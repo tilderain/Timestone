@@ -1,10 +1,10 @@
-#include "..\pch.h"
+#include "../pch.h"
 #include "mk10utils.h"
-#include "..\sigscan.h"
+#include "../sigscan.h"
 
 int64 GetMKXEntryPoint()
 {
-	static __int64 addr = reinterpret_cast<__int64>(GetModuleHandle(nullptr));
+	static int64 addr = reinterpret_cast<int64>(GetModuleHandle(nullptr));
 	return addr;
 }
 
@@ -15,7 +15,7 @@ unsigned long long _adjust(unsigned long long addr) {
 	}
 	return start + addr;
 }
-int64 _addr(__int64 addr)
+int64 _addr(int64 addr)
 {
 	return GetMKXEntryPoint() - 0x140000000 + addr;
 }

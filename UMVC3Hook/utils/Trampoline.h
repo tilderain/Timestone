@@ -5,6 +5,7 @@
 
 #include <cassert>
 #include <memory>
+#include <cstring>
 
 // Trampoline class for big (>2GB) jumps
 // Never needed in 32-bit processes so in those cases this does nothing but forwards to Memory functions
@@ -19,17 +20,21 @@ public:
 	}
 
 	template<typename Func>
+
 	LPVOID Jump( Func func )
 	{
-		union member_cast
-		{
-			LPVOID addr;
-			Func funcPtr;
-		} cast;
-		static_assert( sizeof(cast.addr) == sizeof(cast.funcPtr), "member_cast failure!" );
+		// On MinGW/GCC, member function pointers are often 16 bytes,
+		// while standard pointers (LPVOID) are 8 bytes.
+		// For non-virtual functions, the actual address is in the first 8 bytes.
+		static_assert( sizeof(Func) >= sizeof(LPVOID), "Function pointer too small!" );
 
-		cast.funcPtr = func;
-		return CreateCodeTrampoline( cast.addr );
+		LPVOID addr = nullptr;
+		
+		// Safely extract the first 8 bytes (the actual function address)
+		// This bypasses strict-aliasing rules and works for both 8-byte and 16-byte PMFs
+		std::memcpy(&addr, &func, sizeof(LPVOID));
+
+		return CreateCodeTrampoline( addr );
 	}
 
 	template<typename T>

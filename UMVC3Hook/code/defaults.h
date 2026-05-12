@@ -153,7 +153,7 @@ X hookret(long long addr, A a) {
 
 template<typename X, typename A, typename B>
 X hookret(long long addr, A a, B b) {
-	return ((X(__fastcall*)(A, B))_addr(addr))(a, B);
+	return ((X(__fastcall*)(A, B))_addr(addr))(a, b);
 }
 template<typename X, typename A, typename B, typename C>
 X hookret(long long addr, A a, B b, C c) {

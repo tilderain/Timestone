@@ -1,5 +1,5 @@
 #include "eSettingsManager.h"
-#include "..\IniReader.h"
+#include "../IniReader.h"
 #include <Windows.h>
 
 

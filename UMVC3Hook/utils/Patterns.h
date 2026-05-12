@@ -9,6 +9,7 @@
 
 #include <cassert>
 #include <vector>
+#include <string>
 #include <string_view>
 
 #pragma warning(push)
@@ -38,8 +39,8 @@ namespace hook
 	class pattern
 	{
 	private:
-		std::basic_string<uint8_t> m_bytes;
-		std::basic_string<uint8_t> m_mask;
+		std::string m_bytes;
+		std::string m_mask;
 
 #if PATTERNS_USE_HINTS
 		uint64_t m_hash = 0;
@@ -66,11 +67,6 @@ namespace hook
 			return m_matches[index];
 		}
 
-		inline pattern(uintptr_t module)
-			: pattern( module, 0 )
-		{
-		}
-
 		inline pattern(uintptr_t begin, uintptr_t end)
 			: m_rangeStart(begin), m_rangeEnd(end)
 		{
@@ -78,14 +74,16 @@ namespace hook
 
 	public:
 		explicit pattern(std::string_view pattern)
-			: pattern(get_process_base())
+			: m_rangeStart(0), m_rangeEnd(0)
 		{
+			m_rangeStart = get_process_base();
 			Initialize(std::move(pattern));
 		}
 
 		inline pattern(void* module, std::string_view pattern)
-			: pattern(reinterpret_cast<uintptr_t>(module))
+			: m_rangeStart(0), m_rangeEnd(0)
 		{
+			m_rangeStart = reinterpret_cast<uintptr_t>(module);
 			Initialize(std::move(pattern));
 		}
 
@@ -96,12 +94,13 @@ namespace hook
 		}
 
 		// Pretransformed patterns
-		inline pattern(std::basic_string_view<uint8_t> bytes, std::basic_string_view<uint8_t> mask)
-			: pattern(get_process_base())
+		inline pattern(std::string_view bytes, std::string_view mask)
+			: m_rangeStart(0), m_rangeEnd(0)
 		{
+			m_rangeStart = get_process_base();
 			assert( bytes.length() == mask.length() );
-			m_bytes = std::move(bytes);
-			m_mask = std::move(mask);
+			m_bytes = bytes;
+			m_mask = mask;
 		}
 
 		inline pattern&& count(uint32_t expected)

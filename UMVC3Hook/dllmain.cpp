@@ -114,7 +114,7 @@ DWORD WINAPI MainThread(LPVOID lpReserved)
 	{
 		if (kiero::init(kiero::RenderType::D3D9) == kiero::Status::Success)
 		{
-			kiero::bind(42, (void**)& oEndScene, hkEndScene);
+			kiero::bind(42, (void**)& oEndScene, (void*)hkEndScene);
 			attached = true;
 		}
 	} while (!attached);

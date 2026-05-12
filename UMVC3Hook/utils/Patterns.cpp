@@ -59,7 +59,7 @@ static auto& getHints()
 }
 #endif
 
-static void TransformPattern(std::string_view pattern, std::basic_string<uint8_t>& data, std::basic_string<uint8_t>& mask)
+static void TransformPattern(std::string_view pattern, std::string& data, std::string& mask)
 {
 	uint8_t tempDigit = 0;
 	bool tempFlag = false;
@@ -191,10 +191,10 @@ void pattern::EnsureMatches(uint32_t maxCount)
 		return (m_matches.size() == maxCount);
 	};
 
-	const uint8_t* pattern = m_bytes.data();
-	const uint8_t* mask = m_mask.data();
+	const uint8_t* pattern = reinterpret_cast<const uint8_t*>(m_bytes.data());
+	const uint8_t* mask = reinterpret_cast<const uint8_t*>(m_mask.data());
 	const size_t maskSize = m_mask.size();
-	const size_t lastWild = m_mask.find_last_not_of(uint8_t(0xFF));
+	const size_t lastWild = m_mask.find_last_not_of('\xff');
 
 	ptrdiff_t Last[256];
 
@@ -236,8 +236,8 @@ bool pattern::ConsiderHint(uintptr_t offset)
 	uint8_t* ptr = reinterpret_cast<uint8_t*>(offset);
 
 #if PATTERNS_CAN_SERIALIZE_HINTS
-	const uint8_t* pattern = m_bytes.data();
-	const uint8_t* mask = m_mask.data();
+	const uint8_t* pattern = reinterpret_cast<const uint8_t*>(m_bytes.data());
+	const uint8_t* mask = reinterpret_cast<const uint8_t*>(m_mask.data());
 
 	for (size_t i = 0, j = m_mask.size(); i < j; i++)
 	{

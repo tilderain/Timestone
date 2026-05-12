@@ -1,7 +1,7 @@
 #include "eNotifManager.h"
 #include <iostream>
 #include <Windows.h>
-#include "..\imgui\imgui.h"
+#include "../imgui/imgui.h"
 #ifndef _CRT_SECURE_NO_WARNINGS
 #define _CRT_SECURE_NO_WARNINGS
 #define _CRT_SECURE_NO_WARNINGS

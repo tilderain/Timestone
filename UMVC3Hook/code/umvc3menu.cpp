@@ -1,11 +1,11 @@
-#include "..\pch.h"
+#include "../pch.h"
 #include "umvc3menu.h"
-#include "..\imgui\imgui.h"
+#include "../imgui/imgui.h"
 #include <iostream>
 #include "../MemoryMgr.h"
 #include "../utils/Trampoline.h"
 #include <stdlib.h>
-#include "..\sigscan.h"
+#include "../sigscan.h"
 #include <vector>
 #include "defaults.h"
 #include "generated.h"
