@@ -201,10 +201,10 @@ clean:
 
 # ---------- Install (example path - adjust to your UMVC3 install) ----------
 
-INSTALL_DIR ?= $(HOME)/.steam/steamapps/common/ULTIMATE\ MARVEL\ VS.\ CAPCOM\ 3
+INSTALL_DIR ?= ../ULTIMATE MARVEL VS. CAPCOM 3
 
 install: $(OUTPUT)
-	cp $(OUTPUT) "$(INSTALL_DIR)/"
+	cp "$(OUTPUT)" "$(INSTALL_DIR)/"
 
 # ---------- Help ----------
 

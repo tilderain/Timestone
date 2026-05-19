@@ -143,6 +143,10 @@ void OnInitializeHook()
 	}
 
 	printf("UMVC3Hook::OnInitializeHook() | Begin!\n");
+
+	// Patch single-instance mutex check: JNZ -> JMP to allow multiple instances
+	Memory::VP::Patch<uint8_t>(_addr(0x14051E1CB), 0xEB);
+
 	TheMenu->Initialize();
 
 
