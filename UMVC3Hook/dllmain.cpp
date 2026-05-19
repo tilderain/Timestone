@@ -146,8 +146,14 @@ DWORD WINAPI MainThread(LPVOID lpReserved)
 	return TRUE;
 }
 
-
-// (Training mode input automation removed - using code hooks instead)
+void WINAPI HookUpdate()
+{
+	while (true)
+	{
+		UMVC3Hooks::HookProcessStuff();
+		Sleep(1);
+	}
+}
 
 // MinHook trampoline for aTitleLogo__update (0x140217700)
 typedef void(__fastcall* TitleLogoUpdate_t)(uintptr_t param_1);
@@ -302,6 +308,7 @@ BOOL WINAPI DllMain(HMODULE hMod, DWORD dwReason, LPVOID lpReserved)
 			SettingsMgr->Init();
 			DisableThreadLibraryCalls(hMod);
 			CreateThread(nullptr, 0, MainThread, hMod, 0, nullptr);
+			CreateThread(nullptr, 0, (LPTHREAD_START_ROUTINE)HookUpdate, hMod, 0, nullptr);
 			OnInitializeHook();
 		}
 		break;
