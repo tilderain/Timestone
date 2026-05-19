@@ -23,6 +23,7 @@ CPP_SRC   := \
 	$(SRCDIR)/pch.cpp \
 	$(SRCDIR)/code/umvc3.cpp \
 	$(SRCDIR)/code/umvc3menu.cpp \
+	$(SRCDIR)/code/LaunchMenu.cpp \
 	$(SRCDIR)/code/eSettingsManager.cpp \
 	$(SRCDIR)/code/eNotifManager.cpp \
 	$(SRCDIR)/code/UMVC3Camera.cpp \

@@ -9,6 +9,7 @@
 #include "utils/Trampoline.h"
 #include "code/eSettingsManager.h"
 #include "code/UMVC3Camera.h"
+#include "code/LaunchMenu.h"
 #include <Windows.h>
 //#include "code/generated.h"
 
@@ -146,6 +147,43 @@ void OnInitializeHook()
 
 	// Patch single-instance mutex check: JNZ -> JMP to allow multiple instances
 	Memory::VP::Patch<uint8_t>(_addr(0x14051E1CB), 0xEB);
+
+	// Check for command-line arg from spawned instance
+	LPWSTR cmdLine = GetCommandLineW();
+	bool trainingArg = false;
+	if (wcsstr(cmdLine, L"-training")) {
+		trainingArg = true;
+		SetLaunchOption(LAUNCH_TRAINING);
+		printf("UMVC3Hook: Detected -training argument, entering training mode\n");
+	}
+
+	// Show launch menu on first instance only
+	LaunchOption opt = GetLaunchOption();
+	if (!trainingArg) {
+		opt = ShowLaunchMenu();
+	}
+
+	if (opt == LAUNCH_DUAL_TRAINING) {
+		// Spawn a second game instance with -training arg
+		wchar_t exePath[MAX_PATH];
+		GetModuleFileNameW(NULL, exePath, MAX_PATH);
+
+		// Build command line for second instance
+		wchar_t spawnCmd[MAX_PATH + 32];
+		swprintf(spawnCmd, MAX_PATH + 32, L"\"%s\" -training", exePath);
+
+		STARTUPINFOW si = { sizeof(si) };
+		PROCESS_INFORMATION pi;
+		if (CreateProcessW(exePath, spawnCmd, NULL, NULL, FALSE,
+			CREATE_NEW_CONSOLE, NULL, NULL, &si, &pi)) {
+			CloseHandle(pi.hProcess);
+			CloseHandle(pi.hThread);
+			printf("UMVC3Hook: Spawned second instance with -training\n");
+		}
+		else {
+			printf("UMVC3Hook: Failed to spawn second instance (error %lu)\n", GetLastError());
+		}
+	}
 
 	TheMenu->Initialize();
 
