@@ -11,7 +11,30 @@
 #include "code/UMVC3Camera.h"
 #include "code/LaunchMenu.h"
 #include <Windows.h>
+#include <cstdio>
 //#include "code/generated.h"
+
+// Log file for hook debugging
+static FILE* g_hookLog = nullptr;
+
+void HookLog(const char* fmt, ...)
+{
+	va_list args;
+	va_start(args, fmt);
+
+	// Always print to console/debugger
+	vprintf(fmt, args);
+	va_end(args);
+
+	// Also write to log file
+	if (g_hookLog) {
+		va_list args2;
+		va_start(args2, fmt);
+		vfprintf(g_hookLog, fmt, args2);
+		fflush(g_hookLog);
+		va_end(args2);
+	}
+}
 
 using namespace Memory::VP;
 
@@ -123,27 +146,30 @@ DWORD WINAPI MainThread(LPVOID lpReserved)
 }
 
 
-void WINAPI HookUpdate()
-{
-	while (true)
-	{
-		UMVC3Hooks::HookProcessStuff();
-		Sleep(1);
-	}
-}
+// (Training mode input automation removed - using code hooks instead)
+
 
 
 void OnInitializeHook()
 {
+	// Open log file for hook debugging
+	g_hookLog = fopen("UMVC3Hook.log", "w");
+	if (g_hookLog) {
+		fprintf(g_hookLog, "=== UMVC3Hook Log Start ===\n");
+		fflush(g_hookLog);
+	}
+
 	if (SettingsMgr->bEnableConsoleWindow)
 	{
 		AllocConsole();
 		freopen("CONIN$", "r", stdin);
 		freopen("CONOUT$", "w", stdout);
-		freopen("CONOUT$", "w", stderr);
 	}
 
-	printf("UMVC3Hook::OnInitializeHook() | Begin!\n");
+	// Always redirect stderr to the log file to capture Wine crash logs
+	freopen("UMVC3Hook.log", "a", stderr);
+
+	HookLog("UMVC3Hook::OnInitializeHook() | Begin!\n");
 
 	// Patch single-instance mutex check: JNZ -> JMP to allow multiple instances
 	Memory::VP::Patch<uint8_t>(_addr(0x14051E1CB), 0xEB);
@@ -154,13 +180,24 @@ void OnInitializeHook()
 	if (wcsstr(cmdLine, L"-training")) {
 		trainingArg = true;
 		SetLaunchOption(LAUNCH_TRAINING);
-		printf("UMVC3Hook: Detected -training argument, entering training mode\n");
+		HookLog("UMVC3Hook: Detected -training argument, entering training mode\n");
 	}
 
 	// Show launch menu on first instance only
 	LaunchOption opt = GetLaunchOption();
 	if (!trainingArg) {
 		opt = ShowLaunchMenu();
+	}
+
+	if (opt == LAUNCH_TRAINING || opt == LAUNCH_DUAL_TRAINING) {
+		// Patch aTitleLogo__playLogoMovies: NOP the "animation not near end" JC at 0x140217c8c
+		// and the 4 bytes after it (0x140217c8e through 0x140217c91) that are instruction
+		// fragments only reachable when the animation is near end in normal flow.
+		// This makes the logo phase advance immediately once archives are loaded,
+		// effectively skipping the epilepsy/Capcom/Marvel intro movies.
+		Memory::VP::Patch<uint32_t>(_addr(0x140217c8c), 0x90909090);
+		Memory::VP::Patch<uint16_t>(_addr(0x140217c90), 0x9090);
+		HookLog("UMVC3Hook: Training mode - patched intro movie skip\n");
 	}
 
 	if (opt == LAUNCH_DUAL_TRAINING) {
@@ -178,10 +215,10 @@ void OnInitializeHook()
 			CREATE_NEW_CONSOLE, NULL, NULL, &si, &pi)) {
 			CloseHandle(pi.hProcess);
 			CloseHandle(pi.hThread);
-			printf("UMVC3Hook: Spawned second instance with -training\n");
+			HookLog("UMVC3Hook: Spawned second instance with -training\n");
 		}
 		else {
-			printf("UMVC3Hook: Failed to spawn second instance (error %lu)\n", GetLastError());
+			HookLog("UMVC3Hook: Failed to spawn second instance (error %lu)\n", GetLastError());
 		}
 	}
 
@@ -193,6 +230,10 @@ void OnInitializeHook()
 	InjectHook(_addr(0x14001B451), tramp->Jump(&UMVC3Camera::HookedSetRotation), PATCH_CALL);
 	InjectHook(_addr(0x14001B471), tramp->Jump(&UMVC3Camera::HookedSetPosition), PATCH_CALL);
 	InjectHook(_addr(0x14001A490), tramp->Jump(UMVC3Hooks::HookCamera), PATCH_JUMP);
+
+	// Training mode: handled via code hooks (aTitleLogo__playLogoMovies patch) and
+	// set the battle type to 5 (~10s after game loads) to trigger training.
+
 	TheMenu->PostInit();
 	//InjectHook(_addr(0x140650c10), tramp->Jump(InitMainLoop), PATCH_JUMP);//parts of ui & particles
 	//InjectHook(_addr(0x14004ad20), tramp->Jump(InitMainLoop), PATCH_JUMP);//parts pyshics
@@ -225,7 +266,6 @@ BOOL WINAPI DllMain(HMODULE hMod, DWORD dwReason, LPVOID lpReserved)
 			SettingsMgr->Init();
 			DisableThreadLibraryCalls(hMod);
 			CreateThread(nullptr, 0, MainThread, hMod, 0, nullptr);
-			CreateThread(nullptr, 0, (LPTHREAD_START_ROUTINE)HookUpdate, hMod, 0, nullptr);
 			OnInitializeHook();
 		}
 		break;
