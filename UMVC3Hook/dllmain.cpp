@@ -12,6 +12,7 @@
 #include "code/LaunchMenu.h"
 #include <Windows.h>
 #include <cstdio>
+#include "kiero/minhook/include/MinHook.h"
 //#include "code/generated.h"
 
 // Log file for hook debugging
@@ -148,6 +149,26 @@ DWORD WINAPI MainThread(LPVOID lpReserved)
 
 // (Training mode input automation removed - using code hooks instead)
 
+// MinHook trampoline for aTitleLogo__update (0x140217700)
+typedef void(__fastcall* TitleLogoUpdate_t)(uintptr_t param_1);
+static TitleLogoUpdate_t oTitleLogoUpdate = nullptr;
+
+void __fastcall Hook_titleLogoUpdate(uintptr_t param_1)
+{
+	oTitleLogoUpdate(param_1);
+
+	// Skip logo movies (state 1) when training mode is active.
+	// The caution screen (state 0) is handled by a byte patch in processBootSequence
+	// that skips the MtAnim display creation, keeping archive loading intact.
+	if (GetLaunchOption() == LAUNCH_TRAINING || GetLaunchOption() == LAUNCH_DUAL_TRAINING) {
+		int parentState = *(int*)(param_1 + 0x78);
+		if (parentState == 1) {
+			*(int*)(param_1 + 0x7c) = 0;
+			*(int*)(param_1 + 0x78) = 2;
+			HookLog("UMVC3Hook: Skipped logo movies (state 1 -> 2)\n");
+		}
+	}
+}
 
 
 void OnInitializeHook()
@@ -190,14 +211,29 @@ void OnInitializeHook()
 	}
 
 	if (opt == LAUNCH_TRAINING || opt == LAUNCH_DUAL_TRAINING) {
-		// Patch aTitleLogo__playLogoMovies: NOP the "animation not near end" JC at 0x140217c8c
-		// and the 4 bytes after it (0x140217c8e through 0x140217c91) that are instruction
-		// fragments only reachable when the animation is near end in normal flow.
-		// This makes the logo phase advance immediately once archives are loaded,
-		// effectively skipping the epilepsy/Capcom/Marvel intro movies.
-		Memory::VP::Patch<uint32_t>(_addr(0x140217c8c), 0x90909090);
-		Memory::VP::Patch<uint16_t>(_addr(0x140217c90), 0x9090);
-		HookLog("UMVC3Hook: Training mode - patched intro movie skip\n");
+		// Patch aTitleLogo__processBootSequence @ 0x1402179ab: change JZ (0x74) to JMP (0xEB).
+		// When the caution resource loads, the original code creates a MtAnim display object
+		// and attaches it (which shows the epilepsy warning on screen). By jumping past that,
+		// we skip the display entirely but still do the archive loading that follows.
+		// Since param_1+0x60 stays NULL, sub-state 1 (the wait loop) immediately advances to
+		// cleanup -- the caution screen never renders.
+		Memory::VP::Patch<uint8_t>(_addr(0x1402179ab), 0xEB);
+		HookLog("UMVC3Hook: Training mode - patched caution screen skip\n");
+	}
+
+	// Hook aTitleLogo__update to skip logo movies (epilepsy/Capcom/Marvel) in training mode
+	MH_STATUS mhStatus = MH_Initialize();
+	if (mhStatus == MH_OK || mhStatus == MH_ERROR_ALREADY_INITIALIZED) {
+		if (MH_CreateHook(
+			(LPVOID)_addr(0x140217700),
+			(LPVOID)Hook_titleLogoUpdate,
+			(LPVOID*)&oTitleLogoUpdate
+		) == MH_OK) {
+			MH_EnableHook((LPVOID)_addr(0x140217700));
+			HookLog("UMVC3Hook: Hooked aTitleLogo__update\n");
+		} else {
+			HookLog("UMVC3Hook: FAILED to hook aTitleLogo__update\n");
+		}
 	}
 
 	if (opt == LAUNCH_DUAL_TRAINING) {
