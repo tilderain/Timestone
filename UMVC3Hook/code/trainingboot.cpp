@@ -180,9 +180,9 @@ void BootIntoTraining()
     HookLog("TrainingBoot: UI util flag set (ui+0x5b74 = 0)\n");
 
     // 4. sGameUI__createLoadingScreen(ui, 0, 0) — create loading screen object
-    typedef void(__fastcall* CreateLoading_t)(uint64_t, uint8_t, uint32_t);
-    ((CreateLoading_t)_addr(SGAMEUI_CREATE_LOADING_SCREEN))(ui, 0, 0);
-    HookLog("TrainingBoot: Loading screen created\n");
+   //typedef void(__fastcall* CreateLoading_t)(uint64_t, uint8_t, uint32_t);
+   // ((CreateLoading_t)_addr(SGAMEUI_CREATE_LOADING_SCREEN))(ui, 0, 0);
+    //HookLog("TrainingBoot: Loading screen created\n");
 
     // 5. Area transition to aChrSelectBlank (loading screen → battle area)
     uint64_t sArea = *(uint64_t*)_addr(SAREA_INSTANCE_PTR);
