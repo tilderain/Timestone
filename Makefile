@@ -8,6 +8,7 @@ DLLTOOL   := x86_64-w64-mingw32-dlltool
 AR        := x86_64-w64-mingw32-ar
 
 SRCDIR    := UMVC3Hook
+ENETDIR   := enet-1.3.18
 BUILDDIR  := build
 OBJDIR    := $(BUILDDIR)/obj
 
@@ -54,9 +55,18 @@ RC_SRC    := $(BUILDDIR)/UMVC3Hook.rc
 
 CPP_OBJ   := $(CPP_SRC:$(SRCDIR)/%.cpp=$(OBJDIR)/%.o)
 C_OBJ     := $(C_SRC:$(SRCDIR)/%.c=$(OBJDIR)/%.o)
+ENET_OBJ  := $(ENETDIR)/callbacks.o \
+             $(ENETDIR)/compress.o \
+             $(ENETDIR)/host.o \
+             $(ENETDIR)/list.o \
+             $(ENETDIR)/packet.o \
+             $(ENETDIR)/peer.o \
+             $(ENETDIR)/protocol.o \
+             $(ENETDIR)/win32.o
+ENET_OBJ_FULL := $(addprefix $(OBJDIR)/, $(notdir $(ENET_OBJ)))
 RC_OBJ    := $(OBJDIR)/UMVC3Hook.res
 
-ALL_OBJ   := $(CPP_OBJ) $(C_OBJ) $(RC_OBJ)
+ALL_OBJ   := $(CPP_OBJ) $(C_OBJ) $(ENET_OBJ_FULL) $(RC_OBJ)
 
 # --- Include paths ---
 
@@ -67,6 +77,7 @@ INCLUDES  := \
 	-I$(SRCDIR)/kiero \
 	-I$(SRCDIR)/kiero/minhook/include \
 	-I$(SRCDIR)/utils \
+	-I$(ENETDIR)/include \
 	-I$(BUILDDIR)/include_fix
 
 # --- Preprocessor defines (Release) ---
@@ -140,6 +151,12 @@ $(OBJDIR)/%.o: $(SRCDIR)/%.cpp
 # ---------- Compile C ----------
 
 $(OBJDIR)/%.o: $(SRCDIR)/%.c
+	@mkdir -p $(@D)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+# ---------- Compile enet C ----------
+
+$(OBJDIR)/%.o: $(ENETDIR)/%.c
 	@mkdir -p $(@D)
 	$(CC) $(CFLAGS) -c $< -o $@
 
