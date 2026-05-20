@@ -216,7 +216,7 @@ void OnInitializeHook()
 		opt = ShowLaunchMenu();
 	}
 
-	if (opt == LAUNCH_TRAINING || opt == LAUNCH_DUAL_TRAINING) {
+	//if (opt == LAUNCH_TRAINING || opt == LAUNCH_DUAL_TRAINING) {
 		// Patch aTitleLogo__processBootSequence @ 0x1402179ab: change JZ (0x74) to JMP (0xEB).
 		// When the caution resource loads, the original code creates a MtAnim display object
 		// and attaches it (which shows the epilepsy warning on screen). By jumping past that,
@@ -225,7 +225,7 @@ void OnInitializeHook()
 		// cleanup -- the caution screen never renders.
 		Memory::VP::Patch<uint8_t>(_addr(0x1402179ab), 0xEB);
 		HookLog("UMVC3Hook: Training mode - patched caution screen skip\n");
-	}
+	//}
 
 	// Hook aTitleLogo__update to skip logo movies (epilepsy/Capcom/Marvel) in training mode
 	MH_STATUS mhStatus = MH_Initialize();
