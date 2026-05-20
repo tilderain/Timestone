@@ -7,6 +7,8 @@
 #include "../MemoryMgr.h"
 #include "../utils/Trampoline.h"
 #include <Windows.h>
+#include <d3d9.h>
+#include "../imgui/imgui.h"
 
 using namespace Memory::VP;
 
@@ -55,6 +57,15 @@ static int KEY_ADVANCE = VK_F3;
 static bool isPaused     = false;
 static bool advanceFrame = false;
 
+// Frame counter: incremented each time a game frame actually advances while paused
+static int frameCounter  = 0;
+
+// D3D9 device pointer, set from FrameStepper_SetDevice
+static LPDIRECT3DDEVICE9 g_pDevice = nullptr;
+
+// Game window handle for forcing repaints
+static HWND g_hWnd = nullptr;
+
 // ---------------------------------------------------------------------------
 // Original function pointer for the vtable-hooked move
 // ---------------------------------------------------------------------------
@@ -71,7 +82,19 @@ static void __fastcall HookedMove(void* sMvc3Main)
         if (advanceFrame)
         {
             advanceFrame = false;
+            frameCounter++;
             oMove(sMvc3Main);
+        }
+        else if (g_pDevice)
+        {
+            // Force a render + present so the ImGui overlay stays visible.
+            // Calling EndScene triggers our hkEndScene hook which renders
+            // FrameStepper_Draw (and any other ImGui content). Then Present
+            // flips the back buffer to screen.
+            // BeginScene first to ensure D3D9 is in a valid render state.
+            if (SUCCEEDED(g_pDevice->BeginScene()))
+                g_pDevice->EndScene();
+            g_pDevice->Present(nullptr, nullptr, nullptr, nullptr);
         }
         return;
     }
@@ -109,8 +132,8 @@ static void LoadConfig()
     wcsrchr(iniPath, L'\\')[1] = L'\0';
     wcscat(iniPath, L"UMVC3Hook.ini");
 
-    KEY_PAUSE   = GetPrivateProfileIntW(L"FrameStepper", L"PauseKey",   VK_F1, iniPath);
-    KEY_ADVANCE = GetPrivateProfileIntW(L"FrameStepper", L"AdvanceKey", VK_F2, iniPath);
+    KEY_PAUSE   = GetPrivateProfileIntW(L"FrameStepper", L"PauseKey",   VK_F2, iniPath);
+    KEY_ADVANCE = GetPrivateProfileIntW(L"FrameStepper", L"AdvanceKey", VK_F3, iniPath);
 }
 
 // ---------------------------------------------------------------------------
@@ -135,6 +158,17 @@ static void ShowPopup()
 
     typedef void(__fastcall* ShowLoading_t)(uint64_t);
     ((ShowLoading_t)_addr(SHOW_LOADING_ADDR))(sGameConfig);
+}
+
+// ---------------------------------------------------------------------------
+// Store the D3D9 device so we can force a Present when entering pause
+// ---------------------------------------------------------------------------
+void FrameStepper_SetDevice(LPDIRECT3DDEVICE9 device)
+{
+    g_pDevice = device;
+    D3DDEVICE_CREATION_PARAMETERS cp;
+    if (device && SUCCEEDED(device->GetCreationParameters(&cp)))
+        g_hWnd = cp.hFocusWindow;
 }
 
 // ---------------------------------------------------------------------------
@@ -170,10 +204,48 @@ void FrameStepper_Process()
     {
         isPaused = !isPaused;
         if (isPaused)
+        {
+            frameCounter = 0;
             ShowPopup();
+        }
     }
 
     // Advance one frame while paused
     if (isPaused && (GetAsyncKeyState(KEY_ADVANCE) & 1))
         advanceFrame = true;
+}
+
+// ---------------------------------------------------------------------------
+// Public: draw pause indicator overlay — call from hkEndScene (after ImGui::NewFrame)
+// ---------------------------------------------------------------------------
+void FrameStepper_Draw()
+{
+    if (!isPaused || !IsTrainingMode())
+        return;
+
+    ImGui::SetNextWindowPos(ImVec2(12.0f, 12.0f), ImGuiCond_Always);
+    ImGui::SetNextWindowBgAlpha(0.0f);
+    ImGui::Begin("##FrameStepper", nullptr,
+        ImGuiWindowFlags_NoTitleBar |
+        ImGuiWindowFlags_NoResize |
+        ImGuiWindowFlags_NoMove |
+        ImGuiWindowFlags_NoScrollbar |
+        ImGuiWindowFlags_NoSavedSettings |
+        ImGuiWindowFlags_NoInputs |
+        ImGuiWindowFlags_AlwaysAutoResize);
+
+    // Draw pause bars in the dummy space, then text after
+    const float sz = ImGui::GetTextLineHeight();
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const ImVec2 pos = ImGui::GetCursorScreenPos();
+    dl->AddRectFilled(ImVec2(pos.x + 2.0f, pos.y + 3.0f), ImVec2(pos.x + sz * 0.32f, pos.y + sz - 3.0f),
+        IM_COL32(220, 50, 50, 220), 2.0f);
+    dl->AddRectFilled(ImVec2(pos.x + sz * 0.38f + 2.0f, pos.y + 3.0f), ImVec2(pos.x + sz * 0.68f + 2.0f, pos.y + sz - 3.0f),
+        IM_COL32(220, 50, 50, 220), 2.0f);
+
+    ImGui::Dummy(ImVec2(sz + 6.0f, sz));
+    ImGui::SameLine();
+    ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "PAUSED  %d", frameCounter);
+
+    ImGui::End();
 }

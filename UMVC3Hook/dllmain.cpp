@@ -100,6 +100,7 @@ long __stdcall hkEndScene(LPDIRECT3DDEVICE9 pDevice)
 		window = params.hFocusWindow;
 		oWndProc = (WNDPROC)SetWindowLongPtr(window, GWLP_WNDPROC, (LONG_PTR)WndProc);
 		InitImGui(pDevice);
+		FrameStepper_SetDevice(pDevice);
 		init = true;
 	}
 
@@ -120,6 +121,8 @@ long __stdcall hkEndScene(LPDIRECT3DDEVICE9 pDevice)
 	{
 		TheMenu->Draw();
 	}
+
+	FrameStepper_Draw();
 
 	ImGui::EndFrame();
 
