@@ -67,6 +67,15 @@ static LPDIRECT3DDEVICE9 g_pDevice = nullptr;
 static HWND g_hWnd = nullptr;
 
 // ---------------------------------------------------------------------------
+// Input display function pointers (used during pause to show current inputs)
+// ---------------------------------------------------------------------------
+typedef uint64_t(__fastcall* sPad__getInstance_t)();
+static constexpr uintptr_t SPAD_GET_INSTANCE_ADDR = 0x140001B00;
+
+typedef uint64_t(__fastcall* GetsCurrentInput_withSOCD_t)(uint64_t padInstance, uint32_t playerIndex);
+static constexpr uintptr_t GET_CURRENT_INPUT_ADDR = 0x1402B3700;
+
+// ---------------------------------------------------------------------------
 // Original function pointer for the vtable-hooked move
 // ---------------------------------------------------------------------------
 typedef void(__fastcall* Move_t)(void*);
@@ -246,6 +255,19 @@ void FrameStepper_Draw()
     ImGui::Dummy(ImVec2(sz + 6.0f, sz));
     ImGui::SameLine();
     ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "PAUSED  %d", frameCounter);
+
+    // Read and display current input values for P1 and P2
+    auto sPadGetInstance = (sPad__getInstance_t)_addr(SPAD_GET_INSTANCE_ADDR);
+    auto getInput = (GetsCurrentInput_withSOCD_t)_addr(GET_CURRENT_INPUT_ADDR);
+
+    uint64_t pad = sPadGetInstance();
+    if (pad)
+    {
+        uint32_t p1 = (uint32_t)getInput(pad, 0);
+        uint32_t p2 = (uint32_t)getInput(pad, 1);
+        ImGui::Text("P1 Input: 0x%08X", p1);
+        ImGui::Text("P2 Input: 0x%08X", p2);
+    }
 
     ImGui::End();
 }
