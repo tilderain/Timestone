@@ -51,9 +51,9 @@ static constexpr uintptr_t CHAR_ID_ARRAY_OFFSET              = 0x3bc0c;
 // Global state
 // ---------------------------------------------------------------------------
 static TrainingBootConfig g_bootConfig = {
-    { CHR_WOLVERINE, CHR_WOLVERINE, CHR_WOLVERINE },   // P1 (all 3 slots = Wolverine)
-    { CHR_WOLVERINE, CHR_WOLVERINE, CHR_WOLVERINE },   // P2 (all 3 slots = Wolverine)
-    0,    // stage Daily Bugle
+    { CHR_RYU, CHR_RYU, CHR_RYU },   // P1 (all 3 slots = Wolverine)
+    { CHR_RYU, CHR_RYU, CHR_RYU },   // P2 (all 3 slots = Wolverine)
+    0,    // stage 
     99   // timer (99 = infinite in training)
 };
 static bool g_hasBooted = false;
