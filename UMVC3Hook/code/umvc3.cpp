@@ -3,6 +3,7 @@
 #include <iostream>
 #include "eNotifManager.h"
 #include "eSettingsManager.h"
+#include "framestepper.h"
 #include <Windows.h>
 int64 camera_ptr = 0;
 
@@ -10,6 +11,7 @@ void UMVC3Hooks::HookProcessStuff()
 {
 	TheMenu->Process();
 	Notifications->Update();
+	FrameStepper_Process();
 
 
 	if (TheMenu->m_bFreeCam)

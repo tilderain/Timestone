@@ -28,6 +28,7 @@ CPP_SRC   := \
 	$(SRCDIR)/code/eNotifManager.cpp \
 	$(SRCDIR)/code/UMVC3Camera.cpp \
 	$(SRCDIR)/code/mk10utils.cpp \
+	$(SRCDIR)/code/framestepper.cpp \
 	$(SRCDIR)/imgui/imgui.cpp \
 	$(SRCDIR)/imgui/imgui_demo.cpp \
 	$(SRCDIR)/imgui/imgui_draw.cpp \

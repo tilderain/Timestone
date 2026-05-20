@@ -10,6 +10,7 @@
 #include "code/eSettingsManager.h"
 #include "code/UMVC3Camera.h"
 #include "code/LaunchMenu.h"
+#include "code/framestepper.h"
 #include <Windows.h>
 #include <cstdio>
 #include "kiero/minhook/include/MinHook.h"
@@ -277,6 +278,10 @@ void OnInitializeHook()
 	// set the battle type to 5 (~10s after game loads) to trigger training.
 
 	TheMenu->PostInit();
+
+	// Frame stepper (pause / frame-advance in training mode)
+	FrameStepper_Init();
+
 	//InjectHook(_addr(0x140650c10), tramp->Jump(InitMainLoop), PATCH_JUMP);//parts of ui & particles
 	//InjectHook(_addr(0x14004ad20), tramp->Jump(InitMainLoop), PATCH_JUMP);//parts pyshics
 	//InjectHook(_addr(0x14004b9d0), tramp->Jump(InitMainLoop), PATCH_JUMP);//parts pyshics
