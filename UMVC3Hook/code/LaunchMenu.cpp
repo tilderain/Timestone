@@ -6,6 +6,7 @@
 
 // HookLog from dllmain.cpp
 extern void HookLog(const char* fmt, ...);
+extern void HookLogSetFile(const char* filename);
 
 // ---------------------------------------------------------------------------
 // Character and stage name tables
@@ -493,6 +494,8 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
                 g_dialogConfig.hostPort = atoi(buf);
             }
 
+            // Switch log to host-specific file
+            HookLogSetFile("UMVC3Hook_host.log");
             HookLog("UMVC3Hook: Host button clicked, port %d\n", g_dialogConfig.hostPort);
 
             // Create enet host (server mode)
@@ -544,6 +547,8 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
                 g_dialogConfig.hostPort = atoi(buf);
             }
 
+            // Switch log to client-specific file
+            HookLogSetFile("UMVC3Hook_client.log");
             HookLog("UMVC3Hook: Connect button clicked, target %s:%d\n",
                 g_dialogConfig.hostIp, g_dialogConfig.hostPort);
 

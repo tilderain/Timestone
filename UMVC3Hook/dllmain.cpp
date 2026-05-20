@@ -21,6 +21,21 @@
 // Log file for hook debugging
 FILE* g_hookLog = nullptr;
 
+void HookLogSetFile(const char* filename)
+{
+	if (g_hookLog) {
+		fclose(g_hookLog);
+		g_hookLog = nullptr;
+	}
+	g_hookLog = fopen(filename, "w");
+	if (g_hookLog) {
+		fprintf(g_hookLog, "=== UMVC3Hook Log Start (switched to %s) ===\n", filename);
+		fflush(g_hookLog);
+	}
+	// Also redirect stderr to the new log file for Wine crash logs
+	freopen(filename, "w", stderr);
+}
+
 void HookLog(const char* fmt, ...)
 {
 	va_list args;
@@ -186,11 +201,7 @@ void __fastcall Hook_titleLogoUpdate(uintptr_t param_1)
 void OnInitializeHook()
 {
 	// Open log file for hook debugging (append mode so 2nd instance doesn't clobber)
-	g_hookLog = fopen("UMVC3Hook.log", "a");
-	if (g_hookLog) {
-		fprintf(g_hookLog, "=== UMVC3Hook Log Start ===\n");
-		fflush(g_hookLog);
-	}
+	HookLogSetFile("UMVC3Hook.log");
 
 	if (SettingsMgr->bEnableConsoleWindow)
 	{
@@ -198,9 +209,6 @@ void OnInitializeHook()
 		freopen("CONIN$", "r", stdin);
 		freopen("CONOUT$", "w", stdout);
 	}
-
-	// Always redirect stderr to the log file to capture Wine crash logs
-	freopen("UMVC3Hook.log", "a", stderr);
 
 	HookLog("UMVC3Hook::OnInitializeHook() | Begin!\n");
 
