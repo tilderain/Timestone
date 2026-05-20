@@ -1,9 +1,11 @@
 #include "LaunchMenu.h"
 #include "trainingboot.h"
-#include <winsock2.h>
 #include <Windows.h>
 #include <cstdio>
 #include <cstring>
+
+// HookLog from dllmain.cpp
+extern void HookLog(const char* fmt, ...);
 
 // ---------------------------------------------------------------------------
 // Character and stage name tables
@@ -57,7 +59,9 @@ static LaunchDialogConfig g_dialogConfig = {
     0,           // stageId (Training Room)
     "",          // hostIp
     10800,       // hostPort
-    false        // hostEnabled
+    false,       // hostEnabled
+    nullptr,     // enetHost
+    nullptr      // enetPeer
 };
 
 // ---------------------------------------------------------------------------
@@ -82,6 +86,8 @@ enum CtrlId {
     ID_NET_PORT           = 2202,
     ID_NET_HOST_BTN       = 2203,
     ID_NET_STATUS         = 2204,
+    ID_NET_CONNECT_BTN    = 2205,
+    ID_NET_TIMER          = 2206,
     // Steam lobby controls
     ID_STEAM_SEARCH_BTN   = 2301,
     ID_STEAM_CREATE_BTN   = 2302,
@@ -97,7 +103,8 @@ static void PopulateCharCombo(HWND hCombo, int defaultCharId);
 static void PopulateStageCombo(HWND hCombo, int defaultStageId);
 static int FindStageIndex(int stageId);
 static void UpdateCharFromCombo(HWND hDlg, int comboId, int slotIndex, int team);
-static DWORD WINAPI HostThreadFunc(LPVOID lpParam);
+static void HandleNetworkTimer(HWND hDlg);
+static void CleanupNetwork(HWND hDlg);
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -118,6 +125,8 @@ LaunchOption ShowLaunchMenu()
     strcpy(g_dialogConfig.hostIp, "127.0.0.1");
     g_dialogConfig.hostPort = 10800;
     g_dialogConfig.hostEnabled = false;
+    g_dialogConfig.enetHost = nullptr;
+    g_dialogConfig.enetPeer = nullptr;
 
     // Create the launch dialog window
     const char CLASS_NAME[] = "UMVC3LaunchMenu";
@@ -149,6 +158,15 @@ LaunchOption ShowLaunchMenu()
     }
 
     UnregisterClassA(CLASS_NAME, hInst);
+
+    // Clean up network if no connection was established
+    if (g_dialogConfig.enetHost && !g_dialogConfig.enetPeer) {
+        HookLog("UMVC3Hook: Launch menu closing, cleaning up unused enet host\n");
+        enet_host_destroy(g_dialogConfig.enetHost);
+        g_dialogConfig.enetHost = nullptr;
+    } else if (g_dialogConfig.enetHost && g_dialogConfig.enetPeer) {
+        HookLog("UMVC3Hook: Launch menu closing, keeping connected enet host alive\n");
+    }
 
     return g_launchOption;
 }
@@ -250,7 +268,7 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
         // ---- Network Section ----
         y += 5;
         CreateWindowA("BUTTON", "Network (Direct Connect)",
-            WS_VISIBLE | WS_CHILD | BS_GROUPBOX, leftX, y, 500, 55,
+            WS_VISIBLE | WS_CHILD | BS_GROUPBOX, leftX, y, 500, 75,
             hDlg, NULL, NULL, NULL);
         y += 18;
 
@@ -276,13 +294,20 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
 
         CreateWindowA("BUTTON", "Host Game",
             WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON,
-            leftX + 300, y - 2, 100, 26,
+            leftX + 300, y - 2, 90, 26,
             hDlg, (HMENU)ID_NET_HOST_BTN, NULL, NULL);
 
+        CreateWindowA("BUTTON", "Connect",
+            WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON,
+            leftX + 395, y - 2, 90, 26,
+            hDlg, (HMENU)ID_NET_CONNECT_BTN, NULL, NULL);
+
+        // Status row
+        y += 28;
         CreateWindowA("STATIC", "Ready",
-            WS_VISIBLE | WS_CHILD, leftX + 410, y + 4, 100, 18,
+            WS_VISIBLE | WS_CHILD, leftX + 10, y + 4, 200, 18,
             hDlg, (HMENU)ID_NET_STATUS, NULL, NULL);
-        y += 38;
+        y += 30;
 
         // ---- Steam Lobby Section ----
         y += 5;
@@ -468,17 +493,108 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
                 g_dialogConfig.hostPort = atoi(buf);
             }
 
-            // Start host thread
-            HANDLE hThread = CreateThread(NULL, 0, HostThreadFunc, hDlg, 0, NULL);
-            if (hThread) {
-                CloseHandle(hThread);
-                if (hStatus) SetWindowTextA(hStatus, "Starting host...");
-                // Disable host button to prevent double-click
-                EnableWindow(GetDlgItem(hDlg, ID_NET_HOST_BTN), FALSE);
-                g_dialogConfig.hostEnabled = true;
-            } else {
-                if (hStatus) SetWindowTextA(hStatus, "Failed to start host!");
+            HookLog("UMVC3Hook: Host button clicked, port %d\n", g_dialogConfig.hostPort);
+
+            // Create enet host (server mode)
+            if (g_dialogConfig.enetHost) {
+                HookLog("UMVC3Hook: Already have a host, cleaning up first\n");
+                CleanupNetwork(hDlg);
             }
+
+            ENetAddress addr;
+            addr.host = ENET_HOST_ANY;
+            addr.port = (enet_uint16)g_dialogConfig.hostPort;
+
+            ENetHost* server = enet_host_create(&addr, 1, 2, 0, 0);
+            if (!server) {
+                HookLog("UMVC3Hook: enet_host_create FAILED on port %d\n", g_dialogConfig.hostPort);
+                if (hStatus) SetWindowTextA(hStatus, "Host: enet_host_create failed!");
+                return 0;
+            }
+
+            HookLog("UMVC3Hook: enet_host_create OK on port %d\n", g_dialogConfig.hostPort);
+            g_dialogConfig.enetHost = server;
+            g_dialogConfig.enetPeer = nullptr;
+
+            if (hStatus) {
+                char msg[128];
+                snprintf(msg, sizeof(msg), "Listening on port %d...", g_dialogConfig.hostPort);
+                SetWindowTextA(hStatus, msg);
+            }
+
+            // Start polling timer (50ms)
+            SetTimer(hDlg, ID_NET_TIMER, 50, NULL);
+            EnableWindow(GetDlgItem(hDlg, ID_NET_HOST_BTN), FALSE);
+            EnableWindow(GetDlgItem(hDlg, ID_NET_CONNECT_BTN), FALSE);
+            g_dialogConfig.hostEnabled = true;
+            return 0;
+        }
+
+        // ---- Network Connect button ----
+        case ID_NET_CONNECT_BTN:
+        {
+            HWND hIp = GetDlgItem(hDlg, ID_NET_IP);
+            HWND hPort = GetDlgItem(hDlg, ID_NET_PORT);
+            HWND hStatus = GetDlgItem(hDlg, ID_NET_STATUS);
+
+            if (hIp) GetWindowTextA(hIp, g_dialogConfig.hostIp, sizeof(g_dialogConfig.hostIp));
+            if (hPort) {
+                char buf[16];
+                GetWindowTextA(hPort, buf, sizeof(buf));
+                g_dialogConfig.hostPort = atoi(buf);
+            }
+
+            HookLog("UMVC3Hook: Connect button clicked, target %s:%d\n",
+                g_dialogConfig.hostIp, g_dialogConfig.hostPort);
+
+            // Create client host
+            if (g_dialogConfig.enetHost) {
+                HookLog("UMVC3Hook: Already have a host, cleaning up first\n");
+                CleanupNetwork(hDlg);
+            }
+
+            ENetHost* client = enet_host_create(NULL, 1, 2, 0, 0);
+            if (!client) {
+                HookLog("UMVC3Hook: Client enet_host_create FAILED\n");
+                if (hStatus) SetWindowTextA(hStatus, "Connect: enet_host_create failed!");
+                return 0;
+            }
+
+            HookLog("UMVC3Hook: Client enet_host_create OK\n");
+            g_dialogConfig.enetHost = client;
+            g_dialogConfig.enetPeer = nullptr;
+
+            // Resolve target address
+            ENetAddress targetAddr;
+            if (enet_address_set_host_ip(&targetAddr, g_dialogConfig.hostIp) != 0) {
+                if (enet_address_set_host(&targetAddr, g_dialogConfig.hostIp) != 0) {
+                    HookLog("UMVC3Hook: Failed to resolve address '%s'\n", g_dialogConfig.hostIp);
+                    if (hStatus) SetWindowTextA(hStatus, "Invalid IP address!");
+                    enet_host_destroy(client);
+                    g_dialogConfig.enetHost = nullptr;
+                    return 0;
+                }
+            }
+            targetAddr.port = (enet_uint16)g_dialogConfig.hostPort;
+
+            // Initiate connection
+            ENetPeer* peer = enet_host_connect(client, &targetAddr, 2, 0);
+            if (!peer) {
+                HookLog("UMVC3Hook: enet_host_connect returned NULL\n");
+                if (hStatus) SetWindowTextA(hStatus, "Connect failed!");
+                enet_host_destroy(client);
+                g_dialogConfig.enetHost = nullptr;
+                return 0;
+            }
+
+            HookLog("UMVC3Hook: enet_host_connect OK, polling via timer\n");
+            if (hStatus) SetWindowTextA(hStatus, "Connecting...");
+
+            // Start polling timer (50ms)
+            SetTimer(hDlg, ID_NET_TIMER, 50, NULL);
+            EnableWindow(GetDlgItem(hDlg, ID_NET_HOST_BTN), FALSE);
+            EnableWindow(GetDlgItem(hDlg, ID_NET_CONNECT_BTN), FALSE);
+            g_dialogConfig.hostEnabled = true;
             return 0;
         }
 
@@ -527,6 +643,12 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
         }
         break;
 
+    case WM_TIMER:
+        if (wParam == ID_NET_TIMER) {
+            HandleNetworkTimer(hDlg);
+        }
+        return 0;
+
     case WM_CLOSE:
         g_launchOption = LAUNCH_NORMAL;
         DestroyWindow(hDlg);
@@ -534,6 +656,7 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
         return 0;
 
     case WM_DESTROY:
+        CleanupNetwork(hDlg);
         PostQuitMessage(0);
         return 0;
     }
@@ -625,91 +748,61 @@ static void UpdateCharFromCombo(HWND hDlg, int comboId, int slotIndex, int team)
 }
 
 // ---------------------------------------------------------------------------
-// Network host thread
+// Network helpers (timer-based polling in dialog message loop)
 // ---------------------------------------------------------------------------
-static DWORD WINAPI HostThreadFunc(LPVOID lpParam)
-{
-    HWND hDlg = (HWND)lpParam;
-
-    // Initialize Winsock
-    WSADATA wsaData;
-    int result = WSAStartup(MAKEWORD(2, 2), &wsaData);
-    if (result != 0) {
+static void CleanupNetwork(HWND hDlg) {
+    if (g_dialogConfig.enetHost && !g_dialogConfig.enetPeer) {
+        HookLog("UMVC3Hook: CleanupNetwork - destroying unused enet host\n");
+        enet_host_destroy(g_dialogConfig.enetHost);
+        g_dialogConfig.enetHost = nullptr;
+    }
+    if (hDlg) {
+        KillTimer(hDlg, ID_NET_TIMER);
+        EnableWindow(GetDlgItem(hDlg, ID_NET_HOST_BTN), TRUE);
+        EnableWindow(GetDlgItem(hDlg, ID_NET_CONNECT_BTN), TRUE);
         HWND hStatus = GetDlgItem(hDlg, ID_NET_STATUS);
-        if (hStatus) {
-            char msg[64];
-            snprintf(msg, sizeof(msg), "WSAStartup failed: %d", result);
-            SetWindowTextA(hStatus, msg);
+        if (hStatus) SetWindowTextA(hStatus, "Ready");
+    }
+}
+
+static void HandleNetworkTimer(HWND hDlg) {
+    if (!g_dialogConfig.enetHost) {
+        KillTimer(hDlg, ID_NET_TIMER);
+        return;
+    }
+
+    ENetEvent event;
+    int result = enet_host_service(g_dialogConfig.enetHost, &event, 0);
+
+    if (result > 0) {
+        if (event.type == ENET_EVENT_TYPE_CONNECT) {
+            HookLog("UMVC3Hook: Network CONNECT received\n");
+            g_dialogConfig.enetPeer = event.peer;
+            event.peer->data = (void*)"connected";
+
+            HWND hStatus = GetDlgItem(hDlg, ID_NET_STATUS);
+            if (hStatus) {
+                char msg[128];
+                snprintf(msg, sizeof(msg), "Connected! peer %u.%u.%u.%u:%u",
+                    (event.peer->address.host >> 0) & 0xFF,
+                    (event.peer->address.host >> 8) & 0xFF,
+                    (event.peer->address.host >> 16) & 0xFF,
+                    (event.peer->address.host >> 24) & 0xFF,
+                    event.peer->address.port);
+                SetWindowTextA(hStatus, msg);
+            }
+            // Connected - stop polling, keep host alive for game
+            KillTimer(hDlg, ID_NET_TIMER);
+            EnableWindow(GetDlgItem(hDlg, ID_NET_HOST_BTN), TRUE);
+            EnableWindow(GetDlgItem(hDlg, ID_NET_CONNECT_BTN), TRUE);
         }
-        return 1;
-    }
-
-    // Create socket
-    SOCKET listenSocket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (listenSocket == INVALID_SOCKET) {
-        HWND hStatus = GetDlgItem(hDlg, ID_NET_STATUS);
-        if (hStatus) SetWindowTextA(hStatus, "Socket creation failed");
-        WSACleanup();
-        return 1;
-    }
-
-    // Bind
-    struct sockaddr_in serverAddr;
-    serverAddr.sin_family = AF_INET;
-    serverAddr.sin_addr.s_addr = INADDR_ANY;
-    serverAddr.sin_port = htons(g_dialogConfig.hostPort);
-
-    if (bind(listenSocket, (SOCKADDR*)&serverAddr, sizeof(serverAddr)) == SOCKET_ERROR) {
-        HWND hStatus = GetDlgItem(hDlg, ID_NET_STATUS);
-        if (hStatus) {
-            char msg[64];
-            snprintf(msg, sizeof(msg), "Bind failed on port %d", g_dialogConfig.hostPort);
-            SetWindowTextA(hStatus, msg);
+        else if (event.type == ENET_EVENT_TYPE_DISCONNECT) {
+            HookLog("UMVC3Hook: Network DISCONNECT received\n");
+            CleanupNetwork(hDlg);
         }
-        closesocket(listenSocket);
-        WSACleanup();
-        return 1;
+    } else if (result < 0) {
+        HookLog("UMVC3Hook: enet_host_service error: %d\n", result);
+        CleanupNetwork(hDlg);
     }
-
-    // Listen
-    if (listen(listenSocket, SOMAXCONN) == SOCKET_ERROR) {
-        HWND hStatus = GetDlgItem(hDlg, ID_NET_STATUS);
-        if (hStatus) SetWindowTextA(hStatus, "Listen failed");
-        closesocket(listenSocket);
-        WSACleanup();
-        return 1;
-    }
-
-    // Update status
-    HWND hStatus = GetDlgItem(hDlg, ID_NET_STATUS);
-    if (hStatus) {
-        char msg[128];
-        snprintf(msg, sizeof(msg), "Listening on port %d...", g_dialogConfig.hostPort);
-        SetWindowTextA(hStatus, msg);
-    }
-
-    // Accept one connection (blocking, but acceptable for a pre-game dialog)
-    struct sockaddr_in clientAddr;
-    int clientAddrSize = sizeof(clientAddr);
-    SOCKET clientSocket = accept(listenSocket, (SOCKADDR*)&clientAddr, &clientAddrSize);
-    if (clientSocket != INVALID_SOCKET) {
-        if (hStatus) {
-            char msg[128];
-            snprintf(msg, sizeof(msg), "Connected from %s!", inet_ntoa(clientAddr.sin_addr));
-            SetWindowTextA(hStatus, msg);
-        }
-
-        // Keep the connection alive during the dialog
-        // The connection will persist until the thread exits
-        closesocket(clientSocket);
-    }
-
-    closesocket(listenSocket);
-    WSACleanup();
-
-    // Re-enable host button when thread exits
-    HWND hBtn = GetDlgItem(hDlg, ID_NET_HOST_BTN);
-    if (hBtn) EnableWindow(hBtn, TRUE);
-
-    return 0;
+    // result == 0: no events yet, timer will fire again
 }

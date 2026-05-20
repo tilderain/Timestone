@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <enet/enet.h>
 
 enum LaunchOption {
     LAUNCH_NORMAL = 0,
@@ -31,6 +32,9 @@ struct LaunchDialogConfig {
     char    hostIp[64];
     int     hostPort;
     bool    hostEnabled;
+    // enet handles (set by host/connect threads)
+    ENetHost* enetHost;
+    ENetPeer* enetPeer;
 };
 
 // Shows a Win32 dialog before the game initializes.

@@ -15,6 +15,7 @@
 #include <Windows.h>
 #include <cstdio>
 #include "kiero/minhook/include/MinHook.h"
+#include <enet/enet.h>
 //#include "code/generated.h"
 
 // Log file for hook debugging
@@ -184,8 +185,8 @@ void __fastcall Hook_titleLogoUpdate(uintptr_t param_1)
 
 void OnInitializeHook()
 {
-	// Open log file for hook debugging
-	g_hookLog = fopen("UMVC3Hook.log", "w");
+	// Open log file for hook debugging (append mode so 2nd instance doesn't clobber)
+	g_hookLog = fopen("UMVC3Hook.log", "a");
 	if (g_hookLog) {
 		fprintf(g_hookLog, "=== UMVC3Hook Log Start ===\n");
 		fflush(g_hookLog);
@@ -376,12 +377,20 @@ BOOL WINAPI DllMain(HMODULE hMod, DWORD dwReason, LPVOID lpReserved)
 			//AntiDebugPatch();
 			SettingsMgr->Init();
 			DisableThreadLibraryCalls(hMod);
+
+			if (enet_initialize() != 0) {
+				HookLog("UMVC3Hook: Failed to initialize enet!\n");
+			} else {
+				HookLog("UMVC3Hook: enet initialized successfully\n");
+			}
+
 			CreateThread(nullptr, 0, MainThread, hMod, 0, nullptr);
 			CreateThread(nullptr, 0, (LPTHREAD_START_ROUTINE)HookUpdate, hMod, 0, nullptr);
 			OnInitializeHook();
 		}
 		break;
 	case DLL_PROCESS_DETACH:
+		enet_deinitialize();
 		kiero::shutdown();
 		break;
 	}
