@@ -13,6 +13,9 @@
 
 using namespace Memory::VP;
 
+// HookLog from dllmain.cpp
+extern void HookLog(const char* fmt, ...);
+
 // ---------------------------------------------------------------------------
 // Addresses (VAs, converted at runtime via _addr)
 // ---------------------------------------------------------------------------
@@ -61,12 +64,16 @@ static bool advanceFrame = false;
 // Frame counter: incremented each time a game frame actually advances while paused
 static int frameCounter  = 0;
 
+// aNextBattle tracker for one-time flag init
+static uint64_t s_lastBattleObj = 0;
+
 // Network input capture (captured from HookedMove after oMove runs)
 static uint32_t g_netP1Input   = 0; // battleState+0xd58 — P1's processed input (what would be sent)
 static uint32_t g_bsP2Input    = 0; // battleState+0xd60 — P2 input candidate
 static uint32_t g_netP2Read    = 0; // GetsCurrentInput_withSOCD(pad,1)
 static uint32_t g_padP2Input   = 0; // pad + 0x49c — raw pad slot 1 input
 static bool     g_netDataValid = false;
+
 
 // Slot stride in the pad structure
 static constexpr uint32_t PAD_SLOT_STRIDE = 0x2E0;
@@ -190,14 +197,37 @@ static constexpr int EXTRA_VK_COUNT = sizeof(EXTRA_VK) / sizeof(EXTRA_VK[0]);
 typedef void(__fastcall* Move_t)(void*);
 static Move_t oMove = nullptr;
 
-// Forward declaration
+// Forward declarations
 static void CaptureNetInput();
-
+static bool IsTrainingMode();
+static constexpr uintptr_t SGAMEUI_GET_INSTANCE              = 0x140001ac0;
 // ---------------------------------------------------------------------------
-// Hooked sMvc3Main::move — skips the call when paused unless advancing
+// Hooked sMvc3Main::move — skips the call when paused unless advancing.
 // ---------------------------------------------------------------------------
 static void __fastcall HookedMove(void* sMvc3Main)
 {
+    // --- One-time aNextBattle flag init for training mode ---
+    // Ensure the +0xC4 flags have bit 15 (0x8000) set and bit 25 (0x2000000)
+    // cleared so executeMatchPhase's case 3/4 init block runs. Without this,
+    // the init block (which calls transitionToStep(-1) to advance the phase
+    // from 1 to 2) is skipped, and the engine gets stuck in phase 1 forever
+    // — no pause menu, no intro skip.
+    /*{
+        auto getNextBattle = (uint64_t(__fastcall*)())_addr(0x140001A90);
+        uint64_t aNextBattle = getNextBattle();
+        if (aNextBattle) {
+            if (aNextBattle != s_lastBattleObj) {
+                s_lastBattleObj = aNextBattle;
+                uint32_t* flags = (uint32_t*)(aNextBattle + 0xC4);
+                *flags |= 0x8000;
+                *flags &= ~0x2000000;
+                HookLog("UMVC3Hook: Initialized aNextBattle flags for training mode\n");
+            }
+        } else {
+            s_lastBattleObj = 0;
+        }
+    }*/
+
     if (isPaused)
     {
         if (advanceFrame)
@@ -220,7 +250,32 @@ static void __fastcall HookedMove(void* sMvc3Main)
         }
         return;
     }
+
+    /*uint64_t sm = *(uint64_t*)_addr(MVC3_MAIN_PTR);
+    if (sm) {
+    auto getAmaterasuObj = (uint64_t(__fastcall*)())_addr(0x140001A90);
+    uint64_t aNextBattle = getAmaterasuObj();
+    
+        if (aNextBattle) {
+            int step = *(int*)(aNextBattle + 0xD8);
+
+            // Once we are in gameplay (Step 5)
+            if (step == 5) {
+                auto getGameUI = (uint64_t(__fastcall*)())_addr(SGAMEUI_GET_INSTANCE);
+                uint64_t ui = getGameUI();
+                if (ui) {
+                    uint32_t* bootState = (uint32_t*)(ui + 0x5b74);
+                    // If it is still stuck at 0 (Boot/Load state)
+                    if (*bootState == 0) {
+                    //    *bootState = 2; // Force UI state to 2 (Active Gameplay)
+                     //   HookLog("UMVC3Hook: Forced sGameUI+0x5b74 bootState to 2\n");
+                    }
+                }
+            }
+        }
+    }*/
     oMove(sMvc3Main);
+
     CaptureNetInput();
 }
 
@@ -410,7 +465,7 @@ void FrameStepper_Draw()
         return;
 
     ImGui::SetNextWindowPos(ImVec2(12.0f, 12.0f), ImGuiCond_Always);
-    ImGui::SetNextWindowBgAlpha(0.0f);
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.0f, 0.0f, 0.0f, 0.85f));
     ImGui::Begin("##FrameStepper", nullptr,
         ImGuiWindowFlags_NoTitleBar |
         ImGuiWindowFlags_NoResize |
@@ -488,5 +543,36 @@ void FrameStepper_Draw()
         ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.8f, 1.0f), "P2 getInput(pad,1): 0x%08X", g_netP2Read);
     }
 
+    // 1. Get the aNextBattle instance (Amaterasu is the internal name for the battle manager)
+    typedef uint64_t(__fastcall* GetAmaterasu_t)();
+    GetAmaterasu_t getAmaterasuObj = (GetAmaterasu_t)_addr(0x140001A90);
+    uint64_t aNextBattle = getAmaterasuObj();
+
+    if (aNextBattle) {
+        uint32_t flags      = *(uint32_t*)(aNextBattle + 0xC4);
+        int      step       = *(int*)(aNextBattle + 0xD8);
+        int      phase      = *(int*)(aNextBattle + 0xDC);
+        int      transition = *(int*)(aNextBattle + 0x174);
+
+        ImGui::TextColored(ImVec4(1, 0.5f, 0, 1), "--- DIAGNOSTICS ---");
+        ImGui::Text("aNextBattle: 0x%llX", aNextBattle);
+        ImGui::Text("Flags (+0xC4): 0x%08X", flags);
+        ImGui::Text("Step (+0xD8): %d", step);
+        ImGui::Text("Phase (+0xDC): %d", phase);
+        ImGui::Text("Trans (+0x174): 0x%08X", transition);
+    }
+
+    // 2. Get the sGameUI instance
+    typedef uint64_t(__fastcall* GetGameUI_t)();
+    GetGameUI_t getGameUI = (GetGameUI_t)_addr(0x140001AC0);
+    uint64_t ui = getGameUI();
+
+    if (ui) {
+        uint64_t uiElement = *(uint64_t*)(ui + 0x5AA8);
+        ImGui::Text("sGameUI: 0x%llX", ui);
+        ImGui::Text("UI Element (+0x5AA8): 0x%llX", uiElement);
+    }
+
+    ImGui::PopStyleColor();
     ImGui::End();
 }

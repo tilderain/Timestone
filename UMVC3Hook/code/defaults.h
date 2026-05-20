@@ -269,7 +269,10 @@ physicsX_t physicsX;
 //physicsY
 longlong* FUN_1400199c0(longlong param_1, longlong* param_2, longlong param_3, longlong* param_4, longlong param_5) {
 	if (!physicsY.inited)
+	{
 		printf("physY %x %x %x %x %x\n", param_1, param_2, param_3, param_4, param_5);
+
+	}
 	physicsY.inited = true;
 	physicsY.param_1 = param_1;
 	physicsY.param_2 = param_2;
@@ -283,7 +286,9 @@ longlong* FUN_1400199c0(longlong param_1, longlong* param_2, longlong param_3, l
 
 //AnmEditorSprite
 undefined8* FUN_14045d860(undefined8* param_1, char* param_2, longlong param_3, ulonglong param_4, int param_5,int param_6, uint8_t param_7) {
-	printf("%s %llx %llx\n", param_2,param_1,param_3);
+	//dumps all class info ..
+	
+	;//printf("%s %llx %llx\n", param_2,param_1,param_3);
 	return ((undefined8 * (*)(undefined8 * , char* , longlong , ulonglong , int , int , uint8_t))_addr(0x14045d860))(param_1, param_2, param_3, param_4, param_5,param_6,param_7);
 }
 
@@ -344,7 +349,9 @@ void FUN_1402b41b0(longlong param_1)
 void  FUN_140521df0(longlong param_1)
 {
 	if (!physics.inited)
+	{
 		printf("phys:%x",param_1);
+	}
 	physics.inited = true;
 	physics.param_1 = param_1;
 	((void (*)(longlong))_addr(0x140521df0))(param_1);
@@ -354,8 +361,11 @@ undefined2* FUN_1405ab9a0(longlong* param_1, undefined2* param_2, longlong* para
 	longlong param_5, undefined* param_6, undefined* param_7, undefined* param_8,
 	longlong* param_9) {
 	if(!physicsX.inited)
+	{
 		printf("physX %x %x %x %x %x\n", param_1, param_2, param_3, param_4, param_5, param_6, param_7, param_8,
 		param_9);
+	}
+
 	physicsX.inited = true;
 	physicsX.param_1 = param_1;
 	physicsX.param_2 = param_2;

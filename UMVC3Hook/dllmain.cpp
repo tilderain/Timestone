@@ -312,6 +312,60 @@ bool CheckGame()
 	}
 }
 
+void AntiDebugPatch()
+{
+	//HookLog("[AntiDebug] Applying anti-debug patches...\n");
+
+	// Patch IsDebuggerPresent to always return FALSE
+	/*auto pIsDebuggerPresent = GetProcAddress(GetModuleHandleA("kernel32.dll"), "IsDebuggerPresent");
+	if (pIsDebuggerPresent) {
+		DWORD oldProtect;
+		VirtualProtect((LPVOID)pIsDebuggerPresent, 3, PAGE_EXECUTE_READWRITE, &oldProtect);
+		uint8_t patch[] = { 0x31, 0xC0, 0xC3 }; // xor eax,eax; ret
+		memcpy(pIsDebuggerPresent, patch, 3);
+		VirtualProtect((LPVOID)pIsDebuggerPresent, 3, oldProtect, &oldProtect);
+		HookLog("[AntiDebug] Patched IsDebuggerPresent\n");
+	}
+
+	// Patch CheckRemoteDebuggerPresent to always return FALSE
+	auto pCheckRemoteDebuggerPresent = GetProcAddress(GetModuleHandleA("kernel32.dll"), "CheckRemoteDebuggerPresent");
+	if (pCheckRemoteDebuggerPresent) {
+		DWORD oldProtect;
+		VirtualProtect((LPVOID)pCheckRemoteDebuggerPresent, 6, PAGE_EXECUTE_READWRITE, &oldProtect);
+		// xor eax,eax; mov [rdx],eax; ret  -> returns FALSE and writes 0 to the output flag
+		uint8_t patch[] = { 0x31, 0xC0, 0x89, 0x02, 0xC3 };
+		memcpy(pCheckRemoteDebuggerPresent, patch, 5);
+		VirtualProtect((LPVOID)pCheckRemoteDebuggerPresent, 6, oldProtect, &oldProtect);
+		HookLog("[AntiDebug] Patched CheckRemoteDebuggerPresent\n");
+	}
+
+	// Use NtSetInformationProcess to clear the PEB BeingDebugged flag
+	// This also handles direct PEB reads that bypass IsDebuggerPresent
+	typedef long (WINAPI *NtSetInformationProcess_t)(HANDLE, ULONG, PVOID, ULONG);
+	auto pNtSetInformationProcess = (NtSetInformationProcess_t)
+		GetProcAddress(GetModuleHandleA("ntdll.dll"), "NtSetInformationProcess");
+	if (pNtSetInformationProcess) {
+		ULONG debugFlags = 1; // ProcessDebugFlags = 1 means "not being debugged"
+		long status = pNtSetInformationProcess(GetCurrentProcess(), 0x1F, &debugFlags, sizeof(debugFlags));
+		HookLog("[AntiDebug] NtSetInformationProcess(ProcessDebugFlags): 0x%X\n", status);
+	}*/
+
+	// Install VEH to catch the packer's crash at umvc3+0x257c58
+	// The crash is a page fault from callq *0x50(%r8) with r8=1
+	// We catch it and advance RIP past the faulting instruction
+	/*AddVectoredExceptionHandler(1, [](EXCEPTION_POINTERS* ep) -> LONG {
+		static uintptr_t crashBase = (uintptr_t)GetModuleHandleA(NULL) + 0x257c58;
+		if (ep->ExceptionRecord->ExceptionCode == EXCEPTION_ACCESS_VIOLATION &&
+			ep->ExceptionRecord->ExceptionAddress == (void*)crashBase) {
+			// Skip past the 4-byte callq instruction
+			ep->ContextRecord->Rip += 4;
+			return EXCEPTION_CONTINUE_EXECUTION;
+		}
+		return EXCEPTION_CONTINUE_SEARCH;
+	});*/
+	//HookLog("[AntiDebug] Installed VEH for packer crash at +0x257c58\n");
+}
+
 BOOL WINAPI DllMain(HMODULE hMod, DWORD dwReason, LPVOID lpReserved)
 {
 	switch (dwReason)
@@ -319,6 +373,7 @@ BOOL WINAPI DllMain(HMODULE hMod, DWORD dwReason, LPVOID lpReserved)
 	case DLL_PROCESS_ATTACH:
 		if (CheckGame())
 		{
+			//AntiDebugPatch();
 			SettingsMgr->Init();
 			DisableThreadLibraryCalls(hMod);
 			CreateThread(nullptr, 0, MainThread, hMod, 0, nullptr);
