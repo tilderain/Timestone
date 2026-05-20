@@ -47,6 +47,36 @@ static constexpr uintptr_t BATTLE_SETTING_RESTORE_BACKUP     = 0x14024de40;
 // Access pattern: bs + 0x3bc0c + ((slot % 3) + (team & 0xf) * 3) * 4
 static constexpr uintptr_t CHAR_ID_ARRAY_OFFSET              = 0x3bc0c;
 
+// --- Pad / Keyboard input routing ---
+// sPad singleton instance pointer (written by sPad__sPad_ctor @ 0x14050fbe3).
+// The pad object has 4 slots at stride 0x2E0 starting at +0x62.
+// sMvc3Manager stores the pad-to-player assignment at +0x140 (int32_t per slot).
+// keyboardToGameMask_maybe (0x1402B3390) and GetsCurrentInput_withSOCD (0x1402B3700)
+// check manager+0x140[0] to decide if keyboard maps to P1 (0) or another player.
+// pad+0xc20 and pad+0xc30 are keyboard-disable flags — when non-zero, keyboard
+// is blocked regardless of assignment.
+//
+// REFS:
+//   sPad__sPad_ctor:          0x14050FBA0
+//   sPad__initSlotInner:      0x1405142A0  (writes keyboard scan-to-button map)
+//   GetsCurrentInput_withSOCD:0x1402B3700  (routes keyboard-vs-pad per player)
+//   sMvc3Main__keyboardToGameMask_maybe: 0x1402B3390 (VK→game bitmask mapping)
+//   sMvc3Manager__isPadAssigned:         0x14025AD10 (checks slot != -1)
+//   sMvc3Manager__getPlayerCharIdx:      0x14025AC40 (reads manager+0x140[slot])
+//   sKeyboard__sKeyboard:    0x1406A96C0  (DirectInput keyboard state buffer at +0x138)
+//   FUN_1402950e0:           0x1402950E0  (returns keyboard state provider at 0x140E1A198)
+//   sPad__instance:          0x140E174B8  (global, written at sPad__sPad_ctor+0x43)
+//   sMvc3Manager pointer:    0x140D510A0  (global, deref to get manager instance)
+static constexpr uintptr_t SPAD_INSTANCE_PTR                 = 0x140E174B8;
+static constexpr uintptr_t SMVC3MANAGER_INSTANCE_PTR         = 0x140D510A0;
+
+// Offsets within sMvc3Manager:
+static constexpr uintptr_t MANAGER_PAD_ASSIGN_OFFSET         = 0x140;   // int32_t[4] pad-slot→player index (-1=unassigned, 0=P1, 1=P2)
+
+// Offsets within sPad:
+static constexpr uintptr_t PAD_KEYBOARD_BLOCKED_1            = 0xc20;   // byte: non-zero blocks keyboard
+static constexpr uintptr_t PAD_KEYBOARD_BLOCKED_2            = 0xc30;   // byte: non-zero blocks keyboard
+
 // ---------------------------------------------------------------------------
 // Global state
 // ---------------------------------------------------------------------------
@@ -102,10 +132,77 @@ static void WriteSlotEntry(uint64_t bs, int index, int teamId, int32_t charId)
 }
 
 // ---------------------------------------------------------------------------
+// Save data & pad-to-player mapping notes
+// ---------------------------------------------------------------------------
+// PROBLEM: In the normal "Press Start" flow, save data is loaded from
+// savedata.bin ("savedata/umvc3/savedata.bin"). This does several things
+// that our training boot bypasses:
+//   1. Writes manager+0x140[0..3] — assigns pad slots 0-3 to player indices
+//      (0=P1, 1=P2, -1=unassigned). Slot 0 also controls which player index
+//      the keyboard feeds into (checked by GetsCurrentInput_withSOCD @ 0x1402B3700).
+//   2. Clears pad+0xc20/pad+0xc30 keyboard-disable flags (set during license
+//      check when no save data exists yet).
+//   3. Initializes keyboard scan→button mapping per slot via initSlotInner
+//      (0x1405142A0) — writes the 0x20-byte translation table at slot+0x118.
+//   4. Loads controller config (button assignments, stick zones).
+//
+// The save data loading itself is orchestrated by sLicense (0x140279AE0)
+// and uSaveDataAccess (0x14031CBC0), but we bypass it completely.
+// SetupPadToPlayerMapping() below writes the bare minimum to get keyboard
+// input routing working for Escape/pause and Start/skip-intro.
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// SetupPadToPlayerMapping: Directly writes the pad-to-player assignment and
+// clears keyboard-disable flags, bypassing the need for savedata.bin loading.
+//
+// In the normal flow (title screen → "Press Start" → menu), the license/
+// save-data init does this. We replicate the essential state here since our
+// boot bypasses the entire menu flow.
+//
+// GetsCurrentInput_withSOCD (0x1402B3700) routing logic:
+//   keyboardPlayerIdx = manager+0x140[0]
+//   if (keyboardPlayerIdx == requestedPlayerIdx && pad+0xc30 == 0)
+//       return keyboardInput(requestedPlayerIdx)
+//   else
+//       return padSlotInput[requestedPlayerIdx]  // pad + playerIdx*0x2E0 + 0x1BC
+//
+// sMvc3Main__method_3D00 (called from keyboard reader) also checks:
+//   if (pad+0xc20 != 0 || pad+0xc30 != 0) → return 0 (blocked)
+// ---------------------------------------------------------------------------
+static void SetupPadToPlayerMapping()
+{
+    // --- sMvc3Manager: pad-slot→player assignment ---
+    // manager + 0x140 is an int32_t[4]; write slot→player mapping.
+    // Slot 0 = P1 (also keyboard → P1). Slot 1 = P2.
+    uint64_t sMvc3Manager = *(uint64_t*)_addr(SMVC3MANAGER_INSTANCE_PTR);
+    if (sMvc3Manager) {
+        *(int32_t*)(sMvc3Manager + MANAGER_PAD_ASSIGN_OFFSET + 0 * 4) = 0;  // slot 0 → player 0 (P1, also keyboard)
+        *(int32_t*)(sMvc3Manager + MANAGER_PAD_ASSIGN_OFFSET + 1 * 4) = 1;  // slot 1 → player 1 (P2)
+        *(int32_t*)(sMvc3Manager + MANAGER_PAD_ASSIGN_OFFSET + 2 * 4) = -1; // slot 2 → unassigned
+        *(int32_t*)(sMvc3Manager + MANAGER_PAD_ASSIGN_OFFSET + 3 * 4) = -1; // slot 3 → unassigned
+        HookLog("TrainingBoot: Pad-to-player mapping set (slots 0→P1, 1→P2)\n");
+    } else {
+        HookLog("TrainingBoot: WARNING - sMvc3Manager not available for pad mapping\n");
+    }
+
+    // --- sPad: clear keyboard-disable flags ---
+    uint64_t sPad = *(uint64_t*)_addr(SPAD_INSTANCE_PTR);
+    if (sPad) {
+        *(uint8_t*)(sPad + PAD_KEYBOARD_BLOCKED_1) = 0;
+        *(uint8_t*)(sPad + PAD_KEYBOARD_BLOCKED_2) = 0;
+        HookLog("TrainingBoot: Keyboard-disable flags cleared (pad+0x%x, pad+0x%x)\n",
+                PAD_KEYBOARD_BLOCKED_1, PAD_KEYBOARD_BLOCKED_2);
+    } else {
+        HookLog("TrainingBoot: WARNING - sPad not available for keyboard flag clear\n");
+    }
+}
+
+// ---------------------------------------------------------------------------
 // BootIntoTraining: configures sBattleSetting and transitions to battle.
 // Follows the same flow as aChrSelect__onSelectionComplete for training mode (uVar3 == 6).
 // Sequence: set up chars/stage → set battle type → agent reset → restore backup →
-//           UI flags → create loading screen → area transition to aChrSelectBlank
+//           UI flags → create loading screen → area transition → pad mapping
 // ---------------------------------------------------------------------------
 void BootIntoTraining()
 {
@@ -196,6 +293,11 @@ void BootIntoTraining()
     SetArea_t setArea = (SetArea_t)(*(uint64_t*)(*(uint64_t*)sArea + 0x50));
     setArea(sArea, (void*)_addr(ACHRSELBLANK_DTI));
     HookLog("TrainingBoot: Area transition to aChrSelectBlank!\n");
+
+    // 6. Set pad-to-player mapping + clear keyboard disable flags.
+    //    In the normal Press-Start flow, savedata.bin loading does this
+    //    during menu init. We bypass the menu, so do it directly here.
+    SetupPadToPlayerMapping();
 }
 
 // ---------------------------------------------------------------------------
