@@ -11,13 +11,14 @@
 #include "code/UMVC3Camera.h"
 #include "code/LaunchMenu.h"
 #include "code/framestepper.h"
+#include "code/trainingboot.h"
 #include <Windows.h>
 #include <cstdio>
 #include "kiero/minhook/include/MinHook.h"
 //#include "code/generated.h"
 
 // Log file for hook debugging
-static FILE* g_hookLog = nullptr;
+FILE* g_hookLog = nullptr;
 
 void HookLog(const char* fmt, ...)
 {
@@ -278,7 +279,12 @@ void OnInitializeHook()
 	InjectHook(_addr(0x14001A490), tramp->Jump(UMVC3Hooks::HookCamera), PATCH_JUMP);
 
 	// Training mode: handled via code hooks (aTitleLogo__playLogoMovies patch) and
-	// set the battle type to 5 (~10s after game loads) to trigger training.
+	// the training boot module which intercepts aTitle__update to transition
+	// directly into a battle area with training mode settings.
+
+	if (opt == LAUNCH_TRAINING || opt == LAUNCH_DUAL_TRAINING) {
+		TrainingBoot_InitHooks();
+	}
 
 	TheMenu->PostInit();
 
