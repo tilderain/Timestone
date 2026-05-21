@@ -221,40 +221,30 @@ static Move_t oMove = nullptr;
 static void CaptureNetInput();
 static bool IsTrainingMode();
 static constexpr uintptr_t SGAMEUI_GET_INSTANCE              = 0x140001ac0;
+
+
+extern "C" void Controller_OnFrameStart();
+extern "C" void Controller_OnFrameEnd();
 // ---------------------------------------------------------------------------
 // Hooked sMvc3Main::move — skips the call when paused unless advancing.
 // ---------------------------------------------------------------------------
 static void __fastcall HookedMove(void* sMvc3Main)
 {
-    // --- One-time aNextBattle flag init for training mode ---
-    // Ensure the +0xC4 flags have bit 15 (0x8000) set and bit 25 (0x2000000)
-    // cleared so executeMatchPhase's case 3/4 init block runs. Without this,
-    // the init block (which calls transitionToStep(-1) to advance the phase
-    // from 1 to 2) is skipped, and the engine gets stuck in phase 1 forever
-    // — no pause menu, no intro skip.
-    /*{
-        auto getNextBattle = (uint64_t(__fastcall*)())_addr(0x140001A90);
-        uint64_t aNextBattle = getNextBattle();
-        if (aNextBattle) {
-            if (aNextBattle != s_lastBattleObj) {
-                s_lastBattleObj = aNextBattle;
-                uint32_t* flags = (uint32_t*)(aNextBattle + 0xC4);
-                *flags |= 0x8000;
-                *flags &= ~0x2000000;
-                HookLog("UMVC3Hook: Initialized aNextBattle flags for training mode\n");
-            }
-        } else {
-            s_lastBattleObj = 0;
-        }
-    }*/
-
     if (isPaused)
     {
         if (advanceFrame)
         {
             advanceFrame = false;
             frameCounter++;
+            if (Netplay_IsActive())
+            {
+                Controller_OnFrameStart();
+            }
             oMove(sMvc3Main);
+            if (Netplay_IsActive())
+            {
+                Controller_OnFrameEnd();
+            }
         }
         else if (g_pDevice)
         {
@@ -265,37 +255,21 @@ static void __fastcall HookedMove(void* sMvc3Main)
         return;
     }
 
-    /*uint64_t sm = *(uint64_t*)_addr(MVC3_MAIN_PTR);
-    if (sm) {
-    auto getAmaterasuObj = (uint64_t(__fastcall*)())_addr(0x140001A90);
-    uint64_t aNextBattle = getAmaterasuObj();
-    
-        if (aNextBattle) {
-            int step = *(int*)(aNextBattle + 0xD8);
+    if (Netplay_IsActive())
+    {
+        Controller_OnFrameStart();
+    }
 
-            // Once we are in gameplay (Step 5)
-            if (step == 5) {
-                auto getGameUI = (uint64_t(__fastcall*)())_addr(SGAMEUI_GET_INSTANCE);
-                uint64_t ui = getGameUI();
-                if (ui) {
-                    uint32_t* bootState = (uint32_t*)(ui + 0x5b74);
-                    // If it is still stuck at 0 (Boot/Load state)
-                    if (*bootState == 0) {
-                    //    *bootState = 2; // Force UI state to 2 (Active Gameplay)
-                     //   HookLog("UMVC3Hook: Forced sGameUI+0x5b74 bootState to 2\n");
-                    }
-                }
-            }
-        }
-    }*/
     oMove(sMvc3Main);
+
+    if (Netplay_IsActive())
+    {
+        Controller_OnFrameEnd();
+    }
 
     CaptureNetInput();
 
-    // ===== Netplay: send local P1 input, receive remote P2 input =====
-    // Only send input when the match is actually live (step >= 2).
-    // Step 0 = initial/loading, Step 1 = pre-fight setup,
-    // Step 2+ = input is ready, gameplay has begun.
+    // ===== Netplay: logging only =====
     if (Netplay_IsActive())
     {
         // Check aNextBattle step to know if gameplay has started
@@ -313,40 +287,15 @@ static void __fastcall HookedMove(void* sMvc3Main)
 
         if (step >= 2)
         {
-            // Read local P1 and P2 input using the game's own input function
             auto sPadGetInstance = (sPad__getInstance_t)_addr(SPAD_GET_INSTANCE_ADDR);
-            auto getInput = (GetsCurrentInput_withSOCD_t)_addr(GET_CURRENT_INPUT_ADDR);
             uint64_t pad = sPadGetInstance();
             if (pad) {
-                uint32_t localP1 = (uint32_t)getInput(pad, 0);
-                uint32_t localP2 = (uint32_t)getInput(pad, 1);
-
-                // Queue P1 for the netplay service thread to send
-                if (Netplay_IsHost())
-                {
-                    // Input is now sent from hkprocessFrameInput after keyboard translation.
-                    // Don't send raw localP1 here — it misses keyboard buttons.
-                }
-                else
-                {
-                    // Client still needs to send its physical input as raw for the host to display P2
-                    Netplay_SendInput(localP1);
-                }
-
-                // Overwrite P2 input with remote input (if we have it)
-                if (Netplay_HasRemoteInput()) {
-                    uint32_t remoteInput = Netplay_GetRemoteInput();
-                    // Blast remote input directly into the P2 pad slot so the game reads it
-                    *(uint32_t*)(pad + PAD_SLOT_STRIDE + PAD_SLOT_INPUT) = remoteInput;
-                }
-
-                // Track active netplay frames and print logs every 60 frames
                 static uint32_t s_netplayFrameCounter = 0;
                 s_netplayFrameCounter++;
                 if (s_netplayFrameCounter % 60 == 0) {
                     uint32_t recvInput = Netplay_HasRemoteInput() ? Netplay_GetRemoteInput() : 0;
-                    HookLog("[Netplay] Frame %u | Sent P1: 0x%08X | Local P2: 0x%08X | Recv: 0x%08X | RTT: %u ms\n",
-                            s_netplayFrameCounter, localP1, localP2, recvInput, Netplay_GetRTT());
+                    HookLog("[Netplay] Frame %u | Recv: 0x%08X | RTT: %u ms\n",
+                            s_netplayFrameCounter, recvInput, Netplay_GetRTT());
                 }
             }
         }

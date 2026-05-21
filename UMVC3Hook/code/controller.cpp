@@ -36,13 +36,10 @@ static constexpr uintptr_t ADDR_PAD_CHECK_STOP_VIB       = 0x140514ED0;
 static constexpr uintptr_t ADDR_KEYBOARD_TO_GAME_MASK    = 0x1402B2FA0;
 static constexpr uintptr_t ADDR_PAD_GET_INSTANCE         = 0x140001B00;
 static constexpr uintptr_t ADDR_MVC3_MGR_GET_INSTANCE    = 0x140001AF0;
-static constexpr uintptr_t ADDR_MGR_GET_PLAYER_CHAR      = 0x14025AC40;
+static constexpr uintptr_t ADGR_MGR_GET_PLAYER_CHAR      = 0x14025AC40;
 static constexpr uintptr_t ADDR_METHOD_3D00              = 0x1402B3D00;
 
 // cChrInput__processFrameInput — the per-character input processor.
-// This is the function that reads GetsCurrentInput (or takes Path A from
-// character+0xC4) and stores the result in the cChrInput fields at +0x14,
-// +0x560, +0x56C. We hook it to implement P1-freeze / P2-mirror.
 static constexpr uintptr_t ADDR_PROCESS_FRAME_INPUT       = 0x14002DD60;
 // uAmaterasu__getter_4AC0 — returns the team index (0=P1, 1=P2) from a character object.
 static constexpr uintptr_t ADDR_GET_TEAM_INDEX            = 0x140004AC0;
@@ -57,26 +54,14 @@ static xinputToGameMask_t          oxinputToGameMask          = nullptr;
 static padSlotPostReadProcess_t    opadSlotPostReadProcess    = nullptr;
 static inputAutoRepeatTimerProcess_t oinputAutoRepeatTimerProcess = nullptr;
 
-typedef void(*Netplay_SendInput_t)(uint32_t);
-static Netplay_SendInput_t oNetplay_SendInput = nullptr;
-
-// processFrameInput trampoline + hook cache for P1→P2 mirroring
+// processFrameInput trampoline
 static void(__fastcall* oprocessFrameInput)(uint64_t cChrInput) = nullptr;
-static uint64_t g_p1CChrInputHandle = 0;   // cChrInput of P1's lead character
-static uint32_t g_p1Input14  = 0;           // last-read input from P1 (field +0x14)
-static uint32_t g_p1Input560 = 0;           // last-read input from P1 (field +0x560)
-static uint32_t g_p1Input56C = 0;           // last-read input from P1 (field +0x56C)
 
 // ===========================================================================
 // Decompiled helper functions (inlined from game)
 // ===========================================================================
 namespace ControllerDecomp {
 
-// ---------------------------------------------------------------------------
-// keyboardToGameMask (0x1402B2FA0)
-// Maps VK key states → game input bitmask. Called when keyboard is the
-// active device for a player slot.
-// ---------------------------------------------------------------------------
 static uint32_t keyboardToGameMask(uint64_t sPad)
 {
     typedef uint64_t(__fastcall* method_3D00_t)(uint64_t, uint32_t, uint32_t);
@@ -125,52 +110,6 @@ static uint32_t keyboardToGameMask(uint64_t sPad)
 
     return r;
 }
-// ---------------------------------------------------------------------------
-// GetsCurrentInput_withSOCD (0x1402B3700)
-// Per-player pad read with SOCD cleaning.
-// This is the KEY function for netplay P2 input injection.
-// ---------------------------------------------------------------------------
-uint32_t GetsCurrentInput_withSOCD(uint64_t pad, uint32_t playerIndex)
-{
-    if (playerIndex > 3)
-        return 0;
-
-    auto getMgr = (uint64_t(__fastcall*)())_addr(ADDR_MVC3_MGR_GET_INSTANCE);
-    auto getCharIdx = (uint32_t(__fastcall*)(uint64_t, uint32_t))_addr(ADDR_MGR_GET_PLAYER_CHAR);
-
-    uint64_t manager = getMgr();
-    uint32_t kbPlayer = getCharIdx(manager, 0);
-
-    // Keyboard path: if this player matches the keyboard-assigned player
-    // AND keyboard isn't disabled (pad+0xC30 == 0)
-    if (kbPlayer == playerIndex && *(uint8_t*)(pad + PAD_KEYBOARD_DISABLE) == 0)
-    {
-        return keyboardToGameMask(pad);
-    }
-
-    // Pad slot read (slot = pad + playerIndex * 0x2E0 + 0x1BC)
-    uint32_t input = *(uint32_t*)(pad + (uint64_t)playerIndex * PAD_SLOT_STRIDE + PAD_SLOT_INPUT);
-
-    // SOCD cleaning — faithful reproduction of game's original bit ops
-    // D-Pad Left(0x80) + Right(0x20) -> clear Right
-    if ((input & 0x80020) == 0x80020) input &= 0xFFFFFFDF;
-    // D-Pad Left(0x80) + Stick Right(0x20000) -> clear Stick Right
-    if ((input & 0x20080) == 0x20080)   input &= 0xFFFDFFFF;
-    // D-Pad Left(0x80) + Right(0x20) low-byte only -> clear Right
-    if (((uint8_t)input & 0xA0) == 0xA0) input &= 0xFFFFFFDF;
-    // Stick Left(0x80000) + Stick Right(0x20000) -> clear Stick Right
-    if ((input & 0xA0000) == 0xA0000)   input &= 0xFFFDFFFF;
-    // D-Pad Up(0x10) + Stick Down(0x40000) -> clear Stick Down
-    if ((input & 0x40010) == 0x40010)   input &= 0xFFFBFFFF;
-    // Stick Up(0x10000) + D-Pad Down(0x40) -> clear D-Pad Down
-    if ((input & 0x10040) == 0x10040)   input &= 0xFFFFFFBF;
-    // D-Pad Up(0x10) + Down(0x40) low-byte -> clear Down
-    if (((uint8_t)input & 0x50) == 0x50) input &= 0xFFFFFFBF;
-    // Stick Up(0x10000) + Stick Down(0x40000) -> clear Stick Down
-    if ((input & 0x50000) == 0x50000)   input &= 0xFFFBFFFF;
-
-    return input;
-}
 
 } // namespace ControllerDecomp
 
@@ -198,7 +137,6 @@ static uint32_t ApplySOCD(uint32_t input)
 // ---------------------------------------------------------------------------
 // hkGetsCurrentInput_withSOCD
 // Hook on GetsCurrentInput_withSOCD at 0x1402B3700.
-// Netplay P1/P2 dynamic injection depending on host/client roles.
 // ---------------------------------------------------------------------------
 static uint64_t __fastcall hkGetsCurrentInput_withSOCD(uint64_t pad, uint32_t playerIndex)
 {
@@ -206,30 +144,30 @@ static uint64_t __fastcall hkGetsCurrentInput_withSOCD(uint64_t pad, uint32_t pl
     {
         if (Netplay_IsHost())
         {
-            // Host: P1 is local physical, intercept P2 (1) with remote input
-            if (playerIndex == 1 && Netplay_HasRemoteInput())
+            // Host P1 is local physical. Host P2 is remote. Return 0 raw input for P2
+            // because we inject the remote character-processed bits directly in hkprocessFrameInput.
+            if (playerIndex == 1)
             {
-                uint32_t remote = Netplay_GetRemoteInput();
-                return ApplySOCD(remote);
+                return 0;
             }
         }
         else
         {
-            // Client: intercept P1 (0) with remote host input, map local P1 (0) to P2 (1)
-            if (playerIndex == 0 && Netplay_HasRemoteInput())
+            // Client P1 is remote. Return 0 raw input for P1 to prevent raw bit contamination.
+            if (playerIndex == 0)
             {
-                uint32_t remote = Netplay_GetRemoteInput();
-                return ApplySOCD(remote);
+                return 0;
             }
+            // Client P2 is local physical. Route physical slot 0 combined with keyboard.
             else if (playerIndex == 1)
             {
-                return oGetsCurrentInput_withSOCD(pad, 0);
+                uint32_t padInput = (uint32_t)oGetsCurrentInput_withSOCD(pad, 0);
+                uint32_t kbInput  = ControllerDecomp::keyboardToGameMask(pad);
+                return ApplySOCD(padInput | kbInput);
             }
         }
     }
 
-    // Offline / Fallback behavior:
-    // Strip START/BACK on P2 to prevent duplicate pause menus.
     if (playerIndex == 1)
         return oGetsCurrentInput_withSOCD(pad, 1) & ~(uint64_t)(IN_START | IN_BACK);
 
@@ -237,149 +175,87 @@ static uint64_t __fastcall hkGetsCurrentInput_withSOCD(uint64_t pad, uint32_t pl
 }
 
 // ---------------------------------------------------------------------------
-// hkNetplay_SendInput
-// Intercepts outbound input packets on the client to send physical slot 0 inputs.
+// Netplay Input Accumulators and Frame Boundary Sync
 // ---------------------------------------------------------------------------
-static void hkNetplay_SendInput(uint32_t localInput)
+static uint32_t g_hostPendingInput = 0;
+static uint32_t g_clientPendingInput = 0;
+
+extern "C" void Controller_OnFrameStart()
 {
-    if (Netplay_IsActive() && !Netplay_IsHost())
+    g_hostPendingInput = 0;
+    g_clientPendingInput = 0;
+}
+
+extern "C" void Controller_OnFrameEnd()
+{
+    if (Netplay_IsActive())
     {
-        auto sPadGetInstance = (uint64_t(__fastcall*)())_addr(ADDR_PAD_GET_INSTANCE);
-        uint64_t pad = sPadGetInstance();
-        if (pad)
+        if (Netplay_IsHost())
         {
-            uint32_t realLocalInput = oGetsCurrentInput_withSOCD(pad, 0);
-            oNetplay_SendInput(realLocalInput);
-            return;
+            Netplay_SendInput(g_hostPendingInput);
+        }
+        else
+        {
+            Netplay_SendInput(g_clientPendingInput);
         }
     }
-    oNetplay_SendInput(localInput);
-}
-// Translate raw gamepad inputs (XInput/DirectInput) to the game's character processed input layout.
-static uint32_t TranslateRawToCharacterInput(uint32_t raw)
-{
-    uint32_t processed = 0;
-
-    // 1. Directional Mapping:
-    // Processed character input: Right (0x01), Left (0x02), Up (0x04), Down (0x08)
-    if (raw & (0x0010 | 0x10000)) processed |= 0x04; // IN_UP or IN_STICK_UP -> Up
-    if (raw & (0x0040 | 0x40000)) processed |= 0x08; // IN_DOWN or IN_STICK_DOWN -> Down
-    if (raw & (0x0080 | 0x80000)) processed |= 0x02; // IN_LEFT or IN_STICK_LEFT -> Left
-    if (raw & (0x0020 | 0x20000)) processed |= 0x01; // IN_RIGHT or IN_STICK_RIGHT -> Right
-
-    // 2. Action Buttons Mapping:
-    // Special (0x10), Light (0x100), Medium (0x200), Heavy (0x400)
-    if (raw & 0x8000) processed |= 0x100; // IN_X -> Light (Punch)
-    if (raw & 0x1000) processed |= 0x200; // IN_Y -> Medium
-    if (raw & 0x2000) processed |= 0x400; // IN_B -> Heavy (Kick)
-    if (raw & 0x4000) processed |= 0x10;  // IN_A -> Special (Uppercut/Launcher)
-
-    // 3. Assist Buttons:
-    // Processed character input: Assist 1 (0x20), Assist 2 (0x40)
-    if (raw & 0x0100) processed |= 0x20;  // IN_LB -> Assist 1
-    if (raw & 0x0200) processed |= 0x40;  // IN_RB -> Assist 2
-
-    return processed;
 }
 
+// ---------------------------------------------------------------------------
+// hkprocessFrameInput
+// Hook on processFrameInput at 0x14002DD60.
+// Collects and overrides translated character-processed inputs symmetrically.
+// ---------------------------------------------------------------------------
 static void __fastcall hkprocessFrameInput(uint64_t cChrInput)
 {
+    // 1. Run native translation first so cChrInput fields (+0x14, etc.) populate normally.
     oprocessFrameInput(cChrInput);
 
+    if (!Netplay_IsActive())
+        return;
+
     uint64_t character = *(uint64_t*)(cChrInput + 0x8);
-    if (!character) return;
+    if (!character)
+        return;
 
     typedef uint32_t(__fastcall* getTeamIdx_t)(uint64_t);
     static getTeamIdx_t fnGetTeamIdx = (getTeamIdx_t)_addr(ADDR_GET_TEAM_INDEX);
     uint32_t teamIdx = fnGetTeamIdx(character);
 
-    if (Netplay_IsActive())
+    if (Netplay_IsHost())
     {
-        if (Netplay_IsHost() && teamIdx == 0)
+        if (teamIdx == 0)
         {
-            // Send the already-translated character input, not the raw pad slot.
-            // Raw pad misses all keyboard-sourced buttons (S/D/Z/C/F etc).
-            uint32_t charInput = *(uint32_t*)(cChrInput + 0x14);
-            Netplay_SendInput(charInput);
+            // Host P1: Accumulate locally processed inputs
+            g_hostPendingInput |= *(uint32_t*)(cChrInput + 0x14);
         }
-        else if (!Netplay_IsHost() && teamIdx == 0 && Netplay_HasRemoteInput())
+        else if (teamIdx == 1)
         {
-            // Remote value is now already in character-input format, write directly.
-            uint32_t remote = Netplay_GetRemoteInput();
+            // Host P2: Write host's received remote input directly into character fields
+            uint32_t remote = Netplay_HasRemoteInput() ? Netplay_GetRemoteInput() : 0;
             *(uint32_t*)(cChrInput + 0x14)  = remote;
             *(uint32_t*)(cChrInput + 0x560) = remote;
             *(uint32_t*)(cChrInput + 0x56C) = remote;
         }
-        return;
     }
-
-    /*
-        // === TEMPORARY DEBUG: log +0x14 for P1 offline so we can see real character input bits ===
-    if (!Netplay_IsActive() && teamIdx == 0)
+    else // Client
     {
-        uint32_t val14  = *(uint32_t*)(cChrInput + 0x14);
-        uint32_t val560 = *(uint32_t*)(cChrInput + 0x560);
-        uint32_t val56C = *(uint32_t*)(cChrInput + 0x56C);
-
-        // Only log when something is actually pressed (avoid spamming idle frames)
-        if (val14 != 0)
+        if (teamIdx == 0)
         {
-            static uint32_t lastVal = 0;
-            if (val14 != lastVal)
-            {
-                lastVal = val14;
-                HookLog("[DEBUG] P1 cChrInput+0x14=0x%08X  +0x560=0x%08X  +0x56C=0x%08X\n",
-                        val14, val560, val56C);
-
-                // Also log what raw GetsCurrentInput returned for slot 0 at this moment
-                auto sPadGetInstance = (uint64_t(__fastcall*)())_addr(ADDR_PAD_GET_INSTANCE);
-                uint64_t pad = sPadGetInstance();
-                if (pad)
-                {
-                    uint32_t raw = oGetsCurrentInput_withSOCD(pad, 0);
-                    HookLog("[DEBUG] Raw pad slot 0 at same frame: 0x%08X\n", raw);
-                }
-                
-                // Log which keyboard keys are currently held
-                {
-                    struct VkName { int vk; const char* name; };
-                    static const VkName keys[] = {
-                        { 0x41, "A (LP)" },
-                        { 0x53, "S (MP)" },
-                        { 0x44, "D (HP)" },
-                        { 0x5A, "Z (LK)" },
-                        { 0x58, "X (MK)" },
-                        { 0x43, "C (HK)" },
-                        { 0x46, "F (Special/S)" },
-                        { 0x51, "Q (Assist1)" },
-                        { 0x57, "W (Assist2)" },
-                        { 0x25, "Left" },
-                        { 0x27, "Right" },
-                        { 0x26, "Up" },
-                        { 0x28, "Down" },
-                        { VK_RETURN, "Enter" },
-                        { VK_BACK,   "Backspace" },
-                        { VK_ESCAPE, "Escape" },
-                    };
-                
-                    char keyBuf[256] = "Keys: ";
-                    bool anyKey = false;
-                    for (auto& k : keys)
-                    {
-                        if (GetAsyncKeyState(k.vk) & 0x8000)
-                        {
-                            if (anyKey) strcat(keyBuf, " + ");
-                            strcat(keyBuf, k.name);
-                            anyKey = true;
-                        }
-                    }
-                    if (!anyKey) strcat(keyBuf, "(none)");
-                    HookLog("[DEBUG] %s\n", keyBuf);
-                }
-            }
+            // Client P1: Write host's received remote input directly into character fields
+            uint32_t remote = Netplay_HasRemoteInput() ? Netplay_GetRemoteInput() : 0;
+            *(uint32_t*)(cChrInput + 0x14)  = remote;
+            *(uint32_t*)(cChrInput + 0x560) = remote;
+            *(uint32_t*)(cChrInput + 0x56C) = remote;
         }
-    }*/
+        else if (teamIdx == 1)
+        {
+            // Client P2: Accumulate locally processed inputs
+            g_clientPendingInput |= *(uint32_t*)(cChrInput + 0x14);
+        }
+    }
 }
+
 // ---------------------------------------------------------------------------
 // hkpadPollAllSlots
 // Hook on padPollAllSlots at 0x140514570.
@@ -393,14 +269,12 @@ static void __fastcall hkpadPollAllSlots(uint64_t sPad)
         return;
 
     // Copy P1's processed pad input → P2's pad slot input area.
-    // GetsCurrentInput reads from sPad + playerIndex*0x2E0 + 0x1BC.
     *(uint32_t*)(sPad + 1 * PAD_SLOT_STRIDE + PAD_SLOT_INPUT) =
         *(uint32_t*)(sPad + 0 * PAD_SLOT_STRIDE + PAD_SLOT_INPUT);
 }
 
 // ---------------------------------------------------------------------------
 // All other hooks: call through to original trampolines.
-// These exist so we have injection points for future use.
 // ---------------------------------------------------------------------------
 static uint64_t __fastcall hkpadSlotReadDevice(uint64_t slotBase)
 {
@@ -440,18 +314,7 @@ void Controller_InitHooks()
     else
         HookLog("Controller: Failed to hook GetsCurrentInput_withSOCD (%d)\n", s);
 
-    // Netplay_SendInput — hook to correct client physical input sending
-    s = MH_CreateHook(
-        (LPVOID)&Netplay_SendInput,
-        (LPVOID)&hkNetplay_SendInput,
-        (LPVOID*)&oNetplay_SendInput
-    );
-    if (s == MH_OK)
-        MH_EnableHook((LPVOID)&Netplay_SendInput);
-    else
-        HookLog("Controller: Failed to hook Netplay_SendInput (%d)\n", s);
-
-    // cChrInput__processFrameInput — P1 freeze / P2 mirror & netplay client override
+    // cChrInput__processFrameInput — netplay client/host synchronization
     s = MH_CreateHook(
         (LPVOID)_addr(ADDR_PROCESS_FRAME_INPUT),
         (LPVOID)&hkprocessFrameInput,
@@ -462,7 +325,7 @@ void Controller_InitHooks()
     else
         HookLog("Controller: Failed to hook processFrameInput (%d)\n", s);
 
-    // padSlotReadDevice (future DirectInput hook point)
+    // padSlotReadDevice
     s = MH_CreateHook(
         (LPVOID)_addr(ADDR_PAD_SLOT_READ_DEVICE),
         (LPVOID)&hkpadSlotReadDevice,
@@ -473,7 +336,7 @@ void Controller_InitHooks()
     else
         HookLog("Controller: Failed to hook padSlotReadDevice (%d)\n", s);
 
-    // padPollAllSlots (future hook point)
+    // padPollAllSlots
     s = MH_CreateHook(
         (LPVOID)_addr(ADDR_PAD_POLL_ALL_SLOTS),
         (LPVOID)&hkpadPollAllSlots,
@@ -484,7 +347,7 @@ void Controller_InitHooks()
     else
         HookLog("Controller: Failed to hook padPollAllSlots (%d)\n", s);
 
-    // xinputToGameMask (future XInput hook point)
+    // xinputToGameMask
     s = MH_CreateHook(
         (LPVOID)_addr(ADDR_XINPUT_TO_GAME_MASK),
         (LPVOID)&hkxinputToGameMask,
@@ -495,7 +358,7 @@ void Controller_InitHooks()
     else
         HookLog("Controller: Failed to hook xinputToGameMask (%d)\n", s);
 
-    // padSlotPostReadProcess (future hook point)
+    // padSlotPostReadProcess
     s = MH_CreateHook(
         (LPVOID)_addr(ADDR_PAD_SLOT_POST_READ),
         (LPVOID)&hkpadSlotPostReadProcess,
@@ -506,7 +369,7 @@ void Controller_InitHooks()
     else
         HookLog("Controller: Failed to hook padSlotPostReadProcess (%d)\n", s);
 
-    // inputAutoRepeatTimerProcess (future hook point)
+    // inputAutoRepeatTimerProcess
     s = MH_CreateHook(
         (LPVOID)_addr(ADDR_INPUT_AUTOREPEAT),
         (LPVOID)&hkinputAutoRepeatTimerProcess,
@@ -517,5 +380,5 @@ void Controller_InitHooks()
     else
         HookLog("Controller: Failed to hook inputAutoRepeatTimerProcess (%d)\n", s);
 
-    HookLog("Controller: Init complete — %d hooks installed\n", 8);
+    HookLog("Controller: Init complete — hooks installed\n");
 }

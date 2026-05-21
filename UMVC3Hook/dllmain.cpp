@@ -302,6 +302,10 @@ void OnInitializeHook()
 	}
 
 	if (opt == LAUNCH_DUAL_TRAINING) {
+		// Switch host log to host-specific file so host + client don't clobber each other
+		HookLogSetFile("UMVC3Hook_host.log");
+		HookLog("UMVC3Hook: Dual training host - switched to host log file\n");
+
 		const LaunchDialogConfig& dlgCfg = GetLaunchDialogConfig();
 
 		// 1. Create enet host FIRST so it's listening before the 2nd instance starts
@@ -373,6 +377,9 @@ void OnInitializeHook()
 
 	// Auto-connect: second instance spawned by dual training connects back to host
 	if (g_autoConnectPort != 0 && g_autoConnectIp[0] != '\0') {
+		// Switch client log to client-specific file so host + client don't clobber each other
+		HookLogSetFile("UMVC3Hook_client.log");
+
 		HookLog("UMVC3Hook: Auto-connecting to host %s:%d\n",
 			g_autoConnectIp, g_autoConnectPort);
 
