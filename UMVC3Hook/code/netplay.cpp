@@ -16,7 +16,9 @@ static bool                 g_active = false;
 
 // Thread-safe input exchange (lock-free atomics)
 static std::atomic<uint32_t> g_outboundInput { 0 };   // game -> network thread
+static std::atomic<bool>     g_outboundNew   { false }; // has new outbound input to send
 static std::atomic<uint32_t> g_inboundInput  { 0 };   // network -> game thread
+static std::atomic<bool>     g_inboundHasData{ false }; // has received at least one packet
 static std::atomic<bool>     g_running { false };
 
 static HANDLE g_serviceThread = nullptr;
@@ -45,9 +47,9 @@ static DWORD WINAPI Netplay_ServiceThread(LPVOID)
         }
 
         // --- Send outbound input (if the game thread queued any) ---
-        uint32_t outInput = g_outboundInput.exchange(0);
-        if (outInput != 0 && g_peer)
+        if (g_outboundNew.exchange(false) && g_peer)
         {
+            uint32_t outInput = g_outboundInput.load();
             InputPacket pkt;
             pkt.sequence  = g_seq++;
             pkt.inputBits = outInput;
@@ -75,6 +77,7 @@ static DWORD WINAPI Netplay_ServiceThread(LPVOID)
                     {
                         const InputPacket* inPkt = (const InputPacket*)event.packet->data;
                         g_inboundInput.store(inPkt->inputBits);
+                        g_inboundHasData.store(true);
                         g_recvCount++;
                     }
                     enet_packet_destroy(event.packet);
@@ -119,6 +122,8 @@ void Netplay_Init(ENetHost* host, ENetPeer* peer)
 
     g_inboundInput.store(0);
     g_outboundInput.store(0);
+    g_outboundNew.store(false);
+    g_inboundHasData.store(false);
     g_seq = 0;
     g_recvCount = 0;
     g_lastRecv = 0;
@@ -144,11 +149,17 @@ void Netplay_SendInput(uint32_t localInput)
     // Write the current frame's input into the outbound atom.
     // The service thread picks it up and sends it.
     g_outboundInput.store(localInput);
+    g_outboundNew.store(true);
 }
 
 uint32_t Netplay_GetRemoteInput()
 {
     return g_inboundInput.load();
+}
+
+bool Netplay_HasRemoteInput()
+{
+    return g_inboundHasData.load();
 }
 
 bool Netplay_IsActive()

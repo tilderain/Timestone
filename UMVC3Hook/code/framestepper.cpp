@@ -18,6 +18,9 @@ using namespace Memory::VP;
 // HookLog from dllmain.cpp
 extern void HookLog(const char* fmt, ...);
 
+// Netplay state queries from netplay.cpp
+extern bool Netplay_HasRemoteInput();
+
 // ---------------------------------------------------------------------------
 // Addresses (VAs, converted at runtime via _addr)
 // ---------------------------------------------------------------------------
@@ -312,9 +315,9 @@ static void __fastcall HookedMove(void* sMvc3Main)
                     Netplay_SendInput(localP1Input);
 
                     // Read whatever remote input the service thread has received
-                    uint32_t remoteInput = Netplay_GetRemoteInput();
-                    if (remoteInput != 0) {
-                        // Overwrite the local P2 input slot with the remote player's input
+                    if (Netplay_HasRemoteInput()) {
+                        uint32_t remoteInput = Netplay_GetRemoteInput();
+                        // Overwrite the local P2 input slot with the remote player's input (including 0)
                         *(uint32_t*)(bs + 0xd60) = remoteInput;
                     }
                 }

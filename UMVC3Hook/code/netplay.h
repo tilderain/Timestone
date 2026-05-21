@@ -36,6 +36,11 @@ void Netplay_SendInput(uint32_t localInput);
 // updated by the service thread). Call after Netplay_SendInput each frame.
 uint32_t Netplay_GetRemoteInput();
 
+// Returns true if at least one remote input packet has been received.
+// Use this guard before applying Netplay_GetRemoteInput() to distinguish
+// "no data yet" from "remote player is idle (input = 0)".
+bool Netplay_HasRemoteInput();
+
 // Returns true if netplay is active and the peer is still connected.
 bool Netplay_IsActive();
 
