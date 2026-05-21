@@ -73,15 +73,15 @@ static uint32_t keyboardToGameMask(uint64_t sPad)
 
     // VK_RETURN and VK_A → unit flags (Start/Select in menus)
     if (fn3D00(sPad, 0x0D, 0))
-        r |= (uint32_t)((uint64_t(__fastcall*)(uint64_t))_addr(0x140532830))(sPad);
+        r |= (uint32_t)((uint64_t(__fastcall*)(uint64_t))_addr(0x140001A70))(sPad);
     if (fn3D00(sPad, 0x41, 0))
-        r |= (uint32_t)((uint64_t(__fastcall*)(uint64_t))_addr(0x140532830))(sPad);
+        r |= (uint32_t)((uint64_t(__fastcall*)(uint64_t))_addr(0x140001A70))(sPad);
 
     // VK_BACK and VK_B → UI anm flags
     if (fn3D00(sPad, 0x08, 0))
-        r |= (uint32_t)((uint64_t(__fastcall*)(uint64_t))_addr(0x1402B3C30))(sPad);
+        r |= (uint32_t)((uint64_t(__fastcall*)(uint64_t))_addr(0x140001A50))(sPad);
     if (fn3D00(sPad, 0x42, 0))
-        r |= (uint32_t)((uint64_t(__fastcall*)(uint64_t))_addr(0x1402B3C30))(sPad);
+        r |= (uint32_t)((uint64_t(__fastcall*)(uint64_t))_addr(0x140001A50))(sPad);
 
     if (fn3D00(sPad, 0x58, 0)) r |= IN_X;       // X
     if (fn3D00(sPad, 0x59, 0)) r |= IN_Y;       // Y
@@ -153,8 +153,9 @@ uint32_t GetsCurrentInput_withSOCD(uint64_t pad, uint32_t playerIndex)
 // ---------------------------------------------------------------------------
 // hkGetsCurrentInput_withSOCD
 // Hook on GetsCurrentInput_withSOCD at 0x1402B3700.
-// - Calls decompiled reference implementation
 // - For P2 with netplay remote input available, injects remote input
+// - All other cases: call through to original via MinHook trampoline
+// - Decompiled reference implementation kept in ControllerDecomp namespace
 // ---------------------------------------------------------------------------
 static uint64_t __fastcall hkGetsCurrentInput_withSOCD(uint64_t pad, uint32_t playerIndex)
 {
@@ -174,7 +175,8 @@ static uint64_t __fastcall hkGetsCurrentInput_withSOCD(uint64_t pad, uint32_t pl
         return remote;
     }
 
-    return ControllerDecomp::GetsCurrentInput_withSOCD(pad, playerIndex);
+    // Use original game code via trampoline for reliability
+    return oGetsCurrentInput_withSOCD(pad, playerIndex);
 }
 
 // ---------------------------------------------------------------------------
