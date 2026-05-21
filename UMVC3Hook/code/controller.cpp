@@ -84,10 +84,22 @@ static uint32_t keyboardToGameMask(uint64_t sPad)
 
     uint32_t r = 0;
 
+    // Movement/Directions
     if (fn3D00(sPad, 0x28, 0)) r |= IN_DOWN;
     if (fn3D00(sPad, 0x26, 0)) r |= IN_UP;
     if (fn3D00(sPad, 0x25, 0)) r |= IN_LEFT;
     if (fn3D00(sPad, 0x27, 0)) r |= IN_RIGHT;
+
+    // Standard keyboard mappings for UMVC3 gameplay actions (Default layout)
+    if (fn3D00(sPad, 0x41, 0)) r |= IN_X;       // Key 'A' -> Light Punch (IN_X)
+    if (fn3D00(sPad, 0x53, 0)) r |= IN_Y;       // Key 'S' -> Medium Punch (IN_Y)
+    if (fn3D00(sPad, 0x44, 0)) r |= IN_B;       // Key 'D' -> Heavy Punch (IN_B / Heavy)
+    if (fn3D00(sPad, 0x5A, 0)) r |= IN_X;       // Key 'Z' -> Light Kick (IN_X)
+    if (fn3D00(sPad, 0x58, 0)) r |= IN_Y;       // Key 'X' -> Medium Kick (IN_Y)
+    if (fn3D00(sPad, 0x43, 0)) r |= IN_B;       // Key 'C' -> Heavy Kick (IN_B / Heavy)
+    if (fn3D00(sPad, 0x46, 0)) r |= IN_A;       // Key 'F' -> Special Launcher (IN_A / Special)
+    if (fn3D00(sPad, 0x51, 0)) r |= IN_LB;      // Key 'Q' -> Assist 1 (IN_LB)
+    if (fn3D00(sPad, 0x57, 0)) r |= IN_RB;      // Key 'W' -> Assist 2 (IN_RB)
 
     // VK_RETURN and VK_A → unit flags (Start/Select in menus)
     if (fn3D00(sPad, 0x0D, 0))
@@ -101,8 +113,7 @@ static uint32_t keyboardToGameMask(uint64_t sPad)
     if (fn3D00(sPad, 0x42, 0))
         r |= (uint32_t)((uint64_t(__fastcall*)(uint64_t))_addr(0x140001A50))(sPad);
 
-    if (fn3D00(sPad, 0x58, 0)) r |= IN_X;       // X
-    if (fn3D00(sPad, 0x59, 0)) r |= IN_Y;       // Y
+    // Modifiers / Menus
     if (fn3D00(sPad, 0xA2, 0)) r |= IN_LB;      // L-Shift
     if (fn3D00(sPad, 0xA0, 0)) r |= IN_LT;      // L-Ctrl
     if (fn3D00(sPad, 0xA4, 0)) r |= IN_L3;      // L-Alt
@@ -114,7 +125,6 @@ static uint32_t keyboardToGameMask(uint64_t sPad)
 
     return r;
 }
-
 // ---------------------------------------------------------------------------
 // GetsCurrentInput_withSOCD (0x1402B3700)
 // Per-player pad read with SOCD cleaning.
@@ -245,14 +255,33 @@ static void hkNetplay_SendInput(uint32_t localInput)
     }
     oNetplay_SendInput(localInput);
 }
+// Translate raw gamepad inputs (XInput/DirectInput) to the game's character processed input layout.
+static uint32_t TranslateRawToCharacterInput(uint32_t raw)
+{
+    uint32_t processed = 0;
 
-// ---------------------------------------------------------------------------
-// hkprocessFrameInput
-// Hook on cChrInput__processFrameInput at 0x14002DD60.
-// This is the UNIVERSAL input gate — ALL character input paths converge here.
-// In netplay, if you are the client, it overrides character P1 (teamIdx == 0)
-// inputs directly using the received remote host packet.
-// ---------------------------------------------------------------------------
+    // 1. Directional Mapping:
+    // Processed character input: Right (0x01), Left (0x02), Up (0x04), Down (0x08)
+    if (raw & (0x0010 | 0x10000)) processed |= 0x04; // IN_UP or IN_STICK_UP -> Up
+    if (raw & (0x0040 | 0x40000)) processed |= 0x08; // IN_DOWN or IN_STICK_DOWN -> Down
+    if (raw & (0x0080 | 0x80000)) processed |= 0x02; // IN_LEFT or IN_STICK_LEFT -> Left
+    if (raw & (0x0020 | 0x20000)) processed |= 0x01; // IN_RIGHT or IN_STICK_RIGHT -> Right
+
+    // 2. Action Buttons Mapping:
+    // Special (0x10), Light (0x100), Medium (0x200), Heavy (0x400)
+    if (raw & 0x8000) processed |= 0x100; // IN_X -> Light (Punch)
+    if (raw & 0x1000) processed |= 0x200; // IN_Y -> Medium
+    if (raw & 0x2000) processed |= 0x400; // IN_B -> Heavy (Kick)
+    if (raw & 0x4000) processed |= 0x10;  // IN_A -> Special (Uppercut/Launcher)
+
+    // 3. Assist Buttons:
+    // Processed character input: Assist 1 (0x20), Assist 2 (0x40)
+    if (raw & 0x0100) processed |= 0x20;  // IN_LB -> Assist 1
+    if (raw & 0x0200) processed |= 0x40;  // IN_RB -> Assist 2
+
+    return processed;
+}
+
 static void __fastcall hkprocessFrameInput(uint64_t cChrInput)
 {
     oprocessFrameInput(cChrInput);
@@ -273,10 +302,13 @@ static void __fastcall hkprocessFrameInput(uint64_t cChrInput)
             // Client: P1 (teamIdx == 0) is remote host. Apply host inputs directly.
             if (teamIdx == 0 && Netplay_HasRemoteInput())
             {
+                // Convert the raw remote XInput gamepad state directly to character inputs.
                 uint32_t remote = ApplySOCD(Netplay_GetRemoteInput());
-                *(uint32_t*)(cChrInput + 0x14)  = remote;
-                *(uint32_t*)(cChrInput + 0x560) = remote;
-                *(uint32_t*)(cChrInput + 0x56C) = remote;
+                uint32_t translated = TranslateRawToCharacterInput(remote);
+
+                *(uint32_t*)(cChrInput + 0x14)  = translated;
+                *(uint32_t*)(cChrInput + 0x560) = translated;
+                *(uint32_t*)(cChrInput + 0x56C) = translated;
             }
         }
         return; // Other cases pass through untouched during netplay
