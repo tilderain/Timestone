@@ -286,59 +286,100 @@ static void __fastcall hkprocessFrameInput(uint64_t cChrInput)
 {
     oprocessFrameInput(cChrInput);
 
-    // Read the character pointer (cChrInput + 0x8)
     uint64_t character = *(uint64_t*)(cChrInput + 0x8);
     if (!character) return;
 
-    // Get team index from character object
     typedef uint32_t(__fastcall* getTeamIdx_t)(uint64_t);
     static getTeamIdx_t fnGetTeamIdx = (getTeamIdx_t)_addr(ADDR_GET_TEAM_INDEX);
     uint32_t teamIdx = fnGetTeamIdx(character);
 
     if (Netplay_IsActive())
     {
-        if (!Netplay_IsHost())
+        if (Netplay_IsHost() && teamIdx == 0)
         {
-            // Client: P1 (teamIdx == 0) is remote host. Apply host inputs directly.
-            if (teamIdx == 0 && Netplay_HasRemoteInput())
-            {
-                // Convert the raw remote XInput gamepad state directly to character inputs.
-                uint32_t remote = ApplySOCD(Netplay_GetRemoteInput());
-                uint32_t translated = TranslateRawToCharacterInput(remote);
+            // Send the already-translated character input, not the raw pad slot.
+            // Raw pad misses all keyboard-sourced buttons (S/D/Z/C/F etc).
+            uint32_t charInput = *(uint32_t*)(cChrInput + 0x14);
+            Netplay_SendInput(charInput);
+        }
+        else if (!Netplay_IsHost() && teamIdx == 0 && Netplay_HasRemoteInput())
+        {
+            // Remote value is now already in character-input format, write directly.
+            uint32_t remote = Netplay_GetRemoteInput();
+            *(uint32_t*)(cChrInput + 0x14)  = remote;
+            *(uint32_t*)(cChrInput + 0x560) = remote;
+            *(uint32_t*)(cChrInput + 0x56C) = remote;
+        }
+        return;
+    }
 
-                *(uint32_t*)(cChrInput + 0x14)  = translated;
-                *(uint32_t*)(cChrInput + 0x560) = translated;
-                *(uint32_t*)(cChrInput + 0x56C) = translated;
+    /*
+        // === TEMPORARY DEBUG: log +0x14 for P1 offline so we can see real character input bits ===
+    if (!Netplay_IsActive() && teamIdx == 0)
+    {
+        uint32_t val14  = *(uint32_t*)(cChrInput + 0x14);
+        uint32_t val560 = *(uint32_t*)(cChrInput + 0x560);
+        uint32_t val56C = *(uint32_t*)(cChrInput + 0x56C);
+
+        // Only log when something is actually pressed (avoid spamming idle frames)
+        if (val14 != 0)
+        {
+            static uint32_t lastVal = 0;
+            if (val14 != lastVal)
+            {
+                lastVal = val14;
+                HookLog("[DEBUG] P1 cChrInput+0x14=0x%08X  +0x560=0x%08X  +0x56C=0x%08X\n",
+                        val14, val560, val56C);
+
+                // Also log what raw GetsCurrentInput returned for slot 0 at this moment
+                auto sPadGetInstance = (uint64_t(__fastcall*)())_addr(ADDR_PAD_GET_INSTANCE);
+                uint64_t pad = sPadGetInstance();
+                if (pad)
+                {
+                    uint32_t raw = oGetsCurrentInput_withSOCD(pad, 0);
+                    HookLog("[DEBUG] Raw pad slot 0 at same frame: 0x%08X\n", raw);
+                }
+                
+                // Log which keyboard keys are currently held
+                {
+                    struct VkName { int vk; const char* name; };
+                    static const VkName keys[] = {
+                        { 0x41, "A (LP)" },
+                        { 0x53, "S (MP)" },
+                        { 0x44, "D (HP)" },
+                        { 0x5A, "Z (LK)" },
+                        { 0x58, "X (MK)" },
+                        { 0x43, "C (HK)" },
+                        { 0x46, "F (Special/S)" },
+                        { 0x51, "Q (Assist1)" },
+                        { 0x57, "W (Assist2)" },
+                        { 0x25, "Left" },
+                        { 0x27, "Right" },
+                        { 0x26, "Up" },
+                        { 0x28, "Down" },
+                        { VK_RETURN, "Enter" },
+                        { VK_BACK,   "Backspace" },
+                        { VK_ESCAPE, "Escape" },
+                    };
+                
+                    char keyBuf[256] = "Keys: ";
+                    bool anyKey = false;
+                    for (auto& k : keys)
+                    {
+                        if (GetAsyncKeyState(k.vk) & 0x8000)
+                        {
+                            if (anyKey) strcat(keyBuf, " + ");
+                            strcat(keyBuf, k.name);
+                            anyKey = true;
+                        }
+                    }
+                    if (!anyKey) strcat(keyBuf, "(none)");
+                    HookLog("[DEBUG] %s\n", keyBuf);
+                }
             }
         }
-        return; // Other cases pass through untouched during netplay
-    }
-
-    /*// --- Offline / Non-netplay behavior ---
-    if (teamIdx == 0)
-    {
-        // === P1: save input, then freeze ===
-        g_p1CChrInputHandle = cChrInput;
-        g_p1Input14  = *(uint32_t*)(cChrInput + 0x14);
-        g_p1Input560 = *(uint32_t*)(cChrInput + 0x560);
-        g_p1Input56C = *(uint32_t*)(cChrInput + 0x56C);
-
-        // Zero all input fields so P1's character doesn't move
-        *(uint32_t*)(cChrInput + 0x14)  = 0;
-        *(uint32_t*)(cChrInput + 0x560) = 0;
-        *(uint32_t*)(cChrInput + 0x56C) = 0;
-    }
-    else if (teamIdx == 1)
-    {
-        // === P2: mirror P1's saved input, minus START/BACK ===
-        uint32_t mask = ~(uint32_t)(IN_START | IN_BACK);
-        *(uint32_t*)(cChrInput + 0x14)  = g_p1Input14  & mask;
-        *(uint32_t*)(cChrInput + 0x560) = g_p1Input560 & mask;
-        *(uint32_t*)(cChrInput + 0x56C) = g_p1Input56C & mask;
     }*/
-    // teamIdx >= 2 (assist/special) — leave as-is
 }
-
 // ---------------------------------------------------------------------------
 // hkpadPollAllSlots
 // Hook on padPollAllSlots at 0x140514570.

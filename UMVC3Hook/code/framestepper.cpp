@@ -322,7 +322,16 @@ static void __fastcall HookedMove(void* sMvc3Main)
                 uint32_t localP2 = (uint32_t)getInput(pad, 1);
 
                 // Queue P1 for the netplay service thread to send
-                Netplay_SendInput(localP1);
+                if (Netplay_IsHost())
+                {
+                    // Input is now sent from hkprocessFrameInput after keyboard translation.
+                    // Don't send raw localP1 here — it misses keyboard buttons.
+                }
+                else
+                {
+                    // Client still needs to send its physical input as raw for the host to display P2
+                    Netplay_SendInput(localP1);
+                }
 
                 // Overwrite P2 input with remote input (if we have it)
                 if (Netplay_HasRemoteInput()) {
