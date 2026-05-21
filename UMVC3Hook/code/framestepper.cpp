@@ -492,7 +492,65 @@ void FrameStepper_Process()
 // ---------------------------------------------------------------------------
 void FrameStepper_Draw()
 {
-    if (!isPaused || !IsTrainingMode())
+    if (!IsTrainingMode())
+        return;
+
+    // Always show P1/P2 pad inputs (small overlay)
+    {
+        auto sPadGetInstance = (sPad__getInstance_t)_addr(SPAD_GET_INSTANCE_ADDR);
+        auto getInput = (GetsCurrentInput_withSOCD_t)_addr(GET_CURRENT_INPUT_ADDR);
+
+        uint64_t pad = sPadGetInstance();
+        if (pad)
+        {
+            uint32_t p1 = (uint32_t)getInput(pad, 0);
+            uint32_t p2 = (uint32_t)getInput(pad, 1);
+
+            // OR in keybind-system flags so Z, S, etc. show up
+            p1 |= *(uint32_t*)(pad + UNIT_FLAGS_OFFSET);
+            p2 |= *(uint32_t*)(pad + UNIT_FLAGS_OFFSET);
+
+            char btns1[128], btns2[128];
+            AppendButtons(btns1, sizeof(btns1), p1);
+            AppendButtons(btns2, sizeof(btns2), p2);
+
+            ImGui::SetNextWindowPos(ImVec2(12.0f, 12.0f), ImGuiCond_Always);
+            ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.0f, 0.0f, 0.0f, 0.85f));
+            ImGui::Begin("##FrameStepperPad", nullptr,
+                ImGuiWindowFlags_NoTitleBar |
+                ImGuiWindowFlags_NoResize |
+                ImGuiWindowFlags_NoMove |
+                ImGuiWindowFlags_NoScrollbar |
+                ImGuiWindowFlags_NoSavedSettings |
+                ImGuiWindowFlags_NoInputs |
+                ImGuiWindowFlags_AlwaysAutoResize);
+
+            ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "P1: [%s]  0x%08X", DecodeDirection(p1), p1);
+            if (btns1[0])
+                ImGui::SameLine(), ImGui::TextColored(ImVec4(0.7f, 0.9f, 1.0f, 1.0f), "%s", btns1);
+
+            ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.6f, 1.0f), "P2: [%s]  0x%08X", DecodeDirection(p2), p2);
+            if (btns2[0])
+                ImGui::SameLine(), ImGui::TextColored(ImVec4(0.7f, 1.0f, 0.8f, 1.0f), "%s", btns2);
+
+            // Show extra keyboard keys (Z, S, etc.) not in GetsCurrentInput_withSOCD
+            char kbd[256] = "";
+            for (int i = 0; i < EXTRA_VK_COUNT; i++) {
+                if (GetAsyncKeyState(EXTRA_VK[i]) & 0x8000) {
+                    if (kbd[0]) strcat(kbd, " ");
+                    strcat(kbd, EXTRA_VK_NAMES[i]);
+                }
+            }
+            if (kbd[0])
+                ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "Kbd: %s", kbd);
+
+            ImGui::PopStyleColor();
+            ImGui::End();
+        }
+    }
+
+    // Pause-specific content (only shown when paused)
+    if (!isPaused)
         return;
 
     ImGui::SetNextWindowPos(ImVec2(12.0f, 12.0f), ImGuiCond_Always);
@@ -518,46 +576,6 @@ void FrameStepper_Draw()
     ImGui::Dummy(ImVec2(sz + 6.0f, sz));
     ImGui::SameLine();
     ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "PAUSED  %d", frameCounter);
-
-    // Read and display current input values for P1 and P2
-    // GetsCurrentInput_withSOCD handles hardcoded VK codes (arrows, X, Y, modifiers)
-    // OR in unit flags from cUnit__getUnitFlags to pick up keybind-mapped keys (Z, S, etc.)
-    auto sPadGetInstance = (sPad__getInstance_t)_addr(SPAD_GET_INSTANCE_ADDR);
-    auto getInput = (GetsCurrentInput_withSOCD_t)_addr(GET_CURRENT_INPUT_ADDR);
-
-    uint64_t pad = sPadGetInstance();
-    if (pad)
-    {
-        uint32_t p1 = (uint32_t)getInput(pad, 0);
-        uint32_t p2 = (uint32_t)getInput(pad, 1);
-
-        // OR in keybind-system flags so Z, S, etc. show up
-        p1 |= *(uint32_t*)(pad + UNIT_FLAGS_OFFSET);
-        p2 |= *(uint32_t*)(pad + UNIT_FLAGS_OFFSET);
-
-        char btns1[128], btns2[128];
-        AppendButtons(btns1, sizeof(btns1), p1);
-        AppendButtons(btns2, sizeof(btns2), p2);
-
-        ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "P1: [%s]  0x%08X", DecodeDirection(p1), p1);
-        if (btns1[0])
-            ImGui::SameLine(), ImGui::TextColored(ImVec4(0.7f, 0.9f, 1.0f, 1.0f), "%s", btns1);
-
-        ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.6f, 1.0f), "P2: [%s]  0x%08X", DecodeDirection(p2), p2);
-        if (btns2[0])
-            ImGui::SameLine(), ImGui::TextColored(ImVec4(0.7f, 1.0f, 0.8f, 1.0f), "%s", btns2);
-
-        // Show extra keyboard keys (Z, S, etc.) not in GetsCurrentInput_withSOCD
-        char kbd[256] = "";
-        for (int i = 0; i < EXTRA_VK_COUNT; i++) {
-            if (GetAsyncKeyState(EXTRA_VK[i]) & 0x8000) {
-                if (kbd[0]) strcat(kbd, " ");
-                strcat(kbd, EXTRA_VK_NAMES[i]);
-            }
-        }
-        if (kbd[0])
-            ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "Kbd: %s", kbd);
-    }
 
     // Input buffer display (captured from cChrInput__getInputBuffer hook)
     if (g_inputBufValid) {
