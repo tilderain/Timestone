@@ -50,3 +50,6 @@ void SetLaunchOption(LaunchOption opt);
 
 // Get the dialog config (characters, stage, network settings)
 const LaunchDialogConfig& GetLaunchDialogConfig();
+
+// Clean up any active network session (call on DLL detach / game exit)
+void CleanupNetworkOnExit();

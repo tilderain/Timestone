@@ -398,6 +398,7 @@ BOOL WINAPI DllMain(HMODULE hMod, DWORD dwReason, LPVOID lpReserved)
 		}
 		break;
 	case DLL_PROCESS_DETACH:
+		CleanupNetworkOnExit();
 		enet_deinitialize();
 		kiero::shutdown();
 		break;

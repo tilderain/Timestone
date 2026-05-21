@@ -64,6 +64,32 @@ static LaunchDialogConfig g_dialogConfig = {
     nullptr,     // enetHost
     nullptr      // enetPeer
 };
+static bool      g_isHost = false;          // true if we clicked Host, false if Connect
+static COLORREF  g_statusColor = RGB(0, 0, 0); // default black for status text
+static HBRUSH    g_hStatusBrush = nullptr;
+
+// Custom timer and window messages
+#define ID_NET_POLL_TIMER       5001
+static volatile bool g_networkPolling = false;
+static HANDLE g_hPollThread = NULL;
+static bool g_isLaunching = false;
+
+// Declare global cleanup for DLL detach
+void CleanupNetworkOnExit()
+{
+    g_networkPolling = false;
+    if (g_hPollThread) {
+        WaitForSingleObject(g_hPollThread, 1000);
+        CloseHandle(g_hPollThread);
+        g_hPollThread = NULL;
+    }
+    if (g_dialogConfig.enetHost) {
+        HookLog("UMVC3Hook: CleanupNetworkOnExit - destroying enet host\n");
+        enet_host_destroy(g_dialogConfig.enetHost);
+        g_dialogConfig.enetHost = nullptr;
+        g_dialogConfig.enetPeer = nullptr;
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Control IDs
@@ -88,7 +114,6 @@ enum CtrlId {
     ID_NET_HOST_BTN       = 2203,
     ID_NET_STATUS         = 2204,
     ID_NET_CONNECT_BTN    = 2205,
-    ID_NET_TIMER          = 2206,
     // Steam lobby controls
     ID_STEAM_SEARCH_BTN   = 2301,
     ID_STEAM_CREATE_BTN   = 2302,
@@ -104,8 +129,8 @@ static void PopulateCharCombo(HWND hCombo, int defaultCharId);
 static void PopulateStageCombo(HWND hCombo, int defaultStageId);
 static int FindStageIndex(int stageId);
 static void UpdateCharFromCombo(HWND hDlg, int comboId, int slotIndex, int team);
-static void HandleNetworkTimer(HWND hDlg);
-static void CleanupNetwork(HWND hDlg);
+static DWORD WINAPI NetworkPollThread(LPVOID lpParam);
+static void CleanupNetwork(HWND hDlg, bool forceCleanup = false);
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -160,13 +185,24 @@ LaunchOption ShowLaunchMenu()
 
     UnregisterClassA(CLASS_NAME, hInst);
 
-    // Clean up network if no connection was established
-    if (g_dialogConfig.enetHost && !g_dialogConfig.enetPeer) {
-        HookLog("UMVC3Hook: Launch menu closing, cleaning up unused enet host\n");
-        enet_host_destroy(g_dialogConfig.enetHost);
-        g_dialogConfig.enetHost = nullptr;
-    } else if (g_dialogConfig.enetHost && g_dialogConfig.enetPeer) {
-        HookLog("UMVC3Hook: Launch menu closing, keeping connected enet host alive\n");
+    // Only clean up network if NOT launching into gameplay
+    if (!g_isLaunching || !g_dialogConfig.hostEnabled) {
+        g_networkPolling = false;
+        if (g_hPollThread) {
+            WaitForSingleObject(g_hPollThread, 1000);
+            CloseHandle(g_hPollThread);
+            g_hPollThread = NULL;
+        }
+        if (g_dialogConfig.enetHost) {
+            HookLog("UMVC3Hook: Launch menu closing, cleaning up unused enet host\n");
+            enet_host_destroy(g_dialogConfig.enetHost);
+            g_dialogConfig.enetHost = nullptr;
+            g_dialogConfig.enetPeer = nullptr;
+        }
+    } else {
+        HookLog("UMVC3Hook: Launch menu closing, starting background enet host thread for gameplay\n");
+        g_networkPolling = true;
+        g_hPollThread = CreateThread(NULL, 0, NetworkPollThread, NULL, 0, NULL);
     }
 
     return g_launchOption;
@@ -366,6 +402,52 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
         return msg == WM_INITDIALOG ? TRUE : 0;
     }
 
+    case WM_TIMER:
+        if (wParam == ID_NET_POLL_TIMER) {
+            if (g_dialogConfig.enetHost) {
+                ENetEvent event;
+                int result = enet_host_service(g_dialogConfig.enetHost, &event, 0);
+
+                if (result > 0) {
+                    if (event.type == ENET_EVENT_TYPE_CONNECT) {
+                        uint8_t* ip = (uint8_t*)&event.peer->address.host;
+                        HookLog("UMVC3Hook: CONNECT event from %u.%u.%u.%u:%u (g_isHost=%d)\n",
+                            ip[0], ip[1], ip[2], ip[3],
+                            event.peer->address.port, g_isHost);
+                        g_dialogConfig.enetPeer = event.peer;
+                        event.peer->data = (void*)"connected";
+
+                        HWND hStatus = GetDlgItem(hDlg, ID_NET_STATUS);
+                        if (hStatus) {
+                            if (g_isHost) {
+                                SetWindowTextA(hStatus, "Client connected");
+                                g_statusColor = RGB(0, 120, 215);
+                            } else {
+                                SetWindowTextA(hStatus, "Connected");
+                                g_statusColor = RGB(200, 180, 0);
+                            }
+                            InvalidateRect(hStatus, NULL, TRUE);
+                        }
+                    }
+                    else if (event.type == ENET_EVENT_TYPE_DISCONNECT) {
+                        uint8_t* ip = (uint8_t*)&event.peer->address.host;
+                        HookLog("UMVC3Hook: DISCONNECT event from %u.%u.%u.%u:%u\n",
+                            ip[0], ip[1], ip[2], ip[3],
+                            event.peer->address.port);
+                        g_dialogConfig.enetPeer = nullptr;
+                        CleanupNetwork(hDlg, true);
+                    }
+                    else if (event.type == ENET_EVENT_TYPE_RECEIVE) {
+                        enet_packet_destroy(event.packet);
+                    }
+                } else if (result < 0) {
+                    HookLog("UMVC3Hook: enet_host_service error: %d\n", result);
+                    CleanupNetwork(hDlg, true);
+                }
+            }
+        }
+        return 0;
+
     case WM_COMMAND:
         switch (LOWORD(wParam)) {
         // ---- Launch buttons ----
@@ -381,6 +463,7 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
                 g_dialogConfig.hostPort = atoi(buf);
             }
 
+            g_isLaunching = true;
             g_launchOption = LAUNCH_NORMAL;
             DestroyWindow(hDlg);
             PostQuitMessage(0);
@@ -424,6 +507,7 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
             cfg.timerValue = 99;
             TrainingBoot_SetConfig(cfg);
 
+            g_isLaunching = true;
             g_launchOption = (LOWORD(wParam) == ID_LAUNCH_TRAINING)
                 ? LAUNCH_TRAINING : LAUNCH_DUAL_TRAINING;
             DestroyWindow(hDlg);
@@ -515,9 +599,17 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
                 return 0;
             }
 
-            HookLog("UMVC3Hook: enet_host_create OK on port %d\n", g_dialogConfig.hostPort);
+            HookLog("UMVC3Hook: enet_host_create OK on port %d, host addr=%u.%u.%u.%u:%u\n",
+                g_dialogConfig.hostPort,
+                (server->address.host >> 0) & 0xFF,
+                (server->address.host >> 8) & 0xFF,
+                (server->address.host >> 16) & 0xFF,
+                (server->address.host >> 24) & 0xFF,
+                server->address.port);
             g_dialogConfig.enetHost = server;
             g_dialogConfig.enetPeer = nullptr;
+            g_isHost = true;
+            g_statusColor = RGB(0, 0, 0); // default color while listening
 
             if (hStatus) {
                 char msg[128];
@@ -525,8 +617,8 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
                 SetWindowTextA(hStatus, msg);
             }
 
-            // Start polling timer (50ms)
-            SetTimer(hDlg, ID_NET_TIMER, 50, NULL);
+            // Start non-threaded polling timer inside launch window
+            SetTimer(hDlg, ID_NET_POLL_TIMER, 10, NULL);
             EnableWindow(GetDlgItem(hDlg, ID_NET_HOST_BTN), FALSE);
             EnableWindow(GetDlgItem(hDlg, ID_NET_CONNECT_BTN), FALSE);
             g_dialogConfig.hostEnabled = true;
@@ -565,7 +657,12 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
                 return 0;
             }
 
-            HookLog("UMVC3Hook: Client enet_host_create OK\n");
+            HookLog("UMVC3Hook: Client enet_host_create OK, client addr=%u.%u.%u.%u:%u\n",
+                (client->address.host >> 0) & 0xFF,
+                (client->address.host >> 8) & 0xFF,
+                (client->address.host >> 16) & 0xFF,
+                (client->address.host >> 24) & 0xFF,
+                client->address.port);
             g_dialogConfig.enetHost = client;
             g_dialogConfig.enetPeer = nullptr;
 
@@ -593,10 +690,12 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
             }
 
             HookLog("UMVC3Hook: enet_host_connect OK, polling via timer\n");
+            g_isHost = false;
+            g_statusColor = RGB(0, 0, 0); // default color while connecting
             if (hStatus) SetWindowTextA(hStatus, "Connecting...");
 
-            // Start polling timer (50ms)
-            SetTimer(hDlg, ID_NET_TIMER, 50, NULL);
+            // Start non-threaded polling timer inside launch window
+            SetTimer(hDlg, ID_NET_POLL_TIMER, 10, NULL);
             EnableWindow(GetDlgItem(hDlg, ID_NET_HOST_BTN), FALSE);
             EnableWindow(GetDlgItem(hDlg, ID_NET_CONNECT_BTN), FALSE);
             g_dialogConfig.hostEnabled = true;
@@ -648,11 +747,19 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
         }
         break;
 
-    case WM_TIMER:
-        if (wParam == ID_NET_TIMER) {
-            HandleNetworkTimer(hDlg);
+    case WM_CTLCOLORSTATIC:
+    {
+        HWND hCtrl = (HWND)lParam;
+        if (hCtrl == GetDlgItem(hDlg, ID_NET_STATUS)) {
+            HDC hdc = (HDC)wParam;
+            SetTextColor(hdc, g_statusColor);
+            SetBkMode(hdc, TRANSPARENT);
+            if (!g_hStatusBrush)
+                g_hStatusBrush = CreateSolidBrush(RGB(255, 255, 255));
+            return (INT_PTR)g_hStatusBrush;
         }
-        return 0;
+        break;
+    }
 
     case WM_CLOSE:
         g_launchOption = LAUNCH_NORMAL;
@@ -661,7 +768,15 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
         return 0;
 
     case WM_DESTROY:
-        CleanupNetwork(hDlg);
+        if (!g_isLaunching) {
+            CleanupNetwork(hDlg, true);  // user closed/cancelled — full cleanup
+        } else {
+            CleanupNetwork(hDlg, false); // launching — preserve host for gameplay
+        }
+        if (g_hStatusBrush) {
+            DeleteObject(g_hStatusBrush);
+            g_hStatusBrush = nullptr;
+        }
         PostQuitMessage(0);
         return 0;
     }
@@ -753,61 +868,78 @@ static void UpdateCharFromCombo(HWND hDlg, int comboId, int slotIndex, int team)
 }
 
 // ---------------------------------------------------------------------------
-// Network helpers (timer-based polling in dialog message loop)
+// Network helpers (timer-based polling during dialog, thread after launch)
 // ---------------------------------------------------------------------------
-static void CleanupNetwork(HWND hDlg) {
-    if (g_dialogConfig.enetHost && !g_dialogConfig.enetPeer) {
-        HookLog("UMVC3Hook: CleanupNetwork - destroying unused enet host\n");
-        enet_host_destroy(g_dialogConfig.enetHost);
-        g_dialogConfig.enetHost = nullptr;
-    }
-    if (hDlg) {
-        KillTimer(hDlg, ID_NET_TIMER);
-        EnableWindow(GetDlgItem(hDlg, ID_NET_HOST_BTN), TRUE);
-        EnableWindow(GetDlgItem(hDlg, ID_NET_CONNECT_BTN), TRUE);
-        HWND hStatus = GetDlgItem(hDlg, ID_NET_STATUS);
-        if (hStatus) SetWindowTextA(hStatus, "Ready");
-    }
-}
 
-static void HandleNetworkTimer(HWND hDlg) {
-    if (!g_dialogConfig.enetHost) {
-        KillTimer(hDlg, ID_NET_TIMER);
+static void CleanupNetwork(HWND hDlg, bool forceCleanup) {
+    // When launching into the game with an active connection, skip destruction
+    // so the enet host/peer survive for gameplay.
+    if (g_dialogConfig.hostEnabled && !forceCleanup) {
+        HookLog("UMVC3Hook: CleanupNetwork - skipping (host persists for gameplay)\n");
         return;
     }
 
-    ENetEvent event;
-    int result = enet_host_service(g_dialogConfig.enetHost, &event, 0);
-
-    if (result > 0) {
-        if (event.type == ENET_EVENT_TYPE_CONNECT) {
-            HookLog("UMVC3Hook: Network CONNECT received\n");
-            g_dialogConfig.enetPeer = event.peer;
-            event.peer->data = (void*)"connected";
-
-            HWND hStatus = GetDlgItem(hDlg, ID_NET_STATUS);
-            if (hStatus) {
-                char msg[128];
-                snprintf(msg, sizeof(msg), "Connected! peer %u.%u.%u.%u:%u",
-                    (event.peer->address.host >> 0) & 0xFF,
-                    (event.peer->address.host >> 8) & 0xFF,
-                    (event.peer->address.host >> 16) & 0xFF,
-                    (event.peer->address.host >> 24) & 0xFF,
-                    event.peer->address.port);
-                SetWindowTextA(hStatus, msg);
-            }
-            // Connected - stop polling, keep host alive for game
-            KillTimer(hDlg, ID_NET_TIMER);
-            EnableWindow(GetDlgItem(hDlg, ID_NET_HOST_BTN), TRUE);
-            EnableWindow(GetDlgItem(hDlg, ID_NET_CONNECT_BTN), TRUE);
-        }
-        else if (event.type == ENET_EVENT_TYPE_DISCONNECT) {
-            HookLog("UMVC3Hook: Network DISCONNECT received\n");
-            CleanupNetwork(hDlg);
-        }
-    } else if (result < 0) {
-        HookLog("UMVC3Hook: enet_host_service error: %d\n", result);
-        CleanupNetwork(hDlg);
+    if (hDlg) {
+        KillTimer(hDlg, ID_NET_POLL_TIMER);
     }
-    // result == 0: no events yet, timer will fire again
+
+    g_networkPolling = false;
+    if (g_hPollThread) {
+        WaitForSingleObject(g_hPollThread, 1000);
+        CloseHandle(g_hPollThread);
+        g_hPollThread = NULL;
+    }
+    if (g_dialogConfig.enetHost) {
+        HookLog("UMVC3Hook: CleanupNetwork - destroying enet host\n");
+        enet_host_destroy(g_dialogConfig.enetHost);
+        g_dialogConfig.enetHost = nullptr;
+        g_dialogConfig.enetPeer = nullptr;
+    }
+    g_dialogConfig.hostEnabled = false;
+
+    if (hDlg) {
+        HWND hStatus = GetDlgItem(hDlg, ID_NET_STATUS);
+        g_statusColor = RGB(0, 0, 0);
+        if (hStatus) {
+            SetWindowTextA(hStatus, "Ready");
+            InvalidateRect(hStatus, NULL, TRUE);
+        }
+        EnableWindow(GetDlgItem(hDlg, ID_NET_HOST_BTN), TRUE);
+        EnableWindow(GetDlgItem(hDlg, ID_NET_CONNECT_BTN), TRUE);
+    }
+}
+
+static DWORD WINAPI NetworkPollThread(LPVOID lpParam) {
+    HookLog("UMVC3Hook: NetworkPollThread started\n");
+    while (g_networkPolling && g_dialogConfig.enetHost) {
+        ENetEvent event;
+        int result = enet_host_service(g_dialogConfig.enetHost, &event, 0);
+
+        if (result > 0) {
+            if (event.type == ENET_EVENT_TYPE_CONNECT) {
+                uint8_t* ip = (uint8_t*)&event.peer->address.host;
+                HookLog("UMVC3Hook: CONNECT event from %u.%u.%u.%u:%u (g_isHost=%d)\n",
+                    ip[0], ip[1], ip[2], ip[3],
+                    event.peer->address.port, g_isHost);
+                g_dialogConfig.enetPeer = event.peer;
+                event.peer->data = (void*)"connected";
+            }
+            else if (event.type == ENET_EVENT_TYPE_DISCONNECT) {
+                uint8_t* ip = (uint8_t*)&event.peer->address.host;
+                HookLog("UMVC3Hook: DISCONNECT event from %u.%u.%u.%u:%u\n",
+                    ip[0], ip[1], ip[2], ip[3],
+                    event.peer->address.port);
+                g_dialogConfig.enetPeer = nullptr;
+            }
+            else if (event.type == ENET_EVENT_TYPE_RECEIVE) {
+                enet_packet_destroy(event.packet);
+            }
+        } else if (result < 0) {
+            HookLog("UMVC3Hook: enet_host_service error: %d\n", result);
+            break;
+        }
+        Sleep(10);
+    }
+    HookLog("UMVC3Hook: NetworkPollThread exiting\n");
+    return 0;
 }
