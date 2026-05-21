@@ -304,33 +304,31 @@ static void __fastcall HookedMove(void* sMvc3Main)
 
         if (step >= 2)
         {
-            uint64_t sm = *(uint64_t*)_addr(MVC3_MAIN_PTR);
-            if (sm) {
-                uint64_t bs = *(uint64_t*)(sm + 0x401c0);
-                if (bs) {
-                    // Read local P1's processed input from battle state
-                    uint32_t localP1Input = *(uint32_t*)(bs + 0xd58);
+            // Read local P1 and P2 input using the game's own input function
+            auto sPadGetInstance = (sPad__getInstance_t)_addr(SPAD_GET_INSTANCE_ADDR);
+            auto getInput = (GetsCurrentInput_withSOCD_t)_addr(GET_CURRENT_INPUT_ADDR);
+            uint64_t pad = sPadGetInstance();
+            if (pad) {
+                uint32_t localP1 = (uint32_t)getInput(pad, 0);
+                uint32_t localP2 = (uint32_t)getInput(pad, 1);
 
-                    // Queue it for the netplay service thread to send
-                    Netplay_SendInput(localP1Input);
+                // Queue P1 for the netplay service thread to send
+                Netplay_SendInput(localP1);
 
-                    // Read whatever remote input the service thread has received
-                    if (Netplay_HasRemoteInput()) {
-                        uint32_t remoteInput = Netplay_GetRemoteInput();
-                        // Overwrite the local P2 input slot with the remote player's input (including 0)
-                        *(uint32_t*)(bs + 0xd60) = remoteInput;
-                    }
+                // Overwrite P2 input with remote input (if we have it)
+                if (Netplay_HasRemoteInput()) {
+                    uint32_t remoteInput = Netplay_GetRemoteInput();
+                    // Blast remote input directly into the P2 pad slot so the game reads it
+                    *(uint32_t*)(pad + PAD_SLOT_STRIDE + PAD_SLOT_INPUT) = remoteInput;
+                }
 
-                    // Retrieve the actual active P2 input value for this frame
-                    uint32_t activeP2Input = *(uint32_t*)(bs + 0xd60);
-
-                    // Track active netplay frames and print logs every 60 frames
-                    static uint32_t s_netplayFrameCounter = 0;
-                    s_netplayFrameCounter++;
-                    if (s_netplayFrameCounter % 60 == 0) {
-                        HookLog("[Netplay] Frame %u | Sent P1: 0x%08X | Recv P2: 0x%08X | RTT: %u ms\n",
-                                s_netplayFrameCounter, localP1Input, activeP2Input, Netplay_GetRTT());
-                    }
+                // Track active netplay frames and print logs every 60 frames
+                static uint32_t s_netplayFrameCounter = 0;
+                s_netplayFrameCounter++;
+                if (s_netplayFrameCounter % 60 == 0) {
+                    uint32_t recvInput = Netplay_HasRemoteInput() ? Netplay_GetRemoteInput() : 0;
+                    HookLog("[Netplay] Frame %u | Sent P1: 0x%08X | Local P2: 0x%08X | Recv: 0x%08X | RTT: %u ms\n",
+                            s_netplayFrameCounter, localP1, localP2, recvInput, Netplay_GetRTT());
                 }
             }
         }
@@ -342,29 +340,19 @@ static void __fastcall HookedMove(void* sMvc3Main)
 // ---------------------------------------------------------------------------
 static void CaptureNetInput()
 {
-    // 1) P1's processed input from battle state (what would be SENT)
-    g_netP1Input = 0;
-    g_bsP2Input  = 0;
-    uint64_t sm = *(uint64_t*)_addr(MVC3_MAIN_PTR);
-    if (sm) {
-        uint64_t bs = *(uint64_t*)(sm + 0x401c0);
-        if (bs) {
-            g_netP1Input = *(uint32_t*)(bs + 0xd58);
-            g_bsP2Input  = *(uint32_t*)(bs + 0xd60);
-        }
-    }
-
-    // 2) P2 input from GetsCurrentInput_withSOCD and raw pad
-    g_netP2Read  = 0;
-    g_padP2Input = 0;
     auto sPadGetInstance = (sPad__getInstance_t)_addr(SPAD_GET_INSTANCE_ADDR);
     auto getInput = (GetsCurrentInput_withSOCD_t)_addr(GET_CURRENT_INPUT_ADDR);
     uint64_t pad = sPadGetInstance();
     if (pad) {
+        g_netP1Input = (uint32_t)getInput(pad, 0);
         g_netP2Read  = (uint32_t)getInput(pad, 1);
         g_padP2Input = *(uint32_t*)(pad + PAD_SLOT_STRIDE * 1 + PAD_SLOT_INPUT);
+    } else {
+        g_netP1Input = 0;
+        g_netP2Read  = 0;
+        g_padP2Input = 0;
     }
-
+    g_bsP2Input = 0;
     g_netDataValid = true;
 }
 
