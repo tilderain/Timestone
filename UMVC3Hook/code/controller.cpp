@@ -49,6 +49,9 @@ static xinputToGameMask_t          oxinputToGameMask          = nullptr;
 static padSlotPostReadProcess_t    opadSlotPostReadProcess    = nullptr;
 static inputAutoRepeatTimerProcess_t oinputAutoRepeatTimerProcess = nullptr;
 
+typedef void(*Netplay_SendInput_t)(uint32_t);
+static Netplay_SendInput_t oNetplay_SendInput = nullptr;
+
 // ===========================================================================
 // Decompiled helper functions (inlined from game)
 // ===========================================================================
@@ -146,6 +149,23 @@ uint32_t GetsCurrentInput_withSOCD(uint64_t pad, uint32_t playerIndex)
 
 } // namespace ControllerDecomp
 
+// ---------------------------------------------------------------------------
+// ApplySOCD
+// Cleans inputs according to the game's original logic.
+// ---------------------------------------------------------------------------
+static uint32_t ApplySOCD(uint32_t input)
+{
+    if ((input & 0x80020) == 0x80020) input &= 0xFFFFFFDF;
+    if ((input & 0x20080) == 0x20080)   input &= 0xFFFDFFFF;
+    if (((uint8_t)input & 0xA0) == 0xA0) input &= 0xFFFFFFDF;
+    if ((input & 0xA0000) == 0xA0000)   input &= 0xFFFDFFFF;
+    if ((input & 0x40010) == 0x40010)   input &= 0xFFFBFFFF;
+    if ((input & 0x10040) == 0x10040)   input &= 0xFFFFFFBF;
+    if (((uint8_t)input & 0x50) == 0x50) input &= 0xFFFFFFBF;
+    if ((input & 0x50000) == 0x50000)   input &= 0xFFFBFFFF;
+    return input;
+}
+
 // ===========================================================================
 // Hooked functions
 // ===========================================================================
@@ -153,30 +173,59 @@ uint32_t GetsCurrentInput_withSOCD(uint64_t pad, uint32_t playerIndex)
 // ---------------------------------------------------------------------------
 // hkGetsCurrentInput_withSOCD
 // Hook on GetsCurrentInput_withSOCD at 0x1402B3700.
-// - For P2 with netplay remote input available, injects remote input
-// - All other cases: call through to original via MinHook trampoline
-// - Decompiled reference implementation kept in ControllerDecomp namespace
+// Handles P1/P2 routing depending on whether the game is running as host or client.
 // ---------------------------------------------------------------------------
 static uint64_t __fastcall hkGetsCurrentInput_withSOCD(uint64_t pad, uint32_t playerIndex)
 {
-    // Netplay: intercept P2 (playerIndex == 1) with remote input
-    if (playerIndex == 1 && Netplay_HasRemoteInput())
+    if (Netplay_IsActive())
     {
-        uint32_t remote = Netplay_GetRemoteInput();
-        // Still apply SOCD cleaning to remote input
-        if ((remote & 0x80020) == 0x80020) remote &= 0xFFFFFFDF;
-        if ((remote & 0x20080) == 0x20080) remote &= 0xFFFDFFFF;
-        if (((uint8_t)remote & 0xA0) == 0xA0) remote &= 0xFFFFFFDF;
-        if ((remote & 0xA0000) == 0xA0000) remote &= 0xFFFDFFFF;
-        if ((remote & 0x40010) == 0x40010) remote &= 0xFFFBFFFF;
-        if ((remote & 0x10040) == 0x10040) remote &= 0xFFFFFFBF;
-        if (((uint8_t)remote & 0x50) == 0x50) remote &= 0xFFFFFFBF;
-        if ((remote & 0x50000) == 0x50000) remote &= 0xFFFBFFFF;
-        return remote;
+        if (Netplay_IsHost())
+        {
+            // Host: local P1 (0) remains unhindered, remote input mapped to P2 (1)
+            if (playerIndex == 1 && Netplay_HasRemoteInput())
+            {
+                uint32_t remote = Netplay_GetRemoteInput();
+                return ApplySOCD(remote);
+            }
+        }
+        else
+        {
+            // Client: remote input goes to P1 (0), client's physical input goes to P2 (1)
+            if (playerIndex == 0 && Netplay_HasRemoteInput())
+            {
+                uint32_t remote = Netplay_GetRemoteInput();
+                return ApplySOCD(remote);
+            }
+            else if (playerIndex == 1)
+            {
+                // Map the client's local physical input (from player slot 0) to P2
+                return oGetsCurrentInput_withSOCD(pad, 0);
+            }
+        }
     }
 
-    // Use original game code via trampoline for reliability
     return oGetsCurrentInput_withSOCD(pad, playerIndex);
+}
+
+// ---------------------------------------------------------------------------
+// hkNetplay_SendInput
+// Intercepts outbound input packets on the client to send physical slot 0 inputs.
+// ---------------------------------------------------------------------------
+static void hkNetplay_SendInput(uint32_t localInput)
+{
+    if (Netplay_IsActive() && !Netplay_IsHost())
+    {
+        auto sPadGetInstance = (uint64_t(__fastcall*)())_addr(ADDR_PAD_GET_INSTANCE);
+        uint64_t pad = sPadGetInstance();
+        if (pad)
+        {
+            // Read client's local physical input directly from slot 0
+            uint32_t realLocalInput = oGetsCurrentInput_withSOCD(pad, 0);
+            oNetplay_SendInput(realLocalInput);
+            return;
+        }
+    }
+    oNetplay_SendInput(localInput);
 }
 
 // ---------------------------------------------------------------------------
@@ -215,7 +264,7 @@ void Controller_InitHooks()
 {
     MH_STATUS s;
 
-    // GetsCurrentInput_withSOCD — primary hook for netplay P2 injection
+    // GetsCurrentInput_withSOCD — primary hook for netplay injection
     s = MH_CreateHook(
         (LPVOID)_addr(ADDR_GET_CURRENT_INPUT),
         (LPVOID)&hkGetsCurrentInput_withSOCD,
@@ -225,6 +274,17 @@ void Controller_InitHooks()
         MH_EnableHook((LPVOID)_addr(ADDR_GET_CURRENT_INPUT));
     else
         HookLog("Controller: Failed to hook GetsCurrentInput_withSOCD (%d)\n", s);
+
+    // Netplay_SendInput — hook to correct client physical input sending
+    s = MH_CreateHook(
+        (LPVOID)&Netplay_SendInput,
+        (LPVOID)&hkNetplay_SendInput,
+        (LPVOID*)&oNetplay_SendInput
+    );
+    if (s == MH_OK)
+        MH_EnableHook((LPVOID)&Netplay_SendInput);
+    else
+        HookLog("Controller: Failed to hook Netplay_SendInput (%d)\n", s);
 
     // padSlotReadDevice (future DirectInput hook point)
     s = MH_CreateHook(
@@ -281,5 +341,5 @@ void Controller_InitHooks()
     else
         HookLog("Controller: Failed to hook inputAutoRepeatTimerProcess (%d)\n", s);
 
-    HookLog("Controller: Init complete — %d hooks installed\n", 6);
+    HookLog("Controller: Init complete — %d hooks installed\n", 7);
 }

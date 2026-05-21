@@ -261,7 +261,7 @@ void BootIntoTraining()
     //   7 = Unknown mode 7
     //   8 = Heroes & Heralds
     //   9 = Online (alt)
-    ((SetInt_t)_addr(BATTLE_SETTING_SET_BATTLE_TYPE))(bs, 0);
+    ((SetInt_t)_addr(BATTLE_SETTING_SET_BATTLE_TYPE))(bs, 1);
     HookLog("TrainingBoot: Battle type set to 5 (training)\n");
 
     // --- Follow training mode init flow (aChrSelect__onSelectionComplete, uVar3==6) ---
