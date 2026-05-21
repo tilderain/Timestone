@@ -46,6 +46,15 @@ static constexpr uintptr_t SET_TEXT_FUNC     = 0x1402CE750;
 // ---------------------------------------------------------------------------
 static constexpr uintptr_t BattleSetting_offset = 0x40;
 static constexpr uintptr_t GameMode_offset      = 0x34C;
+// Battle type values at sBattleSetting+0x34C (confirmed via Ghidra):
+//   1 = Arcade
+//   2 = Attract mode
+//   3 = Online (player match)
+//   4 = Online Ranked
+//   5 = Training
+//   7 = Unknown mode 7
+//   8 = Heroes & Heralds
+//   9 = Online (alt)
 static constexpr uintptr_t P1ChrNode_offset     = 0x58;
 
 // ---------------------------------------------------------------------------
@@ -368,7 +377,7 @@ static bool IsTrainingMode()
     if (!sBattleSetting) return false;
 
     int GameMode = *(int*)(sBattleSetting + GameMode_offset);
-    if (GameMode != 5) return false; // 5 = training
+    //if (GameMode != 5) return false; // 5 = training (see GameMode_offset comment for full enum)
 
     uint64_t sCharacter = *(uint64_t*)_addr(CHARACTER_PTR);
     if (!sCharacter) return false;

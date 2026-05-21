@@ -251,7 +251,17 @@ void BootIntoTraining()
     // training-specific init path (isTrainingMode check) executes.
     // In the original aChrSelect flow, the battle type was already set
     // by the mode selection before onSelectionComplete is reached.
-    ((SetInt_t)_addr(BATTLE_SETTING_SET_BATTLE_TYPE))(bs, 5);
+    //
+    // Battle type values at sBattleSetting+0x34C (confirmed via Ghidra):
+    //   1 = Arcade
+    //   2 = Attract mode
+    //   3 = Online (player match)
+    //   4 = Online Ranked
+    //   5 = Training      <-- needed for isTrainingMode (CMP EAX,0x5)
+    //   7 = Unknown mode 7
+    //   8 = Heroes & Heralds
+    //   9 = Online (alt)
+    ((SetInt_t)_addr(BATTLE_SETTING_SET_BATTLE_TYPE))(bs, 0);
     HookLog("TrainingBoot: Battle type set to 5 (training)\n");
 
     // --- Follow training mode init flow (aChrSelect__onSelectionComplete, uVar3==6) ---
