@@ -12,6 +12,7 @@
 #include "code/LaunchMenu.h"
 #include "code/framestepper.h"
 #include "code/trainingboot.h"
+#include "code/controller.h"
 #include <Windows.h>
 #include <cstdio>
 #include "kiero/minhook/include/MinHook.h"
@@ -440,6 +441,9 @@ void OnInitializeHook()
 
 	// Frame stepper (pause / frame-advance in training mode)
 	FrameStepper_Init();
+
+	// Controller hooks: decompiled pad/input functions with netplay P2 injection
+	Controller_InitHooks();
 
 	//InjectHook(_addr(0x140650c10), tramp->Jump(InitMainLoop), PATCH_JUMP);//parts of ui & particles
 	//InjectHook(_addr(0x14004ad20), tramp->Jump(InitMainLoop), PATCH_JUMP);//parts pyshics

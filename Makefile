@@ -31,6 +31,7 @@ CPP_SRC   := \
 	$(SRCDIR)/code/mk10utils.cpp \
 	$(SRCDIR)/code/framestepper.cpp \
 	$(SRCDIR)/code/trainingboot.cpp \
+	$(SRCDIR)/code/controller.cpp \
 	$(SRCDIR)/code/netplay.cpp \
 	$(SRCDIR)/imgui/imgui.cpp \
 	$(SRCDIR)/imgui/imgui_demo.cpp \
