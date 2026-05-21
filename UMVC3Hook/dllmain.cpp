@@ -121,6 +121,9 @@ long __stdcall hkEndScene(LPDIRECT3DDEVICE9 pDevice)
 		init = true;
 	}
 
+	// Capture the current back buffer if a snapshot was requested (pause / advance)
+	FrameStepper_Capture(pDevice);
+
 	ImGui_ImplDX9_NewFrame();
 	ImGui_ImplWin32_NewFrame();
 	ImGui::NewFrame();

@@ -96,6 +96,12 @@ static LPDIRECT3DDEVICE9 g_pDevice = nullptr;
 // Game window handle for forcing repaints
 static HWND g_hWnd = nullptr;
 
+// Pause frame snapshot: captures the back buffer once when pause starts
+// and whenever a frame is advanced, so the frozen game image stays
+// consistent across D3D9 buffer swaps.
+static IDirect3DTexture9* g_pPauseTexture    = nullptr;
+static bool               g_captureRequested = false;
+
 // ---------------------------------------------------------------------------
 // Input bit definitions (derived from XINPUT_GAMEPAD processing at 0x1405111b0)
 // ---------------------------------------------------------------------------
@@ -240,11 +246,6 @@ static void __fastcall HookedMove(void* sMvc3Main)
         }
         else if (g_pDevice)
         {
-            // Force a render + present so the ImGui overlay stays visible.
-            // Calling EndScene triggers our hkEndScene hook which renders
-            // FrameStepper_Draw (and any other ImGui content). Then Present
-            // flips the back buffer to screen.
-            // BeginScene first to ensure D3D9 is in a valid render state.
             if (SUCCEEDED(g_pDevice->BeginScene()))
                 g_pDevice->EndScene();
             g_pDevice->Present(nullptr, nullptr, nullptr, nullptr);
@@ -404,6 +405,52 @@ void FrameStepper_SetDevice(LPDIRECT3DDEVICE9 device)
         g_hWnd = cp.hFocusWindow;
 }
 
+// ---------------------------------------------------------------------------
+// Capture the current back buffer into a GPU texture so it can be drawn as a
+// static background during pause (avoids flicker from D3D9 buffer swaps).
+// ---------------------------------------------------------------------------
+static void CaptureBackBuffer(LPDIRECT3DDEVICE9 pDevice)
+{
+    if (!pDevice) return;
+
+    IDirect3DSurface9* pBackBuffer = nullptr;
+    if (FAILED(pDevice->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &pBackBuffer)))
+        return;
+
+    D3DSURFACE_DESC desc;
+    pBackBuffer->GetDesc(&desc);
+
+    // Free old texture
+    if (g_pPauseTexture) {
+        g_pPauseTexture->Release();
+        g_pPauseTexture = nullptr;
+    }
+
+    // Create a render-target texture matching the back buffer
+    if (SUCCEEDED(pDevice->CreateTexture(desc.Width, desc.Height, 1,
+        D3DUSAGE_RENDERTARGET, desc.Format, D3DPOOL_DEFAULT, &g_pPauseTexture, nullptr)))
+    {
+        IDirect3DSurface9* pTexSurface = nullptr;
+        if (SUCCEEDED(g_pPauseTexture->GetSurfaceLevel(0, &pTexSurface))) {
+            pDevice->StretchRect(pBackBuffer, nullptr, pTexSurface, nullptr, D3DTEXF_NONE);
+            pTexSurface->Release();
+        }
+    }
+    pBackBuffer->Release();
+}
+
+// ---------------------------------------------------------------------------
+// Called from hkEndScene after the game has finished rendering the current
+// frame — resolves any pending capture requests.
+// ---------------------------------------------------------------------------
+void FrameStepper_Capture(LPDIRECT3DDEVICE9 pDevice)
+{
+    if (g_captureRequested) {
+        CaptureBackBuffer(pDevice);
+        g_captureRequested = false;
+    }
+}
+
 // Input buffer hook — hooks cChrInput__getInputBuffer (0x1401cc5d0)
 // Returns the input buffer pointer from *(qword*)(RCX + 0x2030)
 // ---------------------------------------------------------------------------
@@ -466,8 +513,13 @@ void FrameStepper_Process()
 {
     if (!IsTrainingMode())
     {
-        if (isPaused)
+        if (isPaused) {
             isPaused = false;
+            if (g_pPauseTexture) {
+                g_pPauseTexture->Release();
+                g_pPauseTexture = nullptr;
+            }
+        }
         return;
     }
 
@@ -479,12 +531,24 @@ void FrameStepper_Process()
         {
             frameCounter = 0;
             ShowPopup();
+            g_captureRequested = true; // snapshot the current frame
+        }
+        else
+        {
+            // Free the snapshot on unpause
+            if (g_pPauseTexture) {
+                g_pPauseTexture->Release();
+                g_pPauseTexture = nullptr;
+            }
         }
     }
 
     // Advance one frame while paused
     if (isPaused && (GetAsyncKeyState(KEY_ADVANCE) & 1))
+    {
         advanceFrame = true;
+        g_captureRequested = true; // snapshot the advanced frame
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -495,67 +559,81 @@ void FrameStepper_Draw()
     if (!IsTrainingMode())
         return;
 
-    // Always show P1/P2 pad inputs (small overlay)
+    // --- Render the captured static frame as background when paused ---
+    // This eliminates the D3D9 double/triple-buffer flicker by ensuring
+    // every Present shows the same frozen game image behind the overlays.
+    if (isPaused && g_pPauseTexture)
     {
-        auto sPadGetInstance = (sPad__getInstance_t)_addr(SPAD_GET_INSTANCE_ADDR);
-        auto getInput = (GetsCurrentInput_withSOCD_t)_addr(GET_CURRENT_INPUT_ADDR);
-
-        uint64_t pad = sPadGetInstance();
-        if (pad)
+        ImDrawList* bgDrawList = ImGui::GetBackgroundDrawList();
+        if (bgDrawList)
         {
-            uint32_t p1 = (uint32_t)getInput(pad, 0);
-            uint32_t p2 = (uint32_t)getInput(pad, 1);
-
-            // OR in keybind-system flags so Z, S, etc. show up
-            p1 |= *(uint32_t*)(pad + UNIT_FLAGS_OFFSET);
-            p2 |= *(uint32_t*)(pad + UNIT_FLAGS_OFFSET);
-
-            char btns1[128], btns2[128];
-            AppendButtons(btns1, sizeof(btns1), p1);
-            AppendButtons(btns2, sizeof(btns2), p2);
-
-            ImGui::SetNextWindowPos(ImVec2(12.0f, 12.0f), ImGuiCond_Always);
-            ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.0f, 0.0f, 0.0f, 0.85f));
-            ImGui::Begin("##FrameStepperPad", nullptr,
-                ImGuiWindowFlags_NoTitleBar |
-                ImGuiWindowFlags_NoResize |
-                ImGuiWindowFlags_NoMove |
-                ImGuiWindowFlags_NoScrollbar |
-                ImGuiWindowFlags_NoSavedSettings |
-                ImGuiWindowFlags_NoInputs |
-                ImGuiWindowFlags_AlwaysAutoResize);
-
-            ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "P1: [%s]  0x%08X", DecodeDirection(p1), p1);
-            if (btns1[0])
-                ImGui::SameLine(), ImGui::TextColored(ImVec4(0.7f, 0.9f, 1.0f, 1.0f), "%s", btns1);
-
-            ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.6f, 1.0f), "P2: [%s]  0x%08X", DecodeDirection(p2), p2);
-            if (btns2[0])
-                ImGui::SameLine(), ImGui::TextColored(ImVec4(0.7f, 1.0f, 0.8f, 1.0f), "%s", btns2);
-
-            // Show extra keyboard keys (Z, S, etc.) not in GetsCurrentInput_withSOCD
-            char kbd[256] = "";
-            for (int i = 0; i < EXTRA_VK_COUNT; i++) {
-                if (GetAsyncKeyState(EXTRA_VK[i]) & 0x8000) {
-                    if (kbd[0]) strcat(kbd, " ");
-                    strcat(kbd, EXTRA_VK_NAMES[i]);
-                }
-            }
-            if (kbd[0])
-                ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "Kbd: %s", kbd);
-
-            ImGui::PopStyleColor();
-            ImGui::End();
+            bgDrawList->AddImage(
+                (ImTextureID)g_pPauseTexture,
+                ImVec2(0.0f, 0.0f),
+                ImGui::GetIO().DisplaySize
+            );
         }
     }
 
-    // Pause-specific content (only shown when paused)
+    // --- Always-visible P1/P2 pad input window (top-left) ---
+    auto sPadGetInstance = (sPad__getInstance_t)_addr(SPAD_GET_INSTANCE_ADDR);
+    auto getInput = (GetsCurrentInput_withSOCD_t)_addr(GET_CURRENT_INPUT_ADDR);
+
+    uint64_t pad = sPadGetInstance();
+    if (pad)
+    {
+        uint32_t p1 = (uint32_t)getInput(pad, 0);
+        uint32_t p2 = (uint32_t)getInput(pad, 1);
+
+        // OR in keybind-system flags so Z, S, etc. show up
+        p1 |= *(uint32_t*)(pad + UNIT_FLAGS_OFFSET);
+        p2 |= *(uint32_t*)(pad + UNIT_FLAGS_OFFSET);
+
+        char btns1[128], btns2[128];
+        AppendButtons(btns1, sizeof(btns1), p1);
+        AppendButtons(btns2, sizeof(btns2), p2);
+
+        ImGui::SetNextWindowPos(ImVec2(12.0f, 12.0f), ImGuiCond_Always);
+        ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.0f, 0.0f, 0.0f, 0.85f));
+        ImGui::Begin("##FrameStepperPad", nullptr,
+            ImGuiWindowFlags_NoTitleBar |
+            ImGuiWindowFlags_NoResize |
+            ImGuiWindowFlags_NoMove |
+            ImGuiWindowFlags_NoScrollbar |
+            ImGuiWindowFlags_NoSavedSettings |
+            ImGuiWindowFlags_NoInputs |
+            ImGuiWindowFlags_AlwaysAutoResize);
+
+        ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "P1: [%s]  0x%08X", DecodeDirection(p1), p1);
+        if (btns1[0])
+            ImGui::SameLine(), ImGui::TextColored(ImVec4(0.7f, 0.9f, 1.0f, 1.0f), "%s", btns1);
+
+        ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.6f, 1.0f), "P2: [%s]  0x%08X", DecodeDirection(p2), p2);
+        if (btns2[0])
+            ImGui::SameLine(), ImGui::TextColored(ImVec4(0.7f, 1.0f, 0.8f, 1.0f), "%s", btns2);
+
+        // Show extra keyboard keys (Z, S, etc.) not in GetsCurrentInput_withSOCD
+        char kbd[256] = "";
+        for (int i = 0; i < EXTRA_VK_COUNT; i++) {
+            if (GetAsyncKeyState(EXTRA_VK[i]) & 0x8000) {
+                if (kbd[0]) strcat(kbd, " ");
+                strcat(kbd, EXTRA_VK_NAMES[i]);
+            }
+        }
+        if (kbd[0])
+            ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "Kbd: %s", kbd);
+
+        ImGui::PopStyleColor();
+        ImGui::End();
+    }
+
+    // --- Pause-only content: shown below the pad window when paused ---
     if (!isPaused)
         return;
 
-    ImGui::SetNextWindowPos(ImVec2(12.0f, 12.0f), ImGuiCond_Always);
+    ImGui::SetNextWindowPos(ImVec2(12.0f, 80.0f), ImGuiCond_Always);
     ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.0f, 0.0f, 0.0f, 0.85f));
-    ImGui::Begin("##FrameStepper", nullptr,
+    ImGui::Begin("##FrameStepperPause", nullptr,
         ImGuiWindowFlags_NoTitleBar |
         ImGuiWindowFlags_NoResize |
         ImGuiWindowFlags_NoMove |
