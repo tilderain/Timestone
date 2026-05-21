@@ -24,20 +24,28 @@ extern uint32_t Netplay_GetRemoteInput();
 // ---------------------------------------------------------------------------
 // Addresses
 // ---------------------------------------------------------------------------
-static constexpr uintptr_t ADDR_GET_CURRENT_INPUT     = 0x1402B3700;
-static constexpr uintptr_t ADDR_PAD_SLOT_READ_DEVICE  = 0x140514B90;
-static constexpr uintptr_t ADDR_PAD_POLL_ALL_SLOTS    = 0x140514570;
-static constexpr uintptr_t ADDR_XINPUT_TO_GAME_MASK   = 0x1405111B0;
-static constexpr uintptr_t ADDR_PAD_SLOT_POST_READ    = 0x1405146A0;
-static constexpr uintptr_t ADDR_INPUT_AUTOREPEAT      = 0x140514F20;
-static constexpr uintptr_t ADDR_PAD_GET_VIB_MOTOR     = 0x140510620;
-static constexpr uintptr_t ADDR_PAD_VIB_PROCESS       = 0x140514D90;
-static constexpr uintptr_t ADDR_PAD_CHECK_STOP_VIB    = 0x140514ED0;
-static constexpr uintptr_t ADDR_KEYBOARD_TO_GAME_MASK = 0x1402B2FA0;
-static constexpr uintptr_t ADDR_PAD_GET_INSTANCE      = 0x140001B00;
-static constexpr uintptr_t ADDR_MVC3_MGR_GET_INSTANCE = 0x140001AF0;
-static constexpr uintptr_t ADDR_MGR_GET_PLAYER_CHAR   = 0x14025AC40;
-static constexpr uintptr_t ADDR_METHOD_3D00           = 0x1402B3D00;
+static constexpr uintptr_t ADDR_GET_CURRENT_INPUT        = 0x1402B3700;
+static constexpr uintptr_t ADDR_PAD_SLOT_READ_DEVICE     = 0x140514B90;
+static constexpr uintptr_t ADDR_PAD_POLL_ALL_SLOTS       = 0x140514570;
+static constexpr uintptr_t ADDR_XINPUT_TO_GAME_MASK      = 0x1405111B0;
+static constexpr uintptr_t ADDR_PAD_SLOT_POST_READ       = 0x1405146A0;
+static constexpr uintptr_t ADDR_INPUT_AUTOREPEAT         = 0x140514F20;
+static constexpr uintptr_t ADDR_PAD_GET_VIB_MOTOR        = 0x140510620;
+static constexpr uintptr_t ADDR_PAD_VIB_PROCESS          = 0x140514D90;
+static constexpr uintptr_t ADDR_PAD_CHECK_STOP_VIB       = 0x140514ED0;
+static constexpr uintptr_t ADDR_KEYBOARD_TO_GAME_MASK    = 0x1402B2FA0;
+static constexpr uintptr_t ADDR_PAD_GET_INSTANCE         = 0x140001B00;
+static constexpr uintptr_t ADDR_MVC3_MGR_GET_INSTANCE    = 0x140001AF0;
+static constexpr uintptr_t ADDR_MGR_GET_PLAYER_CHAR      = 0x14025AC40;
+static constexpr uintptr_t ADDR_METHOD_3D00              = 0x1402B3D00;
+
+// cChrInput__processFrameInput — the per-character input processor.
+// This is the function that reads GetsCurrentInput (or takes Path A from
+// character+0xC4) and stores the result in the cChrInput fields at +0x14,
+// +0x560, +0x56C. We hook it to implement P1-freeze / P2-mirror.
+static constexpr uintptr_t ADDR_PROCESS_FRAME_INPUT       = 0x14002DD60;
+// uAmaterasu__getter_4AC0 — returns the team index (0=P1, 1=P2) from a character object.
+static constexpr uintptr_t ADDR_GET_TEAM_INDEX            = 0x140004AC0;
 
 // ---------------------------------------------------------------------------
 // Original function pointers (MinHook trampolines)
@@ -51,6 +59,13 @@ static inputAutoRepeatTimerProcess_t oinputAutoRepeatTimerProcess = nullptr;
 
 typedef void(*Netplay_SendInput_t)(uint32_t);
 static Netplay_SendInput_t oNetplay_SendInput = nullptr;
+
+// processFrameInput trampoline + hook cache for P1→P2 mirroring
+static void(__fastcall* oprocessFrameInput)(uint64_t cChrInput) = nullptr;
+static uint64_t g_p1CChrInputHandle = 0;   // cChrInput of P1's lead character
+static uint32_t g_p1Input14  = 0;           // last-read input from P1 (field +0x14)
+static uint32_t g_p1Input560 = 0;           // last-read input from P1 (field +0x560)
+static uint32_t g_p1Input56C = 0;           // last-read input from P1 (field +0x56C)
 
 // ===========================================================================
 // Decompiled helper functions (inlined from game)
@@ -151,7 +166,7 @@ uint32_t GetsCurrentInput_withSOCD(uint64_t pad, uint32_t playerIndex)
 
 // ---------------------------------------------------------------------------
 // ApplySOCD
-// Cleans inputs according to the game's original logic.
+// SOCD cleaning helper function.
 // ---------------------------------------------------------------------------
 static uint32_t ApplySOCD(uint32_t input)
 {
@@ -173,7 +188,7 @@ static uint32_t ApplySOCD(uint32_t input)
 // ---------------------------------------------------------------------------
 // hkGetsCurrentInput_withSOCD
 // Hook on GetsCurrentInput_withSOCD at 0x1402B3700.
-// Handles P1/P2 routing depending on whether the game is running as host or client.
+// Netplay P1/P2 dynamic injection depending on host/client roles.
 // ---------------------------------------------------------------------------
 static uint64_t __fastcall hkGetsCurrentInput_withSOCD(uint64_t pad, uint32_t playerIndex)
 {
@@ -181,7 +196,7 @@ static uint64_t __fastcall hkGetsCurrentInput_withSOCD(uint64_t pad, uint32_t pl
     {
         if (Netplay_IsHost())
         {
-            // Host: local P1 (0) remains unhindered, remote input mapped to P2 (1)
+            // Host: P1 is local physical, intercept P2 (1) with remote input
             if (playerIndex == 1 && Netplay_HasRemoteInput())
             {
                 uint32_t remote = Netplay_GetRemoteInput();
@@ -190,7 +205,7 @@ static uint64_t __fastcall hkGetsCurrentInput_withSOCD(uint64_t pad, uint32_t pl
         }
         else
         {
-            // Client: remote input goes to P1 (0), client's physical input goes to P2 (1)
+            // Client: intercept P1 (0) with remote host input, map local P1 (0) to P2 (1)
             if (playerIndex == 0 && Netplay_HasRemoteInput())
             {
                 uint32_t remote = Netplay_GetRemoteInput();
@@ -198,11 +213,15 @@ static uint64_t __fastcall hkGetsCurrentInput_withSOCD(uint64_t pad, uint32_t pl
             }
             else if (playerIndex == 1)
             {
-                // Map the client's local physical input (from player slot 0) to P2
                 return oGetsCurrentInput_withSOCD(pad, 0);
             }
         }
     }
+
+    // Offline / Fallback behavior:
+    // Strip START/BACK on P2 to prevent duplicate pause menus.
+    if (playerIndex == 1)
+        return oGetsCurrentInput_withSOCD(pad, 1) & ~(uint64_t)(IN_START | IN_BACK);
 
     return oGetsCurrentInput_withSOCD(pad, playerIndex);
 }
@@ -219,7 +238,6 @@ static void hkNetplay_SendInput(uint32_t localInput)
         uint64_t pad = sPadGetInstance();
         if (pad)
         {
-            // Read client's local physical input directly from slot 0
             uint32_t realLocalInput = oGetsCurrentInput_withSOCD(pad, 0);
             oNetplay_SendInput(realLocalInput);
             return;
@@ -229,17 +247,91 @@ static void hkNetplay_SendInput(uint32_t localInput)
 }
 
 // ---------------------------------------------------------------------------
+// hkprocessFrameInput
+// Hook on cChrInput__processFrameInput at 0x14002DD60.
+// This is the UNIVERSAL input gate — ALL character input paths converge here.
+// In netplay, if you are the client, it overrides character P1 (teamIdx == 0)
+// inputs directly using the received remote host packet.
+// ---------------------------------------------------------------------------
+static void __fastcall hkprocessFrameInput(uint64_t cChrInput)
+{
+    oprocessFrameInput(cChrInput);
+
+    // Read the character pointer (cChrInput + 0x8)
+    uint64_t character = *(uint64_t*)(cChrInput + 0x8);
+    if (!character) return;
+
+    // Get team index from character object
+    typedef uint32_t(__fastcall* getTeamIdx_t)(uint64_t);
+    static getTeamIdx_t fnGetTeamIdx = (getTeamIdx_t)_addr(ADDR_GET_TEAM_INDEX);
+    uint32_t teamIdx = fnGetTeamIdx(character);
+
+    if (Netplay_IsActive())
+    {
+        if (!Netplay_IsHost())
+        {
+            // Client: P1 (teamIdx == 0) is remote host. Apply host inputs directly.
+            if (teamIdx == 0 && Netplay_HasRemoteInput())
+            {
+                uint32_t remote = ApplySOCD(Netplay_GetRemoteInput());
+                *(uint32_t*)(cChrInput + 0x14)  = remote;
+                *(uint32_t*)(cChrInput + 0x560) = remote;
+                *(uint32_t*)(cChrInput + 0x56C) = remote;
+            }
+        }
+        return; // Other cases pass through untouched during netplay
+    }
+
+    /*// --- Offline / Non-netplay behavior ---
+    if (teamIdx == 0)
+    {
+        // === P1: save input, then freeze ===
+        g_p1CChrInputHandle = cChrInput;
+        g_p1Input14  = *(uint32_t*)(cChrInput + 0x14);
+        g_p1Input560 = *(uint32_t*)(cChrInput + 0x560);
+        g_p1Input56C = *(uint32_t*)(cChrInput + 0x56C);
+
+        // Zero all input fields so P1's character doesn't move
+        *(uint32_t*)(cChrInput + 0x14)  = 0;
+        *(uint32_t*)(cChrInput + 0x560) = 0;
+        *(uint32_t*)(cChrInput + 0x56C) = 0;
+    }
+    else if (teamIdx == 1)
+    {
+        // === P2: mirror P1's saved input, minus START/BACK ===
+        uint32_t mask = ~(uint32_t)(IN_START | IN_BACK);
+        *(uint32_t*)(cChrInput + 0x14)  = g_p1Input14  & mask;
+        *(uint32_t*)(cChrInput + 0x560) = g_p1Input560 & mask;
+        *(uint32_t*)(cChrInput + 0x56C) = g_p1Input56C & mask;
+    }*/
+    // teamIdx >= 2 (assist/special) — leave as-is
+}
+
+// ---------------------------------------------------------------------------
+// hkpadPollAllSlots
+// Hook on padPollAllSlots at 0x140514570.
+// After normal polling completes, copy P1's processed input to P2's slot (offline only).
+// ---------------------------------------------------------------------------
+static void __fastcall hkpadPollAllSlots(uint64_t sPad)
+{
+    opadPollAllSlots(sPad);
+
+    if (Netplay_IsActive())
+        return;
+
+    // Copy P1's processed pad input → P2's pad slot input area.
+    // GetsCurrentInput reads from sPad + playerIndex*0x2E0 + 0x1BC.
+    *(uint32_t*)(sPad + 1 * PAD_SLOT_STRIDE + PAD_SLOT_INPUT) =
+        *(uint32_t*)(sPad + 0 * PAD_SLOT_STRIDE + PAD_SLOT_INPUT);
+}
+
+// ---------------------------------------------------------------------------
 // All other hooks: call through to original trampolines.
 // These exist so we have injection points for future use.
 // ---------------------------------------------------------------------------
 static uint64_t __fastcall hkpadSlotReadDevice(uint64_t slotBase)
 {
     return opadSlotReadDevice(slotBase);
-}
-
-static void __fastcall hkpadPollAllSlots(uint64_t sPad)
-{
-    opadPollAllSlots(sPad);
 }
 
 static void __fastcall hkxinputToGameMask(uint64_t sPad, uint64_t slotBase, const XInputState* pState)
@@ -264,7 +356,7 @@ void Controller_InitHooks()
 {
     MH_STATUS s;
 
-    // GetsCurrentInput_withSOCD — primary hook for netplay injection
+    // GetsCurrentInput_withSOCD — primary hook for netplay P2 injection
     s = MH_CreateHook(
         (LPVOID)_addr(ADDR_GET_CURRENT_INPUT),
         (LPVOID)&hkGetsCurrentInput_withSOCD,
@@ -285,6 +377,17 @@ void Controller_InitHooks()
         MH_EnableHook((LPVOID)&Netplay_SendInput);
     else
         HookLog("Controller: Failed to hook Netplay_SendInput (%d)\n", s);
+
+    // cChrInput__processFrameInput — P1 freeze / P2 mirror & netplay client override
+    s = MH_CreateHook(
+        (LPVOID)_addr(ADDR_PROCESS_FRAME_INPUT),
+        (LPVOID)&hkprocessFrameInput,
+        (LPVOID*)&oprocessFrameInput
+    );
+    if (s == MH_OK)
+        MH_EnableHook((LPVOID)_addr(ADDR_PROCESS_FRAME_INPUT));
+    else
+        HookLog("Controller: Failed to hook processFrameInput (%d)\n", s);
 
     // padSlotReadDevice (future DirectInput hook point)
     s = MH_CreateHook(
@@ -341,5 +444,5 @@ void Controller_InitHooks()
     else
         HookLog("Controller: Failed to hook inputAutoRepeatTimerProcess (%d)\n", s);
 
-    HookLog("Controller: Init complete — %d hooks installed\n", 7);
+    HookLog("Controller: Init complete — %d hooks installed\n", 8);
 }
