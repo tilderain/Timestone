@@ -20,7 +20,9 @@ static std::atomic<uint32_t> g_inboundInput  { 0 };   // network -> game thread
 static std::atomic<bool>     g_running { false };
 
 static HANDLE g_serviceThread = nullptr;
-static uint32_t g_seq = 0;   // only accessed from service thread
+static uint32_t g_seq = 0;           // only accessed from service thread
+static uint32_t g_recvCount = 0;     // only accessed from service thread
+static uint32_t g_lastRecv  = 0;     // snapshot for stats
 
 // ---------------------------------------------------------------------------
 // Service thread: owns ALL ENet calls
@@ -31,6 +33,17 @@ static DWORD WINAPI Netplay_ServiceThread(LPVOID)
 
     while (g_running)
     {
+        // --- Periodic stats (every ~3 seconds) ---
+        static uint32_t lastStatsTick = GetTickCount();
+        uint32_t now = GetTickCount();
+        if (now - lastStatsTick >= 3000)
+        {
+            HookLog("Netplay: received %u packets in last 3s (total %u)\n",
+                    g_recvCount - g_lastRecv, g_recvCount);
+            g_lastRecv = g_recvCount;
+            lastStatsTick = now;
+        }
+
         // --- Send outbound input (if the game thread queued any) ---
         uint32_t outInput = g_outboundInput.exchange(0);
         if (outInput != 0 && g_peer)
@@ -62,6 +75,7 @@ static DWORD WINAPI Netplay_ServiceThread(LPVOID)
                     {
                         const InputPacket* inPkt = (const InputPacket*)event.packet->data;
                         g_inboundInput.store(inPkt->inputBits);
+                        g_recvCount++;
                     }
                     enet_packet_destroy(event.packet);
                 }
@@ -105,6 +119,9 @@ void Netplay_Init(ENetHost* host, ENetPeer* peer)
 
     g_inboundInput.store(0);
     g_outboundInput.store(0);
+    g_seq = 0;
+    g_recvCount = 0;
+    g_lastRecv = 0;
     g_running = true;
 
     // Start the background service thread
