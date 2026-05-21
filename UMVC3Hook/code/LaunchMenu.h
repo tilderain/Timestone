@@ -51,5 +51,8 @@ void SetLaunchOption(LaunchOption opt);
 // Get the dialog config (characters, stage, network settings)
 const LaunchDialogConfig& GetLaunchDialogConfig();
 
+// Set enet handles from outside (used by auto-host/connect in dual training mode)
+void SetNetworkHandles(ENetHost* host, ENetPeer* peer);
+
 // Clean up any active network session (call on DLL detach / game exit)
 void CleanupNetworkOnExit();

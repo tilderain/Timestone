@@ -234,6 +234,13 @@ const LaunchDialogConfig& GetLaunchDialogConfig()
     return g_dialogConfig;
 }
 
+void SetNetworkHandles(ENetHost* host, ENetPeer* peer)
+{
+    g_dialogConfig.enetHost = host;
+    g_dialogConfig.enetPeer = peer;
+    if (host) g_dialogConfig.hostEnabled = true;
+}
+
 // ---------------------------------------------------------------------------
 // Dialog procedure
 // ---------------------------------------------------------------------------

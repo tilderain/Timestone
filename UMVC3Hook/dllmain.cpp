@@ -57,6 +57,10 @@ void HookLog(const char* fmt, ...)
 
 using namespace Memory::VP;
 
+// Auto-connect target (passed via -connect on command line for spawned 2nd instance)
+static char g_autoConnectIp[64] = "";
+static int  g_autoConnectPort = 0;
+
 extern LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
 EndScene oEndScene = NULL;
@@ -218,13 +222,50 @@ void OnInitializeHook()
 	// Patch single-instance mutex check: JNZ -> JMP to allow multiple instances
 	Memory::VP::Patch<uint8_t>(_addr(0x14051E1CB), 0xEB);
 
-	// Check for command-line arg from spawned instance
-	LPWSTR cmdLine = GetCommandLineW();
+	// Check for command-line args using GetCommandLineA (avoids wchar_t size mismatch
+	// between Linux/GCC (32-bit) and Windows/MSVC (16-bit) under Wine/Proton)
+	const char* cmdLineA = GetCommandLineA();
+	HookLog("UMVC3Hook: Raw Command Line: %s\n", cmdLineA);
+
 	bool trainingArg = false;
-	if (wcsstr(cmdLine, L"-training")) {
+	if (strstr(cmdLineA, "-training")) {
 		trainingArg = true;
 		SetLaunchOption(LAUNCH_TRAINING);
 		HookLog("UMVC3Hook: Detected -training argument, entering training mode\n");
+	}
+
+	// Check for -connect argument (format: -connect=IP:PORT) from dual training spawn
+	const char* connectArg = strstr(cmdLineA, "-connect=");
+	if (connectArg) {
+		const char* connStr = connectArg + 9; // Skip past "-connect="
+
+		// Isolate the connection string (stop at space, double-quote, or end)
+		char tempConn[128] = {};
+		int len = 0;
+		while (connStr[len] && connStr[len] != ' ' && connStr[len] != '\"' && len < 127) {
+			tempConn[len] = connStr[len];
+			len++;
+		}
+		tempConn[len] = '\0';
+
+		// Parse IP:PORT from tempConn
+		const char* colon = strchr(tempConn, ':');
+		if (colon) {
+			size_t ipLen = colon - tempConn;
+			if (ipLen < sizeof(g_autoConnectIp)) {
+				strncpy(g_autoConnectIp, tempConn, ipLen);
+				g_autoConnectIp[ipLen] = '\0';
+			}
+			g_autoConnectPort = atoi(colon + 1);
+		}
+		else {
+			strncpy(g_autoConnectIp, tempConn, sizeof(g_autoConnectIp) - 1);
+			g_autoConnectIp[sizeof(g_autoConnectIp) - 1] = '\0';
+			g_autoConnectPort = 10800;
+		}
+
+		HookLog("UMVC3Hook: Detected -connect argument, target %s:%d\n",
+			g_autoConnectIp, g_autoConnectPort);
 	}
 
 	// Show launch menu on first instance only
@@ -260,13 +301,35 @@ void OnInitializeHook()
 	}
 
 	if (opt == LAUNCH_DUAL_TRAINING) {
-		// Spawn a second game instance with -training arg
+		const LaunchDialogConfig& dlgCfg = GetLaunchDialogConfig();
+
+		// 1. Create enet host FIRST so it's listening before the 2nd instance starts
+		ENetAddress addr;
+		addr.host = ENET_HOST_ANY;
+		addr.port = (enet_uint16)dlgCfg.hostPort;
+
+		ENetHost* server = enet_host_create(&addr, 1, 2, 0, 0);
+		if (!server) {
+			HookLog("UMVC3Hook: Dual training - FAILED to create enet host on port %d\n",
+				dlgCfg.hostPort);
+		} else {
+			SetNetworkHandles(server, nullptr);
+			HookLog("UMVC3Hook: Dual training - hosting on port %d, waiting for 2nd instance...\n",
+				dlgCfg.hostPort);
+		}
+
+		// 2. Spawn the second instance with -connect so it auto-connects back
 		wchar_t exePath[MAX_PATH];
 		GetModuleFileNameW(NULL, exePath, MAX_PATH);
 
-		// Build command line for second instance
-		wchar_t spawnCmd[MAX_PATH + 32];
-		swprintf(spawnCmd, MAX_PATH + 32, L"\"%s\" -training", exePath);
+		// Use MultiByteToWideChar (locale-independent) for the IP address
+		wchar_t wIp[64];
+		MultiByteToWideChar(CP_ACP, 0, dlgCfg.hostIp, -1, wIp, 64);
+
+		// FIX: Use %ls for wide strings (GCC/MinGW treats %s as narrow char*, even in swprintf)
+		wchar_t spawnCmd[MAX_PATH + 64];
+		swprintf(spawnCmd, MAX_PATH + 64, L"\"%ls\" -training -connect=%ls:%d",
+			exePath, wIp, dlgCfg.hostPort);
 
 		STARTUPINFOW si = { sizeof(si) };
 		PROCESS_INFORMATION pi;
@@ -274,10 +337,85 @@ void OnInitializeHook()
 			CREATE_NEW_CONSOLE, NULL, NULL, &si, &pi)) {
 			CloseHandle(pi.hProcess);
 			CloseHandle(pi.hThread);
-			HookLog("UMVC3Hook: Spawned second instance with -training\n");
+			HookLog("UMVC3Hook: Spawned second instance with -training -connect=%s:%d\n",
+				dlgCfg.hostIp, dlgCfg.hostPort);
 		}
 		else {
 			HookLog("UMVC3Hook: Failed to spawn second instance (error %lu)\n", GetLastError());
+		}
+
+		// 3. Wait for connection (only if host was created)
+		if (server) {
+			ENetEvent event;
+			int timeoutMs = 15000;  // 15s timeout (generous for localhost)
+			int waited = 0;
+			while (waited < timeoutMs) {
+				int result = enet_host_service(server, &event, 100);
+				if (result > 0) {
+					if (event.type == ENET_EVENT_TYPE_CONNECT) {
+						event.peer->data = (void*)"connected";
+						SetNetworkHandles(server, event.peer);
+						HookLog("UMVC3Hook: Dual training - 2nd instance connected!\n");
+						break;
+					}
+					else if (event.type == ENET_EVENT_TYPE_RECEIVE) {
+						enet_packet_destroy(event.packet);
+					}
+				}
+				waited += 100;
+			}
+			if (!GetLaunchDialogConfig().enetPeer) {
+				HookLog("UMVC3Hook: Dual training - TIMEOUT waiting for 2nd instance (15s)\n");
+			}
+		}
+	}
+
+	// Auto-connect: second instance spawned by dual training connects back to host
+	if (g_autoConnectPort != 0 && g_autoConnectIp[0] != '\0') {
+		HookLog("UMVC3Hook: Auto-connecting to host %s:%d\n",
+			g_autoConnectIp, g_autoConnectPort);
+
+		ENetHost* client = enet_host_create(NULL, 1, 2, 0, 0);
+		if (client) {
+			ENetAddress targetAddr;
+			if (enet_address_set_host_ip(&targetAddr, g_autoConnectIp) != 0) {
+				enet_address_set_host(&targetAddr, g_autoConnectIp);
+			}
+			targetAddr.port = (enet_uint16)g_autoConnectPort;
+
+			ENetPeer* peer = enet_host_connect(client, &targetAddr, 2, 0);
+			if (peer) {
+				ENetEvent event;
+				int timeoutMs = 15000;
+				int waited = 0;
+				while (waited < timeoutMs) {
+					int result = enet_host_service(client, &event, 100);
+					if (result > 0) {
+						if (event.type == ENET_EVENT_TYPE_CONNECT) {
+							peer->data = (void*)"connected";
+							SetNetworkHandles(client, peer);
+							HookLog("UMVC3Hook: Auto-connect SUCCESS to %s:%d\n",
+								g_autoConnectIp, g_autoConnectPort);
+							break;
+						}
+						else if (event.type == ENET_EVENT_TYPE_RECEIVE) {
+							enet_packet_destroy(event.packet);
+						}
+					}
+					waited += 100;
+				}
+				if (!GetLaunchDialogConfig().enetPeer) {
+					HookLog("UMVC3Hook: Auto-connect TIMEOUT (15s) - destroying client\n");
+					enet_host_destroy(client);
+				}
+			}
+			else {
+				HookLog("UMVC3Hook: Auto-connect - enet_host_connect returned NULL\n");
+				enet_host_destroy(client);
+			}
+		}
+		else {
+			HookLog("UMVC3Hook: Auto-connect - enet_host_create FAILED\n");
 		}
 	}
 
