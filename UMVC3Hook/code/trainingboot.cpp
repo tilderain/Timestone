@@ -193,6 +193,19 @@ static void SetupPadToPlayerMapping()
         *(uint8_t*)(sPad + PAD_KEYBOARD_BLOCKED_2) = 0;
         HookLog("TrainingBoot: Keyboard-disable flags cleared (pad+0x%x, pad+0x%x)\n",
                 PAD_KEYBOARD_BLOCKED_1, PAD_KEYBOARD_BLOCKED_2);
+
+        // Force slot 1 (P2) device-active flags to non-zero so the game thinks
+        // a physical controller is plugged in for P2. This prevents the
+        // "Press Start" / wait-for-P2 state when only one pad is connected.
+        // Slot layout (from sPadCheckSlotDeviceAlive_maybe disasm):
+        //   slot_base = sPad + slotIndex * 0x2E0
+        //   device_active at slot_base + 0x60
+        //   ready_counter at slot_base + 0x63
+    //    uint64_t slot1 = sPad + 1 * 0x2E0;
+    //    *(uint8_t*)(slot1 + 0x60) = 1;  // device active flag
+    //    *(uint8_t*)(slot1 + 0x63) = 1;  // ready counter
+    //    HookLog("TrainingBoot: Forced slot 1 device flags to alive (sPad+0x%llx)\n",
+    //            (unsigned long long)(slot1));
     } else {
         HookLog("TrainingBoot: WARNING - sPad not available for keyboard flag clear\n");
     }
@@ -261,7 +274,7 @@ void BootIntoTraining()
     //   7 = Unknown mode 7
     //   8 = Heroes & Heralds
     //   9 = Online (alt)
-    ((SetInt_t)_addr(BATTLE_SETTING_SET_BATTLE_TYPE))(bs, 1);
+    ((SetInt_t)_addr(BATTLE_SETTING_SET_BATTLE_TYPE))(bs, 0);
     HookLog("TrainingBoot: Battle type set to 5 (training)\n");
 
     // --- Follow training mode init flow (aChrSelect__onSelectionComplete, uVar3==6) ---

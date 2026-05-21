@@ -223,6 +223,19 @@ void OnInitializeHook()
 	// Patch single-instance mutex check: JNZ -> JMP to allow multiple instances
 	Memory::VP::Patch<uint8_t>(_addr(0x14051E1CB), 0xEB);
 
+	// Disable P2 auto-pause on pad disconnect in offline versus (battle type 0).
+	// FUN_1402b4140 at 0x1402B4140 checks slot+0x60 (device active) and
+	// slot+0x63 (ready counter) to determine if a pad slot is "alive".
+	// When P2's physical controller is disconnected, this returns false
+	// even though the pad-to-player mapping says P2 is assigned (slot 1),
+	// causing the game to enter a "Press Start" / wait-for-P2 state.
+	// Patch: replace the function body with MOV AL,1; RET (B0 01 C3).
+	// Note: single-byte patches used because _MEMORY_NO_CRT disables initializer_list overloads.
+	Memory::VP::Patch<uint8_t>(_addr(0x1402B4140), 0xB0);  // MOV AL,
+	Memory::VP::Patch<uint8_t>(_addr(0x1402B4141), 0x01);  //   1
+	Memory::VP::Patch<uint8_t>(_addr(0x1402B4142), 0xC3);  // RET
+	HookLog("UMVC3Hook: Patched FUN_1402b4140 to always return true (slot always alive)\n");
+
 	// Check for command-line args using GetCommandLineA (avoids wchar_t size mismatch
 	// between Linux/GCC (32-bit) and Windows/MSVC (16-bit) under Wine/Proton)
 	const char* cmdLineA = GetCommandLineA();
@@ -441,6 +454,13 @@ void OnInitializeHook()
 	// directly into a battle area with training mode settings.
 
 	if (opt == LAUNCH_TRAINING || opt == LAUNCH_DUAL_TRAINING) {
+		// Backup patch: in uBattleUiTrainingCheckP2PadAssigned_maybe @ 0x1402E57EE,
+		// change JNZ to JMP so the function ALWAYS returns 1 (skip P2 wait state)
+		// even if sPadCheckSlotDeviceAlive_maybe somehow returns false.
+		// Original: 75 44 (JNZ +0x44) → EB 44 (JMP +0x44)
+		Memory::VP::Patch<uint8_t>(_addr(0x1402E57EE), 0xEB);
+		HookLog("UMVC3Hook: Patched uBattleUiTrainingCheckP2PadAssigned_maybe JNZ→JMP\n");
+
 		TrainingBoot_InitHooks();
 	}
 
