@@ -281,23 +281,42 @@ static void __fastcall HookedMove(void* sMvc3Main)
     CaptureNetInput();
 
     // ===== Netplay: send local P1 input, receive remote P2 input =====
+    // Only send input when the match is actually live (step >= 2).
+    // Step 0 = initial/loading, Step 1 = pre-fight setup,
+    // Step 2+ = input is ready, gameplay has begun.
     if (Netplay_IsActive())
     {
-        uint64_t sm = *(uint64_t*)_addr(MVC3_MAIN_PTR);
-        if (sm) {
-            uint64_t bs = *(uint64_t*)(sm + 0x401c0);
-            if (bs) {
-                // Read local P1's processed input from battle state
-                uint32_t localP1Input = *(uint32_t*)(bs + 0xd58);
+        // Check aNextBattle step to know if gameplay has started
+        typedef uint64_t(__fastcall* GetAmaterasu_t)();
+        GetAmaterasu_t getAmaterasuObj = (GetAmaterasu_t)_addr(0x140001A90);
+        uint64_t aNextBattle = getAmaterasuObj();
+        int step = aNextBattle ? *(int*)(aNextBattle + 0xD8) : 0;
 
-                // Queue it for the netplay service thread to send
-                Netplay_SendInput(localP1Input);
+        static bool s_inputStarted = false;
+        if (step >= 2 && !s_inputStarted) {
+            s_inputStarted = true;
+            HookLog("Netplay: First frame input ready (step=%d, aNextBattle=0x%llX) — blasting packets\n",
+                    step, aNextBattle);
+        }
 
-                // Read whatever remote input the service thread has received
-                uint32_t remoteInput = Netplay_GetRemoteInput();
-                if (remoteInput != 0) {
-                    // Overwrite the local P2 input slot with the remote player's input
-                    *(uint32_t*)(bs + 0xd60) = remoteInput;
+        if (step >= 2)
+        {
+            uint64_t sm = *(uint64_t*)_addr(MVC3_MAIN_PTR);
+            if (sm) {
+                uint64_t bs = *(uint64_t*)(sm + 0x401c0);
+                if (bs) {
+                    // Read local P1's processed input from battle state
+                    uint32_t localP1Input = *(uint32_t*)(bs + 0xd58);
+
+                    // Queue it for the netplay service thread to send
+                    Netplay_SendInput(localP1Input);
+
+                    // Read whatever remote input the service thread has received
+                    uint32_t remoteInput = Netplay_GetRemoteInput();
+                    if (remoteInput != 0) {
+                        // Overwrite the local P2 input slot with the remote player's input
+                        *(uint32_t*)(bs + 0xd60) = remoteInput;
+                    }
                 }
             }
         }
