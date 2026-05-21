@@ -604,6 +604,15 @@ void FrameStepper_Draw()
             ImGuiWindowFlags_NoInputs |
             ImGuiWindowFlags_AlwaysAutoResize);
 
+        // Netplay status (always visible when netplay is active, shown at the top)
+        if (Netplay_IsActive()) {
+            const char* role = Netplay_IsHost() ? "HOST" : "CLIENT";
+            ImVec4 color = Netplay_IsHost()
+                ? ImVec4(1.0f, 0.9f, 0.1f, 1.0f)   // yellow for host
+                : ImVec4(0.3f, 0.7f, 1.0f, 1.0f);   // blue for client
+            ImGui::TextColored(color, "NETPLAY: %s  Ping: %ums", role, Netplay_GetRTT());
+        }
+
         ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "P1: [%s]  0x%08X", DecodeDirection(p1), p1);
         if (btns1[0])
             ImGui::SameLine(), ImGui::TextColored(ImVec4(0.7f, 0.9f, 1.0f, 1.0f), "%s", btns1);

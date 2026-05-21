@@ -39,5 +39,11 @@ uint32_t Netplay_GetRemoteInput();
 // Returns true if netplay is active and the peer is still connected.
 bool Netplay_IsActive();
 
+// Returns true if this instance is the netplay host (server), false if client.
+bool Netplay_IsHost();
+
+// Returns the peer's mean round-trip time (ping) in milliseconds, or 0 if inactive.
+uint32_t Netplay_GetRTT();
+
 // Shut down the service thread, disconnect peer, destroy host.
 void Netplay_Shutdown();

@@ -156,6 +156,20 @@ bool Netplay_IsActive()
     return g_active && g_running && g_peer != nullptr;
 }
 
+bool Netplay_IsHost()
+{
+    // A server host binds to a specific port (address.port != 0).
+    // A client host created with enet_host_create(NULL, ...) has address.port == 0.
+    return g_host && g_host->address.port != 0;
+}
+
+uint32_t Netplay_GetRTT()
+{
+    if (g_peer)
+        return g_peer->roundTripTime;
+    return 0;
+}
+
 void Netplay_Shutdown()
 {
     HookLog("Netplay: Shutting down...\n");
