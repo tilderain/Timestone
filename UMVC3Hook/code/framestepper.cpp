@@ -320,6 +320,17 @@ static void __fastcall HookedMove(void* sMvc3Main)
                         // Overwrite the local P2 input slot with the remote player's input (including 0)
                         *(uint32_t*)(bs + 0xd60) = remoteInput;
                     }
+
+                    // Retrieve the actual active P2 input value for this frame
+                    uint32_t activeP2Input = *(uint32_t*)(bs + 0xd60);
+
+                    // Track active netplay frames and print logs every 60 frames
+                    static uint32_t s_netplayFrameCounter = 0;
+                    s_netplayFrameCounter++;
+                    if (s_netplayFrameCounter % 60 == 0) {
+                        HookLog("[Netplay] Frame %u | Sent P1: 0x%08X | Recv P2: 0x%08X | RTT: %u ms\n",
+                                s_netplayFrameCounter, localP1Input, activeP2Input, Netplay_GetRTT());
+                    }
                 }
             }
         }
