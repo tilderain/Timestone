@@ -1,5 +1,6 @@
 #include "LaunchMenu.h"
 #include "trainingboot.h"
+#include "netplay.h"
 #include <Windows.h>
 #include <cstdio>
 #include <cstring>
@@ -77,6 +78,14 @@ static bool g_isLaunching = false;
 // Declare global cleanup for DLL detach
 void CleanupNetworkOnExit()
 {
+    // If netplay took over the host/peer, let it do the cleanup
+    if (Netplay_IsActive()) {
+        Netplay_Shutdown();
+        g_dialogConfig.enetHost = nullptr;
+        g_dialogConfig.enetPeer = nullptr;
+        return;
+    }
+
     g_networkPolling = false;
     if (g_hPollThread) {
         WaitForSingleObject(g_hPollThread, 1000);
@@ -200,9 +209,11 @@ LaunchOption ShowLaunchMenu()
             g_dialogConfig.enetPeer = nullptr;
         }
     } else {
-        HookLog("UMVC3Hook: Launch menu closing, starting background enet host thread for gameplay\n");
-        g_networkPolling = true;
-        g_hPollThread = CreateThread(NULL, 0, NetworkPollThread, NULL, 0, NULL);
+        HookLog("UMVC3Hook: Launch menu closing, netplay will use enet host from game thread\n");
+        // Don't start a background polling thread — netplay.cpp handles ENet I/O
+        // synchronously from the game thread (HookedMove). The enet host and peer
+        // survive in g_dialogConfig for Netplay_Init to pick up later.
+        g_dialogConfig.hostEnabled = true;
     }
 
     return g_launchOption;

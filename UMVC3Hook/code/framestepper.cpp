@@ -10,6 +10,8 @@
 #include <d3d9.h>
 #include "../imgui/imgui.h"
 #include "../kiero/minhook/include/MinHook.h"
+#include "netplay.h"
+#include "LaunchMenu.h"
 
 using namespace Memory::VP;
 
@@ -235,7 +237,6 @@ static void __fastcall HookedMove(void* sMvc3Main)
             advanceFrame = false;
             frameCounter++;
             oMove(sMvc3Main);
-            CaptureNetInput();
         }
         else if (g_pDevice)
         {
@@ -277,6 +278,29 @@ static void __fastcall HookedMove(void* sMvc3Main)
     oMove(sMvc3Main);
 
     CaptureNetInput();
+
+    // ===== Netplay: send local P1 input, receive remote P2 input =====
+    if (Netplay_IsActive())
+    {
+        uint64_t sm = *(uint64_t*)_addr(MVC3_MAIN_PTR);
+        if (sm) {
+            uint64_t bs = *(uint64_t*)(sm + 0x401c0);
+            if (bs) {
+                // Read local P1's processed input from battle state
+                uint32_t localP1Input = *(uint32_t*)(bs + 0xd58);
+
+                // Queue it for the netplay service thread to send
+                Netplay_SendInput(localP1Input);
+
+                // Read whatever remote input the service thread has received
+                uint32_t remoteInput = Netplay_GetRemoteInput();
+                if (remoteInput != 0) {
+                    // Overwrite the local P2 input slot with the remote player's input
+                    *(uint32_t*)(bs + 0xd60) = remoteInput;
+                }
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -425,6 +449,13 @@ void FrameStepper_Init()
         MH_CreateHook((LPVOID)_addr(0x1401cc5d0), (LPVOID)&HookedGetInputBuf, (LPVOID*)&oGetInputBuf);
         MH_EnableHook((LPVOID)_addr(0x1401cc5d0));
         inputBufHooked = true;
+    }
+
+    // Initialize netplay if the launch menu set up an enet host/peer
+    const LaunchDialogConfig& cfg = GetLaunchDialogConfig();
+    if (cfg.hostEnabled && cfg.enetHost && cfg.enetPeer) {
+        Netplay_Init(cfg.enetHost, cfg.enetPeer);
+        HookLog("FrameStepper: Netplay initialized from launch config\n");
     }
 }
 
