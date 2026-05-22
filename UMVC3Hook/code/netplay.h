@@ -3,43 +3,44 @@
 #include <enet/enet.h>
 
 // ---------------------------------------------------------------------------
-// Netplay: frame-synced input transport over ENet.
+// Netplay: frame-delayed ring buffer input transport over ENet.
 //
-// A dedicated background thread handles ALL ENet I/O (send, receive,
-// keep-alive). The game thread communicates via lock-free atomics:
+// Architecture:
+//   Local physical input is accumulated per-character in hkprocessFrameInput.
+//   Each frame's raw accumulated input is written into a delay ring buffer at
+//   (currentFrame + delayFrames), and sent as a sliding-history window
+//   (NET_HISTORY_SIZE entries) over the wire.
 //
-//   Game thread (HookedMove):  writes local P1 input -> reads remote input
-//   Service thread (1ms loop): reads outbound atom -> enet_peer_send
-//                              enet_host_service -> writes inbound atom
+//   On receipt, every history slot is written into the OTHER player's delay
+//   buffer at a relative offset from the receiver's current frame, providing
+//   resilience against packet loss.  Both sides read at currentFrame during
+//   hkprocessFrameInput — symmetric input delay for both players.
 //
-// This guarantees ENet is always serviced (no timeout disconnects) and
-// avoids thread-safety issues with ENet internals.
+//   A dedicated background thread owns ALL ENet I/O. The game thread
+//   communicates via Win32 critical sections for packet exchange.
 // ---------------------------------------------------------------------------
 
-// Input packet sent every frame over the wire
 #pragma pack(push, 1)
+constexpr size_t NET_HISTORY_SIZE = 16;
+
 struct InputPacket {
-    uint32_t sequence;     // monotonic frame counter (for debugging)
-    uint32_t inputBits;    // input bitmask (IN_UP, IN_DOWN, etc.)
+    uint32_t start_frame;      // inputs[0] corresponds to this frame number
+    uint32_t inputs[NET_HISTORY_SIZE];
 };
 #pragma pack(pop)
 
-// Hand over the ENet host/peer from the launch menu and start the service
-// thread. Must be called once from the game thread after the game is loaded.
+// Hand over the ENet host/peer and start the service thread.
 void Netplay_Init(ENetHost* host, ENetPeer* peer);
 
-// Called once per game frame from HookedMove (game thread).
-// Writes local P1 input into the outbound atom for the service thread to send.
-void Netplay_SendInput(uint32_t localInput);
+// Send a single raw uint32 input value over the wire (wraps into InputPacket).
+void Netplay_SendInput(uint32_t rawInput);
 
-// Returns the most recently received remote input bitmask (from the atom
-// updated by the service thread). Call after Netplay_SendInput each frame.
-uint32_t Netplay_GetRemoteInput();
+// Queue a full history packet for the service thread to send.
+void Netplay_SendPacket(const InputPacket& pkt);
 
-// Returns true if at least one remote input packet has been received.
-// Use this guard before applying Netplay_GetRemoteInput() to distinguish
-// "no data yet" from "remote player is idle (input = 0)".
-bool Netplay_HasRemoteInput();
+// Retrieve the most recently received inbound packet. Returns true if data
+// was available (the packet is consumed / cleared by this call).
+bool Netplay_GetInboundPacket(InputPacket& outPkt);
 
 // Returns true if netplay is active and the peer is still connected.
 bool Netplay_IsActive();
@@ -49,6 +50,10 @@ bool Netplay_IsHost();
 
 // Returns the peer's mean round-trip time (ping) in milliseconds, or 0 if inactive.
 uint32_t Netplay_GetRTT();
+
+// Compatibility queries (return first slot of latest inbound packet)
+bool     Netplay_HasRemoteInput();
+uint32_t Netplay_GetRemoteInput();
 
 // Shut down the service thread, disconnect peer, destroy host.
 void Netplay_Shutdown();

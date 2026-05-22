@@ -13,6 +13,11 @@
 #include "netplay.h"
 #include "LaunchMenu.h"
 
+// Netplay debug info from controller.cpp
+extern "C" int32_t Controller_GetDelayFrames();
+extern "C" int32_t Controller_GetNetFrameCount();
+extern "C" int32_t Controller_GetLastRemoteFrame();
+
 using namespace Memory::VP;
 
 // HookLog from dllmain.cpp
@@ -599,6 +604,10 @@ void FrameStepper_Draw()
                 ? ImVec4(1.0f, 0.9f, 0.1f, 1.0f)   // yellow for host
                 : ImVec4(0.3f, 0.7f, 1.0f, 1.0f);   // blue for client
             ImGui::TextColored(color, "NETPLAY: %s  Ping: %ums", role, Netplay_GetRTT());
+            ImGui::TextColored(color, "  Frame:%d Delay:%d LastRecv:%d",
+                Controller_GetNetFrameCount(),
+                Controller_GetDelayFrames(),
+                Controller_GetLastRemoteFrame());
         }
 
         ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "P1: [%s]  0x%08X", DecodeDirection(p1), p1);

@@ -76,3 +76,13 @@ typedef void(__fastcall* inputAutoRepeatTimerProcess_t)(uint64_t slotBase);
 // Initialization
 // ---------------------------------------------------------------------------
 void Controller_InitHooks();
+
+// Netplay ring buffer lifecycle — called from framestepper.cpp / netplay.cpp
+extern "C" void Controller_ResetBuffers();
+extern "C" void Controller_OnFrameStart();
+extern "C" void Controller_OnFrameEnd();
+
+// Netplay debug info — read from framestepper draw
+extern "C" int32_t  Controller_GetDelayFrames();
+extern "C" int32_t  Controller_GetNetFrameCount();
+extern "C" int32_t  Controller_GetLastRemoteFrame();

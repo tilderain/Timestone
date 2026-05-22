@@ -1,10 +1,17 @@
 // controller.cpp
 // Decompiled pad/input functions from umvc3.exe, hooked via MinHook.
-// Primary purpose: intercept GetsCurrentInput_withSOCD for P2 netplay input injection.
 //
-// Hook architecture:
-//   GetsCurrentInput_withSOCD  — FULLY DECOMPILED, with netplay P2 injection
-//   All other hooks             — call through to originals (MinHook trampolines)
+// Frame-delayed ring buffer netplay architecture:
+//   Local input accumulates per-character in hkprocessFrameInput (identical to
+//   original behavior).  At frame end the raw accumulated value is written into
+//   a delay ring buffer at (currentFrame + delayFrames) and also sent over the
+//   wire immediately (no absolute frame indices — packets carry plain values).
+//
+//   On receipt, the raw remote value is written into the remote player's delay
+//   buffer at (currentFrame + delayFrames).  Both sides read their respective
+//   buffer at currentFrame during hkprocessFrameInput, giving each player
+//   exactly delayFrames of execution delay.  No absolute frame counters cross
+//   the wire, so host/client drift is harmless.
 #include "../pch.h"
 #include "controller.h"
 #include "mk10utils.h"
@@ -14,12 +21,6 @@
 #include <cstring>
 
 extern void HookLog(const char* fmt, ...);
-
-// ---------------------------------------------------------------------------
-// External netplay queries
-// ---------------------------------------------------------------------------
-extern bool     Netplay_HasRemoteInput();
-extern uint32_t Netplay_GetRemoteInput();
 
 // ---------------------------------------------------------------------------
 // Addresses
@@ -131,6 +132,74 @@ static uint32_t ApplySOCD(uint32_t input)
 }
 
 // ===========================================================================
+// Netplay Input Buffers  (nifi.cpp-style shift buffer + frame-indexed array)
+//
+// g_oldInputs[] — shift buffer holding the last MAX_HISTORY frames of raw
+//   accumulated local input.  Each frame everything shifts down by one and the
+//   current accumulator is appended at the end.  Delayed local input is read
+//   from g_oldInputs[MAX_HISTORY - g_delayFrames] BEFORE the shift.
+//
+// g_receivedInput[] — indexed by (localFrame % RING_SIZE).  Inbound packets
+//   carry MAX_HISTORY slots, stored at RELATIVE offsets from the receiver's
+//   current frame + delay (the sender's absolute frame numbers are ignored
+//   since host and client frame counters are independent).
+// ===========================================================================
+static constexpr int RING_SIZE      = 256;
+static constexpr int MAX_HISTORY    = NET_HISTORY_SIZE;  // 16 — matches wire format
+
+static uint32_t  g_oldInputs[MAX_HISTORY];     // local history (shift buffer)
+
+// Remote inputs indexed by local frame number (mod RING_SIZE).
+// All offsets are relative to the receiver's own frame counter.
+static uint32_t  g_receivedInput[RING_SIZE];
+
+// Frame counter — read from the game's own sReplay singleton each frame.
+// g_psReplay pointer   = *(uint64_t*)_addr(0x140d4d9d8)  (Ghidra confirmation)
+// Frame counter uint32 = *(sReplay + 0x54)                (INC dword [RCX+0x54] at 0x1401cefdd)
+static int32_t   g_netFrameCount   = -1;
+static int32_t   g_delayFrames     = 3;
+static uint32_t  g_localPending    = 0;   // accumulator, ORed across team chars
+
+// Tracks the latest frame for which remote input has been received.
+// Used to hold-last-value when no new input has arrived for the current frame.
+static int32_t   g_lastRemoteFrame = -1;
+static uint32_t  g_lastRemoteInput = 0;
+
+// ---------------------------------------------------------------------------
+// Helper: read the game's authoritative frame counter from sReplay + 0x54.
+// g_psReplay global at 0x140d4d9d8 (confirmed via Ghidra disassembly).
+// Returns -1 if the replay system isn't initialized yet.
+// ---------------------------------------------------------------------------
+static constexpr uintptr_t G_PSREPLAY_PTR = 0x140d4d9d8;
+
+static int32_t GetGameFrameCount()
+{
+    uint64_t sReplay = *(uint64_t*)_addr(G_PSREPLAY_PTR);
+    if (!sReplay) return -1;
+    return *(int32_t*)(sReplay + 0x54);
+}
+
+// ---------------------------------------------------------------------------
+// Reset buffers — called from Netplay_Init
+// ---------------------------------------------------------------------------
+extern "C" void Controller_ResetBuffers()
+{
+    std::memset(g_oldInputs,      0, sizeof(g_oldInputs));
+    std::memset(g_receivedInput,  0, sizeof(g_receivedInput));
+    // g_netFrameCount is read from sReplay each frame; no reset needed.
+    g_localPending    = 0;
+    g_lastRemoteFrame = -1;
+    g_lastRemoteInput = 0;
+}
+
+// ---------------------------------------------------------------------------
+// Debug accessors — called from framestepper draw
+// ---------------------------------------------------------------------------
+extern "C" int32_t Controller_GetDelayFrames()      { return g_delayFrames; }
+extern "C" int32_t Controller_GetNetFrameCount()    { return GetGameFrameCount(); }
+extern "C" int32_t Controller_GetLastRemoteFrame()  { return g_lastRemoteFrame; }
+
+// ===========================================================================
 // Hooked functions
 // ===========================================================================
 
@@ -175,36 +244,147 @@ static uint64_t __fastcall hkGetsCurrentInput_withSOCD(uint64_t pad, uint32_t pl
 }
 
 // ---------------------------------------------------------------------------
-// Netplay Input Accumulators and Frame Boundary Sync
+// Frame Boundary Synchronization  (nifi.cpp-style)
+//
+// Controller_OnFrameStart (called before oMove):
+//   - Increment frame counter, reset accumulator
+//   - Drain inbound packets: store each history slot at (frame % RING_SIZE)
+//
+// Controller_OnFrameEnd (called after oMove):
+//   - Read delayed local input from oldInputs (BEFORE shifting), then shift
+//     the buffer and write the current accumulator at the end
+//   - Send outbound packet: MAX_HISTORY slots, starting from
+//     (currentFrame + g_delayFrames - MAX_HISTORY + 1)
+//     → newest slot maps to (currentFrame + g_delayFrames) on the wire
+//
+// hkprocessFrameInput (per character, inside oMove):
+//   LOCAL:  accumulate, overwrite fields with delayed oldInputs value
+//   REMOTE: overwrite fields with g_receivedInput[currentFrame % RING_SIZE]
 // ---------------------------------------------------------------------------
-static uint32_t g_hostPendingInput = 0;
-static uint32_t g_clientPendingInput = 0;
-
 extern "C" void Controller_OnFrameStart()
 {
-    g_hostPendingInput = 0;
-    g_clientPendingInput = 0;
+    if (!Netplay_IsActive())
+        return;
+
+    g_netFrameCount = GetGameFrameCount();
+    // If sReplay isn't ready yet, skip packet processing this frame.
+    if (g_netFrameCount < 0) return;
+
+    g_localPending = 0;
+
+    // --- Drain every received packet.
+    //     Slot order:  inputs[0]    = oldest (= MAX_HISTORY-1 frames ago)
+    //                  inputs[15]   = newest (= current frame on sender)
+    //
+    //     We store each slot at a RELATIVE offset from our own frame counter:
+    //     newest    → g_netFrameCount + g_delayFrames
+    //     slot i    → g_netFrameCount + g_delayFrames - (MAX_HISTORY-1 - i)
+    //
+    //     This ensures all slots land at future-or-present frame positions
+    //     regardless of sender/receiver frame counter mismatch.
+    InputPacket inPkt;
+    while (Netplay_GetInboundPacket(inPkt))
+    {
+        for (size_t i = 0; i < NET_HISTORY_SIZE; i++)
+        {
+            // Slot i is (MAX_HISTORY-1 - i) frames OLDER than the newest slot.
+            int32_t localSlot = g_netFrameCount + g_delayFrames
+                                - ((int32_t)MAX_HISTORY - 1 - (int32_t)i);
+            if (localSlot >= 0)
+            {
+                g_receivedInput[(uint32_t)localSlot % RING_SIZE] = inPkt.inputs[i];
+
+                // Track the latest known remote frame
+                if (localSlot > g_lastRemoteFrame)
+                {
+                    g_lastRemoteFrame = localSlot;
+                    g_lastRemoteInput = inPkt.inputs[i];
+                }
+            }
+        }
+    }
+
+    // --- Spin-wait: pause the game thread until remote input for the CURRENT
+    //     frame has arrived.  We only wait for g_netFrameCount (not +delay)
+    //     because the remote can't have sent (ourFrame + delay) data yet — they
+    //     send it at the END of their frame, but we're both at the same frame
+    //     so it would deadlock (neither reaches OnFrameEnd).
+    //
+    //     The sliding window (16 slots per packet) ensures that once at least
+    //     one packet has been received, g_receivedInput[currentFrame] was
+    //     pre-filled by a past packet's window.  So this wait ensures we never
+    //     process a frame without ANY remote data having arrived yet.
+    int32_t neededFrame = g_netFrameCount;
+    if (g_lastRemoteFrame < neededFrame)
+    {
+        while (g_lastRemoteFrame < neededFrame && Netplay_IsActive())
+        {
+            Sleep(1);
+            InputPacket waitPkt;
+            while (Netplay_GetInboundPacket(waitPkt))
+            {
+                for (size_t i = 0; i < NET_HISTORY_SIZE; i++)
+                {
+                    int32_t localSlot = g_netFrameCount + g_delayFrames
+                                        - ((int32_t)MAX_HISTORY - 1 - (int32_t)i);
+                    if (localSlot >= 0)
+                    {
+                        g_receivedInput[(uint32_t)localSlot % RING_SIZE] = waitPkt.inputs[i];
+                        if (localSlot > g_lastRemoteFrame)
+                        {
+                            g_lastRemoteFrame = localSlot;
+                            g_lastRemoteInput = waitPkt.inputs[i];
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 extern "C" void Controller_OnFrameEnd()
 {
-    if (Netplay_IsActive())
-    {
-        if (Netplay_IsHost())
-        {
-            Netplay_SendInput(g_hostPendingInput);
-        }
-        else
-        {
-            Netplay_SendInput(g_clientPendingInput);
-        }
-    }
+    if (!Netplay_IsActive())
+        return;
+
+    // Don't send anything on frame 0 — let the first frame be neutral so both
+    // sides have time to establish the connection and fill initial delay slots.
+    if (g_netFrameCount < 1)
+        return;
+
+    // --- 1. Read delayed local input BEFORE shifting (unused here; the
+    //         actual read that overwrites the character fields happens in
+    //         hkprocessFrameInput which also reads from g_oldInputs before
+    //         this shift).
+
+    // --- 2. Shift history buffer: discard oldest, append current.
+    memmove(&g_oldInputs[0], &g_oldInputs[1],
+            (MAX_HISTORY - 1) * sizeof(uint32_t));
+    g_oldInputs[MAX_HISTORY - 1] = g_localPending;
+
+    // --- 3. Build outbound packet — inputs[] are absolute-frame-indexed.
+    //     start_frame = (currentFrame + delay) - MAX_HISTORY + 1
+    //     inputs[0]                    → frame start_frame          (oldest)
+    //     inputs[MAX_HISTORY-1]        → frame start_frame+MAX_HISTORY-1 (newest)
+    InputPacket outPkt = {};
+    outPkt.start_frame = (uint32_t)(g_netFrameCount + g_delayFrames
+                                     - MAX_HISTORY + 1);
+    for (size_t i = 0; i < MAX_HISTORY; i++)
+        outPkt.inputs[i] = g_oldInputs[i];
+
+    Netplay_SendPacket(outPkt);
 }
 
 // ---------------------------------------------------------------------------
 // hkprocessFrameInput
 // Hook on processFrameInput at 0x14002DD60.
-// Collects and overrides translated character-processed inputs symmetrically.
+//
+// LOCAL:  accumulate native-processed input, then overwrite character fields
+//         with the delayed value from g_oldInputs.
+// REMOTE: overwrite character fields with g_receivedInput[currentFrame].
+//
+// Both players experience the same delay: local via the shift buffer,
+// remote via the frame-indexed receive array and network transport.
 // ---------------------------------------------------------------------------
 static void __fastcall hkprocessFrameInput(uint64_t cChrInput)
 {
@@ -212,6 +392,9 @@ static void __fastcall hkprocessFrameInput(uint64_t cChrInput)
     oprocessFrameInput(cChrInput);
 
     if (!Netplay_IsActive())
+        return;
+
+    if (g_netFrameCount < 0)
         return;
 
     uint64_t character = *(uint64_t*)(cChrInput + 0x8);
@@ -226,13 +409,29 @@ static void __fastcall hkprocessFrameInput(uint64_t cChrInput)
     {
         if (teamIdx == 0)
         {
-            // Host P1: Accumulate locally processed inputs
-            g_hostPendingInput |= *(uint32_t*)(cChrInput + 0x14);
+            // Host P1 (Local): accumulate, then apply delayed value from shift buffer
+            g_localPending |= *(uint32_t*)(cChrInput + 0x14);
+
+            // NOTE: g_oldInputs hasn't been shifted yet for this frame —
+            //       Controller_OnFrameEnd does the shift.  So g_oldInputs still
+            //       has last frame's data.  We read from the delay position,
+            //       which was the local input from g_delayFrames frames ago.
+            uint32_t delayed = g_oldInputs[MAX_HISTORY - g_delayFrames];
+            *(uint32_t*)(cChrInput + 0x14)  = delayed;
+            *(uint32_t*)(cChrInput + 0x560) = delayed;
+            *(uint32_t*)(cChrInput + 0x56C) = delayed;
         }
         else if (teamIdx == 1)
         {
-            // Host P2: Write host's received remote input directly into character fields
-            uint32_t remote = Netplay_HasRemoteInput() ? Netplay_GetRemoteInput() : 0;
+            // Host P2 (Remote): inject received input at current frame.
+            // If no input has been received for this frame yet, hold
+            // the last known value rather than dropping to neutral.
+            uint32_t remote;
+            if (g_netFrameCount <= g_lastRemoteFrame)
+                remote = g_receivedInput[(uint32_t)g_netFrameCount % RING_SIZE];
+            else
+                remote = g_lastRemoteInput;
+
             *(uint32_t*)(cChrInput + 0x14)  = remote;
             *(uint32_t*)(cChrInput + 0x560) = remote;
             *(uint32_t*)(cChrInput + 0x56C) = remote;
@@ -242,24 +441,32 @@ static void __fastcall hkprocessFrameInput(uint64_t cChrInput)
     {
         if (teamIdx == 0)
         {
-            // Client P1: Write host's received remote input directly into character fields
-            uint32_t remote = Netplay_HasRemoteInput() ? Netplay_GetRemoteInput() : 0;
+            // Client P1 (Remote): inject received input at current frame.
+            // Hold-last-value when the remote frame hasn't arrived yet.
+            uint32_t remote;
+            if (g_netFrameCount <= g_lastRemoteFrame)
+                remote = g_receivedInput[(uint32_t)g_netFrameCount % RING_SIZE];
+            else
+                remote = g_lastRemoteInput;
             *(uint32_t*)(cChrInput + 0x14)  = remote;
             *(uint32_t*)(cChrInput + 0x560) = remote;
             *(uint32_t*)(cChrInput + 0x56C) = remote;
         }
         else if (teamIdx == 1)
         {
-            // Client P2: Accumulate locally processed inputs
-            g_clientPendingInput |= *(uint32_t*)(cChrInput + 0x14);
+            // Client P2 (Local): accumulate, then apply delayed value from shift buffer
+            g_localPending |= *(uint32_t*)(cChrInput + 0x14);
+
+            uint32_t delayed = g_oldInputs[MAX_HISTORY - g_delayFrames];
+            *(uint32_t*)(cChrInput + 0x14)  = delayed;
+            *(uint32_t*)(cChrInput + 0x560) = delayed;
+            *(uint32_t*)(cChrInput + 0x56C) = delayed;
         }
     }
 }
 
 // ---------------------------------------------------------------------------
-// hkpadPollAllSlots
-// Hook on padPollAllSlots at 0x140514570.
-// After normal polling completes, copy P1's processed input to P2's slot (offline only).
+// Offline Mirroring & Standard Hook Implementations
 // ---------------------------------------------------------------------------
 static void __fastcall hkpadPollAllSlots(uint64_t sPad)
 {
@@ -273,9 +480,6 @@ static void __fastcall hkpadPollAllSlots(uint64_t sPad)
         *(uint32_t*)(sPad + 0 * PAD_SLOT_STRIDE + PAD_SLOT_INPUT);
 }
 
-// ---------------------------------------------------------------------------
-// All other hooks: call through to original trampolines.
-// ---------------------------------------------------------------------------
 static uint64_t __fastcall hkpadSlotReadDevice(uint64_t slotBase)
 {
     return opadSlotReadDevice(slotBase);
