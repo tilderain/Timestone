@@ -473,6 +473,17 @@ void OnInitializeHook()
 	// Controller hooks: decompiled pad/input functions with netplay P2 injection
 	Controller_InitHooks();
 
+	// Force the global XorShift RNG state to the same initial seed on both
+	// host and client instances.  The game normally does this once at startup
+	// (MtXorShift__seed(&state, 0x1105) @ 0x140a3d120), but explicit
+	// re-seeding here eliminates any risk of divergence caused by hook-init
+	// code paths (different menu selections, timing, etc.) running before the
+	// game's own RNG init.  Both sides must agree on the seed so that
+	// deterministic RNG consumption stays in sync during netplay.
+	HookLog("UMVC3Hook: Re-seeding global XorShift state with 0x1105\n");
+	typedef void(__fastcall* SeedGlobalXorShift_t)();
+	((SeedGlobalXorShift_t)_addr(0x140a3d120))();
+
 	//InjectHook(_addr(0x140650c10), tramp->Jump(InitMainLoop), PATCH_JUMP);//parts of ui & particles
 	//InjectHook(_addr(0x14004ad20), tramp->Jump(InitMainLoop), PATCH_JUMP);//parts pyshics
 	//InjectHook(_addr(0x14004b9d0), tramp->Jump(InitMainLoop), PATCH_JUMP);//parts pyshics
