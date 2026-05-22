@@ -5,13 +5,12 @@
 //   Local input accumulates per-character in hkprocessFrameInput (identical to
 //   original behavior).  At frame end the raw accumulated value is written into
 //   a delay ring buffer at (currentFrame + delayFrames) and also sent over the
-//   wire immediately (no absolute frame indices — packets carry plain values).
+//   wire immediately.
 //
-//   On receipt, the raw remote value is written into the remote player's delay
-//   buffer at (currentFrame + delayFrames).  Both sides read their respective
-//   buffer at currentFrame during hkprocessFrameInput, giving each player
-//   exactly delayFrames of execution delay.  No absolute frame counters cross
-//   the wire, so host/client drift is harmless.
+//   On receipt, inbound inputs are stored at the sender's absolute frame index
+//   (using inPkt.start_frame), binding both games to the same timeline.  A
+//   spin-wait blocks if the local game is more than g_delayFrames ahead of the
+//   remote peer, preventing host/client drift.
 #include "../pch.h"
 #include "controller.h"
 #include "mk10utils.h"
@@ -139,10 +138,10 @@ static uint32_t ApplySOCD(uint32_t input)
 //   current accumulator is appended at the end.  Delayed local input is read
 //   from g_oldInputs[MAX_HISTORY - g_delayFrames] BEFORE the shift.
 //
-// g_receivedInput[] — indexed by (localFrame % RING_SIZE).  Inbound packets
-//   carry MAX_HISTORY slots, stored at RELATIVE offsets from the receiver's
-//   current frame + delay (the sender's absolute frame numbers are ignored
-//   since host and client frame counters are independent).
+// g_receivedInput[] — indexed by sender's absolute frame number (% RING_SIZE).
+//   Inbound packets carry MAX_HISTORY slots.  Each slot is stored at
+//   (inPkt.start_frame + slot_index) % RING_SIZE, binding both games to a
+//   shared timeline and preventing drift.
 // ===========================================================================
 static constexpr int RING_SIZE      = 256;
 static constexpr int MAX_HISTORY    = NET_HISTORY_SIZE;  // 16 — matches wire format
@@ -280,31 +279,24 @@ extern "C" void Controller_OnFrameStart()
     g_localPending = 0;
 
     // --- Drain every received packet.
-    //     Slot order:  inputs[0]    = oldest (= MAX_HISTORY-1 frames ago)
-    //                  inputs[15]   = newest (= current frame on sender)
-    //
-    //     We store each slot at a RELATIVE offset from our own frame counter:
-    //     newest    → g_netFrameCount + g_delayFrames
-    //     slot i    → g_netFrameCount + g_delayFrames - (MAX_HISTORY-1 - i)
-    //
-    //     This ensures all slots land at future-or-present frame positions
-    //     regardless of sender/receiver frame counter mismatch.
+    //     By using the sender's transmitted start_frame, we align both games
+    //     to the same absolute timeline and prevent coordinate/frame drift.
     InputPacket inPkt;
     while (Netplay_GetInboundPacket(inPkt))
     {
         for (size_t i = 0; i < NET_HISTORY_SIZE; i++)
         {
-            // Slot i is (MAX_HISTORY-1 - i) frames OLDER than the newest slot.
-            int32_t localSlot = g_netFrameCount + g_delayFrames
-                                - ((int32_t)MAX_HISTORY - 1 - (int32_t)i);
-            if (localSlot >= 0)
+            // Cast to signed int32_t to handle negative/underflowed frame
+            // numbers gracefully during initial startup frames.
+            int32_t targetFrame = (int32_t)inPkt.start_frame + (int32_t)i;
+            if (targetFrame >= 0)
             {
-                g_receivedInput[(uint32_t)localSlot % RING_SIZE] = inPkt.inputs[i];
+                g_receivedInput[(uint32_t)targetFrame % RING_SIZE] = inPkt.inputs[i];
 
                 // Track the latest known remote frame
-                if (localSlot > g_lastRemoteFrame)
+                if (targetFrame > g_lastRemoteFrame)
                 {
-                    g_lastRemoteFrame = localSlot;
+                    g_lastRemoteFrame = targetFrame;
                     g_lastRemoteInput = inPkt.inputs[i];
                 }
             }
@@ -312,15 +304,8 @@ extern "C" void Controller_OnFrameStart()
     }
 
     // --- Spin-wait: pause the game thread until remote input for the CURRENT
-    //     frame has arrived.  We only wait for g_netFrameCount (not +delay)
-    //     because the remote can't have sent (ourFrame + delay) data yet — they
-    //     send it at the END of their frame, but we're both at the same frame
-    //     so it would deadlock (neither reaches OnFrameEnd).
-    //
-    //     The sliding window (16 slots per packet) ensures that once at least
-    //     one packet has been received, g_receivedInput[currentFrame] was
-    //     pre-filled by a past packet's window.  So this wait ensures we never
-    //     process a frame without ANY remote data having arrived yet.
+    //     frame has arrived.  This guarantees that neither side can run ahead
+    //     of the other by more than the configured delay window.
     int32_t neededFrame = g_netFrameCount;
     if (g_lastRemoteFrame < neededFrame)
     {
@@ -332,14 +317,13 @@ extern "C" void Controller_OnFrameStart()
             {
                 for (size_t i = 0; i < NET_HISTORY_SIZE; i++)
                 {
-                    int32_t localSlot = g_netFrameCount + g_delayFrames
-                                        - ((int32_t)MAX_HISTORY - 1 - (int32_t)i);
-                    if (localSlot >= 0)
+                    int32_t targetFrame = (int32_t)waitPkt.start_frame + (int32_t)i;
+                    if (targetFrame >= 0)
                     {
-                        g_receivedInput[(uint32_t)localSlot % RING_SIZE] = waitPkt.inputs[i];
-                        if (localSlot > g_lastRemoteFrame)
+                        g_receivedInput[(uint32_t)targetFrame % RING_SIZE] = waitPkt.inputs[i];
+                        if (targetFrame > g_lastRemoteFrame)
                         {
-                            g_lastRemoteFrame = localSlot;
+                            g_lastRemoteFrame = targetFrame;
                             g_lastRemoteInput = waitPkt.inputs[i];
                         }
                     }
