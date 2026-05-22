@@ -276,7 +276,7 @@ void OnInitializeHook()
 		else {
 			strncpy(g_autoConnectIp, tempConn, sizeof(g_autoConnectIp) - 1);
 			g_autoConnectIp[sizeof(g_autoConnectIp) - 1] = '\0';
-			g_autoConnectPort = 10800;
+			g_autoConnectPort = 7777;
 		}
 
 		HookLog("UMVC3Hook: Detected -connect argument, target %s:%d\n",

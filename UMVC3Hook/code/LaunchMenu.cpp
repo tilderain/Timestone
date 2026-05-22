@@ -60,7 +60,7 @@ static LaunchDialogConfig g_dialogConfig = {
     {1, 1, 1},   // p2Chars (Ryu, Ryu, Ryu)
     0,           // stageId (Training Room)
     "",          // hostIp
-    10800,       // hostPort
+    7777,       // hostPort
     false,       // hostEnabled
     nullptr,     // enetHost
     nullptr      // enetPeer
@@ -158,7 +158,7 @@ LaunchOption ShowLaunchMenu()
 
     // Default IP
     strcpy(g_dialogConfig.hostIp, "127.0.0.1");
-    g_dialogConfig.hostPort = 10800;
+    g_dialogConfig.hostPort = 7777;
     g_dialogConfig.hostEnabled = false;
     g_dialogConfig.enetHost = nullptr;
     g_dialogConfig.enetPeer = nullptr;
