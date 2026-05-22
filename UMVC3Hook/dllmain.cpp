@@ -207,6 +207,7 @@ void __fastcall Hook_titleLogoUpdate(uintptr_t param_1)
 }
 
 
+
 void OnInitializeHook()
 {
 	// Open log file for hook debugging (append mode so 2nd instance doesn't clobber)
@@ -314,6 +315,33 @@ void OnInitializeHook()
 			HookLog("UMVC3Hook: FAILED to hook aTitleLogo__update\n");
 		}
 	}
+
+	// ---- Netplay pause patches ----
+	// Force uBattleUiCreatePauseMenu_maybe (0x1402ba150) to always create the
+	// uBattleUiPauseNetGallery (quit-match dialog overlay) and never create the
+	// real uBattleUiPause menu (which freezes game logic).
+	//
+	// Patch 1: At the JZ that skips NetGallery creation when NOT in ranked mode,
+	// NOP it so NetGallery is always created.
+	//   Original: 0F 84 90 00 00 00  (JZ +0x90)
+	//   Patched:  90 90 90 90 90 90  (NOP × 6)
+	Memory::VP::Nop(_addr(0x1402BA17E), 6);
+	HookLog("UMVC3Hook: Patched uBattleUiCreatePauseMenu JZ→NOP (force NetGallery)\n");
+
+	// Patch 2: Change JNZ (skip real pause if online) to JMP (always skip).
+	//   Original: 75 5C  (JNZ +0x5C)
+	//   Patched:  EB 5C  (JMP +0x5C)
+	Memory::VP::Patch<uint8_t>(_addr(0x1402BA223), 0xEB);
+	HookLog("UMVC3Hook: Patched uBattleUiCreatePauseMenu JNZ→JMP (skip real pause)\n");
+
+	// Patch 3: uBattleUiPauseNetGallery_vfn5 (0x1402e4320) checks
+	// isGameModeOnlineRanked — when false it calls the parent's vfn78 (no-op)
+	// instead of uMenuSubBase_vfn5 (which actually renders the UI).
+	// Change the conditional jump to unconditional so the NetGallery always renders.
+	//   Original: 75 0C  (JNZ +0x0C)
+	//   Patched:  EB 0C  (JMP +0x0C)
+	Memory::VP::Patch<uint8_t>(_addr(0x1402E433B), 0xEB);
+	HookLog("UMVC3Hook: Patched uBattleUiPauseNetGallery_vfn5 JNZ→JMP (force render)\n");
 
 	if (opt == LAUNCH_DUAL_TRAINING) {
 		// Switch host log to host-specific file so host + client don't clobber each other
