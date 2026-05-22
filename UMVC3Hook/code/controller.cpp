@@ -44,6 +44,9 @@ static constexpr uintptr_t ADDR_PROCESS_FRAME_INPUT       = 0x14002DD60;
 // uAmaterasu__getter_4AC0 — returns the team index (0=P1, 1=P2) from a character object.
 static constexpr uintptr_t ADDR_GET_TEAM_INDEX            = 0x140004AC0;
 
+// sAction__stepIntro — auto-skip intro during netplay
+static constexpr uintptr_t ADDR_STEP_INTRO                 = 0x140007D90;
+
 // ---------------------------------------------------------------------------
 // Original function pointers (MinHook trampolines)
 // ---------------------------------------------------------------------------
@@ -244,9 +247,29 @@ static uint64_t __fastcall hkGetsCurrentInput_withSOCD(uint64_t pad, uint32_t pl
     }
 
     if (playerIndex == 1)
-        return oGetsCurrentInput_withSOCD(pad, 1) & ~(uint64_t)(IN_START | IN_BACK);
+        return oGetsCurrentInput_withSOCD(pad, 1);
 
     return oGetsCurrentInput_withSOCD(pad, playerIndex);
+}
+
+// ---------------------------------------------------------------------------
+// hkStepIntro
+// Hook on sAction__stepIntro at 0x140007D90.
+// When netplay is active, immediately transitions to the 3-second countdown
+// phase (same path as training mode's auto-skip), avoiding desync from
+// unsynchronized skip-button checks.
+// ---------------------------------------------------------------------------
+static void(__fastcall* oStepIntro)(uint64_t param_1) = nullptr;
+
+static void __fastcall hkStepIntro(uint64_t param_1)
+{
+    if (Netplay_IsActive()) {
+        // Same as training mode skip: jump directly to countdown
+        auto setCountdown = (void(__fastcall*)(uint64_t, int))_addr(0x14000AE00);
+        setCountdown(param_1, 3);
+        return;
+    }
+    oStepIntro(param_1);
 }
 
 // ---------------------------------------------------------------------------
@@ -508,6 +531,17 @@ void Controller_InitHooks()
         MH_EnableHook((LPVOID)_addr(ADDR_GET_CURRENT_INPUT));
     else
         HookLog("Controller: Failed to hook GetsCurrentInput_withSOCD (%d)\n", s);
+
+    // sAction__stepIntro — auto-skip intro during netplay
+    s = MH_CreateHook(
+        (LPVOID)_addr(ADDR_STEP_INTRO),
+        (LPVOID)&hkStepIntro,
+        (LPVOID*)&oStepIntro
+    );
+    if (s == MH_OK)
+        MH_EnableHook((LPVOID)_addr(ADDR_STEP_INTRO));
+    else
+        HookLog("Controller: Failed to hook stepIntro (%d)\n", s);
 
     // cChrInput__processFrameInput — netplay client/host synchronization
     s = MH_CreateHook(
