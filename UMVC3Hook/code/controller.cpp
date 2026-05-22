@@ -199,6 +199,13 @@ extern "C" int32_t Controller_GetDelayFrames()      { return g_delayFrames; }
 extern "C" int32_t Controller_GetNetFrameCount()    { return GetGameFrameCount(); }
 extern "C" int32_t Controller_GetLastRemoteFrame()  { return g_lastRemoteFrame; }
 
+extern "C" void Controller_SetDelayFrames(int32_t delay)
+{
+    if (delay < 1)                  delay = 1;
+    if (delay > MAX_HISTORY - 1)    delay = MAX_HISTORY - 1;
+    g_delayFrames = delay;
+}
+
 // ===========================================================================
 // Hooked functions
 // ===========================================================================

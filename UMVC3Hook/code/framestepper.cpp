@@ -25,6 +25,11 @@ extern void HookLog(const char* fmt, ...);
 
 // Netplay state queries from netplay.cpp
 extern bool Netplay_HasRemoteInput();
+extern bool Netplay_GetInboundDelay(int32_t& outDelay);
+extern void Netplay_SendDelay(int32_t delay);
+
+// Controller delay setter from controller.cpp
+extern "C" void Controller_SetDelayFrames(int32_t delay);
 
 // ---------------------------------------------------------------------------
 // Addresses (VAs, converted at runtime via _addr)
@@ -263,6 +268,15 @@ static void __fastcall HookedMove(void* sMvc3Main)
     if (Netplay_IsActive())
     {
         Controller_OnFrameStart();
+
+        // Drain any inbound delay-control packets — keeps both sides in sync
+        // when the user adjusts the delay on either machine.
+        int32_t remoteDelay = -1;
+        while (Netplay_GetInboundDelay(remoteDelay))
+        {
+            if (remoteDelay >= 1 && remoteDelay <= 15)
+                Controller_SetDelayFrames(remoteDelay);
+        }
     }
 
     oMove(sMvc3Main);
@@ -504,6 +518,26 @@ void FrameStepper_Init()
 // ---------------------------------------------------------------------------
 void FrameStepper_Process()
 {
+    // Netplay delay adjustment via [ (decrease) and ] (increase) keys.
+    // Works regardless of training mode so both sides can adjust mid-match.
+    if (Netplay_IsActive())
+    {
+        if (GetAsyncKeyState(VK_OEM_4) & 1)  // [ = decrease delay
+        {
+            int32_t delay = Controller_GetDelayFrames() - 1;
+            if (delay < 1) delay = 1;
+            Controller_SetDelayFrames(delay);
+            Netplay_SendDelay(delay);
+        }
+        if (GetAsyncKeyState(VK_OEM_6) & 1)  // ] = increase delay
+        {
+            int32_t delay = Controller_GetDelayFrames() + 1;
+            if (delay > 15) delay = 15;
+            Controller_SetDelayFrames(delay);
+            Netplay_SendDelay(delay);
+        }
+    }
+
     if (!IsTrainingMode())
     {
         if (isPaused) {
@@ -594,7 +628,6 @@ void FrameStepper_Draw()
             ImGuiWindowFlags_NoMove |
             ImGuiWindowFlags_NoScrollbar |
             ImGuiWindowFlags_NoSavedSettings |
-            ImGuiWindowFlags_NoInputs |
             ImGuiWindowFlags_AlwaysAutoResize);
 
         // Netplay status (always visible when netplay is active, shown at the top)
@@ -604,10 +637,31 @@ void FrameStepper_Draw()
                 ? ImVec4(1.0f, 0.9f, 0.1f, 1.0f)   // yellow for host
                 : ImVec4(0.3f, 0.7f, 1.0f, 1.0f);   // blue for client
             ImGui::TextColored(color, "NETPLAY: %s  Ping: %ums", role, Netplay_GetRTT());
-            ImGui::TextColored(color, "  Frame:%d Delay:%d LastRecv:%d",
+            int32_t curDelay = Controller_GetDelayFrames();
+            ImGui::TextColored(color, "  Frame:%d  Delay: %d  LastRecv:%d",
                 Controller_GetNetFrameCount(),
-                Controller_GetDelayFrames(),
+                curDelay,
                 Controller_GetLastRemoteFrame());
+
+            // Delay adjustment buttons (ImGui::SmallButton for compact sizing).
+            // Changing the delay also notifies the remote peer so both sides
+            // stay in sync and the effective input delay remains equal.
+            ImGui::SameLine();
+            if (ImGui::SmallButton("[-]"))
+            {
+                curDelay = Controller_GetDelayFrames() - 1;
+                if (curDelay < 1) curDelay = 1;
+                Controller_SetDelayFrames(curDelay);
+                Netplay_SendDelay(curDelay);
+            }
+            ImGui::SameLine();
+            if (ImGui::SmallButton("[+]"))
+            {
+                curDelay = Controller_GetDelayFrames() + 1;
+                if (curDelay > 15) curDelay = 15;
+                Controller_SetDelayFrames(curDelay);
+                Netplay_SendDelay(curDelay);
+            }
         }
 
         ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "P1: [%s]  0x%08X", DecodeDirection(p1), p1);

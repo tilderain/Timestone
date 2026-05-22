@@ -28,6 +28,14 @@ static uint32_t             g_recvCount = 0;
 static uint32_t             g_lastRecv  = 0;
 static std::atomic<bool>    g_running { false };
 
+// Delay control channel — small out-of-band packets to synchronise delay
+// changes between both peers without modifying the InputPacket wire format.
+static int32_t              g_outboundDelay    = -1;
+static bool                 g_outboundDelayNew = false;
+static int32_t              g_inboundDelay     = -1;
+static bool                 g_inboundDelayNew  = false;
+static CRITICAL_SECTION     g_delayCS;
+
 // One-time critical section initialization flag
 static bool                 g_csInitialized  = false;
 
@@ -88,6 +96,30 @@ static DWORD WINAPI Netplay_ServiceThread(LPVOID)
             enet_host_flush(g_host);
         }
 
+        // --- Send delay control packet (if a new value is pending) ---
+        bool hasNewDelay = false;
+        int32_t delayVal = -1;
+        {
+            ScopedCS lock(g_delayCS);
+            if (g_outboundDelayNew)
+            {
+                delayVal = g_outboundDelay;
+                hasNewDelay = true;
+                g_outboundDelayNew = false;
+            }
+        }
+
+        if (hasNewDelay && g_peer)
+        {
+            ENetPacket* packet = enet_packet_create(
+                &delayVal, sizeof(int32_t), ENET_PACKET_FLAG_UNSEQUENCED
+            );
+            if (enet_peer_send(g_peer, 0, packet) != 0) {
+                enet_packet_destroy(packet);
+            }
+            enet_host_flush(g_host);
+        }
+
         // --- Service the host ---
         if (g_host)
         {
@@ -105,6 +137,16 @@ static DWORD WINAPI Netplay_ServiceThread(LPVOID)
                             g_inboundHasData = true;
                         }
                         g_recvCount++;
+                    }
+                    else if (event.packet->dataLength == sizeof(int32_t))
+                    {
+                        // Small (4-byte) packets carry delay-control values.
+                        int32_t delay = *(int32_t*)event.packet->data;
+                        {
+                            ScopedCS lock(g_delayCS);
+                            g_inboundDelay = delay;
+                            g_inboundDelayNew = true;
+                        }
                     }
                     enet_packet_destroy(event.packet);
                 }
@@ -149,14 +191,18 @@ void Netplay_Init(ENetHost* host, ENetPeer* peer)
     {
         InitializeCriticalSection(&g_outboundCS);
         InitializeCriticalSection(&g_inboundCS);
+        InitializeCriticalSection(&g_delayCS);
         g_csInitialized = true;
     }
 
     {
         ScopedCS lock1(g_outboundCS);
         ScopedCS lock2(g_inboundCS);
+        ScopedCS lock3(g_delayCS);
         g_outboundNew = false;
         g_inboundHasData = false;
+        g_outboundDelayNew = false;
+        g_inboundDelayNew = false;
         std::memset(&g_outboundPacket, 0, sizeof(InputPacket));
         std::memset(&g_inboundPacket, 0, sizeof(InputPacket));
     }
@@ -202,6 +248,28 @@ bool Netplay_GetInboundPacket(InputPacket& outPkt)
     {
         outPkt = g_inboundPacket;
         g_inboundHasData = false;
+        return true;
+    }
+    return false;
+}
+
+// ---------------------------------------------------------------------------
+// Delay control — out-of-band value sent to keep both peers' delay in sync.
+// ---------------------------------------------------------------------------
+void Netplay_SendDelay(int32_t delay)
+{
+    ScopedCS lock(g_delayCS);
+    g_outboundDelay = delay;
+    g_outboundDelayNew = true;
+}
+
+bool Netplay_GetInboundDelay(int32_t& outDelay)
+{
+    ScopedCS lock(g_delayCS);
+    if (g_inboundDelayNew)
+    {
+        outDelay = g_inboundDelay;
+        g_inboundDelayNew = false;
         return true;
     }
     return false;
@@ -287,6 +355,7 @@ void Netplay_Shutdown()
     {
         DeleteCriticalSection(&g_outboundCS);
         DeleteCriticalSection(&g_inboundCS);
+        DeleteCriticalSection(&g_delayCS);
         g_csInitialized = false;
     }
 

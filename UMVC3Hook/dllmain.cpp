@@ -100,11 +100,12 @@ LRESULT __stdcall WndProc(const HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPar
 		break;
 	}
 
-	if (TheMenu->GetActiveState())
-	{
-		ImGui_ImplWin32_WndProcHandler(hWnd, uMsg, wParam, lParam);
+	// Always forward window messages to ImGui so overlay controls (e.g.
+	// netplay delay [+]/[-] buttons) work even when the debug menu is closed.
+	// ImGui_ImplWin32_WndProcHandler returns nonzero only if it handled the
+	// message — in that case the game should not process it further.
+	if (ImGui_ImplWin32_WndProcHandler(hWnd, uMsg, wParam, lParam))
 		return true;
-	}
 
 	return CallWindowProc(oWndProc, hWnd, uMsg, wParam, lParam);
 }

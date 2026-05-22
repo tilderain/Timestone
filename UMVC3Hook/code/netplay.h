@@ -57,3 +57,11 @@ uint32_t Netplay_GetRemoteInput();
 
 // Shut down the service thread, disconnect peer, destroy host.
 void Netplay_Shutdown();
+
+// Send a delay-control value to the remote peer (communicated via separate
+// small packet so both sides stay in sync when delay changes mid-match).
+void Netplay_SendDelay(int32_t delay);
+
+// Retrieve the last delay value received from the remote peer.  Returns true
+// if a new value was available (it is consumed by this call).
+bool Netplay_GetInboundDelay(int32_t& outDelay);
