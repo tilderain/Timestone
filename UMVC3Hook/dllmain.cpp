@@ -636,6 +636,47 @@ void AntiDebugPatch()
 	//HookLog("[AntiDebug] Installed VEH for packer crash at +0x257c58\n");
 }
 
+// ---------------------------------------------------------------------------
+// CreateFileW hook to log file loads during boot
+// ---------------------------------------------------------------------------
+static auto g_hkCreateFileW_orig = CreateFileW;
+static HANDLE WINAPI g_hkCreateFileW(LPCWSTR lpFileName, DWORD dwDesiredAccess,
+	DWORD dwShareMode, LPSECURITY_ATTRIBUTES lpSecurityAttributes,
+	DWORD dwCreationDisposition, DWORD dwFlagsAndAttributes,
+	HANDLE hTemplateFile)
+{
+	HANDLE h = g_hkCreateFileW_orig(lpFileName, dwDesiredAccess, dwShareMode,
+									 lpSecurityAttributes, dwCreationDisposition,
+									 dwFlagsAndAttributes, hTemplateFile);
+	if (lpFileName) {
+		LARGE_INTEGER t;
+		QueryPerformanceCounter(&t);
+		double ms = (double)(t.QuadPart - g_bootTimer.start.QuadPart)
+			* 1000.0 / (double)g_bootTimer.freq.QuadPart;
+		HookLog("[FILEw: %+.0fms] %S\n", ms, lpFileName);
+	}
+	return h;
+}
+
+static auto g_hkCreateFileA_orig = CreateFileA;
+static HANDLE WINAPI g_hkCreateFileA(LPCSTR lpFileName, DWORD dwDesiredAccess,
+	DWORD dwShareMode, LPSECURITY_ATTRIBUTES lpSecurityAttributes,
+	DWORD dwCreationDisposition, DWORD dwFlagsAndAttributes,
+	HANDLE hTemplateFile)
+{
+	HANDLE h = g_hkCreateFileA_orig(lpFileName, dwDesiredAccess, dwShareMode,
+									 lpSecurityAttributes, dwCreationDisposition,
+									 dwFlagsAndAttributes, hTemplateFile);
+	if (lpFileName) {
+		LARGE_INTEGER t;
+		QueryPerformanceCounter(&t);
+		double ms = (double)(t.QuadPart - g_bootTimer.start.QuadPart)
+			* 1000.0 / (double)g_bootTimer.freq.QuadPart;
+		HookLog("[FILEa: %+.0fms] %s\n", ms, lpFileName);
+	}
+	return h;
+}
+
 BOOL WINAPI DllMain(HMODULE hMod, DWORD dwReason, LPVOID lpReserved)
 {
 	switch (dwReason)
@@ -646,7 +687,18 @@ BOOL WINAPI DllMain(HMODULE hMod, DWORD dwReason, LPVOID lpReserved)
 			BootTimer_Init();
 			BootTimer_Stamp("DllMain entry");
 
-			//AntiDebugPatch();
+			// Install CreateFileA/W hooks to log every file open
+			/*{
+				MH_STATUS mh = MH_Initialize();
+				if (mh == MH_OK || mh == MH_ERROR_ALREADY_INITIALIZED) {
+					MH_CreateHookApi(L"kernel32", "CreateFileA",
+						(LPVOID)g_hkCreateFileA, (LPVOID*)&g_hkCreateFileA_orig);
+					MH_CreateHookApi(L"kernel32", "CreateFileW",
+						(LPVOID)g_hkCreateFileW, (LPVOID*)&g_hkCreateFileW_orig);
+					MH_EnableHook(MH_ALL_HOOKS);
+				}
+			}*/
+
 			SettingsMgr->Init();
 			DisableThreadLibraryCalls(hMod);
 
