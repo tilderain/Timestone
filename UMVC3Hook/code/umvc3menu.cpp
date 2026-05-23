@@ -62,6 +62,7 @@ void UMVC3Menu::PostInit()
 {
 	hookCtrs(tramp);
 	DtiEditor_Init();
+	DtiEditor_InitHooks(tramp);
 }
 
 void UMVC3Menu::Process()
