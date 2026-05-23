@@ -10,6 +10,7 @@
 #include "defaults.h"
 #include "generated.h"
 #include <XInput.h>
+#include "dtieditor.h"      
 #include <intrin.h>
 
 static int64 timer = GetTickCount64();
@@ -60,6 +61,7 @@ void UMVC3Menu::Initialize()
 void UMVC3Menu::PostInit()
 {
 	hookCtrs(tramp);
+	DtiEditor_Init();
 }
 
 void UMVC3Menu::Process()
@@ -240,6 +242,12 @@ void UMVC3Menu::Draw()
 				LoadState();
 
 			}
+			ImGui::EndTabItem();
+		}
+
+		if (ImGui::BeginTabItem("DTI Inspector"))
+		{
+			DtiEditor_Draw();
 			ImGui::EndTabItem();
 		}
 		ImGui::EndTabBar();
