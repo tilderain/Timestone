@@ -12,6 +12,7 @@
 #include "propertytable.h"
 #include <cstring>
 #include <cstdio>
+#include <string>
 #include <algorithm>
 #include <unordered_map>
 
@@ -72,6 +73,12 @@ static char g_propFilter[256] = {};
 static bool g_showPropPane = true;
 static bool g_filterLoadedOnly = true;  // only show DTIs with captured properties
 static bool g_filterEditableOnly = false; // only show DTIs with editable properties
+
+// Forward declarations for allocation tracking
+struct MtDTIDescriptor;
+static uint32_t ComputeDtiHash(const char* name);
+static void RecordPropertyOwner(const char* className, uintptr_t ownerPtr);
+static void InstallAllocationHook();
 
 // ---------------------------------------------------------------------------
 // Known singleton instances for manual property triggering
@@ -413,6 +420,9 @@ void __fastcall HookedCreateProperty(void* ctx, void* propDesc)
         cp.dataPtr = (uintptr_t)desc[3];
         cp.nameHash = ComputeDtiHash(dtiName);
         g_props.push_back(cp);
+
+        // Track the owner instance for this class
+        RecordPropertyOwner(dtiName, (uintptr_t)owner);
     }
 }
 
@@ -421,33 +431,43 @@ void __fastcall HookedCreateProperty(void* ctx, void* propDesc)
 // ---------------------------------------------------------------------------
 static bool DtiHasProperties(MtDTI* dti)
 {
-    if (!dti || !dti->className) return false;
-    uint32_t h = SafeComputeDtiHash(dti->className);
-    if (h == 0) return false;
+    if (!dti) return false;
+    uint64_t rootSentinel = GetRootSentinelAddr();
 
-    for (auto& p : g_props)
-        if (p.nameHash == h) return true;
+    for (MtDTI* cur = dti; cur; cur = cur->parent) {
+        if ((uintptr_t)cur == rootSentinel) break;
+        if (!cur->className) continue;
+        uint32_t h = SafeComputeDtiHash(cur->className);
+        if (h == 0) continue;
+        for (auto& p : g_props)
+            if (p.nameHash == h) return true;
+    }
     return false;
 }
 
 // Check if a DTI has at least one editable property.
 static bool DtiHasEditableProperties(MtDTI* dti)
 {
-    if (!dti || !dti->className) return false;
-    uint32_t h = SafeComputeDtiHash(dti->className);
-    if (h == 0) return false;
+    if (!dti) return false;
+    uint64_t rootSentinel = GetRootSentinelAddr();
 
-    for (auto& p : g_props) {
-        if (p.nameHash != h) continue;
-        switch (p.type) {
-        case PROP_BOOL:
-        case PROP_U32:
-        case PROP_S32:
-        case PROP_F32:
-        case PROP_VECTOR3:
-            return true;
-        default:
-            break;
+    for (MtDTI* cur = dti; cur; cur = cur->parent) {
+        if ((uintptr_t)cur == rootSentinel) break;
+        if (!cur->className) continue;
+        uint32_t h = SafeComputeDtiHash(cur->className);
+        if (h == 0) continue;
+        for (auto& p : g_props) {
+            if (p.nameHash != h) continue;
+            switch (p.type) {
+            case PROP_BOOL:
+            case PROP_U32:
+            case PROP_S32:
+            case PROP_F32:
+            case PROP_VECTOR3:
+                return true;
+            default:
+                break;
+            }
         }
     }
     return false;
@@ -589,6 +609,9 @@ void DtiEditor_InitHooks(Trampoline* tramp)
         memcpy((void*)thunkAddr, &patch, sizeof(patch));
         VirtualProtect((void*)thunkAddr, sizeof(patch), old, &old);
     }
+
+    // Install the MtDTI__getSize hook to track allocations
+    InstallAllocationHook();
 
     g_propsInitialized = true;
     HookLog("DTI Editor: property hooks installed.\n");
@@ -758,6 +781,109 @@ static uintptr_t FindCreatePropertyFn(const char* className)
 }
 
 // ---------------------------------------------------------------------------
+// Allocation tracking via MtDTI__getSize hook.
+// When the game constructs an MtObject, MtDTI__getSize is called to
+// determine the object's allocation size.  We intercept this to track
+// which DTI classes have been instantiated.
+// ---------------------------------------------------------------------------
+
+// DTI descriptor for MtDTI__getSize — same layout as MtDTI but confirmed
+// against the binary: +0x34 = size field (not nameHash).
+struct MtDTIDescriptor {
+    uintptr_t vtable;       // +0x00
+    const char* className;  // +0x08
+    MtDTI* nextSibling;     // +0x10
+    MtDTI* firstChild;      // +0x18
+    MtDTI* parent;          // +0x20
+    MtDTI* hashNext;        // +0x28
+    uint32_t flags;         // +0x30
+    uint32_t size;          // +0x34  ← MtDTI__getSize reads this
+};
+
+static constexpr uintptr_t MTDTI_GETSIZE_VA = 0x1402a40c0;
+
+// Original MtDTI__getSize function
+typedef uint32_t(__fastcall* MtDTIGetSizeFn)(MtDTIDescriptor* dti);
+static MtDTIGetSizeFn g_origGetSize = nullptr;
+
+// Tracks which DTI classes have been allocated
+static std::unordered_map<uint32_t, const char*> g_allocatedDtis;
+// Tracks (classHash → property owner instances) built from HookedCreateProperty
+static std::unordered_map<uint32_t, std::vector<uintptr_t>> g_classInstances;
+
+uint32_t __fastcall HookedMtDTIGetSize(MtDTIDescriptor* dti)
+{
+    uint32_t size = g_origGetSize(dti);
+
+    if (dti && dti->className) {
+        uint32_t hash = ComputeDtiHash(dti->className);
+        g_allocatedDtis[hash] = dti->className;
+    }
+
+    return size;
+}
+
+// Install the MtDTI__getSize hook (called from DtiEditor_InitHooks)
+static void InstallAllocationHook()
+{
+    uintptr_t target = _addr(MTDTI_GETSIZE_VA);
+    g_origGetSize = (MtDTIGetSizeFn)target;
+    // Same JMP patching approach as the property hook
+    uintptr_t hookAddr = (uintptr_t)&HookedMtDTIGetSize;
+    int64_t rel = (int64_t)(hookAddr - (target + 5));
+    if (rel >= INT32_MIN && rel <= INT32_MAX) {
+        struct JmpPatch { uint8_t op; int32_t disp; } __attribute__((packed));
+        JmpPatch patch = { 0xE9, (int32_t)rel };
+        DWORD old;
+        VirtualProtect((void*)target, sizeof(patch), PAGE_EXECUTE_READWRITE, &old);
+        memcpy((void*)target, &patch, sizeof(patch));
+        VirtualProtect((void*)target, sizeof(patch), old, &old);
+    } else {
+        HookLog("DTI Editor: MtDTI__getSize hook too far (rel=%lld), skipping\n", (long long)rel);
+    }
+}
+
+// Record an instance address associated with a class (called from HookedCreateProperty)
+static void RecordPropertyOwner(const char* className, uintptr_t ownerPtr)
+{
+    if (!className || !ownerPtr) return;
+    uint32_t hash = ComputeDtiHash(className);
+    auto& instances = g_classInstances[hash];
+    // Avoid duplicates
+    for (auto addr : instances) {
+        if (addr == ownerPtr) return;
+    }
+    instances.push_back(ownerPtr);
+}
+
+// Check if a DTI class has a tracked live instance (from allocation + property tracking)
+static bool HasTrackedInstance(const char* className)
+{
+    if (!className) return false;
+    uint32_t hash = ComputeDtiHash(className);
+    auto it = g_classInstances.find(hash);
+    if (it == g_classInstances.end()) return false;
+    for (auto addr : it->second) {
+        if (IsReadableMem(addr, 8)) return true;
+    }
+    return false;
+}
+
+// Get the number of tracked instances for a class
+static int GetTrackedInstanceCount(const char* className)
+{
+    if (!className) return -1;
+    uint32_t hash = ComputeDtiHash(className);
+    auto it = g_classInstances.find(hash);
+    if (it == g_classInstances.end()) return -1;
+    int count = 0;
+    for (auto addr : it->second) {
+        if (IsReadableMem(addr, 8)) count++;
+    }
+    return count;
+}
+
+// ---------------------------------------------------------------------------
 // Manually trigger property enumeration for ANY class via vtable scanning.
 // This looks up the class's vtable via the auto-built vtable map, finds live
 // instances, then looks up the createProperty function from the property
@@ -767,43 +893,92 @@ static void TriggerPropertiesForDti_Generic(const char* dtiName)
 {
     if (!dtiName) return;
 
-    // Look up the createProperty function from the property table
+    // Check if we already have captured properties from the passive hook
+    uint32_t hash = ComputeDtiHash(dtiName);
+    bool hasProps = false;
+    for (auto& p : g_props) {
+        if (p.nameHash == hash) { hasProps = true; break; }
+    }
+
+    HookLog("DTI Editor: properties for %s: %zu captured (hook), %zu tracked instances\n",
+        dtiName, g_props.size(), g_classInstances.size());
+
+    if (hasProps) {
+        HookLog("DTI Editor: %s already has %zu captured properties via passive hook\n",
+            dtiName, std::count_if(g_props.begin(), g_props.end(),
+                [hash](auto& p) { return p.nameHash == hash; }));
+        return;
+    }
+
+    // No captured properties yet. Check for live instances from the tracker.
+    uint32_t dtiHash = ComputeDtiHash(dtiName);
+    auto instIt = g_classInstances.find(dtiHash);
+    if (instIt == g_classInstances.end() || instIt->second.empty()) {
+        HookLog("DTI Editor: no tracked instances for %s — enter a match to capture\n", dtiName);
+        return;
+    }
+
+    // Try each tracked instance
     uintptr_t createPropertyFn = FindCreatePropertyFn(dtiName);
     if (!createPropertyFn) {
-        HookLog("DTI Editor: no createProperty entry for %s in property table\n", dtiName);
+        HookLog("DTI Editor: no createProperty entry for %s\n", dtiName);
         return;
     }
 
-    // Look up vtable address for this class (vtable base, not createProperty slot)
-    uintptr_t vtableAddr = FindVtableAddr(dtiName);
-    if (!vtableAddr) {
-        HookLog("DTI Editor: no vtable entry for %s\n", dtiName);
-        return;
-    }
-
-    // Scan for live instances
-    auto instances = ScanForInstancesOfClass(vtableAddr, 1);
-    if (instances.empty()) {
-        HookLog("DTI Editor: no live instances found for %s\n", dtiName);
-        return;
-    }
-
-    uintptr_t instancePtr = instances[0];
-
-    // Create a minimal MtPropertyList context on the stack.
-    // Layout: +0x00 = vtable (unused by newElement), +0x08 = linked list head
     struct { uintptr_t unused; uintptr_t head; } ctx = {0, 0};
-
-    // Call createProperty via the looked-up function pointer
     typedef void(__fastcall* CreatePropertyDebugFn)(uintptr_t instance, void* ctx);
     CreatePropertyDebugFn fn = (CreatePropertyDebugFn)createPropertyFn;
 
-    HookLog("DTI Editor: triggering properties for %s (instance=0x%llx, vtable=0x%llx, fn=0x%llx)\n",
-        dtiName, (unsigned long long)instancePtr, (unsigned long long)vtableAddr, (unsigned long long)createPropertyFn);
+    for (auto addr : instIt->second) {
+        if (!IsReadableMem(addr, 8)) continue;
+        HookLog("DTI Editor: triggering properties for %s via tracked instance 0x%llx\n",
+            dtiName, (unsigned long long)addr);
+        fn(addr, &ctx);
+        break;  // Only need one
+    }
+}
 
-    fn(instancePtr, &ctx);
+// ---------------------------------------------------------------------------
+// Decode a Shift-JIS (codepage 932) string to UTF-8 for display.
+// First checks if the string is already valid UTF-8 — if so, returns as-is.
+// Otherwise converts from Shift-JIS to UTF-8 via a wide Char buffer.
+// Returns a pointer to a static buffer (subsequent calls overwrite).
+// ---------------------------------------------------------------------------
+static const char* SjisToUtf8(const char* sjis)
+{
+    if (!sjis || !*sjis) return sjis;
 
-    HookLog("DTI Editor: done, now have %zu total captured properties\n", g_props.size());
+    // Fast path: if the string is pure ASCII (all bytes < 0x80),
+    // it's valid UTF-8 as-is and definitely not SJIS-encoded.
+    bool hasHighByte = false;
+    for (const char* p = sjis; *p; ++p) {
+        if ((unsigned char)*p >= 0x80) { hasHighByte = true; break; }
+    }
+    if (!hasHighByte) return sjis;
+
+    // Has high bytes — assume Shift-JIS and convert via UTF-16.
+    // Use flag 0 (not MB_ERR_INVALID_CHARS) to tolerate vendor extensions.
+    int wideLen = MultiByteToWideChar(932, 0, sjis, -1, NULL, 0);
+    if (wideLen <= 0) return sjis;
+
+    std::wstring wide(wideLen, L'\0');
+    if (MultiByteToWideChar(932, 0, sjis, -1, &wide[0], wideLen) <= 0)
+        return sjis;
+
+    // Convert UTF-16 → UTF-8
+    int utf8Len = WideCharToMultiByte(CP_UTF8, 0, wide.c_str(), -1, NULL, 0, NULL, NULL);
+    if (utf8Len <= 0) return sjis;
+
+    static std::string s_utf8Buf;
+    s_utf8Buf.resize(utf8Len);
+    WideCharToMultiByte(CP_UTF8, 0, wide.c_str(), -1, &s_utf8Buf[0], utf8Len, NULL, NULL);
+
+    // WideCharToMultiByte includes the null terminator in utf8Len when given -1 length.
+    // Pop it so s_utf8Buf.size() reflects the actual string length.
+    if (!s_utf8Buf.empty() && s_utf8Buf.back() == '\0')
+        s_utf8Buf.pop_back();
+
+    return s_utf8Buf.c_str();
 }
 
 // ---------------------------------------------------------------------------
@@ -817,20 +992,38 @@ static void DrawPropertiesForDti(MtDTI* dti)
     uint32_t dtiHash = SafeComputeDtiHash(safeName);
     if (dtiHash == 0) return;
 
-    // Collect matching properties
+    // Collect properties for this class and ALL ancestor classes.
+    // In MT Framework, a child class inherits all properties registered by
+    // ancestor createProperty functions.  Since the hook at cAtkCtrl captures
+    // properties by return address (→ the actual registering class), we need
+    // to aggregate across the inheritance chain.
     std::vector<CapturedProperty*> matching;
-    for (auto& p : g_props) {
-        if (p.nameHash == dtiHash) {
-            matching.push_back(&p);
+    uint64_t rootSentinel = GetRootSentinelAddr();
+
+    for (MtDTI* cur = dti; cur; cur = cur->parent) {
+        // Stop at root sentinel
+        if ((uintptr_t)cur == rootSentinel) break;
+
+        const char* curName = GetSafeClassName(cur);
+        if (strcmp(curName, "(corrupt name)") == 0) continue;
+
+        uint32_t curHash = SafeComputeDtiHash(curName);
+        if (curHash == 0) continue;
+
+        for (auto& p : g_props) {
+            if (p.nameHash == curHash) {
+                // Deduplicate by name in case of override
+                bool dup = false;
+                for (auto* existing : matching) {
+                    if (existing->name && p.name &&
+                        strcmp(existing->name, p.name) == 0) {
+                        dup = true; break;
+                    }
+                }
+                if (!dup) matching.push_back(&p);
+            }
         }
     }
-
-    // Also check parent DTI chain (parent class properties)
-    // and check for exact class name match
-    // More accurate: filter by exact class name hash match only
-    // In MT Framework, children inherit parent's createProperty, but the
-    // return address will point to the child's function when child-specific
-    // properties are being registered.
 
     if (matching.empty()) {
         ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1),
@@ -869,8 +1062,8 @@ static void DrawPropertiesForDti(MtDTI* dti)
 
         ImGui::Columns(4, "propColumns", true);
 
-        // Name
-        ImGui::Text("%s", pp->name); ImGui::NextColumn();
+        // Name (UMVC3 stores names in Shift-JIS)
+        ImGui::Text("%s", SjisToUtf8(pp->name)); ImGui::NextColumn();
 
         // Type
         const char* typeName = "?";
@@ -952,8 +1145,10 @@ static void DrawPropertiesForDti(MtDTI* dti)
             case PROP_STRING:
                 if (pp->dataPtr && *(const char**)pp->dataPtr && IsReadableCStr(*(const char**)pp->dataPtr)) {
                     const char* s = *(const char**)pp->dataPtr;
+                    // UMVC3 stores strings in Shift-JIS — decode to UTF-8 for ImGui
+                    const char* display = SjisToUtf8(s);
                     // Truncate long strings for display
-                    ImGui::TextColored(ImVec4(0.6f,0.6f,1,1), "\"%s\"", s);
+                    ImGui::TextColored(ImVec4(0.6f,0.6f,1,1), "\"%s\"", display);
                 } else {
                     ImGui::TextColored(ImVec4(0.5f,0.5f,0.5f,1), "(null)");
                 }
@@ -1188,43 +1383,46 @@ void DtiEditor_Draw()
                 dti->nameHash, computed,
                 (computed == dti->nameHash) ? "[MATCH]" : "[MISMATCH]");
 
-            // Instance count from vtable scan
-            int instCnt = GetInstanceCount(safeName);
+            // Instance count from allocation tracking
+            int instCnt = GetTrackedInstanceCount(safeName);
             if (instCnt >= 0) {
-                ImGui::Text("Live instances: %d", instCnt);
-            } else if (g_vtableMapBuilt) {
-                ImGui::Text("Live instances: (not tracked — no vtable entry)");
+                ImGui::Text("Tracked instances: %d", instCnt);
+            } else {
+                ImGui::Text("Tracked instances: (none)");
             }
         }
 
-        // Manual property trigger button — works for any DTI with a vtable entry
+        // Property info — show captured properties or guide user
         if (strcmp(safeName, "(corrupt name)") != 0) {
             const SingletonEntry* singEntry = FindSingletonEntry(safeName);
-            bool canTrigger = false;
-            const char* triggerHint = "";
-
-            if (singEntry) {
-                canTrigger = true;
-                triggerHint = "Singleton — click to enumerate properties";
-            } else {
-                uintptr_t vtableAddr = FindVtableAddr(safeName);
-                if (vtableAddr) {
-                    canTrigger = true;
-                    triggerHint = "Vtable found — click to enumerate properties";
+            bool hasCapProps = false;
+            {
+                uint32_t h = SafeComputeDtiHash(safeName);
+                for (auto& p : g_props) {
+                    if (p.nameHash == h) { hasCapProps = true; break; }
                 }
             }
 
-            if (canTrigger) {
+            if (singEntry && hasCapProps) {
                 ImGui::Separator();
                 if (ImGui::SmallButton("Trigger Properties")) {
-                    if (singEntry) {
-                        TriggerPropertiesForDti(safeName);
-                    } else {
-                        TriggerPropertiesForDti_Generic(safeName);
-                    }
+                    TriggerPropertiesForDti(safeName);
                 }
                 ImGui::SameLine();
-                ImGui::TextColored(ImVec4(0.5f,0.8f,1,1), "%s", triggerHint);
+                ImGui::TextColored(ImVec4(0.5f,0.8f,1,1), "Singleton — click to enumerate properties");
+            } else if (singEntry) {
+                ImGui::Separator();
+                if (ImGui::SmallButton("Trigger Properties")) {
+                    TriggerPropertiesForDti(safeName);
+                }
+                ImGui::SameLine();
+                ImGui::TextColored(ImVec4(0.5f,0.8f,1,1), "Singleton");
+            } else if (!hasCapProps) {
+                ImGui::Separator();
+                ImGui::TextColored(ImVec4(0.5f,0.5f,0.5f,1),
+                    "No captured properties for this type.");
+                ImGui::TextColored(ImVec4(0.5f,0.8f,1,1),
+                    "Enter a match to capture properties naturally.");
             }
         }
 
