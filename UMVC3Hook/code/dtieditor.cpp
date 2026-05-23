@@ -4,6 +4,7 @@
 // cAtkCtrl__TargetInfo__createProperty_BF60 (0x14000bf60).
 #include "../pch.h"
 #include "dtieditor.h"
+#include "umvc3menu.h"
 #include "mk10utils.h"
 #include "../imgui/imgui.h"
 #include "../MemoryMgr.h"
@@ -79,6 +80,47 @@ static uint32_t ComputeDtiHash(const char* name)
     MtCRC_t getCRC = (MtCRC_t)_addr(MTCRC_GETCRC_VA);
     if (!getCRC || !name) return 0;
     return (uint32_t)(getCRC(name, 0xFFFFFFFF) & 0x7FFFFFFF);
+}
+
+// ---------------------------------------------------------------------------
+// Crash-Proof String and Hash Helpers (VirtualQuery-guarded, MinGW-compatible)
+// ---------------------------------------------------------------------------
+
+static bool IsReadableCStr(const char* str)
+{
+    if (!str) return false;
+    MEMORY_BASIC_INFORMATION mbi;
+    if (VirtualQuery(str, &mbi, sizeof(mbi)) == 0) return false;
+    if (mbi.State != MEM_COMMIT) return false;
+    DWORD prot = mbi.Protect;
+    if (prot & (PAGE_NOACCESS | PAGE_GUARD)) return false;
+    const DWORD kRead = PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY |
+                        PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
+    return (prot & kRead) != 0;
+}
+
+static bool SafeStrStr(const char* str, const char* substr)
+{
+    if (!IsReadableCStr(str) || !IsReadableCStr(substr)) return false;
+    return strstr(str, substr) != nullptr;
+}
+
+static const char* SafeStrRChr(const char* str, int ch)
+{
+    if (!IsReadableCStr(str)) return nullptr;
+    return strrchr(str, ch);
+}
+
+static uint32_t SafeComputeDtiHash(const char* name)
+{
+    if (!IsReadableCStr(name)) return 0;
+    return ComputeDtiHash(name);
+}
+
+static const char* GetSafeClassName(MtDTI* dti)
+{
+    if (!dti || !IsReadableCStr(dti->className)) return "(corrupt name)";
+    return dti->className;
 }
 
 // ---------------------------------------------------------------------------
@@ -199,7 +241,9 @@ void __fastcall HookedCreateProperty(void* ctx, void* propDesc)
 static bool DtiHasProperties(MtDTI* dti)
 {
     if (!dti || !dti->className) return false;
-    uint32_t h = ComputeDtiHash(dti->className);
+    uint32_t h = SafeComputeDtiHash(dti->className);
+    if (h == 0) return false;
+
     for (auto& p : g_props)
         if (p.nameHash == h) return true;
     return false;
@@ -213,15 +257,23 @@ static bool AddToFiltered(MtDTI* dti, int depth)
 {
     if (!dti) return false;
 
-    // Check if this node matches the filter
     bool matches = (g_filter[0] == 0);
-    if (!matches && dti->className) {
-        matches = (strstr(dti->className, g_filter) != nullptr);
-        // Also match short name (after last ::)
-        if (!matches) {
-            const char* shortName = strrchr(dti->className, ':');
-            if (shortName) { shortName++; matches = (strstr(shortName, g_filter) != nullptr); }
+
+    if (!matches) {
+        const char* className = GetSafeClassName(dti);
+        if (className && strcmp(className, "(corrupt name)") != 0) {
+            matches = SafeStrStr(className, g_filter);
+
+            // Also match short name (after last ::)
+            if (!matches) {
+                const char* shortName = SafeStrRChr(className, ':');
+                if (shortName) {
+                    shortName++;
+                    matches = SafeStrStr(shortName, g_filter);
+                }
+            }
         }
+
         // Match by hex hash
         if (!matches && g_filter[0] == '0' && g_filter[1] == 'x') {
             unsigned int h = 0;
@@ -230,7 +282,7 @@ static bool AddToFiltered(MtDTI* dti, int depth)
         }
     }
 
-    // "Loaded only" filter — skip DTIs with no captured properties
+    // "Loaded only" filter
     if (matches && g_filterLoadedOnly) {
         matches = DtiHasProperties(dti);
     }
@@ -242,7 +294,6 @@ static bool AddToFiltered(MtDTI* dti, int depth)
             childMatches = true;
     }
 
-    // Add this node if it matches, or if any child matches (parent placeholder)
     if (matches || childMatches) {
         DtiEntry entry;
         entry.dti = dti;
@@ -358,9 +409,11 @@ static void DtiEditor_EnsureCollected()
 // ---------------------------------------------------------------------------
 static void DrawPropertiesForDti(MtDTI* dti)
 {
-    if (!dti || !dti->className) return;
+    const char* safeName = GetSafeClassName(dti);
+    if (strcmp(safeName, "(corrupt name)") == 0) return;
 
-    uint32_t dtiHash = ComputeDtiHash(dti->className);
+    uint32_t dtiHash = SafeComputeDtiHash(safeName);
+    if (dtiHash == 0) return;
 
     // Collect matching properties
     std::vector<CapturedProperty*> matching;
@@ -445,12 +498,29 @@ static void DrawPropertiesForDti(MtDTI* dti)
 }
 
 // ---------------------------------------------------------------------------
+// extern
+// ---------------------------------------------------------------------------
+extern int g_dbg_peekCalls;
+extern int g_dbg_peekKeydowns;
+extern int g_dbg_translated;
+extern int g_dbg_lastMsg;
+
+// ---------------------------------------------------------------------------
 // Draw the DTI inspector content (no Begin/End — caller owns the window).
 // ---------------------------------------------------------------------------
 void DtiEditor_Draw()
 {
     // Collect on first draw
     DtiEditor_EnsureCollected();
+
+    // Debug: PeekMessage hook status (helps diagnose keyboard capture)
+    ImGui::TextColored(ImVec4(0.8f,0.8f,0.8f,1),
+        "DBG: peek=%d keydown=%d translate=%d  lastMsg=0x%04X  menu=%s ctx=%s",
+        g_dbg_peekCalls, g_dbg_peekKeydowns, g_dbg_translated,
+        g_dbg_lastMsg,
+        TheMenu->GetActiveState() ? "Y" : "N",
+        ImGui::GetCurrentContext() ? "Y" : "N");
+    ImGui::Separator();
 
     // --- Filter bar ---
     ImGui::Text("Filter: ");
@@ -513,14 +583,14 @@ void DtiEditor_Draw()
 
         ImGui::PushID((void*)dti);
 
-        bool open = ImGui::TreeNodeEx(dti->className, flags, "%s", dti->className);
+        bool open = ImGui::TreeNodeEx(GetSafeClassName(dti), flags, "%s", GetSafeClassName(dti));
         if (ImGui::IsItemClicked()) {
             g_selected = dti;
         }
         // Right-click context menu
         if (ImGui::BeginPopupContextItem()) {
             if (ImGui::MenuItem("Copy name")) {
-                ImGui::SetClipboardText(dti->className);
+                ImGui::SetClipboardText(GetSafeClassName(dti));
             }
             if (ImGui::MenuItem("Copy hash")) {
                 char buf[32];
@@ -546,7 +616,7 @@ void DtiEditor_Draw()
     if (g_selected) {
         MtDTI* dti = g_selected;
 
-        ImGui::Text("Name: %s", dti->className ? dti->className : "(null)");
+        ImGui::Text("Name: %s", GetSafeClassName(dti));
         ImGui::Text("Address: 0x%llx", (unsigned long long)dti);
         ImGui::Text("Hash: 0x%08X (%u)", dti->nameHash, dti->nameHash);
         ImGui::Text("Flags: 0x%08X", dti->flags);
@@ -558,7 +628,7 @@ void DtiEditor_Draw()
             if ((uintptr_t)dti->parent == rootSentinel) {
                 ImGui::TextColored(ImVec4(0.5f,0.5f,0.5f,1), "Parent: (root)");
             } else {
-                ImGui::Text("Parent: %s", dti->parent->className ? dti->parent->className : "(null)");
+                ImGui::Text("Parent: %s", GetSafeClassName(dti->parent));
             }
         } else {
             ImGui::Text("Parent: (none)");
@@ -579,9 +649,7 @@ void DtiEditor_Draw()
             ImGui::Text("Child classes:");
             ImGui::Indent(12.0f);
             for (MtDTI* c = dti->firstChild; c; c = c->nextSibling) {
-                if (c->className) {
-                    ImGui::BulletText("%s", c->className);
-                }
+                    ImGui::BulletText("%s", GetSafeClassName(c));
             }
             ImGui::Unindent(12.0f);
         }
@@ -590,7 +658,7 @@ void DtiEditor_Draw()
         ImGui::Text("Structure layout (relative to MtObject):");
         ImGui::Indent(12.0f);
         ImGui::Text("+0x00: vtable");
-        ImGui::Text("+0x08: className = \"%s\"", dti->className ? dti->className : "?");
+        ImGui::Text("+0x08: className = \"%s\"", GetSafeClassName(dti));
         ImGui::Text("+0x10: nextSibling = 0x%llx", (unsigned long long)dti->nextSibling);
         ImGui::Text("+0x18: firstChild = 0x%llx", (unsigned long long)dti->firstChild);
         ImGui::Text("+0x20: parent = 0x%llx", (unsigned long long)dti->parent);
@@ -601,15 +669,16 @@ void DtiEditor_Draw()
 
         // CRC verification
         ImGui::Separator();
-        if (dti->className) {
-            uint32_t computed = ComputeDtiHash(dti->className);
+        const char* safeName = GetSafeClassName(dti);
+        if (strcmp(safeName, "(corrupt name)") != 0) {
+            uint32_t computed = SafeComputeDtiHash(safeName);
             ImGui::Text("CRC verification: stored=0x%08X computed=0x%08X %s",
                 dti->nameHash, computed,
                 (computed == dti->nameHash) ? "[MATCH]" : "[MISMATCH]");
         }
 
         // Properties
-        if (g_showPropPane && dti->className) {
+        if (g_showPropPane && strcmp(safeName, "(corrupt name)") != 0) {
             DrawPropertiesForDti(dti);
         }
     } else {

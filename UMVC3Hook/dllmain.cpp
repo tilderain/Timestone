@@ -112,6 +112,80 @@ EndScene oEndScene = NULL;
 WNDPROC oWndProc;
 static HWND window = NULL;
 
+// Direct-polling input injector that feeds ImGui's backend directly,
+// bypassing the Windows message queue entirely.
+void PollKeyboardDirectly()
+{
+    if (!window || !TheMenu->GetActiveState())
+        return;
+
+    ImGuiIO& io = ImGui::GetIO();
+    static bool prevKeys[256] = { 0 };
+    static float repeatTimers[256] = { 0 };
+    float deltaTime = io.DeltaTime;
+
+    for (int vk = 8; vk < 256; vk++)
+    {
+        // Skip keys that aren't useful for typing or editing
+        if (vk > 13 && vk < 32 && vk != 27) continue;
+
+        bool isDown = (GetAsyncKeyState(vk) & 0x8000) != 0;
+        bool wasDown = prevKeys[vk];
+        prevKeys[vk] = isDown;
+
+        bool trigger = false;
+        if (isDown)
+        {
+            if (!wasDown)
+            {
+                trigger = true;
+                repeatTimers[vk] = 0.400f; // Delay before key starts repeating (400ms)
+            }
+            else
+            {
+                repeatTimers[vk] -= deltaTime;
+                if (repeatTimers[vk] <= 0.0f)
+                {
+                    trigger = true;
+                    repeatTimers[vk] = 0.050f; // Key repeat rate (50ms)
+                }
+            }
+        }
+
+        if (trigger)
+        {
+            // Simulate physical key-down event for navigation and shortcut keys
+            LPARAM lParam = (MapVirtualKey(vk, MAPVK_VK_TO_VSC) << 16) | 1;
+            ImGui_ImplWin32_WndProcHandler(window, WM_KEYDOWN, vk, lParam);
+
+            // Translate virtual key code to printable character
+            BYTE ks[256] = { 0 };
+            if (GetAsyncKeyState(VK_SHIFT) & 0x8000)   ks[VK_SHIFT] = 0x80;
+            if (GetAsyncKeyState(VK_CONTROL) & 0x8000) ks[VK_CONTROL] = 0x80;
+            if (GetAsyncKeyState(VK_MENU) & 0x8000)    ks[VK_MENU] = 0x80;
+            if (GetKeyState(VK_CAPITAL) & 0x0001)      ks[VK_CAPITAL] = 0x01;
+
+            WCHAR wchar[4] = { 0 };
+            if (ToUnicode(vk, MapVirtualKey(vk, MAPVK_VK_TO_VSC), ks, wchar, 4, 0) > 0)
+            {
+                for (int i = 0; wchar[i] != 0 && i < 4; i++)
+                {
+                    if (wchar[i] >= 32 && wchar[i] != 127)
+                    {
+                        ImGui_ImplWin32_WndProcHandler(window, WM_CHAR, wchar[i], 0);
+                    }
+                }
+            }
+        }
+        else if (wasDown && !isDown)
+        {
+            // Simulate physical key-up event
+            LPARAM lParam = (MapVirtualKey(vk, MAPVK_VK_TO_VSC) << 16) | 0xC0000001;
+            ImGui_ImplWin32_WndProcHandler(window, WM_KEYUP, vk, lParam);
+        }
+    }
+}
+
 
 void InitImGui(LPDIRECT3DDEVICE9 pDevice)
 {
@@ -129,33 +203,54 @@ void InitImGui(LPDIRECT3DDEVICE9 pDevice)
 
 }
 
-LRESULT __stdcall WndProc(const HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
+LRESULT __stdcall WndProc(const HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
+{
+    switch (uMsg)
+    {
+    case WM_KILLFOCUS:
+        TheMenu->m_bIsFocused = false;
+        break;
+    case WM_SETFOCUS:
+        TheMenu->m_bIsFocused = true;
+        break;
+    default:
+        break;
+    }
 
-	switch (uMsg)
-	{
-	case WM_KILLFOCUS:
-		TheMenu->m_bIsFocused = false;
-		break;
-	case WM_SETFOCUS:
-		TheMenu->m_bIsFocused = true;
-		break;
-		break;
-	default:
-		break;
-	}
+    if (TheMenu->GetActiveState())
+    {
+        // Intercept keyboard Raw Input while menu is open so key presses do not trigger game actions
+        if (uMsg == WM_INPUT)
+        {
+            alignas(RAWINPUT) BYTE buffer[256];
+            UINT dwSize = sizeof(buffer);
+            if (GetRawInputData((HRAWINPUT)lParam, RID_INPUT, buffer, &dwSize, sizeof(RAWINPUTHEADER)) != (UINT)-1)
+            {
+                RAWINPUT* raw = (RAWINPUT*)buffer;
+                if (raw->header.dwType == RIM_TYPEKEYBOARD)
+                {
+                    return 0; // Swallow event
+                }
+            }
+        }
 
-	// Always forward window messages to ImGui so overlay controls (e.g.
-	// netplay delay [+]/[-] buttons) work even when the debug menu is closed.
-	// ImGui_ImplWin32_WndProcHandler returns nonzero only if it handled the
-	// message — in that case the game should not process it further.
-	if (ImGui_ImplWin32_WndProcHandler(hWnd, uMsg, wParam, lParam))
-		return true;
+        // Suppress legacy keyboard events to ensure menu typing doesn't bleed into game operations
+        if (uMsg == WM_KEYDOWN || uMsg == WM_KEYUP || uMsg == WM_CHAR ||
+            uMsg == WM_SYSKEYDOWN || uMsg == WM_SYSKEYUP)
+        {
+            return 0; // Swallow event
+        }
+    }
 
-	return CallWindowProc(oWndProc, hWnd, uMsg, wParam, lParam);
+    // Pass native mouse events directly through to ImGui
+    if (ImGui::GetCurrentContext() != nullptr)
+    {
+        if (ImGui_ImplWin32_WndProcHandler(hWnd, uMsg, wParam, lParam))
+            return true;
+    }
+
+    return CallWindowProc(oWndProc, hWnd, uMsg, wParam, lParam);
 }
-
-
-
 bool init = false;
 bool first_msg = true;
 long __stdcall hkEndScene(LPDIRECT3DDEVICE9 pDevice)
@@ -178,6 +273,10 @@ long __stdcall hkEndScene(LPDIRECT3DDEVICE9 pDevice)
 
 	ImGui_ImplDX9_NewFrame();
 	ImGui_ImplWin32_NewFrame();
+
+	// Inject inputs directly from hardware, bypassing the Windows message queue
+	PollKeyboardDirectly();
+
 	ImGui::NewFrame();
 	ImGui::GetIO().MouseDrawCursor = false;
 	if (first_msg)
@@ -256,6 +355,12 @@ void __fastcall Hook_titleLogoUpdate(uintptr_t param_1)
 }
 
 
+
+// Debug counters exported for the DTI editor tab
+int g_dbg_peekCalls = 0;
+int g_dbg_peekKeydowns = 0;
+int g_dbg_translated = 0;
+int g_dbg_lastMsg = 0;
 
 void OnInitializeHook()
 {
