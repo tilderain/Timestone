@@ -1,0 +1,27 @@
+The Sleep(1) Issue
+
+Sleep(1) is notorious in Windows programming because the actual sleep duration depends on the OS scheduler resolution (which defaults to 15.6ms, though games often set it to 1ms using timeBeginPeriod). If the background thread receives the packet
+
+        
+0.1 ms0.1 ms
+
+      
+
+after the loop starts, the game thread might still sleep for a full millisecond or more before checking again.
+
+    To optimize the threaded model: Consider replacing Sleep(1) in the spin-wait loop with a lightweight yield like SwitchToThread() or YieldProcessor() (which performs a PAUSE instruction on modern CPUs). This allows the game thread to react almost instantly when the background thread releases the lock, saving sub-millisecond delays.
+
+
+
+
+Controller gamepad for p1
+
+
+Rollback frames cfg
+
+
+Integrate into menuing
+
+Full pause menu ingame / not pause gameplay
+
+Hook into the existing lobby system?

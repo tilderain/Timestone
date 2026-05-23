@@ -58,6 +58,50 @@ void HookLog(const char* fmt, ...)
 
 using namespace Memory::VP;
 
+// ---------------------------------------------------------------------------
+// Boot timing instrumentation
+// ---------------------------------------------------------------------------
+static struct {
+	LARGE_INTEGER start;
+	LARGE_INTEGER freq;
+	const char*  labels[32];
+	LARGE_INTEGER stamps[32];
+	int           count;
+	int           dumped;
+} g_bootTimer;
+
+static void BootTimer_Init()
+{
+	QueryPerformanceFrequency(&g_bootTimer.freq);
+	QueryPerformanceCounter(&g_bootTimer.start);
+	g_bootTimer.count = 0;
+	g_bootTimer.dumped = 0;
+}
+
+void BootTimer_Stamp(const char* label)
+{
+	int idx = g_bootTimer.count;
+	if (idx >= 32) return;
+	QueryPerformanceCounter(&g_bootTimer.stamps[idx]);
+	g_bootTimer.labels[idx] = label;
+	g_bootTimer.count = idx + 1;
+}
+
+static void BootTimer_Dump()
+{
+	if (g_bootTimer.dumped) return;
+	g_bootTimer.dumped = 1;
+	HookLog("=== BootTiming ===\n");
+	double prevMs = 0.0;
+	for (int i = 0; i < g_bootTimer.count; i++) {
+		double ms = (double)(g_bootTimer.stamps[i].QuadPart - g_bootTimer.start.QuadPart)
+			* 1000.0 / (double)g_bootTimer.freq.QuadPart;
+		HookLog("  +%7.1f ms  (%+7.1f ms)  %s\n", ms, i == 0 ? 0.0 : ms - prevMs, g_bootTimer.labels[i]);
+		prevMs = ms;
+	}
+	HookLog("=================\n");
+}
+
 // Auto-connect target (passed via -connect on command line for spawned 2nd instance)
 static char g_autoConnectIp[64] = "";
 static int  g_autoConnectPort = 0;
@@ -125,6 +169,8 @@ long __stdcall hkEndScene(LPDIRECT3DDEVICE9 pDevice)
 		InitImGui(pDevice);
 		FrameStepper_SetDevice(pDevice);
 		init = true;
+		BootTimer_Stamp("First hkEndScene");
+		BootTimer_Dump();
 	}
 
 	// Capture the current back buffer if a snapshot was requested (pause / advance)
@@ -162,7 +208,7 @@ long __stdcall hkEndScene(LPDIRECT3DDEVICE9 pDevice)
 
 DWORD WINAPI MainThread(LPVOID lpReserved)
 {
-	Sleep(5000);
+	BootTimer_Stamp("MainThread start");
 	Notifications->Init();
 	bool attached = false;
 	do
@@ -170,6 +216,7 @@ DWORD WINAPI MainThread(LPVOID lpReserved)
 		if (kiero::init(kiero::RenderType::D3D9) == kiero::Status::Success)
 		{
 			kiero::bind(42, (void**)& oEndScene, (void*)hkEndScene);
+			BootTimer_Stamp("kiero::init success");
 			attached = true;
 		}
 	} while (!attached);
@@ -191,6 +238,8 @@ static TitleLogoUpdate_t oTitleLogoUpdate = nullptr;
 
 void __fastcall Hook_titleLogoUpdate(uintptr_t param_1)
 {
+	BootTimer_Stamp("aTitleLogo__update first call");
+
 	oTitleLogoUpdate(param_1);
 
 	// Skip logo movies (state 1) when training mode is active.
@@ -594,6 +643,9 @@ BOOL WINAPI DllMain(HMODULE hMod, DWORD dwReason, LPVOID lpReserved)
 	case DLL_PROCESS_ATTACH:
 		if (CheckGame())
 		{
+			BootTimer_Init();
+			BootTimer_Stamp("DllMain entry");
+
 			//AntiDebugPatch();
 			SettingsMgr->Init();
 			DisableThreadLibraryCalls(hMod);
@@ -606,7 +658,9 @@ BOOL WINAPI DllMain(HMODULE hMod, DWORD dwReason, LPVOID lpReserved)
 
 			CreateThread(nullptr, 0, MainThread, hMod, 0, nullptr);
 			CreateThread(nullptr, 0, (LPTHREAD_START_ROUTINE)HookUpdate, hMod, 0, nullptr);
+			BootTimer_Stamp("Before OnInitializeHook");
 			OnInitializeHook();
+			BootTimer_Stamp("After OnInitializeHook");
 		}
 		break;
 	case DLL_PROCESS_DETACH:

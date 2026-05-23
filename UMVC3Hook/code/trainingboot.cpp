@@ -93,6 +93,7 @@ static bool g_hooksInitialized = false;
 // Extern from dllmain.cpp
 // ---------------------------------------------------------------------------
 extern void HookLog(const char* fmt, ...);
+extern void BootTimer_Stamp(const char* label);
 
 // ---------------------------------------------------------------------------
 // Config
@@ -219,6 +220,8 @@ static void SetupPadToPlayerMapping()
 // ---------------------------------------------------------------------------
 void BootIntoTraining()
 {
+    BootTimer_Stamp("BootIntoTraining start");
+
     if (g_hasBooted) {
         return;
     }
