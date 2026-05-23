@@ -405,6 +405,22 @@ static void DtiEditor_EnsureCollected()
 }
 
 // ---------------------------------------------------------------------------
+// Ensure a memory page is writable, return true if already/successfully writable.
+// ---------------------------------------------------------------------------
+static bool EnsureWritable(uintptr_t addr, size_t size)
+{
+    MEMORY_BASIC_INFORMATION mbi;
+    if (VirtualQuery((void*)addr, &mbi, sizeof(mbi)) == 0) return false;
+    if (mbi.State != MEM_COMMIT) return false;
+    if (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) return false;
+    if (mbi.Protect & (PAGE_READWRITE | PAGE_EXECUTE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_WRITECOPY))
+        return true; // already writable
+    // Try to make it writable
+    DWORD old;
+    return VirtualProtect((void*)addr, size, PAGE_READWRITE, &old) != 0;
+}
+
+// ---------------------------------------------------------------------------
 // Draw property details for the currently selected DTI.
 // ---------------------------------------------------------------------------
 static void DrawPropertiesForDti(MtDTI* dti)
@@ -448,8 +464,8 @@ static void DrawPropertiesForDti(MtDTI* dti)
     ImGui::Columns(4, "propColumns", true);
     ImGui::Text("Name"); ImGui::NextColumn();
     ImGui::Text("Type"); ImGui::NextColumn();
+    ImGui::Text("Value"); ImGui::NextColumn();
     ImGui::Text("Offset"); ImGui::NextColumn();
-    ImGui::Text("Owner"); ImGui::NextColumn();
     ImGui::Separator();
     ImGui::Columns(1);
 
@@ -468,26 +484,101 @@ static void DrawPropertiesForDti(MtDTI* dti)
 
         // Type
         const char* typeName = "?";
+        bool editable = true;
         switch (pp->type) {
-        case PROP_CLASS:    typeName = "Class"; break;
-        case PROP_CLASSREF: typeName = "ClassRef"; break;
+        case PROP_CLASS:    typeName = "Class"; editable = false; break;
+        case PROP_CLASSREF: typeName = "ClassRef"; editable = false; break;
         case PROP_BOOL:     typeName = "Bool"; break;
         case PROP_U32:      typeName = "U32"; break;
         case PROP_S32:      typeName = "S32"; break;
         case PROP_F32:      typeName = "F32"; break;
-        case PROP_STRING:   typeName = "String"; break;
-        case PROP_MATRIX:   typeName = "Matrix"; break;
+        case PROP_STRING:   typeName = "String"; editable = false; break;
+        case PROP_MATRIX:   typeName = "Matrix"; editable = false; break;
         case PROP_VECTOR3:  typeName = "Vector3"; break;
         }
         ImGui::Text("%s", typeName); ImGui::NextColumn();
 
+        // Value (editable)
+        ImGui::PushID(pp->name);
+        if (pp->dataPtr && editable && EnsureWritable(pp->dataPtr, 16)) {
+            switch (pp->type) {
+            case PROP_BOOL: {
+                bool val = *(bool*)pp->dataPtr;
+                if (ImGui::Checkbox("##val", &val))
+                    *(bool*)pp->dataPtr = val;
+                break;
+            }
+            case PROP_U32: {
+                uint32_t val = *(uint32_t*)pp->dataPtr;
+                if (ImGui::InputScalar("##val", ImGuiDataType_U32, &val, NULL, NULL, "%u", ImGuiInputTextFlags_EnterReturnsTrue))
+                    *(uint32_t*)pp->dataPtr = val;
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Press Enter to apply");
+                break;
+            }
+            case PROP_S32: {
+                int32_t val = *(int32_t*)pp->dataPtr;
+                if (ImGui::InputInt("##val", &val, 0, 0, ImGuiInputTextFlags_EnterReturnsTrue))
+                    *(int32_t*)pp->dataPtr = val;
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Press Enter to apply");
+                break;
+            }
+            case PROP_F32: {
+                float val = *(float*)pp->dataPtr;
+                if (ImGui::InputFloat("##val", &val, 0.0f, 0.0f, "%.4f", ImGuiInputTextFlags_EnterReturnsTrue))
+                    *(float*)pp->dataPtr = val;
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Press Enter to apply");
+                break;
+            }
+            case PROP_VECTOR3: {
+                if (EnsureWritable(pp->dataPtr, 12)) {
+                    float* vec = (float*)pp->dataPtr;
+                    ImGui::PushItemWidth(180);
+                    if (ImGui::DragFloat3("##val", vec, 0.1f))
+                        ; // written directly to memory
+                    ImGui::PopItemWidth();
+                } else {
+                    ImGui::TextColored(ImVec4(1,0,0,1), "(unwritable)");
+                }
+                break;
+            }
+            default:
+                ImGui::TextColored(ImVec4(0.5f,0.5f,0.5f,1), "(read-only)");
+                break;
+            }
+        } else if (!editable) {
+            switch (pp->type) {
+            case PROP_CLASS:
+            case PROP_CLASSREF:
+                ImGui::TextColored(ImVec4(0.5f,0.5f,0.5f,1), "(ref)");
+                break;
+            case PROP_STRING:
+                if (pp->dataPtr && *(const char**)pp->dataPtr) {
+                    const char* s = *(const char**)pp->dataPtr;
+                    // Truncate long strings for display
+                    ImGui::TextColored(ImVec4(0.6f,0.6f,1,1), "\"%s\"", s);
+                } else {
+                    ImGui::TextColored(ImVec4(0.5f,0.5f,0.5f,1), "(null)");
+                }
+                break;
+            case PROP_MATRIX:
+                ImGui::TextColored(ImVec4(0.5f,0.5f,0.5f,1), "(16 floats)");
+                break;
+            default:
+                ImGui::TextColored(ImVec4(0.5f,0.5f,0.5f,1), "(read-only)");
+                break;
+            }
+        } else {
+            ImGui::TextColored(ImVec4(1,0,0,1), "(unwritable)");
+        }
+        ImGui::PopID();
+        ImGui::NextColumn();
+
         // Offset (dataPtr - ownerPtr)
         ImGui::Text("+0x%llx",
             (unsigned long long)(pp->dataPtr - pp->ownerPtr));
-        ImGui::NextColumn();
-
-        // Owner address
-        ImGui::Text("0x%llx", (unsigned long long)pp->ownerPtr);
         ImGui::NextColumn();
 
         ImGui::Columns(1);
@@ -525,10 +616,12 @@ void DtiEditor_Draw()
     // --- Filter bar ---
     ImGui::Text("Filter: ");
     ImGui::SameLine();
+    ImGui::PushItemWidth(120);
     if (ImGui::InputText("##dtiFilter", g_filter, sizeof(g_filter)))
     {
         BuildFilteredList();
     }
+    ImGui::PopItemWidth();
     ImGui::SameLine();
     if (ImGui::SmallButton("Clear")) {
         g_filter[0] = 0;
