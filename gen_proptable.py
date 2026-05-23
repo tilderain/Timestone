@@ -1,13 +1,17 @@
 #!/usr/bin/env python3
-"""Generate C++ lookup table for createProperty function addresses → class names.
+"""Generate C++ lookup table from RAW_LINES (Ghidra dump) + createproperty.txt.
 
-Reads the Ghidra function lists (from conversation) and generates a sorted
-C++ array used by the DTI editor's runtime hook to identify which class
-a property belongs to based on the return address.
+Reads both sources and generates a sorted, deduplicated C++ array
+used by the DTI editor's runtime hook to identify which class a property
+belongs to based on the return address.
 """
-import re, sys, json
+import re, sys
+
+OUTPUT = "UMVC3Hook/code/propertytable.h"
+INPUT  = "createproperty.txt"
 
 # Raw data from Ghidra functions_list output (all 6 pages)
+# Format: "address  funcName__createProperty"
 RAW_LINES = r"""
   140003130  uMenuOptionPC__createProperty   \ No newline at end of file
   14000c750  cAtkCtrl__TargetInfo__createProperty  \ No newline at end of file
@@ -1194,29 +1198,68 @@ RAW_LINES = r"""
   1409c2e70  MtGeomPlaneXZ__createProperty   \ No newline at end of file
 """
 
-def parse_line(line):
-    """Parse a single Ghidra function list entry."""
+
+def parse_ghidra_line(line):
+    """Parse a Ghidra-format line: 'address  funcName__createProperty'"""
     m = re.match(r'^\s*(\w+)\s+(\S+)__createProperty', line)
     if m:
         addr = int(m.group(1), 16)
-        class_name = m.group(2)
-        # Convert __ to ::
-        dti_name = class_name.replace('__', '::')
-        return (addr, dti_name)
+        class_name = m.group(2).replace('__', '::')
+        return (addr, class_name)
     return None
+
+
+def parse_txt_line(line):
+    """Parse a createproperty.txt line: 'funcName\taddress\tsignature\tcount'
+
+    The function name ends with __createProperty optionally followed
+    by _HEXSUFFIX (Ghidra disambiguation suffix).
+    """
+    line = line.strip()
+    if not line or line.startswith('#'):
+        return None
+
+    parts = line.split('\t')
+    if len(parts) < 2:
+        return None
+
+    func_name = parts[0]
+    addr_str = parts[1].strip()
+
+    try:
+        addr = int(addr_str, 16)
+    except ValueError:
+        return None
+
+    m = re.match(r'^(.*)__createProperty(?:_[0-9a-fA-F]+)?$', func_name)
+    if not m:
+        return None
+
+    class_name = m.group(1).replace('__', '::')
+    return (addr, class_name)
+
 
 def main():
     entries = set()
+
+    # Parse hardcoded RAW_LINES from Ghidra dump
     for line in RAW_LINES.split('\n'):
-        result = parse_line(line)
+        result = parse_ghidra_line(line)
         if result:
             entries.add(result)
+
+    # Parse createproperty.txt
+    with open(INPUT, 'r') as f:
+        for line in f:
+            result = parse_txt_line(line)
+            if result:
+                entries.add(result)
 
     # Sort by address
     sorted_entries = sorted(entries, key=lambda x: x[0])
 
     # Write C++ header
-    out = '''// Auto-generated from Ghidra createProperty function list.
+    out = '''// Auto-generated from Ghidra RAW_LINES + createproperty.txt.
 // Maps function addresses to DTI class names for property association.
 #pragma once
 #include <cstdint>
@@ -1236,10 +1279,11 @@ static constexpr CreatePropertyEntry g_createPropertyTable[] = {
 static constexpr size_t g_createPropertyTableCount = sizeof(g_createPropertyTable) / sizeof(g_createPropertyTable[0]);
 '''
 
-    with open('UMVC3Hook/code/propertytable.h', 'w') as f:
+    with open(OUTPUT, 'w') as f:
         f.write(out)
 
-    print(f"Generated {len(sorted_entries)} entries.")
+    print(f"Generated {len(sorted_entries)} entries -> {OUTPUT}")
+
 
 if __name__ == '__main__':
     main()

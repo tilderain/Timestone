@@ -13,6 +13,7 @@
 #include <cstring>
 #include <cstdio>
 #include <algorithm>
+#include <unordered_map>
 
 using namespace Memory::VP;
 
@@ -70,6 +71,156 @@ static bool g_propsInitialized = false;         // whether hooks are installed
 static char g_propFilter[256] = {};
 static bool g_showPropPane = true;
 static bool g_filterLoadedOnly = true;  // only show DTIs with captured properties
+static bool g_filterEditableOnly = false; // only show DTIs with editable properties
+
+// ---------------------------------------------------------------------------
+// Known singleton instances for manual property triggering
+// ---------------------------------------------------------------------------
+struct SingletonEntry {
+    const char* dtiName;
+    uintptr_t instancePtrAddr;    // address that holds the instance pointer (read via _addr)
+    uintptr_t createPropertyAddr; // createProperty function VA
+};
+static const SingletonEntry kKnownSingletons[] = {
+    {"sBattleSetting", 0x140d50e58, 0x14024bdf0},
+};
+static constexpr int kKnownSingletonCount = sizeof(kKnownSingletons) / sizeof(kKnownSingletons[0]);
+
+static const SingletonEntry* FindSingletonEntry(const char* dtiName)
+{
+    if (!dtiName) return nullptr;
+    for (int i = 0; i < kKnownSingletonCount; i++) {
+        if (strcmp(kKnownSingletons[i].dtiName, dtiName) == 0)
+            return &kKnownSingletons[i];
+    }
+    return nullptr;
+}
+
+// ---------------------------------------------------------------------------
+// DTI instance tracking via vtable scanning
+// ---------------------------------------------------------------------------
+struct VtableMapEntry {
+    uintptr_t vtableAddr;   // runtime address of the vtable array in .rdata
+    const char* className;  // DTI class name from property table
+    int instanceCount;      // live instance count (refreshed by scan)
+};
+static std::vector<VtableMapEntry> g_vtableMap;
+static bool g_vtableMapBuilt = false;
+
+// Build vtable→class mapping by scanning .rdata for createProperty function
+// pointers.  createProperty is always at vtable index 0 in MT Framework.
+static void BuildVtableMap()
+{
+    if (g_vtableMapBuilt) return;
+    g_vtableMap.clear();
+
+    uintptr_t rdataStart = (uintptr_t)_addr(0x140a5b000);
+    uintptr_t rdataEnd   = (uintptr_t)_addr(0x140c50fff);
+    uintptr_t textStart  = (uintptr_t)_addr(0x140001000);
+    uintptr_t textEnd    = (uintptr_t)_addr(0x140a5afff);
+
+    // Build a bloom-filter-like approach: insert all createProperty addrs into a set
+    // so we can scan .rdata in one linear pass.
+    // Use an std::set for the address lookup.
+    struct CreatePropEntry {
+        uintptr_t addr;
+        const char* name;
+        bool operator<(const CreatePropEntry& o) const { return addr < o.addr; }
+    };
+    std::vector<CreatePropEntry> sortedTable;
+    sortedTable.reserve(g_createPropertyTableCount);
+    for (size_t i = 0; i < g_createPropertyTableCount; i++) {
+        uintptr_t fnAddr = (uintptr_t)_addr(g_createPropertyTable[i].address);
+        sortedTable.push_back({fnAddr, g_createPropertyTable[i].className});
+    }
+    std::sort(sortedTable.begin(), sortedTable.end());
+
+    // Helper: binary search for addr in sortedTable
+    auto findInTable = [&](uintptr_t val) -> const char* {
+        auto it = std::lower_bound(sortedTable.begin(), sortedTable.end(), CreatePropEntry{val, nullptr},
+            [](const CreatePropEntry& a, const CreatePropEntry& b) { return a.addr < b.addr; });
+        if (it != sortedTable.end() && it->addr == val) return it->name;
+        return nullptr;
+    };
+
+    // Linear scan of .rdata
+    for (uintptr_t p = rdataStart; p + 32 <= rdataEnd; p += 8) {
+        uintptr_t val = *(uintptr_t*)p;
+        const char* className = findInTable(val);
+        if (!className) continue;
+
+        // Verify: next 3 entries should also be valid .text addresses
+        bool validVtable = true;
+        for (int i = 1; i <= 3; i++) {
+            uintptr_t e = *(uintptr_t*)(p + i * 8);
+            if (e < textStart || e >= textEnd) { validVtable = false; break; }
+        }
+        if (!validVtable) continue;
+
+        // Check for duplicate (inheritance — same vtable, different class)
+        bool dup = false;
+        for (auto& existing : g_vtableMap) {
+            if (existing.vtableAddr == p) dup = true;
+        }
+        if (!dup) {
+            g_vtableMap.push_back({p, className, 0});
+        }
+    }
+
+    g_vtableMapBuilt = true;
+    HookLog("DTI Editor: built vtable map with %zu entries\n", g_vtableMap.size());
+}
+
+// Scan writable memory for known vtable pointers to count live instances.
+// Returns true if the scan completed (may be false if the process heap is locked).
+static bool ScanForInstances()
+{
+    if (!g_vtableMapBuilt) BuildVtableMap();
+    if (g_vtableMap.empty()) return false;
+
+    // Reset counts
+    for (auto& entry : g_vtableMap) entry.instanceCount = 0;
+
+    // Build hash set for O(1) lookup
+    std::unordered_map<uintptr_t, int*> vtableLookup;
+    vtableLookup.reserve(g_vtableMap.size() * 2);
+    for (auto& entry : g_vtableMap) {
+        vtableLookup[entry.vtableAddr] = &entry.instanceCount;
+    }
+
+    // 1. Scan .data section (static/global objects — fastest)
+    uintptr_t dataStart = (uintptr_t)_addr(0x140c51000);
+    uintptr_t dataEnd   = (uintptr_t)_addr(0x140e24047);
+    for (uintptr_t p = dataStart; p + 8 <= dataEnd; p += 8) {
+        auto it = vtableLookup.find(*(uintptr_t*)p);
+        if (it != vtableLookup.end()) (*it->second)++;
+    }
+
+    // 2. Scan the default process heap (dynamic objects)
+    HANDLE hHeap = GetProcessHeap();
+    if (hHeap) {
+        PROCESS_HEAP_ENTRY phe = {};
+        // HeapWalk can fail mid-iteration in multi-threaded programs — that's ok
+        while (HeapWalk(hHeap, &phe)) {
+            if ((phe.wFlags & PROCESS_HEAP_ENTRY_BUSY) && phe.lpData) {
+                auto it = vtableLookup.find(*(uintptr_t*)phe.lpData);
+                if (it != vtableLookup.end()) (*it->second)++;
+            }
+        }
+    }
+
+    return true;
+}
+
+// Returns >0 live instances for the given DTI name, or -1 if unknown.
+static int GetInstanceCount(const char* dtiName)
+{
+    if (!dtiName) return -1;
+    for (auto& entry : g_vtableMap) {
+        if (strcmp(entry.className, dtiName) == 0) return entry.instanceCount;
+    }
+    return -1;
+}
 
 // ---------------------------------------------------------------------------
 // CRC32 hashing (same as game's MtCRC__getCRC)
@@ -99,10 +250,27 @@ static bool IsReadableCStr(const char* str)
     return (prot & kRead) != 0;
 }
 
+// Case-insensitive substring search (no shlwapi dependency).
+static bool ContainsInsensitive(const char* str, const char* substr)
+{
+    if (!str || !substr) return false;
+    if (substr[0] == 0) return true;
+    for (; *str; ++str) {
+        const char* a = str;
+        const char* b = substr;
+        while (*a && *b && std::tolower((unsigned char)*a) == std::tolower((unsigned char)*b)) {
+            ++a; ++b;
+        }
+        if (*b == 0) return true;
+    }
+    return false;
+}
+
 static bool SafeStrStr(const char* str, const char* substr)
 {
     if (!IsReadableCStr(str) || !IsReadableCStr(substr)) return false;
-    return strstr(str, substr) != nullptr;
+    // Case-insensitive search via ContainsInsensitive
+    return ContainsInsensitive(str, substr);
 }
 
 static const char* SafeStrRChr(const char* str, int ch)
@@ -249,6 +417,29 @@ static bool DtiHasProperties(MtDTI* dti)
     return false;
 }
 
+// Check if a DTI has at least one editable property.
+static bool DtiHasEditableProperties(MtDTI* dti)
+{
+    if (!dti || !dti->className) return false;
+    uint32_t h = SafeComputeDtiHash(dti->className);
+    if (h == 0) return false;
+
+    for (auto& p : g_props) {
+        if (p.nameHash != h) continue;
+        switch (p.type) {
+        case PROP_BOOL:
+        case PROP_U32:
+        case PROP_S32:
+        case PROP_F32:
+        case PROP_VECTOR3:
+            return true;
+        default:
+            break;
+        }
+    }
+    return false;
+}
+
 // ---------------------------------------------------------------------------
 // Recursively add DTI + children to the filtered list in pre-order.
 // Returns true if this node or any descendant matched the filter.
@@ -258,9 +449,9 @@ static bool AddToFiltered(MtDTI* dti, int depth)
     if (!dti) return false;
 
     bool matches = (g_filter[0] == 0);
+    const char* className = GetSafeClassName(dti);
 
     if (!matches) {
-        const char* className = GetSafeClassName(dti);
         if (className && strcmp(className, "(corrupt name)") != 0) {
             matches = SafeStrStr(className, g_filter);
 
@@ -282,9 +473,17 @@ static bool AddToFiltered(MtDTI* dti, int depth)
         }
     }
 
-    // "Loaded only" filter
+    // "Loaded only" filter — use property capture + instance scan
     if (matches && g_filterLoadedOnly) {
         matches = DtiHasProperties(dti);
+        if (!matches && className && strcmp(className, "(corrupt name)") != 0) {
+            matches = GetInstanceCount(className) > 0;
+        }
+    }
+
+    // "Editable only" filter — only if matches is still true
+    if (matches && g_filterEditableOnly) {
+        matches = DtiHasEditableProperties(dti);
     }
 
     // Check children
@@ -405,19 +604,82 @@ static void DtiEditor_EnsureCollected()
 }
 
 // ---------------------------------------------------------------------------
-// Ensure a memory page is writable, return true if already/successfully writable.
+// Temporarily make a page writable, write data, then restore protection.
 // ---------------------------------------------------------------------------
-static bool EnsureWritable(uintptr_t addr, size_t size)
+static void WriteToMemory(uintptr_t addr, const void* data, size_t size)
 {
+    MEMORY_BASIC_INFORMATION mbi;
+    DWORD oldProtect = 0;
+    if (VirtualQuery((void*)addr, &mbi, sizeof(mbi)) == 0) return;
+    if (mbi.State != MEM_COMMIT) return;
+    if (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) return;
+
+    // Check if already writable
+    if (mbi.Protect & (PAGE_READWRITE | PAGE_EXECUTE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_WRITECOPY)) {
+        memcpy((void*)addr, data, size);
+        return;
+    }
+
+    // Need to make it writable temporarily
+    if (VirtualProtect((void*)addr, size, PAGE_READWRITE, &oldProtect)) {
+        memcpy((void*)addr, data, size);
+        VirtualProtect((void*)addr, size, oldProtect, &oldProtect); // restore
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Manually trigger property enumeration for a known singleton DTI.
+// Calls the class's createProperty function with a minimal context so that
+// our hook captures all properties.
+// ---------------------------------------------------------------------------
+static void TriggerPropertiesForDti(const char* dtiName)
+{
+    const SingletonEntry* entry = FindSingletonEntry(dtiName);
+    if (!entry) {
+        HookLog("DTI Editor: no singleton entry for %s\n", dtiName);
+        return;
+    }
+
+    // Read instance pointer from the known global address
+    uintptr_t* instancePtrAddr = (uintptr_t*)_addr(entry->instancePtrAddr);
+    if (!instancePtrAddr) {
+        HookLog("DTI Editor: _addr(%llx) returned null\n", (unsigned long long)entry->instancePtrAddr);
+        return;
+    }
+    uintptr_t instancePtr = *instancePtrAddr;
+    if (!instancePtr) {
+        HookLog("DTI Editor: instance for %s is null\n", dtiName);
+        return;
+    }
+
+    // Create a minimal MtPropertyList context on the stack.
+    // Layout: +0x00 = vtable (unused by newElement), +0x08 = linked list head
+    struct { uintptr_t unused; uintptr_t head; } ctx = {0, 0};
+
+    // Call the createProperty function directly by address
+    typedef void(__fastcall* CreatePropertyDebugFn)(uintptr_t instance, void* ctx);
+    CreatePropertyDebugFn fn = (CreatePropertyDebugFn)_addr(entry->createPropertyAddr);
+
+    HookLog("DTI Editor: triggering properties for %s (instance=0x%llx)\n",
+        dtiName, (unsigned long long)instancePtr);
+
+    fn(instancePtr, &ctx);
+
+    HookLog("DTI Editor: done, now have %zu total captured properties\n", g_props.size());
+}
+
+// ---------------------------------------------------------------------------
+// Check if memory is readable (but NOT writable) for display purposes only.
+// ---------------------------------------------------------------------------
+static bool IsReadableMem(uintptr_t addr, size_t minSize)
+{
+    if (!addr) return false;
     MEMORY_BASIC_INFORMATION mbi;
     if (VirtualQuery((void*)addr, &mbi, sizeof(mbi)) == 0) return false;
     if (mbi.State != MEM_COMMIT) return false;
     if (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) return false;
-    if (mbi.Protect & (PAGE_READWRITE | PAGE_EXECUTE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_WRITECOPY))
-        return true; // already writable
-    // Try to make it writable
-    DWORD old;
-    return VirtualProtect((void*)addr, size, PAGE_READWRITE, &old) != 0;
+    return (mbi.Protect & (PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY |
+                           PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY)) != 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -472,9 +734,13 @@ static void DrawPropertiesForDti(MtDTI* dti)
     ImGui::BeginChild("##propList", ImVec2(0, 200), true);
 
     for (auto* pp : matching) {
+        // Guard against dangling pointers — properties may outlive their source
+        if (!IsReadableCStr(pp->name))
+            continue;
+
         // Filter
         if (g_propFilter[0] &&
-            !strstr(pp->name, g_propFilter))
+            !ContainsInsensitive(pp->name, g_propFilter))
             continue;
 
         ImGui::Columns(4, "propColumns", true);
@@ -500,18 +766,18 @@ static void DrawPropertiesForDti(MtDTI* dti)
 
         // Value (editable)
         ImGui::PushID(pp->name);
-        if (pp->dataPtr && editable && EnsureWritable(pp->dataPtr, 16)) {
+        if (pp->dataPtr && editable && IsReadableMem(pp->dataPtr, 16)) {
             switch (pp->type) {
             case PROP_BOOL: {
                 bool val = *(bool*)pp->dataPtr;
                 if (ImGui::Checkbox("##val", &val))
-                    *(bool*)pp->dataPtr = val;
+                    WriteToMemory(pp->dataPtr, &val, sizeof(val));
                 break;
             }
             case PROP_U32: {
                 uint32_t val = *(uint32_t*)pp->dataPtr;
                 if (ImGui::InputScalar("##val", ImGuiDataType_U32, &val, NULL, NULL, "%u", ImGuiInputTextFlags_EnterReturnsTrue))
-                    *(uint32_t*)pp->dataPtr = val;
+                    WriteToMemory(pp->dataPtr, &val, sizeof(val));
                 if (ImGui::IsItemHovered())
                     ImGui::SetTooltip("Press Enter to apply");
                 break;
@@ -519,7 +785,7 @@ static void DrawPropertiesForDti(MtDTI* dti)
             case PROP_S32: {
                 int32_t val = *(int32_t*)pp->dataPtr;
                 if (ImGui::InputInt("##val", &val, 0, 0, ImGuiInputTextFlags_EnterReturnsTrue))
-                    *(int32_t*)pp->dataPtr = val;
+                    WriteToMemory(pp->dataPtr, &val, sizeof(val));
                 if (ImGui::IsItemHovered())
                     ImGui::SetTooltip("Press Enter to apply");
                 break;
@@ -527,21 +793,26 @@ static void DrawPropertiesForDti(MtDTI* dti)
             case PROP_F32: {
                 float val = *(float*)pp->dataPtr;
                 if (ImGui::InputFloat("##val", &val, 0.0f, 0.0f, "%.4f", ImGuiInputTextFlags_EnterReturnsTrue))
-                    *(float*)pp->dataPtr = val;
+                    WriteToMemory(pp->dataPtr, &val, sizeof(val));
                 if (ImGui::IsItemHovered())
                     ImGui::SetTooltip("Press Enter to apply");
                 break;
             }
             case PROP_VECTOR3: {
-                if (EnsureWritable(pp->dataPtr, 12)) {
-                    float* vec = (float*)pp->dataPtr;
-                    ImGui::PushItemWidth(180);
-                    if (ImGui::DragFloat3("##val", vec, 0.1f))
-                        ; // written directly to memory
-                    ImGui::PopItemWidth();
-                } else {
-                    ImGui::TextColored(ImVec4(1,0,0,1), "(unwritable)");
-                }
+                float v0 = ((float*)pp->dataPtr)[0];
+                float v1 = ((float*)pp->dataPtr)[1];
+                float v2 = ((float*)pp->dataPtr)[2];
+                ImGui::PushItemWidth(60);
+                if (ImGui::InputFloat("##vx", &v0, 0.0f, 0.0f, "%.3f", ImGuiInputTextFlags_EnterReturnsTrue))
+                    WriteToMemory(pp->dataPtr, &v0, sizeof(float));
+                ImGui::SameLine(); ImGui::Text("X");
+                if (ImGui::InputFloat("##vy", &v1, 0.0f, 0.0f, "%.3f", ImGuiInputTextFlags_EnterReturnsTrue))
+                    WriteToMemory(pp->dataPtr + 4, &v1, sizeof(float));
+                ImGui::SameLine(); ImGui::Text("Y");
+                if (ImGui::InputFloat("##vz", &v2, 0.0f, 0.0f, "%.3f", ImGuiInputTextFlags_EnterReturnsTrue))
+                    WriteToMemory(pp->dataPtr + 8, &v2, sizeof(float));
+                ImGui::SameLine(); ImGui::Text("Z");
+                ImGui::PopItemWidth();
                 break;
             }
             default:
@@ -555,7 +826,7 @@ static void DrawPropertiesForDti(MtDTI* dti)
                 ImGui::TextColored(ImVec4(0.5f,0.5f,0.5f,1), "(ref)");
                 break;
             case PROP_STRING:
-                if (pp->dataPtr && *(const char**)pp->dataPtr) {
+                if (pp->dataPtr && *(const char**)pp->dataPtr && IsReadableCStr(*(const char**)pp->dataPtr)) {
                     const char* s = *(const char**)pp->dataPtr;
                     // Truncate long strings for display
                     ImGui::TextColored(ImVec4(0.6f,0.6f,1,1), "\"%s\"", s);
@@ -646,9 +917,33 @@ void DtiEditor_Draw()
         static bool prev = g_filterLoadedOnly;
         ImGui::Checkbox("Loaded only", &g_filterLoadedOnly);
         if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("Only show DTIs that have at least one captured property");
+            ImGui::SetTooltip("Only show DTIs that have live instances (scans for vtable pointers in memory) or captured properties");
         if (prev != g_filterLoadedOnly) {
             prev = g_filterLoadedOnly;
+            if (g_filterLoadedOnly && !g_vtableMapBuilt) {
+                BuildVtableMap();
+                ScanForInstances();
+            }
+            BuildFilteredList();
+        }
+    }
+    ImGui::SameLine();
+    if (ImGui::SmallButton("Scan")) {
+        BuildVtableMap();
+        ScanForInstances();
+        BuildFilteredList();
+    }
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Refresh instance counts by scanning memory for vtable pointers");
+    ImGui::SameLine();
+    // "Editable only" checkbox — rebuild tree when toggled
+    {
+        static bool prev = g_filterEditableOnly;
+        ImGui::Checkbox("Editable only", &g_filterEditableOnly);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Only show DTIs that have at least one editable property (bool, int, float, vector3)");
+        if (prev != g_filterEditableOnly) {
+            prev = g_filterEditableOnly;
             BuildFilteredList();
         }
     }
@@ -768,6 +1063,27 @@ void DtiEditor_Draw()
             ImGui::Text("CRC verification: stored=0x%08X computed=0x%08X %s",
                 dti->nameHash, computed,
                 (computed == dti->nameHash) ? "[MATCH]" : "[MISMATCH]");
+
+            // Instance count from vtable scan
+            int instCnt = GetInstanceCount(safeName);
+            if (instCnt >= 0) {
+                ImGui::Text("Live instances: %d", instCnt);
+            } else if (g_vtableMapBuilt) {
+                ImGui::Text("Live instances: (not tracked — no vtable entry)");
+            }
+        }
+
+        // Manual property trigger button for known singletons
+        if (strcmp(safeName, "(corrupt name)") != 0) {
+            const SingletonEntry* singEntry = FindSingletonEntry(safeName);
+            if (singEntry) {
+                ImGui::Separator();
+                if (ImGui::SmallButton("Trigger Properties")) {
+                    TriggerPropertiesForDti(safeName);
+                }
+                ImGui::SameLine();
+                ImGui::TextColored(ImVec4(0.5f,0.8f,1,1), "Singleton — click to enumerate properties");
+            }
         }
 
         // Properties
