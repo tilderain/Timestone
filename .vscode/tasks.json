@@ -1,0 +1,34 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "type": "shell",
+            "label": "kill things",
+            "command": "killall gdbserver.exe || echo 0",
+            "args": []
+        },
+        {
+            "type": "shell",
+            "label": "make debug",
+            "command": "make -j4 debug",
+            "args": [],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "isBackground": false,
+            "problemMatcher": [],
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            }
+        },
+        {
+            "label": "Build",
+            "dependsOn": [
+                "make debug",
+                "kill things"
+            ],
+            "dependsOrder": "sequence"
+        }
+    ]
+}

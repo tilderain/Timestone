@@ -1,0 +1,29 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "(gdb) Launch UMVC3",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/../ULTIMATE MARVEL VS. CAPCOM 3/umvc3.exe",
+            "args": [],
+            "cwd": "${workspaceFolder}/../ULTIMATE MARVEL VS. CAPCOM 3",
+            "environment": [],
+            "MIMode": "gdb",
+            "miDebuggerPath": "/usr/bin/x86_64-w64-mingw32-gdb",
+            "miDebuggerServerAddress": "localhost:1111",
+            "serverStarted": "Listening\\ on\\ port\\ \\d*",
+            "debugServerPath": "/bin/sh",
+            "debugServerArgs": "-c \"cd '${workspaceFolder}/../ULTIMATE MARVEL VS. CAPCOM 3' && /usr/bin/wine Z:/usr/share/win64/gdbserver.exe localhost:1111 '${workspaceFolder}/../ULTIMATE MARVEL VS. CAPCOM 3/umvc3.exe'\"",
+            "filterStderr": true,
+            "filterStdout": false,
+            "logging": {
+                "moduleLoad": true,
+                "programOutput": true,
+                "exceptions": true
+            },
+            "preLaunchTask": "Build",
+            "postDebugTask": "kill things"
+        }
+    ]
+}
