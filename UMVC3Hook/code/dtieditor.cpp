@@ -108,7 +108,8 @@ static std::vector<VtableMapEntry> g_vtableMap;
 static bool g_vtableMapBuilt = false;
 
 // Build vtable→class mapping by scanning .rdata for createProperty function
-// pointers.  createProperty is always at vtable index 0 in MT Framework.
+// pointers.  createProperty can be at any vtable index; we find the actual
+// vtable base (vtable[0]) by scanning backward from the match.
 static void BuildVtableMap()
 {
     if (g_vtableMapBuilt) return;
@@ -157,13 +158,25 @@ static void BuildVtableMap()
         }
         if (!validVtable) continue;
 
+        // Find the actual vtable base by scanning backward for contiguous
+        // .text pointers.  The createProperty slot may be at any index.
+        uintptr_t vtableBase = p;
+        while (vtableBase >= rdataStart + 8) {
+            uintptr_t candidate = vtableBase - 8;
+            uintptr_t cval = *(uintptr_t*)candidate;
+            if (cval >= textStart && cval < textEnd)
+                vtableBase = candidate;
+            else
+                break;
+        }
+
         // Check for duplicate (inheritance — same vtable, different class)
         bool dup = false;
         for (auto& existing : g_vtableMap) {
-            if (existing.vtableAddr == p) dup = true;
+            if (existing.vtableAddr == vtableBase) dup = true;
         }
         if (!dup) {
-            g_vtableMap.push_back({p, className, 0});
+            g_vtableMap.push_back({vtableBase, className, 0});
         }
     }
 
@@ -598,9 +611,10 @@ static void DtiEditor_EnsureCollected()
 
     CollectAllDtis();
     BuildFilteredList();
+    BuildVtableMap();
     g_initialized = true;
-    HookLog("DTI Editor: collected %zu types, %zu properties.\n",
-        g_allDtis.size(), g_props.size());
+    HookLog("DTI Editor: collected %zu types, %zu properties, %zu vtable entries.\n",
+        g_allDtis.size(), g_props.size(), g_vtableMap.size());
 }
 
 // ---------------------------------------------------------------------------
@@ -680,6 +694,116 @@ static bool IsReadableMem(uintptr_t addr, size_t minSize)
     if (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) return false;
     return (mbi.Protect & (PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY |
                            PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY)) != 0;
+}
+
+// ---------------------------------------------------------------------------
+// Vtable-based instance scanning for a specific class
+// ---------------------------------------------------------------------------
+static uintptr_t FindVtableAddr(const char* className)
+{
+    if (!className) return 0;
+    for (auto& entry : g_vtableMap) {
+        if (strcmp(entry.className, className) == 0)
+            return entry.vtableAddr;
+    }
+    return 0;
+}
+
+// Scan memory for live instances of a specific class (by vtable address).
+// Uses the vtable base address as stored by BuildVtableMap.
+// Returns up to maxResults instance addresses.
+static std::vector<uintptr_t> ScanForInstancesOfClass(uintptr_t vtableAddr, int maxResults = 1)
+{
+    std::vector<uintptr_t> results;
+    if (!vtableAddr) return results;
+
+    // Scan .data section (static/global objects)
+    uintptr_t dataStart = (uintptr_t)_addr(0x140c51000);
+    uintptr_t dataEnd   = (uintptr_t)_addr(0x140e24047);
+    for (uintptr_t p = dataStart; p + 8 <= dataEnd && (int)results.size() < maxResults; p += 8) {
+        if (IsReadableMem(p, 8) && *(uintptr_t*)p == vtableAddr) {
+            results.push_back(p);
+        }
+    }
+    if ((int)results.size() >= maxResults) return results;
+
+    // Scan the default process heap (dynamic objects)
+    HANDLE hHeap = GetProcessHeap();
+    if (hHeap) {
+        PROCESS_HEAP_ENTRY phe = {};
+        while (HeapWalk(hHeap, &phe) && (int)results.size() < maxResults) {
+            if ((phe.wFlags & PROCESS_HEAP_ENTRY_BUSY) && phe.lpData) {
+                if (IsReadableMem((uintptr_t)phe.lpData, 8) &&
+                    *(uintptr_t*)phe.lpData == vtableAddr) {
+                    results.push_back((uintptr_t)phe.lpData);
+                }
+            }
+        }
+    }
+
+    return results;
+}
+
+// ---------------------------------------------------------------------------
+// Look up createProperty function address from the property table by class name.
+// ---------------------------------------------------------------------------
+static uintptr_t FindCreatePropertyFn(const char* className)
+{
+    if (!className) return 0;
+    for (size_t i = 0; i < g_createPropertyTableCount; i++) {
+        if (strcmp(g_createPropertyTable[i].className, className) == 0)
+            return (uintptr_t)_addr(g_createPropertyTable[i].address);
+    }
+    return 0;
+}
+
+// ---------------------------------------------------------------------------
+// Manually trigger property enumeration for ANY class via vtable scanning.
+// This looks up the class's vtable via the auto-built vtable map, finds live
+// instances, then looks up the createProperty function from the property
+// table and calls it on each found instance.
+// ---------------------------------------------------------------------------
+static void TriggerPropertiesForDti_Generic(const char* dtiName)
+{
+    if (!dtiName) return;
+
+    // Look up the createProperty function from the property table
+    uintptr_t createPropertyFn = FindCreatePropertyFn(dtiName);
+    if (!createPropertyFn) {
+        HookLog("DTI Editor: no createProperty entry for %s in property table\n", dtiName);
+        return;
+    }
+
+    // Look up vtable address for this class (vtable base, not createProperty slot)
+    uintptr_t vtableAddr = FindVtableAddr(dtiName);
+    if (!vtableAddr) {
+        HookLog("DTI Editor: no vtable entry for %s\n", dtiName);
+        return;
+    }
+
+    // Scan for live instances
+    auto instances = ScanForInstancesOfClass(vtableAddr, 1);
+    if (instances.empty()) {
+        HookLog("DTI Editor: no live instances found for %s\n", dtiName);
+        return;
+    }
+
+    uintptr_t instancePtr = instances[0];
+
+    // Create a minimal MtPropertyList context on the stack.
+    // Layout: +0x00 = vtable (unused by newElement), +0x08 = linked list head
+    struct { uintptr_t unused; uintptr_t head; } ctx = {0, 0};
+
+    // Call createProperty via the looked-up function pointer
+    typedef void(__fastcall* CreatePropertyDebugFn)(uintptr_t instance, void* ctx);
+    CreatePropertyDebugFn fn = (CreatePropertyDebugFn)createPropertyFn;
+
+    HookLog("DTI Editor: triggering properties for %s (instance=0x%llx, vtable=0x%llx, fn=0x%llx)\n",
+        dtiName, (unsigned long long)instancePtr, (unsigned long long)vtableAddr, (unsigned long long)createPropertyFn);
+
+    fn(instancePtr, &ctx);
+
+    HookLog("DTI Editor: done, now have %zu total captured properties\n", g_props.size());
 }
 
 // ---------------------------------------------------------------------------
@@ -1073,16 +1197,34 @@ void DtiEditor_Draw()
             }
         }
 
-        // Manual property trigger button for known singletons
+        // Manual property trigger button — works for any DTI with a vtable entry
         if (strcmp(safeName, "(corrupt name)") != 0) {
             const SingletonEntry* singEntry = FindSingletonEntry(safeName);
+            bool canTrigger = false;
+            const char* triggerHint = "";
+
             if (singEntry) {
+                canTrigger = true;
+                triggerHint = "Singleton — click to enumerate properties";
+            } else {
+                uintptr_t vtableAddr = FindVtableAddr(safeName);
+                if (vtableAddr) {
+                    canTrigger = true;
+                    triggerHint = "Vtable found — click to enumerate properties";
+                }
+            }
+
+            if (canTrigger) {
                 ImGui::Separator();
                 if (ImGui::SmallButton("Trigger Properties")) {
-                    TriggerPropertiesForDti(safeName);
+                    if (singEntry) {
+                        TriggerPropertiesForDti(safeName);
+                    } else {
+                        TriggerPropertiesForDti_Generic(safeName);
+                    }
                 }
                 ImGui::SameLine();
-                ImGui::TextColored(ImVec4(0.5f,0.8f,1,1), "Singleton — click to enumerate properties");
+                ImGui::TextColored(ImVec4(0.5f,0.8f,1,1), "%s", triggerHint);
             }
         }
 
