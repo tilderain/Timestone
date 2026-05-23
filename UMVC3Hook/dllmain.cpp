@@ -201,6 +201,32 @@ void InitImGui(LPDIRECT3DDEVICE9 pDevice)
 	style->FrameRounding = 2.0f;
 	style->FramePadding = ImVec2(6, 4.25);
 
+	// Load a Japanese-capable font so Shift-JIS property names render correctly.
+	// Try loading a system font first, fall back to the embedded Shinonome font.
+	io.Fonts->AddFontDefault();
+
+	{
+		ImFontConfig fontConfig;
+		fontConfig.MergeMode = true;
+		
+fontConfig.OversampleH    = 1;
+fontConfig.OversampleV    = 1;
+fontConfig.PixelSnapH     = true;
+fontConfig.RasterizerMultiply = 1.0f;
+fontConfig.SizePixels     = 12.0f; // use exact integer sizes: 9, 10, 12, 14, 16...
+
+		const ImWchar* jpRange = io.Fonts->GetGlyphRangesJapanese();
+
+		ImFont* jpFont = io.Fonts->AddFontFromFileTTF(
+			"C:\\Windows\\Fonts\\msgothic.ttc", 12.0f, &fontConfig, jpRange);
+		if (jpFont) {
+			io.Fonts->Build();
+			HookLog("InitImGui: merged msgothic.ttc Japanese glyphs\n");
+		} else {
+			io.Fonts->Build();
+			HookLog("InitImGui: WARNING - no Japanese font available\n");
+		}
+	}
 }
 
 LRESULT __stdcall WndProc(const HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)

@@ -89,7 +89,47 @@ struct SingletonEntry {
     uintptr_t createPropertyAddr; // createProperty function VA
 };
 static const SingletonEntry kKnownSingletons[] = {
-    {"sBattleSetting", 0x140d50e58, 0x14024bdf0},
+    // Format: {dtiName, instancePtrAddr (VA), createPropertyAddr (VA)}
+    // createPropertyAddr=0 means no known createProperty function (trigger not supported)
+    // Extracted via Ghidra from sXxx__getInstance patterns
+    {"sAgentSession",    0x140d52158, 0},
+    {"sAI",              0x140e18ee8, 0},
+    {"sApp",             0x140e17758, 0x14051d7e0},
+    {"sArea",            0x140e17a80, 0},
+    {"sBattleSetting",   0x140d50e58, 0x14024bdf0},
+    {"sCameraViewport",  0x140e17930, 0},
+    {"sCharacter",       0x140d44a70, 0x140058cc0},
+    {"sCollision",       0x140e18250, 0},
+    {"sEarthAtk",        0x140d52220, 0},
+    {"sGameConfig",      0x140d50f88, 0x14024fb20},
+    {"sGameEffect",      0x140d46470, 0x140130960},
+    {"sGameUI",          0x140d53a18, 0},
+    {"sHitSolver",       0x140d44060, 0x1400114a0},
+    {"sId",              0x140d51218, 0x14025c2e0},
+    {"sLicense",         0x140d52268, 0x14027a140},
+    {"sMain",            0x140e177e8, 0x140520590},
+    {"sMessage",         0x140d6c6c8, 0x140459100},
+    {"sMission",         0x140d471f8, 0x140145740},
+    {"sMouse",           0x140e1a220, 0},
+    {"sMvc3Manager",     0x140d510a0, 0x14025a520},
+    {"sMvc3Ranking",     0x140d52360, 0x1402854c0},
+    {"sMvc3Scene",       0x140e1bbc0, 0x1402b51d0},
+    {"sMvc3Setting",     0x140d537c8, 0},
+    {"sMvc3SyncPad",     0x140d523b0, 0},
+    {"sMvc3Vibration",   0x140e17868, 0x1405235a0},
+    {"sNetwork",         0x140e198b0, 0x140685af0},
+    {"sNetworkLibrary",  0x140d6c748, 0},
+    {"sPad",             0x140e174b8, 0},
+    {"sPrimitive",       0x140e193e8, 0x14064ead0},
+    {"sRender",          0x140e179a8, 0},
+    {"sReplay",          0x140d4d9d8, 0},
+    {"sResource",        0x140e175a8, 0},
+    {"sShadow",          0x140e1a8c0, 0},
+    {"sShot",            0x140d47f40, 0},
+    {"sSound",           0x140e18520, 0x1405bf8a0},
+    {"sStage",           0x140d4f718, 0x1401f0520},
+    {"sSyncPoint",       0x140e1b468, 0},
+    {"sUnit",            0x140e17698, 0},
 };
 static constexpr int kKnownSingletonCount = sizeof(kKnownSingletons) / sizeof(kKnownSingletons[0]);
 
@@ -677,6 +717,11 @@ static void TriggerPropertiesForDti(const char* dtiName)
         return;
     }
 
+    if (entry->createPropertyAddr == 0) {
+        HookLog("DTI Editor: no createProperty function known for %s\n", dtiName);
+        return;
+    }
+
     // Read instance pointer from the known global address
     uintptr_t* instancePtrAddr = (uintptr_t*)_addr(entry->instancePtrAddr);
     if (!instancePtrAddr) {
@@ -941,7 +986,7 @@ static void TriggerPropertiesForDti_Generic(const char* dtiName)
 // ---------------------------------------------------------------------------
 // Decode a Shift-JIS (codepage 932) string to UTF-8 for display.
 // First checks if the string is already valid UTF-8 — if so, returns as-is.
-// Otherwise converts from Shift-JIS to UTF-8 via a wide Char buffer.
+// Otherwise converts from Shift-JIS to UTF-8 via a wide char buffer.
 // Returns a pointer to a static buffer (subsequent calls overwrite).
 // ---------------------------------------------------------------------------
 static const char* SjisToUtf8(const char* sjis)
@@ -957,28 +1002,42 @@ static const char* SjisToUtf8(const char* sjis)
     if (!hasHighByte) return sjis;
 
     // Has high bytes — assume Shift-JIS and convert via UTF-16.
-    // Use flag 0 (not MB_ERR_INVALID_CHARS) to tolerate vendor extensions.
-    int wideLen = MultiByteToWideChar(932, 0, sjis, -1, NULL, 0);
-    if (wideLen <= 0) return sjis;
-
-    std::wstring wide(wideLen, L'\0');
-    if (MultiByteToWideChar(932, 0, sjis, -1, &wide[0], wideLen) <= 0)
-        return sjis;
-
-    // Convert UTF-16 → UTF-8
-    int utf8Len = WideCharToMultiByte(CP_UTF8, 0, wide.c_str(), -1, NULL, 0, NULL, NULL);
-    if (utf8Len <= 0) return sjis;
-
     static std::string s_utf8Buf;
-    s_utf8Buf.resize(utf8Len);
-    WideCharToMultiByte(CP_UTF8, 0, wide.c_str(), -1, &s_utf8Buf[0], utf8Len, NULL, NULL);
 
-    // WideCharToMultiByte includes the null terminator in utf8Len when given -1 length.
-    // Pop it so s_utf8Buf.size() reflects the actual string length.
-    if (!s_utf8Buf.empty() && s_utf8Buf.back() == '\0')
-        s_utf8Buf.pop_back();
+    auto convert = [](const char* input, UINT codePage) -> bool {
+        // Use flag 0 (not MB_ERR_INVALID_CHARS) to tolerate vendor extensions.
+        int wideLen = MultiByteToWideChar(codePage, 0, input, -1, NULL, 0);
+        if (wideLen <= 0) return false;
 
-    return s_utf8Buf.c_str();
+        std::wstring wide(wideLen, L'\0');
+        if (MultiByteToWideChar(codePage, 0, input, -1, &wide[0], wideLen) <= 0)
+            return false;
+
+        // Convert UTF-16 → UTF-8
+        int utf8Len = WideCharToMultiByte(CP_UTF8, 0, wide.c_str(), -1, NULL, 0, NULL, NULL);
+        if (utf8Len <= 0) return false;
+
+        s_utf8Buf.resize(utf8Len);
+        WideCharToMultiByte(CP_UTF8, 0, wide.c_str(), -1, &s_utf8Buf[0], utf8Len, NULL, NULL);
+
+        // WideCharToMultiByte includes the null terminator in utf8Len when given -1 length.
+        // Pop it so s_utf8Buf.size() reflects the actual string length.
+        if (!s_utf8Buf.empty() && s_utf8Buf.back() == '\0')
+            s_utf8Buf.pop_back();
+
+        return true;
+    };
+
+    // Try Shift-JIS (codepage 932) first, then fall back to the system ANSI codepage.
+    if (convert(sjis, 932))
+        return s_utf8Buf.c_str();
+    if (convert(sjis, CP_ACP))
+        return s_utf8Buf.c_str();
+
+    // Conversion failed — return the raw string. ImGui will show tofu for
+    // non-ASCII bytes, but at least the ASCII prefix remains readable.
+    HookLog("SjisToUtf8: WARNING - conversion failed for \"%s\"\n", sjis);
+    return sjis;
 }
 
 // ---------------------------------------------------------------------------
