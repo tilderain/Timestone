@@ -235,9 +235,6 @@ static int BuildRegions(Region* regions, int maxRegions)
 
 // ===========================================================================
 // Sleep-Patch & Headless Tick — game-logic-only re-simulation stepping
-//
-// These are defined here (before ReSimulate/FreeSnapshots) so they can be
-// used by the Public API below.
 // ===========================================================================
 static constexpr uintptr_t FN_SMAIN_MOVE            = 0x140521df0;
 static constexpr uintptr_t FN_UPDATE_MANAGERS        = 0x140258540;
@@ -251,9 +248,9 @@ static constexpr uintptr_t FN_SMAIN_TAIL             = 0x140259ea0;  // tail fun
 static constexpr uintptr_t FN_CALL_SRENDER           = 0x14053a250;  // call on sMain+0x40190 (sRender)
 static constexpr uintptr_t FN_COLLISION_SOUND_UPDATE = 0x1405b72b0;  // collision sound-event iterator
 static constexpr uintptr_t FN_RESET_HITNODES         = 0x140259e90;  // j_sHitSolver__resetActiveNodes
-static constexpr uintptr_t FN_MGR_GETSOMETHING       = 0x140259270;  // manager -> subsys, vtable+0x30
 static constexpr uintptr_t FN_PAD_METHOD_3D00        = 0x1402a3d00;  // sPad method
 static constexpr uintptr_t FN_PAD_METHOD_3DC0        = 0x1402a3dc0;  // sPad method
+
 // sMvc3Manager subsystem getters (for MgrSubsysV30 helper)
 static constexpr uintptr_t FN_GETGAMECONFIG          = 0x1401bcc50;
 static constexpr uintptr_t FN_GETGAMEUI              = 0x14097d370;
@@ -311,6 +308,38 @@ static inline void MgrSubsysCall(uintptr_t getterAddr, uint32_t vfnOffset)
     if (fn) fn(obj);
 }
 
+// Helper: Aligns restored sMain structures with actual performance counters
+// to prevent the game loop from computing a negative/excessive frame-time
+// delta after re-simulation, which would cause a freeze in the busy-wait
+// or in the Sleep-based frame-pacing loop.
+static void Rollback_ResyncMainTiming(uint64_t sMain)
+{
+    if (!sMain) return;
+
+    LARGE_INTEGER qpc;
+    QueryPerformanceCounter(&qpc);
+
+    // Sync high-resolution performance-counter samples with physical counter
+    *(uint64_t*)(sMain + 0x40048) = qpc.QuadPart;
+    *(uint64_t*)(sMain + 0x40078) = qpc.QuadPart;
+    *(uint64_t*)(sMain + 0x70)     = qpc.QuadPart;
+
+    // Reset timing deltas to 60 FPS nominal values so the next real tick
+    // sees a well-formed 16 ms frame delta.
+    *(uint32_t*)(sMain + 0x38)     = 16;           // ~16ms frame delta
+    *(float*)(sMain + 0x80)        = 0.01666667f;  // 60fps float delta
+    *(uint32_t*)(sMain + 0xA8)     = 16;           // current delta
+    *(uint32_t*)(sMain + 0xA4)     = 16;           // shifted delta
+
+    // Zero accumulated sleep/deadline calculations so they recompute fresh
+    *(uint64_t*)(sMain + 0x60)     = 0;
+    *(uint64_t*)(sMain + 0x68)     = 0;
+
+    // Set tick count so the next real frame advances by exactly 1 step.
+    // (Without this the restored frame count may jump or stall.)
+    *(uint32_t*)(sMain + 0x48)     = 1;
+}
+
 void Rollback_PatchSleep(bool enable)
 {
     if (enable && !g_sleepPatched) {
@@ -337,7 +366,11 @@ void Rollback_PatchSleep(bool enable)
 
 void Rollback_HeadlessTick(uint64_t sMain)
 {
-    if (!sMain) return;
+    if (!sMain) 
+    {
+        HookLog("Rollbackheadlesstick: smain is bad?:? :>\n");
+        return;
+    }
 
     HookLog("Rollback_HeadlessTick: begin\n");
 
@@ -414,13 +447,13 @@ void Rollback_HeadlessTick(uint64_t sMain)
     // [SKIP] getShot->vtable+0x48 (draw)
     // [SKIP] getGameEffect->vtable+0x48 (draw)
 
-    VTableCall(sMain, 0x401a0, 0x30);  // unknown physics/contact object
-    VTableCall(sMain, 0x401e0, 0x30);  // second call on this member
+    VTableCall(sMain, 0x401a0, 0x30);  // collision (sCollision__move)
+    VTableCall(sMain, 0x401e0, 0x30);  // mpCollision second call
 
     MgrSubsysCall(FN_GETHITSOLVER, 0x30);    // sHitSolver
 
-    VTableCall(sMain, 0x401a0, 0x68);  // physics vfn+0x68 (contact response)
-    VTableCall(sMain, 0x401a0, 0x58);  // physics vfn+0x58 (contact response)
+    VTableCall(sMain, 0x401a0, 0x68);  // physics vfn+0x68
+    VTableCall(sMain, 0x401a0, 0x58);  // physics vfn+0x58
 
     // 8. Direct AI call (separate from vtable+0x30 above)
     HookLog("Rollback_HeadlessTick: Phase2 step8 — Direct AI call\n");
@@ -438,11 +471,13 @@ void Rollback_HeadlessTick(uint64_t sMain)
     // ==================================================================
     // Phase 3 — Manager subsystem update loop (all vtable+0x30)
     //
-    // TEMP DISABLED: re-sim corrupts the job-system dispatch table across all
-    // 16 worker threads (crashes jumping to 0x100000000).  Re-enable one
-    // subsystem at a time after finding which one triggers the corruption.
+    // NOTE: The function at 0x140259270 was previously identified as a
+    // manager subsystem getter, but Ghidra analysis revealed it is actually
+    // Concurrency::details::VirtualProcessor::GetOwningRoot — a ConcRT
+    // thread-pool internal. Calling it with vtable+0x30 corrupts the
+    // dispatch table across all 16 worker threads, causing crashes at
+    // address 0x100000000.  It is intentionally excluded below.
     // ==================================================================
-#if 0
     HookLog("Rollback_HeadlessTick: Phase3 begin — Manager subsystem update loop\n");
     // getInstance -> vtable+0x30 (manager itself)
     HookLog("Rollback_HeadlessTick: Phase3 — sMvc3Manager vtable+0x30\n");
@@ -456,6 +491,7 @@ void Rollback_HeadlessTick(uint64_t sMain)
             }
         }
     }
+
     HookLog("Rollback_HeadlessTick: Phase3 — Character/Stage/Shot/GameEffect vtable+0x30\n");
     MgrSubsysCall(FN_GETCHARACTER, 0x30);    // sCharacter
     MgrSubsysCall(FN_GETSTAGE, 0x30);        // sStage
@@ -471,9 +507,10 @@ void Rollback_HeadlessTick(uint64_t sMain)
                 ((void(__fastcall*)(uint64_t))_addr(FN_RESET_HITNODES))(hs);
         }
     }
+
     HookLog("Rollback_HeadlessTick: Phase3 — Replay/Battle/Network/License vtable+0x30\n");
     MgrSubsysCall(FN_GETREPLAY, 0x30);       // sReplay
-    MgrSubsysCall(FN_MGR_GETSOMETHING, 0x30); // unknown subsys
+    // FN_MGR_GETSOMETHING (0x140259270) intentionally excluded — see note above.
     MgrSubsysCall(FN_GETBATTLESET, 0x30);    // sBattleSetting
     MgrSubsysCall(FN_GETMVC3SET, 0x30);      // sMvc3Setting
     MgrSubsysCall(FN_GETNETWORK, 0x30);      // sNetwork
@@ -488,8 +525,10 @@ void Rollback_HeadlessTick(uint64_t sMain)
     MgrSubsysCall(FN_GETRANKING, 0x30);      // sRanking
     MgrSubsysCall(FN_GETNETROOM, 0x30);      // sNetworkRoom
     MgrSubsysCall(FN_GETEARTHATK, 0x30);     // sEarthAttack
-#endif
 
+    // ==================================================================
+    // Phase 4 — Tail + finalize
+    // ==================================================================
     HookLog("Rollback_HeadlessTick: Phase4 begin — Tail + finalize\n");
     VTableCall(sMain, 0x40198, 0x30);
     VTableCall(sMain, 0x40270, 0x30);
@@ -630,13 +669,23 @@ void Rollback_ReSimulate(int32_t startFrame, int32_t endFrame)
     g_isResimulating = true;
     Rollback_PatchSleep(true); // NOP Sleep calls so frames run at full speed
 
-    // Rewind to the starting frame boundary, then step forward re-saving
+    // 1. Rewind to the starting frame boundary
     //Rollback_RestoreSnapshot(startFrame);
     HookLog("Rollback: re-simulating frames %d \u2192 %d\n", startFrame, endFrame);
+
+    // 2. Step forward re-saving
     for (int32_t f = startFrame; f < endFrame; ++f) {
         g_resimulateCurrentFrame = f;
         Rollback_HeadlessTick(g_sMvc3Main);
-        Rollback_SaveSnapshot(f + 1);
+    //    Rollback_SaveSnapshot(f + 1);
+    }
+
+    // 3. Resynchronize performance counter state inside sMain to match
+    //    current system time, preventing the game loop from seeing a
+    //    negative or excessive frame-time delta that would cause a freeze.
+    uint64_t sMain = *(uint64_t*)_addr(PTR_SMAIN);
+    if (sMain) {
+        Rollback_ResyncMainTiming(sMain);
     }
 
     g_isResimulating = false;
@@ -694,7 +743,13 @@ static void __fastcall hkMvc3Main_move(uint64_t param_1)
 // ===========================================================================
 static void __fastcall hkCollisionSoundUpdate(uint64_t param_1)
 {
-    // just return — no sound events during re-simulation
+    // Bypass during re-simulation; process normally otherwise
+    if (g_isResimulating) {
+        return;
+    }
+    if (oCollisionSoundUpdate) {
+        oCollisionSoundUpdate(param_1);
+    }
 }
 
 void Rollback_InitHooks()

@@ -587,7 +587,7 @@ void FrameStepper_Process()
         static int32_t lastSaveFrame = 0;
         auto sReplay = *(uint64_t*)_addr(0x140d4d9d8);
         int32_t curFrame = sReplay ? *(int32_t*)(sReplay + 0x54) : 0;
-        static constexpr int32_t RESIM_WINDOW = 8;
+        static constexpr int32_t RESIM_WINDOW = 1;
 
         if (GetAsyncKeyState(VK_F5) & 1) {
             Rollback_SaveSnapshot(curFrame);
