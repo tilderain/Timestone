@@ -1282,7 +1282,22 @@ void DtiEditor_Draw()
         BuildFilteredList();
     }
     ImGui::SameLine();
-    ImGui::Text("  (%zu types)", g_filtered.size());
+    if (ImGui::SmallButton("Copy Names")) {
+        // Build a string with filtered (loaded) DTI names, one per line
+        std::string allNames;
+        for (const auto& entry : g_filtered) {
+            if (entry.dti && entry.dti->className && IsReadableCStr(entry.dti->className)) {
+                allNames += entry.dti->className;
+                allNames += '\n';
+            }
+        }
+        if (!allNames.empty())
+            ImGui::SetClipboardText(allNames.c_str());
+    }
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Copy displayed DTI class names to clipboard");
+    ImGui::SameLine();
+    ImGui::Text("  (%zu types / %zu loaded)", g_filtered.size(), g_allDtis.size());
     ImGui::SameLine();
     if (ImGui::SmallButton(g_showPropPane ? "Hide Props" : "Show Props")) {
         g_showPropPane = !g_showPropPane;

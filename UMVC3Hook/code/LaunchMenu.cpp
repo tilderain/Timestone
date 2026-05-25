@@ -435,6 +435,9 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
                         g_dialogConfig.enetPeer = event.peer;
                         event.peer->data = (void*)"connected";
 
+                        // Reset timeout to 15000ms for gameplay
+                        enet_peer_timeout(event.peer, 0, 15000, 15000);
+
                         HWND hStatus = GetDlgItem(hDlg, ID_NET_STATUS);
                         if (hStatus) {
                             if (g_isHost) {
@@ -708,6 +711,8 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
             }
 
             HookLog("UMVC3Hook: enet_host_connect OK, polling via timer\n");
+            // Set connect timeout to 1000ms (default is ~15s)
+            enet_peer_timeout(peer, 0, 1000, 1000);
             g_isHost = false;
             g_statusColor = RGB(0, 0, 0); // default color while connecting
             if (hStatus) SetWindowTextA(hStatus, "Connecting...");
@@ -729,7 +734,7 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
             if (hStatus) SetWindowTextA(hStatus, "Searching... (Steam SDK required)");
 
             // Try to load steam_api and search for lobbies
-            HMODULE hSteam = LoadLibraryA("steam_api.dll");
+            HMODULE hSteam = LoadLibraryA("steam_api64.dll");
             if (hSteam) {
                 // Steam API is available - try to init and use it
                 // This is a simplified approach; full lobby support needs Steamworks SDK headers
@@ -751,7 +756,7 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
             HWND hStatus = GetDlgItem(hDlg, ID_STEAM_STATUS);
             if (hStatus) SetWindowTextA(hStatus, "Creating lobby... (Steam SDK required)");
 
-            HMODULE hSteam = LoadLibraryA("steam_api.dll");
+            HMODULE hSteam = LoadLibraryA("steam_api64.dll");
             if (hSteam) {
                 HWND hList = GetDlgItem(hDlg, ID_STEAM_LIST);
                 if (hList) {
