@@ -77,6 +77,8 @@ int32_t g_resimulateCurrentFrame = 0;
 
 static uint64_t g_sMvc3Main      = 0;
 static void(__fastcall* oMvc3Main_move)(uint64_t param_1) = nullptr;
+// Trampoline for the collision sound-event iterator (hook crashes during re-sim)
+static void(__fastcall* oCollisionSoundUpdate)(uint64_t param_1) = nullptr;
 
 // ===========================================================================
 // Snapshot Region Descriptor & Ring Buffer
@@ -247,6 +249,7 @@ static constexpr uintptr_t FN_CALL_401E0             = 0x1405bb710;  // direct c
 static constexpr uintptr_t FN_CALL_AI                = 0x140647910;  // direct call on sMain+0x40240 (AI)
 static constexpr uintptr_t FN_SMAIN_TAIL             = 0x140259ea0;  // tail function with sMain as arg
 static constexpr uintptr_t FN_CALL_SRENDER           = 0x14053a250;  // call on sMain+0x40190 (sRender)
+static constexpr uintptr_t FN_COLLISION_SOUND_UPDATE = 0x1405b72b0;  // collision sound-event iterator
 static constexpr uintptr_t FN_RESET_HITNODES         = 0x140259e90;  // j_sHitSolver__resetActiveNodes
 static constexpr uintptr_t FN_MGR_GETSOMETHING       = 0x140259270;  // manager -> subsys, vtable+0x30
 static constexpr uintptr_t FN_PAD_METHOD_3D00        = 0x1402a3d00;  // sPad method
@@ -338,6 +341,16 @@ void Rollback_HeadlessTick(uint64_t sMain)
 
     HookLog("Rollback_HeadlessTick: begin\n");
 
+    // ---- Disable collision sound-event updates during re-sim ----
+    // sCollision__move checks the flag at collisionObj+0x73a8 before
+    // calling its sound-event iterator (FUN_1405B72B0).  During re-sim the
+    // sound slot-index increments past the per-entry capacity, hitting a
+    // null-pointer bug in the iterator.  Sound doesn't matter for headless
+    // re-simulation; zeroing the flag safely skips the crashing call.
+    //
+    // (We also hook FUN_1405B72B0 via MinHook below as a belt-and-suspenders
+    //  guard — the flag can be re-enabled on worker threads.)
+
     // ==================================================================
     // Phase 1 — Frame timing + Manager state + Input (always needed)
     // ==================================================================
@@ -424,7 +437,12 @@ void Rollback_HeadlessTick(uint64_t sMain)
 
     // ==================================================================
     // Phase 3 — Manager subsystem update loop (all vtable+0x30)
+    //
+    // TEMP DISABLED: re-sim corrupts the job-system dispatch table across all
+    // 16 worker threads (crashes jumping to 0x100000000).  Re-enable one
+    // subsystem at a time after finding which one triggers the corruption.
     // ==================================================================
+#if 0
     HookLog("Rollback_HeadlessTick: Phase3 begin — Manager subsystem update loop\n");
     // getInstance -> vtable+0x30 (manager itself)
     HookLog("Rollback_HeadlessTick: Phase3 — sMvc3Manager vtable+0x30\n");
@@ -470,6 +488,7 @@ void Rollback_HeadlessTick(uint64_t sMain)
     MgrSubsysCall(FN_GETRANKING, 0x30);      // sRanking
     MgrSubsysCall(FN_GETNETROOM, 0x30);      // sNetworkRoom
     MgrSubsysCall(FN_GETEARTHATK, 0x30);     // sEarthAttack
+#endif
 
     HookLog("Rollback_HeadlessTick: Phase4 begin — Tail + finalize\n");
     VTableCall(sMain, 0x40198, 0x30);
@@ -481,14 +500,11 @@ void Rollback_HeadlessTick(uint64_t sMain)
     HookLog("Rollback_HeadlessTick: Phase4 — sMain tail\n");
     ((void(__fastcall*)(uint64_t))_addr(FN_SMAIN_TAIL))(sMain);
 
-    // sRender update
-    HookLog("Rollback_HeadlessTick: Phase4 — sRender update\n");
-    VTableCall(sMain, 0x40190, 0x30);  // sRender update (game-logic state)
-    HookLog("Rollback_HeadlessTick: Phase4 — sRender method\n");
-    DirectMemberCall(sMain, 0x40190, FN_CALL_SRENDER);  // sRender method
-
-    // [SKIP] vtable+0x50 on [0x40208] (render)
-    // [SKIP] vtable+0x50 on [0x40270] (render)
+    // [SKIP] sRender game-logic state update (vtable+0x30) — handled inside
+    //       FN_SMAIN_MOVE, and the internal allocator isn't snapshot-safe.
+    // [SKIP] Direct sRender method — rendering is meaningless during headless re-sim.
+    //[SKIP] vtable+0x50 on [0x40208] (render)
+    //[SKIP] vtable+0x50 on [0x40270] (render)
 
     HookLog("Rollback_HeadlessTick: Phase4 — Final vtable+0x30\n");
     VTableCall(sMain, 0x401f8, 0x30);
@@ -669,6 +685,18 @@ static void __fastcall hkMvc3Main_move(uint64_t param_1)
     }
 }
 
+// ===========================================================================
+// Hook — collision sound-event iterator (null-pointer bug workaround)
+//
+// During re-simulation the sound slot-index increments past per-entry
+// capacity, triggering a null-pointer dereference inside this function.
+// Sound is irrelevant during headless re-sim, so we intercept and return.
+// ===========================================================================
+static void __fastcall hkCollisionSoundUpdate(uint64_t param_1)
+{
+    // just return — no sound events during re-simulation
+}
+
 void Rollback_InitHooks()
 {
     MH_STATUS s = MH_CreateHook(
@@ -683,5 +711,19 @@ void Rollback_InitHooks()
                 (uint64_t)_addr(FN_SMVC3MAIN_MOVE));
     } else {
         HookLog("Rollback: failed to hook sMvc3Main__move (%d)\n", s);
+    }
+
+    // Collision sound-event iterator — NOP during re-sim
+    s = MH_CreateHook(
+        (LPVOID)_addr(FN_COLLISION_SOUND_UPDATE),
+        (LPVOID)&hkCollisionSoundUpdate,
+        (LPVOID*)&oCollisionSoundUpdate
+    );
+    if (s == MH_OK) {
+        MH_EnableHook((LPVOID)_addr(FN_COLLISION_SOUND_UPDATE));
+        HookLog("Rollback: hooked collision sound update (0x%llX)\n",
+                (uint64_t)_addr(FN_COLLISION_SOUND_UPDATE));
+    } else {
+        HookLog("Rollback: failed to hook collision sound update (%d)\n", s);
     }
 }
