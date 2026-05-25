@@ -48,7 +48,32 @@ sMvc3Manager__getAction → delegates to sAction  → ACTION STEP
 ```
 
 The action step dispatches to the current phase. During fighting (step 5),
-`sAction__stepFighting` runs at `0x140007080`.
+`sAction__stepFighting` runs at `0x140007080`, which calls
+`uActionSideCamera__classFunc` at `0x140006370` for the inner update:
+
+```
+# Inner fighting step pipeline (uActionSideCamera__classFunc):
+1. Clear flags (+0xC4, +0x114, +0xF4)
+2. Reset round timer from config  (+0xF8)
+3. Clear frame sync counters      (+0xFC, +0x100, +0x104)
+4. Reset cActionTime              (sAction +0x38)
+5. sShot: clear stale shots       (sShot__createProperty_B80)
+6. sShot: process special types   (uShotShieldOuroboros)
+7. sGameEffect: clear stale       (sGameEffect__createProperty_6B0)
+8. sGameEffect: purge             (sGameEffect__purgeStaleEffects)
+9. sCharacter: tick each fighter  → vtable+0x2f0 per character
+10. Process tag swaps             (character_tag_swap_orchestrator)
+11. Update positions              (cChrNode__updatePosition_maybe)
+12. Team-level functions          (FUN_140021510 per team)
+13. Training reset timer check
+14. FUN_14005a3e0                 (character post-update)
+15. Camera update
+```
+
+**CRITICAL ORDER:** Shots and effects are cleared BEFORE character ticks.
+Characters create new projectiles/effects during their tick, which are then
+valid for the rest of the frame. Tag swaps happen AFTER character ticks
+(characters set their swap requests during the tick, then swaps execute).
 
 ---
 
@@ -76,6 +101,15 @@ The action step dispatches to the current phase. During fighting (step 5),
 **Why it must be snapshotted:** The frame counter at `+0x54` is the master
 frame clock. All gameplay logic uses it. Without it, rollback has no timeline.
 
+**Training mode replay loop** (from `sReplay__move_trainingLoop` at `0x1401CEF28`):
+- Frame counter at `+0x194` per team slot
+- Team replay slots are `0x23288` bytes apart
+- Plays back recorded inputs during training dummy recording
+- Uses `sReplay__updatePerTeam()` for each team
+
+**Total sReplay size**: `~0x233C4` bytes (from constructor memset).
+This includes the replay data buffer for storing entire match input logs.
+
 ---
 
 ## 2. sCharacter — Character Manager
@@ -101,6 +135,35 @@ cChrNode → cChrNode__getNext(lVar2) → next node (singly linked via +0x10)
 cChrNode → cChrNode__getChr(lVar2) → uCharacter pointer at cChrNode + 0x08
 ```
 
+**Layout** (from `sCharacter__getTeam` at `0x140001B60`):
+```
+sCharacter + 0x40 + teamIndex * 0x2C0  →  cChrTeam (0x2C0 bytes each)
+```
+
+- sCharacter + 0x40       = Team 0 (cChrTeam, 0x2C0 bytes)
+- sCharacter + 0x300      = Team 1 (cChrTeam, 0x2C0 bytes)
+- Total sCharacter size ≈ 0x5C0 + header = ~2-4 KB (manager) + 6 character nodes
+
+**Per-frame character dispatch** (from `FUN_14005a210` at `0x14005A210`):
+```c
+for (teamIdx = 0; teamIdx < 2; teamIdx++) {
+    team = sCharacter__getTeam(param_1, teamIdx);
+    team_state_reset(team, 0);
+    for (node = cChrTeam__getNextNode(team); node != 0; node = cChrNode__getNext(node)) {
+        chr = cChrNode__getChr(node);
+        chr->vtable->tick(chr);           // vtable call at +0x2F0
+    }
+}
+```
+
+This is the per-frame character FSM update. Each character's vtable+0x2F0
+dispatches to its character-specific tick function (e.g. `uFirebrand__tick`
+at `0x1400BE8F0`), which handles:
+- State checks (action conditions, hit state, airborne, etc.)
+- Action transitions (block, hitstun, attack startup/active/recovery)
+- Weapon/effect updates
+- Animation progress
+
 **cChrNode layout** (from `cChrNode__createProperty` at `0x140030D70`):
 | Offset | Size | Field        |
 |--------|------|--------------|
@@ -113,27 +176,145 @@ cChrNode → cChrNode__getChr(lVar2) → uCharacter pointer at cChrNode + 0x08
 | +0x30  | 8    | mpParent      |
 | +0x38  | 8    | mpChild       |
 
-**uCharacter known fields** (verified via Ghidra):
-| Offset   | Size | Field (guess)                |
-|----------|------|------------------------------|
-| +0x08    | ~64  | MtObject base (position, etc)|
-| +0x38    | 4    | cActionTime (speed scale)    |
-| +0x439   | ~64  | **cChrStatus** (health, etc) |
-| +0x1450  | ~32  | mCnsShareList (constraints)  |
-| +0x1470  | 4    | mCnsJointNum                |
-| +0x1480  | 4    | HipRate                     |
-| +0x14f4  | 4    | flags bitfield              |
-| +0x14f8  | 4    | flags bitfield              |
-| +0x14fc  | 4    | flags bitfield              |
-| +0x150c  | 4    | flags bitfield              |
-| +0x1878  | 4    | character/variant index      |
-| +0x212c  | 1    | active state byte           |
-| +0x2d94  | 4    | frame counter (incremented each frame in moveAfter) |
-| +0x414c  | 4    | action/combo value          |
-| +0x4200  | 16    | some array/struct           |
-| +0x4210  | 0xB00 | array of 16 structs × 0xB0  |
-| +0x4d10  | 16*N  | position data block         |
-| +0x63e4  | 8     | ptr/state                   |
+**cChrTeam layout** (from `cChrTeam__createProperty` at `0x140020710`,
+`cChrTeam__cChrTeam_ctor` at `0x14001FEE0`):
+| Offset | Size | Field                 | Init/Notes                |
+|--------|------|-----------------------|---------------------------|
+| +0x00  | 8    | vtable                |                           |
+| +0x08  | 0x40 | mNode[3]              | 3 cChrNode entries (0x14 bytes each + padding) |
+| +0x48  | 8    | **mpCurrentChr**       | currently active uCharacter ptr |
+| +0x50  | 4    | mDeltaTime            | team time delta           |
+| +0x54  | 4    | mDeltaTimeOrder       | init -1.0f                |
+| +0x58  | 4    | **mFlag**             | team flags (uint32)       |
+| +0x5C  | 4    | **mAlive**            | alive character count     |
+| +0x60  | 4    | **mAliveMember**      | alive member bitmask      |
+| +0x68  | 4    | **mLifeTotal**        | total team health (f32)   |
+| +0x6C  | 4    | **mLifeMaxTotal**     | max team health (f32)     |
+| +0x70  | 4    | mLifeRate             | health rate multiplier    |
+| +0x74  | 4    | mLifeRate2            | health rate 2             |
+| +0x78  | 4    | **mGauge**            | hyper meter (0-50000 f32) |
+| +0x7C  | 4    | mGaugeDefault         | default gauge (init 10000)|
+| +0x80  | 4    | mGaugeAdd             | gauge to add              |
+| +0x84  | 4    | mHitLast              | last hit damage           |
+| +0x8C  | 4    | mHitTotal             | total hit damage          |
+| +0x90  | 4    | **mHitCount**         | hit counter               |
+| +0x94  | 4    | mHitCountFrame        | hits this frame           |
+| +0x98  | 4    | mDmgTotal             | total damage dealt        |
+| +0xA8  | 4    | **mChangeEnable**     | tag change enabled        |
+| +0xAC  | 4    | mChangeEnable2        | tag change enabled 2      |
+| +0xB0  | 4    | **mAssist**           | assist type              |
+| +0xB4  | 4    | **mAssistUse**        | assist remaining          |
+| +0xB8  | 4    | mHVRCount             | HVR count                 |
+| +0xBC  | 4    | mDHCCount             | DHC count                 |
+| +0xC0  | 4    | **mXFactorTime**      | X-Factor remaining time   |
+| +0xC4  | 4    | mXFactorSetTime       | X-Factor set time         |
+| +0xC8  | 4    | mXFactorSetTimeLv1    | X-Factor time Lv1         |
+| +0xCC  | 4    | mXFactorSetTimeLv2    | X-Factor time Lv2         |
+| +0xD0  | 4    | mXFactorSetTimeLv3    | X-Factor time Lv3         |
+| +0xD4  | 4    | mXFactorResAddTime    | X-Factor additional time  |
+| +0xD8  | 4    | **mXFactorLv**        | X-Factor level (1-3)      |
+| +0xDC  | 4    | **mXFactorLvNow**     | current X-Factor level    |
+| +0xE0  | 4    | mInputSwitch          | input switch flags        |
+| +0xE4  | 4    | mCPlrId               | current player ID         |
+| +0xE8  | 4    | **mCAnmNo**           | current action number     |
+| +0xEC  | 4    | mCAnmNoReq            | requested action          |
+| +0xF0  | 4    | mCAnmNoHVR            | HVR action number         |
+| +0xF4  | 4    | mCAnmTimePass         | animation time passed     |
+| +0xF8  | 4    | **mCAnmF**            | current animation flags   |
+| +0xFC  | 4    | **mCPrgF**            | current program flags     |
+| +0x100 | 4    | **mCEtcF**            | current etc flags         |
+| +0x104 | 4    | **mCDmgF**            | current damage flags      |
+| +0x110 | 12   | **mCPos** (Vector3)   | current character position|
+| +0x120 | 12   | mCAngle (Vector3)     | current character angle   |
+| +0x130 | ~190 | mPlayData             | replay/playback data      |
+
+**cChrTeam must be snapshotted** because team-level state (health, meter,
+X-Factor, assist counts, active character tracking) is essential for
+deterministic simulation. These values change every frame during combat.
+
+**uCharacter verified layout** (from `cChr__createProperty` at `0x1400511D0`):
+
+| Offset   | Size | Field               | Notes                      |
+|----------|------|---------------------|----------------------------|
+| +0x00    | ~64  | vtable + MtObject   | position in MtObject base  |
+| +0x38    | 4    | cActionTime         | speed scale/hitstop        |
+| +0x439   | ~64  | cChrStatus          | health, meter, flags       |
+| +0x1300  | ~80  | **Animation state** | mDeltaTimeCoef, mAnmNo, mAnmTime, mAnmRate |
+| +0x1450  | ~32  | mCnsShareList       | constraint data            |
+| +0x1470  | 4    | mCnsJointNum        | constraint joint count     |
+| +0x1480  | 4    | HipRate             | hip rate                   |
+| +0x14f0  | 4    | **mChrF**           | character flags            |
+| +0x14f4  | 4    | **mAnmF**           | animation flags            |
+| +0x14f8  | 4    | **mPrgF**           | program flags              |
+| +0x14fc  | 4    | **mNotF**           | note flags                 |
+| +0x1500  | 4    | mNo2F               | note 2 flags               |
+| +0x1504  | 4    | mDmgF               | damage flags               |
+| +0x1508  | 4    | mEtcF               | etc flags                  |
+| +0x150c  | 4    | mEt2F               | etc 2 flags                |
+| +0x1510  | 4    | mUsrF               | user flags                 |
+| +0x1514  | 4    | mDbgF               | debug flags                |
+| +0x1560  | 4    | **mStateCheck**     | state check value (read by FUN_14005a4f0, combined with flag masks) |
+| +0x1878  | 4    | char/variant idx    | character/variant index    |
+| +0x212c  | 1    | active byte         | active state               |
+| +0x29e   | 2    | **mAssistFlags**    | assist entry/DHC condition flags |
+| +0x29f   | 1    | mActionFlags1      | action state sub-flags     |
+| +0x2a0   | 1    | mActionFlags2      | more action flags          |
+| +0x2a1   | 1    | mActionFlags3      | char-specific state flag   |
+| +0x2ac   | 4    | **mStateCtx**      | state context / state check parameter |
+| +0x2d94  | 4    | frame counter       | incremented per frame      |
+| +0x2d9c  | 4    | **mId**             | character ID               |
+| +0x2da0  | 4    | mPlrId             | player ID                  |
+| +0x2da4  | 4    | mTeamId            | team ID                    |
+| +0x2da8  | 4    | mSettingId         | setting/slot               |
+| +0x2dac  | 4    | mDefMemberId       | default member             |
+| +0x2db0  | 4    | mMemberId          | current member             |
+| +0x2db8  | 4    | mBody              | body type                  |
+| +0x2dbc  | 4    | mAssistType        | assist type                |
+| +0x2dc0  | 4    | mLanguage          | language setting            |
+| +0x3560  | 8    | mpResCamera        | resource camera ptr        |
+| +0x3ed0  | 4    | mFaceParts         | face part                  |
+| +0x3f40  | 8    | **weaver ptr**     | weaver factory pointer     |
+| +0x3f48  | 4    | **mAnmNoReqAlive** | requested anim (alive)     |
+| +0x3f4c  | 4    | **mAnmNoReqStd**   | requested anim (standard)  |
+| +0x3f50  | 4    | **mAnmNoReqCmd**   | requested anim (command)   |
+| +0x3f5c  | 4    | mDeltaRateAnm      | animation rate delta       |
+| +0x3f60  | 4    | mMotMode           | animation mode             |
+| +0x3f64  | 4    | mNextMotBlend      | next motion blend          |
+| +0x3f68  | 4    | mThrowAnmNo        | throw animation            |
+| +0x3f6c  | 4    | mTdownAnmNo        | knockdown animation        |
+| +0x3f78  | 4    | mThrowAnmNoEPLast  | throw EP last              |
+| +0x3f7c  | 4    | mTdownAnmNoEPLast  | knockdown EP last          |
+| +0x3f80  | 4    | mEPCnt             | extra part count           |
+| +0x40c0  | 12   | **mMove** (Vec3)   | movement vector            |
+| +0x40e0  | 4    | **mFSpd**          | forward speed              |
+| +0x40e4  | 4    | **mFAcl**          | forward acceleration       |
+| +0x40e8  | 4    | **mYSpd**          | Y speed                    |
+| +0x414c  | 4    | action/combo       | action/combo value         |
+| +0x4200  | 8    | mpHitboxArray      | hitbox array ptr           |
+| +0x4210  | 0xB00| **16 hits × 0xB0** | hitbox/hurtbox array       |
+| +0x4d10  | 0x100 | **16 × Vec3**     | position data block        |
+| +0x6398  | 4    | mLastDComboRate    | last damage combo rate     |
+| +0x63b4  | 4    | **mDmgSta**        | damage status              |
+| +0x63b8  | 4    | mDmgPowLv          | damage power level         |
+| +0x63bc  | 4    | mDmgPoint          | damage point               |
+| +0x63c0  | 4    | mDmgMaterial       | damage material            |
+| +0x63c4  | 4    | mDmgDir            | damage direction           |
+| +0x63c8  | 4    | **mAirTime**       | air time in frames         |
+| +0x63cc  | 4    | mAirTimeOfs        | air time offset            |
+| +0x63d0  | 4    | mAirDist           | air distance               |
+| +0x63d4  | 4    | mAirSpeed          | air speed                  |
+| +0x63d8  | 4    | mAirFallAcl        | air fall acceleration      |
+| +0x63dc  | 4    | **mDmgHitCount**   | damage hit count           |
+| +0x63e0  | 4    | mDmgAirHitCount    | air hit count              |
+| +0x63e4  | 4    | **mDmgHeap**       | damage heap/value          |
+| +0x63ec  | 4    | mDmgTime           | damage time (hitstun)      |
+| +0x63f0  | 4    | mDmgAirTime        | air damage time            |
+| +0x63f4  | 4    | **mComboDmgTotal** | total combo damage         |
+| +0x63f8  | 4    | mStunCharge        | stun charge                |
+| +0x63fc  | 4    | mSameTdownNum      | same knockdown count       |
+| +0x68fd  | 1    | mExtraFlag         | per-character extra flag (Firebrand's fire state) |
+| +0x6908  | 8    | mpExtraWeapon      | per-character weapon/effect pointer |
+| ...      | ...  | ...                | character-specific fields extend beyond base offset |
 
 **cChrStatus layout** (from constructor at `0x1400311E0`,
 `cChrStatus__getLife` at `0x14054A250`, `cChrStatus__getLifeMax` at `0x1406476F0`):
@@ -266,12 +447,27 @@ execute the wrong moves or miss inputs entirely.
 
 | Field          | Value                     |
 |----------------|---------------------------|
-| getInstance    | `0x140153180` (jmp to 0x1401CE000) |
-| Priority       | **MUST**                  |
+| DTI registers  | `0x1409E5CA0`             |
+| DTI class      | `0x14005A840`             |
+| DTI size       | **8 bytes** (= sizeof(MtObject), no own data) |
+| Priority       | **SKIP**                  |
 
 **Role:** Command input buffer. Stores parsed motion command history
-for special move detection (QCF, DP, charge, etc.). Gets populated
-from cChrInput data. Likely per-character.
+for special move detection (QCF, DP, charge, etc.).
+
+**DTI registration** at `0x1409E5CA0`:
+```c
+cChrCommand__MyDTI__MyDTI(&cChrCommand__DTI, "cChrCommand", MtObject__getDTI(), 8, 0, 0);
+```
+
+The **size is 8** — just the vtable pointer. This means cChrCommand
+has no local data storage beyond MtObject. The actual command history
+is processed through other means (cChrInput data in uCharacter, or
+the command processor runs inline in the character FSM).
+
+**Conclusion:** cChrCommand does NOT need its own snapshot. The
+motion command state is derived from cChrInput (already captured)
+and the character's current action/state (already captured).
 
 ---
 
@@ -342,17 +538,19 @@ the playback time, playback rate, and animation transitions.
 |--------|------|--------------------|--------------------------|
 | +0x1300| 4    | mDeltaTimeCoef     | time coefficient         |
 | +0x1304| 4    | mDeltaTimeLocal    | local time step          |
+| +0x1308| 4    | mDeltaTime         | time delta               |
 | +0x1310| 4    | **mAnmNo**          | current animation number |
 | +0x1314| 4    | mAnmNoOld          | previous animation       |
-| +0x1318| 4    | mAnmNoReq          | requested animation      |
+| +0x1318| 4    | mAnmNoReq          | **requested animation**  |
 | +0x131c| 4    | mAnmTimeReq        | requested animation time |
 | +0x1320| 4    | mAnmNoTakeon       | taken-over animation     |
-| +0x1328| 4    | **mAnmTime**        | current animation time (subframe) |
+| +0x1328| 4    | **mAnmTime**        | current animation time (subframe, f32) |
 | +0x132c| 4    | mAnmTimePass       | animation time elapsed   |
 | +0x1330| 4    | **mAnmRate**        | animation playback speed |
 | +0x1334| 4    | mAnmWait           | animation wait flag      |
 | +0x1338| 4    | mAnmWaitTime       | wait remaining           |
-| +0x1348| ?    | mActorGameModelAnm | animation data system    |
+| +0x133c| 4    | mAnmSerial         | animation serial number  |
+| +0x1340| 4    | mWaitMotType       | wait motion type         |
 
 **Why snapshot:** If animation state is wrong after rollback, characters
 will display wrong animations, hitbox/hurtbox positions will be wrong,
@@ -368,17 +566,40 @@ and attack timing (active frames, recovery) will be incorrect.
 | Ptr storage    | `0x140d47f40`             |
 | Priority       | **MUST**                  |
 
-**Role:** Manages all active projectiles. Shot list stored as an `MtArray`
-at `sShot + 0x43c` (`mShotList`). Each entry is a pointer to a `uShot`
-derived object.
+**Role:** Manages all active projectiles. Shots are stored in a per-team
+linked list. The list heads are at a fixed global address (relative to the
+sShot singleton offset +0x450).
+
+**Shot list structure:**
+- List heads at `0x140d47f90 + team * 40` (0x140d47f90 = sShot + 0x450)
+- Team 0 head at `0x140d47f90`
+- Team 1 head at `0x140d47fa8`
+- Each is a cChrNode-like linked list (40 bytes per team head struct)
+- Traverse via `node + 0x10` (next pointer), like cChrNode
+
+**Per-shot linked list node** (from `uShot__getListNode` at `0x1401D5E00`):
+- List node is at `uShot + 0x1450` (returned by `LEA RAX, [RCX + 0x1450]`)
+
+**Shot list iteration:**
+```
+head = *(qword*)(0x140d47f90 + teamIdx * 40)  // first shot node
+while head:
+    uShot = (byte*)head - 0x1450               // back-calculate uShot*
+    // update uShot
+    head = *(qword*)(head + 0x10)              // next node in list
+```
 
 **Known sShot fields:**
 | Offset | Size | Field             |
 |--------|------|-------------------|
+| +0x38  | 0x400 | frame order array (256 × uint32) |
+| +0x438 | 4    | frame order index |
 | +0x43c | 4    | mKillOrder        |
 | +0x440 | 4    | mMaxSpreadHierarchy |
 | +0x444 | 4    | mDeltaTimeCoef    |
-| +0x448 | ~32  | mShotList (MtArray of uShot*) |
+| +0x448 | 8    | spin lock (?lock) |
+| +0x450 | 40   | Team 0 shot list head |
+| +0x478 | 40   | Team 1 shot list head |
 
 **uShot per-frame state** (from `uShot__move` at `0x1401CCEB0`):
 | Offset | Size | Field                  | Notes                 |
@@ -394,6 +615,7 @@ derived object.
 | +0x1fec| 4    | flags                  | 0x1000000             |
 | +0x1ffc| 4    | status result          | 0x80000 = killed      |
 | +0x2000| 8    | pointer                |                       |
+| +0x1450| 8+32  | linked list node       | cChrNode-like: +0x10=next, +0x08=prev |
 | +0x212c| 1    | active flag byte       | 0x01 = active, 0x00 = inactive |
 
 ---
@@ -474,6 +696,17 @@ or miss entirely after a rollback.
 
 **Step transitions** happen via `sAction__transitionToStep(param_1, newStep)`.
 
+**Online frame sync** (in `sAction__stepFighting`):
+The function already has a branch for online mode:
+- **Offline**: Frame sync counters (+0xFC, +0x100, +0x104) are accumulated
+  from `deltaTime * cActionTime__getSpeedScale()` using sMain timing.
+- **Online**: Frame sync values are read from `sMvc3SyncPad` via the
+  `network_get_frame_sync()` mechanism (the original GGPO-sync layer).
+
+The existing netplay bypasses this by delivering inputs directly through
+the netplay module without using the sync pad. For proper rollback, you
+will need to feed these counters yourself based on your frame timing.
+
 ---
 
 ## 13. aNextBattle — Battle State (Amaterasu)
@@ -502,9 +735,31 @@ Accessed in stepFighting for game flags, training reset, round loss checks.
 
 **Role:** Pause state, HUD display data, training mode UI.
 
-**Why it must be snapshotted:** Contains `effectivePause` state which
+**Layout** (from `sGameUi__createProperty` at `0x1402BA290`):
+| Offset | Size | Field                     | Notes            |
+|--------|------|---------------------------|------------------|
+| +0x5790| 4    | mMenuPhase                | menu phase       |
+| +0x5798| 4    | mReturnPhase              | return phase     |
+| +0x579c| 4    | mMenuResponse (f32)       | menu response    |
+| +0x57a0| 4    | mMenuInputResponse (f32)  | input response   |
+| +0x57a4| 4    | mMenuOkResponse (f32)     | OK response      |
+| +0x57a8| 4    | mMenuMoveCam (f32)        | camera movement  |
+| +0x57b0| 4    | mMenuCursorPos            | cursor position  |
+| +0x5ab0| 8    | pause UI pointer          | checked for null |
+| +0x5ab8| 1    | **mPauseMenuPause**       | effective pause  |
+| +0x5ab9| 1    | **mPauseMenuReq**         | pause request    |
+| +0x5aba| 1    | mPauseMenuState           | pause state      |
+| +0x5abb| 1    | **mPauseChange**          | pause changed    |
+| +0x5c3c| 4    | mChrSelectDecideFrame     | char select frame|
+| +0x5c48| 4    | mSearchCancelResponse (f32)| search cancel   |
+| +0x5c9c| 4    | mPopupNetworkBattleWait   | popup handle     |
+| +0x5ea0| 4    | mTSCheckPhase             | TS check phase   |
+| +0x5ea8| 4    | mTSCheck (bool)           | TS check flag    |
+
+**Why it must be snapshotted:** Contains `mPauseMenuPause` (+0x5ab8) which
 determines whether game logic advances. If pause state desyncs between
-peers, the simulation will diverge.
+peers, the simulation will diverge. The menu/misc fields don't change
+during gameplay.
 
 ---
 
@@ -541,7 +796,14 @@ peers, the simulation will diverge.
 | Priority       | **SHOULD**                |
 
 **Role:** Central game state coordinator. Holds references to sAction,
-GSound (sound manager), and player character indices.
+GSound (sound manager), and player character indices. The `getAction`
+method returns the current sAction singleton used for phase dispatch.
+
+**Layout:**
+```
+sMvc3Manager → getAction → sAction  (delegates step to current phase)
+sMvc3Manager → getGameConfig → sGameConfig
+```
 
 **State to snapshot:**
 - Player character index mapping
@@ -573,6 +835,7 @@ from the saved input frames.
 |-----------------|----------------|----------------|---------------|
 | sReplay         | 0x1400047B0    | 0x140d4d9d8   | ~144 KB       |
 | sCharacter      | 0x140001AA0    | 0x140d44a70   | ~48 KB        |
+| ↓ cChrTeam(×2)  | in sCharacter  | +0x40/+0x300  | 0x2C0 each    |
 | sShot           | 0x1400047D0    | 0x140d47f40   | ~4 KB + bullets|
 | sHitSolver      | 0x14004AFF0    | 0x140d44060   | ~200 KB       |
 | sAction         | via sMvc3Mgr   | —             | ~16 KB        |
@@ -581,12 +844,15 @@ from the saved input frames.
 | sMain           | 0x140003150    | 0x140e177e8   | ~256 KB       |
 
 **Per-character MUST snapshot** (×6 characters):
-- cChrStatus (health, meter) — ~64 bytes each
+- **uCharacter bulk** (entire object) — ~0x8000 each (use DTI size)
+- cChrStatus (health, meter) — ~64 bytes each at uCharacter +0x439
 - cAtkCtrl (combo, hitstop, target info) — ~0x950 bytes each
-- cChrInput (input state) — ~0x570 bytes each  
+- cChrInput (input state) — ~0x570 bytes each
 - cChrAbility (ability flags) — ~0xD0 bytes each
-- uCharacter flags (+0x14f4..+0x150c) — ~32 bytes each
+- uCharacter flags (+0x14f0..+0x1514) — ~40 bytes each
+- uCharacter assist flags (+0x29e..+0x2ac) — ~16 bytes each
 - uCharacter animation state (+0x1300..+0x1400) — ~256 bytes each
+- uCharacter damage/combo state (+0x6398..+0x63FC) — ~104 bytes each
 - cActionTime per-character (hitstop/blockstun) — ~0x80 bytes each
 
 ### SHOULD snapshot:
@@ -599,6 +865,40 @@ from the saved input frames.
 | sPad            | 0x140001B00    | 0x140e174b8   |
 
 ### SKIP (never changes during a match, or visual-only):
+
+**sStage analysis** (from `sStage__createProperty` at `0x1401F0520`,
+constructor at `0x1401F0110`):
+| Offset | Size | Field | Notes |
+|--------|------|-------|-------|
+| +0x00  | 8    | vtable | |
+| +0x38  | 4    | (cSystem base) | |
+| +0x3C  | 4    | mDeltaTimeCoef (f32) | init 1.0f, cosmetic timing adjust |
+| +0x40  | 4    | mStateFlags (uint32) | bit 2 = scheduler pause |
+| +0x2048| 8    | mpBackupData | stage ref set at init, static during match |
+| +0x2050| 8    | mpStageObj1 | alive-tracked ptr, null during combat |
+| +0x2058| 8    | mpStageObj2 | alive-tracked ptr, null during combat |
+| +0x2060| ~0x10| MtArray | stage object children (visual) |
+
+sStage has no gameplay-essential mutable state. Destructible background
+objects (e.g., Training stage walls) are managed entirely by the stage's
+own objects, not by sStage itself. **SKIP** for rollback.
+
+**sMvc3SyncPad analysis** (getInstance at `0x140004770`, ptr `0x140d523b0`):
+Contains the `cCommunicationTool` with message types for the original GGPO
+sync layer (MsgInputActData, MsgCrcData, MsgInputData, MsgInputCmd, etc.).
+The game's existing netplay bypasses this layer entirely. **SKIP** since
+you will provide your own sync mechanism through rollback netcode.
+
+**Gameplay RNG check:**
+No gameplay-affecting random number generator was found in the Ghidra
+analysis. All identified RNG functions are non-gameplay:
+- `sChrSelect__randomPickFromReplaySeed` — character select only
+- `RandomCharacterPoolFillForArcadeMode` — arcade mode team gen
+- `RandomColorIDGenerator` — cosmetic color selection
+- `sLicense__correctionRandomGet` — license/achievement system
+
+During combat, the game is fully deterministic given the same inputs.
+No RNG state needs snapshotting.
 
 | Singleton       | getInstance    | Ptr storage   |
 |-----------------|----------------|----------------|
@@ -633,6 +933,148 @@ from the saved input frames.
 | sMouse          | 0x14025C5A0    | 0x140e1a220   |
 | sMvc3Scene      | 0x140452680    | 0x140e1bbc0   |
 | sArea (2)       | 0x140545340    | 0x140e17a88   |
+
+---
+
+## Character-Specific Persistent State
+
+Some characters create persistent objects that must also be rolled back:
+
+| Character | Object | How it's tracked |
+|-----------|--------|-------------------|
+| **Doom** | Hidden Missiles | Created as uShot objects via the weaver at uCharacter +0x3f40; exist in sShot's per-team shot list |
+| **Dr. Strange** | Eye of Agamotto / Daggers | Created via weaver; some are uShot, others are uGameEffect entries |
+| **Phoenix** | Dark Phoenix transformation | Flag in uCharacter +0x14f8 (mPrgF) bit 0x400000; separate character state machine |
+| **Dormammu** | Dark Hole / Purification | uShot projectiles + persistent status effect on the opponent |
+| **Chris** | Weapons (handgun, shotgun, etc.) | Per-character weapon slot managed by weaver at +0x3f40 |
+| **Rocket Raccoon** | Spitfire / traps | uShot projectiles with custom timers |
+| **Arthur** | Armor pieces | Checked/set via flags at uCharacter +0x14f4, +0x14f8 |
+| **Haggar** | Pipes | Weapon object managed via weaver |
+| **Taskmaster** | Weapon mimic | State tracked via character-specific fields in uCharacter +0x.. |
+| **Amaterasu** | Weapon types | Flag-based in uCharacter +0x14f4..+0x150c |
+| **Zero** | Ryuenjin / Sougenmu state | Flag-based + custom projectile behavior |
+| **Strider** | Orbs (Oroboros) | Created as uShot projectiles from weaver |
+| **Ghost Rider** | Chains | Persistent hitbox state managed by weaver |
+| **Nemesis** | Tentacles | Created as ongoing hitbox arrays |
+| **Frank West** | Level-up | Combo-based level counter (potentially in cAtkCtrl mTotalCombo or character-specific field) |
+
+**Weaver at uCharacter +0x3F40:**
+The weaver is a **unit group factory** that creates character-specific runtime
+objects (weapons, projectiles, persistent effects). Each character has a
+`getUnitGroupOverride()` vtable function that returns a unit group ID:
+- Akuma = 0x24, Felicia = 0x22, Doom = 0x31, etc.
+- These IDs map to unit groups that define what objects a character can spawn.
+- The weaver itself does NOT store mutable state — it delegates to the
+  resource system and creates objects that appear in sShot/sGameEffect lists.
+
+**Practical note:** Most character-specific state is stored either in:
+1. uCharacter flag fields (+0x14f0 to +0x1514) — already captured with per-character snapshot
+2. uCharacter unit group/weaver (+0x3f40) — creates new uShot objects that appear in sShot's lists
+3. Custom fields in the uCharacter-derived class's own memory region (beyond the base uCharacter size)
+
+When taking coarse snapshots of the entire uCharacter object, ALL of this is captured automatically.
+Only targeted snapshots need to worry about tracking which specific fields each character uses.
+
+---
+
+## 18. Training Mode State
+
+| Field          | Value                     |
+|----------------|---------------------------|
+| Access         | sGameUI + sAction + sPad  |
+| Priority       | **SHOULD**                |
+
+Training mode includes:
+- **Dummy recording/playback** — stored in sReplay replay slot data (+0x58 onwards)
+- **Training reset flash state** — sAction +0x10C
+- **Training menu settings** — stored in sGameUI (dummy action, guard mode, etc.)
+
+**Important:** Training mode does NOT have a "save frame state and restore"
+mechanism. The `sAction__stepTrainingReset` function (at `0x140009DF0`)
+works by:
+1. Purging stale units, shots, and effects
+2. Reinitializing the stage
+3. Restarting the match from battle settings
+
+There is no pre-existing byte-level save/restore for training mode. For
+rollback, this means you must implement your own state save/restore system
+(the snapshot system itself is the save state).
+
+For rollback, training mode settings don't change during simulation, but
+training reset state and save-state positions should be included to prevent
+desyncs if training reset is triggered during rollback.
+
+---
+
+## 19. The Frame Update Pipeline (Summary)
+
+From `sMvc3Main__move` at `0x1402594A0`, the per-frame update order is:
+
+```
+1. sMain__move()                    → fps/timing, pause state
+2. sMvc3Main__updateManagers_maybe()→ resource streaming
+3. mpNetPad (+0x401c0).vfn+0x30    → sync pad (network input sync)
+4. mpPlatformUtil (+0x40260).vfn+0x30
+5. mpResource (+0x401a8).vfn+0x48  → resource processing
+6. mpTool (+0x40198).vfn+0x48      → tool/system dispatch
+7. mpEffect (+0x401d8).vfn+0x48    → sGameEffect update
+8. mpCollision (+0x401e0)           → collision detection
+9. sGameConfig update               → game config dispatch
+10. sRender + sPrimitive setup      → rendering prep
+11. sMvc3Manager__getAction         → sAction move dispatch
+12.   └→ stepFighting (step 5)      → round timer, frame sync, training
+```
+
+The actual character update (`uCharacter`, `uShot`, `sHitSolver`) happens inside
+the sAction stepFighting dispatch, which calls:
+- `sCharacter__iterateAllFighters(vfn+0x2f0)` — per-character state machine update
+- sShot linked-list iteration — per-shot update
+- sHitSolver — collision resolution
+
+---
+
+## 20. cChrFlag — Character Flag Instances
+
+| Field          | Value                     |
+|----------------|---------------------------|
+| Factory        | `0x1401ED5B0`             |
+| DTI            | `0x140d4f338`             |
+| Priority       | **SHOULD**                |
+
+**Role:** Per-character flag instance management. Simple DTI-based object
+with no extra properties beyond vtable. Not snapshot-critical since
+per-character flags are already captured in uCharacter's `+0x14f0..+0x1514`.
+
+---
+
+## 21. Estimated uCharacter Object Size
+
+| Measurement | Value |
+|-------------|-------|
+| Lowest offset used | +0x00 (vtable) |
+| Confirmed offsets up to | +0x6908 (mpExtraWeapon) |
+| Flag field region | +0x14f0..+0x1514 (40 bytes of flags) |
+| Assist/state region | +0x29e..+0x2ac (~16 bytes) |
+| Animation state region | +0x1300..+0x1348 (~80 bytes) |
+| Hitbox array region | +0x4210..+0x4D10 (0xB00 bytes, 16 × 0xB0) |
+| Position data block | +0x4D10..+0x4E10 (0x100 bytes, 16 × 0x10) |
+| Damage/combo state | +0x6398..+0x63FC (~104 bytes) |
+| Extra fields region | +0x68FD..+0x6908 (char-specific extensions) |
+| **Estimated minimum** | **~0x7000 bytes (~28 KB) per character** |
+| **Estimated conservative** | **~0x8000 bytes (~32 KB) per character** |
+| **All 6 characters** | **~192 KB at 32 KB each** |
+
+The actual uCharacter size varies per character (determined by DTI at
+runtime). Character-specific fields for complex characters (Dante with
+his weapon switching, Dormammu with his summoned objects) extend beyond
+the base uCharacter size. A conservative snapshot should save 0x8000
+bytes per uCharacter to ensure all character-specific state is captured.
+
+For maximum safety, read the actual DTI size at runtime:
+```
+uint32_t size = *(uint32_t*)(uCharacter->dti_ptr + 0x34);
+```
+This gives the exact allocated size for each character's uCharacter instance.
 
 ---
 
