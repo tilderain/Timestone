@@ -1,0 +1,450 @@
+================================================================================
+ ROLLBACK NETCODE SNAPSHOT/RESTORE — COMPREHENSIVE BACKGROUND
+================================================================================
+
+This document contains all context, decompiled functions, data structure
+layouts, and current source code necessary to understand and improve the
+UMvC3 rollback snapshot/restore implementation.
+
+================================================================================
+ 1. GAME UPDATE PIPELINE (per frame, from sMvc3Main__move at 0x1402594A0)
+================================================================================
+
+sMain__move()                                   → fps/timing, pause check
+sMvc3Main__updateManagers_maybe()               → managers dispatch
+sMvc3SyncPad__processFrame_maybe                → sync pad processing
+mpPlatformUtil vtable+0x30                       → platform utilities
+mpResource vtable+0x48                           → resource processing
+mpTool vtable+0x48                               → tool processing
+mpEffect vtable+0x48                             → effect processing
+mpCollision → FUN_1405BB710                      → collision
+sMvc3Manager::getGameConfig → vtable+0x48        → game config
+sRender::setRenderTargetAspect + sPrimitive      → render setup
+mpPrimitive vtable+0x48                          → primitive
+mpGpuParticle vtable+0x48                        → gpu particle
+mpRender → FUN_140537080                         → render
+mpArea vtable+0x30                               → area
+sMvc3Manager::getAction → delegates to sAction   → ACTION STEP (characters, shots, hit detection)
+
+The action step (sAction__stepFighting at 0x140007080) runs:
+  1. sAction step machine
+  2. Per-character: cChrTeam loop → cChrNode → uCharacter tick
+  3. sShot → projectile tick
+  4. sHitSolver → collision resolution
+  5. Physics integration
+
+For rollback, we save BEFORE sMvc3Main__move runs, and restore to re-run it.
+
+================================================================================
+ 2. KEY FUNCTION ADDRESSES (verified via Ghidra)
+================================================================================
+
+sMvc3Main__move              0x1402594A0  Entry point for one frame update
+sMain__move                  0x140521DF0  Frame timing, pause flag read
+sMvc3Manager__getAction      0x1409629D0  Reads sAction from sMvc3Mgr+0x48
+cChrTeam__getNextNode        0x140004870  Returns first cChrNode (inline at team+0x08)
+cChrNode__getNext            0x14068BA70  Returns *(cChrNode+0x10)
+cChrTeam__cChrTeam_ctor      0x14001FEE0  Constructor — confirms node at +0x08
+sCharacter__getTeam          0x140001B60  Returns cChrTeam* from (sCharacter, teamIdx)
+uCharacter__processJugglePhysics 0x1400574D0  Per-character physics
+sAction__stepFighting        0x140007080  Main action step (characters, shots, hit)
+sAction__stepIntro           0x140007D90  Intro skip (used by controller.cpp)
+
+================================================================================
+ 3. SINGLETON POINTER STORAGE ADDRESSES (dereference at runtime)
+================================================================================
+
+Singleton            VA of Ptr Storage     Access at Runtime
+─────────────────────────────────────────────────────────────────
+sReplay              0x140d4d9d8           *(uint64_t*)_addr(0x140d4d9d8)
+sCharacter           0x140d44a70           *(uint64_t*)_addr(0x140d44a70)
+sShot                0x140d47f40           *(uint64_t*)_addr(0x140d47f40)
+sHitSolver           0x140d44060           *(uint64_t*)_addr(0x140d44060)
+aNextBattle          0x140d47e68           *(uint64_t*)_addr(0x140d47e68)
+sGameUI              0x140d53a18           *(uint64_t*)_addr(0x140d53a18)
+sMain                0x140e177e8           *(uint64_t*)_addr(0x140e177e8)
+sGameEffect          0x140d46470           *(uint64_t*)_addr(0x140d46470)
+sMvc3Manager         0x140d510a0           *(uint64_t*)_addr(0x140d510a0)
+  → sAction at sMvc3Mgr + 0x48           *(uint64_t*)(sMvc3Mgr + 0x48)
+
+================================================================================
+ 4. GHIDRA DECOMPILATIONS OF KEY FUNCTIONS
+================================================================================
+
+--- 4a. sMvc3Manager__getAction (0x1409629D0) ---
+  undefined8 sMvc3Manager__getAction(longlong param_1) {
+      return *(undefined8*)(param_1 + 0x48);  // sAction = sMvc3Mgr->field_0x48
+  }
+
+--- 4b. cChrTeam__getNextNode (0x140004870) ---
+  // Returns the FIRST node in the team's character linked list.
+  // The first node is INLINE at team + 0x08, not a pointer-to-pointer.
+  void cChrTeam__getNextNode(longlong param_1) {
+      cChrNode__getNext(param_1 + 8);  // passes team + 0x08 as first node
+      return;
+  }
+
+--- 4c. cChrNode__getNext (0x14068BA70) ---
+  // Returns the next node in the linked list from node->mpNext (+0x10).
+  // The character pointer is at node + 0x08 (mpChr).
+  // getNextNode calls this with the first inline node at team + 0x08.
+  undefined8 cChrNode__getNext(longlong param_1) {
+      return *(undefined8*)(param_1 + 0x10);
+  }
+
+--- 4d. sMain__move (0x140521DF0) — partial ---
+  // Frame timing function. Called from sMvc3Main__move with no args.
+  // Reads from param_1 (RCX, set to sMain* at call time).
+  // Key offsets:
+  //   +0x38  frame delta time
+  //   +0x48  frame count / tick count
+  //   +0x50  time scale
+  //   +0x54  target frame rate
+  //   +0x58  frame lock flag
+  //   +0x60  accumulated frame time
+  //   +0x78  pause timer remaining
+  //   +0x7c  pause flag (1 = paused)
+  //   +0x7d  pause active flag (derived)
+  //   +0x80  frame delta float
+  //   +0xa4  last frame delta copy
+  //   +0xa8  cur frame delta
+  //   +0x40048  performance counter
+  //   +0x40070  inverse perf counter (1.0 / counter)
+  //   +0x40078  performance counter high-res
+  // Total structure size: ~0x40080 bytes
+
+--- 4e. cChrTeam__cChrTeam_ctor (0x14001FEE0) — partial ---
+  // Confirms layout: first cChrNode is constructed at param_1 + 1 (offset 0x08)
+  void cChrTeam__cChrTeam_ctor(undefined8* param_1) {
+      MtObject__ctorBase();
+      *param_1 = &PTR_cChrTeam__dtor_140a6ca78;  // vtable at +0x00
+      cChrNode__cChrNode(param_1 + 1);           // node at +0x08 (offset by 1 element)
+      param_1[9] = 0;                            // mpCurrentChr at +0x48 = null
+      // ... (rest of field inits at +0x4c through +0xF0+)
+  }
+
+--- 4f. sMvc3Main__move (0x1402594A0) — full decompilation ---
+  void sMvc3Main__move(longlong param_1) {
+      sMain__move();
+      sMvc3Main__updateManagers_maybe(param_1);
+      sMvc3SyncPad__processFrame_maybe(*(undefined8*)(param_1 + 0x401c0));
+      // ... vtable dispatches for platform util, resource, tool, effect, collision ...
+      FUN_1405bb710(*(undefined8*)(param_1 + 0x401e0));  // collision
+      uVar1 = sMvc3Manager__getInstance();
+      plVar2 = (longlong*)sMvc3Manager__getGameConfig(uVar1);
+      (**(code**)(*plVar2 + 0x48))(plVar2);
+      // render setup...
+      (**(code**)(**(longlong**)(param_1 + 0x40270) + 0x48))();  // primitive
+      (**(code**)(**(longlong**)(param_1 + 0x40208) + 0x48))();  // gpu particle
+      FUN_140537080(*(undefined8*)(param_1 + 0x40190));            // render
+      (**(code**)(**(longlong**)(param_1 + 0x40200) + 0x30))();   // area
+      uVar1 = sMvc3Manager__getInstance();
+      sMvc3Manager__getAction(uVar1);  // ACTION STEP (does not return!)
+  }
+
+================================================================================
+ 5. DATA STRUCTURE LAYOUTS
+================================================================================
+
+--- 5a. cChrTeam layout (embedded inside sCharacter) ---
+  Offset  Size  Field              Notes
+  ─────────────────────────────────────────────────────
+  +0x00   8     vtable
+  +0x08   8     mNode[0]           First cChrNode (inline, 0x38 bytes total)
+  +0x10   8       mpCharacter      uCharacter* for this slot
+  +0x18   8       mpNext           Next cChrNode* (or null)
+  ...     ...     ...              (rest of node fields)
+  +0x48   8     mpCurrentChr       Currently active uCharacter* on this team
+  +0x50   4     health/scale       (float, 1.0 = full)
+  +0x54   4     unknown            (-1.0)
+  +0x58   8     (2 pointers)       Team state pointers
+  +0x68   8     member info        Array or linked info
+  ...     ...     ...
+  Team size: 0x2C0 bytes (TEAM0 at sCharacter+0x40, TEAM1 at sCharacter+0x300)
+
+--- 5b. cChrNode layout ---
+  Offset  Size  Field
+  ──────────────────────
+  +0x00   8     vtable
+  +0x08   8     mpChr (uCharacter*)
+  +0x10   8     mpNext (next cChrNode*)
+  +0x18   8     mpPrev (previous cChrNode*)
+  ...     ...   ...
+
+  Note: The first cChrNode is INLINE at cChrTeam + 0x08 (confirmed by the
+  cChrTeam constructor calling cChrNode__cChrNode(param_1 + 1), which places
+  the first node at the address + 8 bytes from the team base).
+
+  Traversal:
+    firstNode = team + 0x08                      // inline first node
+    character = *(uint64_t*)(node + 0x08)         // uCharacter*
+    nextNode  = *(uint64_t*)(node + 0x10)         // next cChrNode* (heap allocated)
+    while (node) { read character; node = nextNode; }
+
+--- 5c. uCharacter layout (per character, ~32KB each) ---
+  Offset  Size  Field
+  ──────────────────────
+  +0x00   8     vtable
+  +0x08   8     DTI pointer (contains size at DTI+0x34)
+  +0x10   ...   Character state (action state machine, position, health, etc.)
+  +0x14   ...   tagState
+  ...     ...   ...
+  +0x??   4     groundedState
+  ...     ...   vector, specialState, anim, ...
+  Size determined by DTI: *(uint32_t*)(character->dtiPtr + 0x34)
+
+  DTI (Dynamic Type Information) is an Mt Framework concept. Each object
+  has a DTI pointer at +0x08 (after vtable at +0x00). DTI + 0x34 holds the
+  allocated size of this specific character's class (varies per character:
+  Wolverine is smaller than Galactus).
+
+--- 5d. sCharacter manager layout ---
+  Offset  Size  Field
+  ──────────────────────
+  +0x00   ...   vtable + header
+  +0x40   0x2C0 Team 0 (cChrTeam)
+  +0x300  0x2C0 Team 1 (cChrTeam)
+  +0x5C0  ...   remaining manager state
+  Total: ~48KB (exact size from constructor memset)
+
+--- 5e. sReplay layout (master frame counter) ---
+  Offset  Size  Field
+  ──────────────────────
+  +0x54   4     Frame counter (absolute frame number)
+  +0x00   0x23400 Total (~144KB, includes replay buffer for training)
+  Frame counter at +0x54 is the master clock for the entire game.
+
+--- 5f. sAction layout (per-frame state machine) ---
+  Offset  Size  Field
+  ──────────────────────
+  +0x38   4     cActionTime (hitstop/blockstun remaining frames)
+  +0xD8   4     step/phase (2=intro, 3=countdown, 5=fighting, 6=postRound)
+  +0xF8   4     round timer
+  +0xFC   4     round count
+  +0x100  4     active player count/state
+  Total: ~0x300 bytes
+
+--- 5g. aNextBattle layout (battle state machine) ---
+  Offset  Size  Field
+  ──────────────────────
+  +0xC4   4     flags
+  +0xD8   4     step/phase
+  +0xDC   4     phase sub-state
+  +0x174  4     transition state
+  Total: ~0x20000 bytes (128KB, very large game object)
+
+--- 5h. sMain layout ---
+  +0x38   8     frame delta time (used for animation blending)
+  +0x48   4     tick count / frame index
+  +0x50   4     time scale
+  +0x54   4     target frame rate (60 = 60fps)
+  +0x58   1     frame lock flag (0 = unlocked)
+  +0x78   4     pause timer (countdown when unpausing)
+  +0x7c   1     pause flag (1 = game is paused)
+  +0x7d   1     pause active (derived flag)
+  +0x80   4     frame delta as float
+  +0xa4   4     previous frame delta copy
+  +0xa8   4     current frame delta
+  Total: ~0x40080 bytes (256KB)
+
+================================================================================
+ 6. EXISTING CODE (rollback.h)
+================================================================================
+
+Location: UMVC3Hook/code/rollback.h
+
+#pragma once
+#include <cstdint>
+
+// Maximum rollback window in frames. Keep in sync with NET_HISTORY_SIZE (16).
+static constexpr int ROLLBACK_WINDOW = 16;
+
+void Rollback_InitHooks();          // Call once during DLL init
+void Rollback_SaveSnapshot(int32_t frame);
+void Rollback_RestoreSnapshot(int32_t frame);
+void Rollback_FreeSnapshots();
+
+================================================================================
+ 7. EXISTING CODE (rollback.cpp)
+================================================================================
+
+Location: UMVC3Hook/code/rollback.cpp
+See the file for full source (~336 lines). Key architecture:
+
+- Ring buffer: g_slots[ROLLBACK_WINDOW] of SnapshotSlot { data, size, capacity }
+- Region list: BuildRegions() populates Region[] with { ptr, size } for all
+  snapshot regions in a fixed order. Save and restore iterate identically.
+- Physics: TODO — currently hooks FUN_140521df0 (actually sMain__move, not
+  a physics function). The physics world (~11424 bytes) may be at
+  sMain + 0x31A78 or a separate allocation. Full sMain dump covers it.
+
+Snapshot regions (order is critical — must match between save and restore):
+  1. sReplay          0x23400 bytes   (~144KB) — frame counter, replay buffer
+  2. sShot            0x500 bytes     (1.25KB) — projectile base singleton
+  3. sHitSolver       0x34080 bytes   (~208KB) — collision pairs + result buf
+  4. aNextBattle      0x20000 bytes   (~128KB) — battle state machine
+  5. sGameUI          0x6000 bytes    (~24KB)  — pause state, HUD data
+  6. sMain            0x40080 bytes   (~256KB) — frame timing, pause flag
+  7. sGameEffect      0x2000 bytes    (~8KB)   — gameplay effects
+  8. sAction          0x300 bytes     (0.75KB) — game phase, round timer, hitstop
+  9. Physics          11424 bytes     (~11KB)  — physics world (TODO: fix pointer)
+  10. cChrTeam[0]     0x2C0 bytes     — team 0 health, meter, X-Factor
+  11. cChrTeam[1]     0x2C0 bytes     — team 1
+  12-17. uCharacter   DTI size (~32KB each) — 6 characters from linked-list traversal
+
+Total per snapshot: ~700-900KB
+Ring buffer (16 frames): ~14MB
+
+KNOWN ISSUES:
+  1. Physics hook hooks sMain__move instead of the real physics function.
+     FUN_140521df0 is NOT a physics function — it's sMain__move (frame timing).
+     The param_1 captured is likely sMain*, but the 11424-byte "physics world"
+     is at some offset within sMain or a separate allocation.
+
+  2. Per-character DTI size: uCharacter struct at +0x08 has a DTI pointer.
+     *(uint32_t*)(dtiPtr + 0x34) gives the allocated size. This should be
+     stable during a match (character classes don't change).
+
+  3. sShot projectile list: Currently only saves the base singleton (0x500 bytes).
+     The dynamically-allocated projectile nodes are NOT captured. Missing
+     projectiles after restore will likely cause visual/functional desync.
+
+  4. sGameEffect effects list: Same issue — base singleton saved but dynamic
+     effect list is not.
+
+  5. Input injection during re-simulation: After RestoreSnapshot, the caller
+     needs to inject corrected inputs for each re-simulated frame. This is
+     not yet implemented. The current F5/F6 test keys just blindly save and
+     restore without re-simulation.
+
+  6. The linked-list traversal assumes the first inline cChrNode is at
+     cChrTeam + 0x08. This is confirmed by cChrTeam__getNextNode(team) calling
+     cChrNode__getNext(team + 8). The first node's mpChr is at node + 0x08
+     and mpNext at node + 0x10.
+
+================================================================================
+ 8. EXISTING CODE (framestepper.cpp — F5/F6 integration)
+================================================================================
+
+In FrameStepper_Process(), before the closing '}':
+
+    // --- Rollback save/restore test keys (F5 / F6) ---
+    {
+        static int32_t snapFrame = 0;
+        if (GetAsyncKeyState(VK_F5) & 1) {
+            Rollback_SaveSnapshot(snapFrame);
+            HookLog("Rollback: saved snapshot at frame %d\n", snapFrame);
+            ++snapFrame;
+        }
+        if (GetAsyncKeyState(VK_F6) & 1) {
+            int32_t restoreFrame = snapFrame > 0 ? snapFrame - 1 : 0;
+            Rollback_RestoreSnapshot(restoreFrame);
+            HookLog("Rollback: restored snapshot from frame %d\n", restoreFrame);
+        }
+    }
+
+The include was added:
+    #include "rollback.h"
+
+================================================================================
+ 9. CONTROLLER.CPP — INPUT DELAY ARCHITECTURE
+================================================================================
+
+The existing input handling (controller.cpp) uses a frame-delayed ring buffer:
+
+  hkprocessFrameInput (hooked at 0x14002DD60):
+    - Called per-character per-frame
+    - Accumulates raw physical input into per-character storage
+    - Looks up the delayed input from a ring buffer at index [currentFrame + delay]
+    - The ring buffer stores full 32-bit input masks
+
+  g_oldInputs[] and g_receivedInput[] (global state):
+    - g_oldInputs[f % IN_BUF_SZ]: locally read input for frame f
+    - g_receivedInput[f % IN_BUF_SZ]: remotely received input for frame f
+
+  Frame counting:
+    - g_netFrameCount = absolute frame counter, incremented each frame
+    - sReplay + 0x54 = game's own frame counter (master clock)
+    - g_delayFrames = configured delay (1-15, sent over wire)
+
+  This is a DELAY-BASED system, not rollback. To convert to rollback:
+    1. Replace the ring-buffer lookup with snapshot restore + re-simulation
+    2. When late input arrives for frame N,:
+       a. Rollback_RestoreSnapshot(N)
+       b. For f = N to currentFrame:
+            - inject corrected input from g_receivedInput
+            - run the full sMvc3Main__move frame
+            - Rollback_SaveSnapshot(f+1) with corrected state
+
+================================================================================
+ 10. DEFAULTs.H — PROTOTYPE ROLLBACK CODE (for reference)
+================================================================================
+
+Location: UMVC3Hook/code/defaults.h
+
+Contains a SaveLoadState() function that was a prototype for rollback:
+  - Uses a flat SaveMemory vector (byte buffer) with SaveLoadPtr macros
+  - Saves: fighting data (0x140d44a70), mysterydata (0x140d533e0), physics
+  - Physics: hooks FUN_140521df0 (actually sMain__move), saves 11424 bytes
+  - Per-character: reads from mysterytable + 0xaa0 + (0x438 * i) stride
+  - Contains runahead code that attempts re-simulation but is commented out
+    because "physics doesn't work during runahead"
+
+The Fighter/ScriptableFighter structs in defaults.h are a partial mapping of
+uCharacter with known fields at specific offsets. Much of the offset data is
+unreliable/outdated.
+
+================================================================================
+ 11. BUILD SYSTEM
+================================================================================
+
+Project: UMVC3Hook.vcxproj (Visual Studio 2022, v143 toolset)
+  - DLL project (DynamicLibrary)
+  - MinHook for API hooking (x64)
+  - DirectX 9/11 support (ImGui overlay)
+  - ENet for networking
+
+New files added to vcxproj and vcxproj.filters:
+  - code/rollback.h  (Header Files\code)
+  - code/rollback.cpp (Source Files)
+
+Potential integration point for Rollback_InitHooks():
+  dllmain.cpp:679 — FrameStepper_Init() is called here.
+  Rollback_InitHooks() should be called alongside it, or from within
+  FrameStepper_Init() itself alongside the other hook setups.
+
+================================================================================
+ 12. NEXT STEPS / REMAINING WORK
+================================================================================
+
+Priority order:
+
+  A. Fix physics pointer capture
+     - Find the real physics update function (not sMain__move)
+     - OR derive physics world pointer from sMain + known offset
+     - Verify size (11424 bytes may not be exact)
+
+  B. Add projectile tracking
+     - Snapshot the per-shot cShot objects in sShot's linked list
+     - These are dynamically allocated, need to iterate and capture each
+
+  C. Effect list snapshotting
+     - Similar to projectiles — capture sGameEffect's dynamic effect list
+
+  D. Input injection for re-simulation
+     - After RestoreSnapshot, re-inject corrected inputs from g_receivedInput
+     - Call sMvc3Main__move for each re-simulated frame
+     - Handle the "physics doesn't work during runahead" issue from defaults.h
+
+  E. Hook into netplay
+     - When late input arrives, trigger restore + re-simulation automatically
+     - Currently only triggered manually via F5/F6
+
+  F. Region size verification
+     - Some region sizes (aNextBattle 0x20000, sGameUI 0x6000) are estimates
+     - Should verify by analyzing constructor memset or new() sizes in Ghidra
+
+  G. Optimize snapshot size
+     - Current ~800KB/frame is fine for 16 frames (~14MB)
+     - Could be reduced by saving only the fields that actually change
+     - But premature optimization is not needed yet

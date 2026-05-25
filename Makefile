@@ -33,6 +33,7 @@ CPP_SRC   := \
 	$(SRCDIR)/code/dtieditor.cpp \
 	$(SRCDIR)/code/trainingboot.cpp \
 	$(SRCDIR)/code/controller.cpp \
+	$(SRCDIR)/code/rollback.cpp \
 	$(SRCDIR)/code/netplay.cpp \
 	$(SRCDIR)/imgui/imgui.cpp \
 	$(SRCDIR)/imgui/imgui_demo.cpp \

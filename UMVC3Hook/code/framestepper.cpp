@@ -12,6 +12,7 @@
 #include "../kiero/minhook/include/MinHook.h"
 #include "netplay.h"
 #include "LaunchMenu.h"
+#include "rollback.h"
 
 // Netplay debug info from controller.cpp
 extern "C" int32_t Controller_GetDelayFrames();
@@ -575,6 +576,21 @@ void FrameStepper_Process()
     {
         advanceFrame = true;
         g_captureRequested = true; // snapshot the advanced frame
+    }
+
+    // --- Rollback save/restore test keys (F5 / F6) ---
+    {
+        static int32_t snapFrame = 0;
+        if (GetAsyncKeyState(VK_F5) & 1) {
+            Rollback_SaveSnapshot(snapFrame);
+            HookLog("Rollback: saved snapshot at frame %d\n", snapFrame);
+            ++snapFrame;
+        }
+        if (GetAsyncKeyState(VK_F6) & 1) {
+            int32_t restoreFrame = snapFrame > 0 ? snapFrame - 1 : 0;
+            Rollback_RestoreSnapshot(restoreFrame);
+            HookLog("Rollback: restored snapshot from frame %d\n", restoreFrame);
+        }
     }
 }
 

@@ -138,6 +138,9 @@
     <ClInclude Include="code\generated.h">
       <Filter>Header Files\code</Filter>
     </ClInclude>
+    <ClInclude Include="code\rollback.h">
+      <Filter>Header Files\code</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="dllmain.cpp">
@@ -237,6 +240,9 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="..\enet-1.3.18\win32.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="code\rollback.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>

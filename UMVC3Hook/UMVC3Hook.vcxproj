@@ -162,6 +162,7 @@
   <ItemGroup>
     <ClInclude Include="code\defaults.h" />
     <ClInclude Include="code\eNotifManager.h" />
+    <ClInclude Include="code\rollback.h" />
     <ClInclude Include="code\eSettingsManager.h" />
     <ClInclude Include="code\framestepper.h" />
     <ClInclude Include="code\generated.h" />
@@ -206,6 +207,7 @@
     <ClCompile Include="code\umvc3.cpp" />
     <ClCompile Include="code\UMVC3Camera.cpp" />
     <ClCompile Include="code\umvc3menu.cpp" />
+    <ClCompile Include="code\rollback.cpp" />
     <ClCompile Include="dllmain.cpp" />
     <ClCompile Include="imgui\imgui.cpp" />
     <ClCompile Include="imgui\imgui_demo.cpp" />
