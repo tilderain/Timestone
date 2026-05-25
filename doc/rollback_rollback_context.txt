@@ -323,28 +323,25 @@ KNOWN ISSUES:
      and mpNext at node + 0x10.
 
 ================================================================================
- 8. EXISTING CODE (framestepper.cpp — F5/F6 integration)
+ 8. CURRENT framestepper.cpp F5/F6 TEST KEYS
 ================================================================================
 
-In FrameStepper_Process(), before the closing '}':
+In FrameStepper_Process():
 
     // --- Rollback save/restore test keys (F5 / F6) ---
     {
-        static int32_t snapFrame = 0;
+        auto sReplay = *(uint64_t*)_addr(0x140d4d9d8);
+        int32_t curFrame = sReplay ? *(int32_t*)(sReplay + 0x54) : 0;
+
         if (GetAsyncKeyState(VK_F5) & 1) {
-            Rollback_SaveSnapshot(snapFrame);
-            HookLog("Rollback: saved snapshot at frame %d\n", snapFrame);
-            ++snapFrame;
+            Rollback_SaveSnapshot(curFrame);
+            lastSaveFrame = curFrame;
+            HookLog("Rollback: saved snapshot at game frame %d\n", curFrame);
         }
         if (GetAsyncKeyState(VK_F6) & 1) {
-            int32_t restoreFrame = snapFrame > 0 ? snapFrame - 1 : 0;
-            Rollback_RestoreSnapshot(restoreFrame);
-            HookLog("Rollback: restored snapshot from frame %d\n", restoreFrame);
+            Rollback_ReSimulate(lastSaveFrame, curFrame);
         }
     }
-
-The include was added:
-    #include "rollback.h"
 
 ================================================================================
  9. CONTROLLER.CPP — INPUT DELAY ARCHITECTURE

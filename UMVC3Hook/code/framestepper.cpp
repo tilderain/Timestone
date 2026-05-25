@@ -512,6 +512,9 @@ void FrameStepper_Init()
         Netplay_Init(cfg.enetHost, cfg.enetPeer);
         HookLog("FrameStepper: Netplay initialized from launch config\n");
     }
+
+    // Initialize rollback snapshot engine (hooks sMvc3Main__move)
+    Rollback_InitHooks();
 }
 
 // ---------------------------------------------------------------------------
@@ -578,18 +581,29 @@ void FrameStepper_Process()
         g_captureRequested = true; // snapshot the advanced frame
     }
 
-    // --- Rollback save/restore test keys (F5 / F6) ---
+    // --- Rollback save/restore test keys (F5 / F6 / F7) ---
     {
-        static int32_t snapFrame = 0;
+        // Read the game's absolute frame counter from sReplay+0x54
+        static int32_t lastSaveFrame = 0;
+        auto sReplay = *(uint64_t*)_addr(0x140d4d9d8);
+        int32_t curFrame = sReplay ? *(int32_t*)(sReplay + 0x54) : 0;
+        static constexpr int32_t RESIM_WINDOW = 8;
+
         if (GetAsyncKeyState(VK_F5) & 1) {
-            Rollback_SaveSnapshot(snapFrame);
-            HookLog("Rollback: saved snapshot at frame %d\n", snapFrame);
-            ++snapFrame;
+            Rollback_SaveSnapshot(curFrame);
+            lastSaveFrame = curFrame;
+            HookLog("Rollback: saved snapshot at game frame %d\n", curFrame);
         }
         if (GetAsyncKeyState(VK_F6) & 1) {
-            int32_t restoreFrame = snapFrame > 0 ? snapFrame - 1 : 0;
-            Rollback_RestoreSnapshot(restoreFrame);
-            HookLog("Rollback: restored snapshot from frame %d\n", restoreFrame);
+            Rollback_RestoreSnapshot(lastSaveFrame);
+            HookLog("Rollback: restored snapshot from frame %d\n", lastSaveFrame);
+        }
+        if (GetAsyncKeyState(VK_F7) & 1) {
+            int32_t target = curFrame;
+            int32_t start = target - RESIM_WINDOW;
+            if (start < 0) start = 0;
+            HookLog("Rollback: re-simulating frames %d → %d\n", start, target);
+            Rollback_ReSimulate(start, target);
         }
     }
 }
