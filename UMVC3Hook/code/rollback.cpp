@@ -811,14 +811,22 @@ void Rollback_RestoreSnapshot(int32_t frame)
         offset += slot.regions[i].size;
     }
 
-    // Post-restore: clear sShot projectile list sentinels so the game
-    // doesn't traverse stale pointers from the restored manager base.
-    // sShot__addShotToList uses sentinels at 0x140d47f90 + (slot*0x28),
-    // each with mpNext at +0x10. Zeroing that makes the list appear empty.
+    // Post-restore: reinitialize sShot projectile list sentinels as
+    // proper empty circular doubly-linked lists.  Setting next/prev/self
+    // to point to the node itself (sentinel+0x08) prevents crashes when
+    // cChrNode__insertAfter back-links node->next->prev without a null
+    // check — which is exactly the crash at 0x140057030 (write to 0x10).
+    // Previously only mpNext was cleared, then mpPrev was also zeroed,
+    // but both approaches left sentinel->next = NULL, causing the back-
+    // link write to dereference NULL+0x10 = address 0x10.
     {
         for (int si = 0; si < 6; ++si) {
             uint64_t sentinel = (uint64_t)_addr(0x140d47f90) + si * 0x28;
-            *(uint64_t*)(sentinel + 0x10) = 0;
+            uint64_t node = sentinel + 0x08;
+            uint64_t* p = (uint64_t*)sentinel;
+            p[1] = node; // mpPrev  (+0x08) = self (circular)
+            p[2] = node; // mpNext  (+0x10) = self
+            p[3] = node; // self    (+0x18) = self
         }
     }
 }
