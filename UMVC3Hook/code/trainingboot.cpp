@@ -81,8 +81,8 @@ static constexpr uintptr_t PAD_KEYBOARD_BLOCKED_2            = 0xc30;   // byte:
 // Global state
 // ---------------------------------------------------------------------------
 static TrainingBootConfig g_bootConfig = {
-    { CHR_RYU, CHR_RYU, CHR_RYU },   // P1 (all 3 slots = Wolverine)
-    { CHR_RYU, CHR_RYU, CHR_RYU },   // P2 (all 3 slots = Wolverine)
+    { CHR_MORRIGAN, CHR_MORRIGAN, CHR_MORRIGAN },   // P1 (all 3 slots = Wolverine)
+    { CHR_MORRIGAN, CHR_MORRIGAN, CHR_MORRIGAN },   // P2 (all 3 slots = Wolverine)
     0,    // stage 
     99   // timer (99 = infinite in training)
 };

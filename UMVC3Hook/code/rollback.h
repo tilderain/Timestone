@@ -14,6 +14,12 @@ static constexpr int ROLLBACK_WINDOW = 16;
 extern bool    g_isResimulating;
 extern int32_t g_resimulateCurrentFrame;
 
+// Re-sim request flags, set by FrameStepper_Process (HookUpdate thread),
+// consumed by hkMvc3Main_move (main game thread) so the re-sim runs on
+// the correct thread for D3D/render safety.  -1 means no request pending.
+extern int32_t g_resimRequestedStart;
+extern int32_t g_resimRequestedEnd;
+
 // Hook setup — installs the sMvc3Main__move hook for re-simulation stepping.
 void Rollback_InitHooks();
 

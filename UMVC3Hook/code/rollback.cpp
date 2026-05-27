@@ -75,8 +75,19 @@ static constexpr int    DYNAMIC_SAFETY = 128; // max projectile/effect nodes
 bool    g_isResimulating         = false;
 int32_t g_resimulateCurrentFrame = 0;
 
+// Pending re-sim request from FrameStepper_Process (HookUpdate thread).
+// hkMvc3Main_move on the main game thread checks/resets these so the
+// actual oMvc3Main_move calls run on the correct thread (avoiding D3D
+// thread-safety issues in the render path).
+int32_t g_resimRequestedStart   = -1;
+int32_t g_resimRequestedEnd     = -1;
+
 static uint64_t g_sMvc3Main      = 0;
 static void(__fastcall* oMvc3Main_move)(uint64_t param_1) = nullptr;
+// Trampoline for the render/present call — NOP'd during re-simulation
+static void(__fastcall* oCallSRender)(uint64_t param_1) = nullptr;
+// Trampoline for sMain__move (frame-timing / QPC / Sleep / busy-wait)
+static void(__fastcall* oMain_move)(uint64_t param_1) = nullptr;
 // Trampoline for the collision sound-event iterator (hook crashes during re-sim)
 static void(__fastcall* oCollisionSoundUpdate)(uint64_t param_1) = nullptr;
 
@@ -319,9 +330,14 @@ static void Rollback_ResyncMainTiming(uint64_t sMain)
     LARGE_INTEGER qpc;
     QueryPerformanceCounter(&qpc);
 
-    // Sync high-resolution performance-counter samples with physical counter
-    *(uint64_t*)(sMain + 0x40048) = qpc.QuadPart;
-    *(uint64_t*)(sMain + 0x40078) = qpc.QuadPart;
+    // Sync high-resolution performance-counter samples with physical counter.
+    // sMain+0x40 is the "base QPC" sampled at the PREVIOUS frame boundary;
+    // sMain__move computes the frame delta as (current_QPC - base) * 1000 / freq.
+    // Without a valid base the first post-re-sim delta will be enormous and
+    // the frame-pacer and/or tick-count multiplier will produce wrong results.
+    *(uint64_t*)(sMain + 0x40)     = qpc.QuadPart;  // base QPC for delta
+    *(uint64_t*)(sMain + 0x40048)  = qpc.QuadPart;
+    *(uint64_t*)(sMain + 0x40078)  = qpc.QuadPart;
     *(uint64_t*)(sMain + 0x70)     = qpc.QuadPart;
 
     // Reset timing deltas to 60 FPS nominal values so the next real tick
@@ -331,7 +347,10 @@ static void Rollback_ResyncMainTiming(uint64_t sMain)
     *(uint32_t*)(sMain + 0xA8)     = 16;           // current delta
     *(uint32_t*)(sMain + 0xA4)     = 16;           // shifted delta
 
-    // Zero accumulated sleep/deadline calculations so they recompute fresh
+    // Zero accumulated sleep/deadline calculations so they recompute fresh.
+    // These are the "accumulated time" (sMain+0x60) and "deadline" (sMain+0x68)
+    // used by the frame-pacing busy-wait logic.  If left stale the game may
+    // spin forever waiting for sMain+0x60 < sMain+0x68 to become false.
     *(uint64_t*)(sMain + 0x60)     = 0;
     *(uint64_t*)(sMain + 0x68)     = 0;
 
@@ -387,9 +406,19 @@ void Rollback_HeadlessTick(uint64_t sMain)
     // ==================================================================
     // Phase 1 — Frame timing + Manager state + Input (always needed)
     // ==================================================================
-    // 1. Frame timing (Sleep calls are NOP'd by Rollback_PatchSleep)
-    HookLog("Rollback_HeadlessTick: Phase1 step1 — Frame timing\n");
-    ((void(__fastcall*)(uint64_t))_addr(FN_SMAIN_MOVE))(sMain);
+    // 1. Frame timing — SKIP sMain__move during re-simulation.
+    //    sMain__move (0x140521df0) reads real QPC, computes frame deltas,
+    //    runs Sleep()/busy-wait for frame pacing, and updates sMain timing
+    //    fields (0x38, 0x48, 0x60, 0x68, 0x80, etc.).  Calling it during
+    //    re-sim corrupts those fields (it samples real QPC across the re-sim
+    //    window) and the first post-re-sim real frame computes a stale delta
+    //    that confuses the frame-pacer — causing a permanent hang.
+    //
+    //    Instead we just set the tick count (sMain+0x48) to 1 so any game
+    //    logic that checks it sees a valid advance.  The real sMain__move
+    //    runs on the next natural frame boundary after re-sim ends.
+    HookLog("Rollback_HeadlessTick: Phase1 step1 — Frame timing (skipping sMain__move)\n");
+    *(uint32_t*)(sMain + 0x48) = 1;
     // 2. Window-focus/manager state
     HookLog("Rollback_HeadlessTick: Phase1 step2 — Window-focus/manager state\n");
     ((void(__fastcall*)(uint64_t))_addr(FN_UPDATE_MANAGERS))(sMain);
@@ -661,6 +690,15 @@ void Rollback_RestoreSnapshot(int32_t frame)
 void Rollback_ReSimulate(int32_t startFrame, int32_t endFrame)
 {
     if (startFrame >= endFrame) return;
+
+    // Re-entry guard: if F7 is still held/read during re-sim, the game's
+    // input processing will try to start another ReSimulate from within
+    // oMvc3Main_move.  Just return — we're already in one.
+    if (g_isResimulating) {
+        HookLog("Rollback: ReSimulate re-entered — ignoring (already re-simulating)\n");
+        return;
+    }
+
     if (!g_sMvc3Main) {
         HookLog("Rollback: cannot re-simulate — sMvc3Main pointer not captured\n");
         return;
@@ -673,10 +711,14 @@ void Rollback_ReSimulate(int32_t startFrame, int32_t endFrame)
     //Rollback_RestoreSnapshot(startFrame);
     HookLog("Rollback: re-simulating frames %d \u2192 %d\n", startFrame, endFrame);
 
-    // 2. Step forward re-saving
+    // 2. Step forward re-saving.  sMain__move is hooked (skip frame-pacing)
+    //    and the render function is hooked (skip Present), so the full
+    //    oMvc3Main_move game tick runs at speed without timing waits or
+    //    actual rendering.  The hkMvc3Main_move hook returns early during
+    //    re-sim so the game's own frame loop doesn't double-execute.
     for (int32_t f = startFrame; f < endFrame; ++f) {
         g_resimulateCurrentFrame = f;
-        Rollback_HeadlessTick(g_sMvc3Main);
+        oMvc3Main_move(g_sMvc3Main);
     //    Rollback_SaveSnapshot(f + 1);
     }
 
@@ -721,16 +763,43 @@ void Rollback_FreeSnapshots()
 
 static void __fastcall hkMvc3Main_move(uint64_t param_1)
 {
+    // Log EVERY call so we can tell if the game loop keeps running after re-sim
+    static int32_t frameCounter = 0;
+    frameCounter++;
+    HookLog("hkMvc3Main_move: frame=%d g_isResimulating=%d\n",
+            frameCounter, (int)g_isResimulating);
+
     // Capture the main manager pointer on first call
     if (!g_sMvc3Main) {
         g_sMvc3Main = param_1;
         HookLog("Rollback: captured sMvc3Main @ 0x%llX\n", param_1);
     }
 
+    // Pending re-sim request from HookUpdate thread (FrameStepper_Process).
+    // Execute it HERE on the main game thread so sRender path runs safely.
+    if (g_resimRequestedStart >= 0) {
+        int32_t rs = g_resimRequestedStart;
+        int32_t re = g_resimRequestedEnd;
+        g_resimRequestedStart = -1;
+        g_resimRequestedEnd   = -1;
+        Rollback_ReSimulate(rs, re);
+        // After re-sim, let the normal frame proceed
+    }
+
     if (g_isResimulating) {
-        Rollback_HeadlessTick(param_1);
+        // Must call oMvc3Main_move during re-sim — the game has an internal
+        // dispatch loop that calls 0x1402594A0 (sMvc3Main__move) and expects
+        // it to actually process game state.  If we return SKIPPED the
+        // dispatch loop condition is never met and it spins forever.
+        // Calling oMvc3Main_move here processes the frame normally (timing
+        // is NOP'd by hkMain_move + render calls through without issue).
+        HookLog("hkMvc3Main_move: frame=%d RE-SIM (running)\n", frameCounter);
+        oMvc3Main_move(param_1);
+        HookLog("hkMvc3Main_move: frame=%d RE-SIM exit\n", frameCounter);
+        return;
     } else {
         oMvc3Main_move(param_1);
+        HookLog("hkMvc3Main_move: frame=%d exit (normal frame complete)\n", frameCounter);
     }
 }
 
@@ -752,6 +821,62 @@ static void __fastcall hkCollisionSoundUpdate(uint64_t param_1)
     }
 }
 
+// ===========================================================================
+// Hook — render/present function (FUN_14053a250)
+//
+// Called at the end of sMvc3Main__move as the last operation on the render
+// manager (sMain+0x40190).  Performs frame-rate checking, Present(), and
+// swap-chain management.
+//
+// During re-sim (g_isResimulating) we skip this entirely to avoid the
+// ~16ms VSYNC wait per frame.  The re-sim now runs on the main game thread
+// (via g_resimRequestedStart/End consumed in hkMvc3Main_move), so skipping
+// this is safe — no thread-safety issue with the render path.
+// ===========================================================================
+static void __fastcall hkCallSRender(uint64_t param_1)
+{
+    if (g_isResimulating) {
+        return;
+    }
+    oCallSRender(param_1);
+}
+
+// ===========================================================================
+// Hook — sMain__move (frame timing / Sleep / busy-wait)
+//
+// Reads QPC, computes frame deltas, NOPs Sleep calls, and spins in a
+// busy-wait for frame pacing.  During re-simulation we skip it entirely
+// (just set tick count to 1) because:
+//   1. Sleep is already NOP'd by Rollback_PatchSleep, but the busy-wait
+//      still spins for the full frame time (~16ms @ 60fps).
+//   2. Accumulated/deadline timing values drift across calls, causing
+//      progressively longer busy-waits that eventually hang forever.
+//   3. We sync QPC state via Rollback_ResyncMainTiming after the loop.
+// ===========================================================================
+static void __fastcall hkMain_move(uint64_t param_1)
+{
+    if (g_isResimulating) {
+        // Force tick=0 so the game's dispatcher loop won't call
+        // sMvc3Main__move again.  Setting tick=1 was the root cause
+        // of the infinite loop: the dispatcher checked tick, saw 1,
+        // called sMvc3Main__move which hit hkMvc3Main_move (SKIPPED),
+        // tick was never consumed, so the dispatcher looped forever.
+        *(uint32_t*)(param_1 + 0x48) = 0;
+        return;
+    }
+    oMain_move(param_1);
+}
+
+// ===========================================================================
+// VTable patch — post-render swapchain operations (0x50 slot)
+//
+// The two vtable+0x50 calls at the end of sMvc3Main__move (on objects at
+// sMain+0x40208 and sMain+0x40270) are swapchain / D3D operations that
+// depend on the render function having set up the frame.  When we NOP the
+// render function during re-sim these calls hang.  Since we can't easily
+// MinHook each vtable entry, we temporarily replace them with a NOP stub
+// for the duration of the re-sim loop.
+// ===========================================================================
 void Rollback_InitHooks()
 {
     MH_STATUS s = MH_CreateHook(
@@ -780,5 +905,36 @@ void Rollback_InitHooks()
                 (uint64_t)_addr(FN_COLLISION_SOUND_UPDATE));
     } else {
         HookLog("Rollback: failed to hook collision sound update (%d)\n", s);
+    }
+
+    // Render/present function — NOP during re-sim so the full game tick
+    // (oMvc3Main_move) can be called from Rollback_ReSimulate without
+    // actually drawing to the screen.
+    s = MH_CreateHook(
+        (LPVOID)_addr(FN_CALL_SRENDER),
+        (LPVOID)&hkCallSRender,
+        (LPVOID*)&oCallSRender
+    );
+    if (s == MH_OK) {
+        MH_EnableHook((LPVOID)_addr(FN_CALL_SRENDER));
+        HookLog("Rollback: hooked sRender call (0x%llX)\n",
+                (uint64_t)_addr(FN_CALL_SRENDER));
+    } else {
+        HookLog("Rollback: failed to hook sRender call (%d)\n", s);
+    }
+
+    // sMain__move (frame-timing / QPC / Sleep / busy-wait) — NOP during re-sim
+    // so the full game tick runs at full speed without frame-pacing waits.
+    s = MH_CreateHook(
+        (LPVOID)_addr(FN_SMAIN_MOVE),
+        (LPVOID)&hkMain_move,
+        (LPVOID*)&oMain_move
+    );
+    if (s == MH_OK) {
+        MH_EnableHook((LPVOID)_addr(FN_SMAIN_MOVE));
+        HookLog("Rollback: hooked sMain__move (0x%llX)\n",
+                (uint64_t)_addr(FN_SMAIN_MOVE));
+    } else {
+        HookLog("Rollback: failed to hook sMain__move (%d)\n", s);
     }
 }
