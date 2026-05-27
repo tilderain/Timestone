@@ -284,10 +284,15 @@ static constexpr uintptr_t FN_GETEARTHATK            = 0x140327a10;
 static constexpr uintptr_t SLEEP_CALL_FIXED = 0x1405220b2;  // Sleep(dt-1)
 static constexpr uintptr_t SLEEP_CALL_VAR   = 0x140521f93;  // Sleep(1)
 static constexpr uintptr_t PRESENT_CALL_SITE = 0x14053709c; // CALL [RAX+0x48] inside FUN_140537080
+static constexpr uintptr_t SWAPCHAIN_CALL_A  = 0x1402598c4; // vtable+0x50 on sMain+0x40208
+static constexpr uintptr_t SWAPCHAIN_CALL_B  = 0x1402598d1; // vtable+0x50 on sMain+0x40270
+static constexpr uintptr_t SWAPCHAIN_CALL_C  = 0x140537113; // vtable+0x50 in FUN_140537080 (inside if-block)
 static uint8_t g_savedSleep[2][6] = {};
 static uint8_t g_savedPresent[3] = {};
+static uint8_t g_savedSwapchain[3][3] = {};
 static bool    g_sleepPatched = false;
 static bool    g_presentPatched = false;
+static bool    g_swapchainPatched = false;
 
 // Helper: call a vtable method on an object pointer stored at |offset| in
 // sMvc3Main.  vtable_offset is the byte offset into the vtable (e.g. 0x30).
@@ -409,6 +414,108 @@ void Rollback_PatchPresent(bool enable)
         memcpy((void*)_addr(PRESENT_CALL_SITE), g_savedPresent, 3);
         VirtualProtect((LPVOID)_addr(PRESENT_CALL_SITE), 3, old, &old);
         g_presentPatched = false;
+    }
+}
+
+void Rollback_PatchSwapchain(bool enable)
+{
+    // NOP / restore three vtable+0x50 call sites that are part of the
+    // swapchain / end-frame path in sMvc3Main__move and FUN_140537080.
+    // Each instruction is "CALL [RAX+0x50]" = FF 50 50 (3 bytes).
+    //
+    // These swapchain operations expect a Present to have been submitted;
+    // with the Present NOP'd during re-sim they may do unnecessary work or
+    // block.  NOPping them eliminates any remaining D3D9/Vulkan overhead
+    // from the re-sim path.
+    static const uintptr_t sites[3] = {
+        SWAPCHAIN_CALL_A,
+        SWAPCHAIN_CALL_B,
+        SWAPCHAIN_CALL_C,
+    };
+    if (enable && !g_swapchainPatched) {
+        for (int i = 0; i < 3; ++i) {
+            DWORD old = 0;
+            VirtualProtect((LPVOID)_addr(sites[i]), 3,
+                           PAGE_EXECUTE_READWRITE, &old);
+            memcpy(g_savedSwapchain[i], (void*)_addr(sites[i]), 3);
+            memset((void*)_addr(sites[i]), 0x90, 3);
+            VirtualProtect((LPVOID)_addr(sites[i]), 3, old, &old);
+        }
+        g_swapchainPatched = true;
+    } else if (!enable && g_swapchainPatched) {
+        for (int i = 0; i < 3; ++i) {
+            DWORD old = 0;
+            VirtualProtect((LPVOID)_addr(sites[i]), 3,
+                           PAGE_EXECUTE_READWRITE, &old);
+            memcpy((void*)_addr(sites[i]), g_savedSwapchain[i], 3);
+            VirtualProtect((LPVOID)_addr(sites[i]), 3, old, &old);
+        }
+        g_swapchainPatched = false;
+    }
+}
+
+// ===========================================================================
+// Rollback_PatchDrawCalls — NOP all remaining render/draw call sites
+//
+// Every render-related CALL inside sMvc3Main__move that is still running
+// during re-sim.  Comment out individual entries in the `sites` array
+// below to test whether skipping that call site crashes the game.
+//
+// Sites organised by category:
+//   A–G:  vtable+0x48 indirect draw calls (3 bytes each)
+//   H–K:  Direct render-function CALLs (5 bytes each)
+//   L:    vtable+0x30 render-logic update (3 bytes)
+// ===========================================================================
+void Rollback_PatchDrawCalls(bool enable)
+{
+    static struct { uintptr_t addr; int n; const char* label; } const sites[] = {
+        // --- vtable+0x48 DRAW calls (FF 50 48 / FF 52 48) ---
+        { 0x1402594d9, 3, "draw_401a8"       },
+        { 0x1402594e6, 3, "draw_40198"       },
+        { 0x1402594f3, 3, "draw_401d8"       },
+        { 0x140259515, 3, "draw_gameConfig"  },
+        { 0x140259568, 3, "draw_40270"       },
+        { 0x140259575, 3, "draw_40208"       },
+        { 0x140259896, 3, "draw_401e0"       },
+        // --- Direct render-function CALLs (E8 rel32 = 5 bytes) ---
+        { 0x140259525, 5, "setRenderTargetAspect" },
+        { 0x140259537, 5, "util_C7D0"             },
+        { 0x140259548, 5, "setField_40"            },
+        { 0x140259559, 5, "getter_7110"            },
+        // --- vtable+0x30 render-logic update ---
+        { 0x1402598ab, 3, "sRender_vtable+0x30"   },
+    };
+    static constexpr int N = sizeof(sites) / sizeof(sites[0]);
+
+    // Saved bytes storage — indexed identically to sites[]
+    static uint8_t saved[N][6] = {};   // max 6 bytes per site
+    static bool    patched = false;
+
+    if (enable && !patched) {
+        for (int i = 0; i < N; ++i) {
+            DWORD old = 0;
+            VirtualProtect((LPVOID)_addr(sites[i].addr), sites[i].n,
+                           PAGE_EXECUTE_READWRITE, &old);
+            memcpy(saved[i], (void*)_addr(sites[i].addr), sites[i].n);
+            memset((void*)_addr(sites[i].addr), 0x90, sites[i].n);
+            VirtualProtect((LPVOID)_addr(sites[i].addr), sites[i].n, old, &old);
+            HookLog("Rollback: NOP'd draw call %s @ 0x%llX (%d bytes)\n",
+                    sites[i].label, (uint64_t)_addr(sites[i].addr), sites[i].n);
+        }
+        patched = true;
+    } else if (!enable && patched) {
+        for (int i = 0; i < N; ++i) {
+            DWORD old = 0;
+            VirtualProtect((LPVOID)_addr(sites[i].addr), sites[i].n,
+                           PAGE_EXECUTE_READWRITE, &old);
+            memcpy((void*)_addr(sites[i].addr), saved[i], sites[i].n);
+            VirtualProtect((LPVOID)_addr(sites[i].addr), sites[i].n, old, &old);
+        }
+        patched = false;
+    } else if (!enable && !patched) {
+        return; // nothing to do
+    } else {
+        HookLog("Rollback: draw calls already patched, skipping\n");
     }
 }
 
@@ -736,6 +843,8 @@ void Rollback_ReSimulate(int32_t startFrame, int32_t endFrame)
     g_isResimulating = true;
     Rollback_PatchSleep(true); // NOP Sleep calls so frames run at full speed
     Rollback_PatchPresent(true); // NOP Present inside post-render sync
+    Rollback_PatchSwapchain(true); // NOP swapchain vtable+0x50 calls
+    Rollback_PatchDrawCalls(true); // NOP remaining render/draw calls
 
     // 1. Rewind to the starting frame boundary
     //Rollback_RestoreSnapshot(startFrame);
@@ -771,6 +880,8 @@ void Rollback_ReSimulate(int32_t startFrame, int32_t endFrame)
     g_isResimulating = false;
     Rollback_PatchSleep(false); // restore Sleep calls
     Rollback_PatchPresent(false); // restore Present call
+    Rollback_PatchSwapchain(false); // restore swapchain calls
+    Rollback_PatchDrawCalls(false); // restore render/draw calls
     HookLog("Rollback: re-simulation complete (%d frames)\n",
             endFrame - startFrame);
 }
@@ -782,6 +893,9 @@ void Rollback_FreeSnapshots()
         Rollback_PatchSleep(false);
     if (g_presentPatched)
         Rollback_PatchPresent(false);
+    if (g_swapchainPatched)
+        Rollback_PatchSwapchain(false);
+    Rollback_PatchDrawCalls(false); // restore draw calls (no-op if unpatched)
 
     for (int i = 0; i < ROLLBACK_WINDOW; ++i) {
         delete[] g_slots[i].data;

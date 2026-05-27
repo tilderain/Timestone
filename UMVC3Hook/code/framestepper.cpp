@@ -602,7 +602,7 @@ void FrameStepper_Process()
         static int32_t lastSaveFrame = 0;
         auto sReplay = *(uint64_t*)_addr(0x140d4d9d8);
         int32_t curFrame = sReplay ? *(int32_t*)(sReplay + 0x54) : 0;
-        static constexpr int32_t RESIM_WINDOW = 20;
+        static constexpr int32_t RESIM_WINDOW = 8;
 
         static bool prevF5 = false, prevF6 = false, prevF7 = false;
         if (KeyPressed(VK_F5, prevF5)) {
@@ -615,7 +615,7 @@ void FrameStepper_Process()
             HookLog("Rollback: restored snapshot from frame %d\n", lastSaveFrame);
         }
         if (KeyPressed(VK_F7, prevF7)) {
-            int32_t target = curFrame + 20;
+            int32_t target = curFrame + RESIM_WINDOW;
             int32_t start = target - RESIM_WINDOW;
             if (start < 0) start = 0;
             HookLog("Rollback: requesting re-sim frames %d → %d (on main thread)\n", start, target);

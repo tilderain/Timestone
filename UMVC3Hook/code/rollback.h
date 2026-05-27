@@ -53,3 +53,14 @@ void Rollback_PatchSleep(bool enable);
 // FUN_140537080 (0x14053709c).  During re-sim the Present blocks for ~16ms
 // under DXVK; NOPping it lets the function run normally without the wait.
 void Rollback_PatchPresent(bool enable);
+
+// Patch/unpatch the vtable+0x50 swapchain calls in sMvc3Main__move's tail
+// and inside FUN_140537080 (3 sites total).  These expect a Present to
+// have been submitted; with the Present NOP'd they may do unnecessary
+// D3D9/Vulkan work during re-sim.
+void Rollback_PatchSwapchain(bool enable);
+
+// Patch/unpatch every remaining render/draw call site inside
+// sMvc3Main__move.  Comment out entries in the sites[] array inside
+// the function body to test which ones are safe to skip during re-sim.
+void Rollback_PatchDrawCalls(bool enable);
