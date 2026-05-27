@@ -841,6 +841,9 @@ void Rollback_ReSimulate(int32_t startFrame, int32_t endFrame)
     }
 
     g_isResimulating = true;
+
+    //Are these really necessary? Might as well leave them in
+
     Rollback_PatchSleep(true); // NOP Sleep calls so frames run at full speed
     Rollback_PatchPresent(true); // NOP Present inside post-render sync
     Rollback_PatchSwapchain(true); // NOP swapchain vtable+0x50 calls
@@ -855,17 +858,17 @@ void Rollback_ReSimulate(int32_t startFrame, int32_t endFrame)
     //    oMvc3Main_move game tick runs at speed without timing waits or
     //    actual rendering.  The hkMvc3Main_move hook returns early during
     //    re-sim so the game's own frame loop doesn't double-execute.
-    LARGE_INTEGER freq, t1, t2;
-    QueryPerformanceFrequency(&freq);
+    //LARGE_INTEGER freq, t1, t2;
+    //QueryPerformanceFrequency(&freq);
     for (int32_t f = startFrame; f < endFrame; ++f) {
         g_resimulateCurrentFrame = f;
-        QueryPerformanceCounter(&t1);
+        //QueryPerformanceCounter(&t1);
         oMvc3Main_move(g_sMvc3Main);
-        QueryPerformanceCounter(&t2);
-        double ms = (double)(t2.QuadPart - t1.QuadPart) * 1000.0 / (double)freq.QuadPart;
-        if (ms > 2.0) {
-            HookLog("Rollback: re-sim frame %d took %.2f ms\n", f, ms);
-        }
+        //QueryPerformanceCounter(&t2);
+        //double ms = (double)(t2.QuadPart - t1.QuadPart) * 1000.0 / (double)freq.QuadPart;
+       // if (ms > 2.0) {
+        //    HookLog("Rollback: re-sim frame %d took %.2f ms\n", f, ms);
+       // }
     //    Rollback_SaveSnapshot(f + 1);
     }
 
@@ -874,6 +877,7 @@ void Rollback_ReSimulate(int32_t startFrame, int32_t endFrame)
     //    negative or excessive frame-time delta that would cause a freeze.
     uint64_t sMain = *(uint64_t*)_addr(PTR_SMAIN);
     if (sMain) {
+        //Same with this, unsure if this is really needed, might cause lag if disabled
         Rollback_ResyncMainTiming(sMain);
     }
 
