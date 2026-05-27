@@ -611,8 +611,8 @@ void FrameStepper_Process()
             HookLog("Rollback: saved snapshot at game frame %d\n", curFrame);
         }
         if (KeyPressed(VK_F6, prevF6)) {
-            Rollback_RestoreSnapshot(lastSaveFrame);
-            HookLog("Rollback: restored snapshot from frame %d\n", lastSaveFrame);
+            g_restoreRequestedFrame = lastSaveFrame;
+            HookLog("Rollback: requesting restore to frame %d (deferred to frame boundary)\n", lastSaveFrame);
         }
         if (KeyPressed(VK_F7, prevF7)) {
             int32_t target = curFrame + RESIM_WINDOW;

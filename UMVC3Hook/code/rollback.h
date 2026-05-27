@@ -20,6 +20,11 @@ extern int32_t g_resimulateCurrentFrame;
 extern int32_t g_resimRequestedStart;
 extern int32_t g_resimRequestedEnd;
 
+// Snapshot-restore request flag — same deferral pattern.
+// Set by FrameStepper_Process (F6 key), consumed by hkMvc3Main_move at the
+// next frame boundary to avoid mid-frame memory corruption.
+extern int32_t g_restoreRequestedFrame;
+
 // Hook setup — installs the sMvc3Main__move hook for re-simulation stepping.
 void Rollback_InitHooks();
 

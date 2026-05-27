@@ -57,17 +57,11 @@ static constexpr uintptr_t NODE_NEXT_OFFSET       = 0x10;
 static constexpr uintptr_t TEAM_FIRST_NODE_OFFSET = 0x08;
 static constexpr uintptr_t DTI_SIZE_OFFSET        = 0x34;
 
-// Default list-head offsets inside sShot / sGameEffect managers
-// NOTE: sShot's list head is NOT inside the manager — it's at a separate
-// global array 0x140d47f90 (5 slots × 0x28 stride).  The 0x38 offset was
-// wrong (reads a float = crash).  Dynamic traversal is disabled until the
-// correct global addresses are wired in.
-//static constexpr uintptr_t SSHOT_LIST_HEAD_OFFSET       = 0x38;
-//static constexpr uintptr_t SGAMEEFFECT_LIST_HEAD_OFFSET = 0x38;
-
-static constexpr size_t MAX_CHAR_SIZE  = 0x10000;
-static constexpr int    MAX_REGIONS    = 64;
-static constexpr int    DYNAMIC_SAFETY = 128; // max projectile/effect nodes
+static constexpr size_t MAX_CHAR_SIZE    = 0x10000;
+static constexpr int    MAX_REGIONS      = 256;
+static constexpr int    DYNAMIC_SAFETY   = 128; // max projectile/effect nodes
+static constexpr int    SSHOT_SLOT_COUNT = 10;  // 10 slots × 0x28 bytes each
+static constexpr size_t SSHOT_NODE_OFFSET = 0x1450; // uShot->cChrNode offset
 
 // ===========================================================================
 // Global Re-Simulation Indicators & Hook State
@@ -81,6 +75,7 @@ int32_t g_resimulateCurrentFrame = 0;
 // thread-safety issues in the render path).
 int32_t g_resimRequestedStart   = -1;
 int32_t g_resimRequestedEnd     = -1;
+int32_t g_restoreRequestedFrame = -1;
 
 static uint64_t g_sMvc3Main      = 0;
 static void(__fastcall* oMvc3Main_move)(uint64_t param_1) = nullptr;
@@ -168,11 +163,28 @@ static int BuildRegions(Region* regions, int maxRegions)
         add((void*)(sReplay + 0x54), 4); // just the frame counter
     }
 
-    // ---- 2. sShot manager — base state (projectile type tracking, etc.) ----
+    // ---- 2a. sShot manager — before CRITICAL_SECTION array (up to +0x1E0) ----
+    {
+        // sizeof(sShot) = 0x14A0 at address 0x140d47f40.
+        // Layout: +0x00 cSystem, +0x50 slot array (10×40=0x190), +0x1E0 CS array (10×40=0x190),
+        // +0x370 counters/pending queue/activity array.
+        // We split into two regions to EXCLUDE the CRITICAL_SECTION array (0x1E0–0x370)
+        // from raw save/restore (CS state must not be byte-copied).
+        uint64_t sShot = *(uint64_t*)_addr(PTR_SSHOT);
+        add((void*)sShot, 0x1E0);  // +0x000..+0x1E0 (cSystem + slot array)
+    }
+
+    // ---- 2b. sShot data after CRITICAL_SECTION array (pending queue, activity array) ----
     {
         uint64_t sShot = *(uint64_t*)_addr(PTR_SSHOT);
-        add((void*)sShot, 0x500);
+        add((void*)(sShot + 0x370), 0x1130);  // +0x370..+0x14A0
     }
+
+    // ---- 2c. SKIPPED: sShot slot array + dynamic projectile objects ---
+    //     Restoring slot list-head pointers (sentinel nodes in sShot[0x50..0x1E0])
+    //     and uShot projectile objects is unsafe: uShots may be freed between save
+    //     and restore, and writing old data to freed memory corrupts the heap.
+    //     Accept that F6 won't restore projectile state — the player can re-fire.
 
     // ---- 3. sHitSolver — collision pairs + result buffer (static array) ----
     {
@@ -198,11 +210,17 @@ static int BuildRegions(Region* regions, int maxRegions)
     //    add((void*)sMain, 0x40080);
     }
 
-    // ---- 7. sGameEffect — SKIPPED: has dynamic effect list ---
-    // {
-    //     uint64_t sGameEffect = *(uint64_t*)_addr(PTR_SGAMEEFFECT);
-    //     add((void*)sGameEffect, 0x2000);
-    // }
+    // ---- 7. sGameEffect — static portion only (before MtArray at +0x120) ---
+    //     The MtArray at +0x120 contains a data_ptr to a heap buffer of effect
+    //     pointers. Restoring this pointer is unsafe because the buffer can be
+    //     freed/reallocated between save and restore. Individual effect objects
+    //     from the array are also skipped for the same reason (use-after-free).
+    {
+        uint64_t sGameEffect = *(uint64_t*)_addr(PTR_SGAMEEFFECT);
+        if (sGameEffect) {
+            add((void*)sGameEffect, 0x120);  // up to (not including) the MtArray
+        }
+    }
 
     // ---- 8. sAction (fighting phase state machine) ----
     uint64_t sMvc3Mgr = *(uint64_t*)_addr(PTR_SMVC3MGR);
@@ -811,23 +829,16 @@ void Rollback_RestoreSnapshot(int32_t frame)
         offset += slot.regions[i].size;
     }
 
-    // Post-restore: reinitialize sShot projectile list sentinels as
-    // proper empty circular doubly-linked lists.  Setting next/prev/self
-    // to point to the node itself (sentinel+0x08) prevents crashes when
-    // cChrNode__insertAfter back-links node->next->prev without a null
-    // check — which is exactly the crash at 0x140057030 (write to 0x10).
-    // Previously only mpNext was cleared, then mpPrev was also zeroed,
-    // but both approaches left sentinel->next = NULL, causing the back-
-    // link write to dereference NULL+0x10 = address 0x10.
-    {
-        for (int si = 0; si < 6; ++si) {
-            uint64_t sentinel = (uint64_t)_addr(0x140d47f90) + si * 0x28;
-            uint64_t node = sentinel + 0x08;
-            uint64_t* p = (uint64_t*)sentinel;
-            p[1] = node; // mpPrev  (+0x08) = self (circular)
-            p[2] = node; // mpNext  (+0x10) = self
-            p[3] = node; // self    (+0x18) = self
-        }
+    // Post-restore: reinitialize the CRITICAL_SECTION objects at sShot + 0x1E0
+    // (10 CS objects × 0x28 bytes each).  These were EXCLUDED from raw save/restore
+    // (region split in BuildRegions avoids 0x1E0..0x370).  We must Delete first to
+    // avoid leaking the internal RTL_CRITICAL_SECTION_DEBUG structure (calling
+    // InitializeCriticalSection on an already-initialized CS corrupts the heap).
+    uint64_t csArray = (uint64_t)_addr(0x140d48120);
+    for (int i = 0; i < SSHOT_SLOT_COUNT; ++i) {
+        LPCRITICAL_SECTION cs = (LPCRITICAL_SECTION)(csArray + i * 0x28);
+        DeleteCriticalSection(cs);
+        InitializeCriticalSection(cs);
     }
 }
 
@@ -940,6 +951,17 @@ static void __fastcall hkMvc3Main_move(uint64_t param_1)
     if (!g_sMvc3Main) {
         g_sMvc3Main = param_1;
         HookLog("Rollback: captured sMvc3Main @ 0x%llX\n", param_1);
+    }
+
+    // Pending snapshot-restore request from FrameStepper_Process (F6 key).
+    // Execute at frame boundary (BEFORE oMvc3Main_move) to avoid mid-frame
+    // memory corruption when restoring shared game state.
+    if (g_restoreRequestedFrame >= 0) {
+        int32_t rf = g_restoreRequestedFrame;
+        g_restoreRequestedFrame = -1;
+        HookLog("Rollback: executing deferred restore to frame %d\n", rf);
+        Rollback_RestoreSnapshot(rf);
+        // After restore, let the normal frame proceed
     }
 
     // Pending re-sim request from HookUpdate thread (FrameStepper_Process).
