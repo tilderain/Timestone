@@ -520,20 +520,33 @@ void FrameStepper_Init()
 // ---------------------------------------------------------------------------
 // Public: per-frame processing — call from HookProcessStuff
 // ---------------------------------------------------------------------------
+// Edge-detection helper for use on threads without a message queue.
+// GetAsyncKeyState's &1 bit is per-thread and requires a message pump;
+// on the HookUpdate thread it always returns 0.  This helper uses the
+// global &0x8000 (key-is-down) bit with tracked prior state instead.
+static inline bool KeyPressed(int vk, bool& prevState)
+{
+    bool cur = (GetAsyncKeyState(vk) & 0x8000) != 0;
+    bool pressed = cur && !prevState;
+    prevState = cur;
+    return pressed;
+}
+
 void FrameStepper_Process()
 {
     // Netplay delay adjustment via [ (decrease) and ] (increase) keys.
     // Works regardless of training mode so both sides can adjust mid-match.
+    static bool prevBracketL = false, prevBracketR = false;
     if (Netplay_IsActive())
     {
-        if (GetAsyncKeyState(VK_OEM_4) & 1)  // [ = decrease delay
+        if (KeyPressed(VK_OEM_4, prevBracketL))  // [ = decrease delay
         {
             int32_t delay = Controller_GetDelayFrames() - 1;
             if (delay < 1) delay = 1;
             Controller_SetDelayFrames(delay);
             Netplay_SendDelay(delay);
         }
-        if (GetAsyncKeyState(VK_OEM_6) & 1)  // ] = increase delay
+        if (KeyPressed(VK_OEM_6, prevBracketR))  // ] = increase delay
         {
             int32_t delay = Controller_GetDelayFrames() + 1;
             if (delay > 15) delay = 15;
@@ -555,7 +568,8 @@ void FrameStepper_Process()
     }
 
     // Toggle pause
-    if (GetAsyncKeyState(KEY_PAUSE) & 1)
+    static bool prevPause = false;
+    if (KeyPressed(KEY_PAUSE, prevPause))
     {
         isPaused = !isPaused;
         if (isPaused)
@@ -575,7 +589,8 @@ void FrameStepper_Process()
     }
 
     // Advance one frame while paused
-    if (isPaused && (GetAsyncKeyState(KEY_ADVANCE) & 1))
+    static bool prevAdvance = false;
+    if (isPaused && KeyPressed(KEY_ADVANCE, prevAdvance))
     {
         advanceFrame = true;
         g_captureRequested = true; // snapshot the advanced frame
@@ -589,16 +604,17 @@ void FrameStepper_Process()
         int32_t curFrame = sReplay ? *(int32_t*)(sReplay + 0x54) : 0;
         static constexpr int32_t RESIM_WINDOW = 20;
 
-        if (GetAsyncKeyState(VK_F5) & 1) {
+        static bool prevF5 = false, prevF6 = false, prevF7 = false;
+        if (KeyPressed(VK_F5, prevF5)) {
             Rollback_SaveSnapshot(curFrame);
             lastSaveFrame = curFrame;
             HookLog("Rollback: saved snapshot at game frame %d\n", curFrame);
         }
-        if (GetAsyncKeyState(VK_F6) & 1) {
+        if (KeyPressed(VK_F6, prevF6)) {
             Rollback_RestoreSnapshot(lastSaveFrame);
             HookLog("Rollback: restored snapshot from frame %d\n", lastSaveFrame);
         }
-        if (GetAsyncKeyState(VK_F7) & 1) {
+        if (KeyPressed(VK_F7, prevF7)) {
             int32_t target = curFrame + 20;
             int32_t start = target - RESIM_WINDOW;
             if (start < 0) start = 0;

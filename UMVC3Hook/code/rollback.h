@@ -48,3 +48,8 @@ void Rollback_HeadlessTick(uint64_t sMvc3Main);
 // enable=true → overwrites both call sites with NOPs for fast re-simulation.
 // enable=false → restores original bytes.
 void Rollback_PatchSleep(bool enable);
+
+// Patch/unpatch the Present() call inside the post-render sync function
+// FUN_140537080 (0x14053709c).  During re-sim the Present blocks for ~16ms
+// under DXVK; NOPping it lets the function run normally without the wait.
+void Rollback_PatchPresent(bool enable);

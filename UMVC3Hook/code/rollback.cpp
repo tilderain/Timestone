@@ -283,8 +283,11 @@ static constexpr uintptr_t FN_GETEARTHATK            = 0x140327a10;
 // (0x140521df0).  Each is a 6-byte "CALL [RIP+xxx]" through the IAT.
 static constexpr uintptr_t SLEEP_CALL_FIXED = 0x1405220b2;  // Sleep(dt-1)
 static constexpr uintptr_t SLEEP_CALL_VAR   = 0x140521f93;  // Sleep(1)
+static constexpr uintptr_t PRESENT_CALL_SITE = 0x14053709c; // CALL [RAX+0x48] inside FUN_140537080
 static uint8_t g_savedSleep[2][6] = {};
+static uint8_t g_savedPresent[3] = {};
 static bool    g_sleepPatched = false;
+static bool    g_presentPatched = false;
 
 // Helper: call a vtable method on an object pointer stored at |offset| in
 // sMvc3Main.  vtable_offset is the byte offset into the vtable (e.g. 0x30).
@@ -380,6 +383,32 @@ void Rollback_PatchSleep(bool enable)
             VirtualProtect((LPVOID)_addr(sites[i]), 6, old, &old);
         }
         g_sleepPatched = false;
+    }
+}
+
+void Rollback_PatchPresent(bool enable)
+{
+    // NOP / restore the 3-byte CALL [RAX+0x48] inside FUN_140537080.
+    // This Present call blocks for ~16ms per frame under DXVK; NOPping it
+    // during re-sim lets the rest of the render-sync function run normally
+    // (setting render-done flags, advancing frame counter, etc.) without
+    // the blocking Present.  Required because the game crashes if we skip
+    // FUN_140537080 entirely (downstream game-logic depends on its state).
+    if (enable && !g_presentPatched) {
+        DWORD old = 0;
+        VirtualProtect((LPVOID)_addr(PRESENT_CALL_SITE), 3,
+                       PAGE_EXECUTE_READWRITE, &old);
+        memcpy(g_savedPresent, (void*)_addr(PRESENT_CALL_SITE), 3);
+        memset((void*)_addr(PRESENT_CALL_SITE), 0x90, 3);
+        VirtualProtect((LPVOID)_addr(PRESENT_CALL_SITE), 3, old, &old);
+        g_presentPatched = true;
+    } else if (!enable && g_presentPatched) {
+        DWORD old = 0;
+        VirtualProtect((LPVOID)_addr(PRESENT_CALL_SITE), 3,
+                       PAGE_EXECUTE_READWRITE, &old);
+        memcpy((void*)_addr(PRESENT_CALL_SITE), g_savedPresent, 3);
+        VirtualProtect((LPVOID)_addr(PRESENT_CALL_SITE), 3, old, &old);
+        g_presentPatched = false;
     }
 }
 
@@ -706,6 +735,7 @@ void Rollback_ReSimulate(int32_t startFrame, int32_t endFrame)
 
     g_isResimulating = true;
     Rollback_PatchSleep(true); // NOP Sleep calls so frames run at full speed
+    Rollback_PatchPresent(true); // NOP Present inside post-render sync
 
     // 1. Rewind to the starting frame boundary
     //Rollback_RestoreSnapshot(startFrame);
@@ -716,9 +746,17 @@ void Rollback_ReSimulate(int32_t startFrame, int32_t endFrame)
     //    oMvc3Main_move game tick runs at speed without timing waits or
     //    actual rendering.  The hkMvc3Main_move hook returns early during
     //    re-sim so the game's own frame loop doesn't double-execute.
+    LARGE_INTEGER freq, t1, t2;
+    QueryPerformanceFrequency(&freq);
     for (int32_t f = startFrame; f < endFrame; ++f) {
         g_resimulateCurrentFrame = f;
+        QueryPerformanceCounter(&t1);
         oMvc3Main_move(g_sMvc3Main);
+        QueryPerformanceCounter(&t2);
+        double ms = (double)(t2.QuadPart - t1.QuadPart) * 1000.0 / (double)freq.QuadPart;
+        if (ms > 2.0) {
+            HookLog("Rollback: re-sim frame %d took %.2f ms\n", f, ms);
+        }
     //    Rollback_SaveSnapshot(f + 1);
     }
 
@@ -732,15 +770,18 @@ void Rollback_ReSimulate(int32_t startFrame, int32_t endFrame)
 
     g_isResimulating = false;
     Rollback_PatchSleep(false); // restore Sleep calls
+    Rollback_PatchPresent(false); // restore Present call
     HookLog("Rollback: re-simulation complete (%d frames)\n",
             endFrame - startFrame);
 }
 
 void Rollback_FreeSnapshots()
 {
-    // Make sure Sleep calls are restored before tearing down
+    // Make sure patched calls are restored before tearing down
     if (g_sleepPatched)
         Rollback_PatchSleep(false);
+    if (g_presentPatched)
+        Rollback_PatchPresent(false);
 
     for (int i = 0; i < ROLLBACK_WINDOW; ++i) {
         delete[] g_slots[i].data;
@@ -937,4 +978,5 @@ void Rollback_InitHooks()
     } else {
         HookLog("Rollback: failed to hook sMain__move (%d)\n", s);
     }
+
 }
