@@ -18,6 +18,7 @@
 extern "C" int32_t Controller_GetDelayFrames();
 extern "C" int32_t Controller_GetNetFrameCount();
 extern "C" int32_t Controller_GetLastRemoteFrame();
+extern "C" int32_t Controller_GetRollbackFrames();
 
 using namespace Memory::VP;
 
@@ -29,8 +30,9 @@ extern bool Netplay_HasRemoteInput();
 extern bool Netplay_GetInboundDelay(int32_t& outDelay);
 extern void Netplay_SendDelay(int32_t delay);
 
-// Controller delay setter from controller.cpp
+// Controller setters from controller.cpp
 extern "C" void Controller_SetDelayFrames(int32_t delay);
+extern "C" void Controller_SetRollbackFrames(int32_t n);
 
 // ---------------------------------------------------------------------------
 // Addresses (VAs, converted at runtime via _addr)
@@ -685,9 +687,11 @@ void FrameStepper_Draw()
                 : ImVec4(0.3f, 0.7f, 1.0f, 1.0f);   // blue for client
             ImGui::TextColored(color, "NETPLAY: %s  Ping: %ums", role, Netplay_GetRTT());
             int32_t curDelay = Controller_GetDelayFrames();
-            ImGui::TextColored(color, "  Frame:%d  Delay: %d  LastRecv:%d",
+            int32_t curRollback = Controller_GetRollbackFrames();
+            ImGui::TextColored(color, "  Frame:%d  Delay: %d  Rollback: %d  LastRecv:%d",
                 Controller_GetNetFrameCount(),
                 curDelay,
+                curRollback,
                 Controller_GetLastRemoteFrame());
 
             // Delay adjustment buttons (ImGui::SmallButton for compact sizing).
@@ -708,6 +712,21 @@ void FrameStepper_Draw()
                 if (curDelay > 15) curDelay = 15;
                 Controller_SetDelayFrames(curDelay);
                 Netplay_SendDelay(curDelay);
+            }
+
+            // Rollback adjustment buttons
+            if (ImGui::SmallButton("[R-]"))
+            {
+                curRollback = Controller_GetRollbackFrames() - 1;
+                if (curRollback < 0) curRollback = 0;
+                Controller_SetRollbackFrames(curRollback);
+            }
+            ImGui::SameLine();
+            if (ImGui::SmallButton("[R+]"))
+            {
+                curRollback = Controller_GetRollbackFrames() + 1;
+                if (curRollback > 16) curRollback = 16;
+                Controller_SetRollbackFrames(curRollback);
             }
         }
 

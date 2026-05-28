@@ -82,6 +82,18 @@ extern "C" void Controller_ResetBuffers();
 extern "C" void Controller_OnFrameStart();
 extern "C" void Controller_OnFrameEnd();
 
+// Save/restore controller-side rollback state (g_oldInputs, g_localPending,
+// g_lastRemoteFrame, g_lastRemoteInput) so re-simulation replays identical
+// local inputs. These are called from Rollback_SaveSnapshot/RestoreSnapshot
+// since the snapshot regions only cover game memory, not static buffers.
+extern "C" void Controller_SaveRollbackState();
+extern "C" void Controller_RestoreRollbackState();
+
+// Silent frame-boundary helpers for re-sim — maintain the local input shift
+// buffer without draining packets or sending outbound data.
+extern "C" void Controller_SilentFrameStart();
+extern "C" void Controller_SilentFrameEnd();
+
 // Netplay debug info — read from framestepper draw
 extern "C" int32_t  Controller_GetDelayFrames();
 extern "C" int32_t  Controller_GetNetFrameCount();

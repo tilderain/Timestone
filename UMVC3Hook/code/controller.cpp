@@ -220,6 +220,44 @@ extern "C" void Controller_SetRollbackFrames(int32_t n)
     g_rollbackFrames = n;
 }
 
+// ---------------------------------------------------------------------------
+// Controller state save/restore for rollback snapshots
+// ---------------------------------------------------------------------------
+static uint32_t g_savedOldInputs[MAX_HISTORY];
+static uint32_t g_savedLocalPending;
+static int32_t  g_savedLastRemoteFrame;
+static uint32_t g_savedLastRemoteInput;
+
+extern "C" void Controller_SaveRollbackState()
+{
+    memcpy(g_savedOldInputs, g_oldInputs, sizeof(g_oldInputs));
+    g_savedLocalPending    = g_localPending;
+    g_savedLastRemoteFrame = g_lastRemoteFrame;
+    g_savedLastRemoteInput = g_lastRemoteInput;
+}
+
+extern "C" void Controller_RestoreRollbackState()
+{
+    memcpy(g_oldInputs, g_savedOldInputs, sizeof(g_oldInputs));
+    g_localPending    = g_savedLocalPending;
+    g_lastRemoteFrame = g_savedLastRemoteFrame;
+    g_lastRemoteInput = g_savedLastRemoteInput;
+}
+
+// Silent frame-boundary helpers for re-simulation — maintain the local input
+// shift buffer without draining inbound packets or sending outbound data.
+extern "C" void Controller_SilentFrameStart()
+{
+    g_localPending = 0;
+}
+
+extern "C" void Controller_SilentFrameEnd()
+{
+    memmove(&g_oldInputs[0], &g_oldInputs[1],
+            (MAX_HISTORY - 1) * sizeof(uint32_t));
+    g_oldInputs[MAX_HISTORY - 1] = g_localPending;
+}
+
 extern "C" void Controller_SetDelayFrames(int32_t delay)
 {
     if (delay < 1)                  delay = 1;
@@ -525,14 +563,18 @@ static void __fastcall hkprocessFrameInput(uint64_t cChrInput)
             // Host P2 (Remote): inject received input at current frame.
             // If no input has been received for this frame yet, hold
             // the last known value rather than dropping to neutral.
+            // During re-simulation use g_resimulateCurrentFrame instead of
+            // g_netFrameCount so corrected remote inputs are looked up at
+            // the correct ring-buffer index.
+            int32_t lookupFrame = g_isResimulating ? g_resimulateCurrentFrame : g_netFrameCount;
             uint32_t remote;
-            if (g_netFrameCount <= g_lastRemoteFrame)
-                remote = g_receivedInput[(uint32_t)g_netFrameCount % RING_SIZE];
+            if (lookupFrame <= g_lastRemoteFrame)
+                remote = g_receivedInput[(uint32_t)lookupFrame % RING_SIZE];
             else
                 remote = g_lastRemoteInput;
 
             // Track what we actually used for rollback conflict detection
-            g_usedRemoteInput[(uint32_t)g_netFrameCount % RING_SIZE] = remote;
+            g_usedRemoteInput[(uint32_t)lookupFrame % RING_SIZE] = remote;
 
             *(uint32_t*)(cChrInput + 0x14)  = remote;
             *(uint32_t*)(cChrInput + 0x560) = remote;
@@ -545,14 +587,18 @@ static void __fastcall hkprocessFrameInput(uint64_t cChrInput)
         {
             // Client P1 (Remote): inject received input at current frame.
             // Hold-last-value when the remote frame hasn't arrived yet.
+            // During re-simulation use g_resimulateCurrentFrame instead of
+            // g_netFrameCount so corrected remote inputs are looked up at
+            // the correct ring-buffer index.
+            int32_t lookupFrame = g_isResimulating ? g_resimulateCurrentFrame : g_netFrameCount;
             uint32_t remote;
-            if (g_netFrameCount <= g_lastRemoteFrame)
-                remote = g_receivedInput[(uint32_t)g_netFrameCount % RING_SIZE];
+            if (lookupFrame <= g_lastRemoteFrame)
+                remote = g_receivedInput[(uint32_t)lookupFrame % RING_SIZE];
             else
                 remote = g_lastRemoteInput;
 
             // Track what we actually used for rollback conflict detection
-            g_usedRemoteInput[(uint32_t)g_netFrameCount % RING_SIZE] = remote;
+            g_usedRemoteInput[(uint32_t)lookupFrame % RING_SIZE] = remote;
 
             *(uint32_t*)(cChrInput + 0x14)  = remote;
             *(uint32_t*)(cChrInput + 0x560) = remote;

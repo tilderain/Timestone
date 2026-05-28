@@ -114,6 +114,10 @@ static void(__fastcall* oCollisionSoundUpdate)(uint64_t param_1) = nullptr;
 // Frame counter / rollback state from controller.cpp
 extern "C" int32_t Controller_GetNetFrameCount();
 extern "C" bool    Controller_IsRollbackEnabled();
+extern "C" void    Controller_SaveRollbackState();
+extern "C" void    Controller_RestoreRollbackState();
+extern "C" void    Controller_SilentFrameStart();
+extern "C" void    Controller_SilentFrameEnd();
 
 // ===========================================================================
 // Snapshot Region Descriptor & Ring Buffer
@@ -869,6 +873,10 @@ void Rollback_SaveSnapshot(int32_t frame)
         offset += regions[i].size;
     }
     slot.size = offset;
+
+    // Save controller-side state (input shift buffer, pending, lastRemote)
+    // so re-simulation replays identical local inputs.
+    Controller_SaveRollbackState();
     
     //HookLog("Rollback: saved frame %d with %d regions, total size %zu bytes\n", frame, count, offset);
 }
@@ -925,6 +933,10 @@ void Rollback_RestoreSnapshot(int32_t frame)
     // (see BuildRegions section 2b) and restored at their original addresses, so
     // the sentinel→uShot linked lists remain self-consistent after the memcpy.
 
+    // Restore controller-side state so the local input shift buffer matches
+    // what it was at the time this frame's snapshot was captured.
+    Controller_RestoreRollbackState();
+
     HookLog("Rollback: restored frame %d with %d regions, total size %zu bytes\n", frame, slot.regionCount, offset);
 }
 
@@ -965,9 +977,13 @@ void Rollback_ReSimulate(int32_t startFrame, int32_t endFrame)
     //    runs at speed without timing waits or actual rendering.
     //    The hkMvc3Main_move hook returns early during re-sim so the
     //    game's own frame loop doesn't double-execute.
+    //    Controller_SilentFrameStart/End maintains the local input shift
+    //    buffer without draining packets or sending outbound data.
     for (int32_t f = startFrame; f < endFrame; ++f) {
         g_resimulateCurrentFrame = f;
+        Controller_SilentFrameStart();
         oMvc3Main_move(g_sMvc3Main);
+        Controller_SilentFrameEnd();
     }
 
     // 3. Resynchronize performance counter state inside sMain to match
