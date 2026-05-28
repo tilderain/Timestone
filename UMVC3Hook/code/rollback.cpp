@@ -56,7 +56,26 @@ static constexpr size_t    TEAM_SIZE              = 0x2C0;
 static constexpr uintptr_t NODE_CHR_OFFSET        = 0x08;
 static constexpr uintptr_t NODE_NEXT_OFFSET       = 0x10;
 static constexpr uintptr_t TEAM_FIRST_NODE_OFFSET = 0x08;
-static constexpr uintptr_t DTI_SIZE_OFFSET        = 0x34;
+
+// DTI object size is encoded at +0x30: lower 23 bits = (actual_size >> 2).
+// Decode: ((*(uint32_t*)(dti + 0x30) & 0x7FFFFF) << 2).
+// Do NOT read +0x34 — that field is the CRC32 class-name hash, not the size.
+// IMPORTANT: The DTI pointer is NOT at object+0x08. Per MtObject__isKindOf, it's
+// accessed via vtable[4] = *(void**)(*(uint64_t*)object + 0x20).
+static uint64_t GetObjectDti(uint64_t objPtr) {
+    uint64_t vtable = *(uint64_t*)objPtr;
+    if (vtable && vtable >= 0x140000000) {
+        auto fn = (uint64_t(__fastcall*)(uint64_t))(*(uint64_t*)(vtable + 0x20));
+        if (fn && (uint64_t)fn >= 0x140000000) {
+            return fn(objPtr);
+        }
+    }
+    return 0;
+}
+static uint32_t DecodeDtiSize(uint64_t dtiPtr) {
+    if (!dtiPtr || dtiPtr < 0x140000000) return 0;
+    return ((*(uint32_t*)(dtiPtr + 0x30) & 0x7FFFFF) << 2);
+}
 
 static constexpr size_t MAX_CHAR_SIZE        = 0x10000;
 static constexpr int    MAX_REGIONS          = 512;
@@ -122,12 +141,9 @@ static void TraverseAndAddDynamicList(uint64_t listHead, size_t nextOffset,
         // Reject obviously-bogus pointers
         if (current < 0x10000) break;
 
-        // Read object size from DTI at +0x08
-        uint64_t dtiPtr = *(uint64_t*)(current + 0x08);
-        uint32_t objSize = 0;
-        if (dtiPtr && dtiPtr >= 0x140000000) {
-            objSize = *(uint32_t*)(dtiPtr + DTI_SIZE_OFFSET);
-        }
+        // Read object size from DTI (accessed via vtable[4], not object+0x08)
+        uint64_t dtiPtr = GetObjectDti(current);
+        uint32_t objSize = DecodeDtiSize(dtiPtr);
         if (objSize == 0 || objSize > MAX_CHAR_SIZE) {
             objSize = 0x400; // conservative fallback for typical nodes
         }
@@ -274,15 +290,23 @@ static int BuildRegions(Region* regions, int maxRegions)
             while (node && r < maxRegions) {
                 uint64_t character = *(uint64_t*)(node + NODE_CHR_OFFSET);
                 if (character) {
-                    uint64_t dtiPtr = *(uint64_t*)(character + 0x08);
-                    uint32_t charSize = 0;
-                    if (dtiPtr && dtiPtr >= 0x140000000) {
-                        charSize = *(uint32_t*)(dtiPtr + DTI_SIZE_OFFSET);
+                    uint64_t vtable = *(uint64_t*)character;
+                    uint64_t dtiFunc = (vtable >= 0x140000000) ? *(uint64_t*)(vtable + 0x20) : 0;
+                    uint64_t dtiPtr = GetObjectDti(character);
+                    uint32_t charSize = DecodeDtiSize(dtiPtr);
+                    uint32_t finalSize = charSize;
+                    if (finalSize == 0 || finalSize > MAX_CHAR_SIZE) {
+                        finalSize = 0x8000;
                     }
-                    if (charSize == 0 || charSize > MAX_CHAR_SIZE) {
-                        charSize = 0x8000;
-                    }
-                    add((void*)character, charSize);
+                    uint32_t* animFields = (uint32_t*)(character + 0x1300);
+                   // HookLog("DIAG Character[team %d]: addr=0x%llX vtable=0x%llX dtiFunc=0x%llX dtiPtr=0x%llX rawSize=%u finalSize=%u\n"
+                 //           "DIAG   anim[+0x1300]: %08X %08X %08X %08X  %08X %08X %08X %08X  %08X %08X %08X %08X  %08X %08X %08X %08X\n",
+                 //           ti, character, vtable, dtiFunc, dtiPtr, (unsigned)charSize, (unsigned)finalSize,
+                 //           animFields[0], animFields[1], animFields[2], animFields[3],
+                //            animFields[4], animFields[5], animFields[6], animFields[7],
+                 //           animFields[8], animFields[9], animFields[10], animFields[11],
+                 //           animFields[12], animFields[13], animFields[14], animFields[15]);
+                    add((void*)character, finalSize);
                 }
                 node = *(uint64_t*)(node + NODE_NEXT_OFFSET);
             }
@@ -868,6 +892,25 @@ void Rollback_RestoreSnapshot(int32_t frame)
         offset += slot.regions[i].size;
     }
 
+    // Log ALL heap regions with their sizes
+    offset = 0;
+    for (int i = 0; i < slot.regionCount; ++i) {
+        uint64_t raddr = (uint64_t)slot.regions[i].ptr;
+        size_t rsize = slot.regions[i].size;
+     //   HookLog("DIAG Restore region[%d]: addr=0x%llX size=%zu\n", i, raddr, rsize);
+        uint64_t maybeVt = (raddr >= 0x100000 && raddr < 0x140000000) ? *(uint64_t*)raddr : 0;
+        if (maybeVt >= 0x140000000 && rsize >= 0x1000) {
+            uint32_t* animAfter = (uint32_t*)(raddr + 0x1300);
+     //       HookLog("DIAG Post-restore char@0x%llX region[%d]: anim[+0x1300]: %08X %08X %08X %08X  %08X %08X %08X %08X  %08X %08X %08X %08X  %08X %08X %08X %08X\n",
+     //               raddr, i,
+      //              animAfter[0], animAfter[1], animAfter[2], animAfter[3],
+      //              animAfter[4], animAfter[5], animAfter[6], animAfter[7],
+          //          animAfter[8], animAfter[9], animAfter[10], animAfter[11],
+       //             animAfter[12], animAfter[13], animAfter[14], animAfter[15]);
+        }
+        offset += rsize;
+    }
+
     // No sentinel fix needed — uShot projectile objects were saved individually
     // (see BuildRegions section 2b) and restored at their original addresses, so
     // the sentinel→uShot linked lists remain self-consistent after the memcpy.
@@ -989,11 +1032,13 @@ static void __fastcall hkMvc3Main_move(uint64_t param_1)
     // Pending snapshot-restore request from FrameStepper_Process (F6 key).
     // Execute at frame boundary (BEFORE oMvc3Main_move) to avoid mid-frame
     // memory corruption when restoring shared game state.
+    static bool s_postRestoreTickDump = false;
     if (g_restoreRequestedFrame >= 0) {
         int32_t rf = g_restoreRequestedFrame;
         g_restoreRequestedFrame = -1;
         HookLog("Rollback: executing deferred restore to frame %d\n", rf);
         Rollback_RestoreSnapshot(rf);
+        s_postRestoreTickDump = true;
     }
 
     // Pending re-sim request from HookUpdate thread (FrameStepper_Process).
@@ -1020,7 +1065,29 @@ static void __fastcall hkMvc3Main_move(uint64_t param_1)
         return;
     } else {
         oMvc3Main_move(param_1);
-  //      HookLog("hkMvc3Main_move: frame=%d exit (normal frame complete)\n", frameCounter);
+    }
+
+    // Post-tick diagnostic: dump character animation state after restore+tick
+    if (s_postRestoreTickDump) {
+        s_postRestoreTickDump = false;
+        uint64_t sChar = *(uint64_t*)_addr(PTR_SCHARACTER);
+        if (sChar) {
+            for (int ti = 0; ti < 2; ++ti) {
+                uint64_t team = sChar + (ti == 0 ? TEAM0_OFFSET : TEAM1_OFFSET);
+                uint64_t node = team + TEAM_FIRST_NODE_OFFSET;
+                while (node) {
+                    uint64_t chr = *(uint64_t*)(node + NODE_CHR_OFFSET);
+                    if (chr) {
+                        uint32_t* a = (uint32_t*)(chr + 0x1300);
+                 //       HookLog("DIAG Post-tick char@0x%llX team%d: anim[+0x1300]: %08X %08X %08X %08X  %08X %08X %08X %08X  %08X %08X %08X %08X  %08X %08X %08X %08X\n",
+                  //              chr, ti,
+                 //               a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7],
+                 //               a[8], a[9], a[10], a[11], a[12], a[13], a[14], a[15]);
+                    }
+                    node = *(uint64_t*)(node + NODE_NEXT_OFFSET);
+                }
+            }
+        }
     }
 }
 
