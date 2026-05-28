@@ -239,11 +239,11 @@ static int BuildRegions(Region* regions, int maxRegions)
     //    add((void*)sMain, 0x40080);
     }
 
-    // ---- 7. sGameEffect — SKIPPED: has dynamic effect list ---
-    // {
-    //     uint64_t sGameEffect = *(uint64_t*)_addr(PTR_SGAMEEFFECT);
-    //     add((void*)sGameEffect, 0x2000);
-    // }
+    // ---- 7. sGameEffect — flat restore to prevent effect leak ---
+    {
+        uint64_t sGameEffect = *(uint64_t*)_addr(PTR_SGAMEEFFECT);
+        add((void*)sGameEffect, 0x2000);
+    }
 
     // ---- 8. sAction (fighting phase state machine) ----
     uint64_t sMvc3Mgr = *(uint64_t*)_addr(PTR_SMVC3MGR);
