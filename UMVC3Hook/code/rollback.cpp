@@ -162,13 +162,26 @@ static int BuildRegions(Region* regions, int maxRegions)
         add((void*)(sReplay + 0x54), 4); // just the frame counter
     }
 
-    // ---- 2. sShot manager — base state AND sentinel lists ----
-    //     We snapshot the entire manager struct size (0x34A0) to capture 
-    //     the static sentinel nodes at +0x50 atomically, alongside the
-    //     pending unit queue (+0x448) and the activity array (+0x2450).
+    // ---- 2. sShot manager — vtable + shot ID pool + sentinel slot array only ----
+    //     Snapshotting only up to +0x1E0 (end of 10 × 0x28 sentinel slots at +0x50)
+    //     to avoid corrupting CRITICAL_SECTION objects at +0x1E0 and the
+    //     pointer-heavy activity/pending regions at +0x370+ that go stale.
     uint64_t sShot = *(uint64_t*)_addr(PTR_SSHOT);
     if (sShot) {
-        add((void*)sShot, 0x34A0);
+        add((void*)sShot, 0x1E0);
+    }
+
+    // ---- 2a. Slot active flags (NOT in sShot — stored in sGameConfig+0x4A89C) ---
+    //     sShot__setSlotActiveFlag writes to uHaggar__getter_49F0(sGameConfig) + 0x48A6c.
+    //     uHaggar__getter_49F0 returns sGameConfig + 0x1E30, so the flags live at
+    //     sGameConfig + 0x1E30 + 0x48A6c = sGameConfig + 0x4A89C.  10 slots × 1 byte.
+    //     Without restoring these the game sees no active projectiles and frees them,
+    //     causing stale-address corruption on the next restore.
+    {
+        uint64_t sGameConfig = *(uint64_t*)_addr(0x140D50F88);
+        if (sGameConfig) {
+            add((void*)(sGameConfig + 0x4A89C), 10);
+        }
     }
 
     // ---- 2b. uShot projectile objects — walk each sentinel's circular list ---
