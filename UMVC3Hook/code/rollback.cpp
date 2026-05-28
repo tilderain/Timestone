@@ -57,11 +57,11 @@ static constexpr uintptr_t NODE_NEXT_OFFSET       = 0x10;
 static constexpr uintptr_t TEAM_FIRST_NODE_OFFSET = 0x08;
 static constexpr uintptr_t DTI_SIZE_OFFSET        = 0x34;
 
-static constexpr size_t MAX_CHAR_SIZE    = 0x10000;
-static constexpr int    MAX_REGIONS      = 256;
-static constexpr int    DYNAMIC_SAFETY   = 128; // max projectile/effect nodes
-static constexpr int    SSHOT_SLOT_COUNT = 10;  // 10 slots × 0x28 bytes each
-static constexpr size_t SSHOT_NODE_OFFSET = 0x1450; // uShot->cChrNode offset
+static constexpr size_t MAX_CHAR_SIZE        = 0x10000;
+static constexpr int    MAX_REGIONS          = 512;
+static constexpr int    DYNAMIC_SAFETY       = 128; // max projectile/effect nodes
+static constexpr int    SSHOT_SENTINEL_COUNT = 10;  // 10 sentinel slots starting at 0x140d47f90
+static constexpr size_t SSHOT_NODE_OFFSET    = 0x1450; // uShot->cChrNode offset
 
 // ===========================================================================
 // Global Re-Simulation Indicators & Hook State
@@ -76,7 +76,6 @@ int32_t g_resimulateCurrentFrame = 0;
 int32_t g_resimRequestedStart   = -1;
 int32_t g_resimRequestedEnd     = -1;
 int32_t g_restoreRequestedFrame = -1;
-
 static uint64_t g_sMvc3Main      = 0;
 static void(__fastcall* oMvc3Main_move)(uint64_t param_1) = nullptr;
 // Trampoline for the render/present call — NOP'd during re-simulation
@@ -163,28 +162,45 @@ static int BuildRegions(Region* regions, int maxRegions)
         add((void*)(sReplay + 0x54), 4); // just the frame counter
     }
 
-    // ---- 2a. sShot manager — before CRITICAL_SECTION array (up to +0x1E0) ----
-    {
-        // sizeof(sShot) = 0x14A0 at address 0x140d47f40.
-        // Layout: +0x00 cSystem, +0x50 slot array (10×40=0x190), +0x1E0 CS array (10×40=0x190),
-        // +0x370 counters/pending queue/activity array.
-        // We split into two regions to EXCLUDE the CRITICAL_SECTION array (0x1E0–0x370)
-        // from raw save/restore (CS state must not be byte-copied).
-        uint64_t sShot = *(uint64_t*)_addr(PTR_SSHOT);
-        add((void*)sShot, 0x1E0);  // +0x000..+0x1E0 (cSystem + slot array)
+    // ---- 2. sShot manager — base state AND sentinel lists ----
+    //     We snapshot the entire manager struct size (0x34A0) to capture 
+    //     the static sentinel nodes at +0x50 atomically, alongside the
+    //     pending unit queue (+0x448) and the activity array (+0x2450).
+    uint64_t sShot = *(uint64_t*)_addr(PTR_SSHOT);
+    if (sShot) {
+        add((void*)sShot, 0x34A0);
     }
 
-    // ---- 2b. sShot data after CRITICAL_SECTION array (pending queue, activity array) ----
+    // ---- 2b. uShot projectile objects — walk each sentinel's circular list ---
+    //     Each sentinel starting at 0x140d47f90 + slot*0x28 is an embedded cChrNode.
+    //     A sentinel's "node reference" is sentinel+0x08. mpNext at sentinel+0x10
+    //     stores the first real uShot's nodeRef (= uShot + SSHOT_NODE_OFFSET + 0x08).
+    //     We follow nodeRef->mpNext (at *(nodeRef + 0x08)) back to the sentinel.
+    int shotCount = 0;
     {
-        uint64_t sShot = *(uint64_t*)_addr(PTR_SSHOT);
-        add((void*)(sShot + 0x370), 0x1130);  // +0x370..+0x14A0
-    }
+        for (int si = 0; si < SSHOT_SENTINEL_COUNT; ++si) {
+            uint64_t sentinel = (uint64_t)_addr(0x140d47f90) + si * 0x28;
+            uint64_t sentinelRef = sentinel + 0x08;
+            uint64_t curRef = *(uint64_t*)(sentinel + 0x10);
+            int safety = DYNAMIC_SAFETY;
+            while (curRef != sentinelRef && safety-- > 0) {
+                if (curRef < 0x10000) break;
+                uint64_t uShot = curRef - 0x08 - SSHOT_NODE_OFFSET;
 
-    // ---- 2c. SKIPPED: sShot slot array + dynamic projectile objects ---
-    //     Restoring slot list-head pointers (sentinel nodes in sShot[0x50..0x1E0])
-    //     and uShot projectile objects is unsafe: uShots may be freed between save
-    //     and restore, and writing old data to freed memory corrupts the heap.
-    //     Accept that F6 won't restore projectile state — the player can re-fire.
+                // uShot+0x08 holds list pointers, NOT a DTI descriptor.
+                // Using a DTI lookup here reads garbage and produces a 1-byte
+                // snapshot, truncating the projectile.  Use a flat safe size.
+                uint32_t objSize = 0x2200;
+
+                add((void*)uShot, objSize);
+                shotCount++;
+                curRef = *(uint64_t*)(curRef + 0x08);
+            }
+        }
+    }
+    if (shotCount > 0) {
+        HookLog("Snapshot Diagnosis: Captured %d active uShot projectiles on heap\n", shotCount);
+    }
 
     // ---- 3. sHitSolver — collision pairs + result buffer (static array) ----
     {
@@ -210,17 +226,11 @@ static int BuildRegions(Region* regions, int maxRegions)
     //    add((void*)sMain, 0x40080);
     }
 
-    // ---- 7. sGameEffect — static portion only (before MtArray at +0x120) ---
-    //     The MtArray at +0x120 contains a data_ptr to a heap buffer of effect
-    //     pointers. Restoring this pointer is unsafe because the buffer can be
-    //     freed/reallocated between save and restore. Individual effect objects
-    //     from the array are also skipped for the same reason (use-after-free).
-    {
-        uint64_t sGameEffect = *(uint64_t*)_addr(PTR_SGAMEEFFECT);
-        if (sGameEffect) {
-            add((void*)sGameEffect, 0x120);  // up to (not including) the MtArray
-        }
-    }
+    // ---- 7. sGameEffect — SKIPPED: has dynamic effect list ---
+    // {
+    //     uint64_t sGameEffect = *(uint64_t*)_addr(PTR_SGAMEEFFECT);
+    //     add((void*)sGameEffect, 0x2000);
+    // }
 
     // ---- 8. sAction (fighting phase state machine) ----
     uint64_t sMvc3Mgr = *(uint64_t*)_addr(PTR_SMVC3MGR);
@@ -798,6 +808,8 @@ void Rollback_SaveSnapshot(int32_t frame)
         offset += regions[i].size;
     }
     slot.size = offset;
+    
+    HookLog("Rollback: saved frame %d with %d regions, total size %zu bytes\n", frame, count, offset);
 }
 
 void Rollback_RestoreSnapshot(int32_t frame)
@@ -829,17 +841,10 @@ void Rollback_RestoreSnapshot(int32_t frame)
         offset += slot.regions[i].size;
     }
 
-    // Post-restore: reinitialize the CRITICAL_SECTION objects at sShot + 0x1E0
-    // (10 CS objects × 0x28 bytes each).  These were EXCLUDED from raw save/restore
-    // (region split in BuildRegions avoids 0x1E0..0x370).  We must Delete first to
-    // avoid leaking the internal RTL_CRITICAL_SECTION_DEBUG structure (calling
-    // InitializeCriticalSection on an already-initialized CS corrupts the heap).
-    uint64_t csArray = (uint64_t)_addr(0x140d48120);
-    for (int i = 0; i < SSHOT_SLOT_COUNT; ++i) {
-        LPCRITICAL_SECTION cs = (LPCRITICAL_SECTION)(csArray + i * 0x28);
-        DeleteCriticalSection(cs);
-        InitializeCriticalSection(cs);
-    }
+    // No sentinel fix needed — uShot projectile objects were saved individually
+    // (see BuildRegions section 2b) and restored at their original addresses, so
+    // the sentinel→uShot linked lists remain self-consistent after the memcpy.
+    HookLog("Rollback: restored frame %d with %d regions, total size %zu bytes\n", frame, slot.regionCount, offset);
 }
 
 void Rollback_ReSimulate(int32_t startFrame, int32_t endFrame)
@@ -961,7 +966,6 @@ static void __fastcall hkMvc3Main_move(uint64_t param_1)
         g_restoreRequestedFrame = -1;
         HookLog("Rollback: executing deferred restore to frame %d\n", rf);
         Rollback_RestoreSnapshot(rf);
-        // After restore, let the normal frame proceed
     }
 
     // Pending re-sim request from HookUpdate thread (FrameStepper_Process).
