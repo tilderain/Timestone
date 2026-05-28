@@ -441,8 +441,11 @@ extern "C" void Controller_OnFrameStart()
                 }
                 if (earliestConflict >= 0)
                 {
-                    HookLog("RollbackNet: conflict at frame %d, re-sim [%d, %d)\n",
-                            earliestConflict, earliestConflict, g_netFrameCount);
+                    uint32_t usedVal  = g_usedRemoteInput[(uint32_t)earliestConflict % RING_SIZE];
+                    uint32_t recvVal  = g_receivedInput[(uint32_t)earliestConflict % RING_SIZE];
+                    HookLog("RollbackNet: conflict at frame %d, re-sim [%d, %d)  used:0x%08X recv:0x%08X\n",
+                            earliestConflict, earliestConflict, g_netFrameCount,
+                            usedVal, recvVal);
                     Rollback_RequestReSimulate(earliestConflict, g_netFrameCount);
                 }
             }
