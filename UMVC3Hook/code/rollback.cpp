@@ -22,6 +22,7 @@
 #include "../pch.h"
 #include "rollback.h"
 #include "mk10utils.h"
+#include "netplay.h"
 #include "../kiero/minhook/include/MinHook.h"
 #include <cstring>
 #include <new>
@@ -96,6 +97,11 @@ int32_t g_resimulateCurrentFrame = 0;
 int32_t g_resimRequestedStart   = -1;
 int32_t g_resimRequestedEnd     = -1;
 int32_t g_restoreRequestedFrame = -1;
+
+// Rollback request from controller.cpp — late input arrived that differs
+// from what was predicted.  Start/end inclusive frame range.
+static int32_t g_rollbackReqStart = -1;
+static int32_t g_rollbackReqEnd   = -1;
 static uint64_t g_sMvc3Main      = 0;
 static void(__fastcall* oMvc3Main_move)(uint64_t param_1) = nullptr;
 // Trampoline for the render/present call — NOP'd during re-simulation
@@ -104,6 +110,10 @@ static void(__fastcall* oCallSRender)(uint64_t param_1) = nullptr;
 static void(__fastcall* oMain_move)(uint64_t param_1) = nullptr;
 // Trampoline for the collision sound-event iterator (hook crashes during re-sim)
 static void(__fastcall* oCollisionSoundUpdate)(uint64_t param_1) = nullptr;
+
+// Frame counter / rollback state from controller.cpp
+extern "C" int32_t Controller_GetNetFrameCount();
+extern "C" bool    Controller_IsRollbackEnabled();
 
 // ===========================================================================
 // Snapshot Region Descriptor & Ring Buffer
@@ -578,8 +588,8 @@ void Rollback_PatchDrawCalls(bool enable)
             memcpy(saved[i], (void*)_addr(sites[i].addr), sites[i].n);
             memset((void*)_addr(sites[i].addr), 0x90, sites[i].n);
             VirtualProtect((LPVOID)_addr(sites[i].addr), sites[i].n, old, &old);
-            HookLog("Rollback: NOP'd draw call %s @ 0x%llX (%d bytes)\n",
-                    sites[i].label, (uint64_t)_addr(sites[i].addr), sites[i].n);
+            //HookLog("Rollback: NOP'd draw call %s @ 0x%llX (%d bytes)\n",
+            //        sites[i].label, (uint64_t)_addr(sites[i].addr), sites[i].n);
         }
         patched = true;
     } else if (!enable && patched) {
@@ -594,7 +604,7 @@ void Rollback_PatchDrawCalls(bool enable)
     } else if (!enable && !patched) {
         return; // nothing to do
     } else {
-        HookLog("Rollback: draw calls already patched, skipping\n");
+        //HookLog("Rollback: draw calls already patched, skipping\n");
     }
 }
 
@@ -860,7 +870,7 @@ void Rollback_SaveSnapshot(int32_t frame)
     }
     slot.size = offset;
     
-    HookLog("Rollback: saved frame %d with %d regions, total size %zu bytes\n", frame, count, offset);
+    //HookLog("Rollback: saved frame %d with %d regions, total size %zu bytes\n", frame, count, offset);
 }
 
 void Rollback_RestoreSnapshot(int32_t frame)
@@ -945,26 +955,19 @@ void Rollback_ReSimulate(int32_t startFrame, int32_t endFrame)
     Rollback_PatchDrawCalls(true); // NOP remaining render/draw calls
 
     // 1. Rewind to the starting frame boundary
-    //Rollback_RestoreSnapshot(startFrame);
+    Rollback_RestoreSnapshot(startFrame);
     HookLog("Rollback: re-simulating frames %d \u2192 %d\n", startFrame, endFrame);
 
-    // 2. Step forward re-saving.  sMain__move is hooked (skip frame-pacing)
-    //    and the render function is hooked (skip Present), so the full
-    //    oMvc3Main_move game tick runs at speed without timing waits or
-    //    actual rendering.  The hkMvc3Main_move hook returns early during
-    //    re-sim so the game's own frame loop doesn't double-execute.
-    //LARGE_INTEGER freq, t1, t2;
-    //QueryPerformanceFrequency(&freq);
+    // 2. Step forward (no snapshot saves — the re-simmed frames are now
+    //    correct, and the next normal-frame save at curFrame covers us).
+    //    sMain__move is hooked (skip frame-pacing) and the render function
+    //    is hooked (skip Present), so the full oMvc3Main_move game tick
+    //    runs at speed without timing waits or actual rendering.
+    //    The hkMvc3Main_move hook returns early during re-sim so the
+    //    game's own frame loop doesn't double-execute.
     for (int32_t f = startFrame; f < endFrame; ++f) {
         g_resimulateCurrentFrame = f;
-        //QueryPerformanceCounter(&t1);
         oMvc3Main_move(g_sMvc3Main);
-        //QueryPerformanceCounter(&t2);
-        //double ms = (double)(t2.QuadPart - t1.QuadPart) * 1000.0 / (double)freq.QuadPart;
-       // if (ms > 2.0) {
-        //    HookLog("Rollback: re-sim frame %d took %.2f ms\n", f, ms);
-       // }
-    //    Rollback_SaveSnapshot(f + 1);
     }
 
     // 3. Resynchronize performance counter state inside sMain to match
@@ -983,6 +986,12 @@ void Rollback_ReSimulate(int32_t startFrame, int32_t endFrame)
     Rollback_PatchDrawCalls(false); // restore render/draw calls
     HookLog("Rollback: re-simulation complete (%d frames)\n",
             endFrame - startFrame);
+}
+
+void Rollback_RequestReSimulate(int32_t startFrame, int32_t endFrame)
+{
+    g_rollbackReqStart = startFrame;
+    g_rollbackReqEnd   = endFrame;
 }
 
 void Rollback_FreeSnapshots()
@@ -1059,13 +1068,46 @@ static void __fastcall hkMvc3Main_move(uint64_t param_1)
         // dispatch loop condition is never met and it spins forever.
         // Calling oMvc3Main_move here processes the frame normally (timing
         // is NOP'd by hkMain_move + render calls through without issue).
-  //      HookLog("hkMvc3Main_move: frame=%d RE-SIM (running)\n", frameCounter);
         oMvc3Main_move(param_1);
-   //     HookLog("hkMvc3Main_move: frame=%d RE-SIM exit\n", frameCounter);
         return;
-    } else {
-        oMvc3Main_move(param_1);
     }
+
+    // ==================================================================
+    // Auto-snapshot + rollback for netplay (only on main game thread,
+    // not during re-sim).  Only active when rollback frames > 0.
+    // ==================================================================
+    if (Netplay_IsActive() && !g_isResimulating && Controller_IsRollbackEnabled())
+    {
+        // Only snapshot + rollback when in-game (aNextBattle step >= 2,
+        // i.e. countdown or fighting).  Menus/loading screens don't need
+        // rollback state and the frame counter jumps around there.
+        typedef uint64_t(__fastcall* GetAmaterasu_t)();
+        static GetAmaterasu_t getAmaterasu = (GetAmaterasu_t)_addr(0x140001A90);
+        uint64_t aNextBattle = getAmaterasu();
+        int step = aNextBattle ? *(int*)(aNextBattle + 0xD8) : 0;
+        if (step >= 2)
+        {
+            int32_t curFrame = (int32_t)Controller_GetNetFrameCount();
+
+            // Save snapshot for the current frame BEFORE the game tick
+            Rollback_SaveSnapshot(curFrame);
+
+            // Consume any pending rollback request from controller.cpp
+            if (g_rollbackReqStart >= 0)
+            {
+                int32_t rs = g_rollbackReqStart;
+                int32_t re = g_rollbackReqEnd;
+                g_rollbackReqStart = -1;
+                g_rollbackReqEnd   = -1;
+                Rollback_ReSimulate(rs, re);
+                // After re-sim, re-save the current frame's snapshot so it
+                // reflects the corrected state at start of curFrame.
+                Rollback_SaveSnapshot(curFrame);
+            }
+        }
+    }
+
+    oMvc3Main_move(param_1);
 
     // Post-tick diagnostic: dump character animation state after restore+tick
     if (s_postRestoreTickDump) {

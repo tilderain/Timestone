@@ -3,7 +3,7 @@
 #include <enet/enet.h>
 
 // ---------------------------------------------------------------------------
-// Netplay: frame-delayed ring buffer input transport over ENet.
+// Netplay: rollback netcode input transport over ENet.
 //
 // Architecture:
 //   Local physical input is accumulated per-character in hkprocessFrameInput.
@@ -15,6 +15,12 @@
 //   buffer at a relative offset from the receiver's current frame, providing
 //   resilience against packet loss.  Both sides read at currentFrame during
 //   hkprocessFrameInput — symmetric input delay for both players.
+//
+//   If remote input for the current frame hasn't arrived, we predict using
+//   the last known value.  The rollback engine (rollback.cpp) detects
+//   late-arriving corrections via g_usedRemoteInput vs g_receivedInput
+//   comparison and automatically restores snapshots + re-simulates with
+//   render disabled.
 //
 //   A dedicated background thread owns ALL ENet I/O. The game thread
 //   communicates via Win32 critical sections for packet exchange.

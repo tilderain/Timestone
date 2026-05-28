@@ -3,9 +3,15 @@
 
 // ---------------------------------------------------------------------------
 // Rollback Snapshot / Restore
+//
+// The snapshot ring buffer (ROLLBACK_WINDOW = 16) is the storage capacity.
+// The active rollback window (g_rollbackFrames, default 4 in controller.cpp)
+// controls how many frames we actually re-simulate on a late-packet conflict.
 // ---------------------------------------------------------------------------
 
-// Maximum rollback window in frames. Keep in sync with NET_HISTORY_SIZE (16).
+// Snapshot ring-buffer capacity.  Must be >= rollback frames so old
+// snapshots survive long enough for any pending re-sim to complete.
+// Keep in sync with NET_HISTORY_SIZE (16).
 static constexpr int ROLLBACK_WINDOW = 16;
 
 // Global indicators for input override during re-simulation.
@@ -25,6 +31,10 @@ extern int32_t g_resimRequestedEnd;
 // next frame boundary to avoid mid-frame memory corruption.
 extern int32_t g_restoreRequestedFrame;
 
+// Request a re-simulate from the controller layer — consumed by hkMvc3Main_move.
+// Called when late-arriving remote input differs from what was predicted.
+void Rollback_RequestReSimulate(int32_t startFrame, int32_t endFrame);
+
 // Hook setup — installs the sMvc3Main__move hook for re-simulation stepping.
 void Rollback_InitHooks();
 
@@ -37,7 +47,8 @@ void Rollback_RestoreSnapshot(int32_t frame);
 // Re-simulate frames [startFrame, endFrame):
 //   1. Restore snapshot at startFrame
 //   2. Call the full sMvc3Main__move pipeline for each frame
-//   3. Save corrected snapshot after each frame
+//      (snapshots are NOT re-saved during re-sim — the next normal frame
+//       boundary save handles the corrected state)
 void Rollback_ReSimulate(int32_t startFrame, int32_t endFrame);
 
 // Free all snapshot memory. Call on netplay disconnect / match end.

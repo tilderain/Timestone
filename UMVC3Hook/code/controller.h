@@ -86,6 +86,9 @@ extern "C" void Controller_OnFrameEnd();
 extern "C" int32_t  Controller_GetDelayFrames();
 extern "C" int32_t  Controller_GetNetFrameCount();
 extern "C" int32_t  Controller_GetLastRemoteFrame();
+extern "C" int32_t  Controller_GetRollbackFrames();
+extern "C" bool     Controller_IsRollbackEnabled();
 
 // Runtime delay adjustment — called from framestepper UI or netplay inbound
 extern "C" void     Controller_SetDelayFrames(int32_t delay);
+extern "C" void     Controller_SetRollbackFrames(int32_t n);
