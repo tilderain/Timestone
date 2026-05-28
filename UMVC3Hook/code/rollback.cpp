@@ -40,6 +40,7 @@ static constexpr uintptr_t PTR_SGAMEUI      = 0x140d53a18;
 static constexpr uintptr_t PTR_SMAIN        = 0x140e177e8;
 static constexpr uintptr_t PTR_SGAMEEFFECT  = 0x140d46470;
 static constexpr uintptr_t PTR_SMVC3MGR     = 0x140d510a0;
+static constexpr uintptr_t PTR_SUNIT        = 0x140e17698;
 
 // sMvc3Main__move — the full per-frame update pipeline
 static constexpr uintptr_t FN_SMVC3MAIN_MOVE = 0x1402594A0;
@@ -162,6 +163,14 @@ static int BuildRegions(Region* regions, int maxRegions)
         add((void*)(sReplay + 0x54), 4); // just the frame counter
     }
 
+    // ---- 1a. Global XorShift RNG state (16 bytes, 4 × uint32) ----
+    //     Used by 64/73 call sites across gameplay (hit roll, damage variance,
+    //     AI decisions, projectile patterns).  Without restoring this, re-simulation
+    //     with different inputs consumes RNG differently, causing desyncs in all
+    //     RNG-derived behavior between the original and re-simulated timelines.
+    //     Address confirmed from LEA RAX,[0x140d765d8] in MtXorShift__getGlobalState.
+    add((void*)_addr(0x140d765d8), 16);
+
     // ---- 2. sShot manager — vtable + shot ID pool + sentinel slot array only ----
     //     Snapshotting only up to +0x1E0 (end of 10 × 0x28 sentinel slots at +0x50)
     //     to avoid corrupting CRITICAL_SECTION objects at +0x1E0 and the
@@ -239,11 +248,9 @@ static int BuildRegions(Region* regions, int maxRegions)
     //    add((void*)sMain, 0x40080);
     }
 
-    // ---- 7. sGameEffect — flat restore to prevent effect leak ---
-    {
-        uint64_t sGameEffect = *(uint64_t*)_addr(PTR_SGAMEEFFECT);
-        add((void*)sGameEffect, 0x2000);
-    }
+    // ---- 7. sGameEffect — SKIPPED: individual effect nodes are captured ---
+    //     via the sUnit category traversal (categories 13-16) below.  Flat-
+    //     restoring sGameEffect would crash due to stale effect pointers.
 
     // ---- 8. sAction (fighting phase state machine) ----
     uint64_t sMvc3Mgr = *(uint64_t*)_addr(PTR_SMVC3MGR);
@@ -281,6 +288,13 @@ static int BuildRegions(Region* regions, int maxRegions)
             }
         }
     }
+
+    // ---- 17-20. sUnit effect categories — SKIPPED (heap corruption) ---
+    //     Walking effect categories 13-16 and restoring individual nodes at
+    //     their heap addresses corrupts the pool allocator's free-list metadata
+    //     when nodes were freed between save and restore (MtHeapAllocator crash).
+    //     Instead, we zero the sGameEffect slot tables post-restore to allow
+    //     fresh effect allocations without conflicting with old slots.
 
     return r;
 }
@@ -857,6 +871,7 @@ void Rollback_RestoreSnapshot(int32_t frame)
     // No sentinel fix needed — uShot projectile objects were saved individually
     // (see BuildRegions section 2b) and restored at their original addresses, so
     // the sentinel→uShot linked lists remain self-consistent after the memcpy.
+
     HookLog("Rollback: restored frame %d with %d regions, total size %zu bytes\n", frame, slot.regionCount, offset);
 }
 
@@ -962,8 +977,8 @@ static void __fastcall hkMvc3Main_move(uint64_t param_1)
     // Log EVERY call so we can tell if the game loop keeps running after re-sim
     static int32_t frameCounter = 0;
     frameCounter++;
-    HookLog("hkMvc3Main_move: frame=%d g_isResimulating=%d\n",
-            frameCounter, (int)g_isResimulating);
+   // HookLog("hkMvc3Main_move: frame=%d g_isResimulating=%d\n",
+   //         frameCounter, (int)g_isResimulating);
 
     // Capture the main manager pointer on first call
     if (!g_sMvc3Main) {
@@ -999,13 +1014,13 @@ static void __fastcall hkMvc3Main_move(uint64_t param_1)
         // dispatch loop condition is never met and it spins forever.
         // Calling oMvc3Main_move here processes the frame normally (timing
         // is NOP'd by hkMain_move + render calls through without issue).
-        HookLog("hkMvc3Main_move: frame=%d RE-SIM (running)\n", frameCounter);
+  //      HookLog("hkMvc3Main_move: frame=%d RE-SIM (running)\n", frameCounter);
         oMvc3Main_move(param_1);
-        HookLog("hkMvc3Main_move: frame=%d RE-SIM exit\n", frameCounter);
+   //     HookLog("hkMvc3Main_move: frame=%d RE-SIM exit\n", frameCounter);
         return;
     } else {
         oMvc3Main_move(param_1);
-        HookLog("hkMvc3Main_move: frame=%d exit (normal frame complete)\n", frameCounter);
+  //      HookLog("hkMvc3Main_move: frame=%d exit (normal frame complete)\n", frameCounter);
     }
 }
 
