@@ -571,7 +571,9 @@ static void __fastcall hkprocessFrameInput(uint64_t cChrInput)
             // the correct ring-buffer index.
             int32_t lookupFrame = g_isResimulating ? g_resimulateCurrentFrame : g_netFrameCount;
             uint32_t remote;
-            if (lookupFrame <= g_lastRemoteFrame)
+            // During re-simulation always use the received input directly
+            // (the hold-last-value prediction below is only for live frames).
+            if (g_isResimulating || lookupFrame <= g_lastRemoteFrame)
                 remote = g_receivedInput[(uint32_t)lookupFrame % RING_SIZE];
             else
                 remote = g_lastRemoteInput;
@@ -595,7 +597,9 @@ static void __fastcall hkprocessFrameInput(uint64_t cChrInput)
             // the correct ring-buffer index.
             int32_t lookupFrame = g_isResimulating ? g_resimulateCurrentFrame : g_netFrameCount;
             uint32_t remote;
-            if (lookupFrame <= g_lastRemoteFrame)
+            // During re-simulation always use the received input directly
+            // (the hold-last-value prediction below is only for live frames).
+            if (g_isResimulating || lookupFrame <= g_lastRemoteFrame)
                 remote = g_receivedInput[(uint32_t)lookupFrame % RING_SIZE];
             else
                 remote = g_lastRemoteInput;
