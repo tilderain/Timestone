@@ -9,6 +9,7 @@ AR        := x86_64-w64-mingw32-ar
 
 SRCDIR    := UMVC3Hook
 ENETDIR   := enet-1.3.18
+GGPODIR   := ggpo/src/lib/ggpo
 BUILDDIR  := build
 OBJDIR    := $(BUILDDIR)/obj
 
@@ -68,9 +69,30 @@ ENET_OBJ  := $(ENETDIR)/callbacks.o \
              $(ENETDIR)/protocol.o \
              $(ENETDIR)/win32.o
 ENET_OBJ_FULL := $(addprefix $(OBJDIR)/, $(notdir $(ENET_OBJ)))
+
+# --- GGPO source files (excludes main.cpp which has a conflicting DllMain) ---
+
+GGPO_CPP_SRC := \
+	$(GGPODIR)/sdk.cpp \
+	$(GGPODIR)/bitvector.cpp \
+	$(GGPODIR)/game_input.cpp \
+	$(GGPODIR)/input_queue.cpp \
+	$(GGPODIR)/log.cpp \
+	$(GGPODIR)/poll.cpp \
+	$(GGPODIR)/sync.cpp \
+	$(GGPODIR)/timesync.cpp \
+	$(GGPODIR)/platform_windows.cpp \
+	$(GGPODIR)/backends/p2p.cpp \
+	$(GGPODIR)/backends/spectator.cpp \
+	$(GGPODIR)/backends/synctest.cpp \
+	$(GGPODIR)/network/udp.cpp \
+	$(GGPODIR)/network/udp_proto.cpp
+
+GGPO_OBJ := $(GGPO_CPP_SRC:$(GGPODIR)/%.cpp=$(OBJDIR)/ggpo/%.o)
+
 RC_OBJ    := $(OBJDIR)/UMVC3Hook.res
 
-ALL_OBJ   := $(CPP_OBJ) $(C_OBJ) $(ENET_OBJ_FULL) $(RC_OBJ)
+ALL_OBJ   := $(CPP_OBJ) $(C_OBJ) $(ENET_OBJ_FULL) $(GGPO_OBJ) $(RC_OBJ)
 
 # --- Include paths ---
 
@@ -82,6 +104,8 @@ INCLUDES  := \
 	-I$(SRCDIR)/kiero/minhook/include \
 	-I$(SRCDIR)/utils \
 	-I$(ENETDIR)/include \
+	-I$(GGPODIR) \
+	-Iggpo/src/include \
 	-I$(BUILDDIR)/include_fix
 
 # --- Preprocessor defines (Release) ---
@@ -99,8 +123,8 @@ DEFINES   := \
 
 # --- Compiler flags ---
 
-CXXFLAGS  := -O2 -std=c++20 -fpermissive $(DEFINES) $(INCLUDES) -Wall -Wno-unused-variable -Wno-unused-function
-CFLAGS    := -O2 $(DEFINES) $(INCLUDES) -Wall -Wno-unused-variable
+CXXFLAGS  := -O2 -std=c++20 -fpermissive $(DEFINES) $(INCLUDES) -Wall -Wno-unused-variable -Wno-unused-function -Wno-unknown-pragmas -Wno-format
+CFLAGS    := -O2 $(DEFINES) $(INCLUDES) -Wall -Wno-unused-variable -Wno-unknown-pragmas -Wno-format
 LDFLAGS   := -shared -static-libgcc -static-libstdc++
 LIBS      := \
 	-ld3d9 \
@@ -163,6 +187,12 @@ $(OBJDIR)/%.o: $(SRCDIR)/%.c
 $(OBJDIR)/%.o: $(ENETDIR)/%.c
 	@mkdir -p $(@D)
 	$(CC) $(CFLAGS) -c $< -o $@
+
+# ---------- Compile GGPO C++ ----------
+
+$(OBJDIR)/ggpo/%.o: $(GGPODIR)/%.cpp
+	@mkdir -p $(@D)
+	$(CXX) $(CXXFLAGS) -c $< -o $@
 
 # ---------- Resource file ----------
 
@@ -243,6 +273,10 @@ help:
 	@echo ""
 	@echo "Variables:"
 	@echo "  INSTALL_DIR - UMVC3 install path (default: ~/.steam/...)"
+	@echo ""
+	@echo "Third-party libraries:"
+	@echo "  enet-1.3.18/  - ENet networking library (compiled from source)"
+	@echo "  ggpo/         - GGPO.net rollback netcode SDK (compiled from source)"
 	@echo ""
 	@echo "Dependencies:"
 	@echo "  apt install g++-mingw-w64-x86-64 mingw-w64"
