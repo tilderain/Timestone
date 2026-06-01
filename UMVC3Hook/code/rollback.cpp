@@ -20,7 +20,9 @@
 //
 // See doc/rollback.md for the full singleton catalog and per-field analysis.
 #include "../pch.h"
+
 #include "rollback.h"
+#include "controller.h"
 #include "mk10utils.h"
 #include "netplay.h"
 #include "../kiero/minhook/include/MinHook.h"
@@ -118,6 +120,9 @@ extern "C" void    Controller_SaveRollbackState();
 extern "C" void    Controller_RestoreRollbackState();
 extern "C" void    Controller_SilentFrameStart();
 extern "C" void    Controller_SilentFrameEnd();
+extern "C" void    Controller_SaveInputHistory();
+extern "C" void    Controller_RestoreInputHistory();
+extern "C" void    Controller_ResolveRemoteInput(int32_t frame);
 
 // ===========================================================================
 // Snapshot Region Descriptor & Ring Buffer
@@ -959,6 +964,9 @@ void Rollback_ReSimulate(int32_t startFrame, int32_t endFrame)
 
     g_isResimulating = true;
 
+    HookLog("Rollback: [%s] re-simulating frames %d \u2192 %d\n",
+            Netplay_IsHost() ? "host" : "client", startFrame, endFrame);
+
     //Are these really necessary? Might as well leave them in
 
     Rollback_PatchSleep(true); // NOP Sleep calls so frames run at full speed
@@ -966,9 +974,14 @@ void Rollback_ReSimulate(int32_t startFrame, int32_t endFrame)
     Rollback_PatchSwapchain(true); // NOP swapchain vtable+0x50 calls
     Rollback_PatchDrawCalls(true); // NOP remaining render/draw calls
 
+    // Save the live input history before rewinding.  Rollback_RestoreSnapshot
+    // internally calls Controller_RestoreRollbackState which overwrites
+    // g_oldInputs with startFrame's snapshot; capturing it first prevents
+    // the physical inputs from the rolled-back window from being clobbered.
+    Controller_SaveInputHistory();
+
     // 1. Rewind to the starting frame boundary
     Rollback_RestoreSnapshot(startFrame);
-    HookLog("Rollback: re-simulating frames %d \u2192 %d\n", startFrame, endFrame);
 
     // 2. Step forward (no snapshot saves — the re-simmed frames are now
     //    correct, and the next normal-frame save at curFrame covers us).
@@ -981,10 +994,19 @@ void Rollback_ReSimulate(int32_t startFrame, int32_t endFrame)
     //    buffer without draining packets or sending outbound data.
     for (int32_t f = startFrame; f < endFrame; ++f) {
         g_resimulateCurrentFrame = f;
+        // Re-resolve remote input so re-sim uses the latest received data,
+        // not the stale prediction that triggered the conflict.
+        Controller_ResolveRemoteInput(f);
         Controller_SilentFrameStart();
         oMvc3Main_move(g_sMvc3Main);
         Controller_SilentFrameEnd();
+        Controller_LogReSimFrame(f);
     }
+
+    // Restore the local input history so the next outbound packet carries
+    // the original timeline, preventing the remote side from seeing spurious
+    // conflicts on already-reconciled frames.
+    Controller_RestoreInputHistory();
 
     // 3. Resynchronize performance counter state inside sMain to match
     //    current system time, preventing the game loop from seeing a

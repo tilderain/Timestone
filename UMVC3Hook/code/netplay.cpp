@@ -3,6 +3,7 @@
 #include <cstdio>
 #include <atomic>
 #include <Windows.h>
+#include <vector>
 
 extern void HookLog(const char* fmt, ...);
 
@@ -19,8 +20,7 @@ static InputPacket          g_outboundPacket = {};
 static bool                 g_outboundNew    = false;
 static CRITICAL_SECTION     g_outboundCS;
 
-static InputPacket          g_inboundPacket  = {};
-static bool                 g_inboundHasData = false;
+static std::vector<InputPacket> g_inboundQueue;
 static CRITICAL_SECTION     g_inboundCS;
 
 static HANDLE               g_serviceThread  = nullptr;
@@ -133,8 +133,7 @@ static DWORD WINAPI Netplay_ServiceThread(LPVOID)
                         const InputPacket* inPkt = (const InputPacket*)event.packet->data;
                         {
                             ScopedCS lock(g_inboundCS);
-                            g_inboundPacket = *inPkt;
-                            g_inboundHasData = true;
+                            g_inboundQueue.push_back(*inPkt);
                         }
                         g_recvCount++;
                     }
@@ -200,11 +199,10 @@ void Netplay_Init(ENetHost* host, ENetPeer* peer)
         ScopedCS lock2(g_inboundCS);
         ScopedCS lock3(g_delayCS);
         g_outboundNew = false;
-        g_inboundHasData = false;
+        g_inboundQueue.clear();
         g_outboundDelayNew = false;
         g_inboundDelayNew = false;
         std::memset(&g_outboundPacket, 0, sizeof(InputPacket));
-        std::memset(&g_inboundPacket, 0, sizeof(InputPacket));
     }
 
     g_recvCount = 0;
@@ -244,10 +242,10 @@ void Netplay_SendPacket(const InputPacket& pkt)
 bool Netplay_GetInboundPacket(InputPacket& outPkt)
 {
     ScopedCS lock(g_inboundCS);
-    if (g_inboundHasData)
+    if (!g_inboundQueue.empty())
     {
-        outPkt = g_inboundPacket;
-        g_inboundHasData = false;
+        outPkt = g_inboundQueue.front();
+        g_inboundQueue.erase(g_inboundQueue.begin());
         return true;
     }
     return false;
@@ -294,13 +292,15 @@ void Netplay_SendInput(uint32_t rawInput)
 bool Netplay_HasRemoteInput()
 {
     ScopedCS lock(g_inboundCS);
-    return g_inboundHasData;
+    return !g_inboundQueue.empty();
 }
 
 uint32_t Netplay_GetRemoteInput()
 {
     ScopedCS lock(g_inboundCS);
-    return g_inboundPacket.inputs[0];
+    if (!g_inboundQueue.empty())
+        return g_inboundQueue.front().inputs[0];
+    return 0;
 }
 
 bool Netplay_IsActive()

@@ -89,6 +89,17 @@ extern "C" void Controller_OnFrameEnd();
 extern "C" void Controller_SaveRollbackState();
 extern "C" void Controller_RestoreRollbackState();
 
+// Save/restore the local input shift buffer separately, so Rollback_ReSimulate
+// can preserve the original timeline for outbound packets.
+extern "C" void Controller_SaveInputHistory();
+extern "C" void Controller_RestoreInputHistory();
+
+// Centrally resolve remote input for a given frame into g_usedRemoteInput.
+extern "C" void Controller_ResolveRemoteInput(int32_t frame);
+
+// Log the inputs used during a re-simmed frame for debugging.
+extern "C" void Controller_LogReSimFrame(int32_t frame);
+
 // Silent frame-boundary helpers for re-sim — maintain the local input shift
 // buffer without draining packets or sending outbound data.
 extern "C" void Controller_SilentFrameStart();

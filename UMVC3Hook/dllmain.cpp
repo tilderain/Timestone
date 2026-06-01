@@ -34,7 +34,8 @@ void HookLogSetFile(const char* filename)
 		fflush(g_hookLog);
 	}
 	// Also redirect stderr to the new log file for Wine crash logs
-	freopen(filename, "w", stderr);
+	// Use append mode so it doesn't truncate what g_hookLog just wrote
+	freopen(filename, "a", stderr);
 }
 
 void HookLog(const char* fmt, ...)

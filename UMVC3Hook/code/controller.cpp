@@ -158,10 +158,26 @@ static uint32_t  g_oldInputs[MAX_HISTORY];     // local history (shift buffer)
 // All offsets are relative to the receiver's own frame counter.
 static uint32_t  g_receivedInput[RING_SIZE];
 
+// Tracks the exact absolute frame number currently occupying each slot in the ring buffer.
+// Prevents reading stale inputs from frame - 256.
+static int32_t   g_confirmedFrame[RING_SIZE];
+
+static bool IsFrameConfirmed(int32_t frame)
+{
+    if (frame < 0) return false;
+    return g_confirmedFrame[frame % RING_SIZE] == frame;
+}
+
 // Tracks what input we actually USED during simulation for each frame.
 // Compared against g_receivedInput after each packet drain to detect
 // late-arriving corrections that require a rollback + re-sim.
 static uint32_t  g_usedRemoteInput[RING_SIZE];
+
+// Records the exact delayed local input executed on each live frame.
+// Read directly during re-simulation to replay the original local input
+// instead of reading the real-time physical device, preventing input
+// pollution that causes cyclic rollback conflicts.
+static uint32_t  g_recordedLocalInput[RING_SIZE];
 
 // Frame counter — read from the game's own sReplay singleton each frame.
 // g_psReplay pointer   = *(uint64_t*)_addr(0x140d4d9d8)  (Ghidra confirmation)
@@ -195,9 +211,11 @@ static int32_t GetGameFrameCount()
 // ---------------------------------------------------------------------------
 extern "C" void Controller_ResetBuffers()
 {
-    std::memset(g_oldInputs,       0, sizeof(g_oldInputs));
-    std::memset(g_receivedInput,   0, sizeof(g_receivedInput));
-    std::memset(g_usedRemoteInput, 0, sizeof(g_usedRemoteInput));
+    std::memset(g_oldInputs,          0, sizeof(g_oldInputs));
+    std::memset(g_receivedInput,      0, sizeof(g_receivedInput));
+    std::memset(g_confirmedFrame,    -1, sizeof(g_confirmedFrame));
+    std::memset(g_usedRemoteInput,    0, sizeof(g_usedRemoteInput));
+    std::memset(g_recordedLocalInput, 0, sizeof(g_recordedLocalInput));
     // g_netFrameCount is read from sReplay each frame; no reset needed.
     g_localPending    = 0;
     g_lastRemoteFrame = -1;
@@ -225,23 +243,84 @@ extern "C" void Controller_SetRollbackFrames(int32_t n)
 // ---------------------------------------------------------------------------
 static uint32_t g_savedOldInputs[MAX_HISTORY];
 static uint32_t g_savedLocalPending;
-static int32_t  g_savedLastRemoteFrame;
-static uint32_t g_savedLastRemoteInput;
 
 extern "C" void Controller_SaveRollbackState()
 {
     memcpy(g_savedOldInputs, g_oldInputs, sizeof(g_oldInputs));
-    g_savedLocalPending    = g_localPending;
-    g_savedLastRemoteFrame = g_lastRemoteFrame;
-    g_savedLastRemoteInput = g_lastRemoteInput;
+    g_savedLocalPending = g_localPending;
 }
 
 extern "C" void Controller_RestoreRollbackState()
 {
     memcpy(g_oldInputs, g_savedOldInputs, sizeof(g_oldInputs));
-    g_localPending    = g_savedLocalPending;
-    g_lastRemoteFrame = g_savedLastRemoteFrame;
-    g_lastRemoteInput = g_savedLastRemoteInput;
+    g_localPending = g_savedLocalPending;
+}
+
+// Save/restore the local input shift buffer around re-sim.  The re-sim loop
+// calls SilentFrameEnd which shifts g_oldInputs with accumulated re-sim local
+// input (which is 0 during re-sim since we bypass with g_recordedLocalInput).
+// Restoring it prevents the next outbound packet from carrying a corrupted
+// timeline that would cause spurious conflicts on the remote side.
+static uint32_t g_savedInputHistory[MAX_HISTORY];
+static uint32_t g_savedLocalPendingReSim;
+
+extern "C" void Controller_SaveInputHistory()
+{
+    memcpy(g_savedInputHistory, g_oldInputs, sizeof(g_oldInputs));
+    g_savedLocalPendingReSim = g_localPending;
+}
+
+extern "C" void Controller_RestoreInputHistory()
+{
+    memcpy(g_oldInputs, g_savedInputHistory, sizeof(g_oldInputs));
+    g_localPending = g_savedLocalPendingReSim;
+}
+
+// Centrally resolve the remote input for a given game frame into
+// g_usedRemoteInput.  Called once per frame in Controller_OnFrameStart
+// (for the current live frame) and once per re-simmed frame in the
+// Rollback_ReSimulate loop.  g_lastRemoteFrame is never rolled back
+// (excluded from snapshot save/restore), so the resolution stays
+// accurate across rollback boundaries.
+extern "C" void Controller_ResolveRemoteInput(int32_t frame)
+{
+    uint32_t idx = (uint32_t)frame % RING_SIZE;
+    if (IsFrameConfirmed(frame))
+    {
+        g_usedRemoteInput[idx] = g_receivedInput[idx];
+    }
+    else
+    {
+        // Predict using the latest confirmed frame's input
+        uint32_t prediction = 0;
+        bool found = false;
+        for (int32_t f = frame - 1; f >= 0 && f >= frame - 250; f--)
+        {
+            if (IsFrameConfirmed(f))
+            {
+                prediction = g_receivedInput[f % RING_SIZE];
+                found = true;
+                break;
+            }
+        }
+        if (!found)
+        {
+            prediction = g_lastRemoteInput;
+        }
+        g_usedRemoteInput[idx] = prediction;
+    }
+}
+
+// Log the inputs used during a re-simmed frame for debugging.
+extern "C" void Controller_LogReSimFrame(int32_t frame)
+{
+    uint32_t idx = (uint32_t)frame % RING_SIZE;
+    HookLog("[%s] ReSim frame %d: local=0x%08X remote=0x%08X recv=0x%08X\n",
+            Netplay_IsHost() ? "host" : "client",
+            frame,
+            g_recordedLocalInput[idx],
+            g_usedRemoteInput[idx],
+            IsFrameConfirmed(frame) ? g_receivedInput[idx] : 0);
 }
 
 // Silent frame-boundary helpers for re-simulation — maintain the local input
@@ -364,6 +443,14 @@ extern "C" void Controller_OnFrameStart()
     InputPacket inPkt;
     while (Netplay_GetInboundPacket(inPkt))
     {
+        // Out-of-order protection: discard the packet entirely if its maximum
+        // frame coverage is older than or equal to our already known remote frame.
+        int32_t pktMaxFrame = (int32_t)inPkt.start_frame + NET_HISTORY_SIZE - 1;
+        if (pktMaxFrame <= g_lastRemoteFrame)
+        {
+            continue;
+        }
+
         for (size_t i = 0; i < NET_HISTORY_SIZE; i++)
         {
             // Cast to signed int32_t to handle negative/underflowed frame
@@ -372,6 +459,7 @@ extern "C" void Controller_OnFrameStart()
             if (targetFrame >= 0)
             {
                 g_receivedInput[(uint32_t)targetFrame % RING_SIZE] = inPkt.inputs[i];
+                g_confirmedFrame[(uint32_t)targetFrame % RING_SIZE] = targetFrame;
 
                 // Track the latest known remote frame
                 if (targetFrame > g_lastRemoteFrame)
@@ -399,18 +487,25 @@ extern "C" void Controller_OnFrameStart()
             if (g_netFrameCount > spinWaitThreshold)
             {
                 int32_t minNeeded = g_netFrameCount - spinWaitThreshold;
-                while (g_lastRemoteFrame < minNeeded && Netplay_IsActive())
+                while (!IsFrameConfirmed(minNeeded) && Netplay_IsActive())
                 {
                     Sleep(1);
                     InputPacket waitPkt;
                     while (Netplay_GetInboundPacket(waitPkt))
                     {
+                        int32_t waitPktMaxFrame = (int32_t)waitPkt.start_frame + NET_HISTORY_SIZE - 1;
+                        if (waitPktMaxFrame <= g_lastRemoteFrame)
+                        {
+                            continue;
+                        }
+
                         for (size_t i = 0; i < NET_HISTORY_SIZE; i++)
                         {
                             int32_t targetFrame = (int32_t)waitPkt.start_frame + (int32_t)i;
                             if (targetFrame >= 0)
                             {
                                 g_receivedInput[(uint32_t)targetFrame % RING_SIZE] = waitPkt.inputs[i];
+                                g_confirmedFrame[(uint32_t)targetFrame % RING_SIZE] = targetFrame;
                                 if (targetFrame > g_lastRemoteFrame)
                                 {
                                     g_lastRemoteFrame = targetFrame;
@@ -422,6 +517,10 @@ extern "C" void Controller_OnFrameStart()
                 }
             }
 
+            // --- Centrally resolve this frame's remote input so hkprocessFrameInput
+            //     just reads from g_usedRemoteInput (no per-character resolution logic).
+            Controller_ResolveRemoteInput(g_netFrameCount);
+
             // --- Rollback detection: check if any newly received input for a frame
             //     we already simulated differs from what we predicted/used.
             //     If so, request a re-sim from the earliest conflicting frame.
@@ -432,20 +531,22 @@ extern "C" void Controller_OnFrameStart()
                 int32_t earliestConflict = -1;
                 for (int32_t f = checkStart; f < g_netFrameCount; f++)
                 {
-                    if (g_receivedInput[(uint32_t)f % RING_SIZE] !=
-                        g_usedRemoteInput[(uint32_t)f % RING_SIZE])
+                    if (IsFrameConfirmed(f))
                     {
-                        earliestConflict = f;
-                        break;
+                        uint32_t recv = g_receivedInput[(uint32_t)f % RING_SIZE];
+                        uint32_t used = g_usedRemoteInput[(uint32_t)f % RING_SIZE];
+                        if (recv != used)
+                        {
+                            earliestConflict = f;
+                            HookLog("RollbackNet: conflict at frame %d  used=0x%08X recv=0x%08X diff=0x%08X re-sim [%d, %d)\n",
+                                    f, used, recv, used ^ recv,
+                                    f, g_netFrameCount);
+                            break;
+                        }
                     }
                 }
                 if (earliestConflict >= 0)
                 {
-                    uint32_t usedVal  = g_usedRemoteInput[(uint32_t)earliestConflict % RING_SIZE];
-                    uint32_t recvVal  = g_receivedInput[(uint32_t)earliestConflict % RING_SIZE];
-                    HookLog("RollbackNet: conflict at frame %d, re-sim [%d, %d)  used:0x%08X recv:0x%08X\n",
-                            earliestConflict, earliestConflict, g_netFrameCount,
-                            usedVal, recvVal);
                     Rollback_RequestReSimulate(earliestConflict, g_netFrameCount);
                 }
             }
@@ -455,20 +556,25 @@ extern "C" void Controller_OnFrameStart()
     {
         // --- Legacy delay-based fallback: spin-wait for current frame's input.
         int32_t neededFrame = g_netFrameCount;
-        if (g_lastRemoteFrame < neededFrame)
-        {
-            while (g_lastRemoteFrame < neededFrame && Netplay_IsActive())
+        while (!IsFrameConfirmed(neededFrame) && Netplay_IsActive())
             {
                 Sleep(1);
                 InputPacket waitPkt;
                 while (Netplay_GetInboundPacket(waitPkt))
                 {
+                    int32_t waitPktMaxFrame = (int32_t)waitPkt.start_frame + NET_HISTORY_SIZE - 1;
+                    if (waitPktMaxFrame <= g_lastRemoteFrame)
+                    {
+                        continue;
+                    }
+
                     for (size_t i = 0; i < NET_HISTORY_SIZE; i++)
                     {
                         int32_t targetFrame = (int32_t)waitPkt.start_frame + (int32_t)i;
                         if (targetFrame >= 0)
                         {
                             g_receivedInput[(uint32_t)targetFrame % RING_SIZE] = waitPkt.inputs[i];
+                            g_confirmedFrame[(uint32_t)targetFrame % RING_SIZE] = targetFrame;
                             if (targetFrame > g_lastRemoteFrame)
                             {
                                 g_lastRemoteFrame = targetFrame;
@@ -478,7 +584,6 @@ extern "C" void Controller_OnFrameStart()
                     }
                 }
             }
-        }
     }
 }
 
@@ -513,6 +618,16 @@ extern "C" void Controller_OnFrameEnd()
         outPkt.inputs[i] = g_oldInputs[i];
 
     Netplay_SendPacket(outPkt);
+
+    // Log this frame's local input and what was sent.
+    uint32_t localFrame = (uint32_t)g_netFrameCount % RING_SIZE;
+    int32_t thisIdx = g_netFrameCount - (int32_t)outPkt.start_frame;
+    HookLog("Frame %d: local=0x%08X sent[start=%u idx=%d val=0x%08X]\n",
+            g_netFrameCount,
+            g_recordedLocalInput[localFrame],
+            outPkt.start_frame,
+            thisIdx,
+            (thisIdx >= 0 && thisIdx < (int32_t)MAX_HISTORY) ? outPkt.inputs[thisIdx] : 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -545,41 +660,35 @@ static void __fastcall hkprocessFrameInput(uint64_t cChrInput)
     static getTeamIdx_t fnGetTeamIdx = (getTeamIdx_t)_addr(ADDR_GET_TEAM_INDEX);
     uint32_t teamIdx = fnGetTeamIdx(character);
 
+    int32_t lookupFrame = g_isResimulating ? g_resimulateCurrentFrame : g_netFrameCount;
+
     if (Netplay_IsHost())
     {
         if (teamIdx == 0)
         {
-            // Host P1 (Local): accumulate, then apply delayed value from shift buffer
-            g_localPending |= *(uint32_t*)(cChrInput + 0x14);
-
-            // NOTE: g_oldInputs hasn't been shifted yet for this frame —
-            //       Controller_OnFrameEnd does the shift.  So g_oldInputs still
-            //       has last frame's data.  We read from the delay position,
-            //       which was the local input from g_delayFrames frames ago.
-            uint32_t delayed = g_oldInputs[MAX_HISTORY - g_delayFrames];
+            // Host P1 (Local)
+            uint32_t delayed;
+            if (g_isResimulating)
+            {
+                // Replay the exact input that was recorded during live playback,
+                // preventing real-time physical input from polluting the re-sim.
+                delayed = g_recordedLocalInput[(uint32_t)lookupFrame % RING_SIZE];
+            }
+            else
+            {
+                // Live: accumulate, read from delay buffer, and record
+                g_localPending |= *(uint32_t*)(cChrInput + 0x14);
+                delayed = g_oldInputs[MAX_HISTORY - g_delayFrames];
+                g_recordedLocalInput[(uint32_t)lookupFrame % RING_SIZE] = delayed;
+            }
             *(uint32_t*)(cChrInput + 0x14)  = delayed;
             *(uint32_t*)(cChrInput + 0x560) = delayed;
             *(uint32_t*)(cChrInput + 0x56C) = delayed;
         }
         else if (teamIdx == 1)
         {
-            // Host P2 (Remote): inject received input at current frame.
-            // If no input has been received for this frame yet, hold
-            // the last known value rather than dropping to neutral.
-            // During re-simulation use g_resimulateCurrentFrame instead of
-            // g_netFrameCount so corrected remote inputs are looked up at
-            // the correct ring-buffer index.
-            int32_t lookupFrame = g_isResimulating ? g_resimulateCurrentFrame : g_netFrameCount;
-            uint32_t remote;
-            // During re-simulation always use the received input directly
-            // (the hold-last-value prediction below is only for live frames).
-            if (g_isResimulating || lookupFrame <= g_lastRemoteFrame)
-                remote = g_receivedInput[(uint32_t)lookupFrame % RING_SIZE];
-            else
-                remote = g_lastRemoteInput;
-
-            // Track what we actually used for rollback conflict detection
-            g_usedRemoteInput[(uint32_t)lookupFrame % RING_SIZE] = remote;
+            // Host P2 (Remote): read centrally-resolved input
+            uint32_t remote = g_usedRemoteInput[(uint32_t)lookupFrame % RING_SIZE];
 
             *(uint32_t*)(cChrInput + 0x14)  = remote;
             *(uint32_t*)(cChrInput + 0x560) = remote;
@@ -590,22 +699,8 @@ static void __fastcall hkprocessFrameInput(uint64_t cChrInput)
     {
         if (teamIdx == 0)
         {
-            // Client P1 (Remote): inject received input at current frame.
-            // Hold-last-value when the remote frame hasn't arrived yet.
-            // During re-simulation use g_resimulateCurrentFrame instead of
-            // g_netFrameCount so corrected remote inputs are looked up at
-            // the correct ring-buffer index.
-            int32_t lookupFrame = g_isResimulating ? g_resimulateCurrentFrame : g_netFrameCount;
-            uint32_t remote;
-            // During re-simulation always use the received input directly
-            // (the hold-last-value prediction below is only for live frames).
-            if (g_isResimulating || lookupFrame <= g_lastRemoteFrame)
-                remote = g_receivedInput[(uint32_t)lookupFrame % RING_SIZE];
-            else
-                remote = g_lastRemoteInput;
-
-            // Track what we actually used for rollback conflict detection
-            g_usedRemoteInput[(uint32_t)lookupFrame % RING_SIZE] = remote;
+            // Client P1 (Remote): read centrally-resolved input
+            uint32_t remote = g_usedRemoteInput[(uint32_t)lookupFrame % RING_SIZE];
 
             *(uint32_t*)(cChrInput + 0x14)  = remote;
             *(uint32_t*)(cChrInput + 0x560) = remote;
@@ -613,10 +708,18 @@ static void __fastcall hkprocessFrameInput(uint64_t cChrInput)
         }
         else if (teamIdx == 1)
         {
-            // Client P2 (Local): accumulate, then apply delayed value from shift buffer
-            g_localPending |= *(uint32_t*)(cChrInput + 0x14);
-
-            uint32_t delayed = g_oldInputs[MAX_HISTORY - g_delayFrames];
+            // Client P2 (Local)
+            uint32_t delayed;
+            if (g_isResimulating)
+            {
+                delayed = g_recordedLocalInput[(uint32_t)lookupFrame % RING_SIZE];
+            }
+            else
+            {
+                g_localPending |= *(uint32_t*)(cChrInput + 0x14);
+                delayed = g_oldInputs[MAX_HISTORY - g_delayFrames];
+                g_recordedLocalInput[(uint32_t)lookupFrame % RING_SIZE] = delayed;
+            }
             *(uint32_t*)(cChrInput + 0x14)  = delayed;
             *(uint32_t*)(cChrInput + 0x560) = delayed;
             *(uint32_t*)(cChrInput + 0x56C) = delayed;
