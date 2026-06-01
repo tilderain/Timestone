@@ -834,6 +834,9 @@ void Rollback_HeadlessTick(uint64_t sMain)
     HookLog("Rollback_HeadlessTick: end\n");
 }
 
+// Forward declarations
+static void Rollback_ClearStalePointers();
+
 // ===========================================================================
 // Public API — Save / Restore / ReSimulate
 // ===========================================================================
@@ -942,6 +945,11 @@ void Rollback_RestoreSnapshot(int32_t frame)
     // what it was at the time this frame's snapshot was captured.
     Controller_RestoreRollbackState();
 
+    // Clear stale character slot pointers so MtObject__replaceSlot_6F30
+    // doesn't try to call vtable[0x78] (release) on objects that were
+    // freed between save and restore.
+    Rollback_ClearStalePointers();
+
     HookLog("Rollback: restored frame %d with %d regions, total size %zu bytes\n", frame, slot.regionCount, offset);
 }
 
@@ -1030,6 +1038,48 @@ void Rollback_RequestReSimulate(int32_t startFrame, int32_t endFrame)
 {
     g_rollbackReqStart = startFrame;
     g_rollbackReqEnd   = endFrame;
+}
+
+// ===========================================================================
+// Post-Restore Cleanup — clear stale pointer/slot tables after snapshot restore
+//
+// The flat-memcpy restore of character objects brings back slot arrays at
+// offset +0x6748 that reference heap objects (effects, projectiles, etc.)
+// which were NOT saved in the snapshot.  Any subsequent call to
+// MtObject__replaceSlot_6F30 on these slots will try to call vtable[0x78]
+// (release) on a stale/corrupted object → page fault at NULL.
+//
+// We walk the team character lists (same traversal as BuildRegions) and zero
+// the slot pointers so the game simply writes new references without first
+// trying to release a dangling pointer.
+//
+// Slot array:  64 entries × 8 bytes = 512 bytes at character + 0x6748.
+// Confirmed indices in use: 1, 14, 15 (from crash + decompiled callers).
+// ===========================================================================
+static void Rollback_ClearStalePointers()
+{
+    uint64_t sCharacter = *(uint64_t*)_addr(PTR_SCHARACTER);
+    if (!sCharacter) return;
+
+    static constexpr int SLOT_CLEAR_COUNT = 64;
+    static constexpr uintptr_t SLOT_ARRAY_OFFSET = 0x6748;
+
+    for (int ti = 0; ti < 2; ++ti) {
+        uint64_t team = sCharacter + (ti == 0 ? TEAM0_OFFSET : TEAM1_OFFSET);
+        uint64_t node = team + TEAM_FIRST_NODE_OFFSET;
+
+        while (node) {
+            uint64_t character = *(uint64_t*)(node + NODE_CHR_OFFSET);
+            if (character) {
+                // Zero the slot array so stale pointers are never followed
+                memset((void*)(character + SLOT_ARRAY_OFFSET), 0,
+                       SLOT_CLEAR_COUNT * sizeof(uint64_t));
+            }
+            node = *(uint64_t*)(node + NODE_NEXT_OFFSET);
+        }
+    }
+
+    HookLog("Rollback: cleared character slot arrays after restore\n");
 }
 
 void Rollback_FreeSnapshots()
