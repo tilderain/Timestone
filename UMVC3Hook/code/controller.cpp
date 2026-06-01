@@ -622,12 +622,12 @@ extern "C" void Controller_OnFrameEnd()
     // Log this frame's local input and what was sent.
     uint32_t localFrame = (uint32_t)g_netFrameCount % RING_SIZE;
     int32_t thisIdx = g_netFrameCount - (int32_t)outPkt.start_frame;
-    HookLog("Frame %d: local=0x%08X sent[start=%u idx=%d val=0x%08X]\n",
+    /*HookLog("Frame %d: local=0x%08X sent[start=%u idx=%d val=0x%08X]\n",
             g_netFrameCount,
             g_recordedLocalInput[localFrame],
             outPkt.start_frame,
             thisIdx,
-            (thisIdx >= 0 && thisIdx < (int32_t)MAX_HISTORY) ? outPkt.inputs[thisIdx] : 0);
+            (thisIdx >= 0 && thisIdx < (int32_t)MAX_HISTORY) ? outPkt.inputs[thisIdx] : 0);*/
 }
 
 // ---------------------------------------------------------------------------
