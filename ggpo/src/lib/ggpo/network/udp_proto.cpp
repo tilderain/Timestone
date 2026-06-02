@@ -38,7 +38,8 @@ UdpProtocol::UdpProtocol() :
    _connected(false),
    _next_send_seq(0),
    _next_recv_seq(0),
-   _udp(NULL)
+   _udp(NULL),
+   _current_state(Syncing)
 {
    _last_sent_input.init(-1, NULL, 1);
    _last_received_input.init(-1, NULL, 1);
@@ -196,6 +197,9 @@ UdpProtocol::OnLoopPoll(void *cookie)
          Log("No luck syncing after %d ms... Re-queueing sync packet.\n", next_interval);
          SendSyncRequest();
       }
+      break;
+
+   case Synchronzied:
       break;
 
    case Running:

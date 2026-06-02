@@ -36,6 +36,7 @@ CPP_SRC   := \
 	$(SRCDIR)/code/controller.cpp \
 	$(SRCDIR)/code/rollback.cpp \
 	$(SRCDIR)/code/netplay.cpp \
+	$(SRCDIR)/code/ggpo_netplay.cpp \
 	$(SRCDIR)/imgui/imgui.cpp \
 	$(SRCDIR)/imgui/imgui_demo.cpp \
 	$(SRCDIR)/imgui/imgui_draw.cpp \
@@ -60,15 +61,7 @@ RC_SRC    := $(BUILDDIR)/UMVC3Hook.rc
 
 CPP_OBJ   := $(CPP_SRC:$(SRCDIR)/%.cpp=$(OBJDIR)/%.o)
 C_OBJ     := $(C_SRC:$(SRCDIR)/%.c=$(OBJDIR)/%.o)
-ENET_OBJ  := $(ENETDIR)/callbacks.o \
-             $(ENETDIR)/compress.o \
-             $(ENETDIR)/host.o \
-             $(ENETDIR)/list.o \
-             $(ENETDIR)/packet.o \
-             $(ENETDIR)/peer.o \
-             $(ENETDIR)/protocol.o \
-             $(ENETDIR)/win32.o
-ENET_OBJ_FULL := $(addprefix $(OBJDIR)/, $(notdir $(ENET_OBJ)))
+
 
 # --- GGPO source files (excludes main.cpp which has a conflicting DllMain) ---
 
@@ -92,7 +85,7 @@ GGPO_OBJ := $(GGPO_CPP_SRC:$(GGPODIR)/%.cpp=$(OBJDIR)/ggpo/%.o)
 
 RC_OBJ    := $(OBJDIR)/UMVC3Hook.res
 
-ALL_OBJ   := $(CPP_OBJ) $(C_OBJ) $(ENET_OBJ_FULL) $(GGPO_OBJ) $(RC_OBJ)
+ALL_OBJ   := $(CPP_OBJ) $(C_OBJ) $(GGPO_OBJ) $(RC_OBJ)
 
 # --- Include paths ---
 
@@ -103,7 +96,6 @@ INCLUDES  := \
 	-I$(SRCDIR)/kiero \
 	-I$(SRCDIR)/kiero/minhook/include \
 	-I$(SRCDIR)/utils \
-	-I$(ENETDIR)/include \
 	-I$(GGPODIR) \
 	-Iggpo/src/include \
 	-I$(BUILDDIR)/include_fix
@@ -179,12 +171,6 @@ $(OBJDIR)/%.o: $(SRCDIR)/%.cpp
 # ---------- Compile C ----------
 
 $(OBJDIR)/%.o: $(SRCDIR)/%.c
-	@mkdir -p $(@D)
-	$(CC) $(CFLAGS) -c $< -o $@
-
-# ---------- Compile enet C ----------
-
-$(OBJDIR)/%.o: $(ENETDIR)/%.c
 	@mkdir -p $(@D)
 	$(CC) $(CFLAGS) -c $< -o $@
 
@@ -275,7 +261,6 @@ help:
 	@echo "  INSTALL_DIR - UMVC3 install path (default: ~/.steam/...)"
 	@echo ""
 	@echo "Third-party libraries:"
-	@echo "  enet-1.3.18/  - ENet networking library (compiled from source)"
 	@echo "  ggpo/         - GGPO.net rollback netcode SDK (compiled from source)"
 	@echo ""
 	@echo "Dependencies:"

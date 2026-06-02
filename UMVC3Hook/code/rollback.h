@@ -2,81 +2,44 @@
 #include <cstdint>
 
 // ---------------------------------------------------------------------------
-// Rollback Snapshot / Restore
+// Rollback Snapshot / Restore (GGPO Callbacks)
 //
-// The snapshot ring buffer (ROLLBACK_WINDOW = 16) is the storage capacity.
-// The active rollback window (g_rollbackFrames, default 4 in controller.cpp)
-// controls how many frames we actually re-simulate on a late-packet conflict.
+// The snapshot system captures all necessary game memory regions for GGPO's
+// rollback engine.  Rollback_SaveGameState/LoadGameState serialise/deserialise
+// the region set.  Rollback_AdvanceFrame runs one frame of game logic with
+// timing patches applied for fast re-simulation.
 // ---------------------------------------------------------------------------
 
 // Snapshot ring-buffer capacity.  Must be >= rollback frames so old
 // snapshots survive long enough for any pending re-sim to complete.
-// Keep in sync with NET_HISTORY_SIZE (16).
 static constexpr int ROLLBACK_WINDOW = 16;
 
-// Global indicators for input override during re-simulation.
-// External input hooks (e.g. controller.cpp) check these to decide whether
-// to inject historical buffer inputs instead of live controller reads.
-extern bool    g_isResimulating;
-extern int32_t g_resimulateCurrentFrame;
+// Global indicator for re-simulation mode.  External hooks check this to
+// decide whether to bypass render / timing / sound operations.
+extern bool g_isResimulating;
 
-// Re-sim request flags, set by FrameStepper_Process (HookUpdate thread),
-// consumed by hkMvc3Main_move (main game thread) so the re-sim runs on
-// the correct thread for D3D/render safety.  -1 means no request pending.
-extern int32_t g_resimRequestedStart;
-extern int32_t g_resimRequestedEnd;
-
-// Snapshot-restore request flag — same deferral pattern.
-// Set by FrameStepper_Process (F6 key), consumed by hkMvc3Main_move at the
-// next frame boundary to avoid mid-frame memory corruption.
-extern int32_t g_restoreRequestedFrame;
-
-// Request a re-simulate from the controller layer — consumed by hkMvc3Main_move.
-// Called when late-arriving remote input differs from what was predicted.
-void Rollback_RequestReSimulate(int32_t startFrame, int32_t endFrame);
-
-// Hook setup — installs the sMvc3Main__move hook for re-simulation stepping.
+// ---------------------------------------------------------------------------
+// Initialisation
+// ---------------------------------------------------------------------------
 void Rollback_InitHooks();
-
-// Save a full snapshot of all MUST regions, keyed by |frame|.
-void Rollback_SaveSnapshot(int32_t frame);
-
-// Restore the snapshot previously saved for |frame|.
-void Rollback_RestoreSnapshot(int32_t frame);
-
-// Re-simulate frames [startFrame, endFrame):
-//   1. Restore snapshot at startFrame
-//   2. Call the full sMvc3Main__move pipeline for each frame
-//      (snapshots are NOT re-saved during re-sim — the next normal frame
-//       boundary save handles the corrected state)
-void Rollback_ReSimulate(int32_t startFrame, int32_t endFrame);
-
-// Free all snapshot memory. Call on netplay disconnect / match end.
-void Rollback_FreeSnapshots();
-
-// Headless frame tick — runs game-logic sub-functions from sMvc3Main__move
-// but SKIPS: Sleep (frame pacing), all vtable+0x48 calls (draw/render),
-// all sRender/sPrimitive calls, the Present/swap at 0x140537080.
-// Safe to call many times per real frame for re-simulation.
 void Rollback_HeadlessTick(uint64_t sMvc3Main);
 
-// Patch/unpatch the Sleep() calls inside sMain__move (0x140521df0).
-// enable=true → overwrites both call sites with NOPs for fast re-simulation.
-// enable=false → restores original bytes.
+// ---------------------------------------------------------------------------
+// GGPO callbacks
+// ---------------------------------------------------------------------------
+bool Rollback_SaveGameState(unsigned char** buffer, int* len, int* checksum, int frame);
+bool Rollback_LoadGameState(unsigned char* buffer, int len);
+bool Rollback_AdvanceFrame(int flags);
+void Rollback_FreeSavedStates();
+
+// ---------------------------------------------------------------------------
+// Timing / render patches  (used during re-simulation)
+// ---------------------------------------------------------------------------
 void Rollback_PatchSleep(bool enable);
-
-// Patch/unpatch the Present() call inside the post-render sync function
-// FUN_140537080 (0x14053709c).  During re-sim the Present blocks for ~16ms
-// under DXVK; NOPping it lets the function run normally without the wait.
 void Rollback_PatchPresent(bool enable);
-
-// Patch/unpatch the vtable+0x50 swapchain calls in sMvc3Main__move's tail
-// and inside FUN_140537080 (3 sites total).  These expect a Present to
-// have been submitted; with the Present NOP'd they may do unnecessary
-// D3D9/Vulkan work during re-sim.
 void Rollback_PatchSwapchain(bool enable);
-
-// Patch/unpatch every remaining render/draw call site inside
-// sMvc3Main__move.  Comment out entries in the sites[] array inside
-// the function body to test which ones are safe to skip during re-sim.
 void Rollback_PatchDrawCalls(bool enable);
+
+// Resynchronise the game's QPC / frame-timing fields after re-sim so the
+// first post-re-sim real frame sees a well-formed time delta.
+void Rollback_ResyncMainTiming(uint64_t sMain);

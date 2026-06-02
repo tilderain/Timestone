@@ -1,8 +1,10 @@
 #pragma once
 
 #include <cstdint>
-#include <enet/enet.h>
 
+// ---------------------------------------------------------------------------
+// Launch option enum
+// ---------------------------------------------------------------------------
 enum LaunchOption {
     LAUNCH_NORMAL = 0,
     LAUNCH_TRAINING = 1,
@@ -28,13 +30,12 @@ struct LaunchDialogConfig {
     int32_t p1Chars[3];
     int32_t p2Chars[3];
     int32_t stageId;
-    // Network host config
-    char    hostIp[64];
-    int     hostPort;
+    // Network config (GGPO handles the actual connection)
+    char    remoteIP[64];
+    int     remotePort;
+    int     localPort;
     bool    hostEnabled;
-    // enet handles (set by host/connect threads)
-    ENetHost* enetHost;
-    ENetPeer* enetPeer;
+    bool    isHost;
 };
 
 // Shows a Win32 dialog before the game initializes.
@@ -51,8 +52,8 @@ void SetLaunchOption(LaunchOption opt);
 // Get the dialog config (characters, stage, network settings)
 const LaunchDialogConfig& GetLaunchDialogConfig();
 
-// Set enet handles from outside (used by auto-host/connect in dual training mode)
-void SetNetworkHandles(ENetHost* host, ENetPeer* peer);
+// Mark networking as active (GGPO session will be started on game init)
+void SetNetworkActive();
 
 // Clean up any active network session (call on DLL detach / game exit)
 void CleanupNetworkOnExit();

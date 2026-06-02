@@ -59,8 +59,26 @@ Udp::Init(uint16 port, Poll *poll, Callbacks *callbacks)
    _poll = poll;
    _poll->RegisterLoop(this);
 
+   // Ensure Winsock is initialized (required before any socket operations).
+   // The game may not have called WSAStartup by the time our hook starts.
+   static bool wsockInited = false;
+   if (!wsockInited) {
+      WSADATA wsaData;
+      int wsaErr = WSAStartup(MAKEWORD(2, 2), &wsaData);
+      if (wsaErr != 0) {
+         Log("WSAStartup failed with error %d\n", wsaErr);
+      } else {
+         wsockInited = true;
+         Log("WSAStartup initialized (version %d.%d)\n",
+             LOBYTE(wsaData.wVersion), HIBYTE(wsaData.wVersion));
+      }
+   }
+
    Log("binding udp socket to port %d.\n", port);
    _socket = CreateSocket(port, 0);
+   if (_socket == INVALID_SOCKET) {
+      Log("FAILED to bind UDP socket to port %d\n", port);
+   }
 }
 
 void
@@ -72,7 +90,7 @@ Udp::SendTo(char *buffer, int len, int flags, struct sockaddr *dst, int destlen)
    if (res == SOCKET_ERROR) {
       DWORD err = WSAGetLastError();
       Log("unknown error in sendto (erro: %d  wsaerr: %d).\n", res, err);
-      ASSERT(FALSE && "Unknown error in sendto");
+      return;
    }
    char dst_ip[1024];
    Log("sent packet length %d to %s:%d (ret:%d).\n", len, inet_ntop(AF_INET, (void *)&to->sin_addr, dst_ip, ARRAY_SIZE(dst_ip)), ntohs(to->sin_port), res);

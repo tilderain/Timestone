@@ -6,6 +6,9 @@
  */
 
 #include "types.h"
+#include <cstdio>
+
+extern void HookLog(const char* fmt, ...);
 
 static FILE *logfile = NULL;
 
@@ -22,7 +25,16 @@ void Log(const char *fmt, ...)
 {
    va_list args;
    va_start(args, fmt);
-   Logv(fmt, args);
+   va_list args_copy;
+   va_copy(args_copy, args);
+   Logv(fmt, args_copy);
+   va_end(args_copy);
+
+   if (Platform::GetConfigBool("ggpo.log")) {
+      char buf[4096];
+      vsnprintf(buf, sizeof(buf), fmt, args);
+      HookLog("GGPO: %s", buf);
+   }
    va_end(args);
 }
 

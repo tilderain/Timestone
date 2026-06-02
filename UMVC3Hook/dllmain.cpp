@@ -13,10 +13,12 @@
 #include "code/framestepper.h"
 #include "code/trainingboot.h"
 #include "code/controller.h"
+#include "code/ggpo_netplay.h"
+#include "code/netplay.h"
 #include <Windows.h>
 #include <cstdio>
 #include "kiero/minhook/include/MinHook.h"
-#include <enet/enet.h>
+
 //#include "code/generated.h"
 
 // Log file for hook debugging
@@ -106,6 +108,7 @@ static void BootTimer_Dump()
 // Auto-connect target (passed via -connect on command line for spawned 2nd instance)
 static char g_autoConnectIp[64] = "";
 static int  g_autoConnectPort = 0;
+static int  g_autoLocalPort = 0;
 
 extern LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
@@ -354,6 +357,13 @@ void WINAPI HookUpdate()
 	while (true)
 	{
 		UMVC3Hooks::HookProcessStuff();
+
+		// Pump GGPO network events in background until session is synchronized.
+		// Once running, HookedMove on the game thread takes over GGPO calls.
+		if (g_ggpoSession && !g_ggpoRunning) {
+			ggpo_idle(g_ggpoSession, 0);
+		}
+
 		Sleep(1);
 	}
 }
@@ -465,6 +475,13 @@ void OnInitializeHook()
 			g_autoConnectIp, g_autoConnectPort);
 	}
 
+	// Check for -localport argument (optional, for same-machine dual training)
+	const char* localPortArg = strstr(cmdLineA, "-localport=");
+	if (localPortArg) {
+		g_autoLocalPort = atoi(localPortArg + 11);
+		HookLog("UMVC3Hook: Detected -localport=%d\n", g_autoLocalPort);
+	}
+
 	// Show launch menu on first instance only
 	LaunchOption opt = GetLaunchOption();
 	if (!trainingArg) {
@@ -525,39 +542,35 @@ void OnInitializeHook()
 	HookLog("UMVC3Hook: Patched uBattleUiPauseNetGallery_vfn5 JNZ→JMP (force render)\n");
 
 	if (opt == LAUNCH_DUAL_TRAINING) {
-		// Switch host log to host-specific file so host + client don't clobber each other
 		HookLogSetFile("UMVC3Hook_host.log");
-		HookLog("UMVC3Hook: Dual training host - switched to host log file\n");
+		HookLog("UMVC3Hook: Dual training host\n");
 
-		const LaunchDialogConfig& dlgCfg = GetLaunchDialogConfig();
+		LaunchDialogConfig& dlgCfg = const_cast<LaunchDialogConfig&>(GetLaunchDialogConfig());
+		dlgCfg.isHost = true;
+		dlgCfg.hostEnabled = true;
+		// Host binds remotePort, client binds remotePort+1 (same machine)
+		int clientPort = dlgCfg.remotePort + 1;
+		dlgCfg.localPort = dlgCfg.remotePort;
+		dlgCfg.remotePort = clientPort;
+		SetNetworkActive();
 
-		// 1. Create enet host FIRST so it's listening before the 2nd instance starts
-		ENetAddress addr;
-		addr.host = ENET_HOST_ANY;
-		addr.port = (enet_uint16)dlgCfg.hostPort;
+		// Start the host's GGPO session BEFORE spawning the client so the
+		// UDP socket is bound and ready when the client sends its SyncRequest.
+		Netplay_Init(dlgCfg.isHost, dlgCfg.remoteIP,
+			(unsigned short)dlgCfg.remotePort,
+			(unsigned short)dlgCfg.localPort);
 
-		ENetHost* server = enet_host_create(&addr, 1, 2, 0, 0);
-		if (!server) {
-			HookLog("UMVC3Hook: Dual training - FAILED to create enet host on port %d\n",
-				dlgCfg.hostPort);
-		} else {
-			SetNetworkHandles(server, nullptr);
-			HookLog("UMVC3Hook: Dual training - hosting on port %d, waiting for 2nd instance...\n",
-				dlgCfg.hostPort);
-		}
-
-		// 2. Spawn the second instance with -connect so it auto-connects back
+		// Spawn the second instance with -connect so it auto-connects back.
+		// The client binds remotePort+1 and connects to host on (original) remotePort.
 		wchar_t exePath[MAX_PATH];
 		GetModuleFileNameW(NULL, exePath, MAX_PATH);
 
-		// Use MultiByteToWideChar (locale-independent) for the IP address
 		wchar_t wIp[64];
-		MultiByteToWideChar(CP_ACP, 0, dlgCfg.hostIp, -1, wIp, 64);
+		MultiByteToWideChar(CP_ACP, 0, dlgCfg.remoteIP, -1, wIp, 64);
 
-		// FIX: Use %ls for wide strings (GCC/MinGW treats %s as narrow char*, even in swprintf)
-		wchar_t spawnCmd[MAX_PATH + 64];
-		swprintf(spawnCmd, MAX_PATH + 64, L"\"%ls\" -training -connect=%ls:%d",
-			exePath, wIp, dlgCfg.hostPort);
+		wchar_t spawnCmd[MAX_PATH + 96];
+		swprintf(spawnCmd, MAX_PATH + 96, L"\"%ls\" -training -connect=%ls:%d -localport=%d",
+			exePath, wIp, dlgCfg.localPort, clientPort);
 
 		STARTUPINFOW si = { sizeof(si) };
 		PROCESS_INFORMATION pi;
@@ -565,89 +578,39 @@ void OnInitializeHook()
 			CREATE_NEW_CONSOLE, NULL, NULL, &si, &pi)) {
 			CloseHandle(pi.hProcess);
 			CloseHandle(pi.hThread);
-			HookLog("UMVC3Hook: Spawned second instance with -training -connect=%s:%d\n",
-				dlgCfg.hostIp, dlgCfg.hostPort);
+			HookLog("UMVC3Hook: Spawned second instance (host=%d, client=%d, connect=%s:%d)\n",
+				dlgCfg.localPort, clientPort, dlgCfg.remoteIP, dlgCfg.localPort);
 		}
 		else {
 			HookLog("UMVC3Hook: Failed to spawn second instance (error %lu)\n", GetLastError());
-		}
-
-		// 3. Wait for connection (only if host was created)
-		if (server) {
-			ENetEvent event;
-			int timeoutMs = 15000;  // 15s timeout (generous for localhost)
-			int waited = 0;
-			while (waited < timeoutMs) {
-				int result = enet_host_service(server, &event, 100);
-				if (result > 0) {
-					if (event.type == ENET_EVENT_TYPE_CONNECT) {
-						event.peer->data = (void*)"connected";
-						SetNetworkHandles(server, event.peer);
-						HookLog("UMVC3Hook: Dual training - 2nd instance connected!\n");
-						break;
-					}
-					else if (event.type == ENET_EVENT_TYPE_RECEIVE) {
-						enet_packet_destroy(event.packet);
-					}
-				}
-				waited += 100;
-			}
-			if (!GetLaunchDialogConfig().enetPeer) {
-				HookLog("UMVC3Hook: Dual training - TIMEOUT waiting for 2nd instance (15s)\n");
-			}
 		}
 	}
 
 	// Auto-connect: second instance spawned by dual training connects back to host
 	if (g_autoConnectPort != 0 && g_autoConnectIp[0] != '\0') {
-		// Switch client log to client-specific file so host + client don't clobber each other
 		HookLogSetFile("UMVC3Hook_client.log");
 
 		HookLog("UMVC3Hook: Auto-connecting to host %s:%d\n",
 			g_autoConnectIp, g_autoConnectPort);
 
-		ENetHost* client = enet_host_create(NULL, 1, 2, 0, 0);
-		if (client) {
-			ENetAddress targetAddr;
-			if (enet_address_set_host_ip(&targetAddr, g_autoConnectIp) != 0) {
-				enet_address_set_host(&targetAddr, g_autoConnectIp);
-			}
-			targetAddr.port = (enet_uint16)g_autoConnectPort;
+		LaunchDialogConfig& dlgCfg = const_cast<LaunchDialogConfig&>(GetLaunchDialogConfig());
+		strncpy(dlgCfg.remoteIP, g_autoConnectIp, sizeof(dlgCfg.remoteIP) - 1);
+		dlgCfg.remoteIP[sizeof(dlgCfg.remoteIP) - 1] = '\0';
+		dlgCfg.remotePort = g_autoConnectPort;
+		dlgCfg.localPort = g_autoLocalPort ? g_autoLocalPort : g_autoConnectPort;
+		dlgCfg.isHost = false;
+		dlgCfg.hostEnabled = true;
+		SetNetworkActive();
 
-			ENetPeer* peer = enet_host_connect(client, &targetAddr, 2, 0);
-			if (peer) {
-				ENetEvent event;
-				int timeoutMs = 15000;
-				int waited = 0;
-				while (waited < timeoutMs) {
-					int result = enet_host_service(client, &event, 100);
-					if (result > 0) {
-						if (event.type == ENET_EVENT_TYPE_CONNECT) {
-							peer->data = (void*)"connected";
-							SetNetworkHandles(client, peer);
-							HookLog("UMVC3Hook: Auto-connect SUCCESS to %s:%d\n",
-								g_autoConnectIp, g_autoConnectPort);
-							break;
-						}
-						else if (event.type == ENET_EVENT_TYPE_RECEIVE) {
-							enet_packet_destroy(event.packet);
-						}
-					}
-					waited += 100;
-				}
-				if (!GetLaunchDialogConfig().enetPeer) {
-					HookLog("UMVC3Hook: Auto-connect TIMEOUT (15s) - destroying client\n");
-					enet_host_destroy(client);
-				}
-			}
-			else {
-				HookLog("UMVC3Hook: Auto-connect - enet_host_connect returned NULL\n");
-				enet_host_destroy(client);
-			}
-		}
-		else {
-			HookLog("UMVC3Hook: Auto-connect - enet_host_create FAILED\n");
-		}
+		HookLog("UMVC3Hook: Auto-connect config set (local=%d, remote=%s:%d)\n",
+			dlgCfg.localPort, dlgCfg.remoteIP, dlgCfg.remotePort);
+
+		// Start the client's GGPO session immediately so the socket is
+		// bound and the sync handshake begins as early as possible.
+		// FrameStepper_Init will find the session already started and skip.
+		Netplay_Init(dlgCfg.isHost, dlgCfg.remoteIP,
+			(unsigned short)dlgCfg.remotePort,
+			(unsigned short)dlgCfg.localPort);
 	}
 
 	TheMenu->Initialize();
@@ -834,12 +797,6 @@ BOOL WINAPI DllMain(HMODULE hMod, DWORD dwReason, LPVOID lpReserved)
 			SettingsMgr->Init();
 			DisableThreadLibraryCalls(hMod);
 
-			if (enet_initialize() != 0) {
-				HookLog("UMVC3Hook: Failed to initialize enet!\n");
-			} else {
-				HookLog("UMVC3Hook: enet initialized successfully\n");
-			}
-
 			CreateThread(nullptr, 0, MainThread, hMod, 0, nullptr);
 			CreateThread(nullptr, 0, (LPTHREAD_START_ROUTINE)HookUpdate, hMod, 0, nullptr);
 			BootTimer_Stamp("Before OnInitializeHook");
@@ -849,7 +806,6 @@ BOOL WINAPI DllMain(HMODULE hMod, DWORD dwReason, LPVOID lpReserved)
 		break;
 	case DLL_PROCESS_DETACH:
 		CleanupNetworkOnExit();
-		enet_deinitialize();
 		kiero::shutdown();
 		break;
 	}

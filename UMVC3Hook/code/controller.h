@@ -39,12 +39,12 @@ static constexpr uint32_t PAD_KEYBOARD_DISABLE   = 0xC30;
 static constexpr uint32_t PAD_KB_MAPPED_PLAYER   = 0xBE2;
 
 // Per-slot offsets (slotBase = pad + slotIdx * 0x2E0)
-static constexpr uint32_t SLOT_RAW_XINPUT  = 0x164; // raw input bits from XInput conversion
-static constexpr uint32_t SLOT_PREV_XINPUT = 0x168; // previous frame's raw bits
-static constexpr uint32_t SLOT_RISING      = 0x16C; // newly pressed this frame
-static constexpr uint32_t SLOT_FALLING     = 0x170; // released this frame
-static constexpr uint32_t SLOT_DELTA       = 0x174; // XOR of prev and current
-static constexpr uint32_t SLOT_AUTOREPEAT  = 0x178; // auto-repeat active flags
+static constexpr uint32_t SLOT_RAW_XINPUT  = 0x164;
+static constexpr uint32_t SLOT_PREV_XINPUT = 0x168;
+static constexpr uint32_t SLOT_RISING      = 0x16C;
+static constexpr uint32_t SLOT_FALLING     = 0x170;
+static constexpr uint32_t SLOT_DELTA       = 0x174;
+static constexpr uint32_t SLOT_AUTOREPEAT  = 0x178;
 
 // ---------------------------------------------------------------------------
 // XINPUT_STATE layout (pGamepad param points into this)
@@ -77,41 +77,18 @@ typedef void(__fastcall* inputAutoRepeatTimerProcess_t)(uint64_t slotBase);
 // ---------------------------------------------------------------------------
 void Controller_InitHooks();
 
-// Netplay ring buffer lifecycle — called from framestepper.cpp / netplay.cpp
-extern "C" void Controller_ResetBuffers();
-extern "C" void Controller_OnFrameStart();
-extern "C" void Controller_OnFrameEnd();
+// Reset internal state (called from Netplay_Init).
+void Controller_ResetBuffers();
 
-// Save/restore controller-side rollback state (g_oldInputs, g_localPending,
-// g_lastRemoteFrame, g_lastRemoteInput) so re-simulation replays identical
-// local inputs. These are called from Rollback_SaveSnapshot/RestoreSnapshot
-// since the snapshot regions only cover game memory, not static buffers.
-extern "C" void Controller_SaveRollbackState();
-extern "C" void Controller_RestoreRollbackState();
+// Save/restore controller-side rollback state (g_localPending) so
+// re-simulation replays identical local inputs.  Called from
+// Rollback_SaveGameState/Rollback_LoadGameState.
+void Controller_SaveRollbackState();
+void Controller_RestoreRollbackState();
 
-// Save/restore the local input shift buffer separately, so Rollback_ReSimulate
-// can preserve the original timeline for outbound packets.
-extern "C" void Controller_SaveInputHistory();
-extern "C" void Controller_RestoreInputHistory();
+// Returns the game's current frame count from sReplay+0x54.
+int32_t Controller_GetNetFrameCount();
 
-// Centrally resolve remote input for a given frame into g_usedRemoteInput.
-extern "C" void Controller_ResolveRemoteInput(int32_t frame);
-
-// Log the inputs used during a re-simmed frame for debugging.
-extern "C" void Controller_LogReSimFrame(int32_t frame);
-
-// Silent frame-boundary helpers for re-sim — maintain the local input shift
-// buffer without draining packets or sending outbound data.
-extern "C" void Controller_SilentFrameStart();
-extern "C" void Controller_SilentFrameEnd();
-
-// Netplay debug info — read from framestepper draw
-extern "C" int32_t  Controller_GetDelayFrames();
-extern "C" int32_t  Controller_GetNetFrameCount();
-extern "C" int32_t  Controller_GetLastRemoteFrame();
-extern "C" int32_t  Controller_GetRollbackFrames();
-extern "C" bool     Controller_IsRollbackEnabled();
-
-// Runtime delay adjustment — called from framestepper UI or netplay inbound
-extern "C" void     Controller_SetDelayFrames(int32_t delay);
-extern "C" void     Controller_SetRollbackFrames(int32_t n);
+// Read physical input for a player index, bypassing the GGPO hook.
+// Used by GGPO_AddLocalInput to capture the live physical state.
+uint32_t Controller_ReadPhysicalInput(uint64_t pad, uint32_t playerIndex);

@@ -10,29 +10,15 @@
 #include <d3d9.h>
 #include "../imgui/imgui.h"
 #include "../kiero/minhook/include/MinHook.h"
+#include "ggpo_netplay.h"
 #include "netplay.h"
 #include "LaunchMenu.h"
 #include "rollback.h"
-
-// Netplay debug info from controller.cpp
-extern "C" int32_t Controller_GetDelayFrames();
-extern "C" int32_t Controller_GetNetFrameCount();
-extern "C" int32_t Controller_GetLastRemoteFrame();
-extern "C" int32_t Controller_GetRollbackFrames();
+#include "controller.h"
 
 using namespace Memory::VP;
 
-// HookLog from dllmain.cpp
 extern void HookLog(const char* fmt, ...);
-
-// Netplay state queries from netplay.cpp
-extern bool Netplay_HasRemoteInput();
-extern bool Netplay_GetInboundDelay(int32_t& outDelay);
-extern void Netplay_SendDelay(int32_t delay);
-
-// Controller setters from controller.cpp
-extern "C" void Controller_SetDelayFrames(int32_t delay);
-extern "C" void Controller_SetRollbackFrames(int32_t n);
 
 // ---------------------------------------------------------------------------
 // Addresses (VAs, converted at runtime via _addr)
@@ -53,6 +39,10 @@ static constexpr uintptr_t GAME_CONFIG_PTR  = 0x140D50F88;
 // Functions
 static constexpr uintptr_t SHOW_LOADING_ADDR = 0x140253380;
 static constexpr uintptr_t SET_TEXT_FUNC     = 0x1402CE750;
+static constexpr uintptr_t SPAD_GET_INSTANCE_ADDR = 0x140001B00;
+static constexpr uintptr_t GET_CURRENT_INPUT_ADDR = 0x1402B3700;
+static constexpr uintptr_t SGAMEUI_GET_INSTANCE = 0x140001ac0;
+static constexpr uintptr_t PTR_SMAIN = 0x140e177e8;
 
 // ---------------------------------------------------------------------------
 // Offsets
@@ -69,7 +59,6 @@ static constexpr uintptr_t GameMode_offset      = 0x34C;
 //   8 = Heroes & Heralds
 //   9 = Online (alt)
 static constexpr uintptr_t P1ChrNode_offset     = 0x58;
-
 // ---------------------------------------------------------------------------
 // Message IDs (from ColorExpand msg_sys_menu_en.msd)
 // ---------------------------------------------------------------------------
@@ -100,12 +89,7 @@ static uint32_t g_bsP2Input    = 0; // battleState+0xd60 — P2 input candidate
 static uint32_t g_netP2Read    = 0; // GetsCurrentInput_withSOCD(pad,1)
 static uint32_t g_padP2Input   = 0; // pad + 0x49c — raw pad slot 1 input
 static bool     g_netDataValid = false;
-
-
-// Slot stride in the pad structure
-static constexpr uint32_t PAD_SLOT_STRIDE = 0x2E0;
-static constexpr uint32_t PAD_SLOT_INPUT  = 0x1BC; // offset within each slot for the active input
-// P2's input would be at pad + PAD_SLOT_STRIDE*1 + PAD_SLOT_INPUT = pad + 0x49c
+static uint32_t g_lastLocalInput = 0;
 
 // Input buffer data — captured from cChrInput__getInputBuffer (0x1401cc5d0)
 // and the buffer reader FUN_1402894d0 (0x1402894d0)
@@ -120,6 +104,11 @@ static LPDIRECT3DDEVICE9 g_pDevice = nullptr;
 
 // Game window handle for forcing repaints
 static HWND g_hWnd = nullptr;
+
+// Slot stride in the pad structure
+static constexpr uint32_t PAD_SLOT_STRIDE = 0x2E0;
+static constexpr uint32_t PAD_SLOT_INPUT  = 0x1BC; // offset within each slot for the active input
+// P2's input would be at pad + PAD_SLOT_STRIDE*1 + PAD_SLOT_INPUT = pad + 0x49c
 
 // Pause frame snapshot: captures the back buffer once when pause starts
 // and whenever a frame is advanced, so the frozen game image stays
@@ -156,7 +145,6 @@ static const char* DecodeDirection(uint32_t input)
     // Lower byte gives DPAD-based direction (post-SOCD these should be clean)
     int ud = input & (IN_UP | IN_DOWN);
     int lr = input & (IN_LEFT | IN_RIGHT);
-
     if (lr == IN_LEFT && ud == IN_UP)     return "7";
     if (lr == IN_LEFT && ud == IN_DOWN)   return "1";
     if (lr == IN_RIGHT && ud == IN_UP)    return "9";
@@ -197,10 +185,7 @@ static void AppendButtons(char* buf, size_t len, uint32_t input)
 // Input display function pointers (used during pause to show current inputs)
 // ---------------------------------------------------------------------------
 typedef uint64_t(__fastcall* sPad__getInstance_t)();
-static constexpr uintptr_t SPAD_GET_INSTANCE_ADDR = 0x140001B00;
-
 typedef uint64_t(__fastcall* GetsCurrentInput_withSOCD_t)(uint64_t padInstance, uint32_t playerIndex);
-static constexpr uintptr_t GET_CURRENT_INPUT_ADDR = 0x1402B3700;
 
 // Unit flags offset: contains game action bits from the keybind/action system
 // (cUnit__getUnitFlags reads *(uint32_t*)(pad + 0xbd8))
@@ -233,13 +218,38 @@ static Move_t oMove = nullptr;
 // Forward declarations
 static void CaptureNetInput();
 static bool IsTrainingMode();
-static constexpr uintptr_t SGAMEUI_GET_INSTANCE              = 0x140001ac0;
+static bool IsInPlay()
+{
+    typedef uint64_t(__fastcall* GetAmaterasu_t)();
+    static GetAmaterasu_t getAmaterasuObj = (GetAmaterasu_t)_addr(0x140001A90);
+    uint64_t aNextBattle = getAmaterasuObj();
+    int step = aNextBattle ? *(int*)(aNextBattle + 0xD8) : 0;
+    return step >= 2;
+}
 
+static uint32_t ReadLocalPhysicalInput()
+{
+    auto getPad = (sPad__getInstance_t)_addr(SPAD_GET_INSTANCE_ADDR);
+    uint64_t pad = getPad();
+    if (!pad) return 0;
 
-extern "C" void Controller_OnFrameStart();
-extern "C" void Controller_OnFrameEnd();
+    int localPlayerIndex = GGPO_IsHost() ? 0 : 1;
+    return Controller_ReadPhysicalInput(pad, localPlayerIndex);
+}
+
 // ---------------------------------------------------------------------------
-// Hooked sMvc3Main::move — skips the call when paused unless advancing.
+// Hooked sMvc3Main::move — frame-stepping + GGPO netplay integration
+//
+// Normal path (not paused):
+//   1. Read local physical input
+//   2. GGPO_AddLocalInput() — pushes local input into GGPO
+//   3. GGPO_SyncInputs() — retrieves synchronized inputs for both players
+//   4. oMove(sMvc3Main) — runs the actual game frame
+//   5. GGPO_AdvanceFrame() — notifies GGPO the frame is complete
+//   6. GGPO_Idle() — processes network I/O
+//
+// Paused path: skips the game frame unless advancing frame-by-frame.
+// Early return when GGPO isn't ready yet (prediction barrier).
 // ---------------------------------------------------------------------------
 static void __fastcall HookedMove(void* sMvc3Main)
 {
@@ -251,12 +261,27 @@ static void __fastcall HookedMove(void* sMvc3Main)
             frameCounter++;
             if (Netplay_IsActive())
             {
-                Controller_OnFrameStart();
+                uint32_t input = ReadLocalPhysicalInput();
+                g_lastLocalInput = input;
+                GGPOErrorCode addResult = GGPO_AddLocalInput(input);
+                if (!GGPO_SUCCEEDED(addResult))
+                {
+                    if (IsInPlay()) {
+                        GGPO_Idle(1);
+                        return;
+                    }
+                }
+                GGPO_SyncInputs();
             }
             oMove(sMvc3Main);
             if (Netplay_IsActive())
             {
-                Controller_OnFrameEnd();
+                uint64_t sMain = *(uint64_t*)_addr(PTR_SMAIN);
+                if (sMain) Rollback_ResyncMainTiming(sMain);
+                if (g_ggpoRunning) {
+                    GGPO_AdvanceFrame();
+                }
+                GGPO_Idle(0);
             }
         }
         else if (g_pDevice)
@@ -270,23 +295,29 @@ static void __fastcall HookedMove(void* sMvc3Main)
 
     if (Netplay_IsActive())
     {
-        Controller_OnFrameStart();
-
-        // Drain any inbound delay-control packets — keeps both sides in sync
-        // when the user adjusts the delay on either machine.
-        int32_t remoteDelay = -1;
-        while (Netplay_GetInboundDelay(remoteDelay))
+        uint32_t input = ReadLocalPhysicalInput();
+        g_lastLocalInput = input;
+        GGPOErrorCode addResult = GGPO_AddLocalInput(input);
+        if (!GGPO_SUCCEEDED(addResult))
         {
-            if (remoteDelay >= 1 && remoteDelay <= 15)
-                Controller_SetDelayFrames(remoteDelay);
+            if (IsInPlay()) {
+                GGPO_Idle(1);
+                return;
+            }
         }
+        GGPO_SyncInputs();
     }
 
     oMove(sMvc3Main);
 
     if (Netplay_IsActive())
     {
-        Controller_OnFrameEnd();
+        uint64_t sMain = *(uint64_t*)_addr(PTR_SMAIN);
+        if (sMain) Rollback_ResyncMainTiming(sMain);
+        if (g_ggpoRunning) {
+            GGPO_AdvanceFrame();
+        }
+        GGPO_Idle(0);
     }
 
     CaptureNetInput();
@@ -303,23 +334,15 @@ static void __fastcall HookedMove(void* sMvc3Main)
         static bool s_inputStarted = false;
         if (step >= 2 && !s_inputStarted) {
             s_inputStarted = true;
-            HookLog("Netplay: First frame input ready (step=%d, aNextBattle=0x%llX) — blasting packets\n",
-                    step, aNextBattle);
+            HookLog("Netplay: First frame input ready (step=%d)\n", step);
         }
 
         if (step >= 2)
         {
-            auto sPadGetInstance = (sPad__getInstance_t)_addr(SPAD_GET_INSTANCE_ADDR);
-            uint64_t pad = sPadGetInstance();
-            if (pad) {
-                static uint32_t s_netplayFrameCounter = 0;
-                s_netplayFrameCounter++;
-                if (s_netplayFrameCounter % 60 == 0) {
-                    uint32_t recvInput = Netplay_HasRemoteInput() ? Netplay_GetRemoteInput() : 0;
-                    HookLog("[Netplay] Frame %u | Recv: 0x%08X | RTT: %u ms\n",
-                            s_netplayFrameCounter, recvInput, Netplay_GetRTT());
-                }
-            }
+            static uint32_t s_netplayFrameCounter = 0;
+            s_netplayFrameCounter++;
+            HookLog("[Netplay] Frame %u | Send: 0x%08X  Recv P1: 0x%08X  Recv P2: 0x%08X | RTT: %u ms\n",
+                s_netplayFrameCounter, g_lastLocalInput, g_ggpoSyncInputs[0], g_ggpoSyncInputs[1], GGPO_GetRTT());
         }
     }
 }
@@ -352,22 +375,20 @@ static bool IsTrainingMode()
 {
     uint64_t sMvc3Manager = *(uint64_t*)_addr(MVC3_MANAGER_PTR);
     if (!sMvc3Manager) return false;
-
     uint64_t sBattleSetting = *(uint64_t*)(sMvc3Manager + BattleSetting_offset);
     if (!sBattleSetting) return false;
 
     int GameMode = *(int*)(sBattleSetting + GameMode_offset);
-    //if (GameMode != 5) return false; // 5 = training (see GameMode_offset comment for full enum)
+    // 5 = training (see GameMode_offset comment for full enum)
 
     uint64_t sCharacter = *(uint64_t*)_addr(CHARACTER_PTR);
     if (!sCharacter) return false;
-
     uint64_t P1ChrNode = *(uint64_t*)(sCharacter + P1ChrNode_offset);
     return P1ChrNode != 0;
 }
 
 // ---------------------------------------------------------------------------
-// Load keybind config from UMVC3Hook.ini  [FrameStepper] section
+// Load keybind config from UMVC3Hook.ini [FrameStepper] section
 // ---------------------------------------------------------------------------
 static void LoadConfig()
 {
@@ -375,7 +396,6 @@ static void LoadConfig()
     GetModuleFileNameW(nullptr, iniPath, MAX_PATH);
     wcsrchr(iniPath, L'\\')[1] = L'\0';
     wcscat(iniPath, L"UMVC3Hook.ini");
-
     KEY_PAUSE   = GetPrivateProfileIntW(L"FrameStepper", L"PauseKey",   VK_F2, iniPath);
     KEY_ADVANCE = GetPrivateProfileIntW(L"FrameStepper", L"AdvanceKey", VK_F3, iniPath);
 }
@@ -387,7 +407,6 @@ static int64_t __fastcall HookedSetText(uint64_t fontWidget, int32_t msgID)
 {
     if (msgID == MSG_NOW_LOADING && isPaused)
         msgID = MSG_PAUSED;
-
     typedef int64_t(__fastcall* SetText_t)(uint64_t, int32_t);
     return ((SetText_t)_addr(SET_TEXT_FUNC))(fontWidget, msgID);
 }
@@ -399,7 +418,6 @@ static void ShowPopup()
 {
     uint64_t sGameConfig = *(uint64_t*)_addr(GAME_CONFIG_PTR);
     if (!sGameConfig) return;
-
     typedef void(__fastcall* ShowLoading_t)(uint64_t);
     ((ShowLoading_t)_addr(SHOW_LOADING_ADDR))(sGameConfig);
 }
@@ -422,21 +440,15 @@ void FrameStepper_SetDevice(LPDIRECT3DDEVICE9 device)
 static void CaptureBackBuffer(LPDIRECT3DDEVICE9 pDevice)
 {
     if (!pDevice) return;
-
     IDirect3DSurface9* pBackBuffer = nullptr;
     if (FAILED(pDevice->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &pBackBuffer)))
         return;
-
     D3DSURFACE_DESC desc;
     pBackBuffer->GetDesc(&desc);
-
-    // Free old texture
     if (g_pPauseTexture) {
         g_pPauseTexture->Release();
         g_pPauseTexture = nullptr;
     }
-
-    // Create a render-target texture matching the back buffer
     if (SUCCEEDED(pDevice->CreateTexture(desc.Width, desc.Height, 1,
         D3DUSAGE_RENDERTARGET, desc.Format, D3DPOOL_DEFAULT, &g_pPauseTexture, nullptr)))
     {
@@ -470,7 +482,6 @@ static GetInputBuf_t oGetInputBuf = nullptr;
 static uint64_t __fastcall HookedGetInputBuf(uint64_t obj)
 {
     uint64_t bufPtr = oGetInputBuf(obj);
-
     if (!g_inputBufValid) {
         g_inputBufBase = obj;
         g_inputBufPtr  = bufPtr;
@@ -481,7 +492,6 @@ static uint64_t __fastcall HookedGetInputBuf(uint64_t obj)
         }
         g_inputBufValid = true;
     }
-
     return bufPtr;
 }
 
@@ -496,7 +506,6 @@ void FrameStepper_Init()
     oMove = (Move_t)(*(uintptr_t*)_addr(MOVE_VTABLE_ENTRY));
     Patch((void*)_addr(MOVE_VTABLE_ENTRY), (uintptr_t)&HookedMove);
 
-    // Hook SetText call site (CALL instruction override)
     Trampoline* tramp = Trampoline::MakeTrampoline(GetModuleHandleW(nullptr));
     InjectHook(_addr(HOOK_CALL_SITE), tramp->Jump(&HookedSetText), PATCH_CALL);
 
@@ -508,20 +517,16 @@ void FrameStepper_Init()
         inputBufHooked = true;
     }
 
-    // Initialize netplay if the launch menu set up an enet host/peer
     const LaunchDialogConfig& cfg = GetLaunchDialogConfig();
-    if (cfg.hostEnabled && cfg.enetHost && cfg.enetPeer) {
-        Netplay_Init(cfg.enetHost, cfg.enetPeer);
+    if (cfg.hostEnabled && cfg.remoteIP[0] != '\0')
+    {
+        Netplay_Init(cfg.isHost, cfg.remoteIP, (unsigned short)cfg.remotePort, (unsigned short)cfg.localPort);
         HookLog("FrameStepper: Netplay initialized from launch config\n");
     }
 
-    // Initialize rollback snapshot engine (hooks sMvc3Main__move)
     Rollback_InitHooks();
 }
 
-// ---------------------------------------------------------------------------
-// Public: per-frame processing — call from HookProcessStuff
-// ---------------------------------------------------------------------------
 // Edge-detection helper for use on threads without a message queue.
 // GetAsyncKeyState's &1 bit is per-thread and requires a message pump;
 // on the HookUpdate thread it always returns 0.  This helper uses the
@@ -534,6 +539,9 @@ static inline bool KeyPressed(int vk, bool& prevState)
     return pressed;
 }
 
+// ---------------------------------------------------------------------------
+// Public: per-frame processing — call from HookProcessStuff
+// ---------------------------------------------------------------------------
 void FrameStepper_Process()
 {
     // Netplay delay adjustment via [ (decrease) and ] (increase) keys.
@@ -541,19 +549,14 @@ void FrameStepper_Process()
     static bool prevBracketL = false, prevBracketR = false;
     if (Netplay_IsActive())
     {
-        if (KeyPressed(VK_OEM_4, prevBracketL))  // [ = decrease delay
+        if (KeyPressed(VK_OEM_4, prevBracketL))
         {
-            int32_t delay = Controller_GetDelayFrames() - 1;
-            if (delay < 1) delay = 1;
-            Controller_SetDelayFrames(delay);
-            Netplay_SendDelay(delay);
+            int32_t delay = GGPO_GetRTT() > 0 ? 4 : 4;
+            HookLog("Netplay: Delay adjust [-]\n");
         }
-        if (KeyPressed(VK_OEM_6, prevBracketR))  // ] = increase delay
+        if (KeyPressed(VK_OEM_6, prevBracketR))
         {
-            int32_t delay = Controller_GetDelayFrames() + 1;
-            if (delay > 15) delay = 15;
-            Controller_SetDelayFrames(delay);
-            Netplay_SendDelay(delay);
+            HookLog("Netplay: Delay adjust [+]\n");
         }
     }
 
@@ -569,7 +572,6 @@ void FrameStepper_Process()
         return;
     }
 
-    // Toggle pause
     static bool prevPause = false;
     if (KeyPressed(KEY_PAUSE, prevPause))
     {
@@ -578,11 +580,10 @@ void FrameStepper_Process()
         {
             frameCounter = 0;
             ShowPopup();
-            g_captureRequested = true; // snapshot the current frame
+            g_captureRequested = true;
         }
         else
         {
-            // Free the snapshot on unpause
             if (g_pPauseTexture) {
                 g_pPauseTexture->Release();
                 g_pPauseTexture = nullptr;
@@ -590,40 +591,11 @@ void FrameStepper_Process()
         }
     }
 
-    // Advance one frame while paused
     static bool prevAdvance = false;
     if (isPaused && KeyPressed(KEY_ADVANCE, prevAdvance))
     {
         advanceFrame = true;
-        g_captureRequested = true; // snapshot the advanced frame
-    }
-
-    // --- Rollback save/restore test keys (F5 / F6 / F7) ---
-    {
-        // Read the game's absolute frame counter from sReplay+0x54
-        static int32_t lastSaveFrame = 0;
-        auto sReplay = *(uint64_t*)_addr(0x140d4d9d8);
-        int32_t curFrame = sReplay ? *(int32_t*)(sReplay + 0x54) : 0;
-        static constexpr int32_t RESIM_WINDOW = 20;
-
-        static bool prevF5 = false, prevF6 = false, prevF7 = false;
-        if (KeyPressed(VK_F5, prevF5)) {
-            Rollback_SaveSnapshot(curFrame);
-            lastSaveFrame = curFrame;
-            HookLog("Rollback: saved snapshot at game frame %d\n", curFrame);
-        }
-        if (KeyPressed(VK_F6, prevF6)) {
-            g_restoreRequestedFrame = lastSaveFrame;
-            HookLog("Rollback: requesting restore to frame %d (deferred to frame boundary)\n", lastSaveFrame);
-        }
-        if (KeyPressed(VK_F7, prevF7)) {
-            int32_t target = curFrame + RESIM_WINDOW;
-            int32_t start = target - RESIM_WINDOW;
-            if (start < 0) start = 0;
-            HookLog("Rollback: requesting re-sim frames %d → %d (on main thread)\n", start, target);
-            g_resimRequestedStart = start;
-            g_resimRequestedEnd   = target;
-        }
+        g_captureRequested = true;
     }
 }
 
@@ -672,12 +644,8 @@ void FrameStepper_Draw()
         ImGui::SetNextWindowPos(ImVec2(12.0f, 12.0f), ImGuiCond_Always);
         ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.0f, 0.0f, 0.0f, 0.85f));
         ImGui::Begin("##FrameStepperPad", nullptr,
-            ImGuiWindowFlags_NoTitleBar |
-            ImGuiWindowFlags_NoResize |
-            ImGuiWindowFlags_NoMove |
-            ImGuiWindowFlags_NoScrollbar |
-            ImGuiWindowFlags_NoSavedSettings |
-            ImGuiWindowFlags_AlwaysAutoResize);
+            ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+            ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_AlwaysAutoResize);
 
         // Netplay status (always visible when netplay is active, shown at the top)
         if (Netplay_IsActive()) {
@@ -685,55 +653,21 @@ void FrameStepper_Draw()
             ImVec4 color = Netplay_IsHost()
                 ? ImVec4(1.0f, 0.9f, 0.1f, 1.0f)   // yellow for host
                 : ImVec4(0.3f, 0.7f, 1.0f, 1.0f);   // blue for client
-            ImGui::TextColored(color, "NETPLAY: %s  Ping: %ums", role, Netplay_GetRTT());
-            int32_t curDelay = Controller_GetDelayFrames();
-            int32_t curRollback = Controller_GetRollbackFrames();
-            ImGui::TextColored(color, "  Frame:%d  Delay: %d  Rollback: %d  LastRecv:%d",
-                Controller_GetNetFrameCount(),
-                curDelay,
-                curRollback,
-                Controller_GetLastRemoteFrame());
+            ImGui::TextColored(color, "NETPLAY: %s  Ping: %ums", role, GGPO_GetRTT());
 
-            // Delay adjustment buttons (ImGui::SmallButton for compact sizing).
-            // Changing the delay also notifies the remote peer so both sides
-            // stay in sync and the effective input delay remains equal.
-            ImGui::SameLine();
-            if (ImGui::SmallButton("[-]"))
+            GGPONetworkStats stats;
+            if (GGPO_SUCCEEDED(GGPO_GetNetworkStats(&stats)))
             {
-                curDelay = Controller_GetDelayFrames() - 1;
-                if (curDelay < 1) curDelay = 1;
-                Controller_SetDelayFrames(curDelay);
-                Netplay_SendDelay(curDelay);
-            }
-            ImGui::SameLine();
-            if (ImGui::SmallButton("[+]"))
-            {
-                curDelay = Controller_GetDelayFrames() + 1;
-                if (curDelay > 15) curDelay = 15;
-                Controller_SetDelayFrames(curDelay);
-                Netplay_SendDelay(curDelay);
-            }
-
-            // Rollback adjustment buttons
-            if (ImGui::SmallButton("[R-]"))
-            {
-                curRollback = Controller_GetRollbackFrames() - 1;
-                if (curRollback < 0) curRollback = 0;
-                Controller_SetRollbackFrames(curRollback);
-            }
-            ImGui::SameLine();
-            if (ImGui::SmallButton("[R+]"))
-            {
-                curRollback = Controller_GetRollbackFrames() + 1;
-                if (curRollback > 16) curRollback = 16;
-                Controller_SetRollbackFrames(curRollback);
+                ImGui::TextColored(color, "  Frame: %d  SendQ: %d  RecvQ: %d",
+                    Controller_GetNetFrameCount(),
+                    stats.network.send_queue_len,
+                    stats.network.recv_queue_len);
             }
         }
 
         ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "P1: [%s]  0x%08X", DecodeDirection(p1), p1);
         if (btns1[0])
             ImGui::SameLine(), ImGui::TextColored(ImVec4(0.7f, 0.9f, 1.0f, 1.0f), "%s", btns1);
-
         ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.6f, 1.0f), "P2: [%s]  0x%08X", DecodeDirection(p2), p2);
         if (btns2[0])
             ImGui::SameLine(), ImGui::TextColored(ImVec4(0.7f, 1.0f, 0.8f, 1.0f), "%s", btns2);
@@ -753,22 +687,17 @@ void FrameStepper_Draw()
         ImGui::End();
     }
 
-    // --- Pause-only content: shown below the pad window when paused ---
+    // --- Pause overlay (shown below the pad window when paused) ---
     if (!isPaused)
         return;
 
     ImGui::SetNextWindowPos(ImVec2(12.0f, 80.0f), ImGuiCond_Always);
     ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.0f, 0.0f, 0.0f, 0.85f));
     ImGui::Begin("##FrameStepperPause", nullptr,
-        ImGuiWindowFlags_NoTitleBar |
-        ImGuiWindowFlags_NoResize |
-        ImGuiWindowFlags_NoMove |
-        ImGuiWindowFlags_NoScrollbar |
-        ImGuiWindowFlags_NoSavedSettings |
-        ImGuiWindowFlags_NoInputs |
-        ImGuiWindowFlags_AlwaysAutoResize);
+        ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+        ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoSavedSettings |
+        ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_AlwaysAutoResize);
 
-    // Draw pause bars in the dummy space, then text after
     const float sz = ImGui::GetTextLineHeight();
     ImDrawList* dl = ImGui::GetWindowDrawList();
     const ImVec2 pos = ImGui::GetCursorScreenPos();
@@ -781,49 +710,49 @@ void FrameStepper_Draw()
     ImGui::SameLine();
     ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "PAUSED  %d", frameCounter);
 
-    // Input buffer display (captured from cChrInput__getInputBuffer hook)
     if (g_inputBufValid) {
         ImGui::TextColored(ImVec4(1.0f, 0.9f, 0.5f, 1.0f), "InputBuf @ 0x%llX (obj=0x%llX)", g_inputBufPtr, g_inputBufBase);
         ImGui::Text("  idx      value");
-        for (int i = 0; i < 10 && i < g_inputBufFrames; i++) {
+        for (int i = 0; i < 10 && i < g_inputBufFrames; i++)
             ImGui::Text("  [%d]  0x%08X", i, g_inputBuf[i]);
-        }
     }
 
-    // Network-relevant input display (captured from HookedMove after oMove)
     if (g_netDataValid) {
         ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.4f, 1.0f), "Net send(bs+0xd58): 0x%08X", g_netP1Input);
         ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.8f, 1.0f), "P2 getInput(pad,1): 0x%08X", g_netP2Read);
     }
 
     // 1. Get the aNextBattle instance (Amaterasu is the internal name for the battle manager)
-    typedef uint64_t(__fastcall* GetAmaterasu_t)();
-    GetAmaterasu_t getAmaterasuObj = (GetAmaterasu_t)_addr(0x140001A90);
-    uint64_t aNextBattle = getAmaterasuObj();
+    {
+        typedef uint64_t(__fastcall* GetAmaterasu_t)();
+        GetAmaterasu_t getAmaterasuObj = (GetAmaterasu_t)_addr(0x140001A90);
+        uint64_t aNextBattle = getAmaterasuObj();
 
-    if (aNextBattle) {
-        uint32_t flags      = *(uint32_t*)(aNextBattle + 0xC4);
-        int      step       = *(int*)(aNextBattle + 0xD8);
-        int      phase      = *(int*)(aNextBattle + 0xDC);
-        int      transition = *(int*)(aNextBattle + 0x174);
+        if (aNextBattle) {
+            uint32_t flags      = *(uint32_t*)(aNextBattle + 0xC4);
+            int      step       = *(int*)(aNextBattle + 0xD8);
+            int      phase      = *(int*)(aNextBattle + 0xDC);
+            int      transition = *(int*)(aNextBattle + 0x174);
 
-        ImGui::TextColored(ImVec4(1, 0.5f, 0, 1), "--- DIAGNOSTICS ---");
-        ImGui::Text("aNextBattle: 0x%llX", aNextBattle);
-        ImGui::Text("Flags (+0xC4): 0x%08X", flags);
-        ImGui::Text("Step (+0xD8): %d", step);
-        ImGui::Text("Phase (+0xDC): %d", phase);
-        ImGui::Text("Trans (+0x174): 0x%08X", transition);
+            ImGui::TextColored(ImVec4(1, 0.5f, 0, 1), "--- DIAGNOSTICS ---");
+            ImGui::Text("aNextBattle: 0x%llX", aNextBattle);
+            ImGui::Text("Flags (+0xC4): 0x%08X", flags);
+            ImGui::Text("Step (+0xD8): %d", step);
+            ImGui::Text("Phase (+0xDC): %d", phase);
+            ImGui::Text("Trans (+0x174): 0x%08X", transition);
+        }
     }
 
     // 2. Get the sGameUI instance
-    typedef uint64_t(__fastcall* GetGameUI_t)();
-    GetGameUI_t getGameUI = (GetGameUI_t)_addr(0x140001AC0);
-    uint64_t ui = getGameUI();
-
-    if (ui) {
-        uint64_t uiElement = *(uint64_t*)(ui + 0x5AA8);
-        ImGui::Text("sGameUI: 0x%llX", ui);
-        ImGui::Text("UI Element (+0x5AA8): 0x%llX", uiElement);
+    {
+        typedef uint64_t(__fastcall* GetGameUI_t)();
+        GetGameUI_t getGameUI = (GetGameUI_t)_addr(SGAMEUI_GET_INSTANCE);
+        uint64_t ui = getGameUI();
+        if (ui) {
+            uint64_t uiElement = *(uint64_t*)(ui + 0x5AA8);
+            ImGui::Text("sGameUI: 0x%llX", ui);
+            ImGui::Text("UI Element (+0x5AA8): 0x%llX", uiElement);
+        }
     }
 
     ImGui::PopStyleColor();

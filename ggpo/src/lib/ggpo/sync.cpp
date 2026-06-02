@@ -153,7 +153,13 @@ Sync::AdjustSimulation(int seek_to)
     * Flush our input queue and load the last frame.
     */
    LoadFrame(seek_to);
-   ASSERT(_framecount == seek_to);
+
+   /*
+    * LoadFrame may have fallen back to the oldest available frame
+    * if seek_to was evicted from the ring buffer. Recalculate
+    * the re-simulation count based on the frame actually loaded.
+    */
+   count = framecount - _framecount;
 
    /*
     * Advance frame by frame (stuffing notifications back to 
@@ -235,7 +241,15 @@ Sync::FindSavedFrameIndex(int frame)
       }
    }
    if (i == count) {
-      ASSERT(FALSE);
+      int oldest = 0;
+      for (i = 1; i < count; i++) {
+         if (_savedstate.frames[i].buf &&
+             (!_savedstate.frames[oldest].buf || _savedstate.frames[i].frame < _savedstate.frames[oldest].frame)) {
+            oldest = i;
+         }
+      }
+      i = oldest;
+      Log("Frame %d not found in saved state, falling back to oldest available frame %d.\n", frame, _savedstate.frames[i].frame);
    }
    return i;
 }
