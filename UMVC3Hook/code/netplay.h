@@ -24,14 +24,40 @@
 //
 //   A dedicated background thread owns ALL ENet I/O. The game thread
 //   communicates via Win32 critical sections for packet exchange.
+//
+//   A desync-check packet is also sent every frame: it carries a simple
+//   XOR checksum of all character position/state.  If the remote side's
+//   checksum for a frame doesn't match the local checksum, desync is
+//   declared and the game pauses with an on-screen warning.
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Packet type identifiers (first uint32_t of every ENet payload).
+// ---------------------------------------------------------------------------
+enum PacketType : uint32_t {
+    PACKET_INPUT        = 0,  // InputPacket
+    PACKET_DESYNC_CHECK = 1,  // DesyncCheckPacket
+    PACKET_DELAY        = 2,  // DelayPacket
+};
 
 #pragma pack(push, 1)
 constexpr size_t NET_HISTORY_SIZE = 16;
 
 struct InputPacket {
-    uint32_t start_frame;      // inputs[0] corresponds to this frame number
+    uint32_t type;               // PACKET_INPUT
+    uint32_t start_frame;        // inputs[0] corresponds to this frame
     uint32_t inputs[NET_HISTORY_SIZE];
+};
+
+struct DesyncCheckPacket {
+    uint32_t type;               // PACKET_DESYNC_CHECK
+    uint32_t frame;              // game frame this checksum is for
+    uint32_t checksum;           // XOR of all character positions/states
+};
+
+struct DelayPacket {
+    uint32_t type;               // PACKET_DELAY
+    int32_t  delay;              // delay frame count
 };
 #pragma pack(pop)
 
@@ -64,10 +90,18 @@ uint32_t Netplay_GetRemoteInput();
 // Shut down the service thread, disconnect peer, destroy host.
 void Netplay_Shutdown();
 
-// Send a delay-control value to the remote peer (communicated via separate
-// small packet so both sides stay in sync when delay changes mid-match).
+// Send a delay-control value to the remote peer.
 void Netplay_SendDelay(int32_t delay);
 
 // Retrieve the last delay value received from the remote peer.  Returns true
 // if a new value was available (it is consumed by this call).
 bool Netplay_GetInboundDelay(int32_t& outDelay);
+
+// --- Desync-check helpers ---
+
+// Send a desync checksum for the given frame.
+void Netplay_SendDesyncCheck(uint32_t frame, uint32_t checksum);
+
+// Retrieve the most recent inbound desync-check packet.  Returns true if
+// data was available (the packet is consumed by this call).
+bool Netplay_GetInboundDesyncCheck(uint32_t& outFrame, uint32_t& outChecksum);

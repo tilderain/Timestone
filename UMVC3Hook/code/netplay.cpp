@@ -16,25 +16,33 @@ static bool                 g_active = false;
 
 // Thread-safe queues protected by Win32 critical sections
 // (MinGW-w64 win32 threading model does not support std::mutex)
-static InputPacket          g_outboundPacket = {};
-static bool                 g_outboundNew    = false;
-static CRITICAL_SECTION     g_outboundCS;
+static InputPacket              g_outboundPacket = {};
+static bool                     g_outboundNew    = false;
+static CRITICAL_SECTION         g_outboundCS;
 
 static std::vector<InputPacket> g_inboundQueue;
-static CRITICAL_SECTION     g_inboundCS;
+static CRITICAL_SECTION         g_inboundCS;
+
+// Desync-check packet queue (separate from input packets).
+static std::vector<DesyncCheckPacket> g_inboundDesyncQueue;
+static CRITICAL_SECTION               g_inboundDesyncCS;
 
 static HANDLE               g_serviceThread  = nullptr;
 static uint32_t             g_recvCount = 0;
 static uint32_t             g_lastRecv  = 0;
 static std::atomic<bool>    g_running { false };
 
-// Delay control channel — small out-of-band packets to synchronise delay
-// changes between both peers without modifying the InputPacket wire format.
+// Delay control channel — small packets to keep both peers' delay in sync.
 static int32_t              g_outboundDelay    = -1;
 static bool                 g_outboundDelayNew = false;
 static int32_t              g_inboundDelay     = -1;
 static bool                 g_inboundDelayNew  = false;
 static CRITICAL_SECTION     g_delayCS;
+
+// Desync-check outbound packet (separate from input to avoid conflicts).
+static DesyncCheckPacket   g_outboundDesyncPkt   = {};
+static bool                g_outboundDesyncNew   = false;
+static CRITICAL_SECTION    g_outboundDesyncCS;
 
 // One-time critical section initialization flag
 static bool                 g_csInitialized  = false;
@@ -111,8 +119,35 @@ static DWORD WINAPI Netplay_ServiceThread(LPVOID)
 
         if (hasNewDelay && g_peer)
         {
+            DelayPacket dp;
+            dp.type  = PACKET_DELAY;
+            dp.delay = delayVal;
             ENetPacket* packet = enet_packet_create(
-                &delayVal, sizeof(int32_t), ENET_PACKET_FLAG_UNSEQUENCED
+                &dp, sizeof(DelayPacket), ENET_PACKET_FLAG_UNSEQUENCED
+            );
+            if (enet_peer_send(g_peer, 0, packet) != 0) {
+                enet_packet_destroy(packet);
+            }
+            enet_host_flush(g_host);
+        }
+
+        // --- Send desync-check packet ---
+        bool hasNewDesync = false;
+        DesyncCheckPacket outDesyncPkt = {};
+        {
+            ScopedCS lock(g_outboundDesyncCS);
+            if (g_outboundDesyncNew)
+            {
+                outDesyncPkt = g_outboundDesyncPkt;
+                hasNewDesync = true;
+                g_outboundDesyncNew = false;
+            }
+        }
+
+        if (hasNewDesync && g_peer)
+        {
+            ENetPacket* packet = enet_packet_create(
+                &outDesyncPkt, sizeof(DesyncCheckPacket), ENET_PACKET_FLAG_UNSEQUENCED
             );
             if (enet_peer_send(g_peer, 0, packet) != 0) {
                 enet_packet_destroy(packet);
@@ -128,23 +163,45 @@ static DWORD WINAPI Netplay_ServiceThread(LPVOID)
             {
                 if (event.type == ENET_EVENT_TYPE_RECEIVE)
                 {
-                    if (event.packet->dataLength >= sizeof(InputPacket))
+                    if (event.packet->dataLength >= 4)
                     {
-                        const InputPacket* inPkt = (const InputPacket*)event.packet->data;
+                        uint32_t pktType = *(uint32_t*)event.packet->data;
+                        switch (pktType)
                         {
-                            ScopedCS lock(g_inboundCS);
-                            g_inboundQueue.push_back(*inPkt);
-                        }
-                        g_recvCount++;
-                    }
-                    else if (event.packet->dataLength == sizeof(int32_t))
-                    {
-                        // Small (4-byte) packets carry delay-control values.
-                        int32_t delay = *(int32_t*)event.packet->data;
-                        {
-                            ScopedCS lock(g_delayCS);
-                            g_inboundDelay = delay;
-                            g_inboundDelayNew = true;
+                            case PACKET_INPUT:
+                                if (event.packet->dataLength >= sizeof(InputPacket))
+                                {
+                                    const InputPacket* inPkt = (const InputPacket*)event.packet->data;
+                                    {
+                                        ScopedCS lock(g_inboundCS);
+                                        g_inboundQueue.push_back(*inPkt);
+                                    }
+                                    g_recvCount++;
+                                }
+                                break;
+
+                            case PACKET_DESYNC_CHECK:
+                                if (event.packet->dataLength >= sizeof(DesyncCheckPacket))
+                                {
+                                    const DesyncCheckPacket* dcp = (const DesyncCheckPacket*)event.packet->data;
+                                    {
+                                        ScopedCS lock(g_inboundDesyncCS);
+                                        g_inboundDesyncQueue.push_back(*dcp);
+                                    }
+                                }
+                                break;
+
+                            case PACKET_DELAY:
+                                if (event.packet->dataLength >= sizeof(DelayPacket))
+                                {
+                                    const DelayPacket* dp = (const DelayPacket*)event.packet->data;
+                                    {
+                                        ScopedCS lock(g_delayCS);
+                                        g_inboundDelay = dp->delay;
+                                        g_inboundDelayNew = true;
+                                    }
+                                }
+                                break;
                         }
                     }
                     enet_packet_destroy(event.packet);
@@ -189,17 +246,23 @@ void Netplay_Init(ENetHost* host, ENetPeer* peer)
     if (!g_csInitialized)
     {
         InitializeCriticalSection(&g_outboundCS);
+        InitializeCriticalSection(&g_outboundDesyncCS);
         InitializeCriticalSection(&g_inboundCS);
+        InitializeCriticalSection(&g_inboundDesyncCS);
         InitializeCriticalSection(&g_delayCS);
         g_csInitialized = true;
     }
 
     {
         ScopedCS lock1(g_outboundCS);
-        ScopedCS lock2(g_inboundCS);
-        ScopedCS lock3(g_delayCS);
+        ScopedCS lock2(g_outboundDesyncCS);
+        ScopedCS lock3(g_inboundCS);
+        ScopedCS lock4(g_inboundDesyncCS);
+        ScopedCS lock5(g_delayCS);
         g_outboundNew = false;
+        g_outboundDesyncNew = false;
         g_inboundQueue.clear();
+        g_inboundDesyncQueue.clear();
         g_outboundDelayNew = false;
         g_inboundDelayNew = false;
         std::memset(&g_outboundPacket, 0, sizeof(InputPacket));
@@ -280,6 +343,7 @@ bool Netplay_GetInboundDelay(int32_t& outDelay)
 void Netplay_SendInput(uint32_t rawInput)
 {
     InputPacket pkt = {};
+    pkt.type        = PACKET_INPUT;
     pkt.start_frame = 0;
     pkt.inputs[0] = rawInput;
     // inputs[1..15] remain zero — unused for simple delay-based netplay.
@@ -287,6 +351,32 @@ void Netplay_SendInput(uint32_t rawInput)
     ScopedCS lock(g_outboundCS);
     g_outboundPacket = pkt;
     g_outboundNew = true;
+}
+
+void Netplay_SendDesyncCheck(uint32_t frame, uint32_t checksum)
+{
+    DesyncCheckPacket pkt;
+    pkt.type     = PACKET_DESYNC_CHECK;
+    pkt.frame    = frame;
+    pkt.checksum = checksum;
+
+    ScopedCS lock(g_outboundDesyncCS);
+    g_outboundDesyncPkt = pkt;
+    g_outboundDesyncNew = true;
+}
+
+bool Netplay_GetInboundDesyncCheck(uint32_t& outFrame, uint32_t& outChecksum)
+{
+    ScopedCS lock(g_inboundDesyncCS);
+    if (!g_inboundDesyncQueue.empty())
+    {
+        DesyncCheckPacket pkt = g_inboundDesyncQueue.front();
+        g_inboundDesyncQueue.erase(g_inboundDesyncQueue.begin());
+        outFrame    = pkt.frame;
+        outChecksum = pkt.checksum;
+        return true;
+    }
+    return false;
 }
 
 bool Netplay_HasRemoteInput()
@@ -354,7 +444,9 @@ void Netplay_Shutdown()
     if (g_csInitialized)
     {
         DeleteCriticalSection(&g_outboundCS);
+        DeleteCriticalSection(&g_outboundDesyncCS);
         DeleteCriticalSection(&g_inboundCS);
+        DeleteCriticalSection(&g_inboundDesyncCS);
         DeleteCriticalSection(&g_delayCS);
         g_csInitialized = false;
     }

@@ -20,6 +20,13 @@ extern "C" int32_t Controller_GetNetFrameCount();
 extern "C" int32_t Controller_GetLastRemoteFrame();
 extern "C" int32_t Controller_GetRollbackFrames();
 
+// Desync detection flags from controller.cpp
+extern bool     g_desyncDetected;
+extern bool     g_desyncSeen;
+extern int32_t  g_desyncFrame;
+extern uint32_t g_desyncLocalCS;
+extern uint32_t g_desyncRemoteCS;
+
 using namespace Memory::VP;
 
 // HookLog from dllmain.cpp
@@ -557,9 +564,29 @@ void FrameStepper_Process()
         }
     }
 
+    // --- Desync auto-pause (works in any mode). ---
+    // P key dismisses the alert and unpauses.  The overlay persists
+    // (g_desyncSeen remains true) but future mismatches won't re-pause.
+    static bool prevDesyncP = false;
+    bool desyncActive = g_desyncDetected || g_desyncSeen;
+    if (desyncActive)
+    {
+        if (KeyPressed(0x50, prevDesyncP))
+        {
+            g_desyncDetected = false;
+            g_desyncSeen     = true;
+            isPaused         = false;
+            advanceFrame     = false;
+        }
+        else if (g_desyncDetected)
+        {
+            isPaused = true;
+        }
+    }
+
     if (!IsTrainingMode())
     {
-        if (isPaused) {
+        if (isPaused && !g_desyncDetected) {
             isPaused = false;
             if (g_pPauseTexture) {
                 g_pPauseTexture->Release();
@@ -751,6 +778,45 @@ void FrameStepper_Draw()
 
         ImGui::PopStyleColor();
         ImGui::End();
+    }
+
+    // --- Desync detected overlay (visible in all modes) ---
+    if (g_desyncDetected || g_desyncSeen)
+    {
+        ImGui::SetNextWindowPos(ImVec2(ImGui::GetIO().DisplaySize.x * 0.5f,
+                                       ImGui::GetIO().DisplaySize.y * 0.18f),
+                                ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+        ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.15f, 0.0f, 0.0f, 0.92f));
+        ImGui::Begin("##DesyncOverlay", nullptr,
+            ImGuiWindowFlags_NoTitleBar |
+            ImGuiWindowFlags_NoResize |
+            ImGuiWindowFlags_NoMove |
+            ImGuiWindowFlags_NoScrollbar |
+            ImGuiWindowFlags_NoSavedSettings |
+            ImGuiWindowFlags_AlwaysAutoResize |
+            ImGuiWindowFlags_NoInputs);
+
+        ImGui::PushStyleColor(ImGuiCol_Text,
+            g_desyncDetected ? ImVec4(1.0f, 0.1f, 0.1f, 1.0f)
+                             : ImVec4(0.8f, 0.5f, 0.1f, 1.0f));
+        ImGui::SetWindowFontScale(2.5f);
+        ImGui::Text("DESYNC DETECTED");
+        ImGui::SetWindowFontScale(1.0f);
+        ImGui::PopStyleColor();
+
+        ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.6f, 1.0f),
+            "Frame %d: local 0x%08X  remote 0x%08X",
+            g_desyncFrame, g_desyncLocalCS, g_desyncRemoteCS);
+        if (g_desyncDetected) {
+            ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.4f, 1.0f),
+                "Press P to unpause and continue");
+        } else {
+            ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f),
+                "(dismissed — further mismatches logged only)");
+        }
+
+        ImGui::End();
+        ImGui::PopStyleColor();
     }
 
     // --- Pause-only content: shown below the pad window when paused ---

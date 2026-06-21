@@ -31,6 +31,11 @@ extern int32_t g_resimRequestedEnd;
 // next frame boundary to avoid mid-frame memory corruption.
 extern int32_t g_restoreRequestedFrame;
 
+// Non-negative after Rollback_ReSimulate completes, holding the frame number
+// of the first post-resim live tick.  hkprocessFrameInput checks this to log
+// diagnostic info at the resim→live boundary.  Cleared after first use.
+extern int32_t g_postResimFrame;
+
 // Request a re-simulate from the controller layer — consumed by hkMvc3Main_move.
 // Called when late-arriving remote input differs from what was predicted.
 void Rollback_RequestReSimulate(int32_t startFrame, int32_t endFrame);

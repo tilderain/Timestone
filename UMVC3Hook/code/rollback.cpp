@@ -44,6 +44,7 @@ static constexpr uintptr_t PTR_SMAIN        = 0x140e177e8;
 static constexpr uintptr_t PTR_SGAMEEFFECT  = 0x140d46470;
 static constexpr uintptr_t PTR_SMVC3MGR     = 0x140d510a0;
 static constexpr uintptr_t PTR_SUNIT        = 0x140e17698;
+static constexpr uintptr_t PTR_SCAMERA      = 0x140e17930;
 
 // sMvc3Main__move — the full per-frame update pipeline
 static constexpr uintptr_t FN_SMVC3MAIN_MOVE = 0x1402594A0;
@@ -80,7 +81,7 @@ static uint32_t DecodeDtiSize(uint64_t dtiPtr) {
     return ((*(uint32_t*)(dtiPtr + 0x30) & 0x7FFFFF) << 2);
 }
 
-static constexpr size_t MAX_CHAR_SIZE        = 0x10000;
+static constexpr size_t MAX_CHAR_SIZE        = 0x40000;
 static constexpr int    MAX_REGIONS          = 512;
 static constexpr int    DYNAMIC_SAFETY       = 128; // max projectile/effect nodes
 static constexpr int    SSHOT_SENTINEL_COUNT = 10;  // 10 sentinel slots starting at 0x140d47f90
@@ -91,6 +92,7 @@ static constexpr size_t SSHOT_NODE_OFFSET    = 0x1450; // uShot->cChrNode offset
 // ===========================================================================
 bool    g_isResimulating         = false;
 int32_t g_resimulateCurrentFrame = 0;
+int32_t g_postResimFrame         = -1;
 
 // Pending re-sim request from FrameStepper_Process (HookUpdate thread).
 // hkMvc3Main_move on the main game thread checks/resets these so the
@@ -112,6 +114,21 @@ static void(__fastcall* oCallSRender)(uint64_t param_1) = nullptr;
 static void(__fastcall* oMain_move)(uint64_t param_1) = nullptr;
 // Trampoline for the collision sound-event iterator (hook crashes during re-sim)
 static void(__fastcall* oCollisionSoundUpdate)(uint64_t param_1) = nullptr;
+
+// [EXPERIMENTAL] QPC per-frame virtualization — see mvc3/rollback W3-C2
+// static decltype(&QueryPerformanceCounter) g_real_qpc = nullptr;
+// static uint64_t g_virtual_qpc = 0;
+// static DWORD g_main_thread_id = 0;
+// static uint64_t g_qpc_history[ROLLBACK_WINDOW] = {};
+// 
+// static BOOL WINAPI hooked_qpc(LARGE_INTEGER* out) {
+//     if (g_isResimulating && GetCurrentThreadId() == g_main_thread_id) {
+//         if (out) out->QuadPart = (LONGLONG)g_virtual_qpc;
+//         return TRUE;
+//     }
+//     if (!g_real_qpc) return FALSE;
+//     return g_real_qpc(out);
+// }
 
 // Frame counter / rollback state from controller.cpp
 extern "C" int32_t Controller_GetNetFrameCount();
@@ -279,22 +296,33 @@ static int BuildRegions(Region* regions, int maxRegions)
 
     // ---- 6. sMain — physics, timing, frame pacing (needed for re-sim consistency) ----
     {
-    //    uint64_t sMain = *(uint64_t*)_addr(PTR_SMAIN);
-    //    add((void*)sMain, 0x40080);
+        uint64_t sMain = *(uint64_t*)_addr(PTR_SMAIN);
+        add((void*)sMain, 0x40080);
     }
 
-    // ---- 7. sGameEffect — SKIPPED: individual effect nodes are captured ---
+    // ---- 7. sCamera — view matrices, 8-slot camera stack, cutin state ----
+    //     3456 B total; skip vtable @+0 .. +7 on restore (handled via flat
+    //     memcpy — the vtable pointer is the same at save and restore time
+    //     for a singleton, so restoring it is safe here).
+    {
+        uint64_t sCamera = *(uint64_t*)_addr(PTR_SCAMERA);
+        if (sCamera) {
+            add((void*)sCamera, 0xD80);
+        }
+    }
+
+    // ---- 8. sGameEffect — SKIPPED: individual effect nodes are captured ---
     //     via the sUnit category traversal (categories 13-16) below.  Flat-
     //     restoring sGameEffect would crash due to stale effect pointers.
 
-    // ---- 8. sAction (fighting phase state machine) ----
+    // ---- 10. sAction (fighting phase state machine) ----
     uint64_t sMvc3Mgr = *(uint64_t*)_addr(PTR_SMVC3MGR);
     if (sMvc3Mgr) {
         uint64_t sAction = *(uint64_t*)(sMvc3Mgr + SMVC3MGR_ACTION_OFFSET);
         add((void*)sAction, 0x300);
     }
 
-    // ---- 9-14. Per-character uCharacter + 15-16. cChrTeam ----
+    // ---- 11-16. Per-character uCharacter + 17-18. cChrTeam ----
     uint64_t sCharacter = *(uint64_t*)_addr(PTR_SCHARACTER);
     if (sCharacter) {
         uint64_t team0 = sCharacter + TEAM0_OFFSET;
@@ -315,7 +343,7 @@ static int BuildRegions(Region* regions, int maxRegions)
                     uint32_t charSize = DecodeDtiSize(dtiPtr);
                     uint32_t finalSize = charSize;
                     if (finalSize == 0 || finalSize > MAX_CHAR_SIZE) {
-                        finalSize = 0x8000;
+                        finalSize = 0x20000;
                     }
                     uint32_t* animFields = (uint32_t*)(character + 0x1300);
                    // HookLog("DIAG Character[team %d]: addr=0x%llX vtable=0x%llX dtiFunc=0x%llX dtiPtr=0x%llX rawSize=%u finalSize=%u\n"
@@ -326,13 +354,23 @@ static int BuildRegions(Region* regions, int maxRegions)
                  //           animFields[8], animFields[9], animFields[10], animFields[11],
                  //           animFields[12], animFields[13], animFields[14], animFields[15]);
                     add((void*)character, finalSize);
+
+                    // cChrInput is embedded inside uCharacter at +0x21C8.
+                    // The full cChrInput struct is ~0x5A0 bytes covering all
+                    // ring buffers (mHeldRing, mReleasedRing, mPressedRing),
+                    // direction history (512B at +0x360), final processed fields,
+                    // and the +0x590/+0x594 fields read by getInputDirection.
+                    // Snapshot the entire range so direction-history and
+                    // ring-buffer-head state survive rollback restores.
+                    uint64_t cChrInput = character + 0x21C8;
+                    add((void*)cChrInput, 0x5A0);
                 }
                 node = *(uint64_t*)(node + NODE_NEXT_OFFSET);
             }
         }
     }
 
-    // ---- 17-20. sUnit effect categories — SKIPPED (heap corruption) ---
+    // ---- 19-22. sUnit effect categories — SKIPPED (heap corruption) ---
     //     Walking effect categories 13-16 and restoring individual nodes at
     //     their heap addresses corrupts the pool allocator's free-list metadata
     //     when nodes were freed between save and restore (MtHeapAllocator crash).
@@ -836,6 +874,7 @@ void Rollback_HeadlessTick(uint64_t sMain)
 
 // Forward declarations
 static void Rollback_ClearStalePointers();
+static void Rollback_ClearGameEffectSlots();
 
 // ===========================================================================
 // Public API — Save / Restore / ReSimulate
@@ -881,6 +920,12 @@ void Rollback_SaveSnapshot(int32_t frame)
         offset += regions[i].size;
     }
     slot.size = offset;
+
+    // [EXPERIMENTAL] QPC capture — see mvc3/rollback W3-C2
+    // LARGE_INTEGER qpc_cap;
+    // if (QueryPerformanceCounter(&qpc_cap)) {
+    //     g_qpc_history[slotIdx] = qpc_cap.QuadPart;
+    // }
 
     // Save controller-side state (input shift buffer, pending, lastRemote)
     // so re-simulation replays identical local inputs.
@@ -950,6 +995,12 @@ void Rollback_RestoreSnapshot(int32_t frame)
     // freed between save and restore.
     Rollback_ClearStalePointers();
 
+    // Zero sGameEffect slot tables so stale effect object references
+    // don't cause crashes or visual corruption when the game tries to
+    // update effect animation positions.  Fresh effects will be allocated
+    // into clean slots on the next game tick.
+    //Rollback_ClearGameEffectSlots();
+
     HookLog("Rollback: restored frame %d with %d regions, total size %zu bytes\n", frame, slot.regionCount, offset);
 }
 
@@ -991,6 +1042,16 @@ void Rollback_ReSimulate(int32_t startFrame, int32_t endFrame)
     // 1. Rewind to the starting frame boundary
     Rollback_RestoreSnapshot(startFrame);
 
+    // [EXPERIMENTAL] mJobThreadNumInit=1 — see mvc3/rollback R3-SIMLOOP
+    // uint64_t sMain_job = *(uint64_t*)_addr(PTR_SMAIN);
+    // uint32_t saved_job_thread_num_init = 0;
+    // uint32_t* pJobThreadNumInit = nullptr;
+    // if (sMain_job) {
+    //     pJobThreadNumInit = (uint32_t*)(sMain_job + 0xA4); // mJobThreadNumInit at offset 164
+    //     saved_job_thread_num_init = *pJobThreadNumInit;
+    //     *pJobThreadNumInit = 1;
+    // }
+
     // 2. Step forward (no snapshot saves — the re-simmed frames are now
     //    correct, and the next normal-frame save at curFrame covers us).
     //    sMain__move is hooked (skip frame-pacing) and the render function
@@ -1002,6 +1063,7 @@ void Rollback_ReSimulate(int32_t startFrame, int32_t endFrame)
     //    buffer without draining packets or sending outbound data.
     for (int32_t f = startFrame; f < endFrame; ++f) {
         g_resimulateCurrentFrame = f;
+        // [EXPERIMENTAL] g_virtual_qpc = g_qpc_history[f % ROLLBACK_WINDOW];
         // Re-resolve remote input so re-sim uses the latest received data,
         // not the stale prediction that triggered the conflict.
         Controller_ResolveRemoteInput(f);
@@ -1015,6 +1077,11 @@ void Rollback_ReSimulate(int32_t startFrame, int32_t endFrame)
     // the original timeline, preventing the remote side from seeing spurious
     // conflicts on already-reconciled frames.
     Controller_RestoreInputHistory();
+
+    // [EXPERIMENTAL] mJobThreadNumInit restore — see mvc3/rollback R3-SIMLOOP
+    // if (pJobThreadNumInit) {
+    //     *pJobThreadNumInit = saved_job_thread_num_init;
+    // }
 
     // 3. Resynchronize performance counter state inside sMain to match
     //    current system time, preventing the game loop from seeing a
@@ -1080,6 +1147,37 @@ static void Rollback_ClearStalePointers()
     }
 
     HookLog("Rollback: cleared character slot arrays after restore\n");
+}
+
+// ===========================================================================
+// Post-Restore Cleanup — clear sGameEffect slot tables after snapshot restore
+//
+// The sGameEffect manager maintains two slot tables with MtObject* weak
+// references to active effect objects:
+//   slotTable10 — 10 entries × 8 bytes at +0x40  (80 bytes)
+//   slotTable64 — 64 entries × 16 bytes at +0x1948 (1024 bytes)
+//
+// These entries point to heap-allocated effect nodes that were NOT saved in
+// the snapshot (sUnit effect category traversal is skipped due to pool
+// allocator corruption).  After restore any stale pointers in these tables
+// would be dereferenced by the game's effect update path, causing crashes
+// or visual corruption (broken animation positions).  Zeroing them lets the
+// game allocate fresh effect slots on the next tick.
+// ===========================================================================
+static void Rollback_ClearGameEffectSlots()
+{
+    uint64_t sGameEffect = *(uint64_t*)_addr(PTR_SGAMEEFFECT);
+    if (!sGameEffect) return;
+
+    static constexpr size_t SLOT_TABLE10_OFFSET = 0x40;
+    static constexpr size_t SLOT_TABLE10_SIZE   = 80;   // 10 × 8 bytes
+    static constexpr size_t SLOT_TABLE64_OFFSET = 0x1948;
+    static constexpr size_t SLOT_TABLE64_SIZE   = 1024; // 64 × 16 bytes
+
+    memset((void*)(sGameEffect + SLOT_TABLE10_OFFSET), 0, SLOT_TABLE10_SIZE);
+    memset((void*)(sGameEffect + SLOT_TABLE64_OFFSET), 0, SLOT_TABLE64_SIZE);
+
+    HookLog("Rollback: cleared sGameEffect slot tables after restore\n");
 }
 
 void Rollback_FreeSnapshots()
@@ -1175,6 +1273,12 @@ static void __fastcall hkMvc3Main_move(uint64_t param_1)
         int step = aNextBattle ? *(int*)(aNextBattle + 0xD8) : 0;
         if (step >= 2)
         {
+            // Clear post-resim boundary flag at start of each frame.
+            // This ensures the flag is active for exactly one live tick
+            // (the one immediately after Rollback_ReSimulate returns).
+            if (!g_isResimulating)
+                g_postResimFrame = -1;
+
             int32_t curFrame = (int32_t)Controller_GetNetFrameCount();
 
             // Save snapshot for the current frame BEFORE the game tick
@@ -1188,9 +1292,21 @@ static void __fastcall hkMvc3Main_move(uint64_t param_1)
                 g_rollbackReqStart = -1;
                 g_rollbackReqEnd   = -1;
                 Rollback_ReSimulate(rs, re);
+
+                // Re-resolve the current frame's remote input — packets that
+                // arrived during the resim may now provide real data where we
+                // only had a prediction before.
+                Controller_ResolveRemoteInput(curFrame);
+                HookLog("Rollback: re-resolved remote input for frame %d\n", curFrame);
+
                 // After re-sim, re-save the current frame's snapshot so it
                 // reflects the corrected state at start of curFrame.
                 Rollback_SaveSnapshot(curFrame);
+
+                // Flag the first post-resim live tick for diagnostic logging.
+                g_postResimFrame = curFrame;
+                HookLog("Rollback: resim complete, live tick frame=%d (post-resim boundary)\n",
+                        curFrame);
             }
         }
     }
@@ -1297,6 +1413,24 @@ static void __fastcall hkMain_move(uint64_t param_1)
 // ===========================================================================
 void Rollback_InitHooks()
 {
+    // [EXPERIMENTAL] QPC hook install — see mvc3/rollback W3-C2
+    // g_main_thread_id = GetCurrentThreadId();
+    // {
+    //     HMODULE hKernel = GetModuleHandleA("kernel32.dll");
+    //     void* qpc_target = (void*)GetProcAddress(hKernel, "QueryPerformanceCounter");
+    //     if (qpc_target) {
+    //         MH_STATUS sq = MH_CreateHook(qpc_target, (LPVOID)&hooked_qpc, (void**)&g_real_qpc);
+    //         if (sq == MH_OK) {
+    //             MH_EnableHook(qpc_target);
+    //             HookLog("Rollback: QPC hook installed (main_tid=%lu)\n", g_main_thread_id);
+    //         } else {
+    //             HookLog("Rollback: WARN — QPC hook failed (%d), resim won't be deterministic\n", sq);
+    //         }
+    //     } else {
+    //         HookLog("Rollback: WARN — could not resolve QueryPerformanceCounter\n");
+    //     }
+    // }
+
     MH_STATUS s = MH_CreateHook(
         (LPVOID)_addr(FN_SMVC3MAIN_MOVE),
         (LPVOID)&hkMvc3Main_move,

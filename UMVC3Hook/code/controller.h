@@ -115,3 +115,10 @@ extern "C" bool     Controller_IsRollbackEnabled();
 // Runtime delay adjustment — called from framestepper UI or netplay inbound
 extern "C" void     Controller_SetDelayFrames(int32_t delay);
 extern "C" void     Controller_SetRollbackFrames(int32_t n);
+
+// Desync detection flags — set by controller when checksums diverge.
+extern bool         g_desyncDetected;   // first-time alert (triggers pause)
+extern bool         g_desyncSeen;       // user dismissed with P; suppresses re-pause
+extern int32_t      g_desyncFrame;
+extern uint32_t     g_desyncLocalCS;
+extern uint32_t     g_desyncRemoteCS;
