@@ -55,6 +55,7 @@ struct InputPacket {
 struct DelayPacket {
     uint32_t type;               // PACKET_DELAY
     int32_t  delay;              // delay frame count
+    int32_t  rollbackFrames;     // rollback frame count (both sides stay in sync)
 };
 #pragma pack(pop)
 
@@ -90,8 +91,15 @@ void Netplay_Shutdown();
 // Send a delay-control value to the remote peer.
 void Netplay_SendDelay(int32_t delay);
 
+// Send a rollback-frame control value to the remote peer.
+void Netplay_SendRollback(int32_t rollbackFrames);
+
 // Retrieve the last delay value received from the remote peer.  Returns true
 // if a new value was available (it is consumed by this call).
 bool Netplay_GetInboundDelay(int32_t& outDelay);
+
+// Retrieve the last rollback value received from the remote peer.  Returns true
+// if a new value was available (it is consumed by this call).
+bool Netplay_GetInboundRollback(int32_t& outRollback);
 
 // --- Desync-check: checksum is piggybacked on InputPacket (Slippi-style) ---

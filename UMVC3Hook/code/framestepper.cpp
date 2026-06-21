@@ -35,7 +35,9 @@ extern void HookLog(const char* fmt, ...);
 // Netplay state queries from netplay.cpp
 extern bool Netplay_HasRemoteInput();
 extern bool Netplay_GetInboundDelay(int32_t& outDelay);
+extern bool Netplay_GetInboundRollback(int32_t& outRollback);
 extern void Netplay_SendDelay(int32_t delay);
+extern void Netplay_SendRollback(int32_t rollbackFrames);
 
 // Controller setters from controller.cpp
 extern "C" void Controller_SetDelayFrames(int32_t delay);
@@ -279,13 +281,19 @@ static void __fastcall HookedMove(void* sMvc3Main)
     {
         Controller_OnFrameStart();
 
-        // Drain any inbound delay-control packets — keeps both sides in sync
-        // when the user adjusts the delay on either machine.
+        // Drain any inbound delay/rollback-control packets — keeps both sides
+        // in sync when the user adjusts either value on either machine.
         int32_t remoteDelay = -1;
         while (Netplay_GetInboundDelay(remoteDelay))
         {
             if (remoteDelay >= 1 && remoteDelay <= 15)
                 Controller_SetDelayFrames(remoteDelay);
+        }
+        int32_t remoteRollback = -1;
+        while (Netplay_GetInboundRollback(remoteRollback))
+        {
+            if (remoteRollback >= 0 && remoteRollback <= 16)
+                Controller_SetRollbackFrames(remoteRollback);
         }
     }
 
@@ -741,12 +749,13 @@ void FrameStepper_Draw()
                 Netplay_SendDelay(curDelay);
             }
 
-            // Rollback adjustment buttons
+            // Rollback adjustment buttons — also syncs both sides via delay packet.
             if (ImGui::SmallButton("[R-]"))
             {
                 curRollback = Controller_GetRollbackFrames() - 1;
                 if (curRollback < 0) curRollback = 0;
                 Controller_SetRollbackFrames(curRollback);
+                Netplay_SendRollback(curRollback);
             }
             ImGui::SameLine();
             if (ImGui::SmallButton("[R+]"))
@@ -754,6 +763,7 @@ void FrameStepper_Draw()
                 curRollback = Controller_GetRollbackFrames() + 1;
                 if (curRollback > 16) curRollback = 16;
                 Controller_SetRollbackFrames(curRollback);
+                Netplay_SendRollback(curRollback);
             }
         }
 
