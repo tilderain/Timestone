@@ -247,7 +247,7 @@ static int32_t   g_desyncChecked[RING_SIZE];   // frame number when checksum was
 static bool      g_desyncMismatch[RING_SIZE];  // true if that frame exceeded threshold
 
 static constexpr uint32_t DESYNC_THRESHOLD         = 100;
-static constexpr int32_t  DESYNC_SKIP_FRAMES       = 180;
+static constexpr int32_t  DESYNC_SKIP_FRAMES       = 0;
 static constexpr int32_t  DESYNC_CONSECUTIVE_MIN   = 5;
 
 // Team + node traversal constants (mirrors rollback.cpp BuildRegions)
