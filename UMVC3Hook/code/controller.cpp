@@ -248,7 +248,7 @@ static bool      g_desyncMismatch[RING_SIZE];  // true if that frame exceeded th
 
 static constexpr uint32_t DESYNC_THRESHOLD         = 100;
 static constexpr int32_t  DESYNC_SKIP_FRAMES       = 0;
-static constexpr int32_t  DESYNC_CONSECUTIVE_MIN   = 5;
+static constexpr int32_t  DESYNC_CONSECUTIVE_MIN   = 16;
 
 // ---------------------------------------------------------------------------
 // Timesync (Slippi-style) — QPC-based frame timing
