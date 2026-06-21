@@ -240,10 +240,15 @@ bool     g_desyncSeen         = false;
 int32_t  g_desyncFrame        = -1;
 uint32_t g_desyncLocalCS      = 0;
 uint32_t g_desyncRemoteCS     = 0;
-int      g_desyncConsecutive  = 0;
 
 static uint32_t  g_localChecksum[RING_SIZE];
 static uint32_t  g_remoteChecksum[RING_SIZE];
+static int32_t   g_desyncChecked[RING_SIZE];   // frame number when checksum was compared, -1 = unchecked
+static bool      g_desyncMismatch[RING_SIZE];  // true if that frame exceeded threshold
+
+static constexpr uint32_t DESYNC_THRESHOLD         = 100;
+static constexpr int32_t  DESYNC_SKIP_FRAMES       = 180;
+static constexpr int32_t  DESYNC_CONSECUTIVE_MIN   = 5;
 
 // Team + node traversal constants (mirrors rollback.cpp BuildRegions)
 static constexpr uintptr_t TEAM0_OFFSET          = 0x40;
@@ -282,14 +287,15 @@ extern "C" void Controller_ResetBuffers()
     g_localPending    = 0;
     g_lastRemoteFrame = -1;
     g_lastRemoteInput = 0;
-    g_desyncDetected    = false;
-    g_desyncSeen        = false;
-    g_desyncFrame       = -1;
-    g_desyncLocalCS     = 0;
-    g_desyncRemoteCS    = 0;
-    g_desyncConsecutive = 0;
-    std::memset(g_localChecksum,  0, sizeof(g_localChecksum));
-    std::memset(g_remoteChecksum, 0, sizeof(g_remoteChecksum));
+    g_desyncDetected   = false;
+    g_desyncSeen       = false;
+    g_desyncFrame      = -1;
+    g_desyncLocalCS    = 0;
+    g_desyncRemoteCS   = 0;
+    std::memset(g_localChecksum,    0, sizeof(g_localChecksum));
+    std::memset(g_remoteChecksum,   0, sizeof(g_remoteChecksum));
+    std::memset(g_desyncChecked,  0xFF, sizeof(g_desyncChecked));   // -1 per int32_t
+    std::memset(g_desyncMismatch, 0,    sizeof(g_desyncMismatch));
 }
 
 // ---------------------------------------------------------------------------
@@ -592,6 +598,32 @@ extern "C" void Controller_OnFrameStart()
                 }
             }
         }
+
+        // Piggybacked checksum (Slippi-style): extract and compare.
+        if (g_netFrameCount >= DESYNC_SKIP_FRAMES)
+        {
+            int32_t csFrame = (int32_t)inPkt.checksum_frame;
+            if (csFrame >= 0)
+            {
+                uint32_t ridx = (uint32_t)csFrame % RING_SIZE;
+                g_remoteChecksum[ridx] = inPkt.checksum;
+                if (g_localChecksum[ridx] != 0 && csFrame < g_netFrameCount)
+                {
+                    uint32_t diff = g_localChecksum[ridx] > inPkt.checksum
+                                    ? g_localChecksum[ridx] - inPkt.checksum
+                                    : inPkt.checksum - g_localChecksum[ridx];
+                    g_desyncChecked[ridx]  = csFrame;
+                    g_desyncMismatch[ridx] = (diff > DESYNC_THRESHOLD);
+                    if (diff > DESYNC_THRESHOLD)
+                    {
+                        if (!g_desyncSeen && !g_desyncDetected)
+                            HookLog("DESYNC MISMATCH at frame %d: diff=%u local=0x%08X remote=0x%08X\n",
+                                    csFrame, diff, g_localChecksum[ridx], inPkt.checksum);
+                    }
+                }
+        }
+    }
+
     }
 
     if (g_rollbackFrames > 0)
@@ -633,6 +665,27 @@ extern "C" void Controller_OnFrameStart()
                                 {
                                     g_lastRemoteFrame = targetFrame;
                                     g_lastRemoteInput = waitPkt.inputs[i];
+                                }
+                            }
+                        }
+
+                        int32_t wcsFrame = (int32_t)waitPkt.checksum_frame;
+                        if (wcsFrame >= 0)
+                        {
+                            uint32_t wridx = (uint32_t)wcsFrame % RING_SIZE;
+                            g_remoteChecksum[wridx] = waitPkt.checksum;
+                            if (g_localChecksum[wridx] != 0 && wcsFrame < g_netFrameCount)
+                            {
+                                uint32_t diff = g_localChecksum[wridx] > waitPkt.checksum
+                                                ? g_localChecksum[wridx] - waitPkt.checksum
+                                                : waitPkt.checksum - g_localChecksum[wridx];
+                                g_desyncChecked[wridx]  = wcsFrame;
+                                g_desyncMismatch[wridx] = (diff > DESYNC_THRESHOLD);
+                                if (diff > DESYNC_THRESHOLD)
+                                {
+                                    if (!g_desyncSeen && !g_desyncDetected)
+                                        HookLog("DESYNC MISMATCH at frame %d: diff=%u local=0x%08X remote=0x%08X\n",
+                                                wcsFrame, diff, g_localChecksum[wridx], waitPkt.checksum);
                                 }
                             }
                         }
@@ -711,14 +764,11 @@ extern "C" void Controller_OnFrameStart()
     Controller_ResolveRemoteInput(g_netFrameCount);
 }
 
-// Maximum allowed absolute diff between local and remote checksums.
-// Sub-integer position noise between two instances on the same machine
-// (especially from hidden/KO'd characters) produces tiny deltas ≤ ~20.
-// Real teleport-level desyncs produce diffs in the thousands+.
-static constexpr uint32_t DESYNC_THRESHOLD         = 100;
-static constexpr int32_t  DESYNC_SKIP_FRAMES       = 180; // skip early frames while char init/intro settles
-static constexpr int32_t  DESYNC_CONSECUTIVE_MIN   = 10;   // require this many consecutive mismatches before alerting
-
+// ---------------------------------------------------------------------------
+// Desync checksum — sum of quantized positions + actionId across all
+// characters.  Uses addition (order-independent) and integer quantization
+// to tolerate tiny frame-timing float differences that are not visible
+// desyncs but would cause order-sensitive XOR to false-positive.
 // ---------------------------------------------------------------------------
 // Desync checksum — sum of quantized positions + actionId across all
 // characters.  Uses addition (order-independent) and integer quantization
@@ -776,53 +826,60 @@ extern "C" void Controller_OnFrameEnd()
     //     start_frame = (currentFrame + delay) - MAX_HISTORY + 1
     //     inputs[0]                    → frame start_frame          (oldest)
     //     inputs[MAX_HISTORY-1]        → frame start_frame+MAX_HISTORY-1 (newest)
+    //     checksum is piggybacked (Slippi-style) for desync detection.
     InputPacket outPkt = {};
     outPkt.start_frame = (uint32_t)(g_netFrameCount + g_delayFrames
                                      - MAX_HISTORY + 1);
     for (size_t i = 0; i < MAX_HISTORY; i++)
         outPkt.inputs[i] = g_oldInputs[i];
 
-    Netplay_SendPacket(outPkt);
-
-    // --- Desync detection: compute checksum, send, and compare. ---
     if (!g_isResimulating && g_netFrameCount >= DESYNC_SKIP_FRAMES)
     {
         uint32_t cs = ComputeChecksum();
         uint32_t idx = (uint32_t)g_netFrameCount % RING_SIZE;
         g_localChecksum[idx] = cs;
+        outPkt.checksum_frame = (uint32_t)g_netFrameCount;
+        outPkt.checksum       = cs;
+    }
 
-        Netplay_SendDesyncCheck((uint32_t)g_netFrameCount, cs);
+    Netplay_SendPacket(outPkt);
 
-        // Drain any received desync-check packets and compare.
-        uint32_t remFrame, remCs;
-        while (Netplay_GetInboundDesyncCheck(remFrame, remCs))
+    // --- Desync comparison: scan backward from newest remote checksum. ---
+    if (!g_isResimulating && g_netFrameCount >= DESYNC_SKIP_FRAMES)
+    {
+        int32_t newestChecked = -1;
+        for (int i = 0; i < RING_SIZE; i++)
         {
-            uint32_t ridx = remFrame % RING_SIZE;
-            g_remoteChecksum[ridx] = remCs;
-            if (g_localChecksum[ridx] != 0 && (int32_t)remFrame < g_netFrameCount)
+            if (g_desyncChecked[i] > newestChecked)
+                newestChecked = g_desyncChecked[i];
+        }
+
+        if (newestChecked >= 0)
+        {
+            int consecutive = 0;
+            for (int32_t f = newestChecked; f >= 0 && consecutive < DESYNC_CONSECUTIVE_MIN; f--)
             {
-                uint32_t diff = g_localChecksum[ridx] > remCs
-                                ? g_localChecksum[ridx] - remCs
-                                : remCs - g_localChecksum[ridx];
-                if (diff > DESYNC_THRESHOLD)
+                int32_t idx = f % RING_SIZE;
+                if (g_desyncChecked[idx] == f)
                 {
-                    g_desyncConsecutive++;
-                    if (g_desyncConsecutive >= DESYNC_CONSECUTIVE_MIN)
-                    {
-                        if (!g_desyncSeen)
-                        {
-                            g_desyncDetected = true;
-                            g_desyncFrame    = (int32_t)remFrame;
-                            g_desyncLocalCS  = g_localChecksum[ridx];
-                            g_desyncRemoteCS = remCs;
-                        }
-                    }
-                    HookLog("DESYNC MISMATCH at frame %d: diff=%u local=0x%08X remote=0x%08X consecutive=%d\n",
-                            remFrame, diff, g_localChecksum[ridx], remCs, g_desyncConsecutive);
+                    if (g_desyncMismatch[idx])
+                        consecutive++;
+                    else
+                        break;  // matched within threshold — streak broken
                 }
-                else
+                // else: no checksum for this frame (lost packet) — skip it,
+                // continue scanning older frames to find a longer streak
+            }
+            if (consecutive >= DESYNC_CONSECUTIVE_MIN)
+            {
+                if (!g_desyncSeen && !g_desyncDetected)
                 {
-                    g_desyncConsecutive = 0;
+                    g_desyncDetected = true;
+                    g_desyncFrame    = newestChecked;
+                    g_desyncLocalCS  = g_localChecksum[newestChecked % RING_SIZE];
+                    g_desyncRemoteCS = g_remoteChecksum[newestChecked % RING_SIZE];
+                    HookLog("DESYNC TRIGGER at frame %d: %d consecutive mismatches\n",
+                            newestChecked, consecutive);
                 }
             }
         }

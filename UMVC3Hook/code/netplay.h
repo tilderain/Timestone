@@ -35,9 +35,8 @@
 // Packet type identifiers (first uint32_t of every ENet payload).
 // ---------------------------------------------------------------------------
 enum PacketType : uint32_t {
-    PACKET_INPUT        = 0,  // InputPacket
-    PACKET_DESYNC_CHECK = 1,  // DesyncCheckPacket
-    PACKET_DELAY        = 2,  // DelayPacket
+    PACKET_INPUT = 0,  // InputPacket
+    PACKET_DELAY = 1,  // DelayPacket
 };
 
 #pragma pack(push, 1)
@@ -46,13 +45,9 @@ constexpr size_t NET_HISTORY_SIZE = 16;
 struct InputPacket {
     uint32_t type;               // PACKET_INPUT
     uint32_t start_frame;        // inputs[0] corresponds to this frame
+    uint32_t checksum_frame;     // game frame this checksum is for (past frame)
+    uint32_t checksum;           // checksum of game state at checksum_frame
     uint32_t inputs[NET_HISTORY_SIZE];
-};
-
-struct DesyncCheckPacket {
-    uint32_t type;               // PACKET_DESYNC_CHECK
-    uint32_t frame;              // game frame this checksum is for
-    uint32_t checksum;           // XOR of all character positions/states
 };
 
 struct DelayPacket {
@@ -97,11 +92,4 @@ void Netplay_SendDelay(int32_t delay);
 // if a new value was available (it is consumed by this call).
 bool Netplay_GetInboundDelay(int32_t& outDelay);
 
-// --- Desync-check helpers ---
-
-// Send a desync checksum for the given frame.
-void Netplay_SendDesyncCheck(uint32_t frame, uint32_t checksum);
-
-// Retrieve the most recent inbound desync-check packet.  Returns true if
-// data was available (the packet is consumed by this call).
-bool Netplay_GetInboundDesyncCheck(uint32_t& outFrame, uint32_t& outChecksum);
+// --- Desync-check: checksum is piggybacked on InputPacket (Slippi-style) ---

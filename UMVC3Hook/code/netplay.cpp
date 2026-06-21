@@ -24,8 +24,7 @@ static std::vector<InputPacket> g_inboundQueue;
 static CRITICAL_SECTION         g_inboundCS;
 
 // Desync-check packet queue (separate from input packets).
-static std::vector<DesyncCheckPacket> g_inboundDesyncQueue;
-static CRITICAL_SECTION               g_inboundDesyncCS;
+
 
 static HANDLE               g_serviceThread  = nullptr;
 static uint32_t             g_recvCount = 0;
@@ -38,11 +37,6 @@ static bool                 g_outboundDelayNew = false;
 static int32_t              g_inboundDelay     = -1;
 static bool                 g_inboundDelayNew  = false;
 static CRITICAL_SECTION     g_delayCS;
-
-// Desync-check outbound packet (separate from input to avoid conflicts).
-static DesyncCheckPacket   g_outboundDesyncPkt   = {};
-static bool                g_outboundDesyncNew   = false;
-static CRITICAL_SECTION    g_outboundDesyncCS;
 
 // One-time critical section initialization flag
 static bool                 g_csInitialized  = false;
@@ -131,30 +125,6 @@ static DWORD WINAPI Netplay_ServiceThread(LPVOID)
             enet_host_flush(g_host);
         }
 
-        // --- Send desync-check packet ---
-        bool hasNewDesync = false;
-        DesyncCheckPacket outDesyncPkt = {};
-        {
-            ScopedCS lock(g_outboundDesyncCS);
-            if (g_outboundDesyncNew)
-            {
-                outDesyncPkt = g_outboundDesyncPkt;
-                hasNewDesync = true;
-                g_outboundDesyncNew = false;
-            }
-        }
-
-        if (hasNewDesync && g_peer)
-        {
-            ENetPacket* packet = enet_packet_create(
-                &outDesyncPkt, sizeof(DesyncCheckPacket), ENET_PACKET_FLAG_UNSEQUENCED
-            );
-            if (enet_peer_send(g_peer, 0, packet) != 0) {
-                enet_packet_destroy(packet);
-            }
-            enet_host_flush(g_host);
-        }
-
         // --- Service the host ---
         if (g_host)
         {
@@ -177,17 +147,6 @@ static DWORD WINAPI Netplay_ServiceThread(LPVOID)
                                         g_inboundQueue.push_back(*inPkt);
                                     }
                                     g_recvCount++;
-                                }
-                                break;
-
-                            case PACKET_DESYNC_CHECK:
-                                if (event.packet->dataLength >= sizeof(DesyncCheckPacket))
-                                {
-                                    const DesyncCheckPacket* dcp = (const DesyncCheckPacket*)event.packet->data;
-                                    {
-                                        ScopedCS lock(g_inboundDesyncCS);
-                                        g_inboundDesyncQueue.push_back(*dcp);
-                                    }
                                 }
                                 break;
 
@@ -246,23 +205,9 @@ void Netplay_Init(ENetHost* host, ENetPeer* peer)
     if (!g_csInitialized)
     {
         InitializeCriticalSection(&g_outboundCS);
-        InitializeCriticalSection(&g_outboundDesyncCS);
         InitializeCriticalSection(&g_inboundCS);
-        InitializeCriticalSection(&g_inboundDesyncCS);
         InitializeCriticalSection(&g_delayCS);
-        g_csInitialized = true;
-    }
 
-    {
-        ScopedCS lock1(g_outboundCS);
-        ScopedCS lock2(g_outboundDesyncCS);
-        ScopedCS lock3(g_inboundCS);
-        ScopedCS lock4(g_inboundDesyncCS);
-        ScopedCS lock5(g_delayCS);
-        g_outboundNew = false;
-        g_outboundDesyncNew = false;
-        g_inboundQueue.clear();
-        g_inboundDesyncQueue.clear();
         g_outboundDelayNew = false;
         g_inboundDelayNew = false;
         std::memset(&g_outboundPacket, 0, sizeof(InputPacket));
@@ -353,32 +298,6 @@ void Netplay_SendInput(uint32_t rawInput)
     g_outboundNew = true;
 }
 
-void Netplay_SendDesyncCheck(uint32_t frame, uint32_t checksum)
-{
-    DesyncCheckPacket pkt;
-    pkt.type     = PACKET_DESYNC_CHECK;
-    pkt.frame    = frame;
-    pkt.checksum = checksum;
-
-    ScopedCS lock(g_outboundDesyncCS);
-    g_outboundDesyncPkt = pkt;
-    g_outboundDesyncNew = true;
-}
-
-bool Netplay_GetInboundDesyncCheck(uint32_t& outFrame, uint32_t& outChecksum)
-{
-    ScopedCS lock(g_inboundDesyncCS);
-    if (!g_inboundDesyncQueue.empty())
-    {
-        DesyncCheckPacket pkt = g_inboundDesyncQueue.front();
-        g_inboundDesyncQueue.erase(g_inboundDesyncQueue.begin());
-        outFrame    = pkt.frame;
-        outChecksum = pkt.checksum;
-        return true;
-    }
-    return false;
-}
-
 bool Netplay_HasRemoteInput()
 {
     ScopedCS lock(g_inboundCS);
@@ -444,9 +363,9 @@ void Netplay_Shutdown()
     if (g_csInitialized)
     {
         DeleteCriticalSection(&g_outboundCS);
-        DeleteCriticalSection(&g_outboundDesyncCS);
+
         DeleteCriticalSection(&g_inboundCS);
-        DeleteCriticalSection(&g_inboundDesyncCS);
+
         DeleteCriticalSection(&g_delayCS);
         g_csInitialized = false;
     }
