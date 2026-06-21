@@ -112,6 +112,10 @@ extern "C" int32_t  Controller_GetLastRemoteFrame();
 extern "C" int32_t  Controller_GetRollbackFrames();
 extern "C" bool     Controller_IsRollbackEnabled();
 
+// Timesync info for overlay display
+extern "C" int64_t  Controller_GetTimesyncAdvantage();
+extern "C" uint64_t Controller_GetAvgRttUs();
+
 // Runtime delay adjustment — called from framestepper UI or netplay inbound
 extern "C" void     Controller_SetDelayFrames(int32_t delay);
 extern "C" void     Controller_SetRollbackFrames(int32_t n);
@@ -122,3 +126,9 @@ extern bool         g_desyncSeen;       // user dismissed with P; suppresses re-
 extern int32_t      g_desyncFrame;
 extern uint32_t     g_desyncLocalCS;
 extern uint32_t     g_desyncRemoteCS;
+
+// Timesync (Slippi-style) — frame advantage via QPC timestamps
+extern uint64_t     g_lastRemoteTimestampUs;  // timestamp_us from peer's most recent packet
+extern uint64_t     g_avgRttUs;               // exponential-moving-average round-trip time (us)
+extern int64_t      g_clockOffsetUs;          // estimated peer clock minus local clock (us)
+extern int64_t      g_timesyncAdvantage;      // smoothed diff: local_QPC − remote_QPC (us); positive = we're behind

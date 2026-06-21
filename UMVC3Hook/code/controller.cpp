@@ -250,6 +250,29 @@ static constexpr uint32_t DESYNC_THRESHOLD         = 100;
 static constexpr int32_t  DESYNC_SKIP_FRAMES       = 0;
 static constexpr int32_t  DESYNC_CONSECUTIVE_MIN   = 5;
 
+// ---------------------------------------------------------------------------
+// Timesync (Slippi-style) — QPC-based frame timing
+// ---------------------------------------------------------------------------
+uint64_t     g_lastRemoteTimestampUs  = 0;
+uint64_t     g_avgRttUs              = 50000;   // start with 50ms default
+int64_t      g_clockOffsetUs         = 0;
+int64_t      g_timesyncAdvantage     = 0;
+
+static uint64_t g_localFrameQPC[RING_SIZE];       // QPC when each local frame was processed
+static int32_t  g_localFrameQPC_Frame[RING_SIZE]; // frame number for each QPC entry (-1 = unused)
+static uint64_t g_lastSendQPC = 0;                // QPC when we last sent a packet
+
+// Helper: current time in microseconds (QPC-based)
+static inline uint64_t GetUs()
+{
+    static LARGE_INTEGER freq = {};
+    if (freq.QuadPart == 0)
+        QueryPerformanceFrequency(&freq);
+    LARGE_INTEGER qpc;
+    QueryPerformanceCounter(&qpc);
+    return (uint64_t)((qpc.QuadPart * 1000000LL) / freq.QuadPart);
+}
+
 // Team + node traversal constants (mirrors rollback.cpp BuildRegions)
 static constexpr uintptr_t TEAM0_OFFSET          = 0x40;
 static constexpr uintptr_t TEAM1_OFFSET          = 0x300;
@@ -296,6 +319,13 @@ extern "C" void Controller_ResetBuffers()
     std::memset(g_remoteChecksum,   0, sizeof(g_remoteChecksum));
     std::memset(g_desyncChecked,  0xFF, sizeof(g_desyncChecked));   // -1 per int32_t
     std::memset(g_desyncMismatch, 0,    sizeof(g_desyncMismatch));
+    g_lastRemoteTimestampUs = 0;
+    g_avgRttUs              = 50000;
+    g_clockOffsetUs         = 0;
+    g_timesyncAdvantage     = 0;
+    std::memset(g_localFrameQPC, 0, sizeof(g_localFrameQPC));
+    std::memset(g_localFrameQPC_Frame, -1, sizeof(g_localFrameQPC_Frame));
+    g_lastSendQPC = 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -305,6 +335,8 @@ extern "C" int32_t Controller_GetDelayFrames()      { return g_delayFrames; }
 extern "C" int32_t Controller_GetNetFrameCount()    { return GetGameFrameCount(); }
 extern "C" int32_t Controller_GetLastRemoteFrame()  { return g_lastRemoteFrame; }
 extern "C" int32_t Controller_GetRollbackFrames()   { return g_rollbackFrames; }
+extern "C" int64_t  Controller_GetTimesyncAdvantage() { return g_timesyncAdvantage; }
+extern "C" uint64_t Controller_GetAvgRttUs()          { return g_avgRttUs; }
 extern "C" bool    Controller_IsRollbackEnabled()   { return g_rollbackFrames > 0; }
 
 extern "C" void Controller_SetRollbackFrames(int32_t n)
@@ -591,7 +623,10 @@ extern "C" void Controller_OnFrameStart()
                 g_confirmedFrame[(uint32_t)targetFrame % RING_SIZE] = targetFrame;
 
                 // Track the latest known remote frame
-                if (targetFrame > g_lastRemoteFrame)
+                // Guard: seed packet (timestamp_us == 0) still confirms frames
+                // to break the deadlock, but must NOT inflate g_lastRemoteFrame
+                // or real packets get discarded by the out-of-order check.
+                if (targetFrame > g_lastRemoteFrame && inPkt.timestamp_us != 0)
                 {
                     g_lastRemoteFrame = targetFrame;
                     g_lastRemoteInput = inPkt.inputs[i];
@@ -621,9 +656,52 @@ extern "C" void Controller_OnFrameStart()
                                     csFrame, diff, g_localChecksum[ridx], inPkt.checksum);
                     }
                 }
+            }
         }
-    }
 
+        // --- Timesync: RTT, clock offset, and frame advantage ---
+        uint64_t now = GetUs();
+        uint64_t ts = inPkt.timestamp_us;
+
+        // Save remote timestamp for echo in our next outbound packet
+        g_lastRemoteTimestampUs = ts;
+
+        // Skip timesync on zero-timestamp packets (e.g. the init seed packet)
+        if (ts != 0)
+        {
+            // RTT measurement: remote echoed our timestamp back
+            if (inPkt.echo_timestamp_us != 0)
+            {
+                uint64_t rtt = now - inPkt.echo_timestamp_us;
+                if (rtt >= 1000 && rtt <= 500000)
+                    g_avgRttUs = (uint64_t)(g_avgRttUs * 0.9 + rtt * 0.1);
+            }
+
+            // Clock offset: remote_timestamp - (local_recv - one_way)
+            uint64_t one_way = g_avgRttUs / 2;
+            int64_t offset_this = (int64_t)ts
+                                - ((int64_t)now - (int64_t)one_way);
+            g_clockOffsetUs = (int64_t)(g_clockOffsetUs * 0.95 + offset_this * 0.05);
+
+        // Frame timing advantage:
+        //   The sender recorded timestamp_us at its frame N (in OnFrameEnd).
+        //   Packet start_frame = N + g_delayFrames - MAX_HISTORY + 1, so
+        //   N = start_frame + MAX_HISTORY - 1 - g_delayFrames.
+        //   Look up our local QPC for the same frame N.
+
+            int32_t senderFrame = (int32_t)inPkt.start_frame + MAX_HISTORY - 1 - g_delayFrames;
+            uint32_t remoteIdx = (uint32_t)senderFrame % RING_SIZE;
+            if (g_localFrameQPC_Frame[remoteIdx] == senderFrame)
+            {
+                int64_t T_local         = (int64_t)g_localFrameQPC[remoteIdx];
+                int64_t T_remote_local  = (int64_t)inPkt.timestamp_us - g_clockOffsetUs;
+                int64_t adv_this        = T_local - T_remote_local;
+                // Filter: only update if this sample is within ±200ms of current estimate
+                if (adv_this > g_timesyncAdvantage - 200000 &&
+                    adv_this < g_timesyncAdvantage + 200000)
+                    g_timesyncAdvantage = (int64_t)(g_timesyncAdvantage * 0.9 + adv_this * 0.1);
+            }
+        }
     }
 
     if (g_rollbackFrames > 0)
@@ -762,6 +840,18 @@ extern "C" void Controller_OnFrameStart()
     //     just reads from g_usedRemoteInput (no per-character resolution logic).
     //     Must run for both rollback and delay-based paths.
     Controller_ResolveRemoteInput(g_netFrameCount);
+
+    // --- Timesync: gently slow down if we are ahead of the remote.
+    //     g_timesyncAdvantage < 0 means we processed this frame before the
+    //     remote did (in wall-clock terms) → we're ahead → add a small sleep
+    //     so both peers converge.
+    if (g_netFrameCount >= DESYNC_SKIP_FRAMES && g_lastRemoteTimestampUs != 0)
+    {
+        if (g_timesyncAdvantage < -16666)
+            Sleep(8);       // more than 1 frame ahead
+        else if (g_timesyncAdvantage < -5000)
+            Sleep(3);       // ~1/3 frame ahead
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -841,6 +931,15 @@ extern "C" void Controller_OnFrameEnd()
         outPkt.checksum_frame = (uint32_t)g_netFrameCount;
         outPkt.checksum       = cs;
     }
+
+    // Fill timesync timestamps — record local QPC at the same point in the
+    // frame cycle as the remote will when receiving this packet (symmetric).
+    uint64_t now = GetUs();
+    uint32_t qpcIdx = (uint32_t)g_netFrameCount % RING_SIZE;
+    g_localFrameQPC[qpcIdx] = now;
+    g_localFrameQPC_Frame[qpcIdx] = g_netFrameCount;
+    outPkt.timestamp_us      = now;
+    outPkt.echo_timestamp_us = g_lastRemoteTimestampUs;
 
     Netplay_SendPacket(outPkt);
 
