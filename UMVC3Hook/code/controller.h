@@ -124,6 +124,31 @@ extern "C" uint64_t Controller_GetAvgRttUs();
 extern "C" void     Controller_SetDelayFrames(int32_t delay);
 extern "C" void     Controller_SetRollbackFrames(int32_t n);
 
+// Schedule a delay change to be committed at activationFrame.
+// Both sides call this (the initiator directly, the remote via inbound delay
+// packet), guaranteeing synchronized application.
+extern "C" void     Controller_ScheduleDelayChange(int32_t delay, int32_t activationFrame);
+
+// Returns true while a previously scheduled delay change is still pending
+// (activationFrame not yet reached).  Prevents overlapping requests.
+extern "C" bool     Controller_IsDelayChangePending();
+
+// Returns true while a delay-change handshake negotiation is in flight
+// (REQ sent, ACK not yet received).  Prevents overlapping requests.
+extern "C" bool     Controller_IsNegotiationPending();
+
+// Start a delay-change negotiation (sends REQ, sets negotiation flag).
+// Does NOT schedule locally — waits for ACK.
+extern "C" void     Controller_StartDelayNegotiation(int32_t delay);
+
+// Complete a delay-change negotiation (called when ACK arrives).
+// Schedules the change for the agreed activation frame.
+extern "C" void     Controller_CompleteDelayNegotiation(int32_t delay, int32_t activationFrame);
+
+// Simulation stall counter.  Non-zero = skip oMove, only accumulate+transmit input.
+extern int32_t      g_stallFrames;
+extern "C" int32_t  Controller_GetStallFrames();
+
 // Desync detection flags — set by controller when checksums diverge.
 extern bool         g_desyncDetected;   // first-time alert (triggers pause)
 extern bool         g_desyncSeen;       // user dismissed with P; suppresses re-pause

@@ -36,14 +36,28 @@ extern void HookLog(const char* fmt, ...);
 
 // Netplay state queries from netplay.cpp
 extern bool Netplay_HasRemoteInput();
-extern bool Netplay_GetInboundDelay(int32_t& outDelay);
-extern bool Netplay_GetInboundRollback(int32_t& outRollback);
-extern void Netplay_SendDelay(int32_t delay);
+extern bool Netplay_GetInboundDelayReq(DelayChangeRequest& outReq);
+extern bool Netplay_GetInboundDelayAck(DelayChangeRequest& outAck);
+extern void Netplay_SendDelayReq(int32_t delay, int32_t rollbackFrames);
+extern void Netplay_SendDelayAck(int32_t delay, int32_t rollbackFrames, int32_t activationFrame);
 extern void Netplay_SendRollback(int32_t rollbackFrames);
+extern bool Netplay_GetInboundRollback(int32_t& outRollback);
 
 // Controller setters from controller.cpp
 extern "C" void Controller_SetDelayFrames(int32_t delay);
 extern "C" void Controller_SetRollbackFrames(int32_t n);
+extern "C" void Controller_ScheduleDelayChange(int32_t delay, int32_t activationFrame);
+extern "C" bool Controller_IsDelayChangePending();
+extern "C" bool Controller_IsNegotiationPending();
+extern "C" void Controller_StartDelayNegotiation(int32_t delay);
+extern "C" void Controller_CompleteDelayNegotiation(int32_t delay, int32_t activationFrame);
+extern "C" int32_t Controller_GetStallFrames();
+
+// Declarations from controller.cpp
+extern int32_t g_stallFrames;
+
+// Handshake margin constant (controller.cpp)
+static constexpr int32_t DELAY_HANDSHAKE_MARGIN = 30;
 
 // ---------------------------------------------------------------------------
 // Addresses (VAs, converted at runtime via _addr)
@@ -268,14 +282,36 @@ static void __fastcall HookedMove(void* sMvc3Main)
     {
         Controller_OnFrameStart();
 
-        // Drain any inbound delay/rollback-control packets — keeps both sides
-        // in sync when the user adjusts either value on either machine.
-        int32_t remoteDelay = -1;
-        while (Netplay_GetInboundDelay(remoteDelay))
+        // --- Drain inbound delay-change REQuests.
+        //     Receiver computes a safe commit frame T and sends an ACK back.
+        DelayChangeRequest req;
+        while (Netplay_GetInboundDelayReq(req))
         {
-            if (remoteDelay >= 1 && remoteDelay <= 15)
-                Controller_SetDelayFrames(remoteDelay);
+            if (req.delay >= 1 && req.delay <= 15)
+            {
+                int32_t T = Controller_GetNetFrameCount() + DELAY_HANDSHAKE_MARGIN;
+                if (T < DELAY_HANDSHAKE_MARGIN) T = DELAY_HANDSHAKE_MARGIN;
+                Controller_ScheduleDelayChange(req.delay, T);
+                Netplay_SendDelayAck(req.delay, req.rollbackFrames, T);
+                HookLog("Netplay: Delay REQ(d=%d) → ACK(T=%d)\n", req.delay, T);
+            }
         }
+
+        // --- Drain inbound delay-change ACKnowledgments.
+        //     Initiator completes the negotiation and schedules the change.
+        DelayChangeRequest ack;
+        while (Netplay_GetInboundDelayAck(ack))
+        {
+            if (ack.delay >= 1 && ack.delay <= 15 &&
+                Controller_IsNegotiationPending())
+            {
+                Controller_CompleteDelayNegotiation(ack.delay, ack.activationFrame);
+                HookLog("Netplay: Delay ACK(d=%d, T=%d) → committed\n",
+                        ack.delay, ack.activationFrame);
+            }
+        }
+
+        // --- Drain inbound rollback-only packets (applied immediately).
         int32_t remoteRollback = -1;
         while (Netplay_GetInboundRollback(remoteRollback))
         {
@@ -284,11 +320,19 @@ static void __fastcall HookedMove(void* sMvc3Main)
         }
     }
 
-    oMove(sMvc3Main);
+    // --- If a simulation stall is active (from a recent delay increase),
+    //     skip oMove but still accumulate local input and transmit packets.
+    bool stalled = (g_stallFrames > 0);
+    if (!stalled)
+    {
+        oMove(sMvc3Main);
+    }
 
     if (Netplay_IsActive())
     {
         Controller_OnFrameEnd();
+        if (stalled)
+            g_stallFrames--;
     }
 
     CaptureNetInput();
@@ -539,23 +583,31 @@ static inline bool KeyPressed(int vk, bool& prevState)
 void FrameStepper_Process()
 {
     // Netplay delay adjustment via [ (decrease) and ] (increase) keys.
-    // Works regardless of training mode so both sides can adjust mid-match.
+    // Uses the negotiated handshake: sends REQ, waits for ACK, then commits.
     static bool prevBracketL = false, prevBracketR = false;
     if (Netplay_IsActive())
     {
-        if (KeyPressed(VK_OEM_4, prevBracketL))  // [ = decrease delay
+        // Guard against overlapping negotiations and pending commits
+        if (!Controller_IsDelayChangePending() && !Controller_IsNegotiationPending())
         {
-            int32_t delay = Controller_GetDelayFrames() - 1;
-            if (delay < 1) delay = 1;
-            Controller_SetDelayFrames(delay);
-            Netplay_SendDelay(delay);
-        }
-        if (KeyPressed(VK_OEM_6, prevBracketR))  // ] = increase delay
-        {
-            int32_t delay = Controller_GetDelayFrames() + 1;
-            if (delay > 15) delay = 15;
-            Controller_SetDelayFrames(delay);
-            Netplay_SendDelay(delay);
+            if (KeyPressed(VK_OEM_4, prevBracketL))  // [ = decrease delay
+            {
+                int32_t delay = Controller_GetDelayFrames() - 1;
+                if (delay < 1) delay = 1;
+
+                Controller_StartDelayNegotiation(delay);
+                Netplay_SendDelayReq(delay, Controller_GetRollbackFrames());
+                HookLog("Netplay: Delay REQ(d=%d) sent\n", delay);
+            }
+            if (KeyPressed(VK_OEM_6, prevBracketR))  // ] = increase delay
+            {
+                int32_t delay = Controller_GetDelayFrames() + 1;
+                if (delay > 15) delay = 15;
+
+                Controller_StartDelayNegotiation(delay);
+                Netplay_SendDelayReq(delay, Controller_GetRollbackFrames());
+                HookLog("Netplay: Delay REQ(d=%d) sent\n", delay);
+            }
         }
     }
 
@@ -733,24 +785,26 @@ void FrameStepper_Draw()
                 curRollback,
                 Controller_GetLastRemoteFrame());
 
-            // Delay adjustment buttons (ImGui::SmallButton for compact sizing).
-            // Changing the delay also notifies the remote peer so both sides
-            // stay in sync and the effective input delay remains equal.
-            ImGui::SameLine();
-            if (ImGui::SmallButton("[-]"))
+            // Allow both peers to interact with the delay buttons, as long as
+            // no change or negotiation is currently pending.
+            if (!Controller_IsDelayChangePending() && !Controller_IsNegotiationPending())
             {
-                curDelay = Controller_GetDelayFrames() - 1;
-                if (curDelay < 1) curDelay = 1;
-                Controller_SetDelayFrames(curDelay);
-                Netplay_SendDelay(curDelay);
-            }
-            ImGui::SameLine();
-            if (ImGui::SmallButton("[+]"))
-            {
-                curDelay = Controller_GetDelayFrames() + 1;
-                if (curDelay > 15) curDelay = 15;
-                Controller_SetDelayFrames(curDelay);
-                Netplay_SendDelay(curDelay);
+                ImGui::SameLine();
+                if (ImGui::SmallButton("[-]"))
+                {
+                    curDelay = Controller_GetDelayFrames() - 1;
+                    if (curDelay < 1) curDelay = 1;
+                    Controller_StartDelayNegotiation(curDelay);
+                    Netplay_SendDelayReq(curDelay, Controller_GetRollbackFrames());
+                }
+                ImGui::SameLine();
+                if (ImGui::SmallButton("[+]"))
+                {
+                    curDelay = Controller_GetDelayFrames() + 1;
+                    if (curDelay > 15) curDelay = 15;
+                    Controller_StartDelayNegotiation(curDelay);
+                    Netplay_SendDelayReq(curDelay, Controller_GetRollbackFrames());
+                }
             }
 
             // Rollback adjustment buttons — also syncs both sides via delay packet.

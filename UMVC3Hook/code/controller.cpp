@@ -140,12 +140,10 @@ static uint32_t ApplySOCD(uint32_t input)
 }
 
 // ===========================================================================
-// Netplay Input Buffers  (nifi.cpp-style shift buffer + frame-indexed array)
+// Netplay Input Buffers
 //
-// g_oldInputs[] — shift buffer holding the last MAX_HISTORY frames of raw
-//   accumulated local input.  Each frame everything shifts down by one and the
-//   current accumulator is appended at the end.  Delayed local input is read
-//   from g_oldInputs[MAX_HISTORY - g_delayFrames] BEFORE the shift.
+// Both local and remote players retrieve inputs via absolute-frame-indexed
+// ring buffers, eliminating shift-buffer gaps/duplicates during delay changes.
 //
 // g_receivedInput[] — indexed by sender's absolute frame number (% RING_SIZE).
 //   Inbound packets carry MAX_HISTORY slots.  Each slot is stored at
@@ -154,8 +152,6 @@ static uint32_t ApplySOCD(uint32_t input)
 // ===========================================================================
 static constexpr int RING_SIZE      = 256;
 static constexpr int MAX_HISTORY    = NET_HISTORY_SIZE;  // 16 — matches wire format
-
-static uint32_t  g_oldInputs[MAX_HISTORY];     // local history (shift buffer)
 
 // Remote inputs indexed by local frame number (mod RING_SIZE).
 // All offsets are relative to the receiver's own frame counter.
@@ -171,6 +167,11 @@ static int32_t   g_confirmedFrame[RING_SIZE];
 // populates the history rings correctly.
 // [playerIndex][frame % RING_SIZE]
 static uint32_t  g_rawLocalInput[2][RING_SIZE];
+
+// Per-frame accumulated processed local input (OR of mHeld across team chars).
+// Indexed by absolute frame number — immune to shift-buffer gaps when delay
+// changes.  This is the "what the local player actually entered" history.
+static uint32_t  g_localAccumInput[RING_SIZE];
 
 static bool IsFrameConfirmed(int32_t frame)
 {
@@ -222,10 +223,23 @@ static LiveFrameRecord g_liveRef[2][RING_SIZE];
 // Frame counter — read from the game's own sReplay singleton each frame.
 // g_psReplay pointer   = *(uint64_t*)_addr(0x140d4d9d8)  (Ghidra confirmation)
 // Frame counter uint32 = *(sReplay + 0x54)                (INC dword [RCX+0x54] at 0x1401cefdd)
-static int32_t   g_netFrameCount   = -1;
-static int32_t   g_delayFrames     = 4;
-static int32_t   g_rollbackFrames  = 0;
-static uint32_t  g_localPending    = 0;   // accumulator, ORed across team chars
+static int32_t   g_netFrameCount           = -1;
+static int32_t   g_delayFrames             = 4;
+static int32_t   g_rollbackFrames          = 0;
+static int32_t   g_pendingDelayValue       = -1;
+static int32_t   g_pendingDelayFrame       = -1;
+
+// Handshake negotiation state (initiator only).
+static bool      g_negotiationPending      = false;
+
+// Simulation stall counter — non-zero skips oMove to fill input history
+// after a delay increase.
+int32_t          g_stallFrames             = 0;
+
+// Safe commit frame margin for delay-change handshake (frames).
+// The receiver computes T = F_B + MARGIN to guarantee both peers can
+// reach T before the change commits.
+static constexpr int32_t DELAY_HANDSHAKE_MARGIN = 30;
 
 // Tracks the latest frame for which remote input has been received.
 // Used to hold-last-value when no new input has arrived for the current frame.
@@ -253,8 +267,9 @@ static constexpr int32_t  DESYNC_CONSECUTIVE_MIN   = 30;
 // ---------------------------------------------------------------------------
 // Timesync (Slippi-style) — QPC-based frame timing
 // ---------------------------------------------------------------------------
-uint64_t     g_lastRemoteTimestampUs  = 0;
-uint64_t     g_avgRttUs              = 50000;   // start with 50ms default
+uint64_t     g_lastRemoteTimestampUs    = 0;
+static uint64_t g_lastReceivedTimestampUs = 0;
+uint64_t     g_avgRttUs                = 50000;   // start with 50ms default
 int64_t      g_clockOffsetUs         = 0;
 int64_t      g_timesyncAdvantage     = 0;
 
@@ -299,15 +314,14 @@ static int32_t GetGameFrameCount()
 // ---------------------------------------------------------------------------
 extern "C" void Controller_ResetBuffers()
 {
-    std::memset(g_oldInputs,          0, sizeof(g_oldInputs));
     std::memset(g_receivedInput,      0, sizeof(g_receivedInput));
     std::memset(g_confirmedFrame,    -1, sizeof(g_confirmedFrame));
     std::memset(g_usedRemoteInput,    0, sizeof(g_usedRemoteInput));
     std::memset(g_recordedLocalInput, 0, sizeof(g_recordedLocalInput));
     std::memset(g_rawLocalInput,      0, sizeof(g_rawLocalInput));  // 2D [2][RING_SIZE]
+    std::memset(g_localAccumInput,   0, sizeof(g_localAccumInput));
     std::memset(g_liveRef,            0, sizeof(g_liveRef));
     // g_netFrameCount is read from sReplay each frame; no reset needed.
-    g_localPending    = 0;
     g_lastRemoteFrame = -1;
     g_lastRemoteInput = 0;
     g_desyncDetected   = false;
@@ -326,6 +340,10 @@ extern "C" void Controller_ResetBuffers()
     std::memset(g_localFrameQPC, 0, sizeof(g_localFrameQPC));
     std::memset(g_localFrameQPC_Frame, -1, sizeof(g_localFrameQPC_Frame));
     g_lastSendQPC = 0;
+    g_pendingDelayValue = -1;
+    g_pendingDelayFrame = -1;
+    g_negotiationPending = false;
+    g_stallFrames = 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -357,41 +375,36 @@ extern "C" void Controller_SetRollbackFrames(int32_t n)
 }
 
 // ---------------------------------------------------------------------------
-// Controller state save/restore for rollback snapshots
+// Determine the local player index based on host/client role.
 // ---------------------------------------------------------------------------
-static uint32_t g_savedOldInputs[MAX_HISTORY];
-static uint32_t g_savedLocalPending;
+static inline uint32_t GetLocalPlayerIndex()
+{
+    return Netplay_IsHost() ? 0 : 1;
+}
 
+// ---------------------------------------------------------------------------
+// Controller state save/restore for rollback snapshots
+// g_rawLocalInput is absolute-frame-indexed and acts as a history ring,
+// which remains unaffected by timeline rewinds — these are no-ops.
+// ---------------------------------------------------------------------------
 extern "C" void Controller_SaveRollbackState()
 {
-    memcpy(g_savedOldInputs, g_oldInputs, sizeof(g_oldInputs));
-    g_savedLocalPending = g_localPending;
+    // No-op
 }
 
 extern "C" void Controller_RestoreRollbackState()
 {
-    memcpy(g_oldInputs, g_savedOldInputs, sizeof(g_oldInputs));
-    g_localPending = g_savedLocalPending;
+    // No-op
 }
-
-// Save/restore the local input shift buffer around re-sim.  The re-sim loop
-// calls SilentFrameEnd which shifts g_oldInputs with accumulated re-sim local
-// input (which is 0 during re-sim since we bypass with g_recordedLocalInput).
-// Restoring it prevents the next outbound packet from carrying a corrupted
-// timeline that would cause spurious conflicts on the remote side.
-static uint32_t g_savedInputHistory[MAX_HISTORY];
-static uint32_t g_savedLocalPendingReSim;
 
 extern "C" void Controller_SaveInputHistory()
 {
-    memcpy(g_savedInputHistory, g_oldInputs, sizeof(g_oldInputs));
-    g_savedLocalPendingReSim = g_localPending;
+    // No-op
 }
 
 extern "C" void Controller_RestoreInputHistory()
 {
-    memcpy(g_oldInputs, g_savedInputHistory, sizeof(g_oldInputs));
-    g_localPending = g_savedLocalPendingReSim;
+    // No-op
 }
 
 // Centrally resolve the remote input for a given game frame into
@@ -403,16 +416,19 @@ extern "C" void Controller_RestoreInputHistory()
 extern "C" void Controller_ResolveRemoteInput(int32_t frame)
 {
     uint32_t idx = (uint32_t)frame % RING_SIZE;
-    if (IsFrameConfirmed(frame))
+    int32_t sourceFrame = frame - g_delayFrames;
+    if (sourceFrame < 0) sourceFrame = 0;
+
+    if (IsFrameConfirmed(sourceFrame))
     {
-        g_usedRemoteInput[idx] = g_receivedInput[idx];
+        g_usedRemoteInput[idx] = g_receivedInput[(uint32_t)sourceFrame % RING_SIZE];
     }
     else
     {
-        // Predict using the latest confirmed frame's input
+        // Predict using the latest confirmed source frame's input
         uint32_t prediction = 0;
         bool found = false;
-        for (int32_t f = frame - 1; f >= 0 && f >= frame - 250; f--)
+        for (int32_t f = sourceFrame - 1; f >= 0 && f >= sourceFrame - 250; f--)
         {
             if (IsFrameConfirmed(f))
             {
@@ -441,18 +457,16 @@ extern "C" void Controller_LogReSimFrame(int32_t frame)
             IsFrameConfirmed(frame) ? g_receivedInput[idx] : 0);
 }
 
-// Silent frame-boundary helpers for re-simulation — maintain the local input
-// shift buffer without draining inbound packets or sending outbound data.
+// Silent frame-boundary helpers for re-simulation — no-ops because local input
+// is timeline-anchored in g_rawLocalInput, not a stateful shift buffer.
 extern "C" void Controller_SilentFrameStart()
 {
-    g_localPending = 0;
+    // No-op
 }
 
 extern "C" void Controller_SilentFrameEnd()
 {
-    memmove(&g_oldInputs[0], &g_oldInputs[1],
-            (MAX_HISTORY - 1) * sizeof(uint32_t));
-    g_oldInputs[MAX_HISTORY - 1] = g_localPending;
+    // No-op
 }
 
 extern "C" void Controller_SetDelayFrames(int32_t delay)
@@ -460,6 +474,43 @@ extern "C" void Controller_SetDelayFrames(int32_t delay)
     if (delay < 1)                  delay = 1;
     if (delay > MAX_HISTORY - 1)    delay = MAX_HISTORY - 1;
     g_delayFrames = delay;
+}
+
+extern "C" void Controller_ScheduleDelayChange(int32_t delay, int32_t activationFrame)
+{
+    g_pendingDelayValue = delay;
+    g_pendingDelayFrame = activationFrame;
+}
+
+extern "C" bool Controller_IsDelayChangePending()
+{
+    return g_pendingDelayFrame >= 0;
+}
+
+extern "C" bool Controller_IsNegotiationPending()
+{
+    return g_negotiationPending;
+}
+
+extern "C" void Controller_StartDelayNegotiation(int32_t delay)
+{
+    g_negotiationPending = true;
+    // The actual REQ is sent by the caller (framestepper) to keep netplay.h
+    // out of controller.h.  This just records the pending state.
+}
+
+extern "C" void Controller_CompleteDelayNegotiation(int32_t delay, int32_t activationFrame)
+{
+    if (g_negotiationPending)
+    {
+        Controller_ScheduleDelayChange(delay, activationFrame);
+        g_negotiationPending = false;
+    }
+}
+
+extern "C" int32_t Controller_GetStallFrames()
+{
+    return g_stallFrames;
 }
 
 // ===========================================================================
@@ -587,11 +638,9 @@ static void __fastcall hkStepIntro(uint64_t param_1)
 //   - Drain inbound packets: store each history slot at (frame % RING_SIZE)
 //
 // Controller_OnFrameEnd (called after oMove):
-//   - Read delayed local input from oldInputs (BEFORE shifting), then shift
-//     the buffer and write the current accumulator at the end
-//   - Send outbound packet: MAX_HISTORY slots, starting from
-//     (currentFrame + g_delayFrames - MAX_HISTORY + 1)
-//     → newest slot maps to (currentFrame + g_delayFrames) on the wire
+//   - Read delayed local input from g_localAccumInput (source-frame indexed)
+//   - Send outbound packet: MAX_HISTORY slots indexed by absolute source frame,
+//     start_frame = g_netFrameCount - MAX_HISTORY + 1 (no delay offset).
 //
 // hkprocessFrameInput (per character, inside oMove):
 //   LOCAL:  accumulate, overwrite fields with delayed oldInputs value
@@ -606,7 +655,8 @@ extern "C" void Controller_OnFrameStart()
     // If sReplay isn't ready yet, skip packet processing this frame.
     if (g_netFrameCount < 0) return;
 
-    g_localPending = 0;
+    // Zero this frame's accumulator slot before accumulation begins.
+    g_localAccumInput[(uint32_t)g_netFrameCount % RING_SIZE] = 0;
 
     // --- Drain every received packet.
     //     By using the sender's transmitted start_frame, we align both games
@@ -614,12 +664,14 @@ extern "C" void Controller_OnFrameStart()
     InputPacket inPkt;
     while (Netplay_GetInboundPacket(inPkt))
     {
-        // Out-of-order protection: discard the packet entirely if its maximum
-        // frame coverage is older than or equal to our already known remote frame.
-        int32_t pktMaxFrame = (int32_t)inPkt.start_frame + NET_HISTORY_SIZE - 1;
-        if (pktMaxFrame <= g_lastRemoteFrame)
+        // Timestamp-based out-of-order filter
+        if (inPkt.timestamp_us != 0)
         {
-            continue;
+            if (inPkt.timestamp_us < g_lastReceivedTimestampUs)
+            {
+                continue;
+            }
+            g_lastReceivedTimestampUs = inPkt.timestamp_us;
         }
 
         for (size_t i = 0; i < NET_HISTORY_SIZE; i++)
@@ -631,17 +683,14 @@ extern "C" void Controller_OnFrameStart()
             {
                 g_receivedInput[(uint32_t)targetFrame % RING_SIZE] = inPkt.inputs[i];
                 g_confirmedFrame[(uint32_t)targetFrame % RING_SIZE] = targetFrame;
-
-                // Track the latest known remote frame
-                // Guard: seed packet (timestamp_us == 0) still confirms frames
-                // to break the deadlock, but must NOT inflate g_lastRemoteFrame
-                // or real packets get discarded by the out-of-order check.
-                if (targetFrame > g_lastRemoteFrame && inPkt.timestamp_us != 0)
-                {
-                    g_lastRemoteFrame = targetFrame;
-                    g_lastRemoteInput = inPkt.inputs[i];
-                }
             }
+        }
+
+        // Track the latest known remote frame using the last slot of the newest packet
+        if (inPkt.timestamp_us != 0)
+        {
+            g_lastRemoteFrame = (int32_t)inPkt.start_frame + NET_HISTORY_SIZE - 1;
+            g_lastRemoteInput = inPkt.inputs[NET_HISTORY_SIZE - 1];
         }
 
         // Piggybacked checksum (Slippi-style): extract and compare.
@@ -695,11 +744,11 @@ extern "C" void Controller_OnFrameStart()
 
         // Frame timing advantage:
         //   The sender recorded timestamp_us at its frame N (in OnFrameEnd).
-        //   Packet start_frame = N + g_delayFrames - MAX_HISTORY + 1, so
-        //   N = start_frame + MAX_HISTORY - 1 - g_delayFrames.
+        //   Packet start_frame = N - MAX_HISTORY + 1, so:
+        //   N = start_frame + MAX_HISTORY - 1.
         //   Look up our local QPC for the same frame N.
 
-            int32_t senderFrame = (int32_t)inPkt.start_frame + MAX_HISTORY - 1 - g_delayFrames;
+            int32_t senderFrame = (int32_t)inPkt.start_frame + MAX_HISTORY - 1;
             uint32_t remoteIdx = (uint32_t)senderFrame % RING_SIZE;
             if (g_localFrameQPC_Frame[remoteIdx] == senderFrame)
             {
@@ -712,6 +761,50 @@ extern "C" void Controller_OnFrameStart()
                     g_timesyncAdvantage = (int64_t)(g_timesyncAdvantage * 0.9 + adv_this * 0.1);
             }
         }
+    }
+
+    // --- Commit scheduled delay change if the activation frame has arrived.
+    //     Both peers independently reach the same game-frame count (driven by
+    //     identical input consumption), so the switch-over is synchronized.
+    if (g_pendingDelayFrame >= 0 && g_netFrameCount >= g_pendingDelayFrame)
+    {
+        if (g_pendingDelayValue >= 1 && g_pendingDelayValue <= MAX_HISTORY - 1)
+        {
+            int32_t oldDelay = g_delayFrames;
+            int32_t newDelay = g_pendingDelayValue;
+            g_delayFrames = newDelay;
+
+            // --- Handle input buffer transition gap ---
+            if (newDelay > oldDelay)
+            {
+                // Delay increased: freeze simulation for (new - old) frames
+                // so the input history ring fills with fresh physical inputs
+                // before the game starts consuming the new, deeper offset.
+                g_stallFrames = newDelay - oldDelay;
+                HookLog("Delay inc %d -> %d at frame %d: stalling %d frame(s)\n",
+                        oldDelay, newDelay, g_netFrameCount, g_stallFrames);
+            }
+            else if (newDelay < oldDelay)
+            {
+                // Delay decreased: coalesce skipped physical inputs into the
+                // first source frame consumed under the new delay, so button
+                // presses during the transition window are not lost.
+                int32_t startSkip = g_netFrameCount - oldDelay;
+                int32_t endSkip   = g_netFrameCount - newDelay;
+                uint32_t coalesced = 0;
+                for (int32_t f = startSkip; f < endSkip; f++)
+                {
+                    if (f >= 0)
+                        coalesced |= g_localAccumInput[(uint32_t)f % RING_SIZE];
+                }
+                if (endSkip >= 0)
+                    g_localAccumInput[(uint32_t)endSkip % RING_SIZE] |= coalesced;
+                HookLog("Delay dec %d -> %d at frame %d: coalesced input 0x%08X from frames [%d, %d)\n",
+                        oldDelay, newDelay, g_netFrameCount, coalesced, startSkip, endSkip);
+            }
+        }
+        g_pendingDelayValue = -1;
+        g_pendingDelayFrame = -1;
     }
 
     if (g_rollbackFrames > 0)
@@ -736,10 +829,13 @@ extern "C" void Controller_OnFrameStart()
                     InputPacket waitPkt;
                     while (Netplay_GetInboundPacket(waitPkt))
                     {
-                        int32_t waitPktMaxFrame = (int32_t)waitPkt.start_frame + NET_HISTORY_SIZE - 1;
-                        if (waitPktMaxFrame <= g_lastRemoteFrame)
+                        if (waitPkt.timestamp_us != 0)
                         {
-                            continue;
+                            if (waitPkt.timestamp_us < g_lastReceivedTimestampUs)
+                            {
+                                continue;
+                            }
+                            g_lastReceivedTimestampUs = waitPkt.timestamp_us;
                         }
 
                         for (size_t i = 0; i < NET_HISTORY_SIZE; i++)
@@ -749,12 +845,13 @@ extern "C" void Controller_OnFrameStart()
                             {
                                 g_receivedInput[(uint32_t)targetFrame % RING_SIZE] = waitPkt.inputs[i];
                                 g_confirmedFrame[(uint32_t)targetFrame % RING_SIZE] = targetFrame;
-                                if (targetFrame > g_lastRemoteFrame)
-                                {
-                                    g_lastRemoteFrame = targetFrame;
-                                    g_lastRemoteInput = waitPkt.inputs[i];
-                                }
                             }
+                        }
+
+                        if (waitPkt.timestamp_us != 0)
+                        {
+                            g_lastRemoteFrame = (int32_t)waitPkt.start_frame + NET_HISTORY_SIZE - 1;
+                            g_lastRemoteInput = waitPkt.inputs[NET_HISTORY_SIZE - 1];
                         }
 
                         int32_t wcsFrame = (int32_t)waitPkt.checksum_frame;
@@ -814,18 +911,25 @@ extern "C" void Controller_OnFrameStart()
     }
     else
     {
-        // --- Legacy delay-based fallback: spin-wait for current frame's input.
-        int32_t neededFrame = g_netFrameCount;
-        while (!IsFrameConfirmed(neededFrame) && Netplay_IsActive())
+        // --- Legacy delay-based fallback: spin-wait for the required remote source frame.
+        int32_t neededSourceFrame = g_netFrameCount - g_delayFrames;
+        if (neededSourceFrame < 0) neededSourceFrame = 0;
+
+        while (!IsFrameConfirmed(neededSourceFrame) && Netplay_IsActive())
             {
                 Sleep(1);
                 InputPacket waitPkt;
                 while (Netplay_GetInboundPacket(waitPkt))
                 {
-                    int32_t waitPktMaxFrame = (int32_t)waitPkt.start_frame + NET_HISTORY_SIZE - 1;
-                    if (waitPktMaxFrame <= g_lastRemoteFrame)
+                    // Timestamp-based out-of-order filter — wall-clock monotonic
+                    // time is unaffected by delay changes, preventing false discards.
+                    if (waitPkt.timestamp_us != 0)
                     {
-                        continue;
+                        if (waitPkt.timestamp_us < g_lastReceivedTimestampUs)
+                        {
+                            continue;
+                        }
+                        g_lastReceivedTimestampUs = waitPkt.timestamp_us;
                     }
 
                     for (size_t i = 0; i < NET_HISTORY_SIZE; i++)
@@ -835,12 +939,13 @@ extern "C" void Controller_OnFrameStart()
                         {
                             g_receivedInput[(uint32_t)targetFrame % RING_SIZE] = waitPkt.inputs[i];
                             g_confirmedFrame[(uint32_t)targetFrame % RING_SIZE] = targetFrame;
-                            if (targetFrame > g_lastRemoteFrame)
-                            {
-                                g_lastRemoteFrame = targetFrame;
-                                g_lastRemoteInput = waitPkt.inputs[i];
-                            }
                         }
+                    }
+
+                    if (waitPkt.timestamp_us != 0)
+                    {
+                        g_lastRemoteFrame = (int32_t)waitPkt.start_frame + NET_HISTORY_SIZE - 1;
+                        g_lastRemoteInput = waitPkt.inputs[NET_HISTORY_SIZE - 1];
                     }
                 }
             }
@@ -920,31 +1025,29 @@ extern "C" void Controller_OnFrameEnd()
     //         thread doesn't read stale/unresolved data from the previous ring buffer loop.
     Controller_ResolveRemoteInput(completedFrame);
 
-    // --- 2. Record the executed delayed local input for display before shifting.
-    //         Done at the frame boundary rather than inside hkprocessFrameInput
-    //         because per-character processFrameInput is not called during
-    //         cinematic freezes, hitstun, or transition screens, which would
-    //         leave gaps in g_recordedLocalInput and cause input display flicker.
+    // --- 2. Record the executed delayed local input for display.
+    //         Read from the timeline-anchored g_localAccumInput ring so that
+    //         delay transitions are consistent.
     {
         uint32_t idx = (uint32_t)completedFrame % RING_SIZE;
-        g_recordedLocalInput[idx] = g_oldInputs[MAX_HISTORY - g_delayFrames];
+        int32_t sourceFrame = completedFrame - g_delayFrames;
+        if (sourceFrame < 0) sourceFrame = 0;
+        g_recordedLocalInput[idx] = g_localAccumInput[(uint32_t)sourceFrame % RING_SIZE];
     }
 
-    // --- 3. Shift history buffer: discard oldest, append current.
-    memmove(&g_oldInputs[0], &g_oldInputs[1],
-            (MAX_HISTORY - 1) * sizeof(uint32_t));
-    g_oldInputs[MAX_HISTORY - 1] = g_localPending;
-
-    // --- 4. Build outbound packet — inputs[] are absolute-frame-indexed.
-    //     start_frame = (currentFrame + delay) - MAX_HISTORY + 1
-    //     inputs[0]                    → frame start_frame          (oldest)
-    //     inputs[MAX_HISTORY-1]        → frame start_frame+MAX_HISTORY-1 (newest)
-    //     checksum is piggybacked (Slippi-style) for desync detection.
+    // --- 3. Build outbound packet — inputs[] indexed by absolute source frame.
+    //     start_frame = g_netFrameCount - MAX_HISTORY + 1
+    //     inputs[i] = g_localAccumInput[(start_frame + i) % RING_SIZE]
+    //     No delay offset in the wire format — decouples transmission from delay,
+    //     making delay changes immune to desync.
     InputPacket outPkt = {};
-    outPkt.start_frame = (uint32_t)(g_netFrameCount + g_delayFrames
-                                     - MAX_HISTORY + 1);
+    outPkt.start_frame = (uint32_t)(g_netFrameCount - MAX_HISTORY + 1);
     for (size_t i = 0; i < MAX_HISTORY; i++)
-        outPkt.inputs[i] = g_oldInputs[i];
+    {
+        int32_t sourceFrame = (int32_t)outPkt.start_frame + (int32_t)i;
+        if (sourceFrame < 0) sourceFrame = 0;
+        outPkt.inputs[i] = g_localAccumInput[(uint32_t)sourceFrame % RING_SIZE];
+    }
 
     if (!g_isResimulating && g_netFrameCount >= DESYNC_SKIP_FRAMES)
     {
@@ -1096,18 +1199,14 @@ static void __fastcall hkprocessFrameInput(uint64_t cChrInput)
             if (g_isResimulating)
             {
                 delayed = g_recordedLocalInput[(uint32_t)lookupFrame % RING_SIZE];
-            // Resim: snapshot restore + oprocessFrameInput's mOldHeld copy at
-            // cChrInput+0x10 already provides the correct prev-frame values
-            // for +0x10, +0x18, +0x1C, +0x20.  DO NOT override them here —
-            // setting all four to the same value destroys the XOR edge
-            // detection in the direction processor (FUN_14002E5A0).
             }
             else
             {
-                // Live: accumulate and read from delay buffer
-                g_localPending |= *(uint32_t*)(cChrInput + 0x14);
-                delayed = g_oldInputs[MAX_HISTORY - g_delayFrames];
-                // Live: native engine already set aux fields from physical input history
+                // Live: accumulate processed input and delay from timeline history
+                g_localAccumInput[(uint32_t)lookupFrame % RING_SIZE] |= *(uint32_t*)(cChrInput + 0x14);
+                int32_t sourceFrame = lookupFrame - g_delayFrames;
+                if (sourceFrame < 0) sourceFrame = 0;
+                delayed = g_localAccumInput[(uint32_t)sourceFrame % RING_SIZE];
             }
             *(uint32_t*)(cChrInput + 0x14)  = delayed; // mHeld
             *(uint32_t*)(cChrInput + 0x560) = delayed; // mRemapped
@@ -1139,6 +1238,7 @@ static void __fastcall hkprocessFrameInput(uint64_t cChrInput)
         }
         else if (teamIdx == 1)
         {
+            // Client P2 (Local)
             uint32_t delayed;
             if (g_isResimulating)
             {
@@ -1146,8 +1246,11 @@ static void __fastcall hkprocessFrameInput(uint64_t cChrInput)
             }
             else
             {
-                g_localPending |= *(uint32_t*)(cChrInput + 0x14);
-                delayed = g_oldInputs[MAX_HISTORY - g_delayFrames];
+                // Live: accumulate processed input and delay from timeline history
+                g_localAccumInput[(uint32_t)lookupFrame % RING_SIZE] |= *(uint32_t*)(cChrInput + 0x14);
+                int32_t sourceFrame = lookupFrame - g_delayFrames;
+                if (sourceFrame < 0) sourceFrame = 0;
+                delayed = g_localAccumInput[(uint32_t)sourceFrame % RING_SIZE];
             }
 
             *(uint32_t*)(cChrInput + 0x14)  = delayed; // mHeld

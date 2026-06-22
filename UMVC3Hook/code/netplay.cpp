@@ -31,16 +31,30 @@ static uint32_t             g_recvCount = 0;
 static uint32_t             g_lastRecv  = 0;
 static std::atomic<bool>    g_running { false };
 
-// Delay + rollback control channel — small packets to keep both peers in sync.
-static int32_t              g_outboundDelay    = -1;
-static bool                 g_outboundDelayNew = false;
-static int32_t              g_outboundRollback = -1;
+// Delay-change handshake — queue-based control channels (REQ and ACK).
+static std::vector<DelayChangeRequest> g_inboundDelayReqQueue;
+static CRITICAL_SECTION               g_delayReqCS;
+static std::vector<DelayChangeRequest> g_inboundDelayAckQueue;
+static CRITICAL_SECTION               g_delayAckCS;
+
+// Outbound REQ — signalled by the game thread, consumed by the service thread.
+static bool    g_outboundReqNew = false;
+static int32_t g_outboundReqDelay = -1;
+static int32_t g_outboundReqRollback = -1;
+
+// Outbound ACK — signalled by the game thread (receiver of REQ), consumed
+// by the service thread.
+static bool    g_outboundAckNew = false;
+static int32_t g_outboundAckDelay = -1;
+static int32_t g_outboundAckRollback = -1;
+static int32_t g_outboundAckActivation = -1;
+
+// Rollback-only (single-value, no queue needed — loss-tolerant).
+static int32_t              g_outboundRollback  = -1;
 static bool                 g_outboundRollbackNew = false;
-static int32_t              g_inboundDelay     = -1;
-static bool                 g_inboundDelayNew  = false;
-static int32_t              g_inboundRollback  = -1;
+static int32_t              g_inboundRollback   = -1;
 static bool                 g_inboundRollbackNew = false;
-static CRITICAL_SECTION     g_delayCS;
+static CRITICAL_SECTION     g_rollbackCS;
 
 // One-time critical section initialization flag
 static bool                 g_csInitialized  = false;
@@ -102,35 +116,87 @@ static DWORD WINAPI Netplay_ServiceThread(LPVOID)
             enet_host_flush(g_host);
         }
 
-        // --- Send delay/rollback control packet (if a new value is pending) ---
-        bool hasNewDelay = false;
-        int32_t delayVal = -1;
-        int32_t rollbackVal = -1;
+        // --- Send delay-change REQUEST (if a new value is pending) ---
         {
-            ScopedCS lock(g_delayCS);
-            if (g_outboundDelayNew || g_outboundRollbackNew)
+            bool hasNewReq = false;
+            int32_t reqDelay = -1;
+            int32_t reqRollback = -1;
             {
-                delayVal    = g_outboundDelay;
-                rollbackVal = g_outboundRollback;
-                hasNewDelay = true;
-                g_outboundDelayNew   = false;
-                g_outboundRollbackNew = false;
+                ScopedCS lock(g_delayReqCS);
+                if (g_outboundReqNew)
+                {
+                    reqDelay       = g_outboundReqDelay;
+                    reqRollback    = g_outboundReqRollback;
+                    hasNewReq = true;
+                    g_outboundReqNew = false;
+                }
+            }
+
+            if (hasNewReq && g_peer)
+            {
+                DelayReqPacket dp;
+                dp.type           = PACKET_DELAY_REQ;
+                dp.delay          = reqDelay;
+                dp.rollbackFrames = reqRollback;
+                ENetPacket* packet = enet_packet_create(
+                    &dp, sizeof(DelayReqPacket), ENET_PACKET_FLAG_RELIABLE
+                );
+                if (enet_peer_send(g_peer, 0, packet) != 0)
+                    enet_packet_destroy(packet);
+                enet_host_flush(g_host);
             }
         }
 
-        if (hasNewDelay && g_peer)
+        // --- Send delay-change ACKNOWLEDGMENT (if a new value is pending) ---
         {
-            DelayPacket dp;
-            dp.type           = PACKET_DELAY;
-            dp.delay          = delayVal;
-            dp.rollbackFrames = rollbackVal;
-            ENetPacket* packet = enet_packet_create(
-                &dp, sizeof(DelayPacket), ENET_PACKET_FLAG_RELIABLE
-            );
-            if (enet_peer_send(g_peer, 0, packet) != 0) {
-                enet_packet_destroy(packet);
+            bool hasNewAck = false;
+            int32_t ackDelay = -1;
+            int32_t ackRollback = -1;
+            int32_t ackActivation = -1;
+            {
+                ScopedCS lock(g_delayAckCS);
+                if (g_outboundAckNew)
+                {
+                    ackDelay       = g_outboundAckDelay;
+                    ackRollback    = g_outboundAckRollback;
+                    ackActivation  = g_outboundAckActivation;
+                    hasNewAck = true;
+                    g_outboundAckNew = false;
+                }
             }
-            enet_host_flush(g_host);
+
+            if (hasNewAck && g_peer)
+            {
+                DelayAckPacket dp;
+                dp.type            = PACKET_DELAY_ACK;
+                dp.delay           = ackDelay;
+                dp.rollbackFrames  = ackRollback;
+                dp.activationFrame = ackActivation;
+                ENetPacket* packet = enet_packet_create(
+                    &dp, sizeof(DelayAckPacket), ENET_PACKET_FLAG_RELIABLE
+                );
+                if (enet_peer_send(g_peer, 0, packet) != 0)
+                    enet_packet_destroy(packet);
+                enet_host_flush(g_host);
+            }
+        }
+
+        // --- Send rollback-only control packet (applied immediately) ---
+        {
+            ScopedCS lock(g_rollbackCS);
+            if (g_outboundRollbackNew && g_peer)
+            {
+                RollbackPacket rp;
+                rp.type            = PACKET_ROLLBACK;
+                rp.rollbackFrames  = g_outboundRollback;
+                ENetPacket* packet = enet_packet_create(
+                    &rp, sizeof(RollbackPacket), ENET_PACKET_FLAG_RELIABLE
+                );
+                if (enet_peer_send(g_peer, 0, packet) != 0)
+                    enet_packet_destroy(packet);
+                enet_host_flush(g_host);
+                g_outboundRollbackNew = false;
+            }
         }
 
         // --- Service the host ---
@@ -158,16 +224,44 @@ static DWORD WINAPI Netplay_ServiceThread(LPVOID)
                                 }
                                 break;
 
-                            case PACKET_DELAY:
-                                if (event.packet->dataLength >= sizeof(DelayPacket))
+                            case PACKET_DELAY_REQ:
+                                if (event.packet->dataLength >= sizeof(DelayReqPacket))
                                 {
-                                    const DelayPacket* dp = (const DelayPacket*)event.packet->data;
+                                    const DelayReqPacket* dp = (const DelayReqPacket*)event.packet->data;
                                     {
-                                        ScopedCS lock(g_delayCS);
-                                        g_inboundDelay     = dp->delay;
-                                        g_inboundDelayNew  = true;
-                                        g_inboundRollback     = dp->rollbackFrames;
-                                        g_inboundRollbackNew = true;
+                                        ScopedCS lock(g_delayReqCS);
+                                        DelayChangeRequest req;
+                                        req.delay           = dp->delay;
+                                        req.rollbackFrames  = dp->rollbackFrames;
+                                        req.activationFrame = -1;
+                                        g_inboundDelayReqQueue.push_back(req);
+                                    }
+                                }
+                                break;
+
+                            case PACKET_DELAY_ACK:
+                                if (event.packet->dataLength >= sizeof(DelayAckPacket))
+                                {
+                                    const DelayAckPacket* dp = (const DelayAckPacket*)event.packet->data;
+                                    {
+                                        ScopedCS lock(g_delayAckCS);
+                                        DelayChangeRequest ack;
+                                        ack.delay           = dp->delay;
+                                        ack.rollbackFrames  = dp->rollbackFrames;
+                                        ack.activationFrame = dp->activationFrame;
+                                        g_inboundDelayAckQueue.push_back(ack);
+                                    }
+                                }
+                                break;
+
+                            case PACKET_ROLLBACK:
+                                if (event.packet->dataLength >= sizeof(RollbackPacket))
+                                {
+                                    const RollbackPacket* rp = (const RollbackPacket*)event.packet->data;
+                                    {
+                                        ScopedCS lock(g_rollbackCS);
+                                        g_inboundRollback     = rp->rollbackFrames;
+                                        g_inboundRollbackNew  = true;
                                     }
                                 }
                                 break;
@@ -216,10 +310,14 @@ void Netplay_Init(ENetHost* host, ENetPeer* peer)
     {
         InitializeCriticalSection(&g_outboundCS);
         InitializeCriticalSection(&g_inboundCS);
-        InitializeCriticalSection(&g_delayCS);
+        InitializeCriticalSection(&g_delayReqCS);
+        InitializeCriticalSection(&g_delayAckCS);
+        InitializeCriticalSection(&g_rollbackCS);
 
-        g_outboundDelayNew = false;
-        g_inboundDelayNew = false;
+        g_outboundReqNew = false;
+        g_outboundAckNew = false;
+        g_outboundRollbackNew = false;
+        g_inboundRollbackNew = false;
         std::memset(&g_outboundPacket, 0, sizeof(InputPacket));
     }
 
@@ -270,40 +368,65 @@ bool Netplay_GetInboundPacket(InputPacket& outPkt)
 }
 
 // ---------------------------------------------------------------------------
-// Delay + rollback control — sent together to keep both peers in sync.
+// Delay-change handshake (REQ/ACK) — queue-based, thread-safe.
 // ---------------------------------------------------------------------------
-void Netplay_SendDelay(int32_t delay)
+void Netplay_SendDelayReq(int32_t delay, int32_t rollbackFrames)
 {
-    ScopedCS lock(g_delayCS);
-    g_outboundDelay = delay;
-    g_outboundDelayNew = true;
+    ScopedCS lock(g_delayReqCS);
+    g_outboundReqDelay    = delay;
+    g_outboundReqRollback = rollbackFrames;
+    g_outboundReqNew      = true;
 }
 
-void Netplay_SendRollback(int32_t rollbackFrames)
+void Netplay_SendDelayAck(int32_t delay, int32_t rollbackFrames, int32_t activationFrame)
 {
-    ScopedCS lock(g_delayCS);
-    g_outboundRollback = rollbackFrames;
-    g_outboundRollbackNew = true;
+    ScopedCS lock(g_delayAckCS);
+    g_outboundAckDelay       = delay;
+    g_outboundAckRollback    = rollbackFrames;
+    g_outboundAckActivation  = activationFrame;
+    g_outboundAckNew         = true;
 }
 
-bool Netplay_GetInboundDelay(int32_t& outDelay)
+bool Netplay_GetInboundDelayReq(DelayChangeRequest& outReq)
 {
-    ScopedCS lock(g_delayCS);
-    if (g_inboundDelayNew)
+    ScopedCS lock(g_delayReqCS);
+    if (!g_inboundDelayReqQueue.empty())
     {
-        outDelay = g_inboundDelay;
-        g_inboundDelayNew = false;
+        outReq = g_inboundDelayReqQueue.front();
+        g_inboundDelayReqQueue.erase(g_inboundDelayReqQueue.begin());
         return true;
     }
     return false;
 }
 
+bool Netplay_GetInboundDelayAck(DelayChangeRequest& outAck)
+{
+    ScopedCS lock(g_delayAckCS);
+    if (!g_inboundDelayAckQueue.empty())
+    {
+        outAck = g_inboundDelayAckQueue.front();
+        g_inboundDelayAckQueue.erase(g_inboundDelayAckQueue.begin());
+        return true;
+    }
+    return false;
+}
+
+// ---------------------------------------------------------------------------
+// Rollback-only control — single-value, applied immediately on receipt.
+// ---------------------------------------------------------------------------
+void Netplay_SendRollback(int32_t rollbackFrames)
+{
+    ScopedCS lock(g_rollbackCS);
+    g_outboundRollback    = rollbackFrames;
+    g_outboundRollbackNew = true;
+}
+
 bool Netplay_GetInboundRollback(int32_t& outRollback)
 {
-    ScopedCS lock(g_delayCS);
+    ScopedCS lock(g_rollbackCS);
     if (g_inboundRollbackNew)
     {
-        outRollback = g_inboundRollback;
+        outRollback          = g_inboundRollback;
         g_inboundRollbackNew = false;
         return true;
     }
@@ -392,10 +515,10 @@ void Netplay_Shutdown()
     if (g_csInitialized)
     {
         DeleteCriticalSection(&g_outboundCS);
-
         DeleteCriticalSection(&g_inboundCS);
-
-        DeleteCriticalSection(&g_delayCS);
+        DeleteCriticalSection(&g_delayReqCS);
+        DeleteCriticalSection(&g_delayAckCS);
+        DeleteCriticalSection(&g_rollbackCS);
         g_csInitialized = false;
     }
 

@@ -35,8 +35,10 @@
 // Packet type identifiers (first uint32_t of every ENet payload).
 // ---------------------------------------------------------------------------
 enum PacketType : uint32_t {
-    PACKET_INPUT = 0,  // InputPacket
-    PACKET_DELAY = 1,  // DelayPacket
+    PACKET_INPUT      = 0,  // InputPacket
+    PACKET_DELAY_REQ  = 2,  // DelayReqPacket — handshake request
+    PACKET_DELAY_ACK  = 3,  // DelayAckPacket — handshake acknowledge
+    PACKET_ROLLBACK   = 4,  // RollbackPacket — rollback-only sync
 };
 
 #pragma pack(push, 1)
@@ -52,10 +54,38 @@ struct InputPacket {
     uint64_t echo_timestamp_us;  // timestamp_us from remote's most recent packet (0 = none)
 };
 
-struct DelayPacket {
-    uint32_t type;               // PACKET_DELAY
-    int32_t  delay;              // delay frame count
-    int32_t  rollbackFrames;     // rollback frame count (both sides stay in sync)
+// ---------------------------------------------------------------------------
+// Delay change handshake — negotiated transaction (see framestepper.cpp)
+//
+// Protocol:
+//   1. Initiator sends  MSG_DELAY_REQ(delay, rollbackFrames)
+//   2. Receiver computes  T = currentFrame + MARGIN, sends
+//      MSG_DELAY_ACK(delay, rollbackFrames, T) AND schedules locally for T.
+//   3. Initiator receives MSG_DELAY_ACK, cancels speculation, schedules for T.
+// ---------------------------------------------------------------------------
+struct DelayReqPacket {
+    uint32_t type;           // PACKET_DELAY_REQ
+    int32_t  delay;
+    int32_t  rollbackFrames;
+};
+
+struct DelayAckPacket {
+    uint32_t type;            // PACKET_DELAY_ACK
+    int32_t  delay;
+    int32_t  rollbackFrames;
+    int32_t  activationFrame; // T — both sides commit at this frame
+};
+
+struct RollbackPacket {
+    uint32_t type;            // PACKET_ROLLBACK
+    int32_t  rollbackFrames;
+};
+
+// Queue-based control channel entry (matches Ack layout; Req omits activationFrame).
+struct DelayChangeRequest {
+    int32_t delay;
+    int32_t rollbackFrames;
+    int32_t activationFrame;   // -1 when unused (Req)
 };
 #pragma pack(pop)
 
@@ -88,18 +118,23 @@ uint32_t Netplay_GetRemoteInput();
 // Shut down the service thread, disconnect peer, destroy host.
 void Netplay_Shutdown();
 
-// Send a delay-control value to the remote peer.
-void Netplay_SendDelay(int32_t delay);
+// Send a delay-change request (handshake REQ).  Does NOT schedule locally.
+void Netplay_SendDelayReq(int32_t delay, int32_t rollbackFrames);
 
-// Send a rollback-frame control value to the remote peer.
+// Send a delay-change acknowledgment (handshake ACK).  Sent by the receiver
+// after computing the safe commit frame T.
+void Netplay_SendDelayAck(int32_t delay, int32_t rollbackFrames, int32_t activationFrame);
+
+// Retrieve an inbound delay REQ (thread-safe queue).  Returns true if consumed.
+bool Netplay_GetInboundDelayReq(DelayChangeRequest& outReq);
+
+// Retrieve an inbound delay ACK (thread-safe queue).  Returns true if consumed.
+bool Netplay_GetInboundDelayAck(DelayChangeRequest& outAck);
+
+// Send a rollback-only control value to the remote peer (applied immediately).
 void Netplay_SendRollback(int32_t rollbackFrames);
 
-// Retrieve the last delay value received from the remote peer.  Returns true
-// if a new value was available (it is consumed by this call).
-bool Netplay_GetInboundDelay(int32_t& outDelay);
-
-// Retrieve the last rollback value received from the remote peer.  Returns true
-// if a new value was available (it is consumed by this call).
+// Retrieve inbound rollback-only value.  Returns true if a new value consumed.
 bool Netplay_GetInboundRollback(int32_t& outRollback);
 
 // --- Desync-check: checksum is piggybacked on InputPacket (Slippi-style) ---
