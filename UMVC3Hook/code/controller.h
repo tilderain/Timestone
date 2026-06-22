@@ -112,6 +112,10 @@ extern "C" int32_t  Controller_GetLastRemoteFrame();
 extern "C" int32_t  Controller_GetRollbackFrames();
 extern "C" bool     Controller_IsRollbackEnabled();
 
+// Executed input accessors — return what the game actually used for each player
+extern "C" uint32_t Controller_GetRecordedLocalInput(int32_t frame);
+extern "C" uint32_t Controller_GetUsedRemoteInput(int32_t frame);
+
 // Timesync info for overlay display
 extern "C" int64_t  Controller_GetTimesyncAdvantage();
 extern "C" uint64_t Controller_GetAvgRttUs();

@@ -19,6 +19,8 @@ extern "C" int32_t Controller_GetDelayFrames();
 extern "C" int32_t Controller_GetNetFrameCount();
 extern "C" int32_t Controller_GetLastRemoteFrame();
 extern "C" int32_t Controller_GetRollbackFrames();
+extern "C" uint32_t Controller_GetRecordedLocalInput(int32_t frame);
+extern "C" uint32_t Controller_GetUsedRemoteInput(int32_t frame);
 
 // Desync detection flags from controller.cpp
 extern bool     g_desyncDetected;
@@ -693,12 +695,29 @@ void FrameStepper_Draw()
     uint64_t pad = sPadGetInstance();
     if (pad)
     {
-        uint32_t p1 = (uint32_t)getInput(pad, 0);
-        uint32_t p2 = (uint32_t)getInput(pad, 1);
-
-        // OR in keybind-system flags so Z, S, etc. show up
-        p1 |= *(uint32_t*)(pad + UNIT_FLAGS_OFFSET);
-        p2 |= *(uint32_t*)(pad + UNIT_FLAGS_OFFSET);
+        uint32_t p1, p2;
+        if (Netplay_IsActive())
+        {
+            int32_t frame = Controller_GetNetFrameCount();
+            if (Netplay_IsHost())
+            {
+                p1 = Controller_GetRecordedLocalInput(frame);
+                p2 = Controller_GetUsedRemoteInput(frame);
+            }
+            else
+            {
+                p1 = Controller_GetUsedRemoteInput(frame);
+                p2 = Controller_GetRecordedLocalInput(frame);
+            }
+        }
+        else
+        {
+            p1 = (uint32_t)getInput(pad, 0);
+            p2 = (uint32_t)getInput(pad, 1);
+            // OR in keybind-system flags so Z, S, etc. show up
+            p1 |= *(uint32_t*)(pad + UNIT_FLAGS_OFFSET);
+            p2 |= *(uint32_t*)(pad + UNIT_FLAGS_OFFSET);
+        }
 
         char btns1[128], btns2[128];
         AppendButtons(btns1, sizeof(btns1), p1);

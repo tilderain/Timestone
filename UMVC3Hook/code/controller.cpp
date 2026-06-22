@@ -246,9 +246,9 @@ static uint32_t  g_remoteChecksum[RING_SIZE];
 static int32_t   g_desyncChecked[RING_SIZE];   // frame number when checksum was compared, -1 = unchecked
 static bool      g_desyncMismatch[RING_SIZE];  // true if that frame exceeded threshold
 
-static constexpr uint32_t DESYNC_THRESHOLD         = 100;
+static constexpr uint32_t DESYNC_THRESHOLD         = 5;
 static constexpr int32_t  DESYNC_SKIP_FRAMES       = 0;
-static constexpr int32_t  DESYNC_CONSECUTIVE_MIN   = 16;
+static constexpr int32_t  DESYNC_CONSECUTIVE_MIN   = 30;
 
 // ---------------------------------------------------------------------------
 // Timesync (Slippi-style) — QPC-based frame timing
@@ -335,6 +335,16 @@ extern "C" int32_t Controller_GetDelayFrames()      { return g_delayFrames; }
 extern "C" int32_t Controller_GetNetFrameCount()    { return GetGameFrameCount(); }
 extern "C" int32_t Controller_GetLastRemoteFrame()  { return g_lastRemoteFrame; }
 extern "C" int32_t Controller_GetRollbackFrames()   { return g_rollbackFrames; }
+extern "C" uint32_t Controller_GetRecordedLocalInput(int32_t frame)
+{
+    if (frame < 0) return 0;
+    return g_recordedLocalInput[(uint32_t)frame % RING_SIZE];
+}
+extern "C" uint32_t Controller_GetUsedRemoteInput(int32_t frame)
+{
+    if (frame < 0) return 0;
+    return g_usedRemoteInput[(uint32_t)frame % RING_SIZE];
+}
 extern "C" int64_t  Controller_GetTimesyncAdvantage() { return g_timesyncAdvantage; }
 extern "C" uint64_t Controller_GetAvgRttUs()          { return g_avgRttUs; }
 extern "C" bool    Controller_IsRollbackEnabled()   { return g_rollbackFrames > 0; }
@@ -897,22 +907,35 @@ extern "C" void Controller_OnFrameEnd()
     if (!Netplay_IsActive())
         return;
 
+    // Use the authoritative post-tick frame counter (advanced during oMove)
+    // for the recording index so it matches the render thread's read index.
+    int32_t completedFrame = GetGameFrameCount();
+
     // Don't send anything on frame 0 — let the first frame be neutral so both
     // sides have time to establish the connection and fill initial delay slots.
-    if (g_netFrameCount < 1)
+    if (completedFrame < 1)
         return;
 
-    // --- 1. Read delayed local input BEFORE shifting (unused here; the
-    //         actual read that overwrites the character fields happens in
-    //         hkprocessFrameInput which also reads from g_oldInputs before
-    //         this shift).
+    // --- 1. Resolve remote input for the completed frame index so the rendering
+    //         thread doesn't read stale/unresolved data from the previous ring buffer loop.
+    Controller_ResolveRemoteInput(completedFrame);
 
-    // --- 2. Shift history buffer: discard oldest, append current.
+    // --- 2. Record the executed delayed local input for display before shifting.
+    //         Done at the frame boundary rather than inside hkprocessFrameInput
+    //         because per-character processFrameInput is not called during
+    //         cinematic freezes, hitstun, or transition screens, which would
+    //         leave gaps in g_recordedLocalInput and cause input display flicker.
+    {
+        uint32_t idx = (uint32_t)completedFrame % RING_SIZE;
+        g_recordedLocalInput[idx] = g_oldInputs[MAX_HISTORY - g_delayFrames];
+    }
+
+    // --- 3. Shift history buffer: discard oldest, append current.
     memmove(&g_oldInputs[0], &g_oldInputs[1],
             (MAX_HISTORY - 1) * sizeof(uint32_t));
     g_oldInputs[MAX_HISTORY - 1] = g_localPending;
 
-    // --- 3. Build outbound packet — inputs[] are absolute-frame-indexed.
+    // --- 4. Build outbound packet — inputs[] are absolute-frame-indexed.
     //     start_frame = (currentFrame + delay) - MAX_HISTORY + 1
     //     inputs[0]                    → frame start_frame          (oldest)
     //     inputs[MAX_HISTORY-1]        → frame start_frame+MAX_HISTORY-1 (newest)
@@ -1081,10 +1104,9 @@ static void __fastcall hkprocessFrameInput(uint64_t cChrInput)
             }
             else
             {
-                // Live: accumulate, read from delay buffer, and record
+                // Live: accumulate and read from delay buffer
                 g_localPending |= *(uint32_t*)(cChrInput + 0x14);
                 delayed = g_oldInputs[MAX_HISTORY - g_delayFrames];
-                g_recordedLocalInput[(uint32_t)lookupFrame % RING_SIZE] = delayed;
                 // Live: native engine already set aux fields from physical input history
             }
             *(uint32_t*)(cChrInput + 0x14)  = delayed; // mHeld
@@ -1126,7 +1148,6 @@ static void __fastcall hkprocessFrameInput(uint64_t cChrInput)
             {
                 g_localPending |= *(uint32_t*)(cChrInput + 0x14);
                 delayed = g_oldInputs[MAX_HISTORY - g_delayFrames];
-                g_recordedLocalInput[(uint32_t)lookupFrame % RING_SIZE] = delayed;
             }
 
             *(uint32_t*)(cChrInput + 0x14)  = delayed; // mHeld
