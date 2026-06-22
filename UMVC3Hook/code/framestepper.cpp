@@ -139,34 +139,24 @@ static IDirect3DTexture9* g_pPauseTexture    = nullptr;
 static bool               g_captureRequested = false;
 
 // ---------------------------------------------------------------------------
-// Input bit definitions (derived from XINPUT_GAMEPAD processing at 0x1405111b0)
+// Input bit definitions (GameInput format returned by GetsCurrentInput_withSOCD)
 // ---------------------------------------------------------------------------
-static constexpr uint32_t IN_UP       = 0x0010;
-static constexpr uint32_t IN_RIGHT    = 0x0020;
-static constexpr uint32_t IN_DOWN     = 0x0040;
-static constexpr uint32_t IN_LEFT     = 0x0080;
-static constexpr uint32_t IN_LB       = 0x0100; // Left shoulder
-static constexpr uint32_t IN_RB       = 0x0200; // Right shoulder
-static constexpr uint32_t IN_LT       = 0x0400; // Left trigger
-static constexpr uint32_t IN_RT       = 0x0800; // Right trigger
-static constexpr uint32_t IN_Y        = 0x1000;
-static constexpr uint32_t IN_B        = 0x2000;
-static constexpr uint32_t IN_A        = 0x4000;
-static constexpr uint32_t IN_X        = 0x8000;
-static constexpr uint32_t IN_BACK     = 0x0001;
-static constexpr uint32_t IN_L3       = 0x0002;
-static constexpr uint32_t IN_R3       = 0x0004;
-static constexpr uint32_t IN_START    = 0x0008;
-static constexpr uint32_t IN_STICK_UP    = 0x10000;
-static constexpr uint32_t IN_STICK_RIGHT = 0x20000;
-static constexpr uint32_t IN_STICK_DOWN  = 0x40000;
-static constexpr uint32_t IN_STICK_LEFT  = 0x80000;
+static constexpr uint32_t IN_RIGHT    = 0x0001;
+static constexpr uint32_t IN_LEFT     = 0x0002;
+static constexpr uint32_t IN_UP       = 0x0004;
+static constexpr uint32_t IN_DOWN     = 0x0008;
+static constexpr uint32_t IN_L        = 0x0010; // Light attack
+static constexpr uint32_t IN_M        = 0x0020; // Medium attack
+static constexpr uint32_t IN_H        = 0x0040; // Heavy attack
+static constexpr uint32_t IN_S        = 0x0080; // Special / Exchange
+static constexpr uint32_t IN_A1       = 0x0100; // Assist 1
+static constexpr uint32_t IN_A2       = 0x0200; // Assist 2
+static constexpr uint32_t IN_START    = 0x100000;
 
 static const char* DecodeDirection(uint32_t input)
 {
-    // Lower byte gives DPAD-based direction (post-SOCD these should be clean)
-    int ud = input & (IN_UP | IN_DOWN);
     int lr = input & (IN_LEFT | IN_RIGHT);
+    int ud = input & (IN_UP | IN_DOWN);
 
     if (lr == IN_LEFT && ud == IN_UP)     return "7";
     if (lr == IN_LEFT && ud == IN_DOWN)   return "1";
@@ -188,18 +178,13 @@ static void AppendButtons(char* buf, size_t len, uint32_t input)
             strcat(tmp, name);
         }
     };
-    append("A", IN_A);
-    append("B", IN_B);
-    append("X", IN_X);
-    append("Y", IN_Y);
-    append("LB", IN_LB);
-    append("RB", IN_RB);
-    append("LT", IN_LT);
-    append("RT", IN_RT);
-    append("BACK", IN_BACK);
-    append("START", IN_START);
-    append("L3", IN_L3);
-    append("R3", IN_R3);
+    append("L", IN_L);
+    append("M", IN_M);
+    append("H", IN_H);
+    append("S", IN_S);
+    append("A1", IN_A1);
+    append("A2", IN_A2);
+    append("Start", IN_START);
     strncpy(buf, tmp, len - 1);
     buf[len - 1] = '\0';
 }
