@@ -107,6 +107,10 @@ static void BootTimer_Dump()
 static char g_autoConnectIp[64] = "";
 static int  g_autoConnectPort = 0;
 
+// Window corner positioning for dual training
+// 0=none, 1=top-right (host), 2=bottom-left (client)
+static int g_windowCorner = 0;
+
 extern LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
 EndScene oEndScene = NULL;
@@ -287,6 +291,20 @@ long __stdcall hkEndScene(LPDIRECT3DDEVICE9 pDevice)
 		D3DDEVICE_CREATION_PARAMETERS params;
 		pDevice->GetCreationParameters(&params);
 		window = params.hFocusWindow;
+
+		if (g_windowCorner) {
+			RECT rect;
+			GetWindowRect(window, &rect);
+			int w = rect.right - rect.left;
+			int h = rect.bottom - rect.top;
+			int scrW = GetSystemMetrics(SM_CXSCREEN);
+			int scrH = GetSystemMetrics(SM_CYSCREEN);
+			int x = (g_windowCorner == 1) ? (scrW - w) : 0;
+			int y = (g_windowCorner == 1) ? 0 : (scrH - h);
+			SetWindowPos(window, NULL, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER);
+			g_windowCorner = 0;
+		}
+
 		oWndProc = (WNDPROC)SetWindowLongPtr(window, GWLP_WNDPROC, (LONG_PTR)WndProc);
 		InitImGui(pDevice);
 		FrameStepper_SetDevice(pDevice);
@@ -525,6 +543,9 @@ void OnInitializeHook()
 	HookLog("UMVC3Hook: Patched uBattleUiPauseNetGallery_vfn5 JNZ→JMP (force render)\n");
 
 	if (opt == LAUNCH_DUAL_TRAINING) {
+		// Position host window to top-right corner
+		g_windowCorner = 1;
+
 		// Switch host log to host-specific file so host + client don't clobber each other
 		HookLogSetFile("UMVC3Hook_host.log");
 		HookLog("UMVC3Hook: Dual training host - switched to host log file\n");
@@ -600,6 +621,9 @@ void OnInitializeHook()
 
 	// Auto-connect: second instance spawned by dual training connects back to host
 	if (g_autoConnectPort != 0 && g_autoConnectIp[0] != '\0') {
+		// Position client window to bottom-left corner
+		g_windowCorner = 2;
+
 		// Switch client log to client-specific file so host + client don't clobber each other
 		HookLogSetFile("UMVC3Hook_client.log");
 
