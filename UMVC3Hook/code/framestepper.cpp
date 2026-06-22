@@ -184,7 +184,7 @@ static void AppendButtons(char* buf, size_t len, uint32_t input)
     append("S", IN_S);
     append("A1", IN_A1);
     append("A2", IN_A2);
-    append("Start", IN_START);
+    append("Taunt", IN_START);
     strncpy(buf, tmp, len - 1);
     buf[len - 1] = '\0';
 }
