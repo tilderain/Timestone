@@ -131,6 +131,8 @@ extern "C" void     Controller_ScheduleDelayChange(int32_t delay, int32_t activa
 
 // Returns true while a previously scheduled delay change is still pending
 // (activationFrame not yet reached).  Prevents overlapping requests.
+extern "C" uint64_t Controller_GetLastRawRttUs();
+
 extern "C" bool     Controller_IsDelayChangePending();
 
 // Returns true while a delay-change handshake negotiation is in flight

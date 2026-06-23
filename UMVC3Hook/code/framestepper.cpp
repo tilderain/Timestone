@@ -52,7 +52,7 @@ extern "C" bool Controller_IsNegotiationPending();
 extern "C" void Controller_StartDelayNegotiation(int32_t delay);
 extern "C" void Controller_CompleteDelayNegotiation(int32_t delay, int32_t activationFrame);
 extern "C" int32_t Controller_GetStallFrames();
-
+extern "C" uint64_t Controller_GetLastRawRttUs();
 // Declarations from controller.cpp
 extern int32_t g_stallFrames;
 
@@ -582,6 +582,74 @@ static inline bool KeyPressed(int vk, bool& prevState)
 
 void FrameStepper_Process()
 {
+    // --- Netplay auto-delay: host measures ping and sets delay once.
+    //     Measurement phase: collects raw RTT samples from echo timestamps
+    //     (sent every frame via netplay packets).  After collecting enough
+    //     samples, uses the minimum RTT to compute delay = (ping/17) + 1.
+    //     Only the host initiates the delay negotiation; the client responds.
+    enum { AD_IDLE, AD_MEASURING, AD_DONE } static s_adState = AD_IDLE;
+    static int     s_adSampleCount = 0;
+    static uint64_t s_adMinRttUs    = 0;
+    static bool    s_adWasActive   = false;
+
+    if (Netplay_IsActive())
+    {
+        if (!s_adWasActive)
+        {
+            // Netplay just became active — reset state
+            s_adState      = AD_IDLE;
+            s_adSampleCount = 0;
+            s_adMinRttUs    = 0;
+            s_adWasActive   = true;
+        }
+
+        if (s_adState == AD_IDLE && Netplay_IsHost())
+        {
+            // Host starts measuring on the frame after netplay goes active
+            s_adState = AD_MEASURING;
+            s_adSampleCount = 0;
+            s_adMinRttUs = UINT64_MAX;
+        }
+
+        if (s_adState == AD_MEASURING)
+        {
+            uint64_t rawRtt = Controller_GetLastRawRttUs();
+            if (rawRtt > 0)
+            {
+                if (rawRtt < s_adMinRttUs)
+                    s_adMinRttUs = rawRtt;
+                s_adSampleCount++;
+            }
+
+            // After 10 valid samples (or ~170ms at 60fps after first echo),
+            // compute delay from the minimum RTT and fire
+            if (s_adSampleCount >= 10)
+            {
+                int32_t currentDelay = Controller_GetDelayFrames();
+                // ping = minRttUs / 2000, delay = ping / 17 + 1 = minRttUs / 34000 + 1
+                int32_t targetDelay = (int32_t)(s_adMinRttUs / 34000) + 1;
+                if (targetDelay < 1) targetDelay = 1;
+                if (targetDelay > 15) targetDelay = 15;
+
+                if (targetDelay != currentDelay &&
+                    !Controller_IsDelayChangePending() &&
+                    !Controller_IsNegotiationPending())
+                {
+                    Controller_StartDelayNegotiation(targetDelay);
+                    Netplay_SendDelayReq(targetDelay, Controller_GetRollbackFrames());
+                    HookLog("Netplay: Auto-delay set to %d (minRtt=%lluus, ping=%llums, samples=%d)\n",
+                            targetDelay, s_adMinRttUs, s_adMinRttUs / 2000, s_adSampleCount);
+                }
+                s_adState = AD_DONE;
+            }
+        }
+    }
+    else
+    {
+        s_adWasActive = false;
+        s_adState     = AD_IDLE;
+    }
+
     // Netplay delay adjustment via [ (decrease) and ] (increase) keys.
     // Uses the negotiated handshake: sends REQ, waits for ACK, then commits.
     static bool prevBracketL = false, prevBracketR = false;

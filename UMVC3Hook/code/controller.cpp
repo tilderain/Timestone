@@ -269,7 +269,8 @@ static constexpr int32_t  DESYNC_CONSECUTIVE_MIN   = 30;
 // ---------------------------------------------------------------------------
 uint64_t     g_lastRemoteTimestampUs    = 0;
 static uint64_t g_lastReceivedTimestampUs = 0;
-uint64_t     g_avgRttUs                = 50000;   // start with 50ms default
+uint64_t     g_avgRttUs                = 0;   // start at 0 (no measurement yet)
+uint64_t     g_lastRawRttUs            = 0;   // raw per-frame RTT from echo (0 = no measurement)
 int64_t      g_clockOffsetUs         = 0;
 int64_t      g_timesyncAdvantage     = 0;
 
@@ -334,7 +335,8 @@ extern "C" void Controller_ResetBuffers()
     std::memset(g_desyncChecked,  0xFF, sizeof(g_desyncChecked));   // -1 per int32_t
     std::memset(g_desyncMismatch, 0,    sizeof(g_desyncMismatch));
     g_lastRemoteTimestampUs = 0;
-    g_avgRttUs              = 50000;
+    g_avgRttUs              = 0;
+    g_lastRawRttUs          = 0;
     g_clockOffsetUs         = 0;
     g_timesyncAdvantage     = 0;
     std::memset(g_localFrameQPC, 0, sizeof(g_localFrameQPC));
@@ -365,6 +367,7 @@ extern "C" uint32_t Controller_GetUsedRemoteInput(int32_t frame)
 }
 extern "C" int64_t  Controller_GetTimesyncAdvantage() { return g_timesyncAdvantage; }
 extern "C" uint64_t Controller_GetAvgRttUs()          { return g_avgRttUs; }
+extern "C" uint64_t Controller_GetLastRawRttUs()      { return g_lastRawRttUs; }
 extern "C" bool    Controller_IsRollbackEnabled()   { return g_rollbackFrames > 0; }
 
 extern "C" void Controller_SetRollbackFrames(int32_t n)
@@ -652,15 +655,15 @@ extern "C" void Controller_OnFrameStart()
         return;
 
     g_netFrameCount = GetGameFrameCount();
-    // If sReplay isn't ready yet, skip packet processing this frame.
-    if (g_netFrameCount < 0) return;
 
-    // Zero this frame's accumulator slot before accumulation begins.
-    g_localAccumInput[(uint32_t)g_netFrameCount % RING_SIZE] = 0;
+    // Pre-match: still drain inbound packets for timesync (RTT measurement).
+    // Only do input/frame processing when sReplay is active (g_netFrameCount >= 0).
+    if (g_netFrameCount >= 0)
+    {
+        g_localAccumInput[(uint32_t)g_netFrameCount % RING_SIZE] = 0;
+    }
 
-    // --- Drain every received packet.
-    //     By using the sender's transmitted start_frame, we align both games
-    //     to the same absolute timeline and prevent coordinate/frame drift.
+    // --- Drain every received packet (always — need timesync even during pre-match).
     InputPacket inPkt;
     while (Netplay_GetInboundPacket(inPkt))
     {
@@ -674,28 +677,29 @@ extern "C" void Controller_OnFrameStart()
             g_lastReceivedTimestampUs = inPkt.timestamp_us;
         }
 
-        for (size_t i = 0; i < NET_HISTORY_SIZE; i++)
+        // Only process game data when in-match (pre-match probes have no valid inputs)
+        if (g_netFrameCount >= 0)
         {
-            // Cast to signed int32_t to handle negative/underflowed frame
-            // numbers gracefully during initial startup frames.
-            int32_t targetFrame = (int32_t)inPkt.start_frame + (int32_t)i;
-            if (targetFrame >= 0)
+            for (size_t i = 0; i < NET_HISTORY_SIZE; i++)
             {
-                g_receivedInput[(uint32_t)targetFrame % RING_SIZE] = inPkt.inputs[i];
-                g_confirmedFrame[(uint32_t)targetFrame % RING_SIZE] = targetFrame;
+                int32_t targetFrame = (int32_t)inPkt.start_frame + (int32_t)i;
+                if (targetFrame >= 0)
+                {
+                    g_receivedInput[(uint32_t)targetFrame % RING_SIZE] = inPkt.inputs[i];
+                    g_confirmedFrame[(uint32_t)targetFrame % RING_SIZE] = targetFrame;
+                }
             }
-        }
 
-        // Track the latest known remote frame using the last slot of the newest packet
-        if (inPkt.timestamp_us != 0)
-        {
-            g_lastRemoteFrame = (int32_t)inPkt.start_frame + NET_HISTORY_SIZE - 1;
-            g_lastRemoteInput = inPkt.inputs[NET_HISTORY_SIZE - 1];
-        }
+            // Track the latest known remote frame
+            if (inPkt.timestamp_us != 0)
+            {
+                g_lastRemoteFrame = (int32_t)inPkt.start_frame + NET_HISTORY_SIZE - 1;
+                g_lastRemoteInput = inPkt.inputs[NET_HISTORY_SIZE - 1];
+            }
 
-        // Piggybacked checksum (Slippi-style): extract and compare.
-        if (g_netFrameCount >= DESYNC_SKIP_FRAMES)
-        {
+            // Piggybacked checksum
+            if (g_netFrameCount >= DESYNC_SKIP_FRAMES)
+            {
             int32_t csFrame = (int32_t)inPkt.checksum_frame;
             if (csFrame >= 0)
             {
@@ -715,10 +719,12 @@ extern "C" void Controller_OnFrameStart()
                                     csFrame, diff, g_localChecksum[ridx], inPkt.checksum);
                     }
                 }
+                }
             }
-        }
+        }   // end if (g_netFrameCount >= 0) — game-data processing only during match
 
         // --- Timesync: RTT, clock offset, and frame advantage ---
+        //     Always runs, even during pre-match, so we measure RTT before frame 0.
         uint64_t now = GetUs();
         uint64_t ts = inPkt.timestamp_us;
 
@@ -733,7 +739,10 @@ extern "C" void Controller_OnFrameStart()
             {
                 uint64_t rtt = now - inPkt.echo_timestamp_us;
                 if (rtt >= 1000 && rtt <= 500000)
+                {
                     g_avgRttUs = (uint64_t)(g_avgRttUs * 0.9 + rtt * 0.1);
+                    g_lastRawRttUs = rtt;
+                }
             }
 
             // Clock offset: remote_timestamp - (local_recv - one_way)
@@ -742,23 +751,25 @@ extern "C" void Controller_OnFrameStart()
                                 - ((int64_t)now - (int64_t)one_way);
             g_clockOffsetUs = (int64_t)(g_clockOffsetUs * 0.95 + offset_this * 0.05);
 
-        // Frame timing advantage:
-        //   The sender recorded timestamp_us at its frame N (in OnFrameEnd).
-        //   Packet start_frame = N - MAX_HISTORY + 1, so:
-        //   N = start_frame + MAX_HISTORY - 1.
-        //   Look up our local QPC for the same frame N.
-
-            int32_t senderFrame = (int32_t)inPkt.start_frame + MAX_HISTORY - 1;
-            uint32_t remoteIdx = (uint32_t)senderFrame % RING_SIZE;
-            if (g_localFrameQPC_Frame[remoteIdx] == senderFrame)
+            // Frame timing advantage (only when frame count is valid):
+            //   The sender recorded timestamp_us at its frame N (in OnFrameEnd).
+            //   Packet start_frame = N - MAX_HISTORY + 1, so:
+            //   N = start_frame + MAX_HISTORY - 1.
+            //   Look up our local QPC for the same frame N.
+            if (g_netFrameCount >= 0)
             {
-                int64_t T_local         = (int64_t)g_localFrameQPC[remoteIdx];
-                int64_t T_remote_local  = (int64_t)inPkt.timestamp_us - g_clockOffsetUs;
-                int64_t adv_this        = T_local - T_remote_local;
-                // Filter: only update if this sample is within ±200ms of current estimate
-                if (adv_this > g_timesyncAdvantage - 200000 &&
-                    adv_this < g_timesyncAdvantage + 200000)
-                    g_timesyncAdvantage = (int64_t)(g_timesyncAdvantage * 0.9 + adv_this * 0.1);
+                int32_t senderFrame = (int32_t)inPkt.start_frame + MAX_HISTORY - 1;
+                uint32_t remoteIdx = (uint32_t)senderFrame % RING_SIZE;
+                if (g_localFrameQPC_Frame[remoteIdx] == senderFrame)
+                {
+                    int64_t T_local         = (int64_t)g_localFrameQPC[remoteIdx];
+                    int64_t T_remote_local  = (int64_t)inPkt.timestamp_us - g_clockOffsetUs;
+                    int64_t adv_this        = T_local - T_remote_local;
+                    // Filter: only update if this sample is within ±200ms of current estimate
+                    if (adv_this > g_timesyncAdvantage - 200000 &&
+                        adv_this < g_timesyncAdvantage + 200000)
+                        g_timesyncAdvantage = (int64_t)(g_timesyncAdvantage * 0.9 + adv_this * 0.1);
+                }
             }
         }
     }
@@ -1016,10 +1027,18 @@ extern "C" void Controller_OnFrameEnd()
     // for the recording index so it matches the render thread's read index.
     int32_t completedFrame = GetGameFrameCount();
 
-    // Don't send anything on frame 0 — let the first frame be neutral so both
-    // sides have time to establish the connection and fill initial delay slots.
+    // Pre-match: send timestamp probes for RTT measurement instead of full packets.
+    // This lets both sides measure ping before match start (frame 0).
     if (completedFrame < 1)
+    {
+        InputPacket probe = {};
+        probe.type = PACKET_INPUT;
+        probe.start_frame = 0x80000000u; // negative when cast to int32_t — inputs ignored
+        probe.timestamp_us = GetUs();
+        probe.echo_timestamp_us = g_lastRemoteTimestampUs;
+        Netplay_SendPacket(probe);
         return;
+    }
 
     // --- 1. Resolve remote input for the completed frame index so the rendering
     //         thread doesn't read stale/unresolved data from the previous ring buffer loop.
