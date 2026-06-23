@@ -223,8 +223,8 @@ static LiveFrameRecord g_liveRef[2][RING_SIZE];
 // g_psReplay pointer   = *(uint64_t*)_addr(0x140d4d9d8)  (Ghidra confirmation)
 // Frame counter uint32 = *(sReplay + 0x54)                (INC dword [RCX+0x54] at 0x1401cefdd)
 static int32_t   g_netFrameCount   = -1;
-static int32_t   g_delayFrames     = 4;
-static int32_t   g_rollbackFrames  = 0;
+static int32_t   g_delayFrames     = 2;
+static int32_t   g_rollbackFrames  = 8;
 static uint32_t  g_localPending    = 0;   // accumulator, ORed across team chars
 
 // Tracks the latest frame for which remote input has been received.
