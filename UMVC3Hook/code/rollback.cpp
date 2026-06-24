@@ -1070,6 +1070,7 @@ void Rollback_ReSimulate(int32_t startFrame, int32_t endFrame)
         Controller_SilentFrameStart();
         oMvc3Main_move(g_sMvc3Main);
         Controller_SilentFrameEnd();
+        Controller_StoreChecksum(f);
         Controller_LogReSimFrame(f);
     }
 

@@ -441,6 +441,20 @@ extern "C" void Controller_LogReSimFrame(int32_t frame)
             IsFrameConfirmed(frame) ? g_receivedInput[idx] : 0);
 }
 
+static uint32_t ComputeChecksum();
+
+// Recompute and store local checksum for a given frame after re-simulation
+// so that subsequent desync comparisons use the corrected state, not the
+// stale pre-rollback checksum.
+extern "C" void Controller_StoreChecksum(int32_t frame)
+{
+    if (frame >= DESYNC_SKIP_FRAMES)
+    {
+        uint32_t cs = ComputeChecksum();
+        g_localChecksum[(uint32_t)frame % RING_SIZE] = cs;
+    }
+}
+
 // Silent frame-boundary helpers for re-simulation — maintain the local input
 // shift buffer without draining inbound packets or sending outbound data.
 extern "C" void Controller_SilentFrameStart()
@@ -645,10 +659,11 @@ extern "C" void Controller_OnFrameStart()
         }
 
         // Piggybacked checksum (Slippi-style): extract and compare.
+        // checksum == 0 is a sentinel meaning "not yet confirmed" — skip it.
         if (g_netFrameCount >= DESYNC_SKIP_FRAMES)
         {
             int32_t csFrame = (int32_t)inPkt.checksum_frame;
-            if (csFrame >= 0)
+            if (csFrame >= 0 && inPkt.checksum != 0)
             {
                 uint32_t ridx = (uint32_t)csFrame % RING_SIZE;
                 g_remoteChecksum[ridx] = inPkt.checksum;
@@ -758,7 +773,7 @@ extern "C" void Controller_OnFrameStart()
                         }
 
                         int32_t wcsFrame = (int32_t)waitPkt.checksum_frame;
-                        if (wcsFrame >= 0)
+                        if (wcsFrame >= 0 && waitPkt.checksum != 0)
                         {
                             uint32_t wridx = (uint32_t)wcsFrame % RING_SIZE;
                             g_remoteChecksum[wridx] = waitPkt.checksum;
@@ -946,13 +961,20 @@ extern "C" void Controller_OnFrameEnd()
     for (size_t i = 0; i < MAX_HISTORY; i++)
         outPkt.inputs[i] = g_oldInputs[i];
 
-    if (!g_isResimulating && g_netFrameCount >= DESYNC_SKIP_FRAMES)
+    if (g_netFrameCount >= DESYNC_SKIP_FRAMES)
     {
         uint32_t cs = ComputeChecksum();
         uint32_t idx = (uint32_t)g_netFrameCount % RING_SIZE;
         g_localChecksum[idx] = cs;
-        outPkt.checksum_frame = (uint32_t)g_netFrameCount;
-        outPkt.checksum       = cs;
+
+        if (!g_isResimulating)
+        {
+            outPkt.checksum_frame = (uint32_t)g_netFrameCount;
+            if (IsFrameConfirmed(g_netFrameCount))
+                outPkt.checksum = cs;
+            else
+                outPkt.checksum = 0; // sentinel — unconfirmed, may change after rollback
+        }
     }
 
     // Fill timesync timestamps — record local QPC at the same point in the

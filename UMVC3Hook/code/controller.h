@@ -100,6 +100,10 @@ extern "C" void Controller_ResolveRemoteInput(int32_t frame);
 // Log the inputs used during a re-simmed frame for debugging.
 extern "C" void Controller_LogReSimFrame(int32_t frame);
 
+// Compute and store local checksum for a given frame (called during resim
+// to update checksums after corrected inputs are applied).
+extern "C" void Controller_StoreChecksum(int32_t frame);
+
 // Silent frame-boundary helpers for re-sim — maintain the local input shift
 // buffer without draining packets or sending outbound data.
 extern "C" void Controller_SilentFrameStart();
