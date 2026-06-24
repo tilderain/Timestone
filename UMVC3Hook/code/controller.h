@@ -103,11 +103,6 @@ extern "C" void Controller_LogReSimFrame(int32_t frame);
 // Check and log whether received remote input exists for each frame in [startFrame, endFrame).
 // Prints all results as a single contiguous block before resimulation begins.
 extern "C" void Controller_LogReceivedInputAvailability(int32_t startFrame, int32_t endFrame);
-
-// Compute and store local checksum for a given frame (called during resim
-// to update checksums after corrected inputs are applied).
-extern "C" void Controller_StoreChecksum(int32_t frame);
-
 // Silent frame-boundary helpers for re-sim — maintain the local input shift
 // buffer without draining packets or sending outbound data.
 extern "C" void Controller_SilentFrameStart();
