@@ -1042,6 +1042,10 @@ void Rollback_ReSimulate(int32_t startFrame, int32_t endFrame)
     // 1. Rewind to the starting frame boundary
     Rollback_RestoreSnapshot(startFrame);
 
+    // Diagnostic: log whether we actually have received input for every frame
+    // in the resim range before we start stepping.
+    Controller_LogReceivedInputAvailability(startFrame, endFrame);
+
     // [EXPERIMENTAL] mJobThreadNumInit=1 — see mvc3/rollback R3-SIMLOOP
     // uint64_t sMain_job = *(uint64_t*)_addr(PTR_SMAIN);
     // uint32_t saved_job_thread_num_init = 0;

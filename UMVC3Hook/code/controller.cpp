@@ -262,6 +262,19 @@ static uint64_t g_localFrameQPC[RING_SIZE];       // QPC when each local frame w
 static int32_t  g_localFrameQPC_Frame[RING_SIZE]; // frame number for each QPC entry (-1 = unused)
 static uint64_t g_lastSendQPC = 0;                // QPC when we last sent a packet
 
+// Log the contents of a received input packet: which frames got which inputs.
+static void LogReceivedPacket(const InputPacket& pkt)
+{
+    return;
+    int32_t start = (int32_t)pkt.start_frame;
+    int32_t end = start + NET_HISTORY_SIZE - 1;
+    HookLog("[%s] RCV pkt frames [%d-%d]:",
+            Netplay_IsHost() ? "H" : "C", start, end);
+    for (size_t i = 0; i < NET_HISTORY_SIZE; i++)
+        HookLog(" %d=0x%04X", start + (int32_t)i, pkt.inputs[i]);
+    HookLog("\n");
+}
+
 // Helper: current time in microseconds (QPC-based)
 static inline uint64_t GetUs()
 {
@@ -409,7 +422,47 @@ extern "C" void Controller_ResolveRemoteInput(int32_t frame)
     }
     else
     {
-        // Predict using the latest confirmed frame's input
+        // Drain any inbound packets that arrived since last check
+        InputPacket pkt;
+        while (Netplay_GetInboundPacket(pkt))
+        {
+            int32_t pktMaxFrame = (int32_t)pkt.start_frame + NET_HISTORY_SIZE - 1;
+            if (pktMaxFrame <= g_lastRemoteFrame)
+                continue;
+            for (size_t i = 0; i < NET_HISTORY_SIZE; i++)
+            {
+                int32_t targetFrame = (int32_t)pkt.start_frame + (int32_t)i;
+                if (targetFrame >= 0)
+                {
+                    g_receivedInput[(uint32_t)targetFrame % RING_SIZE] = pkt.inputs[i];
+                    g_confirmedFrame[(uint32_t)targetFrame % RING_SIZE] = targetFrame;
+                    if (targetFrame > g_lastRemoteFrame)
+                    {
+                        g_lastRemoteFrame = targetFrame;
+                        g_lastRemoteInput = pkt.inputs[i];
+                    }
+                }
+            }
+
+            LogReceivedPacket(pkt);
+        }
+
+        if (IsFrameConfirmed(frame))
+        {
+            g_usedRemoteInput[idx] = g_receivedInput[idx];
+            return;
+        }
+
+        if (g_isResimulating)
+        {
+            HookLog("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n"
+                    "!!! HORRIBLE WARNING: ReSim frame %d — remote input NOT YET     !!!\n"
+                    "!!! received! Injecting PREDICTED input instead. This means the !!!\n"
+                    "!!! rollback may produce INCORRECT results!                      !!!\n"
+                    "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n",
+                    frame);
+        }
+
         uint32_t prediction = 0;
         bool found = false;
         for (int32_t f = frame - 1; f >= 0 && f >= frame - 250; f--)
@@ -439,6 +492,32 @@ extern "C" void Controller_LogReSimFrame(int32_t frame)
             g_recordedLocalInput[idx],
             g_usedRemoteInput[idx],
             IsFrameConfirmed(frame) ? g_receivedInput[idx] : 0);
+}
+
+extern "C" void Controller_LogReceivedInputAvailability(int32_t startFrame, int32_t endFrame)
+{
+    return;
+    if (startFrame >= endFrame) return;
+
+    int32_t missingCount = 0;
+    int32_t confirmedCount = 0;
+
+    HookLog("[%s] Received input availability for frames [%d, %d):\n",
+            Netplay_IsHost() ? "host" : "client", startFrame, endFrame);
+    for (int32_t f = startFrame; f < endFrame; f++)
+    {
+        uint32_t idx = (uint32_t)f % RING_SIZE;
+        bool confirmed = IsFrameConfirmed(f);
+        if (confirmed)
+            confirmedCount++;
+        else
+            missingCount++;
+        HookLog("  frame %d: %s recv=0x%08X\n",
+                f, confirmed ? "CONFIRMED" : "MISSING",
+                confirmed ? g_receivedInput[idx] : 0);
+    }
+    HookLog("  summary: %d confirmed, %d missing out of %d frames\n",
+            confirmedCount, missingCount, endFrame - startFrame);
 }
 
 static uint32_t ComputeChecksum();
@@ -658,6 +737,8 @@ extern "C" void Controller_OnFrameStart()
             }
         }
 
+        LogReceivedPacket(inPkt);
+
         // Piggybacked checksum (Slippi-style): extract and compare.
         // checksum == 0 is a sentinel meaning "not yet confirmed" — skip it.
         if (g_netFrameCount >= DESYNC_SKIP_FRAMES)
@@ -772,6 +853,8 @@ extern "C" void Controller_OnFrameStart()
                             }
                         }
 
+                        LogReceivedPacket(waitPkt);
+
                         int32_t wcsFrame = (int32_t)waitPkt.checksum_frame;
                         if (wcsFrame >= 0 && waitPkt.checksum != 0)
                         {
@@ -796,10 +879,17 @@ extern "C" void Controller_OnFrameStart()
                 }
             }
 
-            // --- Rollback detection: check if any newly received input for a frame
-            //     we already simulated differs from what we predicted/used.
-            //     If so, request a re-sim from the earliest conflicting frame.
-            if (g_netFrameCount > 0)
+            // --- Rollback detection: only check for conflicts when the current
+            //     frame's input has arrived.  Since each packet covers
+            //     MAX_HISTORY (16) frames, confirming g_netFrameCount means the
+            //     entire rollback window [g_netFrameCount - g_rollbackFrames,
+            //     g_netFrameCount) is covered — zero missing inputs during re-sim.
+
+
+            //NOTE TODO: Investigate whether or not multiple resims is viable and is better for this.
+            //i.e, resimulating to current frame with only 1 confirmed input and 8 predicted inputs, then if those predictions are wrong
+            //resimulate AGAIN from that frame ...
+            if (g_netFrameCount > 0 && IsFrameConfirmed(g_netFrameCount))
             {
                 int32_t checkStart = g_netFrameCount - g_rollbackFrames;
                 if (checkStart < 0) checkStart = 0;
@@ -857,6 +947,8 @@ extern "C" void Controller_OnFrameStart()
                             }
                         }
                     }
+
+                    LogReceivedPacket(waitPkt);
                 }
             }
     }
