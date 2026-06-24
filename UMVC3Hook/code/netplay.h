@@ -48,8 +48,8 @@ struct InputPacket {
     uint32_t checksum_frame;     // game frame this checksum is for (past frame)
     uint32_t checksum;           // checksum of game state at checksum_frame
     uint32_t inputs[NET_HISTORY_SIZE];
-    uint64_t timestamp_us;       // sender's QPC in microseconds at send time
-    uint64_t echo_timestamp_us;  // timestamp_us from remote's most recent packet (0 = none)
+    int32_t  frame_advantage;    // sender's local frame advantage (negative = sender is ahead)
+    uint32_t flags;              // 0 = seed packet, non-zero = real packet
 };
 
 struct DelayPacket {

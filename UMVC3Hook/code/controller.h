@@ -119,9 +119,9 @@ extern "C" bool     Controller_IsRollbackEnabled();
 extern "C" uint32_t Controller_GetRecordedLocalInput(int32_t frame);
 extern "C" uint32_t Controller_GetUsedRemoteInput(int32_t frame);
 
-// Timesync info for overlay display
-extern "C" int64_t  Controller_GetTimesyncAdvantage();
-extern "C" uint64_t Controller_GetAvgRttUs();
+// Frame advantage info for overlay display (GGPO-style)
+extern "C" int32_t  Controller_GetLocalFrameAdvantage();
+extern "C" int32_t  Controller_GetRemoteFrameAdvantage();
 
 // Runtime delay adjustment — called from framestepper UI or netplay inbound
 extern "C" void     Controller_SetDelayFrames(int32_t delay);
@@ -134,8 +134,6 @@ extern int32_t      g_desyncFrame;
 extern uint32_t     g_desyncLocalCS;
 extern uint32_t     g_desyncRemoteCS;
 
-// Timesync (Slippi-style) — frame advantage via QPC timestamps
-extern uint64_t     g_lastRemoteTimestampUs;  // timestamp_us from peer's most recent packet
-extern uint64_t     g_avgRttUs;               // exponential-moving-average round-trip time (us)
-extern int64_t      g_clockOffsetUs;          // estimated peer clock minus local clock (us)
-extern int64_t      g_timesyncAdvantage;      // smoothed diff: local_QPC − remote_QPC (us); positive = we're behind
+// Frame advantage (GGPO-style) — frame-count-based timesync
+extern int32_t      g_localFrameAdvantage;    // negative = we're ahead of remote
+extern int32_t      g_remoteFrameAdvantage;   // received from peer (their local advantage)
