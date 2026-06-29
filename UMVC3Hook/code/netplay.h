@@ -6,15 +6,21 @@
 // Netplay: rollback netcode input transport over ENet.
 //
 // Architecture:
-//   Local physical input is accumulated per-character in hkprocessFrameInput.
-//   Each frame's raw accumulated input is written into a delay ring buffer at
-//   (currentFrame + delayFrames), and sent as a sliding-history window
-//   (NET_HISTORY_SIZE entries) over the wire.
+//   Raw physical input is captured at the pad level by
+//   hkGetsCurrentInput_withSOCD.  For the local player, raw input is
+//   accumulated into a delay shift buffer (g_oldInputs[]) and the delayed
+//   value is returned to the native pipeline — letting button remapping,
+//   face-left flipping, SOCD cleaning, and all history rings populate
+//   naturally.  For the remote player, the centrally-resolved network input
+//   (g_usedRemoteInput) is returned instead of the physical pad value.
 //
-//   On receipt, every history slot is written into the OTHER player's delay
-//   buffer at a relative offset from the receiver's current frame, providing
-//   resilience against packet loss.  Both sides read at currentFrame during
-//   hkprocessFrameInput — symmetric input delay for both players.
+//   Each frame's accumulated local input is sent as a sliding-history window
+//   (NET_HISTORY_SIZE entries) over the wire, indexed by the sender's
+//   absolute frame number.
+//
+//   On receipt, every history slot is written into g_receivedInput[] at
+//   the sender's absolute frame index (% RING_SIZE), binding both games
+//   to the same timeline and preventing drift.
 //
 //   If remote input for the current frame hasn't arrived, we predict using
 //   the last known value.  The rollback engine (rollback.cpp) detects
@@ -25,10 +31,11 @@
 //   A dedicated background thread owns ALL ENet I/O. The game thread
 //   communicates via Win32 critical sections for packet exchange.
 //
-//   A desync-check packet is also sent every frame: it carries a simple
-//   XOR checksum of all character position/state.  If the remote side's
-//   checksum for a frame doesn't match the local checksum, desync is
-//   declared and the game pauses with an on-screen warning.
+//   A checksum packet is piggybacked on every frame's InputPacket: it
+//   carries an additive checksum of all character position/state.  If
+//   the remote side's checksum for a frame diverges from the local
+//   checksum beyond a threshold, desync is declared and the game pauses
+//   with an on-screen warning.
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------

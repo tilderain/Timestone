@@ -1,18 +1,31 @@
 // controller.cpp
 // Decompiled pad/input functions from umvc3.exe, hooked via MinHook.
 //
-// Rollback netplay architecture:
-//   Local input accumulates per-character in hkprocessFrameInput (identical to
-//   original behavior).  At frame end the raw accumulated value is written into
-//   a delay ring buffer at (currentFrame + delayFrames) and also sent over the
-//   wire immediately.
+// Rollback netplay architecture (Option B — sPad level injection):
 //
-//   On receipt, inbound inputs are stored at the sender's absolute frame index
-//   (using inPkt.start_frame), binding both games to the same timeline.
-//   Instead of blocking (spin-wait) when remote input hasn't arrived, we
-//   predict using the last known remote value.  Late-arriving packets are
-//   detected via g_usedRemoteInput vs g_receivedInput comparison, triggering
-//   a rollback + re-simulation with corrected inputs.
+//   PRIMARY HOOK: hkGetsCurrentInput_withSOCD (at 0x1402B3700).
+//   This is the single chokepoint where all input flows into the character
+//   pipeline.  During live frames we return the correct value directly:
+//     - Local player: raw physical input is accumulated into a delay shift
+//       buffer (g_oldInputs[]), and the delayed value is returned so the
+//       native cChrInput__processFrameInput processes it naturally.
+//     - Remote player: the centrally-resolved network input (g_usedRemoteInput)
+//       is returned, bypassing the physical pad entirely.
+//   During re-simulation we return historically recorded values (either
+//   g_recordedLocalInput for the local player or g_usedRemoteInput for the
+//   remote player), enabling the native pipeline to reconstruct state without
+//   any per-field overrides.
+//
+//   SECONDARY: hkprocessFrameInput (at 0x14002DD60) is DIAGNOSTIC-ONLY.
+//   No input overrides are performed — the native pipeline handles button
+//   remapping, face-left flipping, SOCD cleaning, mMask tracking, mOldHeld
+//   preservation, and all ring buffers deterministically from the single
+//   correct input provided by the primary hook.
+//
+//   Frame boundary: Controller_OnFrameStart drains inbound packets and resolves
+//   remote input.  Controller_OnFrameEnd shifts the local delay buffer and
+//   sends the outbound history packet.  The rollback engine (rollback.cpp)
+//   saves snapshots before each tick and re-simulates on late-packet conflict.
 #include "../pch.h"
 #include "controller.h"
 #include "mk10utils.h"
@@ -552,99 +565,119 @@ extern "C" void Controller_SetDelayFrames(int32_t delay)
 // ---------------------------------------------------------------------------
 // hkGetsCurrentInput_withSOCD
 // Hook on GetsCurrentInput_withSOCD at 0x1402B3700.
+//
+// PRIMARY INPUT CHOKEPOINT (Option B — pad-level injection).
+//
+// During live execution this function:
+//   1. Reads native input from the correct pad slot.  The LOCAL player's
+//      physical controller is always on slot 0 on both host and client
+//      (the client maps P2 to slot 0, same as host maps P1 to slot 0).
+//      The client local player (P2) also mixes in keyboard state to match
+//      the pre-refactor behavior.
+//   2. Records the raw value into g_rawLocalInput for future re-simulation.
+//   3. For online play:
+//      a) Local player: accumulates raw input into g_localPending for the
+//         delay shift buffer, then returns the delayed value
+//         (g_oldInputs[MAX_HISTORY - g_delayFrames]) so the native pipeline
+//         in cChrInput__processFrameInput processes it naturally — populating
+//         mHeld, mOldHeld, mMask, mProcessed, button remapping, face-left
+//         flipping, SOCD cleanup, and all ring buffers correctly.
+//      b) Remote player: returns the centrally-resolved network input
+//         (g_usedRemoteInput[frame]), bypassing physical pad entirely.
+//
+// During re-simulation this function returns historically recorded input:
+//   - Online: g_recordedLocalInput for the local player (delayed input
+//     that was actually consumed), g_usedRemoteInput for the remote player.
+//   - Offline (F7): g_rawLocalInput per player.
+//
+// The cChrInput__processFrameInput hook (hkprocessFrameInput) no longer
+// performs any input overrides — the native pipeline now sees the correct
+// input at the pad level and handles all post-processing deterministically.
 // ---------------------------------------------------------------------------
 static uint64_t __fastcall hkGetsCurrentInput_withSOCD(uint64_t pad, uint32_t playerIndex)
 {
+    uint32_t pIdx = playerIndex & 1;
 
-    ///Note here this was changed in the commit after da18134e, it may be wrong
-    bool is_active = Netplay_IsActive();
-
-    // --- Determine raw input via the original function ---
-    uint64_t raw;
-    if (is_active && !g_isResimulating)
+    // --- RESIM PATH: bypass native pad, return recorded historical input ---
+    if (g_isResimulating)
     {
-        if (Netplay_IsHost())
+        uint32_t idx = (uint32_t)g_resimulateCurrentFrame % RING_SIZE;
+        if (Netplay_IsActive())
         {
-            if (playerIndex == 1)
-            {
-                raw = 0;
-            }
-            else
-            {
-                raw = oGetsCurrentInput_withSOCD(pad, playerIndex);
-            }
+            bool isLocal = Netplay_IsHost() ? (pIdx == 0) : (pIdx == 1);
+            return isLocal ? g_recordedLocalInput[idx] : g_usedRemoteInput[idx];
         }
         else
         {
-            if (playerIndex == 0)
-            {
-                raw = 0;
-            }
-            else if (playerIndex == 1)
+            return g_rawLocalInput[pIdx][idx];
+        }
+    }
+
+    // --- LIVE PATH ---
+    uint64_t raw;
+    bool isOnline = Netplay_IsActive();
+
+    if (isOnline)
+    {
+        bool isLocal = Netplay_IsHost() ? (pIdx == 0) : (pIdx == 1);
+        if (isLocal)
+        {
+            // Local player: physical controller is always on slot 0.
+            // On the client the local player is P2 but still reads slot 0.
+            if (Netplay_IsHost())
+                raw = oGetsCurrentInput_withSOCD(pad, 0);
+            else
             {
                 uint32_t padInput = (uint32_t)oGetsCurrentInput_withSOCD(pad, 0);
                 uint32_t kbInput  = ControllerDecomp::keyboardToGameMask(pad);
                 raw = ApplySOCD(padInput | kbInput);
             }
-            else
-            {
-                raw = oGetsCurrentInput_withSOCD(pad, playerIndex);
-            }
+        }
+        else
+        {
+            // Remote player: no physical input — network takes over.
+            raw = 0;
         }
     }
     else
     {
-        if (playerIndex == 1)
-            raw = oGetsCurrentInput_withSOCD(pad, 1);
-        else
-            raw = oGetsCurrentInput_withSOCD(pad, playerIndex);
+        // Offline: native reads from the player's own slot.
+        raw = oGetsCurrentInput_withSOCD(pad, playerIndex);
     }
 
-    // --- Capture raw input for ALL players every live frame (both netplay
-    //     and offline/training).  During resim these recorded values are
-    //     returned so the history rings inside cChrInput__processFrameInput
-    //     receive the correct historical inputs instead of current physical. ---
-    if (!g_isResimulating)
+    // Record raw input for offline re-simulation diagnostics.
+    // Uses the real-time frame counter (GetGameFrameCount) since this
+    // is only consumed by the offline F7 re-sim path where the frame
+    // counter advances predictably.
+    int32_t realFrame = GetGameFrameCount();
+    if (realFrame >= 0)
+        g_rawLocalInput[pIdx][(uint32_t)realFrame % RING_SIZE] = (uint32_t)raw;
+
+    // Offline: return native input as-is — no delay, no network.
+    if (!isOnline)
+        return raw;
+
+    // --- Online live: ---
+    // Use g_netFrameCount (pre-tick snapshot from Controller_OnFrameStart)
+    // for all indexed lookups.  GetGameFrameCount may have advanced mid-tick
+    // when sReplay+0x54 is incremented, which would index the wrong slot.
+    int32_t frame = g_netFrameCount;
+    bool haveFrame = (frame >= 0);
+
+    bool isLocal = Netplay_IsHost() ? (pIdx == 0) : (pIdx == 1);
+
+    if (isLocal)
     {
-        int32_t frame = GetGameFrameCount();
-        if (frame >= 0)
-        {
-            uint32_t pIdx = (uint32_t)playerIndex & 1;
-            g_rawLocalInput[pIdx][(uint32_t)frame % RING_SIZE] = (uint32_t)raw;
-        }
+        // Return raw input — native processFrameInput will process this
+        // and hkprocessFrameInput will override with the delayed value.
+        return raw;
     }
-
-    // --- DURING RESIM: return recorded raw per-player input.
-    //     Note: For online, this value is immediately overwritten by
-    //     sNetPad__readBufferedInputForTeam inside the native
-    //     processFrameInput, so this only affects the offline resim
-    //     path or the intermediate buttonRemap step.
-    //     For online resim the TRUE input source is the netpad ring
-    //     (which we must snapshot-restore separately — see
-    //     Controller_SaveRollbackState sNetPad cursor save).
-    if (g_isResimulating)
+    else
     {
-        uint32_t idx = (uint32_t)g_resimulateCurrentFrame % RING_SIZE;
-        if (is_active)
-        {
-            bool isLocalPlayer = Netplay_IsHost() ? (playerIndex == 0) : (playerIndex == 1);
-            if (isLocalPlayer)
-                return g_recordedLocalInput[idx];
-            else
-                return g_usedRemoteInput[idx];
-        }
-        else
-        {
-            // Singleplayer offline resim: return per-player raw input recorded
-            // during the live frames.  g_rawLocalInput is populated on every
-            // non-resim frame regardless of netplay state (unlike
-            // g_recordedLocalInput which is only written by
-            // Controller_OnFrameEnd for netplay).
-            return g_rawLocalInput[(uint32_t)playerIndex & 1][idx];
-        }
+        // Remote player: no physical input — native processFrameInput will
+        // see 0 and hkprocessFrameInput will override with network input.
+        return 0;
     }
-
-    return raw;
 }
 
 // ---------------------------------------------------------------------------
@@ -671,19 +704,25 @@ static void __fastcall hkStepIntro(uint64_t param_1)
 // Frame Boundary Synchronization  (nifi.cpp-style)
 //
 // Controller_OnFrameStart (called before oMove):
-//   - Increment frame counter, reset accumulator
+//   - Increment frame counter, reset local pending accumulator
 //   - Drain inbound packets: store each history slot at (frame % RING_SIZE)
+//   - Resolve remote input for the current frame
 //
 // Controller_OnFrameEnd (called after oMove):
-//   - Read delayed local input from oldInputs (BEFORE shifting), then shift
-//     the buffer and write the current accumulator at the end
+//   - Resolve remote input for the completed frame (render thread reads)
+//   - Record the delayed local input from oldInputs (historical ref)
+//   - Shift the delay buffer and write the current accumulator at the end
 //   - Send outbound packet: MAX_HISTORY slots, starting from
 //     (currentFrame + g_delayFrames - MAX_HISTORY + 1)
 //     → newest slot maps to (currentFrame + g_delayFrames) on the wire
 //
-// hkprocessFrameInput (per character, inside oMove):
-//   LOCAL:  accumulate, overwrite fields with delayed oldInputs value
-//   REMOTE: overwrite fields with g_receivedInput[currentFrame % RING_SIZE]
+// hkGetsCurrentInput_withSOCD (inside oMove, per player):
+//   - Returns delayed local input (from g_oldInputs[] shift buffer) or
+//     resolved remote input (from g_usedRemoteInput[]).
+//   - Accumulates raw physical input into g_localPending for the next
+//     shift-buffer append.
+//   - No overrides needed in hkprocessFrameInput — the native pipeline
+//     receives the correct input at the pad level.
 // ---------------------------------------------------------------------------
 extern "C" void Controller_OnFrameStart()
 {
@@ -1122,23 +1161,34 @@ extern "C" void Controller_OnFrameEnd()
 
 // ---------------------------------------------------------------------------
 // hkprocessFrameInput
-// Hook on processFrameInput at 0x14002DD60.
+// Hook on cChrInput__processFrameInput at 0x14002DD60.
 //
-// LOCAL:  accumulate native-processed input, then overwrite character fields
-//         with the delayed value from g_oldInputs.
-// REMOTE: overwrite character fields with g_receivedInput[currentFrame].
+// DIAGNOSTIC-ONLY HOOK (Option B architecture).
 //
-// Both players experience the same delay: local via the shift buffer,
-// remote via the frame-indexed receive array and network transport.
+// All input injection is handled one layer up in hkGetsCurrentInput_withSOCD,
+// which returns the correct value (delayed local or resolved remote) directly
+// at the pad level.  The native processFrameInput then runs its full pipeline
+// — button remapping, face-left flipping, SOCD cleanup, mMask tracking,
+// mOldHeld preservation, and population of all history rings (mHeldRing,
+// mPressedRing, mReleasedRing, mDirectionHistory512) — deterministically
+// from that single correct input value.
+//
+// This hook serves ONLY to capture diagnostic data for desync debugging.
 // ---------------------------------------------------------------------------
 static void __fastcall hkprocessFrameInput(uint64_t cChrInput)
 {
-    // 1. Run native translation first so cChrInput fields (+0x14, etc.) populate normally.
+    // 1. Run native pipeline so button remapping, SOCD cleanup, mMask
+    //    tracking, mOldHeld preservation, and all ring buffers populate
+    //    from the physical-level input returned by hkGetsCurrentInput_withSOCD.
     oprocessFrameInput(cChrInput);
 
-    if (!Netplay_IsActive())
+    bool is_online = Netplay_IsActive();
+
+    // Offline: no overrides needed — native pipeline sees correct physical input.
+    if (!is_online && !g_isResimulating)
         return;
 
+    // Before the game's frame counter is ready, let the native pipeline run unmodified.
     if (g_netFrameCount < 0)
         return;
 
@@ -1150,88 +1200,52 @@ static void __fastcall hkprocessFrameInput(uint64_t cChrInput)
     static getTeamIdx_t fnGetTeamIdx = (getTeamIdx_t)_addr(ADDR_GET_TEAM_INDEX);
     uint32_t teamIdx = fnGetTeamIdx(character);
 
-    DiagLogPreOverride(cChrInput, teamIdx);
+    // Determine local vs. remote from team index
+    bool isLocal = Netplay_IsHost() ? (teamIdx == 0) : (teamIdx == 1);
 
     int32_t lookupFrame = g_isResimulating ? g_resimulateCurrentFrame : g_netFrameCount;
 
-    if (Netplay_IsHost())
+    if (is_online)
     {
-        if (teamIdx == 0)
+        uint32_t overrideInput;
+        if (g_isResimulating)
         {
-            // Host P1 (Local)
-            uint32_t delayed;
-            if (g_isResimulating)
+            overrideInput = isLocal
+                ? g_recordedLocalInput[(uint32_t)lookupFrame % RING_SIZE]
+                : g_usedRemoteInput[(uint32_t)lookupFrame % RING_SIZE];
+        }
+        else
+        {
+            if (isLocal)
             {
-                delayed = g_recordedLocalInput[(uint32_t)lookupFrame % RING_SIZE];
-            // Resim: snapshot restore + oprocessFrameInput's mOldHeld copy at
-            // cChrInput+0x10 already provides the correct prev-frame values
-            // for +0x10, +0x18, +0x1C, +0x20.  DO NOT override them here —
-            // setting all four to the same value destroys the XOR edge
-            // detection in the direction processor (FUN_14002E5A0).
+                // Local player: accumulate native-processed mHeld, read delayed value
+                g_localPending |= *(uint32_t*)(cChrInput + 0x14);
+                overrideInput = g_oldInputs[MAX_HISTORY - g_delayFrames];
             }
             else
             {
-                // Live: accumulate and read from delay buffer
-                g_localPending |= *(uint32_t*)(cChrInput + 0x14);
-                delayed = g_oldInputs[MAX_HISTORY - g_delayFrames];
-                // Live: native engine already set aux fields from physical input history
+                // Remote player: use centrally-resolved network input
+                overrideInput = lookupFrame >= 0
+                    ? g_usedRemoteInput[(uint32_t)lookupFrame % RING_SIZE]
+                    : 0;
             }
-            *(uint32_t*)(cChrInput + 0x14)  = delayed; // mHeld
-            *(uint32_t*)(cChrInput + 0x560) = delayed; // mRemapped
-            *(uint32_t*)(cChrInput + 0x56C) = delayed; // mProcessed
-            *(uint32_t*)(cChrInput + 0x568) = 0;        // mMask — clear, next processFrameInput re-accumulates
         }
-        else if (teamIdx == 1)
-        {
-            uint32_t remote = g_usedRemoteInput[(uint32_t)lookupFrame % RING_SIZE];
-            *(uint32_t*)(cChrInput + 0x14)  = remote; // mHeld
-            *(uint32_t*)(cChrInput + 0x560) = remote; // mRemapped
-            *(uint32_t*)(cChrInput + 0x56C) = remote; // mProcessed
-            *(uint32_t*)(cChrInput + 0x568) = 0;        // mMask — clear
-        }
-    }
-    else // Client
-    {
-        if (teamIdx == 0)
-        {
-            // Client P1 (Remote): read centrally-resolved input
-            uint32_t remote = g_usedRemoteInput[(uint32_t)lookupFrame % RING_SIZE];
-            *(uint32_t*)(cChrInput + 0x14)  = remote; // mHeld
-            *(uint32_t*)(cChrInput + 0x560) = remote; // mRemapped
-            *(uint32_t*)(cChrInput + 0x56C) = remote; // mProcessed
-            *(uint32_t*)(cChrInput + 0x568) = 0;        // mMask — clear
-            // NOTE: Do NOT override +0x10/+0x18/+0x1C/+0x20 here during resim —
-            // snapshot restore + oprocessFrameInput's mOldHeld copy provide
-            // correct prev-frame values; overriding breaks XOR edge detection.
-        }
-        else if (teamIdx == 1)
-        {
-            uint32_t delayed;
-            if (g_isResimulating)
-            {
-                delayed = g_recordedLocalInput[(uint32_t)lookupFrame % RING_SIZE];
-            }
-            else
-            {
-                g_localPending |= *(uint32_t*)(cChrInput + 0x14);
-                delayed = g_oldInputs[MAX_HISTORY - g_delayFrames];
-            }
 
-            *(uint32_t*)(cChrInput + 0x14)  = delayed; // mHeld
-            *(uint32_t*)(cChrInput + 0x560) = delayed; // mRemapped
-            *(uint32_t*)(cChrInput + 0x56C) = delayed; // mProcessed
-            *(uint32_t*)(cChrInput + 0x568) = 0;        // mMask — clear
-        }
+        *(uint32_t*)(cChrInput + 0x14)  = overrideInput; // mHeld
+        *(uint32_t*)(cChrInput + 0x560) = overrideInput; // mRemapped
+        *(uint32_t*)(cChrInput + 0x56C) = overrideInput; // mProcessed
+        *(uint32_t*)(cChrInput + 0x568) = 0;             // mMask — clear
     }
-    
+
+    // --- Diagnostic logging only below this point ---
+    DiagLogPreOverride(cChrInput, teamIdx);
     DiagCaptureLiveRef(cChrInput, teamIdx, g_netFrameCount);
-
     DiagLogPostOverride(cChrInput, teamIdx);
 
     if (g_postResimFrame >= 0 && !g_isResimulating)
         DiagLogPostResim(cChrInput, teamIdx, g_netFrameCount);
 
-    DiagLogActDbg(cChrInput, teamIdx, g_isResimulating ? g_resimulateCurrentFrame : g_netFrameCount, g_isResimulating);
+    DiagLogActDbg(cChrInput, teamIdx, lookupFrame, g_isResimulating);
 }
 
 
@@ -1277,7 +1291,9 @@ void Controller_InitHooks()
 {
     MH_STATUS s;
 
-    // GetsCurrentInput_withSOCD — primary hook for netplay P2 injection
+    // GetsCurrentInput_withSOCD — PRIMARY INPUT CHOKEPOINT (Option B).
+    // All input flows through this hook — delayed local, resolved remote,
+    // and re-simulation paths.
     s = MH_CreateHook(
         (LPVOID)_addr(ADDR_GET_CURRENT_INPUT),
         (LPVOID)&hkGetsCurrentInput_withSOCD,
@@ -1299,7 +1315,9 @@ void Controller_InitHooks()
     else
         HookLog("Controller: Failed to hook stepIntro (%d)\n", s);
 
-    // cChrInput__processFrameInput — netplay client/host synchronization
+    // cChrInput__processFrameInput — DIAGNOSTIC-ONLY (Option B arch).
+    // No input overrides performed; the native pipeline receives the
+    // correct input from hkGetsCurrentInput_withSOCD.
     s = MH_CreateHook(
         (LPVOID)_addr(ADDR_PROCESS_FRAME_INPUT),
         (LPVOID)&hkprocessFrameInput,
