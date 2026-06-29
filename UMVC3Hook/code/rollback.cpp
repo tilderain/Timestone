@@ -104,6 +104,10 @@ int32_t g_resimRequestedStart   = -1;
 int32_t g_resimRequestedEnd     = -1;
 int32_t g_restoreRequestedFrame = -1;
 
+int     g_f7State      = 0;
+int32_t g_f7StartFrame = 0;
+int     g_f7Remaining  = 0;
+
 // Rollback request from controller.cpp — late input arrived that differs
 // from what was predicted.  Start/end inclusive frame range.
 static int32_t g_rollbackReqStart = -1;
@@ -1363,7 +1367,9 @@ void Rollback_ReSimulate(int32_t startFrame, int32_t endFrame)
         // [EXPERIMENTAL] g_virtual_qpc = g_qpc_history[f % ROLLBACK_WINDOW];
         // Re-resolve remote input so re-sim uses the latest received data,
         // not the stale prediction that triggered the conflict.
-        Controller_ResolveRemoteInput(f);
+        if (Netplay_IsActive()) {
+            Controller_ResolveRemoteInput(f);
+        }
         Controller_SilentFrameStart();
         oMvc3Main_move(g_sMvc3Main);
         Controller_SilentFrameEnd();
@@ -1548,6 +1554,34 @@ static void __fastcall hkMvc3Main_move(uint64_t param_1)
         g_resimRequestedEnd   = -1;
         Rollback_ReSimulate(rs, re);
         // After re-sim, let the normal frame proceed
+    }
+
+    // F7 re-sim test: save snapshot, record N frames of normal play, restore
+    // and re-sim with the captured inputs (exercises the full rollback path).
+    if (g_f7State == 1) {
+        Rollback_SaveSnapshot(g_f7StartFrame);
+        g_f7State = 2;
+        HookLog("F7: snapshot saved at frame %d, recording %d frames\n",
+                g_f7StartFrame, g_f7Remaining);
+    }
+    if (g_f7State == 2) {
+        g_f7Remaining--;
+        if (g_f7Remaining <= 0) {
+            g_f7State = 0;
+            HookLog("F7: %d frames recorded, restoring frame %d and re-simulating\n",
+                    8, g_f7StartFrame);
+            Rollback_ReSimulate(g_f7StartFrame, g_f7StartFrame + 8);
+
+            // Mirror the netplay post-resim setup:
+            //   1. Re-save the snapshot at the current frame so the ring buffer
+            //      reflects the corrected state (not the stale pre-resim state).
+            //   2. Flag the first post-resim live tick for diagnostics.
+            int32_t curFrame = (int32_t)Controller_GetNetFrameCount();
+            if (curFrame >= 0) {
+                Rollback_SaveSnapshot(curFrame);
+                g_postResimFrame = curFrame;
+            }
+        }
     }
 
     if (g_isResimulating) {

@@ -36,6 +36,15 @@ extern int32_t g_restoreRequestedFrame;
 // diagnostic info at the resim→live boundary.  Cleared after first use.
 extern int32_t g_postResimFrame;
 
+// F7 re-sim test state machine:
+//   0 = idle
+//   1 = save snapshot on next frame boundary, then enter state 2
+//   2 = counting down g_f7Remaining frames of normal play
+//       when g_f7Remaining hits 0 → restore snapshot + re-sim
+extern int      g_f7State;
+extern int32_t  g_f7StartFrame;
+extern int      g_f7Remaining;
+
 // Request a re-simulate from the controller layer — consumed by hkMvc3Main_move.
 // Called when late-arriving remote input differs from what was predicted.
 void Rollback_RequestReSimulate(int32_t startFrame, int32_t endFrame);

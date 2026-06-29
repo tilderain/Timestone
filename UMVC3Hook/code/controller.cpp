@@ -635,7 +635,12 @@ static uint64_t __fastcall hkGetsCurrentInput_withSOCD(uint64_t pad, uint32_t pl
         }
         else
         {
-            return g_recordedLocalInput[idx];
+            // Singleplayer offline resim: return per-player raw input recorded
+            // during the live frames.  g_rawLocalInput is populated on every
+            // non-resim frame regardless of netplay state (unlike
+            // g_recordedLocalInput which is only written by
+            // Controller_OnFrameEnd for netplay).
+            return g_rawLocalInput[(uint32_t)playerIndex & 1][idx];
         }
     }
 
