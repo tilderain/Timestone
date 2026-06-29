@@ -507,28 +507,38 @@ static void Controller_LogResimNotify(int32_t startFrame, int32_t endFrame)
 
 extern "C" void Controller_LogReceivedInputAvailability(int32_t startFrame, int32_t endFrame)
 {
-    return;
     if (startFrame >= endFrame) return;
 
-    int32_t missingCount = 0;
+    int32_t predictedCount = 0;
     int32_t confirmedCount = 0;
+    int32_t conflictCount = 0;
 
-    HookLog("[%s] Received input availability for frames [%d, %d):\n",
+    HookLog("[%s] Remote input summary for re-sim frames [%d, %d):\n",
             Netplay_IsHost() ? "host" : "client", startFrame, endFrame);
+    HookLog("  %-8s %-12s %-12s %s\n", "Frame", "Predicted", "Received", "Status");
     for (int32_t f = startFrame; f < endFrame; f++)
     {
         uint32_t idx = (uint32_t)f % RING_SIZE;
         bool confirmed = IsFrameConfirmed(f);
-        if (confirmed)
-            confirmedCount++;
-        else
-            missingCount++;
-        HookLog("  frame %d: %s recv=0x%08X\n",
-                f, confirmed ? "CONFIRMED" : "MISSING",
-                confirmed ? g_receivedInput[idx] : 0);
+        uint32_t predicted = g_usedRemoteInput[idx];
+        uint32_t received = confirmed ? g_receivedInput[idx] : 0;
+        const char* status;
+        if (confirmed) {
+            if (predicted == received) {
+                status = "CONFIRMED";
+                confirmedCount++;
+            } else {
+                status = "CONFLICT";
+                conflictCount++;
+            }
+        } else {
+            status = "PREDICTED";
+            predictedCount++;
+        }
+        HookLog("  %-8d 0x%08X 0x%08X %s\n", f, predicted, received, status);
     }
-    HookLog("  summary: %d confirmed, %d missing out of %d frames\n",
-            confirmedCount, missingCount, endFrame - startFrame);
+    HookLog("  summary: %d confirmed, %d conflict, %d predicted out of %d frames\n",
+            confirmedCount, conflictCount, predictedCount, endFrame - startFrame);
 }
 // Silent frame-boundary helpers for re-simulation — maintain the local input
 // shift buffer without draining inbound packets or sending outbound data.

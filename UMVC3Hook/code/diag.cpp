@@ -208,6 +208,13 @@ void DiagLogPostOverride(uint64_t cChrInput, uint32_t teamIdx)
             lr.actionId, lr.flags14F0,
             lr.posX, lr.posY, lr.posZ);
 
+    uint32_t intendedInput = Controller_GetUsedRemoteInput(f);
+    uint32_t actualHeld = *(uint32_t*)(cChrInput + 0x14);
+    if (g_isResimulating && intendedInput != actualHeld) {
+        HookLog("INJECTION MISMATCH frame=%d team=%d: intended 0x%08X but cChrInput+0x14 = 0x%08X\n",
+                f, teamIdx, intendedInput, actualHeld);
+    }
+
     if (actionId != lr.actionId) {
         HookLog("ActDiv frame=%d team=%d resim_act=0x%08X live_act=0x%08X mHeld_post=0x%08X mHeld_live=0x%08X fl=0x%08X\n",
             f, teamIdx, actionId, lr.actionId,
