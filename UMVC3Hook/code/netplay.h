@@ -37,6 +37,7 @@
 enum PacketType : uint32_t {
     PACKET_INPUT = 0,  // InputPacket
     PACKET_DELAY = 1,  // DelayPacket
+    PACKET_RESIM_NOTIFY = 2,  // ResimNotifyPacket
 };
 
 #pragma pack(push, 1)
@@ -56,6 +57,29 @@ struct DelayPacket {
     uint32_t type;               // PACKET_DELAY
     int32_t  delay;              // delay frame count
     int32_t  rollbackFrames;     // rollback frame count (both sides stay in sync)
+};
+
+static constexpr int MAX_RESIM_FRAMES = 16;
+
+struct ResimFrameResult {
+    int32_t  frame;          // absolute frame number
+    uint32_t preActionId;    // entry actionId from live reference
+    float    prePosX;        // entry X position from live reference
+    float    prePosY;        // entry Y position from live reference
+    uint32_t postActionId;   // character actionId after resim tick (remote side)
+    float    postPosX;       // character X position after resim tick
+    float    postPosY;       // character Y position after resim tick
+    uint32_t usedInput;      // input used for this frame during resim
+    uint32_t recvInput;      // input received from remote for this frame
+};
+
+struct ResimNotifyPacket {
+    uint32_t type;               // PACKET_RESIM_NOTIFY
+    int32_t  resimStartFrame;    // first frame of re-simulation
+    int32_t  resimEndFrame;      // end frame (exclusive)
+    uint32_t correctedTeam;      // which team (0 or 1) had its input corrected
+    uint32_t frameCount;         // number of valid entries in frames[]
+    ResimFrameResult frames[MAX_RESIM_FRAMES];
 };
 #pragma pack(pop)
 
@@ -93,6 +117,15 @@ void Netplay_SendDelay(int32_t delay);
 
 // Send a rollback-frame control value to the remote peer.
 void Netplay_SendRollback(int32_t rollbackFrames);
+
+// Send a resim-notify packet to the remote peer — signals which frames were
+// re-simulated due to a late-arriving input correction.  The caller should
+// fill ringIdx fields (correctedTeam, frameCount, frames[]) before sending.
+void Netplay_SendResimNotify(const ResimNotifyPacket& pkt);
+
+// Retrieve the last resim-notify received from the remote peer.  Returns true
+// if a new notification was available (consumed by this call).
+bool Netplay_GetInboundResimNotify(ResimNotifyPacket& outNotify);
 
 // Retrieve the last delay value received from the remote peer.  Returns true
 // if a new value was available (it is consumed by this call).

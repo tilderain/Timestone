@@ -118,6 +118,7 @@ extern "C" bool     Controller_IsRollbackEnabled();
 // Executed input accessors — return what the game actually used for each player
 extern "C" uint32_t Controller_GetRecordedLocalInput(int32_t frame);
 extern "C" uint32_t Controller_GetUsedRemoteInput(int32_t frame);
+extern "C" uint32_t Controller_GetReceivedRemoteInput(int32_t frame);
 
 // Frame advantage info for overlay display (GGPO-style)
 extern "C" int32_t  Controller_GetLocalFrameAdvantage();

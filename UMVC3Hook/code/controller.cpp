@@ -18,6 +18,7 @@
 #include "mk10utils.h"
 #include "netplay.h"
 #include "rollback.h"
+#include "diag.h"
 #include "../kiero/minhook/include/MinHook.h"
 #include <cstdint>
 #include <cstring>
@@ -191,33 +192,7 @@ static uint32_t  g_recordedLocalInput[RING_SIZE];
 
 // Live frame reference record: captures post-override state during the original
 // live tick so we can compare it against re-simulation of the same frame.
-struct LiveFrameRecord {
-    uint32_t mHeld;
-    uint32_t m18;
-    uint32_t m1C;
-    uint32_t mRemapped;
-    uint32_t mMask;
-    uint32_t mProcessed;
-    uint64_t frameCnt;
-    uint32_t h590;
-    uint32_t h594;
-    uint64_t heldR0;
-    uint32_t relHead;
-    uint64_t relR0;
-    uint64_t prsR0;
-    uint32_t dir0;
-    uint32_t dir4;
-    uint64_t dirRing0;
-    uint64_t dirRingSlot;
-    uint64_t dirRing1;
-    uint64_t dirRing2;
-    uint32_t actionId;
-    uint32_t flags14F0;
-    float    posX;
-    float    posY;
-    float    posZ;
-};
-static LiveFrameRecord g_liveRef[2][RING_SIZE];
+
 
 // Frame counter — read from the game's own sReplay singleton each frame.
 // g_psReplay pointer   = *(uint64_t*)_addr(0x140d4d9d8)  (Ghidra confirmation)
@@ -311,6 +286,7 @@ extern "C" void Controller_ResetBuffers()
     std::memset(g_recordedLocalInput, 0, sizeof(g_recordedLocalInput));
     std::memset(g_rawLocalInput,      0, sizeof(g_rawLocalInput));  // 2D [2][RING_SIZE]
     std::memset(g_liveRef,            0, sizeof(g_liveRef));
+    Diag_ResetBuffers();
     // g_netFrameCount is read from sReplay each frame; no reset needed.
     g_localPending    = 0;
     g_lastRemoteFrame = -1;
@@ -347,6 +323,11 @@ extern "C" uint32_t Controller_GetUsedRemoteInput(int32_t frame)
 {
     if (frame < 0) return 0;
     return g_usedRemoteInput[(uint32_t)frame % RING_SIZE];
+}
+extern "C" uint32_t Controller_GetReceivedRemoteInput(int32_t frame)
+{
+    if (frame < 0) return 0;
+    return g_receivedInput[(uint32_t)frame % RING_SIZE];
 }
 extern "C" int32_t  Controller_GetLocalFrameAdvantage()  { return g_localFrameAdvantage; }
 extern "C" int32_t  Controller_GetRemoteFrameAdvantage() { return g_remoteFrameAdvantage; }
@@ -484,6 +465,40 @@ extern "C" void Controller_LogReSimFrame(int32_t frame)
             IsFrameConfirmed(frame) ? g_receivedInput[idx] : 0);
 }
 
+// ---------------------------------------------------------------------------
+// Controller_LogResimNotify — called when remote peer reports a re-simulation.
+// Dumps our HISTORICAL live reference data for the contested frames from the
+// g_liveRef ring buffer (captured during the original live tick), so both
+// sides' states can be directly compared.
+// ---------------------------------------------------------------------------
+static void Controller_LogResimNotify(int32_t startFrame, int32_t endFrame)
+{
+    if (startFrame >= endFrame) return;
+    HookLog("ResimNotify: remote re-simmed frames [%d, %d)\n", startFrame, endFrame);
+
+    for (int32_t f = startFrame; f < endFrame; f++)
+    {
+        uint32_t idx = (uint32_t)f % RING_SIZE;
+        uint32_t used = g_usedRemoteInput[idx];
+        uint32_t recv = g_receivedInput[idx];
+        bool confirmed = IsFrameConfirmed(f);
+        HookLog("ResimNotify frame=%d: used=0x%08X recv=0x%08X %s\n",
+                f, used, recv, confirmed ? "CONFIRMED" : "PREDICTED");
+
+        // Dump historical live reference data for both teams
+        for (int ti = 0; ti < 2; ++ti)
+        {
+            const auto& lr = g_liveRef[ti][idx];
+            uint32_t dirMask = (uint32_t)(lr.dirRingSlot >> 32);
+            HookLog("ResimNotify frame=%d team=%d: act=0x%08X mHeld=0x%08X mProc=0x%08X cntr=%llu fl=0x%08X dir=0x%04X pos=(%+.4f,%+.4f,%+.4f)\n",
+                    f, ti,
+                    lr.actionId, lr.mHeld, lr.mProcessed,
+                    (unsigned long long)lr.frameCnt, lr.flags14F0, dirMask,
+                    lr.posX, lr.posY, lr.posZ);
+        }
+    }
+}
+
 extern "C" void Controller_LogReceivedInputAvailability(int32_t startFrame, int32_t endFrame)
 {
     return;
@@ -614,13 +629,13 @@ static uint64_t __fastcall hkGetsCurrentInput_withSOCD(uint64_t pad, uint32_t pl
         {
             bool isLocalPlayer = Netplay_IsHost() ? (playerIndex == 0) : (playerIndex == 1);
             if (isLocalPlayer)
-                return g_rawLocalInput[playerIndex & 1][idx];
+                return g_recordedLocalInput[idx];
             else
-                return 0; // remote: match live behavior, sNetPad supplies the real value
+                return g_usedRemoteInput[idx];
         }
         else
         {
-            return g_rawLocalInput[playerIndex & 1][idx];
+            return g_recordedLocalInput[idx];
         }
     }
 
@@ -744,6 +759,18 @@ extern "C" void Controller_OnFrameStart()
         // this will be negative from their perspective, meaning we're behind →
         // positive from our perspective.
         g_remoteFrameAdvantage = inPkt.frame_advantage;
+    }
+
+    // --- Drain resim-notify packets from the remote peer ---
+    // The remote side notifies us whenever it re-simulates a range of frames
+    // due to late-arriving input correction.  We dump our live character state
+    // for those frames to enable cross-side diagnostic comparison.
+    {
+        ResimNotifyPacket rnPkt;
+        while (Netplay_GetInboundResimNotify(rnPkt))
+        {
+            Controller_LogResimNotify(rnPkt.resimStartFrame, rnPkt.resimEndFrame);
+        }
     }
 
     if (g_rollbackFrames > 0)
@@ -1118,42 +1145,7 @@ static void __fastcall hkprocessFrameInput(uint64_t cChrInput)
     static getTeamIdx_t fnGetTeamIdx = (getTeamIdx_t)_addr(ADDR_GET_TEAM_INDEX);
     uint32_t teamIdx = fnGetTeamIdx(character);
 
-    // Diagnostic logging during resim: capture state BEFORE override
-    if (g_isResimulating) {
-        uint64_t uChar = *(uint64_t*)(cChrInput + 0x08);
-        uint32_t actionId = uChar ? *(uint32_t*)(uChar + 0x1310) : 0xDEAD;
-        uint32_t flags14F0 = uChar ? *(uint32_t*)(uChar + 0x14F0) : 0;
-        int32_t f = g_resimulateCurrentFrame;
-        uint64_t frameCnt = *(uint64_t*)(cChrInput + 0x18);
-        uint32_t head590 = *(uint32_t*)(cChrInput + 0x590);
-        uint32_t head594 = *(uint32_t*)(cChrInput + 0x594);
-        uint32_t slotIdx = frameCnt & 0x3F; // ring of 64 entries
-        uint32_t dir0 = *(uint32_t*)(cChrInput + 0x1B0);
-        uint32_t dir1 = *(uint32_t*)(cChrInput + 0x1B4);
-        float px = uChar ? *(float*)(uChar + 0x50) : 0.0f;
-        float py = uChar ? *(float*)(uChar + 0x54) : 0.0f;
-        float pz = uChar ? *(float*)(uChar + 0x58) : 0.0f;
-        HookLog("ResimDiag frame=%d team=%d pre: mOld=0x%08X mHeld=0x%08X m18=0x%08X m1C=0x%08X mRemapped=0x%08X mMask=0x%08X mProcessed=0x%08X cntr=%llu h590=0x%08X h594=0x%08X heldR0=0x%016llX relHead=0x%08X relR0=0x%016llX prsR0=0x%016llX dir[0]=0x%08X dir[4]=0x%08X d[0]=0x%016llX d[slot]=0x%016llX d[1]=0x%016llX d[2]=0x%016llX act=0x%08X fl=0x%08X pos=(%+.4f,%+.4f,%+.4f)\n",
-                f, teamIdx,
-                *(uint32_t*)(cChrInput + 0x10),
-                *(uint32_t*)(cChrInput + 0x14),
-                *(uint32_t*)(cChrInput + 0x18),
-                *(uint32_t*)(cChrInput + 0x1C),
-                *(uint32_t*)(cChrInput + 0x560),
-                *(uint32_t*)(cChrInput + 0x568),
-                *(uint32_t*)(cChrInput + 0x56C),
-                frameCnt, head590, head594,
-                *(uint64_t*)(cChrInput + 0x28),
-                *(uint32_t*)(cChrInput + 0x0A8),
-                *(uint64_t*)(cChrInput + 0x0AC),
-                *(uint64_t*)(cChrInput + 0x130),
-                dir0, dir1,
-                *(uint64_t*)(cChrInput + 0x360),
-                *(uint64_t*)(cChrInput + 0x360 + slotIdx * 8),
-                *(uint64_t*)(cChrInput + 0x368),
-                *(uint64_t*)(cChrInput + 0x370),
-                actionId, flags14F0, px, py, pz);
-    }
+    DiagLogPreOverride(cChrInput, teamIdx);
 
     int32_t lookupFrame = g_isResimulating ? g_resimulateCurrentFrame : g_netFrameCount;
 
@@ -1227,159 +1219,16 @@ static void __fastcall hkprocessFrameInput(uint64_t cChrInput)
         }
     }
     
-    // Save post-override state as live reference for future resim comparison
-    if (!g_isResimulating && g_netFrameCount >= 0) {
-        uint64_t uChar = *(uint64_t*)(cChrInput + 0x08);
-        uint64_t frameCnt = *(uint64_t*)(cChrInput + 0x18);
-        uint32_t liveIdx = (uint32_t)g_netFrameCount % RING_SIZE;
-        auto& rec = g_liveRef[teamIdx][liveIdx];
-        rec.mHeld       = *(uint32_t*)(cChrInput + 0x14);
-        rec.m18         = *(uint32_t*)(cChrInput + 0x18);
-        rec.m1C         = *(uint32_t*)(cChrInput + 0x1C);
-        rec.mRemapped   = *(uint32_t*)(cChrInput + 0x560);
-        rec.mMask       = *(uint32_t*)(cChrInput + 0x568);
-        rec.mProcessed  = *(uint32_t*)(cChrInput + 0x56C);
-        rec.frameCnt    = frameCnt;
-        rec.h590        = *(uint32_t*)(cChrInput + 0x590);
-        rec.h594        = *(uint32_t*)(cChrInput + 0x594);
-        rec.heldR0      = *(uint64_t*)(cChrInput + 0x28);
-        rec.relHead     = *(uint32_t*)(cChrInput + 0x0A8);
-        rec.relR0       = *(uint64_t*)(cChrInput + 0x0AC);
-        rec.prsR0       = *(uint64_t*)(cChrInput + 0x130);
-        rec.dir0        = *(uint32_t*)(cChrInput + 0x1B0);
-        rec.dir4        = *(uint32_t*)(cChrInput + 0x1B4);
-        rec.dirRing0    = *(uint64_t*)(cChrInput + 0x360);
-        rec.dirRingSlot = *(uint64_t*)(cChrInput + 0x360 + (frameCnt & 0x3F) * 8);
-        rec.dirRing1    = *(uint64_t*)(cChrInput + 0x368);
-        rec.dirRing2    = *(uint64_t*)(cChrInput + 0x370);
-        rec.actionId    = uChar ? *(uint32_t*)(uChar + 0x1310) : 0xDEAD;
-        rec.flags14F0   = uChar ? *(uint32_t*)(uChar + 0x14F0) : 0;
-        rec.posX        = uChar ? *(float*)(uChar + 0x50) : 0.0f;
-        rec.posY        = uChar ? *(float*)(uChar + 0x54) : 0.0f;
-        rec.posZ        = uChar ? *(float*)(uChar + 0x58) : 0.0f;
-    }
+    DiagCaptureLiveRef(cChrInput, teamIdx, g_netFrameCount);
 
-    // Diagnostic logging during resim: capture state AFTER override
-    if (g_isResimulating) {
-        uint64_t uChar = *(uint64_t*)(cChrInput + 0x08);
-        uint32_t actionId = uChar ? *(uint32_t*)(uChar + 0x1310) : 0xDEAD;
-        uint32_t flags14F0 = uChar ? *(uint32_t*)(uChar + 0x14F0) : 0;
-        int32_t f = g_resimulateCurrentFrame;
-        uint64_t frameCnt = *(uint64_t*)(cChrInput + 0x18);
-        uint32_t head590 = *(uint32_t*)(cChrInput + 0x590);
-        uint32_t head594 = *(uint32_t*)(cChrInput + 0x594);
-        uint32_t slotIdx = frameCnt & 0x3F;
-        uint32_t dir0_p = *(uint32_t*)(cChrInput + 0x1B0);
-        uint32_t dir1_p = *(uint32_t*)(cChrInput + 0x1B4);
-        float px = uChar ? *(float*)(uChar + 0x50) : 0.0f;
-        float py = uChar ? *(float*)(uChar + 0x54) : 0.0f;
-        float pz = uChar ? *(float*)(uChar + 0x58) : 0.0f;
-        HookLog("ResimDiag frame=%d team=%d post: mOld=0x%08X mHeld=0x%08X m18=0x%08X m1C=0x%08X mMask=0x%08X mProcessed=0x%08X cntr=%llu h590=0x%08X h594=0x%08X heldR0=0x%016llX relHead=0x%08X relR0=0x%016llX prsR0=0x%016llX dir[0]=0x%08X dir[4]=0x%08X d[0]=0x%016llX d[slot]=0x%016llX d[1]=0x%016llX d[2]=0x%016llX act=0x%08X fl=0x%08X pos=(%+.4f,%+.4f,%+.4f)\n",
-                f, teamIdx,
-                *(uint32_t*)(cChrInput + 0x10),
-                *(uint32_t*)(cChrInput + 0x14),
-                *(uint32_t*)(cChrInput + 0x18),
-                *(uint32_t*)(cChrInput + 0x1C),
-                *(uint32_t*)(cChrInput + 0x568),
-                *(uint32_t*)(cChrInput + 0x56C),
-                frameCnt, head590, head594,
-                *(uint64_t*)(cChrInput + 0x28),
-                *(uint32_t*)(cChrInput + 0x0A8),
-                *(uint64_t*)(cChrInput + 0x0AC),
-                *(uint64_t*)(cChrInput + 0x130),
-                dir0_p, dir1_p,
-                *(uint64_t*)(cChrInput + 0x360),
-                *(uint64_t*)(cChrInput + 0x360 + slotIdx * 8),
-                *(uint64_t*)(cChrInput + 0x368),
-                *(uint64_t*)(cChrInput + 0x370),
-                actionId, flags14F0, px, py, pz);
-        // Dump saved live reference for comparison
-        uint32_t liveIdx = (uint32_t)f % RING_SIZE;
-        auto& lr = g_liveRef[teamIdx][liveIdx];
-        HookLog("ResimDiag frame=%d team=%d live: mHeld=0x%08X m18=0x%08X m1C=0x%08X mMask=0x%08X mProcessed=0x%08X cntr=%llu h590=0x%08X h594=0x%08X heldR0=0x%016llX relHead=0x%08X relR0=0x%016llX prsR0=0x%016llX dir[0]=0x%08X dir[4]=0x%08X d[0]=0x%016llX d[slot]=0x%016llX d[1]=0x%016llX d[2]=0x%016llX act=0x%08X fl=0x%08X pos=(%+.4f,%+.4f,%+.4f)\n",
-                f, teamIdx,
-                lr.mHeld, lr.m18, lr.m1C, lr.mMask, lr.mProcessed,
-                lr.frameCnt, lr.h590, lr.h594,
-                lr.heldR0, lr.relHead, lr.relR0, lr.prsR0,
-                lr.dir0, lr.dir4,
-                lr.dirRing0, lr.dirRingSlot, lr.dirRing1, lr.dirRing2,
-                lr.actionId, lr.flags14F0,
-                lr.posX, lr.posY, lr.posZ);
-        // Highlight when resim actionId diverges from the live reference
-        if (actionId != lr.actionId) {
-            HookLog("ActDiv frame=%d team=%d resim_act=0x%08X live_act=0x%08X mHeld_post=0x%08X mHeld_live=0x%08X fl=0x%08X\n",
-                f, teamIdx, actionId, lr.actionId,
-                *(uint32_t*)(cChrInput + 0x14), lr.mHeld, flags14F0);
-        }
-    }
+    DiagLogPostOverride(cChrInput, teamIdx);
 
-    // Post-resim diagnostic: log the very first live tick after a resim
-    // to check whether actionId/state survives the resim→live boundary.
-    // Flag is cleared at the next hkMvc3Main_move boundary, so ALL characters
-    // in this frame will log.
     if (g_postResimFrame >= 0 && !g_isResimulating)
-    {
-        uint64_t uChar = *(uint64_t*)(cChrInput + 0x08);
-        uint32_t actionId = uChar ? *(uint32_t*)(uChar + 0x1310) : 0xDEAD;
-        uint32_t flags14F0 = uChar ? *(uint32_t*)(uChar + 0x14F0) : 0;
-        uint64_t frameCnt = *(uint64_t*)(cChrInput + 0x18);
-        uint32_t head590 = *(uint32_t*)(cChrInput + 0x590);
-        uint32_t head594 = *(uint32_t*)(cChrInput + 0x594);
-        uint32_t slotIdx = frameCnt & 0x3F;
-        uint32_t dir0_pr = *(uint32_t*)(cChrInput + 0x1B0);
-        uint32_t dir1_pr = *(uint32_t*)(cChrInput + 0x1B4);
-        float px = uChar ? *(float*)(uChar + 0x50) : 0.0f;
-        float py = uChar ? *(float*)(uChar + 0x54) : 0.0f;
-        float pz = uChar ? *(float*)(uChar + 0x58) : 0.0f;
-        HookLog("PostResim frame=%d team=%d mHeld=0x%08X m18=0x%08X m1C=0x%08X mProcessed=0x%08X cntr=%llu h590=0x%08X h594=0x%08X heldR0=0x%016llX relHead=0x%08X relR0=0x%016llX prsR0=0x%016llX dir[0]=0x%08X dir[4]=0x%08X d[0]=0x%016llX d[slot]=0x%016llX d[1]=0x%016llX d[2]=0x%016llX act=0x%08X fl=0x%08X pos=(%+.4f,%+.4f,%+.4f)\n",
-                g_netFrameCount, teamIdx,
-                *(uint32_t*)(cChrInput + 0x14),
-                *(uint32_t*)(cChrInput + 0x18),
-                *(uint32_t*)(cChrInput + 0x1C),
-                *(uint32_t*)(cChrInput + 0x56C),
-                frameCnt, head590, head594,
-                *(uint64_t*)(cChrInput + 0x28),
-                *(uint32_t*)(cChrInput + 0x0A8),
-                *(uint64_t*)(cChrInput + 0x0AC),
-                *(uint64_t*)(cChrInput + 0x130),
-                dir0_pr, dir1_pr,
-                *(uint64_t*)(cChrInput + 0x360),
-                *(uint64_t*)(cChrInput + 0x360 + slotIdx * 8),
-                *(uint64_t*)(cChrInput + 0x368),
-                *(uint64_t*)(cChrInput + 0x370),
-                actionId, flags14F0, px, py, pz);
-    }
+        DiagLogPostResim(cChrInput, teamIdx, g_netFrameCount);
 
-    // Log non-idle states during both live and resim for debugging
-    if (character) {
-        uint64_t uc = *(uint64_t*)(cChrInput + 0x08);
-        if (uc) {
-            uint32_t act = *(uint32_t*)(uc + 0x1310);
-            if (act != 0) {
-                int32_t curF = g_isResimulating ? g_resimulateCurrentFrame : g_netFrameCount;
-                uint64_t fcnt = *(uint64_t*)(cChrInput + 0x18);
-                uint32_t slot = fcnt & 0x3F;
-                uint32_t cBtn = *(uint16_t*)(cChrInput + 0x22);
-                float px = *(float*)(uc + 0x50);
-                float py = *(float*)(uc + 0x54);
-                float pz = *(float*)(uc + 0x58);
-                HookLog("ActDbg frame=%d team=%d act=0x%08X mHeld=0x%08X m18=0x%08X m1C=0x%08X cntr=%llu d[%u]=0x%016llX dir0=0x%08X dir4=0x%08X cBtn=0x%04X fl=0x%08X pos=(%+.4f,%+.4f,%+.4f) %s\n",
-                    curF, teamIdx, act,
-                    *(uint32_t*)(cChrInput + 0x14),
-                    *(uint32_t*)(cChrInput + 0x18),
-                    *(uint32_t*)(cChrInput + 0x1C),
-                    fcnt, slot,
-                    *(uint64_t*)(cChrInput + 0x360 + slot * 8),
-                    *(uint32_t*)(cChrInput + 0x1B0),
-                    *(uint32_t*)(cChrInput + 0x1B4),
-                    cBtn,
-                    *(uint32_t*)(uc + 0x14F0),
-                    px, py, pz,
-                    g_isResimulating ? "RESIM" : "LIVE");
-            }
-        }
-    }
+    DiagLogActDbg(cChrInput, teamIdx, g_isResimulating ? g_resimulateCurrentFrame : g_netFrameCount, g_isResimulating);
 }
+
 
 // ---------------------------------------------------------------------------
 // Offline Mirroring & Standard Hook Implementations

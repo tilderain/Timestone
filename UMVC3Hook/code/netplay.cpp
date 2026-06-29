@@ -42,6 +42,13 @@ static int32_t              g_inboundRollback  = -1;
 static bool                 g_inboundRollbackNew = false;
 static CRITICAL_SECTION     g_delayCS;
 
+// Resim-notify channel — informs the remote peer which frames were re-simulated.
+static ResimNotifyPacket    g_outboundResimNotify = {};
+static bool                 g_outboundResimNotifyNew = false;
+static ResimNotifyPacket    g_inboundResimNotify = {};
+static bool                 g_inboundResimNotifyNew = false;
+static CRITICAL_SECTION     g_resimNotifyCS;
+
 // One-time critical section initialization flag
 static bool                 g_csInitialized  = false;
 
@@ -133,6 +140,30 @@ static DWORD WINAPI Netplay_ServiceThread(LPVOID)
             enet_host_flush(g_host);
         }
 
+        // --- Send outbound resim-notify packet ---
+        bool hasNewResimNotify = false;
+        ResimNotifyPacket rnPkt = {};
+        {
+            ScopedCS lock(g_resimNotifyCS);
+            if (g_outboundResimNotifyNew)
+            {
+                rnPkt = g_outboundResimNotify;
+                hasNewResimNotify = true;
+                g_outboundResimNotifyNew = false;
+            }
+        }
+
+        if (hasNewResimNotify && g_peer)
+        {
+            ENetPacket* packet = enet_packet_create(
+                &rnPkt, sizeof(ResimNotifyPacket), ENET_PACKET_FLAG_UNSEQUENCED
+            );
+            if (enet_peer_send(g_peer, 0, packet) != 0) {
+                enet_packet_destroy(packet);
+            }
+            enet_host_flush(g_host);
+        }
+
         // --- Service the host ---
         if (g_host)
         {
@@ -168,6 +199,18 @@ static DWORD WINAPI Netplay_ServiceThread(LPVOID)
                                         g_inboundDelayNew  = true;
                                         g_inboundRollback     = dp->rollbackFrames;
                                         g_inboundRollbackNew = true;
+                                    }
+                                }
+                                break;
+
+                            case PACKET_RESIM_NOTIFY:
+                                if (event.packet->dataLength >= sizeof(ResimNotifyPacket))
+                                {
+                                    const ResimNotifyPacket* rnp = (const ResimNotifyPacket*)event.packet->data;
+                                    {
+                                        ScopedCS lock(g_resimNotifyCS);
+                                        g_inboundResimNotify = *rnp;
+                                        g_inboundResimNotifyNew = true;
                                     }
                                 }
                                 break;
@@ -217,9 +260,12 @@ void Netplay_Init(ENetHost* host, ENetPeer* peer)
         InitializeCriticalSection(&g_outboundCS);
         InitializeCriticalSection(&g_inboundCS);
         InitializeCriticalSection(&g_delayCS);
+        InitializeCriticalSection(&g_resimNotifyCS);
 
         g_outboundDelayNew = false;
         g_inboundDelayNew = false;
+        g_outboundResimNotifyNew = false;
+        g_inboundResimNotifyNew = false;
         std::memset(&g_outboundPacket, 0, sizeof(InputPacket));
     }
 
@@ -284,6 +330,25 @@ void Netplay_SendRollback(int32_t rollbackFrames)
     ScopedCS lock(g_delayCS);
     g_outboundRollback = rollbackFrames;
     g_outboundRollbackNew = true;
+}
+
+void Netplay_SendResimNotify(const ResimNotifyPacket& pkt)
+{
+    ScopedCS lock(g_resimNotifyCS);
+    g_outboundResimNotify = pkt;
+    g_outboundResimNotifyNew = true;
+}
+
+bool Netplay_GetInboundResimNotify(ResimNotifyPacket& outNotify)
+{
+    ScopedCS lock(g_resimNotifyCS);
+    if (g_inboundResimNotifyNew)
+    {
+        outNotify = g_inboundResimNotify;
+        g_inboundResimNotifyNew = false;
+        return true;
+    }
+    return false;
 }
 
 bool Netplay_GetInboundDelay(int32_t& outDelay)

@@ -161,6 +161,7 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClInclude Include="code\defaults.h" />
+    <ClInclude Include="code\diag.h" />
     <ClInclude Include="code\eNotifManager.h" />
     <ClInclude Include="code\rollback.h" />
     <ClInclude Include="code\eSettingsManager.h" />
@@ -203,6 +204,7 @@
     <ClCompile Include="code\eNotifManager.cpp" />
     <ClCompile Include="code\eSettingsManager.cpp" />
     <ClCompile Include="code\framestepper.cpp" />
+    <ClCompile Include="code\diag.cpp" />
     <ClCompile Include="code\mk10utils.cpp" />
     <ClCompile Include="code\umvc3.cpp" />
     <ClCompile Include="code\UMVC3Camera.cpp" />

@@ -25,9 +25,11 @@
 #include "controller.h"
 #include "mk10utils.h"
 #include "netplay.h"
+#include "diag.h"
 #include "../kiero/minhook/include/MinHook.h"
 #include <cstring>
 #include <new>
+#include <cstdio>
 
 extern void HookLog(const char* fmt, ...);
 
@@ -115,7 +117,13 @@ static void(__fastcall* oMain_move)(uint64_t param_1) = nullptr;
 // Trampoline for the collision sound-event iterator (hook crashes during re-sim)
 static void(__fastcall* oCollisionSoundUpdate)(uint64_t param_1) = nullptr;
 
-// [EXPERIMENTAL] QPC per-frame virtualization — see mvc3/rollback W3-C2
+// ===========================================================================
+// Resim diagnostic dumper — binary + text state capture
+// ===========================================================================
+static int    g_diagSessionId  = 0;
+static char   g_diagDir[260]   = {};
+static int    g_diagWriteCount = 0;
+
 // static decltype(&QueryPerformanceCounter) g_real_qpc = nullptr;
 // static uint64_t g_virtual_qpc = 0;
 // static DWORD g_main_thread_id = 0;
@@ -1004,6 +1012,276 @@ void Rollback_RestoreSnapshot(int32_t frame)
     HookLog("Rollback: restored frame %d with %d regions, total size %zu bytes\n", frame, slot.regionCount, offset);
 }
 
+// ===========================================================================
+// Diag dumpers — capture full snapshot state + character text for resim debugging
+// ===========================================================================
+
+static uint64_t fnv1a_64(const void* data, size_t len) {
+    uint64_t h = 0xCBF29CE484222325ULL;
+    const uint8_t* p = (const uint8_t*)data;
+    for (size_t i = 0; i < len; i++) {
+        h ^= p[i];
+        h *= 0x100000001B3ULL;
+    }
+    return h;
+}
+
+static void Rollback_DiagInit() {
+    if (g_diagDir[0]) return;
+    SYSTEMTIME st;
+    GetLocalTime(&st);
+    snprintf(g_diagDir, sizeof(g_diagDir), "rdiag_%04d%02d%02d_%02d%02d%02d",
+             st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
+    CreateDirectoryA(g_diagDir, NULL);
+    HookLog("Rollback: diag dir: %s\n", g_diagDir);
+}
+
+// Binary: one file per session with [header + N entries].
+// Header:  magic(4)="RBSD"  ver(u32)  sessionId(u32)  entryCount(u32)
+// Entry:   frame(i32) side(u8) regionCount(u32) dataSize(u32)
+//          regions[ regionSize(u32) regionHash(u64) regionData(bytes) ]
+// v1 → v2: per-region FNV-1a hash added after size for region-level divergence detection.
+static void Rollback_DumpBinary(int session, int32_t frame, uint8_t side) {
+    if (!g_diagDir[0]) return;
+
+    Region regions[MAX_REGIONS];
+    int count = BuildRegions(regions, MAX_REGIONS);
+    if (count == 0) return;
+
+    char path[260];
+    snprintf(path, sizeof(path), "%s/session_%d.bin", g_diagDir, session);
+
+    bool isNew = false;
+    FILE* f = fopen(path, "rb");
+    if (!f) {
+        f = fopen(path, "wb");
+        if (!f) return;
+        isNew = true;
+        uint32_t magic = 0x44534252;
+        uint32_t ver = 2;
+        uint32_t sid = (uint32_t)session;
+        uint32_t ec = 0;
+        fwrite(&magic, 4, 1, f);
+        fwrite(&ver, 4, 1, f);
+        fwrite(&sid, 4, 1, f);
+        fwrite(&ec, 4, 1, f);
+    } else {
+        fclose(f);
+        f = fopen(path, "ab");
+        if (!f) return;
+    }
+
+    g_diagWriteCount++;
+
+    int32_t binFrame = side == 0 ? frame : frame + 1;
+    fwrite(&binFrame, sizeof(binFrame), 1, f);
+    fwrite(&side, 1, 1, f);
+    uint32_t cc = (uint32_t)count;
+    fwrite(&cc, sizeof(cc), 1, f);
+
+    uint32_t totalSize = 0;
+    for (int i = 0; i < count; i++)
+        totalSize += (uint32_t)regions[i].size;
+    fwrite(&totalSize, sizeof(totalSize), 1, f);
+
+    for (int i = 0; i < count; i++) {
+        uint32_t sz = (uint32_t)regions[i].size;
+        uint64_t hash = fnv1a_64(regions[i].ptr, regions[i].size);
+        fwrite(&sz, sizeof(sz), 1, f);
+        fwrite(&hash, sizeof(hash), 1, f);
+        fwrite(regions[i].ptr, 1, sz, f);
+    }
+
+    fclose(f);
+
+    if (isNew) {
+        uint32_t ec = (uint32_t)g_diagWriteCount;
+        f = fopen(path, "r+b");
+        if (f) {
+            fseek(f, 12, SEEK_SET);
+            fwrite(&ec, 4, 1, f);
+            fclose(f);
+        }
+    }
+}
+
+// Text: character state per frame — appended to session text log
+// RESIM dump labeling convention:
+//   side=0 (LIVE): frame = startFrame of the resim window.  The actual captured
+//     state is the current live frame (endFrame), NOT startFrame.  The label uses
+//     startFrame because call-site changes broke the resim — the user must
+//     mentally map: LIVE frame=N → state at the CURRENT live frame, not frame N.
+//   side=1 (RESIM): frame = the frame that was just ticked.  The captured state
+//     is at frame+1 (the start of the next frame).  We display frame+1 here so
+//     the output frame number matches the actual state.
+static void Rollback_DumpCharText(int session, int32_t frame, uint8_t side) {
+    if (!g_diagDir[0]) return;
+
+    char path[260];
+    snprintf(path, sizeof(path), "%s/session_%d.txt", g_diagDir, session);
+
+    FILE* f = fopen(path, "a");
+    if (!f) return;
+
+    int32_t displayFrame = side == 0 ? frame : frame + 1;
+    fprintf(f, "=== %s frame=%d ===\n", side == 0 ? "LIVE" : "RESIM", displayFrame);
+    if (side == 0) {
+        fprintf(f, "# NOTE: LIVE frame=%d labels the resim window start, actual state is at current live frame\n", frame);
+    }
+
+    uint64_t sCharacter = *(uint64_t*)_addr(PTR_SCHARACTER);
+    if (!sCharacter) { fprintf(f, "  (no sCharacter)\n\n"); fclose(f); return; }
+
+    for (int ti = 0; ti < 2; ++ti) {
+        uint64_t team = sCharacter + (ti == 0 ? TEAM0_OFFSET : TEAM1_OFFSET);
+        uint64_t node = team + TEAM_FIRST_NODE_OFFSET;
+        int ci = 0;
+        while (node) {
+            uint64_t chr = *(uint64_t*)(node + NODE_CHR_OFFSET);
+            if (chr) {
+                CharDiagSnapshot snap;
+                CaptureCharSnapshot(chr, ti, ci, snap);
+
+                uint64_t fcnt = *(uint64_t*)(snap.cchr + 0x18);
+                uint32_t mHeld = *(uint32_t*)(snap.cchr + 0x14);
+                uint32_t mRemap = *(uint32_t*)(snap.cchr + 0x560);
+                uint32_t mMask  = *(uint32_t*)(snap.cchr + 0x568);
+                uint32_t mProc  = *(uint32_t*)(snap.cchr + 0x56C);
+                uint32_t mOld   = *(uint32_t*)(snap.cchr + 0x10);
+                uint32_t h590   = *(uint32_t*)(snap.cchr + 0x590);
+                uint32_t h594   = *(uint32_t*)(snap.cchr + 0x594);
+                uint64_t heldR0 = *(uint64_t*)(snap.cchr + 0x28);
+                uint32_t relHead= *(uint32_t*)(snap.cchr + 0x0A8);
+                uint64_t relR0  = *(uint64_t*)(snap.cchr + 0x0AC);
+                uint64_t prsR0  = *(uint64_t*)(snap.cchr + 0x130);
+                uint32_t dir0   = *(uint32_t*)(snap.cchr + 0x1B0);
+                uint32_t dir4   = *(uint32_t*)(snap.cchr + 0x1B4);
+                uint32_t dirSlot= (uint32_t)(fcnt & 0x3F);
+                uint64_t dirRing0  = *(uint64_t*)(snap.cchr + 0x360);
+                uint64_t dirRingSlot=*(uint64_t*)(snap.cchr + 0x360 + dirSlot * 8);
+
+                fprintf(f, "  Team%d Char%d @ 0x%llX\n", ti, ci, (uint64_t)chr);
+                fprintf(f, "    pos=(%+.4f,%+.4f,%+.4f) act=0x%08X fl=0x%08X\n",
+                        snap.posX, snap.posY, snap.posZ, snap.actionId, snap.flags14F0);
+                fprintf(f, "    cci: mOld=0x%08X mHeld=0x%08X remap=0x%08X mask=0x%08X proc=0x%08X\n",
+                        mOld, mHeld, mRemap, mMask, mProc);
+                fprintf(f, "    cci: cntr=%llu h590=0x%08X h594=0x%08X\n", fcnt, h590, h594);
+                fprintf(f, "    cci: heldR0=0x%016llX relHead=0x%08X relR0=0x%016llX prsR0=0x%016llX\n",
+                        heldR0, relHead, relR0, prsR0);
+                fprintf(f, "    cci: dir0=0x%08X dir4=0x%08X dirRing[0]=0x%016llX [%u]=0x%016llX\n",
+                        dir0, dir4, dirRing0, dirSlot, dirRingSlot);
+                fprintf(f, "    rng: 0x%08X 0x%08X 0x%08X 0x%08X\n",
+                        snap.xorShift[0], snap.xorShift[1], snap.xorShift[2], snap.xorShift[3]);
+                ci++;
+            }
+            node = *(uint64_t*)(node + NODE_NEXT_OFFSET);
+        }
+    }
+    fprintf(f, "\n");
+    fclose(f);
+}
+
+// Manifest: per-region FNV-1a hash summary appended to session text log.
+// Quick visual scan shows which regions diverge between LIVE and RESIM.
+static void Rollback_DumpManifest(int session, int32_t frame, uint8_t side) {
+    if (!g_diagDir[0]) return;
+
+    Region regions[MAX_REGIONS];
+    int count = BuildRegions(regions, MAX_REGIONS);
+    if (count == 0) return;
+
+    char path[260];
+    snprintf(path, sizeof(path), "%s/session_%d.txt", g_diagDir, session);
+
+    FILE* f = fopen(path, "a");
+    if (!f) return;
+
+    int32_t mf = side == 0 ? frame : frame + 1;
+    fprintf(f, "=== MANIFEST %s frame=%d regions=%d ===\n",
+            side == 0 ? "LIVE" : "RESIM", mf, count);
+    for (int i = 0; i < count; i++) {
+        uint64_t hash = fnv1a_64(regions[i].ptr, regions[i].size);
+        fprintf(f, "  [%3d] addr=0x%016llX size=%-8u hash=0x%016llX\n",
+                i, (uint64_t)regions[i].ptr, (uint32_t)regions[i].size, hash);
+    }
+    fprintf(f, "\n");
+    fclose(f);
+}
+
+// NDJSON: one JSON line per dump frame for script/AI consumption.
+// Schema:  v, ts, session, frame, side, regions[{idx,addr,size,hash}], chars[{...}]
+static void Rollback_DumpNDJSON(int session, int32_t frame, uint8_t side) {
+    if (!g_diagDir[0]) return;
+
+    Region regions[MAX_REGIONS];
+    int count = BuildRegions(regions, MAX_REGIONS);
+    if (count == 0) return;
+
+    char path[260];
+    snprintf(path, sizeof(path), "%s/session_%d.ndjson", g_diagDir, session);
+
+    FILE* f = fopen(path, "a");
+    if (!f) return;
+
+    // Build ISO timestamp
+    char tsBuf[32] = {};
+    SYSTEMTIME st;
+    GetLocalTime(&st);
+    snprintf(tsBuf, sizeof(tsBuf), "%04d-%02d-%02dT%02d:%02d:%02d",
+             st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
+
+    int32_t nf = side == 0 ? frame : frame + 1;
+    fprintf(f, "{\"v\":1,\"ts\":\"%s\",\"session\":%d,\"frame\":%d,\"side\":\"%s\",\"regions\":[",
+            tsBuf, session, nf, side == 0 ? "live" : "resim");
+
+    for (int i = 0; i < count; i++) {
+        uint64_t rh = fnv1a_64(regions[i].ptr, regions[i].size);
+        if (i > 0) fprintf(f, ",");
+        fprintf(f, "{\"idx\":%d,\"addr\":\"0x%llX\",\"size\":%llu,\"hash\":\"0x%016llX\"}",
+                i, (uint64_t)regions[i].ptr, (uint64_t)regions[i].size, rh);
+    }
+
+    fprintf(f, "],\"chars\":[");
+
+    uint64_t sCharacter = *(uint64_t*)_addr(PTR_SCHARACTER);
+    bool firstChar = true;
+    if (sCharacter) {
+        for (int ti = 0; ti < 2; ++ti) {
+            uint64_t team = sCharacter + (ti == 0 ? TEAM0_OFFSET : TEAM1_OFFSET);
+            uint64_t node = team + TEAM_FIRST_NODE_OFFSET;
+            int ci = 0;
+            while (node) {
+                uint64_t chr = *(uint64_t*)(node + NODE_CHR_OFFSET);
+                if (chr) {
+                    CharDiagSnapshot snap;
+                    CaptureCharSnapshot(chr, ti, ci, snap);
+                    uint64_t fcnt = *(uint64_t*)(snap.cchr + 0x18);
+                    uint32_t mHeld = *(uint32_t*)(snap.cchr + 0x14);
+
+                    if (!firstChar) fprintf(f, ",");
+                    firstChar = false;
+                    fprintf(f, "{\"team\":%d,\"slot\":%d,"
+                            "\"pos\":[%.4f,%.4f,%.4f],"
+                            "\"act\":\"0x%08X\",\"fl\":\"0x%08X\","
+                            "\"mHeld\":\"0x%08X\",\"fcnt\":%llu,"
+                            "\"rng\":[\"0x%08X\",\"0x%08X\",\"0x%08X\",\"0x%08X\"]}",
+                            ti, ci,
+                            snap.posX, snap.posY, snap.posZ,
+                            snap.actionId, snap.flags14F0,
+                            mHeld, fcnt,
+                            snap.xorShift[0], snap.xorShift[1],
+                            snap.xorShift[2], snap.xorShift[3]);
+                    ci++;
+                }
+                node = *(uint64_t*)(node + NODE_NEXT_OFFSET);
+            }
+        }
+    }
+
+    fprintf(f, "]}\n");
+    fclose(f);
+}
+
 void Rollback_ReSimulate(int32_t startFrame, int32_t endFrame)
 {
     if (startFrame >= endFrame) return;
@@ -1038,6 +1316,21 @@ void Rollback_ReSimulate(int32_t startFrame, int32_t endFrame)
     // g_oldInputs with startFrame's snapshot; capturing it first prevents
     // the physical inputs from the rolled-back window from being clobbered.
     Controller_SaveInputHistory();
+
+    // Diagnostic dump: capture ground truth BEFORE rewinding
+    // This gives us the live state of all regions + character state
+    // to compare against what the re-simulation produces.
+    {
+        Rollback_DiagInit();
+        g_diagSessionId++;
+        g_diagWriteCount = 0;
+        int diagSid = g_diagSessionId;
+        HookLog("Rollback: diag session %d for frames %d\u2192%d\n", diagSid, startFrame, endFrame);
+        Rollback_DumpBinary(diagSid, startFrame, 0);
+        Rollback_DumpCharText(diagSid, startFrame, 0);
+        Rollback_DumpManifest(diagSid, startFrame, 0);
+        Rollback_DumpNDJSON(diagSid, startFrame, 0);
+    }
 
     // 1. Rewind to the starting frame boundary
     Rollback_RestoreSnapshot(startFrame);
@@ -1075,6 +1368,12 @@ void Rollback_ReSimulate(int32_t startFrame, int32_t endFrame)
         oMvc3Main_move(g_sMvc3Main);
         Controller_SilentFrameEnd();
         Controller_LogReSimFrame(f);
+
+        // Diagnostic dump: capture re-simmed state for this frame
+        Rollback_DumpBinary(g_diagSessionId, f, 1);
+        Rollback_DumpCharText(g_diagSessionId, f, 1);
+        Rollback_DumpManifest(g_diagSessionId, f, 1);
+        Rollback_DumpNDJSON(g_diagSessionId, f, 1);
     }
 
     // Restore the local input history so the next outbound packet carries
@@ -1296,6 +1595,49 @@ static void __fastcall hkMvc3Main_move(uint64_t param_1)
                 g_rollbackReqStart = -1;
                 g_rollbackReqEnd   = -1;
                 Rollback_ReSimulate(rs, re);
+
+                // Notify the remote peer which frames we just re-simulated,
+                // including our per-frame resim result so their log shows
+                // both sides' states side by side.
+                {
+                    ResimNotifyPacket rnPkt = {};
+                    rnPkt.type = PACKET_RESIM_NOTIFY;
+                    rnPkt.resimStartFrame = rs;
+                    rnPkt.resimEndFrame = re;
+                    rnPkt.correctedTeam = Netplay_IsHost() ? 1 : 0;
+                    int32_t frameCount = 0;
+                    for (int32_t f = rs; f < re && frameCount < MAX_RESIM_FRAMES; f++)
+                    {
+                        uint32_t ringIdx = (uint32_t)(f >= 0 ? f : 0) % ROLLBACK_WINDOW_DIAG;
+                        const FrameDiagSnapshot& snap = g_resimFrameSnap[ringIdx];
+                        // Find the first character entry for the corrected team
+                        const CharDiagSnapshot* charRes = nullptr;
+                        for (int ci = 0; ci < snap.charCount && ci < 6; ci++)
+                        {
+                            if (snap.chars[ci].post.teamIdx == rnPkt.correctedTeam)
+                            {
+                                charRes = &snap.chars[ci].post;
+                                break;
+                            }
+                        }
+                        if (charRes)
+                        {
+                            auto& rf = rnPkt.frames[frameCount];
+                            rf.frame       = f;
+                            rf.preActionId = snap.chars[0].pre.actionId;  // entry actionId
+                            rf.prePosX     = snap.chars[0].pre.posX;
+                            rf.prePosY     = snap.chars[0].pre.posY;
+                            rf.postActionId= charRes->actionId;
+                            rf.postPosX    = charRes->posX;
+                            rf.postPosY    = charRes->posY;
+                            rf.usedInput   = Controller_GetUsedRemoteInput(f);
+                            rf.recvInput   = Controller_GetReceivedRemoteInput(f);
+                            frameCount++;
+                        }
+                    }
+                    rnPkt.frameCount = (uint32_t)frameCount;
+                    Netplay_SendResimNotify(rnPkt);
+                }
 
                 // Re-resolve the current frame's remote input — packets that
                 // arrived during the resim may now provide real data where we

@@ -13,6 +13,7 @@
 #include "code/framestepper.h"
 #include "code/trainingboot.h"
 #include "code/controller.h"
+#include "code/diag.h"
 #include <Windows.h>
 #include <cstdio>
 #include "kiero/minhook/include/MinHook.h"
@@ -705,6 +706,9 @@ void OnInitializeHook()
 
 	// Controller hooks: decompiled pad/input functions with netplay P2 injection
 	Controller_InitHooks();
+
+	// Diagnostic hooks: move_base entry/exit capture, dir history ring analysis
+	Diag_InitHooks();
 
 	// Force the global XorShift RNG state to the same initial seed on both
 	// host and client instances.  The game normally does this once at startup
