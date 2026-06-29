@@ -45,6 +45,11 @@ extern int      g_f7State;
 extern int32_t  g_f7StartFrame;
 extern int      g_f7Remaining;
 
+// Diag session for per-frame live capture during F7 recording phase.
+// Set >=0 during recording; Rollback_ReSimulate reuses this session ID
+// so live and resim dumps appear side by side in the same files.
+extern int      g_f7DiagSession;
+
 // Request a re-simulate from the controller layer — consumed by hkMvc3Main_move.
 // Called when late-arriving remote input differs from what was predicted.
 void Rollback_RequestReSimulate(int32_t startFrame, int32_t endFrame);

@@ -104,9 +104,10 @@ int32_t g_resimRequestedStart   = -1;
 int32_t g_resimRequestedEnd     = -1;
 int32_t g_restoreRequestedFrame = -1;
 
-int     g_f7State      = 0;
-int32_t g_f7StartFrame = 0;
-int     g_f7Remaining  = 0;
+int     g_f7State        = 0;
+int32_t g_f7StartFrame   = 0;
+int     g_f7Remaining    = 0;
+int     g_f7DiagSession  = -1;
 
 // Rollback request from controller.cpp — late input arrived that differs
 // from what was predicted.  Start/end inclusive frame range.
@@ -1321,19 +1322,35 @@ void Rollback_ReSimulate(int32_t startFrame, int32_t endFrame)
     // the physical inputs from the rolled-back window from being clobbered.
     Controller_SaveInputHistory();
 
-    // Diagnostic dump: capture ground truth BEFORE rewinding
-    // This gives us the live state of all regions + character state
-    // to compare against what the re-simulation produces.
+    // Diagnostic dump: capture ground truth BEFORE rewinding.
+    // Gives the live state of all regions + character state to compare
+    // against what the re-simulation produces.
+    // When g_f7DiagSession is set (F7 mode), skip the ground truth dump —
+    // the F7 state machine already captured per-frame live dumps during
+    // the recording phase using that session.  We just reuse the session
+    // ID so resim dumps land alongside the live dumps.
     {
-        Rollback_DiagInit();
-        g_diagSessionId++;
-        g_diagWriteCount = 0;
-        int diagSid = g_diagSessionId;
-        HookLog("Rollback: diag session %d for frames %d\u2192%d\n", diagSid, startFrame, endFrame);
-        Rollback_DumpBinary(diagSid, startFrame, 0);
-        Rollback_DumpCharText(diagSid, startFrame, 0);
-        Rollback_DumpManifest(diagSid, startFrame, 0);
-        Rollback_DumpNDJSON(diagSid, startFrame, 0);
+        int diagSid;
+        if (g_f7DiagSession >= 0) {
+            diagSid = g_f7DiagSession;
+            HookLog("Rollback: diag session %d (F7, reuse) for frames %d\u2192%d\n",
+                    diagSid, startFrame, endFrame);
+        } else {
+            Rollback_DiagInit();
+            g_diagSessionId++;
+            diagSid = g_diagSessionId;
+            uint64_t sr = *(uint64_t*)_addr(PTR_SREPLAY);
+            int32_t liveFrame = sr ? *(int32_t*)(sr + 0x54) : startFrame;
+            g_diagWriteCount = 0;
+            HookLog("Rollback: diag session %d for frames %d\u2192%d (live=%d)\n",
+                    diagSid, startFrame, endFrame, liveFrame);
+            Rollback_DumpBinary(diagSid, liveFrame, 0);
+            Rollback_DumpCharText(diagSid, liveFrame, 0);
+            Rollback_DumpManifest(diagSid, liveFrame, 0);
+            Rollback_DumpNDJSON(diagSid, liveFrame, 0);
+        }
+        // Sync the global so the resim loop writes to the same session
+        g_diagSessionId = diagSid;
     }
 
     // 1. Rewind to the starting frame boundary
@@ -1560,6 +1577,11 @@ static void __fastcall hkMvc3Main_move(uint64_t param_1)
     // and re-sim with the captured inputs (exercises the full rollback path).
     if (g_f7State == 1) {
         Rollback_SaveSnapshot(g_f7StartFrame);
+        // Initialize diag session so Rollback_ReSimulate reuses the same one
+        // (live per-frame dumps during recording + resim dumps side by side).
+        Rollback_DiagInit();
+        g_f7DiagSession = g_diagSessionId;
+        g_diagSessionId++;
         g_f7State = 2;
         HookLog("F7: snapshot saved at frame %d, recording %d frames\n",
                 g_f7StartFrame, g_f7Remaining);
@@ -1567,10 +1589,19 @@ static void __fastcall hkMvc3Main_move(uint64_t param_1)
     if (g_f7State == 2) {
         g_f7Remaining--;
         if (g_f7Remaining <= 0) {
+            // Last recording frame — capture live state before re-sim
+            // so it lines up with the resim dumps (same diag session).
+            if (g_f7DiagSession >= 0) {
+                uint64_t sr = *(uint64_t*)_addr(PTR_SREPLAY);
+                int32_t liveNum = sr ? *(int32_t*)(sr + 0x54) : 0;
+                Rollback_DumpNDJSON(g_f7DiagSession, liveNum, 0);
+                Rollback_DumpManifest(g_f7DiagSession, liveNum, 0);
+            }
             g_f7State = 0;
             HookLog("F7: %d frames recorded, restoring frame %d and re-simulating\n",
                     8, g_f7StartFrame);
             Rollback_ReSimulate(g_f7StartFrame, g_f7StartFrame + 8);
+            g_f7DiagSession = -1;
 
             // Mirror the netplay post-resim setup:
             //   1. Re-save the snapshot at the current frame so the ring buffer
@@ -1692,6 +1723,17 @@ static void __fastcall hkMvc3Main_move(uint64_t param_1)
     }
 
     oMvc3Main_move(param_1);
+
+    // F7 live capture: dump state after each recording frame tick so it appears
+    // alongside the corresponding resim dump in the same diag session files.
+    // Works for frames 1-7 (g_f7Remaining > 0).  Frame 8 is captured before
+    // Rollback_ReSimulate (see g_f7State == 2 handler above).
+    if (g_f7DiagSession >= 0 && g_f7State == 2) {
+        uint64_t sr = *(uint64_t*)_addr(PTR_SREPLAY);
+        int32_t liveNum = sr ? *(int32_t*)(sr + 0x54) : 0;
+        Rollback_DumpNDJSON(g_f7DiagSession, liveNum, 0);
+        Rollback_DumpManifest(g_f7DiagSession, liveNum, 0);
+    }
 
     // Post-tick diagnostic: dump character animation state after restore+tick
     if (s_postRestoreTickDump) {
