@@ -1,0 +1,542 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>NDJSON Rollback Visualizer</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: 'Segoe UI', system-ui, sans-serif; background: #1a1a2e; color: #e0e0e0; height: 100vh; display: flex; flex-direction: column; }
+#dropzone { display: flex; align-items: center; justify-content: center; flex: 1; flex-direction: column; gap: 16px; border: 3px dashed #444; margin: 20px; border-radius: 12px; cursor: pointer; transition: all .2s; }
+#dropzone.drag-over { border-color: #00d4ff; background: rgba(0,212,255,.08); }
+#dropzone.hidden { display: none; }
+#dropzone p { color: #888; font-size: 18px; }
+#dropzone .sub { font-size: 14px; color: #666; }
+#app { display: none; flex-direction: column; height: 100vh; }
+#app.active { display: flex; }
+.toolbar { display: flex; align-items: center; gap: 12px; padding: 8px 16px; background: #16213e; border-bottom: 1px solid #0f3460; flex-wrap: wrap; }
+.toolbar button { background: #0f3460; color: #e0e0e0; border: none; padding: 6px 14px; border-radius: 4px; cursor: pointer; font-size: 14px; transition: background .15s; }
+.toolbar button:hover { background: #1a5276; }
+.toolbar button:active { background: #0a2647; }
+.toolbar button:disabled { opacity: .4; cursor: default; }
+.toolbar label { font-size: 13px; color: #aaa; }
+.toolbar .frame-num { font-size: 20px; font-weight: 700; color: #00d4ff; min-width: 80px; text-align: center; }
+.toolbar input[type=range] { width: 200px; accent-color: #00d4ff; }
+.toolbar input[type=number] { width: 70px; background: #0f3460; color: #e0e0e0; border: 1px solid #1a5276; border-radius: 4px; padding: 4px 8px; font-size: 14px; }
+.toolbar .spacer { flex: 1; }
+.toolbar .file-info { font-size: 12px; color: #888; max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.main { display: flex; flex: 1; overflow: hidden; }
+.canvas-wrap { flex: 1; display: flex; align-items: center; justify-content: center; background: #0d1117; position: relative; min-width: 0; }
+.canvas-wrap canvas { max-width: 100%; max-height: 100%; }
+.sidebar { width: 380px; background: #16213e; border-left: 1px solid #0f3460; overflow-y: auto; font-size: 13px; flex-shrink: 0; }
+.sidebar section { padding: 12px 16px; border-bottom: 1px solid #0f3460; }
+.sidebar h3 { font-size: 12px; text-transform: uppercase; color: #666; margin-bottom: 8px; letter-spacing: 1px; }
+.sidebar table { width: 100%; border-collapse: collapse; }
+.sidebar td, .sidebar th { padding: 3px 6px; text-align: left; font-size: 12px; }
+.sidebar th { color: #888; font-weight: 400; }
+.sidebar td { font-family: 'Consolas', 'Courier New', monospace; }
+.sidebar .pos-val { color: #00d4ff; }
+.sidebar .delta-ok { color: #4caf50; }
+.sidebar .delta-bad { color: #ff5252; font-weight: 700; }
+.sidebar .char-header { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; font-weight: 600; }
+.sidebar .p1-color { color: #4fc3f7; }
+.sidebar .p2-color { color: #ef5350; }
+.sidebar .dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; }
+.legend { display: flex; gap: 16px; padding: 4px 16px; background: #0d1117; font-size: 12px; color: #888; border-bottom: 1px solid #0f3460; }
+.legend-item { display: flex; align-items: center; gap: 6px; }
+.legend-live { width: 12px; height: 12px; border-radius: 50%; }
+.legend-resim { width: 12px; height: 12px; border-radius: 50%; border: 2px solid; background: transparent; }
+.divergence-badge { display: inline-block; padding: 2px 8px; border-radius: 3px; font-size: 11px; font-weight: 700; }
+.divergence-badge.yes { background: #ff5252; color: #fff; }
+.divergence-badge.no { background: #4caf50; color: #fff; }
+.status-bar { padding: 4px 16px; background: #0d1117; border-top: 1px solid #0f3460; font-size: 12px; color: #666; display: flex; gap: 20px; }
+.status-bar .diverged { color: #ff5252; }
+</style>
+</head>
+<body>
+
+<div id="dropzone">
+  <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="#666" stroke-width="1.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+  <p>Drop an <strong>.ndjson</strong> file here, or click to browse</p>
+  <div class="sub">Press F7 in-game to generate diagnostic data</div>
+  <input type="file" id="fileInput" accept=".ndjson,.json,.jsonl,.txt" hidden>
+</div>
+
+<div id="app">
+  <div class="toolbar">
+    <button id="btnLoad" title="Load another file">Open</button>
+    <button id="btnFirst" title="First frame">|◀</button>
+    <button id="btnPrev" title="Previous frame (←)">◀</button>
+    <span class="frame-num" id="frameDisplay">0 / 0</span>
+    <button id="btnNext" title="Next frame (→)">▶</button>
+    <button id="btnLast" title="Last frame">▶|</button>
+    <button id="btnPlay" title="Play/Pause">▶ Play</button>
+    <label>Speed: <input type="range" id="speedRange" min="1" max="30" value="5"></label>
+    <label>Frame: <input type="number" id="frameInput" min="0" style="width:80px"></label>
+    <span class="spacer"></span>
+    <span class="file-info" id="fileInfo"></span>
+  </div>
+
+  <div class="legend">
+    <span class="legend-item"><span class="legend-live" style="background:#00ccaa"></span> P1 Live</span>
+    <span class="legend-item"><span class="legend-resim" style="border-color:#00bfff"></span> P1 Resim</span>
+    <span class="legend-item"><span class="legend-live" style="background:#ff6030"></span> P2 Live</span>
+    <span class="legend-item"><span class="legend-resim" style="border-color:#ff3030"></span> P2 Resim</span>
+    <span class="legend-item" id="globalDivergence">Divergence: —</span>
+    <label style="font-size:13px;color:#888;margin-left:8px"><input type="checkbox" id="showAssists"> Show assists</label>
+  </div>
+
+  <div class="main">
+    <div class="canvas-wrap">
+      <canvas id="canvas"></canvas>
+    </div>
+    <div class="sidebar" id="sidebar"></div>
+  </div>
+
+  <div class="status-bar">
+    <span id="statusFrames">Frames: 0</span>
+    <span id="statusEntries">Entries: 0</span>
+    <span id="statusDiverged" class="diverged"></span>
+  </div>
+</div>
+
+<script>
+// ─── State ────────────────────────────────────────────────────────────
+let frames = [];        // sorted unique frame numbers
+let entries = [];       // raw parsed ndjson lines
+let frameMap = {};      // frame# -> { live: entry|null, resim: entry|null }
+let currentFrameIdx = 0;
+let playing = false;
+let playTimer = null;
+let showAssists = false;
+
+const COLORS = {
+  p1Live: '#00ccaa', p1LiveFill: 'rgba(0,204,170,0.55)',
+  p1Resim: '#00bfff', p1ResimFill: 'rgba(0,191,255,0.3)',
+  p2Live: '#ff6030', p2LiveFill: 'rgba(255,96,48,0.55)',
+  p2Resim: '#ff3030', p2ResimFill: 'rgba(255,48,48,0.3)',
+  grid: 'rgba(255,255,255,0.06)',
+  ground: 'rgba(255,255,255,0.12)',
+  text: '#888',
+  deltaOk: '#4caf50',
+  deltaBad: '#ff5252',
+};
+
+// ─── DOM refs ─────────────────────────────────────────────────────────
+const $ = id => document.getElementById(id);
+const dropzone = $('dropzone'), app = $('app'), fileInput = $('fileInput');
+const canvas = $('canvas'), ctx = canvas.getContext('2d');
+const frameDisplay = $('frameDisplay'), frameInput = $('frameInput');
+const sidebar = $('sidebar'), fileInfo = $('fileInfo');
+const statusFrames = $('statusFrames'), statusEntries = $('statusEntries'), statusDiverged = $('statusDiverged');
+const globalDivergence = $('globalDivergence');
+
+// ─── File loading ─────────────────────────────────────────────────────
+dropzone.addEventListener('click', () => fileInput.click());
+dropzone.addEventListener('dragover', e => { e.preventDefault(); dropzone.classList.add('drag-over'); });
+dropzone.addEventListener('dragleave', () => dropzone.classList.remove('drag-over'));
+dropzone.addEventListener('drop', e => { e.preventDefault(); dropzone.classList.remove('drag-over'); loadFile(e.dataTransfer.files[0]); });
+fileInput.addEventListener('change', e => { if (e.target.files[0]) loadFile(e.target.files[0]); });
+$('btnLoad').addEventListener('click', () => fileInput.click());
+
+function loadFile(file) {
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = e => {
+    parseData(e.target.result, file.name);
+    dropzone.classList.add('hidden');
+    app.classList.add('active');
+    fileInfo.textContent = file.name + ' (' + (file.size/1024).toFixed(1) + ' KB)';
+  };
+  reader.readAsText(file);
+}
+
+function parseData(text, name) {
+  const lines = text.split('\n').filter(l => l.trim());
+  entries = lines.map((l, i) => { try { return JSON.parse(l); } catch(e) { return null; } }).filter(e => e);
+  buildFrameMap();
+  updateStatus();
+  if (frames.length) {
+    currentFrameIdx = 0;
+    render();
+  } else {
+    sidebar.innerHTML = '<section><h3>No valid frames found</h3><p style="color:#888">Could not parse any frame entries from the file.</p></section>';
+  }
+  $('showAssists').checked = false;
+  showAssists = false;
+}
+
+function buildFrameMap() {
+  frameMap = {};
+  frames = [];
+  for (const e of entries) {
+    if (e.frame === undefined || !e.side) continue;
+    if (!frameMap[e.frame]) frameMap[e.frame] = { live: null, resim: null };
+    if (e.side === 'live') frameMap[e.frame].live = e;
+    else if (e.side === 'resim') frameMap[e.frame].resim = e;
+    else if (e.side === 'ground_truth') frameMap[e.frame].live = e;
+  }
+  frames = Object.keys(frameMap).map(Number).sort((a,b) => a-b);
+  frameInput.min = 0;
+  frameInput.max = Math.max(0, frames.length - 1);
+}
+
+function updateStatus() {
+  statusFrames.textContent = `Frames: ${frames.length}`;
+  statusEntries.textContent = `Entries: ${entries.length}`;
+
+  let diverged = 0, total = 0;
+  for (const f of frames) {
+    const g = frameMap[f];
+    if (g.live && g.resim) {
+      total++;
+      if (hasDivergence(g.live, g.resim)) diverged++;
+    }
+  }
+  statusDiverged.textContent = diverged > 0 ? `Diverged: ${diverged}/${total} frames` : '';
+  globalDivergence.textContent = diverged > 0
+    ? `Divergence: ${diverged}/${total} frames ⚠`
+    : total > 0 ? 'Divergence: None ✓' : 'Divergence: —';
+  globalDivergence.style.color = diverged > 0 ? '#ff5252' : total > 0 ? '#4caf50' : '#888';
+}
+
+function hasDivergence(live, resim) {
+  if (!live || !resim) return false;
+  const lc = live.chars, rc = resim.chars;
+  if (!lc || !rc) return false;
+  for (let i = 0; i < Math.max(lc.length, rc.length); i++) {
+    const a = lc[i], b = rc[i];
+    if (!a || !b) return true;
+    if (Math.abs(a.pos[0] - b.pos[0]) > 0.001 || Math.abs(a.pos[1] - b.pos[1]) > 0.001 || Math.abs(a.pos[2] - b.pos[2]) > 0.001)
+      return true;
+  }
+  return false;
+}
+
+function getDelta(c1, c2) {
+  if (!c1 || !c2) return null;
+  return [
+    c1.pos[0] - c2.pos[0],
+    c1.pos[1] - c2.pos[1],
+    c1.pos[2] - c2.pos[2],
+  ];
+}
+
+function getDeltaMag(d) {
+  if (!d) return 0;
+  return Math.sqrt(d[0]*d[0] + d[1]*d[1] + d[2]*d[2]);
+}
+
+// ─── Rendering ────────────────────────────────────────────────────────
+function render() {
+  if (!frames.length) return;
+  const idx = Math.max(0, Math.min(currentFrameIdx, frames.length - 1));
+  currentFrameIdx = idx;
+  const frameNum = frames[idx];
+  const g = frameMap[frameNum];
+  frameDisplay.textContent = `${frameNum} / ${frames[frames.length-1]}`;
+  frameInput.value = idx;
+  updateButtons();
+  drawCanvas(g, frameNum);
+  drawSidebar(g, frameNum);
+}
+
+function updateButtons() {
+  $('btnFirst').disabled = currentFrameIdx <= 0;
+  $('btnPrev').disabled = currentFrameIdx <= 0;
+  $('btnNext').disabled = currentFrameIdx >= frames.length - 1;
+  $('btnLast').disabled = currentFrameIdx >= frames.length - 1;
+}
+
+function getCharPositions(g) {
+  const result = [];
+  if (!g || !g.live) return result;
+  const liveChars = g.live.chars || [];
+  const resimChars = g.resim ? (g.resim.chars || []) : [];
+  for (let i = 0; i < liveChars.length; i++) {
+    const lc = liveChars[i];
+    if (!showAssists && lc.slot > 0) continue;
+    const rc = resimChars[i] || null;
+    result.push({
+      team: lc.team,
+      slot: lc.slot,
+      livePos: lc.pos,
+      resimPos: rc ? rc.pos : null,
+      live: lc,
+      resim: rc,
+      delta: getDelta(lc, rc),
+    });
+  }
+  return result;
+}
+
+function drawCanvas(g, frameNum) {
+  const wrap = canvas.parentElement;
+  const dpr = window.devicePixelRatio || 1;
+  const w = wrap.clientWidth || 800;
+  const h = wrap.clientHeight || 500;
+  canvas.style.width = w + 'px';
+  canvas.style.height = h + 'px';
+  canvas.width = w * dpr;
+  canvas.height = h * dpr;
+  ctx.scale(dpr, dpr);
+
+  ctx.clearRect(0, 0, w, h);
+
+  if (!g || !g.live) {
+    ctx.fillStyle = '#888';
+    ctx.font = '18px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('No data for this frame', w/2, h/2);
+    return;
+  }
+
+  const chars = getCharPositions(g);
+  if (!chars.length) {
+    ctx.fillStyle = '#888';
+    ctx.font = '18px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('No character data', w/2, h/2);
+    return;
+  }
+
+  // Compute bounds
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+  for (const c of chars) {
+    if (c.livePos) { minX = Math.min(minX, c.livePos[0]); maxX = Math.max(maxX, c.livePos[0]); minY = Math.min(minY, c.livePos[1]); maxY = Math.max(maxY, c.livePos[1]); }
+    if (c.resimPos) { minX = Math.min(minX, c.resimPos[0]); maxX = Math.max(maxX, c.resimPos[0]); minY = Math.min(minY, c.resimPos[1]); maxY = Math.max(maxY, c.resimPos[1]); }
+  }
+  if (minX === Infinity) return;
+
+  const pad = 60;
+  const rangeX = Math.max(maxX - minX, 200);
+  const rangeY = Math.max(maxY - minY, 100);
+  const drawW = w - pad * 2;
+  const drawH = h - pad * 2;
+
+  const scale = Math.min(drawW / rangeX, drawH / rangeY) * 0.85;
+  const cx = (minX + maxX) / 2;
+  const cy = (minY + maxY) / 2;
+
+  function toScreen(x, y) {
+    return [
+      w/2 + (x - cx) * scale,
+      h/2 - (y - cy) * scale,  // flip Y so up is positive
+    ];
+  }
+
+  // Grid
+  ctx.strokeStyle = COLORS.grid;
+  ctx.lineWidth = 1;
+  const gridStep = Math.pow(10, Math.floor(Math.log10(Math.max(rangeX, rangeY) / 5)));
+  for (let x = Math.floor(minX/gridStep)*gridStep; x <= maxX+gridStep; x += gridStep) {
+    const [sx] = toScreen(x, 0);
+    ctx.beginPath(); ctx.moveTo(sx, pad); ctx.lineTo(sx, h-pad); ctx.stroke();
+  }
+  for (let y = Math.floor(minY/gridStep)*gridStep; y <= maxY+gridStep; y += gridStep) {
+    const [,sy] = toScreen(0, y);
+    ctx.beginPath(); ctx.moveTo(pad, sy); ctx.lineTo(w-pad, sy); ctx.stroke();
+  }
+
+  // Ground line (Y=0)
+  ctx.strokeStyle = COLORS.ground;
+  ctx.lineWidth = 2;
+  const [,groundY] = toScreen(0, 0);
+  ctx.beginPath(); ctx.moveTo(pad, groundY); ctx.lineTo(w-pad, groundY); ctx.stroke();
+
+  // Draw connecting lines & positions
+  for (const c of chars) {
+    const color = c.team === 0 ? COLORS.p1 : COLORS.p2;
+    const fillColor = c.team === 0 ? COLORS.p1Fill : COLORS.p2Fill;
+    const radius = c.slot === 0 ? 12 : 8;
+    const label = c.team === 0 ? 'P1' : 'P2';
+
+    if (c.livePos && c.resimPos) {
+      const [lx, ly] = toScreen(c.livePos[0], c.livePos[1]);
+      const [rx, ry] = toScreen(c.resimPos[0], c.resimPos[1]);
+      const dMag = getDeltaMag(c.delta);
+
+      // Connect live to resim with line
+      ctx.beginPath(); ctx.moveTo(lx, ly); ctx.lineTo(rx, ry);
+      ctx.strokeStyle = dMag > 0.01 ? COLORS.deltaBad : COLORS.deltaOk;
+      ctx.lineWidth = 2;
+      ctx.stroke();
+
+      // Label delta
+      if (dMag > 0.01) {
+        ctx.fillStyle = COLORS.deltaBad;
+        ctx.font = 'bold 11px monospace';
+        ctx.textAlign = 'center';
+        const mx = (lx + rx) / 2, my = (ly + ry) / 2;
+        ctx.fillText(`Δ${dMag.toFixed(3)}`, mx, my - 8);
+      }
+
+      // Draw resim (outline)
+      ctx.beginPath(); ctx.arc(rx, ry, radius, 0, Math.PI*2);
+      const resimColor = c.team === 0 ? COLORS.p1Resim : COLORS.p2Resim;
+      ctx.strokeStyle = resimColor; ctx.lineWidth = 2.5;
+      ctx.stroke();
+      ctx.fillStyle = c.team === 0 ? COLORS.p1ResimFill : COLORS.p2ResimFill;
+      ctx.fill();
+
+      // Draw live (filled)
+      ctx.beginPath(); ctx.arc(lx, ly, radius, 0, Math.PI*2);
+      const liveColor = c.team === 0 ? COLORS.p1Live : COLORS.p2Live;
+      const liveFill = c.team === 0 ? COLORS.p1LiveFill : COLORS.p2LiveFill;
+      ctx.fillStyle = liveFill;
+      ctx.fill();
+      ctx.strokeStyle = liveColor; ctx.lineWidth = 2;
+      ctx.stroke();
+
+      // Draw slot indicator
+      if (c.slot > 0) {
+        ctx.fillStyle = color;
+        ctx.font = 'bold 9px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(`${c.slot}`, lx, ly);
+      }
+    } else if (c.livePos) {
+      const [lx, ly] = toScreen(c.livePos[0], c.livePos[1]);
+      ctx.beginPath(); ctx.arc(lx, ly, radius, 0, Math.PI*2);
+      const liveColor = c.team === 0 ? COLORS.p1Live : COLORS.p2Live;
+      const liveFill = c.team === 0 ? COLORS.p1LiveFill : COLORS.p2LiveFill;
+      ctx.fillStyle = liveFill;
+      ctx.fill();
+      ctx.strokeStyle = liveColor; ctx.lineWidth = 2;
+      ctx.stroke();
+    }
+  }
+
+  // Labels
+  ctx.fillStyle = COLORS.text;
+  ctx.font = '11px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText(`Frame ${frameNum}`, w/2, 20);
+  ctx.textAlign = 'left';
+  ctx.fillText(`1 unit = ${(1/scale).toFixed(1)} px`, 10, 20);
+}
+
+function drawSidebar(g, frameNum) {
+  if (!g) { sidebar.innerHTML = ''; return; }
+
+  const chars = getCharPositions(g);
+  let html = '<section>';
+  html += `<h3>Frame ${frameNum}</h3>`;
+  html += `<table><tr><th>Live:</th><td>${g.live ? '✓' : '✗'}</td><th>Resim:</th><td>${g.resim ? '✓' : '✗'}</td></tr></table>`;
+  html += '</section>';
+
+  for (const c of chars) {
+    const color = c.team === 0 ? 'p1-color' : 'p2-color';
+    const label = c.team === 0 ? 'P1' : 'P2';
+    const slotLabel = c.slot === 0 ? 'Point' : `Assist ${c.slot}`;
+
+    html += `<section><div class="char-header ${color}"><span class="dot" style="background:${c.team===0?COLORS.p1Live:COLORS.p2Live}"></span> ${label} ${slotLabel}</div>`;
+
+    html += '<table>';
+    html += '<tr><th></th><th>Live</th><th>Resim</th><th>Δ</th></tr>';
+
+    const posLabels = ['X','Y','Z'];
+    for (let i = 0; i < 3; i++) {
+      const lv = c.livePos ? c.livePos[i].toFixed(4) : '—';
+      const rv = c.resimPos ? c.resimPos[i].toFixed(4) : '—';
+      const dv = c.delta ? c.delta[i].toFixed(4) : '—';
+      const cls = c.delta && Math.abs(c.delta[i]) > 0.001 ? 'delta-bad' : 'delta-ok';
+      html += `<tr><th>${posLabels[i]}</th><td class="pos-val">${lv}</td><td class="pos-val">${rv}</td><td class="${cls}">${dv}</td></tr>`;
+    }
+
+    // Action / Flags
+    if (c.live && c.resim) {
+      const actSame = c.live.act === c.resim.act;
+      const flSame = c.live.fl === c.resim.fl;
+      html += `<tr><th>Act</th><td>${c.live.act||'—'}</td><td>${c.resim.act||'—'}</td><td class="${actSame?'delta-ok':'delta-bad'}">${actSame?'✓':'✗'}</td></tr>`;
+      html += `<tr><th>Flags</th><td>${c.live.fl||'—'}</td><td>${c.resim.fl||'—'}</td><td class="${flSame?'delta-ok':'delta-bad'}">${flSame?'✓':'✗'}</td></tr>`;
+      html += `<tr><th>Input</th><td>${c.live.mHeld||'—'}</td><td>${c.resim.mHeld||'—'}</td><td></td></tr>`;
+      html += `<tr><th>FCnt</th><td>${c.live.fcnt??'—'}</td><td>${c.resim.fcnt??'—'}</td><td></td></tr>`;
+    } else if (c.live) {
+      html += `<tr><th>Act</th><td>${c.live.act||'—'}</td><td>—</td><td></td></tr>`;
+      html += `<tr><th>Flags</th><td>${c.live.fl||'—'}</td><td>—</td><td></td></tr>`;
+      html += `<tr><th>Input</th><td>${c.live.mHeld||'—'}</td><td>—</td><td></td></tr>`;
+      html += `<tr><th>FCnt</th><td>${c.live.fcnt??'—'}</td><td>—</td><td></td></tr>`;
+    }
+
+    // RNG
+    if (c.live && c.resim && c.live.rng && c.resim.rng) {
+      const rngSame = c.live.rng.every((v,i) => v === c.resim.rng[i]);
+      html += `<tr><th>RNG</th><td colspan="2">${c.live.rng[0]} …</td><td class="${rngSame?'delta-ok':'delta-bad'}">${rngSame?'✓':'✗'}</td></tr>`;
+    }
+
+    const dMag = getDeltaMag(c.delta);
+    html += `<tr><th>Δ Mag</th><td colspan="3" class="${dMag > 0.01 ? 'delta-bad' : 'delta-ok'}">${dMag.toFixed(6)}</td></tr>`;
+
+    html += '</table></section>';
+  }
+
+  sidebar.innerHTML = html;
+}
+
+// ─── Navigation ───────────────────────────────────────────────────────
+function goFrame(idx) {
+  if (idx < 0 || idx >= frames.length) return;
+  currentFrameIdx = idx;
+  render();
+}
+
+$('btnFirst').addEventListener('click', () => goFrame(0));
+$('btnPrev').addEventListener('click', () => goFrame(currentFrameIdx - 1));
+$('btnNext').addEventListener('click', () => goFrame(currentFrameIdx + 1));
+$('btnLast').addEventListener('click', () => goFrame(frames.length - 1));
+
+document.addEventListener('keydown', e => {
+  if (e.target.tagName === 'INPUT') return;
+  if (e.key === 'ArrowLeft') { e.preventDefault(); goFrame(currentFrameIdx - 1); }
+  if (e.key === 'ArrowRight') { e.preventDefault(); goFrame(currentFrameIdx + 1); }
+  if (e.key === ' ') { e.preventDefault(); togglePlay(); }
+});
+
+frameInput.addEventListener('change', () => {
+  const v = parseInt(frameInput.value);
+  if (!isNaN(v)) goFrame(Math.max(0, Math.min(v, frames.length - 1)));
+});
+
+// ─── Playback ─────────────────────────────────────────────────────────
+function togglePlay() {
+  playing = !playing;
+  $('btnPlay').textContent = playing ? '⏸ Pause' : '▶ Play';
+  if (playing) {
+    const speed = parseInt($('speedRange').value);
+    playTimer = setInterval(() => {
+      if (currentFrameIdx >= frames.length - 1) { togglePlay(); return; }
+      goFrame(currentFrameIdx + 1);
+    }, 1000 / speed);
+  } else {
+    clearInterval(playTimer);
+    playTimer = null;
+  }
+}
+$('btnPlay').addEventListener('click', togglePlay);
+$('speedRange').addEventListener('input', () => {
+  if (playing) { clearInterval(playTimer); const s = parseInt($('speedRange').value); playTimer = setInterval(() => { if (currentFrameIdx >= frames.length - 1) { togglePlay(); return; } goFrame(currentFrameIdx + 1); }, 1000 / s); }
+});
+
+// ─── Show Assists toggle ──────────────────────────────────────────────
+$('showAssists').addEventListener('change', () => {
+  showAssists = $('showAssists').checked;
+  render();
+});
+
+// ─── Resize ───────────────────────────────────────────────────────────
+let resizeTimer;
+window.addEventListener('resize', () => {
+  clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(render, 100);
+});
+
+// ─── Init ─────────────────────────────────────────────────────────────
+render();
+
+// Handle CLI invocation: check URL hash for filepath? No, browser security prevents that.
+// Allow passing file content via URL fragment as base64? Too complex for now.
+</script>
+</body>
+</html>
