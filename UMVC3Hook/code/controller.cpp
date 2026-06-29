@@ -173,6 +173,11 @@ static int32_t   g_confirmedFrame[RING_SIZE];
 // [playerIndex][frame % RING_SIZE]
 static uint32_t  g_rawLocalInput[2][RING_SIZE];
 
+// Game-native format input history per team.
+// Captured from cChrInput+0x14 (mHeld) AFTER oprocessFrameInput translation.
+// Used during offline resim to replay correct game-native values.
+static uint32_t  g_recordedGameInput[2][RING_SIZE];
+
 static bool IsFrameConfirmed(int32_t frame)
 {
     if (frame < 0) return false;
@@ -285,6 +290,7 @@ extern "C" void Controller_ResetBuffers()
     std::memset(g_usedRemoteInput,    0, sizeof(g_usedRemoteInput));
     std::memset(g_recordedLocalInput, 0, sizeof(g_recordedLocalInput));
     std::memset(g_rawLocalInput,      0, sizeof(g_rawLocalInput));  // 2D [2][RING_SIZE]
+    std::memset(g_recordedGameInput,  0, sizeof(g_recordedGameInput));
     std::memset(g_liveRef,            0, sizeof(g_liveRef));
     Diag_ResetBuffers();
     // g_netFrameCount is read from sReplay each frame; no reset needed.
@@ -607,10 +613,9 @@ static uint64_t __fastcall hkGetsCurrentInput_withSOCD(uint64_t pad, uint32_t pl
     if (!g_isResimulating)
     {
         int32_t frame = GetGameFrameCount();
-        if (frame >= 0)
+        if (frame >= 0 && playerIndex < 2)
         {
-            uint32_t pIdx = (uint32_t)playerIndex & 1;
-            g_rawLocalInput[pIdx][(uint32_t)frame % RING_SIZE] = (uint32_t)raw;
+            g_rawLocalInput[playerIndex][(uint32_t)frame % RING_SIZE] = (uint32_t)raw;
         }
     }
 
@@ -640,7 +645,10 @@ static uint64_t __fastcall hkGetsCurrentInput_withSOCD(uint64_t pad, uint32_t pl
             // non-resim frame regardless of netplay state (unlike
             // g_recordedLocalInput which is only written by
             // Controller_OnFrameEnd for netplay).
-            return g_rawLocalInput[(uint32_t)playerIndex & 1][idx];
+            if (playerIndex < 2)
+                return g_rawLocalInput[playerIndex][idx];
+            else
+                return raw;
         }
     }
 
@@ -1033,7 +1041,7 @@ extern "C" void Controller_OnFrameEnd()
     //         cinematic freezes, hitstun, or transition screens, which would
     //         leave gaps in g_recordedLocalInput and cause input display flicker.
     {
-        uint32_t idx = (uint32_t)completedFrame % RING_SIZE;
+        uint32_t idx = (uint32_t)g_netFrameCount % RING_SIZE;
         g_recordedLocalInput[idx] = g_oldInputs[MAX_HISTORY - g_delayFrames];
     }
 
@@ -1136,12 +1144,6 @@ static void __fastcall hkprocessFrameInput(uint64_t cChrInput)
     // 1. Run native translation first so cChrInput fields (+0x14, etc.) populate normally.
     oprocessFrameInput(cChrInput);
 
-    if (!Netplay_IsActive())
-        return;
-
-    if (g_netFrameCount < 0)
-        return;
-
     uint64_t character = *(uint64_t*)(cChrInput + 0x8);
     if (!character)
         return;
@@ -1150,90 +1152,112 @@ static void __fastcall hkprocessFrameInput(uint64_t cChrInput)
     static getTeamIdx_t fnGetTeamIdx = (getTeamIdx_t)_addr(ADDR_GET_TEAM_INDEX);
     uint32_t teamIdx = fnGetTeamIdx(character);
 
-    if (g_isResimulating)
-        DiagLogPreOverride(cChrInput, teamIdx);
+    // Frame resolution: use resim frame or live game frame count
+    int32_t lookupFrame = g_isResimulating ? g_resimulateCurrentFrame : GetGameFrameCount();
+    if (lookupFrame < 0)
+        return;
 
-    int32_t lookupFrame = g_isResimulating ? g_resimulateCurrentFrame : g_netFrameCount;
+    uint32_t idx = (uint32_t)lookupFrame % RING_SIZE;
 
-    if (Netplay_IsHost())
+    if (Netplay_IsActive())
     {
-        if (teamIdx == 0)
+        if (g_isResimulating)
+            DiagLogPreOverride(cChrInput, teamIdx);
+
+        if (Netplay_IsHost())
         {
-            // Host P1 (Local)
-            uint32_t delayed;
-            if (g_isResimulating)
+            if (teamIdx == 0)
             {
-                delayed = g_recordedLocalInput[(uint32_t)lookupFrame % RING_SIZE];
-            // Resim: snapshot restore + oprocessFrameInput's mOldHeld copy at
-            // cChrInput+0x10 already provides the correct prev-frame values
-            // for +0x10, +0x18, +0x1C, +0x20.  DO NOT override them here —
-            // setting all four to the same value destroys the XOR edge
-            // detection in the direction processor (FUN_14002E5A0).
+                // Host P1 (Local)
+                uint32_t delayed;
+                if (g_isResimulating)
+                {
+                    delayed = g_recordedGameInput[0][idx];
+                }
+                else
+                {
+                    // Live: accumulate and read from delay buffer
+                    g_localPending |= *(uint32_t*)(cChrInput + 0x14);
+                    delayed = g_oldInputs[MAX_HISTORY - g_delayFrames];
+                    g_recordedGameInput[0][idx] = delayed; // Record executed native input
+                }
+                *(uint32_t*)(cChrInput + 0x14)  = delayed; // mHeld
+                *(uint32_t*)(cChrInput + 0x560) = delayed; // mRemapped
+                *(uint32_t*)(cChrInput + 0x56C) = delayed; // mProcessed
+                *(uint32_t*)(cChrInput + 0x568) = 0;        // mMask — clear
             }
-            else
+            else if (teamIdx == 1)
             {
-                // Live: accumulate and read from delay buffer
-                g_localPending |= *(uint32_t*)(cChrInput + 0x14);
-                delayed = g_oldInputs[MAX_HISTORY - g_delayFrames];
-                // Live: native engine already set aux fields from physical input history
+                // Host P2 (Remote)
+                uint32_t remote = g_usedRemoteInput[idx];
+                *(uint32_t*)(cChrInput + 0x14)  = remote; // mHeld
+                *(uint32_t*)(cChrInput + 0x560) = remote; // mRemapped
+                *(uint32_t*)(cChrInput + 0x56C) = remote; // mProcessed
+                *(uint32_t*)(cChrInput + 0x568) = 0;        // mMask — clear
             }
-            *(uint32_t*)(cChrInput + 0x14)  = delayed; // mHeld
-            *(uint32_t*)(cChrInput + 0x560) = delayed; // mRemapped
-            *(uint32_t*)(cChrInput + 0x56C) = delayed; // mProcessed
-            *(uint32_t*)(cChrInput + 0x568) = 0;        // mMask — clear, next processFrameInput re-accumulates
         }
-        else if (teamIdx == 1)
+        else // Client
         {
-            uint32_t remote = g_usedRemoteInput[(uint32_t)lookupFrame % RING_SIZE];
-            *(uint32_t*)(cChrInput + 0x14)  = remote; // mHeld
-            *(uint32_t*)(cChrInput + 0x560) = remote; // mRemapped
-            *(uint32_t*)(cChrInput + 0x56C) = remote; // mProcessed
-            *(uint32_t*)(cChrInput + 0x568) = 0;        // mMask — clear
+            if (teamIdx == 0)
+            {
+                // Client P1 (Remote): read centrally-resolved input
+                uint32_t remote = g_usedRemoteInput[idx];
+                *(uint32_t*)(cChrInput + 0x14)  = remote; // mHeld
+                *(uint32_t*)(cChrInput + 0x560) = remote; // mRemapped
+                *(uint32_t*)(cChrInput + 0x56C) = remote; // mProcessed
+                *(uint32_t*)(cChrInput + 0x568) = 0;        // mMask — clear
+            }
+            else if (teamIdx == 1)
+            {
+                // Client P2 (Local)
+                uint32_t delayed;
+                if (g_isResimulating)
+                {
+                    delayed = g_recordedGameInput[1][idx];
+                }
+                else
+                {
+                    g_localPending |= *(uint32_t*)(cChrInput + 0x14);
+                    delayed = g_oldInputs[MAX_HISTORY - g_delayFrames];
+                    g_recordedGameInput[1][idx] = delayed; // Record executed native input
+                }
+
+                *(uint32_t*)(cChrInput + 0x14)  = delayed; // mHeld
+                *(uint32_t*)(cChrInput + 0x560) = delayed; // mRemapped
+                *(uint32_t*)(cChrInput + 0x56C) = delayed; // mProcessed
+                *(uint32_t*)(cChrInput + 0x568) = 0;        // mMask — clear
+            }
+        }
+
+        DiagCaptureLiveRef(cChrInput, teamIdx, g_netFrameCount);
+
+        if (g_isResimulating)
+            DiagLogPostOverride(cChrInput, teamIdx);
+
+        if (g_postResimFrame >= 0 && !g_isResimulating)
+            DiagLogPostResim(cChrInput, teamIdx, g_netFrameCount);
+
+        DiagLogActDbg(cChrInput, teamIdx, g_isResimulating ? g_resimulateCurrentFrame : g_netFrameCount, g_isResimulating);
+    }
+    else // Offline / Singleplayer / F7 test
+    {
+        uint32_t inputVal;
+        if (g_isResimulating)
+        {
+            // Read from our unified Game Native Format history ring
+            inputVal = g_recordedGameInput[teamIdx & 1][idx];
+            *(uint32_t*)(cChrInput + 0x14)  = inputVal; // mHeld
+            *(uint32_t*)(cChrInput + 0x560) = inputVal; // mRemapped
+            *(uint32_t*)(cChrInput + 0x56C) = inputVal; // mProcessed
+            *(uint32_t*)(cChrInput + 0x568) = 0;        // mMask
+        }
+        else
+        {
+            // Live run: capture the game native input translated by oprocessFrameInput
+            inputVal = *(uint32_t*)(cChrInput + 0x14);
+            g_recordedGameInput[teamIdx & 1][idx] = inputVal;
         }
     }
-    else // Client
-    {
-        if (teamIdx == 0)
-        {
-            // Client P1 (Remote): read centrally-resolved input
-            uint32_t remote = g_usedRemoteInput[(uint32_t)lookupFrame % RING_SIZE];
-            *(uint32_t*)(cChrInput + 0x14)  = remote; // mHeld
-            *(uint32_t*)(cChrInput + 0x560) = remote; // mRemapped
-            *(uint32_t*)(cChrInput + 0x56C) = remote; // mProcessed
-            *(uint32_t*)(cChrInput + 0x568) = 0;        // mMask — clear
-            // NOTE: Do NOT override +0x10/+0x18/+0x1C/+0x20 here during resim —
-            // snapshot restore + oprocessFrameInput's mOldHeld copy provide
-            // correct prev-frame values; overriding breaks XOR edge detection.
-        }
-        else if (teamIdx == 1)
-        {
-            uint32_t delayed;
-            if (g_isResimulating)
-            {
-                delayed = g_recordedLocalInput[(uint32_t)lookupFrame % RING_SIZE];
-            }
-            else
-            {
-                g_localPending |= *(uint32_t*)(cChrInput + 0x14);
-                delayed = g_oldInputs[MAX_HISTORY - g_delayFrames];
-            }
-
-            *(uint32_t*)(cChrInput + 0x14)  = delayed; // mHeld
-            *(uint32_t*)(cChrInput + 0x560) = delayed; // mRemapped
-            *(uint32_t*)(cChrInput + 0x56C) = delayed; // mProcessed
-            *(uint32_t*)(cChrInput + 0x568) = 0;        // mMask — clear
-        }
-    }
-    
-    DiagCaptureLiveRef(cChrInput, teamIdx, g_netFrameCount);
-
-    if (g_isResimulating)
-        DiagLogPostOverride(cChrInput, teamIdx);
-
-    if (g_postResimFrame >= 0 && !g_isResimulating)
-        DiagLogPostResim(cChrInput, teamIdx, g_netFrameCount);
-
-    DiagLogActDbg(cChrInput, teamIdx, g_isResimulating ? g_resimulateCurrentFrame : g_netFrameCount, g_isResimulating);
 }
 
 

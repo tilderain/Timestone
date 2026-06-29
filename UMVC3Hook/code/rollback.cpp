@@ -1576,6 +1576,7 @@ static void __fastcall hkMvc3Main_move(uint64_t param_1)
     // F7 re-sim test: save snapshot, record N frames of normal play, restore
     // and re-sim with the captured inputs (exercises the full rollback path).
     if (g_f7State == 1) {
+        g_f7StartFrame = (int32_t)Controller_GetNetFrameCount();
         Rollback_SaveSnapshot(g_f7StartFrame);
         // Initialize diag session so Rollback_ReSimulate reuses the same one
         // (live per-frame dumps during recording + resim dumps side by side).

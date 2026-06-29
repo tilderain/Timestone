@@ -133,11 +133,12 @@ const globalDivergence = $('globalDivergence');
 
 // ─── File loading ─────────────────────────────────────────────────────
 dropzone.addEventListener('click', () => fileInput.click());
-dropzone.addEventListener('dragover', e => { e.preventDefault(); dropzone.classList.add('drag-over'); });
-dropzone.addEventListener('dragleave', () => dropzone.classList.remove('drag-over'));
-dropzone.addEventListener('drop', e => { e.preventDefault(); dropzone.classList.remove('drag-over'); loadFile(e.dataTransfer.files[0]); });
 fileInput.addEventListener('change', e => { if (e.target.files[0]) loadFile(e.target.files[0]); });
 $('btnLoad').addEventListener('click', () => fileInput.click());
+
+document.addEventListener('dragover', e => { e.preventDefault(); document.body.style.outline = '3px dashed #00d4ff'; });
+document.addEventListener('dragleave', e => { document.body.style.outline = ''; });
+document.addEventListener('drop', e => { e.preventDefault(); document.body.style.outline = ''; if (e.dataTransfer.files[0]) loadFile(e.dataTransfer.files[0]); });
 
 function loadFile(file) {
   if (!file) return;
@@ -171,10 +172,16 @@ function buildFrameMap() {
   frames = [];
   for (const e of entries) {
     if (e.frame === undefined || !e.side) continue;
-    if (!frameMap[e.frame]) frameMap[e.frame] = { live: null, resim: null };
-    if (e.side === 'live') frameMap[e.frame].live = e;
-    else if (e.side === 'resim') frameMap[e.frame].resim = e;
-    else if (e.side === 'ground_truth') frameMap[e.frame].live = e;
+    if (!frameMap[e.frame]) frameMap[e.frame] = { live: null, resim: null, refSide: null };
+    if (e.side === 'ground_truth') {
+      frameMap[e.frame].live = e;
+      frameMap[e.frame].refSide = 'ground_truth';
+    } else if (e.side === 'live' && frameMap[e.frame].refSide !== 'ground_truth') {
+      frameMap[e.frame].live = e;
+      frameMap[e.frame].refSide = 'live';
+    } else if (e.side === 'resim') {
+      frameMap[e.frame].resim = e;
+    }
   }
   frames = Object.keys(frameMap).map(Number).sort((a,b) => a-b);
   frameInput.min = 0;
@@ -250,21 +257,24 @@ function updateButtons() {
 
 function getCharPositions(g) {
   const result = [];
-  if (!g || !g.live) return result;
-  const liveChars = g.live.chars || [];
-  const resimChars = g.resim ? (g.resim.chars || []) : [];
-  for (let i = 0; i < liveChars.length; i++) {
-    const lc = liveChars[i];
-    if (!showAssists && lc.slot > 0) continue;
-    const rc = resimChars[i] || null;
+  if (!g) return result;
+  const src = g.live || g.resim;
+  if (!src) return result;
+  const srcChars = src.chars || [];
+  const otherChars = g.resim && g.live ? (g.resim.chars || []) : [];
+  for (let i = 0; i < srcChars.length; i++) {
+    const sc = srcChars[i];
+    if (!showAssists && sc.slot > 0) continue;
+    const oc = otherChars[i] || null;
+    const isLive = !!g.live;
     result.push({
-      team: lc.team,
-      slot: lc.slot,
-      livePos: lc.pos,
-      resimPos: rc ? rc.pos : null,
-      live: lc,
-      resim: rc,
-      delta: getDelta(lc, rc),
+      team: sc.team,
+      slot: sc.slot,
+      livePos: isLive ? sc.pos : (oc ? oc.pos : null),
+      resimPos: g.resim ? (g.resim.chars[i] ? g.resim.chars[i].pos : null) : null,
+      live: isLive ? sc : oc,
+      resim: g.resim ? (g.resim.chars[i] || null) : null,
+      delta: isLive ? getDelta(sc, oc) : getDelta(sc, null),
     });
   }
   return result;
@@ -283,7 +293,7 @@ function drawCanvas(g, frameNum) {
 
   ctx.clearRect(0, 0, w, h);
 
-  if (!g || !g.live) {
+  if (!g || (!g.live && !g.resim)) {
     ctx.fillStyle = '#888';
     ctx.font = '18px sans-serif';
     ctx.textAlign = 'center';
@@ -346,8 +356,6 @@ function drawCanvas(g, frameNum) {
 
   // Draw connecting lines & positions
   for (const c of chars) {
-    const color = c.team === 0 ? COLORS.p1 : COLORS.p2;
-    const fillColor = c.team === 0 ? COLORS.p1Fill : COLORS.p2Fill;
     const radius = c.slot === 0 ? 12 : 8;
     const label = c.team === 0 ? 'P1' : 'P2';
 
@@ -390,7 +398,7 @@ function drawCanvas(g, frameNum) {
 
       // Draw slot indicator
       if (c.slot > 0) {
-        ctx.fillStyle = color;
+        ctx.fillStyle = liveColor;
         ctx.font = 'bold 9px sans-serif';
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
@@ -405,6 +413,14 @@ function drawCanvas(g, frameNum) {
       ctx.fill();
       ctx.strokeStyle = liveColor; ctx.lineWidth = 2;
       ctx.stroke();
+    } else if (c.resimPos) {
+      const [rx, ry] = toScreen(c.resimPos[0], c.resimPos[1]);
+      ctx.beginPath(); ctx.arc(rx, ry, radius, 0, Math.PI*2);
+      ctx.strokeStyle = c.team === 0 ? COLORS.p1Resim : COLORS.p2Resim;
+      ctx.lineWidth = 2.5;
+      ctx.stroke();
+      ctx.fillStyle = c.team === 0 ? COLORS.p1ResimFill : COLORS.p2ResimFill;
+      ctx.fill();
     }
   }
 
@@ -423,7 +439,8 @@ function drawSidebar(g, frameNum) {
   const chars = getCharPositions(g);
   let html = '<section>';
   html += `<h3>Frame ${frameNum}</h3>`;
-  html += `<table><tr><th>Live:</th><td>${g.live ? '✓' : '✗'}</td><th>Resim:</th><td>${g.resim ? '✓' : '✗'}</td></tr></table>`;
+  const refLabel = g.refSide === 'ground_truth' ? 'Ground Truth' : 'Live';
+  html += `<table><tr><th>${refLabel}:</th><td>${g.live ? '✓' : '✗'}</td><th>Resim:</th><td>${g.resim ? '✓' : '✗'}</td></tr></table>`;
   html += '</section>';
 
   for (const c of chars) {
@@ -458,6 +475,11 @@ function drawSidebar(g, frameNum) {
       html += `<tr><th>Flags</th><td>${c.live.fl||'—'}</td><td>—</td><td></td></tr>`;
       html += `<tr><th>Input</th><td>${c.live.mHeld||'—'}</td><td>—</td><td></td></tr>`;
       html += `<tr><th>FCnt</th><td>${c.live.fcnt??'—'}</td><td>—</td><td></td></tr>`;
+    } else if (c.resim) {
+      html += `<tr><th>Act</th><td>—</td><td>${c.resim.act||'—'}</td><td></td></tr>`;
+      html += `<tr><th>Flags</th><td>—</td><td>${c.resim.fl||'—'}</td><td></td></tr>`;
+      html += `<tr><th>Input</th><td>—</td><td>${c.resim.mHeld||'—'}</td><td></td></tr>`;
+      html += `<tr><th>FCnt</th><td>—</td><td>${c.resim.fcnt??'—'}</td><td></td></tr>`;
     }
 
     // RNG
