@@ -58,7 +58,7 @@ body { font-family: 'Segoe UI', system-ui, sans-serif; background: #1a1a2e; colo
 <div id="dropzone">
   <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="#666" stroke-width="1.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
   <p>Drop an <strong>.ndjson</strong> file here, or click to browse</p>
-  <div class="sub">Press F7 in-game to generate diagnostic data</div>
+  <div class="sub">Drop a netplay live log (<strong>nplive_*/frames.ndjson</strong>) or F7 diagnostic dump</div>
   <input type="file" id="fileInput" accept=".ndjson,.json,.jsonl,.txt" hidden>
 </div>
 
@@ -78,12 +78,10 @@ body { font-family: 'Segoe UI', system-ui, sans-serif; background: #1a1a2e; colo
   </div>
 
   <div class="legend">
-    <span class="legend-item"><span class="legend-live" style="background:#00ccaa"></span> P1 Live</span>
-    <span class="legend-item"><span class="legend-resim" style="border-color:#00bfff"></span> P1 Resim</span>
-    <span class="legend-item"><span class="legend-live" style="background:#ff6030"></span> P2 Live</span>
-    <span class="legend-item"><span class="legend-resim" style="border-color:#ff3030"></span> P2 Resim</span>
+    <span id="legendItems"></span>
     <span class="legend-item" id="globalDivergence">Divergence: —</span>
-    <label style="font-size:13px;color:#888;margin-left:8px"><input type="checkbox" id="showAssists"> Show assists</label>
+    <span style="flex:1"></span>
+    <label style="font-size:13px;color:#888"><input type="checkbox" id="showAssists"> Show assists</label>
   </div>
 
   <div class="main">
@@ -115,6 +113,10 @@ const COLORS = {
   p1Resim: '#00bfff', p1ResimFill: 'rgba(0,191,255,0.3)',
   p2Live: '#ff6030', p2LiveFill: 'rgba(255,96,48,0.55)',
   p2Resim: '#ff3030', p2ResimFill: 'rgba(255,48,48,0.3)',
+  p1Host: '#00ccaa', p1HostFill: 'rgba(0,204,170,0.55)',
+  p1Client: '#4488ff', p1ClientFill: 'rgba(68,136,255,0.55)',
+  p2Host: '#ffaa00', p2HostFill: 'rgba(255,170,0,0.55)',
+  p2Client: '#ff3030', p2ClientFill: 'rgba(255,48,48,0.55)',
   grid: 'rgba(255,255,255,0.06)',
   ground: 'rgba(255,255,255,0.12)',
   text: '#888',
@@ -128,8 +130,52 @@ const dropzone = $('dropzone'), app = $('app'), fileInput = $('fileInput');
 const canvas = $('canvas'), ctx = canvas.getContext('2d');
 const frameDisplay = $('frameDisplay'), frameInput = $('frameInput');
 const sidebar = $('sidebar'), fileInfo = $('fileInfo');
-const statusFrames = $('statusFrames'), statusEntries = $('statusEntries'), statusDiverged = $('statusDiverged');
+const statusFrames = $('statusFrames'), statusEntries = $('statusEntries'), statusSource = $('statusSource'), statusDiverged = $('statusDiverged');
 const globalDivergence = $('globalDivergence');
+const legendItems = $('legendItems');
+
+function getCharColor(team, refSide) {
+  if (refSide === 'host' || refSide === 'client') {
+    if (team === 0) {
+      return {
+        main: refSide === 'host' ? COLORS.p1Host : COLORS.p1Client,
+        fill: refSide === 'host' ? COLORS.p1HostFill : COLORS.p1ClientFill,
+      };
+    } else {
+      return {
+        main: refSide === 'host' ? COLORS.p2Host : COLORS.p2Client,
+        fill: refSide === 'host' ? COLORS.p2HostFill : COLORS.p2ClientFill,
+      };
+    }
+  }
+  return {
+    main: team === 0 ? COLORS.p1Live : COLORS.p2Live,
+    fill: team === 0 ? COLORS.p1LiveFill : COLORS.p2LiveFill,
+  };
+}
+
+function getCharRole(team, refSide) {
+  if (refSide !== 'host' && refSide !== 'client') return '';
+  return team === 0 ? 'Host' : 'Client';
+}
+
+function updateLegend() {
+  const isNetplay = entries.some(e => e.inputs);
+  const isDiag = entries.some(e => e.regions && !e.inputs);
+  let html = '';
+  if (isNetplay) {
+    html += `<span class="legend-item"><span class="legend-live" style="background:${COLORS.p1Host}"></span> P1 (Host)</span>`;
+    html += `<span class="legend-item"><span class="legend-live" style="background:${COLORS.p1Client}"></span> P1 (Client)</span>`;
+    html += `<span class="legend-item"><span class="legend-live" style="background:${COLORS.p2Host}"></span> P2 (Host)</span>`;
+    html += `<span class="legend-item"><span class="legend-live" style="background:${COLORS.p2Client}"></span> P2 (Client)</span>`;
+  } else if (isDiag) {
+    html += `<span class="legend-item"><span class="legend-live" style="background:${COLORS.p1Live}"></span> P1 Live</span>`;
+    html += `<span class="legend-item"><span class="legend-resim" style="border-color:${COLORS.p1Resim}"></span> P1 Resim</span>`;
+    html += `<span class="legend-item"><span class="legend-live" style="background:${COLORS.p2Live}"></span> P2 Live</span>`;
+    html += `<span class="legend-item"><span class="legend-resim" style="border-color:${COLORS.p2Resim}"></span> P2 Resim</span>`;
+  }
+  legendItems.innerHTML = html;
+}
 
 // ─── File loading ─────────────────────────────────────────────────────
 dropzone.addEventListener('click', () => fileInput.click());
@@ -156,6 +202,7 @@ function parseData(text, name) {
   const lines = text.split('\n').filter(l => l.trim());
   entries = lines.map((l, i) => { try { return JSON.parse(l); } catch(e) { return null; } }).filter(e => e);
   buildFrameMap();
+  updateLegend();
   updateStatus();
   if (frames.length) {
     currentFrameIdx = 0;
@@ -176,9 +223,9 @@ function buildFrameMap() {
     if (e.side === 'ground_truth') {
       frameMap[e.frame].live = e;
       frameMap[e.frame].refSide = 'ground_truth';
-    } else if (e.side === 'live' && frameMap[e.frame].refSide !== 'ground_truth') {
+    } else if ((e.side === 'live' || e.side === 'host' || e.side === 'client') && frameMap[e.frame].refSide !== 'ground_truth') {
       frameMap[e.frame].live = e;
-      frameMap[e.frame].refSide = 'live';
+      frameMap[e.frame].refSide = e.side;
     } else if (e.side === 'resim') {
       frameMap[e.frame].resim = e;
     }
@@ -270,6 +317,7 @@ function getCharPositions(g) {
     result.push({
       team: sc.team,
       slot: sc.slot,
+      refSide: g.refSide,
       livePos: isLive ? sc.pos : (oc ? oc.pos : null),
       resimPos: g.resim ? (g.resim.chars[i] ? g.resim.chars[i].pos : null) : null,
       live: isLive ? sc : oc,
@@ -357,7 +405,7 @@ function drawCanvas(g, frameNum) {
   // Draw connecting lines & positions
   for (const c of chars) {
     const radius = c.slot === 0 ? 12 : 8;
-    const label = c.team === 0 ? 'P1' : 'P2';
+    const col = getCharColor(c.team, c.refSide);
 
     if (c.livePos && c.resimPos) {
       const [lx, ly] = toScreen(c.livePos[0], c.livePos[1]);
@@ -389,16 +437,14 @@ function drawCanvas(g, frameNum) {
 
       // Draw live (filled)
       ctx.beginPath(); ctx.arc(lx, ly, radius, 0, Math.PI*2);
-      const liveColor = c.team === 0 ? COLORS.p1Live : COLORS.p2Live;
-      const liveFill = c.team === 0 ? COLORS.p1LiveFill : COLORS.p2LiveFill;
-      ctx.fillStyle = liveFill;
+      ctx.fillStyle = col.fill;
       ctx.fill();
-      ctx.strokeStyle = liveColor; ctx.lineWidth = 2;
+      ctx.strokeStyle = col.main; ctx.lineWidth = 2;
       ctx.stroke();
 
       // Draw slot indicator
       if (c.slot > 0) {
-        ctx.fillStyle = liveColor;
+        ctx.fillStyle = col.main;
         ctx.font = 'bold 9px sans-serif';
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
@@ -407,11 +453,9 @@ function drawCanvas(g, frameNum) {
     } else if (c.livePos) {
       const [lx, ly] = toScreen(c.livePos[0], c.livePos[1]);
       ctx.beginPath(); ctx.arc(lx, ly, radius, 0, Math.PI*2);
-      const liveColor = c.team === 0 ? COLORS.p1Live : COLORS.p2Live;
-      const liveFill = c.team === 0 ? COLORS.p1LiveFill : COLORS.p2LiveFill;
-      ctx.fillStyle = liveFill;
+      ctx.fillStyle = col.fill;
       ctx.fill();
-      ctx.strokeStyle = liveColor; ctx.lineWidth = 2;
+      ctx.strokeStyle = col.main; ctx.lineWidth = 2;
       ctx.stroke();
     } else if (c.resimPos) {
       const [rx, ry] = toScreen(c.resimPos[0], c.resimPos[1]);
@@ -439,16 +483,28 @@ function drawSidebar(g, frameNum) {
   const chars = getCharPositions(g);
   let html = '<section>';
   html += `<h3>Frame ${frameNum}</h3>`;
-  const refLabel = g.refSide === 'ground_truth' ? 'Ground Truth' : 'Live';
+  const refLabel = g.refSide === 'ground_truth' ? 'Ground Truth' : (g.refSide === 'host' || g.refSide === 'client' ? g.refSide.toUpperCase() : 'Live');
   html += `<table><tr><th>${refLabel}:</th><td>${g.live ? '✓' : '✗'}</td><th>Resim:</th><td>${g.resim ? '✓' : '✗'}</td></tr></table>`;
+  // Netplay live inputs
+  if (g.live && g.live.inputs) {
+    const inp = g.live.inputs;
+    html += '<table style="margin-top:4px">';
+    html += `<tr><th>Local In</th><td style="font-family:monospace">${inp.local||'—'}</td></tr>`;
+    html += `<tr><th>Used Rem</th><td style="font-family:monospace">${inp.usedRemote||'—'}</td></tr>`;
+    html += `<tr><th>Recv Rem</th><td style="font-family:monospace">${inp.recvRemote||'—'}</td></tr>`;
+    html += '</table>';
+  }
   html += '</section>';
 
   for (const c of chars) {
+    const col = getCharColor(c.team, c.refSide);
+    const role = getCharRole(c.team, c.refSide);
     const color = c.team === 0 ? 'p1-color' : 'p2-color';
     const label = c.team === 0 ? 'P1' : 'P2';
     const slotLabel = c.slot === 0 ? 'Point' : `Assist ${c.slot}`;
+    const roleTag = role ? `<span style="font-size:10px;font-weight:400;color:${col.main};margin-left:4px">(${role})</span>` : '';
 
-    html += `<section><div class="char-header ${color}"><span class="dot" style="background:${c.team===0?COLORS.p1Live:COLORS.p2Live}"></span> ${label} ${slotLabel}</div>`;
+    html += `<section><div class="char-header ${color}"><span class="dot" style="background:${col.main}"></span> ${label} ${slotLabel}${roleTag}</div>`;
 
     html += '<table>';
     html += '<tr><th></th><th>Live</th><th>Resim</th><th>Δ</th></tr>';

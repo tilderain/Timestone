@@ -129,6 +129,93 @@ static int    g_diagSessionId  = 0;
 static char   g_diagDir[260]   = {};
 static int    g_diagWriteCount = 0;
 
+// Netplay per-frame live NDJSON logging
+static bool   g_netplayLiveInit   = false;
+static char   g_netplayLivePath[260] = {};
+static int    g_netplayLiveReset   = 0;
+
+static void Rollback_NetplayLiveInit() {
+    g_netplayLiveInit = false;
+    g_netplayLivePath[0] = '\0';
+
+    char dir[260];
+    SYSTEMTIME st;
+    GetLocalTime(&st);
+    snprintf(dir, sizeof(dir), "nplive_%04d%02d%02d_%02d%02d%02d",
+             st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
+    CreateDirectoryA(dir, NULL);
+
+    snprintf(g_netplayLivePath, sizeof(g_netplayLivePath), "%s/frames.ndjson", dir);
+    FILE* f = fopen(g_netplayLivePath, "w");
+    if (f) fclose(f);
+
+    HookLog("NetplayLive: NDJSON log -> %s\n", g_netplayLivePath);
+    g_netplayLiveInit = true;
+}
+
+static void Rollback_DumpNetplayLive(int32_t frame) {
+    if (!g_netplayLiveInit) Rollback_NetplayLiveInit();
+    if (!g_netplayLivePath[0]) return;
+
+    FILE* f = fopen(g_netplayLivePath, "a");
+    if (!f) return;
+
+    char tsBuf[32] = {};
+    SYSTEMTIME st;
+    GetLocalTime(&st);
+    snprintf(tsBuf, sizeof(tsBuf), "%04d-%02d-%02dT%02d:%02d:%02d",
+             st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
+
+    const char* side = Netplay_IsHost() ? "host" : "client";
+
+    // Input state for this frame
+    uint32_t recvInput = Controller_GetReceivedRemoteInput(frame);
+    uint32_t usedInput = Controller_GetUsedRemoteInput(frame);
+    uint32_t localInput = Controller_GetRecordedLocalInput(frame);
+
+    fprintf(f, "{\"v\":1,\"ts\":\"%s\",\"frame\":%d,\"side\":\"%s\","
+               "\"inputs\":{\"local\":\"0x%08X\",\"usedRemote\":\"0x%08X\",\"recvRemote\":\"0x%08X\"},"
+               "\"chars\":[",
+            tsBuf, frame, side, localInput, usedInput, recvInput);
+
+    uint64_t sCharacter = *(uint64_t*)_addr(PTR_SCHARACTER);
+    bool firstChar = true;
+    if (sCharacter) {
+        for (int ti = 0; ti < 2; ++ti) {
+            uint64_t team = sCharacter + (ti == 0 ? TEAM0_OFFSET : TEAM1_OFFSET);
+            uint64_t node = team + TEAM_FIRST_NODE_OFFSET;
+            int ci = 0;
+            while (node) {
+                uint64_t chr = *(uint64_t*)(node + NODE_CHR_OFFSET);
+                if (chr) {
+                    CharDiagSnapshot snap;
+                    CaptureCharSnapshot(chr, ti, ci, snap);
+
+                    if (!firstChar) fprintf(f, ",");
+                    firstChar = false;
+                    fprintf(f, "{\"team\":%d,\"slot\":%d,"
+                            "\"pos\":[%.4f,%.4f,%.4f],"
+                            "\"act\":\"0x%08X\",\"fl\":\"0x%08X\","
+                            "\"mHeld\":\"0x%08X\",\"fcnt\":%llu,"
+                            "\"rng\":[\"0x%08X\",\"0x%08X\",\"0x%08X\",\"0x%08X\"]}",
+                            ti, ci,
+                            snap.posX, snap.posY, snap.posZ,
+                            snap.actionId, snap.flags14F0,
+                            *(uint32_t*)(snap.cchr + 0x14),
+                            *(uint64_t*)(snap.cchr + 0x18),
+                            snap.xorShift[0], snap.xorShift[1],
+                            snap.xorShift[2], snap.xorShift[3]);
+                    ci++;
+                }
+                node = *(uint64_t*)(node + NODE_NEXT_OFFSET);
+            }
+        }
+    }
+
+    fprintf(f, "]}\n");
+    fclose(f);
+}
+
 // static decltype(&QueryPerformanceCounter) g_real_qpc = nullptr;
 // static uint64_t g_virtual_qpc = 0;
 // static DWORD g_main_thread_id = 0;
@@ -1724,6 +1811,21 @@ static void __fastcall hkMvc3Main_move(uint64_t param_1)
     }
 
     oMvc3Main_move(param_1);
+
+    // Netplay per-frame live NDJSON logging — every live frame logged
+    // so both sides have a complete frame-by-frame record for diagnostics.
+    if (Netplay_IsActive() && !g_isResimulating) {
+        typedef uint64_t(__fastcall* GetAmaterasu_t)();
+        static GetAmaterasu_t getAmaterasu = (GetAmaterasu_t)_addr(0x140001A90);
+        uint64_t aNextBattle = getAmaterasu();
+        int step = aNextBattle ? *(int*)(aNextBattle + 0xD8) : 0;
+        if (step >= 2) {
+            int32_t curFrame = (int32_t)Controller_GetNetFrameCount();
+            if (curFrame >= 0) {
+                Rollback_DumpNetplayLive(curFrame);
+            }
+        }
+    }
 
     // F7 live capture: dump state after each recording frame tick so it appears
     // alongside the corresponding resim dump in the same diag session files.
