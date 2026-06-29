@@ -1150,7 +1150,8 @@ static void __fastcall hkprocessFrameInput(uint64_t cChrInput)
     static getTeamIdx_t fnGetTeamIdx = (getTeamIdx_t)_addr(ADDR_GET_TEAM_INDEX);
     uint32_t teamIdx = fnGetTeamIdx(character);
 
-    DiagLogPreOverride(cChrInput, teamIdx);
+    if (g_isResimulating)
+        DiagLogPreOverride(cChrInput, teamIdx);
 
     int32_t lookupFrame = g_isResimulating ? g_resimulateCurrentFrame : g_netFrameCount;
 
@@ -1226,7 +1227,8 @@ static void __fastcall hkprocessFrameInput(uint64_t cChrInput)
     
     DiagCaptureLiveRef(cChrInput, teamIdx, g_netFrameCount);
 
-    DiagLogPostOverride(cChrInput, teamIdx);
+    if (g_isResimulating)
+        DiagLogPostOverride(cChrInput, teamIdx);
 
     if (g_postResimFrame >= 0 && !g_isResimulating)
         DiagLogPostResim(cChrInput, teamIdx, g_netFrameCount);
