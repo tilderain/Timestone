@@ -111,6 +111,24 @@ int     g_f7DiagSession  = -1;
 
 // Rollback request from controller.cpp — late input arrived that differs
 // from what was predicted.  Start/end inclusive frame range.
+// __ImageBase gives us the DLL's base address (used with GetModuleFileNameA
+// to resolve paths relative to the DLL's directory instead of the CWD, which
+// games often change after loading plugins).
+EXTERN_C IMAGE_DOS_HEADER __ImageBase;
+
+// Resolve a relative path to one rooted at the DLL's own directory.
+// Returns the number of chars written (like snprintf), or negative on error.
+// |dst| is always null-terminated.
+static int ResolveDllPath(char* dst, size_t dstLen, const char* relative) {
+    if (!dst || dstLen == 0) return -1;
+    char modPath[260];
+    DWORD ret = GetModuleFileNameA((HINSTANCE)&__ImageBase, modPath, sizeof(modPath));
+    if (ret == 0 || ret >= sizeof(modPath)) { dst[0] = '\0'; return -1; }
+    char* sep = strrchr(modPath, '\\');
+    if (sep) *(sep + 1) = '\0'; else modPath[0] = '\0';
+    return snprintf(dst, dstLen, "%s%s", modPath, relative);
+}
+
 static int32_t g_rollbackReqStart = -1;
 static int32_t g_rollbackReqEnd   = -1;
 static uint64_t g_sMvc3Main      = 0;
@@ -141,8 +159,10 @@ static void Rollback_NetplayLiveInit() {
     char dir[260];
     SYSTEMTIME st;
     GetLocalTime(&st);
-    snprintf(dir, sizeof(dir), "nplive_%04d%02d%02d_%02d%02d%02d",
+    char rel[64];
+    snprintf(rel, sizeof(rel), "nplive_%04d%02d%02d_%02d%02d%02d",
              st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
+    ResolveDllPath(dir, sizeof(dir), rel);
     CreateDirectoryA(dir, NULL);
 
     snprintf(g_netplayLivePath, sizeof(g_netplayLivePath), "%s/frames.ndjson", dir);
@@ -1122,8 +1142,10 @@ static void Rollback_DiagInit() {
     if (g_diagDir[0]) return;
     SYSTEMTIME st;
     GetLocalTime(&st);
-    snprintf(g_diagDir, sizeof(g_diagDir), "rdiag_%04d%02d%02d_%02d%02d%02d",
+    char rel[64];
+    snprintf(rel, sizeof(rel), "rdiag_%04d%02d%02d_%02d%02d%02d",
              st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
+    ResolveDllPath(g_diagDir, sizeof(g_diagDir), rel);
     CreateDirectoryA(g_diagDir, NULL);
     HookLog("Rollback: diag dir: %s\n", g_diagDir);
 }
