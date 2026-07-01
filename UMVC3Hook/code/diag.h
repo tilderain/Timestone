@@ -63,6 +63,7 @@ struct LiveFrameRecord {
     float posX;
     float posY;
     float posZ;
+    uint32_t rng[4];
 };
 
 extern FrameDiagSnapshot g_liveFrameSnap[ROLLBACK_WINDOW_DIAG];

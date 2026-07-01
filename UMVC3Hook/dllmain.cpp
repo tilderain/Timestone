@@ -325,6 +325,11 @@ long __stdcall hkEndScene(LPDIRECT3DDEVICE9 pDevice)
 
 	ImGui::NewFrame();
 	ImGui::GetIO().MouseDrawCursor = false;
+
+	// Process menu logic, notifications, frame stepper, and freecam
+	// (formerly in a separate HookUpdate thread with Sleep(1))
+	UMVC3Hooks::HookProcessStuff();
+
 	if (first_msg)
 	{
 		Notifications->SetNotificationTime(5500);
@@ -366,15 +371,6 @@ DWORD WINAPI MainThread(LPVOID lpReserved)
 		}
 	} while (!attached);
 	return TRUE;
-}
-
-void WINAPI HookUpdate()
-{
-	while (true)
-	{
-		UMVC3Hooks::HookProcessStuff();
-		Sleep(1);
-	}
 }
 
 // MinHook trampoline for aTitleLogo__update (0x140217700)
@@ -869,7 +865,6 @@ BOOL WINAPI DllMain(HMODULE hMod, DWORD dwReason, LPVOID lpReserved)
 			}
 
 			CreateThread(nullptr, 0, MainThread, hMod, 0, nullptr);
-			CreateThread(nullptr, 0, (LPTHREAD_START_ROUTINE)HookUpdate, hMod, 0, nullptr);
 			BootTimer_Stamp("Before OnInitializeHook");
 			OnInitializeHook();
 			BootTimer_Stamp("After OnInitializeHook");

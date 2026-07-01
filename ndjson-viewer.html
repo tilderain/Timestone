@@ -42,6 +42,10 @@ body { font-family: 'Segoe UI', system-ui, sans-serif; background: #1a1a2e; colo
 .sidebar .p1-color { color: #4fc3f7; }
 .sidebar .p2-color { color: #ef5350; }
 .sidebar .dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; }
+.toolbar .scrub-bar { flex: 1; min-width: 120px; height: 6px; accent-color: #00d4ff; cursor: pointer; }
+.toolbar .num-group { display: flex; align-items: center; gap: 4px; }
+.toolbar .num-group label { font-size: 13px; color: #aaa; white-space: nowrap; }
+.toolbar .num-group input[type=number] { width: 70px; background: #0f3460; color: #e0e0e0; border: 1px solid #1a5276; border-radius: 4px; padding: 4px 8px; font-size: 14px; }
 .legend { display: flex; gap: 16px; padding: 4px 16px; background: #0d1117; font-size: 12px; color: #888; border-bottom: 1px solid #0f3460; }
 .legend-item { display: flex; align-items: center; gap: 6px; }
 .legend-live { width: 12px; height: 12px; border-radius: 50%; }
@@ -49,6 +53,8 @@ body { font-family: 'Segoe UI', system-ui, sans-serif; background: #1a1a2e; colo
 .divergence-badge { display: inline-block; padding: 2px 8px; border-radius: 3px; font-size: 11px; font-weight: 700; }
 .divergence-badge.yes { background: #ff5252; color: #fff; }
 .divergence-badge.no { background: #4caf50; color: #fff; }
+.mismatch-bg { background: rgba(255, 82, 82, 0.15); border-radius: 3px; }
+tr.mismatch-bg td { background: rgba(255, 82, 82, 0.15); }
 .status-bar { padding: 4px 16px; background: #0d1117; border-top: 1px solid #0f3460; font-size: 12px; color: #666; display: flex; gap: 20px; }
 .status-bar .diverged { color: #ff5252; }
 </style>
@@ -70,9 +76,11 @@ body { font-family: 'Segoe UI', system-ui, sans-serif; background: #1a1a2e; colo
     <span class="frame-num" id="frameDisplay">0 / 0</span>
     <button id="btnNext" title="Next frame (→)">▶</button>
     <button id="btnLast" title="Last frame">▶|</button>
+    <button id="btnFirstDiv" title="Jump to first divergent frame">First ↯</button>
     <button id="btnPlay" title="Play/Pause">▶ Play</button>
-    <label>Speed: <input type="range" id="speedRange" min="1" max="30" value="5"></label>
-    <label>Frame: <input type="number" id="frameInput" min="0" style="width:80px"></label>
+    <label style="font-size:13px;color:#aaa;white-space:nowrap">Speed: <input type="range" id="speedRange" min="1" max="30" value="5" style="width:100px;vertical-align:middle"></label>
+    <input type="range" id="scrubBar" class="scrub-bar" min="0" max="0" value="0">
+    <span class="num-group"><label>Frame:</label><input type="number" id="frameInput" min="0"></span>
     <span class="spacer"></span>
     <span class="file-info" id="fileInfo"></span>
   </div>
@@ -127,7 +135,7 @@ const COLORS = {
 // ─── DOM refs ─────────────────────────────────────────────────────────
 const $ = id => document.getElementById(id);
 const dropzone = $('dropzone'), app = $('app'), fileInput = $('fileInput');
-const canvas = $('canvas'), ctx = canvas.getContext('2d');
+const canvas = $('canvas');
 const frameDisplay = $('frameDisplay'), frameInput = $('frameInput');
 const sidebar = $('sidebar'), fileInfo = $('fileInfo');
 const statusFrames = $('statusFrames'), statusEntries = $('statusEntries'), statusSource = $('statusSource'), statusDiverged = $('statusDiverged');
@@ -160,14 +168,14 @@ function getCharRole(team, refSide) {
 }
 
 function updateLegend() {
-  const isNetplay = entries.some(e => e.inputs);
+  const isNetplay = entries.some(e => e.side && (e.side === 'host' || e.side === 'client' || e.side === 'host_resim' || e.side === 'client_resim'));
   const isDiag = entries.some(e => e.regions && !e.inputs);
   let html = '';
   if (isNetplay) {
-    html += `<span class="legend-item"><span class="legend-live" style="background:${COLORS.p1Host}"></span> P1 (Host)</span>`;
-    html += `<span class="legend-item"><span class="legend-live" style="background:${COLORS.p1Client}"></span> P1 (Client)</span>`;
-    html += `<span class="legend-item"><span class="legend-live" style="background:${COLORS.p2Host}"></span> P2 (Host)</span>`;
-    html += `<span class="legend-item"><span class="legend-live" style="background:${COLORS.p2Client}"></span> P2 (Client)</span>`;
+    html += `<span class="legend-item"><span class="legend-live" style="background:${COLORS.p1Host}"></span> P1 Host (live)</span>`;
+    html += `<span class="legend-item"><span class="legend-resim" style="border-color:${COLORS.p1Client}"></span> P1 Client (resim)</span>`;
+    html += `<span class="legend-item"><span class="legend-live" style="background:${COLORS.p2Host}"></span> P2 Host (live)</span>`;
+    html += `<span class="legend-item"><span class="legend-resim" style="border-color:${COLORS.p2Client}"></span> P2 Client (resim)</span>`;
   } else if (isDiag) {
     html += `<span class="legend-item"><span class="legend-live" style="background:${COLORS.p1Live}"></span> P1 Live</span>`;
     html += `<span class="legend-item"><span class="legend-resim" style="border-color:${COLORS.p1Resim}"></span> P1 Resim</span>`;
@@ -194,6 +202,10 @@ function loadFile(file) {
     dropzone.classList.add('hidden');
     app.classList.add('active');
     fileInfo.textContent = file.name + ' (' + (file.size/1024).toFixed(1) + ' KB)';
+    if (frames.length) {
+      currentFrameIdx = 0;
+      render();
+    }
   };
   reader.readAsText(file);
 }
@@ -204,10 +216,7 @@ function parseData(text, name) {
   buildFrameMap();
   updateLegend();
   updateStatus();
-  if (frames.length) {
-    currentFrameIdx = 0;
-    render();
-  } else {
+  if (!frames.length) {
     sidebar.innerHTML = '<section><h3>No valid frames found</h3><p style="color:#888">Could not parse any frame entries from the file.</p></section>';
   }
   $('showAssists').checked = false;
@@ -217,54 +226,113 @@ function parseData(text, name) {
 function buildFrameMap() {
   frameMap = {};
   frames = [];
-  for (const e of entries) {
-    if (e.frame === undefined || !e.side) continue;
-    if (!frameMap[e.frame]) frameMap[e.frame] = { live: null, resim: null, refSide: null };
-    if (e.side === 'ground_truth') {
-      frameMap[e.frame].live = e;
-      frameMap[e.frame].refSide = 'ground_truth';
-    } else if ((e.side === 'live' || e.side === 'host' || e.side === 'client') && frameMap[e.frame].refSide !== 'ground_truth') {
-      frameMap[e.frame].live = e;
-      frameMap[e.frame].refSide = e.side;
-    } else if (e.side === 'resim') {
-      frameMap[e.frame].resim = e;
+
+  const isNetplay = entries.some(e => e.side && (e.side === 'host' || e.side === 'client' || e.side === 'host_resim' || e.side === 'client_resim'));
+
+  if (isNetplay) {
+    const frameEntries = {};
+    for (const e of entries) {
+      if (e.frame === undefined || !e.side) continue;
+      if (!frameEntries[e.frame]) frameEntries[e.frame] = [];
+      frameEntries[e.frame].push(e);
+    }
+    for (const frameNum in frameEntries) {
+      const list = frameEntries[frameNum];
+      let host = null, client = null, gt = null, resim = null;
+      for (const e of list) {
+        if (e.side === 'host') host = e;
+        else if (e.side === 'client') client = e;
+        else if (e.side === 'host_resim' || e.side === 'client_resim') resim = e;
+        else if (e.side === 'ground_truth') gt = e;
+        else if (e.side === 'resim') resim = e;
+      }
+      frameMap[frameNum] = { live: null, resim: null, refSide: null };
+      const resimOK = resim && resim.chars && resim.chars.some(c => c.pos && (c.pos[0] || c.pos[1] || c.pos[2]));
+      if (host) {
+        frameMap[frameNum].live = host;
+        frameMap[frameNum].resim = resimOK ? resim : (client || null);
+        frameMap[frameNum].refSide = 'host';
+      } else if (client) {
+        frameMap[frameNum].live = client;
+        frameMap[frameNum].resim = resimOK ? resim : null;
+        frameMap[frameNum].refSide = 'client';
+      } else if (resim) {
+        frameMap[frameNum].resim = resim;
+        frameMap[frameNum].refSide = resim.side === 'host_resim' ? 'host' : 'client';
+      } else if (gt) {
+        frameMap[frameNum].live = gt;
+        frameMap[frameNum].resim = resim;
+        frameMap[frameNum].refSide = 'ground_truth';
+      }
+    }
+  } else {
+    for (const e of entries) {
+      if (e.frame === undefined || !e.side) continue;
+      if (!frameMap[e.frame]) frameMap[e.frame] = { live: null, resim: null, refSide: null };
+      if (e.side === 'ground_truth') {
+        frameMap[e.frame].live = e;
+        frameMap[e.frame].refSide = 'ground_truth';
+      } else if ((e.side === 'live' || e.side === 'host' || e.side === 'client') && frameMap[e.frame].refSide !== 'ground_truth') {
+        frameMap[e.frame].live = e;
+        frameMap[e.frame].refSide = e.side;
+      } else if (e.side === 'resim') {
+        frameMap[e.frame].resim = e;
+      }
     }
   }
+
   frames = Object.keys(frameMap).map(Number).sort((a,b) => a-b);
   frameInput.min = 0;
   frameInput.max = Math.max(0, frames.length - 1);
+  const sb = $('scrubBar');
+  sb.min = 0;
+  sb.max = Math.max(0, frames.length - 1);
 }
 
 function updateStatus() {
   statusFrames.textContent = `Frames: ${frames.length}`;
   statusEntries.textContent = `Entries: ${entries.length}`;
 
-  let diverged = 0, total = 0;
+  let posDiverged = 0, inpDiverged = 0, total = 0;
   for (const f of frames) {
     const g = frameMap[f];
     if (g.live && g.resim) {
       total++;
-      if (hasDivergence(g.live, g.resim)) diverged++;
+      if (hasDivergence(g.live, g.resim)) posDiverged++;
+      if (hasInputDivergence(g.live, g.resim)) inpDiverged++;
     }
   }
-  statusDiverged.textContent = diverged > 0 ? `Diverged: ${diverged}/${total} frames` : '';
-  globalDivergence.textContent = diverged > 0
-    ? `Divergence: ${diverged}/${total} frames ⚠`
+  const anyDiv = posDiverged > 0 || inpDiverged > 0;
+  statusDiverged.textContent = anyDiv
+    ? `Pos Δ: ${posDiverged}/${total}  Inp Δ: ${inpDiverged}/${total}`
+    : '';
+  globalDivergence.textContent = anyDiv
+    ? `Pos Δ: ${posDiverged}/${total}  Inp Δ: ${inpDiverged}/${total} ⚠`
     : total > 0 ? 'Divergence: None ✓' : 'Divergence: —';
-  globalDivergence.style.color = diverged > 0 ? '#ff5252' : total > 0 ? '#4caf50' : '#888';
+  globalDivergence.style.color = anyDiv ? '#ff5252' : total > 0 ? '#4caf50' : '#888';
+  $('btnFirstDiv').disabled = !anyDiv;
 }
 
 function hasDivergence(live, resim) {
   if (!live || !resim) return false;
   const lc = live.chars, rc = resim.chars;
   if (!lc || !rc) return false;
-  for (let i = 0; i < Math.max(lc.length, rc.length); i++) {
-    const a = lc[i], b = rc[i];
-    if (!a || !b) return true;
+  const rMap = {};
+  for (const c of rc) rMap[c.team + ':' + c.slot] = c;
+  for (const a of lc) {
+    const b = rMap[a.team + ':' + a.slot];
+    if (!b) return true;
     if (Math.abs(a.pos[0] - b.pos[0]) > 0.001 || Math.abs(a.pos[1] - b.pos[1]) > 0.001 || Math.abs(a.pos[2] - b.pos[2]) > 0.001)
       return true;
   }
   return false;
+}
+
+function hasInputDivergence(live, resim) {
+  if (!live || !resim) return false;
+  const li = live.inputs, ri = resim.inputs;
+  if (!li || !ri) return false;
+  return li.local !== ri.local || li.usedRemote !== ri.usedRemote || li.recvRemote !== ri.recvRemote;
 }
 
 function getDelta(c1, c2) {
@@ -290,6 +358,7 @@ function render() {
   const g = frameMap[frameNum];
   frameDisplay.textContent = `${frameNum} / ${frames[frames.length-1]}`;
   frameInput.value = idx;
+  $('scrubBar').value = idx;
   updateButtons();
   drawCanvas(g, frameNum);
   drawSidebar(g, frameNum);
@@ -308,27 +377,48 @@ function getCharPositions(g) {
   const src = g.live || g.resim;
   if (!src) return result;
   const srcChars = src.chars || [];
-  const otherChars = g.resim && g.live ? (g.resim.chars || []) : [];
+  const isLive = !!g.live;
+  const otherEntry = g.resim && g.live ? g.resim : null;
+
+  const otherMap = {};
+  if (otherEntry) {
+    for (const c of otherEntry.chars || []) {
+      otherMap[c.team + ':' + c.slot] = c;
+    }
+  }
+
   for (let i = 0; i < srcChars.length; i++) {
     const sc = srcChars[i];
     if (!showAssists && sc.slot > 0) continue;
-    const oc = otherChars[i] || null;
-    const isLive = !!g.live;
+    const key = sc.team + ':' + sc.slot;
+    const oc = otherMap[key] || null;
+
+    let livePos = null, resimPos = null;
+    if (isLive) {
+      livePos = sc.pos;
+      if (oc) resimPos = oc.pos;
+    } else {
+      resimPos = sc.pos;
+      if (oc) livePos = oc.pos;
+    }
+
     result.push({
       team: sc.team,
       slot: sc.slot,
       refSide: g.refSide,
-      livePos: isLive ? sc.pos : (oc ? oc.pos : null),
-      resimPos: g.resim ? (g.resim.chars[i] ? g.resim.chars[i].pos : null) : null,
+      resimRefSide: otherEntry ? (otherEntry.side === 'client' || otherEntry.side === 'client_resim' ? 'client' : 'host') : null,
+      livePos: livePos,
+      resimPos: resimPos,
       live: isLive ? sc : oc,
-      resim: g.resim ? (g.resim.chars[i] || null) : null,
-      delta: isLive ? getDelta(sc, oc) : getDelta(sc, null),
+      resim: otherEntry ? oc : (isLive ? null : sc),
+      delta: isLive ? (oc ? getDelta(sc, oc) : null) : (oc ? getDelta(oc, sc) : null),
     });
   }
   return result;
 }
 
 function drawCanvas(g, frameNum) {
+  const ctx = canvas.getContext('2d');
   const wrap = canvas.parentElement;
   const dpr = window.devicePixelRatio || 1;
   const w = wrap.clientWidth || 800;
@@ -427,12 +517,12 @@ function drawCanvas(g, frameNum) {
         ctx.fillText(`Δ${dMag.toFixed(3)}`, mx, my - 8);
       }
 
-      // Draw resim (outline)
+      // Draw resim/client (outline)
       ctx.beginPath(); ctx.arc(rx, ry, radius, 0, Math.PI*2);
-      const resimColor = c.team === 0 ? COLORS.p1Resim : COLORS.p2Resim;
+      const resimColor = c.resimRefSide ? getCharColor(c.team, c.resimRefSide).main : (c.team === 0 ? COLORS.p1Resim : COLORS.p2Resim);
       ctx.strokeStyle = resimColor; ctx.lineWidth = 2.5;
       ctx.stroke();
-      ctx.fillStyle = c.team === 0 ? COLORS.p1ResimFill : COLORS.p2ResimFill;
+      ctx.fillStyle = c.resimRefSide ? getCharColor(c.team, c.resimRefSide).fill : (c.team === 0 ? COLORS.p1ResimFill : COLORS.p2ResimFill);
       ctx.fill();
 
       // Draw live (filled)
@@ -460,10 +550,10 @@ function drawCanvas(g, frameNum) {
     } else if (c.resimPos) {
       const [rx, ry] = toScreen(c.resimPos[0], c.resimPos[1]);
       ctx.beginPath(); ctx.arc(rx, ry, radius, 0, Math.PI*2);
-      ctx.strokeStyle = c.team === 0 ? COLORS.p1Resim : COLORS.p2Resim;
-      ctx.lineWidth = 2.5;
+      const resimOnlyColor = c.resimRefSide ? getCharColor(c.team, c.resimRefSide).main : (c.team === 0 ? COLORS.p1Resim : COLORS.p2Resim);
+      ctx.strokeStyle = resimOnlyColor; ctx.lineWidth = 2.5;
       ctx.stroke();
-      ctx.fillStyle = c.team === 0 ? COLORS.p1ResimFill : COLORS.p2ResimFill;
+      ctx.fillStyle = c.resimRefSide ? getCharColor(c.team, c.resimRefSide).fill : (c.team === 0 ? COLORS.p1ResimFill : COLORS.p2ResimFill);
       ctx.fill();
     }
   }
@@ -481,33 +571,50 @@ function drawSidebar(g, frameNum) {
   if (!g) { sidebar.innerHTML = ''; return; }
 
   const chars = getCharPositions(g);
+  const liveSide = g.live ? g.live.side : null;
+  const resimSide = g.resim ? g.resim.side : null;
+  const srcLabel = s => {
+    if (!s) return '—';
+    if (s === 'ground_truth') return 'Ground Truth';
+    if (s === 'host') return 'Host';
+    if (s === 'client') return 'Client';
+    if (s === 'host_resim') return 'Host (Resim)';
+    if (s === 'client_resim') return 'Client (Resim)';
+    if (s === 'resim') return 'Resim';
+    if (s === 'live') return 'Live';
+    return s.charAt(0).toUpperCase() + s.slice(1);
+  };
   let html = '<section>';
   html += `<h3>Frame ${frameNum}</h3>`;
-  const refLabel = g.refSide === 'ground_truth' ? 'Ground Truth' : (g.refSide === 'host' || g.refSide === 'client' ? g.refSide.toUpperCase() : 'Live');
-  html += `<table><tr><th>${refLabel}:</th><td>${g.live ? '✓' : '✗'}</td><th>Resim:</th><td>${g.resim ? '✓' : '✗'}</td></tr></table>`;
-  // Netplay live inputs
+  html += `<table><tr><th>${srcLabel(liveSide)}:</th><td>${g.live ? '✓' : '✗'}</td><th>${srcLabel(resimSide)}:</th><td>${g.resim ? '✓' : '✗'}</td></tr></table>`;
+  // Inputs
   if (g.live && g.live.inputs) {
     const inp = g.live.inputs;
+    const inpDiv = g.resim ? hasInputDivergence(g.live, g.resim) : false;
     html += '<table style="margin-top:4px">';
     html += `<tr><th>Local In</th><td style="font-family:monospace">${inp.local||'—'}</td></tr>`;
     html += `<tr><th>Used Rem</th><td style="font-family:monospace">${inp.usedRemote||'—'}</td></tr>`;
     html += `<tr><th>Recv Rem</th><td style="font-family:monospace">${inp.recvRemote||'—'}</td></tr>`;
+    if (g.resim) {
+      html += `<tr class="${inpDiv ? 'mismatch-bg' : ''}"><th>Match</th><td colspan="3" style="font-weight:700;${inpDiv ? 'color:#ff5252' : 'color:#4caf50'}">${inpDiv ? '✗ MISMATCH' : '✓ Match'}</td></tr>`;
+    }
     html += '</table>';
   }
   html += '</section>';
 
   for (const c of chars) {
     const col = getCharColor(c.team, c.refSide);
-    const role = getCharRole(c.team, c.refSide);
     const color = c.team === 0 ? 'p1-color' : 'p2-color';
     const label = c.team === 0 ? 'P1' : 'P2';
     const slotLabel = c.slot === 0 ? 'Point' : `Assist ${c.slot}`;
-    const roleTag = role ? `<span style="font-size:10px;font-weight:400;color:${col.main};margin-left:4px">(${role})</span>` : '';
+    const resimColor = c.resimRefSide ? getCharColor(c.team, c.resimRefSide).main : (c.team === 0 ? COLORS.p1Resim : COLORS.p2Resim);
+    const liveTag = `<span style="font-size:10px;font-weight:400;color:${col.main};margin-left:4px">[${srcLabel(liveSide)}]</span>`;
+    const resimTag = c.resimPos ? `<span style="font-size:10px;font-weight:400;color:${resimColor};margin-left:4px">[${srcLabel(resimSide)}]</span>` : '';
 
-    html += `<section><div class="char-header ${color}"><span class="dot" style="background:${col.main}"></span> ${label} ${slotLabel}${roleTag}</div>`;
+    html += `<section><div class="char-header ${color}"><span class="dot" style="background:${col.main}"></span> ${label} ${slotLabel} ${liveTag}${resimTag}</div>`;
 
     html += '<table>';
-    html += '<tr><th></th><th>Live</th><th>Resim</th><th>Δ</th></tr>';
+    html += `<tr><th></th><th>${srcLabel(liveSide)}</th><th>${srcLabel(resimSide)}</th><th>Δ</th></tr>`;
 
     const posLabels = ['X','Y','Z'];
     for (let i = 0; i < 3; i++) {
@@ -522,10 +629,12 @@ function drawSidebar(g, frameNum) {
     if (c.live && c.resim) {
       const actSame = c.live.act === c.resim.act;
       const flSame = c.live.fl === c.resim.fl;
-      html += `<tr><th>Act</th><td>${c.live.act||'—'}</td><td>${c.resim.act||'—'}</td><td class="${actSame?'delta-ok':'delta-bad'}">${actSame?'✓':'✗'}</td></tr>`;
-      html += `<tr><th>Flags</th><td>${c.live.fl||'—'}</td><td>${c.resim.fl||'—'}</td><td class="${flSame?'delta-ok':'delta-bad'}">${flSame?'✓':'✗'}</td></tr>`;
-      html += `<tr><th>Input</th><td>${c.live.mHeld||'—'}</td><td>${c.resim.mHeld||'—'}</td><td></td></tr>`;
-      html += `<tr><th>FCnt</th><td>${c.live.fcnt??'—'}</td><td>${c.resim.fcnt??'—'}</td><td></td></tr>`;
+      const mhSame = c.live.mHeld === c.resim.mHeld;
+      const fcntSame = c.live.fcnt === c.resim.fcnt;
+      html += `<tr class="${actSame ? '' : 'mismatch-bg'}"><th>Act</th><td>${c.live.act||'—'}</td><td>${c.resim.act||'—'}</td><td class="${actSame?'delta-ok':'delta-bad'}">${actSame?'✓':'✗'}</td></tr>`;
+      html += `<tr class="${flSame ? '' : 'mismatch-bg'}"><th>Flags</th><td>${c.live.fl||'—'}</td><td>${c.resim.fl||'—'}</td><td class="${flSame?'delta-ok':'delta-bad'}">${flSame?'✓':'✗'}</td></tr>`;
+      html += `<tr class="${mhSame ? '' : 'mismatch-bg'}"><th>Input</th><td>${c.live.mHeld||'—'}</td><td>${c.resim.mHeld||'—'}</td><td class="${mhSame ? '' : 'delta-bad'}">${mhSame ? '✓' : '✗'}</td></tr>`;
+      html += `<tr class="${fcntSame ? '' : 'mismatch-bg'}"><th>FCnt</th><td>${c.live.fcnt??'—'}</td><td>${c.resim.fcnt??'—'}</td><td class="${fcntSame ? '' : 'delta-bad'}">${fcntSame ? '✓' : '✗'}</td></tr>`;
     } else if (c.live) {
       html += `<tr><th>Act</th><td>${c.live.act||'—'}</td><td>—</td><td></td></tr>`;
       html += `<tr><th>Flags</th><td>${c.live.fl||'—'}</td><td>—</td><td></td></tr>`;
@@ -541,7 +650,7 @@ function drawSidebar(g, frameNum) {
     // RNG
     if (c.live && c.resim && c.live.rng && c.resim.rng) {
       const rngSame = c.live.rng.every((v,i) => v === c.resim.rng[i]);
-      html += `<tr><th>RNG</th><td colspan="2">${c.live.rng[0]} …</td><td class="${rngSame?'delta-ok':'delta-bad'}">${rngSame?'✓':'✗'}</td></tr>`;
+      html += `<tr class="${rngSame ? '' : 'mismatch-bg'}"><th>RNG</th><td style="font-family:monospace;font-size:11px">${c.live.rng.join(' ')}</td><td style="font-family:monospace;font-size:11px">${c.resim.rng.join(' ')}</td><td class="${rngSame?'delta-ok':'delta-bad'}">${rngSame?'✓':'✗'}</td></tr>`;
     }
 
     const dMag = getDeltaMag(c.delta);
@@ -565,6 +674,16 @@ $('btnPrev').addEventListener('click', () => goFrame(currentFrameIdx - 1));
 $('btnNext').addEventListener('click', () => goFrame(currentFrameIdx + 1));
 $('btnLast').addEventListener('click', () => goFrame(frames.length - 1));
 
+$('btnFirstDiv').addEventListener('click', () => {
+  for (let i = 0; i < frames.length; i++) {
+    const g = frameMap[frames[i]];
+    if (g.live && g.resim && (hasDivergence(g.live, g.resim) || hasInputDivergence(g.live, g.resim))) {
+      goFrame(i);
+      return;
+    }
+  }
+});
+
 document.addEventListener('keydown', e => {
   if (e.target.tagName === 'INPUT') return;
   if (e.key === 'ArrowLeft') { e.preventDefault(); goFrame(currentFrameIdx - 1); }
@@ -575,6 +694,10 @@ document.addEventListener('keydown', e => {
 frameInput.addEventListener('change', () => {
   const v = parseInt(frameInput.value);
   if (!isNaN(v)) goFrame(Math.max(0, Math.min(v, frames.length - 1)));
+});
+
+$('scrubBar').addEventListener('input', () => {
+  goFrame(parseInt($('scrubBar').value));
 });
 
 // ─── Playback ─────────────────────────────────────────────────────────

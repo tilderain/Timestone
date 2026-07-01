@@ -208,7 +208,7 @@ void DiagLogPostOverride(uint64_t cChrInput, uint32_t teamIdx)
             lr.actionId, lr.flags14F0,
             lr.posX, lr.posY, lr.posZ);
 
-    uint32_t intendedInput = Controller_GetUsedRemoteInput(f);
+    uint32_t intendedInput = Controller_GetExpectedInput(teamIdx, f);
     uint32_t actualHeld = *(uint32_t*)(cChrInput + 0x14);
     if (g_isResimulating && intendedInput != actualHeld) {
         HookLog("INJECTION MISMATCH frame=%d team=%d: intended 0x%08X but cChrInput+0x14 = 0x%08X\n",
@@ -253,6 +253,12 @@ void DiagCaptureLiveRef(uint64_t cChrInput, uint32_t teamIdx, int32_t liveFrame)
     rec.posX        = uChar ? *(float*)(uChar + 0x50) : 0.0f;
     rec.posY        = uChar ? *(float*)(uChar + 0x54) : 0.0f;
     rec.posZ        = uChar ? *(float*)(uChar + 0x58) : 0.0f;
+    if (uChar) {
+        for (int i = 0; i < 4; i++)
+            rec.rng[i] = *(uint32_t*)(uChar + 0x2D80 + i * 4);
+    } else {
+        std::memset(rec.rng, 0, sizeof(rec.rng));
+    }
 }
 
 void DiagLogPostResim(uint64_t cChrInput, uint32_t teamIdx, int32_t frame)
@@ -291,6 +297,8 @@ void DiagLogPostResim(uint64_t cChrInput, uint32_t teamIdx, int32_t frame)
 
 void DiagLogActDbg(uint64_t cChrInput, uint32_t teamIdx, int32_t curFrame, bool isResim)
 {
+    return;
+
     if (!cChrInput) return;
     uint64_t uc = *(uint64_t*)(cChrInput + 0x08);
     if (!uc) return;

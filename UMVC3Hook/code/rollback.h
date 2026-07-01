@@ -26,6 +26,10 @@ extern int32_t g_resimulateCurrentFrame;
 extern int32_t g_resimRequestedStart;
 extern int32_t g_resimRequestedEnd;
 
+// When true, send a ResimNotify packet every frame (for NDJSON debugging),
+// not only when a rollback conflict triggers re-simulation.
+extern bool g_resimNotifyEveryFrame;
+
 // Snapshot-restore request flag — same deferral pattern.
 // Set by FrameStepper_Process (F6 key), consumed by hkMvc3Main_move at the
 // next frame boundary to avoid mid-frame memory corruption.
@@ -60,6 +64,11 @@ void Rollback_InitHooks();
 // Save a full snapshot of all MUST regions, keyed by |frame|.
 void Rollback_SaveSnapshot(int32_t frame);
 
+// Update the remote input stored in an existing snapshot slot.
+// Called from the packet-drain loop when a late-arriving input packet
+// provides the remote input for a frame that was already snapshotted.
+void Rollback_UpdateRemoteInput(int32_t frame, uint32_t input);
+
 // Restore the snapshot previously saved for |frame|.
 void Rollback_RestoreSnapshot(int32_t frame);
 
@@ -69,6 +78,24 @@ void Rollback_RestoreSnapshot(int32_t frame);
 //      (snapshots are NOT re-saved during re-sim — the next normal frame
 //       boundary save handles the corrected state)
 void Rollback_ReSimulate(int32_t startFrame, int32_t endFrame);
+
+struct ResimNotifyPacket;
+// Write received resim notify data to the netplay NDJSON log.
+// Called on the receiver side when a PACKET_RESIM_NOTIFY arrives.
+void Rollback_LogResimNotifyNDJSON(const ResimNotifyPacket& pkt);
+
+// Queue a re-simulation frame's post-state for paired NDJSON logging.
+// In offline (F7) mode, writes directly instead of queueing.
+void Rollback_QueuePendingResimDump(int32_t frame);
+
+// Build and send a GroundTruthPacket for [startFrame, endFrame) using
+// the local g_liveRef history.  Called on the non-simulating side.
+extern "C" void Rollback_SendGroundTruth(int32_t startFrame, int32_t endFrame);
+
+// Process all received GroundTruthPackets — match frames against the
+// pending resim queue and write paired ground_truth + resim records
+// to rdiag.ndjson.
+extern "C" void Rollback_ProcessInboundGroundTruth();
 
 // Free all snapshot memory. Call on netplay disconnect / match end.
 void Rollback_FreeSnapshots();

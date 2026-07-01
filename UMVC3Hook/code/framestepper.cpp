@@ -303,13 +303,13 @@ static void __fastcall HookedMove(void* sMvc3Main)
         int step = aNextBattle ? *(int*)(aNextBattle + 0xD8) : 0;
 
         static bool s_inputStarted = false;
-        if (step >= 2 && !s_inputStarted) {
+        if (step >= 0 && !s_inputStarted) {
             s_inputStarted = true;
             HookLog("Netplay: First frame input ready (step=%d, aNextBattle=0x%llX) — blasting packets\n",
                     step, aNextBattle);
         }
 
-        if (step >= 2)
+        if (step >= 0)
         {
             auto sPadGetInstance = (sPad__getInstance_t)_addr(SPAD_GET_INSTANCE_ADDR);
             uint64_t pad = sPadGetInstance();

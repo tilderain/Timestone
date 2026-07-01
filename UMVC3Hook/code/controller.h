@@ -82,12 +82,21 @@ extern "C" void Controller_ResetBuffers();
 extern "C" void Controller_OnFrameStart();
 extern "C" void Controller_OnFrameEnd();
 
-// Save/restore controller-side rollback state (g_oldInputs, g_localPending,
-// g_lastRemoteFrame, g_lastRemoteInput) so re-simulation replays identical
-// local inputs. These are called from Rollback_SaveSnapshot/RestoreSnapshot
-// since the snapshot regions only cover game memory, not static buffers.
-extern "C" void Controller_SaveRollbackState();
-extern "C" void Controller_RestoreRollbackState();
+// Capture the local player's delayed input for the current frame
+// (= g_oldInputs[MAX_HISTORY - g_delayFrames]).  Stored in the snapshot
+// slot so re-simulation reads it from the snapshot rather than relying
+// on a separate shift-buffer save/restore.
+extern "C" uint32_t Controller_GetCurrentFrameInput();
+
+// Override the local team's recorded game input for a specific frame
+// to the value saved in that frame's snapshot slot.  Called before
+// each re-sim tick so hkprocessFrameInput reads the snapshot's input.
+extern "C" void Controller_InjectLocalInput(int32_t frame, uint32_t input);
+
+// Override the remote side's input for a specific frame to the value
+// saved in that frame's snapshot slot.  Sets g_usedRemoteInput so
+// hkprocessFrameInput reads the snapshot's remote input during re-sim.
+extern "C" void Controller_InjectRemoteInput(int32_t frame, uint32_t input);
 
 // Save/restore the local input shift buffer separately, so Rollback_ReSimulate
 // can preserve the original timeline for outbound packets.
@@ -115,10 +124,18 @@ extern "C" int32_t  Controller_GetLastRemoteFrame();
 extern "C" int32_t  Controller_GetRollbackFrames();
 extern "C" bool     Controller_IsRollbackEnabled();
 
+// Frame confirmation check — returns true if remote input has arrived for this frame
+extern "C" bool     Controller_IsFrameConfirmed(int32_t frame);
+
 // Executed input accessors — return what the game actually used for each player
 extern "C" uint32_t Controller_GetRecordedLocalInput(int32_t frame);
 extern "C" uint32_t Controller_GetUsedRemoteInput(int32_t frame);
 extern "C" uint32_t Controller_GetReceivedRemoteInput(int32_t frame);
+
+// Team-aware expected input for diagnostic comparison during re-simulation.
+// Returns the correct expected input for a given team index and frame,
+// accounting for host/client and local/remote role.
+extern "C" uint32_t Controller_GetExpectedInput(uint32_t teamIdx, int32_t frame);
 
 // Frame advantage info for overlay display (GGPO-style)
 extern "C" int32_t  Controller_GetLocalFrameAdvantage();

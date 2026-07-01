@@ -49,6 +49,13 @@ static ResimNotifyPacket    g_inboundResimNotify = {};
 static bool                 g_inboundResimNotifyNew = false;
 static CRITICAL_SECTION     g_resimNotifyCS;
 
+// Ground-truth channel — non-simulating side's exact live state for verification.
+static GroundTruthPacket    g_outboundGroundTruth = {};
+static bool                 g_outboundGroundTruthNew = false;
+static GroundTruthPacket    g_inboundGroundTruth = {};
+static bool                 g_inboundGroundTruthNew = false;
+static CRITICAL_SECTION     g_groundTruthCS;
+
 // One-time critical section initialization flag
 static bool                 g_csInitialized  = false;
 
@@ -156,7 +163,31 @@ static DWORD WINAPI Netplay_ServiceThread(LPVOID)
         if (hasNewResimNotify && g_peer)
         {
             ENetPacket* packet = enet_packet_create(
-                &rnPkt, sizeof(ResimNotifyPacket), ENET_PACKET_FLAG_UNSEQUENCED
+                &rnPkt, sizeof(ResimNotifyPacket), ENET_PACKET_FLAG_RELIABLE
+            );
+            if (enet_peer_send(g_peer, 0, packet) != 0) {
+                enet_packet_destroy(packet);
+            }
+            enet_host_flush(g_host);
+        }
+
+        // --- Send outbound ground-truth packet ---
+        bool hasNewGroundTruth = false;
+        GroundTruthPacket gtPkt = {};
+        {
+            ScopedCS lock(g_groundTruthCS);
+            if (g_outboundGroundTruthNew)
+            {
+                gtPkt = g_outboundGroundTruth;
+                hasNewGroundTruth = true;
+                g_outboundGroundTruthNew = false;
+            }
+        }
+
+        if (hasNewGroundTruth && g_peer)
+        {
+            ENetPacket* packet = enet_packet_create(
+                &gtPkt, sizeof(GroundTruthPacket), ENET_PACKET_FLAG_RELIABLE
             );
             if (enet_peer_send(g_peer, 0, packet) != 0) {
                 enet_packet_destroy(packet);
@@ -214,6 +245,18 @@ static DWORD WINAPI Netplay_ServiceThread(LPVOID)
                                     }
                                 }
                                 break;
+
+                            case PACKET_GROUND_TRUTH:
+                                if (event.packet->dataLength >= sizeof(GroundTruthPacket))
+                                {
+                                    const GroundTruthPacket* gtp = (const GroundTruthPacket*)event.packet->data;
+                                    {
+                                        ScopedCS lock(g_groundTruthCS);
+                                        g_inboundGroundTruth = *gtp;
+                                        g_inboundGroundTruthNew = true;
+                                    }
+                                }
+                                break;
                         }
                     }
                     enet_packet_destroy(event.packet);
@@ -261,11 +304,14 @@ void Netplay_Init(ENetHost* host, ENetPeer* peer)
         InitializeCriticalSection(&g_inboundCS);
         InitializeCriticalSection(&g_delayCS);
         InitializeCriticalSection(&g_resimNotifyCS);
+        InitializeCriticalSection(&g_groundTruthCS);
 
         g_outboundDelayNew = false;
         g_inboundDelayNew = false;
         g_outboundResimNotifyNew = false;
         g_inboundResimNotifyNew = false;
+        g_outboundGroundTruthNew = false;
+        g_inboundGroundTruthNew = false;
         std::memset(&g_outboundPacket, 0, sizeof(InputPacket));
     }
 
@@ -346,6 +392,25 @@ bool Netplay_GetInboundResimNotify(ResimNotifyPacket& outNotify)
     {
         outNotify = g_inboundResimNotify;
         g_inboundResimNotifyNew = false;
+        return true;
+    }
+    return false;
+}
+
+void Netplay_SendGroundTruth(const GroundTruthPacket& pkt)
+{
+    ScopedCS lock(g_groundTruthCS);
+    g_outboundGroundTruth = pkt;
+    g_outboundGroundTruthNew = true;
+}
+
+bool Netplay_GetInboundGroundTruth(GroundTruthPacket& outGT)
+{
+    ScopedCS lock(g_groundTruthCS);
+    if (g_inboundGroundTruthNew)
+    {
+        outGT = g_inboundGroundTruth;
+        g_inboundGroundTruthNew = false;
         return true;
     }
     return false;
@@ -461,6 +526,8 @@ void Netplay_Shutdown()
         DeleteCriticalSection(&g_inboundCS);
 
         DeleteCriticalSection(&g_delayCS);
+        DeleteCriticalSection(&g_resimNotifyCS);
+        DeleteCriticalSection(&g_groundTruthCS);
         g_csInitialized = false;
     }
 
