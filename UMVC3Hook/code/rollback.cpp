@@ -97,6 +97,7 @@ static constexpr size_t SSHOT_NODE_OFFSET    = 0x1450; // uShot->cChrNode offset
 bool    g_isResimulating         = false;
 int32_t g_resimulateCurrentFrame = 0;
 int32_t g_postResimFrame         = -1;
+int32_t g_resimReentranceDepth   = 0; // tracks nested re-sim calls for diagnostics
 
 // Pending re-sim request from FrameStepper_Process (HookUpdate thread).
 // hkMvc3Main_move on the main game thread checks/resets these so the
@@ -301,13 +302,18 @@ std::string Rollback_GenerateNetplayLiveJSON(int32_t frame, bool isResim) {
                     firstChar = false;
 
                     char charBuf[512];
+                    int32_t memberId = *(int32_t*)(chr + 0x2DB0);
+                    int32_t plrId = *(int32_t*)(chr + 0x2DA0);
+                    int32_t assistType = *(int32_t*)(chr + 0x2DBC);
                     snprintf(charBuf, sizeof(charBuf),
-                            "{\"team\":%d,\"slot\":%d,"
+                            "{\"team\":%d,\"slot\":%d,\"mid\":%d,"
+                            "\"plr\":%d,\"ast\":%d,"
                             "\"pos\":[%.4f,%.4f,%.4f],"
                             "\"act\":\"0x%08X\",\"fl\":\"0x%08X\","
                             "\"mHeld\":\"0x%08X\",\"fcnt\":%llu,"
                             "\"rng\":[\"0x%08X\",\"0x%08X\",\"0x%08X\",\"0x%08X\"]}",
-                            ti, ci,
+                            ti, ci, memberId,
+                            plrId, assistType,
                             snap.posX, snap.posY, snap.posZ,
                             snap.actionId, snap.flags14F0,
                             *(uint32_t*)(snap.cchr + 0x14),
@@ -507,6 +513,7 @@ extern "C" void    Controller_SilentFrameStart();
 extern "C" void    Controller_SilentFrameEnd();
 extern "C" void    Controller_SaveInputHistory();
 extern "C" void    Controller_RestoreInputHistory();
+extern "C" void    Controller_DumpOldInputs(const char* label);
 extern "C" void    Controller_ResolveRemoteInput(int32_t frame);
 
 // ===========================================================================
@@ -1827,9 +1834,12 @@ void Rollback_ReSimulate(int32_t startFrame, int32_t endFrame)
     // input processing will try to start another ReSimulate from within
     // oMvc3Main_move.  Just return — we're already in one.
     if (g_isResimulating) {
-        HookLog("Rollback: ReSimulate re-entered — ignoring (already re-simulating)\n");
+        g_resimReentranceDepth++;
+        HookLog("Rollback: ReSimulate re-entered depth=%d — ignoring (already re-simulating)\n",
+                g_resimReentranceDepth);
         return;
     }
+    g_resimReentranceDepth = 0;
 
     if (!g_sMvc3Main) {
         HookLog("Rollback: cannot re-simulate — sMvc3Main pointer not captured\n");
@@ -1852,7 +1862,9 @@ void Rollback_ReSimulate(int32_t startFrame, int32_t endFrame)
     // SilentFrameStart/End which shifts g_oldInputs with zeros (re-sim
     // bypasses the accumulation).  Restoring after the loop prevents the
     // outbound packet from carrying a corrupted timeline.
+    HookLog("[ReSim] ~~~~~~~~~~ g_oldInputs BEFORE re-sim loop ~~~~~~~~~~\n");
     Controller_SaveInputHistory();
+    int silentFrameEndCount = 0;
 
     // Diagnostic dump: capture ground truth BEFORE rewinding.
     // Gives the live state of all regions + character state to compare
@@ -1942,6 +1954,7 @@ void Rollback_ReSimulate(int32_t startFrame, int32_t endFrame)
         Rollback_CaptureFrameDiagSnapshot(f, /*isResim=*/true, /*postOnly=*/false);
         oMvc3Main_move(g_sMvc3Main);
         Controller_SilentFrameEnd();
+        silentFrameEndCount++;
         Controller_LogReSimFrame(f);
 
         // Discard the unconfirmed pending live JSON and write the corrected state
@@ -1961,6 +1974,15 @@ void Rollback_ReSimulate(int32_t startFrame, int32_t endFrame)
         //Rollback_DumpManifest(g_diagSessionId, f, 1);
         Rollback_QueuePendingResimDump(f);
     }
+
+    // Verify SilentFrameEnd count matches expected
+    int expectedFrameCount = endFrame - startFrame;
+    HookLog("[ReSim] SilentFrameEnd called %d times (expected=%d, match=%s)\n",
+            silentFrameEndCount, expectedFrameCount,
+            silentFrameEndCount == expectedFrameCount ? "YES" : "NO");
+
+    HookLog("[ReSim] ~~~~~~~~~~ g_oldInputs AFTER re-sim loop (before RestoreInputHistory) ~~~~~~~~~~\n");
+    Controller_DumpOldInputs("post-loop-pre-restore");
 
     // Restore the local input history so the next outbound packet carries
     // the original timeline, preventing the remote side from seeing spurious
@@ -1982,6 +2004,10 @@ void Rollback_ReSimulate(int32_t startFrame, int32_t endFrame)
     }
 
     g_isResimulating = false;
+    if (g_resimReentranceDepth > 0) {
+        HookLog("[ReSim] WARNING: re-entrance depth was %d during re-sim (nested calls detected)\n",
+                g_resimReentranceDepth);
+    }
     Rollback_PatchSleep(false); // restore Sleep calls
     Rollback_PatchPresent(false); // restore Present call
     Rollback_PatchSwapchain(false); // restore swapchain calls
@@ -2318,16 +2344,12 @@ static void __fastcall hkMvc3Main_move(uint64_t param_1)
 
     // Netplay per-frame live NDJSON logging — every live frame logged
     // so both sides have a complete frame-by-frame record for diagnostics.
+    // Logged unconditionally of battle step (covers transitions, KOs, etc.)
+    // so replay/chart viewers get a contiguous frame sequence.
     if (Netplay_IsActive() && !g_isResimulating) {
-        typedef uint64_t(__fastcall* GetAmaterasu_t)();
-        static GetAmaterasu_t getAmaterasu = (GetAmaterasu_t)_addr(0x140001A90);
-        uint64_t aNextBattle = getAmaterasu();
-        int step = aNextBattle ? *(int*)(aNextBattle + 0xD8) : 0;
-        if (step >= 0) {
-            int32_t curFrame = (int32_t)Controller_GetNetFrameCount();
-            if (curFrame >= 0) {
-                Rollback_DumpNetplayLive(curFrame);
-            }
+        int32_t curFrame = (int32_t)Controller_GetNetFrameCount();
+        if (curFrame >= 0) {
+            Rollback_DumpNetplayLive(curFrame);
         }
     }
 

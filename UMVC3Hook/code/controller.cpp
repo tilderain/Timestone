@@ -227,6 +227,10 @@ static uint32_t  g_localPending    = 0;   // accumulator, ORed across team chars
 static int32_t   g_lastRemoteFrame = -1;
 static uint32_t  g_lastRemoteInput = 0;
 
+// Count of consecutive frames where remote input wasn't ready (guxt-style).
+// Once this exceeds g_rollbackFrames we spin-wait instead of continuing to predict.
+static int32_t   g_consecutivePredictedFrames = 0;
+
 // ---------------------------------------------------------------------------
 // Desync detection — per-frame XOR checksums of all character state.
 // ---------------------------------------------------------------------------
@@ -438,17 +442,41 @@ extern "C" void Controller_InjectRemoteInput(int32_t frame, uint32_t input)
 // timeline that would cause spurious conflicts on the remote side.
 static uint32_t g_savedInputHistory[MAX_HISTORY];
 static uint32_t g_savedLocalPendingReSim;
+static int64_t g_saveRestorePairId = 0; // pairs Save/Restore calls for log analysis
+
+// Helper: format g_oldInputs buffer into a HookLog line
+static void LogOldInputs(const char* label)
+{
+    HookLog("[g_oldInputs %s] %08X %08X %08X %08X  %08X %08X %08X %08X  "
+            "%08X %08X %08X %08X  %08X %08X %08X %08X  pending=%08X\n",
+            label,
+            g_oldInputs[0], g_oldInputs[1], g_oldInputs[2], g_oldInputs[3],
+            g_oldInputs[4], g_oldInputs[5], g_oldInputs[6], g_oldInputs[7],
+            g_oldInputs[8], g_oldInputs[9], g_oldInputs[10], g_oldInputs[11],
+            g_oldInputs[12], g_oldInputs[13], g_oldInputs[14], g_oldInputs[15],
+            g_localPending);
+}
+
+extern "C" void Controller_DumpOldInputs(const char* label)
+{
+    LogOldInputs(label);
+}
 
 extern "C" void Controller_SaveInputHistory()
 {
+    int64_t pairId = g_saveRestorePairId++;
+    HookLog("[InputHistory] Save #%lld — saving g_oldInputs before re-sim\n", pairId);
+    LogOldInputs("pre-save");
     memcpy(g_savedInputHistory, g_oldInputs, sizeof(g_oldInputs));
     g_savedLocalPendingReSim = g_localPending;
 }
 
 extern "C" void Controller_RestoreInputHistory()
 {
+    HookLog("[InputHistory] Restore — restoring g_oldInputs after re-sim\n");
     memcpy(g_oldInputs, g_savedInputHistory, sizeof(g_oldInputs));
     g_localPending = g_savedLocalPendingReSim;
+    LogOldInputs("post-restore");
 }
 
 // Centrally resolve the remote input for a given game frame into
@@ -913,8 +941,32 @@ extern "C" void Controller_OnFrameStart()
             int32_t minNeeded = g_netFrameCount - spinWaitThreshold;
             while (!IsFrameConfirmed(minNeeded) && Netplay_IsActive())
             {
-                Sleep(1);
+                SwitchToThread();
                 DrainAndProcessPackets();
+            }
+        }
+
+        // --- Once past the initial startup window, track consecutive predicted
+        //     frames and spin-wait when we exceed the rollback window (guxt style).
+        if (g_netFrameCount > g_delayFrames + g_rollbackFrames)
+        {
+            if (IsFrameConfirmed(g_netFrameCount))
+            {
+                g_consecutivePredictedFrames = 0;
+            }
+            else
+            {
+                g_consecutivePredictedFrames++;
+                if (g_consecutivePredictedFrames >= g_rollbackFrames)
+                {
+                    while (!IsFrameConfirmed(g_netFrameCount) && Netplay_IsActive())
+                    {
+                        SwitchToThread();
+                        DrainAndProcessPackets();
+                    }
+                    if (IsFrameConfirmed(g_netFrameCount))
+                        g_consecutivePredictedFrames = 0;
+                }
             }
         }
 
@@ -1000,7 +1052,7 @@ extern "C" void Controller_OnFrameStart()
         int32_t neededFrame = g_netFrameCount;
         while (!IsFrameConfirmed(neededFrame) && Netplay_IsActive())
         {
-            Sleep(1);
+            SwitchToThread();
             DrainAndProcessPackets();
         }
     }

@@ -102,6 +102,7 @@ tr.mismatch-bg td { background: rgba(255, 82, 82, 0.15); }
   <div class="status-bar">
     <span id="statusFrames">Frames: 0</span>
     <span id="statusEntries">Entries: 0</span>
+    <span id="statusGaps"></span>
     <span id="statusDiverged" class="diverged"></span>
   </div>
 </div>
@@ -282,8 +283,8 @@ function buildFrameMap() {
   }
 
   frames = Object.keys(frameMap).map(Number).sort((a,b) => a-b);
-  frameInput.min = 0;
-  frameInput.max = Math.max(0, frames.length - 1);
+  frameInput.min = frames.length ? frames[0] : 0;
+  frameInput.max = frames.length ? frames[frames.length-1] : 0;
   const sb = $('scrubBar');
   sb.min = 0;
   sb.max = Math.max(0, frames.length - 1);
@@ -292,6 +293,14 @@ function buildFrameMap() {
 function updateStatus() {
   statusFrames.textContent = `Frames: ${frames.length}`;
   statusEntries.textContent = `Entries: ${entries.length}`;
+  const gaps = countGaps();
+  const sg = $('statusGaps');
+  if (gaps > 0) {
+    sg.textContent = `Gaps: ${gaps} ⚠`;
+    sg.style.color = '#ffaa00';
+  } else {
+    sg.textContent = '';
+  }
 
   let posDiverged = 0, inpDiverged = 0, total = 0;
   for (const f of frames) {
@@ -313,14 +322,16 @@ function updateStatus() {
   $('btnFirstDiv').disabled = !anyDiv;
 }
 
+function charKey(c) { return c.team + ':' + (c.mid ?? c.slot); }
+
 function hasDivergence(live, resim) {
   if (!live || !resim) return false;
   const lc = live.chars, rc = resim.chars;
   if (!lc || !rc) return false;
   const rMap = {};
-  for (const c of rc) rMap[c.team + ':' + c.slot] = c;
+  for (const c of rc) rMap[charKey(c)] = c;
   for (const a of lc) {
-    const b = rMap[a.team + ':' + a.slot];
+    const b = rMap[charKey(a)];
     if (!b) return true;
     if (Math.abs(a.pos[0] - b.pos[0]) > 0.001 || Math.abs(a.pos[1] - b.pos[1]) > 0.001 || Math.abs(a.pos[2] - b.pos[2]) > 0.001)
       return true;
@@ -356,12 +367,27 @@ function render() {
   currentFrameIdx = idx;
   const frameNum = frames[idx];
   const g = frameMap[frameNum];
-  frameDisplay.textContent = `${frameNum} / ${frames[frames.length-1]}`;
-  frameInput.value = idx;
+  const gapPrev = idx > 0 ? frames[idx] - frames[idx-1] - 1 : 0;
+  const gapNext = idx < frames.length - 1 ? frames[idx+1] - frames[idx] - 1 : 0;
+  let gapWarn = '';
+  if (gapPrev > 0) gapWarn = ` ⚠←${gapPrev} `;
+  if (gapNext > 0) gapWarn += ` ⚠+${gapNext}`;
+  frameDisplay.textContent = `${frameNum} / ${frames[frames.length-1]}${gapWarn}`;
+  frameDisplay.title = gapWarn ? `Warning: ${gapPrev} frame(s) missing before, ${gapNext} after` : '';
+  frameInput.value = frameNum;
   $('scrubBar').value = idx;
   updateButtons();
   drawCanvas(g, frameNum);
   drawSidebar(g, frameNum);
+}
+
+function countGaps() {
+  let total = 0;
+  for (let i = 1; i < frames.length; i++) {
+    const gap = frames[i] - frames[i-1] - 1;
+    if (gap > 0) total += gap;
+  }
+  return total;
 }
 
 function updateButtons() {
@@ -383,14 +409,15 @@ function getCharPositions(g) {
   const otherMap = {};
   if (otherEntry) {
     for (const c of otherEntry.chars || []) {
-      otherMap[c.team + ':' + c.slot] = c;
+      otherMap[charKey(c)] = c;
     }
   }
 
   for (let i = 0; i < srcChars.length; i++) {
     const sc = srcChars[i];
-    if (!showAssists && sc.slot > 0) continue;
-    const key = sc.team + ':' + sc.slot;
+    const mid = sc.mid ?? sc.slot;
+    if (!showAssists && mid > 0) continue;
+    const key = charKey(sc);
     const oc = otherMap[key] || null;
 
     let livePos = null, resimPos = null;
@@ -405,6 +432,7 @@ function getCharPositions(g) {
     result.push({
       team: sc.team,
       slot: sc.slot,
+      mid: mid,
       refSide: g.refSide,
       resimRefSide: otherEntry ? (otherEntry.side === 'client' || otherEntry.side === 'client_resim' ? 'client' : 'host') : null,
       livePos: livePos,
@@ -494,7 +522,7 @@ function drawCanvas(g, frameNum) {
 
   // Draw connecting lines & positions
   for (const c of chars) {
-    const radius = c.slot === 0 ? 12 : 8;
+    const radius = (c.mid ?? c.slot) === 0 ? 12 : 8;
     const col = getCharColor(c.team, c.refSide);
 
     if (c.livePos && c.resimPos) {
@@ -532,13 +560,14 @@ function drawCanvas(g, frameNum) {
       ctx.strokeStyle = col.main; ctx.lineWidth = 2;
       ctx.stroke();
 
-      // Draw slot indicator
-      if (c.slot > 0) {
+      // Draw mid indicator
+      const mid = c.mid ?? c.slot;
+      if (mid > 0) {
         ctx.fillStyle = col.main;
         ctx.font = 'bold 9px sans-serif';
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
-        ctx.fillText(`${c.slot}`, lx, ly);
+        ctx.fillText(`${mid}`, lx, ly);
       }
     } else if (c.livePos) {
       const [lx, ly] = toScreen(c.livePos[0], c.livePos[1]);
@@ -606,7 +635,7 @@ function drawSidebar(g, frameNum) {
     const col = getCharColor(c.team, c.refSide);
     const color = c.team === 0 ? 'p1-color' : 'p2-color';
     const label = c.team === 0 ? 'P1' : 'P2';
-    const slotLabel = c.slot === 0 ? 'Point' : `Assist ${c.slot}`;
+    const slotLabel = (c.mid ?? c.slot) === 0 ? 'Point' : `Assist ${c.mid ?? c.slot}`;
     const resimColor = c.resimRefSide ? getCharColor(c.team, c.resimRefSide).main : (c.team === 0 ? COLORS.p1Resim : COLORS.p2Resim);
     const liveTag = `<span style="font-size:10px;font-weight:400;color:${col.main};margin-left:4px">[${srcLabel(liveSide)}]</span>`;
     const resimTag = c.resimPos ? `<span style="font-size:10px;font-weight:400;color:${resimColor};margin-left:4px">[${srcLabel(resimSide)}]</span>` : '';
@@ -693,7 +722,10 @@ document.addEventListener('keydown', e => {
 
 frameInput.addEventListener('change', () => {
   const v = parseInt(frameInput.value);
-  if (!isNaN(v)) goFrame(Math.max(0, Math.min(v, frames.length - 1)));
+  if (!isNaN(v)) {
+    const idx = frames.indexOf(v);
+    if (idx >= 0) goFrame(idx);
+  }
 });
 
 $('scrubBar').addEventListener('input', () => {

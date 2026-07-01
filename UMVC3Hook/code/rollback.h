@@ -19,6 +19,7 @@ static constexpr int ROLLBACK_WINDOW = 16;
 // to inject historical buffer inputs instead of live controller reads.
 extern bool    g_isResimulating;
 extern int32_t g_resimulateCurrentFrame;
+extern int32_t g_resimReentranceDepth;
 
 // Re-sim request flags, set by FrameStepper_Process (HookUpdate thread),
 // consumed by hkMvc3Main_move (main game thread) so the re-sim runs on
