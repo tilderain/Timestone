@@ -1081,7 +1081,8 @@ extern "C" void Controller_OnFrameStart()
             }
         }
 
-        // --- Rollback detection and trigger logic ---
+        // --- Rollback detection: only check for conflicts when the current
+        //     frame's input has arrived.
         bool shouldCheckRollback = false;
         if (g_multiResimEnabled)
         {
@@ -1097,9 +1098,7 @@ extern "C" void Controller_OnFrameStart()
             int32_t checkStart = g_netFrameCount - g_rollbackFrames;
             if (checkStart < 0) checkStart = 0;
             int32_t earliestConflict = -1;
-
-            // Scan the rollback window for any confirmed frame with a prediction mismatch
-            for (int32_t f = checkStart; f <= g_netFrameCount; f++)
+            for (int32_t f = checkStart; f < g_netFrameCount; f++)
             {
                 if (IsFrameConfirmed(f))
                 {
@@ -1115,35 +1114,24 @@ extern "C" void Controller_OnFrameStart()
                     }
                 }
             }
-
             if (earliestConflict >= 0)
             {
-                // Commit pending correct frames before the earliest conflict
+                // Commit any pending correct frames BEFORE the earliest conflict
                 for (int32_t f = checkStart; f < earliestConflict; f++)
                 {
                     if (IsFrameConfirmed(f))
                     {
-                        uint32_t recv = g_receivedInput[(uint32_t)f % RING_SIZE];
-                        uint32_t used = g_usedRemoteInput[(uint32_t)f % RING_SIZE];
-                        if (recv != used)
-                        {
-                            earliestConflict = f;
-                            HookLog("RollbackNet: conflict at frame %d  used=0x%08X recv=0x%08X diff=0x%08X re-sim [%d, %d)\n",
-                                    f, used, recv, used ^ recv,
-                                    f, g_netFrameCount);
-                            break;
-                        }
+                        Rollback_CommitPendingNetplayLive(f);
                     }
                 }
-                // Update snapshots in the range with definitive or current prediction inputs
+
+                // Update all snapshots in the range with definitive confirmed inputs
                 uint32_t localTeam = Netplay_IsHost() ? 0 : 1;
                 for (int32_t f = earliestConflict; f < g_netFrameCount; f++)
                 {
                     uint32_t idx = (uint32_t)f % RING_SIZE;
                     uint32_t trueLocal = g_recordedGameInput[localTeam][idx];
-                    
-                    // Use confirmed input if available; otherwise, carry forward current prediction
-                    uint32_t trueRemote = IsFrameConfirmed(f) ? g_receivedInput[idx] : g_usedRemoteInput[idx];
+                    uint32_t trueRemote = g_receivedInput[idx];
                     Rollback_UpdateSnapshotInputs(f, trueLocal, trueRemote);
                 }
 
@@ -1152,19 +1140,31 @@ extern "C" void Controller_OnFrameStart()
             }
             else
             {
-                // --- Prediction success tracking: no conflicts in the window ---
+                // No conflict in the entire window! All confirmed frames are correct.
                 int32_t correctPredictions = 0;
                 for (int32_t f = checkStart; f < g_netFrameCount; f++)
                 {
                     uint32_t idx = (uint32_t)f % RING_SIZE;
-                    if (g_predictedInput[idx] && g_predictedFrame[idx] == f && IsFrameConfirmed(f))
+                    if (g_predictedInput[idx] && g_predictedFrame[idx] == f)
                     {
                         HookLog("Frame %d: Prediction SUCCESSFUL! (input 0x%08X matches received)\n", f, g_receivedInput[idx]);
                         correctPredictions++;
+                        g_predictedInput[idx] = false;
                     }
                 }
                 if (correctPredictions > 0)
-                    HookLog("[RollbackNet] %d correct predictions in window [%d, %d)\n", correctPredictions, checkStart, g_netFrameCount);
+                {
+                    HookLog("  >>> All predictions correct for frames [%d, %d) (%d frames verified)\n",
+                            checkStart, g_netFrameCount, correctPredictions);
+                }
+
+                for (int32_t f = checkStart; f <= g_netFrameCount; f++)
+                {
+                    if (IsFrameConfirmed(f))
+                    {
+                        Rollback_CommitPendingNetplayLive(f);
+                    }
+                }
             }
         }
     }

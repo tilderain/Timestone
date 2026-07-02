@@ -7,6 +7,6 @@
     "grep": "allow",
     "task": "allow",
     "todowrite": "allow",
-    "bash": { "make -j*": "allow", "*": "ask" }
+    "bash": { "make -j*": "allow", "make -j8 2>&1": "allow", "tail *": "allow", "*": "ask" }
   }
 }
