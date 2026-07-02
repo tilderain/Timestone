@@ -34,6 +34,7 @@
 #include <string>
 
 extern void HookLog(const char* fmt, ...);
+extern void HookLogSetFile(const char* filename);
 
 // ===========================================================================
 // Addresses — absolute VAs, converted at runtime via _addr()
@@ -251,6 +252,11 @@ static void Rollback_NetplayLiveInit() {
     FILE* f = fopen(g_netplayLivePath, "w");
     if (f) fclose(f);
 
+    char logPath[260];
+    const char* logName = Netplay_IsHost() ? "UMVC3Hook_host.log" : "UMVC3Hook_client.log";
+    snprintf(logPath, sizeof(logPath), "%s/%s", dir, logName);
+    HookLogSetFile(logPath);
+
     for (int i = 0; i < 256; i++) {
         g_pendingNPLiveFrame[i] = -1;
         g_pendingNPLiveJSON[i].clear();
@@ -368,6 +374,11 @@ static void Rollback_DumpNetplayLive(int32_t frame) {
     if (!g_netplayLivePath[0]) return;
 
     std::string json = Rollback_GenerateNetplayLiveJSON(frame, false);
+
+    if (frame < 12) {
+        Rollback_WriteNetplayLiveJSON(json);
+        return;
+    }
 
     int idx = (uint32_t)frame % 256;
     if (Controller_IsFrameConfirmed(frame)) {

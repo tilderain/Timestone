@@ -41,7 +41,7 @@ void HookLogSetFile(const char* filename)
 
 void HookLog(const char* fmt, ...)
 {
-	return;
+	//return;
 	va_list args;
 	va_start(args, fmt);
 
