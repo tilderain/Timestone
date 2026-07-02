@@ -22,6 +22,9 @@ extern "C" int32_t Controller_GetRollbackFrames();
 extern "C" uint32_t Controller_GetRecordedLocalInput(int32_t frame);
 extern "C" uint32_t Controller_GetUsedRemoteInput(int32_t frame);
 
+// Multi-resimulation toggle from controller.cpp
+extern bool g_multiResimEnabled;
+
 // Desync detection flags from controller.cpp
 extern bool     g_desyncDetected;
 extern bool     g_desyncSeen;
@@ -766,6 +769,9 @@ void FrameStepper_Draw()
                 Controller_SetRollbackFrames(curRollback);
                 Netplay_SendRollback(curRollback);
             }
+
+            // Render the toggle for multi-resimulation below the rollback buttons
+            ImGui::Checkbox("Multi ReSim", &g_multiResimEnabled);
         }
 
         ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "P1: [%s]  0x%08X", DecodeDirection(p1), p1);

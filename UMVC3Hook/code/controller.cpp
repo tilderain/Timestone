@@ -231,6 +231,8 @@ static uint32_t  g_lastRemoteInput = 0;
 // Once this exceeds g_rollbackFrames we spin-wait instead of continuing to predict.
 static int32_t   g_consecutivePredictedFrames = 0;
 
+bool g_multiResimEnabled = false; // Multi-resimulation toggle
+
 // ---------------------------------------------------------------------------
 // Desync detection — per-frame XOR checksums of all character state.
 // ---------------------------------------------------------------------------
@@ -834,7 +836,7 @@ static void DrainAndProcessPackets()
     while (Netplay_GetInboundPacket(inPkt))
     {
         // 1. Process inputs from the packet
-        size_t framesToProcess = (inPkt.flags == 0) ? 1 : NET_HISTORY_SIZE;
+        size_t framesToProcess = NET_HISTORY_SIZE;
         for (size_t i = 0; i < framesToProcess; i++)
         {
             int32_t targetFrame = (int32_t)inPkt.start_frame + (int32_t)i;
@@ -850,7 +852,7 @@ static void DrainAndProcessPackets()
                 }
 
                 // Track the absolute furthest remote frame for prediction reference
-                if (targetFrame > g_lastRemoteFrame && inPkt.flags != 0)
+                if (targetFrame > g_lastRemoteFrame)
                 {
                     g_lastRemoteFrame = targetFrame;
                     g_lastRemoteInput = inPkt.inputs[i];
@@ -971,6 +973,9 @@ extern "C" void Controller_OnFrameStart()
         g_remoteFrameAdvantage = inPkt.frame_advantage;
     }
 
+    // Process inbound ground truth packets
+    Rollback_ProcessInboundGroundTruth();
+    
     // --- Drain resim-notify packets from the remote peer ---
     // The remote side notifies us whenever it re-simulates a range of frames
     // due to late-arriving input correction.  We dump our live character state
@@ -1076,22 +1081,45 @@ extern "C" void Controller_OnFrameStart()
             }
         }
 
-            // --- Rollback detection: only check for conflicts when the current
-            //     frame's input has arrived.  Since each packet covers
-            //     MAX_HISTORY (16) frames, confirming g_netFrameCount means the
-            //     entire rollback window [g_netFrameCount - g_rollbackFrames,
-            //     g_netFrameCount) is covered — zero missing inputs during re-sim.
+        // --- Rollback detection and trigger logic ---
+        bool shouldCheckRollback = false;
+        if (g_multiResimEnabled)
+        {
+            shouldCheckRollback = (g_netFrameCount > 0);
+        }
+        else
+        {
+            shouldCheckRollback = (g_netFrameCount > 0 && IsFrameConfirmed(g_netFrameCount));
+        }
 
+        if (shouldCheckRollback)
+        {
+            int32_t checkStart = g_netFrameCount - g_rollbackFrames;
+            if (checkStart < 0) checkStart = 0;
+            int32_t earliestConflict = -1;
 
-            //NOTE TODO: Investigate whether or not multiple resims is viable and is better for this.
-            //i.e, resimulating to current frame with only 1 confirmed input and 8 predicted inputs, then if those predictions are wrong
-            //resimulate AGAIN from that frame ...
-            if (g_netFrameCount > 0 && IsFrameConfirmed(g_netFrameCount))
+            // Scan the rollback window for any confirmed frame with a prediction mismatch
+            for (int32_t f = checkStart; f <= g_netFrameCount; f++)
             {
-                int32_t checkStart = g_netFrameCount - g_rollbackFrames;
-                if (checkStart < 0) checkStart = 0;
-                int32_t earliestConflict = -1;
-                for (int32_t f = checkStart; f < g_netFrameCount; f++)
+                if (IsFrameConfirmed(f))
+                {
+                    uint32_t recv = g_receivedInput[(uint32_t)f % RING_SIZE];
+                    uint32_t used = g_usedRemoteInput[(uint32_t)f % RING_SIZE];
+                    if (recv != used)
+                    {
+                        earliestConflict = f;
+                        HookLog("RollbackNet: conflict at frame %d  used=0x%08X recv=0x%08X diff=0x%08X re-sim [%d, %d)\n",
+                                f, used, recv, used ^ recv,
+                                f, g_netFrameCount);
+                        break;
+                    }
+                }
+            }
+
+            if (earliestConflict >= 0)
+            {
+                // Commit pending correct frames before the earliest conflict
+                for (int32_t f = checkStart; f < earliestConflict; f++)
                 {
                     if (IsFrameConfirmed(f))
                     {
@@ -1107,10 +1135,36 @@ extern "C" void Controller_OnFrameStart()
                         }
                     }
                 }
-                if (earliestConflict >= 0)
+                // Update snapshots in the range with definitive or current prediction inputs
+                uint32_t localTeam = Netplay_IsHost() ? 0 : 1;
+                for (int32_t f = earliestConflict; f < g_netFrameCount; f++)
                 {
-                    Rollback_RequestReSimulate(earliestConflict, g_netFrameCount);
+                    uint32_t idx = (uint32_t)f % RING_SIZE;
+                    uint32_t trueLocal = g_recordedGameInput[localTeam][idx];
+                    
+                    // Use confirmed input if available; otherwise, carry forward current prediction
+                    uint32_t trueRemote = IsFrameConfirmed(f) ? g_receivedInput[idx] : g_usedRemoteInput[idx];
+                    Rollback_UpdateSnapshotInputs(f, trueLocal, trueRemote);
                 }
+
+                g_consecutivePredictedFrames = 0;
+                Rollback_RequestReSimulate(earliestConflict, g_netFrameCount);
+            }
+            else
+            {
+                // --- Prediction success tracking: no conflicts in the window ---
+                int32_t correctPredictions = 0;
+                for (int32_t f = checkStart; f < g_netFrameCount; f++)
+                {
+                    uint32_t idx = (uint32_t)f % RING_SIZE;
+                    if (g_predictedInput[idx] && g_predictedFrame[idx] == f && IsFrameConfirmed(f))
+                    {
+                        HookLog("Frame %d: Prediction SUCCESSFUL! (input 0x%08X matches received)\n", f, g_receivedInput[idx]);
+                        correctPredictions++;
+                    }
+                }
+                if (correctPredictions > 0)
+                    HookLog("[RollbackNet] %d correct predictions in window [%d, %d)\n", correctPredictions, checkStart, g_netFrameCount);
             }
         }
     }
@@ -1148,6 +1202,7 @@ extern "C" void Controller_OnFrameStart()
                     LogReceivedPacket(waitPkt);
                 }
             }
+        }
     }
 
     // --- Centrally resolve this frame's remote input so hkprocessFrameInput
@@ -1193,7 +1248,7 @@ extern "C" void Controller_OnFrameStart()
                 {
                     if (sleepFrames > TIMESYNC_MAX_FRAME_ADVANTAGE)
                         sleepFrames = TIMESYNC_MAX_FRAME_ADVANTAGE;
-                    Sleep(sleepFrames * 16);
+                    Sleep(sleepFrames);
                 }
             }
         }

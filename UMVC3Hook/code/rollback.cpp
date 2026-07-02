@@ -230,6 +230,7 @@ static void Rollback_FillResimCharState(ResimCharState& dst, const CharDiagSnaps
 }
 
 static void Rollback_NetplayLiveInit() {
+    //return;
     g_netplayLiveInit = false;
     g_netplayLivePath[0] = '\0';
 
@@ -260,6 +261,7 @@ static void Rollback_NetplayLiveInit() {
 }
 
 std::string Rollback_GenerateNetplayLiveJSON(int32_t frame, bool isResim) {
+    //return;
     char tsBuf[32] = {};
     SYSTEMTIME st;
     GetLocalTime(&st);
@@ -333,6 +335,7 @@ std::string Rollback_GenerateNetplayLiveJSON(int32_t frame, bool isResim) {
 }
 
 static void Rollback_WriteNetplayLiveJSON(const std::string& json) {
+    //return;
     if (!g_netplayLiveInit) Rollback_NetplayLiveInit();
     if (!g_netplayLivePath[0]) return;
 
@@ -344,6 +347,7 @@ static void Rollback_WriteNetplayLiveJSON(const std::string& json) {
 }
 
 extern "C" void Rollback_CommitPendingNetplayLive(int32_t frame) {
+    //return;
     int idx = (uint32_t)frame % 256;
     if (g_pendingNPLiveFrame[idx] == frame) {
         Rollback_WriteNetplayLiveJSON(g_pendingNPLiveJSON[idx]);
@@ -359,6 +363,7 @@ extern "C" void Rollback_DiscardPendingNetplayLive(int32_t frame) {
 }
 
 static void Rollback_DumpNetplayLive(int32_t frame) {
+    //return;
     if (!g_netplayLiveInit) Rollback_NetplayLiveInit();
     if (!g_netplayLivePath[0]) return;
 
@@ -427,6 +432,7 @@ static void Rollback_DiagInit();
 // ---------------------------------------------------------------------------
 void Rollback_LogResimNotifyNDJSON(const ResimNotifyPacket& pkt)
 {
+    return;
     char tsBuf[32] = {};
     SYSTEMTIME st;
     GetLocalTime(&st);
@@ -515,6 +521,8 @@ extern "C" void    Controller_SaveInputHistory();
 extern "C" void    Controller_RestoreInputHistory();
 extern "C" void    Controller_DumpOldInputs(const char* label);
 extern "C" void    Controller_ResolveRemoteInput(int32_t frame);
+
+extern bool g_multiResimEnabled;
 
 // ===========================================================================
 // Snapshot Region Descriptor & Ring Buffer
@@ -1632,6 +1640,7 @@ static void Rollback_DumpManifest(int session, int32_t frame, uint8_t side) {
 // side=0 → "ground_truth" (pre-resim state), side=1 → "resim" (post-resim state)
 // Schema:  v, ts, frame, side, regions[{idx,addr,size,hash}], chars[{...}]
 static void Rollback_DumpNDJSON(int32_t frame, uint8_t side) {
+    //return;
     if (!g_diagDir[0]) return;
 
     Region regions[MAX_REGIONS];
@@ -1952,6 +1961,12 @@ void Rollback_ReSimulate(int32_t startFrame, int32_t endFrame)
         }
         // Capture PRE-state before the tick
         Rollback_CaptureFrameDiagSnapshot(f, /*isResim=*/true, /*postOnly=*/false);
+
+        // Take snapshot of current state before ticking, ensuring cascading rollbacks have a valid restore point
+        if (g_multiResimEnabled) {
+            Rollback_SaveSnapshot(f);
+        }
+
         oMvc3Main_move(g_sMvc3Main);
         Controller_SilentFrameEnd();
         silentFrameEndCount++;
