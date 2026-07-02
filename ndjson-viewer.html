@@ -503,6 +503,12 @@ function isCharDiffering(c) {
   if (c.live.fl !== c.resim.fl) return true;
   if (c.live.mHeld !== c.resim.mHeld) return true;
   if (c.live.fcnt !== c.resim.fcnt) return true;
+  if (c.live.dirRing && c.resim.dirRing) {
+    if (c.live.dirRing.length !== c.resim.dirRing.length) return true;
+    for (let di = 0; di < c.live.dirRing.length; di++) {
+      if (c.live.dirRing[di] !== c.resim.dirRing[di]) return true;
+    }
+  }
   if (c.live.rng && c.resim.rng) {
     const rngSame = c.live.rng.every((v, i) => v === c.resim.rng[i]);
     if (!rngSame) return true;
@@ -927,7 +933,51 @@ function drawSidebar(g, frameNum) {
     const dMag = getDeltaMag(c.delta);
     html += `<tr><th>Δ Mag</th><td colspan="3" class="${dMag > 0.01 ? 'delta-bad' : 'delta-ok'}">${dMag.toFixed(6)}</td></tr>`;
 
-    html += '</table></section>';
+    html += '</table>';
+
+    // Direction history
+    const dirEntry = c.live || c.resim;
+    if (dirEntry && dirEntry.dirRing) {
+      const liveDE = c.live && c.live.dirRing ? c.live : null;
+      const resimDE = c.resim && c.resim.dirRing ? c.resim : null;
+      const dirSame = liveDE && resimDE ? liveDE.dirRing.every((v,i) => v === resimDE.dirRing[i]) : null;
+
+      html += '<div style="margin-top:8px;border-top:1px solid #0f3460;padding-top:6px">';
+      html += `<div style="font-size:11px;color:#888;margin-bottom:4px">Direction History <span style="color:${dirSame === null ? '#888' : dirSame ? '#4caf50' : '#ff5252'};font-weight:700">${dirSame === null ? '' : dirSame ? '✓' : '✗'}</span></div>`;
+
+      // Metadata: slot, dir0, dir4, h590, h594
+      const de = dirEntry;
+      html += '<table style="margin-bottom:4px">';
+      html += `<tr><th>Slot</th><td style="font-family:monospace">${de.dirSlot !== undefined ? de.dirSlot : '—'}</td>`;
+      html += `<th>h590</th><td style="font-family:monospace">${de.h590 || '—'}</td></tr>`;
+      html += `<tr><th>dir0</th><td style="font-family:monospace">${de.dir0 || '—'}</td>`;
+      html += `<th>h594</th><td style="font-family:monospace">${de.h594 || '—'}</td></tr>`;
+      html += `<tr><th>dir4</th><td style="font-family:monospace">${de.dir4 || '—'}</td>`;
+      html += `<td colspan="2"></td></tr>`;
+      html += '</table>';
+
+      // Compact direction ring grid: 8 rows x 8 cols
+      html += '<div style="font-size:10px;line-height:1.4;font-family:Consolas,monospace">';
+      const dirRing = de.dirRing;
+      const ringLen = dirRing.length;
+      const cols = 8;
+      const rows = Math.ceil(ringLen / cols);
+      for (let r = 0; r < rows && r < 8; r++) {
+        for (let c2 = 0; c2 < cols && r * cols + c2 < ringLen; c2++) {
+          const idx = r * cols + c2;
+          const val = dirRing[idx];
+          const dirVal = val ? parseInt(val.slice(-2), 16) : 0;
+          const isCurrent = idx === de.dirSlot;
+          const bg = dirVal ? (isCurrent ? '#3a7a3a' : '#2a5a2a') : (isCurrent ? '#3a3a5a' : '#1a1a2e');
+          html += `<span style="display:inline-block;width:28px;text-align:center;background:${bg};color:${dirVal ? '#8f8' : '#666'};border:${isCurrent ? '1px solid #00d4ff' : '1px solid transparent'};margin:1px" title="[${idx}] ${val}">${dirVal.toString(16).padStart(2,'0')}</span>`;
+        }
+        html += '<br>';
+      }
+      html += '<div style="font-size:9px;color:#555;margin-top:2px">direction bits (low byte) per slot — highlighted slot = current</div>';
+      html += '</div></div>';
+    }
+
+    html += '</section>';
   }
 
   if (renderedChars === 0 && chars.length > 0) {

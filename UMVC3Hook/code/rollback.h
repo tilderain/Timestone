@@ -41,6 +41,9 @@ extern int32_t g_restoreRequestedFrame;
 // diagnostic info at the resim→live boundary.  Cleared after first use.
 extern int32_t g_postResimFrame;
 
+// When true (default), include direction history fields in NDJSON output.
+extern bool g_ndjsonIncludeDirHistory;
+
 // F7 re-sim test state machine:
 //   0 = idle
 //   1 = save snapshot on next frame boundary, then enter state 2

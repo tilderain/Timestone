@@ -41,3 +41,6 @@ Disable mouse for game
 
 Switch to gecko net ...
 Transmit input for the frame as soon as we capture it
+
+
+add exception handler

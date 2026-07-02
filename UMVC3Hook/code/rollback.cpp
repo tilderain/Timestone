@@ -113,6 +113,8 @@ int32_t g_f7StartFrame   = 0;
 int     g_f7Remaining    = 0;
 int     g_f7DiagSession  = -1;
 
+bool    g_ndjsonIncludeDirHistory = true;
+
 // Rollback request from controller.cpp — late input arrived that differs
 // from what was predicted.  Start/end inclusive frame range.
 // __ImageBase gives us the DLL's base address (used with GetModuleFileNameA
@@ -309,25 +311,69 @@ std::string Rollback_GenerateNetplayLiveJSON(int32_t frame, bool isResim) {
                     if (!firstChar) out += ",";
                     firstChar = false;
 
-                    char charBuf[512];
+                    char charBuf[4096];
                     int32_t memberId = *(int32_t*)(chr + 0x2DB0);
                     int32_t plrId = *(int32_t*)(chr + 0x2DA0);
                     int32_t assistType = *(int32_t*)(chr + 0x2DBC);
-                    snprintf(charBuf, sizeof(charBuf),
-                            "{\"team\":%d,\"slot\":%d,\"mid\":%d,"
-                            "\"plr\":%d,\"ast\":%d,"
-                            "\"pos\":[%.4f,%.4f,%.4f],"
-                            "\"act\":\"0x%08X\",\"fl\":\"0x%08X\","
-                            "\"mHeld\":\"0x%08X\",\"fcnt\":%llu,"
-                            "\"rng\":[\"0x%08X\",\"0x%08X\",\"0x%08X\",\"0x%08X\"]}",
-                            ti, ci, memberId,
-                            plrId, assistType,
-                            snap.posX, snap.posY, snap.posZ,
-                            snap.actionId, snap.flags14F0,
-                            *(uint32_t*)(snap.cchr + 0x14),
-                            *(uint64_t*)(snap.cchr + 0x18),
-                            snap.xorShift[0], snap.xorShift[1],
-                            snap.xorShift[2], snap.xorShift[3]);
+
+                    if (g_ndjsonIncludeDirHistory) {
+                        uint64_t dirFrameCnt = *(uint64_t*)(snap.cchr + 0x18);
+                        uint32_t dirSlot = dirFrameCnt & 0x3F;
+                        uint32_t dir0   = *(uint32_t*)(snap.cchr + 0x1B0);
+                        uint32_t dir4   = *(uint32_t*)(snap.cchr + 0x1B4);
+                        uint32_t h590   = *(uint32_t*)(snap.cchr + 0x590);
+                        uint32_t h594   = *(uint32_t*)(snap.cchr + 0x594);
+
+                        std::string dirRing = "[";
+                        for (int di = 0; di < 64; di++) {
+                            if (di > 0) dirRing += ",";
+                            char tmp[24];
+                            snprintf(tmp, sizeof(tmp), "\"0x%016llX\"",
+                                     *(uint64_t*)(snap.cchr + 0x360 + di * 8));
+                            dirRing += tmp;
+                        }
+                        dirRing += "]";
+
+                        snprintf(charBuf, sizeof(charBuf),
+                                "{\"team\":%d,\"slot\":%d,\"mid\":%d,"
+                                "\"plr\":%d,\"ast\":%d,"
+                                "\"pos\":[%.4f,%.4f,%.4f],"
+                                "\"act\":\"0x%08X\",\"fl\":\"0x%08X\","
+                                "\"mHeld\":\"0x%08X\",\"fcnt\":%llu,"
+                                "\"dirSlot\":%u,"
+                                "\"dir0\":\"0x%08X\",\"dir4\":\"0x%08X\","
+                                "\"h590\":\"0x%08X\",\"h594\":\"0x%08X\","
+                                "\"dirRing\":%s,"
+                                "\"rng\":[\"0x%08X\",\"0x%08X\",\"0x%08X\",\"0x%08X\"]}",
+                                ti, ci, memberId,
+                                plrId, assistType,
+                                snap.posX, snap.posY, snap.posZ,
+                                snap.actionId, snap.flags14F0,
+                                *(uint32_t*)(snap.cchr + 0x14),
+                                dirFrameCnt,
+                                dirSlot,
+                                dir0, dir4,
+                                h590, h594,
+                                dirRing.c_str(),
+                                snap.xorShift[0], snap.xorShift[1],
+                                snap.xorShift[2], snap.xorShift[3]);
+                    } else {
+                        snprintf(charBuf, sizeof(charBuf),
+                                "{\"team\":%d,\"slot\":%d,\"mid\":%d,"
+                                "\"plr\":%d,\"ast\":%d,"
+                                "\"pos\":[%.4f,%.4f,%.4f],"
+                                "\"act\":\"0x%08X\",\"fl\":\"0x%08X\","
+                                "\"mHeld\":\"0x%08X\",\"fcnt\":%llu,"
+                                "\"rng\":[\"0x%08X\",\"0x%08X\",\"0x%08X\",\"0x%08X\"]}",
+                                ti, ci, memberId,
+                                plrId, assistType,
+                                snap.posX, snap.posY, snap.posZ,
+                                snap.actionId, snap.flags14F0,
+                                *(uint32_t*)(snap.cchr + 0x14),
+                                *(uint64_t*)(snap.cchr + 0x18),
+                                snap.xorShift[0], snap.xorShift[1],
+                                snap.xorShift[2], snap.xorShift[3]);
+                    }
                     out += charBuf;
                     ci++;
                 }
@@ -2163,17 +2209,7 @@ static void __fastcall hkMvc3Main_move(uint64_t param_1)
 
     int32_t curFrame = (int32_t)Controller_GetNetFrameCount();
 
-    // 1. Unconditional Netplay Live NDJSON logging at the start of the frame (Pre-Tick)
-    if (Netplay_IsActive() && !g_isResimulating && curFrame >= 0) {
-        Rollback_DumpNetplayLive(curFrame);
-    }
-
-    // 2. Capture PRE-state before the tick
-    if (curFrame >= 0) {
-        Rollback_CaptureFrameDiagSnapshot(curFrame, /*isResim=*/false, /*postOnly=*/false);
-    }
-
-    // Pending snapshot-restore request from FrameStepper_Process (F6 key).
+    // 1. Process pending snapshot-restore request from FrameStepper_Process (F6 key).
     // Execute at frame boundary (BEFORE oMvc3Main_move) to avoid mid-frame
     // memory corruption when restoring shared game state.
     static bool s_postRestoreTickDump = false;
@@ -2185,7 +2221,7 @@ static void __fastcall hkMvc3Main_move(uint64_t param_1)
         s_postRestoreTickDump = true;
     }
 
-    // Pending re-sim request from HookUpdate thread (FrameStepper_Process).
+    // 2. Process pending re-sim request from HookUpdate thread (FrameStepper_Process).
     // Execute it HERE on the main game thread so sRender path runs safely.
     if (g_resimRequestedStart >= 0) {
         int32_t rs = g_resimRequestedStart;
@@ -2196,7 +2232,7 @@ static void __fastcall hkMvc3Main_move(uint64_t param_1)
         // After re-sim, let the normal frame proceed
     }
 
-    // F7 re-sim test: save snapshot, record N frames of normal play, restore
+    // 3. Process F7 re-sim test: save snapshot, record N frames of normal play, restore
     // and re-sim with the captured inputs (exercises the full rollback path).
     if (g_f7State == 1) {
         g_f7StartFrame = (int32_t)Controller_GetNetFrameCount();
@@ -2231,19 +2267,8 @@ static void __fastcall hkMvc3Main_move(uint64_t param_1)
         }
     }
 
-    if (g_isResimulating) {
-        // Must call oMvc3Main_move during re-sim — the game has an internal
-        // dispatch loop that calls 0x1402594A0 (sMvc3Main__move) and expects
-        // it to actually process game state.  If we return SKIPPED the
-        // dispatch loop condition is never met and it spins forever.
-        // Calling oMvc3Main_move here processes the frame normally (timing
-        // is NOP'd by hkMain_move + render calls through without issue).
-        oMvc3Main_move(param_1);
-        return;
-    }
-
     // ==================================================================
-    // Auto-snapshot + rollback for netplay (only on main game thread,
+    // 4. Auto-snapshot + rollback for netplay (only on main game thread,
     // not during re-sim).  Only active when rollback frames > 0.
     // ==================================================================
     if (Netplay_IsActive() && !g_isResimulating && Controller_IsRollbackEnabled())
@@ -2360,9 +2385,29 @@ static void __fastcall hkMvc3Main_move(uint64_t param_1)
         }
     }
 
+    // 5. Early return if we are in the middle of re-simulation
+    if (g_isResimulating) {
+        oMvc3Main_move(param_1);
+        return;
+    }
+
+    // Update curFrame to ensure we log/capture using the corrected frame timeline
+    curFrame = (int32_t)Controller_GetNetFrameCount();
+
+    // 6. Unconditional Netplay Live NDJSON logging at the start of the frame (Pre-Tick)
+    // Runs only after any pending rollbacks/re-simulations have stabilized the frame state
+    if (Netplay_IsActive() && curFrame >= 0) {
+        Rollback_DumpNetplayLive(curFrame);
+    }
+
+    // 7. Capture corrected PRE-state before the tick
+    if (curFrame >= 0) {
+        Rollback_CaptureFrameDiagSnapshot(curFrame, /*isResim=*/false, /*postOnly=*/false);
+    }
+
     oMvc3Main_move(param_1);
 
-    // 3. Capture POST-state after the tick (preserves the pre-state captured above)
+    // 8. Capture POST-state after the tick (preserves the pre-state captured above)
     if (curFrame >= 0) {
         Rollback_CaptureFrameDiagSnapshot(curFrame, /*isResim=*/false, /*postOnly=*/true);
     }
