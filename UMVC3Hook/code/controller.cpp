@@ -833,25 +833,23 @@ static void DrainAndProcessPackets()
     InputPacket inPkt;
     while (Netplay_GetInboundPacket(inPkt))
     {
-        // Out-of-order protection: discard the packet entirely if its maximum
-        // frame coverage is older than or equal to our already known remote frame.
-        int32_t pktMaxFrame = (int32_t)inPkt.start_frame + NET_HISTORY_SIZE - 1;
-        if (pktMaxFrame <= g_lastRemoteFrame)
-        {
-            continue;
-        }
-
+        // 1. Process inputs from the packet
         size_t framesToProcess = (inPkt.flags == 0) ? 1 : NET_HISTORY_SIZE;
         for (size_t i = 0; i < framesToProcess; i++)
         {
             int32_t targetFrame = (int32_t)inPkt.start_frame + (int32_t)i;
             if (targetFrame >= 0)
             {
-                g_receivedInput[(uint32_t)targetFrame % RING_SIZE] = inPkt.inputs[i];
-                g_confirmedFrame[(uint32_t)targetFrame % RING_SIZE] = targetFrame;
+                // Only write if we haven't already confirmed this specific frame
+                // to prevent out-of-order packets from overwriting newer data.
+                if (!IsFrameConfirmed(targetFrame))
+                {
+                    g_receivedInput[(uint32_t)targetFrame % RING_SIZE] = inPkt.inputs[i];
+                    g_confirmedFrame[(uint32_t)targetFrame % RING_SIZE] = targetFrame;
+                    Rollback_UpdateRemoteInput(targetFrame, inPkt.inputs[i]);
+                }
 
-                Rollback_UpdateRemoteInput(targetFrame, inPkt.inputs[i]);
-
+                // Track the absolute furthest remote frame for prediction reference
                 if (targetFrame > g_lastRemoteFrame && inPkt.flags != 0)
                 {
                     g_lastRemoteFrame = targetFrame;
@@ -860,9 +858,7 @@ static void DrainAndProcessPackets()
             }
         }
 
-        LogReceivedPacket(inPkt);
-
-        // Piggybacked checksum (Slippi-style)
+        // 2. Process the piggybacked checksum (always processed from every packet)
         if (g_netFrameCount >= DESYNC_SKIP_FRAMES)
         {
             int32_t csFrame = (int32_t)inPkt.checksum_frame;
@@ -870,6 +866,7 @@ static void DrainAndProcessPackets()
             {
                 uint32_t ridx = (uint32_t)csFrame % RING_SIZE;
                 g_remoteChecksum[ridx] = inPkt.checksum;
+
                 if (g_localChecksum[ridx] != 0 && csFrame < g_netFrameCount)
                 {
                     uint32_t diff = g_localChecksum[ridx] > inPkt.checksum
@@ -888,6 +885,7 @@ static void DrainAndProcessPackets()
         }
 
         g_remoteFrameAdvantage = inPkt.frame_advantage;
+        LogReceivedPacket(inPkt);
     }
 }
 
