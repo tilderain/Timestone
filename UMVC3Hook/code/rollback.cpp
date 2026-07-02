@@ -1727,7 +1727,6 @@ void Rollback_QueuePendingResimDump(int32_t frame)
 {
     if (!Netplay_IsActive())
     {
-        Rollback_DumpNDJSON(frame, 1);
         return;
     }
 
@@ -1973,6 +1972,15 @@ void Rollback_ReSimulate(int32_t startFrame, int32_t endFrame)
         // Capture PRE-state before the tick
         Rollback_CaptureFrameDiagSnapshot(f, /*isResim=*/true, /*postOnly=*/false);
 
+        // Pre-tick NDJSON logging for both active and inactive netplay sessions
+        if (Netplay_IsActive()) {
+            Rollback_DiscardPendingNetplayLive(f);
+            std::string json = Rollback_GenerateNetplayLiveJSON(f, true);
+            Rollback_WriteNetplayLiveJSON(json);
+        } else {
+            Rollback_DumpNDJSON(f, 1);
+        }
+
         // Take snapshot of current state before ticking, ensuring cascading rollbacks have a valid restore point
         if (g_multiResimEnabled) {
             Rollback_SaveSnapshot(f);
@@ -1983,21 +1991,9 @@ void Rollback_ReSimulate(int32_t startFrame, int32_t endFrame)
         silentFrameEndCount++;
         Controller_LogReSimFrame(f);
 
-        // Discard the unconfirmed pending live JSON and write the corrected state
-        if (Netplay_IsActive()) {
-            Rollback_DiscardPendingNetplayLive(f);
-            std::string json = Rollback_GenerateNetplayLiveJSON(f, true);
-            Rollback_WriteNetplayLiveJSON(json);
-        }
-
-        // Capture POST-state after the tick (preserves the pre-state captured above)
+        // Capture POST-state after the tick (preserves the pre-tick state captured above)
         Rollback_CaptureFrameDiagSnapshot(f, /*isResim=*/true, /*postOnly=*/true);
 
-        // Diagnostic dump: capture re-simmed state for this frame
-        // session_* files disabled — use rdiag.ndjson instead
-        //Rollback_DumpBinary(g_diagSessionId, f, 1);
-        //Rollback_DumpCharText(g_diagSessionId, f, 1);
-        //Rollback_DumpManifest(g_diagSessionId, f, 1);
         Rollback_QueuePendingResimDump(f);
     }
 
@@ -2165,6 +2161,18 @@ static void __fastcall hkMvc3Main_move(uint64_t param_1)
         HookLog("Rollback: captured sMvc3Main @ 0x%llX\n", param_1);
     }
 
+    int32_t curFrame = (int32_t)Controller_GetNetFrameCount();
+
+    // 1. Unconditional Netplay Live NDJSON logging at the start of the frame (Pre-Tick)
+    if (Netplay_IsActive() && !g_isResimulating && curFrame >= 0) {
+        Rollback_DumpNetplayLive(curFrame);
+    }
+
+    // 2. Capture PRE-state before the tick
+    if (curFrame >= 0) {
+        Rollback_CaptureFrameDiagSnapshot(curFrame, /*isResim=*/false, /*postOnly=*/false);
+    }
+
     // Pending snapshot-restore request from FrameStepper_Process (F6 key).
     // Execute at frame boundary (BEFORE oMvc3Main_move) to avoid mid-frame
     // memory corruption when restoring shared game state.
@@ -2205,14 +2213,9 @@ static void __fastcall hkMvc3Main_move(uint64_t param_1)
     if (g_f7State == 2) {
         g_f7Remaining--;
         if (g_f7Remaining <= 0) {
-            // Last recording frame — capture live state before re-sim
-            // so it lines up with the resim dumps (same diag session).
+            // Last recording frame — capture live state before re-sim (Pre-Tick)
             if (g_f7DiagSession >= 0) {
-                uint64_t sr = *(uint64_t*)_addr(PTR_SREPLAY);
-                int32_t liveNum = sr ? *(int32_t*)(sr + 0x54) : 0;
-                Rollback_DumpNDJSON(liveNum, 0);
-                // session_* files disabled — use rdiag.ndjson instead
-                //Rollback_DumpManifest(g_f7DiagSession, liveNum, 0);
+                Rollback_DumpNDJSON(curFrame, 0);
             }
             g_f7State = 0;
             HookLog("F7: %d frames recorded, restoring frame %d and re-simulating\n",
@@ -2220,14 +2223,10 @@ static void __fastcall hkMvc3Main_move(uint64_t param_1)
             Rollback_ReSimulate(g_f7StartFrame, g_f7StartFrame + 8);
             g_f7DiagSession = -1;
 
-            // Mirror the netplay post-resim setup:
-            //   1. Re-save the snapshot at the current frame so the ring buffer
-            //      reflects the corrected state (not the stale pre-resim state).
-            //   2. Flag the first post-resim live tick for diagnostics.
-            int32_t curFrame = (int32_t)Controller_GetNetFrameCount();
-            if (curFrame >= 0) {
-                Rollback_SaveSnapshot(curFrame);
-                g_postResimFrame = curFrame;
+            int32_t updatedFrame = (int32_t)Controller_GetNetFrameCount();
+            if (updatedFrame >= 0) {
+                Rollback_SaveSnapshot(updatedFrame);
+                g_postResimFrame = updatedFrame;
             }
         }
     }
@@ -2263,8 +2262,6 @@ static void __fastcall hkMvc3Main_move(uint64_t param_1)
             // (the one immediately after Rollback_ReSimulate returns).
             if (!g_isResimulating)
                 g_postResimFrame = -1;
-
-            int32_t curFrame = (int32_t)Controller_GetNetFrameCount();
 
             // Save snapshot for the current frame BEFORE the game tick
             Rollback_SaveSnapshot(curFrame);
@@ -2365,53 +2362,14 @@ static void __fastcall hkMvc3Main_move(uint64_t param_1)
 
     oMvc3Main_move(param_1);
 
-    // Capture per-frame diag snapshot after every live frame tick
-    Rollback_CaptureFrameDiagSnapshot((int32_t)Controller_GetNetFrameCount(), /*isResim=*/false);
-
-    // Netplay per-frame live NDJSON logging — every live frame logged
-    // so both sides have a complete frame-by-frame record for diagnostics.
-    // Logged unconditionally of battle step (covers transitions, KOs, etc.)
-    // so replay/chart viewers get a contiguous frame sequence.
-    if (Netplay_IsActive() && !g_isResimulating) {
-        int32_t curFrame = (int32_t)Controller_GetNetFrameCount();
-        if (curFrame >= 0) {
-            Rollback_DumpNetplayLive(curFrame);
-        }
+    // 3. Capture POST-state after the tick (preserves the pre-state captured above)
+    if (curFrame >= 0) {
+        Rollback_CaptureFrameDiagSnapshot(curFrame, /*isResim=*/false, /*postOnly=*/true);
     }
 
-    // F7 live capture: dump state after each recording frame tick so it appears
-    // alongside the corresponding resim dump in the same diag session files.
-    // Works for frames 1-7 (g_f7Remaining > 0).  Frame 8 is captured before
-    // Rollback_ReSimulate (see g_f7State == 2 handler above).
+    // F7 live capture during recording for frames 1-7
     if (g_f7DiagSession >= 0 && g_f7State == 2) {
-        uint64_t sr = *(uint64_t*)_addr(PTR_SREPLAY);
-        int32_t liveNum = sr ? *(int32_t*)(sr + 0x54) : 0;
-        Rollback_DumpNDJSON(liveNum, 0);
-        // session_* files disabled — use rdiag.ndjson instead
-        //Rollback_DumpManifest(g_f7DiagSession, liveNum, 0);
-    }
-
-    // Post-tick diagnostic: dump character animation state after restore+tick
-    if (s_postRestoreTickDump) {
-        s_postRestoreTickDump = false;
-        uint64_t sChar = *(uint64_t*)_addr(PTR_SCHARACTER);
-        if (sChar) {
-            for (int ti = 0; ti < 2; ++ti) {
-                uint64_t team = sChar + (ti == 0 ? TEAM0_OFFSET : TEAM1_OFFSET);
-                uint64_t node = team + TEAM_FIRST_NODE_OFFSET;
-                while (node) {
-                    uint64_t chr = *(uint64_t*)(node + NODE_CHR_OFFSET);
-                    if (chr) {
-                        uint32_t* a = (uint32_t*)(chr + 0x1300);
-                 //       HookLog("DIAG Post-tick char@0x%llX team%d: anim[+0x1300]: %08X %08X %08X %08X  %08X %08X %08X %08X  %08X %08X %08X %08X  %08X %08X %08X %08X\n",
-                  //              chr, ti,
-                 //               a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7],
-                 //               a[8], a[9], a[10], a[11], a[12], a[13], a[14], a[15]);
-                    }
-                    node = *(uint64_t*)(node + NODE_NEXT_OFFSET);
-                }
-            }
-        }
+        Rollback_DumpNDJSON(curFrame, 0);
     }
 }
 

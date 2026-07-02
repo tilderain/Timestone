@@ -12,6 +12,7 @@ body { font-family: 'Segoe UI', system-ui, sans-serif; background: #1a1a2e; colo
 #dropzone.hidden { display: none; }
 #dropzone p { color: #888; font-size: 18px; }
 #dropzone .sub { font-size: 14px; color: #666; }
+#dropzone .sub2 { font-size: 12px; color: #555; max-width: 480px; text-align: center; }
 #app { display: none; flex-direction: column; height: 100vh; }
 #app.active { display: flex; }
 .toolbar { display: flex; align-items: center; gap: 12px; padding: 8px 16px; background: #16213e; border-bottom: 1px solid #0f3460; flex-wrap: wrap; }
@@ -19,12 +20,16 @@ body { font-family: 'Segoe UI', system-ui, sans-serif; background: #1a1a2e; colo
 .toolbar button:hover { background: #1a5276; }
 .toolbar button:active { background: #0a2647; }
 .toolbar button:disabled { opacity: .4; cursor: default; }
+.toolbar button.compare-btn { background: #1a5276; }
+.toolbar button.compare-btn:hover { background: #227093; }
+.toolbar button.clear-compare-btn { background: #5c1a1a; }
+.toolbar button.clear-compare-btn:hover { background: #7a2222; }
 .toolbar label { font-size: 13px; color: #aaa; }
 .toolbar .frame-num { font-size: 20px; font-weight: 700; color: #00d4ff; min-width: 80px; text-align: center; }
 .toolbar input[type=range] { width: 200px; accent-color: #00d4ff; }
 .toolbar input[type=number] { width: 70px; background: #0f3460; color: #e0e0e0; border: 1px solid #1a5276; border-radius: 4px; padding: 4px 8px; font-size: 14px; }
 .toolbar .spacer { flex: 1; }
-.toolbar .file-info { font-size: 12px; color: #888; max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.toolbar .file-info { font-size: 12px; color: #888; max-width: 340px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .main { display: flex; flex: 1; overflow: hidden; }
 .canvas-wrap { flex: 1; display: flex; align-items: center; justify-content: center; background: #0d1117; position: relative; min-width: 0; }
 .canvas-wrap canvas { max-width: 100%; max-height: 100%; }
@@ -46,7 +51,7 @@ body { font-family: 'Segoe UI', system-ui, sans-serif; background: #1a1a2e; colo
 .toolbar .num-group { display: flex; align-items: center; gap: 4px; }
 .toolbar .num-group label { font-size: 13px; color: #aaa; white-space: nowrap; }
 .toolbar .num-group input[type=number] { width: 70px; background: #0f3460; color: #e0e0e0; border: 1px solid #1a5276; border-radius: 4px; padding: 4px 8px; font-size: 14px; }
-.legend { display: flex; gap: 16px; padding: 4px 16px; background: #0d1117; font-size: 12px; color: #888; border-bottom: 1px solid #0f3460; }
+.legend { display: flex; gap: 16px; padding: 4px 16px; background: #0d1117; font-size: 12px; color: #888; border-bottom: 1px solid #0f3460; flex-wrap: wrap; }
 .legend-item { display: flex; align-items: center; gap: 6px; }
 .legend-live { width: 12px; height: 12px; border-radius: 50%; }
 .legend-resim { width: 12px; height: 12px; border-radius: 50%; border: 2px solid; background: transparent; }
@@ -57,6 +62,7 @@ body { font-family: 'Segoe UI', system-ui, sans-serif; background: #1a1a2e; colo
 tr.mismatch-bg td { background: rgba(255, 82, 82, 0.15); }
 .status-bar { padding: 4px 16px; background: #0d1117; border-top: 1px solid #0f3460; font-size: 12px; color: #666; display: flex; gap: 20px; }
 .status-bar .diverged { color: #ff5252; }
+.compare-tag { font-size: 10px; padding: 1px 6px; border-radius: 3px; background: #1a5276; color: #cdeeff; margin-left: 6px; }
 </style>
 </head>
 <body>
@@ -65,18 +71,24 @@ tr.mismatch-bg td { background: rgba(255, 82, 82, 0.15); }
   <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="#666" stroke-width="1.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
   <p>Drop an <strong>.ndjson</strong> file here, or click to browse</p>
   <div class="sub">Drop a netplay live log (<strong>nplive_*/frames.ndjson</strong>) or F7 diagnostic dump</div>
-  <input type="file" id="fileInput" accept=".ndjson,.json,.jsonl,.txt" hidden>
+  <div class="sub2">Tip: once loaded, use "+ Compare File" in the toolbar to load a second .ndjson — the first file becomes Host and the second becomes Client, matched frame-by-frame.</div>
 </div>
+
+<input type="file" id="fileInput" accept=".ndjson,.json,.jsonl,.txt" hidden>
+<input type="file" id="compareFileInput" accept=".ndjson,.json,.jsonl,.txt" hidden>
 
 <div id="app">
   <div class="toolbar">
     <button id="btnLoad" title="Load another file">Open</button>
+    <button id="btnCompare" class="compare-btn" title="Load a second file to compare — first file = Host, second = Client">+ Compare File</button>
+    <button id="btnClearCompare" class="clear-compare-btn" title="Remove comparison file" style="display:none">✕ Compare</button>
     <button id="btnFirst" title="First frame">|◀</button>
     <button id="btnPrev" title="Previous frame (←)">◀</button>
     <span class="frame-num" id="frameDisplay">0 / 0</span>
     <button id="btnNext" title="Next frame (→)">▶</button>
     <button id="btnLast" title="Last frame">▶|</button>
-    <button id="btnFirstDiv" title="Jump to first divergent frame">First ↯</button>
+    <button id="btnPrevMismatch" title="Go to previous mismatched character frame">◀ Mismatch</button>
+    <button id="btnNextMismatch" title="Go to next mismatched character frame">Mismatch ▶</button>
     <button id="btnPlay" title="Play/Pause">▶ Play</button>
     <label style="font-size:13px;color:#aaa;white-space:nowrap">Speed: <input type="range" id="speedRange" min="1" max="30" value="5" style="width:100px;vertical-align:middle"></label>
     <input type="range" id="scrubBar" class="scrub-bar" min="0" max="0" value="0">
@@ -89,7 +101,8 @@ tr.mismatch-bg td { background: rgba(255, 82, 82, 0.15); }
     <span id="legendItems"></span>
     <span class="legend-item" id="globalDivergence">Divergence: —</span>
     <span style="flex:1"></span>
-    <label style="font-size:13px;color:#888"><input type="checkbox" id="showAssists"> Show assists</label>
+    <label style="font-size:13px;color:#888;margin-right:12px"><input type="checkbox" id="onlyShowDiffering" checked> Hide matching characters</label>
+    <label style="font-size:13px;color:#888"><input type="checkbox" id="showAssists" checked> Show assists</label>
   </div>
 
   <div class="main">
@@ -101,7 +114,7 @@ tr.mismatch-bg td { background: rgba(255, 82, 82, 0.15); }
 
   <div class="status-bar">
     <span id="statusFrames">Frames: 0</span>
-    <span id="statusEntries">Entries: 0</span>
+    <span id="statusEntries"></span>
     <span id="statusGaps"></span>
     <span id="statusDiverged" class="diverged"></span>
   </div>
@@ -110,12 +123,20 @@ tr.mismatch-bg td { background: rgba(255, 82, 82, 0.15); }
 <script>
 // ─── State ────────────────────────────────────────────────────────────
 let frames = [];        // sorted unique frame numbers
-let entries = [];       // raw parsed ndjson lines
-let frameMap = {};      // frame# -> { live: entry|null, resim: entry|null }
+let entries = [];       // raw parsed ndjson lines (primary file, or union in compare mode)
+let frameMap = {};      // frame# -> { live: entry|null, resim: entry|null, refSide }
 let currentFrameIdx = 0;
 let playing = false;
 let playTimer = null;
-let showAssists = false;
+let showAssists = true;
+let onlyShowDiffering = true;
+
+// Two-file comparison state
+let compareMode = false;
+let fileAEntries = [];  // primary file -> treated as "host"
+let fileBEntries = [];  // comparison file -> treated as "client"
+let fileAName = '';
+let fileBName = '';
 
 const COLORS = {
   p1Live: '#00ccaa', p1LiveFill: 'rgba(0,204,170,0.55)',
@@ -135,11 +156,11 @@ const COLORS = {
 
 // ─── DOM refs ─────────────────────────────────────────────────────────
 const $ = id => document.getElementById(id);
-const dropzone = $('dropzone'), app = $('app'), fileInput = $('fileInput');
+const dropzone = $('dropzone'), app = $('app'), fileInput = $('fileInput'), compareFileInput = $('compareFileInput');
 const canvas = $('canvas');
 const frameDisplay = $('frameDisplay'), frameInput = $('frameInput');
 const sidebar = $('sidebar'), fileInfo = $('fileInfo');
-const statusFrames = $('statusFrames'), statusEntries = $('statusEntries'), statusSource = $('statusSource'), statusDiverged = $('statusDiverged');
+const statusFrames = $('statusFrames'), statusEntries = $('statusEntries'), statusDiverged = $('statusDiverged');
 const globalDivergence = $('globalDivergence');
 const legendItems = $('legendItems');
 
@@ -168,10 +189,24 @@ function getCharRole(team, refSide) {
   return team === 0 ? 'Host' : 'Client';
 }
 
+function truncate(name, n) {
+  n = n || 20;
+  if (!name) return '';
+  return name.length > n ? name.slice(0, n - 1) + '…' : name;
+}
+
 function updateLegend() {
+  let html = '';
+  if (compareMode) {
+    html += `<span class="legend-item"><span class="legend-live" style="background:${COLORS.p1Host}"></span> P1 Host <span class="compare-tag" title="${fileAName}">${truncate(fileAName)}</span></span>`;
+    html += `<span class="legend-item"><span class="legend-resim" style="border-color:${COLORS.p1Client}"></span> P1 Client <span class="compare-tag" title="${fileBName}">${truncate(fileBName)}</span></span>`;
+    html += `<span class="legend-item"><span class="legend-live" style="background:${COLORS.p2Host}"></span> P2 Host <span class="compare-tag" title="${fileAName}">${truncate(fileAName)}</span></span>`;
+    html += `<span class="legend-item"><span class="legend-resim" style="border-color:${COLORS.p2Client}"></span> P2 Client <span class="compare-tag" title="${fileBName}">${truncate(fileBName)}</span></span>`;
+    legendItems.innerHTML = html;
+    return;
+  }
   const isNetplay = entries.some(e => e.side && (e.side === 'host' || e.side === 'client' || e.side === 'host_resim' || e.side === 'client_resim'));
   const isDiag = entries.some(e => e.regions && !e.inputs);
-  let html = '';
   if (isNetplay) {
     html += `<span class="legend-item"><span class="legend-live" style="background:${COLORS.p1Host}"></span> P1 Host (live)</span>`;
     html += `<span class="legend-item"><span class="legend-resim" style="border-color:${COLORS.p1Client}"></span> P1 Client (resim)</span>`;
@@ -186,42 +221,102 @@ function updateLegend() {
   legendItems.innerHTML = html;
 }
 
-// ─── File loading ─────────────────────────────────────────────────────
-dropzone.addEventListener('click', () => fileInput.click());
-fileInput.addEventListener('change', e => { if (e.target.files[0]) loadFile(e.target.files[0]); });
-$('btnLoad').addEventListener('click', () => fileInput.click());
-
-document.addEventListener('dragover', e => { e.preventDefault(); document.body.style.outline = '3px dashed #00d4ff'; });
-document.addEventListener('dragleave', e => { document.body.style.outline = ''; });
-document.addEventListener('drop', e => { e.preventDefault(); document.body.style.outline = ''; if (e.dataTransfer.files[0]) loadFile(e.dataTransfer.files[0]); });
-
-function loadFile(file) {
-  if (!file) return;
-  const reader = new FileReader();
-  reader.onload = e => {
-    parseData(e.target.result, file.name);
-    dropzone.classList.add('hidden');
-    app.classList.add('active');
-    fileInfo.textContent = file.name + ' (' + (file.size/1024).toFixed(1) + ' KB)';
-    if (frames.length) {
-      currentFrameIdx = 0;
-      render();
-    }
-  };
-  reader.readAsText(file);
+function updateFileInfo() {
+  if (compareMode) {
+    fileInfo.textContent = `Host: ${fileAName}  |  Client: ${fileBName}`;
+    fileInfo.title = fileInfo.textContent;
+  } else {
+    fileInfo.textContent = fileAName;
+    fileInfo.title = fileAName;
+  }
 }
 
-function parseData(text, name) {
-  const lines = text.split('\n').filter(l => l.trim());
-  entries = lines.map((l, i) => { try { return JSON.parse(l); } catch(e) { return null; } }).filter(e => e);
+// ─── File loading ─────────────────────────────────────────────────────
+dropzone.addEventListener('click', () => fileInput.click());
+fileInput.addEventListener('change', e => { e.stopPropagation(); if (e.target.files[0]) loadFile(e.target.files[0], 'primary'); e.target.value = ''; });
+compareFileInput.addEventListener('change', e => { e.stopPropagation(); if (e.target.files[0]) loadFile(e.target.files[0], 'compare'); e.target.value = ''; });
+$('btnLoad').addEventListener('click', e => { e.stopPropagation(); fileInput.click(); });
+$('btnCompare').addEventListener('click', e => { e.stopPropagation(); compareFileInput.click(); });
+$('btnClearCompare').addEventListener('click', () => {
+  compareMode = false;
+  fileBEntries = [];
+  fileBName = '';
+  entries = fileAEntries;
   buildFrameMap();
+  updateFileInfo();
   updateLegend();
   updateStatus();
-  if (!frames.length) {
-    sidebar.innerHTML = '<section><h3>No valid frames found</h3><p style="color:#888">Could not parse any frame entries from the file.</p></section>';
+  $('btnClearCompare').style.display = 'none';
+  $('btnCompare').textContent = '+ Compare File';
+  currentFrameIdx = Math.min(currentFrameIdx, Math.max(0, frames.length - 1));
+  render();
+});
+
+document.addEventListener('dragover', e => { 
+  e.preventDefault(); 
+  if (app.classList.contains('active')) {
+    document.body.style.outline = '3px dashed #ffaa00';
+  } else {
+    document.body.style.outline = '3px dashed #00d4ff'; 
   }
-  $('showAssists').checked = false;
-  showAssists = false;
+});
+document.addEventListener('dragleave', e => { document.body.style.outline = ''; });
+document.addEventListener('drop', e => {
+  e.preventDefault();
+  document.body.style.outline = '';
+  if (e.dataTransfer.files[0]) {
+    const target = app.classList.contains('active') ? 'compare' : 'primary';
+    loadFile(e.dataTransfer.files[0], target);
+  }
+});
+
+function parseEntries(text) {
+  const lines = text.split('\n').filter(l => l.trim());
+  return lines.map(l => { try { return JSON.parse(l); } catch(e) { return null; } }).filter(e => e);
+}
+
+function loadFile(file, target) {
+  if (!file) return;
+  target = target || 'primary';
+  const reader = new FileReader();
+  reader.onload = e => {
+    const parsed = parseEntries(e.target.result);
+
+    if (target === 'primary' || !fileAEntries.length) {
+      fileAEntries = parsed;
+      fileAName = file.name;
+      compareMode = false;
+      fileBEntries = [];
+      fileBName = '';
+      entries = fileAEntries;
+      buildFrameMap();
+    } else {
+      fileBEntries = parsed;
+      fileBName = file.name;
+      compareMode = true;
+      buildCompareFrameMap();
+    }
+
+    dropzone.classList.add('hidden');
+    app.classList.add('active');
+    updateFileInfo();
+    updateLegend();
+    updateStatus();
+
+    if (!frames.length) {
+      sidebar.innerHTML = '<section><h3>No valid frames found</h3><p style="color:#888">Could not parse any frame entries from the file.</p></section>';
+    }
+    
+    showAssists = $('showAssists').checked;
+    onlyShowDiffering = $('onlyShowDiffering').checked;
+
+    $('btnClearCompare').style.display = compareMode ? 'inline-block' : 'none';
+    $('btnCompare').textContent = compareMode ? '⇄ Change Compare File' : '+ Compare File';
+
+    currentFrameIdx = 0;
+    render();
+  };
+  reader.readAsText(file);
 }
 
 function buildFrameMap() {
@@ -290,9 +385,57 @@ function buildFrameMap() {
   sb.max = Math.max(0, frames.length - 1);
 }
 
+function pickFrameEntry(list) {
+  const priority = ['ground_truth', 'host', 'client', 'live', 'host_resim', 'client_resim', 'resim'];
+  for (const p of priority) {
+    const found = list.find(e => e.side === p);
+    if (found) return found;
+  }
+  return list[0];
+}
+
+function buildSingleFileFrameEntries(list) {
+  const byFrame = {};
+  for (const e of list) {
+    if (e.frame === undefined) continue;
+    if (!byFrame[e.frame]) byFrame[e.frame] = [];
+    byFrame[e.frame].push(e);
+  }
+  const result = {};
+  for (const f in byFrame) result[f] = pickFrameEntry(byFrame[f]);
+  return result;
+}
+
+function buildCompareFrameMap() {
+  const aMap = buildSingleFileFrameEntries(fileAEntries);
+  const bMap = buildSingleFileFrameEntries(fileBEntries);
+  frameMap = {};
+
+  const frameSet = new Set();
+  Object.keys(aMap).forEach(f => frameSet.add(Number(f)));
+  Object.keys(bMap).forEach(f => frameSet.add(Number(f)));
+
+  for (const f of frameSet) {
+    const a = aMap[f] ? Object.assign({}, aMap[f], { side: 'host' }) : null;
+    const b = bMap[f] ? Object.assign({}, bMap[f], { side: 'client' }) : null;
+    frameMap[f] = { live: a, resim: b, refSide: 'host' };
+  }
+
+  frames = Array.from(frameSet).sort((a, b) => a - b);
+  frameInput.min = frames.length ? frames[0] : 0;
+  frameInput.max = frames.length ? frames[frames.length-1] : 0;
+  const sb = $('scrubBar');
+  sb.min = 0;
+  sb.max = Math.max(0, frames.length - 1);
+
+  entries = fileAEntries.concat(fileBEntries);
+}
+
 function updateStatus() {
   statusFrames.textContent = `Frames: ${frames.length}`;
-  statusEntries.textContent = `Entries: ${entries.length}`;
+  statusEntries.textContent = compareMode
+    ? `Entries: ${fileAEntries.length} (A) + ${fileBEntries.length} (B)`
+    : `Entries: ${entries.length}`;
   const gaps = countGaps();
   const sg = $('statusGaps');
   if (gaps > 0) {
@@ -319,10 +462,14 @@ function updateStatus() {
     ? `Pos Δ: ${posDiverged}/${total}  Inp Δ: ${inpDiverged}/${total} ⚠`
     : total > 0 ? 'Divergence: None ✓' : 'Divergence: —';
   globalDivergence.style.color = anyDiv ? '#ff5252' : total > 0 ? '#4caf50' : '#888';
-  $('btnFirstDiv').disabled = !anyDiv;
 }
 
-function charKey(c) { return c.team + ':' + (c.mid ?? c.slot); }
+function charKey(c) { 
+  if (!c) return '';
+  const id = (c.mid !== undefined && c.mid !== null) ? c.mid : c.slot;
+  const plr = (c.plr !== undefined && c.plr !== null) ? c.plr : '';
+  return c.team + ':' + id + ':' + plr; 
+}
 
 function hasDivergence(live, resim) {
   if (!live || !resim) return false;
@@ -346,6 +493,25 @@ function hasInputDivergence(live, resim) {
   return li.local !== ri.local || li.usedRemote !== ri.usedRemote || li.recvRemote !== ri.recvRemote;
 }
 
+function isCharDiffering(c) {
+  if (!c.live || !c.resim) return true;
+  if (c.delta) {
+    const dMag = getDeltaMag(c.delta);
+    if (dMag > 0.001) return true;
+  }
+  if (c.live.act !== c.resim.act) return true;
+  if (c.live.fl !== c.resim.fl) return true;
+  if (c.live.mHeld !== c.resim.mHeld) return true;
+  if (c.live.fcnt !== c.resim.fcnt) return true;
+  if (c.live.rng && c.resim.rng) {
+    const rngSame = c.live.rng.every((v, i) => v === c.resim.rng[i]);
+    if (!rngSame) return true;
+  } else if ((c.live.rng && !c.resim.rng) || (!c.live.rng && c.resim.rng)) {
+    return true;
+  }
+  return false;
+}
+
 function getDelta(c1, c2) {
   if (!c1 || !c2) return null;
   return [
@@ -358,6 +524,18 @@ function getDelta(c1, c2) {
 function getDeltaMag(d) {
   if (!d) return 0;
   return Math.sqrt(d[0]*d[0] + d[1]*d[1] + d[2]*d[2]);
+}
+
+// Helper to determine if a frame contains any mismatched character data
+function hasCharMismatch(g) {
+  if (!g) return false;
+  const chars = getCharPositions(g);
+  for (const c of chars) {
+    if (isCharDiffering(c)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 // ─── Rendering ────────────────────────────────────────────────────────
@@ -395,15 +573,37 @@ function updateButtons() {
   $('btnPrev').disabled = currentFrameIdx <= 0;
   $('btnNext').disabled = currentFrameIdx >= frames.length - 1;
   $('btnLast').disabled = currentFrameIdx >= frames.length - 1;
+
+  // Scan backwards to see if there is a previous frame with a character mismatch
+  let hasPrevMis = false;
+  for (let i = currentFrameIdx - 1; i >= 0; i--) {
+    if (hasCharMismatch(frameMap[frames[i]])) {
+      hasPrevMis = true;
+      break;
+    }
+  }
+  $('btnPrevMismatch').disabled = !hasPrevMis;
+
+  // Scan forwards to see if there is a next frame with a character mismatch
+  let hasNextMis = false;
+  for (let i = currentFrameIdx + 1; i < frames.length; i++) {
+    if (hasCharMismatch(frameMap[frames[i]])) {
+      hasNextMis = true;
+      break;
+    }
+  }
+  $('btnNextMismatch').disabled = !hasNextMis;
 }
 
 function getCharPositions(g) {
   const result = [];
   if (!g) return result;
-  const src = g.live || g.resim;
-  if (!src) return result;
-  const srcChars = src.chars || [];
+  
   const isLive = !!g.live;
+  const primaryEntry = g.live || g.resim;
+  if (!primaryEntry) return result;
+
+  const primaryChars = primaryEntry.chars || [];
   const otherEntry = g.resim && g.live ? g.resim : null;
 
   const otherMap = {};
@@ -413,9 +613,9 @@ function getCharPositions(g) {
     }
   }
 
-  for (let i = 0; i < srcChars.length; i++) {
-    const sc = srcChars[i];
-    const mid = sc.mid ?? sc.slot;
+  for (let i = 0; i < primaryChars.length; i++) {
+    const sc = primaryChars[i];
+    const mid = (sc.mid !== undefined && sc.mid !== null) ? sc.mid : sc.slot;
     if (!showAssists && mid > 0) continue;
     const key = charKey(sc);
     const oc = otherMap[key] || null;
@@ -433,6 +633,7 @@ function getCharPositions(g) {
       team: sc.team,
       slot: sc.slot,
       mid: mid,
+      plr: sc.plr !== undefined ? sc.plr : -1,
       refSide: g.refSide,
       resimRefSide: otherEntry ? (otherEntry.side === 'client' || otherEntry.side === 'client_resim' ? 'client' : 'host') : null,
       livePos: livePos,
@@ -442,6 +643,40 @@ function getCharPositions(g) {
       delta: isLive ? (oc ? getDelta(sc, oc) : null) : (oc ? getDelta(oc, sc) : null),
     });
   }
+
+  if (otherEntry) {
+    for (const oc of otherEntry.chars || []) {
+      const mid = (oc.mid !== undefined && oc.mid !== null) ? oc.mid : oc.slot;
+      if (!showAssists && mid > 0) continue;
+      const key = charKey(oc);
+      const alreadyMatched = result.some(r => charKey(r.live || r.resim) === key);
+      if (!alreadyMatched) {
+        let livePos = isLive ? null : oc.pos;
+        let resimPos = isLive ? oc.pos : null;
+
+        result.push({
+          team: oc.team,
+          slot: oc.slot,
+          mid: mid,
+          plr: oc.plr !== undefined ? oc.plr : -1,
+          refSide: g.refSide,
+          resimRefSide: otherEntry.side === 'client' || otherEntry.side === 'client_resim' ? 'client' : 'host',
+          livePos: livePos,
+          resimPos: resimPos,
+          live: isLive ? null : oc,
+          resim: isLive ? oc : null,
+          delta: null,
+        });
+      }
+    }
+  }
+
+  result.sort((a, b) => {
+    if (a.team !== b.team) return a.team - b.team;
+    if (a.mid !== b.mid) return a.mid - b.mid;
+    return b.plr - a.plr; 
+  });
+
   return result;
 }
 
@@ -522,7 +757,8 @@ function drawCanvas(g, frameNum) {
 
   // Draw connecting lines & positions
   for (const c of chars) {
-    const radius = (c.mid ?? c.slot) === 0 ? 12 : 8;
+    const labelId = c.mid;
+    const radius = labelId === 0 ? (c.plr === -1 ? 9 : 12) : 8;
     const col = getCharColor(c.team, c.refSide);
 
     if (c.livePos && c.resimPos) {
@@ -560,14 +796,12 @@ function drawCanvas(g, frameNum) {
       ctx.strokeStyle = col.main; ctx.lineWidth = 2;
       ctx.stroke();
 
-      // Draw mid indicator
-      const mid = c.mid ?? c.slot;
-      if (mid > 0) {
+      if (labelId > 0) {
         ctx.fillStyle = col.main;
         ctx.font = 'bold 9px sans-serif';
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
-        ctx.fillText(`${mid}`, lx, ly);
+        ctx.fillText(`${labelId}`, lx, ly);
       }
     } else if (c.livePos) {
       const [lx, ly] = toScreen(c.livePos[0], c.livePos[1]);
@@ -605,8 +839,8 @@ function drawSidebar(g, frameNum) {
   const srcLabel = s => {
     if (!s) return '—';
     if (s === 'ground_truth') return 'Ground Truth';
-    if (s === 'host') return 'Host';
-    if (s === 'client') return 'Client';
+    if (s === 'host') return compareMode ? `Host (${truncate(fileAName, 14)})` : 'Host';
+    if (s === 'client') return compareMode ? `Client (${truncate(fileBName, 14)})` : 'Client';
     if (s === 'host_resim') return 'Host (Resim)';
     if (s === 'client_resim') return 'Client (Resim)';
     if (s === 'resim') return 'Resim';
@@ -616,7 +850,7 @@ function drawSidebar(g, frameNum) {
   let html = '<section>';
   html += `<h3>Frame ${frameNum}</h3>`;
   html += `<table><tr><th>${srcLabel(liveSide)}:</th><td>${g.live ? '✓' : '✗'}</td><th>${srcLabel(resimSide)}:</th><td>${g.resim ? '✓' : '✗'}</td></tr></table>`;
-  // Inputs
+
   if (g.live && g.live.inputs) {
     const inp = g.live.inputs;
     const inpDiv = g.resim ? hasInputDivergence(g.live, g.resim) : false;
@@ -631,11 +865,18 @@ function drawSidebar(g, frameNum) {
   }
   html += '</section>';
 
+  let renderedChars = 0;
   for (const c of chars) {
+    if (onlyShowDiffering && !isCharDiffering(c)) {
+      continue;
+    }
+    renderedChars++;
+
     const col = getCharColor(c.team, c.refSide);
     const color = c.team === 0 ? 'p1-color' : 'p2-color';
     const label = c.team === 0 ? 'P1' : 'P2';
-    const slotLabel = (c.mid ?? c.slot) === 0 ? 'Point' : `Assist ${c.mid ?? c.slot}`;
+    const dummySuffix = c.plr === -1 ? ' (Dummy)' : '';
+    const slotLabel = (c.mid === 0 ? 'Point' : `Assist ${c.mid}`) + dummySuffix;
     const resimColor = c.resimRefSide ? getCharColor(c.team, c.resimRefSide).main : (c.team === 0 ? COLORS.p1Resim : COLORS.p2Resim);
     const liveTag = `<span style="font-size:10px;font-weight:400;color:${col.main};margin-left:4px">[${srcLabel(liveSide)}]</span>`;
     const resimTag = c.resimPos ? `<span style="font-size:10px;font-weight:400;color:${resimColor};margin-left:4px">[${srcLabel(resimSide)}]</span>` : '';
@@ -653,6 +894,7 @@ function drawSidebar(g, frameNum) {
       const cls = c.delta && Math.abs(c.delta[i]) > 0.001 ? 'delta-bad' : 'delta-ok';
       html += `<tr><th>${posLabels[i]}</th><td class="pos-val">${lv}</td><td class="pos-val">${rv}</td><td class="${cls}">${dv}</td></tr>`;
     }
+
 
     // Action / Flags
     if (c.live && c.resim) {
@@ -688,6 +930,10 @@ function drawSidebar(g, frameNum) {
     html += '</table></section>';
   }
 
+  if (renderedChars === 0 && chars.length > 0) {
+    html += `<section><p style="color:#888;text-align:center;padding:12px 0;">All characters match on this frame.</p></section>`;
+  }
+
   sidebar.innerHTML = html;
 }
 
@@ -698,20 +944,31 @@ function goFrame(idx) {
   render();
 }
 
+function goPrevMismatch() {
+  for (let i = currentFrameIdx - 1; i >= 0; i--) {
+    if (hasCharMismatch(frameMap[frames[i]])) {
+      goFrame(i);
+      return;
+    }
+  }
+}
+
+function goNextMismatch() {
+  for (let i = currentFrameIdx + 1; i < frames.length; i++) {
+    if (hasCharMismatch(frameMap[frames[i]])) {
+      goFrame(i);
+      return;
+    }
+  }
+}
+
 $('btnFirst').addEventListener('click', () => goFrame(0));
 $('btnPrev').addEventListener('click', () => goFrame(currentFrameIdx - 1));
 $('btnNext').addEventListener('click', () => goFrame(currentFrameIdx + 1));
 $('btnLast').addEventListener('click', () => goFrame(frames.length - 1));
 
-$('btnFirstDiv').addEventListener('click', () => {
-  for (let i = 0; i < frames.length; i++) {
-    const g = frameMap[frames[i]];
-    if (g.live && g.resim && (hasDivergence(g.live, g.resim) || hasInputDivergence(g.live, g.resim))) {
-      goFrame(i);
-      return;
-    }
-  }
-});
+$('btnPrevMismatch').addEventListener('click', goPrevMismatch);
+$('btnNextMismatch').addEventListener('click', goNextMismatch);
 
 document.addEventListener('keydown', e => {
   if (e.target.tagName === 'INPUT') return;
@@ -752,9 +1009,14 @@ $('speedRange').addEventListener('input', () => {
   if (playing) { clearInterval(playTimer); const s = parseInt($('speedRange').value); playTimer = setInterval(() => { if (currentFrameIdx >= frames.length - 1) { togglePlay(); return; } goFrame(currentFrameIdx + 1); }, 1000 / s); }
 });
 
-// ─── Show Assists toggle ──────────────────────────────────────────────
+// ─── Toggle event listeners ───────────────────────────────────────────
 $('showAssists').addEventListener('change', () => {
   showAssists = $('showAssists').checked;
+  render();
+});
+
+$('onlyShowDiffering').addEventListener('change', () => {
+  onlyShowDiffering = $('onlyShowDiffering').checked;
   render();
 });
 

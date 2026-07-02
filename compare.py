@@ -3,7 +3,7 @@
 compare_nplive.py — diff two NDJSON rollback logs and report where/why they diverge.
 
 Usage:
-    python3 compare_nplive.py fileA.ndjson fileB.ndjson [--pos-eps 0.001] [--context 3]
+    python3 compare_nplive.py fileA.ndjson fileB.ndjson [--pos-eps 0.001] [--context 3] [--post-context 5]
 
 Designed for the UMVC3Hook nplive/rdiag NDJSON schema:
     {"v":1,"ts":..., "frame":N, "side":"host"|"client"|"ground_truth"|"resim",
@@ -17,8 +17,8 @@ What it does:
   2. Walks frames in increasing order, comparing matching (team,slot) characters.
   3. Reports the FIRST frame where anything differs beyond tolerance, classifies
      *what kind* of divergence it is (RNG-only / position / action / flags /
-     mHeld / fcnt), and prints N frames of context before it so you can see the
-     input stream leading up to the split.
+     mHeld / fcnt), and prints N frames of context before and after it so you 
+     can see the input stream and how the split propagates.
   4. Also separately flags the first frame where RNG diverges even if nothing
      else has yet — this is usually the earlier, "root cause" frame, since RNG
      misconsumption often doesn't show up in position/action until later frames
@@ -239,6 +239,7 @@ def main():
     ap.add_argument("--by-slot", action="store_true", help="Compare using (team,slot) key instead of (team,mid) — exposes slot assignment differences")
     ap.add_argument("--pos-eps", type=float, default=0.001, help="Position tolerance (default 0.001)")
     ap.add_argument("--context", type=int, default=3, help="Frames of context to print before first divergence (default 3)")
+    ap.add_argument("--post-context", type=int, default=5, help="Frames of context to print after first divergence (default 5)")
     ap.add_argument("--max-report", type=int, default=50, help="Max diverging frames to list in the summary table (default 50)")
     args = ap.parse_args()
 
@@ -361,6 +362,32 @@ def main():
             print(f"    {fname}: {desc}")
         print(f"\n    Likely cause: {classify(fields)}")
 
+    # Print details for frames following the first divergence
+    post_frames = common[idx + 1: idx + 1 + args.post_context]
+    if post_frames:
+        print(f"\n--- Details of the next {len(post_frames)} frame(s) after first divergence ---")
+        for pf in post_frames:
+            ia, ib = a[pf].get("inputs", {}), b[pf].get("inputs", {})
+            print(f"\nframe {pf}:  A.inputs={ia}  B.inputs={ib}")
+            if pf in frame_diffs:
+                ca_pf = chars_by_key(a[pf], by_mid=by_mid)
+                cb_pf = chars_by_key(b[pf], by_mid=by_mid)
+                for key, fields in frame_diffs[pf].items():
+                    if not isinstance(key, tuple):
+                        continue
+                    if by_mid:
+                        team, mid = key
+                        slot_a = ca_pf.get(key, {}).get("slot", "?")
+                        slot_b = cb_pf.get(key, {}).get("slot", "?")
+                        print(f"  [team={team} mid={mid} slot=({slot_a} vs {slot_b})]")
+                    else:
+                        team, slotv = key
+                        print(f"  [team={team} slot={slotv}]")
+                    for fname, desc in fields.items():
+                        print(f"    {fname}: {desc}")
+            else:
+                print("  [No divergences on this frame]")
+
     if first_rng_only_divergence is not None and first_rng_only_divergence != first_any_divergence:
         print(f"\n{'='*70}")
         print(f"NOTE: an RNG-only divergence was found EARLIER, at frame {first_rng_only_divergence}")
@@ -411,3 +438,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

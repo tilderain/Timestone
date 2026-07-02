@@ -36,3 +36,8 @@ Disable mouse for game
 //NOTE TODO: Investigate whether or not multiple resims is viable and is better for this.
 //i.e, resimulating to current frame with only 1 confirmed input and 8 predicted inputs, then if those predictions are wrong
 //resimulate AGAIN from that frame ...
+
+
+
+Switch to gecko net ...
+Transmit input for the frame as soon as we capture it
