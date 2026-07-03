@@ -795,19 +795,22 @@ static uint64_t __fastcall hkGetsCurrentInput_withSOCD(uint64_t pad, uint32_t pl
 // ---------------------------------------------------------------------------
 // hkStepIntro
 // Hook on sAction__stepIntro at 0x140007D90.
-// When netplay is active, immediately transitions to the 3-second countdown
-// phase (same path as training mode's auto-skip), avoiding desync from
-// unsynchronized skip-button checks.
+// When netplay is active, lets the intro initialize for a few frames then
+// skips deterministically at frame 10 (same frame on both sides via frame 0
+// sync), avoiding both the black-screen from zero-frame intros and the
+// desync from button-based skipping.
 // ---------------------------------------------------------------------------
 static void(__fastcall* oStepIntro)(uint64_t param_1) = nullptr;
 
 static void __fastcall hkStepIntro(uint64_t param_1)
 {
     if (Netplay_IsActive()) {
-        // Same as training mode skip: jump directly to countdown
-        auto setCountdown = (void(__fastcall*)(uint64_t, int))_addr(0x14000AE00);
-        setCountdown(param_1, 3);
-        return;
+        if (GetGameFrameCount() >= 10)
+        {
+            auto setCountdown = (void(__fastcall*)(uint64_t, int))_addr(0x14000AE00);
+            setCountdown(param_1, 3);
+            return;
+        }
     }
     oStepIntro(param_1);
 }
