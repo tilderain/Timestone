@@ -6,6 +6,8 @@
 
 **Ghidra:** The Ghidra MCP is available, and should be used after consulting the docs on reverse engineering notes.
 
+**Subagents** Please do not use subagents.
+
 ## Directory Structure
 
 | Path | Description |

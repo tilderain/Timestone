@@ -30,17 +30,17 @@ def chars_by_key(entry):
 
 def latest_nplive_paths():
     import glob, os, re
-    dirs = glob.glob("nplive_*_host")
-    if not dirs:
+    ts_pat = re.compile(r"nplive_(\d{8}_\d{6})_(host|client)$")
+    host_dirs = [(m, os.path.join(d, "frames.ndjson"))
+                 for d in glob.glob("nplive_*_host")
+                 if (m := ts_pat.match(d))]
+    client_dirs = [(m, os.path.join(d, "frames.ndjson"))
+                   for d in glob.glob("nplive_*_client")
+                   if (m := ts_pat.match(d))]
+    if not host_dirs or not client_dirs:
         return None, None
-    ts_pat = re.compile(r"nplive_(\d{8}_\d{6})_host")
-    latest = max((ts_pat.match(d) for d in dirs if ts_pat.match(d)),
-                 key=lambda m: m.group(1), default=None)
-    if latest is None:
-        return None, None
-    ts = latest.group(1)
-    host = os.path.join(f"nplive_{ts}_host", "frames.ndjson")
-    client = os.path.join(f"nplive_{ts}_client", "frames.ndjson")
+    host = max(host_dirs, key=lambda p: p[0].group(1))[1]
+    client = max(client_dirs, key=lambda p: p[0].group(1))[1]
     return host, client
 
 def main():

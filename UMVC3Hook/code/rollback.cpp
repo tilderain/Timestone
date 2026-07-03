@@ -270,6 +270,7 @@ static void Rollback_NetplayLiveInit() {
 
 std::string Rollback_GenerateNetplayLiveJSON(int32_t frame, bool isResim) {
     //return;
+    if (frame == 0) return "";
     char tsBuf[32] = {};
     SYSTEMTIME st;
     GetLocalTime(&st);
@@ -324,15 +325,26 @@ std::string Rollback_GenerateNetplayLiveJSON(int32_t frame, bool isResim) {
                         uint32_t h590   = *(uint32_t*)(snap.cchr + 0x590);
                         uint32_t h594   = *(uint32_t*)(snap.cchr + 0x594);
 
-                        std::string dirRing = "[";
-                        for (int di = 0; di < 64; di++) {
-                            if (di > 0) dirRing += ",";
-                            char tmp[24];
-                            snprintf(tmp, sizeof(tmp), "\"0x%016llX\"",
-                                     *(uint64_t*)(snap.cchr + 0x360 + di * 8));
-                            dirRing += tmp;
+                        bool allZero = true;
+                        for (int di = 0; di < 64 && allZero; di++) {
+                            if (*(uint64_t*)(snap.cchr + 0x360 + di * 8) != 0)
+                                allZero = false;
                         }
-                        dirRing += "]";
+
+                        std::string dirRing;
+                        if (allZero) {
+                            dirRing = "\"all zeros\"";
+                        } else {
+                            dirRing = "[";
+                            for (int di = 0; di < 64; di++) {
+                                if (di > 0) dirRing += ",";
+                                char tmp[24];
+                                snprintf(tmp, sizeof(tmp), "%llu",
+                                         *(uint64_t*)(snap.cchr + 0x360 + di * 8));
+                                dirRing += tmp;
+                            }
+                            dirRing += "]";
+                        }
 
                         snprintf(charBuf, sizeof(charBuf),
                                 "{\"team\":%d,\"slot\":%d,\"mid\":%d,"
@@ -420,6 +432,7 @@ static void Rollback_DumpNetplayLive(int32_t frame) {
     if (!g_netplayLivePath[0]) return;
 
     std::string json = Rollback_GenerateNetplayLiveJSON(frame, false);
+    if (json.empty()) return;
 
     if (frame < 12) {
         Rollback_WriteNetplayLiveJSON(json);
@@ -2022,7 +2035,8 @@ void Rollback_ReSimulate(int32_t startFrame, int32_t endFrame)
         if (Netplay_IsActive()) {
             Rollback_DiscardPendingNetplayLive(f);
             std::string json = Rollback_GenerateNetplayLiveJSON(f, true);
-            Rollback_WriteNetplayLiveJSON(json);
+            if (!json.empty())
+                Rollback_WriteNetplayLiveJSON(json);
         } else {
             Rollback_DumpNDJSON(f, 1);
         }

@@ -9,7 +9,7 @@ Designed for the UMVC3Hook nplive/rdiag NDJSON schema:
     {"v":1,"ts":..., "frame":N, "side":"host"|"client"|"ground_truth"|"resim",
      "inputs":{"local":..,"usedRemote":..,"recvRemote":..},
      "chars":[{"team":0,"slot":0,"pos":[x,y,z],"act":"0x..","fl":"0x..",
-               "mHeld":"0x..","fcnt":N,"rng":["0x..","0x..","0x..","0x.."]}, ...]}
+               "mHeld":"0x..","fcnt":N,"dirRing":["0x..",...],"rng":["0x..","0x..","0x..","0x.."]}, ...]}
 
 What it does:
   1. Parses both files, picks one "primary" entry per frame per file (skipping
@@ -17,12 +17,13 @@ What it does:
   2. Walks frames in increasing order, comparing matching (team,slot) characters.
   3. Reports the FIRST frame where anything differs beyond tolerance, classifies
      *what kind* of divergence it is (RNG-only / position / action / flags /
-     mHeld / fcnt), and prints N frames of context before and after it so you 
-     can see the input stream and how the split propagates.
+     mHeld / fcnt / dirRing), and prints N frames of context before and after it
+     so you can see the input stream and how the split propagates.
   4. Also separately flags the first frame where RNG diverges even if nothing
      else has yet — this is usually the earlier, "root cause" frame, since RNG
      misconsumption often doesn't show up in position/action until later frames
-     consume the now-different stream.
+     consume the now-different stream. Similarly flags dirRing-only divergences
+     which indicate lost/delayed directional input delivery.
   5. Prints a summary table of every frame that still differs after the first
      divergence, so you can see whether it's a one-frame blip (self-corrects)
      or compounds forever (real desync).
@@ -93,6 +94,21 @@ def rng_eq(a, b):
     return all(hex_eq(x, y) for x, y in zip(a, b))
 
 
+def _normalize_dirRing(dr):
+    if dr == "all zeros":
+        return ["0"] * 64
+    return dr
+
+def dirRing_eq(a, b):
+    a = _normalize_dirRing(a)
+    b = _normalize_dirRing(b)
+    if a is None or b is None:
+        return a == b
+    if len(a) != len(b):
+        return False
+    return all(hex_eq(x, y) for x, y in zip(a, b))
+
+
 def pos_diff(a, b):
     if a is None or b is None:
         return None
@@ -150,19 +166,25 @@ def diff_char(ca, cb, pos_eps):
         diffs["mid"] = f"A={ca.get('mid')} B={cb.get('mid')}"
     if not rng_eq(ca.get("rng"), cb.get("rng")):
         diffs["rng"] = f"A={ca.get('rng')} B={cb.get('rng')}"
+    if not dirRing_eq(ca.get("dirRing"), cb.get("dirRing")):
+        diffs["dirRing"] = f"A={ca.get('dirRing')} B={cb.get('dirRing')}"
     return diffs
 
 
-def fmt_entry_chars(entry):
+def fmt_entry_chars(entry, include_dirRing=False):
     if entry is None:
         return "  (missing)"
     lines = []
     for c in entry.get("chars", []):
-        lines.append(
+        parts = (
             f"    team={c.get('team')} slot={c.get('slot')} mid={c.get('mid', '?')} plr={c.get('plr')} ast={c.get('ast')} "
             f"pos={c.get('pos')} act={c.get('act')} fl={c.get('fl')} mHeld={c.get('mHeld')} "
             f"fcnt={c.get('fcnt')} rng={c.get('rng')}"
         )
+        if include_dirRing and c.get("dirRing") is not None:
+            dr = c["dirRing"]
+            parts += f" dirRing[0..3]={dr[:4]}"
+        lines.append(parts)
     return "\n".join(lines) if lines else "  (no chars)"
 
 
@@ -212,23 +234,30 @@ def classify(diffs):
     if "ast" in keys:
         return ("ast (action sub-timer/assist state) differs — a frame-precision timing "
                 "or assist-related state has drifted between the two simulations.")
+    if "dirRing" in keys:
+        return ("dirRing (direction input ring buffer) differs — the two sides disagree "
+                "about the history of directional inputs received. This can cause motion "
+                "input detection mismatches (e.g., one side sees a quarter-circle motion "
+                "while the other does not), leading to different special moves or actions. "
+                "Check remote input delivery and buffer timing.")
     return "Mixed divergence — see individual fields above."
 
 
 def latest_nplive_paths():
-    """Return (host_path, client_path) for the latest nplive_* pair in cwd."""
+    """Return (host_path, client_path) for the latest nplive_* pair in cwd.
+    Host and client directories are found independently — they may have different timestamps."""
     import glob, os, re
-    dirs = glob.glob("nplive_*_host")
-    if not dirs:
+    ts_pat = re.compile(r"nplive_(\d{8}_\d{6})_(host|client)$")
+    host_dirs = [(m, os.path.join(d, "frames.ndjson"))
+                 for d in glob.glob("nplive_*_host")
+                 if (m := ts_pat.match(d))]
+    client_dirs = [(m, os.path.join(d, "frames.ndjson"))
+                   for d in glob.glob("nplive_*_client")
+                   if (m := ts_pat.match(d))]
+    if not host_dirs or not client_dirs:
         return None, None
-    ts_pat = re.compile(r"nplive_(\d{8}_\d{6})_host")
-    latest = max((ts_pat.match(d) for d in dirs if ts_pat.match(d)),
-                 key=lambda m: m.group(1), default=None)
-    if latest is None:
-        return None, None
-    ts = latest.group(1)
-    host = os.path.join(f"nplive_{ts}_host", "frames.ndjson")
-    client = os.path.join(f"nplive_{ts}_client", "frames.ndjson")
+    host = max(host_dirs, key=lambda p: p[0].group(1))[1]
+    client = max(client_dirs, key=lambda p: p[0].group(1))[1]
     return host, client
 
 
@@ -277,6 +306,7 @@ def main():
     frame_diffs = OrderedDict()
     first_any_divergence = None
     first_rng_only_divergence = None
+    first_dirRing_only_divergence = None
     first_ca = first_cb = None
 
     for frame in common:
@@ -319,6 +349,9 @@ def main():
             if first_rng_only_divergence is None:
                 if all(set(d.keys()) == {"rng"} for d in this_frame_diffs.values()):
                     first_rng_only_divergence = frame
+            if first_dirRing_only_divergence is None:
+                if all(set(d.keys()) == {"dirRing"} for d in this_frame_diffs.values()):
+                    first_dirRing_only_divergence = frame
 
     if not frame_diffs:
         print("\nNo divergence found — A and B agree on every common frame (within tolerance).")
@@ -394,6 +427,14 @@ def main():
         print(f"      (before the frame {first_any_divergence} that has visible pos/act/flag")
         print(f"      differences). This is almost certainly the true root-cause frame —")
         print(f"      start your investigation there, not at frame {first_any_divergence}.")
+        print(f"{'='*70}")
+    if first_dirRing_only_divergence is not None and first_dirRing_only_divergence != first_any_divergence:
+        print(f"\n{'='*70}")
+        print(f"NOTE: a dirRing-only divergence was found EARLIER, at frame {first_dirRing_only_divergence}")
+        print(f"      (before the frame {first_any_divergence} that has visible pos/act/flag")
+        print(f"      differences). The direction input ring buffer diverged first —")
+        print(f"      this likely means a remote directional input was lost, delayed, or")
+        print(f"      misdelivered, causing the motion input histories to differ.")
         print(f"{'='*70}")
 
     # Summary of subsequent diverging frames
