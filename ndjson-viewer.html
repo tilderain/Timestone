@@ -63,6 +63,9 @@ tr.mismatch-bg td { background: rgba(255, 82, 82, 0.15); }
 .status-bar { padding: 4px 16px; background: #0d1117; border-top: 1px solid #0f3460; font-size: 12px; color: #666; display: flex; gap: 20px; }
 .status-bar .diverged { color: #ff5252; }
 .compare-tag { font-size: 10px; padding: 1px 6px; border-radius: 3px; background: #1a5276; color: #cdeeff; margin-left: 6px; }
+.resim-badge { font-size: 9px; padding: 1px 5px; border-radius: 3px; background: #ff8c00; color: #000; font-weight: 700; margin-left: 4px; vertical-align: middle; }
+.resim-badge.host { background: #0088ff; color: #fff; }
+.resim-badge.client { background: #ff3030; color: #fff; }
 </style>
 </head>
 <body>
@@ -423,6 +426,10 @@ function buildSingleFileFrameEntries(list) {
   return result;
 }
 
+function isResimSide(s) {
+  return s && (s === 'resim' || s === 'host_resim' || s === 'client_resim');
+}
+
 function buildCompareFrameMap() {
   const aMap = buildSingleFileFrameEntries(fileAEntries);
   const bMap = buildSingleFileFrameEntries(fileBEntries);
@@ -433,8 +440,10 @@ function buildCompareFrameMap() {
   Object.keys(bMap).forEach(f => frameSet.add(Number(f)));
 
   for (const f of frameSet) {
-    const a = aMap[f] ? Object.assign({}, aMap[f], { side: 'host' }) : null;
-    const b = bMap[f] ? Object.assign({}, bMap[f], { side: 'client' }) : null;
+    const origA = aMap[f];
+    const origB = bMap[f];
+    const a = origA ? Object.assign({}, origA, { side: 'host', originalSide: origA.side }) : null;
+    const b = origB ? Object.assign({}, origB, { side: 'client', originalSide: origB.side }) : null;
     frameMap[f] = { live: a, resim: b, refSide: 'host' };
   }
 
@@ -850,7 +859,15 @@ function drawCanvas(g, frameNum) {
   ctx.fillStyle = COLORS.text;
   ctx.font = '11px sans-serif';
   ctx.textAlign = 'center';
-  ctx.fillText(`Frame ${frameNum}`, w/2, 20);
+  let frameLabel = `Frame ${frameNum}`;
+  if (compareMode) {
+    const hostResim = g.live && g.live.originalSide && isResimSide(g.live.originalSide);
+    const clientResim = g.resim && g.resim.originalSide && isResimSide(g.resim.originalSide);
+    if (hostResim && clientResim) frameLabel += ' (Both Resim)';
+    else if (hostResim) frameLabel += ' (Host Resim)';
+    else if (clientResim) frameLabel += ' (Client Resim)';
+  }
+  ctx.fillText(frameLabel, w/2, 20);
   ctx.textAlign = 'left';
   ctx.fillText(`1 unit = ${(1/scale).toFixed(1)} px`, 10, 20);
 }
@@ -874,7 +891,12 @@ function drawSidebar(g, frameNum) {
   };
   let html = '<section>';
   html += `<h3>Frame ${frameNum}</h3>`;
-  html += `<table><tr><th>${srcLabel(liveSide)}:</th><td>${g.live ? '✓' : '✗'}</td><th>${srcLabel(resimSide)}:</th><td>${g.resim ? '✓' : '✗'}</td></tr></table>`;
+  html += `<table><tr>`;
+  const hostBadge = compareMode && g.live && g.live.originalSide && isResimSide(g.live.originalSide) ? ` <span class="resim-badge host">Resim</span>` : '';
+  const clientBadge = compareMode && g.resim && g.resim.originalSide && isResimSide(g.resim.originalSide) ? ` <span class="resim-badge client">Resim</span>` : '';
+  html += `<th>${srcLabel(liveSide)}${hostBadge}:</th><td>${g.live ? '✓' : '✗'}</td>`;
+  html += `<th>${srcLabel(resimSide)}${clientBadge}:</th><td>${g.resim ? '✓' : '✗'}</td>`;
+  html += `</tr></table>`;
 
   if (g.live && g.live.inputs) {
     const inp = g.live.inputs;
