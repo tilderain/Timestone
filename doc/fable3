@@ -1,0 +1,129 @@
+# fable3 — The Real Desync: cChrCmd Line Buffers (Heap-Escaped Command State)
+
+This supersedes `doc/fable2`. The position-fed accumulator story in `fable2` was
+correct in analysis but was **already fixed** (mDeltaTime=1.0 clamp, startup
+input alignment) by the time we captured `nplive_20260709_031730`. The remaining
+desync at frame 514 has a different root cause.
+
+## TL;DR
+
+Two **cChrCmd command-interpreter objects** are embedded in `uCharacter` at
+`+0x2738` and `+0x2950`. Each has a **heap-allocated line buffer** (ptr at
+`cmd+0x178`, count at `cmd+0x170`, `0x20` B/entry) that stores per-command
+**matching progress** — current step index, elapsed window timer, match
+bookkeeping flags. This buffer is **outside the flat character snapshot** and
+**outside the cChrInput 0x5A0 window**. When rollback restores and resimulates,
+the command matcher sees stale step/timer state → double-tap dashes, back-dash
+jumps, charge moves evaluate differently → divergent actions at identical inputs.
+
+## The frame-514 divergence (031730 capture)
+
+- **Frame 513: everything logged matches** — cChrInput rings, accumulators,
+  masks, flags, position, action — all byte-identical host vs client.
+- **Frame 514 (host resim window start):** both machines log identical
+  `mHeld=0x01`, `mPressed=0x01`. But client live produces `act=0x03` (jump/dash
+  back) while host resim produces `act=0x01` (walk). Client's y rises +3/frame,
+  x moves −9.5/frame — a back-dash jump arc.
+- **The client never resimmed** in this session (zero resim ranges). All 25
+  resim windows are on the host only. The host's resim re-evaluated the
+  frame-514 tick from a restored snapshot and got a different action than what
+  the client live-executed.
+
+## Evidence from Ghidra
+
+`cChrCmd__allocAndResetLineBuffer` (0x1400280C0):
+```
+cmd+0x168 = command-list resource pointer
+cmd+0x170 = number of lines (count)
+cmd+0x178 = heap-allocated array of n × 0x20 B entries
+```
+
+Each 0x20-byte `cPlayDataAccumulate` entry:
+```
++0x00: vtable/type
++0x08: current step index into the command sequence
++0x10: match bookkeeping
++0x18: more bookkeeping
++0x1C: elapsed-time accumulator (−1.0 = inactive, otherwise counting up)
+```
+
+`cChrCmd__Line_vfn5` (0x140028240) — per-frame command matcher, giant opcode
+switch (100+ cases for direction taps, holds, releases, buttons). Walks the
+command's element sequence, advances the step index on partial match, and at
+the tail of a completed match:
+
+```c
+fVar1 = *(float*)(line + 0x1c);
+if (-0.0001 < fVar1)
+    *(float*)(line + 0x1c) = deltaTime + fVar1;   // command input window timer
+```
+
+So a double-tap dash mid-sequence: after tap #1, the line holds `step=1`,
+`timer` counting frames. Tap #2 completes it only if `timer < dash_window`.
+When the snapshot restores and resim runs, the heap array keeps the timer value
+from after the rollback — not from the snapshot point. Command matches either
+fire spuriously or miss entirely.
+
+## Two cChrCmd instances
+
+Located by decoding callers of `cChrCmd__setOwner` (0x140027FA0):
+
+```
+140054cd8: LEA RCX,[R14+0x2738]   ; call cChrCmd__setOwner  → embedded at +0x2738
+140054ce7: LEA RCX,[R14+0x2950]   ; call cChrCmd__setOwner  → embedded at +0x2950
+```
+
+These are within the flat `finalSize` character save, so the cChrCmd struct
+itself (including pointer at +0x178) IS snapshotted. Only the **heap array**
+that +0x178 points to is missed.
+
+## Fix applied
+
+In `BuildRegions` (rollback.cpp:891), after the cChrInput 0x5A0 add:
+
+```cpp
+for (uint64_t cmdOff : {0x2738ull, 0x2950ull}) {
+    uint64_t cmd   = character + cmdOff;
+    uint64_t lines = *(uint64_t*)(cmd + 0x178);
+    int      n     = *(int*)(cmd + 0x170);
+    if (lines && n > 0 && n < 0x1000)
+        add((void*)(lines - 8), (size_t)n * 0x20 + 8);
+}
+```
+
+The `-8` covers the 4-B count header at `lines[-2]` (= `*(int*)(lines - 8)`),
+which `allocAndResetLineBuffer` initializes. The full allocation is
+`n * 0x20 + 8` bytes.
+
+## Other heap-allocated buffers to check
+
+This pattern — an embedded pointer to a separately heap-allocated array — is
+dangerous for rollback and likely appears elsewhere:
+
+| Object | Offset | Description | Status |
+|--------|--------|-------------|--------|
+| cChrCmd (×2) | +0x178 | Per-command line buffer (n × 0x20) | **FIXED** |
+| cChrCmdSpatk | ? | Special-attack command object, may have its own buffer | **UNCHECKED** |
+| cChrCmdBtnChrg | ? | Charge-input timer state | **UNCHECKED** (likely inline) |
+| cChrCmdCombo | ? | Combo-sequence tracking buffer | **UNCHECKED** |
+| sReplay | +0x?? | Full replay input buffer (internal pointers, skip) | SKIPPED (stale ptrs) |
+| uShot | +0x08 | Circular-list node linkage (not heap-array, captured by walk) | CAPTURED |
+| cGameEffect | pool | Per-effect state nodes (pool allocator, skip) | SKIPPED |
+
+The cChrCmd subclasses (Spatk, BtnChrg, Combo) inherit from cChrCmd and may
+have their own heap arrays beyond the base `+0x178` line buffer. The Ghidra
+cross-refs to `cChrCmd__allocAndResetLineBuffer` and `cChrCmd__reset` should
+identify them. Only the base cChrCmd line buffer is fixed here.
+
+## Key addresses
+
+| Symbol | Address | Description |
+|--------|---------|-------------|
+| `cChrCmd__allocAndResetLineBuffer` | 0x1400280C0 | Allocates line array, stores ptr at +0x178 |
+| `cChrCmd__Line_vfn5` | 0x140028240 | Per-frame command matcher, mutates line entries |
+| `cChrCmd__reset` | 0x1400257F0 | Clears all lines (calls util_57D0 per line) |
+| `cChrCmd__setOwner` | 0x140027FA0 | Writes +0x160, identifies embedded instances |
+| uCharacter+0x2738 | (first cChrCmd) | Internal name: likely cChrCmd (base) |
+| uCharacter+0x2950 | (second cChrCmd) | Internal name: likely cChrCmdCombo or cChrCmdSpatk |
+| cPlayDataAccumulate | 0x14000BCA0 | 0x20-B per-line match state object |
+| `cPlayDataAccumulate__util_57D0` | 0x1400257D0 | Resets line (+0x08=0,+0x10=0,+0x1C=−1.0) |

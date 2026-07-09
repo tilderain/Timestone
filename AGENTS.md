@@ -6,7 +6,7 @@
 
 **Ghidra:** The Ghidra MCP is available, and should be used after consulting the docs on reverse engineering notes.
 
-**Subagents** Please do not use subagents.
+**Subagents** Please never under any circumstance use subagents to explore the codebase.
 
 ## Directory Structure
 

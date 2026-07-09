@@ -327,12 +327,11 @@ void Netplay_Init(ENetHost* host, ENetPeer* peer)
     {
         HookLog("Netplay: Initialized, service thread running\n");
 
-        // Send a seed (zeroed) packet to pre-load the peer's receive buffer.
-        // Without this, both sides deadlock on frame 0 — each waits for the
-        // other's data in Controller_OnFrameStart but neither reaches
-        // Controller_OnFrameEnd to send its own first packet.
-        InputPacket seed = {};
-        Netplay_SendPacket(seed);
+        // NOTE: no seed packet is sent anymore.  The startup window
+        // (frames 0..delay+rollback) is locally pre-confirmed as zero input
+        // in Controller's IsFrameConfirmed — both sides force zero input for
+        // those frames anyway, so no wire exchange is needed and a stale
+        // seed packet can no longer falsely confirm frames beyond the window.
     }
     else
     {

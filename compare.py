@@ -7,17 +7,19 @@ Usage:
 
 Designed for the UMVC3Hook nplive/rdiag NDJSON schema:
     {"v":1,"ts":..., "frame":N, "side":"host"|"client"|"ground_truth"|"resim",
-     "inputs":{"local":..,"usedRemote":..,"recvRemote":..},
-     "chars":[{"team":0,"slot":0,"pos":[x,y,z],"act":"0x..","fl":"0x..",
-               "mHeld":"0x..","fcnt":N,"dirRing":["0x..",...],"rng":["0x..","0x..","0x..","0x.."]}, ...]}
+      "chars":[{"team":0,"slot":0,"pos":[x,y,z],"act":"0x..","fl":"0x..",
+                "mHeld":"0x..","fcnt":N,
+                "mOld":"0x..","mPressed":"0x..","mReleased":"0x..","mMask":"0x..","mProcessed":"0x..",
+                "dirSlot":N,"dir0":"0x..","dir4":"0x..","h590":"0x..","h594":"0x..",
+                "dirRing":["0x..",...],"rng":["0x..","0x..","0x..","0x.."]}, ...]}
 
 What it does:
   1. Parses both files, picks one "primary" entry per frame per file (skipping
      resim/diag duplicate entries unless that's all there is).
   2. Walks frames in increasing order, comparing matching (team,slot) characters.
-  3. Reports the FIRST frame where anything differs beyond tolerance, classifies
-     *what kind* of divergence it is (RNG-only / position / action / flags /
-     mHeld / fcnt / dirRing), and prints N frames of context before and after it
+   3. Reports the FIRST frame where anything differs beyond tolerance, classifies
+      *what kind* of divergence it is (RNG-only / position / action / flags /
+      mHeld / fcnt / dirSlot / dir0 / dir4 / h590 / h594 / dirRing), and prints N frames of context before and after it
      so you can see the input stream and how the split propagates.
   4. Also separately flags the first frame where RNG diverges even if nothing
      else has yet — this is usually the earlier, "root cause" frame, since RNG
@@ -156,8 +158,22 @@ def diff_char(ca, cb, pos_eps):
         diffs["act"] = f"A={ca.get('act')} B={cb.get('act')}"
     if not hex_eq(ca.get("fl"), cb.get("fl")):
         diffs["fl"] = f"A={ca.get('fl')} B={cb.get('fl')}"
+    if not hex_eq(ca.get("fl4"), cb.get("fl4")):
+        diffs["fl4"] = f"A={ca.get('fl4')} B={cb.get('fl4')}"
+    if not hex_eq(ca.get("fl8"), cb.get("fl8")):
+        diffs["fl8"] = f"A={ca.get('fl8')} B={cb.get('fl8')}"
     if not hex_eq(ca.get("mHeld"), cb.get("mHeld")):
         diffs["mHeld"] = f"A={ca.get('mHeld')} B={cb.get('mHeld')}"
+    if not hex_eq(ca.get("mOld"), cb.get("mOld")):
+        diffs["mOld"] = f"A={ca.get('mOld')} B={cb.get('mOld')}"
+    if not hex_eq(ca.get("mPressed"), cb.get("mPressed")):
+        diffs["mPressed"] = f"A={ca.get('mPressed')} B={cb.get('mPressed')}"
+    if not hex_eq(ca.get("mReleased"), cb.get("mReleased")):
+        diffs["mReleased"] = f"A={ca.get('mReleased')} B={cb.get('mReleased')}"
+    if not hex_eq(ca.get("mMask"), cb.get("mMask")):
+        diffs["mMask"] = f"A={ca.get('mMask')} B={cb.get('mMask')}"
+    if not hex_eq(ca.get("mProcessed"), cb.get("mProcessed")):
+        diffs["mProcessed"] = f"A={ca.get('mProcessed')} B={cb.get('mProcessed')}"
     if ca.get("fcnt") != cb.get("fcnt"):
         diffs["fcnt"] = f"A={ca.get('fcnt')} B={cb.get('fcnt')}"
     if ca.get("ast") != cb.get("ast"):
@@ -168,22 +184,54 @@ def diff_char(ca, cb, pos_eps):
         diffs["rng"] = f"A={ca.get('rng')} B={cb.get('rng')}"
     if not dirRing_eq(ca.get("dirRing"), cb.get("dirRing")):
         diffs["dirRing"] = f"A={ca.get('dirRing')} B={cb.get('dirRing')}"
+    if ca.get("dirSlot") != cb.get("dirSlot"):
+        diffs["dirSlot"] = f"A={ca.get('dirSlot')} B={cb.get('dirSlot')}"
+    if not hex_eq(ca.get("dir0"), cb.get("dir0")):
+        diffs["dir0"] = f"A={ca.get('dir0')} B={cb.get('dir0')}"
+    if not hex_eq(ca.get("dir4"), cb.get("dir4")):
+        diffs["dir4"] = f"A={ca.get('dir4')} B={cb.get('dir4')}"
+    if not hex_eq(ca.get("h590"), cb.get("h590")):
+        diffs["h590"] = f"A={ca.get('h590')} B={cb.get('h590')}"
+    if not hex_eq(ca.get("h594"), cb.get("h594")):
+        diffs["h594"] = f"A={ca.get('h594')} B={cb.get('h594')}"
+    if ca.get("acc260") != cb.get("acc260"):
+        diffs["acc260"] = f"A={ca.get('acc260')} B={cb.get('acc260')}"
+    if ca.get("tap2e0") != cb.get("tap2e0"):
+        diffs["tap2e0"] = f"A={ca.get('tap2e0')} B={cb.get('tap2e0')}"
+    if ca.get("acc130") != cb.get("acc130"):
+        diffs["acc130"] = f"A={ca.get('acc130')} B={cb.get('acc130')}"
+    if not hex_eq(ca.get("m12c"), cb.get("m12c")):
+        diffs["m12c"] = f"A={ca.get('m12c')} B={cb.get('m12c')}"
+    if not hex_eq(ca.get("m230"), cb.get("m230")):
+        diffs["m230"] = f"A={ca.get('m230')} B={cb.get('m230')}"
+    if not hex_eq(ca.get("m238"), cb.get("m238")):
+        diffs["m238"] = f"A={ca.get('m238')} B={cb.get('m238')}"
+    if not hex_eq(ca.get("m250"), cb.get("m250")):
+        diffs["m250"] = f"A={ca.get('m250')} B={cb.get('m250')}"
     return diffs
 
 
-def fmt_entry_chars(entry, include_dirRing=False):
+def fmt_entry_chars(entry, include_dir=False):
     if entry is None:
         return "  (missing)"
     lines = []
     for c in entry.get("chars", []):
         parts = (
             f"    team={c.get('team')} slot={c.get('slot')} mid={c.get('mid', '?')} plr={c.get('plr')} ast={c.get('ast')} "
-            f"pos={c.get('pos')} act={c.get('act')} fl={c.get('fl')} mHeld={c.get('mHeld')} "
+            f"pos={c.get('pos')} act={c.get('act')} fl={c.get('fl')} fl4={c.get('fl4')} fl8={c.get('fl8')} mHeld={c.get('mHeld')} "
+            f"mOld={c.get('mOld')} mPressed={c.get('mPressed')} mReleased={c.get('mReleased')} "
+            f"mMask={c.get('mMask')} mProcessed={c.get('mProcessed')} "
             f"fcnt={c.get('fcnt')} rng={c.get('rng')}"
         )
-        if include_dirRing and c.get("dirRing") is not None:
-            dr = c["dirRing"]
-            parts += f" dirRing[0..3]={dr[:4]}"
+        if include_dir:
+            ds = c.get("dirSlot")
+            d0 = c.get("dir0")
+            d4 = c.get("dir4")
+            if ds is not None:
+                parts += f" dirSlot={ds} dir0={d0} dir4={d4}"
+            dr = c.get("dirRing")
+            if dr is not None:
+                parts += f" dirRing[0..3]={dr[:4]}"
         lines.append(parts)
     return "\n".join(lines) if lines else "  (no chars)"
 
@@ -207,15 +255,23 @@ def classify(diffs):
                 "a physics/velocity integration difference (e.g. an unrestored physics "
                 "sub-state, or input applied on a different frame than expected) rather than "
                 "a logic/RNG branch difference.")
+    if "fl8" in keys:
+        return ("fl8 (uCharacter+0x14F8) differs — this word holds the face-left flag "
+                "(bit 0x200000) read by cChrInput__swapLRIfFaceLeft to remap left/right "
+                "input bits. If it diverges, identical mHeld produces OPPOSITE horizontal "
+                "movement and different dash/walk decisions on each side. Check whether "
+                "the snapshot restore covers +0x14F8 and what recomputes it post-restore.")
     if "act" in keys or "fl" in keys:
         return ("Action/flag divergence — the two simulations took a different state-machine "
-                "branch this frame. Check the input fields (local/usedRemote/recvRemote) for "
-                "this and the prior 1-2 frames: a differing/late input is the most common "
-                "cause of an act/fl split.")
-    if "mHeld" in keys:
-        return ("mHeld (translated input) differs — the two sides disagree about what input "
-                "was actually applied this frame, independent of any RNG/physics issue. "
-                "Check delay-buffer / remote-input resolution timing.")
+                "branch this frame.")
+    input_raw_keys = {"mHeld", "mOld", "mPressed", "mReleased", "mMask", "mProcessed"}
+    if keys & input_raw_keys:
+        return ("Raw input fields differ (mHeld/mOld/mPressed/mReleased/mMask/mProcessed) — "
+                "the two sides disagree about what input was received or processed this frame. "
+                "mOld=previous frame input, mPressed=rising edge, mReleased=falling edge, "
+                "mMask=post-SOCD mask, mProcessed=final processed input. "
+                "Check delay-buffer / remote-input resolution timing, SOCD cleaning, "
+                "and input delivery order.")
     if "fcnt" in keys:
         return ("Frame counter differs — one side's character is running on a different "
                 "internal tick count than the other, which usually means a desync in how "
@@ -240,6 +296,21 @@ def classify(diffs):
                 "input detection mismatches (e.g., one side sees a quarter-circle motion "
                 "while the other does not), leading to different special moves or actions. "
                 "Check remote input delivery and buffer timing.")
+    dir_keys = {"dirSlot", "dir0", "dir4", "h590", "h594"}
+    if keys & dir_keys:
+        return ("Direction-related raw state differs — dirSlot/dir0/dir4/h590/h594 "
+                "capture the direction input state. A divergence here "
+                "means the input processing code saw a different direction value or "
+                "slot this frame. Check remote input delivery timing, SOCD cleaning, "
+                "and direction-ring buffer alignment.")
+    dash_keys = {"acc260", "tap2e0", "acc130", "m12c", "m230", "m238", "m250"}
+    if keys & dash_keys:
+        return ("Dash/double-tap detection state differs — acc260/tap2e0/acc130 are "
+                "per-bit elapsed-frame timers and tap counters; m12c/m230/m238/m250 are "
+                "mask words for dash detection. A divergence here means the input "
+                "processing code saw different tap timing or direction inputs, which can "
+                "cause different dash/super-dash/wave-dash behavior. Check remote input "
+                "delivery timing and direction-ring alignment.")
     return "Mixed divergence — see individual fields above."
 
 
@@ -350,7 +421,8 @@ def main():
                 if all(set(d.keys()) == {"rng"} for d in this_frame_diffs.values()):
                     first_rng_only_divergence = frame
             if first_dirRing_only_divergence is None:
-                if all(set(d.keys()) == {"dirRing"} for d in this_frame_diffs.values()):
+                dir_field_set = {"dirRing", "dirSlot", "dir0", "dir4", "h590", "h594"}
+                if all(set(d.keys()) <= dir_field_set for d in this_frame_diffs.values()):
                     first_dirRing_only_divergence = frame
 
     if not frame_diffs:
@@ -430,11 +502,11 @@ def main():
         print(f"{'='*70}")
     if first_dirRing_only_divergence is not None and first_dirRing_only_divergence != first_any_divergence:
         print(f"\n{'='*70}")
-        print(f"NOTE: a dirRing-only divergence was found EARLIER, at frame {first_dirRing_only_divergence}")
+        print(f"NOTE: a dir-only divergence was found EARLIER, at frame {first_dirRing_only_divergence}")
         print(f"      (before the frame {first_any_divergence} that has visible pos/act/flag")
-        print(f"      differences). The direction input ring buffer diverged first —")
-        print(f"      this likely means a remote directional input was lost, delayed, or")
-        print(f"      misdelivered, causing the motion input histories to differ.")
+        print(f"      differences). The direction input state (dirRing/dirSlot/dir0/dir4/h590/h594)")
+        print(f"      diverged first — this likely means a remote directional input was lost,")
+        print(f"      delayed, or misdelivered, causing the motion input histories to differ.")
         print(f"{'='*70}")
 
     # Summary of subsequent diverging frames

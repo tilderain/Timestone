@@ -97,13 +97,7 @@ def main():
                 show = True
 
             if show:
-                al = ia.get("local", "-")
-                au = ia.get("usedRemote", "-")
-                ar = ia.get("recvRemote", "-")
-                bl = ib.get("local", "-")
-                bu = ib.get("usedRemote", "-")
-                br = ib.get("recvRemote", "-")
-                print(f"{frame:>6} | {team:>4} {mid:>4} | {va:>12} {vb:>12} | {al:>12} {au:>12} {ar:>12} {bl:>12} {bu:>12} {br:>12} | {match:>5} | {notes}")
+                print(f"{frame:>6} | {team:>4} {mid:>4} | {va:>12} {vb:>12} | {match:>5} | {notes}")
 
 if __name__ == "__main__":
     main()

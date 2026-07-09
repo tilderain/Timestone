@@ -141,6 +141,17 @@ let fileBEntries = [];  // comparison file -> treated as "client"
 let fileAName = '';
 let fileBName = '';
 
+// Fields that are explicitly rendered/handled — everything else is dynamic
+const KNOWN_CHAR_FIELDS = new Set([
+  'team', 'slot', 'mid', 'plr', 'ast',
+  'pos',
+  'act', 'fl', 'mHeld', 'fcnt', 'mOld', 'mPressed', 'mReleased',
+  'mMask', 'mProcessed',
+  'rng',
+  'dirRing', 'dirSlot', 'dir0', 'dir4', 'h590', 'h594',
+  'acc260', 'tap2e0', 'acc130', 'm12c', 'm230', 'm238', 'm250',
+]);
+
 const COLORS = {
   p1Live: '#00ccaa', p1LiveFill: 'rgba(0,204,170,0.55)',
   p1Resim: '#00bfff', p1ResimFill: 'rgba(0,191,255,0.3)',
@@ -406,12 +417,7 @@ function buildFrameMap() {
 }
 
 function pickFrameEntry(list) {
-  const priority = ['ground_truth', 'host', 'client', 'live', 'host_resim', 'client_resim', 'resim'];
-  for (const p of priority) {
-    const found = list.find(e => e.side === p);
-    if (found) return found;
-  }
-  return list[0];
+  return list[list.length - 1];
 }
 
 function buildSingleFileFrameEntries(list) {
@@ -493,8 +499,7 @@ function updateStatus() {
 function charKey(c) { 
   if (!c) return '';
   const id = (c.mid !== undefined && c.mid !== null) ? c.mid : c.slot;
-  const plr = (c.plr !== undefined && c.plr !== null) ? c.plr : '';
-  return c.team + ':' + id + ':' + plr; 
+  return c.team + ':' + id; 
 }
 
 function hasDivergence(live, resim) {
@@ -512,13 +517,6 @@ function hasDivergence(live, resim) {
   return false;
 }
 
-function hasInputDivergence(live, resim) {
-  if (!live || !resim) return false;
-  const li = live.inputs, ri = resim.inputs;
-  if (!li || !ri) return false;
-  return li.local !== ri.local || li.usedRemote !== ri.usedRemote || li.recvRemote !== ri.recvRemote;
-}
-
 function isCharDiffering(c) {
   if (!c.live || !c.resim) return true;
   if (c.delta) {
@@ -528,6 +526,11 @@ function isCharDiffering(c) {
   if (c.live.act !== c.resim.act) return true;
   if (c.live.fl !== c.resim.fl) return true;
   if (c.live.mHeld !== c.resim.mHeld) return true;
+  if (c.live.mOld !== c.resim.mOld) return true;
+  if (c.live.mPressed !== c.resim.mPressed) return true;
+  if (c.live.mReleased !== c.resim.mReleased) return true;
+  if (c.live.mMask !== c.resim.mMask) return true;
+  if (c.live.mProcessed !== c.resim.mProcessed) return true;
   if (c.live.fcnt !== c.resim.fcnt) return true;
   if (c.live.dirRing && c.resim.dirRing) {
     if (c.live.dirRing.length !== c.resim.dirRing.length) return true;
@@ -538,10 +541,34 @@ function isCharDiffering(c) {
     return true;
   }
   if (c.live.rng && c.resim.rng) {
+    if (c.live.rng.length !== c.resim.rng.length) return true;
     const rngSame = c.live.rng.every((v, i) => v === c.resim.rng[i]);
     if (!rngSame) return true;
   } else if ((c.live.rng && !c.resim.rng) || (!c.live.rng && c.resim.rng)) {
     return true;
+  }
+  // Dash-state fields
+  if (c.live.acc260 !== c.resim.acc260) return true;
+  if (c.live.tap2e0 !== c.resim.tap2e0) return true;
+  if (c.live.acc130 !== c.resim.acc130) return true;
+  if (c.live.m12c !== c.resim.m12c) return true;
+  if (c.live.m230 !== c.resim.m230) return true;
+  if (c.live.m238 !== c.resim.m238) return true;
+  if (c.live.m250 !== c.resim.m250) return true;
+  // Dynamic field check: any field on live/resim not in KNOWN_CHAR_FIELDS
+  const allKeys = new Set();
+  if (c.live) Object.keys(c.live).forEach(k => allKeys.add(k));
+  if (c.resim) Object.keys(c.resim).forEach(k => allKeys.add(k));
+  for (const k of allKeys) {
+    if (KNOWN_CHAR_FIELDS.has(k)) continue;
+    const lv = c.live ? c.live[k] : undefined;
+    const rv = c.resim ? c.resim[k] : undefined;
+    if (lv === undefined && rv === undefined) continue;
+    if (typeof lv === 'object' || typeof rv === 'object') {
+      if (JSON.stringify(lv) !== JSON.stringify(rv)) return true;
+    } else {
+      if (lv !== rv) return true;
+    }
   }
   return false;
 }
@@ -640,10 +667,12 @@ function getCharPositions(g) {
   const primaryChars = primaryEntry.chars || [];
   const otherEntry = g.resim && g.live ? g.resim : null;
 
-  const otherMap = {};
+  const otherMap = {};  // key → array of chars (handles collisions when mid alone isn't unique)
   if (otherEntry) {
     for (const c of otherEntry.chars || []) {
-      otherMap[charKey(c)] = c;
+      const k = charKey(c);
+      if (!otherMap[k]) otherMap[k] = [];
+      otherMap[k].push(c);
     }
   }
 
@@ -652,7 +681,7 @@ function getCharPositions(g) {
     const mid = (sc.mid !== undefined && sc.mid !== null) ? sc.mid : sc.slot;
     if (!showAssists && mid > 0) continue;
     const key = charKey(sc);
-    const oc = otherMap[key] || null;
+    const oc = (otherMap[key] && otherMap[key].length > 0) ? otherMap[key].shift() : null;
 
     let livePos = null, resimPos = null;
     if (isLive) {
@@ -679,12 +708,10 @@ function getCharPositions(g) {
   }
 
   if (otherEntry) {
-    for (const oc of otherEntry.chars || []) {
-      const mid = (oc.mid !== undefined && oc.mid !== null) ? oc.mid : oc.slot;
-      if (!showAssists && mid > 0) continue;
-      const key = charKey(oc);
-      const alreadyMatched = result.some(r => charKey(r.live || r.resim) === key);
-      if (!alreadyMatched) {
+    for (const key in otherMap) {
+      for (const oc of otherMap[key]) {
+        const mid = (oc.mid !== undefined && oc.mid !== null) ? oc.mid : oc.slot;
+        if (!showAssists && mid > 0) continue;
         let livePos = isLive ? null : oc.pos;
         let resimPos = isLive ? oc.pos : null;
 
@@ -898,16 +925,9 @@ function drawSidebar(g, frameNum) {
   html += `<th>${srcLabel(resimSide)}${clientBadge}:</th><td>${g.resim ? '✓' : '✗'}</td>`;
   html += `</tr></table>`;
 
-  if (g.live && g.live.inputs) {
-    const inp = g.live.inputs;
-    const inpDiv = g.resim ? hasInputDivergence(g.live, g.resim) : false;
+  if (g.resim) {
     html += '<table style="margin-top:4px">';
-    html += `<tr><th>Local In</th><td style="font-family:monospace">${inp.local||'—'}</td></tr>`;
-    html += `<tr><th>Used Rem</th><td style="font-family:monospace">${inp.usedRemote||'—'}</td></tr>`;
-    html += `<tr><th>Recv Rem</th><td style="font-family:monospace">${inp.recvRemote||'—'}</td></tr>`;
-    if (g.resim) {
-      html += `<tr class="${inpDiv ? 'mismatch-bg' : ''}"><th>Match</th><td colspan="3" style="font-weight:700;${inpDiv ? 'color:#ff5252' : 'color:#4caf50'}">${inpDiv ? '✗ MISMATCH' : '✓ Match'}</td></tr>`;
-    }
+    html += `<tr><th>Match</th><td style="font-weight:700">✓</td></tr>`;
     html += '</table>';
   }
   html += '</section>';
@@ -943,7 +963,7 @@ function drawSidebar(g, frameNum) {
     }
 
 
-    // Action / Flags
+    // Action / Flags / Input State
     if (c.live && c.resim) {
       const actSame = c.live.act === c.resim.act;
       const flSame = c.live.fl === c.resim.fl;
@@ -953,6 +973,27 @@ function drawSidebar(g, frameNum) {
       html += `<tr class="${flSame ? '' : 'mismatch-bg'}"><th>Flags</th><td>${c.live.fl||'—'}</td><td>${c.resim.fl||'—'}</td><td class="${flSame?'delta-ok':'delta-bad'}">${flSame?'✓':'✗'}</td></tr>`;
       html += `<tr class="${mhSame ? '' : 'mismatch-bg'}"><th>Input</th><td>${c.live.mHeld||'—'}</td><td>${c.resim.mHeld||'—'}</td><td class="${mhSame ? '' : 'delta-bad'}">${mhSame ? '✓' : '✗'}</td></tr>`;
       html += `<tr class="${fcntSame ? '' : 'mismatch-bg'}"><th>FCnt</th><td>${c.live.fcnt??'—'}</td><td>${c.resim.fcnt??'—'}</td><td class="${fcntSame ? '' : 'delta-bad'}">${fcntSame ? '✓' : '✗'}</td></tr>`;
+      // Edge state
+      if (c.live.mOld !== undefined || c.resim.mOld !== undefined) {
+        const moSame = c.live.mOld === c.resim.mOld;
+        html += `<tr class="${moSame ? '' : 'mismatch-bg'}"><th>mOld</th><td>${c.live.mOld||'—'}</td><td>${c.resim.mOld||'—'}</td><td class="${moSame?'delta-ok':'delta-bad'}">${moSame?'✓':'✗'}</td></tr>`;
+      }
+      if (c.live.mPressed !== undefined || c.resim.mPressed !== undefined) {
+        const mpSame = c.live.mPressed === c.resim.mPressed;
+        html += `<tr class="${mpSame ? '' : 'mismatch-bg'}"><th>mPressed</th><td>${c.live.mPressed||'—'}</td><td>${c.resim.mPressed||'—'}</td><td class="${mpSame?'delta-ok':'delta-bad'}">${mpSame?'✓':'✗'}</td></tr>`;
+      }
+      if (c.live.mReleased !== undefined || c.resim.mReleased !== undefined) {
+        const mrSame = c.live.mReleased === c.resim.mReleased;
+        html += `<tr class="${mrSame ? '' : 'mismatch-bg'}"><th>mReleased</th><td>${c.live.mReleased||'—'}</td><td>${c.resim.mReleased||'—'}</td><td class="${mrSame?'delta-ok':'delta-bad'}">${mrSame?'✓':'✗'}</td></tr>`;
+      }
+      if (c.live.mMask !== undefined || c.resim.mMask !== undefined) {
+        const mmSame = c.live.mMask === c.resim.mMask;
+        html += `<tr class="${mmSame ? '' : 'mismatch-bg'}"><th>mMask</th><td>${c.live.mMask||'—'}</td><td>${c.resim.mMask||'—'}</td><td class="${mmSame?'delta-ok':'delta-bad'}">${mmSame?'✓':'✗'}</td></tr>`;
+      }
+      if (c.live.mProcessed !== undefined || c.resim.mProcessed !== undefined) {
+        const mprSame = c.live.mProcessed === c.resim.mProcessed;
+        html += `<tr class="${mprSame ? '' : 'mismatch-bg'}"><th>mProcessed</th><td>${c.live.mProcessed||'—'}</td><td>${c.resim.mProcessed||'—'}</td><td class="${mprSame?'delta-ok':'delta-bad'}">${mprSame?'✓':'✗'}</td></tr>`;
+      }
     } else if (c.live) {
       html += `<tr><th>Act</th><td>${c.live.act||'—'}</td><td>—</td><td></td></tr>`;
       html += `<tr><th>Flags</th><td>${c.live.fl||'—'}</td><td>—</td><td></td></tr>`;
@@ -963,6 +1004,49 @@ function drawSidebar(g, frameNum) {
       html += `<tr><th>Flags</th><td>—</td><td>${c.resim.fl||'—'}</td><td></td></tr>`;
       html += `<tr><th>Input</th><td>—</td><td>${c.resim.mHeld||'—'}</td><td></td></tr>`;
       html += `<tr><th>FCnt</th><td>—</td><td>${c.resim.fcnt??'—'}</td><td></td></tr>`;
+    }
+
+    // Dash-state fields (acc260, tap2e0, acc130, m12c, m230, m238, m250)
+    if (c.live && c.resim) {
+      const dashFields = ['acc260','tap2e0','acc130','m12c','m230','m238','m250'];
+      for (const df of dashFields) {
+        if (c.live[df] !== undefined || c.resim[df] !== undefined) {
+          const lv = c.live[df], rv = c.resim[df];
+          const lvS = lv !== undefined ? (typeof lv === 'object' ? JSON.stringify(lv) : lv) : '—';
+          const rvS = rv !== undefined ? (typeof rv === 'object' ? JSON.stringify(rv) : rv) : '—';
+          const same = lv === rv || (typeof lv === 'object' && typeof rv === 'object' && JSON.stringify(lv) === JSON.stringify(rv));
+          const show = !same || !onlyShowDiffering;
+          if (show) {
+            html += `<tr class="${same ? '' : 'mismatch-bg'}"><th>${df}</th><td style="font-family:monospace;font-size:11px">${lvS}</td><td style="font-family:monospace;font-size:11px">${rvS}</td><td class="${same?'delta-ok':'delta-bad'}">${same?'✓':'✗'}</td></tr>`;
+          }
+        }
+      }
+    }
+
+    // Dynamic scalar fields: auto-detect any field not in KNOWN_CHAR_FIELDS
+    const dynamicFields = [];
+    const allKeys = new Set();
+    if (c.live) Object.keys(c.live).forEach(k => allKeys.add(k));
+    if (c.resim) Object.keys(c.resim).forEach(k => allKeys.add(k));
+    for (const k of allKeys) {
+      if (KNOWN_CHAR_FIELDS.has(k)) continue;
+      const lv = c.live ? c.live[k] : undefined;
+      const rv = c.resim ? c.resim[k] : undefined;
+      if (lv === undefined && rv === undefined) continue;
+      const isObj = typeof lv === 'object' || typeof rv === 'object';
+      const same = lv === rv || (isObj && JSON.stringify(lv) === JSON.stringify(rv));
+      dynamicFields.push({ key: k, live: lv, resim: rv, same, isObj });
+    }
+    if (dynamicFields.length > 0) {
+      const showAll = !onlyShowDiffering && c.live && c.resim;
+      const anyDiff = dynamicFields.some(f => !f.same);
+      if (showAll || anyDiff || (!c.live && !c.resim)) {
+        for (const f of dynamicFields) {
+          const lvS = f.live !== undefined ? (f.isObj ? JSON.stringify(f.live) : String(f.live)) : '—';
+          const rvS = f.resim !== undefined ? (f.isObj ? JSON.stringify(f.resim) : String(f.resim)) : '—';
+          html += `<tr class="${f.same ? '' : 'mismatch-bg'}"><th>${f.key}</th><td style="font-family:monospace;font-size:11px">${lvS}</td><td style="font-family:monospace;font-size:11px">${rvS}</td><td class="${f.same?'delta-ok':'delta-bad'}">${f.same?'✓':'✗'}</td></tr>`;
+        }
+      }
     }
 
     // RNG

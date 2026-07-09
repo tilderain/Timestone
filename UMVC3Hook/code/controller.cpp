@@ -185,9 +185,20 @@ static uint32_t  g_rawLocalInput[2][RING_SIZE];
 // Used during offline resim to replay correct game-native values.
 static uint32_t  g_recordedGameInput[2][RING_SIZE];
 
+// Delay/rollback settings — defined here (above IsFrameConfirmed) because the
+// startup-window confirmation check reads them.
+static int32_t   g_delayFrames     = 2;
+static int32_t   g_rollbackFrames  = 8;
+
 static bool IsFrameConfirmed(int32_t frame)
 {
     if (frame < 0) return false;
+    // Startup window: frames 0..(delay+rollback) are forced to zero input on
+    // BOTH sides by the guards in hkprocessFrameInput / Controller_OnFrameEnd,
+    // so the remote input for these frames is zero by construction.  Treat
+    // them as confirmed locally — no seed packet needed, and no risk of a
+    // stale seed packet falsely confirming frames beyond this window.
+    if (frame <= g_delayFrames + g_rollbackFrames) return true;
     return g_confirmedFrame[frame % RING_SIZE] == frame;
 }
 
@@ -218,8 +229,7 @@ static uint32_t  g_recordedLocalInput[RING_SIZE];
 // g_psReplay pointer   = *(uint64_t*)_addr(0x140d4d9d8)  (Ghidra confirmation)
 // Frame counter uint32 = *(sReplay + 0x54)                (INC dword [RCX+0x54] at 0x1401cefdd)
 static int32_t   g_netFrameCount   = -1;
-static int32_t   g_delayFrames     = 2;
-static int32_t   g_rollbackFrames  = 8;
+// g_delayFrames / g_rollbackFrames are defined above IsFrameConfirmed.
 static uint32_t  g_localPending    = 0;   // accumulator, ORed across team chars
 
 // Tracks the latest frame for which remote input has been received.

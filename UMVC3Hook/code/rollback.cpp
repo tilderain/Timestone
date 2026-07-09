@@ -283,16 +283,21 @@ std::string Rollback_GenerateNetplayLiveJSON(int32_t frame, bool isResim) {
     }
     const char* side = sideStr.c_str();
 
-    uint32_t recvInput = Controller_GetReceivedRemoteInput(frame);
-    uint32_t usedInput = Controller_GetUsedRemoteInput(frame);
-    uint32_t localInput = Controller_GetRecordedLocalInput(frame);
+    // sMain+0x80 = mDeltaTime: wall-clock QPC-derived frame delta consumed by
+    // the dash double-tap accumulators in cChrInput_inputMaskPostProcess
+    // (acc += this value each frame).  Logged at full precision to detect
+    // cross-machine timing jitter baked into dash detection state.
+    float mainDt = 0.0f;
+    {
+        uint64_t sMain = *(uint64_t*)_addr(PTR_SMAIN);
+        if (sMain) mainDt = *(float*)(sMain + 0x80);
+    }
 
     char header[512];
     snprintf(header, sizeof(header),
-             "{\"v\":1,\"ts\":\"%s\",\"frame\":%d,\"side\":\"%s\","
-             "\"inputs\":{\"local\":\"0x%08X\",\"usedRemote\":\"0x%08X\",\"recvRemote\":\"0x%08X\"},"
+             "{\"v\":1,\"ts\":\"%s\",\"frame\":%d,\"side\":\"%s\",\"dt\":%.9g,"
              "\"chars\":[",
-             tsBuf, frame, side, localInput, usedInput, recvInput);
+             tsBuf, frame, side, mainDt);
 
     std::string out = header;
 
@@ -316,6 +321,56 @@ std::string Rollback_GenerateNetplayLiveJSON(int32_t frame, bool isResim) {
                     int32_t memberId = *(int32_t*)(chr + 0x2DB0);
                     int32_t plrId = *(int32_t*)(chr + 0x2DA0);
                     int32_t assistType = *(int32_t*)(chr + 0x2DBC);
+
+                    // Dash/double-tap detection state (cChrInput_inputMaskPostProcess
+                    // @0x14002E5A0): per-bit elapsed-frame timers and tap counters.
+                    //   +0x260: float[32] frame timer since last tap (+= sMain+0x80/frame)
+                    //   +0x2e0: int[32]   consecutive tap count (>=3 sets mask +0x238)
+                    //   +0x130: float[32] frame timer (2.0/3.0 threshold windows)
+                    // Mask words: +0x12c, +0x230, +0x238, +0x250.
+                    // Only nonzero entries are emitted as "i:value" pairs.
+                    std::string dashState;
+                    {
+                        char tmp[128];
+                        dashState = "\"acc260\":{";
+                        bool first = true;
+                        for (int bi = 0; bi < 32; bi++) {
+                            float v = *(float*)(snap.cchr + 0x260 + bi * 4);
+                            if (v != 0.0f) {
+                                if (!first) dashState += ",";
+                                snprintf(tmp, sizeof(tmp), "\"%d\":%.9g", bi, v);
+                                dashState += tmp; first = false;
+                            }
+                        }
+                        dashState += "},\"tap2e0\":{";
+                        first = true;
+                        for (int bi = 0; bi < 32; bi++) {
+                            int32_t v = *(int32_t*)(snap.cchr + 0x2e0 + bi * 4);
+                            if (v != 0) {
+                                if (!first) dashState += ",";
+                                snprintf(tmp, sizeof(tmp), "\"%d\":%d", bi, v);
+                                dashState += tmp; first = false;
+                            }
+                        }
+                        dashState += "},\"acc130\":{";
+                        first = true;
+                        for (int bi = 0; bi < 32; bi++) {
+                            float v = *(float*)(snap.cchr + 0x130 + bi * 4);
+                            if (v != 0.0f) {
+                                if (!first) dashState += ",";
+                                snprintf(tmp, sizeof(tmp), "\"%d\":%.9g", bi, v);
+                                dashState += tmp; first = false;
+                            }
+                        }
+                        snprintf(tmp, sizeof(tmp),
+                                 "},\"m12c\":\"0x%08X\",\"m230\":\"0x%08X\","
+                                 "\"m238\":\"0x%08X\",\"m250\":\"0x%08X\"",
+                                 *(uint32_t*)(snap.cchr + 0x12c),
+                                 *(uint32_t*)(snap.cchr + 0x230),
+                                 *(uint32_t*)(snap.cchr + 0x238),
+                                 *(uint32_t*)(snap.cchr + 0x250));
+                        dashState += tmp;
+                    }
 
                     if (g_ndjsonIncludeDirHistory) {
                         uint64_t dirFrameCnt = *(uint64_t*)(snap.cchr + 0x18);
@@ -349,44 +404,71 @@ std::string Rollback_GenerateNetplayLiveJSON(int32_t frame, bool isResim) {
                         snprintf(charBuf, sizeof(charBuf),
                                 "{\"team\":%d,\"slot\":%d,\"mid\":%d,"
                                 "\"plr\":%d,\"ast\":%d,"
-                                "\"pos\":[%.4f,%.4f,%.4f],"
+                                "\"pos\":[%.9g,%.9g,%.9g],"
                                 "\"act\":\"0x%08X\",\"fl\":\"0x%08X\","
+                                "\"fl4\":\"0x%08X\",\"fl8\":\"0x%08X\","
                                 "\"mHeld\":\"0x%08X\",\"fcnt\":%llu,"
+                                "\"mOld\":\"0x%08X\","
+                                "\"mPressed\":\"0x%08X\",\"mReleased\":\"0x%08X\","
+                                "\"mMask\":\"0x%08X\",\"mProcessed\":\"0x%08X\","
                                 "\"dirSlot\":%u,"
                                 "\"dir0\":\"0x%08X\",\"dir4\":\"0x%08X\","
                                 "\"h590\":\"0x%08X\",\"h594\":\"0x%08X\","
                                 "\"dirRing\":%s,"
-                                "\"rng\":[\"0x%08X\",\"0x%08X\",\"0x%08X\",\"0x%08X\"]}",
+                                "\"rng\":[\"0x%08X\",\"0x%08X\",\"0x%08X\",\"0x%08X\"]",
                                 ti, ci, memberId,
                                 plrId, assistType,
                                 snap.posX, snap.posY, snap.posZ,
                                 snap.actionId, snap.flags14F0,
+                                snap.flags14F4, snap.flags14F8,
                                 *(uint32_t*)(snap.cchr + 0x14),
                                 dirFrameCnt,
+                                *(uint32_t*)(snap.cchr + 0x10),
+                                *(uint32_t*)(snap.cchr + 0x20),
+                                *(uint32_t*)(snap.cchr + 0x24),
+                                *(uint32_t*)(snap.cchr + 0x568),
+                                *(uint32_t*)(snap.cchr + 0x56C),
                                 dirSlot,
                                 dir0, dir4,
                                 h590, h594,
                                 dirRing.c_str(),
                                 snap.xorShift[0], snap.xorShift[1],
                                 snap.xorShift[2], snap.xorShift[3]);
+                        out += charBuf;
+                        out += ",";
+                        out += dashState;
+                        out += "}";
                     } else {
                         snprintf(charBuf, sizeof(charBuf),
                                 "{\"team\":%d,\"slot\":%d,\"mid\":%d,"
                                 "\"plr\":%d,\"ast\":%d,"
-                                "\"pos\":[%.4f,%.4f,%.4f],"
+                                "\"pos\":[%.9g,%.9g,%.9g],"
                                 "\"act\":\"0x%08X\",\"fl\":\"0x%08X\","
+                                "\"fl4\":\"0x%08X\",\"fl8\":\"0x%08X\","
                                 "\"mHeld\":\"0x%08X\",\"fcnt\":%llu,"
-                                "\"rng\":[\"0x%08X\",\"0x%08X\",\"0x%08X\",\"0x%08X\"]}",
+                                "\"mOld\":\"0x%08X\","
+                                "\"mPressed\":\"0x%08X\",\"mReleased\":\"0x%08X\","
+                                "\"mMask\":\"0x%08X\",\"mProcessed\":\"0x%08X\","
+                                "\"rng\":[\"0x%08X\",\"0x%08X\",\"0x%08X\",\"0x%08X\"]",
                                 ti, ci, memberId,
                                 plrId, assistType,
                                 snap.posX, snap.posY, snap.posZ,
                                 snap.actionId, snap.flags14F0,
+                                snap.flags14F4, snap.flags14F8,
                                 *(uint32_t*)(snap.cchr + 0x14),
                                 *(uint64_t*)(snap.cchr + 0x18),
+                                *(uint32_t*)(snap.cchr + 0x10),
+                                *(uint32_t*)(snap.cchr + 0x20),
+                                *(uint32_t*)(snap.cchr + 0x24),
+                                *(uint32_t*)(snap.cchr + 0x568),
+                                *(uint32_t*)(snap.cchr + 0x56C),
                                 snap.xorShift[0], snap.xorShift[1],
                                 snap.xorShift[2], snap.xorShift[3]);
+                        out += charBuf;
+                        out += ",";
+                        out += dashState;
+                        out += "}";
                     }
-                    out += charBuf;
                     ci++;
                 }
                 node = *(uint64_t*)(node + NODE_NEXT_OFFSET);
@@ -518,11 +600,9 @@ void Rollback_LogResimNotifyNDJSON(const ResimNotifyPacket& pkt)
                    "\"side\":\"%s\",\"resim_notify\":true,"
                    "\"senderSide\":\"%s\",\"correctedTeam\":%u,"
                    "\"corrected_frames\":[%d,%d],"
-                   "\"inputs\":{\"local\":\"—\",\"usedRemote\":\"0x%08X\",\"recvRemote\":\"0x%08X\"},"
                    "\"chars\":[",
                 tsBuf, frame, side, senderSide, pkt.correctedTeam,
-                pkt.resimStartFrame, pkt.resimEndFrame,
-                pkt.frames[0].usedInput, pkt.frames[0].recvInput);
+                pkt.resimStartFrame, pkt.resimEndFrame);
         // P1 point
         fprintf(f, "{\"team\":0,\"slot\":0,"
                    "\"pos\":[%.4f,%.4f,%.4f],"
@@ -819,6 +899,21 @@ static int BuildRegions(Region* regions, int maxRegions)
                     // ring-buffer-head state survive rollback restores.
                     uint64_t cChrInput = character + 0x21C8;
                     add((void*)cChrInput, 0x5A0);
+
+                    // ---- cChrCmd line buffers (heap-allocated per-command match state) ----
+                    // Two embedded cChrCmd objects at uCharacter+0x2738 and +0x2950.
+                    // Each has a heap-allocated line array at cmd+0x178 of n×0x20 B entries
+                    // (where n = cmd+0x170), with an 8-B count header at lines-8.
+                    // Without this, double-tap dash / back-dash / charge / combo command
+                    // matching progress is lost on snapshot restore → resim eats different
+                    // action transitions.  Verified via Ghidra cross-refs from cChrCmd__setOwner.
+                    for (uint64_t cmdOff : {0x2738ull, 0x2950ull}) {
+                        uint64_t cmd   = character + cmdOff;
+                        uint64_t lines = *(uint64_t*)(cmd + 0x178);
+                        int      n     = *(int*)(cmd + 0x170);
+                        if (lines && n > 0 && n < 0x1000)
+                            add((void*)(lines - 8), (size_t)n * 0x20 + 8);
+                    }
                 }
                 node = *(uint64_t*)(node + NODE_NEXT_OFFSET);
             }
@@ -942,7 +1037,10 @@ static void Rollback_ResyncMainTiming(uint64_t sMain)
     // Reset timing deltas to 60 FPS nominal values so the next real tick
     // sees a well-formed 16 ms frame delta.
     *(uint32_t*)(sMain + 0x38)     = 16;           // ~16ms frame delta
-    *(float*)(sMain + 0x80)        = 0.01666667f;  // 60fps float delta
+    // mDeltaTime (+0x80) is in FRAME units (~1.0), not seconds — sMain__move
+    // sets it to 1.0f in the vsync path and multiplies by globalSpeed (+0x8c).
+    // The dash double-tap timers integrate this value per frame.
+    *(float*)(sMain + 0x80)        = 1.0f;         // 1 frame of game time
     *(uint32_t*)(sMain + 0xA8)     = 16;           // current delta
     *(uint32_t*)(sMain + 0xA4)     = 16;           // shifted delta
 
@@ -1753,6 +1851,11 @@ static void Rollback_DumpNDJSON(int32_t frame, uint8_t side) {
                     CaptureCharSnapshot(chr, ti, ci, snap);
                     uint64_t fcnt = *(uint64_t*)(snap.cchr + 0x18);
                     uint32_t mHeld = *(uint32_t*)(snap.cchr + 0x14);
+                    uint32_t mOld = *(uint32_t*)(snap.cchr + 0x10);
+                    uint32_t mPressed = *(uint32_t*)(snap.cchr + 0x20);
+                    uint32_t mReleased = *(uint32_t*)(snap.cchr + 0x24);
+                    uint32_t mMask = *(uint32_t*)(snap.cchr + 0x568);
+                    uint32_t mProcessed = *(uint32_t*)(snap.cchr + 0x56C);
 
                     if (!firstChar) fprintf(g_diagNdjsonFile, ",");
                     firstChar = false;
@@ -1760,11 +1863,15 @@ static void Rollback_DumpNDJSON(int32_t frame, uint8_t side) {
                             "\"pos\":[%.4f,%.4f,%.4f],"
                             "\"act\":\"0x%08X\",\"fl\":\"0x%08X\","
                             "\"mHeld\":\"0x%08X\",\"fcnt\":%llu,"
+                            "\"mOld\":\"0x%08X\","
+                            "\"mPressed\":\"0x%08X\",\"mReleased\":\"0x%08X\","
+                            "\"mMask\":\"0x%08X\",\"mProcessed\":\"0x%08X\","
                             "\"rng\":[\"0x%08X\",\"0x%08X\",\"0x%08X\",\"0x%08X\"]}",
                             ti, ci,
                             snap.posX, snap.posY, snap.posZ,
                             snap.actionId, snap.flags14F0,
                             mHeld, fcnt,
+                            mOld, mPressed, mReleased, mMask, mProcessed,
                             snap.xorShift[0], snap.xorShift[1],
                             snap.xorShift[2], snap.xorShift[3]);
                     ci++;
@@ -1872,7 +1979,6 @@ extern "C" void Rollback_ProcessInboundGroundTruth()
 
             // Ground truth (received remote data)
             fprintf(g_diagNdjsonFile, "{\"v\":1,\"ts\":\"%s\",\"frame\":%d,\"side\":\"ground_truth\","
-                       "\"inputs\":{\"local\":\"-\",\"usedRemote\":\"-\",\"recvRemote\":\"-\"},"
                        "\"chars\":[",
                     tsBuf, rf.frame);
             fprintf(g_diagNdjsonFile, "{\"team\":0,\"slot\":0,\"pos\":[%.4f,%.4f,%.4f],\"act\":\"0x%08X\",\"fl\":\"0x%08X\",\"mHeld\":\"0x%08X\",\"fcnt\":%llu,\"rng\":[\"0x%08X\",\"0x%08X\",\"0x%08X\",\"0x%08X\"]}",
@@ -1885,7 +1991,6 @@ extern "C" void Rollback_ProcessInboundGroundTruth()
 
             // Resim (local corrected data)
             fprintf(g_diagNdjsonFile, "{\"v\":1,\"ts\":\"%s\",\"frame\":%d,\"side\":\"resim\","
-                       "\"inputs\":{\"local\":\"-\",\"usedRemote\":\"-\",\"recvRemote\":\"-\"},"
                        "\"chars\":[",
                     tsBuf, rf.frame);
             fprintf(g_diagNdjsonFile, "{\"team\":0,\"slot\":0,\"pos\":[%.4f,%.4f,%.4f],\"act\":\"0x%08X\",\"fl\":\"0x%08X\",\"mHeld\":\"0x%08X\",\"fcnt\":%llu,\"rng\":[\"0x%08X\",\"0x%08X\",\"0x%08X\",\"0x%08X\"]}",
@@ -2491,9 +2596,23 @@ static void __fastcall hkMain_move(uint64_t param_1)
         // called sMvc3Main__move which hit hkMvc3Main_move (SKIPPED),
         // tick was never consumed, so the dispatcher looped forever.
         *(uint32_t*)(param_1 + 0x48) = 0;
+        // Deterministic frame delta during re-sim: sMain__move is skipped so
+        // mDeltaTime (+0x80) would stay frozen at the snapshot value.  The
+        // dash double-tap timers in cChrInput_inputMaskPostProcess do
+        // acc += mDeltaTime each frame (thresholds 2.0/3.0/8.0/10.0 frames),
+        // so it must be exactly 1.0 per simulated frame.
+        *(float*)(param_1 + 0x80) = 1.0f;
         return;
     }
     oMain_move(param_1);
+
+    // Netplay determinism: mDeltaTime (+0x80) is QPC-derived wall-clock
+    // jitter (≈1.0 but different on each machine every frame).  The dash
+    // double-tap window timers integrate it, so host and client drift apart
+    // and eventually detect dashes on different frames (frame-227 desync).
+    // Force exactly 1 frame of game time per tick on both machines.
+    if (Netplay_IsActive())
+        *(float*)(param_1 + 0x80) = 1.0f;
 }
 
 // ===========================================================================
