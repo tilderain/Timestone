@@ -1,3 +1,27 @@
+add exception handler
+
+transmit controller config on start ..
+Somehow enable the pause menu mid match
+
+Transmit character start
+Synchronize button press for skip intro
+
+Desyncs-
+    Collision (pushing players)
+    Multi hit moves (morrigan air heavy)
+    Shot
+    Morrigan's clone
+    Restoring previous hitboxes on snapshot restore
+
+verbose logging?
+Only log to memory then write json at desync
+Json transmit on desync
+
+Auto updater
+
+Multi asi loader
+
+
 The Sleep(1) Issue
 
 Sleep(1) is notorious in Windows programming because the actual sleep duration depends on the OS scheduler resolution (which defaults to 15.6ms, though games often set it to 1ms using timeBeginPeriod). If the background thread receives the packet
@@ -19,10 +43,7 @@ Controller gamepad for p1
 
 Rollback frames cfg
 
-
 Integrate into menuing
-
-Full pause menu ingame / not pause gameplay
 
 Hook into the existing lobby system?
 
@@ -42,5 +63,3 @@ Disable mouse for game
 Switch to gecko net ...
 Transmit input for the frame as soon as we capture it
 
-
-add exception handler
