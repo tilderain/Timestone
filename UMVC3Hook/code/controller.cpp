@@ -302,12 +302,20 @@ static constexpr uintptr_t NODE_NEXT_OFFSET      = 0x10;
 // Returns -1 if the replay system isn't initialized yet.
 // ---------------------------------------------------------------------------
 static constexpr uintptr_t G_PSREPLAY_PTR = 0x140d4d9d8;
+static int32_t g_gameFrameBase = 0;
 
 static int32_t GetGameFrameCount()
 {
     uint64_t sReplay = *(uint64_t*)_addr(G_PSREPLAY_PTR);
     if (!sReplay) return -1;
-    return *(int32_t*)(sReplay + 0x54);
+    return *(int32_t*)(sReplay + 0x54) - g_gameFrameBase;
+}
+
+extern "C" void Controller_ResetFrameEpoch()
+{
+    uint64_t sReplay = *(uint64_t*)_addr(G_PSREPLAY_PTR);
+    g_gameFrameBase = sReplay ? *(int32_t*)(sReplay + 0x54) : 0;
+    g_netFrameCount = 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -811,16 +819,14 @@ static uint64_t __fastcall hkGetsCurrentInput_withSOCD(uint64_t pad, uint32_t pl
 // desync from button-based skipping.
 // ---------------------------------------------------------------------------
 static void(__fastcall* oStepIntro)(uint64_t param_1) = nullptr;
+extern "C" bool FrameStepper_IsBattleSynchronized();
 
 static void __fastcall hkStepIntro(uint64_t param_1)
 {
-    if (Netplay_IsActive()) {
-        if (GetGameFrameCount() >= 10)
-        {
-            auto setCountdown = (void(__fastcall*)(uint64_t, int))_addr(0x14000AE00);
-            setCountdown(param_1, 3);
-            return;
-        }
+    if (Netplay_IsActive() && FrameStepper_IsBattleSynchronized()) {
+        auto setCountdown = (void(__fastcall*)(uint64_t, int))_addr(0x14000AE00);
+        setCountdown(param_1, 3);
+        return;
     }
     oStepIntro(param_1);
 }

@@ -47,6 +47,12 @@ extern void Netplay_SendRollback(int32_t rollbackFrames);
 // Controller setters from controller.cpp
 extern "C" void Controller_SetDelayFrames(int32_t delay);
 extern "C" void Controller_SetRollbackFrames(int32_t n);
+extern "C" void Controller_ResetBuffers();
+extern "C" void Controller_ResetFrameEpoch();
+
+// True after both peers have reached the post-initialization intro barrier.
+static bool g_battleSynchronized = false;
+extern "C" bool FrameStepper_IsBattleSynchronized() { return g_battleSynchronized; }
 
 // ---------------------------------------------------------------------------
 // Addresses (VAs, converted at runtime via _addr)
@@ -269,8 +275,6 @@ static void __fastcall HookedMove(void* sMvc3Main)
 
     if (Netplay_IsActive())
     {
-        Controller_OnFrameStart();
-
         // Drain any inbound delay/rollback-control packets — keeps both sides
         // in sync when the user adjusts either value on either machine.
         int32_t remoteDelay = -1;
@@ -285,11 +289,56 @@ static void __fastcall HookedMove(void* sMvc3Main)
             if (remoteRollback >= 0 && remoteRollback <= 16)
                 Controller_SetRollbackFrames(remoteRollback);
         }
+
+        static bool localReady = false;
+        static bool remoteReady = false;
+        static uint32_t generation = 1;
+
+        uint32_t remoteGeneration = 0;
+        while (Netplay_GetInboundBattleReady(remoteGeneration))
+        {
+            if (remoteGeneration == generation)
+                remoteReady = true;
+        }
+
+        if (!g_battleSynchronized)
+        {
+            typedef uint64_t(__fastcall* GetAmaterasu_t)();
+            static GetAmaterasu_t getAmaterasu = (GetAmaterasu_t)_addr(0x140001A90);
+            uint64_t action = getAmaterasu();
+            int32_t step = action ? *(int32_t*)(action + 0xD8) : 0;
+            int32_t pendingStep = action ? *(int32_t*)(action + 0xDC) : -1;
+            int32_t introSubstate = action ? *(int32_t*)(action + 0xE0) : 0;
+
+            if (!localReady && step == 2 && pendingStep < 0 && introSubstate > 0)
+            {
+                localReady = true;
+                Netplay_SendBattleReady(generation);
+                HookLog("Netplay: Local intro ready (generation=%u, substate=%d)\n",
+                        generation, introSubstate);
+            }
+
+            if (localReady && !remoteReady)
+                return;
+
+            if (localReady && remoteReady)
+            {
+                Netplay_ClearInputQueues();
+                Controller_ResetBuffers();
+                Controller_ResetFrameEpoch();
+                Rollback_FreeSnapshots();
+                g_battleSynchronized = true;
+                HookLog("Netplay: Intro barrier released (generation=%u)\n", generation);
+            }
+        }
+
+        if (g_battleSynchronized)
+            Controller_OnFrameStart();
     }
 
     oMove(sMvc3Main);
 
-    if (Netplay_IsActive())
+    if (Netplay_IsActive() && g_battleSynchronized)
     {
         Controller_OnFrameEnd();
     }

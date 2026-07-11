@@ -91,6 +91,12 @@ static constexpr int    MAX_REGIONS          = 512;
 static constexpr int    DYNAMIC_SAFETY       = 128; // max projectile/effect nodes
 static constexpr int    SSHOT_SENTINEL_COUNT = 10;  // 10 sentinel slots starting at 0x140d47f90
 static constexpr size_t SSHOT_NODE_OFFSET    = 0x1450; // uShot->cChrNode offset
+static constexpr size_t SHITSOLVER_SIZE      = 0x3808C;
+static constexpr size_t SHITSOLVER_DATA_OFF  = 0x58;   // skip vtable, CS, flags, MtArray header
+static constexpr size_t SHITSOLVER_ARRAY_OFF = 0x38;
+static constexpr size_t SHITSOLVER_POOL_OFF  = 0x60;
+static constexpr size_t SHITSOLVER_NODE_SIZE = 0x60;
+static constexpr size_t SHITSOLVER_COUNT_OFF = 0x30060;
 
 // ===========================================================================
 // Global Re-Simulation Indicators & Hook State
@@ -662,6 +668,7 @@ void Rollback_LogResimNotifyNDJSON(const ResimNotifyPacket& pkt)
 // Frame counter / rollback state from controller.cpp
 extern "C" int32_t Controller_GetNetFrameCount();
 extern "C" bool    Controller_IsRollbackEnabled();
+extern "C" bool    FrameStepper_IsBattleSynchronized();
 extern "C" uint32_t Controller_GetCurrentFrameInput();
 extern "C" void    Controller_InjectLocalInput(int32_t frame, uint32_t input);
 extern "C" void    Controller_InjectRemoteInput(int32_t frame, uint32_t input);
@@ -843,7 +850,7 @@ static int BuildRegions(Region* regions, int maxRegions)
     //     mid-SortBucketB, dropping ~16KB of bucket B and the work counters.
     {
         uint64_t sHitSolver = *(uint64_t*)_addr(PTR_SHITSOLVER);
-        add((void*)sHitSolver, 0x3808C);
+        add((void*)sHitSolver, SHITSOLVER_SIZE);
     }
 
     // ---- 4. aNextBattle — battle state machine (static manager) ----
@@ -1598,16 +1605,45 @@ void Rollback_RestoreSnapshot(int32_t frame)
     // This ensures dynamic objects (projectiles, effects) map to the exact
     // same memory addresses that were captured, even if the game rebuilt its
     // internal lists between save and restore.
+    uint64_t sHitSolver = *(uint64_t*)_addr(PTR_SHITSOLVER);
     size_t offset = 0;
     for (int i = 0; i < slot.regionCount; ++i) {
         size_t copySize = slot.regions[i].size;
         if (offset + copySize > slot.size) {
             copySize = slot.size - offset;
         }
-        if (copySize > 0) {
+        if ((uint64_t)slot.regions[i].ptr == sHitSolver &&
+            slot.regions[i].size == SHITSOLVER_SIZE &&
+            copySize > SHITSOLVER_DATA_OFF) {
+            // Preserve the live vtable, CRITICAL_SECTION, flags and the
+            // heap-backed MtArray<cHitNode*> header.
+            std::memcpy((void*)(sHitSolver + SHITSOLVER_DATA_OFF),
+                        slot.data + offset + SHITSOLVER_DATA_OFF,
+                        copySize - SHITSOLVER_DATA_OFF);
+        } else if (copySize > 0) {
             std::memcpy(slot.regions[i].ptr, slot.data + offset, copySize);
         }
         offset += slot.regions[i].size;
+    }
+
+    // Rebuild the active-node pointers against the array's live allocation.
+    // cHitNode slots have stable addresses inside the process-lifetime solver.
+    if (sHitSolver) {
+        uint32_t count = *(uint32_t*)(sHitSolver + SHITSOLVER_COUNT_OFF);
+        uint32_t capacity = *(uint32_t*)(sHitSolver + SHITSOLVER_ARRAY_OFF + 0x0C);
+        uint64_t buffer = *(uint64_t*)(sHitSolver + SHITSOLVER_ARRAY_OFF + 0x18);
+        if (buffer && count <= capacity && count <= 0x800) {
+            for (uint32_t i = 0; i < count; ++i) {
+                *(uint64_t*)(buffer + i * sizeof(uint64_t)) =
+                    sHitSolver + SHITSOLVER_POOL_OFF + i * SHITSOLVER_NODE_SIZE;
+            }
+            *(uint32_t*)(sHitSolver + SHITSOLVER_ARRAY_OFF + 0x08) = count;
+        } else {
+            // Avoid exposing stale collision pointers. The next add/reset pass
+            // will repopulate the array normally.
+            *(uint32_t*)(sHitSolver + SHITSOLVER_ARRAY_OFF + 0x08) = 0;
+            *(uint32_t*)(sHitSolver + SHITSOLVER_COUNT_OFF) = 0;
+        }
     }
 
     // Log ALL heap regions with their sizes
@@ -2442,7 +2478,8 @@ static void __fastcall hkMvc3Main_move(uint64_t param_1)
     // 4. Auto-snapshot + rollback for netplay (only on main game thread,
     // not during re-sim).  Only active when rollback frames > 0.
     // ==================================================================
-    if (Netplay_IsActive() && !g_isResimulating && Controller_IsRollbackEnabled())
+    if (Netplay_IsActive() && FrameStepper_IsBattleSynchronized() &&
+        !g_isResimulating && Controller_IsRollbackEnabled())
     {
         // Only snapshot + rollback when in-game (aNextBattle step >= 2,
         // i.e. countdown or fighting).  Menus/loading screens don't need

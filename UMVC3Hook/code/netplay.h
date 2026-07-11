@@ -39,6 +39,7 @@ enum PacketType : uint32_t {
     PACKET_DELAY = 1,  // DelayPacket
     PACKET_RESIM_NOTIFY = 2,  // ResimNotifyPacket
     PACKET_GROUND_TRUTH = 4,  // GroundTruthPacket
+    PACKET_BATTLE_READY = 5,  // BattleReadyPacket
 };
 
 #pragma pack(push, 1)
@@ -58,6 +59,11 @@ struct DelayPacket {
     uint32_t type;               // PACKET_DELAY
     int32_t  delay;              // delay frame count
     int32_t  rollbackFrames;     // rollback frame count (both sides stay in sync)
+};
+
+struct BattleReadyPacket {
+    uint32_t type;               // PACKET_BATTLE_READY
+    uint32_t generation;         // distinguishes later rounds/rematches
 };
 
 static constexpr int MAX_RESIM_FRAMES = 16;
@@ -164,5 +170,12 @@ bool Netplay_GetInboundGroundTruth(GroundTruthPacket& outGT);
 // Retrieve the last rollback value received from the remote peer.  Returns true
 // if a new value was available (it is consumed by this call).
 bool Netplay_GetInboundRollback(int32_t& outRollback);
+
+// Startup rendezvous used after local intro initialization has completed.
+void Netplay_SendBattleReady(uint32_t generation);
+bool Netplay_GetInboundBattleReady(uint32_t& outGeneration);
+
+// Discard input packets produced before the synchronized battle boundary.
+void Netplay_ClearInputQueues();
 
 // --- Desync-check: checksum is piggybacked on InputPacket (Slippi-style) ---

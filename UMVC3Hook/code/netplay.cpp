@@ -56,6 +56,12 @@ static GroundTruthPacket    g_inboundGroundTruth = {};
 static bool                 g_inboundGroundTruthNew = false;
 static CRITICAL_SECTION     g_groundTruthCS;
 
+static BattleReadyPacket    g_outboundBattleReady = {};
+static bool                 g_outboundBattleReadyNew = false;
+static BattleReadyPacket    g_inboundBattleReady = {};
+static bool                 g_inboundBattleReadyNew = false;
+static CRITICAL_SECTION     g_battleReadyCS;
+
 // One-time critical section initialization flag
 static bool                 g_csInitialized  = false;
 
@@ -195,6 +201,28 @@ static DWORD WINAPI Netplay_ServiceThread(LPVOID)
             enet_host_flush(g_host);
         }
 
+        bool hasBattleReady = false;
+        BattleReadyPacket readyPkt = {};
+        {
+            ScopedCS lock(g_battleReadyCS);
+            if (g_outboundBattleReadyNew)
+            {
+                readyPkt = g_outboundBattleReady;
+                hasBattleReady = true;
+                g_outboundBattleReadyNew = false;
+            }
+        }
+        if (hasBattleReady && g_peer)
+        {
+            ENetPacket* packet = enet_packet_create(
+                &readyPkt, sizeof(BattleReadyPacket), ENET_PACKET_FLAG_RELIABLE
+            );
+            if (enet_peer_send(g_peer, 0, packet) != 0) {
+                enet_packet_destroy(packet);
+            }
+            enet_host_flush(g_host);
+        }
+
         // --- Service the host ---
         if (g_host)
         {
@@ -257,6 +285,16 @@ static DWORD WINAPI Netplay_ServiceThread(LPVOID)
                                     }
                                 }
                                 break;
+
+                            case PACKET_BATTLE_READY:
+                                if (event.packet->dataLength >= sizeof(BattleReadyPacket))
+                                {
+                                    const BattleReadyPacket* brp = (const BattleReadyPacket*)event.packet->data;
+                                    ScopedCS lock(g_battleReadyCS);
+                                    g_inboundBattleReady = *brp;
+                                    g_inboundBattleReadyNew = true;
+                                }
+                                break;
                         }
                     }
                     enet_packet_destroy(event.packet);
@@ -305,6 +343,7 @@ void Netplay_Init(ENetHost* host, ENetPeer* peer)
         InitializeCriticalSection(&g_delayCS);
         InitializeCriticalSection(&g_resimNotifyCS);
         InitializeCriticalSection(&g_groundTruthCS);
+        InitializeCriticalSection(&g_battleReadyCS);
 
         g_outboundDelayNew = false;
         g_inboundDelayNew = false;
@@ -312,6 +351,8 @@ void Netplay_Init(ENetHost* host, ENetPeer* peer)
         g_inboundResimNotifyNew = false;
         g_outboundGroundTruthNew = false;
         g_inboundGroundTruthNew = false;
+        g_outboundBattleReadyNew = false;
+        g_inboundBattleReadyNew = false;
         std::memset(&g_outboundPacket, 0, sizeof(InputPacket));
     }
 
@@ -437,6 +478,37 @@ bool Netplay_GetInboundRollback(int32_t& outRollback)
         return true;
     }
     return false;
+}
+
+void Netplay_SendBattleReady(uint32_t generation)
+{
+    ScopedCS lock(g_battleReadyCS);
+    g_outboundBattleReady.type = PACKET_BATTLE_READY;
+    g_outboundBattleReady.generation = generation;
+    g_outboundBattleReadyNew = true;
+}
+
+bool Netplay_GetInboundBattleReady(uint32_t& outGeneration)
+{
+    ScopedCS lock(g_battleReadyCS);
+    if (!g_inboundBattleReadyNew)
+        return false;
+    outGeneration = g_inboundBattleReady.generation;
+    g_inboundBattleReadyNew = false;
+    return true;
+}
+
+void Netplay_ClearInputQueues()
+{
+    {
+        ScopedCS lock(g_inboundCS);
+        g_inboundQueue.clear();
+    }
+    {
+        ScopedCS lock(g_outboundCS);
+        g_outboundNew = false;
+        std::memset(&g_outboundPacket, 0, sizeof(g_outboundPacket));
+    }
 }
 
 // ---------------------------------------------------------------------------
