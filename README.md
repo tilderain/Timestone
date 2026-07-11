@@ -13,3 +13,4 @@ Archeroflegend- Framestepper
 ermaccer- UMVC3Hook
 Vevota- Playtesting
 John2143- "Sponsorship"
+Those random guys who played with me in a steam lobby one day

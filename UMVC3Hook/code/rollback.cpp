@@ -758,6 +758,20 @@ static int BuildRegions(Region* regions, int maxRegions)
     //     Address confirmed from LEA RAX,[0x140d765d8] in MtXorShift__getGlobalState.
     add((void*)_addr(0x140d765d8), 16);
 
+    // ---- 1b. sEffect per-instance RNG (sEffect+0x3C, 16 bytes) ----
+    //     Second within-round RNG source (rng_inventory.md §4.2/§5.1): seeded at
+    //     sEffect ctor (seed 426772233) and reseeded by sReplay__onRoundStart from
+    //     the round seed, then advances within the round.  g_sEffect__mpInstance
+    //     global at 0x140E17A38 (returned by aNextBattle__createProperty_4730).
+    //     Determinism harness invariant per rng_inventory.md §6.3: sEffect+0x3C
+    //     must match saved value byte-for-byte after restore.
+    {
+        uint64_t sEffect = *(uint64_t*)_addr(0x140E17A38);
+        if (sEffect) {
+            add((void*)(sEffect + 0x3C), 16);
+        }
+    }
+
     // ---- 2. sShot manager — vtable + shot ID pool + sentinel slot array only ----
     //     Snapshotting only up to +0x1E0 (end of 10 × 0x28 sentinel slots at +0x50)
     //     to avoid corrupting CRITICAL_SECTION objects at +0x1E0 and the
@@ -796,10 +810,21 @@ static int BuildRegions(Region* regions, int maxRegions)
                 if (curRef < 0x10000) break;
                 uint64_t uShot = curRef - 0x08 - SSHOT_NODE_OFFSET;
 
-                // uShot+0x08 holds list pointers, NOT a DTI descriptor.
-                // Using a DTI lookup here reads garbage and produces a 1-byte
-                // snapshot, truncating the projectile.  Use a flat safe size.
-                uint32_t objSize = 0x2200;
+                // uShot subclass tails: base body is 0x2140, but 13 subclasses
+                // register extra tail fields extending up to 0x2314
+                // (uShotLaserRekkouha).  A hard-coded 0x2200 truncates those
+                // (Rekkouha mIsGroundHit@+0x2310, Axe/Torch/LandMine/Ouroboros
+                // latches @+0x2210+), rewinding beam/pillar/power-up state on
+                // restore.  Use the DTI-driven per-subclass size via vtable[4]
+                // (same path as characters — NOT object+0x08, which holds the
+                // circular-list pointers).  All subclass tails are POD, so the
+                // larger flat memcpy adds no new heap-pointer hazard.
+                uint64_t dtiPtr  = GetObjectDti(uShot);
+                uint32_t dtiSize = DecodeDtiSize(dtiPtr);
+                uint32_t objSize = dtiSize;
+                if (objSize < 0x2140 || objSize > 0x3000) {
+                    objSize = 0x2320; // covers largest known tail (0x2314)
+                }
 
                 add((void*)uShot, objSize);
                 shotCount++;
@@ -812,9 +837,13 @@ static int BuildRegions(Region* regions, int maxRegions)
     }
 
     // ---- 3. sHitSolver — collision pairs + result buffer (static array) ----
+    //     Full body is 0x3808C (sHitSolver_field_map.md §2): 192KB cHitNode pool,
+    //     counters at +0x30060, SortBucketA @+0x30070, SortBucketB @+0x34078,
+    //     mWorkCnt/B/Final tail @+0x38080.  The previous 0x34080 size truncated
+    //     mid-SortBucketB, dropping ~16KB of bucket B and the work counters.
     {
         uint64_t sHitSolver = *(uint64_t*)_addr(PTR_SHITSOLVER);
-        add((void*)sHitSolver, 0x34080);
+        add((void*)sHitSolver, 0x3808C);
     }
 
     // ---- 4. aNextBattle — battle state machine (static manager) ----
@@ -839,10 +868,32 @@ static int BuildRegions(Region* regions, int maxRegions)
     //     3456 B total; skip vtable @+0 .. +7 on restore (handled via flat
     //     memcpy — the vtable pointer is the same at save and restore time
     //     for a singleton, so restoring it is safe here).
+    uint64_t camUnit = 0;
     {
         uint64_t sCamera = *(uint64_t*)_addr(PTR_SCAMERA);
         if (sCamera) {
             add((void*)sCamera, 0xD80);
+            // First viewport slot at +0x50, stride 0x1A0, camera unit ptr at slot+8.
+            // This is the uActionSideCamera gameplay anchor unit.
+            camUnit = *(uint64_t*)(sCamera + 0x58);
+        }
+    }
+
+    // ---- 7a. uActionSideCamera — gameplay camera anchor/smoothing unit ----
+    //     cUnit-derived object (DTI 0x140d44268, size 0x590) that computes
+    //     camera anchor position, smoothing trajectory, and screen-edge
+    //     clamps each frame.  During host-only resim its internal state
+    //     drifts from the live client, causing permanent character position
+    //     drift (desync) that never self-corrects.  sCamera viewport[0]+8
+    //     holds the pointer (confirmed via Ghidra FUN_140535c80).
+    {
+        if (camUnit) {
+            uint64_t dtiPtr  = GetObjectDti(camUnit);
+            uint32_t camSize = DecodeDtiSize(dtiPtr);
+            if (camSize < 0x100 || camSize > 0x2000) {
+                camSize = 0x590; // known DTI size for uActionSideCamera
+            }
+            add((void*)camUnit, camSize);
         }
     }
 
@@ -2151,6 +2202,7 @@ void Rollback_ReSimulate(int32_t startFrame, int32_t endFrame)
             Rollback_SaveSnapshot(f);
         }
 
+        //Todo: replace with headless tick for better perf
         oMvc3Main_move(g_sMvc3Main);
         Controller_SilentFrameEnd();
         silentFrameEndCount++;

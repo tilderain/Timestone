@@ -103,17 +103,81 @@ dangerous for rollback and likely appears elsewhere:
 | Object | Offset | Description | Status |
 |--------|--------|-------------|--------|
 | cChrCmd (×2) | +0x178 | Per-command line buffer (n × 0x20) | **FIXED** |
-| cChrCmdSpatk | ? | Special-attack command object, may have its own buffer | **UNCHECKED** |
-| cChrCmdBtnChrg | ? | Charge-input timer state | **UNCHECKED** (likely inline) |
-| cChrCmdCombo | ? | Combo-sequence tracking buffer | **UNCHECKED** |
+| cChrCmdSpatk | — | Same 0x218 B layout as base cChrCmd (operator_new 0x218); dtor `cChrCmdSpatk__dtor_C380` → shared teardown `FUN_140025430` frees ONLY `+0x178`. No extra heap. | **CLEAR** (inline) |
+| cChrCmdBtnChrg | — | Embedded at cChrCmd+0x138; `reset` (0x140029050) zeroes only +0x14..+0x23 inline; ctor allocates nothing. | **CLEAR** (inline) |
+| cChrCmdCombo | — | Same 0x218 B layout as base (operator_new 0x218); dtor → `FUN_140025430`, frees only `+0x178`. No extra heap. | **CLEAR** (inline) |
+| cChrCmdLimit | — | Embedded at cChrCmd+0x8; `reset` (0x14002C1F0) writes ~0x118 B all inline; no allocation. | **CLEAR** (inline) |
+| cChrCmd +0x168 | +0x168 | Command-list resource ptr (static .lot-style resource, set via allocAndResetLineBuffer arg) | CLEAR (stable resource, keep ptr) |
+| cChrCmd +0x1E8 | +0x1E8 | 6 qwords zeroed in ctor, never freed in dtor → non-owning ptrs into command-list resource | CLEAR (stable resource) |
+| cAtkCtrl | +80/+848/+1616 | 3× MtArray<cPlayDataAccumulate>[32] (0x18 B × 32 each) — **inline** within the 2384 B body (cChr+6264), covered by flat char save. Dtor destructs in place, no free. | **CLEAR** (inline) |
+| cChrInput | +0x21C8 | `initInputBuffer` (0x14002E440) does inline memset/stores only, zero allocation; all rings embedded in 0x570 body. | **CLEAR** (inline) |
+| mpChainSetup | cChr+0x67F0 | Points to sChainSetup static resource (per field map §3) | CLEAR (stable resource) |
 | sReplay | +0x?? | Full replay input buffer (internal pointers, skip) | SKIPPED (stale ptrs) |
 | uShot | +0x08 | Circular-list node linkage (not heap-array, captured by walk) | CAPTURED |
 | cGameEffect | pool | Per-effect state nodes (pool allocator, skip) | SKIPPED |
 
-The cChrCmd subclasses (Spatk, BtnChrg, Combo) inherit from cChrCmd and may
-have their own heap arrays beyond the base `+0x178` line buffer. The Ghidra
-cross-refs to `cChrCmd__allocAndResetLineBuffer` and `cChrCmd__reset` should
-identify them. Only the base cChrCmd line buffer is fixed here.
+**Audit conclusion (Ghidra, dtor-based ownership analysis):** the shared cChrCmd
+teardown `FUN_140025430` — used by base, Spatk, and Combo dtors — frees exactly
+one heap block: the `+0x178` line buffer. Both subclasses are the identical
+0x218 B size as the base class (their `operator_new` calls request 0x218), so
+they add vfn overrides only, no fields. BtnChrg (embedded at +0x138) and Limit
+(embedded at +0x8) are fully inline. Therefore the `+0x178` fix covers ALL
+cChrCmd-family heap state. cAtkCtrl's three cPlayDataAccumulate arrays are
+inline per its ctor (`MtArray__initElements(this+80/+848/+1616, 0x18, 0x20, ...)`)
+and land inside the flat character snapshot.
+
+## Snapshot-gap audit round 2 (2026-07-09) — fixed in BuildRegions
+
+Systematic cross-check of BuildRegions against the RE docs
+(`/media/god/tempData/mvc3/docs`, esp. `snapshot_reference_for_r00tz.md`,
+`uShot_subclass_tails.md`, `sHitSolver_field_map.md`, `rng_inventory.md`):
+
+| # | Gap | Impact | Fix |
+|---|-----|--------|-----|
+| 1 | **uShot hardcoded 0x2200** truncated 13 subclass tails (up to 0x2314: uShotLaserRekkouha `mIsGroundHit`@+0x2310; Axe/Torch/LandMine/Ouroboros latches @+0x2210+). Symptoms per doc: beam head snaps back, pillar counts reset, power-up/armed latches lost on restore. | Desync whenever those projectiles are live during a resim window | DTI-driven size via vtable[4] (same `GetObjectDti` path as characters), fallback 0x2320 clamp. All tails are POD — no new heap-ptr hazard. Node/EffectSlot ptrs at +0x2058..+0x2070 are pool-stable across frames (sCollision map §Node allocator). |
+| 2 | **sEffect RNG (sEffect+0x3C, 16 B) not saved.** Second within-round RNG source; reseeded only at round start; advances during the round. rng_inventory.md §5.1 lists it as required (`rng_sEffect`); §6.3 makes it a determinism-harness invariant. | Effect-side RNG divergence after any resim | Added `*(0x140E17A38)+0x3C` (16 B) to BuildRegions next to the global RNG. |
+| 3 | **sHitSolver size 0x34080 truncated mid-SortBucketB.** True body = 0x3808C (sHitSolver_field_map.md §2): SortBucketB @+0x34078 (0x4008 B) and mWorkCnt/B/Final tail @+0x38080 were mostly dropped. Buckets hold pointers into the cHitNode pool — restoring bucket A without bucket B is inconsistent state. | Potential stale bucket-B pool references during resim of collision-heavy frames | Bumped to 0x3808C. |
+
+### Checked and NOT gaps
+
+- **sCollision (0x239E0)** — intentionally not snapshotted. Doc conclusion
+  (sCollision_hit_primitives_map.md §Phase-1): BVHs + NodeLists **self-heal
+  within 1 frame** from correct cChr/uShot state; counts are zeroed each
+  `sCollision__move`; restoring its 246 heap buffer ptrs would dangle. Resim
+  re-runs `sCollision__move` (rollback.cpp VTableCall +0x401a0), so downstream
+  state regenerates.
+- **sAction 0x300 over-save** — actual body is 0x250; the extra 0xB0 is a
+  harmless over-read into adjacent static memory. §7a of the sAction map
+  confirms flat memcpy is sufficient (no side heap).
+- **cChr per-character RNG (+0x2D80)** — inside the flat char body. Covered.
+- **sGSound voice-ID counter (0x140D5336C)** — audio-only nondeterminism
+  (voice IDs); no gameplay impact. Skipped deliberately.
+- **rCloud emitter RNG (+280 in 320-B emitter)** — visual particle jitter,
+  spawned via sUnit categories we skip; global-RNG-seeded on first use.
+  Visual-only.
+- **nNetwork Session RNG (+8240)** — out of gameplay-sim scope.
+
+### Known-open (deferred, documented)
+
+- **Cutin (uCutIn) draw-layer contamination** — snapshot taken mid-cutin then
+  restored after the cutin dies leaves participants stranded on the cutin
+  render layer (`cUnit+0x11C` mask + MtObject+0x10 flag 0x4000 cleared) →
+  invisible characters. Fix options ranked in snapshot_reference_for_r00tz.md
+  §6/§8 (cheapest: post-restore, if `*(sMvc3Main+0xA0)==0`, reset each char's
+  draw-layer mask to `(mask & 0xFF8FFFFE) | 1` and set flag 0x4000). Also
+  `sMvc3Main +0xA0/+0xB0/+0xB8` (mpCutIn/mpCam/mpCamOld) dangle after restore
+  and block the next hyper.
+- **Round-boundary rollback** — sReplay__onRoundStart reseeds all RNGs from
+  the round seed; a resim window crossing a round boundary must re-apply the
+  reseed (snapshot_reference §1). Netplay windows are ≤16 frames so this only
+  matters at round transitions; refuse/force-confirm around
+  `sAction.mStep==12 && mSubStep>=1` (training reset = destructive stage
+  reload, cannot resim across it — sAction map §7b).
+- **Stage-object state (uStage/uStgObj)** — outdoor-stage RNG
+  (`mIRandResult/mFRandResult` @ uStage+5584) and per-StgObj FSM/user-data
+  advance per frame (sArea_sStage map). Visual for most stages; MadGear
+  barrels etc. are gameplay-adjacent but stage hazards don't affect hitboxes
+  in UMVC3. Deferred.
 
 ## Key addresses
 
