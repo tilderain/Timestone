@@ -368,11 +368,9 @@ void Netplay_Init(ENetHost* host, ENetPeer* peer)
     {
         HookLog("Netplay: Initialized, service thread running\n");
 
-        // NOTE: no seed packet is sent anymore.  The startup window
-        // (frames 0..delay+rollback) is locally pre-confirmed as zero input
-        // in Controller's IsFrameConfirmed — both sides force zero input for
-        // those frames anyway, so no wire exchange is needed and a stale
-        // seed packet can no longer falsely confirm frames beyond the window.
+        // Controller sends its forced-zero startup history from normal frame
+        // boundaries. This primes delay-mode confirmation without a synthetic
+        // packet from the pre-battle frame epoch.
     }
     else
     {

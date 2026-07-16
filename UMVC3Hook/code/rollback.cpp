@@ -2679,6 +2679,8 @@ static void __fastcall hkCallSRender(uint64_t param_1)
 static void __fastcall hkMain_move(uint64_t param_1)
 {
     if (g_isResimulating) {
+        *(uint32_t*)(param_1 + 0xA8) = 1;
+        *(uint32_t*)(param_1 + 0xA4) = 1;
         // Force tick=0 so the game's dispatcher loop won't call
         // sMvc3Main__move again.  Setting tick=1 was the root cause
         // of the infinite loop: the dispatcher checked tick, saw 1,
@@ -2693,6 +2695,22 @@ static void __fastcall hkMain_move(uint64_t param_1)
         *(float*)(param_1 + 0x80) = 1.0f;
         return;
     }
+
+    // Eliminate job scheduling as a source of peer-dependent floating-point
+    // ordering in constraint and character-push work. sMain::move copies the
+    // desired count at +0xA8 into the active count at +0xA4, so set both before
+    // the call. Keep this active from loading through fighting so pre-fight
+    // collision caches are constructed under the same execution mode.
+    if (Netplay_IsActive()) {
+        static bool loggedSingleThread = false;
+        *(uint32_t*)(param_1 + 0xA8) = 1;
+        *(uint32_t*)(param_1 + 0xA4) = 1;
+        if (!loggedSingleThread) {
+            HookLog("Netplay: forcing deterministic single-thread job execution\n");
+            loggedSingleThread = true;
+        }
+    }
+
     oMain_move(param_1);
 
     // Netplay determinism: mDeltaTime (+0x80) is QPC-derived wall-clock
@@ -2700,8 +2718,13 @@ static void __fastcall hkMain_move(uint64_t param_1)
     // double-tap window timers integrate it, so host and client drift apart
     // and eventually detect dashes on different frames (frame-227 desync).
     // Force exactly 1 frame of game time per tick on both machines.
-    if (Netplay_IsActive())
+    if (Netplay_IsActive()) {
         *(float*)(param_1 + 0x80) = 1.0f;
+        // Defend against runtime settings code changing the desired count
+        // between ticks. The next sMain::move will copy this value to +0xA4.
+        *(uint32_t*)(param_1 + 0xA8) = 1;
+        *(uint32_t*)(param_1 + 0xA4) = 1;
+    }
 }
 
 // ===========================================================================

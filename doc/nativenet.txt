@@ -1,0 +1,672 @@
+The native netcode is not just an input ring buffer. It is a complete online-session subsystem that combines matchmaking, Steam transport, message serialization, delayed input synchronization, frame pacing, fight-time synchronization, connection-loss handling, desync detection, spectator playback, and online UI behavior.
+The most useful mental model is:
+Steam / CMU session
+    -> native network message queue
+    -> sNetwork / sMessage dispatch
+    -> sMvc3SyncPad / cCommunicationTool
+    -> delayed input rings
+    -> cChrInput::processFrameInput
+    -> character simulation
+The core object is the native sMvc3SyncPad communication state, referred to by the decompiler as a cCommunicationTool. Its important state begins around sMvc3SyncPad + 0xC00, with the two input ring pointers at approximately +0xD18 and +0xD20.
+1. Online session and matchmaking
+Before gameplay synchronization begins, the game establishes an online session.
+The native system has several layers:
+Steam interfaces
+    -> sNetworkLibrary
+    -> sNetwork
+    -> sNetworkRoom
+    -> sAgentSession
+    -> sMvc3SyncPad
+Steam interfaces
+The binary creates a large group of Steam interfaces in Steam__createAllInterfaces @ 0x140212E30.
+The relevant ones include:
+- ISteamClient
+- ISteamUser
+- ISteamFriends
+- ISteamMatchmaking
+- ISteamMatchmakingServers
+- ISteamNetworking
+- Steam user stats
+- Steam remote storage
+- Steam screenshots
+- Steam HTTP
+- Steam voice/controller-related interfaces
+The native system therefore assumes Steam is available and uses Steam for more than just gameplay packets. Steam is involved in identity, lobby/session state, invites, and transport.
+The lazily obtained gameplay networking interface is returned by:
+MtSteam__getInterfaceNetworkingLazy @ 0x1404F33D0
+That function ultimately returns the cached Steam networking interface created by the global Steam interface initialization.
+Capcom matchmaking room
+The native room object is constructed by:
+sNetworkRoom__sNetworkRoom @ 0x14028C700
+The room layer appears to manage:
+- Room creation and destruction.
+- Player slots.
+- Player identities.
+- Ready state.
+- Character/stage/match metadata.
+- Battle readiness.
+- Battle result reporting.
+- Room version negotiation.
+- Lobby/session synchronization.
+The game contains the identifier:
+MARVEL_VS_CAPCOM_3
+This is used by the Capcom Matchmaking Unit, or CMU. The native online topology is therefore hybrid:
+Capcom CMU:
+    matchmaking, room state, player coordination
+Steam lobby:
+    discovery, invites, session presentation
+Steam networking:
+    gameplay/session transport
+This distinction matters because hijacking the gameplay ring does not remove the need to satisfy the room and session layers. The native netcode expects those objects and state machines to be initialized.
+2. Native network update loop
+The native network system is updated from the game’s main update path.
+The rough native frame pipeline is:
+sMvc3Main__move
+    -> sMain__move
+        -> frame pacing and Sleep
+    -> sMvc3SyncPad__move
+        -> latency update
+        -> frame counters
+        -> native input synchronization
+    -> character/game simulation
+    -> rendering
+The native networking is not serviced by the game’s delay-job worker threads. Those threads are primarily for graphics and asset work.
+The network message path is also primarily main-thread driven:
+network packets arrive through Steam/internal networking
+    -> native message queue
+    -> sNetPad__processPendingNetworkMessages
+    -> sMvc3SyncPad / sNetPad dispatch
+ sNetPad__processPendingNetworkMessages @ 0x14028D500 drains pending messages from the native network/message system. It invokes internal functions associated with:
+- The current network session.
+- The native message queue.
+- Latest message slots.
+- Network protocol processing.
+This means the game can receive data asynchronously inside Steam or its lower-level networking implementation, but the gameplay-facing processing occurs when the main game loop services it.
+That is an important difference from the current implementation, where the custom ENet service thread owns socket operations and queues complete input packets for the game thread.
+3. The native communication object
+The native communication object contains both input synchronization state and general online-session state.
+The major fields identified from Ghidra are approximately:
+Offset	Role
++0xC48	Current local input/state area
++0xC58	Character select/session-related pointer
++0xD10	Player 3/spectator-related flag
++0xD11	Input-disabled or waiting flag
++0xD13	Automatic-input mode
++0xD14	Automatic-input counter/data
++0xD18	One native input ring
++0xD20	Second native input ring
++0xD28	Network status/session object
++0xD30	Live synchronized frame cursor
++0xD34	Read cursor for first ring
++0xD38	Read cursor for second ring
++0xD3C	Received/drop-related counter
++0xD40	Input/transmission-related counter
++0xD44	Native outbound write cursor
++0xD48	Acknowledged/consumed remote cursor
++0xD50	Desync/drop/frame failure counter
++0xD54	Prediction lookahead
++0xD58	Current input being transmitted/processed
++0xD60	Ring/frame gap metric
++0xD68	Replay recording mode
++0xD6C	Replay frame counter
++0xD78	Current input delay
++0xD7C	Delay-change cooldown
++0xD80	Delay-increasing flag
++0xD8C	Dynamic delay enabled
++0xD90	Maximum delay threshold
++0xD94	Minimum delay threshold
++0xD98	Delay increase rate
++0xD9C	Delay decrease rate
++0xDBC	Maximum prediction window
++0xDD0	Timing/send accumulator
++0xDEC	Remote quality metric
++0xDF0	Local quality metric
++0xDF4	RTT/ping value
++0xDF8	Current delay mode
++0xDFC	Low-ping threshold
++0xE00	High-ping threshold
++0xE04	High-ping delay value
++0xE08	Medium-ping delay value
++0xE14	Desync/fencepost state
++0xE1C	Desync/fencepost state
++0xE24	Desync/fencepost state
++0xE2C	Desync/fencepost state
++0xE34	Fight-time baseline
++0xE40	Spectator/player-3 position accumulator
+Some field names remain approximate because the original symbols are unavailable and the decompiler sometimes assigns misleading types. In particular, the fields previously described as position drift are partly timing and send-accumulator state.
+4. The two native input rings
+The native system uses two ring buffers.
+Each ring is approximately:
+struct NativeInputRing {
+    int writeCursor;
+    int capacity;       // observed as 120
+    // ring entries follow
+};
+Each entry is approximately eight bytes:
+struct NativeInputEntry {
+    uint32_t frame;
+    uint16_t input;
+    uint16_t padding;
+};
+The capacity is about 120 frames.
+A ring slot is selected by:
+frame % 120
+The helper functions include:
+sNetPad__getRingSlot             @ 0x1402893D0
+sNetPad__writeRingSlot           @ 0x140288D30
+sNetPad__initRingSentinel        @ 0x140288E20
+sNetPad__readRingButtonMasked    @ 0x1402894F0
+sNetPad__isRingSlotMarkerCDCD    @ 0x140289680
+A slot can contain a special 0xCDCD marker indicating that the expected input has not been populated.
+Writing a ring slot
+sNetPad__writeRingSlot writes:
+- The frame number.
+- The 16-bit button/input value.
+- Possibly a flag bit in the stored input.
+- The ring’s next write position.
+The native input format is smaller than the custom format used by the mod. The native gameplay input is effectively a 16-bit button bitfield, while the mod’s packet structure currently transports 32-bit values.
+Clearing a ring slot
+sNetPad__initRingSentinel marks a slot as unavailable:
+frame = 0xCDCD
+input = 0xCDCD
+Those markers are used to distinguish “no input has arrived” from a valid neutral input.
+Reading a ring slot
+The native read functions check:
+- The current read cursor.
+- The ring’s write cursor.
+- Whether an entry exists for the requested slot.
+- The stored button mask.
+The ring is therefore not merely a history buffer. Its cursor positions determine whether the game is allowed to continue simulation.
+5. Native input delay initialization
+The native delay timeline is initialized by:
+sNetPad__initializeInputDelay @ 0x14028B4D0
+The function calculates the initial delay from:
+base configured delay at +0xDA4
++ active slot-specific delay at +0xDA8 + 4 * slot
+For a live online battle, it then writes that many empty/sentinel-like delayed entries into one of the native rings and advances the outbound write cursor.
+The initialization also:
+- Dispatches pending inbound messages.
+- Resets native CRC/fencepost state.
+- Clears the spectator/player-3 accumulator.
+- Resets synchronization state.
+- Notifies a native network object if one exists.
+This happens as part of the native battle setup, not at arbitrary gameplay time.
+The purpose is to establish a shared timeline in which inputs begin being consumed only after the agreed delay has elapsed.
+6. Local input collection
+Local online input is collected by:
+sNetPad__sendOnlineInputFrame @ 0x1402896E0
+The function:
+1. Checks that the battle is a live online battle.
+2. Checks that the relevant character/team is active.
+3. Obtains the local pad singleton.
+4. Reads the local input with SOCD cleaning.
+5. Determines the player/team context.
+6. Applies button remapping and facing-direction rules.
+7. Stores the result as the outbound button state.
+The relevant path is conceptually:
+sPad__getPlayerInput_withSOCDClean
+    -> cChrInput__buttonRemap
+    -> sNetPad__setOutboundButton
+The native function does not directly send a UDP packet at this point. It prepares the input for the later sNetPad__tickInputSender path.
+This is different from the custom architecture, where local input is collected at the character input hook and inserted into the mod’s frame-indexed input history.
+7. Native packet/message serialization
+Native input packets are not simple fixed structs like the custom InputPacket.
+The native transport uses the game’s object/property/message system. Relevant types include:
+MsgInputData
+MsgInputActData
+MsgInputActData2
+MsgInputActData3
+MsgInputActData4
+MsgInputActData5
+MsgInputActData6
+MsgInputActData7
+MsgInputActData8
+MsgInputActData9
+MsgInputActDataRep
+MsgInputCmd
+MsgCrcData
+MsgGalleryData
+The DTI objects are located around:
+0x1402892D0 - 0x1402893A0
+The native dispatch function is:
+sMvc3SyncPad__cCommunicationTool__dispatchMessage_maybe @ 0x14028A080
+It identifies incoming messages by querying their DTI identity and comparing it against known message types.
+For each type it selects a handler, such as:
+sNetPad__handleInputActData  @ 0x140288C80
+sNetPad__handleInputActData2 @ 0x140288590
+sNetPad__handleInputActData3 @ 0x140288670
+...
+sNetPad__handleInputActData9 @ 0x140288BA0
+sNetPad__handleInputCommand @ 0x140288D10
+sNetPad__handleCrcData       @ 0x140288400
+The message system supports batching multiple input frames into one message. The MsgInputActDataN forms carry increasing numbers of input values, up to nine frames in the observed dispatch table.
+This batching is likely intended to reduce overhead and accommodate the native network protocol’s packet scheduling. It is not the same as rollback history transmission. The batched frames are still inserted into the native delayed ring.
+8. Receiving remote input
+For a normal input message, the handler extracts:
+- A frame or starting frame.
+- One or more 16-bit input values.
+- Quality/latency metadata.
+- Possibly a life/fencepost value.
+For example, sNetPad__handleInputActData:
+1. Ignores the message for spectator battles.
+2. Extracts remote/local quality bytes.
+3. Stores those quality values in the communication object.
+4. Reads the frame number and input value.
+5. Writes the input into the native ring at +0xD20.
+6. Increments a received-input counter.
+The multi-frame variants do the same thing repeatedly for multiple consecutive ring slots.
+The important detail is that arrival does not directly modify the character’s current input. It only populates the native delayed timeline.
+The native game later consumes those inputs from the ring when its read cursors reach the corresponding frames.
+9. How native input ownership works
+sNetPad__readBufferedInputForTeam @ 0x140289520 is the final native selection helper used by cChrInput__processFrameInput.
+The native input function does roughly this:
+determine whether the local peer owns slot 1
+    -> choose P1 or P2 native ring reader
+    -> read buffered button value
+    -> advance a corresponding counter
+The exact team-to-ring choice depends on:
+sAgentSession__isLocalSlot1
+This means the same native function behaves differently on host and client. The ring assignment is not simply “ring A is remote, ring B is local” in an invariant way. It changes based on session ownership.
+The native process-frame function calls the helper only when:
+sBattleSetting__isLiveOnlineBattle == true
+That predicate accepts live online battle types, notably BattleType 3 and BattleType 9.
+10. Native input consumption and stalling
+The native code does not freely simulate indefinitely when remote input is unavailable.
+The relevant function is:
+sNetPad__consumeRemoteInputFrame @ 0x14028BE70
+It examines the next expected slots in both native rings.
+The function checks whether either slot contains the 0xCDCD marker. If data is missing, it can:
+- Start a network/wait indicator.
+- Preserve the waiting state.
+- Avoid normal synchronized advancement.
+- Increment an internal timeout counter.
+- Display a network warning after a prolonged stall.
+The observed timeout threshold is approximately 180 frames.
+When a previously missing slot becomes available, the function can stop the network indicator.
+There are also special cases where the function writes neutral input into a missing slot. Those cases are restricted by:
+- Battle/session readiness.
+- Action scheduler state.
+- UI banner state.
+- Input lock flags.
+- Specific pre-fight or exceptional modes.
+This is not general gameplay prediction. During normal fighting, missing synchronized input causes the native system to wait rather than run speculative simulation.
+11. The native per-frame sender
+The primary native per-frame synchronization function is:
+sNetPad__tickInputSender @ 0x14028BC10
+It has two fundamentally different paths.
+Connected path
+When the native network status object reports an active connection, the function:
+1. Reads timing values from sMain.
+2. Updates internal timing/send accumulators.
+3. Examines the native ring gap.
+4. Checks prediction and quality thresholds.
+5. Decides whether the current local input can be transmitted.
+6. Writes local input into the ring.
+7. Advances the outbound write cursor.
+8. Dispatches queued outbound packets.
+9. Resets an accumulator when a packet is successfully staged.
+The function uses several conditions involving:
+- Ring availability.
+- Current delay mode.
+- Local/remote quality.
+- Frame-distance metrics.
+- Timing accumulators.
+- Maximum prediction settings.
+This is a delay/synchronization controller, not a rollback scheduler.
+Disconnected or failed path
+When the connection is not considered alive, it:
+1. Increments a desync/drop counter.
+2. Calls the retransmission helper.
+3. Marks the current slots in both rings as unavailable.
+4. Advances both ring read cursors.
+5. Advances the live frame cursor.
+6. Resets some counters.
+7. Recomputes ring gap metrics.
+8. Updates the native life/fencepost checksum.
+9. Sends a desync fencepost.
+10. Checks for a desync condition.
+11. Potentially displays the network indicator and resets simulated-lag state.
+12. Reads ring inputs into the game-facing input fields.
+The fact that the failure path advances the native cursor and clears slots is one of the reasons it is dangerous to reuse directly for rollback. Its notion of “recovering” from a network problem is not “restore an old snapshot and run corrected frames”; it is closer to retransmit, skip, clear, or enter a degraded state.
+12. Retransmission and prediction surrogate
+The native retransmission helper is:
+sNetPad__resendIfTimeout @ 0x14028B1D0
+It looks at the gap between expected and available frames and compares it to the configured prediction budget at approximately +0xDBC.
+Within the permitted gap, it attempts to retransmit or reinsert input data into the native ring.
+Once various budgets or thresholds are exceeded, it can stop trying to advance normally and allow the system to hold or wait.
+This is the closest native behavior to prediction recovery, but it is not rollback:
+native:
+    missing input
+    -> hold/wait/retransmit/reinsert input
+rollback:
+    missing input
+    -> predict
+    -> simulate
+    -> receive correction
+    -> restore state
+    -> re-simulate
+No native state snapshot or restoration mechanism was found in this path.
+13. Native dynamic delay adjustment
+Native delay adjustment is handled in the broader sync-pad update logic, including:
+sMvc3SyncPad__move
+sMvc3SyncPad__adjustDynamicDelay_maybe
+The communication object tracks:
+- Current RTT/ping at +0xDF4.
+- Delay mode at +0xDF8.
+- Low/high ping thresholds at +0xDFC and +0xE00.
+- Delay values for different quality ranges at +0xE04 and +0xE08.
+- Current delay at +0xD78.
+- Delay cooldown at +0xD7C.
+- Increase/decrease rates at +0xD98 and +0xD9C.
+- Minimum/maximum thresholds at +0xD94 and +0xD90.
+The broad behavior is:
+if dynamic delay disabled:
+    leave delay alone
+if network quality is good and ring gap is small:
+    gradually increase delay to smooth jitter
+otherwise:
+    gradually decrease or adjust delay based on quality
+A delay change is not an isolated setting. It changes the relationship between:
+- Outbound input frames.
+- Ring write cursors.
+- Ring read cursors.
+- Fight-time frame progression.
+- Native synchronization messages.
+The native system is designed to trade responsiveness for fewer stalls. That is appropriate for delay-based netcode but conflicts with a fixed rollback window.
+14. The live synchronized frame cursor
+One of the more important discoveries is that the native frame cursor is gameplay-relevant.
+The live cursor is approximately:
+sMvc3SyncPad + 0xD30
+It is advanced as the native synchronized input timeline advances.
+The native fighting-time baseline is approximately:
+sMvc3SyncPad + 0xE34
+At the transition into the fighting phase, the game captures the current live cursor:
+fightTimeBaseline = liveFrameCursor;
+The native online fight elapsed time is then effectively:
+elapsedSeconds =
+    max((liveFrameCursor - fightTimeBaseline) / 60, 0);
+The remaining round time is:
+remainingSeconds =
+    max(180.0f - elapsedSeconds, 0.0f);
+The functions identified for these operations are:
+sMvc3SyncPad__getRemainingRoundSeconds @ 0x140289590
+sMvc3SyncPad__getFightElapsedSeconds   @ 0x1402895C0
+sMvc3SyncPad__captureFightTimeBaseline @ 0x14028B970
+The native online sAction__stepFighting @ 0x140007080 does not simply integrate each machine’s local wall-clock delta. It overwrites its fighting clocks from the synchronized net frame.
+This is necessary because many systems depend on the shared simulation timeline:
+- Round timeout.
+- Animation timing.
+- Hitbox and hurtbox windows.
+- Throw and invulnerability windows.
+- Projectile and assist lifetimes.
+- Scheduled transitions.
+- Collision and pushbox state.
+- Post-fight thresholds.
+A local machine must not advance its action timer while the other peer is waiting for a missing input frame.
+This is one of the most valuable native invariants for the current implementation.
+15. Why the cursor is tied to input consumption
+The native timing model is effectively:
+shared delayed input timeline
+    + shared consumed-input cursor
+    + fight time derived from that cursor
+If the two peers consume different numbers of input frames, they can disagree about:
+- Which input belongs to a simulation tick.
+- How much fight time has elapsed.
+- When a timeout or phase transition should occur.
+- How long collision or action state should persist.
+This explains why simply overriding character buttons is not sufficient by itself. The mod also needs to keep game timing and simulation frame numbering aligned.
+The current custom implementation addresses this by hooking sAction__stepFighting and deriving its time fields from the custom synchronized frame rather than allowing the offline local-delta branch to run independently.
+16. Desync detection
+The native system has a fencepost/checksum mechanism.
+Relevant functions include:
+sNetPad__sumTeamLifeForFencepost
+sNetPad__sendDesyncFencepost_90f @ 0x14028A730
+sNetPad__storeRemoteDesyncFencepost
+sNetPad__checkDesyncFencepost @ 0x140288DB0
+The communication object contains multiple fencepost/checksum fields around:
++0xE14
++0xE1C
++0xE24
++0xE2C
+The native input message also carries a cached life-related value obtained through:
+sNetPad__getRawLifeSumCached @ 0x140289580
+The native system uses that value as a lightweight consistency check. It can:
+- Calculate local team life totals.
+- Send a compact fencepost value.
+- Store the remote value.
+- Compare local and remote values.
+- Reset the fencepost fields when they agree.
+- Declare a desync when they disagree.
+The native CRC message path is separately dispatched through:
+sNetPad__handleCrcData @ 0x140288400
+The native CRC/fencepost mechanism is not a full rollback state verifier. It detects selected state differences, especially life/fencepost mismatches, but it does not identify the first divergent frame or repair the state.
+The custom code’s per-frame checksum and ground-truth packets are more useful for rollback diagnostics because they associate state with absolute frame numbers and can compare historical/resimulated state.
+17. Handling a desync or stalled connection
+When native consistency checks fail, the system can activate user-facing recovery behavior.
+Observed actions include:
+- Starting a network indicator.
+- Displaying a network banner.
+- Resetting simulated-lag fields.
+- Resolving or changing a UI badge/state.
+- Clearing or modifying input-lock flags.
+- Moving the session into a degraded or disconnected state.
+The native networking system therefore owns part of the online user experience. It is not just an invisible transport.
+Several UI decisions depend on scheduler state and online mode. This is another reason forcing native online predicates on top of custom ENet is unsafe: the game would begin showing native wait indicators and executing native teardown/recovery paths even though the custom transport does not maintain the native session state.
+18. Battle synchronization command
+At the beginning of a live fight, the native system sends an initial battle synchronization command.
+The function is:
+sNetPad__sendInitialBattleSyncCommand @ 0x14028BA00
+It only sends under conditions such as:
+- The local peer is the appropriate room owner/slot.
+- The room battle is live.
+- Character-select/session state is available.
+The command is a native MsgInputCmd, apparently with command value zero.
+The receiver handles it through:
+sNetPad__handleInputCommand @ 0x140288D10
+    -> sNetPad__initializeInputDelay @ 0x14028B4D0
+This means native battle startup includes an explicit synchronization barrier for the input timeline.
+The sequence is approximately:
+room declares battle live
+    -> native input command sent
+    -> receiver initializes delay rings
+    -> pending messages are dispatched
+    -> fencepost state is cleared
+    -> fight phase begins
+    -> current synchronized cursor captured as fight-time zero
+The mod’s BattleReadyPacket and frame epoch reset serve a similar purpose, but they are custom equivalents rather than native integration.
+19. The native cChrInput__processFrameInput path
+The main native input function is:
+cChrInput__processFrameInput @ 0x14002DD60
+Its behavior depends on mode.
+Early input state handling
+It first:
+- Obtains the character associated with the input object.
+- Checks character/gameplay flags.
+- Checks scheduler/action state.
+- Copies old input state.
+- Clears current processed/mask fields.
+- Determines whether the character is active.
+Offline/training/replay path
+For offline modes, it can:
+- Read from the normal pad.
+- Read from training/replay input.
+- Apply SOCD cleaning.
+- Apply button remapping.
+- Apply facing-direction left/right swapping.
+- Apply training/replay substitutions.
+- Apply game-state input locks.
+- Apply special-case command or assist restrictions.
+Native online path
+For live online battle mode, after the general setup, it calls:
+sNetPad__readBufferedInputForTeam
+The returned native buffered value is placed into the character input structure.
+After that, the function performs normal common post-processing:
+- Direction/facing remap.
+- SOCD/axis cleanup.
+- State-dependent button masks.
+- Pause/UI-related masking.
+- Recording/net-active overrides.
+- Processed input field updates.
+This is why the current hook is strategically positioned well. Calling the original function first preserves all normal input translation and state-field setup, and then replacing the final game-facing fields allows the custom netplay system to control what the simulation consumes.
+20. Spectator and replay behavior
+The native communication object also supports spectator/watch mode.
+The relevant distinctions are:
+BattleType 3 or 9:
+    live online battle
+BattleType 4:
+    online spectator/watch battle
+The spectator path uses different frame/time sources. In particular, spectator mode can use a replay frame cursor rather than the live synchronized input cursor.
+Relevant functions include:
+sNetPad__spectatorReplayDriver @ 0x14028C130
+sNetPad__resetReplayInputState  @ 0x14028C450
+sNetPad__ingestSpectatorReplayInputs @ 0x140288430
+The native message dispatcher has a dedicated MsgGalleryData type for spectator input/replay data.
+The spectator system can:
+- Assign watched players.
+- Stream input/state information.
+- Feed a replay-like frame cursor.
+- Drive observed player inputs.
+- Avoid treating the observer as a live participant.
+- Use different UI and frame progression rules.
+This is important because online mode predicates are not binary in the native engine. Enabling “online” can activate either live peer synchronization or spectator/replay synchronization depending on the battle type.
+21. Native sMvc3SyncPad__move
+The main sync-pad update is:
+sMvc3SyncPad__move @ the function referenced by 0x140289BE9
+The decompiled function performs several jobs:
+1. Obtains the message/session state.
+2. Reads current network latency from the native networking/message layer.
+3. Stores RTT at +0xDF4.
+4. Selects a native delay mode based on latency thresholds.
+5. Updates frame counters.
+6. Handles auto-input mode.
+7. Calculates prediction lookahead.
+8. Checks input-disabled state.
+9. Runs spectator driving logic.
+10. Handles player-3/spectator position accumulation.
+11. Updates the native input sender.
+12. Reads native ring inputs into game-facing communication fields.
+The dynamic delay selection uses native network latency, not the custom ENet RTT. It also updates mode values that affect subsequent ring synchronization.
+The function can set the input-disabled flag when native ring state indicates that synchronization is not ready. That flag feeds back into the rest of the native online pipeline.
+22. Native network transport implementation
+At a lower level, the game has a generic native networking stack with protocol objects and codecs.
+The available Ghidra symbols show:
+sNetwork__codecWritePacketHeaderEntry @ 0x140772BD0
+sNetwork__codecEncodeFrame            @ 0x1409400F0
+sNetwork__move                        @ 0x1406864D0
+The codec is substantially more complicated than a raw input packet serializer. The decompiled encoder includes:
+- Channel/frame handling.
+- Byte stream reads/writes.
+- Packet header encoding.
+- Channel availability checks.
+- Timing calculations.
+- Packet age tracking.
+- Per-channel byte accounting.
+- Packet selection/drop logic.
+- Arithmetic-style encoding behavior.
+- Bandwidth/queue heuristics.
+- Multiple protocol channels.
+The native network layer appears to multiplex various online data, not only fighting inputs. That likely includes room state, UI/session messages, voice-related or auxiliary data, and other protocol traffic.
+The exact wire protocol is not necessary for understanding gameplay synchronization, but it reinforces that replacing only the native input ring would not constitute a complete native-netcode hijack.
+23. Native message queue processing
+The game has a message singleton:
+sMessage__getInstance @ 0x1400047C0
+The message subsystem tracks:
+- Ready state.
+- Message queue slots.
+- Latest message indices.
+- Network session associations.
+- Teardown state.
+The functions include:
+sMessage__pollAndUpdate_272AA0
+sMessage__getLatestMsgSlot
+sMessage__getLatestMsgSlot_locked
+sMessage__getReadyBit
+sMessage__isMsgQueueDrained
+sMessage__isReadyAndQueueDrained
+ sMessage__pollAndUpdate_272AA0 polls the message subsystem and can invoke lower-level network processing.
+sNetPad__processPendingNetworkMessages then drains pending protocol/session messages before the sync-pad logic consumes input.
+The result is a layered queue model:
+native transport queue
+    -> message queue
+    -> network/session queue
+    -> DTI message objects
+    -> sNetPad handlers
+    -> input rings
+The custom ENet system intentionally removes most of these layers for gameplay input. It sends absolute-frame packets directly into a thread-safe queue, which is simpler and better suited to rollback.
+24. What the native system does not do
+The native netcode does not appear to provide:
+- State snapshots.
+- State restoration.
+- Frame rewind.
+- Headless re-simulation.
+- Late input correction against an already simulated frame.
+- A GGPO-style prediction/correction loop.
+- A complete deterministic state checksum for all game objects.
+- Automatic repair of divergent gameplay state.
+Its recovery behavior is based on:
+delay
+    + missing-input detection
+    + hold/wait
+    + retransmission
+    + native ring repair
+    + connection/desync UI
+That is why the native implementation is best categorized as delay-based synchronized input, not rollback.
+25. Native frame behavior in one complete sequence
+A normal live online battle roughly follows this sequence:
+1. Steam initializes.
+2. The network library creates native session objects.
+3. The room/CMU establishes player and battle state.
+4. The local/remote slots are assigned.
+5. The room transitions to a live battle.
+6. The native battle-sync command is sent.
+7. The receiver initializes its delay ring.
+8. Initial empty delayed slots are inserted.
+9. Pending native messages are dispatched.
+10. Native fencepost/CRC state is cleared.
+11. The game enters the fight phase.
+12. The current native live cursor is captured as fight-time zero.
+13. Each frame:
+       a. native latency and delay mode are updated
+       b. local pad input is translated
+       c. local input is placed into the outbound ring
+       d. outbound messages are serialized and sent
+       e. inbound messages are decoded
+       f. remote input is placed into the delayed ring
+       g. missing slots are checked
+       h. the game waits if synchronization is unavailable
+       i. ring inputs are copied to game-facing pad fields
+       j. character input processing reads the buffered input
+       k. action/fight clocks derive time from the shared cursor
+       l. the game simulates and renders
+14. Fencepost/CRC state is periodically exchanged.
+15. If a slot is missing, the game waits or enters a degraded state.
+16. If a desync is detected, native UI/recovery logic runs.
+17. At match end, room/network objects and rings are torn down.
+26. Relationship to the current implementation
+The current mod replaces or bypasses selected parts of that sequence:
+native local input capture:
+    replaced for custom netplay
+native packet transport:
+    replaced by ENet
+native input rings:
+    replaced by custom absolute-frame histories
+native native delay/retransmission:
+    replaced by custom delay/prediction/rollback logic
+native cChrInput final input:
+    overridden by the mod hook
+native state/time behavior:
+    partially adapted through snapshot restoration
+    and the sAction fighting-time hook
+native simulation:
+    retained
+The part worth preserving conceptually is the native shared-cursor invariant:
+do not let gameplay time advance independently from synchronized simulation frames
+The parts that are not worth adopting wholesale are:
+CMU/session/property-message dependencies
+native DTI packet protocol
+native two-ring ownership asymmetry
+dynamic delay state machine
+native retransmission behavior
+native connection/UI recovery
+native main-thread message servicing
+The native netcode is sophisticated, but it is sophisticated in the direction of making delay-based online play reliable and presentable. It is not a partially completed rollback engine waiting to be activated.

@@ -4,7 +4,7 @@
 
 **Build:** `make -j8` using MinGW-w64 cross-compiler on Linux. 
 
-**Ghidra:** The Ghidra MCP is available, and should be used after consulting the docs on reverse engineering notes.
+**Ghidra:** The Ghidra MCP is available, and should be used after consulting the docs on reverse engineering notes. If you are decompiling functions, please try to apply structs to the unknown and unnamed structs inside a function (if you have determined the struct such as cChrInput, sAction to be a suitable match).
 
 **Subagents** Please never under any circumstance use subagents to explore the codebase.
 

@@ -6,10 +6,10 @@ UMVC3 has a multi-layered pause system that freezes game logic at several
 independent levels when the pause UI is onscreen. Understanding these layers
 is necessary to keep the simulation ticking during rollback netplay.
 
-**Key finding:** You cannot pause during online matches in UMVC3's native
-netcode. Pressing Start in an online match either shows a non-pausing gallery
-overlay (ranked) or does nothing at all (player match). The game logic and
-network sync continue running underneath.
+**Key finding:** You cannot pause during a live online versus match in UMVC3's
+native netcode. Live online battles (BattleType 3 or 9) do not create a pause
+UI object. The non-pausing gallery overlay belongs to spectator/watch battles
+(BattleType 4), not live ranked versus.
 
 ---
 
@@ -25,10 +25,10 @@ freezes the game:
 - Provides: resume, quit, options, etc.
 - **Actually freezes game logic** via the `sMain` pause flag
 
-### `uBattleUiPauseNetGallery` — Gallery Overlay (online ranked only)
+### `uBattleUiPauseNetGallery` — Gallery Overlay (spectator/watch only)
 
 - Size: **0xc0** bytes
-- Created only when `isGameModeOnlineRanked()` returns **true**
+- Created only when `sBattleSetting__isOnlineSpectatorBattle()` returns **true**
 - Provides: a way to quit the match, possibly gallery/photo viewing
 - **Does NOT freeze game logic** — the game continues underneath
 
@@ -42,9 +42,9 @@ void uBattleUiCreatePauseMenu_maybe(longlong param_1)
     *(undefined2 *)(param_1 + 0x5ab8) = 0;
     *(undefined1 *)(param_1 + 0x5aba) = 0;
 
-    // --- ONLINE RANKED path: create NetGallery overlay ---
+    // --- SPECTATOR/WATCH path: create NetGallery overlay ---
     uVar3 = sBattleSetting__getInstance();
-    cVar2 = isGameModeOnlineRanked(uVar3);
+    cVar2 = sBattleSetting__isOnlineSpectatorBattle(uVar3);
     if (cVar2 != '\0') {
         if ((*(longlong *)(param_1 + 0x5ab0) != 0) && ...)
             *(undefined8 *)(param_1 + 0x5ab0) = 0;
@@ -70,11 +70,11 @@ void uBattleUiCreatePauseMenu_maybe(longlong param_1)
 
 ### Decision Table
 
-| Mode                | `isOnlineRanked` | `isOnlineBattle` | What's created             | Game pauses? |
-|---------------------|:----------------:|:----------------:|----------------------------|:------------:|
-| Offline (any)       | false            | false            | `uBattleUiPause`           | **Yes**      |
-| Online player match | false            | **true**         | **Nothing**                | No           |
-| Online ranked       | **true**         | true             | `uBattleUiPauseNetGallery` | No           |
+| Mode                | `isOnlineSpectatorBattle` | `isOnlineBattle` | What's created             | Game pauses? |
+|---------------------|:-------------------------:|:----------------:|----------------------------|:------------:|
+| Offline (any)       | false                     | false            | `uBattleUiPause`           | **Yes**      |
+| Live online versus  | false                     | **true**         | **Nothing**                | No           |
+| Online spectator    | **true**                  | true             | `uBattleUiPauseNetGallery` | No           |
 
 ---
 
@@ -109,7 +109,7 @@ state between the two peers.
 
 ---
 
-## The `uBattleUiPauseNetGallery` (Online Ranked "Pause")
+## The `uBattleUiPauseNetGallery` (Spectator/Watch "Pause")
 
 Its vfn29 event handler is essentially a **quit-only dialog** with a 60-frame
 (1 second) exit countdown:
@@ -346,15 +346,88 @@ cChrPause at character +0x1560
 
 ## Full Capability Matrix
 
-| Capability                   | Offline | Online (Ranked) | Online (Player) |
-|------------------------------|:-------:|:---------------:|:---------------:|
-| Game freezes                 | Yes     | No              | No              |
-| Pause menu (resume/quit/opt) | Yes     | No              | No              |
-| Gallery overlay              | No      | Yes             | No              |
-| Quit match                   | Yes     | Yes             | No*             |
-| P2 can trigger pause         | Yes     | No              | No              |
-| Netcode syncs pause state    | N/A     | No              | No              |
+| Capability                   | Offline | Spectator/Watch | Live Online Versus |
+|------------------------------|:-------:|:---------------:|:------------------:|
+| Game freezes                 | Yes     | No              | No                 |
+| Pause menu (resume/quit/opt) | Yes     | No              | No                 |
+| Gallery overlay              | No      | Yes             | No                 |
+| Quit match                   | Yes     | Yes             | No*                |
+| P2 can trigger pause         | Yes     | No              | No                 |
+| Netcode syncs pause state    | N/A     | No              | No                 |
 
 *In player matches, since no UI element is created at all, there is no way to
 quit via the pause button either. The match must be quit via other means (e.g.
 ALT+F4, task manager, or the Steam overlay).*
+
+---
+
+## Live Online Versus Experiment
+
+Ghidra analysis confirms that opening the full offline pause menu in a live
+online battle is mechanically possible, but not safe as a native synchronized
+pause.
+
+### Battle-type predicates
+
+| Function | Address | Meaning |
+|----------|---------|---------|
+| `sBattleSetting__isLiveOnlineBattle` | `0x140006A70` | BattleType is 3 or 9 |
+| `sBattleSetting__isOnlineSpectatorBattle` | `0x140006AB0` | BattleType is 4 |
+| `g__isOnlineBattle` | `0x140006AF0` | Either predicate above is true |
+
+### Creation blocker
+
+`sAction__openVersusPauseMenu` (`0x1402BA150`) runs when `sAction` enters match
+phase 5. It pre-creates a dormant pause object; Start later activates that
+object. The real `uBattleUiPause` creation branch is skipped by:
+
+```asm
+1402BA219  call g__isOnlineBattle
+1402BA221  test al, al
+1402BA223  jnz  0x1402BA281
+```
+
+For a controlled experiment, replace `75 5C` at `0x1402BA223` with `90 90`.
+This permits execution to fall through to:
+
+```text
+uBattleUiPause__operator_new(0x14a0, 0x10)  // 0x1402DF3A0
+uBattleUiPause__ctor(object, 0, 0)          // 0x1402DF210
+sUnit__addUnit(..., moveLine=0x19, object)   // 0x14051A6B0
+```
+
+This experiment should not also force the NetGallery path. In particular, the
+existing patches at `0x1402BA17E` and `0x1402E433B` manufacture spectator UI
+behavior outside BattleType 4 and are unrelated to opening the full menu.
+
+### Input and activation path
+
+Live online mode does not need a second patch to consume pause requests:
+
+1. `uBattleUiPause__move` (`0x1402E2E60`) calls the Start-edge reader at
+   `0x1402E0130` while the object is dormant.
+2. P1 Start can activate the menu. P2 Start remains gated by the secondary-pad
+   eligibility checks.
+3. `sNetPad__stepHelper` (`0x140289C30`) explicitly calls
+   `sGameUI__consumePauseRequest` (`0x1402C1600`) when `g__isOnlineBattle()` is
+   true. The ordinary `sGameUI__move` path skips this call online to avoid
+   consuming the same request twice.
+
+### Safety limitation
+
+The full menu uses the normal pause request fields at `sGameUI + 0x5AB8` through
+`+0x5ABC` and changes multiple `sUnit` move lines when the request is consumed.
+Nothing in the native live-online path transmits menu-open, menu-close, cursor,
+or pause state to the remote peer. Therefore:
+
+- The menu should render after bypassing the creation blocker.
+- The peer that opens it will apply the offline pause behavior locally.
+- The other peer will continue simulating, causing immediate timeline
+  divergence and likely timeout/desync behavior.
+- Quit and return-to-title actions also invoke broader scene/session teardown
+  paths and should not be assumed safe for rollback netplay.
+
+For rollback netplay, use the full menu only after adding a synchronized pause
+protocol, or keep simulation running and selectively suppress the full menu's
+pause side effects. The latter requires auditing each menu action because the
+full menu was designed around a frozen offline simulation.

@@ -54,6 +54,8 @@ static constexpr uintptr_t ADDR_GET_TEAM_INDEX            = 0x140004AC0;
 
 // sAction__stepIntro — auto-skip intro during netplay
 static constexpr uintptr_t ADDR_STEP_INTRO                 = 0x140007D90;
+// sAction__stepFighting — replace offline local-delta fight clocks during netplay.
+static constexpr uintptr_t ADDR_STEP_FIGHTING              = 0x140007080;
 
 // Character manager singleton (for desync checksum traversal)
 static constexpr uintptr_t PTR_SCHARACTER                  = 0x140d44a70;
@@ -188,7 +190,7 @@ static uint32_t  g_recordedGameInput[2][RING_SIZE];
 // Delay/rollback settings — defined here (above IsFrameConfirmed) because the
 // startup-window confirmation check reads them.
 static int32_t   g_delayFrames     = 2;
-static int32_t   g_rollbackFrames  = 8;
+static int32_t   g_rollbackFrames  = 0;
 
 static bool IsFrameConfirmed(int32_t frame)
 {
@@ -303,6 +305,7 @@ static constexpr uintptr_t NODE_NEXT_OFFSET      = 0x10;
 // ---------------------------------------------------------------------------
 static constexpr uintptr_t G_PSREPLAY_PTR = 0x140d4d9d8;
 static int32_t g_gameFrameBase = 0;
+static int32_t g_fightFrameBase = -1;
 
 static int32_t GetGameFrameCount()
 {
@@ -316,6 +319,7 @@ extern "C" void Controller_ResetFrameEpoch()
     uint64_t sReplay = *(uint64_t*)_addr(G_PSREPLAY_PTR);
     g_gameFrameBase = sReplay ? *(int32_t*)(sReplay + 0x54) : 0;
     g_netFrameCount = 0;
+    g_fightFrameBase = -1;
 }
 
 // ---------------------------------------------------------------------------
@@ -337,6 +341,7 @@ extern "C" void Controller_ResetBuffers()
     g_localPending    = 0;
     g_lastRemoteFrame = -1;
     g_lastRemoteInput = 0;
+    g_consecutivePredictedFrames = 0;
     g_desyncDetected   = false;
     g_desyncSeen       = false;
     g_desyncFrame      = -1;
@@ -401,6 +406,12 @@ extern "C" void Controller_SetRollbackFrames(int32_t n)
     if (n < 0)                  n = 0;
     if (n > ROLLBACK_WINDOW)    n = ROLLBACK_WINDOW;
     g_rollbackFrames = n;
+    if (n == 0)
+    {
+        std::memset(g_predictedInput, 0, sizeof(g_predictedInput));
+        std::memset(g_predictedFrame, -1, sizeof(g_predictedFrame));
+        g_consecutivePredictedFrames = 0;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -544,6 +555,18 @@ extern "C" void Controller_ResolveRemoteInput(int32_t frame)
         {
             g_predictedInput[idx] = false;
             g_usedRemoteInput[idx] = g_receivedInput[idx];
+            return;
+        }
+
+        // Delay-only netcode must never manufacture remote input. Its frame
+        // start path blocks until confirmation; other callers may inspect a
+        // future frame, but they must leave it unresolved rather than predict.
+        if (g_rollbackFrames == 0)
+        {
+            g_predictedInput[idx] = false;
+            g_predictedFrame[idx] = -1;
+            HookLog("Netplay: refusing to predict unconfirmed frame %d with rollback disabled\n",
+                    frame);
             return;
         }
 
@@ -819,6 +842,7 @@ static uint64_t __fastcall hkGetsCurrentInput_withSOCD(uint64_t pad, uint32_t pl
 // desync from button-based skipping.
 // ---------------------------------------------------------------------------
 static void(__fastcall* oStepIntro)(uint64_t param_1) = nullptr;
+static void(__fastcall* oStepFighting)(uint64_t param_1) = nullptr;
 extern "C" bool FrameStepper_IsBattleSynchronized();
 
 static void __fastcall hkStepIntro(uint64_t param_1)
@@ -829,6 +853,52 @@ static void __fastcall hkStepIntro(uint64_t param_1)
         return;
     }
     oStepIntro(param_1);
+}
+
+// Native online play derives these clocks from the synchronized netpad cursor
+// instead of accumulating each machine's local sMain delta.  The mod runs the
+// game in an offline BattleType, so reproduce that invariant from our shared
+// frame timeline.  Apply both before and after the original function: the
+// pre-write makes timeout/action threshold checks see synchronized time, while
+// the post-write removes the one local-delta increment performed by the
+// offline branch.
+static void ApplySynchronizedFightTime(uint64_t sAction)
+{
+    if (!sAction || !Netplay_IsActive() || !FrameStepper_IsBattleSynchronized())
+        return;
+
+    int32_t frame = g_isResimulating ? g_resimulateCurrentFrame : GetGameFrameCount();
+    if (frame < 0)
+        return;
+
+    if (g_fightFrameBase < 0)
+    {
+        g_fightFrameBase = frame;
+        HookLog("Netplay: captured sAction fight-time baseline at frame %d\n", frame);
+    }
+
+    int32_t elapsedFrames = frame - g_fightFrameBase;
+    if (elapsedFrames < 0)
+        elapsedFrames = 0;
+
+    // Native sMvc3SyncPad divides its cursor delta by 60 as an integer before
+    // converting to float, so sAction receives whole elapsed seconds.
+    float elapsedSeconds = (float)(elapsedFrames / 60);
+    float remainingSeconds = 180.0f - elapsedSeconds;
+    if (remainingSeconds < 0.0f)
+        remainingSeconds = 0.0f;
+
+    *(float*)(sAction + 0xF8)  = remainingSeconds; // mRTimeLimit
+    *(float*)(sAction + 0xFC)  = elapsedSeconds;   // mRTimePass
+    *(float*)(sAction + 0x100) = elapsedSeconds;   // mRTimePass2
+    *(float*)(sAction + 0x104) = elapsedSeconds;   // mTimePass
+}
+
+static void __fastcall hkStepFighting(uint64_t sAction)
+{
+    ApplySynchronizedFightTime(sAction);
+    oStepFighting(sAction);
+    ApplySynchronizedFightTime(sAction);
 }
 
 // ---------------------------------------------------------------------------
@@ -910,6 +980,22 @@ static void DrainAndProcessPackets()
     }
 }
 
+static void WaitForConfirmedFrame(int32_t frame, const char* reason)
+{
+    if (IsFrameConfirmed(frame) || !Netplay_IsActive())
+        return;
+
+    HookLog("Netplay: waiting for remote input frame %d (%s, local=%d, lastRemote=%d)\n",
+            frame, reason, g_netFrameCount, g_lastRemoteFrame);
+    while (!IsFrameConfirmed(frame) && Netplay_IsActive())
+    {
+        SwitchToThread();
+        DrainAndProcessPackets();
+    }
+    HookLog("Netplay: remote input frame %d wait complete (active=%d, lastRemote=%d)\n",
+            frame, Netplay_IsActive() ? 1 : 0, g_lastRemoteFrame);
+}
+
 // ---------------------------------------------------------------------------
 extern "C" void Controller_OnFrameStart()
 {
@@ -922,75 +1008,10 @@ extern "C" void Controller_OnFrameStart()
 
     g_localPending = 0;
 
-    // --- Drain every received packet.
-    //     By using the sender's transmitted start_frame, we align both games
-    //     to the same absolute timeline and prevent coordinate/frame drift.
-    InputPacket inPkt;
-    while (Netplay_GetInboundPacket(inPkt))
-    {
-        // Out-of-order protection: discard the packet entirely if its maximum
-        // frame coverage is older than or equal to our already known remote frame.
-        int32_t pktMaxFrame = (int32_t)inPkt.start_frame + NET_HISTORY_SIZE - 1;
-        if (pktMaxFrame <= g_lastRemoteFrame)
-        {
-            //continue;
-        }
-
-        for (size_t i = 0; i < NET_HISTORY_SIZE; i++)
-        {
-            // Cast to signed int32_t to handle negative/underflowed frame
-            // numbers gracefully during initial startup frames.
-            int32_t targetFrame = (int32_t)inPkt.start_frame + (int32_t)i;
-            if (targetFrame >= 0)
-            {
-                g_receivedInput[(uint32_t)targetFrame % RING_SIZE] = inPkt.inputs[i];
-                g_confirmedFrame[(uint32_t)targetFrame % RING_SIZE] = targetFrame;
-
-                // Track the latest known remote frame
-                // Guard: seed packet (flags == 0) still confirms frames
-                // to break the deadlock, but must NOT inflate g_lastRemoteFrame
-                // or real packets get discarded by the out-of-order check.
-                if (targetFrame > g_lastRemoteFrame && inPkt.flags != 0)
-                {
-                    g_lastRemoteFrame = targetFrame;
-                    g_lastRemoteInput = inPkt.inputs[i];
-                }
-            }
-        }
-
-        LogReceivedPacket(inPkt);
-
-        // Piggybacked checksum (Slippi-style): extract and compare.
-        if (g_netFrameCount >= DESYNC_SKIP_FRAMES)
-        {
-            int32_t csFrame = (int32_t)inPkt.checksum_frame;
-            if (csFrame >= 0)
-            {
-                uint32_t ridx = (uint32_t)csFrame % RING_SIZE;
-                g_remoteChecksum[ridx] = inPkt.checksum;
-                if (g_localChecksum[ridx] != 0 && csFrame < g_netFrameCount)
-                {
-                    uint32_t diff = g_localChecksum[ridx] > inPkt.checksum
-                                    ? g_localChecksum[ridx] - inPkt.checksum
-                                    : inPkt.checksum - g_localChecksum[ridx];
-                    g_desyncChecked[ridx]  = csFrame;
-                    g_desyncMismatch[ridx] = (diff > DESYNC_THRESHOLD);
-                    if (diff > DESYNC_THRESHOLD)
-                    {
-                        if (!g_desyncSeen && !g_desyncDetected)
-                            HookLog("DESYNC MISMATCH at frame %d: diff=%u local=0x%08X remote=0x%08X\n",
-                                    csFrame, diff, g_localChecksum[ridx], inPkt.checksum);
-                    }
-                }
-            }
-        }
-
-        // --- Extract remote frame advantage from inbound packet (GGPO-style) ---
-        // The sender tells us their local frame advantage. If they're ahead (negative),
-        // this will be negative from their perspective, meaning we're behind →
-        // positive from our perspective.
-        g_remoteFrameAdvantage = inPkt.frame_advantage;
-    }
+    // Use the same ingestion path here and inside waits. Previously each path
+    // had different stale-packet handling, so a packet could advance
+    // g_lastRemoteFrame without confirming the frame a waiter needed.
+    DrainAndProcessPackets();
 
     // Process inbound ground truth packets
     Rollback_ProcessInboundGroundTruth();
@@ -1023,57 +1044,7 @@ extern "C" void Controller_OnFrameStart()
             if (g_netFrameCount > spinWaitThreshold)
             {
                 int32_t minNeeded = g_netFrameCount - spinWaitThreshold;
-                while (!IsFrameConfirmed(minNeeded) && Netplay_IsActive())
-                {
-                    Sleep(1);
-                    InputPacket waitPkt;
-                    while (Netplay_GetInboundPacket(waitPkt))
-                    {
-                        int32_t waitPktMaxFrame = (int32_t)waitPkt.start_frame + NET_HISTORY_SIZE - 1;
-                        if (waitPktMaxFrame <= g_lastRemoteFrame)
-                        {
-                            continue;
-                        }
-
-                        for (size_t i = 0; i < NET_HISTORY_SIZE; i++)
-                        {
-                            int32_t targetFrame = (int32_t)waitPkt.start_frame + (int32_t)i;
-                            if (targetFrame >= 0)
-                            {
-                                g_receivedInput[(uint32_t)targetFrame % RING_SIZE] = waitPkt.inputs[i];
-                                g_confirmedFrame[(uint32_t)targetFrame % RING_SIZE] = targetFrame;
-                                if (targetFrame > g_lastRemoteFrame)
-                                {
-                                    g_lastRemoteFrame = targetFrame;
-                                    g_lastRemoteInput = waitPkt.inputs[i];
-                                }
-                            }
-                        }
-
-                        LogReceivedPacket(waitPkt);
-
-                        int32_t wcsFrame = (int32_t)waitPkt.checksum_frame;
-                        if (wcsFrame >= 0)
-                        {
-                            uint32_t wridx = (uint32_t)wcsFrame % RING_SIZE;
-                            g_remoteChecksum[wridx] = waitPkt.checksum;
-                            if (g_localChecksum[wridx] != 0 && wcsFrame < g_netFrameCount)
-                            {
-                                uint32_t diff = g_localChecksum[wridx] > waitPkt.checksum
-                                                ? g_localChecksum[wridx] - waitPkt.checksum
-                                                : waitPkt.checksum - g_localChecksum[wridx];
-                                g_desyncChecked[wridx]  = wcsFrame;
-                                g_desyncMismatch[wridx] = (diff > DESYNC_THRESHOLD);
-                                if (diff > DESYNC_THRESHOLD)
-                                {
-                                    if (!g_desyncSeen && !g_desyncDetected)
-                                        HookLog("DESYNC MISMATCH at frame %d: diff=%u local=0x%08X remote=0x%08X\n",
-                                                wcsFrame, diff, g_localChecksum[wridx], waitPkt.checksum);
-                                }
-                            }
-                        }
-                    }
-                }
+                WaitForConfirmedFrame(minNeeded, "rollback window exhausted");
             }
 
         // --- Once past the initial startup window, track consecutive predicted
@@ -1089,11 +1060,7 @@ extern "C" void Controller_OnFrameStart()
                 g_consecutivePredictedFrames++;
                 if (g_consecutivePredictedFrames >= g_rollbackFrames)
                 {
-                    while (!IsFrameConfirmed(g_netFrameCount) && Netplay_IsActive())
-                    {
-                        SwitchToThread();
-                        DrainAndProcessPackets();
-                    }
+                    WaitForConfirmedFrame(g_netFrameCount, "prediction budget exhausted");
                     if (IsFrameConfirmed(g_netFrameCount))
                         g_consecutivePredictedFrames = 0;
                 }
@@ -1187,41 +1154,12 @@ extern "C" void Controller_OnFrameStart()
             }
         }
     }
+    }
     else
     {
         // --- Legacy delay-based fallback: spin-wait for current frame's input.
         int32_t neededFrame = g_netFrameCount;
-        while (!IsFrameConfirmed(neededFrame) && Netplay_IsActive())
-            {
-                Sleep(1);
-                InputPacket waitPkt;
-                while (Netplay_GetInboundPacket(waitPkt))
-                {
-                    int32_t waitPktMaxFrame = (int32_t)waitPkt.start_frame + NET_HISTORY_SIZE - 1;
-                    if (waitPktMaxFrame <= g_lastRemoteFrame)
-                    {
-                        continue;
-                    }
-
-                    for (size_t i = 0; i < NET_HISTORY_SIZE; i++)
-                    {
-                        int32_t targetFrame = (int32_t)waitPkt.start_frame + (int32_t)i;
-                        if (targetFrame >= 0)
-                        {
-                            g_receivedInput[(uint32_t)targetFrame % RING_SIZE] = waitPkt.inputs[i];
-                            g_confirmedFrame[(uint32_t)targetFrame % RING_SIZE] = targetFrame;
-                            if (targetFrame > g_lastRemoteFrame)
-                            {
-                                g_lastRemoteFrame = targetFrame;
-                                g_lastRemoteInput = waitPkt.inputs[i];
-                            }
-                        }
-                    }
-
-                    LogReceivedPacket(waitPkt);
-                }
-            }
-        }
+        WaitForConfirmedFrame(neededFrame, "delay mode");
     }
 
     // --- Centrally resolve this frame's remote input so hkprocessFrameInput
@@ -1321,17 +1259,14 @@ extern "C" void Controller_OnFrameEnd()
     // for the recording index so it matches the render thread's read index.
     int32_t completedFrame = GetGameFrameCount();
 
-    // Don't send or capture inputs during the initial frames (0 through
-    // g_delayFrames + g_rollbackFrames).  During this window the game is still
-    // in its countdown phase and the player may move around — capturing those
-    // inputs would send nonzero data for frames where the remote side has only
-    // seen the zeroed seed packet, causing an immediate desync.
-    if (completedFrame <= g_delayFrames + g_rollbackFrames)
-        return;
+    // Input hooks force this startup window to zero, but we must still send its
+    // history. In delay mode both peers otherwise reach frame delay+1 and wait
+    // before either has ever queued a packet, producing a symmetric deadlock.
 
     // --- 1. Resolve remote input for the completed frame index so the rendering
     //         thread doesn't read stale/unresolved data from the previous ring buffer loop.
-    Controller_ResolveRemoteInput(completedFrame);
+    if (g_rollbackFrames > 0 || IsFrameConfirmed(completedFrame))
+        Controller_ResolveRemoteInput(completedFrame);
 
     // --- 2. Record the executed delayed local input for display before shifting.
     //         Done at the frame boundary rather than inside hkprocessFrameInput
@@ -1679,6 +1614,17 @@ void Controller_InitHooks()
         MH_EnableHook((LPVOID)_addr(ADDR_STEP_INTRO));
     else
         HookLog("Controller: Failed to hook stepIntro (%d)\n", s);
+
+    // sAction__stepFighting — derive fight clocks from the synchronized frame.
+    s = MH_CreateHook(
+        (LPVOID)_addr(ADDR_STEP_FIGHTING),
+        (LPVOID)&hkStepFighting,
+        (LPVOID*)&oStepFighting
+    );
+    if (s == MH_OK)
+        MH_EnableHook((LPVOID)_addr(ADDR_STEP_FIGHTING));
+    else
+        HookLog("Controller: Failed to hook stepFighting (%d)\n", s);
 
     // cChrInput__processFrameInput — netplay client/host synchronization
     s = MH_CreateHook(
