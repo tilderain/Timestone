@@ -113,6 +113,27 @@ When the real game loop resumes:
 
 ## 3. Collision System & Sound Event Chain
 
+### Character slot ordering caveat
+
+The `nplive_20260718_044007_host` and `nplive_20260718_044006_client` logs reveal
+different Team 1 intrusive-list slot order from frame 10: the host orders mids
+`[0, 1, 2]`, while the client orders them `[2, 1, 0]`. This is visible with
+`compare.py --by-slot`, but comparison by stable `(team, mid)` identity remains
+equal through frame 441.
+
+After the host rolls back frames `[431, 433)`, the first stable-identity divergence
+appears at frame 442. Team 1 mids 0 and 1 differ only in `uCharacter+0x14F8` and
+per-character RNG at first; one peer advances mid 0 while the other advances mid
+1. Position and action still match. This indicates a team current-character or
+activation ownership inversion caused by slot/index state, not an immediate
+collision-position failure.
+
+Rollback diagnostics must therefore compare fighters by `(team, mid)`, not linked-
+list slot. Snapshot validation must include `cChrTeam` current/next/previous fighter
+pointers, member indexes, node links, traversal order, and slot lookup tables. The
+later position-only divergence at frame 717 occurs after this earlier timeline
+split and is not clean evidence of an `sCollision` restore gap.
+
 ### sCollision__move Full Decompilation
 
 Address: typically called via `VTableCall(sMain, 0x401a0, 0x30)` (the physics/contact object)
@@ -133,7 +154,7 @@ void sCollision__move(longlong param_1) {
     FUN_1405bb3b0(param_1);             // clear/reset collision arrays (0x29 entries × 3 groups)
     FUN_1407e2420(param_1 + 0x6860);    // update collision table B
     if (*(char *)(param_1 + 0x73a8) != '\0') {
-        FUN_1405b7280(param_1 + 0x7368);  // ← SOUND EVENT UPDATE CHAIN
+        FUN_1405b7280(param_1 + 0x7368);  // move-matrix post-process
     }
     *(undefined2 *)(param_1 + 0x44) = 0x100;
     if ((bVar1) && ((*(char *)(param_1 + 0x30) != '\0' || (BYTE_140e178f0 != 0)))) {
@@ -152,38 +173,38 @@ void sCollision__move(longlong param_1) {
 | +0x280        | ~    | base for collision arrays    | used by FUN_1405bb3b0        |
 | +0x43B8       | ~    | collision table A            | updated by FUN_1407e1a20     |
 | +0x6860       | ~    | collision table B            | updated by FUN_1407e2420     |
-| +0x7368       | ~    | **sound event sub-struct**   | passed to FUN_1405b7280      |
-| +0x73a8       | 1    | **sound event enable flag**  | gates FUN_1405b7280 call     |
+| +0x7368       | ~    | `cSbcMoveMatrixArray`        | passed to FUN_1405b7280      |
+| +0x73a8       | 1    | `mFlgRunColliderInSystem`    | gates move-matrix post-process |
 
-### Sound Event Sub-Struct (collisionObj + 0x7368)
+### Move-Matrix Subsystem (collisionObj + 0x7368)
 
 Parsed from `FUN_1405B7280`, `FUN_1405B72B0`, `FUN_1405B75C0`, `FUN_1405B7660`:
 
 | Offset | Size | Field              | Notes                              |
 |--------|------|--------------------|------------------------------------|
 | +0x00  | 4    | field_0x00         | ???                                |
-| +0x10  | 4    | **entry count**    | number of collision sound entries  |
-| +0x20  | 8    | **entries ptr**    | pointer to array of sound entries  |
-| +0x28  | 4    | **slot index**     | current slot index (incremented each call) |
+| +0x10  | 4    | **entry count**    | number of move-matrix manager groups |
+| +0x20  | 8    | **entries ptr**    | pointer to manager-group array      |
+| +0x28  | 4    | **frame-slot cursor** | current manager frame slot       |
 | +0x2C  | 4    | prev slot index    | previous value before increment    |
 | +0x30  | 4    | bitfield           | shifted left per entry, starts at 1 |
 | +0x3C  | 1    | **dispatch mode**  | 0 = direct (FUN_1405B87A0), ≠0 = job dispatch |
 | +0x3D  | 1    | param for 75C0     | passed to FUN_1405B6320           |
 | +0x3E  | 1    | param for 7660     | passed to FUN_1405B6510           |
 
-### FUN_1405B7280 — Sound Event Update Driver
+### FUN_1405B7280 — Move-Matrix Post-Process Driver
 
 ```c
 void FUN_1405b7280(longlong param_1) {
-    FUN_1405b72b0();          // SOUND JOB DISPATCH (our hook point, 0x1405B72B0)
-    FUN_1405b75c0(param_1);   // collision sound processing A (always runs)
-    FUN_1405b7660(param_1);   // collision sound processing B (always runs)
+    FUN_1405b72b0();          // queued-object/BVH post-move work
+    FUN_1405b75c0(param_1);   // emitter collision jobs
+    FUN_1405b7660(param_1);   // emitter visualization jobs
     *(int *)(param_1 + 0x28) = *(int *)(param_1 + 0x28) + 1;  // INCREMENT SLOT INDEX
     return;
 }
 ```
 
-### FUN_1405B72B0 — Sound Job Dispatcher (HOOKED)
+### FUN_1405B72B0 — Collision Post-Move Dispatcher
 
 ```c
 void FUN_1405b72b0(longlong param_1) {

@@ -36,7 +36,12 @@ import sys
 from collections import OrderedDict
 
 PRIMARY_SIDE_PRIORITY = ["host", "client", "ground_truth", "live"]
-SECONDARY_SIDES = {"resim"}  # skip these when a primary entry exists for the frame
+SECONDARY_SIDES = {"resim"}  # base names for secondary resimulation entries
+
+
+def is_secondary_side(side):
+    """Return true for both legacy resim and host/client resim records."""
+    return side in SECONDARY_SIDES or isinstance(side, str) and side.endswith("_resim")
 
 
 def load_ndjson(path):
@@ -61,7 +66,7 @@ def load_ndjson(path):
                 by_frame[frame] = entry
             else:
                 # Prefer a primary-side entry over a secondary one if we see both.
-                if existing.get("side") in SECONDARY_SIDES and side not in SECONDARY_SIDES:
+                if is_secondary_side(existing.get("side")) and not is_secondary_side(side):
                     by_frame[frame] = entry
     return by_frame
 
@@ -551,4 +556,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

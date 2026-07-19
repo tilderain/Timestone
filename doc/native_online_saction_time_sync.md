@@ -339,6 +339,94 @@ two-peer capture must confirm that the first position split disappears or moves.
 the same contact frame, the next step is to exchange and compare stable collision-body and
 `uCnsGroup` scalar state at the barrier rather than copying character positions alone.
 
+### Native online disables gameplay parallelism
+
+Further analysis found the native mechanism that makes differing local worker counts irrelevant to
+gameplay determinism. `aNextBattle__initBattleRound @ 0x140203810` enters a determinism setup branch
+when either replay-use state is active or `g__isOnlineBattle` is true. The branch does the following:
+
+```cpp
+sMain__setFrameWait(sMain, true);
+
+for (int category = 0; category < 64; ++category) {
+    sUnit__setMoveLineParallel(sUnit, category, false);
+}
+
+auto moveMatrix = sCollision__getMoveMatrixSubsystem(sCollision);
+sCollisionMoveMatrix__setParallelFlags(moveMatrix, false); // +0x3C..+0x3E
+sHitSolver__setMultiThread(sHitSolver, false);
+sBattleRuntime__setParallelFlag281(battleRuntime, false);
+```
+
+The `sUnit` setter is `aNextBattle__createProperty_7B10 @ 0x140207B10`. Its third argument is passed
+in `R8B`; native setup clears it for every move line. `sUnit__moveCategory @ 0x14051B4C0` checks this
+bit. When clear, it invokes every unit's `move` callback directly in linked-list order. When set, it
+enqueues one job per unit and calls `sMain__executeJob`, allowing callbacks in that category to run
+concurrently and in scheduler-dependent completion order.
+
+The additional native switches are:
+
+| Address | Recovered behavior |
+|---|---|
+| `0x1402033D0` | Returns the `sCollision+0x7368` move-matrix subsystem |
+| `0x1405B7BF0` | Clears parallel bytes at subsystem `+0x3C..+0x3E` |
+| `0x140207660` | Writes `sHitSolver::mMultiThread` |
+| `0x140207C30` | Writes another battle-runtime parallel byte at `+0x281` |
+
+This explains how native delay netcode avoids push-position divergence without synchronizing
+`sMain+0xA4/+0xA8`: it does not require equal engine worker counts. It serializes gameplay-sensitive
+unit, collision, and hit-solver work at battle initialization while leaving the worker pool available
+for unrelated engine work.
+
+Custom ENet play currently keeps an offline/training `BattleType`, so it skips this branch. It starts
+the same independently simulated match while leaving gameplay move lines and collision subsystems in
+their normal offline parallel configuration. Forcing `sMain` to one executor masks that omission by
+making every queued batch execute inline, which agrees with the observed fix.
+
+This also narrows the preferred long-term fix. Instead of forcing the entire regular engine job pool
+to one executor, custom netplay should reproduce these four native battle-local settings and restore
+their previous values on teardown. The global one-executor override should remain as a diagnostic
+fallback until two-peer delay and rollback tests confirm that the narrower native-equivalent setup is
+stable.
+
+### Correction: generic constraint collision is not proven fighter push collision
+
+`uCnsGroup__stepSolver @ 0x14071C170` and
+`uCollisionNode_processCharacterPush @ 0x140725B70` belong to the generic `uCnsTinyChain`
+secondary-motion constraint system. Reflection exposes fields such as `mGravity`, `mDamping`,
+`mSpringCoef`, chain-node radius, and collision iteration counts. The function name describes a
+generic selected-collision pass; static analysis alone does not establish that its bodies are MVC3
+fighter gameplay pushboxes.
+
+There is a potentially non-reentrant lazy guard in
+`uCnsTinyChain__cChainGroup__adjust @ 0x140719860`:
+
+```cpp
+if (group->solvedThisMove == 0) { // +0xA9
+    uCnsGroup__stepSolver(group); // callee writes +0xA9 = 1 at entry
+}
+```
+
+The check and set are not atomic. However, it becomes an actual race only if separate concurrent unit
+jobs can reach the same chain group. The owning `uCnsTinyChain` normally calls its group adjustments
+inside one unit callback, so runtime pointer/thread provenance is required before attributing the
+observed fighter X divergence to this guard. Native online's blanket serialization would avoid such a
+race if shared ownership does occur, but it also avoids many other order-sensitive gameplay paths.
+
+The highest-value runtime confirmation is therefore to log the native settings and solver provenance,
+not merely solver entry counts:
+
+- All 64 `sUnit` move-line parallel bits at battle start.
+- `sHitSolver::mMultiThread` and collision move-matrix `+0x3C..+0x3E`.
+- Every job callback that writes either fighter's `uCharacter+0x50` on the first divergent frame.
+- For `uCnsGroup__stepSolver`, OS thread ID, group pointer, owner `uCnsTinyChain`, and whether any
+  overlapping call uses the same group or body pointer.
+
+An A/B test should retain the normal worker count and apply the native four-part serialization setup.
+If that fixes the two-peer push split, it confirms the missing native determinism branch as the cause
+of the global-thread-count symptom. Individual switches can then be re-enabled one at a time to locate
+the smallest responsible subsystem.
+
 ## Corrections To Existing Notes
 
 Some labels in `doc/net.md` predate this analysis and should not be relied on literally:

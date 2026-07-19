@@ -1266,8 +1266,11 @@ void Rollback_PatchDrawCalls(bool enable)
     }
 }
 
+//THIS IS NOT USED
 void Rollback_HeadlessTick(uint64_t sMain)
 {
+//THIS IS NOT USED
+return;
     if (!sMain) 
     {
         HookLog("Rollbackheadlesstick: smain is bad?:? :>\n");
