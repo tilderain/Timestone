@@ -151,6 +151,14 @@ static void(__fastcall* oCallSRender)(uint64_t param_1) = nullptr;
 static void(__fastcall* oMain_move)(uint64_t param_1) = nullptr;
 // Trampoline for the collision sound-event iterator (hook crashes during re-sim)
 static void(__fastcall* oCollisionSoundUpdate)(uint64_t param_1) = nullptr;
+// Trampoline for the fighter pushbox collision callback.
+static void(__fastcall* oApplyCollisionPushCorrection)(
+    uint64_t character,
+    int callbackPhase,
+    uint64_t collisionObject,
+    uint64_t otherCharacter,
+    uint64_t collisionResult,
+    uint32_t collisionSlot) = nullptr;
 
 // ===========================================================================
 // Resim diagnostic dumper — binary + text state capture
@@ -1002,6 +1010,7 @@ static constexpr uintptr_t FN_CALL_AI                = 0x140647910;  // direct c
 static constexpr uintptr_t FN_SMAIN_TAIL             = 0x140259ea0;  // tail function with sMain as arg
 static constexpr uintptr_t FN_CALL_SRENDER           = 0x14053a250;  // call on sMain+0x40190 (sRender)
 static constexpr uintptr_t FN_COLLISION_SOUND_UPDATE = 0x1405b72b0;  // collision sound-event iterator
+static constexpr uintptr_t FN_APPLY_COLLISION_PUSH   = 0x14004ad20;  // fighter pushbox response callback
 static constexpr uintptr_t FN_RESET_HITNODES         = 0x140259e90;  // j_sHitSolver__resetActiveNodes
 static constexpr uintptr_t FN_PAD_METHOD_3D00        = 0x1402a3d00;  // sPad method
 static constexpr uintptr_t FN_PAD_METHOD_3DC0        = 0x1402a3dc0;  // sPad method
@@ -2647,6 +2656,27 @@ static void __fastcall hkCollisionSoundUpdate(uint64_t param_1)
     }
 }
 
+// Keep the callback's phase-1 collision-node state transition, but suppress
+// phase 0, which accumulates the player-to-player separation correction.
+static void __fastcall hkApplyCollisionPushCorrection(
+    uint64_t character,
+    int callbackPhase,
+    uint64_t collisionObject,
+    uint64_t otherCharacter,
+    uint64_t collisionResult,
+    uint32_t collisionSlot)
+{
+    if (callbackPhase != 0 && oApplyCollisionPushCorrection) {
+        oApplyCollisionPushCorrection(
+            character,
+            callbackPhase,
+            collisionObject,
+            otherCharacter,
+            collisionResult,
+            collisionSlot);
+    }
+}
+
 // ===========================================================================
 // Hook — render/present function (FUN_14053a250)
 //
@@ -2786,6 +2816,19 @@ void Rollback_InitHooks()
                 (uint64_t)_addr(FN_COLLISION_SOUND_UPDATE));
     } else {
         HookLog("Rollback: failed to hook collision sound update (%d)\n", s);
+    }
+
+    s = MH_CreateHook(
+        (LPVOID)_addr(FN_APPLY_COLLISION_PUSH),
+        (LPVOID)&hkApplyCollisionPushCorrection,
+        (LPVOID*)&oApplyCollisionPushCorrection
+    );
+    if (s == MH_OK) {
+        MH_EnableHook((LPVOID)_addr(FN_APPLY_COLLISION_PUSH));
+        HookLog("Rollback: player collision pushboxes disabled (0x%llX)\n",
+                (uint64_t)_addr(FN_APPLY_COLLISION_PUSH));
+    } else {
+        HookLog("Rollback: failed to disable player collision pushboxes (%d)\n", s);
     }
 
     // Render/present function — NOP during re-sim so the full game tick

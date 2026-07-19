@@ -9,9 +9,10 @@ Synchronize button press for skip intro
 Desyncs-
     Collision (pushing players)
     Multi hit moves (morrigan air heavy)
+     /Restoring previous hitboxes on snapshot restore
     Shot
     Morrigan's clone
-    Restoring previous hitboxes on snapshot restore
+
 
 verbose logging?
 Only log to memory then write json at desync
