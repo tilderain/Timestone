@@ -53,6 +53,7 @@ static constexpr uintptr_t PTR_SCAMERA      = 0x140e17930;
 
 // sMvc3Main__move — the full per-frame update pipeline
 static constexpr uintptr_t FN_SMVC3MAIN_MOVE = 0x1402594A0;
+static constexpr uintptr_t FN_GAMEUI_SET_TEAM_CHARACTER_ID = 0x140022610;
 
 // ===========================================================================
 // Offsets & Struct Constants
@@ -123,10 +124,16 @@ static constexpr SnapshotRange CCHR_SCALAR_RESTORE_RANGES[] = {
     // rewind its script IDs, owner, command blocks, key and loop registers.
     {0x1350, 0x98},
     {0x14F0, 0x28},  // cChr gameplay flags, including mAnmF airborne bit
+    // cChrStatus is embedded at +0x1530. Preserve its live vtable and
+    // internal references, but restore max/current/start/red life scalars.
+    {0x154C, 0x14},
     {0x1644, 0x04},  // class-opcode action frame counter
     // cAtkCtrl starts at +0x1878. Restore the one-shot attack window and
     // attack-info state, but leave its mpUnit/resource pointers live.
     {0x18A0, 0x30},
+    // Character/team/member identity is rewritten during death and tag swaps.
+    // Restore it so pending swap logic resolves the saved roster member.
+    {0x2D9C, 0x24},
     {0x3F48, 0x2B0}, // action requests, movement, velocity, gravity and air counters
     {0x63B0, 0x78},  // damage, aerial trajectory and hitstun time state
 };
@@ -140,6 +147,13 @@ static constexpr SnapshotRange SMAIN_RESTORE_RANGES[] = {
     {0x40010, 0x10},    // secondary timing before mpJobSys1
     {0x40028, 0x18},    // secondary timing between embedded vtable pointers
     {0x40048, 0x14},    // secondary timing tail
+};
+
+// cChrTeam embeds its intrusive cChrNode/list head at +0x08. Restore only
+// gameplay/team-selection fields; the live list topology must not be rewound.
+static constexpr SnapshotRange CCHR_TEAM_RESTORE_RANGES[] = {
+    {0x50, 0xC0},  // timing, health, meter, tag/X-Factor and cached active flags
+    {0x110, 0x1B0}, // cached character state and play data
 };
 
 static bool IsLikelyPointer(uint64_t value)
@@ -157,11 +171,13 @@ static void RestoreExternalAnimBlock(void* dst, const uint8_t* src, size_t size)
     // unrelated live objects into collision jobs and eventually calls draw
     // methods without an sRender context. Restore all known deterministic
     // node state while retaining only the live graph/resource fields.
-    // mFlgActive (+0x08) is the only slot lifecycle flag restored here. Keep
-    // mFlgSetup live: it gates collision-node setup/dirty processing, and
-    // rewinding it while retaining the live draw/collision graph can enqueue a
-    // setup callback with the wrong render context.
+    // Restore the active flag and setup latch for slots that were active in the
+    // snapshot. The latch is the one-shot setup gate: setupOnce invokes the
+    // saved owner callback only when +0x74 is zero. Inactive slots retain their
+    // live lifecycle state because they have no hitbox to re-register.
     std::memcpy((uint8_t*)dst + 0x08, src + 0x08, 0x01);
+    if (*(const uint8_t*)(src + 0x08) != 0)
+        std::memcpy((uint8_t*)dst + 0x74, src + 0x74, 0x01);
     std::memcpy((uint8_t*)dst + 0x90, src + 0x90, 0x28); // group, attr, move, user u32
     std::memcpy((uint8_t*)dst + 0xC8, src + 0xC8, 0x18); // derived slot scalar tail
 }
@@ -1641,6 +1657,7 @@ return;
 // Forward declarations
 static void Rollback_ClearStalePointers();
 static void Rollback_ClearGameEffectSlots();
+static void Rollback_SyncActiveCharacterUi();
 
 // ===========================================================================
 // Public API — Save / Restore / ReSimulate
@@ -1764,6 +1781,21 @@ void Rollback_RestoreSnapshot(int32_t frame)
     // same memory addresses that were captured, even if the game rebuilt its
     // internal lists between save and restore.
     uint64_t sHitSolver = *(uint64_t*)_addr(PTR_SHITSOLVER);
+    uint64_t sCharacter = *(uint64_t*)_addr(PTR_SCHARACTER);
+    uint64_t team0 = sCharacter ? sCharacter + TEAM0_OFFSET : 0;
+    uint64_t team1 = sCharacter ? sCharacter + TEAM1_OFFSET : 0;
+    auto isTeamCharacter = [sCharacter](uint64_t character) {
+        if (!sCharacter || !character) return false;
+        for (int teamIndex = 0; teamIndex < 2; ++teamIndex) {
+            uint64_t node = sCharacter + (teamIndex == 0 ? TEAM0_OFFSET : TEAM1_OFFSET) +
+                TEAM_FIRST_NODE_OFFSET;
+            for (int n = 0; node && n < 8; ++n) {
+                if (*(uint64_t*)(node + NODE_CHR_OFFSET) == character) return true;
+                node = *(uint64_t*)(node + NODE_NEXT_OFFSET);
+            }
+        }
+        return false;
+    };
     bool ownerStillMatches[MAX_REGIONS] = {};
     uint64_t liveOwnerPointers[MAX_REGIONS] = {};
     for (int i = 0; i < slot.regionCount; ++i) {
@@ -1810,6 +1842,39 @@ void Rollback_RestoreSnapshot(int32_t frame)
             std::memcpy((void*)(sHitSolver + SHITSOLVER_DATA_OFF),
                         slot.data + offset + SHITSOLVER_DATA_OFF,
                         copySize - SHITSOLVER_DATA_OFF);
+        } else if ((uint64_t)slot.regions[i].ptr == team0 ||
+                   (uint64_t)slot.regions[i].ptr == team1) {
+            // Keep the live cChrNode list head and vtable, but restore the
+            // active-character reference and all team gameplay aggregates.
+            uint64_t liveActive = *(uint64_t*)((uint8_t*)slot.regions[i].ptr + 0x48);
+            for (const SnapshotRange& range : CCHR_TEAM_RESTORE_RANGES) {
+                if ((size_t)range.offset + range.size <= copySize) {
+                    std::memcpy((uint8_t*)slot.regions[i].ptr + range.offset,
+                                slot.data + offset + range.offset,
+                                range.size);
+                }
+            }
+            std::memcpy((uint8_t*)slot.regions[i].ptr + 0x48,
+                        slot.data + offset + 0x48, sizeof(uint64_t));
+            // Do not leave a saved pointer to a character that no longer
+            // belongs to the current live team list.
+            uint64_t restoredActive = *(uint64_t*)((uint8_t*)slot.regions[i].ptr + 0x48);
+            if (restoredActive == 0 || restoredActive != liveActive) {
+                // The roster itself is stable for a snapshot restore; the
+                // saved pointer is valid when it is one of the current nodes.
+                // If it was replaced, retain the live selection instead.
+                bool found = false;
+                uint64_t node = (uint64_t)slot.regions[i].ptr + TEAM_FIRST_NODE_OFFSET;
+                for (int n = 0; node && n < 8; ++n) {
+                    if (*(uint64_t*)(node + NODE_CHR_OFFSET) == restoredActive) {
+                        found = true;
+                        break;
+                    }
+                    node = *(uint64_t*)(node + NODE_NEXT_OFFSET);
+                }
+                if (!found)
+                    *(uint64_t*)((uint8_t*)slot.regions[i].ptr + 0x48) = liveActive;
+            }
         } else if (slot.regions[i].skipVtable && copySize > sizeof(uint64_t)) {
             uint64_t liveUnitState[sizeof(CUNIT_LIVE_STATE_OFFSETS) / sizeof(CUNIT_LIVE_STATE_OFFSETS[0])];
             for (size_t field = 0;
@@ -1851,8 +1916,10 @@ void Rollback_RestoreSnapshot(int32_t frame)
             for (size_t field = 0;
                  field < sizeof(CUNIT_LIVE_STATE_OFFSETS) / sizeof(CUNIT_LIVE_STATE_OFFSETS[0]);
                  ++field) {
-                *(uint64_t*)((uint8_t*)slot.regions[i].ptr + CUNIT_LIVE_STATE_OFFSETS[field]) =
-                    liveUnitState[field];
+                uint32_t fieldOffset = CUNIT_LIVE_STATE_OFFSETS[field];
+                if (fieldOffset == 0x10 && isTeamCharacter((uint64_t)slot.regions[i].ptr))
+                    continue; // restore the saved MtObject alive/lifecycle flags
+                *(uint64_t*)((uint8_t*)slot.regions[i].ptr + fieldOffset) = liveUnitState[field];
             }
             // Keep live draw-list/resource ownership and uModel lifecycle state,
             // but rewind Motion[8] at +0x560..+0x115f. Those records must agree
@@ -1948,10 +2015,9 @@ void Rollback_RestoreSnapshot(int32_t frame)
     // (see BuildRegions section 2b) and restored at their original addresses, so
     // the sentinel→uShot linked lists remain self-consistent after the memcpy.
 
-    // Clear stale character slot pointers so MtObject__replaceSlot_6F30
-    // doesn't try to call vtable[0x78] (release) on objects that were
-    // freed between save and restore.
-    Rollback_ClearStalePointers();
+    // Character slot tables contain live model/resource references. Clearing
+    // all 64 entries makes restored dead characters invisible.
+    Rollback_SyncActiveCharacterUi();
 
     // Zero sGameEffect slot tables so stale effect object references
     // don't cause crashes or visual corruption when the game tries to
@@ -2616,6 +2682,27 @@ static void Rollback_ClearStalePointers()
     }
 
     HookLog("Rollback: cleared character slot arrays after restore\n");
+}
+
+static void Rollback_SyncActiveCharacterUi()
+{
+    uint64_t sCharacter = *(uint64_t*)_addr(PTR_SCHARACTER);
+    uint64_t sGameUi = *(uint64_t*)_addr(PTR_SGAMEUI);
+    if (!sCharacter || !sGameUi) return;
+
+    using SetTeamCharacterId = void(__fastcall*)(uint64_t, int, int);
+    auto setTeamCharacterId = (SetTeamCharacterId)_addr(FN_GAMEUI_SET_TEAM_CHARACTER_ID);
+    for (int teamIndex = 0; teamIndex < 2; ++teamIndex) {
+        uint64_t team = sCharacter + (teamIndex == 0 ? TEAM0_OFFSET : TEAM1_OFFSET);
+        uint64_t active = *(uint64_t*)(team + 0x48);
+        if (!active) continue;
+
+        // Match cChrTeam::commitPendingCharacterSwap: the UI table is keyed by
+        // player/team id and stores the active member id.
+        int playerId = *(int*)(active + 0x2DA0);
+        int memberId = *(int*)(active + 0x2DB0);
+        setTeamCharacterId(sGameUi, playerId, memberId);
+    }
 }
 
 // ===========================================================================
