@@ -116,12 +116,12 @@ void Rollback_HeadlessTick(uint64_t sMvc3Main);
 void Rollback_PatchSleep(bool enable);
 
 // Patch/unpatch the Present() call inside the post-render sync function
-// FUN_140537080 (0x14053709c).  During re-sim the Present blocks for ~16ms
+// sRender__beginFrame (call site 0x14053709c). During re-sim Present blocks for ~16ms
 // under DXVK; NOPping it lets the function run normally without the wait.
 void Rollback_PatchPresent(bool enable);
 
 // Patch/unpatch the vtable+0x50 swapchain calls in sMvc3Main__move's tail
-// and inside FUN_140537080 (3 sites total).  These expect a Present to
+// and inside sRender__beginFrame (3 sites total). These expect a Present to
 // have been submitted; with the Present NOP'd they may do unnecessary
 // D3D9/Vulkan work during re-sim.
 void Rollback_PatchSwapchain(bool enable);

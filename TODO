@@ -132,3 +132,7 @@ FFFFFFFF     ANMCHR_INCOMING           = 0x156,
 FFFFFFFF     ANMCHR_THC                = 0x159,
 FFFFFFFF     ANMCHR_DHC_OUT            = 0x15A,
 FFFFFFFF };
+
+
+
+Fix dead character ui swap

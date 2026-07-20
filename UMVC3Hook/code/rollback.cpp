@@ -119,6 +119,13 @@ struct SnapshotRange {
 static constexpr SnapshotRange CCHR_SCALAR_RESTORE_RANGES[] = {
     {0x48, 0x38},    // parent flags and world position/orientation/scale
     {0xA8, 0x04},    // action event/frame progression counter
+    // uBaseModel::PartsDisp is a 512-bit command/part availability bitset.
+    // Character logic consumes these bits as attacks progress; Morrigan tests
+    // bit 0 every frame before remapping attack commands. The broad live draw-
+    // state preservation below must not retain the exhausted post-attack bits.
+    {0x12C, 0x40},
+    // Assist/DHC and action-state flags used by character transitions.
+    {0x29E, 0x12},
     {0x1308, 0x40},  // action descriptor and actor animation state
     // cActorGameModelAnm is embedded at +0x1348. Keep its vtable live, but
     // rewind its script IDs, owner, command blocks, key and loop registers.
@@ -127,15 +134,35 @@ static constexpr SnapshotRange CCHR_SCALAR_RESTORE_RANGES[] = {
     // cChrStatus is embedded at +0x1530. Preserve its live vtable and
     // internal references, but restore max/current/start/red life scalars.
     {0x154C, 0x14},
+    // cChrAbility contains six inline 0x80-byte Prim records at +0x1570.
+    // Preserve each vtable at record +0x00 and the live sound cookie at +0x78,
+    // but rewind the scalar gameplay payload at +0x08..+0x77.
+    {0x1578, 0x70},
+    {0x15F8, 0x70},
+    {0x1678, 0x70},
+    {0x16F8, 0x70},
+    {0x1778, 0x70},
+    {0x17F8, 0x70},
+    {0x1870, 0x08},  // cChrAbility scalar tail before cAtkCtrl
     {0x1644, 0x04},  // class-opcode action frame counter
-    // cAtkCtrl starts at +0x1878. Restore the one-shot attack window and
-    // attack-info state, but leave its mpUnit/resource pointers live.
-    {0x18A0, 0x30},
+    // cAtkCtrl starts at +0x1878. Restore mpResource, mAtkInfoId, flags,
+    // timers and the full scalar range through mAnmNo so multi-hit attacks
+    // have correct attack definition, lifetime state and animation binding.
+    // mpUnit at +0x1890 remains live (owner character reference).
+    {0x1898, 0x30},  // stop before mTInfo at cAtkCtrl+0x50
     // Character/team/member identity is rewritten during death and tag swaps.
     // Restore it so pending swap logic resolves the saved roster member.
     {0x2D9C, 0x24},
     {0x3F48, 0x2B0}, // action requests, movement, velocity, gravity and air counters
-    {0x63B0, 0x78},  // damage, aerial trajectory and hitstun time state
+    // Combat counters block at +0x4168 contains hit tracking, air action limits,
+    // block timing windows, hitstun state and super armor. Essential for multi-hit
+    // attacks, air combo limits, and defensive state determinism.
+    {0x4168, 0x90},
+    // Pointer-free combat tail. +0x6360..+0x636f selects the current attack
+    // data for each collision group before geometry is populated. It must be
+    // rewound along with combo rates, last-hit state, damage, armor and guard
+    // state through +0x6427. The MtArray headers at +0x6340/+0x6350 stay live.
+    {0x6360, 0xC8},
 };
 
 // sMain is almost entirely live worker infrastructure. Only timing state is
@@ -166,18 +193,21 @@ static void RestoreExternalAnimBlock(void* dst, const uint8_t* src, size_t size)
     if (size != CCHR_EXTERNAL_ANIM_SIZE) return;
 
     // cChrEffectSlot is an sCollision::Node, not a plain animation buffer.
-    // +0x00..+0x8f owns its live vtable, geometry MtArray, child records,
-    // bounding topology, owner and callback. Rewinding that graph inserts
-    // unrelated live objects into collision jobs and eventually calls draw
-    // methods without an sRender context. Restore all known deterministic
-    // node state while retaining only the live graph/resource fields.
-    // Restore the active flag and setup latch for slots that were active in the
-    // snapshot. The latch is the one-shot setup gate: setupOnce invokes the
-    // saved owner callback only when +0x74 is zero. Inactive slots retain their
-    // live lifecycle state because they have no hitbox to re-register.
+    // +0x00..+0x7f owns its live vtable, geometry MtArray, child records and
+    // bounding topology. Rewinding that graph inserts unrelated live objects
+    // into collision jobs and eventually calls draw methods without an
+    // sRender context. The owner and setup callback at +0x80/+0x88 are not
+    // topology: they are the one-shot setup binding and must match the saved
+    // attack. A completed single-hit attack can clear this binding; starting
+    // another attack repopulates it, which previously made restore appear to
+    // work only after another attack was started.
+    // Restore active flag and owner/callback, but CLEAR the setup latch so
+    // setupOnce fires again after restore. The latch is the one-shot gate:
+    // setupOnce only invokes the callback when +0x74 is zero. Restoring a
+    // post-setup latch=1 prevents multi-hit attacks from rebuilding geometry.
     std::memcpy((uint8_t*)dst + 0x08, src + 0x08, 0x01);
-    if (*(const uint8_t*)(src + 0x08) != 0)
-        std::memcpy((uint8_t*)dst + 0x74, src + 0x74, 0x01);
+    *((uint8_t*)dst + 0x74) = 0; // clear setup latch to allow callback re-execution
+    std::memcpy((uint8_t*)dst + 0x80, src + 0x80, 0x10); // setup owner and callback
     std::memcpy((uint8_t*)dst + 0x90, src + 0x90, 0x28); // group, attr, move, user u32
     std::memcpy((uint8_t*)dst + 0xC8, src + 0xC8, 0x18); // derived slot scalar tail
 }
@@ -1004,7 +1034,7 @@ static int BuildRegions(Region* regions, int maxRegions)
     //     clamps each frame.  During host-only resim its internal state
     //     drifts from the live client, causing permanent character position
     //     drift (desync) that never self-corrects.  sCamera viewport[0]+8
-    //     holds the pointer (confirmed via Ghidra FUN_140535c80).
+    //     holds the pointer (confirmed via sCamera__refreshViewsForBoundary).
     {
         if (camUnit) {
             uint64_t dtiPtr  = GetObjectDti(camUnit);
@@ -1164,11 +1194,11 @@ static constexpr uintptr_t FN_PAD_PROCESS            = 0x140289c30;
 static constexpr uintptr_t FN_MVC3MGR_GETINSTANCE    = 0x140001af0;
 static constexpr uintptr_t FN_MVC3MGR_GETACTION      = 0x1409629d0;
 static constexpr uintptr_t FN_AFTER_GETACTION        = 0x14014f410;
-static constexpr uintptr_t FN_CALL_401E0             = 0x1405bb710;  // direct call on sMain+0x401e0
+static constexpr uintptr_t FN_COLLISION_BEGIN_FRAME  = 0x1405bb710;  // sCollision__beginFrameAndDrainDeferredState
 static constexpr uintptr_t FN_CALL_AI                = 0x140647910;  // direct call on sMain+0x40240 (AI)
-static constexpr uintptr_t FN_SMAIN_TAIL             = 0x140259ea0;  // tail function with sMain as arg
-static constexpr uintptr_t FN_CALL_SRENDER           = 0x14053a250;  // call on sMain+0x40190 (sRender)
-static constexpr uintptr_t FN_COLLISION_SOUND_UPDATE = 0x1405b72b0;  // collision sound-event iterator
+static constexpr uintptr_t FN_UPDATE_RENDER_STATE    = 0x140259ea0;  // sMvc3Main__updateRenderState
+static constexpr uintptr_t FN_RENDER_END_FRAME       = 0x14053a250;  // sRender__endFrameAndPresent
+static constexpr uintptr_t FN_COLLISION_POST_MOVE    = 0x1405b72b0;  // sCollision__cSbcMoveMatrix__dispatchPostMoveJobs
 static constexpr uintptr_t FN_APPLY_COLLISION_PUSH   = 0x14004ad20;  // fighter pushbox response callback
 static constexpr uintptr_t FN_RESET_HITNODES         = 0x140259e90;  // j_sHitSolver__resetActiveNodes
 static constexpr uintptr_t FN_PAD_METHOD_3D00        = 0x1402a3d00;  // sPad method
@@ -1195,10 +1225,10 @@ static constexpr uintptr_t FN_GETEARTHATK            = 0x140327a10;
 // (0x140521df0).  Each is a 6-byte "CALL [RIP+xxx]" through the IAT.
 static constexpr uintptr_t SLEEP_CALL_FIXED = 0x1405220b2;  // Sleep(dt-1)
 static constexpr uintptr_t SLEEP_CALL_VAR   = 0x140521f93;  // Sleep(1)
-static constexpr uintptr_t PRESENT_CALL_SITE = 0x14053709c; // CALL [RAX+0x48] inside FUN_140537080
+static constexpr uintptr_t PRESENT_CALL_SITE = 0x14053709c; // CALL [RAX+0x48] inside sRender__beginFrame
 static constexpr uintptr_t SWAPCHAIN_CALL_A  = 0x1402598c4; // vtable+0x50 on sMain+0x40208
 static constexpr uintptr_t SWAPCHAIN_CALL_B  = 0x1402598d1; // vtable+0x50 on sMain+0x40270
-static constexpr uintptr_t SWAPCHAIN_CALL_C  = 0x140537113; // vtable+0x50 in FUN_140537080 (inside if-block)
+static constexpr uintptr_t SWAPCHAIN_CALL_C  = 0x140537113; // vtable+0x50 in sRender__beginFrame
 static uint8_t g_savedSleep[2][6] = {};
 static uint8_t g_savedPresent[3] = {};
 static uint8_t g_savedSwapchain[3][3] = {};
@@ -1308,12 +1338,12 @@ void Rollback_PatchSleep(bool enable)
 
 void Rollback_PatchPresent(bool enable)
 {
-    // NOP / restore the 3-byte CALL [RAX+0x48] inside FUN_140537080.
+    // NOP / restore the 3-byte CALL [RAX+0x48] inside sRender__beginFrame.
     // This Present call blocks for ~16ms per frame under DXVK; NOPping it
     // during re-sim lets the rest of the render-sync function run normally
     // (setting render-done flags, advancing frame counter, etc.) without
     // the blocking Present.  Required because the game crashes if we skip
-    // FUN_140537080 entirely (downstream game-logic depends on its state).
+    // sRender__beginFrame entirely (downstream game logic depends on its state).
     if (enable && !g_presentPatched) {
         DWORD old = 0;
         VirtualProtect((LPVOID)_addr(PRESENT_CALL_SITE), 3,
@@ -1335,7 +1365,7 @@ void Rollback_PatchPresent(bool enable)
 void Rollback_PatchSwapchain(bool enable)
 {
     // NOP / restore three vtable+0x50 call sites that are part of the
-    // swapchain / end-frame path in sMvc3Main__move and FUN_140537080.
+    // swapchain/end-frame path in sMvc3Main__move and sRender__beginFrame.
     // Each instruction is "CALL [RAX+0x50]" = FF 50 50 (3 bytes).
     //
     // These swapchain operations expect a Present to have been submitted;
@@ -1449,12 +1479,12 @@ return;
 
     // ---- Disable collision sound-event updates during re-sim ----
     // sCollision__move checks the flag at collisionObj+0x73a8 before
-    // calling its sound-event iterator (FUN_1405B72B0).  During re-sim the
+    // calling sCollision__cSbcMoveMatrix__dispatchPostMoveJobs. During re-sim the
     // sound slot-index increments past the per-entry capacity, hitting a
     // null-pointer bug in the iterator.  Sound doesn't matter for headless
     // re-simulation; zeroing the flag safely skips the crashing call.
     //
-    // (We also hook FUN_1405B72B0 via MinHook below as a belt-and-suspenders
+    // (We also hook the post-move dispatcher via MinHook below as a redundant
     //  guard — the flag can be re-enabled on worker threads.)
 
     // ==================================================================
@@ -1487,10 +1517,10 @@ return;
 
     // ==================================================================
     // [SKIP] vtable+0x48 draw calls on [0x401a8], [0x40198], [0x401d8]
-    // [SKIP] FUN_1405bb710 on [0x401e0] — render debug/profiling call
+    // [SKIP] sCollision__beginFrameAndDrainDeferredState on [0x401e0]
     // [SKIP] sRender/sPrimitive render-setup block
     // [SKIP] vtable+0x48 on [0x40270], [0x40208]
-    // [SKIP] FUN_140537080 (Present!) — would crash through kiero hooks
+    // [SKIP] sRender__beginFrame (Present path) - would crash through kiero hooks
     // ==================================================================
 
     // ==================================================================
@@ -1620,7 +1650,7 @@ return;
 
     // Tail function
     HookLog("Rollback_HeadlessTick: Phase4 — sMain tail\n");
-    ((void(__fastcall*)(uint64_t))_addr(FN_SMAIN_TAIL))(sMain);
+    ((void(__fastcall*)(uint64_t))_addr(FN_UPDATE_RENDER_STATE))(sMain);
 
     // [SKIP] sRender game-logic state update (vtable+0x30) — handled inside
     //       FN_SMAIN_MOVE, and the internal allocator isn't snapshot-safe.
@@ -1949,14 +1979,95 @@ void Rollback_RestoreSnapshot(int32_t frame)
                 }
             }
 
-            // cAtkCtrl::TargetInfo entries are 0x20 bytes: vtable at +0x00,
-            // live target reference at +0x08, then deterministic mTotalHit
-            // and mHitTime at +0x10/+0x14. Restore hit-confirm bookkeeping
-            // without rewinding the target object references.
+            // Rewind all five cChrTargetInfo records at +0x6490..+0x670f.
+            // They cache target, attacker, damage, throw and parent character
+            // state. Keep each vtable live and validate its saved character
+            // pointer against the current roster.
+            static constexpr uint32_t targetInfoBase = 0x6490;
+            static constexpr uint32_t targetInfoStride = 0x80;
+            for (uint32_t targetInfo = 0; targetInfo < 5; ++targetInfo) {
+                uint32_t record = targetInfoBase + targetInfo * targetInfoStride;
+                uint32_t pointerField = record + 0x08;
+                uint32_t dataField = record + 0x10;
+                if ((size_t)dataField + 0x70 > copySize) continue;
+
+                uint64_t savedTarget = *(const uint64_t*)(slot.data + offset + pointerField);
+                uint64_t liveTarget = *(uint64_t*)((uint8_t*)slot.regions[i].ptr + pointerField);
+                if (savedTarget == 0 || savedTarget == liveTarget || isTeamCharacter(savedTarget)) {
+                    *(uint64_t*)((uint8_t*)slot.regions[i].ptr + pointerField) = savedTarget;
+                    std::memcpy((uint8_t*)slot.regions[i].ptr + dataField,
+                                slot.data + offset + dataField,
+                                0x70);
+                }
+            }
+
+            // The generic pointer guard above can mistake aligned primitive
+            // flags, coordinates and IDs for addresses, retaining post-hit
+            // disabled geometry. Rewind confirmed pointer-free fields while
+            // preserving each primitive's vtable and live parent references.
+            static constexpr uint32_t capsuleBase = 0x4210;
+            static constexpr uint32_t capsuleStride = 0xB0;
+            for (uint32_t primitive = 0; primitive < 16; ++primitive) {
+                uint32_t entry = capsuleBase + primitive * capsuleStride;
+                static constexpr SnapshotRange fields[] = {
+                    {0x10, 0x04}, // primitive kind
+                    {0x20, 0x24}, // capsule endpoints and radius
+                    {0x50, 0x04}, // active/attribute flags
+                    {0x68, 0x0C}, // parent indices and size rate
+                    {0x80, 0x20}, // local endpoint offsets
+                };
+                for (const SnapshotRange& field : fields) {
+                    if ((size_t)entry + field.offset + field.size <= copySize) {
+                        std::memcpy((uint8_t*)slot.regions[i].ptr + entry + field.offset,
+                                    slot.data + offset + entry + field.offset,
+                                    field.size);
+                    }
+                }
+            }
+
+            static constexpr uint32_t sphereBases[] = {0x4E20, 0x5530, 0x5C40};
+            static constexpr uint32_t sphereStride = 0x70;
+            for (uint32_t base : sphereBases) {
+                for (uint32_t primitive = 0; primitive < 16; ++primitive) {
+                    uint32_t entry = base + primitive * sphereStride;
+                    static constexpr SnapshotRange fields[] = {
+                        {0x10, 0x04}, // primitive kind
+                        {0x20, 0x10}, // sphere center and radius
+                        {0x30, 0x04}, // active/attribute flags
+                        {0x40, 0x08}, // parent index and size rate
+                        {0x50, 0x10}, // local center offset
+                    };
+                    for (const SnapshotRange& field : fields) {
+                        if ((size_t)entry + field.offset + field.size <= copySize) {
+                            std::memcpy((uint8_t*)slot.regions[i].ptr + entry + field.offset,
+                                        slot.data + offset + entry + field.offset,
+                                        field.size);
+                        }
+                    }
+                }
+            }
+
+            // cAtkCtrl::TargetInfo entries are 0x18 bytes: vtable at +0x00,
+            // target reference at +0x08, then mTotalHit and mHitTime at
+            // +0x10/+0x14. There are 32 inline entries in each table. The
+            // target reference is part of the attack's
+            // per-target consumed state. Preserving the post-hit live pointer
+            // can make a restored pre-hit attack remain associated with the
+            // target it already hit; starting another attack clears this,
+            // which explains why the next attack works.
             static constexpr uint32_t targetTables[] = {0x18C8, 0x1BC8, 0x1EC8};
             for (uint32_t table : targetTables) {
-                for (uint32_t target = 0; target < 24; ++target) {
-                    uint32_t field = table + target * 0x20 + 0x10;
+                for (uint32_t target = 0; target < 32; ++target) {
+                    uint32_t targetOffset = table + target * 0x18 + 0x08;
+                    uint32_t field = table + target * 0x18 + 0x10;
+                    if ((size_t)targetOffset + sizeof(uint64_t) <= copySize) {
+                        uint64_t savedTarget = *(const uint64_t*)(slot.data + offset + targetOffset);
+                        uint64_t liveTarget = *(uint64_t*)((uint8_t*)slot.regions[i].ptr + targetOffset);
+                        if (savedTarget == 0 || savedTarget == liveTarget ||
+                            isTeamCharacter(savedTarget)) {
+                            *(uint64_t*)((uint8_t*)slot.regions[i].ptr + targetOffset) = savedTarget;
+                        }
+                    }
                     if ((size_t)field + 0x08 <= copySize) {
                         std::memcpy((uint8_t*)slot.regions[i].ptr + field,
                                     slot.data + offset + field,
@@ -3032,7 +3143,7 @@ static void __fastcall hkApplyCollisionPushCorrection(
 }
 
 // ===========================================================================
-// Hook — render/present function (FUN_14053a250)
+// Hook - sRender__endFrameAndPresent
 //
 // Called at the end of sMvc3Main__move as the last operation on the render
 // manager (sMain+0x40190).  Performs frame-rate checking, Present(), and
@@ -3160,14 +3271,14 @@ void Rollback_InitHooks()
 
     // Collision sound-event iterator — NOP during re-sim
     s = MH_CreateHook(
-        (LPVOID)_addr(FN_COLLISION_SOUND_UPDATE),
+        (LPVOID)_addr(FN_COLLISION_POST_MOVE),
         (LPVOID)&hkCollisionSoundUpdate,
         (LPVOID*)&oCollisionSoundUpdate
     );
     if (s == MH_OK) {
-        MH_EnableHook((LPVOID)_addr(FN_COLLISION_SOUND_UPDATE));
+        MH_EnableHook((LPVOID)_addr(FN_COLLISION_POST_MOVE));
         HookLog("Rollback: hooked collision sound update (0x%llX)\n",
-                (uint64_t)_addr(FN_COLLISION_SOUND_UPDATE));
+                (uint64_t)_addr(FN_COLLISION_POST_MOVE));
     } else {
         HookLog("Rollback: failed to hook collision sound update (%d)\n", s);
     }
@@ -3189,14 +3300,14 @@ void Rollback_InitHooks()
     // (oMvc3Main_move) can be called from Rollback_ReSimulate without
     // actually drawing to the screen.
     s = MH_CreateHook(
-        (LPVOID)_addr(FN_CALL_SRENDER),
+        (LPVOID)_addr(FN_RENDER_END_FRAME),
         (LPVOID)&hkCallSRender,
         (LPVOID*)&oCallSRender
     );
     if (s == MH_OK) {
-        MH_EnableHook((LPVOID)_addr(FN_CALL_SRENDER));
+        MH_EnableHook((LPVOID)_addr(FN_RENDER_END_FRAME));
         HookLog("Rollback: hooked sRender call (0x%llX)\n",
-                (uint64_t)_addr(FN_CALL_SRENDER));
+                (uint64_t)_addr(FN_RENDER_END_FRAME));
     } else {
         HookLog("Rollback: failed to hook sRender call (%d)\n", s);
     }
