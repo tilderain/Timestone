@@ -283,8 +283,6 @@ static void(__fastcall* oMvc3Main_move)(uint64_t param_1) = nullptr;
 static void(__fastcall* oCallSRender)(uint64_t param_1) = nullptr;
 // Trampoline for sMain__move (frame-timing / QPC / Sleep / busy-wait)
 static void(__fastcall* oMain_move)(uint64_t param_1) = nullptr;
-// Trampoline for the collision sound-event iterator (hook crashes during re-sim)
-static void(__fastcall* oCollisionSoundUpdate)(uint64_t param_1) = nullptr;
 // Trampoline for the fighter pushbox collision callback.
 static void(__fastcall* oApplyCollisionPushCorrection)(
     uint64_t character,
@@ -1516,7 +1514,6 @@ static constexpr uintptr_t FN_COLLISION_BEGIN_FRAME  = 0x1405bb710;  // sCollisi
 static constexpr uintptr_t FN_CALL_AI                = 0x140647910;  // direct call on sMain+0x40240 (AI)
 static constexpr uintptr_t FN_UPDATE_RENDER_STATE    = 0x140259ea0;  // sMvc3Main__updateRenderState
 static constexpr uintptr_t FN_RENDER_END_FRAME       = 0x14053a250;  // sRender__endFrameAndPresent
-static constexpr uintptr_t FN_COLLISION_POST_MOVE    = 0x1405b72b0;  // sCollision__cSbcMoveMatrix__dispatchPostMoveJobs
 static constexpr uintptr_t FN_APPLY_COLLISION_PUSH   = 0x14004ad20;  // fighter pushbox response callback
 static constexpr uintptr_t FN_RESET_HITNODES         = 0x140259e90;  // j_sHitSolver__resetActiveNodes
 static constexpr uintptr_t FN_PAD_METHOD_3D00        = 0x1402a3d00;  // sPad method
@@ -3442,24 +3439,6 @@ static void __fastcall hkMvc3Main_move(uint64_t param_1)
     }
 }
 
-// ===========================================================================
-// Hook — collision sound-event iterator (null-pointer bug workaround)
-//
-// During re-simulation the sound slot-index increments past per-entry
-// capacity, triggering a null-pointer dereference inside this function.
-// Sound is irrelevant during headless re-sim, so we intercept and return.
-// ===========================================================================
-static void __fastcall hkCollisionSoundUpdate(uint64_t param_1)
-{
-    // Bypass during re-simulation; process normally otherwise
-    if (g_isResimulating) {
-        return;
-    }
-    if (oCollisionSoundUpdate) {
-        oCollisionSoundUpdate(param_1);
-    }
-}
-
 // Keep the callback's phase-1 collision-node state transition, but suppress
 // phase 0, which accumulates the player-to-player separation correction.
 static void __fastcall hkApplyCollisionPushCorrection(
@@ -3642,20 +3621,6 @@ void Rollback_InitHooks()
         HookLog("Rollback: hooked sUnit__removeUnit for recipe lifetime\n");
     } else {
         HookLog("Rollback: failed to hook sUnit__removeUnit (%d)\n", s);
-    }
-
-    // Collision sound-event iterator — NOP during re-sim
-    s = MH_CreateHook(
-        (LPVOID)_addr(FN_COLLISION_POST_MOVE),
-        (LPVOID)&hkCollisionSoundUpdate,
-        (LPVOID*)&oCollisionSoundUpdate
-    );
-    if (s == MH_OK) {
-        MH_EnableHook((LPVOID)_addr(FN_COLLISION_POST_MOVE));
-        HookLog("Rollback: hooked collision sound update (0x%llX)\n",
-                (uint64_t)_addr(FN_COLLISION_POST_MOVE));
-    } else {
-        HookLog("Rollback: failed to hook collision sound update (%d)\n", s);
     }
 
     s = MH_CreateHook(
