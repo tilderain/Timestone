@@ -949,7 +949,9 @@ static void CaptureCollisionNodeClones(SnapshotSlot& slot)
 
         void* clone = createNode(nullptr);
         if (!clone) continue;
-        copyNode(clone, region.ptr, true, true);
+        // Match the engine's copy thunk: inherit the source child factory, then
+        // deep-copy each child through that compatible factory.
+        copyNode(clone, region.ptr, false, true);
         slot.collisionNodeClones.push_back({region.ownerSlot, region.ptr, clone});
     }
 }
@@ -2406,13 +2408,13 @@ void Rollback_RestoreSnapshot(int32_t frame)
         offset += slot.regions[i].size;
     }
 
-    // Rebuild child wrappers and geometry through the node's own factory and
-    // virtual copy path. This avoids replaying setup animation commands.
+    // Restore the saved child factory as well as its children. Keeping the
+    // destination's generic factory creates objects with incompatible vtables.
     auto copyCollisionNode =
         (void(__fastcall*)(void*, void*, bool, bool))_addr(FN_COLLISION_NODE_COPY);
     for (const CollisionNodeClone& entry : slot.collisionNodeClones) {
         if (*(uint64_t*)entry.ownerSlot == (uint64_t)entry.savedPtr)
-            copyCollisionNode(entry.savedPtr, entry.clone, true, true);
+            copyCollisionNode(entry.savedPtr, entry.clone, false, true);
     }
 
     // Full cChr body restore also rewinds its external pointer fields. If an
