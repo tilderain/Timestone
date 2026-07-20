@@ -229,6 +229,8 @@ static constexpr size_t SHITSOLVER_ARRAY_OFF = 0x38;
 static constexpr size_t SHITSOLVER_POOL_OFF  = 0x60;
 static constexpr size_t SHITSOLVER_NODE_SIZE = 0x60;
 static constexpr size_t SHITSOLVER_COUNT_OFF = 0x30060;
+static constexpr uintptr_t FN_COLLISION_NODE_OBJECT_CREATE = 0x1405AD2A0;
+static constexpr uintptr_t FN_COLLISION_NODE_COPY          = 0x1405A4DA0;
 
 // ===========================================================================
 // Global Re-Simulation Indicators & Hook State
@@ -885,6 +887,12 @@ struct EffectRecipe {
     void* a13;
 };
 
+struct CollisionNodeClone {
+    uint64_t ownerSlot;
+    void* savedPtr;
+    void* clone;
+};
+
 struct SnapshotSlot {
     int32_t  frame       = -1;    // game frame this slot holds (-1 = invalid)
     uint8_t* data        = nullptr; // compact linear memory pool
@@ -896,6 +904,7 @@ struct SnapshotSlot {
     uint32_t remoteInput = 0;      // best-known remote input for this frame
     std::vector<ShotRecipe> shotRecipes;
     std::vector<EffectRecipe> effectRecipes;
+    std::vector<CollisionNodeClone> collisionNodeClones;
 };
 
 static SnapshotSlot g_slots[ROLLBACK_WINDOW];
@@ -915,6 +924,34 @@ static ShotSpawnFn oShotSpawn = nullptr;
 static ShotSpawnExFn oShotSpawnEx = nullptr;
 static UnitRemoveFn oUnitRemove = nullptr;
 static EffectCreateFn oEffectCreate = nullptr;
+
+static void DestroyCollisionNodeClones(SnapshotSlot& slot)
+{
+    for (const CollisionNodeClone& entry : slot.collisionNodeClones) {
+        if (!entry.clone) continue;
+        auto destroy = (void(__fastcall*)(void*, uint32_t))*(uint64_t*)entry.clone;
+        destroy(entry.clone, 1);
+    }
+    slot.collisionNodeClones.clear();
+}
+
+static void CaptureCollisionNodeClones(SnapshotSlot& slot)
+{
+    auto createNode =
+        (void*(__fastcall*)(void*))_addr(FN_COLLISION_NODE_OBJECT_CREATE);
+    auto copyNode =
+        (void(__fastcall*)(void*, void*, bool, bool))_addr(FN_COLLISION_NODE_COPY);
+
+    for (int i = 0; i < slot.regionCount; ++i) {
+        const Region& region = slot.regions[i];
+        if (!region.ownerSlot || region.size != CCHR_EXTERNAL_ANIM_SIZE) continue;
+
+        void* clone = createNode(nullptr);
+        if (!clone) continue;
+        copyNode(clone, region.ptr, true, true);
+        slot.collisionNodeClones.push_back({region.ownerSlot, region.ptr, clone});
+    }
+}
 
 static void CaptureShotFlight(void* shot, ShotFlightState& out)
 {
@@ -1986,6 +2023,8 @@ void Rollback_SaveSnapshot(int32_t frame)
     if (slotIdx < 0) slotIdx += ROLLBACK_WINDOW;
     SnapshotSlot& slot = g_slots[slotIdx];
 
+    DestroyCollisionNodeClones(slot);
+
     if (slot.capacity < total) {
         delete[] slot.data;
         slot.data = new (std::nothrow) uint8_t[total];
@@ -2015,6 +2054,9 @@ void Rollback_SaveSnapshot(int32_t frame)
     }
     slot.size = offset;
 
+    // Native clones keep reference-managed geometry alive after attack-end
+    // clears the live node's child array.
+    CaptureCollisionNodeClones(slot);
     CaptureShotAndEffectRecipes(slot);
 
     // [EXPERIMENTAL] QPC capture — see mvc3/rollback W3-C2
@@ -2290,6 +2332,7 @@ void Rollback_RestoreSnapshot(int32_t frame)
             for (uint32_t primitive = 0; primitive < 16; ++primitive) {
                 uint32_t entry = capsuleBase + primitive * capsuleStride;
                 static constexpr SnapshotRange fields[] = {
+                    {0x08, 0x01}, // inherited active flag
                     {0x10, 0x04}, // primitive kind
                     {0x20, 0x24}, // capsule endpoints and radius
                     {0x50, 0x04}, // active/attribute flags
@@ -2311,6 +2354,7 @@ void Rollback_RestoreSnapshot(int32_t frame)
                 for (uint32_t primitive = 0; primitive < 16; ++primitive) {
                     uint32_t entry = base + primitive * sphereStride;
                     static constexpr SnapshotRange fields[] = {
+                        {0x08, 0x01}, // inherited active flag
                         {0x10, 0x04}, // primitive kind
                         {0x20, 0x10}, // sphere center and radius
                         {0x30, 0x04}, // active/attribute flags
@@ -2359,6 +2403,15 @@ void Rollback_RestoreSnapshot(int32_t frame)
             std::memcpy(slot.regions[i].ptr, slot.data + offset, copySize);
         }
         offset += slot.regions[i].size;
+    }
+
+    // Rebuild child wrappers and geometry through the node's own factory and
+    // virtual copy path. This avoids replaying setup animation commands.
+    auto copyCollisionNode =
+        (void(__fastcall*)(void*, void*, bool, bool))_addr(FN_COLLISION_NODE_COPY);
+    for (const CollisionNodeClone& entry : slot.collisionNodeClones) {
+        if (*(uint64_t*)entry.ownerSlot == (uint64_t)entry.savedPtr)
+            copyCollisionNode(entry.savedPtr, entry.clone, true, true);
     }
 
     // Full cChr body restore also rewinds its external pointer fields. If an
@@ -3137,6 +3190,7 @@ void Rollback_FreeSnapshots()
     Rollback_PatchDrawCalls(false); // restore draw calls (no-op if unpatched)
 
     for (int i = 0; i < ROLLBACK_WINDOW; ++i) {
+        DestroyCollisionNodeClones(g_slots[i]);
         delete[] g_slots[i].data;
         g_slots[i].data        = nullptr;
         g_slots[i].size        = 0;
