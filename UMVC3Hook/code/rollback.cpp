@@ -929,7 +929,8 @@ static void DestroyCollisionNodeClones(SnapshotSlot& slot)
 {
     for (const CollisionNodeClone& entry : slot.collisionNodeClones) {
         if (!entry.clone) continue;
-        auto destroy = (void(__fastcall*)(void*, uint32_t))*(uint64_t*)entry.clone;
+        uint64_t vtable = *(uint64_t*)entry.clone;
+        auto destroy = (void(__fastcall*)(void*, uint32_t))*(uint64_t*)vtable;
         destroy(entry.clone, 1);
     }
     slot.collisionNodeClones.clear();
