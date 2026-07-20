@@ -87,6 +87,84 @@ static uint32_t DecodeDtiSize(uint64_t dtiPtr) {
 }
 
 static constexpr size_t MAX_CHAR_SIZE        = 0x40000;
+static constexpr size_t CCHR_NOMINAL_SIZE    = 0x6A60;
+static constexpr size_t CCHR_MAX_SIZE        = 30000;
+static constexpr uint32_t CCHR_NUM_JOINTS_OFFSET = 0x530;
+static constexpr uint32_t CCHR_MOTION_BASE       = 0x560;
+static constexpr uint32_t CCHR_MOTION_STRIDE     = 0x180;
+static constexpr uint32_t CCHR_BLEND_PTR_OFFSET  = 0x160;
+static constexpr size_t CCHR_BLEND_BYTES_PER_JOINT = 104;
+static constexpr uint32_t CCHR_EXTERNAL_ANIM_OFFSETS[] = {
+    0x4200, 0x4E10, 0x5520, 0x5C30
+};
+static constexpr size_t CCHR_EXTERNAL_ANIM_SIZE = 0xE0;
+static constexpr int CCHR_MOTION_COUNT = 8;
+static constexpr uint32_t CCHR_DRAW_STATE_START = 0x80;
+static constexpr uint32_t CCHR_DRAW_STATE_END   = CCHR_MOTION_BASE;
+static constexpr uint32_t CCHR_MODEL_TAIL_START = 0x1160;
+static constexpr uint32_t CCHR_MODEL_TAIL_END   = 0x1300;
+static constexpr uint32_t SUNIT_CATEGORY_COUNT_OFFSET = 0xC38;
+static constexpr uint32_t SUNIT_CATEGORY_LISTS_OFFSET = 0x50;
+static constexpr uint32_t SUNIT_CATEGORY_LIST_STRIDE  = 0x30;
+static constexpr uint32_t SUNIT_CHARACTER_CATEGORY    = 8;
+static constexpr uint32_t CUNIT_LIVE_STATE_OFFSETS[] = {0x10, 0x18, 0x20, 0x38};
+static constexpr size_t SMAIN_SIZE = 0x40080;
+
+struct SnapshotRange {
+    uint32_t offset;
+    uint32_t size;
+};
+
+static constexpr SnapshotRange CCHR_SCALAR_RESTORE_RANGES[] = {
+    {0x48, 0x38},    // parent flags and world position/orientation/scale
+    {0xA8, 0x04},    // action event/frame progression counter
+    {0x1308, 0x40},  // action descriptor and actor animation state
+    // cActorGameModelAnm is embedded at +0x1348. Keep its vtable live, but
+    // rewind its script IDs, owner, command blocks, key and loop registers.
+    {0x1350, 0x98},
+    {0x14F0, 0x28},  // cChr gameplay flags, including mAnmF airborne bit
+    {0x1644, 0x04},  // class-opcode action frame counter
+    // cAtkCtrl starts at +0x1878. Restore the one-shot attack window and
+    // attack-info state, but leave its mpUnit/resource pointers live.
+    {0x18A0, 0x30},
+    {0x3F48, 0x2B0}, // action requests, movement, velocity, gravity and air counters
+    {0x63B0, 0x78},  // damage, aerial trajectory and hitstun time state
+};
+
+// sMain is almost entirely live worker infrastructure. Only timing state is
+// rollback-relevant; callback queues, ring buffers, handles and worker records
+// must remain on the current timeline.
+static constexpr SnapshotRange SMAIN_RESTORE_RANGES[] = {
+    {0x30, 0x64},       // init flag and primary timing through +0x93
+    {0xA4, 0x1C},       // timing tail; excludes queue header +0x98..+0xA3
+    {0x40010, 0x10},    // secondary timing before mpJobSys1
+    {0x40028, 0x18},    // secondary timing between embedded vtable pointers
+    {0x40048, 0x14},    // secondary timing tail
+};
+
+static bool IsLikelyPointer(uint64_t value)
+{
+    return value >= 0x10000 && value < 0x0000800000000000ull && (value & 7) == 0;
+}
+
+static void RestoreExternalAnimBlock(void* dst, const uint8_t* src, size_t size)
+{
+    if (size != CCHR_EXTERNAL_ANIM_SIZE) return;
+
+    // cChrEffectSlot is an sCollision::Node, not a plain animation buffer.
+    // +0x00..+0x8f owns its live vtable, geometry MtArray, child records,
+    // bounding topology, owner and callback. Rewinding that graph inserts
+    // unrelated live objects into collision jobs and eventually calls draw
+    // methods without an sRender context. Restore all known deterministic
+    // node state while retaining only the live graph/resource fields.
+    // mFlgActive (+0x08) is the only slot lifecycle flag restored here. Keep
+    // mFlgSetup live: it gates collision-node setup/dirty processing, and
+    // rewinding it while retaining the live draw/collision graph can enqueue a
+    // setup callback with the wrong render context.
+    std::memcpy((uint8_t*)dst + 0x08, src + 0x08, 0x01);
+    std::memcpy((uint8_t*)dst + 0x90, src + 0x90, 0x28); // group, attr, move, user u32
+    std::memcpy((uint8_t*)dst + 0xC8, src + 0xC8, 0x18); // derived slot scalar tail
+}
 static constexpr int    MAX_REGIONS          = 512;
 static constexpr int    DYNAMIC_SAFETY       = 128; // max projectile/effect nodes
 static constexpr int    SSHOT_SENTINEL_COUNT = 10;  // 10 sentinel slots starting at 0x140d47f90
@@ -693,8 +771,11 @@ extern bool g_multiResimEnabled;
 // Snapshot Region Descriptor & Ring Buffer
 // ===========================================================================
 struct Region {
-    void*    ptr;  // source/destination address in game memory
-    size_t   size; // number of bytes
+    void*    ptr;       // source/destination address in game memory
+    size_t   size;      // number of bytes
+    uint64_t ownerSlot; // pointer field that must still refer to ptr on restore
+    uint64_t expectedVtable; // nonzero for cChr bodies; validates helper reuse
+    bool     skipVtable;
 };
 
 struct SnapshotSlot {
@@ -736,6 +817,9 @@ static void TraverseAndAddDynamicList(uint64_t listHead, size_t nextOffset,
 
         regions[r].ptr  = (void*)current;
         regions[r].size = objSize;
+        regions[r].ownerSlot = 0;
+        regions[r].expectedVtable = 0;
+        regions[r].skipVtable = false;
         ++r;
 
         current = *(uint64_t*)(current + nextOffset);
@@ -750,10 +834,14 @@ static int BuildRegions(Region* regions, int maxRegions)
     if (!regions || maxRegions < 1) return 0;
 
     int r = 0;
-    auto add = [&](void* ptr, size_t sz) {
+    auto add = [&](void* ptr, size_t sz, uint64_t ownerSlot = 0,
+                   uint64_t expectedVtable = 0, bool skipVtable = false) {
         if (r < maxRegions && ptr && sz > 0) {
             regions[r].ptr  = ptr;
             regions[r].size = sz;
+            regions[r].ownerSlot = ownerSlot;
+            regions[r].expectedVtable = expectedVtable;
+            regions[r].skipVtable = skipVtable;
             ++r;
         }
     };
@@ -876,7 +964,7 @@ static int BuildRegions(Region* regions, int maxRegions)
     // ---- 6. sMain — physics, timing, frame pacing (needed for re-sim consistency) ----
     {
         uint64_t sMain = *(uint64_t*)_addr(PTR_SMAIN);
-        add((void*)sMain, 0x40080);
+        add((void*)sMain, SMAIN_SIZE);
     }
 
     // ---- 7. sCamera — view matrices, 8-slot camera stack, cutin state ----
@@ -931,6 +1019,8 @@ static int BuildRegions(Region* regions, int maxRegions)
         add((void*)team0, TEAM_SIZE);
         add((void*)team1, TEAM_SIZE);
 
+        uint64_t teamCharacters[6] = {};
+        int teamCharacterCount = 0;
         for (int ti = 0; ti < 2; ++ti) {
             uint64_t team = sCharacter + (ti == 0 ? TEAM0_OFFSET : TEAM1_OFFSET);
             uint64_t node = team + TEAM_FIRST_NODE_OFFSET;
@@ -938,13 +1028,16 @@ static int BuildRegions(Region* regions, int maxRegions)
             while (node && r < maxRegions) {
                 uint64_t character = *(uint64_t*)(node + NODE_CHR_OFFSET);
                 if (character) {
+                    if (teamCharacterCount < 6) {
+                        teamCharacters[teamCharacterCount++] = character;
+                    }
                     uint64_t vtable = *(uint64_t*)character;
                     uint64_t dtiFunc = (vtable >= 0x140000000) ? *(uint64_t*)(vtable + 0x20) : 0;
                     uint64_t dtiPtr = GetObjectDti(character);
                     uint32_t charSize = DecodeDtiSize(dtiPtr);
                     uint32_t finalSize = charSize;
-                    if (finalSize == 0 || finalSize > MAX_CHAR_SIZE) {
-                        finalSize = 0x20000;
+                    if (finalSize < CCHR_NOMINAL_SIZE || finalSize > CCHR_MAX_SIZE) {
+                        finalSize = CCHR_NOMINAL_SIZE;
                     }
                     uint32_t* animFields = (uint32_t*)(character + 0x1300);
                    // HookLog("DIAG Character[team %d]: addr=0x%llX vtable=0x%llX dtiFunc=0x%llX dtiPtr=0x%llX rawSize=%u finalSize=%u\n"
@@ -954,7 +1047,31 @@ static int BuildRegions(Region* regions, int maxRegions)
                 //            animFields[4], animFields[5], animFields[6], animFields[7],
                  //           animFields[8], animFields[9], animFields[10], animFields[11],
                  //           animFields[12], animFields[13], animFields[14], animFields[15]);
-                    add((void*)character, finalSize);
+                    add((void*)character, finalSize, 0, vtable, true);
+
+                    // Restore motion state and its external interpolation data
+                    // together. Keeping one live while rewinding the other
+                    // leaves animation/root-motion state split across frames.
+                    uint32_t numJoints = *(uint32_t*)(character + CCHR_NUM_JOINTS_OFFSET);
+                    if (numJoints <= 256) {
+                        size_t blendSize = CCHR_BLEND_BYTES_PER_JOINT * numJoints;
+                        for (int motion = 0; motion < CCHR_MOTION_COUNT; ++motion) {
+                            uint64_t ownerSlot = character + CCHR_MOTION_BASE +
+                                motion * CCHR_MOTION_STRIDE + CCHR_BLEND_PTR_OFFSET;
+                            uint64_t blend = *(uint64_t*)ownerSlot;
+                            if (blend && blendSize > 0) {
+                                add((void*)blend, blendSize, ownerSlot);
+                            }
+                        }
+                    }
+
+                    for (uint32_t animOffset : CCHR_EXTERNAL_ANIM_OFFSETS) {
+                        uint64_t ownerSlot = character + animOffset;
+                        uint64_t anim = *(uint64_t*)ownerSlot;
+                        if (anim) {
+                            add((void*)anim, CCHR_EXTERNAL_ANIM_SIZE, ownerSlot);
+                        }
+                    }
 
                     // cChrInput is embedded inside uCharacter at +0x21C8.
                     // The full cChrInput struct is ~0x5A0 bytes covering all
@@ -982,6 +1099,32 @@ static int BuildRegions(Region* regions, int maxRegions)
                     }
                 }
                 node = *(uint64_t*)(node + NODE_NEXT_OFFSET);
+            }
+        }
+
+        // Spawned helper uCharacters live in sUnit category 8 but are not in
+        // either team roster. Capture their DTI-sized bodies at saved addresses;
+        // blend and external animation buffers remain team-fighter-only.
+        uint64_t sUnit = *(uint64_t*)_addr(PTR_SUNIT);
+        if (sUnit && *(uint32_t*)(sUnit + SUNIT_CATEGORY_COUNT_OFFSET) > SUNIT_CHARACTER_CATEGORY) {
+            uint64_t helper = *(uint64_t*)(sUnit + SUNIT_CATEGORY_LISTS_OFFSET +
+                SUNIT_CATEGORY_LIST_STRIDE * SUNIT_CHARACTER_CATEGORY);
+            int safety = 64;
+            while (helper && safety-- > 0 && r < maxRegions) {
+                bool isTeamCharacter = false;
+                for (int i = 0; i < teamCharacterCount; ++i) {
+                    if (teamCharacters[i] == helper) {
+                        isTeamCharacter = true;
+                        break;
+                    }
+                }
+                if (!isTeamCharacter) {
+                    uint32_t helperSize = DecodeDtiSize(GetObjectDti(helper));
+                    if (helperSize >= 8 && helperSize <= CCHR_MAX_SIZE) {
+                        add((void*)helper, helperSize, 0, *(uint64_t*)helper, true);
+                    }
+                }
+                helper = *(uint64_t*)(helper + 0x18);
             }
         }
     }
@@ -1539,6 +1682,9 @@ void Rollback_SaveSnapshot(int32_t frame)
     for (int i = 0; i < count; ++i) {
         slot.regions[i].ptr  = regions[i].ptr;
         slot.regions[i].size = regions[i].size;
+        slot.regions[i].ownerSlot = regions[i].ownerSlot;
+        slot.regions[i].expectedVtable = regions[i].expectedVtable;
+        slot.regions[i].skipVtable = regions[i].skipVtable;
         std::memcpy(slot.data + offset, regions[i].ptr, regions[i].size);
         offset += regions[i].size;
     }
@@ -1618,13 +1764,45 @@ void Rollback_RestoreSnapshot(int32_t frame)
     // same memory addresses that were captured, even if the game rebuilt its
     // internal lists between save and restore.
     uint64_t sHitSolver = *(uint64_t*)_addr(PTR_SHITSOLVER);
+    bool ownerStillMatches[MAX_REGIONS] = {};
+    uint64_t liveOwnerPointers[MAX_REGIONS] = {};
+    for (int i = 0; i < slot.regionCount; ++i) {
+        uint64_t ownerSlot = slot.regions[i].ownerSlot;
+        if (ownerSlot == 0) {
+            ownerStillMatches[i] = true;
+            continue;
+        }
+        liveOwnerPointers[i] = *(uint64_t*)ownerSlot;
+        ownerStillMatches[i] = liveOwnerPointers[i] == (uint64_t)slot.regions[i].ptr;
+    }
+
     size_t offset = 0;
     for (int i = 0; i < slot.regionCount; ++i) {
         size_t copySize = slot.regions[i].size;
         if (offset + copySize > slot.size) {
             copySize = slot.size - offset;
         }
-        if ((uint64_t)slot.regions[i].ptr == sHitSolver &&
+        bool objectStillMatches = slot.regions[i].expectedVtable == 0 ||
+            *(uint64_t*)slot.regions[i].ptr == slot.regions[i].expectedVtable;
+        if (!ownerStillMatches[i] || !objectStillMatches) {
+            // The external blend/animation allocation was replaced after the
+            // snapshot, or a helper cChr was destroyed/reused. Never write old
+            // bytes into a freed or repurposed allocation.
+        } else if (slot.regions[i].ownerSlot != 0 &&
+                   slot.regions[i].size == CCHR_EXTERNAL_ANIM_SIZE) {
+            RestoreExternalAnimBlock(slot.regions[i].ptr,
+                                     slot.data + offset,
+                                     copySize);
+        } else if ((uint64_t)slot.regions[i].ptr == *(uint64_t*)_addr(PTR_SMAIN) &&
+                   slot.regions[i].size == SMAIN_SIZE) {
+            for (const SnapshotRange& range : SMAIN_RESTORE_RANGES) {
+                if ((size_t)range.offset + range.size <= copySize) {
+                    std::memcpy((uint8_t*)slot.regions[i].ptr + range.offset,
+                                slot.data + offset + range.offset,
+                                range.size);
+                }
+            }
+        } else if ((uint64_t)slot.regions[i].ptr == sHitSolver &&
             slot.regions[i].size == SHITSOLVER_SIZE &&
             copySize > SHITSOLVER_DATA_OFF) {
             // Preserve the live vtable, CRITICAL_SECTION, flags and the
@@ -1632,30 +1810,119 @@ void Rollback_RestoreSnapshot(int32_t frame)
             std::memcpy((void*)(sHitSolver + SHITSOLVER_DATA_OFF),
                         slot.data + offset + SHITSOLVER_DATA_OFF,
                         copySize - SHITSOLVER_DATA_OFF);
+        } else if (slot.regions[i].skipVtable && copySize > sizeof(uint64_t)) {
+            uint64_t liveUnitState[sizeof(CUNIT_LIVE_STATE_OFFSETS) / sizeof(CUNIT_LIVE_STATE_OFFSETS[0])];
+            for (size_t field = 0;
+                 field < sizeof(CUNIT_LIVE_STATE_OFFSETS) / sizeof(CUNIT_LIVE_STATE_OFFSETS[0]);
+                 ++field) {
+                liveUnitState[field] =
+                    *(uint64_t*)((uint8_t*)slot.regions[i].ptr + CUNIT_LIVE_STATE_OFFSETS[field]);
+            }
+            uint8_t liveDrawState[CCHR_DRAW_STATE_END - CCHR_DRAW_STATE_START];
+            std::memcpy(liveDrawState,
+                        (uint8_t*)slot.regions[i].ptr + CCHR_DRAW_STATE_START,
+                        sizeof(liveDrawState));
+            uint8_t liveModelTail[CCHR_MODEL_TAIL_END - CCHR_MODEL_TAIL_START];
+            std::memcpy(liveModelTail,
+                        (uint8_t*)slot.regions[i].ptr + CCHR_MODEL_TAIL_START,
+                        sizeof(liveModelTail));
+
+            struct LivePointerField { uint32_t offset; uint64_t value; };
+            LivePointerField livePointers[512];
+            size_t livePointerCount = 0;
+            for (size_t fieldOffset = sizeof(uint64_t);
+                 fieldOffset + sizeof(uint64_t) <= copySize && livePointerCount < 512;
+                 fieldOffset += sizeof(uint64_t)) {
+                uint64_t liveValue = *(uint64_t*)((uint8_t*)slot.regions[i].ptr + fieldOffset);
+                uint64_t savedValue = *(uint64_t*)(slot.data + offset + fieldOffset);
+                if (IsLikelyPointer(liveValue) || IsLikelyPointer(savedValue)) {
+                    livePointers[livePointerCount++] = {
+                        (uint32_t)fieldOffset, liveValue
+                    };
+                }
+            }
+            std::memcpy((uint8_t*)slot.regions[i].ptr + sizeof(uint64_t),
+                        slot.data + offset + sizeof(uint64_t),
+                        copySize - sizeof(uint64_t));
+            // cChr derives from cUnit. Preserve its live lifecycle state and
+            // intrusive links: rewinding +0x10 can re-run setup/createProperty
+            // for an already-live helper, while rewinding the links corrupts
+            // sUnit traversal shared with objects outside this snapshot.
+            for (size_t field = 0;
+                 field < sizeof(CUNIT_LIVE_STATE_OFFSETS) / sizeof(CUNIT_LIVE_STATE_OFFSETS[0]);
+                 ++field) {
+                *(uint64_t*)((uint8_t*)slot.regions[i].ptr + CUNIT_LIVE_STATE_OFFSETS[field]) =
+                    liveUnitState[field];
+            }
+            // Keep live draw-list/resource ownership and uModel lifecycle state,
+            // but rewind Motion[8] at +0x560..+0x115f. Those records must agree
+            // with the separately restored blend buffers and animation blocks.
+            std::memcpy((uint8_t*)slot.regions[i].ptr + CCHR_DRAW_STATE_START,
+                        liveDrawState,
+                        sizeof(liveDrawState));
+            std::memcpy((uint8_t*)slot.regions[i].ptr + CCHR_MODEL_TAIL_START,
+                        liveModelTail,
+                        sizeof(liveModelTail));
+            // Preserve every live pointer-like field in the remainder of cChr.
+            // The legacy body contains weak shot/effect refs, resource refs and
+            // subclass-tail pointers whose targets are not recreated by restore.
+            for (size_t pointer = 0; pointer < livePointerCount; ++pointer) {
+                *(uint64_t*)((uint8_t*)slot.regions[i].ptr + livePointers[pointer].offset) =
+                    livePointers[pointer].value;
+            }
+            // The broad pointer guard can mistake packed flags and pairs of
+            // floats for aligned addresses (for example speed + zero accel).
+            // Reapply confirmed pointer-free gameplay ranges so grounded state,
+            // gravity and velocity come from the restored frame.
+            for (const SnapshotRange& range : CCHR_SCALAR_RESTORE_RANGES) {
+                if ((size_t)range.offset + range.size <= copySize) {
+                    std::memcpy((uint8_t*)slot.regions[i].ptr + range.offset,
+                                slot.data + offset + range.offset,
+                                range.size);
+                }
+            }
+
+            // cAtkCtrl::TargetInfo entries are 0x20 bytes: vtable at +0x00,
+            // live target reference at +0x08, then deterministic mTotalHit
+            // and mHitTime at +0x10/+0x14. Restore hit-confirm bookkeeping
+            // without rewinding the target object references.
+            static constexpr uint32_t targetTables[] = {0x18C8, 0x1BC8, 0x1EC8};
+            for (uint32_t table : targetTables) {
+                for (uint32_t target = 0; target < 24; ++target) {
+                    uint32_t field = table + target * 0x20 + 0x10;
+                    if ((size_t)field + 0x08 <= copySize) {
+                        std::memcpy((uint8_t*)slot.regions[i].ptr + field,
+                                    slot.data + offset + field,
+                                    0x08);
+                    }
+                }
+            }
         } else if (copySize > 0) {
             std::memcpy(slot.regions[i].ptr, slot.data + offset, copySize);
         }
         offset += slot.regions[i].size;
     }
 
-    // Rebuild the active-node pointers against the array's live allocation.
-    // cHitNode slots have stable addresses inside the process-lifetime solver.
-    if (sHitSolver) {
-        uint32_t count = *(uint32_t*)(sHitSolver + SHITSOLVER_COUNT_OFF);
-        uint32_t capacity = *(uint32_t*)(sHitSolver + SHITSOLVER_ARRAY_OFF + 0x0C);
-        uint64_t buffer = *(uint64_t*)(sHitSolver + SHITSOLVER_ARRAY_OFF + 0x18);
-        if (buffer && count <= capacity && count <= 0x800) {
-            for (uint32_t i = 0; i < count; ++i) {
-                *(uint64_t*)(buffer + i * sizeof(uint64_t)) =
-                    sHitSolver + SHITSOLVER_POOL_OFF + i * SHITSOLVER_NODE_SIZE;
-            }
-            *(uint32_t*)(sHitSolver + SHITSOLVER_ARRAY_OFF + 0x08) = count;
-        } else {
-            // Avoid exposing stale collision pointers. The next add/reset pass
-            // will repopulate the array normally.
-            *(uint32_t*)(sHitSolver + SHITSOLVER_ARRAY_OFF + 0x08) = 0;
-            *(uint32_t*)(sHitSolver + SHITSOLVER_COUNT_OFF) = 0;
+    // Full cChr body restore also rewinds its external pointer fields. If an
+    // allocation changed, put the current pointer back after skipping its old
+    // buffer so the live character does not retain a stale address.
+    for (int i = 0; i < slot.regionCount; ++i) {
+        if (slot.regions[i].ownerSlot != 0 && !ownerStillMatches[i]) {
+            *(uint64_t*)slot.regions[i].ownerSlot = liveOwnerPointers[i];
         }
+    }
+
+    // Active hit nodes are one-frame work items. Restoring them after a hit has
+    // already been applied replays the resolver callback on every subsequent
+    // restore, compounding launch/pushback (the effect is largest immediately
+    // after a hit and decays once the native solver consumes the node).
+    // Keep the live MtArray allocation and solver infrastructure, but discard
+    // the transient pending-hit list.
+    if (sHitSolver) {
+        ((void(__fastcall*)(uint64_t))_addr(FN_RESET_HITNODES))(sHitSolver);
+        *(uint32_t*)(sHitSolver + 0x30064) = 0; // mHitSolverCnt
+        *(uint32_t*)(sHitSolver + 0x30070) = 0; // sort bucket A count
+        *(uint32_t*)(sHitSolver + 0x34078) = 0; // sort bucket B count
     }
 
     // Log ALL heap regions with their sizes
