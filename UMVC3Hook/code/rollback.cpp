@@ -32,6 +32,7 @@
 #include <cstdio>
 #include <vector>
 #include <string>
+#include <unordered_map>
 
 extern void HookLog(const char* fmt, ...);
 extern void HookLogSetFile(const char* filename);
@@ -54,6 +55,12 @@ static constexpr uintptr_t PTR_SCAMERA      = 0x140e17930;
 // sMvc3Main__move — the full per-frame update pipeline
 static constexpr uintptr_t FN_SMVC3MAIN_MOVE = 0x1402594A0;
 static constexpr uintptr_t FN_GAMEUI_SET_TEAM_CHARACTER_ID = 0x140022610;
+static constexpr uintptr_t FN_SSHOT_SPAWN = 0x140150E00;
+static constexpr uintptr_t FN_SSHOT_SPAWN_EX = 0x140150F40;
+static constexpr uintptr_t FN_SSHOT_ENQUEUE_UNIT = 0x1401512A0;
+static constexpr uintptr_t FN_SUNIT_ADD_UNIT = 0x14051A6B0;
+static constexpr uintptr_t FN_SUNIT_REMOVE_UNIT = 0x14051B9F0;
+static constexpr uintptr_t FN_UGAMEEFFECT_CREATE = 0x140131410;
 
 // ===========================================================================
 // Offsets & Struct Constants
@@ -110,6 +117,7 @@ static constexpr uint32_t SUNIT_CATEGORY_LIST_STRIDE  = 0x30;
 static constexpr uint32_t SUNIT_CHARACTER_CATEGORY    = 8;
 static constexpr uint32_t CUNIT_LIVE_STATE_OFFSETS[] = {0x10, 0x18, 0x20, 0x38};
 static constexpr size_t SMAIN_SIZE = 0x40080;
+static constexpr int SSHOT_CATEGORY = 10;
 
 struct SnapshotRange {
     uint32_t offset;
@@ -824,6 +832,59 @@ struct Region {
     bool     skipVtable;
 };
 
+struct ShotFlightState {
+    float pos[4];
+    float quat[4];
+    float timerThresh;
+    float timer;
+    uint32_t flags;
+    uint32_t flags2;
+    uint32_t prevFlags;
+    float timeAcc;
+    float lifetime;
+    float velocityDir[4];
+    float speed;
+    int32_t state;
+};
+
+enum class ShotSpawnKind : uint8_t { Standard, Extended };
+
+struct ShotRecipe {
+    void* savedPtr;
+    void* restoredPtr;
+    void* shotElement;
+    int initParam;
+    void* posData;
+    void* ownerChr;
+    void* objectRef1;
+    uint32_t slotId;
+    void* objectRef2;
+    ShotSpawnKind kind;
+    int exA9;
+    void* exA10;
+    int exA11;
+    void* exA12;
+    ShotFlightState flight;
+};
+
+struct EffectRecipe {
+    void* savedPtr;
+    void* restoredPtr;
+    void* sGameEffect;
+    int effectId;
+    int a3;
+    void* attachTo;
+    int a5;
+    int a6;
+    void* a7;
+    void* a8;
+    int a9;
+    void* a10;
+    int a11;
+    uint32_t a12;
+    void* a13;
+};
+
 struct SnapshotSlot {
     int32_t  frame       = -1;    // game frame this slot holds (-1 = invalid)
     uint8_t* data        = nullptr; // compact linear memory pool
@@ -833,9 +894,266 @@ struct SnapshotSlot {
     int      regionCount = 0;       // number of populated regions[]
     uint32_t localInput  = 0;      // local player's delayed input for this frame
     uint32_t remoteInput = 0;      // best-known remote input for this frame
+    std::vector<ShotRecipe> shotRecipes;
+    std::vector<EffectRecipe> effectRecipes;
 };
 
 static SnapshotSlot g_slots[ROLLBACK_WINDOW];
+static std::unordered_map<void*, ShotRecipe> g_liveShotRecipes;
+static std::unordered_map<void*, EffectRecipe> g_liveEffectRecipes;
+
+using ShotSpawnFn = void*(__fastcall*)(void*, void*, int, void*, void*, void*, uint32_t, void*);
+using ShotSpawnExFn = void*(__fastcall*)(void*, void*, int, void*, void*, void*, uint32_t,
+                                        void*, int, void*, int, void*);
+using ShotEnqueueFn = char(__fastcall*)(void*, void*, int);
+using UnitAddFn = char(__fastcall*)(void*, int, void*, void*);
+using UnitRemoveFn = char(__fastcall*)(void*, void*);
+using EffectCreateFn = void*(__fastcall*)(void*, int, int, void*, int, int, void*, void*,
+                                          int, void*, int, uint32_t, void*);
+
+static ShotSpawnFn oShotSpawn = nullptr;
+static ShotSpawnExFn oShotSpawnEx = nullptr;
+static UnitRemoveFn oUnitRemove = nullptr;
+static EffectCreateFn oEffectCreate = nullptr;
+
+static void CaptureShotFlight(void* shot, ShotFlightState& out)
+{
+    auto* p = (uint8_t*)shot;
+    std::memcpy(out.pos, p + 0x50, sizeof(out.pos));
+    std::memcpy(out.quat, p + 0x60, sizeof(out.quat));
+    std::memcpy(&out.timerThresh, p + 0x1F58, sizeof(out.timerThresh));
+    std::memcpy(&out.timer, p + 0x1F60, sizeof(out.timer));
+    std::memcpy(&out.flags, p + 0x1FE0, sizeof(out.flags));
+    std::memcpy(&out.flags2, p + 0x1FE4, sizeof(out.flags2));
+    std::memcpy(&out.prevFlags, p + 0x1FEC, sizeof(out.prevFlags));
+    std::memcpy(&out.timeAcc, p + 0x2050, sizeof(out.timeAcc));
+    std::memcpy(&out.lifetime, p + 0x2078, sizeof(out.lifetime));
+    std::memcpy(out.velocityDir, p + 0x20C0, sizeof(out.velocityDir));
+    std::memcpy(&out.speed, p + 0x20D0, sizeof(out.speed));
+    std::memcpy(&out.state, p + 0x212C, sizeof(out.state));
+}
+
+static void ApplyShotFlight(void* shot, const ShotFlightState& in)
+{
+    auto* p = (uint8_t*)shot;
+    std::memcpy(p + 0x50, in.pos, sizeof(in.pos));
+    std::memcpy(p + 0x60, in.quat, sizeof(in.quat));
+    std::memcpy(p + 0x1F58, &in.timerThresh, sizeof(in.timerThresh));
+    std::memcpy(p + 0x1F60, &in.timer, sizeof(in.timer));
+    std::memcpy(p + 0x1FE0, &in.flags, sizeof(in.flags));
+    std::memcpy(p + 0x1FE4, &in.flags2, sizeof(in.flags2));
+    std::memcpy(p + 0x1FEC, &in.prevFlags, sizeof(in.prevFlags));
+    std::memcpy(p + 0x2050, &in.timeAcc, sizeof(in.timeAcc));
+    std::memcpy(p + 0x2078, &in.lifetime, sizeof(in.lifetime));
+    std::memcpy(p + 0x20C0, in.velocityDir, sizeof(in.velocityDir));
+    std::memcpy(p + 0x20D0, &in.speed, sizeof(in.speed));
+    std::memcpy(p + 0x212C, &in.state, sizeof(in.state));
+}
+
+static void* __fastcall hkShotSpawn(void* manager, void* element, int initParam,
+                                    void* posData, void* ownerChr, void* objectRef1,
+                                    uint32_t slotId, void* objectRef2)
+{
+    void* shot = oShotSpawn(manager, element, initParam, posData, ownerChr,
+                            objectRef1, slotId, objectRef2);
+    if (shot) {
+        ShotRecipe recipe{};
+        recipe.savedPtr = shot;
+        recipe.restoredPtr = shot;
+        recipe.shotElement = element;
+        recipe.initParam = initParam;
+        recipe.posData = posData;
+        recipe.ownerChr = ownerChr;
+        recipe.objectRef1 = objectRef1;
+        recipe.slotId = slotId;
+        recipe.objectRef2 = objectRef2;
+        recipe.kind = ShotSpawnKind::Standard;
+        g_liveShotRecipes[shot] = recipe;
+    }
+    return shot;
+}
+
+static void* __fastcall hkShotSpawnEx(void* manager, void* element, int initParam,
+                                      void* posData, void* ownerChr, void* objectRef1,
+                                      uint32_t slotId, void* objectRef2, int a9,
+                                      void* a10, int a11, void* a12)
+{
+    void* shot = oShotSpawnEx(manager, element, initParam, posData, ownerChr,
+                              objectRef1, slotId, objectRef2, a9, a10, a11, a12);
+    if (shot) {
+        ShotRecipe recipe{};
+        recipe.savedPtr = shot;
+        recipe.restoredPtr = shot;
+        recipe.shotElement = element;
+        recipe.initParam = initParam;
+        recipe.posData = posData;
+        recipe.ownerChr = ownerChr;
+        recipe.objectRef1 = objectRef1;
+        recipe.slotId = slotId;
+        recipe.objectRef2 = objectRef2;
+        recipe.kind = ShotSpawnKind::Extended;
+        recipe.exA9 = a9;
+        recipe.exA10 = a10;
+        recipe.exA11 = a11;
+        recipe.exA12 = a12;
+        g_liveShotRecipes[shot] = recipe;
+    }
+    return shot;
+}
+
+static void* __fastcall hkEffectCreate(void* manager, int effectId, int a3,
+                                       void* attachTo, int a5, int a6, void* a7,
+                                       void* a8, int a9, void* a10, int a11,
+                                       uint32_t a12, void* a13)
+{
+    void* effect = oEffectCreate(manager, effectId, a3, attachTo, a5, a6, a7,
+                                 a8, a9, a10, a11, a12, a13);
+    if (effect) {
+        g_liveEffectRecipes[effect] = {
+            effect, effect, manager, effectId, a3, attachTo, a5, a6, a7, a8,
+            a9, a10, a11, a12, a13
+        };
+    }
+    return effect;
+}
+
+static char __fastcall hkUnitRemove(void* manager, void* unit)
+{
+    char result = oUnitRemove(manager, unit);
+    if (result && unit) {
+        g_liveShotRecipes.erase(unit);
+        g_liveEffectRecipes.erase(unit);
+    }
+    return result;
+}
+
+static bool IsLinkedShot(void* shot)
+{
+    for (int list = 0; list < SSHOT_SENTINEL_COUNT; ++list) {
+        uint64_t sentinel = (uint64_t)_addr(0x140d47f90) + list * 0x28;
+        uint64_t sentinelRef = sentinel + 0x08;
+        uint64_t nodeRef = *(uint64_t*)(sentinel + 0x10);
+        int safety = DYNAMIC_SAFETY;
+        while (nodeRef && nodeRef != sentinelRef && safety-- > 0) {
+            if ((void*)(nodeRef - SSHOT_NODE_OFFSET) == shot) return true;
+            nodeRef = *(uint64_t*)(nodeRef + 0x10);
+        }
+    }
+    return false;
+}
+
+static bool IsActiveUnit(void* unit)
+{
+    if (!unit) return false;
+    uint32_t state = *(uint32_t*)((uint8_t*)unit + 0x10);
+    return (state & 7u) < 3u && (state & 0x3F8u) != 0x3F8u;
+}
+
+static void CaptureShotAndEffectRecipes(SnapshotSlot& slot)
+{
+    slot.shotRecipes.clear();
+    slot.effectRecipes.clear();
+
+    // Only snapshot recipes for shots that are still linked in sShot. The
+    // lifecycle hook may retain an entry until sUnit finishes its two-step
+    // removal, so copying the entire map would resurrect dying projectiles.
+    for (int list = 0; list < SSHOT_SENTINEL_COUNT; ++list) {
+        uint64_t sentinel = (uint64_t)_addr(0x140d47f90) + list * 0x28;
+        uint64_t sentinelRef = sentinel + 0x08;
+        uint64_t nodeRef = *(uint64_t*)(sentinel + 0x10);
+        int safety = DYNAMIC_SAFETY;
+        while (nodeRef && nodeRef != sentinelRef && safety-- > 0) {
+            void* shot = (void*)(nodeRef - SSHOT_NODE_OFFSET);
+            auto recipe = g_liveShotRecipes.find(shot);
+            if (recipe != g_liveShotRecipes.end()) {
+                ShotRecipe saved = recipe->second;
+                saved.savedPtr = shot;
+                CaptureShotFlight(shot, saved.flight);
+                slot.shotRecipes.push_back(saved);
+            }
+            nodeRef = *(uint64_t*)(nodeRef + 0x10);
+        }
+    }
+
+    // uGameEffect creation is centralized at the hooked 13-argument factory.
+    // Entries are removed when sUnit removes the corresponding object.
+    slot.effectRecipes.reserve(g_liveEffectRecipes.size());
+    for (const auto& entry : g_liveEffectRecipes) {
+        if (!IsActiveUnit(entry.first)) continue;
+        EffectRecipe saved = entry.second;
+        saved.savedPtr = entry.first;
+        saved.restoredPtr = entry.first;
+        slot.effectRecipes.push_back(saved);
+    }
+}
+
+static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
+{
+    if (!oShotSpawn || !oShotSpawnEx) {
+        HookLog("Rollback: shot restore skipped because lifecycle hooks are unavailable\n");
+        return;
+    }
+
+    // A projectile that has already advanced cannot be made equivalent to its
+    // saved state by patching trajectory fields: hit-consumption, collision,
+    // callback, and subclass-tail state remain advanced. Retire every current
+    // shot and recreate the saved set through the native factory below.
+    int retiredShots = 0;
+    for (const auto& entry : g_liveShotRecipes) {
+        if (!IsLinkedShot(entry.first)) continue;
+        uint32_t* state = (uint32_t*)((uint8_t*)entry.first + 0x10);
+        *state = (*state & ~7u) | 3u;
+        retiredShots++;
+    }
+
+    // Effect factory arguments include transient animation/stack pointers and
+    // are not a self-contained reconstruction recipe. Replaying them produced
+    // corrupt stretched geometry. Retire old effects normally; shot spawn and
+    // deterministic simulation will recreate their owned effects.
+    int retiredEffects = 0;
+    for (const auto& entry : g_liveEffectRecipes) {
+        if (!IsActiveUnit(entry.first)) continue;
+        uint32_t* state = (uint32_t*)((uint8_t*)entry.first + 0x10);
+        *state = (*state & ~7u) | 3u;
+        retiredEffects++;
+    }
+
+    void* sShot = *(void**)_addr(PTR_SSHOT);
+    void* sUnit = *(void**)_addr(PTR_SUNIT);
+    auto enqueue = (ShotEnqueueFn)_addr(FN_SSHOT_ENQUEUE_UNIT);
+    auto addUnit = (UnitAddFn)_addr(FN_SUNIT_ADD_UNIT);
+    int respawnedShots = 0;
+    int failedShots = 0;
+
+    for (ShotRecipe& saved : slot.shotRecipes) {
+        void* fresh = saved.kind == ShotSpawnKind::Extended
+            ? oShotSpawnEx(sShot, saved.shotElement, saved.initParam, saved.posData,
+                           saved.ownerChr, saved.objectRef1, saved.slotId,
+                           saved.objectRef2, saved.exA9, saved.exA10,
+                           saved.exA11, saved.exA12)
+            : oShotSpawn(sShot, saved.shotElement, saved.initParam, saved.posData,
+                         saved.ownerChr, saved.objectRef1, saved.slotId,
+                         saved.objectRef2);
+        if (!fresh) {
+            failedShots++;
+            continue;
+        }
+
+        ShotRecipe liveRecipe = saved;
+        liveRecipe.savedPtr = fresh;
+        liveRecipe.restoredPtr = fresh;
+        g_liveShotRecipes[fresh] = liveRecipe;
+        saved.restoredPtr = fresh;
+        if (!enqueue(sShot, fresh, SSHOT_CATEGORY)) {
+            addUnit(sUnit, SSHOT_CATEGORY, fresh, nullptr);
+        }
+        ApplyShotFlight(fresh, saved.flight);
+        respawnedShots++;
+    }
+
+    HookLog("Rollback: retired shots=%d effects=%d; shot recipes respawned=%d failed=%d\n",
+            retiredShots, retiredEffects, respawnedShots, failedShots);
+}
 
 // ===========================================================================
 // Safe Dynamic List Traversal
@@ -921,13 +1239,11 @@ static int BuildRegions(Region* regions, int maxRegions)
         }
     }
 
-    // ---- 2. sShot manager — vtable + shot ID pool + sentinel slot array only ----
-    //     Snapshotting only up to +0x1E0 (end of 10 × 0x28 sentinel slots at +0x50)
-    //     to avoid corrupting CRITICAL_SECTION objects at +0x1E0 and the
-    //     pointer-heavy activity/pending regions at +0x370+ that go stale.
+    // ---- 2. sShot manager header and shot ID pool ----
+    // Keep intrusive sentinel topology live; recipes reconcile shot lifetime.
     uint64_t sShot = *(uint64_t*)_addr(PTR_SSHOT);
     if (sShot) {
-        add((void*)sShot, 0x1E0);
+        add((void*)sShot, 0x50);
     }
 
     // ---- 2a. Slot active flags (NOT in sShot — stored in sGameConfig+0x4A89C) ---
@@ -943,47 +1259,9 @@ static int BuildRegions(Region* regions, int maxRegions)
         }
     }
 
-    // ---- 2b. uShot projectile objects — walk each sentinel's circular list ---
-    //     Each sentinel starting at 0x140d47f90 + slot*0x28 is an embedded cChrNode.
-    //     A sentinel's "node reference" is sentinel+0x08. mpNext at sentinel+0x10
-    //     stores the first real uShot's nodeRef (= uShot + SSHOT_NODE_OFFSET + 0x08).
-    //     We follow nodeRef->mpNext (at *(nodeRef + 0x08)) back to the sentinel.
-    int shotCount = 0;
-    {
-        for (int si = 0; si < SSHOT_SENTINEL_COUNT; ++si) {
-            uint64_t sentinel = (uint64_t)_addr(0x140d47f90) + si * 0x28;
-            uint64_t sentinelRef = sentinel + 0x08;
-            uint64_t curRef = *(uint64_t*)(sentinel + 0x10);
-            int safety = DYNAMIC_SAFETY;
-            while (curRef != sentinelRef && safety-- > 0) {
-                if (curRef < 0x10000) break;
-                uint64_t uShot = curRef - 0x08 - SSHOT_NODE_OFFSET;
-
-                // uShot subclass tails: base body is 0x2140, but 13 subclasses
-                // register extra tail fields extending up to 0x2314
-                // (uShotLaserRekkouha).  A hard-coded 0x2200 truncates those
-                // (Rekkouha mIsGroundHit@+0x2310, Axe/Torch/LandMine/Ouroboros
-                // latches @+0x2210+), rewinding beam/pillar/power-up state on
-                // restore.  Use the DTI-driven per-subclass size via vtable[4]
-                // (same path as characters — NOT object+0x08, which holds the
-                // circular-list pointers).  All subclass tails are POD, so the
-                // larger flat memcpy adds no new heap-pointer hazard.
-                uint64_t dtiPtr  = GetObjectDti(uShot);
-                uint32_t dtiSize = DecodeDtiSize(dtiPtr);
-                uint32_t objSize = dtiSize;
-                if (objSize < 0x2140 || objSize > 0x3000) {
-                    objSize = 0x2320; // covers largest known tail (0x2314)
-                }
-
-                add((void*)uShot, objSize);
-                shotCount++;
-                curRef = *(uint64_t*)(curRef + 0x08);
-            }
-        }
-    }
-    if (shotCount > 0) {
-        HookLog("Snapshot Diagnosis: Captured %d active uShot projectiles on heap\n", shotCount);
-    }
+    // uShot heap bodies are not copied. Their intrusive links and owned effect
+    // pointers cannot safely survive object destruction; native spawn recipes
+    // below reconstruct missing shots and their dependent objects.
 
     // ---- 3. sHitSolver — collision pairs + result buffer (static array) ----
     //     Full body is 0x3808C (sHitSolver_field_map.md §2): 192KB cHitNode pool,
@@ -1737,6 +2015,8 @@ void Rollback_SaveSnapshot(int32_t frame)
     }
     slot.size = offset;
 
+    CaptureShotAndEffectRecipes(slot);
+
     // [EXPERIMENTAL] QPC capture — see mvc3/rollback W3-C2
     // LARGE_INTEGER qpc_cap;
     // if (QueryPerformanceCounter(&qpc_cap)) {
@@ -2122,9 +2402,7 @@ void Rollback_RestoreSnapshot(int32_t frame)
         offset += rsize;
     }
 
-    // No sentinel fix needed — uShot projectile objects were saved individually
-    // (see BuildRegions section 2b) and restored at their original addresses, so
-    // the sentinel→uShot linked lists remain self-consistent after the memcpy.
+    RestoreShotAndEffectRecipes(slot);
 
     // Character slot tables contain live model/resource references. Clearing
     // all 64 entries makes restored dead characters invisible.
@@ -2865,7 +3143,11 @@ void Rollback_FreeSnapshots()
         g_slots[i].capacity    = 0;
         g_slots[i].regionCount = 0;
         g_slots[i].frame       = -1;
+        g_slots[i].shotRecipes.clear();
+        g_slots[i].effectRecipes.clear();
     }
+    g_liveShotRecipes.clear();
+    g_liveEffectRecipes.clear();
     g_sMvc3Main = 0;
 }
 
@@ -3267,6 +3549,42 @@ void Rollback_InitHooks()
                 (uint64_t)_addr(FN_SMVC3MAIN_MOVE));
     } else {
         HookLog("Rollback: failed to hook sMvc3Main__move (%d)\n", s);
+    }
+
+    s = MH_CreateHook((LPVOID)_addr(FN_SSHOT_SPAWN),
+                      (LPVOID)&hkShotSpawn, (LPVOID*)&oShotSpawn);
+    if (s == MH_OK) {
+        MH_EnableHook((LPVOID)_addr(FN_SSHOT_SPAWN));
+        HookLog("Rollback: hooked sShot__spawnShot\n");
+    } else {
+        HookLog("Rollback: failed to hook sShot__spawnShot (%d)\n", s);
+    }
+
+    s = MH_CreateHook((LPVOID)_addr(FN_SSHOT_SPAWN_EX),
+                      (LPVOID)&hkShotSpawnEx, (LPVOID*)&oShotSpawnEx);
+    if (s == MH_OK) {
+        MH_EnableHook((LPVOID)_addr(FN_SSHOT_SPAWN_EX));
+        HookLog("Rollback: hooked sShot__spawnShotEx\n");
+    } else {
+        HookLog("Rollback: failed to hook sShot__spawnShotEx (%d)\n", s);
+    }
+
+    s = MH_CreateHook((LPVOID)_addr(FN_UGAMEEFFECT_CREATE),
+                      (LPVOID)&hkEffectCreate, (LPVOID*)&oEffectCreate);
+    if (s == MH_OK) {
+        MH_EnableHook((LPVOID)_addr(FN_UGAMEEFFECT_CREATE));
+        HookLog("Rollback: hooked uGameEffect factory\n");
+    } else {
+        HookLog("Rollback: failed to hook uGameEffect factory (%d)\n", s);
+    }
+
+    s = MH_CreateHook((LPVOID)_addr(FN_SUNIT_REMOVE_UNIT),
+                      (LPVOID)&hkUnitRemove, (LPVOID*)&oUnitRemove);
+    if (s == MH_OK) {
+        MH_EnableHook((LPVOID)_addr(FN_SUNIT_REMOVE_UNIT));
+        HookLog("Rollback: hooked sUnit__removeUnit for recipe lifetime\n");
+    } else {
+        HookLog("Rollback: failed to hook sUnit__removeUnit (%d)\n", s);
     }
 
     // Collision sound-event iterator — NOP during re-sim
