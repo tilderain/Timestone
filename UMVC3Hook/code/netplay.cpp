@@ -628,6 +628,9 @@ void Netplay_SendDesyncUnpause()
 
 bool Netplay_GetInboundDesync(DesyncPacket& outPacket)
 {
+    if (!g_active || !g_csInitialized)
+        return false;
+
     ScopedCS lock(g_desyncCS);
     if (!g_inboundDesyncNew)
         return false;
@@ -647,6 +650,9 @@ void Netplay_SendRestartMatch(int32_t targetFrame, uint32_t roundSeed)
 
 bool Netplay_GetInboundRestartMatch(int32_t& outTargetFrame, uint32_t& outRoundSeed)
 {
+    if (!g_active || !g_csInitialized)
+        return false;
+
     ScopedCS lock(g_restartCS);
     if (!g_inboundRestartNew)
         return false;
