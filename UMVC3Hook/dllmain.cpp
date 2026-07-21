@@ -15,6 +15,7 @@
 #include "code/netplay.h"
 #include "code/controller.h"
 #include "code/diag.h"
+#include "code/exception.h"
 #include <Windows.h>
 #include <cstdio>
 #include "kiero/minhook/include/MinHook.h"
@@ -294,6 +295,8 @@ bool init = false;
 bool first_msg = true;
 long __stdcall hkEndScene(LPDIRECT3DDEVICE9 pDevice)
 {
+	//Exception_UpdateTestHotkey();
+
 	if (!init)
 	{
 		D3DDEVICE_CREATION_PARAMETERS params;
@@ -863,6 +866,7 @@ BOOL WINAPI DllMain(HMODULE hMod, DWORD dwReason, LPVOID lpReserved)
 	case DLL_PROCESS_ATTACH:
 		if (CheckGame())
 		{
+			Exception_InstallHandler();
 			BootTimer_Init();
 			BootTimer_Stamp("DllMain entry");
 
@@ -894,6 +898,7 @@ BOOL WINAPI DllMain(HMODULE hMod, DWORD dwReason, LPVOID lpReserved)
 		}
 		break;
 	case DLL_PROCESS_DETACH:
+		Exception_RemoveHandler();
 		CleanupNetworkOnExit();
 		enet_deinitialize();
 		kiero::shutdown();
@@ -901,4 +906,3 @@ BOOL WINAPI DllMain(HMODULE hMod, DWORD dwReason, LPVOID lpReserved)
 	}
 	return TRUE;
 }
-

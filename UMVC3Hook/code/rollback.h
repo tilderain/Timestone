@@ -1,4 +1,5 @@
 #pragma once
+#include <cstddef>
 #include <cstdint>
 
 // ---------------------------------------------------------------------------
@@ -49,6 +50,9 @@ extern "C" void Rollback_NotifyDesyncTriggered(int32_t frame);
 
 // Start a fresh rolling netplay NDJSON log for a restarted match.
 void Rollback_ResetNetplayLiveLog();
+
+// Copies the current nplive session directory into |path| when initialized.
+bool Rollback_GetNetplayLiveDirectory(char* path, size_t pathSize);
 
 // Reproduce the native online battle's gameplay serialization switches.
 void Rollback_ApplyNetplayDeterminism();

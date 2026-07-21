@@ -141,10 +141,16 @@
     <ClInclude Include="code\rollback.h">
       <Filter>Header Files\code</Filter>
     </ClInclude>
+    <ClInclude Include="code\exception.h">
+      <Filter>Header Files\code</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="dllmain.cpp">
       <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="code\exception.cpp">
+      <Filter>Header Files\code</Filter>
     </ClCompile>
     <ClCompile Include="pch.cpp">
       <Filter>Source Files</Filter>

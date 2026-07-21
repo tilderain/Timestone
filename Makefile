@@ -6,6 +6,10 @@ CC        := x86_64-w64-mingw32-gcc-win32
 WINDRES   := x86_64-w64-mingw32-windres
 DLLTOOL   := x86_64-w64-mingw32-dlltool
 AR        := x86_64-w64-mingw32-ar
+GIT_COMMIT := $(shell git rev-parse HEAD 2>/dev/null || printf unknown)
+GIT_DIR := $(shell git rev-parse --git-dir 2>/dev/null)
+GIT_HEAD_REF := $(shell git symbolic-ref -q HEAD 2>/dev/null)
+GIT_COMMIT_DEPS := $(if $(GIT_DIR),$(GIT_DIR)/HEAD $(if $(GIT_HEAD_REF),$(GIT_DIR)/$(GIT_HEAD_REF)))
 
 SRCDIR    := UMVC3Hook
 ENETDIR   := enet-1.3.18
@@ -34,6 +38,7 @@ CPP_SRC   := \
 	$(SRCDIR)/code/trainingboot.cpp \
 	$(SRCDIR)/code/controller.cpp \
 	$(SRCDIR)/code/diag.cpp \
+	$(SRCDIR)/code/exception.cpp \
 	$(SRCDIR)/code/rollback.cpp \
 	$(SRCDIR)/code/netplay.cpp \
 	$(SRCDIR)/imgui/imgui.cpp \
@@ -100,7 +105,7 @@ DEFINES   := \
 
 # --- Compiler flags ---
 
-CXXFLAGS  := -O2 -std=c++20 -fpermissive $(DEFINES) $(INCLUDES) -Wall -Wno-unused-variable -Wno-unused-function
+CXXFLAGS  := -O2 -std=c++20 -fpermissive $(DEFINES) $(INCLUDES) -DUMVC3HOOK_GIT_COMMIT=\"$(GIT_COMMIT)\" -Wall -Wno-unused-variable -Wno-unused-function
 CFLAGS    := -O2 $(DEFINES) $(INCLUDES) -Wall -Wno-unused-variable
 LDFLAGS   := -shared -static-libgcc -static-libstdc++
 LIBS      := \
@@ -125,9 +130,12 @@ LIBS      := \
 # Targets
 # ##############################################################################
 
-.PHONY: all clean release debug fix-includes
+.PHONY: all clean release debug fix-includes build-status
 
-all: release
+all: release build-status
+
+build-status:
+	@echo "=== No changes: $(OUTPUT) is up to date ==="
 
 # ---------- Release build ----------
 
@@ -152,6 +160,9 @@ $(OUTPUT): $(ALL_OBJ)
 $(OBJDIR)/%.o: $(SRCDIR)/%.cpp
 	@mkdir -p $(@D)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+# Recompile only when HEAD or the current branch advances.
+$(OBJDIR)/code/exception.o: $(GIT_COMMIT_DEPS)
 
 # ---------- Compile C ----------
 

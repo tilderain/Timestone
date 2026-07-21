@@ -191,6 +191,7 @@
     <ClInclude Include="kiero\minhook\src\hde\table64.h" />
     <ClInclude Include="kiero\minhook\src\trampoline.h" />
     <ClInclude Include="pch.h" />
+    <ClInclude Include="code\exception.h" />
     <ClInclude Include="resource.h" />
     <ClInclude Include="resource1.h" />
     <ClInclude Include="sigscan.h" />
@@ -205,6 +206,7 @@
     <ClCompile Include="code\eSettingsManager.cpp" />
     <ClCompile Include="code\framestepper.cpp" />
     <ClCompile Include="code\diag.cpp" />
+    <ClCompile Include="code\exception.cpp" />
     <ClCompile Include="code\mk10utils.cpp" />
     <ClCompile Include="code\umvc3.cpp" />
     <ClCompile Include="code\UMVC3Camera.cpp" />

@@ -544,6 +544,27 @@ static void Rollback_NetplayLiveInit() {
     g_netplayLiveInit = true;
 }
 
+bool Rollback_GetNetplayLiveDirectory(char* path, size_t pathSize)
+{
+    if (!path || pathSize == 0 || !g_netplayLiveInit || !g_netplayLivePath[0])
+        return false;
+
+    const char* slash = strrchr(g_netplayLivePath, '/');
+    const char* backslash = strrchr(g_netplayLivePath, '\\');
+    if (!slash || (backslash && backslash > slash))
+        slash = backslash;
+    if (!slash)
+        return false;
+
+    const size_t directoryLength = static_cast<size_t>(slash - g_netplayLivePath);
+    if (directoryLength + 1 > pathSize)
+        return false;
+
+    memcpy(path, g_netplayLivePath, directoryLength);
+    path[directoryLength] = '\0';
+    return true;
+}
+
 void Rollback_ResetNetplayLiveLog()
 {
     ++g_netplayLiveReset;
