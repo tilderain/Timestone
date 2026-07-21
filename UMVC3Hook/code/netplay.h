@@ -42,6 +42,7 @@ enum PacketType : uint32_t {
     PACKET_BATTLE_READY = 5,  // BattleReadyPacket
     PACKET_LAUNCH_TRAINING = 6, // LaunchTrainingPacket
     PACKET_DESYNC = 7,  // DesyncPacket
+    PACKET_RESTART_MATCH = 8, // RestartMatchPacket
 };
 
 #pragma pack(push, 1)
@@ -87,6 +88,11 @@ struct DesyncPacket {
     int32_t  frame;
     uint32_t localChecksum;
     uint32_t remoteChecksum;
+};
+
+struct RestartMatchPacket {
+    uint32_t type;               // PACKET_RESTART_MATCH
+    int32_t  target_frame;       // synchronized net frame to restart on
 };
 
 enum BattleSyncFlags : uint32_t {
@@ -208,6 +214,9 @@ void Netplay_SendDesyncTrigger(int32_t frame, uint32_t localChecksum,
                                uint32_t remoteChecksum);
 void Netplay_SendDesyncUnpause();
 bool Netplay_GetInboundDesync(DesyncPacket& outPacket);
+
+void Netplay_SendRestartMatch(int32_t targetFrame);
+bool Netplay_GetInboundRestartMatch(int32_t& outTargetFrame);
 
 // Discard input packets produced before the synchronized battle boundary.
 void Netplay_ClearInputQueues();

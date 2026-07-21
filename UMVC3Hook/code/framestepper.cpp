@@ -43,6 +43,8 @@ extern bool Netplay_GetInboundDelay(int32_t& outDelay);
 extern bool Netplay_GetInboundRollback(int32_t& outRollback);
 extern void Netplay_SendDelay(int32_t delay);
 extern void Netplay_SendRollback(int32_t rollbackFrames);
+extern bool Netplay_GetInboundRestartMatch(int32_t& outTargetFrame);
+extern void Netplay_SendRestartMatch(int32_t targetFrame);
 
 // Controller setters from controller.cpp
 extern "C" void Controller_SetDelayFrames(int32_t delay);
@@ -52,6 +54,14 @@ extern "C" void Controller_ResetFrameEpoch();
 
 // True after both peers have reached the post-initialization intro barrier.
 static bool g_battleSynchronized = false;
+static int32_t g_restartTargetFrame = -1;
+static bool g_localReady = false;
+static bool g_remoteReady = false;
+static bool g_localRelease = false;
+static bool g_remoteRelease = false;
+static uint32_t g_battleGeneration = 1;
+static uint32_t g_advertisedBattleFlags = 0;
+static uint32_t g_battleAdvertiseTick = 0;
 extern "C" bool FrameStepper_IsBattleSynchronized() { return g_battleSynchronized; }
 
 // ---------------------------------------------------------------------------
@@ -273,6 +283,40 @@ static void __fastcall HookedMove(void* sMvc3Main)
         return;
     }
 
+    // Restart is a new battle epoch. Do the entire reset before the game tick
+    // at the agreed frame, then let the normal intro barrier run again.
+    if (Netplay_IsActive() && g_restartTargetFrame >= 0 &&
+        Controller_GetNetFrameCount() >= g_restartTargetFrame)
+    {
+        static constexpr uintptr_t MVC3_MANAGER_PTR = 0x140D510A0;
+        static constexpr uintptr_t SMVC3MGR_ACTION_OFFSET = 0x48;
+        uint64_t sMvc3Manager = *(uint64_t*)_addr(MVC3_MANAGER_PTR);
+        uint64_t sAction = sMvc3Manager
+            ? *(uint64_t*)(sMvc3Manager + SMVC3MGR_ACTION_OFFSET) : 0;
+        if (sAction)
+            *(int32_t*)(sAction + 0xD8) = 2;
+
+        Netplay_ClearInputQueues();
+        Controller_ResetBuffers();
+        Controller_ResetFrameEpoch();
+        Rollback_FreeSnapshots();
+
+        g_battleSynchronized = false;
+        g_localReady = false;
+        g_remoteReady = false;
+        g_localRelease = false;
+        g_remoteRelease = false;
+        ++g_battleGeneration;
+        if (g_battleGeneration == 0)
+            g_battleGeneration = 1;
+        g_advertisedBattleFlags = 0;
+        g_battleAdvertiseTick = 0;
+        g_restartTargetFrame = -1;
+
+        HookLog("Netplay: reset battle epoch and restarted intro (generation=%u)\n",
+                g_battleGeneration);
+    }
+
     if (Netplay_IsActive())
     {
         // Drain any inbound delay/rollback-control packets — keeps both sides
@@ -290,22 +334,14 @@ static void __fastcall HookedMove(void* sMvc3Main)
                 Controller_SetRollbackFrames(remoteRollback);
         }
 
-        static bool localReady = false;
-        static bool remoteReady = false;
-        static bool localRelease = false;
-        static bool remoteRelease = false;
-        static uint32_t generation = 1;
-        static uint32_t advertisedFlags = 0;
-        static uint32_t advertiseTick = 0;
-
         uint32_t remoteGeneration = 0;
         uint32_t remoteFlags = 0;
         while (Netplay_GetInboundBattleReady(remoteGeneration, remoteFlags))
         {
-            if (remoteGeneration == generation)
+            if (remoteGeneration == g_battleGeneration)
             {
-                remoteReady |= (remoteFlags & BATTLE_SYNC_READY) != 0;
-                remoteRelease |= (remoteFlags & BATTLE_SYNC_RELEASE) != 0;
+                g_remoteReady |= (remoteFlags & BATTLE_SYNC_READY) != 0;
+                g_remoteRelease |= (remoteFlags & BATTLE_SYNC_RELEASE) != 0;
             }
         }
 
@@ -318,32 +354,32 @@ static void __fastcall HookedMove(void* sMvc3Main)
             int32_t pendingStep = action ? *(int32_t*)(action + 0xDC) : -1;
             int32_t introSubstate = action ? *(int32_t*)(action + 0xE0) : 0;
 
-            if (!localReady && step == 2 && pendingStep < 0 && introSubstate > 0)
+            if (!g_localReady && step == 2 && pendingStep < 0 && introSubstate > 0)
             {
-                localReady = true;
+                g_localReady = true;
                 HookLog("Netplay: Local intro ready (generation=%u, substate=%d)\n",
-                        generation, introSubstate);
+                        g_battleGeneration, introSubstate);
             }
 
             // RELEASE acknowledges that this peer observed the remote READY.
             // A one-way READY is insufficient: its sender may otherwise stay
             // frozen while the receiver starts and predicts frames without it.
-            if (localReady && remoteReady)
-                localRelease = true;
+            if (g_localReady && g_remoteReady)
+                g_localRelease = true;
         }
 
-        uint32_t localFlags = (localReady ? BATTLE_SYNC_READY : 0) |
-                              (localRelease ? BATTLE_SYNC_RELEASE : 0);
-        advertiseTick++;
+        uint32_t localFlags = (g_localReady ? BATTLE_SYNC_READY : 0) |
+                              (g_localRelease ? BATTLE_SYNC_RELEASE : 0);
+        g_battleAdvertiseTick++;
         if (localFlags != 0 &&
-            (localFlags != advertisedFlags || advertiseTick >= 30))
+            (localFlags != g_advertisedBattleFlags || g_battleAdvertiseTick >= 30))
         {
-            Netplay_SendBattleReady(generation, localFlags);
-            advertisedFlags = localFlags;
-            advertiseTick = 0;
+            Netplay_SendBattleReady(g_battleGeneration, localFlags);
+            g_advertisedBattleFlags = localFlags;
+            g_battleAdvertiseTick = 0;
         }
 
-        if (!g_battleSynchronized && localRelease && remoteRelease)
+        if (!g_battleSynchronized && g_localRelease && g_remoteRelease)
         {
             Netplay_ClearInputQueues();
             Controller_ResetBuffers();
@@ -351,12 +387,12 @@ static void __fastcall HookedMove(void* sMvc3Main)
             Rollback_FreeSnapshots();
             g_battleSynchronized = true;
             HookLog("Netplay: Intro barrier released after mutual acknowledgement (generation=%u)\n",
-                    generation);
+                    g_battleGeneration);
         }
 
         // Keep loading normally until this machine reaches the barrier. Once
         // ready, freeze it until the mutual acknowledgement is complete.
-        if (localReady && !g_battleSynchronized)
+        if (g_localReady && !g_battleSynchronized)
             return;
 
         if (g_battleSynchronized)
@@ -618,6 +654,25 @@ static inline bool KeyPressed(int vk, bool& prevState)
 
 void FrameStepper_Process()
 {
+    static bool prevRestart = false;
+    if (KeyPressed(VK_F11, prevRestart))
+    {
+        int32_t targetFrame = Controller_GetNetFrameCount();
+        if (Netplay_IsActive())
+        {
+            // Give the reliable packet time to arrive. The target itself is
+            // still absolute, so both machines perform the write together.
+            targetFrame += 90;
+            Netplay_SendRestartMatch(targetFrame);
+        }
+        g_restartTargetFrame = targetFrame;
+        HookLog("Netplay: scheduled match restart for frame %d\n", targetFrame);
+    }
+
+    int32_t remoteRestartFrame = -1;
+    while (Netplay_GetInboundRestartMatch(remoteRestartFrame))
+        g_restartTargetFrame = remoteRestartFrame;
+
     // Netplay delay adjustment via [ (decrease) and ] (increase) keys.
     // Works regardless of training mode so both sides can adjust mid-match.
     static bool prevBracketL = false, prevBracketR = false;

@@ -69,6 +69,11 @@ static bool                     g_outboundDesyncNew = false;
 static DesyncPacket             g_inboundDesync = {};
 static bool                     g_inboundDesyncNew = false;
 static CRITICAL_SECTION         g_desyncCS;
+static RestartMatchPacket       g_outboundRestart = {};
+static bool                     g_outboundRestartNew = false;
+static RestartMatchPacket       g_inboundRestart = {};
+static bool                     g_inboundRestartNew = false;
+static CRITICAL_SECTION         g_restartCS;
 
 // One-time critical section initialization flag
 static bool                 g_csInitialized  = false;
@@ -253,6 +258,27 @@ static DWORD WINAPI Netplay_ServiceThread(LPVOID)
             enet_host_flush(g_host);
         }
 
+        bool hasRestart = false;
+        RestartMatchPacket restartPkt = {};
+        {
+            ScopedCS lock(g_restartCS);
+            if (g_outboundRestartNew)
+            {
+                restartPkt = g_outboundRestart;
+                hasRestart = true;
+                g_outboundRestartNew = false;
+            }
+        }
+        if (hasRestart && g_peer)
+        {
+            ENetPacket* packet = enet_packet_create(
+                &restartPkt, sizeof(RestartMatchPacket), ENET_PACKET_FLAG_RELIABLE
+            );
+            if (enet_peer_send(g_peer, 0, packet) != 0)
+                enet_packet_destroy(packet);
+            enet_host_flush(g_host);
+        }
+
         // --- Service the host ---
         if (g_host)
         {
@@ -345,6 +371,17 @@ static DWORD WINAPI Netplay_ServiceThread(LPVOID)
                                     }
                                 }
                                 break;
+
+                            case PACKET_RESTART_MATCH:
+                                if (event.packet->dataLength >= sizeof(RestartMatchPacket))
+                                {
+                                    const RestartMatchPacket* rp =
+                                        (const RestartMatchPacket*)event.packet->data;
+                                    ScopedCS lock(g_restartCS);
+                                    g_inboundRestart = *rp;
+                                    g_inboundRestartNew = true;
+                                }
+                                break;
                         }
                     }
                     enet_packet_destroy(event.packet);
@@ -401,6 +438,7 @@ void Netplay_Init(ENetHost* host, ENetPeer* peer)
         InitializeCriticalSection(&g_groundTruthCS);
         InitializeCriticalSection(&g_battleReadyCS);
         InitializeCriticalSection(&g_desyncCS);
+        InitializeCriticalSection(&g_restartCS);
 
         g_outboundDelayNew = false;
         g_inboundDelayNew = false;
@@ -412,6 +450,8 @@ void Netplay_Init(ENetHost* host, ENetPeer* peer)
         g_inboundBattleReadyNew = false;
         g_outboundDesyncNew = false;
         g_inboundDesyncNew = false;
+        g_outboundRestartNew = false;
+        g_inboundRestartNew = false;
         std::memset(&g_outboundPacket, 0, sizeof(InputPacket));
         g_csInitialized = true;
     }
@@ -593,6 +633,24 @@ bool Netplay_GetInboundDesync(DesyncPacket& outPacket)
         return false;
     outPacket = g_inboundDesync;
     g_inboundDesyncNew = false;
+    return true;
+}
+
+void Netplay_SendRestartMatch(int32_t targetFrame)
+{
+    ScopedCS lock(g_restartCS);
+    g_outboundRestart.type = PACKET_RESTART_MATCH;
+    g_outboundRestart.target_frame = targetFrame;
+    g_outboundRestartNew = true;
+}
+
+bool Netplay_GetInboundRestartMatch(int32_t& outTargetFrame)
+{
+    ScopedCS lock(g_restartCS);
+    if (!g_inboundRestartNew)
+        return false;
+    outTargetFrame = g_inboundRestart.target_frame;
+    g_inboundRestartNew = false;
     return true;
 }
 
