@@ -1044,18 +1044,18 @@ struct Region {
 };
 
 struct ShotFlightState {
-    float pos[4];
-    float quat[4];
+    // uModel+0x100 is a live owned pointer, so only restore the contiguous
+    // position/quaternion/matrix scalar block preceding it.
+    uint8_t transformState[0xB0];  // +0x50..+0xFF
+    uint8_t shotMatrices[0x100];   // +0x1E50..+0x1F4F
     float timerThresh;
     float timer;
-    uint32_t flags;
-    uint32_t flags2;
-    uint32_t prevFlags;
-    float timeAcc;
-    float lifetime;
-    float velocityDir[4];
-    float speed;
-    int32_t state;
+    float delayTime;
+    float autoAddDivStartTime;
+    uint8_t resourceScalars[0x90]; // +0x1F70..+0x1FFF
+    uint8_t attackScalars[0x20];   // +0x2038..+0x2057
+    uint8_t movementScalars[0x60]; // +0x2078..+0x20D7
+    uint8_t animationScalars[0x14];// +0x2118..+0x212B
 };
 
 enum class ShotSpawnKind : uint8_t { Standard, Extended };
@@ -1076,8 +1076,6 @@ struct ShotRecipe {
     int exA11;
     void* exA12;
     ShotFlightState flight;
-    uint64_t bodyVtable;
-    std::vector<uint8_t> body;
 };
 
 struct EffectRecipe {
@@ -1170,76 +1168,31 @@ static void CaptureCollisionNodeClones(SnapshotSlot& slot)
 static void CaptureShotFlight(void* shot, ShotFlightState& out)
 {
     auto* p = (uint8_t*)shot;
-    std::memcpy(out.pos, p + 0x50, sizeof(out.pos));
-    std::memcpy(out.quat, p + 0x60, sizeof(out.quat));
+    std::memcpy(out.transformState, p + 0x50, sizeof(out.transformState));
+    std::memcpy(out.shotMatrices, p + 0x1E50, sizeof(out.shotMatrices));
     std::memcpy(&out.timerThresh, p + 0x1F58, sizeof(out.timerThresh));
     std::memcpy(&out.timer, p + 0x1F60, sizeof(out.timer));
-    std::memcpy(&out.flags, p + 0x1FE0, sizeof(out.flags));
-    std::memcpy(&out.flags2, p + 0x1FE4, sizeof(out.flags2));
-    std::memcpy(&out.prevFlags, p + 0x1FEC, sizeof(out.prevFlags));
-    std::memcpy(&out.timeAcc, p + 0x2050, sizeof(out.timeAcc));
-    std::memcpy(&out.lifetime, p + 0x2078, sizeof(out.lifetime));
-    std::memcpy(out.velocityDir, p + 0x20C0, sizeof(out.velocityDir));
-    std::memcpy(&out.speed, p + 0x20D0, sizeof(out.speed));
-    std::memcpy(&out.state, p + 0x212C, sizeof(out.state));
+    std::memcpy(&out.delayTime, p + 0x1F5C, sizeof(out.delayTime));
+    std::memcpy(&out.autoAddDivStartTime, p + 0x1F64, sizeof(out.autoAddDivStartTime));
+    std::memcpy(out.resourceScalars, p + 0x1F70, sizeof(out.resourceScalars));
+    std::memcpy(out.attackScalars, p + 0x2038, sizeof(out.attackScalars));
+    std::memcpy(out.movementScalars, p + 0x2078, sizeof(out.movementScalars));
+    std::memcpy(out.animationScalars, p + 0x2118, sizeof(out.animationScalars));
 }
 
 static void ApplyShotFlight(void* shot, const ShotFlightState& in)
 {
     auto* p = (uint8_t*)shot;
-    std::memcpy(p + 0x50, in.pos, sizeof(in.pos));
-    std::memcpy(p + 0x60, in.quat, sizeof(in.quat));
+    std::memcpy(p + 0x50, in.transformState, sizeof(in.transformState));
+    std::memcpy(p + 0x1E50, in.shotMatrices, sizeof(in.shotMatrices));
     std::memcpy(p + 0x1F58, &in.timerThresh, sizeof(in.timerThresh));
     std::memcpy(p + 0x1F60, &in.timer, sizeof(in.timer));
-    std::memcpy(p + 0x1FE0, &in.flags, sizeof(in.flags));
-    std::memcpy(p + 0x1FE4, &in.flags2, sizeof(in.flags2));
-    std::memcpy(p + 0x1FEC, &in.prevFlags, sizeof(in.prevFlags));
-    std::memcpy(p + 0x2050, &in.timeAcc, sizeof(in.timeAcc));
-    std::memcpy(p + 0x2078, &in.lifetime, sizeof(in.lifetime));
-    std::memcpy(p + 0x20C0, in.velocityDir, sizeof(in.velocityDir));
-    std::memcpy(p + 0x20D0, &in.speed, sizeof(in.speed));
-    std::memcpy(p + 0x212C, &in.state, sizeof(in.state));
-}
-
-static void CaptureShotBody(void* shot, ShotRecipe& recipe)
-{
-    recipe.body.clear();
-    recipe.bodyVtable = 0;
-    if (!shot) return;
-
-    uint32_t size = DecodeDtiSize(GetObjectDti((uint64_t)shot));
-    if (size < 0x2130 || size > MAX_CHAR_SIZE) return;
-
-    recipe.bodyVtable = *(uint64_t*)shot;
-    recipe.body.resize(size);
-    std::memcpy(recipe.body.data(), shot, size);
-}
-
-static bool RestoreShotBody(void* shot, const ShotRecipe& recipe)
-{
-    if (!shot || recipe.body.empty() || *(uint64_t*)shot != recipe.bodyVtable)
-        return false;
-
-    uint32_t liveSize = DecodeDtiSize(GetObjectDti((uint64_t)shot));
-    if (liveSize != recipe.body.size()) return false;
-
-    struct LivePointerField { uint32_t offset; uint64_t value; };
-    std::vector<LivePointerField> livePointers;
-    livePointers.reserve(liveSize / 32);
-    for (uint32_t offset = 8; offset + 8 <= liveSize; offset += 8) {
-        uint64_t liveValue = *(uint64_t*)((uint8_t*)shot + offset);
-        uint64_t savedValue = *(const uint64_t*)(recipe.body.data() + offset);
-        if (IsAccessiblePointer(liveValue) || IsAccessiblePointer(savedValue))
-            livePointers.push_back({offset, liveValue});
-    }
-
-    // The factory establishes valid ownership, allocation and intrusive-list
-    // topology. Rewind the complete scalar/subclass state, then retain every
-    // live pointer field so the saved object graph is never transplanted.
-    std::memcpy((uint8_t*)shot + 8, recipe.body.data() + 8, liveSize - 8);
-    for (const LivePointerField& field : livePointers)
-        *(uint64_t*)((uint8_t*)shot + field.offset) = field.value;
-    return true;
+    std::memcpy(p + 0x1F5C, &in.delayTime, sizeof(in.delayTime));
+    std::memcpy(p + 0x1F64, &in.autoAddDivStartTime, sizeof(in.autoAddDivStartTime));
+    std::memcpy(p + 0x1F70, in.resourceScalars, sizeof(in.resourceScalars));
+    std::memcpy(p + 0x2038, in.attackScalars, sizeof(in.attackScalars));
+    std::memcpy(p + 0x2078, in.movementScalars, sizeof(in.movementScalars));
+    std::memcpy(p + 0x2118, in.animationScalars, sizeof(in.animationScalars));
 }
 
 static void* __fastcall hkShotSpawn(void* manager, void* element, int initParam,
@@ -1361,7 +1314,6 @@ static void CaptureShotAndEffectRecipes(SnapshotSlot& slot)
                 ShotRecipe saved = recipe->second;
                 saved.savedPtr = shot;
                 CaptureShotFlight(shot, saved.flight);
-                CaptureShotBody(shot, saved);
                 slot.shotRecipes.push_back(saved);
             }
             nodeRef = *(uint64_t*)(nodeRef + 0x10);
@@ -1417,7 +1369,6 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
     auto addUnit = (UnitAddFn)_addr(FN_SUNIT_ADD_UNIT);
     int respawnedShots = 0;
     int failedShots = 0;
-    int fullBodyShots = 0;
 
     // Native shot construction consumes action/global/effect RNG while
     // rebuilding resources and owned effects. Reconstruction is rollback
@@ -1455,11 +1406,7 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
         if (!enqueue(sShot, fresh, SSHOT_CATEGORY)) {
             addUnit(sUnit, SSHOT_CATEGORY, fresh, nullptr);
         }
-        if (RestoreShotBody(fresh, saved)) {
-            fullBodyShots++;
-        } else {
-            ApplyShotFlight(fresh, saved.flight);
-        }
+        ApplyShotFlight(fresh, saved.flight);
         respawnedShots++;
     }
 
@@ -1467,9 +1414,8 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
     std::memcpy((void*)_addr(0x140d765d8), savedGlobalRng, sizeof(savedGlobalRng));
     if (sEffect) std::memcpy((void*)(sEffect + 0x3C), savedEffectRng, sizeof(savedEffectRng));
 
-    HookLog("Rollback: retired shots=%d effects=%d; shot recipes respawned=%d "
-            "fullBody=%d failed=%d\n",
-            retiredShots, retiredEffects, respawnedShots, fullBodyShots, failedShots);
+    HookLog("Rollback: retired shots=%d effects=%d; shot recipes respawned=%d failed=%d\n",
+            retiredShots, retiredEffects, respawnedShots, failedShots);
 }
 
 // ===========================================================================
