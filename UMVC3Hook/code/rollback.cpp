@@ -2958,6 +2958,30 @@ void Rollback_RestoreSnapshot(int32_t frame)
                 }
             }
 
+            // Motion slots contain many pairs of floats whose packed 64-bit
+            // value passes IsLikelyPointer (for example {1.0f, 0.0f}). The
+            // generic pointer guard above would therefore retain prediction-
+            // timeline frame, blend and root-motion values. Rewind the known
+            // scalar/vector portions while keeping the slot vtable and its
+            // resource/allocation pointers at +0x120..+0x138, +0x160,
+            // +0x170 and +0x178 live.
+            for (int motion = 0; motion < CCHR_MOTION_COUNT; ++motion) {
+                size_t motionBase = CCHR_MOTION_BASE + motion * CCHR_MOTION_STRIDE;
+                static constexpr SnapshotRange motionRestoreRanges[] = {
+                    {0x08, 0x118},
+                    {0x140, 0x20},
+                    {0x168, 0x08},
+                };
+                for (const SnapshotRange& range : motionRestoreRanges) {
+                    size_t fieldOffset = motionBase + range.offset;
+                    if (fieldOffset + range.size <= copySize) {
+                        std::memcpy((uint8_t*)slot.regions[i].ptr + fieldOffset,
+                                    slot.data + offset + fieldOffset,
+                                    range.size);
+                    }
+                }
+            }
+
             // Rewind all five cChrTargetInfo records at +0x6490..+0x670f.
             // They cache target, attacker, damage, throw and parent character
             // state. Keep each vtable live and validate its saved character
