@@ -105,6 +105,7 @@ tr.mismatch-bg td { background: rgba(255, 82, 82, 0.15); }
     <span class="legend-item" id="globalDivergence">Divergence: —</span>
     <span style="flex:1"></span>
     <label style="font-size:13px;color:#888;margin-right:12px"><input type="checkbox" id="onlyShowDiffering" checked> Hide matching characters</label>
+    <label style="font-size:13px;color:#888;margin-right:12px"><input type="checkbox" id="showHitboxes" checked> Show hitboxes</label>
     <label style="font-size:13px;color:#888"><input type="checkbox" id="showAssists" checked> Show assists</label>
   </div>
 
@@ -132,6 +133,7 @@ let currentFrameIdx = 0;
 let playing = false;
 let playTimer = null;
 let showAssists = true;
+let showHitboxes = true;
 let onlyShowDiffering = true;
 
 // Two-file comparison state
@@ -145,6 +147,7 @@ let fileBName = '';
 const KNOWN_CHAR_FIELDS = new Set([
   'team', 'slot', 'mid', 'plr', 'ast',
   'pos',
+  'hitboxes',
   'act', 'fl', 'mHeld', 'fcnt', 'mOld', 'mPressed', 'mReleased',
   'mMask', 'mProcessed',
   'rng',
@@ -339,6 +342,7 @@ function loadFile(file, target) {
     }
     
     showAssists = $('showAssists').checked;
+    showHitboxes = $('showHitboxes').checked;
     onlyShowDiffering = $('onlyShowDiffering').checked;
 
     $('btnClearCompare').style.display = compareMode ? 'inline-block' : 'none';
@@ -502,6 +506,40 @@ function charKey(c) {
   return c.team + ':' + id; 
 }
 
+function hitboxKey(hitbox) {
+  return `${hitbox.bank ?? ''}:${hitbox.index ?? ''}:${hitbox.shape ?? ''}`;
+}
+
+function hitboxMap(hitboxes) {
+  const result = new Map();
+  for (const hitbox of hitboxes || []) result.set(hitboxKey(hitbox), hitbox);
+  return result;
+}
+
+function numericArraySame(a, b, eps = 0.001) {
+  if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return a === b;
+  return a.every((value, index) => Math.abs(value - b[index]) <= eps);
+}
+
+function hitboxesSame(a, b, eps = 0.001) {
+  if (a === undefined || b === undefined) return a === b;
+  const mapA = hitboxMap(a), mapB = hitboxMap(b);
+  if (mapA.size !== mapB.size) return false;
+  for (const [key, hitboxA] of mapA) {
+    const hitboxB = mapB.get(key);
+    if (!hitboxB || !numericArraySame(hitboxA.pos, hitboxB.pos, eps) ||
+        !numericArraySame(hitboxA.size, hitboxB.size, eps)) return false;
+    for (const field of ['radius', 'length']) {
+      const va = hitboxA[field], vb = hitboxB[field];
+      if (va === undefined || vb === undefined) {
+        if (va !== vb) return false;
+      } else if (Math.abs(va - vb) > eps) return false;
+    }
+    if (hitboxA.damaging !== hitboxB.damaging) return false;
+  }
+  return true;
+}
+
 function hasDivergence(live, resim) {
   if (!live || !resim) return false;
   const lc = live.chars, rc = resim.chars;
@@ -513,6 +551,7 @@ function hasDivergence(live, resim) {
     if (!b) return true;
     if (Math.abs(a.pos[0] - b.pos[0]) > 0.001 || Math.abs(a.pos[1] - b.pos[1]) > 0.001 || Math.abs(a.pos[2] - b.pos[2]) > 0.001)
       return true;
+    if (!hitboxesSame(a.hitboxes, b.hitboxes)) return true;
   }
   return false;
 }
@@ -532,6 +571,7 @@ function isCharDiffering(c) {
   if (c.live.mMask !== c.resim.mMask) return true;
   if (c.live.mProcessed !== c.resim.mProcessed) return true;
   if (c.live.fcnt !== c.resim.fcnt) return true;
+  if (!hitboxesSame(c.live.hitboxes, c.resim.hitboxes)) return true;
   if (c.live.dirRing && c.resim.dirRing) {
     if (c.live.dirRing.length !== c.resim.dirRing.length) return true;
     for (let di = 0; di < c.live.dirRing.length; di++) {
@@ -777,6 +817,17 @@ function drawCanvas(g, frameNum) {
   for (const c of chars) {
     if (c.livePos) { minX = Math.min(minX, c.livePos[0]); maxX = Math.max(maxX, c.livePos[0]); minY = Math.min(minY, c.livePos[1]); maxY = Math.max(maxY, c.livePos[1]); }
     if (c.resimPos) { minX = Math.min(minX, c.resimPos[0]); maxX = Math.max(maxX, c.resimPos[0]); minY = Math.min(minY, c.resimPos[1]); maxY = Math.max(maxY, c.resimPos[1]); }
+    if (showHitboxes) {
+      for (const character of [c.live, c.resim]) {
+        for (const hitbox of character?.hitboxes || []) {
+          if (!hitbox.pos || !hitbox.size) continue;
+          minX = Math.min(minX, hitbox.pos[0] - hitbox.size[0] / 2);
+          maxX = Math.max(maxX, hitbox.pos[0] + hitbox.size[0] / 2);
+          minY = Math.min(minY, hitbox.pos[1] - hitbox.size[1] / 2);
+          maxY = Math.max(maxY, hitbox.pos[1] + hitbox.size[1] / 2);
+        }
+      }
+    }
   }
   if (minX === Infinity) return;
 
@@ -815,6 +866,47 @@ function drawCanvas(g, frameNum) {
   ctx.lineWidth = 2;
   const [,groundY] = toScreen(0, 0);
   ctx.beginPath(); ctx.moveTo(pad, groundY); ctx.lineTo(w-pad, groundY); ctx.stroke();
+
+  if (showHitboxes) {
+    const drawHitboxes = (character, color, dashed) => {
+      ctx.save();
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash(dashed ? [5, 3] : []);
+      for (const hitbox of character?.hitboxes || []) {
+        if (!hitbox.pos || !hitbox.size) continue;
+        const hitboxColor = hitbox.damaging ? '#ff2d55' : color;
+        ctx.strokeStyle = hitboxColor;
+        const [sx, sy] = toScreen(hitbox.pos[0], hitbox.pos[1]);
+        const width = Math.max(1, hitbox.size[0] * scale);
+        const height = Math.max(1, hitbox.size[1] * scale);
+        ctx.beginPath();
+        if (hitbox.shape === 'sphere') {
+          ctx.ellipse(sx, sy, width / 2, height / 2, 0, 0, Math.PI * 2);
+        } else if (hitbox.shape === 'capsule') {
+          const cornerRadius = Math.min(width, height) / 2;
+          ctx.roundRect(sx - width / 2, sy - height / 2, width, height, cornerRadius);
+        } else {
+          ctx.rect(sx - width / 2, sy - height / 2, width, height);
+        }
+        ctx.stroke();
+
+        ctx.fillStyle = hitboxColor;
+        ctx.font = '9px monospace';
+        ctx.textAlign = 'center';
+        ctx.fillText(`${hitbox.damaging ? 'damage ' : ''}${hitbox.shape || 'unknown'} ${hitbox.index ?? '?'}`,
+                     sx, sy - height / 2 - 3);
+      }
+      ctx.restore();
+    };
+    for (const c of chars) {
+      const liveColor = getCharColor(c.team, c.refSide).main;
+      const resimColor = c.resimRefSide
+        ? getCharColor(c.team, c.resimRefSide).main
+        : (c.team === 0 ? COLORS.p1Resim : COLORS.p2Resim);
+      drawHitboxes(c.live, liveColor, false);
+      drawHitboxes(c.resim, resimColor, true);
+    }
+  }
 
   // Draw connecting lines & positions
   for (const c of chars) {
@@ -1060,6 +1152,43 @@ function drawSidebar(g, frameNum) {
 
     html += '</table>';
 
+    const liveHitboxes = hitboxMap(c.live?.hitboxes);
+    const resimHitboxes = hitboxMap(c.resim?.hitboxes);
+    const hitboxKeys = Array.from(new Set([...liveHitboxes.keys(), ...resimHitboxes.keys()])).sort();
+    if (hitboxKeys.length) {
+      html += '<div style="margin-top:10px;border-top:1px solid #0f3460;padding-top:8px">';
+      html += '<div style="font-size:11px;color:#888;margin-bottom:6px">Hitboxes</div>';
+      html += '<table><tr><th>Bank/Index</th><th>Type/Shape</th><th>Position</th><th>Size</th></tr>';
+      for (const key of hitboxKeys) {
+        const liveHitbox = liveHitboxes.get(key);
+        const resimHitbox = resimHitboxes.get(key);
+        const same = liveHitbox && resimHitbox &&
+          numericArraySame(liveHitbox.pos, resimHitbox.pos) &&
+          numericArraySame(liveHitbox.size, resimHitbox.size) &&
+          liveHitbox.shape === resimHitbox.shape &&
+          liveHitbox.damaging === resimHitbox.damaging;
+        if (onlyShowDiffering && same) continue;
+
+        const hitbox = liveHitbox || resimHitbox;
+        const formatVec = value => Array.isArray(value)
+          ? `[${value.map(v => Number(v).toFixed(3)).join(', ')}]`
+          : '—';
+        const source = liveHitbox && resimHitbox ? '' : (liveHitbox ? ' A only' : ' B only');
+        html += `<tr class="${same ? '' : 'mismatch-bg'}">` +
+          `<td>${hitbox.bank ?? '?'}:${hitbox.index ?? '?'}${source}</td>` +
+          `<td style="color:${hitbox.damaging ? '#ff2d55' : 'inherit'}">${hitbox.damaging ? 'Damaging ' : ''}${hitbox.shape ?? 'unknown'}</td>` +
+          `<td>${formatVec(hitbox.pos)}</td>` +
+          `<td>${formatVec(hitbox.size)}</td></tr>`;
+        if (liveHitbox && resimHitbox && !same) {
+          html += `<tr class="mismatch-bg"><th>A/B</th>` +
+            `<td>${liveHitbox.damaging ? 'Damaging ' : ''}${liveHitbox.shape ?? 'unknown'} / ${resimHitbox.damaging ? 'Damaging ' : ''}${resimHitbox.shape ?? 'unknown'}</td>` +
+            `<td>${formatVec(liveHitbox.pos)}<br>${formatVec(resimHitbox.pos)}</td>` +
+            `<td>${formatVec(liveHitbox.size)}<br>${formatVec(resimHitbox.size)}</td></tr>`;
+        }
+      }
+      html += '</table></div>';
+    }
+
     // Direction history
     const hasLiveRing = c.live && c.live.dirRing;
     const hasResimRing = c.resim && c.resim.dirRing;
@@ -1248,6 +1377,11 @@ $('speedRange').addEventListener('input', () => {
 // ─── Toggle event listeners ───────────────────────────────────────────
 $('showAssists').addEventListener('change', () => {
   showAssists = $('showAssists').checked;
+  render();
+});
+
+$('showHitboxes').addEventListener('change', () => {
+  showHitboxes = $('showHitboxes').checked;
   render();
 });
 

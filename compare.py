@@ -6,12 +6,14 @@ Usage:
     python3 compare_nplive.py fileA.ndjson fileB.ndjson [--pos-eps 0.001] [--context 3] [--post-context 5]
 
 Designed for the UMVC3Hook nplive/rdiag NDJSON schema:
-    {"v":1,"ts":..., "frame":N, "side":"host"|"client"|"ground_truth"|"resim",
+    {"v":1,"ts":..., "frame":N, "side":"host"|"client"|"ground_truth"|"resim"|"host_pre_restore_prediction",
       "chars":[{"team":0,"slot":0,"pos":[x,y,z],"act":"0x..","fl":"0x..",
                 "mHeld":"0x..","fcnt":N,
                 "mOld":"0x..","mPressed":"0x..","mReleased":"0x..","mMask":"0x..","mProcessed":"0x..",
                 "dirSlot":N,"dir0":"0x..","dir4":"0x..","h590":"0x..","h594":"0x..",
-                "dirRing":["0x..",...],"rng":["0x..","0x..","0x..","0x.."]}, ...]}
+                "dirRing":["0x..",...],"rng":["0x..","0x..","0x..","0x.."],
+                "hitboxes":[{"bank":"capsule","index":0,"shape":"capsule",
+                              "pos":[x,y,z],"size":[x,y,z]}]}, ...]}
 
 What it does:
   1. Parses both files, picks one "primary" entry per frame per file (skipping
@@ -36,12 +38,14 @@ import sys
 from collections import OrderedDict
 
 PRIMARY_SIDE_PRIORITY = ["host", "client", "ground_truth", "live"]
-SECONDARY_SIDES = {"resim"}  # base names for secondary resimulation entries
+SECONDARY_SIDES = {"resim", "pre_restore_prediction"}
 
 
 def is_secondary_side(side):
-    """Return true for both legacy resim and host/client resim records."""
-    return side in SECONDARY_SIDES or isinstance(side, str) and side.endswith("_resim")
+    """Return true for diagnostic records, not primary timeline entries."""
+    return (side in SECONDARY_SIDES or
+            isinstance(side, str) and
+            (side.endswith("_resim") or side.endswith("_pre_restore_prediction")))
 
 
 def load_ndjson(path):
@@ -120,6 +124,50 @@ def pos_diff(a, b):
     if a is None or b is None:
         return None
     return [abs(a[i] - b[i]) for i in range(min(len(a), len(b)))]
+
+
+def hitbox_key(hitbox):
+    return (hitbox.get("bank"), hitbox.get("index"), hitbox.get("shape"))
+
+
+def hitbox_diff(a, b, eps):
+    """Return readable differences for hitboxes keyed by bank/index/shape."""
+    if a is None or b is None:
+        return None if a == b else f"A={a} B={b}"
+
+    map_a = {hitbox_key(h): h for h in a}
+    map_b = {hitbox_key(h): h for h in b}
+    differences = []
+    for key in sorted(set(map_a) | set(map_b), key=str):
+        if key not in map_a:
+            differences.append(f"{key}: present in B only")
+            continue
+        if key not in map_b:
+            differences.append(f"{key}: present in A only")
+            continue
+
+        ha, hb = map_a[key], map_b[key]
+        if ha.get("damaging") != hb.get("damaging"):
+            differences.append(
+                f"{key} damaging: A={ha.get('damaging')} B={hb.get('damaging')}"
+            )
+        for field in ("pos", "size"):
+            va, vb = ha.get(field), hb.get(field)
+            delta = pos_diff(va, vb)
+            if delta is None:
+                if va != vb:
+                    differences.append(f"{key} {field}: A={va} B={vb}")
+            elif len(va) != len(vb) or max(delta, default=0) > eps:
+                differences.append(f"{key} {field}: A={va} B={vb} delta={delta}")
+        for field in ("radius", "length"):
+            va, vb = ha.get(field), hb.get(field)
+            if va is None or vb is None:
+                if va != vb:
+                    differences.append(f"{key} {field}: A={va} B={vb}")
+            elif abs(va - vb) > eps:
+                differences.append(f"{key} {field}: A={va} B={vb} delta={abs(va - vb)}")
+
+    return "; ".join(differences) if differences else None
 
 
 def is_uninit(v):
@@ -213,6 +261,9 @@ def diff_char(ca, cb, pos_eps):
         diffs["m238"] = f"A={ca.get('m238')} B={cb.get('m238')}"
     if not hex_eq(ca.get("m250"), cb.get("m250")):
         diffs["m250"] = f"A={ca.get('m250')} B={cb.get('m250')}"
+    hitboxes = hitbox_diff(ca.get("hitboxes"), cb.get("hitboxes"), pos_eps)
+    if hitboxes:
+        diffs["hitboxes"] = hitboxes
     return diffs
 
 
@@ -259,7 +310,13 @@ def classify(diffs):
         return ("Position-only divergence with RNG/action/flags still matching — looks like "
                 "a physics/velocity integration difference (e.g. an unrestored physics "
                 "sub-state, or input applied on a different frame than expected) rather than "
-                "a logic/RNG branch difference.")
+                 "a logic/RNG branch difference.")
+    if keys == {"hitboxes"}:
+        return ("Hitbox-only divergence with character state still matching. Check restored "
+                "cHitPrim geometry, active flags, parent transforms, and collision update order.")
+    if "hitboxes" in keys:
+        return ("Hitbox geometry diverges along with character state. The per-primitive details "
+                "identify whether the split is position, size, activation, or shape membership.")
     if "fl8" in keys:
         return ("fl8 (uCharacter+0x14F8) differs — this word holds the face-left flag "
                 "(bit 0x200000) read by cChrInput__swapLRIfFaceLeft to remap left/right "

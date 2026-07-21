@@ -28,11 +28,13 @@
 #include "diag.h"
 #include "../kiero/minhook/include/MinHook.h"
 #include <cstring>
+#include <cmath>
 #include <new>
 #include <cstdio>
 #include <vector>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 
 extern void HookLog(const char* fmt, ...);
 extern void HookLogSetFile(const char* filename);
@@ -51,9 +53,11 @@ static constexpr uintptr_t PTR_SGAMEEFFECT  = 0x140d46470;
 static constexpr uintptr_t PTR_SMVC3MGR     = 0x140d510a0;
 static constexpr uintptr_t PTR_SUNIT        = 0x140e17698;
 static constexpr uintptr_t PTR_SCAMERA      = 0x140e17930;
+static constexpr uintptr_t PTR_SCOLLISION   = 0x140e18250;
 
 // sMvc3Main__move — the full per-frame update pipeline
 static constexpr uintptr_t FN_SMVC3MAIN_MOVE = 0x1402594A0;
+static constexpr uintptr_t FN_CCHR_SET_POS    = 0x140002AF0;
 static constexpr uintptr_t FN_GAMEUI_SET_TEAM_CHARACTER_ID = 0x140022610;
 static constexpr uintptr_t FN_SSHOT_SPAWN = 0x140150E00;
 static constexpr uintptr_t FN_SSHOT_SPAWN_EX = 0x140150F40;
@@ -69,6 +73,11 @@ static constexpr uintptr_t SMVC3MGR_ACTION_OFFSET = 0x48;
 static constexpr uintptr_t TEAM0_OFFSET           = 0x40;
 static constexpr uintptr_t TEAM1_OFFSET           = 0x300;
 static constexpr size_t    TEAM_SIZE              = 0x2C0;
+static constexpr size_t    SCOLLISION_SIZE        = 0x239E0;
+static constexpr uint32_t SCOLLISION_BODY_START   = 0x38;
+static constexpr uint32_t SCOLLISION_ALLOC_START  = 0x23970;
+static constexpr size_t    SCOLLISION_BVH_COUNT   = 0x1F;
+static constexpr size_t    SCOLLISION_NODE_SIZE   = 0x40;
 
 static constexpr uintptr_t NODE_CHR_OFFSET        = 0x08;
 static constexpr uintptr_t NODE_NEXT_OFFSET       = 0x10;
@@ -98,10 +107,19 @@ static constexpr size_t MAX_CHAR_SIZE        = 0x40000;
 static constexpr size_t CCHR_NOMINAL_SIZE    = 0x6A60;
 static constexpr size_t CCHR_MAX_SIZE        = 30000;
 static constexpr uint32_t CCHR_NUM_JOINTS_OFFSET = 0x530;
+static constexpr uint32_t CCHR_JOINT_STATE_PTR_OFFSET = 0x538;
+static constexpr uint32_t CCHR_JOINT_INDEX_PTR_OFFSET = 0x548;
+static constexpr uint32_t CCHR_MOTION_COUNT_OFFSET = 0x554;
 static constexpr uint32_t CCHR_MOTION_BASE       = 0x560;
 static constexpr uint32_t CCHR_MOTION_STRIDE     = 0x180;
 static constexpr uint32_t CCHR_BLEND_PTR_OFFSET  = 0x160;
 static constexpr size_t CCHR_BLEND_BYTES_PER_JOINT = 104;
+static constexpr uint32_t CCHR_MOTION_CHANNELS_PTR_OFFSET = 0x6D8;
+static constexpr uint32_t CCHR_BLENDED_JOINT_PTR_OFFSET = 0x11B0;
+static constexpr uint32_t CCHR_MOTION_CHANNEL_COUNT_OFFSET = 0x1238;
+static constexpr size_t CCHR_MOTION_CHANNEL_STRIDE = 0x0C;
+static constexpr size_t CCHR_JOINT_STATE_STRIDE = 0xC0;
+static constexpr size_t CCHR_BLENDED_JOINT_STRIDE = 0x40;
 static constexpr uint32_t CCHR_EXTERNAL_ANIM_OFFSETS[] = {
     0x4200, 0x4E10, 0x5520, 0x5C30
 };
@@ -126,12 +144,20 @@ struct SnapshotRange {
 
 static constexpr SnapshotRange CCHR_SCALAR_RESTORE_RANGES[] = {
     {0x48, 0x38},    // parent flags and world position/orientation/scale
+    // These pointer-free local/cached/world matrices are derived from the
+    // restored position. Reapply them after preserving live model state so
+    // root-level collision primitives do not read abandoned prediction data.
+    {0x80, 0x100},
     {0xA8, 0x04},    // action event/frame progression counter
     // uBaseModel::PartsDisp is a 512-bit command/part availability bitset.
     // Character logic consumes these bits as attacks progress; Morrigan tests
     // bit 0 every frame before remapping attack commands. The broad live draw-
     // state preservation below must not retain the exhausted post-attack bits.
     {0x12C, 0x40},
+    // uModel motion-evaluation aggregate state immediately before Motion[0].
+    // +0x558/+0x55C are consumed/accumulated layer flags that select the
+    // layered versus simple joint path. They must rewind with Motion[8].
+    {0x550, 0x10},
     // Assist/DHC and action-state flags used by character transitions.
     {0x29E, 0x12},
     {0x1308, 0x40},  // action descriptor and actor animation state
@@ -166,11 +192,24 @@ static constexpr SnapshotRange CCHR_SCALAR_RESTORE_RANGES[] = {
     // block timing windows, hitstun state and super armor. Essential for multi-hit
     // attacks, air combo limits, and defensive state determinism.
     {0x4168, 0x90},
+    // Inline per-primitive world-position cache. The hitbox records above
+    // contain shape/local data, but collision setup also reads these sixteen
+    // Vec3 entries when committing primitive positions. Keeping this live can
+    // leave one sphere on the previous timeline and later compound into a
+    // whole-model root-position offset.
+    {0x4D10, 0x100},
+    // Pending fighter-separation correction written by
+    // uCharacter__applyCollisionPushCorrection. Its packed float bits can look
+    // like an aligned pointer, so explicitly rewind it after the pointer guard.
+    {0x6340, 0x10},
     // Pointer-free combat tail. +0x6360..+0x636f selects the current attack
     // data for each collision group before geometry is populated. It must be
     // rewound along with combo rates, last-hit state, damage, armor and guard
-    // state through +0x6427. The MtArray headers at +0x6340/+0x6350 stay live.
+    // state through +0x6427. The MtArray header at +0x6350 stays live.
     {0x6360, 0xC8},
+    // Pointer-free cChr tail containing reflected charge/stiffness scalars and
+    // the model/attachment vector written before action dispatch at +0x68E0.
+    {0x68D0, 0x20},
 };
 
 // sMain is almost entirely live worker infrastructure. Only timing state is
@@ -196,6 +235,54 @@ static bool IsLikelyPointer(uint64_t value)
     return value >= 0x10000 && value < 0x0000800000000000ull && (value & 7) == 0;
 }
 
+static bool IsAccessiblePointer(uint64_t value)
+{
+    if (!IsLikelyPointer(value)) return false;
+    MEMORY_BASIC_INFORMATION mbi = {};
+    if (VirtualQuery((void*)value, &mbi, sizeof(mbi)) == 0) return false;
+    if (mbi.State != MEM_COMMIT) return false;
+    return (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) == 0;
+}
+
+static bool IsAccessibleAddress(uint64_t value)
+{
+    if (value < 0x10000 || value >= 0x0000800000000000ull) return false;
+    MEMORY_BASIC_INFORMATION mbi = {};
+    if (VirtualQuery((void*)value, &mbi, sizeof(mbi)) == 0) return false;
+    if (mbi.State != MEM_COMMIT) return false;
+    return (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) == 0;
+}
+
+static void RestoreSCollisionBody(void* destination, const uint8_t* source, size_t size)
+{
+    if (size < SCOLLISION_SIZE) return;
+
+    HookLog("Rollback: restoring inline sCollision body @ 0x%llX size=%zu\n",
+            (uint64_t)destination, size);
+
+    struct LivePointerField { uint32_t offset; uint64_t value; };
+    std::vector<LivePointerField> livePointers;
+    for (uint32_t offset = SCOLLISION_BODY_START;
+         offset + sizeof(uint64_t) <= SCOLLISION_ALLOC_START;
+         offset += sizeof(uint64_t)) {
+        uint64_t liveValue = *(uint64_t*)((uint8_t*)destination + offset);
+        uint64_t savedValue = *(const uint64_t*)(source + offset);
+        if (IsAccessiblePointer(liveValue) || IsAccessiblePointer(savedValue)) {
+            livePointers.push_back({offset, liveValue});
+        }
+    }
+
+    // Rewind the complete inline collision state, but not cSystem's base or
+    // mPrivateAllocator. Heap ownership behind the preserved pointers remains
+    // on the live timeline until those allocations are captured explicitly.
+    std::memcpy((uint8_t*)destination + SCOLLISION_BODY_START,
+                source + SCOLLISION_BODY_START,
+                SCOLLISION_ALLOC_START - SCOLLISION_BODY_START);
+    for (const LivePointerField& field : livePointers) {
+        *(uint64_t*)((uint8_t*)destination + field.offset) = field.value;
+    }
+}
+
 static void RestoreExternalAnimBlock(void* dst, const uint8_t* src, size_t size)
 {
     if (size != CCHR_EXTERNAL_ANIM_SIZE) return;
@@ -219,7 +306,7 @@ static void RestoreExternalAnimBlock(void* dst, const uint8_t* src, size_t size)
     std::memcpy((uint8_t*)dst + 0x90, src + 0x90, 0x28); // group, attr, move, user u32
     std::memcpy((uint8_t*)dst + 0xC8, src + 0xC8, 0x18); // derived slot scalar tail
 }
-static constexpr int    MAX_REGIONS          = 512;
+static constexpr int    MAX_REGIONS          = 2048;
 static constexpr int    DYNAMIC_SAFETY       = 128; // max projectile/effect nodes
 static constexpr int    SSHOT_SENTINEL_COUNT = 10;  // 10 sentinel slots starting at 0x140d47f90
 static constexpr size_t SSHOT_NODE_OFFSET    = 0x1450; // uShot->cChrNode offset
@@ -279,6 +366,25 @@ static int32_t g_rollbackReqStart = -1;
 static int32_t g_rollbackReqEnd   = -1;
 static uint64_t g_sMvc3Main      = 0;
 static void(__fastcall* oMvc3Main_move)(uint64_t param_1) = nullptr;
+using CChrSetPos_t = void(__fastcall*)(uint64_t character, const float* position);
+static CChrSetPos_t oCChrSetPos = nullptr;
+
+static void __fastcall hkCChrSetPos(uint64_t character, const float* position)
+{
+    if (g_isResimulating && character && position) {
+        const float* oldPosition = (const float*)(character + 0x50);
+        float deltaX = position[0] - oldPosition[0];
+        if (std::isfinite(deltaX) && std::fabs(deltaX) >= 0.001f) {
+            HookLog("[ResimSetPos] frame=%d chr=0x%llX caller=0x%llX "
+                    "old=[%.9g,%.9g,%.9g] src=[%.9g,%.9g,%.9g] dx=%.9g\n",
+                    g_resimulateCurrentFrame, character,
+                    (uint64_t)__builtin_return_address(0),
+                    oldPosition[0], oldPosition[1], oldPosition[2],
+                    position[0], position[1], position[2], deltaX);
+        }
+    }
+    oCChrSetPos(character, position);
+}
 // Trampoline for the render/present call — NOP'd during re-simulation
 static void(__fastcall* oCallSRender)(uint64_t param_1) = nullptr;
 // Trampoline for sMain__move (frame-timing / QPC / Sleep / busy-wait)
@@ -414,7 +520,91 @@ static void Rollback_NetplayLiveInit() {
     g_netplayLiveInit = true;
 }
 
-std::string Rollback_GenerateNetplayLiveJSON(int32_t frame, bool isResim) {
+static std::string Rollback_GenerateHitboxJSON(uint64_t chr) {
+    static constexpr uint32_t capsuleBase = 0x4210;
+    static constexpr uint32_t capsuleStride = 0xB0;
+    static constexpr uint32_t sphereBases[] = {0x4E20, 0x5530, 0x5C40};
+    static constexpr uint32_t sphereStride = 0x70;
+
+    std::string out = "[";
+    bool first = true;
+    char entry[384];
+
+    for (uint32_t index = 0; index < 16; ++index) {
+        uint64_t primitive = chr + capsuleBase + index * capsuleStride;
+        if (*(uint8_t*)(primitive + 0x08) == 0) continue;
+
+        float x0 = *(float*)(primitive + 0x20);
+        float y0 = *(float*)(primitive + 0x24);
+        float z0 = *(float*)(primitive + 0x28);
+        float x1 = *(float*)(primitive + 0x30);
+        float y1 = *(float*)(primitive + 0x34);
+        float z1 = *(float*)(primitive + 0x38);
+        float radius = *(float*)(primitive + 0x40);
+        float dx = x1 - x0;
+        float dy = y1 - y0;
+        float dz = z1 - z0;
+        float segmentLength = std::sqrt(dx * dx + dy * dy + dz * dz);
+        if (!std::isfinite(x0) || !std::isfinite(y0) || !std::isfinite(z0) ||
+            !std::isfinite(x1) || !std::isfinite(y1) || !std::isfinite(z1) ||
+            !std::isfinite(radius) || !std::isfinite(segmentLength)) {
+            continue;
+        }
+
+        snprintf(entry, sizeof(entry),
+                 "%s{\"bank\":\"capsule\",\"index\":%u,\"shape\":\"capsule\",\"damaging\":true,"
+                 "\"pos\":[%.9g,%.9g,%.9g],"
+                 "\"size\":[%.9g,%.9g,%.9g],\"radius\":%.9g,\"length\":%.9g}",
+                 first ? "" : ",", index,
+                 (x0 + x1) * 0.5f, (y0 + y1) * 0.5f, (z0 + z1) * 0.5f,
+                 std::fabs(dx) + radius * 2.0f,
+                 std::fabs(dy) + radius * 2.0f,
+                 std::fabs(dz) + radius * 2.0f,
+                 radius, segmentLength + radius * 2.0f);
+        out += entry;
+        first = false;
+    }
+
+    for (uint32_t bank = 0; bank < 3; ++bank) {
+        for (uint32_t index = 0; index < 16; ++index) {
+            uint64_t primitive = chr + sphereBases[bank] + index * sphereStride;
+            if (*(uint8_t*)(primitive + 0x08) == 0) continue;
+
+            float x = *(float*)(primitive + 0x20);
+            float y = *(float*)(primitive + 0x24);
+            float z = *(float*)(primitive + 0x28);
+            float radius = *(float*)(primitive + 0x2C);
+            int32_t parent = *(int32_t*)(primitive + 0x40);
+            float localX = *(float*)(primitive + 0x50);
+            float localY = *(float*)(primitive + 0x54);
+            float localZ = *(float*)(primitive + 0x58);
+            if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z) ||
+                !std::isfinite(radius) || !std::isfinite(localX) ||
+                !std::isfinite(localY) || !std::isfinite(localZ)) {
+                continue;
+            }
+
+            snprintf(entry, sizeof(entry),
+                     "%s{\"bank\":\"sphere%u\",\"index\":%u,\"shape\":\"sphere\",\"damaging\":false,"
+                     "\"pos\":[%.9g,%.9g,%.9g],"
+                     "\"size\":[%.9g,%.9g,%.9g],\"radius\":%.9g,"
+                     "\"parent\":%d,\"local\":[%.9g,%.9g,%.9g]}",
+                     first ? "" : ",", bank, index, x, y, z,
+                     radius * 2.0f, radius * 2.0f, radius * 2.0f, radius,
+                     parent, localX, localY, localZ);
+            out += entry;
+            first = false;
+        }
+    }
+
+    out += "]";
+    return out;
+}
+
+std::string Rollback_GenerateNetplayLiveJSON(int32_t frame, bool isResim,
+                                             const char* phase = nullptr,
+                                             int32_t rollbackStart = -1,
+                                             int32_t rollbackEnd = -1) {
     //return;
     if (frame == 0) return "";
     char tsBuf[32] = {};
@@ -424,7 +614,10 @@ std::string Rollback_GenerateNetplayLiveJSON(int32_t frame, bool isResim) {
              st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
 
     std::string sideStr = Netplay_IsHost() ? "host" : "client";
-    if (isResim) {
+    if (phase) {
+        sideStr += "_";
+        sideStr += phase;
+    } else if (isResim) {
         sideStr += "_resim";
     }
     const char* side = sideStr.c_str();
@@ -440,10 +633,17 @@ std::string Rollback_GenerateNetplayLiveJSON(int32_t frame, bool isResim) {
     }
 
     char header[512];
-    snprintf(header, sizeof(header),
-             "{\"v\":1,\"ts\":\"%s\",\"frame\":%d,\"side\":\"%s\",\"dt\":%.9g,"
-             "\"chars\":[",
-             tsBuf, frame, side, mainDt);
+    if (rollbackStart >= 0 && rollbackEnd >= rollbackStart) {
+        snprintf(header, sizeof(header),
+                 "{\"v\":1,\"ts\":\"%s\",\"frame\":%d,\"side\":\"%s\","
+                 "\"rollback_start\":%d,\"rollback_end\":%d,\"dt\":%.9g,\"chars\":[",
+                 tsBuf, frame, side, rollbackStart, rollbackEnd, mainDt);
+    } else {
+        snprintf(header, sizeof(header),
+                 "{\"v\":1,\"ts\":\"%s\",\"frame\":%d,\"side\":\"%s\",\"dt\":%.9g,"
+                 "\"chars\":[",
+                 tsBuf, frame, side, mainDt);
+    }
 
     std::string out = header;
 
@@ -467,6 +667,7 @@ std::string Rollback_GenerateNetplayLiveJSON(int32_t frame, bool isResim) {
                     int32_t memberId = *(int32_t*)(chr + 0x2DB0);
                     int32_t plrId = *(int32_t*)(chr + 0x2DA0);
                     int32_t assistType = *(int32_t*)(chr + 0x2DBC);
+                    std::string hitboxes = Rollback_GenerateHitboxJSON(chr);
 
                     // Dash/double-tap detection state (cChrInput_inputMaskPostProcess
                     // @0x14002E5A0): per-bit elapsed-frame timers and tap counters.
@@ -583,6 +784,8 @@ std::string Rollback_GenerateNetplayLiveJSON(int32_t frame, bool isResim) {
                         out += charBuf;
                         out += ",";
                         out += dashState;
+                        out += ",\"hitboxes\":";
+                        out += hitboxes;
                         out += "}";
                     } else {
                         snprintf(charBuf, sizeof(charBuf),
@@ -613,6 +816,8 @@ std::string Rollback_GenerateNetplayLiveJSON(int32_t frame, bool isResim) {
                         out += charBuf;
                         out += ",";
                         out += dashState;
+                        out += ",\"hitboxes\":";
+                        out += hitboxes;
                         out += "}";
                     }
                     ci++;
@@ -1248,6 +1453,298 @@ static int BuildRegions(Region* regions, int maxRegions)
         }
     };
 
+    int collisionExternalRegions = 0;
+    size_t collisionExternalBytes = 0;
+    struct CollisionDiscoveryDiag {
+        uint64_t sCollision = 0;
+        uint64_t sbc = 0;
+        uint64_t moveMatrix = 0;
+        uint64_t activeData = 0;
+        uint32_t activeCount = 0;
+        uint32_t activeCapacity = 0;
+        uint64_t moveCategoryArray = 0;
+        uint32_t moveCategoryCount = 0;
+        uint32_t bvhVisited = 0;
+        uint32_t bvhPoolPresent = 0;
+        uint32_t bvhPoolHeaderAccessible = 0;
+        uint32_t bvhPoolCapacityValid = 0;
+        uint32_t bvhFreePresent = 0;
+        uint32_t bvhFreeHeaderValid = 0;
+        uint32_t bvhReachableNodes = 0;
+        uint32_t bvhStandaloneNodes = 0;
+        uint32_t sbcQueueHeadersValid = 0;
+        uint32_t sbcQueueDataPresent = 0;
+        uint32_t moveQueuesPresent = 0;
+        uint32_t moveThreadHeadersValid = 0;
+    } collisionDiag;
+
+    auto logOwnedBufferRejection = [&](const char* label, uint64_t ownerSlot,
+                                       uint64_t ptr, size_t size) {
+        static std::unordered_map<std::string, std::string> lastReasons;
+        const char* reason = nullptr;
+        if (!ownerSlot) reason = "null owner slot";
+        else if (!ptr) reason = "null data pointer";
+        else if (!size) reason = "zero size";
+        else if (size > 0x1000000) reason = "size exceeds limit";
+        else if (!IsAccessiblePointer(ptr)) reason = "start inaccessible";
+        else if (!IsAccessibleAddress(ptr + size - 1)) reason = "end inaccessible";
+        if (!reason) return;
+
+        char state[192];
+        std::snprintf(state, sizeof(state),
+                      "%s owner=0x%llX ptr=0x%llX size=%zu",
+                      reason, ownerSlot, ptr, size);
+        std::string& previous = lastReasons[label];
+        if (previous != state) {
+            HookLog("Rollback: sCollision discovery reject %s: %s\n", label, state);
+            previous = state;
+        }
+    };
+
+    auto addOwnedBuffer = [&](uint64_t ownerSlot, uint64_t ptr, size_t size) {
+        if (!ownerSlot || !ptr || !size || size > 0x1000000 ||
+            !IsAccessiblePointer(ptr) || !IsAccessibleAddress(ptr + size - 1)) {
+            return;
+        }
+        if (r >= maxRegions) return;
+        add((void*)ptr, size, ownerSlot);
+        ++collisionExternalRegions;
+        collisionExternalBytes += size;
+    };
+
+    std::unordered_set<uint64_t> capturedStandaloneBvhNodes;
+    auto addDynamicBvhBuffers = [&](uint64_t bvh, uint32_t bank, uint32_t index) {
+        ++collisionDiag.bvhVisited;
+        if (!bvh || !IsAccessiblePointer(bvh)) {
+            if (index == 0)
+                HookLog("Rollback: sCollision discovery BVH bank=0x%X base=0x%llX inaccessible\n",
+                        bank, bvh);
+            return;
+        }
+
+        // resizeNodePool allocates a 0x10-byte allocator header followed by
+        // 0x40-byte nodes and stores the first node in +0x18. Do not rewind
+        // allocator metadata; capture the node payload itself. The +0x20
+        // array contains pointers into that pool and defines free-list order.
+        uint64_t pool = *(uint64_t*)(bvh + 0x18);
+        if (pool) ++collisionDiag.bvhPoolPresent;
+        uint32_t poolCapacity = 0;
+        if (pool && IsAccessiblePointer(pool - 0x10)) {
+            ++collisionDiag.bvhPoolHeaderAccessible;
+            poolCapacity = *(uint32_t*)(pool - 0x10);
+        }
+        if (poolCapacity > 0 && poolCapacity <= 0x10000) {
+            ++collisionDiag.bvhPoolCapacityValid;
+            addOwnedBuffer(bvh + 0x18, pool,
+                           (size_t)poolCapacity * SCOLLISION_NODE_SIZE);
+        } else if (pool && index == 0) {
+            HookLog("Rollback: sCollision discovery BVH bank=0x%X pool=0x%llX capacity=%u headerAccessible=%d\n",
+                    bank, pool, poolCapacity, IsAccessiblePointer(pool - 0x10));
+        }
+
+        uint32_t freeCount = *(uint32_t*)(bvh + 0x28);
+        uint32_t freeCapacity = *(uint32_t*)(bvh + 0x2C);
+        uint64_t freeNodes = *(uint64_t*)(bvh + 0x20);
+        if (freeNodes) ++collisionDiag.bvhFreePresent;
+        if (freeCount <= freeCapacity && freeCapacity <= 0x10000) {
+            ++collisionDiag.bvhFreeHeaderValid;
+            addOwnedBuffer(bvh + 0x20, freeNodes, (size_t)freeCapacity * 8);
+        } else if (index == 0) {
+            HookLog("Rollback: sCollision discovery BVH bank=0x%X freeNodes=0x%llX count=%u capacity=%u\n",
+                    bank, freeNodes, freeCount, freeCapacity);
+        }
+
+        // A second MtArray at +0x30 tracks nodes not currently assigned to
+        // the reserved pool. It has its own external pointer array at +0x48.
+        uint32_t noUseCount = *(uint32_t*)(bvh + 0x38);
+        uint32_t noUseCapacity = *(uint32_t*)(bvh + 0x3C);
+        uint64_t noUseNodes = *(uint64_t*)(bvh + 0x48);
+        if (noUseCount <= noUseCapacity && noUseCapacity <= 0x10000) {
+            addOwnedBuffer(bvh + 0x48, noUseNodes,
+                           (size_t)noUseCapacity * 8);
+        }
+
+        // popNodeOrAlloc falls back to individually allocated 0x40-byte nodes
+        // after both pointer arrays are exhausted. Walk the live tree and
+        // capture every reachable node outside this BVH's fixed pool. The
+        // parent/root field is the owner slot, so restore is skipped if the
+        // live topology no longer references the saved allocation.
+        struct PendingBvhNode { uint64_t ownerSlot; uint64_t node; };
+        std::vector<PendingBvhNode> pending;
+        uint64_t root = *(uint64_t*)(bvh + 0x08);
+        if (root) pending.push_back({bvh + 0x08, root});
+        std::unordered_set<uint64_t> visited;
+        while (!pending.empty() && visited.size() < 0x10000) {
+            PendingBvhNode current = pending.back();
+            pending.pop_back();
+            if (!current.node || !IsAccessiblePointer(current.node) ||
+                !visited.insert(current.node).second) {
+                continue;
+            }
+            ++collisionDiag.bvhReachableNodes;
+
+            bool inFixedPool = pool && poolCapacity > 0 &&
+                current.node >= pool &&
+                current.node < pool + (size_t)poolCapacity * SCOLLISION_NODE_SIZE &&
+                ((current.node - pool) % SCOLLISION_NODE_SIZE) == 0;
+            if (!inFixedPool && capturedStandaloneBvhNodes.insert(current.node).second) {
+                addOwnedBuffer(current.ownerSlot, current.node, SCOLLISION_NODE_SIZE);
+                ++collisionDiag.bvhStandaloneNodes;
+            }
+
+            uint64_t child0 = *(uint64_t*)(current.node + 0x10);
+            uint64_t child1 = *(uint64_t*)(current.node + 0x18);
+            if (child0) pending.push_back({current.node + 0x10, child0});
+            if (child1) pending.push_back({current.node + 0x18, child1});
+        }
+    };
+
+    auto addNodeListBuffers = [&](uint64_t nodeList) {
+        if (!nodeList || !IsAccessiblePointer(nodeList)) return;
+
+        // NodeList contains seven 41-entry MtArray groups, four singleton
+        // MtArrays, and two embedded dynamic BVHs. The object itself is
+        // captured separately; these are its heap-backed pointer arrays.
+        static constexpr uint32_t arrayBases[] = {
+            0x18, 0x538, 0xA58, 0x1028, 0x1548, 0x1A68, 0x1F88
+        };
+        for (uint32_t base : arrayBases) {
+            for (uint32_t category = 0; category < 0x29; ++category) {
+                uint64_t header = nodeList + base + category * 0x20;
+                uint32_t count = *(uint32_t*)(header + 0x08);
+                uint32_t capacity = *(uint32_t*)(header + 0x0C);
+                uint64_t data = *(uint64_t*)(header + 0x18);
+                if (count <= capacity && capacity <= 0x10000) {
+                    addOwnedBuffer(header + 0x18, data, (size_t)capacity * 8);
+                }
+            }
+        }
+
+        for (uint32_t headerOffset : {0xF78u, 0xF98u, 0x24A8u, 0x24C8u}) {
+            uint64_t header = nodeList + headerOffset;
+            uint32_t count = *(uint32_t*)(header + 0x08);
+            uint32_t capacity = *(uint32_t*)(header + 0x0C);
+            uint64_t data = *(uint64_t*)(header + 0x18);
+            if (count <= capacity && capacity <= 0x10000) {
+                addOwnedBuffer(header + 0x18, data, (size_t)capacity * 8);
+            }
+        }
+
+        addDynamicBvhBuffers(nodeList + 0xFC0, 0xFC0, 0);
+        addDynamicBvhBuffers(nodeList + 0x24E8, 0x24E8, 0);
+    };
+
+    auto addSbcObjectBuffers = [&](uint64_t sbc) {
+        collisionDiag.sbc = sbc;
+        if (!sbc || !IsAccessiblePointer(sbc)) {
+            HookLog("Rollback: sCollision discovery SbcObject=0x%llX inaccessible\n", sbc);
+            return;
+        }
+
+        // Active registration array: MtArray header at +0x40, data at +0x58.
+        uint32_t activeCount = *(uint32_t*)(sbc + 0x48);
+        uint32_t activeCapacity = *(uint32_t*)(sbc + 0x4C);
+        uint64_t activeData = *(uint64_t*)(sbc + 0x58);
+        collisionDiag.activeCount = activeCount;
+        collisionDiag.activeCapacity = activeCapacity;
+        collisionDiag.activeData = activeData;
+        if (activeCount <= activeCapacity && activeCapacity <= 0x10000) {
+            addOwnedBuffer(sbc + 0x58, activeData,
+                           (size_t)activeCapacity * 8);
+            if (activeCapacity > 0)
+                logOwnedBufferRejection("SbcObject.active", sbc + 0x58, activeData,
+                                        (size_t)activeCapacity * 8);
+        } else {
+            HookLog("Rollback: sCollision discovery active invalid count=%u capacity=%u data=0x%llX\n",
+                    activeCount, activeCapacity, activeData);
+        }
+
+        // Dirty and merge queues are 41 MtArray-derived NodeList headers with
+        // a 0x20-byte stride. These offsets start at the count field: capacity
+        // is +0x04, ownership is +0x08, and data is +0x10.
+        for (uint32_t base : {0x70u, 0x590u}) {
+            for (uint32_t category = 0; category < 0x29; ++category) {
+                uint64_t header = sbc + base + category * 0x20;
+                uint32_t count = *(uint32_t*)(header + 0x00);
+                uint32_t capacity = *(uint32_t*)(header + 0x04);
+                uint64_t data = *(uint64_t*)(header + 0x10);
+                if (count <= capacity && capacity <= 0x10000) {
+                    ++collisionDiag.sbcQueueHeadersValid;
+                    if (data) ++collisionDiag.sbcQueueDataPresent;
+                    addOwnedBuffer(header + 0x10, data, (size_t)capacity * 8);
+                    if (capacity > 0 && category == 0)
+                        logOwnedBufferRejection(base == 0x70 ? "SbcObject.dirty[0]" :
+                                                 "SbcObject.merge[0]",
+                                                 header + 0x10, data,
+                                                 (size_t)capacity * 8);
+                } else if (category == 0) {
+                    HookLog("Rollback: sCollision discovery queue base=0x%X count=%u capacity=%u data=0x%llX\n",
+                            base, count, capacity, data);
+                }
+                if (data && count <= capacity && capacity <= 0x10000) {
+                    for (uint32_t entry = 0; entry < count; ++entry) {
+                        uint64_t recordSlot = data + (size_t)entry * 8;
+                        uint64_t record = *(uint64_t*)recordSlot;
+                        addOwnedBuffer(recordSlot, record, 0x28);
+                    }
+                }
+            }
+        }
+    };
+
+    auto addMoveMatrixBuffers = [&](uint64_t moveMatrix) {
+        collisionDiag.moveMatrix = moveMatrix;
+        if (!moveMatrix || !IsAccessiblePointer(moveMatrix)) {
+            HookLog("Rollback: sCollision discovery moveMatrix=0x%llX inaccessible\n",
+                    moveMatrix);
+            return;
+        }
+        uint32_t categoryCount = *(uint32_t*)(moveMatrix + 0x10);
+        uint32_t categoryCapacity = *(uint32_t*)(moveMatrix + 0x14);
+        uint64_t categoryArray = *(uint64_t*)(moveMatrix + 0x20);
+        collisionDiag.moveCategoryCount = categoryCount;
+        collisionDiag.moveCategoryArray = categoryArray;
+        if (categoryCount > categoryCapacity || categoryCapacity > 0x40 ||
+            !categoryArray ||
+            !IsAccessiblePointer(categoryArray)) {
+            HookLog("Rollback: sCollision discovery move categories count=%u capacity=%u array=0x%llX accessible=%d\n",
+                    categoryCount, categoryCapacity, categoryArray,
+                    IsAccessiblePointer(categoryArray));
+            return;
+        }
+
+        addOwnedBuffer(moveMatrix + 0x20, categoryArray,
+                       (size_t)categoryCapacity * 8);
+
+        // Each category points to an MtArray<NodeList*>. Its backing array
+        // selects one full 0x2550-byte NodeList per frame/thread slot.
+        for (uint32_t category = 0; category < categoryCount; ++category) {
+            uint64_t categorySlot = categoryArray + (size_t)category * 8;
+            uint64_t queue = *(uint64_t*)categorySlot;
+            if (!queue || !IsAccessiblePointer(queue)) continue;
+            ++collisionDiag.moveQueuesPresent;
+            uint32_t threadCount = *(uint32_t*)(queue + 8);
+            uint32_t threadCapacity = *(uint32_t*)(queue + 0xC);
+            uint64_t threadData = *(uint64_t*)(queue + 0x18);
+            if (threadCount > threadCapacity || threadCapacity > 0x40) {
+                if (category == 0)
+                    HookLog("Rollback: sCollision discovery move queue=0x%llX threadCount=%u capacity=%u\n",
+                            queue, threadCount, threadCapacity);
+                continue;
+            }
+            addOwnedBuffer(queue + 0x18, threadData,
+                           (size_t)threadCapacity * 8);
+            for (uint32_t thread = 0; thread < threadCount; ++thread) {
+                uint64_t nodeListSlot = threadData + (size_t)thread * 8;
+                uint64_t nodeList = *(uint64_t*)nodeListSlot;
+                if (!nodeList || !IsAccessiblePointer(nodeList)) continue;
+                ++collisionDiag.moveThreadHeadersValid;
+                addOwnedBuffer(nodeListSlot, nodeList, 0x2550);
+                addNodeListBuffers(nodeList);
+            }
+        }
+    };
+
     // ---- 1. sReplay: frame counter only (sReplay+0x54). Full replay buffer
     //     has internal pointers that go stale. ---
     uint64_t sReplay = *(uint64_t*)_addr(PTR_SREPLAY);
@@ -1327,6 +1824,95 @@ static int BuildRegions(Region* regions, int maxRegions)
     {
         uint64_t sMain = *(uint64_t*)_addr(PTR_SMAIN);
         add((void*)sMain, SMAIN_SIZE);
+    }
+
+    // ---- 6a. sCollision — inline broadphase, move-matrix and geometry state ----
+    // Restore has a dedicated path that retains cSystem synchronization,
+    // mPrivateAllocator, and live pointers to externally owned allocations.
+    {
+        uint64_t sCollision = *(uint64_t*)_addr(PTR_SCOLLISION);
+        collisionDiag.sCollision = sCollision;
+        add((void*)sCollision, SCOLLISION_SIZE);
+        if (sCollision) {
+            // Ghidra's sCollision methods address these subsystems directly
+            // from the complete singleton. The documented offsets already
+            // include the 0x38-byte cSystem base.
+            uint64_t sbc = sCollision + 0x43B8;
+            uint64_t moveMatrix = sCollision + 0x7368;
+
+            addSbcObjectBuffers(sbc);
+            addMoveMatrixBuffers(moveMatrix);
+
+            // cSbcArrayBP has five independent banks of 31 dynamic BVHs.
+            // Their headers are inline in sCollision, but their node pools and
+            // free-node arrays are allocated externally.
+            for (uint32_t bank : {0x2B8u, 0xFB8u, 0x1CB8u, 0x29B8u, 0x36B8u}) {
+                for (uint32_t index = 0; index < SCOLLISION_BVH_COUNT; ++index)
+                    addDynamicBvhBuffers(sCollision + bank + index * 0x68, bank, index);
+            }
+
+            // cSbcObject owns two banks of 31 dynamic BVHs. The same helper
+            // captures their node pools and free-node pointer arrays.
+            for (uint32_t bank : {0xAA8u, 0x17A8u}) {
+                for (uint32_t index = 0; index < SCOLLISION_BVH_COUNT; ++index)
+                    addDynamicBvhBuffers(sbc + bank + index * 0x68, bank, index);
+            }
+
+            // Character collision attachment wrappers own dynamic BVHs and
+            // NodeList-backed child state outside the singleton. Their child
+            // graph is already cloned; capture the allocation's scalar image
+            // as well when the live owner still points to it.
+            uint64_t character = *(uint64_t*)_addr(PTR_SCHARACTER);
+            if (character) {
+                for (uint32_t teamOffset : {TEAM0_OFFSET, TEAM1_OFFSET}) {
+                    uint64_t node = character + teamOffset + TEAM_FIRST_NODE_OFFSET;
+                    for (uint32_t n = 0; node && n < 8; ++n) {
+                        uint64_t chr = *(uint64_t*)(node + NODE_CHR_OFFSET);
+                        if (chr) {
+                            for (uint32_t offset : CCHR_EXTERNAL_ANIM_OFFSETS) {
+                                uint64_t wrapper = *(uint64_t*)(chr + offset);
+                                if (wrapper) {
+                                    // Wrapper scalar state is already covered
+                                    // by the 0xE0 region. Its child arrays are
+                                    // intentionally left to the deep clone.
+                                }
+                            }
+                        }
+                        node = *(uint64_t*)(node + NODE_NEXT_OFFSET);
+                    }
+                }
+            }
+        }
+        static int lastCollisionExternalRegions = -1;
+        static size_t lastCollisionExternalBytes = 0;
+        if (collisionExternalRegions != lastCollisionExternalRegions ||
+            collisionExternalBytes != lastCollisionExternalBytes) {
+            HookLog("Rollback: sCollision external discovery regions=%d bytes=%zu\n",
+                    collisionExternalRegions, collisionExternalBytes);
+            HookLog("Rollback: sCollision discovery summary singleton=0x%llX sbc=0x%llX "
+                    "active=%u/%u@0x%llX queues=%u/%u bvh=%u nodes=%u standalone=%u pool=%u/%u/%u "
+                    "free=%u/%u move=0x%llX categories=%u@0x%llX queues=%u threads=%u\n",
+                    collisionDiag.sCollision, collisionDiag.sbc,
+                    collisionDiag.activeCount, collisionDiag.activeCapacity,
+                    collisionDiag.activeData,
+                    collisionDiag.sbcQueueDataPresent,
+                    collisionDiag.sbcQueueHeadersValid,
+                    collisionDiag.bvhVisited,
+                    collisionDiag.bvhReachableNodes,
+                    collisionDiag.bvhStandaloneNodes,
+                    collisionDiag.bvhPoolPresent,
+                    collisionDiag.bvhPoolHeaderAccessible,
+                    collisionDiag.bvhPoolCapacityValid,
+                    collisionDiag.bvhFreePresent,
+                    collisionDiag.bvhFreeHeaderValid,
+                    collisionDiag.moveMatrix,
+                    collisionDiag.moveCategoryCount,
+                    collisionDiag.moveCategoryArray,
+                    collisionDiag.moveQueuesPresent,
+                    collisionDiag.moveThreadHeadersValid);
+            lastCollisionExternalRegions = collisionExternalRegions;
+            lastCollisionExternalBytes = collisionExternalBytes;
+        }
     }
 
     // ---- 7. sCamera — view matrices, 8-slot camera stack, cutin state ----
@@ -1424,6 +2010,51 @@ static int BuildRegions(Region* regions, int maxRegions)
                             if (blend && blendSize > 0) {
                                 add((void*)blend, blendSize, ownerSlot);
                             }
+                        }
+                    }
+
+                    // Motion+0x178 fields are slices into one allocation owned
+                    // by uModel+0x6D8, not independent allocations. Rewind the
+                    // complete allocation through its actual owner slot.
+                    uint32_t channelCount = *(uint32_t*)(character +
+                        CCHR_MOTION_CHANNEL_COUNT_OFFSET);
+                    uint32_t motionCount = *(uint32_t*)(character +
+                        CCHR_MOTION_COUNT_OFFSET);
+                    if (channelCount <= 4096 && motionCount <= CCHR_MOTION_COUNT) {
+                        size_t channelBytes = CCHR_MOTION_CHANNEL_STRIDE *
+                            channelCount * motionCount;
+                        uint64_t ownerSlot = character + CCHR_MOTION_CHANNELS_PTR_OFFSET;
+                        uint64_t channels = *(uint64_t*)ownerSlot;
+                        if (channels && channelBytes > 0) {
+                            add((void*)channels, channelBytes, ownerSlot);
+                        }
+                    }
+
+                    // These heap buffers are outputs and working state of the
+                    // same motion evaluation pass. Leaving them ahead while
+                    // rewinding Motion/channel state splits root and joint
+                    // transforms across timelines.
+                    if (numJoints <= 256 && numJoints > 0) {
+                        uint64_t jointStateOwner = character + CCHR_JOINT_STATE_PTR_OFFSET;
+                        uint64_t jointStates = *(uint64_t*)jointStateOwner;
+                        if (jointStates) {
+                            add((void*)jointStates,
+                                CCHR_JOINT_STATE_STRIDE * numJoints,
+                                jointStateOwner);
+                        }
+
+                        uint64_t jointIndexOwner = character + CCHR_JOINT_INDEX_PTR_OFFSET;
+                        uint64_t jointIndices = *(uint64_t*)jointIndexOwner;
+                        if (jointIndices) {
+                            add((void*)jointIndices, numJoints, jointIndexOwner);
+                        }
+
+                        uint64_t blendedOwner = character + CCHR_BLENDED_JOINT_PTR_OFFSET;
+                        uint64_t blendedJoints = *(uint64_t*)blendedOwner;
+                        if (blendedJoints) {
+                            add((void*)blendedJoints,
+                                CCHR_BLENDED_JOINT_STRIDE * numJoints,
+                                blendedOwner);
                         }
                     }
 
@@ -2054,6 +2685,22 @@ void Rollback_SaveSnapshot(int32_t frame)
     }
     slot.size = offset;
 
+    static int lastSnapshotRegionCount = -1;
+    if (count != lastSnapshotRegionCount) {
+        int collisionIndex = -1;
+        size_t collisionSize = 0;
+        for (int i = 0; i < count; ++i) {
+            if ((uintptr_t)regions[i].ptr == *(uint64_t*)_addr(PTR_SCOLLISION)) {
+                collisionIndex = i;
+                collisionSize = regions[i].size;
+                break;
+            }
+        }
+        HookLog("Rollback: snapshot frame %d regions=%d bytes=%zu sCollisionIndex=%d sCollisionSize=%zu\n",
+                frame, count, offset, collisionIndex, collisionSize);
+        lastSnapshotRegionCount = count;
+    }
+
     // Native clones keep reference-managed geometry alive after attack-end
     // clears the live node's child array.
     CaptureCollisionNodeClones(slot);
@@ -2133,6 +2780,9 @@ void Rollback_RestoreSnapshot(int32_t frame)
     // same memory addresses that were captured, even if the game rebuilt its
     // internal lists between save and restore.
     uint64_t sHitSolver = *(uint64_t*)_addr(PTR_SHITSOLVER);
+    uint64_t sCollision = *(uint64_t*)_addr(PTR_SCOLLISION);
+    uint64_t sMvc3Mgr = *(uint64_t*)_addr(PTR_SMVC3MGR);
+    uint64_t sAction = sMvc3Mgr ? *(uint64_t*)(sMvc3Mgr + SMVC3MGR_ACTION_OFFSET) : 0;
     uint64_t sCharacter = *(uint64_t*)_addr(PTR_SCHARACTER);
     uint64_t team0 = sCharacter ? sCharacter + TEAM0_OFFSET : 0;
     uint64_t team1 = sCharacter ? sCharacter + TEAM1_OFFSET : 0;
@@ -2161,6 +2811,8 @@ void Rollback_RestoreSnapshot(int32_t frame)
     }
 
     size_t offset = 0;
+    int collisionRestoreCount = 0;
+    size_t collisionRestoreBytes = 0;
     for (int i = 0; i < slot.regionCount; ++i) {
         size_t copySize = slot.regions[i].size;
         if (offset + copySize > slot.size) {
@@ -2177,6 +2829,11 @@ void Rollback_RestoreSnapshot(int32_t frame)
             RestoreExternalAnimBlock(slot.regions[i].ptr,
                                      slot.data + offset,
                                      copySize);
+        } else if ((uint64_t)slot.regions[i].ptr == sCollision &&
+                   slot.regions[i].size == SCOLLISION_SIZE) {
+            ++collisionRestoreCount;
+            collisionRestoreBytes += copySize;
+            RestoreSCollisionBody(slot.regions[i].ptr, slot.data + offset, copySize);
         } else if ((uint64_t)slot.regions[i].ptr == *(uint64_t*)_addr(PTR_SMAIN) &&
                    slot.regions[i].size == SMAIN_SIZE) {
             for (const SnapshotRange& range : SMAIN_RESTORE_RANGES) {
@@ -2455,6 +3112,11 @@ void Rollback_RestoreSnapshot(int32_t frame)
         offset += rsize;
     }
 
+    // The character body restore includes slot-table pointers to heap objects
+    // that are not part of the snapshot. Clear them before the next game tick
+    // can release one through MtObject__replaceSlot_6F30.
+    Rollback_ClearStalePointers();
+
     RestoreShotAndEffectRecipes(slot);
 
     // Character slot tables contain live model/resource references. Clearing
@@ -2467,7 +3129,9 @@ void Rollback_RestoreSnapshot(int32_t frame)
     // into clean slots on the next game tick.
     //Rollback_ClearGameEffectSlots();
 
-    HookLog("Rollback: restored frame %d with %d regions, total size %zu bytes\n", frame, slot.regionCount, offset);
+    HookLog("Rollback: restored frame %d with %d regions, total size %zu bytes, "
+            "sCollision inline regions=%d bytes=%zu\n",
+            frame, slot.regionCount, offset, collisionRestoreCount, collisionRestoreBytes);
 }
 
 // ===========================================================================
@@ -2952,6 +3616,20 @@ void Rollback_ReSimulate(int32_t startFrame, int32_t endFrame)
         }
         // Sync the global so the resim loop writes to the same session
         g_diagSessionId = diagSid;
+    }
+
+    // Capture the final predicted live state before restoring it. This is a
+    // separate diagnostic entry because it belongs to the discarded timeline,
+    // not to the corrected frame sequence.
+    int32_t liveFrameBeforeRestore = -1;
+    {
+        uint64_t sReplay = *(uint64_t*)_addr(PTR_SREPLAY);
+        if (sReplay) liveFrameBeforeRestore = *(int32_t*)(sReplay + 0x54);
+    }
+    if (liveFrameBeforeRestore >= 0 && Netplay_IsActive()) {
+        std::string json = Rollback_GenerateNetplayLiveJSON(
+            liveFrameBeforeRestore, false, "pre_restore_prediction", startFrame, endFrame);
+        if (!json.empty()) Rollback_WriteNetplayLiveJSON(json);
     }
 
     // 1. Rewind to the starting frame boundary
@@ -3587,6 +4265,15 @@ void Rollback_InitHooks()
         HookLog("Rollback: failed to hook sMvc3Main__move (%d)\n", s);
     }
 
+    s = MH_CreateHook((LPVOID)_addr(FN_CCHR_SET_POS),
+                      (LPVOID)&hkCChrSetPos, (LPVOID*)&oCChrSetPos);
+    if (s == MH_OK) {
+        MH_EnableHook((LPVOID)_addr(FN_CCHR_SET_POS));
+        HookLog("Rollback: hooked cChr__setPos for resim diagnostics\n");
+    } else {
+        HookLog("Rollback: failed to hook cChr__setPos (%d)\n", s);
+    }
+
     s = MH_CreateHook((LPVOID)_addr(FN_SSHOT_SPAWN),
                       (LPVOID)&hkShotSpawn, (LPVOID*)&oShotSpawn);
     if (s == MH_OK) {
@@ -3629,9 +4316,9 @@ void Rollback_InitHooks()
         (LPVOID*)&oApplyCollisionPushCorrection
     );
     if (s == MH_OK) {
-        MH_EnableHook((LPVOID)_addr(FN_APPLY_COLLISION_PUSH));
-        HookLog("Rollback: player collision pushboxes disabled (0x%llX)\n",
-                (uint64_t)_addr(FN_APPLY_COLLISION_PUSH));
+    //    MH_EnableHook((LPVOID)_addr(FN_APPLY_COLLISION_PUSH));
+    //    HookLog("Rollback: player collision pushboxes disabled (0x%llX)\n",
+    //            (uint64_t)_addr(FN_APPLY_COLLISION_PUSH));
     } else {
         HookLog("Rollback: failed to disable player collision pushboxes (%d)\n", s);
     }
