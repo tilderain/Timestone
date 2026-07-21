@@ -664,12 +664,12 @@ void OnInitializeHook()
 								g_autoConnectIp, g_autoConnectPort);
 						}
 						else if (event.type == ENET_EVENT_TYPE_RECEIVE) {
-							if (event.packet->dataLength >= sizeof(LaunchTrainingPacket) &&
+							if (event.packet->dataLength == sizeof(LaunchTrainingPacket) &&
 								*(uint32_t*)event.packet->data == PACKET_LAUNCH_TRAINING) {
-								ApplyTrainingLaunchPacket(
+								receivedLaunchConfig = ApplyTrainingLaunchPacket(
 									*(const LaunchTrainingPacket*)event.packet->data);
-								receivedLaunchConfig = true;
-								HookLog("UMVC3Hook: Auto-connect received dual-training selection\n");
+								if (receivedLaunchConfig)
+									HookLog("UMVC3Hook: Auto-connect received dual-training selection\n");
 							}
 							enet_packet_destroy(event.packet);
 						}

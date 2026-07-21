@@ -92,8 +92,8 @@ void Rollback_RestoreSnapshot(int32_t frame);
 // Re-simulate frames [startFrame, endFrame):
 //   1. Restore snapshot at startFrame
 //   2. Call the full sMvc3Main__move pipeline for each frame
-//      (snapshots are NOT re-saved during re-sim — the next normal frame
-//       boundary save handles the corrected state)
+//   3. When multi-resim is enabled, replace each frame snapshot with its
+//      corrected state while retaining the inputs used for that frame
 void Rollback_ReSimulate(int32_t startFrame, int32_t endFrame);
 
 struct ResimNotifyPacket;

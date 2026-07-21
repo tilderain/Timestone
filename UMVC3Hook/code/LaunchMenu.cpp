@@ -69,6 +69,18 @@ static bool      g_isHost = false;          // true if we clicked Host, false if
 static COLORREF  g_statusColor = RGB(0, 0, 0); // default black for status text
 static HBRUSH    g_hStatusBrush = nullptr;
 
+static bool IsValidTrainingLaunchPacket(const LaunchTrainingPacket& packet)
+{
+    if (packet.type != PACKET_LAUNCH_TRAINING)
+        return false;
+    for (int i = 0; i < 3; ++i) {
+        if (packet.p1Chars[i] < 1 || packet.p1Chars[i] >= kCharNameCount ||
+            packet.p2Chars[i] < 1 || packet.p2Chars[i] >= kCharNameCount)
+            return false;
+    }
+    return true;
+}
+
 // Custom timer and window messages
 #define ID_NET_POLL_TIMER       5001
 static volatile bool g_networkPolling = false;
@@ -129,11 +141,18 @@ void SendTrainingLaunchPacket()
         return;
     }
     enet_host_flush(g_dialogConfig.enetHost);
-    HookLog("UMVC3Hook: Sent training launch packet\n");
+    HookLog("UMVC3Hook: Sent training launch packet P1=%d/%d/%d P2=%d/%d/%d stage=%d\n",
+            packet.p1Chars[0], packet.p1Chars[1], packet.p1Chars[2],
+            packet.p2Chars[0], packet.p2Chars[1], packet.p2Chars[2], packet.stageId);
 }
 
-void ApplyTrainingLaunchPacket(const LaunchTrainingPacket& packet)
+bool ApplyTrainingLaunchPacket(const LaunchTrainingPacket& packet)
 {
+    if (!IsValidTrainingLaunchPacket(packet)) {
+        HookLog("UMVC3Hook: Rejected invalid training launch packet\n");
+        return false;
+    }
+
     for (int i = 0; i < 3; ++i) {
         g_dialogConfig.p1Chars[i] = packet.p1Chars[i];
         g_dialogConfig.p2Chars[i] = packet.p2Chars[i];
@@ -148,7 +167,10 @@ void ApplyTrainingLaunchPacket(const LaunchTrainingPacket& packet)
     cfg.stageId = packet.stageId;
     cfg.timerValue = 99;
     TrainingBoot_SetConfig(cfg);
-    HookLog("UMVC3Hook: Applied synchronized dual-training fighter selection\n");
+    HookLog("UMVC3Hook: Applied launch packet P1=%d/%d/%d P2=%d/%d/%d stage=%d\n",
+            packet.p1Chars[0], packet.p1Chars[1], packet.p1Chars[2],
+            packet.p2Chars[0], packet.p2Chars[1], packet.p2Chars[2], packet.stageId);
+    return true;
 }
 
 // Declare global cleanup for DLL detach
@@ -553,11 +575,14 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
                         CleanupNetwork(hDlg, true);
                     }
                     else if (event.type == ENET_EVENT_TYPE_RECEIVE) {
-                        if (event.packet->dataLength >= sizeof(LaunchTrainingPacket) &&
+                        if (event.packet->dataLength == sizeof(LaunchTrainingPacket) &&
                             *(uint32_t*)event.packet->data == PACKET_LAUNCH_TRAINING) {
                             const LaunchTrainingPacket* launch =
                                 (const LaunchTrainingPacket*)event.packet->data;
-                            ApplyTrainingLaunchPacket(*launch);
+                            if (!ApplyTrainingLaunchPacket(*launch)) {
+                                enet_packet_destroy(event.packet);
+                                return 0;
+                            }
                             SaveRollbackSettings();
                             g_isLaunching = true;
                             g_launchOption = LAUNCH_TRAINING;

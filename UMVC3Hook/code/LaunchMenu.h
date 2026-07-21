@@ -61,7 +61,7 @@ void SendTrainingLaunchPacket();
 
 // Apply a host-selected training configuration received by an auto-connected
 // dual-training client before its training boot sequence begins.
-void ApplyTrainingLaunchPacket(const LaunchTrainingPacket& packet);
+bool ApplyTrainingLaunchPacket(const LaunchTrainingPacket& packet);
 
 // Clean up any active network session (call on DLL detach / game exit)
 void CleanupNetworkOnExit();

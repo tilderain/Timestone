@@ -364,3 +364,5 @@ FodyWeavers.xsd
 
 UMVC3Hook.asi
 all.txt
+
+build/**

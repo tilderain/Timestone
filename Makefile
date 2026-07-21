@@ -130,12 +130,14 @@ LIBS      := \
 # Targets
 # ##############################################################################
 
-.PHONY: all clean release debug fix-includes build-status
+.PHONY: all clean release debug fix-includes
 
-all: release build-status
-
-build-status:
-	@echo "=== No changes: $(OUTPUT) is up to date ==="
+all:
+	@if $(MAKE) --no-print-directory -q $(OUTPUT); then \
+		echo "=== No changes: $(OUTPUT) is up to date ==="; \
+	else \
+		$(MAKE) --no-print-directory release; \
+	fi
 
 # ---------- Release build ----------
 
@@ -209,7 +211,7 @@ $(BUILDDIR)/UMVC3Hook.rc:
 		'    END' \
 		'END' > $@
 
-$(RC_OBJ): $(BUILDDIR)/UMVC3Hook.rc $(SRCDIR)/resource.h | fix-includes
+$(RC_OBJ): $(BUILDDIR)/UMVC3Hook.rc $(SRCDIR)/resource.h | $(INCLUDE_FIX_STAMP)
 	@mkdir -p $(@D)
 	$(WINDRES) --include-dir $(SRCDIR) --include-dir $(INCLUDE_FIX_DIR) -O coff -i $< -o $@
 
@@ -218,8 +220,11 @@ $(RC_OBJ): $(BUILDDIR)/UMVC3Hook.rc $(SRCDIR)/resource.h | fix-includes
 # We create symlinks so the case-sensitive compiler finds them.
 
 INCLUDE_FIX_DIR := $(BUILDDIR)/include_fix
+INCLUDE_FIX_STAMP := $(INCLUDE_FIX_DIR)/.stamp
 
-fix-includes:
+fix-includes: $(INCLUDE_FIX_STAMP)
+
+$(INCLUDE_FIX_STAMP):
 	@mkdir -p $(INCLUDE_FIX_DIR)
 	@test -L $(INCLUDE_FIX_DIR)/Windows.h 2>/dev/null || \
 		ln -sf /usr/x86_64-w64-mingw32/include/windows.h $(INCLUDE_FIX_DIR)/Windows.h
@@ -227,6 +232,7 @@ fix-includes:
 		ln -sf /usr/x86_64-w64-mingw32/include/psapi.h $(INCLUDE_FIX_DIR)/Psapi.h
 	@test -L $(INCLUDE_FIX_DIR)/XInput.h 2>/dev/null || \
 		ln -sf /usr/x86_64-w64-mingw32/include/xinput.h $(INCLUDE_FIX_DIR)/XInput.h
+	@touch $@
 
 $(OBJDIR):
 	mkdir -p $(OBJDIR)

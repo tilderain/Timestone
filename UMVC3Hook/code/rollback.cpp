@@ -3924,12 +3924,25 @@ void Rollback_ReSimulate(int32_t startFrame, int32_t endFrame)
     //    Controller_InjectRemoteInput before the game tick.
     for (int32_t f = startFrame; f < endFrame; ++f) {
         g_resimulateCurrentFrame = f;
+        int si = f % ROLLBACK_WINDOW;
+        if (si < 0) si += ROLLBACK_WINDOW;
+
+        // Keep the corrected inputs attached to this frame while multi-resim
+        // replaces its snapshot. SaveSnapshot normally samples the live input
+        // shift buffer, which is not the timeline currently being replayed.
+        const uint32_t resimLocalInput = g_slots[si].localInput;
+        uint32_t resimRemoteInput = g_slots[si].remoteInput;
+
         // [EXPERIMENTAL] g_virtual_qpc = g_qpc_history[f % ROLLBACK_WINDOW];
         // Re-resolve remote input so re-sim uses the latest received data,
         // not the stale prediction that triggered the conflict.
         if (Netplay_IsActive()) {
             Controller_ResolveRemoteInput(f);
+            resimRemoteInput = Controller_GetUsedRemoteInput(f);
         }
+        // hkprocessFrameInput reads snapshot metadata before its ring-buffer
+        // fallback, so publish the newly resolved input before running the tick.
+        Rollback_UpdateSnapshotInputs(f, resimLocalInput, resimRemoteInput);
         Controller_SilentFrameStart();
         // Inject the local and remote inputs saved in this frame's
         // snapshot slot.  hkprocessFrameInput reads g_recordedGameInput
@@ -3939,11 +3952,9 @@ void Rollback_ReSimulate(int32_t startFrame, int32_t endFrame)
         // shift-buffer save/restore that was global-static-buffer-
         // vulnerable.
         {
-            int si = f % ROLLBACK_WINDOW;
-            if (si < 0) si += ROLLBACK_WINDOW;
-            Controller_InjectLocalInput(f, g_slots[si].localInput);
+            Controller_InjectLocalInput(f, resimLocalInput);
             if (!Netplay_IsActive()) {
-                Controller_InjectRemoteInput(f, g_slots[si].remoteInput);
+                Controller_InjectRemoteInput(f, resimRemoteInput);
             }
         }
         // Capture PRE-state before the tick
@@ -3962,6 +3973,7 @@ void Rollback_ReSimulate(int32_t startFrame, int32_t endFrame)
         // Take snapshot of current state before ticking, ensuring cascading rollbacks have a valid restore point
         if (g_multiResimEnabled) {
             Rollback_SaveSnapshot(f);
+            Rollback_UpdateSnapshotInputs(f, resimLocalInput, resimRemoteInput);
         }
 
         //Todo: replace with headless tick for better perf
