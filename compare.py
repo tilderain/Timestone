@@ -12,13 +12,17 @@ Designed for the UMVC3Hook nplive/rdiag NDJSON schema:
                 "mOld":"0x..","mPressed":"0x..","mReleased":"0x..","mMask":"0x..","mProcessed":"0x..",
                 "dirSlot":N,"dir0":"0x..","dir4":"0x..","h590":"0x..","h594":"0x..",
                 "dirRing":["0x..",...],"rng":["0x..","0x..","0x..","0x.."],
-                "hitboxes":[{"bank":"capsule","index":0,"shape":"capsule",
-                              "pos":[x,y,z],"size":[x,y,z]}]}, ...]}
+                 "hitboxes":[{"bank":"capsule","index":0,"shape":"capsule",
+                               "pos":[x,y,z],"size":[x,y,z]}], ...],
+       "shots":[{"list":0,"addr":"0x..","slot":0,"init":0,
+                  "owner":"0x..","element":"0x..","state":"0x..",
+                  "pos":[x,y,z],"timer":0.0}, ...]}
 
 What it does:
   1. Parses both files, picks one "primary" entry per frame per file (skipping
      resim/diag duplicate entries unless that's all there is).
-  2. Walks frames in increasing order, comparing matching (team,slot) characters.
+   2. Walks frames in increasing order, comparing matching (team,slot) characters
+      and matching shots by list/order.
    3. Reports the FIRST frame where anything differs beyond tolerance, classifies
       *what kind* of divergence it is (RNG-only / position / action / flags /
       mHeld / fcnt / dirSlot / dir0 / dir4 / h590 / h594 / dirRing), and prints N frames of context before and after it
@@ -85,6 +89,18 @@ def chars_by_key(entry, by_mid=False):
         else:
             key = (c.get("team"), c.get("slot"))
         out[key] = c
+    return out
+
+
+def shots_by_key(entry):
+    """Match shots by stable list/order identity, not process-local addresses."""
+    out = {}
+    per_list = {}
+    for shot in entry.get("shots", []):
+        shot_list = shot.get("list", 0)
+        ordinal = per_list.get(shot_list, 0)
+        per_list[shot_list] = ordinal + 1
+        out[(shot_list, ordinal)] = shot
     return out
 
 
@@ -265,6 +281,40 @@ def diff_char(ca, cb, pos_eps):
     if hitboxes:
         diffs["hitboxes"] = hitboxes
     return diffs
+
+
+def diff_shot(sa, sb, pos_eps):
+    diffs = {}
+    if sa.get("slot") != sb.get("slot"):
+        diffs["slot"] = f"A={sa.get('slot')} B={sb.get('slot')}"
+    if sa.get("init") != sb.get("init"):
+        diffs["init"] = f"A={sa.get('init')} B={sb.get('init')}"
+    for field in ("owner", "element", "state"):
+        if not hex_eq(sa.get(field), sb.get(field)):
+            diffs[field] = f"A={sa.get(field)} B={sb.get(field)}"
+    pd = pos_diff(sa.get("pos"), sb.get("pos"))
+    if pd is not None and (len(pd) != len(sa.get("pos", [])) or max(pd, default=0) > pos_eps):
+        diffs["pos"] = f"A={sa.get('pos')} B={sb.get('pos')} delta={pd}"
+    ta, tb = sa.get("timer"), sb.get("timer")
+    if ta is None or tb is None:
+        if ta != tb:
+            diffs["timer"] = f"A={ta} B={tb}"
+    elif abs(ta - tb) > pos_eps:
+        diffs["timer"] = f"A={ta} B={tb} delta={abs(ta - tb)}"
+    return diffs
+
+
+def fmt_entry_shots(entry):
+    if entry is None:
+        return "  (missing)"
+    shots = entry.get("shots", [])
+    if not shots:
+        return "  (no shots)"
+    return "\n".join(
+        f"    list={s.get('list')} slot={s.get('slot')} state={s.get('state')} "
+        f"pos={s.get('pos')} timer={s.get('timer')} owner={s.get('owner')}"
+        for s in shots
+    )
 
 
 def fmt_entry_chars(entry, include_dir=False):
@@ -455,6 +505,18 @@ def main():
             if d:
                 this_frame_diffs[key] = d
 
+        sa, sb = shots_by_key(ea), shots_by_key(eb)
+        shot_diffs = {}
+        for key in sorted(set(sa) | set(sb)):
+            if key not in sa or key not in sb:
+                shot_diffs[key] = {"_missing": f"shot present in {'A' if key in sa else 'B'} only"}
+                continue
+            d = diff_shot(sa[key], sb[key], args.pos_eps)
+            if d:
+                shot_diffs[key] = d
+        if shot_diffs:
+            this_frame_diffs["__shots__"] = shot_diffs
+
         # Annotate mid diffs that are actually slot swaps (only when comparing by slot)
         if args.by_slot:
             swaps = detect_mid_swap(ca, cb)
@@ -469,6 +531,9 @@ def main():
             # Skip frames where the only diffs are uninit positions
             only_uninit_pos = True
             for fields in this_frame_diffs.values():
+                if fields and all(k == "_missing" for k in fields):
+                    only_uninit_pos = False
+                    break
                 for k, v in fields.items():
                     if k != "pos" or "uninit" not in v:
                         only_uninit_pos = False
@@ -515,6 +580,14 @@ def main():
               f"       round start, not a rollback-state desync.")
 
     for key, fields in frame_diffs[first_any_divergence].items():
+        if key == "__shots__":
+            print("\n  [shots]")
+            for shot_key, shot_fields in fields.items():
+                print(f"    [list={shot_key[0]} ordinal={shot_key[1]}]")
+                for fname, desc in shot_fields.items():
+                    print(f"      {fname}: {desc}")
+            print("\n    Likely cause: projectile lifecycle, position, or shot-state divergence.")
+            continue
         if not isinstance(key, tuple):
             continue
         if by_mid:
@@ -540,6 +613,11 @@ def main():
                 ca_pf = chars_by_key(a[pf], by_mid=by_mid)
                 cb_pf = chars_by_key(b[pf], by_mid=by_mid)
                 for key, fields in frame_diffs[pf].items():
+                    if key == "__shots__":
+                        print("  [shots]")
+                        for shot_key, shot_fields in fields.items():
+                            print(f"    [list={shot_key[0]} ordinal={shot_key[1]}] {shot_fields}")
+                        continue
                     if not isinstance(key, tuple):
                         continue
                     if by_mid:
@@ -583,6 +661,8 @@ def main():
         raw_fields = set()
         for d in fields.values():
             if isinstance(d, dict):
+                if d and all(k == "_missing" for k in d):
+                    raw_fields.add("shots")
                 for fname in d.keys():
                     if fname != "__slot_swap__":
                         raw_fields.add(fname)

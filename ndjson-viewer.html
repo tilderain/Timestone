@@ -540,20 +540,64 @@ function hitboxesSame(a, b, eps = 0.001) {
   return true;
 }
 
+function shotKey(shot, ordinal) {
+  return `${shot.list ?? 0}:${ordinal}`;
+}
+
+function shotMap(shots) {
+  const map = new Map();
+  const ordinals = {};
+  for (const shot of shots || []) {
+    const list = shot.list ?? 0;
+    const ordinal = ordinals[list] || 0;
+    ordinals[list] = ordinal + 1;
+    map.set(shotKey(shot, ordinal), shot);
+  }
+  return map;
+}
+
+function shotsSame(a, b, eps = 0.001) {
+  if (!Array.isArray(a) || !Array.isArray(b)) return a === b;
+  const mapA = shotMap(a), mapB = shotMap(b);
+  if (mapA.size !== mapB.size) return false;
+  for (const [key, shotA] of mapA) {
+    const shotB = mapB.get(key);
+    if (!shotB || shotA.slot !== shotB.slot || shotA.init !== shotB.init ||
+        shotA.owner !== shotB.owner || shotA.element !== shotB.element ||
+        shotA.state !== shotB.state || !numericArraySame(shotA.pos, shotB.pos, eps) ||
+        Math.abs((shotA.timer ?? 0) - (shotB.timer ?? 0)) > eps) return false;
+  }
+  return true;
+}
+
+function getShotPositions(g) {
+  if (!g) return [];
+  const live = g.live?.shots || [];
+  const resim = g.resim?.shots || [];
+  const liveMap = shotMap(live), resimMap = shotMap(resim);
+  const result = [];
+  for (const key of new Set([...liveMap.keys(), ...resimMap.keys()])) {
+    const a = liveMap.get(key), b = resimMap.get(key);
+    result.push({ live: a, resim: b, delta: a && b ? getDelta(a, b) : null, key });
+  }
+  return result;
+}
+
 function hasDivergence(live, resim) {
   if (!live || !resim) return false;
   const lc = live.chars, rc = resim.chars;
-  if (!lc || !rc) return false;
-  const rMap = {};
-  for (const c of rc) rMap[charKey(c)] = c;
-  for (const a of lc) {
-    const b = rMap[charKey(a)];
-    if (!b) return true;
-    if (Math.abs(a.pos[0] - b.pos[0]) > 0.001 || Math.abs(a.pos[1] - b.pos[1]) > 0.001 || Math.abs(a.pos[2] - b.pos[2]) > 0.001)
-      return true;
-    if (!hitboxesSame(a.hitboxes, b.hitboxes)) return true;
+  if (lc && rc) {
+    const rMap = {};
+    for (const c of rc) rMap[charKey(c)] = c;
+    for (const a of lc) {
+      const b = rMap[charKey(a)];
+      if (!b) return true;
+      if (Math.abs(a.pos[0] - b.pos[0]) > 0.001 || Math.abs(a.pos[1] - b.pos[1]) > 0.001 || Math.abs(a.pos[2] - b.pos[2]) > 0.001)
+        return true;
+      if (!hitboxesSame(a.hitboxes, b.hitboxes)) return true;
+    }
   }
-  return false;
+  return !shotsSame(live.shots, resim.shots);
 }
 
 function isCharDiffering(c) {
@@ -636,7 +680,7 @@ function hasCharMismatch(g) {
       return true;
     }
   }
-  return false;
+  return !shotsSame(g?.live?.shots, g?.resim?.shots);
 }
 
 // ─── Rendering ────────────────────────────────────────────────────────
@@ -804,7 +848,8 @@ function drawCanvas(g, frameNum) {
   }
 
   const chars = getCharPositions(g);
-  if (!chars.length) {
+  const shots = getShotPositions(g);
+  if (!chars.length && !shots.length) {
     ctx.fillStyle = '#888';
     ctx.font = '18px sans-serif';
     ctx.textAlign = 'center';
@@ -826,6 +871,14 @@ function drawCanvas(g, frameNum) {
           minY = Math.min(minY, hitbox.pos[1] - hitbox.size[1] / 2);
           maxY = Math.max(maxY, hitbox.pos[1] + hitbox.size[1] / 2);
         }
+      }
+    }
+  }
+  for (const shot of shots) {
+    for (const projectile of [shot.live, shot.resim]) {
+      if (projectile?.pos) {
+        minX = Math.min(minX, projectile.pos[0]); maxX = Math.max(maxX, projectile.pos[0]);
+        minY = Math.min(minY, projectile.pos[1]); maxY = Math.max(maxY, projectile.pos[1]);
       }
     }
   }
@@ -890,11 +943,13 @@ function drawCanvas(g, frameNum) {
         }
         ctx.stroke();
 
-        ctx.fillStyle = hitboxColor;
-        ctx.font = '9px monospace';
-        ctx.textAlign = 'center';
-        ctx.fillText(`${hitbox.damaging ? 'damage ' : ''}${hitbox.shape || 'unknown'} ${hitbox.index ?? '?'}`,
-                     sx, sy - height / 2 - 3);
+        if (hitbox.shape !== 'sphere' && !(hitbox.shape === 'capsule' && hitbox.damaging)) {
+          ctx.fillStyle = hitboxColor;
+          ctx.font = '9px monospace';
+          ctx.textAlign = 'center';
+          ctx.fillText(`${hitbox.damaging ? 'damage ' : ''}${hitbox.shape || 'unknown'} ${hitbox.index ?? '?'}`,
+                       sx, sy - height / 2 - 3);
+        }
       }
       ctx.restore();
     };
@@ -909,6 +964,30 @@ function drawCanvas(g, frameNum) {
   }
 
   // Draw connecting lines & positions
+  for (const shot of shots) {
+    const liveColor = '#ffd166';
+    const resimColor = '#ff8c00';
+    if (shot.live?.pos && shot.resim?.pos) {
+      const [lx, ly] = toScreen(shot.live.pos[0], shot.live.pos[1]);
+      const [rx, ry] = toScreen(shot.resim.pos[0], shot.resim.pos[1]);
+      ctx.beginPath(); ctx.moveTo(lx, ly); ctx.lineTo(rx, ry);
+      ctx.strokeStyle = shot.delta && getDeltaMag(shot.delta) > 0.01 ? COLORS.deltaBad : COLORS.deltaOk;
+      ctx.lineWidth = 1.5; ctx.stroke();
+      ctx.beginPath(); ctx.arc(rx, ry, 5, 0, Math.PI * 2);
+      ctx.strokeStyle = resimColor; ctx.lineWidth = 2; ctx.stroke();
+      ctx.beginPath(); ctx.arc(lx, ly, 5, 0, Math.PI * 2);
+      ctx.fillStyle = liveColor; ctx.fill(); ctx.strokeStyle = liveColor; ctx.stroke();
+    } else {
+      const projectile = shot.live || shot.resim;
+      if (!projectile?.pos) continue;
+      const [sx, sy] = toScreen(projectile.pos[0], projectile.pos[1]);
+      ctx.beginPath(); ctx.arc(sx, sy, 5, 0, Math.PI * 2);
+      ctx.strokeStyle = shot.live ? liveColor : resimColor; ctx.lineWidth = 2; ctx.stroke();
+      if (shot.live) { ctx.fillStyle = liveColor; ctx.fill(); }
+    }
+  }
+
+  // Draw connecting lines & character positions
   for (const c of chars) {
     const labelId = c.mid;
     const radius = labelId === 0 ? (c.plr === -1 ? 9 : 12) : 8;
@@ -1297,6 +1376,27 @@ function drawSidebar(g, frameNum) {
 
   if (renderedChars === 0 && chars.length > 0) {
     html += `<section><p style="color:#888;text-align:center;padding:12px 0;">All characters match on this frame.</p></section>`;
+  }
+
+  const shots = getShotPositions(g);
+  if (shots.length) {
+    html += '<section><h3>Shots</h3>';
+    html += '<table><tr><th>List</th><th>Slot</th><th>Position</th><th>Timer</th><th>State</th></tr>';
+    for (const shot of shots) {
+      const live = shot.live, resim = shot.resim;
+      const same = live && resim && shotsSame([live], [resim]);
+      if (onlyShowDiffering && same) continue;
+      const value = live || resim;
+      const formatPosition = p => p ? `[${p.map(v => Number(v).toFixed(3)).join(', ')}]` : '—';
+      const formatSide = field => live && resim
+        ? `${live[field] ?? '—'} / ${resim[field] ?? '—'}`
+        : (value[field] ?? '—');
+      html += `<tr class="${same ? '' : 'mismatch-bg'}">` +
+        `<td>${value.list ?? '—'}</td><td>${formatSide('slot')}</td>` +
+        `<td>${live && resim ? `${formatPosition(live.pos)} / ${formatPosition(resim.pos)}` : formatPosition(value.pos)}</td>` +
+        `<td>${formatSide('timer')}</td><td>${formatSide('state')}</td></tr>`;
+    }
+    html += '</table></section>';
   }
 
   sidebar.innerHTML = html;

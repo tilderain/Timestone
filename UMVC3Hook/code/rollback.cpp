@@ -160,6 +160,7 @@ static constexpr SnapshotRange CCHR_SCALAR_RESTORE_RANGES[] = {
     {0x550, 0x10},
     // Assist/DHC and action-state flags used by character transitions.
     {0x29E, 0x12},
+    {0x1300, 0x08},  // character action-time coefficient and local step
     {0x1308, 0x40},  // action descriptor and actor animation state
     // cActorGameModelAnm is embedded at +0x1348. Keep its vtable live, but
     // rewind its script IDs, owner, command blocks, key and loop registers.
@@ -3489,7 +3490,7 @@ static void Rollback_DumpManifest(int session, int32_t frame, uint8_t side) {
 // NDJSON: one JSON line per dump frame for script/AI consumption.
 // All entries go into a single rdiag.ndjson file (no separate sessions).
 // side=0 → "ground_truth" (pre-resim state), side=1 → "resim" (post-resim state)
-// Schema:  v, ts, frame, side, regions[{idx,addr,size,hash}], chars[{...}]
+// Schema:  v, ts, frame, side, regions[{idx,addr,size,hash}], chars[{...}], shots[{...}]
 static void Rollback_DumpNDJSON(int32_t frame, uint8_t side) {
     //return;
     if (!g_diagDir[0]) return;
@@ -3561,6 +3562,53 @@ static void Rollback_DumpNDJSON(int32_t frame, uint8_t side) {
                 }
                 node = *(uint64_t*)(node + NODE_NEXT_OFFSET);
             }
+        }
+    }
+
+    fprintf(g_diagNdjsonFile, "],\"shots\":[");
+
+    // Dump the live projectile list separately from character state.  The
+    // rollback snapshot already captures these fields, so keeping the same
+    // representation here makes shot divergence easy to compare.
+    bool firstShot = true;
+    for (int list = 0; list < SSHOT_SENTINEL_COUNT; ++list) {
+        uint64_t sentinel = (uint64_t)_addr(0x140d47f90) + list * 0x28;
+        uint64_t sentinelRef = sentinel + 0x08;
+        uint64_t nodeRef = *(uint64_t*)(sentinel + 0x10);
+        int safety = DYNAMIC_SAFETY;
+        while (nodeRef && nodeRef != sentinelRef && safety-- > 0) {
+            void* shot = (void*)(nodeRef - SSHOT_NODE_OFFSET);
+            uint8_t* shotBytes = (uint8_t*)shot;
+            auto recipe = g_liveShotRecipes.find(shot);
+
+            uint32_t slotId = 0;
+            int initParam = 0;
+            uint64_t ownerChr = 0;
+            uint64_t shotElement = 0;
+            if (recipe != g_liveShotRecipes.end()) {
+                slotId = recipe->second.slotId;
+                initParam = recipe->second.initParam;
+                ownerChr = (uint64_t)recipe->second.ownerChr;
+                shotElement = (uint64_t)recipe->second.shotElement;
+            }
+
+            if (!firstShot) fprintf(g_diagNdjsonFile, ",");
+            firstShot = false;
+            fprintf(g_diagNdjsonFile,
+                    "{\"list\":%d,\"addr\":\"0x%llX\","
+                    "\"slot\":%u,\"init\":%d,"
+                    "\"owner\":\"0x%llX\",\"element\":\"0x%llX\","
+                    "\"state\":\"0x%08X\","
+                    "\"pos\":[%.4f,%.4f,%.4f],\"timer\":%.4f}",
+                    list, (uint64_t)shot, slotId, initParam,
+                    ownerChr, shotElement,
+                    *(uint32_t*)(shotBytes + 0x10),
+                    *(float*)(shotBytes + 0x50),
+                    *(float*)(shotBytes + 0x54),
+                    *(float*)(shotBytes + 0x58),
+                    *(float*)(shotBytes + 0x1F60));
+
+            nodeRef = *(uint64_t*)(nodeRef + 0x10);
         }
     }
 
