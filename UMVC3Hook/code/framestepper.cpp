@@ -300,6 +300,7 @@ static void __fastcall HookedMove(void* sMvc3Main)
         Controller_ResetBuffers();
         Controller_ResetFrameEpoch();
         Rollback_FreeSnapshots();
+        Rollback_ResetNetplayLiveLog();
 
         g_battleSynchronized = false;
         g_localReady = false;

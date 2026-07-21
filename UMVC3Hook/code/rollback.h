@@ -47,6 +47,9 @@ extern bool g_ndjsonIncludeDirHistory;
 // Flush the rolling netplay NDJSON history when desync is triggered.
 extern "C" void Rollback_NotifyDesyncTriggered(int32_t frame);
 
+// Start a fresh rolling netplay NDJSON log for a restarted match.
+void Rollback_ResetNetplayLiveLog();
+
 // F7 re-sim test state machine:
 //   0 = idle
 //   1 = save snapshot on next frame boundary, then enter state 2

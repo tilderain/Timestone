@@ -508,8 +508,15 @@ static void Rollback_NetplayLiveInit() {
     
     // Append the local netplay role as a suffix to the directory name
     const char* sideSuffix = Netplay_IsActive() ? (Netplay_IsHost() ? "_host" : "_client") : "_offline";
-    snprintf(rel, sizeof(rel), "nplive_%04d%02d%02d_%02d%02d%02d%s",
-             st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond, sideSuffix);
+    if (g_netplayLiveReset > 0) {
+        snprintf(rel, sizeof(rel), "nplive_%04d%02d%02d_%02d%02d%02d%s_r%d",
+                 st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond,
+                 sideSuffix, g_netplayLiveReset);
+    } else {
+        snprintf(rel, sizeof(rel), "nplive_%04d%02d%02d_%02d%02d%02d%s",
+                 st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond,
+                 sideSuffix);
+    }
              
     ResolveDllPath(dir, sizeof(dir), rel);
     CreateDirectoryA(dir, NULL);
@@ -535,6 +542,12 @@ static void Rollback_NetplayLiveInit() {
 
     HookLog("NetplayLive: NDJSON log -> %s\n", g_netplayLivePath);
     g_netplayLiveInit = true;
+}
+
+void Rollback_ResetNetplayLiveLog()
+{
+    ++g_netplayLiveReset;
+    Rollback_NetplayLiveInit();
 }
 
 static std::string Rollback_GenerateHitboxJSON(uint64_t chr) {
