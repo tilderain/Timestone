@@ -3,7 +3,6 @@
 #include <cstdio>
 #include <atomic>
 #include <Windows.h>
-#include <vector>
 
 extern void HookLog(const char* fmt, ...);
 
@@ -20,7 +19,10 @@ static InputPacket              g_outboundPacket = {};
 static bool                     g_outboundNew    = false;
 static CRITICAL_SECTION         g_outboundCS;
 
-static std::vector<InputPacket> g_inboundQueue;
+static constexpr size_t         MAX_INBOUND_PACKETS = 256;
+static InputPacket              g_inboundQueue[MAX_INBOUND_PACKETS] = {};
+static size_t                   g_inboundHead = 0;
+static size_t                   g_inboundCount = 0;
 static CRITICAL_SECTION         g_inboundCS;
 
 // Desync-check packet queue (separate from input packets).
@@ -242,7 +244,14 @@ static DWORD WINAPI Netplay_ServiceThread(LPVOID)
                                     const InputPacket* inPkt = (const InputPacket*)event.packet->data;
                                     {
                                         ScopedCS lock(g_inboundCS);
-                                        g_inboundQueue.push_back(*inPkt);
+                                        if (g_inboundCount == MAX_INBOUND_PACKETS)
+                                        {
+                                            g_inboundHead = (g_inboundHead + 1) % MAX_INBOUND_PACKETS;
+                                            --g_inboundCount;
+                                        }
+                                        size_t tail = (g_inboundHead + g_inboundCount) % MAX_INBOUND_PACKETS;
+                                        g_inboundQueue[tail] = *inPkt;
+                                        ++g_inboundCount;
                                     }
                                     g_recvCount++;
                                 }
@@ -325,6 +334,12 @@ static DWORD WINAPI Netplay_ServiceThread(LPVOID)
 // ---------------------------------------------------------------------------
 void Netplay_Init(ENetHost* host, ENetPeer* peer)
 {
+    if (g_running || g_serviceThread)
+    {
+        HookLog("Netplay: Init ignored because service thread is already running\n");
+        return;
+    }
+
     g_host   = host;
     g_peer   = peer;
     g_active = (host != nullptr && peer != nullptr);
@@ -354,6 +369,13 @@ void Netplay_Init(ENetHost* host, ENetPeer* peer)
         g_outboundBattleReadyNew = false;
         g_inboundBattleReadyNew = false;
         std::memset(&g_outboundPacket, 0, sizeof(InputPacket));
+        g_csInitialized = true;
+    }
+
+    {
+        ScopedCS lock(g_inboundCS);
+        g_inboundHead = 0;
+        g_inboundCount = 0;
     }
 
     g_recvCount = 0;
@@ -390,10 +412,11 @@ void Netplay_SendPacket(const InputPacket& pkt)
 bool Netplay_GetInboundPacket(InputPacket& outPkt)
 {
     ScopedCS lock(g_inboundCS);
-    if (!g_inboundQueue.empty())
+    if (g_inboundCount != 0)
     {
-        outPkt = g_inboundQueue.front();
-        g_inboundQueue.erase(g_inboundQueue.begin());
+        outPkt = g_inboundQueue[g_inboundHead];
+        g_inboundHead = (g_inboundHead + 1) % MAX_INBOUND_PACKETS;
+        --g_inboundCount;
         return true;
     }
     return false;
@@ -500,7 +523,8 @@ void Netplay_ClearInputQueues()
 {
     {
         ScopedCS lock(g_inboundCS);
-        g_inboundQueue.clear();
+        g_inboundHead = 0;
+        g_inboundCount = 0;
     }
     {
         ScopedCS lock(g_outboundCS);
@@ -529,14 +553,14 @@ void Netplay_SendInput(uint32_t rawInput)
 bool Netplay_HasRemoteInput()
 {
     ScopedCS lock(g_inboundCS);
-    return !g_inboundQueue.empty();
+    return g_inboundCount != 0;
 }
 
 uint32_t Netplay_GetRemoteInput()
 {
     ScopedCS lock(g_inboundCS);
-    if (!g_inboundQueue.empty())
-        return g_inboundQueue.front().inputs[0];
+    if (g_inboundCount != 0)
+        return g_inboundQueue[g_inboundHead].inputs[0];
     return 0;
 }
 
@@ -597,6 +621,7 @@ void Netplay_Shutdown()
         DeleteCriticalSection(&g_delayCS);
         DeleteCriticalSection(&g_resimNotifyCS);
         DeleteCriticalSection(&g_groundTruthCS);
+        DeleteCriticalSection(&g_battleReadyCS);
         g_csInitialized = false;
     }
 

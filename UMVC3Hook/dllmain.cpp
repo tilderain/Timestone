@@ -22,9 +22,11 @@
 
 // Log file for hook debugging
 FILE* g_hookLog = nullptr;
+static SRWLOCK g_hookLogLock = SRWLOCK_INIT;
 
 void HookLogSetFile(const char* filename)
 {
+	AcquireSRWLockExclusive(&g_hookLogLock);
 	if (g_hookLog) {
 		fclose(g_hookLog);
 		g_hookLog = nullptr;
@@ -37,11 +39,13 @@ void HookLogSetFile(const char* filename)
 	// Also redirect stderr to the new log file for Wine crash logs
 	// Use append mode so it doesn't truncate what g_hookLog just wrote
 	freopen(filename, "a", stderr);
+	ReleaseSRWLockExclusive(&g_hookLogLock);
 }
 
 void HookLog(const char* fmt, ...)
 {
 	//return;
+	AcquireSRWLockExclusive(&g_hookLogLock);
 	va_list args;
 	va_start(args, fmt);
 
@@ -57,6 +61,7 @@ void HookLog(const char* fmt, ...)
 		fflush(g_hookLog);
 		va_end(args2);
 	}
+	ReleaseSRWLockExclusive(&g_hookLogLock);
 }
 
 using namespace Memory::VP;
@@ -879,7 +884,6 @@ BOOL WINAPI DllMain(HMODULE hMod, DWORD dwReason, LPVOID lpReserved)
 	}
 	return TRUE;
 }
-
 
 
 
