@@ -40,6 +40,7 @@ enum PacketType : uint32_t {
     PACKET_RESIM_NOTIFY = 2,  // ResimNotifyPacket
     PACKET_GROUND_TRUTH = 4,  // GroundTruthPacket
     PACKET_BATTLE_READY = 5,  // BattleReadyPacket
+    PACKET_LAUNCH_TRAINING = 6, // LaunchTrainingPacket
 };
 
 #pragma pack(push, 1)
@@ -65,6 +66,13 @@ struct BattleReadyPacket {
     uint32_t type;               // PACKET_BATTLE_READY
     uint32_t generation;         // distinguishes later rounds/rematches
     uint32_t flags;              // BattleSyncFlags advertised by the sender
+};
+
+struct LaunchTrainingPacket {
+    uint32_t type;               // PACKET_LAUNCH_TRAINING
+    int32_t  p1Chars[3];
+    int32_t  p2Chars[3];
+    int32_t  stageId;
 };
 
 enum BattleSyncFlags : uint32_t {

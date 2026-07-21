@@ -75,6 +75,63 @@ static volatile bool g_networkPolling = false;
 static HANDLE g_hPollThread = NULL;
 static bool g_isLaunching = false;
 
+static void GetRollbackSettingsPath(char* path, size_t pathSize)
+{
+    wchar_t modulePath[MAX_PATH] = {};
+    GetModuleFileNameW(nullptr, modulePath, MAX_PATH);
+    wchar_t* slash = wcsrchr(modulePath, L'\\');
+    if (slash) slash[1] = L'\0';
+    wchar_t settingPath[MAX_PATH] = {};
+    swprintf(settingPath, MAX_PATH, L"%srollbacksetting.ini", modulePath);
+    WideCharToMultiByte(CP_ACP, 0, settingPath, -1, path, (int)pathSize, nullptr, nullptr);
+}
+
+static void LoadRollbackSettings()
+{
+    char path[MAX_PATH] = {};
+    GetRollbackSettingsPath(path, sizeof(path));
+    for (int i = 0; i < 3; ++i) {
+        char key[16];
+        snprintf(key, sizeof(key), "Slot%d", i + 1);
+        g_dialogConfig.p1Chars[i] = GetPrivateProfileIntA("P1", key, g_dialogConfig.p1Chars[i], path);
+        g_dialogConfig.p2Chars[i] = GetPrivateProfileIntA("P2", key, g_dialogConfig.p2Chars[i], path);
+    }
+}
+
+static void SaveRollbackSettings()
+{
+    char path[MAX_PATH] = {};
+    GetRollbackSettingsPath(path, sizeof(path));
+    for (int i = 0; i < 3; ++i) {
+        char key[16], value[16];
+        snprintf(key, sizeof(key), "Slot%d", i + 1);
+        snprintf(value, sizeof(value), "%d", g_dialogConfig.p1Chars[i]);
+        WritePrivateProfileStringA("P1", key, value, path);
+        snprintf(value, sizeof(value), "%d", g_dialogConfig.p2Chars[i]);
+        WritePrivateProfileStringA("P2", key, value, path);
+    }
+}
+
+static void SendTrainingLaunch()
+{
+    if (!g_isHost || !g_dialogConfig.enetPeer || !g_dialogConfig.enetHost) return;
+    LaunchTrainingPacket packet = {};
+    packet.type = PACKET_LAUNCH_TRAINING;
+    for (int i = 0; i < 3; ++i) {
+        packet.p1Chars[i] = g_dialogConfig.p1Chars[i];
+        packet.p2Chars[i] = g_dialogConfig.p2Chars[i];
+    }
+    packet.stageId = g_dialogConfig.stageId;
+    ENetPacket* enetPacket = enet_packet_create(&packet, sizeof(packet), ENET_PACKET_FLAG_RELIABLE);
+    if (!enetPacket || enet_peer_send(g_dialogConfig.enetPeer, 0, enetPacket) != 0) {
+        if (enetPacket) enet_packet_destroy(enetPacket);
+        HookLog("UMVC3Hook: Failed to send training launch packet\n");
+        return;
+    }
+    enet_host_flush(g_dialogConfig.enetHost);
+    HookLog("UMVC3Hook: Sent training launch packet\n");
+}
+
 // Declare global cleanup for DLL detach
 void CleanupNetworkOnExit()
 {
@@ -154,6 +211,7 @@ LaunchOption ShowLaunchMenu()
         g_dialogConfig.p1Chars[i] = def.p1Chars[i];
         g_dialogConfig.p2Chars[i] = def.p2Chars[i];
     }
+    LoadRollbackSettings();
     g_dialogConfig.stageId = def.stageId;
 
     // Default IP
@@ -459,6 +517,33 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
                         CleanupNetwork(hDlg, true);
                     }
                     else if (event.type == ENET_EVENT_TYPE_RECEIVE) {
+                        if (event.packet->dataLength >= sizeof(LaunchTrainingPacket) &&
+                            *(uint32_t*)event.packet->data == PACKET_LAUNCH_TRAINING) {
+                            const LaunchTrainingPacket* launch =
+                                (const LaunchTrainingPacket*)event.packet->data;
+                            for (int i = 0; i < 3; ++i) {
+                                g_dialogConfig.p1Chars[i] = launch->p1Chars[i];
+                                g_dialogConfig.p2Chars[i] = launch->p2Chars[i];
+                            }
+                            g_dialogConfig.stageId = launch->stageId;
+
+                            TrainingBootConfig cfg = {};
+                            for (int i = 0; i < 3; ++i) {
+                                cfg.p1Chars[i] = launch->p1Chars[i];
+                                cfg.p2Chars[i] = launch->p2Chars[i];
+                            }
+                            cfg.stageId = launch->stageId;
+                            cfg.timerValue = 99;
+                            TrainingBoot_SetConfig(cfg);
+                            SaveRollbackSettings();
+                            g_isLaunching = true;
+                            g_launchOption = LAUNCH_TRAINING;
+                            HookLog("UMVC3Hook: Received training launch packet\n");
+                            enet_packet_destroy(event.packet);
+                            DestroyWindow(hDlg);
+                            PostQuitMessage(0);
+                            return 0;
+                        }
                         enet_packet_destroy(event.packet);
                     }
                 } else if (result < 0) {
@@ -474,6 +559,11 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
         // ---- Launch buttons ----
         case ID_LAUNCH_NORMAL:
         {
+            for (int i = 0; i < 3; ++i) {
+                UpdateCharFromCombo(hDlg, ID_P1_SLOT1 + i, i, 0);
+                UpdateCharFromCombo(hDlg, ID_P2_SLOT1 + i, i, 1);
+            }
+            SaveRollbackSettings();
             // Apply network config before launching
             HWND hIp = GetDlgItem(hDlg, ID_NET_IP);
             HWND hPort = GetDlgItem(hDlg, ID_NET_PORT);
@@ -519,6 +609,8 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
             }
 
             // Apply config to training boot
+            SaveRollbackSettings();
+            SendTrainingLaunch();
             TrainingBootConfig cfg;
             for (int i = 0; i < 3; i++) {
                 cfg.p1Chars[i] = g_dialogConfig.p1Chars[i];
