@@ -707,6 +707,7 @@ void FrameStepper_Process()
             g_desyncFrame = desyncPacket.frame;
             g_desyncLocalCS = desyncPacket.remoteChecksum;
             g_desyncRemoteCS = desyncPacket.localChecksum;
+            Rollback_NotifyDesyncTriggered(desyncPacket.frame);
         }
         else if (desyncPacket.action == DESYNC_UNPAUSE)
         {
