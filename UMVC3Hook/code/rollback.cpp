@@ -1134,6 +1134,8 @@ static ShotSpawnExFn oShotSpawnEx = nullptr;
 static UnitRemoveFn oUnitRemove = nullptr;
 static EffectCreateFn oEffectCreate = nullptr;
 
+static bool IsLinkedShot(void* shot);
+
 static void DestroyCollisionNodeClones(SnapshotSlot& slot)
 {
     for (const CollisionNodeClone& entry : slot.collisionNodeClones) {
@@ -1266,7 +1268,11 @@ static char __fastcall hkUnitRemove(void* manager, void* unit)
 {
     char result = oUnitRemove(manager, unit);
     if (result && unit) {
-        g_liveShotRecipes.erase(unit);
+        // A shot can leave sUnit while remaining linked in sShot until its
+        // deferred list cleanup. Keep its spawn recipe through that interval;
+        // hkShotSpawn replaces the entry if the allocator reuses the address.
+        if (!IsLinkedShot(unit))
+            g_liveShotRecipes.erase(unit);
         g_liveEffectRecipes.erase(unit);
     }
     return result;
@@ -2975,6 +2981,28 @@ void Rollback_RestoreSnapshot(int32_t frame)
                     std::memcpy((uint8_t*)slot.regions[i].ptr + range.offset,
                                 slot.data + offset + range.offset,
                                 range.size);
+                }
+            }
+
+            // cChrCmd+0x180 points at the line that most recently matched;
+            // +0x188..+0x19f cache its success outputs. They are transient
+            // evaluator results, not matcher progress. Replaying either the
+            // saved result or the prediction result can dispatch an action
+            // that no longer matches the corrected input. The heap line array
+            // at +0x178 retains the actual command-step/timer history and is
+            // restored separately, so invalidate these outputs for the next
+            // native command update to recompute.
+            for (size_t cmdOffset : {0x2738u, 0x2950u}) {
+                size_t resultOffset = cmdOffset + 0x180;
+                if (resultOffset + 0x20 <= copySize) {
+                    uint8_t* cmdResult = (uint8_t*)slot.regions[i].ptr + resultOffset;
+                    *(uint64_t*)(cmdResult + 0x00) = 0;           // successful line
+                    *(int32_t*)(cmdResult + 0x08) = -1;          // mSucListId
+                    *(int32_t*)(cmdResult + 0x0C) = 0;           // mSucAnmNo
+                    *(int32_t*)(cmdResult + 0x10) = -1;          // mSucThrowNo
+                    *(int32_t*)(cmdResult + 0x14) = -1;          // mSucTdownNo
+                    *(float*)(cmdResult + 0x18) = 0.0f;          // mSucDelay
+                    *(int32_t*)(cmdResult + 0x1C) = 0;           // mSucWork
                 }
             }
 
