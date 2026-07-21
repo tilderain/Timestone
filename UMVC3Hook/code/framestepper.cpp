@@ -696,7 +696,7 @@ void FrameStepper_Process()
         {
             // Give the reliable packet time to arrive. The target itself is
             // still absolute, so both machines perform the write together.
-            targetFrame += 90;
+            targetFrame += 25;
             g_restartRoundSeed = (uint32_t)targetFrame ^
                                  (g_battleGeneration * 0x9E3779B9u) ^ 0x4D564333u;
             Netplay_SendRestartMatch(targetFrame, g_restartRoundSeed);
