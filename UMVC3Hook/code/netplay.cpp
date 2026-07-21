@@ -1,4 +1,6 @@
 #include "netplay.h"
+#include "rollback.h"
+#include "controller.h"
 #include <cstring>
 #include <cstdio>
 #include <atomic>
@@ -395,6 +397,10 @@ static DWORD WINAPI Netplay_ServiceThread(LPVOID)
                 else if (event.type == ENET_EVENT_TYPE_DISCONNECT)
                 {
                     HookLog("Netplay: Remote peer disconnected\n");
+                    // The game thread may not get another tick to consume a
+                    // queued remote desync trigger. Save the rolling window
+                    // before making the session inactive.
+                    Rollback_FlushNetplayLive(-1);
                     g_running = false;
                     g_active  = false;
                     g_peer    = nullptr;
@@ -735,6 +741,9 @@ uint32_t Netplay_GetRTT()
 void Netplay_Shutdown()
 {
     HookLog("Netplay: Shutting down...\n");
+    int32_t liveFrame = Controller_GetNetFrameCount();
+    if (liveFrame >= 0)
+        Rollback_FlushNetplayLive(liveFrame);
     g_running = false;
 
     if (g_serviceThread)

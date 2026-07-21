@@ -962,6 +962,43 @@ extern "C" void Rollback_NotifyDesyncTriggered(int32_t frame)
             NETPLAY_LIVE_HISTORY, frame);
 }
 
+extern "C" void Rollback_FlushNetplayLive(int32_t frame)
+{
+    if (!g_netplayLiveInit) Rollback_NetplayLiveInit();
+    if (!g_netplayLivePath[0] || g_netplayLiveDesyncFlushed) return;
+
+    // A clean disconnect can happen before either side reaches the local
+    // desync threshold. Preserve the same rolling window in that case.
+    for (int i = 0; i < 256; i++) {
+        if (g_pendingNPLiveFrame[i] >= 0) {
+            Rollback_WriteNetplayLiveJSON(g_pendingNPLiveJSON[i]);
+            g_pendingNPLiveFrame[i] = -1;
+        }
+    }
+
+    int32_t newestFrame = frame;
+    if (newestFrame < 0) {
+        for (int i = 0; i < NETPLAY_LIVE_HISTORY; i++)
+            if (g_netplayLiveHistoryFrame[i] > newestFrame)
+                newestFrame = g_netplayLiveHistoryFrame[i];
+    }
+    if (newestFrame < 0) return;
+
+    FILE* f = fopen(g_netplayLivePath, "a");
+    if (!f) return;
+
+    int32_t firstFrame = newestFrame - NETPLAY_LIVE_HISTORY + 1;
+    for (int32_t current = firstFrame; current <= newestFrame; current++) {
+        int idx = (uint32_t)current % NETPLAY_LIVE_HISTORY;
+        if (g_netplayLiveHistoryFrame[idx] == current)
+            fputs(g_netplayLiveHistory[idx].c_str(), f);
+    }
+    fclose(f);
+    g_netplayLiveDesyncFlushed = true;
+    HookLog("NetplayLive: final flush of last %d frames through frame %d\n",
+            NETPLAY_LIVE_HISTORY, newestFrame);
+}
+
 extern "C" void Rollback_CommitPendingNetplayLive(int32_t frame) {
     //return;
     int idx = (uint32_t)frame % 256;
