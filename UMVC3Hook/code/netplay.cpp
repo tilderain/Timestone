@@ -35,10 +35,12 @@ static std::atomic<bool>    g_running { false };
 
 // Delay + rollback control channel — small packets to keep both peers in sync.
 static int32_t              g_outboundDelay    = -1;
+static int32_t              g_outboundDelayFrame = -1;
 static bool                 g_outboundDelayNew = false;
 static int32_t              g_outboundRollback = -1;
 static bool                 g_outboundRollbackNew = false;
 static int32_t              g_inboundDelay     = -1;
+static int32_t              g_inboundDelayFrame = -1;
 static bool                 g_inboundDelayNew  = false;
 static int32_t              g_inboundRollback  = -1;
 static bool                 g_inboundRollbackNew = false;
@@ -138,12 +140,14 @@ static DWORD WINAPI Netplay_ServiceThread(LPVOID)
         // --- Send delay/rollback control packet (if a new value is pending) ---
         bool hasNewDelay = false;
         int32_t delayVal = -1;
+        int32_t delayFrame = -1;
         int32_t rollbackVal = -1;
         {
             ScopedCS lock(g_delayCS);
             if (g_outboundDelayNew || g_outboundRollbackNew)
             {
                 delayVal    = g_outboundDelay;
+                delayFrame  = g_outboundDelayFrame;
                 rollbackVal = g_outboundRollback;
                 hasNewDelay = true;
                 g_outboundDelayNew   = false;
@@ -157,6 +161,7 @@ static DWORD WINAPI Netplay_ServiceThread(LPVOID)
             dp.type           = PACKET_DELAY;
             dp.delay          = delayVal;
             dp.rollbackFrames = rollbackVal;
+            dp.effective_frame = delayFrame;
             ENetPacket* packet = enet_packet_create(
                 &dp, sizeof(DelayPacket), ENET_PACKET_FLAG_RELIABLE
             );
@@ -318,6 +323,7 @@ static DWORD WINAPI Netplay_ServiceThread(LPVOID)
                                     {
                                         ScopedCS lock(g_delayCS);
                                         g_inboundDelay     = dp->delay;
+                                        g_inboundDelayFrame = dp->effective_frame;
                                         g_inboundDelayNew  = true;
                                         g_inboundRollback     = dp->rollbackFrames;
                                         g_inboundRollbackNew = true;
@@ -509,10 +515,11 @@ bool Netplay_GetInboundPacket(InputPacket& outPkt)
 // ---------------------------------------------------------------------------
 // Delay + rollback control — sent together to keep both peers in sync.
 // ---------------------------------------------------------------------------
-void Netplay_SendDelay(int32_t delay)
+void Netplay_SendDelay(int32_t delay, int32_t effectiveFrame)
 {
     ScopedCS lock(g_delayCS);
     g_outboundDelay = delay;
+    g_outboundDelayFrame = effectiveFrame;
     g_outboundDelayNew = true;
 }
 
@@ -561,12 +568,13 @@ bool Netplay_GetInboundGroundTruth(GroundTruthPacket& outGT)
     return false;
 }
 
-bool Netplay_GetInboundDelay(int32_t& outDelay)
+bool Netplay_GetInboundDelay(int32_t& outDelay, int32_t& outEffectiveFrame)
 {
     ScopedCS lock(g_delayCS);
     if (g_inboundDelayNew)
     {
         outDelay = g_inboundDelay;
+        outEffectiveFrame = g_inboundDelayFrame;
         g_inboundDelayNew = false;
         return true;
     }

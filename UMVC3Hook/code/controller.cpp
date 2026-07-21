@@ -176,6 +176,12 @@ static constexpr int MAX_HISTORY    = NET_HISTORY_SIZE;  // 16 — matches wire 
 
 static uint32_t  g_oldInputs[MAX_HISTORY];     // local history (shift buffer)
 
+// Local inputs keyed by their absolute execution frame. Unlike g_oldInputs,
+// this schedule is not reinterpreted when delay changes: already queued inputs
+// keep their original frame, while newly captured input uses the new delay.
+static uint32_t  g_scheduledLocalInput[RING_SIZE];
+static int32_t   g_scheduledLocalFrame[RING_SIZE];
+
 // Remote inputs indexed by local frame number (mod RING_SIZE).
 // All offsets are relative to the receiver's own frame counter.
 static uint32_t  g_receivedInput[RING_SIZE];
@@ -202,7 +208,9 @@ static uint32_t  g_recordedGameInput[2][RING_SIZE];
 // Delay/rollback settings — defined here (above IsFrameConfirmed) because the
 // startup-window confirmation check reads them.
 static int32_t   g_delayFrames     = 3;
-static int32_t   g_rollbackFrames  = 8;
+static int32_t   g_pendingDelayFrames = -1;
+static int32_t   g_pendingDelayEffectiveFrame = -1;
+static int32_t   g_rollbackFrames  = 0;
 
 static bool IsFrameConfirmed(int32_t frame)
 {
@@ -340,6 +348,8 @@ extern "C" void Controller_ResetFrameEpoch()
 extern "C" void Controller_ResetBuffers()
 {
     std::memset(g_oldInputs,          0, sizeof(g_oldInputs));
+    std::memset(g_scheduledLocalInput, 0, sizeof(g_scheduledLocalInput));
+    std::memset(g_scheduledLocalFrame, -1, sizeof(g_scheduledLocalFrame));
     std::memset(g_receivedInput,      0, sizeof(g_receivedInput));
     std::memset(g_confirmedFrame,    -1, sizeof(g_confirmedFrame));
     std::memset(g_predictedFrame,    -1, sizeof(g_predictedFrame));
@@ -351,6 +361,8 @@ extern "C" void Controller_ResetBuffers()
     Diag_ResetBuffers();
     // g_netFrameCount is read from sReplay each frame; no reset needed.
     g_localPending    = 0;
+    g_pendingDelayFrames = -1;
+    g_pendingDelayEffectiveFrame = -1;
     g_lastRemoteFrame = -1;
     g_lastRemoteInput = 0;
     g_consecutivePredictedFrames = 0;
@@ -450,7 +462,10 @@ extern "C" void Controller_RestoreRollbackState()
 // frames ago that hkprocessFrameInput will apply during the imminent tick.
 extern "C" uint32_t Controller_GetCurrentFrameInput()
 {
-    return g_oldInputs[MAX_HISTORY - g_delayFrames];
+    int32_t frame = GetGameFrameCount();
+    if (frame < 0) return 0;
+    uint32_t idx = (uint32_t)frame % RING_SIZE;
+    return g_scheduledLocalFrame[idx] == frame ? g_scheduledLocalInput[idx] : 0;
 }
 
 // Override the local team's recorded game input for |frame| to |input|.
@@ -742,7 +757,35 @@ extern "C" void Controller_SetDelayFrames(int32_t delay)
 {
     if (delay < 1)                  delay = 1;
     if (delay > MAX_HISTORY - 1)    delay = MAX_HISTORY - 1;
+
+    if (delay == g_delayFrames)
+        return;
+
     g_delayFrames = delay;
+    HookLog("Netplay: delay changed to %d\n", delay);
+}
+
+extern "C" void Controller_ScheduleDelayFrames(int32_t delay, int32_t effectiveFrame)
+{
+    if (delay < 1) delay = 1;
+    if (delay > MAX_HISTORY - 1) delay = MAX_HISTORY - 1;
+    g_pendingDelayFrames = delay;
+    g_pendingDelayEffectiveFrame = effectiveFrame;
+    HookLog("Netplay: delay change to %d scheduled for frame %d\n", delay, effectiveFrame);
+}
+
+static void ApplyScheduledDelayIfReady()
+{
+    if (g_pendingDelayFrames < 0 || g_netFrameCount < g_pendingDelayEffectiveFrame)
+        return;
+
+    const int32_t newDelay = g_pendingDelayFrames;
+
+    g_delayFrames = newDelay;
+    g_pendingDelayFrames = -1;
+    g_pendingDelayEffectiveFrame = -1;
+    HookLog("Netplay: applied delay %d at frame %d\n",
+            newDelay, g_netFrameCount);
 }
 
 // ===========================================================================
@@ -952,9 +995,10 @@ static void DrainAndProcessPackets()
             int32_t targetFrame = (int32_t)inPkt.start_frame + (int32_t)i;
             if (targetFrame >= 0)
             {
-                // Only write if we haven't already confirmed this specific frame
-                // to prevent out-of-order packets from overwriting newer data.
-                if (!IsFrameConfirmed(targetFrame))
+                // History packets may revise a future frame during a delay
+                // transition. Accept that newest value until the frame has
+                // executed; past frames remain immutable in delay mode.
+                if (!IsFrameConfirmed(targetFrame) || targetFrame > g_netFrameCount)
                 {
                     g_receivedInput[(uint32_t)targetFrame % RING_SIZE] = inPkt.inputs[i];
                     g_confirmedFrame[(uint32_t)targetFrame % RING_SIZE] = targetFrame;
@@ -1026,6 +1070,8 @@ extern "C" void Controller_OnFrameStart()
     g_netFrameCount = GetGameFrameCount();
     // If sReplay isn't ready yet, skip packet processing this frame.
     if (g_netFrameCount < 0) return;
+
+    ApplyScheduledDelayIfReady();
 
     g_localPending = 0;
 
@@ -1289,17 +1335,28 @@ extern "C" void Controller_OnFrameEnd()
     if (g_rollbackFrames > 0 || IsFrameConfirmed(completedFrame))
         Controller_ResolveRemoteInput(completedFrame);
 
-    // --- 2. Record the executed delayed local input for display before shifting.
+    // --- 2. Record the local input assigned to this absolute frame.
     //         Done at the frame boundary rather than inside hkprocessFrameInput
     //         because per-character processFrameInput is not called during
     //         cinematic freezes, hitstun, or transition screens, which would
     //         leave gaps in g_recordedLocalInput and cause input display flicker.
     {
         uint32_t idx = (uint32_t)g_netFrameCount % RING_SIZE;
-        g_recordedLocalInput[idx] = g_oldInputs[MAX_HISTORY - g_delayFrames];
+        g_recordedLocalInput[idx] = g_scheduledLocalFrame[idx] == g_netFrameCount
+            ? g_scheduledLocalInput[idx] : 0;
     }
 
-    // --- 3. Shift history buffer: discard oldest, append current.
+    // --- 3. Assign newly captured input to its absolute execution frame.
+    // Existing scheduled frames are never relabeled by a delay change.
+    int32_t scheduledFrame = g_netFrameCount + g_delayFrames;
+    uint32_t scheduledIdx = (uint32_t)scheduledFrame % RING_SIZE;
+    if (g_scheduledLocalFrame[scheduledIdx] == scheduledFrame)
+        g_scheduledLocalInput[scheduledIdx] |= g_localPending;
+    else
+        g_scheduledLocalInput[scheduledIdx] = g_localPending;
+    g_scheduledLocalFrame[scheduledIdx] = scheduledFrame;
+
+    // Keep the legacy history populated for rollback save/restore diagnostics.
     memmove(&g_oldInputs[0], &g_oldInputs[1],
             (MAX_HISTORY - 1) * sizeof(uint32_t));
     g_oldInputs[MAX_HISTORY - 1] = g_localPending;
@@ -1310,10 +1367,21 @@ extern "C" void Controller_OnFrameEnd()
     //     inputs[MAX_HISTORY-1]        → frame start_frame+MAX_HISTORY-1 (newest)
     //     checksum is piggybacked (Slippi-style) for desync detection.
     InputPacket outPkt = {};
-    outPkt.start_frame = (uint32_t)(g_netFrameCount + g_delayFrames
-                                     - MAX_HISTORY + 1);
+    int32_t packetEndFrame = g_netFrameCount + g_delayFrames;
+    for (int32_t frame = g_netFrameCount; frame < g_netFrameCount + MAX_HISTORY; ++frame)
+    {
+        uint32_t idx = (uint32_t)frame % RING_SIZE;
+        if (g_scheduledLocalFrame[idx] == frame && frame > packetEndFrame)
+            packetEndFrame = frame;
+    }
+    outPkt.start_frame = (uint32_t)(packetEndFrame - MAX_HISTORY + 1);
     for (size_t i = 0; i < MAX_HISTORY; i++)
-        outPkt.inputs[i] = g_oldInputs[i];
+    {
+        int32_t frame = (int32_t)outPkt.start_frame + (int32_t)i;
+        uint32_t idx = (uint32_t)frame % RING_SIZE;
+        outPkt.inputs[i] = g_scheduledLocalFrame[idx] == frame
+            ? g_scheduledLocalInput[idx] : 0;
+    }
 
     if (!g_isResimulating && g_netFrameCount >= DESYNC_SKIP_FRAMES)
     {
@@ -1469,7 +1537,8 @@ static void __fastcall hkprocessFrameInput(uint64_t cChrInput)
                     if (lookupFrame > g_delayFrames + g_rollbackFrames)
                     {
                         g_localPending |= *(uint32_t*)(cChrInput + 0x14);
-                        uint32_t delayed = g_oldInputs[MAX_HISTORY - g_delayFrames];
+                        uint32_t delayed = g_scheduledLocalFrame[idx] == lookupFrame
+                            ? g_scheduledLocalInput[idx] : 0;
                         g_recordedGameInput[0][idx] = delayed;
                         *(uint32_t*)(cChrInput + 0x14)  = delayed;
                         *(uint32_t*)(cChrInput + 0x560) = delayed;
@@ -1512,7 +1581,8 @@ static void __fastcall hkprocessFrameInput(uint64_t cChrInput)
                     if (lookupFrame > g_delayFrames + g_rollbackFrames)
                     {
                         g_localPending |= *(uint32_t*)(cChrInput + 0x14);
-                        uint32_t delayed = g_oldInputs[MAX_HISTORY - g_delayFrames];
+                        uint32_t delayed = g_scheduledLocalFrame[idx] == lookupFrame
+                            ? g_scheduledLocalInput[idx] : 0;
                         g_recordedGameInput[1][idx] = delayed;
 
                         *(uint32_t*)(cChrInput + 0x14)  = delayed;

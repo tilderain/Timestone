@@ -62,6 +62,7 @@ struct DelayPacket {
     uint32_t type;               // PACKET_DELAY
     int32_t  delay;              // delay frame count
     int32_t  rollbackFrames;     // rollback frame count (both sides stay in sync)
+    int32_t  effective_frame;    // absolute frame for the delay transition
 };
 
 struct BattleReadyPacket {
@@ -176,7 +177,7 @@ uint32_t Netplay_GetRemoteInput();
 void Netplay_Shutdown();
 
 // Send a delay-control value to the remote peer.
-void Netplay_SendDelay(int32_t delay);
+void Netplay_SendDelay(int32_t delay, int32_t effectiveFrame = -1);
 
 // Send a rollback-frame control value to the remote peer.
 void Netplay_SendRollback(int32_t rollbackFrames);
@@ -192,7 +193,7 @@ bool Netplay_GetInboundResimNotify(ResimNotifyPacket& outNotify);
 
 // Retrieve the last delay value received from the remote peer.  Returns true
 // if a new value was available (it is consumed by this call).
-bool Netplay_GetInboundDelay(int32_t& outDelay);
+bool Netplay_GetInboundDelay(int32_t& outDelay, int32_t& outEffectiveFrame);
 
 // Send a ground-truth packet to the remote peer — provides the non-simulating
 // side's exact live state for the requested frame range.
