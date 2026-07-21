@@ -28,6 +28,7 @@ extern void HookLog(const char* fmt, ...);
 extern "C" bool Rollback_GetSnapshotInputs(int32_t frame, uint32_t* outLocal, uint32_t* outRemote);
 extern "C" void Rollback_UpdateSnapshotInputs(int32_t frame, uint32_t localInput, uint32_t remoteInput);
 extern "C" void Rollback_CommitPendingNetplayLive(int32_t frame);
+extern "C" void Rollback_NotifyDesyncTriggered(int32_t frame);
 
 // ---------------------------------------------------------------------------
 // Addresses
@@ -1347,6 +1348,7 @@ extern "C" void Controller_OnFrameEnd()
                     g_desyncFrame    = newestChecked;
                     g_desyncLocalCS  = g_localChecksum[newestChecked % RING_SIZE];
                     g_desyncRemoteCS = g_remoteChecksum[newestChecked % RING_SIZE];
+                    Rollback_NotifyDesyncTriggered(newestChecked);
                     HookLog("DESYNC TRIGGER at frame %d: %d consecutive mismatches\n",
                             newestChecked, consecutive);
                 }

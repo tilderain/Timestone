@@ -412,6 +412,7 @@ static char   g_diagDir[260]   = {};
 static int    g_diagWriteCount = 0;
 static FILE*  g_diagNdjsonFile    = nullptr;
 static DWORD  g_diagNdjsonFlush   = 0;
+static bool   g_diagFileOutputEnabled = false;
 
 // Netplay per-frame live NDJSON logging
 static bool   g_netplayLiveInit   = false;
@@ -420,6 +421,10 @@ static int    g_netplayLiveReset   = 0;
 
 static std::string g_pendingNPLiveJSON[256];
 static int32_t     g_pendingNPLiveFrame[256];
+static constexpr int NETPLAY_LIVE_HISTORY = 200;
+static std::string g_netplayLiveHistory[NETPLAY_LIVE_HISTORY];
+static int32_t     g_netplayLiveHistoryFrame[NETPLAY_LIVE_HISTORY];
+static bool        g_netplayLiveDesyncFlushed = false;
 
 // Ground-truth verification: locally queued re-simulation states, paired with
 // remote ground truth data upon receipt of a GroundTruthPacket.
@@ -521,6 +526,11 @@ static void Rollback_NetplayLiveInit() {
         g_pendingNPLiveFrame[i] = -1;
         g_pendingNPLiveJSON[i].clear();
     }
+    for (int i = 0; i < NETPLAY_LIVE_HISTORY; i++) {
+        g_netplayLiveHistoryFrame[i] = -1;
+        g_netplayLiveHistory[i].clear();
+    }
+    g_netplayLiveDesyncFlushed = false;
 
     HookLog("NetplayLive: NDJSON log -> %s\n", g_netplayLivePath);
     g_netplayLiveInit = true;
@@ -838,15 +848,49 @@ std::string Rollback_GenerateNetplayLiveJSON(int32_t frame, bool isResim,
 }
 
 static void Rollback_WriteNetplayLiveJSON(const std::string& json) {
-    //return;
+    if (!g_netplayLiveInit) Rollback_NetplayLiveInit();
+    if (!g_netplayLivePath[0] || g_netplayLiveDesyncFlushed || json.empty()) return;
+
+    int32_t frame = -1;
+    const char* frameKey = std::strstr(json.c_str(), "\"frame\":");
+    if (frameKey) frame = (int32_t)std::strtol(frameKey + 8, nullptr, 10);
+    if (frame < 0) return;
+
+    int idx = (uint32_t)frame % NETPLAY_LIVE_HISTORY;
+    if (g_netplayLiveHistoryFrame[idx] != frame) {
+        g_netplayLiveHistoryFrame[idx] = frame;
+        g_netplayLiveHistory[idx].clear();
+    }
+    g_netplayLiveHistory[idx] += json;
+}
+
+extern "C" void Rollback_NotifyDesyncTriggered(int32_t frame)
+{
+    if (g_netplayLiveDesyncFlushed) return;
     if (!g_netplayLiveInit) Rollback_NetplayLiveInit();
     if (!g_netplayLivePath[0]) return;
+
+    // Move still-predicted records into the history before flushing it.
+    for (int i = 0; i < 256; i++) {
+        if (g_pendingNPLiveFrame[i] >= 0) {
+            Rollback_WriteNetplayLiveJSON(g_pendingNPLiveJSON[i]);
+            g_pendingNPLiveFrame[i] = -1;
+        }
+    }
 
     FILE* f = fopen(g_netplayLivePath, "a");
     if (!f) return;
 
-    fputs(json.c_str(), f);
+    int32_t firstFrame = frame - NETPLAY_LIVE_HISTORY + 1;
+    for (int32_t current = firstFrame; current <= frame; current++) {
+        int idx = (uint32_t)current % NETPLAY_LIVE_HISTORY;
+        if (g_netplayLiveHistoryFrame[idx] == current)
+            fputs(g_netplayLiveHistory[idx].c_str(), f);
+    }
     fclose(f);
+    g_netplayLiveDesyncFlushed = true;
+    HookLog("NetplayLive: flushed last %d frames through desync trigger frame %d\n",
+            NETPLAY_LIVE_HISTORY, frame);
 }
 
 extern "C" void Rollback_CommitPendingNetplayLive(int32_t frame) {
@@ -3249,16 +3293,17 @@ static uint64_t fnv1a_64(const void* data, size_t len) {
 }
 
 static void Rollback_DiagInit() {
+    if (!g_diagFileOutputEnabled) return;
     if (g_diagDir[0]) return;
     SYSTEMTIME st;
     GetLocalTime(&st);
     char rel[80];
-    
+
     // Append the local netplay role as a suffix to the directory name
     const char* sideSuffix = Netplay_IsActive() ? (Netplay_IsHost() ? "_host" : "_client") : "_offline";
     snprintf(rel, sizeof(rel), "rdiag_%04d%02d%02d_%02d%02d%02d%s",
              st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond, sideSuffix);
-             
+
     ResolveDllPath(g_diagDir, sizeof(g_diagDir), rel);
     CreateDirectoryA(g_diagDir, NULL);
     HookLog("Rollback: diag dir: %s\n", g_diagDir);
