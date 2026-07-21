@@ -187,6 +187,12 @@ static constexpr SnapshotRange CCHR_SCALAR_RESTORE_RANGES[] = {
     // Character/team/member identity is rewritten during death and tag swaps.
     // Restore it so pending swap logic resolves the saved roster member.
     {0x2D9C, 0x24},
+    // Mutable success/work state for the two embedded cChrCmd objects. These
+    // fields are pointer-free, but packed result/index values can trip the
+    // generic pointer guard and retain command progress from prediction.
+    // Keep each command's owner/resource/line-buffer pointers live.
+    {0x28B8, 0x20}, // cChr+0x2738, cChrCmd+0x180..+0x19F
+    {0x2AD0, 0x20}, // cChr+0x2950, cChrCmd+0x180..+0x19F
     {0x3F48, 0x2B0}, // action requests, movement, velocity, gravity and air counters
     // Combat counters block at +0x4168 contains hit tracking, air action limits,
     // block timing windows, hitstun state and super armor. Essential for multi-hit
@@ -1070,6 +1076,8 @@ struct ShotRecipe {
     int exA11;
     void* exA12;
     ShotFlightState flight;
+    uint64_t bodyVtable;
+    std::vector<uint8_t> body;
 };
 
 struct EffectRecipe {
@@ -1193,6 +1201,47 @@ static void ApplyShotFlight(void* shot, const ShotFlightState& in)
     std::memcpy(p + 0x212C, &in.state, sizeof(in.state));
 }
 
+static void CaptureShotBody(void* shot, ShotRecipe& recipe)
+{
+    recipe.body.clear();
+    recipe.bodyVtable = 0;
+    if (!shot) return;
+
+    uint32_t size = DecodeDtiSize(GetObjectDti((uint64_t)shot));
+    if (size < 0x2130 || size > MAX_CHAR_SIZE) return;
+
+    recipe.bodyVtable = *(uint64_t*)shot;
+    recipe.body.resize(size);
+    std::memcpy(recipe.body.data(), shot, size);
+}
+
+static bool RestoreShotBody(void* shot, const ShotRecipe& recipe)
+{
+    if (!shot || recipe.body.empty() || *(uint64_t*)shot != recipe.bodyVtable)
+        return false;
+
+    uint32_t liveSize = DecodeDtiSize(GetObjectDti((uint64_t)shot));
+    if (liveSize != recipe.body.size()) return false;
+
+    struct LivePointerField { uint32_t offset; uint64_t value; };
+    std::vector<LivePointerField> livePointers;
+    livePointers.reserve(liveSize / 32);
+    for (uint32_t offset = 8; offset + 8 <= liveSize; offset += 8) {
+        uint64_t liveValue = *(uint64_t*)((uint8_t*)shot + offset);
+        uint64_t savedValue = *(const uint64_t*)(recipe.body.data() + offset);
+        if (IsAccessiblePointer(liveValue) || IsAccessiblePointer(savedValue))
+            livePointers.push_back({offset, liveValue});
+    }
+
+    // The factory establishes valid ownership, allocation and intrusive-list
+    // topology. Rewind the complete scalar/subclass state, then retain every
+    // live pointer field so the saved object graph is never transplanted.
+    std::memcpy((uint8_t*)shot + 8, recipe.body.data() + 8, liveSize - 8);
+    for (const LivePointerField& field : livePointers)
+        *(uint64_t*)((uint8_t*)shot + field.offset) = field.value;
+    return true;
+}
+
 static void* __fastcall hkShotSpawn(void* manager, void* element, int initParam,
                                     void* posData, void* ownerChr, void* objectRef1,
                                     uint32_t slotId, void* objectRef2)
@@ -1312,6 +1361,7 @@ static void CaptureShotAndEffectRecipes(SnapshotSlot& slot)
                 ShotRecipe saved = recipe->second;
                 saved.savedPtr = shot;
                 CaptureShotFlight(shot, saved.flight);
+                CaptureShotBody(shot, saved);
                 slot.shotRecipes.push_back(saved);
             }
             nodeRef = *(uint64_t*)(nodeRef + 0x10);
@@ -1367,6 +1417,21 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
     auto addUnit = (UnitAddFn)_addr(FN_SUNIT_ADD_UNIT);
     int respawnedShots = 0;
     int failedShots = 0;
+    int fullBodyShots = 0;
+
+    // Native shot construction consumes action/global/effect RNG while
+    // rebuilding resources and owned effects. Reconstruction is rollback
+    // plumbing, not a simulated gameplay event, so it must not advance any
+    // deterministic stream before the first re-simulated frame.
+    uint8_t savedAction[0x300] = {};
+    uint8_t savedGlobalRng[16] = {};
+    uint8_t savedEffectRng[16] = {};
+    uint64_t sMvc3Mgr = *(uint64_t*)_addr(PTR_SMVC3MGR);
+    uint64_t sAction = sMvc3Mgr ? *(uint64_t*)(sMvc3Mgr + SMVC3MGR_ACTION_OFFSET) : 0;
+    uint64_t sEffect = *(uint64_t*)_addr(0x140E17A38);
+    if (sAction) std::memcpy(savedAction, (void*)sAction, sizeof(savedAction));
+    std::memcpy(savedGlobalRng, (void*)_addr(0x140d765d8), sizeof(savedGlobalRng));
+    if (sEffect) std::memcpy(savedEffectRng, (void*)(sEffect + 0x3C), sizeof(savedEffectRng));
 
     for (ShotRecipe& saved : slot.shotRecipes) {
         void* fresh = saved.kind == ShotSpawnKind::Extended
@@ -1390,12 +1455,21 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
         if (!enqueue(sShot, fresh, SSHOT_CATEGORY)) {
             addUnit(sUnit, SSHOT_CATEGORY, fresh, nullptr);
         }
-        ApplyShotFlight(fresh, saved.flight);
+        if (RestoreShotBody(fresh, saved)) {
+            fullBodyShots++;
+        } else {
+            ApplyShotFlight(fresh, saved.flight);
+        }
         respawnedShots++;
     }
 
-    HookLog("Rollback: retired shots=%d effects=%d; shot recipes respawned=%d failed=%d\n",
-            retiredShots, retiredEffects, respawnedShots, failedShots);
+    if (sAction) std::memcpy((void*)sAction, savedAction, sizeof(savedAction));
+    std::memcpy((void*)_addr(0x140d765d8), savedGlobalRng, sizeof(savedGlobalRng));
+    if (sEffect) std::memcpy((void*)(sEffect + 0x3C), savedEffectRng, sizeof(savedEffectRng));
+
+    HookLog("Rollback: retired shots=%d effects=%d; shot recipes respawned=%d "
+            "fullBody=%d failed=%d\n",
+            retiredShots, retiredEffects, respawnedShots, fullBodyShots, failedShots);
 }
 
 // ===========================================================================
