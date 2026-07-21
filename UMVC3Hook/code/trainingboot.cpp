@@ -20,6 +20,8 @@ static constexpr uintptr_t BATTLE_SETTING_SET_BATTLE_TYPE    = 0x14024e050;
 static constexpr uintptr_t BATTLE_SETTING_SET_STAGE_VALUE    = 0x1401cf640;
 static constexpr uintptr_t BATTLE_SETTING_SET_TIMER_VALUE    = 0x1401cf4f0;
 static constexpr uintptr_t BATTLE_SETTING_COMMIT_ONE_PLAY    = 0x140214a40;
+static constexpr uintptr_t BATTLE_SETTING_SET_CHAR_ID        = 0x140146560;
+static constexpr uintptr_t BATTLE_SETTING_SET_ASSIST_TYPE    = 0x1401461e0;
 
 // sArea (to transition to battle)
 static constexpr uintptr_t SAREA_INSTANCE_PTR                = 0x140e17a80;
@@ -119,17 +121,21 @@ static void WriteCharacterId(uint64_t battleSetting, int team, int slot, int32_t
 }
 
 // ---------------------------------------------------------------------------
-// Write a slot entry into the backup source region (bs+0x378 + index*0x58).
-// Each entry layout: +0x08=teamId, +0x0c=charId (0xffff = empty).
-// restoreBackupAndInit copies these to the live slot area (bs+0x38) and
-// method_CDB0 reads them back for UI init.
+// Write the fields used by the native slot lookup into the backup source.
+// restoreBackupAndInit copies six 0x58-byte records from bs+0x378 to bs+0x38.
+// Native lookup scans slot+0x08 for team and treats a positive character ID at
+// slot+0x0c as an active entry.
 // ---------------------------------------------------------------------------
 static void WriteSlotEntry(uint64_t bs, int index, int teamId, int32_t charId)
 {
     uint64_t entry = bs + 0x378 + index * 0x58;
+    typedef void(__fastcall* SetSlotValue_t)(uint64_t, int32_t);
+
     *(int32_t*)(entry + 0x08) = teamId;
-    *(int32_t*)(entry + 0x0c) = charId;
-    HookLog("TrainingBoot: Slot entry %d: team=%d charId=%d\n", index, teamId, charId);
+    ((SetSlotValue_t)_addr(BATTLE_SETTING_SET_CHAR_ID))(entry, charId);
+    ((SetSlotValue_t)_addr(BATTLE_SETTING_SET_ASSIST_TYPE))(entry, 0);
+    HookLog("TrainingBoot: Native slot entry %d: team=%d charId=%d dti=%d\n",
+            index, teamId, charId, *(int32_t*)(entry + 0x10));
 }
 
 // ---------------------------------------------------------------------------
@@ -252,8 +258,9 @@ void BootIntoTraining()
         WriteCharacterId(bs, 1, slot, g_bootConfig.p2Chars[slot]);
     }
 
-    // Write slot entries at the backup source (bs+0x378) so
-    // restoreBackupAndInit has valid player data to work with.
+    // Populate backup records through the native character setter. In addition
+    // to the ID at +0x0c, it resolves the character DTI into +0x10. Character
+    // creation otherwise depends on asynchronous archive completion order.
     // P1 = entries 0-2 (team 0), P2 = entries 3-5 (team 1).
     for (int slot = 0; slot < 3; slot++) {
         WriteSlotEntry(bs, slot,     0, g_bootConfig.p1Chars[slot]);
@@ -278,7 +285,7 @@ void BootIntoTraining()
     //   8 = Heroes & Heralds
     //   9 = Online (alt)
     ((SetInt_t)_addr(BATTLE_SETTING_SET_BATTLE_TYPE))(bs, 0);
-    HookLog("TrainingBoot: Battle type set to 5 (training)\n");
+    HookLog("TrainingBoot: Battle type set to 0\n");
 
     // --- Follow training mode init flow (aChrSelect__onSelectionComplete, uVar3==6) ---
 
@@ -294,6 +301,26 @@ void BootIntoTraining()
     typedef void(__fastcall* RestoreBackup_t)(uint64_t);
     ((RestoreBackup_t)_addr(BATTLE_SETTING_RESTORE_BACKUP))(bs);
     HookLog("TrainingBoot: Backup restored\n");
+
+    for (int team = 0; team < 2; ++team) {
+        for (int member = 0; member < 3; ++member) {
+            int found = -1;
+            for (int index = 0, occurrence = 0; index < 6; ++index) {
+                uint64_t entry = bs + 0x38 + index * 0x58;
+                if (*(int32_t*)(entry + 0x08) == team &&
+                    *(int32_t*)(entry + 0x0c) > 0) {
+                    if (occurrence++ == member) {
+                        found = *(int32_t*)(entry + 0x0c);
+                        break;
+                    }
+                }
+            }
+            const int expected = team == 0
+                ? g_bootConfig.p1Chars[member] : g_bootConfig.p2Chars[member];
+            HookLog("TrainingBoot: Resolved team=%d member=%d charId=%d expected=%d\n",
+                    team, member, found, expected);
+        }
+    }
 
     // 3. aChrSelect__util_4AC0(ui, 0) — write 0 to ui+0x5b74 (training flag)
     GetInstance_t getGameUI = (GetInstance_t)_addr(SGAMEUI_GET_INSTANCE);

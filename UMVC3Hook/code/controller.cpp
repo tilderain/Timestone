@@ -147,6 +147,17 @@ static uint32_t ApplySOCD(uint32_t input)
     return input;
 }
 
+static bool IsGameProcessForeground()
+{
+    HWND foreground = GetForegroundWindow();
+    if (!foreground)
+        return false;
+
+    DWORD processId = 0;
+    GetWindowThreadProcessId(foreground, &processId);
+    return processId == GetCurrentProcessId();
+}
+
 // ===========================================================================
 // Netplay Input Buffers  (nifi.cpp-style shift buffer + frame-indexed array)
 //
@@ -771,8 +782,13 @@ static uint64_t __fastcall hkGetsCurrentInput_withSOCD(uint64_t pad, uint32_t pl
             }
             else if (playerIndex == 1)
             {
-                uint32_t padInput = (uint32_t)oGetsCurrentInput_withSOCD(pad, 0);
-                uint32_t kbInput  = ControllerDecomp::keyboardToGameMask(pad);
+                // Read the physical slot directly. Calling the original getter
+                // for player 0 can route through keyboard input because the
+                // boot path maps the keyboard to player 0.
+                uint32_t padInput = *(uint32_t*)(pad + PAD_SLOT_INPUT);
+                uint32_t kbInput = IsGameProcessForeground()
+                    ? ControllerDecomp::keyboardToGameMask(pad)
+                    : 0;
                 raw = ApplySOCD(padInput | kbInput);
             }
             else
