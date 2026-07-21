@@ -67,6 +67,7 @@ void CaptureCharSnapshot(uint64_t uChar, uint32_t teamIdx, uint32_t charSlot, Ch
 static void LogSnapshotDiff(const CharDiagSnapshot& live, const CharDiagSnapshot& resim,
                             int frame, int teamIdx, const char* phase)
 {
+    return;
     if (std::memcmp(live.cchr, resim.cchr, CCHRINPUT_SIZE) != 0) {
         HookLog("DASH_DIAG frame=%d team=%d %s cChrInput[0..%X] DIVERGED:\n",
                 frame, teamIdx, phase, CCHRINPUT_SIZE);
@@ -122,6 +123,7 @@ static void LogSnapshotDiff(const CharDiagSnapshot& live, const CharDiagSnapshot
 
 void DiagLogPreOverride(uint64_t cChrInput, uint32_t teamIdx)
 {
+    return;
     if (!cChrInput) return;
     uint64_t uChar = *(uint64_t*)(cChrInput + 0x08);
     uint32_t actionId = uChar ? *(uint32_t*)(uChar + 0x1310) : 0xDEAD;
@@ -161,6 +163,7 @@ void DiagLogPreOverride(uint64_t cChrInput, uint32_t teamIdx)
 
 void DiagLogPostOverride(uint64_t cChrInput, uint32_t teamIdx)
 {
+    return;
     if (!cChrInput) return;
     uint64_t uChar = *(uint64_t*)(cChrInput + 0x08);
     uint32_t actionId = uChar ? *(uint32_t*)(uChar + 0x1310) : 0xDEAD;
@@ -263,6 +266,7 @@ void DiagCaptureLiveRef(uint64_t cChrInput, uint32_t teamIdx, int32_t liveFrame)
 
 void DiagLogPostResim(uint64_t cChrInput, uint32_t teamIdx, int32_t frame)
 {
+        return;
     if (!cChrInput) return;
     uint64_t uChar = *(uint64_t*)(cChrInput + 0x08);
     uint32_t actionId = uChar ? *(uint32_t*)(uChar + 0x1310) : 0xDEAD;
@@ -512,14 +516,14 @@ static void __fastcall hkInputMaskPostProcess(uint64_t cChrInput)
                 static getTeamIdx_t fnGetTeamIdx = (getTeamIdx_t)_addr(ADDR_GET_TEAM_INDEX);
                 teamIdx = fnGetTeamIdx(uChar);
             }
-            HookLog("DIRHIST_DIAG frame=%d team=%d dirHist[%u]: before=0x%016llX after=0x%016llX h590=0x%08X h594=0x%08X cntr=%llu\n",
-                    g_resimulateCurrentFrame, teamIdx, slotIdx,
-                    dirHistSlot_before, dirHistSlot, head590, head594, frameCnt);
+            //HookLog("DIRHIST_DIAG frame=%d team=%d dirHist[%u]: before=0x%016llX after=0x%016llX h590=0x%08X h594=0x%08X cntr=%llu\n",
+            //        g_resimulateCurrentFrame, teamIdx, slotIdx,
+            //        dirHistSlot_before, dirHistSlot, head590, head594, frameCnt);
 
             uint32_t dirMask = (uint32_t)(dirHistSlot >> 32);
             uint32_t dirMaskBefore = (uint32_t)(dirHistSlot_before >> 32);
             if (dirMask != dirMaskBefore) {
-                HookLog("DIRHIST_DIAG   direction mask: 0x%04X \u2192 0x%04X\n", dirMaskBefore, dirMask);
+            //    HookLog("DIRHIST_DIAG   direction mask: 0x%04X \u2192 0x%04X\n", dirMaskBefore, dirMask);
             }
         }
     }
@@ -543,7 +547,9 @@ void Diag_InitHooks()
         (LPVOID*)&oCharacterMoveBase
     );
     if (s == MH_OK)
-        MH_EnableHook((LPVOID)_addr(ADDR_CHARACTER_MOVE_BASE));
+    {
+        //MH_EnableHook((LPVOID)_addr(ADDR_CHARACTER_MOVE_BASE));
+    }
     else
         HookLog("Diag: Failed to hook uCharacter__move_base (%d)\n", s);
 
@@ -553,7 +559,9 @@ void Diag_InitHooks()
         (LPVOID*)&oInputMaskPostProcess
     );
     if (s == MH_OK)
-        MH_EnableHook((LPVOID)_addr(ADDR_INPUT_MASK_POST_PROCESS));
+    {
+        //MH_EnableHook((LPVOID)_addr(ADDR_INPUT_MASK_POST_PROCESS));
+    }
     else
         HookLog("Diag: Failed to hook inputMaskPostProcess (%d)\n", s);
 

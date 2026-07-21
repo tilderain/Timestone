@@ -263,8 +263,8 @@ static void RestoreSCollisionBody(void* destination, const uint8_t* source, size
 {
     if (size < SCOLLISION_SIZE) return;
 
-    HookLog("Rollback: restoring inline sCollision body @ 0x%llX size=%zu\n",
-            (uint64_t)destination, size);
+//    HookLog("Rollback: restoring inline sCollision body @ 0x%llX size=%zu\n",
+            //(uint64_t)destination, size);
 
     struct LivePointerField { uint32_t offset; uint64_t value; };
     std::vector<LivePointerField> livePointers;
@@ -1535,6 +1535,7 @@ static int BuildRegions(Region* regions, int maxRegions)
 
     auto logOwnedBufferRejection = [&](const char* label, uint64_t ownerSlot,
                                        uint64_t ptr, size_t size) {
+        return;
         static std::unordered_map<std::string, std::string> lastReasons;
         const char* reason = nullptr;
         if (!ownerSlot) reason = "null owner slot";
@@ -1733,8 +1734,8 @@ static int BuildRegions(Region* regions, int maxRegions)
                                                  header + 0x10, data,
                                                  (size_t)capacity * 8);
                 } else if (category == 0) {
-                    HookLog("Rollback: sCollision discovery queue base=0x%X count=%u capacity=%u data=0x%llX\n",
-                            base, count, capacity, data);
+                   //HookLog("Rollback: sCollision discovery queue base=0x%X count=%u capacity=%u data=0x%llX\n",
+                            //base, count, capacity, data);
                 }
                 if (data && count <= capacity && capacity <= 0x10000) {
                     for (uint32_t entry = 0; entry < count; ++entry) {
@@ -1750,8 +1751,8 @@ static int BuildRegions(Region* regions, int maxRegions)
     auto addMoveMatrixBuffers = [&](uint64_t moveMatrix) {
         collisionDiag.moveMatrix = moveMatrix;
         if (!moveMatrix || !IsAccessiblePointer(moveMatrix)) {
-            HookLog("Rollback: sCollision discovery moveMatrix=0x%llX inaccessible\n",
-                    moveMatrix);
+            //HookLog("Rollback: sCollision discovery moveMatrix=0x%llX inaccessible\n",
+            //        moveMatrix);
             return;
         }
         uint32_t categoryCount = *(uint32_t*)(moveMatrix + 0x10);
@@ -1762,9 +1763,9 @@ static int BuildRegions(Region* regions, int maxRegions)
         if (categoryCount > categoryCapacity || categoryCapacity > 0x40 ||
             !categoryArray ||
             !IsAccessiblePointer(categoryArray)) {
-            HookLog("Rollback: sCollision discovery move categories count=%u capacity=%u array=0x%llX accessible=%d\n",
-                    categoryCount, categoryCapacity, categoryArray,
-                    IsAccessiblePointer(categoryArray));
+            //HookLog("Rollback: sCollision discovery move categories count=%u capacity=%u array=0x%llX accessible=%d\n",
+            //        categoryCount, categoryCapacity, categoryArray,
+            //        IsAccessiblePointer(categoryArray));
             return;
         }
 
@@ -1783,8 +1784,8 @@ static int BuildRegions(Region* regions, int maxRegions)
             uint64_t threadData = *(uint64_t*)(queue + 0x18);
             if (threadCount > threadCapacity || threadCapacity > 0x40) {
                 if (category == 0)
-                    HookLog("Rollback: sCollision discovery move queue=0x%llX threadCount=%u capacity=%u\n",
-                            queue, threadCount, threadCapacity);
+                    //HookLog("Rollback: sCollision discovery move queue=0x%llX threadCount=%u capacity=%u\n",
+                    //        queue, threadCount, threadCapacity);
                 continue;
             }
             addOwnedBuffer(queue + 0x18, threadData,
@@ -1942,7 +1943,7 @@ static int BuildRegions(Region* regions, int maxRegions)
         static size_t lastCollisionExternalBytes = 0;
         if (collisionExternalRegions != lastCollisionExternalRegions ||
             collisionExternalBytes != lastCollisionExternalBytes) {
-            HookLog("Rollback: sCollision external discovery regions=%d bytes=%zu\n",
+            /*HookLog("Rollback: sCollision external discovery regions=%d bytes=%zu\n",
                     collisionExternalRegions, collisionExternalBytes);
             HookLog("Rollback: sCollision discovery summary singleton=0x%llX sbc=0x%llX "
                     "active=%u/%u@0x%llX queues=%u/%u bvh=%u nodes=%u standalone=%u pool=%u/%u/%u "
@@ -1964,7 +1965,7 @@ static int BuildRegions(Region* regions, int maxRegions)
                     collisionDiag.moveCategoryCount,
                     collisionDiag.moveCategoryArray,
                     collisionDiag.moveQueuesPresent,
-                    collisionDiag.moveThreadHeadersValid);
+                    collisionDiag.moveThreadHeadersValid);*/
             lastCollisionExternalRegions = collisionExternalRegions;
             lastCollisionExternalBytes = collisionExternalBytes;
         }
@@ -3668,8 +3669,8 @@ void Rollback_ReSimulate(int32_t startFrame, int32_t endFrame)
 
     g_isResimulating = true;
 
-    HookLog("Rollback: [%s] re-simulating frames %d \u2192 %d\n",
-            Netplay_IsHost() ? "host" : "client", startFrame, endFrame);
+    //HookLog("Rollback: [%s] re-simulating frames %d \u2192 %d\n",
+            //Netplay_IsHost() ? "host" : "client", startFrame, endFrame);
 
     //Are these really necessary? Might as well leave them in
 
@@ -3682,7 +3683,7 @@ void Rollback_ReSimulate(int32_t startFrame, int32_t endFrame)
     // SilentFrameStart/End which shifts g_oldInputs with zeros (re-sim
     // bypasses the accumulation).  Restoring after the loop prevents the
     // outbound packet from carrying a corrupted timeline.
-    HookLog("[ReSim] ~~~~~~~~~~ g_oldInputs BEFORE re-sim loop ~~~~~~~~~~\n");
+    //HookLog("[ReSim] ~~~~~~~~~~ g_oldInputs BEFORE re-sim loop ~~~~~~~~~~\n");
     Controller_SaveInputHistory();
     int silentFrameEndCount = 0;
 
@@ -3706,8 +3707,8 @@ void Rollback_ReSimulate(int32_t startFrame, int32_t endFrame)
             uint64_t sr = *(uint64_t*)_addr(PTR_SREPLAY);
             int32_t liveFrame = sr ? *(int32_t*)(sr + 0x54) : startFrame;
             g_diagWriteCount = 0;
-            HookLog("Rollback: diag session %d for frames %d\u2192%d (live=%d)\n",
-                    diagSid, startFrame, endFrame, liveFrame);
+            //HookLog("Rollback: diag session %d for frames %d\u2192%d (live=%d)\n",
+                    //diagSid, startFrame, endFrame, liveFrame);
             // session_* files disabled — use rdiag.ndjson instead
             //Rollback_DumpBinary(diagSid, liveFrame, 0);
             //Rollback_DumpCharText(diagSid, liveFrame, 0);
@@ -3816,11 +3817,11 @@ void Rollback_ReSimulate(int32_t startFrame, int32_t endFrame)
 
     // Verify SilentFrameEnd count matches expected
     int expectedFrameCount = endFrame - startFrame;
-    HookLog("[ReSim] SilentFrameEnd called %d times (expected=%d, match=%s)\n",
-            silentFrameEndCount, expectedFrameCount,
-            silentFrameEndCount == expectedFrameCount ? "YES" : "NO");
+    //HookLog("[ReSim] SilentFrameEnd called %d times (expected=%d, match=%s)\n",
+            //silentFrameEndCount, expectedFrameCount,
+            //silentFrameEndCount == expectedFrameCount ? "YES" : "NO");
 
-    HookLog("[ReSim] ~~~~~~~~~~ g_oldInputs AFTER re-sim loop (before RestoreInputHistory) ~~~~~~~~~~\n");
+    //HookLog("[ReSim] ~~~~~~~~~~ g_oldInputs AFTER re-sim loop (before RestoreInputHistory) ~~~~~~~~~~\n");
     Controller_DumpOldInputs("post-loop-pre-restore");
 
     // Restore the local input history so the next outbound packet carries
@@ -3851,8 +3852,8 @@ void Rollback_ReSimulate(int32_t startFrame, int32_t endFrame)
     Rollback_PatchPresent(false); // restore Present call
     Rollback_PatchSwapchain(false); // restore swapchain calls
     Rollback_PatchDrawCalls(false); // restore render/draw calls
-    HookLog("Rollback: re-simulation complete (%d frames)\n",
-            endFrame - startFrame);
+    //HookLog("Rollback: re-simulation complete (%d frames)\n",
+            //endFrame - startFrame);
 }
 
 void Rollback_RequestReSimulate(int32_t startFrame, int32_t endFrame)
@@ -3900,7 +3901,7 @@ static void Rollback_ClearStalePointers()
         }
     }
 
-    HookLog("Rollback: cleared character slot arrays after restore\n");
+//HookLog("Rollback: cleared character slot arrays after restore\n");
 }
 
 static void Rollback_SyncActiveCharacterUi()
@@ -3953,7 +3954,7 @@ static void Rollback_ClearGameEffectSlots()
     memset((void*)(sGameEffect + GENERIC_SLOTS_OFFSET), 0, GENERIC_SLOTS_SIZE);
     memset((void*)(sGameEffect + CHARACTER_SLOTS_OFFSET), 0, CHARACTER_SLOTS_SIZE);
 
-    HookLog("Rollback: cleared sGameEffect slot tables after restore\n");
+//    HookLog("Rollback: cleared sGameEffect slot tables after restore\n");
 }
 
 void Rollback_FreeSnapshots()
@@ -4002,7 +4003,7 @@ static void __fastcall hkMvc3Main_move(uint64_t param_1)
     // Capture the main manager pointer on first call
     if (!g_sMvc3Main) {
         g_sMvc3Main = param_1;
-        HookLog("Rollback: captured sMvc3Main @ 0x%llX\n", param_1);
+        //HookLog("Rollback: captured sMvc3Main @ 0x%llX\n", param_1);
     }
 
     int32_t curFrame = (int32_t)Controller_GetNetFrameCount();
@@ -4170,7 +4171,7 @@ static void __fastcall hkMvc3Main_move(uint64_t param_1)
                 // arrived during the resim may now provide real data where we
                 // only had a prediction before.
                 Controller_ResolveRemoteInput(curFrame);
-                HookLog("Rollback: re-resolved remote input for frame %d\n", curFrame);
+                //HookLog("Rollback: re-resolved remote input for frame %d\n", curFrame);
 
                 // After re-sim, re-save the current frame's snapshot so it
                 // reflects the corrected state at start of curFrame.
@@ -4178,8 +4179,8 @@ static void __fastcall hkMvc3Main_move(uint64_t param_1)
 
                 // Flag the first post-resim live tick for diagnostic logging.
                 g_postResimFrame = curFrame;
-                HookLog("Rollback: resim complete, live tick frame=%d (post-resim boundary)\n",
-                        curFrame);
+                //HookLog("Rollback: resim complete, live tick frame=%d (post-resim boundary)\n",
+                        //curFrame);
             }
         }
     }
@@ -4368,7 +4369,7 @@ void Rollback_InitHooks()
     s = MH_CreateHook((LPVOID)_addr(FN_CCHR_SET_POS),
                       (LPVOID)&hkCChrSetPos, (LPVOID*)&oCChrSetPos);
     if (s == MH_OK) {
-        MH_EnableHook((LPVOID)_addr(FN_CCHR_SET_POS));
+        //MH_EnableHook((LPVOID)_addr(FN_CCHR_SET_POS));
         HookLog("Rollback: hooked cChr__setPos for resim diagnostics\n");
     } else {
         HookLog("Rollback: failed to hook cChr__setPos (%d)\n", s);

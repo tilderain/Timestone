@@ -478,6 +478,7 @@ static int64_t g_saveRestorePairId = 0; // pairs Save/Restore calls for log anal
 // Helper: format g_oldInputs buffer into a HookLog line
 static void LogOldInputs(const char* label)
 {
+    return;
     HookLog("[g_oldInputs %s] %08X %08X %08X %08X  %08X %08X %08X %08X  "
             "%08X %08X %08X %08X  %08X %08X %08X %08X  pending=%08X\n",
             label,
@@ -490,13 +491,14 @@ static void LogOldInputs(const char* label)
 
 extern "C" void Controller_DumpOldInputs(const char* label)
 {
+    return;
     LogOldInputs(label);
 }
 
 extern "C" void Controller_SaveInputHistory()
 {
     int64_t pairId = g_saveRestorePairId++;
-    HookLog("[InputHistory] Save #%lld — saving g_oldInputs before re-sim\n", pairId);
+    //HookLog("[InputHistory] Save #%lld — saving g_oldInputs before re-sim\n", pairId);
     LogOldInputs("pre-save");
     memcpy(g_savedInputHistory, g_oldInputs, sizeof(g_oldInputs));
     g_savedLocalPendingReSim = g_localPending;
@@ -504,7 +506,7 @@ extern "C" void Controller_SaveInputHistory()
 
 extern "C" void Controller_RestoreInputHistory()
 {
-    HookLog("[InputHistory] Restore — restoring g_oldInputs after re-sim\n");
+    //HookLog("[InputHistory] Restore — restoring g_oldInputs after re-sim\n");
     memcpy(g_oldInputs, g_savedInputHistory, sizeof(g_oldInputs));
     g_localPending = g_savedLocalPendingReSim;
     LogOldInputs("post-restore");
@@ -602,7 +604,7 @@ extern "C" void Controller_ResolveRemoteInput(int32_t frame)
 
         if (!alreadyPredicted)
         {
-            HookLog("Predicting for frame %d using input 0x%08X\n", frame, prediction);
+            //HookLog("Predicting for frame %d using input 0x%08X\n", frame, prediction);
         }
     }
 }
@@ -610,6 +612,7 @@ extern "C" void Controller_ResolveRemoteInput(int32_t frame)
 // Log the inputs used during a re-simmed frame for debugging.
 extern "C" void Controller_LogReSimFrame(int32_t frame)
 {
+    return;
     uint32_t idx = (uint32_t)frame % RING_SIZE;
     HookLog("[%s] ReSim frame %d: local=0x%08X remote=0x%08X recv=0x%08X\n",
             Netplay_IsHost() ? "host" : "client",
@@ -667,6 +670,7 @@ static void Controller_LogResimNotify(const ResimNotifyPacket& pkt)
 
 extern "C" void Controller_LogReceivedInputAvailability(int32_t startFrame, int32_t endFrame)
 {
+    return;
     if (startFrame >= endFrame) return;
 
     int32_t predictedCount = 0;
@@ -674,9 +678,9 @@ extern "C" void Controller_LogReceivedInputAvailability(int32_t startFrame, int3
     int32_t correctPredictionCount = 0;
     int32_t conflictCount = 0;
 
-    HookLog("[%s] Remote input summary for re-sim frames [%d, %d):\n",
-            Netplay_IsHost() ? "host" : "client", startFrame, endFrame);
-    HookLog("  %-8s %-12s %-12s %s\n", "Frame", "Predicted", "Received", "Status");
+    //HookLog("[%s] Remote input summary for re-sim frames [%d, %d):\n",
+    //        Netplay_IsHost() ? "host" : "client", startFrame, endFrame);
+    //HookLog("  %-8s %-12s %-12s %s\n", "Frame", "Predicted", "Received", "Status");
     for (int32_t f = startFrame; f < endFrame; f++)
     {
         uint32_t idx = (uint32_t)f % RING_SIZE;
@@ -699,14 +703,14 @@ extern "C" void Controller_LogReceivedInputAvailability(int32_t startFrame, int3
             status = "PREDICTED";
             predictedCount++;
         }
-        HookLog("  %-8d 0x%08X 0x%08X %s\n", f, predicted, received, status);
+        //HookLog("  %-8d 0x%08X 0x%08X %s\n", f, predicted, received, status);
     }
     if (conflictCount == 0 && correctPredictionCount > 0)
     {
-        HookLog("  >>> All predictions correct for frames [%d, %d)\n", startFrame, endFrame);
+    //    HookLog("  >>> All predictions correct for frames [%d, %d)\n", startFrame, endFrame);
     }
-    HookLog("  summary: %d correct, %d confirmed, %d conflict, %d predicted out of %d frames\n",
-            correctPredictionCount, confirmedCount, conflictCount, predictedCount, endFrame - startFrame);
+    //HookLog("  summary: %d correct, %d confirmed, %d conflict, %d predicted out of %d frames\n",
+    //        correctPredictionCount, confirmedCount, conflictCount, predictedCount, endFrame - startFrame);
 }
 // Silent frame-boundary helpers for re-simulation — maintain the local input
 // shift buffer without draining inbound packets or sending outbound data.
@@ -874,7 +878,7 @@ static void ApplySynchronizedFightTime(uint64_t sAction)
     if (g_fightFrameBase < 0)
     {
         g_fightFrameBase = frame;
-        HookLog("Netplay: captured sAction fight-time baseline at frame %d\n", frame);
+        //HookLog("Netplay: captured sAction fight-time baseline at frame %d\n", frame);
     }
 
     int32_t elapsedFrames = frame - g_fightFrameBase;
@@ -985,15 +989,15 @@ static void WaitForConfirmedFrame(int32_t frame, const char* reason)
     if (IsFrameConfirmed(frame) || !Netplay_IsActive())
         return;
 
-    HookLog("Netplay: waiting for remote input frame %d (%s, local=%d, lastRemote=%d)\n",
-            frame, reason, g_netFrameCount, g_lastRemoteFrame);
+    //HookLog("Netplay: waiting for remote input frame %d (%s, local=%d, lastRemote=%d)\n",
+            //frame, reason, g_netFrameCount, g_lastRemoteFrame);
     while (!IsFrameConfirmed(frame) && Netplay_IsActive())
     {
         SwitchToThread();
         DrainAndProcessPackets();
     }
-    HookLog("Netplay: remote input frame %d wait complete (active=%d, lastRemote=%d)\n",
-            frame, Netplay_IsActive() ? 1 : 0, g_lastRemoteFrame);
+    //HookLog("Netplay: remote input frame %d wait complete (active=%d, lastRemote=%d)\n",
+    //        frame, Netplay_IsActive() ? 1 : 0, g_lastRemoteFrame);
 }
 
 // ---------------------------------------------------------------------------
@@ -1133,15 +1137,15 @@ extern "C" void Controller_OnFrameStart()
                     uint32_t idx = (uint32_t)f % RING_SIZE;
                     if (g_predictedInput[idx] && g_predictedFrame[idx] == f)
                     {
-                        HookLog("Frame %d: Prediction SUCCESSFUL! (input 0x%08X matches received)\n", f, g_receivedInput[idx]);
+                        //HookLog("Frame %d: Prediction SUCCESSFUL! (input 0x%08X matches received)\n", f, g_receivedInput[idx]);
                         correctPredictions++;
                         g_predictedInput[idx] = false;
                     }
                 }
                 if (correctPredictions > 0)
                 {
-                    HookLog("  >>> All predictions correct for frames [%d, %d) (%d frames verified)\n",
-                            checkStart, g_netFrameCount, correctPredictions);
+                    //HookLog("  >>> All predictions correct for frames [%d, %d) (%d frames verified)\n",
+                            //checkStart, g_netFrameCount, correctPredictions);
                 }
 
                 for (int32_t f = checkStart; f <= g_netFrameCount; f++)
@@ -1353,7 +1357,7 @@ extern "C" void Controller_OnFrameEnd()
     // Log this frame's local input and what was sent.
     {
         uint32_t localFrame = (uint32_t)g_netFrameCount % RING_SIZE;
-        HookLog("Frame %d: local=0x%08X\n", g_netFrameCount, g_recordedLocalInput[localFrame]);
+        //HookLog("Frame %d: local=0x%08X\n", g_netFrameCount, g_recordedLocalInput[localFrame]);
         //for (size_t i = 0; i < MAX_HISTORY; i++)
         //    HookLog(" 0x%04X", outPkt.inputs[i] & 0xFFFF);
         //HookLog("]\n");
@@ -1405,8 +1409,8 @@ static void __fastcall hkprocessFrameInput(uint64_t cChrInput)
                 bool isLocal = Netplay_IsHost() ? (teamIdx == 0) : (teamIdx == 1);
                 uint32_t resolved = isLocal ? snapLocal : snapRemote;
 
-                HookLog("[ResimInput] the local and remote input for this frame was local=0x%08X remote=0x%08X from the snapshot frame %d\n",
-                        snapLocal, snapRemote, lookupFrame);
+                //HookLog("[ResimInput] the local and remote input for this frame was local=0x%08X remote=0x%08X from the snapshot frame %d\n",
+                        //snapLocal, snapRemote, lookupFrame);
 
                 *(uint32_t*)(cChrInput + 0x14)  = resolved; // mHeld
                 *(uint32_t*)(cChrInput + 0x560) = resolved; // mRemapped
