@@ -43,8 +43,8 @@ extern bool Netplay_GetInboundDelay(int32_t& outDelay);
 extern bool Netplay_GetInboundRollback(int32_t& outRollback);
 extern void Netplay_SendDelay(int32_t delay);
 extern void Netplay_SendRollback(int32_t rollbackFrames);
-extern bool Netplay_GetInboundRestartMatch(int32_t& outTargetFrame);
-extern void Netplay_SendRestartMatch(int32_t targetFrame);
+extern bool Netplay_GetInboundRestartMatch(int32_t& outTargetFrame, uint32_t& outRoundSeed);
+extern void Netplay_SendRestartMatch(int32_t targetFrame, uint32_t roundSeed);
 
 // Controller setters from controller.cpp
 extern "C" void Controller_SetDelayFrames(int32_t delay);
@@ -55,6 +55,7 @@ extern "C" void Controller_ResetFrameEpoch();
 // True after both peers have reached the post-initialization intro barrier.
 static bool g_battleSynchronized = false;
 static int32_t g_restartTargetFrame = -1;
+static uint32_t g_restartRoundSeed = 0;
 static bool g_localReady = false;
 static bool g_remoteReady = false;
 static bool g_localRelease = false;
@@ -290,11 +291,19 @@ static void __fastcall HookedMove(void* sMvc3Main)
     {
         static constexpr uintptr_t MVC3_MANAGER_PTR = 0x140D510A0;
         static constexpr uintptr_t SMVC3MGR_ACTION_OFFSET = 0x48;
+        static constexpr uintptr_t SREPLAY_PTR = 0x140D4D9D8;
         uint64_t sMvc3Manager = *(uint64_t*)_addr(MVC3_MANAGER_PTR);
         uint64_t sAction = sMvc3Manager
             ? *(uint64_t*)(sMvc3Manager + SMVC3MGR_ACTION_OFFSET) : 0;
-        if (sAction)
-            *(int32_t*)(sAction + 0xD8) = 2;
+        uint64_t sReplay = *(uint64_t*)_addr(SREPLAY_PTR);
+
+        Rollback_ApplyNetplayDeterminism();
+        if (sReplay)
+            *(uint32_t*)(sReplay + 0x23424) = g_restartRoundSeed;
+        if (sAction) {
+            using ExecuteMatchPhaseFn = void(__fastcall*)(uint64_t, int32_t);
+            ((ExecuteMatchPhaseFn)_addr(0x140004B80))(sAction, 2);
+        }
 
         Netplay_ClearInputQueues();
         Controller_ResetBuffers();
@@ -314,8 +323,8 @@ static void __fastcall HookedMove(void* sMvc3Main)
         g_battleAdvertiseTick = 0;
         g_restartTargetFrame = -1;
 
-        HookLog("Netplay: reset battle epoch and restarted intro (generation=%u)\n",
-                g_battleGeneration);
+        HookLog("Netplay: reset battle epoch and restarted intro (generation=%u seed=0x%08X)\n",
+                 g_battleGeneration, g_restartRoundSeed);
     }
 
     if (Netplay_IsActive())
@@ -636,6 +645,8 @@ void FrameStepper_Init()
 
     // Initialize rollback snapshot engine (hooks sMvc3Main__move)
     Rollback_InitHooks();
+    if (Netplay_IsActive())
+        Rollback_ApplyNetplayDeterminism();
 }
 
 // ---------------------------------------------------------------------------
@@ -664,15 +675,20 @@ void FrameStepper_Process()
             // Give the reliable packet time to arrive. The target itself is
             // still absolute, so both machines perform the write together.
             targetFrame += 90;
-            Netplay_SendRestartMatch(targetFrame);
+            g_restartRoundSeed = (uint32_t)targetFrame ^
+                                 (g_battleGeneration * 0x9E3779B9u) ^ 0x4D564333u;
+            Netplay_SendRestartMatch(targetFrame, g_restartRoundSeed);
         }
         g_restartTargetFrame = targetFrame;
         HookLog("Netplay: scheduled match restart for frame %d\n", targetFrame);
     }
 
     int32_t remoteRestartFrame = -1;
-    while (Netplay_GetInboundRestartMatch(remoteRestartFrame))
+    uint32_t remoteRestartSeed = 0;
+    while (Netplay_GetInboundRestartMatch(remoteRestartFrame, remoteRestartSeed)) {
         g_restartTargetFrame = remoteRestartFrame;
+        g_restartRoundSeed = remoteRestartSeed;
+    }
 
     // Netplay delay adjustment via [ (decrease) and ] (increase) keys.
     // Works regardless of training mode so both sides can adjust mid-match.

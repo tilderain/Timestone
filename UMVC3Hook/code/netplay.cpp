@@ -636,20 +636,22 @@ bool Netplay_GetInboundDesync(DesyncPacket& outPacket)
     return true;
 }
 
-void Netplay_SendRestartMatch(int32_t targetFrame)
+void Netplay_SendRestartMatch(int32_t targetFrame, uint32_t roundSeed)
 {
     ScopedCS lock(g_restartCS);
     g_outboundRestart.type = PACKET_RESTART_MATCH;
     g_outboundRestart.target_frame = targetFrame;
+    g_outboundRestart.round_seed = roundSeed;
     g_outboundRestartNew = true;
 }
 
-bool Netplay_GetInboundRestartMatch(int32_t& outTargetFrame)
+bool Netplay_GetInboundRestartMatch(int32_t& outTargetFrame, uint32_t& outRoundSeed)
 {
     ScopedCS lock(g_restartCS);
     if (!g_inboundRestartNew)
         return false;
     outTargetFrame = g_inboundRestart.target_frame;
+    outRoundSeed = g_inboundRestart.round_seed;
     g_inboundRestartNew = false;
     return true;
 }

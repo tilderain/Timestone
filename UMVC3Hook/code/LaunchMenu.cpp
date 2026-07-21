@@ -112,9 +112,9 @@ static void SaveRollbackSettings()
     }
 }
 
-static void SendTrainingLaunch()
+void SendTrainingLaunchPacket()
 {
-    if (!g_isHost || !g_dialogConfig.enetPeer || !g_dialogConfig.enetHost) return;
+    if (!g_dialogConfig.enetPeer || !g_dialogConfig.enetHost) return;
     LaunchTrainingPacket packet = {};
     packet.type = PACKET_LAUNCH_TRAINING;
     for (int i = 0; i < 3; ++i) {
@@ -130,6 +130,25 @@ static void SendTrainingLaunch()
     }
     enet_host_flush(g_dialogConfig.enetHost);
     HookLog("UMVC3Hook: Sent training launch packet\n");
+}
+
+void ApplyTrainingLaunchPacket(const LaunchTrainingPacket& packet)
+{
+    for (int i = 0; i < 3; ++i) {
+        g_dialogConfig.p1Chars[i] = packet.p1Chars[i];
+        g_dialogConfig.p2Chars[i] = packet.p2Chars[i];
+    }
+    g_dialogConfig.stageId = packet.stageId;
+
+    TrainingBootConfig cfg = {};
+    for (int i = 0; i < 3; ++i) {
+        cfg.p1Chars[i] = packet.p1Chars[i];
+        cfg.p2Chars[i] = packet.p2Chars[i];
+    }
+    cfg.stageId = packet.stageId;
+    cfg.timerValue = 99;
+    TrainingBoot_SetConfig(cfg);
+    HookLog("UMVC3Hook: Applied synchronized dual-training fighter selection\n");
 }
 
 // Declare global cleanup for DLL detach
@@ -538,20 +557,7 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
                             *(uint32_t*)event.packet->data == PACKET_LAUNCH_TRAINING) {
                             const LaunchTrainingPacket* launch =
                                 (const LaunchTrainingPacket*)event.packet->data;
-                            for (int i = 0; i < 3; ++i) {
-                                g_dialogConfig.p1Chars[i] = launch->p1Chars[i];
-                                g_dialogConfig.p2Chars[i] = launch->p2Chars[i];
-                            }
-                            g_dialogConfig.stageId = launch->stageId;
-
-                            TrainingBootConfig cfg = {};
-                            for (int i = 0; i < 3; ++i) {
-                                cfg.p1Chars[i] = launch->p1Chars[i];
-                                cfg.p2Chars[i] = launch->p2Chars[i];
-                            }
-                            cfg.stageId = launch->stageId;
-                            cfg.timerValue = 99;
-                            TrainingBoot_SetConfig(cfg);
+                            ApplyTrainingLaunchPacket(*launch);
                             SaveRollbackSettings();
                             g_isLaunching = true;
                             g_launchOption = LAUNCH_TRAINING;
@@ -627,7 +633,7 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
 
             // Apply config to training boot
             SaveRollbackSettings();
-            SendTrainingLaunch();
+            SendTrainingLaunchPacket();
             TrainingBootConfig cfg;
             for (int i = 0; i < 3; i++) {
                 cfg.p1Chars[i] = g_dialogConfig.p1Chars[i];

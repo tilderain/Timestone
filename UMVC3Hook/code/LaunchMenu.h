@@ -3,6 +3,8 @@
 #include <cstdint>
 #include <enet/enet.h>
 
+struct LaunchTrainingPacket;
+
 enum LaunchOption {
     LAUNCH_NORMAL = 0,
     LAUNCH_TRAINING = 1,
@@ -53,6 +55,13 @@ const LaunchDialogConfig& GetLaunchDialogConfig();
 
 // Set enet handles from outside (used by auto-host/connect in dual training mode)
 void SetNetworkHandles(ENetHost* host, ENetPeer* peer);
+
+// Send the host's selected training configuration after the peer connects.
+void SendTrainingLaunchPacket();
+
+// Apply a host-selected training configuration received by an auto-connected
+// dual-training client before its training boot sequence begins.
+void ApplyTrainingLaunchPacket(const LaunchTrainingPacket& packet);
 
 // Clean up any active network session (call on DLL detach / game exit)
 void CleanupNetworkOnExit();

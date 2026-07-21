@@ -93,6 +93,7 @@ struct DesyncPacket {
 struct RestartMatchPacket {
     uint32_t type;               // PACKET_RESTART_MATCH
     int32_t  target_frame;       // synchronized net frame to restart on
+    uint32_t round_seed;         // deterministic gameplay RNG seed
 };
 
 enum BattleSyncFlags : uint32_t {
@@ -215,8 +216,8 @@ void Netplay_SendDesyncTrigger(int32_t frame, uint32_t localChecksum,
 void Netplay_SendDesyncUnpause();
 bool Netplay_GetInboundDesync(DesyncPacket& outPacket);
 
-void Netplay_SendRestartMatch(int32_t targetFrame);
-bool Netplay_GetInboundRestartMatch(int32_t& outTargetFrame);
+void Netplay_SendRestartMatch(int32_t targetFrame, uint32_t roundSeed);
+bool Netplay_GetInboundRestartMatch(int32_t& outTargetFrame, uint32_t& outRoundSeed);
 
 // Discard input packets produced before the synchronized battle boundary.
 void Netplay_ClearInputQueues();

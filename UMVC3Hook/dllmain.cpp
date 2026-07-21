@@ -12,6 +12,7 @@
 #include "code/LaunchMenu.h"
 #include "code/framestepper.h"
 #include "code/trainingboot.h"
+#include "code/netplay.h"
 #include "code/controller.h"
 #include "code/diag.h"
 #include <Windows.h>
@@ -607,6 +608,9 @@ void OnInitializeHook()
 					if (event.type == ENET_EVENT_TYPE_CONNECT) {
 						event.peer->data = (void*)"connected";
 						SetNetworkHandles(server, event.peer);
+						// The launch menu ran before this peer existed, so send the
+						// selected fighters/stage as the post-connect handshake.
+						SendTrainingLaunchPacket();
 						HookLog("UMVC3Hook: Dual training - 2nd instance connected!\n");
 						break;
 					}
@@ -646,6 +650,7 @@ void OnInitializeHook()
 				ENetEvent event;
 				int timeoutMs = 15000;
 				int waited = 0;
+				bool receivedLaunchConfig = false;
 				while (waited < timeoutMs) {
 					int result = enet_host_service(client, &event, 100);
 					if (result > 0) {
@@ -654,16 +659,28 @@ void OnInitializeHook()
 							SetNetworkHandles(client, peer);
 							HookLog("UMVC3Hook: Auto-connect SUCCESS to %s:%d\n",
 								g_autoConnectIp, g_autoConnectPort);
-							break;
 						}
 						else if (event.type == ENET_EVENT_TYPE_RECEIVE) {
+							if (event.packet->dataLength >= sizeof(LaunchTrainingPacket) &&
+								*(uint32_t*)event.packet->data == PACKET_LAUNCH_TRAINING) {
+								ApplyTrainingLaunchPacket(
+									*(const LaunchTrainingPacket*)event.packet->data);
+								receivedLaunchConfig = true;
+								HookLog("UMVC3Hook: Auto-connect received dual-training selection\n");
+							}
 							enet_packet_destroy(event.packet);
 						}
+						else if (event.type == ENET_EVENT_TYPE_DISCONNECT) {
+							HookLog("UMVC3Hook: Auto-connect disconnected before launch sync\n");
+							break;
+						}
 					}
+					if (receivedLaunchConfig) break;
 					waited += 100;
 				}
-				if (!GetLaunchDialogConfig().enetPeer) {
-					HookLog("UMVC3Hook: Auto-connect TIMEOUT (15s) - destroying client\n");
+				if (!GetLaunchDialogConfig().enetPeer || !receivedLaunchConfig) {
+					HookLog("UMVC3Hook: Auto-connect TIMEOUT waiting for launch sync - destroying client\n");
+					SetNetworkHandles(nullptr, nullptr);
 					enet_host_destroy(client);
 				}
 			}
@@ -884,6 +901,4 @@ BOOL WINAPI DllMain(HMODULE hMod, DWORD dwReason, LPVOID lpReserved)
 	}
 	return TRUE;
 }
-
-
 
