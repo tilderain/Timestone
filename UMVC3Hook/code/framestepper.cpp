@@ -403,6 +403,7 @@ static void __fastcall HookedMove(void* sMvc3Main)
             }
         }
     }
+
 }
 
 // ---------------------------------------------------------------------------
@@ -638,6 +639,28 @@ void FrameStepper_Process()
         }
     }
 
+    // Apply remote desync-screen actions on the game thread. These actions do
+    // not send a response, preventing trigger/unpause packets from bouncing.
+    DesyncPacket desyncPacket;
+    while (Netplay_GetInboundDesync(desyncPacket))
+    {
+        if (desyncPacket.action == DESYNC_TRIGGER)
+        {
+            g_desyncDetected = true;
+            g_desyncSeen = false;
+            g_desyncFrame = desyncPacket.frame;
+            g_desyncLocalCS = desyncPacket.remoteChecksum;
+            g_desyncRemoteCS = desyncPacket.localChecksum;
+        }
+        else if (desyncPacket.action == DESYNC_UNPAUSE)
+        {
+            g_desyncDetected = false;
+            g_desyncSeen = true;
+            isPaused = false;
+            advanceFrame = false;
+        }
+    }
+
     // --- Desync auto-pause (works in any mode). ---
     // P key dismisses the alert and unpauses.  The overlay persists
     // (g_desyncSeen remains true) but future mismatches won't re-pause.
@@ -651,6 +674,8 @@ void FrameStepper_Process()
             g_desyncSeen     = true;
             isPaused         = false;
             advanceFrame     = false;
+            if (Netplay_IsActive())
+                Netplay_SendDesyncUnpause();
         }
         else if (g_desyncDetected)
         {

@@ -190,7 +190,7 @@ static uint32_t  g_recordedGameInput[2][RING_SIZE];
 
 // Delay/rollback settings — defined here (above IsFrameConfirmed) because the
 // startup-window confirmation check reads them.
-static int32_t   g_delayFrames     = 2;
+static int32_t   g_delayFrames     = 3;
 static int32_t   g_rollbackFrames  = 8;
 
 static bool IsFrameConfirmed(int32_t frame)
@@ -1348,6 +1348,8 @@ extern "C" void Controller_OnFrameEnd()
                     g_desyncFrame    = newestChecked;
                     g_desyncLocalCS  = g_localChecksum[newestChecked % RING_SIZE];
                     g_desyncRemoteCS = g_remoteChecksum[newestChecked % RING_SIZE];
+                    Netplay_SendDesyncTrigger(g_desyncFrame, g_desyncLocalCS,
+                                               g_desyncRemoteCS);
                     Rollback_NotifyDesyncTriggered(newestChecked);
                     HookLog("DESYNC TRIGGER at frame %d: %d consecutive mismatches\n",
                             newestChecked, consecutive);

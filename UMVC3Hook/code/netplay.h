@@ -41,6 +41,7 @@ enum PacketType : uint32_t {
     PACKET_GROUND_TRUTH = 4,  // GroundTruthPacket
     PACKET_BATTLE_READY = 5,  // BattleReadyPacket
     PACKET_LAUNCH_TRAINING = 6, // LaunchTrainingPacket
+    PACKET_DESYNC = 7,  // DesyncPacket
 };
 
 #pragma pack(push, 1)
@@ -73,6 +74,19 @@ struct LaunchTrainingPacket {
     int32_t  p1Chars[3];
     int32_t  p2Chars[3];
     int32_t  stageId;
+};
+
+enum DesyncAction : uint32_t {
+    DESYNC_TRIGGER = 1,
+    DESYNC_UNPAUSE = 2,
+};
+
+struct DesyncPacket {
+    uint32_t type;               // PACKET_DESYNC
+    uint32_t action;             // DesyncAction
+    int32_t  frame;
+    uint32_t localChecksum;
+    uint32_t remoteChecksum;
 };
 
 enum BattleSyncFlags : uint32_t {
@@ -188,6 +202,12 @@ bool Netplay_GetInboundRollback(int32_t& outRollback);
 // Startup rendezvous used after local intro initialization has completed.
 void Netplay_SendBattleReady(uint32_t generation, uint32_t flags);
 bool Netplay_GetInboundBattleReady(uint32_t& outGeneration, uint32_t& outFlags);
+
+// Synchronize the desync warning and its P-key dismissal with the peer.
+void Netplay_SendDesyncTrigger(int32_t frame, uint32_t localChecksum,
+                               uint32_t remoteChecksum);
+void Netplay_SendDesyncUnpause();
+bool Netplay_GetInboundDesync(DesyncPacket& outPacket);
 
 // Discard input packets produced before the synchronized battle boundary.
 void Netplay_ClearInputQueues();

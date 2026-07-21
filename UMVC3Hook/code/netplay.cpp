@@ -64,6 +64,12 @@ static BattleReadyPacket    g_inboundBattleReady = {};
 static bool                 g_inboundBattleReadyNew = false;
 static CRITICAL_SECTION     g_battleReadyCS;
 
+static DesyncPacket             g_outboundDesync = {};
+static bool                     g_outboundDesyncNew = false;
+static DesyncPacket             g_inboundDesync = {};
+static bool                     g_inboundDesyncNew = false;
+static CRITICAL_SECTION         g_desyncCS;
+
 // One-time critical section initialization flag
 static bool                 g_csInitialized  = false;
 
@@ -225,6 +231,28 @@ static DWORD WINAPI Netplay_ServiceThread(LPVOID)
             enet_host_flush(g_host);
         }
 
+        // --- Send desync screen control packet ---
+        bool hasDesync = false;
+        DesyncPacket desyncPkt = {};
+        {
+            ScopedCS lock(g_desyncCS);
+            if (g_outboundDesyncNew)
+            {
+                desyncPkt = g_outboundDesync;
+                hasDesync = true;
+                g_outboundDesyncNew = false;
+            }
+        }
+        if (hasDesync && g_peer)
+        {
+            ENetPacket* packet = enet_packet_create(
+                &desyncPkt, sizeof(DesyncPacket), ENET_PACKET_FLAG_RELIABLE
+            );
+            if (enet_peer_send(g_peer, 0, packet) != 0)
+                enet_packet_destroy(packet);
+            enet_host_flush(g_host);
+        }
+
         // --- Service the host ---
         if (g_host)
         {
@@ -304,6 +332,19 @@ static DWORD WINAPI Netplay_ServiceThread(LPVOID)
                                     g_inboundBattleReadyNew = true;
                                 }
                                 break;
+
+                            case PACKET_DESYNC:
+                                if (event.packet->dataLength >= sizeof(DesyncPacket))
+                                {
+                                    const DesyncPacket* dp = (const DesyncPacket*)event.packet->data;
+                                    if (dp->action == DESYNC_TRIGGER || dp->action == DESYNC_UNPAUSE)
+                                    {
+                                        ScopedCS lock(g_desyncCS);
+                                        g_inboundDesync = *dp;
+                                        g_inboundDesyncNew = true;
+                                    }
+                                }
+                                break;
                         }
                     }
                     enet_packet_destroy(event.packet);
@@ -359,6 +400,7 @@ void Netplay_Init(ENetHost* host, ENetPeer* peer)
         InitializeCriticalSection(&g_resimNotifyCS);
         InitializeCriticalSection(&g_groundTruthCS);
         InitializeCriticalSection(&g_battleReadyCS);
+        InitializeCriticalSection(&g_desyncCS);
 
         g_outboundDelayNew = false;
         g_inboundDelayNew = false;
@@ -368,6 +410,8 @@ void Netplay_Init(ENetHost* host, ENetPeer* peer)
         g_inboundGroundTruthNew = false;
         g_outboundBattleReadyNew = false;
         g_inboundBattleReadyNew = false;
+        g_outboundDesyncNew = false;
+        g_inboundDesyncNew = false;
         std::memset(&g_outboundPacket, 0, sizeof(InputPacket));
         g_csInitialized = true;
     }
@@ -518,6 +562,37 @@ bool Netplay_GetInboundBattleReady(uint32_t& outGeneration, uint32_t& outFlags)
     outGeneration = g_inboundBattleReady.generation;
     outFlags = g_inboundBattleReady.flags;
     g_inboundBattleReadyNew = false;
+    return true;
+}
+
+void Netplay_SendDesyncTrigger(int32_t frame, uint32_t localChecksum,
+                               uint32_t remoteChecksum)
+{
+    ScopedCS lock(g_desyncCS);
+    g_outboundDesync.type = PACKET_DESYNC;
+    g_outboundDesync.action = DESYNC_TRIGGER;
+    g_outboundDesync.frame = frame;
+    g_outboundDesync.localChecksum = localChecksum;
+    g_outboundDesync.remoteChecksum = remoteChecksum;
+    g_outboundDesyncNew = true;
+}
+
+void Netplay_SendDesyncUnpause()
+{
+    ScopedCS lock(g_desyncCS);
+    g_outboundDesync = {};
+    g_outboundDesync.type = PACKET_DESYNC;
+    g_outboundDesync.action = DESYNC_UNPAUSE;
+    g_outboundDesyncNew = true;
+}
+
+bool Netplay_GetInboundDesync(DesyncPacket& outPacket)
+{
+    ScopedCS lock(g_desyncCS);
+    if (!g_inboundDesyncNew)
+        return false;
+    outPacket = g_inboundDesync;
+    g_inboundDesyncNew = false;
     return true;
 }
 

@@ -198,6 +198,22 @@ static void UpdateCharFromCombo(HWND hDlg, int comboId, int slotIndex, int team)
 static DWORD WINAPI NetworkPollThread(LPVOID lpParam);
 static void CleanupNetwork(HWND hDlg, bool forceCleanup = false);
 
+static void DisableClientMenuControls(HWND hDlg)
+{
+    for (HWND child = GetWindow(hDlg, GW_CHILD); child;
+         child = GetWindow(child, GW_HWNDNEXT)) {
+        char className[32] = {};
+        GetClassNameA(child, className, sizeof(className));
+        if (_stricmp(className, "BUTTON") == 0 ||
+            _stricmp(className, "COMBOBOX") == 0 ||
+            _stricmp(className, "EDIT") == 0 ||
+            _stricmp(className, "LISTBOX") == 0) {
+            EnableWindow(child, FALSE);
+        }
+    }
+    HookLog("UMVC3Hook: Client menu controls disabled after connection\n");
+}
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -504,6 +520,7 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
                             } else {
                                 SetWindowTextA(hStatus, "Connected");
                                 g_statusColor = RGB(200, 180, 0);
+                                DisableClientMenuControls(hDlg);
                             }
                             InvalidateRect(hStatus, NULL, TRUE);
                         }
