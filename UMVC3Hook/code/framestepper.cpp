@@ -292,13 +292,21 @@ static void __fastcall HookedMove(void* sMvc3Main)
 
         static bool localReady = false;
         static bool remoteReady = false;
+        static bool localRelease = false;
+        static bool remoteRelease = false;
         static uint32_t generation = 1;
+        static uint32_t advertisedFlags = 0;
+        static uint32_t advertiseTick = 0;
 
         uint32_t remoteGeneration = 0;
-        while (Netplay_GetInboundBattleReady(remoteGeneration))
+        uint32_t remoteFlags = 0;
+        while (Netplay_GetInboundBattleReady(remoteGeneration, remoteFlags))
         {
             if (remoteGeneration == generation)
-                remoteReady = true;
+            {
+                remoteReady |= (remoteFlags & BATTLE_SYNC_READY) != 0;
+                remoteRelease |= (remoteFlags & BATTLE_SYNC_RELEASE) != 0;
+            }
         }
 
         if (!g_battleSynchronized)
@@ -313,24 +321,43 @@ static void __fastcall HookedMove(void* sMvc3Main)
             if (!localReady && step == 2 && pendingStep < 0 && introSubstate > 0)
             {
                 localReady = true;
-                Netplay_SendBattleReady(generation);
                 HookLog("Netplay: Local intro ready (generation=%u, substate=%d)\n",
                         generation, introSubstate);
             }
 
-            if (localReady && !remoteReady)
-                return;
-
+            // RELEASE acknowledges that this peer observed the remote READY.
+            // A one-way READY is insufficient: its sender may otherwise stay
+            // frozen while the receiver starts and predicts frames without it.
             if (localReady && remoteReady)
-            {
-                Netplay_ClearInputQueues();
-                Controller_ResetBuffers();
-                Controller_ResetFrameEpoch();
-                Rollback_FreeSnapshots();
-                g_battleSynchronized = true;
-                HookLog("Netplay: Intro barrier released (generation=%u)\n", generation);
-            }
+                localRelease = true;
         }
+
+        uint32_t localFlags = (localReady ? BATTLE_SYNC_READY : 0) |
+                              (localRelease ? BATTLE_SYNC_RELEASE : 0);
+        advertiseTick++;
+        if (localFlags != 0 &&
+            (localFlags != advertisedFlags || advertiseTick >= 30))
+        {
+            Netplay_SendBattleReady(generation, localFlags);
+            advertisedFlags = localFlags;
+            advertiseTick = 0;
+        }
+
+        if (!g_battleSynchronized && localRelease && remoteRelease)
+        {
+            Netplay_ClearInputQueues();
+            Controller_ResetBuffers();
+            Controller_ResetFrameEpoch();
+            Rollback_FreeSnapshots();
+            g_battleSynchronized = true;
+            HookLog("Netplay: Intro barrier released after mutual acknowledgement (generation=%u)\n",
+                    generation);
+        }
+
+        // Keep loading normally until this machine reaches the barrier. Once
+        // ready, freeze it until the mutual acknowledgement is complete.
+        if (localReady && !g_battleSynchronized)
+            return;
 
         if (g_battleSynchronized)
             Controller_OnFrameStart();

@@ -501,20 +501,22 @@ bool Netplay_GetInboundRollback(int32_t& outRollback)
     return false;
 }
 
-void Netplay_SendBattleReady(uint32_t generation)
+void Netplay_SendBattleReady(uint32_t generation, uint32_t flags)
 {
     ScopedCS lock(g_battleReadyCS);
     g_outboundBattleReady.type = PACKET_BATTLE_READY;
     g_outboundBattleReady.generation = generation;
+    g_outboundBattleReady.flags = flags;
     g_outboundBattleReadyNew = true;
 }
 
-bool Netplay_GetInboundBattleReady(uint32_t& outGeneration)
+bool Netplay_GetInboundBattleReady(uint32_t& outGeneration, uint32_t& outFlags)
 {
     ScopedCS lock(g_battleReadyCS);
     if (!g_inboundBattleReadyNew)
         return false;
     outGeneration = g_inboundBattleReady.generation;
+    outFlags = g_inboundBattleReady.flags;
     g_inboundBattleReadyNew = false;
     return true;
 }

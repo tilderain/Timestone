@@ -1383,12 +1383,37 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
     uint8_t savedAction[0x300] = {};
     uint8_t savedGlobalRng[16] = {};
     uint8_t savedEffectRng[16] = {};
+    struct SavedCharacterRng {
+        void* character;
+        uint8_t state[16];
+    };
+    std::vector<SavedCharacterRng> savedCharacterRngs;
     uint64_t sMvc3Mgr = *(uint64_t*)_addr(PTR_SMVC3MGR);
     uint64_t sAction = sMvc3Mgr ? *(uint64_t*)(sMvc3Mgr + SMVC3MGR_ACTION_OFFSET) : 0;
     uint64_t sEffect = *(uint64_t*)_addr(0x140E17A38);
     if (sAction) std::memcpy(savedAction, (void*)sAction, sizeof(savedAction));
     std::memcpy(savedGlobalRng, (void*)_addr(0x140d765d8), sizeof(savedGlobalRng));
     if (sEffect) std::memcpy(savedEffectRng, (void*)(sEffect + 0x3C), sizeof(savedEffectRng));
+
+    // Some shot setup methods dispatch RNG through their owning uCharacter.
+    // Preserve each owner's stream so native reconstruction remains plumbing.
+    for (const ShotRecipe& saved : slot.shotRecipes) {
+        if (!saved.ownerChr) continue;
+        bool alreadySaved = false;
+        for (const SavedCharacterRng& characterRng : savedCharacterRngs) {
+            if (characterRng.character == saved.ownerChr) {
+                alreadySaved = true;
+                break;
+            }
+        }
+        if (alreadySaved) continue;
+
+        SavedCharacterRng characterRng{};
+        characterRng.character = saved.ownerChr;
+        std::memcpy(characterRng.state, (uint8_t*)saved.ownerChr + 0x2D80,
+                    sizeof(characterRng.state));
+        savedCharacterRngs.push_back(characterRng);
+    }
 
     for (ShotRecipe& saved : slot.shotRecipes) {
         void* fresh = saved.kind == ShotSpawnKind::Extended
@@ -1419,6 +1444,10 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
     if (sAction) std::memcpy((void*)sAction, savedAction, sizeof(savedAction));
     std::memcpy((void*)_addr(0x140d765d8), savedGlobalRng, sizeof(savedGlobalRng));
     if (sEffect) std::memcpy((void*)(sEffect + 0x3C), savedEffectRng, sizeof(savedEffectRng));
+    for (const SavedCharacterRng& characterRng : savedCharacterRngs) {
+        std::memcpy((uint8_t*)characterRng.character + 0x2D80, characterRng.state,
+                    sizeof(characterRng.state));
+    }
 
     HookLog("Rollback: retired shots=%d effects=%d; shot recipes respawned=%d failed=%d\n",
             retiredShots, retiredEffects, respawnedShots, failedShots);
@@ -3189,17 +3218,15 @@ void Rollback_RestoreSnapshot(int32_t frame)
     // can release one through MtObject__replaceSlot_6F30.
     Rollback_ClearStalePointers();
 
+    // Shot construction registers owned effects through sGameEffect and scans
+    // its tracked-object slots with MtObject::isKindOf. Clear references to
+    // effects retired by this restore before the first factory call.
+    Rollback_ClearGameEffectSlots();
     RestoreShotAndEffectRecipes(slot);
 
     // Character slot tables contain live model/resource references. Clearing
     // all 64 entries makes restored dead characters invisible.
     Rollback_SyncActiveCharacterUi();
-
-    // Zero sGameEffect slot tables so stale effect object references
-    // don't cause crashes or visual corruption when the game tries to
-    // update effect animation positions.  Fresh effects will be allocated
-    // into clean slots on the next game tick.
-    //Rollback_ClearGameEffectSlots();
 
     HookLog("Rollback: restored frame %d with %d regions, total size %zu bytes, "
             "sCollision inline regions=%d bytes=%zu\n",
@@ -3902,8 +3929,9 @@ static void Rollback_SyncActiveCharacterUi()
 //
 // The sGameEffect manager maintains two slot tables with MtObject* weak
 // references to active effect objects:
-//   slotTable10 — 10 entries × 8 bytes at +0x40  (80 bytes)
-//   slotTable64 — 64 entries × 16 bytes at +0x1948 (1024 bytes)
+//   generic slots — 10 entries × 8 bytes at +0x40
+//   character slots — 6 records × 0x18 bytes at +0x90; each record contains
+//                     a three-entry effect pointer array
 //
 // These entries point to heap-allocated effect nodes that were NOT saved in
 // the snapshot (sUnit effect category traversal is skipped due to pool
@@ -3917,13 +3945,13 @@ static void Rollback_ClearGameEffectSlots()
     uint64_t sGameEffect = *(uint64_t*)_addr(PTR_SGAMEEFFECT);
     if (!sGameEffect) return;
 
-    static constexpr size_t SLOT_TABLE10_OFFSET = 0x40;
-    static constexpr size_t SLOT_TABLE10_SIZE   = 80;   // 10 × 8 bytes
-    static constexpr size_t SLOT_TABLE64_OFFSET = 0x1948;
-    static constexpr size_t SLOT_TABLE64_SIZE   = 1024; // 64 × 16 bytes
+    static constexpr size_t GENERIC_SLOTS_OFFSET = 0x40;
+    static constexpr size_t GENERIC_SLOTS_SIZE   = 10 * sizeof(uint64_t);
+    static constexpr size_t CHARACTER_SLOTS_OFFSET = 0x90;
+    static constexpr size_t CHARACTER_SLOTS_SIZE   = 6 * 0x18;
 
-    memset((void*)(sGameEffect + SLOT_TABLE10_OFFSET), 0, SLOT_TABLE10_SIZE);
-    memset((void*)(sGameEffect + SLOT_TABLE64_OFFSET), 0, SLOT_TABLE64_SIZE);
+    memset((void*)(sGameEffect + GENERIC_SLOTS_OFFSET), 0, GENERIC_SLOTS_SIZE);
+    memset((void*)(sGameEffect + CHARACTER_SLOTS_OFFSET), 0, CHARACTER_SLOTS_SIZE);
 
     HookLog("Rollback: cleared sGameEffect slot tables after restore\n");
 }

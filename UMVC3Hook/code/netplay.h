@@ -64,6 +64,12 @@ struct DelayPacket {
 struct BattleReadyPacket {
     uint32_t type;               // PACKET_BATTLE_READY
     uint32_t generation;         // distinguishes later rounds/rematches
+    uint32_t flags;              // BattleSyncFlags advertised by the sender
+};
+
+enum BattleSyncFlags : uint32_t {
+    BATTLE_SYNC_READY   = 1u << 0,
+    BATTLE_SYNC_RELEASE = 1u << 1,
 };
 
 static constexpr int MAX_RESIM_FRAMES = 16;
@@ -172,8 +178,8 @@ bool Netplay_GetInboundGroundTruth(GroundTruthPacket& outGT);
 bool Netplay_GetInboundRollback(int32_t& outRollback);
 
 // Startup rendezvous used after local intro initialization has completed.
-void Netplay_SendBattleReady(uint32_t generation);
-bool Netplay_GetInboundBattleReady(uint32_t& outGeneration);
+void Netplay_SendBattleReady(uint32_t generation, uint32_t flags);
+bool Netplay_GetInboundBattleReady(uint32_t& outGeneration, uint32_t& outFlags);
 
 // Discard input packets produced before the synchronized battle boundary.
 void Netplay_ClearInputQueues();
