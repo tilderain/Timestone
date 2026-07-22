@@ -327,6 +327,7 @@ static constexpr int    MAX_REGIONS          = 2048;
 static constexpr int    DYNAMIC_SAFETY       = 128; // max projectile/effect nodes
 static constexpr int    SSHOT_SENTINEL_COUNT = 10;  // 10 sentinel slots starting at 0x140d47f90
 static constexpr size_t SSHOT_NODE_OFFSET    = 0x1450; // uShot->cChrNode offset
+static constexpr size_t SSHOT_NODE_NEXT      = 0x08; // cChrNode forward link
 static constexpr size_t SHITSOLVER_SIZE      = 0x3808C;
 static constexpr size_t SHITSOLVER_DATA_OFF  = 0x58;   // skip vtable, CS, flags, MtArray header
 static constexpr size_t SHITSOLVER_ARRAY_OFF = 0x38;
@@ -357,7 +358,7 @@ int32_t g_f7StartFrame   = 0;
 int     g_f7Remaining    = 0;
 int     g_f7DiagSession  = -1;
 
-bool    g_ndjsonIncludeDirHistory = true;
+bool    g_ndjsonIncludeDirHistory = false;
 
 // Rollback request from controller.cpp — late input arrived that differs
 // from what was predicted.  Start/end inclusive frame range.
@@ -824,27 +825,6 @@ std::string Rollback_GenerateNetplayLiveJSON(int32_t frame, bool isResim,
                         uint32_t h590   = *(uint32_t*)(snap.cchr + 0x590);
                         uint32_t h594   = *(uint32_t*)(snap.cchr + 0x594);
 
-                        bool allZero = true;
-                        for (int di = 0; di < 64 && allZero; di++) {
-                            if (*(uint64_t*)(snap.cchr + 0x360 + di * 8) != 0)
-                                allZero = false;
-                        }
-
-                        std::string dirRing;
-                        if (allZero) {
-                            dirRing = "\"all zeros\"";
-                        } else {
-                            dirRing = "[";
-                            for (int di = 0; di < 64; di++) {
-                                if (di > 0) dirRing += ",";
-                                char tmp[24];
-                                snprintf(tmp, sizeof(tmp), "%llu",
-                                         *(uint64_t*)(snap.cchr + 0x360 + di * 8));
-                                dirRing += tmp;
-                            }
-                            dirRing += "]";
-                        }
-
                         snprintf(charBuf, sizeof(charBuf),
                                 "{\"team\":%d,\"slot\":%d,\"mid\":%d,"
                                 "\"plr\":%d,\"ast\":%d,"
@@ -855,11 +835,10 @@ std::string Rollback_GenerateNetplayLiveJSON(int32_t frame, bool isResim,
                                 "\"mOld\":\"0x%08X\","
                                 "\"mPressed\":\"0x%08X\",\"mReleased\":\"0x%08X\","
                                 "\"mMask\":\"0x%08X\",\"mProcessed\":\"0x%08X\","
-                                "\"dirSlot\":%u,"
-                                "\"dir0\":\"0x%08X\",\"dir4\":\"0x%08X\","
-                                "\"h590\":\"0x%08X\",\"h594\":\"0x%08X\","
-                                "\"dirRing\":%s,"
-                                "\"rng\":[\"0x%08X\",\"0x%08X\",\"0x%08X\",\"0x%08X\"]",
+                                 "\"dirSlot\":%u,"
+                                 "\"dir0\":\"0x%08X\",\"dir4\":\"0x%08X\","
+                                 "\"h590\":\"0x%08X\",\"h594\":\"0x%08X\","
+                                 "\"rng\":[\"0x%08X\",\"0x%08X\",\"0x%08X\",\"0x%08X\"]",
                                 ti, ci, memberId,
                                 plrId, assistType,
                                 snap.posX, snap.posY, snap.posZ,
@@ -872,11 +851,10 @@ std::string Rollback_GenerateNetplayLiveJSON(int32_t frame, bool isResim,
                                 *(uint32_t*)(snap.cchr + 0x24),
                                 *(uint32_t*)(snap.cchr + 0x568),
                                 *(uint32_t*)(snap.cchr + 0x56C),
-                                dirSlot,
-                                dir0, dir4,
-                                h590, h594,
-                                dirRing.c_str(),
-                                snap.xorShift[0], snap.xorShift[1],
+                                 dirSlot,
+                                 dir0, dir4,
+                                 h590, h594,
+                                 snap.xorShift[0], snap.xorShift[1],
                                 snap.xorShift[2], snap.xorShift[3]);
                         out += charBuf;
                         out += ",";
@@ -1212,11 +1190,11 @@ struct ShotFlightState {
     // uModel+0x100 is a live owned pointer, so only restore the contiguous
     // position/quaternion/matrix scalar block preceding it.
     uint8_t transformState[0xB0];  // +0x50..+0xFF
-    // uShot's per-frame lifetime, motion and position scalars. These are
-    // outside the factory-init block and are consumed by uShot::move before
-    // it dispatches attack/collision callbacks. Recreating a shot without
-    // them leaves the new object at the current timeline's projectile phase.
-    uint8_t runtimeScalars[0x38];   // +0x3E8..+0x41F
+    // uShot::move reads this scalar block for lifetime, active/end flags,
+    // velocity and movement state. The factory initializes it, but restoring
+    // only the transform and attack blocks leaves a respawned shot at the
+    // current timeline's runtime phase.
+    uint8_t runtimeState[0x50];     // +0x3E8..+0x437
     uint8_t shotMatrices[0x100];   // +0x1E50..+0x1F4F
     float timerThresh;
     float timer;
@@ -1226,6 +1204,7 @@ struct ShotFlightState {
     uint8_t attackScalars[0x20];   // +0x2038..+0x2057
     uint8_t movementScalars[0x60]; // +0x2078..+0x20D7
     uint8_t animationScalars[0x14];// +0x2118..+0x212B
+    uint32_t step;                  // +0x212C, read by uShot::move
 };
 
 enum class ShotSpawnKind : uint8_t { Standard, Extended };
@@ -1344,7 +1323,7 @@ static void CaptureShotFlight(void* shot, ShotFlightState& out)
     auto* p = (uint8_t*)shot;
     std::memcpy(&out.unitState, p + 0x10, sizeof(out.unitState));
     std::memcpy(out.transformState, p + 0x50, sizeof(out.transformState));
-    std::memcpy(out.runtimeScalars, p + 0x3E8, sizeof(out.runtimeScalars));
+    std::memcpy(out.runtimeState, p + 0x3E8, sizeof(out.runtimeState));
     std::memcpy(out.shotMatrices, p + 0x1E50, sizeof(out.shotMatrices));
     std::memcpy(&out.timerThresh, p + 0x1F58, sizeof(out.timerThresh));
     std::memcpy(&out.timer, p + 0x1F60, sizeof(out.timer));
@@ -1354,6 +1333,7 @@ static void CaptureShotFlight(void* shot, ShotFlightState& out)
     std::memcpy(out.attackScalars, p + 0x2038, sizeof(out.attackScalars));
     std::memcpy(out.movementScalars, p + 0x2078, sizeof(out.movementScalars));
     std::memcpy(out.animationScalars, p + 0x2118, sizeof(out.animationScalars));
+    std::memcpy(&out.step, p + 0x212C, sizeof(out.step));
 }
 
 static void ApplyShotFlight(void* shot, const ShotFlightState& in)
@@ -1366,7 +1346,7 @@ static void ApplyShotFlight(void* shot, const ShotFlightState& in)
     unitState = (in.unitState & ~0x3F8u) | (unitState & 0x3F8u);
     std::memcpy(p + 0x10, &unitState, sizeof(unitState));
     std::memcpy(p + 0x50, in.transformState, sizeof(in.transformState));
-    std::memcpy(p + 0x3E8, in.runtimeScalars, sizeof(in.runtimeScalars));
+    std::memcpy(p + 0x3E8, in.runtimeState, sizeof(in.runtimeState));
     std::memcpy(p + 0x1E50, in.shotMatrices, sizeof(in.shotMatrices));
     std::memcpy(p + 0x1F58, &in.timerThresh, sizeof(in.timerThresh));
     std::memcpy(p + 0x1F60, &in.timer, sizeof(in.timer));
@@ -1376,6 +1356,7 @@ static void ApplyShotFlight(void* shot, const ShotFlightState& in)
     std::memcpy(p + 0x2038, in.attackScalars, sizeof(in.attackScalars));
     std::memcpy(p + 0x2078, in.movementScalars, sizeof(in.movementScalars));
     std::memcpy(p + 0x2118, in.animationScalars, sizeof(in.animationScalars));
+    std::memcpy(p + 0x212C, &in.step, sizeof(in.step));
 }
 
 static void* __fastcall hkShotSpawn(void* manager, void* element, int initParam,
@@ -1468,7 +1449,7 @@ static bool IsLinkedShot(void* shot)
         int safety = DYNAMIC_SAFETY;
         while (nodeRef && nodeRef != sentinelRef && safety-- > 0) {
             if ((void*)(nodeRef - SSHOT_NODE_OFFSET) == shot) return true;
-            nodeRef = *(uint64_t*)(nodeRef + 0x10);
+            nodeRef = *(uint64_t*)(nodeRef + SSHOT_NODE_NEXT);
         }
     }
     return false;
@@ -1481,11 +1462,117 @@ static bool IsActiveUnit(void* unit)
     return (state & 7u) < 3u && (state & 0x3F8u) != 0x3F8u;
 }
 
+static void Rollback_AppendShotHitboxesJSON(std::string& json, void* shot)
+{
+    json += ",\"hitboxes\":[";
+    bool firstHitbox = true;
+    uint8_t* shotBytes = (uint8_t*)shot;
+    using GetPrimitiveFn = uint64_t(__fastcall*)(uint64_t, uint32_t);
+    auto getMetadata = (uint64_t(__fastcall*)(uint64_t, uint32_t))_addr(0x1405AA900);
+    uint32_t hitboxIndex = 0;
+
+    // uShot__forEachExtraSlot_dispatchCollision enumerates all four embedded
+    // collision slots beginning at +0x2058. The slot's MtArray is at +0x18;
+    // its count is at +0x20 and entries are obtained through vtable +0x88.
+    for (uint32_t slotIndex = 0; slotIndex < 4; ++slotIndex) {
+        uint64_t collisionSlot = *(uint64_t*)(shotBytes + 0x2058 + slotIndex * 8);
+        if (!collisionSlot || !IsAccessiblePointer(collisionSlot)) continue;
+
+        uint64_t vtable = *(uint64_t*)collisionSlot;
+        if (!vtable || !IsAccessiblePointer(vtable) ||
+            !IsAccessibleAddress(vtable + 0x88)) continue;
+        GetPrimitiveFn getPrimitive = *(GetPrimitiveFn*)(vtable + 0x88);
+        if (!getPrimitive || !IsAccessibleAddress((uint64_t)getPrimitive)) continue;
+
+        uint32_t count = *(uint32_t*)(collisionSlot + 0x20);
+        if (count > 128) count = 128;
+        for (uint32_t index = 0; index < count; ++index) {
+            uint64_t primitive = getPrimitive(collisionSlot, index);
+            uint64_t metadata = getMetadata(collisionSlot, index);
+            if (!primitive || !metadata || !IsAccessiblePointer(primitive) ||
+                !IsAccessiblePointer(metadata)) {
+                continue;
+            }
+
+            uint32_t type = *(uint32_t*)(metadata + 0x14);
+            if (type != 0 && type != 1) continue;
+
+            float x = *(float*)(primitive + 0x20);
+            float y = *(float*)(primitive + 0x24);
+            float z = *(float*)(primitive + 0x28);
+            float radius = *(float*)(primitive + (type == 0 ? 0x2C : 0x40));
+            float x2 = 0.0f;
+            float y2 = 0.0f;
+            float z2 = 0.0f;
+            if (type == 1) {
+                x2 = *(float*)(primitive + 0x30);
+                y2 = *(float*)(primitive + 0x34);
+                z2 = *(float*)(primitive + 0x38);
+            }
+            if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z) ||
+                !std::isfinite(x2) || !std::isfinite(y2) || !std::isfinite(z2) ||
+                !std::isfinite(radius) || radius <= 0.0f || radius > 1000.0f) {
+                continue;
+            }
+
+            char hitbox[512];
+            if (type == 1) {
+                snprintf(hitbox, sizeof(hitbox),
+                         "%s{\"bank\":\"shot\",\"index\":%u,\"slot\":%u,\"shape\":\"capsule\","
+                         "\"pos\":[%.9g,%.9g,%.9g],\"endPos\":[%.9g,%.9g,%.9g],"
+                         "\"size\":[%.9g,%.9g,%.9g],\"radius\":%.9g}",
+                         firstHitbox ? "" : ",", hitboxIndex++, slotIndex,
+                         x, y, z, x2, y2, z2,
+                         radius * 2.0f, radius * 2.0f, radius * 2.0f, radius);
+            } else {
+                snprintf(hitbox, sizeof(hitbox),
+                         "%s{\"bank\":\"shot\",\"index\":%u,\"slot\":%u,\"shape\":\"sphere\","
+                         "\"pos\":[%.9g,%.9g,%.9g],\"size\":[%.9g,%.9g,%.9g],"
+                         "\"radius\":%.9g}",
+                         firstHitbox ? "" : ",", hitboxIndex++, slotIndex,
+                         x, y, z, radius * 2.0f, radius * 2.0f, radius * 2.0f, radius);
+            }
+            json += hitbox;
+            firstHitbox = false;
+        }
+    }
+    json += "]";
+}
+
+static void Rollback_AppendShotCollisionOriginJSON(std::string& json, void* shot)
+{
+    uint64_t shotAddress = (uint64_t)shot;
+    uint64_t vtable = shotAddress ? *(uint64_t*)shotAddress : 0;
+    if (!vtable || !IsAccessiblePointer(vtable) || !IsAccessibleAddress(vtable + 0xA0)) return;
+
+    using GetMatrixFn = uint64_t(__fastcall*)(uint64_t, int32_t);
+    GetMatrixFn getMatrix = *(GetMatrixFn*)(vtable + 0xA0);
+    if (!getMatrix || !IsAccessibleAddress((uint64_t)getMatrix)) return;
+    uint64_t matrix = getMatrix(shotAddress, -1);
+    if (!matrix || !IsAccessiblePointer(matrix)) return;
+
+    float values[16];
+    for (int i = 0; i < 16; ++i) {
+        values[i] = *(float*)(matrix + 0x20 + i * sizeof(float));
+        if (!std::isfinite(values[i])) return;
+    }
+    char origin[640];
+    snprintf(origin, sizeof(origin),
+             ",\"collisionMatrix\":["
+             "%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,"
+             "%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g]",
+             values[0], values[1], values[2], values[3],
+             values[4], values[5], values[6], values[7],
+             values[8], values[9], values[10], values[11],
+             values[12], values[13], values[14], values[15]);
+    json += origin;
+}
+
 static std::string Rollback_GenerateShotJSON()
 {
     std::string out = "[";
     bool first = true;
-    char entry[512];
+    char entry[1024];
 
     for (int list = 0; list < SSHOT_SENTINEL_COUNT; ++list) {
         uint64_t sentinel = (uint64_t)_addr(0x140d47f90) + list * 0x28;
@@ -1515,17 +1602,35 @@ static std::string Rollback_GenerateShotJSON()
                      "\"slot\":%u,\"init\":%d,\"kind\":\"%s\","
                      "\"owner\":\"0x%llX\",\"element\":\"0x%llX\","
                      "\"state\":\"0x%08X\","
-                     "\"pos\":[%.9g,%.9g,%.9g],\"timer\":%.9g}",
+                     "\"pos\":[%.9g,%.9g,%.9g],"
+                     "\"runtimePos\":[%.9g,%.9g,%.9g],"
+                     "\"lifeFrame\":%.9g,"
+                     "\"velocity\":[%.9g,%.9g,%.9g],"
+                     "\"speed\":%.9g,\"step\":%.9g,"
+                     "\"timer\":%.9g",
                      first ? "" : ",", list, (uint64_t)shot,
                      slotId, initParam, kind, ownerChr, shotElement,
-                     *(uint32_t*)(shotBytes + 0x10),
-                     *(float*)(shotBytes + 0x50),
-                     *(float*)(shotBytes + 0x54),
-                     *(float*)(shotBytes + 0x58),
-                     *(float*)(shotBytes + 0x1F60));
-            out += entry;
+                      *(uint32_t*)(shotBytes + 0x10),
+                      *(float*)(shotBytes + 0x50),
+                      *(float*)(shotBytes + 0x54),
+                      *(float*)(shotBytes + 0x58),
+                      *(float*)(shotBytes + 0x418),
+                      *(float*)(shotBytes + 0x41C),
+                      *(float*)(shotBytes + 0x420),
+                      *(float*)(shotBytes + 0x2078),
+                      *(float*)(shotBytes + 0x20C0),
+                      *(float*)(shotBytes + 0x20C4),
+                      *(float*)(shotBytes + 0x20C8),
+                      *(float*)(shotBytes + 0x20D0),
+                      *(float*)(shotBytes + 0x212C),
+                      *(float*)(shotBytes + 0x1F60));
+               std::string shotEntry(entry);
+               Rollback_AppendShotCollisionOriginJSON(shotEntry, shot);
+               Rollback_AppendShotHitboxesJSON(shotEntry, shot);
+             shotEntry += "}";
+             out += shotEntry;
             first = false;
-            nodeRef = *(uint64_t*)(nodeRef + 0x10);
+            nodeRef = *(uint64_t*)(nodeRef + SSHOT_NODE_NEXT);
         }
     }
 
@@ -1555,7 +1660,7 @@ static void CaptureShotAndEffectRecipes(SnapshotSlot& slot)
                 CaptureShotFlight(shot, saved.flight);
                 slot.shotRecipes.push_back(saved);
             }
-            nodeRef = *(uint64_t*)(nodeRef + 0x10);
+            nodeRef = *(uint64_t*)(nodeRef + SSHOT_NODE_NEXT);
         }
     }
 
@@ -3815,16 +3920,35 @@ static void Rollback_DumpNDJSON(int32_t frame, uint8_t side) {
                     "\"slot\":%u,\"init\":%d,"
                     "\"owner\":\"0x%llX\",\"element\":\"0x%llX\","
                     "\"state\":\"0x%08X\","
-                    "\"pos\":[%.4f,%.4f,%.4f],\"timer\":%.4f}",
+                    "\"pos\":[%.4f,%.4f,%.4f],"
+                    "\"runtimePos\":[%.4f,%.4f,%.4f],"
+                    "\"lifeFrame\":%.4f,"
+                    "\"velocity\":[%.4f,%.4f,%.4f],"
+                    "\"speed\":%.4f,\"step\":%.4f,"
+                    "\"timer\":%.4f",
                     list, (uint64_t)shot, slotId, initParam,
                     ownerChr, shotElement,
-                    *(uint32_t*)(shotBytes + 0x10),
-                    *(float*)(shotBytes + 0x50),
-                    *(float*)(shotBytes + 0x54),
-                    *(float*)(shotBytes + 0x58),
-                    *(float*)(shotBytes + 0x1F60));
+                     *(uint32_t*)(shotBytes + 0x10),
+                     *(float*)(shotBytes + 0x50),
+                     *(float*)(shotBytes + 0x54),
+                     *(float*)(shotBytes + 0x58),
+                     *(float*)(shotBytes + 0x418),
+                     *(float*)(shotBytes + 0x41C),
+                     *(float*)(shotBytes + 0x420),
+                     *(float*)(shotBytes + 0x2078),
+                     *(float*)(shotBytes + 0x20C0),
+                     *(float*)(shotBytes + 0x20C4),
+                     *(float*)(shotBytes + 0x20C8),
+                     *(float*)(shotBytes + 0x20D0),
+                     *(float*)(shotBytes + 0x212C),
+                     *(float*)(shotBytes + 0x1F60));
+            std::string shotHitboxes;
+            Rollback_AppendShotCollisionOriginJSON(shotHitboxes, shot);
+            Rollback_AppendShotHitboxesJSON(shotHitboxes, shot);
+            fputs(shotHitboxes.c_str(), g_diagNdjsonFile);
+            fputs("}", g_diagNdjsonFile);
 
-            nodeRef = *(uint64_t*)(nodeRef + 0x10);
+            nodeRef = *(uint64_t*)(nodeRef + SSHOT_NODE_NEXT);
         }
     }
 

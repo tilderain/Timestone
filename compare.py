@@ -11,12 +11,20 @@ Designed for the UMVC3Hook nplive/rdiag NDJSON schema:
                 "mHeld":"0x..","fcnt":N,
                 "mOld":"0x..","mPressed":"0x..","mReleased":"0x..","mMask":"0x..","mProcessed":"0x..",
                 "dirSlot":N,"dir0":"0x..","dir4":"0x..","h590":"0x..","h594":"0x..",
-                "dirRing":["0x..",...],"rng":["0x..","0x..","0x..","0x.."],
+                 "rng":["0x..","0x..","0x..","0x.."],
                  "hitboxes":[{"bank":"capsule","index":0,"shape":"capsule",
                                "pos":[x,y,z],"size":[x,y,z]}], ...],
        "shots":[{"list":0,"addr":"0x..","slot":0,"init":0,
-                  "owner":"0x..","element":"0x..","state":"0x..",
-                  "pos":[x,y,z],"timer":0.0}, ...]}
+                   "owner":"0x..","element":"0x..","state":"0x..",
+                    "pos":[x,y,z],"runtimePos":[x,y,z],
+                    "collisionMatrix":[m00,m01,m02,m03,m10,m11,m12,m13,
+                                         m20,m21,m22,m23,m30,m31,m32,m33],
+                    "lifeFrame":0.0,"velocity":[x,y,z],"speed":0.0,
+                    "step":0.0,"timer":0.0,
+                    "hitboxes":[{"bank":"shot","index":0,"slot":0,
+                                  "shape":"capsule","pos":[x,y,z],
+                                  "endPos":[x,y,z],"size":[x,y,z],
+                                  "radius":0.0}]}, ...]}
 
 What it does:
   1. Parses both files, picks one "primary" entry per frame per file (skipping
@@ -156,7 +164,8 @@ def pos_diff(a, b):
 
 
 def hitbox_key(hitbox):
-    return (hitbox.get("bank"), hitbox.get("index"), hitbox.get("shape"))
+    return (hitbox.get("bank"), hitbox.get("slot"),
+            hitbox.get("index"), hitbox.get("shape"))
 
 
 def hitbox_diff(a, b, eps):
@@ -180,7 +189,7 @@ def hitbox_diff(a, b, eps):
             differences.append(
                 f"{key} damaging: A={ha.get('damaging')} B={hb.get('damaging')}"
             )
-        for field in ("pos", "size"):
+        for field in ("pos", "endPos", "size"):
             va, vb = ha.get(field), hb.get(field)
             delta = pos_diff(va, vb)
             if delta is None:
@@ -306,15 +315,26 @@ def diff_shot(sa, sb, pos_eps):
     # cannot be compared between host and client logs reliably.
     if not hex_eq(sa.get("state"), sb.get("state")):
         diffs["state"] = f"A={sa.get('state')} B={sb.get('state')}"
-    pd = pos_diff(sa.get("pos"), sb.get("pos"))
-    if pd is not None and (len(pd) != len(sa.get("pos", [])) or max(pd, default=0) > pos_eps):
-        diffs["pos"] = f"A={sa.get('pos')} B={sb.get('pos')} delta={pd}"
-    ta, tb = sa.get("timer"), sb.get("timer")
-    if ta is None or tb is None:
-        if ta != tb:
-            diffs["timer"] = f"A={ta} B={tb}"
-    elif abs(ta - tb) > pos_eps:
-        diffs["timer"] = f"A={ta} B={tb} delta={abs(ta - tb)}"
+    # runtimePos is the effective uShot movement position. Keep the legacy
+    # root pos comparison too, since it can expose transform/root divergence.
+    for field in ("pos", "runtimePos", "collisionOrigin", "velocity"):
+        va, vb = sa.get(field), sb.get(field)
+        pd = pos_diff(va, vb)
+        if pd is None:
+            if va != vb:
+                diffs[field] = f"A={va} B={vb}"
+        elif len(pd) != len(va) or max(pd, default=0) > pos_eps:
+            diffs[field] = f"A={va} B={vb} delta={pd}"
+    for field in ("lifeFrame", "speed", "step", "timer"):
+        va, vb = sa.get(field), sb.get(field)
+        if va is None or vb is None:
+            if va != vb:
+                diffs[field] = f"A={va} B={vb}"
+        elif abs(va - vb) > pos_eps:
+            diffs[field] = f"A={va} B={vb} delta={abs(va - vb)}"
+    hitboxes = hitbox_diff(sa.get("hitboxes"), sb.get("hitboxes"), pos_eps)
+    if hitboxes:
+        diffs["hitboxes"] = hitboxes
     return diffs
 
 
@@ -326,7 +346,9 @@ def fmt_entry_shots(entry):
         return "  (no shots)"
     return "\n".join(
         f"    list={s.get('list')} slot={s.get('slot')} kind={s.get('kind', '?')} "
-        f"state={s.get('state')} pos={s.get('pos')} timer={s.get('timer')}"
+        f"state={s.get('state')} pos={s.get('pos')} runtimePos={s.get('runtimePos')} "
+        f"lifeFrame={s.get('lifeFrame')} velocity={s.get('velocity')} "
+        f"speed={s.get('speed')} step={s.get('step')} timer={s.get('timer')}"
         for s in shots
     )
 

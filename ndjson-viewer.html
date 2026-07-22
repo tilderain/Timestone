@@ -507,7 +507,7 @@ function charKey(c) {
 }
 
 function hitboxKey(hitbox) {
-  return `${hitbox.bank ?? ''}:${hitbox.index ?? ''}:${hitbox.shape ?? ''}`;
+  return `${hitbox.bank ?? ''}:${hitbox.slot ?? ''}:${hitbox.index ?? ''}:${hitbox.shape ?? ''}`;
 }
 
 function hitboxMap(hitboxes) {
@@ -528,6 +528,7 @@ function hitboxesSame(a, b, eps = 0.001) {
   for (const [key, hitboxA] of mapA) {
     const hitboxB = mapB.get(key);
     if (!hitboxB || !numericArraySame(hitboxA.pos, hitboxB.pos, eps) ||
+        !numericArraySame(hitboxA.endPos, hitboxB.endPos, eps) ||
         !numericArraySame(hitboxA.size, hitboxB.size, eps)) return false;
     for (const field of ['radius', 'length']) {
       const va = hitboxA[field], vb = hitboxB[field];
@@ -563,7 +564,14 @@ function shotsSame(a, b, eps = 0.001) {
   for (const [key, shotA] of mapA) {
     const shotB = mapB.get(key);
     if (!shotB || shotA.slot !== shotB.slot || shotA.kind !== shotB.kind ||
-        shotA.state !== shotB.state || !numericArraySame(shotA.pos, shotB.pos, eps) ||
+        shotA.state !== shotB.state ||
+        !numericArraySame(shotA.pos, shotB.pos, eps) ||
+        !numericArraySame(shotA.runtimePos, shotB.runtimePos, eps) ||
+        !numericArraySame(shotA.velocity, shotB.velocity, eps) ||
+        !hitboxesSame(shotA.hitboxes, shotB.hitboxes, eps) ||
+        Math.abs((shotA.lifeFrame ?? 0) - (shotB.lifeFrame ?? 0)) > eps ||
+        Math.abs((shotA.speed ?? 0) - (shotB.speed ?? 0)) > eps ||
+        Math.abs((shotA.step ?? 0) - (shotB.step ?? 0)) > eps ||
         Math.abs((shotA.timer ?? 0) - (shotB.timer ?? 0)) > eps) return false;
   }
   return true;
@@ -577,7 +585,7 @@ function getShotPositions(g) {
   const result = [];
   for (const key of new Set([...liveMap.keys(), ...resimMap.keys()])) {
     const a = liveMap.get(key), b = resimMap.get(key);
-    result.push({ live: a, resim: b, delta: a && b ? getDelta(a, b) : null, key });
+    result.push({ live: a, resim: b, delta: a && b ? getShotDelta(a, b) : null, key });
   }
   return result;
 }
@@ -663,6 +671,31 @@ function getDelta(c1, c2) {
     c1.pos[1] - c2.pos[1],
     c1.pos[2] - c2.pos[2],
   ];
+}
+
+function getShotPosition(shot) {
+  if (!shot) return null;
+  return Array.isArray(shot.pos) ? shot.pos : getShotCollisionOrigin(shot);
+}
+
+function getShotCollisionOrigin(shot) {
+  const matrix = shot?.collisionMatrix;
+  if (Array.isArray(matrix) && matrix.length >= 7) {
+    return [matrix[4], matrix[5], matrix[6]];
+  }
+  return Array.isArray(shot?.pos) ? shot.pos : [0, 0, 0];
+}
+
+function getShotHitboxPoint(shot, point) {
+  if (!Array.isArray(point)) return null;
+  // The collision slot getter returns the transformed runtime primitive.
+  return point;
+}
+
+function getShotDelta(a, b) {
+  const pa = getShotPosition(a), pb = getShotPosition(b);
+  if (!pa || !pb) return null;
+  return [pa[0] - pb[0], pa[1] - pb[1], pa[2] - pb[2]];
 }
 
 function getDeltaMag(d) {
@@ -864,7 +897,7 @@ function drawCanvas(g, frameNum) {
     if (showHitboxes) {
       for (const character of [c.live, c.resim]) {
         for (const hitbox of character?.hitboxes || []) {
-          if (!hitbox.pos || !hitbox.size) continue;
+          if (!hitbox.pos || !hitbox.size || !(hitbox.radius > 0)) continue;
           minX = Math.min(minX, hitbox.pos[0] - hitbox.size[0] / 2);
           maxX = Math.max(maxX, hitbox.pos[0] + hitbox.size[0] / 2);
           minY = Math.min(minY, hitbox.pos[1] - hitbox.size[1] / 2);
@@ -875,9 +908,22 @@ function drawCanvas(g, frameNum) {
   }
   for (const shot of shots) {
     for (const projectile of [shot.live, shot.resim]) {
-      if (projectile?.pos) {
-        minX = Math.min(minX, projectile.pos[0]); maxX = Math.max(maxX, projectile.pos[0]);
-        minY = Math.min(minY, projectile.pos[1]); maxY = Math.max(maxY, projectile.pos[1]);
+      const position = getShotPosition(projectile);
+      if (position) {
+        minX = Math.min(minX, position[0]); maxX = Math.max(maxX, position[0]);
+        minY = Math.min(minY, position[1]); maxY = Math.max(maxY, position[1]);
+      }
+      for (const hitbox of projectile?.hitboxes || []) {
+        if (!(hitbox.radius > 0)) continue;
+        for (const point of [
+          getShotHitboxPoint(projectile, hitbox.pos),
+          getShotHitboxPoint(projectile, hitbox.endPos),
+        ]) {
+          if (!point) continue;
+          const radius = hitbox.radius || 0;
+          minX = Math.min(minX, point[0] - radius); maxX = Math.max(maxX, point[0] + radius);
+          minY = Math.min(minY, point[1] - radius); maxY = Math.max(maxY, point[1] + radius);
+        }
       }
     }
   }
@@ -925,7 +971,7 @@ function drawCanvas(g, frameNum) {
       ctx.lineWidth = 1.5;
       ctx.setLineDash(dashed ? [5, 3] : []);
       for (const hitbox of character?.hitboxes || []) {
-        if (!hitbox.pos || !hitbox.size) continue;
+        if (!hitbox.pos || !hitbox.size || !(hitbox.radius > 0)) continue;
         const hitboxColor = hitbox.damaging ? '#ff2d55' : color;
         ctx.strokeStyle = hitboxColor;
         const [sx, sy] = toScreen(hitbox.pos[0], hitbox.pos[1]);
@@ -934,6 +980,17 @@ function drawCanvas(g, frameNum) {
         ctx.beginPath();
         if (hitbox.shape === 'sphere') {
           ctx.ellipse(sx, sy, width / 2, height / 2, 0, 0, Math.PI * 2);
+        } else if (hitbox.shape === 'capsule' && hitbox.endPos) {
+          const endPos = hitbox.endPos;
+          const [ex, ey] = toScreen(endPos[0], endPos[1]);
+          const radius = Math.max(1, (hitbox.radius || 0) * scale);
+          ctx.moveTo(sx, sy);
+          ctx.lineTo(ex, ey);
+          ctx.stroke();
+          ctx.beginPath();
+          ctx.arc(sx, sy, radius, 0, Math.PI * 2);
+          ctx.moveTo(ex + radius, ey);
+          ctx.arc(ex, ey, radius, 0, Math.PI * 2);
         } else if (hitbox.shape === 'capsule') {
           const cornerRadius = Math.min(width, height) / 2;
           ctx.roundRect(sx - width / 2, sy - height / 2, width, height, cornerRadius);
@@ -968,6 +1025,35 @@ function drawCanvas(g, frameNum) {
     const shotNumber = shotIndex + 1;
     const liveColor = '#ffd166';
     const resimColor = '#ff8c00';
+    const drawShotHitboxes = (projectile, color, dashed) => {
+      ctx.save();
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 2;
+      ctx.setLineDash(dashed ? [5, 3] : []);
+      for (const hitbox of projectile?.hitboxes || []) {
+        if (!(hitbox.radius > 0)) continue;
+        const pos = getShotHitboxPoint(projectile, hitbox.pos);
+        if (!pos) continue;
+        const [x, y] = toScreen(pos[0], pos[1]);
+        const radius = Math.max(2, (hitbox.radius || 0) * scale);
+        ctx.beginPath();
+        if (hitbox.shape === 'capsule' && hitbox.endPos) {
+          const endPos = getShotHitboxPoint(projectile, hitbox.endPos);
+          const [x2, y2] = toScreen(endPos[0], endPos[1]);
+          ctx.moveTo(x, y); ctx.lineTo(x2, y2); ctx.stroke();
+          ctx.beginPath(); ctx.arc(x, y, radius, 0, Math.PI * 2);
+          ctx.moveTo(x2 + radius, y2); ctx.arc(x2, y2, radius, 0, Math.PI * 2);
+          ctx.fillStyle = color === liveColor ? 'rgba(255,209,102,0.14)' : 'rgba(255,140,0,0.14)';
+          ctx.fill();
+        } else {
+          ctx.arc(x, y, radius, 0, Math.PI * 2);
+        }
+        ctx.stroke();
+      }
+      ctx.restore();
+    };
+    drawShotHitboxes(shot.live, liveColor, false);
+    drawShotHitboxes(shot.resim, resimColor, true);
     const drawShotLabel = (x, y, color, missingText = '') => {
       ctx.save();
       ctx.fillStyle = color;
@@ -981,9 +1067,11 @@ function drawCanvas(g, frameNum) {
       }
       ctx.restore();
     };
-    if (shot.live?.pos && shot.resim?.pos) {
-      const [lx, ly] = toScreen(shot.live.pos[0], shot.live.pos[1]);
-      const [rx, ry] = toScreen(shot.resim.pos[0], shot.resim.pos[1]);
+    const liveShotPos = getShotPosition(shot.live);
+    const resimShotPos = getShotPosition(shot.resim);
+    if (liveShotPos && resimShotPos) {
+      const [lx, ly] = toScreen(liveShotPos[0], liveShotPos[1]);
+      const [rx, ry] = toScreen(resimShotPos[0], resimShotPos[1]);
       ctx.beginPath(); ctx.moveTo(lx, ly); ctx.lineTo(rx, ry);
       ctx.strokeStyle = shot.delta && getDeltaMag(shot.delta) > 0.01 ? COLORS.deltaBad : COLORS.deltaOk;
       ctx.lineWidth = 1.5; ctx.stroke();
@@ -995,8 +1083,9 @@ function drawCanvas(g, frameNum) {
       drawShotLabel(rx, ry, resimColor);
     } else {
       const projectile = shot.live || shot.resim;
-      if (!projectile?.pos) continue;
-      const [sx, sy] = toScreen(projectile.pos[0], projectile.pos[1]);
+      const position = getShotPosition(projectile);
+      if (!position) continue;
+      const [sx, sy] = toScreen(position[0], position[1]);
       ctx.beginPath(); ctx.arc(sx, sy, 5, 0, Math.PI * 2);
       ctx.strokeStyle = shot.live ? liveColor : resimColor; ctx.lineWidth = 2; ctx.stroke();
       if (shot.live) { ctx.fillStyle = liveColor; ctx.fill(); }
@@ -1260,13 +1349,15 @@ function drawSidebar(g, frameNum) {
     if (hitboxKeys.length) {
       html += '<div style="margin-top:10px;border-top:1px solid #0f3460;padding-top:8px">';
       html += '<div style="font-size:11px;color:#888;margin-bottom:6px">Hitboxes</div>';
-      html += '<table><tr><th>Bank/Index</th><th>Type/Shape</th><th>Position</th><th>Size</th></tr>';
+      html += '<table><tr><th>Bank/Slot/Index</th><th>Type/Shape</th><th>Position / End</th><th>Size / Radius</th></tr>';
       for (const key of hitboxKeys) {
         const liveHitbox = liveHitboxes.get(key);
         const resimHitbox = resimHitboxes.get(key);
         const same = liveHitbox && resimHitbox &&
           numericArraySame(liveHitbox.pos, resimHitbox.pos) &&
+          numericArraySame(liveHitbox.endPos, resimHitbox.endPos) &&
           numericArraySame(liveHitbox.size, resimHitbox.size) &&
+          Math.abs((liveHitbox.radius ?? 0) - (resimHitbox.radius ?? 0)) <= 0.001 &&
           liveHitbox.shape === resimHitbox.shape &&
           liveHitbox.damaging === resimHitbox.damaging;
         if (onlyShowDiffering && same) continue;
@@ -1277,15 +1368,15 @@ function drawSidebar(g, frameNum) {
           : '—';
         const source = liveHitbox && resimHitbox ? '' : (liveHitbox ? ' A only' : ' B only');
         html += `<tr class="${same ? '' : 'mismatch-bg'}">` +
-          `<td>${hitbox.bank ?? '?'}:${hitbox.index ?? '?'}${source}</td>` +
+          `<td>${hitbox.bank ?? '?'}:${hitbox.slot ?? '—'}:${hitbox.index ?? '?'}${source}</td>` +
           `<td style="color:${hitbox.damaging ? '#ff2d55' : 'inherit'}">${hitbox.damaging ? 'Damaging ' : ''}${hitbox.shape ?? 'unknown'}</td>` +
-          `<td>${formatVec(hitbox.pos)}</td>` +
-          `<td>${formatVec(hitbox.size)}</td></tr>`;
+          `<td>${formatVec(hitbox.pos)}${hitbox.endPos ? `<br>${formatVec(hitbox.endPos)}` : ''}</td>` +
+          `<td>${formatVec(hitbox.size)}${hitbox.radius !== undefined ? `<br>r=${Number(hitbox.radius).toFixed(3)}` : ''}</td></tr>`;
         if (liveHitbox && resimHitbox && !same) {
           html += `<tr class="mismatch-bg"><th>A/B</th>` +
             `<td>${liveHitbox.damaging ? 'Damaging ' : ''}${liveHitbox.shape ?? 'unknown'} / ${resimHitbox.damaging ? 'Damaging ' : ''}${resimHitbox.shape ?? 'unknown'}</td>` +
-            `<td>${formatVec(liveHitbox.pos)}<br>${formatVec(resimHitbox.pos)}</td>` +
-            `<td>${formatVec(liveHitbox.size)}<br>${formatVec(resimHitbox.size)}</td></tr>`;
+            `<td>${formatVec(liveHitbox.pos)} → ${formatVec(liveHitbox.endPos)}<br>${formatVec(resimHitbox.pos)} → ${formatVec(resimHitbox.endPos)}</td>` +
+            `<td>${formatVec(liveHitbox.size)} r=${liveHitbox.radius ?? '—'}<br>${formatVec(resimHitbox.size)} r=${resimHitbox.radius ?? '—'}</td></tr>`;
         }
       }
       html += '</table></div>';
@@ -1404,7 +1495,7 @@ function drawSidebar(g, frameNum) {
   const shots = getShotPositions(g);
   if (shots.length) {
     html += '<section><h3>Shots</h3>';
-    html += '<table><tr><th>List</th><th>Slot</th><th>Kind</th><th>Position</th><th>Timer</th><th>State</th><th>Owner</th><th>Element</th></tr>';
+    html += '<table><tr><th>List</th><th>Slot</th><th>Kind</th><th>Collision Origin</th><th>Root Position</th><th>Velocity</th><th>Life</th><th>Speed</th><th>Step</th><th>Timer</th><th>State</th><th>Owner</th><th>Element</th></tr>';
     for (const shot of shots) {
       const live = shot.live, resim = shot.resim;
       const same = live && resim && shotsSame([live], [resim]);
@@ -1414,13 +1505,39 @@ function drawSidebar(g, frameNum) {
       const formatSide = field => live && resim
         ? `${live[field] ?? '—'} / ${resim[field] ?? '—'}`
         : (value[field] ?? '—');
+      const formatVectorSide = field => live && resim
+        ? `${formatPosition(live[field])} / ${formatPosition(resim[field])}`
+        : formatPosition(value[field]);
+      const formatCollisionOrigin = () => live && resim
+        ? `${formatPosition(getShotCollisionOrigin(live))} / ${formatPosition(getShotCollisionOrigin(resim))}`
+        : formatPosition(getShotCollisionOrigin(value));
       html += `<tr class="${same ? '' : 'mismatch-bg'}">` +
         `<td>${value.list ?? '—'}</td><td>${formatSide('slot')}</td>` +
         `<td>${formatSide('kind')}</td>` +
-        `<td>${live && resim ? `${formatPosition(live.pos)} / ${formatPosition(resim.pos)}` : formatPosition(value.pos)}</td>` +
-        `<td>${formatSide('timer')}</td><td>${formatSide('state')}</td>` +
+        `<td>${formatCollisionOrigin()}</td>` +
+        `<td>${formatVectorSide('pos')}</td>` +
+        `<td>${formatVectorSide('velocity')}</td>` +
+        `<td>${formatSide('lifeFrame')}</td><td>${formatSide('speed')}</td>` +
+        `<td>${formatSide('step')}</td><td>${formatSide('timer')}</td>` +
+        `<td>${formatSide('state')}</td>` +
         `<td style="font-family:monospace;font-size:10px">${value.owner ?? '—'}</td>` +
         `<td style="font-family:monospace;font-size:10px">${value.element ?? '—'}</td></tr>`;
+      const liveHitboxes = hitboxMap(live?.hitboxes);
+      const resimHitboxes = hitboxMap(resim?.hitboxes);
+      for (const key of new Set([...liveHitboxes.keys(), ...resimHitboxes.keys()])) {
+        const lh = liveHitboxes.get(key), rh = resimHitboxes.get(key), hitbox = lh || rh;
+        const livePos = getShotHitboxPoint(live, lh?.pos);
+        const resimPos = getShotHitboxPoint(resim, rh?.pos);
+        const liveEndPos = getShotHitboxPoint(live, lh?.endPos);
+        const resimEndPos = getShotHitboxPoint(resim, rh?.endPos);
+        const hitboxSame = lh && rh && numericArraySame(lh.pos, rh.pos) &&
+          numericArraySame(lh.endPos, rh.endPos) && Math.abs((lh.radius || 0) - (rh.radius || 0)) <= 0.001;
+        if (onlyShowDiffering && hitboxSame) continue;
+        html += `<tr class="${hitboxSame ? '' : 'mismatch-bg'}"><th colspan="3">Hitbox ${hitbox.bank ?? '?'} slot ${hitbox.slot ?? '—'} index ${hitbox.index ?? '?'}</th>` +
+          `<td>${lh && rh ? `${formatPosition(livePos)} / ${formatPosition(resimPos)}` : formatPosition(getShotHitboxPoint(value, hitbox.pos))}</td>` +
+          `<td colspan="2">${lh && rh ? `end ${formatPosition(liveEndPos)} / ${formatPosition(resimEndPos)}` : (hitbox.endPos ? `end ${formatPosition(getShotHitboxPoint(value, hitbox.endPos))}` : hitbox.shape)}</td>` +
+          `<td colspan="2">${lh && rh ? `radius ${lh.radius ?? '—'} / ${rh.radius ?? '—'}` : `radius ${hitbox.radius ?? '—'}`}</td><td colspan="5"></td></tr>`;
+      }
     }
     html += '</table></section>';
   }
