@@ -43,6 +43,7 @@ enum PacketType : uint32_t {
     PACKET_LAUNCH_TRAINING = 6, // LaunchTrainingPacket
     PACKET_DESYNC = 7,  // DesyncPacket
     PACKET_RESTART_MATCH = 8, // RestartMatchPacket
+    PACKET_MULTI_RESIM = 9, // MultiResimPacket
 };
 
 #pragma pack(push, 1)
@@ -95,6 +96,11 @@ struct RestartMatchPacket {
     uint32_t type;               // PACKET_RESTART_MATCH
     int32_t  target_frame;       // synchronized net frame to restart on
     uint32_t round_seed;         // deterministic gameplay RNG seed
+};
+
+struct MultiResimPacket {
+    uint32_t type;               // PACKET_MULTI_RESIM
+    uint32_t enabled;            // 0 = disabled, 1 = enabled
 };
 
 enum BattleSyncFlags : uint32_t {
@@ -219,6 +225,10 @@ bool Netplay_GetInboundDesync(DesyncPacket& outPacket);
 
 void Netplay_SendRestartMatch(int32_t targetFrame, uint32_t roundSeed);
 bool Netplay_GetInboundRestartMatch(int32_t& outTargetFrame, uint32_t& outRoundSeed);
+
+// Synchronize the multi-resimulation mode with the remote peer.
+void Netplay_SendMultiResim(bool enabled);
+bool Netplay_GetInboundMultiResim(bool& outEnabled);
 
 // Discard input packets produced before the synchronized battle boundary.
 void Netplay_ClearInputQueues();

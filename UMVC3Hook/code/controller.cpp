@@ -422,6 +422,23 @@ extern "C" int32_t  Controller_GetLocalFrameAdvantage()  { return g_localFrameAd
 extern "C" int32_t  Controller_GetRemoteFrameAdvantage() { return g_remoteFrameAdvantage; }
 extern "C" bool    Controller_IsRollbackEnabled()   { return g_rollbackFrames > 0; }
 
+extern "C" void Controller_SetMultiResimEnabled(bool enabled)
+{
+    if (g_multiResimEnabled == enabled)
+        return;
+
+    g_multiResimEnabled = enabled;
+
+    // Frames handled under the previous mode must not be reconsidered by the
+    // non-multi frontier. Their snapshots may already have rolled out.
+    int32_t transitionFrame = GetGameFrameCount();
+    if (transitionFrame >= 0)
+        g_lastNonMultiCheckedFrame = transitionFrame;
+
+    HookLog("RollbackNet: multi-resim %s at frame %d\n",
+            enabled ? "enabled" : "disabled", transitionFrame);
+}
+
 extern "C" void Controller_SetRollbackFrames(int32_t n)
 {
     if (n < 0)                  n = 0;

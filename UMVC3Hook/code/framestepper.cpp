@@ -50,6 +50,7 @@ extern void Netplay_SendRestartMatch(int32_t targetFrame, uint32_t roundSeed);
 extern "C" void Controller_SetDelayFrames(int32_t delay);
 extern "C" void Controller_ScheduleDelayFrames(int32_t delay, int32_t effectiveFrame);
 extern "C" void Controller_SetRollbackFrames(int32_t n);
+extern "C" void Controller_SetMultiResimEnabled(bool enabled);
 extern "C" void Controller_ResetBuffers();
 extern "C" void Controller_ResetFrameEpoch();
 
@@ -373,6 +374,9 @@ static void __fastcall HookedMove(void* sMvc3Main)
             if (remoteRollback >= 0 && remoteRollback <= 16)
                 Controller_SetRollbackFrames(remoteRollback);
         }
+        bool remoteMultiResim = false;
+        while (Netplay_GetInboundMultiResim(remoteMultiResim))
+            Controller_SetMultiResimEnabled(remoteMultiResim);
 
         uint32_t remoteGeneration = 0;
         uint32_t remoteFlags = 0;
@@ -965,7 +969,12 @@ void FrameStepper_Draw()
                 Netplay_SendRollback(curRollback);
             }
 
-            ImGui::Checkbox("Multi ReSim", &g_multiResimEnabled);
+            bool multiResimEnabled = g_multiResimEnabled;
+            if (ImGui::Checkbox("Multi ReSim", &multiResimEnabled))
+            {
+                Controller_SetMultiResimEnabled(multiResimEnabled);
+                Netplay_SendMultiResim(multiResimEnabled);
+            }
         }
 
         ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "P1: [%s]  0x%08X", DecodeDirection(p1), p1);

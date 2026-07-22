@@ -78,6 +78,11 @@ static bool                     g_outboundRestartNew = false;
 static RestartMatchPacket       g_inboundRestart = {};
 static bool                     g_inboundRestartNew = false;
 static CRITICAL_SECTION         g_restartCS;
+static MultiResimPacket         g_outboundMultiResim = {};
+static bool                     g_outboundMultiResimNew = false;
+static MultiResimPacket         g_inboundMultiResim = {};
+static bool                     g_inboundMultiResimNew = false;
+static CRITICAL_SECTION         g_multiResimCS;
 
 // One-time critical section initialization flag
 static bool                 g_csInitialized  = false;
@@ -286,6 +291,27 @@ static DWORD WINAPI Netplay_ServiceThread(LPVOID)
             enet_host_flush(g_host);
         }
 
+        bool hasMultiResim = false;
+        MultiResimPacket multiResimPkt = {};
+        {
+            ScopedCS lock(g_multiResimCS);
+            if (g_outboundMultiResimNew)
+            {
+                multiResimPkt = g_outboundMultiResim;
+                hasMultiResim = true;
+                g_outboundMultiResimNew = false;
+            }
+        }
+        if (hasMultiResim && g_peer)
+        {
+            ENetPacket* packet = enet_packet_create(
+                &multiResimPkt, sizeof(MultiResimPacket), ENET_PACKET_FLAG_RELIABLE
+            );
+            if (enet_peer_send(g_peer, 0, packet) != 0)
+                enet_packet_destroy(packet);
+            enet_host_flush(g_host);
+        }
+
         // --- Service the host ---
         if (g_host)
         {
@@ -390,6 +416,20 @@ static DWORD WINAPI Netplay_ServiceThread(LPVOID)
                                     g_inboundRestartNew = true;
                                 }
                                 break;
+
+                            case PACKET_MULTI_RESIM:
+                                if (event.packet->dataLength >= sizeof(MultiResimPacket))
+                                {
+                                    const MultiResimPacket* mrp =
+                                        (const MultiResimPacket*)event.packet->data;
+                                    if (mrp->enabled <= 1)
+                                    {
+                                        ScopedCS lock(g_multiResimCS);
+                                        g_inboundMultiResim = *mrp;
+                                        g_inboundMultiResimNew = true;
+                                    }
+                                }
+                                break;
                         }
                     }
                     enet_packet_destroy(event.packet);
@@ -451,6 +491,7 @@ void Netplay_Init(ENetHost* host, ENetPeer* peer)
         InitializeCriticalSection(&g_battleReadyCS);
         InitializeCriticalSection(&g_desyncCS);
         InitializeCriticalSection(&g_restartCS);
+        InitializeCriticalSection(&g_multiResimCS);
 
         g_outboundDelayNew = false;
         g_inboundDelayNew = false;
@@ -464,6 +505,8 @@ void Netplay_Init(ENetHost* host, ENetPeer* peer)
         g_inboundDesyncNew = false;
         g_outboundRestartNew = false;
         g_inboundRestartNew = false;
+        g_outboundMultiResimNew = false;
+        g_inboundMultiResimNew = false;
         std::memset(&g_outboundPacket, 0, sizeof(InputPacket));
         g_csInitialized = true;
     }
@@ -597,6 +640,24 @@ bool Netplay_GetInboundRollback(int32_t& outRollback)
         return true;
     }
     return false;
+}
+
+void Netplay_SendMultiResim(bool enabled)
+{
+    ScopedCS lock(g_multiResimCS);
+    g_outboundMultiResim.type = PACKET_MULTI_RESIM;
+    g_outboundMultiResim.enabled = enabled ? 1u : 0u;
+    g_outboundMultiResimNew = true;
+}
+
+bool Netplay_GetInboundMultiResim(bool& outEnabled)
+{
+    ScopedCS lock(g_multiResimCS);
+    if (!g_inboundMultiResimNew)
+        return false;
+    outEnabled = g_inboundMultiResim.enabled != 0;
+    g_inboundMultiResimNew = false;
+    return true;
 }
 
 void Netplay_SendBattleReady(uint32_t generation, uint32_t flags)
