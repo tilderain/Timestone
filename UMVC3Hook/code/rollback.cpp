@@ -200,10 +200,9 @@ static constexpr SnapshotRange CCHR_SCALAR_RESTORE_RANGES[] = {
     // the generic 8-byte pointer heuristic can classify an aligned pair of
     // RNG words as a live pointer and otherwise retain the prediction state.
     {0x2D80, 0x10},
-    // Mutable success/work state for the two embedded cChrCmd objects. These
-    // fields are pointer-free, but packed result/index values can trip the
-    // generic pointer guard and retain command progress from prediction.
-    // Keep each command's owner/resource/line-buffer pointers live.
+    // Rewind the complete success window for both embedded cChrCmd objects.
+    // mpSucLine points into the separately restored line buffer, and the cached
+    // outputs remain gameplay-relevant until native mSucDelay expiration.
     {0x28B8, 0x20}, // cChr+0x2738, cChrCmd+0x180..+0x19F
     {0x2AD0, 0x20}, // cChr+0x2950, cChrCmd+0x180..+0x19F
     {0x3F48, 0x2B0}, // action requests, movement, velocity, gravity and air counters
@@ -3387,28 +3386,6 @@ void Rollback_RestoreSnapshot(int32_t frame)
                     std::memcpy((uint8_t*)slot.regions[i].ptr + range.offset,
                                 slot.data + offset + range.offset,
                                 range.size);
-                }
-            }
-
-            // cChrCmd+0x180 points at the line that most recently matched;
-            // +0x188..+0x19f cache its success outputs. They are transient
-            // evaluator results, not matcher progress. Replaying either the
-            // saved result or the prediction result can dispatch an action
-            // that no longer matches the corrected input. The heap line array
-            // at +0x178 retains the actual command-step/timer history and is
-            // restored separately, so invalidate these outputs for the next
-            // native command update to recompute.
-            for (size_t cmdOffset : {0x2738u, 0x2950u}) {
-                size_t resultOffset = cmdOffset + 0x180;
-                if (resultOffset + 0x20 <= copySize) {
-                    uint8_t* cmdResult = (uint8_t*)slot.regions[i].ptr + resultOffset;
-                    *(uint64_t*)(cmdResult + 0x00) = 0;           // successful line
-                    *(int32_t*)(cmdResult + 0x08) = -1;          // mSucListId
-                    *(int32_t*)(cmdResult + 0x0C) = 0;           // mSucAnmNo
-                    *(int32_t*)(cmdResult + 0x10) = -1;          // mSucThrowNo
-                    *(int32_t*)(cmdResult + 0x14) = -1;          // mSucTdownNo
-                    *(float*)(cmdResult + 0x18) = 0.0f;          // mSucDelay
-                    *(int32_t*)(cmdResult + 0x1C) = 0;           // mSucWork
                 }
             }
 
