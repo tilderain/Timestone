@@ -258,10 +258,7 @@ static uint32_t  g_localPending    = 0;   // accumulator, ORed across team chars
 // Used to hold-last-value when no new input has arrived for the current frame.
 static int32_t   g_lastRemoteFrame = -1;
 static uint32_t  g_lastRemoteInput = 0;
-
-// Count of consecutive frames where remote input wasn't ready (guxt-style).
-// Once this exceeds g_rollbackFrames we spin-wait instead of continuing to predict.
-static int32_t   g_consecutivePredictedFrames = 0;
+static int32_t   g_lastNonMultiCheckedFrame = -1;
 
 bool g_multiResimEnabled = false; // Multi-resimulation toggle
 
@@ -292,7 +289,7 @@ int32_t      g_remoteFrameAdvantage = 0;  // received from peer via packet
 // Timesync window averaging (GGPO-style)
 static constexpr int TIMESYNC_WINDOW_SIZE       = 40;
 static constexpr int TIMESYNC_MIN_FRAME_ADVANTAGE = 1;
-static constexpr int TIMESYNC_MAX_FRAME_ADVANTAGE = 3;
+static constexpr int TIMESYNC_MAX_FRAME_ADVANTAGE = 9;
 
 static int32_t g_localAdvHistory[TIMESYNC_WINDOW_SIZE] = {};
 static int32_t g_remoteAdvHistory[TIMESYNC_WINDOW_SIZE] = {};
@@ -365,7 +362,7 @@ extern "C" void Controller_ResetBuffers()
     g_pendingDelayEffectiveFrame = -1;
     g_lastRemoteFrame = -1;
     g_lastRemoteInput = 0;
-    g_consecutivePredictedFrames = 0;
+    g_lastNonMultiCheckedFrame = -1;
     g_desyncDetected   = false;
     g_desyncSeen       = false;
     g_desyncFrame      = -1;
@@ -434,7 +431,6 @@ extern "C" void Controller_SetRollbackFrames(int32_t n)
     {
         std::memset(g_predictedInput, 0, sizeof(g_predictedInput));
         std::memset(g_predictedFrame, -1, sizeof(g_predictedFrame));
-        g_consecutivePredictedFrames = 0;
     }
 }
 
@@ -599,7 +595,7 @@ extern "C" void Controller_ResolveRemoteInput(int32_t frame)
             return;
         }
 
-        if (g_isResimulating)
+        if (g_isResimulating && !g_multiResimEnabled)
         {
             HookLog("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n"
                     "!!! HORRIBLE WARNING: ReSim frame %d — remote input NOT YET     !!!\n"
@@ -631,7 +627,8 @@ extern "C" void Controller_ResolveRemoteInput(int32_t frame)
 
         if (!alreadyPredicted)
         {
-            //HookLog("Predicting for frame %d using input 0x%08X\n", frame, prediction);
+            //HookLog("Predicting for frame %d using input 0x%08X (lastRemote=%d)\n",
+                    //frame, prediction, g_lastRemoteFrame);
         }
     }
 }
@@ -1051,7 +1048,7 @@ static void WaitForConfirmedFrame(int32_t frame, const char* reason)
         return;
 
     //HookLog("Netplay: waiting for remote input frame %d (%s, local=%d, lastRemote=%d)\n",
-            //frame, reason, g_netFrameCount, g_lastRemoteFrame);
+    //        frame, reason, g_netFrameCount, g_lastRemoteFrame);
     while (!IsFrameConfirmed(frame) && Netplay_IsActive())
     {
         SwitchToThread();
@@ -1104,59 +1101,51 @@ extern "C" void Controller_OnFrameStart()
         int step = aNextBattle ? *(int*)(aNextBattle + 0xD8) : 0;
         if (step >= 2)
         {
-            // --- Bounded spin-wait: if remote is more than (delay + rollback_frames)
-            //     behind, we can't roll back (snapshot ring buffer wraps).  Block
-            //     until the gap shrinks back within the window.
-            int32_t spinWaitThreshold = g_delayFrames + g_rollbackFrames;
-            if (g_netFrameCount > spinWaitThreshold)
+            // Bound prediction by the configured input delay plus rollback
+            // window. Unlike the old consecutive-miss counter, this measures
+            // the actual oldest remote frame needed by the current timeline.
+            int32_t predictionBudget = g_delayFrames + g_rollbackFrames;
+            if (g_netFrameCount > predictionBudget)
             {
-                int32_t minNeeded = g_netFrameCount - spinWaitThreshold;
-                WaitForConfirmedFrame(minNeeded, "rollback window exhausted");
+                int32_t oldestRequiredFrame = g_netFrameCount - predictionBudget;
+                WaitForConfirmedFrame(oldestRequiredFrame, "prediction budget exhausted");
             }
 
-        // --- Once past the initial startup window, track consecutive predicted
-        //     frames and spin-wait when we exceed the rollback window (guxt style).
-        if (g_netFrameCount > g_delayFrames + g_rollbackFrames)
+        // Multi-resim checks the rolling window continuously. Non-multi only
+        // inspects the newly confirmed frontier; if it finds a conflict, it
+        // waits for a definitive batch before replaying that range once.
+        bool shouldCheckRollback = g_netFrameCount > 0 &&
+            (g_multiResimEnabled || g_lastRemoteFrame > g_lastNonMultiCheckedFrame);
+        if (shouldCheckRollback)
         {
-            if (IsFrameConfirmed(g_netFrameCount))
+            // Match the prediction budget above. A frame confirmed by the
+            // budget wait must still be included in this conflict scan.
+            int32_t checkStart;
+            if (g_multiResimEnabled)
             {
-                g_consecutivePredictedFrames = 0;
+                checkStart = g_netFrameCount - predictionBudget;
+                if (checkStart < 0) checkStart = 0;
             }
             else
             {
-                g_consecutivePredictedFrames++;
-                if (g_consecutivePredictedFrames >= g_rollbackFrames)
-                {
-                    WaitForConfirmedFrame(g_netFrameCount, "prediction budget exhausted");
-                    if (IsFrameConfirmed(g_netFrameCount))
-                        g_consecutivePredictedFrames = 0;
-                }
+                checkStart = g_lastNonMultiCheckedFrame + 1;
             }
-        }
-
-        // --- Rollback detection: only check for conflicts when the current
-        //     frame's input has arrived.
-        bool shouldCheckRollback = false;
-        if (g_multiResimEnabled)
-        {
-            shouldCheckRollback = (g_netFrameCount > 0);
-        }
-        else
-        {
-            shouldCheckRollback = (g_netFrameCount > 0 && IsFrameConfirmed(g_netFrameCount));
-        }
-
-        if (shouldCheckRollback)
-        {
-            int32_t checkStart = g_netFrameCount - g_rollbackFrames;
-            if (checkStart < 0) checkStart = 0;
+            int32_t checkEnd = g_netFrameCount;
+            if (!g_multiResimEnabled && checkEnd > g_lastRemoteFrame + 1)
+                checkEnd = g_lastRemoteFrame + 1;
             int32_t earliestConflict = -1;
-            for (int32_t f = checkStart; f < g_netFrameCount; f++)
+            for (int32_t f = checkStart; f < checkEnd; f++)
             {
                 if (IsFrameConfirmed(f))
                 {
                     uint32_t recv = g_receivedInput[(uint32_t)f % RING_SIZE];
                     uint32_t used = g_usedRemoteInput[(uint32_t)f % RING_SIZE];
+                    uint32_t idx = (uint32_t)f % RING_SIZE;
+                    if (g_predictedInput[idx] && g_predictedFrame[idx] == f)
+                    {
+                        //HookLog("Prediction check frame %d: used=0x%08X recv=0x%08X %s\n",
+                        //        f, used, recv, used == recv ? "MATCH" : "CONFLICT");
+                    }
                     if (recv != used)
                     {
                         earliestConflict = f;
@@ -1169,6 +1158,15 @@ extern "C" void Controller_OnFrameStart()
             }
             if (earliestConflict >= 0)
             {
+                if (!g_multiResimEnabled)
+                {
+                    // Non-multi does not replace snapshots inside the replay.
+                    // Confirm the whole batch first so no frame in it can need
+                    // correction a second time.
+                    WaitForConfirmedFrame(g_netFrameCount, "non-multi definitive batch");
+                    checkEnd = g_netFrameCount;
+                }
+
                 // Commit any pending correct frames BEFORE the earliest conflict
                 for (int32_t f = checkStart; f < earliestConflict; f++)
                 {
@@ -1179,16 +1177,17 @@ extern "C" void Controller_OnFrameStart()
                 }
 
                 // Update all snapshots in the range with definitive confirmed inputs
-                uint32_t localTeam = Netplay_IsHost() ? 0 : 1;
                 for (int32_t f = earliestConflict; f < g_netFrameCount; f++)
                 {
                     uint32_t idx = (uint32_t)f % RING_SIZE;
-                    uint32_t trueLocal = g_recordedGameInput[localTeam][idx];
-                    uint32_t trueRemote = g_receivedInput[idx];
+                    uint32_t trueLocal = 0;
+                    Rollback_GetSnapshotInputs(f, &trueLocal, nullptr);
+                    uint32_t trueRemote = IsFrameConfirmed(f)
+                        ? g_receivedInput[idx]
+                        : g_usedRemoteInput[idx];
                     Rollback_UpdateSnapshotInputs(f, trueLocal, trueRemote);
                 }
 
-                g_consecutivePredictedFrames = 0;
                 Rollback_RequestReSimulate(earliestConflict, g_netFrameCount);
             }
             else
@@ -1198,9 +1197,11 @@ extern "C" void Controller_OnFrameStart()
                 for (int32_t f = checkStart; f < g_netFrameCount; f++)
                 {
                     uint32_t idx = (uint32_t)f % RING_SIZE;
-                    if (g_predictedInput[idx] && g_predictedFrame[idx] == f)
+                    if (IsFrameConfirmed(f) &&
+                        g_predictedInput[idx] && g_predictedFrame[idx] == f)
                     {
-                        //HookLog("Frame %d: Prediction SUCCESSFUL! (input 0x%08X matches received)\n", f, g_receivedInput[idx]);
+                        //HookLog("Prediction confirmed frame %d: input=0x%08X\n",
+                        //        f, g_receivedInput[idx]);
                         correctPredictions++;
                         g_predictedInput[idx] = false;
                     }
@@ -1219,6 +1220,17 @@ extern "C" void Controller_OnFrameStart()
                     }
                 }
             }
+
+            if (!g_multiResimEnabled)
+            {
+                // Never advance past a hole. A frame that was not confirmed in
+                // this pass still needs comparison when a later packet fills it.
+                while (g_lastNonMultiCheckedFrame + 1 < checkEnd &&
+                       IsFrameConfirmed(g_lastNonMultiCheckedFrame + 1))
+                {
+                    g_lastNonMultiCheckedFrame++;
+                }
+            }
         }
     }
     }
@@ -1233,6 +1245,18 @@ extern "C" void Controller_OnFrameStart()
     //     just reads from g_usedRemoteInput (no per-character resolution logic).
     //     Must run for both rollback and delay-based paths.
     Controller_ResolveRemoteInput(g_netFrameCount);
+
+    // Rollback_SaveSnapshot runs outside this hook, before current-frame input
+    // resolution. Attach the exact inputs this live tick will execute so a later
+    // cascading resim does not read stale ring-slot data from the snapshot.
+    if (g_rollbackFrames > 0)
+    {
+        uint32_t idx = (uint32_t)g_netFrameCount % RING_SIZE;
+        uint32_t localInput = g_scheduledLocalFrame[idx] == g_netFrameCount
+            ? g_scheduledLocalInput[idx] : 0;
+        Rollback_UpdateSnapshotInputs(
+            g_netFrameCount, localInput, g_usedRemoteInput[idx]);
+    }
 
     // --- GGPO-style frame advantage timesync.
     //     Estimate remote frame: last received frame + RTT converted to frames.
@@ -1272,7 +1296,7 @@ extern "C" void Controller_OnFrameStart()
                 {
                     if (sleepFrames > TIMESYNC_MAX_FRAME_ADVANTAGE)
                         sleepFrames = TIMESYNC_MAX_FRAME_ADVANTAGE;
-                    //Sleep(sleepFrames);
+                    Sleep(sleepFrames);
                 }
             }
         }
@@ -1622,8 +1646,8 @@ static void __fastcall hkprocessFrameInput(uint64_t cChrInput)
             if (Rollback_GetSnapshotInputs(lookupFrame, &snapLocal, &snapRemote))
             {
                 inputVal = (teamIdx == 0) ? snapLocal : snapRemote;
-                HookLog("[ResimInput] the local and remote input for this frame was local=0x%08X remote=0x%08X from the snapshot frame %d\n",
-                        snapLocal, snapRemote, lookupFrame);
+                //HookLog("[ResimInput] the local and remote input for this frame was local=0x%08X remote=0x%08X from the snapshot frame %d\n",
+                //        snapLocal, snapRemote, lookupFrame);
             }
             else
             {

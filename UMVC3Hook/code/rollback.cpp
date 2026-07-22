@@ -3148,8 +3148,10 @@ void Rollback_SaveSnapshot(int32_t frame)
     // delayed input that the imminent game tick will use.
     slot.localInput = Controller_GetCurrentFrameInput();
 
-    // Save the best-known remote input for this frame.
-    slot.remoteInput = Controller_GetReceivedRemoteInput(frame);
+    // Controller_OnFrameStart resolves and republishes the exact input before
+    // the tick. Initialize with the prior prediction rather than stale received
+    // ring data in case this frame is not confirmed yet.
+    slot.remoteInput = Controller_GetUsedRemoteInput(frame);
     
     //HookLog("Rollback: saved frame %d with %d regions, total size %zu bytes\n", frame, count, offset);
 }
@@ -4229,7 +4231,9 @@ void Rollback_ReSimulate(int32_t startFrame, int32_t endFrame)
             Rollback_DumpNDJSON(f, 1);
         }
 
-        // Take snapshot of current state before ticking, ensuring cascading rollbacks have a valid restore point
+        // Multi-resim may correct a still-predicted frame again, so preserve a
+        // corrected restore point. Non-multi waits for a definitive batch and
+        // never starts another rollback inside this replayed range.
         if (g_multiResimEnabled) {
             Rollback_SaveSnapshot(f);
             Rollback_UpdateSnapshotInputs(f, resimLocalInput, resimRemoteInput);

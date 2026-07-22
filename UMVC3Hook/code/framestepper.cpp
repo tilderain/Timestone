@@ -276,6 +276,14 @@ extern "C" void Controller_OnFrameEnd();
 // ---------------------------------------------------------------------------
 static void __fastcall HookedMove(void* sMvc3Main)
 {
+    // Rollback_ReSimulate owns the input boundary while replaying frames.
+    // Re-entering the live path here can spin waiting for confirmed input.
+    if (g_isResimulating)
+    {
+        oMove(sMvc3Main);
+        return;
+    }
+
     if (isPaused)
     {
         if (advanceFrame)
