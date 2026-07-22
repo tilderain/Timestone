@@ -62,6 +62,8 @@ static constexpr uintptr_t FN_GAMEUI_SET_TEAM_CHARACTER_ID = 0x140022610;
 static constexpr uintptr_t FN_SSHOT_SPAWN = 0x140150E00;
 static constexpr uintptr_t FN_SSHOT_SPAWN_EX = 0x140150F40;
 static constexpr uintptr_t FN_SSHOT_ENQUEUE_UNIT = 0x1401512A0;
+static constexpr uintptr_t FN_SSHOT_FLUSH_PENDING_UNITS = 0x1401517A0;
+static constexpr uintptr_t VTABLE_USHOT_VULCAN_ZIREITOU = 0x140AC0E20;
 static constexpr uintptr_t FN_SUNIT_ADD_UNIT = 0x14051A6B0;
 static constexpr uintptr_t FN_SUNIT_REMOVE_UNIT = 0x14051B9F0;
 static constexpr uintptr_t FN_SUNIT_REMOVE_MULTI_MASK = 0x14051BAF0;
@@ -1205,6 +1207,8 @@ struct ShotFlightState {
     uint8_t movementScalars[0x60]; // +0x2078..+0x20D7
     uint8_t animationScalars[0x14];// +0x2118..+0x212B
     uint32_t step;                  // +0x212C, read by uShot::move
+    bool hasZireitouState;
+    uint32_t zireitouState[4];      // +0x2210..+0x221F phase/timing scalars
 };
 
 enum class ShotSpawnKind : uint8_t { Standard, Extended };
@@ -1273,10 +1277,8 @@ using ShotSpawnFn = void*(__fastcall*)(void*, void*, int, void*, void*, void*, u
 using ShotSpawnExFn = void*(__fastcall*)(void*, void*, int, void*, void*, void*, uint32_t,
                                         void*, int, void*, int, void*);
 using ShotEnqueueFn = char(__fastcall*)(void*, void*, int);
-using UnitAddFn = char(__fastcall*)(void*, int, void*, void*);
 using UnitRemoveFn = char(__fastcall*)(void*, void*);
 using UnitRemoveMultiMaskFn = void(__fastcall*)(void*, void*);
-using UnitRegisterMultiMaskFn = void(__fastcall*)(void*, void*, uint64_t);
 using EffectCreateFn = void*(__fastcall*)(void*, int, int, void*, int, int, void*, void*,
                                           int, void*, int, uint32_t, void*);
 
@@ -1286,6 +1288,11 @@ static UnitRemoveFn oUnitRemove = nullptr;
 static EffectCreateFn oEffectCreate = nullptr;
 
 static bool IsLinkedShot(void* shot);
+
+static bool IsZireitouShot(void* shot)
+{
+    return shot && *(uintptr_t*)shot == (uintptr_t)_addr(VTABLE_USHOT_VULCAN_ZIREITOU);
+}
 
 static void DestroyCollisionNodeClones(SnapshotSlot& slot)
 {
@@ -1334,6 +1341,10 @@ static void CaptureShotFlight(void* shot, ShotFlightState& out)
     std::memcpy(out.movementScalars, p + 0x2078, sizeof(out.movementScalars));
     std::memcpy(out.animationScalars, p + 0x2118, sizeof(out.animationScalars));
     std::memcpy(&out.step, p + 0x212C, sizeof(out.step));
+    out.hasZireitouState = IsZireitouShot(shot);
+    if (out.hasZireitouState) {
+        std::memcpy(out.zireitouState, p + 0x2210, sizeof(out.zireitouState));
+    }
 }
 
 static void ApplyShotFlight(void* shot, const ShotFlightState& in)
@@ -1357,6 +1368,9 @@ static void ApplyShotFlight(void* shot, const ShotFlightState& in)
     std::memcpy(p + 0x2078, in.movementScalars, sizeof(in.movementScalars));
     std::memcpy(p + 0x2118, in.animationScalars, sizeof(in.animationScalars));
     std::memcpy(p + 0x212C, &in.step, sizeof(in.step));
+    if (in.hasZireitouState && IsZireitouShot(shot)) {
+        std::memcpy(p + 0x2210, in.zireitouState, sizeof(in.zireitouState));
+    }
 }
 
 static void* __fastcall hkShotSpawn(void* manager, void* element, int initParam,
@@ -1596,7 +1610,7 @@ static std::string Rollback_GenerateShotJSON()
                 shotElement = (uint64_t)recipe->second.shotElement;
                 kind = recipe->second.kind == ShotSpawnKind::Extended ? "extended" : "standard";
             }
-
+            
             snprintf(entry, sizeof(entry),
                      "%s{\"list\":%d,\"addr\":\"0x%llX\","
                      "\"slot\":%u,\"init\":%d,\"kind\":\"%s\","
@@ -1724,10 +1738,9 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
     }
 
     void* sShot = *(void**)_addr(PTR_SSHOT);
-    auto enqueue = (ShotEnqueueFn)_addr(FN_SSHOT_ENQUEUE_UNIT);
-    auto addUnit = (UnitAddFn)_addr(FN_SUNIT_ADD_UNIT);
-    auto registerMultiMask =
-        (UnitRegisterMultiMaskFn)_addr(FN_SUNIT_REGISTER_MULTI_MASK);
+    auto enqueueUnit = (ShotEnqueueFn)_addr(FN_SSHOT_ENQUEUE_UNIT);
+    auto flushPendingUnits =
+        (void(__fastcall*)(void*))_addr(FN_SSHOT_FLUSH_PENDING_UNITS);
     int respawnedShots = 0;
     int failedShots = 0;
 
@@ -1789,23 +1802,20 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
         liveRecipe.restoredPtr = fresh;
         g_liveShotRecipes[fresh] = liveRecipe;
         saved.restoredPtr = fresh;
-        if (!enqueue(sShot, fresh, SSHOT_CATEGORY)) {
-            addUnit(sUnit, SSHOT_CATEGORY, fresh, nullptr);
-        }
+        // Rebuild registration through the same pending-unit path used by the
+        // native shot callers. Drain it before resimulation so all restored
+        // shots enter the category list in one native registration pass.
+        enqueueUnit(sShot, fresh, SSHOT_CATEGORY);
         ApplyShotFlight(fresh, saved.flight);
 
-        // sUnit::addUnit assigns category bits 3..9, but the restore state
-        // write above intentionally preserves the saved gameplay bits and can
-        // retain the removed sentinel (0x3f8). Reassert the projectile
-        // category after all flight fields are restored, then rebuild the
-        // multi-mask arrays from the shot's active vtable state. Otherwise the
-        // shot remains visible in sShot while it is absent from the normal
-        // sUnit category/multi-mask update path.
+        // ApplyShotFlight preserves the category assigned by addUnit while
+        // restoring the saved gameplay lifecycle bits.
         uint32_t* unitState = (uint32_t*)((uint8_t*)fresh + 0x10);
         *unitState = (*unitState & ~0x3F8u) | (SSHOT_CATEGORY << 3);
-        registerMultiMask(sUnit, fresh, 0);
         respawnedShots++;
     }
+
+    flushPendingUnits(sShot);
 
     if (sAction) std::memcpy((void*)sAction, savedAction, sizeof(savedAction));
     std::memcpy((void*)_addr(0x140d765d8), savedGlobalRng, sizeof(savedGlobalRng));

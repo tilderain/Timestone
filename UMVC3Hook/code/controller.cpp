@@ -281,7 +281,7 @@ static bool      g_desyncMismatch[RING_SIZE];  // true if that frame exceeded th
 
 static constexpr uint32_t DESYNC_THRESHOLD         = 5;
 static constexpr int32_t  DESYNC_SKIP_FRAMES       = 0;
-static constexpr int32_t  DESYNC_CONSECUTIVE_MIN   = 30;
+static constexpr int32_t  DESYNC_CONSECUTIVE_MIN   = 15;
 
 // ---------------------------------------------------------------------------
 // Frame advantage (GGPO-style) — RTT-based frame-count timesync
