@@ -289,7 +289,7 @@ int32_t      g_remoteFrameAdvantage = 0;  // received from peer via packet
 // Timesync window averaging (GGPO-style)
 static constexpr int TIMESYNC_WINDOW_SIZE       = 40;
 static constexpr int TIMESYNC_MIN_FRAME_ADVANTAGE = 1;
-static constexpr int TIMESYNC_MAX_FRAME_ADVANTAGE = 9;
+static constexpr int TIMESYNC_MAX_FRAME_ADVANTAGE = 14;
 
 static int32_t g_localAdvHistory[TIMESYNC_WINDOW_SIZE] = {};
 static int32_t g_remoteAdvHistory[TIMESYNC_WINDOW_SIZE] = {};
