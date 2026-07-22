@@ -22,7 +22,9 @@ What it does:
   1. Parses both files, picks one "primary" entry per frame per file (skipping
      resim/diag duplicate entries unless that's all there is).
    2. Walks frames in increasing order, comparing matching (team,slot) characters
-      and matching shots by list/order.
+      and matching shots by list/order. Shot addresses and owner/element pointers
+      are process-local metadata and are intentionally not treated as gameplay
+      divergence.
    3. Reports the FIRST frame where anything differs beyond tolerance, classifies
       *what kind* of divergence it is (RNG-only / position / action / flags /
       mHeld / fcnt / dirSlot / dir0 / dir4 / h590 / h594 / dirRing), and prints N frames of context before and after it
@@ -52,6 +54,15 @@ def is_secondary_side(side):
             (side.endswith("_resim") or side.endswith("_pre_restore_prediction")))
 
 
+def side_priority(side):
+    """Prefer canonical live records, then corrected resim, then predictions."""
+    if not is_secondary_side(side):
+        return 2
+    if isinstance(side, str) and (side == "resim" or side.endswith("_resim")):
+        return 1
+    return 0
+
+
 def load_ndjson(path):
     """Returns dict: frame -> entry (picks the best entry per frame)."""
     by_frame = OrderedDict()
@@ -73,8 +84,10 @@ def load_ndjson(path):
             if existing is None:
                 by_frame[frame] = entry
             else:
-                # Prefer a primary-side entry over a secondary one if we see both.
-                if is_secondary_side(existing.get("side")) and not is_secondary_side(side):
+                # A frame can contain both the intentionally stale pre-restore
+                # prediction and its corrected resim result. Prefer the latter
+                # when no canonical live record is present.
+                if side_priority(side) > side_priority(existing.get("side")):
                     by_frame[frame] = entry
     return by_frame
 
@@ -287,11 +300,12 @@ def diff_shot(sa, sb, pos_eps):
     diffs = {}
     if sa.get("slot") != sb.get("slot"):
         diffs["slot"] = f"A={sa.get('slot')} B={sb.get('slot')}"
-    if sa.get("init") != sb.get("init"):
-        diffs["init"] = f"A={sa.get('init')} B={sb.get('init')}"
-    for field in ("owner", "element", "state"):
-        if not hex_eq(sa.get(field), sb.get(field)):
-            diffs[field] = f"A={sa.get(field)} B={sb.get(field)}"
+    if sa.get("kind") != sb.get("kind"):
+        diffs["kind"] = f"A={sa.get('kind')} B={sb.get('kind')}"
+    # addr, owner, element, and init are allocator/process-local values. They
+    # cannot be compared between host and client logs reliably.
+    if not hex_eq(sa.get("state"), sb.get("state")):
+        diffs["state"] = f"A={sa.get('state')} B={sb.get('state')}"
     pd = pos_diff(sa.get("pos"), sb.get("pos"))
     if pd is not None and (len(pd) != len(sa.get("pos", [])) or max(pd, default=0) > pos_eps):
         diffs["pos"] = f"A={sa.get('pos')} B={sb.get('pos')} delta={pd}"
@@ -311,8 +325,8 @@ def fmt_entry_shots(entry):
     if not shots:
         return "  (no shots)"
     return "\n".join(
-        f"    list={s.get('list')} slot={s.get('slot')} state={s.get('state')} "
-        f"pos={s.get('pos')} timer={s.get('timer')} owner={s.get('owner')}"
+        f"    list={s.get('list')} slot={s.get('slot')} kind={s.get('kind', '?')} "
+        f"state={s.get('state')} pos={s.get('pos')} timer={s.get('timer')}"
         for s in shots
     )
 
@@ -586,7 +600,7 @@ def main():
                 print(f"    [list={shot_key[0]} ordinal={shot_key[1]}]")
                 for fname, desc in shot_fields.items():
                     print(f"      {fname}: {desc}")
-            print("\n    Likely cause: projectile lifecycle, position, or shot-state divergence.")
+            print("\n    Likely cause: projectile lifecycle, position, kind, or shot-state divergence.")
             continue
         if not isinstance(key, tuple):
             continue
@@ -659,10 +673,15 @@ def main():
             print(f"  ... ({len(frame_diffs) - shown} more, use --max-report to see more)")
             break
         raw_fields = set()
-        for d in fields.values():
+        for key, d in fields.items():
+            if key == "__shots__":
+                for shot_fields in d.values():
+                    raw_fields.update(
+                        "shots" if name == "_missing" else f"shot.{name}"
+                        for name in shot_fields
+                    )
+                continue
             if isinstance(d, dict):
-                if d and all(k == "_missing" for k in d):
-                    raw_fields.add("shots")
                 for fname in d.keys():
                     if fname != "__slot_swap__":
                         raw_fields.add(fname)

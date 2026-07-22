@@ -562,8 +562,7 @@ function shotsSame(a, b, eps = 0.001) {
   if (mapA.size !== mapB.size) return false;
   for (const [key, shotA] of mapA) {
     const shotB = mapB.get(key);
-    if (!shotB || shotA.slot !== shotB.slot || shotA.init !== shotB.init ||
-        shotA.owner !== shotB.owner || shotA.element !== shotB.element ||
+    if (!shotB || shotA.slot !== shotB.slot || shotA.kind !== shotB.kind ||
         shotA.state !== shotB.state || !numericArraySame(shotA.pos, shotB.pos, eps) ||
         Math.abs((shotA.timer ?? 0) - (shotB.timer ?? 0)) > eps) return false;
   }
@@ -964,9 +963,24 @@ function drawCanvas(g, frameNum) {
   }
 
   // Draw connecting lines & positions
-  for (const shot of shots) {
+  for (let shotIndex = 0; shotIndex < shots.length; shotIndex++) {
+    const shot = shots[shotIndex];
+    const shotNumber = shotIndex + 1;
     const liveColor = '#ffd166';
     const resimColor = '#ff8c00';
+    const drawShotLabel = (x, y, color, missingText = '') => {
+      ctx.save();
+      ctx.fillStyle = color;
+      ctx.font = '10px monospace';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'bottom';
+      ctx.fillText(`Shot ${shotNumber}`, x, y - 9);
+      if (missingText) {
+        ctx.fillStyle = COLORS.deltaBad;
+        ctx.fillText(missingText, x, y - 21);
+      }
+      ctx.restore();
+    };
     if (shot.live?.pos && shot.resim?.pos) {
       const [lx, ly] = toScreen(shot.live.pos[0], shot.live.pos[1]);
       const [rx, ry] = toScreen(shot.resim.pos[0], shot.resim.pos[1]);
@@ -977,6 +991,8 @@ function drawCanvas(g, frameNum) {
       ctx.strokeStyle = resimColor; ctx.lineWidth = 2; ctx.stroke();
       ctx.beginPath(); ctx.arc(lx, ly, 5, 0, Math.PI * 2);
       ctx.fillStyle = liveColor; ctx.fill(); ctx.strokeStyle = liveColor; ctx.stroke();
+      drawShotLabel(lx, ly, liveColor);
+      drawShotLabel(rx, ry, resimColor);
     } else {
       const projectile = shot.live || shot.resim;
       if (!projectile?.pos) continue;
@@ -984,6 +1000,13 @@ function drawCanvas(g, frameNum) {
       ctx.beginPath(); ctx.arc(sx, sy, 5, 0, Math.PI * 2);
       ctx.strokeStyle = shot.live ? liveColor : resimColor; ctx.lineWidth = 2; ctx.stroke();
       if (shot.live) { ctx.fillStyle = liveColor; ctx.fill(); }
+      const missingSide = compareMode
+        ? (shot.live ? 'Client' : 'Host')
+        : (shot.live ? 'Resim' : 'Live');
+      drawShotLabel(
+        sx, sy, shot.live ? liveColor : resimColor,
+        `Shot does not exist in ${missingSide}`
+      );
     }
   }
 
@@ -1381,7 +1404,7 @@ function drawSidebar(g, frameNum) {
   const shots = getShotPositions(g);
   if (shots.length) {
     html += '<section><h3>Shots</h3>';
-    html += '<table><tr><th>List</th><th>Slot</th><th>Position</th><th>Timer</th><th>State</th></tr>';
+    html += '<table><tr><th>List</th><th>Slot</th><th>Kind</th><th>Position</th><th>Timer</th><th>State</th><th>Owner</th><th>Element</th></tr>';
     for (const shot of shots) {
       const live = shot.live, resim = shot.resim;
       const same = live && resim && shotsSame([live], [resim]);
@@ -1393,8 +1416,11 @@ function drawSidebar(g, frameNum) {
         : (value[field] ?? '—');
       html += `<tr class="${same ? '' : 'mismatch-bg'}">` +
         `<td>${value.list ?? '—'}</td><td>${formatSide('slot')}</td>` +
+        `<td>${formatSide('kind')}</td>` +
         `<td>${live && resim ? `${formatPosition(live.pos)} / ${formatPosition(resim.pos)}` : formatPosition(value.pos)}</td>` +
-        `<td>${formatSide('timer')}</td><td>${formatSide('state')}</td></tr>`;
+        `<td>${formatSide('timer')}</td><td>${formatSide('state')}</td>` +
+        `<td style="font-family:monospace;font-size:10px">${value.owner ?? '—'}</td>` +
+        `<td style="font-family:monospace;font-size:10px">${value.element ?? '—'}</td></tr>`;
     }
     html += '</table></section>';
   }

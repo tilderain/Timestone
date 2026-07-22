@@ -143,6 +143,10 @@ struct SnapshotRange {
 };
 
 static constexpr SnapshotRange CCHR_SCALAR_RESTORE_RANGES[] = {
+    // cUnit::getTimeScale reads +0x28 directly. The generic pointer-preserve
+    // pass can mistake a pair of packed float values here for an address,
+    // leaving a post-rollback hitstop/time-scale value live.
+    {0x28, 0x08},
     {0x48, 0x38},    // parent flags and world position/orientation/scale
     // These pointer-free local/cached/world matrices are derived from the
     // restored position. Reapply them after preserving live model state so
@@ -188,6 +192,10 @@ static constexpr SnapshotRange CCHR_SCALAR_RESTORE_RANGES[] = {
     // Character/team/member identity is rewritten during death and tag swaps.
     // Restore it so pending swap logic resolves the saved roster member.
     {0x2D9C, 0x24},
+    // MtXorShift state is four uint32 values. Restore it explicitly because
+    // the generic 8-byte pointer heuristic can classify an aligned pair of
+    // RNG words as a live pointer and otherwise retain the prediction state.
+    {0x2D80, 0x10},
     // Mutable success/work state for the two embedded cChrCmd objects. These
     // fields are pointer-free, but packed result/index values can trip the
     // generic pointer guard and retain command progress from prediction.
@@ -686,6 +694,8 @@ static std::string Rollback_GenerateHitboxJSON(uint64_t chr) {
     return out;
 }
 
+static std::string Rollback_GenerateShotJSON();
+
 std::string Rollback_GenerateNetplayLiveJSON(int32_t frame, bool isResim,
                                              const char* phase = nullptr,
                                              int32_t rollbackStart = -1,
@@ -912,7 +922,9 @@ std::string Rollback_GenerateNetplayLiveJSON(int32_t frame, bool isResim,
         }
     }
 
-    out += "]}\n";
+    out += "],\"shots\":";
+    out += Rollback_GenerateShotJSON();
+    out += "}\n";
     return out;
 }
 
@@ -1448,6 +1460,58 @@ static bool IsActiveUnit(void* unit)
     if (!unit) return false;
     uint32_t state = *(uint32_t*)((uint8_t*)unit + 0x10);
     return (state & 7u) < 3u && (state & 0x3F8u) != 0x3F8u;
+}
+
+static std::string Rollback_GenerateShotJSON()
+{
+    std::string out = "[";
+    bool first = true;
+    char entry[512];
+
+    for (int list = 0; list < SSHOT_SENTINEL_COUNT; ++list) {
+        uint64_t sentinel = (uint64_t)_addr(0x140d47f90) + list * 0x28;
+        uint64_t sentinelRef = sentinel + 0x08;
+        uint64_t nodeRef = *(uint64_t*)(sentinel + 0x10);
+        int safety = DYNAMIC_SAFETY;
+        while (nodeRef && nodeRef != sentinelRef && safety-- > 0) {
+            void* shot = (void*)(nodeRef - SSHOT_NODE_OFFSET);
+            uint8_t* shotBytes = (uint8_t*)shot;
+            auto recipe = g_liveShotRecipes.find(shot);
+
+            uint32_t slotId = 0;
+            int initParam = 0;
+            uint64_t ownerChr = 0;
+            uint64_t shotElement = 0;
+            const char* kind = "unknown";
+            if (recipe != g_liveShotRecipes.end()) {
+                slotId = recipe->second.slotId;
+                initParam = recipe->second.initParam;
+                ownerChr = (uint64_t)recipe->second.ownerChr;
+                shotElement = (uint64_t)recipe->second.shotElement;
+                kind = recipe->second.kind == ShotSpawnKind::Extended ? "extended" : "standard";
+            }
+
+            snprintf(entry, sizeof(entry),
+                     "%s{\"list\":%d,\"addr\":\"0x%llX\","
+                     "\"slot\":%u,\"init\":%d,\"kind\":\"%s\","
+                     "\"owner\":\"0x%llX\",\"element\":\"0x%llX\","
+                     "\"state\":\"0x%08X\","
+                     "\"pos\":[%.9g,%.9g,%.9g],\"timer\":%.9g}",
+                     first ? "" : ",", list, (uint64_t)shot,
+                     slotId, initParam, kind, ownerChr, shotElement,
+                     *(uint32_t*)(shotBytes + 0x10),
+                     *(float*)(shotBytes + 0x50),
+                     *(float*)(shotBytes + 0x54),
+                     *(float*)(shotBytes + 0x58),
+                     *(float*)(shotBytes + 0x1F60));
+            out += entry;
+            first = false;
+            nodeRef = *(uint64_t*)(nodeRef + 0x10);
+        }
+    }
+
+    out += "]";
+    return out;
 }
 
 static void CaptureShotAndEffectRecipes(SnapshotSlot& slot)
