@@ -64,6 +64,8 @@ static constexpr uintptr_t FN_SSHOT_SPAWN_EX = 0x140150F40;
 static constexpr uintptr_t FN_SSHOT_ENQUEUE_UNIT = 0x1401512A0;
 static constexpr uintptr_t FN_SUNIT_ADD_UNIT = 0x14051A6B0;
 static constexpr uintptr_t FN_SUNIT_REMOVE_UNIT = 0x14051B9F0;
+static constexpr uintptr_t FN_SUNIT_REMOVE_MULTI_MASK = 0x14051BAF0;
+static constexpr uintptr_t FN_SUNIT_REGISTER_MULTI_MASK = 0x14051BDE0;
 static constexpr uintptr_t FN_UGAMEEFFECT_CREATE = 0x140131410;
 
 // ===========================================================================
@@ -1206,9 +1208,15 @@ struct Region {
 };
 
 struct ShotFlightState {
+    uint32_t unitState;             // +0x10 cUnit lifecycle/gameplay flags
     // uModel+0x100 is a live owned pointer, so only restore the contiguous
     // position/quaternion/matrix scalar block preceding it.
     uint8_t transformState[0xB0];  // +0x50..+0xFF
+    // uShot's per-frame lifetime, motion and position scalars. These are
+    // outside the factory-init block and are consumed by uShot::move before
+    // it dispatches attack/collision callbacks. Recreating a shot without
+    // them leaves the new object at the current timeline's projectile phase.
+    uint8_t runtimeScalars[0x38];   // +0x3E8..+0x41F
     uint8_t shotMatrices[0x100];   // +0x1E50..+0x1F4F
     float timerThresh;
     float timer;
@@ -1288,6 +1296,8 @@ using ShotSpawnExFn = void*(__fastcall*)(void*, void*, int, void*, void*, void*,
 using ShotEnqueueFn = char(__fastcall*)(void*, void*, int);
 using UnitAddFn = char(__fastcall*)(void*, int, void*, void*);
 using UnitRemoveFn = char(__fastcall*)(void*, void*);
+using UnitRemoveMultiMaskFn = void(__fastcall*)(void*, void*);
+using UnitRegisterMultiMaskFn = void(__fastcall*)(void*, void*, uint64_t);
 using EffectCreateFn = void*(__fastcall*)(void*, int, int, void*, int, int, void*, void*,
                                           int, void*, int, uint32_t, void*);
 
@@ -1332,7 +1342,9 @@ static void CaptureCollisionNodeClones(SnapshotSlot& slot)
 static void CaptureShotFlight(void* shot, ShotFlightState& out)
 {
     auto* p = (uint8_t*)shot;
+    std::memcpy(&out.unitState, p + 0x10, sizeof(out.unitState));
     std::memcpy(out.transformState, p + 0x50, sizeof(out.transformState));
+    std::memcpy(out.runtimeScalars, p + 0x3E8, sizeof(out.runtimeScalars));
     std::memcpy(out.shotMatrices, p + 0x1E50, sizeof(out.shotMatrices));
     std::memcpy(&out.timerThresh, p + 0x1F58, sizeof(out.timerThresh));
     std::memcpy(&out.timer, p + 0x1F60, sizeof(out.timer));
@@ -1347,7 +1359,14 @@ static void CaptureShotFlight(void* shot, ShotFlightState& out)
 static void ApplyShotFlight(void* shot, const ShotFlightState& in)
 {
     auto* p = (uint8_t*)shot;
+    // sUnit::addUnit rewrites only category bits 3..9. Preserve the factory's
+    // current category sentinel until registration, but restore the saved
+    // lifecycle state so an active shot does not run setup a second time.
+    uint32_t unitState = *(uint32_t*)(p + 0x10);
+    unitState = (in.unitState & ~0x3F8u) | (unitState & 0x3F8u);
+    std::memcpy(p + 0x10, &unitState, sizeof(unitState));
     std::memcpy(p + 0x50, in.transformState, sizeof(in.transformState));
+    std::memcpy(p + 0x3E8, in.runtimeScalars, sizeof(in.runtimeScalars));
     std::memcpy(p + 0x1E50, in.shotMatrices, sizeof(in.shotMatrices));
     std::memcpy(p + 0x1F58, &in.timerThresh, sizeof(in.timerThresh));
     std::memcpy(p + 0x1F60, &in.timer, sizeof(in.timer));
@@ -1559,16 +1578,32 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
         return;
     }
 
+    void* sUnit = *(void**)_addr(PTR_SUNIT);
+    auto removeMultiMask = (UnitRemoveMultiMaskFn)_addr(FN_SUNIT_REMOVE_MULTI_MASK);
+    auto removeUnit = (UnitRemoveFn)_addr(FN_SUNIT_REMOVE_UNIT);
+
     // A projectile that has already advanced cannot be made equivalent to its
     // saved state by patching trajectory fields: hit-consumption, collision,
-    // callback, and subclass-tail state remain advanced. Retire every current
-    // shot and recreate the saved set through the native factory below.
+    // callback, and subclass-tail state remain advanced. Remove every current
+    // shot synchronously before recreating the saved set. Merely setting state
+    // 3 leaves the object in both sUnit and sShot for two more moveCategory
+    // passes, so rollback would briefly run the retired shot beside its clone.
     int retiredShots = 0;
+    std::vector<void*> currentShots;
+    currentShots.reserve(g_liveShotRecipes.size());
     for (const auto& entry : g_liveShotRecipes) {
         if (!IsLinkedShot(entry.first)) continue;
-        uint32_t* state = (uint32_t*)((uint8_t*)entry.first + 0x10);
-        *state = (*state & ~7u) | 3u;
-        retiredShots++;
+        currentShots.push_back(entry.first);
+    }
+    for (void* shot : currentShots) {
+        uint32_t* state = (uint32_t*)((uint8_t*)shot + 0x10);
+        removeMultiMask(sUnit, shot);
+        removeUnit(sUnit, shot);
+        *state &= ~7u;
+        uint64_t vtable = *(uint64_t*)shot;
+        auto destroy = (void(__fastcall*)(void*, uint32_t))*(uint64_t*)vtable;
+        destroy(shot, 1);
+        ++retiredShots;
     }
 
     // Effect factory arguments include transient animation/stack pointers and
@@ -1584,9 +1619,10 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
     }
 
     void* sShot = *(void**)_addr(PTR_SSHOT);
-    void* sUnit = *(void**)_addr(PTR_SUNIT);
     auto enqueue = (ShotEnqueueFn)_addr(FN_SSHOT_ENQUEUE_UNIT);
     auto addUnit = (UnitAddFn)_addr(FN_SUNIT_ADD_UNIT);
+    auto registerMultiMask =
+        (UnitRegisterMultiMaskFn)_addr(FN_SUNIT_REGISTER_MULTI_MASK);
     int respawnedShots = 0;
     int failedShots = 0;
 
@@ -1652,6 +1688,17 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
             addUnit(sUnit, SSHOT_CATEGORY, fresh, nullptr);
         }
         ApplyShotFlight(fresh, saved.flight);
+
+        // sUnit::addUnit assigns category bits 3..9, but the restore state
+        // write above intentionally preserves the saved gameplay bits and can
+        // retain the removed sentinel (0x3f8). Reassert the projectile
+        // category after all flight fields are restored, then rebuild the
+        // multi-mask arrays from the shot's active vtable state. Otherwise the
+        // shot remains visible in sShot while it is absent from the normal
+        // sUnit category/multi-mask update path.
+        uint32_t* unitState = (uint32_t*)((uint8_t*)fresh + 0x10);
+        *unitState = (*unitState & ~0x3F8u) | (SSHOT_CATEGORY << 3);
+        registerMultiMask(sUnit, fresh, 0);
         respawnedShots++;
     }
 
