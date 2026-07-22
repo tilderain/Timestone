@@ -128,6 +128,9 @@ static constexpr uint32_t CCHR_EXTERNAL_ANIM_OFFSETS[] = {
     0x4200, 0x4E10, 0x5520, 0x5C30
 };
 static constexpr size_t CCHR_EXTERNAL_ANIM_SIZE = 0xE0;
+static constexpr uintptr_t UCHRCPU_VTABLE = 0x140A87B08;
+static constexpr uint32_t UCHRCPU_VM_STATE_OFFSET = 0xD0;
+static constexpr uint32_t UCHRCPU_VM_STATE_SIZE = 0x1580; // through +0x164f
 static constexpr int CCHR_MOTION_COUNT = 8;
 static constexpr uint32_t CCHR_DRAW_STATE_START = 0x80;
 static constexpr uint32_t CCHR_DRAW_STATE_END   = CCHR_MOTION_BASE;
@@ -545,6 +548,8 @@ static void __fastcall hkCChrSetPos(uint64_t character, const float* position)
 static void(__fastcall* oCallSRender)(uint64_t param_1) = nullptr;
 // Trampoline for sMain__move (frame-timing / QPC / Sleep / busy-wait)
 static void(__fastcall* oMain_move)(uint64_t param_1) = nullptr;
+// Trampoline for sSound__move. Audio scene state is not rollback gameplay state.
+static void(__fastcall* oSound_move)(uint64_t param_1) = nullptr;
 // Trampoline for the fighter pushbox collision callback.
 static void(__fastcall* oApplyCollisionPushCorrection)(
     uint64_t character,
@@ -2755,6 +2760,7 @@ static constexpr uintptr_t FN_COLLISION_BEGIN_FRAME  = 0x1405bb710;  // sCollisi
 static constexpr uintptr_t FN_CALL_AI                = 0x140647910;  // direct call on sMain+0x40240 (AI)
 static constexpr uintptr_t FN_UPDATE_RENDER_STATE    = 0x140259ea0;  // sMvc3Main__updateRenderState
 static constexpr uintptr_t FN_RENDER_END_FRAME       = 0x14053a250;  // sRender__endFrameAndPresent
+static constexpr uintptr_t FN_SSOUND_MOVE             = 0x1405CC040;
 static constexpr uintptr_t FN_APPLY_COLLISION_PUSH   = 0x14004ad20;  // fighter pushbox response callback
 static constexpr uintptr_t FN_RESET_HITNODES         = 0x140259e90;  // j_sHitSolver__resetActiveNodes
 static constexpr uintptr_t FN_PAD_METHOD_3D00        = 0x1402a3d00;  // sPad method
@@ -3567,6 +3573,33 @@ void Rollback_RestoreSnapshot(int32_t frame)
                     std::memcpy((uint8_t*)slot.regions[i].ptr + range.offset,
                                 slot.data + offset + range.offset,
                                 range.size);
+                }
+            }
+
+            // uChrCpu's interpreter stack contains 32-bit script values, so
+            // pairs of words can look like pointers to the generic guard. A
+            // split restore of that stack and its cursor lets the VM combine
+            // stale words into a bogus manager pointer during re-simulation.
+            // Locate the embedded uChrCpu by its vtable and restore the VM
+            // stack plus scalar execution state as one pointer-free block.
+            const uint64_t cpuVtable = _addr(UCHRCPU_VTABLE);
+            if (cpuVtable != 0) {
+                for (size_t cpuOffset = 0;
+                     cpuOffset + sizeof(uint64_t) <= copySize;
+                     cpuOffset += sizeof(uint64_t)) {
+                    uint64_t liveVtable = *(uint64_t*)((uint8_t*)slot.regions[i].ptr +
+                                                       cpuOffset);
+                    if (liveVtable != cpuVtable) continue;
+                    if (cpuOffset + UCHRCPU_VM_STATE_OFFSET +
+                            UCHRCPU_VM_STATE_SIZE > copySize)
+                        break;
+
+                    std::memcpy((uint8_t*)slot.regions[i].ptr + cpuOffset +
+                                    UCHRCPU_VM_STATE_OFFSET,
+                                slot.data + offset + cpuOffset +
+                                    UCHRCPU_VM_STATE_OFFSET,
+                                UCHRCPU_VM_STATE_SIZE);
+                    break;
                 }
             }
 
@@ -4876,6 +4909,15 @@ static void __fastcall hkCallSRender(uint64_t param_1)
     oCallSRender(param_1);
 }
 
+static void __fastcall hkSound_move(uint64_t param_1)
+{
+    // Sound scenes contain live emitter/model pointers and transient matrix
+    // indices. They are cosmetic and are not part of the rollback snapshot, so
+    // advancing them during headless ticks can dereference abandoned objects.
+    if (!g_isResimulating)
+        oSound_move(param_1);
+}
+
 // ===========================================================================
 // Hook — sMain__move (frame timing / Sleep / busy-wait)
 //
@@ -5055,6 +5097,18 @@ void Rollback_InitHooks()
                 (uint64_t)_addr(FN_RENDER_END_FRAME));
     } else {
         HookLog("Rollback: failed to hook sRender call (%d)\n", s);
+    }
+
+    s = MH_CreateHook(
+        (LPVOID)_addr(FN_SSOUND_MOVE),
+        (LPVOID)&hkSound_move,
+        (LPVOID*)&oSound_move
+    );
+    if (s == MH_OK) {
+        MH_EnableHook((LPVOID)_addr(FN_SSOUND_MOVE));
+        HookLog("Rollback: hooked sSound__move for headless re-simulation\n");
+    } else {
+        HookLog("Rollback: failed to hook sSound__move (%d)\n", s);
     }
 
     // sMain__move (frame-timing / QPC / Sleep / busy-wait) — NOP during re-sim

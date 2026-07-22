@@ -5,7 +5,10 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <tlhelp32.h>
+#include <winver.h>
 
 extern void HookLog(const char* fmt, ...);
 
@@ -89,6 +92,92 @@ bool IsExecutableAddress(uintptr_t address)
     const DWORD executable = PAGE_EXECUTE | PAGE_EXECUTE_READ |
         PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
     return (memory.Protect & executable) != 0;
+}
+
+bool ReadModuleImageInfo(HMODULE module, DWORD* timestamp, DWORD* imageSize)
+{
+    if (!module || !timestamp || !imageSize ||
+        !IsReadableRange(reinterpret_cast<uintptr_t>(module), sizeof(IMAGE_DOS_HEADER)))
+        return false;
+
+    const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(module);
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE || dos->e_lfanew < 0)
+        return false;
+
+    const uintptr_t ntAddress = reinterpret_cast<uintptr_t>(module) +
+        static_cast<uintptr_t>(dos->e_lfanew);
+    if (!IsReadableRange(ntAddress, sizeof(IMAGE_NT_HEADERS)))
+        return false;
+
+    const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(ntAddress);
+    if (nt->Signature != IMAGE_NT_SIGNATURE)
+        return false;
+
+    *timestamp = nt->FileHeader.TimeDateStamp;
+    *imageSize = nt->OptionalHeader.SizeOfImage;
+    return true;
+}
+
+void WriteModuleVersion(FILE* file, const char* path)
+{
+    DWORD ignored = 0;
+    const DWORD versionSize = GetFileVersionInfoSizeA(path, &ignored);
+    if (!versionSize)
+        return;
+
+    void* versionData = std::malloc(versionSize);
+    if (!versionData || !GetFileVersionInfoA(path, 0, versionSize, versionData)) {
+        std::free(versionData);
+        return;
+    }
+
+    VS_FIXEDFILEINFO* fixed = nullptr;
+    UINT fixedSize = 0;
+    if (VerQueryValueA(versionData, "\\", reinterpret_cast<void**>(&fixed), &fixedSize) &&
+        fixed && fixedSize >= sizeof(VS_FIXEDFILEINFO)) {
+        std::fprintf(file, " version=%u.%u.%u.%u",
+            HIWORD(fixed->dwFileVersionMS), LOWORD(fixed->dwFileVersionMS),
+            HIWORD(fixed->dwFileVersionLS), LOWORD(fixed->dwFileVersionLS));
+    }
+    std::free(versionData);
+}
+
+void WriteLoadedModules(FILE* file)
+{
+    std::fprintf(file, "loaded modules:\n");
+    HANDLE snapshot = CreateToolhelp32Snapshot(
+        TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, GetCurrentProcessId());
+    if (snapshot == INVALID_HANDLE_VALUE) {
+        std::fprintf(file, "  <unavailable error=%lu>\n",
+            static_cast<unsigned long>(GetLastError()));
+        return;
+    }
+
+    MODULEENTRY32 entry{};
+    entry.dwSize = sizeof(entry);
+    BOOL hasModule = Module32First(snapshot, &entry);
+    while (hasModule) {
+        DWORD timestamp = 0;
+        DWORD imageSize = 0;
+        const bool hasImageInfo = ReadModuleImageInfo(
+            entry.hModule, &timestamp, &imageSize);
+
+        std::fprintf(file, "  %s base=0x%016llX size=0x%lX timestamp=0x%08lX",
+            entry.szExePath,
+            static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(entry.modBaseAddr)),
+            static_cast<unsigned long>(hasImageInfo ? imageSize : 0),
+            static_cast<unsigned long>(hasImageInfo ? timestamp : 0));
+        WriteModuleVersion(file, entry.szExePath);
+        if (!hasImageInfo)
+            std::fprintf(file, " image_info=<unavailable>");
+        std::fprintf(file, "\n");
+
+        hasModule = Module32Next(snapshot, &entry);
+    }
+    if (!hasModule && GetLastError() != ERROR_NO_MORE_FILES)
+        std::fprintf(file, "  <enumeration stopped error=%lu>\n",
+            static_cast<unsigned long>(GetLastError()));
+    CloseHandle(snapshot);
 }
 
 void WriteUnwindBacktrace(FILE* file, const CONTEXT* exceptionContext)
@@ -200,6 +289,7 @@ LONG WINAPI ExceptionHandler(PEXCEPTION_POINTERS info)
         }
 
         ResolveAddress(file, "fault: ", context->Rip);
+        WriteLoadedModules(file);
         WriteUnwindBacktrace(file, context);
         std::fprintf(file, "stack scan (executable addresses):\n");
         constexpr size_t stackEntries = 96;
