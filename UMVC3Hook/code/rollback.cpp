@@ -137,6 +137,10 @@ static constexpr uint32_t SUNIT_CATEGORY_COUNT_OFFSET = 0xC38;
 static constexpr uint32_t SUNIT_CATEGORY_LISTS_OFFSET = 0x50;
 static constexpr uint32_t SUNIT_CATEGORY_LIST_STRIDE  = 0x30;
 static constexpr uint32_t SUNIT_CHARACTER_CATEGORY    = 8;
+static constexpr uint32_t SUNIT_MAX_CATEGORIES        = 64;
+static constexpr uint32_t SUNIT_MULTI_MASK_COUNT_OFFSET = 0x1840;
+static constexpr uint32_t SUNIT_MULTI_MASK_ARRAYS_OFFSET = 0xC50;
+static constexpr uintptr_t DTI_CUNIT                  = 0x140E173D0;
 static constexpr uint32_t CUNIT_LIVE_STATE_OFFSETS[] = {0x10, 0x18, 0x20, 0x38};
 static constexpr size_t SMAIN_SIZE = 0x40080;
 static constexpr int SSHOT_CATEGORY = 10;
@@ -287,6 +291,121 @@ static bool HasCallableDtiVirtual(const void* object)
     const DWORD executable = PAGE_EXECUTE | PAGE_EXECUTE_READ |
         PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
     return (mbi.Protect & executable) != 0;
+}
+
+static bool IsUnitObject(const void* object)
+{
+    if (!HasCallableDtiVirtual(object)) return false;
+
+    uint64_t dti = GetObjectDti((uint64_t)object);
+    const uint64_t unitDti = _addr(DTI_CUNIT);
+    for (int depth = 0; dti && depth < 128; ++depth) {
+        if (dti == unitDti) return true;
+        if (!IsAccessibleAddress(dti + 0x20)) return false;
+        uint64_t parent = *(const uint64_t*)(dti + 0x20);
+        if (parent == dti) return false;
+        dti = parent;
+    }
+    return false;
+}
+
+static int SanitizeUnitCategoryLists(void* sUnit)
+{
+    if (!sUnit || !IsAccessiblePointer((uint64_t)sUnit)) return 0;
+
+    uint32_t categoryCount =
+        *(uint32_t*)((uint8_t*)sUnit + SUNIT_CATEGORY_COUNT_OFFSET);
+    if (categoryCount > SUNIT_MAX_CATEGORIES)
+        categoryCount = SUNIT_MAX_CATEGORIES;
+
+    uint32_t maskCount =
+        *(uint32_t*)((uint8_t*)sUnit + SUNIT_MULTI_MASK_COUNT_OFFSET);
+    if (maskCount > SUNIT_MAX_CATEGORIES)
+        maskCount = SUNIT_MAX_CATEGORIES;
+
+    int removed = 0;
+    for (uint32_t category = 0; category < categoryCount; ++category) {
+        auto* head = (void**)((uint8_t*)sUnit + SUNIT_CATEGORY_LISTS_OFFSET +
+                              SUNIT_CATEGORY_LIST_STRIDE * category);
+        auto* tail = head + 1;
+        void* previous = nullptr;
+        void* node = *head;
+        int safety = 4096;
+
+        while (node && safety-- > 0) {
+            if (!IsAccessibleAddress((uint64_t)node + 0x20)) {
+                if (previous)
+                    *(void**)((uint8_t*)previous + 0x18) = nullptr;
+                else
+                    *head = nullptr;
+                *tail = previous;
+                ++removed;
+                break;
+            }
+
+            void* next = *(void**)((uint8_t*)node + 0x18);
+            if (IsUnitObject(node)) {
+                previous = node;
+                node = next;
+                continue;
+            }
+
+            // The pending-shot queue can register scalar or unrelated object
+            // storage as a unit when its count overruns the 512-entry buffer.
+            // Remove the foreign pointer without reading its category or mask.
+            for (uint32_t mask = 0; mask < maskCount; ++mask) {
+                uint8_t* array = (uint8_t*)sUnit + SUNIT_MULTI_MASK_ARRAYS_OFFSET +
+                                 SUNIT_CATEGORY_LIST_STRIDE * mask;
+                uint32_t* count = (uint32_t*)(array + 0x08);
+                uint32_t capacity = *(uint32_t*)(array + 0x0C);
+                void** entries = *(void***)(array + 0x18);
+                if (*count > capacity || !entries ||
+                    !IsAccessibleAddress((uint64_t)entries +
+                                         (size_t)capacity * sizeof(void*)))
+                    continue;
+
+                for (uint32_t i = 0; i < *count;) {
+                    if (entries[i] != node) {
+                        ++i;
+                        continue;
+                    }
+                    for (uint32_t j = i + 1; j < *count; ++j)
+                        entries[j - 1] = entries[j];
+                    entries[--*count] = nullptr;
+                }
+            }
+
+            if (previous)
+                *(void**)((uint8_t*)previous + 0x18) = next;
+            else
+                *head = next;
+
+            if (next && IsAccessibleAddress((uint64_t)next + 0x20))
+                *(void**)((uint8_t*)next + 0x20) = previous;
+            else if (next) {
+                next = nullptr;
+                if (previous)
+                    *(void**)((uint8_t*)previous + 0x18) = nullptr;
+                else
+                    *head = nullptr;
+            }
+
+            if (*tail == node || !next)
+                *tail = previous;
+
+            ++removed;
+            node = next;
+        }
+
+        if (node && safety <= 0) {
+            if (previous)
+                *(void**)((uint8_t*)previous + 0x18) = nullptr;
+            else
+                *head = nullptr;
+            *tail = previous;
+        }
+    }
+    return removed;
 }
 
 static void RestoreSCollisionBody(void* destination, const uint8_t* source, size_t size)
@@ -1720,6 +1839,12 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
     void* sUnit = *(void**)_addr(PTR_SUNIT);
     auto removeMultiMask = (UnitRemoveMultiMaskFn)_addr(FN_SUNIT_REMOVE_MULTI_MASK);
     auto removeUnit = (UnitRemoveFn)_addr(FN_SUNIT_REMOVE_UNIT);
+
+    int removedInvalidUnits = SanitizeUnitCategoryLists(sUnit);
+    if (removedInvalidUnits != 0) {
+        HookLog("Rollback: removed %d invalid sUnit category entries before restore\n",
+                removedInvalidUnits);
+    }
 
     // Effects can retain weak references to shots and other transient units at
     // +0x280. Retire every native effect-category entry before destroying the
