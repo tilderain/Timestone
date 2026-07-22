@@ -260,7 +260,7 @@ static int32_t   g_lastRemoteFrame = -1;
 static uint32_t  g_lastRemoteInput = 0;
 static int32_t   g_lastNonMultiCheckedFrame = -1;
 
-bool g_multiResimEnabled = false; // Multi-resimulation toggle
+bool g_multiResimEnabled = true; // Multi-resimulation toggle
 
 // ---------------------------------------------------------------------------
 // Desync detection — per-frame XOR checksums of all character state.

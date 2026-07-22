@@ -91,6 +91,58 @@ bool IsExecutableAddress(uintptr_t address)
     return (memory.Protect & executable) != 0;
 }
 
+void WriteUnwindBacktrace(FILE* file, const CONTEXT* exceptionContext)
+{
+#if defined(_M_X64) || defined(__x86_64__)
+    CONTEXT context = *exceptionContext;
+    std::fprintf(file, "unwind backtrace:\n");
+
+    constexpr size_t maxFrames = 64;
+    for (size_t frame = 0; frame < maxFrames && context.Rip; ++frame) {
+        char tag[24] = {};
+        std::snprintf(tag, sizeof(tag), "  #%02llu: ",
+            static_cast<unsigned long long>(frame));
+        ResolveAddress(file, tag, context.Rip);
+
+        const DWORD64 previousRip = context.Rip;
+        const DWORD64 previousRsp = context.Rsp;
+        DWORD64 imageBase = 0;
+        PRUNTIME_FUNCTION function = RtlLookupFunctionEntry(
+            context.Rip, &imageBase, nullptr);
+
+        if (function) {
+            PVOID handlerData = nullptr;
+            DWORD64 establisherFrame = 0;
+            RtlVirtualUnwind(
+                UNW_FLAG_NHANDLER,
+                imageBase,
+                context.Rip,
+                function,
+                &context,
+                &handlerData,
+                &establisherFrame,
+                nullptr);
+        } else {
+            // Leaf functions have no unwind metadata. Their return address is
+            // the qword at RSP, as long as the stack location remains readable.
+            if (!IsReadableRange(context.Rsp, sizeof(uintptr_t)))
+                break;
+            context.Rip = *reinterpret_cast<const uintptr_t*>(context.Rsp);
+            context.Rsp += sizeof(uintptr_t);
+        }
+
+        if ((context.Rip == previousRip && context.Rsp == previousRsp) ||
+            context.Rsp <= previousRsp ||
+            (context.Rip != 0 && !IsExecutableAddress(context.Rip))) {
+            break;
+        }
+    }
+#else
+    (void)exceptionContext;
+    std::fprintf(file, "unwind backtrace: <unsupported architecture>\n");
+#endif
+}
+
 LONG WINAPI ExceptionHandler(PEXCEPTION_POINTERS info)
 {
     if (!info || !info->ExceptionRecord || !info->ContextRecord)
@@ -148,6 +200,7 @@ LONG WINAPI ExceptionHandler(PEXCEPTION_POINTERS info)
         }
 
         ResolveAddress(file, "fault: ", context->Rip);
+        WriteUnwindBacktrace(file, context);
         std::fprintf(file, "stack scan (executable addresses):\n");
         constexpr size_t stackEntries = 96;
         if (IsReadableRange(context->Rsp, stackEntries * sizeof(uintptr_t))) {

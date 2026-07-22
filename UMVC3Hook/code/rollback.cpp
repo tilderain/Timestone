@@ -271,6 +271,24 @@ static bool IsAccessibleAddress(uint64_t value)
     return (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) == 0;
 }
 
+static bool HasCallableDtiVirtual(const void* object)
+{
+    uint64_t address = (uint64_t)object;
+    if (!IsAccessiblePointer(address)) return false;
+
+    uint64_t vtable = *(const uint64_t*)object;
+    if (!IsAccessibleAddress(vtable + 0x20)) return false;
+
+    uint64_t getDti = *(const uint64_t*)(vtable + 0x20);
+    if (!getDti || !IsAccessibleAddress(getDti)) return false;
+
+    MEMORY_BASIC_INFORMATION mbi = {};
+    if (VirtualQuery((void*)getDti, &mbi, sizeof(mbi)) == 0) return false;
+    const DWORD executable = PAGE_EXECUTE | PAGE_EXECUTE_READ |
+        PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
+    return (mbi.Protect & executable) != 0;
+}
+
 static void RestoreSCollisionBody(void* destination, const uint8_t* source, size_t size)
 {
     if (size < SCOLLISION_SIZE) return;
@@ -1276,6 +1294,7 @@ using ShotSpawnFn = void*(__fastcall*)(void*, void*, int, void*, void*, void*, u
 using ShotSpawnExFn = void*(__fastcall*)(void*, void*, int, void*, void*, void*, uint32_t,
                                         void*, int, void*, int, void*);
 using ShotEnqueueFn = char(__fastcall*)(void*, void*, int);
+using UnitAddFn = char(__fastcall*)(void*, int, void*, void*);
 using UnitRemoveFn = char(__fastcall*)(void*, void*);
 using UnitRemoveMultiMaskFn = void(__fastcall*)(void*, void*);
 using EffectCreateFn = void*(__fastcall*)(void*, int, int, void*, int, int, void*, void*,
@@ -1296,10 +1315,11 @@ static bool IsZireitouShot(void* shot)
 static void DestroyCollisionNodeClones(SnapshotSlot& slot)
 {
     for (const CollisionNodeClone& entry : slot.collisionNodeClones) {
-        if (!entry.clone) continue;
+        if (!entry.clone || !HasCallableDtiVirtual(entry.clone)) continue;
         uint64_t vtable = *(uint64_t*)entry.clone;
         auto destroy = (void(__fastcall*)(void*, uint32_t))*(uint64_t*)vtable;
-        destroy(entry.clone, 1);
+        if (destroy && IsAccessibleAddress((uint64_t)destroy))
+            destroy(entry.clone, 1);
     }
     slot.collisionNodeClones.clear();
 }
@@ -1314,6 +1334,7 @@ static void CaptureCollisionNodeClones(SnapshotSlot& slot)
     for (int i = 0; i < slot.regionCount; ++i) {
         const Region& region = slot.regions[i];
         if (!region.ownerSlot || region.size != CCHR_EXTERNAL_ANIM_SIZE) continue;
+        if (!HasCallableDtiVirtual(region.ptr)) continue;
 
         void* clone = createNode(nullptr);
         if (!clone) continue;
@@ -1700,6 +1721,28 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
     auto removeMultiMask = (UnitRemoveMultiMaskFn)_addr(FN_SUNIT_REMOVE_MULTI_MASK);
     auto removeUnit = (UnitRemoveFn)_addr(FN_SUNIT_REMOVE_UNIT);
 
+    // Effects can retain weak references to shots and other transient units at
+    // +0x280. Retire every native effect-category entry before destroying the
+    // current shots so untracked effects cannot move with a dangling target on
+    // the first re-simulated tick. State 3 preserves sUnit's required two-step
+    // multi-mask and primary-list cleanup.
+    int retiredEffects = 0;
+    uint32_t categoryCount = *(uint32_t*)((uint8_t*)sUnit + SUNIT_CATEGORY_COUNT_OFFSET);
+    for (uint32_t category = 13; category <= 16 && category < categoryCount; ++category) {
+        void* effect = *(void**)((uint8_t*)sUnit + SUNIT_CATEGORY_LISTS_OFFSET +
+                                SUNIT_CATEGORY_LIST_STRIDE * category);
+        int safety = 4096;
+        while (effect && safety-- > 0) {
+            void* next = *(void**)((uint8_t*)effect + 0x18);
+            uint32_t* state = (uint32_t*)((uint8_t*)effect + 0x10);
+            if ((*state & 7u) < 3u) {
+                *state = (*state & ~7u) | 3u;
+                ++retiredEffects;
+            }
+            effect = next;
+        }
+    }
+
     // A projectile that has already advanced cannot be made equivalent to its
     // saved state by patching trajectory fields: hit-consumption, collision,
     // callback, and subclass-tail state remain advanced. Remove every current
@@ -1724,22 +1767,17 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
         ++retiredShots;
     }
 
-    // Effect factory arguments include transient animation/stack pointers and
-    // are not a self-contained reconstruction recipe. Replaying them produced
-    // corrupt stretched geometry. Retire old effects normally; shot spawn and
-    // deterministic simulation will recreate their owned effects.
-    int retiredEffects = 0;
-    for (const auto& entry : g_liveEffectRecipes) {
-        if (!IsActiveUnit(entry.first)) continue;
-        uint32_t* state = (uint32_t*)((uint8_t*)entry.first + 0x10);
-        *state = (*state & ~7u) | 3u;
-        retiredEffects++;
-    }
-
     void* sShot = *(void**)_addr(PTR_SSHOT);
     auto enqueueUnit = (ShotEnqueueFn)_addr(FN_SSHOT_ENQUEUE_UNIT);
+    auto addUnit = (UnitAddFn)_addr(FN_SUNIT_ADD_UNIT);
     auto flushPendingUnits =
         (void(__fastcall*)(void*))_addr(FN_SSHOT_FLUSH_PENDING_UNITS);
+    uint32_t* pendingCountPtr = (uint32_t*)((uint8_t*)sShot + 0x2448);
+    if (*pendingCountPtr != 0) {
+        HookLog("Rollback: discarding %u pre-restore pending-shot entries\n",
+                *pendingCountPtr);
+        *pendingCountPtr = 0;
+    }
     int respawnedShots = 0;
     int failedShots = 0;
 
@@ -1804,7 +1842,14 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
         // Rebuild registration through the same pending-unit path used by the
         // native shot callers. Drain it before resimulation so all restored
         // shots enter the category list in one native registration pass.
-        enqueueUnit(sShot, fresh, SSHOT_CATEGORY);
+        // The native pending queue holds 0x200 entries. Its enqueue function
+        // increments the counter even on overflow, which would make the later
+        // flush walk beyond the queue buffer. Match the native caller fallback
+        // without touching the counter once the queue is full.
+        uint32_t pendingCount = *pendingCountPtr;
+        if (pendingCount >= 0x200 || !enqueueUnit(sShot, fresh, SSHOT_CATEGORY)) {
+            addUnit(sUnit, SSHOT_CATEGORY, fresh, nullptr);
+        }
         ApplyShotFlight(fresh, saved.flight);
 
         // ApplyShotFlight preserves the category assigned by addUnit while
@@ -1814,6 +1859,15 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
         respawnedShots++;
     }
 
+    // Native enqueue increments the counter before rejecting an overflow. A
+    // concurrent/native spawn during reconstruction can therefore poison it
+    // again even though our own calls stop at capacity. Never let flush walk
+    // beyond the 512-entry buffer into the activity array at +0x2450.
+    if (*pendingCountPtr > 0x200) {
+        HookLog("Rollback: clamping pending-shot count %u to 512 before flush\n",
+                *pendingCountPtr);
+        *pendingCountPtr = 0x200;
+    }
     flushPendingUnits(sShot);
 
     if (sAction) std::memcpy((void*)sAction, savedAction, sizeof(savedAction));
@@ -2492,7 +2546,7 @@ static int BuildRegions(Region* regions, int maxRegions)
                     for (uint32_t animOffset : CCHR_EXTERNAL_ANIM_OFFSETS) {
                         uint64_t ownerSlot = character + animOffset;
                         uint64_t anim = *(uint64_t*)ownerSlot;
-                        if (anim) {
+                        if (anim && HasCallableDtiVirtual((void*)anim)) {
                             add((void*)anim, CCHR_EXTERNAL_ANIM_SIZE, ownerSlot);
                         }
                     }
@@ -3524,7 +3578,9 @@ void Rollback_RestoreSnapshot(int32_t frame)
     auto copyCollisionNode =
         (void(__fastcall*)(void*, void*, bool, bool))_addr(FN_COLLISION_NODE_COPY);
     for (const CollisionNodeClone& entry : slot.collisionNodeClones) {
-        if (*(uint64_t*)entry.ownerSlot == (uint64_t)entry.savedPtr)
+        if (*(uint64_t*)entry.ownerSlot == (uint64_t)entry.savedPtr &&
+            HasCallableDtiVirtual(entry.savedPtr) &&
+            HasCallableDtiVirtual(entry.clone))
             copyCollisionNode(entry.savedPtr, entry.clone, false, true);
     }
 
