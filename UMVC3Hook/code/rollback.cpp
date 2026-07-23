@@ -1395,7 +1395,7 @@ struct ShotRecipe {
     void* savedPtr;
     void* restoredPtr;
     void* shotElement;
-    int initParam;
+    uint64_t initParam;
     void* posData;
     void* ownerChr;
     void* objectRef1;
@@ -1458,9 +1458,9 @@ static std::unordered_map<void*, ShotRecipe> g_liveShotRecipes;
 static std::unordered_map<void*, EffectRecipe> g_liveEffectRecipes;
 static uint64_t g_shotSpawnSequence = 0;
 
-using ShotSpawnFn = void*(__fastcall*)(void*, void*, int, void*, void*, void*, uint32_t, void*);
-using ShotSpawnExFn = void*(__fastcall*)(void*, void*, int, void*, void*, void*, uint32_t,
-                                        void*, int, void*, int, void*);
+using ShotSpawnFn = void*(__fastcall*)(void*, void*, uint64_t, void*, void*, void*, uint32_t, void*);
+using ShotSpawnExFn = void*(__fastcall*)(void*, void*, uint64_t, void*, void*, void*, uint32_t,
+                                         void*, int, void*, int, void*);
 using ShotEnqueueFn = char(__fastcall*)(void*, void*, int);
 using UnitAddFn = char(__fastcall*)(void*, int, void*, void*);
 using UnitRemoveFn = char(__fastcall*)(void*, void*);
@@ -1725,7 +1725,7 @@ static void ApplyShotFlight(void* shot, const ShotFlightState& in)
     }
 }
 
-static void* __fastcall hkShotSpawn(void* manager, void* element, int initParam,
+static void* __fastcall hkShotSpawn(void* manager, void* element, uint64_t initParam,
                                     void* posData, void* ownerChr, void* objectRef1,
                                     uint32_t slotId, void* objectRef2)
 {
@@ -1752,7 +1752,7 @@ static void* __fastcall hkShotSpawn(void* manager, void* element, int initParam,
     return shot;
 }
 
-static void* __fastcall hkShotSpawnEx(void* manager, void* element, int initParam,
+static void* __fastcall hkShotSpawnEx(void* manager, void* element, uint64_t initParam,
                                       void* posData, void* ownerChr, void* objectRef1,
                                       uint32_t slotId, void* objectRef2, int a9,
                                       void* a10, int a11, void* a12)
@@ -1972,7 +1972,7 @@ static std::string Rollback_GenerateShotJSON()
             auto recipe = g_liveShotRecipes.find(shot);
 
             uint32_t slotId = 0;
-            int initParam = 0;
+            uint64_t initParam = 0;
             uint64_t ownerChr = 0;
             uint64_t shotElement = 0;
             const char* kind = "unknown";
@@ -1986,7 +1986,7 @@ static std::string Rollback_GenerateShotJSON()
             
             snprintf(entry, sizeof(entry),
                      "%s{\"list\":%d,\"addr\":\"0x%llX\","
-                     "\"slot\":%u,\"init\":%d,\"kind\":\"%s\","
+                     "\"slot\":%u,\"init\":%llu,\"kind\":\"%s\","
                      "\"owner\":\"0x%llX\",\"element\":\"0x%llX\","
                      "\"state\":\"0x%08X\","
                      "\"pos\":[%.9g,%.9g,%.9g],"
@@ -1996,7 +1996,7 @@ static std::string Rollback_GenerateShotJSON()
                      "\"speed\":%.9g,\"step\":%.9g,"
                      "\"timer\":%.9g",
                      first ? "" : ",", list, (uint64_t)shot,
-                     slotId, initParam, kind, ownerChr, shotElement,
+                      slotId, (unsigned long long)initParam, kind, ownerChr, shotElement,
                       *(uint32_t*)(shotBytes + 0x10),
                       *(float*)(shotBytes + 0x50),
                       *(float*)(shotBytes + 0x54),
@@ -2083,6 +2083,20 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
     void* sUnit = *(void**)_addr(PTR_SUNIT);
     auto removeMultiMask = (UnitRemoveMultiMaskFn)_addr(FN_SUNIT_REMOVE_MULTI_MASK);
     auto removeUnit = (UnitRemoveFn)_addr(FN_SUNIT_REMOVE_UNIT);
+
+    // Each live uShot owns the rShot resource stored in its recipe. Pin every
+    // resource before destroying current shots so native reconstruction cannot
+    // dereference attack/collision data released with the old object.
+    auto addRef = (void(__fastcall*)(void*))_addr(0x14050D100);
+    auto releaseRef = (void(__fastcall*)(void*))_addr(0x14050D5A0);
+    std::vector<void*> pinnedShotResources;
+    pinnedShotResources.reserve(slot.shotRecipes.size());
+    for (const ShotRecipe& saved : slot.shotRecipes) {
+        if (!saved.shotElement || !HasCallableDtiVirtual(saved.shotElement))
+            continue;
+        addRef(saved.shotElement);
+        pinnedShotResources.push_back(saved.shotElement);
+    }
 
     int removedInvalidUnits = SanitizeUnitCategoryLists(sUnit);
     if (removedInvalidUnits != 0) {
@@ -2216,7 +2230,10 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
         if (pendingCount >= 0x200 || !enqueueUnit(sShot, fresh, SSHOT_CATEGORY)) {
             addUnit(sUnit, SSHOT_CATEGORY, fresh, nullptr);
         }
-        ConcreteShotSnapshot_Restore(fresh, saved.concrete);
+        if (!ConcreteShotSnapshot_Restore(fresh, saved.concrete)) {
+            HookLog("Rollback: restored shot 0x%llX has incomplete collision topology\n",
+                    (uint64_t)fresh);
+        }
         // Reapply confirmed pointer-free common fields after the broad object
         // overlay so packed floats/flags that resemble addresses still rewind.
         ApplyShotFlight(fresh, saved.flight);
@@ -2245,6 +2262,8 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
         std::memcpy((uint8_t*)characterRng.character + 0x2D80, characterRng.state,
                     sizeof(characterRng.state));
     }
+    for (void* resource : pinnedShotResources)
+        releaseRef(resource);
 
     HookLog("Rollback: retired shots=%d effects=%d; shot recipes respawned=%d failed=%d\n",
             retiredShots, retiredEffects, respawnedShots, failedShots);
@@ -4369,7 +4388,7 @@ static void Rollback_DumpNDJSON(int32_t frame, uint8_t side) {
             auto recipe = g_liveShotRecipes.find(shot);
 
             uint32_t slotId = 0;
-            int initParam = 0;
+            uint64_t initParam = 0;
             uint64_t ownerChr = 0;
             uint64_t shotElement = 0;
             if (recipe != g_liveShotRecipes.end()) {
@@ -4383,7 +4402,7 @@ static void Rollback_DumpNDJSON(int32_t frame, uint8_t side) {
             firstShot = false;
             fprintf(g_diagNdjsonFile,
                     "{\"list\":%d,\"addr\":\"0x%llX\","
-                    "\"slot\":%u,\"init\":%d,"
+                    "\"slot\":%u,\"init\":%llu,"
                     "\"owner\":\"0x%llX\",\"element\":\"0x%llX\","
                     "\"state\":\"0x%08X\","
                     "\"pos\":[%.4f,%.4f,%.4f],"
@@ -4392,7 +4411,7 @@ static void Rollback_DumpNDJSON(int32_t frame, uint8_t side) {
                     "\"velocity\":[%.4f,%.4f,%.4f],"
                     "\"speed\":%.4f,\"step\":%.4f,"
                     "\"timer\":%.4f",
-                    list, (uint64_t)shot, slotId, initParam,
+                    list, (uint64_t)shot, slotId, (unsigned long long)initParam,
                     ownerChr, shotElement,
                      *(uint32_t*)(shotBytes + 0x10),
                      *(float*)(shotBytes + 0x50),

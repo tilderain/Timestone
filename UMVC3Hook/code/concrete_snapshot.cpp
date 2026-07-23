@@ -15,10 +15,12 @@ constexpr size_t kMaxEmbeddedObjectSize = 0x1000;
 constexpr size_t kShotCollisionSlotsOffset = 0x2058;
 constexpr uint32_t kShotCollisionSlotCount = 4;
 constexpr uint32_t kMaxCollisionPrimitives = 128;
-constexpr size_t kShotAttackInfoOffset = 0x1F68;
-constexpr size_t kAttackInfoFlagsOffset = 0x3C;
-constexpr size_t kAttackInfoHitStateOffset = 0x94;
-constexpr size_t kAttackInfoHitStateSize = 0x68;
+constexpr uint32_t kAttackTargetTableCount = 3;
+constexpr uint32_t kAttackTargetCount = 32;
+constexpr size_t kAttackTargetStride = 0x18;
+constexpr size_t kAttackTargetTables[kAttackTargetTableCount] = {
+    0x18C8, 0x1BC8, 0x1EC8
+};
 
 // These DTI addresses were verified from the class DTI getters in Ghidra.
 // They are used only to select the exceptional subclass policy; the object
@@ -218,25 +220,26 @@ void RestoreCollisionPrimitives(uint8_t* shot,
     }
 }
 
-uint8_t* GetAttackInfo(uint8_t* shot)
+void RestoreAttackTargets(uint8_t* shot, const uint8_t* saved,
+                          size_t objectSize)
 {
-    if (!shot) return nullptr;
-    uint64_t resource = *(uint64_t*)(shot + kShotAttackInfoOffset);
-    if (!Accessible(resource, 0xCC)) return nullptr;
+    for (size_t table : kAttackTargetTables) {
+        for (uint32_t index = 0; index < kAttackTargetCount; ++index) {
+            size_t entry = table + index * kAttackTargetStride;
+            if (entry + kAttackTargetStride > objectSize) return;
 
-    // rShot::getAtkInfo returns mpData + mAtkInfoOffset. uShot::getAtkInfo's
-    // rShot+0xF0 value is the owning rAtkInfo resource, not the selected data
-    // record consumed by hit_damage_apply.
-    uint64_t data = *(uint64_t*)(resource + 0x78);
-    uint32_t attackInfoOffset = *(uint32_t*)(resource + 0xC8);
-    if (!Accessible(data, (size_t)attackInfoOffset +
-                          kAttackInfoHitStateOffset + kAttackInfoHitStateSize)) {
-        return nullptr;
+            uint64_t savedTarget = *(const uint64_t*)(saved + entry + 0x08);
+            uint64_t liveTarget = *(uint64_t*)(shot + entry + 0x08);
+            // TargetInfo references characters, which remain allocated while
+            // shots are reconstructed. Reject any historical pointer that no
+            // longer resolves to a live MtObject.
+            if (savedTarget == 0 || savedTarget == liveTarget ||
+                GetDti((void*)savedTarget) != 0) {
+                *(uint64_t*)(shot + entry + 0x08) = savedTarget;
+            }
+            std::memcpy(shot + entry + 0x10, saved + entry + 0x10, 0x08);
+        }
     }
-    uint64_t attackInfo = data + attackInfoOffset;
-    return Accessible(attackInfo,
-                      kAttackInfoHitStateOffset + kAttackInfoHitStateSize)
-        ? (uint8_t*)attackInfo : nullptr;
 }
 
 } // namespace
@@ -259,29 +262,19 @@ bool ConcreteShotSnapshot_Capture(void* shot, ConcreteShotSnapshot& out)
     out.body.resize(size);
     std::memcpy(out.body.data(), shot, size);
     CaptureCollisionPrimitives((const uint8_t*)shot, out);
-
-    if (uint8_t* attackInfo = GetAttackInfo((uint8_t*)shot)) {
-        out.hasAttackInfo = true;
-        std::memcpy(&out.attackInfoFlags,
-                    attackInfo + kAttackInfoFlagsOffset,
-                    sizeof(out.attackInfoFlags));
-        std::memcpy(out.attackInfoHitState,
-                    attackInfo + kAttackInfoHitStateOffset,
-                    sizeof(out.attackInfoHitState));
-    }
     return true;
 }
 
-void ConcreteShotSnapshot_Restore(void* shot,
+bool ConcreteShotSnapshot_Restore(void* shot,
                                   const ConcreteShotSnapshot& snapshot)
 {
-    if (!shot || snapshot.body.size() < kShotBodyStart) return;
+    if (!shot || snapshot.body.size() < kShotBodyStart) return false;
 
     uint64_t liveDti = GetDti(shot);
     uint32_t liveSize = DtiSize(liveDti);
     if (liveDti != snapshot.dti || liveSize != snapshot.body.size() ||
         !Accessible((uint64_t)shot, liveSize)) {
-        return;
+        return false;
     }
 
     const uint8_t* source = snapshot.body.data();
@@ -324,18 +317,17 @@ void ConcreteShotSnapshot_Restore(void* shot,
     // intrusive links and remains owned by the freshly-created object.
     CopyRange(live, overlay.data(), liveSize,
               {kShotRestoreStart, liveSize - kShotRestoreStart});
+    // A fresh shot has empty cAtkCtrl target tables. Restore the saved
+    // per-target hit count/time so reconstructing an already-consumed attack
+    // cannot apply the same projectile to the same character a second time.
+    RestoreAttackTargets(live, source, liveSize);
     RestoreCollisionPrimitives(live, snapshot);
 
-    if (snapshot.hasAttackInfo) {
-        if (uint8_t* attackInfo = GetAttackInfo(live)) {
-            std::memcpy(attackInfo + kAttackInfoFlagsOffset,
-                        &snapshot.attackInfoFlags,
-                        sizeof(snapshot.attackInfoFlags));
-            std::memcpy(attackInfo + kAttackInfoHitStateOffset,
-                        snapshot.attackInfoHitState,
-                        sizeof(snapshot.attackInfoHitState));
-        }
+    for (const auto& saved : snapshot.collisionPrimitives) {
+        if (!GetCollisionPrimitive(live, saved.slot, saved.index))
+            return false;
     }
+    return true;
 }
 
 void ConcreteCharacterSnapshot_RestoreFields(void* character,
