@@ -22,6 +22,7 @@
 #include "../pch.h"
 
 #include "rollback.h"
+#include "concrete_snapshot.h"
 #include "controller.h"
 #include "mk10utils.h"
 #include "netplay.h"
@@ -32,6 +33,7 @@
 #include <new>
 #include <cstdio>
 #include <vector>
+#include <algorithm>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -70,6 +72,9 @@ static constexpr uintptr_t FN_SUNIT_REMOVE_MULTI_MASK = 0x14051BAF0;
 static constexpr uintptr_t FN_SUNIT_REGISTER_MULTI_MASK = 0x14051BDE0;
 static constexpr uintptr_t FN_UGAMEEFFECT_CREATE = 0x140131410;
 static constexpr uintptr_t FN_RCHRCPU_CLASS_FUNC = 0x140117280;
+static constexpr uintptr_t FN_RNG_RANDOM_INT = 0x14014EB30;
+static constexpr uintptr_t FN_HSIENKO_SELECT_ANKI = 0x1400A1260;
+static constexpr uintptr_t FN_SET_RESERVED_ANKI = 0x1400D4D90;
 
 // ===========================================================================
 // Offsets & Struct Constants
@@ -512,7 +517,7 @@ int     g_f7DiagSession  = -1;
 
 // Code-only diagnostic toggle. Keep false during normal play: NDJSON capture
 // serializes full character, hitbox, projectile, and memory state per frame.
-bool    g_ndjsonLoggingEnabled      = false;
+bool    g_ndjsonLoggingEnabled      = true;
 bool    g_ndjsonIncludeDirHistory   = false;
 
 // Rollback request from controller.cpp — late input arrived that differs
@@ -590,7 +595,7 @@ static int    g_netplayLiveReset   = 0;
 
 static std::string g_pendingNPLiveJSON[256];
 static int32_t     g_pendingNPLiveFrame[256];
-static constexpr int NETPLAY_LIVE_HISTORY = 200;
+static constexpr int NETPLAY_LIVE_HISTORY = 256;
 static std::string g_netplayLiveHistory[NETPLAY_LIVE_HISTORY];
 static int32_t     g_netplayLiveHistoryFrame[NETPLAY_LIVE_HISTORY];
 static bool        g_netplayLiveDesyncFlushed = false;
@@ -1368,6 +1373,13 @@ struct ShotFlightState {
     uint8_t movementScalars[0x60]; // +0x2078..+0x20D7
     uint8_t animationScalars[0x14];// +0x2118..+0x212B
     uint32_t step;                  // +0x212C, read by uShot::move
+    // These are per-shot dispatch fields. Ghidra's
+    // sMvc3Manager_updateRandomSelection name describes the dispatch case, but
+    // its this pointer is the active uShot/rChrCpu object, not the singleton.
+    uint32_t randomProgress;        // +0xA8
+    uint32_t randomSelection;       // +0xC4
+    uint32_t randomFlags;            // +0xC8
+    uint32_t randomState;            // +0x1B58
     bool hasZireitouState;
     uint32_t zireitouState[4];      // +0x2210..+0x221F phase/timing scalars
 };
@@ -1390,6 +1402,12 @@ struct ShotRecipe {
     int exA11;
     void* exA12;
     ShotFlightState flight;
+    ConcreteShotSnapshot concrete;
+    uint64_t spawnSequence = 0;
+    uint8_t preSpawnGlobalRng[16] = {};
+    uint8_t preSpawnEffectRng[16] = {};
+    uint8_t preSpawnOwnerRng[16] = {};
+    bool hasPreSpawnRng = false;
 };
 
 struct EffectRecipe {
@@ -1433,6 +1451,7 @@ struct SnapshotSlot {
 static SnapshotSlot g_slots[ROLLBACK_WINDOW];
 static std::unordered_map<void*, ShotRecipe> g_liveShotRecipes;
 static std::unordered_map<void*, EffectRecipe> g_liveEffectRecipes;
+static uint64_t g_shotSpawnSequence = 0;
 
 using ShotSpawnFn = void*(__fastcall*)(void*, void*, int, void*, void*, void*, uint32_t, void*);
 using ShotSpawnExFn = void*(__fastcall*)(void*, void*, int, void*, void*, void*, uint32_t,
@@ -1448,8 +1467,164 @@ static ShotSpawnFn oShotSpawn = nullptr;
 static ShotSpawnExFn oShotSpawnEx = nullptr;
 static UnitRemoveFn oUnitRemove = nullptr;
 static EffectCreateFn oEffectCreate = nullptr;
+using HsienKoSelectAnkiFn = int(__fastcall*)(void*);
+static HsienKoSelectAnkiFn oHsienKoSelectAnki = nullptr;
+using SetReservedAnkiFn = void(__fastcall*)(void*, int);
+static SetReservedAnkiFn oSetReservedAnki = nullptr;
+
+using RandomIntRangeFn = int(__fastcall*)(void*, int, int, void*);
+static RandomIntRangeFn oRandomIntRange = nullptr;
+static int g_rngTraceFrame = -1;
+static int g_rngTraceCount = 0;
+static int g_ankiTraceFrame = -1;
+static int g_ankiTraceCount = 0;
+static int g_ankiReserveTraceFrame = -1;
+static int g_ankiReserveTraceCount = 0;
+
+static int RngTraceFrame()
+{
+    uint64_t replay = *(uint64_t*)_addr(PTR_SREPLAY);
+    return replay ? *(int32_t*)(replay + 0x54) : -1;
+}
+
+static bool IsAnkihouRngCaller(uint64_t caller, void* rngOwner)
+{
+    // Return addresses immediately following the random calls in Bomb setup,
+    // Bomb's direction callback, and Rolling setup/landing. Keep the filter
+    // tight so a full gameplay round does not flood the hook log.
+    if (rngOwner && GetObjectDti((uint64_t)rngOwner) == (uint64_t)_addr(0x140D455F8))
+        return true;
+    return caller == (uint64_t)_addr(0x1400A1289) ||
+           caller == (uint64_t)_addr(0x14018BAF1) ||
+           caller == (uint64_t)_addr(0x14018B5C2) ||
+           caller == (uint64_t)_addr(0x14018D245 + 5) ||
+           caller == (uint64_t)_addr(0x14018D299 + 5);
+}
+
+static int __fastcall hkRandomIntRange(void* stateArg, int low, int high,
+                                       void* rngOwner)
+{
+    uint64_t caller = (uint64_t)__builtin_return_address(0);
+    if (!IsAnkihouRngCaller(caller, rngOwner))
+        return oRandomIntRange(stateArg, low, high, rngOwner);
+
+    int frame = RngTraceFrame();
+    if (frame != g_rngTraceFrame) {
+        g_rngTraceFrame = frame;
+        g_rngTraceCount = 0;
+    }
+
+    uint32_t globalBefore[4] = {};
+    uint32_t ownerBefore[4] = {};
+    std::memcpy(globalBefore, (void*)_addr(0x140D765D8), sizeof(globalBefore));
+    if (rngOwner)
+        std::memcpy(ownerBefore, (uint8_t*)rngOwner + 0x2D80, sizeof(ownerBefore));
+
+    int result = oRandomIntRange(stateArg, low, high, rngOwner);
+
+    uint32_t globalAfter[4] = {};
+    uint32_t ownerAfter[4] = {};
+    std::memcpy(globalAfter, (void*)_addr(0x140D765D8), sizeof(globalAfter));
+    if (rngOwner)
+        std::memcpy(ownerAfter, (uint8_t*)rngOwner + 0x2D80, sizeof(ownerAfter));
+
+    if (g_rngTraceCount++ < 32) {
+        HookLog("RNGTRACE frame=%d resim=%d caller=0x%llX stateArg=0x%llX owner=0x%llX "
+                "range=[%d,%d] result=%d global=%08X,%08X,%08X,%08X->%08X,%08X,%08X,%08X "
+                "ownerRng(+0x2D80)=%08X,%08X,%08X,%08X->%08X,%08X,%08X,%08X\n",
+                frame, g_isResimulating ? 1 : 0, caller, (uint64_t)stateArg,
+                (uint64_t)rngOwner, low, high, result,
+                globalBefore[0], globalBefore[1], globalBefore[2], globalBefore[3],
+                globalAfter[0], globalAfter[1], globalAfter[2], globalAfter[3],
+                ownerBefore[0], ownerBefore[1], ownerBefore[2], ownerBefore[3],
+                ownerAfter[0], ownerAfter[1], ownerAfter[2], ownerAfter[3]);
+    }
+    return result;
+}
+
+static int __fastcall hkHsienKoSelectAnki(void* character)
+{
+    if (!character)
+        return oHsienKoSelectAnki(character);
+
+    int frame = RngTraceFrame();
+    if (frame != g_ankiTraceFrame) {
+        g_ankiTraceFrame = frame;
+        g_ankiTraceCount = 0;
+    }
+
+    uint32_t reservedBefore = *(uint32_t*)((uint8_t*)character + 0x68FC);
+    uint32_t commandBefore = *(uint32_t*)((uint8_t*)character + 0x13C4);
+    uint32_t actionId = *(uint32_t*)((uint8_t*)character + 0x1310);
+    uint32_t rngBefore[4] = {};
+    std::memcpy(rngBefore, (uint8_t*)character + 0x2D80, sizeof(rngBefore));
+
+    int result = oHsienKoSelectAnki(character);
+
+    uint32_t rngAfter[4] = {};
+    std::memcpy(rngAfter, (uint8_t*)character + 0x2D80, sizeof(rngAfter));
+    uint64_t caller = (uint64_t)__builtin_return_address(0);
+
+    if (g_ankiTraceCount++ < 64) {
+        HookLog("ANKITRACE frame=%d resim=%d caller=0x%llX char=0x%llX action=0x%08X "
+                "reserved=%d commandBefore(+0x13C4)=%08X callbackResult=%d "
+                "rng(+0x2D80)=%08X,%08X,%08X,%08X->%08X,%08X,%08X,%08X\n",
+                frame, g_isResimulating ? 1 : 0, caller, (uint64_t)character,
+                actionId, (int32_t)reservedBefore, commandBefore, result,
+                rngBefore[0], rngBefore[1], rngBefore[2], rngBefore[3],
+                rngAfter[0], rngAfter[1], rngAfter[2], rngAfter[3]);
+    }
+    return result;
+}
+
+static void __fastcall hkSetReservedAnki(void* character, int value)
+{
+    if (!character)
+        return oSetReservedAnki(character, value);
+
+    int frame = RngTraceFrame();
+    if (frame != g_ankiReserveTraceFrame) {
+        g_ankiReserveTraceFrame = frame;
+        g_ankiReserveTraceCount = 0;
+    }
+
+    uint32_t before = *(uint32_t*)((uint8_t*)character + 0x68FC);
+    uint32_t actionId = *(uint32_t*)((uint8_t*)character + 0x1310);
+    uint64_t caller = (uint64_t)__builtin_return_address(0);
+    oSetReservedAnki(character, value);
+
+    if (g_ankiReserveTraceCount++ < 32) {
+        HookLog("ANKIRESERVE frame=%d resim=%d caller=0x%llX object=0x%llX "
+                "action=0x%08X before=%d after=%d\n",
+                frame, g_isResimulating ? 1 : 0, caller, (uint64_t)character,
+                actionId, (int32_t)before, value);
+    }
+}
 
 static bool IsLinkedShot(void* shot);
+
+static void CapturePreSpawnRng(ShotRecipe& recipe, void* ownerChr)
+{
+    std::memcpy(recipe.preSpawnGlobalRng, (void*)_addr(0x140D765D8), 16);
+    uint64_t sEffect = *(uint64_t*)_addr(0x140E17A38);
+    if (sEffect)
+        std::memcpy(recipe.preSpawnEffectRng, (uint8_t*)sEffect + 0x3C, 16);
+    if (ownerChr)
+        std::memcpy(recipe.preSpawnOwnerRng, (uint8_t*)ownerChr + 0x2D80, 16);
+    recipe.hasPreSpawnRng = true;
+}
+
+static void RestorePreSpawnRng(const ShotRecipe& recipe)
+{
+    if (!recipe.hasPreSpawnRng) return;
+    std::memcpy((void*)_addr(0x140D765D8), recipe.preSpawnGlobalRng, 16);
+    uint64_t sEffect = *(uint64_t*)_addr(0x140E17A38);
+    if (sEffect)
+        std::memcpy((uint8_t*)sEffect + 0x3C, recipe.preSpawnEffectRng, 16);
+    if (recipe.ownerChr)
+        std::memcpy((uint8_t*)recipe.ownerChr + 0x2D80,
+                    recipe.preSpawnOwnerRng, 16);
+}
 
 static bool IsZireitouShot(void* shot)
 {
@@ -1505,6 +1680,10 @@ static void CaptureShotFlight(void* shot, ShotFlightState& out)
     std::memcpy(out.movementScalars, p + 0x2078, sizeof(out.movementScalars));
     std::memcpy(out.animationScalars, p + 0x2118, sizeof(out.animationScalars));
     std::memcpy(&out.step, p + 0x212C, sizeof(out.step));
+    std::memcpy(&out.randomProgress, p + 0xA8, sizeof(out.randomProgress));
+    std::memcpy(&out.randomSelection, p + 0xC4, sizeof(out.randomSelection));
+    std::memcpy(&out.randomFlags, p + 0xC8, sizeof(out.randomFlags));
+    std::memcpy(&out.randomState, p + 0x1B58, sizeof(out.randomState));
     out.hasZireitouState = IsZireitouShot(shot);
     if (out.hasZireitouState) {
         std::memcpy(out.zireitouState, p + 0x2210, sizeof(out.zireitouState));
@@ -1532,6 +1711,10 @@ static void ApplyShotFlight(void* shot, const ShotFlightState& in)
     std::memcpy(p + 0x2078, in.movementScalars, sizeof(in.movementScalars));
     std::memcpy(p + 0x2118, in.animationScalars, sizeof(in.animationScalars));
     std::memcpy(p + 0x212C, &in.step, sizeof(in.step));
+    std::memcpy(p + 0xA8, &in.randomProgress, sizeof(in.randomProgress));
+    std::memcpy(p + 0xC4, &in.randomSelection, sizeof(in.randomSelection));
+    std::memcpy(p + 0xC8, &in.randomFlags, sizeof(in.randomFlags));
+    std::memcpy(p + 0x1B58, &in.randomState, sizeof(in.randomState));
     if (in.hasZireitouState && IsZireitouShot(shot)) {
         std::memcpy(p + 0x2210, in.zireitouState, sizeof(in.zireitouState));
     }
@@ -1541,20 +1724,24 @@ static void* __fastcall hkShotSpawn(void* manager, void* element, int initParam,
                                     void* posData, void* ownerChr, void* objectRef1,
                                     uint32_t slotId, void* objectRef2)
 {
+    ShotRecipe recipe{};
+    recipe.shotElement = element;
+    recipe.initParam = initParam;
+    recipe.posData = posData;
+    recipe.ownerChr = ownerChr;
+    recipe.objectRef1 = objectRef1;
+    recipe.slotId = slotId;
+    recipe.objectRef2 = objectRef2;
+    recipe.kind = ShotSpawnKind::Standard;
+    recipe.spawnSequence = ++g_shotSpawnSequence;
+    // Capture before the native factory. Hsien-Ko Ankihou setup consumes the
+    // owner's dispatcher RNG while choosing its concrete effect variant.
+    CapturePreSpawnRng(recipe, ownerChr);
     void* shot = oShotSpawn(manager, element, initParam, posData, ownerChr,
                             objectRef1, slotId, objectRef2);
     if (shot) {
-        ShotRecipe recipe{};
         recipe.savedPtr = shot;
         recipe.restoredPtr = shot;
-        recipe.shotElement = element;
-        recipe.initParam = initParam;
-        recipe.posData = posData;
-        recipe.ownerChr = ownerChr;
-        recipe.objectRef1 = objectRef1;
-        recipe.slotId = slotId;
-        recipe.objectRef2 = objectRef2;
-        recipe.kind = ShotSpawnKind::Standard;
         g_liveShotRecipes[shot] = recipe;
     }
     return shot;
@@ -1565,24 +1752,26 @@ static void* __fastcall hkShotSpawnEx(void* manager, void* element, int initPara
                                       uint32_t slotId, void* objectRef2, int a9,
                                       void* a10, int a11, void* a12)
 {
+    ShotRecipe recipe{};
+    recipe.shotElement = element;
+    recipe.initParam = initParam;
+    recipe.posData = posData;
+    recipe.ownerChr = ownerChr;
+    recipe.objectRef1 = objectRef1;
+    recipe.slotId = slotId;
+    recipe.objectRef2 = objectRef2;
+    recipe.kind = ShotSpawnKind::Extended;
+    recipe.exA9 = a9;
+    recipe.exA10 = a10;
+    recipe.exA11 = a11;
+    recipe.exA12 = a12;
+    recipe.spawnSequence = ++g_shotSpawnSequence;
+    CapturePreSpawnRng(recipe, ownerChr);
     void* shot = oShotSpawnEx(manager, element, initParam, posData, ownerChr,
                               objectRef1, slotId, objectRef2, a9, a10, a11, a12);
     if (shot) {
-        ShotRecipe recipe{};
         recipe.savedPtr = shot;
         recipe.restoredPtr = shot;
-        recipe.shotElement = element;
-        recipe.initParam = initParam;
-        recipe.posData = posData;
-        recipe.ownerChr = ownerChr;
-        recipe.objectRef1 = objectRef1;
-        recipe.slotId = slotId;
-        recipe.objectRef2 = objectRef2;
-        recipe.kind = ShotSpawnKind::Extended;
-        recipe.exA9 = a9;
-        recipe.exA10 = a10;
-        recipe.exA11 = a11;
-        recipe.exA12 = a12;
         g_liveShotRecipes[shot] = recipe;
     }
     return shot;
@@ -1836,11 +2025,17 @@ static void CaptureShotAndEffectRecipes(SnapshotSlot& slot)
                 ShotRecipe saved = recipe->second;
                 saved.savedPtr = shot;
                 CaptureShotFlight(shot, saved.flight);
+                ConcreteShotSnapshot_Capture(shot, saved.concrete);
                 slot.shotRecipes.push_back(saved);
             }
             nodeRef = *(uint64_t*)(nodeRef + SSHOT_NODE_NEXT);
         }
     }
+
+    std::sort(slot.shotRecipes.begin(), slot.shotRecipes.end(),
+              [](const ShotRecipe& a, const ShotRecipe& b) {
+                  return a.spawnSequence < b.spawnSequence;
+              });
 
     // uGameEffect creation is centralized at the hooked 13-argument factory.
     // Entries are removed when sUnit removes the corresponding object.
@@ -1935,27 +2130,23 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
     // rebuilding resources and owned effects. Reconstruction is rollback
     // plumbing, not a simulated gameplay event, so it must not advance any
     // deterministic stream before the first re-simulated frame.
-    uint8_t savedAction[0x300] = {};
-    uint8_t savedGlobalRng[16] = {};
-    uint8_t savedEffectRng[16] = {};
+    uint8_t restoredGlobalRng[16] = {};
+    uint8_t restoredEffectRng[16] = {};
     struct SavedCharacterRng {
         void* character;
         uint8_t state[16];
     };
-    std::vector<SavedCharacterRng> savedCharacterRngs;
-    uint64_t sMvc3Mgr = *(uint64_t*)_addr(PTR_SMVC3MGR);
-    uint64_t sAction = sMvc3Mgr ? *(uint64_t*)(sMvc3Mgr + SMVC3MGR_ACTION_OFFSET) : 0;
+    std::vector<SavedCharacterRng> restoredCharacterRngs;
     uint64_t sEffect = *(uint64_t*)_addr(0x140E17A38);
-    if (sAction) std::memcpy(savedAction, (void*)sAction, sizeof(savedAction));
-    std::memcpy(savedGlobalRng, (void*)_addr(0x140d765d8), sizeof(savedGlobalRng));
-    if (sEffect) std::memcpy(savedEffectRng, (void*)(sEffect + 0x3C), sizeof(savedEffectRng));
+    std::memcpy(restoredGlobalRng, (void*)_addr(0x140d765d8), sizeof(restoredGlobalRng));
+    if (sEffect) std::memcpy(restoredEffectRng, (void*)(sEffect + 0x3C), sizeof(restoredEffectRng));
 
     // Some shot setup methods dispatch RNG through their owning uCharacter.
     // Preserve each owner's stream so native reconstruction remains plumbing.
     for (const ShotRecipe& saved : slot.shotRecipes) {
         if (!saved.ownerChr) continue;
         bool alreadySaved = false;
-        for (const SavedCharacterRng& characterRng : savedCharacterRngs) {
+        for (const SavedCharacterRng& characterRng : restoredCharacterRngs) {
             if (characterRng.character == saved.ownerChr) {
                 alreadySaved = true;
                 break;
@@ -1967,10 +2158,11 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
         characterRng.character = saved.ownerChr;
         std::memcpy(characterRng.state, (uint8_t*)saved.ownerChr + 0x2D80,
                     sizeof(characterRng.state));
-        savedCharacterRngs.push_back(characterRng);
+        restoredCharacterRngs.push_back(characterRng);
     }
 
     for (ShotRecipe& saved : slot.shotRecipes) {
+        RestorePreSpawnRng(saved);
         void* fresh = saved.kind == ShotSpawnKind::Extended
             ? oShotSpawnEx(sShot, saved.shotElement, saved.initParam, saved.posData,
                            saved.ownerChr, saved.objectRef1, saved.slotId,
@@ -2001,6 +2193,7 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
             addUnit(sUnit, SSHOT_CATEGORY, fresh, nullptr);
         }
         ApplyShotFlight(fresh, saved.flight);
+        ConcreteShotSnapshot_Restore(fresh, saved.concrete);
 
         // ApplyShotFlight preserves the category assigned by addUnit while
         // restoring the saved gameplay lifecycle bits.
@@ -2020,10 +2213,9 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
     }
     flushPendingUnits(sShot);
 
-    if (sAction) std::memcpy((void*)sAction, savedAction, sizeof(savedAction));
-    std::memcpy((void*)_addr(0x140d765d8), savedGlobalRng, sizeof(savedGlobalRng));
-    if (sEffect) std::memcpy((void*)(sEffect + 0x3C), savedEffectRng, sizeof(savedEffectRng));
-    for (const SavedCharacterRng& characterRng : savedCharacterRngs) {
+    std::memcpy((void*)_addr(0x140d765d8), restoredGlobalRng, sizeof(restoredGlobalRng));
+    if (sEffect) std::memcpy((void*)(sEffect + 0x3C), restoredEffectRng, sizeof(restoredEffectRng));
+    for (const SavedCharacterRng& characterRng : restoredCharacterRngs) {
         std::memcpy((uint8_t*)characterRng.character + 0x2D80, characterRng.state,
                     sizeof(characterRng.state));
     }
@@ -3596,6 +3788,30 @@ void Rollback_RestoreSnapshot(int32_t frame)
                 }
             }
 
+            uint64_t concreteDti = GetObjectDti((uint64_t)slot.regions[i].ptr);
+            int32_t ankiReservedLive = 0;
+            int32_t ankiReservedSaved = 0;
+            bool traceAnkiRestore =
+                concreteDti == (uint64_t)_addr(0x140D455F8) && copySize >= 0x6900;
+            if (traceAnkiRestore) {
+                ankiReservedLive = *(int32_t*)((uint8_t*)slot.regions[i].ptr + 0x68FC);
+                ankiReservedSaved = *(int32_t*)(slot.data + offset + 0x68FC);
+            }
+
+            ConcreteCharacterSnapshot_RestoreFields(
+                slot.regions[i].ptr,
+                slot.data + offset,
+                copySize,
+                concreteDti);
+
+            if (traceAnkiRestore) {
+                int32_t ankiReservedAfter =
+                    *(int32_t*)((uint8_t*)slot.regions[i].ptr + 0x68FC);
+                //HookLog("ANKIRESTORE frame=%d object=0x%llX live=%d saved=%d after=%d\n",
+                //        frame, (uint64_t)slot.regions[i].ptr, ankiReservedLive,
+                //        ankiReservedSaved, ankiReservedAfter);
+            }
+
             // uChrCpu's interpreter stack contains 32-bit script values, so
             // pairs of words can look like pointers to the generic guard. A
             // split restore of that stack and its cursor lets the VM combine
@@ -4694,6 +4910,7 @@ void Rollback_FreeSnapshots()
     }
     g_liveShotRecipes.clear();
     g_liveEffectRecipes.clear();
+    g_shotSpawnSequence = 0;
     g_sMvc3Main = 0;
 }
 
@@ -5161,6 +5378,39 @@ void Rollback_InitHooks()
         HookLog("Rollback: hooked sShot__spawnShot\n");
     } else {
         HookLog("Rollback: failed to hook sShot__spawnShot (%d)\n", s);
+    }
+
+    s = MH_CreateHook((LPVOID)_addr(FN_RNG_RANDOM_INT),
+                      (LPVOID)&hkRandomIntRange,
+                      (LPVOID*)&oRandomIntRange);
+    if (s == MH_OK) {
+        //MH_EnableHook((LPVOID)_addr(FN_RNG_RANDOM_INT));
+        HookLog("Rollback: hooked Ankihou RNG trace at 0x%llX\n",
+                (uint64_t)_addr(FN_RNG_RANDOM_INT));
+    } else {
+        HookLog("Rollback: failed to hook Ankihou RNG trace (%d)\n", s);
+    }
+
+    s = MH_CreateHook((LPVOID)_addr(FN_HSIENKO_SELECT_ANKI),
+                      (LPVOID)&hkHsienKoSelectAnki,
+                      (LPVOID*)&oHsienKoSelectAnki);
+    if (s == MH_OK) {
+        //MH_EnableHook((LPVOID)_addr(FN_HSIENKO_SELECT_ANKI));
+        HookLog("Rollback: hooked Hsien-Ko Anki selector trace at 0x%llX\n",
+                (uint64_t)_addr(FN_HSIENKO_SELECT_ANKI));
+    } else {
+        HookLog("Rollback: failed to hook Hsien-Ko Anki selector trace (%d)\n", s);
+    }
+
+    s = MH_CreateHook((LPVOID)_addr(FN_SET_RESERVED_ANKI),
+                      (LPVOID)&hkSetReservedAnki,
+                      (LPVOID*)&oSetReservedAnki);
+    if (s == MH_OK) {
+        //MH_EnableHook((LPVOID)_addr(FN_SET_RESERVED_ANKI));
+        HookLog("Rollback: hooked Hsien-Ko Anki reserve trace at 0x%llX\n",
+                (uint64_t)_addr(FN_SET_RESERVED_ANKI));
+    } else {
+        HookLog("Rollback: failed to hook Hsien-Ko Anki reserve trace (%d)\n", s);
     }
 
     s = MH_CreateHook((LPVOID)_addr(FN_SSHOT_SPAWN_EX),

@@ -41,6 +41,7 @@ CPP_SRC   := \
 	$(SRCDIR)/code/diag.cpp \
 	$(SRCDIR)/code/exception.cpp \
 	$(SRCDIR)/code/rollback.cpp \
+	$(SRCDIR)/code/concrete_snapshot.cpp \
 	$(SRCDIR)/code/netplay.cpp \
 	$(SRCDIR)/imgui/imgui.cpp \
 	$(SRCDIR)/imgui/imgui_demo.cpp \

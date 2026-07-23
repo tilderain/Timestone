@@ -402,7 +402,7 @@ static void __fastcall HookedMove(void* sMvc3Main)
             {
                 g_localReady = true;
                 HookLog("Netplay: Local intro ready (generation=%u, substate=%d)\n",
-                        g_battleGeneration, introSubstate);
+                         g_battleGeneration, introSubstate);
             }
 
             // RELEASE acknowledges that this peer observed the remote READY.

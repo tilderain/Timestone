@@ -200,6 +200,7 @@
     <ClInclude Include="utils\LateStaticInit.h" />
     <ClInclude Include="utils\Patterns.h" />
     <ClInclude Include="utils\Trampoline.h" />
+    <ClInclude Include="code\concrete_snapshot.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="code\eNotifManager.cpp" />
@@ -212,6 +213,7 @@
     <ClCompile Include="code\UMVC3Camera.cpp" />
     <ClCompile Include="code\umvc3menu.cpp" />
     <ClCompile Include="code\rollback.cpp" />
+    <ClCompile Include="code\concrete_snapshot.cpp" />
     <ClCompile Include="dllmain.cpp" />
     <ClCompile Include="imgui\imgui.cpp" />
     <ClCompile Include="imgui\imgui_demo.cpp" />
