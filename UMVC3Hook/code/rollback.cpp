@@ -4544,12 +4544,12 @@ void Rollback_RequestReSimulate(int32_t startFrame, int32_t endFrame)
 // MtObject__replaceSlot_6F30 on these slots will try to call vtable[0x78]
 // (release) on a stale/corrupted object → page fault at NULL.
 //
-// We walk the team character lists (same traversal as BuildRegions) and zero
-// the slot pointers so the game simply writes new references without first
-// trying to release a dangling pointer.
+// We walk the team character lists (same traversal as BuildRegions) and clear
+// only the slot entries confirmed to hold stale references. Do not clear the
+// whole allocation: this range overlaps character-specific state.
 //
-// Slot array:  64 entries × 8 bytes = 512 bytes at character + 0x6748.
-// Confirmed indices in use: 1, 14, 15 (from crash + decompiled callers).
+// Slot array base: character + 0x6748.
+// Confirmed stale-reference indices: 1, 14, 15.
 //
 // uBaseModel also owns a material-instance cache through +0x110, with its
 // entry count at +0x118. Character action changes release every cached entry
@@ -4578,8 +4578,8 @@ static void Rollback_ClearStalePointers()
     uint64_t sCharacter = *(uint64_t*)_addr(PTR_SCHARACTER);
     if (!sCharacter) return;
 
-    static constexpr int SLOT_CLEAR_COUNT = 64;
     static constexpr uintptr_t SLOT_ARRAY_OFFSET = 0x6748;
+    static constexpr uint32_t STALE_SLOT_INDICES[] = {1, 14, 15};
 
     for (int ti = 0; ti < 2; ++ti) {
         uint64_t team = sCharacter + (ti == 0 ? TEAM0_OFFSET : TEAM1_OFFSET);
@@ -4603,9 +4603,12 @@ static void Rollback_ClearStalePointers()
                     }
                 }
 
-                // Zero the slot array so stale pointers are never followed
-                memset((void*)(character + SLOT_ARRAY_OFFSET), 0,
-                       SLOT_CLEAR_COUNT * sizeof(uint64_t));
+                for (uint32_t index : STALE_SLOT_INDICES) {
+                    uint64_t slotAddress = character + SLOT_ARRAY_OFFSET +
+                                           (uint64_t)index * sizeof(uint64_t);
+                    if (IsAccessibleAddress(slotAddress))
+                        *(uint64_t*)slotAddress = 0;
+                }
             }
             node = *(uint64_t*)(node + NODE_NEXT_OFFSET);
         }
