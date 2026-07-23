@@ -102,6 +102,7 @@ static constexpr uintptr_t GAME_CONFIG_PTR  = 0x140D50F88;
 // Functions
 static constexpr uintptr_t SHOW_LOADING_ADDR = 0x140253380;
 static constexpr uintptr_t SET_TEXT_FUNC     = 0x1402CE750;
+static constexpr uintptr_t REPLAY_ROUND_START_ADDR = 0x1401CFA90;
 
 // ---------------------------------------------------------------------------
 // Offsets
@@ -324,11 +325,19 @@ static void __fastcall HookedMove(void* sMvc3Main)
         uint64_t sReplay = *(uint64_t*)_addr(SREPLAY_PTR);
 
         Rollback_ApplyNetplayDeterminism();
-        if (sReplay)
+        if (sReplay) {
             *(uint32_t*)(sReplay + 0x23424) = g_restartRoundSeed;
+            *(uint32_t*)(sReplay + 0x58) = g_restartRoundSeed;
+        }
         if (sAction) {
             using ExecuteMatchPhaseFn = void(__fastcall*)(uint64_t, int32_t);
             ((ExecuteMatchPhaseFn)_addr(0x140004B80))(sAction, 2);
+        }
+        if (sReplay) {
+            // Training mode skips this native round-start call. F11 still needs
+            // it to reseed global, effect, and every character RNG domain.
+            using ReplayRoundStartFn = void(__fastcall*)(uint64_t);
+            ((ReplayRoundStartFn)_addr(REPLAY_ROUND_START_ADDR))(sReplay);
         }
 
         Netplay_ClearInputQueues();

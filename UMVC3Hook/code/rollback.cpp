@@ -1898,18 +1898,45 @@ static void DetachEmbeddedShotEffect(void* shot)
     *(uint32_t*)(embeddedEffect + 0x70) = 0xFFFFFFFFu;
 }
 
-static void SanitizeShotAttachmentOwner(void* shot)
+static int SanitizeShotCollisionSlotsForDestruction(void* shot)
+{
+    if (!shot || !IsAccessiblePointer((uint64_t)shot + 0x2078)) return 0;
+
+    int sanitized = 0;
+    auto* shotBytes = (uint8_t*)shot;
+    for (uint32_t index = 0; index < 4; ++index) {
+        uint64_t slot = *(uint64_t*)(shotBytes + 0x2058 + index * sizeof(uint64_t));
+        if (!slot || !IsAccessiblePointer(slot + 0x38)) continue;
+
+        // cCollisionNode's geometry MtArray owns its entries at +0x30. A
+        // partially restored header can retain a scalar as its data pointer;
+        // uShot__releaseAtkInfo then calls the slot destructor, which passes
+        // that value to MtAllocator::free. Discard only malformed arrays: the
+        // allocation cannot be reclaimed safely, but the shot can still run
+        // its remaining native teardown.
+        uint32_t count = *(uint32_t*)(slot + 0x20);
+        uint32_t capacity = *(uint32_t*)(slot + 0x24);
+        uint64_t entries = *(uint64_t*)(slot + 0x30);
+        bool malformed = count > capacity || count > 128 ||
+            (count != 0 && !IsAccessiblePointer(entries)) ||
+            (entries != 0 && !IsAccessiblePointer(entries));
+        if (!malformed) continue;
+
+        std::memset((void*)(slot + 0x20), 0, 0x18);
+        ++sanitized;
+    }
+    return sanitized;
+}
+
+static void DetachShotAttachment(void* shot)
 {
     if (!shot || !IsAccessiblePointer((uint64_t)shot + 0x1DC0 + 0x80)) return;
 
-    // uShot__advancePhysicsAndPose passes shot+0x1DC0. Ghidra renders this as
-    // field2_0x1478+0x948, but field2 is inline storage, not a pointer. Crash
-    // registers confirm the relationship directly (cArm RBX - shot RSI).
-    uint8_t* owner = (uint8_t*)shot + 0x1DC0;
-    // buildAttachMatrixForOwner returns immediately when +0x78 is null. The
-    // factory's attachment target belongs to the discarded timeline, so do
-    // not let the restored scalar state reach the target's +0x2D0 dispatch.
-    *(uint64_t*)(owner + 0x78) = 0;
+    // uShot__buildAttachMatrixForOwner returns immediately when cArm+0x78 is
+    // null. A reconstructed attachment can have a callable primary owner at
+    // +0x70 whose transform virtual nevertheless returns a stale small value.
+    // The external attachment graph is not reconstructed, so do not enter it.
+    *(uint64_t*)((uint8_t*)shot + 0x1DC0 + 0x78) = 0;
 }
 
 static void Rollback_AppendShotHitboxesJSON(std::string& json, void* shot)
@@ -2211,6 +2238,11 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
         // links before destruction; the native factory creates fresh effects
         // for the restored shot when needed.
         DetachEmbeddedShotEffect(shot);
+        int malformedCollisionSlots = SanitizeShotCollisionSlotsForDestruction(shot);
+        if (malformedCollisionSlots != 0) {
+            HookLog("Rollback: detached %d malformed collision arrays before destroying shot 0x%llX\n",
+                    malformedCollisionSlots, (uint64_t)shot);
+        }
         uint32_t* state = (uint32_t*)((uint8_t*)shot + 0x10);
         removeMultiMask(sUnit, shot);
         removeUnit(sUnit, shot);
@@ -2333,7 +2365,7 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
         // graph referenced by inline sEffect objects. Leave that graph
         // detached so later native shot destruction cannot walk stale nodes.
         DetachEmbeddedShotEffect(fresh);
-        SanitizeShotAttachmentOwner(fresh);
+        DetachShotAttachment(fresh);
         // Reapply confirmed pointer-free common fields after the broad object
         // overlay so packed floats/flags that resemble addresses still rewind.
         ApplyShotFlight(fresh, saved.flight);
