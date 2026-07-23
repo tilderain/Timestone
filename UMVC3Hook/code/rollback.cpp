@@ -75,6 +75,7 @@ static constexpr uintptr_t FN_RCHRCPU_CLASS_FUNC = 0x140117280;
 static constexpr uintptr_t FN_RNG_RANDOM_INT = 0x14014EB30;
 static constexpr uintptr_t FN_HSIENKO_SELECT_ANKI = 0x1400A1260;
 static constexpr uintptr_t FN_SET_RESERVED_ANKI = 0x1400D4D90;
+static constexpr uintptr_t FN_BUILD_ATTACH_MATRIX = 0x14014F960;
 
 // ===========================================================================
 // Offsets & Struct Constants
@@ -1431,6 +1432,7 @@ struct ShotRecipe {
     uint8_t preSpawnEffectRng[16] = {};
     uint8_t preSpawnOwnerRng[16] = {};
     bool hasPreSpawnRng = false;
+    bool reconstructed = false;
 };
 
 struct EffectRecipe {
@@ -1490,6 +1492,8 @@ static ShotSpawnFn oShotSpawn = nullptr;
 static ShotSpawnExFn oShotSpawnEx = nullptr;
 static UnitRemoveFn oUnitRemove = nullptr;
 static EffectCreateFn oEffectCreate = nullptr;
+using BuildAttachMatrixFn = void(__fastcall*)(void*, void*, char);
+static BuildAttachMatrixFn oBuildAttachMatrix = nullptr;
 using HsienKoSelectAnkiFn = int(__fastcall*)(void*);
 static HsienKoSelectAnkiFn oHsienKoSelectAnki = nullptr;
 using SetReservedAnkiFn = void(__fastcall*)(void*, int);
@@ -1898,6 +1902,44 @@ static void DetachEmbeddedShotEffect(void* shot)
     *(uint32_t*)(embeddedEffect + 0x70) = 0xFFFFFFFFu;
 }
 
+static bool ValidAttachDispatchObject(uint64_t object)
+{
+    if (!object || !IsAccessiblePointer(object) ||
+        !HasCallableDtiVirtual((void*)object)) return false;
+
+    uint64_t vtable = *(uint64_t*)object;
+    return IsAccessibleAddress(vtable + 0x2C8) &&
+           IsAccessibleAddress(vtable + 0x2D0) &&
+           IsExecutableAddress(*(uint64_t*)(vtable + 0x2C8)) &&
+           IsExecutableAddress(*(uint64_t*)(vtable + 0x2D0));
+}
+
+static void __fastcall hkBuildAttachMatrix(void* arm, void* output, char reset)
+{
+    if (!arm || !output || !IsAccessiblePointer((uint64_t)arm + 0xD0)) {
+        return;
+    }
+
+    void* shot = (uint8_t*)arm - 0x1DC0;
+    auto recipe = g_liveShotRecipes.find(shot);
+    if (recipe == g_liveShotRecipes.end() || !recipe->second.reconstructed) {
+        oBuildAttachMatrix(arm, output, reset);
+        return;
+    }
+
+    // The native routine unconditionally dispatches primary +0x2C8/+0x2D0
+    // after it has optionally traversed secondary/tertiary. A restored cArm
+    // can retain the old timeline's UINTPTR_MAX link even though all gameplay
+    // scalars are otherwise valid. Do not let that sentinel reach native code.
+    // The native routine cannot be made safe by validating its vtable: the
+    // +0x2C8/+0x2D0 methods are allowed to return small sentinel values, which
+    // the routine immediately passes to MtVector4::copy. Use the last
+    // pointer-free attachment matrix instead. It preserves the reconstructed
+    // laser pose without traversing the discarded attachment graph.
+    (void)reset;
+    std::memcpy(output, (uint8_t*)arm + 0x90, 0x40);
+}
+
 static int SanitizeShotCollisionSlotsForDestruction(void* shot)
 {
     if (!shot || !IsAccessiblePointer((uint64_t)shot + 0x2078)) return 0;
@@ -1926,17 +1968,6 @@ static int SanitizeShotCollisionSlotsForDestruction(void* shot)
         ++sanitized;
     }
     return sanitized;
-}
-
-static void DetachShotAttachment(void* shot)
-{
-    if (!shot || !IsAccessiblePointer((uint64_t)shot + 0x1DC0 + 0x80)) return;
-
-    // uShot__buildAttachMatrixForOwner returns immediately when cArm+0x78 is
-    // null. A reconstructed attachment can have a callable primary owner at
-    // +0x70 whose transform virtual nevertheless returns a stale small value.
-    // The external attachment graph is not reconstructed, so do not enter it.
-    *(uint64_t*)((uint8_t*)shot + 0x1DC0 + 0x78) = 0;
 }
 
 static void Rollback_AppendShotHitboxesJSON(std::string& json, void* shot)
@@ -2325,11 +2356,10 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
         // The factory may create an inline effect with a valid vtable, but its
         // owner/list links still point at the old prediction graph. Detach it
         // before the broad concrete overlay can copy any stale relationship.
-        DetachEmbeddedShotEffect(fresh);
-
         ShotRecipe liveRecipe = saved;
         liveRecipe.savedPtr = fresh;
         liveRecipe.restoredPtr = fresh;
+        liveRecipe.reconstructed = true;
         g_liveShotRecipes[fresh] = liveRecipe;
         saved.restoredPtr = fresh;
         // Rebuild registration through the same pending-unit path used by the
@@ -2364,8 +2394,7 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
         // Concrete snapshots do not reconstruct the global particle-owner
         // graph referenced by inline sEffect objects. Leave that graph
         // detached so later native shot destruction cannot walk stale nodes.
-        DetachEmbeddedShotEffect(fresh);
-        DetachShotAttachment(fresh);
+
         // Reapply confirmed pointer-free common fields after the broad object
         // overlay so packed floats/flags that resemble addresses still rewind.
         ApplyShotFlight(fresh, saved.flight);
@@ -5607,6 +5636,16 @@ void Rollback_InitHooks()
         HookLog("Rollback: hooked uGameEffect factory\n");
     } else {
         HookLog("Rollback: failed to hook uGameEffect factory (%d)\n", s);
+    }
+
+    s = MH_CreateHook((LPVOID)_addr(FN_BUILD_ATTACH_MATRIX),
+                      (LPVOID)&hkBuildAttachMatrix,
+                      (LPVOID*)&oBuildAttachMatrix);
+    if (s == MH_OK) {
+        MH_EnableHook((LPVOID)_addr(FN_BUILD_ATTACH_MATRIX));
+        HookLog("Rollback: hooked uShot attachment transform guard\n");
+    } else {
+        HookLog("Rollback: failed to hook uShot attachment transform guard (%d)\n", s);
     }
 
     s = MH_CreateHook((LPVOID)_addr(FN_SUNIT_REMOVE_UNIT),
