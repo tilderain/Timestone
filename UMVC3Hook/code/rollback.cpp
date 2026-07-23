@@ -333,6 +333,20 @@ static bool IsUnitObject(const void* object)
     return false;
 }
 
+static bool IsActiveUnit(void* unit);
+
+static void* ValidateShotObjectReference(void* reference, uint64_t expectedDti,
+                                         bool expectedActiveUnit)
+{
+    if (!reference) return nullptr;
+    if (!expectedDti || !HasCallableDtiVirtual(reference) ||
+        GetObjectDti((uint64_t)reference) != expectedDti) {
+        return nullptr;
+    }
+    if (expectedActiveUnit && !IsActiveUnit(reference)) return nullptr;
+    return reference;
+}
+
 static int SanitizeUnitCategoryLists(void* sUnit)
 {
     if (!sUnit || !IsAccessiblePointer((uint64_t)sUnit)) return 0;
@@ -1399,8 +1413,12 @@ struct ShotRecipe {
     void* posData;
     void* ownerChr;
     void* objectRef1;
+    uint64_t objectRef1Dti;
+    bool objectRef1WasActiveUnit;
     uint32_t slotId;
     void* objectRef2;
+    uint64_t objectRef2Dti;
+    bool objectRef2WasActiveUnit;
     ShotSpawnKind kind;
     int exA9;
     void* exA10;
@@ -1706,13 +1724,10 @@ static void ApplyShotFlight(void* shot, const ShotFlightState& in)
     std::memcpy(p + 0x10, &unitState, sizeof(unitState));
     std::memcpy(p + 0x50, in.transformState, sizeof(in.transformState));
     std::memcpy(p + 0x3E8, in.runtimeState, sizeof(in.runtimeState));
-    std::memcpy(p + 0x1E50, in.shotMatrices, sizeof(in.shotMatrices));
     std::memcpy(p + 0x1F58, &in.timerThresh, sizeof(in.timerThresh));
     std::memcpy(p + 0x1F60, &in.timer, sizeof(in.timer));
     std::memcpy(p + 0x1F5C, &in.delayTime, sizeof(in.delayTime));
     std::memcpy(p + 0x1F64, &in.autoAddDivStartTime, sizeof(in.autoAddDivStartTime));
-    std::memcpy(p + 0x1F70, in.resourceScalars, sizeof(in.resourceScalars));
-    std::memcpy(p + 0x2038, in.attackScalars, sizeof(in.attackScalars));
     std::memcpy(p + 0x2078, in.movementScalars, sizeof(in.movementScalars));
     std::memcpy(p + 0x2118, in.animationScalars, sizeof(in.animationScalars));
     std::memcpy(p + 0x212C, &in.step, sizeof(in.step));
@@ -1735,8 +1750,16 @@ static void* __fastcall hkShotSpawn(void* manager, void* element, uint64_t initP
     recipe.posData = posData;
     recipe.ownerChr = ownerChr;
     recipe.objectRef1 = objectRef1;
+    recipe.objectRef1Dti = objectRef1 && HasCallableDtiVirtual(objectRef1)
+        ? GetObjectDti((uint64_t)objectRef1) : 0;
+    recipe.objectRef1WasActiveUnit = objectRef1 && IsUnitObject(objectRef1) &&
+        IsActiveUnit(objectRef1);
     recipe.slotId = slotId;
     recipe.objectRef2 = objectRef2;
+    recipe.objectRef2Dti = objectRef2 && HasCallableDtiVirtual(objectRef2)
+        ? GetObjectDti((uint64_t)objectRef2) : 0;
+    recipe.objectRef2WasActiveUnit = objectRef2 && IsUnitObject(objectRef2) &&
+        IsActiveUnit(objectRef2);
     recipe.kind = ShotSpawnKind::Standard;
     recipe.spawnSequence = ++g_shotSpawnSequence;
     // Capture before the native factory. Hsien-Ko Ankihou setup consumes the
@@ -1763,8 +1786,16 @@ static void* __fastcall hkShotSpawnEx(void* manager, void* element, uint64_t ini
     recipe.posData = posData;
     recipe.ownerChr = ownerChr;
     recipe.objectRef1 = objectRef1;
+    recipe.objectRef1Dti = objectRef1 && HasCallableDtiVirtual(objectRef1)
+        ? GetObjectDti((uint64_t)objectRef1) : 0;
+    recipe.objectRef1WasActiveUnit = objectRef1 && IsUnitObject(objectRef1) &&
+        IsActiveUnit(objectRef1);
     recipe.slotId = slotId;
     recipe.objectRef2 = objectRef2;
+    recipe.objectRef2Dti = objectRef2 && HasCallableDtiVirtual(objectRef2)
+        ? GetObjectDti((uint64_t)objectRef2) : 0;
+    recipe.objectRef2WasActiveUnit = objectRef2 && IsUnitObject(objectRef2) &&
+        IsActiveUnit(objectRef2);
     recipe.kind = ShotSpawnKind::Extended;
     recipe.exA9 = a9;
     recipe.exA10 = a10;
@@ -2224,14 +2255,19 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
 
     for (ShotRecipe& saved : slot.shotRecipes) {
         RestorePreSpawnRng(saved);
+        void* objectRef1 = ValidateShotObjectReference(
+            saved.objectRef1, saved.objectRef1Dti,
+            saved.objectRef1WasActiveUnit);
+        void* objectRef2 = ValidateShotObjectReference(
+            saved.objectRef2, saved.objectRef2Dti,
+            saved.objectRef2WasActiveUnit);
         void* fresh = saved.kind == ShotSpawnKind::Extended
             ? oShotSpawnEx(sShot, saved.shotElement, saved.initParam, saved.posData,
-                           saved.ownerChr, saved.objectRef1, saved.slotId,
-                           saved.objectRef2, saved.exA9, saved.exA10,
+                           saved.ownerChr, objectRef1, saved.slotId,
+                           objectRef2, saved.exA9, saved.exA10,
                            saved.exA11, saved.exA12)
             : oShotSpawn(sShot, saved.shotElement, saved.initParam, saved.posData,
-                         saved.ownerChr, saved.objectRef1, saved.slotId,
-                         saved.objectRef2);
+                         saved.ownerChr, objectRef1, saved.slotId, objectRef2);
         if (!fresh) {
             failedShots++;
             continue;

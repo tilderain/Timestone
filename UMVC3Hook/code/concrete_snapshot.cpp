@@ -379,18 +379,26 @@ bool ConcreteShotSnapshot_Restore(void* shot,
     // call through a null pointer during joint-order traversal.
     PreserveRange(overlay.data(), live, liveSize, {0x530, 0x30});
 
+    // cAtkCtrl and cArm are inline native owners. Their scalar fields include
+    // vtable-backed collision slots and target-info storage, so preserving only
+    // the pointer-looking words is insufficient: a saved destructor state can
+    // leave a live slot non-null with a zeroed vtable. Keep the complete fresh
+    // owner region; the explicitly restored target/collision gameplay state is
+    // applied below through native accessors.
+    PreserveRange(overlay.data(), live, liveSize, {0x1470, 0xC08});
+
     // Soul Fist stores a live uGameEffect pointer after its mode field.
     if (IsDti(snapshot.dti, kSoulFistDti)) {
         PreserveRange(overlay.data(), live, liveSize, {0x2148, 0x08});
     }
 
-    // Concrete projectile tails can contain embedded MtObjects with live
-    // ownership/list links. Discover those objects from the fresh instance
-    // rather than maintaining a projectile-class allowlist. Their complete
-    // live ranges must survive restoration; otherwise a later destructor can
-    // follow an owner pointer from the old timeline.
+    // Shots contain inline MtObjects both in the common body and concrete tail.
+    // Discover them across the complete restored range from the fresh instance
+    // rather than maintaining a class allowlist. Their complete live ranges
+    // must survive restoration: cArm, for example, can retain a fresh pointer
+    // to an inline model near +0xAC0 whose saved vtable is zero.
     for (const SnapshotRange& range : FindEmbeddedObjects(
-             live, liveSize, kShotBodyStart)) {
+             live, liveSize, kShotRestoreStart)) {
         PreserveRange(overlay.data(), live, liveSize, range);
     }
 
