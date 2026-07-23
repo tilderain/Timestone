@@ -2192,8 +2192,10 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
         if (pendingCount >= 0x200 || !enqueueUnit(sShot, fresh, SSHOT_CATEGORY)) {
             addUnit(sUnit, SSHOT_CATEGORY, fresh, nullptr);
         }
-        ApplyShotFlight(fresh, saved.flight);
         ConcreteShotSnapshot_Restore(fresh, saved.concrete);
+        // Reapply confirmed pointer-free common fields after the broad object
+        // overlay so packed floats/flags that resemble addresses still rewind.
+        ApplyShotFlight(fresh, saved.flight);
 
         // ApplyShotFlight preserves the category assigned by addUnit while
         // restoring the saved gameplay lifecycle bits.

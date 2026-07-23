@@ -9,16 +9,14 @@ namespace {
 
 constexpr uintptr_t kMinGameAddress = 0x140000000ull;
 constexpr size_t kShotBodyStart = 0x2140;
+constexpr size_t kShotRestoreStart = 0x50;
 constexpr size_t kMaxObjectSize = 0x40000;
+constexpr size_t kMaxEmbeddedObjectSize = 0x1000;
 
 // These DTI addresses were verified from the class DTI getters in Ghidra.
 // They are used only to select the exceptional subclass policy; the object
 // size itself always comes from the live object's DTI metadata.
 constexpr uintptr_t kSoulFistDti = 0x140D4B6E8ull;
-constexpr uintptr_t kLaserSinkuDti = 0x140D4C5F0ull;
-constexpr uintptr_t kVulcanHandGrenadeBombDti = 0x140D48CD0ull;
-constexpr uintptr_t kAnkihouRollingDti = 0x140D4AFE0ull;
-constexpr uintptr_t kZireitouDti = 0x140D4B0D0ull;
 constexpr uintptr_t kRyuDti = 0x140D45A10ull;
 constexpr uintptr_t kHsienKoDti = 0x140D455F8ull;
 
@@ -43,14 +41,30 @@ bool Accessible(uint64_t address, size_t size = sizeof(uint64_t))
     return address <= regionEnd && size <= regionEnd - address;
 }
 
+bool Executable(uint64_t address)
+{
+    MEMORY_BASIC_INFORMATION mbi = {};
+    if (VirtualQuery((void*)address, &mbi, sizeof(mbi)) == 0 ||
+        mbi.State != MEM_COMMIT ||
+        (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) != 0) {
+        return false;
+    }
+
+    constexpr DWORD executable = PAGE_EXECUTE | PAGE_EXECUTE_READ |
+        PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
+    return (mbi.Protect & executable) != 0;
+}
+
 uint64_t GetDti(void* object)
 {
     if (!object || !Accessible((uint64_t)object)) return 0;
     uint64_t vtable = *(uint64_t*)object;
-    if (!Accessible(vtable + 0x28)) return 0;
+    if (!vtable || !Accessible(vtable + 0x28)) return 0;
     uint64_t getDti = *(uint64_t*)(vtable + 0x20);
-    if (!getDti || getDti < kMinGameAddress || !Accessible(getDti)) return 0;
-    return ((uint64_t(__fastcall*)(uint64_t))getDti)((uint64_t)object);
+    if (!getDti || getDti < kMinGameAddress || !Executable(getDti)) return 0;
+    uint64_t dti = ((uint64_t(__fastcall*)(uint64_t))getDti)((uint64_t)object);
+    return dti >= kMinGameAddress && Accessible(dti + 0x30, sizeof(uint32_t))
+        ? dti : 0;
 }
 
 uint32_t DtiSize(uint64_t dti)
@@ -67,10 +81,24 @@ bool IsDti(uint64_t dti, uintptr_t expected)
 void CopyRange(void* destination, const uint8_t* source, size_t objectSize,
                SnapshotRange range)
 {
-    if (range.offset < kShotBodyStart || range.offset >= objectSize) return;
+    if (range.offset >= objectSize) return;
     size_t size = range.size;
     if (range.offset + size > objectSize) size = objectSize - range.offset;
     std::memcpy((uint8_t*)destination + range.offset, source + range.offset, size);
+}
+
+void PreserveLivePointers(uint8_t* overlay, const uint8_t* live,
+                          size_t objectSize)
+{
+    for (size_t offset = kShotRestoreStart;
+         offset + sizeof(uint64_t) <= objectSize;
+         offset += sizeof(uint64_t)) {
+        uint64_t liveValue = *(const uint64_t*)(live + offset);
+        uint64_t savedValue = *(const uint64_t*)(overlay + offset);
+        if (Accessible(liveValue) || Accessible(savedValue)) {
+            std::memcpy(overlay + offset, live + offset, sizeof(uint64_t));
+        }
+    }
 }
 
 void PreserveRange(uint8_t* saved, const uint8_t* live, size_t objectSize,
@@ -80,6 +108,37 @@ void PreserveRange(uint8_t* saved, const uint8_t* live, size_t objectSize,
     size_t size = range.size;
     if (range.offset + size > objectSize) size = objectSize - range.offset;
     std::memcpy(saved + range.offset, live + range.offset, size);
+}
+
+std::vector<SnapshotRange> FindEmbeddedObjects(const uint8_t* live,
+                                               size_t objectSize)
+{
+    std::vector<SnapshotRange> ranges;
+    for (size_t offset = kShotBodyStart;
+         offset + sizeof(uint64_t) <= objectSize;
+         offset += sizeof(uint64_t)) {
+        uint64_t candidate = *(const uint64_t*)(live + offset);
+        if (candidate < kMinGameAddress || !Accessible(candidate + 0x28))
+            continue;
+
+        uint64_t dti = GetDti((void*)(live + offset));
+        uint32_t size = DtiSize(dti);
+        if (!dti || size < sizeof(uint64_t) ||
+            size > kMaxEmbeddedObjectSize || offset + size > objectSize)
+            continue;
+
+        bool overlaps = false;
+        for (const SnapshotRange& range : ranges) {
+            if (offset < range.offset + range.size &&
+                range.offset < offset + size) {
+                overlaps = true;
+                break;
+            }
+        }
+        if (!overlaps)
+            ranges.push_back({offset, size});
+    }
+    return ranges;
 }
 
 } // namespace
@@ -125,33 +184,37 @@ void ConcreteShotSnapshot_Restore(void* shot,
     PreserveRange(overlay.data(), live, liveSize, {0, sizeof(uint64_t)});
     PreserveRange(overlay.data(), live, liveSize, {0x10, 0x08});
 
+    // Restore the complete common uShot gameplay body rather than the sparse
+    // ShotFlightState ranges alone. Keep allocations, resources and external
+    // references from the freshly-created object wherever either timeline's
+    // qword resolves to committed memory. This also lets a fresh null clear a
+    // stale saved pointer. Confirmed scalar flight ranges are applied after
+    // this overlay by the caller.
+    PreserveLivePointers(overlay.data(), live, liveSize);
+
+    // uModel's joint count and allocation pointers describe the freshly-built
+    // native model. A saved count with a null live index array makes rendering
+    // call through a null pointer during joint-order traversal.
+    PreserveRange(overlay.data(), live, liveSize, {0x530, 0x30});
+
     // Soul Fist stores a live uGameEffect pointer after its mode field.
     if (IsDti(snapshot.dti, kSoulFistDti)) {
         PreserveRange(overlay.data(), live, liveSize, {0x2148, 0x08});
     }
 
-    // Shinku Hadouken constructs two embedded constraint/share objects. Their
-    // vtables and allocator-owned headers must remain those of the fresh
-    // native object; scalar subclass state around them is still restored.
-    if (IsDti(snapshot.dti, kLaserSinkuDti)) {
-        PreserveRange(overlay.data(), live, liveSize, {0x2160, 0xD0});
-        PreserveRange(overlay.data(), live, liveSize, {0x2230, 0xD0});
+    // Concrete projectile tails can contain embedded MtObjects with live
+    // ownership/list links. Discover those objects from the fresh instance
+    // rather than maintaining a projectile-class allowlist. Their complete
+    // live ranges must survive restoration; otherwise a later destructor can
+    // follow an owner pointer from the old timeline.
+    for (const SnapshotRange& range : FindEmbeddedObjects(live, liveSize)) {
+        PreserveRange(overlay.data(), live, liveSize, range);
     }
 
-    if (IsDti(snapshot.dti, kVulcanHandGrenadeBombDti) ||
-        IsDti(snapshot.dti, kAnkihouRollingDti) ||
-        IsDti(snapshot.dti, kZireitouDti)) {
-        // These projectiles embed a particle-list object at +0x2140.
-        // Its prev/next/list-owner fields span the entire embedded object.
-        // Restoring any of them makes destruction follow the old timeline's
-        // list; in particular, the owner is at embedded +0xA8 (+0x21E8).
-        PreserveRange(overlay.data(), live, liveSize, {0x2140, 0xC0});
-    }
-
-    // Only the concrete subclass tail is copied here. The existing flight
-    // snapshot remains responsible for the pointer-rich common uShot body.
+    // Copy the complete gameplay tail. The prefix contains cUnit ownership and
+    // intrusive links and remains owned by the freshly-created object.
     CopyRange(live, overlay.data(), liveSize,
-              {kShotBodyStart, liveSize - kShotBodyStart});
+              {kShotRestoreStart, liveSize - kShotRestoreStart});
 }
 
 void ConcreteCharacterSnapshot_RestoreFields(void* character,
