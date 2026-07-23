@@ -1883,15 +1883,14 @@ static bool IsTerminalShot(void* shot)
 
 static void DetachEmbeddedShotEffect(void* shot)
 {
-    if (!shot || !HasCallableDtiVirtual(shot)) return;
-    uint32_t shotSize = DecodeDtiSize(GetObjectDti((uint64_t)shot));
-    if (shotSize < 0x21F0) return;
+    if (!shot || !HasCallableDtiVirtual(shot) ||
+        !IsAccessiblePointer((uint64_t)shot + 0x2160 + 0xB0)) return;
 
-    // The inline sEffect is the subobject beginning at shot+0x2140. Its
-    // methods use the subobject address as `this`; do not pass the containing
-    // shot through the generic DTI check, which can accept the wrong subobject
-    // when the saved tail has overwritten its vtable.
-    uint8_t* embeddedEffect = (uint8_t*)shot + 0x2140;
+    // The concrete laser destructors pass shot+0x2160 to particle unlink.
+    // Ghidra renders this as field19_0x1350+0xE10, but field19 is inline
+    // storage. Crash registers confirm the direct offset (sEffect RBX - shot
+    // R12 == 0x2160).
+    uint8_t* embeddedEffect = (uint8_t*)shot + 0x2160;
     if (!HasCallableDtiVirtual(embeddedEffect)) return;
     *(uint64_t*)(embeddedEffect + 0x50) = 0;
     *(uint64_t*)(embeddedEffect + 0x58) = 0;
@@ -1901,27 +1900,16 @@ static void DetachEmbeddedShotEffect(void* shot)
 
 static void SanitizeShotAttachmentOwner(void* shot)
 {
-    if (!shot || !IsAccessiblePointer((uint64_t)shot + 0x1480)) return;
+    if (!shot || !IsAccessiblePointer((uint64_t)shot + 0x1DC0 + 0x80)) return;
 
-    // uShot__advancePhysicsAndPose passes *(shot+0x1478)+0x948 to
-    // buildAttachMatrixForOwner. This is an indirect cArm, not the bytes at a
-    // fixed offset in the shot body.
-    uint64_t armBase = *(uint64_t*)((uint8_t*)shot + 0x1478);
-    if (!armBase || !IsAccessiblePointer(armBase + 0x948 + 0x80)) return;
-    uint8_t* owner = (uint8_t*)(armBase + 0x948);
-    // buildAttachMatrixForOwner returns when +0x78 is null, but otherwise
-    // eventually dispatches through the required primary object at +0x70.
-    // A reconstructed shot can retain the optional link while the factory has
-    // no compatible primary owner, which otherwise becomes a call through 0x2D0.
-    uint64_t primary = *(uint64_t*)(owner + 0x70);
-    bool validPrimary = primary && HasCallableDtiVirtual((void*)primary);
-    if (validPrimary) {
-        uint64_t vtable = *(uint64_t*)primary;
-        validPrimary = IsAccessibleAddress(vtable + 0x2D0) &&
-            IsExecutableAddress(*(uint64_t*)(vtable + 0x2D0));
-    }
-    if (*(uint64_t*)(owner + 0x78) && !validPrimary)
-        *(uint64_t*)(owner + 0x78) = 0;
+    // uShot__advancePhysicsAndPose passes shot+0x1DC0. Ghidra renders this as
+    // field2_0x1478+0x948, but field2 is inline storage, not a pointer. Crash
+    // registers confirm the relationship directly (cArm RBX - shot RSI).
+    uint8_t* owner = (uint8_t*)shot + 0x1DC0;
+    // buildAttachMatrixForOwner returns immediately when +0x78 is null. The
+    // factory's attachment target belongs to the discarded timeline, so do
+    // not let the restored scalar state reach the target's +0x2D0 dispatch.
+    *(uint64_t*)(owner + 0x78) = 0;
 }
 
 static void Rollback_AppendShotHitboxesJSON(std::string& json, void* shot)
