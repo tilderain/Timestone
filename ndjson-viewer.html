@@ -148,7 +148,7 @@ const KNOWN_CHAR_FIELDS = new Set([
   'team', 'slot', 'mid', 'plr', 'ast',
   'pos',
   'hitboxes',
-  'act', 'fl', 'mHeld', 'fcnt', 'mOld', 'mPressed', 'mReleased',
+  'act', 'mChrF', 'mAnmF', 'mPrgF', 'mHeld', 'fcnt', 'mOld', 'mPressed', 'mReleased',
   'mMask', 'mProcessed',
   'rng',
   'dirRing', 'dirSlot', 'dir0', 'dir4', 'h590', 'h594',
@@ -301,6 +301,9 @@ function parseEntries(text) {
       const e = JSON.parse(l);
       if (e.chars) {
         for (const c of e.chars) {
+          if (c.mChrF === undefined && c.fl !== undefined) c.mChrF = c.fl;
+          if (c.mAnmF === undefined && c.fl4 !== undefined) c.mAnmF = c.fl4;
+          if (c.mPrgF === undefined && c.fl8 !== undefined) c.mPrgF = c.fl8;
           if (c.dirRing) c.dirRing = normalizeDirRing(c.dirRing);
         }
       }
@@ -614,7 +617,9 @@ function isCharDiffering(c) {
     if (dMag > 0.001) return true;
   }
   if (c.live.act !== c.resim.act) return true;
-  if (c.live.fl !== c.resim.fl) return true;
+  if (c.live.mChrF !== c.resim.mChrF) return true;
+  if (c.live.mAnmF !== c.resim.mAnmF) return true;
+  if (c.live.mPrgF !== c.resim.mPrgF) return true;
   if (c.live.mHeld !== c.resim.mHeld) return true;
   if (c.live.mOld !== c.resim.mOld) return true;
   if (c.live.mPressed !== c.resim.mPressed) return true;
@@ -1249,11 +1254,15 @@ function drawSidebar(g, frameNum) {
     // Action / Flags / Input State
     if (c.live && c.resim) {
       const actSame = c.live.act === c.resim.act;
-      const flSame = c.live.fl === c.resim.fl;
+      const mChrFSame = c.live.mChrF === c.resim.mChrF;
+      const mAnmFSame = c.live.mAnmF === c.resim.mAnmF;
+      const mPrgFSame = c.live.mPrgF === c.resim.mPrgF;
       const mhSame = c.live.mHeld === c.resim.mHeld;
       const fcntSame = c.live.fcnt === c.resim.fcnt;
       html += `<tr class="${actSame ? '' : 'mismatch-bg'}"><th>Act</th><td>${c.live.act||'—'}</td><td>${c.resim.act||'—'}</td><td class="${actSame?'delta-ok':'delta-bad'}">${actSame?'✓':'✗'}</td></tr>`;
-      html += `<tr class="${flSame ? '' : 'mismatch-bg'}"><th>Flags</th><td>${c.live.fl||'—'}</td><td>${c.resim.fl||'—'}</td><td class="${flSame?'delta-ok':'delta-bad'}">${flSame?'✓':'✗'}</td></tr>`;
+      for (const [field, same] of [['mChrF', mChrFSame], ['mAnmF', mAnmFSame], ['mPrgF', mPrgFSame]]) {
+        html += `<tr class="${same ? '' : 'mismatch-bg'}"><th>${field}</th><td>${c.live[field]||'—'}</td><td>${c.resim[field]||'—'}</td><td class="${same?'delta-ok':'delta-bad'}">${same?'✓':'✗'}</td></tr>`;
+      }
       html += `<tr class="${mhSame ? '' : 'mismatch-bg'}"><th>Input</th><td>${c.live.mHeld||'—'}</td><td>${c.resim.mHeld||'—'}</td><td class="${mhSame ? '' : 'delta-bad'}">${mhSame ? '✓' : '✗'}</td></tr>`;
       html += `<tr class="${fcntSame ? '' : 'mismatch-bg'}"><th>FCnt</th><td>${c.live.fcnt??'—'}</td><td>${c.resim.fcnt??'—'}</td><td class="${fcntSame ? '' : 'delta-bad'}">${fcntSame ? '✓' : '✗'}</td></tr>`;
       // Edge state
@@ -1279,12 +1288,12 @@ function drawSidebar(g, frameNum) {
       }
     } else if (c.live) {
       html += `<tr><th>Act</th><td>${c.live.act||'—'}</td><td>—</td><td></td></tr>`;
-      html += `<tr><th>Flags</th><td>${c.live.fl||'—'}</td><td>—</td><td></td></tr>`;
+      for (const field of ['mChrF', 'mAnmF', 'mPrgF']) html += `<tr><th>${field}</th><td>${c.live[field]||'—'}</td><td>—</td><td></td></tr>`;
       html += `<tr><th>Input</th><td>${c.live.mHeld||'—'}</td><td>—</td><td></td></tr>`;
       html += `<tr><th>FCnt</th><td>${c.live.fcnt??'—'}</td><td>—</td><td></td></tr>`;
     } else if (c.resim) {
       html += `<tr><th>Act</th><td>—</td><td>${c.resim.act||'—'}</td><td></td></tr>`;
-      html += `<tr><th>Flags</th><td>—</td><td>${c.resim.fl||'—'}</td><td></td></tr>`;
+      for (const field of ['mChrF', 'mAnmF', 'mPrgF']) html += `<tr><th>${field}</th><td>—</td><td>${c.resim[field]||'—'}</td><td></td></tr>`;
       html += `<tr><th>Input</th><td>—</td><td>${c.resim.mHeld||'—'}</td><td></td></tr>`;
       html += `<tr><th>FCnt</th><td>—</td><td>${c.resim.fcnt??'—'}</td><td></td></tr>`;
     }

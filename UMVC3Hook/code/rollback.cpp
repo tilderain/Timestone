@@ -992,8 +992,8 @@ std::string Rollback_GenerateNetplayLiveJSON(int32_t frame, bool isResim,
                                 "{\"team\":%d,\"slot\":%d,\"mid\":%d,"
                                 "\"plr\":%d,\"ast\":%d,"
                                 "\"pos\":[%.9g,%.9g,%.9g],"
-                                "\"act\":\"0x%08X\",\"fl\":\"0x%08X\","
-                                "\"fl4\":\"0x%08X\",\"fl8\":\"0x%08X\","
+                                 "\"act\":\"0x%08X\",\"mChrF\":\"0x%08X\","
+                                 "\"mAnmF\":\"0x%08X\",\"mPrgF\":\"0x%08X\","
                                 "\"mHeld\":\"0x%08X\",\"fcnt\":%llu,"
                                 "\"mOld\":\"0x%08X\","
                                 "\"mPressed\":\"0x%08X\",\"mReleased\":\"0x%08X\","
@@ -1030,8 +1030,8 @@ std::string Rollback_GenerateNetplayLiveJSON(int32_t frame, bool isResim,
                                 "{\"team\":%d,\"slot\":%d,\"mid\":%d,"
                                 "\"plr\":%d,\"ast\":%d,"
                                 "\"pos\":[%.9g,%.9g,%.9g],"
-                                "\"act\":\"0x%08X\",\"fl\":\"0x%08X\","
-                                "\"fl4\":\"0x%08X\",\"fl8\":\"0x%08X\","
+                                 "\"act\":\"0x%08X\",\"mChrF\":\"0x%08X\","
+                                 "\"mAnmF\":\"0x%08X\",\"mPrgF\":\"0x%08X\","
                                 "\"mHeld\":\"0x%08X\",\"fcnt\":%llu,"
                                 "\"mOld\":\"0x%08X\","
                                 "\"mPressed\":\"0x%08X\",\"mReleased\":\"0x%08X\","
@@ -1273,17 +1273,17 @@ void Rollback_LogResimNotifyNDJSON(const ResimNotifyPacket& pkt)
         // P1 point
         fprintf(f, "{\"team\":0,\"slot\":0,"
                    "\"pos\":[%.4f,%.4f,%.4f],"
-                   "\"act\":\"0x%08X\",\"fl\":\"0x%08X\","
+                             "\"act\":\"0x%08X\",\"mChrF\":\"0x%08X\","
                    "\"mHeld\":\"0x%08X\",\"fcnt\":%llu,"
                    "\"rng\":[\"0x%08X\",\"0x%08X\",\"0x%08X\",\"0x%08X\"]}",
                 p1.posX, p1.posY, p1.posZ,
-                p1.actionId, p1.flags,
+                 p1.actionId, p1.flags,
                 p1.mHeld, (unsigned long long)p1.frameCnt,
                 p1.rng[0], p1.rng[1], p1.rng[2], p1.rng[3]);
         // P2 point
         fprintf(f, ",{\"team\":1,\"slot\":0,"
                    "\"pos\":[%.4f,%.4f,%.4f],"
-                   "\"act\":\"0x%08X\",\"fl\":\"0x%08X\","
+                             "\"act\":\"0x%08X\",\"mChrF\":\"0x%08X\","
                    "\"mHeld\":\"0x%08X\",\"fcnt\":%llu,"
                    "\"rng\":[\"0x%08X\",\"0x%08X\",\"0x%08X\",\"0x%08X\"]}",
                 p2.posX, p2.posY, p2.posZ,
@@ -1840,9 +1840,8 @@ static bool IsTerminalShot(void* shot)
     // pattern observed for the persistent list-0 shot in the 031454 capture.
     float lifeFrame = *(float*)((uint8_t*)shot + 0x2078);
     uint32_t step = *(uint32_t*)((uint8_t*)shot + 0x212C);
-    float timer = *(float*)((uint8_t*)shot + 0x1F60);
     return std::isfinite(lifeFrame) && lifeFrame <= 0.0f &&
-           step == 3 && std::isfinite(timer) && timer > 0.0f;
+           step == 3;
 }
 
 static void Rollback_AppendShotHitboxesJSON(std::string& json, void* shot)
@@ -4327,7 +4326,8 @@ static void Rollback_DumpNDJSON(int32_t frame, uint8_t side) {
                     firstChar = false;
                     fprintf(g_diagNdjsonFile, "{\"team\":%d,\"slot\":%d,"
                             "\"pos\":[%.4f,%.4f,%.4f],"
-                            "\"act\":\"0x%08X\",\"fl\":\"0x%08X\","
+                             "\"act\":\"0x%08X\",\"mChrF\":\"0x%08X\","
+                             "\"mAnmF\":\"0x%08X\",\"mPrgF\":\"0x%08X\","
                             "\"mHeld\":\"0x%08X\",\"fcnt\":%llu,"
                             "\"mOld\":\"0x%08X\","
                             "\"mPressed\":\"0x%08X\",\"mReleased\":\"0x%08X\","
@@ -4335,7 +4335,7 @@ static void Rollback_DumpNDJSON(int32_t frame, uint8_t side) {
                             "\"rng\":[\"0x%08X\",\"0x%08X\",\"0x%08X\",\"0x%08X\"]}",
                             ti, ci,
                             snap.posX, snap.posY, snap.posZ,
-                            snap.actionId, snap.flags14F0,
+                             snap.actionId, snap.flags14F0, snap.flags14F4, snap.flags14F8,
                             mHeld, fcnt,
                             mOld, mPressed, mReleased, mMask, mProcessed,
                             snap.xorShift[0], snap.xorShift[1],

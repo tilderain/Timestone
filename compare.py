@@ -7,7 +7,8 @@ Usage:
 
 Designed for the UMVC3Hook nplive/rdiag NDJSON schema:
     {"v":1,"ts":..., "frame":N, "side":"host"|"client"|"ground_truth"|"resim"|"host_pre_restore_prediction",
-      "chars":[{"team":0,"slot":0,"pos":[x,y,z],"act":"0x..","fl":"0x..",
+       "chars":[{"team":0,"slot":0,"pos":[x,y,z],"act":"0x..",
+                 "mChrF":"0x..","mAnmF":"0x..","mPrgF":"0x..",
                 "mHeld":"0x..","fcnt":N,
                 "mOld":"0x..","mPressed":"0x..","mReleased":"0x..","mMask":"0x..","mProcessed":"0x..",
                 "dirSlot":N,"dir0":"0x..","dir4":"0x..","h590":"0x..","h594":"0x..",
@@ -103,6 +104,9 @@ def load_ndjson(path):
 def chars_by_key(entry, by_mid=False):
     out = {}
     for c in entry.get("chars", []):
+        for canonical, legacy in (("mChrF", "fl"), ("mAnmF", "fl4"), ("mPrgF", "fl8")):
+            if canonical not in c and legacy in c:
+                c[canonical] = c[legacy]
         if c.get("plr", -1) < 0:
             continue
         if by_mid:
@@ -247,12 +251,9 @@ def diff_char(ca, cb, pos_eps):
             diffs["pos"] = f"A={pa} B={pb} delta={pd}"
     if not hex_eq(ca.get("act"), cb.get("act")):
         diffs["act"] = f"A={ca.get('act')} B={cb.get('act')}"
-    if not hex_eq(ca.get("fl"), cb.get("fl")):
-        diffs["fl"] = f"A={ca.get('fl')} B={cb.get('fl')}"
-    if not hex_eq(ca.get("fl4"), cb.get("fl4")):
-        diffs["fl4"] = f"A={ca.get('fl4')} B={cb.get('fl4')}"
-    if not hex_eq(ca.get("fl8"), cb.get("fl8")):
-        diffs["fl8"] = f"A={ca.get('fl8')} B={cb.get('fl8')}"
+    for field in ("mChrF", "mAnmF", "mPrgF"):
+        if not hex_eq(ca.get(field), cb.get(field)):
+            diffs[field] = f"A={ca.get(field)} B={cb.get(field)}"
     if not hex_eq(ca.get("mHeld"), cb.get("mHeld")):
         diffs["mHeld"] = f"A={ca.get('mHeld')} B={cb.get('mHeld')}"
     if not hex_eq(ca.get("mOld"), cb.get("mOld")):
@@ -360,7 +361,7 @@ def fmt_entry_chars(entry, include_dir=False):
     for c in entry.get("chars", []):
         parts = (
             f"    team={c.get('team')} slot={c.get('slot')} mid={c.get('mid', '?')} plr={c.get('plr')} ast={c.get('ast')} "
-            f"pos={c.get('pos')} act={c.get('act')} fl={c.get('fl')} fl4={c.get('fl4')} fl8={c.get('fl8')} mHeld={c.get('mHeld')} "
+            f"pos={c.get('pos')} act={c.get('act')} mChrF={c.get('mChrF')} mAnmF={c.get('mAnmF')} mPrgF={c.get('mPrgF')} mHeld={c.get('mHeld')} "
             f"mOld={c.get('mOld')} mPressed={c.get('mPressed')} mReleased={c.get('mReleased')} "
             f"mMask={c.get('mMask')} mProcessed={c.get('mProcessed')} "
             f"fcnt={c.get('fcnt')} rng={c.get('rng')}"
@@ -403,13 +404,13 @@ def classify(diffs):
     if "hitboxes" in keys:
         return ("Hitbox geometry diverges along with character state. The per-primitive details "
                 "identify whether the split is position, size, activation, or shape membership.")
-    if "fl8" in keys:
-        return ("fl8 (uCharacter+0x14F8) differs — this word holds the face-left flag "
+    if "mPrgF" in keys:
+        return ("mPrgF (uCharacter+0x14F8) differs — this program-flags word contains the face-left flag "
                 "(bit 0x200000) read by cChrInput__swapLRIfFaceLeft to remap left/right "
                 "input bits. If it diverges, identical mHeld produces OPPOSITE horizontal "
                 "movement and different dash/walk decisions on each side. Check whether "
                 "the snapshot restore covers +0x14F8 and what recomputes it post-restore.")
-    if "act" in keys or "fl" in keys:
+    if "act" in keys or "mChrF" in keys or "mAnmF" in keys:
         return ("Action/flag divergence — the two simulations took a different state-machine "
                 "branch this frame.")
     input_raw_keys = {"mHeld", "mOld", "mPressed", "mReleased", "mMask", "mProcessed"}
