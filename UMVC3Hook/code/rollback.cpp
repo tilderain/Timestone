@@ -1829,6 +1829,22 @@ static bool IsActiveUnit(void* unit)
     return (state & 7u) < 3u && (state & 0x3F8u) != 0x3F8u;
 }
 
+static bool IsTerminalShot(void* shot)
+{
+    if (!shot || !IsActiveUnit(shot)) return false;
+
+    // uShot::move dispatches step 3 to the concrete shot handler instead of
+    // running the common lifetime path. A few handlers leave an expired shot
+    // linked with lifeFrame=0 and a nonzero timer, causing rollback recipe
+    // capture to resurrect the dead object forever. This is the terminal
+    // pattern observed for the persistent list-0 shot in the 031454 capture.
+    float lifeFrame = *(float*)((uint8_t*)shot + 0x2078);
+    uint32_t step = *(uint32_t*)((uint8_t*)shot + 0x212C);
+    float timer = *(float*)((uint8_t*)shot + 0x1F60);
+    return std::isfinite(lifeFrame) && lifeFrame <= 0.0f &&
+           step == 3 && std::isfinite(timer) && timer > 0.0f;
+}
+
 static void Rollback_AppendShotHitboxesJSON(std::string& json, void* shot)
 {
     json += ",\"hitboxes\":[";
@@ -2022,6 +2038,10 @@ static void CaptureShotAndEffectRecipes(SnapshotSlot& slot)
             void* shot = (void*)(nodeRef - SSHOT_NODE_OFFSET);
             auto recipe = g_liveShotRecipes.find(shot);
             if (recipe != g_liveShotRecipes.end()) {
+                if (IsTerminalShot(shot)) {
+                    nodeRef = *(uint64_t*)(nodeRef + SSHOT_NODE_NEXT);
+                    continue;
+                }
                 ShotRecipe saved = recipe->second;
                 saved.savedPtr = shot;
                 CaptureShotFlight(shot, saved.flight);
