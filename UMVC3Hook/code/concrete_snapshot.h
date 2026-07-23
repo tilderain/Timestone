@@ -32,8 +32,8 @@ bool ConcreteShotSnapshot_Restore(void* shot, const ConcreteShotSnapshot& snapsh
                                   const void* const* validTargets,
                                   size_t validTargetCount);
 
-// Reapply Ghidra-verified pointer-free subclass fields after rollback.cpp's
-// conservative character pointer-preservation pass.
+// Restore detected scalar bytes from the concrete character tail, then reapply
+// Ghidra-verified pointer-free ranges that need explicit overrides.
 void ConcreteCharacterSnapshot_RestoreFields(void* character,
                                              const uint8_t* savedBody,
                                              size_t bodySize,

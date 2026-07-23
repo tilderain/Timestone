@@ -10,6 +10,7 @@ namespace {
 constexpr uintptr_t kMinGameAddress = 0x140000000ull;
 constexpr size_t kShotBodyStart = 0x2140;
 constexpr size_t kShotRestoreStart = 0x50;
+constexpr size_t kCharacterConcreteTailStart = 0x68F0;
 constexpr size_t kMaxObjectSize = 0x40000;
 constexpr size_t kMaxEmbeddedObjectSize = 0x1000;
 constexpr size_t kShotCollisionSlotsOffset = 0x2058;
@@ -89,6 +90,23 @@ bool IsDti(uint64_t dti, uintptr_t expected)
     return dti == (uint64_t)_addr(expected);
 }
 
+bool LooksLikeAddress(uint64_t value)
+{
+    return value >= 0x10000 && value < 0x0000800000000000ull &&
+           (value & (alignof(void*) - 1)) == 0;
+}
+
+bool PreserveCharacterTailWord(uint64_t liveValue, uint64_t savedValue)
+{
+    if (Accessible(liveValue) || Accessible(savedValue)) return true;
+
+    // A destroyed helper commonly leaves one timeline null and the other with
+    // an address whose allocation has already been released. Keep the current
+    // null/stale relationship instead of resurrecting that historical target.
+    return (liveValue == 0 && LooksLikeAddress(savedValue)) ||
+           (savedValue == 0 && LooksLikeAddress(liveValue));
+}
+
 void CopyRange(void* destination, const uint8_t* source, size_t objectSize,
                SnapshotRange range)
 {
@@ -122,10 +140,68 @@ void PreserveRange(uint8_t* saved, const uint8_t* live, size_t objectSize,
 }
 
 std::vector<SnapshotRange> FindEmbeddedObjects(const uint8_t* live,
-                                               size_t objectSize)
+                                               size_t objectSize,
+                                               size_t searchStart);
+
+void RestoreDetectedCharacterTailScalars(void* character,
+                                         const uint8_t* savedBody,
+                                         size_t bodySize)
+{
+    if (bodySize <= kCharacterConcreteTailStart) return;
+
+    uint8_t* live = (uint8_t*)character;
+    std::vector<SnapshotRange> embedded = FindEmbeddedObjects(
+        live, bodySize, kCharacterConcreteTailStart);
+    auto preservedRangeAt = [&embedded](size_t offset) -> const SnapshotRange* {
+        for (const SnapshotRange& range : embedded) {
+            if (offset >= range.offset && offset < range.offset + range.size)
+                return &range;
+        }
+        return nullptr;
+    };
+
+    size_t offset = kCharacterConcreteTailStart;
+    while (offset < bodySize) {
+        if (const SnapshotRange* range = preservedRangeAt(offset)) {
+            offset = range->offset + range->size;
+            continue;
+        }
+        if ((offset & (alignof(void*) - 1)) == 0 &&
+            offset + sizeof(uint64_t) <= bodySize) {
+            uint64_t liveValue = 0;
+            uint64_t savedValue = 0;
+            std::memcpy(&liveValue, live + offset, sizeof(liveValue));
+            std::memcpy(&savedValue, savedBody + offset, sizeof(savedValue));
+            if (PreserveCharacterTailWord(liveValue, savedValue)) {
+                offset += sizeof(uint64_t);
+                continue;
+            }
+        }
+
+        size_t scalarStart = offset++;
+        while (offset < bodySize) {
+            if (preservedRangeAt(offset)) break;
+            if ((offset & (alignof(void*) - 1)) == 0 &&
+                offset + sizeof(uint64_t) <= bodySize) {
+                uint64_t liveValue = 0;
+                uint64_t savedValue = 0;
+                std::memcpy(&liveValue, live + offset, sizeof(liveValue));
+                std::memcpy(&savedValue, savedBody + offset, sizeof(savedValue));
+                if (PreserveCharacterTailWord(liveValue, savedValue)) break;
+            }
+            ++offset;
+        }
+        std::memcpy(live + scalarStart, savedBody + scalarStart,
+                    offset - scalarStart);
+    }
+}
+
+std::vector<SnapshotRange> FindEmbeddedObjects(const uint8_t* live,
+                                               size_t objectSize,
+                                               size_t searchStart)
 {
     std::vector<SnapshotRange> ranges;
-    for (size_t offset = kShotBodyStart;
+    for (size_t offset = searchStart;
          offset + sizeof(uint64_t) <= objectSize;
          offset += sizeof(uint64_t)) {
         uint64_t candidate = *(const uint64_t*)(live + offset);
@@ -316,7 +392,8 @@ bool ConcreteShotSnapshot_Restore(void* shot,
     // rather than maintaining a projectile-class allowlist. Their complete
     // live ranges must survive restoration; otherwise a later destructor can
     // follow an owner pointer from the old timeline.
-    for (const SnapshotRange& range : FindEmbeddedObjects(live, liveSize)) {
+    for (const SnapshotRange& range : FindEmbeddedObjects(
+             live, liveSize, kShotBodyStart)) {
         PreserveRange(overlay.data(), live, liveSize, range);
     }
 
@@ -343,6 +420,13 @@ void ConcreteCharacterSnapshot_RestoreFields(void* character,
                                              uint64_t dti)
 {
     if (!character || !savedBody) return;
+
+    // Concrete character tails are mostly small flags, counters and vectors,
+    // interspersed with character-specific helper/resource pointers. Restore
+    // bytes whose aligned word does not resolve as a live allocation. Unlike
+    // the broad body heuristic, this does not classify packed scalar values as
+    // pointers merely because their bits happen to resemble an address.
+    RestoreDetectedCharacterTailScalars(character, savedBody, bodySize);
 
     if (IsDti(dti, kRyuDti)) {
         // uRyu's concrete tail is scalar except for mpBeamObj at +0x6918.
