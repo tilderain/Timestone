@@ -90,23 +90,6 @@ bool IsDti(uint64_t dti, uintptr_t expected)
     return dti == (uint64_t)_addr(expected);
 }
 
-bool LooksLikeAddress(uint64_t value)
-{
-    return value >= 0x10000 && value < 0x0000800000000000ull &&
-           (value & (alignof(void*) - 1)) == 0;
-}
-
-bool PreserveCharacterTailWord(uint64_t liveValue, uint64_t savedValue)
-{
-    if (Accessible(liveValue) || Accessible(savedValue)) return true;
-
-    // A destroyed helper commonly leaves one timeline null and the other with
-    // an address whose allocation has already been released. Keep the current
-    // null/stale relationship instead of resurrecting that historical target.
-    return (liveValue == 0 && LooksLikeAddress(savedValue)) ||
-           (savedValue == 0 && LooksLikeAddress(liveValue));
-}
-
 void CopyRange(void* destination, const uint8_t* source, size_t objectSize,
                SnapshotRange range)
 {
@@ -150,49 +133,63 @@ void RestoreDetectedCharacterTailScalars(void* character,
     if (bodySize <= kCharacterConcreteTailStart) return;
 
     uint8_t* live = (uint8_t*)character;
-    std::vector<SnapshotRange> embedded = FindEmbeddedObjects(
-        live, bodySize, kCharacterConcreteTailStart);
-    auto preservedRangeAt = [&embedded](size_t offset) -> const SnapshotRange* {
-        for (const SnapshotRange& range : embedded) {
-            if (offset >= range.offset && offset < range.offset + range.size)
-                return &range;
-        }
-        return nullptr;
+    std::vector<uint8_t> preserve(bodySize - kCharacterConcreteTailStart, 0);
+    auto preserveRange = [&](size_t start, size_t end) {
+        start = std::max(start, kCharacterConcreteTailStart);
+        end = std::min(end, bodySize);
+        if (start >= end) return;
+        std::memset(preserve.data() + start - kCharacterConcreteTailStart, 1,
+                    end - start);
     };
+
+    // Inline MtObjects own vtables, references, and destructor state. Their
+    // complete native ranges remain on the live timeline.
+    for (const SnapshotRange& range : FindEmbeddedObjects(
+             live, bodySize, kCharacterConcreteTailStart)) {
+        preserveRange(range.offset, range.offset + range.size);
+    }
+
+    // Character subclasses use both 8-byte and 4-byte packing. Scan each
+    // four-byte boundary so an unaligned helper pointer is not split into two
+    // apparent scalar words. Preserve the neighboring selector fields with the
+    // pointer: attachment records commonly store parent/joint modes immediately
+    // before or after the reference, and mixing saved selectors with a live
+    // object can dispatch a virtual method that object does not implement.
+    for (size_t offset = kCharacterConcreteTailStart;
+         offset + sizeof(uint64_t) <= bodySize;
+         offset += alignof(uint32_t)) {
+        uint64_t liveValue = 0;
+        uint64_t savedValue = 0;
+        std::memcpy(&liveValue, live + offset, sizeof(liveValue));
+        std::memcpy(&savedValue, savedBody + offset, sizeof(savedValue));
+        bool livePointer = Accessible(liveValue);
+        bool savedPointer = Accessible(savedValue);
+        bool staleTransition =
+            (liveValue == 0 && savedValue >= 0x10000 &&
+             savedValue < 0x0000800000000000ull && (savedValue & 7) == 0) ||
+            (savedValue == 0 && liveValue >= 0x10000 &&
+             liveValue < 0x0000800000000000ull && (liveValue & 7) == 0);
+        if (livePointer || savedPointer || staleTransition) {
+            size_t recordStart = offset >= 8 ? offset - 8 : 0;
+            preserveRange(recordStart, offset + sizeof(uint64_t) + 16);
+        }
+    }
 
     size_t offset = kCharacterConcreteTailStart;
     while (offset < bodySize) {
-        if (const SnapshotRange* range = preservedRangeAt(offset)) {
-            offset = range->offset + range->size;
-            continue;
-        }
-        if ((offset & (alignof(void*) - 1)) == 0 &&
-            offset + sizeof(uint64_t) <= bodySize) {
-            uint64_t liveValue = 0;
-            uint64_t savedValue = 0;
-            std::memcpy(&liveValue, live + offset, sizeof(liveValue));
-            std::memcpy(&savedValue, savedBody + offset, sizeof(savedValue));
-            if (PreserveCharacterTailWord(liveValue, savedValue)) {
-                offset += sizeof(uint64_t);
-                continue;
-            }
-        }
-
-        size_t scalarStart = offset++;
-        while (offset < bodySize) {
-            if (preservedRangeAt(offset)) break;
-            if ((offset & (alignof(void*) - 1)) == 0 &&
-                offset + sizeof(uint64_t) <= bodySize) {
-                uint64_t liveValue = 0;
-                uint64_t savedValue = 0;
-                std::memcpy(&liveValue, live + offset, sizeof(liveValue));
-                std::memcpy(&savedValue, savedBody + offset, sizeof(savedValue));
-                if (PreserveCharacterTailWord(liveValue, savedValue)) break;
-            }
+        while (offset < bodySize &&
+               preserve[offset - kCharacterConcreteTailStart] != 0) {
             ++offset;
         }
-        std::memcpy(live + scalarStart, savedBody + scalarStart,
-                    offset - scalarStart);
+        size_t scalarStart = offset;
+        while (offset < bodySize &&
+               preserve[offset - kCharacterConcreteTailStart] == 0) {
+            ++offset;
+        }
+        if (scalarStart < offset) {
+            std::memcpy(live + scalarStart, savedBody + scalarStart,
+                        offset - scalarStart);
+        }
     }
 }
 
@@ -441,4 +438,5 @@ void ConcreteCharacterSnapshot_RestoreFields(void* character,
         // and is intentionally left on the live timeline.
         CopyRange(character, savedBody, bodySize, {0x68FC, 0x1C});
     }
+
 }

@@ -32,8 +32,8 @@ bool ConcreteShotSnapshot_Restore(void* shot, const ConcreteShotSnapshot& snapsh
                                   const void* const* validTargets,
                                   size_t validTargetCount);
 
-// Restore detected scalar bytes from the concrete character tail, then reapply
-// Ghidra-verified pointer-free ranges that need explicit overrides.
+// Restore detected scalar spans from concrete character tails while retaining
+// live pointer/embedded-object ownership records, then apply verified overrides.
 void ConcreteCharacterSnapshot_RestoreFields(void* character,
                                              const uint8_t* savedBody,
                                              size_t bodySize,
