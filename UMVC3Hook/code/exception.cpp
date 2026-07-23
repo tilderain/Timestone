@@ -16,6 +16,10 @@ extern void HookLog(const char* fmt, ...);
 #define UMVC3HOOK_GIT_COMMIT "unknown"
 #endif
 
+#ifndef UMVC3HOOK_GIT_DIRTY
+#define UMVC3HOOK_GIT_DIRTY 0
+#endif
+
 namespace {
 
 PVOID g_exceptionHandler = nullptr;
@@ -261,10 +265,11 @@ LONG WINAPI ExceptionHandler(PEXCEPTION_POINTERS info)
         GetLocalTime(&time);
         std::fprintf(file,
             "\n=== UMVC3Hook crash %04u-%02u-%02u %02u:%02u:%02u.%03u ===\n"
-            "commit=%s\n"
+            "commit=%s%s\n"
             "code=0x%08lX exception=%p thread=%lu\n",
             time.wYear, time.wMonth, time.wDay, time.wHour, time.wMinute,
             time.wSecond, time.wMilliseconds, UMVC3HOOK_GIT_COMMIT,
+            UMVC3HOOK_GIT_DIRTY ? " (dirty)" : "",
             static_cast<unsigned long>(code),
             exception->ExceptionAddress, static_cast<unsigned long>(GetCurrentThreadId()));
 
@@ -289,7 +294,6 @@ LONG WINAPI ExceptionHandler(PEXCEPTION_POINTERS info)
         }
 
         ResolveAddress(file, "fault: ", context->Rip);
-        WriteLoadedModules(file);
         WriteUnwindBacktrace(file, context);
         std::fprintf(file, "stack scan (executable addresses):\n");
         constexpr size_t stackEntries = 96;
@@ -308,6 +312,7 @@ LONG WINAPI ExceptionHandler(PEXCEPTION_POINTERS info)
         } else {
             std::fprintf(file, "  <stack unreadable>\n");
         }
+        WriteLoadedModules(file);
         std::fprintf(file, "=== end crash ===\n");
         std::fflush(file);
         std::fclose(file);

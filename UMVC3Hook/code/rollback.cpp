@@ -69,6 +69,7 @@ static constexpr uintptr_t FN_SUNIT_REMOVE_UNIT = 0x14051B9F0;
 static constexpr uintptr_t FN_SUNIT_REMOVE_MULTI_MASK = 0x14051BAF0;
 static constexpr uintptr_t FN_SUNIT_REGISTER_MULTI_MASK = 0x14051BDE0;
 static constexpr uintptr_t FN_UGAMEEFFECT_CREATE = 0x140131410;
+static constexpr uintptr_t FN_RCHRCPU_CLASS_FUNC = 0x140117280;
 
 // ===========================================================================
 // Offsets & Struct Constants
@@ -276,6 +277,16 @@ static bool IsAccessibleAddress(uint64_t value)
     if (VirtualQuery((void*)value, &mbi, sizeof(mbi)) == 0) return false;
     if (mbi.State != MEM_COMMIT) return false;
     return (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) == 0;
+}
+
+static bool IsExecutableAddress(uint64_t value)
+{
+    if (!IsAccessibleAddress(value)) return false;
+    MEMORY_BASIC_INFORMATION mbi = {};
+    if (VirtualQuery((void*)value, &mbi, sizeof(mbi)) == 0) return false;
+    const DWORD executable = PAGE_EXECUTE | PAGE_EXECUTE_READ |
+        PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
+    return (mbi.Protect & executable) != 0;
 }
 
 static bool HasCallableDtiVirtual(const void* object)
@@ -499,7 +510,10 @@ int32_t g_f7StartFrame   = 0;
 int     g_f7Remaining    = 0;
 int     g_f7DiagSession  = -1;
 
-bool    g_ndjsonIncludeDirHistory = false;
+// Code-only diagnostic toggle. Keep false during normal play: NDJSON capture
+// serializes full character, hitbox, projectile, and memory state per frame.
+bool    g_ndjsonLoggingEnabled      = false;
+bool    g_ndjsonIncludeDirHistory   = false;
 
 // Rollback request from controller.cpp — late input arrived that differs
 // from what was predicted.  Start/end inclusive frame range.
@@ -550,6 +564,7 @@ static void(__fastcall* oCallSRender)(uint64_t param_1) = nullptr;
 static void(__fastcall* oMain_move)(uint64_t param_1) = nullptr;
 // Trampoline for sSound__move. Audio scene state is not rollback gameplay state.
 static void(__fastcall* oSound_move)(uint64_t param_1) = nullptr;
+static bool(__fastcall* oRChrCpuClassFunc)(void* cpu, void* object) = nullptr;
 // Trampoline for the fighter pushbox collision callback.
 static void(__fastcall* oApplyCollisionPushCorrection)(
     uint64_t character,
@@ -567,7 +582,6 @@ static char   g_diagDir[260]   = {};
 static int    g_diagWriteCount = 0;
 static FILE*  g_diagNdjsonFile    = nullptr;
 static DWORD  g_diagNdjsonFlush   = 0;
-static bool   g_diagFileOutputEnabled = false;
 
 // Netplay per-frame live NDJSON logging
 static bool   g_netplayLiveInit   = false;
@@ -651,7 +665,7 @@ static void Rollback_FillResimCharState(ResimCharState& dst, const CharDiagSnaps
 }
 
 static void Rollback_NetplayLiveInit() {
-    //return;
+    if (!g_ndjsonLoggingEnabled) return;
     g_netplayLiveInit = false;
     g_netplayLivePath[0] = '\0';
 
@@ -721,6 +735,7 @@ bool Rollback_GetNetplayLiveDirectory(char* path, size_t pathSize)
 
 void Rollback_ResetNetplayLiveLog()
 {
+    if (!g_ndjsonLoggingEnabled) return;
     ++g_netplayLiveReset;
     Rollback_NetplayLiveInit();
 }
@@ -846,7 +861,7 @@ std::string Rollback_GenerateNetplayLiveJSON(int32_t frame, bool isResim,
                                              const char* phase = nullptr,
                                              int32_t rollbackStart = -1,
                                              int32_t rollbackEnd = -1) {
-    //return;
+    if (!g_ndjsonLoggingEnabled) return "";
     if (frame == 0) return "";
     char tsBuf[32] = {};
     SYSTEMTIME st;
@@ -1052,6 +1067,7 @@ std::string Rollback_GenerateNetplayLiveJSON(int32_t frame, bool isResim,
 }
 
 static void Rollback_WriteNetplayLiveJSON(const std::string& json) {
+    if (!g_ndjsonLoggingEnabled) return;
     if (!g_netplayLiveInit) Rollback_NetplayLiveInit();
     if (!g_netplayLivePath[0] || g_netplayLiveDesyncFlushed || json.empty()) return;
 
@@ -1070,6 +1086,7 @@ static void Rollback_WriteNetplayLiveJSON(const std::string& json) {
 
 extern "C" void Rollback_NotifyDesyncTriggered(int32_t frame)
 {
+    if (!g_ndjsonLoggingEnabled) return;
     if (g_netplayLiveDesyncFlushed) return;
     if (!g_netplayLiveInit) Rollback_NetplayLiveInit();
     if (!g_netplayLivePath[0]) return;
@@ -1099,6 +1116,7 @@ extern "C" void Rollback_NotifyDesyncTriggered(int32_t frame)
 
 extern "C" void Rollback_FlushNetplayLive(int32_t frame)
 {
+    if (!g_ndjsonLoggingEnabled) return;
     if (!g_netplayLiveInit) Rollback_NetplayLiveInit();
     if (!g_netplayLivePath[0] || g_netplayLiveDesyncFlushed) return;
 
@@ -1135,7 +1153,7 @@ extern "C" void Rollback_FlushNetplayLive(int32_t frame)
 }
 
 extern "C" void Rollback_CommitPendingNetplayLive(int32_t frame) {
-    //return;
+    if (!g_ndjsonLoggingEnabled) return;
     int idx = (uint32_t)frame % 256;
     if (g_pendingNPLiveFrame[idx] == frame) {
         Rollback_WriteNetplayLiveJSON(g_pendingNPLiveJSON[idx]);
@@ -1144,6 +1162,7 @@ extern "C" void Rollback_CommitPendingNetplayLive(int32_t frame) {
 }
 
 extern "C" void Rollback_DiscardPendingNetplayLive(int32_t frame) {
+    if (!g_ndjsonLoggingEnabled) return;
     int idx = (uint32_t)frame % 256;
     if (g_pendingNPLiveFrame[idx] == frame) {
         g_pendingNPLiveFrame[idx] = -1;
@@ -1151,7 +1170,7 @@ extern "C" void Rollback_DiscardPendingNetplayLive(int32_t frame) {
 }
 
 static void Rollback_DumpNetplayLive(int32_t frame) {
-    //return;
+    if (!g_ndjsonLoggingEnabled) return;
     if (!g_netplayLiveInit) Rollback_NetplayLiveInit();
     if (!g_netplayLivePath[0]) return;
 
@@ -1181,6 +1200,7 @@ static void Rollback_DumpNetplayLive(int32_t frame) {
 //    state that was captured before oMvc3Main_move).
 static void Rollback_CaptureFrameDiagSnapshot(int32_t frame, bool isResim, bool postOnly = false)
 {
+    if (!g_ndjsonLoggingEnabled) return;
     FrameDiagSnapshot& dst = isResim ? g_resimFrameSnap[(uint32_t)(frame >= 0 ? frame : 0) % ROLLBACK_WINDOW_DIAG]
                                       : g_liveFrameSnap[(uint32_t)(frame >= 0 ? frame : 0) % ROLLBACK_WINDOW_DIAG];
     if (!postOnly) {
@@ -1226,7 +1246,7 @@ static void Rollback_DiagInit();
 // ---------------------------------------------------------------------------
 void Rollback_LogResimNotifyNDJSON(const ResimNotifyPacket& pkt)
 {
-    return;
+    if (!g_ndjsonLoggingEnabled) return;
     char tsBuf[32] = {};
     SYSTEMTIME st;
     GetLocalTime(&st);
@@ -3818,7 +3838,7 @@ static uint64_t fnv1a_64(const void* data, size_t len) {
 }
 
 static void Rollback_DiagInit() {
-    if (!g_diagFileOutputEnabled) return;
+    if (!g_ndjsonLoggingEnabled) return;
     if (g_diagDir[0]) return;
     SYSTEMTIME st;
     GetLocalTime(&st);
@@ -4016,7 +4036,7 @@ static void Rollback_DumpManifest(int session, int32_t frame, uint8_t side) {
 // side=0 → "ground_truth" (pre-resim state), side=1 → "resim" (post-resim state)
 // Schema:  v, ts, frame, side, regions[{idx,addr,size,hash}], chars[{...}], shots[{...}]
 static void Rollback_DumpNDJSON(int32_t frame, uint8_t side) {
-    //return;
+    if (!g_ndjsonLoggingEnabled) return;
     if (!g_diagDir[0]) return;
 
     Region regions[MAX_REGIONS];
@@ -4165,6 +4185,7 @@ static void Rollback_DumpNDJSON(int32_t frame, uint8_t side) {
 
 void Rollback_QueuePendingResimDump(int32_t frame)
 {
+    if (!g_ndjsonLoggingEnabled) return;
     if (!Netplay_IsActive())
     {
         return;
@@ -4189,6 +4210,7 @@ void Rollback_QueuePendingResimDump(int32_t frame)
 
 extern "C" void Rollback_SendGroundTruth(int32_t startFrame, int32_t endFrame)
 {
+    if (!g_ndjsonLoggingEnabled) return;
     if (startFrame >= endFrame) return;
 
     GroundTruthPacket gtPkt = {};
@@ -4231,6 +4253,7 @@ extern "C" void Rollback_ProcessInboundGroundTruth()
     GroundTruthPacket gtPkt;
     while (Netplay_GetInboundGroundTruth(gtPkt))
     {
+        if (!g_ndjsonLoggingEnabled) continue;
         Rollback_DiagInit();
         if (!g_diagNdjsonFile) continue;
 
@@ -4527,7 +4550,29 @@ void Rollback_RequestReSimulate(int32_t startFrame, int32_t endFrame)
 //
 // Slot array:  64 entries × 8 bytes = 512 bytes at character + 0x6748.
 // Confirmed indices in use: 1, 14, 15 (from crash + decompiled callers).
+//
+// uBaseModel also owns a material-instance cache through +0x110, with its
+// entry count at +0x118. Character action changes release every cached entry
+// before rebuilding it. The cache allocation itself remains live across a
+// restore, but entries retired on the prediction timeline can be dangling.
 // ===========================================================================
+static void ClearModelMaterialCache(uint64_t model)
+{
+    if (!HasCallableDtiVirtual((void*)model)) return;
+
+    uint64_t entries = *(uint64_t*)(model + 0x110);
+    uint32_t count = *(uint32_t*)(model + 0x118);
+    if (!entries || count > 4096 || !IsAccessibleAddress(entries)) return;
+
+    for (uint32_t i = 0; i < count; ++i) {
+        uint64_t entry = entries + (uint64_t)i * sizeof(uint64_t);
+        if (!IsAccessibleAddress(entry)) break;
+        uint64_t material = *(uint64_t*)entry;
+        if (material && !HasCallableDtiVirtual((void*)material))
+            *(uint64_t*)entry = 0;
+    }
+}
+
 static void Rollback_ClearStalePointers()
 {
     uint64_t sCharacter = *(uint64_t*)_addr(PTR_SCHARACTER);
@@ -4543,6 +4588,21 @@ static void Rollback_ClearStalePointers()
         while (node) {
             uint64_t character = *(uint64_t*)(node + NODE_CHR_OFFSET);
             if (character) {
+                ClearModelMaterialCache(character);
+
+                // cChr owns an array of character-specific weapon models.
+                // Hsien-Ko, for example, resets weapon index 12 on every
+                // action change and follows that weapon's material cache.
+                uint32_t weaponCount = *(uint32_t*)(character + 0x3F38);
+                uint64_t weapons = *(uint64_t*)(character + 0x3F40);
+                if (weaponCount <= 256 && weapons && IsAccessibleAddress(weapons)) {
+                    for (uint32_t i = 0; i < weaponCount; ++i) {
+                        uint64_t slot = weapons + (uint64_t)i * sizeof(uint64_t);
+                        if (!IsAccessibleAddress(slot)) break;
+                        ClearModelMaterialCache(*(uint64_t*)slot);
+                    }
+                }
+
                 // Zero the slot array so stale pointers are never followed
                 memset((void*)(character + SLOT_ARRAY_OFFSET), 0,
                        SLOT_CLEAR_COUNT * sizeof(uint64_t));
@@ -4753,7 +4813,7 @@ static void __fastcall hkMvc3Main_move(uint64_t param_1)
                 // Notify the remote peer which frames we just re-simulated,
                 // including per-frame resim results for BOTH teams' point
                 // characters so their NDJSON log shows both sides' states.
-                {
+                if (g_ndjsonLoggingEnabled) {
                     ResimNotifyPacket rnPkt = {};
                     rnPkt.type = PACKET_RESIM_NOTIFY;
                     rnPkt.resimStartFrame = rs;
@@ -4914,8 +4974,65 @@ static void __fastcall hkSound_move(uint64_t param_1)
     // Sound scenes contain live emitter/model pointers and transient matrix
     // indices. They are cosmetic and are not part of the rollback snapshot, so
     // advancing them during headless ticks can dereference abandoned objects.
-    if (!g_isResimulating)
-        oSound_move(param_1);
+    if (g_isResimulating)
+        return;
+
+    // sScene__updateSoundEnv calls model->vtable[0xA0] without validating the
+    // attachment. A rollback can destroy or reuse a transient model while its
+    // sound scene remains live, leaving +0x80 pointing at non-object data. Drop
+    // only those stale cosmetic attachments before native sound processing.
+    constexpr uint32_t SOUND_SCENE_COUNT_OFFSET = 0x1CF50;
+    constexpr uint32_t SOUND_SCENE_FIRST_OFFSET = 0x70;
+    constexpr uint32_t SOUND_SCENE_STRIDE = 0xB50;
+    constexpr uint32_t SOUND_SCENE_MODEL_OFFSET = 0x80;
+    constexpr uint32_t SOUND_SCENE_MAX_COUNT = 40;
+
+    uint32_t sceneCount = *(uint32_t*)(param_1 + SOUND_SCENE_COUNT_OFFSET);
+    if (sceneCount <= SOUND_SCENE_MAX_COUNT) {
+        for (uint32_t i = 0; i < sceneCount; ++i) {
+            uint64_t scene = param_1 + SOUND_SCENE_FIRST_OFFSET +
+                (uint64_t)i * SOUND_SCENE_STRIDE;
+            uint64_t* modelSlot = (uint64_t*)(scene + SOUND_SCENE_MODEL_OFFSET);
+            uint64_t model = *modelSlot;
+            if (!model)
+                continue;
+
+            bool valid = IsAccessiblePointer(model);
+            uint64_t vtable = valid ? *(uint64_t*)model : 0;
+            valid = valid && IsAccessiblePointer(vtable) &&
+                IsAccessibleAddress(vtable + 0xA0);
+            uint64_t getMatrix = valid ? *(uint64_t*)(vtable + 0xA0) : 0;
+            if (!valid || !IsExecutableAddress(getMatrix)) {
+                HookLog("Rollback: detached stale sound scene model scene=%u model=0x%llX vtable=0x%llX\n",
+                        i, model, vtable);
+                *modelSlot = 0;
+            }
+        }
+    }
+
+    oSound_move(param_1);
+}
+
+static bool __fastcall hkRChrCpuClassFunc(void* cpu, void* object)
+{
+    // This opcode pops a 64-bit object from two 32-bit VM stack entries and
+    // immediately calls object->vtable[0x20]. A rewound script can reach the
+    // opcode with an ordinary packed script value (the observed crash used
+    // 0x0000008400000084). Native behavior for null/type mismatch is false, so
+    // reject values that cannot be safely dispatched as MtObject instances.
+    uint64_t address = (uint64_t)object;
+    if (!IsAccessiblePointer(address))
+        return false;
+
+    uint64_t vtable = *(uint64_t*)address;
+    if (!IsAccessiblePointer(vtable) || !IsAccessibleAddress(vtable + 0x20))
+        return false;
+
+    uint64_t getDti = *(uint64_t*)(vtable + 0x20);
+    if (!IsExecutableAddress(getDti))
+        return false;
+
+    return oRChrCpuClassFunc(cpu, object);
 }
 
 // ===========================================================================
@@ -5109,6 +5226,18 @@ void Rollback_InitHooks()
         HookLog("Rollback: hooked sSound__move for headless re-simulation\n");
     } else {
         HookLog("Rollback: failed to hook sSound__move (%d)\n", s);
+    }
+
+    s = MH_CreateHook(
+        (LPVOID)_addr(FN_RCHRCPU_CLASS_FUNC),
+        (LPVOID)&hkRChrCpuClassFunc,
+        (LPVOID*)&oRChrCpuClassFunc
+    );
+    if (s == MH_OK) {
+        MH_EnableHook((LPVOID)_addr(FN_RCHRCPU_CLASS_FUNC));
+        HookLog("Rollback: guarded rChrCpu script object cast\n");
+    } else {
+        HookLog("Rollback: failed to guard rChrCpu script object cast (%d)\n", s);
     }
 
     // sMain__move (frame-timing / QPC / Sleep / busy-wait) — NOP during re-sim

@@ -42,7 +42,10 @@ extern int32_t g_restoreRequestedFrame;
 // diagnostic info at the resim→live boundary.  Cleared after first use.
 extern int32_t g_postResimFrame;
 
-// When true (default), include direction history fields in NDJSON output.
+// Master switch for all NDJSON serialization, buffering, and file output.
+extern bool g_ndjsonLoggingEnabled;
+
+// When true, include direction history fields in NDJSON output.
 extern bool g_ndjsonIncludeDirHistory;
 
 // Flush the rolling netplay NDJSON history when desync is triggered.

@@ -7,6 +7,7 @@ WINDRES   := x86_64-w64-mingw32-windres
 DLLTOOL   := x86_64-w64-mingw32-dlltool
 AR        := x86_64-w64-mingw32-ar
 GIT_COMMIT := $(shell git rev-parse HEAD 2>/dev/null || printf unknown)
+GIT_DIRTY := $(if $(shell git status --porcelain --untracked-files=normal 2>/dev/null),1,0)
 GIT_DIR := $(shell git rev-parse --git-dir 2>/dev/null)
 GIT_HEAD_REF := $(shell git symbolic-ref -q HEAD 2>/dev/null)
 GIT_COMMIT_DEPS := $(if $(GIT_DIR),$(GIT_DIR)/HEAD $(if $(GIT_HEAD_REF),$(GIT_DIR)/$(GIT_HEAD_REF)))
@@ -105,7 +106,7 @@ DEFINES   := \
 
 # --- Compiler flags ---
 
-CXXFLAGS  := -O2 -std=c++20 -fpermissive $(DEFINES) $(INCLUDES) -DUMVC3HOOK_GIT_COMMIT=\"$(GIT_COMMIT)\" -Wall -Wno-unused-variable -Wno-unused-function
+CXXFLAGS  := -O2 -std=c++20 -fpermissive $(DEFINES) $(INCLUDES) -DUMVC3HOOK_GIT_COMMIT=\"$(GIT_COMMIT)\" -DUMVC3HOOK_GIT_DIRTY=$(GIT_DIRTY) -Wall -Wno-unused-variable -Wno-unused-function
 CFLAGS    := -O2 $(DEFINES) $(INCLUDES) -Wall -Wno-unused-variable
 LDFLAGS   := -shared -static-libgcc -static-libstdc++
 LIBS      := \
@@ -164,7 +165,7 @@ $(OBJDIR)/%.o: $(SRCDIR)/%.cpp
 	@mkdir -p $(@D)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
-# Recompile only when HEAD or the current branch advances.
+# Recompile when HEAD or the current branch advances.
 $(OBJDIR)/code/exception.o: $(GIT_COMMIT_DEPS)
 
 # ---------- Compile C ----------
