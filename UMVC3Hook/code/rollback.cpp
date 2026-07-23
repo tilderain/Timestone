@@ -2140,6 +2140,29 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
         currentShots.push_back(entry.first);
     }
     for (void* shot : currentShots) {
+        // Some concrete shots embed an sEffect at +0x2140. Its destructor
+        // unlinks through owner+0xA8; a restored/retired effect graph can leave
+        // that child pointer stale. Detach only an invalid owner chain so valid
+        // native particle-list cleanup remains untouched.
+        uint32_t shotSize = DecodeDtiSize(GetObjectDti((uint64_t)shot));
+        if (shotSize >= 0x21F0) {
+            uint8_t* embeddedEffect = (uint8_t*)shot + 0x2140;
+            if (HasCallableDtiVirtual(embeddedEffect)) {
+                uint64_t owner = *(uint64_t*)(embeddedEffect + 0x60);
+                bool invalidOwner = owner &&
+                    (!IsAccessibleAddress(owner + 0xB0) ||
+                     (*(uint64_t*)(owner + 0xA8) &&
+                      !IsAccessibleAddress(*(uint64_t*)(owner + 0xA8) + 0x10)));
+                if (invalidOwner) {
+                    *(uint64_t*)(embeddedEffect + 0x50) = 0;
+                    *(uint64_t*)(embeddedEffect + 0x58) = 0;
+                    *(uint64_t*)(embeddedEffect + 0x60) = 0;
+                    *(uint32_t*)(embeddedEffect + 0x70) = 0xFFFFFFFFu;
+                    HookLog("Rollback: detached stale embedded shot effect shot=0x%llX\n",
+                            (uint64_t)shot);
+                }
+            }
+        }
         uint32_t* state = (uint32_t*)((uint8_t*)shot + 0x10);
         removeMultiMask(sUnit, shot);
         removeUnit(sUnit, shot);
@@ -2230,7 +2253,21 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
         if (pendingCount >= 0x200 || !enqueueUnit(sShot, fresh, SSHOT_CATEGORY)) {
             addUnit(sUnit, SSHOT_CATEGORY, fresh, nullptr);
         }
-        if (!ConcreteShotSnapshot_Restore(fresh, saved.concrete)) {
+        const void* validTargets[6] = {};
+        size_t validTargetCount = 0;
+        uint64_t sCharacter = *(uint64_t*)_addr(PTR_SCHARACTER);
+        for (int teamIndex = 0; sCharacter && teamIndex < 2; ++teamIndex) {
+            uint64_t node = sCharacter +
+                (teamIndex == 0 ? TEAM0_OFFSET : TEAM1_OFFSET) +
+                TEAM_FIRST_NODE_OFFSET;
+            for (int member = 0; node && member < 3; ++member) {
+                void* character = *(void**)(node + NODE_CHR_OFFSET);
+                if (character) validTargets[validTargetCount++] = character;
+                node = *(uint64_t*)(node + NODE_NEXT_OFFSET);
+            }
+        }
+        if (!ConcreteShotSnapshot_Restore(fresh, saved.concrete, validTargets,
+                                          validTargetCount)) {
             HookLog("Rollback: restored shot 0x%llX has incomplete collision topology\n",
                     (uint64_t)fresh);
         }

@@ -221,7 +221,8 @@ void RestoreCollisionPrimitives(uint8_t* shot,
 }
 
 void RestoreAttackTargets(uint8_t* shot, const uint8_t* saved,
-                          size_t objectSize)
+                          size_t objectSize, const void* const* validTargets,
+                          size_t validTargetCount)
 {
     for (size_t table : kAttackTargetTables) {
         for (uint32_t index = 0; index < kAttackTargetCount; ++index) {
@@ -230,11 +231,15 @@ void RestoreAttackTargets(uint8_t* shot, const uint8_t* saved,
 
             uint64_t savedTarget = *(const uint64_t*)(saved + entry + 0x08);
             uint64_t liveTarget = *(uint64_t*)(shot + entry + 0x08);
-            // TargetInfo references characters, which remain allocated while
-            // shots are reconstructed. Reject any historical pointer that no
-            // longer resolves to a live MtObject.
-            if (savedTarget == 0 || savedTarget == liveTarget ||
-                GetDti((void*)savedTarget) != 0) {
+            bool validTarget = savedTarget == 0 || savedTarget == liveTarget;
+            for (size_t target = 0; !validTarget && target < validTargetCount;
+                 ++target) {
+                validTarget = savedTarget == (uint64_t)validTargets[target];
+            }
+            // TargetInfo only owns character references. Restrict historical
+            // pointers to the current roster instead of accepting an unrelated
+            // live MtObject that happens to reuse the old address.
+            if (validTarget) {
                 *(uint64_t*)(shot + entry + 0x08) = savedTarget;
             }
             std::memcpy(shot + entry + 0x10, saved + entry + 0x10, 0x08);
@@ -266,7 +271,9 @@ bool ConcreteShotSnapshot_Capture(void* shot, ConcreteShotSnapshot& out)
 }
 
 bool ConcreteShotSnapshot_Restore(void* shot,
-                                  const ConcreteShotSnapshot& snapshot)
+                                  const ConcreteShotSnapshot& snapshot,
+                                  const void* const* validTargets,
+                                  size_t validTargetCount)
 {
     if (!shot || snapshot.body.size() < kShotBodyStart) return false;
 
@@ -320,7 +327,7 @@ bool ConcreteShotSnapshot_Restore(void* shot,
     // A fresh shot has empty cAtkCtrl target tables. Restore the saved
     // per-target hit count/time so reconstructing an already-consumed attack
     // cannot apply the same projectile to the same character a second time.
-    RestoreAttackTargets(live, source, liveSize);
+    RestoreAttackTargets(live, source, liveSize, validTargets, validTargetCount);
     RestoreCollisionPrimitives(live, snapshot);
 
     for (const auto& saved : snapshot.collisionPrimitives) {

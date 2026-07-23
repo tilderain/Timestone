@@ -28,7 +28,9 @@ struct ConcreteShotSnapshot {
 };
 
 bool ConcreteShotSnapshot_Capture(void* shot, ConcreteShotSnapshot& out);
-bool ConcreteShotSnapshot_Restore(void* shot, const ConcreteShotSnapshot& snapshot);
+bool ConcreteShotSnapshot_Restore(void* shot, const ConcreteShotSnapshot& snapshot,
+                                  const void* const* validTargets,
+                                  size_t validTargetCount);
 
 // Reapply Ghidra-verified pointer-free subclass fields after rollback.cpp's
 // conservative character pointer-preservation pass.
