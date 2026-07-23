@@ -108,6 +108,12 @@ static void LoadRollbackSettings()
         g_dialogConfig.p1Chars[i] = GetPrivateProfileIntA("P1", key, g_dialogConfig.p1Chars[i], path);
         g_dialogConfig.p2Chars[i] = GetPrivateProfileIntA("P2", key, g_dialogConfig.p2Chars[i], path);
     }
+
+    GetPrivateProfileStringA("Network", "HostIp", "127.0.0.1",
+                             g_dialogConfig.hostIp,
+                             sizeof(g_dialogConfig.hostIp), path);
+    g_dialogConfig.hostPort = GetPrivateProfileIntA(
+        "Network", "HostPort", g_dialogConfig.hostPort, path);
 }
 
 static void SaveRollbackSettings()
@@ -122,6 +128,11 @@ static void SaveRollbackSettings()
         snprintf(value, sizeof(value), "%d", g_dialogConfig.p2Chars[i]);
         WritePrivateProfileStringA("P2", key, value, path);
     }
+    WritePrivateProfileStringA("Network", "HostIp", g_dialogConfig.hostIp, path);
+
+    char port[16];
+    snprintf(port, sizeof(port), "%d", g_dialogConfig.hostPort);
+    WritePrivateProfileStringA("Network", "HostPort", port, path);
 }
 
 void SendTrainingLaunchPacket()
@@ -268,12 +279,12 @@ LaunchOption ShowLaunchMenu()
         g_dialogConfig.p1Chars[i] = def.p1Chars[i];
         g_dialogConfig.p2Chars[i] = def.p2Chars[i];
     }
-    LoadRollbackSettings();
     g_dialogConfig.stageId = def.stageId;
 
-    // Default IP
+    // Default network settings, then restore the last target from disk.
     strcpy(g_dialogConfig.hostIp, "127.0.0.1");
     g_dialogConfig.hostPort = 7777;
+    LoadRollbackSettings();
     g_dialogConfig.hostEnabled = false;
     g_dialogConfig.enetHost = nullptr;
     g_dialogConfig.enetPeer = nullptr;
@@ -447,9 +458,16 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
             hDlg, NULL, NULL, NULL);
 
         HWND hIpEdit = CreateWindowA("EDIT", g_dialogConfig.hostIp,
-            WS_VISIBLE | WS_CHILD | WS_TABSTOP | WS_BORDER | ES_AUTOHSCROLL,
+            WS_VISIBLE | WS_CHILD | WS_TABSTOP | WS_BORDER | ES_AUTOHSCROLL |
+            ES_NOHIDESEL,
             leftX + 35, y, 140, 22,
             hDlg, (HMENU)ID_NET_IP, NULL, NULL);
+        if (hIpEdit) {
+            // Keep clipboard pastes bounded and leave the native EDIT
+            // clipboard handling (Ctrl+C/Ctrl+V and context-menu paste) intact.
+            SendMessageA(hIpEdit, EM_SETLIMITTEXT,
+                         (WPARAM)(sizeof(g_dialogConfig.hostIp) - 1), 0);
+        }
 
         CreateWindowA("STATIC", "Port:",
             WS_VISIBLE | WS_CHILD, leftX + 185, y + 4, 35, 18,
@@ -621,6 +639,7 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
                 GetWindowTextA(hPort, buf, sizeof(buf));
                 g_dialogConfig.hostPort = atoi(buf);
             }
+            SaveRollbackSettings();
 
             g_isLaunching = true;
             g_launchOption = LAUNCH_NORMAL;
@@ -738,6 +757,7 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
                 GetWindowTextA(hPort, buf, sizeof(buf));
                 g_dialogConfig.hostPort = atoi(buf);
             }
+            SaveRollbackSettings();
 
             // Switch log to host-specific file
             HookLogSetFile("UMVC3Hook_host.log");
@@ -799,6 +819,7 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
                 GetWindowTextA(hPort, buf, sizeof(buf));
                 g_dialogConfig.hostPort = atoi(buf);
             }
+            SaveRollbackSettings();
 
             // Switch log to client-specific file
             HookLogSetFile("UMVC3Hook_client.log");
