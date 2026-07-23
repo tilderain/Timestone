@@ -218,7 +218,12 @@ static constexpr SnapshotRange CCHR_SCALAR_RESTORE_RANGES[] = {
     // outputs remain gameplay-relevant until native mSucDelay expiration.
     {0x28B8, 0x20}, // cChr+0x2738, cChrCmd+0x180..+0x19F
     {0x2AD0, 0x20}, // cChr+0x2950, cChrCmd+0x180..+0x19F
-    {0x3F48, 0x2B0}, // action requests, movement, velocity, gravity and air counters
+    {0x3F48, 0x18C}, // action requests and movement state before the Y-motion block
+    // uZeroSh__positionUpdate_DE80/FUN_14004EF80 reads the cached Y reference
+    // and vertical velocity from this block before deciding the landing/gravity
+    // path. Keep it explicit so rollback cannot retain one prediction tick.
+    {0x40D4, 0x4C},  // mMoveAux.y, mOtherYSpd, mYSpd and related Y-motion state
+    {0x4120, 0xD8},  // remaining velocity/gravity and air counters
     // Combat counters block at +0x4168 contains hit tracking, air action limits,
     // block timing windows, hitstun state and super armor. Essential for multi-hit
     // attacks, air combo limits, and defensive state determinism.

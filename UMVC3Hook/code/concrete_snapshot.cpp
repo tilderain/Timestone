@@ -15,6 +15,10 @@ constexpr size_t kMaxEmbeddedObjectSize = 0x1000;
 constexpr size_t kShotCollisionSlotsOffset = 0x2058;
 constexpr uint32_t kShotCollisionSlotCount = 4;
 constexpr uint32_t kMaxCollisionPrimitives = 128;
+constexpr size_t kShotAttackInfoOffset = 0x1F68;
+constexpr size_t kAttackInfoFlagsOffset = 0x3C;
+constexpr size_t kAttackInfoHitStateOffset = 0x94;
+constexpr size_t kAttackInfoHitStateSize = 0x68;
 
 // These DTI addresses were verified from the class DTI getters in Ghidra.
 // They are used only to select the exceptional subclass policy; the object
@@ -214,6 +218,27 @@ void RestoreCollisionPrimitives(uint8_t* shot,
     }
 }
 
+uint8_t* GetAttackInfo(uint8_t* shot)
+{
+    if (!shot) return nullptr;
+    uint64_t resource = *(uint64_t*)(shot + kShotAttackInfoOffset);
+    if (!Accessible(resource, 0xCC)) return nullptr;
+
+    // rShot::getAtkInfo returns mpData + mAtkInfoOffset. uShot::getAtkInfo's
+    // rShot+0xF0 value is the owning rAtkInfo resource, not the selected data
+    // record consumed by hit_damage_apply.
+    uint64_t data = *(uint64_t*)(resource + 0x78);
+    uint32_t attackInfoOffset = *(uint32_t*)(resource + 0xC8);
+    if (!Accessible(data, (size_t)attackInfoOffset +
+                          kAttackInfoHitStateOffset + kAttackInfoHitStateSize)) {
+        return nullptr;
+    }
+    uint64_t attackInfo = data + attackInfoOffset;
+    return Accessible(attackInfo,
+                      kAttackInfoHitStateOffset + kAttackInfoHitStateSize)
+        ? (uint8_t*)attackInfo : nullptr;
+}
+
 } // namespace
 
 bool ConcreteShotSnapshot_Capture(void* shot, ConcreteShotSnapshot& out)
@@ -234,6 +259,16 @@ bool ConcreteShotSnapshot_Capture(void* shot, ConcreteShotSnapshot& out)
     out.body.resize(size);
     std::memcpy(out.body.data(), shot, size);
     CaptureCollisionPrimitives((const uint8_t*)shot, out);
+
+    if (uint8_t* attackInfo = GetAttackInfo((uint8_t*)shot)) {
+        out.hasAttackInfo = true;
+        std::memcpy(&out.attackInfoFlags,
+                    attackInfo + kAttackInfoFlagsOffset,
+                    sizeof(out.attackInfoFlags));
+        std::memcpy(out.attackInfoHitState,
+                    attackInfo + kAttackInfoHitStateOffset,
+                    sizeof(out.attackInfoHitState));
+    }
     return true;
 }
 
@@ -290,6 +325,17 @@ void ConcreteShotSnapshot_Restore(void* shot,
     CopyRange(live, overlay.data(), liveSize,
               {kShotRestoreStart, liveSize - kShotRestoreStart});
     RestoreCollisionPrimitives(live, snapshot);
+
+    if (snapshot.hasAttackInfo) {
+        if (uint8_t* attackInfo = GetAttackInfo(live)) {
+            std::memcpy(attackInfo + kAttackInfoFlagsOffset,
+                        &snapshot.attackInfoFlags,
+                        sizeof(snapshot.attackInfoFlags));
+            std::memcpy(attackInfo + kAttackInfoHitStateOffset,
+                        snapshot.attackInfoHitState,
+                        sizeof(snapshot.attackInfoHitState));
+        }
+    }
 }
 
 void ConcreteCharacterSnapshot_RestoreFields(void* character,

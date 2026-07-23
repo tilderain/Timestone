@@ -25,6 +25,13 @@ struct ConcreteShotSnapshot {
     uint64_t vtable = 0;
     std::vector<uint8_t> body;
     std::vector<CollisionPrimitive> collisionPrimitives;
+
+    // rShot::getAtkInfo selects an attack-data record through the shot resource.
+    // Preserve its pointer-free hit payload; the resource owns the surrounding
+    // references and array headers.
+    bool hasAttackInfo = false;
+    uint32_t attackInfoFlags = 0;
+    uint8_t attackInfoHitState[0x68] = {};
 };
 
 bool ConcreteShotSnapshot_Capture(void* shot, ConcreteShotSnapshot& out);
