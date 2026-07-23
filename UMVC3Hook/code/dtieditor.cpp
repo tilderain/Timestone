@@ -613,6 +613,14 @@ void DtiEditor_InitHooks(Trampoline* tramp)
 {
     if (g_propsInitialized) return;
 
+    // Passive property capture is DTI-editor instrumentation only. It is not
+    // used by rollback and runs on normal game property construction paths.
+    // Leave the game's createProperty thunk untouched; the capture vector is
+    // not safe to mutate from every caller/thread that reaches this function.
+    g_propsInitialized = true;
+    HookLog("DTI Editor: property capture hook disabled.\n");
+    return;
+
     // cAtkCtrl__TargetInfo__createProperty_BF60 at 0x14000bf60 is a 5-byte
     // JMP thunk (E9 rel32) to the real body at 0x14000c630.
     // We patch the thunk to redirect to our hook.

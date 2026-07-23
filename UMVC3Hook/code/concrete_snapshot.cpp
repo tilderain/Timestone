@@ -16,6 +16,7 @@ constexpr size_t kMaxObjectSize = 0x40000;
 // size itself always comes from the live object's DTI metadata.
 constexpr uintptr_t kSoulFistDti = 0x140D4B6E8ull;
 constexpr uintptr_t kLaserSinkuDti = 0x140D4C5F0ull;
+constexpr uintptr_t kVulcanHandGrenadeBombDti = 0x140D48CD0ull;
 constexpr uintptr_t kAnkihouRollingDti = 0x140D4AFE0ull;
 constexpr uintptr_t kZireitouDti = 0x140D4B0D0ull;
 constexpr uintptr_t kRyuDti = 0x140D45A10ull;
@@ -137,12 +138,14 @@ void ConcreteShotSnapshot_Restore(void* shot,
         PreserveRange(overlay.data(), live, liveSize, {0x2230, 0xD0});
     }
 
-    if (IsDti(snapshot.dti, kAnkihouRollingDti) ||
+    if (IsDti(snapshot.dti, kVulcanHandGrenadeBombDti) ||
+        IsDti(snapshot.dti, kAnkihouRollingDti) ||
         IsDti(snapshot.dti, kZireitouDti)) {
-        // Hsien-Ko's projectile embeds a particle-list object at +0x2140.
-        // Its prev/next/list-owner fields must come from the fresh instance;
-        // restoring them makes destruction follow the old timeline's list.
-        PreserveRange(overlay.data(), live, liveSize, {0x2190, 0x68});
+        // These projectiles embed a particle-list object at +0x2140.
+        // Its prev/next/list-owner fields span the entire embedded object.
+        // Restoring any of them makes destruction follow the old timeline's
+        // list; in particular, the owner is at embedded +0xA8 (+0x21E8).
+        PreserveRange(overlay.data(), live, liveSize, {0x2140, 0xC0});
     }
 
     // Only the concrete subclass tail is copied here. The existing flight
