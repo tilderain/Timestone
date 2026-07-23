@@ -1724,6 +1724,10 @@ static void ApplyShotFlight(void* shot, const ShotFlightState& in)
     std::memcpy(p + 0x10, &unitState, sizeof(unitState));
     std::memcpy(p + 0x50, in.transformState, sizeof(in.transformState));
     std::memcpy(p + 0x3E8, in.runtimeState, sizeof(in.runtimeState));
+    // This per-shot matrix drives the collision primitive endpoint. The native
+    // factory initializes it from the current owner, which collapses distinct
+    // shots onto one attachment origin during resimulation.
+    std::memcpy(p + 0x1E50, in.shotMatrices, sizeof(in.shotMatrices));
     std::memcpy(p + 0x1F58, &in.timerThresh, sizeof(in.timerThresh));
     std::memcpy(p + 0x1F60, &in.timer, sizeof(in.timer));
     std::memcpy(p + 0x1F5C, &in.delayTime, sizeof(in.delayTime));
@@ -2073,10 +2077,6 @@ static void CaptureShotAndEffectRecipes(SnapshotSlot& slot)
             void* shot = (void*)(nodeRef - SSHOT_NODE_OFFSET);
             auto recipe = g_liveShotRecipes.find(shot);
             if (recipe != g_liveShotRecipes.end()) {
-                if (IsTerminalShot(shot)) {
-                    nodeRef = *(uint64_t*)(nodeRef + SSHOT_NODE_NEXT);
-                    continue;
-                }
                 ShotRecipe saved = recipe->second;
                 saved.savedPtr = shot;
                 CaptureShotFlight(shot, saved.flight);
