@@ -1724,10 +1724,6 @@ static void ApplyShotFlight(void* shot, const ShotFlightState& in)
     std::memcpy(p + 0x10, &unitState, sizeof(unitState));
     std::memcpy(p + 0x50, in.transformState, sizeof(in.transformState));
     std::memcpy(p + 0x3E8, in.runtimeState, sizeof(in.runtimeState));
-    // This per-shot matrix drives the collision primitive endpoint. The native
-    // factory initializes it from the current owner, which collapses distinct
-    // shots onto one attachment origin during resimulation.
-    std::memcpy(p + 0x1E50, in.shotMatrices, sizeof(in.shotMatrices));
     std::memcpy(p + 0x1F58, &in.timerThresh, sizeof(in.timerThresh));
     std::memcpy(p + 0x1F60, &in.timer, sizeof(in.timer));
     std::memcpy(p + 0x1F5C, &in.delayTime, sizeof(in.delayTime));
@@ -1879,9 +1875,53 @@ static bool IsTerminalShot(void* shot)
     // capture to resurrect the dead object forever. This is the terminal
     // pattern observed for the persistent list-0 shot in the 031454 capture.
     float lifeFrame = *(float*)((uint8_t*)shot + 0x2078);
+    float timer = *(float*)((uint8_t*)shot + 0x1F60);
     uint32_t step = *(uint32_t*)((uint8_t*)shot + 0x212C);
     return std::isfinite(lifeFrame) && lifeFrame <= 0.0f &&
-           step == 3;
+           std::isfinite(timer) && timer > 0.0f && step == 3;
+}
+
+static void DetachEmbeddedShotEffect(void* shot)
+{
+    if (!shot || !HasCallableDtiVirtual(shot)) return;
+    uint32_t shotSize = DecodeDtiSize(GetObjectDti((uint64_t)shot));
+    if (shotSize < 0x21F0) return;
+
+    // The inline sEffect is the subobject beginning at shot+0x2140. Its
+    // methods use the subobject address as `this`; do not pass the containing
+    // shot through the generic DTI check, which can accept the wrong subobject
+    // when the saved tail has overwritten its vtable.
+    uint8_t* embeddedEffect = (uint8_t*)shot + 0x2140;
+    if (!HasCallableDtiVirtual(embeddedEffect)) return;
+    *(uint64_t*)(embeddedEffect + 0x50) = 0;
+    *(uint64_t*)(embeddedEffect + 0x58) = 0;
+    *(uint64_t*)(embeddedEffect + 0x60) = 0;
+    *(uint32_t*)(embeddedEffect + 0x70) = 0xFFFFFFFFu;
+}
+
+static void SanitizeShotAttachmentOwner(void* shot)
+{
+    if (!shot || !IsAccessiblePointer((uint64_t)shot + 0x1480)) return;
+
+    // uShot__advancePhysicsAndPose passes *(shot+0x1478)+0x948 to
+    // buildAttachMatrixForOwner. This is an indirect cArm, not the bytes at a
+    // fixed offset in the shot body.
+    uint64_t armBase = *(uint64_t*)((uint8_t*)shot + 0x1478);
+    if (!armBase || !IsAccessiblePointer(armBase + 0x948 + 0x80)) return;
+    uint8_t* owner = (uint8_t*)(armBase + 0x948);
+    // buildAttachMatrixForOwner returns when +0x78 is null, but otherwise
+    // eventually dispatches through the required primary object at +0x70.
+    // A reconstructed shot can retain the optional link while the factory has
+    // no compatible primary owner, which otherwise becomes a call through 0x2D0.
+    uint64_t primary = *(uint64_t*)(owner + 0x70);
+    bool validPrimary = primary && HasCallableDtiVirtual((void*)primary);
+    if (validPrimary) {
+        uint64_t vtable = *(uint64_t*)primary;
+        validPrimary = IsAccessibleAddress(vtable + 0x2D0) &&
+            IsExecutableAddress(*(uint64_t*)(vtable + 0x2D0));
+    }
+    if (*(uint64_t*)(owner + 0x78) && !validPrimary)
+        *(uint64_t*)(owner + 0x78) = 0;
 }
 
 static void Rollback_AppendShotHitboxesJSON(std::string& json, void* shot)
@@ -2077,6 +2117,10 @@ static void CaptureShotAndEffectRecipes(SnapshotSlot& slot)
             void* shot = (void*)(nodeRef - SSHOT_NODE_OFFSET);
             auto recipe = g_liveShotRecipes.find(shot);
             if (recipe != g_liveShotRecipes.end()) {
+                if (IsTerminalShot(shot)) {
+                    nodeRef = *(uint64_t*)(nodeRef + SSHOT_NODE_NEXT);
+                    continue;
+                }
                 ShotRecipe saved = recipe->second;
                 saved.savedPtr = shot;
                 CaptureShotFlight(shot, saved.flight);
@@ -2172,28 +2216,13 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
     }
     for (void* shot : currentShots) {
         // Some concrete shots embed an sEffect at +0x2140. Its destructor
-        // unlinks through owner+0xA8; a restored/retired effect graph can leave
-        // that child pointer stale. Detach only an invalid owner chain so valid
-        // native particle-list cleanup remains untouched.
-        uint32_t shotSize = DecodeDtiSize(GetObjectDti((uint64_t)shot));
-        if (shotSize >= 0x21F0) {
-            uint8_t* embeddedEffect = (uint8_t*)shot + 0x2140;
-            if (HasCallableDtiVirtual(embeddedEffect)) {
-                uint64_t owner = *(uint64_t*)(embeddedEffect + 0x60);
-                bool invalidOwner = owner &&
-                    (!IsAccessibleAddress(owner + 0xB0) ||
-                     (*(uint64_t*)(owner + 0xA8) &&
-                      !IsAccessibleAddress(*(uint64_t*)(owner + 0xA8) + 0x10)));
-                if (invalidOwner) {
-                    *(uint64_t*)(embeddedEffect + 0x50) = 0;
-                    *(uint64_t*)(embeddedEffect + 0x58) = 0;
-                    *(uint64_t*)(embeddedEffect + 0x60) = 0;
-                    *(uint32_t*)(embeddedEffect + 0x70) = 0xFFFFFFFFu;
-                    HookLog("Rollback: detached stale embedded shot effect shot=0x%llX\n",
-                            (uint64_t)shot);
-                }
-            }
-        }
+        // unlinks through the owner and then walks owner+0xA8's child chain.
+        // That graph is not reconstructed by the shot recipe path, so even a
+        // readable owner can contain a stale child and crash in
+        // sEffect__markChildrenDirtyForUnlink. Detach the embedded particle
+        // links before destruction; the native factory creates fresh effects
+        // for the restored shot when needed.
+        DetachEmbeddedShotEffect(shot);
         uint32_t* state = (uint32_t*)((uint8_t*)shot + 0x10);
         removeMultiMask(sUnit, shot);
         removeUnit(sUnit, shot);
@@ -2273,6 +2302,11 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
             continue;
         }
 
+        // The factory may create an inline effect with a valid vtable, but its
+        // owner/list links still point at the old prediction graph. Detach it
+        // before the broad concrete overlay can copy any stale relationship.
+        DetachEmbeddedShotEffect(fresh);
+
         ShotRecipe liveRecipe = saved;
         liveRecipe.savedPtr = fresh;
         liveRecipe.restoredPtr = fresh;
@@ -2307,6 +2341,11 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
             HookLog("Rollback: restored shot 0x%llX has incomplete collision topology\n",
                     (uint64_t)fresh);
         }
+        // Concrete snapshots do not reconstruct the global particle-owner
+        // graph referenced by inline sEffect objects. Leave that graph
+        // detached so later native shot destruction cannot walk stale nodes.
+        DetachEmbeddedShotEffect(fresh);
+        SanitizeShotAttachmentOwner(fresh);
         // Reapply confirmed pointer-free common fields after the broad object
         // overlay so packed floats/flags that resemble addresses still rewind.
         ApplyShotFlight(fresh, saved.flight);
