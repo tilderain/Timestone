@@ -12,6 +12,9 @@ constexpr size_t kShotBodyStart = 0x2140;
 constexpr size_t kShotRestoreStart = 0x50;
 constexpr size_t kMaxObjectSize = 0x40000;
 constexpr size_t kMaxEmbeddedObjectSize = 0x1000;
+constexpr size_t kShotCollisionSlotsOffset = 0x2058;
+constexpr uint32_t kShotCollisionSlotCount = 4;
+constexpr uint32_t kMaxCollisionPrimitives = 128;
 
 // These DTI addresses were verified from the class DTI getters in Ghidra.
 // They are used only to select the exceptional subclass policy; the object
@@ -24,6 +27,8 @@ struct SnapshotRange {
     size_t offset;
     size_t size;
 };
+
+using GetPrimitiveFn = uint64_t(__fastcall*)(uint64_t, uint32_t);
 
 bool Accessible(uint64_t address, size_t size = sizeof(uint64_t))
 {
@@ -141,6 +146,74 @@ std::vector<SnapshotRange> FindEmbeddedObjects(const uint8_t* live,
     return ranges;
 }
 
+uint64_t GetCollisionPrimitive(const uint8_t* shot, uint32_t slotIndex,
+                               uint32_t primitiveIndex)
+{
+    uint64_t slot = *(const uint64_t*)(shot + kShotCollisionSlotsOffset +
+                                      slotIndex * sizeof(uint64_t));
+    if (!Accessible(slot, 0x24)) return 0;
+
+    uint64_t vtable = *(uint64_t*)slot;
+    if (!Accessible(vtable + 0x90)) return 0;
+    GetPrimitiveFn getPrimitive = *(GetPrimitiveFn*)(vtable + 0x88);
+    if (!getPrimitive || !Executable((uint64_t)getPrimitive)) return 0;
+
+    uint32_t count = *(uint32_t*)(slot + 0x20);
+    if (count > kMaxCollisionPrimitives || primitiveIndex >= count) return 0;
+    uint64_t primitive = getPrimitive(slot, primitiveIndex);
+    return Accessible(primitive, 0xA0) ? primitive : 0;
+}
+
+void CaptureCollisionPrimitives(const uint8_t* shot, ConcreteShotSnapshot& out)
+{
+    for (uint32_t slot = 0; slot < kShotCollisionSlotCount; ++slot) {
+        uint64_t collisionSlot = *(const uint64_t*)(
+            shot + kShotCollisionSlotsOffset + slot * sizeof(uint64_t));
+        if (!Accessible(collisionSlot, 0x24)) continue;
+
+        uint32_t count = *(uint32_t*)(collisionSlot + 0x20);
+        if (count > kMaxCollisionPrimitives) continue;
+        for (uint32_t index = 0; index < count; ++index) {
+            uint64_t primitive = GetCollisionPrimitive(shot, slot, index);
+            if (!primitive) continue;
+
+            ConcreteShotSnapshot::CollisionPrimitive saved{};
+            saved.slot = slot;
+            saved.index = index;
+            saved.active = *(uint8_t*)(primitive + 0x08);
+            saved.kind = *(uint32_t*)(primitive + 0x10);
+            std::memcpy(saved.geometry, (void*)(primitive + 0x20),
+                        sizeof(saved.geometry));
+            saved.flags = *(uint32_t*)(primitive + 0x50);
+            std::memcpy(saved.parentState, (void*)(primitive + 0x68),
+                        sizeof(saved.parentState));
+            std::memcpy(saved.localGeometry, (void*)(primitive + 0x80),
+                        sizeof(saved.localGeometry));
+            out.collisionPrimitives.push_back(saved);
+        }
+    }
+}
+
+void RestoreCollisionPrimitives(uint8_t* shot,
+                                const ConcreteShotSnapshot& snapshot)
+{
+    for (const auto& saved : snapshot.collisionPrimitives) {
+        if (saved.slot >= kShotCollisionSlotCount) continue;
+        uint64_t primitive = GetCollisionPrimitive(shot, saved.slot, saved.index);
+        if (!primitive) continue;
+
+        *(uint8_t*)(primitive + 0x08) = saved.active;
+        *(uint32_t*)(primitive + 0x10) = saved.kind;
+        std::memcpy((void*)(primitive + 0x20), saved.geometry,
+                    sizeof(saved.geometry));
+        *(uint32_t*)(primitive + 0x50) = saved.flags;
+        std::memcpy((void*)(primitive + 0x68), saved.parentState,
+                    sizeof(saved.parentState));
+        std::memcpy((void*)(primitive + 0x80), saved.localGeometry,
+                    sizeof(saved.localGeometry));
+    }
+}
+
 } // namespace
 
 bool ConcreteShotSnapshot_Capture(void* shot, ConcreteShotSnapshot& out)
@@ -160,6 +233,7 @@ bool ConcreteShotSnapshot_Capture(void* shot, ConcreteShotSnapshot& out)
     out.vtable = *(uint64_t*)shot;
     out.body.resize(size);
     std::memcpy(out.body.data(), shot, size);
+    CaptureCollisionPrimitives((const uint8_t*)shot, out);
     return true;
 }
 
@@ -215,6 +289,7 @@ void ConcreteShotSnapshot_Restore(void* shot,
     // intrusive links and remains owned by the freshly-created object.
     CopyRange(live, overlay.data(), liveSize,
               {kShotRestoreStart, liveSize - kShotRestoreStart});
+    RestoreCollisionPrimitives(live, snapshot);
 }
 
 void ConcreteCharacterSnapshot_RestoreFields(void* character,
