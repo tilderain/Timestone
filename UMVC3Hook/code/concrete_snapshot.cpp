@@ -20,7 +20,9 @@ constexpr uint32_t kAttackTargetTableCount = 3;
 constexpr uint32_t kAttackTargetCount = 32;
 constexpr size_t kAttackTargetStride = 0x18;
 constexpr size_t kAttackTargetTables[kAttackTargetTableCount] = {
-    0x18C8, 0x1BC8, 0x1EC8
+    // uShot embeds cAtkCtrl at +0x1470. Its three 0x300-byte TargetInfo
+    // tables begin at cAtkCtrl +0x50/+0x350/+0x650.
+    0x14C0, 0x17C0, 0x1AC0
 };
 
 // These DTI addresses were verified from the class DTI getters in Ghidra.
@@ -409,6 +411,9 @@ bool ConcreteShotSnapshot_Restore(void* shot,
     // A fresh shot has empty cAtkCtrl target tables. Restore the saved
     // per-target hit count/time so reconstructing an already-consumed attack
     // cannot apply the same projectile to the same character a second time.
+    // Keep the fresh vtable, mpUnit and mpResource ownership at +0x00..+0x27,
+    // but rewind mAtkInfoId, flags, combo and timing state through mAnmNo.
+    CopyRange(live, source, liveSize, {0x1498, 0x28});
     RestoreAttackTargets(live, source, liveSize, validTargets, validTargetCount);
     RestoreCollisionPrimitives(live, snapshot);
 

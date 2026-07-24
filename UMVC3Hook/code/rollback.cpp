@@ -1855,8 +1855,20 @@ static void* __fastcall hkEffectCreate(void* manager, int effectId, int a3,
     return effect;
 }
 
+static void DetachEmbeddedShotEffect(void* shot);
+
 static char __fastcall hkUnitRemove(void* manager, void* unit)
 {
+    auto shotRecipe = g_liveShotRecipes.find(unit);
+    if (shotRecipe != g_liveShotRecipes.end() &&
+        shotRecipe->second.reconstructed) {
+        // Natural category cleanup calls removeUnit immediately before the
+        // concrete shot destructor. Gameplay can repopulate an inline particle
+        // node after reconstruction, so detach it at this final ownership
+        // boundary as well as during rollback's explicit retirement.
+       // DetachEmbeddedShotEffect(unit);
+    }
+
     char result = oUnitRemove(manager, unit);
     if (result && unit) {
         // A shot can leave sUnit while remaining linked in sShot until its
@@ -2427,6 +2439,7 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
         // Concrete snapshots do not reconstruct the global particle-owner
         // graph referenced by inline sEffect objects. Leave that graph
         // detached so later native shot destruction cannot walk stale nodes.
+        DetachEmbeddedShotEffect(fresh);
 
         // Reapply confirmed pointer-free common fields after the broad object
         // overlay so packed floats/flags that resemble addresses still rewind.
