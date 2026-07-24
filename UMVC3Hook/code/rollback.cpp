@@ -77,6 +77,7 @@ static constexpr uintptr_t FN_HSIENKO_SELECT_ANKI = 0x1400A1260;
 static constexpr uintptr_t FN_SET_RESERVED_ANKI = 0x1400D4D90;
 static constexpr uintptr_t FN_BUILD_ATTACH_MATRIX = 0x14014F960;
 static constexpr uintptr_t DTI_UEFFECT = 0x140E18698;
+static constexpr uintptr_t DTI_UBASEMODEL = 0x140E17D48;
 
 // ===========================================================================
 // Offsets & Struct Constants
@@ -349,6 +350,22 @@ static bool IsEffectObject(const void* object)
     const uint64_t effectDti = _addr(DTI_UEFFECT);
     for (int depth = 0; dti && depth < 128; ++depth) {
         if (dti == effectDti) return true;
+        if (!IsAccessibleAddress(dti + 0x20)) return false;
+        uint64_t parent = *(const uint64_t*)(dti + 0x20);
+        if (parent == dti) return false;
+        dti = parent;
+    }
+    return false;
+}
+
+static bool IsBaseModelObject(const void* object)
+{
+    if (!HasCallableDtiVirtual(object)) return false;
+
+    uint64_t dti = GetObjectDti((uint64_t)object);
+    const uint64_t baseModelDti = _addr(DTI_UBASEMODEL);
+    for (int depth = 0; dti && depth < 128; ++depth) {
+        if (dti == baseModelDti) return true;
         if (!IsAccessibleAddress(dti + 0x20)) return false;
         uint64_t parent = *(const uint64_t*)(dti + 0x20);
         if (parent == dti) return false;
@@ -5657,10 +5674,10 @@ static void __fastcall hkSound_move(uint64_t param_1)
     if (g_isResimulating)
         return;
 
-    // sScene__updateSoundEnv calls model->vtable[0xA0] without validating the
-    // attachment. A rollback can destroy or reuse a transient model while its
-    // sound scene remains live, leaving +0x80 pointing at non-object data. Drop
-    // only those stale cosmetic attachments before native sound processing.
+    // sScene__updateSoundEnv calls uBaseModel's matrix virtual at +0xA0 without
+    // validating the attachment. A rollback can destroy or reuse a transient
+    // model while its sound scene remains live. The reused address may still be
+    // a valid object with an executable +0xA0 slot, so require model ancestry.
     constexpr uint32_t SOUND_SCENE_COUNT_OFFSET = 0x1CF50;
     constexpr uint32_t SOUND_SCENE_FIRST_OFFSET = 0x70;
     constexpr uint32_t SOUND_SCENE_STRIDE = 0xB50;
@@ -5677,7 +5694,7 @@ static void __fastcall hkSound_move(uint64_t param_1)
             if (!model)
                 continue;
 
-            bool valid = IsAccessiblePointer(model);
+            bool valid = IsBaseModelObject((void*)model);
             uint64_t vtable = valid ? *(uint64_t*)model : 0;
             valid = valid && IsAccessiblePointer(vtable) &&
                 IsAccessibleAddress(vtable + 0xA0);

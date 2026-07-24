@@ -16,13 +16,17 @@ Current `hkSound_move` behavior is:
 - During re-simulation, return without calling native `sSound__move`.
 - During normal frames, inspect at most 40 sound scenes from the scene array at
   `sSound+0x70`, using stride `0xB50` and count `sSound+0x1CF50`.
-- Clear a scene's model attachment at scene `+0x80` only when it cannot safely
-  dispatch the model matrix virtual at vtable `+0xA0`.
+- Clear a scene's model attachment at scene `+0x80` unless its DTI derives from
+  `uBaseModel` and it can safely dispatch the model matrix virtual at vtable
+  `+0xA0`.
 - Call native `sSound__move` after that cosmetic attachment validation.
 
 This prevents headless ticks and stale post-rollback model references from
-advancing or dereferencing audio-scene presentation state. It does not rewind
-voices, emitters, streams, or the XAudio2 backend.
+advancing or dereferencing audio-scene presentation state. Type validation is
+required because a freed model address can be reused by another valid object;
+checking only that vtable `+0xA0` is executable can dispatch an unrelated
+virtual with the sound scene's joint index as an incompatible argument. It does
+not rewind voices, emitters, streams, or the XAudio2 backend.
 
 ## Resource Types
 
