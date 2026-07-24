@@ -1,5 +1,39 @@
 # Desync Root Cause Analysis — Complete Technical Reference
 
+**Status: Historical capture analysis.** Session-specific observations remain
+evidence, but root-cause rankings, source line numbers, snapshot gaps, and fixes
+describe an older build. Later investigations are `fable2`, `fable3`, and
+`dash_resim_root_cause.md`; current implementation truth is in `current.md` and
+the source.
+
+## Supersession Notes
+
+Read the code excerpts below as a record of the July 2-3 investigation, not as
+current source. In particular:
+
+- The `mOldHeld` mismatch was a plausible hypothesis from these captures, but
+  the later dash investigation identified re-simulation delta-time handling as
+  the demonstrated dash root cause. Do not treat the proposed `+0x10` write as
+  a currently validated fix merely because the current hook still does not
+  write that field.
+- Current input scheduling uses absolute-frame scheduled records, centrally
+  resolved remote input, and per-frame snapshot metadata. The old
+  `g_oldInputs[MAX_HISTORY-delay]` excerpts no longer describe the live path.
+- Current `BuildRegions` captures `sEffect+0x3C` as a 16-byte RNG state, captures
+  only `0x50` bytes of the `sShot` manager header, reconstructs shots through
+  native spawn recipes, and has ownership-aware restore paths for pointer-bearing
+  managers and external allocations.
+- Character regions retain their captured object addresses in each snapshot.
+  Restore does not assign character bodies to whichever object occupies the
+  same traversal ordinal. Roster traversal identity can still make diagnostics
+  misleading, but it is not by itself evidence that restore swapped bodies.
+- `sMain+0x40228` is a member-pointer slot used to call `sId`; it is not the
+  `sId` object body. The proposed guessed `0x100`-byte flat snapshot was never
+  validated and must not be applied.
+- Current re-simulation still calls full native `oMvc3Main_move`; the surrounding
+  snapshot, input, rendering, sound, timing, and reconstruction behavior has
+  changed substantially from the excerpts below.
+
 ## Table of Contents
 1. [Compare.py Results](#1-comparepy-results)
 2. [cChrInput Field Layout](#2-cchrinput-field-layout)
@@ -7,7 +41,7 @@
 4. [Ghidra: cChrInput_inputMaskPostProcess (0x14002E5A0)](#4-ghidra-cchrinput_inputmaskpostprocess)
 5. [Ghidra: cChrInput__getInputDirection (0x1402CE750)](#5-ghidra-cchrinput__getinputdirection)
 6. [Ghidra: sMvc3Main__move Execution Order](#6-ghidra-smvc3main__move-execution-order)
-7. [uCharacter__move_base Disassembly — Exact Call Order](#7-ucharter__move_base-call-order)
+7. [uCharacter__move_base Disassembly — Exact Call Order](#7-ucharacter__move_base-disassembly)
 8. [hkprocessFrameInput — Full Source (controller.cpp:1423-1600)](#8-hkprocessframeinput)
 9. [hkGetsCurrentInput_withSOCD — Full Source (controller.cpp:699-793)](#9-hkgetscurrentinput_withsocd)
 10. [BuildRegions — Snapshot Region Enumeration (rollback.cpp:653-836)](#10-buildregions)
@@ -18,7 +52,7 @@
 15. [BuildRegions — Character Snapshot Details (rollback.cpp:780-826)](#15-character-snapshot-regions)
 16. [cChrTeam Snapshot Size Verification](#16-cchrteam-snapshot-verification)
 17. [Root Cause Analysis](#17-root-cause-analysis)
-18. [The mOldHeld Bug](#18-the-moldheld-bug)
+18. [The mOldHeld Bug](#18-the-moldheld-bug-detailed-walkthrough)
 19. [Verified Snapshot Coverage](#19-verified-snapshot-coverage)
 20. [Snapshot Gaps Identified](#20-snapshot-gaps-identified)
 21. [Execution Order: sMvc3Main::move → uCharacter__move_base](#21-execution-order)
@@ -88,7 +122,7 @@ From `initInputBuffer` (0x14002E440) + `processFrameInput` + `inputMaskPostProce
 
 ---
 
-## 3. Ghidra Decompilation: cChrInput__processFrameInput (0x14002DD60)
+## 3. Ghidra Decompilation: cChrInput__processFrameInput
 
 ```c
 /* R2-INPUT chokepoint: per-character input resolver. Called from uCharacter__move_base.
@@ -152,7 +186,7 @@ void cChrInput__processFrameInput(longlong param_1)
 
 ---
 
-## 4. Ghidra: cChrInput_inputMaskPostProcess (0x14002E5A0)
+## 4. Ghidra: cChrInput_inputMaskPostProcess
 
 ```c
 void cChrInput_inputMaskPostProcess(longlong param_1)
@@ -215,7 +249,7 @@ LAB_14002e622:
 
 ---
 
-## 5. Ghidra: cChrInput__getInputDirection (0x1402CE750)
+## 5. Ghidra: cChrInput__getInputDirection
 
 ```c
 void cChrInput__getInputDirection(longlong param_1, undefined4 param_2)
@@ -310,7 +344,7 @@ void sMvc3Main__move(longlong param_1)
 
 ---
 
-## 7. uCharacter__move_base Call Order
+## 7. uCharacter__move_base Disassembly
 
 From raw disassembly at `LAB_14004c0a0`:
 
@@ -346,7 +380,12 @@ if (!(chr+0x1514 & 0x10))
 
 ---
 
-## 8. hkprocessFrameInput (controller.cpp:1423-1600)
+## 8. hkprocessFrameInput
+
+**Historical source excerpt.** Current `hkprocessFrameInput` has different
+absolute-frame scheduling and fallback behavior. The missing `+0x10` write is an
+observation about this implementation, while its classification as the root
+cause is superseded by `dash_resim_root_cause.md`.
 
 ```cpp
 static void __fastcall hkprocessFrameInput(uint64_t cChrInput)
@@ -413,7 +452,10 @@ static void __fastcall hkprocessFrameInput(uint64_t cChrInput)
 
 ---
 
-## 9. hkGetsCurrentInput_withSOCD (controller.cpp:699-793)
+## 9. hkGetsCurrentInput_withSOCD
+
+**Historical source excerpt.** Current client-local input reads the physical pad
+slot directly and current timeline resolution is not fully represented here.
 
 ```cpp
 static uint64_t __fastcall hkGetsCurrentInput_withSOCD(uint64_t pad, uint32_t playerIndex)
@@ -483,7 +525,11 @@ static uint64_t __fastcall hkGetsCurrentInput_withSOCD(uint64_t pad, uint32_t pl
 
 ---
 
-## 10. BuildRegions (rollback.cpp:653-836)
+## 10. BuildRegions
+
+**Historical source excerpt.** This flat-region inventory is not current. In
+particular, current source does not flat-copy projectile bodies or restore the
+complete `sMain` body.
 
 ```cpp
 static int BuildRegions(Region* regions, int maxRegions)
@@ -564,7 +610,7 @@ static int BuildRegions(Region* regions, int maxRegions)
 
 ---
 
-## 11. Rollback_SaveSnapshot (rollback.cpp:1338-1394)
+## 11. Rollback_SaveSnapshot
 
 ```cpp
 void Rollback_SaveSnapshot(int32_t frame)
@@ -607,7 +653,11 @@ void Rollback_SaveSnapshot(int32_t frame)
 
 ---
 
-## 12. Rollback_RestoreSnapshot (rollback.cpp:1435-1499)
+## 12. Rollback_RestoreSnapshot
+
+**Historical source excerpt.** Current restore validates owner slots and object
+identity and dispatches dedicated restore/reconstruction policies. The broad
+`memcpy` loop below is not an accurate description of current restore safety.
 
 ```cpp
 void Rollback_RestoreSnapshot(int32_t frame)
@@ -639,7 +689,7 @@ void Rollback_RestoreSnapshot(int32_t frame)
 
 ---
 
-## 13. Rollback_ReSimulate (rollback.cpp:1907-2099)
+## 13. Rollback_ReSimulate
 
 ```cpp
 void Rollback_ReSimulate(int32_t startFrame, int32_t endFrame)
@@ -704,7 +754,7 @@ void Rollback_ReSimulate(int32_t startFrame, int32_t endFrame)
 
 ---
 
-## 14. Diag Capture Functions (diag.cpp)
+## 14. Diag Capture
 
 ```cpp
 // CaptureCharSnapshot — copies ALL relevant char state
@@ -778,7 +828,7 @@ void DiagLogPostOverride(uint64_t cChrInput, uint32_t teamIdx)
 
 ---
 
-## 15. Character Snapshot Regions (rollback.cpp:780-826)
+## 15. Character Snapshot Regions
 
 ```cpp
 // ---- 11-16. Per-character uCharacter + 17-18. cChrTeam ----
@@ -846,6 +896,10 @@ cChrTeam offset map (from doc/rollback.md):
 
 ## 17. Root Cause Analysis
 
+**Historical ranking, superseded.** These were hypotheses generated from the two
+captures above. They are not a current defect list or a validated ordering of
+causes.
+
 ### Root Cause #1: mOldHeld (+0x10) Not Overridden by Hook (HIGH)
 The native `cChrInput__processFrameInput` writes `mOldHeld (+0x10) = mHeld` at the start of post-processing. Our `hkprocessFrameInput` then overrides `mHeld (+0x14)`, `mRemapped (+0x560)`, `mProcessed (+0x56C)`, and `mMask (+0x568)` — but NOT `mOldHeld (+0x10)`. When `cChrInput_inputMaskPostProcess` runs next, it XORs `mOldHeld (+0x10)` vs `mButtons (+0x1C)` to compute rising/falling edges — producing **wrong edge detection** for the replayed input. This cascades into wrong `dirRing` entries and wrong held/released/pressed ring data.
 
@@ -857,14 +911,27 @@ In Session B, team 1 has `mid=0` in slot 0 on host but `mid=2` in slot 0 on clie
 - The snapshot captures characters by linked-list traversal order; if the ordering differs at snapshot save time vs restore time, the character states get swapped
 - This causes per-character RNG states to be consumed in different order → frame 9 RNG divergence
 
+**Current correction:** snapshots store each region's captured address and do
+not remap bodies by later traversal ordinal. Slot-order divergence remains a
+diagnostic identity problem and may indicate an earlier gameplay divergence, but
+the body-swap mechanism proposed here is not how current restore operates.
+
 ### Root Cause #3: sId Allocator Not Snapshotted (MEDIUM)
 `sId` at sMvc3Main step #21 (vtable+0x30 on member at offset 0x40228) is NOT in the snapshot regions. sId is the unique ID allocator for projectiles, effects, and other gameplay objects. If a projectile/effect is created during re-sim that consumes a different ID than during live, subsequent allocations diverge. This affects:
 - uShot projectile IDs → collision/despawn mismatches
 - sGameEffect IDs → visual effect desync
 - Any gameplay code that branches on object IDs
 
+**Current correction:** `sMain+0x40228` is the slot containing the `sId*`, not
+the allocator body. The target's size and ownership policy were not established
+here, so the flat-copy fix proposed below is unsupported.
+
 ### Root Cause #4: sEffect RNG (+0x3C) Not Snapshotted (MEDIUM)
 The global MtXorShift RNG (0x140d765d8, 16 bytes) IS in the snapshot. Per-character RNG (cChr+0x2D80) IS in the snapshot. But `sEffect` has its own RNG at `sGameEffect + 0x3C` — this is NOT in the snapshot. If any sEffect RNG is consumed during re-sim, the global RNG state diverges from live.
+
+**Current correction:** current `BuildRegions` captures 16 bytes at
+`sEffect+0x3C`. Shot reconstruction also preserves and restores that complete
+state around native respawn work.
 
 ### Root Cause #5: GetsCurrentInput Asymmetry During Resim (MEDIUM)
 During live netplay, GetsCurrentInput returns **0** for the remote player. During resim, it returns `g_usedRemoteInput[idx]` (the corrected remote input). The native `processFrameInput` then:
@@ -929,6 +996,11 @@ dirRing written with wrong edges
 
 ## 19. Verified Snapshot Coverage
 
+**Historical table.** The checks describe the old `BuildRegions` excerpt and do
+not represent current coverage or restore policy. A row marked YES here may now
+use a narrower ownership-aware restore, while a row marked MISSING may have been
+added or reconstructed.
+
 | Region | Address | Size | In Snapshot? |
 |--------|---------|------|-------------|
 | sReplay frame counter | sReplay+0x54 | 4 | ✓ YES |
@@ -958,6 +1030,10 @@ dirRing written with wrong edges
 
 ## 20. Snapshot Gaps Identified
 
+**Historical proposals.** Gap 2 is resolved in current source. Gap 1's proposed
+size is unverified, and Gap 3's body-swap premise does not match address-based
+restore. Do not implement these snippets without a new ownership analysis.
+
 ### Gap 1: sId Allocator (sMain member at +0x40228)
 **Location**: `sMain + 0x40228` — `vtable+0x30` called on this member during sMvc3Main__move step #21.
 **Fix**: Add to BuildRegions:
@@ -983,7 +1059,7 @@ The snapshot captures characters in linked-list traversal order. If the list ord
 
 ---
 
-## 21. Execution Order Summary
+## 21. Execution Order
 
 ### Within sMvc3Main::move (one game tick):
 ```
@@ -1030,7 +1106,11 @@ For each frame f in [startFrame, endFrame):
 
 ---
 
-## 22. Resim vs Live Asymmetry: GetsCurrentInput for Remote Player
+## 22. Resim vs Live Asymmetry
+
+**Historical comparison.** This table describes the source excerpt above. It is
+not sufficient evidence that the listed field asymmetry remains a current desync
+cause, and its concluding "core" designation is superseded by later captures.
 
 | Aspect | Live | Resim |
 |--------|------|-------|

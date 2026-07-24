@@ -1,4 +1,11 @@
-user
+Historical transcript: early desync root-cause analysis
+
+Status: Superseded raw investigation. The assertions and source line numbers in
+this transcript describe an old build and are not current implementation truth.
+The immediate theory was superseded by fable2 and then fable3. Use current.md
+for current architecture and preserve this file only as capture evidence.
+
+Original prompt:
 Desync Root Cause Analysis — Complete Technical Reference
 
 Table of Contents
@@ -1415,4 +1422,3 @@ TTFT: 6.99s
 Total Latency: 28.02s
 In: 130346
 Out: 1255
-

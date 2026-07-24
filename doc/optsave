@@ -1,6 +1,14 @@
 Snapshot and Restore Optimization Findings
 ==========================================
 
+Status: Historical optimization review. Reviewed 2026-07-23.
+
+The implementation has changed substantially since this review: projectile
+recipes, concrete snapshots, collision external buffers, and dedicated restore
+handlers now dominate correctness. Line numbers and statements about dead
+passes or allocation behavior must be re-profiled before acting on them. Do not
+coalesce regions across ownership-aware restore boundaries.
+
 Current implementation
 ----------------------
 

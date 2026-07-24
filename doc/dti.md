@@ -1,5 +1,10 @@
 # MT Framework DTI (Dynamic Type Information) System
 
+**Status: Native reference. Reviewed 2026-07-23.** This describes the analyzed
+retail executable, not plugin-owned types. Packed DTI size is decoded by current
+code as `(flagsAndSize & 0x7FFFFF) << 2`; names and addresses remain
+reverse-engineering evidence rather than a stable API.
+
 ## Overview
 
 UMVC3 uses Capcom's MT Framework engine which includes a runtime type
@@ -64,18 +69,19 @@ PTR_PTR_140d22a28 (root sentinel)
 
 ### Location
 
-`MtDTI__globalHashTable` — a 256-entry array of `qword` (2048 bytes total).
+The global table is at `0x140D6D7B0`: 256 `qword` bucket heads (2048 bytes).
 
 Referenced in:
 - `MtDTI__findByHash` (`0x14045d980`): `(&MtDTI__globalHashTable)[hash & 0xFF]`
-- `MtDTI__walkGlobalHashTable` (`0x14045db70`): iterates all 256 buckets
+- `FUN_14045DB70`: walks all 256 buckets and follows each chain, but has no
+  visible callback and returns no entries
 - `MtDTI__MtDTI` constructor: inserts new DTI into the table
 
 The exact address can be found by disassembling `MtDTI__findByHash`:
 ```
-14045d980: LEA RAX,[MtDTI__globalHashTable]
-14045d987: AND ECX,0xFF
-14045d98a: MOV RAX,[RAX + RCX*8]
+14045d980: LEA RDX,[0x140D6D7B0]
+14045d987: MOVZX EAX,CL
+14045d98a: MOV RAX,[RDX + RAX*8]
 ```
 
 ### Lookup (`MtDTI__findByHash`)
@@ -92,10 +98,12 @@ MtDTI__findByHash(uint hash)
 
 Used 85+ times across the codebase for type lookups during initialization.
 
-### Enumeration (`MtDTI__walkGlobalHashTable`)
+### Bucket Walker (`FUN_14045DB70`)
 
-Walks all 256 buckets and their linked lists. Called during startup
-initialization. This is the basis for enumerating ALL registered types.
+Walks all 256 buckets and their linked lists but performs no externally visible
+per-entry action in the recovered instructions. It is not an enumeration API.
+Hook code can enumerate types by reading `0x140D6D7B0` directly and following
+`+0x28`, provided registration has completed.
 
 ---
 
@@ -152,8 +160,8 @@ a non-negative signed integer.
 | `0x14045da80` | `MtDTI__init`                | Initialize hash table + sort children |
 | `0x14045da90` | `FUN_14045da90`              | Sort child DTIs alphabetically        |
 | `0x14045d980` | `MtDTI__findByHash`          | Lookup DTI by CRC32 hash              |
-| `0x14045db70` | `MtDTI__walkGlobalHashTable` | Enumerate all registered DTIs         |
-| `0x1402a40c0` | `MtDTI__getSize`             | Get instance size from DTI            |
+| `0x14045db70` | `FUN_14045DB70`               | Traverse all bucket chains; no callback |
+| `0x1402a40c0` | `MtDTI__getID`                | Return the hash/ID at `DTI+0x34`      |
 | `0x140455640` | *(clamp function)*            | Misidentified — not instance count    |
 | `0x1404c4590` | `MtCRC__getCRC`              | CRC32 hash (standard polynomial)      |
 
@@ -225,7 +233,8 @@ This is used by the collision editor tool.
 ```c
 // Global hash table address — find via MtDTI__findByHash disassembly
 // Accesses globalHashTable[hash & 0xFF]
-extern uint64_t MtDTI__globalHashTable[256];
+// Preferred VA in this executable. Relocate it at runtime.
+extern uint64_t MtDTI__globalHashTable[256]; // 0x140D6D7B0
 
 struct MtDTI {
     uint64_t vtable;
@@ -234,7 +243,7 @@ struct MtDTI {
     MtDTI* firstChild;      // +0x18
     MtDTI* parent;          // +0x20
     MtDTI* hashNext;        // +0x28
-    uint32_t flags;         // +0x30
+    uint32_t flagsAndSize;  // +0x30; low 23 bits store size / 4
     uint32_t hash;          // +0x34 — CRC32 & 0x7FFFFFFF
 };
 
@@ -245,6 +254,16 @@ for (int i = 0; i < 256; i++) {
     }
 }
 ```
+
+Instance size is decoded as:
+
+```c
+size_t instanceSize = (dti->flagsAndSize & 0x007FFFFF) << 2;
+```
+
+The constructor at `0x14045D860` receives a byte size, shifts it right by two,
+and stores the low 23 bits. This implies DTI-represented sizes are four-byte
+granular.
 
 ### Walking the Type Hierarchy
 

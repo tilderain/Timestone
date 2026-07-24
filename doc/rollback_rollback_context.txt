@@ -2,6 +2,13 @@
  ROLLBACK NETCODE SNAPSHOT/RESTORE — COMPREHENSIVE BACKGROUND
 ================================================================================
 
+STATUS: SUPERSEDED BACKGROUND SNAPSHOT
+Captured from an older implementation. It omits current shot/effect recipe
+reconstruction, concrete subclass snapshots, collision external-buffer
+handling, battle-ready synchronization, and the current packet protocol.
+Addresses may remain useful, but source excerpts and “current” conclusions must
+be checked against UMVC3Hook/code. See doc/current.md.
+
 This document contains all context, decompiled functions, data structure
 layouts, and current source code necessary to understand and improve the
 UMvC3 rollback snapshot/restore implementation.

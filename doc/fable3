@@ -1,5 +1,11 @@
 # fable3 — The Real Desync: cChrCmd Line Buffers (Heap-Escaped Command State)
 
+**Status: Historical finding, still architecturally relevant.** Current
+`BuildRegions` captures external allocations discovered from character-owned
+objects, but this capture does not prove every concrete character's command
+state is covered. Treat the offsets below as evidence from the named capture,
+not as a complete current snapshot specification.
+
 This supersedes `doc/fable2`. The position-fed accumulator story in `fable2` was
 correct in analysis but was **already fixed** (mDeltaTime=1.0 clamp, startup
 input alignment) by the time we captured `nplive_20260709_031730`. The remaining

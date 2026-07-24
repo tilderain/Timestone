@@ -1,3 +1,11 @@
+NATIVE REFERENCE - NOT THE PLUGIN'S ACTIVE NETCODE
+
+Reviewed 2026-07-23. This file describes the retail Steam/CMU online subsystem.
+UMVC3Rollback uses ENet, a 16-frame input-history packet, prediction, snapshot
+restore, and re-simulation. Native objects may still execute offline/common
+game paths, but they are not the gameplay transport authority. Field names
+marked approximate remain hypotheses.
+
 The native netcode is not just an input ring buffer. It is a complete online-session subsystem that combines matchmaking, Steam transport, message serialization, delayed input synchronization, frame pacing, fight-time synchronization, connection-loss handling, desync detection, spectator playback, and online UI behavior.
 The most useful mental model is:
 Steam / CMU session

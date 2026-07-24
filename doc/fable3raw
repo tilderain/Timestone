@@ -1,3 +1,9 @@
+RAW EVIDENCE - NOT CURRENT DOCUMENTATION
+
+This is an unedited tool/reasoning transcript retained to support `fable3`.
+It contains abandoned hypotheses, tool errors, and references to old source
+line numbers. Nothing in this file is authoritative; see `current.md`.
+
 ▣  Build ·  · 11m 41s
 ghidra_functions_decompile [name=cChrCmd_vfn7]
 ⚙ ghidra_xrefs_list [to_addr=140028240]

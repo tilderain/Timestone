@@ -1,318 +1,201 @@
-# Shot List Analysis for Rollback
+# Projectile Ownership And Rollback
 
-Analysis performed via Ghidra MCP on `umvc3.exe.unpacked.exe`.
+**Status: Current focused reference. Verified against Ghidra and source on
+2026-07-23.**
 
-## Current Architecture
+This replaces the former fixed-array proposal. That proposal treated projectiles
+as uniform byte blobs and did not account for polymorphic DTI allocation,
+resource ownership, collision arrays, inline objects, effects, or scalar
+deleting destructors.
 
-### sShot Singleton
+## Native Manager
 
-A global singleton manages all shots for both players.
+| Address | Meaning |
+|---|---|
+| `0x140D47F40` | Storage for the `sShot*` singleton |
+| `0x140D47F90` | Global array of 10 list sentinels, stride `0x28` |
+| `0x140D48120` | Global array of 10 `CRITICAL_SECTION` objects, stride `0x28` |
 
-| Address | Symbol | Description |
-|---------|--------|-------------|
-| `0x140d47f40` | `QWORD_140d47f40` | `sShot` singleton pointer (stored by `sShot__sShot` at `0x140150800`) |
-| `0x140d47f90` | `QWORD_140d47f90` | 10-slot shot list array (each slot = 40 bytes, total 400 bytes) |
-| `0x140d48120` | `QWORD_140d48120` | 10 CRITICAL_SECTION locks (each 40 bytes, total 400 bytes) |
+The sentinel and lock arrays are globals adjacent to the singleton-pointer
+storage. They must not be described as fields at `sShot+0x50` or as overlapping
+objects. `sShot__addShotToList` and `sShot__removeShotFromList` index the two
+arrays independently.
 
-### sShot Struct Layout (offsets from sShot\*)
+Verified manager fields used by current source include:
 
-| Offset | Size | Field | Notes |
-|--------|------|-------|-------|
-| +0x000 | — | cSystem base | vtable, etc. |
-| +0x038 | 1024 | Shot ID pool | 0x10 iterations × 8 qwords per iteration = 1024 bytes cleared in `sShot__clearShotIdPool` |
-| +0x050 | 400 | Slot array | 10 slots × 40 bytes each (see below) |
-| +0x438 | 4 | mKillOrder | int |
-| +0x43C | 4 | (unnamed) | int, set to 0 |
-| +0x440 | 4 | mMaxSpreadHierarchy | int, init = 1 |
-| +0x444 | 4 | mDeltaTimeCoef | float, init = 1.0 (0x3f800000) |
-| +0x448 | 0x2000 | Pending unit queue | 512 entries × 16 bytes each (`sShot__enqueuePendingUnit`) |
-| +0x2448 | 4 | Pending unit count | int |
-| +0x2450 | 0x1000 | Activity array | 0x40 iterations × 64 bytes each = 4096 bytes (`sShot__initActivityArray`) |
+| `sShot` offset | Meaning |
+|---|---|
+| `+0x38` | Shot-ID/manager state included in the current `0x50`-byte manager snapshot |
+| `+0x438` | Kill-order/state scalar region |
+| `+0x444` | Delta-time coefficient |
+| `+0x448` | Pending-unit array, 512 entries of `0x10` bytes |
+| `+0x2448` | Pending-unit count |
+| `+0x2450` | Activity records |
 
-### Slot Structure (40 bytes each)
+The exact semantics of every manager-header word are not fully recovered. Do not
+infer a 1024-object capacity from the size of the ID state.
 
-```
-+0x00: vtable pointer  (8 bytes, object header for cNodeList)
-+0x08: CRITICAL_SECTION + cChrNode linked-list head (32 bytes)
-       - +0x08: prev pointer (written by FUN_0x140003d50, read by cChrNode__getChr)
-       - +0x10: next pointer (written by InitializeCriticalSection stub at 0x140057030)
-       - +0x18: owner/self pointer (written by SetCriticalSectionSpinCount stub at 0x140022720)
-```
+## Intrusive List Layout
 
-The CRITICAL_SECTION and the doubly-linked-list head occupy the same memory region starting at offset +0x08 within each slot. Each slot is initialized by `sShot__initSlot` (0x140150bb0).
+Each concrete `uShot` contains a list node at `shot+0x1450`:
 
-### Shot Objects
-
-Shots are heap-allocated objects. Each shot embeds a `cChrNode` at a fixed offset:
-
-- `uShot__getListNode(shot_ptr)` → `shot_ptr + 0x1450`
-- `sShot__getShotFromNode(node_ptr)` → `*(node_ptr + 0x10)` (reads owner backpointer)
-
-The cChrNode embedded in each shot:
-```
-shot + 0x1450: prev pointer (points to prev shot or slot list head)
-shot + 0x1458: next pointer (points to next shot or slot list head)
-shot + 0x1460: owner backpointer (points to shot itself)
+```text
++0x1450  previous node
++0x1458  next node
++0x1460  owning uShot pointer
 ```
 
-### Slot Indexing
-
-Slots are indexed by team/player ID (`param_2 & 0xffffffff`). With 10 slots:
-- Typically P1 team (3 characters) uses slots 0-2 or similar
-- Typically P2 team (3 characters) uses slots 3-5 or similar
-- Remaining slots for assists, projectiles, etc.
-
-### Key Operations
-
-| Function | Address | Description |
-|----------|---------|-------------|
-| `sShot__addShotToList` | `0x140150ad0` | Lock slot, insert shot node via `cChrNode__insertAfter`, unlock |
-| `sShot__removeShotFromList` | `0x140151420` | Lock slot, remove shot node via `cChrNode__removeFromList`, unlock |
-| `sShot__getFirstShotInSlot` | `0x140151160` | Lock slot, return first shot node, unlock |
-| `sShot__spawnShot` | `0x140150e00` | Allocates uShot, inits, adds to list |
-| `sShot__spawnShotEx` | `0x140150f40` | Extended spawn with additional init params |
-| `sShot__enqueuePendingUnit` | `0x1401512a0` | Enqueue to fixed-size ring buffer at +0x448 (cap 512) |
-| `sShot__getInstance` | `0x1400047d0` | Returns singleton pointer `QWORD_140d47f40` |
-| `sShot__lockSlot` | `0x140150700` | `EnterCriticalSection` wrapper |
-| `sShot__unlockSlot` | `0x1401508a0` | `LeaveCriticalSection` wrapper |
-| `sShot__reset` | `0x1401515e0` | Reinit all slots, clear ID pool, clear activity array |
-| `sShot__initAllSlots` | `0x140150be0` | Init 10 slots (loop with step = 5 qwords) |
-| `uCharacter__updateShotList` | `0x140039d70` | Character-level shot list update |
-| `uCharacter__processShots` | `0x1400393f0` | Process shots for a character |
-| `rShot__getData` | `0x14014feb0` | Get shot data from shot resource |
-
-### Function Access Summary
-
-| Key | Count |
-|-----|-------|
-| Direct data references to slot array (0x140d47f90) | 6 unique functions (add, remove, init, getFirst, static init, static dtor) |
-| Shot list API functions (lock, unlock, add, remove, spawn, init, reset, etc.) | 13 functions |
-| Functions calling sShot\_\_spawnShot/sShot\_\_spawnShotEx | 11 unique call sites |
-| Functions calling sShot\_\_addShotToList directly (outside spawn) | 1 (sShot\_\_changeShotSlot — moves shot between slots) |
-| Functions calling sShot\_\_removeShotFromList directly | 2 (uShot\_\_dtor + sShot\_\_changeShotSlot) |
-| Functions calling sShot\_\_getFirstShotInSlot (iterate the list) | 4 callers |
-| Functions calling uShot\_\_getListNode (read embedded node) | 8 callers (add, remove, 6 others for resource path construction) |
-| Character virtual dispatch to uCharacter\_\_updateShotList | 118 vtable entries (every character has this in their vtable) |
-| Character virtual dispatch to uCharacter\_\_processShots | 121 vtable entries (every character + overrides like uHawkeye\_\_processShots) |
-
-**Total distinct functions that touch the shot list data structure or its API: ~16.** The vtable dispatchers account for the bulk of references (239 .rdata entries) but all route to the same two shared implementations (`uCharacter__updateShotList` and `uCharacter__processShots`).
-
-## Existing Save State (`defaults.h`)
-
-Current `SaveLoadState` saves/restores:
-- 6 fighters × ~1000 bytes (in several ranges per fighter)
-- mysterytable (9200 bytes)
-- block2 (2272 bytes) + team data
-- physics (11424 bytes)
-- **Shot list is NOT saved or restored**
-
-## The Problem
-
-When rolling back to a previous game state, shots that were spawned during now-discarded frames must be removed, and shots that existed at the save point must be restored. Currently, no shot state is preserved, meaning:
-- Shots spawned during rollback-simulated frames persist incorrectly
-- Shots that should exist after a rollback are missing
-- The per-slot linked lists become corrupted after repeated rollback cycles
-
-## Analysis: Two Approaches
-
-### Option A: Preallocated Array (1024 entries)
-
-Replace the 10 linked lists with 10 fixed-size arrays of 1024 shot pointers each.
-
-**Save:**
-
-```c
-// Single memcpy of the entire slot array (or individual slot if per-slot granularity)
-memcpy(saved_slots, slot_array, sizeof(slot_array)); // 10 * 1024 * 8 = 80KB
-
-// Deep-copy each shot that exists
-for each slot:
-    for each entry in slot:
-        if entry[i].active:
-            memcpy(saved_shot + i, current_shot, sizeof(Shot));
-```
-
-**Restore:**
-
-```c
-// Restore slot array (pointers)
-memcpy(slot_array, saved_slots, sizeof(slot_array));
-
-// Restore each shot
-for each slot:
-    for each entry in slot:
-        if entry[i].active:
-            memcpy(current_shot, saved_shot + i, sizeof(Shot));
-```
-
-**Pros:**
-- O(1) save/restore for the slot metadata
-- No pointer fixup needed (fixed memory layout, no heap allocs during gameplay)
-- Deterministic memory usage
-- Cache-friendly iteration
-
-**Cons:**
-- Maximum shot limit of 1024 total (across all 10 slots)
-- The current game code uses linked list operations (`cChrNode__insertAfter`, `cChrNode__removeFromList`) — replacing requires hooking or rewriting those functions
-- Doubly-linked list semantics embedded in shot creation/destruction need modification
-- 80KB just for the pointer array (negligible)
-- Large refactor — every function that traverses the shot list needs to use array indexing
-
-### Option B: Snapshot Linked List with Malloc
-
-Keep the existing linked list structure. On save, deep-copy all shot objects and serialize the list topology. On restore, free current shots and recreate the lists.
-
-**Save:**
-
-```c
-// snapshot sShot's mutable fields (pending queue, activity array, counters, etc.)
-memcpy(saved_sShot, sShot_instance, sizeof(sShot_header));
-
-// deep-copy each slot's linked list
-for each slot:
-    saved_slots[i].node_count = count_nodes(slot);
-    for each node in slot's list:
-        shot = get_shot_from_node(node);
-        saved_shots[slot_index][n] = malloc_copy(shot, sizeof_UShot);
-        saved_nodes[slot_index][n] = { prev_idx, next_idx }; // serialize topology
-```
-
-**Restore:**
-
-```c
-// restore sShot metadata
-memcpy(sShot_instance, saved_sShot, sizeof(sShot_header));
-
-// destroy current shots
-for each slot:
-    for each node in slot's list:
-        free(node);
-    init_slot(slot); // reset list head
-
-// rebuild lists from saved data
-for each slot:
-    for i = 0 to saved_slots[i].node_count:
-        // re-alloc each shot
-        new_shot = malloc(sizeof_UShot);
-        memcpy(new_shot, saved_shots[slot][i], sizeof_UShot);
-        // fix node pointers within shot (at shot + 0x1450)
-        fixup_list_pointers(new_shot, saved_nodes[slot][i]);
-        // insert into slot
-        cChrNode__insertAfter(slot_head, new_shot + 0x1450);
-```
-
-**Pros:**
-- No changes to game's internal shot management code
-- No artificial shot limit
-- Minimal memory waste (only active shots stored)
-
-**Cons:**
-- **Pointers inside shots need fixup**: The cChrNode at +0x1450 contains prev/next pointers to adjacent nodes. After `malloc_copy`, these point to the old addresses and must be fixed to new addresses.
-- Shots may contain additional pointers to other game objects (e.g., owner fighter, target) that also need fixup
-- malloc/free overhead during every rollback (hundreds per frame)
-- Save/restore is O(n) in shot count for both time and space
-- The `MVC3Rollback` already uses `std::vector<uint8_t>` for save memory — adding variable-length shot lists complicates the save buffer management
-- The existing `SaveLoadPtr` API (`SaveLoadPtr(ptr, save, size)`) assumes fixed-size blocks
-
-### Option C (Hybrid): Preallocated Shot Pool + Linked List Keep
-
-Preallocate a fixed pool of shot objects. Keep the linked list for traversal but use the pool for deterministic allocation. Snapshot the pool bitmap + sShot metadata.
-
-**Save:**
-
-```c
-// save: pool bitmap tells us which slots are live
-memcpy(saved_pool_bitmap, pool_bitmap, pool_size / 8);
-memcpy(saved_sShot, sShot_instance, sizeof(sShot_metadata));
-
-// copy each live shot (no pointer fixup needed — same pool addresses after restore)
-for each bit in pool_bitmap:
-    if live:
-        memcpy(saved_shot_data + i * sizeof(Shot), pool_addr + i * sizeof(Shot), sizeof(Shot));
-```
-
-**Restore:**
-
-```c
-// restore pool metadata + sShot metadata
-memcpy(pool_bitmap, saved_pool_bitmap, pool_size / 8);
-memcpy(sShot_instance, saved_sShot, sizeof(sShot_metadata));
-
-// restore each live shot in-place (pool addresses don't change)
-for each bit in pool_bitmap:
-    if live:
-        memcpy(pool_addr + i * sizeof(Shot), saved_shot_data + i * sizeof(Shot), sizeof(Shot));
-```
-
-**Pros:**
-- No pointer fixup needed (shots stay at same pool addresses)
-- O(1) save/restore if using a single pool memcpy and bitfield
-- Keeps existing linked list traversal code intact
-- Bounded memory (no malloc during gameplay)
-
-**Cons:**
-- Linked list topology still uses pointers — if a shot was freed and reallocated at a different pool index between save and restore, the saved linked list pointers are stale
-- However: during rollback, the *entire state* is restored, so the pool bitmap and the linked list topology are restored atomically
-
-## Recommendation
-
-**Option C (Preallocated pool + keep linked list) gives the best tradeoff** for this codebase because:
-
-1. The existing linked list operations in the game binary (`cChrNode__insertAfter`, etc.) are embedded in the game's shot management — replacing them requires hooking at minimum, and rewrites at worst.
-
-2. A preallocated pool avoids malloc/free during gameplay AND during rollback, giving deterministic performance.
-
-3. The pool bitmap + sShot metadata can be saved in O(1) with a single `memcpy` block, fitting nicely into the existing `SaveLoadPtr` API which uses `std::vector<uint8_t>` + offset tracking.
-
-4. The shot ID pool at sShot +0x38 (1024 bytes) already hints at a 1024-entry architecture — this may reflect the engine's original design intent.
-
-5. The existing `sShot__enqueuePendingUnit` already has a 512-entry fixed-size queue, suggesting the engine designers expected bounded shot counts.
-
-**Suggested pool size: 1024 entries.** This matches the shot ID pool capacity and is large enough for any conceivable gameplay scenario (current game likely uses <100 concurrent shots).
-
-### Integration with existing SaveLoadState
-
-The existing code already does:
+Each list sentinel contains the same node shape beginning at `sentinel+0x08`.
+The list is circular when initialized. Current source traverses it as:
 
 ```cpp
-void SaveLoadState(bool save) {
-    currentSaveLoadOffset = 0;
-    // ... fighter saves ...
-    SaveLoadPtr(block2, save, 2272);
-    SaveLoadPtr(team1, save, teamBackupSize);
-    SaveLoadPtr(team2, save, teamBackupSize);
-    SaveLoadPtr(physics, save, 11424);
+uint64_t sentinel = _addr(0x140D47F90) + list * 0x28;
+uint64_t end = sentinel + 0x08;
+uint64_t node = *(uint64_t*)(sentinel + 0x10);
+
+while (node && node != end) {
+    void* shot = (void*)(node - 0x1450);
+    node = *(uint64_t*)(node + 0x08);
 }
 ```
 
-Adding the shot pool:
+Relevant native functions:
 
-```cpp
-constexpr int MAX_SHOTS = 1024;
-bool shotPoolInited = false;
-uint8_t* shotPoolPtr = nullptr;  // preallocated pool
+| Address | Function | Role |
+|---|---|---|
+| `0x140150AD0` | `sShot__addShotToList` | Lock and insert embedded node |
+| `0x140151420` | `sShot__removeShotFromList` | Lock and unlink embedded node |
+| `0x140151160` | `sShot__getFirstShotInSlot` | Return the first node/entry representation |
+| `0x140150E00` | `sShot__spawnShot` | Standard native factory path |
+| `0x140150F40` | `sShot__spawnShotEx` | Extended native factory path |
+| `0x14029F7F0` | `sShot__createUShot` | Resolve concrete DTI and invoke its factory |
+| `0x1401C9FD0` | `uShot__dtor` | Unlink and release owned state |
+| `0x1401CA090` | `uShot__operatorDelete` | Return memory to the MT allocator |
+| `0x1401C5F20` | `uShot__onOwnerChange` | Move a shot between team/list slots |
 
-// In SaveLoadState (inside the save/restore loop):
-if (!shotPoolInited) {
-    auto sShot = *(uintptr_t*)_addr(0x140d47f40);
-    shotPoolPtr = (uint8_t*)malloc(MAX_SHOTS * sizeof(rShot)); // or determine at runtime
-    shotPoolInited = true;
-}
-SaveLoadPtr((intptr_t)shotPool, save, MAX_SHOTS * sizeof(rShot));       // shot data
-SaveLoadPtr((intptr_t)slot_array, save, 10 * sizeof(Slot));             // list heads
-SaveLoadPtr((intptr_t)sShot_metadata, save, sizeof(sShot_metadata));    // pending queue, etc.
-```
+Direct list access is narrow but not isolated behind one interface. Several
+gameplay routines call `sShot__getFirstShotInSlot` and continue through
+`cChrNode__getNext`. Other generic engine systems retain ordinary `uShot*` or
+`cUnit*` pointers.
 
-Or, simpler: directly snapshot the sShot singleton plus slot array:
+## Object Allocation
 
-```cpp
-auto sShotSingleton = *(uintptr_t*)_addr(0x140d47f40);
-// sShot from +0x38 (ID pool) through +0x2450 (end of activity array)
-SaveLoadPtr(sShotSingleton + 0x38, save, 0x2450 + 0x1000 - 0x38);  // the entire sShot data
-```
+Shots are not one fixed-size class. `sShot__createUShot`:
 
-### Unsolved: Shot Internal Pointers
+1. Reads the concrete class hash from the `rShot` resource.
+2. Resolves an `MtDTI` with `MtDTI__findByHash`.
+3. Calls the DTI virtual factory.
+4. Returns a variable-sized polymorphic object.
 
-This analysis assumes shots don't contain mutable pointers to game objects that also change during rollback. If shots contain e.g., a `mOwnerFighter*` that points into the fighter struct being restored, that pointer will still be valid after restore (same address). But if shots contain pointers to heap-allocated objects that are ALSO being snapshotted separately, those pointers could become stale.
+Runtime size is decoded from DTI metadata. Concrete classes can extend beyond
+the common body beginning around `0x2140`; the current snapshot code accepts
+sizes up to `0x40000` but does not assume all of those bytes are flat gameplay
+state.
 
-A full investigation would need to examine the `rShot::cCommonData`, `rShot::cAtkData`, and `rShot::cHitData` structures (all in the `rShot` DTI area at `0x140b117a8`-`0x140b117d0`) for pointer fields.
+Known ownership-bearing contents include:
+
+- `cUnit` lifecycle and category links.
+- The `sShot` intrusive list node.
+- Inline `cAtkCtrl`, `cArm`, model, animation, and other `MtObject` records.
+- Resource references and attack data.
+- Four collision-slot pointers near `+0x2058`.
+- Owner, target, parent-shot, reflected-owner, last-hit, and requested-unit
+  references.
+- Concrete subclass state and, for some classes, inline or external effects.
+
+Native destruction must run to release those owners correctly. Calling the
+scalar deleting destructor with flag 1 also calls `uShot__operatorDelete`.
+
+## Current Rollback Strategy
+
+The native allocator and native lists remain authoritative.
+
+### Capture
+
+Hooks on `sShot__spawnShot` and `sShot__spawnShotEx` record a `ShotRecipe`:
+
+- Spawn function and arguments.
+- Resource and owner/reference identities.
+- Slot ID and spawn order.
+- Pre-spawn RNG states.
+- Verified common flight/gameplay ranges.
+- A runtime-DTI-sized `ConcreteShotSnapshot` used for an ownership-filtered
+  overlay of the common body and concrete tail.
+- Collision primitive gameplay state.
+
+Only recipes for shots still linked in `sShot` are copied into a frame snapshot.
+Terminal/deferred-cleanup cases are filtered so rollback does not resurrect a
+shot that was already dying.
+
+### Restore
+
+`RestoreShotAndEffectRecipes` performs these steps:
+
+1. Pin saved `rShot` resources.
+2. Sanitize invalid unit/category or collision records that would make native
+   destruction unsafe.
+3. Mark transient effect-category units for native deferred retirement because
+   they may hold weak references into the discarded prediction graph.
+4. Remove current shots from `sUnit` and call their native scalar deleting
+   destructors.
+5. Clear stale pending-shot entries.
+6. Recreate each saved shot through the original native spawn function.
+7. Re-register it through the native pending-unit/category path.
+8. Overlay compatible saved body state while retaining fresh pointer-bearing
+   words, inline objects, model allocation fields, and native owner regions.
+9. Restore attack-target and collision-primitive state through dedicated rules.
+10. Restore RNG streams consumed by reconstruction and release pinned resources.
+
+This is reconstruction, not heap rewind. A restored shot may have a different
+address from the shot captured in the snapshot. Code that stores historical
+shot pointers must therefore use an explicit saved-to-restored mapping or retain
+fresh native references.
+
+## Why A Flat Array Is Not The Current Solution
+
+### Dense array of `uShot*`
+
+Replacing the ten linked lists with dense pointer arrays is possible with a
+moderate hook surface, but it only changes enumeration. Every entry still points
+to a variable-sized native object with external ownership. It does not make
+snapshot/restore materially safer.
+
+It would also require patching or emulating every consumer that expects a
+`cChrNode`, including owner-change and destruction paths. Fake nodes preserve
+the pointer topology and remove most of the intended benefit.
+
+### Stable slab of concrete objects
+
+A stable-address slab is substantially harder. It would require:
+
+- Reserving aligned slots large enough for every concrete DTI size.
+- Intercepting DTI factory allocation.
+- Running native constructors and destructors.
+- Suppressing only the final MT allocator free for slab-backed objects.
+- Preserving `sUnit`, collision, resource, animation, effect, and parent-shot
+  relationships.
+- Proving that every concrete subclass is compatible with placement into the
+  slab.
+
+A whole-slab `memcpy` would still restore stale external pointers and allocator
+state, so it would not replace the current ownership-aware restore logic.
+
+### Pointer-free handles
+
+Replacing `uShot*` throughout the game with indices is not a local list change.
+Generic engine APIs, virtual dispatch, collision, stage logic, effects, and
+character fields all consume real object addresses. This would be a partial
+engine rewrite and is not practical for the plugin.
+
+## Invariants
+
+- Never flat-copy intrusive sentinel topology from an old frame.
+- Never free a shot body without running its native destructor path.
+- Never restore historical resource, collision, effect, or inline-object
+  pointers merely because the address is readable.
+- Preserve native list/category registration order unless a test demonstrates
+  that order is irrelevant.
+- Keep the pending count at or below `0x200`; the native enqueue path can
+  increment before reporting overflow.
+- Test projectile-heavy and character-specific cases on both peers. Static
+  layout analysis cannot prove effect and collision ownership correctness.

@@ -1,5 +1,14 @@
 # Rollback Netcode — Comprehensive Collation
 
+**Status: Superseded architecture collation.** This file contains valuable
+Ghidra excerpts but predates the current ownership-aware restore paths,
+projectile recipe reconstruction, battle rendezvous, and packet protocol. Its
+“current” source descriptions and line numbers are stale. Use
+[`current.md`](current.md) for implementation truth and focused documents for
+verified layouts. In particular, current re-simulation calls the full native
+`oMvc3Main_move`; `Rollback_HeadlessTick` is an unused early-return stub, and
+`sMain+0xA4/+0xA8` are active/requested worker counts rather than frame deltas.
+
 Collated from: `rollback.md`, `rollback_rollback_context.txt`, Ghidra MCP decompilations,
 `rollback.cpp`, `rollback.h`, `framestepper.cpp`, `netplay.cpp`
 
@@ -634,12 +643,13 @@ static void __fastcall hkCollisionSoundUpdate(uint64_t param_1) {
 
 ### sMain Snapshot
 
-sMain is currently excluded from BuildRegions. It needs to be included so that
-restore operations return sMain to its correct state. Size: 0x40080 bytes per frame.
+**Historical claim, now fixed:** current `BuildRegions` includes `sMain` with
+size `0x40080`. Restore applies `SMAIN_RESTORE_RANGES` rather than flat-copying
+the entire object, preserving ownership and synchronization state.
 
 ### Ring Buffer Slot Overwrite
 
-During re-sim, ReSimulate saves snapshots for frames `startFrame+1` through `endFrame`.
-These overwrite the ring buffer slots of previously saved frames (e.g. frame 204
-overwrites frame 188's slot since 204 % 16 == 188 % 16). The caller must be aware
-of this and handle it appropriately.
+Current behavior is mode-dependent. Normal re-simulation does not replace every
+slot in the range. Multi-resimulation mode saves corrected per-frame restore
+points and intentionally replaces slots modulo 16 while preserving their input
+metadata. Every lookup validates the exact frame stamp before use.

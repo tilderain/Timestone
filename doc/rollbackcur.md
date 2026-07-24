@@ -1,5 +1,13 @@
 # Input Hook Comparison: Pad-Level vs Character-Level
 
+**Status: Historical design comparison.** The decision is implemented: current
+netplay uses the character-level `cChrInput__processFrameInput` hook after
+native translation, plus frame-boundary history management. The shown source
+line numbers and pseudocode predate the current absolute-frame queues, scheduled
+delay transitions, startup gates, and resimulation injection. The pad prototype
+captures two 550-byte slices, not the complete four-slot `sPad` object; claims
+below describing complete pad-state capture are design-era overstatements.
+
 ## Overview
 
 Two existing input hook approaches exist in the codebase. Both were written for
@@ -231,9 +239,9 @@ FSM without also re-running the physics step produced incorrect results:
 //Physics doesn't work during runahead; This should in theory fix it. But doesn't
 ```
 
-This means the physics state is an **additional singleton** with its own
-mutable data that must be snapshotted and restored. The current controller.cpp
-approach (which only hooks input) doesn't address physics at all.
+This was a design-stage observation. Current rollback is not only an input hook:
+`BuildRegions` captures character, timing, collision, hit-solver, manager, and
+external allocation state, and restore applies subsystem-specific policies.
 
 ---
 
@@ -273,9 +281,9 @@ The existing hook at `0x14002DD60` is the right layer because:
 3. **Small data** — 3 uint32 writes per character = 72 bytes/frame total
 4. **No routing needed** — the game maps pad→player→character before this hook
 
-### What's Missing
+### What Was Missing In This Historical Design
 
-The current hook does NOT address physics rollback:
+The input hook alone did not address physics rollback:
 
 ```cpp
 // In hkprocessFrameInput — input ONLY

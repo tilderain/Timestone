@@ -1,409 +1,224 @@
-# Netcode Architecture
+# Native Netpad Architecture
 
-## Overview
+**Status: Native reference only. Reviewed 2026-07-23.** Retail UMVC3 uses a
+delayed synchronized-input timeline. UMVC3Rollback does not extend this native
+transport; it uses ENet, its own absolute-frame input history, prediction,
+snapshot restore, and re-simulation. See [`current.md`](current.md).
 
-This game is **delay-based**, not rollback. There are no `saveState`, `rollback`, `rewind`, or `resimulate`
-functions anywhere in the binary. The netcode revolves around an object called `sMvc3SyncPad::cCommunicationTool`
-which manages input sync, prediction, and delay logic.
+## Scope
 
-## Network Stack
+The native gameplay object is referred to here as `sMvc3SyncPad`/`sNetPad`,
+matching recovered function roles. Older names such as
+`cCommunicationTool` are not required to understand the verified layout.
 
-```
-sMvc3Main  (application root)
-  └─ sMvc3Manager::registerNetworkScheduler  (registers the sync callback)
-       └─ sMvc3SyncPad::cCommunicationTool  (core netcode object)
-            ├─ Ring buffer A (local input history)  [param_1 + 0xd18]
-            ├─ Ring buffer B (remote input history) [param_1 + 0xd20]
-            ├─ network_sync_buffer_read()          [0x140289520]
-            ├─ sMvc3Manager::processNetworkSync()  [0x14025c860]
-            └─ sNetworkRoom                        [0x14028c700]
-                 └─ cNetRoomCmu  (Capcom Matchmaking Unit)
-```
+Native code establishes:
 
-## cCommunicationTool Object Layout
+- Two 120-slot input rings at `+0xD18` and `+0xD20`.
+- Separate read cursors at `+0xD34` and `+0xD38`.
+- A live synchronized frame cursor at `+0xD30`.
+- Initial insertion of configured neutral delay frames.
+- Stalling/indicator behavior for unavailable fighting input.
+- A 90-frame fencepost containing frame number and aggregate team life.
+- No native simulation-state snapshot, restore, or re-simulation path.
 
-Key offsets on `this` (the cCommunicationTool instance, size ~0xe50+):
+## Mode Predicates
 
-| Offset | Size | Description |
-|--------|------|-------------|
-| +0xc48 | 1    | Current input state (local pad) |
-| +0xc58 | 8    | Character select interface pointer |
-| +0xd10 | 1    | Flag: player 3 (spectator) mode |
-| +0xd11 | 1    | Flag: local input disabled? |
-| +0xd13 | 1    | Flag: auto-input mode |
-| +0xd14 | 4    | Auto-input frame counter / data |
-| +0xd18 | 8    | **Ring buffer A** (originally received from remote / authoritative) |
-| +0xd20 | 8    | **Ring buffer B** (locally predicted inputs sent to remote) |
-| +0xd28 | 8    | Network status object pointer |
-| +0xd30 | 4    | Total frame counter |
-| +0xd34 | 4    | Read cursor for ring buffer A |
-| +0xd38 | 4    | Read cursor for ring buffer B |
-| +0xd3c | 4    | Dropped packet counter |
-| +0xd40 | 4    | Received packet counter |
-| +0xd44 | 4    | Write cursor for transmitted inputs |
-| +0xd48 | 4    | Acknowledged frame by remote |
-| +0xd4c | 4    | Total inputs stored counter |
-| +0xd50 | 4    | Frame skip / desync counter |
-| +0xd54 | 4    | Input prediction lookahead |
-| +0xd58 | 4    | Current input data being processed |
-| +0xd60 | 4    | Local frames - remote frames distance |
-| +0xd68 | 1    | Flag: replay recording mode |
-| +0xd6c | 4    | Replay frame counter |
-| +0xd78 | 4    | Delay value (frames of delay, float) |
-| +0xd7c | 4    | Delay change cooldown timer (float) |
-| +0xd80 | 1    | Flag: delay increasing |
-| +0xd8c | 1    | Flag: dynamic delay adjustment enabled |
-| +0xd90 | 4    | Max delay threshold (float) |
-| +0xd94 | 4    | Min delay threshold (float) |
-| +0xd98 | 4    | Delay increase rate (float) |
-| +0xd9c | 4    | Delay decrease rate (float) |
-| +0xdbc | 4    | Max prediction frames allowed (uint) |
-| +0xdc8 | 4    | Accumulated position drift (float) |
-| +0xdcc | 4    | Drift threshold for resync (float) |
-| +0xdd0 | 4    | Total accumulated drift |
-| +0xdd4 | 4    | Drive resync threshold (float) |
-| +0xdd8 | 4    | Local player position at last sync |
-| +0xde0 | 4    | Frame delay metric 1 |
-| +0xde4 | 4    | Frame delay metric 2 |
-| +0xdec | 4    | Remote quality indicator |
-| +0xdf0 | 4    | Local quality indicator |
-| +0xdf4 | 4    | Network RTT / ping (float) |
-| +0xdf8 | 4    | Current delay mode |
-| +0xdfc | 4    | Low ping threshold for delay reduction |
-| +0xe00 | 4    | High ping threshold for delay increase |
-| +0xe04 | 4    | Delay value applied at high ping |
-| +0xe08 | 4    | Delay value applied at medium ping |
-| +0xe14 | 8    | CRC / checksum pair 1 (for desync detection) |
-| +0xe1c | 8    | CRC / checksum pair 2 (for desync detection) |
-| +0xe40 | 4    | Client-side position accumulator (player 3 drift fix) |
-
-## Ring Buffer Design
-
-Each ring buffer (`0xd18` and `0xd20`) points to a structure:
-
-```
-struct SyncBuffer {
-    int write_head;           // +0x00: total frames written
-    int max_frames;           // +0x04: capacity (always 0x78 = 120)
-    FrameEntry entries[120];  // +0x0c: circular buffer
-};
-
-struct FrameEntry {   // 8 bytes each
-    uint frame;       // +0x00: frame number (also stores 0xCDCD when cleared)
-    ushort input;     // +0x04: 16-bit input data (bitfield)
-    // +0x06: padding
-};
-```
-
-Entry lookup: `base + 0xc + (frame % 120) * 8` for the frame number, and
-`base + 0x10 + (frame % 120) * 8` for the 2-byte input value.
-
-Input bits (from `pad.md` and decompilation):
-- 10 bindings per player (LP, MP, HP, LK, MK, HK, S1, S2, Assist, Up, Down, Left, Right, etc.)
-- 0x10 = 16 bits per entry seems sufficient
-
-### Buffer Operations
-
-**Write** (`FUN_140288d30` at `0x140288d30`):
-```
-void syncBuffer_write(buffer, inputData, frame, flags) {
-    slot = frame % 120;
-    buffer.entries[slot].frame = frame;
-    buffer.entries[slot].input = inputData | (flags & 0x8000);
-    buffer.write_head = frame + 1;
-}
-```
-
-**Clear** (`FUN_140288e20` at `0x140288e20`):
-```
-void syncBuffer_clearEntry(buffer, frame) {
-    slot = frame % 120;
-    buffer.entries[slot].frame = 0xCDCD;  // tombstone
-    buffer.entries[slot].input = 0xCDCD;
-}
-```
-
-**Read** (`FUN_140289490`/`FUN_140289450`):
-- Checks if read_cursor < buffer.write_head
-- Returns the 16-bit input value from the entry at read_cursor
-- Handles negative values (cast to unsigned)
-
-## Network Sync Flow
-
-### sMvc3Manager::processNetworkSync (`0x14025c860`)
-
-Called each frame. This is the main sync decision function.
-
-Takes: `(manager, playerIndex, syncType, param4)`
-Returns: `bool` (true = inputs match / frame is synced)
-
-Sync types (switch cases):
-- **0**: Read `param_1 + 0x54` (standard frame input check)
-- **1**: Read `param_1 + 0x48` (action/assist data)
-- **2**: Read `param_1 + 0x4c` (secondary input data)
-- **3**: Read `param_1 + 0x58` (alternate input)
-- **4**: Read `param_1 + 0x5c` (extra data)
-- **7**: Read `param_1 + 0x9c` (bulk data)
-
-The manager stores input slots as an array of 4 entries (for 4 possible players),
-each 0x70 bytes:
-
-```
-struct PlayerInputSlot {     // 0x70 bytes
-    char active;              // +0x00
-    // ... (3 bytes padding)
-    uint input_frame;         // +0x04: which frame we're checking
-    uint expected_frame;      // +0x08: which frame we expect
-    // +0x0c to +0x44: various input buffers
-    uint normal_input;        // +0x48: normal button input
-    uint default_input;       // +0x4c: default/fallback input
-    uint frame_input;         // +0x54: frame-specific input
-    uint alt_input;           // +0x58: alternate input
-    uint extra_input;         // +0x5c: extra/bulk input
-    // ...
-    uint bulk_data;           // +0x9c: bulk input data
-};
-```
-
-### network_sync_buffer_read (`0x140289520`)
-
-```
-void network_sync_buffer_read(cCommunicationTool* tool) {
-    if (isHost()) {
-        // Host reads from ring buffer A (remote inputs received)
-        readFrame(tool + 0xd18);  // FUN_140289490
-        tool.recv_counter++;
-    } else {
-        // Client reads from ring buffer B (local predictions)
-        readFrame(tool + 0xd20);  // FUN_140289450
-        tool.drop_counter++;  // counts frames read from prediction buffer
-    }
-}
-```
-
-### FUN_14028bc10 (`0x14028bc10`) - Main Sync/Transmit Function
-
-This is the core function that decides whether to send input data or handle
-prediction/desync. It runs each frame.
-
-**When the network connection is alive:**
-1. Accumulates position drift (`this + 0xdd0`)
-2. If the sync condition is met (frames available, delay threshold exceeded, etc.):
-   - Writes current input into the transmit buffer (ring buffer B for client, A for host)
-   - Increments the transmit counter `+0xd44`
-   - Resets drift accumulator
-   - Sends the input data to the remote peer
-3. Calls `FUN_14028a810` to send CRC data if not all frames are transmitted
-
-**When the network connection is dead/dropped:**
-1. Increments `+0xd50` (desync/drop counter)
-2. Calls `FUN_14028b1d0` for re-transmission
-3. Clears both ring buffer entries for current frame (marks them 0xCDCD)
-4. Increments read cursors for both buffers
-5. Increments total frame counter
-6. Resets the received/predicted frame counters
-
-### FUN_14028b1d0 (`0x14028b1d0`) - Retransmission / Rollback Surrogate
-
-This function decides what to do when frames are missing. It checks if the
-frame gap is within the prediction window (`+0xdbc`). If yes, it checks:
-
-- If the frame budget has been exceeded (various counters)
-- If so, it resets drift and does nothing (essentially holds)
-- Otherwise, it re-transmits the input data by calling `FUN_140288d30` again
-
-This is the closest thing to a rollback mechanism — it can re-insert inputs
-into the buffer for re-simulation, but there's no state save/restore.
-
-### FUN_14028c090 (`0x14028c090`) - Dynamic Delay Adjustment
-
-```
-void adjustDynamicDelay(cCommunicationTool* tool) {
-    if (!tool.delayAdjustEnabled) return;
-    
-    tool.delayIncreasing = 0;
-    if (tool.delayChangeCooldown > 0.0)
-        tool.delayChangeCooldown -= 1.0;
-    
-    if (ringBufferAGap < 3 && tool.qualityLocal > 2) {
-        // Network is good: increase delay (smooth out jitter)
-        newDelay = tool.currentDelay + tool.delayIncreaseRate;
-        clamp to tool.maxDelayThreshold;
-    } else {
-        // Network is bad: decrease delay
-        newDelay = tool.currentDelay - tool.delayDecreaseRate;
-        clamp to tool.minDelayThreshold;
-    }
-    
-    tool.currentDelay = newDelay;
-    tool.delayChangeCooldown = 30.0;  // ~0.5 second cooldown
-}
-```
-
-This implements **adaptive delay**: it measures network quality and adjusts
-the delay buffer size dynamically. When the ring buffer gap is small (< 3 frames)
-and local quality is good, it increases delay. Otherwise it reduces it.
-
-## Message Types
-
-All messages are serialized through a property/message system (MtObject/DTI)
-with virtual function dispatch (`vfn8` at `0x14028a080` dispatches by message size).
-
-| Message Type | Size | Description |
+| Address | Predicate | Verified condition |
 |---|---|---|
-| MsgInputData | small | 1 frame of button input data |
-| MsgInputActData | small+ | 1 frame input + action data (2 entries in buffer) |
-| MsgInputActData2 | larger | 2 frames of input bundled |
-| MsgInputActData3 | larger | 3 frames of input bundled |
-| MsgInputActData4 | larger | 4 frames bundled |
-| MsgInputActData5 | larger | 5 frames bundled |
-| MsgInputActData6 | larger | 6 frames bundled |
-| MsgInputActData7 | larger | 7 frames bundled |
-| MsgInputActData8 | larger | 8 frames bundled |
-| MsgInputActData9 | larger | 9 frames bundled |
-| MsgInputActDataRep | special | Repair / retransmission request |
-| MsgInputCmd | ? | Command data |
-| MsgCrcData | ? | CRC checksum data (desync detection) |
-| MsgGalleryData | ? | Gallery/spectator data |
+| `0x140006A60` | `sBattleSetting__isLiveOnlineBattle` | `BattleType == 3 || BattleType == 9` |
+| `0x140006AB0` | `sBattleSetting__isOnlineSpectatorBattle` | `BattleType == 4` |
+| `0x140006AF0` | `g__isOnlineBattle` | Either predicate above |
 
-The `vfn8` handler (`0x14028a080`) dispatches incoming messages by comparing
-the message size against known DTI sizes. Each message type has a dedicated
-handler function that writes the data into the appropriate ring buffer.
+Spectator mode consumes replay-backed data and must not be conflated with the
+two-player live netpad timeline.
 
-## Steam Integration
+## Verified Layout
 
-The game initializes Steam via `cChrTeam__processTeamLogic` (`0x140212e30`):
+| Offset | Type | Verified role |
+|---:|---|---|
+| `+0xC50` | `uint32_t` | Cached aggregate team life used by the fencepost |
+| `+0xC58` | pointer | Character-select/network message interface used by fencepost send |
+| `+0xC60` | `uint32_t` | Game-facing buffered input from ring `+0xD18` |
+| `+0xC8C` | `uint32_t` | Game-facing buffered input from ring `+0xD20` |
+| `+0xD10` | byte | Local readiness component |
+| `+0xD11` | byte | Remote/input-buffer readiness component |
+| `+0xD14` | `uint32_t` | Active slot index used when selecting configured delay |
+| `+0xD18` | pointer | First 120-entry synchronized input ring |
+| `+0xD20` | pointer | Second 120-entry synchronized input ring |
+| `+0xD28` | pointer | Netpad/session status object |
+| `+0xD30` | `uint32_t` | Live consumed-frame cursor and fight-time source |
+| `+0xD34` | `uint32_t` | First ring read cursor |
+| `+0xD38` | `uint32_t` | Second ring read cursor |
+| `+0xD3C` | `uint32_t` | First buffered-input consumer count |
+| `+0xD40` | `uint32_t` | Second buffered-input consumer count |
+| `+0xD44` | `uint32_t` | Local ring write/transmit cursor |
+| `+0xD48` | `uint32_t` | Peer/dispatch comparison cursor |
+| `+0xD50` | `uint32_t` | Counter incremented on the non-connected/advance path |
+| `+0xD58` | `uint32_t` | Current local input value written to a ring slot |
+| `+0xD60` | `uint32_t` | First ring buffered-depth metric |
+| `+0xD64` | `uint32_t` | Second ring buffered-depth metric |
+| `+0xD78` | `float` | Dynamic delay metric |
+| `+0xD7C` | `float` | Delay-adjustment cooldown |
+| `+0xD80` | byte | Delay-adjustment state flag |
+| `+0xD84` | `float` | Network wait/timeout counter |
+| `+0xD8C` | byte | Enables dynamic-delay adjustment |
+| `+0xD90/+0xD94` | `float` | Upper/lower delay bounds |
+| `+0xD98/+0xD9C` | `float` | Delay increase/decrease increments |
+| `+0xDA4` | `uint32_t` | Base initial delay |
+| `+0xDA8` | array | Per-slot initial-delay additions |
+| `+0xDBC` | `uint32_t` | Buffered-depth limit used before writing/resending |
+| `+0xDC8` | `float` | Send-gating timing accumulator |
+| `+0xDCC` | `float` | Send-gating timing threshold |
+| `+0xDD0` | `float` | Resend-gating timing accumulator |
+| `+0xDD4` | `float` | Resend-gating timing threshold |
+| `+0xDE0/+0xDE4` | `uint32_t` | Resend comparison metrics |
+| `+0xDEC/+0xDF0/+0xDF8` | `uint32_t` | Send/delay comparison metrics |
+| `+0xE0C` | byte | Enables in-match wait-indicator behavior |
+| `+0xE10` | flags | Records neutral pre-fight ring substitutions |
+| `+0xE14/+0xE18` | pair | Local fencepost frame and aggregate life |
+| `+0xE1C/+0xE20` | pair | Remote fencepost frame and aggregate life |
+| `+0xE34` | `uint32_t` | Fight-time baseline cursor |
+| `+0xE40` | `uint32_t` | Startup accumulator cleared with delay state |
 
+Several fields retain generic descriptions because their exact network metric
+names are not established. In particular, timing values derived from `sMain`
+must not be labeled character-position drift.
+
+## Ring Format
+
+Each pointer at `+0xD18`/`+0xD20` refers to a ring with 120 entries:
+
+```c
+struct NativeInputRing {
+    uint32_t unknown00;
+    uint32_t writeCursor; // +0x04
+    uint32_t unknown08;
+    NativeInputSlot slots[120]; // +0x0C
+};
+
+struct NativeInputSlot {
+    uint32_t sequence;
+    uint16_t buttons;
+    uint16_t padding;
+};
 ```
-SteamClient017         -> ISteamClient
-SteamUser019           -> ISteamUser
-SteamFriends015        -> ISteamFriends
-SteamUtils008          -> ISteamUtils
-SteamMatchMaking009    -> ISteamMatchmaking      (lobbies)
-SteamMatchMakingServers002 -> ISteamMatchmakingServers
-SteamNetworking005     -> ISteamNetworking       (P2P transport)
-STEAMUSERSTATS_INTERFACE_VERSION011 -> ISteamUserStats
-STEAMAPPS_INTERFACE_VERSION008 -> ISteamApps
-STEAMREMOTESTORAGE_INTERFACE_VERSION013 -> ISteamRemoteStorage
-STEAMSCREENSHOTS_INTERFACE_VERSION002 -> ISteamScreenshots
-STEAMHTTP_INTERFACE_VERSION002 -> ISteamHTTP
-STEAMUNIFIEDMESSAGES_INTERFACE_VERSION001 -> ISteamUnifiedMessages
-SteamController003     -> ISteamController
-STEAMUGC_INTERFACE_VERSION008 -> ISteamUGC
-STEAMAPPLIST_INTERFACE_VERSION001 -> ISteamAppList
-STEAMMUSIC_INTERFACE_VERSION001 -> ISteamMusic
-STEAMMUSICREMOTE_INTERFACE_VERSION001 -> ISteamMusicRemote
-STEAMHTMLSURFACE_INTERFACE_VERSION_003 -> ISteamHTMLSurface
-STEAMINVENTORY_INTERFACE_V001 -> ISteamInventory
-STEAMVIDEO_INTERFACE_V001 -> ISteamVideo
+
+`sNetPad__writeRingSlot` at `0x140288D30` selects
+`slots[sequence % 120]`, writes the sequence and low 16 input bits, optionally
+adds bit `0x8000` from an input flag, and advances `ring+0x04` to
+`sequence + 1`.
+
+`sNetPad__initRingSentinel` at `0x140288E20` writes `0x0000CDCD` to the slot
+sequence and `0xCDCD` to its button field. Consumers test this marker to detect
+an unavailable slot.
+
+## Startup Delay
+
+`sNetPad__initializeInputDelay` at `0x14028B4D0` computes:
+
+```c
+delay = netpad->baseDelay_DA4 + netpad->slotDelay_DA8[netpad->slot_D14];
 ```
 
-## Matchmaking / Lobby System
+In a live online battle, it writes that many zero-button slots to the first
+ring, advances `+0xD44`, dispatches pending inbound data, clears the fencepost
+and synchronization region at `+0xE14..+0xE33`, and clears `+0xE40`. This is
+input delay, not rollback prediction.
 
-**Network topology**: Steam Lobbies + custom Capcom matchmaking server.
+## Per-Frame Consumption
 
-### cNetRoomCmu (Capcom Matchmaking Unit)
+`sNetPad__tickInputSender` at `0x14028BC10` has two important paths:
 
-Created during `sNetworkRoom::sNetworkRoom` at `0x14028c700`.
+- While its status predicate permits sending, it accumulates `sMain`-derived
+  timing at `+0xDC8/+0xDD0`, conditionally writes the current input and cached
+  life aggregate to the first ring, advances `+0xD44`, and dispatches inbound
+  packets.
+- On the alternate advancement path, it handles resend gating, initializes the
+  current ring slots to `0xCDCD`, advances both ring read cursors and `+0xD30`,
+  updates buffered-depth metrics, processes the desync fencepost, and exposes
+  both consumed button values at `+0xC60/+0xC8C`.
 
-- Game identifier string: `"MARVEL_VS_CAPCOM_3"` (used to identify the game to the CMU)
-- The room communicates with a Capcom matchmaking server (CMU = Capcom Matchmaking Unit)
-- Rooms are identified by IDs, contain player info, battle records, match state
-- `cNetRoomCmu::MsgRoomVer` — version negotiation
-- `cNetRoomCmu::MsgRoomInfo` — room metadata
-- `cNetRoomCmu::MsgPlayerInfo` / `MsgPlayerInfoAll` — player info exchange
-- `cNetRoomCmu::MsgMatchReadyInfo` / `MsgMatchReadyOk` — ready state
-- `cNetRoomCmu::MsgBattleResult` — match results
-- `cNetRoomCmu::MsgRoomID` — room identification
+The predicate's decompiler label is not reliable enough to describe these as
+simply "connection alive" and "connection dead" branches.
 
-### sNetworkRoom
+`sNetPad__readBufferedInputForTeam` at `0x140289520` chooses a P1/P2 buffered
+reader based on local slot ownership and requested team. It increments `+0xD3C`
+or `+0xD40`. It is not a generic host-versus-client network buffer read.
 
-Higher-level room abstraction. Handles:
-- Player slots (array of `NetworkUniqueId`)
-- Ready states
-- Match configuration
-- UI state for lobby display
+## Missing Input
 
-The string `+connect_lobby` exists at `0x140b083e0` (used via `FUN_140255a70`),
-suggesting lobby connectivity is tied to the Steam lobby system.
+`sNetPad__consumeRemoteInputFrame` at `0x14028BE70` examines the next entries in
+both rings. Once both room-ready bytes are set:
 
-### Summary
+- Before action step 3, selected missing slots that are already within the
+  ring's written range may be replaced with neutral input and recorded in
+  `+0xE10`.
+- During relevant match steps, unresolved `0xCDCD` slots activate the network
+  wait indicator when enabled.
+- The alternate status path accumulates a 180-frame timeout and only dismisses
+  the indicator once required slots/session conditions permit progress.
 
-The game uses a **hybrid approach**:
-1. **Capcom Matchmaking Server** (CMU) — handles room creation, player matching,
-   battle records, and coordination
-2. **Steam P2P** (SteamNetworking005) — handles the actual gameplay data transport
-3. **Steam Lobbies** (SteamMatchMaking009) — likely used for session discovery
-   and invite functionality
+The authoritative fighting cursor therefore does not freely advance from local
+wall-clock updates while synchronized input is unavailable.
 
-## Prediction / Delay System
+## Resend and Dynamic Delay
 
-### How Input Delay Works
+`sNetPad__resendIfTimeout` at `0x14028B1D0` may write another current-input slot
+when ring depth is below `+0xDBC` and resend metrics permit it, then dispatch
+inbound data. It does not restore old game state or re-simulate a frame and is
+not a rollback surrogate.
 
-1. The local player's inputs are queued into a ring buffer
-2. These inputs are sent to the remote player over Steam P2P
-3. The local player also receives the remote player's inputs
-4. Both sides delay processing by `N` frames (the delay value at `+0xd78`)
-5. The delay is **dynamically adjusted** based on RTT (`+0xdf4`) and buffer health
+`sMvc3SyncPad__adjustDynamicDelay` at `0x14028C090` adjusts `+0xD78` when enabled:
 
-### Prediction
+- If first-ring buffered depth is below 3 and metric `+0xDF0` exceeds 2, it
+  increases delay by `+0xD98` up to `+0xD90`.
+- Otherwise it decreases delay by `+0xD9C` down to `+0xD94`.
+- It sets the cooldown at `+0xD7C` to `30.0f`.
 
-When remote input hasn't arrived yet (within the prediction window `+0xdbc`):
-- The game **re-uses the last known input** (it doesn't actually predict — it holds)
-- The retransmission system (`FUN_14028b1d0`) tries to resend/recover
-- No actual forward prediction of inputs occurs
+## Desync Fencepost
 
-### Desync Detection
+Every 90 live-room frames, `sNetPad__sendDesyncFencepost_90f` at `0x14028A730`
+sends a message containing:
 
-- Two CRC/checksum pairs are stored at `+0xe14` and `+0xe1c`
-- `FUN_140288db0` (`0x140288db0`) compares them:
-  - If CRCs match: resets all four to zero
-  - If CRCs mismatch: returns `true` (desync detected)
-  - This is used by the gallery/spectator system
+```text
+live cursor (+0xD30)
+aggregate team life (+0xC50)
+```
 
-## Recommendations for Rollback Implementation
+`sNetPad__checkDesyncFencepost` at `0x140288DB0` compares local and remote frame
+and life values. Matching pairs clear the fencepost storage. This is not a CRC
+of complete simulation state and cannot detect every deterministic divergence.
 
-### Option A: Piggyback off existing infrastructure (moderate complexity)
+## Transport Boundary
 
-**Pro:**
-- Ring buffer already exists (120-frame capacity, well-structured)
-- Network transport layer (Steam P2P) already works
-- Message system can be extended
-- Input format is known (16-bit bitfield)
-- Frame timing / counter is already integrated
+The executable imports Steam interfaces including `SteamNetworking005` and has
+Capcom room/message classes, but this note does not assign every gameplay
+message to a particular transport path without tracing its sender into the
+Steam API. Matchmaking/session evidence and synchronized-netpad behavior are
+separate claims.
 
-**Con:**
-- No state save/restore at all — you'd need to add this for every game object
-- The existing delay logic is deeply baked into the frame pipeline
-- Dynamic delay adjustment fights against rollback (it expects variable latency)
-- The prediction buffer (`+0xd20`) is used asymmetrically between host/client
-- The Capcom CMU server dependency adds complexity for a custom solution
-- You'd need to hook every frame update to implement save states
+## Rollback Contrast
 
-### Option B: Own ring buffer + IP direct connect (more work but cleaner)
+The current plugin follows the independent-transport design once proposed in
+older versions of this note:
 
-**Pro:**
-- No fighting with existing delay logic
-- Full control over input prediction and state management
-- No Capcom server dependency
-- Can implement proper GGPO-style rollback
-- Steam P2P can be bypassed or wrapped freely
+- ENet carries custom absolute-frame input history and checksums.
+- Missing remote input is predicted by the plugin.
+- Late corrections request restore and deterministic re-simulation.
+- Native rings and adaptive delay are reference behavior, not the active
+  rollback authority.
 
-**Con:**
-- Must implement own networking from scratch
-- Must hook game's frame update loop for save states
-- Must implement own serialization of game state
-- Must work around game's existing pad input system
-- Must handle Steam overlay / invites yourself
+## Key Addresses
 
-### Verdict
-
-**Option A is risky** — the existing delay system is not designed for rollback.
-The "prediction" is really just hold-last-input, and there's no state
-save/restore infrastructure. You'd be fighting the architecture.
-
-**Option B is recommended** — hook the game at the input level (replace the
-pad read) and at the frame level (save/restore state). Run your own rollback
-loop with your own ring buffer. The game's existing netcode is fine for single-player
-and replays but not worth adapting for rollback — the delay-based assumption
-is too deeply embedded.
+| Address | Verified function |
+|---|---|
+| `0x140288D30` | Write native input-ring slot |
+| `0x140288DB0` | Compare frame/life desync fencepost |
+| `0x140288E20` | Initialize ring slot with `0xCDCD` marker |
+| `0x140289520` | Read buffered input for a requested team |
+| `0x14028A730` | Send 90-frame frame/life fencepost |
+| `0x14028B1D0` | Resend current input when gating permits |
+| `0x14028B4D0` | Initialize native input delay |
+| `0x14028BC10` | Tick sender and consumed-input timeline |
+| `0x14028BE70` | Handle unavailable next synchronized input |
+| `0x14028C090` | Adjust dynamic delay metric |

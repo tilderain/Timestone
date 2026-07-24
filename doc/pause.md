@@ -1,433 +1,137 @@
-# UMVC3 Pause System — Complete Analysis
+# Native Pause and Plugin Frame Stop
 
-## Overview
+**Status: Native reference with current-plugin override. Reviewed 2026-07-23.**
+Retail pause UI and the plugin's frame-step/desync stop are separate systems.
+The plugin does not enable native online pause synchronization.
 
-UMVC3 has a multi-layered pause system that freezes game logic at several
-independent levels when the pause UI is onscreen. Understanding these layers
-is necessary to keep the simulation ticking during rollback netplay.
+## Native Battle-Type Behavior
 
-**Key finding:** You cannot pause during a live online versus match in UMVC3's
-native netcode. Live online battles (BattleType 3 or 9) do not create a pause
-UI object. The non-pausing gallery overlay belongs to spectator/watch battles
-(BattleType 4), not live ranked versus.
+The relevant predicates are:
 
----
+| Address | Predicate | Condition |
+|---|---|---|
+| `0x140006A60` | `sBattleSetting__isLiveOnlineBattle` | `BattleType == 3 || BattleType == 9` |
+| `0x140006AB0` | `sBattleSetting__isOnlineSpectatorBattle` | `BattleType == 4` |
+| `0x140006AF0` | `g__isOnlineBattle` | Live online or spectator |
 
-## Two Distinct Pause UI Objects
+`sAction__openVersusPauseMenu` at `0x1402BA150` creates pause-related objects by
+these predicates:
 
-UMVC3 has two separate pause-related UI objects, only one of which actually
-freezes the game:
+| Battle type | Object created |
+|---|---|
+| Offline, non-attract | Full `uBattleUiPause` |
+| Live online, type 3 or 9 | No full pause object |
+| Spectator, type 4 | `uBattleUiPauseNetGallery`, but no full pause object |
 
-### `uBattleUiPause` — The Real Pause Menu (offline only)
+The spectator object is a network-gallery/watch overlay. Its creation does not
+establish that native live online supports synchronized simulation pause.
 
-- Size: **0x14a0** bytes
-- Created only when `sBattleSetting__isOnlineBattle()` returns **false**
-- Provides: resume, quit, options, etc.
-- **Actually freezes game logic** via the `sMain` pause flag
+## Full Pause Creation
 
-### `uBattleUiPauseNetGallery` — Gallery Overlay (spectator/watch only)
-
-- Size: **0xc0** bytes
-- Created only when `sBattleSetting__isOnlineSpectatorBattle()` returns **true**
-- Provides: a way to quit the match, possibly gallery/photo viewing
-- **Does NOT freeze game logic** — the game continues underneath
-
-### Where Pause Is Created
-
-`uBattleUiCreatePauseMenu_maybe` (`0x1402BA150`) is the central decision point:
+The verified native structure of `sAction__openVersusPauseMenu` is:
 
 ```c
-void uBattleUiCreatePauseMenu_maybe(longlong param_1)
-{
-    *(undefined2 *)(param_1 + 0x5ab8) = 0;
-    *(undefined1 *)(param_1 + 0x5aba) = 0;
+if (sBattleSetting__isOnlineSpectatorBattle(settings)) {
+    destroyOldGalleryIfNeeded();
+    gallery = new uBattleUiPauseNetGallery();
+    sUnit__addUnit(sUnit, 0x19, gallery);
+}
 
-    // --- SPECTATOR/WATCH path: create NetGallery overlay ---
-    uVar3 = sBattleSetting__getInstance();
-    cVar2 = sBattleSetting__isOnlineSpectatorBattle(uVar3);
-    if (cVar2 != '\0') {
-        if ((*(longlong *)(param_1 + 0x5ab0) != 0) && ...)
-            *(undefined8 *)(param_1 + 0x5ab0) = 0;
-        lVar4 = uBattleUiPauseNetGallery__operator_new(0xc0, 0x10);
-        if (lVar4 != 0)
-            uVar3 = FUN_1402e3eb0(lVar4);
-        *(undefined8 *)(param_1 + 0x5ab0) = uVar3;
-        sUnit__addUnit(sUnit__getInstance(), 0x19, uVar3);
-    }
-
-    // --- OFFLINE path: create real pause menu ---
-    uVar5 = sBattleSetting__getInstance();
-    cVar2 = sBattleSetting__isOnlineBattle(uVar5);
-    if (cVar2 == '\0') {  // <-- only offline
-        lVar4 = uBattleUiPause__operator_new(0x14a0, 0x10);
-        if (lVar4 != 0)
-            uVar3 = uBattleUiPauseConstructor_maybe(lVar4, 0, 0);
-        *(undefined8 *)(param_1 + 0x5aa8) = uVar3;
-        sUnit__addUnit(sUnit__getInstance(), 0x19, uVar3);
-    }
+if (!g__isOnlineBattle(settings) &&
+    !sBattleSetting__isGameModeAttract(settings) &&
+    fullPause == NULL) {
+    fullPause = new uBattleUiPause(0, 0);
+    sUnit__addUnit(sUnit, 0x19, fullPause);
 }
 ```
 
-### Decision Table
+Thus native live online skips full pause-object construction. Patching only
+this branch can create the object, but does not add a network protocol for menu
+state, cursor state, simulation stopping, or teardown.
 
-| Mode                | `isOnlineSpectatorBattle` | `isOnlineBattle` | What's created             | Game pauses? |
-|---------------------|:-------------------------:|:----------------:|----------------------------|:------------:|
-| Offline (any)       | false                     | false            | `uBattleUiPause`           | **Yes**      |
-| Live online versus  | false                     | **true**         | **Nothing**                | No           |
-| Online spectator    | **true**                  | true             | `uBattleUiPauseNetGallery` | No           |
+## `sMain` Pause Gate
 
----
-
-## Online Pause Input Handling
-
-`uBattleUiReadInputsAndCheckPause_maybe` (`0x1402E019D`) is called each frame:
+`sMain__isPausedThisFrame` at `0x140006B50` returns true exactly when:
 
 ```c
-// P1 start button press
-if ((uVar4 & 8) != 0 && (uVar6 & 1) == 0) {  // start edge
-    *(int*)(unaff_RSI + 0x1458) = 0;           // active player = P1
-    bVar1 = true;
-}
-
-// P2 start button press
-if ((uVar5 & 8) != 0 && (uVar7 & 1) == 0) {  // start edge
-    cVar2 = sBattleSetting_isOfflineVersus_maybe();  // <-- must be OFFLINE versus
-    if (cVar2 != '\0') {
-        cVar2 = sMvc3Manager__isPadAssigned(1);       // <-- must have pad assigned
-        if (cVar2 != '\0') {
-            *(int*)(unaff_RSI + 0x1458) = 1;           // active player = P2
-            bVar1 = true;
-        }
-    }
-}
+sMain->mSkip == 0 && sMain->mPause != false
 ```
 
-P1 can always press Start to trigger the pause check. P2's Start is **gated**
-behind `sBattleSetting_isOfflineVersus_maybe()` — in online mode this returns
-false, so P2's Start is silently ignored. There is no mechanism to sync pause
-state between the two peers.
-
----
-
-## The `uBattleUiPauseNetGallery` (Spectator/Watch "Pause")
-
-Its vfn29 event handler is essentially a **quit-only dialog** with a 60-frame
-(1 second) exit countdown:
-
-```c
-void uBattleUiPauseNetGallery_vfn29(longlong param_1)
-{
-    lVar8 = param_1 + 0xb0;
-    lVar7 = sGSound__queryEvent(sGameUI__getInstance(), lVar8);
-
-    if (*(int*)(param_1 + 0xb8) == 0) {  // not yet quitting
-        if (lVar7 != 0) {
-            cVar2 = uUiElement_int_short_int_short_int_bool_long_____(lVar7);
-            if (cVar2 != '\0') return;  // dialog active, wait
-
-            iVar6 = aTitle__getter_C7C0(lVar7);
-            if (iVar6 == 0) {           // player confirmed quit
-                FUN_140272ea0(sAgentSession__getInstance());  // disconnect
-                FUN_1402e42e0(sMvc3Scene__getUI(), 0, 1);     // go to menu
-                *(int*)(param_1 + 0xb8) = 1;                   // quitting state
-            }
-        }
-        if (/* license ok && start edge */) {
-            sGSound__postEvent(...);  // play sound, dismiss
-        }
-    }
-    else {
-        if (*(float*)(param_1 + 0xb4) < 60.0f)  // wait 60 frames
-            cUnit__getDeltaTime();
-        sArea__getInstance()->vfn50(&aNetworkRoom__DTI);
-        FUN_1402e4110();
-    }
-}
-```
-
-It does not pause, does not offer resume, and does not sync with the remote player.
-
----
-
-## Pause Freeze Mechanism — The 5 Layers
-
-When offline pause is active, game logic is frozen through five independent layers.
-
-### Layer 1 — sMain pause flag (`sMain_isPaused_maybe`)
-
-**Address:** `0x140006b50`
-
-```c
-undefined1 sMain_isPaused_maybe(longlong param_1)
-{
-  if ((*(int *)(param_1 + 0x78) == 0) && (*(char *)(param_1 + 0x7c) != '\0')) {
-    return 1;  // paused
-  }
-  return 0;    // not paused
-}
-```
-
-| Offset   | Type | Description                                      |
-|----------|------|--------------------------------------------------|
-| `+0x78`  | int  | Pause counter — counts down each frame            |
-| `+0x7c`  | byte | Pause enable flag (1 = pause requested)           |
-| `+0x7d`  | byte | Computed result: 1 when counter=0 && enable=1     |
-
-**Who reads it:**
-- `sAction__move` (`0x140006d20`): early-returns if nonzero
-- `sCharacter__move` (`0x1400597f0`): early-returns if nonzero
-
-**How it's set:** Every frame `sMain__move` (`0x140521df0`) manages the
-counter at +0x78. When +0x7c is non-zero the counter decrements. When it hits
-zero AND +0x7c is still set, +0x7d is written to 1.
-
-In online mode, none of the code paths set these flags — the `uBattleUiPause`
-constructor is what would set them, and it's never called for online matches.
-
----
-
-### Layer 2 — Stage scheduler pause
-
-**Scheduler-pause check function:** `uStageObject__isSchedulerPaused_maybe` (`0x1401f0940`)
-
-```c
-byte uStageObject__isSchedulerPaused_maybe(longlong param_1)
-{
-  return *(byte *)(param_1 + 0x1474) & 1;
-}
-```
-
-- `stage_object + 0x1474` bit 0 = scheduler pause flag
-
-**Who reads it:** `sStage__move` (`0x1401f0aa0`):
-
-```c
-void sStage__move(longlong param_1)
-{
-  uVar1 = *(uint *)(param_1 + 0x40);
-  if (((uVar1 & 4) == 0) && (*(longlong *)(param_1 + 0x2050) != 0)) {
-    cVar2 = uStageObject__isSchedulerPaused_maybe(param_1);
-    if (cVar2 != '\0') {
-      *(uint *)(param_1 + 0x40) = uVar1 | 4;   // set "skip" bit
-    }
-  }
-  // scheduler at +0x2050 is paused when bit 2 at +0x40 is set
-
-  if (*(longlong *)(param_1 + 0x2058) != 0) {
-    // ... clean up secondary scheduler ...
-  }
-  FUN_1401f03d0(param_1);   // shot processing — always runs
-}
-```
-
-- `stage + 0x40` bit 2 = "stage scheduler skip" flag
-- When set, the stage's main scheduler FSM commands don't execute
-- `FUN_1401f03d0` (shot/projectile processing) always runs regardless
-
----
-
-### Layer 3 — OBJ_MovePause (object-level movement pause)
-
-**FSM handler:** `uStageObject__setObjMovePauseFlag_maybe` (`0x1401ec900`)
-
-```c
-void uStageObject__setObjMovePauseFlag_maybe(longlong param_1, byte param_2)
-{
-  *(uint *)(param_1 + 0x1478) = *(uint *)(param_1 + 0x1478) & 0xffffdfff;
-  *(uint *)(param_1 + 0x1478) = *(uint *)(param_1 + 0x1478) | (param_2 & 1) << 0xd;
-}
-```
-
-Sets/clears bit 0x2000 at `stage_object + 0x1478` — gates individual object
-movement within the stage (animations, environment motion).
-
-**Registered as FSM command:** `OBJ_MovePause` string at `0x140afbbb8`.
-Referenced from `FUN_1401f1c00` which is the stage FSM command registration
-function.
-
----
-
-### Layer 4 — FSM scheduler-pause commands
-
-Registration at `FUN_1401f1c00` (`0x1401f1c00`) registers these FSM commands
-via `MtMemoryAllocator__allocTail`:
-
-| FSM Command String         | Handler/Data Address |
-|----------------------------|----------------------|
-| `OBJ_MovePause`            | `FUN_1401ec900`      |
-| `STG_MainSchedulerPause`   | `LAB_1401f1abc`      |
-| `STG_EnvSchedulerPause`    |                      |
-| `STG_DefLimSchedulerPause` |                      |
-
-These are dispatched by the stage's scheduler FSM. Each pause command causes
-the corresponding scheduler layer to stop processing until an unpause command
-is received.
-
----
-
-### Layer 5 — `cChrPause` (character-level pause)
-
-**Class:** `cChrPause` (DTI at `0x140a8e450`)
-
-**Properties:** `mMode` and `mbDisable`
-
-**Constructor:** `cChrPause__createProperty` (`0x140031080`)
-
-The character pause manager sits at offset `0x1560` from the character object.
-`uGalactus__stateCheck_41B0` (`0x1400241b0`) checks 6 entries (team members)
-starting at `char + 0x1570` and returns a bitmask of active pause states.
-
-The `sCharacter__move` path checks character state flags at `char + 0x14f4`
-(bit 0x80000) and other offsets in `moveAfter` to skip per-character updates.
-
----
-
-## Patch Attempts and Results
-
-All individual patches failed — the game hangs on a black screen when
-attempting to enter battle even with a single patch applied.
-
-| Attempt | Address | What | Result |
-|---------|---------|------|--------|
-| Patch `sMain_isPaused_maybe` | `0x140006b50` | Always return 0 | Game still hangs |
-| Patch `sMain__move` +0x7c | `0x140521e0e` (`C6 41 7C 00`) | Clear pause flag byte | Game still hangs |
-| NOP stage scheduler `or edi,0x04` | `0x1401f0af7` (`83 CF 04` → `90 90 90`) | Prevent scheduler skip-bit set | Game still hangs |
-| Patch `uStageObject__isSchedulerPaused_maybe` | `0x1401f0940` | Always return 0 | Game still hangs |
-| NOP `sMain_isPaused_maybe` to return 0 | `0x140006b50` (`32 C0 C3`) | Always return 0 | Game still hangs |
-| Patch `uStageObject__setObjMovePauseFlag_maybe` | `0x1401ec900` | RET (disabled) | Untested alone |
-
----
-
-## Possible Root Causes
-
-**Timing-dependent check.** The pause flag may be checked during loading before
-the patch has a chance to clear it. If the pause flag is supposed to be set
-during loading and the game checks it synchronously in the same function call,
-the game logic freezes before reaching the patch site.
-
-**Different code path.** The hang may not be caused by these pause mechanisms
-at all — there may be a separate code path that waits for resources or signals
-that depends on the game's normal pause/loading state machine.
-
-**The pause flag reinitializes each frame.** Something might be setting +0x7c
-back to non-zero after the patch clears it, in a function that runs after
-`sMain__move` but before `sAction__move`.
-
-**A deeper freeze mechanism.** OBJ_MovePause sets a flag, and there may be a
-check somewhere that actively sleeps/spins based on this flag rather than just
-skipping FSM commands.
-
----
-
-## Scheduler Layer Summary
-
-```
-sMain (game-level)
- ├── +0x78 pause counter (counts down)
- ├── +0x7c pause flag (master enable)
- └── +0x7d computed pause state
-     ├── sAction__move — early return when paused
-     └── sCharacter__move — early return when paused
-
-stage_object +0x40 bit 2 — stage scheduler skip flag
- └── set by sStage__move when isSchedulerPaused_maybe returns true
-
-stage_object +0x1474 bit 0 — scheduler pause source flag
- └── read by uStageObject__isSchedulerPaused_maybe
-
-stage_object +0x1478 bit 0x2000 — OBJ_MovePause flag
- └── set by uStageObject__setObjMovePauseFlag_maybe (OBJ_MovePause FSM command)
-
-cChrPause at character +0x1560
- └── mMode, mbDisable — per-character pause state
-```
-
----
-
-## Full Capability Matrix
-
-| Capability                   | Offline | Spectator/Watch | Live Online Versus |
-|------------------------------|:-------:|:---------------:|:------------------:|
-| Game freezes                 | Yes     | No              | No                 |
-| Pause menu (resume/quit/opt) | Yes     | No              | No                 |
-| Gallery overlay              | No      | Yes             | No                 |
-| Quit match                   | Yes     | Yes             | No*                |
-| P2 can trigger pause         | Yes     | No              | No                 |
-| Netcode syncs pause state    | N/A     | No              | No                 |
-
-*In player matches, since no UI element is created at all, there is no way to
-quit via the pause button either. The match must be quit via other means (e.g.
-ALT+F4, task manager, or the Steam overlay).*
-
----
-
-## Live Online Versus Experiment
-
-Ghidra analysis confirms that opening the full offline pause menu in a live
-online battle is mechanically possible, but not safe as a native synchronized
-pause.
-
-### Battle-type predicates
-
-| Function | Address | Meaning |
-|----------|---------|---------|
-| `sBattleSetting__isLiveOnlineBattle` | `0x140006A70` | BattleType is 3 or 9 |
-| `sBattleSetting__isOnlineSpectatorBattle` | `0x140006AB0` | BattleType is 4 |
-| `g__isOnlineBattle` | `0x140006AF0` | Either predicate above is true |
-
-### Creation blocker
-
-`sAction__openVersusPauseMenu` (`0x1402BA150`) runs when `sAction` enters match
-phase 5. It pre-creates a dormant pause object; Start later activates that
-object. The real `uBattleUiPause` creation branch is skipped by:
-
-```asm
-1402BA219  call g__isOnlineBattle
-1402BA221  test al, al
-1402BA223  jnz  0x1402BA281
-```
-
-For a controlled experiment, replace `75 5C` at `0x1402BA223` with `90 90`.
-This permits execution to fall through to:
-
-```text
-uBattleUiPause__operator_new(0x14a0, 0x10)  // 0x1402DF3A0
-uBattleUiPause__ctor(object, 0, 0)          // 0x1402DF210
-sUnit__addUnit(..., moveLine=0x19, object)   // 0x14051A6B0
-```
-
-This experiment should not also force the NetGallery path. In particular, the
-existing patches at `0x1402BA17E` and `0x1402E433B` manufacture spectator UI
-behavior outside BattleType 4 and are unrelated to opening the full menu.
-
-### Input and activation path
-
-Live online mode does not need a second patch to consume pause requests:
-
-1. `uBattleUiPause__move` (`0x1402E2E60`) calls the Start-edge reader at
-   `0x1402E0130` while the object is dormant.
-2. P1 Start can activate the menu. P2 Start remains gated by the secondary-pad
-   eligibility checks.
-3. `sNetPad__stepHelper` (`0x140289C30`) explicitly calls
-   `sGameUI__consumePauseRequest` (`0x1402C1600`) when `g__isOnlineBattle()` is
-   true. The ordinary `sGameUI__move` path skips this call online to avoid
-   consuming the same request twice.
-
-### Safety limitation
-
-The full menu uses the normal pause request fields at `sGameUI + 0x5AB8` through
-`+0x5ABC` and changes multiple `sUnit` move lines when the request is consumed.
-Nothing in the native live-online path transmits menu-open, menu-close, cursor,
-or pause state to the remote peer. Therefore:
-
-- The menu should render after bypassing the creation blocker.
-- The peer that opens it will apply the offline pause behavior locally.
-- The other peer will continue simulating, causing immediate timeline
-  divergence and likely timeout/desync behavior.
-- Quit and return-to-title actions also invoke broader scene/session teardown
-  paths and should not be assumed safe for rollback netplay.
-
-For rollback netplay, use the full menu only after adding a synchronized pause
-protocol, or keep simulation running and selectively suppress the full menu's
-pause side effects. The latter requires auditing each menu action because the
-full menu was designed around a frozen offline simulation.
+The relevant offsets are:
+
+| Offset | Role |
+|---:|---|
+| `sMain+0x78` | Skip/countdown value |
+| `sMain+0x7C` | Pause request Boolean |
+| `sMain+0x7D` | Pause-edge/result byte written by `sMain__move` |
+
+`sMain__move` at `0x140521DF0` decrements `+0x78` while pause is set and writes
+the `+0x7D` result. `sAction__move` at `0x140006D20` and `sCharacter__move` at
+`0x1400597F0` both consult `sMain__isPausedThisFrame` and return before normal
+updates when it is true.
+
+This is one verified native simulation gate. It should not be interpreted as a
+complete inventory of every UI, scheduler, effect, stage, audio, and character
+pause mechanism.
+
+## Stage and Character Pause State
+
+The executable also contains stage scheduler commands and reflected character
+pause state, including:
+
+- `OBJ_MovePause` registration and its stage-object flag writer at
+  `0x1401EC900`.
+- Stage scheduler-pause command registration around `0x1401F1C00`.
+- Reflected `cChrPause` objects with `mMode`/`mbDisable` properties around
+  `0x140031080`.
+
+These establish additional local pause controls. Static presence alone does not
+prove that all of them are activated by the full pause menu, nor that one patch
+to one layer safely converts retail online play into synchronized pause.
+
+## Current Plugin Behavior
+
+The plugin's `framestepper.cpp` stops execution by intercepting the game move
+boundary. This is independent of native `uBattleUiPause` construction:
+
+- Manual frame-step pause is available only in Training mode.
+- A checksum desync can auto-pause in any mode by setting the plugin's
+  `isPaused` state.
+- While plugin-paused, the hooked move is skipped unless one-frame advance is
+  requested; a captured D3D frame is presented as the background.
+- Custom netplay sends `PACKET_DESYNC` actions for desync trigger and desync
+  unpause. Remote actions are applied on the game thread.
+- Pressing `P` dismisses a desync alert locally and sends `DESYNC_UNPAUSE` when
+  netplay is active.
+
+This protocol synchronizes the plugin's desync-screen stop/dismiss action. It
+does not synchronize arbitrary native pause-menu opening, navigation, or quit
+operations.
+
+## Safety Boundary
+
+Creating `uBattleUiPause` in native online mode is not sufficient for safe
+rollback pause. Any full-menu experiment must account for:
+
+- Both peers stopping at the same custom simulation frame.
+- Input packets continuing to be serviced while simulation is stopped.
+- Menu ownership and cursor decisions.
+- Resume at an agreed frame.
+- Quit/restart scene and session teardown.
+
+The current implementation only has a narrow synchronized desync-alert action;
+it does not claim these general native-menu guarantees.
+
+## Key Addresses
+
+| Address | Verified role |
+|---|---|
+| `0x140006A60` | Live-online predicate |
+| `0x140006AB0` | Spectator predicate |
+| `0x140006AF0` | Broad online predicate |
+| `0x140006B50` | Test `sMain` pause/skip state |
+| `0x140006D20` | `sAction__move`, includes pause gate |
+| `0x1400597F0` | `sCharacter__move`, includes pause gate |
+| `0x1401EC900` | Stage object move-pause flag writer |
+| `0x1402BA150` | Construct battle pause/gallery objects by mode |
+| `0x140521DF0` | Update `sMain` pause and timing state |

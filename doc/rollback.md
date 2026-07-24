@@ -1,5 +1,13 @@
 # Rollback Netcode: Gameplay State Analysis
 
+**Status: Historical subsystem inventory, not the current snapshot contract.**
+This catalog predates ownership-aware character restore, external command and
+collision buffers, concrete projectile reconstruction, and the current ENet
+protocol. “MUST/SHOULD/SKIP” labels below are research priorities, not a list of
+what `BuildRegions` currently copies. Use [`current.md`](current.md),
+`rollback.cpp`, and focused documents for implementation truth. Addresses and
+native layouts remain useful only where independently verified.
+
 ## Overview
 
 This document catalogs all game systems (singletons) that contain mutable gameplay

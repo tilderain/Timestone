@@ -1,4 +1,20 @@
-The system today identifies which class/region diverged (via build_manifest → per-region body_hash diff at resim_mode.cpp:284-315), but not which field within the class. To get to why, the most practical path is per-field diff via the existing reflection system (diag::walk_fields):
+# Re-simulation Divergence Methodology
+
+**Status: Historical methodology from a different codebase/build.** The symbols
+and offsets below are not implementation references for this repository. The
+general compare-at-entry/compare-at-exit and restore-boundary bisect remains
+useful. See [`dash_resim_root_cause.md`](dash_resim_root_cause.md) for the
+verified current input call order and [`current.md`](current.md) for current
+rollback architecture.
+
+The symbols cited here (`build_manifest`, `resim_mode.cpp`, `diag::walk_fields`,
+`hooks.cpp`, and `g_in_resim`) are not the current UMVC3Rollback implementation.
+Current diagnostics live primarily in `rollback.cpp` and `diag.cpp`, using
+`g_isResimulating` and NDJSON snapshots. The
+general dataflow/bisect method remains useful, but the integration instructions
+below must not be followed literally.
+
+The analyzed system identified which class/region diverged, but not which field within the class. To get to why, the proposed path was per-field diff through its reflection system:
 Recommended approach:
 1. Hook into the per-character move (vtbl[+64] / uCharacter__move_base) — not the full sMvc3Main::move. This gives you a tight before/after window around just the character movement function.
 2. Before the call: capture cChr fields via diag::walk_fields(cChr, ...) into a typed key-value map (the reflect::FieldSchema cache at reflect.h:47 already has offset/type/size for every field).

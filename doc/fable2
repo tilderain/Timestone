@@ -1,5 +1,9 @@
 # fable2 — The Real Desync: Position-Fed Dash Accumulators
 
+**Status: Superseded investigation.** This corrected `fable` for one capture,
+but `fable3` documents the later external-command-buffer gap. Claims about the
+current fix state and source layout must be verified against current code.
+
 This supersedes `doc/fable`. The mOldHeld / snapshot / resim-asymmetry story in
 `fable` is **not** the cause of the `nplive_20260707_234332` desync.
 

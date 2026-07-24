@@ -1,5 +1,10 @@
 # Native Online `sAction` Time Synchronization
 
+**Status: Native reference. Reviewed 2026-07-23.** This explains retail online
+timekeeping. The plugin does not activate the complete retail online session;
+it hooks `sAction__stepFighting` and maintains its own synchronized frame
+timeline. Native behavior is design evidence, not the active implementation.
+
 ## Scope
 
 This note documents how native UMVC3 synchronizes fight time in `sAction` during a live online battle. It distinguishes live-player online modes from spectator/watch mode because the two paths use different authoritative frame cursors.
@@ -27,7 +32,7 @@ Native online play does not advance `sAction` fight clocks by integrating each m
 For live online play:
 
 ```cpp
-elapsedSeconds = max((syncPad->liveFrameCursor - syncPad->fightTimeBaseline) / 60, 0);
+elapsedSeconds = float(uint32_t(syncPad->liveFrameCursor - syncPad->fightTimeBaseline) / 60);
 remainingSeconds = max(180.0f - elapsedSeconds, 0.0f);
 ```
 
@@ -38,7 +43,12 @@ The relevant `sMvc3SyncPad` fields are:
 | `+0xD30` | Live synchronized input/simulation cursor |
 | `+0xE34` | Cursor captured when `sAction` enters fighting phase 5 |
 
-Spectator mode substitutes the streamed `sReplay` frame cursor for `+0xD30`. That replay-backed path must not be mistaken for normal live online behavior.
+Spectator mode substitutes the streamed `sReplay` frame cursor for `+0xD30`.
+That path uses signed integer subtraction/division and then clamps a negative
+result to zero. The live path converts the 32-bit cursor difference to an
+unsigned value before division; under normal monotonic cursor operation this is
+the same whole-second delta, but it is not literally a signed `max(delta, 0)`.
+The replay-backed path must not be mistaken for normal live online behavior.
 
 ## Startup Ordering
 
@@ -193,7 +203,10 @@ The helper implementations are:
 | `0x1402895C0` | `sMvc3SyncPad__getFightElapsedSeconds` | Returns cursor delta divided by 60, clamped to zero |
 | `0x140289590` | `sMvc3SyncPad__getRemainingRoundSeconds` | Returns `max(180.0f - elapsed, 0.0f)` |
 
-The live-online assembly at `0x140289611` reads `syncPad+0xD30`, subtracts `syncPad+0xE34`, divides the unsigned frame delta by 60, converts it to `float`, and clamps negative results to zero.
+The live-online assembly at `0x140289611` reads `syncPad+0xD30`, subtracts
+`syncPad+0xE34`, zero-extends the 32-bit difference, divides it by 60, and
+converts it to `float`. The helper's final negative clamp affects the signed
+spectator calculation but cannot make this unsigned live result negative.
 
 The integer division is significant: these `sAction` fields represent whole elapsed/remaining seconds derived from the synchronized frame timeline, not a continuously accumulated local fractional clock.
 
@@ -312,10 +325,10 @@ The custom fight baseline is reset by `Controller_ResetFrameEpoch()` at the batt
 
 This is intentionally narrower than changing the game's `BattleType` or hooking `g__isOnlineBattle`: enabling those native predicates would also activate native session, netpad, ownership, UI, and teardown paths that the custom ENet implementation does not initialize.
 
-### Deterministic job execution for collision and constraints
+### Deterministic engine execution
 
-`rollback.cpp` now forces `sMain`'s desired and active job-thread counts to one while custom
-netplay is active:
+`rollback.cpp` forces `sMain`'s desired and active job-thread counts to one while custom netplay is
+active:
 
 ```text
 sMain+0xA8 = 1  // desired job-thread count
@@ -334,10 +347,7 @@ same execution model on both peers. It specifically targets the observed first d
 equal-and-opposite X correction beginning at the first character-push contact while input, action,
 flags, and RNG still agree.
 
-This is an attempted determinism fix, not proof that worker ordering was the sole cause. A fresh
-two-peer capture must confirm that the first position split disappears or moves. If it remains at
-the same contact frame, the next step is to exchange and compare stable collision-body and
-`uCnsGroup` scalar state at the barrier rather than copying character positions alone.
+This is a broad deterministic fallback, not proof that worker ordering was the sole cause.
 
 ### Native online disables gameplay parallelism
 
@@ -378,16 +388,17 @@ This explains how native delay netcode avoids push-position divergence without s
 unit, collision, and hit-solver work at battle initialization while leaving the worker pool available
 for unrelated engine work.
 
-Custom ENet play currently keeps an offline/training `BattleType`, so it skips this branch. It starts
-the same independently simulated match while leaving gameplay move lines and collision subsystems in
-their normal offline parallel configuration. Forcing `sMain` to one executor masks that omission by
-making every queued batch execute inline, which agrees with the observed fix.
+Custom ENet play keeps a non-online `BattleType`, so native battle initialization does not enter this
+branch automatically. Current plugin code compensates in
+`Rollback_ApplyNetplayDeterminism`: it enables frame wait, clears all 64 `sUnit` move-line parallel
+bits, disables the collision move-matrix parallel flags, disables `sHitSolver` multithreading, and
+clears the battle-runtime parallel byte. The function runs after netplay/rollback initialization and
+again when a synchronized restart creates a new battle epoch.
 
-This also narrows the preferred long-term fix. Instead of forcing the entire regular engine job pool
-to one executor, custom netplay should reproduce these four native battle-local settings and restore
-their previous values on teardown. The global one-executor override should remain as a diagnostic
-fallback until two-peer delay and rollback tests confirm that the narrower native-equivalent setup is
-stable.
+The plugin still forces the entire regular `sMain` executor to one thread as an additional fallback.
+It does not currently restore either the battle-local settings or the global worker count on netplay
+teardown. Therefore the native-equivalent settings are implemented, while narrowing or removing the
+global fallback remains contingent on two-peer delay and rollback validation.
 
 ### Correction: generic constraint collision is not proven fighter push collision
 
