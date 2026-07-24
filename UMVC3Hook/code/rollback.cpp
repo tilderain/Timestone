@@ -76,11 +76,18 @@ static constexpr uintptr_t FN_RNG_RANDOM_INT = 0x14014EB30;
 static constexpr uintptr_t FN_HSIENKO_SELECT_ANKI = 0x1400A1260;
 static constexpr uintptr_t FN_SET_RESERVED_ANKI = 0x1400D4D90;
 static constexpr uintptr_t FN_BUILD_ATTACH_MATRIX = 0x14014F960;
+static constexpr uintptr_t DTI_UEFFECT = 0x140E18698;
 
 // ===========================================================================
 // Offsets & Struct Constants
 // ===========================================================================
 static constexpr uintptr_t SMVC3MGR_ACTION_OFFSET = 0x48;
+static constexpr uint32_t SACTION_MODEL_JOINT_WRAPPER_OFFSET = 0x120;
+static constexpr uint32_t SACTION_MODEL_JOINT_ALLOCATION_OFFSET = 0x70;
+static constexpr uint32_t SACTION_MODEL_JOINT_DATA_OFFSET = 0x10;
+static constexpr size_t SACTION_MODEL_JOINT_DATA_SIZE = 0x70;
+static constexpr size_t SACTION_MODEL_JOINT_ALLOCATION_SIZE =
+    SACTION_MODEL_JOINT_DATA_OFFSET + SACTION_MODEL_JOINT_DATA_SIZE;
 static constexpr uintptr_t TEAM0_OFFSET           = 0x40;
 static constexpr uintptr_t TEAM1_OFFSET           = 0x300;
 static constexpr size_t    TEAM_SIZE              = 0x2C0;
@@ -326,6 +333,22 @@ static bool IsUnitObject(const void* object)
     const uint64_t unitDti = _addr(DTI_CUNIT);
     for (int depth = 0; dti && depth < 128; ++depth) {
         if (dti == unitDti) return true;
+        if (!IsAccessibleAddress(dti + 0x20)) return false;
+        uint64_t parent = *(const uint64_t*)(dti + 0x20);
+        if (parent == dti) return false;
+        dti = parent;
+    }
+    return false;
+}
+
+static bool IsEffectObject(const void* object)
+{
+    if (!HasCallableDtiVirtual(object)) return false;
+
+    uint64_t dti = GetObjectDti((uint64_t)object);
+    const uint64_t effectDti = _addr(DTI_UEFFECT);
+    for (int depth = 0; dti && depth < 128; ++depth) {
+        if (dti == effectDti) return true;
         if (!IsAccessibleAddress(dti + 0x20)) return false;
         uint64_t parent = *(const uint64_t*)(dti + 0x20);
         if (parent == dti) return false;
@@ -1979,10 +2002,7 @@ static char __fastcall hkUnitRemove(void* manager, void* unit)
         // boundary as well as during rollback's explicit retirement.
         DetachEmbeddedShotEffect(unit);
     }
-    uint32_t category = unit
-        ? (*(uint32_t*)((uint8_t*)unit + 0x10) & 0x3F8u) >> 3
-        : 0;
-    if (category >= 13 && category <= 16) {
+    if (IsEffectObject(unit)) {
         SanitizeEffectForDestruction(unit);
         if (g_rollbackRetiredEffects.erase(unit) != 0) {
             // The effect graph was not snapshotted, so apparent pointer and
@@ -2408,7 +2428,7 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
         while (effect && safety-- > 0) {
             void* next = *(void**)((uint8_t*)effect + 0x18);
             uint32_t* state = (uint32_t*)((uint8_t*)effect + 0x10);
-            if ((*state & 7u) < 3u) {
+            if (IsEffectObject(effect) && (*state & 7u) < 3u) {
                 *state = (*state & ~7u) | 3u;
                 g_rollbackRetiredEffects.insert(effect);
                 ++retiredEffects;
@@ -2470,7 +2490,8 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
         int safety = 4096;
         while (effect && safety-- > 0) {
             void* next = *(void**)((uint8_t*)effect + 0x18);
-            SanitizeEffectForDestruction(effect);
+            if (IsEffectObject(effect))
+                SanitizeEffectForDestruction(effect);
             effect = next;
         }
     }
@@ -3183,6 +3204,26 @@ static int BuildRegions(Region* regions, int maxRegions)
     if (sMvc3Mgr) {
         uint64_t sAction = *(uint64_t*)(sMvc3Mgr + SMVC3MGR_ACTION_OFFSET);
         add((void*)sAction, 0x300);
+        if (sAction && IsAccessibleAddress(
+                sAction + SACTION_MODEL_JOINT_WRAPPER_OFFSET)) {
+            uint64_t modelJointWrapper = *(uint64_t*)(
+                sAction + SACTION_MODEL_JOINT_WRAPPER_OFFSET);
+            if (modelJointWrapper && IsAccessibleAddress(
+                    modelJointWrapper + SACTION_MODEL_JOINT_ALLOCATION_OFFSET)) {
+                uint64_t allocationSlot = modelJointWrapper +
+                    SACTION_MODEL_JOINT_ALLOCATION_OFFSET;
+                uint64_t allocation = *(uint64_t*)allocationSlot;
+                if (allocation && IsAccessibleAddress(
+                        allocation + SACTION_MODEL_JOINT_ALLOCATION_SIZE - 1)) {
+                    // sAction__getModelJoint returns allocation+0x10. Capture
+                    // the allocation for ownership validation; restore skips
+                    // its header and applies only the scalar payload.
+                    add((void*)allocation,
+                        SACTION_MODEL_JOINT_ALLOCATION_SIZE,
+                        allocationSlot);
+                }
+            }
+        }
     }
 
     // ---- 11-16. Per-character uCharacter + 17-18. cChrTeam ----
@@ -4012,6 +4053,17 @@ void Rollback_RestoreSnapshot(int32_t frame)
     uint64_t sCollision = *(uint64_t*)_addr(PTR_SCOLLISION);
     uint64_t sMvc3Mgr = *(uint64_t*)_addr(PTR_SMVC3MGR);
     uint64_t sAction = sMvc3Mgr ? *(uint64_t*)(sMvc3Mgr + SMVC3MGR_ACTION_OFFSET) : 0;
+    uint64_t modelJointAllocationSlot = 0;
+    if (sAction && IsAccessibleAddress(
+            sAction + SACTION_MODEL_JOINT_WRAPPER_OFFSET)) {
+        uint64_t modelJointWrapper = *(uint64_t*)(
+            sAction + SACTION_MODEL_JOINT_WRAPPER_OFFSET);
+        if (modelJointWrapper && IsAccessibleAddress(
+                modelJointWrapper + SACTION_MODEL_JOINT_ALLOCATION_OFFSET)) {
+            modelJointAllocationSlot = modelJointWrapper +
+                SACTION_MODEL_JOINT_ALLOCATION_OFFSET;
+        }
+    }
     uint64_t sCharacter = *(uint64_t*)_addr(PTR_SCHARACTER);
     uint64_t team0 = sCharacter ? sCharacter + TEAM0_OFFSET : 0;
     uint64_t team1 = sCharacter ? sCharacter + TEAM1_OFFSET : 0;
@@ -4058,6 +4110,13 @@ void Rollback_RestoreSnapshot(int32_t frame)
             RestoreExternalAnimBlock(slot.regions[i].ptr,
                                      slot.data + offset,
                                      copySize);
+        } else if (slot.regions[i].ownerSlot == modelJointAllocationSlot &&
+                   slot.regions[i].size == SACTION_MODEL_JOINT_ALLOCATION_SIZE &&
+                   copySize > SACTION_MODEL_JOINT_DATA_OFFSET) {
+            std::memcpy((uint8_t*)slot.regions[i].ptr +
+                            SACTION_MODEL_JOINT_DATA_OFFSET,
+                        slot.data + offset + SACTION_MODEL_JOINT_DATA_OFFSET,
+                        copySize - SACTION_MODEL_JOINT_DATA_OFFSET);
         } else if ((uint64_t)slot.regions[i].ptr == sCollision &&
                    slot.regions[i].size == SCOLLISION_SIZE) {
             ++collisionRestoreCount;
