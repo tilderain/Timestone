@@ -1421,9 +1421,6 @@ struct ShotFlightState {
     // uModel+0x100 is a live owned pointer, so only restore the contiguous
     // position/quaternion/matrix scalar block preceding it.
     uint8_t transformState[0xB0];  // +0x50..+0xFF
-    // uEffect timing scalars: mBaseFps, mDeltaTimeRate, adjacent timing state,
-    // and mTimeInterpolationRate. The packed qwords can resemble pointers.
-    uint8_t effectTimingState[0x10]; // +0x110..+0x11F    // Test if necessary on Hado Shoryu
     // uShot::move reads this scalar block for lifetime, active/end flags,
     // velocity and movement state. The factory initializes it, but restoring
     // only the transform and attack blocks leaves a respawned shot at the
@@ -1524,6 +1521,7 @@ struct SnapshotSlot {
 static SnapshotSlot g_slots[ROLLBACK_WINDOW];
 static std::unordered_map<void*, ShotRecipe> g_liveShotRecipes;
 static std::unordered_map<void*, EffectRecipe> g_liveEffectRecipes;
+static std::unordered_set<void*> g_rollbackRetiredEffects;
 static uint64_t g_shotSpawnSequence = 0;
 static uint64_t g_effectSpawnSequence = 0;
 
@@ -1745,7 +1743,6 @@ static void CaptureShotFlight(void* shot, ShotFlightState& out)
     auto* p = (uint8_t*)shot;
     std::memcpy(&out.unitState, p + 0x10, sizeof(out.unitState));
     std::memcpy(out.transformState, p + 0x50, sizeof(out.transformState));
-    std::memcpy(out.effectTimingState, p + 0x110, sizeof(out.effectTimingState));  // Test if necessary on Hado Shoryu
     std::memcpy(out.runtimeState, p + 0x3E8, sizeof(out.runtimeState));
     std::memcpy(out.shotMatrices, p + 0x1E50, sizeof(out.shotMatrices));  // Test if necessary on Hado Shoryu
     std::memcpy(&out.timerThresh, p + 0x1F58, sizeof(out.timerThresh));
@@ -1777,7 +1774,6 @@ static void ApplyShotFlight(void* shot, const ShotFlightState& in)
     unitState = (in.unitState & ~0x3F8u) | (unitState & 0x3F8u);
     std::memcpy(p + 0x10, &unitState, sizeof(unitState));
     std::memcpy(p + 0x50, in.transformState, sizeof(in.transformState));
-    std::memcpy(p + 0x110, in.effectTimingState, sizeof(in.effectTimingState));  // Test if necessary on Hado Shoryu
     std::memcpy(p + 0x3E8, in.runtimeState, sizeof(in.runtimeState));
     std::memcpy(p + 0x1E50, in.shotMatrices, sizeof(in.shotMatrices));  // Test if necessary on Hado Shoryu
     std::memcpy(p + 0x1F58, &in.timerThresh, sizeof(in.timerThresh));
@@ -1988,6 +1984,14 @@ static char __fastcall hkUnitRemove(void* manager, void* unit)
         : 0;
     if (category >= 13 && category <= 16) {
         SanitizeEffectForDestruction(unit);
+        if (g_rollbackRetiredEffects.erase(unit) != 0) {
+            // The effect graph was not snapshotted, so apparent pointer and
+            // vtable validity cannot establish allocator ownership. Do not
+            // return rollback-ambiguous generator storage to the shared heap.
+            *(uint64_t*)((uint8_t*)unit + 0x218) = 0;
+            *(uint64_t*)((uint8_t*)unit + 0x220) = 0;
+            *(uint16_t*)((uint8_t*)unit + 0x208) = 0;
+        }
     }
 
     char result = oUnitRemove(manager, unit);
@@ -2406,6 +2410,7 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
             uint32_t* state = (uint32_t*)((uint8_t*)effect + 0x10);
             if ((*state & 7u) < 3u) {
                 *state = (*state & ~7u) | 3u;
+                g_rollbackRetiredEffects.insert(effect);
                 ++retiredEffects;
             }
             effect = next;
@@ -5305,6 +5310,7 @@ void Rollback_FreeSnapshots()
     }
     g_liveShotRecipes.clear();
     g_liveEffectRecipes.clear();
+    g_rollbackRetiredEffects.clear();
     g_shotSpawnSequence = 0;
     g_sMvc3Main = 0;
 }

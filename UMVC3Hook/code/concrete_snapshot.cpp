@@ -381,6 +381,13 @@ bool ConcreteShotSnapshot_Restore(void* shot,
     // call through a null pointer during joint-order traversal.
     PreserveRange(overlay.data(), live, liveSize, {0x530, 0x30});
 
+    // uActorGameModel owns four resource references followed by seven helper
+    // allocations in +0x13E8..+0x143F. Its destructor releases this complete
+    // block. Preserve it atomically; mixing saved adjacent ownership state with
+    // fresh pointers can make two fields release the same helper or dispatch
+    // through an object whose vtable was already cleared.
+    PreserveRange(overlay.data(), live, liveSize, {0x13E8, 0x58});
+
     // cAtkCtrl and cArm are inline native owners. Their scalar fields include
     // vtable-backed collision slots and target-info storage, so preserving only
     // the pointer-looking words is insufficient: a saved destructor state can
