@@ -1942,11 +1942,22 @@ static void SanitizeEffectForDestruction(void* effect)
             break;
         }
         uint64_t vtable = *(uint64_t*)node;
-        if (!IsAccessibleAddress(vtable) ||
-            !IsExecutableAddress(*(uint64_t*)vtable)) {
+        static constexpr uint32_t requiredVirtuals[] = {
+            0x00, // deleting destructor
+            0x38, 0x40, 0x50, 0x70, 0x88, // setup/update/finish path
+            0xA0, 0xA8              // draw path
+        };
+        if (!IsAccessibleAddress(vtable + 0xA8)) {
             validGeneratorChain = false;
             break;
         }
+        for (uint32_t offset : requiredVirtuals) {
+            if (!IsExecutableAddress(*(uint64_t*)(vtable + offset))) {
+                validGeneratorChain = false;
+                break;
+            }
+        }
+        if (!validGeneratorChain) break;
         node = *(uint64_t*)(node + 0x18);
         if (count == 4095 && node != 0) validGeneratorChain = false;
     }
@@ -2379,21 +2390,11 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
                 removedInvalidUnits);
     }
 
-    // Preserve effects that existed at the selected frame. Retiring those
-    // snapshot-era objects releases generator graphs still belonging to the
-    // restored timeline and eventually corrupts the shared particle heap.
-    // Only prediction-created effects must drain through native two-phase
-    // cleanup because they may reference shots from the discarded timeline.
-    std::unordered_set<void*> savedEffects;
-    savedEffects.reserve(slot.effectRecipes.size());
-    for (const EffectRecipe& saved : slot.effectRecipes) {
-        auto live = g_liveEffectRecipes.find(saved.savedPtr);
-        if (live != g_liveEffectRecipes.end() &&
-            live->second.spawnSequence == saved.spawnSequence) {
-            savedEffects.insert(saved.savedPtr);
-        }
-    }
-
+    // Effect bodies and generator graphs are not rewound. Retaining even a
+    // snapshot-era effect lets its independently advanced graph execute after
+    // restore; observed failures cover move, finish, draw, and destruction.
+    // Retire all effects through native two-phase cleanup. hkUnitRemove
+    // sanitizes owned resource/generator fields at the destruction boundary.
     int retiredEffects = 0;
     uint32_t categoryCount = *(uint32_t*)((uint8_t*)sUnit + SUNIT_CATEGORY_COUNT_OFFSET);
     for (uint32_t category = 13; category <= 16 && category < categoryCount; ++category) {
@@ -2403,8 +2404,7 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
         while (effect && safety-- > 0) {
             void* next = *(void**)((uint8_t*)effect + 0x18);
             uint32_t* state = (uint32_t*)((uint8_t*)effect + 0x10);
-            if (savedEffects.find(effect) == savedEffects.end() &&
-                (*state & 7u) < 3u) {
+            if ((*state & 7u) < 3u) {
                 *state = (*state & ~7u) | 3u;
                 ++retiredEffects;
             }
@@ -2458,6 +2458,16 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
     if (removedShotOwnedEffects != 0) {
         HookLog("Rollback: removed %d dead sUnit entries after shot destruction\n",
                 removedShotOwnedEffects);
+    }
+    for (uint32_t category = 13; category <= 16 && category < categoryCount; ++category) {
+        void* effect = *(void**)((uint8_t*)sUnit + SUNIT_CATEGORY_LISTS_OFFSET +
+                                 SUNIT_CATEGORY_LIST_STRIDE * category);
+        int safety = 4096;
+        while (effect && safety-- > 0) {
+            void* next = *(void**)((uint8_t*)effect + 0x18);
+            SanitizeEffectForDestruction(effect);
+            effect = next;
+        }
     }
 
     void* sShot = *(void**)_addr(PTR_SSHOT);
