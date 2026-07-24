@@ -1383,6 +1383,7 @@ struct ShotFlightState {
     // only the transform and attack blocks leaves a respawned shot at the
     // current timeline's runtime phase.
     uint8_t runtimeState[0x50];     // +0x3E8..+0x437
+    // mBaseMatrix, mOldWorldMatrix, mAtkMatrix and mAtkBaseMatrix.
     uint8_t shotMatrices[0x100];   // +0x1E50..+0x1F4F
     float timerThresh;
     float timer;
@@ -1730,6 +1731,7 @@ static void ApplyShotFlight(void* shot, const ShotFlightState& in)
     std::memcpy(p + 0x10, &unitState, sizeof(unitState));
     std::memcpy(p + 0x50, in.transformState, sizeof(in.transformState));
     std::memcpy(p + 0x3E8, in.runtimeState, sizeof(in.runtimeState));
+    std::memcpy(p + 0x1E50, in.shotMatrices, sizeof(in.shotMatrices));
     std::memcpy(p + 0x1F58, &in.timerThresh, sizeof(in.timerThresh));
     std::memcpy(p + 0x1F60, &in.timer, sizeof(in.timer));
     std::memcpy(p + 0x1F5C, &in.delayTime, sizeof(in.delayTime));
@@ -2294,7 +2296,6 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
     }
 
     void* sUnit = *(void**)_addr(PTR_SUNIT);
-    auto removeMultiMask = (UnitRemoveMultiMaskFn)_addr(FN_SUNIT_REMOVE_MULTI_MASK);
     auto removeUnit = (UnitRemoveFn)_addr(FN_SUNIT_REMOVE_UNIT);
 
     // Each live uShot owns the rShot resource stored in its recipe. Pin every
@@ -2317,38 +2318,33 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
                 removedInvalidUnits);
     }
 
-    // Retire only effects created after the selected snapshot. Effects that
-    // already existed at that frame retain live animation/property bindings;
-    // killing them leaves character MtFCurve caches targeting objects pending
-    // destruction on the first re-simulated tick.
-    std::unordered_set<void*> savedEffects;
-    savedEffects.reserve(slot.effectRecipes.size());
-    for (const EffectRecipe& saved : slot.effectRecipes) {
-        auto live = g_liveEffectRecipes.find(saved.savedPtr);
-        if (live != g_liveEffectRecipes.end() &&
-            live->second.spawnSequence == saved.spawnSequence) {
-            savedEffects.insert(saved.savedPtr);
-        }
-    }
-
-    // State 3 preserves sUnit's required two-step multi-mask and primary-list
-    // cleanup for prediction-only effects.
+    // Effects are transient owned graphs and are not reconstructed from the
+    // snapshot. Retaining an effect while synchronously replacing its owning
+    // shot leaves request/attachment pointers into the destroyed shot and can
+    // later double-release or corrupt the shared particle-generator heap.
+    // Remove them synchronously before any fresh shot factory allocates effects.
     int retiredEffects = 0;
+    std::vector<void*> currentEffects;
     uint32_t categoryCount = *(uint32_t*)((uint8_t*)sUnit + SUNIT_CATEGORY_COUNT_OFFSET);
     for (uint32_t category = 13; category <= 16 && category < categoryCount; ++category) {
         void* effect = *(void**)((uint8_t*)sUnit + SUNIT_CATEGORY_LISTS_OFFSET +
-                                SUNIT_CATEGORY_LIST_STRIDE * category);
+                                 SUNIT_CATEGORY_LIST_STRIDE * category);
         int safety = 4096;
         while (effect && safety-- > 0) {
             void* next = *(void**)((uint8_t*)effect + 0x18);
-            uint32_t* state = (uint32_t*)((uint8_t*)effect + 0x10);
-            if (savedEffects.find(effect) == savedEffects.end() &&
-                (*state & 7u) < 3u) {
-                *state = (*state & ~7u) | 3u;
-                ++retiredEffects;
-            }
+            currentEffects.push_back(effect);
             effect = next;
         }
+    }
+    for (void* effect : currentEffects) {
+        SanitizeEffectForDestruction(effect);
+        RemoveUnitFromAllMultiMaskArrays(sUnit, effect);
+        removeUnit(sUnit, effect);
+        *(uint32_t*)((uint8_t*)effect + 0x10) &= ~7u;
+        uint64_t vtable = *(uint64_t*)effect;
+        auto destroy = (void(__fastcall*)(void*, uint32_t))*(uint64_t*)vtable;
+        destroy(effect, 1);
+        ++retiredEffects;
     }
 
     // A projectile that has already advanced cannot be made equivalent to its
@@ -2379,7 +2375,7 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
                     malformedCollisionSlots, (uint64_t)shot);
         }
         uint32_t* state = (uint32_t*)((uint8_t*)shot + 0x10);
-        removeMultiMask(sUnit, shot);
+        RemoveUnitFromAllMultiMaskArrays(sUnit, shot);
         removeUnit(sUnit, shot);
         *state &= ~7u;
         uint64_t vtable = *(uint64_t*)shot;

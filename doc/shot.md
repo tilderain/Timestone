@@ -119,6 +119,8 @@ Hooks on `sShot__spawnShot` and `sShot__spawnShotEx` record a `ShotRecipe`:
 - Slot ID and spawn order.
 - Pre-spawn RNG states.
 - Verified common flight/gameplay ranges.
+- The four common shot matrices at `+0x1E50..+0x1F4F` (`mBaseMatrix`,
+  `mOldWorldMatrix`, `mAtkMatrix`, and `mAtkBaseMatrix`).
 - A runtime-DTI-sized `ConcreteShotSnapshot` used for an ownership-filtered
   overlay of the common body and concrete tail.
 - Collision primitive gameplay state.
@@ -145,6 +147,11 @@ shot that was already dying.
    words, inline objects, model allocation fields, and native owner regions.
 9. Restore attack-target and collision-primitive state through dedicated rules.
 10. Restore RNG streams consumed by reconstruction and release pinned resources.
+
+The matrix restore is required even though later movement paths regenerate some
+of them. Generic pre-move collision and pose code can consume the saved attack
+and prior-world matrices first. Leaving the factory matrices in a reconstructed
+Ryu Hadouken delayed its step transition and changed its lifetime after rollback.
 
 This is reconstruction, not heap rewind. A restored shot may have a different
 address from the shot captured in the snapshot. Code that stores historical
