@@ -1866,7 +1866,7 @@ static char __fastcall hkUnitRemove(void* manager, void* unit)
         // concrete shot destructor. Gameplay can repopulate an inline particle
         // node after reconstruction, so detach it at this final ownership
         // boundary as well as during rollback's explicit retirement.
-       // DetachEmbeddedShotEffect(unit);
+        DetachEmbeddedShotEffect(unit);
     }
 
     char result = oUnitRemove(manager, unit);
