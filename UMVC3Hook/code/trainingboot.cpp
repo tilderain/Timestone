@@ -72,6 +72,18 @@ static constexpr uintptr_t CHAR_ID_ARRAY_OFFSET              = 0x3bc0c;
 static constexpr uintptr_t SPAD_INSTANCE_PTR                 = 0x140E174B8;
 static constexpr uintptr_t SMVC3MANAGER_INSTANCE_PTR         = 0x140D510A0;
 
+// sMvc3Pad controller configuration manager.
+// Ghidra: the public load/request method starts the storage-thread request;
+// the worker itself must not be called from the title update thread.
+static constexpr uintptr_t SMVC3PAD_INSTANCE_PTR             = 0x140E1B3E0;
+static constexpr uintptr_t SMVC3PAD_REQUEST_LOAD              = 0x14075B970;
+static constexpr uintptr_t SMVC3PAD_BUSY_OFFSET               = 0x3c;
+static constexpr uintptr_t SMVC3PAD_RESULT_OFFSET             = 0x40;
+
+// sPad__initSlotInner receives the embedded Map object, not the slot base.
+static constexpr uintptr_t PAD_SLOT_BASE_OFFSET               = 0x58;
+static constexpr uintptr_t PAD_SLOT_MAP_OFFSET                = 0x198;
+
 // Offsets within sMvc3Manager:
 static constexpr uintptr_t MANAGER_PAD_ASSIGN_OFFSET         = 0x140;   // int32_t[4] pad-slot→player index (-1=unassigned, 0=P1, 1=P2)
 
@@ -90,6 +102,7 @@ static TrainingBootConfig g_bootConfig = {
 };
 static bool g_hasBooted = false;
 static bool g_hooksInitialized = false;
+static bool g_controllerConfigRequested = false;
 
 // ---------------------------------------------------------------------------
 // Extern from dllmain.cpp
@@ -177,6 +190,41 @@ static void WriteSlotEntry(uint64_t bs, int index, int teamId, int32_t charId)
 // sMvc3Main__method_3D00 (called from keyboard reader) also checks:
 //   if (pad+0xc20 != 0 || pad+0xc30 != 0) → return 0 (blocked)
 // ---------------------------------------------------------------------------
+static bool LoadPlayerOneControllerConfig()
+{
+    uint64_t config = *(uint64_t*)_addr(SMVC3PAD_INSTANCE_PTR);
+    if (!config) {
+        HookLog("TrainingBoot: WARNING - sMvc3Pad instance is not available\n");
+        return true;
+    }
+
+    typedef uint64_t(__fastcall* RequestLoad_t)(uint64_t);
+    RequestLoad_t requestLoad = (RequestLoad_t)_addr(SMVC3PAD_REQUEST_LOAD);
+
+    if (!g_controllerConfigRequested) {
+        uint64_t result = requestLoad(config);
+        if (result == 8) {
+            HookLog("TrainingBoot: sMvc3Pad config load is already busy\n");
+        } else {
+            HookLog("TrainingBoot: requested sMvc3Pad controller config load\n");
+        }
+        g_controllerConfigRequested = true;
+        return false;
+    }
+
+    if (*(int32_t*)(config + SMVC3PAD_BUSY_OFFSET) != 0)
+        return false;
+
+    int32_t result = *(int32_t*)(config + SMVC3PAD_RESULT_OFFSET);
+    if (result != 0) {
+        HookLog("TrainingBoot: sMvc3Pad controller config load failed (result=%d)\n",
+                result);
+    } else {
+        HookLog("TrainingBoot: sMvc3Pad controller config loaded\n");
+    }
+    return true;
+}
+
 static void SetupPadToPlayerMapping()
 {
     // --- sMvc3Manager: pad-slot→player assignment ---
@@ -198,8 +246,16 @@ static void SetupPadToPlayerMapping()
     if (sPad) {
         *(uint8_t*)(sPad + PAD_KEYBOARD_BLOCKED_1) = 0;
         *(uint8_t*)(sPad + PAD_KEYBOARD_BLOCKED_2) = 0;
+
+        // Reapply the native P1 keyboard translation table. The pad
+        // constructor normally does this before savedata/controller setup.
+        typedef void(__fastcall* InitSlotInner_t)(uint64_t);
+        InitSlotInner_t initSlotInner = (InitSlotInner_t)_addr(0x1405142A0);
+        uint64_t p1Map = sPad + PAD_SLOT_BASE_OFFSET + PAD_SLOT_MAP_OFFSET;
+        initSlotInner(p1Map);
         HookLog("TrainingBoot: Keyboard-disable flags cleared (pad+0x%x, pad+0x%x)\n",
                 PAD_KEYBOARD_BLOCKED_1, PAD_KEYBOARD_BLOCKED_2);
+        HookLog("TrainingBoot: Reinitialized P1 keyboard/controller map\n");
 
         // Force slot 1 (P2) device-active flags to non-zero so the game thinks
         // a physical controller is plugged in for P2. This prevents the
@@ -231,6 +287,12 @@ void BootIntoTraining()
     if (g_hasBooted) {
         return;
     }
+
+    // savedata/controller loading is asynchronous. Keep the title update
+    // hook active until the native sMvc3Pad request has settled.
+    if (!LoadPlayerOneControllerConfig())
+        return;
+
     g_hasBooted = true;
 
     HookLog("TrainingBoot: Starting boot sequence...\n");

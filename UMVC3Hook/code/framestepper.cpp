@@ -713,13 +713,14 @@ void FrameStepper_Process()
     if (KeyPressed(VK_F11, prevRestart))
     {
         int32_t targetFrame = Controller_GetNetFrameCount();
+        uint64_t sReplay = *(uint64_t*)_addr(0x140D4D9D8);
+        if (sReplay)
+            g_restartRoundSeed = *(uint32_t*)(sReplay + 0x58);
         if (Netplay_IsActive())
         {
             // Give the reliable packet time to arrive. The target itself is
             // still absolute, so both machines perform the write together.
             targetFrame += 25;
-            g_restartRoundSeed = (uint32_t)targetFrame ^
-                                 (g_battleGeneration * 0x9E3779B9u) ^ 0x4D564333u;
             Netplay_SendRestartMatch(targetFrame, g_restartRoundSeed);
         }
         g_restartTargetFrame = targetFrame;

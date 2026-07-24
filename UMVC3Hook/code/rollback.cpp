@@ -1744,6 +1744,28 @@ static void ApplyShotFlight(void* shot, const ShotFlightState& in)
     }
 }
 
+static void RestoreShotArmState(void* shot, const ShotRecipe& saved)
+{
+    if (!shot || saved.concrete.body.size() < 0x1E50) return;
+
+    uint8_t* arm = (uint8_t*)shot + 0x1DC0;
+    const uint8_t* savedArm = saved.concrete.body.data() + 0x1DC0;
+    void* shootParent = *(void**)(arm + 0x78);
+    void* shootWayParent = *(void**)(arm + 0x80);
+
+    // cArm is inline native state. Restore its pointer-free shoot position,
+    // direction, offsets and error vectors, but keep the fresh object's vtable
+    // and rebind its owner graph below.
+    std::memcpy(arm + 0x10, savedArm + 0x10, 0x60);
+    std::memcpy(arm + 0x88, savedArm + 0x88, 0x08);
+
+    // mpSelfShot is the reconstructed shot. Retain the parent links established
+    // by the native factory (Ryu for his hyper laser), not historical objects.
+    *(void**)(arm + 0x70) = shot;
+    *(void**)(arm + 0x78) = shootParent;
+    *(void**)(arm + 0x80) = shootWayParent;
+}
+
 static void* __fastcall hkShotSpawn(void* manager, void* element, uint64_t initParam,
                                     void* posData, void* ownerChr, void* objectRef1,
                                     uint32_t slotId, void* objectRef2)
@@ -1914,6 +1936,11 @@ static bool ValidAttachDispatchObject(uint64_t object)
            IsExecutableAddress(*(uint64_t*)(vtable + 0x2D0));
 }
 
+static bool ValidOptionalAttachObject(uint64_t object)
+{
+    return object == 0 || HasCallableDtiVirtual((void*)object);
+}
+
 static void __fastcall hkBuildAttachMatrix(void* arm, void* output, char reset)
 {
     if (!arm || !output || !IsAccessiblePointer((uint64_t)arm + 0xD0)) {
@@ -1927,17 +1954,23 @@ static void __fastcall hkBuildAttachMatrix(void* arm, void* output, char reset)
         return;
     }
 
-    // The native routine unconditionally dispatches primary +0x2C8/+0x2D0
-    // after it has optionally traversed secondary/tertiary. A restored cArm
-    // can retain the old timeline's UINTPTR_MAX link even though all gameplay
-    // scalars are otherwise valid. Do not let that sentinel reach native code.
-    // The native routine cannot be made safe by validating its vtable: the
-    // +0x2C8/+0x2D0 methods are allowed to return small sentinel values, which
-    // the routine immediately passes to MtVector4::copy. Use the last
-    // pointer-free attachment matrix instead. It preserves the reconstructed
-    // laser pose without traversing the discarded attachment graph.
+    auto* bytes = (uint8_t*)arm;
+    uint64_t primary = *(uint64_t*)(bytes + 0x70);
+    uint64_t secondary = *(uint64_t*)(bytes + 0x78);
+    uint64_t tertiary = *(uint64_t*)(bytes + 0x80);
+    if (ValidAttachDispatchObject(primary) &&
+        ValidOptionalAttachObject(secondary) &&
+        ValidOptionalAttachObject(tertiary)) {
+        oBuildAttachMatrix(arm, output, reset);
+        return;
+    }
+
+    // A reconstructed owner can still contain a stale optional attachment or
+    // primary dispatch link. Preserve the last native matrix for that case;
+    // valid fresh owners must run natively so directional input can update the
+    // laser quaternion during re-simulation.
     (void)reset;
-    std::memcpy(output, (uint8_t*)arm + 0x90, 0x40);
+    std::memcpy(output, bytes + 0x90, 0x40);
 }
 
 static int SanitizeShotCollisionSlotsForDestruction(void* shot)
@@ -2397,6 +2430,7 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
 
         // Reapply confirmed pointer-free common fields after the broad object
         // overlay so packed floats/flags that resemble addresses still rewind.
+        RestoreShotArmState(fresh, saved);
         ApplyShotFlight(fresh, saved.flight);
 
         // ApplyShotFlight preserves the category assigned by addUnit while

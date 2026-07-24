@@ -112,6 +112,9 @@ static void LoadRollbackSettings()
     GetPrivateProfileStringA("Network", "HostIp", "127.0.0.1",
                              g_dialogConfig.hostIp,
                              sizeof(g_dialogConfig.hostIp), path);
+    if (g_dialogConfig.hostIp[0] == '\0') {
+        strcpy(g_dialogConfig.hostIp, "127.0.0.1");
+    }
     g_dialogConfig.hostPort = GetPrivateProfileIntA(
         "Network", "HostPort", g_dialogConfig.hostPort, path);
 }

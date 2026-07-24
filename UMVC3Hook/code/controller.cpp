@@ -50,6 +50,7 @@ static constexpr uintptr_t ADDR_METHOD_3D00              = 0x1402B3D00;
 
 // cChrInput__processFrameInput — the per-character input processor.
 static constexpr uintptr_t ADDR_PROCESS_FRAME_INPUT       = 0x14002DD60;
+static constexpr uintptr_t ADDR_BUTTON_REMAP              = 0x14002DA30;
 // uAmaterasu__getter_4AC0 — returns the team index (0=P1, 1=P2) from a character object.
 static constexpr uintptr_t ADDR_GET_TEAM_INDEX            = 0x140004AC0;
 
@@ -73,6 +74,8 @@ static inputAutoRepeatTimerProcess_t oinputAutoRepeatTimerProcess = nullptr;
 
 // processFrameInput trampoline
 static void(__fastcall* oprocessFrameInput)(uint64_t cChrInput) = nullptr;
+static uint32_t(__fastcall* obuttonRemap)(uint64_t playerIndex, uint32_t input,
+                                          uint8_t alternateMap) = nullptr;
 
 // ===========================================================================
 // Decompiled helper functions (inlined from game)
@@ -806,6 +809,19 @@ static void ApplyScheduledDelayIfReady()
 // Hooked functions
 // ===========================================================================
 
+// Netplay always uses the local user's P1 bindings. The client still controls
+// team P2, but passing player index 1 here selects P2's often-unconfigured
+// sGameConfig button table. Directions do not use that table, which is why
+// movement worked while attack buttons were missing.
+static uint32_t __fastcall hkbuttonRemap(uint64_t playerIndex, uint32_t input,
+                                         uint8_t alternateMap)
+{
+    if (Netplay_IsActive())
+        playerIndex = 0;
+
+    return obuttonRemap(playerIndex, input, alternateMap);
+}
+
 // ---------------------------------------------------------------------------
 // hkGetsCurrentInput_withSOCD
 // Hook on GetsCurrentInput_withSOCD at 0x1402B3700.
@@ -843,10 +859,9 @@ static uint64_t __fastcall hkGetsCurrentInput_withSOCD(uint64_t pad, uint32_t pl
                 // for player 0 can route through keyboard input because the
                 // boot path maps the keyboard to player 0.
                 uint32_t padInput = *(uint32_t*)(pad + PAD_SLOT_INPUT);
-                uint32_t kbInput = IsGameProcessForeground()
-                    ? ControllerDecomp::keyboardToGameMask(pad)
-                    : 0;
-                raw = ApplySOCD(padInput | kbInput);
+                // Diagnostic: temporarily disable keyboard input for the
+                // netplay client's local P2 to isolate keyboard-map masking.
+                raw = ApplySOCD(padInput);
             }
             else
             {
@@ -1708,6 +1723,16 @@ static uint64_t __fastcall hkpadSlotReadDevice(uint64_t slotBase)
 
 static void __fastcall hkxinputToGameMask(uint64_t sPad, uint64_t slotBase, const XInputState* pState)
 {
+    // Multiple game instances can poll the same XInput device. Only the
+    // foreground instance should receive controller input; keyboard routing
+    // remains independent so the inactive instance can still be controlled
+    // with its own keyboard if desired.
+    if (!IsGameProcessForeground()) {
+        static const XInputState kEmptyState = {};
+        oxinputToGameMask(sPad, slotBase, &kEmptyState);
+        return;
+    }
+
     oxinputToGameMask(sPad, slotBase, pState);
 }
 
@@ -1760,6 +1785,17 @@ void Controller_InitHooks()
         MH_EnableHook((LPVOID)_addr(ADDR_STEP_FIGHTING));
     else
         HookLog("Controller: Failed to hook stepFighting (%d)\n", s);
+
+    // cChrInput__processFrameInput — netplay client/host synchronization
+    s = MH_CreateHook(
+        (LPVOID)_addr(ADDR_BUTTON_REMAP),
+        (LPVOID)&hkbuttonRemap,
+        (LPVOID*)&obuttonRemap
+    );
+    if (s == MH_OK)
+        MH_EnableHook((LPVOID)_addr(ADDR_BUTTON_REMAP));
+    else
+        HookLog("Controller: Failed to hook buttonRemap (%d)\n", s);
 
     // cChrInput__processFrameInput — netplay client/host synchronization
     s = MH_CreateHook(
