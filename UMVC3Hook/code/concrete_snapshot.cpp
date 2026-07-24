@@ -440,6 +440,17 @@ bool ConcreteShotSnapshot_Restore(void* shot,
         PreserveRange(overlay.data(), live, liveSize, range);
     }
 
+    // The saved timeline can contain an initialized inline effect where the
+    // freshly constructed shot currently has inactive scalar storage. Detect
+    // embedded owners in the saved body as well, but retain the corresponding
+    // fresh bytes. Otherwise the broad overlay imports historical generator and
+    // particle-buffer ownership that a later destructor returns to the shared
+    // effect heap.
+    for (const SnapshotRange& range : FindEmbeddedObjects(
+             source, liveSize, kShotRestoreStart)) {
+        PreserveRange(overlay.data(), live, liveSize, range);
+    }
+
     // createProperty value fields exported from properties_static.json are
     // ownership-free gameplay state. Reapply them after the pointer and
     // embedded-object filters so a packed scalar cannot be retained merely

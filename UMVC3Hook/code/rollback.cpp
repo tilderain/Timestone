@@ -2096,6 +2096,27 @@ static void DetachEmbeddedShotEffect(void* shot)
     *(uint64_t*)(embeddedEffect + 0x58) = 0;
     *(uint64_t*)(embeddedEffect + 0x60) = 0;
     *(uint32_t*)(embeddedEffect + 0x70) = 0xFFFFFFFFu;
+
+    // Reconstructed shots do not own a reconstructed particle graph. Ensure a
+    // saved inline effect can never return historical storage to the allocator.
+    *(uint64_t*)(embeddedEffect + 0x218) = 0;
+    *(uint64_t*)(embeddedEffect + 0x220) = 0;
+    *(uint64_t*)(embeddedEffect + 0x228) = 0;
+    *(uint32_t*)(embeddedEffect + 0x208) = 0;
+    *(uint32_t*)(embeddedEffect + 0x210) = 0;
+}
+
+static void ReleaseFreshEmbeddedShotEffectGraph(void* shot)
+{
+    if (!shot || !IsAccessiblePointer((uint64_t)shot + 0x2160 + 0x230)) return;
+
+    void* embeddedEffect = (uint8_t*)shot + 0x2160;
+    if (!IsEffectObject(embeddedEffect)) return;
+
+    // This graph was just created by the native shot factory, so its allocator
+    // ownership is still authoritative. Release it before concrete restoration;
+    // DetachEmbeddedShotEffect then keeps the reconstructed shot graph-free.
+    ((void(__fastcall*)(void*))_addr(0x1405E6890))(embeddedEffect);
 }
 
 static bool ValidAttachDispatchObject(uint64_t object)
@@ -2602,6 +2623,7 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
         if (pendingCount >= 0x200 || !enqueueUnit(sShot, fresh, SSHOT_CATEGORY)) {
             addUnit(sUnit, SSHOT_CATEGORY, fresh, nullptr);
         }
+        ReleaseFreshEmbeddedShotEffectGraph(fresh);
         const void* validTargets[6] = {};
         size_t validTargetCount = 0;
         uint64_t sCharacter = *(uint64_t*)_addr(PTR_SCHARACTER);
