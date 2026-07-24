@@ -383,7 +383,16 @@ static int SanitizeUnitCategoryLists(void* sUnit)
             }
 
             void* next = *(void**)((uint8_t*)node + 0x18);
-            if (IsUnitObject(node)) {
+            bool validUnit = IsUnitObject(node);
+            if (validUnit) {
+                uint32_t state = *(uint32_t*)((uint8_t*)node + 0x10);
+                if ((state & 7u) == 2u && (state & 0x400u) != 0) {
+                    uint64_t vtable = *(uint64_t*)node;
+                    validUnit = IsAccessibleAddress(vtable + 0x40) &&
+                                IsExecutableAddress(*(uint64_t*)(vtable + 0x40));
+                }
+            }
+            if (validUnit) {
                 previous = node;
                 node = next;
                 continue;
@@ -445,6 +454,40 @@ static int SanitizeUnitCategoryLists(void* sUnit)
         }
     }
     return removed;
+}
+
+static void RemoveUnitFromAllMultiMaskArrays(void* sUnit, void* unit)
+{
+    if (!sUnit || !unit) return;
+
+    uint32_t maskCount =
+        *(uint32_t*)((uint8_t*)sUnit + SUNIT_MULTI_MASK_COUNT_OFFSET);
+    if (maskCount > SUNIT_MAX_CATEGORIES)
+        maskCount = SUNIT_MAX_CATEGORIES;
+
+    for (uint32_t mask = 0; mask < maskCount; ++mask) {
+        uint8_t* array = (uint8_t*)sUnit + SUNIT_MULTI_MASK_ARRAYS_OFFSET +
+                         SUNIT_CATEGORY_LIST_STRIDE * mask;
+        uint32_t* count = (uint32_t*)(array + 0x08);
+        uint32_t capacity = *(uint32_t*)(array + 0x0C);
+        void** entries = *(void***)(array + 0x18);
+        if (*count > capacity || !entries ||
+            !IsAccessibleAddress((uint64_t)entries +
+                                 (size_t)capacity * sizeof(void*)))
+            continue;
+
+        for (uint32_t i = 0; i < *count;) {
+            if (entries[i] != unit) {
+                ++i;
+                continue;
+            }
+            for (uint32_t j = i + 1; j < *count; ++j)
+                entries[j - 1] = entries[j];
+            entries[--*count] = nullptr;
+        }
+    }
+
+    *(uint64_t*)((uint8_t*)unit + 0x30) = 0;
 }
 
 static void RestoreSCollisionBody(void* destination, const uint8_t* source, size_t size)
@@ -1378,13 +1421,16 @@ struct ShotFlightState {
     // uModel+0x100 is a live owned pointer, so only restore the contiguous
     // position/quaternion/matrix scalar block preceding it.
     uint8_t transformState[0xB0];  // +0x50..+0xFF
+    // uEffect timing scalars: mBaseFps, mDeltaTimeRate, adjacent timing state,
+    // and mTimeInterpolationRate. The packed qwords can resemble pointers.
+    uint8_t effectTimingState[0x10]; // +0x110..+0x11F    // Test if necessary on Hado Shoryu
     // uShot::move reads this scalar block for lifetime, active/end flags,
     // velocity and movement state. The factory initializes it, but restoring
     // only the transform and attack blocks leaves a respawned shot at the
     // current timeline's runtime phase.
     uint8_t runtimeState[0x50];     // +0x3E8..+0x437
     // mBaseMatrix, mOldWorldMatrix, mAtkMatrix and mAtkBaseMatrix.
-    uint8_t shotMatrices[0x100];   // +0x1E50..+0x1F4F
+    uint8_t shotMatrices[0x100];   // +0x1E50..+0x1F4F    // Test if necessary on Hado Shoryu
     float timerThresh;
     float timer;
     float delayTime;
@@ -1699,8 +1745,9 @@ static void CaptureShotFlight(void* shot, ShotFlightState& out)
     auto* p = (uint8_t*)shot;
     std::memcpy(&out.unitState, p + 0x10, sizeof(out.unitState));
     std::memcpy(out.transformState, p + 0x50, sizeof(out.transformState));
+    std::memcpy(out.effectTimingState, p + 0x110, sizeof(out.effectTimingState));  // Test if necessary on Hado Shoryu
     std::memcpy(out.runtimeState, p + 0x3E8, sizeof(out.runtimeState));
-    std::memcpy(out.shotMatrices, p + 0x1E50, sizeof(out.shotMatrices));
+    std::memcpy(out.shotMatrices, p + 0x1E50, sizeof(out.shotMatrices));  // Test if necessary on Hado Shoryu
     std::memcpy(&out.timerThresh, p + 0x1F58, sizeof(out.timerThresh));
     std::memcpy(&out.timer, p + 0x1F60, sizeof(out.timer));
     std::memcpy(&out.delayTime, p + 0x1F5C, sizeof(out.delayTime));
@@ -1730,12 +1777,15 @@ static void ApplyShotFlight(void* shot, const ShotFlightState& in)
     unitState = (in.unitState & ~0x3F8u) | (unitState & 0x3F8u);
     std::memcpy(p + 0x10, &unitState, sizeof(unitState));
     std::memcpy(p + 0x50, in.transformState, sizeof(in.transformState));
+    std::memcpy(p + 0x110, in.effectTimingState, sizeof(in.effectTimingState));  // Test if necessary on Hado Shoryu
     std::memcpy(p + 0x3E8, in.runtimeState, sizeof(in.runtimeState));
-    std::memcpy(p + 0x1E50, in.shotMatrices, sizeof(in.shotMatrices));
+    std::memcpy(p + 0x1E50, in.shotMatrices, sizeof(in.shotMatrices));  // Test if necessary on Hado Shoryu
     std::memcpy(p + 0x1F58, &in.timerThresh, sizeof(in.timerThresh));
     std::memcpy(p + 0x1F60, &in.timer, sizeof(in.timer));
     std::memcpy(p + 0x1F5C, &in.delayTime, sizeof(in.delayTime));
     std::memcpy(p + 0x1F64, &in.autoAddDivStartTime, sizeof(in.autoAddDivStartTime));
+    std::memcpy(p + 0x1F70, in.resourceScalars, sizeof(in.resourceScalars));  // Test if necessary on Hado Shoryu
+    std::memcpy(p + 0x2038, in.attackScalars, sizeof(in.attackScalars));   // Test if necessary on Hado Shoryu
     std::memcpy(p + 0x2078, in.movementScalars, sizeof(in.movementScalars));
     std::memcpy(p + 0x2118, in.animationScalars, sizeof(in.animationScalars));
     std::memcpy(p + 0x212C, &in.step, sizeof(in.step));
@@ -1866,6 +1916,17 @@ static void DetachEmbeddedShotEffect(void* shot);
 static void SanitizeEffectForDestruction(void* effect)
 {
     if (!effect || !IsAccessiblePointer((uint64_t)effect + 0x230)) return;
+
+    // uEffect::~uEffect releases the cResource at +0x108. A torn effect can
+    // retain a small scalar here (0x120 in the 04:06 crash), which makes
+    // sResource::release decrement memory at scalar+0x4c. Keep valid native
+    // resources; suppress only values that cannot be resource objects.
+    uint64_t resource = *(uint64_t*)((uint8_t*)effect + 0x108);
+    if (resource != 0 &&
+        (!IsAccessibleAddress(resource + 0x4C) ||
+         !HasCallableDtiVirtual((void*)resource))) {
+        *(uint64_t*)((uint8_t*)effect + 0x108) = 0;
+    }
 
     // uEffect::~uEffect deletes the generator chain at +0x218 and releases the
     // particle sub-buffer array at +0x220. Prediction-only effects can outlive
@@ -2318,13 +2379,22 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
                 removedInvalidUnits);
     }
 
-    // Effects are transient owned graphs and are not reconstructed from the
-    // snapshot. Retaining an effect while synchronously replacing its owning
-    // shot leaves request/attachment pointers into the destroyed shot and can
-    // later double-release or corrupt the shared particle-generator heap.
-    // Remove them synchronously before any fresh shot factory allocates effects.
+    // Preserve effects that existed at the selected frame. Retiring those
+    // snapshot-era objects releases generator graphs still belonging to the
+    // restored timeline and eventually corrupts the shared particle heap.
+    // Only prediction-created effects must drain through native two-phase
+    // cleanup because they may reference shots from the discarded timeline.
+    std::unordered_set<void*> savedEffects;
+    savedEffects.reserve(slot.effectRecipes.size());
+    for (const EffectRecipe& saved : slot.effectRecipes) {
+        auto live = g_liveEffectRecipes.find(saved.savedPtr);
+        if (live != g_liveEffectRecipes.end() &&
+            live->second.spawnSequence == saved.spawnSequence) {
+            savedEffects.insert(saved.savedPtr);
+        }
+    }
+
     int retiredEffects = 0;
-    std::vector<void*> currentEffects;
     uint32_t categoryCount = *(uint32_t*)((uint8_t*)sUnit + SUNIT_CATEGORY_COUNT_OFFSET);
     for (uint32_t category = 13; category <= 16 && category < categoryCount; ++category) {
         void* effect = *(void**)((uint8_t*)sUnit + SUNIT_CATEGORY_LISTS_OFFSET +
@@ -2332,19 +2402,14 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
         int safety = 4096;
         while (effect && safety-- > 0) {
             void* next = *(void**)((uint8_t*)effect + 0x18);
-            currentEffects.push_back(effect);
+            uint32_t* state = (uint32_t*)((uint8_t*)effect + 0x10);
+            if (savedEffects.find(effect) == savedEffects.end() &&
+                (*state & 7u) < 3u) {
+                *state = (*state & ~7u) | 3u;
+                ++retiredEffects;
+            }
             effect = next;
         }
-    }
-    for (void* effect : currentEffects) {
-        SanitizeEffectForDestruction(effect);
-        RemoveUnitFromAllMultiMaskArrays(sUnit, effect);
-        removeUnit(sUnit, effect);
-        *(uint32_t*)((uint8_t*)effect + 0x10) &= ~7u;
-        uint64_t vtable = *(uint64_t*)effect;
-        auto destroy = (void(__fastcall*)(void*, uint32_t))*(uint64_t*)vtable;
-        destroy(effect, 1);
-        ++retiredEffects;
     }
 
     // A projectile that has already advanced cannot be made equivalent to its
@@ -2382,6 +2447,17 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
         auto destroy = (void(__fastcall*)(void*, uint32_t))*(uint64_t*)vtable;
         destroy(shot, 1);
         ++retiredShots;
+    }
+
+    // Concrete shot destructors can release attached uGameEffect objects
+    // directly. Those effects may still be present in sUnit's primary and
+    // multi-mask lists with a zeroed vtable, causing the next parallel move
+    // job to dispatch through null at vtable+0x40. Remove such dead entries
+    // after all shot-owned teardown has completed and before reconstruction.
+    int removedShotOwnedEffects = SanitizeUnitCategoryLists(sUnit);
+    if (removedShotOwnedEffects != 0) {
+        HookLog("Rollback: removed %d dead sUnit entries after shot destruction\n",
+                removedShotOwnedEffects);
     }
 
     void* sShot = *(void**)_addr(PTR_SSHOT);

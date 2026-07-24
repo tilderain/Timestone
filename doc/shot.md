@@ -119,6 +119,8 @@ Hooks on `sShot__spawnShot` and `sShot__spawnShotEx` record a `ShotRecipe`:
 - Slot ID and spawn order.
 - Pre-spawn RNG states.
 - Verified common flight/gameplay ranges.
+- The pointer-free `uEffect` timing scalars at `+0x110..+0x11F`, including
+  `mBaseFps`, `mDeltaTimeRate`, and `mTimeInterpolationRate`.
 - The four common shot matrices at `+0x1E50..+0x1F4F` (`mBaseMatrix`,
   `mOldWorldMatrix`, `mAtkMatrix`, and `mAtkBaseMatrix`).
 - A runtime-DTI-sized `ConcreteShotSnapshot` used for an ownership-filtered
@@ -152,6 +154,12 @@ The matrix restore is required even though later movement paths regenerate some
 of them. Generic pre-move collision and pose code can consume the saved attack
 and prior-world matrices first. Leaving the factory matrices in a reconstructed
 Ryu Hadouken delayed its step transition and changed its lifetime after rollback.
+
+The timing scalars receive an explicit restore after the ownership-filtered body
+overlay. Their packed float values can resemble readable addresses when viewed
+as a qword, causing the generic pointer-preservation heuristic to retain factory
+timing. In the 2026-07-24 Ryu capture, `mTimeInterpolationRate` remained at `1`
+instead of the saved `4`, delaying the Hadouken phase transition by three ticks.
 
 This is reconstruction, not heap rewind. A restored shot may have a different
 address from the shot captured in the snapshot. Code that stores historical
