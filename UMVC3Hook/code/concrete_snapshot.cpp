@@ -31,10 +31,26 @@ constexpr size_t kAttackTargetTables[kAttackTargetTableCount] = {
 constexpr uintptr_t kSoulFistDti = 0x140D4B6E8ull;
 constexpr uintptr_t kRyuDti = 0x140D45A10ull;
 constexpr uintptr_t kHsienKoDti = 0x140D455F8ull;
+constexpr uintptr_t kSpencerDti = 0x140D45D40ull;
+constexpr uintptr_t kAttackWireDti = 0x140D4CA20ull;
 
 struct SnapshotRange {
     size_t offset;
     size_t size;
+};
+
+struct DtiSnapshotRange {
+    uintptr_t dti;
+    size_t offset;
+    size_t size;
+};
+
+constexpr DtiSnapshotRange kGeneratedCharacterTailRanges[] = {
+#include "generated_character_tail_fields.inc"
+};
+
+constexpr DtiSnapshotRange kGeneratedShotTailRanges[] = {
+#include "generated_shot_tail_fields.inc"
 };
 
 using GetPrimitiveFn = uint64_t(__fastcall*)(uint64_t, uint32_t);
@@ -99,6 +115,19 @@ void CopyRange(void* destination, const uint8_t* source, size_t objectSize,
     size_t size = range.size;
     if (range.offset + size > objectSize) size = objectSize - range.offset;
     std::memcpy((uint8_t*)destination + range.offset, source + range.offset, size);
+}
+
+template <size_t Count>
+void RestoreGeneratedRanges(void* destination, const uint8_t* source,
+                            size_t objectSize, uint64_t dti,
+                            const DtiSnapshotRange (&ranges)[Count])
+{
+    for (const DtiSnapshotRange& range : ranges) {
+        if (IsDti(dti, range.dti)) {
+            CopyRange(destination, source, objectSize,
+                      {range.offset, range.size});
+        }
+    }
 }
 
 void PreserveLivePointers(uint8_t* overlay, const uint8_t* live,
@@ -411,6 +440,20 @@ bool ConcreteShotSnapshot_Restore(void* shot,
         PreserveRange(overlay.data(), live, liveSize, range);
     }
 
+    // createProperty value fields exported from properties_static.json are
+    // ownership-free gameplay state. Reapply them after the pointer and
+    // embedded-object filters so a packed scalar cannot be retained merely
+    // because it resembles an address.
+    RestoreGeneratedRanges(overlay.data(), source, liveSize, snapshot.dti,
+                           kGeneratedShotTailRanges);
+
+    /*if (IsDti(snapshot.dti, kAttackWireDti)) {
+        // This unlabeled attack-wire block was separately verified from its
+        // constructor and collision callbacks. Its owned effect resource starts
+        // at +0x2150 and intentionally remains on the reconstructed timeline.
+        CopyRange(overlay.data(), source, liveSize, {0x2140, 0x10});
+    }*/
+
     // Copy the complete gameplay tail. The prefix contains cUnit ownership and
     // intrusive links and remains owned by the freshly-created object.
     CopyRange(live, overlay.data(), liveSize,
@@ -438,12 +481,13 @@ void ConcreteCharacterSnapshot_RestoreFields(void* character,
 {
     if (!character || !savedBody) return;
 
-    // Concrete character tails are mostly small flags, counters and vectors,
-    // interspersed with character-specific helper/resource pointers. Restore
-    // bytes whose aligned word does not resolve as a live allocation. Unlike
-    // the broad body heuristic, this does not classify packed scalar values as
-    // pointers merely because their bits happen to resemble an address.
+    // Preserve unknown character-tail scalars while retaining detected live
+    // helper/resource ownership. Known createProperty fields are then applied
+    // explicitly so packed values cannot be mistaken for pointers.
     RestoreDetectedCharacterTailScalars(character, savedBody, bodySize);
+
+    RestoreGeneratedRanges(character, savedBody, bodySize, dti,
+                           kGeneratedCharacterTailRanges);
 
     if (IsDti(dti, kRyuDti)) {
         // uRyu's concrete tail is scalar except for mpBeamObj at +0x6918.
@@ -458,5 +502,12 @@ void ConcreteCharacterSnapshot_RestoreFields(void* character,
         // and is intentionally left on the live timeline.
         CopyRange(character, savedBody, bodySize, {0x68FC, 0x1C});
     }
+
+    /*if (IsDti(dti, kSpencerDti)) {
+        // uSpencer's complete 16-byte concrete tail is pointer-free. It holds
+        // the wire-active latch, wire animation number and mUsrF consumed when
+        // the grapple branches to its facing-specific action.
+        CopyRange(character, savedBody, bodySize, {0x68F0, 0x10});
+    }*/
 
 }
