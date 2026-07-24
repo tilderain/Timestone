@@ -1451,6 +1451,7 @@ struct EffectRecipe {
     int a11;
     uint32_t a12;
     void* a13;
+    uint64_t spawnSequence = 0;
 };
 
 struct CollisionNodeClone {
@@ -1477,6 +1478,7 @@ static SnapshotSlot g_slots[ROLLBACK_WINDOW];
 static std::unordered_map<void*, ShotRecipe> g_liveShotRecipes;
 static std::unordered_map<void*, EffectRecipe> g_liveEffectRecipes;
 static uint64_t g_shotSpawnSequence = 0;
+static uint64_t g_effectSpawnSequence = 0;
 
 using ShotSpawnFn = void*(__fastcall*)(void*, void*, uint64_t, void*, void*, void*, uint32_t, void*);
 using ShotSpawnExFn = void*(__fastcall*)(void*, void*, uint64_t, void*, void*, void*, uint32_t,
@@ -1847,15 +1849,54 @@ static void* __fastcall hkEffectCreate(void* manager, int effectId, int a3,
     void* effect = oEffectCreate(manager, effectId, a3, attachTo, a5, a6, a7,
                                  a8, a9, a10, a11, a12, a13);
     if (effect) {
-        g_liveEffectRecipes[effect] = {
+        EffectRecipe recipe = {
             effect, effect, manager, effectId, a3, attachTo, a5, a6, a7, a8,
             a9, a10, a11, a12, a13
         };
+        recipe.spawnSequence = ++g_effectSpawnSequence;
+        g_liveEffectRecipes[effect] = recipe;
     }
     return effect;
 }
 
 static void DetachEmbeddedShotEffect(void* shot);
+
+static void SanitizeEffectForDestruction(void* effect)
+{
+    if (!effect || !IsAccessiblePointer((uint64_t)effect + 0x230)) return;
+
+    // uEffect::~uEffect deletes the generator chain at +0x218 and releases the
+    // particle sub-buffer array at +0x220. Prediction-only effects can outlive
+    // the graph that populated these fields until sUnit's deferred cleanup.
+    // Clear only malformed ownership; valid native allocations remain intact.
+    uint64_t generator = *(uint64_t*)((uint8_t*)effect + 0x218);
+    uint64_t node = generator;
+    std::unordered_set<uint64_t> visited;
+    bool validGeneratorChain = true;
+    for (int count = 0; node != 0 && count < 4096; ++count) {
+        if (!IsAccessiblePointer(node + 0x18) || !visited.insert(node).second) {
+            validGeneratorChain = false;
+            break;
+        }
+        uint64_t vtable = *(uint64_t*)node;
+        if (!IsAccessibleAddress(vtable) ||
+            !IsExecutableAddress(*(uint64_t*)vtable)) {
+            validGeneratorChain = false;
+            break;
+        }
+        node = *(uint64_t*)(node + 0x18);
+        if (count == 4095 && node != 0) validGeneratorChain = false;
+    }
+    if (!validGeneratorChain) {
+        *(uint64_t*)((uint8_t*)effect + 0x218) = 0;
+    }
+
+    uint64_t subBuffers = *(uint64_t*)((uint8_t*)effect + 0x220);
+    if (subBuffers != 0 && !IsAccessiblePointer(subBuffers)) {
+        *(uint64_t*)((uint8_t*)effect + 0x220) = 0;
+        *(uint16_t*)((uint8_t*)effect + 0x208) = 0;
+    }
+}
 
 static char __fastcall hkUnitRemove(void* manager, void* unit)
 {
@@ -1867,6 +1908,12 @@ static char __fastcall hkUnitRemove(void* manager, void* unit)
         // node after reconstruction, so detach it at this final ownership
         // boundary as well as during rollback's explicit retirement.
         DetachEmbeddedShotEffect(unit);
+    }
+    uint32_t category = unit
+        ? (*(uint32_t*)((uint8_t*)unit + 0x10) & 0x3F8u) >> 3
+        : 0;
+    if (category >= 13 && category <= 16) {
+        SanitizeEffectForDestruction(unit);
     }
 
     char result = oUnitRemove(manager, unit);
@@ -2270,11 +2317,22 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
                 removedInvalidUnits);
     }
 
-    // Effects can retain weak references to shots and other transient units at
-    // +0x280. Retire every native effect-category entry before destroying the
-    // current shots so untracked effects cannot move with a dangling target on
-    // the first re-simulated tick. State 3 preserves sUnit's required two-step
-    // multi-mask and primary-list cleanup.
+    // Retire only effects created after the selected snapshot. Effects that
+    // already existed at that frame retain live animation/property bindings;
+    // killing them leaves character MtFCurve caches targeting objects pending
+    // destruction on the first re-simulated tick.
+    std::unordered_set<void*> savedEffects;
+    savedEffects.reserve(slot.effectRecipes.size());
+    for (const EffectRecipe& saved : slot.effectRecipes) {
+        auto live = g_liveEffectRecipes.find(saved.savedPtr);
+        if (live != g_liveEffectRecipes.end() &&
+            live->second.spawnSequence == saved.spawnSequence) {
+            savedEffects.insert(saved.savedPtr);
+        }
+    }
+
+    // State 3 preserves sUnit's required two-step multi-mask and primary-list
+    // cleanup for prediction-only effects.
     int retiredEffects = 0;
     uint32_t categoryCount = *(uint32_t*)((uint8_t*)sUnit + SUNIT_CATEGORY_COUNT_OFFSET);
     for (uint32_t category = 13; category <= 16 && category < categoryCount; ++category) {
@@ -2284,7 +2342,8 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
         while (effect && safety-- > 0) {
             void* next = *(void**)((uint8_t*)effect + 0x18);
             uint32_t* state = (uint32_t*)((uint8_t*)effect + 0x10);
-            if ((*state & 7u) < 3u) {
+            if (savedEffects.find(effect) == savedEffects.end() &&
+                (*state & 7u) < 3u) {
                 *state = (*state & ~7u) | 3u;
                 ++retiredEffects;
             }
