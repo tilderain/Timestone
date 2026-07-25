@@ -68,6 +68,7 @@ static constexpr uintptr_t FN_SSHOT_FLUSH_PENDING_UNITS = 0x1401517A0;
 static constexpr uintptr_t VTABLE_USHOT_VULCAN_ZIREITOU = 0x140AC0E20;
 static constexpr uintptr_t FN_SUNIT_ADD_UNIT = 0x14051A6B0;
 static constexpr uintptr_t FN_SUNIT_REMOVE_UNIT = 0x14051B9F0;
+static constexpr uintptr_t FN_SUNIT_LOAD_CATEGORY = 0x14051B6F0;
 static constexpr uintptr_t FN_SUNIT_REMOVE_MULTI_MASK = 0x14051BAF0;
 static constexpr uintptr_t FN_SUNIT_REGISTER_MULTI_MASK = 0x14051BDE0;
 static constexpr uintptr_t FN_UGAMEEFFECT_CREATE = 0x140131410;
@@ -1596,6 +1597,8 @@ using EffectCreateFn = void*(__fastcall*)(void*, int, int, void*, int, int, void
 static ShotSpawnFn oShotSpawn = nullptr;
 static ShotSpawnExFn oShotSpawnEx = nullptr;
 static UnitRemoveFn oUnitRemove = nullptr;
+using UnitLoadCategoryFn = void(__fastcall*)(void*, int);
+static UnitLoadCategoryFn oUnitLoadCategory = nullptr;
 static EffectCreateFn oEffectCreate = nullptr;
 using BuildAttachMatrixFn = void(__fastcall*)(void*, void*, char);
 static BuildAttachMatrixFn oBuildAttachMatrix = nullptr;
@@ -2059,6 +2062,32 @@ static char __fastcall hkUnitRemove(void* manager, void* unit)
         g_liveEffectRecipes.erase(unit);
     }
     return result;
+}
+
+static void __fastcall hkUnitLoadCategory(void* manager, int category)
+{
+    uint32_t categoryCount = *(uint32_t*)((uint8_t*)manager + SUNIT_CATEGORY_COUNT_OFFSET);
+    if (category >= 0 && (uint32_t)category < categoryCount &&
+        categoryCount <= SUNIT_MAX_CATEGORIES) {
+        void* unit = *(void**)((uint8_t*)manager + SUNIT_CATEGORY_LISTS_OFFSET +
+                              SUNIT_CATEGORY_LIST_STRIDE * (uint32_t)category);
+        for (int safety = 4096; unit && safety-- > 0;) {
+            void* next = *(void**)((uint8_t*)unit + 0x18);
+            if (IsEffectObject(unit)) {
+                // uEffect subclasses such as uKirigakureEffect call
+                // MtObject::isAlive on the weak attachment at +0x40 from their
+                // load callback. A rollback can destroy or reuse that target
+                // before this category is loaded, so validate it before any
+                // subclass virtual has a chance to dispatch through it.
+                uint64_t* attachment = (uint64_t*)((uint8_t*)unit + 0x40);
+                if (*attachment && !HasCallableDtiVirtual((void*)*attachment))
+                    *attachment = 0;
+            }
+            unit = next;
+        }
+    }
+
+    oUnitLoadCategory(manager, category);
 }
 
 static bool IsLinkedShot(void* shot)
@@ -5788,12 +5817,16 @@ static void __fastcall hkGameUi_move(uint64_t param_1)
 
 static void __fastcall hkSchedulerRebuild(uint64_t scheduler)
 {
-    // UI and battle-message units can both lazily rebuild resource schedulers
-    // from sUnit::load/save. Those arrays are presentation state and allocate
-    // from the live heap, which rollback does not rewind. Do not create another
-    // timeline's scheduler storage while replaying frames.
-    if (g_isResimulating)
+    // UI and battle-message units can both be created through sUnit while
+    // replaying frames. Merely skipping the allocation leaves the new unit in
+    // active state 2 with an empty scheduler, so it survives onto the final
+    // timeline and repeated rollbacks accumulate presentation objects. Retire
+    // it through sUnit's normal state-3 two-phase destruction path instead.
+    if (g_isResimulating) {
+        uint32_t* state = (uint32_t*)(scheduler + 0x10);
+        *state = (*state & ~7u) | 3u;
         return;
+    }
 
     oSchedulerRebuild(scheduler);
 }
@@ -6013,6 +6046,16 @@ void Rollback_InitHooks()
         HookLog("Rollback: hooked sUnit__removeUnit for recipe lifetime\n");
     } else {
         HookLog("Rollback: failed to hook sUnit__removeUnit (%d)\n", s);
+    }
+
+    s = MH_CreateHook((LPVOID)_addr(FN_SUNIT_LOAD_CATEGORY),
+                      (LPVOID)&hkUnitLoadCategory,
+                      (LPVOID*)&oUnitLoadCategory);
+    if (s == MH_OK) {
+        MH_EnableHook((LPVOID)_addr(FN_SUNIT_LOAD_CATEGORY));
+        HookLog("Rollback: hooked sUnit__loadCategory for effect attachment validation\n");
+    } else {
+        HookLog("Rollback: failed to hook sUnit__loadCategory (%d)\n", s);
     }
 
     s = MH_CreateHook(
