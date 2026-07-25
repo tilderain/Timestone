@@ -1653,6 +1653,9 @@ using BuildAttachMatrixFn = void(__fastcall*)(void*, void*, char);
 static BuildAttachMatrixFn oBuildAttachMatrix = nullptr;
 using ShotUpdateHitboxesFn = void(__fastcall*)(void*);
 static ShotUpdateHitboxesFn oShotUpdateHitboxes = nullptr;
+using KingKobunMoveFn = void(__fastcall*)(void*);
+static KingKobunMoveFn oKingKobunMove = nullptr;
+static int g_kingKobunTraceCount = 0;
 using HsienKoSelectAnkiFn = int(__fastcall*)(void*);
 static HsienKoSelectAnkiFn oHsienKoSelectAnki = nullptr;
 using SetReservedAnkiFn = void(__fastcall*)(void*, int);
@@ -2323,6 +2326,36 @@ static void __fastcall hkShotUpdateHitboxes(void* shot)
         return;
 
     ConcreteShotSnapshot_ReapplyCapsules(shot, recipe->second.concrete);
+}
+
+static void __fastcall hkKingKobunMove(void* shot)
+{
+    bool trace = shot && GetObjectDti((uint64_t)shot) == _addr(0x140D4D2B0) &&
+        g_kingKobunTraceCount < 128;
+    uint32_t beforeMode = 0;
+    uint32_t beforePhase = 0;
+    float beforePos = 0.0f;
+    if (trace) {
+        beforeMode = *(uint32_t*)((uint8_t*)shot + 0x214C);
+        beforePhase = *(uint32_t*)((uint8_t*)shot + 0x2140);
+        beforePos = *(float*)((uint8_t*)shot + 0x50);
+    }
+
+    oKingKobunMove(shot);
+
+    if (trace) {
+        HookLog("KINGMOVE shot=0x%llX frame=%d resim=%d mode=%u->%u phase=%u->%u "
+                "x=%.6g->%.6g speed=%.6g facing=%u helper=0x%llX state=0x%08X\n",
+                (uint64_t)shot, RngTraceFrame(), g_multiResimEnabled ? 1 : 0,
+                beforeMode, *(uint32_t*)((uint8_t*)shot + 0x214C),
+                beforePhase, *(uint32_t*)((uint8_t*)shot + 0x2140),
+                beforePos, *(float*)((uint8_t*)shot + 0x50),
+                *(float*)((uint8_t*)shot + 0x2150),
+                *(uint8_t*)((uint8_t*)shot + 0x2154),
+                *(uint64_t*)((uint8_t*)shot + 0x2158),
+                *(uint32_t*)((uint8_t*)shot + 0x10));
+        ++g_kingKobunTraceCount;
+    }
 }
 
 static int SanitizeShotCollisionSlotsForDestruction(void* shot)
@@ -4357,23 +4390,17 @@ void Rollback_RestoreSnapshot(int32_t frame)
             IsAccessibleAddress(liveModelJointAllocation +
                 SACTION_MODEL_JOINT_ALLOCATION_SIZE - 1) &&
             copySize > SACTION_MODEL_JOINT_DATA_OFFSET) {
-            // Throw root motion reads only the model-joint limits at +0x54 and
-            // +0x58. The throw/capture transition also consults +0x68/+0x6C.
-            // Restore those scalar fields in the current allocation, but do
-            // not rewind the rest of the action model payload: it contains
-            // current-timeline transition and animation state, and restoring
-            // it makes the throw end in the floor state during re-simulation.
-            static constexpr SnapshotRange modelJointFields[] = {
-                {SACTION_MODEL_JOINT_DATA_OFFSET + 0x54, 0x08},
-                {SACTION_MODEL_JOINT_DATA_OFFSET + 0x68, 0x08},
-            };
-            for (const SnapshotRange& field : modelJointFields) {
-                if ((size_t)field.offset + field.size <= copySize) {
-                    std::memcpy((uint8_t*)liveModelJointAllocation + field.offset,
-                                slot.data + offset + field.offset,
-                                field.size);
-                }
-            }
+            // The payload is the evaluated action-model joint state. Throw
+            // capture consumes its root-motion result as well as the limits at
+            // +0x54/+0x58. Keeping the future payload makes the first restored
+            // throw tick see already-consumed motion and produce no diagonal
+            // displacement. Rewind the payload in the current allocation while
+            // preserving the live allocator header and pointer identity.
+            size_t payloadSize = copySize - SACTION_MODEL_JOINT_DATA_OFFSET;
+            std::memcpy((uint8_t*)liveModelJointAllocation +
+                            SACTION_MODEL_JOINT_DATA_OFFSET,
+                        slot.data + offset + SACTION_MODEL_JOINT_DATA_OFFSET,
+                        payloadSize);
         } else if (!ownerStillMatches[i] || !objectStillMatches) {
             // The external blend/animation allocation was replaced after the
             // snapshot, or a helper cChr was destroyed/reused. Never write old
@@ -6139,6 +6166,15 @@ void Rollback_InitHooks()
         HookLog("Rollback: hooked sShot__spawnShot\n");
     } else {
         HookLog("Rollback: failed to hook sShot__spawnShot (%d)\n", s);
+    }
+
+    s = MH_CreateHook((LPVOID)_addr(0x1401BA2D0),
+                      (LPVOID)&hkKingKobunMove, (LPVOID*)&oKingKobunMove);
+    if (s == MH_OK) {
+        MH_EnableHook((LPVOID)_addr(0x1401BA2D0));
+        HookLog("Rollback: hooked uShotVulcanKingKobun::move trace\n");
+    } else {
+        HookLog("Rollback: failed to hook uShotVulcanKingKobun::move (%d)\n", s);
     }
 
     s = MH_CreateHook((LPVOID)_addr(FN_RNG_RANDOM_INT),
