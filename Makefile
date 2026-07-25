@@ -79,6 +79,7 @@ ENET_OBJ_FULL := $(addprefix $(OBJDIR)/, $(notdir $(ENET_OBJ)))
 RC_OBJ    := $(OBJDIR)/UMVC3Hook.res
 
 ALL_OBJ   := $(CPP_OBJ) $(C_OBJ) $(ENET_OBJ_FULL) $(RC_OBJ)
+DEP_FILES := $(CPP_OBJ:.o=.d) $(C_OBJ:.o=.d) $(ENET_OBJ_FULL:.o=.d)
 
 # --- Include paths ---
 
@@ -107,8 +108,8 @@ DEFINES   := \
 
 # --- Compiler flags ---
 
-CXXFLAGS  := -O2 -std=c++20 -fpermissive $(DEFINES) $(INCLUDES) -DUMVC3HOOK_GIT_COMMIT=\"$(GIT_COMMIT)\" -DUMVC3HOOK_GIT_DIRTY=$(GIT_DIRTY) -Wall -Wno-unused-variable -Wno-unused-function
-CFLAGS    := -O2 $(DEFINES) $(INCLUDES) -Wall -Wno-unused-variable
+CXXFLAGS  := -O2 -std=c++20 -fpermissive -MMD -MP $(DEFINES) $(INCLUDES) -DUMVC3HOOK_GIT_COMMIT=\"$(GIT_COMMIT)\" -DUMVC3HOOK_GIT_DIRTY=$(GIT_DIRTY) -Wall -Wno-unused-variable -Wno-unused-function
+CFLAGS    := -O2 -MMD -MP $(DEFINES) $(INCLUDES) -Wall -Wno-unused-variable
 LDFLAGS   := -shared -static-libgcc -static-libstdc++
 LIBS      := \
 	-ld3d9 \
@@ -239,6 +240,8 @@ $(INCLUDE_FIX_STAMP):
 
 $(OBJDIR):
 	mkdir -p $(OBJDIR)
+
+-include $(DEP_FILES)
 
 # ---------- Clean ----------
 

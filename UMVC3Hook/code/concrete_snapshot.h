@@ -16,8 +16,14 @@ struct ConcreteShotSnapshot {
         uint32_t kind = 0;
         uint8_t geometry[0x24] = {};
         uint32_t flags = 0;
+        uint64_t parent0 = 0;
+        uint64_t parent1 = 0;
+        int32_t parent0ShotOffset = -1;
+        int32_t parent1ShotOffset = -1;
         uint8_t parentState[0x0C] = {};
         uint8_t localGeometry[0x20] = {};
+        uint8_t sourceGeometry[0x20] = {};
+        bool hasSourceGeometry = false;
     };
 
     void* savedObject = nullptr;
@@ -31,6 +37,10 @@ bool ConcreteShotSnapshot_Capture(void* shot, ConcreteShotSnapshot& out);
 bool ConcreteShotSnapshot_Restore(void* shot, const ConcreteShotSnapshot& snapshot,
                                   const void* const* validTargets,
                                   size_t validTargetCount);
+void ConcreteShotSnapshot_DispatchCapsule(
+    void* shot, const ConcreteShotSnapshot& snapshot, void* metadata,
+    void* primitive, void* cameraOrigin,
+    void (__fastcall* dispatchCapsule)(void*, void*, void*, void*));
 
 // Restore detected scalar spans from concrete character tails while retaining
 // live pointer/embedded-object ownership records, then apply verified overrides.

@@ -65,6 +65,7 @@ static constexpr uintptr_t FN_SSHOT_SPAWN = 0x140150E00;
 static constexpr uintptr_t FN_SSHOT_SPAWN_EX = 0x140150F40;
 static constexpr uintptr_t FN_SSHOT_ENQUEUE_UNIT = 0x1401512A0;
 static constexpr uintptr_t FN_SSHOT_FLUSH_PENDING_UNITS = 0x1401517A0;
+static constexpr uintptr_t FN_USHOT_DISPATCH_CAPSULE = 0x1401C92E0;
 static constexpr uintptr_t VTABLE_USHOT_VULCAN_ZIREITOU = 0x140AC0E20;
 static constexpr uintptr_t FN_SUNIT_ADD_UNIT = 0x14051A6B0;
 static constexpr uintptr_t FN_SUNIT_REMOVE_UNIT = 0x14051B9F0;
@@ -715,9 +716,9 @@ static bool   g_netplayLiveInit   = false;
 static char   g_netplayLivePath[260] = {};
 static int    g_netplayLiveReset   = 0;
 
-static std::string g_pendingNPLiveJSON[256];
-static int32_t     g_pendingNPLiveFrame[256];
-static constexpr int NETPLAY_LIVE_HISTORY = 256;
+static std::string g_pendingNPLiveJSON[512];
+static int32_t     g_pendingNPLiveFrame[512];
+static constexpr int NETPLAY_LIVE_HISTORY = 512;
 static std::string g_netplayLiveHistory[NETPLAY_LIVE_HISTORY];
 static int32_t     g_netplayLiveHistoryFrame[NETPLAY_LIVE_HISTORY];
 static bool        g_netplayLiveDesyncFlushed = false;
@@ -1279,6 +1280,56 @@ extern "C" void Rollback_FlushNetplayLive(int32_t frame)
             NETPLAY_LIVE_HISTORY, newestFrame);
 }
 
+bool Rollback_FlushNDJSONOnCrash()
+{
+    bool flushed = false;
+
+    // rdiag records are written immediately but its stdio buffer is normally
+    // flushed only once per second.
+    if (g_diagNdjsonFile && fflush(g_diagNdjsonFile) == 0)
+        flushed = true;
+
+    if (!g_ndjsonLoggingEnabled || !g_netplayLiveInit ||
+        !g_netplayLivePath[0] || g_netplayLiveDesyncFlushed) {
+        return flushed;
+    }
+
+    int32_t newestFrame = -1;
+    for (int i = 0; i < NETPLAY_LIVE_HISTORY; ++i) {
+        if (g_netplayLiveHistoryFrame[i] > newestFrame)
+            newestFrame = g_netplayLiveHistoryFrame[i];
+    }
+    for (int i = 0; i < 256; ++i) {
+        if (g_pendingNPLiveFrame[i] > newestFrame)
+            newestFrame = g_pendingNPLiveFrame[i];
+    }
+    if (newestFrame < 0)
+        return flushed;
+
+    FILE* file = fopen(g_netplayLivePath, "a");
+    if (!file)
+        return flushed;
+
+    const int32_t firstFrame = newestFrame - NETPLAY_LIVE_HISTORY + 1;
+    for (int32_t frame = firstFrame; frame <= newestFrame; ++frame) {
+        const int historyIndex = (uint32_t)frame % NETPLAY_LIVE_HISTORY;
+        if (g_netplayLiveHistoryFrame[historyIndex] == frame) {
+            const std::string& json = g_netplayLiveHistory[historyIndex];
+            fwrite(json.data(), 1, json.size(), file);
+        }
+
+        const int pendingIndex = (uint32_t)frame % 256;
+        if (g_pendingNPLiveFrame[pendingIndex] == frame) {
+            const std::string& json = g_pendingNPLiveJSON[pendingIndex];
+            fwrite(json.data(), 1, json.size(), file);
+        }
+    }
+
+    flushed = fflush(file) == 0 || flushed;
+    fclose(file);
+    return flushed;
+}
+
 extern "C" void Rollback_CommitPendingNetplayLive(int32_t frame) {
     if (!g_ndjsonLoggingEnabled) return;
     int idx = (uint32_t)frame % 256;
@@ -1580,7 +1631,6 @@ struct SnapshotSlot {
 static SnapshotSlot g_slots[ROLLBACK_WINDOW];
 static std::unordered_map<void*, ShotRecipe> g_liveShotRecipes;
 static std::unordered_map<void*, EffectRecipe> g_liveEffectRecipes;
-static std::unordered_set<void*> g_rollbackRetiredEffects;
 static uint64_t g_shotSpawnSequence = 0;
 static uint64_t g_effectSpawnSequence = 0;
 
@@ -1601,6 +1651,8 @@ static void(__fastcall* oKirigakureEffectUpdate)(void* effect) = nullptr;
 static EffectCreateFn oEffectCreate = nullptr;
 using BuildAttachMatrixFn = void(__fastcall*)(void*, void*, char);
 static BuildAttachMatrixFn oBuildAttachMatrix = nullptr;
+using ShotDispatchCapsuleFn = void(__fastcall*)(void*, void*, void*, void*);
+static ShotDispatchCapsuleFn oShotDispatchCapsule = nullptr;
 using HsienKoSelectAnkiFn = int(__fastcall*)(void*);
 static HsienKoSelectAnkiFn oHsienKoSelectAnki = nullptr;
 using SetReservedAnkiFn = void(__fastcall*)(void*, int);
@@ -2041,14 +2093,6 @@ static char __fastcall hkUnitRemove(void* manager, void* unit)
     }
     if (IsEffectObject(unit)) {
         SanitizeEffectForDestruction(unit);
-        if (g_rollbackRetiredEffects.erase(unit) != 0) {
-            // The effect graph was not snapshotted, so apparent pointer and
-            // vtable validity cannot establish allocator ownership. Do not
-            // return rollback-ambiguous generator storage to the shared heap.
-            *(uint64_t*)((uint8_t*)unit + 0x218) = 0;
-            *(uint64_t*)((uint8_t*)unit + 0x220) = 0;
-            *(uint16_t*)((uint8_t*)unit + 0x208) = 0;
-        }
     }
 
     char result = oUnitRemove(manager, unit);
@@ -2208,6 +2252,20 @@ static void __fastcall hkBuildAttachMatrix(void* arm, void* output, char reset)
     // laser quaternion during re-simulation.
     (void)reset;
     std::memcpy(output, bytes + 0x90, 0x40);
+}
+
+static void __fastcall hkShotDispatchCapsule(void* shot, void* metadata,
+                                              void* primitive,
+                                              void* cameraOrigin)
+{
+    auto recipe = g_liveShotRecipes.find(shot);
+    if (recipe != g_liveShotRecipes.end() && recipe->second.reconstructed) {
+        ConcreteShotSnapshot_DispatchCapsule(
+            shot, recipe->second.concrete, metadata, primitive, cameraOrigin,
+            oShotDispatchCapsule);
+        return;
+    }
+    oShotDispatchCapsule(shot, metadata, primitive, cameraOrigin);
 }
 
 static int SanitizeShotCollisionSlotsForDestruction(void* shot)
@@ -2510,7 +2568,6 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
             uint32_t* state = (uint32_t*)((uint8_t*)effect + 0x10);
             if (IsEffectObject(effect) && (*state & 7u) < 3u) {
                 *state = (*state & ~7u) | 3u;
-                g_rollbackRetiredEffects.insert(effect);
                 ++retiredEffects;
             }
             effect = next;
@@ -3344,6 +3401,33 @@ static int BuildRegions(Region* regions, int maxRegions)
                  //           animFields[8], animFields[9], animFields[10], animFields[11],
                  //           animFields[12], animFields[13], animFields[14], animFields[15]);
                     add((void*)character, finalSize, 0, vtable, true);
+
+                    // processTarget1 indexes these seven heap-backed tables
+                    // using the packed counts at +0x1440 and immediately calls
+                    // virtual +0x40 on each entry. Rewind each active table
+                    // with its owning slot so its entries stay synchronized
+                    // with the restored count.
+                    static constexpr uint32_t targetOffsets[] = {
+                        0x1408, 0x1410, 0x1418, 0x1420,
+                        0x1428, 0x1430, 0x1438,
+                    };
+                    static constexpr uint32_t targetStrides[] = {
+                        0xBB0, 0xBB0, 0xB90, 0xB90,
+                        0xBB0, 0xBB0, 0xB80,
+                    };
+                    uint32_t packedTargetCounts = *(uint32_t*)(character + 0x1440);
+                    for (size_t target = 0;
+                         target < sizeof(targetOffsets) / sizeof(targetOffsets[0]);
+                         ++target) {
+                        uint32_t count = (packedTargetCounts >> (target * 4)) & 0xF;
+                        uint64_t ownerSlot = character + targetOffsets[target];
+                        uint64_t table = *(uint64_t*)ownerSlot;
+                        if (table && count > 0 && count <= 10) {
+                            add((void*)table,
+                                (size_t)count * targetStrides[target],
+                                ownerSlot);
+                        }
+                    }
 
                     // Restore motion state and its external interpolation data
                     // together. Keeping one live while rewinding the other
@@ -5465,7 +5549,6 @@ void Rollback_FreeSnapshots()
     }
     g_liveShotRecipes.clear();
     g_liveEffectRecipes.clear();
-    g_rollbackRetiredEffects.clear();
     g_shotSpawnSequence = 0;
     g_sMvc3Main = 0;
 }
@@ -6022,6 +6105,16 @@ void Rollback_InitHooks()
         HookLog("Rollback: hooked uShot attachment transform guard\n");
     } else {
         HookLog("Rollback: failed to hook uShot attachment transform guard (%d)\n", s);
+    }
+
+    s = MH_CreateHook((LPVOID)_addr(FN_USHOT_DISPATCH_CAPSULE),
+                      (LPVOID)&hkShotDispatchCapsule,
+                      (LPVOID*)&oShotDispatchCapsule);
+    if (s == MH_OK) {
+        MH_EnableHook((LPVOID)_addr(FN_USHOT_DISPATCH_CAPSULE));
+        HookLog("Rollback: hooked uShot capsule collision source\n");
+    } else {
+        HookLog("Rollback: failed to hook uShot capsule collision source (%d)\n", s);
     }
 
     s = MH_CreateHook((LPVOID)_addr(FN_SUNIT_REMOVE_UNIT),

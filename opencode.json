@@ -1,12 +1,33 @@
 {
   "$schema": "https://opencode.ai/config.json",
   "permission": {
-    "read": "allow",
+    "read": {
+      "*": "allow",
+      "/media/god/tempData/SteamLibrary/steamapps/common/ULTIMATE MARVEL VS. CAPCOM 3/**": "allow"
+    },
     "edit": "allow",
     "glob": "allow",
     "grep": "allow",
     "task": "allow",
     "todowrite": "allow",
-    "bash": { "make -j8": "allow", "make -j8 2>&1": "allow", "tail *": "allow", "*": "ask" }
+    "bash": {
+      "*": "ask",
+      "make -j8": "allow",
+      "make -j8 2>&1": "allow",
+      "tail *": "allow",
+      "git diff *": "allow",
+      "git status *": "allow",
+      "git log *": "allow",
+      "jq *": "allow",
+      "python3 compare.py": "allow",
+      "python3 compare.py *": "allow",
+      "x86_64-w64-mingw32-objdump *": "allow",
+      "x86_64-w64-mingw32-nm *": "allow",
+      "x86_64-w64-mingw32-addr2line *": "allow"
+    },
+    "external_directory": {
+      "*": "ask",
+      "/media/god/tempData/SteamLibrary/steamapps/common/ULTIMATE MARVEL VS. CAPCOM 3/**": "allow"
+    }
   }
 }

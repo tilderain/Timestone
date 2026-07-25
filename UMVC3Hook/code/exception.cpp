@@ -259,6 +259,8 @@ LONG WINAPI ExceptionHandler(PEXCEPTION_POINTERS info)
         GetFullPathNameA("umvc3_crash.log", MAX_PATH, crashLogPath, nullptr);
     }
 
+    const bool ndjsonFlushed = Rollback_FlushNDJSONOnCrash();
+
     FILE* file = std::fopen(crashLogPath, "a");
     if (file) {
         SYSTEMTIME time{};
@@ -272,6 +274,7 @@ LONG WINAPI ExceptionHandler(PEXCEPTION_POINTERS info)
             UMVC3HOOK_GIT_DIRTY ? " (dirty)" : "",
             static_cast<unsigned long>(code),
             exception->ExceptionAddress, static_cast<unsigned long>(GetCurrentThreadId()));
+        std::fprintf(file, "ndjson_flush=%s\n", ndjsonFlushed ? "completed" : "unavailable");
 
         std::fprintf(file,
             "RIP=0x%016llX RSP=0x%016llX RBP=0x%016llX\n"

@@ -126,6 +126,9 @@ Hooks on `sShot__spawnShot` and `sShot__spawnShotEx` record a `ShotRecipe`:
 - A runtime-DTI-sized `ConcreteShotSnapshot` used for an ownership-filtered
   overlay of the common body and concrete tail.
 - Collision primitive gameplay state.
+- Collision primitive parent identity when the parent is the shot itself or a
+  stable roster character. Reconstructed self references are remapped to the
+  fresh shot address.
 
 Only recipes for shots still linked in `sShot` are copied into a frame snapshot.
 Terminal/deferred-cleanup cases are filtered so rollback does not resurrect a
@@ -160,6 +163,59 @@ overlay. Their packed float values can resemble readable addresses when viewed
 as a qword, causing the generic pointer-preservation heuristic to retain factory
 timing. In the 2026-07-24 Ryu capture, `mTimeInterpolationRate` remained at `1`
 instead of the saved `4`, delaying the Hadouken phase transition by three ticks.
+
+Collision capsule parents require explicit identity remapping. Ghidra's
+`cHitPrimCapsule_vfn58` reads parent references at `+0x58/+0x60`, parent/joint
+state at `+0x68`, and local endpoints at `+0x80/+0x90` before writing world
+endpoints at `+0x20/+0x30`. Saved references to the old shot or an inline object
+within it are mapped by relative offset into the reconstructed shot; references
+to stable roster characters are restored directly, while other effect-owned
+references remain native.
+
+The normal shot collision path has an additional authoritative source. Ghidra's
+`uShot__updateHitboxes` calls `uShot__forEachExtraSlot_dispatchCollision`, whose
+capsule branch at `0x1401C92E0` copies attack-info metadata `+0x20/+0x40` into
+the primitive's local endpoints `+0x80/+0x90` on every tick before dispatching
+virtual `+0x1C8` to calculate world endpoints. Restoring only the primitive is
+therefore temporary. Restore rewinds those two vectors in the fresh node's
+native metadata record as well. The source must be the saved primitive's
+`+0x80/+0x90` local geometry, not a copy of the resource metadata: the latter
+can retain setup-phase zeros even though the evolved primitive is correct.
+Registration can reset that record after the restore, so reconstructed shots
+replace the source only at the capsule dispatcher at `0x1401C92E0`. The hook
+matches the exact live primitive pointer to its saved slot/index, copies the
+native `0x60`-byte source record to stack storage, replaces only its endpoint
+vectors, and passes that private source to the original dispatcher. Native code
+then copies the vectors and computes world endpoints synchronously without ever
+writing shared `rShot` metadata.
+The Tron swarm has another representation: its saved primitive can have correct
+world endpoints at `+0x20/+0x30` while the local cache at `+0x80/+0x90` is zero
+or contains only sub-centimeter floating-point residue. Capture treats local
+components below `0.01` as empty and reconstructs the private source vectors as
+`saved world endpoint - saved shot position`. Inactive setup primitives derive
+zero and stay on the native path. Active swarm capsules derive the native
+`-110,+30` and `+110,+30` endpoints without hard-coding those values or relying
+on a concrete DTI that can differ between the super's controller and child shots.
+
+Character target-processing tables must remain synchronized with the character
+body. `uCharacter__processTarget1` indexes seven heap-backed tables through
+`+0x1408..+0x1438` using packed counts at `+0x1440`, then calls virtual `+0x40`
+on each active entry. Restoring a count without its corresponding table caused
+the `2026-07-24 23:04:41` null-vtable crash at `0x140201007`. Active table ranges
+are now captured separately and restored only while the character's owner slot
+still points to the captured allocation.
+Zero setup-phase endpoints are not reapplied. A shot reconstructed before its
+attack activates must be allowed to obtain its later geometry from native
+metadata; otherwise the stale snapshot zeros collapse every future capsule to
+the shot origin. The `20260724_220943` capture demonstrated this case: shot
+movement and lifetime matched, while the host capsules remained degenerate and
+the client used the expected `-110,+30` to `+110,+30` local endpoints.
+Leaving the modified vectors in shared `rShot` storage corrupted allocator state
+during later effect-generator allocation in the `20260724_220644` crash. It must
+not replace the metadata pointer at collision entry
+`+0x48`: the `20260724_212647` capture showed that doing so made all four
+reconstructed swarm capsules disappear on the next resim tick, even though the
+primitive arrays and shots remained present.
 
 This is reconstruction, not heap rewind. A restored shot may have a different
 address from the shot captured in the snapshot. Code that stores historical

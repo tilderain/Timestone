@@ -3,6 +3,7 @@
 #include "concrete_snapshot.h"
 #include "mk10utils.h"
 
+#include <cmath>
 #include <cstring>
 
 namespace {
@@ -83,6 +84,18 @@ bool Executable(uint64_t address)
     constexpr DWORD executable = PAGE_EXECUTE | PAGE_EXECUTE_READ |
         PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
     return (mbi.Protect & executable) != 0;
+}
+
+bool HasLocalGeometry(const uint8_t* geometry)
+{
+    constexpr size_t components[] = {0x00, 0x04, 0x08, 0x10, 0x14, 0x18};
+    for (size_t offset : components) {
+        float value = 0.0f;
+        std::memcpy(&value, geometry + offset, sizeof(value));
+        if (!std::isfinite(value)) return false;
+        if (std::fabs(value) >= 0.01f) return true;
+    }
+    return false;
 }
 
 uint64_t GetDti(void* object)
@@ -295,18 +308,68 @@ void CaptureCollisionPrimitives(const uint8_t* shot, ConcreteShotSnapshot& out)
             std::memcpy(saved.geometry, (void*)(primitive + 0x20),
                         sizeof(saved.geometry));
             saved.flags = *(uint32_t*)(primitive + 0x50);
+            saved.parent0 = *(uint64_t*)(primitive + 0x58);
+            saved.parent1 = *(uint64_t*)(primitive + 0x60);
+            auto shotOffset = [&](uint64_t parent) {
+                uintptr_t shotStart = (uintptr_t)shot;
+                uintptr_t shotEnd = shotStart + out.body.size();
+                return parent >= shotStart && parent < shotEnd
+                    ? (int32_t)(parent - shotStart) : -1;
+            };
+            saved.parent0ShotOffset = shotOffset(saved.parent0);
+            saved.parent1ShotOffset = shotOffset(saved.parent1);
             std::memcpy(saved.parentState, (void*)(primitive + 0x68),
                         sizeof(saved.parentState));
             std::memcpy(saved.localGeometry, (void*)(primitive + 0x80),
                         sizeof(saved.localGeometry));
+            if (HasLocalGeometry(saved.localGeometry)) {
+                std::memcpy(saved.sourceGeometry, saved.localGeometry,
+                            sizeof(saved.sourceGeometry));
+                saved.hasSourceGeometry = true;
+            } else {
+                // Some resource-driven capsules retain correct world endpoints
+                // while their primitive-local cache is zero or contains only
+                // floating-point residue. Their collision matrices are
+                // shot-local translations, so reconstruct the source vectors
+                // from the saved world capsule and shot origin. Inactive
+                // setup primitives derive zero and remain on the native path.
+                const float* worldStart = (const float*)saved.geometry;
+                const float* worldEnd = (const float*)(saved.geometry + 0x10);
+                const float* shotPos = (const float*)(shot + 0x50);
+                float* sourceStart = (float*)saved.sourceGeometry;
+                float* sourceEnd = (float*)(saved.sourceGeometry + 0x10);
+                bool finite = true;
+                for (size_t axis = 0; axis < 3; ++axis) {
+                    finite = finite && std::isfinite(worldStart[axis]) &&
+                        std::isfinite(worldEnd[axis]) &&
+                        std::isfinite(shotPos[axis]);
+                    sourceStart[axis] = worldStart[axis] - shotPos[axis];
+                    sourceEnd[axis] = worldEnd[axis] - shotPos[axis];
+                }
+                saved.hasSourceGeometry = finite &&
+                    HasLocalGeometry(saved.sourceGeometry);
+            }
             out.collisionPrimitives.push_back(saved);
         }
     }
 }
 
 void RestoreCollisionPrimitives(uint8_t* shot,
-                                const ConcreteShotSnapshot& snapshot)
+                                 const ConcreteShotSnapshot& snapshot,
+                                 const void* const* validTargets,
+                                 size_t validTargetCount)
 {
+    auto restoreParent = [&](uint64_t savedParent, int32_t shotOffset,
+                             uint64_t liveParent) {
+        if (shotOffset >= 0 && (size_t)shotOffset < snapshot.body.size())
+            return (uint64_t)shot + (uint32_t)shotOffset;
+        for (size_t target = 0; target < validTargetCount; ++target) {
+            if (savedParent == (uint64_t)validTargets[target])
+                return savedParent;
+        }
+        return liveParent;
+    };
+
     for (const auto& saved : snapshot.collisionPrimitives) {
         if (saved.slot >= kShotCollisionSlotCount) continue;
         uint64_t primitive = GetCollisionPrimitive(shot, saved.slot, saved.index);
@@ -317,10 +380,17 @@ void RestoreCollisionPrimitives(uint8_t* shot,
         std::memcpy((void*)(primitive + 0x20), saved.geometry,
                     sizeof(saved.geometry));
         *(uint32_t*)(primitive + 0x50) = saved.flags;
+        *(uint64_t*)(primitive + 0x58) = restoreParent(
+            saved.parent0, saved.parent0ShotOffset,
+            *(uint64_t*)(primitive + 0x58));
+        *(uint64_t*)(primitive + 0x60) = restoreParent(
+            saved.parent1, saved.parent1ShotOffset,
+            *(uint64_t*)(primitive + 0x60));
         std::memcpy((void*)(primitive + 0x68), saved.parentState,
                     sizeof(saved.parentState));
         std::memcpy((void*)(primitive + 0x80), saved.localGeometry,
                     sizeof(saved.localGeometry));
+
     }
 }
 
@@ -476,13 +546,42 @@ bool ConcreteShotSnapshot_Restore(void* shot,
     // but rewind mAtkInfoId, flags, combo and timing state through mAnmNo.
     CopyRange(live, source, liveSize, {0x1498, 0x28});
     RestoreAttackTargets(live, source, liveSize, validTargets, validTargetCount);
-    RestoreCollisionPrimitives(live, snapshot);
+    RestoreCollisionPrimitives(live, snapshot, validTargets, validTargetCount);
 
     for (const auto& saved : snapshot.collisionPrimitives) {
         if (!GetCollisionPrimitive(live, saved.slot, saved.index))
             return false;
     }
     return true;
+}
+
+void ConcreteShotSnapshot_DispatchCapsule(
+    void* shot, const ConcreteShotSnapshot& snapshot, void* metadata,
+    void* primitive, void* cameraOrigin,
+    void (__fastcall* dispatchCapsule)(void*, void*, void*, void*))
+{
+    if (!shot || !metadata || !primitive || !dispatchCapsule) return;
+
+    uint8_t* live = (uint8_t*)shot;
+    for (const auto& saved : snapshot.collisionPrimitives) {
+        if (saved.slot >= kShotCollisionSlotCount) continue;
+        if (!saved.hasSourceGeometry) continue;
+        if (GetCollisionPrimitive(live, saved.slot, saved.index) !=
+            (uint64_t)primitive) continue;
+
+        // Reconstruct the per-shot collision source on the stack. Native code
+        // copies these vectors into the primitive and computes its world
+        // endpoints synchronously, while the shared rShot metadata remains
+        // untouched.
+        uint8_t source[0x60];
+        std::memcpy(source, metadata, sizeof(source));
+        std::memcpy(source + 0x20, saved.sourceGeometry, 0x0C);
+        std::memcpy(source + 0x40, saved.sourceGeometry + 0x10, 0x0C);
+        dispatchCapsule(shot, source, primitive, cameraOrigin);
+        return;
+    }
+
+    dispatchCapsule(shot, metadata, primitive, cameraOrigin);
 }
 
 void ConcreteCharacterSnapshot_RestoreFields(void* character,
