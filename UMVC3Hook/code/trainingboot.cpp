@@ -23,11 +23,8 @@ static constexpr uintptr_t BATTLE_SETTING_COMMIT_ONE_PLAY    = 0x140214a40;
 static constexpr uintptr_t BATTLE_SETTING_SET_CHAR_ID        = 0x140146560;
 static constexpr uintptr_t BATTLE_SETTING_SET_ASSIST_TYPE    = 0x1401461e0;
 
-// sArea (to transition to battle)
+// sArea scene-chain manager
 static constexpr uintptr_t SAREA_INSTANCE_PTR                = 0x140e17a80;
-
-// DTI for aNextBattle (type descriptor for the battle area)
-static constexpr uintptr_t ANEXTBATTLE_DTI                   = 0x140d50618;
 
 // aChrSelectBlank DTI (loading screen before battle)
 static constexpr uintptr_t ACHRSELBLANK_DTI                  = 0x140d500f0;
@@ -346,8 +343,11 @@ void BootIntoTraining()
     //   7 = Unknown mode 7
     //   8 = Heroes & Heralds
     //   9 = Online (alt)
-    ((SetInt_t)_addr(BATTLE_SETTING_SET_BATTLE_TYPE))(bs, 0);
-    HookLog("TrainingBoot: Battle type set to 0\n");
+    ((SetInt_t)_addr(BATTLE_SETTING_SET_BATTLE_TYPE))(bs, 5);
+    HookLog("TrainingBoot: Battle type set to training (5)\n");
+
+    typedef void(__fastcall* CommitOnePlay_t)(uint64_t, uint8_t);
+    ((CommitOnePlay_t)_addr(BATTLE_SETTING_COMMIT_ONE_PLAY))(bs, 1);
 
     // --- Follow training mode init flow (aChrSelect__onSelectionComplete, uVar3==6) ---
 
@@ -391,12 +391,22 @@ void BootIntoTraining()
     ((ChrSelectUtil_t)_addr(ACHRSELECT_UTIL_4AC0))(ui, 0);
     HookLog("TrainingBoot: UI util flag set (ui+0x5b74 = 0)\n");
 
+    // Match the native training token used when leaving a training battle.
+    ((SetInt_t)_addr(SGAMEUI_SET_BOOT_STATE))(ui, 13);
+
     // 4. sGameUI__createLoadingScreen(ui, 0, 0) — create loading screen object
    //typedef void(__fastcall* CreateLoading_t)(uint64_t, uint8_t, uint32_t);
    // ((CreateLoading_t)_addr(SGAMEUI_CREATE_LOADING_SCREEN))(ui, 0, 0);
     //HookLog("TrainingBoot: Loading screen created\n");
 
-    // 5. Area transition to aChrSelectBlank (loading screen → battle area)
+    // 5. Set pad-to-player mapping before entering the battle area. setArea can
+    //    synchronously initialize battle input, so doing this afterward is too
+    //    late for the first controller-assignment check.
+    SetupPadToPlayerMapping();
+
+    // 6. Queue the native transition intermediary. It waits for stage resources,
+    //    resolves aStage%03d, and queues that DTI; sArea then constructs the
+    //    target's area-parent chain through aGame and aAction.
     uint64_t sArea = *(uint64_t*)_addr(SAREA_INSTANCE_PTR);
     if (!sArea) {
         HookLog("TrainingBoot: FAILED - sArea instance is null\n");
@@ -407,12 +417,7 @@ void BootIntoTraining()
     typedef void(__fastcall* SetArea_t)(uint64_t, void*);
     SetArea_t setArea = (SetArea_t)(*(uint64_t*)(*(uint64_t*)sArea + 0x50));
     setArea(sArea, (void*)_addr(ACHRSELBLANK_DTI));
-    HookLog("TrainingBoot: Area transition to aChrSelectBlank!\n");
-
-    // 6. Set pad-to-player mapping + clear keyboard disable flags.
-    //    In the normal Press-Start flow, savedata.bin loading does this
-    //    during menu init. We bypass the menu, so do it directly here.
-    SetupPadToPlayerMapping();
+    HookLog("TrainingBoot: Queued aChrSelectBlank battle transition\n");
 }
 
 // ---------------------------------------------------------------------------

@@ -373,11 +373,19 @@ DWORD WINAPI MainThread(LPVOID lpReserved)
 	bool attached = false;
 	do
 	{
-		if (kiero::init(kiero::RenderType::D3D9) == kiero::Status::Success)
+		// Reuse the engine's real D3D9 device. Kiero's normal initialization
+		// creates a second device, which serializes with native driver startup.
+		uint64_t render = *(uint64_t*)_addr(0x140E179A8);
+		void* device = render ? *(void**)(render + 0xB0) : nullptr;
+		if (device && kiero::initFromD3D9Device(device) == kiero::Status::Success)
 		{
 			kiero::bind(42, (void**)& oEndScene, (void*)hkEndScene);
-			BootTimer_Stamp("kiero::init success");
+			BootTimer_Stamp("Hooked engine D3D9 device");
 			attached = true;
+		}
+		else
+		{
+			Sleep(1);
 		}
 	} while (!attached);
 	return TRUE;
@@ -389,19 +397,20 @@ static TitleLogoUpdate_t oTitleLogoUpdate = nullptr;
 
 void __fastcall Hook_titleLogoUpdate(uintptr_t param_1)
 {
-	BootTimer_Stamp("aTitleLogo__update first call");
+	static bool firstCall = true;
+	if (firstCall) {
+		BootTimer_Stamp("aTitleLogo__update first call");
+		firstCall = false;
+	}
 
 	oTitleLogoUpdate(param_1);
 
-	// Skip logo movies (state 1) when training mode is active.
-	// The caution screen (state 0) is handled by a byte patch in processBootSequence
-	// that skips the MtAnim display creation, keeping archive loading intact.
+	// State 0 queues the common boot archives needed by battle. Once it advances,
+	// configure training immediately; aTitle itself is only menu setup here.
 	if (GetLaunchOption() == LAUNCH_TRAINING || GetLaunchOption() == LAUNCH_DUAL_TRAINING) {
 		int parentState = *(int*)(param_1 + 0x78);
 		if (parentState == 1) {
-			*(int*)(param_1 + 0x7c) = 0;
-			*(int*)(param_1 + 0x78) = 2;
-			HookLog("UMVC3Hook: Skipped logo movies (state 1 -> 2)\n");
+			BootIntoTraining();
 		}
 	}
 }
@@ -711,6 +720,12 @@ void OnInitializeHook()
 	// directly into a battle area with training mode settings.
 
 	if (opt == LAUNCH_TRAINING || opt == LAUNCH_DUAL_TRAINING) {
+		// The direct aTitle transition still runs aTitle__load, which creates a
+		// purely visual uLoading unit at 0x14021706F. Keep its state countdown and
+		// resource readiness checks, but skip constructing the loading screen.
+		Memory::VP::Nop(_addr(0x14021706F), 5);
+		HookLog("UMVC3Hook: Disabled aTitle loading-screen creation for training boot\n");
+
 		// Backup patch: in uBattleUiTrainingCheckP2PadAssigned_maybe @ 0x1402E57EE,
 		// change JNZ to JMP so the function ALWAYS returns 1 (skip P2 wait state)
 		// even if sPadCheckSlotDeviceAlive_maybe somehow returns false.

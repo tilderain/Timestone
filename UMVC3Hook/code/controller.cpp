@@ -1126,11 +1126,11 @@ extern "C" void Controller_OnFrameStart()
 
     if (g_rollbackFrames > 0)
     {
-        // Only do rollback logic when in-game (aNextBattle step >= 2)
-        typedef uint64_t(__fastcall* GetAmaterasu_t)();
-        static GetAmaterasu_t getAmaterasu = (GetAmaterasu_t)_addr(0x140001A90);
-        uint64_t aNextBattle = getAmaterasu();
-        int step = aNextBattle ? *(int*)(aNextBattle + 0xD8) : 0;
+        // Only do rollback logic once the sAction battle step has started.
+        typedef uint64_t(__fastcall* GetAction_t)();
+        static GetAction_t getAction = (GetAction_t)_addr(0x140001A90);
+        uint64_t action = getAction();
+        int step = action ? *(int*)(action + 0xD8) : 0;
         if (step >= 2)
         {
             // Bound prediction by the configured input delay plus rollback
@@ -1704,13 +1704,6 @@ static void __fastcall hkprocessFrameInput(uint64_t cChrInput)
 static void __fastcall hkpadPollAllSlots(uint64_t sPad)
 {
     opadPollAllSlots(sPad);
-
-    if (Netplay_IsActive())
-        return;
-
-    // Copy P1's processed pad input → P2's pad slot input area.
-    *(uint32_t*)(sPad + 1 * PAD_SLOT_STRIDE + PAD_SLOT_INPUT) =
-        *(uint32_t*)(sPad + 0 * PAD_SLOT_STRIDE + PAD_SLOT_INPUT);
 }
 
 static uint64_t __fastcall hkpadSlotReadDevice(uint64_t slotBase)

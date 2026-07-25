@@ -48,7 +48,7 @@ static constexpr uintptr_t PTR_SREPLAY      = 0x140d4d9d8;
 static constexpr uintptr_t PTR_SCHARACTER   = 0x140d44a70;
 static constexpr uintptr_t PTR_SSHOT        = 0x140d47f40;
 static constexpr uintptr_t PTR_SHITSOLVER   = 0x140d44060;
-static constexpr uintptr_t PTR_ANEXTBATTLE  = 0x140d47e68;
+static constexpr uintptr_t PTR_SACTION      = 0x140d47e68;
 static constexpr uintptr_t PTR_SGAMEUI      = 0x140d53a18;
 static constexpr uintptr_t PTR_SMAIN        = 0x140e177e8;
 static constexpr uintptr_t PTR_SGAMEEFFECT  = 0x140d46470;
@@ -3309,10 +3309,10 @@ static int BuildRegions(Region* regions, int maxRegions)
         add((void*)sHitSolver, SHITSOLVER_SIZE);
     }
 
-    // ---- 4. aNextBattle — battle state machine (static manager) ----
+    // ---- 4. sAction — battle state machine (static manager) ----
     {
-        uint64_t aNextBattle = *(uint64_t*)_addr(PTR_ANEXTBATTLE);
-        add((void*)aNextBattle, 0x20000);
+        uint64_t sAction = *(uint64_t*)_addr(PTR_SACTION);
+        add((void*)sAction, 0x20000);
     }
 
     // ---- 5. sGameUI — SKIPPED: has internal ptrs (ui elements, text buffers) ---
@@ -5770,13 +5770,13 @@ static void __fastcall hkMvc3Main_move(uint64_t param_1)
     if (Netplay_IsActive() && FrameStepper_IsBattleSynchronized() &&
         !g_isResimulating && Controller_IsRollbackEnabled())
     {
-        // Only snapshot + rollback when in-game (aNextBattle step >= 2,
+        // Only snapshot + rollback when the sAction battle step is active
         // i.e. countdown or fighting).  Menus/loading screens don't need
         // rollback state and the frame counter jumps around there.
-        typedef uint64_t(__fastcall* GetAmaterasu_t)();
-        static GetAmaterasu_t getAmaterasu = (GetAmaterasu_t)_addr(0x140001A90);
-        uint64_t aNextBattle = getAmaterasu();
-        int step = aNextBattle ? *(int*)(aNextBattle + 0xD8) : 0;
+        typedef uint64_t(__fastcall* GetAction_t)();
+        static GetAction_t getAction = (GetAction_t)_addr(0x140001A90);
+        uint64_t action = getAction();
+        int step = action ? *(int*)(action + 0xD8) : 0;
         if (step >= 0)
         {
             // Clear post-resim boundary flag at start of each frame.

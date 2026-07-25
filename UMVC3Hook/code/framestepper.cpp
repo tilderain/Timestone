@@ -404,9 +404,9 @@ static void __fastcall HookedMove(void* sMvc3Main)
 
         if (!g_battleSynchronized)
         {
-            typedef uint64_t(__fastcall* GetAmaterasu_t)();
-            static GetAmaterasu_t getAmaterasu = (GetAmaterasu_t)_addr(0x140001A90);
-            uint64_t action = getAmaterasu();
+            typedef uint64_t(__fastcall* GetAction_t)();
+            static GetAction_t getAction = (GetAction_t)_addr(0x140001A90);
+            uint64_t action = getAction();
             int32_t step = action ? *(int32_t*)(action + 0xD8) : 0;
             int32_t pendingStep = action ? *(int32_t*)(action + 0xDC) : -1;
             int32_t introSubstate = action ? *(int32_t*)(action + 0xE0) : 0;
@@ -469,17 +469,17 @@ static void __fastcall HookedMove(void* sMvc3Main)
     // ===== Netplay: logging only =====
     if (Netplay_IsActive())
     {
-        // Check aNextBattle step to know if gameplay has started
-        typedef uint64_t(__fastcall* GetAmaterasu_t)();
-        GetAmaterasu_t getAmaterasuObj = (GetAmaterasu_t)_addr(0x140001A90);
-        uint64_t aNextBattle = getAmaterasuObj();
-        int step = aNextBattle ? *(int*)(aNextBattle + 0xD8) : 0;
+        // Check the sAction step to know if gameplay has started.
+        typedef uint64_t(__fastcall* GetAction_t)();
+        GetAction_t getAction = (GetAction_t)_addr(0x140001A90);
+        uint64_t action = getAction();
+        int step = action ? *(int*)(action + 0xD8) : 0;
 
         static bool s_inputStarted = false;
         if (step >= 0 && !s_inputStarted) {
             s_inputStarted = true;
-            HookLog("Netplay: First frame input ready (step=%d, aNextBattle=0x%llX) — blasting packets\n",
-                    step, aNextBattle);
+            HookLog("Netplay: First frame input ready (step=%d, sAction=0x%llX) — blasting packets\n",
+                    step, action);
         }
 
         if (step >= 0)
@@ -1082,7 +1082,7 @@ void FrameStepper_Draw()
     ImGui::Dummy(ImVec2(sz + 6.0f, sz));
     ImGui::SameLine();
     ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "PAUSED  %d", frameCounter);
-
+    /*
     // Input buffer display (captured from cChrInput__getInputBuffer hook)
     if (g_inputBufValid) {
         ImGui::TextColored(ImVec4(1.0f, 0.9f, 0.5f, 1.0f), "InputBuf @ 0x%llX (obj=0x%llX)", g_inputBufPtr, g_inputBufBase);
@@ -1098,19 +1098,19 @@ void FrameStepper_Draw()
         ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.8f, 1.0f), "P2 getInput(pad,1): 0x%08X", g_netP2Read);
     }
 
-    // 1. Get the aNextBattle instance (Amaterasu is the internal name for the battle manager)
-    typedef uint64_t(__fastcall* GetAmaterasu_t)();
-    GetAmaterasu_t getAmaterasuObj = (GetAmaterasu_t)_addr(0x140001A90);
-    uint64_t aNextBattle = getAmaterasuObj();
+    // 1. Get the native sAction battle-state singleton.
+    typedef uint64_t(__fastcall* GetAction_t)();
+    GetAction_t getAction = (GetAction_t)_addr(0x140001A90);
+    uint64_t action = getAction();
 
-    if (aNextBattle) {
-        uint32_t flags      = *(uint32_t*)(aNextBattle + 0xC4);
-        int      step       = *(int*)(aNextBattle + 0xD8);
-        int      phase      = *(int*)(aNextBattle + 0xDC);
-        int      transition = *(int*)(aNextBattle + 0x174);
+    if (action) {
+        uint32_t flags      = *(uint32_t*)(action + 0xC4);
+        int      step       = *(int*)(action + 0xD8);
+        int      phase      = *(int*)(action + 0xDC);
+        int      transition = *(int*)(action + 0x174);
 
         ImGui::TextColored(ImVec4(1, 0.5f, 0, 1), "--- DIAGNOSTICS ---");
-        ImGui::Text("aNextBattle: 0x%llX", aNextBattle);
+        ImGui::Text("sAction: 0x%llX", action);
         ImGui::Text("Flags (+0xC4): 0x%08X", flags);
         ImGui::Text("Step (+0xD8): %d", step);
         ImGui::Text("Phase (+0xDC): %d", phase);
@@ -1126,7 +1126,7 @@ void FrameStepper_Draw()
         uint64_t uiElement = *(uint64_t*)(ui + 0x5AA8);
         ImGui::Text("sGameUI: 0x%llX", ui);
         ImGui::Text("UI Element (+0x5AA8): 0x%llX", uiElement);
-    }
+    }*/
 
     ImGui::PopStyleColor();
     ImGui::End();

@@ -352,7 +352,7 @@ This is a broad deterministic fallback, not proof that worker ordering was the s
 ### Native online disables gameplay parallelism
 
 Further analysis found the native mechanism that makes differing local worker counts irrelevant to
-gameplay determinism. `aNextBattle__initBattleRound @ 0x140203810` enters a determinism setup branch
+gameplay determinism. `aAction__init @ 0x140203810` enters a determinism setup branch
 when either replay-use state is active or `g__isOnlineBattle` is true. The branch does the following:
 
 ```cpp

@@ -45,6 +45,31 @@
 static kiero::RenderType::Enum g_renderType = kiero::RenderType::None;
 static uint150_t* g_methodsTable = NULL;
 
+kiero::Status::Enum kiero::initFromD3D9Device(void* device)
+{
+	if (g_renderType != RenderType::None)
+		return Status::AlreadyInitializedError;
+	if (device == NULL)
+		return Status::UnknownError;
+
+	g_methodsTable = (uint150_t*)::calloc(119, sizeof(uint150_t));
+	if (g_methodsTable == NULL)
+		return Status::UnknownError;
+
+	::memcpy(g_methodsTable, *(uint150_t**)device, 119 * sizeof(uint150_t));
+#if KIERO_USE_MINHOOK
+	MH_STATUS status = MH_Initialize();
+	if (status != MH_OK && status != MH_ERROR_ALREADY_INITIALIZED)
+	{
+		::free(g_methodsTable);
+		g_methodsTable = NULL;
+		return Status::UnknownError;
+	}
+#endif
+	g_renderType = RenderType::D3D9;
+	return Status::Success;
+}
+
 kiero::Status::Enum kiero::init(RenderType::Enum _renderType)
 {
 	if (g_renderType != RenderType::None)
@@ -717,4 +742,4 @@ kiero::RenderType::Enum kiero::getRenderType()
 uint150_t* kiero::getMethodsTable()
 {
 	return g_methodsTable;
-} 
+}

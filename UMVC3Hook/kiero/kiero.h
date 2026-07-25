@@ -66,6 +66,7 @@ namespace kiero
 	};
 
 	Status::Enum init(RenderType::Enum renderType);
+	Status::Enum initFromD3D9Device(void* device);
 	void shutdown();
 
 	Status::Enum bind(uint16_t index, void** original, void* function);

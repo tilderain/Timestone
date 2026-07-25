@@ -32,6 +32,7 @@ confirmed by instructions, callers, and field usage.
 These describe the unmodified game, not the active ENet rollback protocol:
 
 - [`dti.md`](dti.md)
+- [`area.md`](area.md)
 - [`intro.md`](intro.md)
 - [`main.md`](main.md)
 - [`nativenet.txt`](nativenet.txt)
