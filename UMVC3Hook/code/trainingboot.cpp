@@ -338,7 +338,7 @@ void BootIntoTraining()
     //   1 = Arcade
     //   2 = Attract mode
     //   3 = Online (player match)
-    //   4 = Online Ranked
+    //   4 = Online spectator/watch battle
     //   5 = Training      <-- needed for isTrainingMode (CMP EAX,0x5)
     //   7 = Unknown mode 7
     //   8 = Heroes & Heralds
