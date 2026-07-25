@@ -1336,12 +1336,7 @@ extern "C" void Controller_OnFrameStart()
 }
 
 // ---------------------------------------------------------------------------
-// Desync checksum — sum of quantized positions + actionId across all
-// characters.  Uses addition (order-independent) and integer quantization
-// to tolerate tiny frame-timing float differences that are not visible
-// desyncs but would cause order-sensitive XOR to false-positive.
-// ---------------------------------------------------------------------------
-// Desync checksum — sum of quantized positions + actionId across all
+// Desync checksum — sum of quantized positions, HP, and actionId across all
 // characters.  Uses addition (order-independent) and integer quantization
 // to tolerate tiny frame-timing float differences that are not visible
 // desyncs but would cause order-sensitive XOR to false-positive.
@@ -1363,8 +1358,10 @@ static uint32_t ComputeChecksum()
             {
                 int32_t qx = (int32_t)*(float*)(character + 0x50);
                 int32_t qy = (int32_t)*(float*)(character + 0x54);
+                int32_t hp = (int32_t)*(float*)(character + 0x1550);
                 cs += (uint32_t)(qx < 0 ? -qx : qx);
                 cs += (uint32_t)(qy < 0 ? -qy : qy);
+                cs += (uint32_t)(hp < 0 ? -hp : hp);
                 cs += *(uint32_t*)(character + 0x1310); // actionId
             }
             node = *(uint64_t*)(node + NODE_NEXT_OFFSET);

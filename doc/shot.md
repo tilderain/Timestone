@@ -183,17 +183,30 @@ native metadata record as well. The source must be the saved primitive's
 can retain setup-phase zeros even though the evolved primitive is correct.
 Registration can reset that record after the restore, so reconstructed shots
 replace the source only at the capsule dispatcher at `0x1401C92E0`. The hook
-matches the exact live primitive pointer to its saved slot/index, copies the
-native `0x60`-byte source record to stack storage, replaces only its endpoint
-vectors, and passes that private source to the original dispatcher. Native code
-then copies the vectors and computes world endpoints synchronously without ever
-writing shared `rShot` metadata.
+copies the native `0x60`-byte source record to stack storage, replaces only its
+endpoint vectors, and passes that private source to the original dispatcher.
+Native code then copies the vectors and computes world endpoints synchronously
+without ever writing shared `rShot` metadata.
+Fresh collision setup can replace or reorder primitive wrappers and metadata
+entries after reconstruction. The dispatcher first matches the saved native
+metadata pointer. If that identity no longer survives, it uses the unique saved
+capsule with the greatest nonzero endpoint separation only when the primitive
+entering dispatch still has nonzero local or world separation. This preserves
+genuinely inactive zero-span primitives. Primitive `+0x08` cannot be used as an
+activity discriminator: `MtGeometry__ctor` stores capsule geometry type `6`
+there for every capsule. Setup records can retain Y=30 at both endpoints while
+their endpoint separation is zero, so they are valid vectors but invalid sources
+for an already-wide Tron swarm primitive.
+The `20260724_232510` client capture retained width `220` on restored frame
+`1080`, then collapsed at frame `1081`, showing the prior all-source candidate
+count still fell through after native collision setup replaced the wrapper.
 The Tron swarm has another representation: its saved primitive can have correct
 world endpoints at `+0x20/+0x30` while the local cache at `+0x80/+0x90` is zero
 or contains only sub-centimeter floating-point residue. Capture treats local
-components below `0.01` as empty and reconstructs the private source vectors as
-`saved world endpoint - saved shot position`. Inactive setup primitives derive
-zero and stay on the native path. Active swarm capsules derive the native
+endpoint-axis pairs below `0.01` as empty and reconstructs each missing axis as
+`saved world endpoint - saved shot position`. This per-axis fallback matters
+when Y remains `30` but both X endpoints contain only residue. Inactive setup
+primitives derive zero and stay on the native path. Active swarm capsules derive the native
 `-110,+30` and `+110,+30` endpoints without hard-coding those values or relying
 on a concrete DTI that can differ between the super's controller and child shots.
 
@@ -204,6 +217,14 @@ on each active entry. Restoring a count without its corresponding table caused
 the `2026-07-24 23:04:41` null-vtable crash at `0x140201007`. Active table ranges
 are now captured separately and restored only while the character's owner slot
 still points to the captured allocation.
+Effect retirement must also detach the current `uExAtkSpace` child effects.
+Ghidra's `uExAtkSpace__setModel` at `0x140137A10` walks four owned `uEffect*`
+fields at `+0x1D18..+0x1D30` and releases each live child through virtual
+`+0x78`. The `2026-07-24 23:31:48` crash at `0x140137A6A` occurred after a
+retired child was independently destroyed and its former vtable word was reused
+as packed `1.0f` values. Rollback now clears those four owner references before
+marking effect categories for native deferred retirement; it does not destroy
+the children directly or alter the `sAction+0x148` ExAtkSpace owner pointer.
 Zero setup-phase endpoints are not reapplied. A shot reconstructed before its
 attack activates must be allowed to obtain its later geometry from native
 metadata; otherwise the stale snapshot zeros collapse every future capsule to

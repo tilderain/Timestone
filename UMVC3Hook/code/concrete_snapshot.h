@@ -12,8 +12,10 @@ struct ConcreteShotSnapshot {
     struct CollisionPrimitive {
         uint32_t slot = 0;
         uint32_t index = 0;
-        uint8_t active = 0;
-        uint32_t kind = 0;
+        uint64_t metadata = 0;
+        uint32_t metadataType = 0;
+        uint8_t geometryType = 0;
+        uint32_t collisionKind = 0;
         uint8_t geometry[0x24] = {};
         uint32_t flags = 0;
         uint64_t parent0 = 0;
@@ -40,6 +42,14 @@ bool ConcreteShotSnapshot_Restore(void* shot, const ConcreteShotSnapshot& snapsh
 void ConcreteShotSnapshot_DispatchCapsule(
     void* shot, const ConcreteShotSnapshot& snapshot, void* metadata,
     void* primitive, void* cameraOrigin,
+    void (__fastcall* dispatchCapsule)(void*, void*, void*, void*));
+
+// Reapply reconstructed capsule sources after the native shot hitbox update.
+// The native update can overwrite the dispatcher result later in the same
+// tick, so this runs at the outer update boundary.
+void ConcreteShotSnapshot_ReapplyCapsules(
+    void* shot, const ConcreteShotSnapshot& snapshot,
+    void* cameraOrigin,
     void (__fastcall* dispatchCapsule)(void*, void*, void*, void*));
 
 // Restore detected scalar spans from concrete character tails while retaining
