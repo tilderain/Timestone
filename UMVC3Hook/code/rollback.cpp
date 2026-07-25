@@ -2800,6 +2800,24 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
                     (uint64_t)fresh);
         }
         RestoreKingKobunHelper(fresh, saved);
+        if (saved.concrete.dti == (uint64_t)_addr(0x140D4D2B0) &&
+            saved.concrete.body.size() >= 0x2164) {
+            // These are the controller's scalar mode/phase fields. The broad
+            // shot overlay deliberately preserves pointer-looking words, and
+            // +0x2158 is fixed separately above; explicitly restore the
+            // remaining King Servbot fields so reconstruction cannot leave the
+            // fresh factory mode latched at its pre-move state.
+            static constexpr size_t kingRanges[][2] = {
+                {0x2140, 0x08},
+                {0x214C, 0x04},
+                {0x2150, 0x08},
+                {0x2160, 0x04},
+            };
+            for (const auto& range : kingRanges) {
+                std::memcpy((uint8_t*)fresh + range[0],
+                            saved.concrete.body.data() + range[0], range[1]);
+            }
+        }
         // Concrete snapshots do not reconstruct the global particle-owner
         // graph referenced by inline sEffect objects. Leave that graph
         // detached so later native shot destruction cannot walk stale nodes.
@@ -4339,14 +4357,23 @@ void Rollback_RestoreSnapshot(int32_t frame)
             IsAccessibleAddress(liveModelJointAllocation +
                 SACTION_MODEL_JOINT_ALLOCATION_SIZE - 1) &&
             copySize > SACTION_MODEL_JOINT_DATA_OFFSET) {
-            // Throw root motion reads this transient sAction payload. Native
-            // action processing can replace its allocation after capture, so
-            // rewind the saved scalar data into the current allocation while
-            // retaining the current allocator header and pointer identity.
-            std::memcpy((uint8_t*)liveModelJointAllocation +
-                            SACTION_MODEL_JOINT_DATA_OFFSET,
-                        slot.data + offset + SACTION_MODEL_JOINT_DATA_OFFSET,
-                        copySize - SACTION_MODEL_JOINT_DATA_OFFSET);
+            // Throw root motion reads only the model-joint limits at +0x54 and
+            // +0x58. The throw/capture transition also consults +0x68/+0x6C.
+            // Restore those scalar fields in the current allocation, but do
+            // not rewind the rest of the action model payload: it contains
+            // current-timeline transition and animation state, and restoring
+            // it makes the throw end in the floor state during re-simulation.
+            static constexpr SnapshotRange modelJointFields[] = {
+                {SACTION_MODEL_JOINT_DATA_OFFSET + 0x54, 0x08},
+                {SACTION_MODEL_JOINT_DATA_OFFSET + 0x68, 0x08},
+            };
+            for (const SnapshotRange& field : modelJointFields) {
+                if ((size_t)field.offset + field.size <= copySize) {
+                    std::memcpy((uint8_t*)liveModelJointAllocation + field.offset,
+                                slot.data + offset + field.offset,
+                                field.size);
+                }
+            }
         } else if (!ownerStillMatches[i] || !objectStillMatches) {
             // The external blend/animation allocation was replaced after the
             // snapshot, or a helper cChr was destroyed/reused. Never write old
