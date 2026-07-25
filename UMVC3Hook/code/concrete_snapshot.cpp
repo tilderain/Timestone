@@ -573,10 +573,10 @@ bool ConcreteShotSnapshot_Restore(void* shot,
                            kGeneratedShotTailRanges);
 
     if (IsDti(snapshot.dti, kKingKobunDti)) {
-        // King Servbot changes movement mode when Motion[0]+0x10 raises event
-        // bit 2. Reconstruction keeps fresh motion owners and resources, but
-        // must rewind their pointer-free playback state or every rollback
-        // restarts the controller animation before that event is reached.
+        // King Servbot changes movement phase when Motion[0]+0x0A reports
+        // completion bit 2. Reconstruction keeps fresh motion owners and
+        // resources, but must rewind their pointer-free playback state or every
+        // rollback restarts the controller animation before completion.
         CopyRange(overlay.data(), source, liveSize, {0x550, 0x10});
         static constexpr SnapshotRange motionRestoreRanges[] = {
             {0x08, 0x118},

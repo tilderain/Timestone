@@ -1528,6 +1528,9 @@ struct Region {
 
 struct ShotFlightState {
     uint32_t unitState;             // +0x10 cUnit lifecycle/gameplay flags
+    // uModel motion playback advances by cUnit delta-time at +0x28. Restoring
+    // Motion[] without this pair can leave reconstructed animations frozen.
+    uint8_t timeScaleState[0x08];   // +0x28..+0x2F
     // uModel+0x100 is a live owned pointer, so only restore the contiguous
     // position/quaternion/matrix scalar block preceding it.
     uint8_t transformState[0xB0];  // +0x50..+0xFF
@@ -1857,6 +1860,7 @@ static void CaptureShotFlight(void* shot, ShotFlightState& out)
 {
     auto* p = (uint8_t*)shot;
     std::memcpy(&out.unitState, p + 0x10, sizeof(out.unitState));
+    std::memcpy(out.timeScaleState, p + 0x28, sizeof(out.timeScaleState));
     std::memcpy(out.transformState, p + 0x50, sizeof(out.transformState));
     std::memcpy(out.runtimeState, p + 0x3E8, sizeof(out.runtimeState));
     std::memcpy(out.shotMatrices, p + 0x1E50, sizeof(out.shotMatrices));  // Test if necessary on Hado Shoryu
@@ -1888,6 +1892,7 @@ static void ApplyShotFlight(void* shot, const ShotFlightState& in)
     uint32_t unitState = *(uint32_t*)(p + 0x10);
     unitState = (in.unitState & ~0x3F8u) | (unitState & 0x3F8u);
     std::memcpy(p + 0x10, &unitState, sizeof(unitState));
+    std::memcpy(p + 0x28, in.timeScaleState, sizeof(in.timeScaleState));
     std::memcpy(p + 0x50, in.transformState, sizeof(in.transformState));
     std::memcpy(p + 0x3E8, in.runtimeState, sizeof(in.runtimeState));
     std::memcpy(p + 0x1E50, in.shotMatrices, sizeof(in.shotMatrices));  // Test if necessary on Hado Shoryu
@@ -2345,12 +2350,13 @@ static void __fastcall hkKingKobunMove(void* shot)
 
     if (trace) {
         HookLog("KINGMOVE shot=0x%llX frame=%d resim=%d mode=%u->%u phase=%u->%u "
-                "x=%.6g->%.6g speed=%.6g facing=%u helper=0x%llX state=0x%08X\n",
+                "x=%.6g->%.6g speed=%.6g dt=%.6g facing=%u helper=0x%llX state=0x%08X\n",
                 (uint64_t)shot, RngTraceFrame(), g_multiResimEnabled ? 1 : 0,
                 beforeMode, *(uint32_t*)((uint8_t*)shot + 0x214C),
                 beforePhase, *(uint32_t*)((uint8_t*)shot + 0x2140),
                 beforePos, *(float*)((uint8_t*)shot + 0x50),
                 *(float*)((uint8_t*)shot + 0x2150),
+                *(float*)((uint8_t*)shot + 0x28),
                 *(uint8_t*)((uint8_t*)shot + 0x2154),
                 *(uint64_t*)((uint8_t*)shot + 0x2158),
                 *(uint32_t*)((uint8_t*)shot + 0x10));
@@ -5962,9 +5968,9 @@ static void __fastcall hkSound_move(uint64_t param_1)
     // validating the attachment. A rollback can destroy or reuse a transient
     // model while its sound scene remains live. The reused address may still be
     // a valid object with an executable +0xA0 slot, so require model ancestry.
-    constexpr uint32_t SOUND_SCENE_COUNT_OFFSET = 0x1CF50;
-    constexpr uint32_t SOUND_SCENE_FIRST_OFFSET = 0x70;
-    constexpr uint32_t SOUND_SCENE_STRIDE = 0xB50;
+    constexpr uint32_t SOUND_SCENE_COUNT_OFFSET = 0x1CF54;
+    constexpr uint32_t SOUND_SCENE_FIRST_OFFSET = 0x16A70;
+    constexpr uint32_t SOUND_SCENE_STRIDE = 0xB30;
     constexpr uint32_t SOUND_SCENE_MODEL_OFFSET = 0x80;
     constexpr uint32_t SOUND_SCENE_MAX_COUNT = 40;
 

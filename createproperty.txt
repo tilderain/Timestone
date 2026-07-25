@@ -447,20 +447,20 @@ sMvc3Effect__createProperty	1402b2ce0	thunk undefined sMvc3Effect__createPropert
 sMvc3Effect__createProperty_0	140542160	undefined sMvc3Effect__createProperty_0()	43
 sMvc3Guide__createProperty	140280cf0	thunk undefined sMvc3Guide__createProperty()	5
 sMvc3Guide__createProperty_0	140458820	undefined sMvc3Guide__createProperty_0()	620
-sMvc3Main__createProperty	1400186a0	undefined sMvc3Main__createProperty()	3466
-sMvc3Main__createProperty_0	1401fb0b0	undefined sMvc3Main__createProperty_0()	1589
+uActionSideCamera__createProperty	1400186a0	void uActionSideCamera__createProperty(uActionSideCamera * this, MtPropertyList * properties)	3466
+uStage011__createProperty	1401fb0b0	undefined uStage011__createProperty(uStage011 * this, MtPropertyList * param_2)	1589
 sMvc3Main__createProperty_1	140258a20	undefined sMvc3Main__createProperty_1()	1396
-sMvc3Main__createProperty_10	1403fc6b0	undefined sMvc3Main__createProperty_10()	1176
-sMvc3Main__createProperty_11	1404170e0	undefined sMvc3Main__createProperty_11()	1978
-sMvc3Main__createProperty_2	140276bc0	undefined sMvc3Main__createProperty_2()	38
-sMvc3Main__createProperty_3	1402fbea0	undefined sMvc3Main__createProperty_3()	1138
-sMvc3Main__createProperty_4	14031abf0	undefined sMvc3Main__createProperty_4()	1196
-sMvc3Main__createProperty_5	1403615e0	undefined sMvc3Main__createProperty_5()	2176
-sMvc3Main__createProperty_5AB0	140545ab0	undefined sMvc3Main__createProperty_5AB0()	858
-sMvc3Main__createProperty_6	14036f010	undefined sMvc3Main__createProperty_6()	1256
-sMvc3Main__createProperty_7	1403760b0	undefined sMvc3Main__createProperty_7()	1189
-sMvc3Main__createProperty_8	1403d6b10	undefined sMvc3Main__createProperty_8()	1475
-sMvc3Main__createProperty_9	1403e8e60	undefined sMvc3Main__createProperty_9()	1165
+uMenuHelpMsg__createProperty	1403fc6b0	undefined uMenuHelpMsg__createProperty(uMenuHelpMsg * this, MtPropertyList * param_2)	1176
+uMenuLicense__createProperty	1404170e0	undefined uMenuLicense__createProperty(uMenuLicense * this, MtPropertyList * param_2)	1978
+sEarthAtk__createProperty	140276bc0	undefined sEarthAtk__createProperty(sEarthAtk * this, MtPropertyList * param_2)	38
+uBtResult__createProperty	1402fbea0	undefined uBtResult__createProperty(uBtResult * this, MtPropertyList * param_2)	1138
+uFinishScreen__createProperty	14031abf0	undefined uFinishScreen__createProperty(uFinishScreen * this, MtPropertyList * param_2)	1196
+uMenuChrSel__createProperty	1403615e0	undefined uMenuChrSel__createProperty(uMenuChrSel * this, MtPropertyList * param_2)	2176
+uCamera__createProperty	140545ab0	undefined uCamera__createProperty(uCamera * this, MtPropertyList * param_2)	858
+uMenuChrSelCardPlayer__createProperty	14036f010	undefined uMenuChrSelCardPlayer__createProperty(uMenuChrSelCardPlayer * this, MtPropertyList * param_2)	1256
+uMenuChrSelOption__createProperty	1403760b0	undefined uMenuChrSelOption__createProperty(uMenuChrSelOption * this, MtPropertyList * param_2)	1189
+uMenuEarthAtk__createProperty	1403d6b10	undefined uMenuEarthAtk__createProperty(uMenuEarthAtk * this, MtPropertyList * param_2)	1475
+uMenuMainBase__createProperty	1403e8e60	undefined uMenuMainBase__createProperty(uMenuMainBase * this, MtPropertyList * param_2)	1165
 sMvc3Manager__createProperty	14025a520	undefined sMvc3Manager__createProperty()	30
 sMvc3Pad__createProperty	1402b2f80	thunk undefined sMvc3Pad__createProperty()	5
 sMvc3Pad__createProperty_0	140513720	undefined sMvc3Pad__createProperty_0()	39

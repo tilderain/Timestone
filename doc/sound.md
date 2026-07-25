@@ -15,7 +15,7 @@ Current `hkSound_move` behavior is:
 
 - During re-simulation, return without calling native `sSound__move`.
 - During normal frames, inspect at most 40 sound scenes from the scene array at
-  `sSound+0x70`, using stride `0xB50` and count `sSound+0x1CF50`.
+  `sSound+0x16A70`, using stride `0xB30` and count `sSound+0x1CF54`.
 - Clear a scene's model attachment at scene `+0x80` unless its DTI derives from
   `uBaseModel` and it can safely dispatch the model matrix virtual at vtable
   `+0xA0`.

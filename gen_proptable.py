@@ -29,7 +29,7 @@ RAW_LINES = r"""
   1400156a0  cMayaMotionWork__createProperty  \ No newline at end of file
   140016c10  uActionCamera__createProperty   \ No newline at end of file
   140016dd0  uActionCamera__createProperty   \ No newline at end of file
-  1400186a0  sMvc3Main__createProperty       \ No newline at end of file
+  1400186a0  uActionSideCamera__createProperty  \ No newline at end of file
   14001c5c0  uCollectionCamera__createProperty  \ No newline at end of file
   14001c8c0  uCollectionCamera__createProperty  \ No newline at end of file
   14001d1a0  uStageScreenCamera__createProperty  \ No newline at end of file
@@ -1240,23 +1240,42 @@ def parse_txt_line(line):
 
 
 def main():
-    entries = set()
+    entries = {}
 
     # Parse hardcoded RAW_LINES from Ghidra dump
     for line in RAW_LINES.split('\n'):
         result = parse_ghidra_line(line)
         if result:
-            entries.add(result)
+            entries[result[0]] = result[1]
 
     # Parse createproperty.txt
     with open(INPUT, 'r') as f:
         for line in f:
             result = parse_txt_line(line)
             if result:
-                entries.add(result)
+                entries[result[0]] = result[1]
+
+    # Known ownership repairs override stale exported names. Keeping these at
+    # the final merge point also guarantees one class per function address.
+    ownership_repairs = {
+        0x1400186a0: "uActionSideCamera",
+        0x1401fb0b0: "uStage011",
+        0x140276bc0: "sEarthAtk",
+        0x1402fbea0: "uBtResult",
+        0x14031abf0: "uFinishScreen",
+        0x1403615e0: "uMenuChrSel",
+        0x14036f010: "uMenuChrSelCardPlayer",
+        0x1403760b0: "uMenuChrSelOption",
+        0x1403d6b10: "uMenuEarthAtk",
+        0x1403e8e60: "uMenuMainBase",
+        0x1403fc6b0: "uMenuHelpMsg",
+        0x1404170e0: "uMenuLicense",
+        0x140545ab0: "uCamera",
+    }
+    entries.update(ownership_repairs)
 
     # Sort by address
-    sorted_entries = sorted(entries, key=lambda x: x[0])
+    sorted_entries = sorted(entries.items())
 
     # Write C++ header
     out = '''// Auto-generated from Ghidra RAW_LINES + createproperty.txt.
