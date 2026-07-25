@@ -1,7 +1,6 @@
 #include "../pch.h"
 
 #include "concrete_snapshot.h"
-#include "diag.h"
 #include "mk10utils.h"
 
 #include <cmath>
@@ -334,9 +333,9 @@ void CaptureCollisionPrimitives(const uint8_t* shot, ConcreteShotSnapshot& out)
             ConcreteShotSnapshot::CollisionPrimitive saved{};
             saved.slot = slot;
             saved.index = index;
-            saved.metadata = GetCollisionMetadata(shot, slot, index);
-            if (saved.metadata)
-                saved.metadataType = *(uint32_t*)(saved.metadata + 0x14);
+            uint64_t metadata = GetCollisionMetadata(shot, slot, index);
+            if (metadata)
+                saved.metadataType = *(uint32_t*)(metadata + 0x14);
             saved.geometryType = *(uint8_t*)(primitive + 0x08);
             saved.collisionKind = *(uint32_t*)(primitive + 0x10);
             std::memcpy(saved.geometry, (void*)(primitive + 0x20),
@@ -599,149 +598,11 @@ bool ConcreteShotSnapshot_Restore(void* shot,
     return true;
 }
 
-void ConcreteShotSnapshot_DispatchCapsule(
-    void* shot, const ConcreteShotSnapshot& snapshot, void* metadata,
-    void* primitive, void* cameraOrigin,
-    void (__fastcall* dispatchCapsule)(void*, void*, void*, void*))
-{
-    if (!shot || !metadata || !primitive || !dispatchCapsule) return;
-
-    static int diagnosticCount = 0;
-    const ConcreteShotSnapshot::CollisionPrimitive* selected = nullptr;
-    const ConcreteShotSnapshot::CollisionPrimitive* soleCandidate = nullptr;
-    const ConcreteShotSnapshot::CollisionPrimitive* widestCandidate = nullptr;
-    size_t candidateCount = 0;
-    float widestSpan = 0.0f;
-    bool widestSpanTied = false;
-    for (const auto& saved : snapshot.collisionPrimitives) {
-        if (saved.slot >= kShotCollisionSlotCount) continue;
-        if (!saved.hasSourceGeometry) continue;
-        soleCandidate = &saved;
-        ++candidateCount;
-
-        float span = EndpointSpanSquared(saved.sourceGeometry);
-        const float* sourceStart = (const float*)saved.sourceGeometry;
-        const float* sourceEnd = (const float*)(saved.sourceGeometry + 0x10);
-        bool symmetricX = std::fabs(sourceStart[0] + sourceEnd[0]) < 0.01f;
-        // The fallback is specifically for centered, data-derived capsule
-        // sources. Keep arbitrary normal-shot sources eligible for exact
-        // identity matching, but never use them as the swarm fallback.
-        if (symmetricX && span > widestSpan + 0.0001f) {
-            widestCandidate = &saved;
-            widestSpan = span;
-            widestSpanTied = false;
-        } else if (symmetricX && span > 0.0001f &&
-                   std::fabs(span - widestSpan) <= 0.0001f) {
-            widestSpanTied = true;
-        }
-        // cCollisionNode entry +0x48 retains the rShot attack-info identity.
-        // Match that stable source directly: reconstruction can reorder fresh
-        // entries, making the historical slot/index unsuitable as identity.
-        if (saved.metadata == (uint64_t)metadata) {
-            selected = &saved;
-            break;
-        }
-    }
-
-    // primitive+0x08 is MtGeometry's shape type, not an activity flag. When a
-    // reconstructed node no longer preserves metadata identity, select the
-    // unique saved capsule with actual endpoint separation. Setup records can
-    // contain a valid Y offset at both endpoints but have zero span, which is
-    // the exact source that collapsed Tron's swarm X extent after restore.
-    float selectedSpan = selected
-        ? EndpointSpanSquared(selected->sourceGeometry) : 0.0f;
-    float primitiveLocalSpan = EndpointSpanSquared((uint8_t*)primitive + 0x80);
-    float primitiveWorldSpan = EndpointSpanSquared((uint8_t*)primitive + 0x20);
-    if (widestCandidate && !widestSpanTied &&
-        (!selected || selectedSpan <= 0.0001f)) {
-        selected = widestCandidate;
-    }
-
-    // Only repair a source whose captured local X cache was empty while the
-    // derived source contains separation. Ordinary reconstructed capsules can
-    // legitimately use a nonzero local Y/Z source and must remain native.
-    bool selectedLocalXEmpty = false;
-    bool selectedXSymmetric = false;
-    if (selected) {
-        const float* sourceStart = (const float*)selected->sourceGeometry;
-        const float* sourceEnd = (const float*)(selected->sourceGeometry + 0x10);
-        const float* localStart = (const float*)selected->localGeometry;
-        const float* localEnd = (const float*)(selected->localGeometry + 0x10);
-        selectedLocalXEmpty = std::fabs(localStart[0]) < 0.01f &&
-            std::fabs(localEnd[0]) < 0.01f;
-        selectedXSymmetric = std::fabs(sourceStart[0] + sourceEnd[0]) < 0.01f;
-    }
-    if (selected && (!selectedLocalXEmpty || !selectedXSymmetric)) {
-        dispatchCapsule(shot, metadata, primitive, cameraOrigin);
-        return;
-    }
-    if (!selected && candidateCount == 1)
-        selected = soleCandidate;
-    if (!selected) {
-        const float* nativeStart = (const float*)((uint8_t*)metadata + 0x20);
-        const float* nativeEnd = (const float*)((uint8_t*)metadata + 0x40);
-        if (diagnosticCount < 64 &&
-            std::fabs(nativeEnd[0] - nativeStart[0]) < 0.01f) {
-            HookLog("CAPSULESOURCE miss shot=0x%llX primitive=0x%llX metadata=0x%llX "
-                    "candidates=%zu widestSpan=%.3f primitiveSpan=%.3f/%.3f tied=%d\n",
-                    (uint64_t)shot, (uint64_t)primitive, (uint64_t)metadata,
-                    candidateCount, widestSpan, primitiveLocalSpan,
-                    primitiveWorldSpan, widestSpanTied ? 1 : 0);
-            ++diagnosticCount;
-        }
-        dispatchCapsule(shot, metadata, primitive, cameraOrigin);
-        return;
-    }
-
-    // Reconstruct the per-shot collision source on the stack. Native code
-    // copies these vectors into the primitive and computes its world endpoints
-    // synchronously, while the shared rShot metadata remains untouched.
-    uint8_t source[0x60];
-    std::memcpy(source, metadata, sizeof(source));
-    std::memcpy(source + 0x20, selected->sourceGeometry, 0x0C);
-    std::memcpy(source + 0x40, selected->sourceGeometry + 0x10, 0x0C);
-
-    float beforeLocal[6] = {};
-    float beforeWorld[6] = {};
-    std::memcpy(beforeLocal, (uint8_t*)primitive + 0x80, 0x0C);
-    std::memcpy(beforeLocal + 3, (uint8_t*)primitive + 0x90, 0x0C);
-    std::memcpy(beforeWorld, (uint8_t*)primitive + 0x20, 0x0C);
-    std::memcpy(beforeWorld + 3, (uint8_t*)primitive + 0x30, 0x0C);
-    dispatchCapsule(shot, source, primitive, cameraOrigin);
-
-    const float* nativeStart = (const float*)((uint8_t*)metadata + 0x20);
-    const float* nativeEnd = (const float*)((uint8_t*)metadata + 0x40);
-    const float* selectedStart = (const float*)selected->sourceGeometry;
-    const float* selectedEnd = (const float*)(selected->sourceGeometry + 0x10);
-    if (diagnosticCount < 64 &&
-        std::fabs(nativeEnd[0] - nativeStart[0]) < 0.01f &&
-        std::fabs(selectedEnd[0] - selectedStart[0]) >= 0.01f) {
-        const float* afterLocal0 = (const float*)((uint8_t*)primitive + 0x80);
-        const float* afterLocal1 = (const float*)((uint8_t*)primitive + 0x90);
-        const float* afterWorld0 = (const float*)((uint8_t*)primitive + 0x20);
-        const float* afterWorld1 = (const float*)((uint8_t*)primitive + 0x30);
-        HookLog("CAPSULESOURCE shot=0x%llX primitive=0x%llX metadata=0x%llX "
-                "savedMetadata=0x%llX candidates=%zu span=%.3f "
-                "nativeX=[%.3f,%.3f] selected=[%.3f,%.3f] "
-                "localX=%.3f,%.3f->%.3f,%.3f worldX=%.3f,%.3f->%.3f,%.3f\n",
-                (uint64_t)shot, (uint64_t)primitive, (uint64_t)metadata,
-                selected->metadata, candidateCount, EndpointSpanSquared(selected->sourceGeometry),
-                nativeStart[0], nativeEnd[0], selectedStart[0], selectedEnd[0],
-                beforeLocal[0], beforeLocal[3], afterLocal0[0], afterLocal1[0],
-                beforeWorld[0], beforeWorld[3], afterWorld0[0], afterWorld1[0]);
-        ++diagnosticCount;
-    }
-    return;
-
-}
-
 void ConcreteShotSnapshot_ReapplyCapsules(
-    void* shot, const ConcreteShotSnapshot& snapshot, void* cameraOrigin,
-    void (__fastcall* dispatchCapsule)(void*, void*, void*, void*))
+    void* shot, const ConcreteShotSnapshot& snapshot)
 {
-    if (!shot || !dispatchCapsule) return;
+    if (!shot) return;
 
-    static int diagnosticCount = 0;
     const ConcreteShotSnapshot::CollisionPrimitive* widest = nullptr;
     float widestSpan = 0.0f;
     for (const auto& saved : snapshot.collisionPrimitives) {
@@ -755,46 +616,18 @@ void ConcreteShotSnapshot_ReapplyCapsules(
             widestSpan = span;
         }
     }
-    if (!widest) {
-        if (diagnosticCount < 128) {
-            HookLog("CAPSULETAIL no-source shot=0x%llX saved=%zu\n",
-                    (uint64_t)shot, snapshot.collisionPrimitives.size());
-            ++diagnosticCount;
-        }
-        return;
-    }
+    if (!widest) return;
 
-    size_t visited = 0;
-    size_t applied = 0;
     for (const auto& saved : snapshot.collisionPrimitives) {
         if (!saved.hasSourceGeometry || saved.metadataType != 1) continue;
-        ++visited;
         uint64_t primitive = GetCollisionPrimitive(
             (const uint8_t*)shot, saved.slot, saved.index);
         uint64_t metadata = GetCollisionMetadata(
             (const uint8_t*)shot, saved.slot, saved.index);
-        if (!primitive || !metadata) {
-            if (diagnosticCount < 128) {
-                HookLog("CAPSULETAIL missing shot=0x%llX saved=%u/%u "
-                        "primitive=0x%llX metadata=0x%llX\n",
-                        (uint64_t)shot, saved.slot, saved.index,
-                        primitive, metadata);
-                ++diagnosticCount;
-            }
-            continue;
-        }
+        if (!primitive || !metadata) continue;
 
         uint32_t liveMetadataType = *(uint32_t*)(metadata + 0x14);
-        if (liveMetadataType != 1) {
-            if (diagnosticCount < 128) {
-                HookLog("CAPSULETAIL type-mismatch shot=0x%llX saved=%u/%u "
-                        "primitive=0x%llX metadata=0x%llX savedType=%u liveType=%u\n",
-                        (uint64_t)shot, saved.slot, saved.index, primitive,
-                        metadata, saved.metadataType, liveMetadataType);
-                ++diagnosticCount;
-            }
-            continue;
-        }
+        if (liveMetadataType != 1) continue;
 
         const float* start = (const float*)saved.sourceGeometry;
         const float* end = (const float*)(saved.sourceGeometry + 0x10);
@@ -802,13 +635,6 @@ void ConcreteShotSnapshot_ReapplyCapsules(
         const auto* selected = centered ? &saved : widest;
         if (EndpointSpanSquared(selected->sourceGeometry) <= 0.0001f)
             continue;
-
-        float beforeLocal[6] = {};
-        float beforeWorld[6] = {};
-        std::memcpy(beforeLocal, (const void*)(primitive + 0x80), 0x0C);
-        std::memcpy(beforeLocal + 3, (const void*)(primitive + 0x90), 0x0C);
-        std::memcpy(beforeWorld, (const void*)(primitive + 0x20), 0x0C);
-        std::memcpy(beforeWorld + 3, (const void*)(primitive + 0x30), 0x0C);
 
         // The reconstructed primitive's live parent transforms can cancel the
         // restored local X offsets inside virtual +0x1C8, collapsing both world
@@ -829,42 +655,6 @@ void ConcreteShotSnapshot_ReapplyCapsules(
             worldStart[axis] = shotPosition[axis] + selectedStart[axis];
             worldEnd[axis] = shotPosition[axis] + selectedEnd[axis];
         }
-        ++applied;
-
-        if (diagnosticCount < 128) {
-            const float* afterLocal0 = (const float*)(primitive + 0x80);
-            const float* afterLocal1 = (const float*)(primitive + 0x90);
-            const float* afterWorld0 = (const float*)(primitive + 0x20);
-            const float* afterWorld1 = (const float*)(primitive + 0x30);
-            HookLog("CAPSULETAIL shot=0x%llX saved=%u/%u primitive=0x%llX "
-                    "metadata=0x%llX savedMetadata=0x%llX selected=%u/%u "
-                    "source=[%.3f,%.3f,%.3f]-[%.3f,%.3f,%.3f] "
-                    "local=[%.3f,%.3f,%.3f]-[%.3f,%.3f,%.3f]->"
-                    "[%.3f,%.3f,%.3f]-[%.3f,%.3f,%.3f] "
-                    "world=[%.3f,%.3f,%.3f]-[%.3f,%.3f,%.3f]->"
-                    "[%.3f,%.3f,%.3f]-[%.3f,%.3f,%.3f]\n",
-                    (uint64_t)shot, saved.slot, saved.index, primitive,
-                    metadata, saved.metadata, selected->slot, selected->index,
-                    selectedStart[0], selectedStart[1], selectedStart[2],
-                    selectedEnd[0], selectedEnd[1], selectedEnd[2],
-                    beforeLocal[0], beforeLocal[1], beforeLocal[2],
-                    beforeLocal[3], beforeLocal[4], beforeLocal[5],
-                    afterLocal0[0], afterLocal0[1], afterLocal0[2],
-                    afterLocal1[0], afterLocal1[1], afterLocal1[2],
-                    beforeWorld[0], beforeWorld[1], beforeWorld[2],
-                    beforeWorld[3], beforeWorld[4], beforeWorld[5],
-                    afterWorld0[0], afterWorld0[1], afterWorld0[2],
-                    afterWorld1[0], afterWorld1[1], afterWorld1[2]);
-            ++diagnosticCount;
-        }
-    }
-
-    if (diagnosticCount < 128) {
-        HookLog("CAPSULETAIL summary shot=0x%llX saved=%zu visited=%zu "
-                "applied=%zu widestSpan=%.3f camera=0x%llX\n",
-                (uint64_t)shot, snapshot.collisionPrimitives.size(), visited,
-                applied, widestSpan, (uint64_t)cameraOrigin);
-        ++diagnosticCount;
     }
 }
 

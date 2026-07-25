@@ -177,26 +177,10 @@ The normal shot collision path has an additional authoritative source. Ghidra's
 capsule branch at `0x1401C92E0` copies attack-info metadata `+0x20/+0x40` into
 the primitive's local endpoints `+0x80/+0x90` on every tick before dispatching
 virtual `+0x1C8` to calculate world endpoints. Restoring only the primitive is
-therefore temporary. Restore rewinds those two vectors in the fresh node's
-native metadata record as well. The source must be the saved primitive's
-`+0x80/+0x90` local geometry, not a copy of the resource metadata: the latter
-can retain setup-phase zeros even though the evolved primitive is correct.
-Registration can reset that record after the restore, so reconstructed shots
-replace the source only at the capsule dispatcher at `0x1401C92E0`. The hook
-copies the native `0x60`-byte source record to stack storage, replaces only its
-endpoint vectors, and passes that private source to the original dispatcher.
-Native code then copies the vectors and computes world endpoints synchronously
-without ever writing shared `rShot` metadata.
-Fresh collision setup can replace or reorder primitive wrappers and metadata
-entries after reconstruction. The dispatcher first matches the saved native
-metadata pointer. If that identity no longer survives, it uses the unique saved
-capsule with the greatest nonzero endpoint separation only when the primitive
-entering dispatch still has nonzero local or world separation. This preserves
-genuinely inactive zero-span primitives. Primitive `+0x08` cannot be used as an
+therefore temporary. Reconstructed shots reapply the saved data-derived source
+after the complete native hitbox update. Primitive `+0x08` cannot be used as an
 activity discriminator: `MtGeometry__ctor` stores capsule geometry type `6`
-there for every capsule. Setup records can retain Y=30 at both endpoints while
-their endpoint separation is zero, so they are valid vectors but invalid sources
-for an already-wide Tron swarm primitive.
+there for every capsule.
 The `20260724_232510` client capture retained width `220` on restored frame
 `1080`, then collapsed at frame `1081`, showing the prior all-source candidate
 count still fell through after native collision setup replaced the wrapper.
@@ -209,6 +193,11 @@ when Y remains `30` but both X endpoints contain only residue. Inactive setup
 primitives derive zero and stay on the native path. Active swarm capsules derive the native
 `-110,+30` and `+110,+30` endpoints without hard-coding those values or relying
 on a concrete DTI that can differ between the super's controller and child shots.
+For reconstructed centered capsules with a nonzero recovered source, the final
+repair writes the local endpoints and computes each world endpoint as
+`shot position + source endpoint`. This bypasses reconstructed parent transforms
+that otherwise cancel both X offsets inside virtual `+0x1C8`. It does not modify
+shared `rShot` metadata or collision-entry ownership.
 
 Character target-processing tables must remain synchronized with the character
 body. `uCharacter__processTarget1` indexes seven heap-backed tables through

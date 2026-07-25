@@ -65,7 +65,6 @@ static constexpr uintptr_t FN_SSHOT_SPAWN = 0x140150E00;
 static constexpr uintptr_t FN_SSHOT_SPAWN_EX = 0x140150F40;
 static constexpr uintptr_t FN_SSHOT_ENQUEUE_UNIT = 0x1401512A0;
 static constexpr uintptr_t FN_SSHOT_FLUSH_PENDING_UNITS = 0x1401517A0;
-static constexpr uintptr_t FN_USHOT_DISPATCH_CAPSULE = 0x1401C92E0;
 static constexpr uintptr_t FN_USHOT_UPDATE_HITBOXES = 0x1401C9000;
 static constexpr uintptr_t VTABLE_USHOT_VULCAN_ZIREITOU = 0x140AC0E20;
 static constexpr uintptr_t FN_SUNIT_ADD_UNIT = 0x14051A6B0;
@@ -1652,16 +1651,8 @@ static void(__fastcall* oKirigakureEffectUpdate)(void* effect) = nullptr;
 static EffectCreateFn oEffectCreate = nullptr;
 using BuildAttachMatrixFn = void(__fastcall*)(void*, void*, char);
 static BuildAttachMatrixFn oBuildAttachMatrix = nullptr;
-using ShotDispatchCapsuleFn = void(__fastcall*)(void*, void*, void*, void*);
-static ShotDispatchCapsuleFn oShotDispatchCapsule = nullptr;
 using ShotUpdateHitboxesFn = void(__fastcall*)(void*);
 static ShotUpdateHitboxesFn oShotUpdateHitboxes = nullptr;
-struct ShotCapsuleDispatchContext {
-    void* shot = nullptr;
-    float cameraOrigin[4] = {};
-    bool hasCameraOrigin = false;
-};
-static thread_local ShotCapsuleDispatchContext g_shotCapsuleDispatchContext;
 using HsienKoSelectAnkiFn = int(__fastcall*)(void*);
 static HsienKoSelectAnkiFn oHsienKoSelectAnki = nullptr;
 using SetReservedAnkiFn = void(__fastcall*)(void*, int);
@@ -2286,42 +2277,15 @@ static void __fastcall hkBuildAttachMatrix(void* arm, void* output, char reset)
     std::memcpy(output, bytes + 0x90, 0x40);
 }
 
-static void __fastcall hkShotDispatchCapsule(void* shot, void* metadata,
-                                               void* primitive,
-                                               void* cameraOrigin)
-{
-    g_shotCapsuleDispatchContext.shot = shot;
-    g_shotCapsuleDispatchContext.hasCameraOrigin = cameraOrigin != nullptr;
-    if (cameraOrigin) {
-        std::memcpy(g_shotCapsuleDispatchContext.cameraOrigin, cameraOrigin,
-                    sizeof(g_shotCapsuleDispatchContext.cameraOrigin));
-    }
-
-    auto recipe = g_liveShotRecipes.find(shot);
-    if (recipe != g_liveShotRecipes.end() && recipe->second.reconstructed) {
-        ConcreteShotSnapshot_DispatchCapsule(
-            shot, recipe->second.concrete, metadata, primitive, cameraOrigin,
-            oShotDispatchCapsule);
-        return;
-    }
-    oShotDispatchCapsule(shot, metadata, primitive, cameraOrigin);
-}
-
 static void __fastcall hkShotUpdateHitboxes(void* shot)
 {
-    g_shotCapsuleDispatchContext = {};
     oShotUpdateHitboxes(shot);
 
     auto recipe = g_liveShotRecipes.find(shot);
     if (recipe == g_liveShotRecipes.end() || !recipe->second.reconstructed)
         return;
 
-    void* cameraOrigin =
-        g_shotCapsuleDispatchContext.shot == shot &&
-        g_shotCapsuleDispatchContext.hasCameraOrigin
-        ? g_shotCapsuleDispatchContext.cameraOrigin : nullptr;
-    ConcreteShotSnapshot_ReapplyCapsules(
-        shot, recipe->second.concrete, cameraOrigin, oShotDispatchCapsule);
+    ConcreteShotSnapshot_ReapplyCapsules(shot, recipe->second.concrete);
 }
 
 static int SanitizeShotCollisionSlotsForDestruction(void* shot)
@@ -6162,16 +6126,6 @@ void Rollback_InitHooks()
         HookLog("Rollback: hooked uShot attachment transform guard\n");
     } else {
         HookLog("Rollback: failed to hook uShot attachment transform guard (%d)\n", s);
-    }
-
-    s = MH_CreateHook((LPVOID)_addr(FN_USHOT_DISPATCH_CAPSULE),
-                      (LPVOID)&hkShotDispatchCapsule,
-                      (LPVOID*)&oShotDispatchCapsule);
-    if (s == MH_OK) {
-        MH_EnableHook((LPVOID)_addr(FN_USHOT_DISPATCH_CAPSULE));
-        HookLog("Rollback: hooked uShot capsule collision source\n");
-    } else {
-        HookLog("Rollback: failed to hook uShot capsule collision source (%d)\n", s);
     }
 
     s = MH_CreateHook((LPVOID)_addr(FN_USHOT_UPDATE_HITBOXES),
