@@ -311,10 +311,11 @@ static void __fastcall HookedMove(void* sMvc3Main)
         return;
     }
 
-    // Restart is a new battle epoch. Do the entire reset before the game tick
-    // at the agreed frame, then let the normal intro barrier run again.
-    if (Netplay_IsActive() && g_restartTargetFrame >= 0 &&
-        Controller_GetNetFrameCount() >= g_restartTargetFrame)
+    // Restart immediately offline or at the agreed frame during netplay.
+    // Perform it before the game tick, then let the intro run again.
+    const bool restartNetplay = Netplay_IsActive();
+    if (g_restartTargetFrame >= 0 &&
+        (!restartNetplay || Controller_GetNetFrameCount() >= g_restartTargetFrame))
     {
         static constexpr uintptr_t MVC3_MANAGER_PTR = 0x140D510A0;
         static constexpr uintptr_t SMVC3MGR_ACTION_OFFSET = 0x48;
@@ -340,25 +341,28 @@ static void __fastcall HookedMove(void* sMvc3Main)
             ((ReplayRoundStartFn)_addr(REPLAY_ROUND_START_ADDR))(sReplay);
         }
 
-        Netplay_ClearInputQueues();
-        Controller_ResetBuffers();
-        Controller_ResetFrameEpoch();
         Rollback_FreeSnapshots();
-        Rollback_ResetNetplayLiveLog();
+        if (restartNetplay) {
+            Netplay_ClearInputQueues();
+            Controller_ResetBuffers();
+            Controller_ResetFrameEpoch();
+            Rollback_ResetNetplayLiveLog();
 
-        g_battleSynchronized = false;
-        g_localReady = false;
-        g_remoteReady = false;
-        g_localRelease = false;
-        g_remoteRelease = false;
-        ++g_battleGeneration;
-        if (g_battleGeneration == 0)
-            g_battleGeneration = 1;
-        g_advertisedBattleFlags = 0;
-        g_battleAdvertiseTick = 0;
+            g_battleSynchronized = false;
+            g_localReady = false;
+            g_remoteReady = false;
+            g_localRelease = false;
+            g_remoteRelease = false;
+            ++g_battleGeneration;
+            if (g_battleGeneration == 0)
+                g_battleGeneration = 1;
+            g_advertisedBattleFlags = 0;
+            g_battleAdvertiseTick = 0;
+        }
         g_restartTargetFrame = -1;
 
-        HookLog("Netplay: reset battle epoch and restarted intro (generation=%u seed=0x%08X)\n",
+        HookLog("FrameStepper: restarted match (%s, generation=%u seed=0x%08X)\n",
+                 restartNetplay ? "netplay" : "offline",
                  g_battleGeneration, g_restartRoundSeed);
     }
 
@@ -439,6 +443,7 @@ static void __fastcall HookedMove(void* sMvc3Main)
             Controller_ResetFrameEpoch();
             Rollback_FreeSnapshots();
             g_battleSynchronized = true;
+            Netplay_SetTimeout(5000);
             HookLog("Netplay: Intro barrier released after mutual acknowledgement (generation=%u)\n",
                     g_battleGeneration);
         }
@@ -724,7 +729,8 @@ void FrameStepper_Process()
             Netplay_SendRestartMatch(targetFrame, g_restartRoundSeed);
         }
         g_restartTargetFrame = targetFrame;
-        HookLog("Netplay: scheduled match restart for frame %d\n", targetFrame);
+        HookLog("FrameStepper: scheduled match restart for frame %d (%s)\n",
+                targetFrame, Netplay_IsActive() ? "netplay" : "offline");
     }
 
     int32_t remoteRestartFrame = -1;

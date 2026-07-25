@@ -571,7 +571,7 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
                         g_dialogConfig.enetPeer = event.peer;
                         event.peer->data = (void*)"connected";
 
-                        // Reset timeout to 15000ms for gameplay
+                        // Keep a generous timeout through loading and the intro barrier.
                         enet_peer_timeout(event.peer, 0, 15000, 15000);
 
                         HWND hStatus = GetDlgItem(hDlg, ID_NET_STATUS);

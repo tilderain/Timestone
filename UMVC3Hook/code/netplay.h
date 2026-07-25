@@ -175,6 +175,9 @@ bool Netplay_IsHost();
 // Returns the peer's mean round-trip time (ping) in milliseconds, or 0 if inactive.
 uint32_t Netplay_GetRTT();
 
+// Request a peer timeout change on the ENet service thread.
+void Netplay_SetTimeout(uint32_t timeoutMs);
+
 // Compatibility queries (return first slot of latest inbound packet)
 bool     Netplay_HasRemoteInput();
 uint32_t Netplay_GetRemoteInput();

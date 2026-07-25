@@ -268,6 +268,20 @@ static constexpr SnapshotRange SMAIN_RESTORE_RANGES[] = {
     {0x40048, 0x14},    // secondary timing tail
 };
 
+// sAction owns resources, arrays and transient effect/ExAtkSpace objects in the
+// same 0x300-byte body as its match state. Rewind only confirmed scalar state;
+// in particular, +0x148 is a live uExAtkSpace reference released through
+// vtable+0x78 and must never be imported from an older timeline.
+static constexpr SnapshotRange SACTION_RESTORE_RANGES[] = {
+    {0x28, 0xE8},  // cActionTime and match/round/step gameplay state
+    {0x140, 0x08}, // current ExAtkSpace type and request state before owner ptr
+    {0x150, 0x08}, // ExAtkSpace destroy flag and scalar state
+    {0x168, 0x09}, // remaining ExAtkSpace scalar state through request flag
+    {0x218, 0x04}, // clear-character type
+    {0x250, 0x10}, // restart and damage scaling
+    {0x268, 0x34}, // combat tuning and stage-range scalar state
+};
+
 // cChrTeam embeds its intrusive cChrNode/list head at +0x08. Restore only
 // gameplay/team-selection fields; the live list topology must not be rewound.
 static constexpr SnapshotRange CCHR_TEAM_RESTORE_RANGES[] = {
@@ -672,6 +686,10 @@ static void(__fastcall* oCallSRender)(uint64_t param_1) = nullptr;
 static void(__fastcall* oMain_move)(uint64_t param_1) = nullptr;
 // Trampoline for sSound__move. Audio scene state is not rollback gameplay state.
 static void(__fastcall* oSound_move)(uint64_t param_1) = nullptr;
+// Trampoline for sGameUI__move. UI scheduler state is not rollback gameplay state.
+static void(__fastcall* oGameUi_move)(uint64_t param_1) = nullptr;
+// Trampoline for resource-backed scheduler setup. Its arrays are allocator-owned.
+static void(__fastcall* oSchedulerRebuild)(uint64_t scheduler) = nullptr;
 static bool(__fastcall* oRChrCpuClassFunc)(void* cpu, void* object) = nullptr;
 // Trampoline for the fighter pushbox collision callback.
 static void(__fastcall* oApplyCollisionPushCorrection)(
@@ -2083,15 +2101,20 @@ static bool IsTerminalShot(void* shot)
 
 static void DetachEmbeddedShotEffect(void* shot)
 {
-    if (!shot || !HasCallableDtiVirtual(shot) ||
-        !IsAccessiblePointer((uint64_t)shot + 0x2160 + 0xB0)) return;
+    if (!shot || !HasCallableDtiVirtual(shot)) return;
+
+    constexpr uint32_t EMBEDDED_EFFECT_OFFSET = 0x2160;
+    constexpr uint32_t EMBEDDED_EFFECT_SIZE = 0x230;
+    uint32_t shotSize = DecodeDtiSize(GetObjectDti((uint64_t)shot));
+    if (shotSize < EMBEDDED_EFFECT_OFFSET + EMBEDDED_EFFECT_SIZE) return;
 
     // The concrete laser destructors pass shot+0x2160 to particle unlink.
     // Ghidra renders this as field19_0x1350+0xE10, but field19 is inline
-    // storage. Crash registers confirm the direct offset (sEffect RBX - shot
-    // R12 == 0x2160).
-    uint8_t* embeddedEffect = (uint8_t*)shot + 0x2160;
-    if (!HasCallableDtiVirtual(embeddedEffect)) return;
+    // storage. Only concrete types whose DTI size contains the complete uEffect
+    // may use this layout. Shorter lasers end near +0x2160; treating committed
+    // memory after them as inline storage corrupts the next heap allocation.
+    uint8_t* embeddedEffect = (uint8_t*)shot + EMBEDDED_EFFECT_OFFSET;
+    if (!IsEffectObject(embeddedEffect)) return;
     *(uint64_t*)(embeddedEffect + 0x50) = 0;
     *(uint64_t*)(embeddedEffect + 0x58) = 0;
     *(uint64_t*)(embeddedEffect + 0x60) = 0;
@@ -2108,9 +2131,14 @@ static void DetachEmbeddedShotEffect(void* shot)
 
 static void ReleaseFreshEmbeddedShotEffectGraph(void* shot)
 {
-    if (!shot || !IsAccessiblePointer((uint64_t)shot + 0x2160 + 0x230)) return;
+    if (!shot || !HasCallableDtiVirtual(shot)) return;
 
-    void* embeddedEffect = (uint8_t*)shot + 0x2160;
+    constexpr uint32_t EMBEDDED_EFFECT_OFFSET = 0x2160;
+    constexpr uint32_t EMBEDDED_EFFECT_SIZE = 0x230;
+    uint32_t shotSize = DecodeDtiSize(GetObjectDti((uint64_t)shot));
+    if (shotSize < EMBEDDED_EFFECT_OFFSET + EMBEDDED_EFFECT_SIZE) return;
+
+    void* embeddedEffect = (uint8_t*)shot + EMBEDDED_EFFECT_OFFSET;
     if (!IsEffectObject(embeddedEffect)) return;
 
     // This graph was just created by the native shot factory, so its allocator
@@ -3452,6 +3480,8 @@ static constexpr uintptr_t FN_CALL_AI                = 0x140647910;  // direct c
 static constexpr uintptr_t FN_UPDATE_RENDER_STATE    = 0x140259ea0;  // sMvc3Main__updateRenderState
 static constexpr uintptr_t FN_RENDER_END_FRAME       = 0x14053a250;  // sRender__endFrameAndPresent
 static constexpr uintptr_t FN_SSOUND_MOVE             = 0x1405CC040;
+static constexpr uintptr_t FN_SGAMEUI_MOVE            = 0x1402BE610;
+static constexpr uintptr_t FN_SCHEDULER_REBUILD       = 0x14050F010;
 static constexpr uintptr_t FN_APPLY_COLLISION_PUSH   = 0x14004ad20;  // fighter pushbox response callback
 static constexpr uintptr_t FN_RESET_HITNODES         = 0x140259e90;  // j_sHitSolver__resetActiveNodes
 static constexpr uintptr_t FN_PAD_METHOD_3D00        = 0x1402a3d00;  // sPad method
@@ -3808,7 +3838,11 @@ return;
     // ---- Manager subsystems (vtable+0x30 updates) ----
     HookLog("Rollback_HeadlessTick: Phase2 — Manager subsystems\n");
     MgrSubsysCall(FN_GETGAMECONFIG, 0x30);   // sGameConfig
-    MgrSubsysCall(FN_GETGAMEUI, 0x30);       // sGameUI
+    // sGameUI is presentation state and is intentionally excluded from the
+    // snapshot. Updating it during re-simulation can load uCmbText resources
+    // and rebuild uScheduler arrays whose allocator-owned storage is not
+    // rewound, eventually reaching native setup with a failed allocation.
+    // Leave UI animation/resource state on the live timeline.
 
     // [SKIP] getShot->vtable+0x48 (draw)
     // [SKIP] getGameEffect->vtable+0x48 (draw)
@@ -4164,6 +4198,15 @@ void Rollback_RestoreSnapshot(int32_t frame)
         } else if ((uint64_t)slot.regions[i].ptr == *(uint64_t*)_addr(PTR_SMAIN) &&
                    slot.regions[i].size == SMAIN_SIZE) {
             for (const SnapshotRange& range : SMAIN_RESTORE_RANGES) {
+                if ((size_t)range.offset + range.size <= copySize) {
+                    std::memcpy((uint8_t*)slot.regions[i].ptr + range.offset,
+                                slot.data + offset + range.offset,
+                                range.size);
+                }
+            }
+        } else if ((uint64_t)slot.regions[i].ptr == sAction &&
+                   slot.regions[i].size == 0x300) {
+            for (const SnapshotRange& range : SACTION_RESTORE_RANGES) {
                 if ((size_t)range.offset + range.size <= copySize) {
                     std::memcpy((uint8_t*)slot.regions[i].ptr + range.offset,
                                 slot.data + offset + range.offset,
@@ -5732,6 +5775,29 @@ static void __fastcall hkSound_move(uint64_t param_1)
     oSound_move(param_1);
 }
 
+static void __fastcall hkGameUi_move(uint64_t param_1)
+{
+    // Re-simulation currently runs the full native sMvc3Main__move rather than
+    // Rollback_HeadlessTick. Keep unsnapshotted UI resources and scheduler
+    // arrays on the final presentation timeline only.
+    if (g_isResimulating)
+        return;
+
+    oGameUi_move(param_1);
+}
+
+static void __fastcall hkSchedulerRebuild(uint64_t scheduler)
+{
+    // UI and battle-message units can both lazily rebuild resource schedulers
+    // from sUnit::load/save. Those arrays are presentation state and allocate
+    // from the live heap, which rollback does not rewind. Do not create another
+    // timeline's scheduler storage while replaying frames.
+    if (g_isResimulating)
+        return;
+
+    oSchedulerRebuild(scheduler);
+}
+
 static bool __fastcall hkRChrCpuClassFunc(void* cpu, void* object)
 {
     // This opcode pops a 64-bit object from two 32-bit VM stack entries and
@@ -5988,6 +6054,30 @@ void Rollback_InitHooks()
         HookLog("Rollback: hooked sSound__move for headless re-simulation\n");
     } else {
         HookLog("Rollback: failed to hook sSound__move (%d)\n", s);
+    }
+
+    s = MH_CreateHook(
+        (LPVOID)_addr(FN_SGAMEUI_MOVE),
+        (LPVOID)&hkGameUi_move,
+        (LPVOID*)&oGameUi_move
+    );
+    if (s == MH_OK) {
+        MH_EnableHook((LPVOID)_addr(FN_SGAMEUI_MOVE));
+        HookLog("Rollback: hooked sGameUI__move for re-simulation suppression\n");
+    } else {
+        HookLog("Rollback: failed to hook sGameUI__move (%d)\n", s);
+    }
+
+    s = MH_CreateHook(
+        (LPVOID)_addr(FN_SCHEDULER_REBUILD),
+        (LPVOID)&hkSchedulerRebuild,
+        (LPVOID*)&oSchedulerRebuild
+    );
+    if (s == MH_OK) {
+        MH_EnableHook((LPVOID)_addr(FN_SCHEDULER_REBUILD));
+        HookLog("Rollback: hooked uScheduler rebuild for re-simulation suppression\n");
+    } else {
+        HookLog("Rollback: failed to hook uScheduler rebuild (%d)\n", s);
     }
 
     s = MH_CreateHook(

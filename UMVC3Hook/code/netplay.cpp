@@ -34,6 +34,7 @@ static HANDLE               g_serviceThread  = nullptr;
 static uint32_t             g_recvCount = 0;
 static uint32_t             g_lastRecv  = 0;
 static std::atomic<bool>    g_running { false };
+static std::atomic<uint32_t> g_requestedTimeoutMs { 0 };
 
 // Delay + rollback control channel — small packets to keep both peers in sync.
 static int32_t              g_outboundDelay    = -1;
@@ -109,6 +110,13 @@ static DWORD WINAPI Netplay_ServiceThread(LPVOID)
 
     while (g_running)
     {
+        uint32_t timeoutMs = g_requestedTimeoutMs.exchange(0);
+        if (timeoutMs != 0 && g_peer)
+        {
+            enet_peer_timeout(g_peer, 0, timeoutMs, timeoutMs);
+            HookLog("Netplay: Peer timeout set to %u ms\n", timeoutMs);
+        }
+
         // --- Periodic stats (every ~3 seconds) ---
         static uint32_t lastStatsTick = GetTickCount();
         uint32_t now = GetTickCount();
@@ -519,6 +527,7 @@ void Netplay_Init(ENetHost* host, ENetPeer* peer)
 
     g_recvCount = 0;
     g_lastRecv = 0;
+    g_requestedTimeoutMs = 0;
     g_running = true;
 
     // Reset internal player pad ring buffers
@@ -539,6 +548,12 @@ void Netplay_Init(ENetHost* host, ENetPeer* peer)
         g_running = false;
         g_active  = false;
     }
+}
+
+void Netplay_SetTimeout(uint32_t timeoutMs)
+{
+    if (g_active && timeoutMs != 0)
+        g_requestedTimeoutMs = timeoutMs;
 }
 
 void Netplay_SendPacket(const InputPacket& pkt)
