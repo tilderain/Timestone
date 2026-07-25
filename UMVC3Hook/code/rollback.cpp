@@ -2164,6 +2164,43 @@ static bool IsActiveUnit(void* unit)
     return (state & 7u) < 3u && (state & 0x3F8u) != 0x3F8u;
 }
 
+static void RestoreKingKobunHelper(void* shot, const ShotRecipe& saved)
+{
+    constexpr uintptr_t KING_KOBUN_DTI = 0x140D4D2B0;
+    constexpr uintptr_t KOBUN_DTI = 0x140D455B0;
+    constexpr size_t HELPER_OFFSET = 0x2158;
+    if (!shot || saved.concrete.dti != (uint64_t)_addr(KING_KOBUN_DTI) ||
+        saved.concrete.body.size() < HELPER_OFFSET + sizeof(uint64_t)) {
+        return;
+    }
+
+    void* savedHelper = *(void**)(saved.concrete.body.data() + HELPER_OFFSET);
+    void* helper = ValidateShotObjectReference(
+        savedHelper, (uint64_t)_addr(KOBUN_DTI), true);
+
+    // King Servbot setup normally obtains this relationship from Tron's
+    // transient action-side-camera state. That lookup is no longer populated
+    // when a historical shot is reconstructed, so fall back to the unique live
+    // uKobun helper in the character category.
+    if (!helper) {
+        uint64_t sUnit = *(uint64_t*)_addr(PTR_SUNIT);
+        if (sUnit && *(uint32_t*)(sUnit + SUNIT_CATEGORY_COUNT_OFFSET) >
+                         SUNIT_CHARACTER_CATEGORY) {
+            uint64_t node = *(uint64_t*)(sUnit + SUNIT_CATEGORY_LISTS_OFFSET +
+                SUNIT_CATEGORY_LIST_STRIDE * SUNIT_CHARACTER_CATEGORY);
+            for (int safety = 64; node && safety-- > 0; node = *(uint64_t*)(node + 0x18)) {
+                if (GetObjectDti(node) == (uint64_t)_addr(KOBUN_DTI) &&
+                    IsActiveUnit((void*)node)) {
+                    if (helper) return; // Ambiguous: do not bind another player's helper.
+                    helper = (void*)node;
+                }
+            }
+        }
+    }
+
+    *(void**)((uint8_t*)shot + HELPER_OFFSET) = helper;
+}
+
 static bool IsTerminalShot(void* shot)
 {
     if (!shot || !IsActiveUnit(shot)) return false;
@@ -2762,6 +2799,7 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
             HookLog("Rollback: restored shot 0x%llX has incomplete collision topology\n",
                     (uint64_t)fresh);
         }
+        RestoreKingKobunHelper(fresh, saved);
         // Concrete snapshots do not reconstruct the global particle-owner
         // graph referenced by inline sEffect objects. Leave that graph
         // detached so later native shot destruction cannot walk stale nodes.
@@ -4246,6 +4284,7 @@ void Rollback_RestoreSnapshot(int32_t frame)
     uint64_t sMvc3Mgr = *(uint64_t*)_addr(PTR_SMVC3MGR);
     uint64_t sAction = sMvc3Mgr ? *(uint64_t*)(sMvc3Mgr + SMVC3MGR_ACTION_OFFSET) : 0;
     uint64_t modelJointAllocationSlot = 0;
+    uint64_t liveModelJointAllocation = 0;
     if (sAction && IsAccessibleAddress(
             sAction + SACTION_MODEL_JOINT_WRAPPER_OFFSET)) {
         uint64_t modelJointWrapper = *(uint64_t*)(
@@ -4254,6 +4293,7 @@ void Rollback_RestoreSnapshot(int32_t frame)
                 modelJointWrapper + SACTION_MODEL_JOINT_ALLOCATION_OFFSET)) {
             modelJointAllocationSlot = modelJointWrapper +
                 SACTION_MODEL_JOINT_ALLOCATION_OFFSET;
+            liveModelJointAllocation = *(uint64_t*)modelJointAllocationSlot;
         }
     }
     uint64_t sCharacter = *(uint64_t*)_addr(PTR_SCHARACTER);
@@ -4293,7 +4333,21 @@ void Rollback_RestoreSnapshot(int32_t frame)
         }
         bool objectStillMatches = slot.regions[i].expectedVtable == 0 ||
             *(uint64_t*)slot.regions[i].ptr == slot.regions[i].expectedVtable;
-        if (!ownerStillMatches[i] || !objectStillMatches) {
+        if (slot.regions[i].ownerSlot == modelJointAllocationSlot &&
+            slot.regions[i].size == SACTION_MODEL_JOINT_ALLOCATION_SIZE &&
+            liveModelJointAllocation &&
+            IsAccessibleAddress(liveModelJointAllocation +
+                SACTION_MODEL_JOINT_ALLOCATION_SIZE - 1) &&
+            copySize > SACTION_MODEL_JOINT_DATA_OFFSET) {
+            // Throw root motion reads this transient sAction payload. Native
+            // action processing can replace its allocation after capture, so
+            // rewind the saved scalar data into the current allocation while
+            // retaining the current allocator header and pointer identity.
+            std::memcpy((uint8_t*)liveModelJointAllocation +
+                            SACTION_MODEL_JOINT_DATA_OFFSET,
+                        slot.data + offset + SACTION_MODEL_JOINT_DATA_OFFSET,
+                        copySize - SACTION_MODEL_JOINT_DATA_OFFSET);
+        } else if (!ownerStillMatches[i] || !objectStillMatches) {
             // The external blend/animation allocation was replaced after the
             // snapshot, or a helper cChr was destroyed/reused. Never write old
             // bytes into a freed or repurposed allocation.
@@ -4302,13 +4356,6 @@ void Rollback_RestoreSnapshot(int32_t frame)
             RestoreExternalAnimBlock(slot.regions[i].ptr,
                                      slot.data + offset,
                                      copySize);
-        } else if (slot.regions[i].ownerSlot == modelJointAllocationSlot &&
-                   slot.regions[i].size == SACTION_MODEL_JOINT_ALLOCATION_SIZE &&
-                   copySize > SACTION_MODEL_JOINT_DATA_OFFSET) {
-            std::memcpy((uint8_t*)slot.regions[i].ptr +
-                            SACTION_MODEL_JOINT_DATA_OFFSET,
-                        slot.data + offset + SACTION_MODEL_JOINT_DATA_OFFSET,
-                        copySize - SACTION_MODEL_JOINT_DATA_OFFSET);
         } else if ((uint64_t)slot.regions[i].ptr == sCollision &&
                    slot.regions[i].size == SCOLLISION_SIZE) {
             ++collisionRestoreCount;

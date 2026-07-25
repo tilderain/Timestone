@@ -30,6 +30,7 @@ constexpr size_t kAttackTargetTables[kAttackTargetTableCount] = {
 // They are used only to select the exceptional subclass policy; the object
 // size itself always comes from the live object's DTI metadata.
 constexpr uintptr_t kSoulFistDti = 0x140D4B6E8ull;
+constexpr uintptr_t kKingKobunDti = 0x140D4D2B0ull;
 constexpr uintptr_t kRyuDti = 0x140D45A10ull;
 constexpr uintptr_t kHsienKoDti = 0x140D455F8ull;
 constexpr uintptr_t kSpencerDti = 0x140D45D40ull;
@@ -570,6 +571,26 @@ bool ConcreteShotSnapshot_Restore(void* shot,
     // because it resembles an address.
     RestoreGeneratedRanges(overlay.data(), source, liveSize, snapshot.dti,
                            kGeneratedShotTailRanges);
+
+    if (IsDti(snapshot.dti, kKingKobunDti)) {
+        // King Servbot changes movement mode when Motion[0]+0x10 raises event
+        // bit 2. Reconstruction keeps fresh motion owners and resources, but
+        // must rewind their pointer-free playback state or every rollback
+        // restarts the controller animation before that event is reached.
+        CopyRange(overlay.data(), source, liveSize, {0x550, 0x10});
+        static constexpr SnapshotRange motionRestoreRanges[] = {
+            {0x08, 0x118},
+            {0x140, 0x20},
+            {0x168, 0x08},
+        };
+        for (uint32_t motion = 0; motion < 8; ++motion) {
+            size_t motionBase = 0x560 + motion * 0x180;
+            for (const SnapshotRange& range : motionRestoreRanges) {
+                CopyRange(overlay.data(), source, liveSize,
+                          {motionBase + range.offset, range.size});
+            }
+        }
+    }
 
     /*if (IsDti(snapshot.dti, kAttackWireDti)) {
         // This unlabeled attack-wire block was separately verified from its
