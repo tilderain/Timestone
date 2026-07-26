@@ -109,9 +109,16 @@ DEFINES   := \
 
 # --- Compiler flags ---
 
-CXXFLAGS  := -O2 -std=c++20 -fpermissive -MMD -MP $(DEFINES) $(INCLUDES) -DUMVC3HOOK_GIT_COMMIT=\"$(GIT_COMMIT)\" -DUMVC3HOOK_GIT_DIRTY=$(GIT_DIRTY) -Wall -Wno-unused-variable -Wno-unused-function
-CFLAGS    := -O2 -MMD -MP $(DEFINES) $(INCLUDES) -Wall -Wno-unused-variable
-LDFLAGS   := -shared -static-libgcc -static-libstdc++
+# Keep the release ISA portable across netplay peers. In particular, do not use
+# -march=native or -ffast-math: host-specific instructions and relaxed floating
+# point semantics are both inappropriate for deterministic rollback simulation.
+PERF_FLAGS := -O3 -flto=auto -fuse-linker-plugin -fipa-pta \
+	-fdevirtualize-at-ltrans -fomit-frame-pointer \
+	-ffunction-sections -fdata-sections
+CXXFLAGS  := $(PERF_FLAGS) -std=c++20 -fpermissive -MMD -MP $(DEFINES) $(INCLUDES) -DUMVC3HOOK_GIT_COMMIT=\"$(GIT_COMMIT)\" -DUMVC3HOOK_GIT_DIRTY=$(GIT_DIRTY) -Wall -Wno-unused-variable -Wno-unused-function
+CFLAGS    := $(PERF_FLAGS) -MMD -MP $(DEFINES) $(INCLUDES) -Wall -Wno-unused-variable
+LDFLAGS   := -shared -static-libgcc -static-libstdc++ -flto=auto \
+	-fuse-linker-plugin -Wl,--gc-sections -Wl,-O2
 LIBS      := \
 	-ld3d9 \
 	-ld3dcompiler \
