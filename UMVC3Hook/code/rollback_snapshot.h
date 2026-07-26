@@ -116,3 +116,5 @@ struct RollbackSnapshotSlot {
 };
 
 extern RollbackSnapshotSlot g_rollbackSnapshotSlots[ROLLBACK_WINDOW];
+
+int Rollback_BuildRegions(RollbackRegion* regions, int maxRegions);

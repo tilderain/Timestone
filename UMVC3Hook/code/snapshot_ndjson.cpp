@@ -8,6 +8,8 @@
 #include "rollback.h"
 #include "rollback_diagnostics.h"
 #include "rollback_memory.h"
+#include "rollback_shot.h"
+#include "rollback_snapshot.h"
 
 #include <cmath>
 #include <cstdio>
@@ -548,6 +550,28 @@ void DumpManifest(int session, int32_t frame, uint8_t side)
 }
 
 } // namespace
+
+void NDJSON_GetRegions(std::vector<NDJSON_Region>& regions)
+{
+    RollbackRegion snapshotRegions[ROLLBACK_MAX_REGIONS];
+    int count = Rollback_BuildRegions(snapshotRegions, ROLLBACK_MAX_REGIONS);
+    regions.clear();
+    regions.reserve(count);
+    for (int i = 0; i < count; ++i)
+        regions.push_back({snapshotRegions[i].ptr, snapshotRegions[i].size});
+}
+
+bool NDJSON_GetShotRecipe(void* shot, NDJSON_ShotRecipe& recipe)
+{
+    RollbackShotRecipe found;
+    if (!Shot_GetRecipe(shot, found)) return false;
+    recipe.slotId = found.slotId;
+    recipe.initParam = found.initParam;
+    recipe.ownerChr = (uint64_t)found.ownerChr;
+    recipe.shotElement = (uint64_t)found.shotElement;
+    recipe.extended = found.kind == RollbackShotSpawnKind::Extended;
+    return true;
+}
 
 std::string NDJSON_GenerateNetplayLive(int32_t frame, bool isResim,
                                        const char* phase, int32_t rollbackStart,

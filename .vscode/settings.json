@@ -1,0 +1,7 @@
+{
+	"files.associations": {
+		"*.nut": "c",
+		"*.td": "c",
+		"system_error": "cpp"
+	}
+}

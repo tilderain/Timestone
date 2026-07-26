@@ -43,6 +43,7 @@ CPP_SRC   := \
 	$(SRCDIR)/code/rollback.cpp \
 	$(SRCDIR)/code/rollback_cleanup.cpp \
 	$(SRCDIR)/code/rollback_diagnostics.cpp \
+	$(SRCDIR)/code/rollback_effect.cpp \
 	$(SRCDIR)/code/rollback_hooks.cpp \
 	$(SRCDIR)/code/rollback_memory.cpp \
 	$(SRCDIR)/code/rollback_restore.cpp \
@@ -53,6 +54,7 @@ CPP_SRC   := \
 	$(SRCDIR)/code/snapshot_ndjson.cpp \
 	$(SRCDIR)/code/rollback_profile.cpp \
 	$(SRCDIR)/code/rollback_rng.cpp \
+	$(SRCDIR)/code/rollback_shot.cpp \
 	$(SRCDIR)/code/concrete_snapshot.cpp \
 	$(SRCDIR)/code/netplay.cpp \
 	$(SRCDIR)/imgui/imgui.cpp \
