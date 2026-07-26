@@ -54,6 +54,9 @@ extern "C" void Rollback_NotifyDesyncTriggered(int32_t frame);
 // Flush buffered netplay diagnostics during shutdown or peer disconnect.
 extern "C" void Rollback_FlushNetplayLive(int32_t frame);
 
+// Write the current rolling history without stopping subsequent capture.
+void Rollback_DumpNetplayHistory(int32_t frame);
+
 // Best-effort flush of already-buffered NDJSON from the crash handler.
 // Does not initialize logging, capture game state, or mutate the rolling buffers.
 bool Rollback_FlushNDJSONOnCrash();

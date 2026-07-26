@@ -44,6 +44,7 @@ enum PacketType : uint32_t {
     PACKET_DESYNC = 7,  // DesyncPacket
     PACKET_RESTART_MATCH = 8, // RestartMatchPacket
     PACKET_MULTI_RESIM = 9, // MultiResimPacket
+    PACKET_DUMP_NDJSON = 10, // DumpNdjsonPacket
 };
 
 #pragma pack(push, 1)
@@ -101,6 +102,11 @@ struct RestartMatchPacket {
 struct MultiResimPacket {
     uint32_t type;               // PACKET_MULTI_RESIM
     uint32_t enabled;            // 0 = disabled, 1 = enabled
+};
+
+struct DumpNdjsonPacket {
+    uint32_t type;               // PACKET_DUMP_NDJSON
+    int32_t  frame;              // final frame included in the rolling dump
 };
 
 enum BattleSyncFlags : uint32_t {
@@ -232,6 +238,10 @@ bool Netplay_GetInboundRestartMatch(int32_t& outTargetFrame, uint32_t& outRoundS
 // Synchronize the multi-resimulation mode with the remote peer.
 void Netplay_SendMultiResim(bool enabled);
 bool Netplay_GetInboundMultiResim(bool& outEnabled);
+
+// Request that both peers dump their current rolling NDJSON history.
+void Netplay_SendDumpNDJSON(int32_t frame);
+bool Netplay_GetInboundDumpNDJSON(int32_t& outFrame);
 
 // Discard input packets produced before the synchronized battle boundary.
 void Netplay_ClearInputQueues();

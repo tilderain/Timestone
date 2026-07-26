@@ -84,6 +84,11 @@ static bool                     g_outboundMultiResimNew = false;
 static MultiResimPacket         g_inboundMultiResim = {};
 static bool                     g_inboundMultiResimNew = false;
 static CRITICAL_SECTION         g_multiResimCS;
+static DumpNdjsonPacket         g_outboundDumpNDJSON = {};
+static bool                     g_outboundDumpNDJSONNew = false;
+static DumpNdjsonPacket         g_inboundDumpNDJSON = {};
+static bool                     g_inboundDumpNDJSONNew = false;
+static CRITICAL_SECTION         g_dumpNDJSONCS;
 
 // One-time critical section initialization flag
 static bool                 g_csInitialized  = false;
@@ -320,6 +325,27 @@ static DWORD WINAPI Netplay_ServiceThread(LPVOID)
             enet_host_flush(g_host);
         }
 
+        bool hasDumpNDJSON = false;
+        DumpNdjsonPacket dumpNDJSONPkt = {};
+        {
+            ScopedCS lock(g_dumpNDJSONCS);
+            if (g_outboundDumpNDJSONNew)
+            {
+                dumpNDJSONPkt = g_outboundDumpNDJSON;
+                hasDumpNDJSON = true;
+                g_outboundDumpNDJSONNew = false;
+            }
+        }
+        if (hasDumpNDJSON && g_peer)
+        {
+            ENetPacket* packet = enet_packet_create(
+                &dumpNDJSONPkt, sizeof(DumpNdjsonPacket), ENET_PACKET_FLAG_RELIABLE
+            );
+            if (enet_peer_send(g_peer, 0, packet) != 0)
+                enet_packet_destroy(packet);
+            enet_host_flush(g_host);
+        }
+
         // --- Service the host ---
         if (g_host)
         {
@@ -438,6 +464,17 @@ static DWORD WINAPI Netplay_ServiceThread(LPVOID)
                                     }
                                 }
                                 break;
+
+                            case PACKET_DUMP_NDJSON:
+                                if (event.packet->dataLength >= sizeof(DumpNdjsonPacket))
+                                {
+                                    const DumpNdjsonPacket* dnp =
+                                        (const DumpNdjsonPacket*)event.packet->data;
+                                    ScopedCS lock(g_dumpNDJSONCS);
+                                    g_inboundDumpNDJSON = *dnp;
+                                    g_inboundDumpNDJSONNew = true;
+                                }
+                                break;
                         }
                     }
                     enet_packet_destroy(event.packet);
@@ -500,6 +537,7 @@ void Netplay_Init(ENetHost* host, ENetPeer* peer)
         InitializeCriticalSection(&g_desyncCS);
         InitializeCriticalSection(&g_restartCS);
         InitializeCriticalSection(&g_multiResimCS);
+        InitializeCriticalSection(&g_dumpNDJSONCS);
 
         g_outboundDelayNew = false;
         g_inboundDelayNew = false;
@@ -515,6 +553,8 @@ void Netplay_Init(ENetHost* host, ENetPeer* peer)
         g_inboundRestartNew = false;
         g_outboundMultiResimNew = false;
         g_inboundMultiResimNew = false;
+        g_outboundDumpNDJSONNew = false;
+        g_inboundDumpNDJSONNew = false;
         std::memset(&g_outboundPacket, 0, sizeof(InputPacket));
         g_csInitialized = true;
     }
@@ -672,6 +712,27 @@ bool Netplay_GetInboundMultiResim(bool& outEnabled)
         return false;
     outEnabled = g_inboundMultiResim.enabled != 0;
     g_inboundMultiResimNew = false;
+    return true;
+}
+
+void Netplay_SendDumpNDJSON(int32_t frame)
+{
+    ScopedCS lock(g_dumpNDJSONCS);
+    g_outboundDumpNDJSON.type = PACKET_DUMP_NDJSON;
+    g_outboundDumpNDJSON.frame = frame;
+    g_outboundDumpNDJSONNew = true;
+}
+
+bool Netplay_GetInboundDumpNDJSON(int32_t& outFrame)
+{
+    if (!g_active || !g_csInitialized)
+        return false;
+
+    ScopedCS lock(g_dumpNDJSONCS);
+    if (!g_inboundDumpNDJSONNew)
+        return false;
+    outFrame = g_inboundDumpNDJSON.frame;
+    g_inboundDumpNDJSONNew = false;
     return true;
 }
 

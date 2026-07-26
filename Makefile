@@ -41,6 +41,8 @@ CPP_SRC   := \
 	$(SRCDIR)/code/diag.cpp \
 	$(SRCDIR)/code/exception.cpp \
 	$(SRCDIR)/code/rollback.cpp \
+	$(SRCDIR)/code/rollback_runtime.cpp \
+	$(SRCDIR)/code/rollback_tick.cpp \
 	$(SRCDIR)/code/rollback_profile.cpp \
 	$(SRCDIR)/code/concrete_snapshot.cpp \
 	$(SRCDIR)/code/netplay.cpp \

@@ -22,7 +22,9 @@
 #include "../pch.h"
 
 #include "rollback.h"
+#include "rollback_internal.h"
 #include "rollback_profile.h"
+#include "rollback_tick.h"
 #include "concrete_snapshot.h"
 #include "controller.h"
 #include "mk10utils.h"
@@ -79,6 +81,13 @@ static constexpr uintptr_t FN_HSIENKO_SELECT_ANKI = 0x1400A1260;
 static constexpr uintptr_t FN_SET_RESERVED_ANKI = 0x1400D4D90;
 static constexpr uintptr_t FN_BUILD_ATTACH_MATRIX = 0x14014F960;
 static constexpr uintptr_t FN_KIRIGAKURE_EFFECT_UPDATE = 0x14013B050;
+static constexpr uintptr_t FN_SMAIN_MOVE = 0x140521DF0;
+static constexpr uintptr_t FN_RENDER_END_FRAME = 0x14053A250;
+static constexpr uintptr_t FN_SSOUND_MOVE = 0x1405CC040;
+static constexpr uintptr_t FN_SGAMEUI_MOVE = 0x1402BE610;
+static constexpr uintptr_t FN_SCHEDULER_REBUILD = 0x14050F010;
+static constexpr uintptr_t FN_APPLY_COLLISION_PUSH = 0x14004AD20;
+static constexpr uintptr_t FN_RESET_HITNODES = 0x140259E90;
 static constexpr uintptr_t DTI_UEFFECT = 0x140E18698;
 static constexpr uintptr_t DTI_UBASEMODEL = 0x140E17D48;
 
@@ -900,40 +909,6 @@ void Rollback_ResetNetplayLiveLog()
     Rollback_NetplayLiveInit();
 }
 
-void Rollback_ApplyNetplayDeterminism()
-{
-    using SetFrameWaitFn = void(__fastcall*)(uint64_t, bool);
-    using SetMoveLineParallelFn = void(__fastcall*)(uint64_t, int, bool);
-    using GetCollisionMoveMatrixFn = uint64_t(__fastcall*)(uint64_t);
-    using GetInstanceFn = uint64_t(__fastcall*)();
-    using SetBoolFn = void(__fastcall*)(uint64_t, bool);
-
-    uint64_t sMain = *(uint64_t*)_addr(0x140e177e8);
-    uint64_t sUnit = *(uint64_t*)_addr(PTR_SUNIT);
-    uint64_t sCollision = *(uint64_t*)_addr(0x140e18250);
-    uint64_t sHitSolver = *(uint64_t*)_addr(0x140d44060);
-    uint64_t battleRuntime = ((GetInstanceFn)_addr(0x140004730))();
-
-    if (sMain)
-        ((SetFrameWaitFn)_addr(0x140522420))(sMain, true);
-    if (sUnit) {
-        auto setMoveLineParallel = (SetMoveLineParallelFn)_addr(0x140207b10);
-        for (int category = 0; category < 64; ++category)
-            setMoveLineParallel(sUnit, category, false);
-    }
-    if (sCollision) {
-        uint64_t moveMatrix = ((GetCollisionMoveMatrixFn)_addr(0x1402033d0))(sCollision);
-        if (moveMatrix)
-            ((SetBoolFn)_addr(0x1405b7bf0))(moveMatrix, false);
-    }
-    if (sHitSolver)
-        ((SetBoolFn)_addr(0x140207660))(sHitSolver, false);
-    if (battleRuntime)
-        ((SetBoolFn)_addr(0x140207c30))(battleRuntime, false);
-
-    HookLog("Netplay: applied native battle determinism settings\n");
-}
-
 static std::string Rollback_GenerateHitboxJSON(uint64_t chr) {
     static constexpr uint32_t capsuleBase = 0x4210;
     static constexpr uint32_t capsuleStride = 0xB0;
@@ -1242,6 +1217,41 @@ static void Rollback_WriteNetplayLiveJSON(const std::string& json) {
         g_netplayLiveHistory[idx].clear();
     }
     g_netplayLiveHistory[idx] += json;
+}
+
+void Rollback_DumpNetplayHistory(int32_t frame)
+{
+    if (!g_ndjsonLoggingEnabled) return;
+    if (!g_netplayLiveInit) Rollback_NetplayLiveInit();
+    if (!g_netplayLivePath[0]) return;
+
+    for (int i = 0; i < 256; i++) {
+        if (g_pendingNPLiveFrame[i] >= 0) {
+            Rollback_WriteNetplayLiveJSON(g_pendingNPLiveJSON[i]);
+            g_pendingNPLiveFrame[i] = -1;
+        }
+    }
+
+    int32_t newestFrame = -1;
+    for (int i = 0; i < NETPLAY_LIVE_HISTORY; i++) {
+        const int32_t availableFrame = g_netplayLiveHistoryFrame[i];
+        if (availableFrame > newestFrame && (frame < 0 || availableFrame <= frame))
+            newestFrame = availableFrame;
+    }
+    if (newestFrame < 0) return;
+
+    FILE* f = fopen(g_netplayLivePath, "w");
+    if (!f) return;
+
+    const int32_t firstFrame = newestFrame - NETPLAY_LIVE_HISTORY + 1;
+    for (int32_t current = firstFrame; current <= newestFrame; current++) {
+        int idx = (uint32_t)current % NETPLAY_LIVE_HISTORY;
+        if (g_netplayLiveHistoryFrame[idx] == current)
+            fputs(g_netplayLiveHistory[idx].c_str(), f);
+    }
+    fclose(f);
+    HookLog("NetplayLive: manual dump of last %d frames through frame %d\n",
+            NETPLAY_LIVE_HISTORY, newestFrame);
 }
 
 extern "C" void Rollback_NotifyDesyncTriggered(int32_t frame)
@@ -3821,6 +3831,7 @@ static int BuildRegions(Region* regions, int maxRegions)
 // ===========================================================================
 // Sleep-Patch & Headless Tick — game-logic-only re-simulation stepping
 // ===========================================================================
+#if 0 // Moved to rollback_tick.cpp; retained temporarily as reverse-engineering notes.
 static constexpr uintptr_t FN_SMAIN_MOVE            = 0x140521df0;
 static constexpr uintptr_t FN_UPDATE_MANAGERS        = 0x140258540;
 static constexpr uintptr_t FN_PAD_PROCESS            = 0x140289c30;
@@ -3932,9 +3943,6 @@ static void Rollback_ResyncMainTiming(uint64_t sMain)
     // sets it to 1.0f in the vsync path and multiplies by globalSpeed (+0x8c).
     // The dash double-tap timers integrate this value per frame.
     *(float*)(sMain + 0x80)        = 1.0f;         // 1 frame of game time
-    *(uint32_t*)(sMain + 0xA8)     = 16;           // current delta
-    *(uint32_t*)(sMain + 0xA4)     = 16;           // shifted delta
-
     // Zero accumulated sleep/deadline calculations so they recompute fresh.
     // These are the "accumulated time" (sMain+0x60) and "deadline" (sMain+0x68)
     // used by the frame-pacing busy-wait logic.  If left stale the game may
@@ -4322,6 +4330,8 @@ return;
 
     HookLog("Rollback_HeadlessTick: end\n");
 }
+
+#endif
 
 // Forward declarations
 static void Rollback_ClearStalePointers();
@@ -5866,12 +5876,10 @@ static void Rollback_ClearGameEffectSlots()
 void Rollback_FreeSnapshots()
 {
     // Make sure patched calls are restored before tearing down
-    if (g_sleepPatched)
-        Rollback_PatchSleep(false);
-    if (g_presentPatched)
-        Rollback_PatchPresent(false);
-    if (g_swapchainPatched)
-        Rollback_PatchSwapchain(false);
+    Rollback_PatchSleep(false);
+    Rollback_PatchPresent(false);
+    Rollback_PatchSwapchain(false);
+    Rollback_PatchDrawCalls(false);
     Rollback_PatchDrawCalls(false); // restore draw calls (no-op if unpatched)
 
     for (int i = 0; i < ROLLBACK_WINDOW; ++i) {
@@ -6294,8 +6302,6 @@ static void __fastcall hkMain_move(uint64_t param_1)
 {
     RollbackHookProfileScope profile(RollbackHookProfileId::MainMove);
     if (g_isResimulating) {
-        *(uint32_t*)(param_1 + 0xA8) = 1;
-        *(uint32_t*)(param_1 + 0xA4) = 1;
         // Force tick=0 so the game's dispatcher loop won't call
         // sMvc3Main__move again.  Setting tick=1 was the root cause
         // of the infinite loop: the dispatcher checked tick, saw 1,
@@ -6311,21 +6317,6 @@ static void __fastcall hkMain_move(uint64_t param_1)
         return;
     }
 
-    // Eliminate job scheduling as a source of peer-dependent floating-point
-    // ordering in constraint and character-push work. sMain::move copies the
-    // desired count at +0xA8 into the active count at +0xA4, so set both before
-    // the call. Keep this active from loading through fighting so pre-fight
-    // collision caches are constructed under the same execution mode.
-    if (Netplay_IsActive()) {
-        static bool loggedSingleThread = false;
-        *(uint32_t*)(param_1 + 0xA8) = 1;
-        *(uint32_t*)(param_1 + 0xA4) = 1;
-        if (!loggedSingleThread) {
-            HookLog("Netplay: forcing deterministic single-thread job execution\n");
-            loggedSingleThread = true;
-        }
-    }
-
     oMain_move(param_1);
 
     // Netplay determinism: mDeltaTime (+0x80) is QPC-derived wall-clock
@@ -6335,10 +6326,6 @@ static void __fastcall hkMain_move(uint64_t param_1)
     // Force exactly 1 frame of game time per tick on both machines.
     if (Netplay_IsActive()) {
         *(float*)(param_1 + 0x80) = 1.0f;
-        // Defend against runtime settings code changing the desired count
-        // between ticks. The next sMain::move will copy this value to +0xA4.
-        *(uint32_t*)(param_1 + 0xA8) = 1;
-        *(uint32_t*)(param_1 + 0xA4) = 1;
     }
 }
 

@@ -140,10 +140,11 @@ ENet. Re-simulation also runs on the game thread and calls full native
 `oMvc3Main_move` ticks while temporarily suppressing pacing/presentation call
 sites.
 
-Current custom netplay applies native gameplay serialization settings and also
-forces `sMain+0xA4/+0xA8` to one as a broader fallback. This controls regular
-job dispatch. It does not terminate delay workers or prove unrelated
-asynchronous engine activity deterministic.
+Current custom netplay applies the native gameplay serialization settings. It
+does not alter `sMain+0xA4/+0xA8`, so the regular job executor remains at the
+user/game-selected worker count for unrelated engine work. It does not
+terminate delay workers or prove unrelated asynchronous engine activity
+deterministic.
 
 ## Snapshot Ownership
 

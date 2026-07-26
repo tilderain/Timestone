@@ -147,6 +147,12 @@
     <ClInclude Include="code\exception.h">
       <Filter>Header Files\code</Filter>
     </ClInclude>
+    <ClInclude Include="code\rollback_internal.h">
+      <Filter>Header Files\code</Filter>
+    </ClInclude>
+    <ClInclude Include="code\rollback_tick.h">
+      <Filter>Header Files\code</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="dllmain.cpp">
@@ -252,6 +258,12 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="code\rollback.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="code\rollback_runtime.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="code\rollback_tick.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="code\concrete_snapshot.cpp">

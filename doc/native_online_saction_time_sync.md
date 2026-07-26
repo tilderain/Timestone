@@ -327,27 +327,11 @@ This is intentionally narrower than changing the game's `BattleType` or hooking 
 
 ### Deterministic engine execution
 
-`rollback.cpp` forces `sMain`'s desired and active job-thread counts to one while custom netplay is
-active:
-
-```text
-sMain+0xA8 = 1  // desired job-thread count
-sMain+0xA4 = 1  // active job-thread count
-```
-
-Ghidra confirms that `sMain__setJobThreadNum @ 0x140522450` writes `+0xA8`, and
-`sMain__move @ 0x140521DF0` copies `+0xA8` to `+0xA4` each tick. The job executor uses an inline
-single-thread path when the active count is one; otherwise it signals workers and waits for their
-completion.
-
-The override is applied before `sMain__move`, after it defensively, and in rollback resimulation.
-It starts as soon as custom netplay is active rather than only after the intro barrier. This ensures
-that pre-fight collision/constraint caches and fighting push resolution are constructed under the
-same execution model on both peers. It specifically targets the observed first divergence: an
-equal-and-opposite X correction beginning at the first character-push contact while input, action,
-flags, and RNG still agree.
-
-This is a broad deterministic fallback, not proof that worker ordering was the sole cause.
+Custom netplay leaves `sMain`'s desired and active job-thread counts unchanged.
+Ghidra confirms that `sMain__setJobThreadNum @ 0x140522450` writes the desired
+count at `+0xA8`, and `sMain__move @ 0x140521DF0` copies it to the active count
+at `+0xA4` each tick. Neither live netplay nor rollback re-simulation overrides
+these global regular-job executor fields.
 
 ### Native online disables gameplay parallelism
 
@@ -395,10 +379,10 @@ bits, disables the collision move-matrix parallel flags, disables `sHitSolver` m
 clears the battle-runtime parallel byte. The function runs after netplay/rollback initialization and
 again when a synchronized restart creates a new battle epoch.
 
-The plugin still forces the entire regular `sMain` executor to one thread as an additional fallback.
-It does not currently restore either the battle-local settings or the global worker count on netplay
-teardown. Therefore the native-equivalent settings are implemented, while narrowing or removing the
-global fallback remains contingent on two-peer delay and rollback validation.
+The plugin does not force the entire regular `sMain` executor to one thread.
+Only the native-equivalent gameplay switches above are serialized, leaving the
+worker pool available for unrelated engine work. These battle-local settings
+are applied at custom-netplay initialization and synchronized netplay restart.
 
 ### Correction: generic constraint collision is not proven fighter push collision
 

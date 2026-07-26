@@ -325,7 +325,8 @@ static void __fastcall HookedMove(void* sMvc3Main)
             ? *(uint64_t*)(sMvc3Manager + SMVC3MGR_ACTION_OFFSET) : 0;
         uint64_t sReplay = *(uint64_t*)_addr(SREPLAY_PTR);
 
-        Rollback_ApplyNetplayDeterminism();
+        if (restartNetplay)
+            Rollback_ApplyNetplayDeterminism();
         if (sReplay) {
             *(uint32_t*)(sReplay + 0x23424) = g_restartRoundSeed;
             *(uint32_t*)(sReplay + 0x58) = g_restartRoundSeed;
@@ -714,6 +715,25 @@ static inline bool KeyPressed(int vk, bool& prevState)
 
 void FrameStepper_Process()
 {
+    static bool prevDumpNDJSON = false;
+    if (KeyPressed(VK_F10, prevDumpNDJSON))
+    {
+        const int32_t frame = Controller_GetNetFrameCount();
+        Rollback_DumpNetplayHistory(frame);
+        if (Netplay_IsActive())
+            Netplay_SendDumpNDJSON(frame);
+        HookLog("FrameStepper: F10 dumped NDJSON through frame %d%s\n",
+                frame, Netplay_IsActive() ? " on both peers" : "");
+    }
+
+    int32_t remoteDumpFrame = -1;
+    while (Netplay_GetInboundDumpNDJSON(remoteDumpFrame))
+    {
+        Rollback_DumpNetplayHistory(remoteDumpFrame);
+        HookLog("FrameStepper: remote F10 dumped NDJSON through frame %d\n",
+                remoteDumpFrame);
+    }
+
     static bool prevRestart = false;
     if (KeyPressed(VK_F11, prevRestart))
     {
