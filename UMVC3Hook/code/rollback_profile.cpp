@@ -80,6 +80,63 @@ double Profile_Ms(uint64_t ticks)
     return frequency ? (double)ticks * 1000.0 / (double)frequency : 0.0;
 }
 
+void Profile_BeginRollbackEnabled(RollbackProfile& profile, int32_t startFrame,
+                                  int32_t endFrame)
+{
+    profile = {};
+    profile.startFrame = startFrame;
+    profile.endFrame = endFrame;
+    g_activeRollbackProfile = &profile;
+}
+
+void Profile_EndRollbackEnabled(RollbackProfile& profile, uint64_t profileStart)
+{
+    profile.total = Profile_NowEnabled() - profileStart;
+    g_activeRollbackProfile = nullptr;
+}
+
+void Profile_AddTicksEnabled(uint64_t RollbackProfile::*field, uint64_t ticks)
+{
+    if (g_activeRollbackProfile)
+        g_activeRollbackProfile->*field += ticks;
+}
+
+void Profile_AddElapsedEnabled(uint64_t RollbackProfile::*field, uint64_t start)
+{
+    Profile_AddTicksEnabled(field, Profile_NowEnabled() - start);
+}
+
+void Profile_AddFramePhaseEnabled(uint64_t RollbackProfile::*field,
+                                  uint64_t& checkpoint)
+{
+    const uint64_t now = Profile_NowEnabled();
+    Profile_AddTicksEnabled(field, now - checkpoint);
+    checkpoint = now;
+}
+
+void Profile_AddFramePhaseMaxEnabled(uint64_t RollbackProfile::*field,
+                                     uint64_t RollbackProfile::*maximum,
+                                     uint64_t& checkpoint)
+{
+    const uint64_t now = Profile_NowEnabled();
+    const uint64_t elapsed = now - checkpoint;
+    if (g_activeRollbackProfile) {
+        g_activeRollbackProfile->*field += elapsed;
+        g_activeRollbackProfile->*maximum =
+            std::max(g_activeRollbackProfile->*maximum, elapsed);
+    }
+    checkpoint = now;
+}
+
+void Profile_FinishFrameEnabled(uint64_t start)
+{
+    if (!g_activeRollbackProfile) return;
+    const uint64_t elapsed = Profile_NowEnabled() - start;
+    g_activeRollbackProfile->frameTotal += elapsed;
+    g_activeRollbackProfile->frameTotalMax =
+        std::max(g_activeRollbackProfile->frameTotalMax, elapsed);
+}
+
 uint64_t Profile_HookBegin()
 {
     return g_activeRollbackProfile ? Profile_NowEnabled() : 0;

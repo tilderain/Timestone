@@ -123,6 +123,17 @@ extern RollbackProfile* g_activeRollbackProfile;
 
 uint64_t Profile_NowEnabled();
 double Profile_Ms(uint64_t ticks);
+void Profile_BeginRollbackEnabled(RollbackProfile& profile, int32_t startFrame,
+                                  int32_t endFrame);
+void Profile_EndRollbackEnabled(RollbackProfile& profile, uint64_t profileStart);
+void Profile_AddTicksEnabled(uint64_t RollbackProfile::*field, uint64_t ticks);
+void Profile_AddElapsedEnabled(uint64_t RollbackProfile::*field, uint64_t start);
+void Profile_AddFramePhaseEnabled(uint64_t RollbackProfile::*field,
+                                  uint64_t& checkpoint);
+void Profile_AddFramePhaseMaxEnabled(uint64_t RollbackProfile::*field,
+                                     uint64_t RollbackProfile::*maximum,
+                                     uint64_t& checkpoint);
+void Profile_FinishFrameEnabled(uint64_t start);
 uint64_t Profile_HookBegin();
 void Profile_HookEnd(RollbackHookProfileId id, uint64_t start);
 void Profile_RecordSnapshotEnabled(uint64_t profileStart, uint64_t buildRegionsEnd,
@@ -145,6 +156,31 @@ inline uint64_t Profile_Now()
     if constexpr (ROLLBACK_PROFILING_ENABLED)
         return Profile_NowEnabled();
     return 0;
+}
+
+inline void Profile_BeginRollback(RollbackProfile& profile, int32_t startFrame,
+                                  int32_t endFrame)
+{
+    if constexpr (ROLLBACK_PROFILING_ENABLED)
+        Profile_BeginRollbackEnabled(profile, startFrame, endFrame);
+}
+
+inline void Profile_EndRollback(RollbackProfile& profile, uint64_t profileStart)
+{
+    if constexpr (ROLLBACK_PROFILING_ENABLED)
+        Profile_EndRollbackEnabled(profile, profileStart);
+}
+
+inline void Profile_AddTicks(uint64_t RollbackProfile::*field, uint64_t ticks)
+{
+    if constexpr (ROLLBACK_PROFILING_ENABLED)
+        Profile_AddTicksEnabled(field, ticks);
+}
+
+inline void Profile_AddElapsed(uint64_t RollbackProfile::*field, uint64_t start)
+{
+    if constexpr (ROLLBACK_PROFILING_ENABLED)
+        Profile_AddElapsedEnabled(field, start);
 }
 
 inline void Profile_RecordSnapshot(uint64_t profileStart, uint64_t buildRegionsEnd,
@@ -211,24 +247,17 @@ class RollbackProfileTimerImpl<true> {
 public:
     RollbackProfileTimerImpl() : start_(Profile_NowEnabled()), checkpoint_(start_) {}
 
-    void Add(uint64_t& total) {
-        const uint64_t now = Profile_NowEnabled();
-        total += now - checkpoint_;
-        checkpoint_ = now;
+    void Add(uint64_t RollbackProfile::*field) {
+        Profile_AddFramePhaseEnabled(field, checkpoint_);
     }
 
-    void Add(uint64_t& total, uint64_t& maximum) {
-        const uint64_t now = Profile_NowEnabled();
-        const uint64_t elapsed = now - checkpoint_;
-        total += elapsed;
-        if (elapsed > maximum) maximum = elapsed;
-        checkpoint_ = now;
+    void Add(uint64_t RollbackProfile::*field,
+             uint64_t RollbackProfile::*maximum) {
+        Profile_AddFramePhaseMaxEnabled(field, maximum, checkpoint_);
     }
 
-    void Finish(uint64_t& total, uint64_t& maximum) const {
-        const uint64_t elapsed = Profile_NowEnabled() - start_;
-        total += elapsed;
-        if (elapsed > maximum) maximum = elapsed;
+    void Finish() const {
+        Profile_FinishFrameEnabled(start_);
     }
 
 private:
@@ -239,9 +268,9 @@ private:
 template <>
 class RollbackProfileTimerImpl<false> {
 public:
-    void Add(uint64_t&) {}
-    void Add(uint64_t&, uint64_t&) {}
-    void Finish(uint64_t&, uint64_t&) const {}
+    void Add(uint64_t RollbackProfile::*) {}
+    void Add(uint64_t RollbackProfile::*, uint64_t RollbackProfile::*) {}
+    void Finish() const {}
 };
 
 using RollbackProfileTimer = RollbackProfileTimerImpl<ROLLBACK_PROFILING_ENABLED>;

@@ -29,6 +29,8 @@
 #include "rollback_memory.h"
 #include "rollback_profile.h"
 #include "rollback_restore.h"
+#include "rollback_resim.h"
+#include "rollback_snapshot.h"
 #include "rollback_tick.h"
 #include "snapshot_ndjson.h"
 #include "concrete_snapshot.h"
@@ -152,10 +154,7 @@ static constexpr uint32_t CUNIT_LIVE_STATE_OFFSETS[] = {0x10, 0x18, 0x20, 0x38};
 static constexpr size_t SMAIN_SIZE = 0x40080;
 static constexpr int SSHOT_CATEGORY = 10;
 
-struct SnapshotRange {
-    uint32_t offset;
-    uint32_t size;
-};
+using SnapshotRange = RollbackSnapshotRange;
 
 static constexpr SnapshotRange CCHR_SCALAR_RESTORE_RANGES[] = {
     // cUnit::getTimeScale reads +0x28 directly. The generic pointer-preserve
@@ -451,7 +450,7 @@ static void RemoveUnitFromAllMultiMaskArrays(void* sUnit, void* unit)
     *(uint64_t*)((uint8_t*)unit + 0x30) = 0;
 }
 
-static constexpr int    MAX_REGIONS          = 2048;
+static constexpr int    MAX_REGIONS          = ROLLBACK_MAX_REGIONS;
 static constexpr int    DYNAMIC_SAFETY       = 128; // max projectile/effect nodes
 static constexpr int    SSHOT_SENTINEL_COUNT = 10;  // 10 sentinel slots starting at 0x140d47f90
 static constexpr size_t SSHOT_NODE_OFFSET    = 0x1450; // uShot->cChrNode offset
@@ -479,11 +478,6 @@ static constexpr uintptr_t FN_COLLISION_NODE_COPY          = 0x1405A4DA0;
 // __ImageBase gives us the DLL's base address (used with GetModuleFileNameA
 // to resolve paths relative to the DLL's directory instead of the CWD, which
 // games often change after loading plugins).
-static int32_t g_rollbackReqStart = -1;
-static int32_t g_rollbackReqEnd   = -1;
-static uint64_t g_sMvc3Main      = 0;
-static void(__fastcall* oMvc3Main_move)(uint64_t param_1) = nullptr;
-
  // static decltype(&QueryPerformanceCounter) g_real_qpc = nullptr;
 // static uint64_t g_virtual_qpc = 0;
 // static DWORD g_main_thread_id = 0;
@@ -503,134 +497,22 @@ extern "C" int32_t Controller_GetNetFrameCount();
 extern "C" bool    Controller_IsRollbackEnabled();
 extern "C" bool    FrameStepper_IsBattleSynchronized();
 extern "C" uint32_t Controller_GetCurrentFrameInput();
-extern "C" void    Controller_InjectLocalInput(int32_t frame, uint32_t input);
-extern "C" void    Controller_InjectRemoteInput(int32_t frame, uint32_t input);
-extern "C" void    Controller_SilentFrameStart();
-extern "C" void    Controller_SilentFrameEnd();
-extern "C" void    Controller_SaveInputHistory();
-extern "C" void    Controller_RestoreInputHistory();
-extern "C" void    Controller_DumpOldInputs(const char* label);
-extern "C" void    Controller_ResolveRemoteInput(int32_t frame);
 
 extern bool g_multiResimEnabled;
 
 // ===========================================================================
 // Snapshot Region Descriptor & Ring Buffer
 // ===========================================================================
-struct Region {
-    void*    ptr;       // source/destination address in game memory
-    size_t   size;      // number of bytes
-    uint64_t ownerSlot; // pointer field that must still refer to ptr on restore
-    uint64_t expectedVtable; // nonzero for cChr bodies; validates helper reuse
-    bool     skipVtable;
-};
+using Region = RollbackRegion;
+using ShotFlightState = RollbackShotFlightState;
+using ShotSpawnKind = RollbackShotSpawnKind;
+using ShotRecipe = RollbackShotRecipe;
+using EffectRecipe = RollbackEffectRecipe;
+using CollisionNodeClone = RollbackCollisionNodeClone;
+using SnapshotSlot = RollbackSnapshotSlot;
 
-struct ShotFlightState {
-    uint32_t unitState;             // +0x10 cUnit lifecycle/gameplay flags
-    // uModel motion playback advances by cUnit delta-time at +0x28. Restoring
-    // Motion[] without this pair can leave reconstructed animations frozen.
-    uint8_t timeScaleState[0x08];   // +0x28..+0x2F
-    // uModel+0x100 is a live owned pointer, so only restore the contiguous
-    // position/quaternion/matrix scalar block preceding it.
-    uint8_t transformState[0xB0];  // +0x50..+0xFF
-    // uShot::move reads this scalar block for lifetime, active/end flags,
-    // velocity and movement state. The factory initializes it, but restoring
-    // only the transform and attack blocks leaves a respawned shot at the
-    // current timeline's runtime phase.
-    uint8_t runtimeState[0x50];     // +0x3E8..+0x437
-    // mBaseMatrix, mOldWorldMatrix, mAtkMatrix and mAtkBaseMatrix.
-    uint8_t shotMatrices[0x100];   // +0x1E50..+0x1F4F    // Test if necessary on Hado Shoryu
-    float timerThresh;
-    float timer;
-    float delayTime;
-    float autoAddDivStartTime;
-    uint8_t resourceScalars[0x90]; // +0x1F70..+0x1FFF
-    uint8_t attackScalars[0x20];   // +0x2038..+0x2057
-    uint8_t movementScalars[0x60]; // +0x2078..+0x20D7
-    uint8_t animationScalars[0x14];// +0x2118..+0x212B
-    uint32_t step;                  // +0x212C, read by uShot::move
-    // These are per-shot dispatch fields. Ghidra's
-    // sMvc3Manager_updateRandomSelection name describes the dispatch case, but
-    // its this pointer is the active uShot/rChrCpu object, not the singleton.
-    uint32_t randomProgress;        // +0xA8
-    uint32_t randomSelection;       // +0xC4
-    uint32_t randomFlags;            // +0xC8
-    uint32_t randomState;            // +0x1B58
-    bool hasZireitouState;
-    uint32_t zireitouState[4];      // +0x2210..+0x221F phase/timing scalars
-};
-
-enum class ShotSpawnKind : uint8_t { Standard, Extended };
-
-struct ShotRecipe {
-    void* savedPtr;
-    void* restoredPtr;
-    void* shotElement;
-    uint64_t initParam;
-    void* posData;
-    void* ownerChr;
-    void* objectRef1;
-    uint64_t objectRef1Dti;
-    bool objectRef1WasActiveUnit;
-    uint32_t slotId;
-    void* objectRef2;
-    uint64_t objectRef2Dti;
-    bool objectRef2WasActiveUnit;
-    ShotSpawnKind kind;
-    int exA9;
-    void* exA10;
-    int exA11;
-    void* exA12;
-    ShotFlightState flight;
-    ConcreteShotSnapshot concrete;
-    uint64_t spawnSequence = 0;
-    uint8_t preSpawnGlobalRng[16] = {};
-    uint8_t preSpawnEffectRng[16] = {};
-    uint8_t preSpawnOwnerRng[16] = {};
-    bool hasPreSpawnRng = false;
-    bool reconstructed = false;
-};
-
-struct EffectRecipe {
-    void* savedPtr;
-    void* restoredPtr;
-    void* sGameEffect;
-    int effectId;
-    int a3;
-    void* attachTo;
-    int a5;
-    int a6;
-    void* a7;
-    void* a8;
-    int a9;
-    void* a10;
-    int a11;
-    uint32_t a12;
-    void* a13;
-    uint64_t spawnSequence = 0;
-};
-
-struct CollisionNodeClone {
-    uint64_t ownerSlot;
-    void* savedPtr;
-    void* clone;
-};
-
-struct SnapshotSlot {
-    int32_t  frame       = -1;    // game frame this slot holds (-1 = invalid)
-    uint8_t* data        = nullptr; // compact linear memory pool
-    size_t   size        = 0;       // total bytes of data written
-    size_t   capacity    = 0;       // allocated capacity of data[]
-    Region   regions[MAX_REGIONS];  // exact addresses captured at save time
-    int      regionCount = 0;       // number of populated regions[]
-    uint32_t localInput  = 0;      // local player's delayed input for this frame
-    uint32_t remoteInput = 0;      // best-known remote input for this frame
-    std::vector<ShotRecipe> shotRecipes;
-    std::vector<EffectRecipe> effectRecipes;
-    std::vector<CollisionNodeClone> collisionNodeClones;
-};
-
-static SnapshotSlot g_slots[ROLLBACK_WINDOW];
+RollbackSnapshotSlot g_rollbackSnapshotSlots[ROLLBACK_WINDOW];
+#define g_slots g_rollbackSnapshotSlots
 static std::unordered_map<void*, ShotRecipe> g_liveShotRecipes;
 static std::unordered_map<void*, EffectRecipe> g_liveEffectRecipes;
 static uint64_t g_shotSpawnSequence = 0;
@@ -3280,279 +3162,6 @@ void Rollback_RestoreSnapshot(int32_t frame)
             frame, slot.regionCount, offset, collisionRestoreCount, collisionRestoreBytes);
 }
 
- void Rollback_ReSimulate(int32_t startFrame, int32_t endFrame)
-{
-    if (startFrame >= endFrame) return;
-
-    // Re-entry guard: if F7 is still held/read during re-sim, the game's
-    // input processing will try to start another ReSimulate from within
-    // oMvc3Main_move.  Just return — we're already in one.
-    if (g_isResimulating) {
-        g_resimReentranceDepth++;
-        HookLog("Rollback: ReSimulate re-entered depth=%d — ignoring (already re-simulating)\n",
-                g_resimReentranceDepth);
-        return;
-    }
-    g_resimReentranceDepth = 0;
-
-    if (!g_sMvc3Main) {
-        HookLog("Rollback: cannot re-simulate — sMvc3Main pointer not captured\n");
-        return;
-    }
-
-    RollbackProfile profile = {};
-    profile.startFrame = startFrame;
-    profile.endFrame = endFrame;
-    const uint64_t profileStart = Profile_Now();
-    if constexpr (ROLLBACK_PROFILING_ENABLED)
-        g_activeRollbackProfile = &profile;
-    g_isResimulating = true;
-
-    //HookLog("Rollback: [%s] re-simulating frames %d \u2192 %d\n",
-            //Netplay_IsHost() ? "host" : "client", startFrame, endFrame);
-
-    //Are these really necessary? Might as well leave them in
-
-    uint64_t phaseStart = Profile_Now();
-    Rollback_PatchSleep(true); // NOP Sleep calls so frames run at full speed
-    Rollback_PatchPresent(true); // NOP Present inside post-render sync
-    Rollback_PatchSwapchain(true); // NOP swapchain vtable+0x50 calls
-    Rollback_PatchDrawCalls(true); // NOP remaining render/draw calls
-    profile.patchEnable += Profile_Now() - phaseStart;
-
-    // Save the live input history before rewinding.  The re-sim loop calls
-    // SilentFrameStart/End which shifts g_oldInputs with zeros (re-sim
-    // bypasses the accumulation).  Restoring after the loop prevents the
-    // outbound packet from carrying a corrupted timeline.
-    //HookLog("[ReSim] ~~~~~~~~~~ g_oldInputs BEFORE re-sim loop ~~~~~~~~~~\n");
-    phaseStart = Profile_Now();
-    Controller_SaveInputHistory();
-    profile.inputHistorySave += Profile_Now() - phaseStart;
-    int silentFrameEndCount = 0;
-
-    // Diagnostic dump: capture ground truth BEFORE rewinding.
-    // Gives the live state of all regions + character state to compare
-    // against what the re-simulation produces.
-    // When g_f7DiagSession is set (F7 mode), skip the ground truth dump —
-    // the F7 state machine already captured per-frame live dumps during
-    // the recording phase using that session.  We just reuse the session
-    // ID so resim dumps land alongside the live dumps.
-    phaseStart = Profile_Now();
-    {
-        int diagSid;
-        if (g_f7DiagSession >= 0) {
-            diagSid = g_f7DiagSession;
-            HookLog("Rollback: diag session %d (F7, reuse) for frames %d\u2192%d\n",
-                    diagSid, startFrame, endFrame);
-        } else {
-            diagSid = NDJSON_BeginSession();
-        }
-        // Sync the global so the resim loop writes to the same session
-        (void)diagSid;
-    }
-    profile.diagSetup += Profile_Now() - phaseStart;
-
-    // Capture the final predicted live state before restoring it. This is a
-    // separate diagnostic entry because it belongs to the discarded timeline,
-    // not to the corrected frame sequence.
-    int32_t liveFrameBeforeRestore = -1;
-    {
-        uint64_t sReplay = *(uint64_t*)_addr(PTR_SREPLAY);
-        if (sReplay) liveFrameBeforeRestore = *(int32_t*)(sReplay + 0x54);
-    }
-    phaseStart = Profile_Now();
-    if (liveFrameBeforeRestore >= 0 && Netplay_IsActive()) {
-        std::string json = NDJSON_GenerateNetplayLive(
-            liveFrameBeforeRestore, false, "pre_restore_prediction", startFrame, endFrame);
-        if (!json.empty()) NDJSON_WriteNetplayLive(json);
-    }
-    profile.preRestoreJson += Profile_Now() - phaseStart;
-
-    // 1. Rewind to the starting frame boundary
-    Rollback_RestoreSnapshot(startFrame);
-
-    // Diagnostic: log whether we actually have received input for every frame
-    // in the resim range before we start stepping.
-    phaseStart = Profile_Now();
-    Controller_LogReceivedInputAvailability(startFrame, endFrame);
-    profile.inputAvailability += Profile_Now() - phaseStart;
-
-    // [EXPERIMENTAL] mJobThreadNumInit=1 — see mvc3/rollback R3-SIMLOOP
-    // uint64_t sMain_job = *(uint64_t*)_addr(PTR_SMAIN);
-    // uint32_t saved_job_thread_num_init = 0;
-    // uint32_t* pJobThreadNumInit = nullptr;
-    // if (sMain_job) {
-    //     pJobThreadNumInit = (uint32_t*)(sMain_job + 0xA4); // mJobThreadNumInit at offset 164
-    //     saved_job_thread_num_init = *pJobThreadNumInit;
-    //     *pJobThreadNumInit = 1;
-    // }
-
-    // 2. Step forward (no snapshot saves — the re-simmed frames are now
-    //    correct, and the next normal-frame save at curFrame covers us).
-    //    sMain__move is hooked (skip frame-pacing) and the render function
-    //    is hooked (skip Present), so the full oMvc3Main_move game tick
-    //    runs at speed without timing waits or actual rendering.
-    //    The hkMvc3Main_move hook returns early during re-sim so the
-    //    game's own frame loop doesn't double-execute.
-    //    Controller_SilentFrameStart/End maintains the local input shift
-    //    buffer without draining packets or sending outbound data.  Local
-    //    and remote input for each re-simmed frame are injected from the
-    //    snapshot slot via Controller_InjectLocalInput and
-    //    Controller_InjectRemoteInput before the game tick.
-    for (int32_t f = startFrame; f < endFrame; ++f) {
-        RollbackProfileTimer frameTimer;
-        g_resimulateCurrentFrame = f;
-        int si = f % ROLLBACK_WINDOW;
-        if (si < 0) si += ROLLBACK_WINDOW;
-
-        // Keep the corrected inputs attached to this frame while multi-resim
-        // replaces its snapshot. SaveSnapshot normally samples the live input
-        // shift buffer, which is not the timeline currently being replayed.
-        const uint32_t resimLocalInput = g_slots[si].localInput;
-        uint32_t resimRemoteInput = g_slots[si].remoteInput;
-
-        // [EXPERIMENTAL] g_virtual_qpc = g_qpc_history[f % ROLLBACK_WINDOW];
-        // Re-resolve remote input so re-sim uses the latest received data,
-        // not the stale prediction that triggered the conflict.
-        if (Netplay_IsActive()) {
-            Controller_ResolveRemoteInput(f);
-            resimRemoteInput = Controller_GetUsedRemoteInput(f);
-        }
-        // hkprocessFrameInput reads snapshot metadata before its ring-buffer
-        // fallback, so publish the newly resolved input before running the tick.
-        Rollback_UpdateSnapshotInputs(f, resimLocalInput, resimRemoteInput);
-        Controller_SilentFrameStart();
-        // Inject the local and remote inputs saved in this frame's
-        // snapshot slot.  hkprocessFrameInput reads g_recordedGameInput
-        // for the local team and g_usedRemoteInput for the remote team
-        // during re-sim; pre-populating from the snapshot makes the hook
-        // replay the correct historical inputs without relying on the
-        // shift-buffer save/restore that was global-static-buffer-
-        // vulnerable.
-        {
-            Controller_InjectLocalInput(f, resimLocalInput);
-            if (!Netplay_IsActive()) {
-                Controller_InjectRemoteInput(f, resimRemoteInput);
-            }
-        }
-        frameTimer.Add(profile.frameInput);
-
-        // Capture PRE-state before the tick
-            NDJSON_CaptureFrame(f, /*isResim=*/true, /*postOnly=*/false);
-        frameTimer.Add(profile.frameDiagPre);
-
-        // Pre-tick NDJSON logging for both active and inactive netplay sessions
-        if (Netplay_IsActive()) {
-            NDJSON_DiscardPendingNetplayLive(f);
-            std::string json = NDJSON_GenerateNetplayLive(f, true);
-            if (!json.empty())
-                NDJSON_WriteNetplayLive(json);
-        } else {
-            NDJSON_DumpFrame(f, 1);
-        }
-        frameTimer.Add(profile.frameJson);
-
-        // Multi-resim may correct a still-predicted frame again, so preserve a
-        // corrected restore point. Non-multi waits for a definitive batch and
-        // never starts another rollback inside this replayed range.
-        if (g_multiResimEnabled) {
-            Rollback_SaveSnapshot(f);
-            Rollback_UpdateSnapshotInputs(f, resimLocalInput, resimRemoteInput);
-        }
-        frameTimer.Add(profile.frameSnapshot);
-
-        //Todo: replace with headless tick for better perf
-        oMvc3Main_move(g_sMvc3Main);
-        frameTimer.Add(profile.frameNativeTick, profile.frameNativeTickMax);
-
-        Controller_SilentFrameEnd();
-        silentFrameEndCount++;
-        Controller_LogReSimFrame(f);
-        frameTimer.Add(profile.frameInputEnd);
-
-        // Capture POST-state after the tick (preserves the pre-tick state captured above)
-        NDJSON_CaptureFrame(f, /*isResim=*/true, /*postOnly=*/true);
-
-        NDJSON_QueuePendingResimDump(f);
-        frameTimer.Add(profile.frameDiagPost);
-        frameTimer.Finish(profile.frameTotal, profile.frameTotalMax);
-    }
-
-    // Verify SilentFrameEnd count matches expected
-    int expectedFrameCount = endFrame - startFrame;
-    //HookLog("[ReSim] SilentFrameEnd called %d times (expected=%d, match=%s)\n",
-            //silentFrameEndCount, expectedFrameCount,
-            //silentFrameEndCount == expectedFrameCount ? "YES" : "NO");
-
-    //HookLog("[ReSim] ~~~~~~~~~~ g_oldInputs AFTER re-sim loop (before RestoreInputHistory) ~~~~~~~~~~\n");
-    Controller_DumpOldInputs("post-loop-pre-restore");
-
-    // Restore the local input history so the next outbound packet carries
-    // the original timeline, preventing the remote side from seeing spurious
-    // conflicts on already-reconciled frames.
-    phaseStart = Profile_Now();
-    Controller_RestoreInputHistory();
-    profile.inputHistoryRestore += Profile_Now() - phaseStart;
-
-    // [EXPERIMENTAL] mJobThreadNumInit restore — see mvc3/rollback R3-SIMLOOP
-    // if (pJobThreadNumInit) {
-    //     *pJobThreadNumInit = saved_job_thread_num_init;
-    // }
-
-    // 3. Resynchronize performance counter state inside sMain to match
-    //    current system time, preventing the game loop from seeing a
-    //    negative or excessive frame-time delta that would cause a freeze.
-    uint64_t sMain = *(uint64_t*)_addr(PTR_SMAIN);
-    phaseStart = Profile_Now();
-    if (sMain) {
-        //Same with this, unsure if this is really needed, might cause lag if disabled
-        Rollback_ResyncMainTiming(sMain);
-    }
-    profile.timingResync += Profile_Now() - phaseStart;
-
-    g_isResimulating = false;
-    if (g_resimReentranceDepth > 0) {
-        HookLog("[ReSim] WARNING: re-entrance depth was %d during re-sim (nested calls detected)\n",
-                g_resimReentranceDepth);
-    }
-    phaseStart = Profile_Now();
-    Rollback_PatchSleep(false); // restore Sleep calls
-    Rollback_PatchPresent(false); // restore Present call
-    Rollback_PatchSwapchain(false); // restore swapchain calls
-    Rollback_PatchDrawCalls(false); // restore render/draw calls
-    profile.patchDisable += Profile_Now() - phaseStart;
-    profile.total = Profile_Now() - profileStart;
-    if constexpr (ROLLBACK_PROFILING_ENABLED)
-        g_activeRollbackProfile = nullptr;
-    Profile_Dump(profile, g_ndjsonLoggingEnabled, g_multiResimEnabled);
-    //HookLog("Rollback: re-simulation complete (%d frames)\n",
-            //endFrame - startFrame);
-}
-
-void Rollback_RequestReSimulate(int32_t startFrame, int32_t endFrame)
-{
-    g_rollbackReqStart = startFrame;
-    g_rollbackReqEnd   = endFrame;
-}
-
-bool Rollback_ConsumeReSimRequest(int32_t& startFrame, int32_t& endFrame)
-{
-    if (g_rollbackReqStart < 0)
-        return false;
-
-    startFrame = g_rollbackReqStart;
-    endFrame = g_rollbackReqEnd;
-    g_rollbackReqStart = -1;
-    g_rollbackReqEnd = -1;
-    return true;
-}
-
-void Rollback_SetMainInstance(uint64_t main)
-{
-    if (!g_sMvc3Main)
-        g_sMvc3Main = main;
-}
-
 void Rollback_FreeSnapshots()
 {
     // Make sure patched calls are restored before tearing down
@@ -3576,7 +3185,7 @@ void Rollback_FreeSnapshots()
     g_liveShotRecipes.clear();
     g_liveEffectRecipes.clear();
     g_shotSpawnSequence = 0;
-    g_sMvc3Main = 0;
+    Rollback_ResetReSimulation();
 }
 
 // ===========================================================================
@@ -3609,7 +3218,7 @@ void Rollback_InitHooks()
     //     }
     // }
 
-    Rollback_InitMainHooks(&oMvc3Main_move);
+    Rollback_InitReSimulationHooks();
 
     MH_STATUS s;
 

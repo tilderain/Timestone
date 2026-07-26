@@ -207,6 +207,8 @@
     <ClInclude Include="code\rollback_hooks.h" />
     <ClInclude Include="code\rollback_memory.h" />
     <ClInclude Include="code\rollback_restore.h" />
+    <ClInclude Include="code\rollback_resim.h" />
+    <ClInclude Include="code\rollback_snapshot.h" />
     <ClInclude Include="code\rollback_tick.h" />
     <ClInclude Include="code\snapshot_ndjson.h" />
   </ItemGroup>
@@ -226,6 +228,7 @@
     <ClCompile Include="code\rollback_hooks.cpp" />
     <ClCompile Include="code\rollback_memory.cpp" />
     <ClCompile Include="code\rollback_restore.cpp" />
+    <ClCompile Include="code\rollback_resim.cpp" />
     <ClCompile Include="code\rollback_runtime.cpp" />
     <ClCompile Include="code\rollback_state.cpp" />
     <ClCompile Include="code\rollback_tick.cpp" />

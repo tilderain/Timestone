@@ -165,6 +165,12 @@
     <ClInclude Include="code\rollback_restore.h">
       <Filter>Header Files\code</Filter>
     </ClInclude>
+    <ClInclude Include="code\rollback_resim.h">
+      <Filter>Header Files\code</Filter>
+    </ClInclude>
+    <ClInclude Include="code\rollback_snapshot.h">
+      <Filter>Header Files\code</Filter>
+    </ClInclude>
     <ClInclude Include="code\rollback_tick.h">
       <Filter>Header Files\code</Filter>
     </ClInclude>
@@ -294,6 +300,9 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="code\rollback_hooks.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="code\rollback_resim.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="code\rollback_runtime.cpp">

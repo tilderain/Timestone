@@ -12,6 +12,8 @@
 //
 // rollback_hooks.cpp owns main-loop orchestration and presentation/timing guards.
 //
+// rollback_resim.cpp owns corrected-frame replay and deferred rollback state.
+//
 // rollback_memory.cpp owns game-memory validation and DTI hierarchy queries.
 //
 // rollback_restore.cpp owns specialized pointer-preserving region restores.
