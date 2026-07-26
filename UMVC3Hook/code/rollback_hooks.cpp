@@ -20,6 +20,7 @@ static constexpr uintptr_t FN_CCHR_SET_POS = 0x140002AF0;
 static constexpr uintptr_t FN_RENDER_END_FRAME = 0x14053A250;
 static constexpr uintptr_t FN_SSOUND_MOVE = 0x1405CC040;
 static constexpr uintptr_t FN_SGAMEUI_MOVE = 0x1402BE610;
+static constexpr uintptr_t FN_UBTGAUGELIFE_MOVE = 0x1402F6800;
 static constexpr uintptr_t FN_SCHEDULER_REBUILD = 0x14050F010;
 static constexpr uintptr_t FN_RCHRCPU_CLASS_FUNC = 0x140117280;
 static constexpr uintptr_t FN_SMAIN_MOVE = 0x140521DF0;
@@ -30,6 +31,7 @@ static void(__fastcall* oCallSRender)(uint64_t) = nullptr;
 static void(__fastcall* oMainMove)(uint64_t) = nullptr;
 static void(__fastcall* oSoundMove)(uint64_t) = nullptr;
 static void(__fastcall* oGameUiMove)(uint64_t) = nullptr;
+static void(__fastcall* oBtGaugeLifeMove)(uint64_t) = nullptr;
 static void(__fastcall* oSchedulerRebuild)(uint64_t) = nullptr;
 static bool(__fastcall* oRChrCpuClassFunc)(void*, void*) = nullptr;
 static void(__fastcall* oApplyCollisionPushCorrection)(
@@ -227,6 +229,14 @@ static void __fastcall hkGameUiMove(uint64_t gameUi)
         oGameUiMove(gameUi);
 }
 
+static void __fastcall hkBtGaugeLifeMove(uint64_t gauge)
+{
+    // sGameUI is suppressed during re-simulation, so its gauge dependencies
+    // are not guaranteed to be initialized for the accompanying sUnit pass.
+    if (!g_isResimulating)
+        oBtGaugeLifeMove(gauge);
+}
+
 static void __fastcall hkSchedulerRebuild(uint64_t scheduler)
 {
     RollbackHookProfileScope profile(RollbackHookProfileId::SchedulerRebuild);
@@ -295,6 +305,10 @@ void Rollback_InitMainHooks(RollbackMainMoveFn* originalMove)
     EnableHook(FN_SGAMEUI_MOVE, (void*)&hkGameUiMove, (void**)&oGameUiMove,
                "Rollback: hooked sGameUI__move for re-simulation suppression",
                "Rollback: failed to hook sGameUI__move (%d)\n");
+    EnableHook(FN_UBTGAUGELIFE_MOVE, (void*)&hkBtGaugeLifeMove,
+               (void**)&oBtGaugeLifeMove,
+               "Rollback: hooked uBtGaugeLife__move for re-simulation suppression",
+               "Rollback: failed to hook uBtGaugeLife__move (%d)\n");
     EnableHook(FN_SCHEDULER_REBUILD, (void*)&hkSchedulerRebuild,
                (void**)&oSchedulerRebuild,
                "Rollback: hooked uScheduler rebuild for re-simulation suppression",

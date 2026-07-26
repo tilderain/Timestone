@@ -16,4 +16,6 @@
 //
 // rollback_memory.cpp owns game-memory validation and DTI hierarchy queries.
 //
-// rollback_restore.cpp owns specialized pointer-preserving region restores.
+// rollback_restore.cpp owns specialized collision restores and deep-clone lifetime.
+//
+// rollback_rng.cpp owns optional RNG and Hsien-Ko Anki diagnostic hooks.

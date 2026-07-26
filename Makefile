@@ -52,6 +52,7 @@ CPP_SRC   := \
 	$(SRCDIR)/code/rollback_tick.cpp \
 	$(SRCDIR)/code/snapshot_ndjson.cpp \
 	$(SRCDIR)/code/rollback_profile.cpp \
+	$(SRCDIR)/code/rollback_rng.cpp \
 	$(SRCDIR)/code/concrete_snapshot.cpp \
 	$(SRCDIR)/code/netplay.cpp \
 	$(SRCDIR)/imgui/imgui.cpp \

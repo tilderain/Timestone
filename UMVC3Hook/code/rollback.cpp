@@ -28,6 +28,7 @@
 #include "rollback_hooks.h"
 #include "rollback_memory.h"
 #include "rollback_profile.h"
+#include "rollback_rng.h"
 #include "rollback_restore.h"
 #include "rollback_resim.h"
 #include "rollback_snapshot.h"
@@ -81,9 +82,6 @@ static constexpr uintptr_t FN_SUNIT_REMOVE_UNIT = 0x14051B9F0;
 static constexpr uintptr_t FN_SUNIT_REMOVE_MULTI_MASK = 0x14051BAF0;
 static constexpr uintptr_t FN_SUNIT_REGISTER_MULTI_MASK = 0x14051BDE0;
 static constexpr uintptr_t FN_UGAMEEFFECT_CREATE = 0x140131410;
-static constexpr uintptr_t FN_RNG_RANDOM_INT = 0x14014EB30;
-static constexpr uintptr_t FN_HSIENKO_SELECT_ANKI = 0x1400A1260;
-static constexpr uintptr_t FN_SET_RESERVED_ANKI = 0x1400D4D90;
 static constexpr uintptr_t FN_BUILD_ATTACH_MATRIX = 0x14014F960;
 static constexpr uintptr_t FN_KIRIGAKURE_EFFECT_UPDATE = 0x14013B050;
 static constexpr uintptr_t FN_RESET_HITNODES = 0x140259E90;
@@ -461,8 +459,6 @@ static constexpr size_t SHITSOLVER_ARRAY_OFF = 0x38;
 static constexpr size_t SHITSOLVER_POOL_OFF  = 0x60;
 static constexpr size_t SHITSOLVER_NODE_SIZE = 0x60;
 static constexpr size_t SHITSOLVER_COUNT_OFF = 0x30060;
-static constexpr uintptr_t FN_COLLISION_NODE_OBJECT_CREATE = 0x1405AD2A0;
-static constexpr uintptr_t FN_COLLISION_NODE_COPY          = 0x1405A4DA0;
 
 // ===========================================================================
 // Global Re-Simulation Indicators & Hook State
@@ -508,7 +504,6 @@ using ShotFlightState = RollbackShotFlightState;
 using ShotSpawnKind = RollbackShotSpawnKind;
 using ShotRecipe = RollbackShotRecipe;
 using EffectRecipe = RollbackEffectRecipe;
-using CollisionNodeClone = RollbackCollisionNodeClone;
 using SnapshotSlot = RollbackSnapshotSlot;
 
 RollbackSnapshotSlot g_rollbackSnapshotSlots[ROLLBACK_WINDOW];
@@ -540,140 +535,6 @@ static ShotUpdateHitboxesFn oShotUpdateHitboxes = nullptr;
 using KingKobunMoveFn = void(__fastcall*)(void*);
 static KingKobunMoveFn oKingKobunMove = nullptr;
 static int g_kingKobunTraceCount = 0;
-using HsienKoSelectAnkiFn = int(__fastcall*)(void*);
-static HsienKoSelectAnkiFn oHsienKoSelectAnki = nullptr;
-using SetReservedAnkiFn = void(__fastcall*)(void*, int);
-static SetReservedAnkiFn oSetReservedAnki = nullptr;
-
-using RandomIntRangeFn = int(__fastcall*)(void*, int, int, void*);
-static RandomIntRangeFn oRandomIntRange = nullptr;
-static int g_rngTraceFrame = -1;
-static int g_rngTraceCount = 0;
-static int g_ankiTraceFrame = -1;
-static int g_ankiTraceCount = 0;
-static int g_ankiReserveTraceFrame = -1;
-static int g_ankiReserveTraceCount = 0;
-
-static int RngTraceFrame()
-{
-    uint64_t replay = *(uint64_t*)_addr(PTR_SREPLAY);
-    return replay ? *(int32_t*)(replay + 0x54) : -1;
-}
-
-static bool IsAnkihouRngCaller(uint64_t caller, void* rngOwner)
-{
-    // Return addresses immediately following the random calls in Bomb setup,
-    // Bomb's direction callback, and Rolling setup/landing. Keep the filter
-    // tight so a full gameplay round does not flood the hook log.
-    if (rngOwner && GetObjectDti((uint64_t)rngOwner) == (uint64_t)_addr(0x140D455F8))
-        return true;
-    return caller == (uint64_t)_addr(0x1400A1289) ||
-           caller == (uint64_t)_addr(0x14018BAF1) ||
-           caller == (uint64_t)_addr(0x14018B5C2) ||
-           caller == (uint64_t)_addr(0x14018D245 + 5) ||
-           caller == (uint64_t)_addr(0x14018D299 + 5);
-}
-
-static int __fastcall hkRandomIntRange(void* stateArg, int low, int high,
-                                       void* rngOwner)
-{
-    uint64_t caller = (uint64_t)__builtin_return_address(0);
-    if (!IsAnkihouRngCaller(caller, rngOwner))
-        return oRandomIntRange(stateArg, low, high, rngOwner);
-
-    int frame = RngTraceFrame();
-    if (frame != g_rngTraceFrame) {
-        g_rngTraceFrame = frame;
-        g_rngTraceCount = 0;
-    }
-
-    uint32_t globalBefore[4] = {};
-    uint32_t ownerBefore[4] = {};
-    std::memcpy(globalBefore, (void*)_addr(0x140D765D8), sizeof(globalBefore));
-    if (rngOwner)
-        std::memcpy(ownerBefore, (uint8_t*)rngOwner + 0x2D80, sizeof(ownerBefore));
-
-    int result = oRandomIntRange(stateArg, low, high, rngOwner);
-
-    uint32_t globalAfter[4] = {};
-    uint32_t ownerAfter[4] = {};
-    std::memcpy(globalAfter, (void*)_addr(0x140D765D8), sizeof(globalAfter));
-    if (rngOwner)
-        std::memcpy(ownerAfter, (uint8_t*)rngOwner + 0x2D80, sizeof(ownerAfter));
-
-    if (g_rngTraceCount++ < 32) {
-        HookLog("RNGTRACE frame=%d resim=%d caller=0x%llX stateArg=0x%llX owner=0x%llX "
-                "range=[%d,%d] result=%d global=%08X,%08X,%08X,%08X->%08X,%08X,%08X,%08X "
-                "ownerRng(+0x2D80)=%08X,%08X,%08X,%08X->%08X,%08X,%08X,%08X\n",
-                frame, g_isResimulating ? 1 : 0, caller, (uint64_t)stateArg,
-                (uint64_t)rngOwner, low, high, result,
-                globalBefore[0], globalBefore[1], globalBefore[2], globalBefore[3],
-                globalAfter[0], globalAfter[1], globalAfter[2], globalAfter[3],
-                ownerBefore[0], ownerBefore[1], ownerBefore[2], ownerBefore[3],
-                ownerAfter[0], ownerAfter[1], ownerAfter[2], ownerAfter[3]);
-    }
-    return result;
-}
-
-static int __fastcall hkHsienKoSelectAnki(void* character)
-{
-    if (!character)
-        return oHsienKoSelectAnki(character);
-
-    int frame = RngTraceFrame();
-    if (frame != g_ankiTraceFrame) {
-        g_ankiTraceFrame = frame;
-        g_ankiTraceCount = 0;
-    }
-
-    uint32_t reservedBefore = *(uint32_t*)((uint8_t*)character + 0x68FC);
-    uint32_t commandBefore = *(uint32_t*)((uint8_t*)character + 0x13C4);
-    uint32_t actionId = *(uint32_t*)((uint8_t*)character + 0x1310);
-    uint32_t rngBefore[4] = {};
-    std::memcpy(rngBefore, (uint8_t*)character + 0x2D80, sizeof(rngBefore));
-
-    int result = oHsienKoSelectAnki(character);
-
-    uint32_t rngAfter[4] = {};
-    std::memcpy(rngAfter, (uint8_t*)character + 0x2D80, sizeof(rngAfter));
-    uint64_t caller = (uint64_t)__builtin_return_address(0);
-
-    if (g_ankiTraceCount++ < 64) {
-        HookLog("ANKITRACE frame=%d resim=%d caller=0x%llX char=0x%llX action=0x%08X "
-                "reserved=%d commandBefore(+0x13C4)=%08X callbackResult=%d "
-                "rng(+0x2D80)=%08X,%08X,%08X,%08X->%08X,%08X,%08X,%08X\n",
-                frame, g_isResimulating ? 1 : 0, caller, (uint64_t)character,
-                actionId, (int32_t)reservedBefore, commandBefore, result,
-                rngBefore[0], rngBefore[1], rngBefore[2], rngBefore[3],
-                rngAfter[0], rngAfter[1], rngAfter[2], rngAfter[3]);
-    }
-    return result;
-}
-
-static void __fastcall hkSetReservedAnki(void* character, int value)
-{
-    if (!character)
-        return oSetReservedAnki(character, value);
-
-    int frame = RngTraceFrame();
-    if (frame != g_ankiReserveTraceFrame) {
-        g_ankiReserveTraceFrame = frame;
-        g_ankiReserveTraceCount = 0;
-    }
-
-    uint32_t before = *(uint32_t*)((uint8_t*)character + 0x68FC);
-    uint32_t actionId = *(uint32_t*)((uint8_t*)character + 0x1310);
-    uint64_t caller = (uint64_t)__builtin_return_address(0);
-    oSetReservedAnki(character, value);
-
-    if (g_ankiReserveTraceCount++ < 32) {
-        HookLog("ANKIRESERVE frame=%d resim=%d caller=0x%llX object=0x%llX "
-                "action=0x%08X before=%d after=%d\n",
-                frame, g_isResimulating ? 1 : 0, caller, (uint64_t)character,
-                actionId, (int32_t)before, value);
-    }
-}
-
 static bool IsLinkedShot(void* shot);
 
 static void CapturePreSpawnRng(ShotRecipe& recipe, void* ownerChr)
@@ -702,39 +563,6 @@ static void RestorePreSpawnRng(const ShotRecipe& recipe)
 static bool IsZireitouShot(void* shot)
 {
     return shot && *(uintptr_t*)shot == (uintptr_t)_addr(VTABLE_USHOT_VULCAN_ZIREITOU);
-}
-
-static void DestroyCollisionNodeClones(SnapshotSlot& slot)
-{
-    for (const CollisionNodeClone& entry : slot.collisionNodeClones) {
-        if (!entry.clone || !HasCallableDtiVirtual(entry.clone)) continue;
-        uint64_t vtable = *(uint64_t*)entry.clone;
-        auto destroy = (void(__fastcall*)(void*, uint32_t))*(uint64_t*)vtable;
-        if (destroy && IsAccessibleAddress((uint64_t)destroy))
-            destroy(entry.clone, 1);
-    }
-    slot.collisionNodeClones.clear();
-}
-
-static void CaptureCollisionNodeClones(SnapshotSlot& slot)
-{
-    auto createNode =
-        (void*(__fastcall*)(void*))_addr(FN_COLLISION_NODE_OBJECT_CREATE);
-    auto copyNode =
-        (void(__fastcall*)(void*, void*, bool, bool))_addr(FN_COLLISION_NODE_COPY);
-
-    for (int i = 0; i < slot.regionCount; ++i) {
-        const Region& region = slot.regions[i];
-        if (!region.ownerSlot || region.size != CCHR_EXTERNAL_ANIM_SIZE) continue;
-        if (!HasCallableDtiVirtual(region.ptr)) continue;
-
-        void* clone = createNode(nullptr);
-        if (!clone) continue;
-        // Match the engine's copy thunk: inherit the source child factory, then
-        // deep-copy each child through that compatible factory.
-        copyNode(clone, region.ptr, false, true);
-        slot.collisionNodeClones.push_back({region.ownerSlot, region.ptr, clone});
-    }
 }
 
 static void CaptureShotFlight(void* shot, ShotFlightState& out)
@@ -1273,9 +1101,11 @@ static void __fastcall hkKingKobunMove(void* shot)
     oKingKobunMove(shot);
 
     if (trace) {
+        uint64_t replay = *(uint64_t*)_addr(PTR_SREPLAY);
+        int frame = replay ? *(int32_t*)(replay + 0x54) : -1;
         HookLog("KINGMOVE shot=0x%llX frame=%d resim=%d mode=%u->%u phase=%u->%u "
                 "x=%.6g->%.6g speed=%.6g dt=%.6g facing=%u helper=0x%llX state=0x%08X\n",
-                (uint64_t)shot, RngTraceFrame(), g_multiResimEnabled ? 1 : 0,
+                (uint64_t)shot, frame, g_multiResimEnabled ? 1 : 0,
                 beforeMode, *(uint32_t*)((uint8_t*)shot + 0x214C),
                 beforePhase, *(uint32_t*)((uint8_t*)shot + 0x2140),
                 beforePos, *(float*)((uint8_t*)shot + 0x50),
@@ -2534,7 +2364,7 @@ void Rollback_SaveSnapshot(int32_t frame)
     if (slotIdx < 0) slotIdx += ROLLBACK_WINDOW;
     SnapshotSlot& slot = g_slots[slotIdx];
 
-    DestroyCollisionNodeClones(slot);
+    Rollback_DestroyCollisionNodeClones(slot);
 
     if (slot.capacity < total) {
         delete[] slot.data;
@@ -2586,7 +2416,7 @@ void Rollback_SaveSnapshot(int32_t frame)
 
     // Native clones keep reference-managed geometry alive after attack-end
     // clears the live node's child array.
-    CaptureCollisionNodeClones(slot);
+    Rollback_CaptureCollisionNodeClones(slot);
     const uint64_t collisionClonesEnd = Profile_Now();
     CaptureShotAndEffectRecipes(slot);
     const uint64_t shotRecipesEnd = Profile_Now();
@@ -3070,16 +2900,7 @@ void Rollback_RestoreSnapshot(int32_t frame)
     }
     const uint64_t regionsEnd = Profile_Now();
 
-    // Restore the saved child factory as well as its children. Keeping the
-    // destination's generic factory creates objects with incompatible vtables.
-    auto copyCollisionNode =
-        (void(__fastcall*)(void*, void*, bool, bool))_addr(FN_COLLISION_NODE_COPY);
-    for (const CollisionNodeClone& entry : slot.collisionNodeClones) {
-        if (*(uint64_t*)entry.ownerSlot == (uint64_t)entry.savedPtr &&
-            HasCallableDtiVirtual(entry.savedPtr) &&
-            HasCallableDtiVirtual(entry.clone))
-            copyCollisionNode(entry.savedPtr, entry.clone, false, true);
-    }
+    Rollback_RestoreCollisionNodeClones(slot);
     const uint64_t collisionClonesEnd = Profile_Now();
 
     // Full cChr body restore also rewinds its external pointer fields. If an
@@ -3172,7 +2993,7 @@ void Rollback_FreeSnapshots()
     Rollback_PatchDrawCalls(false); // restore draw calls (no-op if unpatched)
 
     for (int i = 0; i < ROLLBACK_WINDOW; ++i) {
-        DestroyCollisionNodeClones(g_slots[i]);
+        Rollback_DestroyCollisionNodeClones(g_slots[i]);
         delete[] g_slots[i].data;
         g_slots[i].data        = nullptr;
         g_slots[i].size        = 0;
@@ -3219,6 +3040,7 @@ void Rollback_InitHooks()
     // }
 
     Rollback_InitReSimulationHooks();
+    Rollback_InitRngHooks();
 
     MH_STATUS s;
 
@@ -3238,39 +3060,6 @@ void Rollback_InitHooks()
         HookLog("Rollback: hooked uShotVulcanKingKobun::move trace\n");
     } else {
         HookLog("Rollback: failed to hook uShotVulcanKingKobun::move (%d)\n", s);
-    }
-
-    s = MH_CreateHook((LPVOID)_addr(FN_RNG_RANDOM_INT),
-                      (LPVOID)&hkRandomIntRange,
-                      (LPVOID*)&oRandomIntRange);
-    if (s == MH_OK) {
-        //MH_EnableHook((LPVOID)_addr(FN_RNG_RANDOM_INT));
-        HookLog("Rollback: hooked Ankihou RNG trace at 0x%llX\n",
-                (uint64_t)_addr(FN_RNG_RANDOM_INT));
-    } else {
-        HookLog("Rollback: failed to hook Ankihou RNG trace (%d)\n", s);
-    }
-
-    s = MH_CreateHook((LPVOID)_addr(FN_HSIENKO_SELECT_ANKI),
-                      (LPVOID)&hkHsienKoSelectAnki,
-                      (LPVOID*)&oHsienKoSelectAnki);
-    if (s == MH_OK) {
-        //MH_EnableHook((LPVOID)_addr(FN_HSIENKO_SELECT_ANKI));
-        HookLog("Rollback: hooked Hsien-Ko Anki selector trace at 0x%llX\n",
-                (uint64_t)_addr(FN_HSIENKO_SELECT_ANKI));
-    } else {
-        HookLog("Rollback: failed to hook Hsien-Ko Anki selector trace (%d)\n", s);
-    }
-
-    s = MH_CreateHook((LPVOID)_addr(FN_SET_RESERVED_ANKI),
-                      (LPVOID)&hkSetReservedAnki,
-                      (LPVOID*)&oSetReservedAnki);
-    if (s == MH_OK) {
-        //MH_EnableHook((LPVOID)_addr(FN_SET_RESERVED_ANKI));
-        HookLog("Rollback: hooked Hsien-Ko Anki reserve trace at 0x%llX\n",
-                (uint64_t)_addr(FN_SET_RESERVED_ANKI));
-    } else {
-        HookLog("Rollback: failed to hook Hsien-Ko Anki reserve trace (%d)\n", s);
     }
 
     s = MH_CreateHook((LPVOID)_addr(FN_SSHOT_SPAWN_EX),
