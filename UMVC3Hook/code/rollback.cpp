@@ -23,6 +23,8 @@
 
 #include "rollback.h"
 #include "rollback_internal.h"
+#include "rollback_cleanup.h"
+#include "rollback_diagnostics.h"
 #include "rollback_profile.h"
 #include "rollback_tick.h"
 #include "concrete_snapshot.h"
@@ -657,49 +659,17 @@ static constexpr uintptr_t FN_COLLISION_NODE_COPY          = 0x1405A4DA0;
 // ===========================================================================
 // Global Re-Simulation Indicators & Hook State
 // ===========================================================================
-bool    g_isResimulating         = false;
-int32_t g_resimulateCurrentFrame = 0;
-int32_t g_postResimFrame         = -1;
-int32_t g_resimReentranceDepth   = 0; // tracks nested re-sim calls for diagnostics
-
 // Pending re-sim request from FrameStepper_Process (HookUpdate thread).
 // hkMvc3Main_move on the main game thread checks/resets these so the
 // actual oMvc3Main_move calls run on the correct thread (avoiding D3D
 // thread-safety issues in the render path).
-int32_t g_resimRequestedStart   = -1;
-int32_t g_resimRequestedEnd     = -1;
-int32_t g_restoreRequestedFrame = -1;
-
-int     g_f7State        = 0;
-int32_t g_f7StartFrame   = 0;
-int     g_f7Remaining    = 0;
-int     g_f7DiagSession  = -1;
-
 // Code-only diagnostic toggle. Keep false during normal play: NDJSON capture
 // serializes full character, hitbox, projectile, and memory state per frame.
-bool    g_ndjsonLoggingEnabled      = true;
-bool    g_ndjsonIncludeDirHistory   = false;
-
 // Rollback request from controller.cpp — late input arrived that differs
 // from what was predicted.  Start/end inclusive frame range.
 // __ImageBase gives us the DLL's base address (used with GetModuleFileNameA
 // to resolve paths relative to the DLL's directory instead of the CWD, which
 // games often change after loading plugins).
-EXTERN_C IMAGE_DOS_HEADER __ImageBase;
-
-// Resolve a relative path to one rooted at the DLL's own directory.
-// Returns the number of chars written (like snprintf), or negative on error.
-// |dst| is always null-terminated.
-static int ResolveDllPath(char* dst, size_t dstLen, const char* relative) {
-    if (!dst || dstLen == 0) return -1;
-    char modPath[260];
-    DWORD ret = GetModuleFileNameA((HINSTANCE)&__ImageBase, modPath, sizeof(modPath));
-    if (ret == 0 || ret >= sizeof(modPath)) { dst[0] = '\0'; return -1; }
-    char* sep = strrchr(modPath, '\\');
-    if (sep) *(sep + 1) = '\0'; else modPath[0] = '\0';
-    return snprintf(dst, dstLen, "%s%s", modPath, relative);
-}
-
 static int32_t g_rollbackReqStart = -1;
 static int32_t g_rollbackReqEnd   = -1;
 static uint64_t g_sMvc3Main      = 0;
@@ -855,7 +825,7 @@ static void Rollback_NetplayLiveInit() {
                  sideSuffix);
     }
              
-    ResolveDllPath(dir, sizeof(dir), rel);
+    Rollback_ResolveDllPath(dir, sizeof(dir), rel);
     CreateDirectoryA(dir, NULL);
 
     snprintf(g_netplayLivePath, sizeof(g_netplayLivePath), "%s/frames.ndjson", dir);
@@ -3829,516 +3799,6 @@ static int BuildRegions(Region* regions, int maxRegions)
 }
 
 // ===========================================================================
-// Sleep-Patch & Headless Tick — game-logic-only re-simulation stepping
-// ===========================================================================
-#if 0 // Moved to rollback_tick.cpp; retained temporarily as reverse-engineering notes.
-static constexpr uintptr_t FN_SMAIN_MOVE            = 0x140521df0;
-static constexpr uintptr_t FN_UPDATE_MANAGERS        = 0x140258540;
-static constexpr uintptr_t FN_PAD_PROCESS            = 0x140289c30;
-static constexpr uintptr_t FN_MVC3MGR_GETINSTANCE    = 0x140001af0;
-static constexpr uintptr_t FN_MVC3MGR_GETACTION      = 0x1409629d0;
-static constexpr uintptr_t FN_AFTER_GETACTION        = 0x14014f410;
-static constexpr uintptr_t FN_COLLISION_BEGIN_FRAME  = 0x1405bb710;  // sCollision__beginFrameAndDrainDeferredState
-static constexpr uintptr_t FN_CALL_AI                = 0x140647910;  // direct call on sMain+0x40240 (AI)
-static constexpr uintptr_t FN_UPDATE_RENDER_STATE    = 0x140259ea0;  // sMvc3Main__updateRenderState
-static constexpr uintptr_t FN_RENDER_END_FRAME       = 0x14053a250;  // sRender__endFrameAndPresent
-static constexpr uintptr_t FN_SSOUND_MOVE             = 0x1405CC040;
-static constexpr uintptr_t FN_SGAMEUI_MOVE            = 0x1402BE610;
-static constexpr uintptr_t FN_SCHEDULER_REBUILD       = 0x14050F010;
-static constexpr uintptr_t FN_APPLY_COLLISION_PUSH   = 0x14004ad20;  // fighter pushbox response callback
-static constexpr uintptr_t FN_RESET_HITNODES         = 0x140259e90;  // j_sHitSolver__resetActiveNodes
-static constexpr uintptr_t FN_PAD_METHOD_3D00        = 0x1402a3d00;  // sPad method
-static constexpr uintptr_t FN_PAD_METHOD_3DC0        = 0x1402a3dc0;  // sPad method
-
-// sMvc3Manager subsystem getters (for MgrSubsysV30 helper)
-static constexpr uintptr_t FN_GETGAMECONFIG          = 0x1401bcc50;
-static constexpr uintptr_t FN_GETGAMEUI              = 0x14097d370;
-static constexpr uintptr_t FN_GETSHOT                = 0x140683730;
-static constexpr uintptr_t FN_GETGAMEEFFECT          = 0x140015690;
-static constexpr uintptr_t FN_GETHITSOLVER           = 0x140056130;
-static constexpr uintptr_t FN_GETCHARACTER           = 0x1407bcd80;
-static constexpr uintptr_t FN_GETSTAGE               = 0x140259460;
-static constexpr uintptr_t FN_GETREPLAY              = 0x14013c430;
-static constexpr uintptr_t FN_GETBATTLESET           = 0x1408f1f10;
-static constexpr uintptr_t FN_GETMVC3SET             = 0x14004b000;
-static constexpr uintptr_t FN_GETNETWORK             = 0x1407cda50;
-static constexpr uintptr_t FN_GETLICENSE             = 0x14010a200;
-static constexpr uintptr_t FN_GETRANKING             = 0x140703370;
-static constexpr uintptr_t FN_GETNETROOM             = 0x14030e6c0;
-static constexpr uintptr_t FN_GETEARTHATK            = 0x140327a10;
-
-// Sleep-patch state: the two Sleep() call sites inside sMain__move
-// (0x140521df0).  Each is a 6-byte "CALL [RIP+xxx]" through the IAT.
-static constexpr uintptr_t SLEEP_CALL_FIXED = 0x1405220b2;  // Sleep(dt-1)
-static constexpr uintptr_t SLEEP_CALL_VAR   = 0x140521f93;  // Sleep(1)
-static constexpr uintptr_t PRESENT_CALL_SITE = 0x14053709c; // CALL [RAX+0x48] inside sRender__beginFrame
-static constexpr uintptr_t SWAPCHAIN_CALL_A  = 0x1402598c4; // vtable+0x50 on sMain+0x40208
-static constexpr uintptr_t SWAPCHAIN_CALL_B  = 0x1402598d1; // vtable+0x50 on sMain+0x40270
-static constexpr uintptr_t SWAPCHAIN_CALL_C  = 0x140537113; // vtable+0x50 in sRender__beginFrame
-static uint8_t g_savedSleep[2][6] = {};
-static uint8_t g_savedPresent[3] = {};
-static uint8_t g_savedSwapchain[3][3] = {};
-static bool    g_sleepPatched = false;
-static bool    g_presentPatched = false;
-static bool    g_swapchainPatched = false;
-
-// Helper: call a vtable method on an object pointer stored at |offset| in
-// sMvc3Main.  vtable_offset is the byte offset into the vtable (e.g. 0x30).
-static inline void VTableCall(uint64_t sMain, uint32_t memberOffset, uint32_t vtableOffset)
-{
-    uint64_t obj = *(uint64_t*)(sMain + memberOffset);
-    if (!obj) return;
-    uint64_t vtable = *(uint64_t*)obj;
-    if (!vtable) return;
-    auto fn = *(void(__fastcall**)(uint64_t))(vtable + vtableOffset);
-    if (fn) fn(obj);
-}
-
-// Helper: call a non-vtable direct function with an object from sMain member.
-static inline void DirectMemberCall(uint64_t sMain, uint32_t memberOffset, uintptr_t funcAddr)
-{
-    uint64_t obj = *(uint64_t*)(sMain + memberOffset);
-    if (!obj) return;
-    ((void(__fastcall*)(uint64_t))_addr(funcAddr))(obj);
-}
-
-// Helper: sMvc3Manager::getInstance() → getter(instance) → vtable(vfnOffset) on result.
-static inline void MgrSubsysCall(uintptr_t getterAddr, uint32_t vfnOffset)
-{
-    uint64_t inst = ((uint64_t(__fastcall*)())_addr(FN_MVC3MGR_GETINSTANCE))();
-    if (!inst) return;
-    uint64_t obj = ((uint64_t(__fastcall*)(uint64_t))_addr(getterAddr))(inst);
-    if (!obj) return;
-    uint64_t vt = *(uint64_t*)obj;
-    if (!vt) return;
-    auto fn = *(void(__fastcall**)(uint64_t))(vt + vfnOffset);
-    if (fn) fn(obj);
-}
-
-// Helper: Aligns restored sMain structures with actual performance counters
-// to prevent the game loop from computing a negative/excessive frame-time
-// delta after re-simulation, which would cause a freeze in the busy-wait
-// or in the Sleep-based frame-pacing loop.
-static void Rollback_ResyncMainTiming(uint64_t sMain)
-{
-    if (!sMain) return;
-
-    LARGE_INTEGER qpc;
-    QueryPerformanceCounter(&qpc);
-
-    // Sync high-resolution performance-counter samples with physical counter.
-    // sMain+0x40 is the "base QPC" sampled at the PREVIOUS frame boundary;
-    // sMain__move computes the frame delta as (current_QPC - base) * 1000 / freq.
-    // Without a valid base the first post-re-sim delta will be enormous and
-    // the frame-pacer and/or tick-count multiplier will produce wrong results.
-    *(uint64_t*)(sMain + 0x40)     = qpc.QuadPart;  // base QPC for delta
-    *(uint64_t*)(sMain + 0x40048)  = qpc.QuadPart;
-    *(uint64_t*)(sMain + 0x40078)  = qpc.QuadPart;
-    *(uint64_t*)(sMain + 0x70)     = qpc.QuadPart;
-
-    // Reset timing deltas to 60 FPS nominal values so the next real tick
-    // sees a well-formed 16 ms frame delta.
-    *(uint32_t*)(sMain + 0x38)     = 16;           // ~16ms frame delta
-    // mDeltaTime (+0x80) is in FRAME units (~1.0), not seconds — sMain__move
-    // sets it to 1.0f in the vsync path and multiplies by globalSpeed (+0x8c).
-    // The dash double-tap timers integrate this value per frame.
-    *(float*)(sMain + 0x80)        = 1.0f;         // 1 frame of game time
-    // Zero accumulated sleep/deadline calculations so they recompute fresh.
-    // These are the "accumulated time" (sMain+0x60) and "deadline" (sMain+0x68)
-    // used by the frame-pacing busy-wait logic.  If left stale the game may
-    // spin forever waiting for sMain+0x60 < sMain+0x68 to become false.
-    *(uint64_t*)(sMain + 0x60)     = 0;
-    *(uint64_t*)(sMain + 0x68)     = 0;
-
-    // Set tick count so the next real frame advances by exactly 1 step.
-    // (Without this the restored frame count may jump or stall.)
-    *(uint32_t*)(sMain + 0x48)     = 1;
-}
-
-void Rollback_PatchSleep(bool enable)
-{
-    if (enable && !g_sleepPatched) {
-        DWORD old = 0;
-        static const uintptr_t sites[2] = { SLEEP_CALL_FIXED, SLEEP_CALL_VAR };
-        for (int i = 0; i < 2; ++i) {
-            VirtualProtect((LPVOID)_addr(sites[i]), 6, PAGE_EXECUTE_READWRITE, &old);
-            memcpy(g_savedSleep[i], (void*)_addr(sites[i]), 6);
-            memset((void*)_addr(sites[i]), 0x90, 6);
-            VirtualProtect((LPVOID)_addr(sites[i]), 6, old, &old);
-        }
-        g_sleepPatched = true;
-    } else if (!enable && g_sleepPatched) {
-        DWORD old = 0;
-        static const uintptr_t sites[2] = { SLEEP_CALL_FIXED, SLEEP_CALL_VAR };
-        for (int i = 0; i < 2; ++i) {
-            VirtualProtect((LPVOID)_addr(sites[i]), 6, PAGE_EXECUTE_READWRITE, &old);
-            memcpy((void*)_addr(sites[i]), g_savedSleep[i], 6);
-            VirtualProtect((LPVOID)_addr(sites[i]), 6, old, &old);
-        }
-        g_sleepPatched = false;
-    }
-}
-
-void Rollback_PatchPresent(bool enable)
-{
-    // NOP / restore the 3-byte CALL [RAX+0x48] inside sRender__beginFrame.
-    // This Present call blocks for ~16ms per frame under DXVK; NOPping it
-    // during re-sim lets the rest of the render-sync function run normally
-    // (setting render-done flags, advancing frame counter, etc.) without
-    // the blocking Present.  Required because the game crashes if we skip
-    // sRender__beginFrame entirely (downstream game logic depends on its state).
-    if (enable && !g_presentPatched) {
-        DWORD old = 0;
-        VirtualProtect((LPVOID)_addr(PRESENT_CALL_SITE), 3,
-                       PAGE_EXECUTE_READWRITE, &old);
-        memcpy(g_savedPresent, (void*)_addr(PRESENT_CALL_SITE), 3);
-        memset((void*)_addr(PRESENT_CALL_SITE), 0x90, 3);
-        VirtualProtect((LPVOID)_addr(PRESENT_CALL_SITE), 3, old, &old);
-        g_presentPatched = true;
-    } else if (!enable && g_presentPatched) {
-        DWORD old = 0;
-        VirtualProtect((LPVOID)_addr(PRESENT_CALL_SITE), 3,
-                       PAGE_EXECUTE_READWRITE, &old);
-        memcpy((void*)_addr(PRESENT_CALL_SITE), g_savedPresent, 3);
-        VirtualProtect((LPVOID)_addr(PRESENT_CALL_SITE), 3, old, &old);
-        g_presentPatched = false;
-    }
-}
-
-void Rollback_PatchSwapchain(bool enable)
-{
-    // NOP / restore three vtable+0x50 call sites that are part of the
-    // swapchain/end-frame path in sMvc3Main__move and sRender__beginFrame.
-    // Each instruction is "CALL [RAX+0x50]" = FF 50 50 (3 bytes).
-    //
-    // These swapchain operations expect a Present to have been submitted;
-    // with the Present NOP'd during re-sim they may do unnecessary work or
-    // block.  NOPping them eliminates any remaining D3D9/Vulkan overhead
-    // from the re-sim path.
-    static const uintptr_t sites[3] = {
-        SWAPCHAIN_CALL_A,
-        SWAPCHAIN_CALL_B,
-        SWAPCHAIN_CALL_C,
-    };
-    if (enable && !g_swapchainPatched) {
-        for (int i = 0; i < 3; ++i) {
-            DWORD old = 0;
-            VirtualProtect((LPVOID)_addr(sites[i]), 3,
-                           PAGE_EXECUTE_READWRITE, &old);
-            memcpy(g_savedSwapchain[i], (void*)_addr(sites[i]), 3);
-            memset((void*)_addr(sites[i]), 0x90, 3);
-            VirtualProtect((LPVOID)_addr(sites[i]), 3, old, &old);
-        }
-        g_swapchainPatched = true;
-    } else if (!enable && g_swapchainPatched) {
-        for (int i = 0; i < 3; ++i) {
-            DWORD old = 0;
-            VirtualProtect((LPVOID)_addr(sites[i]), 3,
-                           PAGE_EXECUTE_READWRITE, &old);
-            memcpy((void*)_addr(sites[i]), g_savedSwapchain[i], 3);
-            VirtualProtect((LPVOID)_addr(sites[i]), 3, old, &old);
-        }
-        g_swapchainPatched = false;
-    }
-}
-
-// ===========================================================================
-// Rollback_PatchDrawCalls — NOP all remaining render/draw call sites
-//
-// Every render-related CALL inside sMvc3Main__move that is still running
-// during re-sim.  Comment out individual entries in the `sites` array
-// below to test whether skipping that call site crashes the game.
-//
-// Sites organised by category:
-//   A–G:  vtable+0x48 indirect draw calls (3 bytes each)
-//   H–K:  Direct render-function CALLs (5 bytes each)
-//   L:    vtable+0x30 render-logic update (3 bytes)
-// ===========================================================================
-void Rollback_PatchDrawCalls(bool enable)
-{
-    static struct { uintptr_t addr; int n; const char* label; } const sites[] = {
-        // --- vtable+0x48 DRAW calls (FF 50 48 / FF 52 48) ---
-        { 0x1402594d9, 3, "draw_401a8"       },
-        { 0x1402594e6, 3, "draw_40198"       },
-        { 0x1402594f3, 3, "draw_401d8"       },
-        { 0x140259515, 3, "draw_gameConfig"  },
-        { 0x140259568, 3, "draw_40270"       },
-        { 0x140259575, 3, "draw_40208"       },
-        { 0x140259896, 3, "draw_401e0"       },
-        // --- Direct render-function CALLs (E8 rel32 = 5 bytes) ---
-        { 0x140259525, 5, "setRenderTargetAspect" },
-        { 0x140259537, 5, "util_C7D0"             },
-        { 0x140259548, 5, "setField_40"            },
-        { 0x140259559, 5, "getter_7110"            },
-        // --- vtable+0x30 render-logic update ---
-        { 0x1402598ab, 3, "sRender_vtable+0x30"   },
-    };
-    static constexpr int N = sizeof(sites) / sizeof(sites[0]);
-
-    // Saved bytes storage — indexed identically to sites[]
-    static uint8_t saved[N][6] = {};   // max 6 bytes per site
-    static bool    patched = false;
-
-    if (enable && !patched) {
-        for (int i = 0; i < N; ++i) {
-            DWORD old = 0;
-            VirtualProtect((LPVOID)_addr(sites[i].addr), sites[i].n,
-                           PAGE_EXECUTE_READWRITE, &old);
-            memcpy(saved[i], (void*)_addr(sites[i].addr), sites[i].n);
-            memset((void*)_addr(sites[i].addr), 0x90, sites[i].n);
-            VirtualProtect((LPVOID)_addr(sites[i].addr), sites[i].n, old, &old);
-            //HookLog("Rollback: NOP'd draw call %s @ 0x%llX (%d bytes)\n",
-            //        sites[i].label, (uint64_t)_addr(sites[i].addr), sites[i].n);
-        }
-        patched = true;
-    } else if (!enable && patched) {
-        for (int i = 0; i < N; ++i) {
-            DWORD old = 0;
-            VirtualProtect((LPVOID)_addr(sites[i].addr), sites[i].n,
-                           PAGE_EXECUTE_READWRITE, &old);
-            memcpy((void*)_addr(sites[i].addr), saved[i], sites[i].n);
-            VirtualProtect((LPVOID)_addr(sites[i].addr), sites[i].n, old, &old);
-        }
-        patched = false;
-    } else if (!enable && !patched) {
-        return; // nothing to do
-    } else {
-        //HookLog("Rollback: draw calls already patched, skipping\n");
-    }
-}
-
-//THIS IS NOT USED
-void Rollback_HeadlessTick(uint64_t sMain)
-{
-//THIS IS NOT USED
-return;
-    if (!sMain) 
-    {
-        HookLog("Rollbackheadlesstick: smain is bad?:? :>\n");
-        return;
-    }
-
-    HookLog("Rollback_HeadlessTick: begin\n");
-
-    // ---- Disable collision sound-event updates during re-sim ----
-    // sCollision__move checks the flag at collisionObj+0x73a8 before
-    // calling sCollision__cSbcMoveMatrix__dispatchPostMoveJobs. During re-sim the
-    // sound slot-index increments past the per-entry capacity, hitting a
-    // null-pointer bug in the iterator.  Sound doesn't matter for headless
-    // re-simulation; zeroing the flag safely skips the crashing call.
-    //
-    // (We also hook the post-move dispatcher via MinHook below as a redundant
-    //  guard — the flag can be re-enabled on worker threads.)
-
-    // ==================================================================
-    // Phase 1 — Frame timing + Manager state + Input (always needed)
-    // ==================================================================
-    // 1. Frame timing — SKIP sMain__move during re-simulation.
-    //    sMain__move (0x140521df0) reads real QPC, computes frame deltas,
-    //    runs Sleep()/busy-wait for frame pacing, and updates sMain timing
-    //    fields (0x38, 0x48, 0x60, 0x68, 0x80, etc.).  Calling it during
-    //    re-sim corrupts those fields (it samples real QPC across the re-sim
-    //    window) and the first post-re-sim real frame computes a stale delta
-    //    that confuses the frame-pacer — causing a permanent hang.
-    //
-    //    Instead we just set the tick count (sMain+0x48) to 1 so any game
-    //    logic that checks it sees a valid advance.  The real sMain__move
-    //    runs on the next natural frame boundary after re-sim ends.
-    HookLog("Rollback_HeadlessTick: Phase1 step1 — Frame timing (skipping sMain__move)\n");
-    *(uint32_t*)(sMain + 0x48) = 1;
-    // 2. Window-focus/manager state
-    HookLog("Rollback_HeadlessTick: Phase1 step2 — Window-focus/manager state\n");
-    ((void(__fastcall*)(uint64_t))_addr(FN_UPDATE_MANAGERS))(sMain);
-    // 3. Input processing (CRITICAL — gathers pad / applies historical inputs)
-    HookLog("Rollback_HeadlessTick: Phase1 step3 — Input processing\n");
-    uint64_t syncPad = *(uint64_t*)(sMain + 0x401c0);
-    if (syncPad)
-        ((void(__fastcall*)(uint64_t))_addr(FN_PAD_PROCESS))(syncPad);
-    // 4. Async loader update (vtable+0x30)
-    HookLog("Rollback_HeadlessTick: Phase1 step4 — Async loader update\n");
-    VTableCall(sMain, 0x40260, 0x30);
-
-    // ==================================================================
-    // [SKIP] vtable+0x48 draw calls on [0x401a8], [0x40198], [0x401d8]
-    // [SKIP] sCollision__beginFrameAndDrainDeferredState on [0x401e0]
-    // [SKIP] sRender/sPrimitive render-setup block
-    // [SKIP] vtable+0x48 on [0x40270], [0x40208]
-    // [SKIP] sRender__beginFrame (Present path) - would crash through kiero hooks
-    // ==================================================================
-
-    // ==================================================================
-    // Phase 2 — Post-render game-logic updates (mirrors original order)
-    // ==================================================================
-    HookLog("Rollback_HeadlessTick: Phase2 begin — Post-render game-logic updates\n");
-    // 5. sMvc3Area update (vtable+0x30)
-    VTableCall(sMain, 0x40200, 0x30);
-
-    // 6. sMvc3Manager singleton chain (getAction + afterAction)
-    HookLog("Rollback_HeadlessTick: Phase2 step6 — sMvc3Manager singleton chain\n");
-    {
-        uint64_t mgr = ((uint64_t(__fastcall*)())_addr(FN_MVC3MGR_GETINSTANCE))();
-        if (mgr) {
-            uint64_t action = ((uint64_t(__fastcall*)(uint64_t))_addr(FN_MVC3MGR_GETACTION))(mgr);
-            if (action)
-                ((void(__fastcall*)(uint64_t))_addr(FN_AFTER_GETACTION))(action);
-        }
-    }
-
-    // 7. Post-render vtable+0x30 updates (game-logic state)
-    HookLog("Rollback_HeadlessTick: Phase2 step7 — Post-render vtable+0x30 updates\n");
-    VTableCall(sMain, 0x40230, 0x30);  // sMvc3Vibration
-    VTableCall(sMain, 0x401c0, 0x30);  // sMvc3SyncPad
-    VTableCall(sMain, 0x40210, 0x30);  // sMouse
-    VTableCall(sMain, 0x40228, 0x30);  // sId
-    VTableCall(sMain, 0x40218, 0x30);  // sKeyboard
-    VTableCall(sMain, 0x401c0, 0x50);  // sMvc3SyncPad vfn+0x50
-    VTableCall(sMain, 0x401e8, 0x30);  // sMvc3Shader2
-    VTableCall(sMain, 0x40240, 0x30);  // sAI
-
-    // ---- Manager subsystems (vtable+0x30 updates) ----
-    HookLog("Rollback_HeadlessTick: Phase2 — Manager subsystems\n");
-    MgrSubsysCall(FN_GETGAMECONFIG, 0x30);   // sGameConfig
-    // sGameUI is presentation state and is intentionally excluded from the
-    // snapshot. Updating it during re-simulation can load uCmbText resources
-    // and rebuild uScheduler arrays whose allocator-owned storage is not
-    // rewound, eventually reaching native setup with a failed allocation.
-    // Leave UI animation/resource state on the live timeline.
-
-    // [SKIP] getShot->vtable+0x48 (draw)
-    // [SKIP] getGameEffect->vtable+0x48 (draw)
-
-    VTableCall(sMain, 0x401a0, 0x30);  // collision (sCollision__move)
-    VTableCall(sMain, 0x401e0, 0x30);  // mpCollision second call
-
-    MgrSubsysCall(FN_GETHITSOLVER, 0x30);    // sHitSolver
-
-    VTableCall(sMain, 0x401a0, 0x68);  // physics vfn+0x68
-    VTableCall(sMain, 0x401a0, 0x58);  // physics vfn+0x58
-
-    // 8. Direct AI call (separate from vtable+0x30 above)
-    HookLog("Rollback_HeadlessTick: Phase2 step8 — Direct AI call\n");
-    DirectMemberCall(sMain, 0x40240, FN_CALL_AI);
-
-    // 9. Remaining vtable+0x30 member updates
-    HookLog("Rollback_HeadlessTick: Phase2 step9 — Remaining vtable+0x30 updates\n");
-    VTableCall(sMain, 0x401d8, 0x30);
-    VTableCall(sMain, 0x40208, 0x30);
-    VTableCall(sMain, 0x401b0, 0x30);
-    VTableCall(sMain, 0x401f0, 0x30);
-    VTableCall(sMain, 0x40248, 0x30);
-    VTableCall(sMain, 0x40258, 0x30);
-
-    // ==================================================================
-    // Phase 3 — Manager subsystem update loop (all vtable+0x30)
-    //
-    // NOTE: The function at 0x140259270 was previously identified as a
-    // manager subsystem getter, but Ghidra analysis revealed it is actually
-    // Concurrency::details::VirtualProcessor::GetOwningRoot — a ConcRT
-    // thread-pool internal. Calling it with vtable+0x30 corrupts the
-    // dispatch table across all 16 worker threads, causing crashes at
-    // address 0x100000000.  It is intentionally excluded below.
-    // ==================================================================
-    HookLog("Rollback_HeadlessTick: Phase3 begin — Manager subsystem update loop\n");
-    // getInstance -> vtable+0x30 (manager itself)
-    HookLog("Rollback_HeadlessTick: Phase3 — sMvc3Manager vtable+0x30\n");
-    {
-        uint64_t mgr = ((uint64_t(__fastcall*)())_addr(FN_MVC3MGR_GETINSTANCE))();
-        if (mgr) {
-            uint64_t vt = *(uint64_t*)mgr;
-            if (vt) {
-                auto fn = *(void(__fastcall**)(uint64_t))(vt + 0x30);
-                if (fn) fn(mgr);
-            }
-        }
-    }
-
-    HookLog("Rollback_HeadlessTick: Phase3 — Character/Stage/Shot/GameEffect vtable+0x30\n");
-    MgrSubsysCall(FN_GETCHARACTER, 0x30);    // sCharacter
-    MgrSubsysCall(FN_GETSTAGE, 0x30);        // sStage
-    MgrSubsysCall(FN_GETSHOT, 0x30);         // sShot (update, NOT draw)
-    MgrSubsysCall(FN_GETGAMEEFFECT, 0x30);   // sGameEffect (update, NOT draw)
-    // getHitSolver -> j_sHitSolver__resetActiveNodes (direct, not vtable)
-    HookLog("Rollback_HeadlessTick: Phase3 — Hit solver reset\n");
-    {
-        uint64_t inst = ((uint64_t(__fastcall*)())_addr(FN_MVC3MGR_GETINSTANCE))();
-        if (inst) {
-            uint64_t hs = ((uint64_t(__fastcall*)(uint64_t))_addr(FN_GETHITSOLVER))(inst);
-            if (hs)
-                ((void(__fastcall*)(uint64_t))_addr(FN_RESET_HITNODES))(hs);
-        }
-    }
-
-    HookLog("Rollback_HeadlessTick: Phase3 — Replay/Battle/Network/License vtable+0x30\n");
-    MgrSubsysCall(FN_GETREPLAY, 0x30);       // sReplay
-    // FN_MGR_GETSOMETHING (0x140259270) intentionally excluded — see note above.
-    MgrSubsysCall(FN_GETBATTLESET, 0x30);    // sBattleSetting
-    MgrSubsysCall(FN_GETMVC3SET, 0x30);      // sMvc3Setting
-    MgrSubsysCall(FN_GETNETWORK, 0x30);      // sNetwork
-    MgrSubsysCall(FN_GETLICENSE, 0x30);      // sLicense
-
-    HookLog("Rollback_HeadlessTick: Phase3 — Remaining member vtable+0x30\n");
-    VTableCall(sMain, 0x401b8, 0x30);
-    VTableCall(sMain, 0x401c8, 0x30);
-    VTableCall(sMain, 0x401d0, 0x30);
-
-    HookLog("Rollback_HeadlessTick: Phase3 — Ranking/NetRoom/EarthAtk vtable+0x30\n");
-    MgrSubsysCall(FN_GETRANKING, 0x30);      // sRanking
-    MgrSubsysCall(FN_GETNETROOM, 0x30);      // sNetworkRoom
-    MgrSubsysCall(FN_GETEARTHATK, 0x30);     // sEarthAttack
-
-    // ==================================================================
-    // Phase 4 — Tail + finalize
-    // ==================================================================
-    HookLog("Rollback_HeadlessTick: Phase4 begin — Tail + finalize\n");
-    VTableCall(sMain, 0x40198, 0x30);
-    VTableCall(sMain, 0x40270, 0x30);
-
-    // [SKIP] vtable+0x48 on [0x401e0] (draw)
-
-    // Tail function
-    HookLog("Rollback_HeadlessTick: Phase4 — sMain tail\n");
-    ((void(__fastcall*)(uint64_t))_addr(FN_UPDATE_RENDER_STATE))(sMain);
-
-    // [SKIP] sRender game-logic state update (vtable+0x30) — handled inside
-    //       FN_SMAIN_MOVE, and the internal allocator isn't snapshot-safe.
-    // [SKIP] Direct sRender method — rendering is meaningless during headless re-sim.
-    //[SKIP] vtable+0x50 on [0x40208] (render)
-    //[SKIP] vtable+0x50 on [0x40270] (render)
-
-    HookLog("Rollback_HeadlessTick: Phase4 — Final vtable+0x30\n");
-    VTableCall(sMain, 0x401f8, 0x30);
-
-    // ==================================================================
-    // Phase 5 — Pad methods + exit check (SKIP exit during re-sim)
-    // ==================================================================
-    HookLog("Rollback_HeadlessTick: Phase5 begin — Pad methods\n");
-    // sPad::method_3D00(0xa4) and sPad::method_3D00(0xa5) — input state flush
-    {
-        uint64_t pad = ((uint64_t(__fastcall*)())_addr(0x140001b00))();
-        if (pad)
-            ((uint8_t(__fastcall*)(uint64_t, uint32_t, uint8_t))_addr(FN_PAD_METHOD_3D00))(pad, 0xa4, 1);
-    }
-    HookLog("Rollback_HeadlessTick: Phase5 — Pad method 0xa5\n");
-    {
-        uint64_t pad = ((uint64_t(__fastcall*)())_addr(0x140001b00))();
-        if (pad)
-            ((uint8_t(__fastcall*)(uint64_t, uint32_t, uint8_t))_addr(FN_PAD_METHOD_3D00))(pad, 0xa5, 1);
-    }
-    // [SKIP] The ALT+F4 exit check (sMain__exit call) — we NEVER want to
-    // exit during re-simulation. The original checks if F4+Enter was pressed
-    // and calls sMain__exit. Skip this entirely.
-
-    HookLog("Rollback_HeadlessTick: end\n");
-}
-
-#endif
-
-// Forward declarations
-static void Rollback_ClearStalePointers();
-static void Rollback_ClearGameEffectSlots();
-static void Rollback_SyncActiveCharacterUi();
-
-// ===========================================================================
 // Public API — Save / Restore / ReSimulate
 // ===========================================================================
 
@@ -4991,16 +4451,6 @@ void Rollback_RestoreSnapshot(int32_t frame)
 // Diag dumpers — capture full snapshot state + character text for resim debugging
 // ===========================================================================
 
-static uint64_t fnv1a_64(const void* data, size_t len) {
-    uint64_t h = 0xCBF29CE484222325ULL;
-    const uint8_t* p = (const uint8_t*)data;
-    for (size_t i = 0; i < len; i++) {
-        h ^= p[i];
-        h *= 0x100000001B3ULL;
-    }
-    return h;
-}
-
 static void Rollback_DiagInit() {
 return;
     if (!g_ndjsonLoggingEnabled) return;
@@ -5014,7 +4464,7 @@ return;
     snprintf(rel, sizeof(rel), "rdiag_%04d%02d%02d_%02d%02d%02d%s",
              st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond, sideSuffix);
 
-    ResolveDllPath(g_diagDir, sizeof(g_diagDir), rel);
+    Rollback_ResolveDllPath(g_diagDir, sizeof(g_diagDir), rel);
     CreateDirectoryA(g_diagDir, NULL);
     HookLog("Rollback: diag dir: %s\n", g_diagDir);
     char ndjsonPath[260];
@@ -5074,7 +4524,7 @@ static void Rollback_DumpBinary(int session, int32_t frame, uint8_t side) {
 
     for (int i = 0; i < count; i++) {
         uint32_t sz = (uint32_t)regions[i].size;
-        uint64_t hash = fnv1a_64(regions[i].ptr, regions[i].size);
+        uint64_t hash = Rollback_Fnv1a64(regions[i].ptr, regions[i].size);
         fwrite(&sz, sizeof(sz), 1, f);
         fwrite(&hash, sizeof(hash), 1, f);
         fwrite(regions[i].ptr, 1, sz, f);
@@ -5188,7 +4638,7 @@ static void Rollback_DumpManifest(int session, int32_t frame, uint8_t side) {
     fprintf(f, "=== MANIFEST %s frame=%d regions=%d ===\n",
             side == 0 ? "LIVE" : "RESIM", mf, count);
     for (int i = 0; i < count; i++) {
-        uint64_t hash = fnv1a_64(regions[i].ptr, regions[i].size);
+        uint64_t hash = Rollback_Fnv1a64(regions[i].ptr, regions[i].size);
         fprintf(f, "  [%3d] addr=0x%016llX size=%-8u hash=0x%016llX\n",
                 i, (uint64_t)regions[i].ptr, (uint32_t)regions[i].size, hash);
     }
@@ -5222,7 +4672,7 @@ static void Rollback_DumpNDJSON(int32_t frame, uint8_t side) {
             tsBuf, nf, side == 0 ? "ground_truth" : "resim");
 
     for (int i = 0; i < count; i++) {
-        uint64_t rh = fnv1a_64(regions[i].ptr, regions[i].size);
+        uint64_t rh = Rollback_Fnv1a64(regions[i].ptr, regions[i].size);
         if (i > 0) fprintf(g_diagNdjsonFile, ",");
         fprintf(g_diagNdjsonFile, "{\"idx\":%d,\"addr\":\"0x%llX\",\"size\":%llu,\"hash\":\"0x%016llX\"}",
                 i, (uint64_t)regions[i].ptr, (uint64_t)regions[i].size, rh);
@@ -5736,141 +5186,6 @@ void Rollback_RequestReSimulate(int32_t startFrame, int32_t endFrame)
 {
     g_rollbackReqStart = startFrame;
     g_rollbackReqEnd   = endFrame;
-}
-
-// ===========================================================================
-// Post-Restore Cleanup — clear stale pointer/slot tables after snapshot restore
-//
-// The flat-memcpy restore of character objects brings back slot arrays at
-// offset +0x6748 that reference heap objects (effects, projectiles, etc.)
-// which were NOT saved in the snapshot.  Any subsequent call to
-// MtObject__replaceSlot_6F30 on these slots will try to call vtable[0x78]
-// (release) on a stale/corrupted object → page fault at NULL.
-//
-// We walk the team character lists (same traversal as BuildRegions) and clear
-// only the slot entries confirmed to hold stale references. Do not clear the
-// whole allocation: this range overlaps character-specific state.
-//
-// Slot array base: character + 0x6748.
-// Confirmed stale-reference indices: 1, 14, 15.
-//
-// uBaseModel also owns a material-instance cache through +0x110, with its
-// entry count at +0x118. Character action changes release every cached entry
-// before rebuilding it. The cache allocation itself remains live across a
-// restore, but entries retired on the prediction timeline can be dangling.
-// ===========================================================================
-static void ClearModelMaterialCache(uint64_t model)
-{
-    if (!HasCallableDtiVirtual((void*)model)) return;
-
-    uint64_t entries = *(uint64_t*)(model + 0x110);
-    uint32_t count = *(uint32_t*)(model + 0x118);
-    if (!entries || count > 4096 || !IsAccessibleAddress(entries)) return;
-
-    for (uint32_t i = 0; i < count; ++i) {
-        uint64_t entry = entries + (uint64_t)i * sizeof(uint64_t);
-        if (!IsAccessibleAddress(entry)) break;
-        uint64_t material = *(uint64_t*)entry;
-        if (material && !HasCallableDtiVirtual((void*)material))
-            *(uint64_t*)entry = 0;
-    }
-}
-
-static void Rollback_ClearStalePointers()
-{
-    uint64_t sCharacter = *(uint64_t*)_addr(PTR_SCHARACTER);
-    if (!sCharacter) return;
-
-    static constexpr uintptr_t SLOT_ARRAY_OFFSET = 0x6748;
-    static constexpr uint32_t STALE_SLOT_INDICES[] = {1, 14, 15};
-
-    for (int ti = 0; ti < 2; ++ti) {
-        uint64_t team = sCharacter + (ti == 0 ? TEAM0_OFFSET : TEAM1_OFFSET);
-        uint64_t node = team + TEAM_FIRST_NODE_OFFSET;
-
-        while (node) {
-            uint64_t character = *(uint64_t*)(node + NODE_CHR_OFFSET);
-            if (character) {
-                ClearModelMaterialCache(character);
-
-                // cChr owns an array of character-specific weapon models.
-                // Hsien-Ko, for example, resets weapon index 12 on every
-                // action change and follows that weapon's material cache.
-                uint32_t weaponCount = *(uint32_t*)(character + 0x3F38);
-                uint64_t weapons = *(uint64_t*)(character + 0x3F40);
-                if (weaponCount <= 256 && weapons && IsAccessibleAddress(weapons)) {
-                    for (uint32_t i = 0; i < weaponCount; ++i) {
-                        uint64_t slot = weapons + (uint64_t)i * sizeof(uint64_t);
-                        if (!IsAccessibleAddress(slot)) break;
-                        ClearModelMaterialCache(*(uint64_t*)slot);
-                    }
-                }
-
-                for (uint32_t index : STALE_SLOT_INDICES) {
-                    uint64_t slotAddress = character + SLOT_ARRAY_OFFSET +
-                                           (uint64_t)index * sizeof(uint64_t);
-                    if (IsAccessibleAddress(slotAddress))
-                        *(uint64_t*)slotAddress = 0;
-                }
-            }
-            node = *(uint64_t*)(node + NODE_NEXT_OFFSET);
-        }
-    }
-
-//HookLog("Rollback: cleared character slot arrays after restore\n");
-}
-
-static void Rollback_SyncActiveCharacterUi()
-{
-    uint64_t sCharacter = *(uint64_t*)_addr(PTR_SCHARACTER);
-    uint64_t sGameUi = *(uint64_t*)_addr(PTR_SGAMEUI);
-    if (!sCharacter || !sGameUi) return;
-
-    using SetTeamCharacterId = void(__fastcall*)(uint64_t, int, int);
-    auto setTeamCharacterId = (SetTeamCharacterId)_addr(FN_GAMEUI_SET_TEAM_CHARACTER_ID);
-    for (int teamIndex = 0; teamIndex < 2; ++teamIndex) {
-        uint64_t team = sCharacter + (teamIndex == 0 ? TEAM0_OFFSET : TEAM1_OFFSET);
-        uint64_t active = *(uint64_t*)(team + 0x48);
-        if (!active) continue;
-
-        // Match cChrTeam::commitPendingCharacterSwap: the UI table is keyed by
-        // player/team id and stores the active member id.
-        int playerId = *(int*)(active + 0x2DA0);
-        int memberId = *(int*)(active + 0x2DB0);
-        setTeamCharacterId(sGameUi, playerId, memberId);
-    }
-}
-
-// ===========================================================================
-// Post-Restore Cleanup — clear sGameEffect slot tables after snapshot restore
-//
-// The sGameEffect manager maintains two slot tables with MtObject* weak
-// references to active effect objects:
-//   generic slots — 10 entries × 8 bytes at +0x40
-//   character slots — 6 records × 0x18 bytes at +0x90; each record contains
-//                     a three-entry effect pointer array
-//
-// These entries point to heap-allocated effect nodes that were NOT saved in
-// the snapshot (sUnit effect category traversal is skipped due to pool
-// allocator corruption).  After restore any stale pointers in these tables
-// would be dereferenced by the game's effect update path, causing crashes
-// or visual corruption (broken animation positions).  Zeroing them lets the
-// game allocate fresh effect slots on the next tick.
-// ===========================================================================
-static void Rollback_ClearGameEffectSlots()
-{
-    uint64_t sGameEffect = *(uint64_t*)_addr(PTR_SGAMEEFFECT);
-    if (!sGameEffect) return;
-
-    static constexpr size_t GENERIC_SLOTS_OFFSET = 0x40;
-    static constexpr size_t GENERIC_SLOTS_SIZE   = 10 * sizeof(uint64_t);
-    static constexpr size_t CHARACTER_SLOTS_OFFSET = 0x90;
-    static constexpr size_t CHARACTER_SLOTS_SIZE   = 6 * 0x18;
-
-    memset((void*)(sGameEffect + GENERIC_SLOTS_OFFSET), 0, GENERIC_SLOTS_SIZE);
-    memset((void*)(sGameEffect + CHARACTER_SLOTS_OFFSET), 0, CHARACTER_SLOTS_SIZE);
-
-//    HookLog("Rollback: cleared sGameEffect slot tables after restore\n");
 }
 
 void Rollback_FreeSnapshots()

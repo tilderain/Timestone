@@ -202,6 +202,8 @@
     <ClInclude Include="utils\Trampoline.h" />
     <ClInclude Include="code\concrete_snapshot.h" />
     <ClInclude Include="code\rollback_internal.h" />
+    <ClInclude Include="code\rollback_cleanup.h" />
+    <ClInclude Include="code\rollback_diagnostics.h" />
     <ClInclude Include="code\rollback_tick.h" />
   </ItemGroup>
   <ItemGroup>
@@ -215,7 +217,10 @@
     <ClCompile Include="code\UMVC3Camera.cpp" />
     <ClCompile Include="code\umvc3menu.cpp" />
     <ClCompile Include="code\rollback.cpp" />
+    <ClCompile Include="code\rollback_cleanup.cpp" />
+    <ClCompile Include="code\rollback_diagnostics.cpp" />
     <ClCompile Include="code\rollback_runtime.cpp" />
+    <ClCompile Include="code\rollback_state.cpp" />
     <ClCompile Include="code\rollback_tick.cpp" />
     <ClCompile Include="code\concrete_snapshot.cpp" />
     <ClCompile Include="dllmain.cpp" />
