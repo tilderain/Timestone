@@ -68,6 +68,8 @@ void Rollback_ResetNetplayLiveLog();
 bool Rollback_GetNetplayLiveDirectory(char* path, size_t pathSize);
 
 // Reproduce the native online battle's gameplay serialization switches.
+// Patch aAction__init so custom netplay enters that native setup path itself.
+bool Rollback_PatchNativeNetplayDeterminism();
 void Rollback_ApplyNetplayDeterminism();
 
 // F7 re-sim test state machine:

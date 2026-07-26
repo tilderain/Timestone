@@ -62,6 +62,8 @@ static bool g_localReady = false;
 static bool g_remoteReady = false;
 static bool g_localRelease = false;
 static bool g_remoteRelease = false;
+static bool g_roundSeedReady = false;
+static uint32_t g_roundSeed = 0;
 static uint32_t g_battleGeneration = 1;
 static uint32_t g_advertisedBattleFlags = 0;
 static uint32_t g_battleAdvertiseTick = 0;
@@ -103,6 +105,18 @@ static constexpr uintptr_t GAME_CONFIG_PTR  = 0x140D50F88;
 static constexpr uintptr_t SHOW_LOADING_ADDR = 0x140253380;
 static constexpr uintptr_t SET_TEXT_FUNC     = 0x1402CE750;
 static constexpr uintptr_t REPLAY_ROUND_START_ADDR = 0x1401CFA90;
+
+static bool SynchronizeRoundRng(uint32_t seed)
+{
+    uint64_t sReplay = *(uint64_t*)_addr(0x140D4D9D8);
+    if (!sReplay) return false;
+
+    *(uint32_t*)(sReplay + 0x23424) = seed;
+    *(uint32_t*)(sReplay + 0x58) = seed;
+    using ReplayRoundStartFn = void(__fastcall*)(uint64_t);
+    ((ReplayRoundStartFn)_addr(REPLAY_ROUND_START_ADDR))(sReplay);
+    return true;
+}
 
 // ---------------------------------------------------------------------------
 // Offsets
@@ -354,6 +368,8 @@ static void __fastcall HookedMove(void* sMvc3Main)
             g_remoteReady = false;
             g_localRelease = false;
             g_remoteRelease = false;
+            g_roundSeedReady = false;
+            g_roundSeed = 0;
             ++g_battleGeneration;
             if (g_battleGeneration == 0)
                 g_battleGeneration = 1;
@@ -394,12 +410,18 @@ static void __fastcall HookedMove(void* sMvc3Main)
 
         uint32_t remoteGeneration = 0;
         uint32_t remoteFlags = 0;
-        while (Netplay_GetInboundBattleReady(remoteGeneration, remoteFlags))
+        uint32_t remoteRoundSeed = 0;
+        while (Netplay_GetInboundBattleReady(remoteGeneration, remoteFlags,
+                                              remoteRoundSeed))
         {
             if (remoteGeneration == g_battleGeneration)
             {
                 g_remoteReady |= (remoteFlags & BATTLE_SYNC_READY) != 0;
                 g_remoteRelease |= (remoteFlags & BATTLE_SYNC_RELEASE) != 0;
+                if (!Netplay_IsHost() && (remoteFlags & BATTLE_SYNC_SEED) != 0) {
+                    g_roundSeed = remoteRoundSeed;
+                    g_roundSeedReady = true;
+                }
             }
         }
 
@@ -415,6 +437,13 @@ static void __fastcall HookedMove(void* sMvc3Main)
             if (!g_localReady && step == 2 && pendingStep < 0 && introSubstate > 0)
             {
                 g_localReady = true;
+                if (Netplay_IsHost()) {
+                    uint64_t sReplay = *(uint64_t*)_addr(0x140D4D9D8);
+                    if (sReplay) {
+                        g_roundSeed = *(uint32_t*)(sReplay + 0x58);
+                        g_roundSeedReady = true;
+                    }
+                }
                 HookLog("Netplay: Local intro ready (generation=%u, substate=%d)\n",
                          g_battleGeneration, introSubstate);
             }
@@ -422,31 +451,36 @@ static void __fastcall HookedMove(void* sMvc3Main)
             // RELEASE acknowledges that this peer observed the remote READY.
             // A one-way READY is insufficient: its sender may otherwise stay
             // frozen while the receiver starts and predicts frames without it.
-            if (g_localReady && g_remoteReady)
+            if (g_localReady && g_remoteReady && g_roundSeedReady)
                 g_localRelease = true;
         }
 
         uint32_t localFlags = (g_localReady ? BATTLE_SYNC_READY : 0) |
-                              (g_localRelease ? BATTLE_SYNC_RELEASE : 0);
+                              (g_localRelease ? BATTLE_SYNC_RELEASE : 0) |
+                              (Netplay_IsHost() && g_roundSeedReady ? BATTLE_SYNC_SEED : 0);
         g_battleAdvertiseTick++;
         if (localFlags != 0 &&
             (localFlags != g_advertisedBattleFlags || g_battleAdvertiseTick >= 30))
         {
-            Netplay_SendBattleReady(g_battleGeneration, localFlags);
+            Netplay_SendBattleReady(g_battleGeneration, localFlags, g_roundSeed);
             g_advertisedBattleFlags = localFlags;
             g_battleAdvertiseTick = 0;
         }
 
         if (!g_battleSynchronized && g_localRelease && g_remoteRelease)
         {
+            if (!SynchronizeRoundRng(g_roundSeed)) {
+                HookLog("Netplay: cannot synchronize round RNG; sReplay unavailable\n");
+                return;
+            }
             Netplay_ClearInputQueues();
             Controller_ResetBuffers();
             Controller_ResetFrameEpoch();
             Rollback_FreeSnapshots();
             g_battleSynchronized = true;
             Netplay_SetTimeout(5000);
-            HookLog("Netplay: Intro barrier released after mutual acknowledgement (generation=%u)\n",
-                    g_battleGeneration);
+            HookLog("Netplay: Intro barrier released after RNG sync (generation=%u seed=0x%08X)\n",
+                     g_battleGeneration, g_roundSeed);
         }
 
         // Keep loading normally until this machine reaches the barrier. Once
@@ -694,8 +728,10 @@ void FrameStepper_Init()
 
     // Initialize rollback snapshot engine (hooks sMvc3Main__move)
     Rollback_InitHooks();
-    if (Netplay_IsActive())
+    if (Netplay_IsActive()) {
+        Rollback_PatchNativeNetplayDeterminism();
         Rollback_ApplyNetplayDeterminism();
+    }
 }
 
 // ---------------------------------------------------------------------------

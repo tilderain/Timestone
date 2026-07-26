@@ -156,7 +156,16 @@
     <ClInclude Include="code\rollback_diagnostics.h">
       <Filter>Header Files\code</Filter>
     </ClInclude>
+    <ClInclude Include="code\rollback_memory.h">
+      <Filter>Header Files\code</Filter>
+    </ClInclude>
+    <ClInclude Include="code\rollback_restore.h">
+      <Filter>Header Files\code</Filter>
+    </ClInclude>
     <ClInclude Include="code\rollback_tick.h">
+      <Filter>Header Files\code</Filter>
+    </ClInclude>
+    <ClInclude Include="code\snapshot_ndjson.h">
       <Filter>Header Files\code</Filter>
     </ClInclude>
   </ItemGroup>
@@ -165,6 +174,15 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="code\exception.cpp">
+      <Filter>Header Files\code</Filter>
+    </ClCompile>
+    <ClCompile Include="code\rollback_memory.cpp">
+      <Filter>Header Files\code</Filter>
+    </ClCompile>
+    <ClCompile Include="code\rollback_restore.cpp">
+      <Filter>Header Files\code</Filter>
+    </ClCompile>
+    <ClCompile Include="code\snapshot_ndjson.cpp">
       <Filter>Header Files\code</Filter>
     </ClCompile>
     <ClCompile Include="pch.cpp">

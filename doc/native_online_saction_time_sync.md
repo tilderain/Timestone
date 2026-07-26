@@ -373,11 +373,16 @@ unit, collision, and hit-solver work at battle initialization while leaving the 
 for unrelated engine work.
 
 Custom ENet play keeps a non-online `BattleType`, so native battle initialization does not enter this
-branch automatically. Current plugin code compensates in
-`Rollback_ApplyNetplayDeterminism`: it enables frame wait, clears all 64 `sUnit` move-line parallel
-bits, disables the collision move-matrix parallel flags, disables `sHitSolver` multithreading, and
-clears the battle-runtime parallel byte. The function runs after netplay/rollback initialization and
-again when a synchronized restart creates a new battle epoch.
+branch automatically. During custom-netplay initialization, the plugin changes the conditional jump
+at `0x14020385F` from `JNZ` to `JMP`. This forces only the determinism branch in `aAction__init`; it
+does not hook `g__isOnlineBattle`, whose other 91 call sites activate native netpad, session, UI, and
+reward behavior. New action epochs therefore run the game's own setup and set `aAction+0x6D` to one.
+
+`Rollback_ApplyNetplayDeterminism` also applies the same switches immediately for an action epoch
+that may already exist when custom netplay initializes: it enables frame wait, clears all 64 `sUnit`
+move-line parallel bits, disables the collision move-matrix parallel flags, disables `sHitSolver`
+multithreading, and clears the battle-runtime parallel byte. It runs again when a synchronized restart
+creates a new battle epoch.
 
 The plugin does not force the entire regular `sMain` executor to one thread.
 Only the native-equivalent gameplay switches above are serialized, leaving the

@@ -11,3 +11,7 @@
 // headless tick entry point.
 //
 // rollback_runtime.cpp owns independent native determinism policy.
+//
+// rollback_memory.cpp owns game-memory validation and DTI hierarchy queries.
+//
+// rollback_restore.cpp owns specialized pointer-preserving region restores.

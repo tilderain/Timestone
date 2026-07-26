@@ -736,22 +736,25 @@ bool Netplay_GetInboundDumpNDJSON(int32_t& outFrame)
     return true;
 }
 
-void Netplay_SendBattleReady(uint32_t generation, uint32_t flags)
+void Netplay_SendBattleReady(uint32_t generation, uint32_t flags, uint32_t roundSeed)
 {
     ScopedCS lock(g_battleReadyCS);
     g_outboundBattleReady.type = PACKET_BATTLE_READY;
     g_outboundBattleReady.generation = generation;
     g_outboundBattleReady.flags = flags;
+    g_outboundBattleReady.round_seed = roundSeed;
     g_outboundBattleReadyNew = true;
 }
 
-bool Netplay_GetInboundBattleReady(uint32_t& outGeneration, uint32_t& outFlags)
+bool Netplay_GetInboundBattleReady(uint32_t& outGeneration, uint32_t& outFlags,
+                                   uint32_t& outRoundSeed)
 {
     ScopedCS lock(g_battleReadyCS);
     if (!g_inboundBattleReadyNew)
         return false;
     outGeneration = g_inboundBattleReady.generation;
     outFlags = g_inboundBattleReady.flags;
+    outRoundSeed = g_inboundBattleReady.round_seed;
     g_inboundBattleReadyNew = false;
     return true;
 }

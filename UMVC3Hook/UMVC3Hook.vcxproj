@@ -204,7 +204,10 @@
     <ClInclude Include="code\rollback_internal.h" />
     <ClInclude Include="code\rollback_cleanup.h" />
     <ClInclude Include="code\rollback_diagnostics.h" />
+    <ClInclude Include="code\rollback_memory.h" />
+    <ClInclude Include="code\rollback_restore.h" />
     <ClInclude Include="code\rollback_tick.h" />
+    <ClInclude Include="code\snapshot_ndjson.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="code\eNotifManager.cpp" />
@@ -219,9 +222,12 @@
     <ClCompile Include="code\rollback.cpp" />
     <ClCompile Include="code\rollback_cleanup.cpp" />
     <ClCompile Include="code\rollback_diagnostics.cpp" />
+    <ClCompile Include="code\rollback_memory.cpp" />
+    <ClCompile Include="code\rollback_restore.cpp" />
     <ClCompile Include="code\rollback_runtime.cpp" />
     <ClCompile Include="code\rollback_state.cpp" />
     <ClCompile Include="code\rollback_tick.cpp" />
+    <ClCompile Include="code\snapshot_ndjson.cpp" />
     <ClCompile Include="code\concrete_snapshot.cpp" />
     <ClCompile Include="dllmain.cpp" />
     <ClCompile Include="imgui\imgui.cpp" />

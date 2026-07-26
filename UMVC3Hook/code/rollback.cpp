@@ -25,8 +25,11 @@
 #include "rollback_internal.h"
 #include "rollback_cleanup.h"
 #include "rollback_diagnostics.h"
+#include "rollback_memory.h"
 #include "rollback_profile.h"
+#include "rollback_restore.h"
 #include "rollback_tick.h"
+#include "snapshot_ndjson.h"
 #include "concrete_snapshot.h"
 #include "controller.h"
 #include "mk10utils.h"
@@ -90,8 +93,6 @@ static constexpr uintptr_t FN_SGAMEUI_MOVE = 0x1402BE610;
 static constexpr uintptr_t FN_SCHEDULER_REBUILD = 0x14050F010;
 static constexpr uintptr_t FN_APPLY_COLLISION_PUSH = 0x14004AD20;
 static constexpr uintptr_t FN_RESET_HITNODES = 0x140259E90;
-static constexpr uintptr_t DTI_UEFFECT = 0x140E18698;
-static constexpr uintptr_t DTI_UBASEMODEL = 0x140E17D48;
 
 // ===========================================================================
 // Offsets & Struct Constants
@@ -107,8 +108,6 @@ static constexpr uintptr_t TEAM0_OFFSET           = 0x40;
 static constexpr uintptr_t TEAM1_OFFSET           = 0x300;
 static constexpr size_t    TEAM_SIZE              = 0x2C0;
 static constexpr size_t    SCOLLISION_SIZE        = 0x239E0;
-static constexpr uint32_t SCOLLISION_BODY_START   = 0x38;
-static constexpr uint32_t SCOLLISION_ALLOC_START  = 0x23970;
 static constexpr size_t    SCOLLISION_BVH_COUNT   = 0x1F;
 static constexpr size_t    SCOLLISION_NODE_SIZE   = 0x40;
 
@@ -121,21 +120,6 @@ static constexpr uintptr_t TEAM_FIRST_NODE_OFFSET = 0x08;
 // Do NOT read +0x34 — that field is the CRC32 class-name hash, not the size.
 // IMPORTANT: The DTI pointer is NOT at object+0x08. Per MtObject__isKindOf, it's
 // accessed via vtable[4] = *(void**)(*(uint64_t*)object + 0x20).
-static uint64_t GetObjectDti(uint64_t objPtr) {
-    uint64_t vtable = *(uint64_t*)objPtr;
-    if (vtable && vtable >= 0x140000000) {
-        auto fn = (uint64_t(__fastcall*)(uint64_t))(*(uint64_t*)(vtable + 0x20));
-        if (fn && (uint64_t)fn >= 0x140000000) {
-            return fn(objPtr);
-        }
-    }
-    return 0;
-}
-static uint32_t DecodeDtiSize(uint64_t dtiPtr) {
-    if (!dtiPtr || dtiPtr < 0x140000000) return 0;
-    return ((*(uint32_t*)(dtiPtr + 0x30) & 0x7FFFFF) << 2);
-}
-
 static constexpr size_t MAX_CHAR_SIZE        = 0x40000;
 static constexpr size_t CCHR_NOMINAL_SIZE    = 0x6A60;
 static constexpr size_t CCHR_MAX_SIZE        = 30000;
@@ -172,7 +156,6 @@ static constexpr uint32_t SUNIT_CHARACTER_CATEGORY    = 8;
 static constexpr uint32_t SUNIT_MAX_CATEGORIES        = 64;
 static constexpr uint32_t SUNIT_MULTI_MASK_COUNT_OFFSET = 0x1840;
 static constexpr uint32_t SUNIT_MULTI_MASK_ARRAYS_OFFSET = 0xC50;
-static constexpr uintptr_t DTI_CUNIT                  = 0x140E173D0;
 static constexpr uint32_t CUNIT_LIVE_STATE_OFFSETS[] = {0x10, 0x18, 0x20, 0x38};
 static constexpr size_t SMAIN_SIZE = 0x40080;
 static constexpr int SSHOT_CATEGORY = 10;
@@ -302,119 +285,6 @@ static constexpr SnapshotRange CCHR_TEAM_RESTORE_RANGES[] = {
     {0x50, 0xC0},  // timing, health, meter, tag/X-Factor and cached active flags
     {0x110, 0x1B0}, // cached character state and play data
 };
-
-static bool IsLikelyPointer(uint64_t value)
-{
-    return value >= 0x10000 && value < 0x0000800000000000ull && (value & 7) == 0;
-}
-
-static bool IsAccessiblePointer(uint64_t value)
-{
-    if (!IsLikelyPointer(value)) return false;
-    MEMORY_BASIC_INFORMATION mbi = {};
-    if (VirtualQuery((void*)value, &mbi, sizeof(mbi)) == 0) return false;
-    if (mbi.State != MEM_COMMIT) return false;
-    return (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) == 0;
-}
-
-static bool IsAccessibleAddress(uint64_t value)
-{
-    if (value < 0x10000 || value >= 0x0000800000000000ull) return false;
-    MEMORY_BASIC_INFORMATION mbi = {};
-    if (VirtualQuery((void*)value, &mbi, sizeof(mbi)) == 0) return false;
-    if (mbi.State != MEM_COMMIT) return false;
-    return (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) == 0;
-}
-
-static bool IsExecutableAddress(uint64_t value)
-{
-    if (value < 0x10000 || value >= 0x0000800000000000ull) return false;
-    MEMORY_BASIC_INFORMATION mbi = {};
-    if (VirtualQuery((void*)value, &mbi, sizeof(mbi)) == 0) return false;
-    if (mbi.State != MEM_COMMIT || (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) != 0)
-        return false;
-    const DWORD executable = PAGE_EXECUTE | PAGE_EXECUTE_READ |
-        PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
-    return (mbi.Protect & executable) != 0;
-}
-
-static bool IsAccessibleRange(uint64_t value, size_t size)
-{
-    if (value < 0x10000 || value >= 0x0000800000000000ull || size == 0 ||
-        size - 1 > UINT64_MAX - value) {
-        return false;
-    }
-
-    MEMORY_BASIC_INFORMATION mbi = {};
-    if (VirtualQuery((void*)value, &mbi, sizeof(mbi)) == 0 ||
-        mbi.State != MEM_COMMIT ||
-        (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) != 0) {
-        return false;
-    }
-
-    const uint64_t regionEnd = (uint64_t)mbi.BaseAddress + mbi.RegionSize;
-    return value + size <= regionEnd;
-}
-
-static bool HasCallableDtiVirtual(const void* object)
-{
-    uint64_t address = (uint64_t)object;
-    if (!IsAccessibleRange(address, sizeof(uint64_t))) return false;
-
-    uint64_t vtable = *(const uint64_t*)object;
-    if (!IsAccessibleRange(vtable, 0x28)) return false;
-
-    uint64_t getDti = *(const uint64_t*)(vtable + 0x20);
-    return getDti && IsExecutableAddress(getDti);
-}
-
-static bool IsUnitObject(const void* object)
-{
-    if (!HasCallableDtiVirtual(object)) return false;
-
-    uint64_t dti = GetObjectDti((uint64_t)object);
-    const uint64_t unitDti = _addr(DTI_CUNIT);
-    for (int depth = 0; dti && depth < 128; ++depth) {
-        if (dti == unitDti) return true;
-        if (!IsAccessibleAddress(dti + 0x20)) return false;
-        uint64_t parent = *(const uint64_t*)(dti + 0x20);
-        if (parent == dti) return false;
-        dti = parent;
-    }
-    return false;
-}
-
-static bool IsEffectObject(const void* object)
-{
-    if (!HasCallableDtiVirtual(object)) return false;
-
-    uint64_t dti = GetObjectDti((uint64_t)object);
-    const uint64_t effectDti = _addr(DTI_UEFFECT);
-    for (int depth = 0; dti && depth < 128; ++depth) {
-        if (dti == effectDti) return true;
-        if (!IsAccessibleAddress(dti + 0x20)) return false;
-        uint64_t parent = *(const uint64_t*)(dti + 0x20);
-        if (parent == dti) return false;
-        dti = parent;
-    }
-    return false;
-}
-
-static bool IsBaseModelObject(const void* object)
-{
-    if (!HasCallableDtiVirtual(object)) return false;
-
-    uint64_t dti = GetObjectDti((uint64_t)object);
-    const uint64_t baseModelDti = _addr(DTI_UBASEMODEL);
-    for (int depth = 0; dti && depth < 128; ++depth) {
-        if (dti == baseModelDti) return true;
-        if (!IsAccessibleAddress(dti + 0x20)) return false;
-        uint64_t parent = *(const uint64_t*)(dti + 0x20);
-        if (parent == dti) return false;
-        dti = parent;
-    }
-    return false;
-}
 
 static bool IsActiveUnit(void* unit);
 
@@ -589,59 +459,6 @@ static void RemoveUnitFromAllMultiMaskArrays(void* sUnit, void* unit)
     *(uint64_t*)((uint8_t*)unit + 0x30) = 0;
 }
 
-static void RestoreSCollisionBody(void* destination, const uint8_t* source, size_t size)
-{
-    if (size < SCOLLISION_SIZE) return;
-
-//    HookLog("Rollback: restoring inline sCollision body @ 0x%llX size=%zu\n",
-            //(uint64_t)destination, size);
-
-    struct LivePointerField { uint32_t offset; uint64_t value; };
-    std::vector<LivePointerField> livePointers;
-    for (uint32_t offset = SCOLLISION_BODY_START;
-         offset + sizeof(uint64_t) <= SCOLLISION_ALLOC_START;
-         offset += sizeof(uint64_t)) {
-        uint64_t liveValue = *(uint64_t*)((uint8_t*)destination + offset);
-        uint64_t savedValue = *(const uint64_t*)(source + offset);
-        if (IsAccessiblePointer(liveValue) || IsAccessiblePointer(savedValue)) {
-            livePointers.push_back({offset, liveValue});
-        }
-    }
-
-    // Rewind the complete inline collision state, but not cSystem's base or
-    // mPrivateAllocator. Heap ownership behind the preserved pointers remains
-    // on the live timeline until those allocations are captured explicitly.
-    std::memcpy((uint8_t*)destination + SCOLLISION_BODY_START,
-                source + SCOLLISION_BODY_START,
-                SCOLLISION_ALLOC_START - SCOLLISION_BODY_START);
-    for (const LivePointerField& field : livePointers) {
-        *(uint64_t*)((uint8_t*)destination + field.offset) = field.value;
-    }
-}
-
-static void RestoreExternalAnimBlock(void* dst, const uint8_t* src, size_t size)
-{
-    if (size != CCHR_EXTERNAL_ANIM_SIZE) return;
-
-    // cChrEffectSlot is an sCollision::Node, not a plain animation buffer.
-    // +0x00..+0x7f owns its live vtable, geometry MtArray, child records and
-    // bounding topology. Rewinding that graph inserts unrelated live objects
-    // into collision jobs and eventually calls draw methods without an
-    // sRender context. The owner and setup callback at +0x80/+0x88 are not
-    // topology: they are the one-shot setup binding and must match the saved
-    // attack. A completed single-hit attack can clear this binding; starting
-    // another attack repopulates it, which previously made restore appear to
-    // work only after another attack was started.
-    // Restore active flag and owner/callback, but CLEAR the setup latch so
-    // setupOnce fires again after restore. The latch is the one-shot gate:
-    // setupOnce only invokes the callback when +0x74 is zero. Restoring a
-    // post-setup latch=1 prevents multi-hit attacks from rebuilding geometry.
-    std::memcpy((uint8_t*)dst + 0x08, src + 0x08, 0x01);
-    *((uint8_t*)dst + 0x74) = 0; // clear setup latch to allow callback re-execution
-    std::memcpy((uint8_t*)dst + 0x80, src + 0x80, 0x10); // setup owner and callback
-    std::memcpy((uint8_t*)dst + 0x90, src + 0x90, 0x28); // group, attr, move, user u32
-    std::memcpy((uint8_t*)dst + 0xC8, src + 0xC8, 0x18); // derived slot scalar tail
-}
 static constexpr int    MAX_REGIONS          = 2048;
 static constexpr int    DYNAMIC_SAFETY       = 128; // max projectile/effect nodes
 static constexpr int    SSHOT_SENTINEL_COUNT = 10;  // 10 sentinel slots starting at 0x140d47f90
@@ -713,791 +530,7 @@ static void(__fastcall* oApplyCollisionPushCorrection)(
     uint64_t collisionResult,
     uint32_t collisionSlot) = nullptr;
 
-// ===========================================================================
-// Resim diagnostic dumper — binary + text state capture
-// ===========================================================================
-static int    g_diagSessionId  = 0;
-static char   g_diagDir[260]   = {};
-static int    g_diagWriteCount = 0;
-static FILE*  g_diagNdjsonFile    = nullptr;
-static DWORD  g_diagNdjsonFlush   = 0;
-
-// Netplay per-frame live NDJSON logging
-static bool   g_netplayLiveInit   = false;
-static char   g_netplayLivePath[260] = {};
-static int    g_netplayLiveReset   = 0;
-
-static std::string g_pendingNPLiveJSON[512];
-static int32_t     g_pendingNPLiveFrame[512];
-static constexpr int NETPLAY_LIVE_HISTORY = 512;
-static std::string g_netplayLiveHistory[NETPLAY_LIVE_HISTORY];
-static int32_t     g_netplayLiveHistoryFrame[NETPLAY_LIVE_HISTORY];
-static bool        g_netplayLiveDesyncFlushed = false;
-
-// Ground-truth verification: locally queued re-simulation states, paired with
-// remote ground truth data upon receipt of a GroundTruthPacket.
-struct PendingResimDump {
-    int32_t frame;
-    ResimCharState p1Post;
-    ResimCharState p2Post;
-};
-static constexpr int PENDING_RESIM_DUMP_RING = 256;
-static PendingResimDump g_pendingResimDumps[PENDING_RESIM_DUMP_RING] = {};
-static bool             g_pendingResimDumpValid[PENDING_RESIM_DUMP_RING] = {};
-
-// ===========================================================================
-// Diag Snapshot Accessors — the ONLY place that should read g_resimFrameSnap
-// / g_liveFrameSnap. Centralizes the frame-stamp check that was previously
-// missing at three separate call sites.
-// ===========================================================================
-static const FrameDiagSnapshot* Rollback_GetResimSnapshot(int32_t frame) {
-    uint32_t idx = (uint32_t)(frame >= 0 ? frame : 0) % ROLLBACK_WINDOW_DIAG;
-    const FrameDiagSnapshot& snap = g_resimFrameSnap[idx];
-    if (snap.frame != frame) {
-        HookLog("Rollback: stale resim diag slot for frame %d (slot holds frame %d) — refusing read\n",
-                frame, snap.frame);
-        return nullptr;
-    }
-    return &snap;
-}
-
-static const FrameDiagSnapshot* Rollback_GetLiveSnapshot(int32_t frame) {
-    uint32_t idx = (uint32_t)(frame >= 0 ? frame : 0) % ROLLBACK_WINDOW_DIAG;
-    const FrameDiagSnapshot& snap = g_liveFrameSnap[idx];
-    if (snap.frame != frame) {
-        HookLog("Rollback: stale live diag slot for frame %d (slot holds frame %d) — refusing read\n",
-                frame, snap.frame);
-        return nullptr;
-    }
-    return &snap;
-}
-
-// Pulls P1/P2 point-character post-state out of a snapshot. Returns false
-// if either character isn't present (so callers don't have to repeat the
-// teamIdx/charSlot scan loop).
-static bool Rollback_FindP1P2Post(const FrameDiagSnapshot& snap,
-                                   const CharDiagSnapshot** p1Post,
-                                   const CharDiagSnapshot** p2Post)
-{
-    *p1Post = nullptr;
-    *p2Post = nullptr;
-    for (int ci = 0; ci < snap.charCount && ci < 6; ci++) {
-        uint32_t teamIdx = snap.chars[ci].post.teamIdx;
-        uint32_t slot    = snap.chars[ci].post.charSlot;
-        if (teamIdx == 0 && slot == 0) *p1Post = &snap.chars[ci].post;
-        if (teamIdx == 1 && slot == 0) *p2Post = &snap.chars[ci].post;
-    }
-    return *p1Post && *p2Post;
-}
-
-static void Rollback_FillResimCharState(ResimCharState& dst, const CharDiagSnapshot& s)
-{
-    dst.actionId = s.actionId;
-    dst.posX     = s.posX;
-    dst.posY     = s.posY;
-    dst.posZ     = s.posZ;
-    dst.flags    = s.flags14F0;
-    dst.mHeld    = *(uint32_t*)(s.cchr + 0x14);
-    dst.frameCnt = *(uint64_t*)(s.cchr + 0x18);
-    for (int ri = 0; ri < 4; ri++)
-        dst.rng[ri] = s.xorShift[ri];
-}
-
-static void Rollback_NetplayLiveInit() {
-    if (!g_ndjsonLoggingEnabled) return;
-    g_netplayLiveInit = false;
-    g_netplayLivePath[0] = '\0';
-
-    char dir[260];
-    SYSTEMTIME st;
-    GetLocalTime(&st);
-    char rel[80];
-    
-    // Append the local netplay role as a suffix to the directory name
-    const char* sideSuffix = Netplay_IsActive() ? (Netplay_IsHost() ? "_host" : "_client") : "_offline";
-    if (g_netplayLiveReset > 0) {
-        snprintf(rel, sizeof(rel), "nplive_%04d%02d%02d_%02d%02d%02d%s_r%d",
-                 st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond,
-                 sideSuffix, g_netplayLiveReset);
-    } else {
-        snprintf(rel, sizeof(rel), "nplive_%04d%02d%02d_%02d%02d%02d%s",
-                 st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond,
-                 sideSuffix);
-    }
-             
-    Rollback_ResolveDllPath(dir, sizeof(dir), rel);
-    CreateDirectoryA(dir, NULL);
-
-    snprintf(g_netplayLivePath, sizeof(g_netplayLivePath), "%s/frames.ndjson", dir);
-    FILE* f = fopen(g_netplayLivePath, "w");
-    if (f) fclose(f);
-
-    char logPath[260];
-    const char* logName = Netplay_IsHost() ? "UMVC3Hook_host.log" : "UMVC3Hook_client.log";
-    snprintf(logPath, sizeof(logPath), "%s/%s", dir, logName);
-    HookLogSetFile(logPath);
-
-    for (int i = 0; i < 256; i++) {
-        g_pendingNPLiveFrame[i] = -1;
-        g_pendingNPLiveJSON[i].clear();
-    }
-    for (int i = 0; i < NETPLAY_LIVE_HISTORY; i++) {
-        g_netplayLiveHistoryFrame[i] = -1;
-        g_netplayLiveHistory[i].clear();
-    }
-    g_netplayLiveDesyncFlushed = false;
-
-    HookLog("NetplayLive: NDJSON log -> %s\n", g_netplayLivePath);
-    g_netplayLiveInit = true;
-}
-
-bool Rollback_GetNetplayLiveDirectory(char* path, size_t pathSize)
-{
-    if (!path || pathSize == 0 || !g_netplayLiveInit || !g_netplayLivePath[0])
-        return false;
-
-    const char* slash = strrchr(g_netplayLivePath, '/');
-    const char* backslash = strrchr(g_netplayLivePath, '\\');
-    if (!slash || (backslash && backslash > slash))
-        slash = backslash;
-    if (!slash)
-        return false;
-
-    const size_t directoryLength = static_cast<size_t>(slash - g_netplayLivePath);
-    if (directoryLength + 1 > pathSize)
-        return false;
-
-    memcpy(path, g_netplayLivePath, directoryLength);
-    path[directoryLength] = '\0';
-    return true;
-}
-
-void Rollback_ResetNetplayLiveLog()
-{
-    if (!g_ndjsonLoggingEnabled) return;
-    ++g_netplayLiveReset;
-    Rollback_NetplayLiveInit();
-}
-
-static std::string Rollback_GenerateHitboxJSON(uint64_t chr) {
-    static constexpr uint32_t capsuleBase = 0x4210;
-    static constexpr uint32_t capsuleStride = 0xB0;
-    static constexpr uint32_t sphereBases[] = {0x4E20, 0x5530, 0x5C40};
-    static constexpr uint32_t sphereStride = 0x70;
-
-    std::string out = "[";
-    bool first = true;
-    char entry[384];
-
-    for (uint32_t index = 0; index < 16; ++index) {
-        uint64_t primitive = chr + capsuleBase + index * capsuleStride;
-        if (*(uint8_t*)(primitive + 0x08) == 0) continue;
-
-        float x0 = *(float*)(primitive + 0x20);
-        float y0 = *(float*)(primitive + 0x24);
-        float z0 = *(float*)(primitive + 0x28);
-        float x1 = *(float*)(primitive + 0x30);
-        float y1 = *(float*)(primitive + 0x34);
-        float z1 = *(float*)(primitive + 0x38);
-        float radius = *(float*)(primitive + 0x40);
-        float dx = x1 - x0;
-        float dy = y1 - y0;
-        float dz = z1 - z0;
-        float segmentLength = std::sqrt(dx * dx + dy * dy + dz * dz);
-        if (!std::isfinite(x0) || !std::isfinite(y0) || !std::isfinite(z0) ||
-            !std::isfinite(x1) || !std::isfinite(y1) || !std::isfinite(z1) ||
-            !std::isfinite(radius) || !std::isfinite(segmentLength)) {
-            continue;
-        }
-
-        snprintf(entry, sizeof(entry),
-                 "%s{\"bank\":\"capsule\",\"index\":%u,\"shape\":\"capsule\",\"damaging\":true,"
-                 "\"pos\":[%.9g,%.9g,%.9g],"
-                 "\"size\":[%.9g,%.9g,%.9g],\"radius\":%.9g,\"length\":%.9g}",
-                 first ? "" : ",", index,
-                 (x0 + x1) * 0.5f, (y0 + y1) * 0.5f, (z0 + z1) * 0.5f,
-                 std::fabs(dx) + radius * 2.0f,
-                 std::fabs(dy) + radius * 2.0f,
-                 std::fabs(dz) + radius * 2.0f,
-                 radius, segmentLength + radius * 2.0f);
-        out += entry;
-        first = false;
-    }
-
-    for (uint32_t bank = 0; bank < 3; ++bank) {
-        for (uint32_t index = 0; index < 16; ++index) {
-            uint64_t primitive = chr + sphereBases[bank] + index * sphereStride;
-            if (*(uint8_t*)(primitive + 0x08) == 0) continue;
-
-            float x = *(float*)(primitive + 0x20);
-            float y = *(float*)(primitive + 0x24);
-            float z = *(float*)(primitive + 0x28);
-            float radius = *(float*)(primitive + 0x2C);
-            int32_t parent = *(int32_t*)(primitive + 0x40);
-            float localX = *(float*)(primitive + 0x50);
-            float localY = *(float*)(primitive + 0x54);
-            float localZ = *(float*)(primitive + 0x58);
-            if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z) ||
-                !std::isfinite(radius) || !std::isfinite(localX) ||
-                !std::isfinite(localY) || !std::isfinite(localZ)) {
-                continue;
-            }
-
-            snprintf(entry, sizeof(entry),
-                     "%s{\"bank\":\"sphere%u\",\"index\":%u,\"shape\":\"sphere\",\"damaging\":false,"
-                     "\"pos\":[%.9g,%.9g,%.9g],"
-                     "\"size\":[%.9g,%.9g,%.9g],\"radius\":%.9g,"
-                     "\"parent\":%d,\"local\":[%.9g,%.9g,%.9g]}",
-                     first ? "" : ",", bank, index, x, y, z,
-                     radius * 2.0f, radius * 2.0f, radius * 2.0f, radius,
-                     parent, localX, localY, localZ);
-            out += entry;
-            first = false;
-        }
-    }
-
-    out += "]";
-    return out;
-}
-
-static std::string Rollback_GenerateShotJSON();
-
-std::string Rollback_GenerateNetplayLiveJSON(int32_t frame, bool isResim,
-                                             const char* phase = nullptr,
-                                             int32_t rollbackStart = -1,
-                                             int32_t rollbackEnd = -1) {
-    if (!g_ndjsonLoggingEnabled) return "";
-    if (frame == 0) return "";
-    char tsBuf[32] = {};
-    SYSTEMTIME st;
-    GetLocalTime(&st);
-    snprintf(tsBuf, sizeof(tsBuf), "%04d-%02d-%02dT%02d:%02d:%02d",
-             st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
-
-    std::string sideStr = Netplay_IsHost() ? "host" : "client";
-    if (phase) {
-        sideStr += "_";
-        sideStr += phase;
-    } else if (isResim) {
-        sideStr += "_resim";
-    }
-    const char* side = sideStr.c_str();
-
-    // sMain+0x80 = mDeltaTime: wall-clock QPC-derived frame delta consumed by
-    // the dash double-tap accumulators in cChrInput_inputMaskPostProcess
-    // (acc += this value each frame).  Logged at full precision to detect
-    // cross-machine timing jitter baked into dash detection state.
-    float mainDt = 0.0f;
-    {
-        uint64_t sMain = *(uint64_t*)_addr(PTR_SMAIN);
-        if (sMain) mainDt = *(float*)(sMain + 0x80);
-    }
-
-    char header[512];
-    if (rollbackStart >= 0 && rollbackEnd >= rollbackStart) {
-        snprintf(header, sizeof(header),
-                 "{\"v\":1,\"ts\":\"%s\",\"frame\":%d,\"side\":\"%s\","
-                 "\"rollback_start\":%d,\"rollback_end\":%d,\"dt\":%.9g,\"chars\":[",
-                 tsBuf, frame, side, rollbackStart, rollbackEnd, mainDt);
-    } else {
-        snprintf(header, sizeof(header),
-                 "{\"v\":1,\"ts\":\"%s\",\"frame\":%d,\"side\":\"%s\",\"dt\":%.9g,"
-                 "\"chars\":[",
-                 tsBuf, frame, side, mainDt);
-    }
-
-    std::string out = header;
-
-    uint64_t sCharacter = *(uint64_t*)_addr(PTR_SCHARACTER);
-    bool firstChar = true;
-    if (sCharacter) {
-        for (int ti = 0; ti < 2; ++ti) {
-            uint64_t team = sCharacter + (ti == 0 ? TEAM0_OFFSET : TEAM1_OFFSET);
-            uint64_t node = team + TEAM_FIRST_NODE_OFFSET;
-            int ci = 0;
-            while (node) {
-                uint64_t chr = *(uint64_t*)(node + NODE_CHR_OFFSET);
-                if (chr) {
-                    CharDiagSnapshot snap;
-                    CaptureCharSnapshot(chr, ti, ci, snap);
-
-                    if (!firstChar) out += ",";
-                    firstChar = false;
-
-                    char charBuf[4096];
-                    int32_t memberId = *(int32_t*)(chr + 0x2DB0);
-                    int32_t plrId = *(int32_t*)(chr + 0x2DA0);
-                    int32_t assistType = *(int32_t*)(chr + 0x2DBC);
-                    std::string hitboxes = Rollback_GenerateHitboxJSON(chr);
-
-                    // Dash/double-tap detection state (cChrInput_inputMaskPostProcess
-                    // @0x14002E5A0): per-bit elapsed-frame timers and tap counters.
-                    //   +0x260: float[32] frame timer since last tap (+= sMain+0x80/frame)
-                    //   +0x2e0: int[32]   consecutive tap count (>=3 sets mask +0x238)
-                    //   +0x130: float[32] frame timer (2.0/3.0 threshold windows)
-                    // Mask words: +0x12c, +0x230, +0x238, +0x250.
-                    // Only nonzero entries are emitted as "i:value" pairs.
-                    std::string dashState;
-                    {
-                        char tmp[128];
-                        dashState = "\"acc260\":{";
-                        bool first = true;
-                        for (int bi = 0; bi < 32; bi++) {
-                            float v = *(float*)(snap.cchr + 0x260 + bi * 4);
-                            if (v != 0.0f) {
-                                if (!first) dashState += ",";
-                                snprintf(tmp, sizeof(tmp), "\"%d\":%.9g", bi, v);
-                                dashState += tmp; first = false;
-                            }
-                        }
-                        dashState += "},\"tap2e0\":{";
-                        first = true;
-                        for (int bi = 0; bi < 32; bi++) {
-                            int32_t v = *(int32_t*)(snap.cchr + 0x2e0 + bi * 4);
-                            if (v != 0) {
-                                if (!first) dashState += ",";
-                                snprintf(tmp, sizeof(tmp), "\"%d\":%d", bi, v);
-                                dashState += tmp; first = false;
-                            }
-                        }
-                        dashState += "},\"acc130\":{";
-                        first = true;
-                        for (int bi = 0; bi < 32; bi++) {
-                            float v = *(float*)(snap.cchr + 0x130 + bi * 4);
-                            if (v != 0.0f) {
-                                if (!first) dashState += ",";
-                                snprintf(tmp, sizeof(tmp), "\"%d\":%.9g", bi, v);
-                                dashState += tmp; first = false;
-                            }
-                        }
-                        snprintf(tmp, sizeof(tmp),
-                                 "},\"m12c\":\"0x%08X\",\"m230\":\"0x%08X\","
-                                 "\"m238\":\"0x%08X\",\"m250\":\"0x%08X\"",
-                                 *(uint32_t*)(snap.cchr + 0x12c),
-                                 *(uint32_t*)(snap.cchr + 0x230),
-                                 *(uint32_t*)(snap.cchr + 0x238),
-                                 *(uint32_t*)(snap.cchr + 0x250));
-                        dashState += tmp;
-                    }
-
-                    if (g_ndjsonIncludeDirHistory) {
-                        uint64_t dirFrameCnt = *(uint64_t*)(snap.cchr + 0x18);
-                        uint32_t dirSlot = dirFrameCnt & 0x3F;
-                        uint32_t dir0   = *(uint32_t*)(snap.cchr + 0x1B0);
-                        uint32_t dir4   = *(uint32_t*)(snap.cchr + 0x1B4);
-                        uint32_t h590   = *(uint32_t*)(snap.cchr + 0x590);
-                        uint32_t h594   = *(uint32_t*)(snap.cchr + 0x594);
-
-                        snprintf(charBuf, sizeof(charBuf),
-                                "{\"team\":%d,\"slot\":%d,\"mid\":%d,"
-                                "\"plr\":%d,\"ast\":%d,"
-                                "\"pos\":[%.9g,%.9g,%.9g],"
-                                 "\"act\":\"0x%08X\",\"mChrF\":\"0x%08X\","
-                                 "\"mAnmF\":\"0x%08X\",\"mPrgF\":\"0x%08X\","
-                                "\"mHeld\":\"0x%08X\",\"fcnt\":%llu,"
-                                "\"mOld\":\"0x%08X\","
-                                "\"mPressed\":\"0x%08X\",\"mReleased\":\"0x%08X\","
-                                "\"mMask\":\"0x%08X\",\"mProcessed\":\"0x%08X\","
-                                 "\"dirSlot\":%u,"
-                                 "\"dir0\":\"0x%08X\",\"dir4\":\"0x%08X\","
-                                 "\"h590\":\"0x%08X\",\"h594\":\"0x%08X\","
-                                 "\"rng\":[\"0x%08X\",\"0x%08X\",\"0x%08X\",\"0x%08X\"]",
-                                ti, ci, memberId,
-                                plrId, assistType,
-                                snap.posX, snap.posY, snap.posZ,
-                                snap.actionId, snap.flags14F0,
-                                snap.flags14F4, snap.flags14F8,
-                                *(uint32_t*)(snap.cchr + 0x14),
-                                dirFrameCnt,
-                                *(uint32_t*)(snap.cchr + 0x10),
-                                *(uint32_t*)(snap.cchr + 0x20),
-                                *(uint32_t*)(snap.cchr + 0x24),
-                                *(uint32_t*)(snap.cchr + 0x568),
-                                *(uint32_t*)(snap.cchr + 0x56C),
-                                 dirSlot,
-                                 dir0, dir4,
-                                 h590, h594,
-                                 snap.xorShift[0], snap.xorShift[1],
-                                snap.xorShift[2], snap.xorShift[3]);
-                        out += charBuf;
-                        out += ",";
-                        out += dashState;
-                        out += ",\"hitboxes\":";
-                        out += hitboxes;
-                        out += "}";
-                    } else {
-                        snprintf(charBuf, sizeof(charBuf),
-                                "{\"team\":%d,\"slot\":%d,\"mid\":%d,"
-                                "\"plr\":%d,\"ast\":%d,"
-                                "\"pos\":[%.9g,%.9g,%.9g],"
-                                 "\"act\":\"0x%08X\",\"mChrF\":\"0x%08X\","
-                                 "\"mAnmF\":\"0x%08X\",\"mPrgF\":\"0x%08X\","
-                                "\"mHeld\":\"0x%08X\",\"fcnt\":%llu,"
-                                "\"mOld\":\"0x%08X\","
-                                "\"mPressed\":\"0x%08X\",\"mReleased\":\"0x%08X\","
-                                "\"mMask\":\"0x%08X\",\"mProcessed\":\"0x%08X\","
-                                "\"rng\":[\"0x%08X\",\"0x%08X\",\"0x%08X\",\"0x%08X\"]",
-                                ti, ci, memberId,
-                                plrId, assistType,
-                                snap.posX, snap.posY, snap.posZ,
-                                snap.actionId, snap.flags14F0,
-                                snap.flags14F4, snap.flags14F8,
-                                *(uint32_t*)(snap.cchr + 0x14),
-                                *(uint64_t*)(snap.cchr + 0x18),
-                                *(uint32_t*)(snap.cchr + 0x10),
-                                *(uint32_t*)(snap.cchr + 0x20),
-                                *(uint32_t*)(snap.cchr + 0x24),
-                                *(uint32_t*)(snap.cchr + 0x568),
-                                *(uint32_t*)(snap.cchr + 0x56C),
-                                snap.xorShift[0], snap.xorShift[1],
-                                snap.xorShift[2], snap.xorShift[3]);
-                        out += charBuf;
-                        out += ",";
-                        out += dashState;
-                        out += ",\"hitboxes\":";
-                        out += hitboxes;
-                        out += "}";
-                    }
-                    ci++;
-                }
-                node = *(uint64_t*)(node + NODE_NEXT_OFFSET);
-            }
-        }
-    }
-
-    out += "],\"shots\":";
-    out += Rollback_GenerateShotJSON();
-    out += "}\n";
-    return out;
-}
-
-static void Rollback_WriteNetplayLiveJSON(const std::string& json) {
-    if (!g_ndjsonLoggingEnabled) return;
-    if (!g_netplayLiveInit) Rollback_NetplayLiveInit();
-    if (!g_netplayLivePath[0] || g_netplayLiveDesyncFlushed || json.empty()) return;
-
-    int32_t frame = -1;
-    const char* frameKey = std::strstr(json.c_str(), "\"frame\":");
-    if (frameKey) frame = (int32_t)std::strtol(frameKey + 8, nullptr, 10);
-    if (frame < 0) return;
-
-    int idx = (uint32_t)frame % NETPLAY_LIVE_HISTORY;
-    if (g_netplayLiveHistoryFrame[idx] != frame) {
-        g_netplayLiveHistoryFrame[idx] = frame;
-        g_netplayLiveHistory[idx].clear();
-    }
-    g_netplayLiveHistory[idx] += json;
-}
-
-void Rollback_DumpNetplayHistory(int32_t frame)
-{
-    if (!g_ndjsonLoggingEnabled) return;
-    if (!g_netplayLiveInit) Rollback_NetplayLiveInit();
-    if (!g_netplayLivePath[0]) return;
-
-    for (int i = 0; i < 256; i++) {
-        if (g_pendingNPLiveFrame[i] >= 0) {
-            Rollback_WriteNetplayLiveJSON(g_pendingNPLiveJSON[i]);
-            g_pendingNPLiveFrame[i] = -1;
-        }
-    }
-
-    int32_t newestFrame = -1;
-    for (int i = 0; i < NETPLAY_LIVE_HISTORY; i++) {
-        const int32_t availableFrame = g_netplayLiveHistoryFrame[i];
-        if (availableFrame > newestFrame && (frame < 0 || availableFrame <= frame))
-            newestFrame = availableFrame;
-    }
-    if (newestFrame < 0) return;
-
-    FILE* f = fopen(g_netplayLivePath, "w");
-    if (!f) return;
-
-    const int32_t firstFrame = newestFrame - NETPLAY_LIVE_HISTORY + 1;
-    for (int32_t current = firstFrame; current <= newestFrame; current++) {
-        int idx = (uint32_t)current % NETPLAY_LIVE_HISTORY;
-        if (g_netplayLiveHistoryFrame[idx] == current)
-            fputs(g_netplayLiveHistory[idx].c_str(), f);
-    }
-    fclose(f);
-    HookLog("NetplayLive: manual dump of last %d frames through frame %d\n",
-            NETPLAY_LIVE_HISTORY, newestFrame);
-}
-
-extern "C" void Rollback_NotifyDesyncTriggered(int32_t frame)
-{
-    if (!g_ndjsonLoggingEnabled) return;
-    if (g_netplayLiveDesyncFlushed) return;
-    if (!g_netplayLiveInit) Rollback_NetplayLiveInit();
-    if (!g_netplayLivePath[0]) return;
-
-    // Move still-predicted records into the history before flushing it.
-    for (int i = 0; i < 256; i++) {
-        if (g_pendingNPLiveFrame[i] >= 0) {
-            Rollback_WriteNetplayLiveJSON(g_pendingNPLiveJSON[i]);
-            g_pendingNPLiveFrame[i] = -1;
-        }
-    }
-
-    FILE* f = fopen(g_netplayLivePath, "a");
-    if (!f) return;
-
-    int32_t firstFrame = frame - NETPLAY_LIVE_HISTORY + 1;
-    for (int32_t current = firstFrame; current <= frame; current++) {
-        int idx = (uint32_t)current % NETPLAY_LIVE_HISTORY;
-        if (g_netplayLiveHistoryFrame[idx] == current)
-            fputs(g_netplayLiveHistory[idx].c_str(), f);
-    }
-    fclose(f);
-    g_netplayLiveDesyncFlushed = true;
-    HookLog("NetplayLive: flushed last %d frames through desync trigger frame %d\n",
-            NETPLAY_LIVE_HISTORY, frame);
-}
-
-extern "C" void Rollback_FlushNetplayLive(int32_t frame)
-{
-    if (!g_ndjsonLoggingEnabled) return;
-    if (!g_netplayLiveInit) Rollback_NetplayLiveInit();
-    if (!g_netplayLivePath[0] || g_netplayLiveDesyncFlushed) return;
-
-    // A clean disconnect can happen before either side reaches the local
-    // desync threshold. Preserve the same rolling window in that case.
-    for (int i = 0; i < 256; i++) {
-        if (g_pendingNPLiveFrame[i] >= 0) {
-            Rollback_WriteNetplayLiveJSON(g_pendingNPLiveJSON[i]);
-            g_pendingNPLiveFrame[i] = -1;
-        }
-    }
-
-    int32_t newestFrame = frame;
-    if (newestFrame < 0) {
-        for (int i = 0; i < NETPLAY_LIVE_HISTORY; i++)
-            if (g_netplayLiveHistoryFrame[i] > newestFrame)
-                newestFrame = g_netplayLiveHistoryFrame[i];
-    }
-    if (newestFrame < 0) return;
-
-    FILE* f = fopen(g_netplayLivePath, "a");
-    if (!f) return;
-
-    int32_t firstFrame = newestFrame - NETPLAY_LIVE_HISTORY + 1;
-    for (int32_t current = firstFrame; current <= newestFrame; current++) {
-        int idx = (uint32_t)current % NETPLAY_LIVE_HISTORY;
-        if (g_netplayLiveHistoryFrame[idx] == current)
-            fputs(g_netplayLiveHistory[idx].c_str(), f);
-    }
-    fclose(f);
-    g_netplayLiveDesyncFlushed = true;
-    HookLog("NetplayLive: final flush of last %d frames through frame %d\n",
-            NETPLAY_LIVE_HISTORY, newestFrame);
-}
-
-bool Rollback_FlushNDJSONOnCrash()
-{
-    bool flushed = false;
-
-    // rdiag records are written immediately but its stdio buffer is normally
-    // flushed only once per second.
-    if (g_diagNdjsonFile && fflush(g_diagNdjsonFile) == 0)
-        flushed = true;
-
-    if (!g_ndjsonLoggingEnabled || !g_netplayLiveInit ||
-        !g_netplayLivePath[0] || g_netplayLiveDesyncFlushed) {
-        return flushed;
-    }
-
-    int32_t newestFrame = -1;
-    for (int i = 0; i < NETPLAY_LIVE_HISTORY; ++i) {
-        if (g_netplayLiveHistoryFrame[i] > newestFrame)
-            newestFrame = g_netplayLiveHistoryFrame[i];
-    }
-    for (int i = 0; i < 256; ++i) {
-        if (g_pendingNPLiveFrame[i] > newestFrame)
-            newestFrame = g_pendingNPLiveFrame[i];
-    }
-    if (newestFrame < 0)
-        return flushed;
-
-    FILE* file = fopen(g_netplayLivePath, "a");
-    if (!file)
-        return flushed;
-
-    const int32_t firstFrame = newestFrame - NETPLAY_LIVE_HISTORY + 1;
-    for (int32_t frame = firstFrame; frame <= newestFrame; ++frame) {
-        const int historyIndex = (uint32_t)frame % NETPLAY_LIVE_HISTORY;
-        if (g_netplayLiveHistoryFrame[historyIndex] == frame) {
-            const std::string& json = g_netplayLiveHistory[historyIndex];
-            fwrite(json.data(), 1, json.size(), file);
-        }
-
-        const int pendingIndex = (uint32_t)frame % 256;
-        if (g_pendingNPLiveFrame[pendingIndex] == frame) {
-            const std::string& json = g_pendingNPLiveJSON[pendingIndex];
-            fwrite(json.data(), 1, json.size(), file);
-        }
-    }
-
-    flushed = fflush(file) == 0 || flushed;
-    fclose(file);
-    return flushed;
-}
-
-extern "C" void Rollback_CommitPendingNetplayLive(int32_t frame) {
-    if (!g_ndjsonLoggingEnabled) return;
-    int idx = (uint32_t)frame % 256;
-    if (g_pendingNPLiveFrame[idx] == frame) {
-        Rollback_WriteNetplayLiveJSON(g_pendingNPLiveJSON[idx]);
-        g_pendingNPLiveFrame[idx] = -1;
-    }
-}
-
-extern "C" void Rollback_DiscardPendingNetplayLive(int32_t frame) {
-    if (!g_ndjsonLoggingEnabled) return;
-    int idx = (uint32_t)frame % 256;
-    if (g_pendingNPLiveFrame[idx] == frame) {
-        g_pendingNPLiveFrame[idx] = -1;
-    }
-}
-
-static void Rollback_DumpNetplayLive(int32_t frame) {
-    if (!g_ndjsonLoggingEnabled) return;
-    if (!g_netplayLiveInit) Rollback_NetplayLiveInit();
-    if (!g_netplayLivePath[0]) return;
-
-    std::string json = Rollback_GenerateNetplayLiveJSON(frame, false);
-    if (json.empty()) return;
-
-    if (frame < 12) {
-        Rollback_WriteNetplayLiveJSON(json);
-        return;
-    }
-
-    int idx = (uint32_t)frame % 256;
-    if (Controller_IsFrameConfirmed(frame)) {
-        Rollback_WriteNetplayLiveJSON(json);
-        g_pendingNPLiveFrame[idx] = -1;
-    } else {
-        g_pendingNPLiveJSON[idx] = json;
-        g_pendingNPLiveFrame[idx] = frame;
-    }
-}
-
-// Captures character state into the diag ring buffer.
-// If postOnly is false (default): captures both pre and post from the current
-//   memory state (used for live frames and initial resim pre-capture).
-// If postOnly is true: captures only the post-state, leaving pre untouched
-//   (used for resim post-capture after the frame tick to preserve the pre-tick
-//    state that was captured before oMvc3Main_move).
-static void Rollback_CaptureFrameDiagSnapshot(int32_t frame, bool isResim, bool postOnly = false)
-{
-    if (!g_ndjsonLoggingEnabled) return;
-    FrameDiagSnapshot& dst = isResim ? g_resimFrameSnap[(uint32_t)(frame >= 0 ? frame : 0) % ROLLBACK_WINDOW_DIAG]
-                                      : g_liveFrameSnap[(uint32_t)(frame >= 0 ? frame : 0) % ROLLBACK_WINDOW_DIAG];
-    if (!postOnly) {
-        dst.charCount = 0;
-        dst.frame = frame;
-    }
-
-    uint64_t sCharacter = *(uint64_t*)_addr(PTR_SCHARACTER);
-    if (!sCharacter) return;
-
-    int ci = 0;
-    for (int ti = 0; ti < 2; ++ti) {
-        uint64_t team = sCharacter + (ti == 0 ? TEAM0_OFFSET : TEAM1_OFFSET);
-        uint64_t node = team + TEAM_FIRST_NODE_OFFSET;
-        int slotInTeam = 0;
-        while (node && (postOnly ? (ci < dst.charCount) : (dst.charCount < 6))) {
-            uint64_t chr = *(uint64_t*)(node + NODE_CHR_OFFSET);
-            if (chr) {
-                CharDiagSnapshot snap;
-                CaptureCharSnapshot(chr, ti, slotInTeam, snap);
-                if (postOnly) {
-                    dst.chars[ci].post = snap;
-                } else {
-                    dst.chars[dst.charCount].pre  = snap;
-                    dst.chars[dst.charCount].post = snap;
-                    dst.charCount++;
-                }
-                ci++;
-                slotInTeam++;
-            }
-            node = *(uint64_t*)(node + NODE_NEXT_OFFSET);
-        }
-    }
-}
-
-static void Rollback_DiagInit();
-
-// ---------------------------------------------------------------------------
-// Rollback_LogResimNotifyNDJSON — called on the RECEIVER side when a resim
-// notify packet arrives from the remote peer.  Writes the sender's pre-state
-// as side="ground_truth" and post-state as side="resim" to both the nplive
-// NDJSON and the rdiag.ndjson (when available).
-// ---------------------------------------------------------------------------
-void Rollback_LogResimNotifyNDJSON(const ResimNotifyPacket& pkt)
-{
-    if (!g_ndjsonLoggingEnabled) return;
-    char tsBuf[32] = {};
-    SYSTEMTIME st;
-    GetLocalTime(&st);
-    snprintf(tsBuf, sizeof(tsBuf), "%04d-%02d-%02dT%02d:%02d:%02d",
-             st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
-
-    const char* senderSide = Netplay_IsHost() ? "host" : "client";
-
-    auto writeEntry = [&](FILE* f, int32_t frame, const char* side,
-                          const ResimCharState& p1, const ResimCharState& p2)
-    {
-        fprintf(f, "{\"v\":1,\"ts\":\"%s\",\"frame\":%d,"
-                   "\"side\":\"%s\",\"resim_notify\":true,"
-                   "\"senderSide\":\"%s\",\"correctedTeam\":%u,"
-                   "\"corrected_frames\":[%d,%d],"
-                   "\"chars\":[",
-                tsBuf, frame, side, senderSide, pkt.correctedTeam,
-                pkt.resimStartFrame, pkt.resimEndFrame);
-        // P1 point
-        fprintf(f, "{\"team\":0,\"slot\":0,"
-                   "\"pos\":[%.4f,%.4f,%.4f],"
-                             "\"act\":\"0x%08X\",\"mChrF\":\"0x%08X\","
-                   "\"mHeld\":\"0x%08X\",\"fcnt\":%llu,"
-                   "\"rng\":[\"0x%08X\",\"0x%08X\",\"0x%08X\",\"0x%08X\"]}",
-                p1.posX, p1.posY, p1.posZ,
-                 p1.actionId, p1.flags,
-                p1.mHeld, (unsigned long long)p1.frameCnt,
-                p1.rng[0], p1.rng[1], p1.rng[2], p1.rng[3]);
-        // P2 point
-        fprintf(f, ",{\"team\":1,\"slot\":0,"
-                   "\"pos\":[%.4f,%.4f,%.4f],"
-                             "\"act\":\"0x%08X\",\"mChrF\":\"0x%08X\","
-                   "\"mHeld\":\"0x%08X\",\"fcnt\":%llu,"
-                   "\"rng\":[\"0x%08X\",\"0x%08X\",\"0x%08X\",\"0x%08X\"]}",
-                p2.posX, p2.posY, p2.posZ,
-                p2.actionId, p2.flags,
-                p2.mHeld, (unsigned long long)p2.frameCnt,
-                p2.rng[0], p2.rng[1], p2.rng[2], p2.rng[3]);
-        fprintf(f, "]}\n");
-    };
-
-    // --- Write to rdiag.ndjson (pre-state as ground_truth, post-state as resim) ---
-    // Initialize the diag directory if this side hasn't created one yet
-    // (e.g. receiver that never ran Rollback_ReSimulate locally).
-    // Remote notify packets are kept out of nplive to ensure nplive only logs local simulation.
-    Rollback_DiagInit();
-    if (g_diagNdjsonFile) {
-        for (uint32_t fi = 0; fi < pkt.frameCount; fi++) {
-            const auto& rf = pkt.frames[fi];
-            writeEntry(g_diagNdjsonFile, rf.frame, "ground_truth", rf.p1Pre, rf.p2Pre);
-            writeEntry(g_diagNdjsonFile, rf.frame, "resim", rf.p1Post, rf.p2Post);
-        }
-        DWORD now = GetTickCount();
-        if (now - g_diagNdjsonFlush >= 1000) {
-            fflush(g_diagNdjsonFile);
-            g_diagNdjsonFlush = now;
-        }
-    }
-}
-
-// static decltype(&QueryPerformanceCounter) g_real_qpc = nullptr;
+ // static decltype(&QueryPerformanceCounter) g_real_qpc = nullptr;
 // static uint64_t g_virtual_qpc = 0;
 // static DWORD g_main_thread_id = 0;
 // static uint64_t g_qpc_history[ROLLBACK_WINDOW] = {};
@@ -2447,182 +1480,6 @@ static int SanitizeShotCollisionSlotsForDestruction(void* shot)
         ++sanitized;
     }
     return sanitized;
-}
-
-static void Rollback_AppendShotHitboxesJSON(std::string& json, void* shot)
-{
-    json += ",\"hitboxes\":[";
-    bool firstHitbox = true;
-    uint8_t* shotBytes = (uint8_t*)shot;
-    using GetPrimitiveFn = uint64_t(__fastcall*)(uint64_t, uint32_t);
-    auto getMetadata = (uint64_t(__fastcall*)(uint64_t, uint32_t))_addr(0x1405AA900);
-    uint32_t hitboxIndex = 0;
-
-    // uShot__forEachExtraSlot_dispatchCollision enumerates all four embedded
-    // collision slots beginning at +0x2058. The slot's MtArray is at +0x18;
-    // its count is at +0x20 and entries are obtained through vtable +0x88.
-    for (uint32_t slotIndex = 0; slotIndex < 4; ++slotIndex) {
-        uint64_t collisionSlot = *(uint64_t*)(shotBytes + 0x2058 + slotIndex * 8);
-        if (!collisionSlot || !IsAccessiblePointer(collisionSlot)) continue;
-
-        uint64_t vtable = *(uint64_t*)collisionSlot;
-        if (!vtable || !IsAccessiblePointer(vtable) ||
-            !IsAccessibleAddress(vtable + 0x88)) continue;
-        GetPrimitiveFn getPrimitive = *(GetPrimitiveFn*)(vtable + 0x88);
-        if (!getPrimitive || !IsAccessibleAddress((uint64_t)getPrimitive)) continue;
-
-        uint32_t count = *(uint32_t*)(collisionSlot + 0x20);
-        if (count > 128) count = 128;
-        for (uint32_t index = 0; index < count; ++index) {
-            uint64_t primitive = getPrimitive(collisionSlot, index);
-            uint64_t metadata = getMetadata(collisionSlot, index);
-            if (!primitive || !metadata || !IsAccessiblePointer(primitive) ||
-                !IsAccessiblePointer(metadata)) {
-                continue;
-            }
-
-            uint32_t type = *(uint32_t*)(metadata + 0x14);
-            if (type != 0 && type != 1) continue;
-
-            float x = *(float*)(primitive + 0x20);
-            float y = *(float*)(primitive + 0x24);
-            float z = *(float*)(primitive + 0x28);
-            float radius = *(float*)(primitive + (type == 0 ? 0x2C : 0x40));
-            float x2 = 0.0f;
-            float y2 = 0.0f;
-            float z2 = 0.0f;
-            if (type == 1) {
-                x2 = *(float*)(primitive + 0x30);
-                y2 = *(float*)(primitive + 0x34);
-                z2 = *(float*)(primitive + 0x38);
-            }
-            if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z) ||
-                !std::isfinite(x2) || !std::isfinite(y2) || !std::isfinite(z2) ||
-                !std::isfinite(radius) || radius <= 0.0f || radius > 1000.0f) {
-                continue;
-            }
-
-            char hitbox[512];
-            if (type == 1) {
-                snprintf(hitbox, sizeof(hitbox),
-                         "%s{\"bank\":\"shot\",\"index\":%u,\"slot\":%u,\"shape\":\"capsule\","
-                         "\"pos\":[%.9g,%.9g,%.9g],\"endPos\":[%.9g,%.9g,%.9g],"
-                         "\"size\":[%.9g,%.9g,%.9g],\"radius\":%.9g}",
-                         firstHitbox ? "" : ",", hitboxIndex++, slotIndex,
-                         x, y, z, x2, y2, z2,
-                         radius * 2.0f, radius * 2.0f, radius * 2.0f, radius);
-            } else {
-                snprintf(hitbox, sizeof(hitbox),
-                         "%s{\"bank\":\"shot\",\"index\":%u,\"slot\":%u,\"shape\":\"sphere\","
-                         "\"pos\":[%.9g,%.9g,%.9g],\"size\":[%.9g,%.9g,%.9g],"
-                         "\"radius\":%.9g}",
-                         firstHitbox ? "" : ",", hitboxIndex++, slotIndex,
-                         x, y, z, radius * 2.0f, radius * 2.0f, radius * 2.0f, radius);
-            }
-            json += hitbox;
-            firstHitbox = false;
-        }
-    }
-    json += "]";
-}
-
-static void Rollback_AppendShotCollisionOriginJSON(std::string& json, void* shot)
-{
-    uint64_t shotAddress = (uint64_t)shot;
-    uint64_t vtable = shotAddress ? *(uint64_t*)shotAddress : 0;
-    if (!vtable || !IsAccessiblePointer(vtable) || !IsAccessibleAddress(vtable + 0xA0)) return;
-
-    using GetMatrixFn = uint64_t(__fastcall*)(uint64_t, int32_t);
-    GetMatrixFn getMatrix = *(GetMatrixFn*)(vtable + 0xA0);
-    if (!getMatrix || !IsAccessibleAddress((uint64_t)getMatrix)) return;
-    uint64_t matrix = getMatrix(shotAddress, -1);
-    if (!matrix || !IsAccessiblePointer(matrix)) return;
-
-    float values[16];
-    for (int i = 0; i < 16; ++i) {
-        values[i] = *(float*)(matrix + 0x20 + i * sizeof(float));
-        if (!std::isfinite(values[i])) return;
-    }
-    char origin[640];
-    snprintf(origin, sizeof(origin),
-             ",\"collisionMatrix\":["
-             "%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,"
-             "%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g]",
-             values[0], values[1], values[2], values[3],
-             values[4], values[5], values[6], values[7],
-             values[8], values[9], values[10], values[11],
-             values[12], values[13], values[14], values[15]);
-    json += origin;
-}
-
-static std::string Rollback_GenerateShotJSON()
-{
-    std::string out = "[";
-    bool first = true;
-    char entry[1024];
-
-    for (int list = 0; list < SSHOT_SENTINEL_COUNT; ++list) {
-        uint64_t sentinel = (uint64_t)_addr(0x140d47f90) + list * 0x28;
-        uint64_t sentinelRef = sentinel + 0x08;
-        uint64_t nodeRef = *(uint64_t*)(sentinel + 0x10);
-        int safety = DYNAMIC_SAFETY;
-        while (nodeRef && nodeRef != sentinelRef && safety-- > 0) {
-            void* shot = (void*)(nodeRef - SSHOT_NODE_OFFSET);
-            uint8_t* shotBytes = (uint8_t*)shot;
-            auto recipe = g_liveShotRecipes.find(shot);
-
-            uint32_t slotId = 0;
-            uint64_t initParam = 0;
-            uint64_t ownerChr = 0;
-            uint64_t shotElement = 0;
-            const char* kind = "unknown";
-            if (recipe != g_liveShotRecipes.end()) {
-                slotId = recipe->second.slotId;
-                initParam = recipe->second.initParam;
-                ownerChr = (uint64_t)recipe->second.ownerChr;
-                shotElement = (uint64_t)recipe->second.shotElement;
-                kind = recipe->second.kind == ShotSpawnKind::Extended ? "extended" : "standard";
-            }
-            
-            snprintf(entry, sizeof(entry),
-                     "%s{\"list\":%d,\"addr\":\"0x%llX\","
-                     "\"slot\":%u,\"init\":%llu,\"kind\":\"%s\","
-                     "\"owner\":\"0x%llX\",\"element\":\"0x%llX\","
-                     "\"state\":\"0x%08X\","
-                     "\"pos\":[%.9g,%.9g,%.9g],"
-                     "\"runtimePos\":[%.9g,%.9g,%.9g],"
-                     "\"lifeFrame\":%.9g,"
-                     "\"velocity\":[%.9g,%.9g,%.9g],"
-                     "\"speed\":%.9g,\"step\":%.9g,"
-                     "\"timer\":%.9g",
-                     first ? "" : ",", list, (uint64_t)shot,
-                      slotId, (unsigned long long)initParam, kind, ownerChr, shotElement,
-                      *(uint32_t*)(shotBytes + 0x10),
-                      *(float*)(shotBytes + 0x50),
-                      *(float*)(shotBytes + 0x54),
-                      *(float*)(shotBytes + 0x58),
-                      *(float*)(shotBytes + 0x418),
-                      *(float*)(shotBytes + 0x41C),
-                      *(float*)(shotBytes + 0x420),
-                      *(float*)(shotBytes + 0x2078),
-                      *(float*)(shotBytes + 0x20C0),
-                      *(float*)(shotBytes + 0x20C4),
-                      *(float*)(shotBytes + 0x20C8),
-                      *(float*)(shotBytes + 0x20D0),
-                      *(float*)(shotBytes + 0x212C),
-                      *(float*)(shotBytes + 0x1F60));
-               std::string shotEntry(entry);
-               Rollback_AppendShotCollisionOriginJSON(shotEntry, shot);
-               Rollback_AppendShotHitboxesJSON(shotEntry, shot);
-             shotEntry += "}";
-             out += shotEntry;
-            first = false;
-            nodeRef = *(uint64_t*)(nodeRef + SSHOT_NODE_NEXT);
-        }
-    }
-
-    out += "]";
-    return out;
 }
 
 static void CaptureShotAndEffectRecipes(SnapshotSlot& slot)
@@ -3798,6 +2655,28 @@ static int BuildRegions(Region* regions, int maxRegions)
     return r;
 }
 
+void NDJSON_GetRegions(std::vector<NDJSON_Region>& regions)
+{
+    Region snapshotRegions[MAX_REGIONS];
+    int count = BuildRegions(snapshotRegions, MAX_REGIONS);
+    regions.clear();
+    regions.reserve(count);
+    for (int i = 0; i < count; ++i)
+        regions.push_back({snapshotRegions[i].ptr, snapshotRegions[i].size});
+}
+
+bool NDJSON_GetShotRecipe(void* shot, NDJSON_ShotRecipe& recipe)
+{
+    auto found = g_liveShotRecipes.find(shot);
+    if (found == g_liveShotRecipes.end()) return false;
+    recipe.slotId = found->second.slotId;
+    recipe.initParam = found->second.initParam;
+    recipe.ownerChr = (uint64_t)found->second.ownerChr;
+    recipe.shotElement = (uint64_t)found->second.shotElement;
+    recipe.extended = found->second.kind == ShotSpawnKind::Extended;
+    return true;
+}
+
 // ===========================================================================
 // Public API — Save / Restore / ReSimulate
 // ===========================================================================
@@ -4034,14 +2913,14 @@ void Rollback_RestoreSnapshot(int32_t frame)
             // bytes into a freed or repurposed allocation.
         } else if (slot.regions[i].ownerSlot != 0 &&
                    slot.regions[i].size == CCHR_EXTERNAL_ANIM_SIZE) {
-            RestoreExternalAnimBlock(slot.regions[i].ptr,
+            Rollback_RestoreExternalAnimBlock(slot.regions[i].ptr,
                                      slot.data + offset,
                                      copySize);
         } else if ((uint64_t)slot.regions[i].ptr == sCollision &&
                    slot.regions[i].size == SCOLLISION_SIZE) {
             ++collisionRestoreCount;
             collisionRestoreBytes += copySize;
-            RestoreSCollisionBody(slot.regions[i].ptr, slot.data + offset, copySize);
+            Rollback_RestoreCollisionBody(slot.regions[i].ptr, slot.data + offset, copySize);
         } else if ((uint64_t)slot.regions[i].ptr == *(uint64_t*)_addr(PTR_SMAIN) &&
                    slot.regions[i].size == SMAIN_SIZE) {
             for (const SnapshotRange& range : SMAIN_RESTORE_RANGES) {
@@ -4447,482 +3326,7 @@ void Rollback_RestoreSnapshot(int32_t frame)
             frame, slot.regionCount, offset, collisionRestoreCount, collisionRestoreBytes);
 }
 
-// ===========================================================================
-// Diag dumpers — capture full snapshot state + character text for resim debugging
-// ===========================================================================
-
-static void Rollback_DiagInit() {
-return;
-    if (!g_ndjsonLoggingEnabled) return;
-    if (g_diagDir[0]) return;
-    SYSTEMTIME st;
-    GetLocalTime(&st);
-    char rel[80];
-
-    // Append the local netplay role as a suffix to the directory name
-    const char* sideSuffix = Netplay_IsActive() ? (Netplay_IsHost() ? "_host" : "_client") : "_offline";
-    snprintf(rel, sizeof(rel), "rdiag_%04d%02d%02d_%02d%02d%02d%s",
-             st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond, sideSuffix);
-
-    Rollback_ResolveDllPath(g_diagDir, sizeof(g_diagDir), rel);
-    CreateDirectoryA(g_diagDir, NULL);
-    HookLog("Rollback: diag dir: %s\n", g_diagDir);
-    char ndjsonPath[260];
-    snprintf(ndjsonPath, sizeof(ndjsonPath), "%s/rdiag.ndjson", g_diagDir);
-    g_diagNdjsonFile = fopen(ndjsonPath, "a");
-    if (g_diagNdjsonFile)
-        g_diagNdjsonFlush = GetTickCount();
-}
-
-// Binary: one file per session with [header + N entries].
-// Header:  magic(4)="RBSD"  ver(u32)  sessionId(u32)  entryCount(u32)
-// Entry:   frame(i32) side(u8) regionCount(u32) dataSize(u32)
-//          regions[ regionSize(u32) regionHash(u64) regionData(bytes) ]
-// v1 → v2: per-region FNV-1a hash added after size for region-level divergence detection.
-static void Rollback_DumpBinary(int session, int32_t frame, uint8_t side) {
-    if (!g_diagDir[0]) return;
-
-    Region regions[MAX_REGIONS];
-    int count = BuildRegions(regions, MAX_REGIONS);
-    if (count == 0) return;
-
-    char path[260];
-    snprintf(path, sizeof(path), "%s/session_%d.bin", g_diagDir, session);
-
-    bool isNew = false;
-    FILE* f = fopen(path, "rb");
-    if (!f) {
-        f = fopen(path, "wb");
-        if (!f) return;
-        isNew = true;
-        uint32_t magic = 0x44534252;
-        uint32_t ver = 2;
-        uint32_t sid = (uint32_t)session;
-        uint32_t ec = 0;
-        fwrite(&magic, 4, 1, f);
-        fwrite(&ver, 4, 1, f);
-        fwrite(&sid, 4, 1, f);
-        fwrite(&ec, 4, 1, f);
-    } else {
-        fclose(f);
-        f = fopen(path, "ab");
-        if (!f) return;
-    }
-
-    g_diagWriteCount++;
-
-    int32_t binFrame = side == 0 ? frame : frame + 1;
-    fwrite(&binFrame, sizeof(binFrame), 1, f);
-    fwrite(&side, 1, 1, f);
-    uint32_t cc = (uint32_t)count;
-    fwrite(&cc, sizeof(cc), 1, f);
-
-    uint32_t totalSize = 0;
-    for (int i = 0; i < count; i++)
-        totalSize += (uint32_t)regions[i].size;
-    fwrite(&totalSize, sizeof(totalSize), 1, f);
-
-    for (int i = 0; i < count; i++) {
-        uint32_t sz = (uint32_t)regions[i].size;
-        uint64_t hash = Rollback_Fnv1a64(regions[i].ptr, regions[i].size);
-        fwrite(&sz, sizeof(sz), 1, f);
-        fwrite(&hash, sizeof(hash), 1, f);
-        fwrite(regions[i].ptr, 1, sz, f);
-    }
-
-    fclose(f);
-
-    if (isNew) {
-        uint32_t ec = (uint32_t)g_diagWriteCount;
-        f = fopen(path, "r+b");
-        if (f) {
-            fseek(f, 12, SEEK_SET);
-            fwrite(&ec, 4, 1, f);
-            fclose(f);
-        }
-    }
-}
-
-// Text: character state per frame — appended to session text log
-// RESIM dump labeling convention:
-//   side=0 (LIVE): frame = startFrame of the resim window.  The actual captured
-//     state is the current live frame (endFrame), NOT startFrame.  The label uses
-//     startFrame because call-site changes broke the resim — the user must
-//     mentally map: LIVE frame=N → state at the CURRENT live frame, not frame N.
-//   side=1 (RESIM): frame = the frame that was just ticked.  The captured state
-//     is at frame+1 (the start of the next frame).  We display frame+1 here so
-//     the output frame number matches the actual state.
-static void Rollback_DumpCharText(int session, int32_t frame, uint8_t side) {
-    if (!g_diagDir[0]) return;
-
-    char path[260];
-    snprintf(path, sizeof(path), "%s/session_%d.txt", g_diagDir, session);
-
-    FILE* f = fopen(path, "a");
-    if (!f) return;
-
-    int32_t displayFrame = side == 0 ? frame : frame + 1;
-    fprintf(f, "=== %s frame=%d ===\n", side == 0 ? "LIVE" : "RESIM", displayFrame);
-    if (side == 0) {
-        fprintf(f, "# NOTE: LIVE frame=%d labels the resim window start, actual state is at current live frame\n", frame);
-    }
-
-    uint64_t sCharacter = *(uint64_t*)_addr(PTR_SCHARACTER);
-    if (!sCharacter) { fprintf(f, "  (no sCharacter)\n\n"); fclose(f); return; }
-
-    for (int ti = 0; ti < 2; ++ti) {
-        uint64_t team = sCharacter + (ti == 0 ? TEAM0_OFFSET : TEAM1_OFFSET);
-        uint64_t node = team + TEAM_FIRST_NODE_OFFSET;
-        int ci = 0;
-        while (node) {
-            uint64_t chr = *(uint64_t*)(node + NODE_CHR_OFFSET);
-            if (chr) {
-                CharDiagSnapshot snap;
-                CaptureCharSnapshot(chr, ti, ci, snap);
-
-                uint64_t fcnt = *(uint64_t*)(snap.cchr + 0x18);
-                uint32_t mHeld = *(uint32_t*)(snap.cchr + 0x14);
-                uint32_t mRemap = *(uint32_t*)(snap.cchr + 0x560);
-                uint32_t mMask  = *(uint32_t*)(snap.cchr + 0x568);
-                uint32_t mProc  = *(uint32_t*)(snap.cchr + 0x56C);
-                uint32_t mOld   = *(uint32_t*)(snap.cchr + 0x10);
-                uint32_t h590   = *(uint32_t*)(snap.cchr + 0x590);
-                uint32_t h594   = *(uint32_t*)(snap.cchr + 0x594);
-                uint64_t heldR0 = *(uint64_t*)(snap.cchr + 0x28);
-                uint32_t relHead= *(uint32_t*)(snap.cchr + 0x0A8);
-                uint64_t relR0  = *(uint64_t*)(snap.cchr + 0x0AC);
-                uint64_t prsR0  = *(uint64_t*)(snap.cchr + 0x130);
-                uint32_t dir0   = *(uint32_t*)(snap.cchr + 0x1B0);
-                uint32_t dir4   = *(uint32_t*)(snap.cchr + 0x1B4);
-                uint32_t dirSlot= (uint32_t)(fcnt & 0x3F);
-                uint64_t dirRing0  = *(uint64_t*)(snap.cchr + 0x360);
-                uint64_t dirRingSlot=*(uint64_t*)(snap.cchr + 0x360 + dirSlot * 8);
-
-                fprintf(f, "  Team%d Char%d @ 0x%llX\n", ti, ci, (uint64_t)chr);
-                fprintf(f, "    pos=(%+.4f,%+.4f,%+.4f) act=0x%08X fl=0x%08X\n",
-                        snap.posX, snap.posY, snap.posZ, snap.actionId, snap.flags14F0);
-                fprintf(f, "    cci: mOld=0x%08X mHeld=0x%08X remap=0x%08X mask=0x%08X proc=0x%08X\n",
-                        mOld, mHeld, mRemap, mMask, mProc);
-                fprintf(f, "    cci: cntr=%llu h590=0x%08X h594=0x%08X\n", fcnt, h590, h594);
-                fprintf(f, "    cci: heldR0=0x%016llX relHead=0x%08X relR0=0x%016llX prsR0=0x%016llX\n",
-                        heldR0, relHead, relR0, prsR0);
-                fprintf(f, "    cci: dir0=0x%08X dir4=0x%08X dirRing[0]=0x%016llX [%u]=0x%016llX\n",
-                        dir0, dir4, dirRing0, dirSlot, dirRingSlot);
-                fprintf(f, "    rng: 0x%08X 0x%08X 0x%08X 0x%08X\n",
-                        snap.xorShift[0], snap.xorShift[1], snap.xorShift[2], snap.xorShift[3]);
-                ci++;
-            }
-            node = *(uint64_t*)(node + NODE_NEXT_OFFSET);
-        }
-    }
-    fprintf(f, "\n");
-    fclose(f);
-}
-
-// Manifest: per-region FNV-1a hash summary appended to session text log.
-// Quick visual scan shows which regions diverge between LIVE and RESIM.
-static void Rollback_DumpManifest(int session, int32_t frame, uint8_t side) {
-    if (!g_diagDir[0]) return;
-
-    Region regions[MAX_REGIONS];
-    int count = BuildRegions(regions, MAX_REGIONS);
-    if (count == 0) return;
-
-    char path[260];
-    snprintf(path, sizeof(path), "%s/session_%d.txt", g_diagDir, session);
-
-    FILE* f = fopen(path, "a");
-    if (!f) return;
-
-    int32_t mf = side == 0 ? frame : frame + 1;
-    fprintf(f, "=== MANIFEST %s frame=%d regions=%d ===\n",
-            side == 0 ? "LIVE" : "RESIM", mf, count);
-    for (int i = 0; i < count; i++) {
-        uint64_t hash = Rollback_Fnv1a64(regions[i].ptr, regions[i].size);
-        fprintf(f, "  [%3d] addr=0x%016llX size=%-8u hash=0x%016llX\n",
-                i, (uint64_t)regions[i].ptr, (uint32_t)regions[i].size, hash);
-    }
-    fprintf(f, "\n");
-    fclose(f);
-}
-
-// NDJSON: one JSON line per dump frame for script/AI consumption.
-// All entries go into a single rdiag.ndjson file (no separate sessions).
-// side=0 → "ground_truth" (pre-resim state), side=1 → "resim" (post-resim state)
-// Schema:  v, ts, frame, side, regions[{idx,addr,size,hash}], chars[{...}], shots[{...}]
-static void Rollback_DumpNDJSON(int32_t frame, uint8_t side) {
-    if (!g_ndjsonLoggingEnabled) return;
-    if (!g_diagDir[0]) return;
-
-    Region regions[MAX_REGIONS];
-    int count = BuildRegions(regions, MAX_REGIONS);
-    if (count == 0) return;
-
-    if (!g_diagNdjsonFile) return;
-
-    // Build ISO timestamp
-    char tsBuf[32] = {};
-    SYSTEMTIME st;
-    GetLocalTime(&st);
-    snprintf(tsBuf, sizeof(tsBuf), "%04d-%02d-%02dT%02d:%02d:%02d",
-             st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
-
-    int32_t nf = side == 0 ? frame : frame + 1;
-    fprintf(g_diagNdjsonFile, "{\"v\":1,\"ts\":\"%s\",\"frame\":%d,\"side\":\"%s\",\"regions\":[",
-            tsBuf, nf, side == 0 ? "ground_truth" : "resim");
-
-    for (int i = 0; i < count; i++) {
-        uint64_t rh = Rollback_Fnv1a64(regions[i].ptr, regions[i].size);
-        if (i > 0) fprintf(g_diagNdjsonFile, ",");
-        fprintf(g_diagNdjsonFile, "{\"idx\":%d,\"addr\":\"0x%llX\",\"size\":%llu,\"hash\":\"0x%016llX\"}",
-                i, (uint64_t)regions[i].ptr, (uint64_t)regions[i].size, rh);
-    }
-
-    fprintf(g_diagNdjsonFile, "],\"chars\":[");
-
-    uint64_t sCharacter = *(uint64_t*)_addr(PTR_SCHARACTER);
-    bool firstChar = true;
-    if (sCharacter) {
-        for (int ti = 0; ti < 2; ++ti) {
-            uint64_t team = sCharacter + (ti == 0 ? TEAM0_OFFSET : TEAM1_OFFSET);
-            uint64_t node = team + TEAM_FIRST_NODE_OFFSET;
-            int ci = 0;
-            while (node) {
-                uint64_t chr = *(uint64_t*)(node + NODE_CHR_OFFSET);
-                if (chr) {
-                    CharDiagSnapshot snap;
-                    CaptureCharSnapshot(chr, ti, ci, snap);
-                    uint64_t fcnt = *(uint64_t*)(snap.cchr + 0x18);
-                    uint32_t mHeld = *(uint32_t*)(snap.cchr + 0x14);
-                    uint32_t mOld = *(uint32_t*)(snap.cchr + 0x10);
-                    uint32_t mPressed = *(uint32_t*)(snap.cchr + 0x20);
-                    uint32_t mReleased = *(uint32_t*)(snap.cchr + 0x24);
-                    uint32_t mMask = *(uint32_t*)(snap.cchr + 0x568);
-                    uint32_t mProcessed = *(uint32_t*)(snap.cchr + 0x56C);
-
-                    if (!firstChar) fprintf(g_diagNdjsonFile, ",");
-                    firstChar = false;
-                    fprintf(g_diagNdjsonFile, "{\"team\":%d,\"slot\":%d,"
-                            "\"pos\":[%.4f,%.4f,%.4f],"
-                             "\"act\":\"0x%08X\",\"mChrF\":\"0x%08X\","
-                             "\"mAnmF\":\"0x%08X\",\"mPrgF\":\"0x%08X\","
-                            "\"mHeld\":\"0x%08X\",\"fcnt\":%llu,"
-                            "\"mOld\":\"0x%08X\","
-                            "\"mPressed\":\"0x%08X\",\"mReleased\":\"0x%08X\","
-                            "\"mMask\":\"0x%08X\",\"mProcessed\":\"0x%08X\","
-                            "\"rng\":[\"0x%08X\",\"0x%08X\",\"0x%08X\",\"0x%08X\"]}",
-                            ti, ci,
-                            snap.posX, snap.posY, snap.posZ,
-                             snap.actionId, snap.flags14F0, snap.flags14F4, snap.flags14F8,
-                            mHeld, fcnt,
-                            mOld, mPressed, mReleased, mMask, mProcessed,
-                            snap.xorShift[0], snap.xorShift[1],
-                            snap.xorShift[2], snap.xorShift[3]);
-                    ci++;
-                }
-                node = *(uint64_t*)(node + NODE_NEXT_OFFSET);
-            }
-        }
-    }
-
-    fprintf(g_diagNdjsonFile, "],\"shots\":[");
-
-    // Dump the live projectile list separately from character state.  The
-    // rollback snapshot already captures these fields, so keeping the same
-    // representation here makes shot divergence easy to compare.
-    bool firstShot = true;
-    for (int list = 0; list < SSHOT_SENTINEL_COUNT; ++list) {
-        uint64_t sentinel = (uint64_t)_addr(0x140d47f90) + list * 0x28;
-        uint64_t sentinelRef = sentinel + 0x08;
-        uint64_t nodeRef = *(uint64_t*)(sentinel + 0x10);
-        int safety = DYNAMIC_SAFETY;
-        while (nodeRef && nodeRef != sentinelRef && safety-- > 0) {
-            void* shot = (void*)(nodeRef - SSHOT_NODE_OFFSET);
-            uint8_t* shotBytes = (uint8_t*)shot;
-            auto recipe = g_liveShotRecipes.find(shot);
-
-            uint32_t slotId = 0;
-            uint64_t initParam = 0;
-            uint64_t ownerChr = 0;
-            uint64_t shotElement = 0;
-            if (recipe != g_liveShotRecipes.end()) {
-                slotId = recipe->second.slotId;
-                initParam = recipe->second.initParam;
-                ownerChr = (uint64_t)recipe->second.ownerChr;
-                shotElement = (uint64_t)recipe->second.shotElement;
-            }
-
-            if (!firstShot) fprintf(g_diagNdjsonFile, ",");
-            firstShot = false;
-            fprintf(g_diagNdjsonFile,
-                    "{\"list\":%d,\"addr\":\"0x%llX\","
-                    "\"slot\":%u,\"init\":%llu,"
-                    "\"owner\":\"0x%llX\",\"element\":\"0x%llX\","
-                    "\"state\":\"0x%08X\","
-                    "\"pos\":[%.4f,%.4f,%.4f],"
-                    "\"runtimePos\":[%.4f,%.4f,%.4f],"
-                    "\"lifeFrame\":%.4f,"
-                    "\"velocity\":[%.4f,%.4f,%.4f],"
-                    "\"speed\":%.4f,\"step\":%.4f,"
-                    "\"timer\":%.4f",
-                    list, (uint64_t)shot, slotId, (unsigned long long)initParam,
-                    ownerChr, shotElement,
-                     *(uint32_t*)(shotBytes + 0x10),
-                     *(float*)(shotBytes + 0x50),
-                     *(float*)(shotBytes + 0x54),
-                     *(float*)(shotBytes + 0x58),
-                     *(float*)(shotBytes + 0x418),
-                     *(float*)(shotBytes + 0x41C),
-                     *(float*)(shotBytes + 0x420),
-                     *(float*)(shotBytes + 0x2078),
-                     *(float*)(shotBytes + 0x20C0),
-                     *(float*)(shotBytes + 0x20C4),
-                     *(float*)(shotBytes + 0x20C8),
-                     *(float*)(shotBytes + 0x20D0),
-                     *(float*)(shotBytes + 0x212C),
-                     *(float*)(shotBytes + 0x1F60));
-            std::string shotHitboxes;
-            Rollback_AppendShotCollisionOriginJSON(shotHitboxes, shot);
-            Rollback_AppendShotHitboxesJSON(shotHitboxes, shot);
-            fputs(shotHitboxes.c_str(), g_diagNdjsonFile);
-            fputs("}", g_diagNdjsonFile);
-
-            nodeRef = *(uint64_t*)(nodeRef + SSHOT_NODE_NEXT);
-        }
-    }
-
-    fprintf(g_diagNdjsonFile, "]}\n");
-    DWORD now = GetTickCount();
-    if (now - g_diagNdjsonFlush >= 1000) {
-        fflush(g_diagNdjsonFile);
-        g_diagNdjsonFlush = now;
-    }
-}
-
-void Rollback_QueuePendingResimDump(int32_t frame)
-{
-    if (!g_ndjsonLoggingEnabled) return;
-    if (!Netplay_IsActive())
-    {
-        return;
-    }
-
-    const FrameDiagSnapshot* snap = Rollback_GetResimSnapshot(frame);
-    if (!snap) return;
-
-    const CharDiagSnapshot* p1Post = nullptr;
-    const CharDiagSnapshot* p2Post = nullptr;
-    if (!Rollback_FindP1P2Post(*snap, &p1Post, &p2Post)) return;
-
-    PendingResimDump dump;
-    dump.frame = frame;
-    Rollback_FillResimCharState(dump.p1Post, *p1Post);
-    Rollback_FillResimCharState(dump.p2Post, *p2Post);
-
-    uint32_t idx = (uint32_t)(frame >= 0 ? frame : 0) % PENDING_RESIM_DUMP_RING;
-    g_pendingResimDumps[idx] = dump;
-    g_pendingResimDumpValid[idx] = true;
-}
-
-extern "C" void Rollback_SendGroundTruth(int32_t startFrame, int32_t endFrame)
-{
-    if (!g_ndjsonLoggingEnabled) return;
-    if (startFrame >= endFrame) return;
-
-    GroundTruthPacket gtPkt = {};
-    gtPkt.type = PACKET_GROUND_TRUTH;
-    gtPkt.startFrame = startFrame;
-    gtPkt.endFrame = endFrame;
-
-    int32_t frameCount = 0;
-    for (int32_t f = startFrame; f < endFrame && frameCount < MAX_RESIM_FRAMES; f++)
-    {
-        uint32_t liveIdx = (uint32_t)f % 256;
-        auto& p1Live = g_liveRef[0][liveIdx];
-        auto& p2Live = g_liveRef[1][liveIdx];
-
-        auto& rf = gtPkt.frames[frameCount];
-        rf.frame = f;
-
-        auto fillState = [](ResimCharState& dst, const LiveFrameRecord& src) {
-            dst.actionId = src.actionId;
-            dst.posX     = src.posX;
-            dst.posY     = src.posY;
-            dst.posZ     = src.posZ;
-            dst.flags    = src.flags14F0;
-            dst.mHeld    = src.mHeld;
-            dst.frameCnt = src.frameCnt;
-            for (int ri = 0; ri < 4; ri++)
-                dst.rng[ri] = src.rng[ri];
-        };
-
-        fillState(rf.p1Live, p1Live);
-        fillState(rf.p2Live, p2Live);
-        frameCount++;
-    }
-    gtPkt.frameCount = (uint32_t)frameCount;
-    Netplay_SendGroundTruth(gtPkt);
-}
-
-extern "C" void Rollback_ProcessInboundGroundTruth()
-{
-    GroundTruthPacket gtPkt;
-    while (Netplay_GetInboundGroundTruth(gtPkt))
-    {
-        if (!g_ndjsonLoggingEnabled) continue;
-        Rollback_DiagInit();
-        if (!g_diagNdjsonFile) continue;
-
-        char tsBuf[32] = {};
-        SYSTEMTIME st;
-        GetLocalTime(&st);
-        snprintf(tsBuf, sizeof(tsBuf), "%04d-%02d-%02dT%02d:%02d:%02d",
-                 st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
-
-        for (uint32_t fi = 0; fi < gtPkt.frameCount; fi++)
-        {
-            auto& rf = gtPkt.frames[fi];
-
-            uint32_t pidx = (uint32_t)(rf.frame >= 0 ? rf.frame : 0) % PENDING_RESIM_DUMP_RING;
-            bool found = g_pendingResimDumpValid[pidx] && g_pendingResimDumps[pidx].frame == rf.frame;
-            PendingResimDump resimDump = found ? g_pendingResimDumps[pidx] : PendingResimDump{};
-            if (found) g_pendingResimDumpValid[pidx] = false;
-
-            if (!found) continue;
-
-            // Ground truth (received remote data)
-            fprintf(g_diagNdjsonFile, "{\"v\":1,\"ts\":\"%s\",\"frame\":%d,\"side\":\"ground_truth\","
-                       "\"chars\":[",
-                    tsBuf, rf.frame);
-            fprintf(g_diagNdjsonFile, "{\"team\":0,\"slot\":0,\"pos\":[%.4f,%.4f,%.4f],\"act\":\"0x%08X\",\"fl\":\"0x%08X\",\"mHeld\":\"0x%08X\",\"fcnt\":%llu,\"rng\":[\"0x%08X\",\"0x%08X\",\"0x%08X\",\"0x%08X\"]}",
-                    rf.p1Live.posX, rf.p1Live.posY, rf.p1Live.posZ, rf.p1Live.actionId, rf.p1Live.flags, rf.p1Live.mHeld, (unsigned long long)rf.p1Live.frameCnt,
-                    rf.p1Live.rng[0], rf.p1Live.rng[1], rf.p1Live.rng[2], rf.p1Live.rng[3]);
-            fprintf(g_diagNdjsonFile, ",{\"team\":1,\"slot\":0,\"pos\":[%.4f,%.4f,%.4f],\"act\":\"0x%08X\",\"fl\":\"0x%08X\",\"mHeld\":\"0x%08X\",\"fcnt\":%llu,\"rng\":[\"0x%08X\",\"0x%08X\",\"0x%08X\",\"0x%08X\"]}",
-                    rf.p2Live.posX, rf.p2Live.posY, rf.p2Live.posZ, rf.p2Live.actionId, rf.p2Live.flags, rf.p2Live.mHeld, (unsigned long long)rf.p2Live.frameCnt,
-                    rf.p2Live.rng[0], rf.p2Live.rng[1], rf.p2Live.rng[2], rf.p2Live.rng[3]);
-            fprintf(g_diagNdjsonFile, "]}\n");
-
-            // Resim (local corrected data)
-            fprintf(g_diagNdjsonFile, "{\"v\":1,\"ts\":\"%s\",\"frame\":%d,\"side\":\"resim\","
-                       "\"chars\":[",
-                    tsBuf, rf.frame);
-            fprintf(g_diagNdjsonFile, "{\"team\":0,\"slot\":0,\"pos\":[%.4f,%.4f,%.4f],\"act\":\"0x%08X\",\"fl\":\"0x%08X\",\"mHeld\":\"0x%08X\",\"fcnt\":%llu,\"rng\":[\"0x%08X\",\"0x%08X\",\"0x%08X\",\"0x%08X\"]}",
-                    resimDump.p1Post.posX, resimDump.p1Post.posY, resimDump.p1Post.posZ, resimDump.p1Post.actionId, resimDump.p1Post.flags, resimDump.p1Post.mHeld, (unsigned long long)resimDump.p1Post.frameCnt,
-                    resimDump.p1Post.rng[0], resimDump.p1Post.rng[1], resimDump.p1Post.rng[2], resimDump.p1Post.rng[3]);
-            fprintf(g_diagNdjsonFile, ",{\"team\":1,\"slot\":0,\"pos\":[%.4f,%.4f,%.4f],\"act\":\"0x%08X\",\"fl\":\"0x%08X\",\"mHeld\":\"0x%08X\",\"fcnt\":%llu,\"rng\":[\"0x%08X\",\"0x%08X\",\"0x%08X\",\"0x%08X\"]}",
-                    resimDump.p2Post.posX, resimDump.p2Post.posY, resimDump.p2Post.posZ, resimDump.p2Post.actionId, resimDump.p2Post.flags, resimDump.p2Post.mHeld, (unsigned long long)resimDump.p2Post.frameCnt,
-                    resimDump.p2Post.rng[0], resimDump.p2Post.rng[1], resimDump.p2Post.rng[2], resimDump.p2Post.rng[3]);
-            fprintf(g_diagNdjsonFile, "]}\n");
-        }
-        DWORD now = GetTickCount();
-        if (now - g_diagNdjsonFlush >= 1000) {
-            fflush(g_diagNdjsonFile);
-            g_diagNdjsonFlush = now;
-        }
-    }
-}
-
-void Rollback_ReSimulate(int32_t startFrame, int32_t endFrame)
+ void Rollback_ReSimulate(int32_t startFrame, int32_t endFrame)
 {
     if (startFrame >= endFrame) return;
 
@@ -4987,21 +3391,10 @@ void Rollback_ReSimulate(int32_t startFrame, int32_t endFrame)
             HookLog("Rollback: diag session %d (F7, reuse) for frames %d\u2192%d\n",
                     diagSid, startFrame, endFrame);
         } else {
-            Rollback_DiagInit();
-            g_diagSessionId++;
-            diagSid = g_diagSessionId;
-            uint64_t sr = *(uint64_t*)_addr(PTR_SREPLAY);
-            int32_t liveFrame = sr ? *(int32_t*)(sr + 0x54) : startFrame;
-            g_diagWriteCount = 0;
-            //HookLog("Rollback: diag session %d for frames %d\u2192%d (live=%d)\n",
-                    //diagSid, startFrame, endFrame, liveFrame);
-            // session_* files disabled — use rdiag.ndjson instead
-            //Rollback_DumpBinary(diagSid, liveFrame, 0);
-            //Rollback_DumpCharText(diagSid, liveFrame, 0);
-            //Rollback_DumpManifest(diagSid, liveFrame, 0);
+            diagSid = NDJSON_BeginSession();
         }
         // Sync the global so the resim loop writes to the same session
-        g_diagSessionId = diagSid;
+        (void)diagSid;
     }
     profile.diagSetup += Profile_Now() - phaseStart;
 
@@ -5015,9 +3408,9 @@ void Rollback_ReSimulate(int32_t startFrame, int32_t endFrame)
     }
     phaseStart = Profile_Now();
     if (liveFrameBeforeRestore >= 0 && Netplay_IsActive()) {
-        std::string json = Rollback_GenerateNetplayLiveJSON(
+        std::string json = NDJSON_GenerateNetplayLive(
             liveFrameBeforeRestore, false, "pre_restore_prediction", startFrame, endFrame);
-        if (!json.empty()) Rollback_WriteNetplayLiveJSON(json);
+        if (!json.empty()) NDJSON_WriteNetplayLive(json);
     }
     profile.preRestoreJson += Profile_Now() - phaseStart;
 
@@ -5091,17 +3484,17 @@ void Rollback_ReSimulate(int32_t startFrame, int32_t endFrame)
         frameTimer.Add(profile.frameInput);
 
         // Capture PRE-state before the tick
-        Rollback_CaptureFrameDiagSnapshot(f, /*isResim=*/true, /*postOnly=*/false);
+            NDJSON_CaptureFrame(f, /*isResim=*/true, /*postOnly=*/false);
         frameTimer.Add(profile.frameDiagPre);
 
         // Pre-tick NDJSON logging for both active and inactive netplay sessions
         if (Netplay_IsActive()) {
-            Rollback_DiscardPendingNetplayLive(f);
-            std::string json = Rollback_GenerateNetplayLiveJSON(f, true);
+            NDJSON_DiscardPendingNetplayLive(f);
+            std::string json = NDJSON_GenerateNetplayLive(f, true);
             if (!json.empty())
-                Rollback_WriteNetplayLiveJSON(json);
+                NDJSON_WriteNetplayLive(json);
         } else {
-            Rollback_DumpNDJSON(f, 1);
+            NDJSON_DumpFrame(f, 1);
         }
         frameTimer.Add(profile.frameJson);
 
@@ -5124,9 +3517,9 @@ void Rollback_ReSimulate(int32_t startFrame, int32_t endFrame)
         frameTimer.Add(profile.frameInputEnd);
 
         // Capture POST-state after the tick (preserves the pre-tick state captured above)
-        Rollback_CaptureFrameDiagSnapshot(f, /*isResim=*/true, /*postOnly=*/true);
+        NDJSON_CaptureFrame(f, /*isResim=*/true, /*postOnly=*/true);
 
-        Rollback_QueuePendingResimDump(f);
+        NDJSON_QueuePendingResimDump(f);
         frameTimer.Add(profile.frameDiagPost);
         frameTimer.Finish(profile.frameTotal, profile.frameTotalMax);
     }
@@ -5268,9 +3661,7 @@ static void __fastcall hkMvc3Main_move(uint64_t param_1)
         Rollback_SaveSnapshot(g_f7StartFrame);
         // Initialize diag session so Rollback_ReSimulate reuses the same one
         // (live per-frame dumps during recording + resim dumps side by side).
-        Rollback_DiagInit();
-        g_f7DiagSession = g_diagSessionId;
-        g_diagSessionId++;
+        g_f7DiagSession = NDJSON_BeginSession(true);
         g_f7State = 2;
         HookLog("F7: snapshot saved at frame %d, recording %d frames\n",
                 g_f7StartFrame, g_f7Remaining);
@@ -5280,7 +3671,7 @@ static void __fastcall hkMvc3Main_move(uint64_t param_1)
         if (g_f7Remaining <= 0) {
             // Last recording frame — capture live state before re-sim (Pre-Tick)
             if (g_f7DiagSession >= 0) {
-                Rollback_DumpNDJSON(curFrame, 0);
+                NDJSON_DumpFrame(curFrame, 0);
             }
             g_f7State = 0;
             HookLog("F7: %d frames recorded, restoring frame %d and re-simulating\n",
@@ -5335,67 +3726,7 @@ static void __fastcall hkMvc3Main_move(uint64_t param_1)
                 // including per-frame resim results for BOTH teams' point
                 // characters so their NDJSON log shows both sides' states.
                 if (g_ndjsonLoggingEnabled) {
-                    ResimNotifyPacket rnPkt = {};
-                    rnPkt.type = PACKET_RESIM_NOTIFY;
-                    rnPkt.resimStartFrame = rs;
-                    rnPkt.resimEndFrame = re;
-                    rnPkt.correctedTeam = Netplay_IsHost() ? 1 : 0;
-                    int32_t notifyStart = rs - 2;
-                    if (notifyStart < 0) notifyStart = 0;
-                    int32_t notifyEnd = re + 2;
-                    int32_t frameCount = 0;
-                    for (int32_t f = notifyStart; f < notifyEnd && frameCount < MAX_RESIM_FRAMES; f++)
-                    {
-                        auto& rf = rnPkt.frames[frameCount];
-                        rf.frame = f;
-
-                        auto fillLive = [](ResimCharState& dst, const LiveFrameRecord& src) {
-                        dst.actionId = src.actionId;
-                        dst.posX     = src.posX;
-                        dst.posY     = src.posY;
-                        dst.posZ     = src.posZ;
-                        dst.flags    = src.flags14F0;
-                        dst.mHeld    = src.mHeld;
-                        dst.frameCnt = src.frameCnt;
-                        for (int ri = 0; ri < 4; ri++)
-                            dst.rng[ri] = src.rng[ri];
-                    };
-
-                    bool isResimFrame = (f >= rs && f < re);
-                    if (isResimFrame)
-                    {
-                        // PRE state from g_liveRef (live state recorded during gameplay)
-                        uint32_t lrIdx = (uint32_t)(f >= 0 ? f : 0) % 256;
-                        fillLive(rf.p1Pre, g_liveRef[0][lrIdx]);
-                        fillLive(rf.p2Pre, g_liveRef[1][lrIdx]);
-
-                        // POST state from pending resim dump (resimulation output)
-                        uint32_t pidx = (uint32_t)(f >= 0 ? f : 0) % PENDING_RESIM_DUMP_RING;
-                        if (g_pendingResimDumpValid[pidx] && g_pendingResimDumps[pidx].frame == f) {
-                            rf.p1Post = g_pendingResimDumps[pidx].p1Post;
-                            rf.p2Post = g_pendingResimDumps[pidx].p2Post;
-                        } else {
-                            // Fallback: post == pre if dump not available
-                            rf.p1Post = rf.p1Pre;
-                            rf.p2Post = rf.p2Pre;
-                        }
-                    }
-                    else
-                    {
-                        // Context frame: pre == post == live state from g_liveRef
-                        uint32_t liveIdx = (uint32_t)(f >= 0 ? f : 0) % 256;
-                        fillLive(rf.p1Pre,  g_liveRef[0][liveIdx]);
-                        fillLive(rf.p1Post, g_liveRef[0][liveIdx]);
-                        fillLive(rf.p2Pre,  g_liveRef[1][liveIdx]);
-                        fillLive(rf.p2Post, g_liveRef[1][liveIdx]);
-                    }
-
-                        rf.usedInput = Controller_GetUsedRemoteInput(f);
-                        rf.recvInput = Controller_GetReceivedRemoteInput(f);
-                        frameCount++;
-                    }
-                    rnPkt.frameCount = (uint32_t)frameCount;
-                    Netplay_SendResimNotify(rnPkt);
+                    NDJSON_SendResimNotify(rs, re);
                 }
                 const uint64_t notifyEnd = Profile_Now();
 
@@ -5438,24 +3769,24 @@ static void __fastcall hkMvc3Main_move(uint64_t param_1)
     // 6. Unconditional Netplay Live NDJSON logging at the start of the frame (Pre-Tick)
     // Runs only after any pending rollbacks/re-simulations have stabilized the frame state
     if (Netplay_IsActive() && curFrame >= 0) {
-        Rollback_DumpNetplayLive(curFrame);
+        NDJSON_DumpNetplayLive(curFrame);
     }
 
     // 7. Capture corrected PRE-state before the tick
     if (curFrame >= 0) {
-        Rollback_CaptureFrameDiagSnapshot(curFrame, /*isResim=*/false, /*postOnly=*/false);
+        NDJSON_CaptureFrame(curFrame, /*isResim=*/false, /*postOnly=*/false);
     }
 
     oMvc3Main_move(param_1);
 
     // 8. Capture POST-state after the tick (preserves the pre-state captured above)
     if (curFrame >= 0) {
-        Rollback_CaptureFrameDiagSnapshot(curFrame, /*isResim=*/false, /*postOnly=*/true);
+        NDJSON_CaptureFrame(curFrame, /*isResim=*/false, /*postOnly=*/true);
     }
 
     // F7 live capture during recording for frames 1-7
     if (g_f7DiagSession >= 0 && g_f7State == 2) {
-        Rollback_DumpNDJSON(curFrame, 0);
+                        NDJSON_DumpFrame(curFrame, 0);
     }
 }
 

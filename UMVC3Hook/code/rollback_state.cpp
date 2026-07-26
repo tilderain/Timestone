@@ -13,6 +13,3 @@ int g_f7State = 0;
 int32_t g_f7StartFrame = 0;
 int g_f7Remaining = 0;
 int g_f7DiagSession = -1;
-
-bool g_ndjsonLoggingEnabled = true;
-bool g_ndjsonIncludeDirHistory = false;
