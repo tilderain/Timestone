@@ -2,15 +2,15 @@
 
 // Private rollback implementation boundaries.
 //
-// rollback.cpp owns snapshot storage, dynamic object reconstruction, diagnostics,
-// re-simulation orchestration, and hook installation. These areas currently
-// share SnapshotSlot and recipe lifetime state and must remain in one translation
-// unit until those invariants have explicit interfaces.
+// rollback.cpp owns snapshot storage, dynamic object reconstruction, and
+// re-simulation. These areas share SnapshotSlot and recipe lifetime state.
 //
 // rollback_tick.cpp owns frame-pacing/render patch state and the optional
 // headless tick entry point.
 //
 // rollback_runtime.cpp owns independent native determinism policy.
+//
+// rollback_hooks.cpp owns main-loop orchestration and presentation/timing guards.
 //
 // rollback_memory.cpp owns game-memory validation and DTI hierarchy queries.
 //

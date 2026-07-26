@@ -89,6 +89,8 @@ extern int      g_f7DiagSession;
 // Request a re-simulate from the controller layer — consumed by hkMvc3Main_move.
 // Called when late-arriving remote input differs from what was predicted.
 void Rollback_RequestReSimulate(int32_t startFrame, int32_t endFrame);
+bool Rollback_ConsumeReSimRequest(int32_t& startFrame, int32_t& endFrame);
+void Rollback_SetMainInstance(uint64_t main);
 
 // Hook setup — installs the sMvc3Main__move hook for re-simulation stepping.
 void Rollback_InitHooks();

@@ -156,6 +156,9 @@
     <ClInclude Include="code\rollback_diagnostics.h">
       <Filter>Header Files\code</Filter>
     </ClInclude>
+    <ClInclude Include="code\rollback_hooks.h">
+      <Filter>Header Files\code</Filter>
+    </ClInclude>
     <ClInclude Include="code\rollback_memory.h">
       <Filter>Header Files\code</Filter>
     </ClInclude>
@@ -288,6 +291,9 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="code\rollback_diagnostics.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="code\rollback_hooks.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="code\rollback_runtime.cpp">

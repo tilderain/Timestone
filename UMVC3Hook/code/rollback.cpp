@@ -25,6 +25,7 @@
 #include "rollback_internal.h"
 #include "rollback_cleanup.h"
 #include "rollback_diagnostics.h"
+#include "rollback_hooks.h"
 #include "rollback_memory.h"
 #include "rollback_profile.h"
 #include "rollback_restore.h"
@@ -66,8 +67,6 @@ static constexpr uintptr_t PTR_SCAMERA      = 0x140e17930;
 static constexpr uintptr_t PTR_SCOLLISION   = 0x140e18250;
 
 // sMvc3Main__move — the full per-frame update pipeline
-static constexpr uintptr_t FN_SMVC3MAIN_MOVE = 0x1402594A0;
-static constexpr uintptr_t FN_CCHR_SET_POS    = 0x140002AF0;
 static constexpr uintptr_t FN_GAMEUI_SET_TEAM_CHARACTER_ID = 0x140022610;
 static constexpr uintptr_t FN_SSHOT_SPAWN = 0x140150E00;
 static constexpr uintptr_t FN_SSHOT_SPAWN_EX = 0x140150F40;
@@ -80,18 +79,11 @@ static constexpr uintptr_t FN_SUNIT_REMOVE_UNIT = 0x14051B9F0;
 static constexpr uintptr_t FN_SUNIT_REMOVE_MULTI_MASK = 0x14051BAF0;
 static constexpr uintptr_t FN_SUNIT_REGISTER_MULTI_MASK = 0x14051BDE0;
 static constexpr uintptr_t FN_UGAMEEFFECT_CREATE = 0x140131410;
-static constexpr uintptr_t FN_RCHRCPU_CLASS_FUNC = 0x140117280;
 static constexpr uintptr_t FN_RNG_RANDOM_INT = 0x14014EB30;
 static constexpr uintptr_t FN_HSIENKO_SELECT_ANKI = 0x1400A1260;
 static constexpr uintptr_t FN_SET_RESERVED_ANKI = 0x1400D4D90;
 static constexpr uintptr_t FN_BUILD_ATTACH_MATRIX = 0x14014F960;
 static constexpr uintptr_t FN_KIRIGAKURE_EFFECT_UPDATE = 0x14013B050;
-static constexpr uintptr_t FN_SMAIN_MOVE = 0x140521DF0;
-static constexpr uintptr_t FN_RENDER_END_FRAME = 0x14053A250;
-static constexpr uintptr_t FN_SSOUND_MOVE = 0x1405CC040;
-static constexpr uintptr_t FN_SGAMEUI_MOVE = 0x1402BE610;
-static constexpr uintptr_t FN_SCHEDULER_REBUILD = 0x14050F010;
-static constexpr uintptr_t FN_APPLY_COLLISION_PUSH = 0x14004AD20;
 static constexpr uintptr_t FN_RESET_HITNODES = 0x140259E90;
 
 // ===========================================================================
@@ -491,44 +483,6 @@ static int32_t g_rollbackReqStart = -1;
 static int32_t g_rollbackReqEnd   = -1;
 static uint64_t g_sMvc3Main      = 0;
 static void(__fastcall* oMvc3Main_move)(uint64_t param_1) = nullptr;
-using CChrSetPos_t = void(__fastcall*)(uint64_t character, const float* position);
-static CChrSetPos_t oCChrSetPos = nullptr;
-
-static void __fastcall hkCChrSetPos(uint64_t character, const float* position)
-{
-    if (g_isResimulating && character && position) {
-        const float* oldPosition = (const float*)(character + 0x50);
-        float deltaX = position[0] - oldPosition[0];
-        if (std::isfinite(deltaX) && std::fabs(deltaX) >= 0.001f) {
-            HookLog("[ResimSetPos] frame=%d chr=0x%llX caller=0x%llX "
-                    "old=[%.9g,%.9g,%.9g] src=[%.9g,%.9g,%.9g] dx=%.9g\n",
-                    g_resimulateCurrentFrame, character,
-                    (uint64_t)__builtin_return_address(0),
-                    oldPosition[0], oldPosition[1], oldPosition[2],
-                    position[0], position[1], position[2], deltaX);
-        }
-    }
-    oCChrSetPos(character, position);
-}
-// Trampoline for the render/present call — NOP'd during re-simulation
-static void(__fastcall* oCallSRender)(uint64_t param_1) = nullptr;
-// Trampoline for sMain__move (frame-timing / QPC / Sleep / busy-wait)
-static void(__fastcall* oMain_move)(uint64_t param_1) = nullptr;
-// Trampoline for sSound__move. Audio scene state is not rollback gameplay state.
-static void(__fastcall* oSound_move)(uint64_t param_1) = nullptr;
-// Trampoline for sGameUI__move. UI scheduler state is not rollback gameplay state.
-static void(__fastcall* oGameUi_move)(uint64_t param_1) = nullptr;
-// Trampoline for resource-backed scheduler setup. Its arrays are allocator-owned.
-static void(__fastcall* oSchedulerRebuild)(uint64_t scheduler) = nullptr;
-static bool(__fastcall* oRChrCpuClassFunc)(void* cpu, void* object) = nullptr;
-// Trampoline for the fighter pushbox collision callback.
-static void(__fastcall* oApplyCollisionPushCorrection)(
-    uint64_t character,
-    int callbackPhase,
-    uint64_t collisionObject,
-    uint64_t otherCharacter,
-    uint64_t collisionResult,
-    uint32_t collisionSlot) = nullptr;
 
  // static decltype(&QueryPerformanceCounter) g_real_qpc = nullptr;
 // static uint64_t g_virtual_qpc = 0;
@@ -3581,6 +3535,24 @@ void Rollback_RequestReSimulate(int32_t startFrame, int32_t endFrame)
     g_rollbackReqEnd   = endFrame;
 }
 
+bool Rollback_ConsumeReSimRequest(int32_t& startFrame, int32_t& endFrame)
+{
+    if (g_rollbackReqStart < 0)
+        return false;
+
+    startFrame = g_rollbackReqStart;
+    endFrame = g_rollbackReqEnd;
+    g_rollbackReqStart = -1;
+    g_rollbackReqEnd = -1;
+    return true;
+}
+
+void Rollback_SetMainInstance(uint64_t main)
+{
+    if (!g_sMvc3Main)
+        g_sMvc3Main = main;
+}
+
 void Rollback_FreeSnapshots()
 {
     // Make sure patched calls are restored before tearing down
@@ -3605,374 +3577,6 @@ void Rollback_FreeSnapshots()
     g_liveEffectRecipes.clear();
     g_shotSpawnSequence = 0;
     g_sMvc3Main = 0;
-}
-
-// ===========================================================================
-// Hook Setup — intercept sMvc3Main__move
-//
-// We hook the top-level frame update function (0x1402594A0) so we can:
-//   1. Capture the sMvc3Main instance pointer for re-simulation calls
-//   2. (Future) Gate execution during re-simulation or inject pre-frame logic
-// ===========================================================================
-
-static void __fastcall hkMvc3Main_move(uint64_t param_1)
-{
-    // Log EVERY call so we can tell if the game loop keeps running after re-sim
-    static int32_t frameCounter = 0;
-    frameCounter++;
-   // HookLog("hkMvc3Main_move: frame=%d g_isResimulating=%d\n",
-   //         frameCounter, (int)g_isResimulating);
-
-    // Capture the main manager pointer on first call
-    if (!g_sMvc3Main) {
-        g_sMvc3Main = param_1;
-        //HookLog("Rollback: captured sMvc3Main @ 0x%llX\n", param_1);
-    }
-
-    int32_t curFrame = (int32_t)Controller_GetNetFrameCount();
-
-    // 1. Process pending snapshot-restore request from FrameStepper_Process (F6 key).
-    // Execute at frame boundary (BEFORE oMvc3Main_move) to avoid mid-frame
-    // memory corruption when restoring shared game state.
-    static bool s_postRestoreTickDump = false;
-    if (g_restoreRequestedFrame >= 0) {
-        int32_t rf = g_restoreRequestedFrame;
-        g_restoreRequestedFrame = -1;
-        HookLog("Rollback: executing deferred restore to frame %d\n", rf);
-        Rollback_RestoreSnapshot(rf);
-        s_postRestoreTickDump = true;
-    }
-
-    // 2. Process pending re-sim request from HookUpdate thread (FrameStepper_Process).
-    // Execute it HERE on the main game thread so sRender path runs safely.
-    if (g_resimRequestedStart >= 0) {
-        int32_t rs = g_resimRequestedStart;
-        int32_t re = g_resimRequestedEnd;
-        g_resimRequestedStart = -1;
-        g_resimRequestedEnd   = -1;
-        Rollback_ReSimulate(rs, re);
-        // After re-sim, let the normal frame proceed
-    }
-
-    // 3. Process F7 re-sim test: save snapshot, record N frames of normal play, restore
-    // and re-sim with the captured inputs (exercises the full rollback path).
-    if (g_f7State == 1) {
-        g_f7StartFrame = (int32_t)Controller_GetNetFrameCount();
-        Rollback_SaveSnapshot(g_f7StartFrame);
-        // Initialize diag session so Rollback_ReSimulate reuses the same one
-        // (live per-frame dumps during recording + resim dumps side by side).
-        g_f7DiagSession = NDJSON_BeginSession(true);
-        g_f7State = 2;
-        HookLog("F7: snapshot saved at frame %d, recording %d frames\n",
-                g_f7StartFrame, g_f7Remaining);
-    }
-    if (g_f7State == 2) {
-        g_f7Remaining--;
-        if (g_f7Remaining <= 0) {
-            // Last recording frame — capture live state before re-sim (Pre-Tick)
-            if (g_f7DiagSession >= 0) {
-                NDJSON_DumpFrame(curFrame, 0);
-            }
-            g_f7State = 0;
-            HookLog("F7: %d frames recorded, restoring frame %d and re-simulating\n",
-                    8, g_f7StartFrame);
-            Rollback_ReSimulate(g_f7StartFrame, g_f7StartFrame + 8);
-            g_f7DiagSession = -1;
-
-            int32_t updatedFrame = (int32_t)Controller_GetNetFrameCount();
-            if (updatedFrame >= 0) {
-                Rollback_SaveSnapshot(updatedFrame);
-                g_postResimFrame = updatedFrame;
-            }
-        }
-    }
-
-    // ==================================================================
-    // 4. Auto-snapshot + rollback for netplay (only on main game thread,
-    // not during re-sim).  Only active when rollback frames > 0.
-    // ==================================================================
-    if (Netplay_IsActive() && FrameStepper_IsBattleSynchronized() &&
-        !g_isResimulating && Controller_IsRollbackEnabled())
-    {
-        // Only snapshot + rollback when the sAction battle step is active
-        // i.e. countdown or fighting).  Menus/loading screens don't need
-        // rollback state and the frame counter jumps around there.
-        typedef uint64_t(__fastcall* GetAction_t)();
-        static GetAction_t getAction = (GetAction_t)_addr(0x140001A90);
-        uint64_t action = getAction();
-        int step = action ? *(int*)(action + 0xD8) : 0;
-        if (step >= 0)
-        {
-            // Clear post-resim boundary flag at start of each frame.
-            // This ensures the flag is active for exactly one live tick
-            // (the one immediately after Rollback_ReSimulate returns).
-            if (!g_isResimulating)
-                g_postResimFrame = -1;
-
-            // Save snapshot for the current frame BEFORE the game tick
-            Rollback_SaveSnapshot(curFrame);
-
-            // Consume any pending rollback request from controller.cpp
-            if (g_rollbackReqStart >= 0)
-            {
-                int32_t rs = g_rollbackReqStart;
-                int32_t re = g_rollbackReqEnd;
-                g_rollbackReqStart = -1;
-                g_rollbackReqEnd   = -1;
-                Rollback_ReSimulate(rs, re);
-                const uint64_t postResimStart = Profile_Now();
-
-                // Notify the remote peer which frames we just re-simulated,
-                // including per-frame resim results for BOTH teams' point
-                // characters so their NDJSON log shows both sides' states.
-                if (g_ndjsonLoggingEnabled) {
-                    NDJSON_SendResimNotify(rs, re);
-                }
-                const uint64_t notifyEnd = Profile_Now();
-
-                // Re-resolve the current frame's remote input — packets that
-                // arrived during the resim may now provide real data where we
-                // only had a prediction before.
-                Controller_ResolveRemoteInput(curFrame);
-                //HookLog("Rollback: re-resolved remote input for frame %d\n", curFrame);
-
-                // After re-sim, re-save the current frame's snapshot so it
-                // reflects the corrected state at start of curFrame.
-                const uint64_t postSaveStart = Profile_Now();
-                Rollback_SaveSnapshot(curFrame);
-                const uint64_t postSaveEnd = Profile_Now();
-                if (Profile_Enabled()) {
-                    Profile_DumpPostResim(curFrame,
-                                          notifyEnd - postResimStart,
-                                          postSaveStart - notifyEnd,
-                                          postSaveEnd - postSaveStart,
-                                          postSaveEnd - postResimStart);
-                }
-
-                // Flag the first post-resim live tick for diagnostic logging.
-                g_postResimFrame = curFrame;
-                //HookLog("Rollback: resim complete, live tick frame=%d (post-resim boundary)\n",
-                        //curFrame);
-            }
-        }
-    }
-
-    // 5. Early return if we are in the middle of re-simulation
-    if (g_isResimulating) {
-        oMvc3Main_move(param_1);
-        return;
-    }
-
-    // Update curFrame to ensure we log/capture using the corrected frame timeline
-    curFrame = (int32_t)Controller_GetNetFrameCount();
-
-    // 6. Unconditional Netplay Live NDJSON logging at the start of the frame (Pre-Tick)
-    // Runs only after any pending rollbacks/re-simulations have stabilized the frame state
-    if (Netplay_IsActive() && curFrame >= 0) {
-        NDJSON_DumpNetplayLive(curFrame);
-    }
-
-    // 7. Capture corrected PRE-state before the tick
-    if (curFrame >= 0) {
-        NDJSON_CaptureFrame(curFrame, /*isResim=*/false, /*postOnly=*/false);
-    }
-
-    oMvc3Main_move(param_1);
-
-    // 8. Capture POST-state after the tick (preserves the pre-state captured above)
-    if (curFrame >= 0) {
-        NDJSON_CaptureFrame(curFrame, /*isResim=*/false, /*postOnly=*/true);
-    }
-
-    // F7 live capture during recording for frames 1-7
-    if (g_f7DiagSession >= 0 && g_f7State == 2) {
-                        NDJSON_DumpFrame(curFrame, 0);
-    }
-}
-
-// Keep the callback's phase-1 collision-node state transition, but suppress
-// phase 0, which accumulates the player-to-player separation correction.
-static void __fastcall hkApplyCollisionPushCorrection(
-    uint64_t character,
-    int callbackPhase,
-    uint64_t collisionObject,
-    uint64_t otherCharacter,
-    uint64_t collisionResult,
-    uint32_t collisionSlot)
-{
-    if (callbackPhase != 0 && oApplyCollisionPushCorrection) {
-        oApplyCollisionPushCorrection(
-            character,
-            callbackPhase,
-            collisionObject,
-            otherCharacter,
-            collisionResult,
-            collisionSlot);
-    }
-}
-
-// ===========================================================================
-// Hook - sRender__endFrameAndPresent
-//
-// Called at the end of sMvc3Main__move as the last operation on the render
-// manager (sMain+0x40190).  Performs frame-rate checking, Present(), and
-// swap-chain management.
-//
-// During re-sim (g_isResimulating) we skip this entirely to avoid the
-// ~16ms VSYNC wait per frame.  The re-sim now runs on the main game thread
-// (via g_resimRequestedStart/End consumed in hkMvc3Main_move), so skipping
-// this is safe — no thread-safety issue with the render path.
-// ===========================================================================
-static void __fastcall hkCallSRender(uint64_t param_1)
-{
-    RollbackHookProfileScope profile(RollbackHookProfileId::RenderEndFrame);
-    if (g_isResimulating) {
-        return;
-    }
-    oCallSRender(param_1);
-}
-
-static void __fastcall hkSound_move(uint64_t param_1)
-{
-    RollbackHookProfileScope profile(RollbackHookProfileId::SoundMove);
-    // Sound scenes contain live emitter/model pointers and transient matrix
-    // indices. They are cosmetic and are not part of the rollback snapshot, so
-    // advancing them during headless ticks can dereference abandoned objects.
-    if (g_isResimulating)
-        return;
-
-    // sScene__updateSoundEnv calls uBaseModel's matrix virtual at +0xA0 without
-    // validating the attachment. A rollback can destroy or reuse a transient
-    // model while its sound scene remains live. The reused address may still be
-    // a valid object with an executable +0xA0 slot, so require model ancestry.
-    // sSound__updateSceneArray indexes scenes as sSound+0x70+i*0xB50 and
-    // reads the active count from +0x1CF50. These are inline sScene records,
-    // not the unrelated storage near +0x16A70 used by the old guard.
-    constexpr uint32_t SOUND_SCENE_COUNT_OFFSET = 0x1CF50;
-    constexpr uint32_t SOUND_SCENE_FIRST_OFFSET = 0x70;
-    constexpr uint32_t SOUND_SCENE_STRIDE = 0xB50;
-    constexpr uint32_t SOUND_SCENE_MODEL_OFFSET = 0x80;
-    constexpr uint32_t SOUND_SCENE_MAX_COUNT = 40;
-
-    uint32_t sceneCount = *(uint32_t*)(param_1 + SOUND_SCENE_COUNT_OFFSET);
-    if (sceneCount <= SOUND_SCENE_MAX_COUNT) {
-        for (uint32_t i = 0; i < sceneCount; ++i) {
-            uint64_t scene = param_1 + SOUND_SCENE_FIRST_OFFSET +
-                (uint64_t)i * SOUND_SCENE_STRIDE;
-            uint64_t* modelSlot = (uint64_t*)(scene + SOUND_SCENE_MODEL_OFFSET);
-            uint64_t model = *modelSlot;
-            if (!model)
-                continue;
-
-            bool valid = IsBaseModelObject((void*)model);
-            uint64_t vtable = valid ? *(uint64_t*)model : 0;
-            valid = valid && IsAccessiblePointer(vtable) &&
-                IsAccessibleAddress(vtable + 0xA0);
-            uint64_t getMatrix = valid ? *(uint64_t*)(vtable + 0xA0) : 0;
-            if (!valid || !IsExecutableAddress(getMatrix)) {
-                HookLog("Rollback: detached stale sound scene model scene=%u model=0x%llX vtable=0x%llX\n",
-                        i, model, vtable);
-                *modelSlot = 0;
-            }
-        }
-    }
-
-    oSound_move(param_1);
-}
-
-static void __fastcall hkGameUi_move(uint64_t param_1)
-{
-    RollbackHookProfileScope profile(RollbackHookProfileId::GameUiMove);
-    // Re-simulation currently runs the full native sMvc3Main__move rather than
-    // Rollback_HeadlessTick. Keep unsnapshotted UI resources and scheduler
-    // arrays on the final presentation timeline only.
-    if (g_isResimulating)
-        return;
-
-    oGameUi_move(param_1);
-}
-
-static void __fastcall hkSchedulerRebuild(uint64_t scheduler)
-{
-    RollbackHookProfileScope profile(RollbackHookProfileId::SchedulerRebuild);
-    // UI and battle-message units can both be created through sUnit while
-    // replaying frames. Merely skipping the allocation leaves the new unit in
-    // active state 2 with an empty scheduler, so it survives onto the final
-    // timeline and repeated rollbacks accumulate presentation objects. Retire
-    // it through sUnit's normal state-3 two-phase destruction path instead.
-    if (g_isResimulating) {
-        uint32_t* state = (uint32_t*)(scheduler + 0x10);
-        *state = (*state & ~7u) | 3u;
-        return;
-    }
-
-    oSchedulerRebuild(scheduler);
-}
-
-static bool __fastcall hkRChrCpuClassFunc(void* cpu, void* object)
-{
-    RollbackHookProfileScope profile(RollbackHookProfileId::ChrCpuClassFunc);
-    // This opcode pops a 64-bit object from two 32-bit VM stack entries and
-    // immediately calls object->vtable[0x20]. A rewound script can reach the
-    // opcode with an ordinary packed script value (the observed crash used
-    // 0x0000008400000084). Native behavior for null/type mismatch is false, so
-    // reject values that cannot be safely dispatched as MtObject instances.
-    uint64_t address = (uint64_t)object;
-    if (!IsAccessiblePointer(address))
-        return false;
-
-    uint64_t vtable = *(uint64_t*)address;
-    if (!IsAccessiblePointer(vtable) || !IsAccessibleAddress(vtable + 0x20))
-        return false;
-
-    uint64_t getDti = *(uint64_t*)(vtable + 0x20);
-    if (!IsExecutableAddress(getDti))
-        return false;
-
-    return oRChrCpuClassFunc(cpu, object);
-}
-
-// ===========================================================================
-// Hook — sMain__move (frame timing / Sleep / busy-wait)
-//
-// Reads QPC, computes frame deltas, NOPs Sleep calls, and spins in a
-// busy-wait for frame pacing.  During re-simulation we skip it entirely
-// (just set tick count to 1) because:
-//   1. Sleep is already NOP'd by Rollback_PatchSleep, but the busy-wait
-//      still spins for the full frame time (~16ms @ 60fps).
-//   2. Accumulated/deadline timing values drift across calls, causing
-//      progressively longer busy-waits that eventually hang forever.
-//   3. We sync QPC state via Rollback_ResyncMainTiming after the loop.
-// ===========================================================================
-static void __fastcall hkMain_move(uint64_t param_1)
-{
-    RollbackHookProfileScope profile(RollbackHookProfileId::MainMove);
-    if (g_isResimulating) {
-        // Force tick=0 so the game's dispatcher loop won't call
-        // sMvc3Main__move again.  Setting tick=1 was the root cause
-        // of the infinite loop: the dispatcher checked tick, saw 1,
-        // called sMvc3Main__move which hit hkMvc3Main_move (SKIPPED),
-        // tick was never consumed, so the dispatcher looped forever.
-        *(uint32_t*)(param_1 + 0x48) = 0;
-        // Deterministic frame delta during re-sim: sMain__move is skipped so
-        // mDeltaTime (+0x80) would stay frozen at the snapshot value.  The
-        // dash double-tap timers in cChrInput_inputMaskPostProcess do
-        // acc += mDeltaTime each frame (thresholds 2.0/3.0/8.0/10.0 frames),
-        // so it must be exactly 1.0 per simulated frame.
-        *(float*)(param_1 + 0x80) = 1.0f;
-        return;
-    }
-
-    oMain_move(param_1);
-
-    // Netplay determinism: mDeltaTime (+0x80) is QPC-derived wall-clock
-    // jitter (≈1.0 but different on each machine every frame).  The dash
-    // double-tap window timers integrate it, so host and client drift apart
-    // and eventually detect dashes on different frames (frame-227 desync).
-    // Force exactly 1 frame of game time per tick on both machines.
-    if (Netplay_IsActive()) {
-        *(float*)(param_1 + 0x80) = 1.0f;
-    }
 }
 
 // ===========================================================================
@@ -4005,28 +3609,9 @@ void Rollback_InitHooks()
     //     }
     // }
 
-    MH_STATUS s = MH_CreateHook(
-        (LPVOID)_addr(FN_SMVC3MAIN_MOVE),
-        (LPVOID)&hkMvc3Main_move,
-        (LPVOID*)&oMvc3Main_move
-    );
+    Rollback_InitMainHooks(&oMvc3Main_move);
 
-    if (s == MH_OK) {
-        MH_EnableHook((LPVOID)_addr(FN_SMVC3MAIN_MOVE));
-        HookLog("Rollback: hooked sMvc3Main__move (0x%llX)\n",
-                (uint64_t)_addr(FN_SMVC3MAIN_MOVE));
-    } else {
-        HookLog("Rollback: failed to hook sMvc3Main__move (%d)\n", s);
-    }
-
-    s = MH_CreateHook((LPVOID)_addr(FN_CCHR_SET_POS),
-                      (LPVOID)&hkCChrSetPos, (LPVOID*)&oCChrSetPos);
-    if (s == MH_OK) {
-        //MH_EnableHook((LPVOID)_addr(FN_CCHR_SET_POS));
-        HookLog("Rollback: hooked cChr__setPos for resim diagnostics\n");
-    } else {
-        HookLog("Rollback: failed to hook cChr__setPos (%d)\n", s);
-    }
+    MH_STATUS s;
 
     s = MH_CreateHook((LPVOID)_addr(FN_SSHOT_SPAWN),
                       (LPVOID)&hkShotSpawn, (LPVOID*)&oShotSpawn);
@@ -4134,98 +3719,6 @@ void Rollback_InitHooks()
         HookLog("Rollback: guarded uKirigakureEffect weak attachment\n");
     } else {
         HookLog("Rollback: failed to guard uKirigakureEffect attachment (%d)\n", s);
-    }
-
-    s = MH_CreateHook(
-        (LPVOID)_addr(FN_APPLY_COLLISION_PUSH),
-        (LPVOID)&hkApplyCollisionPushCorrection,
-        (LPVOID*)&oApplyCollisionPushCorrection
-    );
-    if (s == MH_OK) {
-    //    MH_EnableHook((LPVOID)_addr(FN_APPLY_COLLISION_PUSH));
-    //    HookLog("Rollback: player collision pushboxes disabled (0x%llX)\n",
-    //            (uint64_t)_addr(FN_APPLY_COLLISION_PUSH));
-    } else {
-        HookLog("Rollback: failed to disable player collision pushboxes (%d)\n", s);
-    }
-
-    // Render/present function — NOP during re-sim so the full game tick
-    // (oMvc3Main_move) can be called from Rollback_ReSimulate without
-    // actually drawing to the screen.
-    s = MH_CreateHook(
-        (LPVOID)_addr(FN_RENDER_END_FRAME),
-        (LPVOID)&hkCallSRender,
-        (LPVOID*)&oCallSRender
-    );
-    if (s == MH_OK) {
-        MH_EnableHook((LPVOID)_addr(FN_RENDER_END_FRAME));
-        HookLog("Rollback: hooked sRender call (0x%llX)\n",
-                (uint64_t)_addr(FN_RENDER_END_FRAME));
-    } else {
-        HookLog("Rollback: failed to hook sRender call (%d)\n", s);
-    }
-
-    s = MH_CreateHook(
-        (LPVOID)_addr(FN_SSOUND_MOVE),
-        (LPVOID)&hkSound_move,
-        (LPVOID*)&oSound_move
-    );
-    if (s == MH_OK) {
-        MH_EnableHook((LPVOID)_addr(FN_SSOUND_MOVE));
-        HookLog("Rollback: hooked sSound__move for headless re-simulation\n");
-    } else {
-        HookLog("Rollback: failed to hook sSound__move (%d)\n", s);
-    }
-
-    s = MH_CreateHook(
-        (LPVOID)_addr(FN_SGAMEUI_MOVE),
-        (LPVOID)&hkGameUi_move,
-        (LPVOID*)&oGameUi_move
-    );
-    if (s == MH_OK) {
-        MH_EnableHook((LPVOID)_addr(FN_SGAMEUI_MOVE));
-        HookLog("Rollback: hooked sGameUI__move for re-simulation suppression\n");
-    } else {
-        HookLog("Rollback: failed to hook sGameUI__move (%d)\n", s);
-    }
-
-    s = MH_CreateHook(
-        (LPVOID)_addr(FN_SCHEDULER_REBUILD),
-        (LPVOID)&hkSchedulerRebuild,
-        (LPVOID*)&oSchedulerRebuild
-    );
-    if (s == MH_OK) {
-        MH_EnableHook((LPVOID)_addr(FN_SCHEDULER_REBUILD));
-        HookLog("Rollback: hooked uScheduler rebuild for re-simulation suppression\n");
-    } else {
-        HookLog("Rollback: failed to hook uScheduler rebuild (%d)\n", s);
-    }
-
-    s = MH_CreateHook(
-        (LPVOID)_addr(FN_RCHRCPU_CLASS_FUNC),
-        (LPVOID)&hkRChrCpuClassFunc,
-        (LPVOID*)&oRChrCpuClassFunc
-    );
-    if (s == MH_OK) {
-        MH_EnableHook((LPVOID)_addr(FN_RCHRCPU_CLASS_FUNC));
-        HookLog("Rollback: guarded rChrCpu script object cast\n");
-    } else {
-        HookLog("Rollback: failed to guard rChrCpu script object cast (%d)\n", s);
-    }
-
-    // sMain__move (frame-timing / QPC / Sleep / busy-wait) — NOP during re-sim
-    // so the full game tick runs at full speed without frame-pacing waits.
-    s = MH_CreateHook(
-        (LPVOID)_addr(FN_SMAIN_MOVE),
-        (LPVOID)&hkMain_move,
-        (LPVOID*)&oMain_move
-    );
-    if (s == MH_OK) {
-        MH_EnableHook((LPVOID)_addr(FN_SMAIN_MOVE));
-        HookLog("Rollback: hooked sMain__move (0x%llX)\n",
-                (uint64_t)_addr(FN_SMAIN_MOVE));
-    } else {
-        HookLog("Rollback: failed to hook sMain__move (%d)\n", s);
     }
 
 }

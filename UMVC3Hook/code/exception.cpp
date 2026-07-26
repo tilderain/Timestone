@@ -98,6 +98,29 @@ bool IsExecutableAddress(uintptr_t address)
     return (memory.Protect & executable) != 0;
 }
 
+bool IsNetGalleryTeardownFault(const EXCEPTION_RECORD* exception, const CONTEXT* context)
+{
+#if defined(_M_X64) || defined(__x86_64__)
+    if (!exception || !context || exception->ExceptionCode != EXCEPTION_ACCESS_VIOLATION ||
+        exception->NumberParameters < 2 || exception->ExceptionInformation[0] != 0 ||
+        exception->ExceptionInformation[1] != 0x30)
+        return false;
+
+    const uintptr_t gameBase = reinterpret_cast<uintptr_t>(GetModuleHandleA(nullptr));
+    if (!gameBase || context->Rip != gameBase + 0x6D00 ||
+        !IsReadableRange(context->Rsp, sizeof(uintptr_t)))
+        return false;
+
+    // uBattleUiPauseNetGallery's destructor can post after sGameUI is gone.
+    // Match its leaf call into cSystem__enterCriticalSection, not other null locks.
+    return *reinterpret_cast<const uintptr_t*>(context->Rsp) == gameBase + 0x2BDB35;
+#else
+    (void)exception;
+    (void)context;
+    return false;
+#endif
+}
+
 bool ReadModuleImageInfo(HMODULE module, DWORD* timestamp, DWORD* imageSize)
 {
     if (!module || !timestamp || !imageSize ||
@@ -243,6 +266,8 @@ LONG WINAPI ExceptionHandler(PEXCEPTION_POINTERS info)
 
     const DWORD code = info->ExceptionRecord->ExceptionCode;
     if (!IsCatastrophicException(code))
+        return EXCEPTION_CONTINUE_SEARCH;
+    if (IsNetGalleryTeardownFault(info->ExceptionRecord, info->ContextRecord))
         return EXCEPTION_CONTINUE_SEARCH;
     if (InterlockedExchange(&g_crashInFlight, 1) != 0)
         return EXCEPTION_CONTINUE_SEARCH;

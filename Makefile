@@ -43,6 +43,7 @@ CPP_SRC   := \
 	$(SRCDIR)/code/rollback.cpp \
 	$(SRCDIR)/code/rollback_cleanup.cpp \
 	$(SRCDIR)/code/rollback_diagnostics.cpp \
+	$(SRCDIR)/code/rollback_hooks.cpp \
 	$(SRCDIR)/code/rollback_memory.cpp \
 	$(SRCDIR)/code/rollback_restore.cpp \
 	$(SRCDIR)/code/rollback_runtime.cpp \
