@@ -4992,6 +4992,7 @@ static uint64_t fnv1a_64(const void* data, size_t len) {
 }
 
 static void Rollback_DiagInit() {
+return;
     if (!g_ndjsonLoggingEnabled) return;
     if (g_diagDir[0]) return;
     SYSTEMTIME st;
