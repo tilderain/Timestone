@@ -2,6 +2,7 @@
 
 #include "concrete_snapshot.h"
 #include "mk10utils.h"
+#include "rollback_profile.h"
 
 #include <cmath>
 #include <cstring>
@@ -58,20 +59,60 @@ constexpr DtiSnapshotRange kGeneratedShotTailRanges[] = {
 using GetPrimitiveFn = uint64_t(__fastcall*)(uint64_t, uint32_t);
 using GetMetadataFn = uint64_t(__fastcall*)(uint64_t, uint32_t);
 
+struct CachedMemoryRegion {
+    uint64_t start;
+    uint64_t end;
+    bool accessible;
+};
+
+static std::vector<CachedMemoryRegion> g_accessibleRegions;
+static bool g_cacheAccessibleRegions = false;
+
+class AccessibleRegionCacheScope {
+public:
+    AccessibleRegionCacheScope()
+    {
+        g_accessibleRegions.clear();
+        g_cacheAccessibleRegions = true;
+    }
+
+    ~AccessibleRegionCacheScope()
+    {
+        g_cacheAccessibleRegions = false;
+    }
+};
+
 bool Accessible(uint64_t address, size_t size = sizeof(uint64_t))
 {
-    if (address < 0x10000 || address >= 0x0000800000000000ull || size == 0)
-        return false;
-
-    MEMORY_BASIC_INFORMATION mbi = {};
-    if (VirtualQuery((void*)address, &mbi, sizeof(mbi)) == 0 ||
-        mbi.State != MEM_COMMIT ||
-        (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) != 0) {
+    if (address < 0x10000 || address >= 0x0000800000000000ull || size == 0 ||
+        size - 1 > UINT64_MAX - address) {
         return false;
     }
 
+    if (g_cacheAccessibleRegions) {
+        for (const CachedMemoryRegion& region : g_accessibleRegions) {
+            if (address >= region.start && address < region.end)
+                return region.accessible && size <= region.end - address;
+        }
+    }
+
+    MEMORY_BASIC_INFORMATION mbi = {};
+    if (VirtualQuery((void*)address, &mbi, sizeof(mbi)) == 0) {
+        if (g_cacheAccessibleRegions) {
+            constexpr uint64_t kPageSize = 0x1000;
+            uint64_t page = address & ~(kPageSize - 1);
+            g_accessibleRegions.push_back({page, page + kPageSize, false});
+        }
+        return false;
+    }
+
+    bool accessible = mbi.State == MEM_COMMIT &&
+        (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) == 0;
+    const uint64_t regionStart = (uint64_t)mbi.BaseAddress;
     const uint64_t regionEnd = (uint64_t)mbi.BaseAddress + mbi.RegionSize;
-    return address <= regionEnd && size <= regionEnd - address;
+    if (g_cacheAccessibleRegions)
+        g_accessibleRegions.push_back({regionStart, regionEnd, accessible});
+    return accessible && address < regionEnd && size <= regionEnd - address;
 }
 
 bool Executable(uint64_t address)
@@ -135,6 +176,19 @@ uint32_t DtiSize(uint64_t dti)
 bool IsDti(uint64_t dti, uintptr_t expected)
 {
     return dti == (uint64_t)_addr(expected);
+}
+
+bool IsGameImageAddress(uint64_t address)
+{
+    static const uint64_t imageBase = (uint64_t)GetMKXEntryPoint();
+    static const uint64_t imageEnd = []() {
+        const auto* dos = (const IMAGE_DOS_HEADER*)GetMKXEntryPoint();
+        if (!dos || dos->e_magic != IMAGE_DOS_SIGNATURE) return (uint64_t)0;
+        const auto* nt = (const IMAGE_NT_HEADERS64*)((const uint8_t*)dos + dos->e_lfanew);
+        if (nt->Signature != IMAGE_NT_SIGNATURE) return (uint64_t)0;
+        return (uint64_t)dos + nt->OptionalHeader.SizeOfImage;
+    }();
+    return address >= imageBase && address < imageEnd;
 }
 
 void CopyRange(void* destination, const uint8_t* source, size_t objectSize,
@@ -262,7 +316,9 @@ std::vector<SnapshotRange> FindEmbeddedObjects(const uint8_t* live,
          offset + sizeof(uint64_t) <= objectSize;
          offset += sizeof(uint64_t)) {
         uint64_t candidate = *(const uint64_t*)(live + offset);
-        if (candidate < kMinGameAddress || !Accessible(candidate + 0x28))
+        // An inline MtObject begins with a game-owned vtable. Reject ordinary
+        // heap/data pointers before any VirtualQuery or DTI virtual dispatch.
+        if (!IsGameImageAddress(candidate))
             continue;
 
         uint64_t dti = GetDti((void*)(live + offset));
@@ -495,16 +551,24 @@ bool ConcreteShotSnapshot_Restore(void* shot,
 {
     if (!shot || snapshot.body.size() < kShotBodyStart) return false;
 
+    // Pointer filtering revisits the same heap and module regions hundreds of
+    // times per shot. Cache VirtualQuery results only for this allocation-free
+    // restore operation; the next native factory starts with a fresh cache.
+    AccessibleRegionCacheScope accessibleRegionCache;
+    const uint64_t profileStart = Profile_Now();
+
     uint64_t liveDti = GetDti(shot);
     uint32_t liveSize = DtiSize(liveDti);
     if (liveDti != snapshot.dti || liveSize != snapshot.body.size() ||
         !Accessible((uint64_t)shot, liveSize)) {
         return false;
     }
+    const uint64_t validateEnd = Profile_Now();
 
     const uint8_t* source = snapshot.body.data();
     uint8_t* live = (uint8_t*)shot;
     std::vector<uint8_t> overlay(source, source + snapshot.body.size());
+    const uint64_t copyBodyEnd = Profile_Now();
 
     // The vtable and common unit state remain owned by the freshly-created
     // object. ShotFlightState restores the gameplay lifecycle bits safely.
@@ -518,6 +582,7 @@ bool ConcreteShotSnapshot_Restore(void* shot,
     // stale saved pointer. Confirmed scalar flight ranges are applied after
     // this overlay by the caller.
     PreserveLivePointers(overlay.data(), live, liveSize);
+    const uint64_t pointerScanEnd = Profile_Now();
 
     // uModel's joint count and allocation pointers describe the freshly-built
     // native model. A saved count with a null live index array makes rendering
@@ -553,6 +618,7 @@ bool ConcreteShotSnapshot_Restore(void* shot,
              live, liveSize, kShotRestoreStart)) {
         PreserveRange(overlay.data(), live, liveSize, range);
     }
+    const uint64_t embeddedLiveEnd = Profile_Now();
 
     // The saved timeline can contain an initialized inline effect where the
     // freshly constructed shot currently has inactive scalar storage. Detect
@@ -564,6 +630,7 @@ bool ConcreteShotSnapshot_Restore(void* shot,
              source, liveSize, kShotRestoreStart)) {
         PreserveRange(overlay.data(), live, liveSize, range);
     }
+    const uint64_t embeddedSavedEnd = Profile_Now();
 
     // createProperty value fields exported from properties_static.json are
     // ownership-free gameplay state. Reapply them after the pointer and
@@ -603,6 +670,7 @@ bool ConcreteShotSnapshot_Restore(void* shot,
     // intrusive links and remains owned by the freshly-created object.
     CopyRange(live, overlay.data(), liveSize,
               {kShotRestoreStart, liveSize - kShotRestoreStart});
+    const uint64_t applyBodyEnd = Profile_Now();
     // A fresh shot has empty cAtkCtrl target tables. Restore the saved
     // per-target hit count/time so reconstructing an already-consumed attack
     // cannot apply the same projectile to the same character a second time.
@@ -610,11 +678,23 @@ bool ConcreteShotSnapshot_Restore(void* shot,
     // but rewind mAtkInfoId, flags, combo and timing state through mAnmNo.
     CopyRange(live, source, liveSize, {0x1498, 0x28});
     RestoreAttackTargets(live, source, liveSize, validTargets, validTargetCount);
+    const uint64_t targetsEnd = Profile_Now();
     RestoreCollisionPrimitives(live, snapshot, validTargets, validTargetCount);
 
     for (const auto& saved : snapshot.collisionPrimitives) {
         if (!GetCollisionPrimitive(live, saved.slot, saved.index))
             return false;
+    }
+    const uint64_t collisionEnd = Profile_Now();
+    if (g_activeRollbackProfile) {
+        g_activeRollbackProfile->restoreConcreteValidate += validateEnd - profileStart;
+        g_activeRollbackProfile->restoreConcreteCopyBody += copyBodyEnd - validateEnd;
+        g_activeRollbackProfile->restoreConcretePointerScan += pointerScanEnd - copyBodyEnd;
+        g_activeRollbackProfile->restoreConcreteEmbeddedLive += embeddedLiveEnd - pointerScanEnd;
+        g_activeRollbackProfile->restoreConcreteEmbeddedSaved += embeddedSavedEnd - embeddedLiveEnd;
+        g_activeRollbackProfile->restoreConcreteApplyBody += applyBodyEnd - embeddedSavedEnd;
+        g_activeRollbackProfile->restoreConcreteTargets += targetsEnd - applyBodyEnd;
+        g_activeRollbackProfile->restoreConcreteCollision += collisionEnd - targetsEnd;
     }
     return true;
 }

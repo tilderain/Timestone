@@ -4,7 +4,7 @@
 #include <cstdint>
 
 // Set true for a profiling build. The disabled API compiles entirely away.
-inline constexpr bool ROLLBACK_PROFILING_ENABLED = false;
+inline constexpr bool ROLLBACK_PROFILING_ENABLED = true;
 
 enum class RollbackHookProfileId : uint8_t {
     ButtonRemap,
@@ -60,6 +60,35 @@ struct RollbackProfile {
     uint64_t restoreStalePointers = 0;
     uint64_t restoreEffectSlots = 0;
     uint64_t restoreShots = 0;
+    uint64_t restoreShotPinResources = 0;
+    uint64_t restoreShotPreSanitize = 0;
+    uint64_t restoreShotRetireEffects = 0;
+    uint64_t restoreShotCollect = 0;
+    uint64_t restoreShotDestroy = 0;
+    uint64_t restoreShotPostSanitize = 0;
+    uint64_t restoreShotSanitizeEffects = 0;
+    uint64_t restoreShotRespawnSetup = 0;
+    uint64_t restoreShotRespawn = 0;
+    uint64_t restoreShotRespawnPrepare = 0;
+    uint64_t restoreShotRespawnFactory = 0;
+    uint64_t restoreShotRespawnRegister = 0;
+    uint64_t restoreShotRespawnReleaseEffects = 0;
+    uint64_t restoreShotRespawnConcrete = 0;
+    uint64_t restoreConcreteValidate = 0;
+    uint64_t restoreConcreteCopyBody = 0;
+    uint64_t restoreConcretePointerScan = 0;
+    uint64_t restoreConcreteEmbeddedLive = 0;
+    uint64_t restoreConcreteEmbeddedSaved = 0;
+    uint64_t restoreConcreteApplyBody = 0;
+    uint64_t restoreConcreteTargets = 0;
+    uint64_t restoreConcreteCollision = 0;
+    uint64_t restoreShotRespawnOverlay = 0;
+    uint64_t restoreShotFinalize = 0;
+    uint32_t restoreEffectVisits = 0;
+    uint32_t restoreEffectSanitizeCalls = 0;
+    uint32_t restoreEffectGeneratorNodes = 0;
+    uint32_t restoreCurrentShots = 0;
+    uint32_t restoreSavedShots = 0;
     uint64_t restoreUi = 0;
     uint64_t inputAvailability = 0;
     uint64_t frameInput = 0;

@@ -327,22 +327,34 @@ static bool IsExecutableAddress(uint64_t value)
     return (mbi.Protect & executable) != 0;
 }
 
+static bool IsAccessibleRange(uint64_t value, size_t size)
+{
+    if (value < 0x10000 || value >= 0x0000800000000000ull || size == 0 ||
+        size - 1 > UINT64_MAX - value) {
+        return false;
+    }
+
+    MEMORY_BASIC_INFORMATION mbi = {};
+    if (VirtualQuery((void*)value, &mbi, sizeof(mbi)) == 0 ||
+        mbi.State != MEM_COMMIT ||
+        (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) != 0) {
+        return false;
+    }
+
+    const uint64_t regionEnd = (uint64_t)mbi.BaseAddress + mbi.RegionSize;
+    return value + size <= regionEnd;
+}
+
 static bool HasCallableDtiVirtual(const void* object)
 {
     uint64_t address = (uint64_t)object;
-    if (!IsAccessiblePointer(address)) return false;
+    if (!IsAccessibleRange(address, sizeof(uint64_t))) return false;
 
     uint64_t vtable = *(const uint64_t*)object;
-    if (!IsAccessibleAddress(vtable + 0x20)) return false;
+    if (!IsAccessibleRange(vtable, 0x28)) return false;
 
     uint64_t getDti = *(const uint64_t*)(vtable + 0x20);
-    if (!getDti || !IsAccessibleAddress(getDti)) return false;
-
-    MEMORY_BASIC_INFORMATION mbi = {};
-    if (VirtualQuery((void*)getDti, &mbi, sizeof(mbi)) == 0) return false;
-    const DWORD executable = PAGE_EXECUTE | PAGE_EXECUTE_READ |
-        PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
-    return (mbi.Protect & executable) != 0;
+    return getDti && IsExecutableAddress(getDti);
 }
 
 static bool IsUnitObject(const void* object)
@@ -411,6 +423,31 @@ static int SanitizeUnitCategoryLists(void* sUnit)
 {
     if (!sUnit || !IsAccessiblePointer((uint64_t)sUnit)) return 0;
 
+    struct ValidatedUnit {
+        void* unit;
+        bool valid;
+    };
+    std::vector<ValidatedUnit> validatedUnits;
+    validatedUnits.reserve(128);
+
+    auto isValidUnit = [&](void* unit) {
+        for (const ValidatedUnit& cached : validatedUnits) {
+            if (cached.unit == unit) return cached.valid;
+        }
+
+        bool valid = IsUnitObject(unit);
+        if (valid) {
+            uint32_t state = *(uint32_t*)((uint8_t*)unit + 0x10);
+            if ((state & 7u) == 2u && (state & 0x400u) != 0) {
+                uint64_t vtable = *(uint64_t*)unit;
+                valid = IsAccessibleAddress(vtable + 0x40) &&
+                        IsExecutableAddress(*(uint64_t*)(vtable + 0x40));
+            }
+        }
+        validatedUnits.push_back({unit, valid});
+        return valid;
+    };
+
     uint32_t categoryCount =
         *(uint32_t*)((uint8_t*)sUnit + SUNIT_CATEGORY_COUNT_OFFSET);
     if (categoryCount > SUNIT_MAX_CATEGORIES)
@@ -442,15 +479,7 @@ static int SanitizeUnitCategoryLists(void* sUnit)
             }
 
             void* next = *(void**)((uint8_t*)node + 0x18);
-            bool validUnit = IsUnitObject(node);
-            if (validUnit) {
-                uint32_t state = *(uint32_t*)((uint8_t*)node + 0x10);
-                if ((state & 7u) == 2u && (state & 0x400u) != 0) {
-                    uint64_t vtable = *(uint64_t*)node;
-                    validUnit = IsAccessibleAddress(vtable + 0x40) &&
-                                IsExecutableAddress(*(uint64_t*)(vtable + 0x40));
-                }
-            }
+            bool validUnit = isValidUnit(node);
             if (validUnit) {
                 previous = node;
                 node = next;
@@ -2037,7 +2066,9 @@ static void DetachEmbeddedShotEffect(void* shot);
 
 static void SanitizeEffectForDestruction(void* effect)
 {
-    if (!effect || !IsAccessiblePointer((uint64_t)effect + 0x230)) return;
+    if (!effect || !IsAccessibleRange((uint64_t)effect, 0x230)) return;
+    if (g_activeRollbackProfile)
+        ++g_activeRollbackProfile->restoreEffectSanitizeCalls;
 
     // uEffect::~uEffect releases the cResource at +0x108. A torn effect can
     // retain a small scalar here (0x120 in the 04:06 crash), which makes
@@ -2066,7 +2097,9 @@ static void SanitizeEffectForDestruction(void* effect)
         uint32_t cycleLength = 0;
         bool validGeneratorChain = true;
         for (int count = 0; node != 0 && count < 4096; ++count) {
-            if (!IsAccessiblePointer(node + 0x18)) {
+            if (g_activeRollbackProfile)
+                ++g_activeRollbackProfile->restoreEffectGeneratorNodes;
+            if (!IsAccessibleRange(node, 0x20)) {
                 validGeneratorChain = false;
                 break;
             }
@@ -2075,7 +2108,7 @@ static void SanitizeEffectForDestruction(void* effect)
             // destructor at vtable slot 0. Other update and draw slots are not part
             // of destruction and made this guard perform eight VirtualQuery calls
             // for every node in every retired effect.
-            if (!IsAccessibleAddress(vtable + sizeof(uint64_t) - 1) ||
+            if (!IsAccessibleRange(vtable, sizeof(uint64_t)) ||
                 !IsExecutableAddress(*(uint64_t*)vtable)) {
                 validGeneratorChain = false;
                 break;
@@ -2669,6 +2702,9 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
 
     void* sUnit = *(void**)_addr(PTR_SUNIT);
     auto removeUnit = (UnitRemoveFn)_addr(FN_SUNIT_REMOVE_UNIT);
+    const uint64_t profileStart = Profile_Now();
+    if (g_activeRollbackProfile)
+        g_activeRollbackProfile->restoreSavedShots += (uint32_t)slot.shotRecipes.size();
 
     // Each live uShot owns the rShot resource stored in its recipe. Pin every
     // resource before destroying current shots so native reconstruction cannot
@@ -2683,12 +2719,14 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
         addRef(saved.shotElement);
         pinnedShotResources.push_back(saved.shotElement);
     }
+    const uint64_t pinResourcesEnd = Profile_Now();
 
     int removedInvalidUnits = SanitizeUnitCategoryLists(sUnit);
     if (removedInvalidUnits != 0) {
         HookLog("Rollback: removed %d invalid sUnit category entries before restore\n",
-                removedInvalidUnits);
+                 removedInvalidUnits);
     }
+    const uint64_t preSanitizeEnd = Profile_Now();
 
     // Effect bodies and generator graphs are not rewound. Retaining even a
     // snapshot-era effect lets its independently advanced graph execute after
@@ -2703,6 +2741,8 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
                                  SUNIT_CATEGORY_LIST_STRIDE * category);
         int safety = 4096;
         while (effect && safety-- > 0) {
+            if (g_activeRollbackProfile)
+                ++g_activeRollbackProfile->restoreEffectVisits;
             void* next = *(void**)((uint8_t*)effect + 0x18);
             uint32_t* state = (uint32_t*)((uint8_t*)effect + 0x10);
             if (IsEffectObject(effect) && (*state & 7u) < 3u) {
@@ -2712,6 +2752,7 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
             effect = next;
         }
     }
+    const uint64_t retireEffectsEnd = Profile_Now();
 
     // A projectile that has already advanced cannot be made equivalent to its
     // saved state by patching trajectory fields: hit-consumption, collision,
@@ -2726,6 +2767,9 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
         if (!IsLinkedShot(entry.first)) continue;
         currentShots.push_back(entry.first);
     }
+    if (g_activeRollbackProfile)
+        g_activeRollbackProfile->restoreCurrentShots += (uint32_t)currentShots.size();
+    const uint64_t collectShotsEnd = Profile_Now();
     for (void* shot : currentShots) {
         // Some concrete shots embed an sEffect at +0x2140. Its destructor
         // unlinks through the owner and then walks owner+0xA8's child chain.
@@ -2749,28 +2793,39 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
         destroy(shot, 1);
         ++retiredShots;
     }
+    const uint64_t destroyShotsEnd = Profile_Now();
 
     // Concrete shot destructors can release attached uGameEffect objects
     // directly. Those effects may still be present in sUnit's primary and
     // multi-mask lists with a zeroed vtable, causing the next parallel move
     // job to dispatch through null at vtable+0x40. Remove such dead entries
     // after all shot-owned teardown has completed and before reconstruction.
-    int removedShotOwnedEffects = SanitizeUnitCategoryLists(sUnit);
+    // Only shot destructors can introduce the dead attached-effect entries this
+    // second pass repairs. With no current shots, topology is unchanged since
+    // the pre-restore sanitation pass, so rescanning every sUnit list is pure
+    // overhead.
+    int removedShotOwnedEffects = currentShots.empty()
+        ? 0
+        : SanitizeUnitCategoryLists(sUnit);
     if (removedShotOwnedEffects != 0) {
         HookLog("Rollback: removed %d dead sUnit entries after shot destruction\n",
-                removedShotOwnedEffects);
+                 removedShotOwnedEffects);
     }
+    const uint64_t postSanitizeEnd = Profile_Now();
     for (uint32_t category = 13; category <= 16 && category < categoryCount; ++category) {
         void* effect = *(void**)((uint8_t*)sUnit + SUNIT_CATEGORY_LISTS_OFFSET +
                                  SUNIT_CATEGORY_LIST_STRIDE * category);
         int safety = 4096;
         while (effect && safety-- > 0) {
+            if (g_activeRollbackProfile)
+                ++g_activeRollbackProfile->restoreEffectVisits;
             void* next = *(void**)((uint8_t*)effect + 0x18);
             if (IsEffectObject(effect))
                 SanitizeEffectForDestruction(effect);
             effect = next;
         }
     }
+    const uint64_t sanitizeEffectsEnd = Profile_Now();
 
     void* sShot = *(void**)_addr(PTR_SSHOT);
     auto enqueueUnit = (ShotEnqueueFn)_addr(FN_SSHOT_ENQUEUE_UNIT);
@@ -2820,8 +2875,16 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
                     sizeof(characterRng.state));
         restoredCharacterRngs.push_back(characterRng);
     }
+    const uint64_t respawnSetupEnd = Profile_Now();
 
+    uint64_t respawnPrepareTicks = 0;
+    uint64_t respawnFactoryTicks = 0;
+    uint64_t respawnRegisterTicks = 0;
+    uint64_t respawnReleaseEffectsTicks = 0;
+    uint64_t respawnConcreteTicks = 0;
+    uint64_t respawnOverlayTicks = 0;
     for (ShotRecipe& saved : slot.shotRecipes) {
+        const uint64_t prepareStart = Profile_Now();
         RestorePreSpawnRng(saved);
         void* objectRef1 = ValidateShotObjectReference(
             saved.objectRef1, saved.objectRef1Dti,
@@ -2829,6 +2892,8 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
         void* objectRef2 = ValidateShotObjectReference(
             saved.objectRef2, saved.objectRef2Dti,
             saved.objectRef2WasActiveUnit);
+        const uint64_t factoryStart = Profile_Now();
+        respawnPrepareTicks += factoryStart - prepareStart;
         void* fresh = saved.kind == ShotSpawnKind::Extended
             ? oShotSpawnEx(sShot, saved.shotElement, saved.initParam, saved.posData,
                            saved.ownerChr, objectRef1, saved.slotId,
@@ -2836,6 +2901,8 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
                            saved.exA11, saved.exA12)
             : oShotSpawn(sShot, saved.shotElement, saved.initParam, saved.posData,
                          saved.ownerChr, objectRef1, saved.slotId, objectRef2);
+        const uint64_t factoryEnd = Profile_Now();
+        respawnFactoryTicks += factoryEnd - factoryStart;
         if (!fresh) {
             failedShots++;
             continue;
@@ -2861,7 +2928,11 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
         if (pendingCount >= 0x200 || !enqueueUnit(sShot, fresh, SSHOT_CATEGORY)) {
             addUnit(sUnit, SSHOT_CATEGORY, fresh, nullptr);
         }
+        const uint64_t registerEnd = Profile_Now();
+        respawnRegisterTicks += registerEnd - factoryEnd;
         ReleaseFreshEmbeddedShotEffectGraph(fresh);
+        const uint64_t releaseEffectsEnd = Profile_Now();
+        respawnReleaseEffectsTicks += releaseEffectsEnd - registerEnd;
         const void* validTargets[6] = {};
         size_t validTargetCount = 0;
         uint64_t sCharacter = *(uint64_t*)_addr(PTR_SCHARACTER);
@@ -2878,8 +2949,10 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
         if (!ConcreteShotSnapshot_Restore(fresh, saved.concrete, validTargets,
                                           validTargetCount)) {
             HookLog("Rollback: restored shot 0x%llX has incomplete collision topology\n",
-                    (uint64_t)fresh);
+                     (uint64_t)fresh);
         }
+        const uint64_t concreteEnd = Profile_Now();
+        respawnConcreteTicks += concreteEnd - releaseEffectsEnd;
         RestoreKingKobunHelper(fresh, saved);
         if (saved.concrete.dti == (uint64_t)_addr(0x140D4D2B0) &&
             saved.concrete.body.size() >= 0x2164) {
@@ -2913,8 +2986,11 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
         // restoring the saved gameplay lifecycle bits.
         uint32_t* unitState = (uint32_t*)((uint8_t*)fresh + 0x10);
         *unitState = (*unitState & ~0x3F8u) | (SSHOT_CATEGORY << 3);
+        const uint64_t overlayEnd = Profile_Now();
+        respawnOverlayTicks += overlayEnd - concreteEnd;
         respawnedShots++;
     }
+    const uint64_t respawnEnd = Profile_Now();
 
     // Native enqueue increments the counter before rejecting an overflow. A
     // concurrent/native spawn during reconstruction can therefore poison it
@@ -2935,6 +3011,26 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
     }
     for (void* resource : pinnedShotResources)
         releaseRef(resource);
+    const uint64_t finalizeEnd = Profile_Now();
+
+    if (g_activeRollbackProfile) {
+        g_activeRollbackProfile->restoreShotPinResources += pinResourcesEnd - profileStart;
+        g_activeRollbackProfile->restoreShotPreSanitize += preSanitizeEnd - pinResourcesEnd;
+        g_activeRollbackProfile->restoreShotRetireEffects += retireEffectsEnd - preSanitizeEnd;
+        g_activeRollbackProfile->restoreShotCollect += collectShotsEnd - retireEffectsEnd;
+        g_activeRollbackProfile->restoreShotDestroy += destroyShotsEnd - collectShotsEnd;
+        g_activeRollbackProfile->restoreShotPostSanitize += postSanitizeEnd - destroyShotsEnd;
+        g_activeRollbackProfile->restoreShotSanitizeEffects += sanitizeEffectsEnd - postSanitizeEnd;
+        g_activeRollbackProfile->restoreShotRespawnSetup += respawnSetupEnd - sanitizeEffectsEnd;
+        g_activeRollbackProfile->restoreShotRespawn += respawnEnd - respawnSetupEnd;
+        g_activeRollbackProfile->restoreShotRespawnPrepare += respawnPrepareTicks;
+        g_activeRollbackProfile->restoreShotRespawnFactory += respawnFactoryTicks;
+        g_activeRollbackProfile->restoreShotRespawnRegister += respawnRegisterTicks;
+        g_activeRollbackProfile->restoreShotRespawnReleaseEffects += respawnReleaseEffectsTicks;
+        g_activeRollbackProfile->restoreShotRespawnConcrete += respawnConcreteTicks;
+        g_activeRollbackProfile->restoreShotRespawnOverlay += respawnOverlayTicks;
+        g_activeRollbackProfile->restoreShotFinalize += finalizeEnd - respawnEnd;
+    }
 
     HookLog("Rollback: retired shots=%d effects=%d; shot recipes respawned=%d failed=%d\n",
             retiredShots, retiredEffects, respawnedShots, failedShots);
@@ -6094,9 +6190,12 @@ static void __fastcall hkSound_move(uint64_t param_1)
     // validating the attachment. A rollback can destroy or reuse a transient
     // model while its sound scene remains live. The reused address may still be
     // a valid object with an executable +0xA0 slot, so require model ancestry.
-    constexpr uint32_t SOUND_SCENE_COUNT_OFFSET = 0x1CF54;
-    constexpr uint32_t SOUND_SCENE_FIRST_OFFSET = 0x16A70;
-    constexpr uint32_t SOUND_SCENE_STRIDE = 0xB30;
+    // sSound__updateSceneArray indexes scenes as sSound+0x70+i*0xB50 and
+    // reads the active count from +0x1CF50. These are inline sScene records,
+    // not the unrelated storage near +0x16A70 used by the old guard.
+    constexpr uint32_t SOUND_SCENE_COUNT_OFFSET = 0x1CF50;
+    constexpr uint32_t SOUND_SCENE_FIRST_OFFSET = 0x70;
+    constexpr uint32_t SOUND_SCENE_STRIDE = 0xB50;
     constexpr uint32_t SOUND_SCENE_MODEL_OFFSET = 0x80;
     constexpr uint32_t SOUND_SCENE_MAX_COUNT = 40;
 

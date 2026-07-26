@@ -161,9 +161,23 @@ void Profile_DumpEnabled(const RollbackProfile& profile, bool ndjsonEnabled,
                 "\"shot_recipes_ms\":%.6f},"
                 "\"restore\":{\"total_ms\":%.6f,\"setup_ms\":%.6f,\"regions_ms\":%.6f,"
                 "\"collision_clones_ms\":%.6f,\"owner_pointers_ms\":%.6f,"
-                "\"hit_solver_ms\":%.6f,\"stale_pointers_ms\":%.6f,"
-                "\"effect_slots_ms\":%.6f,\"shots_ms\":%.6f,\"ui_ms\":%.6f},"
-                "\"hooks\":[",
+                 "\"hit_solver_ms\":%.6f,\"stale_pointers_ms\":%.6f,"
+                 "\"effect_slots_ms\":%.6f,\"shots_ms\":%.6f,\"ui_ms\":%.6f},"
+                 "\"shot_restore\":{\"pin_resources_ms\":%.6f,\"pre_sanitize_ms\":%.6f,"
+                 "\"retire_effects_ms\":%.6f,\"collect_shots_ms\":%.6f,"
+                 "\"destroy_shots_ms\":%.6f,\"post_sanitize_ms\":%.6f,"
+                 "\"sanitize_effects_ms\":%.6f,\"respawn_setup_ms\":%.6f,"
+                 "\"respawn_ms\":%.6f,\"respawn_prepare_ms\":%.6f,"
+                 "\"respawn_factory_ms\":%.6f,\"respawn_register_ms\":%.6f,"
+                 "\"respawn_release_effects_ms\":%.6f,\"respawn_concrete_ms\":%.6f,"
+                 "\"concrete_validate_ms\":%.6f,\"concrete_copy_body_ms\":%.6f,"
+                 "\"concrete_pointer_scan_ms\":%.6f,\"concrete_embedded_live_ms\":%.6f,"
+                 "\"concrete_embedded_saved_ms\":%.6f,\"concrete_apply_body_ms\":%.6f,"
+                 "\"concrete_targets_ms\":%.6f,\"concrete_collision_ms\":%.6f,"
+                 "\"respawn_overlay_ms\":%.6f,\"finalize_ms\":%.6f,"
+                 "\"effect_visits\":%u,\"effect_sanitize_calls\":%u,"
+                 "\"generator_nodes\":%u,\"current_shots\":%u,\"saved_shots\":%u},"
+                 "\"hooks\":[",
                 profile.startFrame, profile.endFrame, frameCount, Profile_Ms(profile.total),
                 Profile_Ms(profile.frameTotal) / frameDivisor, Profile_Ms(profile.frameTotalMax),
                 ndjsonEnabled ? "true" : "false", multiResimEnabled ? "true" : "false",
@@ -184,9 +198,36 @@ void Profile_DumpEnabled(const RollbackProfile& profile, bool ndjsonEnabled,
                 Profile_Ms(profile.saveCollisionClones), Profile_Ms(profile.saveShotRecipes),
                 Profile_Ms(profile.restoreTotal), Profile_Ms(profile.restoreSetup),
                 Profile_Ms(profile.restoreRegions), Profile_Ms(profile.restoreCollisionClones),
-                Profile_Ms(profile.restoreOwnerPointers), Profile_Ms(profile.restoreHitSolver),
-                Profile_Ms(profile.restoreStalePointers), Profile_Ms(profile.restoreEffectSlots),
-                Profile_Ms(profile.restoreShots), Profile_Ms(profile.restoreUi));
+                 Profile_Ms(profile.restoreOwnerPointers), Profile_Ms(profile.restoreHitSolver),
+                 Profile_Ms(profile.restoreStalePointers), Profile_Ms(profile.restoreEffectSlots),
+                 Profile_Ms(profile.restoreShots), Profile_Ms(profile.restoreUi),
+                 Profile_Ms(profile.restoreShotPinResources),
+                 Profile_Ms(profile.restoreShotPreSanitize),
+                 Profile_Ms(profile.restoreShotRetireEffects),
+                 Profile_Ms(profile.restoreShotCollect),
+                 Profile_Ms(profile.restoreShotDestroy),
+                 Profile_Ms(profile.restoreShotPostSanitize),
+                 Profile_Ms(profile.restoreShotSanitizeEffects),
+                 Profile_Ms(profile.restoreShotRespawnSetup),
+                 Profile_Ms(profile.restoreShotRespawn),
+                 Profile_Ms(profile.restoreShotRespawnPrepare),
+                 Profile_Ms(profile.restoreShotRespawnFactory),
+                 Profile_Ms(profile.restoreShotRespawnRegister),
+                 Profile_Ms(profile.restoreShotRespawnReleaseEffects),
+                 Profile_Ms(profile.restoreShotRespawnConcrete),
+                 Profile_Ms(profile.restoreConcreteValidate),
+                 Profile_Ms(profile.restoreConcreteCopyBody),
+                 Profile_Ms(profile.restoreConcretePointerScan),
+                 Profile_Ms(profile.restoreConcreteEmbeddedLive),
+                 Profile_Ms(profile.restoreConcreteEmbeddedSaved),
+                 Profile_Ms(profile.restoreConcreteApplyBody),
+                 Profile_Ms(profile.restoreConcreteTargets),
+                 Profile_Ms(profile.restoreConcreteCollision),
+                 Profile_Ms(profile.restoreShotRespawnOverlay),
+                 Profile_Ms(profile.restoreShotFinalize),
+                 profile.restoreEffectVisits, profile.restoreEffectSanitizeCalls,
+                 profile.restoreEffectGeneratorNodes, profile.restoreCurrentShots,
+                 profile.restoreSavedShots);
 
         bool firstHook = true;
         for (size_t hook = 0; hook < (size_t)RollbackHookProfileId::Count; ++hook) {
