@@ -6,7 +6,7 @@
 #include "rollback_resim.h"
 #include "rollback_snapshot.h"
 #include "rollback_tick.h"
-#include "snapshot_ndjson.h"
+#include "rollback_ndjson.h"
 #include "controller.h"
 #include "mk10utils.h"
 #include "netplay.h"
@@ -15,6 +15,16 @@
 
 extern void HookLog(const char* fmt, ...);
 extern bool g_multiResimEnabled;
+
+bool g_isResimulating = false;
+int32_t g_resimulateCurrentFrame = 0;
+int32_t g_postResimFrame = -1;
+int32_t g_resimReentranceDepth = 0;
+int32_t g_restoreRequestedFrame = -1;
+int g_f7State = 0;
+int32_t g_f7StartFrame = 0;
+int g_f7Remaining = 0;
+int g_f7DiagSession = -1;
 
 static constexpr uintptr_t PTR_SREPLAY = 0x140d4d9d8;
 static constexpr uintptr_t PTR_SMAIN = 0x140e177e8;
@@ -64,6 +74,15 @@ void Rollback_ResetReSimulation()
     g_mainInstance = 0;
     g_requestStart = -1;
     g_requestEnd = -1;
+    g_isResimulating = false;
+    g_resimulateCurrentFrame = 0;
+    g_postResimFrame = -1;
+    g_resimReentranceDepth = 0;
+    g_restoreRequestedFrame = -1;
+    g_f7State = 0;
+    g_f7StartFrame = 0;
+    g_f7Remaining = 0;
+    g_f7DiagSession = -1;
 }
 
 void Rollback_ReSimulate(int32_t startFrame, int32_t endFrame)

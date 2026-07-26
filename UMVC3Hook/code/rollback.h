@@ -22,25 +22,24 @@ extern bool    g_isResimulating;
 extern int32_t g_resimulateCurrentFrame;
 extern int32_t g_resimReentranceDepth;
 
-// Re-sim request flags, set by FrameStepper_Process (HookUpdate thread),
-// consumed by hkMvc3Main_move (main game thread) so the re-sim runs on
-// the correct thread for D3D/render safety.  -1 means no request pending.
-extern int32_t g_resimRequestedStart;
-extern int32_t g_resimRequestedEnd;
-
 // When true, send a ResimNotify packet every frame (for NDJSON debugging),
 // not only when a rollback conflict triggers re-simulation.
 extern bool g_resimNotifyEveryFrame;
-
-// Snapshot-restore request flag — same deferral pattern.
-// Set by FrameStepper_Process (F6 key), consumed by hkMvc3Main_move at the
-// next frame boundary to avoid mid-frame memory corruption.
-extern int32_t g_restoreRequestedFrame;
 
 // Non-negative after Rollback_ReSimulate completes, holding the frame number
 // of the first post-resim live tick.  hkprocessFrameInput checks this to log
 // diagnostic info at the resim→live boundary.  Cleared after first use.
 extern int32_t g_postResimFrame;
+
+// Snapshot restore is deferred to the main game thread to avoid mid-frame
+// mutation from the frame-stepper hook.
+extern int32_t g_restoreRequestedFrame;
+
+// F7 rollback diagnostic state machine and active NDJSON session.
+extern int g_f7State;
+extern int32_t g_f7StartFrame;
+extern int g_f7Remaining;
+extern int g_f7DiagSession;
 
 // Master switch for all NDJSON serialization, buffering, and file output.
 extern bool g_ndjsonLoggingEnabled;
@@ -71,20 +70,6 @@ bool Rollback_GetNetplayLiveDirectory(char* path, size_t pathSize);
 // Patch aAction__init so custom netplay enters that native setup path itself.
 bool Rollback_PatchNativeNetplayDeterminism();
 void Rollback_ApplyNetplayDeterminism();
-
-// F7 re-sim test state machine:
-//   0 = idle
-//   1 = save snapshot on next frame boundary, then enter state 2
-//   2 = counting down g_f7Remaining frames of normal play
-//       when g_f7Remaining hits 0 → restore snapshot + re-sim
-extern int      g_f7State;
-extern int32_t  g_f7StartFrame;
-extern int      g_f7Remaining;
-
-// Diag session for per-frame live capture during F7 recording phase.
-// Set >=0 during recording; Rollback_ReSimulate reuses this session ID
-// so live and resim dumps appear side by side in the same files.
-extern int      g_f7DiagSession;
 
 // Request a re-simulate from the controller layer — consumed by hkMvc3Main_move.
 // Called when late-arriving remote input differs from what was predicted.

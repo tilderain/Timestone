@@ -178,9 +178,159 @@ void Rollback_PatchDrawCalls(bool enable)
     patched = enable;
 }
 
+
+//currently unused
+/*
 void Rollback_HeadlessTick(uint64_t sMain)
 {
-    // The native tick remains the active re-simulation path. Keep this API as
-    // an explicit no-op until the manually reconstructed pipeline is validated.
-    (void)sMain;
-}
+    if (!sMain) {
+        HookLog("Rollbackheadlesstick: smain is bad?:? :>\n");
+        return;
+    }
+
+    HookLog("Rollback_HeadlessTick: begin\n");
+
+    // Skip sMain__move because sampling real QPC during re-simulation corrupts
+    // frame pacing. Game logic still needs to observe one valid tick.
+    HookLog("Rollback_HeadlessTick: Phase1 step1 - Frame timing (skipping sMain__move)\n");
+    *(uint32_t*)(sMain + 0x48) = 1;
+
+    HookLog("Rollback_HeadlessTick: Phase1 step2 - Window-focus/manager state\n");
+    ((void(__fastcall*)(uint64_t))_addr(FN_UPDATE_MANAGERS))(sMain);
+
+    HookLog("Rollback_HeadlessTick: Phase1 step3 - Input processing\n");
+    uint64_t syncPad = *(uint64_t*)(sMain + 0x401c0);
+    if (syncPad)
+        ((void(__fastcall*)(uint64_t))_addr(FN_PAD_PROCESS))(syncPad);
+
+    HookLog("Rollback_HeadlessTick: Phase1 step4 - Async loader update\n");
+    VTableCall(sMain, 0x40260, 0x30);
+
+    // Draw calls, collision deferred-state draining, render setup, and Present
+    // are intentionally excluded from the headless pipeline.
+    HookLog("Rollback_HeadlessTick: Phase2 begin - Post-render game-logic updates\n");
+    VTableCall(sMain, 0x40200, 0x30);
+
+    HookLog("Rollback_HeadlessTick: Phase2 step6 - sMvc3Manager singleton chain\n");
+    {
+        uint64_t manager =
+            ((uint64_t(__fastcall*)())_addr(FN_MVC3MGR_GETINSTANCE))();
+        if (manager) {
+            uint64_t action =
+                ((uint64_t(__fastcall*)(uint64_t))_addr(FN_MVC3MGR_GETACTION))(manager);
+            if (action)
+                ((void(__fastcall*)(uint64_t))_addr(FN_AFTER_GETACTION))(action);
+        }
+    }
+
+    HookLog("Rollback_HeadlessTick: Phase2 step7 - Post-render vtable+0x30 updates\n");
+    VTableCall(sMain, 0x40230, 0x30);
+    VTableCall(sMain, 0x401c0, 0x30);
+    VTableCall(sMain, 0x40210, 0x30);
+    VTableCall(sMain, 0x40228, 0x30);
+    VTableCall(sMain, 0x40218, 0x30);
+    VTableCall(sMain, 0x401c0, 0x50);
+    VTableCall(sMain, 0x401e8, 0x30);
+    VTableCall(sMain, 0x40240, 0x30);
+
+    HookLog("Rollback_HeadlessTick: Phase2 - Manager subsystems\n");
+    MgrSubsysCall(FN_GETGAMECONFIG, 0x30);
+    // sGameUI presentation and allocator-owned resources stay on the live timeline.
+    VTableCall(sMain, 0x401a0, 0x30);
+    VTableCall(sMain, 0x401e0, 0x30);
+    MgrSubsysCall(FN_GETHITSOLVER, 0x30);
+    VTableCall(sMain, 0x401a0, 0x68);
+    VTableCall(sMain, 0x401a0, 0x58);
+
+    HookLog("Rollback_HeadlessTick: Phase2 step8 - Direct AI call\n");
+    DirectMemberCall(sMain, 0x40240, FN_CALL_AI);
+
+    HookLog("Rollback_HeadlessTick: Phase2 step9 - Remaining vtable+0x30 updates\n");
+    VTableCall(sMain, 0x401d8, 0x30);
+    VTableCall(sMain, 0x40208, 0x30);
+    VTableCall(sMain, 0x401b0, 0x30);
+    VTableCall(sMain, 0x401f0, 0x30);
+    VTableCall(sMain, 0x40248, 0x30);
+    VTableCall(sMain, 0x40258, 0x30);
+
+    HookLog("Rollback_HeadlessTick: Phase3 begin - Manager subsystem update loop\n");
+    HookLog("Rollback_HeadlessTick: Phase3 - sMvc3Manager vtable+0x30\n");
+    {
+        uint64_t manager =
+            ((uint64_t(__fastcall*)())_addr(FN_MVC3MGR_GETINSTANCE))();
+        if (manager) {
+            uint64_t vtable = *(uint64_t*)manager;
+            if (vtable) {
+                auto function = *(void(__fastcall**)(uint64_t))(vtable + 0x30);
+                if (function) function(manager);
+            }
+        }
+    }
+
+    HookLog("Rollback_HeadlessTick: Phase3 - Character/Stage/Shot/GameEffect vtable+0x30\n");
+    MgrSubsysCall(FN_GETCHARACTER, 0x30);
+    MgrSubsysCall(FN_GETSTAGE, 0x30);
+    MgrSubsysCall(FN_GETSHOT, 0x30);
+    MgrSubsysCall(FN_GETGAMEEFFECT, 0x30);
+
+    HookLog("Rollback_HeadlessTick: Phase3 - Hit solver reset\n");
+    {
+        uint64_t manager =
+            ((uint64_t(__fastcall*)())_addr(FN_MVC3MGR_GETINSTANCE))();
+        if (manager) {
+            uint64_t hitSolver =
+                ((uint64_t(__fastcall*)(uint64_t))_addr(FN_GETHITSOLVER))(manager);
+            if (hitSolver)
+                ((void(__fastcall*)(uint64_t))_addr(FN_RESET_HITNODES))(hitSolver);
+        }
+    }
+
+    HookLog("Rollback_HeadlessTick: Phase3 - Replay/Battle/Network/License vtable+0x30\n");
+    MgrSubsysCall(FN_GETREPLAY, 0x30);
+    // 0x140259270 is a ConcRT VirtualProcessor method, not a manager getter.
+    MgrSubsysCall(FN_GETBATTLESET, 0x30);
+    MgrSubsysCall(FN_GETMVC3SET, 0x30);
+    MgrSubsysCall(FN_GETNETWORK, 0x30);
+    MgrSubsysCall(FN_GETLICENSE, 0x30);
+
+    HookLog("Rollback_HeadlessTick: Phase3 - Remaining member vtable+0x30\n");
+    VTableCall(sMain, 0x401b8, 0x30);
+    VTableCall(sMain, 0x401c8, 0x30);
+    VTableCall(sMain, 0x401d0, 0x30);
+
+    HookLog("Rollback_HeadlessTick: Phase3 - Ranking/NetRoom/EarthAtk vtable+0x30\n");
+    MgrSubsysCall(FN_GETRANKING, 0x30);
+    MgrSubsysCall(FN_GETNETROOM, 0x30);
+    MgrSubsysCall(FN_GETEARTHATK, 0x30);
+
+    HookLog("Rollback_HeadlessTick: Phase4 begin - Tail + finalize\n");
+    VTableCall(sMain, 0x40198, 0x30);
+    VTableCall(sMain, 0x40270, 0x30);
+
+    HookLog("Rollback_HeadlessTick: Phase4 - sMain tail\n");
+    ((void(__fastcall*)(uint64_t))_addr(FN_UPDATE_RENDER_STATE))(sMain);
+
+    HookLog("Rollback_HeadlessTick: Phase4 - Final vtable+0x30\n");
+    VTableCall(sMain, 0x401f8, 0x30);
+
+    HookLog("Rollback_HeadlessTick: Phase5 begin - Pad methods\n");
+    {
+        uint64_t pad = ((uint64_t(__fastcall*)())_addr(0x140001b00))();
+        if (pad) {
+            ((uint8_t(__fastcall*)(uint64_t, uint32_t, uint8_t))
+                _addr(FN_PAD_METHOD_3D00))(pad, 0xa4, 1);
+        }
+    }
+
+    HookLog("Rollback_HeadlessTick: Phase5 - Pad method 0xa5\n");
+    {
+        uint64_t pad = ((uint64_t(__fastcall*)())_addr(0x140001b00))();
+        if (pad) {
+            ((uint8_t(__fastcall*)(uint64_t, uint32_t, uint8_t))
+                _addr(FN_PAD_METHOD_3D00))(pad, 0xa5, 1);
+        }
+    }
+    // The native Alt+F4 exit check is deliberately skipped during re-simulation.
+
+    HookLog("Rollback_HeadlessTick: end\n");
+}*/

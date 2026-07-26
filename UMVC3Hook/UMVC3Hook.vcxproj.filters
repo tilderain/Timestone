@@ -174,7 +174,7 @@
     <ClInclude Include="code\rollback_tick.h">
       <Filter>Header Files\code</Filter>
     </ClInclude>
-    <ClInclude Include="code\snapshot_ndjson.h">
+    <ClInclude Include="code\rollback_ndjson.h">
       <Filter>Header Files\code</Filter>
     </ClInclude>
   </ItemGroup>
@@ -191,7 +191,10 @@
     <ClCompile Include="code\rollback_restore.cpp">
       <Filter>Header Files\code</Filter>
     </ClCompile>
-    <ClCompile Include="code\snapshot_ndjson.cpp">
+    <ClCompile Include="code\rollback_snapshot.cpp">
+      <Filter>Header Files\code</Filter>
+    </ClCompile>
+    <ClCompile Include="code\rollback_ndjson.cpp">
       <Filter>Header Files\code</Filter>
     </ClCompile>
     <ClCompile Include="pch.cpp">
@@ -306,9 +309,6 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="code\rollback_runtime.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="code\rollback_state.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="code\rollback_tick.cpp">

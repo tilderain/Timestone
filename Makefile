@@ -49,12 +49,12 @@ CPP_SRC   := \
 	$(SRCDIR)/code/rollback_restore.cpp \
 	$(SRCDIR)/code/rollback_resim.cpp \
 	$(SRCDIR)/code/rollback_runtime.cpp \
-	$(SRCDIR)/code/rollback_state.cpp \
 	$(SRCDIR)/code/rollback_tick.cpp \
-	$(SRCDIR)/code/snapshot_ndjson.cpp \
+	$(SRCDIR)/code/rollback_ndjson.cpp \
 	$(SRCDIR)/code/rollback_profile.cpp \
 	$(SRCDIR)/code/rollback_rng.cpp \
 	$(SRCDIR)/code/rollback_shot.cpp \
+	$(SRCDIR)/code/rollback_snapshot.cpp \
 	$(SRCDIR)/code/concrete_snapshot.cpp \
 	$(SRCDIR)/code/netplay.cpp \
 	$(SRCDIR)/imgui/imgui.cpp \

@@ -8,7 +8,7 @@
 #include "rollback.h"
 #include "rollback_memory.h"
 #include "rollback_profile.h"
-#include "snapshot_ndjson.h"
+#include "rollback_ndjson.h"
 #include "../kiero/minhook/include/MinHook.h"
 
 #include <cmath>
@@ -85,14 +85,6 @@ static void __fastcall hkMvc3MainMove(uint64_t main)
         g_restoreRequestedFrame = -1;
         HookLog("Rollback: executing deferred restore to frame %d\n", restoreFrame);
         Rollback_RestoreSnapshot(restoreFrame);
-    }
-
-    if (g_resimRequestedStart >= 0) {
-        int32_t start = g_resimRequestedStart;
-        int32_t end = g_resimRequestedEnd;
-        g_resimRequestedStart = -1;
-        g_resimRequestedEnd = -1;
-        Rollback_ReSimulate(start, end);
     }
 
     if (g_f7State == 1) {
