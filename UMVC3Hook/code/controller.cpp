@@ -18,6 +18,7 @@
 #include "mk10utils.h"
 #include "netplay.h"
 #include "rollback.h"
+#include "rollback_profile.h"
 #include "diag.h"
 #include "../kiero/minhook/include/MinHook.h"
 #include <cstdint>
@@ -814,8 +815,9 @@ static void ApplyScheduledDelayIfReady()
 // sGameConfig button table. Directions do not use that table, which is why
 // movement worked while attack buttons were missing.
 static uint32_t __fastcall hkbuttonRemap(uint64_t playerIndex, uint32_t input,
-                                         uint8_t alternateMap)
+                                          uint8_t alternateMap)
 {
+    RollbackHookProfileScope profile(RollbackHookProfileId::ButtonRemap);
     if (Netplay_IsActive())
         playerIndex = 0;
 
@@ -828,6 +830,7 @@ static uint32_t __fastcall hkbuttonRemap(uint64_t playerIndex, uint32_t input,
 // ---------------------------------------------------------------------------
 static uint64_t __fastcall hkGetsCurrentInput_withSOCD(uint64_t pad, uint32_t playerIndex)
 {
+    RollbackHookProfileScope profile(RollbackHookProfileId::GetCurrentInput);
 
     ///Note here this was changed in the commit after da18134e, it may be wrong
     bool is_active = Netplay_IsActive();
@@ -940,6 +943,7 @@ extern "C" bool FrameStepper_IsBattleSynchronized();
 
 static void __fastcall hkStepIntro(uint64_t param_1)
 {
+    RollbackHookProfileScope profile(RollbackHookProfileId::StepIntro);
     if (Netplay_IsActive() && FrameStepper_IsBattleSynchronized()) {
         auto setCountdown = (void(__fastcall*)(uint64_t, int))_addr(0x14000AE00);
         setCountdown(param_1, 3);
@@ -989,6 +993,7 @@ static void ApplySynchronizedFightTime(uint64_t sAction)
 
 static void __fastcall hkStepFighting(uint64_t sAction)
 {
+    RollbackHookProfileScope profile(RollbackHookProfileId::StepFighting);
     ApplySynchronizedFightTime(sAction);
     oStepFighting(sAction);
     ApplySynchronizedFightTime(sAction);
@@ -1518,6 +1523,7 @@ extern "C" void Controller_OnFrameEnd()
 // ---------------------------------------------------------------------------
 static void __fastcall hkprocessFrameInput(uint64_t cChrInput)
 {
+    RollbackHookProfileScope profile(RollbackHookProfileId::ProcessFrameInput);
     // 1. Run native translation first so cChrInput fields (+0x14, etc.) populate normally.
     oprocessFrameInput(cChrInput);
 
@@ -1703,16 +1709,19 @@ static void __fastcall hkprocessFrameInput(uint64_t cChrInput)
 // ---------------------------------------------------------------------------
 static void __fastcall hkpadPollAllSlots(uint64_t sPad)
 {
+    RollbackHookProfileScope profile(RollbackHookProfileId::PadPollAll);
     opadPollAllSlots(sPad);
 }
 
 static uint64_t __fastcall hkpadSlotReadDevice(uint64_t slotBase)
 {
+    RollbackHookProfileScope profile(RollbackHookProfileId::PadSlotRead);
     return opadSlotReadDevice(slotBase);
 }
 
 static void __fastcall hkxinputToGameMask(uint64_t sPad, uint64_t slotBase, const XInputState* pState)
 {
+    RollbackHookProfileScope profile(RollbackHookProfileId::XInputToMask);
     // Multiple game instances can poll the same XInput device. Only the
     // foreground instance should receive controller input; keyboard routing
     // remains independent so the inactive instance can still be controlled
@@ -1728,11 +1737,13 @@ static void __fastcall hkxinputToGameMask(uint64_t sPad, uint64_t slotBase, cons
 
 static void __fastcall hkpadSlotPostReadProcess(uint64_t sPad, uint64_t slotBase, uint32_t slotIdx)
 {
+    RollbackHookProfileScope profile(RollbackHookProfileId::PadPostRead);
     opadSlotPostReadProcess(sPad, slotBase, slotIdx);
 }
 
 static void __fastcall hkinputAutoRepeatTimerProcess(uint64_t slotBase)
 {
+    RollbackHookProfileScope profile(RollbackHookProfileId::InputAutoRepeat);
     oinputAutoRepeatTimerProcess(slotBase);
 }
 

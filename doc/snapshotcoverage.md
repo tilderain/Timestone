@@ -11,14 +11,15 @@ answer:
 
 1. Was the field present in the saved snapshot?
 2. If it was present, did the field contain the saved value after restore?
+3. Does the field change during normal frame-to-frame capture, and how often?
 
 The result should make snapshot omissions and restore gaps visible immediately:
 
-| Field | Offset | Size | Capture | After restore |
-|---|---:|---:|---|---|
-| `mPos` | `+0x50` | 12 | Covered | Match |
-| `mState` | `+0x84` | 4 | Covered | Mismatch |
-| `mTimer` | `+0xA0` | 4 | Missing | Not compared |
+| Field | Offset | Size | Activity | Capture | After restore |
+|---|---:|---:|---|---|---|
+| `mPos` | `+0x50` | 12 | Changes every frame | Covered | Match |
+| `mState` | `+0x84` | 4 | Intermittent | Covered | Mismatch |
+| `mTimer` | `+0xA0` | 4 | Stable (240 frames) | Missing | Not compared |
 
 ## DTI Editor Prerequisite
 
@@ -69,6 +70,7 @@ Add a small DTI editor audit state containing:
 - Whether snapshot auditing is armed.
 - Frame number of the latest captured audit.
 - Results from the latest restore.
+- Per-field capture history for the selected owner.
 
 The initial implementation audits one selected instance, not every property in
 the process. This keeps the normal per-frame snapshot path cheap and makes the
@@ -77,6 +79,65 @@ result unambiguous when several fighters share the same concrete class.
 The existing tracked property owners can populate an instance selector. Reject
 an owner when it is no longer readable or its vtable no longer matches the
 selected class.
+
+Reset field history when the selected owner changes, the match restarts, frame
+numbers move backward outside a restore comparison, or the user presses a
+`Reset activity` button. A different instance at the same address must not
+inherit the previous object's statistics.
+
+## Frame Activity
+
+Track activity from the bytes already written to consecutive snapshots. Do not
+perform a second live-object sampling pass.
+
+For each fully covered, sized field in the armed instance, retain:
+
+```cpp
+struct FieldActivity {
+    uint32_t observedFrames;
+    uint32_t changedFrames;
+    uint32_t consecutiveStableFrames;
+    int32_t firstObservedFrame;
+    int32_t lastObservedFrame;
+    int32_t lastChangedFrame;
+    uint64_t lastValueHash;
+};
+```
+
+After packing a new snapshot, hash the field bytes in `slot.data`. Compare that
+hash with the previous capture for the same `(owner, offset, size, name)` and
+update the counters. The first observation establishes a baseline and does not
+count as either changed or stable.
+
+Only compare adjacent forward frames. If the new frame is not
+`lastObservedFrame + 1`, establish a new baseline so rollback slot replacement,
+manual restore, frame stepping, and match transitions do not look like ordinary
+frame-to-frame changes.
+
+Use the following display classifications:
+
+| Classification | Meaning |
+|---|---|
+| `Unobserved` | No usable captured value yet |
+| `Baseline` | One captured value; no comparison yet |
+| `Stable (N)` | No changes in the last `N` adjacent captures |
+| `Changes every frame` | Every comparison in the current observation window changed |
+| `Frequently changing` | At least half of comparisons changed |
+| `Intermittent` | Changed at least once, but in fewer than half of comparisons |
+| `Changed this frame` | Optional immediate marker applied in addition to the long-term class |
+
+Show the exact ratio in a tooltip, for example `37 / 120 compared frames changed;
+last change: frame 442`.
+
+`Stable` means only that the bytes did not change during the observed interval.
+It must not be labeled immutable, constant, safe to omit, or irrelevant to
+rollback. Mode flags, round state, timers, and cached references may remain
+stable for hundreds of frames and still be required when an event occurs.
+
+Hashes are an optimization for activity detection. When a hash differs, a raw
+byte comparison may confirm the change before incrementing `changedFrames`.
+For fields in this feature's small selected-instance set, retaining the prior
+raw value is also acceptable and eliminates collision ambiguity.
 
 ## Snapshot-Side Data
 
@@ -136,6 +197,8 @@ been populated:
    and its exact offset in `slot.data`.
 7. If snapshot regions contain only some bytes, record `Partial`.
 8. If no snapshot region intersects the field, record `Missing`.
+9. For each fully covered field, update its frame-activity history from the
+   saved bytes.
 
 This matching must use `slot.regions`, not a fresh call to `BuildRegions()`.
 Dynamic ownership and object lists may have changed by the time the UI reads the
@@ -143,6 +206,11 @@ result, while `slot.regions` describes exactly what that frame captured.
 
 Deduplicate fields by `(owner, offset, size, name)`. Property creation can be
 observed more than once for the same instance.
+
+Activity is independent of restore status. A covered field can be stable and
+still mismatch after restore; that combination is especially useful because it
+points to restore logic altering or preserving a value that capture expected to
+remain unchanged.
 
 ## Restore Comparison
 
@@ -195,10 +263,15 @@ Extend `DrawPropertiesForDti()` rather than creating another debug window:
 - Add an instance selector for tracked owners of the selected class.
 - Add an `Arm snapshot audit` checkbox.
 - Show the audited frame number.
+- Add an `Activity` column with stable-frame count or change classification.
 - Add `Capture` and `After restore` columns.
 - Add a `Problems only` checkbox that keeps `Missing`, `Partial`, `Mismatch`,
   `Unreadable`, and unknown-size fields visible.
+- Add activity filters: `Changed this frame`, `Ever changed`, and `Stable`.
+- Add a `Reset activity` button.
 - Show summary counts: covered, missing, partial, matched, and mismatched.
+- Show activity summary counts: changed this frame, ever changed, and stable in
+  the current observation window.
 - For a mismatch, show saved and restored bytes in a tooltip. Use typed values
   for known scalar types and hexadecimal bytes for vectors, matrices, strings,
   and references.
@@ -209,6 +282,10 @@ Suggested colors:
 - Red: missing or mismatched.
 - Yellow: partial, unreadable, or unknown size.
 - Gray: not audited or accessor-backed.
+
+Use a separate activity marker or text color so coverage and activity remain
+distinct. A red `Missing` field must not become visually harmless merely because
+it has been stable in the short observation window.
 
 ## Files
 
@@ -223,6 +300,8 @@ Suggested colors:
   validation.
 - Add field-size lookup, selected-instance state, result storage, filters, and
   table columns.
+- Track adjacent-frame field activity and reset it when the selected instance or
+  timeline changes.
 
 ### `UMVC3Hook/code/rollback.cpp`
 
@@ -249,6 +328,12 @@ first implementation.
    restore and pointer preservation, not during the raw body copy.
 9. Leave auditing disarmed and verify no audit vectors are populated during
    ordinary snapshot capture.
+10. Hold a field constant for several captures and confirm it reports
+    `Stable (N)` with an increasing count.
+11. Change a field on one frame and confirm it reports `Changed this frame`, its
+    changed-frame count increments once, and it later becomes `Intermittent`.
+12. Restore or jump the timeline and confirm the next capture becomes a new
+    baseline rather than an artificial frame-to-frame change.
 
 ## Initial Scope
 

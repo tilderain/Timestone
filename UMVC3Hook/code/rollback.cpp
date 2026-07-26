@@ -22,6 +22,7 @@
 #include "../pch.h"
 
 #include "rollback.h"
+#include "rollback_profile.h"
 #include "concrete_snapshot.h"
 #include "controller.h"
 #include "mk10utils.h"
@@ -316,9 +317,11 @@ static bool IsAccessibleAddress(uint64_t value)
 
 static bool IsExecutableAddress(uint64_t value)
 {
-    if (!IsAccessibleAddress(value)) return false;
+    if (value < 0x10000 || value >= 0x0000800000000000ull) return false;
     MEMORY_BASIC_INFORMATION mbi = {};
     if (VirtualQuery((void*)value, &mbi, sizeof(mbi)) == 0) return false;
+    if (mbi.State != MEM_COMMIT || (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) != 0)
+        return false;
     const DWORD executable = PAGE_EXECUTE | PAGE_EXECUTE_READ |
         PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
     return (mbi.Protect & executable) != 0;
@@ -1940,6 +1943,7 @@ static void* __fastcall hkShotSpawn(void* manager, void* element, uint64_t initP
                                     void* posData, void* ownerChr, void* objectRef1,
                                     uint32_t slotId, void* objectRef2)
 {
+    RollbackHookProfileScope profile(RollbackHookProfileId::ShotSpawn);
     ShotRecipe recipe{};
     recipe.shotElement = element;
     recipe.initParam = initParam;
@@ -1976,6 +1980,7 @@ static void* __fastcall hkShotSpawnEx(void* manager, void* element, uint64_t ini
                                       uint32_t slotId, void* objectRef2, int a9,
                                       void* a10, int a11, void* a12)
 {
+    RollbackHookProfileScope profile(RollbackHookProfileId::ShotSpawnEx);
     ShotRecipe recipe{};
     recipe.shotElement = element;
     recipe.initParam = initParam;
@@ -2014,6 +2019,7 @@ static void* __fastcall hkEffectCreate(void* manager, int effectId, int a3,
                                        void* a8, int a9, void* a10, int a11,
                                        uint32_t a12, void* a13)
 {
+    RollbackHookProfileScope profile(RollbackHookProfileId::EffectCreate);
     void* effect = oEffectCreate(manager, effectId, a3, attachTo, a5, a6, a7,
                                  a8, a9, a10, a11, a12, a13);
     if (effect) {
@@ -2037,54 +2043,69 @@ static void SanitizeEffectForDestruction(void* effect)
     // retain a small scalar here (0x120 in the 04:06 crash), which makes
     // sResource::release decrement memory at scalar+0x4c. Keep valid native
     // resources; suppress only values that cannot be resource objects.
-    uint64_t resource = *(uint64_t*)((uint8_t*)effect + 0x108);
-    if (resource != 0 &&
-        (!IsAccessibleAddress(resource + 0x4C) ||
-         !HasCallableDtiVirtual((void*)resource))) {
-        *(uint64_t*)((uint8_t*)effect + 0x108) = 0;
+    {
+        RollbackHookProfileScope profile(RollbackHookProfileId::UnitRemoveEffectResource);
+        uint64_t resource = *(uint64_t*)((uint8_t*)effect + 0x108);
+        if (resource != 0 &&
+            (!IsAccessibleAddress(resource + 0x4C) ||
+             !HasCallableDtiVirtual((void*)resource))) {
+            *(uint64_t*)((uint8_t*)effect + 0x108) = 0;
+        }
     }
 
     // uEffect::~uEffect deletes the generator chain at +0x218 and releases the
     // particle sub-buffer array at +0x220. Prediction-only effects can outlive
     // the graph that populated these fields until sUnit's deferred cleanup.
     // Clear only malformed ownership; valid native allocations remain intact.
-    uint64_t generator = *(uint64_t*)((uint8_t*)effect + 0x218);
-    uint64_t node = generator;
-    std::unordered_set<uint64_t> visited;
-    bool validGeneratorChain = true;
-    for (int count = 0; node != 0 && count < 4096; ++count) {
-        if (!IsAccessiblePointer(node + 0x18) || !visited.insert(node).second) {
-            validGeneratorChain = false;
-            break;
-        }
-        uint64_t vtable = *(uint64_t*)node;
-        static constexpr uint32_t requiredVirtuals[] = {
-            0x00, // deleting destructor
-            0x38, 0x40, 0x50, 0x70, 0x88, // setup/update/finish path
-            0xA0, 0xA8              // draw path
-        };
-        if (!IsAccessibleAddress(vtable + 0xA8)) {
-            validGeneratorChain = false;
-            break;
-        }
-        for (uint32_t offset : requiredVirtuals) {
-            if (!IsExecutableAddress(*(uint64_t*)(vtable + offset))) {
+    {
+        RollbackHookProfileScope profile(RollbackHookProfileId::UnitRemoveEffectGenerator);
+        uint64_t generator = *(uint64_t*)((uint8_t*)effect + 0x218);
+        uint64_t node = generator;
+        uint64_t cycleCheckpoint = generator;
+        uint32_t cyclePower = 1;
+        uint32_t cycleLength = 0;
+        bool validGeneratorChain = true;
+        for (int count = 0; node != 0 && count < 4096; ++count) {
+            if (!IsAccessiblePointer(node + 0x18)) {
                 validGeneratorChain = false;
                 break;
             }
+            uint64_t vtable = *(uint64_t*)node;
+            // uEffect::releaseGenerator only follows +0x18 and invokes the deleting
+            // destructor at vtable slot 0. Other update and draw slots are not part
+            // of destruction and made this guard perform eight VirtualQuery calls
+            // for every node in every retired effect.
+            if (!IsAccessibleAddress(vtable + sizeof(uint64_t) - 1) ||
+                !IsExecutableAddress(*(uint64_t*)vtable)) {
+                validGeneratorChain = false;
+                break;
+            }
+            uint64_t next = *(uint64_t*)(node + 0x18);
+            ++cycleLength;
+            if (next != 0 && next == cycleCheckpoint) {
+                validGeneratorChain = false;
+                break;
+            }
+            if (cycleLength == cyclePower) {
+                cycleCheckpoint = next;
+                cyclePower *= 2;
+                cycleLength = 0;
+            }
+            node = next;
+            if (count == 4095 && node != 0) validGeneratorChain = false;
         }
-        if (!validGeneratorChain) break;
-        node = *(uint64_t*)(node + 0x18);
-        if (count == 4095 && node != 0) validGeneratorChain = false;
-    }
-    if (!validGeneratorChain) {
-        *(uint64_t*)((uint8_t*)effect + 0x218) = 0;
+        if (!validGeneratorChain) {
+            *(uint64_t*)((uint8_t*)effect + 0x218) = 0;
+        }
     }
 
-    uint64_t subBuffers = *(uint64_t*)((uint8_t*)effect + 0x220);
-    if (subBuffers != 0 && !IsAccessiblePointer(subBuffers)) {
-        *(uint64_t*)((uint8_t*)effect + 0x220) = 0;
-        *(uint16_t*)((uint8_t*)effect + 0x208) = 0;
+    {
+        RollbackHookProfileScope profile(RollbackHookProfileId::UnitRemoveEffectSubBuffers);
+        uint64_t subBuffers = *(uint64_t*)((uint8_t*)effect + 0x220);
+        if (subBuffers != 0 && !IsAccessiblePointer(subBuffers)) {
+            *(uint64_t*)((uint8_t*)effect + 0x220) = 0;
+            *(uint16_t*)((uint8_t*)effect + 0x208) = 0;
+        }
     }
 }
 
@@ -2113,21 +2134,38 @@ static void DetachExAtkSpaceChildren()
 
 static char __fastcall hkUnitRemove(void* manager, void* unit)
 {
-    auto shotRecipe = g_liveShotRecipes.find(unit);
+    RollbackHookProfileScope profile(RollbackHookProfileId::UnitRemove);
+    decltype(g_liveShotRecipes)::iterator shotRecipe;
+    {
+        RollbackHookProfileScope child(RollbackHookProfileId::UnitRemoveRecipeLookup);
+        shotRecipe = g_liveShotRecipes.find(unit);
+    }
     if (shotRecipe != g_liveShotRecipes.end() &&
         shotRecipe->second.reconstructed) {
         // Natural category cleanup calls removeUnit immediately before the
         // concrete shot destructor. Gameplay can repopulate an inline particle
         // node after reconstruction, so detach it at this final ownership
         // boundary as well as during rollback's explicit retirement.
+        RollbackHookProfileScope child(RollbackHookProfileId::UnitRemoveShotDetach);
         DetachEmbeddedShotEffect(unit);
     }
-    if (IsEffectObject(unit)) {
+    bool isEffect = false;
+    {
+        RollbackHookProfileScope child(RollbackHookProfileId::UnitRemoveEffectCheck);
+        isEffect = IsEffectObject(unit);
+    }
+    if (isEffect) {
+        RollbackHookProfileScope child(RollbackHookProfileId::UnitRemoveEffectSanitize);
         SanitizeEffectForDestruction(unit);
     }
 
-    char result = oUnitRemove(manager, unit);
+    char result;
+    {
+        RollbackHookProfileScope child(RollbackHookProfileId::UnitRemoveNative);
+        result = oUnitRemove(manager, unit);
+    }
     if (result && unit) {
+        RollbackHookProfileScope child(RollbackHookProfileId::UnitRemoveRecipeCleanup);
         // A shot can leave sUnit while remaining linked in sShot until its
         // deferred list cleanup. Keep its spawn recipe through that interval;
         // hkShotSpawn replaces the entry if the allocator reuses the address.
@@ -2140,6 +2178,7 @@ static char __fastcall hkUnitRemove(void* manager, void* unit)
 
 static void __fastcall hkKirigakureEffectUpdate(void* effect)
 {
+    RollbackHookProfileScope profile(RollbackHookProfileId::KirigakureEffectUpdate);
     // This callback calls MtObject::isAlive directly on its weak attachment at
     // +0x40. Validate only at that dereference site instead of scanning every
     // sUnit category and performing DTI checks on every object each frame.
@@ -2292,6 +2331,7 @@ static bool ValidOptionalAttachObject(uint64_t object)
 
 static void __fastcall hkBuildAttachMatrix(void* arm, void* output, char reset)
 {
+    RollbackHookProfileScope profile(RollbackHookProfileId::BuildAttachMatrix);
     if (!arm || !output || !IsAccessiblePointer((uint64_t)arm + 0xD0)) {
         return;
     }
@@ -2324,6 +2364,7 @@ static void __fastcall hkBuildAttachMatrix(void* arm, void* output, char reset)
 
 static void __fastcall hkShotUpdateHitboxes(void* shot)
 {
+    RollbackHookProfileScope profile(RollbackHookProfileId::ShotUpdateHitboxes);
     oShotUpdateHitboxes(shot);
 
     auto recipe = g_liveShotRecipes.find(shot);
@@ -2335,6 +2376,7 @@ static void __fastcall hkShotUpdateHitboxes(void* shot)
 
 static void __fastcall hkKingKobunMove(void* shot)
 {
+    RollbackHookProfileScope profile(RollbackHookProfileId::KingKobunMove);
     bool trace = shot && GetObjectDti((uint64_t)shot) == _addr(0x140D4D2B0) &&
         g_kingKobunTraceCount < 128;
     uint32_t beforeMode = 0;
@@ -4196,9 +4238,11 @@ static void Rollback_SyncActiveCharacterUi();
 
 void Rollback_SaveSnapshot(int32_t frame)
 {
+    const uint64_t profileStart = Profile_Now();
     Region regions[MAX_REGIONS];
     int count = BuildRegions(regions, MAX_REGIONS);
     if (count == 0) return;
+    const uint64_t buildRegionsEnd = Profile_Now();
 
     size_t total = 0;
     for (int i = 0; i < count; ++i) {
@@ -4224,6 +4268,7 @@ void Rollback_SaveSnapshot(int32_t frame)
         }
         slot.capacity = total;
     }
+    const uint64_t allocationEnd = Profile_Now();
 
     // Copy data AND save per-region metadata for safe restore
     size_t offset = 0;
@@ -4239,6 +4284,7 @@ void Rollback_SaveSnapshot(int32_t frame)
         offset += regions[i].size;
     }
     slot.size = offset;
+    const uint64_t copyRegionsEnd = Profile_Now();
 
     static int lastSnapshotRegionCount = -1;
     if (count != lastSnapshotRegionCount) {
@@ -4255,11 +4301,18 @@ void Rollback_SaveSnapshot(int32_t frame)
                 frame, count, offset, collisionIndex, collisionSize);
         lastSnapshotRegionCount = count;
     }
+    const uint64_t snapshotMetadataEnd = Profile_Now();
 
     // Native clones keep reference-managed geometry alive after attack-end
     // clears the live node's child array.
     CaptureCollisionNodeClones(slot);
+    const uint64_t collisionClonesEnd = Profile_Now();
     CaptureShotAndEffectRecipes(slot);
+    const uint64_t shotRecipesEnd = Profile_Now();
+
+    Profile_RecordSnapshot(profileStart, buildRegionsEnd, allocationEnd, copyRegionsEnd,
+                           snapshotMetadataEnd, collisionClonesEnd, shotRecipesEnd,
+                           offset, (uint32_t)count);
 
     // [EXPERIMENTAL] QPC capture — see mvc3/rollback W3-C2
     // LARGE_INTEGER qpc_cap;
@@ -4321,6 +4374,7 @@ extern "C" bool Rollback_GetSnapshotInputs(int32_t frame, uint32_t* outLocal, ui
 
 void Rollback_RestoreSnapshot(int32_t frame)
 {
+    const uint64_t profileStart = Profile_Now();
     int slotIdx = frame % ROLLBACK_WINDOW;
     if (slotIdx < 0) slotIdx += ROLLBACK_WINDOW;
     SnapshotSlot& slot = g_slots[slotIdx];
@@ -4379,6 +4433,7 @@ void Rollback_RestoreSnapshot(int32_t frame)
         liveOwnerPointers[i] = *(uint64_t*)ownerSlot;
         ownerStillMatches[i] = liveOwnerPointers[i] == (uint64_t)slot.regions[i].ptr;
     }
+    const uint64_t setupEnd = Profile_Now();
 
     size_t offset = 0;
     int collisionRestoreCount = 0;
@@ -4732,6 +4787,7 @@ void Rollback_RestoreSnapshot(int32_t frame)
         }
         offset += slot.regions[i].size;
     }
+    const uint64_t regionsEnd = Profile_Now();
 
     // Restore the saved child factory as well as its children. Keeping the
     // destination's generic factory creates objects with incompatible vtables.
@@ -4743,6 +4799,7 @@ void Rollback_RestoreSnapshot(int32_t frame)
             HasCallableDtiVirtual(entry.clone))
             copyCollisionNode(entry.savedPtr, entry.clone, false, true);
     }
+    const uint64_t collisionClonesEnd = Profile_Now();
 
     // Full cChr body restore also rewinds its external pointer fields. If an
     // allocation changed, put the current pointer back after skipping its old
@@ -4752,6 +4809,7 @@ void Rollback_RestoreSnapshot(int32_t frame)
             *(uint64_t*)slot.regions[i].ownerSlot = liveOwnerPointers[i];
         }
     }
+    const uint64_t ownerPointersEnd = Profile_Now();
 
     // Active hit nodes are one-frame work items. Restoring them after a hit has
     // already been applied replays the resolver callback on every subsequent
@@ -4765,6 +4823,7 @@ void Rollback_RestoreSnapshot(int32_t frame)
         *(uint32_t*)(sHitSolver + 0x30070) = 0; // sort bucket A count
         *(uint32_t*)(sHitSolver + 0x34078) = 0; // sort bucket B count
     }
+    const uint64_t hitSolverEnd = Profile_Now();
 
     // Log ALL heap regions with their sizes
     offset = 0;
@@ -4789,16 +4848,33 @@ void Rollback_RestoreSnapshot(int32_t frame)
     // that are not part of the snapshot. Clear them before the next game tick
     // can release one through MtObject__replaceSlot_6F30.
     Rollback_ClearStalePointers();
+    const uint64_t stalePointersEnd = Profile_Now();
 
     // Shot construction registers owned effects through sGameEffect and scans
     // its tracked-object slots with MtObject::isKindOf. Clear references to
     // effects retired by this restore before the first factory call.
     Rollback_ClearGameEffectSlots();
+    const uint64_t effectSlotsEnd = Profile_Now();
     RestoreShotAndEffectRecipes(slot);
+    const uint64_t shotsEnd = Profile_Now();
 
     // Character slot tables contain live model/resource references. Clearing
     // all 64 entries makes restored dead characters invisible.
     Rollback_SyncActiveCharacterUi();
+    const uint64_t uiEnd = Profile_Now();
+
+    if (g_activeRollbackProfile) {
+        g_activeRollbackProfile->restoreTotal += uiEnd - profileStart;
+        g_activeRollbackProfile->restoreSetup += setupEnd - profileStart;
+        g_activeRollbackProfile->restoreRegions += regionsEnd - setupEnd;
+        g_activeRollbackProfile->restoreCollisionClones += collisionClonesEnd - regionsEnd;
+        g_activeRollbackProfile->restoreOwnerPointers += ownerPointersEnd - collisionClonesEnd;
+        g_activeRollbackProfile->restoreHitSolver += hitSolverEnd - ownerPointersEnd;
+        g_activeRollbackProfile->restoreStalePointers += stalePointersEnd - hitSolverEnd;
+        g_activeRollbackProfile->restoreEffectSlots += effectSlotsEnd - stalePointersEnd;
+        g_activeRollbackProfile->restoreShots += shotsEnd - effectSlotsEnd;
+        g_activeRollbackProfile->restoreUi += uiEnd - shotsEnd;
+    }
 
     HookLog("Rollback: restored frame %d with %d regions, total size %zu bytes, "
             "sCollision inline regions=%d bytes=%zu\n",
@@ -5309,6 +5385,12 @@ void Rollback_ReSimulate(int32_t startFrame, int32_t endFrame)
         return;
     }
 
+    RollbackProfile profile = {};
+    profile.startFrame = startFrame;
+    profile.endFrame = endFrame;
+    const uint64_t profileStart = Profile_Now();
+    if constexpr (ROLLBACK_PROFILING_ENABLED)
+        g_activeRollbackProfile = &profile;
     g_isResimulating = true;
 
     //HookLog("Rollback: [%s] re-simulating frames %d \u2192 %d\n",
@@ -5316,17 +5398,21 @@ void Rollback_ReSimulate(int32_t startFrame, int32_t endFrame)
 
     //Are these really necessary? Might as well leave them in
 
+    uint64_t phaseStart = Profile_Now();
     Rollback_PatchSleep(true); // NOP Sleep calls so frames run at full speed
     Rollback_PatchPresent(true); // NOP Present inside post-render sync
     Rollback_PatchSwapchain(true); // NOP swapchain vtable+0x50 calls
     Rollback_PatchDrawCalls(true); // NOP remaining render/draw calls
+    profile.patchEnable += Profile_Now() - phaseStart;
 
     // Save the live input history before rewinding.  The re-sim loop calls
     // SilentFrameStart/End which shifts g_oldInputs with zeros (re-sim
     // bypasses the accumulation).  Restoring after the loop prevents the
     // outbound packet from carrying a corrupted timeline.
     //HookLog("[ReSim] ~~~~~~~~~~ g_oldInputs BEFORE re-sim loop ~~~~~~~~~~\n");
+    phaseStart = Profile_Now();
     Controller_SaveInputHistory();
+    profile.inputHistorySave += Profile_Now() - phaseStart;
     int silentFrameEndCount = 0;
 
     // Diagnostic dump: capture ground truth BEFORE rewinding.
@@ -5336,6 +5422,7 @@ void Rollback_ReSimulate(int32_t startFrame, int32_t endFrame)
     // the F7 state machine already captured per-frame live dumps during
     // the recording phase using that session.  We just reuse the session
     // ID so resim dumps land alongside the live dumps.
+    phaseStart = Profile_Now();
     {
         int diagSid;
         if (g_f7DiagSession >= 0) {
@@ -5359,6 +5446,7 @@ void Rollback_ReSimulate(int32_t startFrame, int32_t endFrame)
         // Sync the global so the resim loop writes to the same session
         g_diagSessionId = diagSid;
     }
+    profile.diagSetup += Profile_Now() - phaseStart;
 
     // Capture the final predicted live state before restoring it. This is a
     // separate diagnostic entry because it belongs to the discarded timeline,
@@ -5368,18 +5456,22 @@ void Rollback_ReSimulate(int32_t startFrame, int32_t endFrame)
         uint64_t sReplay = *(uint64_t*)_addr(PTR_SREPLAY);
         if (sReplay) liveFrameBeforeRestore = *(int32_t*)(sReplay + 0x54);
     }
+    phaseStart = Profile_Now();
     if (liveFrameBeforeRestore >= 0 && Netplay_IsActive()) {
         std::string json = Rollback_GenerateNetplayLiveJSON(
             liveFrameBeforeRestore, false, "pre_restore_prediction", startFrame, endFrame);
         if (!json.empty()) Rollback_WriteNetplayLiveJSON(json);
     }
+    profile.preRestoreJson += Profile_Now() - phaseStart;
 
     // 1. Rewind to the starting frame boundary
     Rollback_RestoreSnapshot(startFrame);
 
     // Diagnostic: log whether we actually have received input for every frame
     // in the resim range before we start stepping.
+    phaseStart = Profile_Now();
     Controller_LogReceivedInputAvailability(startFrame, endFrame);
+    profile.inputAvailability += Profile_Now() - phaseStart;
 
     // [EXPERIMENTAL] mJobThreadNumInit=1 — see mvc3/rollback R3-SIMLOOP
     // uint64_t sMain_job = *(uint64_t*)_addr(PTR_SMAIN);
@@ -5404,6 +5496,7 @@ void Rollback_ReSimulate(int32_t startFrame, int32_t endFrame)
     //    snapshot slot via Controller_InjectLocalInput and
     //    Controller_InjectRemoteInput before the game tick.
     for (int32_t f = startFrame; f < endFrame; ++f) {
+        RollbackProfileTimer frameTimer;
         g_resimulateCurrentFrame = f;
         int si = f % ROLLBACK_WINDOW;
         if (si < 0) si += ROLLBACK_WINDOW;
@@ -5438,8 +5531,11 @@ void Rollback_ReSimulate(int32_t startFrame, int32_t endFrame)
                 Controller_InjectRemoteInput(f, resimRemoteInput);
             }
         }
+        frameTimer.Add(profile.frameInput);
+
         // Capture PRE-state before the tick
         Rollback_CaptureFrameDiagSnapshot(f, /*isResim=*/true, /*postOnly=*/false);
+        frameTimer.Add(profile.frameDiagPre);
 
         // Pre-tick NDJSON logging for both active and inactive netplay sessions
         if (Netplay_IsActive()) {
@@ -5450,6 +5546,7 @@ void Rollback_ReSimulate(int32_t startFrame, int32_t endFrame)
         } else {
             Rollback_DumpNDJSON(f, 1);
         }
+        frameTimer.Add(profile.frameJson);
 
         // Multi-resim may correct a still-predicted frame again, so preserve a
         // corrected restore point. Non-multi waits for a definitive batch and
@@ -5458,17 +5555,23 @@ void Rollback_ReSimulate(int32_t startFrame, int32_t endFrame)
             Rollback_SaveSnapshot(f);
             Rollback_UpdateSnapshotInputs(f, resimLocalInput, resimRemoteInput);
         }
+        frameTimer.Add(profile.frameSnapshot);
 
         //Todo: replace with headless tick for better perf
         oMvc3Main_move(g_sMvc3Main);
+        frameTimer.Add(profile.frameNativeTick, profile.frameNativeTickMax);
+
         Controller_SilentFrameEnd();
         silentFrameEndCount++;
         Controller_LogReSimFrame(f);
+        frameTimer.Add(profile.frameInputEnd);
 
         // Capture POST-state after the tick (preserves the pre-tick state captured above)
         Rollback_CaptureFrameDiagSnapshot(f, /*isResim=*/true, /*postOnly=*/true);
 
         Rollback_QueuePendingResimDump(f);
+        frameTimer.Add(profile.frameDiagPost);
+        frameTimer.Finish(profile.frameTotal, profile.frameTotalMax);
     }
 
     // Verify SilentFrameEnd count matches expected
@@ -5483,7 +5586,9 @@ void Rollback_ReSimulate(int32_t startFrame, int32_t endFrame)
     // Restore the local input history so the next outbound packet carries
     // the original timeline, preventing the remote side from seeing spurious
     // conflicts on already-reconciled frames.
+    phaseStart = Profile_Now();
     Controller_RestoreInputHistory();
+    profile.inputHistoryRestore += Profile_Now() - phaseStart;
 
     // [EXPERIMENTAL] mJobThreadNumInit restore — see mvc3/rollback R3-SIMLOOP
     // if (pJobThreadNumInit) {
@@ -5494,20 +5599,28 @@ void Rollback_ReSimulate(int32_t startFrame, int32_t endFrame)
     //    current system time, preventing the game loop from seeing a
     //    negative or excessive frame-time delta that would cause a freeze.
     uint64_t sMain = *(uint64_t*)_addr(PTR_SMAIN);
+    phaseStart = Profile_Now();
     if (sMain) {
         //Same with this, unsure if this is really needed, might cause lag if disabled
         Rollback_ResyncMainTiming(sMain);
     }
+    profile.timingResync += Profile_Now() - phaseStart;
 
     g_isResimulating = false;
     if (g_resimReentranceDepth > 0) {
         HookLog("[ReSim] WARNING: re-entrance depth was %d during re-sim (nested calls detected)\n",
                 g_resimReentranceDepth);
     }
+    phaseStart = Profile_Now();
     Rollback_PatchSleep(false); // restore Sleep calls
     Rollback_PatchPresent(false); // restore Present call
     Rollback_PatchSwapchain(false); // restore swapchain calls
     Rollback_PatchDrawCalls(false); // restore render/draw calls
+    profile.patchDisable += Profile_Now() - phaseStart;
+    profile.total = Profile_Now() - profileStart;
+    if constexpr (ROLLBACK_PROFILING_ENABLED)
+        g_activeRollbackProfile = nullptr;
+    Profile_Dump(profile, g_ndjsonLoggingEnabled, g_multiResimEnabled);
     //HookLog("Rollback: re-simulation complete (%d frames)\n",
             //endFrame - startFrame);
 }
@@ -5796,6 +5909,7 @@ static void __fastcall hkMvc3Main_move(uint64_t param_1)
                 g_rollbackReqStart = -1;
                 g_rollbackReqEnd   = -1;
                 Rollback_ReSimulate(rs, re);
+                const uint64_t postResimStart = Profile_Now();
 
                 // Notify the remote peer which frames we just re-simulated,
                 // including per-frame resim results for BOTH teams' point
@@ -5863,6 +5977,7 @@ static void __fastcall hkMvc3Main_move(uint64_t param_1)
                     rnPkt.frameCount = (uint32_t)frameCount;
                     Netplay_SendResimNotify(rnPkt);
                 }
+                const uint64_t notifyEnd = Profile_Now();
 
                 // Re-resolve the current frame's remote input — packets that
                 // arrived during the resim may now provide real data where we
@@ -5872,7 +5987,16 @@ static void __fastcall hkMvc3Main_move(uint64_t param_1)
 
                 // After re-sim, re-save the current frame's snapshot so it
                 // reflects the corrected state at start of curFrame.
+                const uint64_t postSaveStart = Profile_Now();
                 Rollback_SaveSnapshot(curFrame);
+                const uint64_t postSaveEnd = Profile_Now();
+                if (Profile_Enabled()) {
+                    Profile_DumpPostResim(curFrame,
+                                          notifyEnd - postResimStart,
+                                          postSaveStart - notifyEnd,
+                                          postSaveEnd - postSaveStart,
+                                          postSaveEnd - postResimStart);
+                }
 
                 // Flag the first post-resim live tick for diagnostic logging.
                 g_postResimFrame = curFrame;
@@ -5950,6 +6074,7 @@ static void __fastcall hkApplyCollisionPushCorrection(
 // ===========================================================================
 static void __fastcall hkCallSRender(uint64_t param_1)
 {
+    RollbackHookProfileScope profile(RollbackHookProfileId::RenderEndFrame);
     if (g_isResimulating) {
         return;
     }
@@ -5958,6 +6083,7 @@ static void __fastcall hkCallSRender(uint64_t param_1)
 
 static void __fastcall hkSound_move(uint64_t param_1)
 {
+    RollbackHookProfileScope profile(RollbackHookProfileId::SoundMove);
     // Sound scenes contain live emitter/model pointers and transient matrix
     // indices. They are cosmetic and are not part of the rollback snapshot, so
     // advancing them during headless ticks can dereference abandoned objects.
@@ -6002,6 +6128,7 @@ static void __fastcall hkSound_move(uint64_t param_1)
 
 static void __fastcall hkGameUi_move(uint64_t param_1)
 {
+    RollbackHookProfileScope profile(RollbackHookProfileId::GameUiMove);
     // Re-simulation currently runs the full native sMvc3Main__move rather than
     // Rollback_HeadlessTick. Keep unsnapshotted UI resources and scheduler
     // arrays on the final presentation timeline only.
@@ -6013,6 +6140,7 @@ static void __fastcall hkGameUi_move(uint64_t param_1)
 
 static void __fastcall hkSchedulerRebuild(uint64_t scheduler)
 {
+    RollbackHookProfileScope profile(RollbackHookProfileId::SchedulerRebuild);
     // UI and battle-message units can both be created through sUnit while
     // replaying frames. Merely skipping the allocation leaves the new unit in
     // active state 2 with an empty scheduler, so it survives onto the final
@@ -6029,6 +6157,7 @@ static void __fastcall hkSchedulerRebuild(uint64_t scheduler)
 
 static bool __fastcall hkRChrCpuClassFunc(void* cpu, void* object)
 {
+    RollbackHookProfileScope profile(RollbackHookProfileId::ChrCpuClassFunc);
     // This opcode pops a 64-bit object from two 32-bit VM stack entries and
     // immediately calls object->vtable[0x20]. A rewound script can reach the
     // opcode with an ordinary packed script value (the observed crash used
@@ -6063,6 +6192,7 @@ static bool __fastcall hkRChrCpuClassFunc(void* cpu, void* object)
 // ===========================================================================
 static void __fastcall hkMain_move(uint64_t param_1)
 {
+    RollbackHookProfileScope profile(RollbackHookProfileId::MainMove);
     if (g_isResimulating) {
         *(uint32_t*)(param_1 + 0xA8) = 1;
         *(uint32_t*)(param_1 + 0xA4) = 1;
