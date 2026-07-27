@@ -118,8 +118,6 @@ static void __fastcall hkMvc3MainMove(uint64_t main)
         int step = action ? *(int*)(action + 0xD8) : 0;
         if (step >= 0) {
             g_postResimFrame = -1;
-            Rollback_SaveSnapshot(curFrame);
-
             int32_t start = -1;
             int32_t end = -1;
             if (Rollback_ConsumeReSimRequest(start, end)) {
@@ -139,6 +137,8 @@ static void __fastcall hkMvc3MainMove(uint64_t main)
                                           postSaveEnd - postResimStart);
                 }
                 g_postResimFrame = curFrame;
+            } else {
+                Rollback_SaveSnapshot(curFrame);
             }
         }
     }
