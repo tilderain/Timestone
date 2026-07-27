@@ -26,9 +26,11 @@ constexpr uintptr_t DTI_RMSGDATA = 0x140D52E30;
 constexpr uintptr_t PTR_SCHARACTER = 0x140D44A70;
 constexpr uintptr_t PTR_COMMAND_LIST_ROW_TABLES = 0x140B16960;
 constexpr uintptr_t PTR_SMVC3_MANAGER = 0x140D510A0;
+constexpr uintptr_t PTR_SREPLAY = 0x140D4D9D8;
 constexpr uintptr_t SMVC3_MANAGER_ACTION_OFFSET = 0x48;
 constexpr uintptr_t ADDR_SET_RESTART_MODE = 0x14000AF90;
 constexpr uintptr_t ADDR_SET_CHARACTER_POSITION = 0x140002AF0;
+constexpr uintptr_t ADDR_REPLAY_ROUND_START = 0x1401CFA90;
 constexpr uintptr_t PTR_SHOT_LISTS = 0x140D47F90;
 constexpr uintptr_t MVC3_MANAGER_CUTIN_OFFSET = 0xB50;
 constexpr uintptr_t TEAM_OFFSETS[] = {0x40, 0x300};
@@ -129,6 +131,7 @@ bool g_suiteManualCase = false;
 float g_suiteDefenderLife = 0.0f;
 int32_t g_suiteDeadline = -1;
 uint32_t g_suiteIdleActions[2] = {};
+uint32_t g_suiteRngSeed = 0;
 constexpr int32_t SUITE_COMMAND_TIMEOUT = 600;
 constexpr int32_t SUITE_COMPLETION_TIMEOUT = 3600;
 constexpr int32_t SUITE_QUIET_FRAMES = 20;
@@ -259,6 +262,19 @@ void RequestTrainingReset()
 
     using SetRestartMode_t = void(__fastcall*)(uint64_t, int32_t);
     ((SetRestartMode_t)_addr(ADDR_SET_RESTART_MODE))(action, 3);
+}
+
+bool ResetSuiteRng()
+{
+    uint64_t replay = *(uint64_t*)_addr(PTR_SREPLAY);
+    if (!replay)
+        return false;
+
+    *(uint32_t*)(replay + 0x23424) = g_suiteRngSeed;
+    *(uint32_t*)(replay + 0x58) = g_suiteRngSeed;
+    using ReplayRoundStart_t = void(__fastcall*)(uint64_t);
+    ((ReplayRoundStart_t)_addr(ADDR_REPLAY_ROUND_START))(replay);
+    return true;
 }
 
 void FinishSuiteCommand(bool passed, const char* reason)
@@ -1296,6 +1312,11 @@ extern "C" bool AutoTest_StartSuite(int32_t playerIndex, bool facingLeft)
     if (playerIndex < 0 || playerIndex > 1)
         return false;
 
+    uint64_t replay = *(uint64_t*)_addr(PTR_SREPLAY);
+    if (!replay)
+        return false;
+    g_suiteRngSeed = *(uint32_t*)(replay + 0x58);
+
     int32_t allCount = AutoTest_GetRuntimeCommands(
         g_suiteCommands, AUTOTEST_MAX_RUNTIME_COMMANDS);
     using GetCommandByLine_t = uint64_t(__fastcall*)(uint64_t, uint32_t);
@@ -1386,6 +1407,15 @@ extern "C" void AutoTest_Process()
             snprintf(g_suiteStatus.lastResult, sizeof(g_suiteStatus.lastResult),
                      "Suite complete: %d passed, %d failed",
                      g_suiteStatus.passedCount, g_suiteStatus.failedCount);
+            HookLog("AutoTestSuite: %s\n", g_suiteStatus.lastResult);
+            g_suiteStatus.active = false;
+            g_suitePhase = SuitePhase::Idle;
+            return;
+        }
+
+        if (!ResetSuiteRng()) {
+            snprintf(g_suiteStatus.lastResult, sizeof(g_suiteStatus.lastResult),
+                     "Suite stopped: sReplay unavailable for RNG reset");
             HookLog("AutoTestSuite: %s\n", g_suiteStatus.lastResult);
             g_suiteStatus.active = false;
             g_suitePhase = SuitePhase::Idle;
