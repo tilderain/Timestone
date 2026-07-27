@@ -45,6 +45,7 @@ These describe the unmodified game, not the active ENet rollback protocol:
 - [`sbattlesetting.md`](sbattlesetting.md)
 - [`sound.md`](sound.md)
 - [`sai.md`](sai.md)
+- [`sunit_categories.md`](sunit_categories.md)
 - [`thread.md`](thread.md)
 
 ## Historical Investigations

@@ -2,6 +2,7 @@
 #include "rollback_profile.h"
 #include "rollback.h"
 #include "netplay.h"
+#include "mk10utils.h"
 
 #include <algorithm>
 
@@ -171,6 +172,58 @@ void Profile_HookEnd(RollbackHookProfileId id, uint64_t start)
     ++g_activeRollbackProfile->hookCalls[index];
 }
 
+void Profile_RecordUnitCategory(RollbackUnitProfilePhase phase, uint32_t category,
+                                 uint64_t ticks)
+{
+    if (!g_activeRollbackProfile || category >= ROLLBACK_UNIT_CATEGORY_COUNT) return;
+    const size_t phaseIndex = (size_t)phase;
+    if (phaseIndex >= (size_t)RollbackUnitProfilePhase::Count) return;
+
+    g_activeRollbackProfile->unitCategoryTicks[phaseIndex][category] += ticks;
+    g_activeRollbackProfile->unitCategoryMaxTicks[phaseIndex][category] =
+        std::max(g_activeRollbackProfile->unitCategoryMaxTicks[phaseIndex][category], ticks);
+    ++g_activeRollbackProfile->unitCategoryCalls[phaseIndex][category];
+}
+
+void Profile_RegisterUnitObjectType(uint32_t category, uint64_t dti)
+{
+    if (!g_activeRollbackProfile || !dti) return;
+    for (uint32_t i = 0; i < g_activeRollbackProfile->unitObjectTypeCount; ++i) {
+        RollbackUnitObjectProfile& entry = g_activeRollbackProfile->unitObjectTypes[i];
+        if (entry.category == category && entry.dti == dti) {
+            ++entry.visits;
+            return;
+        }
+    }
+    if (g_activeRollbackProfile->unitObjectTypeCount >= ROLLBACK_UNIT_OBJECT_TYPE_COUNT)
+        return;
+    RollbackUnitObjectProfile& entry = g_activeRollbackProfile->unitObjectTypes[
+        g_activeRollbackProfile->unitObjectTypeCount++];
+    entry.category = category;
+    entry.dti = dti;
+    entry.visits = 1;
+}
+
+void Profile_RecordUnitObject(uint32_t category, uint64_t dti, uint64_t ticks)
+{
+    RollbackProfile* profile = g_activeRollbackProfile;
+    if (!profile || !dti) return;
+    for (uint32_t i = 0; i < profile->unitObjectTypeCount; ++i) {
+        RollbackUnitObjectProfile& entry = profile->unitObjectTypes[i];
+        if (entry.category != category || entry.dti != dti) continue;
+        InterlockedAdd64((volatile LONG64*)&entry.ticks, (LONG64)ticks);
+        InterlockedIncrement((volatile LONG*)&entry.calls);
+        uint64_t previous = entry.maxTicks;
+        while (ticks > previous) {
+            const uint64_t observed = (uint64_t)InterlockedCompareExchange64(
+                (volatile LONG64*)&entry.maxTicks, (LONG64)ticks, (LONG64)previous);
+            if (observed == previous) break;
+            previous = observed;
+        }
+        return;
+    }
+}
+
 void Profile_RecordSnapshotEnabled(uint64_t profileStart, uint64_t buildRegionsEnd,
                                     uint64_t allocationEnd, uint64_t copyRegionsEnd,
                                     uint64_t snapshotMetadataEnd, uint64_t collisionClonesEnd,
@@ -267,7 +320,7 @@ void Profile_DumpEnabled(const RollbackProfile& profile, bool ndjsonEnabled,
                  "\"respawn_overlay_ms\":%.6f,\"finalize_ms\":%.6f,"
                  "\"effect_visits\":%u,\"effect_sanitize_calls\":%u,"
                  "\"generator_nodes\":%u,\"current_shots\":%u,\"saved_shots\":%u},"
-                 "\"hooks\":[",
+                 "\"unit_categories\":[",
                 profile.startFrame, profile.endFrame, frameCount, Profile_Ms(profile.total),
                 Profile_Ms(profile.frameTotal) / frameDivisor, Profile_Ms(profile.frameTotalMax),
                 ndjsonEnabled ? "true" : "false", multiResimEnabled ? "true" : "false",
@@ -335,7 +388,47 @@ void Profile_DumpEnabled(const RollbackProfile& profile, bool ndjsonEnabled,
                  Profile_Ms(profile.restoreShotFinalize),
                  profile.restoreEffectVisits, profile.restoreEffectSanitizeCalls,
                  profile.restoreEffectGeneratorNodes, profile.restoreCurrentShots,
-                 profile.restoreSavedShots);
+                  profile.restoreSavedShots);
+
+        using GetUnitCategoryNameFn = const char*(__fastcall*)(uint64_t, uint32_t);
+        auto getCategoryName = (GetUnitCategoryNameFn)_addr(0x14051b1c0);
+        uint64_t sUnit = *(uint64_t*)_addr(0x140e17698);
+        static const char* const unitPhaseNames[] = {"move", "sync_job", "sync_save"};
+        bool firstCategory = true;
+        for (size_t phase = 0; phase < (size_t)RollbackUnitProfilePhase::Count; ++phase) {
+            for (size_t category = 0; category < ROLLBACK_UNIT_CATEGORY_COUNT; ++category) {
+                const uint32_t calls = profile.unitCategoryCalls[phase][category];
+                if (!calls) continue;
+                const char* name = sUnit ? getCategoryName(sUnit, (uint32_t)category) : "unknown";
+                fprintf(json,
+                        "%s{\"phase\":\"%s\",\"category\":%u,\"name\":\"%s\","
+                        "\"calls\":%u,\"total_ms\":%.6f,\"avg_us\":%.6f,\"max_us\":%.6f}",
+                        firstCategory ? "" : ",", unitPhaseNames[phase],
+                        (unsigned)category, name ? name : "unknown", calls,
+                        Profile_Ms(profile.unitCategoryTicks[phase][category]),
+                        Profile_Ms(profile.unitCategoryTicks[phase][category]) * 1000.0 / calls,
+                        Profile_Ms(profile.unitCategoryMaxTicks[phase][category]) * 1000.0);
+                firstCategory = false;
+            }
+        }
+        fputs("],\"unit_objects\":[", json);
+
+        bool firstObject = true;
+        for (uint32_t i = 0; i < profile.unitObjectTypeCount; ++i) {
+            const RollbackUnitObjectProfile& entry = profile.unitObjectTypes[i];
+            const char* name = *(const char**)(entry.dti + 0x08);
+            fprintf(json,
+                    "%s{\"category\":%u,\"phase\":\"move\",\"dti\":\"0x%llx\","
+                    "\"name\":\"%s\",\"visits\":%u,\"calls\":%u,\"total_ms\":%.6f,"
+                    "\"avg_us\":%.6f,\"max_us\":%.6f}",
+                    firstObject ? "" : ",", entry.category,
+                    (unsigned long long)entry.dti, name ? name : "unknown",
+                    entry.visits, entry.calls, Profile_Ms(entry.ticks),
+                    entry.calls ? Profile_Ms(entry.ticks) * 1000.0 / entry.calls : 0.0,
+                    Profile_Ms(entry.maxTicks) * 1000.0);
+            firstObject = false;
+        }
+        fputs("],\"hooks\":[", json);
 
         bool firstHook = true;
         for (size_t hook = 0; hook < (size_t)RollbackHookProfileId::Count; ++hook) {

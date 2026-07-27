@@ -3,8 +3,20 @@
 #include <cstddef>
 #include <cstdint>
 
-// Set true for a profiling build. The disabled API compiles entirely away.
-inline constexpr bool ROLLBACK_PROFILING_ENABLED = true;
+// Override to 0 at compile time for a profiling-free build.
+#ifndef UMVC3_ROLLBACK_PROFILING
+#define UMVC3_ROLLBACK_PROFILING 1
+#endif
+inline constexpr bool ROLLBACK_PROFILING_ENABLED = UMVC3_ROLLBACK_PROFILING != 0;
+inline constexpr size_t ROLLBACK_UNIT_CATEGORY_COUNT = 64;
+inline constexpr size_t ROLLBACK_UNIT_OBJECT_TYPE_COUNT = 512;
+
+enum class RollbackUnitProfilePhase : uint8_t {
+    Move,
+    SyncJob,
+    SyncSave,
+    Count
+};
 
 enum class RollbackHookProfileId : uint8_t {
     ButtonRemap,
@@ -41,6 +53,15 @@ enum class RollbackHookProfileId : uint8_t {
     ChrCpuClassFunc,
     MainMove,
     Count
+};
+
+struct RollbackUnitObjectProfile {
+    uint64_t dti = 0;
+    uint32_t category = 0;
+    uint32_t visits = 0;
+    uint64_t ticks = 0;
+    uint64_t maxTicks = 0;
+    uint32_t calls = 0;
 };
 
 struct RollbackProfile {
@@ -148,6 +169,14 @@ struct RollbackProfile {
     uint64_t snapshotBytes = 0;
     uint64_t snapshotRegions = 0;
     uint32_t snapshotCount = 0;
+    uint64_t unitCategoryTicks[(size_t)RollbackUnitProfilePhase::Count]
+                              [ROLLBACK_UNIT_CATEGORY_COUNT] = {};
+    uint64_t unitCategoryMaxTicks[(size_t)RollbackUnitProfilePhase::Count]
+                                 [ROLLBACK_UNIT_CATEGORY_COUNT] = {};
+    uint32_t unitCategoryCalls[(size_t)RollbackUnitProfilePhase::Count]
+                               [ROLLBACK_UNIT_CATEGORY_COUNT] = {};
+    RollbackUnitObjectProfile unitObjectTypes[ROLLBACK_UNIT_OBJECT_TYPE_COUNT] = {};
+    uint32_t unitObjectTypeCount = 0;
     uint64_t hookTicks[(size_t)RollbackHookProfileId::Count] = {};
     uint64_t hookMaxTicks[(size_t)RollbackHookProfileId::Count] = {};
     uint32_t hookCalls[(size_t)RollbackHookProfileId::Count] = {};
@@ -174,6 +203,10 @@ void Profile_AddHeadlessPhaseEnabled(uint64_t RollbackProfile::*field,
 void Profile_FinishHeadlessEnabled(uint64_t start);
 uint64_t Profile_HookBegin();
 void Profile_HookEnd(RollbackHookProfileId id, uint64_t start);
+void Profile_RecordUnitCategory(RollbackUnitProfilePhase phase, uint32_t category,
+                                 uint64_t ticks);
+void Profile_RegisterUnitObjectType(uint32_t category, uint64_t dti);
+void Profile_RecordUnitObject(uint32_t category, uint64_t dti, uint64_t ticks);
 void Profile_RecordSnapshotEnabled(uint64_t profileStart, uint64_t buildRegionsEnd,
                                    uint64_t allocationEnd, uint64_t copyRegionsEnd,
                                    uint64_t snapshotMetadataEnd, uint64_t collisionClonesEnd,
