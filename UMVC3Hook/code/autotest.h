@@ -67,6 +67,22 @@ struct AutoTestRuntimeCommand {
     uint32_t programFlagsForbidden;
 };
 
+struct AutoTestSuiteStatus {
+    bool active;
+    bool waitingForHit;
+    bool waitingForReset;
+    int32_t playerIndex;
+    int32_t currentCommand;
+    int32_t commandCount;
+    int32_t passedCount;
+    int32_t failedCount;
+    int32_t currentMatcher;
+    int32_t currentLine;
+    int32_t commandStartFrame;
+    char currentName[96];
+    char lastResult[160];
+};
+
 void AutoTest_InitHooks();
 
 extern "C" bool AutoTest_GetInput(int32_t frame, uint32_t playerIndex,
@@ -84,3 +100,6 @@ extern "C" bool AutoTest_StartRuntimeCommand(int32_t playerIndex,
                                                int32_t lineIndex,
                                                bool facingLeft);
 extern "C" const char* AutoTest_GetRuntimeExecutionError();
+extern "C" bool AutoTest_StartSuite(int32_t playerIndex, bool facingLeft);
+extern "C" void AutoTest_Process();
+extern "C" AutoTestSuiteStatus AutoTest_GetSuiteStatus();

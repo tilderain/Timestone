@@ -712,6 +712,8 @@ static inline bool KeyPressed(int vk, bool& prevState)
 
 void FrameStepper_Process()
 {
+    AutoTest_Process();
+
     static bool prevDumpNDJSON = false;
     if (KeyPressed(VK_F10, prevDumpNDJSON))
     {
@@ -1138,6 +1140,25 @@ void FrameStepper_DrawAutoTest()
     ImGui::Checkbox("Facing left", &facingLeft);
 
     AutoTestStatus status = AutoTest_GetStatus();
+    AutoTestSuiteStatus suite = AutoTest_GetSuiteStatus();
+    if (!suite.active) {
+        if (ImGui::SmallButton("Run all commands"))
+            AutoTest_StartSuite(playerIndex, facingLeft);
+    } else {
+        if (ImGui::SmallButton("Stop suite"))
+            AutoTest_Stop();
+        ImGui::Text("Suite: %d/%d  passed=%d failed=%d",
+                    suite.currentCommand + 1, suite.commandCount,
+                    suite.passedCount, suite.failedCount);
+        ImGui::Text("Current: %s [M%d L%d]",
+                    suite.currentName, suite.currentMatcher, suite.currentLine);
+        ImGui::Text("Phase: %s",
+                    suite.waitingForReset ? "resetting through sAction step 12" :
+                    suite.waitingForHit ? "waiting for P2 hit" : "running");
+        if (suite.lastResult[0])
+            ImGui::TextWrapped("Last: %s", suite.lastResult);
+    }
+
     if (!status.active) {
         if (ImGui::SmallButton("Run move"))
             AutoTest_Start(scriptIndex, playerIndex, facingLeft);

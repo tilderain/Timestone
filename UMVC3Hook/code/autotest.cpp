@@ -25,6 +25,11 @@ constexpr uintptr_t ADDR_LOAD_GLOBAL_ARCHIVE = 0x14025AD30;
 constexpr uintptr_t DTI_RMSGDATA = 0x140D52E30;
 constexpr uintptr_t PTR_SCHARACTER = 0x140D44A70;
 constexpr uintptr_t PTR_COMMAND_LIST_ROW_TABLES = 0x140B16960;
+constexpr uintptr_t PTR_SMVC3_MANAGER = 0x140D510A0;
+constexpr uintptr_t SMVC3_MANAGER_ACTION_OFFSET = 0x48;
+constexpr uintptr_t ADDR_EXECUTE_MATCH_PHASE = 0x140004B80;
+constexpr uintptr_t ADDR_SET_RESTART_MODE = 0x14000AF90;
+constexpr uintptr_t ADDR_SET_CHARACTER_POSITION = 0x140002AF0;
 constexpr uintptr_t TEAM_OFFSETS[] = {0x40, 0x300};
 constexpr uintptr_t TEAM_ACTIVE_CHARACTER_OFFSET = 0x48;
 constexpr uintptr_t COMMAND_MATCHER_OFFSETS[] = {0x2738, 0x2950};
@@ -88,6 +93,24 @@ InputScript g_runtimeScript = {"Runtime command", g_runtimeInputSteps, 0};
 bool g_runningRuntimeCommand = false;
 char g_runtimeExecutionError[160] = {};
 
+enum class SuitePhase {
+    Idle,
+    StartCommand,
+    RunningCommand,
+    WaitingForHit,
+    WaitingForReset,
+};
+
+AutoTestRuntimeCommand g_suiteCommands[AUTOTEST_MAX_RUNTIME_COMMANDS] = {};
+AutoTestSuiteStatus g_suiteStatus = {};
+SuitePhase g_suitePhase = SuitePhase::Idle;
+bool g_suiteFacingLeft = false;
+bool g_suiteMatchedCommand = false;
+float g_suiteDefenderLife = 0.0f;
+int32_t g_suiteDeadline = -1;
+constexpr int32_t SUITE_COMMAND_TIMEOUT = 360;
+constexpr int32_t SUITE_HIT_TIMEOUT = 240;
+
 struct RuntimeCommandNameCache {
     uint64_t resource;
     uint64_t command;
@@ -121,6 +144,78 @@ struct CommandNotation {
 
 using UpdateCommandMatcher_t = void(__fastcall*)(uint64_t commandMatcher);
 UpdateCommandMatcher_t oUpdateCommandMatcher = nullptr;
+
+uint64_t GetActiveCharacter(int32_t playerIndex)
+{
+    uint64_t characters = *(uint64_t*)_addr(PTR_SCHARACTER);
+    return characters
+        ? *(uint64_t*)(characters + TEAM_OFFSETS[playerIndex] +
+                      TEAM_ACTIVE_CHARACTER_OFFSET)
+        : 0;
+}
+
+uint64_t GetAction()
+{
+    uint64_t manager = *(uint64_t*)_addr(PTR_SMVC3_MANAGER);
+    return manager ? *(uint64_t*)(manager + SMVC3_MANAGER_ACTION_OFFSET) : 0;
+}
+
+float GetCharacterLife(uint64_t character)
+{
+    return character ? *(float*)(character + 0x459) : 0.0f;
+}
+
+void PlaceDefenderNextToAttacker(int32_t attackerIndex)
+{
+    uint64_t attacker = GetActiveCharacter(attackerIndex);
+    uint64_t defender = GetActiveCharacter(attackerIndex ^ 1);
+    if (!attacker || !defender)
+        return;
+
+    float position[4] = {
+        *(float*)(attacker + 0x50) + (g_suiteFacingLeft ? -2.0f : 2.0f),
+        *(float*)(attacker + 0x54),
+        *(float*)(attacker + 0x58),
+        0.0f,
+    };
+    using SetPosition_t = void(__fastcall*)(uint64_t, const float*);
+    ((SetPosition_t)_addr(ADDR_SET_CHARACTER_POSITION))(defender, position);
+}
+
+void RequestTrainingReset()
+{
+    uint64_t action = GetAction();
+    if (!action)
+        return;
+
+    using SetRestartMode_t = void(__fastcall*)(uint64_t, int32_t);
+    ((SetRestartMode_t)_addr(ADDR_SET_RESTART_MODE))(action, 3);
+    using ExecuteMatchPhase_t = void(__fastcall*)(uint64_t, int32_t,
+                                                   uint64_t, uint64_t);
+    ((ExecuteMatchPhase_t)_addr(ADDR_EXECUTE_MATCH_PHASE))(action, 12, 0, 0);
+}
+
+void FinishSuiteCommand(bool passed, const char* reason)
+{
+    if (passed)
+        ++g_suiteStatus.passedCount;
+    else
+        ++g_suiteStatus.failedCount;
+    snprintf(g_suiteStatus.lastResult, sizeof(g_suiteStatus.lastResult),
+             "%s: %s", g_suiteStatus.currentName, reason);
+    HookLog("AutoTestSuite: command=%d/%d matcher=%d line=%d %s\n",
+            g_suiteStatus.currentCommand + 1, g_suiteStatus.commandCount,
+            g_suiteStatus.currentMatcher, g_suiteStatus.currentLine,
+            g_suiteStatus.lastResult);
+
+    g_status.active = false;
+    g_status.currentInput = 0;
+    g_runningRuntimeCommand = false;
+    RequestTrainingReset();
+    g_suitePhase = SuitePhase::WaitingForReset;
+    g_suiteStatus.waitingForHit = false;
+    g_suiteStatus.waitingForReset = true;
+}
 
 uint32_t MirrorDirections(uint32_t input)
 {
@@ -730,6 +825,11 @@ void __fastcall hkUpdateCommandMatcher(uint64_t commandMatcher)
     g_status.lastSuccessAnimation = *(int32_t*)(commandMatcher + 0x18C);
     g_status.lastAction = *(uint32_t*)(character + 0x1310);
 
+    if (g_suiteStatus.active &&
+        matcherIndex == g_suiteStatus.currentMatcher &&
+        lineIndex == g_suiteStatus.currentLine)
+        g_suiteMatchedCommand = true;
+
     HookLog("AutoTest: frame=%d script=%s matcher=%d line=%d list=%d anm=%d action=0x%08X\n",
             frame, ActiveScriptName(), matcherIndex, lineIndex,
             g_status.lastSuccessListId, g_status.lastSuccessAnimation,
@@ -802,6 +902,10 @@ extern "C" void AutoTest_Stop()
     g_status.active = false;
     g_status.currentInput = 0;
     g_runningRuntimeCommand = false;
+    g_suiteStatus.active = false;
+    g_suiteStatus.waitingForHit = false;
+    g_suiteStatus.waitingForReset = false;
+    g_suitePhase = SuitePhase::Idle;
 }
 
 extern "C" AutoTestStatus AutoTest_GetStatus()
@@ -1048,4 +1152,117 @@ extern "C" bool AutoTest_StartRuntimeCommand(int32_t playerIndex,
 extern "C" const char* AutoTest_GetRuntimeExecutionError()
 {
     return g_runtimeExecutionError;
+}
+
+extern "C" bool AutoTest_StartSuite(int32_t playerIndex, bool facingLeft)
+{
+    if (playerIndex < 0 || playerIndex > 1)
+        return false;
+
+    int32_t allCount = AutoTest_GetRuntimeCommands(
+        g_suiteCommands, AUTOTEST_MAX_RUNTIME_COMMANDS);
+    int32_t commandCount = 0;
+    for (int32_t i = 0; i < allCount; ++i) {
+        if (g_suiteCommands[i].playerIndex == playerIndex)
+            g_suiteCommands[commandCount++] = g_suiteCommands[i];
+    }
+    if (commandCount == 0)
+        return false;
+
+    g_suiteStatus = {};
+    g_suiteStatus.active = true;
+    g_suiteStatus.playerIndex = playerIndex;
+    g_suiteStatus.currentCommand = 0;
+    g_suiteStatus.commandCount = commandCount;
+    g_suiteStatus.currentMatcher = -1;
+    g_suiteStatus.currentLine = -1;
+    g_suiteFacingLeft = facingLeft;
+    g_suiteMatchedCommand = false;
+    g_suitePhase = SuitePhase::StartCommand;
+    HookLog("AutoTestSuite: started %d commands for P%d\n",
+            commandCount, playerIndex + 1);
+    return true;
+}
+
+extern "C" void AutoTest_Process()
+{
+    if (!g_suiteStatus.active || g_isResimulating)
+        return;
+
+    int32_t frame = Controller_GetNetFrameCount();
+    uint64_t action = GetAction();
+    int32_t actionStep = action ? *(int32_t*)(action + 0xD8) : -1;
+
+    switch (g_suitePhase) {
+    case SuitePhase::StartCommand: {
+        if (actionStep != 5)
+            return;
+        if (g_suiteStatus.currentCommand >= g_suiteStatus.commandCount) {
+            snprintf(g_suiteStatus.lastResult, sizeof(g_suiteStatus.lastResult),
+                     "Suite complete: %d passed, %d failed",
+                     g_suiteStatus.passedCount, g_suiteStatus.failedCount);
+            HookLog("AutoTestSuite: %s\n", g_suiteStatus.lastResult);
+            g_suiteStatus.active = false;
+            g_suitePhase = SuitePhase::Idle;
+            return;
+        }
+
+        const AutoTestRuntimeCommand& command =
+            g_suiteCommands[g_suiteStatus.currentCommand];
+        g_suiteStatus.currentMatcher = command.matcherIndex;
+        g_suiteStatus.currentLine = command.lineIndex;
+        snprintf(g_suiteStatus.currentName, sizeof(g_suiteStatus.currentName),
+                 "%s", command.commandListName[0]
+                     ? command.commandListName : command.name);
+        PlaceDefenderNextToAttacker(g_suiteStatus.playerIndex);
+        g_suiteDefenderLife = GetCharacterLife(
+            GetActiveCharacter(g_suiteStatus.playerIndex ^ 1));
+        g_suiteMatchedCommand = false;
+        if (!AutoTest_StartRuntimeCommand(g_suiteStatus.playerIndex,
+                                          command.matcherIndex,
+                                          command.lineIndex,
+                                          g_suiteFacingLeft)) {
+            FinishSuiteCommand(false, AutoTest_GetRuntimeExecutionError());
+            return;
+        }
+        g_suiteStatus.active = true;
+        g_suiteStatus.commandStartFrame = frame;
+        g_suiteDeadline = frame + SUITE_COMMAND_TIMEOUT;
+        g_suitePhase = SuitePhase::RunningCommand;
+        return;
+    }
+    case SuitePhase::RunningCommand:
+        if (g_suiteMatchedCommand) {
+            g_suiteStatus.waitingForHit = true;
+            g_suiteDeadline = frame + SUITE_HIT_TIMEOUT;
+            g_suitePhase = SuitePhase::WaitingForHit;
+        } else if (frame > g_suiteDeadline) {
+            FinishSuiteCommand(false, "command matcher timed out");
+        }
+        return;
+    case SuitePhase::WaitingForHit: {
+        float life = GetCharacterLife(
+            GetActiveCharacter(g_suiteStatus.playerIndex ^ 1));
+        if (life < g_suiteDefenderLife) {
+            FinishSuiteCommand(true, "matched and hit P2");
+        } else if (frame > g_suiteDeadline) {
+            FinishSuiteCommand(false, "matched but did not hit P2");
+        }
+        return;
+    }
+    case SuitePhase::WaitingForReset:
+        if (actionStep == 5) {
+            ++g_suiteStatus.currentCommand;
+            g_suiteStatus.waitingForReset = false;
+            g_suitePhase = SuitePhase::StartCommand;
+        }
+        return;
+    case SuitePhase::Idle:
+        return;
+    }
+}
+
+extern "C" AutoTestSuiteStatus AutoTest_GetSuiteStatus()
+{
+    return g_suiteStatus;
 }
