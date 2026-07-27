@@ -13,14 +13,14 @@
 #include "netplay.h"
 #include "LaunchMenu.h"
 #include "rollback.h"
+#include "controller.h"
 
 // Netplay debug info from controller.cpp
 extern "C" int32_t Controller_GetDelayFrames();
 extern "C" int32_t Controller_GetNetFrameCount();
 extern "C" int32_t Controller_GetLastRemoteFrame();
 extern "C" int32_t Controller_GetRollbackFrames();
-extern "C" uint32_t Controller_GetRecordedLocalInput(int32_t frame);
-extern "C" uint32_t Controller_GetUsedRemoteInput(int32_t frame);
+extern "C" uint32_t Controller_GetExpectedInput(uint32_t teamIdx, int32_t frame);
 
 // Multi-resimulation toggle from controller.cpp
 extern bool g_multiResimEnabled;
@@ -166,11 +166,6 @@ static uint32_t g_padP2Input   = 0; // pad + 0x49c — raw pad slot 1 input
 static bool     g_netDataValid = false;
 
 
-// Slot stride in the pad structure
-static constexpr uint32_t PAD_SLOT_STRIDE = 0x2E0;
-static constexpr uint32_t PAD_SLOT_INPUT  = 0x1BC; // offset within each slot for the active input
-// P2's input would be at pad + PAD_SLOT_STRIDE*1 + PAD_SLOT_INPUT = pad + 0x49c
-
 // Input buffer data — captured from cChrInput__getInputBuffer (0x1401cc5d0)
 // and the buffer reader FUN_1402894d0 (0x1402894d0)
 static uint64_t   g_inputBufBase = 0;     // input buffer base pointer (cChrInput object)
@@ -190,21 +185,6 @@ static HWND g_hWnd = nullptr;
 // consistent across D3D9 buffer swaps.
 static IDirect3DTexture9* g_pPauseTexture    = nullptr;
 static bool               g_captureRequested = false;
-
-// ---------------------------------------------------------------------------
-// Input bit definitions (GameInput format returned by GetsCurrentInput_withSOCD)
-// ---------------------------------------------------------------------------
-static constexpr uint32_t IN_RIGHT    = 0x0001;
-static constexpr uint32_t IN_LEFT     = 0x0002;
-static constexpr uint32_t IN_UP       = 0x0004;
-static constexpr uint32_t IN_DOWN     = 0x0008;
-static constexpr uint32_t IN_L        = 0x0010; // Light attack
-static constexpr uint32_t IN_M        = 0x0020; // Medium attack
-static constexpr uint32_t IN_H        = 0x0040; // Heavy attack
-static constexpr uint32_t IN_S        = 0x0080; // Special / Exchange
-static constexpr uint32_t IN_A1       = 0x0100; // Assist 1
-static constexpr uint32_t IN_A2       = 0x0200; // Assist 2
-static constexpr uint32_t IN_START    = 0x100000;
 
 static const char* DecodeDirection(uint32_t input)
 {
@@ -231,12 +211,12 @@ static void AppendButtons(char* buf, size_t len, uint32_t input)
             strcat(tmp, name);
         }
     };
-    append("L", IN_L);
-    append("M", IN_M);
-    append("H", IN_H);
-    append("S", IN_S);
-    append("A1", IN_A1);
-    append("A2", IN_A2);
+    append("L", IN_X);
+    append("M", IN_Y);
+    append("H", IN_B);
+    append("S", IN_A);
+    append("A1", IN_LB);
+    append("A2", IN_RB);
     append("Taunt", IN_START);
     strncpy(buf, tmp, len - 1);
     buf[len - 1] = '\0';
@@ -250,28 +230,6 @@ static constexpr uintptr_t SPAD_GET_INSTANCE_ADDR = 0x140001B00;
 
 typedef uint64_t(__fastcall* GetsCurrentInput_withSOCD_t)(uint64_t padInstance, uint32_t playerIndex);
 static constexpr uintptr_t GET_CURRENT_INPUT_ADDR = 0x1402B3700;
-
-// Unit flags offset: contains game action bits from the keybind/action system
-// (cUnit__getUnitFlags reads *(uint32_t*)(pad + 0xbd8))
-static constexpr uint32_t UNIT_FLAGS_OFFSET = 0xBD8;
-
-// Common UMVC3 keyboard VK codes not in GetsCurrentInput_withSOCD's hardcoded list
-// (default UMVC3 layout: arrows=move, A=LP, S=MP, D=HP, Z=LK, X=MK, C=HK, F=Special, Q=A1, W=A2)
-static constexpr int EXTRA_VK[] = {
-    0x5A, // VK_Z
-    0x53, // VK_S
-    0x44, // VK_D
-    0x43, // VK_C
-    0x46, // VK_F
-    0x51, // VK_Q
-    0x57, // VK_W
-    0x45, // VK_E
-    0x52, // VK_R
-};
-static constexpr const char* EXTRA_VK_NAMES[] = {
-    "Z", "S", "D", "C", "F", "Q", "W", "E", "R",
-};
-static constexpr int EXTRA_VK_COUNT = sizeof(EXTRA_VK) / sizeof(EXTRA_VK[0]);
 
 // ---------------------------------------------------------------------------
 // Original function pointer for the vtable-hooked move
@@ -952,35 +910,14 @@ void FrameStepper_Draw()
     }
 
     // --- Always-visible P1/P2 pad input window (top-left) ---
-    auto sPadGetInstance = (sPad__getInstance_t)_addr(SPAD_GET_INSTANCE_ADDR);
-    auto getInput = (GetsCurrentInput_withSOCD_t)_addr(GET_CURRENT_INPUT_ADDR);
-
-    uint64_t pad = sPadGetInstance();
-    if (pad)
+    if (Controller_GetNetFrameCount() >= 0)
     {
-        uint32_t p1, p2;
-        if (Netplay_IsActive())
-        {
-            int32_t frame = Controller_GetNetFrameCount();
-            if (Netplay_IsHost())
-            {
-                p1 = Controller_GetRecordedLocalInput(frame);
-                p2 = Controller_GetUsedRemoteInput(frame);
-            }
-            else
-            {
-                p1 = Controller_GetUsedRemoteInput(frame);
-                p2 = Controller_GetRecordedLocalInput(frame);
-            }
-        }
-        else
-        {
-            p1 = (uint32_t)getInput(pad, 0);
-            p2 = (uint32_t)getInput(pad, 1);
-            // OR in keybind-system flags so Z, S, etc. show up
-            p1 |= *(uint32_t*)(pad + UNIT_FLAGS_OFFSET);
-            p2 |= *(uint32_t*)(pad + UNIT_FLAGS_OFFSET);
-        }
+        // sReplay advances during oMove, but processFrameInput records under the
+        // frame value from the start of that tick. Display the input that made
+        // the currently rendered frame, not the device state for the next tick.
+        int32_t frame = Controller_GetNetFrameCount() - 1;
+        uint32_t p1 = Controller_GetExpectedInput(0, frame);
+        uint32_t p2 = Controller_GetExpectedInput(1, frame);
 
         char btns1[128], btns2[128];
         AppendButtons(btns1, sizeof(btns1), p1);
@@ -1056,17 +993,6 @@ void FrameStepper_Draw()
         ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.6f, 1.0f), "P2: [%s]  0x%08X", DecodeDirection(p2), p2);
         if (btns2[0])
             ImGui::SameLine(), ImGui::TextColored(ImVec4(0.7f, 1.0f, 0.8f, 1.0f), "%s", btns2);
-
-        // Show extra keyboard keys (Z, S, etc.) not in GetsCurrentInput_withSOCD
-        char kbd[256] = "";
-        for (int i = 0; i < EXTRA_VK_COUNT; i++) {
-            if (GetAsyncKeyState(EXTRA_VK[i]) & 0x8000) {
-                if (kbd[0]) strcat(kbd, " ");
-                strcat(kbd, EXTRA_VK_NAMES[i]);
-            }
-        }
-        if (kbd[0])
-            ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "Kbd: %s", kbd);
 
         ImGui::PopStyleColor();
         ImGui::End();

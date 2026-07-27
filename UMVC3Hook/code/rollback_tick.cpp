@@ -269,11 +269,11 @@ void Rollback_HeadlessTick(uint64_t sMain)
     // iterates every active category, and dispatches that category through
     // sUnit vtable slot 12. The category/node pass performs the per-node
     // save/load transition work and synchronizes any queued unit jobs.
-    VTableCall(MainMember(sMain, 0x401a0), 0x68);
+    VTableCall(MainMember(sMain, 0x401a0), 0x68); //REQUIRED
     // sUnit vtable slot 11 (0x58): sUnit__save. Begins sync phase 3 and
     // iterates every active category through sUnit vtable slot 10. This is
     // the normal non-job-wrapper category synchronization pass.
-    VTableCall(MainMember(sMain, 0x401a0), 0x58);
+    VTableCall(MainMember(sMain, 0x401a0), 0x58); //REQUIRED
 
         profile.Add(&RollbackProfile::headlessUnitSync,
         &RollbackProfile::headlessUnitSyncMax);
