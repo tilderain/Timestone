@@ -146,6 +146,9 @@ struct CommandNotation {
     int32_t attackCount;
 };
 
+CommandNotation g_suiteCommandNotations[AUTOTEST_MAX_RUNTIME_COMMANDS] = {};
+bool g_suiteCommandHasNotation[AUTOTEST_MAX_RUNTIME_COMMANDS] = {};
+
 using UpdateCommandMatcher_t = void(__fastcall*)(uint64_t commandMatcher);
 UpdateCommandMatcher_t oUpdateCommandMatcher = nullptr;
 
@@ -485,6 +488,20 @@ bool GetRuntimeCommandNotation(uint64_t resource, uint64_t command,
         notation.buttons |= buttons;
     }
     return notation.directionCount > 0 || notation.buttons != 0;
+}
+
+bool CommandNotationsEqual(const CommandNotation& left,
+                           const CommandNotation& right)
+{
+    if (left.directionCount != right.directionCount ||
+        left.buttons != right.buttons ||
+        left.attackCount != right.attackCount)
+        return false;
+    for (int32_t i = 0; i < left.directionCount; ++i) {
+        if (left.directions[i] != right.directions[i])
+            return false;
+    }
+    return true;
 }
 
 bool GetDisplayRowNotation(uint64_t rowNotation, int32_t rowIndex,
@@ -1208,13 +1225,53 @@ extern "C" bool AutoTest_StartSuite(int32_t playerIndex, bool facingLeft)
 
     int32_t allCount = AutoTest_GetRuntimeCommands(
         g_suiteCommands, AUTOTEST_MAX_RUNTIME_COMMANDS);
+    using GetCommandByLine_t = uint64_t(__fastcall*)(uint64_t, uint32_t);
+    static GetCommandByLine_t getCommandByLine =
+        (GetCommandByLine_t)_addr(ADDR_GET_COMMAND_BY_LINE);
     int32_t commandCount = 0;
+    int32_t duplicateCount = 0;
     for (int32_t i = 0; i < allCount; ++i) {
-        if (g_suiteCommands[i].playerIndex == playerIndex)
-            g_suiteCommands[commandCount++] = g_suiteCommands[i];
+        const AutoTestRuntimeCommand command = g_suiteCommands[i];
+        if (command.playerIndex != playerIndex)
+            continue;
+
+        uint64_t runtimeCommand = command.resource
+            ? getCommandByLine(command.resource, (uint32_t)command.lineIndex)
+            : 0;
+        CommandNotation notation = {};
+        bool hasNotation = GetRuntimeCommandNotation(
+            command.resource, runtimeCommand, notation);
+        bool duplicate = false;
+        if (hasNotation) {
+            for (int32_t existing = 0; existing < commandCount; ++existing) {
+                if (g_suiteCommandHasNotation[existing] &&
+                    CommandNotationsEqual(
+                        notation, g_suiteCommandNotations[existing])) {
+                    duplicate = true;
+                    break;
+                }
+            }
+        }
+        if (duplicate) {
+            ++duplicateCount;
+            continue;
+        }
+
+        g_suiteCommands[commandCount] = command;
+        g_suiteCommandNotations[commandCount] = notation;
+        g_suiteCommandHasNotation[commandCount] = hasNotation;
+        ++commandCount;
     }
     if (commandCount == 0)
         return false;
+
+    for (int32_t i = 0; i < commandCount; ++i) {
+        const AutoTestRuntimeCommand& command = g_suiteCommands[i];
+        HookLog("AutoTestSuite: list=%d matcher=%d line=%d notation=\"%s\" command=\"%s\"\n",
+                i + 1, command.matcherIndex, command.lineIndex,
+                command.name, command.commandListName[0]
+                    ? command.commandListName : command.name);
+    }
 
     g_suiteStatus = {};
     g_suiteStatus.active = true;
@@ -1227,8 +1284,8 @@ extern "C" bool AutoTest_StartSuite(int32_t playerIndex, bool facingLeft)
     g_suiteFacingLeft = facingLeft;
     g_suiteMatchedCommand = false;
     g_suitePhase = SuitePhase::StartCommand;
-    HookLog("AutoTestSuite: started %d commands for P%d\n",
-            commandCount, playerIndex + 1);
+    HookLog("AutoTestSuite: started %d unique commands for P%d (%d duplicate notations removed)\n",
+            commandCount, playerIndex + 1, duplicateCount);
     return true;
 }
 
