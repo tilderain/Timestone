@@ -7,5 +7,6 @@
 void FrameStepper_Init();
 void FrameStepper_Process();
 void FrameStepper_Draw();
+void FrameStepper_DrawAutoTest();
 void FrameStepper_SetDevice(LPDIRECT3DDEVICE9 device);
 void FrameStepper_Capture(LPDIRECT3DDEVICE9 pDevice);

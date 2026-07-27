@@ -11,6 +11,7 @@
 #include "generated.h"
 #include <XInput.h>
 #include "dtieditor.h"      
+#include "framestepper.h"
 #include <intrin.h>
 
 static int64 timer = GetTickCount64();
@@ -249,6 +250,11 @@ void UMVC3Menu::Draw()
 		if (ImGui::BeginTabItem("DTI Inspector"))
 		{
 			DtiEditor_Draw();
+			ImGui::EndTabItem();
+		}
+		if (ImGui::BeginTabItem("Auto Test"))
+		{
+			FrameStepper_DrawAutoTest();
 			ImGui::EndTabItem();
 		}
 		ImGui::EndTabBar();
