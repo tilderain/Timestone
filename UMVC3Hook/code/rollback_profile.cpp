@@ -137,6 +137,22 @@ void Profile_FinishFrameEnabled(uint64_t start)
         std::max(g_activeRollbackProfile->frameTotalMax, elapsed);
 }
 
+void Profile_AddHeadlessPhaseEnabled(uint64_t RollbackProfile::*field,
+                                     uint64_t RollbackProfile::*maximum,
+                                     uint64_t& checkpoint)
+{
+    Profile_AddFramePhaseMaxEnabled(field, maximum, checkpoint);
+}
+
+void Profile_FinishHeadlessEnabled(uint64_t start)
+{
+    if (!g_activeRollbackProfile) return;
+    const uint64_t elapsed = Profile_NowEnabled() - start;
+    g_activeRollbackProfile->headlessTotal += elapsed;
+    g_activeRollbackProfile->headlessTotalMax =
+        std::max(g_activeRollbackProfile->headlessTotalMax, elapsed);
+}
+
 uint64_t Profile_HookBegin()
 {
     return g_activeRollbackProfile ? Profile_NowEnabled() : 0;
@@ -208,10 +224,27 @@ void Profile_DumpEnabled(const RollbackProfile& profile, bool ndjsonEnabled,
                 "\"diag_setup\":%.6f,\"pre_restore_json\":%.6f,\"restore\":%.6f,"
                 "\"input_availability\":%.6f,\"frame_input\":%.6f,\"frame_diag_pre\":%.6f,"
                 "\"frame_json\":%.6f,\"frame_snapshot\":%.6f,\"native_tick\":%.6f,"
-                "\"native_tick_max\":%.6f,\"frame_input_end\":%.6f,"
-                "\"frame_diag_post\":%.6f,\"input_history_restore\":%.6f,"
-                "\"timing_resync\":%.6f,\"patch_disable\":%.6f},"
-                "\"snapshot\":{\"count\":%u,\"total_ms\":%.6f,\"avg_ms\":%.6f,"
+                 "\"native_tick_max\":%.6f,\"frame_input_end\":%.6f,"
+                 "\"frame_diag_post\":%.6f,\"input_history_restore\":%.6f,"
+                 "\"timing_resync\":%.6f,\"patch_disable\":%.6f},"
+                 "\"headless_tick\":{\"total_ms\":%.6f,\"max_ms\":%.6f,"
+                 "\"timing_input_ms\":%.6f,\"timing_input_max_ms\":%.6f,"
+                 "\"early_draw_collision_ms\":%.6f,\"early_draw_collision_max_ms\":%.6f,"
+                 "\"viewport_setup_ms\":%.6f,\"viewport_setup_max_ms\":%.6f,"
+                 "\"render_begin_area_ms\":%.6f,\"render_begin_area_max_ms\":%.6f,"
+                 "\"action_ms\":%.6f,\"action_max_ms\":%.6f,"
+                 "\"input_devices_ms\":%.6f,\"input_devices_max_ms\":%.6f,"
+                 "\"gameplay_setup_ms\":%.6f,\"gameplay_setup_max_ms\":%.6f,"
+                 "\"unit_move_ms\":%.6f,\"unit_move_max_ms\":%.6f,"
+                 "\"collision_hit_ms\":%.6f,\"collision_hit_max_ms\":%.6f,"
+                 "\"unit_sync_ms\":%.6f,\"unit_sync_max_ms\":%.6f,"
+                 "\"simulation_tail_ms\":%.6f,\"simulation_tail_max_ms\":%.6f,"
+                 "\"manager_core_ms\":%.6f,\"manager_core_max_ms\":%.6f,"
+                 "\"network_services_ms\":%.6f,\"network_services_max_ms\":%.6f,"
+                 "\"render_ms\":%.6f,\"render_max_ms\":%.6f,"
+                 "\"post_frame_ms\":%.6f,\"post_frame_max_ms\":%.6f,"
+                 "\"alt_f4_ms\":%.6f,\"alt_f4_max_ms\":%.6f},"
+                 "\"snapshot\":{\"count\":%u,\"total_ms\":%.6f,\"avg_ms\":%.6f,"
                 "\"avg_kib\":%.6f,\"avg_regions\":%.6f,\"build_regions_ms\":%.6f,"
                 "\"recycle_allocate_ms\":%.6f,\"copy_regions_ms\":%.6f,"
                 "\"metadata_ms\":%.6f,\"collision_clones_ms\":%.6f,"
@@ -244,9 +277,27 @@ void Profile_DumpEnabled(const RollbackProfile& profile, bool ndjsonEnabled,
                 Profile_Ms(profile.frameInput), Profile_Ms(profile.frameDiagPre),
                 Profile_Ms(profile.frameJson), Profile_Ms(profile.frameSnapshot),
                 Profile_Ms(profile.frameNativeTick), Profile_Ms(profile.frameNativeTickMax),
-                Profile_Ms(profile.frameInputEnd), Profile_Ms(profile.frameDiagPost),
-                Profile_Ms(profile.inputHistoryRestore), Profile_Ms(profile.timingResync),
-                Profile_Ms(profile.patchDisable), profile.snapshotCount,
+                 Profile_Ms(profile.frameInputEnd), Profile_Ms(profile.frameDiagPost),
+                 Profile_Ms(profile.inputHistoryRestore), Profile_Ms(profile.timingResync),
+                 Profile_Ms(profile.patchDisable),
+                 Profile_Ms(profile.headlessTotal), Profile_Ms(profile.headlessTotalMax),
+                 Profile_Ms(profile.headlessTimingInput), Profile_Ms(profile.headlessTimingInputMax),
+                 Profile_Ms(profile.headlessEarlyDrawCollision), Profile_Ms(profile.headlessEarlyDrawCollisionMax),
+                 Profile_Ms(profile.headlessViewportSetup), Profile_Ms(profile.headlessViewportSetupMax),
+                 Profile_Ms(profile.headlessRenderBeginArea), Profile_Ms(profile.headlessRenderBeginAreaMax),
+                 Profile_Ms(profile.headlessAction), Profile_Ms(profile.headlessActionMax),
+                 Profile_Ms(profile.headlessInputDevices), Profile_Ms(profile.headlessInputDevicesMax),
+                 Profile_Ms(profile.headlessGameplaySetup), Profile_Ms(profile.headlessGameplaySetupMax),
+                 Profile_Ms(profile.headlessUnitMove), Profile_Ms(profile.headlessUnitMoveMax),
+                 Profile_Ms(profile.headlessCollisionHit), Profile_Ms(profile.headlessCollisionHitMax),
+                 Profile_Ms(profile.headlessUnitSync), Profile_Ms(profile.headlessUnitSyncMax),
+                 Profile_Ms(profile.headlessSimulationTail), Profile_Ms(profile.headlessSimulationTailMax),
+                 Profile_Ms(profile.headlessManagerCore), Profile_Ms(profile.headlessManagerCoreMax),
+                 Profile_Ms(profile.headlessNetworkServices), Profile_Ms(profile.headlessNetworkServicesMax),
+                 Profile_Ms(profile.headlessRender), Profile_Ms(profile.headlessRenderMax),
+                 Profile_Ms(profile.headlessPostFrame), Profile_Ms(profile.headlessPostFrameMax),
+                 Profile_Ms(profile.headlessAltF4), Profile_Ms(profile.headlessAltF4Max),
+                 profile.snapshotCount,
                 Profile_Ms(profile.saveTotal), Profile_Ms(profile.saveTotal) / snapshotDivisor,
                 (double)profile.snapshotBytes / snapshotDivisor / 1024.0,
                 (double)profile.snapshotRegions / snapshotDivisor,

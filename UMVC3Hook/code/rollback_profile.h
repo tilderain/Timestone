@@ -101,6 +101,40 @@ struct RollbackProfile {
     uint64_t frameDiagPost = 0;
     uint64_t frameTotal = 0;
     uint64_t frameTotalMax = 0;
+    uint64_t headlessTimingInput = 0;
+    uint64_t headlessTimingInputMax = 0;
+    uint64_t headlessEarlyDrawCollision = 0;
+    uint64_t headlessEarlyDrawCollisionMax = 0;
+    uint64_t headlessViewportSetup = 0;
+    uint64_t headlessViewportSetupMax = 0;
+    uint64_t headlessRenderBeginArea = 0;
+    uint64_t headlessRenderBeginAreaMax = 0;
+    uint64_t headlessAction = 0;
+    uint64_t headlessActionMax = 0;
+    uint64_t headlessInputDevices = 0;
+    uint64_t headlessInputDevicesMax = 0;
+    uint64_t headlessGameplaySetup = 0;
+    uint64_t headlessGameplaySetupMax = 0;
+    uint64_t headlessUnitMove = 0;
+    uint64_t headlessUnitMoveMax = 0;
+    uint64_t headlessCollisionHit = 0;
+    uint64_t headlessCollisionHitMax = 0;
+    uint64_t headlessUnitSync = 0;
+    uint64_t headlessUnitSyncMax = 0;
+    uint64_t headlessSimulationTail = 0;
+    uint64_t headlessSimulationTailMax = 0;
+    uint64_t headlessManagerCore = 0;
+    uint64_t headlessManagerCoreMax = 0;
+    uint64_t headlessNetworkServices = 0;
+    uint64_t headlessNetworkServicesMax = 0;
+    uint64_t headlessRender = 0;
+    uint64_t headlessRenderMax = 0;
+    uint64_t headlessPostFrame = 0;
+    uint64_t headlessPostFrameMax = 0;
+    uint64_t headlessAltF4 = 0;
+    uint64_t headlessAltF4Max = 0;
+    uint64_t headlessTotal = 0;
+    uint64_t headlessTotalMax = 0;
     uint64_t inputHistoryRestore = 0;
     uint64_t timingResync = 0;
     uint64_t patchDisable = 0;
@@ -134,6 +168,10 @@ void Profile_AddFramePhaseMaxEnabled(uint64_t RollbackProfile::*field,
                                      uint64_t RollbackProfile::*maximum,
                                      uint64_t& checkpoint);
 void Profile_FinishFrameEnabled(uint64_t start);
+void Profile_AddHeadlessPhaseEnabled(uint64_t RollbackProfile::*field,
+                                     uint64_t RollbackProfile::*maximum,
+                                     uint64_t& checkpoint);
+void Profile_FinishHeadlessEnabled(uint64_t start);
 uint64_t Profile_HookBegin();
 void Profile_HookEnd(RollbackHookProfileId id, uint64_t start);
 void Profile_RecordSnapshotEnabled(uint64_t profileStart, uint64_t buildRegionsEnd,
@@ -274,3 +312,34 @@ public:
 };
 
 using RollbackProfileTimer = RollbackProfileTimerImpl<ROLLBACK_PROFILING_ENABLED>;
+
+template <bool Enabled>
+class RollbackHeadlessProfileTimerImpl;
+
+template <>
+class RollbackHeadlessProfileTimerImpl<true> {
+public:
+    RollbackHeadlessProfileTimerImpl() : start_(Profile_NowEnabled()), checkpoint_(start_) {}
+
+    void Add(uint64_t RollbackProfile::*field, uint64_t RollbackProfile::*maximum) {
+        Profile_AddHeadlessPhaseEnabled(field, maximum, checkpoint_);
+    }
+
+    void Finish() const {
+        Profile_FinishHeadlessEnabled(start_);
+    }
+
+private:
+    uint64_t start_;
+    uint64_t checkpoint_;
+};
+
+template <>
+class RollbackHeadlessProfileTimerImpl<false> {
+public:
+    void Add(uint64_t RollbackProfile::*, uint64_t RollbackProfile::*) {}
+    void Finish() const {}
+};
+
+using RollbackHeadlessProfileTimer =
+    RollbackHeadlessProfileTimerImpl<ROLLBACK_PROFILING_ENABLED>;

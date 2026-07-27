@@ -1,6 +1,7 @@
 #include "../pch.h"
 
 #include "rollback.h"
+#include "rollback_profile.h"
 #include "rollback_tick.h"
 #include "mk10utils.h"
 
@@ -185,15 +186,23 @@ void Rollback_PatchDrawCalls(bool enable)
 
 void Rollback_HeadlessTick(uint64_t sMain)
 {
+    RollbackHeadlessProfileTimer profile;
+
     ((ObjectFn)_addr(FN_SMAIN_MOVE))(sMain); // Advance base timing, pause, and frame pacing state.
     ((ObjectFn)_addr(FN_UPDATE_WINDOW_FOCUS))(sMain); // Refresh iconified, foreground, and focus flags.
     ((ObjectFn)_addr(FN_NETPAD_PROCESS_INPUT))(MainMember(sMain, 0x401c0)); // Poll/process online pad input.
     VTableCall(MainMember(sMain, 0x40260), 0x30); // mpPlatformUtil::move: service platform/async work.
+
+        profile.Add(&RollbackProfile::headlessTimingInput,
+        &RollbackProfile::headlessTimingInputMax);
+
     VTableCall(MainMember(sMain, 0x401a8), 0x48); // mpResource::draw.
     VTableCall(MainMember(sMain, 0x40198), 0x48); // mpTool::draw.
     VTableCall(MainMember(sMain, 0x401d8), 0x48); // mpEffect::draw.
     ((ObjectFn)_addr(FN_COLLISION_BEGIN_FRAME))(MainMember(sMain, 0x401e0)); // Drain deferred collision state.
     VTableCall(ManagerSubsystem(FN_GET_GAME_CONFIG), 0x48); // sGameConfig::draw.
+        profile.Add(&RollbackProfile::headlessEarlyDrawCollision,
+        &RollbackProfile::headlessEarlyDrawCollisionMax);
 
     // Copy the current render viewport dimensions into the primitive renderer.
     uint64_t render = ((uint64_t(__fastcall*)())_addr(FN_RENDER_GETINSTANCE))();
@@ -206,15 +215,24 @@ void Rollback_HeadlessTick(uint64_t sMain)
     primitive = ((uint64_t(__fastcall*)())_addr(FN_PRIMITIVE_GETINSTANCE))();
     ((void(__fastcall*)(uint64_t, uint32_t))_addr(FN_PRIMITIVE_SET_HEIGHT))(primitive, viewport[1]); // Set field +0x44.
 
+        profile.Add(&RollbackProfile::headlessViewportSetup,
+        &RollbackProfile::headlessViewportSetupMax);
+
     VTableCall(MainMember(sMain, 0x40270), 0x48); // mpPrimitive::draw.
     VTableCall(MainMember(sMain, 0x40208), 0x48); // mpGpuParticle::draw.
     ((ObjectFn)_addr(FN_RENDER_BEGIN_FRAME))(MainMember(sMain, 0x40190)); // Begin/submit the render frame.
     VTableCall(MainMember(sMain, 0x40200), 0x30); // mpArea::move.
 
+        profile.Add(&RollbackProfile::headlessRenderBeginArea,
+        &RollbackProfile::headlessRenderBeginAreaMax);
+
     // Advance the active battle action; this dispatches character frame logic.
     uint64_t manager = ((uint64_t(__fastcall*)())_addr(FN_MVC3MGR_GETINSTANCE))();
     uint64_t action = ((GetterFn)_addr(FN_MVC3MGR_GETACTION))(manager); // Resolve the active sAction.
     ((ObjectFn)_addr(FN_ACTION_SUBSTEP))(action); // Run the action substep and character moves.
+
+        profile.Add(&RollbackProfile::headlessAction,
+        &RollbackProfile::headlessActionMax);
 
     VTableCall(MainMember(sMain, 0x40230), 0x30); // mpVibration::move.
     VTableCall(MainMember(sMain, 0x401c0), 0x30); // mpNetPad::move.
@@ -222,15 +240,31 @@ void Rollback_HeadlessTick(uint64_t sMain)
     VTableCall(MainMember(sMain, 0x40228), 0x30); // mpId::move: advance unique-ID allocator state.
     VTableCall(MainMember(sMain, 0x40218), 0x30); // mpKeyboard::move: update held/triggered/released maps.
     VTableCall(MainMember(sMain, 0x401c0), 0x50); // mpNetPad::postFrame.
+    
+        profile.Add(&RollbackProfile::headlessInputDevices,
+        &RollbackProfile::headlessInputDevicesMax);
+
     VTableCall(MainMember(sMain, 0x401e8), 0x30); // mpShader2::move.
     VTableCall(MainMember(sMain, 0x40240), 0x30); // mpAI::move.
     VTableCall(ManagerSubsystem(FN_GET_GAME_CONFIG), 0x30); // sGameConfig::move.
     VTableCall(ManagerSubsystem(FN_GET_GAME_UI), 0x30); // sGameUi::move.
     VTableCall(ManagerSubsystem(FN_GET_SHOT), 0x48); // sShot::draw.
     VTableCall(ManagerSubsystem(FN_GET_GAME_EFFECT), 0x48); // sGameEffect::draw.
+
+        profile.Add(&RollbackProfile::headlessGameplaySetup,
+        &RollbackProfile::headlessGameplaySetupMax);
+
     VTableCall(MainMember(sMain, 0x401a0), 0x30); // mpUnit::move.
+
+        profile.Add(&RollbackProfile::headlessUnitMove,
+        &RollbackProfile::headlessUnitMoveMax);
+
     VTableCall(MainMember(sMain, 0x401e0), 0x30); // mpCollision base cSystem::move.
     VTableCall(ManagerSubsystem(FN_GET_HIT_SOLVER), 0x30); // sHitSolver::move.
+
+        profile.Add(&RollbackProfile::headlessCollisionHit,
+        &RollbackProfile::headlessCollisionHitMax);
+
     // sUnit vtable slot 13 (0x68): sUnit__save_jobwrap. Begins sync phase 2,
     // iterates every active category, and dispatches that category through
     // sUnit vtable slot 12. The category/node pass performs the per-node
@@ -240,6 +274,10 @@ void Rollback_HeadlessTick(uint64_t sMain)
     // iterates every active category through sUnit vtable slot 10. This is
     // the normal non-job-wrapper category synchronization pass.
     VTableCall(MainMember(sMain, 0x401a0), 0x58);
+
+        profile.Add(&RollbackProfile::headlessUnitSync,
+        &RollbackProfile::headlessUnitSyncMax);
+
     ((ObjectFn)_addr(FN_AI_SUBSTEP))(MainMember(sMain, 0x40240)); // Run the AI substep helper.
     VTableCall(MainMember(sMain, 0x401d8), 0x30); // mpEffect::move.
     VTableCall(MainMember(sMain, 0x40208), 0x30); // mpGpuParticle::move.
@@ -247,6 +285,9 @@ void Rollback_HeadlessTick(uint64_t sMain)
     VTableCall(MainMember(sMain, 0x401f0), 0x30); // mpSound::move.
     VTableCall(MainMember(sMain, 0x40248), 0x30); // mpScene::move.
     VTableCall(MainMember(sMain, 0x40258), 0x30); // mpShadow::move.
+
+        profile.Add(&RollbackProfile::headlessSimulationTail,
+        &RollbackProfile::headlessSimulationTailMax);
 
     manager = ((uint64_t(__fastcall*)())_addr(FN_MVC3MGR_GETINSTANCE))();
     VTableCall(manager, 0x30); // sMvc3Manager::move.
@@ -259,6 +300,10 @@ void Rollback_HeadlessTick(uint64_t sMain)
     VTableCall(ManagerSubsystem(FN_GET_GSOUND), 0x30); // sGSound::move.
     VTableCall(ManagerSubsystem(FN_GET_BATTLE_SETTING), 0x30); // sBattleSetting::move.
     VTableCall(ManagerSubsystem(FN_GET_MVC3_SETTING), 0x30); // sMvc3Setting::move.
+
+        profile.Add(&RollbackProfile::headlessManagerCore,
+        &RollbackProfile::headlessManagerCoreMax);
+
     VTableCall(ManagerSubsystem(FN_GET_NETWORK), 0x30); // Manager-owned sNetwork::move.
     VTableCall(ManagerSubsystem(FN_GET_LICENSE), 0x30); // sLicense::move.
     VTableCall(MainMember(sMain, 0x401b8), 0x30); // mpNetwork::move.
@@ -268,14 +313,25 @@ void Rollback_HeadlessTick(uint64_t sMain)
     VTableCall(ManagerSubsystem(FN_GET_NETWORK_ROOM), 0x30); // sNetworkRoom::move.
     VTableCall(ManagerSubsystem(FN_GET_EARTH_ATTACK), 0x30); // sEarthAttack::move.
     VTableCall(MainMember(sMain, 0x40198), 0x30); // mpTool::move.
+
+        profile.Add(&RollbackProfile::headlessNetworkServices,
+        &RollbackProfile::headlessNetworkServicesMax);
+
     VTableCall(MainMember(sMain, 0x40270), 0x30); // mpPrimitive::move.
     VTableCall(MainMember(sMain, 0x401e0), 0x48); // mpCollision base cSystem::draw.
     ((ObjectFn)_addr(FN_UPDATE_RENDER_STATE))(sMain); // Update sMvc3Main render/camera state.
     VTableCall(MainMember(sMain, 0x40190), 0x30); // mpRender::move.
     ((ObjectFn)_addr(FN_RENDER_END_FRAME))(MainMember(sMain, 0x40190)); // End and present the render frame.
+
+        profile.Add(&RollbackProfile::headlessRender,
+        &RollbackProfile::headlessRenderMax);
+
     VTableCall(MainMember(sMain, 0x40208), 0x50); // mpGpuParticle::postFrame.
     VTableCall(MainMember(sMain, 0x40270), 0x50); // mpPrimitive::postFrame.
     VTableCall(MainMember(sMain, 0x401f8), 0x30); // mpCapture::move.
+
+        profile.Add(&RollbackProfile::headlessPostFrame,
+        &RollbackProfile::headlessPostFrameMax);
 
     // Alt+F4 bypasses the ordinary sPad keyboard-input suppression gates.
     using KeyQueryFn = bool(__fastcall*)(uint64_t, uint32_t, bool);
@@ -289,4 +345,7 @@ void Rollback_HeadlessTick(uint64_t sMain)
             ((ObjectFn)_addr(FN_SMAIN_EXIT))(main); // Request orderly game shutdown.
         }
     }
+        profile.Add(&RollbackProfile::headlessAltF4,
+        &RollbackProfile::headlessAltF4Max);
+        profile.Finish();
 }
