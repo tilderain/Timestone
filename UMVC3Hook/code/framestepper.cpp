@@ -1032,7 +1032,145 @@ void FrameStepper_Draw()
                 ImGui::Text("list=%d anm=%d action=%08X",
                             status.lastSuccessListId,
                             status.lastSuccessAnimation,
-                            status.lastAction);
+                             status.lastAction);
+            }
+
+            if (ImGui::TreeNode("Runtime commands")) {
+                static int commandPlayer = 0;
+                static int commandMatcher = -1;
+                static int selectedMatcher = 0;
+                static int selectedLine = -1;
+                static bool activeOnly = false;
+                static AutoTestRuntimeCommand commands[AUTOTEST_MAX_RUNTIME_COMMANDS];
+
+                int commandCount = AutoTest_GetRuntimeCommands(
+                    commands, AUTOTEST_MAX_RUNTIME_COMMANDS);
+
+                ImGui::RadioButton("Commands P1", &commandPlayer, 0);
+                ImGui::SameLine();
+                ImGui::RadioButton("Commands P2", &commandPlayer, 1);
+                ImGui::RadioButton("Both matchers", &commandMatcher, -1);
+                ImGui::SameLine();
+                ImGui::RadioButton("Matcher 0", &commandMatcher, 0);
+                ImGui::SameLine();
+                ImGui::RadioButton("Matcher 1", &commandMatcher, 1);
+                ImGui::Checkbox("Active progress only", &activeOnly);
+
+                char selectedLabel[96];
+                if (selectedLine >= 0)
+                    snprintf(selectedLabel, sizeof(selectedLabel),
+                             "M%d L%d", selectedMatcher, selectedLine);
+                else
+                    snprintf(selectedLabel, sizeof(selectedLabel),
+                             "Select a command");
+                if (ImGui::BeginCombo("Execute command", selectedLabel)) {
+                    for (int i = 0; i < commandCount; ++i) {
+                        const AutoTestRuntimeCommand& command = commands[i];
+                        if (command.playerIndex != commandPlayer ||
+                            (commandMatcher >= 0 &&
+                             command.matcherIndex != commandMatcher))
+                            continue;
+                        char label[192];
+                        snprintf(label, sizeof(label),
+                                 "%s  [M%d L%d, steps=%d]",
+                                 command.name,
+                                 command.matcherIndex, command.lineIndex,
+                                 command.commandStepCount);
+                        bool selected = command.matcherIndex == selectedMatcher &&
+                                        command.lineIndex == selectedLine;
+                        if (ImGui::Selectable(label, selected)) {
+                            selectedMatcher = command.matcherIndex;
+                            selectedLine = command.lineIndex;
+                        }
+                        if (selected) ImGui::SetItemDefaultFocus();
+                    }
+                    ImGui::EndCombo();
+                }
+                if (selectedLine >= 0 && !status.active) {
+                    if (ImGui::SmallButton("Run selected command"))
+                        AutoTest_StartRuntimeCommand(commandPlayer,
+                                                     selectedMatcher,
+                                                     selectedLine,
+                                                     facingLeft);
+                }
+                const char* executionError = AutoTest_GetRuntimeExecutionError();
+                if (executionError[0])
+                    ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.35f, 1.0f),
+                                       "%s", executionError);
+
+                int visibleCount = 0;
+                for (int i = 0; i < commandCount; ++i) {
+                    const AutoTestRuntimeCommand& command = commands[i];
+                    if (command.playerIndex != commandPlayer ||
+                        (commandMatcher >= 0 &&
+                         command.matcherIndex != commandMatcher) ||
+                        (activeOnly && command.cmdStep == 0 &&
+                         command.time == 0.0f && command.chargeTime == 0.0f &&
+                         command.padBuf == 0 && command.failTime == 0.0f))
+                        continue;
+
+                    ++visibleCount;
+                    ImGui::PushID(i);
+                    bool open = ImGui::TreeNodeEx(
+                        "command", ImGuiTreeNodeFlags_SpanAvailWidth,
+                        "%s  [M%d L%d/%d]  step=%d/%d  time=%.3f  charge=%.3f  "
+                        "pad=%08X  fail=%.3f",
+                        command.name,
+                        command.matcherIndex, command.lineIndex,
+                        command.lineCount, command.cmdStep,
+                        command.commandStepCount, command.time,
+                        command.chargeTime, command.padBuf, command.failTime);
+                    if (open) {
+                        ImGui::Text("lineFlags=%08X commandFlags=%08X",
+                                    command.lineFlags, command.commandFlags);
+                        ImGui::Text("character=%p matcher=%p resource=%p",
+                                    (void*)command.character,
+                                    (void*)command.matcher,
+                                    (void*)command.resource);
+                        ImGui::Text("cached success: list=%d anm=%d throw=%d "
+                                    "tdown=%d delay=%.3f work=%d",
+                                    command.successListId,
+                                    command.successAnimation,
+                                    command.successThrow,
+                                    command.successTdown,
+                                    command.successDelay,
+                                    command.successWork);
+                        ImGui::Separator();
+                        ImGui::Text("Matcher restrictions");
+                        ImGui::Text("life %.3f..%.3f  gauge %.3f..%.3f  "
+                                    "height %.3f..%.3f",
+                                    command.lifeRateMin, command.lifeRateMax,
+                                    command.gaugeRateMin, command.gaugeRateMax,
+                                    command.heightMin, command.heightMax);
+                        ImGui::Text("status req=%d forbid=%d  ability req=%d "
+                                    "forbid=%d",
+                                    command.statusRequired,
+                                    command.statusForbidden,
+                                    command.abilityRequired,
+                                    command.abilityForbidden);
+                        ImGui::Text("jump=%d airSpecial=%d limitFlags=%08X",
+                                    command.jumpCount,
+                                    command.airSpecialCount,
+                                    command.limitFlags);
+                        ImGui::Text("chr req=%08X forbid=%08X  anm req=%08X "
+                                    "forbid=%08X",
+                                    command.characterFlagsRequired,
+                                    command.characterFlagsForbidden,
+                                    command.animationFlagsRequired,
+                                    command.animationFlagsForbidden);
+                        ImGui::Text("prg req=%08X forbid=%08X",
+                                    command.programFlagsRequired,
+                                    command.programFlagsForbidden);
+                        ImGui::TreePop();
+                    }
+                    ImGui::PopID();
+                }
+                ImGui::TextDisabled("%d visible / %d captured", visibleCount,
+                                    commandCount);
+                if (commandCount == AUTOTEST_MAX_RUNTIME_COMMANDS)
+                    ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.2f, 1.0f),
+                                       "Command capture truncated");
+                ImGui::TreePop();
             }
         }
 
