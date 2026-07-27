@@ -513,7 +513,8 @@ int Shot_SanitizeCollisionSlotsForDestruction(void* shot)
     return sanitized;
 }
 
-int Shot_SanitizeUnitCategoryLists(void* sUnit)
+int Shot_SanitizeUnitCategoryLists(void* sUnit, uint32_t firstCategory,
+                                   uint32_t lastCategory)
 {
     if (!sUnit || !IsAccessiblePointer((uint64_t)sUnit)) return 0;
 
@@ -546,6 +547,10 @@ int Shot_SanitizeUnitCategoryLists(void* sUnit)
         *(uint32_t*)((uint8_t*)sUnit + SUNIT_CATEGORY_COUNT_OFFSET);
     if (categoryCount > SUNIT_MAX_CATEGORIES)
         categoryCount = SUNIT_MAX_CATEGORIES;
+    if (firstCategory >= categoryCount || firstCategory > lastCategory)
+        return 0;
+    if (lastCategory >= categoryCount)
+        lastCategory = categoryCount - 1;
 
     uint32_t maskCount =
         *(uint32_t*)((uint8_t*)sUnit + SUNIT_MULTI_MASK_COUNT_OFFSET);
@@ -553,7 +558,7 @@ int Shot_SanitizeUnitCategoryLists(void* sUnit)
         maskCount = SUNIT_MAX_CATEGORIES;
 
     int removed = 0;
-    for (uint32_t category = 0; category < categoryCount; ++category) {
+    for (uint32_t category = firstCategory; category <= lastCategory; ++category) {
         auto* head = (void**)((uint8_t*)sUnit + SUNIT_CATEGORY_LISTS_OFFSET +
                               SUNIT_CATEGORY_LIST_STRIDE * category);
         auto* tail = head + 1;

@@ -493,6 +493,9 @@ int Rollback_BuildRegions(Region* regions, int maxRegions)
     }
 
     // ---- 4. sAction — battle state machine (static manager) ----
+    // Defeat replacement uses state outside the compact ranges restored below.
+    // Removing this region caused peers to select the next point character on
+    // different frames after a rollback crossed a character defeat.
     {
         uint64_t sAction = *(uint64_t*)_addr(PTR_SACTION);
         add((void*)sAction, 0x20000);

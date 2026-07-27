@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <vector>
 
 struct RollbackShotFlightState;
@@ -22,5 +23,6 @@ void Shot_RestoreArmState(void* shot, const RollbackShotRecipe& recipe);
 void Shot_DetachEmbeddedEffect(void* shot);
 void Shot_ReleaseFreshEmbeddedEffectGraph(void* shot);
 int Shot_SanitizeCollisionSlotsForDestruction(void* shot);
-int Shot_SanitizeUnitCategoryLists(void* sUnit);
+int Shot_SanitizeUnitCategoryLists(void* sUnit, uint32_t firstCategory,
+                                   uint32_t lastCategory);
 void Shot_RemoveFromAllMultiMaskArrays(void* sUnit, void* unit);

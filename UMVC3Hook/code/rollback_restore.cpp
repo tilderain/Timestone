@@ -58,6 +58,8 @@ static constexpr uint32_t SUNIT_CHARACTER_CATEGORY = 8;
 static constexpr uint32_t CUNIT_LIVE_STATE_OFFSETS[] = {0x10, 0x18, 0x20, 0x38};
 static constexpr size_t SMAIN_SIZE = 0x40080;
 static constexpr int SSHOT_CATEGORY = 10;
+static constexpr uint32_t SSHOT_FIRST_CATEGORY = 10;
+static constexpr uint32_t SEFFECT_LAST_CATEGORY = 16;
 static constexpr int MAX_REGIONS = ROLLBACK_MAX_REGIONS;
 static constexpr size_t SHITSOLVER_SIZE = 0x3808C;
 static constexpr size_t SHITSOLVER_DATA_OFF = 0x58;
@@ -291,7 +293,8 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
     }
     const uint64_t pinResourcesEnd = Profile_Now();
 
-    int removedInvalidUnits = Shot_SanitizeUnitCategoryLists(sUnit);
+    int removedInvalidUnits = Shot_SanitizeUnitCategoryLists(
+        sUnit, SSHOT_FIRST_CATEGORY, SEFFECT_LAST_CATEGORY);
     if (removedInvalidUnits != 0) {
         HookLog("Rollback: removed %d invalid sUnit category entries before restore\n",
                  removedInvalidUnits);
@@ -355,7 +358,8 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
     // overhead.
     int removedShotOwnedEffects = currentShots.empty()
         ? 0
-        : Shot_SanitizeUnitCategoryLists(sUnit);
+        : Shot_SanitizeUnitCategoryLists(
+            sUnit, SSHOT_FIRST_CATEGORY, SEFFECT_LAST_CATEGORY);
     if (removedShotOwnedEffects != 0) {
         HookLog("Rollback: removed %d dead sUnit entries after shot destruction\n",
                  removedShotOwnedEffects);

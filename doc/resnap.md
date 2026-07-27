@@ -105,7 +105,7 @@ The following regions are candidates for removal or replacement with compact
 ranges. Except where the current restore code already proves bytes are unused,
 these are hypotheses rather than correctness claims.
 
-#### High confidence: duplicate `sAction` `0x20000` region
+#### Required for now: broad `sAction` `0x20000` region
 
 `Rollback_BuildRegions()` currently captures `sAction` twice:
 
@@ -132,10 +132,13 @@ selected ranges:
 +0x268 size 0x034
 ```
 
-The duplicate `0x20000` region is the strongest removal candidate. Retain the
-compact `sAction` ranges and the dedicated model-joint payload until each field
-is independently reduced. Removing the broad region also avoids the current
-later `0x300` selective restore being preceded by an unsafe broad restore.
+The broad region was removed experimentally while retaining the compact
+`sAction` ranges and dedicated model-joint payload. A two-peer rollback capture
+then diverged during defeat replacement: at frame 1601 the peers assigned the
+next point character on different frames (`SLOT_SWAP`/`mid` divergence), after
+which action, position, flags, and RNG remained divergent. The broad region
+therefore contains authoritative defeat/team-transition state outside the known
+compact ranges and must remain until those fields are identified explicitly.
 
 #### High confidence: unused portions of the full `sMain` image
 
@@ -257,8 +260,8 @@ makes it visible which state is actually part of the deterministic contract.
 
 #### Recommended removal experiment order
 
-1. Remove the duplicate `sAction` `0x20000` region while retaining the compact
-   `0x300` restore and model-joint payload.
+1. Map the defeat-replacement fields in broad `sAction` before attempting to
+   narrow it again.
 2. Pack only `SMAIN_RESTORE_RANGES` instead of the complete `sMain` body.
 3. Pack only the restored `cChrTeam` ranges and validated active pointer.
 4. Disable the full `sCamera` singleton while retaining `uActionSideCamera`.
