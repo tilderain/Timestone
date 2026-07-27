@@ -77,11 +77,28 @@ constexpr InputStep FORWARD_DASH[] = {
     {0, 35},
 };
 
+constexpr InputStep FORWARD_THROW[] = {
+    {IN_RIGHT, 6},
+    {IN_RIGHT | IN_B, 2},
+    {0, 45},
+};
+
+constexpr InputStep BACK_THROW[] = {
+    {IN_RIGHT, 12},
+    {IN_LEFT | IN_B, 2},
+    {0, 45},
+};
+
 constexpr InputScript SCRIPTS[] = {
     {"QCF + Light", QCF_LIGHT, std::size(QCF_LIGHT)},
     {"QCB + Light", QCB_LIGHT, std::size(QCB_LIGHT)},
     {"DP + Light", DP_LIGHT, std::size(DP_LIGHT)},
     {"Forward Dash", FORWARD_DASH, std::size(FORWARD_DASH)},
+};
+
+constexpr InputScript SUITE_MANUAL_SCRIPTS[] = {
+    {"Forward Throw", FORWARD_THROW, std::size(FORWARD_THROW)},
+    {"Back Throw", BACK_THROW, std::size(BACK_THROW)},
 };
 
 AutoTestStatus g_status = {
@@ -93,6 +110,7 @@ constexpr int32_t MAX_RUNTIME_COMMAND_NAMES = 512;
 InputStep g_runtimeInputSteps[MAX_RUNTIME_INPUT_STEPS] = {};
 InputScript g_runtimeScript = {"Runtime command", g_runtimeInputSteps, 0};
 bool g_runningRuntimeCommand = false;
+int32_t g_runningManualCommand = -1;
 char g_runtimeExecutionError[160] = {};
 
 enum class SuitePhase {
@@ -108,6 +126,7 @@ AutoTestSuiteStatus g_suiteStatus = {};
 SuitePhase g_suitePhase = SuitePhase::Idle;
 bool g_suiteFacingLeft = false;
 bool g_suiteMatchedCommand = false;
+bool g_suiteManualCase = false;
 float g_suiteDefenderLife = 0.0f;
 int32_t g_suiteDeadline = -1;
 uint32_t g_suiteIdleActions[2] = {};
@@ -217,13 +236,20 @@ void PlaceDefenderNextToAttacker(int32_t attackerIndex)
         return;
 
     float position[4] = {
-        *(float*)(attacker + 0x50) + (g_suiteFacingLeft ? -2.0f : 2.0f),
+        *(float*)(attacker + 0x50) + (g_suiteFacingLeft ? -0.25f : 0.25f),
         *(float*)(attacker + 0x54),
         *(float*)(attacker + 0x58),
         0.0f,
     };
     using SetPosition_t = void(__fastcall*)(uint64_t, const float*);
     ((SetPosition_t)_addr(ADDR_SET_CHARACTER_POSITION))(defender, position);
+}
+
+void FillAttackerHyperGauge(int32_t attackerIndex)
+{
+    uint64_t characters = *(uint64_t*)_addr(PTR_SCHARACTER);
+    if (characters)
+        *(float*)(characters + TEAM_OFFSETS[attackerIndex] + 0x78) = 50000.0f;
 }
 
 void RequestTrainingReset()
@@ -255,6 +281,7 @@ void FinishSuiteCommand(bool passed, const char* reason)
     g_status.active = false;
     g_status.currentInput = 0;
     g_runningRuntimeCommand = false;
+    g_runningManualCommand = -1;
     RequestTrainingReset();
     g_suitePhase = SuitePhase::WaitingForReset;
     g_suiteStatus.waitingForCompletion = false;
@@ -294,14 +321,16 @@ uint32_t ScriptInputAt(const InputScript& script, int32_t scriptFrame)
 
 const InputScript& ActiveScript()
 {
-    return g_runningRuntimeCommand ? g_runtimeScript
-                                   : SCRIPTS[g_status.scriptIndex];
+    if (g_runningRuntimeCommand)
+        return g_runtimeScript;
+    if (g_runningManualCommand >= 0)
+        return SUITE_MANUAL_SCRIPTS[g_runningManualCommand];
+    return SCRIPTS[g_status.scriptIndex];
 }
 
 const char* ActiveScriptName()
 {
-    return g_runningRuntimeCommand ? g_runtimeScript.name
-                                   : SCRIPTS[g_status.scriptIndex].name;
+    return ActiveScript().name;
 }
 
 uint32_t FindRawInput(uint32_t requiredMask, uint32_t expected)
@@ -426,7 +455,8 @@ void BuildRuntimeCommandName(uint64_t resource, uint64_t command,
 }
 
 bool GetRuntimeCommandNotation(uint64_t resource, uint64_t command,
-                               CommandNotation& notation)
+                               CommandNotation& notation,
+                               uint32_t commandFlags = 0)
 {
     notation = {};
     if (!resource || !command)
@@ -487,6 +517,8 @@ bool GetRuntimeCommandNotation(uint64_t resource, uint64_t command,
         if (expected & 0x2000) buttons |= 0x70;
         notation.buttons |= buttons;
     }
+    if (commandFlags & 1)
+        notation.buttons |= 0x80000000;
     return notation.directionCount > 0 || notation.buttons != 0;
 }
 
@@ -534,7 +566,8 @@ bool GetDisplayRowNotation(uint64_t rowNotation, int32_t rowIndex,
 }
 
 bool CommandNotationsMatch(const CommandNotation& runtime,
-                           const CommandNotation& display)
+                           const CommandNotation& display,
+                           uint32_t commandFlags)
 {
     if (runtime.directionCount != display.directionCount)
         return false;
@@ -551,8 +584,15 @@ bool CommandNotationsMatch(const CommandNotation& runtime,
         int32_t attackCount = ((attacks & 0x10) != 0) +
                               ((attacks & 0x20) != 0) +
                               ((attacks & 0x40) != 0);
-        if (attackCount != display.attackCount)
+        // Hyper commands are stored as a primary attack in the runtime table;
+        // the command-list XX sprite is the actual two-button pad input.
+        if (display.attackCount > 1) {
+            if ((commandFlags & 1) == 0 || attackCount != 1)
+                return false;
+        } else if ((commandFlags & 1) != 0 ||
+                   attackCount != display.attackCount) {
             return false;
+        }
     }
     return display.attackCount > 0 || display.buttons || runtimeButtons == 0;
 }
@@ -781,9 +821,13 @@ uint64_t GetCommandListTextResource(int32_t playerIndex, uint64_t character)
 
 void GetInGameCommandListName(int32_t playerIndex, uint64_t character,
                                uint64_t commandResource, uint64_t command,
-                               char* name, size_t capacity)
+                               char* name, size_t capacity,
+                               int32_t* category = nullptr,
+                               int32_t* attackCount = nullptr)
 {
     name[0] = '\0';
+    if (category) *category = -1;
+    if (attackCount) *attackCount = 0;
     uint64_t resource = GetCommandListTextResource(playerIndex, character);
     if (!resource || !commandResource || !command)
         return;
@@ -797,7 +841,9 @@ void GetInGameCommandListName(int32_t playerIndex, uint64_t character,
         return;
 
     CommandNotation runtimeNotation = {};
-    if (!GetRuntimeCommandNotation(commandResource, command, runtimeNotation))
+    uint32_t commandFlags = *(uint32_t*)(command + 0x20);
+    if (!GetRuntimeCommandNotation(commandResource, command, runtimeNotation,
+                                   commandFlags))
         return;
 
     int32_t matchedRow = -1;
@@ -805,7 +851,8 @@ void GetInGameCommandListName(int32_t playerIndex, uint64_t character,
         CommandNotation displayNotation = {};
         if (!GetDisplayRowNotation(cached.rowNotation, rowIndex,
                                    displayNotation) ||
-            !CommandNotationsMatch(runtimeNotation, displayNotation)) {
+            !CommandNotationsMatch(runtimeNotation, displayNotation,
+                                   commandFlags)) {
             continue;
         }
         if (matchedRow >= 0)
@@ -822,17 +869,24 @@ void GetInGameCommandListName(int32_t playerIndex, uint64_t character,
 
     DecodeCommandListText(records + (uint64_t)textIndex * 0x10,
                           name, capacity);
+    const int32_t* metadata = (const int32_t*)(cached.rowMetadata +
+                                               (uint64_t)matchedRow * 0x10);
+    if (category) *category = metadata[1];
+    if (attackCount) {
+        CommandNotation displayNotation = {};
+        GetDisplayRowNotation(cached.rowNotation, matchedRow, displayNotation);
+        *attackCount = displayNotation.attackCount;
+    }
 }
 
 bool AppendRuntimeInput(uint32_t mask, uint32_t expected, int frames)
 {
-    if (g_runtimeScript.stepCount + 2 > MAX_RUNTIME_INPUT_STEPS)
+    if (g_runtimeScript.stepCount + 1 > MAX_RUNTIME_INPUT_STEPS)
         return false;
     uint32_t raw = FindRawInput(mask, expected);
     if (raw == UINT32_MAX)
         return false;
     g_runtimeInputSteps[g_runtimeScript.stepCount++] = {raw, frames};
-    g_runtimeInputSteps[g_runtimeScript.stepCount++] = {0, 1};
     return true;
 }
 
@@ -955,6 +1009,7 @@ extern "C" void AutoTest_Start(int32_t scriptIndex, int32_t playerIndex,
         -1, -1, 0, -1, -1, -1, -1, -1, 0,
     };
     g_runningRuntimeCommand = false;
+    g_runningManualCommand = -1;
     g_facingLeft = facingLeft;
     HookLog("AutoTest: scheduled %s for P%d at frame %d facing=%s\n",
             SCRIPTS[scriptIndex].name, playerIndex + 1, g_status.startFrame,
@@ -966,6 +1021,7 @@ extern "C" void AutoTest_Stop()
     g_status.active = false;
     g_status.currentInput = 0;
     g_runningRuntimeCommand = false;
+    g_runningManualCommand = -1;
     g_suiteStatus.active = false;
     g_suiteStatus.waitingForCompletion = false;
     g_suiteStatus.waitingForReset = false;
@@ -1058,7 +1114,9 @@ extern "C" int32_t AutoTest_GetRuntimeCommands(
                                       sizeof(out.name));
                 GetInGameCommandListName(player, character, resource, command,
                                           out.commandListName,
-                                          sizeof(out.commandListName));
+                                          sizeof(out.commandListName),
+                                          &out.commandListCategory,
+                                          &out.commandListAttackCount);
                 CommandListTextCache& textCache = g_commandListText[player];
                 snprintf(out.commandListPath, sizeof(out.commandListPath),
                          "%s", textCache.path);
@@ -1133,6 +1191,17 @@ extern "C" bool AutoTest_StartRuntimeCommand(int32_t playerIndex,
         return false;
     }
 
+    char commandListName[128] = {};
+    int32_t commandListCategory = -1;
+    int32_t commandListAttackCount = 0;
+    GetInGameCommandListName(playerIndex, character, resource, command,
+                             commandListName, sizeof(commandListName),
+                             &commandListCategory, &commandListAttackCount);
+    const bool isHyper = commandListCategory == 2 &&
+                         commandListAttackCount >= 2;
+    if (isHyper)
+        FillAttackerHyperGauge(playerIndex);
+
     g_runtimeScript.stepCount = 0;
     for (int32_t i = 0; i < stepCount; ++i) {
         uint64_t step = getCommandStep(resource, command, (uint32_t)i);
@@ -1186,6 +1255,13 @@ extern "C" bool AutoTest_StartRuntimeCommand(int32_t playerIndex,
             return false;
         }
 
+        if (isHyper && (expected & 0x70) != 0) {
+            // The native hyper command checks one representative attack and a
+            // separate hyper predicate. Drive the command-list's XX literally.
+            mask = (mask & ~0x70u) | 0x70u;
+            expected = (expected & ~0x70u) | 0x30u;
+        }
+
         if (!AppendRuntimeInput(mask, expected, 2)) {
             snprintf(g_runtimeExecutionError, sizeof(g_runtimeExecutionError),
                      "Could not map command step %d (mask %08X = %08X)",
@@ -1208,6 +1284,7 @@ extern "C" bool AutoTest_StartRuntimeCommand(int32_t playerIndex,
     };
     g_facingLeft = facingLeft;
     g_runningRuntimeCommand = true;
+    g_runningManualCommand = -1;
     HookLog("AutoTest: scheduled runtime command matcher=%d line=%d for P%d at frame %d\n",
             matcherIndex, lineIndex, playerIndex + 1, g_status.startFrame);
     return true;
@@ -1240,7 +1317,8 @@ extern "C" bool AutoTest_StartSuite(int32_t playerIndex, bool facingLeft)
             : 0;
         CommandNotation notation = {};
         bool hasNotation = GetRuntimeCommandNotation(
-            command.resource, runtimeCommand, notation);
+            command.resource, runtimeCommand, notation,
+            command.commandFlags);
         bool duplicate = false;
         if (hasNotation) {
             for (int32_t existing = 0; existing < commandCount; ++existing) {
@@ -1277,15 +1355,16 @@ extern "C" bool AutoTest_StartSuite(int32_t playerIndex, bool facingLeft)
     g_suiteStatus.active = true;
     g_suiteStatus.playerIndex = playerIndex;
     g_suiteStatus.currentCommand = 0;
-    g_suiteStatus.commandCount = commandCount;
+    g_suiteStatus.commandCount = commandCount + (int32_t)std::size(SUITE_MANUAL_SCRIPTS);
     g_suiteStatus.currentMatcher = -1;
     g_suiteStatus.currentLine = -1;
     g_suiteStatus.requiredQuietFrames = SUITE_QUIET_FRAMES;
     g_suiteFacingLeft = facingLeft;
     g_suiteMatchedCommand = false;
     g_suitePhase = SuitePhase::StartCommand;
-    HookLog("AutoTestSuite: started %d unique commands for P%d (%d duplicate notations removed)\n",
-            commandCount, playerIndex + 1, duplicateCount);
+    HookLog("AutoTestSuite: started %d manual cases and %d unique commands for P%d (%d duplicate notations removed)\n",
+            (int32_t)std::size(SUITE_MANUAL_SCRIPTS), commandCount,
+            playerIndex + 1, duplicateCount);
     return true;
 }
 
@@ -1312,13 +1391,18 @@ extern "C" void AutoTest_Process()
             return;
         }
 
-        const AutoTestRuntimeCommand& command =
-            g_suiteCommands[g_suiteStatus.currentCommand];
-        g_suiteStatus.currentMatcher = command.matcherIndex;
-        g_suiteStatus.currentLine = command.lineIndex;
+        int32_t manualCount = (int32_t)std::size(SUITE_MANUAL_SCRIPTS);
+        g_suiteManualCase = g_suiteStatus.currentCommand < manualCount;
+        const AutoTestRuntimeCommand* command = g_suiteManualCase
+            ? nullptr
+            : &g_suiteCommands[g_suiteStatus.currentCommand - manualCount];
+        g_suiteStatus.currentMatcher = command ? command->matcherIndex : -1;
+        g_suiteStatus.currentLine = command ? command->lineIndex : -1;
         snprintf(g_suiteStatus.currentName, sizeof(g_suiteStatus.currentName),
-                 "%s", command.commandListName[0]
-                     ? command.commandListName : command.name);
+                 "%s", g_suiteManualCase
+                     ? SUITE_MANUAL_SCRIPTS[g_suiteStatus.currentCommand].name
+                     : (command->commandListName[0]
+                         ? command->commandListName : command->name));
         PlaceDefenderNextToAttacker(g_suiteStatus.playerIndex);
         uint64_t attacker = GetActiveCharacter(g_suiteStatus.playerIndex);
         uint64_t defender = GetActiveCharacter(g_suiteStatus.playerIndex ^ 1);
@@ -1336,21 +1420,33 @@ extern "C" void AutoTest_Process()
         g_suiteStatus.attackerAction = g_suiteIdleActions[0];
         g_suiteStatus.defenderAction = g_suiteIdleActions[1];
         g_suiteMatchedCommand = false;
-        if (!AutoTest_StartRuntimeCommand(g_suiteStatus.playerIndex,
-                                          command.matcherIndex,
-                                          command.lineIndex,
-                                          g_suiteFacingLeft)) {
-            FinishSuiteCommand(false, AutoTest_GetRuntimeExecutionError());
-            return;
+        if (g_suiteManualCase) {
+            g_status = {
+                true, g_suiteStatus.playerIndex, -1, frame + 5,
+                -1, -1, 0, -1, -1, -1, -1, -1, 0,
+            };
+            g_facingLeft = g_suiteFacingLeft;
+            g_runningRuntimeCommand = false;
+            g_runningManualCommand = g_suiteStatus.currentCommand;
+        } else {
+            if (!AutoTest_StartRuntimeCommand(g_suiteStatus.playerIndex,
+                                              command->matcherIndex,
+                                              command->lineIndex,
+                                              g_suiteFacingLeft)) {
+                FinishSuiteCommand(false, AutoTest_GetRuntimeExecutionError());
+                return;
+            }
+            g_suiteStatus.active = true;
         }
-        g_suiteStatus.active = true;
         g_suiteStatus.commandStartFrame = frame;
         g_suiteDeadline = frame + SUITE_COMMAND_TIMEOUT;
         g_suitePhase = SuitePhase::RunningCommand;
         return;
     }
     case SuitePhase::RunningCommand:
-        if (g_suiteMatchedCommand) {
+        if (g_suiteMatchedCommand ||
+            (g_suiteManualCase && !g_status.active &&
+             frame >= g_status.startFrame)) {
             g_suiteStatus.waitingForCompletion = true;
             g_suiteDeadline = frame + SUITE_COMPLETION_TIMEOUT;
             g_suitePhase = SuitePhase::WaitingForCompletion;
@@ -1377,9 +1473,12 @@ extern "C" void AutoTest_Process()
                      g_suiteStatus.shotsClear && g_suiteStatus.cutinClear;
         g_suiteStatus.quietFrames = quiet ? g_suiteStatus.quietFrames + 1 : 0;
         if (g_suiteStatus.quietFrames >= SUITE_QUIET_FRAMES) {
-            FinishSuiteCommand(true, g_suiteStatus.dealtDamage
-                ? "matched, dealt damage, and returned to idle"
-                : "matched and returned to idle");
+            if (g_suiteManualCase && !g_suiteStatus.dealtDamage)
+                FinishSuiteCommand(false, "did not throw the defender");
+            else
+                FinishSuiteCommand(true, g_suiteStatus.dealtDamage
+                    ? "dealt damage and returned to idle"
+                    : "matched and returned to idle");
         } else if (frame > g_suiteDeadline) {
             FinishSuiteCommand(false, "matched but did not return to idle");
         }

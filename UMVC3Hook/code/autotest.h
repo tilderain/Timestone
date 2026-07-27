@@ -25,6 +25,8 @@ struct AutoTestRuntimeCommand {
     char commandListName[128];
     char commandListPath[128];
     int32_t commandListTextCount;
+    int32_t commandListCategory;
+    int32_t commandListAttackCount;
     int32_t playerIndex;
     int32_t matcherIndex;
     int32_t lineIndex;
