@@ -24,3 +24,7 @@ Aerial assists will sometimes desync (character attacking is spawned in the wron
 
 
 Rollback past step transition (fade to black) will make black screen forever
+
+For non modded characters and shots we need to hardcode dti size
+
+Hook sync phase
