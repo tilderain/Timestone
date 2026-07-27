@@ -603,7 +603,7 @@ int Rollback_BuildRegions(Region* regions, int maxRegions)
     //     3456 B total; skip vtable @+0 .. +7 on restore (handled via flat
     //     memcpy — the vtable pointer is the same at save and restore time
     //     for a singleton, so restoring it is safe here).
-    /*uint64_t camUnit = 0;
+    uint64_t camUnit = 0;
     {
         uint64_t sCamera = *(uint64_t*)_addr(PTR_SCAMERA);
         if (sCamera) {
@@ -612,7 +612,7 @@ int Rollback_BuildRegions(Region* regions, int maxRegions)
             // This is the uActionSideCamera gameplay anchor unit.
             camUnit = *(uint64_t*)(sCamera + 0x58);
         }
-    }*/
+    }
 
     // ---- 7a. uActionSideCamera — gameplay camera anchor/smoothing unit ----
     //     cUnit-derived object (DTI 0x140d44268, size 0x590) that computes
@@ -621,7 +621,7 @@ int Rollback_BuildRegions(Region* regions, int maxRegions)
     //     drifts from the live client, causing permanent character position
     //     drift (desync) that never self-corrects.  sCamera viewport[0]+8
     //     holds the pointer (confirmed via sCamera__refreshViewsForBoundary).
-    /*{
+    {
         if (camUnit) {
             uint64_t dtiPtr  = GetObjectDti(camUnit);
             uint32_t camSize = DecodeDtiSize(dtiPtr);
@@ -630,7 +630,7 @@ int Rollback_BuildRegions(Region* regions, int maxRegions)
             }
             add((void*)camUnit, camSize);
         }
-    }*/
+    }
 
     // ---- 8. sGameEffect — SKIPPED: individual effect nodes are captured ---
     //     via the sUnit category traversal (categories 13-16) below.  Flat-
