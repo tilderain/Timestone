@@ -14,6 +14,7 @@
 #include "LaunchMenu.h"
 #include "rollback.h"
 #include "controller.h"
+#include "autotest.h"
 
 // Netplay debug info from controller.cpp
 extern "C" int32_t Controller_GetDelayFrames();
@@ -993,6 +994,47 @@ void FrameStepper_Draw()
         ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.6f, 1.0f), "P2: [%s]  0x%08X", DecodeDirection(p2), p2);
         if (btns2[0])
             ImGui::SameLine(), ImGui::TextColored(ImVec4(0.7f, 1.0f, 0.8f, 1.0f), "%s", btns2);
+
+        if (ImGui::CollapsingHeader("Auto Test")) {
+            static int scriptIndex = 0;
+            static int playerIndex = 0;
+            static bool facingLeft = false;
+
+            if (ImGui::BeginCombo("Move", AutoTest_GetScriptName(scriptIndex))) {
+                for (int i = 0; i < AutoTest_GetScriptCount(); ++i) {
+                    bool selected = i == scriptIndex;
+                    if (ImGui::Selectable(AutoTest_GetScriptName(i), selected))
+                        scriptIndex = i;
+                    if (selected) ImGui::SetItemDefaultFocus();
+                }
+                ImGui::EndCombo();
+            }
+            ImGui::RadioButton("P1", &playerIndex, 0);
+            ImGui::SameLine();
+            ImGui::RadioButton("P2", &playerIndex, 1);
+            ImGui::Checkbox("Facing left", &facingLeft);
+
+            AutoTestStatus status = AutoTest_GetStatus();
+            if (!status.active) {
+                if (ImGui::SmallButton("Run move"))
+                    AutoTest_Start(scriptIndex, playerIndex, facingLeft);
+            } else if (ImGui::SmallButton("Stop move")) {
+                AutoTest_Stop();
+            }
+
+            status = AutoTest_GetStatus();
+            ImGui::Text("State: %s  frame: %d  input: %08X",
+                        status.active ? "running" : "idle",
+                        status.scriptFrame, status.currentInput);
+            if (status.lastSuccessFrame >= 0) {
+                ImGui::Text("Success: f%d cmd%d line%d", status.lastSuccessFrame,
+                            status.lastSuccessMatcher, status.lastSuccessLine);
+                ImGui::Text("list=%d anm=%d action=%08X",
+                            status.lastSuccessListId,
+                            status.lastSuccessAnimation,
+                            status.lastAction);
+            }
+        }
 
         ImGui::PopStyleColor();
         ImGui::End();

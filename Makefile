@@ -38,6 +38,7 @@ CPP_SRC   := \
 	$(SRCDIR)/code/dtieditor.cpp \
 	$(SRCDIR)/code/trainingboot.cpp \
 	$(SRCDIR)/code/controller.cpp \
+	$(SRCDIR)/code/autotest.cpp \
 	$(SRCDIR)/code/diag.cpp \
 	$(SRCDIR)/code/exception.cpp \
 	$(SRCDIR)/code/rollback.cpp \

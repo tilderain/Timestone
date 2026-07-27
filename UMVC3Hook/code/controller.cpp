@@ -20,6 +20,7 @@
 #include "rollback.h"
 #include "rollback_profile.h"
 #include "diag.h"
+#include "autotest.h"
 #include "../kiero/minhook/include/MinHook.h"
 #include <cstdint>
 #include <cstring>
@@ -1542,6 +1543,28 @@ static void __fastcall hkprocessFrameInput(uint64_t cChrInput)
 
     uint32_t idx = (uint32_t)lookupFrame % RING_SIZE;
 
+    // The pad getter's index identifies a routed hardware slot, which is not a
+    // stable P1/P2 identity in training and dual-training modes. Inject here,
+    // where the owning team is known, but still run the raw mask through the
+    // game's native button map. The caller performs inputMaskPostProcess after
+    // this hook returns, so edge and command histories consume the override.
+    if (!g_isResimulating)
+    {
+        uint32_t rawTestInput = 0;
+        if (AutoTest_GetInput(lookupFrame, teamIdx, &rawTestInput))
+        {
+            // Native player index 0 has a focus/menu shortcut that can return a
+            // configuration aggregate without reading rawTestInput. Index 1
+            // takes the regular direction/button translation path and is safe
+            // for synthetic masks; team ownership is handled independently.
+            uint32_t resolved = obuttonRemap(1, rawTestInput, 0);
+            *(uint32_t*)(cChrInput + 0x14)  = resolved;
+            *(uint32_t*)(cChrInput + 0x560) = resolved;
+            *(uint32_t*)(cChrInput + 0x56C) = resolved;
+            *(uint32_t*)(cChrInput + 0x568) = 0;
+        }
+    }
+
     if (Netplay_IsActive())
     {
         if (g_isResimulating)
@@ -1864,5 +1887,6 @@ void Controller_InitHooks()
     else
         HookLog("Controller: Failed to hook inputAutoRepeatTimerProcess (%d)\n", s);
 
+    AutoTest_InitHooks();
     HookLog("Controller: Init complete — hooks installed\n");
 }
