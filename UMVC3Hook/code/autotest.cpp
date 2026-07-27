@@ -17,7 +17,14 @@ namespace {
 constexpr uintptr_t ADDR_UPDATE_COMMAND_MATCHER = 0x140028D10;
 constexpr uintptr_t ADDR_GET_COMMAND_BY_LINE = 0x14005B630;
 constexpr uintptr_t ADDR_GET_COMMAND_STEP = 0x14005AD40;
+constexpr uintptr_t ADDR_GET_CHARACTER_NAME = 0x140058F90;
+constexpr uintptr_t ADDR_GET_CHARACTER_ID_FROM_DTI = 0x140059250;
+constexpr uintptr_t ADDR_GET_RESOURCE_MANAGER = 0x140001B10;
+constexpr uintptr_t ADDR_GET_MVC3_MANAGER = 0x140001AF0;
+constexpr uintptr_t ADDR_LOAD_GLOBAL_ARCHIVE = 0x14025AD30;
+constexpr uintptr_t DTI_RMSGDATA = 0x140D52E30;
 constexpr uintptr_t PTR_SCHARACTER = 0x140D44A70;
+constexpr uintptr_t PTR_COMMAND_LIST_ROW_TABLES = 0x140B16960;
 constexpr uintptr_t TEAM_OFFSETS[] = {0x40, 0x300};
 constexpr uintptr_t TEAM_ACTIVE_CHARACTER_OFFSET = 0x48;
 constexpr uintptr_t COMMAND_MATCHER_OFFSETS[] = {0x2738, 0x2950};
@@ -88,6 +95,29 @@ struct RuntimeCommandNameCache {
 };
 
 RuntimeCommandNameCache g_runtimeCommandNames[MAX_RUNTIME_COMMAND_NAMES] = {};
+
+struct CommandListTextCache {
+    int32_t characterId;
+    uint64_t resource;
+    int32_t rowCount;
+    uint64_t rowMetadata;
+    uint64_t rowNotation;
+    bool textDumped;
+    uint64_t dumpedCommandResources[2];
+    char path[128];
+};
+
+CommandListTextCache g_commandListText[2] = {
+    {-1, 0, 0, 0, 0, false, {}, {}},
+    {-1, 0, 0, 0, 0, false, {}, {}},
+};
+
+struct CommandNotation {
+    int32_t directions[16];
+    int32_t directionCount;
+    uint32_t buttons;
+    int32_t attackCount;
+};
 
 using UpdateCommandMatcher_t = void(__fastcall*)(uint64_t commandMatcher);
 UpdateCommandMatcher_t oUpdateCommandMatcher = nullptr;
@@ -256,6 +286,249 @@ void BuildRuntimeCommandName(uint64_t resource, uint64_t command,
         snprintf(name, capacity, "Matcher %d Line %d", matcherIndex, lineIndex);
 }
 
+bool GetRuntimeCommandNotation(uint64_t resource, uint64_t command,
+                               CommandNotation& notation)
+{
+    notation = {};
+    if (!resource || !command)
+        return false;
+
+    using GetCommandStep_t = uint64_t(__fastcall*)(uint64_t, uint64_t, uint32_t);
+    static GetCommandStep_t getCommandStep =
+        (GetCommandStep_t)_addr(ADDR_GET_COMMAND_STEP);
+    int32_t count = *(int32_t*)(command + 0x04);
+    for (int32_t i = 0; i < count && i < 256; ++i) {
+        uint64_t step = getCommandStep(resource, command, (uint32_t)i);
+        if (!step)
+            continue;
+
+        uint32_t expected = 0;
+        switch (*(int32_t*)(step + 0x00)) {
+        case 2:
+        case 3:
+            expected = *(uint32_t*)(step + 0x18);
+            break;
+        case 4:
+            expected = *(int32_t*)(step + 0x0C) == 0 ? 0x10 : 0x30;
+            break;
+        case 5:
+        case 6:
+            expected = *(uint32_t*)(step + 0x0C) |
+                       *(uint32_t*)(step + 0x10);
+            break;
+        case 7:
+            expected = *(uint32_t*)(step + 0x10);
+            break;
+        default:
+            continue;
+        }
+
+        uint32_t direction = expected & 0x0F;
+        if (direction && notation.directionCount <
+                             (int32_t)std::size(notation.directions)) {
+            int32_t numpad = 0;
+            switch (direction) {
+            case 0x01: numpad = 6; break;
+            case 0x02: numpad = 4; break;
+            case 0x04: numpad = 8; break;
+            case 0x05: numpad = 9; break;
+            case 0x06: numpad = 7; break;
+            case 0x08: numpad = 2; break;
+            case 0x09: numpad = 3; break;
+            case 0x0A: numpad = 1; break;
+            default: break;
+            }
+            if (numpad)
+                notation.directions[notation.directionCount++] = numpad;
+        }
+        uint32_t buttons = expected & 0xF0;
+        if (expected & 0x400) buttons |= 0x30;
+        if (expected & 0x800) buttons |= 0x50;
+        if (expected & 0x1000) buttons |= 0x60;
+        if (expected & 0x2000) buttons |= 0x70;
+        notation.buttons |= buttons;
+    }
+    return notation.directionCount > 0 || notation.buttons != 0;
+}
+
+bool GetDisplayRowNotation(uint64_t rowNotation, int32_t rowIndex,
+                           CommandNotation& notation)
+{
+    notation = {};
+    if (!rowNotation || rowIndex < 0)
+        return false;
+
+    // Token IDs 0-7 are the eight directional sprites, 8 is the plus sign,
+    // and 14-18 are L, M, H, S, and the generic attack-button sprite.
+    static constexpr int32_t directions[] = {1, 2, 3, 4, 6, 7, 8, 9};
+    const uint32_t* tokens =
+        (const uint32_t*)(rowNotation + (uint64_t)rowIndex * 15 * 4);
+    for (int32_t i = 0; i < 15; ++i) {
+        uint32_t token = tokens[i];
+        if (token == UINT32_MAX)
+            break;
+        if (token < std::size(directions) &&
+            notation.directionCount < (int32_t)std::size(notation.directions)) {
+            notation.directions[notation.directionCount++] = directions[token];
+        } else if (token >= 14 && token <= 17) {
+            notation.buttons |= 0x10u << (token - 14);
+        } else if (token == 18) {
+            ++notation.attackCount;
+        }
+    }
+    return notation.directionCount > 0 || notation.buttons != 0 ||
+           notation.attackCount > 0;
+}
+
+bool CommandNotationsMatch(const CommandNotation& runtime,
+                           const CommandNotation& display)
+{
+    if (runtime.directionCount != display.directionCount)
+        return false;
+    for (int32_t i = 0; i < runtime.directionCount; ++i) {
+        if (runtime.directions[i] != display.directions[i])
+            return false;
+    }
+
+    uint32_t runtimeButtons = runtime.buttons & 0xF0;
+    if (display.buttons && (runtimeButtons & display.buttons) != display.buttons)
+        return false;
+    if (display.attackCount > 0) {
+        uint32_t attacks = runtimeButtons & 0x70;
+        int32_t attackCount = ((attacks & 0x10) != 0) +
+                              ((attacks & 0x20) != 0) +
+                              ((attacks & 0x40) != 0);
+        if (attackCount != display.attackCount)
+            return false;
+    }
+    return display.attackCount > 0 || display.buttons || runtimeButtons == 0;
+}
+
+void DecodeCommandListText(uint64_t record, char* name, size_t capacity)
+{
+    name[0] = '\0';
+    uint32_t length = *(uint32_t*)record;
+    const wchar_t* text = *(const wchar_t**)(record + 0x08);
+    if (!text || length == 0 || length > 0x1000 || capacity == 0)
+        return;
+
+    wchar_t decoded[128];
+    uint32_t decodedLength = length;
+    if (decodedLength >= std::size(decoded))
+        decodedLength = (uint32_t)std::size(decoded) - 1;
+    for (uint32_t i = 0; i < decodedLength; ++i) {
+        wchar_t glyph = text[i];
+        if (glyph == 0)
+            decoded[i] = L' ';
+        else if (glyph >= 0x21 && glyph <= 0x3A)
+            decoded[i] = (wchar_t)(glyph + 0x20);
+        else if (glyph == 0xFFFE)
+            decoded[i] = L'|';
+        else if (glyph == 0xFFFF) {
+            decodedLength = i;
+            break;
+        } else
+            decoded[i] = glyph;
+    }
+    decoded[decodedLength] = L'\0';
+
+    int written = WideCharToMultiByte(CP_UTF8, 0, decoded,
+                                      (int)decodedLength, name,
+                                      (int)capacity - 1, nullptr, nullptr);
+    if (written > 0)
+        name[written] = '\0';
+}
+
+void DumpCommandListArrays(int32_t playerIndex)
+{
+    CommandListTextCache& cached = g_commandListText[playerIndex];
+    if (cached.textDumped || !cached.resource || !cached.rowMetadata ||
+        !cached.rowNotation || cached.rowCount <= 0)
+        return;
+
+    uint32_t count = *(uint32_t*)(cached.resource + 0x70);
+    uint64_t records = *(uint64_t*)(cached.resource + 0x78);
+    if (!records || count == 0 || count > 0x10000)
+        return;
+
+    HookLog("AutoTestCommandList: BEGIN player=%d characterId=%d path=%s textCount=%u rowCount=%d metadata=0x%llX notation=0x%llX\n",
+            playerIndex + 1, cached.characterId, cached.path, count,
+            cached.rowCount, (unsigned long long)cached.rowMetadata,
+            (unsigned long long)cached.rowNotation);
+    for (uint32_t textIndex = 0; textIndex < count; ++textIndex) {
+        uint64_t record = records + (uint64_t)textIndex * 0x10;
+        char text[256] = {};
+        DecodeCommandListText(record, text, sizeof(text));
+        HookLog("AutoTestCommandList: TEXT index=%u length=%u value=\"%s\"\n",
+                textIndex, *(uint32_t*)record, text);
+    }
+    for (int32_t rowIndex = 0; rowIndex < cached.rowCount; ++rowIndex) {
+        const int32_t* metadata = (const int32_t*)(cached.rowMetadata +
+                                                  (uint64_t)rowIndex * 0x10);
+        const uint32_t* tokens = (const uint32_t*)(cached.rowNotation +
+                                                   (uint64_t)rowIndex * 0x3C);
+        HookLog("AutoTestCommandList: ROW index=%d metadata=[%d,%d,%d,0x%08X] tokens=[",
+                rowIndex, metadata[0], metadata[1], metadata[2], metadata[3]);
+        for (int32_t tokenIndex = 0; tokenIndex < 15; ++tokenIndex) {
+            HookLog("%s%d", tokenIndex ? "," : "", (int32_t)tokens[tokenIndex]);
+            if (tokens[tokenIndex] == UINT32_MAX)
+                break;
+        }
+        HookLog("]\n");
+    }
+    HookLog("AutoTestCommandList: END player=%d characterId=%d\n",
+            playerIndex + 1, cached.characterId);
+    cached.textDumped = true;
+}
+
+void DumpRuntimeCommandArray(int32_t playerIndex, int32_t matcherIndex,
+                             uint64_t resource, int32_t lineCount)
+{
+    if (playerIndex < 0 || playerIndex > 1 || matcherIndex < 0 ||
+        matcherIndex > 1 || !resource || lineCount <= 0 || lineCount > 0x1000)
+        return;
+
+    CommandListTextCache& cached = g_commandListText[playerIndex];
+    if (cached.dumpedCommandResources[matcherIndex] == resource)
+        return;
+
+    using GetCommandByLine_t = uint64_t(__fastcall*)(uint64_t, uint32_t);
+    using GetCommandStep_t = uint64_t(__fastcall*)(uint64_t, uint64_t, uint32_t);
+    static GetCommandByLine_t getCommandByLine =
+        (GetCommandByLine_t)_addr(ADDR_GET_COMMAND_BY_LINE);
+    static GetCommandStep_t getCommandStep =
+        (GetCommandStep_t)_addr(ADDR_GET_COMMAND_STEP);
+
+    HookLog("AutoTestCommandList: RUNTIME_BEGIN player=%d characterId=%d matcher=%d resource=0x%llX lineCount=%d\n",
+            playerIndex + 1, cached.characterId, matcherIndex,
+            (unsigned long long)resource, lineCount);
+    for (int32_t lineIndex = 0; lineIndex < lineCount; ++lineIndex) {
+        uint64_t command = getCommandByLine(resource, (uint32_t)lineIndex);
+        char generated[128] = {};
+        BuildRuntimeCommandName(resource, command, matcherIndex, lineIndex,
+                                generated, sizeof(generated));
+        int32_t stepCount = command ? *(int32_t*)(command + 0x04) : -1;
+        uint32_t flags = command ? *(uint32_t*)(command + 0x20) : 0;
+        HookLog("AutoTestCommandList: COMMAND matcher=%d line=%d command=0x%llX steps=%d flags=0x%08X generated=\"%s\"\n",
+                matcherIndex, lineIndex, (unsigned long long)command,
+                stepCount, flags, generated);
+        for (int32_t stepIndex = 0; command && stepIndex < stepCount &&
+                                      stepIndex < 256; ++stepIndex) {
+            uint64_t step = getCommandStep(resource, command,
+                                           (uint32_t)stepIndex);
+            if (!step)
+                continue;
+            const uint32_t* words = (const uint32_t*)step;
+            HookLog("AutoTestCommandList: STEP matcher=%d line=%d index=%d raw=[%08X,%08X,%08X,%08X,%08X,%08X,%08X,%08X]\n",
+                    matcherIndex, lineIndex, stepIndex, words[0], words[1],
+                    words[2], words[3], words[4], words[5], words[6], words[7]);
+        }
+    }
+    HookLog("AutoTestCommandList: RUNTIME_END player=%d characterId=%d matcher=%d\n",
+            playerIndex + 1, cached.characterId, matcherIndex);
+    cached.dumpedCommandResources[matcherIndex] = resource;
+}
+
 void GetRuntimeCommandName(int32_t cacheIndex, uint64_t resource,
                            uint64_t command, int32_t matcherIndex,
                            int32_t lineIndex, char* name, size_t capacity)
@@ -274,6 +547,128 @@ void GetRuntimeCommandName(int32_t cacheIndex, uint64_t resource,
                                 cached.name, sizeof(cached.name));
     }
     snprintf(name, capacity, "%s", cached.name);
+}
+
+uint64_t GetCommandListTextResource(int32_t playerIndex, uint64_t character)
+{
+    if (playerIndex < 0 || playerIndex > 1 || !character)
+        return 0;
+
+    using GetObjectDti_t = uint64_t(__fastcall*)(uint64_t);
+    using GetCharacterIdFromDti_t = uint32_t(__fastcall*)(uint64_t);
+    GetObjectDti_t getObjectDti =
+        *(GetObjectDti_t*)(*(uint64_t*)character + 0x20);
+    static GetCharacterIdFromDti_t getCharacterIdFromDti =
+        (GetCharacterIdFromDti_t)_addr(ADDR_GET_CHARACTER_ID_FROM_DTI);
+    uint64_t characterDti = getObjectDti ? getObjectDti(character) : 0;
+    int32_t characterId = characterDti
+        ? (int32_t)getCharacterIdFromDti(characterDti)
+        : -1;
+    if (characterId <= 0 || characterId >= 0x3C)
+        return 0;
+
+    CommandListTextCache& cached = g_commandListText[playerIndex];
+    if (cached.characterId == characterId && cached.resource)
+        return cached.resource;
+
+    if (cached.characterId != characterId) {
+        cached = {characterId, 0, 0, 0, 0, false, {}, {}};
+        // The game indexes this table with selectedCharacterId - 1. Character
+        // IDs are one-based, while the static command-list table is zero-based.
+        uint64_t tables = _addr(PTR_COMMAND_LIST_ROW_TABLES) +
+                          (uint64_t)(characterId - 1) * 0x10;
+        uint64_t rowMetadata = *(uint64_t*)(tables + 0x00);
+        uint64_t rowNotation = *(uint64_t*)(tables + 0x08);
+        if (rowMetadata && rowNotation > rowMetadata) {
+            uint64_t size = rowNotation - rowMetadata;
+            if (size % 0x10 == 0 && size / 0x10 <= 0x100) {
+                cached.rowCount = (int32_t)(size / 0x10);
+                cached.rowMetadata = rowMetadata;
+                cached.rowNotation = rowNotation;
+            }
+        }
+    }
+    using GetCharacterName_t = const char*(__fastcall*)(int32_t);
+    using GetResourceManager_t = uint64_t(__fastcall*)();
+    static GetCharacterName_t getCharacterName =
+        (GetCharacterName_t)_addr(ADDR_GET_CHARACTER_NAME);
+    static GetResourceManager_t getResourceManager =
+        (GetResourceManager_t)_addr(ADDR_GET_RESOURCE_MANAGER);
+
+    // Follow the native boot path: mount ui/game_msg.arc before requesting an
+    // rMsgData child from ui/commandlist inside that archive.
+    using GetMvc3Manager_t = uint64_t(__fastcall*)();
+    using LoadGlobalArchive_t = void(__fastcall*)(uint64_t, uint32_t,
+                                                   uint64_t, uint64_t);
+    static GetMvc3Manager_t getMvc3Manager =
+        (GetMvc3Manager_t)_addr(ADDR_GET_MVC3_MANAGER);
+    static LoadGlobalArchive_t loadGlobalArchive =
+        (LoadGlobalArchive_t)_addr(ADDR_LOAD_GLOBAL_ARCHIVE);
+    uint64_t mvc3Manager = getMvc3Manager();
+    if (mvc3Manager)
+        loadGlobalArchive(mvc3Manager, 8, 0, 0);
+
+    const char* characterName = getCharacterName(characterId);
+    uint64_t manager = getResourceManager();
+    if (!characterName || !characterName[0] || !manager)
+        return 0;
+
+    snprintf(cached.path, sizeof(cached.path),
+             "ui\\commandlist\\msg_commandlist_%s_en", characterName);
+    using LoadResource_t = uint64_t(__fastcall*)(uint64_t, void*, const char*,
+                                                  uint32_t);
+    LoadResource_t loadResource =
+        *(LoadResource_t*)(*(uint64_t*)manager + 0x60);
+    if (loadResource)
+        cached.resource = loadResource(manager, (void*)_addr(DTI_RMSGDATA),
+                                       cached.path, 1);
+    DumpCommandListArrays(playerIndex);
+    return cached.resource;
+}
+
+void GetInGameCommandListName(int32_t playerIndex, uint64_t character,
+                               uint64_t commandResource, uint64_t command,
+                               char* name, size_t capacity)
+{
+    name[0] = '\0';
+    uint64_t resource = GetCommandListTextResource(playerIndex, character);
+    if (!resource || !commandResource || !command)
+        return;
+
+    uint32_t count = *(uint32_t*)(resource + 0x70);
+    uint64_t records = *(uint64_t*)(resource + 0x78);
+    CommandListTextCache& cached = g_commandListText[playerIndex];
+    int32_t rowCount = cached.rowCount;
+    if (!records || count == 0 || count > 0x10000 || rowCount <= 0 ||
+        !cached.rowMetadata || !cached.rowNotation)
+        return;
+
+    CommandNotation runtimeNotation = {};
+    if (!GetRuntimeCommandNotation(commandResource, command, runtimeNotation))
+        return;
+
+    int32_t matchedRow = -1;
+    for (int32_t rowIndex = 0; rowIndex < rowCount; ++rowIndex) {
+        CommandNotation displayNotation = {};
+        if (!GetDisplayRowNotation(cached.rowNotation, rowIndex,
+                                   displayNotation) ||
+            !CommandNotationsMatch(runtimeNotation, displayNotation)) {
+            continue;
+        }
+        if (matchedRow >= 0)
+            return;
+        matchedRow = rowIndex;
+    }
+    if (matchedRow < 0)
+        return;
+
+    int32_t textIndex = *(int32_t*)(cached.rowMetadata +
+                                    (uint64_t)matchedRow * 0x10);
+    if (textIndex < 0 || (uint32_t)textIndex >= count)
+        return;
+
+    DecodeCommandListText(records + (uint64_t)textIndex * 0x10,
+                          name, capacity);
 }
 
 bool AppendRuntimeInput(uint32_t mask, uint32_t expected, int frames)
@@ -457,6 +852,9 @@ extern "C" int32_t AutoTest_GetRuntimeCommands(
             if (!lines || lineCount <= 0 || lineCount > 0x1000)
                 continue;
 
+            GetCommandListTextResource(player, character);
+            DumpRuntimeCommandArray(player, matcherIndex, resource, lineCount);
+
             for (int32_t lineIndex = 0;
                  lineIndex < lineCount && written < capacity; ++lineIndex) {
                 uint64_t line = lines + (uint64_t)lineIndex * 0x20;
@@ -490,6 +888,15 @@ extern "C" int32_t AutoTest_GetRuntimeCommands(
                 GetRuntimeCommandName(cacheIndex, resource, command,
                                       matcherIndex, lineIndex, out.name,
                                       sizeof(out.name));
+                GetInGameCommandListName(player, character, resource, command,
+                                          out.commandListName,
+                                          sizeof(out.commandListName));
+                CommandListTextCache& textCache = g_commandListText[player];
+                snprintf(out.commandListPath, sizeof(out.commandListPath),
+                         "%s", textCache.path);
+                out.commandListTextCount = textCache.resource
+                    ? *(int32_t*)(textCache.resource + 0x70)
+                    : -1;
                 out.lifeRateMin = *(float*)(matcher + 0x10);
                 out.lifeRateMax = *(float*)(matcher + 0x14);
                 out.gaugeRateMin = *(float*)(matcher + 0x18);

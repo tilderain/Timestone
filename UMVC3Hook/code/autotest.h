@@ -22,6 +22,9 @@ constexpr int AUTOTEST_MAX_RUNTIME_COMMANDS = 512;
 
 struct AutoTestRuntimeCommand {
     char name[96];
+    char commandListName[128];
+    char commandListPath[128];
+    int32_t commandListTextCount;
     int32_t playerIndex;
     int32_t matcherIndex;
     int32_t lineIndex;

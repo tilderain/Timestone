@@ -189,18 +189,17 @@ static bool               g_captureRequested = false;
 
 static const char* DecodeDirection(uint32_t input)
 {
-    int lr = input & (IN_LEFT | IN_RIGHT);
-    int ud = input & (IN_UP | IN_DOWN);
-
-    if (lr == IN_LEFT && ud == IN_UP)     return "7";
-    if (lr == IN_LEFT && ud == IN_DOWN)   return "1";
-    if (lr == IN_RIGHT && ud == IN_UP)    return "9";
-    if (lr == IN_RIGHT && ud == IN_DOWN)  return "3";
-    if (lr == IN_LEFT)                    return "4";
-    if (lr == IN_RIGHT)                   return "6";
-    if (ud == IN_UP)                      return "8";
-    if (ud == IN_DOWN)                    return "2";
-    return "5";
+    switch (input & 0x0F) {
+    case 0x01: return "6";
+    case 0x02: return "4";
+    case 0x04: return "8";
+    case 0x05: return "9";
+    case 0x06: return "7";
+    case 0x08: return "2";
+    case 0x09: return "3";
+    case 0x0A: return "1";
+    default:   return "5";
+    }
 }
 
 static void AppendButtons(char* buf, size_t len, uint32_t input)
@@ -212,13 +211,16 @@ static void AppendButtons(char* buf, size_t len, uint32_t input)
             strcat(tmp, name);
         }
     };
-    append("L", IN_X);
-    append("M", IN_Y);
-    append("H", IN_B);
-    append("S", IN_A);
-    append("A1", IN_LB);
-    append("A2", IN_RB);
-    append("Taunt", IN_START);
+    append("L", 0x0010);
+    append("M", 0x0020);
+    append("H", 0x0040);
+    append("S", 0x0080);
+    append("A1", 0x0100);
+    append("A2", 0x0200);
+    append("L+M", 0x0400);
+    append("L+H", 0x0800);
+    append("M+H", 0x1000);
+    append("L+M+H", 0x2000);
     strncpy(buf, tmp, len - 1);
     buf[len - 1] = '\0';
 }
@@ -1161,8 +1163,6 @@ void FrameStepper_DrawAutoTest()
 
     static int commandPlayer = 0;
     static int commandMatcher = -1;
-    static int selectedMatcher = 0;
-    static int selectedLine = -1;
     static bool activeOnly = false;
     static AutoTestRuntimeCommand commands[AUTOTEST_MAX_RUNTIME_COMMANDS];
 
@@ -1179,37 +1179,6 @@ void FrameStepper_DrawAutoTest()
     ImGui::RadioButton("Matcher 1", &commandMatcher, 1);
     ImGui::Checkbox("Active progress only", &activeOnly);
 
-    char selectedLabel[96];
-    if (selectedLine >= 0)
-        snprintf(selectedLabel, sizeof(selectedLabel),
-                 "M%d L%d", selectedMatcher, selectedLine);
-    else
-        snprintf(selectedLabel, sizeof(selectedLabel), "Select a command");
-    if (ImGui::BeginCombo("Execute command", selectedLabel)) {
-        for (int i = 0; i < commandCount; ++i) {
-            const AutoTestRuntimeCommand& command = commands[i];
-            if (command.playerIndex != commandPlayer ||
-                (commandMatcher >= 0 && command.matcherIndex != commandMatcher))
-                continue;
-            char label[192];
-            snprintf(label, sizeof(label), "%s  [M%d L%d, steps=%d]",
-                     command.name, command.matcherIndex, command.lineIndex,
-                     command.commandStepCount);
-            bool selected = command.matcherIndex == selectedMatcher &&
-                            command.lineIndex == selectedLine;
-            if (ImGui::Selectable(label, selected)) {
-                selectedMatcher = command.matcherIndex;
-                selectedLine = command.lineIndex;
-            }
-            if (selected) ImGui::SetItemDefaultFocus();
-        }
-        ImGui::EndCombo();
-    }
-    if (selectedLine >= 0 && !status.active &&
-        ImGui::SmallButton("Run selected command")) {
-        AutoTest_StartRuntimeCommand(commandPlayer, selectedMatcher,
-                                     selectedLine, facingLeft);
-    }
     const char* executionError = AutoTest_GetRuntimeExecutionError();
     if (executionError[0])
         ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.35f, 1.0f),
@@ -1227,14 +1196,30 @@ void FrameStepper_DrawAutoTest()
 
         ++visibleCount;
         ImGui::PushID(i);
+        if (status.active) ImGui::BeginDisabled();
+        if (ImGui::SmallButton("Run"))
+            AutoTest_StartRuntimeCommand(commandPlayer, command.matcherIndex,
+                                         command.lineIndex, facingLeft);
+        if (status.active) ImGui::EndDisabled();
+        ImGui::SameLine();
         bool open = ImGui::TreeNodeEx(
             "command", ImGuiTreeNodeFlags_SpanAvailWidth,
-            "%s  [M%d L%d/%d]  step=%d/%d  time=%.3f  charge=%.3f  "
+            "%s%s%s  [M%d L%d/%d]  step=%d/%d  time=%.3f  charge=%.3f  "
             "pad=%08X  fail=%.3f",
-            command.name, command.matcherIndex, command.lineIndex,
+            command.commandListName[0] ? command.commandListName : command.name,
+            command.commandListName[0] ? "  |  " : "",
+            command.commandListName[0] ? command.name : "",
+            command.matcherIndex, command.lineIndex,
             command.lineCount, command.cmdStep, command.commandStepCount,
             command.time, command.chargeTime, command.padBuf, command.failTime);
         if (open) {
+            ImGui::Text("command-list name: %s",
+                        command.commandListName[0]
+                            ? command.commandListName : "<not resolved>");
+            ImGui::Text("text resource: %s  records=%d",
+                        command.commandListPath[0]
+                            ? command.commandListPath : "<not requested>",
+                        command.commandListTextCount);
             ImGui::Text("lineFlags=%08X commandFlags=%08X",
                         command.lineFlags, command.commandFlags);
             ImGui::Text("character=%p matcher=%p resource=%p",
