@@ -20,7 +20,7 @@
 extern void HookLog(const char* fmt, ...);
 extern void HookLogSetFile(const char* filename);
 
-bool g_ndjsonLoggingEnabled = true;
+bool g_ndjsonLoggingEnabled = false;
 bool g_ndjsonIncludeDirHistory = false;
 
 namespace {
@@ -239,7 +239,6 @@ std::string GenerateCharacterHitboxes(uint64_t character)
 
 void InitLiveLog()
 {
-    if (!g_ndjsonLoggingEnabled) return;
     g_liveInit = false;
     g_livePath[0] = '\0';
 
@@ -262,7 +261,9 @@ void InitLiveLog()
     Rollback_ResolveDllPath(directory, sizeof(directory), relative);
     CreateDirectoryA(directory, nullptr);
     snprintf(g_livePath, sizeof(g_livePath), "%s/frames.ndjson", directory);
-    if (FILE* file = fopen(g_livePath, "w")) fclose(file);
+    if (g_ndjsonLoggingEnabled) {
+        if (FILE* file = fopen(g_livePath, "w")) fclose(file);
+    }
 
     char logPath[260];
     snprintf(logPath, sizeof(logPath), "%s/%s", directory,
@@ -279,7 +280,10 @@ void InitLiveLog()
     }
     g_desyncFlushed = false;
     g_liveInit = true;
-    HookLog("NetplayLive: NDJSON log -> %s\n", g_livePath);
+    if (g_ndjsonLoggingEnabled)
+        HookLog("NetplayLive: NDJSON log -> %s\n", g_livePath);
+    else
+        HookLog("NetplayLive: profile session -> %s\n", directory);
 }
 
 void AppendShotCollision(std::string& json, void* shot)
@@ -1060,7 +1064,9 @@ void NDJSON_ResetNetplayLiveLog()
 
 bool NDJSON_GetNetplayLiveDirectory(char* path, size_t pathSize)
 {
-    if (!path || pathSize == 0 || !g_liveInit || !g_livePath[0]) return false;
+    if (!path || pathSize == 0) return false;
+    if (!g_liveInit) InitLiveLog();
+    if (!g_liveInit || !g_livePath[0]) return false;
     const char* slash = strrchr(g_livePath, '/');
     const char* backslash = strrchr(g_livePath, '\\');
     if (!slash || (backslash && backslash > slash)) slash = backslash;

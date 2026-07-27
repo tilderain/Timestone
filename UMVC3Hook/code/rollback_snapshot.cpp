@@ -81,6 +81,62 @@ using SnapshotSlot = RollbackSnapshotSlot;
 RollbackSnapshotSlot g_rollbackSnapshotSlots[ROLLBACK_WINDOW];
 #define g_slots g_rollbackSnapshotSlots
 
+struct RegionDependency {
+    uintptr_t address = 0;
+    uint64_t value = 0;
+    uint8_t size = 0;
+    bool requireAccessible = false;
+};
+
+struct RegionDependencies {
+    static constexpr size_t MAX_VALUES = 1024;
+    RegionDependency values[MAX_VALUES] = {};
+    size_t count = 0;
+    bool overflow = false;
+
+    template <typename T>
+    T read(uintptr_t address, bool requireAccessible = false)
+    {
+        static_assert(sizeof(T) <= sizeof(uint64_t));
+        T value = *(T*)address;
+        if (count < MAX_VALUES) {
+            RegionDependency& dependency = values[count++];
+            dependency.address = address;
+            dependency.size = sizeof(T);
+            dependency.requireAccessible = requireAccessible;
+            std::memcpy(&dependency.value, &value, sizeof(T));
+        } else {
+            overflow = true;
+        }
+        return value;
+    }
+};
+
+struct RegionCache {
+    Region regions[MAX_REGIONS] = {};
+    RegionDependencies dependencies;
+    int count = 0;
+    bool valid = false;
+};
+
+static RegionCache g_regionCache;
+
+static bool RegionDependenciesValid(const RegionDependencies& dependencies)
+{
+    if (dependencies.overflow) return false;
+    for (size_t i = 0; i < dependencies.count; ++i) {
+        const RegionDependency& dependency = dependencies.values[i];
+        if (dependency.requireAccessible &&
+            !IsAccessibleAddress(dependency.address + dependency.size - 1)) {
+            return false;
+        }
+        uint64_t value = 0;
+        std::memcpy(&value, (void*)dependency.address, dependency.size);
+        if (value != dependency.value) return false;
+    }
+    return true;
+}
+
 // ===========================================================================
 // Safe Dynamic List Traversal
 //
@@ -119,11 +175,16 @@ static void TraverseAndAddDynamicList(uint64_t listHead, size_t nextOffset,
 // ===========================================================================
 // Region List Builder — enumerates all snapshot-worthy memory
 // ===========================================================================
-int Rollback_BuildRegions(Region* regions, int maxRegions)
+static int BuildRegionsUncached(Region* regions, int maxRegions,
+                                RegionDependencies& dependencies)
 {
     if (!regions || maxRegions < 1) return 0;
 
     int r = 0;
+    auto read = [&]<typename T>(uintptr_t address,
+                                bool requireAccessible = false) {
+        return dependencies.read<T>(address, requireAccessible);
+    };
     auto add = [&](void* ptr, size_t sz, uint64_t ownerSlot = 0,
                    uint64_t expectedVtable = 0, bool skipVtable = false) {
         if (r < maxRegions && ptr && sz > 0) {
@@ -431,7 +492,7 @@ int Rollback_BuildRegions(Region* regions, int maxRegions)
 
     // ---- 1. sReplay: frame counter only (sReplay+0x54). Full replay buffer
     //     has internal pointers that go stale. ---
-    uint64_t sReplay = *(uint64_t*)_addr(PTR_SREPLAY);
+    uint64_t sReplay = read.operator()<uint64_t>(_addr(PTR_SREPLAY));
     if (sReplay) {
         add((void*)(sReplay + 0x54), 4); // just the frame counter
     }
@@ -452,7 +513,7 @@ int Rollback_BuildRegions(Region* regions, int maxRegions)
     //     Determinism harness invariant per rng_inventory.md §6.3: sEffect+0x3C
     //     must match saved value byte-for-byte after restore.
     {
-        uint64_t sEffect = *(uint64_t*)_addr(0x140E17A38);
+        uint64_t sEffect = read.operator()<uint64_t>(_addr(0x140E17A38));
         if (sEffect) {
             add((void*)(sEffect + 0x3C), 16);
         }
@@ -460,7 +521,7 @@ int Rollback_BuildRegions(Region* regions, int maxRegions)
 
     // ---- 2. sShot manager header and shot ID pool ----
     // Keep intrusive sentinel topology live; recipes reconcile shot lifetime.
-    uint64_t sShot = *(uint64_t*)_addr(PTR_SSHOT);
+    uint64_t sShot = read.operator()<uint64_t>(_addr(PTR_SSHOT));
     if (sShot) {
         add((void*)sShot, 0x50);
     }
@@ -472,7 +533,7 @@ int Rollback_BuildRegions(Region* regions, int maxRegions)
     //     Without restoring these the game sees no active projectiles and frees them,
     //     causing stale-address corruption on the next restore.
     {
-        uint64_t sGameConfig = *(uint64_t*)_addr(0x140D50F88);
+        uint64_t sGameConfig = read.operator()<uint64_t>(_addr(0x140D50F88));
         if (sGameConfig) {
             add((void*)(sGameConfig + 0x4A89C), 10);
         }
@@ -497,7 +558,7 @@ int Rollback_BuildRegions(Region* regions, int maxRegions)
     // Removing this region caused peers to select the next point character on
     // different frames after a rollback crossed a character defeat.
     {
-        uint64_t sAction = *(uint64_t*)_addr(PTR_SACTION);
+        uint64_t sAction = read.operator()<uint64_t>(_addr(PTR_SACTION));
         add((void*)sAction, 0x20000);
     }
 
@@ -608,12 +669,12 @@ int Rollback_BuildRegions(Region* regions, int maxRegions)
     //     for a singleton, so restoring it is safe here).
     uint64_t camUnit = 0;
     {
-        uint64_t sCamera = *(uint64_t*)_addr(PTR_SCAMERA);
+        uint64_t sCamera = read.operator()<uint64_t>(_addr(PTR_SCAMERA));
         if (sCamera) {
             add((void*)sCamera, 0xD80);
             // First viewport slot at +0x50, stride 0x1A0, camera unit ptr at slot+8.
             // This is the uActionSideCamera gameplay anchor unit.
-            camUnit = *(uint64_t*)(sCamera + 0x58);
+            camUnit = read.operator()<uint64_t>(sCamera + 0x58);
         }
     }
 
@@ -626,6 +687,7 @@ int Rollback_BuildRegions(Region* regions, int maxRegions)
     //     holds the pointer (confirmed via sCamera__refreshViewsForBoundary).
     {
         if (camUnit) {
+            read.operator()<uint64_t>(camUnit, true);
             uint64_t dtiPtr  = GetObjectDti(camUnit);
             uint32_t camSize = DecodeDtiSize(dtiPtr);
             if (camSize < 0x100 || camSize > 0x2000) {
@@ -640,19 +702,20 @@ int Rollback_BuildRegions(Region* regions, int maxRegions)
     //     restoring sGameEffect would crash due to stale effect pointers.
 
     // ---- 10. sAction (fighting phase state machine) ----
-    uint64_t sMvc3Mgr = *(uint64_t*)_addr(PTR_SMVC3MGR);
+    uint64_t sMvc3Mgr = read.operator()<uint64_t>(_addr(PTR_SMVC3MGR));
     if (sMvc3Mgr) {
-        uint64_t sAction = *(uint64_t*)(sMvc3Mgr + SMVC3MGR_ACTION_OFFSET);
+        uint64_t sAction = read.operator()<uint64_t>(
+            sMvc3Mgr + SMVC3MGR_ACTION_OFFSET);
         add((void*)sAction, 0x300);
         if (sAction && IsAccessibleAddress(
                 sAction + SACTION_MODEL_JOINT_WRAPPER_OFFSET)) {
-            uint64_t modelJointWrapper = *(uint64_t*)(
-                sAction + SACTION_MODEL_JOINT_WRAPPER_OFFSET);
+            uint64_t modelJointWrapper = read.operator()<uint64_t>(
+                sAction + SACTION_MODEL_JOINT_WRAPPER_OFFSET, true);
             if (modelJointWrapper && IsAccessibleAddress(
                     modelJointWrapper + SACTION_MODEL_JOINT_ALLOCATION_OFFSET)) {
                 uint64_t allocationSlot = modelJointWrapper +
                     SACTION_MODEL_JOINT_ALLOCATION_OFFSET;
-                uint64_t allocation = *(uint64_t*)allocationSlot;
+                uint64_t allocation = read.operator()<uint64_t>(allocationSlot, true);
                 if (allocation && IsAccessibleAddress(
                         allocation + SACTION_MODEL_JOINT_ALLOCATION_SIZE - 1)) {
                     // sAction__getModelJoint returns allocation+0x10. Capture
@@ -667,7 +730,7 @@ int Rollback_BuildRegions(Region* regions, int maxRegions)
     }
 
     // ---- 11-16. Per-character uCharacter + 17-18. cChrTeam ----
-    uint64_t sCharacter = *(uint64_t*)_addr(PTR_SCHARACTER);
+    uint64_t sCharacter = read.operator()<uint64_t>(_addr(PTR_SCHARACTER));
     if (sCharacter) {
         uint64_t team0 = sCharacter + TEAM0_OFFSET;
         uint64_t team1 = sCharacter + TEAM1_OFFSET;
@@ -681,12 +744,13 @@ int Rollback_BuildRegions(Region* regions, int maxRegions)
             uint64_t node = team + TEAM_FIRST_NODE_OFFSET;
 
             while (node && r < maxRegions) {
-                uint64_t character = *(uint64_t*)(node + NODE_CHR_OFFSET);
+                uint64_t character = read.operator()<uint64_t>(
+                    node + NODE_CHR_OFFSET);
                 if (character) {
                     if (teamCharacterCount < 6) {
                         teamCharacters[teamCharacterCount++] = character;
                     }
-                    uint64_t vtable = *(uint64_t*)character;
+                    uint64_t vtable = read.operator()<uint64_t>(character, true);
                     uint64_t dtiFunc = (vtable >= 0x140000000) ? *(uint64_t*)(vtable + 0x20) : 0;
                     uint64_t dtiPtr = GetObjectDti(character);
                     uint32_t charSize = DecodeDtiSize(dtiPtr);
@@ -717,13 +781,14 @@ int Rollback_BuildRegions(Region* regions, int maxRegions)
                         0xBB0, 0xBB0, 0xB90, 0xB90,
                         0xBB0, 0xBB0, 0xB80,
                     };
-                    uint32_t packedTargetCounts = *(uint32_t*)(character + 0x1440);
+                    uint32_t packedTargetCounts = read.operator()<uint32_t>(
+                        character + 0x1440);
                     for (size_t target = 0;
                          target < sizeof(targetOffsets) / sizeof(targetOffsets[0]);
                          ++target) {
                         uint32_t count = (packedTargetCounts >> (target * 4)) & 0xF;
                         uint64_t ownerSlot = character + targetOffsets[target];
-                        uint64_t table = *(uint64_t*)ownerSlot;
+                        uint64_t table = read.operator()<uint64_t>(ownerSlot);
                         if (table && count > 0 && count <= 10) {
                             add((void*)table,
                                 (size_t)count * targetStrides[target],
@@ -734,13 +799,14 @@ int Rollback_BuildRegions(Region* regions, int maxRegions)
                     // Restore motion state and its external interpolation data
                     // together. Keeping one live while rewinding the other
                     // leaves animation/root-motion state split across frames.
-                    uint32_t numJoints = *(uint32_t*)(character + CCHR_NUM_JOINTS_OFFSET);
+                    uint32_t numJoints = read.operator()<uint32_t>(
+                        character + CCHR_NUM_JOINTS_OFFSET);
                     if (numJoints <= 256) {
                         size_t blendSize = CCHR_BLEND_BYTES_PER_JOINT * numJoints;
                         for (int motion = 0; motion < CCHR_MOTION_COUNT; ++motion) {
                             uint64_t ownerSlot = character + CCHR_MOTION_BASE +
                                 motion * CCHR_MOTION_STRIDE + CCHR_BLEND_PTR_OFFSET;
-                            uint64_t blend = *(uint64_t*)ownerSlot;
+                            uint64_t blend = read.operator()<uint64_t>(ownerSlot);
                             if (blend && blendSize > 0) {
                                 add((void*)blend, blendSize, ownerSlot);
                             }
@@ -750,15 +816,15 @@ int Rollback_BuildRegions(Region* regions, int maxRegions)
                     // Motion+0x178 fields are slices into one allocation owned
                     // by uModel+0x6D8, not independent allocations. Rewind the
                     // complete allocation through its actual owner slot.
-                    uint32_t channelCount = *(uint32_t*)(character +
+                    uint32_t channelCount = read.operator()<uint32_t>(character +
                         CCHR_MOTION_CHANNEL_COUNT_OFFSET);
-                    uint32_t motionCount = *(uint32_t*)(character +
+                    uint32_t motionCount = read.operator()<uint32_t>(character +
                         CCHR_MOTION_COUNT_OFFSET);
                     if (channelCount <= 4096 && motionCount <= CCHR_MOTION_COUNT) {
                         size_t channelBytes = CCHR_MOTION_CHANNEL_STRIDE *
                             channelCount * motionCount;
                         uint64_t ownerSlot = character + CCHR_MOTION_CHANNELS_PTR_OFFSET;
-                        uint64_t channels = *(uint64_t*)ownerSlot;
+                        uint64_t channels = read.operator()<uint64_t>(ownerSlot);
                         if (channels && channelBytes > 0) {
                             add((void*)channels, channelBytes, ownerSlot);
                         }
@@ -770,7 +836,7 @@ int Rollback_BuildRegions(Region* regions, int maxRegions)
                     // transforms across timelines.
                     if (numJoints <= 256 && numJoints > 0) {
                         uint64_t jointStateOwner = character + CCHR_JOINT_STATE_PTR_OFFSET;
-                        uint64_t jointStates = *(uint64_t*)jointStateOwner;
+                        uint64_t jointStates = read.operator()<uint64_t>(jointStateOwner);
                         if (jointStates) {
                             add((void*)jointStates,
                                 CCHR_JOINT_STATE_STRIDE * numJoints,
@@ -778,13 +844,13 @@ int Rollback_BuildRegions(Region* regions, int maxRegions)
                         }
 
                         uint64_t jointIndexOwner = character + CCHR_JOINT_INDEX_PTR_OFFSET;
-                        uint64_t jointIndices = *(uint64_t*)jointIndexOwner;
+                        uint64_t jointIndices = read.operator()<uint64_t>(jointIndexOwner);
                         if (jointIndices) {
                             add((void*)jointIndices, numJoints, jointIndexOwner);
                         }
 
                         uint64_t blendedOwner = character + CCHR_BLENDED_JOINT_PTR_OFFSET;
-                        uint64_t blendedJoints = *(uint64_t*)blendedOwner;
+                        uint64_t blendedJoints = read.operator()<uint64_t>(blendedOwner);
                         if (blendedJoints) {
                             add((void*)blendedJoints,
                                 CCHR_BLENDED_JOINT_STRIDE * numJoints,
@@ -794,8 +860,9 @@ int Rollback_BuildRegions(Region* regions, int maxRegions)
 
                     for (uint32_t animOffset : CCHR_EXTERNAL_ANIM_OFFSETS) {
                         uint64_t ownerSlot = character + animOffset;
-                        uint64_t anim = *(uint64_t*)ownerSlot;
+                        uint64_t anim = read.operator()<uint64_t>(ownerSlot);
                         if (anim && HasCallableDtiVirtual((void*)anim)) {
+                            read.operator()<uint64_t>(anim, true);
                             add((void*)anim, CCHR_EXTERNAL_ANIM_SIZE, ownerSlot);
                         }
                     }
@@ -819,22 +886,25 @@ int Rollback_BuildRegions(Region* regions, int maxRegions)
                     // action transitions.  Verified via Ghidra cross-refs from cChrCmd__setOwner.
                     for (uint64_t cmdOff : {0x2738ull, 0x2950ull}) {
                         uint64_t cmd   = character + cmdOff;
-                        uint64_t lines = *(uint64_t*)(cmd + 0x178);
-                        int      n     = *(int*)(cmd + 0x170);
+                        uint64_t lines = read.operator()<uint64_t>(cmd + 0x178);
+                        int n = read.operator()<int>(cmd + 0x170);
                         if (lines && n > 0 && n < 0x1000)
                             add((void*)(lines - 8), (size_t)n * 0x20 + 8);
                     }
                 }
-                node = *(uint64_t*)(node + NODE_NEXT_OFFSET);
+                node = read.operator()<uint64_t>(node + NODE_NEXT_OFFSET);
             }
         }
 
         // Spawned helper uCharacters live in sUnit category 8 but are not in
         // either team roster. Capture their DTI-sized bodies at saved addresses;
         // blend and external animation buffers remain team-fighter-only.
-        uint64_t sUnit = *(uint64_t*)_addr(PTR_SUNIT);
-        if (sUnit && *(uint32_t*)(sUnit + SUNIT_CATEGORY_COUNT_OFFSET) > SUNIT_CHARACTER_CATEGORY) {
-            uint64_t helper = *(uint64_t*)(sUnit + SUNIT_CATEGORY_LISTS_OFFSET +
+        uint64_t sUnit = read.operator()<uint64_t>(_addr(PTR_SUNIT));
+        uint32_t categoryCount = sUnit ? read.operator()<uint32_t>(
+            sUnit + SUNIT_CATEGORY_COUNT_OFFSET) : 0;
+        if (sUnit && categoryCount > SUNIT_CHARACTER_CATEGORY) {
+            uint64_t helper = read.operator()<uint64_t>(
+                sUnit + SUNIT_CATEGORY_LISTS_OFFSET +
                 SUNIT_CATEGORY_LIST_STRIDE * SUNIT_CHARACTER_CATEGORY);
             int safety = 64;
             while (helper && safety-- > 0 && r < maxRegions) {
@@ -846,12 +916,13 @@ int Rollback_BuildRegions(Region* regions, int maxRegions)
                     }
                 }
                 if (!isTeamCharacter) {
+                    read.operator()<uint64_t>(helper, true);
                     uint32_t helperSize = DecodeDtiSize(GetObjectDti(helper));
                     if (helperSize >= 8 && helperSize <= CCHR_MAX_SIZE) {
                         add((void*)helper, helperSize, 0, *(uint64_t*)helper, true);
                     }
                 }
-                helper = *(uint64_t*)(helper + 0x18);
+                helper = read.operator()<uint64_t>(helper + 0x18);
             }
         }
     }
@@ -864,6 +935,29 @@ int Rollback_BuildRegions(Region* regions, int maxRegions)
     //     fresh effect allocations without conflicting with old slots.
 
     return r;
+}
+
+int Rollback_BuildRegions(Region* regions, int maxRegions)
+{
+    if (!regions || maxRegions < 1) return 0;
+
+    if (g_regionCache.valid &&
+        RegionDependenciesValid(g_regionCache.dependencies)) {
+        int count = g_regionCache.count < maxRegions
+            ? g_regionCache.count : maxRegions;
+        std::memcpy(regions, g_regionCache.regions, count * sizeof(Region));
+        return count;
+    }
+
+    g_regionCache.dependencies = {};
+    int count = BuildRegionsUncached(g_regionCache.regions, MAX_REGIONS,
+                                     g_regionCache.dependencies);
+    g_regionCache.count = count;
+    g_regionCache.valid = count > 0 && !g_regionCache.dependencies.overflow;
+
+    int copyCount = count < maxRegions ? count : maxRegions;
+    std::memcpy(regions, g_regionCache.regions, copyCount * sizeof(Region));
+    return copyCount;
 }
 
 void Rollback_SaveSnapshot(int32_t frame)
@@ -1026,4 +1120,5 @@ void Rollback_FreeSnapshots()
     Shot_Reset();
     Effect_Reset();
     Rollback_ResetReSimulation();
+    g_regionCache.valid = false;
 }
