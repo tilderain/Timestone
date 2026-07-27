@@ -59,7 +59,7 @@ int64 UMVC3Hooks::HookCamera(int64 camera, int64 a2)
 
 	if (*(char*)(camera + 1416) == 1)
 	{
-		((void(__fastcall*)(int64))_addr(0x140015710))(camera + 0x230);
+		((void(__fastcall*)(int64, int64))_addr(0x140015710))(camera + 0x230, a2);
 	}
 	else
 	{
