@@ -119,10 +119,8 @@ extern "C" void Rollback_ProcessInboundGroundTruth();
 // Free all snapshot memory. Call on netplay disconnect / match end.
 void Rollback_FreeSnapshots();
 
-// Headless frame tick — runs game-logic sub-functions from sMvc3Main__move
-// but SKIPS: Sleep (frame pacing), all vtable+0x48 calls (draw/render),
-// all sRender/sPrimitive calls, the Present/swap at 0x140537080.
-// Safe to call many times per real frame for re-simulation.
+// Full C++ replication of sMvc3Main__move at 0x1402594A0. It preserves the
+// native call order, repeated singleton lookups, render calls, and Alt+F4 path.
 void Rollback_HeadlessTick(uint64_t sMvc3Main);
 
 // Patch/unpatch the Sleep() calls inside sMain__move (0x140521df0).

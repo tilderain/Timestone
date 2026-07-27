@@ -170,7 +170,8 @@ void Rollback_ReSimulate(int32_t startFrame, int32_t endFrame)
             Rollback_UpdateSnapshotInputs(frame, localInput, remoteInput);
         }
         timer.Add(&RollbackProfile::frameSnapshot);
-        g_originalMainMove(g_mainInstance);
+        //g_originalMainMove(g_mainInstance);
+        Rollback_HeadlessTick(g_mainInstance);
         timer.Add(&RollbackProfile::frameNativeTick,
                   &RollbackProfile::frameNativeTickMax);
         Controller_SilentFrameEnd();
