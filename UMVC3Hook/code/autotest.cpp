@@ -17,7 +17,6 @@ namespace {
 constexpr uintptr_t ADDR_UPDATE_COMMAND_MATCHER = 0x140028D10;
 constexpr uintptr_t ADDR_GET_COMMAND_BY_LINE = 0x14005B630;
 constexpr uintptr_t ADDR_GET_COMMAND_STEP = 0x14005AD40;
-constexpr uintptr_t ADDR_BUTTON_REMAP = 0x14002DA30;
 constexpr uintptr_t PTR_SCHARACTER = 0x140D44A70;
 constexpr uintptr_t TEAM_OFFSETS[] = {0x40, 0x300};
 constexpr uintptr_t TEAM_ACTIVE_CHARACTER_OFFSET = 0x48;
@@ -138,9 +137,6 @@ const char* ActiveScriptName()
 
 uint32_t FindRawInput(uint32_t requiredMask, uint32_t expected)
 {
-    using ButtonRemap_t = uint32_t(__fastcall*)(uint64_t, uint32_t, uint8_t);
-    static ButtonRemap_t buttonRemap = (ButtonRemap_t)_addr(ADDR_BUTTON_REMAP);
-
     // Directions have a fixed mapping and must not depend on the configurable
     // button table. Invert them directly, then search only physical buttons.
     uint32_t rawDirection = 0;
@@ -161,7 +157,9 @@ uint32_t FindRawInput(uint32_t requiredMask, uint32_t expected)
             if ((combination & (1u << bit)) != 0)
                 raw |= rawButtonBits[bit];
         }
-        uint32_t resolved = buttonRemap(1, raw, 0);
+        uint32_t resolved = 0;
+        if (!Controller_RemapSyntheticInput(raw, &resolved))
+            return UINT32_MAX;
         if ((resolved & requiredMask) == expected)
             return raw;
     }

@@ -88,6 +88,11 @@ extern "C" void Controller_OnFrameEnd();
 // on a separate shift-buffer save/restore.
 extern "C" uint32_t Controller_GetCurrentFrameInput();
 
+// Translate a synthetic raw pad mask without the netplay player-index rewrite.
+// This matches the path used when autotest input is injected.
+extern "C" bool Controller_RemapSyntheticInput(uint32_t rawInput,
+                                                uint32_t* outInput);
+
 // Override the local team's recorded game input for a specific frame
 // to the value saved in that frame's snapshot slot.  Called before
 // each re-sim tick so hkprocessFrameInput reads the snapshot's input.

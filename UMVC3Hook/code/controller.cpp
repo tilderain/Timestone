@@ -825,6 +825,18 @@ static uint32_t __fastcall hkbuttonRemap(uint64_t playerIndex, uint32_t input,
     return obuttonRemap(playerIndex, input, alternateMap);
 }
 
+extern "C" bool Controller_RemapSyntheticInput(uint32_t rawInput,
+                                                uint32_t* outInput)
+{
+    if (!obuttonRemap || !outInput)
+        return false;
+
+    // Index 1 bypasses the native index-0 focus/menu shortcut. Team ownership
+    // is resolved separately by the cChrInput instance receiving the result.
+    *outInput = obuttonRemap(1, rawInput, 0);
+    return true;
+}
+
 // ---------------------------------------------------------------------------
 // hkGetsCurrentInput_withSOCD
 // Hook on GetsCurrentInput_withSOCD at 0x1402B3700.
@@ -1557,7 +1569,9 @@ static void __fastcall hkprocessFrameInput(uint64_t cChrInput)
             // configuration aggregate without reading rawTestInput. Index 1
             // takes the regular direction/button translation path and is safe
             // for synthetic masks; team ownership is handled independently.
-            uint32_t resolved = obuttonRemap(1, rawTestInput, 0);
+            uint32_t resolved = 0;
+            if (!Controller_RemapSyntheticInput(rawTestInput, &resolved))
+                resolved = 0;
             *(uint32_t*)(cChrInput + 0x14)  = resolved;
             *(uint32_t*)(cChrInput + 0x560) = resolved;
             *(uint32_t*)(cChrInput + 0x56C) = resolved;
