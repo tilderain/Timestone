@@ -1320,14 +1320,19 @@ extern "C" bool AutoTest_StartSuite(int32_t playerIndex, bool facingLeft)
             command.resource, runtimeCommand, notation,
             command.commandFlags);
         bool duplicate = false;
-        if (hasNotation) {
-            for (int32_t existing = 0; existing < commandCount; ++existing) {
-                if (g_suiteCommandHasNotation[existing] &&
-                    CommandNotationsEqual(
-                        notation, g_suiteCommandNotations[existing])) {
-                    duplicate = true;
-                    break;
-                }
+        const char* commandName = command.commandListName[0]
+            ? command.commandListName : command.name;
+        for (int32_t existing = 0; existing < commandCount; ++existing) {
+            const AutoTestRuntimeCommand& existingCommand =
+                g_suiteCommands[existing];
+            const char* existingName = existingCommand.commandListName[0]
+                ? existingCommand.commandListName : existingCommand.name;
+            if (strcmp(commandName, existingName) == 0 ||
+                (hasNotation && g_suiteCommandHasNotation[existing] &&
+                 CommandNotationsEqual(
+                     notation, g_suiteCommandNotations[existing]))) {
+                duplicate = true;
+                break;
             }
         }
         if (duplicate) {
@@ -1362,7 +1367,7 @@ extern "C" bool AutoTest_StartSuite(int32_t playerIndex, bool facingLeft)
     g_suiteFacingLeft = facingLeft;
     g_suiteMatchedCommand = false;
     g_suitePhase = SuitePhase::StartCommand;
-    HookLog("AutoTestSuite: started %d manual cases and %d unique commands for P%d (%d duplicate notations removed)\n",
+    HookLog("AutoTestSuite: started %d manual cases and %d unique commands for P%d (%d duplicate moves removed)\n",
             (int32_t)std::size(SUITE_MANUAL_SCRIPTS), commandCount,
             playerIndex + 1, duplicateCount);
     return true;
