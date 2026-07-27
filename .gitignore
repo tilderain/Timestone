@@ -363,6 +363,7 @@ MigrationBackup/
 FodyWeavers.xsd
 
 UMVC3Hook.asi
+UMVC3Hook.map
 all.txt
 
 build/**

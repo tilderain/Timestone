@@ -343,8 +343,8 @@ void BootIntoTraining()
     //   7 = Unknown mode 7
     //   8 = Heroes & Heralds
     //   9 = Online (alt)
-    ((SetInt_t)_addr(BATTLE_SETTING_SET_BATTLE_TYPE))(bs, 5);
-    HookLog("TrainingBoot: Battle type set to training (5)\n");
+    ((SetInt_t)_addr(BATTLE_SETTING_SET_BATTLE_TYPE))(bs, 0);
+    HookLog("TrainingBoot: Battle type set to training (0)\n");
 
     typedef void(__fastcall* CommitOnePlay_t)(uint64_t, uint8_t);
     ((CommitOnePlay_t)_addr(BATTLE_SETTING_COMMIT_ONE_PLAY))(bs, 1);
