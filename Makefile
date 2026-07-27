@@ -19,6 +19,7 @@ OBJDIR    := $(BUILDDIR)/obj
 
 # Output: .asi is a renamed DLL loaded by Ultimate ASI Loader
 OUTPUT    := UMVC3Hook.asi
+MAP_FILE  := UMVC3Hook.map
 
 # --- Source files (from UMVC3Hook.vcxproj, Release|x64) ---
 
@@ -132,7 +133,7 @@ PERF_FLAGS := -O3 -flto=auto -fuse-linker-plugin -fipa-pta \
 CXXFLAGS  := $(PERF_FLAGS) -std=c++20 -fpermissive -MMD -MP $(DEFINES) $(INCLUDES) -DUMVC3HOOK_GIT_COMMIT=\"$(GIT_COMMIT)\" -DUMVC3HOOK_GIT_DIRTY=$(GIT_DIRTY) -Wall -Wno-unused-variable -Wno-unused-function
 CFLAGS    := $(PERF_FLAGS) -MMD -MP $(DEFINES) $(INCLUDES) -Wall -Wno-unused-variable
 LDFLAGS   := -shared -static-libgcc -static-libstdc++ -flto=auto \
-	-fuse-linker-plugin -Wl,--gc-sections -Wl,-O2
+	-fuse-linker-plugin -Wl,--gc-sections -Wl,-O2 -Wl,-Map,$(MAP_FILE)
 LIBS      := \
 	-ld3d9 \
 	-ld3dcompiler \
@@ -268,7 +269,7 @@ $(OBJDIR):
 # ---------- Clean ----------
 
 clean:
-	rm -rf $(BUILDDIR) $(OUTPUT)
+	rm -rf $(BUILDDIR) $(OUTPUT) $(MAP_FILE)
 
 # ---------- Install (example path - adjust to your UMVC3 install) ----------
 

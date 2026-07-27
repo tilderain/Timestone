@@ -8,8 +8,9 @@
 #include "rollback_snapshot.h"
 #include "../kiero/minhook/include/MinHook.h"
 
+#include <algorithm>
 #include <cstring>
-#include <unordered_map>
+#include <vector>
 
 extern void HookLog(const char* fmt, ...);
 
@@ -26,7 +27,7 @@ using EffectCreateFn = void*(__fastcall*)(void*, int, int, void*, int, int,
 
 static EffectCreateFn oEffectCreate = nullptr;
 static void(__fastcall* oKirigakureEffectUpdate)(void*) = nullptr;
-static std::unordered_map<void*, RollbackEffectRecipe> g_liveEffectRecipes;
+static std::vector<RollbackEffectRecipe> g_liveEffectRecipes;
 static uint64_t g_effectSpawnSequence = 0;
 
 static bool IsActiveUnit(void* unit)
@@ -129,7 +130,15 @@ static void* __fastcall hkEffectCreate(void* manager, int effectId, int a3,
             a9, a10, a11, a12, a13
         };
         recipe.spawnSequence = ++g_effectSpawnSequence;
-        g_liveEffectRecipes[effect] = recipe;
+        auto existing = std::find_if(g_liveEffectRecipes.begin(),
+                                     g_liveEffectRecipes.end(),
+                                     [effect](const RollbackEffectRecipe& live) {
+                                         return live.restoredPtr == effect;
+                                     });
+        if (existing != g_liveEffectRecipes.end())
+            *existing = recipe;
+        else
+            g_liveEffectRecipes.push_back(recipe);
     }
     return effect;
 }
@@ -147,11 +156,10 @@ void Effect_CaptureRecipes(RollbackSnapshotSlot& slot)
 {
     slot.effectRecipes.clear();
     slot.effectRecipes.reserve(g_liveEffectRecipes.size());
-    for (const auto& entry : g_liveEffectRecipes) {
-        if (!IsActiveUnit(entry.first)) continue;
-        RollbackEffectRecipe saved = entry.second;
-        saved.savedPtr = entry.first;
-        saved.restoredPtr = entry.first;
+    for (const RollbackEffectRecipe& recipe : g_liveEffectRecipes) {
+        if (!IsActiveUnit(recipe.restoredPtr)) continue;
+        RollbackEffectRecipe saved = recipe;
+        saved.savedPtr = recipe.restoredPtr;
         slot.effectRecipes.push_back(saved);
     }
 }
@@ -171,7 +179,12 @@ void Effect_PrepareUnitRemoval(void* unit)
 
 void Effect_FinishUnitRemoval(void* unit)
 {
-    g_liveEffectRecipes.erase(unit);
+    g_liveEffectRecipes.erase(
+        std::remove_if(g_liveEffectRecipes.begin(), g_liveEffectRecipes.end(),
+                       [unit](const RollbackEffectRecipe& recipe) {
+                           return recipe.restoredPtr == unit;
+                       }),
+        g_liveEffectRecipes.end());
 }
 
 int Effect_RetireCurrent(void* sUnit)

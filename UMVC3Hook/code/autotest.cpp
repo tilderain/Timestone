@@ -27,7 +27,6 @@ constexpr uintptr_t PTR_SCHARACTER = 0x140D44A70;
 constexpr uintptr_t PTR_COMMAND_LIST_ROW_TABLES = 0x140B16960;
 constexpr uintptr_t PTR_SMVC3_MANAGER = 0x140D510A0;
 constexpr uintptr_t SMVC3_MANAGER_ACTION_OFFSET = 0x48;
-constexpr uintptr_t ADDR_EXECUTE_MATCH_PHASE = 0x140004B80;
 constexpr uintptr_t ADDR_SET_RESTART_MODE = 0x14000AF90;
 constexpr uintptr_t ADDR_SET_CHARACTER_POSITION = 0x140002AF0;
 constexpr uintptr_t PTR_SHOT_LISTS = 0x140D47F90;
@@ -260,9 +259,6 @@ void RequestTrainingReset()
 
     using SetRestartMode_t = void(__fastcall*)(uint64_t, int32_t);
     ((SetRestartMode_t)_addr(ADDR_SET_RESTART_MODE))(action, 3);
-    using ExecuteMatchPhase_t = void(__fastcall*)(uint64_t, int32_t,
-                                                   uint64_t, uint64_t);
-    ((ExecuteMatchPhase_t)_addr(ADDR_EXECUTE_MATCH_PHASE))(action, 12, 0, 0);
 }
 
 void FinishSuiteCommand(bool passed, const char* reason)
