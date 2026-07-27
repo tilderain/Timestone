@@ -21,3 +21,6 @@ Ryu
 	Big hadoken aimed up/normal aim desync position
 
 Aerial assists will sometimes desync (character attacking is spawned in the wrong spot?)
+
+
+Rollback past step transition (fade to black) will make black screen forever
