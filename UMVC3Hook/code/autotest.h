@@ -69,8 +69,12 @@ struct AutoTestRuntimeCommand {
 
 struct AutoTestSuiteStatus {
     bool active;
-    bool waitingForHit;
+    bool waitingForCompletion;
     bool waitingForReset;
+    bool dealtDamage;
+    bool charactersStable;
+    bool shotsClear;
+    bool cutinClear;
     int32_t playerIndex;
     int32_t currentCommand;
     int32_t commandCount;
@@ -79,6 +83,11 @@ struct AutoTestSuiteStatus {
     int32_t currentMatcher;
     int32_t currentLine;
     int32_t commandStartFrame;
+    int32_t quietFrames;
+    int32_t requiredQuietFrames;
+    int32_t shotCount;
+    uint32_t attackerAction;
+    uint32_t defenderAction;
     char currentName[96];
     char lastResult[160];
 };

@@ -1154,7 +1154,16 @@ void FrameStepper_DrawAutoTest()
                     suite.currentName, suite.currentMatcher, suite.currentLine);
         ImGui::Text("Phase: %s",
                     suite.waitingForReset ? "resetting through sAction step 12" :
-                    suite.waitingForHit ? "waiting for P2 hit" : "running");
+                    suite.waitingForCompletion ? "waiting for idle" : "running");
+        if (suite.waitingForCompletion) {
+            ImGui::Text("Quiet: %d/%d  point chars idle=%s (%08X/%08X) shots=%d cutin=%s damage=%s",
+                        suite.quietFrames, suite.requiredQuietFrames,
+                        suite.charactersStable ? "yes" : "no",
+                        suite.attackerAction, suite.defenderAction,
+                        suite.shotCount,
+                        suite.cutinClear ? "clear" : "active",
+                        suite.dealtDamage ? "yes" : "no");
+        }
         if (suite.lastResult[0])
             ImGui::TextWrapped("Last: %s", suite.lastResult);
     }
@@ -1167,7 +1176,7 @@ void FrameStepper_DrawAutoTest()
     }
 
     status = AutoTest_GetStatus();
-    ImGui::Text("State: %s  frame: %d  input: %08X",
+    ImGui::Text("Input playback: %s  frame: %d  input: %08X",
                 status.active ? "running" : "idle",
                 status.scriptFrame, status.currentInput);
     if (status.lastSuccessFrame >= 0) {

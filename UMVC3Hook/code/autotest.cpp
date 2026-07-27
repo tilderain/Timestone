@@ -30,6 +30,8 @@ constexpr uintptr_t SMVC3_MANAGER_ACTION_OFFSET = 0x48;
 constexpr uintptr_t ADDR_EXECUTE_MATCH_PHASE = 0x140004B80;
 constexpr uintptr_t ADDR_SET_RESTART_MODE = 0x14000AF90;
 constexpr uintptr_t ADDR_SET_CHARACTER_POSITION = 0x140002AF0;
+constexpr uintptr_t PTR_SHOT_LISTS = 0x140D47F90;
+constexpr uintptr_t MVC3_MANAGER_CUTIN_OFFSET = 0xB50;
 constexpr uintptr_t TEAM_OFFSETS[] = {0x40, 0x300};
 constexpr uintptr_t TEAM_ACTIVE_CHARACTER_OFFSET = 0x48;
 constexpr uintptr_t COMMAND_MATCHER_OFFSETS[] = {0x2738, 0x2950};
@@ -97,7 +99,7 @@ enum class SuitePhase {
     Idle,
     StartCommand,
     RunningCommand,
-    WaitingForHit,
+    WaitingForCompletion,
     WaitingForReset,
 };
 
@@ -108,8 +110,10 @@ bool g_suiteFacingLeft = false;
 bool g_suiteMatchedCommand = false;
 float g_suiteDefenderLife = 0.0f;
 int32_t g_suiteDeadline = -1;
-constexpr int32_t SUITE_COMMAND_TIMEOUT = 360;
-constexpr int32_t SUITE_HIT_TIMEOUT = 240;
+uint32_t g_suiteIdleActions[2] = {};
+constexpr int32_t SUITE_COMMAND_TIMEOUT = 600;
+constexpr int32_t SUITE_COMPLETION_TIMEOUT = 3600;
+constexpr int32_t SUITE_QUIET_FRAMES = 20;
 
 struct RuntimeCommandNameCache {
     uint64_t resource;
@@ -165,6 +169,43 @@ float GetCharacterLife(uint64_t character)
     return character ? *(float*)(character + 0x459) : 0.0f;
 }
 
+int32_t CountActiveShots()
+{
+    constexpr int32_t SHOT_LIST_COUNT = 10;
+    constexpr int32_t SHOT_LIST_STRIDE = 0x28;
+    constexpr uintptr_t SHOT_NODE_NEXT = 0x10;
+    int32_t count = 0;
+    for (int32_t list = 0; list < SHOT_LIST_COUNT; ++list) {
+        uint64_t sentinel = _addr(PTR_SHOT_LISTS) + list * SHOT_LIST_STRIDE;
+        uint64_t sentinelRef = sentinel + 0x08;
+        uint64_t node = *(uint64_t*)(sentinel + SHOT_NODE_NEXT);
+        for (int32_t safety = 128;
+             node && node != sentinelRef && safety-- > 0;
+             node = *(uint64_t*)(node + SHOT_NODE_NEXT))
+            ++count;
+    }
+    return count;
+}
+
+bool HasActiveCutin()
+{
+    uint64_t manager = *(uint64_t*)_addr(PTR_SMVC3_MANAGER);
+    return manager && *(uint64_t*)(manager + MVC3_MANAGER_CUTIN_OFFSET);
+}
+
+bool CharacterActionsAreIdle(uint64_t attacker, uint64_t defender)
+{
+    if (!attacker || !defender)
+        return false;
+
+    uint32_t actions[2] = {*(uint32_t*)(attacker + 0x1310),
+                           *(uint32_t*)(defender + 0x1310)};
+    g_suiteStatus.attackerAction = actions[0];
+    g_suiteStatus.defenderAction = actions[1];
+    return actions[0] == g_suiteIdleActions[0] &&
+           actions[1] == g_suiteIdleActions[1];
+}
+
 void PlaceDefenderNextToAttacker(int32_t attackerIndex)
 {
     uint64_t attacker = GetActiveCharacter(attackerIndex);
@@ -213,7 +254,7 @@ void FinishSuiteCommand(bool passed, const char* reason)
     g_runningRuntimeCommand = false;
     RequestTrainingReset();
     g_suitePhase = SuitePhase::WaitingForReset;
-    g_suiteStatus.waitingForHit = false;
+    g_suiteStatus.waitingForCompletion = false;
     g_suiteStatus.waitingForReset = true;
 }
 
@@ -796,7 +837,8 @@ void __fastcall hkUpdateCommandMatcher(uint64_t commandMatcher)
         return;
 
     uint64_t successfulLine = *(uint64_t*)(commandMatcher + 0x180);
-    if (!successfulLine)
+    int32_t successListId = *(int32_t*)(commandMatcher + 0x188);
+    if (!successfulLine && successListId < 0)
         return;
 
     int32_t frame = Controller_GetNetFrameCount();
@@ -808,6 +850,11 @@ void __fastcall hkUpdateCommandMatcher(uint64_t commandMatcher)
         if (offset % 0x20 == 0 && offset / 0x20 < (uint64_t)lineCount)
             lineIndex = (int32_t)(offset / 0x20);
     }
+    // Some matcher implementations publish a successful command object rather
+    // than an address inside the live Line array. The native selected-line
+    // output remains the authoritative index in those cases.
+    if (lineIndex < 0 && successListId >= 0 && successListId < lineCount)
+        lineIndex = successListId;
 
     int32_t matcherIndex = -1;
     if (commandMatcher == character + 0x2738) matcherIndex = 0;
@@ -821,7 +868,7 @@ void __fastcall hkUpdateCommandMatcher(uint64_t commandMatcher)
     g_status.lastSuccessFrame = frame;
     g_status.lastSuccessMatcher = matcherIndex;
     g_status.lastSuccessLine = lineIndex;
-    g_status.lastSuccessListId = *(int32_t*)(commandMatcher + 0x188);
+    g_status.lastSuccessListId = successListId;
     g_status.lastSuccessAnimation = *(int32_t*)(commandMatcher + 0x18C);
     g_status.lastAction = *(uint32_t*)(character + 0x1310);
 
@@ -903,7 +950,7 @@ extern "C" void AutoTest_Stop()
     g_status.currentInput = 0;
     g_runningRuntimeCommand = false;
     g_suiteStatus.active = false;
-    g_suiteStatus.waitingForHit = false;
+    g_suiteStatus.waitingForCompletion = false;
     g_suiteStatus.waitingForReset = false;
     g_suitePhase = SuitePhase::Idle;
 }
@@ -1176,6 +1223,7 @@ extern "C" bool AutoTest_StartSuite(int32_t playerIndex, bool facingLeft)
     g_suiteStatus.commandCount = commandCount;
     g_suiteStatus.currentMatcher = -1;
     g_suiteStatus.currentLine = -1;
+    g_suiteStatus.requiredQuietFrames = SUITE_QUIET_FRAMES;
     g_suiteFacingLeft = facingLeft;
     g_suiteMatchedCommand = false;
     g_suitePhase = SuitePhase::StartCommand;
@@ -1215,8 +1263,21 @@ extern "C" void AutoTest_Process()
                  "%s", command.commandListName[0]
                      ? command.commandListName : command.name);
         PlaceDefenderNextToAttacker(g_suiteStatus.playerIndex);
-        g_suiteDefenderLife = GetCharacterLife(
-            GetActiveCharacter(g_suiteStatus.playerIndex ^ 1));
+        uint64_t attacker = GetActiveCharacter(g_suiteStatus.playerIndex);
+        uint64_t defender = GetActiveCharacter(g_suiteStatus.playerIndex ^ 1);
+        g_suiteDefenderLife = GetCharacterLife(defender);
+        g_suiteStatus.dealtDamage = false;
+        g_suiteStatus.charactersStable = false;
+        g_suiteStatus.shotsClear = false;
+        g_suiteStatus.cutinClear = false;
+        g_suiteStatus.quietFrames = 0;
+        g_suiteStatus.shotCount = CountActiveShots();
+        g_suiteIdleActions[0] = attacker
+            ? *(uint32_t*)(attacker + 0x1310) : UINT32_MAX;
+        g_suiteIdleActions[1] = defender
+            ? *(uint32_t*)(defender + 0x1310) : UINT32_MAX;
+        g_suiteStatus.attackerAction = g_suiteIdleActions[0];
+        g_suiteStatus.defenderAction = g_suiteIdleActions[1];
         g_suiteMatchedCommand = false;
         if (!AutoTest_StartRuntimeCommand(g_suiteStatus.playerIndex,
                                           command.matcherIndex,
@@ -1233,20 +1294,37 @@ extern "C" void AutoTest_Process()
     }
     case SuitePhase::RunningCommand:
         if (g_suiteMatchedCommand) {
-            g_suiteStatus.waitingForHit = true;
-            g_suiteDeadline = frame + SUITE_HIT_TIMEOUT;
-            g_suitePhase = SuitePhase::WaitingForHit;
+            g_suiteStatus.waitingForCompletion = true;
+            g_suiteDeadline = frame + SUITE_COMPLETION_TIMEOUT;
+            g_suitePhase = SuitePhase::WaitingForCompletion;
+        } else if (!g_status.active && frame >= g_status.startFrame) {
+            FinishSuiteCommand(false, "input ended without matching command");
         } else if (frame > g_suiteDeadline) {
             FinishSuiteCommand(false, "command matcher timed out");
         }
         return;
-    case SuitePhase::WaitingForHit: {
-        float life = GetCharacterLife(
-            GetActiveCharacter(g_suiteStatus.playerIndex ^ 1));
-        if (life < g_suiteDefenderLife) {
-            FinishSuiteCommand(true, "matched and hit P2");
+    case SuitePhase::WaitingForCompletion: {
+        uint64_t attacker = GetActiveCharacter(g_suiteStatus.playerIndex);
+        uint64_t defender = GetActiveCharacter(g_suiteStatus.playerIndex ^ 1);
+        float life = GetCharacterLife(defender);
+        if (life < g_suiteDefenderLife)
+            g_suiteStatus.dealtDamage = true;
+
+        g_suiteStatus.charactersStable =
+            CharacterActionsAreIdle(attacker, defender);
+        g_suiteStatus.shotCount = CountActiveShots();
+        g_suiteStatus.shotsClear = g_suiteStatus.shotCount == 0;
+        g_suiteStatus.cutinClear = !HasActiveCutin();
+
+        bool quiet = g_suiteStatus.charactersStable &&
+                     g_suiteStatus.shotsClear && g_suiteStatus.cutinClear;
+        g_suiteStatus.quietFrames = quiet ? g_suiteStatus.quietFrames + 1 : 0;
+        if (g_suiteStatus.quietFrames >= SUITE_QUIET_FRAMES) {
+            FinishSuiteCommand(true, g_suiteStatus.dealtDamage
+                ? "matched, dealt damage, and returned to idle"
+                : "matched and returned to idle");
         } else if (frame > g_suiteDeadline) {
-            FinishSuiteCommand(false, "matched but did not hit P2");
+            FinishSuiteCommand(false, "matched but did not return to idle");
         }
         return;
     }
