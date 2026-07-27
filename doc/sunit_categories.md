@@ -48,8 +48,8 @@ passes one category at a time:
 | Profile label | Fence | sUnit category function | Per-active-node virtual | Meaning |
 |---|---:|---|---|---|
 | `move` | 1 | `sUnit__moveCategory @ 0x14051B4C0` | `+0x40` | Main unit update; also performs two-stage unit initialization/destruction |
-| `sync phase 2` / `sync_job` | 2 | `sUnit__load @ 0x14051BF10` | `+0x50` | Post-move / move-after pass |
-| `sync phase 3` / `sync_save` | 3 | `sUnit__loadCategory @ 0x14051B6F0` | `+0x48` | Synchronization/finalization pass |
+| `sync phase 2` / `sync_job` | 2 | `sUnit__load @ 0x14051BF10` | `+0x50` | First late pass after collision/hit solving |
+| `sync phase 3` / `sync_save` | 3 | `sUnit__loadCategory @ 0x14051B6F0` | `+0x48` | Final late pass before manager/tail work |
 
 The Ghidra names `load`, `loadCategory`, `save`, and `save_jobwrap` are historical
 misnomers. These functions do not serialize rollback snapshots. Native
@@ -57,15 +57,73 @@ misnomers. These functions do not serialize rollback snapshots. Native
 (`0x60`, `sUnit__load`) for every category. Native `sUnit__save @ 0x14051B850`
 opens fence 3 and dispatches slot 10 (`0x50`, `sUnit__loadCategory`).
 
-The node virtuals identify the purpose more clearly. For example:
+The node virtuals do not have one universal semantic name. Ghidra names such as
+`moveAfter`, `sync`, and `getBoundary` describe individual class implementations,
+not the scheduler slots. The scheduler always calls `+0x50` in phase 2 and
+`+0x48` in phase 3. Concrete vtables prove that recovered names can appear in
+the opposite order from their names: ordinary fighters place
+`uCharacter__sync_base` at `+0x50` and `uCharacter__moveAfter` at `+0x48`, while
+`uCharacterPost` places `uCharacterPost__sync` at `+0x50` and
+`uCharacterPost__moveAfter` at `+0x48`.
 
-- `uCharacterPre` is registered on line 7; its `+0x40` virtual is
-  `uCharacterPre__move`, and its `+0x50` virtual is
-  `uCharacterPre__moveAfter`.
-- `uCharacterPost` is registered on line 18; its `+0x40` virtual is
-  `uCharacterPost__move`, its `+0x50` virtual is
-  `uCharacterPost__moveAfter`, and its `+0x48` virtual is
-  `uCharacterPost__sync`.
+### What the late phases do
+
+The two phases are ordered extension points for work that must happen after all
+selected units have moved and after `sCollision` and `sHitSolver` have run. They
+are not network synchronization, snapshot serialization, or generic memory
+copying. Each class assigns different work to the two virtual slots.
+
+The exact callback targets recovered for entities in the supplied profile are:
+
+| Entity/family | Phase 2: vtable `+0x50` | Phase 3: vtable `+0x48` | Recovered effects |
+|---|---|---|---|
+| `uActionSideCamera` | no-op | `uCamera__getBoundary @ 0x140545F70` | Refreshes `sCamera` views and derives camera boundary/translation vectors. |
+| `uCutIn` | no-op | `uCutIn__moveAfter @ 0x14044AF10` | Advances cinematic timers, lighting, animation, participant lists, fade state, and cut-in lifetime. |
+| `uViewDraw` | no-op | no-op | No gameplay work in either late slot. |
+| `uCharacterPre` | no-op | `uCharacterPre__moveAfter @ 0x14005EF20` | Handles a conditional global character damage/action path under game flag `0x10000`. |
+| `uShotPreProcess` | no-op | no-op | No late work in the recovered vtable. |
+| `uGSoundProcess` | no-op | function at `0x1402B17C0` | Invokes the gameplay sound manager's late processing helper. |
+| ordinary fighters | `uCharacter__sync_base @ 0x14004C840` | `uCharacter__moveAfter @ 0x14004C360` | Validates linked subobjects, synchronizes joint-hold targets, updates status, applies delayed hit/damage effects, advances timers, and performs post-hit/action cleanup. |
+| `uFeliciaF` | `uFeliciaF__sync @ 0x140081550` | inherited character post-move | Runs base character synchronization and updates draw mode from its linked object. |
+| `uShot` family | `uShot__dispatchByState @ 0x1401CE120` | `uShot__moveAfter @ 0x1401CCEB0` | Dispatches projectile state, then advances transforms, attack matrices, hit results, attack transitions, life/expiration, and cleanup. |
+| `uChrChain` | no-op | `uChrChain__moveAfter @ 0x140036130` | Validates/rebinds model resources and advances chain/model finalization based on runtime flags. |
+| `uGameEffect` | `uEffect__sync @ 0x1405E8690` | `uMaterialVjob__tickAndCullByBounds @ 0x14013A9B0` | Validates generator/parent lifetime and reference counts, advances effect state, culls by battle bounds, and may retire the object. |
+| `uGameEffectModel` | no-op | `uGameEffectModel__getBoundary @ 0x14013C510` | Validates owner links, advances timers/model state, updates bounds, and may dispatch or retire the object. |
+| `uExAtkSpace` | function at `0x140138250` | `uExAtkSpace__getBoundary @ 0x140137B60` | Cleans effect links, drives stage/attack-space lifecycle, advances the model, and destroys the attack-space object once children are gone. |
+| `uCharacterPost` | `uCharacterPost__sync @ 0x14005F2B0` | `uCharacterPost__moveAfter @ 0x14005EE00` | Finalizes hit-solver and character links, throws/captures, targets, team state, partner attacks, swaps, defeat transitions, and post-frame status. |
+| `uChrCpu` | `uChrCpu__sync @ 0x140120E90` | `uChrCpu__moveAfter @ 0x140120AE0` | Rebinds CPU controllers to active characters, clears dead references, and runs CPU script/action processing when enabled. |
+
+The phase-3 category-13 cost is therefore not one generic synchronization
+routine. In the measured matchup it is the sum of 16 chain finalizers plus
+effect/model and attack-space lifecycle callbacks. Likewise, category 18 is a
+single coordinator callback that loops over both complete teams and commits
+authoritative combat state.
+
+### Rollback omission policy
+
+Static analysis supports these policies for the current headless replay:
+
+- **Retain categories 8, 10-13, and 18.** Their late callbacks mutate combat,
+  collision-facing, team, projectile, attack-space, target-link, or lifecycle
+  state.
+- **Retain category 9 when character auxiliaries are active.** Such objects
+  inherit character late processing even when a particular capture is cheap.
+- **Category 21 is mode-dependent, not generally disposable.** It can be
+  omitted only if replay deliberately excludes CPU/training-script behavior and
+  its controller bindings are reconstructed elsewhere.
+- **Category 3 is primarily camera/cinematic state.** `uViewDraw` is a no-op,
+  but `uActionSideCamera` refreshes camera-derived state and `uCutIn` advances
+  cinematic lifetime and mutates shot/effect presentation flags. Skip only if
+  the rollback design explicitly freezes and reconciles those systems.
+- **Category 7 should be filtered by entity rather than removed wholesale.**
+  shot preprocessing has no late work in the recovered vtable, but character
+  preprocessing has a conditional gameplay path and sound processing advances
+  its manager.
+
+The safest optimization is therefore callback- or DTI-level suppression of
+proven no-ops/presentation work. A category-only sync filter is useful for
+experiments, but categories 7 and 13 are mixed lanes and cannot be classified
+correctly by category alone.
 
 The profiler invokes category functions directly with line job mode disabled by
 rollback setup. Therefore the measured category duration is the serial cost of
@@ -119,18 +177,19 @@ Confidence meanings:
 
 ## Runtime Entity Capture
 
-The entity profile instruments the fence-1 `move` traversal only. For every
-linked node, it resolves the node's exact DTI via `GetObjectDti` before checking
-whether the node receives a move callback.
+The entity profile instruments all three traversals. For every linked node, it
+resolves the node's exact DTI via `GetObjectDti` before checking whether the node
+receives that phase's callback. Records are keyed by phase, category, and DTI so
+the `+0x40`, `+0x50`, and `+0x48` timings remain separate.
 
 The counters therefore mean:
 
 | Counter | Exact meaning |
 |---|---|
 | `list visits` | Linked-list nodes encountered with that category and exact DTI |
-| `callbacks` | Nodes that were active (`state == 2`), move-enabled (`0x400`), and not excluded by the active multi-mask before virtual `+0x40` was invoked |
+| `callbacks` | Nodes that were active (`state == 2`), move-enabled (`0x400`), and not excluded by the active multi-mask before that phase's virtual was invoked |
 | `calls/frame` | Callback count divided by replayed frame count; it approximates active instance count |
-| callback timing | Time around the node's virtual `+0x40` only; category traversal, DTI lookup, lifecycle work, and skipped nodes are outside it |
+| callback timing | Time around only the phase virtual (`+0x40`, `+0x50`, or `+0x48`); category traversal, DTI lookup, lifecycle work, and skipped nodes are outside it |
 
 The UI presents `list visits` and `callbacks` as averages per rollback over the
 capture set, which is why those values can be fractional. `calls/frame` uses the
@@ -216,8 +275,6 @@ Static analysis alone cannot produce that universal list because:
 - child UI objects commonly use `cUnit__getMoveLine(parent) + 1`;
 - a node's line can therefore vary by context even when its DTI class is fixed.
 
-The current move instrumentation already supplies the exact match-specific DTI
-breakdown. The next useful extension is to record the actual virtual target at
-`+0x40`, and to instrument `+0x48` and `+0x50` similarly. That would attribute
-phase-2 and phase-3 costs to entities and distinguish inherited callbacks from
-DTI-specific overrides.
+The phase-aware instrumentation supplies the exact match-specific DTI breakdown.
+The next useful extension is to record the actual virtual target alongside each
+DTI. That would distinguish inherited callbacks from DTI-specific overrides.

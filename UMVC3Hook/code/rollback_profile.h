@@ -58,6 +58,7 @@ enum class RollbackHookProfileId : uint8_t {
 struct RollbackUnitObjectProfile {
     uint64_t dti = 0;
     uint32_t category = 0;
+    RollbackUnitProfilePhase phase = RollbackUnitProfilePhase::Move;
     uint32_t visits = 0;
     uint64_t ticks = 0;
     uint64_t maxTicks = 0;
@@ -205,8 +206,10 @@ uint64_t Profile_HookBegin();
 void Profile_HookEnd(RollbackHookProfileId id, uint64_t start);
 void Profile_RecordUnitCategory(RollbackUnitProfilePhase phase, uint32_t category,
                                  uint64_t ticks);
-void Profile_RegisterUnitObjectType(uint32_t category, uint64_t dti);
-void Profile_RecordUnitObject(uint32_t category, uint64_t dti, uint64_t ticks);
+void Profile_RegisterUnitObjectType(RollbackUnitProfilePhase phase, uint32_t category,
+                                    uint64_t dti);
+void Profile_RecordUnitObject(RollbackUnitProfilePhase phase, uint32_t category,
+                              uint64_t dti, uint64_t ticks);
 void Profile_RecordSnapshotEnabled(uint64_t profileStart, uint64_t buildRegionsEnd,
                                    uint64_t allocationEnd, uint64_t copyRegionsEnd,
                                    uint64_t snapshotMetadataEnd, uint64_t collisionClonesEnd,

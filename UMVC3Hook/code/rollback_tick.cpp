@@ -64,6 +64,7 @@ static constexpr uint32_t SUNIT_CATEGORY_LIST_STRIDE  = 0x30;
 static constexpr uintptr_t FN_SUNIT_REMOVE_MULTI_MASK = 0x14051baf0;
 static constexpr uintptr_t FN_SUNIT_REMOVE_UNIT       = 0x14051b9f0;
 static constexpr uintptr_t FN_SMAIN_EXECUTE_JOB       = 0x140521230;
+static constexpr uintptr_t DTI_UCHRCHAIN              = 0x140D44920;
 
 static bool IsHeadlessGameplayUnitCategory(uint32_t category)
 {
@@ -78,6 +79,9 @@ static bool IsHeadlessGameplayUnitCategory(uint32_t category)
         case 8:  // Fighters and character-owned helpers.
         case 9:  // Character auxiliary units such as Morrigan shadows.
         case 10: // Projectiles.
+        case 11: // Projectiles?
+        case 12: // Projectiles?
+
         case 13: // Character chains and attack spaces; also contains some effects.
         case 18: // Character post-processing.
         case 21: // Character CPU state.
@@ -85,6 +89,32 @@ static bool IsHeadlessGameplayUnitCategory(uint32_t category)
         default:
             return false;
     }
+}
+
+static bool IsHeadlessGameplaySyncCategory(uint32_t category)
+{
+    // Keep sync filtering independent from move filtering so categories can be
+    // omitted experimentally without suppressing their main gameplay update.
+    switch (category) {
+        //case 3:  // Camera, needed to prevent screen jitter.
+        case 7:  // Character, shot, and game-effect preprocessing.
+        case 8:  // Fighters and character-owned helpers.
+        case 9:  // Character auxiliary units such as Morrigan shadows.
+        case 10: // Projectiles.
+        case 11: // Data-selected projectile/gameplay lane.
+        case 12: // Data-selected projectile/gameplay lane.
+        case 13: // Character chains and attack spaces; also contains some effects.
+        case 18: // Character post-processing.
+        case 21: // Character CPU state.
+            return true;
+        default:
+            return false;
+    }
+}
+
+static bool IsHeadlessGameplayUnitObject(uint64_t dti)
+{
+    return dti != (uint64_t)_addr(DTI_UCHRCHAIN);
 }
 
 static constexpr uintptr_t SLEEP_CALL_FIXED  = 0x1405220b2;
@@ -127,7 +157,18 @@ static void __fastcall ProfiledUnitObjectMove(uint64_t unit)
     const uint64_t dti = GetObjectDti(unit);
     const uint64_t start = Profile_NowEnabled();
     VTableCall(unit, 0x40);
-    Profile_RecordUnitObject((uint32_t)Category, dti, Profile_NowEnabled() - start);
+    Profile_RecordUnitObject(RollbackUnitProfilePhase::Move, (uint32_t)Category,
+                             dti, Profile_NowEnabled() - start);
+}
+
+template <RollbackUnitProfilePhase Phase, size_t Category, uint32_t VtableOffset>
+static void __fastcall ProfiledUnitObjectPostMove(uint64_t unit)
+{
+    const uint64_t dti = GetObjectDti(unit);
+    const uint64_t start = Profile_NowEnabled();
+    VTableCall(unit, VtableOffset);
+    Profile_RecordUnitObject(Phase, (uint32_t)Category, dti,
+                             Profile_NowEnabled() - start);
 }
 
 template <size_t... Categories>
@@ -141,7 +182,29 @@ static constexpr auto MakeProfiledUnitObjectMoves(std::index_sequence<Categories
 static constexpr auto PROFILED_UNIT_OBJECT_MOVES = MakeProfiledUnitObjectMoves(
     std::make_index_sequence<ROLLBACK_UNIT_CATEGORY_COUNT>{});
 
-static void ProfiledUnitCategoryMove(uint64_t sMain, uint64_t sUnit,
+template <size_t... Categories>
+static constexpr auto MakeProfiledUnitObjectSyncJobs(std::index_sequence<Categories...>)
+{
+    return std::array<ObjectFn, sizeof...(Categories)>{
+        &ProfiledUnitObjectPostMove<RollbackUnitProfilePhase::SyncJob, Categories, 0x50>...
+    };
+}
+
+template <size_t... Categories>
+static constexpr auto MakeProfiledUnitObjectSyncSaves(std::index_sequence<Categories...>)
+{
+    return std::array<ObjectFn, sizeof...(Categories)>{
+        &ProfiledUnitObjectPostMove<RollbackUnitProfilePhase::SyncSave, Categories, 0x48>...
+    };
+}
+
+static constexpr auto PROFILED_UNIT_OBJECT_SYNC_JOBS = MakeProfiledUnitObjectSyncJobs(
+    std::make_index_sequence<ROLLBACK_UNIT_CATEGORY_COUNT>{});
+static constexpr auto PROFILED_UNIT_OBJECT_SYNC_SAVES = MakeProfiledUnitObjectSyncSaves(
+    std::make_index_sequence<ROLLBACK_UNIT_CATEGORY_COUNT>{});
+
+template <bool ProfilingEnabled>
+static void HeadlessUnitCategoryMove(uint64_t sMain, uint64_t sUnit,
                                      uint32_t category)
 {
     const uint64_t categoryBase = sUnit + SUNIT_CATEGORY_LISTS_OFFSET +
@@ -159,7 +222,8 @@ static void ProfiledUnitCategoryMove(uint64_t sMain, uint64_t sUnit,
     while (unit) {
         const uint64_t next = *(uint64_t*)(unit + 0x18);
         const uint64_t dti = GetObjectDti(unit);
-        Profile_RegisterUnitObjectType(category, dti);
+        if constexpr (ProfilingEnabled)
+            Profile_RegisterUnitObjectType(RollbackUnitProfilePhase::Move, category, dti);
         if ((*(uint64_t*)(unit + 0x30) & enabledMask) == 0) {
             uint32_t stateFlags = *(uint32_t*)(unit + 0x10);
             *(float*)(unit + 0x28) = delta;
@@ -184,15 +248,21 @@ static void ProfiledUnitCategoryMove(uint64_t sMain, uint64_t sUnit,
                 continue;
             }
 
-            if ((stateFlags & 7u) == 2 && (stateFlags & 0x400u) != 0) {
+            if ((stateFlags & 7u) == 2 && (stateFlags & 0x400u) != 0 &&
+                IsHeadlessGameplayUnitObject(dti)) {
                 if (!useJobs) {
-                    PROFILED_UNIT_OBJECT_MOVES[category](unit);
+                    if constexpr (ProfilingEnabled)
+                        PROFILED_UNIT_OBJECT_MOVES[category](unit);
+                    else
+                        VTableCall(unit, 0x40);
                 } else {
                     const uint32_t job = *(uint32_t*)(sMain + 0x98);
                     *(uint32_t*)(sMain + 0x98) = job + 1;
                     *(uint64_t*)(sMain + 0xc8 + (uint64_t)job * 0x10) = unit;
                     *(uint64_t*)(sMain + 0xd0 + (uint64_t)job * 0x10) =
-                        (uint64_t)PROFILED_UNIT_OBJECT_MOVES[category];
+                        ProfilingEnabled
+                            ? (uint64_t)PROFILED_UNIT_OBJECT_MOVES[category]
+                            : *(uint64_t*)(*(uint64_t*)unit + 0x40);
                 }
             }
         }
@@ -204,6 +274,80 @@ static void ProfiledUnitCategoryMove(uint64_t sMain, uint64_t sUnit,
     }
 }
 
+
+// Replicates the per-category late-pass body used by sUnit__load
+// (0x14051BF10, phase 2) and sUnit__loadCategory (0x14051B6F0, phase 3).
+template <bool ProfilingEnabled>
+static void HeadlessUnitCategoryPostMove(uint64_t sMain, uint64_t sUnit,
+                                         RollbackUnitProfilePhase phase,
+                                         uint32_t category)
+{
+    const uint64_t categoryBase = sUnit + SUNIT_CATEGORY_LISTS_OFFSET +
+        SUNIT_CATEGORY_LIST_STRIDE * category;
+    const uint32_t categoryFlags = *(uint32_t*)(categoryBase - 8);
+    if ((categoryFlags & 2u) != 0) return;
+
+    uint64_t unit = *(uint64_t*)categoryBase;
+    if (!unit) return;
+
+    const bool useJobs = phase == RollbackUnitProfilePhase::SyncSave &&
+        (categoryFlags & 1u) != 0;
+    VTableCall(sUnit, 0x78);
+    const uint64_t enabledMask = ~*(uint64_t*)(sUnit + 0x1848);
+
+    while (unit) {
+        const uint64_t next = *(uint64_t*)(unit + 0x18);
+        const uint64_t dti = GetObjectDti(unit);
+        if constexpr (ProfilingEnabled)
+            Profile_RegisterUnitObjectType(phase, category, dti);
+        if ((*(uint64_t*)(unit + 0x30) & enabledMask) == 0) {
+            uint32_t stateFlags = *(uint32_t*)(unit + 0x10);
+            bool initialized = false;
+            if ((stateFlags & 7u) == 1) {
+                *(uint32_t*)(unit + 0x10) = (stateFlags & 0xfffffffau) | 2u;
+                VTableCall(unit, 0x28);
+                stateFlags = *(uint32_t*)(unit + 0x10);
+                initialized = true;
+            }
+
+            if ((stateFlags & 7u) == 2 && (stateFlags & 0x400u) != 0 &&
+                IsHeadlessGameplayUnitObject(dti)) {
+                if (initialized) {
+                    VTableCall(unit, 0x40);
+                    if (phase == RollbackUnitProfilePhase::SyncSave)
+                        VTableCall(unit, 0x50);
+                }
+
+                ObjectFn callback;
+                if constexpr (ProfilingEnabled) {
+                    callback = phase == RollbackUnitProfilePhase::SyncJob
+                        ? PROFILED_UNIT_OBJECT_SYNC_JOBS[category]
+                        : PROFILED_UNIT_OBJECT_SYNC_SAVES[category];
+                } else {
+                    const uint32_t offset = phase == RollbackUnitProfilePhase::SyncJob
+                        ? 0x50 : 0x48;
+                    callback = *(ObjectFn*)(*(uint64_t*)unit + offset);
+                }
+                if (!useJobs) {
+                    callback(unit);
+                } else {
+                    const uint32_t job = *(uint32_t*)(sMain + 0x98);
+                    *(uint32_t*)(sMain + 0x98) = job + 1;
+                    *(uint64_t*)(sMain + 0xc8 + (uint64_t)job * 0x10) = unit;
+                    *(uint64_t*)(sMain + 0xd0 + (uint64_t)job * 0x10) =
+                        (uint64_t)callback;
+                }
+            }
+        }
+        unit = next;
+    }
+
+    if (useJobs)
+        ((void(__fastcall*)(uint64_t, int))_addr(FN_SMAIN_EXECUTE_JOB))(sMain, 0);
+}
+
+// Replicates the native sUnit phase wrapper: sUnit__save_jobwrap
+// (0x14051BFF0, fence 2) and sUnit__save (0x14051B850, fence 3).
 template <bool ProfilingEnabled>
 static void HeadlessUnitPass(uint64_t sMain, uint64_t sUnit,
                              RollbackUnitProfilePhase phase, int fenceState,
@@ -222,16 +366,25 @@ static void HeadlessUnitPass(uint64_t sMain, uint64_t sUnit,
             vtable + categoryVtableOffset);
 
         for (uint32_t category = 0; category < categoryCount; ++category) {
-            if (!IsHeadlessGameplayUnitCategory(category)) continue;
+            const bool enabled = phase == RollbackUnitProfilePhase::Move
+                ? IsHeadlessGameplayUnitCategory(category)
+                : IsHeadlessGameplaySyncCategory(category);
+            if (!enabled) continue;
             if constexpr (ProfilingEnabled) {
                 const uint64_t start = Profile_NowEnabled();
                 if (phase == RollbackUnitProfilePhase::Move) {
-                    ProfiledUnitCategoryMove(sMain, sUnit, category);
+                    HeadlessUnitCategoryMove<true>(sMain, sUnit, category);
                 } else {
-                    categoryFn(sUnit, (int)category);
+                    HeadlessUnitCategoryPostMove<true>(sMain, sUnit, phase, category);
                 }
                 Profile_RecordUnitCategory(phase, category,
                                            Profile_NowEnabled() - start);
+            } else if (category == 13) {
+                if (phase == RollbackUnitProfilePhase::Move) {
+                    HeadlessUnitCategoryMove<false>(sMain, sUnit, category);
+                } else {
+                    HeadlessUnitCategoryPostMove<false>(sMain, sUnit, phase, category);
+                }
             } else {
                 categoryFn(sUnit, (int)category);
             }
@@ -346,6 +499,8 @@ void Rollback_PatchDrawCalls(bool enable)
 }
 
 
+// Replicates the gameplay portion of sMain__move (0x140521DF0) for rollback
+// re-simulation, with rendering, pacing, and non-deterministic services removed.
 void Rollback_HeadlessTick(uint64_t sMain)
 {
     RollbackHeadlessProfileTimer profile;

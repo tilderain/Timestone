@@ -185,12 +185,13 @@ void Profile_RecordUnitCategory(RollbackUnitProfilePhase phase, uint32_t categor
     ++g_activeRollbackProfile->unitCategoryCalls[phaseIndex][category];
 }
 
-void Profile_RegisterUnitObjectType(uint32_t category, uint64_t dti)
+void Profile_RegisterUnitObjectType(RollbackUnitProfilePhase phase, uint32_t category,
+                                    uint64_t dti)
 {
     if (!g_activeRollbackProfile || !dti) return;
     for (uint32_t i = 0; i < g_activeRollbackProfile->unitObjectTypeCount; ++i) {
         RollbackUnitObjectProfile& entry = g_activeRollbackProfile->unitObjectTypes[i];
-        if (entry.category == category && entry.dti == dti) {
+        if (entry.phase == phase && entry.category == category && entry.dti == dti) {
             ++entry.visits;
             return;
         }
@@ -199,18 +200,20 @@ void Profile_RegisterUnitObjectType(uint32_t category, uint64_t dti)
         return;
     RollbackUnitObjectProfile& entry = g_activeRollbackProfile->unitObjectTypes[
         g_activeRollbackProfile->unitObjectTypeCount++];
+    entry.phase = phase;
     entry.category = category;
     entry.dti = dti;
     entry.visits = 1;
 }
 
-void Profile_RecordUnitObject(uint32_t category, uint64_t dti, uint64_t ticks)
+void Profile_RecordUnitObject(RollbackUnitProfilePhase phase, uint32_t category,
+                              uint64_t dti, uint64_t ticks)
 {
     RollbackProfile* profile = g_activeRollbackProfile;
     if (!profile || !dti) return;
     for (uint32_t i = 0; i < profile->unitObjectTypeCount; ++i) {
         RollbackUnitObjectProfile& entry = profile->unitObjectTypes[i];
-        if (entry.category != category || entry.dti != dti) continue;
+        if (entry.phase != phase || entry.category != category || entry.dti != dti) continue;
         InterlockedAdd64((volatile LONG64*)&entry.ticks, (LONG64)ticks);
         InterlockedIncrement((volatile LONG*)&entry.calls);
         uint64_t previous = entry.maxTicks;
@@ -418,10 +421,11 @@ void Profile_DumpEnabled(const RollbackProfile& profile, bool ndjsonEnabled,
             const RollbackUnitObjectProfile& entry = profile.unitObjectTypes[i];
             const char* name = *(const char**)(entry.dti + 0x08);
             fprintf(json,
-                    "%s{\"category\":%u,\"phase\":\"move\",\"dti\":\"0x%llx\","
+                    "%s{\"category\":%u,\"phase\":\"%s\",\"dti\":\"0x%llx\","
                     "\"name\":\"%s\",\"visits\":%u,\"calls\":%u,\"total_ms\":%.6f,"
                     "\"avg_us\":%.6f,\"max_us\":%.6f}",
                     firstObject ? "" : ",", entry.category,
+                    unitPhaseNames[(size_t)entry.phase],
                     (unsigned long long)entry.dti, name ? name : "unknown",
                     entry.visits, entry.calls, Profile_Ms(entry.ticks),
                     entry.calls ? Profile_Ms(entry.ticks) * 1000.0 / entry.calls : 0.0,
