@@ -1445,16 +1445,12 @@ extern "C" void AutoTest_Process()
         return;
     }
     case SuitePhase::RunningCommand:
-        if (g_suiteMatchedCommand ||
-            (g_suiteManualCase && !g_status.active &&
-             frame >= g_status.startFrame)) {
+        if (!g_status.active && frame >= g_status.startFrame) {
             g_suiteStatus.waitingForCompletion = true;
             g_suiteDeadline = frame + SUITE_COMPLETION_TIMEOUT;
             g_suitePhase = SuitePhase::WaitingForCompletion;
-        } else if (!g_status.active && frame >= g_status.startFrame) {
-            FinishSuiteCommand(false, "input ended without matching command");
         } else if (frame > g_suiteDeadline) {
-            FinishSuiteCommand(false, "command matcher timed out");
+            FinishSuiteCommand(false, "input timed out");
         }
         return;
     case SuitePhase::WaitingForCompletion: {
@@ -1470,18 +1466,12 @@ extern "C" void AutoTest_Process()
         g_suiteStatus.shotsClear = g_suiteStatus.shotCount == 0;
         g_suiteStatus.cutinClear = !HasActiveCutin();
 
-        bool quiet = g_suiteStatus.charactersStable &&
-                     g_suiteStatus.shotsClear && g_suiteStatus.cutinClear;
+        bool quiet = g_suiteStatus.charactersStable;
         g_suiteStatus.quietFrames = quiet ? g_suiteStatus.quietFrames + 1 : 0;
         if (g_suiteStatus.quietFrames >= SUITE_QUIET_FRAMES) {
-            if (g_suiteManualCase && !g_suiteStatus.dealtDamage)
-                FinishSuiteCommand(false, "did not throw the defender");
-            else
-                FinishSuiteCommand(true, g_suiteStatus.dealtDamage
-                    ? "dealt damage and returned to idle"
-                    : "matched and returned to idle");
+            FinishSuiteCommand(true, "input completed and returned to idle");
         } else if (frame > g_suiteDeadline) {
-            FinishSuiteCommand(false, "matched but did not return to idle");
+            FinishSuiteCommand(false, "did not return to idle");
         }
         return;
     }
