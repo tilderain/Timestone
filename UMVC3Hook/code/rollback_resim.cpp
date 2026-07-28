@@ -33,6 +33,28 @@ static int32_t g_requestEnd = -1;
 static uint64_t g_mainInstance = 0;
 static RollbackMainMoveFn g_originalMainMove = nullptr;
 
+static bool CanReuseRestoredSnapshot(int32_t frame)
+{
+    int slotIndex = frame % ROLLBACK_WINDOW;
+    if (slotIndex < 0) slotIndex += ROLLBACK_WINDOW;
+    const RollbackSnapshotSlot& slot = g_rollbackSnapshotSlots[slotIndex];
+    if (slot.frame != frame || !slot.data || slot.size == 0 ||
+        !slot.shotRecipes.empty() || !slot.effectRecipes.empty()) {
+        return false;
+    }
+
+    for (int i = 0; i < slot.regionCount; ++i) {
+        const RollbackRegion& region = slot.regions[i];
+        if (region.ownerSlot && *(const uint64_t*)region.ownerSlot != (uint64_t)region.ptr)
+            return false;
+        if (region.expectedVtable &&
+            *(const uint64_t*)region.ptr != region.expectedVtable) {
+            return false;
+        }
+    }
+    return true;
+}
+
 extern "C" void Controller_InjectLocalInput(int32_t, uint32_t);
 extern "C" void Controller_InjectRemoteInput(int32_t, uint32_t);
 extern "C" void Controller_SilentFrameStart();
@@ -133,6 +155,7 @@ void Rollback_ReSimulate(int32_t startFrame, int32_t endFrame)
     Profile_AddElapsed(&RollbackProfile::preRestoreJson, phaseStart);
 
     Rollback_RestoreSnapshot(startFrame);
+    const bool reuseStartSnapshot = CanReuseRestoredSnapshot(startFrame);
 
     phaseStart = Profile_Now();
     Controller_LogReceivedInputAvailability(startFrame, endFrame);
@@ -165,7 +188,7 @@ void Rollback_ReSimulate(int32_t startFrame, int32_t endFrame)
             NDJSON_DumpFrame(frame, 1);
         }
         timer.Add(&RollbackProfile::frameJson);
-        if (g_multiResimEnabled) {
+        if (g_multiResimEnabled && (frame != startFrame || !reuseStartSnapshot)) {
             Rollback_SaveSnapshot(frame);
             Rollback_UpdateSnapshotInputs(frame, localInput, remoteInput);
         }
