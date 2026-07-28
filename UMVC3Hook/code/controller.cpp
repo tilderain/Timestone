@@ -348,6 +348,18 @@ extern "C" void Controller_ResetFrameEpoch()
     g_fightFrameBase = -1;
 }
 
+extern "C" void Controller_ResetFightTimer(uint64_t sAction)
+{
+    g_fightFrameBase = GetGameFrameCount();
+    if (!sAction)
+        return;
+
+    *(float*)(sAction + 0xF8) = 180.0f;
+    *(float*)(sAction + 0xFC) = 0.0f;
+    *(float*)(sAction + 0x100) = 0.0f;
+    *(float*)(sAction + 0x104) = 0.0f;
+}
+
 // ---------------------------------------------------------------------------
 // Reset buffers — called from Netplay_Init
 // ---------------------------------------------------------------------------

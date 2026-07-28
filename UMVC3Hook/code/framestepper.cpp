@@ -322,6 +322,7 @@ static void __fastcall HookedMove(void* sMvc3Main)
                 ((SetRestartModeFn)_addr(0x14000AF90))(sAction, 3);
                 ((SetRestartModeFn)_addr(0x140207530))(sAction,
                                                        g_restartButtonMode);
+                Controller_ResetFightTimer(sAction);
             }
             Rollback_FreeSnapshots();
             Controller_ClearDesyncDetection();
@@ -1189,6 +1190,9 @@ void FrameStepper_DrawAutoTest()
     if (!suite.active) {
         if (ImGui::SmallButton("Run all commands"))
             AutoTest_StartSuite(playerIndex, facingLeft);
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Run all variants"))
+            AutoTest_StartVariantSuite(playerIndex, facingLeft);
     } else {
         if (ImGui::SmallButton("Stop suite"))
             AutoTest_Stop();

@@ -157,6 +157,7 @@ extern "C" int32_t  Controller_GetRemoteFrameAdvantage();
 extern "C" void     Controller_SetDelayFrames(int32_t delay);
 extern "C" void     Controller_ScheduleDelayFrames(int32_t delay, int32_t effectiveFrame);
 extern "C" void     Controller_SetRollbackFrames(int32_t n);
+extern "C" void     Controller_ResetFightTimer(uint64_t sAction);
 
 // Desync detection flags — set by controller when checksums diverge.
 extern bool         g_desyncDetected;   // first-time alert (triggers pause)

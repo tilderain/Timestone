@@ -112,6 +112,8 @@ extern "C" bool AutoTest_StartRuntimeCommand(int32_t playerIndex,
                                                bool facingLeft);
 extern "C" const char* AutoTest_GetRuntimeExecutionError();
 extern "C" bool AutoTest_StartSuite(int32_t playerIndex, bool facingLeft);
+extern "C" bool AutoTest_StartVariantSuite(int32_t playerIndex,
+                                             bool facingLeft);
 extern "C" void AutoTest_Process();
 extern "C" AutoTestSuiteStatus AutoTest_GetSuiteStatus();
 extern "C" bool AutoTest_IsActive();

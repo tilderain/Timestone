@@ -113,6 +113,7 @@ constexpr int32_t MAX_RUNTIME_COMMAND_NAMES = 512;
 InputStep g_runtimeInputSteps[MAX_RUNTIME_INPUT_STEPS] = {};
 InputScript g_runtimeScript = {"Runtime command", g_runtimeInputSteps, 0};
 bool g_runningRuntimeCommand = false;
+bool g_runningRuntimeHyper = false;
 int32_t g_runningManualCommand = -1;
 char g_runtimeExecutionError[160] = {};
 
@@ -324,6 +325,7 @@ void FinishSuiteCommand(bool passed, const char* reason)
     g_status.active = false;
     g_status.currentInput = 0;
     g_runningRuntimeCommand = false;
+    g_runningRuntimeHyper = false;
     g_runningManualCommand = -1;
     if (g_netSuiteActive && Netplay_IsActive() && Netplay_IsHost()) {
         const char* outcome = passed ? "SYNC"
@@ -377,6 +379,8 @@ void ProcessNetSuiteSetup(int32_t frame)
         g_netSuiteSetupFrame < 0 || frame < g_netSuiteSetupFrame)
         return;
     PlaceDefenderNextToAttacker(g_suiteStatus.playerIndex);
+    if (g_runningRuntimeHyper)
+        FillAttackerHyperGauge(g_suiteStatus.playerIndex);
     g_netSuiteSetupApplied = true;
     HookLog("AutoTestNet: move %u setup applied at frame %d\n",
             g_netSuiteMoveId, frame);
@@ -1124,6 +1128,83 @@ bool AppendRuntimeInput(uint32_t mask, uint32_t expected, int frames)
     return true;
 }
 
+bool GetStagedHyperCommand(int32_t playerIndex, uint64_t resource,
+                           uint64_t command, char* name, size_t capacity,
+                           uint32_t* outFollowupButtons)
+{
+    if (playerIndex < 0 || playerIndex > 1 ||
+        !resource || !command || !name || !outFollowupButtons)
+        return false;
+
+    using GetCommandStep_t = uint64_t(__fastcall*)(uint64_t, uint64_t, uint32_t);
+    static GetCommandStep_t getCommandStep =
+        (GetCommandStep_t)_addr(ADDR_GET_COMMAND_STEP);
+    bool hasGenericTwoAttackInput = false;
+    int32_t stepCount = *(int32_t*)(command + 0x04);
+    for (int32_t i = 0; i < stepCount && i < 256; ++i) {
+        uint64_t step = getCommandStep(resource, command, (uint32_t)i);
+        if (!step)
+            continue;
+        int32_t type = *(int32_t*)(step + 0x00);
+        if ((type == 2 || type == 3) &&
+            (*(uint32_t*)(step + 0x18) & 0x300) == 0x300)
+            hasGenericTwoAttackInput = true;
+    }
+    if (!hasGenericTwoAttackInput)
+        return false;
+
+    CommandListTextCache& cached = g_commandListText[playerIndex];
+    uint64_t textResource = GetCommandListTextResource(
+        playerIndex, GetActiveCharacter(playerIndex));
+    if (!textResource || !cached.rowMetadata || !cached.rowNotation)
+        return false;
+
+    CommandNotation runtimeNotation = {};
+    if (!GetRuntimeCommandNotation(resource, command, runtimeNotation,
+                                   *(uint32_t*)(command + 0x20)))
+        return false;
+
+    int32_t matchedRow = -1;
+    CommandNotation matchedNotation = {};
+    for (int32_t row = 0; row < cached.rowCount; ++row) {
+        const int32_t* metadata = (const int32_t*)(cached.rowMetadata +
+                                                   (uint64_t)row * 0x10);
+        CommandNotation display = {};
+        if (metadata[1] != 2 || !GetDisplayRowNotation(
+                cached.rowNotation, row, display) || display.attackCount < 2 ||
+            display.buttons == 0 ||
+            runtimeNotation.directionCount != display.directionCount)
+            continue;
+
+        bool directionsMatch = true;
+        for (int32_t i = 0; i < runtimeNotation.directionCount; ++i) {
+            if (runtimeNotation.directions[i] != display.directions[i]) {
+                directionsMatch = false;
+                break;
+            }
+        }
+        if (!directionsMatch)
+            continue;
+        if (matchedRow >= 0)
+            return false;
+        matchedRow = row;
+        matchedNotation = display;
+    }
+    if (matchedRow < 0)
+        return false;
+
+    uint32_t textCount = *(uint32_t*)(textResource + 0x70);
+    uint64_t records = *(uint64_t*)(textResource + 0x78);
+    int32_t textIndex = *(int32_t*)(cached.rowMetadata +
+                                    (uint64_t)matchedRow * 0x10);
+    if (!records || textIndex < 0 || (uint32_t)textIndex >= textCount)
+        return false;
+    DecodeCommandListText(records + (uint64_t)textIndex * 0x10,
+                          name, capacity);
+    *outFollowupButtons = matchedNotation.buttons;
+    return name[0] != '\0';
+}
+
 void __fastcall hkUpdateCommandMatcher(uint64_t commandMatcher)
 {
     oUpdateCommandMatcher(commandMatcher);
@@ -1217,6 +1298,7 @@ extern "C" bool AutoTest_GetInput(int32_t frame, uint32_t playerIndex,
     if (scriptFrame >= ScriptLength(script)) {
         g_status.active = false;
         g_runningRuntimeCommand = false;
+        g_runningRuntimeHyper = false;
         g_status.currentInput = 0;
         HookLog("AutoTest: completed %s at frame %d\n", script.name, frame);
         return false;
@@ -1243,6 +1325,7 @@ extern "C" void AutoTest_Start(int32_t scriptIndex, int32_t playerIndex,
         -1, -1, 0, -1, -1, -1, -1, -1, 0,
     };
     g_runningRuntimeCommand = false;
+    g_runningRuntimeHyper = false;
     g_runningManualCommand = -1;
     g_facingLeft = facingLeft;
     HookLog("AutoTest: scheduled %s for P%d at frame %d facing=%s\n",
@@ -1255,6 +1338,7 @@ extern "C" void AutoTest_Stop()
     g_status.active = false;
     g_status.currentInput = 0;
     g_runningRuntimeCommand = false;
+    g_runningRuntimeHyper = false;
     g_runningManualCommand = -1;
     g_suiteStatus.active = false;
     g_suiteStatus.waitingForCompletion = false;
@@ -1359,6 +1443,14 @@ extern "C" int32_t AutoTest_GetRuntimeCommands(
                                           sizeof(out.commandListName),
                                           &out.commandListCategory,
                                           &out.commandListAttackCount);
+                uint32_t stagedFollowup = 0;
+                if (GetStagedHyperCommand(player, resource, command,
+                                          out.commandListName,
+                                          sizeof(out.commandListName),
+                                          &stagedFollowup)) {
+                    out.commandListCategory = 2;
+                    out.commandListAttackCount = 2;
+                }
                 CommandListTextCache& textCache = g_commandListText[player];
                 snprintf(out.commandListPath, sizeof(out.commandListPath),
                          "%s", textCache.path);
@@ -1439,8 +1531,13 @@ extern "C" bool AutoTest_StartRuntimeCommand(int32_t playerIndex,
     GetInGameCommandListName(playerIndex, character, resource, command,
                              commandListName, sizeof(commandListName),
                              &commandListCategory, &commandListAttackCount);
-    const bool isHyper = commandListCategory == 2 &&
-                         commandListAttackCount >= 2;
+    uint32_t stagedHyperFollowup = 0;
+    const bool isStagedHyper = GetStagedHyperCommand(
+        playerIndex, resource, command, commandListName,
+        sizeof(commandListName), &stagedHyperFollowup);
+    const bool isHyper = isStagedHyper ||
+                         (commandListCategory == 2 &&
+                          commandListAttackCount >= 2);
     if (isHyper)
         FillAttackerHyperGauge(playerIndex);
 
@@ -1497,7 +1594,12 @@ extern "C" bool AutoTest_StartRuntimeCommand(int32_t playerIndex,
             return false;
         }
 
-        if (isHyper && (expected & 0x70) != 0) {
+        if (isStagedHyper && (expected & 0x300) == 0x300) {
+            // The native matcher encodes the generic XX requirement in the
+            // assist-bit range. Drive two attacks, not literal A1+A2.
+            mask = (mask & ~0x300u) | 0x70u;
+            expected = (expected & ~0x300u) | 0x30u;
+        } else if (isHyper && (expected & 0x70) != 0) {
             // The native hyper command checks one representative attack and a
             // separate hyper predicate. Drive the command-list's XX literally.
             mask = (mask & ~0x70u) | 0x70u;
@@ -1513,6 +1615,14 @@ extern "C" bool AutoTest_StartRuntimeCommand(int32_t playerIndex,
         }
     }
 
+    if (isStagedHyper && stagedHyperFollowup != 0 &&
+        !AppendRuntimeInput(stagedHyperFollowup, stagedHyperFollowup, 2)) {
+        snprintf(g_runtimeExecutionError, sizeof(g_runtimeExecutionError),
+                 "Could not append staged hyper activation input");
+        g_runtimeScript.stepCount = 0;
+        return false;
+    }
+
     if (g_runtimeScript.stepCount == 0 ||
         g_runtimeScript.stepCount >= MAX_RUNTIME_INPUT_STEPS) {
         snprintf(g_runtimeExecutionError, sizeof(g_runtimeExecutionError),
@@ -1526,6 +1636,7 @@ extern "C" bool AutoTest_StartRuntimeCommand(int32_t playerIndex,
     };
     g_facingLeft = facingLeft;
     g_runningRuntimeCommand = true;
+    g_runningRuntimeHyper = isHyper;
     g_runningManualCommand = -1;
     HookLog("AutoTest: scheduled runtime command matcher=%d line=%d for P%d at frame %d\n",
             matcherIndex, lineIndex, playerIndex + 1, g_status.startFrame);
@@ -1537,7 +1648,7 @@ extern "C" const char* AutoTest_GetRuntimeExecutionError()
     return g_runtimeExecutionError;
 }
 
-extern "C" bool AutoTest_StartSuite(int32_t playerIndex, bool facingLeft)
+bool StartSuite(int32_t playerIndex, bool facingLeft, bool deduplicate)
 {
     if (playerIndex < 0 || playerIndex > 1)
         return false;
@@ -1573,7 +1684,8 @@ extern "C" bool AutoTest_StartSuite(int32_t playerIndex, bool facingLeft)
         bool duplicate = false;
         const char* commandName = command.commandListName[0]
             ? command.commandListName : command.name;
-        for (int32_t existing = 0; existing < commandCount; ++existing) {
+        for (int32_t existing = 0; deduplicate && existing < commandCount;
+             ++existing) {
             const AutoTestRuntimeCommand& existingCommand =
                 g_suiteCommands[existing];
             const char* existingName = existingCommand.commandListName[0]
@@ -1623,10 +1735,22 @@ extern "C" bool AutoTest_StartSuite(int32_t playerIndex, bool facingLeft)
     g_netSuiteClient = false;
     g_netSuiteRestartPending = false;
     g_netSuiteMoveId = 0;
-    HookLog("AutoTestSuite: started %d manual cases and %d unique commands for P%d (%d duplicate moves removed)\n",
+    HookLog("AutoTestSuite: started %d manual cases and %d %scommands for P%d (%d duplicate moves removed)\n",
             (int32_t)std::size(SUITE_MANUAL_SCRIPTS), commandCount,
-            playerIndex + 1, duplicateCount);
+            deduplicate ? "unique " : "variant ", playerIndex + 1,
+            duplicateCount);
     return true;
+}
+
+extern "C" bool AutoTest_StartSuite(int32_t playerIndex, bool facingLeft)
+{
+    return StartSuite(playerIndex, facingLeft, true);
+}
+
+extern "C" bool AutoTest_StartVariantSuite(int32_t playerIndex,
+                                             bool facingLeft)
+{
+    return StartSuite(playerIndex, facingLeft, false);
 }
 
 extern "C" void AutoTest_Process()
@@ -1685,11 +1809,21 @@ extern "C" void AutoTest_Process()
             : &g_suiteCommands[g_suiteStatus.currentCommand - manualCount];
         g_suiteStatus.currentMatcher = command ? command->matcherIndex : -1;
         g_suiteStatus.currentLine = command ? command->lineIndex : -1;
-        snprintf(g_suiteStatus.currentName, sizeof(g_suiteStatus.currentName),
-                 "%s", g_suiteManualCase
-                     ? SUITE_MANUAL_SCRIPTS[g_suiteStatus.currentCommand].name
-                     : (command->commandListName[0]
-                         ? command->commandListName : command->name));
+        if (g_suiteManualCase) {
+            snprintf(g_suiteStatus.currentName,
+                     sizeof(g_suiteStatus.currentName), "%s",
+                     SUITE_MANUAL_SCRIPTS[g_suiteStatus.currentCommand].name);
+        } else if (command->commandListName[0] && command->name[0] &&
+                   strcmp(command->commandListName, command->name) != 0) {
+            snprintf(g_suiteStatus.currentName,
+                     sizeof(g_suiteStatus.currentName), "%s [%s]",
+                     command->commandListName, command->name);
+        } else {
+            snprintf(g_suiteStatus.currentName,
+                     sizeof(g_suiteStatus.currentName), "%s",
+                     command->commandListName[0]
+                         ? command->commandListName : command->name);
+        }
         if (!g_netSuiteActive)
             PlaceDefenderNextToAttacker(g_suiteStatus.playerIndex);
         uint64_t attacker = GetActiveCharacter(g_suiteStatus.playerIndex);
