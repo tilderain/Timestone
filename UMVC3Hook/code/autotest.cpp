@@ -741,6 +741,14 @@ void DescribeResolvedInput(uint32_t input, char* token, size_t capacity)
     if (direction)
         snprintf(token, capacity, "%s", direction);
 
+    const bool genericTwoAttackInput = (input & 0x300) == 0x300;
+    if (genericTwoAttackInput) {
+        size_t length = strlen(token);
+        snprintf(token + length, capacity - length, "%sXX",
+                 length ? "+" : "");
+        input &= ~0x300u;
+    }
+
     struct ButtonName { uint32_t bit; const char* name; };
     static constexpr ButtonName buttons[] = {
         {0x10, "L"}, {0x20, "M"}, {0x40, "H"}, {0x80, "S"},
@@ -869,6 +877,8 @@ bool GetRuntimeCommandNotation(uint64_t resource, uint64_t command,
         if (expected & 0x1000) buttons |= 0x60;
         if (expected & 0x2000) buttons |= 0x70;
         notation.buttons |= buttons;
+        if ((expected & 0x300) == 0x300)
+            notation.attackCount += 2;
     }
     if (commandFlags & 1)
         notation.buttons |= 0x80000000;
@@ -933,6 +943,8 @@ bool CommandNotationsMatch(const CommandNotation& runtime,
     if (display.buttons && (runtimeButtons & display.buttons) != display.buttons)
         return false;
     if (display.attackCount > 0) {
+        if (runtime.attackCount > 0)
+            return runtime.attackCount == display.attackCount;
         uint32_t attacks = runtimeButtons & 0x70;
         int32_t attackCount = ((attacks & 0x10) != 0) +
                               ((attacks & 0x20) != 0) +
@@ -1288,7 +1300,6 @@ bool GetStagedHyperCommand(int32_t playerIndex, uint64_t resource,
         CommandNotation display = {};
         if (metadata[1] != 2 || !GetDisplayRowNotation(
                 cached.rowNotation, row, display) || display.attackCount < 2 ||
-            display.buttons == 0 ||
             runtimeNotation.directionCount != display.directionCount)
             continue;
 
