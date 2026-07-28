@@ -621,15 +621,23 @@ void Rollback_RestoreSnapshot(int32_t frame)
     uint64_t sCharacter = *(uint64_t*)_addr(PTR_SCHARACTER);
     uint64_t team0 = sCharacter ? sCharacter + TEAM0_OFFSET : 0;
     uint64_t team1 = sCharacter ? sCharacter + TEAM1_OFFSET : 0;
-    auto isTeamCharacter = [sCharacter](uint64_t character) {
-        if (!sCharacter || !character) return false;
+    uint64_t teamCharacters[16] = {};
+    size_t teamCharacterCount = 0;
+    if (sCharacter) {
         for (int teamIndex = 0; teamIndex < 2; ++teamIndex) {
             uint64_t node = sCharacter + (teamIndex == 0 ? TEAM0_OFFSET : TEAM1_OFFSET) +
                 TEAM_FIRST_NODE_OFFSET;
             for (int n = 0; node && n < 8; ++n) {
-                if (*(uint64_t*)(node + NODE_CHR_OFFSET) == character) return true;
+                uint64_t character = *(uint64_t*)(node + NODE_CHR_OFFSET);
+                if (character && teamCharacterCount < std::size(teamCharacters))
+                    teamCharacters[teamCharacterCount++] = character;
                 node = *(uint64_t*)(node + NODE_NEXT_OFFSET);
             }
+        }
+    }
+    auto isTeamCharacter = [&teamCharacters, teamCharacterCount](uint64_t character) {
+        for (size_t i = 0; i < teamCharacterCount; ++i) {
+            if (teamCharacters[i] == character) return true;
         }
         return false;
     };
@@ -821,28 +829,11 @@ void Rollback_RestoreSnapshot(int32_t frame)
             }
 
             uint64_t concreteDti = GetObjectDti((uint64_t)slot.regions[i].ptr);
-            int32_t ankiReservedLive = 0;
-            int32_t ankiReservedSaved = 0;
-            bool traceAnkiRestore =
-                concreteDti == (uint64_t)_addr(0x140D455F8) && copySize >= 0x6900;
-            if (traceAnkiRestore) {
-                ankiReservedLive = *(int32_t*)((uint8_t*)slot.regions[i].ptr + 0x68FC);
-                ankiReservedSaved = *(int32_t*)(slot.data + offset + 0x68FC);
-            }
-
             ConcreteCharacterSnapshot_RestoreFields(
                 slot.regions[i].ptr,
                 slot.data + offset,
                 copySize,
                 concreteDti);
-
-            if (traceAnkiRestore) {
-                int32_t ankiReservedAfter =
-                    *(int32_t*)((uint8_t*)slot.regions[i].ptr + 0x68FC);
-                //HookLog("ANKIRESTORE frame=%d object=0x%llX live=%d saved=%d after=%d\n",
-                //        frame, (uint64_t)slot.regions[i].ptr, ankiReservedLive,
-                //        ankiReservedSaved, ankiReservedAfter);
-            }
 
             // uChrCpu's interpreter stack contains 32-bit script values, so
             // pairs of words can look like pointers to the generic guard. A
@@ -1035,25 +1026,6 @@ void Rollback_RestoreSnapshot(int32_t frame)
         *(uint32_t*)(sHitSolver + 0x34078) = 0; // sort bucket B count
     }
     const uint64_t hitSolverEnd = Profile_Now();
-
-    // Log ALL heap regions with their sizes
-    offset = 0;
-    for (int i = 0; i < slot.regionCount; ++i) {
-        uint64_t raddr = (uint64_t)slot.regions[i].ptr;
-        size_t rsize = slot.regions[i].size;
-     //   HookLog("DIAG Restore region[%d]: addr=0x%llX size=%zu\n", i, raddr, rsize);
-        uint64_t maybeVt = (raddr >= 0x100000 && raddr < 0x140000000) ? *(uint64_t*)raddr : 0;
-        if (maybeVt >= 0x140000000 && rsize >= 0x1000) {
-            uint32_t* animAfter = (uint32_t*)(raddr + 0x1300);
-     //       HookLog("DIAG Post-restore char@0x%llX region[%d]: anim[+0x1300]: %08X %08X %08X %08X  %08X %08X %08X %08X  %08X %08X %08X %08X  %08X %08X %08X %08X\n",
-     //               raddr, i,
-      //              animAfter[0], animAfter[1], animAfter[2], animAfter[3],
-      //              animAfter[4], animAfter[5], animAfter[6], animAfter[7],
-          //          animAfter[8], animAfter[9], animAfter[10], animAfter[11],
-       //             animAfter[12], animAfter[13], animAfter[14], animAfter[15]);
-        }
-        offset += rsize;
-    }
 
     // The character body restore includes slot-table pointers to heap objects
     // that are not part of the snapshot. Clear them before the next game tick

@@ -2,6 +2,7 @@
 
 #include "concrete_snapshot.h"
 #include "mk10utils.h"
+#include "rollback_memory.h"
 #include "rollback_profile.h"
 
 #include <cmath>
@@ -59,74 +60,14 @@ constexpr DtiSnapshotRange kGeneratedShotTailRanges[] = {
 using GetPrimitiveFn = uint64_t(__fastcall*)(uint64_t, uint32_t);
 using GetMetadataFn = uint64_t(__fastcall*)(uint64_t, uint32_t);
 
-struct CachedMemoryRegion {
-    uint64_t start;
-    uint64_t end;
-    bool accessible;
-};
-
-static std::vector<CachedMemoryRegion> g_accessibleRegions;
-static bool g_cacheAccessibleRegions = false;
-
-class AccessibleRegionCacheScope {
-public:
-    AccessibleRegionCacheScope()
-    {
-        g_accessibleRegions.clear();
-        g_cacheAccessibleRegions = true;
-    }
-
-    ~AccessibleRegionCacheScope()
-    {
-        g_cacheAccessibleRegions = false;
-    }
-};
-
 bool Accessible(uint64_t address, size_t size = sizeof(uint64_t))
 {
-    if (address < 0x10000 || address >= 0x0000800000000000ull || size == 0 ||
-        size - 1 > UINT64_MAX - address) {
-        return false;
-    }
-
-    if (g_cacheAccessibleRegions) {
-        for (const CachedMemoryRegion& region : g_accessibleRegions) {
-            if (address >= region.start && address < region.end)
-                return region.accessible && size <= region.end - address;
-        }
-    }
-
-    MEMORY_BASIC_INFORMATION mbi = {};
-    if (VirtualQuery((void*)address, &mbi, sizeof(mbi)) == 0) {
-        if (g_cacheAccessibleRegions) {
-            constexpr uint64_t kPageSize = 0x1000;
-            uint64_t page = address & ~(kPageSize - 1);
-            g_accessibleRegions.push_back({page, page + kPageSize, false});
-        }
-        return false;
-    }
-
-    bool accessible = mbi.State == MEM_COMMIT &&
-        (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) == 0;
-    const uint64_t regionStart = (uint64_t)mbi.BaseAddress;
-    const uint64_t regionEnd = (uint64_t)mbi.BaseAddress + mbi.RegionSize;
-    if (g_cacheAccessibleRegions)
-        g_accessibleRegions.push_back({regionStart, regionEnd, accessible});
-    return accessible && address < regionEnd && size <= regionEnd - address;
+    return IsAccessibleRange(address, size);
 }
 
 bool Executable(uint64_t address)
 {
-    MEMORY_BASIC_INFORMATION mbi = {};
-    if (VirtualQuery((void*)address, &mbi, sizeof(mbi)) == 0 ||
-        mbi.State != MEM_COMMIT ||
-        (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) != 0) {
-        return false;
-    }
-
-    constexpr DWORD executable = PAGE_EXECUTE | PAGE_EXECUTE_READ |
-        PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
-    return (mbi.Protect & executable) != 0;
+    return IsExecutableAddress(address);
 }
 
 bool HasLocalGeometry(const uint8_t* geometry)
@@ -221,7 +162,8 @@ void PreserveLivePointers(uint8_t* overlay, const uint8_t* live,
          offset += sizeof(uint64_t)) {
         uint64_t liveValue = *(const uint64_t*)(live + offset);
         uint64_t savedValue = *(const uint64_t*)(overlay + offset);
-        if (Accessible(liveValue) || Accessible(savedValue)) {
+        if ((IsLikelyPointer(liveValue) && Accessible(liveValue)) ||
+            (IsLikelyPointer(savedValue) && Accessible(savedValue))) {
             std::memcpy(overlay + offset, live + offset, sizeof(uint64_t));
         }
     }
@@ -276,8 +218,8 @@ void RestoreDetectedCharacterTailScalars(void* character,
         uint64_t savedValue = 0;
         std::memcpy(&liveValue, live + offset, sizeof(liveValue));
         std::memcpy(&savedValue, savedBody + offset, sizeof(savedValue));
-        bool livePointer = Accessible(liveValue);
-        bool savedPointer = Accessible(savedValue);
+        bool livePointer = IsLikelyPointer(liveValue) && Accessible(liveValue);
+        bool savedPointer = IsLikelyPointer(savedValue) && Accessible(savedValue);
         bool staleTransition =
             (liveValue == 0 && savedValue >= 0x10000 &&
              savedValue < 0x0000800000000000ull && (savedValue & 7) == 0) ||
@@ -551,10 +493,6 @@ bool ConcreteShotSnapshot_Restore(void* shot,
 {
     if (!shot || snapshot.body.size() < kShotBodyStart) return false;
 
-    // Pointer filtering revisits the same heap and module regions hundreds of
-    // times per shot. Cache VirtualQuery results only for this allocation-free
-    // restore operation; the next native factory starts with a fresh cache.
-    AccessibleRegionCacheScope accessibleRegionCache;
     const uint64_t profileStart = Profile_Now();
 
     uint64_t liveDti = GetDti(shot);

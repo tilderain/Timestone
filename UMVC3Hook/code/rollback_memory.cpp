@@ -10,6 +10,7 @@ namespace {
 constexpr uintptr_t DTI_CUNIT = 0x140E173D0;
 constexpr uintptr_t DTI_UEFFECT = 0x140E18698;
 constexpr uintptr_t DTI_UBASEMODEL = 0x140E17D48;
+constexpr size_t MAX_CACHED_MEMORY_REGIONS = 256;
 
 struct CachedMemoryRegion {
     uint64_t start;
@@ -21,6 +22,7 @@ struct CachedMemoryRegion {
 thread_local std::vector<CachedMemoryRegion> g_memoryRegions;
 thread_local LONG g_memoryCacheEpochSeen = 0;
 thread_local size_t g_lastMemoryRegion = SIZE_MAX;
+thread_local size_t g_nextMemoryRegionReplacement = 0;
 volatile LONG g_memoryCacheEpoch = 1;
 
 void SynchronizeMemoryCacheEpoch()
@@ -29,6 +31,7 @@ void SynchronizeMemoryCacheEpoch()
     if (g_memoryCacheEpochSeen == epoch) return;
     g_memoryRegions.clear();
     g_lastMemoryRegion = SIZE_MAX;
+    g_nextMemoryRegionReplacement = 0;
     g_memoryCacheEpochSeen = epoch;
 }
 
@@ -53,14 +56,22 @@ const CachedMemoryRegion* GetCachedMemoryRegion(uint64_t address)
         PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
     const bool accessible = mbi.State == MEM_COMMIT &&
         (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) == 0;
-    g_memoryRegions.push_back({
+    CachedMemoryRegion queriedRegion = {
         (uint64_t)mbi.BaseAddress,
         (uint64_t)mbi.BaseAddress + mbi.RegionSize,
         accessible,
         accessible && (mbi.Protect & executable) != 0,
-    });
-    g_lastMemoryRegion = g_memoryRegions.size() - 1;
-    return &g_memoryRegions.back();
+    };
+    if (g_memoryRegions.size() < MAX_CACHED_MEMORY_REGIONS) {
+        g_memoryRegions.push_back(queriedRegion);
+        g_lastMemoryRegion = g_memoryRegions.size() - 1;
+    } else {
+        g_lastMemoryRegion = g_nextMemoryRegionReplacement;
+        g_memoryRegions[g_lastMemoryRegion] = queriedRegion;
+        g_nextMemoryRegionReplacement =
+            (g_nextMemoryRegionReplacement + 1) % MAX_CACHED_MEMORY_REGIONS;
+    }
+    return &g_memoryRegions[g_lastMemoryRegion];
 }
 
 bool IsObjectKindOf(const void* object, uintptr_t expectedDti)
