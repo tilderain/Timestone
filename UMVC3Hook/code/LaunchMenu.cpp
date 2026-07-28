@@ -149,7 +149,17 @@ void SendTrainingLaunchPacket()
         packet.p2Chars[i] = g_dialogConfig.p2Chars[i];
     }
     packet.stageId = g_dialogConfig.stageId;
-    packet.flags = TrainingBoot_GetBothCpus() ? LAUNCH_TRAINING_BOTH_CPUS : 0;
+    switch (TrainingBoot_GetCpuMode()) {
+    case TRAINING_CPU_P2_ONLY:
+        packet.flags = LAUNCH_TRAINING_P2_CPU;
+        break;
+    case TRAINING_CPU_BOTH:
+        packet.flags = LAUNCH_TRAINING_BOTH_CPUS;
+        break;
+    default:
+        packet.flags = 0;
+        break;
+    }
     ENetPacket* enetPacket = enet_packet_create(&packet, sizeof(packet), ENET_PACKET_FLAG_RELIABLE);
     if (!enetPacket || enet_peer_send(g_dialogConfig.enetPeer, 0, enetPacket) != 0) {
         if (enetPacket) enet_packet_destroy(enetPacket);
@@ -174,7 +184,10 @@ bool ApplyTrainingLaunchPacket(const LaunchTrainingPacket& packet)
         g_dialogConfig.p2Chars[i] = packet.p2Chars[i];
     }
     g_dialogConfig.stageId = packet.stageId;
-    TrainingBoot_SetBothCpus((packet.flags & LAUNCH_TRAINING_BOTH_CPUS) != 0);
+    TrainingBoot_SetCpuMode(
+        (packet.flags & LAUNCH_TRAINING_BOTH_CPUS) ? TRAINING_CPU_BOTH :
+        (packet.flags & LAUNCH_TRAINING_P2_CPU) ? TRAINING_CPU_P2_ONLY :
+        TRAINING_CPU_NONE);
 
     TrainingBootConfig cfg = {};
     for (int i = 0; i < 3; ++i) {
@@ -224,6 +237,7 @@ enum CtrlId {
     ID_LAUNCH_TRAINING    = 1002,
     ID_LAUNCH_DUAL        = 1003,
     ID_LAUNCH_DUAL_CPUS   = 1004,
+    ID_LAUNCH_DUAL_P2_CPU = 1005,
     // Character combos
     ID_P1_SLOT1           = 2001,
     ID_P1_SLOT2           = 2002,
@@ -308,7 +322,7 @@ LaunchOption ShowLaunchMenu()
 
     RegisterClassA(&wc);
 
-    int w = 540, h = 705;
+    int w = 540, h = 743;
     int x = (GetSystemMetrics(SM_CXSCREEN) - w) / 2;
     int y = (GetSystemMetrics(SM_CYSCREEN) - h) / 2;
 
@@ -591,6 +605,11 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
         CreateWindowA("BUTTON", "Launch Dual Training with CPUs",
             WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON,
             leftX, y, 490, 32, hDlg, (HMENU)ID_LAUNCH_DUAL_CPUS, NULL, NULL);
+        y += 38;
+
+        CreateWindowA("BUTTON", "Launch Dual Training with P2 CPU",
+            WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON,
+            leftX, y, 490, 32, hDlg, (HMENU)ID_LAUNCH_DUAL_P2_CPU, NULL, NULL);
 
         return msg == WM_INITDIALOG ? TRUE : 0;
     }
@@ -692,6 +711,7 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
         case ID_LAUNCH_TRAINING:
         case ID_LAUNCH_DUAL:
         case ID_LAUNCH_DUAL_CPUS:
+        case ID_LAUNCH_DUAL_P2_CPU:
         {
             // Read character selections from combo boxes
             for (int i = 0; i < 3; i++) {
@@ -720,7 +740,10 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
 
             // Apply config to training boot
             SaveRollbackSettings();
-            TrainingBoot_SetBothCpus(LOWORD(wParam) == ID_LAUNCH_DUAL_CPUS);
+            TrainingBoot_SetCpuMode(
+                LOWORD(wParam) == ID_LAUNCH_DUAL_CPUS ? TRAINING_CPU_BOTH :
+                LOWORD(wParam) == ID_LAUNCH_DUAL_P2_CPU ? TRAINING_CPU_P2_ONLY :
+                TRAINING_CPU_NONE);
             SendTrainingLaunchPacket();
             TrainingBootConfig cfg;
             for (int i = 0; i < 3; i++) {

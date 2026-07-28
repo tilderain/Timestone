@@ -112,9 +112,15 @@ const TrainingBootConfig& TrainingBoot_GetDefaultConfig();
 // Set a custom config (e.g. from command-line parsing).
 void TrainingBoot_SetConfig(const TrainingBootConfig& cfg);
 
-// Independently controls whether all six character slots use CPU control.
-void TrainingBoot_SetBothCpus(bool enabled);
-bool TrainingBoot_GetBothCpus();
+enum TrainingBootCpuMode {
+    TRAINING_CPU_NONE = 0,
+    TRAINING_CPU_P2_ONLY = 1,
+    TRAINING_CPU_BOTH = 2,
+};
+
+// Independently controls which teams use CPU control.
+void TrainingBoot_SetCpuMode(TrainingBootCpuMode mode);
+TrainingBootCpuMode TrainingBoot_GetCpuMode();
 
 // Execute the boot sequence: configure sBattleSetting and transition to
 // aNextBattle. Called once from the aTitle__update hook.

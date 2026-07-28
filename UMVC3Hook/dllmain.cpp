@@ -515,8 +515,12 @@ void OnInitializeHook()
 		HookLog("UMVC3Hook: Detected -training argument, entering training mode\n");
 	}
 	if (strstr(cmdLineA, "-training-cpus")) {
-		TrainingBoot_SetBothCpus(true);
+		TrainingBoot_SetCpuMode(TRAINING_CPU_BOTH);
 		HookLog("UMVC3Hook: Training CPU control enabled for both teams\n");
+	}
+	else if (strstr(cmdLineA, "-training-p2-cpu")) {
+		TrainingBoot_SetCpuMode(TRAINING_CPU_P2_ONLY);
+		HookLog("UMVC3Hook: Training CPU control enabled for P2\n");
 	}
 
 	const int autoTestCharacter = ParseAutoTestCharacter(cmdLineA);
@@ -657,9 +661,12 @@ void OnInitializeHook()
 
 		// FIX: Use %ls for wide strings (GCC/MinGW treats %s as narrow char*, even in swprintf)
 		wchar_t spawnCmd[MAX_PATH + 128];
+		const wchar_t* cpuArg = TrainingBoot_GetCpuMode() == TRAINING_CPU_BOTH
+			? L" -training-cpus"
+			: TrainingBoot_GetCpuMode() == TRAINING_CPU_P2_ONLY
+				? L" -training-p2-cpu" : L"";
 		swprintf(spawnCmd, MAX_PATH + 128, L"\"%ls\" -training%ls -connect=%ls:%d",
-			exePath, TrainingBoot_GetBothCpus() ? L" -training-cpus" : L"",
-			wIp, dlgCfg.hostPort);
+			exePath, cpuArg, wIp, dlgCfg.hostPort);
 
 		STARTUPINFOW si = { sizeof(si) };
 		PROCESS_INFORMATION pi;

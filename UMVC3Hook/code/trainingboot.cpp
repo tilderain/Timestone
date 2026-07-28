@@ -107,7 +107,7 @@ static TrainingBootConfig g_bootConfig = {
 static bool g_hasBooted = false;
 static bool g_hooksInitialized = false;
 static bool g_controllerConfigRequested = false;
-static bool g_bothCpus = false;
+static TrainingBootCpuMode g_cpuMode = TRAINING_CPU_NONE;
 
 // ---------------------------------------------------------------------------
 // Extern from dllmain.cpp
@@ -128,14 +128,14 @@ void TrainingBoot_SetConfig(const TrainingBootConfig& cfg)
     g_bootConfig = cfg;
 }
 
-void TrainingBoot_SetBothCpus(bool enabled)
+void TrainingBoot_SetCpuMode(TrainingBootCpuMode mode)
 {
-    g_bothCpus = enabled;
+    g_cpuMode = mode;
 }
 
-bool TrainingBoot_GetBothCpus()
+TrainingBootCpuMode TrainingBoot_GetCpuMode()
 {
-    return g_bothCpus;
+    return g_cpuMode;
 }
 
 // ---------------------------------------------------------------------------
@@ -183,8 +183,10 @@ static void ConfigureTrainingMatchDefaults(uint64_t bs)
 
     HookLog("TrainingBoot: Defaults set (CPU=Very Hard, meter P1/P2=1, HP drain=normal)\n");
 
-    const int32_t cpuControl = g_bothCpus ? 1 : 0;
     for (int team = 0; team < 2; ++team) {
+        const int32_t cpuControl =
+            g_cpuMode == TRAINING_CPU_BOTH ||
+            (g_cpuMode == TRAINING_CPU_P2_ONLY && team == 1);
         for (int slot = 0; slot < 3; ++slot) {
             *(int32_t*)(bs + 0x38 + (team * 3 + slot) * 0x58 +
                         SLOT_CPU_CONTROL_OFFSET) = cpuControl;
@@ -192,8 +194,7 @@ static void ConfigureTrainingMatchDefaults(uint64_t bs)
                         SLOT_CPU_CONTROL_OFFSET) = cpuControl;
         }
     }
-    HookLog("TrainingBoot: CPU control for both teams %s\n",
-            g_bothCpus ? "enabled" : "disabled");
+    HookLog("TrainingBoot: CPU control mode=%d\n", (int)g_cpuMode);
 }
 
 // ---------------------------------------------------------------------------
