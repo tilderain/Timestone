@@ -279,7 +279,8 @@ void Netplay_SendDesyncUnpause();
 bool Netplay_GetInboundDesync(DesyncPacket& outPacket);
 
 void Netplay_SendRestartMatch(int32_t targetFrame, uint32_t roundSeed);
-void Netplay_SendTrainingRestart(int32_t targetFrame, int32_t buttonRestart);
+void Netplay_SendTrainingRestart(int32_t targetFrame, uint32_t roundSeed,
+                                 int32_t buttonRestart);
 bool Netplay_GetInboundRestartMatch(int32_t& outTargetFrame, uint32_t& outRoundSeed,
                                     uint32_t& outKind, int32_t& outButtonRestart);
 

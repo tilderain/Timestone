@@ -970,6 +970,49 @@ void NDJSON_DumpNetplayHistory(int32_t frame)
             NETPLAY_LIVE_HISTORY, newest);
 }
 
+bool NDJSON_ExportNetplayHistory(int32_t frame, const char* path)
+{
+    if (!g_ndjsonLoggingEnabled || !path || !path[0]) return false;
+    if (!g_liveInit) InitLiveLog();
+    int32_t newest = -1;
+    for (int i = 0; i < NETPLAY_LIVE_HISTORY; ++i) {
+        if (g_historyFrame[i] > newest &&
+            (frame < 0 || g_historyFrame[i] <= frame))
+            newest = g_historyFrame[i];
+    }
+    if (newest < 0) return false;
+
+    FILE* file = fopen(path, "w");
+    if (!file) return false;
+    for (int32_t current = newest - NETPLAY_LIVE_HISTORY + 1;
+         current <= newest; ++current) {
+        int historyIndex = (uint32_t)current % NETPLAY_LIVE_HISTORY;
+        if (g_historyFrame[historyIndex] == current)
+            fputs(g_history[historyIndex].c_str(), file);
+        int pendingIndex = (uint32_t)current % PENDING_HISTORY;
+        if (g_pendingFrame[pendingIndex] == current)
+            fputs(g_pendingJson[pendingIndex].c_str(), file);
+    }
+    bool success = fflush(file) == 0;
+    fclose(file);
+    HookLog("NetplayLive: exported autotest history through frame %d -> %s\n",
+            newest, path);
+    return success;
+}
+
+void NDJSON_ResetNetplayHistoryBuffers()
+{
+    for (int i = 0; i < PENDING_HISTORY; ++i) {
+        g_pendingFrame[i] = -1;
+        g_pendingJson[i].clear();
+    }
+    for (int i = 0; i < NETPLAY_LIVE_HISTORY; ++i) {
+        g_historyFrame[i] = -1;
+        g_history[i].clear();
+    }
+    g_desyncFlushed = false;
+}
+
 void NDJSON_NotifyDesyncTriggered(int32_t frame)
 {
     if (!g_ndjsonLoggingEnabled) return;
@@ -1175,6 +1218,16 @@ extern "C" void Rollback_FlushNetplayLive(int32_t frame)
 void Rollback_DumpNetplayHistory(int32_t frame)
 {
     NDJSON_DumpNetplayHistory(frame);
+}
+
+bool Rollback_ExportNetplayHistory(int32_t frame, const char* path)
+{
+    return NDJSON_ExportNetplayHistory(frame, path);
+}
+
+void Rollback_ResetNetplayHistoryBuffers()
+{
+    NDJSON_ResetNetplayHistoryBuffers();
 }
 
 bool Rollback_FlushNDJSONOnCrash()

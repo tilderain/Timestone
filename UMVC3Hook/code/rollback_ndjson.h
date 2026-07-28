@@ -39,6 +39,8 @@ void NDJSON_ProcessInboundGroundTruth();
 void NDJSON_NotifyDesyncTriggered(int32_t frame);
 void NDJSON_FlushNetplayLive(int32_t frame);
 void NDJSON_DumpNetplayHistory(int32_t frame);
+bool NDJSON_ExportNetplayHistory(int32_t frame, const char* path);
+void NDJSON_ResetNetplayHistoryBuffers();
 bool NDJSON_FlushOnCrash();
 void NDJSON_ResetNetplayLiveLog();
 bool NDJSON_GetNetplayLiveDirectory(char* path, size_t pathSize);

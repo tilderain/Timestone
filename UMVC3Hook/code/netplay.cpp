@@ -948,12 +948,13 @@ void Netplay_SendRestartMatch(int32_t targetFrame, uint32_t roundSeed)
     g_outboundRestartNew = true;
 }
 
-void Netplay_SendTrainingRestart(int32_t targetFrame, int32_t buttonRestart)
+void Netplay_SendTrainingRestart(int32_t targetFrame, uint32_t roundSeed,
+                                 int32_t buttonRestart)
 {
     ScopedCS lock(g_restartCS);
     g_outboundRestart.type = PACKET_RESTART_MATCH;
     g_outboundRestart.target_frame = targetFrame;
-    g_outboundRestart.round_seed = 0;
+    g_outboundRestart.round_seed = roundSeed;
     g_outboundRestart.kind = RESTART_TRAINING;
     g_outboundRestart.button_restart = buttonRestart;
     g_outboundRestartNew = true;

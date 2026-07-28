@@ -138,6 +138,7 @@ uint32_t g_suiteRngSeed = 0;
 char g_suiteResultPath[MAX_PATH] = {};
 char g_suiteTestDate[32] = {};
 char g_suiteCharacterName[64] = {};
+char g_suiteCharacterStem[64] = {};
 const char* g_suiteType = "commands";
 constexpr int32_t SUITE_COMMAND_TIMEOUT = 600;
 constexpr int32_t SUITE_COMPLETION_TIMEOUT = 3600;
@@ -318,6 +319,7 @@ void InitializeSuiteResultFile(int32_t playerIndex, bool deduplicate)
     g_suiteResultPath[0] = '\0';
     g_suiteTestDate[0] = '\0';
     g_suiteCharacterName[0] = '\0';
+    g_suiteCharacterStem[0] = '\0';
     g_suiteType = deduplicate ? "commands" : "variants";
 
     SYSTEMTIME now = {};
@@ -346,10 +348,14 @@ void InitializeSuiteResultFile(int32_t playerIndex, bool deduplicate)
                      (value >= 'A' && value <= 'Z') ||
                      (value >= '0' && value <= '9') || value == '-' ||
                      value == '_';
+        if (value >= 'A' && value <= 'Z')
+            value = (char)(value - 'A' + 'a');
         safeCharacter[safeLength++] = valid ? value : '_';
     }
     if (!safeCharacter[0])
         snprintf(safeCharacter, sizeof(safeCharacter), "Unknown");
+    snprintf(g_suiteCharacterStem, sizeof(g_suiteCharacterStem), "%s",
+             safeCharacter);
 
     if (!CreateDirectoryA("autotest", nullptr) &&
         GetLastError() != ERROR_ALREADY_EXISTS) {
@@ -421,6 +427,12 @@ void FinishSuiteCommand(bool passed, const char* reason)
     g_runningManualCommand = -1;
     WriteSuiteResult(passed, reason);
     if (g_netSuiteActive && Netplay_IsActive() && Netplay_IsHost()) {
+        if (!passed && g_netSuiteFirstMismatchFrame >= 0) {
+            char path[MAX_PATH];
+            snprintf(path, sizeof(path), "autotest/%s_%u_host.ndjson",
+                     g_suiteCharacterStem, g_netSuiteMoveId);
+            Rollback_ExportNetplayHistory(g_netSuiteFirstMismatchFrame, path);
+        }
         g_netSuiteRestartPending = true;
         AutoTest_PrepareForRestart();
         FrameStepper_ScheduleAutoTestRestart(g_suiteRngSeed);
@@ -457,12 +469,17 @@ void ProcessNetSuiteSetup(int32_t frame)
     if (!g_netSuiteActive || g_netSuiteSetupApplied ||
         g_netSuiteSetupFrame < 0 || frame < g_netSuiteSetupFrame)
         return;
+    if (!ResetSuiteRng()) {
+        HookLog("AutoTestNet: move %u setup could not reset RNG\n",
+                g_netSuiteMoveId);
+        return;
+    }
     PlaceDefenderNextToAttacker(g_suiteStatus.playerIndex);
     if (g_runningRuntimeHyper)
         FillAttackerHyperGauge(g_suiteStatus.playerIndex);
     g_netSuiteSetupApplied = true;
-    HookLog("AutoTestNet: move %u setup applied at frame %d\n",
-            g_netSuiteMoveId, frame);
+    HookLog("AutoTestNet: move %u setup applied at frame %d seed=0x%08X\n",
+            g_netSuiteMoveId, frame, g_suiteRngSeed);
 }
 
 void ConfigureManualScript(int32_t manualIndex, int32_t playerIndex,
@@ -495,6 +512,7 @@ void StartInboundNetSuiteMove(const AutoTestStartPacket& packet)
 
     g_netSuiteActive = true;
     g_netSuiteClient = true;
+    g_ndjsonLoggingEnabled = true;
     g_netSuiteRestartPending = false;
     g_suiteStatus = {};
     g_suiteStatus.active = true;
@@ -1805,6 +1823,8 @@ bool StartSuite(int32_t playerIndex, bool facingLeft, bool deduplicate)
         return false;
 
     InitializeSuiteResultFile(playerIndex, deduplicate);
+    if (Netplay_IsActive())
+        g_ndjsonLoggingEnabled = true;
 
     for (int32_t i = 0; i < commandCount; ++i) {
         const AutoTestRuntimeCommand& command = g_suiteCommands[i];
@@ -2090,6 +2110,36 @@ extern "C" void AutoTest_OnLiveFrame(int32_t frame, uint32_t checksum)
     g_netSuiteLiveFrames[idx] = {frame, checksum, BothCharactersIdle()};
 }
 
+extern "C" void AutoTest_OnDesyncDetected(int32_t frame)
+{
+    if (!g_netSuiteActive || !g_netSuiteClient || g_netSuiteMoveId == 0)
+        return;
+
+    if (!g_suiteCharacterStem[0]) {
+        GetCommandListTextResource(g_suiteStatus.playerIndex,
+                                   GetActiveCharacter(g_suiteStatus.playerIndex));
+        int32_t characterId = g_commandListText[g_suiteStatus.playerIndex].characterId;
+        using GetCharacterName_t = const char*(__fastcall*)(int32_t);
+        static GetCharacterName_t getCharacterName =
+            (GetCharacterName_t)_addr(ADDR_GET_CHARACTER_NAME);
+        const char* name = characterId > 0 ? getCharacterName(characterId) : nullptr;
+        snprintf(g_suiteCharacterStem, sizeof(g_suiteCharacterStem), "%s",
+                 name && name[0] ? name : "unknown");
+        for (char* c = g_suiteCharacterStem; *c; ++c) {
+            if (*c >= 'A' && *c <= 'Z')
+                *c = (char)(*c - 'A' + 'a');
+            else if (!((*c >= 'a' && *c <= 'z') ||
+                       (*c >= '0' && *c <= '9') || *c == '-' || *c == '_'))
+                *c = '_';
+        }
+    }
+
+    char path[MAX_PATH];
+    snprintf(path, sizeof(path), "autotest/%s_%u_client.ndjson",
+             g_suiteCharacterStem, g_netSuiteMoveId);
+    Rollback_ExportNetplayHistory(frame, path);
+}
+
 extern "C" void AutoTest_PrepareForRestart()
 {
     if (!g_netSuiteActive)
@@ -2104,5 +2154,5 @@ extern "C" void AutoTest_OnTrainingRestartExecuted()
     if (!g_netSuiteActive)
         return;
     g_netSuiteRestartExecuted = true;
-    g_netSuiteRestartLeftFighting = false;
+    g_netSuiteRestartLeftFighting = true;
 }

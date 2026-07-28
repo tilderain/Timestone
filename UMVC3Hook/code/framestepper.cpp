@@ -71,6 +71,8 @@ static uint32_t g_roundSeed = 0;
 static uint32_t g_battleGeneration = 1;
 static uint32_t g_advertisedBattleFlags = 0;
 static uint32_t g_battleAdvertiseTick = 0;
+static bool g_trainingRestartBarrier = false;
+static bool g_trainingRestartLeftFighting = false;
 extern "C" bool FrameStepper_IsBattleSynchronized() { return g_battleSynchronized; }
 
 extern "C" void FrameStepper_ScheduleAutoTestRestart(uint32_t roundSeed)
@@ -81,9 +83,10 @@ extern "C" void FrameStepper_ScheduleAutoTestRestart(uint32_t roundSeed)
     g_restartKind = RESTART_TRAINING;
     g_restartButtonMode = 12;
     g_restartTargetFrame = Controller_GetNetFrameCount() + 25;
-    Netplay_SendTrainingRestart(g_restartTargetFrame, g_restartButtonMode);
-    HookLog("AutoTestNet: synchronized mode-12 training restart scheduled for frame %d\n",
-            g_restartTargetFrame);
+    Netplay_SendTrainingRestart(g_restartTargetFrame, g_restartRoundSeed,
+                                g_restartButtonMode);
+    HookLog("AutoTestNet: synchronized mode-12 training restart scheduled for frame %d seed=0x%08X\n",
+            g_restartTargetFrame, g_restartRoundSeed);
 }
 
 static void ScheduleNetplayDelay(int32_t delay)
@@ -326,9 +329,24 @@ static void __fastcall HookedMove(void* sMvc3Main)
             }
             Rollback_FreeSnapshots();
             Controller_ClearDesyncDetection();
-            AutoTest_OnTrainingRestartExecuted();
-            HookLog("FrameStepper: executed synchronized training restart buttonMode=%d frame=%d\n",
-                    g_restartButtonMode, Controller_GetNetFrameCount());
+            Rollback_ResetNetplayHistoryBuffers();
+            g_battleSynchronized = false;
+            g_localReady = false;
+            g_remoteReady = false;
+            g_localRelease = false;
+            g_remoteRelease = false;
+            g_roundSeed = g_restartRoundSeed;
+            g_roundSeedReady = true;
+            g_trainingRestartBarrier = true;
+            g_trainingRestartLeftFighting = false;
+            ++g_battleGeneration;
+            if (g_battleGeneration == 0)
+                g_battleGeneration = 1;
+            g_advertisedBattleFlags = 0;
+            g_battleAdvertiseTick = 0;
+            HookLog("FrameStepper: requested synchronized training restart buttonMode=%d frame=%d generation=%u seed=0x%08X\n",
+                    g_restartButtonMode, Controller_GetNetFrameCount(),
+                    g_battleGeneration, g_restartRoundSeed);
             g_restartTargetFrame = -1;
             g_restartKind = RESTART_FULL_MATCH;
             g_restartButtonMode = 0;
@@ -430,7 +448,15 @@ static void __fastcall HookedMove(void* sMvc3Main)
             int32_t pendingStep = action ? *(int32_t*)(action + 0xDC) : -1;
             int32_t introSubstate = action ? *(int32_t*)(action + 0xE0) : 0;
 
-            if (!g_localReady && step == 2 && pendingStep < 0 && introSubstate > 0)
+            if (g_trainingRestartBarrier) {
+                if (step != 5)
+                    g_trainingRestartLeftFighting = true;
+                if (!g_localReady && g_trainingRestartLeftFighting && step == 5) {
+                    g_localReady = true;
+                    HookLog("AutoTestNet: local training restart ready (generation=%u)\n",
+                            g_battleGeneration);
+                }
+            } else if (!g_localReady && step == 2 && pendingStep < 0 && introSubstate > 0)
             {
                 g_localReady = true;
                 if (Netplay_IsHost()) {
@@ -474,6 +500,11 @@ static void __fastcall HookedMove(void* sMvc3Main)
             Controller_ResetFrameEpoch();
             Rollback_FreeSnapshots();
             g_battleSynchronized = true;
+            if (g_trainingRestartBarrier) {
+                g_trainingRestartBarrier = false;
+                g_trainingRestartLeftFighting = false;
+                AutoTest_OnTrainingRestartExecuted();
+            }
             Netplay_SetTimeout(5000);
             HookLog("Netplay: Intro barrier released after RNG sync (generation=%u seed=0x%08X)\n",
                      g_battleGeneration, g_roundSeed);
@@ -800,6 +831,8 @@ void FrameStepper_Process()
         g_restartRoundSeed = remoteRestartSeed;
         g_restartKind = remoteRestartKind;
         g_restartButtonMode = remoteRestartButton;
+        HookLog("FrameStepper: received restart kind=%u target=%d seed=0x%08X\n",
+                remoteRestartKind, remoteRestartFrame, remoteRestartSeed);
     }
 
     // Netplay delay adjustment via [ (decrease) and ] (increase) keys.
@@ -834,6 +867,7 @@ void FrameStepper_Process()
             g_desyncLocalCS = desyncPacket.remoteChecksum;
             g_desyncRemoteCS = desyncPacket.localChecksum;
             Rollback_NotifyDesyncTriggered(desyncPacket.frame);
+            AutoTest_OnDesyncDetected(desyncPacket.frame);
         }
         else if (desyncPacket.action == DESYNC_UNPAUSE)
         {

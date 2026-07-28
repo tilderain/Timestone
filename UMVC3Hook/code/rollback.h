@@ -55,6 +55,8 @@ extern "C" void Rollback_FlushNetplayLive(int32_t frame);
 
 // Write the current rolling history without stopping subsequent capture.
 void Rollback_DumpNetplayHistory(int32_t frame);
+bool Rollback_ExportNetplayHistory(int32_t frame, const char* path);
+void Rollback_ResetNetplayHistoryBuffers();
 
 // Best-effort flush of already-buffered NDJSON from the crash handler.
 // Does not initialize logging, capture game state, or mutate the rolling buffers.
