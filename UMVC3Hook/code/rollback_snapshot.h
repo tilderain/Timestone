@@ -99,6 +99,7 @@ struct RollbackCollisionNodeClone {
     uint64_t ownerSlot;
     void* savedPtr;
     void* clone;
+    uint32_t childCount;
 };
 
 struct RollbackSnapshotSlot {

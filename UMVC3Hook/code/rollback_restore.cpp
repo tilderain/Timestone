@@ -123,6 +123,7 @@ constexpr uint32_t SCOLLISION_ALLOC_START = 0x23970;
 constexpr size_t CCHR_EXTERNAL_ANIM_SIZE = 0xE0;
 constexpr uintptr_t FN_COLLISION_NODE_OBJECT_CREATE = 0x1405AD2A0;
 constexpr uintptr_t FN_COLLISION_NODE_COPY = 0x1405A4DA0;
+constexpr uintptr_t FN_COLLISION_NODE_PRUNE_CHILD = 0x14004C9D0;
 
 } // namespace
 
@@ -189,12 +190,18 @@ void Rollback_CaptureCollisionNodeClones(RollbackSnapshotSlot& slot)
         if (!region.ownerSlot || region.size != CCHR_EXTERNAL_ANIM_SIZE) continue;
         if (!HasCallableDtiVirtual(region.ptr)) continue;
 
+        uint32_t childCount = *(const uint32_t*)((const uint8_t*)region.ptr + 0x20);
+        if (childCount == 0) {
+            slot.collisionNodeClones.push_back({region.ownerSlot, region.ptr, nullptr, 0});
+            continue;
+        }
+
         void* clone = createNode(nullptr);
         InvalidateMemoryQueryCache();
         if (!clone) continue;
         // Inherit the source child factory before deep-copying its children.
         copyNode(clone, region.ptr, false, true);
-        slot.collisionNodeClones.push_back({region.ownerSlot, region.ptr, clone});
+        slot.collisionNodeClones.push_back({region.ownerSlot, region.ptr, clone, childCount});
     }
 }
 
@@ -202,10 +209,19 @@ void Rollback_RestoreCollisionNodeClones(RollbackSnapshotSlot& slot)
 {
     auto copyNode =
         (void(__fastcall*)(void*, void*, bool, bool))_addr(FN_COLLISION_NODE_COPY);
+    auto pruneChild =
+        (void(__fastcall*)(void*, uint32_t))_addr(FN_COLLISION_NODE_PRUNE_CHILD);
     for (const RollbackCollisionNodeClone& entry : slot.collisionNodeClones) {
-        if (*(uint64_t*)entry.ownerSlot == (uint64_t)entry.savedPtr &&
-            HasCallableDtiVirtual(entry.savedPtr) &&
-            HasCallableDtiVirtual(entry.clone)) {
+        if (*(uint64_t*)entry.ownerSlot != (uint64_t)entry.savedPtr ||
+            !HasCallableDtiVirtual(entry.savedPtr)) continue;
+
+        if (entry.childCount == 0) {
+            auto* childArray = (uint8_t*)entry.savedPtr + 0x18;
+            uint32_t liveCount = *(uint32_t*)((uint8_t*)entry.savedPtr + 0x20);
+            while (liveCount > 0)
+                pruneChild(childArray, --liveCount);
+            InvalidateMemoryQueryCache();
+        } else if (HasCallableDtiVirtual(entry.clone)) {
             copyNode(entry.savedPtr, entry.clone, false, true);
         }
     }
