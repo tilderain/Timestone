@@ -121,13 +121,48 @@ struct RegionCache {
 
 static RegionCache g_regionCache;
 
+class DependencyMemoryCache {
+public:
+    bool isAccessible(uintptr_t address, size_t size)
+    {
+        if (address < 0x10000 || address >= 0x0000800000000000ull ||
+            size == 0 || size - 1 > UINTPTR_MAX - address) {
+            return false;
+        }
+        for (const MemoryRegion& region : regions_) {
+            if (address >= region.start && address + size <= region.end)
+                return region.accessible;
+        }
+
+        MEMORY_BASIC_INFORMATION mbi = {};
+        if (VirtualQuery((void*)address, &mbi, sizeof(mbi)) == 0) return false;
+        const bool accessible = mbi.State == MEM_COMMIT &&
+            (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) == 0;
+        regions_.push_back({
+            (uintptr_t)mbi.BaseAddress,
+            (uintptr_t)mbi.BaseAddress + mbi.RegionSize,
+            accessible,
+        });
+        return accessible && address + size <= regions_.back().end;
+    }
+
+private:
+    struct MemoryRegion {
+        uintptr_t start;
+        uintptr_t end;
+        bool accessible;
+    };
+    std::vector<MemoryRegion> regions_;
+};
+
 static bool RegionDependenciesValid(const RegionDependencies& dependencies)
 {
     if (dependencies.overflow) return false;
+    DependencyMemoryCache memory;
     for (size_t i = 0; i < dependencies.count; ++i) {
         const RegionDependency& dependency = dependencies.values[i];
         if (dependency.requireAccessible &&
-            !IsAccessibleAddress(dependency.address + dependency.size - 1)) {
+            !memory.isAccessible(dependency.address, dependency.size)) {
             return false;
         }
         uint64_t value = 0;
