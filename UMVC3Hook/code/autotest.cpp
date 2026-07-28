@@ -137,7 +137,8 @@ uint32_t g_suiteRngSeed = 0;
 constexpr int32_t SUITE_COMMAND_TIMEOUT = 600;
 constexpr int32_t SUITE_COMPLETION_TIMEOUT = 3600;
 constexpr int32_t SUITE_QUIET_FRAMES = 20;
-constexpr int32_t NET_SUITE_STABLE_FRAMES = 15;
+constexpr int32_t NET_SUITE_STABLE_FRAMES = 3;
+constexpr int32_t NET_SUITE_DESYNC_FRAMES = 1;
 constexpr int32_t NET_SUITE_HISTORY = 512;
 
 struct NetSuiteFrame {
@@ -158,6 +159,7 @@ bool g_netSuiteSetupApplied = false;
 int32_t g_netSuiteLastForcedFrame = -1;
 int32_t g_netSuiteLastComparedFrame = -1;
 int32_t g_netSuiteStableFrames = 0;
+int32_t g_netSuiteMismatchFrames = 0;
 int32_t g_netSuiteComparedFrames = 0;
 int32_t g_netSuiteFirstMismatchFrame = -1;
 uint32_t g_netSuiteFirstHostChecksum = 0;
@@ -356,6 +358,7 @@ void ResetNetSuiteMoveState(uint32_t moveId, int32_t startFrame)
     g_netSuiteLastForcedFrame = startFrame - 1;
     g_netSuiteLastComparedFrame = startFrame - 1;
     g_netSuiteStableFrames = 0;
+    g_netSuiteMismatchFrames = 0;
     g_netSuiteComparedFrames = 0;
     g_netSuiteFirstMismatchFrame = -1;
     g_netSuiteFirstHostChecksum = 0;
@@ -480,12 +483,30 @@ void ProcessNetSuitePackets()
         ++g_netSuiteComparedFrames;
         g_netSuiteLastComparedFrame = frame;
         bool checksumMatch = host.checksum == client.checksum;
+        g_netSuiteMismatchFrames = checksumMatch
+            ? 0 : g_netSuiteMismatchFrames + 1;
         if (!checksumMatch && g_netSuiteFirstMismatchFrame < 0) {
             g_netSuiteFirstMismatchFrame = frame;
             g_netSuiteFirstHostChecksum = host.checksum;
             g_netSuiteFirstClientChecksum = client.checksum;
             HookLog("AutoTestNet: move %u mismatch frame=%d host=0x%08X client=0x%08X\n",
                     client.move_id, frame, host.checksum, client.checksum);
+        }
+
+        if (g_netSuiteMismatchFrames >= NET_SUITE_DESYNC_FRAMES &&
+            (g_suitePhase == SuitePhase::RunningCommand ||
+             g_suitePhase == SuitePhase::WaitingForCompletion)) {
+            g_desyncDetected = true;
+            g_desyncSeen = false;
+            g_desyncFrame = frame;
+            g_desyncLocalCS = host.checksum;
+            g_desyncRemoteCS = client.checksum;
+            Netplay_SendDesyncTrigger(frame, host.checksum, client.checksum);
+            Rollback_NotifyDesyncTriggered(frame);
+            HookLog("AutoTestNet: move %u persistent desync at frame %d after %d mismatches\n",
+                    client.move_id, frame, g_netSuiteMismatchFrames);
+            FinishSuiteCommand(false, "persistent desync detected");
+            return;
         }
 
         bool bothIdle = host.charactersIdle &&
@@ -495,10 +516,7 @@ void ProcessNetSuitePackets()
         g_suiteStatus.quietFrames = g_netSuiteStableFrames;
         if (g_netSuiteStableFrames >= NET_SUITE_STABLE_FRAMES &&
             g_suitePhase == SuitePhase::WaitingForCompletion) {
-            FinishSuiteCommand(true,
-                g_netSuiteFirstMismatchFrame < 0
-                    ? "checksums stable for 15 idle frames"
-                    : "checksums recovered and stayed stable for 15 idle frames");
+            FinishSuiteCommand(true, "checksums stable for 15 idle frames");
             return;
         }
     }
