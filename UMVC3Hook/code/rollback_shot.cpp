@@ -32,6 +32,7 @@ static constexpr uintptr_t FN_USHOT_UPDATE_HITBOXES = 0x1401C9000;
 static constexpr uintptr_t FN_BUILD_ATTACH_MATRIX = 0x14014F960;
 static constexpr uintptr_t FN_SUNIT_REMOVE_UNIT = 0x14051B9F0;
 static constexpr uintptr_t FN_KING_KOBUN_MOVE = 0x1401BA2D0;
+static constexpr uintptr_t FN_MISSILE_EMPLACEMENT_MOVE = 0x14016F220;
 static constexpr int DYNAMIC_SAFETY = 128;
 static constexpr int SSHOT_SENTINEL_COUNT = 10;
 static constexpr size_t SSHOT_NODE_OFFSET = 0x1450;
@@ -45,6 +46,7 @@ using UnitRemoveFn = char(__fastcall*)(void*, void*);
 using BuildAttachMatrixFn = void(__fastcall*)(void*, void*, char);
 using ShotUpdateHitboxesFn = void(__fastcall*)(void*);
 using KingKobunMoveFn = void(__fastcall*)(void*);
+using MissileEmplacementMoveFn = void(__fastcall*)(void*);
 
 static ShotSpawnFn oShotSpawn = nullptr;
 static ShotSpawnExFn oShotSpawnEx = nullptr;
@@ -52,6 +54,7 @@ static UnitRemoveFn oUnitRemove = nullptr;
 static BuildAttachMatrixFn oBuildAttachMatrix = nullptr;
 static ShotUpdateHitboxesFn oShotUpdateHitboxes = nullptr;
 static KingKobunMoveFn oKingKobunMove = nullptr;
+static MissileEmplacementMoveFn oMissileEmplacementMove = nullptr;
 static std::unordered_map<void*, RollbackShotRecipe> g_liveShotRecipes;
 static uint64_t g_shotSpawnSequence = 0;
 static int g_kingKobunTraceCount = 0;
@@ -249,6 +252,21 @@ static void __fastcall hkKingKobunMove(void* shot)
     }
 }
 
+static void __fastcall hkMissileEmplacementMove(void* shot)
+{
+    constexpr size_t JOINT_TABLE_OFFSET = 0x538;
+    constexpr size_t JOINT_STRIDE = 0xC0;
+    constexpr uint32_t JOINT_COUNT = 8;
+    uint64_t joints = *(uint64_t*)((uint8_t*)shot + JOINT_TABLE_OFFSET);
+    if (!joints || !IsAccessibleRange(joints, JOINT_STRIDE * JOINT_COUNT))
+        return;
+    for (uint32_t index = 0; index < JOINT_COUNT; ++index) {
+        if (!HasCallableDtiVirtual((void*)(joints + index * JOINT_STRIDE)))
+            return;
+    }
+    oMissileEmplacementMove(shot);
+}
+
 static char __fastcall hkUnitRemove(void* manager, void* unit)
 {
     RollbackHookProfileScope profile(RollbackHookProfileId::UnitRemove);
@@ -383,6 +401,11 @@ void Shot_InitHooks()
                 (void**)&oKingKobunMove,
                 "Rollback: hooked uShotVulcanKingKobun::move trace",
                 "Rollback: failed to hook uShotVulcanKingKobun::move (%d)\n");
+    InstallHook(FN_MISSILE_EMPLACEMENT_MOVE,
+                (LPVOID)&hkMissileEmplacementMove,
+                (void**)&oMissileEmplacementMove,
+                "Rollback: hooked missile emplacement joint guard",
+                "Rollback: failed to hook missile emplacement joint guard (%d)\n");
     InstallHook(FN_SUNIT_REMOVE_UNIT, (LPVOID)&hkUnitRemove, (void**)&oUnitRemove,
                 "Rollback: hooked sUnit__removeUnit for recipe lifetime",
                 "Rollback: failed to hook sUnit__removeUnit (%d)\n");
