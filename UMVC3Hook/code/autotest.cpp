@@ -135,6 +135,10 @@ float g_suiteDefenderLife = 0.0f;
 int32_t g_suiteDeadline = -1;
 uint32_t g_suiteIdleActions[2] = {};
 uint32_t g_suiteRngSeed = 0;
+char g_suiteResultPath[MAX_PATH] = {};
+char g_suiteTestDate[32] = {};
+char g_suiteCharacterName[64] = {};
+const char* g_suiteType = "commands";
 constexpr int32_t SUITE_COMMAND_TIMEOUT = 600;
 constexpr int32_t SUITE_COMPLETION_TIMEOUT = 3600;
 constexpr int32_t SUITE_QUIET_FRAMES = 20;
@@ -309,6 +313,94 @@ bool ResetSuiteRng()
     return true;
 }
 
+void InitializeSuiteResultFile(int32_t playerIndex, bool deduplicate)
+{
+    g_suiteResultPath[0] = '\0';
+    g_suiteTestDate[0] = '\0';
+    g_suiteCharacterName[0] = '\0';
+    g_suiteType = deduplicate ? "commands" : "variants";
+
+    SYSTEMTIME now = {};
+    GetLocalTime(&now);
+    snprintf(g_suiteTestDate, sizeof(g_suiteTestDate),
+             "%04u-%02u-%02uT%02u:%02u:%02u.%03u",
+             now.wYear, now.wMonth, now.wDay, now.wHour, now.wMinute,
+             now.wSecond, now.wMilliseconds);
+
+    int32_t characterId = playerIndex >= 0 && playerIndex <= 1
+        ? g_commandListText[playerIndex].characterId : -1;
+    using GetCharacterName_t = const char*(__fastcall*)(int32_t);
+    static GetCharacterName_t getCharacterName =
+        (GetCharacterName_t)_addr(ADDR_GET_CHARACTER_NAME);
+    const char* characterName = characterId > 0
+        ? getCharacterName(characterId) : nullptr;
+    snprintf(g_suiteCharacterName, sizeof(g_suiteCharacterName), "%s",
+             characterName && characterName[0] ? characterName : "Unknown");
+
+    char safeCharacter[64] = {};
+    size_t safeLength = 0;
+    for (const char* c = g_suiteCharacterName; *c &&
+         safeLength + 1 < sizeof(safeCharacter); ++c) {
+        char value = *c;
+        bool valid = (value >= 'a' && value <= 'z') ||
+                     (value >= 'A' && value <= 'Z') ||
+                     (value >= '0' && value <= '9') || value == '-' ||
+                     value == '_';
+        safeCharacter[safeLength++] = valid ? value : '_';
+    }
+    if (!safeCharacter[0])
+        snprintf(safeCharacter, sizeof(safeCharacter), "Unknown");
+
+    if (!CreateDirectoryA("autotest", nullptr) &&
+        GetLastError() != ERROR_ALREADY_EXISTS) {
+        HookLog("AutoTestSuite: could not create ./autotest (error=%lu)\n",
+                GetLastError());
+        return;
+    }
+
+    snprintf(g_suiteResultPath, sizeof(g_suiteResultPath),
+             "autotest/%04u%02u%02u_%02u%02u%02u_%03u_%s_%s.tsv",
+             now.wYear, now.wMonth, now.wDay, now.wHour, now.wMinute,
+             now.wSecond, now.wMilliseconds, safeCharacter, g_suiteType);
+    FILE* file = fopen(g_suiteResultPath, "w");
+    if (!file) {
+        HookLog("AutoTestSuite: could not create %s\n", g_suiteResultPath);
+        g_suiteResultPath[0] = '\0';
+        return;
+    }
+    fprintf(file, "test_date\tcharacter\tsuite_type\tmove_id\tmove\tresult\tcompared_frames\tmismatch_frame\thost_checksum\tclient_checksum\treason\n");
+    fclose(file);
+    HookLog("AutoTestSuite: results -> %s (date=%s character=%s)\n",
+            g_suiteResultPath, g_suiteTestDate, g_suiteCharacterName);
+}
+
+void WriteSuiteResult(bool passed, const char* reason)
+{
+    if (!g_suiteResultPath[0])
+        return;
+
+    bool network = g_netSuiteActive && Netplay_IsActive() && Netplay_IsHost();
+    const char* outcome = network
+        ? (passed ? "SYNC"
+                  : (g_netSuiteFirstMismatchFrame >= 0 ? "DESYNC" : "ERROR"))
+        : (passed ? "PASS" : "FAIL");
+    uint32_t moveId = network ? g_netSuiteMoveId
+                              : (uint32_t)g_suiteStatus.currentCommand + 1;
+    FILE* file = fopen(g_suiteResultPath, "a");
+    if (!file) {
+        HookLog("AutoTestSuite: could not append %s\n", g_suiteResultPath);
+        return;
+    }
+    fprintf(file, "%s\t%s\t%s\t%u\t%s\t%s\t%d\t%d\t0x%08X\t0x%08X\t%s\n",
+            g_suiteTestDate, g_suiteCharacterName, g_suiteType, moveId,
+            g_suiteStatus.currentName, outcome,
+            network ? g_netSuiteComparedFrames : 0,
+            network ? g_netSuiteFirstMismatchFrame : -1,
+            network ? g_netSuiteFirstHostChecksum : 0,
+            network ? g_netSuiteFirstClientChecksum : 0, reason);
+    fclose(file);
+}
+
 void FinishSuiteCommand(bool passed, const char* reason)
 {
     if (passed)
@@ -327,21 +419,8 @@ void FinishSuiteCommand(bool passed, const char* reason)
     g_runningRuntimeCommand = false;
     g_runningRuntimeHyper = false;
     g_runningManualCommand = -1;
+    WriteSuiteResult(passed, reason);
     if (g_netSuiteActive && Netplay_IsActive() && Netplay_IsHost()) {
-        const char* outcome = passed ? "SYNC"
-            : (g_netSuiteFirstMismatchFrame >= 0 ? "DESYNC" : "ERROR");
-        FILE* file = fopen("autotest_results.tsv", "a");
-        if (file) {
-            fprintf(file, "%u\t%s\t%s\t%d\t%d\t0x%08X\t0x%08X\t%s\n",
-                    g_netSuiteMoveId, g_suiteStatus.currentName,
-                    outcome, g_netSuiteComparedFrames,
-                    g_netSuiteFirstMismatchFrame,
-                    g_netSuiteFirstHostChecksum,
-                    g_netSuiteFirstClientChecksum, reason);
-            fclose(file);
-        } else {
-            HookLog("AutoTestNet: could not append autotest_results.tsv\n");
-        }
         g_netSuiteRestartPending = true;
         AutoTest_PrepareForRestart();
         FrameStepper_ScheduleAutoTestRestart(g_suiteRngSeed);
@@ -478,11 +557,21 @@ void ProcessNetSuitePackets()
     for (;;) {
         int32_t frame = g_netSuiteLastComparedFrame + 1;
         uint32_t idx = (uint32_t)frame % NET_SUITE_HISTORY;
-        const NetSuiteFrame& host = g_netSuiteLiveFrames[idx];
+        NetSuiteFrame& host = g_netSuiteLiveFrames[idx];
         const AutoTestFramePacket& client = g_netSuiteRemoteFrames[idx];
         if (host.frame != frame || client.frame != frame ||
-            client.move_id != g_netSuiteMoveId)
+            client.move_id != g_netSuiteMoveId ||
+            !Controller_IsFrameConfirmed(frame))
             break;
+
+        // The live callback may have cached speculative host state. Once input
+        // is confirmed, read the checksum ring again so ordinary correction
+        // rollback can replace it before comparison, matching the normal
+        // confirmed-checksum desync path.
+        uint32_t confirmedHostChecksum = 0;
+        if (!Controller_GetFrameChecksum(frame, &confirmedHostChecksum))
+            break;
+        host.checksum = confirmedHostChecksum;
 
         ++g_netSuiteComparedFrames;
         g_netSuiteLastComparedFrame = frame;
@@ -520,7 +609,11 @@ void ProcessNetSuitePackets()
         g_suiteStatus.quietFrames = g_netSuiteStableFrames;
         if (g_netSuiteStableFrames >= NET_SUITE_STABLE_FRAMES &&
             g_suitePhase == SuitePhase::WaitingForCompletion) {
-            FinishSuiteCommand(true, "checksums stable for 15 idle frames");
+            char reason[96];
+            snprintf(reason, sizeof(reason),
+                     "checksums stable for %d idle frames",
+                     NET_SUITE_STABLE_FRAMES);
+            FinishSuiteCommand(true, reason);
             return;
         }
     }
@@ -1710,6 +1803,8 @@ bool StartSuite(int32_t playerIndex, bool facingLeft, bool deduplicate)
     }
     if (commandCount == 0)
         return false;
+
+    InitializeSuiteResultFile(playerIndex, deduplicate);
 
     for (int32_t i = 0; i < commandCount; ++i) {
         const AutoTestRuntimeCommand& command = g_suiteCommands[i];
