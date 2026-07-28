@@ -77,6 +77,9 @@ static void __fastcall hkCChrSetPos(uint64_t character, const float* position)
 
 static void __fastcall hkMvc3MainMove(uint64_t main)
 {
+    // Heap-backed native objects can be retired or remapped between frames.
+    // Every accessibility helper remains cached within this frame generation.
+    InvalidateMemoryQueryCache();
     Rollback_SetMainInstance(main);
 
     int32_t curFrame = Controller_GetNetFrameCount();

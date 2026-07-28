@@ -125,6 +125,7 @@ static void* __fastcall hkShotSpawn(void* manager, void* element, uint64_t initP
     CapturePreSpawnRng(recipe, ownerChr);
     void* shot = oShotSpawn(manager, element, initParam, posData, ownerChr,
                             objectRef1, slotId, objectRef2);
+    InvalidateMemoryQueryCache();
     if (shot) {
         recipe.savedPtr = shot;
         recipe.restoredPtr = shot;
@@ -164,6 +165,7 @@ static void* __fastcall hkShotSpawnEx(void* manager, void* element, uint64_t ini
     CapturePreSpawnRng(recipe, ownerChr);
     void* shot = oShotSpawnEx(manager, element, initParam, posData, ownerChr,
                               objectRef1, slotId, objectRef2, a9, a10, a11, a12);
+    InvalidateMemoryQueryCache();
     if (shot) {
         recipe.savedPtr = shot;
         recipe.restoredPtr = shot;
@@ -265,6 +267,7 @@ static char __fastcall hkUnitRemove(void* manager, void* unit)
         RollbackHookProfileScope child(RollbackHookProfileId::UnitRemoveNative);
         result = oUnitRemove(manager, unit);
     }
+    InvalidateMemoryQueryCache();
     if (result && unit) {
         RollbackHookProfileScope child(RollbackHookProfileId::UnitRemoveRecipeCleanup);
         if (!IsLinkedShot(unit)) g_liveShotRecipes.erase(unit);

@@ -17,6 +17,10 @@ bool IsUnitObject(const void* object);
 bool IsEffectObject(const void* object);
 bool IsBaseModelObject(const void* object);
 
+// Invalidates cached VirtualQuery results on every thread at its next lookup.
+// Call before or after native work that can release or remap allocations.
+void InvalidateMemoryQueryCache();
+
 class ScopedMemoryQueryCache {
 public:
     ScopedMemoryQueryCache();

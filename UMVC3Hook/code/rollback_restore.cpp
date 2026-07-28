@@ -173,6 +173,7 @@ void Rollback_DestroyCollisionNodeClones(RollbackSnapshotSlot& slot)
         if (destroy && IsAccessibleAddress((uint64_t)destroy))
             destroy(entry.clone, 1);
     }
+    InvalidateMemoryQueryCache();
     slot.collisionNodeClones.clear();
 }
 
@@ -189,6 +190,7 @@ void Rollback_CaptureCollisionNodeClones(RollbackSnapshotSlot& slot)
         if (!HasCallableDtiVirtual(region.ptr)) continue;
 
         void* clone = createNode(nullptr);
+        InvalidateMemoryQueryCache();
         if (!clone) continue;
         // Inherit the source child factory before deep-copying its children.
         copyNode(clone, region.ptr, false, true);

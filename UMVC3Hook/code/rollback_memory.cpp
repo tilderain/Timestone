@@ -19,13 +19,32 @@ struct CachedMemoryRegion {
 };
 
 thread_local std::vector<CachedMemoryRegion> g_memoryRegions;
-thread_local uint32_t g_memoryCacheDepth = 0;
+thread_local LONG g_memoryCacheEpochSeen = 0;
+thread_local size_t g_lastMemoryRegion = SIZE_MAX;
+volatile LONG g_memoryCacheEpoch = 1;
+
+void SynchronizeMemoryCacheEpoch()
+{
+    LONG epoch = InterlockedCompareExchange(&g_memoryCacheEpoch, 0, 0);
+    if (g_memoryCacheEpochSeen == epoch) return;
+    g_memoryRegions.clear();
+    g_lastMemoryRegion = SIZE_MAX;
+    g_memoryCacheEpochSeen = epoch;
+}
 
 const CachedMemoryRegion* GetCachedMemoryRegion(uint64_t address)
 {
-    if (g_memoryCacheDepth == 0) return nullptr;
-    for (const CachedMemoryRegion& region : g_memoryRegions) {
+    SynchronizeMemoryCacheEpoch();
+    if (g_lastMemoryRegion < g_memoryRegions.size()) {
+        const CachedMemoryRegion& region = g_memoryRegions[g_lastMemoryRegion];
         if (address >= region.start && address < region.end) return &region;
+    }
+    for (size_t i = 0; i < g_memoryRegions.size(); ++i) {
+        const CachedMemoryRegion& region = g_memoryRegions[i];
+        if (address >= region.start && address < region.end) {
+            g_lastMemoryRegion = i;
+            return &region;
+        }
     }
 
     MEMORY_BASIC_INFORMATION mbi = {};
@@ -40,6 +59,7 @@ const CachedMemoryRegion* GetCachedMemoryRegion(uint64_t address)
         accessible,
         accessible && (mbi.Protect & executable) != 0,
     });
+    g_lastMemoryRegion = g_memoryRegions.size() - 1;
     return &g_memoryRegions.back();
 }
 
@@ -167,13 +187,17 @@ bool IsBaseModelObject(const void* object)
     return IsObjectKindOf(object, DTI_UBASEMODEL);
 }
 
+void InvalidateMemoryQueryCache()
+{
+    InterlockedIncrement(&g_memoryCacheEpoch);
+}
+
 ScopedMemoryQueryCache::ScopedMemoryQueryCache()
 {
-    if (g_memoryCacheDepth++ == 0) g_memoryRegions.clear();
+    InvalidateMemoryQueryCache();
 }
 
 ScopedMemoryQueryCache::~ScopedMemoryQueryCache()
 {
-    if (g_memoryCacheDepth > 0 && --g_memoryCacheDepth == 0)
-        g_memoryRegions.clear();
+    InvalidateMemoryQueryCache();
 }

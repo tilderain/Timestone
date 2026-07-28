@@ -142,6 +142,7 @@ static void* __fastcall hkEffectCreate(void* manager, int effectId, int a3,
     RollbackHookProfileScope profile(RollbackHookProfileId::EffectCreate);
     void* effect = oEffectCreate(manager, effectId, a3, attachTo, a5, a6, a7,
                                  a8, a9, a10, a11, a12, a13);
+    InvalidateMemoryQueryCache();
     if (effect) {
         RollbackEffectRecipe recipe = {
             effect, effect, manager, effectId, a3, attachTo, a5, a6, a7, a8,
