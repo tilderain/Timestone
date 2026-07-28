@@ -53,8 +53,8 @@ constexpr size_t NET_HISTORY_SIZE = 16;
 struct InputPacket {
     uint32_t type;               // PACKET_INPUT
     uint32_t start_frame;        // inputs[0] corresponds to this frame
-    uint32_t checksum_frame;     // game frame this checksum is for (past frame)
-    uint32_t checksum;           // checksum of game state at checksum_frame
+    uint32_t checksum_frame;     // confirmed game frame, UINT32_MAX when absent
+    uint32_t checksum;           // corrected state at checksum_frame
     uint32_t inputs[NET_HISTORY_SIZE];
     int32_t  frame_advantage;    // sender's local frame advantage (negative = sender is ahead)
     uint32_t flags;              // 0 = seed packet, non-zero = real packet

@@ -125,6 +125,9 @@ extern "C" void Controller_DumpOldInputs(const char* label);
 extern "C" void Controller_SilentFrameStart();
 extern "C" void Controller_SilentFrameEnd();
 
+// Replace the checksum for a historical frame after its corrected re-sim tick.
+extern "C" void Controller_RecordFrameChecksum(int32_t frame);
+
 // Netplay debug info — read from framestepper draw
 extern "C" int32_t  Controller_GetDelayFrames();
 extern "C" int32_t  Controller_GetNetFrameCount();

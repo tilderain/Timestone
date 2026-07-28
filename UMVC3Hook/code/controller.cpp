@@ -278,8 +278,12 @@ uint32_t g_desyncRemoteCS     = 0;
 
 static uint32_t  g_localChecksum[RING_SIZE];
 static uint32_t  g_remoteChecksum[RING_SIZE];
+static int32_t   g_localChecksumFrame[RING_SIZE];
+static int32_t   g_remoteChecksumFrame[RING_SIZE];
 static int32_t   g_desyncChecked[RING_SIZE];   // frame number when checksum was compared, -1 = unchecked
 static bool      g_desyncMismatch[RING_SIZE];  // true if that frame exceeded threshold
+static int32_t   g_confirmedChecksumThrough = -1;
+static int32_t   g_lastAdvertisedChecksumFrame = -1;
 
 static constexpr uint32_t DESYNC_THRESHOLD         = 5;
 static constexpr int32_t  DESYNC_SKIP_FRAMES       = 0;
@@ -375,8 +379,12 @@ extern "C" void Controller_ResetBuffers()
     g_desyncRemoteCS   = 0;
     std::memset(g_localChecksum,    0, sizeof(g_localChecksum));
     std::memset(g_remoteChecksum,   0, sizeof(g_remoteChecksum));
+    std::memset(g_localChecksumFrame,  0xFF, sizeof(g_localChecksumFrame));
+    std::memset(g_remoteChecksumFrame, 0xFF, sizeof(g_remoteChecksumFrame));
     std::memset(g_desyncChecked,  0xFF, sizeof(g_desyncChecked));   // -1 per int32_t
     std::memset(g_desyncMismatch, 0,    sizeof(g_desyncMismatch));
+    g_confirmedChecksumThrough = -1;
+    g_lastAdvertisedChecksumFrame = -1;
     g_localFrameAdvantage  = 0;
     g_remoteFrameAdvantage = 0;
     g_timesyncFrameCount   = 0;
@@ -1061,7 +1069,8 @@ static void DrainAndProcessPackets()
             }
         }
 
-        // 2. Process the piggybacked checksum (always processed from every packet)
+        // 2. Queue the piggybacked checksum. It is compared at frame end, after
+        // any rollback requested by this packet has replaced speculative state.
         if (g_netFrameCount >= DESYNC_SKIP_FRAMES)
         {
             int32_t csFrame = (int32_t)inPkt.checksum_frame;
@@ -1069,21 +1078,7 @@ static void DrainAndProcessPackets()
             {
                 uint32_t ridx = (uint32_t)csFrame % RING_SIZE;
                 g_remoteChecksum[ridx] = inPkt.checksum;
-
-                if (g_localChecksum[ridx] != 0 && csFrame < g_netFrameCount)
-                {
-                    uint32_t diff = g_localChecksum[ridx] > inPkt.checksum
-                                    ? g_localChecksum[ridx] - inPkt.checksum
-                                    : inPkt.checksum - g_localChecksum[ridx];
-                    g_desyncChecked[ridx]  = csFrame;
-                    g_desyncMismatch[ridx] = (diff > DESYNC_THRESHOLD);
-                    if (diff > DESYNC_THRESHOLD)
-                    {
-                        if (!g_desyncSeen && !g_desyncDetected)
-                            HookLog("DESYNC MISMATCH at frame %d: diff=%u local=0x%08X remote=0x%08X\n",
-                                    csFrame, diff, g_localChecksum[ridx], inPkt.checksum);
-                    }
-                }
+                g_remoteChecksumFrame[ridx] = csFrame;
             }
         }
 
@@ -1388,6 +1383,55 @@ static uint32_t ComputeChecksum()
     return cs;
 }
 
+extern "C" void Controller_RecordFrameChecksum(int32_t frame)
+{
+    if (frame < DESYNC_SKIP_FRAMES) return;
+    uint32_t idx = (uint32_t)frame % RING_SIZE;
+    g_localChecksum[idx] = ComputeChecksum();
+    g_localChecksumFrame[idx] = frame;
+
+    // A corrected frame invalidates any earlier comparison for that frame.
+    // Confirmed-only comparison normally prevents this, but clearing the tags
+    // also makes explicit/manual re-simulation safe.
+    if (g_desyncChecked[idx] == frame)
+    {
+        g_desyncChecked[idx] = -1;
+        g_desyncMismatch[idx] = false;
+    }
+}
+
+static void UpdateConfirmedChecksums()
+{
+    while (g_confirmedChecksumThrough < g_netFrameCount)
+    {
+        int32_t next = g_confirmedChecksumThrough + 1;
+        uint32_t idx = (uint32_t)next % RING_SIZE;
+        if (!IsFrameConfirmed(next) || g_localChecksumFrame[idx] != next)
+            break;
+        g_confirmedChecksumThrough = next;
+    }
+
+    int32_t first = g_confirmedChecksumThrough - RING_SIZE + 1;
+    if (first < 0) first = 0;
+    for (int32_t frame = first; frame <= g_confirmedChecksumThrough; ++frame)
+    {
+        uint32_t idx = (uint32_t)frame % RING_SIZE;
+        if (g_localChecksumFrame[idx] != frame ||
+            g_remoteChecksumFrame[idx] != frame ||
+            g_desyncChecked[idx] == frame)
+            continue;
+
+        uint32_t local = g_localChecksum[idx];
+        uint32_t remote = g_remoteChecksum[idx];
+        uint32_t diff = local > remote ? local - remote : remote - local;
+        g_desyncChecked[idx] = frame;
+        g_desyncMismatch[idx] = diff > DESYNC_THRESHOLD;
+        if (diff > DESYNC_THRESHOLD && !g_desyncSeen && !g_desyncDetected)
+            HookLog("DESYNC MISMATCH at confirmed frame %d: diff=%u local=0x%08X remote=0x%08X\n",
+                    frame, diff, local, remote);
+    }
+}
+
 extern "C" void Controller_OnFrameEnd()
 {
     if (!Netplay_IsActive())
@@ -1438,6 +1482,7 @@ extern "C" void Controller_OnFrameEnd()
     //     inputs[MAX_HISTORY-1]        → frame start_frame+MAX_HISTORY-1 (newest)
     //     checksum is piggybacked (Slippi-style) for desync detection.
     InputPacket outPkt = {};
+    outPkt.checksum_frame = 0xFFFFFFFFu;
     int32_t packetEndFrame = g_netFrameCount + g_delayFrames;
     for (int32_t frame = g_netFrameCount; frame < g_netFrameCount + MAX_HISTORY; ++frame)
     {
@@ -1456,11 +1501,20 @@ extern "C" void Controller_OnFrameEnd()
 
     if (!g_isResimulating && g_netFrameCount >= DESYNC_SKIP_FRAMES)
     {
-        uint32_t cs = ComputeChecksum();
-        uint32_t idx = (uint32_t)g_netFrameCount % RING_SIZE;
-        g_localChecksum[idx] = cs;
-        outPkt.checksum_frame = (uint32_t)g_netFrameCount;
-        outPkt.checksum       = cs;
+        Controller_RecordFrameChecksum(g_netFrameCount);
+        UpdateConfirmedChecksums();
+
+        int32_t checksumFrame = g_lastAdvertisedChecksumFrame + 1;
+        if (checksumFrame <= g_confirmedChecksumThrough)
+        {
+            uint32_t idx = (uint32_t)checksumFrame % RING_SIZE;
+            if (g_localChecksumFrame[idx] == checksumFrame)
+            {
+                outPkt.checksum_frame = (uint32_t)checksumFrame;
+                outPkt.checksum = g_localChecksum[idx];
+                g_lastAdvertisedChecksumFrame = checksumFrame;
+            }
+        }
     }
 
     // Fill frame advantage (GGPO-style) — tell the remote peer our local estimate.

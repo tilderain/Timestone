@@ -198,6 +198,8 @@ void Rollback_ReSimulate(int32_t startFrame, int32_t endFrame)
         timer.Add(&RollbackProfile::frameNativeTick,
                   &RollbackProfile::frameNativeTickMax);
         Controller_SilentFrameEnd();
+        if (Netplay_IsActive())
+            Controller_RecordFrameChecksum(frame);
         Controller_LogReSimFrame(frame);
         timer.Add(&RollbackProfile::frameInputEnd);
         NDJSON_CaptureFrame(frame, true, true);
