@@ -71,6 +71,9 @@ static constexpr uint32_t SUNIT_CATEGORY_COUNT_OFFSET = 0xC38;
 static constexpr uint32_t SUNIT_CATEGORY_LISTS_OFFSET = 0x50;
 static constexpr uint32_t SUNIT_CATEGORY_LIST_STRIDE = 0x30;
 static constexpr uint32_t SUNIT_CHARACTER_CATEGORY = 8;
+static constexpr uint32_t SUNIT_CHARACTER_POST_CATEGORY = 18;
+static constexpr uint32_t UCHARACTER_POST_CAMERA_STATE_OFFSET = 0x40;
+static constexpr size_t UCHARACTER_POST_CAMERA_STATE_SIZE = 0x20;
 static constexpr size_t SMAIN_SIZE = 0x40080;
 static constexpr int MAX_REGIONS = ROLLBACK_MAX_REGIONS;
 static constexpr int DYNAMIC_SAFETY = 128;
@@ -948,6 +951,22 @@ static int BuildRegionsUncached(Region* regions, int maxRegions,
                     }
                 }
                 helper = read.operator()<uint64_t>(helper + 0x18);
+            }
+        }
+
+        // uCharacterPost::sync owns the camera-relative fighter correction at
+        // the end of category 18. Its center and cached point-character pair
+        // feed both point recentering and incoming assist/TAC placement.
+        if (sUnit && categoryCount > SUNIT_CHARACTER_POST_CATEGORY) {
+            uint64_t characterPost = read.operator()<uint64_t>(
+                sUnit + SUNIT_CATEGORY_LISTS_OFFSET +
+                SUNIT_CATEGORY_LIST_STRIDE * SUNIT_CHARACTER_POST_CATEGORY,
+                true);
+            if (characterPost && IsAccessibleAddress(
+                    characterPost + UCHARACTER_POST_CAMERA_STATE_OFFSET +
+                    UCHARACTER_POST_CAMERA_STATE_SIZE - 1)) {
+                add((void*)(characterPost + UCHARACTER_POST_CAMERA_STATE_OFFSET),
+                    UCHARACTER_POST_CAMERA_STATE_SIZE);
             }
         }
     }
