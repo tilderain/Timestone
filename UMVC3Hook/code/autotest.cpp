@@ -202,6 +202,7 @@ struct CommandNotation {
     int32_t directionCount;
     uint32_t buttons;
     int32_t attackCount;
+    int32_t modifierCount;
 };
 
 CommandNotation g_suiteCommandNotations[AUTOTEST_MAX_RUNTIME_COMMANDS] = {};
@@ -922,6 +923,11 @@ bool GetDisplayRowNotation(uint64_t rowNotation, int32_t rowIndex,
             notation.buttons |= 0x10u << (token - 14);
         } else if (token == 18) {
             ++notation.attackCount;
+        } else if (token != 8) {
+            // Remaining sprites describe variants such as vertical up/down.
+            // They are not pad inputs, but distinguish decorated display rows
+            // from the plain command when their runtime motions are identical.
+            ++notation.modifierCount;
         }
     }
     return notation.directionCount > 0 || notation.buttons != 0 ||
@@ -1213,6 +1219,8 @@ void GetInGameCommandListName(int32_t playerIndex, uint64_t character,
         return;
 
     int32_t matchedRow = -1;
+    int32_t matchedModifierCount = INT32_MAX;
+    bool ambiguous = false;
     for (int32_t rowIndex = 0; rowIndex < rowCount; ++rowIndex) {
         CommandNotation displayNotation = {};
         if (!GetDisplayRowNotation(cached.rowNotation, rowIndex,
@@ -1221,11 +1229,15 @@ void GetInGameCommandListName(int32_t playerIndex, uint64_t character,
                                    commandFlags)) {
             continue;
         }
-        if (matchedRow >= 0)
-            return;
-        matchedRow = rowIndex;
+        if (displayNotation.modifierCount < matchedModifierCount) {
+            matchedRow = rowIndex;
+            matchedModifierCount = displayNotation.modifierCount;
+            ambiguous = false;
+        } else if (displayNotation.modifierCount == matchedModifierCount) {
+            ambiguous = true;
+        }
     }
-    if (matchedRow < 0)
+    if (matchedRow < 0 || ambiguous)
         return;
 
     int32_t textIndex = *(int32_t*)(cached.rowMetadata +
@@ -1293,6 +1305,8 @@ bool GetStagedHyperCommand(int32_t playerIndex, uint64_t resource,
         return false;
 
     int32_t matchedRow = -1;
+    int32_t matchedModifierCount = INT32_MAX;
+    bool ambiguous = false;
     CommandNotation matchedNotation = {};
     for (int32_t row = 0; row < cached.rowCount; ++row) {
         const int32_t* metadata = (const int32_t*)(cached.rowMetadata +
@@ -1312,12 +1326,16 @@ bool GetStagedHyperCommand(int32_t playerIndex, uint64_t resource,
         }
         if (!directionsMatch)
             continue;
-        if (matchedRow >= 0)
-            return false;
-        matchedRow = row;
-        matchedNotation = display;
+        if (display.modifierCount < matchedModifierCount) {
+            matchedRow = row;
+            matchedModifierCount = display.modifierCount;
+            matchedNotation = display;
+            ambiguous = false;
+        } else if (display.modifierCount == matchedModifierCount) {
+            ambiguous = true;
+        }
     }
-    if (matchedRow < 0)
+    if (matchedRow < 0 || ambiguous)
         return false;
 
     uint32_t textCount = *(uint32_t*)(textResource + 0x70);
