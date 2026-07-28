@@ -149,6 +149,7 @@ void SendTrainingLaunchPacket()
         packet.p2Chars[i] = g_dialogConfig.p2Chars[i];
     }
     packet.stageId = g_dialogConfig.stageId;
+    packet.flags = TrainingBoot_GetBothCpus() ? LAUNCH_TRAINING_BOTH_CPUS : 0;
     ENetPacket* enetPacket = enet_packet_create(&packet, sizeof(packet), ENET_PACKET_FLAG_RELIABLE);
     if (!enetPacket || enet_peer_send(g_dialogConfig.enetPeer, 0, enetPacket) != 0) {
         if (enetPacket) enet_packet_destroy(enetPacket);
@@ -173,6 +174,7 @@ bool ApplyTrainingLaunchPacket(const LaunchTrainingPacket& packet)
         g_dialogConfig.p2Chars[i] = packet.p2Chars[i];
     }
     g_dialogConfig.stageId = packet.stageId;
+    TrainingBoot_SetBothCpus((packet.flags & LAUNCH_TRAINING_BOTH_CPUS) != 0);
 
     TrainingBootConfig cfg = {};
     for (int i = 0; i < 3; ++i) {
@@ -221,6 +223,7 @@ enum CtrlId {
     ID_LAUNCH_NORMAL      = 1001,
     ID_LAUNCH_TRAINING    = 1002,
     ID_LAUNCH_DUAL        = 1003,
+    ID_LAUNCH_DUAL_CPUS   = 1004,
     // Character combos
     ID_P1_SLOT1           = 2001,
     ID_P1_SLOT2           = 2002,
@@ -305,7 +308,7 @@ LaunchOption ShowLaunchMenu()
 
     RegisterClassA(&wc);
 
-    int w = 540, h = 660;
+    int w = 540, h = 705;
     int x = (GetSystemMetrics(SM_CXSCREEN) - w) / 2;
     int y = (GetSystemMetrics(SM_CYSCREEN) - h) / 2;
 
@@ -583,6 +586,11 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
         CreateWindowA("STATIC", "Spawned instance will auto-enter training.",
             WS_VISIBLE | WS_CHILD, leftX + 250, y + 8, 240, 18,
             hDlg, NULL, NULL, NULL);
+        y += 38;
+
+        CreateWindowA("BUTTON", "Launch Dual Training with CPUs",
+            WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON,
+            leftX, y, 490, 32, hDlg, (HMENU)ID_LAUNCH_DUAL_CPUS, NULL, NULL);
 
         return msg == WM_INITDIALOG ? TRUE : 0;
     }
@@ -683,6 +691,7 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
         }
         case ID_LAUNCH_TRAINING:
         case ID_LAUNCH_DUAL:
+        case ID_LAUNCH_DUAL_CPUS:
         {
             // Read character selections from combo boxes
             for (int i = 0; i < 3; i++) {
@@ -711,6 +720,7 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
 
             // Apply config to training boot
             SaveRollbackSettings();
+            TrainingBoot_SetBothCpus(LOWORD(wParam) == ID_LAUNCH_DUAL_CPUS);
             SendTrainingLaunchPacket();
             TrainingBootConfig cfg;
             for (int i = 0; i < 3; i++) {

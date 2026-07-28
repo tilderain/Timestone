@@ -27,4 +27,6 @@ Rollback past step transition (fade to black) will make black screen forever
 
 For non modded characters and shots we need to hardcode dti size
 
-Hook sync phase
+Advancing guard desyncs
+
+Assist turns invisible forever?

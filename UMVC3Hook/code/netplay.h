@@ -82,6 +82,11 @@ struct LaunchTrainingPacket {
     int32_t  p1Chars[3];
     int32_t  p2Chars[3];
     int32_t  stageId;
+    uint32_t flags;              // LaunchTrainingFlags
+};
+
+enum LaunchTrainingFlags : uint32_t {
+    LAUNCH_TRAINING_BOTH_CPUS = 1 << 0,
 };
 
 enum DesyncAction : uint32_t {

@@ -46,6 +46,13 @@ static constexpr uintptr_t BATTLE_SETTING_RESTORE_BACKUP     = 0x14024de40;
 // Access pattern: bs + 0x3bc0c + ((slot % 3) + (team & 0xf) * 3) * 4
 static constexpr uintptr_t CHAR_ID_ARRAY_OFFSET              = 0x3bc0c;
 
+// Training/versus options in sBattleSetting. These are consumed by the native
+// training UI setup after the battle descriptor has been restored.
+static constexpr uintptr_t BS_P2_METER_DEFAULT_OFFSET         = 0x29c;
+static constexpr uintptr_t BS_P1_METER_DEFAULT_OFFSET         = 0x2d4;
+static constexpr uintptr_t BS_HP_DRAIN_MODE_OFFSET            = 0x2d8;
+static constexpr uintptr_t SLOT_CPU_CONTROL_OFFSET             = 0x18;
+
 // --- Pad / Keyboard input routing ---
 // sPad singleton instance pointer (written by sPad__sPad_ctor @ 0x14050fbe3).
 // The pad object has 4 slots at stride 0x2E0 starting at +0x62.
@@ -100,6 +107,7 @@ static TrainingBootConfig g_bootConfig = {
 static bool g_hasBooted = false;
 static bool g_hooksInitialized = false;
 static bool g_controllerConfigRequested = false;
+static bool g_bothCpus = false;
 
 // ---------------------------------------------------------------------------
 // Extern from dllmain.cpp
@@ -118,6 +126,16 @@ const TrainingBootConfig& TrainingBoot_GetDefaultConfig()
 void TrainingBoot_SetConfig(const TrainingBootConfig& cfg)
 {
     g_bootConfig = cfg;
+}
+
+void TrainingBoot_SetBothCpus(bool enabled)
+{
+    g_bothCpus = enabled;
+}
+
+bool TrainingBoot_GetBothCpus()
+{
+    return g_bothCpus;
 }
 
 // ---------------------------------------------------------------------------
@@ -146,6 +164,36 @@ static void WriteSlotEntry(uint64_t bs, int index, int teamId, int32_t charId)
     ((SetSlotValue_t)_addr(BATTLE_SETTING_SET_ASSIST_TYPE))(entry, 0);
     HookLog("TrainingBoot: Native slot entry %d: team=%d charId=%d dti=%d\n",
             index, teamId, charId, *(int32_t*)(entry + 0x10));
+}
+
+static void ConfigureTrainingMatchDefaults(uint64_t bs)
+{
+    // 0xff is the native "Very Hard" CPU level (the final entry in the
+    // versus CPU-level table: 0x20, 0x60, 0xa0, 0xc0, 0xff).
+    typedef void(__fastcall* SetCpuLevel_t)(uint64_t, int32_t);
+    ((SetCpuLevel_t)_addr(0x140146430))(bs, 0xff);
+
+    // Native training setup multiplies these values by 10000 when initializing
+    // the two team meters. Keep both teams at the regular-versus default of 1.
+    *(int32_t*)(bs + BS_P1_METER_DEFAULT_OFFSET) = 1;
+    *(int32_t*)(bs + BS_P2_METER_DEFAULT_OFFSET) = 1;
+
+    // Zero is the normal HP-drain behavior used by the native training path.
+    *(int32_t*)(bs + BS_HP_DRAIN_MODE_OFFSET) = 0;
+
+    HookLog("TrainingBoot: Defaults set (CPU=Very Hard, meter P1/P2=1, HP drain=normal)\n");
+
+    const int32_t cpuControl = g_bothCpus ? 1 : 0;
+    for (int team = 0; team < 2; ++team) {
+        for (int slot = 0; slot < 3; ++slot) {
+            *(int32_t*)(bs + 0x38 + (team * 3 + slot) * 0x58 +
+                        SLOT_CPU_CONTROL_OFFSET) = cpuControl;
+            *(int32_t*)(bs + 0x378 + (team * 3 + slot) * 0x58 +
+                        SLOT_CPU_CONTROL_OFFSET) = cpuControl;
+        }
+    }
+    HookLog("TrainingBoot: CPU control for both teams %s\n",
+            g_bothCpus ? "enabled" : "disabled");
 }
 
 // ---------------------------------------------------------------------------
@@ -345,6 +393,8 @@ void BootIntoTraining()
     //   9 = Online (alt)
     ((SetInt_t)_addr(BATTLE_SETTING_SET_BATTLE_TYPE))(bs, 0);
     HookLog("TrainingBoot: Battle type set to training (0)\n");
+
+    ConfigureTrainingMatchDefaults(bs);
 
     typedef void(__fastcall* CommitOnePlay_t)(uint64_t, uint8_t);
     ((CommitOnePlay_t)_addr(BATTLE_SETTING_COMMIT_ONE_PLAY))(bs, 1);

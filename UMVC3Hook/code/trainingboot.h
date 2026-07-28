@@ -112,6 +112,10 @@ const TrainingBootConfig& TrainingBoot_GetDefaultConfig();
 // Set a custom config (e.g. from command-line parsing).
 void TrainingBoot_SetConfig(const TrainingBootConfig& cfg);
 
+// Independently controls whether all six character slots use CPU control.
+void TrainingBoot_SetBothCpus(bool enabled);
+bool TrainingBoot_GetBothCpus();
+
 // Execute the boot sequence: configure sBattleSetting and transition to
 // aNextBattle. Called once from the aTitle__update hook.
 void BootIntoTraining();
