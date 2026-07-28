@@ -485,7 +485,7 @@ static void __fastcall HookedMove(void* sMvc3Main)
             if (pad) {
                 static uint32_t s_netplayFrameCounter = 0;
                 s_netplayFrameCounter++;
-                if (s_netplayFrameCounter % 60 == 0) {
+                if (s_netplayFrameCounter % 600 == 0) {
                     uint32_t recvInput = Netplay_HasRemoteInput() ? Netplay_GetRemoteInput() : 0;
                     HookLog("[Netplay] Frame %u | Recv: 0x%08X | RTT: %u ms\n",
                             s_netplayFrameCounter, recvInput, Netplay_GetRTT());

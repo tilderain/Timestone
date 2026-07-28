@@ -1194,9 +1194,9 @@ extern "C" void Controller_OnFrameStart()
                     if (recv != used)
                     {
                         earliestConflict = f;
-                        HookLog("RollbackNet: conflict at frame %d  used=0x%08X recv=0x%08X diff=0x%08X re-sim [%d, %d)\n",
-                                f, used, recv, used ^ recv,
-                                f, g_netFrameCount);
+                        //HookLog("RollbackNet: conflict at frame %d  used=0x%08X recv=0x%08X diff=0x%08X re-sim [%d, %d)\n",
+                        //        f, used, recv, used ^ recv,
+                        //        f, g_netFrameCount);
                         break;
                     }
                 }

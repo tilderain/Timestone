@@ -125,9 +125,9 @@ static DWORD WINAPI Netplay_ServiceThread(LPVOID)
         // --- Periodic stats (every ~3 seconds) ---
         static uint32_t lastStatsTick = GetTickCount();
         uint32_t now = GetTickCount();
-        if (now - lastStatsTick >= 3000)
+        if (now - lastStatsTick >= 5000)
         {
-            HookLog("Netplay: received %u packets in last 3s (total %u)\n",
+            HookLog("Netplay: received %u packets in last 5s (total %u)\n",
                     g_recvCount - g_lastRecv, g_recvCount);
             g_lastRecv = g_recvCount;
             lastStatsTick = now;
