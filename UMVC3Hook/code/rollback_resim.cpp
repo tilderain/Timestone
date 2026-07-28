@@ -176,7 +176,7 @@ void Rollback_ReSimulate(int32_t startFrame, int32_t endFrame)
         }
         Rollback_UpdateSnapshotInputs(frame, localInput, remoteInput);
         Controller_SilentFrameStart();
-        Controller_InjectLocalInput(frame, localInput);
+        if(!Netplay_IsActive()) Controller_InjectLocalInput(frame, localInput);
         Controller_InjectRemoteInput(frame, remoteInput);
         timer.Add(&RollbackProfile::frameInput);
 
