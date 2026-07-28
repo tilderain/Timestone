@@ -47,6 +47,7 @@ enum PacketType : uint32_t {
     PACKET_DUMP_NDJSON = 10, // DumpNdjsonPacket
     PACKET_AUTOTEST_START = 11, // AutoTestStartPacket
     PACKET_AUTOTEST_FRAME = 12, // AutoTestFramePacket
+    PACKET_AUTOTEST_COMPLETE = 13, // AutoTestCompletePacket
 };
 
 #pragma pack(push, 1)
@@ -151,6 +152,10 @@ struct AutoTestFramePacket {
     int32_t  frame;
     uint32_t checksum;           // post-resimulation checksum
     uint32_t flags;              // AutoTestFrameFlags
+};
+
+struct AutoTestCompletePacket {
+    uint32_t type;               // PACKET_AUTOTEST_COMPLETE
 };
 
 enum BattleSyncFlags : uint32_t {
@@ -297,6 +302,8 @@ void Netplay_SendAutoTestStart(const AutoTestStartPacket& packet);
 bool Netplay_GetInboundAutoTestStart(AutoTestStartPacket& outPacket);
 void Netplay_SendAutoTestFrame(const AutoTestFramePacket& packet);
 bool Netplay_GetInboundAutoTestFrame(AutoTestFramePacket& outPacket);
+void Netplay_SendAutoTestComplete();
+bool Netplay_GetInboundAutoTestComplete();
 
 // Discard input packets produced before the synchronized battle boundary.
 void Netplay_ClearInputQueues();

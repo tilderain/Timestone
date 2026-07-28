@@ -102,6 +102,9 @@ static AutoTestFramePacket      g_inboundAutoTestFrames[MAX_AUTOTEST_FRAME_PACKE
 static size_t                   g_inboundAutoTestFrameHead = 0;
 static size_t                   g_inboundAutoTestFrameCount = 0;
 static CRITICAL_SECTION         g_autoTestFrameCS;
+static bool                     g_outboundAutoTestComplete = false;
+static bool                     g_inboundAutoTestComplete = false;
+static CRITICAL_SECTION         g_autoTestCompleteCS;
 
 // One-time critical section initialization flag
 static bool                 g_csInitialized  = false;
@@ -379,6 +382,22 @@ static DWORD WINAPI Netplay_ServiceThread(LPVOID)
             enet_host_flush(g_host);
         }
 
+        bool hasAutoTestComplete = false;
+        {
+            ScopedCS lock(g_autoTestCompleteCS);
+            hasAutoTestComplete = g_outboundAutoTestComplete;
+            g_outboundAutoTestComplete = false;
+        }
+        if (hasAutoTestComplete && g_peer)
+        {
+            AutoTestCompletePacket complete = {PACKET_AUTOTEST_COMPLETE};
+            ENetPacket* packet = enet_packet_create(
+                &complete, sizeof(complete), ENET_PACKET_FLAG_RELIABLE);
+            if (enet_peer_send(g_peer, 0, packet) != 0)
+                enet_packet_destroy(packet);
+            enet_host_flush(g_host);
+        }
+
         AutoTestFramePacket autoTestFrame = {};
         bool hasAutoTestFrame = false;
         {
@@ -561,6 +580,14 @@ static DWORD WINAPI Netplay_ServiceThread(LPVOID)
                                     ++g_inboundAutoTestFrameCount;
                                 }
                                 break;
+
+                            case PACKET_AUTOTEST_COMPLETE:
+                                if (event.packet->dataLength >= sizeof(AutoTestCompletePacket))
+                                {
+                                    ScopedCS lock(g_autoTestCompleteCS);
+                                    g_inboundAutoTestComplete = true;
+                                }
+                                break;
                         }
                     }
                     enet_packet_destroy(event.packet);
@@ -626,6 +653,7 @@ void Netplay_Init(ENetHost* host, ENetPeer* peer)
         InitializeCriticalSection(&g_dumpNDJSONCS);
         InitializeCriticalSection(&g_autoTestStartCS);
         InitializeCriticalSection(&g_autoTestFrameCS);
+        InitializeCriticalSection(&g_autoTestCompleteCS);
 
         g_outboundDelayNew = false;
         g_inboundDelayNew = false;
@@ -649,6 +677,8 @@ void Netplay_Init(ENetHost* host, ENetPeer* peer)
         g_outboundAutoTestFrameCount = 0;
         g_inboundAutoTestFrameHead = 0;
         g_inboundAutoTestFrameCount = 0;
+        g_outboundAutoTestComplete = false;
+        g_inboundAutoTestComplete = false;
         std::memset(&g_outboundPacket, 0, sizeof(InputPacket));
         g_csInitialized = true;
     }
@@ -848,6 +878,24 @@ bool Netplay_GetInboundAutoTestStart(AutoTestStartPacket& outPacket)
     outPacket = g_inboundAutoTestStart;
     g_inboundAutoTestStartNew = false;
     return true;
+}
+
+void Netplay_SendAutoTestComplete()
+{
+    if (!g_active || !g_csInitialized)
+        return;
+    ScopedCS lock(g_autoTestCompleteCS);
+    g_outboundAutoTestComplete = true;
+}
+
+bool Netplay_GetInboundAutoTestComplete()
+{
+    if (!g_active || !g_csInitialized)
+        return false;
+    ScopedCS lock(g_autoTestCompleteCS);
+    bool complete = g_inboundAutoTestComplete;
+    g_inboundAutoTestComplete = false;
+    return complete;
 }
 
 void Netplay_SendAutoTestFrame(const AutoTestFramePacket& packet)
@@ -1089,6 +1137,7 @@ void Netplay_Shutdown()
         DeleteCriticalSection(&g_dumpNDJSONCS);
         DeleteCriticalSection(&g_autoTestStartCS);
         DeleteCriticalSection(&g_autoTestFrameCS);
+        DeleteCriticalSection(&g_autoTestCompleteCS);
         g_csInitialized = false;
     }
 

@@ -66,6 +66,7 @@ static LaunchDialogConfig g_dialogConfig = {
     nullptr      // enetPeer
 };
 static bool      g_isHost = false;          // true if we clicked Host, false if Connect
+static bool      g_autoTestLaunch = false;
 static COLORREF  g_statusColor = RGB(0, 0, 0); // default black for status text
 static HBRUSH    g_hStatusBrush = nullptr;
 
@@ -356,6 +357,36 @@ LaunchOption GetLaunchOption()
 void SetLaunchOption(LaunchOption opt)
 {
     g_launchOption = opt;
+}
+
+bool ConfigureAutoTestDualTraining(int32_t characterId)
+{
+    if (characterId < 1 || characterId >= kCharNameCount)
+        return false;
+
+    LoadRollbackSettings();
+    for (int i = 0; i < 3; ++i) {
+        g_dialogConfig.p1Chars[i] = characterId;
+        g_dialogConfig.p2Chars[i] = characterId;
+    }
+    g_dialogConfig.stageId = 0;
+    g_launchOption = LAUNCH_DUAL_TRAINING;
+    g_autoTestLaunch = true;
+
+    TrainingBootConfig cfg = {};
+    for (int i = 0; i < 3; ++i) {
+        cfg.p1Chars[i] = characterId;
+        cfg.p2Chars[i] = characterId;
+    }
+    cfg.stageId = 0;
+    cfg.timerValue = 99;
+    TrainingBoot_SetConfig(cfg);
+    return true;
+}
+
+bool IsAutoTestLaunchEnabled()
+{
+    return g_autoTestLaunch;
 }
 
 const LaunchDialogConfig& GetLaunchDialogConfig()

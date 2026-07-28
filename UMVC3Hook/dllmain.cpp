@@ -120,6 +120,56 @@ static int  g_autoConnectPort = 0;
 // 0=none, 1=top-right (host), 2=bottom-left (client)
 static int g_windowCorner = 0;
 
+static bool CharacterNamesEqual(const char* lhs, const char* rhs)
+{
+	while (*lhs || *rhs) {
+		while (*lhs == ' ' || *lhs == '-' || *lhs == '_' || *lhs == '.') ++lhs;
+		while (*rhs == ' ' || *rhs == '-' || *rhs == '_' || *rhs == '.') ++rhs;
+		char left = *lhs;
+		char right = *rhs;
+		if (left >= 'A' && left <= 'Z') left = (char)(left - 'A' + 'a');
+		if (right >= 'A' && right <= 'Z') right = (char)(right - 'A' + 'a');
+		if (left != right) return false;
+		if (left) ++lhs;
+		if (right) ++rhs;
+	}
+	return true;
+}
+
+static int ParseAutoTestCharacter(const char* cmdLine)
+{
+	const char* arg = strstr(cmdLine, "-autotest=");
+	if (!arg) return -1;
+
+	const bool quotedArgument = arg > cmdLine && arg[-1] == '"';
+	const char* value = arg + 10;
+	bool quotedValue = false;
+	if (*value == '"') {
+		quotedValue = true;
+		++value;
+	}
+	char name[64] = {};
+	int length = 0;
+	while (value[length] && length < (int)sizeof(name) - 1) {
+		if (value[length] == '"') break;
+		if (!quotedArgument && !quotedValue && value[length] == ' ') break;
+		name[length] = value[length];
+		++length;
+	}
+	name[length] = '\0';
+	if (!name[0]) return 0;
+
+	char* end = nullptr;
+	long id = strtol(name, &end, 10);
+	if (end && *end == '\0' && id >= 1 && id < kCharNameCount)
+		return (int)id;
+	for (int i = 1; i < kCharNameCount; ++i) {
+		if (CharacterNamesEqual(name, kCharNames[i]))
+			return i;
+	}
+	return 0;
+}
+
 extern LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
 EndScene oEndScene = NULL;
@@ -463,6 +513,16 @@ void OnInitializeHook()
 		trainingArg = true;
 		SetLaunchOption(LAUNCH_TRAINING);
 		HookLog("UMVC3Hook: Detected -training argument, entering training mode\n");
+	}
+
+	const int autoTestCharacter = ParseAutoTestCharacter(cmdLineA);
+	if (autoTestCharacter > 0 && ConfigureAutoTestDualTraining(autoTestCharacter)) {
+		trainingArg = true;
+		HookLog("UMVC3Hook: Detected -autotest=%s, launching dual training with all slots set to character ID %d\n",
+			kCharNames[autoTestCharacter], autoTestCharacter);
+	} else if (autoTestCharacter == 0) {
+		HookLog("UMVC3Hook: Invalid -autotest character; use a character name or ID 1-%d\n",
+			kCharNameCount - 1);
 	}
 
 	// Check for -connect argument (format: -connect=IP:PORT) from dual training spawn

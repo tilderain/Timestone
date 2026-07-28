@@ -153,6 +153,13 @@ shot that was already dying.
 9. Restore attack-target and collision-primitive state through dedicated rules.
 10. Restore RNG streams consumed by reconstruction and release pinned resources.
 
+Doctor Doom's missile emplacement can restore an active saved phase before its
+fresh asynchronous model has rebuilt the eight joint records referenced through
+`uModel+0x538`. Native movement otherwise computes a small non-null value such
+as `0x300` from the null table and dispatches through it. Reconstructed missiles
+defer movement until the complete fresh joint table is readable and each joint
+exposes a callable DTI virtual; ordinary live missiles retain native behavior.
+
 The matrix restore is required even though later movement paths regenerate some
 of them. Generic pre-move collision and pose code can consume the saved attack
 and prior-world matrices first. Leaving the factory matrices in a reconstructed

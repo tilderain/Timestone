@@ -50,6 +50,11 @@ LaunchOption GetLaunchOption();
 // Set launch option (e.g. from command-line args for spawned instance)
 void SetLaunchOption(LaunchOption opt);
 
+// Configure a dialog-free dual-training autotest launch. The selected
+// character is placed in every slot on both teams.
+bool ConfigureAutoTestDualTraining(int32_t characterId);
+bool IsAutoTestLaunchEnabled();
+
 // Get the dialog config (characters, stage, network settings)
 const LaunchDialogConfig& GetLaunchDialogConfig();
 

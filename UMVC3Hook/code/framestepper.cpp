@@ -73,6 +73,9 @@ static uint32_t g_advertisedBattleFlags = 0;
 static uint32_t g_battleAdvertiseTick = 0;
 static bool g_trainingRestartBarrier = false;
 static bool g_trainingRestartLeftFighting = false;
+static bool g_autoTestLaunchPending = false;
+static bool g_autoTestLaunchRunning = false;
+static DWORD g_autoTestExitTick = 0;
 extern "C" bool FrameStepper_IsBattleSynchronized() { return g_battleSynchronized; }
 
 extern "C" void FrameStepper_ScheduleAutoTestRestart(uint32_t roundSeed)
@@ -752,6 +755,8 @@ void FrameStepper_Init()
         Netplay_Init(cfg.enetHost, cfg.enetPeer);
         HookLog("FrameStepper: Netplay initialized from launch config\n");
     }
+    g_autoTestLaunchPending = IsAutoTestLaunchEnabled() &&
+                              Netplay_IsActive() && Netplay_IsHost();
 
     // Initialize rollback snapshot engine (hooks sMvc3Main__move)
     Rollback_InitHooks();
@@ -779,6 +784,39 @@ static inline bool KeyPressed(int vk, bool& prevState)
 void FrameStepper_Process()
 {
     AutoTest_Process();
+
+    if (Netplay_GetInboundAutoTestComplete()) {
+        HookLog("AutoTestSuite: remote command-line suite complete; closing game\n");
+        if (g_hWnd) PostMessageW(g_hWnd, WM_CLOSE, 0, 0);
+        return;
+    }
+
+    if (g_autoTestExitTick && GetTickCount() - g_autoTestExitTick < 0x80000000u) {
+        HookLog("AutoTestSuite: completion delivered; closing host game\n");
+        g_autoTestExitTick = 0;
+        if (g_hWnd) PostMessageW(g_hWnd, WM_CLOSE, 0, 0);
+        return;
+    }
+
+    if (g_autoTestLaunchRunning && !AutoTest_GetSuiteStatus().active) {
+        g_autoTestLaunchRunning = false;
+        Netplay_SendAutoTestComplete();
+        g_autoTestExitTick = GetTickCount() + 500;
+        HookLog("AutoTestSuite: command-line suite complete; notifying client before exit\n");
+    }
+
+    if (g_autoTestLaunchPending && g_battleSynchronized &&
+        Netplay_IsActive() && Netplay_IsHost()) {
+        typedef uint64_t(__fastcall* GetAction_t)();
+        static GetAction_t getAction = (GetAction_t)_addr(0x140001A90);
+        uint64_t action = getAction();
+        if (action && *(int32_t*)(action + 0xD8) == 5 &&
+            AutoTest_StartSuite(0, false)) {
+            g_autoTestLaunchPending = false;
+            g_autoTestLaunchRunning = true;
+            HookLog("AutoTestSuite: command-line suite started after synchronized training readiness\n");
+        }
+    }
 
     static bool prevDumpNDJSON = false;
     if (KeyPressed(VK_F10, prevDumpNDJSON))
