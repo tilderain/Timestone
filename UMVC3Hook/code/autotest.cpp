@@ -1735,7 +1735,7 @@ extern "C" bool AutoTest_StartRuntimeCommand(int32_t playerIndex,
             return false;
         }
 
-        if (isStagedHyper && (expected & 0x300) == 0x300) {
+        if ((expected & 0x300) == 0x300) {
             // The native matcher encodes the generic XX requirement in the
             // assist-bit range. Drive two attacks, not literal A1+A2.
             mask = (mask & ~0x300u) | 0x70u;
