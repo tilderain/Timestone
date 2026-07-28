@@ -512,7 +512,6 @@ void StartInboundNetSuiteMove(const AutoTestStartPacket& packet)
 
     g_netSuiteActive = true;
     g_netSuiteClient = true;
-    g_ndjsonLoggingEnabled = true;
     g_netSuiteRestartPending = false;
     g_suiteStatus = {};
     g_suiteStatus.active = true;
@@ -1823,8 +1822,6 @@ bool StartSuite(int32_t playerIndex, bool facingLeft, bool deduplicate)
         return false;
 
     InitializeSuiteResultFile(playerIndex, deduplicate);
-    if (Netplay_IsActive())
-        g_ndjsonLoggingEnabled = true;
 
     for (int32_t i = 0; i < commandCount; ++i) {
         const AutoTestRuntimeCommand& command = g_suiteCommands[i];
