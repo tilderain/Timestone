@@ -126,6 +126,7 @@ enum class SuitePhase {
 };
 
 AutoTestRuntimeCommand g_suiteCommands[AUTOTEST_MAX_RUNTIME_COMMANDS] = {};
+bool g_suiteCommandIsCharge[AUTOTEST_MAX_RUNTIME_COMMANDS] = {};
 AutoTestSuiteStatus g_suiteStatus = {};
 SuitePhase g_suitePhase = SuitePhase::Idle;
 bool g_suiteFacingLeft = false;
@@ -885,6 +886,23 @@ bool GetRuntimeCommandNotation(uint64_t resource, uint64_t command,
     if (commandFlags & 1)
         notation.buttons |= 0x80000000;
     return notation.directionCount > 0 || notation.buttons != 0;
+}
+
+bool RuntimeCommandHasChargeStep(uint64_t resource, uint64_t command)
+{
+    if (!resource || !command)
+        return false;
+
+    using GetCommandStep_t = uint64_t(__fastcall*)(uint64_t, uint64_t, uint32_t);
+    static GetCommandStep_t getCommandStep =
+        (GetCommandStep_t)_addr(ADDR_GET_COMMAND_STEP);
+    const int32_t count = *(int32_t*)(command + 0x04);
+    for (int32_t i = 0; i < count && i < 256; ++i) {
+        const uint64_t step = getCommandStep(resource, command, (uint32_t)i);
+        if (step && *(int32_t*)(step + 0x00) == 0x1F)
+            return true;
+    }
+    return false;
 }
 
 bool CommandNotationsEqual(const CommandNotation& left,
@@ -1946,6 +1964,10 @@ bool StartSuite(int32_t playerIndex, bool facingLeft, bool deduplicate)
         bool hasNotation = GetRuntimeCommandNotation(
             command.resource, runtimeCommand, notation,
             command.commandFlags);
+        const bool isCharge = RuntimeCommandHasChargeStep(
+            command.resource, runtimeCommand);
+        const bool isAir = command.matcherIndex == 0 &&
+                           command.commandState == 1;
         bool duplicate = false;
         const char* commandName = command.commandListName[0]
             ? command.commandListName : command.name;
@@ -1957,11 +1979,15 @@ bool StartSuite(int32_t playerIndex, bool facingLeft, bool deduplicate)
                 ? existingCommand.commandListName : existingCommand.name;
             bool bothNamesResolved = command.commandListName[0] &&
                                      existingCommand.commandListName[0];
-            if (strcmp(commandName, existingName) == 0 ||
+            const bool existingIsAir = existingCommand.matcherIndex == 0 &&
+                                       existingCommand.commandState == 1;
+            if (!isCharge && !g_suiteCommandIsCharge[existing] &&
+                !isAir && !existingIsAir &&
+                (strcmp(commandName, existingName) == 0 ||
                 (!bothNamesResolved && hasNotation &&
                  g_suiteCommandHasNotation[existing] &&
                  CommandNotationsEqual(
-                      notation, g_suiteCommandNotations[existing]))) {
+                      notation, g_suiteCommandNotations[existing])))) {
                 duplicate = true;
                 break;
             }
@@ -1972,6 +1998,7 @@ bool StartSuite(int32_t playerIndex, bool facingLeft, bool deduplicate)
         }
 
         g_suiteCommands[commandCount] = command;
+        g_suiteCommandIsCharge[commandCount] = isCharge;
         g_suiteCommandNotations[commandCount] = notation;
         g_suiteCommandHasNotation[commandCount] = hasNotation;
         ++commandCount;
