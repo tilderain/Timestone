@@ -16,3 +16,12 @@ bool HasCallableDtiVirtual(const void* object);
 bool IsUnitObject(const void* object);
 bool IsEffectObject(const void* object);
 bool IsBaseModelObject(const void* object);
+
+class ScopedMemoryQueryCache {
+public:
+    ScopedMemoryQueryCache();
+    ~ScopedMemoryQueryCache();
+
+    ScopedMemoryQueryCache(const ScopedMemoryQueryCache&) = delete;
+    ScopedMemoryQueryCache& operator=(const ScopedMemoryQueryCache&) = delete;
+};

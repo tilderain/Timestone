@@ -51,6 +51,8 @@ static constexpr uint32_t CCHR_DRAW_STATE_START = 0x80;
 static constexpr uint32_t CCHR_DRAW_STATE_END = CCHR_MOTION_BASE;
 static constexpr uint32_t CCHR_MODEL_TAIL_START = 0x1160;
 static constexpr uint32_t CCHR_MODEL_TAIL_END = 0x1300;
+static constexpr uint32_t CCHR_INPUT_OFFSET = 0x21C8;
+static constexpr size_t CCHR_INPUT_SIZE = 0x5A0;
 static constexpr uint32_t SUNIT_CATEGORY_COUNT_OFFSET = 0xC38;
 static constexpr uint32_t SUNIT_CATEGORY_LISTS_OFFSET = 0x50;
 static constexpr uint32_t SUNIT_CATEGORY_LIST_STRIDE = 0x30;
@@ -293,20 +295,26 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
     }
     const uint64_t pinResourcesEnd = Profile_Now();
 
-    int removedInvalidUnits = Shot_SanitizeUnitCategoryLists(
-        sUnit, SSHOT_FIRST_CATEGORY, SEFFECT_LAST_CATEGORY);
-    if (removedInvalidUnits != 0) {
-        HookLog("Rollback: removed %d invalid sUnit category entries before restore\n",
-                 removedInvalidUnits);
-    }
-    const uint64_t preSanitizeEnd = Profile_Now();
+    int removedInvalidUnits = 0;
+    int retiredEffects = 0;
+    uint64_t preSanitizeEnd = 0;
+    {
+        ScopedMemoryQueryCache memoryCache;
+        removedInvalidUnits = Shot_SanitizeUnitCategoryLists(
+            sUnit, SSHOT_FIRST_CATEGORY, SEFFECT_LAST_CATEGORY);
+        if (removedInvalidUnits != 0) {
+            HookLog("Rollback: removed %d invalid sUnit category entries before restore\n",
+                     removedInvalidUnits);
+        }
+        preSanitizeEnd = Profile_Now();
 
-    // Effect bodies and generator graphs are not rewound. Retaining even a
-    // snapshot-era effect lets its independently advanced graph execute after
-    // restore; observed failures cover move, finish, draw, and destruction.
-    // Retire all effects through native two-phase cleanup. hkUnitRemove
-    // sanitizes owned resource/generator fields at the destruction boundary.
-    int retiredEffects = Effect_RetireCurrent(sUnit);
+        // Effect bodies and generator graphs are not rewound. Retaining even a
+        // snapshot-era effect lets its independently advanced graph execute after
+        // restore; observed failures cover move, finish, draw, and destruction.
+        // Retire all effects through native two-phase cleanup. hkUnitRemove
+        // sanitizes owned resource/generator fields at the destruction boundary.
+        retiredEffects = Effect_RetireCurrent(sUnit);
+    }
     const uint64_t retireEffectsEnd = Profile_Now();
 
     // A projectile that has already advanced cannot be made equivalent to its
@@ -356,16 +364,21 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
     // second pass repairs. With no current shots, topology is unchanged since
     // the pre-restore sanitation pass, so rescanning every sUnit list is pure
     // overhead.
-    int removedShotOwnedEffects = currentShots.empty()
-        ? 0
-        : Shot_SanitizeUnitCategoryLists(
-            sUnit, SSHOT_FIRST_CATEGORY, SEFFECT_LAST_CATEGORY);
-    if (removedShotOwnedEffects != 0) {
-        HookLog("Rollback: removed %d dead sUnit entries after shot destruction\n",
-                 removedShotOwnedEffects);
+    int removedShotOwnedEffects = 0;
+    uint64_t postSanitizeEnd = 0;
+    {
+        ScopedMemoryQueryCache memoryCache;
+        removedShotOwnedEffects = currentShots.empty()
+            ? 0
+            : Shot_SanitizeUnitCategoryLists(
+                sUnit, SSHOT_FIRST_CATEGORY, SEFFECT_LAST_CATEGORY);
+        if (removedShotOwnedEffects != 0) {
+            HookLog("Rollback: removed %d dead sUnit entries after shot destruction\n",
+                     removedShotOwnedEffects);
+        }
+        postSanitizeEnd = Profile_Now();
+        Effect_SanitizeRetired(sUnit);
     }
-    const uint64_t postSanitizeEnd = Profile_Now();
-    Effect_SanitizeRetired(sUnit);
     const uint64_t sanitizeEffectsEnd = Profile_Now();
 
     void* sShot = *(void**)_addr(PTR_SSHOT);
@@ -976,6 +989,15 @@ void Rollback_RestoreSnapshot(int32_t frame)
                                     0x08);
                     }
                 }
+            }
+
+            // cChrInput is embedded in the captured character body. Restore it
+            // exactly after all pointer-preserving character fixups; packed
+            // input history words can otherwise be mistaken for pointers.
+            if (CCHR_INPUT_OFFSET + CCHR_INPUT_SIZE <= copySize) {
+                std::memcpy((uint8_t*)slot.regions[i].ptr + CCHR_INPUT_OFFSET,
+                            slot.data + offset + CCHR_INPUT_OFFSET,
+                            CCHR_INPUT_SIZE);
             }
         } else if (copySize > 0) {
             std::memcpy(slot.regions[i].ptr, slot.data + offset, copySize);

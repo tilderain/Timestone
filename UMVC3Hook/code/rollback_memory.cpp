@@ -3,11 +3,45 @@
 #include "rollback_memory.h"
 #include "mk10utils.h"
 
+#include <vector>
+
 namespace {
 
 constexpr uintptr_t DTI_CUNIT = 0x140E173D0;
 constexpr uintptr_t DTI_UEFFECT = 0x140E18698;
 constexpr uintptr_t DTI_UBASEMODEL = 0x140E17D48;
+
+struct CachedMemoryRegion {
+    uint64_t start;
+    uint64_t end;
+    bool accessible;
+    bool executable;
+};
+
+thread_local std::vector<CachedMemoryRegion> g_memoryRegions;
+thread_local uint32_t g_memoryCacheDepth = 0;
+
+const CachedMemoryRegion* GetCachedMemoryRegion(uint64_t address)
+{
+    if (g_memoryCacheDepth == 0) return nullptr;
+    for (const CachedMemoryRegion& region : g_memoryRegions) {
+        if (address >= region.start && address < region.end) return &region;
+    }
+
+    MEMORY_BASIC_INFORMATION mbi = {};
+    if (VirtualQuery((void*)address, &mbi, sizeof(mbi)) == 0) return nullptr;
+    const DWORD executable = PAGE_EXECUTE | PAGE_EXECUTE_READ |
+        PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
+    const bool accessible = mbi.State == MEM_COMMIT &&
+        (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) == 0;
+    g_memoryRegions.push_back({
+        (uint64_t)mbi.BaseAddress,
+        (uint64_t)mbi.BaseAddress + mbi.RegionSize,
+        accessible,
+        accessible && (mbi.Protect & executable) != 0,
+    });
+    return &g_memoryRegions.back();
+}
 
 bool IsObjectKindOf(const void* object, uintptr_t expectedDti)
 {
@@ -52,6 +86,8 @@ bool IsLikelyPointer(uint64_t value)
 bool IsAccessiblePointer(uint64_t value)
 {
     if (!IsLikelyPointer(value)) return false;
+    if (const CachedMemoryRegion* region = GetCachedMemoryRegion(value))
+        return region->accessible;
     MEMORY_BASIC_INFORMATION mbi = {};
     if (VirtualQuery((void*)value, &mbi, sizeof(mbi)) == 0) return false;
     if (mbi.State != MEM_COMMIT) return false;
@@ -61,6 +97,8 @@ bool IsAccessiblePointer(uint64_t value)
 bool IsAccessibleAddress(uint64_t value)
 {
     if (value < 0x10000 || value >= 0x0000800000000000ull) return false;
+    if (const CachedMemoryRegion* region = GetCachedMemoryRegion(value))
+        return region->accessible;
     MEMORY_BASIC_INFORMATION mbi = {};
     if (VirtualQuery((void*)value, &mbi, sizeof(mbi)) == 0) return false;
     if (mbi.State != MEM_COMMIT) return false;
@@ -70,6 +108,8 @@ bool IsAccessibleAddress(uint64_t value)
 bool IsExecutableAddress(uint64_t value)
 {
     if (value < 0x10000 || value >= 0x0000800000000000ull) return false;
+    if (const CachedMemoryRegion* region = GetCachedMemoryRegion(value))
+        return region->executable;
     MEMORY_BASIC_INFORMATION mbi = {};
     if (VirtualQuery((void*)value, &mbi, sizeof(mbi)) == 0) return false;
     if (mbi.State != MEM_COMMIT || (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) != 0)
@@ -85,6 +125,9 @@ bool IsAccessibleRange(uint64_t value, size_t size)
         size - 1 > UINT64_MAX - value) {
         return false;
     }
+
+    if (const CachedMemoryRegion* region = GetCachedMemoryRegion(value))
+        return region->accessible && value + size <= region->end;
 
     MEMORY_BASIC_INFORMATION mbi = {};
     if (VirtualQuery((void*)value, &mbi, sizeof(mbi)) == 0 ||
@@ -122,4 +165,15 @@ bool IsEffectObject(const void* object)
 bool IsBaseModelObject(const void* object)
 {
     return IsObjectKindOf(object, DTI_UBASEMODEL);
+}
+
+ScopedMemoryQueryCache::ScopedMemoryQueryCache()
+{
+    if (g_memoryCacheDepth++ == 0) g_memoryRegions.clear();
+}
+
+ScopedMemoryQueryCache::~ScopedMemoryQueryCache()
+{
+    if (g_memoryCacheDepth > 0 && --g_memoryCacheDepth == 0)
+        g_memoryRegions.clear();
 }

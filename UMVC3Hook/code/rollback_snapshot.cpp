@@ -902,16 +902,6 @@ static int BuildRegionsUncached(Region* regions, int maxRegions,
                         }
                     }
 
-                    // cChrInput is embedded inside uCharacter at +0x21C8.
-                    // The full cChrInput struct is ~0x5A0 bytes covering all
-                    // ring buffers (mHeldRing, mReleasedRing, mPressedRing),
-                    // direction history (512B at +0x360), final processed fields,
-                    // and the +0x590/+0x594 fields read by getInputDirection.
-                    // Snapshot the entire range so direction-history and
-                    // ring-buffer-head state survive rollback restores.
-                    uint64_t cChrInput = character + 0x21C8;
-                    add((void*)cChrInput, 0x5A0);
-
                     // ---- cChrCmd line buffers (heap-allocated per-command match state) ----
                     // Two embedded cChrCmd objects at uCharacter+0x2738 and +0x2950.
                     // Each has a heap-allocated line array at cmd+0x178 of n×0x20 B entries
