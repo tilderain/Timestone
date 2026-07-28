@@ -47,6 +47,7 @@ struct AutoTestRuntimeCommand {
     float successDelay;
     int32_t successWork;
     int32_t commandStepCount;
+    int32_t commandState;
     uint32_t commandFlags;
     float lifeRateMin;
     float lifeRateMax;

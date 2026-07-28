@@ -1378,8 +1378,9 @@ void FrameStepper_DrawAutoTest()
                         command.commandListPath[0]
                             ? command.commandListPath : "<not requested>",
                         command.commandListTextCount);
-            ImGui::Text("lineFlags=%08X commandFlags=%08X",
-                        command.lineFlags, command.commandFlags);
+            ImGui::Text("lineFlags=%08X commandState=%d commandFlags=%08X",
+                        command.lineFlags, command.commandState,
+                        command.commandFlags);
             ImGui::Text("character=%p matcher=%p resource=%p",
                         (void*)command.character, (void*)command.matcher,
                         (void*)command.resource);

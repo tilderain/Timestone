@@ -800,6 +800,11 @@ void BuildRuntimeCommandName(uint64_t resource, uint64_t command,
     }
     if (!name[0])
         snprintf(name, capacity, "Matcher %d Line %d", matcherIndex, lineIndex);
+    if (matcherIndex == 0 && command && *(int32_t*)(command + 0x18) == 1) {
+        char notation[128];
+        snprintf(notation, sizeof(notation), "%s", name);
+        snprintf(name, capacity, "(AIR) %s", notation);
+    }
 }
 
 bool GetRuntimeCommandNotation(uint64_t resource, uint64_t command,
@@ -1049,10 +1054,11 @@ void DumpRuntimeCommandArray(int32_t playerIndex, int32_t matcherIndex,
         BuildRuntimeCommandName(resource, command, matcherIndex, lineIndex,
                                 generated, sizeof(generated));
         int32_t stepCount = command ? *(int32_t*)(command + 0x04) : -1;
+        int32_t commandState = command ? *(int32_t*)(command + 0x18) : -1;
         uint32_t flags = command ? *(uint32_t*)(command + 0x20) : 0;
-        HookLog("AutoTestCommandList: COMMAND matcher=%d line=%d command=0x%llX steps=%d flags=0x%08X generated=\"%s\"\n",
-                matcherIndex, lineIndex, (unsigned long long)command,
-                stepCount, flags, generated);
+        HookLog("AutoTestCommandList: COMMAND matcher=%d line=%d command=0x%llX steps=%d state=%d flags=0x%08X generated=\"%s\"\n",
+                 matcherIndex, lineIndex, (unsigned long long)command,
+                 stepCount, commandState, flags, generated);
         for (int32_t stepIndex = 0; command && stepIndex < stepCount &&
                                       stepIndex < 256; ++stepIndex) {
             uint64_t step = getCommandStep(resource, command,
@@ -1544,6 +1550,7 @@ extern "C" int32_t AutoTest_GetRuntimeCommands(
                 out.successDelay = *(float*)(matcher + 0x198);
                 out.successWork = *(int32_t*)(matcher + 0x19C);
                 out.commandStepCount = command ? *(int32_t*)(command + 0x04) : -1;
+                out.commandState = command ? *(int32_t*)(command + 0x18) : -1;
                 out.commandFlags = command ? *(uint32_t*)(command + 0x20) : 0;
                 GetRuntimeCommandName(cacheIndex, resource, command,
                                       matcherIndex, lineIndex, out.name,
@@ -1652,6 +1659,19 @@ extern "C" bool AutoTest_StartRuntimeCommand(int32_t playerIndex,
         FillAttackerHyperGauge(playerIndex);
 
     g_runtimeScript.stepCount = 0;
+    const int32_t commandState = *(int32_t*)(command + 0x18);
+    const uint32_t commandFlags = *(uint32_t*)(command + 0x20);
+    // cChrCmdSpatk treats 0 as grounded, 1 as airborne, and other values as
+    // unrestricted. cChrCmdCombo uses this field for different restrictions.
+    const bool requiresAir = matcherIndex == 0 && commandState == 1;
+    if (requiresAir) {
+        if (!AppendRuntimeInput(0x0F, 0x04, 3)) {
+            snprintf(g_runtimeExecutionError, sizeof(g_runtimeExecutionError),
+                     "Could not map jump input for air-only command");
+            return false;
+        }
+        g_runtimeInputSteps[g_runtimeScript.stepCount++] = {0, 6};
+    }
     for (int32_t i = 0; i < stepCount; ++i) {
         uint64_t step = getCommandStep(resource, command, (uint32_t)i);
         if (!step)
@@ -1748,8 +1768,10 @@ extern "C" bool AutoTest_StartRuntimeCommand(int32_t playerIndex,
     g_runningRuntimeCommand = true;
     g_runningRuntimeHyper = isHyper;
     g_runningManualCommand = -1;
-    HookLog("AutoTest: scheduled runtime command matcher=%d line=%d for P%d at frame %d\n",
-            matcherIndex, lineIndex, playerIndex + 1, g_status.startFrame);
+    HookLog("AutoTest: scheduled runtime command matcher=%d line=%d state=%d flags=0x%08X for P%d at frame %d%s\n",
+            matcherIndex, lineIndex, commandState, commandFlags,
+            playerIndex + 1, g_status.startFrame,
+            requiresAir ? " with jump setup" : "");
     return true;
 }
 
