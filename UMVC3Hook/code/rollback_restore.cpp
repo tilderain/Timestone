@@ -60,6 +60,7 @@ static constexpr uint32_t SUNIT_CHARACTER_CATEGORY = 8;
 static constexpr uint32_t CUNIT_LIVE_STATE_OFFSETS[] = {0x10, 0x18, 0x20, 0x38};
 static constexpr size_t SMAIN_SIZE = 0x40080;
 static constexpr int SSHOT_CATEGORY = 10;
+static constexpr uint32_t SAUX_FIRST_CATEGORY = 9;
 static constexpr uint32_t SSHOT_FIRST_CATEGORY = 10;
 static constexpr uint32_t SEFFECT_LAST_CATEGORY = 16;
 static constexpr int MAX_REGIONS = ROLLBACK_MAX_REGIONS;
@@ -301,7 +302,7 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
     {
         ScopedMemoryQueryCache memoryCache;
         removedInvalidUnits = Shot_SanitizeUnitCategoryLists(
-            sUnit, SSHOT_FIRST_CATEGORY, SEFFECT_LAST_CATEGORY);
+            sUnit, SAUX_FIRST_CATEGORY, SEFFECT_LAST_CATEGORY);
         if (removedInvalidUnits != 0) {
             HookLog("Rollback: removed %d invalid sUnit category entries before restore\n",
                      removedInvalidUnits);

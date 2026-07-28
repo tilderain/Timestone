@@ -15,12 +15,14 @@
 extern void HookLog(const char* fmt, ...);
 
 static constexpr uintptr_t PTR_SMVC3MGR = 0x140d510a0;
+static constexpr uintptr_t PTR_SSTAGE = 0x140d4f718;
 static constexpr uintptr_t FN_UGAMEEFFECT_CREATE = 0x140131410;
 static constexpr uintptr_t FN_KIRIGAKURE_EFFECT_UPDATE = 0x14013B050;
 static constexpr uintptr_t SMVC3MGR_ACTION_OFFSET = 0x48;
 static constexpr uint32_t SUNIT_CATEGORY_COUNT_OFFSET = 0xC38;
 static constexpr uint32_t SUNIT_CATEGORY_LISTS_OFFSET = 0x50;
 static constexpr uint32_t SUNIT_CATEGORY_LIST_STRIDE = 0x30;
+static constexpr uint32_t SSTAGE_EFFECT_OFFSETS[] = {0x2050, 0x2058};
 
 using EffectCreateFn = void*(__fastcall*)(void*, int, int, void*, int, int,
     void*, void*, int, void*, int, uint32_t, void*);
@@ -116,6 +118,22 @@ static void DetachExAtkSpaceChildren()
     std::memset((void*)(exAtkSpace + 0x1D18), 0, 4 * sizeof(uint64_t));
 }
 
+static void SanitizeStageEffectReferences(void* retiringEffect = nullptr)
+{
+    uint64_t sStage = *(uint64_t*)_addr(PTR_SSTAGE);
+    if (!sStage || !IsAccessibleRange(sStage, 0x2060)) return;
+
+    for (uint32_t offset : SSTAGE_EFFECT_OFFSETS) {
+        void** slot = (void**)(sStage + offset);
+        void* effect = *slot;
+        if (!effect) continue;
+        if (effect == retiringEffect || !IsEffectObject(effect) ||
+            !IsActiveUnit(effect)) {
+            *slot = nullptr;
+        }
+    }
+}
+
 static void* __fastcall hkEffectCreate(void* manager, int effectId, int a3,
                                        void* attachTo, int a5, int a6, void* a7,
                                        void* a8, int a9, void* a10, int a11,
@@ -190,6 +208,7 @@ void Effect_FinishUnitRemoval(void* unit)
 int Effect_RetireCurrent(void* sUnit)
 {
     DetachExAtkSpaceChildren();
+    SanitizeStageEffectReferences();
     int retired = 0;
     uint32_t categoryCount = *(uint32_t*)((uint8_t*)sUnit + SUNIT_CATEGORY_COUNT_OFFSET);
     for (uint32_t category = 13; category <= 16 && category < categoryCount; ++category) {
@@ -200,6 +219,7 @@ int Effect_RetireCurrent(void* sUnit)
             void* next = *(void**)((uint8_t*)effect + 0x18);
             uint32_t* state = (uint32_t*)((uint8_t*)effect + 0x10);
             if (IsEffectObject(effect) && (*state & 7u) < 3u) {
+                SanitizeStageEffectReferences(effect);
                 *state = (*state & ~7u) | 3u;
                 ++retired;
             }

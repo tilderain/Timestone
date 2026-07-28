@@ -543,6 +543,47 @@ int Shot_SanitizeUnitCategoryLists(void* sUnit, uint32_t firstCategory,
         return valid;
     };
 
+    auto logInvalidUnit = [&](uint32_t category, void* previous, void* unit,
+                              void* next) {
+        uint64_t address = (uint64_t)unit;
+        uint64_t vtable = IsAccessibleRange(address, sizeof(uint64_t))
+            ? *(uint64_t*)unit : 0;
+        uint64_t dti = vtable && HasCallableDtiVirtual(unit)
+            ? GetObjectDti(address) : 0;
+        uint32_t state = IsAccessibleRange(address + 0x10, sizeof(uint32_t))
+            ? *(uint32_t*)(address + 0x10) : 0;
+        uint64_t owner = 0;
+        uint64_t ownerDti = 0;
+        size_t ownerOffset = 0;
+
+        uint32_t totalCategories = *(uint32_t*)((uint8_t*)sUnit +
+                                                SUNIT_CATEGORY_COUNT_OFFSET);
+        if (totalCategories > 8) {
+            uint64_t character = *(uint64_t*)((uint8_t*)sUnit +
+                SUNIT_CATEGORY_LISTS_OFFSET + SUNIT_CATEGORY_LIST_STRIDE * 8);
+            for (int safety = 64; character && safety-- > 0;) {
+                if (!IsAccessibleRange(character, 0x20)) break;
+                uint64_t characterDti = HasCallableDtiVirtual((void*)character)
+                    ? GetObjectDti(character) : 0;
+                uint32_t characterSize = DecodeDtiSize(characterDti);
+                if (characterSize >= 8 && characterSize <= 0x40000 &&
+                    address >= character && address < character + characterSize) {
+                    owner = character;
+                    ownerDti = characterDti;
+                    ownerOffset = (size_t)(address - character);
+                    break;
+                }
+                character = *(uint64_t*)(character + 0x18);
+            }
+        }
+
+        HookLog("Rollback: invalid sUnit category=%u previous=0x%llX node=0x%llX "
+                "next=0x%llX vtable=0x%llX dti=0x%llX state=0x%08X "
+                "containingCharacter=0x%llX ownerDti=0x%llX ownerOffset=0x%zX\n",
+                category, (uint64_t)previous, address, (uint64_t)next,
+                vtable, dti, state, owner, ownerDti, ownerOffset);
+    };
+
     uint32_t categoryCount =
         *(uint32_t*)((uint8_t*)sUnit + SUNIT_CATEGORY_COUNT_OFFSET);
     if (categoryCount > SUNIT_MAX_CATEGORIES)
@@ -568,6 +609,7 @@ int Shot_SanitizeUnitCategoryLists(void* sUnit, uint32_t firstCategory,
 
         while (node && safety-- > 0) {
             if (!IsAccessibleAddress((uint64_t)node + 0x20)) {
+                logInvalidUnit(category, previous, node, nullptr);
                 if (previous)
                     *(void**)((uint8_t*)previous + 0x18) = nullptr;
                 else
@@ -583,6 +625,8 @@ int Shot_SanitizeUnitCategoryLists(void* sUnit, uint32_t firstCategory,
                 node = next;
                 continue;
             }
+
+            logInvalidUnit(category, previous, node, next);
 
             for (uint32_t mask = 0; mask < maskCount; ++mask) {
                 uint8_t* array = (uint8_t*)sUnit + SUNIT_MULTI_MASK_ARRAYS_OFFSET +
