@@ -182,6 +182,36 @@ std::vector<SnapshotRange> FindEmbeddedObjects(const uint8_t* live,
                                                size_t objectSize,
                                                size_t searchStart);
 
+void PreserveEmbeddedObjectsFromBoth(uint8_t* overlay, const uint8_t* live,
+                                     const uint8_t* saved, size_t objectSize,
+                                     size_t searchStart)
+{
+    size_t liveRangeEnd = searchStart;
+    size_t savedRangeEnd = searchStart;
+    for (size_t offset = searchStart;
+         offset + sizeof(uint64_t) <= objectSize;
+         offset += sizeof(uint64_t)) {
+        auto preserveCandidate = [&](const uint8_t* body, size_t& rangeEnd) {
+            if (offset < rangeEnd) return;
+            uint64_t candidate = *(const uint64_t*)(body + offset);
+            if (!IsGameImageAddress(candidate)) return;
+
+            uint64_t dti = GetDti((void*)(body + offset));
+            uint32_t size = DtiSize(dti);
+            if (!dti || size < sizeof(uint64_t) ||
+                size > kMaxEmbeddedObjectSize || offset + size > objectSize) {
+                return;
+            }
+
+            PreserveRange(overlay, live, objectSize, {offset, size});
+            rangeEnd = offset + size;
+        };
+
+        preserveCandidate(live, liveRangeEnd);
+        preserveCandidate(saved, savedRangeEnd);
+    }
+}
+
 void RestoreDetectedCharacterTailScalars(void* character,
                                          const uint8_t* savedBody,
                                          size_t bodySize)
@@ -547,28 +577,13 @@ bool ConcreteShotSnapshot_Restore(void* shot,
         PreserveRange(overlay.data(), live, liveSize, {0x2148, 0x08});
     }
 
-    // Shots contain inline MtObjects both in the common body and concrete tail.
-    // Discover them across the complete restored range from the fresh instance
-    // rather than maintaining a class allowlist. Their complete live ranges
-    // must survive restoration: cArm, for example, can retain a fresh pointer
-    // to an inline model near +0xAC0 whose saved vtable is zero.
-    for (const SnapshotRange& range : FindEmbeddedObjects(
-             live, liveSize, kShotRestoreStart)) {
-        PreserveRange(overlay.data(), live, liveSize, range);
-    }
+    // Scan the common body and concrete tail once, preserving inline MtObjects
+    // found in either timeline. Saved-only owners still retain fresh bytes so
+    // historical generator and particle ownership cannot enter the live heap.
+    PreserveEmbeddedObjectsFromBoth(overlay.data(), live, source, liveSize,
+                                    kShotRestoreStart);
     const uint64_t embeddedLiveEnd = Profile_Now();
-
-    // The saved timeline can contain an initialized inline effect where the
-    // freshly constructed shot currently has inactive scalar storage. Detect
-    // embedded owners in the saved body as well, but retain the corresponding
-    // fresh bytes. Otherwise the broad overlay imports historical generator and
-    // particle-buffer ownership that a later destructor returns to the shared
-    // effect heap.
-    for (const SnapshotRange& range : FindEmbeddedObjects(
-             source, liveSize, kShotRestoreStart)) {
-        PreserveRange(overlay.data(), live, liveSize, range);
-    }
-    const uint64_t embeddedSavedEnd = Profile_Now();
+    const uint64_t embeddedSavedEnd = embeddedLiveEnd;
 
     // createProperty value fields exported from properties_static.json are
     // ownership-free gameplay state. Reapply them after the pointer and

@@ -185,6 +185,7 @@ void Rollback_CaptureCollisionNodeClones(RollbackSnapshotSlot& slot)
     auto copyNode =
         (void(__fastcall*)(void*, void*, bool, bool))_addr(FN_COLLISION_NODE_COPY);
 
+    bool createdClone = false;
     for (int i = 0; i < slot.regionCount; ++i) {
         const RollbackRegion& region = slot.regions[i];
         if (!region.ownerSlot || region.size != CCHR_EXTERNAL_ANIM_SIZE) continue;
@@ -197,12 +198,13 @@ void Rollback_CaptureCollisionNodeClones(RollbackSnapshotSlot& slot)
         }
 
         void* clone = createNode(nullptr);
-        InvalidateMemoryQueryCache();
         if (!clone) continue;
+        createdClone = true;
         // Inherit the source child factory before deep-copying its children.
         copyNode(clone, region.ptr, false, true);
         slot.collisionNodeClones.push_back({region.ownerSlot, region.ptr, clone, childCount});
     }
+    if (createdClone) InvalidateMemoryQueryCache();
 }
 
 void Rollback_RestoreCollisionNodeClones(RollbackSnapshotSlot& slot)
@@ -211,6 +213,7 @@ void Rollback_RestoreCollisionNodeClones(RollbackSnapshotSlot& slot)
         (void(__fastcall*)(void*, void*, bool, bool))_addr(FN_COLLISION_NODE_COPY);
     auto pruneChild =
         (void(__fastcall*)(void*, uint32_t))_addr(FN_COLLISION_NODE_PRUNE_CHILD);
+    bool mutatedChildren = false;
     for (const RollbackCollisionNodeClone& entry : slot.collisionNodeClones) {
         if (*(uint64_t*)entry.ownerSlot != (uint64_t)entry.savedPtr ||
             !HasCallableDtiVirtual(entry.savedPtr)) continue;
@@ -218,13 +221,15 @@ void Rollback_RestoreCollisionNodeClones(RollbackSnapshotSlot& slot)
         if (entry.childCount == 0) {
             auto* childArray = (uint8_t*)entry.savedPtr + 0x18;
             uint32_t liveCount = *(uint32_t*)((uint8_t*)entry.savedPtr + 0x20);
+            mutatedChildren |= liveCount != 0;
             while (liveCount > 0)
                 pruneChild(childArray, --liveCount);
-            InvalidateMemoryQueryCache();
         } else if (HasCallableDtiVirtual(entry.clone)) {
             copyNode(entry.savedPtr, entry.clone, false, true);
+            mutatedChildren = true;
         }
     }
+    if (mutatedChildren) InvalidateMemoryQueryCache();
 }
 
 
@@ -595,8 +600,10 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
         g_activeRollbackProfile->restoreShotFinalize += finalizeEnd - respawnEnd;
     }
 
-    HookLog("Rollback: retired shots=%d effects=%d; shot recipes respawned=%d failed=%d\n",
-            retiredShots, retiredEffects, respawnedShots, failedShots);
+    if (failedShots != 0) {
+        HookLog("Rollback: retired shots=%d effects=%d; shot recipes respawned=%d failed=%d\n",
+                retiredShots, retiredEffects, respawnedShots, failedShots);
+    }
 }
 
 void Rollback_RestoreSnapshot(int32_t frame)
@@ -671,8 +678,6 @@ void Rollback_RestoreSnapshot(int32_t frame)
     const uint64_t setupEnd = Profile_Now();
 
     size_t offset = 0;
-    int collisionRestoreCount = 0;
-    size_t collisionRestoreBytes = 0;
     for (int i = 0; i < slot.regionCount; ++i) {
         size_t copySize = slot.regions[i].size;
         if (offset + copySize > slot.size) {
@@ -708,8 +713,6 @@ void Rollback_RestoreSnapshot(int32_t frame)
                                      copySize);
         } else if ((uint64_t)slot.regions[i].ptr == sCollision &&
                    slot.regions[i].size == SCOLLISION_SIZE) {
-            ++collisionRestoreCount;
-            collisionRestoreBytes += copySize;
             Rollback_RestoreCollisionBody(slot.regions[i].ptr, slot.data + offset, copySize);
         } else if ((uint64_t)slot.regions[i].ptr == *(uint64_t*)_addr(PTR_SMAIN) &&
                    slot.regions[i].size == SMAIN_SIZE) {
@@ -1075,7 +1078,4 @@ void Rollback_RestoreSnapshot(int32_t frame)
         g_activeRollbackProfile->restoreUi += uiEnd - shotsEnd;
     }
 
-    HookLog("Rollback: restored frame %d with %d regions, total size %zu bytes, "
-            "sCollision inline regions=%d bytes=%zu\n",
-            frame, slot.regionCount, offset, collisionRestoreCount, collisionRestoreBytes);
 }
