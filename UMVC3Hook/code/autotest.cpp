@@ -534,7 +534,8 @@ void StartInboundNetSuiteMove(const AutoTestStartPacket& packet)
         configured = AutoTest_StartRuntimeCommand(packet.player_index,
                                                    packet.matcher_index,
                                                    packet.line_index,
-                                                   g_suiteFacingLeft);
+                                                   g_suiteFacingLeft,
+                                                   packet.variant_token);
         if (configured)
             g_status.startFrame = packet.start_frame;
     }
@@ -966,6 +967,61 @@ bool CommandNotationsMatch(const CommandNotation& runtime,
         }
     }
     return display.attackCount > 0 || display.buttons || runtimeButtons == 0;
+}
+
+void DecodeCommandListText(uint64_t record, char* name, size_t capacity);
+uint64_t GetCommandListTextResource(int32_t playerIndex, uint64_t character);
+
+bool GetCommandListVariantName(int32_t playerIndex, uint64_t character,
+                               uint64_t commandResource, uint64_t command,
+                               uint32_t variantToken, char* name,
+                               size_t capacity)
+{
+    name[0] = '\0';
+    uint64_t resource = GetCommandListTextResource(playerIndex, character);
+    if (!resource || !commandResource || !command)
+        return false;
+
+    CommandListTextCache& cached = g_commandListText[playerIndex];
+    uint32_t textCount = *(uint32_t*)(resource + 0x70);
+    uint64_t records = *(uint64_t*)(resource + 0x78);
+    if (!records || !cached.rowMetadata || !cached.rowNotation)
+        return false;
+
+    CommandNotation runtimeNotation = {};
+    uint32_t commandFlags = *(uint32_t*)(command + 0x20);
+    if (!GetRuntimeCommandNotation(commandResource, command, runtimeNotation,
+                                   commandFlags))
+        return false;
+
+    int32_t matchedRow = -1;
+    for (int32_t row = 0; row < cached.rowCount; ++row) {
+        const uint32_t* tokens = (const uint32_t*)(
+            cached.rowNotation + (uint64_t)row * 15 * sizeof(uint32_t));
+        bool hasVariant = false;
+        for (int32_t i = 0; i < 15 && tokens[i] != UINT32_MAX; ++i)
+            hasVariant |= tokens[i] == variantToken;
+        if (!hasVariant)
+            continue;
+
+        CommandNotation display = {};
+        if (!GetDisplayRowNotation(cached.rowNotation, row, display) ||
+            !CommandNotationsMatch(runtimeNotation, display, commandFlags))
+            continue;
+        if (matchedRow >= 0)
+            return false;
+        matchedRow = row;
+    }
+    if (matchedRow < 0)
+        return false;
+
+    int32_t textIndex = *(int32_t*)(cached.rowMetadata +
+                                     (uint64_t)matchedRow * 0x10);
+    if (textIndex < 0 || (uint32_t)textIndex >= textCount)
+        return false;
+    DecodeCommandListText(records + (uint64_t)textIndex * 0x10,
+                          name, capacity);
+    return name[0] != '\0';
 }
 
 void DecodeCommandListText(uint64_t record, char* name, size_t capacity)
@@ -1622,6 +1678,34 @@ extern "C" int32_t AutoTest_GetRuntimeCommands(
                 out.animationFlagsForbidden = *(uint32_t*)(matcher + 0x74);
                 out.programFlagsRequired = *(uint32_t*)(matcher + 0x7C);
                 out.programFlagsForbidden = *(uint32_t*)(matcher + 0x80);
+
+                char rapidName[128] = {};
+                char holdName[128] = {};
+                bool hasRapidVariant = GetCommandListVariantName(
+                    player, character, resource, command, 20,
+                    rapidName, sizeof(rapidName));
+                bool hasHoldVariant = GetCommandListVariantName(
+                    player, character, resource, command, 19,
+                    holdName, sizeof(holdName));
+                if (hasRapidVariant || hasHoldVariant) {
+                    const int32_t firstToken = hasRapidVariant ? 20 : 19;
+                    const char* firstName = hasRapidVariant
+                        ? rapidName : holdName;
+                    snprintf(out.commandListName, sizeof(out.commandListName),
+                             "%s", firstName);
+                    out.commandListVariantToken = firstToken;
+
+                    if (hasRapidVariant && hasHoldVariant && written < capacity) {
+                        AutoTestRuntimeCommand& variant = outCommands[written++];
+                        variant = out;
+                        snprintf(variant.commandListName,
+                                 sizeof(variant.commandListName), "%s",
+                                 holdName);
+                        variant.commandListVariantToken = 19;
+                    }
+                } else {
+                    out.commandListVariantToken = -1;
+                }
             }
         }
     }
@@ -1631,7 +1715,8 @@ extern "C" int32_t AutoTest_GetRuntimeCommands(
 extern "C" bool AutoTest_StartRuntimeCommand(int32_t playerIndex,
                                                int32_t matcherIndex,
                                                int32_t lineIndex,
-                                               bool facingLeft)
+                                               bool facingLeft,
+                                               int32_t variantToken)
 {
     g_runtimeExecutionError[0] = '\0';
     if (playerIndex < 0 || playerIndex > 1 || matcherIndex < 0 ||
@@ -1782,6 +1867,25 @@ extern "C" bool AutoTest_StartRuntimeCommand(int32_t playerIndex,
         return false;
     }
 
+    if (variantToken == 20) {
+        for (int32_t repeat = 0; repeat < 4; ++repeat) {
+            if (!AppendRuntimeInput(0x80, 0, 2) ||
+                !AppendRuntimeInput(0x80, 0x80, 2)) {
+                snprintf(g_runtimeExecutionError,
+                         sizeof(g_runtimeExecutionError),
+                         "Could not append rapid-S command variant");
+                g_runtimeScript.stepCount = 0;
+                return false;
+            }
+        }
+    } else if (variantToken == 19 &&
+               !AppendRuntimeInput(0x80, 0x80, 60)) {
+        snprintf(g_runtimeExecutionError, sizeof(g_runtimeExecutionError),
+                 "Could not append held-S command variant");
+        g_runtimeScript.stepCount = 0;
+        return false;
+    }
+
     if (g_runtimeScript.stepCount == 0 ||
         g_runtimeScript.stepCount >= MAX_RUNTIME_INPUT_STEPS) {
         snprintf(g_runtimeExecutionError, sizeof(g_runtimeExecutionError),
@@ -1797,9 +1901,9 @@ extern "C" bool AutoTest_StartRuntimeCommand(int32_t playerIndex,
     g_runningRuntimeCommand = true;
     g_runningRuntimeHyper = isHyper;
     g_runningManualCommand = -1;
-    HookLog("AutoTest: scheduled runtime command matcher=%d line=%d state=%d flags=0x%08X for P%d at frame %d%s\n",
+    HookLog("AutoTest: scheduled runtime command matcher=%d line=%d state=%d flags=0x%08X variant=%d for P%d at frame %d%s\n",
             matcherIndex, lineIndex, commandState, commandFlags,
-            playerIndex + 1, g_status.startFrame,
+            variantToken, playerIndex + 1, g_status.startFrame,
             requiresAir ? " with jump setup" : "");
     return true;
 }
@@ -1851,10 +1955,13 @@ bool StartSuite(int32_t playerIndex, bool facingLeft, bool deduplicate)
                 g_suiteCommands[existing];
             const char* existingName = existingCommand.commandListName[0]
                 ? existingCommand.commandListName : existingCommand.name;
+            bool bothNamesResolved = command.commandListName[0] &&
+                                     existingCommand.commandListName[0];
             if (strcmp(commandName, existingName) == 0 ||
-                (hasNotation && g_suiteCommandHasNotation[existing] &&
+                (!bothNamesResolved && hasNotation &&
+                 g_suiteCommandHasNotation[existing] &&
                  CommandNotationsEqual(
-                     notation, g_suiteCommandNotations[existing]))) {
+                      notation, g_suiteCommandNotations[existing]))) {
                 duplicate = true;
                 break;
             }
@@ -2011,9 +2118,10 @@ extern "C" void AutoTest_Process()
                                   g_suiteFacingLeft, frame + 5);
         } else {
             if (!AutoTest_StartRuntimeCommand(g_suiteStatus.playerIndex,
-                                              command->matcherIndex,
-                                              command->lineIndex,
-                                              g_suiteFacingLeft)) {
+                                               command->matcherIndex,
+                                               command->lineIndex,
+                                               g_suiteFacingLeft,
+                                               command->commandListVariantToken)) {
                 FinishSuiteCommand(false, AutoTest_GetRuntimeExecutionError());
                 return;
             }
@@ -2029,6 +2137,8 @@ extern "C" void AutoTest_Process()
             packet.player_index = g_suiteStatus.playerIndex;
             packet.matcher_index = command ? command->matcherIndex : -1;
             packet.line_index = command ? command->lineIndex : -1;
+            packet.variant_token = command
+                ? command->commandListVariantToken : -1;
             packet.manual_index = g_suiteManualCase
                 ? g_suiteStatus.currentCommand : -1;
             packet.setup_frame = g_status.startFrame - 10;

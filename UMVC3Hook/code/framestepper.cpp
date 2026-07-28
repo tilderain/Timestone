@@ -1357,7 +1357,8 @@ void FrameStepper_DrawAutoTest()
         if (status.active) ImGui::BeginDisabled();
         if (ImGui::SmallButton("Run"))
             AutoTest_StartRuntimeCommand(commandPlayer, command.matcherIndex,
-                                         command.lineIndex, facingLeft);
+                                          command.lineIndex, facingLeft,
+                                          command.commandListVariantToken);
         if (status.active) ImGui::EndDisabled();
         ImGui::SameLine();
         bool open = ImGui::TreeNodeEx(

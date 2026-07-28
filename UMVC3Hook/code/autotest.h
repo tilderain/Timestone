@@ -49,6 +49,7 @@ struct AutoTestRuntimeCommand {
     int32_t commandStepCount;
     int32_t commandState;
     uint32_t commandFlags;
+    int32_t commandListVariantToken;
     float lifeRateMin;
     float lifeRateMax;
     float gaugeRateMin;
@@ -110,7 +111,8 @@ extern "C" int32_t AutoTest_GetRuntimeCommands(
 extern "C" bool AutoTest_StartRuntimeCommand(int32_t playerIndex,
                                                int32_t matcherIndex,
                                                int32_t lineIndex,
-                                               bool facingLeft);
+                                               bool facingLeft,
+                                               int32_t variantToken = -1);
 extern "C" const char* AutoTest_GetRuntimeExecutionError();
 extern "C" bool AutoTest_StartSuite(int32_t playerIndex, bool facingLeft);
 extern "C" bool AutoTest_StartVariantSuite(int32_t playerIndex,

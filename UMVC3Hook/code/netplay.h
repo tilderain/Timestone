@@ -136,6 +136,7 @@ struct AutoTestStartPacket {
     int32_t  player_index;
     int32_t  matcher_index;
     int32_t  line_index;
+    int32_t  variant_token;
     int32_t  manual_index;
     int32_t  setup_frame;
     int32_t  start_frame;
