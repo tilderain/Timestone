@@ -285,7 +285,7 @@ static bool      g_desyncMismatch[RING_SIZE];  // true if that frame exceeded th
 static int32_t   g_confirmedChecksumThrough = -1;
 static int32_t   g_lastAdvertisedChecksumFrame = -1;
 
-static constexpr uint32_t DESYNC_THRESHOLD         = 5;
+static constexpr uint32_t DESYNC_THRESHOLD         = 0;
 static constexpr int32_t  DESYNC_SKIP_FRAMES       = 0;
 static constexpr int32_t  DESYNC_CONSECUTIVE_MIN   = 15;
 
