@@ -728,9 +728,11 @@ void ConcreteCharacterSnapshot_RestoreFields(void* character,
                            kGeneratedCharacterTailRanges);
 
     if (IsDti(dti, kRyuDti)) {
-        // uRyu's concrete tail is scalar except for mpBeamObj at +0x6918.
-        // Keep that external reference live until shot/effect fixups can map it.
+        // Restore retires every live effect without reconstructing or remapping
+        // this weak reference. Do not let uRyu::tick release the retired object.
         CopyRange(character, savedBody, bodySize, {0x68F0, 0x28});
+        if (bodySize >= 0x6920)
+            *(uint64_t*)((uint8_t*)character + 0x6918) = 0;
         CopyRange(character, savedBody, bodySize, {0x6920, 0x20});
     }
 
