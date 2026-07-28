@@ -781,20 +781,27 @@ static inline bool KeyPressed(int vk, bool& prevState)
     return pressed;
 }
 
+static void CloseGameAfterAutoTest()
+{
+    if (g_hWnd && PostMessageW(g_hWnd, WM_CLOSE, 0, 0))
+        return;
+    ExitProcess(0);
+}
+
 void FrameStepper_Process()
 {
     AutoTest_Process();
 
     if (Netplay_GetInboundAutoTestComplete()) {
         HookLog("AutoTestSuite: remote command-line suite complete; closing game\n");
-        if (g_hWnd) PostMessageW(g_hWnd, WM_CLOSE, 0, 0);
+        CloseGameAfterAutoTest();
         return;
     }
 
     if (g_autoTestExitTick && GetTickCount() - g_autoTestExitTick < 0x80000000u) {
         HookLog("AutoTestSuite: completion delivered; closing host game\n");
         g_autoTestExitTick = 0;
-        if (g_hWnd) PostMessageW(g_hWnd, WM_CLOSE, 0, 0);
+        CloseGameAfterAutoTest();
         return;
     }
 
