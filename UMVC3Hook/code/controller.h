@@ -127,6 +127,7 @@ extern "C" void Controller_SilentFrameEnd();
 
 // Replace the checksum for a historical frame after its corrected re-sim tick.
 extern "C" void Controller_RecordFrameChecksum(int32_t frame);
+extern "C" bool Controller_GetFrameChecksum(int32_t frame, uint32_t* outChecksum);
 
 // Netplay debug info — read from framestepper draw
 extern "C" int32_t  Controller_GetDelayFrames();
@@ -163,6 +164,7 @@ extern bool         g_desyncSeen;       // user dismissed with P; suppresses re-
 extern int32_t      g_desyncFrame;
 extern uint32_t     g_desyncLocalCS;
 extern uint32_t     g_desyncRemoteCS;
+extern "C" void     Controller_ClearDesyncDetection();
 
 // Frame advantage (GGPO-style) — frame-count-based timesync
 extern int32_t      g_localFrameAdvantage;    // negative = we're ahead of remote

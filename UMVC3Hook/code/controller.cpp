@@ -399,6 +399,24 @@ extern "C" int32_t Controller_GetDelayFrames()      { return g_delayFrames; }
 extern "C" int32_t Controller_GetNetFrameCount()    { return GetGameFrameCount(); }
 extern "C" int32_t Controller_GetLastRemoteFrame()  { return g_lastRemoteFrame; }
 extern "C" int32_t Controller_GetRollbackFrames()   { return g_rollbackFrames; }
+extern "C" void Controller_ClearDesyncDetection()
+{
+    g_desyncDetected = false;
+    g_desyncSeen = false;
+    g_desyncFrame = -1;
+    g_desyncLocalCS = 0;
+    g_desyncRemoteCS = 0;
+
+    // Treat comparisons from the completed move as acknowledged so they cannot
+    // immediately retrigger after a training reset. New frames overwrite them.
+    for (int32_t i = 0; i < RING_SIZE; ++i) {
+        if (g_localChecksumFrame[i] == g_remoteChecksumFrame[i])
+            g_desyncChecked[i] = g_localChecksumFrame[i];
+        else
+            g_desyncChecked[i] = -1;
+        g_desyncMismatch[i] = false;
+    }
+}
 extern "C" uint32_t Controller_GetRecordedLocalInput(int32_t frame)
 {
     if (frame < 0) return 0;
@@ -1400,6 +1418,17 @@ extern "C" void Controller_RecordFrameChecksum(int32_t frame)
     }
 }
 
+extern "C" bool Controller_GetFrameChecksum(int32_t frame, uint32_t* outChecksum)
+{
+    if (frame < DESYNC_SKIP_FRAMES || !outChecksum)
+        return false;
+    uint32_t idx = (uint32_t)frame % RING_SIZE;
+    if (g_localChecksumFrame[idx] != frame)
+        return false;
+    *outChecksum = g_localChecksum[idx];
+    return true;
+}
+
 static void UpdateConfirmedChecksums()
 {
     while (g_confirmedChecksumThrough < g_netFrameCount)
@@ -1502,6 +1531,9 @@ extern "C" void Controller_OnFrameEnd()
     if (!g_isResimulating && g_netFrameCount >= DESYNC_SKIP_FRAMES)
     {
         Controller_RecordFrameChecksum(g_netFrameCount);
+        uint32_t liveChecksum = 0;
+        if (Controller_GetFrameChecksum(g_netFrameCount, &liveChecksum))
+            AutoTest_OnLiveFrame(g_netFrameCount, liveChecksum);
         UpdateConfirmedChecksums();
 
         int32_t checksumFrame = g_lastAdvertisedChecksumFrame + 1;

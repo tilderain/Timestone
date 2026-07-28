@@ -3,6 +3,8 @@
 #include "controller.h"
 #include "mk10utils.h"
 #include "rollback.h"
+#include "netplay.h"
+#include "framestepper.h"
 #include "../kiero/minhook/include/MinHook.h"
 
 #include <cstddef>
@@ -135,6 +137,33 @@ uint32_t g_suiteRngSeed = 0;
 constexpr int32_t SUITE_COMMAND_TIMEOUT = 600;
 constexpr int32_t SUITE_COMPLETION_TIMEOUT = 3600;
 constexpr int32_t SUITE_QUIET_FRAMES = 20;
+constexpr int32_t NET_SUITE_STABLE_FRAMES = 15;
+constexpr int32_t NET_SUITE_HISTORY = 512;
+
+struct NetSuiteFrame {
+    int32_t frame;
+    uint32_t checksum;
+    bool charactersIdle;
+};
+
+bool g_netSuiteActive = false;
+bool g_netSuiteClient = false;
+bool g_netSuiteRestartPending = false;
+bool g_netSuiteRestartExecuted = false;
+bool g_netSuiteRestartLeftFighting = false;
+uint32_t g_netSuiteMoveId = 0;
+int32_t g_netSuiteStartFrame = -1;
+int32_t g_netSuiteSetupFrame = -1;
+bool g_netSuiteSetupApplied = false;
+int32_t g_netSuiteLastForcedFrame = -1;
+int32_t g_netSuiteLastComparedFrame = -1;
+int32_t g_netSuiteStableFrames = 0;
+int32_t g_netSuiteComparedFrames = 0;
+int32_t g_netSuiteFirstMismatchFrame = -1;
+uint32_t g_netSuiteFirstHostChecksum = 0;
+uint32_t g_netSuiteFirstClientChecksum = 0;
+NetSuiteFrame g_netSuiteLiveFrames[NET_SUITE_HISTORY] = {};
+AutoTestFramePacket g_netSuiteRemoteFrames[NET_SUITE_HISTORY] = {};
 
 struct RuntimeCommandNameCache {
     uint64_t resource;
@@ -294,10 +323,185 @@ void FinishSuiteCommand(bool passed, const char* reason)
     g_status.currentInput = 0;
     g_runningRuntimeCommand = false;
     g_runningManualCommand = -1;
-    RequestTrainingReset();
+    if (g_netSuiteActive && Netplay_IsActive() && Netplay_IsHost()) {
+        const char* outcome = passed ? "SYNC"
+            : (g_netSuiteFirstMismatchFrame >= 0 ? "DESYNC" : "ERROR");
+        FILE* file = fopen("autotest_results.tsv", "a");
+        if (file) {
+            fprintf(file, "%u\t%s\t%s\t%d\t%d\t0x%08X\t0x%08X\t%s\n",
+                    g_netSuiteMoveId, g_suiteStatus.currentName,
+                    outcome, g_netSuiteComparedFrames,
+                    g_netSuiteFirstMismatchFrame,
+                    g_netSuiteFirstHostChecksum,
+                    g_netSuiteFirstClientChecksum, reason);
+            fclose(file);
+        } else {
+            HookLog("AutoTestNet: could not append autotest_results.tsv\n");
+        }
+        g_netSuiteRestartPending = true;
+        AutoTest_PrepareForRestart();
+        FrameStepper_ScheduleAutoTestRestart(g_suiteRngSeed);
+    } else {
+        RequestTrainingReset();
+    }
     g_suitePhase = SuitePhase::WaitingForReset;
     g_suiteStatus.waitingForCompletion = false;
     g_suiteStatus.waitingForReset = true;
+}
+
+void ResetNetSuiteMoveState(uint32_t moveId, int32_t startFrame)
+{
+    g_netSuiteMoveId = moveId;
+    g_netSuiteStartFrame = startFrame;
+    g_netSuiteLastForcedFrame = startFrame - 1;
+    g_netSuiteLastComparedFrame = startFrame - 1;
+    g_netSuiteStableFrames = 0;
+    g_netSuiteComparedFrames = 0;
+    g_netSuiteFirstMismatchFrame = -1;
+    g_netSuiteFirstHostChecksum = 0;
+    g_netSuiteFirstClientChecksum = 0;
+    g_netSuiteRestartExecuted = false;
+    g_netSuiteRestartLeftFighting = false;
+    for (NetSuiteFrame& entry : g_netSuiteLiveFrames)
+        entry.frame = -1;
+    for (AutoTestFramePacket& entry : g_netSuiteRemoteFrames)
+        entry.frame = -1;
+}
+
+void ProcessNetSuiteSetup(int32_t frame)
+{
+    if (!g_netSuiteActive || g_netSuiteSetupApplied ||
+        g_netSuiteSetupFrame < 0 || frame < g_netSuiteSetupFrame)
+        return;
+    PlaceDefenderNextToAttacker(g_suiteStatus.playerIndex);
+    g_netSuiteSetupApplied = true;
+    HookLog("AutoTestNet: move %u setup applied at frame %d\n",
+            g_netSuiteMoveId, frame);
+}
+
+void ConfigureManualScript(int32_t manualIndex, int32_t playerIndex,
+                           bool facingLeft, int32_t startFrame)
+{
+    g_status = {
+        true, playerIndex, -1, startFrame,
+        -1, -1, 0, -1, -1, -1, -1, -1, 0,
+    };
+    g_facingLeft = facingLeft;
+    g_runningRuntimeCommand = false;
+    g_runningManualCommand = manualIndex;
+}
+
+bool BothCharactersIdle()
+{
+    return CharacterActionsAreIdle(GetActiveCharacter(g_suiteStatus.playerIndex),
+                                   GetActiveCharacter(g_suiteStatus.playerIndex ^ 1));
+}
+
+void StartInboundNetSuiteMove(const AutoTestStartPacket& packet)
+{
+    if (Netplay_IsHost() || packet.player_index != 0 ||
+        packet.start_frame <= Controller_GetNetFrameCount()) {
+        HookLog("AutoTestNet: rejected move %u start=%d current=%d player=%d\n",
+                packet.move_id, packet.start_frame,
+                Controller_GetNetFrameCount(), packet.player_index);
+        return;
+    }
+
+    g_netSuiteActive = true;
+    g_netSuiteClient = true;
+    g_netSuiteRestartPending = false;
+    g_suiteStatus = {};
+    g_suiteStatus.active = true;
+    g_suiteStatus.playerIndex = packet.player_index;
+    g_suiteIdleActions[0] = packet.attacker_idle_action;
+    g_suiteIdleActions[1] = packet.defender_idle_action;
+    snprintf(g_suiteStatus.currentName, sizeof(g_suiteStatus.currentName),
+             "%s", packet.move_name);
+    g_suiteFacingLeft = packet.facing_left != 0;
+    g_suiteRngSeed = packet.round_seed;
+    bool configured = false;
+    if (packet.case_type == AUTOTEST_CASE_MANUAL &&
+        packet.manual_index >= 0 &&
+        packet.manual_index < (int32_t)std::size(SUITE_MANUAL_SCRIPTS)) {
+        ConfigureManualScript(packet.manual_index, packet.player_index,
+                              g_suiteFacingLeft, packet.start_frame);
+        configured = true;
+    } else if (packet.case_type == AUTOTEST_CASE_RUNTIME) {
+        configured = AutoTest_StartRuntimeCommand(packet.player_index,
+                                                   packet.matcher_index,
+                                                   packet.line_index,
+                                                   g_suiteFacingLeft);
+        if (configured)
+            g_status.startFrame = packet.start_frame;
+    }
+    if (!configured) {
+        HookLog("AutoTestNet: could not configure move %u: %s\n",
+                packet.move_id, AutoTest_GetRuntimeExecutionError());
+        g_netSuiteActive = false;
+        g_suiteStatus.active = false;
+        return;
+    }
+
+    // Inputs arrive through the normal host input stream. Keeping the script
+    // configured gives diagnostics a move identity without injecting client input.
+    g_status.active = false;
+    ResetNetSuiteMoveState(packet.move_id, packet.start_frame);
+    g_netSuiteSetupFrame = packet.setup_frame;
+    g_netSuiteSetupApplied = false;
+    HookLog("AutoTestNet: client armed move %u %s at frame %d\n",
+            packet.move_id, packet.move_name, packet.start_frame);
+}
+
+void ProcessNetSuitePackets()
+{
+    AutoTestStartPacket start = {};
+    while (Netplay_GetInboundAutoTestStart(start))
+        StartInboundNetSuiteMove(start);
+
+    if (!g_netSuiteActive || !Netplay_IsHost())
+        return;
+
+    AutoTestFramePacket report = {};
+    while (Netplay_GetInboundAutoTestFrame(report)) {
+        if (report.move_id != g_netSuiteMoveId || report.frame < g_netSuiteStartFrame)
+            continue;
+        g_netSuiteRemoteFrames[(uint32_t)report.frame % NET_SUITE_HISTORY] = report;
+    }
+
+    for (;;) {
+        int32_t frame = g_netSuiteLastComparedFrame + 1;
+        uint32_t idx = (uint32_t)frame % NET_SUITE_HISTORY;
+        const NetSuiteFrame& host = g_netSuiteLiveFrames[idx];
+        const AutoTestFramePacket& client = g_netSuiteRemoteFrames[idx];
+        if (host.frame != frame || client.frame != frame ||
+            client.move_id != g_netSuiteMoveId)
+            break;
+
+        ++g_netSuiteComparedFrames;
+        g_netSuiteLastComparedFrame = frame;
+        bool checksumMatch = host.checksum == client.checksum;
+        if (!checksumMatch && g_netSuiteFirstMismatchFrame < 0) {
+            g_netSuiteFirstMismatchFrame = frame;
+            g_netSuiteFirstHostChecksum = host.checksum;
+            g_netSuiteFirstClientChecksum = client.checksum;
+            HookLog("AutoTestNet: move %u mismatch frame=%d host=0x%08X client=0x%08X\n",
+                    client.move_id, frame, host.checksum, client.checksum);
+        }
+
+        bool bothIdle = host.charactersIdle &&
+                        (client.flags & AUTOTEST_FRAME_CHARACTERS_IDLE) != 0;
+        g_netSuiteStableFrames = checksumMatch && bothIdle
+            ? g_netSuiteStableFrames + 1 : 0;
+        g_suiteStatus.quietFrames = g_netSuiteStableFrames;
+        if (g_netSuiteStableFrames >= NET_SUITE_STABLE_FRAMES &&
+            g_suitePhase == SuitePhase::WaitingForCompletion) {
+            FinishSuiteCommand(true,
+                g_netSuiteFirstMismatchFrame < 0
+                    ? "checksums stable for 15 idle frames"
+                    : "checksums recovered and stayed stable for 15 idle frames");
+            return;
+        }
+    }
 }
 
 uint32_t MirrorDirections(uint32_t input)
@@ -1038,11 +1242,19 @@ extern "C" void AutoTest_Stop()
     g_suiteStatus.waitingForCompletion = false;
     g_suiteStatus.waitingForReset = false;
     g_suitePhase = SuitePhase::Idle;
+    g_netSuiteActive = false;
+    g_netSuiteClient = false;
+    g_netSuiteRestartPending = false;
 }
 
 extern "C" AutoTestStatus AutoTest_GetStatus()
 {
     return g_status;
+}
+
+extern "C" bool AutoTest_IsActive()
+{
+    return g_status.active || g_suiteStatus.active || g_netSuiteActive;
 }
 
 extern "C" int32_t AutoTest_GetScriptCount()
@@ -1311,6 +1523,10 @@ extern "C" bool AutoTest_StartSuite(int32_t playerIndex, bool facingLeft)
 {
     if (playerIndex < 0 || playerIndex > 1)
         return false;
+    if (Netplay_IsActive() && (!Netplay_IsHost() || playerIndex != 0)) {
+        HookLog("AutoTestNet: start the network suite on host P1\n");
+        return false;
+    }
 
     uint64_t replay = *(uint64_t*)_addr(PTR_SREPLAY);
     if (!replay)
@@ -1380,10 +1596,15 @@ extern "C" bool AutoTest_StartSuite(int32_t playerIndex, bool facingLeft)
     g_suiteStatus.commandCount = commandCount + (int32_t)std::size(SUITE_MANUAL_SCRIPTS);
     g_suiteStatus.currentMatcher = -1;
     g_suiteStatus.currentLine = -1;
-    g_suiteStatus.requiredQuietFrames = SUITE_QUIET_FRAMES;
+    g_suiteStatus.requiredQuietFrames = Netplay_IsActive()
+        ? NET_SUITE_STABLE_FRAMES : SUITE_QUIET_FRAMES;
     g_suiteFacingLeft = facingLeft;
     g_suiteMatchedCommand = false;
     g_suitePhase = SuitePhase::StartCommand;
+    g_netSuiteActive = Netplay_IsActive();
+    g_netSuiteClient = false;
+    g_netSuiteRestartPending = false;
+    g_netSuiteMoveId = 0;
     HookLog("AutoTestSuite: started %d manual cases and %d unique commands for P%d (%d duplicate moves removed)\n",
             (int32_t)std::size(SUITE_MANUAL_SCRIPTS), commandCount,
             playerIndex + 1, duplicateCount);
@@ -1392,12 +1613,29 @@ extern "C" bool AutoTest_StartSuite(int32_t playerIndex, bool facingLeft)
 
 extern "C" void AutoTest_Process()
 {
+    ProcessNetSuitePackets();
+    ProcessNetSuiteSetup(Controller_GetNetFrameCount());
+    if (g_netSuiteActive && g_netSuiteClient)
+        return;
     if (!g_suiteStatus.active || g_isResimulating)
         return;
 
     int32_t frame = Controller_GetNetFrameCount();
     uint64_t action = GetAction();
     int32_t actionStep = action ? *(int32_t*)(action + 0xD8) : -1;
+
+    if (g_netSuiteActive && !g_netSuiteClient && !g_netSuiteRestartPending &&
+        g_desyncDetected &&
+        (g_suitePhase == SuitePhase::RunningCommand ||
+         g_suitePhase == SuitePhase::WaitingForCompletion)) {
+        if (g_netSuiteFirstMismatchFrame < 0) {
+            g_netSuiteFirstMismatchFrame = g_desyncFrame;
+            g_netSuiteFirstHostChecksum = g_desyncLocalCS;
+            g_netSuiteFirstClientChecksum = g_desyncRemoteCS;
+        }
+        FinishSuiteCommand(false, "persistent desync detected");
+        return;
+    }
 
     switch (g_suitePhase) {
     case SuitePhase::StartCommand: {
@@ -1413,7 +1651,7 @@ extern "C" void AutoTest_Process()
             return;
         }
 
-        if (!ResetSuiteRng()) {
+        if (!g_netSuiteActive && !ResetSuiteRng()) {
             snprintf(g_suiteStatus.lastResult, sizeof(g_suiteStatus.lastResult),
                      "Suite stopped: sReplay unavailable for RNG reset");
             HookLog("AutoTestSuite: %s\n", g_suiteStatus.lastResult);
@@ -1434,7 +1672,8 @@ extern "C" void AutoTest_Process()
                      ? SUITE_MANUAL_SCRIPTS[g_suiteStatus.currentCommand].name
                      : (command->commandListName[0]
                          ? command->commandListName : command->name));
-        PlaceDefenderNextToAttacker(g_suiteStatus.playerIndex);
+        if (!g_netSuiteActive)
+            PlaceDefenderNextToAttacker(g_suiteStatus.playerIndex);
         uint64_t attacker = GetActiveCharacter(g_suiteStatus.playerIndex);
         uint64_t defender = GetActiveCharacter(g_suiteStatus.playerIndex ^ 1);
         g_suiteDefenderLife = GetCharacterLife(defender);
@@ -1452,13 +1691,9 @@ extern "C" void AutoTest_Process()
         g_suiteStatus.defenderAction = g_suiteIdleActions[1];
         g_suiteMatchedCommand = false;
         if (g_suiteManualCase) {
-            g_status = {
-                true, g_suiteStatus.playerIndex, -1, frame + 5,
-                -1, -1, 0, -1, -1, -1, -1, -1, 0,
-            };
-            g_facingLeft = g_suiteFacingLeft;
-            g_runningRuntimeCommand = false;
-            g_runningManualCommand = g_suiteStatus.currentCommand;
+            ConfigureManualScript(g_suiteStatus.currentCommand,
+                                  g_suiteStatus.playerIndex,
+                                  g_suiteFacingLeft, frame + 5);
         } else {
             if (!AutoTest_StartRuntimeCommand(g_suiteStatus.playerIndex,
                                               command->matcherIndex,
@@ -1468,6 +1703,34 @@ extern "C" void AutoTest_Process()
                 return;
             }
             g_suiteStatus.active = true;
+        }
+        if (g_netSuiteActive) {
+            int32_t networkLead = (int32_t)(Netplay_GetRTT() * 60 / 1000) + 30;
+            g_status.startFrame = frame + networkLead;
+            AutoTestStartPacket packet = {};
+            packet.move_id = ++g_netSuiteMoveId;
+            packet.case_type = g_suiteManualCase
+                ? AUTOTEST_CASE_MANUAL : AUTOTEST_CASE_RUNTIME;
+            packet.player_index = g_suiteStatus.playerIndex;
+            packet.matcher_index = command ? command->matcherIndex : -1;
+            packet.line_index = command ? command->lineIndex : -1;
+            packet.manual_index = g_suiteManualCase
+                ? g_suiteStatus.currentCommand : -1;
+            packet.setup_frame = g_status.startFrame - 10;
+            packet.start_frame = g_status.startFrame;
+            packet.attacker_idle_action = g_suiteIdleActions[0];
+            packet.defender_idle_action = g_suiteIdleActions[1];
+            packet.facing_left = g_suiteFacingLeft ? 1u : 0u;
+            packet.round_seed = g_suiteRngSeed;
+            snprintf(packet.move_name, sizeof(packet.move_name), "%s",
+                     g_suiteStatus.currentName);
+            ResetNetSuiteMoveState(packet.move_id, packet.start_frame);
+            g_netSuiteSetupFrame = packet.setup_frame;
+            g_netSuiteSetupApplied = false;
+            g_netSuiteRestartPending = false;
+            Netplay_SendAutoTestStart(packet);
+            HookLog("AutoTestNet: host started move %u %s at frame %d\n",
+                    packet.move_id, packet.move_name, packet.start_frame);
         }
         g_suiteStatus.commandStartFrame = frame;
         g_suiteDeadline = frame + SUITE_COMMAND_TIMEOUT;
@@ -1496,6 +1759,12 @@ extern "C" void AutoTest_Process()
         g_suiteStatus.shotsClear = g_suiteStatus.shotCount == 0;
         g_suiteStatus.cutinClear = !HasActiveCutin();
 
+        if (g_netSuiteActive) {
+            if (frame > g_suiteDeadline)
+                FinishSuiteCommand(false, "network checksum stabilization timed out");
+            return;
+        }
+
         bool quiet = g_suiteStatus.charactersStable;
         g_suiteStatus.quietFrames = quiet ? g_suiteStatus.quietFrames + 1 : 0;
         if (g_suiteStatus.quietFrames >= SUITE_QUIET_FRAMES) {
@@ -1506,6 +1775,16 @@ extern "C" void AutoTest_Process()
         return;
     }
     case SuitePhase::WaitingForReset:
+        if (g_netSuiteActive) {
+            if (!g_netSuiteRestartExecuted)
+                return;
+            if (actionStep != 5) {
+                g_netSuiteRestartLeftFighting = true;
+                return;
+            }
+            if (!g_netSuiteRestartLeftFighting)
+                return;
+        }
         if (actionStep == 5) {
             ++g_suiteStatus.currentCommand;
             g_suiteStatus.waitingForReset = false;
@@ -1520,4 +1799,63 @@ extern "C" void AutoTest_Process()
 extern "C" AutoTestSuiteStatus AutoTest_GetSuiteStatus()
 {
     return g_suiteStatus;
+}
+
+extern "C" bool AutoTest_GetForcedClientResim(int32_t currentFrame,
+                                                int32_t* outStartFrame,
+                                                int32_t* outEndFrame)
+{
+    if (!g_netSuiteActive || !g_netSuiteClient || g_netSuiteRestartPending ||
+        !Netplay_IsActive() || Netplay_IsHost() || !outStartFrame || !outEndFrame)
+        return false;
+
+    int32_t frame = g_netSuiteLastForcedFrame + 1;
+    if (frame < g_netSuiteStartFrame)
+        frame = g_netSuiteStartFrame;
+    if (frame >= currentFrame || !Controller_IsFrameConfirmed(frame))
+        return false;
+    g_netSuiteLastForcedFrame = frame;
+    *outStartFrame = frame;
+    *outEndFrame = frame + 1;
+    return true;
+}
+
+extern "C" void AutoTest_OnResimFrame(int32_t frame, uint32_t checksum)
+{
+    if (!g_netSuiteActive || !g_netSuiteClient || g_netSuiteRestartPending ||
+        frame < g_netSuiteStartFrame || !Controller_IsFrameConfirmed(frame))
+        return;
+    AutoTestFramePacket packet = {};
+    packet.move_id = g_netSuiteMoveId;
+    packet.frame = frame;
+    packet.checksum = checksum;
+    if (BothCharactersIdle())
+        packet.flags |= AUTOTEST_FRAME_CHARACTERS_IDLE;
+    Netplay_SendAutoTestFrame(packet);
+}
+
+extern "C" void AutoTest_OnLiveFrame(int32_t frame, uint32_t checksum)
+{
+    if (!g_netSuiteActive || g_netSuiteClient || g_netSuiteRestartPending ||
+        frame < g_netSuiteStartFrame)
+        return;
+    uint32_t idx = (uint32_t)frame % NET_SUITE_HISTORY;
+    g_netSuiteLiveFrames[idx] = {frame, checksum, BothCharactersIdle()};
+}
+
+extern "C" void AutoTest_PrepareForRestart()
+{
+    if (!g_netSuiteActive)
+        return;
+    g_netSuiteRestartPending = true;
+    g_status.active = false;
+    g_status.currentInput = 0;
+}
+
+extern "C" void AutoTest_OnTrainingRestartExecuted()
+{
+    if (!g_netSuiteActive)
+        return;
+    g_netSuiteRestartExecuted = true;
+    g_netSuiteRestartLeftFighting = false;
 }

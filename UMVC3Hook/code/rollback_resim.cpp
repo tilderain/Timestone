@@ -9,6 +9,7 @@
 #include "rollback_tick.h"
 #include "rollback_ndjson.h"
 #include "controller.h"
+#include "autotest.h"
 #include "mk10utils.h"
 #include "netplay.h"
 
@@ -199,8 +200,12 @@ void Rollback_ReSimulate(int32_t startFrame, int32_t endFrame)
         timer.Add(&RollbackProfile::frameNativeTick,
                   &RollbackProfile::frameNativeTickMax);
         Controller_SilentFrameEnd();
-        if (Netplay_IsActive())
+        if (Netplay_IsActive()) {
             Controller_RecordFrameChecksum(frame);
+            uint32_t checksum = 0;
+            if (Controller_GetFrameChecksum(frame, &checksum))
+                AutoTest_OnResimFrame(frame, checksum);
+        }
         Controller_LogReSimFrame(frame);
         timer.Add(&RollbackProfile::frameInputEnd);
         NDJSON_CaptureFrame(frame, true, true);

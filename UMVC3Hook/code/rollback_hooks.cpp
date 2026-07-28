@@ -3,6 +3,7 @@
 #include "rollback_hooks.h"
 
 #include "controller.h"
+#include "autotest.h"
 #include "mk10utils.h"
 #include "netplay.h"
 #include "rollback.h"
@@ -123,7 +124,10 @@ static void __fastcall hkMvc3MainMove(uint64_t main)
             g_postResimFrame = -1;
             int32_t start = -1;
             int32_t end = -1;
-            if (Rollback_ConsumeReSimRequest(start, end)) {
+            bool shouldResim = Rollback_ConsumeReSimRequest(start, end);
+            if (!shouldResim)
+                shouldResim = AutoTest_GetForcedClientResim(curFrame, &start, &end);
+            if (shouldResim) {
                 Rollback_ReSimulate(start, end);
                 const uint64_t postResimStart = Profile_Now();
                 if (g_ndjsonLoggingEnabled)

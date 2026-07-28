@@ -114,3 +114,14 @@ extern "C" const char* AutoTest_GetRuntimeExecutionError();
 extern "C" bool AutoTest_StartSuite(int32_t playerIndex, bool facingLeft);
 extern "C" void AutoTest_Process();
 extern "C" AutoTestSuiteStatus AutoTest_GetSuiteStatus();
+extern "C" bool AutoTest_IsActive();
+
+// Network suite integration. Only the client returns true from the forced
+// replay query; the host remains the live reference timeline.
+extern "C" bool AutoTest_GetForcedClientResim(int32_t currentFrame,
+                                                int32_t* outStartFrame,
+                                                int32_t* outEndFrame);
+extern "C" void AutoTest_OnResimFrame(int32_t frame, uint32_t checksum);
+extern "C" void AutoTest_OnLiveFrame(int32_t frame, uint32_t checksum);
+extern "C" void AutoTest_PrepareForRestart();
+extern "C" void AutoTest_OnTrainingRestartExecuted();

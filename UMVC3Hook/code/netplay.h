@@ -45,6 +45,8 @@ enum PacketType : uint32_t {
     PACKET_RESTART_MATCH = 8, // RestartMatchPacket
     PACKET_MULTI_RESIM = 9, // MultiResimPacket
     PACKET_DUMP_NDJSON = 10, // DumpNdjsonPacket
+    PACKET_AUTOTEST_START = 11, // AutoTestStartPacket
+    PACKET_AUTOTEST_FRAME = 12, // AutoTestFramePacket
 };
 
 #pragma pack(push, 1)
@@ -98,6 +100,13 @@ struct RestartMatchPacket {
     uint32_t type;               // PACKET_RESTART_MATCH
     int32_t  target_frame;       // synchronized net frame to restart on
     uint32_t round_seed;         // deterministic gameplay RNG seed
+    uint32_t kind;               // RestartMatchKind
+    int32_t  button_restart;     // native sAction button-restart value
+};
+
+enum RestartMatchKind : uint32_t {
+    RESTART_FULL_MATCH = 0,
+    RESTART_TRAINING = 1,
 };
 
 struct MultiResimPacket {
@@ -108,6 +117,40 @@ struct MultiResimPacket {
 struct DumpNdjsonPacket {
     uint32_t type;               // PACKET_DUMP_NDJSON
     int32_t  frame;              // final frame included in the rolling dump
+};
+
+enum AutoTestCaseType : uint32_t {
+    AUTOTEST_CASE_MANUAL = 0,
+    AUTOTEST_CASE_RUNTIME = 1,
+};
+
+enum AutoTestFrameFlags : uint32_t {
+    AUTOTEST_FRAME_CHARACTERS_IDLE = 1u << 0,
+};
+
+struct AutoTestStartPacket {
+    uint32_t type;               // PACKET_AUTOTEST_START
+    uint32_t move_id;            // monotonically increasing suite case id
+    uint32_t case_type;          // AutoTestCaseType
+    int32_t  player_index;
+    int32_t  matcher_index;
+    int32_t  line_index;
+    int32_t  manual_index;
+    int32_t  setup_frame;
+    int32_t  start_frame;
+    uint32_t attacker_idle_action;
+    uint32_t defender_idle_action;
+    uint32_t facing_left;
+    uint32_t round_seed;
+    char     move_name[96];
+};
+
+struct AutoTestFramePacket {
+    uint32_t type;               // PACKET_AUTOTEST_FRAME
+    uint32_t move_id;
+    int32_t  frame;
+    uint32_t checksum;           // post-resimulation checksum
+    uint32_t flags;              // AutoTestFrameFlags
 };
 
 enum BattleSyncFlags : uint32_t {
@@ -236,7 +279,9 @@ void Netplay_SendDesyncUnpause();
 bool Netplay_GetInboundDesync(DesyncPacket& outPacket);
 
 void Netplay_SendRestartMatch(int32_t targetFrame, uint32_t roundSeed);
-bool Netplay_GetInboundRestartMatch(int32_t& outTargetFrame, uint32_t& outRoundSeed);
+void Netplay_SendTrainingRestart(int32_t targetFrame, int32_t buttonRestart);
+bool Netplay_GetInboundRestartMatch(int32_t& outTargetFrame, uint32_t& outRoundSeed,
+                                    uint32_t& outKind, int32_t& outButtonRestart);
 
 // Synchronize the multi-resimulation mode with the remote peer.
 void Netplay_SendMultiResim(bool enabled);
@@ -245,6 +290,12 @@ bool Netplay_GetInboundMultiResim(bool& outEnabled);
 // Request that both peers dump their current rolling NDJSON history.
 void Netplay_SendDumpNDJSON(int32_t frame);
 bool Netplay_GetInboundDumpNDJSON(int32_t& outFrame);
+
+// Host starts each suite case; the client reports every post-resim frame.
+void Netplay_SendAutoTestStart(const AutoTestStartPacket& packet);
+bool Netplay_GetInboundAutoTestStart(AutoTestStartPacket& outPacket);
+void Netplay_SendAutoTestFrame(const AutoTestFramePacket& packet);
+bool Netplay_GetInboundAutoTestFrame(AutoTestFramePacket& outPacket);
 
 // Discard input packets produced before the synchronized battle boundary.
 void Netplay_ClearInputQueues();
