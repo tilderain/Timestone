@@ -436,7 +436,11 @@ void Shot_ApplyFlight(void* shot, const RollbackShotFlightState& in)
     std::memcpy(bytes + 0x1F5C, &in.delayTime, sizeof(in.delayTime));
     std::memcpy(bytes + 0x1F64, &in.autoAddDivStartTime,
                 sizeof(in.autoAddDivStartTime));
-    std::memcpy(bytes + 0x1F70, in.resourceScalars, sizeof(in.resourceScalars));
+    // +0x1F78..+0x1FDF holds 13 uEffect pointers owned by the fresh shot.
+    // Rewind only the scalar fields around that array; restoring the retired
+    // shot's entries makes native cleanup dispatch through stale sentinels.
+    std::memcpy(bytes + 0x1F70, in.resourceScalars, 0x08);
+    std::memcpy(bytes + 0x1FE0, in.resourceScalars + 0x70, 0x20);
     std::memcpy(bytes + 0x2038, in.attackScalars, sizeof(in.attackScalars));
     std::memcpy(bytes + 0x2078, in.movementScalars, sizeof(in.movementScalars));
     std::memcpy(bytes + 0x2118, in.animationScalars, sizeof(in.animationScalars));
