@@ -282,7 +282,7 @@ void Profile_DumpEnabled(const RollbackProfile& profile, bool ndjsonEnabled,
                 "\"frame_json\":%.6f,\"frame_snapshot\":%.6f,\"native_tick\":%.6f,"
                  "\"native_tick_max\":%.6f,\"frame_input_end\":%.6f,"
                  "\"frame_diag_post\":%.6f,\"input_history_restore\":%.6f,"
-                 "\"timing_resync\":%.6f,\"patch_disable\":%.6f},"
+                 "\"timing_resync\":%.6f,\"cutin_repair\":%.6f,\"patch_disable\":%.6f},"
                  "\"headless_tick\":{\"total_ms\":%.6f,\"max_ms\":%.6f,"
                  "\"timing_input_ms\":%.6f,\"timing_input_max_ms\":%.6f,"
                  "\"early_draw_collision_ms\":%.6f,\"early_draw_collision_max_ms\":%.6f,"
@@ -334,8 +334,8 @@ void Profile_DumpEnabled(const RollbackProfile& profile, bool ndjsonEnabled,
                 Profile_Ms(profile.frameJson), Profile_Ms(profile.frameSnapshot),
                 Profile_Ms(profile.frameNativeTick), Profile_Ms(profile.frameNativeTickMax),
                  Profile_Ms(profile.frameInputEnd), Profile_Ms(profile.frameDiagPost),
-                 Profile_Ms(profile.inputHistoryRestore), Profile_Ms(profile.timingResync),
-                 Profile_Ms(profile.patchDisable),
+                  Profile_Ms(profile.inputHistoryRestore), Profile_Ms(profile.timingResync),
+                  Profile_Ms(profile.cutinRepair), Profile_Ms(profile.patchDisable),
                  Profile_Ms(profile.headlessTotal), Profile_Ms(profile.headlessTotalMax),
                  Profile_Ms(profile.headlessTimingInput), Profile_Ms(profile.headlessTimingInputMax),
                  Profile_Ms(profile.headlessEarlyDrawCollision), Profile_Ms(profile.headlessEarlyDrawCollisionMax),

@@ -1,6 +1,7 @@
 #include "../pch.h"
 
 #include "rollback_cleanup.h"
+#include "rollback_memory.h"
 #include "mk10utils.h"
 
 #include <vector>
@@ -8,12 +9,22 @@
 static constexpr uintptr_t PTR_SCHARACTER = 0x140d44a70;
 static constexpr uintptr_t PTR_SGAMEUI = 0x140d53a18;
 static constexpr uintptr_t PTR_SGAMEEFFECT = 0x140d46470;
+static constexpr uintptr_t PTR_SMVC3MGR = 0x140d510a0;
 static constexpr uintptr_t FN_GAMEUI_SET_TEAM_CHARACTER_ID = 0x140022610;
+static constexpr uintptr_t FN_MODEL_SET_CHILD_MATERIAL_MODE = 0x140200DB0;
+static constexpr uintptr_t DTI_UCUTIN = 0x140D6BCC8;
 static constexpr uintptr_t TEAM0_OFFSET = 0x40;
 static constexpr uintptr_t TEAM1_OFFSET = 0x300;
 static constexpr uintptr_t NODE_CHR_OFFSET = 0x08;
 static constexpr uintptr_t NODE_NEXT_OFFSET = 0x10;
 static constexpr uintptr_t TEAM_FIRST_NODE_OFFSET = 0x08;
+static constexpr uintptr_t SMVC3MGR_CUTIN_OFFSET = 0xB50;
+static constexpr uintptr_t CUNIT_DRAW_LAYER_MASK_OFFSET = 0x11C;
+static constexpr uintptr_t CCHR_WEAPON_COUNT_OFFSET = 0x3F38;
+static constexpr uintptr_t CCHR_WEAPON_ARRAY_OFFSET = 0x3F40;
+static constexpr uint32_t CUTIN_DRAW_LAYER_BITS = 0x00700000;
+static constexpr uint32_t NORMAL_DRAW_LAYER_BIT = 0x00000001;
+static constexpr uint32_t MTOBJECT_VISIBLE_FLAG = 0x00004000;
 
 class MemoryRegionCache {
 public:
@@ -146,6 +157,63 @@ void Rollback_SyncActiveCharacterUi()
         int playerId = *(int*)(active + 0x2DA0);
         int memberId = *(int*)(active + 0x2DB0);
         setTeamCharacterId(sGameUi, playerId, memberId);
+    }
+}
+
+void Rollback_RepairOrphanedCutinRenderState()
+{
+    uint64_t manager = *(uint64_t*)_addr(PTR_SMVC3MGR);
+    uint64_t cutin = manager ? *(uint64_t*)(manager + SMVC3MGR_CUTIN_OFFSET) : 0;
+    if (cutin && HasCallableDtiVirtual((void*)cutin) &&
+        GetObjectDti(cutin) == (uint64_t)_addr(DTI_UCUTIN) &&
+        ((*(uint32_t*)(cutin + 0x10) & 7) - 1 < 2)) {
+        return;
+    }
+    if (manager && cutin)
+        *(uint64_t*)(manager + SMVC3MGR_CUTIN_OFFSET) = 0;
+
+    uint64_t sCharacter = *(uint64_t*)_addr(PTR_SCHARACTER);
+    if (!sCharacter) return;
+
+    using SetChildMaterialModeFn = void(__fastcall*)(void*, int, uint8_t);
+    auto setChildMaterialMode =
+        (SetChildMaterialModeFn)_addr(FN_MODEL_SET_CHILD_MATERIAL_MODE);
+    auto restoreModel = [setChildMaterialMode](uint64_t model, bool restoreVisibility,
+                                                bool validateUnit) {
+        if (!model || (validateUnit && !IsUnitObject((void*)model))) return;
+        uint32_t& drawLayer = *(uint32_t*)(model + CUNIT_DRAW_LAYER_MASK_OFFSET);
+        if ((drawLayer & CUTIN_DRAW_LAYER_BITS) == 0) return;
+        drawLayer = (drawLayer & ~CUTIN_DRAW_LAYER_BITS) | NORMAL_DRAW_LAYER_BIT;
+        if (restoreVisibility)
+            *(uint32_t*)(model + 0x10) |= MTOBJECT_VISIBLE_FLAG;
+        setChildMaterialMode((void*)model, -1, 3);
+    };
+
+    for (int teamIndex = 0; teamIndex < 2; ++teamIndex) {
+        uint64_t team = sCharacter + (teamIndex == 0 ? TEAM0_OFFSET : TEAM1_OFFSET);
+        for (uint64_t node = team + TEAM_FIRST_NODE_OFFSET; node;
+             node = *(uint64_t*)(node + NODE_NEXT_OFFSET)) {
+            uint64_t character = *(uint64_t*)(node + NODE_CHR_OFFSET);
+            if (!character) continue;
+            // Native cut-in entry routes the character and all its weapons in
+            // one operation. Checking the trusted roster character first keeps
+            // the ordinary post-rollback path free of RTTI and VirtualQuery.
+            if ((*(uint32_t*)(character + CUNIT_DRAW_LAYER_MASK_OFFSET) &
+                 CUTIN_DRAW_LAYER_BITS) == 0) {
+                continue;
+            }
+            restoreModel(character, true, false);
+
+            uint32_t weaponCount = *(uint32_t*)(character + CCHR_WEAPON_COUNT_OFFSET);
+            uint64_t weapons = *(uint64_t*)(character + CCHR_WEAPON_ARRAY_OFFSET);
+            if (!weapons || weaponCount > 256 ||
+                !IsAccessibleRange(weapons, (size_t)weaponCount * sizeof(uint64_t))) {
+                continue;
+            }
+            for (uint32_t weapon = 0; weapon < weaponCount; ++weapon)
+                restoreModel(*(uint64_t*)(weapons + (uint64_t)weapon * sizeof(uint64_t)),
+                             false, true);
+        }
     }
 }
 

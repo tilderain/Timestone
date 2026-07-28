@@ -159,6 +159,7 @@ struct RollbackProfile {
     uint64_t headlessTotalMax = 0;
     uint64_t inputHistoryRestore = 0;
     uint64_t timingResync = 0;
+    uint64_t cutinRepair = 0;
     uint64_t patchDisable = 0;
     uint64_t saveTotal = 0;
     uint64_t saveBuildRegions = 0;

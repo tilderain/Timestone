@@ -1,6 +1,7 @@
 #include "../pch.h"
 
 #include "rollback.h"
+#include "rollback_cleanup.h"
 #include "rollback_hooks.h"
 #include "rollback_profile.h"
 #include "rollback_resim.h"
@@ -218,6 +219,13 @@ void Rollback_ReSimulate(int32_t startFrame, int32_t endFrame)
     if (main) Rollback_ResyncMainTiming(main);
     Profile_AddElapsed(&RollbackProfile::timingResync, phaseStart);
     g_isResimulating = false;
+
+    // Native uCutIn teardown restores participant draw routing and material
+    // mode. If a predicted cutin disappeared during headless replay, its exit
+    // callback never runs and the character remains invisible or unshaded.
+    phaseStart = Profile_Now();
+    Rollback_RepairOrphanedCutinRenderState();
+    Profile_AddElapsed(&RollbackProfile::cutinRepair, phaseStart);
 
     phaseStart = Profile_Now();
     Rollback_PatchSleep(false);
