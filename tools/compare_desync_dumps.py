@@ -17,6 +17,23 @@ FRAME = struct.Struct("<i7I4QB7s")
 REGION_V1 = struct.Struct("<5QB7s")
 REGION_V2 = struct.Struct("<5QB7s64s")
 ROLE_NAMES = {0: "offline", 1: "host", 2: "client"}
+DEFAULT_SKIP_FRAME0_POINTERS = True
+EXPLICIT_REGION_OVERRIDES = {
+    "uCharacter.motionBlend",
+}
+FRAME0_EXPLICIT_BYTE_OVERRIDES = {
+    ("uActionSideCamera", 0x18, 8),
+    ("uCharacter.externalAnimation", 0x92, 1),
+    ("uCharacter.team0", 0x13B0, 8),
+    ("uCharacter.team1", 0x13B0, 8),
+    ("sAction.full", 0x1F0, 0x20),
+    ("sAction.compact", 0x1F0, 0x20),
+    *(("sAction.full", 0x163C + index * 0x20, 8) for index in range(12)),
+}
+EXPLICIT_VTABLE_BYTE_OVERRIDES = {
+    # The broad character region extends 0x16c bytes beyond uChunLi's DTI size.
+    0xA71F90: ((0x68F4, 0x16C),),
+}
 
 
 @dataclass
@@ -76,6 +93,12 @@ class StructDatabase:
         "uActionSideCamera": ("uActionSideCamera", 0),
         "cChrTeam[0]": ("cChrTeam", 0),
         "cChrTeam[1]": ("cChrTeam", 0),
+        "uCharacter.motionBlend": ("RollbackMotionBlendRecord", 0),
+        "uCharacter.jointStates": ("RollbackJointWorkRecord", 0),
+    }
+    REPEATING_REGION_BINDINGS = {
+        "uCharacter.motionBlend",
+        "uCharacter.jointStates",
     }
 
     def __init__(self, path, layouts):
@@ -305,6 +328,82 @@ def differing_runs(data_a, data_b, ignored, limit):
     return runs
 
 
+def looks_like_user_pointer(value):
+    return 0x10000 <= value < 0x0000800000000000
+
+
+def collect_frame0_pointer_overrides(dump_a, dump_b):
+    if 0 not in dump_a.frames or 0 not in dump_b.frames:
+        return set()
+    frame_a, frame_b = dump_a.frames[0], dump_b.frames[0]
+    resolver_a = PointerResolver(dump_a, frame_a)
+    resolver_b = PointerResolver(dump_b, frame_b)
+    overrides = set()
+    for index, (region_a, region_b) in enumerate(zip(frame_a.regions, frame_b.regions)):
+        if region_a.size != region_b.size:
+            continue
+        label_a = region_label(index, region_a, dump_a, resolver_a)
+        label_b = region_label(index, region_b, dump_b, resolver_b)
+        if label_a != label_b:
+            continue
+        data_a = frame_a.data[region_a.data_offset:region_a.data_offset + region_a.size]
+        data_b = frame_b.data[region_b.data_offset:region_b.data_offset + region_b.size]
+        for offset in range(0, min(len(data_a), len(data_b)) - 7, 8):
+            value_a = int.from_bytes(data_a[offset:offset + 8], "little")
+            value_b = int.from_bytes(data_b[offset:offset + 8], "little")
+            if (value_a != value_b and
+                    looks_like_user_pointer(value_a) and
+                    looks_like_user_pointer(value_b)):
+                overrides.add((index, label_a, offset, 8))
+        for override_label, offset, size in FRAME0_EXPLICIT_BYTE_OVERRIDES:
+            if label_a == override_label and offset + size <= len(data_a):
+                overrides.add((index, label_a, offset, size))
+        saved_vtable = int.from_bytes(data_a[:8], "little") if len(data_a) >= 8 else 0
+        vtable_rva = saved_vtable - dump_a.image_base
+        for offset, size in EXPLICIT_VTABLE_BYTE_OVERRIDES.get(vtable_rva, ()):
+            if offset + size <= len(data_a):
+                overrides.add((index, label_a, offset, size))
+    return overrides
+
+
+def collect_explicit_region_overrides(dump_a, dump_b):
+    common = sorted(set(dump_a.frames) & set(dump_b.frames))
+    if not common:
+        return set()
+    frame_a, frame_b = dump_a.frames[common[0]], dump_b.frames[common[0]]
+    resolver_a = PointerResolver(dump_a, frame_a)
+    resolver_b = PointerResolver(dump_b, frame_b)
+    overrides = set()
+    for index, (region_a, region_b) in enumerate(zip(frame_a.regions, frame_b.regions)):
+        if region_a.size != region_b.size:
+            continue
+        label_a = region_label(index, region_a, dump_a, resolver_a)
+        label_b = region_label(index, region_b, dump_b, resolver_b)
+        if label_a == label_b and label_a in EXPLICIT_REGION_OVERRIDES:
+            overrides.add((index, label_a, 0, region_a.size))
+    return overrides
+
+
+def ignored_pointer_bytes(index, label, data_a, data_b, pointer_overrides):
+    ignored = set()
+    overridden = []
+    if not pointer_overrides:
+        return ignored, overridden
+    for override_index, override_label, offset, size in pointer_overrides:
+        if override_index != index or override_label != label:
+            continue
+        value_a = int.from_bytes(data_a[offset:offset + size], "little")
+        value_b = int.from_bytes(data_b[offset:offset + size], "little")
+        ignored.update(range(offset, offset + size))
+        overridden.append({
+            "offset": f"0x{offset:x}",
+            "size": size,
+            "a_value": f"0x{value_a:x}",
+            "b_value": f"0x{value_b:x}",
+        })
+    return ignored, overridden
+
+
 def decode_field_value(data, field_type):
     normalized = field_type.lower()
     if not data:
@@ -335,45 +434,58 @@ def decode_field_value(data, field_type):
     return data.hex()
 
 
-def annotate_run(layout, object_base, start, end, data_a, data_b):
-    object_start = object_base + start
-    object_end = object_base + end
+def annotate_run(layout, object_base, start, end, data_a, data_b, repeat_size=0):
     annotations = []
-    for field in layout.fields:
-        field_start = int(field["offset"])
-        field_end = field_start + int(field["size"])
-        if field_end <= object_start or field_start >= object_end:
-            continue
-        region_field_start = field_start - object_base
-        region_field_end = field_end - object_base
-        annotation = {
-            "name": field["name"],
-            "type": field["type"],
-            "offset": f"0x{field_start:x}",
-            "size": int(field["size"]),
-        }
-        if region_field_start >= 0 and region_field_end <= len(data_a):
-            annotation["a_value"] = decode_field_value(
-                data_a[region_field_start:region_field_end], field["type"]
-            )
-            annotation["b_value"] = decode_field_value(
-                data_b[region_field_start:region_field_end], field["type"]
-            )
-        annotations.append(annotation)
+    first_element = start // repeat_size if repeat_size else 0
+    last_element = (end - 1) // repeat_size if repeat_size else 0
+    for element_index in range(first_element, last_element + 1):
+        element_base = element_index * repeat_size if repeat_size else 0
+        object_start = object_base + max(start, element_base) - element_base
+        object_end = object_base + min(end, element_base + repeat_size) - element_base \
+            if repeat_size else object_base + end
+        for field in layout.fields:
+            field_start = int(field["offset"])
+            field_end = field_start + int(field["size"])
+            if field_end <= object_start or field_start >= object_end:
+                continue
+            region_field_start = element_base + field_start - object_base
+            region_field_end = region_field_start + int(field["size"])
+            annotation = {
+                "name": field["name"],
+                "type": field["type"],
+                "offset": f"0x{field_start:x}",
+                "size": int(field["size"]),
+            }
+            if repeat_size:
+                annotation["element_index"] = element_index
+            if region_field_start >= 0 and region_field_end <= len(data_a):
+                annotation["a_value"] = decode_field_value(
+                    data_a[region_field_start:region_field_end], field["type"]
+                )
+                annotation["b_value"] = decode_field_value(
+                    data_b[region_field_start:region_field_end], field["type"]
+                )
+            annotations.append(annotation)
     return annotations
 
 
 def compare_region(index, region_a, region_b, dump_a, dump_b, frame_a, frame_b,
-                   resolver_a, resolver_b, max_diffs, structs=None):
+                   resolver_a, resolver_b, max_diffs, structs=None,
+                   pointer_overrides=None):
     start_a, start_b = region_a.data_offset, region_b.data_offset
     data_a = frame_a.data[start_a:start_a + region_a.size]
     data_b = frame_b.data[start_b:start_b + region_b.size]
-    ignored = set()
+    label = region_label(index, region_a, dump_a, resolver_a)
+    ignored, overridden_pointers = ignored_pointer_bytes(
+        index, label, data_a, data_b, pointer_overrides
+    )
     relocations = []
     for offset in range(0, min(len(data_a), len(data_b)) - 7, 8):
         value_a = int.from_bytes(data_a[offset:offset + 8], "little")
         value_b = int.from_bytes(data_b[offset:offset + 8], "little")
         if value_a == value_b:
+            continue
+        if pointer_overrides and (index, label, offset, 8) in pointer_overrides:
             continue
         pointer_a = resolver_a.resolve(value_a)
         pointer_b = resolver_b.resolve(value_b)
@@ -381,8 +493,6 @@ def compare_region(index, region_a, region_b, dump_a, dump_b, frame_a, frame_b,
             ignored.update(range(offset, offset + 8))
             if len(relocations) < max_diffs:
                 relocations.append({"offset": f"0x{offset:x}", "target": list(pointer_a)})
-
-    label = region_label(index, region_a, dump_a, resolver_a)
     layout = None
     object_base = 0
     type_source = None
@@ -391,13 +501,17 @@ def compare_region(index, region_a, region_b, dump_a, dump_b, frame_a, frame_b,
         layout, object_base, type_source = structs.resolve(
             region_a, label, dump_a, saved_vtable
         )
+    repeat_size = (layout.size if layout and structs and
+                   label in structs.REPEATING_REGION_BINDINGS else 0)
     runs = []
     for start, end in differing_runs(data_a, data_b, ignored, max_diffs):
         context_start = max(0, start - 8)
         context_end = min(len(data_a), end + 8)
         difference = {
             "offset": f"0x{start:x}",
-            "object_offset": f"0x{object_base + start:x}" if layout else None,
+            "object_offset": (f"0x{object_base + start % repeat_size:x}"
+                              if repeat_size else
+                              f"0x{object_base + start:x}" if layout else None),
             "length": end - start,
             "a_hex": data_a[start:end].hex(),
             "b_hex": data_b[start:end].hex(),
@@ -406,8 +520,10 @@ def compare_region(index, region_a, region_b, dump_a, dump_b, frame_a, frame_b,
             "b_context_hex": data_b[context_start:context_end].hex(),
         }
         if layout:
+            if repeat_size:
+                difference["element_index"] = start // repeat_size
             difference["known_fields"] = annotate_run(
-                layout, object_base, start, end, data_a, data_b
+                layout, object_base, start, end, data_a, data_b, repeat_size
             )
         runs.append(difference)
     raw_diff_bytes = sum(a != b for a, b in zip(data_a, data_b))
@@ -426,12 +542,13 @@ def compare_region(index, region_a, region_b, dump_a, dump_b, frame_a, frame_b,
         "relocation_only_bytes": raw_diff_bytes - meaningful_diff_bytes,
         "meaningful_different_bytes": meaningful_diff_bytes,
         "pointer_relocations_sample": relocations,
+        "frame0_pointer_overrides_sample": overridden_pointers[:max_diffs],
         "differences_sample": runs,
     }
 
 
 def compare_frame(dump_a, dump_b, frame_a, frame_b, max_regions, max_diffs,
-                  structs=None):
+                    structs=None, pointer_overrides=None):
     resolver_a = PointerResolver(dump_a, frame_a)
     resolver_b = PointerResolver(dump_b, frame_b)
     result = {
@@ -487,7 +604,7 @@ def compare_frame(dump_a, dump_b, frame_a, frame_b, max_regions, max_diffs,
         else:
             comparison = compare_region(
                 index, region_a, region_b, dump_a, dump_b, frame_a, frame_b,
-                resolver_a, resolver_b, max_diffs, structs,
+                resolver_a, resolver_b, max_diffs, structs, pointer_overrides,
             )
             if comparison["meaningful_different_bytes"]:
                 result["regions"].append(comparison)
@@ -531,14 +648,19 @@ def diagnose(first):
 
 
 def build_report(dump_a, dump_b, max_regions, max_diffs, include_timeline=False,
-                 structs=None):
+                  structs=None, skip_frame0_pointers=DEFAULT_SKIP_FRAME0_POINTERS):
     common = sorted(set(dump_a.frames) & set(dump_b.frames))
+    pointer_overrides = (
+        collect_frame0_pointer_overrides(dump_a, dump_b) |
+        collect_explicit_region_overrides(dump_a, dump_b)
+        if skip_frame0_pointers else set()
+    )
     frame_results = []
     first = None
     for number in common:
         result = compare_frame(
             dump_a, dump_b, dump_a.frames[number], dump_b.frames[number],
-            max_regions, max_diffs, structs,
+            max_regions, max_diffs, structs, pointer_overrides,
         )
         if result["meaningful_different_bytes"] or not result["structure_matches"] or not result["inputs"]["cross_peer_consistent"]:
             if first is None:
@@ -561,6 +683,11 @@ def build_report(dump_a, dump_b, max_regions, max_diffs, include_timeline=False,
     report = {
         "schema": "umvc3_desync_comparison_v1",
         "struct_database": structs.path if structs else None,
+        "frame0_pointer_override": {
+            "enabled": skip_frame0_pointers,
+            "slot_count": sum(size == 8 for _, _, _, size in pointer_overrides),
+            "explicit_byte_count": sum(size for _, _, _, size in pointer_overrides if size != 8),
+        },
         "dump_a": metadata(dump_a),
         "dump_b": metadata(dump_b),
         "coverage": {
@@ -632,13 +759,19 @@ def main():
                         help="Ghidra structure schema (default: ghidra_export/snapdump_structs.json)")
     parser.add_argument("--no-structs", action="store_true",
                         help="disable Ghidra field annotation")
+    parser.add_argument(
+        "--skip-frame0-pointers", action=argparse.BooleanOptionalAction,
+        default=DEFAULT_SKIP_FRAME0_POINTERS,
+        help="ignore exact qword slots exposed as peer-specific pointers at frame 0 (default: on)",
+    )
     args = parser.parse_args()
     try:
         dump_a = load_dump(args.dump_a)
         dump_b = load_dump(args.dump_b)
         structs = None if args.no_structs or args.structs is None else load_struct_database(args.structs)
         report = build_report(
-            dump_a, dump_b, args.max_regions, args.max_diffs, args.timeline, structs
+            dump_a, dump_b, args.max_regions, args.max_diffs, args.timeline, structs,
+            args.skip_frame0_pointers,
         )
     except (OSError, ValueError, struct.error) as error:
         print(f"error: {error}", file=sys.stderr)

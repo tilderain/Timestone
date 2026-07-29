@@ -505,6 +505,10 @@ void Rollback_HeadlessTick(uint64_t sMain)
 {
     RollbackHeadlessProfileTimer profile;
 
+    // Characters cache this value as the identity of shots spawned this frame.
+    // Native sMain derives it from local wall time, which is not peer-stable.
+    *(uint32_t*)(sMain + 0x48) = (uint32_t)g_resimulateCurrentFrame;
+
     //((ObjectFn)_addr(FN_SMAIN_MOVE))(sMain); // Advance base timing, pause, and frame pacing state.
     //((ObjectFn)_addr(FN_UPDATE_WINDOW_FOCUS))(sMain); // Refresh iconified, foreground, and focus flags.
     //((ObjectFn)_addr(FN_NETPAD_PROCESS_INPUT))(MainMember(sMain, 0x401c0)); // Poll/process online pad input.

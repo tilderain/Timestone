@@ -14,7 +14,8 @@ compare = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(compare)
 
 
-def write_dump(path, role, image_base, frames, version=1, region_name=""):
+def write_dump(path, role, image_base, frames, version=1, region_name="",
+               region_names=None):
     commit = b"0123456789abcdef0123456789abcdef01234567\0"
     header = compare.HEADER.pack(
         compare.MAGIC, version, compare.HEADER.size, len(frames),
@@ -22,9 +23,10 @@ def write_dump(path, role, image_base, frames, version=1, region_name=""):
     )
     with open(path, "wb") as file:
         file.write(header)
-        for number, local_input, remote_input, address, data in frames:
+        for frame_index, (number, local_input, remote_input, address, data) in enumerate(frames):
             if version >= 2:
-                encoded_name = region_name.encode("utf-8")[:63].ljust(64, b"\0")
+                name = region_names[frame_index] if region_names else region_name
+                encoded_name = name.encode("utf-8")[:63].ljust(64, b"\0")
                 region = compare.REGION_V2.pack(
                     address, len(data), 0, image_base + 0x1234, 0, 0,
                     b"\0" * 7, encoded_name,
@@ -157,6 +159,300 @@ class CompareSnapDumpsTest(unittest.TestCase):
         self.assertEqual("mSpeed", field["name"])
         self.assertEqual(1.5, field["a_value"])
         self.assertEqual(2.5, field["b_value"])
+
+    def test_repeats_ghidra_fields_for_dynamic_array_elements(self):
+        base_a, base_b = 0x140000000, 0x150000000
+        data_a = bytearray(0x180)
+        data_b = bytearray(data_a)
+        data_a[0xC0 + 0x14:0xC0 + 0x18] = struct.pack("<I", 3)
+        data_b[0xC0 + 0x14:0xC0 + 0x18] = struct.pack("<I", 4)
+        write_dump(
+            self.path_a, 1, base_a,
+            [(10, 0x11, 0x22, 0xF119E50, bytes(data_a))],
+            version=2, region_name="uCharacter.jointStates",
+        )
+        write_dump(
+            self.path_b, 2, base_b,
+            [(10, 0x22, 0x11, 0xF0D9E50, bytes(data_b))],
+            version=2, region_name="uCharacter.jointStates",
+        )
+        structs_path = Path(self.tempdir.name) / "structs.json"
+        structs_path.write_text(json.dumps({
+            "schema": "umvc3_snapdump_structs_v2",
+            "classes": [{
+                "name": "RollbackJointWorkRecord",
+                "family": "other",
+                "size": 0xC0,
+                "vtable_rvas": [],
+                "fields": [
+                    {"offset": 0x14, "size": 4, "name": "mDepth", "type": "uint"},
+                ],
+            }],
+        }), encoding="utf-8")
+
+        report = compare.build_report(
+            compare.load_dump(self.path_a), compare.load_dump(self.path_b),
+            32, 16, structs=compare.load_struct_database(structs_path),
+        )
+        difference = report["first_divergence"]["regions"][0]["differences_sample"][0]
+        self.assertEqual(1, difference["element_index"])
+        self.assertEqual("0x14", difference["object_offset"])
+        field = difference["known_fields"][0]
+        self.assertEqual("mDepth", field["name"])
+        self.assertEqual(1, field["element_index"])
+        self.assertEqual(3, field["a_value"])
+        self.assertEqual(4, field["b_value"])
+
+    def test_skips_frame0_pointer_slots_by_default(self):
+        base_a, base_b = 0x140000000, 0x150000000
+        pointers_a = [0x5DFACB0, 0x5DFACE0, 0x5DFE7D0, 0x5DFAD10]
+        pointers_b = [value - 0x70000 for value in pointers_a]
+        data_a = b"".join(struct.pack("<Q", value) for value in pointers_a)
+        data_b = b"".join(struct.pack("<Q", value) for value in pointers_b)
+        write_dump(
+            self.path_a, 1, base_a,
+            [(0, 0x11, 0x22, 0xF119E50, data_a)],
+            version=2, region_name="uCharacter.motionBlend",
+        )
+        write_dump(
+            self.path_b, 2, base_b,
+            [(0, 0x22, 0x11, 0xF0D9E50, data_b)],
+            version=2, region_name="uCharacter.motionBlend",
+        )
+
+        report = compare.build_report(
+            compare.load_dump(self.path_a), compare.load_dump(self.path_b), 32, 16
+        )
+        self.assertEqual("match", report["verdict"])
+        self.assertGreater(report["frame0_pointer_override"]["slot_count"], 0)
+
+    def test_skips_entire_motion_blend_region_across_frames(self):
+        base_a, base_b = 0x140000000, 0x150000000
+        data_a = bytes(range(0x68))
+        data_b = bytes(reversed(range(0x68)))
+        write_dump(
+            self.path_a, 1, base_a,
+            [(2, 0x11, 0x22, 0xF119E50, data_a)],
+            version=2, region_name="uCharacter.motionBlend",
+        )
+        write_dump(
+            self.path_b, 2, base_b,
+            [(2, 0x22, 0x11, 0xF0D9E50, data_b)],
+            version=2, region_name="uCharacter.motionBlend",
+        )
+
+        report = compare.build_report(
+            compare.load_dump(self.path_a), compare.load_dump(self.path_b), 32, 16
+        )
+        self.assertEqual("match", report["verdict"])
+
+        conservative = compare.build_report(
+            compare.load_dump(self.path_a), compare.load_dump(self.path_b), 32, 16,
+            skip_frame0_pointers=False,
+        )
+        self.assertEqual("diverged", conservative["verdict"])
+
+    def test_can_disable_frame0_pointer_override(self):
+        base_a, base_b = 0x140000000, 0x150000000
+        data_a = struct.pack("<Q", 0x5DFACB0)
+        data_b = struct.pack("<Q", 0x5D8ACB0)
+        write_dump(
+            self.path_a, 1, base_a,
+            [(10, 0x11, 0x22, 0xF119E50, data_a)],
+            version=2, region_name="unknown",
+        )
+        write_dump(
+            self.path_b, 2, base_b,
+            [(10, 0x22, 0x11, 0xF0D9E50, data_b)],
+            version=2, region_name="unknown",
+        )
+
+        report = compare.build_report(
+            compare.load_dump(self.path_a), compare.load_dump(self.path_b), 32, 16,
+            skip_frame0_pointers=False,
+        )
+        self.assertEqual("diverged", report["verdict"])
+
+    def test_skips_external_animation_group_noise_at_frame0(self):
+        base_a, base_b = 0x140000000, 0x150000000
+        data_a = bytearray(0xE0)
+        data_b = bytearray(data_a)
+        data_a[0x92] = 0x89
+        data_b[0x92] = 0x85
+        write_dump(
+            self.path_a, 1, base_a,
+            [(0, 0x11, 0x22, 0xF119E50, bytes(data_a))],
+            version=2, region_name="uCharacter.externalAnimation",
+        )
+        write_dump(
+            self.path_b, 2, base_b,
+            [(0, 0x22, 0x11, 0xF0D9E50, bytes(data_b))],
+            version=2, region_name="uCharacter.externalAnimation",
+        )
+
+        report = compare.build_report(
+            compare.load_dump(self.path_a), compare.load_dump(self.path_b), 32, 16
+        )
+        self.assertEqual("match", report["verdict"])
+        self.assertEqual(1, report["frame0_pointer_override"]["explicit_byte_count"])
+
+    def test_skips_saction_cref_and_unaligned_spill_pointers(self):
+        base_a, base_b = 0x140000000, 0x150000000
+        data_a = bytearray(0x1800)
+        data_b = bytearray(data_a)
+        data_a[0x1F0:0x1F8] = struct.pack("<Q", base_a + 0x112478)
+        data_b[0x1F0:0x1F8] = struct.pack("<Q", base_b + 0x112478)
+        data_a[0x208:0x20C] = struct.pack("<I", 0x1230)
+        data_b[0x208:0x20C] = struct.pack("<I", 0x122D)
+        data_a[0x163C:0x1644] = struct.pack("<Q", 0x0F3ADFC0)
+        data_b[0x163C:0x1644] = struct.pack("<Q", 0x0F36DFC0)
+        write_dump(
+            self.path_a, 1, base_a,
+            [(0, 0x11, 0x22, 0x0D72AAC0, bytes(data_a))],
+            version=2, region_name="sAction.full",
+        )
+        write_dump(
+            self.path_b, 2, base_b,
+            [(0, 0x22, 0x11, 0x0D6EAAC0, bytes(data_b))],
+            version=2, region_name="sAction.full",
+        )
+
+        report = compare.build_report(
+            compare.load_dump(self.path_a), compare.load_dump(self.path_b), 32, 16
+        )
+        self.assertEqual("match", report["verdict"])
+
+        conservative = compare.build_report(
+            compare.load_dump(self.path_a), compare.load_dump(self.path_b), 32, 16,
+            skip_frame0_pointers=False,
+        )
+        self.assertEqual("diverged", conservative["verdict"])
+
+    def test_skips_late_camera_pointer(self):
+        base_a, base_b = 0x140000000, 0x150000000
+        camera_a = bytearray(0x590)
+        camera_b = bytearray(camera_a)
+        camera_a[0x18:0x20] = struct.pack("<Q", 0x0F1400A0)
+        camera_b[0x18:0x20] = struct.pack("<Q", 0x0F1000A0)
+        write_dump(
+            self.path_a, 1, base_a,
+            [(2, 0x11, 0x22, 0x0F140000, bytes(camera_a))],
+            version=2, region_name="uActionSideCamera",
+        )
+        write_dump(
+            self.path_b, 2, base_b,
+            [(2, 0x22, 0x11, 0x0F100000, bytes(camera_b))],
+            version=2, region_name="uActionSideCamera",
+        )
+
+        report = compare.build_report(
+            compare.load_dump(self.path_a), compare.load_dump(self.path_b), 32, 16
+        )
+        self.assertEqual("match", report["verdict"])
+
+    def test_skips_animation_command_and_chunli_spill_pointers(self):
+        base_a, base_b = 0x140000000, 0x150000000
+        character_a = bytearray(0x6A60)
+        character_b = bytearray(character_a)
+        character_a[:8] = struct.pack("<Q", base_a + 0xA71F90)
+        character_b[:8] = struct.pack("<Q", base_b + 0xA71F90)
+        for offset, value_a, value_b in (
+                (0x13B0, 0x05F70538, 0x05F10538),
+                (0x6A10, 0x04751010, 0x04711010),
+                (0x6A20, 0x04751098, 0x04711098)):
+            character_a[offset:offset + 8] = struct.pack("<Q", value_a)
+            character_b[offset:offset + 8] = struct.pack("<Q", value_b)
+        write_dump(
+            self.path_a, 1, base_a,
+            [(0, 0x11, 0x22, 0x0F750000, bytes(character_a))],
+            version=2, region_name="uCharacter.team0",
+        )
+        write_dump(
+            self.path_b, 2, base_b,
+            [(0, 0x22, 0x11, 0x0F710000, bytes(character_b))],
+            version=2, region_name="uCharacter.team0",
+        )
+
+        report = compare.build_report(
+            compare.load_dump(self.path_a), compare.load_dump(self.path_b), 32, 16
+        )
+        self.assertEqual("match", report["verdict"])
+
+    def test_keeps_animation_serial_difference(self):
+        base_a, base_b = 0x140000000, 0x150000000
+        data_a = bytearray(0x1400)
+        data_b = bytearray(data_a)
+        data_a[0x133C:0x1340] = struct.pack("<I", 0x130)
+        data_b[0x133C:0x1340] = struct.pack("<I", 0x12B)
+        write_dump(
+            self.path_a, 1, base_a,
+            [(2, 0x11, 0x22, 0x0F750000, bytes(data_a))],
+            version=2, region_name="uCharacter.team0",
+        )
+        write_dump(
+            self.path_b, 2, base_b,
+            [(2, 0x22, 0x11, 0x0F710000, bytes(data_b))],
+            version=2, region_name="uCharacter.team0",
+        )
+
+        report = compare.build_report(
+            compare.load_dump(self.path_a), compare.load_dump(self.path_b), 32, 16
+        )
+        self.assertEqual("diverged", report["verdict"])
+        self.assertEqual(
+            "0x133c",
+            report["first_divergence"]["regions"][0]["differences_sample"][0]["offset"],
+        )
+
+    def test_keeps_scalar_difference_despite_pointer_relocations(self):
+        base_a, base_b = 0x140000000, 0x150000000
+        pointers_a = [0x5DFACB0, 0x5DFACE0, 0x5DFE7D0, 0x5DFAD10]
+        pointers_b = [value - 0x70000 for value in pointers_a]
+        data_a = b"".join(struct.pack("<Q", value) for value in pointers_a) + b"state-A!"
+        data_b = b"".join(struct.pack("<Q", value) for value in pointers_b) + b"state-B!"
+        write_dump(
+            self.path_a, 1, base_a,
+            [(10, 0x11, 0x22, 0xF119E50, data_a)],
+            version=2, region_name="unknown",
+        )
+        write_dump(
+            self.path_b, 2, base_b,
+            [(10, 0x22, 0x11, 0xF0D9E50, data_b)],
+            version=2, region_name="unknown",
+        )
+
+        report = compare.build_report(
+            compare.load_dump(self.path_a), compare.load_dump(self.path_b), 32, 16
+        )
+        self.assertEqual("diverged", report["verdict"])
+        differences = report["first_divergence"]["regions"][0]["differences_sample"]
+        self.assertIn("0x26", [difference["offset"] for difference in differences])
+
+    def test_does_not_override_tagged_non_pointer_qword(self):
+        base_a, base_b = 0x140000000, 0x150000000
+        pointers_a = [0x5DFACB0, 0x5DFACE0, 0x5DFE7D0, 0x5DFAD10]
+        pointers_b = [value - 0x70000 for value in pointers_a]
+        tagged_a = (0x1143560 << 8) | 0x16
+        tagged_b = ((0x1143560 - 0x40000) << 8) | 0x16
+        data_a = b"".join(struct.pack("<Q", value) for value in pointers_a)
+        data_b = b"".join(struct.pack("<Q", value) for value in pointers_b)
+        data_a += struct.pack("<Q", tagged_a)
+        data_b += struct.pack("<Q", tagged_b)
+        write_dump(
+            self.path_a, 1, base_a,
+            [(10, 0x11, 0x22, 0xF119E50, data_a)],
+            version=2, region_name="uCharacter.team0",
+        )
+        write_dump(
+            self.path_b, 2, base_b,
+            [(10, 0x22, 0x11, 0xF0D9E50, data_b)],
+            version=2, region_name="uCharacter.team0",
+        )
+
+        report = compare.build_report(
+            compare.load_dump(self.path_a), compare.load_dump(self.path_b), 32, 16
+        )
+        self.assertEqual("diverged", report["verdict"])
 
 
 if __name__ == "__main__":

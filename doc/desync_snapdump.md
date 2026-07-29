@@ -66,8 +66,84 @@ and surrounding bytes. Later divergent frames are summarized as propagation.
 Version 2 dumps carry region names directly. The comparison tool remains
 compatible with version 1 dumps and infers names for known singleton and
 fixed-size character regions where possible.
-Unknown pointer-like values are deliberately retained as differences rather than
-hidden, because they may be gameplay state or evidence of a different object graph.
+By default, the comparator records qword slots containing different user-space
+addresses in the shared frame-0 snapshot and excludes those exact `(region,
+offset)` slots from every compared frame. This suppresses the allocation noise
+exposed by the baseline capture without applying a general heap-delta rule or
+discarding newly appearing pointer slots. Use `--no-skip-frame0-pointers` to
+process those slots conservatively.
+
+The same default-on override explicitly excludes
+`uCharacter.externalAnimation+0x92`. This is byte 2 of the inherited collision
+node's 32-bit `mGroup` field at `+0x90`; all exposed wrappers carry the same
+peer-specific frame-0 delta. The rule is deliberately limited to that semantic
+region and byte. It does not suppress `mAttribute` at `+0x94` or other collision
+state. `--no-skip-frame0-pointers` disables this explicit override as well.
+
+Two `sAction`-labelled cases are also explicitly excluded. The real `sAction`
+contains a 0x20-byte `cRef` at `+0x1f0`; its vtable, resource/reference token,
+and trailing token at `+0x18` are process-local reference infrastructure and
+remain unchanged within each peer across all 46 captured frames. Both the full
+and compact duplicate regions skip this complete `cRef`. The broad
+`sAction.full` capture also skips twelve unaligned pointers at
+`+0x163c + n*0x20` for `n=0..11`. These locations are far beyond the real
+0x250-byte `sAction`, belong to adjacent repeated records, and differ only by
+the peers' allocation displacement. No actual `sAction` gameplay scalar is
+covered by either rule.
+
+The comparator also excludes complete `uCharacter.motionBlend` regions by
+default. These per-joint interpolation work buffers are treated as visual-only
+derived state rather than authoritative rollback state. This semantic override
+applies to every byte in each buffer even when no difference was present at
+frame 0. `--no-skip-frame0-pointers` restores their conservative comparison
+along with the other default overrides.
+
+Investigation of the first frame-2 differences identified three additional
+pointer-only cases. `uActionSideCamera+0x18` is inherited `cUnit` pointer state:
+the generic `cUnit` constructor clears it, and the peers acquire allocation-
+displaced values (`0x0f1400a0` versus `0x0f1000a0`) at the same frame.
+`uCharacter+0x13b0` is `cActorGameModelAnm+0x68`, the current animation-command
+record pointer consumed by `cActorGameModelAnm__advanceCommandBlock`; it is a
+resource pointer, not command progress. Finally, the high-offset differences in
+this capture occur only on `uChunLi` (vtable RVA `0xa71f90`) and lie beyond its
+DTI size `0x68f4`, so they are adjacent-allocation spill. The comparator excludes
+the complete `[0x68f4, 0x6a60)` tail, gated by the concrete Chun-Li vtable rather
+than applying the boundary to all character regions.
+
+The `uCharacter+0x133c` differences remain compared. Ghidra identifies the full
+32-bit field as `uActorGameModel::mAnmSerial`, but executable behavior overturns
+the earlier animation-generation interpretation. `cChr__cacheMainField72` at
+`0x140036cd0` copies `sMain::mFrameTimer` from `sMain+0x48` into this field. The
+native `sMain__move` store at `0x140521f62` derives that frame timer from local
+QPC elapsed time and target FPS. This explains why the field starts equal at
+`0x117`, then becomes host `0x130` versus client `0x12b` at frame 2 even though
+all six characters have matching animation numbers and animation times.
+
+The cached frame stamp is gameplay-relevant. The virtual getter at
+`0x140036fd0` returns `mAnmSerial`; AnmChr shot creation passes it to
+`uShot__setAnmchrKeyframeParams`, which stores it in
+`uShot::mRequestAnmSerial` at `+0x211c`. `uShot__getShotId` at `0x140038410`
+returns that value, and `sAnmchrParser__pushShotIntoRingBuffer` at
+`0x1400378c0` uses it to deduplicate an eight-entry shot-ID ring at
+`cChr+0x6434`. Hit/contact and child-shot paths also consume the resulting shot
+identity. The ring compares IDs generated within one process, however, so
+different absolute host/client stamps do not by themselves prove different
+gameplay. The relevant invariant is that corresponding local spawn events
+preserve the same equality and uniqueness relationships. The comparator keeps
+the field visible because it cannot establish that relationship from one byte
+difference alone.
+
+Native online does not overwrite `mFrameTimer` with its synchronized input
+cursor. Instead, the deterministic branch in `aAction__init` calls
+`sMain__setFrameWait`, which fixes simulation delta and resets pacing drift while
+leaving the absolute QPC-derived stamp process-local. The plugin already
+reproduces that setup through `Rollback_ApplyNetplayDeterminism` for live custom
+netplay. Headless rollback is different because it skips `sMain__move` entirely;
+`Rollback_HeadlessTick` therefore assigns `g_resimulateCurrentFrame` to
+`sMain+0x48` before character gameplay, giving each historical tick a stable,
+distinct local shot stamp. The broader `sMain` body remains intentionally
+uncaptured because its QPC, pacing, and process-local service state is not
+rollback state.
 
 ## Ghidra Field Annotations
 
@@ -99,9 +175,126 @@ python3 tools/compare_desync_dumps.py host.usdp client.usdp \
 python3 tools/compare_desync_dumps.py host.usdp client.usdp --no-structs
 ```
 
-Heap arrays such as motion blends, joint states, and command-line buffers keep
-their explicit snapdump labels when no unambiguous Ghidra element structure is
-known. The analyzer never guesses a concrete type from size alone.
+Heap arrays keep their explicit snapdump labels. The current Ghidra database
+also binds `uCharacter.motionBlend` to the verified 0x68-byte
+`RollbackMotionBlendRecord` element and `uCharacter.jointStates` to the verified
+0xC0-byte `RollbackJointWorkRecord` element. These bindings come from native
+allocation strides and access sites, not size-only guesses. Other arrays remain
+untyped until an element layout is independently established.
+
+## Pointer Classification Notes
+
+The current conservative comparison treats pointer values as equal only when
+both peers resolve them to the same executable RVA or the same captured region
+and offset. The following classifications aid diagnosis but do not add further
+normalization:
+
+- `sShot+0x8`, `sAction+0x8`, and `sCamera+0x8` begin inherited `cSystem`
+  `CRITICAL_SECTION` state. They are process-local synchronization bytes, not
+  gameplay object identities.
+- `uModel+0x100` is a retained model resource, `+0x538` is the allocated joint
+  array, `+0x540` is a resource-owned joint-number table, and `+0x548` is an
+  allocated joint index/depth table.
+- Each `uCharacter.motionBlend` element is a per-joint 0x68-byte work record.
+  Its track descriptors are initialized from immutable motion-resource entries.
+  The comparator now excludes the complete visual interpolation buffer through
+  the explicit default override described above.
+- Each `uCharacter.jointStates` element is a 0xC0-byte joint record. `+0x08` is
+  an optional constraint or attachment, `+0x14` is hierarchy depth, `+0xA1` is
+  parent index, `+0xA4` contains hierarchy flags, and `+0xA8` points to the
+  containing `uModel`. The owner pointer is diagnosable as self-relative, but is
+  not assigned a special normalization rule.
+- The four `uCharacter.externalAnimation` regions are 0xE0-byte
+  `nCollision::cCollisionNodeObject`-derived wrappers owned by their captured
+  character. Their owner, callback, and user-data fields retain raw comparison
+  unless ordinary image-RVA or captured-region resolution already proves
+  identity.
+- `sAction.full` is not a 0x20000-byte `sAction`; current Ghidra gives `sAction`
+  size 0x250. Bytes above that size overlap adjacent allocations, including
+  `cChrTeam[0]` at `sAction+0x350`, `cChrTeam[1]` at `+0x610`, and `sShot` at
+  `+0x5540`. High-offset differences therefore cannot safely receive `sAction`
+  field names or pointer recipes.
+
+The first frame-0 `sAction` differences illustrate the distinction:
+
+- `+0x08` is inherited `cSystem` synchronization state. It is real memory, but
+  not a gameplay field.
+- `+0x122` is the third byte of the eight-byte `mpActionParam` pointer at
+  `+0x120`. The pointer targets an uncaptured heap resource, so its differing
+  low byte is currently meaningful evidence of different resource allocation or
+  identity, not a fake byte and not a standalone `sAction` scalar.
+- `+0x1d2` is the third byte of the eight-byte `mpCamList` pointer at `+0x1d0`.
+  The pointer is a real `sAction` member registered by `sAction::createProperty`,
+  but its target is not currently captured with a proven resource identity.
+- Bytes at `+0x1e0` and `+0x1f0..+0x1ff` are also inside the real 0x250-byte
+  object, but belong to currently unresolved embedded/reference state rather
+  than the broad `sAction.full` spill. They should remain visible until their
+  substructure is identified.
+
+Therefore the `sAction` report is not fabricated: offsets below `0x250` are
+bytes from the real object. However, byte-level output must be interpreted with
+pointer alignment and inheritance in mind. Only offsets beyond `0x250` are
+guaranteed to be adjacent captured objects rather than `sAction` fields.
+
+RE5 and Dragon debug layouts supply cross-version semantic evidence for the
+joint and motion field order. Devil 4 confirms the surrounding `uModel` order
+(`mJointNum`, `mJoint`, `mJointTable`, `mBlendNum`, `mMotion`, model resource,
+shader resource, and motion-list resources), but its nested Motion and Joint
+definitions are incomplete. All three references are 32-bit, so their raw
+offsets are not imported into UMVC3's 64-bit structures.
+
+## Action Parameter Resource
+
+Current Ghidra analysis identifies `sAction+0x120` as
+`rActionParam *mpActionParam`. `sAction::classFunc` requests the
+`boot\\actionparam` resource, and `rActionParam::convert` copies the complete
+resource into persistent allocator-5 storage after validating magic
+`0x00504341` and version `0x20110223`. `rActionParam::getData` skips the
+16-byte ACP file header and returns the immutable gameplay-parameter payload.
+The meanings of header bytes `+0x08..+0x0f` remain unproven.
+
+The current Ghidra helper `/UMVC3/Rollback/rActionParamPayload` is a sparse
+0x80-byte layout. Its names come from current executable consumers rather than
+historical tables:
+
+| Payload offset | Type | Confirmed use |
+|---:|---|---|
+| `+0x00` | `float` | Damage converted to recoverable/red life |
+| `+0x10`, `+0x14` | `float` | Successful-hit attacker and defender meter-gain rates |
+| `+0x18`, `+0x1c` | `float` | Guarded-contact attacker and defender meter-gain rates |
+| `+0x20`, `+0x24` | `int` | Grounded hitstun decay start and frames removed per step |
+| `+0x28`, `+0x2c` | `int` | Airborne hitstun decay start and frames removed per step |
+| `+0x30`, `+0x34` | `int` | Grounded blockstun decay start and frames removed per step |
+| `+0x38`, `+0x3c` | `int` | Airborne blockstun decay start and frames removed per step |
+| `+0x40` | `int` | Minimum computed hitstun |
+| `+0x44`, `+0x48` | `float` | AnmChr `1_93` multipliers for previous actions `0x170` and `0x171` |
+| `+0x4c`, `+0x50` | `float` | AnmChr `1_94` values selected for DHC counts one and two; destination semantics unresolved |
+| `+0x54`, `+0x58` | `float` | Action-joint motion limit and per-frame signed step |
+| `+0x5c` | `int` | Minimum counter enforced by mission-flight action selection |
+| `+0x68`, `+0x6c` | `int` | Team assist/tag entry timing thresholds |
+| `+0x70`, `+0x74`, `+0x78` | `int` | Attacker contact-event delay by defender grounded/crouching/airborne state |
+| `+0x7c` | `float` | Team defeat/death transition duration used by gameplay and life-gauge UI |
+
+The accessor has 108 references spanning hit and guard resolution, stun decay,
+meter and recoverable-life calculations, DHC commands, action-joint movement,
+team transitions, mission flight logic, and life-gauge display. The resource is
+therefore immutable but gameplay-authoritative. Existing dumps capture only the
+raw `rActionParam *`, not its resource key or payload, so they cannot prove that
+host and client pointers refer to identical content. `mpActionParam` must remain
+a meaningful difference until a stable resource identity or payload hash is
+captured and validated.
+
+`sResource::hashKey_dtiIdCRCPath` establishes the native logical identity used
+by the resource cache. It removes one leading backslash, collapses repeated
+backslashes, computes the normalized path CRC32, and returns
+`(DTI.id << 32) | pathCRC32`. The loader stores this key at resource-object
+`+0x60`, the original path in the 64-byte buffer at `+0x0c`, and the source file
+size at `+0x58`. Thus both peers loading `rActionParam` from
+`boot\\actionparam` should have the same native key despite different heap
+addresses. The key alone is not sufficient for snapdump normalization: a
+modified or reloaded ACP can retain the same DTI and path. A future compact
+identity should include the native key and a hash of the immutable converted
+bytes (plus byte length), and normalization should require all values to match.
 
 ## Verification
 

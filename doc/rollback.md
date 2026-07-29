@@ -557,7 +557,7 @@ the playback time, playback rate, and animation transitions.
 | +0x1330| 4    | **mAnmRate**        | animation playback speed |
 | +0x1334| 4    | mAnmWait           | animation wait flag      |
 | +0x1338| 4    | mAnmWaitTime       | wait remaining           |
-| +0x133c| 4    | mAnmSerial         | animation serial number  |
+| +0x133c| 4    | mAnmSerial         | cached `sMain::mFrameTimer`; propagated into spawned-shot identity |
 | +0x1340| 4    | mWaitMotType       | wait motion type         |
 
 **Why snapshot:** If animation state is wrong after rollback, characters

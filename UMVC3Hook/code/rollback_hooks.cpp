@@ -266,7 +266,7 @@ static void __fastcall hkMainMove(uint64_t main)
 {
     RollbackHookProfileScope profile(RollbackHookProfileId::MainMove);
     if (g_isResimulating) {
-        *(uint32_t*)(main + 0x48) = 0;
+        *(uint32_t*)(main + 0x48) = (uint32_t)g_resimulateCurrentFrame;
         *(float*)(main + 0x80) = 1.0f;
         return;
     }
