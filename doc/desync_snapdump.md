@@ -135,6 +135,21 @@ consumes it to build lighting and shading parameters. Neither range is fighter
 gameplay position or action state. Character-specific bytes, including the
 unresolved in-object Chun-Li tail, remain compared.
 
+Three additional full pointer slots are excluded for both character teams:
+`uModel+0x100` is the retained model resource, `uModel+0x110` is the attached
+model pointer table, and `uModel+0x540` is the resource-owned joint-number
+table. Native motion evaluation uses the resources through these pointers, but
+the pointers themselves are peer-local allocation addresses. Motion timing,
+flags, event masks, and transform scalars remain compared and restored
+separately.
+
+The comparator also excludes the verified motion-resource binding slots in the
+first `uModel::Motion` record (`+0x640`, `+0x660`, `+0x680`, `+0x688`, `+0x690`,
+`+0x698`, `+0x6c0`, `+0x6d0`, and `+0x6d8`) for every motion slot, plus the
+`uModel+0x11b8..+0x1237` motion-list pointer table. These are resource and
+allocation pointers populated by `uModel__bindMotionEntryToSlot` and
+`uModel__getMotionListEntry`; motion-slot scalar state remains compared.
+
 `sAction.full+0x3634` is also excluded. The full region is a deliberate 0x20000
 broad capture for defeat replacement, while current Ghidra gives the real
 `sAction` size as 0x250. The byte is outside both that object and the separate

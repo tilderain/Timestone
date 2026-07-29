@@ -12,17 +12,26 @@
 extern void HookLog(const char* fmt, ...);
 
 static constexpr uintptr_t FN_RNG_RANDOM_INT = 0x14014EB30;
+static constexpr uintptr_t FN_RNG_ADVANCE = 0x14014EAB0;
+static constexpr uintptr_t FN_RNG_NEXT = 0x14000AF80;
+static constexpr uintptr_t FN_SOUND_RANDOM_VARIANT = 0x1402A9110;
 static constexpr uintptr_t FN_HSIENKO_SELECT_ANKI = 0x1400A1260;
 static constexpr uintptr_t FN_SET_RESERVED_ANKI = 0x1400D4D90;
 static constexpr uintptr_t FN_RCHRCPU_RNG_MOD_N = 0x14010FE50;
 static constexpr uintptr_t GLOBAL_RNG_STATE = 0x140D765D8;
 
 using RandomIntRangeFn = int(__fastcall*)(void*, int, int, void*);
+using RngAdvanceFn = float(__fastcall*)(uint64_t, void*);
+using RngNextFn = void(__fastcall*)(uint32_t*);
+using SoundRandomVariantFn = int(__fastcall*)(uint64_t, void*, int);
 using HsienKoSelectAnkiFn = int(__fastcall*)(void*);
 using SetReservedAnkiFn = void(__fastcall*)(void*, int);
 using RChrCpuRngModNFn = uint32_t(__fastcall*)(void*, uint32_t);
 
 static RandomIntRangeFn oRandomIntRange = nullptr;
+static RngAdvanceFn oRngAdvance = nullptr;
+static RngNextFn oRngNext = nullptr;
+static SoundRandomVariantFn oSoundRandomVariant = nullptr;
 static HsienKoSelectAnkiFn oHsienKoSelectAnki = nullptr;
 static SetReservedAnkiFn oSetReservedAnki = nullptr;
 static RChrCpuRngModNFn oRChrCpuRngModN = nullptr;
@@ -32,6 +41,99 @@ static int g_ankiTraceFrame = -1;
 static int g_ankiTraceCount = 0;
 static int g_ankiReserveTraceFrame = -1;
 static int g_ankiReserveTraceCount = 0;
+static int g_advanceTraceFrame = -1;
+static int g_advanceTraceCount = 0;
+
+static int RngTraceFrame();
+
+static int __fastcall hkSoundRandomVariant(uint64_t soundContext, void* soundRef,
+                                           int variant)
+{
+    if (!Netplay_IsActive())
+        return oSoundRandomVariant(soundContext, soundRef, variant);
+
+    // FUN_1402A9110 chooses voice/sound variants with the global XorShift
+    // stream. Audio presentation must not consume gameplay RNG on one peer.
+    uint32_t savedState[4] = {};
+    std::memcpy(savedState, (void*)_addr(GLOBAL_RNG_STATE), sizeof(savedState));
+    int result = oSoundRandomVariant(soundContext, soundRef, variant);
+    std::memcpy((void*)_addr(GLOBAL_RNG_STATE), savedState, sizeof(savedState));
+    return result;
+}
+
+static void __fastcall hkRngNext(uint32_t* state)
+{
+    if (!Netplay_IsActive()) {
+        oRngNext(state);
+        return;
+    }
+
+    int frame = RngTraceFrame();
+    if (frame != g_advanceTraceFrame) {
+        g_advanceTraceFrame = frame;
+        g_advanceTraceCount = 0;
+    }
+
+    uint32_t before[4] = {};
+    if (state)
+        std::memcpy(before, state, sizeof(before));
+    oRngNext(state);
+
+    if (state && g_advanceTraceCount++ < 256) {
+        uint64_t global = _addr(GLOBAL_RNG_STATE);
+        const char* domain = (state == (uint32_t*)global) ? "global" : "other";
+        HookLog("RNGNEXT frame=%d resim=%d caller=0x%llX state=0x%llX domain=%s "
+                "before=%08X,%08X,%08X,%08X after=%08X,%08X,%08X,%08X\n",
+                frame, g_isResimulating ? 1 : 0,
+                (uint64_t)__builtin_return_address(0), (uint64_t)state, domain,
+                before[0], before[1], before[2], before[3],
+                state[0], state[1], state[2], state[3]);
+    }
+}
+
+static float __fastcall hkRngAdvance(uint64_t stateArg, void* rngOwner)
+{
+    if (!Netplay_IsActive())
+        return oRngAdvance(stateArg, rngOwner);
+
+    int frame = RngTraceFrame();
+    if (frame != g_advanceTraceFrame) {
+        g_advanceTraceFrame = frame;
+        g_advanceTraceCount = 0;
+    }
+
+    uint32_t globalBefore[4] = {};
+    uint32_t globalAfter[4] = {};
+    uint32_t ownerBefore[4] = {};
+    if (rngOwner && IsAccessibleAddress((uint64_t)rngOwner + 0x2D8C)) {
+        std::memcpy(ownerBefore, (uint8_t*)rngOwner + 0x2D80,
+                    sizeof(ownerBefore));
+    }
+    std::memcpy(globalBefore, (void*)_addr(GLOBAL_RNG_STATE), sizeof(globalBefore));
+    float result = oRngAdvance(stateArg, rngOwner);
+    std::memcpy(globalAfter, (void*)_addr(GLOBAL_RNG_STATE), sizeof(globalAfter));
+
+    // This is deliberately capped per frame: animation command streams can
+    // legitimately consume many random values, but the first callers are the
+    // useful evidence for locating an unexpected branch.
+    if (g_advanceTraceCount++ < 128) {
+        uint32_t ownerAfter[4] = {};
+        if (rngOwner && IsAccessibleAddress((uint64_t)rngOwner + 0x2D8C)) {
+            std::memcpy(ownerAfter, (uint8_t*)rngOwner + 0x2D80,
+                        sizeof(ownerAfter));
+        }
+        HookLog("RNGADV frame=%d resim=%d caller=0x%llX stateArg=0x%llX "
+                "owner=0x%llX result=%.9g global=%08X,%08X,%08X,%08X->%08X,%08X,%08X,%08X "
+                "ownerRng=%08X,%08X,%08X,%08X\n",
+                frame, g_isResimulating ? 1 : 0,
+                (uint64_t)__builtin_return_address(0), stateArg,
+                (uint64_t)rngOwner, result,
+                globalBefore[0], globalBefore[1], globalBefore[2], globalBefore[3],
+                globalAfter[0], globalAfter[1], globalAfter[2], globalAfter[3],
+                ownerBefore[0], ownerBefore[1], ownerBefore[2], ownerBefore[3]);
+    }
+    return result;
+}
 
 static uint32_t __fastcall hkRChrCpuRngModN(void* cpu, uint32_t modulus)
 {
@@ -165,7 +267,49 @@ static void __fastcall hkSetReservedAnki(void* character, int value)
 
 void Rollback_InitRngHooks()
 {
-    MH_STATUS status = MH_CreateHook((LPVOID)_addr(FN_RCHRCPU_RNG_MOD_N),
+    MH_STATUS status = MH_CreateHook((LPVOID)_addr(FN_SOUND_RANDOM_VARIANT),
+                                     (LPVOID)&hkSoundRandomVariant,
+                                     (LPVOID*)&oSoundRandomVariant);
+    if (status == MH_OK) {
+        status = MH_EnableHook((LPVOID)_addr(FN_SOUND_RANDOM_VARIANT));
+        if (status == MH_OK)
+            HookLog("Rollback: isolated sound variant RNG at 0x%llX\n",
+                    (uint64_t)_addr(FN_SOUND_RANDOM_VARIANT));
+        else
+            HookLog("Rollback: failed to enable sound variant RNG isolation (%d)\n", status);
+    } else {
+        HookLog("Rollback: failed to hook sound variant RNG (%d)\n", status);
+    }
+
+    status = MH_CreateHook((LPVOID)_addr(FN_RNG_NEXT),
+                                     (LPVOID)&hkRngNext,
+                                     (LPVOID*)&oRngNext);
+    if (status == MH_OK) {
+        status = MH_EnableHook((LPVOID)_addr(FN_RNG_NEXT));
+        if (status == MH_OK)
+            HookLog("Rollback: hooked MtXorShift next-state trace at 0x%llX\n",
+                    (uint64_t)_addr(FN_RNG_NEXT));
+        else
+            HookLog("Rollback: failed to enable next-state RNG trace (%d)\n", status);
+    } else {
+        HookLog("Rollback: failed to hook next-state RNG trace (%d)\n", status);
+    }
+
+    status = MH_CreateHook((LPVOID)_addr(FN_RNG_ADVANCE),
+                                     (LPVOID)&hkRngAdvance,
+                                     (LPVOID*)&oRngAdvance);
+    if (status == MH_OK) {
+        status = MH_EnableHook((LPVOID)_addr(FN_RNG_ADVANCE));
+        if (status == MH_OK)
+            HookLog("Rollback: hooked shared MtXorShift advancement trace at 0x%llX\n",
+                    (uint64_t)_addr(FN_RNG_ADVANCE));
+        else
+            HookLog("Rollback: failed to enable shared RNG trace (%d)\n", status);
+    } else {
+        HookLog("Rollback: failed to hook shared RNG trace (%d)\n", status);
+    }
+
+    status = MH_CreateHook((LPVOID)_addr(FN_RCHRCPU_RNG_MOD_N),
                                       (LPVOID)&hkRChrCpuRngModN,
                                       (LPVOID*)&oRChrCpuRngModN);
     if (status == MH_OK) {

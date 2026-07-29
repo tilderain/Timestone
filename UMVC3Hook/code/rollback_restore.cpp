@@ -84,14 +84,73 @@ using UnitRemoveFn = char(__fastcall*)(void*, void*);
 #define g_slots g_rollbackSnapshotSlots
 
 static constexpr SnapshotRange CCHR_SCALAR_RESTORE_RANGES[] = {
-    {0x28, 0x08}, {0x48, 0x38}, {0x80, 0x100}, {0xA8, 0x04},
-    {0x12C, 0x40}, {0x550, 0x10}, {0x29E, 0x12}, {0x1300, 0x08},
-    {0x1308, 0x40}, {0x1350, 0x98}, {0x14F0, 0x28}, {0x154C, 0x14},
-    {0x1578, 0x70}, {0x15F8, 0x70}, {0x1678, 0x70}, {0x16F8, 0x70},
-    {0x1778, 0x70}, {0x17F8, 0x70}, {0x1870, 0x08}, {0x1644, 0x04},
-    {0x1898, 0x30}, {0x2D9C, 0x24}, {0x2D80, 0x10}, {0x28B8, 0x20},
-    {0x2AD0, 0x20}, {0x3F48, 0x18C}, {0x40D4, 0x4C}, {0x4120, 0xD8},
-    {0x4168, 0x90}, {0x4D10, 0x100}, {0x6340, 0x10}, {0x6360, 0xC8},
+    // Pointer-free cChr state immediately following the base object header.
+    {0x28, 0x08},
+    // cActionTime-adjacent scalar state, including hitstop/time-scale values.
+    {0x48, 0x38},
+    // Early input and command-processing state used by the character FSM.
+    {0x80, 0x100},
+    // Input repeat/transition scalar at the end of the preceding input block.
+    {0xA8, 0x04},
+    // Per-character input history and derived directional/button state.
+    {0x12C, 0x40},
+    // Motion[8] timing/state header used by character animation updates.
+    {0x550, 0x10},
+    // Assist and action sub-flags: mAssistFlags and adjacent action flags.
+    {0x29E, 0x12},
+    // Animation-state header: delta coefficient and current animation values.
+    {0x1300, 0x08},
+    // Remaining pointer-free animation timing and transition state.
+    {0x1308, 0x40},
+    // Character constraint, animation, and state-check scalars.
+    {0x1350, 0x98},
+    // mChrF through mEtcF and related character/program flags.
+    {0x14F0, 0x28},
+    // Remaining pointer-free state-check and animation-transition scalars.
+    {0x154C, 0x14},
+    // Per-character motion/constraint work records, first block.
+    {0x1578, 0x70},
+    // Per-character motion/constraint work records, second block.
+    {0x15F8, 0x70},
+    // Per-character motion/constraint work records, third block.
+    {0x1678, 0x70},
+    // Per-character motion/constraint work records, fourth block.
+    {0x16F8, 0x70},
+    // Per-character motion/constraint work records, fifth block.
+    {0x1778, 0x70},
+    // Per-character motion/constraint work records, sixth block.
+    {0x17F8, 0x70},
+    // Character/variant index and related selection state.
+    {0x1870, 0x08},
+    // Scalar motion/constraint value within the work-record area.
+    {0x1644, 0x04},
+    // Character state/context values before the frame and identity fields.
+    {0x1898, 0x30},
+    // Character identity, player/team membership, and body/assist settings.
+    {0x2D9C, 0x24},
+    // Frame and identity-adjacent scalar state preceding mId.
+    {0x2D80, 0x10},
+    // Character body/assist configuration state.
+    {0x28B8, 0x20},
+    // Character state values used by action and movement dispatch.
+    {0x2AD0, 0x20},
+    // mWeaponNum controls native weapon-slot processing and collision setup.
+    {0x3F38, 0x04},
+    // mAnmNoReqAlive/Std/Cmd, request flags, and animation-rate state drive
+    // action-to-animation transitions during the next simulated frame.
+    {0x3F48, 0x18C},
+    // Movement vector, forward/Y speed, acceleration, and adjacent motion state.
+    {0x40D4, 0x4C},
+    // Hitbox/hurtbox and active collision state for the character.
+    {0x4120, 0xD8},
+    // Remaining pointer-free movement and collision scalars.
+    {0x4168, 0x90},
+    // Sixteen Vec3 position entries used by hitbox/contact processing.
+    {0x4D10, 0x100},
+    // Damage-state header and counters.
+    {0x6340, 0x10},
+    // Damage, air-state, combo, stun, and knockdown counters.
+    {0x6360, 0xC8},
     // cChr's throw-reaction reuse state and two cached attack-info transforms.
     // Leaving these on the live timeline changes the selected throw response
     // (+0x6828 defaults to -1) and loses the restored matrix values.
@@ -102,22 +161,43 @@ static constexpr SnapshotRange CCHR_SCALAR_RESTORE_RANGES[] = {
 // These shared cChr fields are rebuilt by native post-restore helpers on some
 // rollback paths. Reapply the saved values after those helpers complete.
 static constexpr SnapshotRange CCHR_POST_RESTORE_TAIL_RANGES[] = {
+    // Reapply throw-reaction reuse state after native model/character rebuilds.
     {0x680D, 0x01}, {0x6810, 0x24}, {0x6828, 0x04}, {0x6840, 0x80},
+    // Reapply cached attack-info transform data consumed by throw/contact logic.
     {0x68D0, 0x20},
 };
 
 static constexpr SnapshotRange SMAIN_RESTORE_RANGES[] = {
-    {0x30, 0x64}, {0xA4, 0x1C}, {0x40010, 0x10},
-    {0x40028, 0x18}, {0x40048, 0x14},
+    // Core sMain frame/pause and simulation-control state below the header.
+    {0x30, 0x64},
+    // Previous/current frame-time values and adjacent timing state.
+    {0xA4, 0x1C},
+    // Process-local timing accumulator block used by native frame pacing.
+    {0x40010, 0x10},
+    // Double-precision timing values and performance-counter conversion state.
+    {0x40028, 0x18},
+    // Current performance-counter/timing values used during frame advancement.
+    {0x40048, 0x14},
 };
 
 static constexpr SnapshotRange SACTION_RESTORE_RANGES[] = {
-    {0x28, 0xE8}, {0x140, 0x08}, {0x150, 0x08}, {0x168, 0x09},
+    // cActionTime hitstop/blockstun state and the main action timeline.
+    {0x28, 0xE8},
+    // Action phase transition and frame-sync scalar state.
+    {0x140, 0x08},
+    // Action-side timing/transition state.
+    {0x150, 0x08},
+    // Action flags and compact transition state.
+    {0x168, 0x09},
+    // Current action/frame counter value used by phase dispatch.
     {0x218, 0x04},
 };
 
 static constexpr SnapshotRange CCHR_TEAM_RESTORE_RANGES[] = {
-    {0x50, 0xC0}, {0x110, 0x1B0},
+    // Team delta, flags, life, meter, assists, X-Factor, and active action state.
+    {0x50, 0xC0},
+    // Team character position, angle, replay, and remaining team gameplay state.
+    {0x110, 0x1B0},
 };
 
 static bool IsActiveUnit(void* unit);
@@ -697,6 +777,28 @@ void Rollback_RestoreSnapshot(int32_t frame)
         return;
     }
 
+    uint32_t savedGlobalRng[4] = {};
+    bool foundGlobalRng = false;
+    size_t globalRngOffset = 0;
+    for (int i = 0; i < slot.regionCount; ++i) {
+        if ((uint64_t)slot.regions[i].ptr == _addr(0x140D765D8) &&
+            slot.regions[i].size >= sizeof(savedGlobalRng) &&
+            globalRngOffset + sizeof(savedGlobalRng) <= slot.size) {
+            std::memcpy(savedGlobalRng, slot.data + globalRngOffset,
+                        sizeof(savedGlobalRng));
+            foundGlobalRng = true;
+            break;
+        }
+        globalRngOffset += slot.regions[i].size;
+    }
+    uint32_t liveGlobalRng[4] = {};
+    std::memcpy(liveGlobalRng, (void*)_addr(0x140D765D8), sizeof(liveGlobalRng));
+    HookLog("RNGRESTORE frame=%d stage=begin saved=%08X,%08X,%08X,%08X live=%08X,%08X,%08X,%08X found=%d\n",
+            frame,
+            savedGlobalRng[0], savedGlobalRng[1], savedGlobalRng[2], savedGlobalRng[3],
+            liveGlobalRng[0], liveGlobalRng[1], liveGlobalRng[2], liveGlobalRng[3],
+            foundGlobalRng ? 1 : 0);
+
     // Restore using SAVED region metadata (addresses + sizes), not re-resolved.
     // This ensures dynamic objects (projectiles, effects) map to the exact
     // same memory addresses that were captured, even if the game rebuilt its
@@ -1096,6 +1198,10 @@ void Rollback_RestoreSnapshot(int32_t frame)
     }
     const uint64_t regionsEnd = Profile_Now();
 
+    std::memcpy(liveGlobalRng, (void*)_addr(0x140D765D8), sizeof(liveGlobalRng));
+    HookLog("RNGRESTORE frame=%d stage=regions live=%08X,%08X,%08X,%08X\n",
+            frame, liveGlobalRng[0], liveGlobalRng[1], liveGlobalRng[2], liveGlobalRng[3]);
+
     Rollback_RestoreCollisionNodeClones(slot);
     const uint64_t collisionClonesEnd = Profile_Now();
 
@@ -1136,6 +1242,10 @@ void Rollback_RestoreSnapshot(int32_t frame)
     const uint64_t effectSlotsEnd = Profile_Now();
     RestoreShotAndEffectRecipes(slot);
     const uint64_t shotsEnd = Profile_Now();
+
+    std::memcpy(liveGlobalRng, (void*)_addr(0x140D765D8), sizeof(liveGlobalRng));
+    HookLog("RNGRESTORE frame=%d stage=recipes live=%08X,%08X,%08X,%08X\n",
+            frame, liveGlobalRng[0], liveGlobalRng[1], liveGlobalRng[2], liveGlobalRng[3]);
 
     using SetChildMaterialModeFn = void(__fastcall*)(void*, int, uint8_t);
     auto setChildMaterialMode =
@@ -1188,6 +1298,10 @@ void Rollback_RestoreSnapshot(int32_t frame)
     // all 64 entries makes restored dead characters invisible.
     Rollback_SyncActiveCharacterUi();
     const uint64_t uiEnd = Profile_Now();
+
+    std::memcpy(liveGlobalRng, (void*)_addr(0x140D765D8), sizeof(liveGlobalRng));
+    HookLog("RNGRESTORE frame=%d stage=complete live=%08X,%08X,%08X,%08X\n",
+            frame, liveGlobalRng[0], liveGlobalRng[1], liveGlobalRng[2], liveGlobalRng[3]);
 
     if (g_activeRollbackProfile) {
         g_activeRollbackProfile->restoreTotal += uiEnd - profileStart;

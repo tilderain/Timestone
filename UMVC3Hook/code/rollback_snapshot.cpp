@@ -1170,6 +1170,14 @@ void Rollback_SaveSnapshot(int32_t frame)
     slot.size = offset;
     const uint64_t copyRegionsEnd = Profile_Now();
 
+    // Record the exact state captured at the rollback boundary. RNG hooks only
+    // observe advances; this also exposes direct writes and snapshot timing.
+    uint32_t globalRng[4] = {};
+    std::memcpy(globalRng, (void*)_addr(0x140D765D8), sizeof(globalRng));
+    HookLog("RNGSNAP frame=%d resim=%d state=%08X,%08X,%08X,%08X\n",
+            frame, g_isResimulating ? 1 : 0,
+            globalRng[0], globalRng[1], globalRng[2], globalRng[3]);
+
     static int lastSnapshotRegionCount = -1;
     if (count != lastSnapshotRegionCount) {
         int collisionIndex = -1;

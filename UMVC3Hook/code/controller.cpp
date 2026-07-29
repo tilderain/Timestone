@@ -288,7 +288,7 @@ static int32_t   g_lastAdvertisedChecksumFrame = -1;
 
 static constexpr uint32_t DESYNC_THRESHOLD         = 0;
 static constexpr int32_t  DESYNC_SKIP_FRAMES       = 0;
-static constexpr int32_t  DESYNC_CONSECUTIVE_MIN   = 3;
+static constexpr int32_t  DESYNC_CONSECUTIVE_MIN   = 1;
 
 // ---------------------------------------------------------------------------
 // Frame advantage (GGPO-style) — RTT-based frame-count timesync

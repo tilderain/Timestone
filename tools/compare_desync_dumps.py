@@ -3,6 +3,7 @@
 
 import argparse
 import bisect
+import datetime
 import json
 import re
 import struct
@@ -21,6 +22,7 @@ ROLE_NAMES = {0: "offline", 1: "host", 2: "client"}
 SNAPDUMP_NAME = re.compile(
     r"desync_(\d{8}_\d{6})_(host|client)_f(-?\d+)\.usdp$"
 )
+SNAPDUMP_PAIR_SKEW = datetime.timedelta(seconds=5)
 NONZERO_BYTE_TABLE = bytes(value != 0 for value in range(256))
 DEFAULT_SKIP_FRAME0_POINTERS = True
 EXPLICIT_REGION_OVERRIDES = {
@@ -41,6 +43,42 @@ EXPLICIT_BYTE_OVERRIDES = {
     ("uCharacter.team1", 0x96, 2),
     ("uCharacter.team1", 0x12D0, 0xC),
     ("uCharacter.team1", 0x18C, 4),
+    # Character model/face-part state. These values affect presentation only.
+    ("uCharacter.team0", 0x13D8, 4),
+    ("uCharacter.team0", 0x3660, 4),
+    ("uCharacter.team0", 0x3664, 4),
+    ("uCharacter.team0", 0x368C, 4),
+    ("uCharacter.team0", 0x3ED0, 4),
+    ("uCharacter.team0", 0x3EBC, 4),
+    # Chain and constraint resource arrays used for secondary model motion.
+    ("uCharacter.team0", 0x3ED8, 0x60),
+    ("uCharacter.team1", 0x13D8, 4),
+    ("uCharacter.team1", 0x3660, 4),
+    ("uCharacter.team1", 0x3664, 4),
+    ("uCharacter.team1", 0x368C, 4),
+    ("uCharacter.team1", 0x3ED0, 4),
+    ("uCharacter.team1", 0x3EBC, 4),
+    ("uCharacter.team1", 0x3ED8, 0x60),
+    # uModel resource and joint-table pointers retained by restore. Their
+    # allocation addresses differ between peers, while motion scalar state is
+    # compared separately.
+    ("uCharacter.team0", 0x100, 8),
+    ("uCharacter.team0", 0x110, 8),
+    ("uCharacter.team0", 0x540, 8),
+    ("uCharacter.team1", 0x100, 8),
+    ("uCharacter.team1", 0x110, 8),
+    ("uCharacter.team1", 0x540, 8),
+    # uModel motion-resource bindings. The surrounding Motion records remain
+    # compared; these slots only hold peer-local resource/allocation pointers.
+    *( (label, 0x560 + slot * 0x180 + offset, 8)
+       for label in ("uCharacter.team0", "uCharacter.team1")
+       for slot in range(8)
+       for offset in (0xE0, 0x100, 0x120, 0x128, 0x130, 0x138,
+                     0x160, 0x170, 0x178) ),
+    # uModel::getMotionListEntry reads this 16-entry resource pointer table.
+    *( (label, offset, 8)
+       for label in ("uCharacter.team0", "uCharacter.team1")
+       for offset in range(0x11B8, 0x1238, 8) ),
 }
 FRAME0_EXPLICIT_BYTE_OVERRIDES = {
     ("uActionSideCamera", 0x18, 8),
@@ -307,7 +345,11 @@ def load_dump(path):
 
 
 def latest_snapdump_paths(directories=None):
-    """Return the newest complete host/client snapdump pair in search directories."""
+    """Return the newest complete host/client snapdump pair in search directories.
+
+    The peers write their files independently, so their filename timestamps can
+    differ by a few seconds even when they belong to the same desync.
+    """
     if directories is None:
         game_directory = (
             Path(__file__).resolve().parent / ".." / ".." /
@@ -316,20 +358,35 @@ def latest_snapdump_paths(directories=None):
         directories = (Path("."), game_directory)
     elif isinstance(directories, (str, Path)):
         directories = (Path(directories),)
-    pairs = {}
+    dumps = []
     for directory in directories:
         for path in directory.glob("desync_*.usdp"):
             match = SNAPDUMP_NAME.fullmatch(path.name)
             if not match:
                 continue
             timestamp, role, frame = match.groups()
-            pairs.setdefault((timestamp, int(frame)), {})[role] = path
-    complete = [(key, paths) for key, paths in pairs.items()
-                if "host" in paths and "client" in paths]
+            try:
+                stamp = datetime.datetime.strptime(timestamp, "%Y%m%d_%H%M%S")
+            except ValueError:
+                continue
+            dumps.append((stamp, role, int(frame), path))
+
+    # Match only the same trigger frame and keep the timestamp tolerance small
+    # enough not to join unrelated desyncs that happen to use the same frame.
+    complete = []
+    for host in dumps:
+        if host[1] != "host":
+            continue
+        clients = [client for client in dumps
+                   if client[1] == "client" and client[2] == host[2]
+                   and abs(client[0] - host[0]) <= SNAPDUMP_PAIR_SKEW]
+        for client in clients:
+            complete.append((max(host[0], client[0]),
+                             -abs(client[0] - host[0]), host[3], client[3]))
     if not complete:
         return None, None
-    _, paths = max(complete, key=lambda item: item[0])
-    return paths["host"], paths["client"]
+    _, _, host_path, client_path = max(complete)
+    return host_path, client_path
 
 
 def region_label(index, region, dump, resolver):

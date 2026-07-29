@@ -114,6 +114,15 @@ class CompareSnapDumpsTest(unittest.TestCase):
 
         self.assertEqual((None, None), compare.latest_snapdump_paths(directory))
 
+    def test_latest_snapdump_pair_allows_peer_write_time_skew(self):
+        directory = Path(self.tempdir.name)
+        host = directory / "desync_20260729_153535_host_f445.usdp"
+        client = directory / "desync_20260729_153534_client_f445.usdp"
+        host.touch()
+        client.touch()
+
+        self.assertEqual((host, client), compare.latest_snapdump_paths(directory))
+
     def test_finds_latest_pair_across_search_directories(self):
         first = Path(self.tempdir.name) / "first"
         second = Path(self.tempdir.name) / "second"
@@ -567,6 +576,122 @@ class CompareSnapDumpsTest(unittest.TestCase):
             skip_frame0_pointers=False,
         )
         self.assertEqual("diverged", conservative["verdict"])
+
+    def test_skips_character_face_and_model_state(self):
+        base_a, base_b = 0x140000000, 0x150000000
+        data_a = bytearray(0x3F38)
+        data_b = bytearray(data_a)
+        for offset, size in (
+                (0x13D8, 4), (0x3660, 4), (0x3664, 4),
+                (0x368C, 4), (0x3EBC, 4), (0x3ED0, 4),
+                (0x3ED8, 0x60)):
+            data_a[offset:offset + size] = bytes([0xA1] * size)
+            data_b[offset:offset + size] = bytes([0xB2] * size)
+        write_dump(
+            self.path_a, 1, base_a,
+            [(0, 0x11, 0x22, 0x0F750000, bytes(data_a))],
+            version=2, region_name="uCharacter.team0",
+        )
+        write_dump(
+            self.path_b, 2, base_b,
+            [(0, 0x22, 0x11, 0x0F710000, bytes(data_b))],
+            version=2, region_name="uCharacter.team0",
+        )
+
+        report = compare.build_report(
+            compare.load_dump(self.path_a), compare.load_dump(self.path_b), 32, 16,
+        )
+        self.assertEqual("match", report["verdict"])
+
+        conservative = compare.build_report(
+            compare.load_dump(self.path_a), compare.load_dump(self.path_b), 32, 16,
+            skip_frame0_pointers=False,
+        )
+        self.assertEqual("diverged", conservative["verdict"])
+
+    def test_skips_character_model_resource_pointers(self):
+        base_a, base_b = 0x140000000, 0x150000000
+        data_a = bytearray(0x548)
+        data_b = bytearray(data_a)
+        for offset, value_a, value_b in (
+                (0x100, 0x05F70538, 0x05F10538),
+                (0x110, 0x05F70620, 0x05F10620),
+                (0x540, 0x05F70708, 0x05F10708)):
+            data_a[offset:offset + 8] = struct.pack("<Q", value_a)
+            data_b[offset:offset + 8] = struct.pack("<Q", value_b)
+        data_a[0x120] = 0xA1
+        data_b[0x120] = 0xB2
+        write_dump(
+            self.path_a, 1, base_a,
+            [(11, 0x11, 0x22, 0x0F750000, bytes(data_a))],
+            version=2, region_name="uCharacter.team0",
+        )
+        write_dump(
+            self.path_b, 2, base_b,
+            [(11, 0x22, 0x11, 0x0F710000, bytes(data_b))],
+            version=2, region_name="uCharacter.team0",
+        )
+
+        report = compare.build_report(
+            compare.load_dump(self.path_a), compare.load_dump(self.path_b), 32, 16,
+        )
+        self.assertEqual("diverged", report["verdict"])
+        self.assertEqual(
+            "0x120",
+            report["first_divergence"]["regions"][0]["differences_sample"][0]["offset"],
+        )
+
+        data_b[0x120] = 0xA1
+        write_dump(
+            self.path_b, 2, base_b,
+            [(11, 0x22, 0x11, 0x0F710000, bytes(data_b))],
+            version=2, region_name="uCharacter.team0",
+        )
+        report = compare.build_report(
+            compare.load_dump(self.path_a), compare.load_dump(self.path_b), 32, 16,
+        )
+        self.assertEqual("match", report["verdict"])
+
+    def test_skips_motion_resource_bindings_and_list(self):
+        base_a, base_b = 0x140000000, 0x150000000
+        data_a = bytearray(0x1240)
+        data_b = bytearray(data_a)
+        for offset in (0x640, 0x660, 0x680, 0x688, 0x690, 0x698,
+                       0x6C0, 0x6D0, 0x6D8, 0x11B8, 0x11C0, 0x11D0):
+            data_a[offset:offset + 8] = struct.pack("<Q", 0x05F70000 + offset)
+            data_b[offset:offset + 8] = struct.pack("<Q", 0x05F10000 + offset)
+        data_a[0x620] = 0xA1
+        data_b[0x620] = 0xB2
+        write_dump(
+            self.path_a, 1, base_a,
+            [(11, 0x11, 0x22, 0x0F750000, bytes(data_a))],
+            version=2, region_name="uCharacter.team0",
+        )
+        write_dump(
+            self.path_b, 2, base_b,
+            [(11, 0x22, 0x11, 0x0F710000, bytes(data_b))],
+            version=2, region_name="uCharacter.team0",
+        )
+
+        report = compare.build_report(
+            compare.load_dump(self.path_a), compare.load_dump(self.path_b), 32, 16,
+        )
+        self.assertEqual("diverged", report["verdict"])
+        self.assertEqual(
+            "0x620",
+            report["first_divergence"]["regions"][0]["differences_sample"][0]["offset"],
+        )
+
+        data_b[0x620] = 0xA1
+        write_dump(
+            self.path_b, 2, base_b,
+            [(11, 0x22, 0x11, 0x0F710000, bytes(data_b))],
+            version=2, region_name="uCharacter.team0",
+        )
+        report = compare.build_report(
+            compare.load_dump(self.path_a), compare.load_dump(self.path_b), 32, 16,
+        )
+        self.assertEqual("match", report["verdict"])
 
     def test_skips_unrestored_saction_full_spill_byte(self):
         base_a, base_b = 0x140000000, 0x150000000
