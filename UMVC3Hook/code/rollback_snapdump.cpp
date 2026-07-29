@@ -22,7 +22,7 @@ namespace {
 
 constexpr uint32_t DUMP_MAGIC = 0x50445355; // USDP
 constexpr uint32_t DUMP_VERSION = 2;
-constexpr int HISTORY_SIZE = 128;
+constexpr int HISTORY_SIZE = 255;
 constexpr uint8_t ENCODING_RAW = 0;
 constexpr uint8_t ENCODING_XOR_RLE = 1;
 

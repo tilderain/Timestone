@@ -4,6 +4,7 @@
 import argparse
 import bisect
 import json
+import re
 import struct
 import sys
 from dataclasses import dataclass
@@ -17,17 +18,27 @@ FRAME = struct.Struct("<i7I4QB7s")
 REGION_V1 = struct.Struct("<5QB7s")
 REGION_V2 = struct.Struct("<5QB7s64s")
 ROLE_NAMES = {0: "offline", 1: "host", 2: "client"}
+SNAPDUMP_NAME = re.compile(
+    r"desync_(\d{8}_\d{6})_(host|client)_f(-?\d+)\.usdp$"
+)
+NONZERO_BYTE_TABLE = bytes(value != 0 for value in range(256))
 DEFAULT_SKIP_FRAME0_POINTERS = True
 EXPLICIT_REGION_OVERRIDES = {
+    "uCharacter.externalAnimation",
+    "uCharacter.jointStates",
     "uCharacter.motionBlend",
 }
 EXPLICIT_BYTE_OVERRIDES = {
+    ("sAction.full", 0x3634, 1),
+    ("uCharacter.team0", 0x190, 8),
+    ("uCharacter.team0", 0x12D0, 0xC),
     ("uCharacter.team0", 0x18C, 4),
+    ("uCharacter.team1", 0x190, 8),
+    ("uCharacter.team1", 0x12D0, 0xC),
     ("uCharacter.team1", 0x18C, 4),
 }
 FRAME0_EXPLICIT_BYTE_OVERRIDES = {
     ("uActionSideCamera", 0x18, 8),
-    ("uCharacter.externalAnimation", 0x92, 1),
     ("uCharacter.team0", 0x13B0, 8),
     ("uCharacter.team1", 0x13B0, 8),
     ("sAction.full", 0x1F0, 0x20),
@@ -290,6 +301,32 @@ def load_dump(path):
     )
 
 
+def latest_snapdump_paths(directories=None):
+    """Return the newest complete host/client snapdump pair in search directories."""
+    if directories is None:
+        game_directory = (
+            Path(__file__).resolve().parent / ".." / ".." /
+            "ULTIMATE MARVEL VS. CAPCOM 3"
+        ).resolve()
+        directories = (Path("."), game_directory)
+    elif isinstance(directories, (str, Path)):
+        directories = (Path(directories),)
+    pairs = {}
+    for directory in directories:
+        for path in directory.glob("desync_*.usdp"):
+            match = SNAPDUMP_NAME.fullmatch(path.name)
+            if not match:
+                continue
+            timestamp, role, frame = match.groups()
+            pairs.setdefault((timestamp, int(frame)), {})[role] = path
+    complete = [(key, paths) for key, paths in pairs.items()
+                if "host" in paths and "client" in paths]
+    if not complete:
+        return None, None
+    _, paths = max(complete, key=lambda item: item[0])
+    return paths["host"], paths["client"]
+
+
 def region_label(index, region, dump, resolver):
     if region.name:
         return region.name
@@ -316,24 +353,17 @@ def region_label(index, region, dump, resolver):
     return f"region[{index}]"
 
 
-def differing_runs(data_a, data_b, ignored, limit):
-    runs = []
-    index = 0
-    size = min(len(data_a), len(data_b))
-    while index < size and len(runs) < limit:
-        if data_a[index] == data_b[index] or index in ignored:
-            index += 1
-            continue
-        start = index
-        while (index < size and data_a[index] != data_b[index] and
-               index not in ignored and index - start < 32):
-            index += 1
-        runs.append((start, index))
-    return runs
-
-
 def looks_like_user_pointer(value):
     return 0x10000 <= value < 0x0000800000000000
+
+
+def differing_byte_count(data_a, data_b):
+    """Count unequal byte positions without iterating through Python integers."""
+    size = min(len(data_a), len(data_b))
+    if size == 0:
+        return 0
+    value = int.from_bytes(data_a[:size], "little") ^ int.from_bytes(data_b[:size], "little")
+    return value.to_bytes(size, "little").translate(NONZERO_BYTE_TABLE).count(1)
 
 
 def collect_frame0_pointer_overrides(dump_a, dump_b):
@@ -398,9 +428,7 @@ def ignored_pointer_bytes(index, label, data_a, data_b, pointer_overrides):
     overridden = []
     if not pointer_overrides:
         return ignored, overridden
-    for override_index, override_label, offset, size in pointer_overrides:
-        if override_index != index or override_label != label:
-            continue
+    for offset, size in pointer_overrides.get((index, label), ()):
         value_a = int.from_bytes(data_a[offset:offset + size], "little")
         value_b = int.from_bytes(data_b[offset:offset + size], "little")
         ignored.update(range(offset, offset + size))
@@ -480,11 +508,28 @@ def annotate_run(layout, object_base, start, end, data_a, data_b, repeat_size=0)
 
 def compare_region(index, region_a, region_b, dump_a, dump_b, frame_a, frame_b,
                    resolver_a, resolver_b, max_diffs, structs=None,
-                   pointer_overrides=None):
+                   pointer_overrides=None, details=True):
     start_a, start_b = region_a.data_offset, region_b.data_offset
     data_a = frame_a.data[start_a:start_a + region_a.size]
     data_b = frame_b.data[start_b:start_b + region_b.size]
     label = region_label(index, region_a, dump_a, resolver_a)
+    region_overrides = pointer_overrides.get((index, label), ()) if pointer_overrides else ()
+    fully_ignored = (0, region_a.size) in region_overrides
+    if fully_ignored or data_a == data_b:
+        return {
+            "region_index": index,
+            "label": label,
+            "concrete_type": None,
+            "type_source": None,
+            "object_base_offset": None,
+            "size": region_a.size,
+            "raw_different_bytes": 0,
+            "relocation_only_bytes": 0,
+            "meaningful_different_bytes": 0,
+            "pointer_relocations_sample": [],
+            "frame0_pointer_overrides_sample": [],
+            "differences_sample": [],
+        }
     ignored, overridden_pointers = ignored_pointer_bytes(
         index, label, data_a, data_b, pointer_overrides
     )
@@ -494,7 +539,7 @@ def compare_region(index, region_a, region_b, dump_a, dump_b, frame_a, frame_b,
         value_b = int.from_bytes(data_b[offset:offset + 8], "little")
         if value_a == value_b:
             continue
-        if pointer_overrides and (index, label, offset, 8) in pointer_overrides:
+        if (offset, 8) in region_overrides:
             continue
         pointer_a = resolver_a.resolve(value_a)
         pointer_b = resolver_b.resolve(value_b)
@@ -502,18 +547,59 @@ def compare_region(index, region_a, region_b, dump_a, dump_b, frame_a, frame_b,
             ignored.update(range(offset, offset + 8))
             if len(relocations) < max_diffs:
                 relocations.append({"offset": f"0x{offset:x}", "target": list(pointer_a)})
+    if not details:
+        raw_diff_bytes = differing_byte_count(data_a, data_b)
+        ignored_diff_bytes = sum(
+            data_a[offset] != data_b[offset] for offset in ignored
+        )
+        return {
+            "region_index": index,
+            "label": label,
+            "concrete_type": None,
+            "type_source": None,
+            "object_base_offset": None,
+            "size": region_a.size,
+            "raw_different_bytes": raw_diff_bytes,
+            "relocation_only_bytes": ignored_diff_bytes,
+            "meaningful_different_bytes": raw_diff_bytes - ignored_diff_bytes,
+            "pointer_relocations_sample": relocations,
+            "frame0_pointer_overrides_sample": overridden_pointers[:max_diffs],
+            "differences_sample": [],
+        }
     layout = None
     object_base = 0
     type_source = None
-    if structs:
+    if details and structs:
         saved_vtable = int.from_bytes(data_a[:8], "little") if len(data_a) >= 8 else 0
         layout, object_base, type_source = structs.resolve(
             region_a, label, dump_a, saved_vtable
         )
     repeat_size = (layout.size if layout and structs and
                    label in structs.REPEATING_REGION_BINDINGS else 0)
+    raw_diff_bytes = 0
+    meaningful_diff_bytes = 0
+    run_bounds = []
+    run_start = None
+    for offset, (value_a, value_b) in enumerate(zip(data_a, data_b)):
+        different = value_a != value_b
+        meaningful = different and offset not in ignored
+        if different:
+            raw_diff_bytes += 1
+        if meaningful:
+            meaningful_diff_bytes += 1
+            if details and run_start is None and len(run_bounds) < max_diffs:
+                run_start = offset
+            if run_start is not None and offset - run_start == 31:
+                run_bounds.append((run_start, offset + 1))
+                run_start = offset + 1 if len(run_bounds) < max_diffs else None
+        elif details and run_start is not None:
+            run_bounds.append((run_start, offset))
+            run_start = None
+    if details and run_start is not None:
+        run_bounds.append((run_start, len(data_a)))
+
     runs = []
-    for start, end in differing_runs(data_a, data_b, ignored, max_diffs):
+    for start, end in run_bounds:
         context_start = max(0, start - 8)
         context_end = min(len(data_a), end + 8)
         difference = {
@@ -535,11 +621,6 @@ def compare_region(index, region_a, region_b, dump_a, dump_b, frame_a, frame_b,
                 layout, object_base, start, end, data_a, data_b, repeat_size
             )
         runs.append(difference)
-    raw_diff_bytes = sum(a != b for a, b in zip(data_a, data_b))
-    meaningful_diff_bytes = sum(
-        a != b and offset not in ignored
-        for offset, (a, b) in enumerate(zip(data_a, data_b))
-    )
     return {
         "region_index": index,
         "label": label,
@@ -557,7 +638,7 @@ def compare_region(index, region_a, region_b, dump_a, dump_b, frame_a, frame_b,
 
 
 def compare_frame(dump_a, dump_b, frame_a, frame_b, max_regions, max_diffs,
-                    structs=None, pointer_overrides=None):
+                    structs=None, pointer_overrides=None, details=True):
     resolver_a = PointerResolver(dump_a, frame_a)
     resolver_b = PointerResolver(dump_b, frame_b)
     result = {
@@ -613,7 +694,7 @@ def compare_frame(dump_a, dump_b, frame_a, frame_b, max_regions, max_diffs,
         else:
             comparison = compare_region(
                 index, region_a, region_b, dump_a, dump_b, frame_a, frame_b,
-                resolver_a, resolver_b, max_diffs, structs, pointer_overrides,
+                resolver_a, resolver_b, max_diffs, structs, pointer_overrides, details,
             )
             if comparison["meaningful_different_bytes"]:
                 result["regions"].append(comparison)
@@ -657,23 +738,29 @@ def diagnose(first):
 
 
 def build_report(dump_a, dump_b, max_regions, max_diffs, include_timeline=False,
-                  structs=None, skip_frame0_pointers=DEFAULT_SKIP_FRAME0_POINTERS):
+                   structs=None, skip_frame0_pointers=DEFAULT_SKIP_FRAME0_POINTERS):
     common = sorted(set(dump_a.frames) & set(dump_b.frames))
     pointer_overrides = (
         collect_frame0_pointer_overrides(dump_a, dump_b) |
         collect_explicit_region_overrides(dump_a, dump_b)
         if skip_frame0_pointers else set()
     )
+    overrides_by_region = {}
+    for index, label, offset, size in pointer_overrides:
+        overrides_by_region.setdefault((index, label), set()).add((offset, size))
     frame_results = []
     first = None
     for number in common:
         result = compare_frame(
             dump_a, dump_b, dump_a.frames[number], dump_b.frames[number],
-            max_regions, max_diffs, structs, pointer_overrides,
+            max_regions, max_diffs, structs, overrides_by_region, False,
         )
         if result["meaningful_different_bytes"] or not result["structure_matches"] or not result["inputs"]["cross_peer_consistent"]:
             if first is None:
-                first = result
+                first = compare_frame(
+                    dump_a, dump_b, dump_a.frames[number], dump_b.frames[number],
+                    max_regions, max_diffs, structs, overrides_by_region,
+                )
             frame_results.append({
                 "frame": number,
                 "meaningful_different_bytes": result["meaningful_different_bytes"],
@@ -752,8 +839,10 @@ def print_text_summary(report):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("dump_a", type=Path)
-    parser.add_argument("dump_b", type=Path)
+    parser.add_argument("dump_a", type=Path, nargs="?",
+                        help="first dump (defaults to latest host dump in cwd)")
+    parser.add_argument("dump_b", type=Path, nargs="?",
+                        help="second dump (defaults to latest client dump in cwd)")
     parser.add_argument("--output", "-o", type=Path, help="write full JSON report to this path")
     parser.add_argument("--json", action="store_true", help="print the full JSON report")
     parser.add_argument("--max-regions", type=int, default=32,
@@ -774,6 +863,13 @@ def main():
         help="ignore exact qword slots exposed as peer-specific pointers at frame 0 (default: on)",
     )
     args = parser.parse_args()
+    if args.dump_a is None or args.dump_b is None:
+        args.dump_a, args.dump_b = latest_snapdump_paths()
+        if args.dump_a is None:
+            parser.error(
+                "no complete desync_*_host/_client_fN.usdp pair found in cwd or "
+                "../../ULTIMATE MARVEL VS. CAPCOM 3 and two dump paths were not provided"
+            )
     try:
         dump_a = load_dump(args.dump_a)
         dump_b = load_dump(args.dump_b)

@@ -45,9 +45,16 @@ XOR/RLE compression are deferred until the desync trigger has paused the match.
 Run:
 
 ```sh
+python3 tools/compare_desync_dumps.py
 python3 tools/compare_desync_dumps.py host.usdp client.usdp \
   --output desync_report.json
 ```
+
+With no paths, the comparator selects the newest complete
+`desync_TIMESTAMP_{host,client}_fN.usdp` pair found in either the current
+directory or `tools/../../ULTIMATE MARVEL VS. CAPCOM 3`. Both the timestamp and
+trigger frame must match, so a partially written newer pair is ignored.
+Supplying two paths retains explicit selection.
 
 The command prints a short verdict and writes a complete JSON report suitable
 for inspection by a person or AI. It exits `0` when all overlapping snapshots
@@ -73,12 +80,11 @@ exposed by the baseline capture without applying a general heap-delta rule or
 discarding newly appearing pointer slots. Use `--no-skip-frame0-pointers` to
 process those slots conservatively.
 
-The same default-on override explicitly excludes
-`uCharacter.externalAnimation+0x92`. This is byte 2 of the inherited collision
-node's 32-bit `mGroup` field at `+0x90`; all exposed wrappers carry the same
-peer-specific frame-0 delta. The rule is deliberately limited to that semantic
-region and byte. It does not suppress `mAttribute` at `+0x94` or other collision
-state. `--no-skip-frame0-pointers` disables this explicit override as well.
+The same default-on override excludes complete
+`uCharacter.externalAnimation` and `uCharacter.jointStates` regions. These
+captured animation-wrapper and joint-work buffers are derived visual state and
+may reflect process-local render timing. `--no-skip-frame0-pointers` restores
+their conservative comparison along with the other default overrides.
 
 Two `sAction`-labelled cases are also explicitly excluded. The real `sAction`
 contains a 0x20-byte `cRef` at `+0x1f0`; its vtable, resource/reference token,
@@ -93,10 +99,9 @@ covered by either rule.
 
 The comparator also excludes complete `uCharacter.motionBlend` regions by
 default. These per-joint interpolation work buffers are treated as visual-only
-derived state rather than authoritative rollback state. This semantic override
-applies to every byte in each buffer even when no difference was present at
-frame 0. `--no-skip-frame0-pointers` restores their conservative comparison
-along with the other default overrides.
+derived state rather than authoritative rollback state. Like the external
+animation and joint-work exclusions, this semantic override applies to every
+byte in each buffer even when no difference was present at frame 0.
 
 Investigation of the first frame-2 differences identified three additional
 pointer-only cases. `uActionSideCamera+0x18` is inherited `cUnit` pointer state:
@@ -121,6 +126,21 @@ simulation or gameplay. The override covers exactly four bytes at `+0x18c` in
 `uCharacter.team0` and `uCharacter.team1`; the neighboring reflected LOD fields
 at `+0x184` and `+0x188` remain compared. As with the other semantic overrides,
 `--no-skip-frame0-pointers` restores conservative comparison.
+
+Two neighboring model-only ranges are excluded for both character teams as
+well. `uBaseModel+0x190..+0x197` is model resource/cache bookkeeping populated
+during material setup. `uToonModel+0x12d0..+0x12db` belongs to the embedded
+toon-parameter coordinate object at `+0x12c0`; `uToonModel__renderToonShading`
+consumes it to build lighting and shading parameters. Neither range is fighter
+gameplay position or action state. Character-specific bytes, including the
+unresolved in-object Chun-Li tail, remain compared.
+
+`sAction.full+0x3634` is also excluded. The full region is a deliberate 0x20000
+broad capture for defeat replacement, while current Ghidra gives the real
+`sAction` size as 0x250. The byte is outside both that object and the separate
+0x300 `sAction.compact` restore region. `Rollback_RestoreSnapshot` restores only
+the documented compact ranges for the latter, so this broad-capture spill is
+diagnostic-only and cannot alter rollback simulation through the snapshot path.
 
 The `uCharacter+0x133c` differences remain compared. Ghidra identifies the full
 32-bit field as `uActorGameModel::mAnmSerial`, but executable behavior overturns

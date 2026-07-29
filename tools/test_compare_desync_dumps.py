@@ -93,12 +93,55 @@ class CompareSnapDumpsTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "truncated dump header"):
             compare.load_dump(self.path_a)
 
+    def test_finds_latest_complete_snapdump_pair(self):
+        directory = Path(self.tempdir.name)
+        old_host = directory / "desync_20260729_062239_host_f425.usdp"
+        old_client = directory / "desync_20260729_062239_client_f425.usdp"
+        new_host = directory / "desync_20260729_062652_host_f367.usdp"
+        new_client = directory / "desync_20260729_062652_client_f367.usdp"
+        incomplete = directory / "desync_20260729_070000_host_f500.usdp"
+        for path in (old_host, old_client, new_host, new_client, incomplete):
+            path.touch()
+
+        self.assertEqual(
+            (new_host, new_client), compare.latest_snapdump_paths(directory)
+        )
+
+    def test_latest_snapdump_pair_requires_matching_frame(self):
+        directory = Path(self.tempdir.name)
+        (directory / "desync_20260729_062652_host_f367.usdp").touch()
+        (directory / "desync_20260729_062652_client_f368.usdp").touch()
+
+        self.assertEqual((None, None), compare.latest_snapdump_paths(directory))
+
+    def test_finds_latest_pair_across_search_directories(self):
+        first = Path(self.tempdir.name) / "first"
+        second = Path(self.tempdir.name) / "second"
+        first.mkdir()
+        second.mkdir()
+        (first / "desync_20260729_062239_host_f425.usdp").touch()
+        (first / "desync_20260729_062239_client_f425.usdp").touch()
+        new_host = second / "desync_20260729_062652_host_f367.usdp"
+        new_client = second / "desync_20260729_062652_client_f367.usdp"
+        new_host.touch()
+        new_client.touch()
+
+        self.assertEqual(
+            (new_host, new_client),
+            compare.latest_snapdump_paths((first, second)),
+        )
+
     def test_decodes_xor_rle_payload(self):
         previous = bytes([0, 1, 2, 3, 4, 5])
         # Three unchanged bytes, two XOR literals (7 and 9), one unchanged byte.
         encoded = bytes([(3 << 1), (2 << 1) | 1, 7, 9, (1 << 1)])
         expected = bytes([0, 1, 2, 3 ^ 7, 4 ^ 9, 5])
         self.assertEqual(expected, compare.decode_xor_rle(encoded, previous, 6))
+
+    def test_counts_differing_bytes(self):
+        self.assertEqual(0, compare.differing_byte_count(b"same", b"same"))
+        self.assertEqual(2, compare.differing_byte_count(b"\x00\xff\x10", b"\x01\xff\x11"))
+        self.assertEqual(2, compare.differing_byte_count(b"\x00\xff\x00", b"\x01\x00\x00"))
 
     def test_version_two_region_name_is_reported(self):
         base_a, base_b = 0x140000000, 0x150000000
@@ -193,6 +236,7 @@ class CompareSnapDumpsTest(unittest.TestCase):
         report = compare.build_report(
             compare.load_dump(self.path_a), compare.load_dump(self.path_b),
             32, 16, structs=compare.load_struct_database(structs_path),
+            skip_frame0_pointers=False,
         )
         difference = report["first_divergence"]["regions"][0]["differences_sample"][0]
         self.assertEqual(1, difference["element_index"])
@@ -273,20 +317,22 @@ class CompareSnapDumpsTest(unittest.TestCase):
         )
         self.assertEqual("diverged", report["verdict"])
 
-    def test_skips_external_animation_group_noise_at_frame0(self):
+    def test_skips_external_animation_region_across_frames(self):
         base_a, base_b = 0x140000000, 0x150000000
         data_a = bytearray(0xE0)
         data_b = bytearray(data_a)
+        data_a[0x32] = 0x1F
+        data_b[0x32] = 0x1B
         data_a[0x92] = 0x89
         data_b[0x92] = 0x85
         write_dump(
             self.path_a, 1, base_a,
-            [(0, 0x11, 0x22, 0xF119E50, bytes(data_a))],
+            [(2, 0x11, 0x22, 0xF119E50, bytes(data_a))],
             version=2, region_name="uCharacter.externalAnimation",
         )
         write_dump(
             self.path_b, 2, base_b,
-            [(0, 0x22, 0x11, 0xF0D9E50, bytes(data_b))],
+            [(2, 0x22, 0x11, 0xF0D9E50, bytes(data_b))],
             version=2, region_name="uCharacter.externalAnimation",
         )
 
@@ -294,7 +340,38 @@ class CompareSnapDumpsTest(unittest.TestCase):
             compare.load_dump(self.path_a), compare.load_dump(self.path_b), 32, 16
         )
         self.assertEqual("match", report["verdict"])
-        self.assertEqual(1, report["frame0_pointer_override"]["explicit_byte_count"])
+
+        conservative = compare.build_report(
+            compare.load_dump(self.path_a), compare.load_dump(self.path_b), 32, 16,
+            skip_frame0_pointers=False,
+        )
+        self.assertEqual("diverged", conservative["verdict"])
+
+    def test_skips_joint_state_region_across_frames(self):
+        base_a, base_b = 0x140000000, 0x150000000
+        data_a = bytes(range(0xC0))
+        data_b = bytes(reversed(range(0xC0)))
+        write_dump(
+            self.path_a, 1, base_a,
+            [(2, 0x11, 0x22, 0xF119E50, data_a)],
+            version=2, region_name="uCharacter.jointStates",
+        )
+        write_dump(
+            self.path_b, 2, base_b,
+            [(2, 0x22, 0x11, 0xF0D9E50, data_b)],
+            version=2, region_name="uCharacter.jointStates",
+        )
+
+        report = compare.build_report(
+            compare.load_dump(self.path_a), compare.load_dump(self.path_b), 32, 16
+        )
+        self.assertEqual("match", report["verdict"])
+
+        conservative = compare.build_report(
+            compare.load_dump(self.path_a), compare.load_dump(self.path_b), 32, 16,
+            skip_frame0_pointers=False,
+        )
+        self.assertEqual("diverged", conservative["verdict"])
 
     def test_skips_saction_cref_and_unaligned_spill_pointers(self):
         base_a, base_b = 0x140000000, 0x150000000
@@ -419,6 +496,63 @@ class CompareSnapDumpsTest(unittest.TestCase):
             self.path_b, 2, base_b,
             [(2, 0x22, 0x11, 0x0F710000, bytes(data_b))],
             version=2, region_name="uCharacter.team1",
+        )
+
+        report = compare.build_report(
+            compare.load_dump(self.path_a), compare.load_dump(self.path_b), 32, 16
+        )
+        self.assertEqual("match", report["verdict"])
+
+        conservative = compare.build_report(
+            compare.load_dump(self.path_a), compare.load_dump(self.path_b), 32, 16,
+            skip_frame0_pointers=False,
+        )
+        self.assertEqual("diverged", conservative["verdict"])
+
+    def test_skips_character_model_visual_state(self):
+        base_a, base_b = 0x140000000, 0x150000000
+        data_a = bytearray(0x1300)
+        data_b = bytearray(data_a)
+        data_a[0x190:0x198] = bytes.fromhex("01000f0001000000")
+        data_b[0x190:0x198] = bytes.fromhex("01000f0000000000")
+        data_a[0x12D0:0x12DC] = bytes.fromhex("27068140f40a264190c23541")
+        data_b[0x12D0:0x12DC] = bytes.fromhex("9c9999400000404100004041")
+        write_dump(
+            self.path_a, 1, base_a,
+            [(51, 0x11, 0x22, 0x0F750000, bytes(data_a))],
+            version=2, region_name="uCharacter.team0",
+        )
+        write_dump(
+            self.path_b, 2, base_b,
+            [(51, 0x22, 0x11, 0x0F710000, bytes(data_b))],
+            version=2, region_name="uCharacter.team0",
+        )
+
+        report = compare.build_report(
+            compare.load_dump(self.path_a), compare.load_dump(self.path_b), 32, 16
+        )
+        self.assertEqual("match", report["verdict"])
+
+        conservative = compare.build_report(
+            compare.load_dump(self.path_a), compare.load_dump(self.path_b), 32, 16,
+            skip_frame0_pointers=False,
+        )
+        self.assertEqual("diverged", conservative["verdict"])
+
+    def test_skips_unrestored_saction_full_spill_byte(self):
+        base_a, base_b = 0x140000000, 0x150000000
+        data_a = bytearray(0x3635)
+        data_b = bytearray(data_a)
+        data_a[0x3634] = 0x40
+        write_dump(
+            self.path_a, 1, base_a,
+            [(51, 0x11, 0x22, 0x0D72AAC0, bytes(data_a))],
+            version=2, region_name="sAction.full",
+        )
+        write_dump(
+            self.path_b, 2, base_b,
+            [(51, 0x22, 0x11, 0x22, bytes(data_b))],
+            version=2, region_name="sAction.full",
         )
 
         report = compare.build_report(

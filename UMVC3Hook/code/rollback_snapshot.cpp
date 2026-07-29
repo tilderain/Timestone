@@ -1349,7 +1349,7 @@ void Rollback_FreeSnapshots()
     Effect_Reset();
     Rollback_ResetReSimulation();
     g_regionCache.valid = false;
-#if ROLLBACK_SNAPDUMP_ENABLED
-    SnapDump_Reset();
-#endif
+    // Keep snapdump history independent of the live rollback slots. New captures
+    // replace entries modulo its own 255-frame ring instead of losing pre-reset
+    // diagnostic context when the live snapshot storage is recreated.
 }

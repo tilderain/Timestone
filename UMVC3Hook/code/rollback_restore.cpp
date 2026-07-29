@@ -102,7 +102,7 @@ static constexpr SnapshotRange SMAIN_RESTORE_RANGES[] = {
 
 static constexpr SnapshotRange SACTION_RESTORE_RANGES[] = {
     {0x28, 0xE8}, {0x140, 0x08}, {0x150, 0x08}, {0x168, 0x09},
-    {0x218, 0x04}, {0x250, 0x10}, {0x268, 0x34},
+    {0x218, 0x04},
 };
 
 static constexpr SnapshotRange CCHR_TEAM_RESTORE_RANGES[] = {
