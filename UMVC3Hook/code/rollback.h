@@ -69,9 +69,12 @@ void Rollback_ResetNetplayLiveLog();
 bool Rollback_GetNetplayLiveDirectory(char* path, size_t pathSize);
 
 // Reproduce the native online battle's gameplay serialization switches.
-// Patch aAction__init so custom netplay enters that native setup path itself.
 bool Rollback_PatchNativeNetplayDeterminism();
 void Rollback_ApplyNetplayDeterminism();
+
+// Enable selected deterministic and combat online branches during custom ENet
+// netplay without enabling native session, netpad, or lifecycle behavior.
+void Rollback_InitOnlineBattleHook();
 
 // Request a re-simulate from the controller layer — consumed by hkMvc3Main_move.
 // Called when late-arriving remote input differs from what was predicted.

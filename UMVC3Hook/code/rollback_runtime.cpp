@@ -3,8 +3,54 @@
 #include "rollback.h"
 #include "mk10utils.h"
 #include "netplay.h"
+#include "../kiero/minhook/include/MinHook.h"
 
 extern void HookLog(const char* fmt, ...);
+
+static constexpr uintptr_t FN_IS_ONLINE_BATTLE = 0x140006AF0;
+static constexpr uintptr_t ONLINE_CALLER_RETURNS[] = {
+    0x14003F083, // cChr__resolveActionTransitionState
+    0x14003F251, // cChr__resolveAdvancedGuardTransition
+    0x14004026A, // cChr__resolveDamageReactionTransition
+    0x1400409D6, // cChr__tryStartThrowTransition
+    0x140040F41, // cChr__tryStartVariableCounterTransition
+    0x1400417BF, // cChr__resolveDamageReactionAction
+    0x140048CBD, // cChr__populateHitReactionResult
+    0x140203869, // aAction__init deterministic setup
+};
+using IsOnlineBattleFn = bool(__fastcall*)(uint64_t battleSetting);
+static IsOnlineBattleFn g_originalIsOnlineBattle = nullptr;
+
+static bool __fastcall hkIsOnlineBattle(uint64_t battleSetting)
+{
+    if (Netplay_IsActive()) {
+        uintptr_t caller = (uintptr_t)__builtin_return_address(0);
+        for (uintptr_t address : ONLINE_CALLER_RETURNS) {
+            if (caller == (uintptr_t)_addr(address))
+                return true;
+        }
+    }
+
+    return g_originalIsOnlineBattle && g_originalIsOnlineBattle(battleSetting);
+}
+
+void Rollback_InitOnlineBattleHook()
+{
+    MH_STATUS status = MH_CreateHook(
+        (LPVOID)_addr(FN_IS_ONLINE_BATTLE),
+        (LPVOID)&hkIsOnlineBattle,
+        (LPVOID*)&g_originalIsOnlineBattle);
+    if (status != MH_OK) {
+        HookLog("Netplay: failed to hook g__isOnlineBattle (%d)\n", status);
+        return;
+    }
+
+    status = MH_EnableHook((LPVOID)_addr(FN_IS_ONLINE_BATTLE));
+    if (status == MH_OK)
+        HookLog("Netplay: enabled scoped native online combat behavior\n");
+    else
+        HookLog("Netplay: failed to enable g__isOnlineBattle hook (%d)\n", status);
+}
 
 bool Rollback_PatchNativeNetplayDeterminism()
 {

@@ -9,6 +9,7 @@
 
 void Rollback_InitHooks()
 {
+    Rollback_InitOnlineBattleHook();
     Rollback_InitReSimulationHooks();
     Rollback_InitRngHooks();
     Effect_InitHooks();
