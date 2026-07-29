@@ -30,10 +30,15 @@ EXPLICIT_REGION_OVERRIDES = {
 }
 EXPLICIT_BYTE_OVERRIDES = {
     ("sAction.full", 0x3634, 1),
+    # uBaseModel render/cache state retained on the live timeline by restore.
+    ("uCharacter.team0", 0x93, 1),
+    ("uCharacter.team0", 0x96, 2),
     ("uCharacter.team0", 0x190, 8),
     ("uCharacter.team0", 0x12D0, 0xC),
     ("uCharacter.team0", 0x18C, 4),
     ("uCharacter.team1", 0x190, 8),
+    ("uCharacter.team1", 0x93, 1),
+    ("uCharacter.team1", 0x96, 2),
     ("uCharacter.team1", 0x12D0, 0xC),
     ("uCharacter.team1", 0x18C, 4),
 }

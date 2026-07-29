@@ -95,14 +95,15 @@ static constexpr SnapshotRange CCHR_SCALAR_RESTORE_RANGES[] = {
     // cChr's throw-reaction reuse state and two cached attack-info transforms.
     // Leaving these on the live timeline changes the selected throw response
     // (+0x6828 defaults to -1) and loses the restored matrix values.
-    {0x680D, 0x01}, {0x6810, 0x24}, {0x6840, 0x80},
+    {0x680D, 0x01}, {0x6810, 0x24}, {0x6828, 0x04}, {0x6840, 0x80},
     {0x68D0, 0x20},
 };
 
 // These shared cChr fields are rebuilt by native post-restore helpers on some
 // rollback paths. Reapply the saved values after those helpers complete.
 static constexpr SnapshotRange CCHR_POST_RESTORE_TAIL_RANGES[] = {
-    {0x680D, 0x01}, {0x6810, 0x24}, {0x6840, 0x80}, {0x68D0, 0x20},
+    {0x680D, 0x01}, {0x6810, 0x24}, {0x6828, 0x04}, {0x6840, 0x80},
+    {0x68D0, 0x20},
 };
 
 static constexpr SnapshotRange SMAIN_RESTORE_RANGES[] = {
