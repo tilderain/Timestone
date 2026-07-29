@@ -636,14 +636,14 @@ static int BuildRegionsUncached(Region* regions, int maxRegions,
     // Defeat replacement uses state outside the compact ranges restored below.
     // Removing this region caused peers to select the next point character on
     // different frames after a rollback crossed a character defeat.
-    {
+    /*{
         uint64_t sAction = read.operator()<uint64_t>(_addr(PTR_SACTION));
-        add((void*)sAction, 0x20000, 0, 0, false
+        add((void*)sAction, 0x250, 0, 0, false
 #if ROLLBACK_SNAPDUMP_ENABLED
             , "sAction.full"
 #endif
         );
-    }
+    }*/
 
     // ---- 5. sGameUI — SKIPPED: has internal ptrs (ui elements, text buffers) ---
     // {
