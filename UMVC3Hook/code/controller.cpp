@@ -1144,6 +1144,17 @@ extern "C" void Controller_OnFrameStart()
     // If sReplay isn't ready yet, skip packet processing this frame.
     if (g_netFrameCount < 0) return;
 
+    // The intro barrier establishes a local frame base on each peer, so the
+    // native replay counters can retain a small process-local offset. Rebase
+    // the native counter onto the shared logical frame once it is known. This
+    // keeps native replay indexing in its normal small frame range while
+    // making snapshot state agree.
+    uint64_t sReplay = *(uint64_t*)_addr(G_PSREPLAY_PTR);
+    if (sReplay) {
+        *(int32_t*)(sReplay + 0x54) = g_netFrameCount;
+        g_gameFrameBase = 0;
+    }
+
     ApplyScheduledDelayIfReady();
 
     g_localPending = 0;
