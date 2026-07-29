@@ -99,6 +99,12 @@ static constexpr SnapshotRange CCHR_SCALAR_RESTORE_RANGES[] = {
     {0x68D0, 0x20},
 };
 
+// These shared cChr fields are rebuilt by native post-restore helpers on some
+// rollback paths. Reapply the saved values after those helpers complete.
+static constexpr SnapshotRange CCHR_POST_RESTORE_TAIL_RANGES[] = {
+    {0x680D, 0x01}, {0x6810, 0x24}, {0x6840, 0x80}, {0x68D0, 0x20},
+};
+
 static constexpr SnapshotRange SMAIN_RESTORE_RANGES[] = {
     {0x30, 0x64}, {0xA4, 0x1C}, {0x40010, 0x10},
     {0x40028, 0x18}, {0x40048, 0x14},
@@ -1154,6 +1160,27 @@ void Rollback_RestoreSnapshot(int32_t frame)
             // returning it to normal rendering.
             setChildMaterialMode(saved.model, -1, savedCutin ? 2 : 3);
         }
+    }
+
+    // Recipe reconstruction and model state repair can reset this shared cChr
+    // block for every team member. It contains the throw-reaction selectors and
+    // attack-info transforms, so retain the snapshot values after that work.
+    offset = 0;
+    for (int i = 0; i < slot.regionCount; ++i) {
+        size_t copySize = slot.regions[i].size;
+        if (offset + copySize > slot.size)
+            copySize = slot.size - offset;
+        if (slot.regions[i].skipVtable &&
+            isTeamCharacter((uint64_t)slot.regions[i].ptr)) {
+            for (const SnapshotRange& range : CCHR_POST_RESTORE_TAIL_RANGES) {
+                if ((size_t)range.offset + range.size <= copySize) {
+                    std::memcpy((uint8_t*)slot.regions[i].ptr + range.offset,
+                                slot.data + offset + range.offset,
+                                range.size);
+                }
+            }
+        }
+        offset += slot.regions[i].size;
     }
 
     // Character slot tables contain live model/resource references. Clearing
