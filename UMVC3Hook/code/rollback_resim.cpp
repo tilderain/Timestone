@@ -225,11 +225,11 @@ void Rollback_ReSimulate(int32_t startFrame, int32_t endFrame)
     Profile_AddElapsed(&RollbackProfile::timingResync, phaseStart);
     g_isResimulating = false;
 
-    // Native uCutIn teardown restores participant draw routing and material
-    // mode. If a predicted cutin disappeared during headless replay, its exit
-    // callback never runs and the character remains invisible or unshaded.
+    // A rollback can begin after cChrTeam::active changed but before the model
+    // callback made the incoming point visible. Normalize both current point
+    // characters unless a live cut-in actually owns their render state.
     phaseStart = Profile_Now();
-    Rollback_RepairOrphanedCutinRenderState();
+    Rollback_SyncActiveCharacterVisibility();
     Profile_AddElapsed(&RollbackProfile::cutinRepair, phaseStart);
 
     phaseStart = Profile_Now();

@@ -1075,6 +1075,64 @@ void Rollback_SaveSnapshot(int32_t frame)
     // clears the live node's child array.
     Rollback_CaptureCollisionNodeClones(slot);
     const uint64_t collisionClonesEnd = Profile_Now();
+
+    // Cut-ins independently change character visibility, model draw routing,
+    // and material mode. The raw character restore deliberately preserves some
+    // live model ownership state, so keep the small render contract explicitly.
+    slot.modelRenderStates.clear();
+    auto captureModelRenderState = [&slot](void* model, bool character) {
+        if (!model) return;
+        for (RollbackModelRenderState& saved : slot.modelRenderStates) {
+            if (saved.model == model) {
+                saved.character = saved.character || character;
+                return;
+            }
+        }
+        slot.modelRenderStates.push_back({
+            model,
+            *(uint64_t*)model,
+            *(uint32_t*)((uint8_t*)model + 0x10),
+            *(uint32_t*)((uint8_t*)model + 0x11C),
+            *(float*)((uint8_t*)model + 0x180),
+            character,
+        });
+    };
+    auto captureCharacterRenderState = [&captureModelRenderState](void* character) {
+        if (!character) return;
+        captureModelRenderState(character, true);
+        uint32_t weaponCount = *(uint32_t*)((uint8_t*)character + 0x3F38);
+        void** weapons = *(void***)((uint8_t*)character + 0x3F40);
+        if (!weapons || weaponCount > 256 ||
+            !IsAccessibleRange((uint64_t)weapons,
+                               (size_t)weaponCount * sizeof(void*))) {
+            return;
+        }
+        for (uint32_t i = 0; i < weaponCount; ++i)
+            captureModelRenderState(weapons[i], false);
+    };
+    uint64_t renderCharacterManager = *(uint64_t*)_addr(PTR_SCHARACTER);
+    for (int teamIndex = 0; renderCharacterManager && teamIndex < 2; ++teamIndex) {
+        uint64_t node = renderCharacterManager +
+            (teamIndex == 0 ? TEAM0_OFFSET : TEAM1_OFFSET) +
+            TEAM_FIRST_NODE_OFFSET;
+        for (int member = 0; node && member < 8; ++member) {
+            void* character = *(void**)(node + NODE_CHR_OFFSET);
+            captureCharacterRenderState(character);
+            node = *(uint64_t*)(node + NODE_NEXT_OFFSET);
+        }
+    }
+    uint64_t renderUnitManager = *(uint64_t*)_addr(PTR_SUNIT);
+    uint32_t renderCategoryCount = renderUnitManager
+        ? *(uint32_t*)(renderUnitManager + SUNIT_CATEGORY_COUNT_OFFSET)
+        : 0;
+    if (renderCategoryCount > SUNIT_CHARACTER_CATEGORY) {
+        void* character = *(void**)(renderUnitManager + SUNIT_CATEGORY_LISTS_OFFSET +
+            SUNIT_CATEGORY_LIST_STRIDE * SUNIT_CHARACTER_CATEGORY);
+        for (int safety = 64; character && safety-- > 0;
+             character = *(void**)((uint8_t*)character + 0x18)) {
+            captureCharacterRenderState(character);
+        }
+    }
     Shot_CaptureRecipes(slot);
     Effect_CaptureRecipes(slot);
     const uint64_t shotRecipesEnd = Profile_Now();
@@ -1160,6 +1218,7 @@ void Rollback_FreeSnapshots()
         g_slots[i].frame       = -1;
         g_slots[i].shotRecipes.clear();
         g_slots[i].effectRecipes.clear();
+        g_slots[i].modelRenderStates.clear();
     }
     Shot_Reset();
     Effect_Reset();

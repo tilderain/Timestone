@@ -102,6 +102,15 @@ struct RollbackCollisionNodeClone {
     uint32_t childCount;
 };
 
+struct RollbackModelRenderState {
+    void* model;
+    uint64_t expectedVtable;
+    uint32_t objectFlags;
+    uint32_t drawLayerMask;
+    float transparency;
+    bool character;
+};
+
 struct RollbackSnapshotSlot {
     int32_t frame = -1;
     uint8_t* data = nullptr;
@@ -114,6 +123,7 @@ struct RollbackSnapshotSlot {
     std::vector<RollbackShotRecipe> shotRecipes;
     std::vector<RollbackEffectRecipe> effectRecipes;
     std::vector<RollbackCollisionNodeClone> collisionNodeClones;
+    std::vector<RollbackModelRenderState> modelRenderStates;
 };
 
 extern RollbackSnapshotSlot g_rollbackSnapshotSlots[ROLLBACK_WINDOW];

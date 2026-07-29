@@ -31,6 +31,7 @@ static constexpr uintptr_t FN_SGAMEEFFECT_FLUSH_PENDING = 0x140130D00;
 static constexpr uintptr_t FN_SUNIT_ADD_UNIT = 0x14051A6B0;
 static constexpr uintptr_t FN_SUNIT_REMOVE_UNIT = 0x14051B9F0;
 static constexpr uintptr_t FN_RESET_HITNODES = 0x140259E90;
+static constexpr uintptr_t FN_MODEL_SET_CHILD_MATERIAL_MODE = 0x140200DB0;
 
 static constexpr uintptr_t SMVC3MGR_ACTION_OFFSET = 0x48;
 static constexpr uint32_t SACTION_MODEL_JOINT_WRAPPER_OFFSET = 0x120;
@@ -61,6 +62,8 @@ static constexpr uint32_t SUNIT_CATEGORY_LISTS_OFFSET = 0x50;
 static constexpr uint32_t SUNIT_CATEGORY_LIST_STRIDE = 0x30;
 static constexpr uint32_t SUNIT_CHARACTER_CATEGORY = 8;
 static constexpr uint32_t CUNIT_LIVE_STATE_OFFSETS[] = {0x10, 0x18, 0x20, 0x38};
+static constexpr uint32_t CUTIN_DRAW_LAYER_BITS = 0x00700000;
+static constexpr uint32_t MTOBJECT_VISIBLE_FLAG = 0x00004000;
 static constexpr size_t SMAIN_SIZE = 0x40080;
 static constexpr int SSHOT_CATEGORY = 10;
 static constexpr uint32_t SAUX_FIRST_CATEGORY = 9;
@@ -1120,6 +1123,32 @@ void Rollback_RestoreSnapshot(int32_t frame)
     const uint64_t effectSlotsEnd = Profile_Now();
     RestoreShotAndEffectRecipes(slot);
     const uint64_t shotsEnd = Profile_Now();
+
+    using SetChildMaterialModeFn = void(__fastcall*)(void*, int, uint8_t);
+    auto setChildMaterialMode =
+        (SetChildMaterialModeFn)_addr(FN_MODEL_SET_CHILD_MATERIAL_MODE);
+    for (const RollbackModelRenderState& saved : slot.modelRenderStates) {
+        if (!saved.model || !HasCallableDtiVirtual(saved.model) ||
+            *(uint64_t*)saved.model != saved.expectedVtable) {
+            continue;
+        }
+
+        uint32_t* objectFlags = (uint32_t*)((uint8_t*)saved.model + 0x10);
+        uint32_t* drawLayerMask = (uint32_t*)((uint8_t*)saved.model + 0x11C);
+        bool liveCutin = (*drawLayerMask & CUTIN_DRAW_LAYER_BITS) != 0;
+        bool savedCutin = (saved.drawLayerMask & CUTIN_DRAW_LAYER_BITS) != 0;
+        if (saved.character) {
+            *objectFlags = (*objectFlags & ~MTOBJECT_VISIBLE_FLAG) |
+                (saved.objectFlags & MTOBJECT_VISIBLE_FLAG);
+        }
+        *drawLayerMask = saved.drawLayerMask;
+        *(float*)((uint8_t*)saved.model + 0x180) = saved.transparency;
+        if (liveCutin != savedCutin) {
+            // Native uses mode 2 while a cut-in owns the model and mode 3 when
+            // returning it to normal rendering.
+            setChildMaterialMode(saved.model, -1, savedCutin ? 2 : 3);
+        }
+    }
 
     // Character slot tables contain live model/resource references. Clearing
     // all 64 entries makes restored dead characters invisible.

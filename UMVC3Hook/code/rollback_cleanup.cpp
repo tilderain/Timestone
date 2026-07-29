@@ -12,6 +12,7 @@ static constexpr uintptr_t PTR_SGAMEEFFECT = 0x140d46470;
 static constexpr uintptr_t PTR_SMVC3MGR = 0x140d510a0;
 static constexpr uintptr_t FN_GAMEUI_SET_TEAM_CHARACTER_ID = 0x140022610;
 static constexpr uintptr_t FN_MODEL_SET_CHILD_MATERIAL_MODE = 0x140200DB0;
+static constexpr uintptr_t FN_MODEL_UPDATE_CAMERA_VISIBILITY_MASK = 0x1405641A0;
 static constexpr uintptr_t DTI_UCUTIN = 0x140D6BCC8;
 static constexpr uintptr_t TEAM0_OFFSET = 0x40;
 static constexpr uintptr_t TEAM1_OFFSET = 0x300;
@@ -157,6 +158,79 @@ void Rollback_SyncActiveCharacterUi()
         int playerId = *(int*)(active + 0x2DA0);
         int memberId = *(int*)(active + 0x2DB0);
         setTeamCharacterId(sGameUi, playerId, memberId);
+    }
+}
+
+void Rollback_SyncActiveCharacterVisibility()
+{
+    uint64_t sCharacter = *(uint64_t*)_addr(PTR_SCHARACTER);
+    if (!sCharacter) return;
+
+    uint64_t manager = *(uint64_t*)_addr(PTR_SMVC3MGR);
+    uint64_t cutin = manager ? *(uint64_t*)(manager + SMVC3MGR_CUTIN_OFFSET) : 0;
+    bool validCutin = cutin && HasCallableDtiVirtual((void*)cutin) &&
+        GetObjectDti(cutin) == (uint64_t)_addr(DTI_UCUTIN) &&
+        ((*(uint32_t*)(cutin + 0x10) & 7) - 1 < 2);
+
+    auto isCutinParticipant = [cutin, validCutin](uint64_t character) {
+        if (!validCutin) return false;
+        uint32_t count = *(uint32_t*)(cutin + 0x48);
+        uint64_t entries = *(uint64_t*)(cutin + 0x58);
+        if (count > 16 || (count && !IsAccessibleRange(
+                entries, (size_t)count * sizeof(uint64_t)))) {
+            return false;
+        }
+        for (uint32_t i = 0; i < count; ++i) {
+            if (*(uint64_t*)(entries + (uint64_t)i * sizeof(uint64_t)) == character)
+                return true;
+        }
+        return false;
+    };
+
+    using SetChildMaterialModeFn = void(__fastcall*)(void*, int, uint8_t);
+    auto setChildMaterialMode =
+        (SetChildMaterialModeFn)_addr(FN_MODEL_SET_CHILD_MATERIAL_MODE);
+    using UpdateCameraVisibilityMaskFn = void(__fastcall*)(void*);
+    auto updateCameraVisibilityMask =
+        (UpdateCameraVisibilityMaskFn)_addr(FN_MODEL_UPDATE_CAMERA_VISIBILITY_MASK);
+    auto restoreNormalModel = [setChildMaterialMode, updateCameraVisibilityMask](
+                                  uint64_t model, bool restoreVisibility) {
+        if (!model || !HasCallableDtiVirtual((void*)model)) return;
+        uint32_t& drawLayer = *(uint32_t*)(model + CUNIT_DRAW_LAYER_MASK_OFFSET);
+        drawLayer = (drawLayer & ~CUTIN_DRAW_LAYER_BITS) | NORMAL_DRAW_LAYER_BIT;
+        if (restoreVisibility) {
+            *(uint32_t*)(model + 0x10) |= MTOBJECT_VISIBLE_FLAG;
+            // uModel::submitForRender has a separate hard gate on
+            // mTransparency. A restored bench/cutin value of zero bypasses
+            // rendering even when the MtObject draw flag is set.
+            *(float*)(model + 0x180) = 1.0f;
+        }
+        setChildMaterialMode((void*)model, -1, 3);
+        updateCameraVisibilityMask((void*)model);
+    };
+
+    for (int teamIndex = 0; teamIndex < 2; ++teamIndex) {
+        uint64_t team = sCharacter +
+            (teamIndex == 0 ? TEAM0_OFFSET : TEAM1_OFFSET);
+        uint64_t character = *(uint64_t*)(team + 0x48);
+        if (!character || !HasCallableDtiVirtual((void*)character)) continue;
+
+        // Draw-layer bits can themselves be stale, so only a live uCutIn that
+        // actually lists this character may keep the active point hidden.
+        if (isCutinParticipant(character)) continue;
+
+        restoreNormalModel(character, true);
+        uint32_t weaponCount = *(uint32_t*)(character + CCHR_WEAPON_COUNT_OFFSET);
+        uint64_t weapons = *(uint64_t*)(character + CCHR_WEAPON_ARRAY_OFFSET);
+        if (!weapons || weaponCount > 256 || !IsAccessibleRange(
+                weapons, (size_t)weaponCount * sizeof(uint64_t))) {
+            continue;
+        }
+        for (uint32_t weapon = 0; weapon < weaponCount; ++weapon) {
+            restoreNormalModel(
+                *(uint64_t*)(weapons + (uint64_t)weapon * sizeof(uint64_t)),
+                false);
+        }
     }
 }
 
