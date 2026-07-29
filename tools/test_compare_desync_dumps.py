@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import importlib.util
+import json
 import struct
 import tempfile
 import unittest
@@ -116,6 +117,46 @@ class CompareSnapDumpsTest(unittest.TestCase):
             "uCharacter.motionChannels",
             report["first_divergence"]["regions"][0]["label"],
         )
+
+    def test_annotates_difference_with_ghidra_field(self):
+        base_a, base_b = 0x140000000, 0x150000000
+        data_a = struct.pack("<If", 7, 1.5)
+        data_b = struct.pack("<If", 7, 2.5)
+        write_dump(
+            self.path_a, 1, base_a,
+            [(10, 0x11, 0x22, base_a + 0x1000, data_a)],
+            version=2, region_name="uCharacter.team0",
+        )
+        write_dump(
+            self.path_b, 2, base_b,
+            [(10, 0x22, 0x11, base_b + 0x1000, data_b)],
+            version=2, region_name="uCharacter.team0",
+        )
+        structs_path = Path(self.tempdir.name) / "structs.json"
+        structs_path.write_text(json.dumps({
+            "schema": "umvc3_snapdump_structs_v2",
+            "classes": [{
+                "name": "uTestCharacter",
+                "family": "character",
+                "size": 8,
+                "vtable_rvas": ["0x1234"],
+                "fields": [
+                    {"offset": 0, "size": 4, "name": "mState", "type": "uint"},
+                    {"offset": 4, "size": 4, "name": "mSpeed", "type": "float"},
+                ],
+            }],
+        }), encoding="utf-8")
+        structs = compare.load_struct_database(structs_path)
+        report = compare.build_report(
+            compare.load_dump(self.path_a), compare.load_dump(self.path_b),
+            32, 16, structs=structs,
+        )
+        region = report["first_divergence"]["regions"][0]
+        self.assertEqual("uTestCharacter", region["concrete_type"])
+        field = region["differences_sample"][0]["known_fields"][0]
+        self.assertEqual("mSpeed", field["name"])
+        self.assertEqual(1.5, field["a_value"])
+        self.assertEqual(2.5, field["b_value"])
 
 
 if __name__ == "__main__":

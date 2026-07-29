@@ -1,5 +1,4 @@
 #pragma once
 
-// Optional RNG and Hsien-Ko Anki diagnostic hooks used while investigating
-// deterministic re-simulation differences.
+// Netplay RNG behavior and optional deterministic re-simulation diagnostics.
 void Rollback_InitRngHooks();

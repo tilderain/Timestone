@@ -4,6 +4,7 @@
 #include "rollback_memory.h"
 #include "rollback_rng.h"
 #include "mk10utils.h"
+#include "netplay.h"
 #include "../kiero/minhook/include/MinHook.h"
 
 #include <cstring>
@@ -13,20 +14,37 @@ extern void HookLog(const char* fmt, ...);
 static constexpr uintptr_t FN_RNG_RANDOM_INT = 0x14014EB30;
 static constexpr uintptr_t FN_HSIENKO_SELECT_ANKI = 0x1400A1260;
 static constexpr uintptr_t FN_SET_RESERVED_ANKI = 0x1400D4D90;
+static constexpr uintptr_t FN_RCHRCPU_RNG_MOD_N = 0x14010FE50;
+static constexpr uintptr_t GLOBAL_RNG_STATE = 0x140D765D8;
 
 using RandomIntRangeFn = int(__fastcall*)(void*, int, int, void*);
 using HsienKoSelectAnkiFn = int(__fastcall*)(void*);
 using SetReservedAnkiFn = void(__fastcall*)(void*, int);
+using RChrCpuRngModNFn = uint32_t(__fastcall*)(void*, uint32_t);
 
 static RandomIntRangeFn oRandomIntRange = nullptr;
 static HsienKoSelectAnkiFn oHsienKoSelectAnki = nullptr;
 static SetReservedAnkiFn oSetReservedAnki = nullptr;
+static RChrCpuRngModNFn oRChrCpuRngModN = nullptr;
 static int g_rngTraceFrame = -1;
 static int g_rngTraceCount = 0;
 static int g_ankiTraceFrame = -1;
 static int g_ankiTraceCount = 0;
 static int g_ankiReserveTraceFrame = -1;
 static int g_ankiReserveTraceCount = 0;
+
+static uint32_t __fastcall hkRChrCpuRngModN(void* cpu, uint32_t modulus)
+{
+    if (!Netplay_IsActive())
+        return oRChrCpuRngModN(cpu, modulus);
+
+    uint32_t savedState[4];
+    void* globalState = (void*)_addr(GLOBAL_RNG_STATE);
+    std::memcpy(savedState, globalState, sizeof(savedState));
+    uint32_t result = oRChrCpuRngModN(cpu, modulus);
+    std::memcpy(globalState, savedState, sizeof(savedState));
+    return result;
+}
 
 static int RngTraceFrame()
 {
@@ -147,7 +165,20 @@ static void __fastcall hkSetReservedAnki(void* character, int value)
 
 void Rollback_InitRngHooks()
 {
-    MH_STATUS status = MH_CreateHook((LPVOID)_addr(FN_RNG_RANDOM_INT),
+    MH_STATUS status = MH_CreateHook((LPVOID)_addr(FN_RCHRCPU_RNG_MOD_N),
+                                      (LPVOID)&hkRChrCpuRngModN,
+                                      (LPVOID*)&oRChrCpuRngModN);
+    if (status == MH_OK) {
+        status = MH_EnableHook((LPVOID)_addr(FN_RCHRCPU_RNG_MOD_N));
+        if (status == MH_OK)
+            HookLog("Rollback: disabled CPU global RNG advancement during netplay\n");
+        else
+            HookLog("Rollback: failed to enable CPU RNG hook (%d)\n", status);
+    } else {
+        HookLog("Rollback: failed to hook CPU RNG dispatch (%d)\n", status);
+    }
+
+    status = MH_CreateHook((LPVOID)_addr(FN_RNG_RANDOM_INT),
                                      (LPVOID)&hkRandomIntRange,
                                      (LPVOID*)&oRandomIntRange);
     if (status == MH_OK) {

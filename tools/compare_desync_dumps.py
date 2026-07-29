@@ -55,6 +55,78 @@ class Dump:
     frames: dict
 
 
+@dataclass
+class TypeLayout:
+    name: str
+    family: str
+    size: int
+    fields: list
+    vtable_rvas: list
+
+
+class StructDatabase:
+    REGION_BINDINGS = {
+        "sReplay.frameCounter": ("sReplay", 0x54),
+        "sEffect.rng": ("sEffect", 0x3C),
+        "sShot": ("sShot", 0),
+        "sGameConfig.shotSlotFlags": ("sGameConfig", 0x4A89C),
+        "sAction.full": ("sAction", 0),
+        "sAction.compact": ("sAction", 0),
+        "sCamera": ("sCamera", 0),
+        "uActionSideCamera": ("uActionSideCamera", 0),
+        "cChrTeam[0]": ("cChrTeam", 0),
+        "cChrTeam[1]": ("cChrTeam", 0),
+    }
+
+    def __init__(self, path, layouts):
+        self.path = str(path)
+        self.layouts = layouts
+        self.by_name = {layout.name: layout for layout in layouts}
+        self.by_vtable = {}
+        for layout in layouts:
+            for rva in layout.vtable_rvas:
+                self.by_vtable.setdefault(rva, []).append(layout)
+
+    def resolve(self, region, label, dump, saved_vtable=0):
+        vtable = region.expected_vtable or saved_vtable
+        if vtable and dump.image_base <= vtable < dump.image_base + dump.image_size:
+            rva = vtable - dump.image_base
+            candidates = self.by_vtable.get(rva, [])
+            if len(candidates) == 1:
+                source = "manifest_vtable" if region.expected_vtable else "saved_vtable"
+                return candidates[0], 0, source
+            exact_size = [layout for layout in candidates if layout.size == region.size]
+            if len(exact_size) == 1:
+                source = "manifest_vtable_size" if region.expected_vtable else "saved_vtable_size"
+                return exact_size[0], 0, source
+        binding = self.REGION_BINDINGS.get(label)
+        if binding:
+            layout = self.by_name.get(binding[0])
+            if layout:
+                return layout, binding[1], "region_binding"
+        return None, 0, None
+
+
+def parse_int(value):
+    return int(value, 0) if isinstance(value, str) else int(value)
+
+
+def load_struct_database(path):
+    with open(path, "r", encoding="utf-8") as file:
+        document = json.load(file)
+    if document.get("schema") not in {
+            "umvc3_snapdump_structs_v1", "umvc3_snapdump_structs_v2"}:
+        raise ValueError(f"unsupported struct schema {document.get('schema')!r}")
+    layouts = []
+    for record in document.get("classes", []):
+        fields = sorted(record.get("fields", []), key=lambda field: field["offset"])
+        layouts.append(TypeLayout(
+            record["name"], record.get("family", "other"), int(record["size"]),
+            fields, [parse_int(value) for value in record.get("vtable_rvas", [])],
+        ))
+    return StructDatabase(path, layouts)
+
+
 class PointerResolver:
     def __init__(self, dump, frame):
         self.dump = dump
@@ -233,8 +305,66 @@ def differing_runs(data_a, data_b, ignored, limit):
     return runs
 
 
+def decode_field_value(data, field_type):
+    normalized = field_type.lower()
+    if not data:
+        return None
+    if normalized in {"float", "f32"} and len(data) == 4:
+        return struct.unpack("<f", data)[0]
+    if normalized in {"double", "f64"} and len(data) == 8:
+        return struct.unpack("<d", data)[0]
+    if normalized in {"bool", "boolean"} and len(data) == 1:
+        return bool(data[0])
+    if normalized in {"char", "byte", "uchar", "uint8_t", "u8"}:
+        return int.from_bytes(data, "little")
+    if normalized in {"int", "long", "s32", "int32_t"} and len(data) == 4:
+        return int.from_bytes(data, "little", signed=True)
+    if normalized in {"short", "s16", "int16_t"} and len(data) == 2:
+        return int.from_bytes(data, "little", signed=True)
+    if normalized in {"longlong", "s64", "int64_t"} and len(data) == 8:
+        return int.from_bytes(data, "little", signed=True)
+    if normalized in {
+            "uint", "ulong", "dword", "u32", "uint32_t", "undefined4"} and len(data) == 4:
+        return int.from_bytes(data, "little")
+    if normalized in {
+            "ushort", "word", "u16", "uint16_t", "undefined2"} and len(data) == 2:
+        return int.from_bytes(data, "little")
+    if normalized in {
+            "ulonglong", "qword", "u64", "uint64_t", "undefined8", "pointer"} and len(data) == 8:
+        return f"0x{int.from_bytes(data, 'little'):x}"
+    return data.hex()
+
+
+def annotate_run(layout, object_base, start, end, data_a, data_b):
+    object_start = object_base + start
+    object_end = object_base + end
+    annotations = []
+    for field in layout.fields:
+        field_start = int(field["offset"])
+        field_end = field_start + int(field["size"])
+        if field_end <= object_start or field_start >= object_end:
+            continue
+        region_field_start = field_start - object_base
+        region_field_end = field_end - object_base
+        annotation = {
+            "name": field["name"],
+            "type": field["type"],
+            "offset": f"0x{field_start:x}",
+            "size": int(field["size"]),
+        }
+        if region_field_start >= 0 and region_field_end <= len(data_a):
+            annotation["a_value"] = decode_field_value(
+                data_a[region_field_start:region_field_end], field["type"]
+            )
+            annotation["b_value"] = decode_field_value(
+                data_b[region_field_start:region_field_end], field["type"]
+            )
+        annotations.append(annotation)
+    return annotations
+
+
 def compare_region(index, region_a, region_b, dump_a, dump_b, frame_a, frame_b,
-                   resolver_a, resolver_b, max_diffs):
+                   resolver_a, resolver_b, max_diffs, structs=None):
     start_a, start_b = region_a.data_offset, region_b.data_offset
     data_a = frame_a.data[start_a:start_a + region_a.size]
     data_b = frame_b.data[start_b:start_b + region_b.size]
@@ -252,19 +382,34 @@ def compare_region(index, region_a, region_b, dump_a, dump_b, frame_a, frame_b,
             if len(relocations) < max_diffs:
                 relocations.append({"offset": f"0x{offset:x}", "target": list(pointer_a)})
 
+    label = region_label(index, region_a, dump_a, resolver_a)
+    layout = None
+    object_base = 0
+    type_source = None
+    if structs:
+        saved_vtable = int.from_bytes(data_a[:8], "little") if len(data_a) >= 8 else 0
+        layout, object_base, type_source = structs.resolve(
+            region_a, label, dump_a, saved_vtable
+        )
     runs = []
     for start, end in differing_runs(data_a, data_b, ignored, max_diffs):
         context_start = max(0, start - 8)
         context_end = min(len(data_a), end + 8)
-        runs.append({
+        difference = {
             "offset": f"0x{start:x}",
+            "object_offset": f"0x{object_base + start:x}" if layout else None,
             "length": end - start,
             "a_hex": data_a[start:end].hex(),
             "b_hex": data_b[start:end].hex(),
             "context_offset": f"0x{context_start:x}",
             "a_context_hex": data_a[context_start:context_end].hex(),
             "b_context_hex": data_b[context_start:context_end].hex(),
-        })
+        }
+        if layout:
+            difference["known_fields"] = annotate_run(
+                layout, object_base, start, end, data_a, data_b
+            )
+        runs.append(difference)
     raw_diff_bytes = sum(a != b for a, b in zip(data_a, data_b))
     meaningful_diff_bytes = sum(
         a != b and offset not in ignored
@@ -272,7 +417,10 @@ def compare_region(index, region_a, region_b, dump_a, dump_b, frame_a, frame_b,
     )
     return {
         "region_index": index,
-        "label": region_label(index, region_a, dump_a, resolver_a),
+        "label": label,
+        "concrete_type": layout.name if layout else None,
+        "type_source": type_source,
+        "object_base_offset": f"0x{object_base:x}" if layout else None,
         "size": region_a.size,
         "raw_different_bytes": raw_diff_bytes,
         "relocation_only_bytes": raw_diff_bytes - meaningful_diff_bytes,
@@ -282,7 +430,8 @@ def compare_region(index, region_a, region_b, dump_a, dump_b, frame_a, frame_b,
     }
 
 
-def compare_frame(dump_a, dump_b, frame_a, frame_b, max_regions, max_diffs):
+def compare_frame(dump_a, dump_b, frame_a, frame_b, max_regions, max_diffs,
+                  structs=None):
     resolver_a = PointerResolver(dump_a, frame_a)
     resolver_b = PointerResolver(dump_b, frame_b)
     result = {
@@ -338,7 +487,7 @@ def compare_frame(dump_a, dump_b, frame_a, frame_b, max_regions, max_diffs):
         else:
             comparison = compare_region(
                 index, region_a, region_b, dump_a, dump_b, frame_a, frame_b,
-                resolver_a, resolver_b, max_diffs,
+                resolver_a, resolver_b, max_diffs, structs,
             )
             if comparison["meaningful_different_bytes"]:
                 result["regions"].append(comparison)
@@ -375,19 +524,21 @@ def diagnose(first):
         )
     return (
         "Inputs and snapshot structure agree, but authoritative captured state bytes differ. "
-        "The first listed region and offset are the earliest concrete state evidence. Map that "
-        "address/offset to its owning game type in Ghidra; later frame differences are propagation."
+        "The first listed region and offset are the earliest concrete state evidence. Current "
+        "Ghidra fields are shown where known; unannotated offsets still require reverse engineering. "
+        "Later frame differences are propagation."
     )
 
 
-def build_report(dump_a, dump_b, max_regions, max_diffs, include_timeline=False):
+def build_report(dump_a, dump_b, max_regions, max_diffs, include_timeline=False,
+                 structs=None):
     common = sorted(set(dump_a.frames) & set(dump_b.frames))
     frame_results = []
     first = None
     for number in common:
         result = compare_frame(
             dump_a, dump_b, dump_a.frames[number], dump_b.frames[number],
-            max_regions, max_diffs,
+            max_regions, max_diffs, structs,
         )
         if result["meaningful_different_bytes"] or not result["structure_matches"] or not result["inputs"]["cross_peer_consistent"]:
             if first is None:
@@ -409,6 +560,7 @@ def build_report(dump_a, dump_b, max_regions, max_diffs, include_timeline=False)
     }
     report = {
         "schema": "umvc3_desync_comparison_v1",
+        "struct_database": structs.path if structs else None,
         "dump_a": metadata(dump_a),
         "dump_b": metadata(dump_b),
         "coverage": {
@@ -444,9 +596,22 @@ def print_text_summary(report):
         if "structural_mismatch" in region:
             print(f"structural mismatch {region['structural_mismatch']}")
         else:
-            print(f"{region['meaningful_different_bytes']} differing byte(s)")
+            concrete = (f", {region['concrete_type']}" if region.get("concrete_type")
+                        else "")
+            print(f"{region['meaningful_different_bytes']} differing byte(s){concrete}")
             for difference in region["differences_sample"][:3]:
-                print(f"    +{difference['offset']}: A={difference['a_hex']} B={difference['b_hex']}")
+                fields = difference.get("known_fields", [])
+                field_text = ""
+                if fields:
+                    field_text = " [" + ", ".join(
+                        f"{field['name']}:{field['type']}" for field in fields
+                    ) + "]"
+                print(f"    +{difference['offset']}: A={difference['a_hex']} "
+                      f"B={difference['b_hex']}{field_text}")
+                for field in fields:
+                    if "a_value" in field:
+                        print(f"      {field['name']} @ {field['offset']}: "
+                              f"A={field['a_value']} B={field['b_value']}")
 
 
 def main():
@@ -461,12 +626,19 @@ def main():
                         help="maximum byte runs retained per region")
     parser.add_argument("--timeline", action="store_true",
                         help="scan all frames after finding the first divergence")
+    default_structs = Path(__file__).resolve().parents[1] / "ghidra_export" / "snapdump_structs.json"
+    parser.add_argument("--structs", type=Path,
+                        default=default_structs if default_structs.is_file() else None,
+                        help="Ghidra structure schema (default: ghidra_export/snapdump_structs.json)")
+    parser.add_argument("--no-structs", action="store_true",
+                        help="disable Ghidra field annotation")
     args = parser.parse_args()
     try:
         dump_a = load_dump(args.dump_a)
         dump_b = load_dump(args.dump_b)
+        structs = None if args.no_structs or args.structs is None else load_struct_database(args.structs)
         report = build_report(
-            dump_a, dump_b, args.max_regions, args.max_diffs, args.timeline
+            dump_a, dump_b, args.max_regions, args.max_diffs, args.timeline, structs
         )
     except (OSError, ValueError, struct.error) as error:
         print(f"error: {error}", file=sys.stderr)

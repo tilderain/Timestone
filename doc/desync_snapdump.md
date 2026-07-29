@@ -69,6 +69,40 @@ fixed-size character regions where possible.
 Unknown pointer-like values are deliberately retained as differences rather than
 hidden, because they may be gameplay state or evidence of a different object graph.
 
+## Ghidra Field Annotations
+
+Run `ExportSnapdumpStructs.java` from the Ghidra script manager against the
+current `umvc3.exe.unpacked.exe` program. It writes:
+
+```text
+ghidra_export/snapdump_structs.json
+```
+
+The export is generated directly from Ghidra's current data-type manager and
+executable. It includes every current structure, recursively flattened named
+fields, and recovered DTI/vtable identities. Character and shot families are
+also identified through current virtual methods. It does not consume the older
+property JSON or TSV audits.
+
+`compare_desync_dumps.py` loads that path automatically when present. Exact
+saved vtables select concrete character, helper, and shot types. Stable region
+bindings annotate partial singleton captures such as `sReplay.frameCounter`,
+`sEffect.rng`, `sShot`, `sAction`, `sCamera`, and `cChrTeam`. Each differing run
+then reports overlapping Ghidra field names, types, full object offsets, and
+decoded values for known scalar types.
+
+Use a different export or disable annotations with:
+
+```sh
+python3 tools/compare_desync_dumps.py host.usdp client.usdp \
+  --structs path/to/snapdump_structs.json
+python3 tools/compare_desync_dumps.py host.usdp client.usdp --no-structs
+```
+
+Heap arrays such as motion blends, joint states, and command-line buffers keep
+their explicit snapdump labels when no unambiguous Ghidra element structure is
+known. The analyzer never guesses a concrete type from size alone.
+
 ## Verification
 
 ```sh
