@@ -63,6 +63,7 @@ static constexpr uintptr_t ADDR_STEP_FIGHTING              = 0x140007080;
 
 // Character manager singleton (for desync checksum traversal)
 static constexpr uintptr_t PTR_SCHARACTER                  = 0x140d44a70;
+static constexpr uintptr_t PTR_GLOBAL_RNG                  = 0x140d765d8;
 
 // ---------------------------------------------------------------------------
 // Original function pointers (MinHook trampolines)
@@ -1380,9 +1381,9 @@ extern "C" void Controller_OnFrameStart()
 
 // ---------------------------------------------------------------------------
 // Desync checksum — sum of quantized positions, HP, and actionId across all
-// characters.  Uses addition (order-independent) and integer quantization
-// to tolerate tiny frame-timing float differences that are not visible
-// desyncs but would cause order-sensitive XOR to false-positive.
+// characters, then mix in the global gameplay RNG state. Character state uses
+// order-independent addition and integer quantization to tolerate tiny
+// frame-timing float differences that are not visible desyncs.
 // ---------------------------------------------------------------------------
 static uint32_t ComputeChecksum()
 {
@@ -1410,6 +1411,11 @@ static uint32_t ComputeChecksum()
             node = *(uint64_t*)(node + NODE_NEXT_OFFSET);
         }
     }
+
+    const uint32_t* globalRng = (const uint32_t*)_addr(PTR_GLOBAL_RNG);
+    for (int i = 0; i < 4; ++i)
+        cs = (cs ^ globalRng[i]) * 16777619u;
+
     return cs;
 }
 

@@ -18,6 +18,8 @@
 extern void HookLog(const char* fmt, ...);
 extern bool g_multiResimEnabled;
 
+static_assert(sizeof(RollbackRegion) <= 64);
+
 bool g_isResimulating = false;
 int32_t g_resimulateCurrentFrame = 0;
 int32_t g_postResimFrame = -1;

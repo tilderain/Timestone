@@ -3,6 +3,7 @@
 #include "rollback_snapshot.h"
 
 #include "controller.h"
+#include "rollback_snapdump.h"
 #include "mk10utils.h"
 #include "rollback_effect.h"
 #include "rollback_memory.h"
@@ -21,6 +22,8 @@
 
 extern void HookLog(const char* fmt, ...);
 extern "C" uint32_t Controller_GetCurrentFrameInput();
+
+static_assert(sizeof(RollbackRegion) <= 64);
 
 static constexpr uintptr_t PTR_SREPLAY = 0x140d4d9d8;
 static constexpr uintptr_t PTR_SCHARACTER = 0x140d44a70;
@@ -204,6 +207,9 @@ static void TraverseAndAddDynamicList(uint64_t listHead, size_t nextOffset,
         regions[r].ownerSlot = 0;
         regions[r].expectedVtable = 0;
         regions[r].skipVtable = false;
+#if ROLLBACK_SNAPDUMP_ENABLED
+        regions[r].snapDumpName = "dynamic_list_object";
+#endif
         ++r;
 
         current = *(uint64_t*)(current + nextOffset);
@@ -224,13 +230,20 @@ static int BuildRegionsUncached(Region* regions, int maxRegions,
         return dependencies.read<T>(address, requireAccessible);
     };
     auto add = [&](void* ptr, size_t sz, uint64_t ownerSlot = 0,
-                   uint64_t expectedVtable = 0, bool skipVtable = false) {
+                   uint64_t expectedVtable = 0, bool skipVtable = false
+#if ROLLBACK_SNAPDUMP_ENABLED
+                   , const char* snapDumpName = "unnamed"
+#endif
+                   ) {
         if (r < maxRegions && ptr && sz > 0) {
             regions[r].ptr  = ptr;
             regions[r].size = sz;
             regions[r].ownerSlot = ownerSlot;
             regions[r].expectedVtable = expectedVtable;
             regions[r].skipVtable = skipVtable;
+#if ROLLBACK_SNAPDUMP_ENABLED
+            regions[r].snapDumpName = snapDumpName;
+#endif
             ++r;
         }
     };
@@ -284,13 +297,21 @@ static int BuildRegionsUncached(Region* regions, int maxRegions,
         }
     };
 
-    auto addOwnedBuffer = [&](uint64_t ownerSlot, uint64_t ptr, size_t size) {
+    auto addOwnedBuffer = [&](uint64_t ownerSlot, uint64_t ptr, size_t size
+#if ROLLBACK_SNAPDUMP_ENABLED
+                              , const char* snapDumpName = "owned_buffer"
+#endif
+                              ) {
         if (!ownerSlot || !ptr || !size || size > 0x1000000 ||
             !IsAccessiblePointer(ptr) || !IsAccessibleAddress(ptr + size - 1)) {
             return;
         }
         if (r >= maxRegions) return;
-        add((void*)ptr, size, ownerSlot);
+        add((void*)ptr, size, ownerSlot, 0, false
+#if ROLLBACK_SNAPDUMP_ENABLED
+            , snapDumpName
+#endif
+        );
         //++collisionExternalRegions;
         //collisionExternalBytes += size;
     };
@@ -532,7 +553,11 @@ static int BuildRegionsUncached(Region* regions, int maxRegions,
     //     has internal pointers that go stale. ---
     uint64_t sReplay = read.operator()<uint64_t>(_addr(PTR_SREPLAY));
     if (sReplay) {
-        add((void*)(sReplay + 0x54), 4); // just the frame counter
+        add((void*)(sReplay + 0x54), 4, 0, 0, false
+#if ROLLBACK_SNAPDUMP_ENABLED
+            , "sReplay.frameCounter"
+#endif
+        );
     }
 
     // ---- 1a. Global XorShift RNG state (16 bytes, 4 × uint32) ----
@@ -541,7 +566,11 @@ static int BuildRegionsUncached(Region* regions, int maxRegions,
     //     with different inputs consumes RNG differently, causing desyncs in all
     //     RNG-derived behavior between the original and re-simulated timelines.
     //     Address confirmed from LEA RAX,[0x140d765d8] in MtXorShift__getGlobalState.
-    add((void*)_addr(0x140d765d8), 16);
+    add((void*)_addr(0x140d765d8), 16, 0, 0, false
+#if ROLLBACK_SNAPDUMP_ENABLED
+        , "globalRng"
+#endif
+    );
 
     // ---- 1b. sEffect per-instance RNG (sEffect+0x3C, 16 bytes) ----
     //     Second within-round RNG source (rng_inventory.md §4.2/§5.1): seeded at
@@ -553,7 +582,11 @@ static int BuildRegionsUncached(Region* regions, int maxRegions,
     {
         uint64_t sEffect = read.operator()<uint64_t>(_addr(0x140E17A38));
         if (sEffect) {
-            add((void*)(sEffect + 0x3C), 16);
+            add((void*)(sEffect + 0x3C), 16, 0, 0, false
+#if ROLLBACK_SNAPDUMP_ENABLED
+                , "sEffect.rng"
+#endif
+            );
         }
     }
 
@@ -561,7 +594,11 @@ static int BuildRegionsUncached(Region* regions, int maxRegions,
     // Keep intrusive sentinel topology live; recipes reconcile shot lifetime.
     uint64_t sShot = read.operator()<uint64_t>(_addr(PTR_SSHOT));
     if (sShot) {
-        add((void*)sShot, 0x50);
+        add((void*)sShot, 0x50, 0, 0, false
+#if ROLLBACK_SNAPDUMP_ENABLED
+            , "sShot"
+#endif
+        );
     }
 
     // ---- 2a. Slot active flags (NOT in sShot — stored in sGameConfig+0x4A89C) ---
@@ -573,7 +610,11 @@ static int BuildRegionsUncached(Region* regions, int maxRegions,
     {
         uint64_t sGameConfig = read.operator()<uint64_t>(_addr(0x140D50F88));
         if (sGameConfig) {
-            add((void*)(sGameConfig + 0x4A89C), 10);
+            add((void*)(sGameConfig + 0x4A89C), 10, 0, 0, false
+#if ROLLBACK_SNAPDUMP_ENABLED
+                , "sGameConfig.shotSlotFlags"
+#endif
+            );
         }
     }
 
@@ -597,7 +638,11 @@ static int BuildRegionsUncached(Region* regions, int maxRegions,
     // different frames after a rollback crossed a character defeat.
     {
         uint64_t sAction = read.operator()<uint64_t>(_addr(PTR_SACTION));
-        add((void*)sAction, 0x20000);
+        add((void*)sAction, 0x20000, 0, 0, false
+#if ROLLBACK_SNAPDUMP_ENABLED
+            , "sAction.full"
+#endif
+        );
     }
 
     // ---- 5. sGameUI — SKIPPED: has internal ptrs (ui elements, text buffers) ---
@@ -709,7 +754,11 @@ static int BuildRegionsUncached(Region* regions, int maxRegions,
     {
         uint64_t sCamera = read.operator()<uint64_t>(_addr(PTR_SCAMERA));
         if (sCamera) {
-            add((void*)sCamera, 0xD80);
+            add((void*)sCamera, 0xD80, 0, 0, false
+#if ROLLBACK_SNAPDUMP_ENABLED
+                , "sCamera"
+#endif
+            );
             // First viewport slot at +0x50, stride 0x1A0, camera unit ptr at slot+8.
             // This is the uActionSideCamera gameplay anchor unit.
             camUnit = read.operator()<uint64_t>(sCamera + 0x58);
@@ -731,7 +780,11 @@ static int BuildRegionsUncached(Region* regions, int maxRegions,
             if (camSize < 0x100 || camSize > 0x2000) {
                 camSize = 0x590; // known DTI size for uActionSideCamera
             }
-            add((void*)camUnit, camSize);
+            add((void*)camUnit, camSize, 0, 0, false
+#if ROLLBACK_SNAPDUMP_ENABLED
+                , "uActionSideCamera"
+#endif
+            );
         }
     }
 
@@ -744,7 +797,11 @@ static int BuildRegionsUncached(Region* regions, int maxRegions,
     if (sMvc3Mgr) {
         uint64_t sAction = read.operator()<uint64_t>(
             sMvc3Mgr + SMVC3MGR_ACTION_OFFSET);
-        add((void*)sAction, 0x300);
+        add((void*)sAction, 0x300, 0, 0, false
+#if ROLLBACK_SNAPDUMP_ENABLED
+            , "sAction.compact"
+#endif
+        );
         if (sAction && IsAccessibleAddress(
                 sAction + SACTION_MODEL_JOINT_WRAPPER_OFFSET)) {
             uint64_t modelJointWrapper = read.operator()<uint64_t>(
@@ -761,7 +818,11 @@ static int BuildRegionsUncached(Region* regions, int maxRegions,
                     // its header and applies only the scalar payload.
                     add((void*)allocation,
                         SACTION_MODEL_JOINT_ALLOCATION_SIZE,
-                        allocationSlot);
+                        allocationSlot, 0, false
+#if ROLLBACK_SNAPDUMP_ENABLED
+                        , "sAction.modelJointAllocation"
+#endif
+                    );
                 }
             }
         }
@@ -772,8 +833,16 @@ static int BuildRegionsUncached(Region* regions, int maxRegions,
     if (sCharacter) {
         uint64_t team0 = sCharacter + TEAM0_OFFSET;
         uint64_t team1 = sCharacter + TEAM1_OFFSET;
-        add((void*)team0, TEAM_SIZE);
-        add((void*)team1, TEAM_SIZE);
+        add((void*)team0, TEAM_SIZE, 0, 0, false
+#if ROLLBACK_SNAPDUMP_ENABLED
+            , "cChrTeam[0]"
+#endif
+        );
+        add((void*)team1, TEAM_SIZE, 0, 0, false
+#if ROLLBACK_SNAPDUMP_ENABLED
+            , "cChrTeam[1]"
+#endif
+        );
 
         uint64_t teamCharacters[6] = {};
         int teamCharacterCount = 0;
@@ -804,7 +873,11 @@ static int BuildRegionsUncached(Region* regions, int maxRegions,
                 //            animFields[4], animFields[5], animFields[6], animFields[7],
                  //           animFields[8], animFields[9], animFields[10], animFields[11],
                  //           animFields[12], animFields[13], animFields[14], animFields[15]);
-                    add((void*)character, finalSize, 0, vtable, true);
+                    add((void*)character, finalSize, 0, vtable, true
+#if ROLLBACK_SNAPDUMP_ENABLED
+                        , ti == 0 ? "uCharacter.team0" : "uCharacter.team1"
+#endif
+                    );
 
                     // processTarget1 indexes these seven heap-backed tables
                     // using the packed counts at +0x1440 and immediately calls
@@ -830,7 +903,11 @@ static int BuildRegionsUncached(Region* regions, int maxRegions,
                         if (table && count > 0 && count <= 10) {
                             add((void*)table,
                                 (size_t)count * targetStrides[target],
-                                ownerSlot);
+                                ownerSlot, 0, false
+#if ROLLBACK_SNAPDUMP_ENABLED
+                                , "uCharacter.targetTable"
+#endif
+                            );
                         }
                     }
 
@@ -846,7 +923,11 @@ static int BuildRegionsUncached(Region* regions, int maxRegions,
                                 motion * CCHR_MOTION_STRIDE + CCHR_BLEND_PTR_OFFSET;
                             uint64_t blend = read.operator()<uint64_t>(ownerSlot);
                             if (blend && blendSize > 0) {
-                                add((void*)blend, blendSize, ownerSlot);
+                                add((void*)blend, blendSize, ownerSlot, 0, false
+#if ROLLBACK_SNAPDUMP_ENABLED
+                                    , "uCharacter.motionBlend"
+#endif
+                                );
                             }
                         }
                     }
@@ -864,7 +945,11 @@ static int BuildRegionsUncached(Region* regions, int maxRegions,
                         uint64_t ownerSlot = character + CCHR_MOTION_CHANNELS_PTR_OFFSET;
                         uint64_t channels = read.operator()<uint64_t>(ownerSlot);
                         if (channels && channelBytes > 0) {
-                            add((void*)channels, channelBytes, ownerSlot);
+                            add((void*)channels, channelBytes, ownerSlot, 0, false
+#if ROLLBACK_SNAPDUMP_ENABLED
+                                , "uCharacter.motionChannels"
+#endif
+                            );
                         }
                     }
 
@@ -878,13 +963,21 @@ static int BuildRegionsUncached(Region* regions, int maxRegions,
                         if (jointStates) {
                             add((void*)jointStates,
                                 CCHR_JOINT_STATE_STRIDE * numJoints,
-                                jointStateOwner);
+                                jointStateOwner, 0, false
+#if ROLLBACK_SNAPDUMP_ENABLED
+                                , "uCharacter.jointStates"
+#endif
+                            );
                         }
 
                         uint64_t jointIndexOwner = character + CCHR_JOINT_INDEX_PTR_OFFSET;
                         uint64_t jointIndices = read.operator()<uint64_t>(jointIndexOwner);
                         if (jointIndices) {
-                            add((void*)jointIndices, numJoints, jointIndexOwner);
+                            add((void*)jointIndices, numJoints, jointIndexOwner, 0, false
+#if ROLLBACK_SNAPDUMP_ENABLED
+                                , "uCharacter.jointIndices"
+#endif
+                            );
                         }
 
                         uint64_t blendedOwner = character + CCHR_BLENDED_JOINT_PTR_OFFSET;
@@ -892,7 +985,11 @@ static int BuildRegionsUncached(Region* regions, int maxRegions,
                         if (blendedJoints) {
                             add((void*)blendedJoints,
                                 CCHR_BLENDED_JOINT_STRIDE * numJoints,
-                                blendedOwner);
+                                blendedOwner, 0, false
+#if ROLLBACK_SNAPDUMP_ENABLED
+                                , "uCharacter.blendedJoints"
+#endif
+                            );
                         }
                     }
 
@@ -901,7 +998,11 @@ static int BuildRegionsUncached(Region* regions, int maxRegions,
                         uint64_t anim = read.operator()<uint64_t>(ownerSlot);
                         if (anim && HasCallableDtiVirtual((void*)anim)) {
                             read.operator()<uint64_t>(anim, true);
-                            add((void*)anim, CCHR_EXTERNAL_ANIM_SIZE, ownerSlot);
+                            add((void*)anim, CCHR_EXTERNAL_ANIM_SIZE, ownerSlot, 0, false
+#if ROLLBACK_SNAPDUMP_ENABLED
+                                , "uCharacter.externalAnimation"
+#endif
+                            );
                         }
                     }
 
@@ -917,7 +1018,11 @@ static int BuildRegionsUncached(Region* regions, int maxRegions,
                         uint64_t lines = read.operator()<uint64_t>(cmd + 0x178);
                         int n = read.operator()<int>(cmd + 0x170);
                         if (lines && n > 0 && n < 0x1000)
-                            add((void*)(lines - 8), (size_t)n * 0x20 + 8);
+                            add((void*)(lines - 8), (size_t)n * 0x20 + 8, 0, 0, false
+#if ROLLBACK_SNAPDUMP_ENABLED
+                                , "uCharacter.commandLines"
+#endif
+                            );
                     }
                 }
                 node = read.operator()<uint64_t>(node + NODE_NEXT_OFFSET);
@@ -947,7 +1052,11 @@ static int BuildRegionsUncached(Region* regions, int maxRegions,
                     read.operator()<uint64_t>(helper, true);
                     uint32_t helperSize = DecodeDtiSize(GetObjectDti(helper));
                     if (helperSize >= 8 && helperSize <= CCHR_MAX_SIZE) {
-                        add((void*)helper, helperSize, 0, *(uint64_t*)helper, true);
+                        add((void*)helper, helperSize, 0, *(uint64_t*)helper, true
+#if ROLLBACK_SNAPDUMP_ENABLED
+                            , "uCharacter.helper"
+#endif
+                        );
                     }
                 }
                 helper = read.operator()<uint64_t>(helper + 0x18);
@@ -966,7 +1075,11 @@ static int BuildRegionsUncached(Region* regions, int maxRegions,
                     characterPost + UCHARACTER_POST_CAMERA_STATE_OFFSET +
                     UCHARACTER_POST_CAMERA_STATE_SIZE - 1)) {
                 add((void*)(characterPost + UCHARACTER_POST_CAMERA_STATE_OFFSET),
-                    UCHARACTER_POST_CAMERA_STATE_SIZE);
+                    UCHARACTER_POST_CAMERA_STATE_SIZE, 0, 0, false
+#if ROLLBACK_SNAPDUMP_ENABLED
+                    , "uCharacterPost.cameraState"
+#endif
+                );
             }
         }
     }
@@ -1048,6 +1161,9 @@ void Rollback_SaveSnapshot(int32_t frame)
         slot.regions[i].ownerSlot = regions[i].ownerSlot;
         slot.regions[i].expectedVtable = regions[i].expectedVtable;
         slot.regions[i].skipVtable = regions[i].skipVtable;
+#if ROLLBACK_SNAPDUMP_ENABLED
+        slot.regions[i].snapDumpName = regions[i].snapDumpName;
+#endif
         std::memcpy(slot.data + offset, regions[i].ptr, regions[i].size);
         offset += regions[i].size;
     }
@@ -1156,6 +1272,9 @@ void Rollback_SaveSnapshot(int32_t frame)
     // the tick. Initialize with the prior prediction rather than stale received
     // ring data in case this frame is not confirmed yet.
     slot.remoteInput = Controller_GetUsedRemoteInput(frame);
+#if ROLLBACK_SNAPDUMP_ENABLED
+    SnapDump_CaptureSnapshot(slot);
+#endif
     
     //HookLog("Rollback: saved frame %d with %d regions, total size %zu bytes\n", frame, count, offset);
 }
@@ -1168,6 +1287,9 @@ void Rollback_UpdateRemoteInput(int32_t frame, uint32_t input)
     if (slot.data && slot.size > 0 && slot.regionCount > 0 && slot.frame == frame)
     {
         slot.remoteInput = input;
+#if ROLLBACK_SNAPDUMP_ENABLED
+        SnapDump_UpdateInputs(frame, slot.localInput, input);
+#endif
     }
 }
 
@@ -1181,6 +1303,9 @@ extern "C" void Rollback_UpdateSnapshotInputs(int32_t frame, uint32_t localInput
     {
         slot.localInput = localInput;
         slot.remoteInput = remoteInput;
+#if ROLLBACK_SNAPDUMP_ENABLED
+        SnapDump_UpdateInputs(frame, localInput, remoteInput);
+#endif
     }
 }
 
@@ -1224,4 +1349,7 @@ void Rollback_FreeSnapshots()
     Effect_Reset();
     Rollback_ResetReSimulation();
     g_regionCache.valid = false;
+#if ROLLBACK_SNAPDUMP_ENABLED
+    SnapDump_Reset();
+#endif
 }

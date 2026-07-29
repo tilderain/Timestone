@@ -41,6 +41,7 @@ CPP_SRC   := \
 	$(SRCDIR)/code/controller.cpp \
 	$(SRCDIR)/code/autotest.cpp \
 	$(SRCDIR)/code/diag.cpp \
+	$(SRCDIR)/code/rollback_snapdump.cpp \
 	$(SRCDIR)/code/exception.cpp \
 	$(SRCDIR)/code/rollback.cpp \
 	$(SRCDIR)/code/rollback_cleanup.cpp \

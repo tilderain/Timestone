@@ -2,6 +2,7 @@
 
 #include "rollback_ndjson.h"
 #include "controller.h"
+#include "rollback_snapdump.h"
 #include "diag.h"
 #include "mk10utils.h"
 #include "netplay.h"
@@ -19,6 +20,8 @@
 
 extern void HookLog(const char* fmt, ...);
 extern void HookLogSetFile(const char* filename);
+
+static_assert(sizeof(RollbackRegion) <= 64);
 
 bool g_ndjsonLoggingEnabled = false;
 bool g_ndjsonIncludeDirHistory = false;
@@ -1207,6 +1210,9 @@ void NDJSON_ProcessInboundGroundTruth()
 
 extern "C" void Rollback_NotifyDesyncTriggered(int32_t frame)
 {
+#if ROLLBACK_SNAPDUMP_ENABLED
+    SnapDump_WriteHistory(frame);
+#endif
     NDJSON_NotifyDesyncTriggered(frame);
 }
 

@@ -2,6 +2,7 @@
 
 #include "concrete_snapshot.h"
 #include "rollback.h"
+#include "rollback_snapdump.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -20,7 +21,16 @@ struct RollbackRegion {
     uint64_t ownerSlot;
     uint64_t expectedVtable;
     bool skipVtable;
+#if ROLLBACK_SNAPDUMP_ENABLED
+    const char* snapDumpName;
+#endif
 };
+
+#if ROLLBACK_SNAPDUMP_ENABLED
+static_assert(offsetof(RollbackRegion, snapDumpName) >
+              offsetof(RollbackRegion, skipVtable));
+static_assert(sizeof(RollbackRegion) <= 64);
+#endif
 
 struct RollbackShotFlightState {
     uint32_t unitState;

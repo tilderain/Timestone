@@ -18,6 +18,8 @@
 extern void HookLog(const char* fmt, ...);
 extern bool g_multiResimEnabled;
 
+static_assert(sizeof(RollbackRegion) <= 64);
+
 static constexpr uint32_t SUNIT_CATEGORY_COUNT_OFFSET = 0xC38;
 static constexpr uint32_t SUNIT_CATEGORY_LISTS_OFFSET = 0x50;
 static constexpr uint32_t SUNIT_CATEGORY_LIST_STRIDE = 0x30;

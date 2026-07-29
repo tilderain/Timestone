@@ -14,6 +14,8 @@
 
 extern void HookLog(const char* fmt, ...);
 
+static_assert(sizeof(RollbackRegion) <= 64);
+
 static constexpr uintptr_t PTR_SMVC3MGR = 0x140d510a0;
 static constexpr uintptr_t PTR_SSTAGE = 0x140d4f718;
 static constexpr uintptr_t FN_SGAMEEFFECT_FLUSH_PENDING = 0x140130D00;

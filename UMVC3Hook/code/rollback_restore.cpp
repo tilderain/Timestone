@@ -17,6 +17,8 @@
 
 extern void HookLog(const char* fmt, ...);
 
+static_assert(sizeof(RollbackRegion) <= 64);
+
 static constexpr uintptr_t PTR_SCHARACTER = 0x140d44a70;
 static constexpr uintptr_t PTR_SSHOT = 0x140d47f40;
 static constexpr uintptr_t PTR_SHITSOLVER = 0x140d44060;
