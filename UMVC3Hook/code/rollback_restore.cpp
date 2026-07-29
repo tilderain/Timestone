@@ -10,6 +10,7 @@
 #include "concrete_snapshot.h"
 #include "mk10utils.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <vector>
@@ -23,8 +24,10 @@ static constexpr uintptr_t PTR_SMAIN = 0x140e177e8;
 static constexpr uintptr_t PTR_SMVC3MGR = 0x140d510a0;
 static constexpr uintptr_t PTR_SUNIT = 0x140e17698;
 static constexpr uintptr_t PTR_SCOLLISION = 0x140e18250;
+static constexpr uintptr_t PTR_SGAMEEFFECT = 0x140d46470;
 static constexpr uintptr_t FN_SSHOT_ENQUEUE_UNIT = 0x1401512A0;
 static constexpr uintptr_t FN_SSHOT_FLUSH_PENDING_UNITS = 0x1401517A0;
+static constexpr uintptr_t FN_SGAMEEFFECT_FLUSH_PENDING = 0x140130D00;
 static constexpr uintptr_t FN_SUNIT_ADD_UNIT = 0x14051A6B0;
 static constexpr uintptr_t FN_SUNIT_REMOVE_UNIT = 0x14051B9F0;
 static constexpr uintptr_t FN_RESET_HITNODES = 0x140259E90;
@@ -323,6 +326,15 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
     int retiredEffects = 0;
     uint64_t preSanitizeEnd = 0;
     {
+        // Pending effects are not in sUnit yet, so category retirement cannot
+        // see them. Do not let their owning MtArray allocation cross restore.
+        uint64_t sGameEffect = *(uint64_t*)_addr(PTR_SGAMEEFFECT);
+        if (sGameEffect && *(uint32_t*)(sGameEffect + 0x128) != 0) {
+            ((void(__fastcall*)(uint64_t))_addr(
+                FN_SGAMEEFFECT_FLUSH_PENDING))(sGameEffect);
+            InvalidateMemoryQueryCache();
+        }
+
         ScopedMemoryQueryCache memoryCache;
         removedInvalidUnits = Shot_SanitizeUnitCategoryLists(
             sUnit, SAUX_FIRST_CATEGORY, SEFFECT_LAST_CATEGORY);
@@ -463,6 +475,7 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
     uint64_t respawnOverlayTicks = 0;
     for (ShotRecipe& saved : slot.shotRecipes) {
         const uint64_t prepareStart = Profile_Now();
+        saved.restoredPtr = nullptr;
         RestorePreSpawnRng(saved);
         void* objectRef1 = ValidateShotObjectReference(
             saved.objectRef1, saved.objectRef1Dti,
@@ -559,6 +572,54 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
         respawnedShots++;
     }
     const uint64_t respawnEnd = Profile_Now();
+
+    // cChr+0x90 is the animation interpreter's last-created object. Character
+    // restore rewinds it to a saved shot address, but reconstruction gives that
+    // shot a new allocation. Remap saved shots and discard references to shots
+    // that existed only in the abandoned timeline before an opcode performs
+    // isAlive/isKindOf on the field.
+    std::vector<void*> characters;
+    uint64_t sCharacter = *(uint64_t*)_addr(PTR_SCHARACTER);
+    for (int teamIndex = 0; sCharacter && teamIndex < 2; ++teamIndex) {
+        uint64_t node = sCharacter +
+            (teamIndex == 0 ? TEAM0_OFFSET : TEAM1_OFFSET) +
+            TEAM_FIRST_NODE_OFFSET;
+        for (int member = 0; node && member < 8; ++member) {
+            void* character = *(void**)(node + NODE_CHR_OFFSET);
+            if (character) characters.push_back(character);
+            node = *(uint64_t*)(node + NODE_NEXT_OFFSET);
+        }
+    }
+    uint32_t categoryCount = sUnit
+        ? *(uint32_t*)((uint8_t*)sUnit + SUNIT_CATEGORY_COUNT_OFFSET)
+        : 0;
+    if (categoryCount > SUNIT_CHARACTER_CATEGORY) {
+        void* character = *(void**)((uint8_t*)sUnit + SUNIT_CATEGORY_LISTS_OFFSET +
+            SUNIT_CATEGORY_LIST_STRIDE * SUNIT_CHARACTER_CATEGORY);
+        for (int safety = 64; character && safety-- > 0;
+             character = *(void**)((uint8_t*)character + 0x18)) {
+            if (std::find(characters.begin(), characters.end(), character) == characters.end())
+                characters.push_back(character);
+        }
+    }
+    for (void* character : characters) {
+        void** objectReturn = (void**)((uint8_t*)character + 0x90);
+        void* savedReference = *objectReturn;
+        bool resolved = false;
+        for (const ShotRecipe& saved : slot.shotRecipes) {
+            if (saved.savedPtr == savedReference) {
+                *objectReturn = saved.restoredPtr;
+                resolved = true;
+                break;
+            }
+        }
+        if (resolved) continue;
+        if (std::find(currentShots.begin(), currentShots.end(), savedReference) !=
+                currentShots.end() ||
+            (savedReference && !HasCallableDtiVirtual(savedReference))) {
+            *objectReturn = nullptr;
+        }
+    }
 
     // Native enqueue increments the counter before rejecting an overflow. A
     // concurrent/native spawn during reconstruction can therefore poison it

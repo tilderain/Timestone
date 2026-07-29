@@ -43,6 +43,14 @@ bool IsCatastrophicException(DWORD code)
     }
 }
 
+bool IsAutoTestProcess()
+{
+    const char* commandLine = GetCommandLineA();
+    return commandLine &&
+        (std::strstr(commandLine, "-autotest=") ||
+         std::strstr(commandLine, "-autotest-client"));
+}
+
 const char* BaseName(const char* path)
 {
     const char* slash = std::strrchr(path, '\\');
@@ -346,10 +354,15 @@ LONG WINAPI ExceptionHandler(PEXCEPTION_POINTERS info)
         std::fclose(file);
     }
 
-    char message[MAX_PATH + 96] = {};
-    std::snprintf(message, sizeof(message),
-        "The game just freaking crashed! Crash log available at %s", crashLogPath);
-    MessageBoxA(nullptr, message, "UMVC3Hook Crash", MB_OK | MB_ICONERROR | MB_SYSTEMMODAL);
+    if (!IsAutoTestProcess()) {
+        char message[MAX_PATH + 96] = {};
+        std::snprintf(message, sizeof(message),
+            "The game just freaking crashed! Crash log available at %s", crashLogPath);
+        MessageBoxA(nullptr, message, "UMVC3Hook Crash", MB_OK | MB_ICONERROR | MB_SYSTEMMODAL);
+    } else {
+        HookLog("UMVC3Hook: autotest crash recorded at %s; message box suppressed\n",
+            crashLogPath);
+    }
 
     return EXCEPTION_CONTINUE_SEARCH;
 }

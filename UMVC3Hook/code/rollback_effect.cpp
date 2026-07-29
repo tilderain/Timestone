@@ -16,6 +16,7 @@ extern void HookLog(const char* fmt, ...);
 
 static constexpr uintptr_t PTR_SMVC3MGR = 0x140d510a0;
 static constexpr uintptr_t PTR_SSTAGE = 0x140d4f718;
+static constexpr uintptr_t FN_SGAMEEFFECT_FLUSH_PENDING = 0x140130D00;
 static constexpr uintptr_t FN_UGAMEEFFECT_CREATE = 0x140131410;
 static constexpr uintptr_t FN_KIRIGAKURE_EFFECT_UPDATE = 0x14013B050;
 static constexpr uintptr_t SMVC3MGR_ACTION_OFFSET = 0x48;
@@ -28,6 +29,7 @@ using EffectCreateFn = void*(__fastcall*)(void*, int, int, void*, int, int,
     void*, void*, int, void*, int, uint32_t, void*);
 
 static EffectCreateFn oEffectCreate = nullptr;
+static void(__fastcall* oGameEffectFlushPending)(void*) = nullptr;
 static void(__fastcall* oKirigakureEffectUpdate)(void*) = nullptr;
 static std::vector<RollbackEffectRecipe> g_liveEffectRecipes;
 static uint64_t g_effectSpawnSequence = 0;
@@ -162,6 +164,31 @@ static void* __fastcall hkEffectCreate(void* manager, int effectId, int a3,
     return effect;
 }
 
+static void __fastcall hkGameEffectFlushPending(void* manager)
+{
+    // Native isAlive checks only state flags. A retired effect can therefore
+    // survive in this queue with a zeroed vtable and crash at virtual +0x78.
+    uint32_t count = *(uint32_t*)((uint8_t*)manager + 0x128);
+    void** entries = *(void***)((uint8_t*)manager + 0x138);
+    if (count <= 4096 && (!count || IsAccessibleRange(
+            (uint64_t)entries, (size_t)count * sizeof(void*)))) {
+        for (uint32_t i = 0; i < count; ++i) {
+            void* effect = entries[i];
+            if (!effect) continue;
+            if (!IsAccessibleRange((uint64_t)effect, sizeof(uint64_t))) {
+                entries[i] = nullptr;
+                continue;
+            }
+            uint64_t vtable = *(uint64_t*)effect;
+            if (!IsAccessibleAddress(vtable + 0x78) ||
+                !IsExecutableAddress(*(uint64_t*)(vtable + 0x78))) {
+                entries[i] = nullptr;
+            }
+        }
+    }
+    oGameEffectFlushPending(manager);
+}
+
 static void __fastcall hkKirigakureEffectUpdate(void* effect)
 {
     RollbackHookProfileScope profile(RollbackHookProfileId::KirigakureEffectUpdate);
@@ -252,7 +279,18 @@ void Effect_Reset()
 
 void Effect_InitHooks()
 {
-    MH_STATUS status = MH_CreateHook((LPVOID)_addr(FN_UGAMEEFFECT_CREATE),
+    MH_STATUS status = MH_CreateHook((LPVOID)_addr(FN_SGAMEEFFECT_FLUSH_PENDING),
+                                     (LPVOID)&hkGameEffectFlushPending,
+                                     (LPVOID*)&oGameEffectFlushPending);
+    if (status == MH_OK) {
+        MH_EnableHook((LPVOID)_addr(FN_SGAMEEFFECT_FLUSH_PENDING));
+        HookLog("Rollback: guarded sGameEffect pending-effect flush\n");
+    } else {
+        HookLog("Rollback: failed to guard sGameEffect pending-effect flush (%d)\n",
+                status);
+    }
+
+    status = MH_CreateHook((LPVOID)_addr(FN_UGAMEEFFECT_CREATE),
                                      (LPVOID)&hkEffectCreate,
                                      (LPVOID*)&oEffectCreate);
     if (status == MH_OK) {

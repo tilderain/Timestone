@@ -665,8 +665,10 @@ void OnInitializeHook()
 			? L" -training-cpus"
 			: TrainingBoot_GetCpuMode() == TRAINING_CPU_P2_ONLY
 				? L" -training-p2-cpu" : L"";
-		swprintf(spawnCmd, MAX_PATH + 128, L"\"%ls\" -training%ls -connect=%ls:%d",
-			exePath, cpuArg, wIp, dlgCfg.hostPort);
+		const wchar_t* autoTestArg = IsAutoTestLaunchEnabled()
+			? L" -autotest-client" : L"";
+		swprintf(spawnCmd, MAX_PATH + 128, L"\"%ls\" -training%ls%ls -connect=%ls:%d",
+			exePath, cpuArg, autoTestArg, wIp, dlgCfg.hostPort);
 
 		STARTUPINFOW si = { sizeof(si) };
 		PROCESS_INFORMATION pi;
