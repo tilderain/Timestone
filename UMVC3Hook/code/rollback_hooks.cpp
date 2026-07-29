@@ -271,8 +271,12 @@ static void __fastcall hkMainMove(uint64_t main)
         return;
     }
     oMainMove(main);
-    if (Netplay_IsActive())
+    if (Netplay_IsActive()) {
+        int32_t frame = Controller_GetNetFrameCount();
+        if (frame >= 0 && FrameStepper_IsBattleSynchronized())
+            *(uint32_t*)(main + 0x48) = (uint32_t)frame;
         *(float*)(main + 0x80) = 1.0f;
+    }
 }
 
 void Rollback_InitMainHooks(RollbackMainMoveFn* originalMove)

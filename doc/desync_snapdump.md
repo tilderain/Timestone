@@ -136,14 +136,21 @@ difference alone.
 Native online does not overwrite `mFrameTimer` with its synchronized input
 cursor. Instead, the deterministic branch in `aAction__init` calls
 `sMain__setFrameWait`, which fixes simulation delta and resets pacing drift while
-leaving the absolute QPC-derived stamp process-local. The plugin already
-reproduces that setup through `Rollback_ApplyNetplayDeterminism` for live custom
-netplay. Headless rollback is different because it skips `sMain__move` entirely;
-`Rollback_HeadlessTick` therefore assigns `g_resimulateCurrentFrame` to
-`sMain+0x48` before character gameplay, giving each historical tick a stable,
-distinct local shot stamp. The broader `sMain` body remains intentionally
-uncaptured because its QPC, pacing, and process-local service state is not
-rollback state.
+leaving the absolute QPC-derived stamp process-local. The plugin reproduces that
+setup through `Rollback_ApplyNetplayDeterminism`, but rollback adds an invariant
+native delay netplay does not need: `Rollback_ResyncMainTiming` resets the local
+QPC epoch after replay. In the `20260729_061431` dump, subsequent animation
+transitions consequently receive host/client stamps such as `19/308`, `0/325`,
+`329/0`, and `9/349`. Reusing low IDs while the AnmChr eight-entry ring still
+contains earlier stamps can suppress a distinct shot as a duplicate.
+
+Custom netplay therefore normalizes this field to its shared relative frame
+timeline. `hkMainMove` overwrites `sMain+0x48` with the current net frame after
+native timing and before the rest of `sMvc3Main__move` executes.
+`Rollback_HeadlessTick` assigns `g_resimulateCurrentFrame` before historical
+character gameplay. This preserves a stable, monotonic shot-event namespace
+across live and replayed ticks without snapshotting the broader `sMain` body,
+whose QPC, pacing, and process-local service state is not rollback state.
 
 ## Ghidra Field Annotations
 
