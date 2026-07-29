@@ -464,6 +464,30 @@ class CompareSnapDumpsTest(unittest.TestCase):
         )
         self.assertEqual("match", report["verdict"])
 
+    def test_skips_chunli_tail_without_frame_zero(self):
+        base_a, base_b = 0x140000000, 0x150000000
+        data_a = bytearray(0x6A60)
+        data_b = bytearray(data_a)
+        data_a[:8] = struct.pack("<Q", base_a + 0xA71F90)
+        data_b[:8] = struct.pack("<Q", base_b + 0xA71F90)
+        data_a[0x693A] = 0xA1
+        data_b[0x693A] = 0xB2
+        write_dump(
+            self.path_a, 7, base_a,
+            [(0, 0x11, 0x22, 0x0F750000, bytes(data_a))],
+            version=2, region_name="uCharacter.team0",
+        )
+        write_dump(
+            self.path_b, 2, base_b,
+            [(0, 0x22, 0x11, 0x0F710000, bytes(data_b))],
+            version=2, region_name="uCharacter.team0",
+        )
+
+        report = compare.build_report(
+            compare.load_dump(self.path_a), compare.load_dump(self.path_b), 32, 16,
+        )
+        self.assertEqual("match", report["verdict"])
+
     def test_keeps_animation_serial_difference(self):
         base_a, base_b = 0x140000000, 0x150000000
         data_a = bytearray(0x1400)
@@ -685,6 +709,171 @@ class CompareSnapDumpsTest(unittest.TestCase):
         data_b[0x620] = 0xA1
         write_dump(
             self.path_b, 2, base_b,
+            [(11, 0x22, 0x11, 0x0F710000, bytes(data_b))],
+            version=2, region_name="uCharacter.team0",
+        )
+        report = compare.build_report(
+            compare.load_dump(self.path_a), compare.load_dump(self.path_b), 32, 16,
+        )
+        self.assertEqual("match", report["verdict"])
+
+    def test_skips_animation_wrapper_pointers_but_keeps_scalars(self):
+        base_a, base_b = 0x140000000, 0x150000000
+        data_a = bytearray(0x13C0)
+        data_b = bytearray(data_a)
+        for offset in (0x1360, 0x1368, 0x1370, 0x1380, 0x1390, 0x1398,
+                       0x13A0, 0x13A8, 0x13B0):
+            data_a[offset:offset + 8] = struct.pack("<Q", 0x05F70000 + offset)
+            data_b[offset:offset + 8] = struct.pack("<Q", 0x05F10000 + offset)
+        data_a[0x134C] = 0xA1
+        data_b[0x134C] = 0xB2
+        write_dump(
+            self.path_a, 7, base_a,
+            [(11, 0x11, 0x22, 0x0F750000, bytes(data_a))],
+            version=2, region_name="uCharacter.team0",
+        )
+        write_dump(
+            self.path_b, 7, base_b,
+            [(11, 0x22, 0x11, 0x0F710000, bytes(data_b))],
+            version=2, region_name="uCharacter.team0",
+        )
+
+        report = compare.build_report(
+            compare.load_dump(self.path_a), compare.load_dump(self.path_b), 32, 16,
+        )
+        self.assertEqual("diverged", report["verdict"])
+        self.assertEqual(
+            "0x134c",
+            report["first_divergence"]["regions"][0]["differences_sample"][0]["offset"],
+        )
+
+        data_b[0x134C] = 0xA1
+        write_dump(
+            self.path_b, 7, base_b,
+            [(11, 0x22, 0x11, 0x0F710000, bytes(data_b))],
+            version=2, region_name="uCharacter.team0",
+        )
+        report = compare.build_report(
+            compare.load_dump(self.path_a), compare.load_dump(self.path_b), 32, 16,
+        )
+        self.assertEqual("match", report["verdict"])
+
+    def test_skips_character_constraint_resource_pointers(self):
+        base_a, base_b = 0x140000000, 0x150000000
+        data_a = bytearray(0x1550)
+        data_b = bytearray(data_a)
+        for offset in (0x1468, 0x1478, 0x1540):
+            data_a[offset:offset + 8] = struct.pack("<Q", 0x05F70000 + offset)
+            data_b[offset:offset + 8] = struct.pack("<Q", 0x05F10000 + offset)
+        data_a[0x1450] = 0xA1
+        data_b[0x1450] = 0xB2
+        write_dump(
+            self.path_a, 7, base_a,
+            [(11, 0x11, 0x22, 0x0F750000, bytes(data_a))],
+            version=2, region_name="uCharacter.team0",
+        )
+        write_dump(
+            self.path_b, 7, base_b,
+            [(11, 0x22, 0x11, 0x0F710000, bytes(data_b))],
+            version=2, region_name="uCharacter.team0",
+        )
+
+        report = compare.build_report(
+            compare.load_dump(self.path_a), compare.load_dump(self.path_b), 32, 16,
+        )
+        self.assertEqual("diverged", report["verdict"])
+        self.assertEqual(
+            "0x1450",
+            report["first_divergence"]["regions"][0]["differences_sample"][0]["offset"],
+        )
+
+        data_b[0x1450] = 0xA1
+        write_dump(
+            self.path_b, 7, base_b,
+            [(11, 0x22, 0x11, 0x0F710000, bytes(data_b))],
+            version=2, region_name="uCharacter.team0",
+        )
+        report = compare.build_report(
+            compare.load_dump(self.path_a), compare.load_dump(self.path_b), 32, 16,
+        )
+        self.assertEqual("match", report["verdict"])
+
+    def test_skips_repeated_character_reference_tables(self):
+        base_a, base_b = 0x140000000, 0x150000000
+        data_a = bytearray(0x3600)
+        data_b = bytearray(data_a)
+        for offset in (0x1898, 0x28A0, 0x2AB8, 0x2DC8, 0x2DE8, 0x2DF0,
+                       0x2DF8, 0x2E00, 0x2F90, 0x2FA0, 0x2FF0, 0x3000,
+                       0x3098, 0x34F0, 0x34F8, 0x3500, 0x3560, 0x35A8,
+                       0x35B0, 0x35B8, 0x35C0, 0x35D8, 0x35F8):
+            data_a[offset:offset + 8] = struct.pack("<Q", 0x05F70000 + offset)
+            data_b[offset:offset + 8] = struct.pack("<Q", 0x05F10000 + offset)
+        data_a[0x2F88] = 0xA1
+        data_b[0x2F88] = 0xB2
+        write_dump(
+            self.path_a, 7, base_a,
+            [(11, 0x11, 0x22, 0x0F750000, bytes(data_a))],
+            version=2, region_name="uCharacter.team0",
+        )
+        write_dump(
+            self.path_b, 7, base_b,
+            [(11, 0x22, 0x11, 0x0F710000, bytes(data_b))],
+            version=2, region_name="uCharacter.team0",
+        )
+
+        report = compare.build_report(
+            compare.load_dump(self.path_a), compare.load_dump(self.path_b), 32, 16,
+        )
+        self.assertEqual("diverged", report["verdict"])
+        self.assertEqual(
+            "0x2f88",
+            report["first_divergence"]["regions"][0]["differences_sample"][0]["offset"],
+        )
+
+        data_b[0x2F88] = 0xA1
+        write_dump(
+            self.path_b, 7, base_b,
+            [(11, 0x22, 0x11, 0x0F710000, bytes(data_b))],
+            version=2, region_name="uCharacter.team0",
+        )
+        report = compare.build_report(
+            compare.load_dump(self.path_a), compare.load_dump(self.path_b), 32, 16,
+        )
+        self.assertEqual("match", report["verdict"])
+
+    def test_skips_remaining_pointer_shaped_character_slots(self):
+        base_a, base_b = 0x140000000, 0x150000000
+        data_a = bytearray(0x6800)
+        data_b = bytearray(data_a)
+        for offset in (0x3270, 0x3608, 0x3618, 0x3628, 0x3C40, 0x3DB0,
+                       0x6460, 0x6740, 0x67F0):
+            data_a[offset:offset + 8] = struct.pack("<Q", 0x05F70000 + offset)
+            data_b[offset:offset + 8] = struct.pack("<Q", 0x05F10000 + offset)
+        data_a[0x3278] = 0xA1
+        data_b[0x3278] = 0xB2
+        write_dump(
+            self.path_a, 7, base_a,
+            [(11, 0x11, 0x22, 0x0F750000, bytes(data_a))],
+            version=2, region_name="uCharacter.team0",
+        )
+        write_dump(
+            self.path_b, 7, base_b,
+            [(11, 0x22, 0x11, 0x0F710000, bytes(data_b))],
+            version=2, region_name="uCharacter.team0",
+        )
+
+        report = compare.build_report(
+            compare.load_dump(self.path_a), compare.load_dump(self.path_b), 32, 16,
+        )
+        self.assertEqual("diverged", report["verdict"])
+        self.assertEqual(
+            "0x3278",
+            report["first_divergence"]["regions"][0]["differences_sample"][0]["offset"],
+        )
+
+        data_b[0x3278] = 0xA1
+        write_dump(
+            self.path_b, 7, base_b,
             [(11, 0x22, 0x11, 0x0F710000, bytes(data_b))],
             version=2, region_name="uCharacter.team0",
         )

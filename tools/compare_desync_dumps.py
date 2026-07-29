@@ -31,6 +31,22 @@ EXPLICIT_REGION_OVERRIDES = {
     "uCharacter.motionBlend",
 }
 EXPLICIT_BYTE_OVERRIDES = {
+    # cSystem's inherited tail is critical-section state, not simulation data.
+    ("sShot", 0x8, 8),
+    ("sCamera", 0x8, 8),
+    ("sAction.compact", 0x8, 8),
+    # uActionSideCamera inherits cUnit state. This pointer is camera-owned
+    # unit bookkeeping and is not a gameplay identity.
+    ("uActionSideCamera", 0x18, 8),
+    # sAction's cRef contains allocator/reference bookkeeping. The bytes past
+    # the native 0x250-byte object are adjacent capture spill; neither is part
+    # of the compact restore contract.
+    ("sAction.compact", 0x1F0, 0x20),
+    ("sAction.compact", 0x250, 0xB0),
+    # Native sAction resource references. The surviving differences are
+    # address bytes in these qword slots, not resource payload bytes.
+    ("sAction.compact", 0x120, 8),
+    ("sAction.compact", 0x1D0, 8),
     ("sAction.full", 0x3634, 1),
     # uBaseModel render/cache state retained on the live timeline by restore.
     ("uCharacter.team0", 0x93, 1),
@@ -79,6 +95,38 @@ EXPLICIT_BYTE_OVERRIDES = {
     *( (label, offset, 8)
        for label in ("uCharacter.team0", "uCharacter.team1")
        for offset in range(0x11B8, 0x1238, 8) ),
+    # cActorGameModelAnm is embedded at uCharacter+0x1348. These qwords are
+    # command/resource/owner pointers consumed by its native command walker;
+    # command indices and flags around them remain compared.
+    *( (label, offset, 8)
+       for label in ("uCharacter.team0", "uCharacter.team1")
+       for offset in (0x1360, 0x1368, 0x1370, 0x1380, 0x1390, 0x1398,
+                     0x13A0, 0x13A8, 0x13B0, 0x13E8, 0x13F0, 0x13F8) ),
+    # Character constraint/share resource pointers. The surrounding joint
+    # count, modes, and scalar constraint state remain compared.
+    *( (label, offset, 8)
+       for label in ("uCharacter.team0", "uCharacter.team1")
+       for offset in (0x1468, 0x1478, 0x1540) ),
+    # Repeated local reference tables in the cChr body. Every listed slot has
+    # a peer-local heap address at frame 7; scalar bytes between the slots stay
+    # visible to the comparator.
+    *( (label, offset, 8)
+       for label in ("uCharacter.team0", "uCharacter.team1")
+       for offset in (
+           0x1898, 0x28A0, 0x2AB8, 0x2DC8, 0x2DE8, 0x2DF0, 0x2DF8, 0x2E00,
+           0x2F90, 0x2FA0,
+           *range(0x2FF0, 0x30A0, 8),
+           0x34F0,
+           *range(0x34F8, 0x3568, 8),
+           0x35A8, 0x35B0, 0x35B8, 0x35C0,
+           *range(0x35D8, 0x3600, 8),
+       ) ),
+    # Remaining pointer-shaped slots identified by the frame-7 address
+    # pattern. Nearby four-byte fields remain visible.
+    *( (label, offset, 8)
+       for label in ("uCharacter.team0", "uCharacter.team1")
+       for offset in (0x3270, 0x3608, 0x3618, 0x3628, 0x3C40, 0x3DB0,
+                     0x6460, 0x6740, 0x67F0) ),
 }
 FRAME0_EXPLICIT_BYTE_OVERRIDES = {
     ("uActionSideCamera", 0x18, 8),
@@ -477,10 +525,16 @@ def collect_explicit_region_overrides(dump_a, dump_b):
         label_b = region_label(index, region_b, dump_b, resolver_b)
         if label_a != label_b:
             continue
+        data_a = frame_a.data[region_a.data_offset:region_a.data_offset + region_a.size]
         if label_a in EXPLICIT_REGION_OVERRIDES:
             overrides.add((index, label_a, 0, region_a.size))
         for override_label, offset, size in EXPLICIT_BYTE_OVERRIDES:
             if label_a == override_label and offset + size <= region_a.size:
+                overrides.add((index, label_a, offset, size))
+        saved_vtable = int.from_bytes(data_a[:8], "little") if len(data_a) >= 8 else 0
+        vtable_rva = saved_vtable - dump_a.image_base
+        for offset, size in EXPLICIT_VTABLE_BYTE_OVERRIDES.get(vtable_rva, ()):
+            if offset + size <= len(data_a):
                 overrides.add((index, label_a, offset, size))
     return overrides
 

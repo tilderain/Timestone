@@ -150,6 +150,34 @@ first `uModel::Motion` record (`+0x640`, `+0x660`, `+0x680`, `+0x688`, `+0x690`,
 allocation pointers populated by `uModel__bindMotionEntryToSlot` and
 `uModel__getMotionListEntry`; motion-slot scalar state remains compared.
 
+The embedded `cActorGameModelAnm` pointer slots at `uCharacter+0x1360`,
+`+0x1368`, `+0x1370`, `+0x1380`, `+0x1390`, `+0x1398`, `+0x13a0`, `+0x13a8`,
+and `+0x13b0`, `+0x13e8`, `+0x13f0`, and `+0x13f8` are also excluded.
+`cActorGameModelAnm__advanceCommandBlock`
+and `cActorGameModelAnm__advanceActionTime` consume these as owner, command
+block, command cursor, and resource pointers. Command indices, counters, stop
+flags, animation numbers, and animation times remain compared; only the raw
+peer-local addresses are normalized.
+
+The constraint/share pointer slots at `uCharacter+0x1468`, `+0x1478`, and
+`+0x1540` are excluded as well. They sit in the `mCnsShareList` and adjacent
+constraint/model ownership area; `uCharacter__updateConstraints` and
+`uActorShareModel__vfn_2_19` consume the referenced model/constraint resources.
+The constraint count, joint numbers, modes, flags, and other scalar state are
+not excluded.
+
+Additional repeated pointer tables in the cChr body are normalized at their
+full qword boundaries, including the clusters around `+0x1898`, `+0x28a0`,
+`+0x2ab8`, `+0x2dc8..+0x2e00`, `+0x2f90..+0x309f`, and
+`+0x34f0..+0x35ff`. The frame-7 differences occur only in their peer-local heap
+address bytes. Non-pointer bytes before, between, and after these slots remain
+compared to expose any scalar desync.
+
+The final pointer-shaped offsets in this capture are also normalized at
+`+0x3270`, `+0x3608`, `+0x3618`, `+0x3628`, `+0x3c40`, `+0x3db0`, `+0x6460`,
+`+0x6740`, and `+0x67f0`. Their changed bytes form peer-local heap addresses;
+adjacent four-byte values remain compared.
+
 `sAction.full+0x3634` is also excluded. The full region is a deliberate 0x20000
 broad capture for defeat replacement, while current Ghidra gives the real
 `sAction` size as 0x250. The byte is outside both that object and the separate
@@ -269,6 +297,15 @@ normalization:
   `+0x5540`. High-offset differences therefore cannot safely receive `sAction`
   field names or pointer recipes.
 
+The remaining singleton-header differences are non-gameplay state. `sShot+0x8`,
+`sCamera+0x8`, and `sAction+0x8` are the inherited `cSystem` synchronization
+tail. `uActionSideCamera+0x18..0x1f` is the inherited `cUnit` pointer slot; the
+reported `+0x1a` byte is inside that pointer, not an independent camera flag.
+The compact capture also excludes the native `sAction` cRef at `+0x1f0..0x20f`
+and adjacent-allocation spill from `+0x250..0x2ff`. These bytes are not
+restored by the compact gameplay ranges and cannot affect simulation through
+the rollback snapshot path.
+
 The first frame-0 `sAction` differences illustrate the distinction:
 
 - `+0x08` is inherited `cSystem` synchronization state. It is real memory, but
@@ -288,7 +325,19 @@ The first frame-0 `sAction` differences illustrate the distinction:
 Therefore the `sAction` report is not fabricated: offsets below `0x250` are
 bytes from the real object. However, byte-level output must be interpreted with
 pointer alignment and inheritance in mind. Only offsets beyond `0x250` are
-guaranteed to be adjacent captured objects rather than `sAction` fields.
+  guaranteed to be adjacent captured objects rather than `sAction` fields.
+
+After removing those non-gameplay fields, the current pair leaves only two
+pointer slots: `sAction+0x120` (`mpActionParam`) and `sAction+0x1d0`
+(`mpCamList`). The dump values confirm that only allocation addresses differ:
+the pointers have the same low-level resource role and stable peer-local
+displacement across the timeline. Ghidra confirms that `sAction::classFunc`
+loads `boot\\actionparam` and `boot\\actioncam`, while
+`rActionParam::convert` copies the immutable ACP image into persistent storage.
+The resources themselves are meaningful, but these raw pointer bytes are not
+their payload and are now normalized at the aligned qword slots. A future
+resource-key or payload-hash diagnostic can replace this address-level rule
+with direct content verification.
 
 RE5 and Dragon debug layouts supply cross-version semantic evidence for the
 joint and motion field order. Devil 4 confirms the surrounding `uModel` order
