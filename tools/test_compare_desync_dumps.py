@@ -404,6 +404,34 @@ class CompareSnapDumpsTest(unittest.TestCase):
             report["first_divergence"]["regions"][0]["differences_sample"][0]["offset"],
         )
 
+    def test_skips_character_render_frame_stamp(self):
+        base_a, base_b = 0x140000000, 0x150000000
+        data_a = bytearray(0x200)
+        data_b = bytearray(data_a)
+        data_a[0x18C:0x190] = struct.pack("<I", 61)
+        data_b[0x18C:0x190] = struct.pack("<I", 66)
+        write_dump(
+            self.path_a, 1, base_a,
+            [(2, 0x11, 0x22, 0x0F750000, bytes(data_a))],
+            version=2, region_name="uCharacter.team1",
+        )
+        write_dump(
+            self.path_b, 2, base_b,
+            [(2, 0x22, 0x11, 0x0F710000, bytes(data_b))],
+            version=2, region_name="uCharacter.team1",
+        )
+
+        report = compare.build_report(
+            compare.load_dump(self.path_a), compare.load_dump(self.path_b), 32, 16
+        )
+        self.assertEqual("match", report["verdict"])
+
+        conservative = compare.build_report(
+            compare.load_dump(self.path_a), compare.load_dump(self.path_b), 32, 16,
+            skip_frame0_pointers=False,
+        )
+        self.assertEqual("diverged", conservative["verdict"])
+
     def test_keeps_scalar_difference_despite_pointer_relocations(self):
         base_a, base_b = 0x140000000, 0x150000000
         pointers_a = [0x5DFACB0, 0x5DFACE0, 0x5DFE7D0, 0x5DFAD10]

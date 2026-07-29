@@ -110,6 +110,18 @@ DTI size `0x68f4`, so they are adjacent-allocation spill. The comparator exclude
 the complete `[0x68f4, 0x6a60)` tail, gated by the concrete Chun-Li vtable rather
 than applying the boundary to all character regions.
 
+The inherited `uBaseModel+0x18c` dword in each character is also excluded by
+default. `uBaseModel_vfn22` at `0x14055fdc0` atomically copies the counter at
+`sRender+0x6764c` into this field, then calls `FUN_1405dcca0` for attached models
+only when the stamp changes. `sRender__beginFrame` at `0x140537080` increments
+the source once per rendered frame. It is therefore a process-local render-cache
+invalidation stamp: all models rendered in one process share its sequence, while
+peers can differ according to local presentation history. It does not drive
+simulation or gameplay. The override covers exactly four bytes at `+0x18c` in
+`uCharacter.team0` and `uCharacter.team1`; the neighboring reflected LOD fields
+at `+0x184` and `+0x188` remain compared. As with the other semantic overrides,
+`--no-skip-frame0-pointers` restores conservative comparison.
+
 The `uCharacter+0x133c` differences remain compared. Ghidra identifies the full
 32-bit field as `uActorGameModel::mAnmSerial`, but executable behavior overturns
 the earlier animation-generation interpretation. `cChr__cacheMainField72` at

@@ -21,6 +21,10 @@ DEFAULT_SKIP_FRAME0_POINTERS = True
 EXPLICIT_REGION_OVERRIDES = {
     "uCharacter.motionBlend",
 }
+EXPLICIT_BYTE_OVERRIDES = {
+    ("uCharacter.team0", 0x18C, 4),
+    ("uCharacter.team1", 0x18C, 4),
+}
 FRAME0_EXPLICIT_BYTE_OVERRIDES = {
     ("uActionSideCamera", 0x18, 8),
     ("uCharacter.externalAnimation", 0x92, 1),
@@ -379,8 +383,13 @@ def collect_explicit_region_overrides(dump_a, dump_b):
             continue
         label_a = region_label(index, region_a, dump_a, resolver_a)
         label_b = region_label(index, region_b, dump_b, resolver_b)
-        if label_a == label_b and label_a in EXPLICIT_REGION_OVERRIDES:
+        if label_a != label_b:
+            continue
+        if label_a in EXPLICIT_REGION_OVERRIDES:
             overrides.add((index, label_a, 0, region_a.size))
+        for override_label, offset, size in EXPLICIT_BYTE_OVERRIDES:
+            if label_a == override_label and offset + size <= region_a.size:
+                overrides.add((index, label_a, offset, size))
     return overrides
 
 
