@@ -109,6 +109,7 @@ void Rollback_ClearStalePointers()
     if (!sCharacter) return;
 
     static constexpr uintptr_t SLOT_ARRAY_OFFSET = 0x6748;
+    static constexpr uint32_t SLOT_COUNT = 64;
     static constexpr uint32_t STALE_SLOT_INDICES[] = {1, 14, 15};
     MemoryRegionCache memory;
 
@@ -128,6 +129,17 @@ void Rollback_ClearStalePointers()
                         if (!memory.IsAccessible(slot)) break;
                         ClearModelMaterialCache(*(uint64_t*)slot, memory);
                     }
+                }
+
+                // Effect retirement can leave any indexed slot pointing at an
+                // allocation whose vtable has already been overwritten.
+                for (uint32_t index = 0; index < SLOT_COUNT; ++index) {
+                    uint64_t slot = character + SLOT_ARRAY_OFFSET +
+                        (uint64_t)index * sizeof(uint64_t);
+                    if (!memory.IsAccessible(slot)) break;
+                    uint64_t object = *(uint64_t*)slot;
+                    if (object && !HasCallableDtiVirtual(object, memory))
+                        *(uint64_t*)slot = 0;
                 }
 
                 for (uint32_t index : STALE_SLOT_INDICES) {
