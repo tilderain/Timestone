@@ -240,6 +240,14 @@ at `0x1400BE8F0`), which handles:
 X-Factor, assist counts, active character tracking) is essential for
 deterministic simulation. These values change every frame during combat.
 
+The two `sCharacter::mChgOrder` records at `sCharacter + 0x5C0` are also
+authoritative. Each record is `0x20` bytes. `cChrNode__updatePosition_maybe`
+advances these records and eventually submits the pending IDs consumed by
+`cChrTeam__commitPendingCharacterSwap`. Restoring `mpCurrentChr` without these
+records can rewind the selected point character while retaining transition
+progress from the prediction timeline, causing the replayed swap never to be
+submitted.
+
 **uCharacter verified layout** (from `cChr__createProperty` at `0x1400511D0`):
 
 | Offset   | Size | Field               | Notes                      |

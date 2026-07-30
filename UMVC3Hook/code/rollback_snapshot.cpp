@@ -44,6 +44,8 @@ static constexpr size_t SACTION_MODEL_JOINT_ALLOCATION_SIZE = SACTION_MODEL_JOIN
 static constexpr uintptr_t TEAM0_OFFSET = 0x40;
 static constexpr uintptr_t TEAM1_OFFSET = 0x300;
 static constexpr size_t TEAM_SIZE = 0x2C0;
+static constexpr uintptr_t SCHARACTER_CHANGE_ORDER_OFFSET = 0x5C0;
+static constexpr size_t SCHARACTER_CHANGE_ORDER_SIZE = 0x40;
 static constexpr size_t SCOLLISION_SIZE = 0x239E0;
 static constexpr size_t SCOLLISION_BVH_COUNT = 0x1F;
 static constexpr size_t SCOLLISION_NODE_SIZE = 0x40;
@@ -817,6 +819,16 @@ static int BuildRegionsUncached(Region* regions, int maxRegions,
     // ---- 11-16. Per-character uCharacter + 17-18. cChrTeam ----
     uint64_t sCharacter = read.operator()<uint64_t>(_addr(PTR_SCHARACTER));
     if (sCharacter) {
+        // Two 0x20-byte transition records drive tag/assist entry and eventually
+        // populate cChrTeam's pending swap IDs. They sit outside cChrTeam, so
+        // restoring only the team and character bodies leaves prediction-time
+        // transition progress active after a rollback.
+        add((void*)(sCharacter + SCHARACTER_CHANGE_ORDER_OFFSET),
+            SCHARACTER_CHANGE_ORDER_SIZE, 0, 0, false
+#if ROLLBACK_SNAPDUMP_ENABLED
+            , "sCharacter.changeOrder"
+#endif
+        );
         uint64_t team0 = sCharacter + TEAM0_OFFSET;
         uint64_t team1 = sCharacter + TEAM1_OFFSET;
         add((void*)team0, TEAM_SIZE, 0, 0, false

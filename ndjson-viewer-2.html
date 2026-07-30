@@ -90,6 +90,9 @@ td code { color:#00d4ff; word-break:break-all; }
     <span class="spacer"></span>
     <label><input id="showBench" type="checkbox" checked> Show assists</label>
     <label><input id="showCollision" type="checkbox"> Show hitboxes</label>
+    <label><input id="showRegions" type="checkbox"> Show regions</label>
+    <label><input id="calculateCharacters" type="checkbox"> Calculate full characters</label>
+    <label><input id="showCharacters" type="checkbox" disabled> Show full characters</label>
     <label><input id="showDifferences" type="checkbox"> Snapshot differences</label>
   </div>
   <div class="content"><section class="main">
@@ -172,7 +175,9 @@ function decodeFighters(dump,frame) {
   const result=[];
   for(let team=0;team<2;team++) {
     const teamRegion=frame.regions.find(region=>region.name===`cChrTeam[${team}]`);
-    const activeAddress=teamRegion && teamRegion.size>=0x50 ? u64(regionView(frame,teamRegion),0x48) : 0;
+    const teamView=teamRegion ? regionView(frame,teamRegion) : null;
+    const activeAddress=teamView && teamRegion.size>=0x50 ? u64(teamView,0x48) : 0;
+    const mCPrgF=teamView && teamRegion.size>=0x100 ? u32(teamView,0xFC) : null;
     fighterRegions(frame,team).forEach((region,slot)=>{
       const view=regionView(frame,region), pos=[finiteFloat(view,0x50),finiteFloat(view,0x54),finiteFloat(view,0x58)];
       const collision=[];
@@ -193,7 +198,7 @@ function decodeFighters(dump,frame) {
           }
         }
       }
-      result.push({team,slot,role:dump.role,pos,active:activeAddress===region.address,action:u32(view,0x1310),flags:u32(view,0x14F0),collision});
+      result.push({team,slot,role:dump.role,pos,active:activeAddress===region.address,action:u32(view,0x1310),flags:u32(view,0x14F0),mCPrgF,collision});
     });
   }
   return result;
@@ -207,6 +212,128 @@ function fighterPairs(frameNumber) {
   const hostMap=new Map(host.map(fighter=>[fighterKey(fighter),fighter])),clientMap=new Map(client.map(fighter=>[fighterKey(fighter),fighter]));
   return Array.from(new Set([...hostMap.keys(),...clientMap.keys()])).sort().map(key=>({key,host:hostMap.get(key)||null,client:clientMap.get(key)||null}));
 }
+// Flattened from the current Ghidra uActorGameModel -> uCharacter -> cChr layouts.
+// Broad array/state records name every contained dword; narrower scalar fields win.
+const CHARACTER_FIELDS=[];
+function addField(owner,name,offset,size=4) { CHARACTER_FIELDS.push({owner,name,offset,size}); }
+addField('uActorGameModel','base',0,0x1300);
+[
+  [0x1300,'uActorGameModel'],[0x1304,'mDeltaTimeLocal'],[0x1310,'mAnmNo'],
+  [0x1314,'mAnmNoOld'],[0x1318,'mAnmNoReq'],[0x131C,'mAnmTimeReq'],
+  [0x1320,'mAnmNoTakeon'],[0x1328,'mAnmTime'],[0x132C,'mAnmTimePass'],
+  [0x1330,'mAnmRate'],[0x1334,'mAnmWait'],[0x1338,'mAnmWaitTime'],
+  [0x133C,'mAnmSerial'],[0x1340,'mWaitMotType'],[0x1348,'mpOwner',8],
+].forEach(field=>addField('uActorGameModel',field[1],field[0],field[2]||4));
+addField('uActorGameModel','reserved_1350',0x1350,0x100);
+addField('uCharacter','mCnsShareList',0x1450,0x20);
+addField('uCharacter','mCnsJointNum',0x1470);
+addField('uCharacter','pad_1474',0x1474,0x0C);
+addField('uCharacter','mHipRate',0x1480);
+addField('uCharacter','mHipRateOfs',0x1484);
+addField('uCharacter','pad_1488',0x1488,0x18);
+addField('uCharacter','mConstraintShareFlags',0x14A0);
+addField('uCharacter','reserved_14A4',0x14A4,0x4C);
+[
+  [0x14F0,'mChrF'],[0x14F4,'mAnmF'],[0x14F8,'mPrgF'],[0x14FC,'mNotF'],
+  [0x1500,'mNo2F'],[0x1504,'mDmgF'],[0x1508,'mEtcF'],[0x150C,'mEt2F'],
+  [0x1510,'mUsrF'],[0x1514,'mDbgF'],[0x1518,'flag_state',0x18],
+  [0x1530,'mStatus',0x30],[0x1560,'mAbility',0x318],[0x1878,'mAtkCtrl',0x950],
+  [0x21C8,'mInput',0x570],[0x2738,'mCmdSpatk',0x218],[0x2950,'mCmdCombo',0x218],
+  [0x2B68,'pad_2B68',8],[0x2B70,'mJointHold',0xE0],[0x2C50,'mMessages',0x120],
+  [0x2D70,'mPause',0x10],[0x2D80,'mRandom',0x10],[0x2D90,'mbRandomize',1],
+  [0x2D91,'state_2D91',0x0B],[0x2D9C,'mId'],[0x2DA0,'mPlrId'],
+  [0x2DA4,'mTeamId'],[0x2DA8,'mSettingId'],[0x2DAC,'mDefMemberId'],
+  [0x2DB0,'mMemberId'],[0x2DB4,'identity_2DB4'],[0x2DB8,'mBody'],
+  [0x2DBC,'mAssistType'],[0x2DC0,'mLanguage'],[0x2DC4,'mExCpu'],
+  [0x2DC8,'resources',0x838],[0x3600,'mResourceRefs',0x30],[0x3630,'mEyes',0x5C0],
+  [0x3BF0,'mCnsHelper',0x170],[0x3D60,'mCnsNeck',0x170],[0x3ED0,'mFaceParts'],
+  [0x3ED4,'pad_3ED4'],[0x3ED8,'mChainArray',0x20],[0x3EF8,'mChainColArray',0x20],
+  [0x3F18,'mChainResArray',0x20],[0x3F38,'mWeaponNum'],[0x3F3C,'weapon_state',0x0C],
+  [0x3F48,'mAnmNoReqAlive'],[0x3F4C,'mAnmNoReqStd'],[0x3F50,'mAnmNoReqCmd'],
+  [0x3F54,'anm_request_state',8],[0x3F5C,'mDeltaRateAnm'],[0x3F60,'mMotMode'],
+  [0x3F64,'mNextMotBlend'],[0x3F68,'mThrowAnmNo'],[0x3F6C,'mTdownAnmNo'],
+  [0x3F70,'ep_state',8],[0x3F78,'mThrowAnmNoEPLast'],[0x3F7C,'mTdownAnmNoEPLast'],
+  [0x3F80,'mEPCnt'],[0x3F84,'ep_counts',0x14],[0x3F98,'mAnmNoCombo'],
+  [0x3F9C,'animation_state',0x114],[0x40B0,'mPos',0x10],[0x40C0,'mMove',0x10],
+  [0x40D0,'mMoveAux',0x10],[0x40E0,'mFSpd'],[0x40E4,'mFAcl'],[0x40E8,'mYSpd'],
+  [0x40EC,'mYAcl'],[0x40F0,'mOtherYSpd'],[0x40F4,'mOtherYAcl'],
+  [0x40F8,'mDSpd'],[0x40FC,'mDAcl'],[0x4100,'mBSpd'],[0x4104,'mBAcl'],
+  [0x4108,'mWSpd'],[0x410C,'mWAcl'],[0x4110,'mJSpd'],[0x4114,'mJDir'],
+  [0x4118,'mISpd'],[0x411C,'mIAcl'],[0x4120,'mIDir'],[0x4124,'mFlyHSpd'],
+  [0x4128,'mFlyVSpd'],[0x412C,'mFlyAcl'],[0x4130,'mFlyDir'],[0x4134,'mFlySpdMax'],
+  [0x4138,'movement_state',0x0C],[0x4144,'mNDmgTimer'],[0x4148,'mNTDownTimer'],
+  [0x414C,'mStiffWait'],[0x4150,'mStiffWaitRes'],[0x4154,'mStiffDmg'],
+  [0x4158,'mStiffGuard'],[0x415C,'mStiffUkemi'],[0x4160,'mStiffDown'],
+  [0x4164,'mHitCount'],[0x4168,'combat_counters',0xA8],
+  [0x4210,'mHitPrimCapsules',0xB00],[0x4D10,'mHitPrimCapsuleArrays',0x100],
+  [0x4E10,'collision_state_4E10',0x10],[0x4E20,'mHitPrimSpheres0',0x700],
+  [0x5520,'collision_state_5520',0x10],[0x5530,'mHitPrimSpheres1',0x700],
+  [0x5C30,'collision_state_5C30',0x10],[0x5C40,'mHitPrimSpheres2',0x700],
+  [0x6340,'combat_arrays',0x30],[0x6370,'mComboDmgRate'],[0x6374,'mComboGaugeRate'],
+  [0x6378,'mHVRDmgRate'],[0x637C,'mDHCDmgRate'],[0x6380,'mLastHDmg'],
+  [0x6384,'mLastHAnmNo'],[0x6388,'last_hit_state',0x0C],[0x6394,'mLastDDmg'],
+  [0x6398,'mLastDComboRate'],[0x639C,'damage_state',0x18],[0x63B4,'mDmgSta'],
+  [0x63B8,'mDmgPowLv'],[0x63BC,'mDmgPoint'],[0x63C0,'mDmgMaterial'],
+  [0x63C4,'mDmgDir'],[0x63C8,'mAirTime'],[0x63CC,'mAirTimeOfs'],
+  [0x63D0,'mAirDist'],[0x63D4,'mAirSpeed'],[0x63D8,'mAirFallAcl'],
+  [0x63DC,'mDmgHitCount'],[0x63E0,'mDmgAirHitCount'],[0x63E4,'mDmgHeap'],
+  [0x63E8,'pad_63E8'],[0x63EC,'mDmgTime'],[0x63F0,'mDmgAirTime'],
+  [0x63F4,'mComboDmgTotal'],[0x63F8,'mStunCharge'],[0x63FC,'mSameTdownNum'],
+  [0x6400,'mSpArmorTimer'],[0x6404,'mSpArmorDmgRate'],[0x6408,'mSpArmorShield'],
+  [0x640C,'mGuardType'],[0x6410,'mUkemiType'],[0x6414,'mDownEscType'],
+  [0x6418,'mCHitType'],[0x641C,'mThrowEscType'],[0x6420,'mAdvGType'],
+  [0x6424,'mVCounterType'],[0x6428,'shot_state',0x18],[0x6440,'mCurrentShotGroup'],
+  [0x6444,'shot_groups',0x4C],[0x6490,'mTargetChrInfo',0x80],
+  [0x6510,'mAtkChrInfo',0x80],[0x6590,'mDmgChrInfo',0x80],
+  [0x6610,'mThrowChrInfo',0x80],[0x6690,'mParentChrInfo',0x80],
+  [0x6710,'relations_and_shots',0xF0],[0x6800,'mShotDefenseType'],
+  [0x6804,'mShotMutekiType'],[0x6808,'shot_group_state',0x38],
+  [0x6840,'mAtkInfoArray0',0x40],[0x6880,'mAtkInfoArray1',0x40],
+  [0x68C0,'combat_tail',0x10],[0x68D0,'mShortChargeSPCRate'],
+  [0x68D4,'stiff_adjust_state'],[0x68D8,'mStiffAdjustParam'],[0x68DC,'pad_68DC'],
+  [0x68E0,'mCombatTailVector',0x10],
+].forEach(field=>addField('cChr',field[1],field[0],field[2]||4));
+CHARACTER_FIELDS.sort((a,b)=>a.offset-b.offset||a.size-b.size);
+function characterFieldAt(offset) {
+  let best=null;
+  for(const field of CHARACTER_FIELDS) {
+    if(field.offset>offset) break;
+    if(offset<field.offset+field.size && (!best||field.size<best.size)) best=field;
+  }
+  if(!best) return '';
+  const inner=offset-best.offset;
+  return `${best.owner}.${best.name}${inner?` +${hex(inner,2)}`:''}`;
+}
+function compareMiscCharacterState(frameNumber) {
+  if(!$('calculateCharacters').checked) return [];
+  if(state.dumps.length<2) return [];
+  const hostDump=state.dumps.find(dump=>dump.role==='host')||state.dumps[0];
+  const clientDump=state.dumps.find(dump=>dump.role==='client')||state.dumps[1];
+  const hostFrame=hostDump?.byFrame.get(frameNumber),clientFrame=clientDump?.byFrame.get(frameNumber);
+  if(!hostFrame?.regions||!clientFrame?.regions) return [];
+  const result=[];
+  for(let team=0;team<2;team++) {
+    const hostRegions=fighterRegions(hostFrame,team),clientRegions=fighterRegions(clientFrame,team);
+    for(let slot=0;slot<Math.max(hostRegions.length,clientRegions.length);slot++) {
+      const hostRegion=hostRegions[slot],clientRegion=clientRegions[slot];
+      if(!hostRegion||!clientRegion) continue;
+      const hostView=regionView(hostFrame,hostRegion),clientView=regionView(clientFrame,clientRegion),words=[];
+      const size=Math.max(hostView.byteLength,clientView.byteLength);
+      let differingWords=0;
+      for(let offset=0;offset<size;offset+=4) {
+        const hostSize=Math.max(0,Math.min(4,hostView.byteLength-offset));
+        const clientSize=Math.max(0,Math.min(4,clientView.byteLength-offset));
+        const host=hostSize?readBytes(hostView,offset,hostSize):new Uint8Array();
+        const client=clientSize?readBytes(clientView,offset,clientSize):new Uint8Array();
+        const different=byteDiff(host,client);
+        if(different) differingWords++;
+        if($('showCharacters').checked) words.push({offset,host,client,different,field:characterFieldAt(offset)});
+      }
+      result.push({team,slot,regionIndex:hostFrame.regions.indexOf(hostRegion),vtable:hostRegion.vtable,size,differingWords,words});
+    }
+  }
+  return result;
+}
 function compareVisualFighters(frameNumber) {
   if(state.dumps.length<2) return [];
   const first=decodeFighters(state.dumps[0],state.dumps[0].byFrame.get(frameNumber));
@@ -218,8 +345,8 @@ function compareVisualFighters(frameNumber) {
     if(!b) { mismatches.push({key:fighterKey(a),a,b:null,position:true,flags:true,action:true,active:true,distance:null}); continue; }
     const delta=a.pos.map((value,index)=>value-b.pos[index]);
     const distance=Math.hypot(...delta);
-    const position=distance>0.001, flags=a.flags!==b.flags, action=a.action!==b.action, active=a.active!==b.active;
-    if(position||flags||action||active) mismatches.push({key:fighterKey(a),a,b,position,flags,action,active,distance,delta});
+    const position=distance>0.001, flags=a.flags!==b.flags, mCPrgF=a.mCPrgF!==b.mCPrgF, action=a.action!==b.action, active=a.active!==b.active;
+    if(position||flags||mCPrgF||action||active) mismatches.push({key:fighterKey(a),a,b,position,flags,mCPrgF,action,active,distance,delta});
   }
   return mismatches;
 }
@@ -263,9 +390,9 @@ function drawArena(frameNumber) {
       } else {
         const center=screen(...shape.center);context.arc(...center,radius,0,Math.PI*2);
       }
-      context.globalAlpha=fighter.active?.08:.025;context.fill();context.globalAlpha=fighter.active?.7:.22;context.stroke();context.restore();
+      context.globalAlpha=fighter.active?.7:.22;context.stroke();context.restore();
     }
-    context.save();context.globalAlpha=fighter.active?1:.35;context.strokeStyle=mismatch?'#ff7b72':color;context.fillStyle=color;context.lineWidth=mismatch?4:(fighter.active?3:1.5);context.setLineDash(fighter.role==='client'?[6,3]:[]);context.beginPath();context.arc(x,y,fighter.active?9:6,0,Math.PI*2);fighter.role==='host'||fighter.role==='offline'?context.fill():context.stroke();context.setLineDash([]);context.font=`${fighter.active?'bold ':''}11px ui-monospace`;context.textAlign='center';context.fillStyle=mismatch?'#ff7b72':color;context.fillText(`${fighter.role[0].toUpperCase()} P${fighter.team+1}:${fighter.slot}${fighter.active?' POINT':''}${mismatch?' DESYNC':''}`,x,y-15);context.font='10px ui-monospace';context.fillText(`act ${hex(fighter.action,4)} flags ${hex(fighter.flags,8)}`,x,y+25);context.restore();
+    context.save();context.globalAlpha=fighter.active?1:.35;context.strokeStyle=mismatch?'#ff7b72':color;context.fillStyle=color;context.lineWidth=mismatch?4:(fighter.active?3:1.5);context.setLineDash(fighter.role==='client'?[6,3]:[]);context.beginPath();context.arc(x,y,fighter.active?9:6,0,Math.PI*2);fighter.role==='host'||fighter.role==='offline'?context.fill():context.stroke();context.setLineDash([]);context.font=`${fighter.active?'bold ':''}11px ui-monospace`;context.textAlign='center';context.fillStyle=mismatch?'#ff7b72':color;context.fillText(`${fighter.role[0].toUpperCase()} P${fighter.team+1}:${fighter.slot}${fighter.active?' POINT':''}${mismatch?' DESYNC':''}`,x,y-15);context.restore();
   }
 }
 function compareFrames(a,b) {
@@ -313,20 +440,36 @@ function update() {
     const posSame=!!host&&!!client&&host.pos.every((value,index)=>Math.abs(value-client.pos[index])<=.001);
     const actionSame=!!host&&!!client&&host.action===client.action;
     const flagsSame=!!host&&!!client&&host.flags===client.flags;
+    const mCPrgFSame=!!host&&!!client&&host.mCPrgF===client.mCPrgF;
     const activeSame=!!host&&!!client&&host.active===client.active;
-    const allSame=posSame&&actionSame&&flagsSame&&activeSame;
+    const allSame=posSame&&actionSame&&flagsSame&&mCPrgFSame&&activeSame;
     const color=team===0?'p1-color':'p2-color', dot=team===0?'#4fc3f7':'#ef5350', role=slot===0?'Point':`Assist ${slot}`;
     const row=(label,hostValue,clientValue,same,delta='')=>`<tr class="${same?'':'mismatch-bg'}"><th>${label}</th><td>${hostValue}</td><td>${clientValue}</td><td class="${same?'ok':'bad'}">${delta|| (same?'✓':'✗')}</td></tr>`;
     let section=`<div class="section"><div class="char-header ${color}"><span class="dot" style="background:${dot}"></span>P${team+1} ${role}${allSame?'':' <span class="bad">DESYNC</span>'}</div><table><tr><th></th><th>Host</th><th>Client</th><th>Δ</th></tr>`;
     for(let axis=0;axis<3;axis++) { const hv=host?host.pos[axis]:null,cv=client?client.pos[axis]:null,same=hv!==null&&cv!==null&&Math.abs(hv-cv)<=.001;section+=row(['X','Y','Z'][axis],hv===null?'—':hv.toFixed(4),cv===null?'—':cv.toFixed(4),same,hv===null||cv===null?'✗':(hv-cv).toFixed(4)); }
     section+=row('Act',host?hex(host.action):'—',client?hex(client.action):'—',actionSame);
     section+=row('mChrF',host?hex(host.flags):'—',client?hex(client.flags):'—',flagsSame);
+    section+=row('mCPrgF',host?hex(host.mCPrgF):'—',client?hex(client.mCPrgF):'—',mCPrgFSame);
     section+=row('Point',host?String(host.active):'—',client?String(client.active):'—',activeSame);
     const distance=host&&client?Math.hypot(...host.pos.map((value,index)=>value-client.pos[index])):null;
     section+=`<tr class="${posSame?'':'mismatch-bg'}"><th>Δ Mag</th><td colspan="3" class="${posSame?'ok':'bad'}">${distance===null?'—':distance.toFixed(6)}</td></tr></table></div>`;
     $('inspector').innerHTML+=section;
   }
-  if(frame.regions) $('inspector').innerHTML += '<div class="section"><h2>Regions</h2><table><tr><th>Name</th><th>Size</th><th>Hash</th></tr>'+frame.regions.map(r=>`<tr><td>${r.name||'(unnamed)'}</td><td>${r.size}</td><td><code>${hex(r.hash,16)}</code></td></tr>`).join('')+'</table></div>';
+  const fullCharacters=compareMiscCharacterState(frame.number);
+  if($('calculateCharacters').checked && fullCharacters.length) {
+    const totalDifferences=fullCharacters.reduce((total,character)=>total+character.differingWords,0);
+    let misc=`<div class="section"><h2 class="${totalDifferences?'bad':'ok'}">Full character comparison: ${totalDifferences} differing dword${totalDifferences===1?'':'s'}</h2>`;
+    for(const character of fullCharacters) {
+      misc+=`<div class="char-header ${character.team===0?'p1-color':'p2-color'}"><span class="dot" style="background:${character.team===0?'#4fc3f7':'#ef5350'}"></span>P${character.team+1} ${character.slot===0?'Point':`Assist ${character.slot}`} <span class="${character.differingWords?'bad':'ok'}">region ${character.regionIndex}, ${character.size} bytes, ${character.differingWords} differing dwords</span></div>`;
+      if($('showCharacters').checked) {
+        misc+='<table><tr><th>Offset</th><th>Field</th><th>Host</th><th>Client</th><th>Match</th></tr>';
+        for(const word of character.words) misc+=`<tr class="${word.different?'mismatch-bg':''}"><th>+${hex(word.offset,4)}</th><td>${word.field||'—'}</td><td>${bytesHex(word.host)}</td><td>${bytesHex(word.client)}</td><td class="${word.different?'bad':'ok'}">${word.different?'✗':'✓'}</td></tr>`;
+        misc+='</table>';
+      }
+    }
+    $('inspector').innerHTML+=misc+'</div>';
+  }
+  if($('showRegions').checked && frame.regions) $('inspector').innerHTML += '<div class="section"><h2>Regions</h2><table><tr><th>Name</th><th>Size</th><th>Hash</th></tr>'+frame.regions.map(r=>`<tr><td>${r.name||'(unnamed)'}</td><td>${r.size}</td><td><code>${hex(r.hash,16)}</code></td></tr>`).join('')+'</table></div>';
 }
 function inspectDiff(diff,a,b) {
   const ra=a?.regions.find(r=>(r.name||'')===diff.region) || a?.regions[Number((diff.region.match(/\[(\d+)\]/)||[])[1])]; const rb=b?.regions.find(r=>(r.name||'')===diff.region) || b?.regions[Number((diff.region.match(/\[(\d+)\]/)||[])[1])];
@@ -368,6 +511,13 @@ $('next').onclick=()=>move(1);
 $('slider').oninput=e=>{state.index=Number(e.target.value);update()};
 $('showBench').onchange=update;
 $('showCollision').onchange=update;
+$('showRegions').onchange=update;
+$('calculateCharacters').onchange=()=>{
+  $('showCharacters').disabled=!$('calculateCharacters').checked;
+  if(!$('calculateCharacters').checked) $('showCharacters').checked=false;
+  update();
+};
+$('showCharacters').onchange=update;
 $('showDifferences').onchange=()=>{$('differencePanel').hidden=!$('showDifferences').checked;update()};
 window.addEventListener('resize',()=>{const frame=currentFrame();if(frame)drawArena(frame.number)});
 document.onkeydown=e=>{
