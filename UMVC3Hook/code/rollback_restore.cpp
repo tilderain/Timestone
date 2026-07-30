@@ -126,6 +126,8 @@ static constexpr SnapshotRange CCHR_SCALAR_RESTORE_RANGES[] = {
     {0x1350, 0x98},
     // mChrF through mEtcF and related character/program flags.
     {0x14F0, 0x28},
+    // Packed flag state immediately following the named character flags.
+    {0x1518, 0x18},
     // Remaining pointer-free state-check and animation-transition scalars.
     {0x154C, 0x14},
     // Per-character motion/constraint work records, first block.
@@ -199,6 +201,9 @@ static constexpr SnapshotRange CCHR_POST_RESTORE_TAIL_RANGES[] = {
     // Keep the saved EP counts and animation selector adjacent state aligned
     // before the next deterministic character tick.
     {0x3F84, 0x18},
+    // Native animation/model repair can rewrite this tail scalar after the
+    // main restore. Reapply it for deterministic character animation state.
+    {0x3EA8, 0x04},
 };
 
 static constexpr SnapshotRange SMAIN_RESTORE_RANGES[] = {
@@ -1348,6 +1353,32 @@ void Rollback_RestoreSnapshot(int32_t frame)
     // all 64 entries makes restored dead characters invisible.
     Rollback_SyncActiveCharacterUi();
     const uint64_t uiEnd = Profile_Now();
+
+    // Native shot/model/UI repair can run after the initial camera restore and
+    // rewrite the anchor's position and tracking fields. Reapply the saved
+    // authoritative camera scalars after all such repair work completes.
+    uint64_t liveCamera = *(uint64_t*)_addr(PTR_SCAMERA);
+    uint64_t liveCameraUnit = liveCamera
+        ? *(uint64_t*)(liveCamera + 0x58) : 0;
+    if (liveCameraUnit) {
+        offset = 0;
+        for (int i = 0; i < slot.regionCount; ++i) {
+            size_t copySize = slot.regions[i].size;
+            if (offset + copySize > slot.size)
+                copySize = slot.size - offset;
+            if ((uint64_t)slot.regions[i].ptr == liveCameraUnit) {
+                for (const SnapshotRange& range : UACTION_CAMERA_SCALAR_RESTORE_RANGES) {
+                    if ((size_t)range.offset + range.size <= copySize) {
+                        std::memcpy((uint8_t*)liveCameraUnit + range.offset,
+                                    slot.data + offset + range.offset,
+                                    range.size);
+                    }
+                }
+                break;
+            }
+            offset += slot.regions[i].size;
+        }
+    }
 
     std::memcpy(liveGlobalRng, (void*)_addr(0x140D765D8), sizeof(liveGlobalRng));
     HookLog("RNGRESTORE frame=%d stage=complete live=%08X,%08X,%08X,%08X\n",

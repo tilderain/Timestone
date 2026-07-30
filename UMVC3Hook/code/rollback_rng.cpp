@@ -25,6 +25,9 @@ static constexpr uintptr_t EFFECT_RNG_CALLSITE_A = 0x14080D423;
 static constexpr uintptr_t EFFECT_RNG_CALLSITE_B = 0x14080D4A0;
 static constexpr uintptr_t SOUND_RNG_CALLSITE_A = 0x1405D4C47;
 static constexpr uintptr_t SOUND_RNG_CALLSITE_B = 0x1405D4CBB;
+// sGSound::queueVoice5 selects a voice sampler variant directly with the
+// global stream; this path does not go through sGSound__selectRandomVoiceVariant.
+static constexpr uintptr_t SOUND_VOICE_QUEUE_RNG_CALLSITE = 0x1402AE35A;
 // sCamera::jitterStep uses the shared stream for screen shake when its
 // logistic-map mode is disabled. Jitter is presentation-only.
 static constexpr uintptr_t CAMERA_JITTER_CALLSITE_A = 0x14092E29D;
@@ -93,6 +96,7 @@ static bool IsPresentationRngCallsite(uint64_t caller)
            caller == _addr(EFFECT_RNG_CALLSITE_B) ||
            caller == _addr(SOUND_RNG_CALLSITE_A) ||
            caller == _addr(SOUND_RNG_CALLSITE_B) ||
+           caller == _addr(SOUND_VOICE_QUEUE_RNG_CALLSITE) ||
            caller == _addr(CAMERA_JITTER_CALLSITE_A) ||
            caller == _addr(CAMERA_JITTER_CALLSITE_B) ||
            caller == _addr(SHADOW_RNG_CALLSITE)) {
@@ -129,7 +133,8 @@ static int __fastcall hkSoundRandomVariant(uint64_t soundContext, void* soundRef
     return result;
 }
 
-static void __fastcall hkRngNextCommon(uint32_t* state, RngNextFn original)
+static void __fastcall hkRngNextCommon(uint32_t* state, RngNextFn original,
+                                       uint64_t caller)
 {
     if (!Netplay_IsActive()) {
         original(state);
@@ -145,7 +150,6 @@ static void __fastcall hkRngNextCommon(uint32_t* state, RngNextFn original)
     uint32_t before[4] = {};
     if (state)
         std::memcpy(before, state, sizeof(before));
-    const uint64_t caller = (uint64_t)__builtin_return_address(0);
     const bool isolateGlobalRng = state == (uint32_t*)_addr(GLOBAL_RNG_STATE) &&
         (IsStageObjectCallsite(caller) || IsPresentationRngCallsite(caller));
     uint32_t savedGlobal[4] = {};
@@ -178,12 +182,14 @@ static void __fastcall hkRngNextCommon(uint32_t* state, RngNextFn original)
 
 static void __fastcall hkRngNext(uint32_t* state)
 {
-    hkRngNextCommon(state, oRngNext);
+    hkRngNextCommon(state, oRngNext,
+                    (uint64_t)__builtin_return_address(0));
 }
 
 static void __fastcall hkRngNextImpl(uint32_t* state)
 {
-    hkRngNextCommon(state, oRngNextImpl);
+    hkRngNextCommon(state, oRngNextImpl,
+                    (uint64_t)__builtin_return_address(0));
 }
 
 static float __fastcall hkRngAdvance(uint64_t stateArg, void* rngOwner)
