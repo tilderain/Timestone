@@ -14,6 +14,15 @@ extern void HookLog(const char* fmt, ...);
 static constexpr uintptr_t FN_RNG_RANDOM_INT = 0x14014EB30;
 static constexpr uintptr_t FN_RNG_ADVANCE = 0x14014EAB0;
 static constexpr uintptr_t FN_RNG_NEXT = 0x14000AF80;
+static constexpr uintptr_t FN_RNG_NEXT_IMPL = 0x1404600F0;
+static constexpr uintptr_t FN_EFFECT_NEXT_RANDOM = 0x140543B70;
+// Stage object classes, their generic FSM helpers, and stage implementations
+// live in this image range. Their random results are local presentation state
+// and must never advance the shared gameplay stream.
+static constexpr uintptr_t STAGE_OBJECT_CODE_BEGIN = 0x1401CFC20;
+static constexpr uintptr_t STAGE_OBJECT_CODE_END = 0x140200000;
+static constexpr uintptr_t EFFECT_RNG_CALLSITE_A = 0x14080D423;
+static constexpr uintptr_t EFFECT_RNG_CALLSITE_B = 0x14080D4A0;
 static constexpr uintptr_t FN_SOUND_RANDOM_VARIANT = 0x1402A9110;
 static constexpr uintptr_t FN_HSIENKO_SELECT_ANKI = 0x1400A1260;
 static constexpr uintptr_t FN_SET_RESERVED_ANKI = 0x1400D4D90;
@@ -23,6 +32,7 @@ static constexpr uintptr_t GLOBAL_RNG_STATE = 0x140D765D8;
 using RandomIntRangeFn = int(__fastcall*)(void*, int, int, void*);
 using RngAdvanceFn = float(__fastcall*)(uint64_t, void*);
 using RngNextFn = void(__fastcall*)(uint32_t*);
+using EffectNextRandomFn = uint64_t(__fastcall*)(void*, int);
 using SoundRandomVariantFn = int(__fastcall*)(uint64_t, void*, int);
 using HsienKoSelectAnkiFn = int(__fastcall*)(void*);
 using SetReservedAnkiFn = void(__fastcall*)(void*, int);
@@ -31,6 +41,8 @@ using RChrCpuRngModNFn = uint32_t(__fastcall*)(void*, uint32_t);
 static RandomIntRangeFn oRandomIntRange = nullptr;
 static RngAdvanceFn oRngAdvance = nullptr;
 static RngNextFn oRngNext = nullptr;
+static RngNextFn oRngNextImpl = nullptr;
+static EffectNextRandomFn oEffectNextRandom = nullptr;
 static SoundRandomVariantFn oSoundRandomVariant = nullptr;
 static HsienKoSelectAnkiFn oHsienKoSelectAnki = nullptr;
 static SetReservedAnkiFn oSetReservedAnki = nullptr;
@@ -45,6 +57,26 @@ static int g_advanceTraceFrame = -1;
 static int g_advanceTraceCount = 0;
 
 static int RngTraceFrame();
+
+static bool IsStageObjectCallsite(uint64_t caller)
+{
+    const uint64_t address = caller;
+    return address >= _addr(STAGE_OBJECT_CODE_BEGIN) &&
+           address < _addr(STAGE_OBJECT_CODE_END);
+}
+
+static bool IsPresentationRngCallsite(uint64_t caller)
+{
+    return caller == _addr(EFFECT_RNG_CALLSITE_A) ||
+           caller == _addr(EFFECT_RNG_CALLSITE_B);
+}
+
+static uint64_t __fastcall hkEffectNextRandom(void* effect, int useEffectRng)
+{
+    // The native zero path advances the shared gameplay stream. Effects have
+    // their own state at sEffect+0x3C, so always draw from that local stream.
+    return oEffectNextRandom(effect, 1);
+}
 
 static int __fastcall hkSoundRandomVariant(uint64_t soundContext, void* soundRef,
                                            int variant)
@@ -61,10 +93,10 @@ static int __fastcall hkSoundRandomVariant(uint64_t soundContext, void* soundRef
     return result;
 }
 
-static void __fastcall hkRngNext(uint32_t* state)
+static void __fastcall hkRngNextCommon(uint32_t* state, RngNextFn original)
 {
     if (!Netplay_IsActive()) {
-        oRngNext(state);
+        original(state);
         return;
     }
 
@@ -77,7 +109,20 @@ static void __fastcall hkRngNext(uint32_t* state)
     uint32_t before[4] = {};
     if (state)
         std::memcpy(before, state, sizeof(before));
-    oRngNext(state);
+    const uint64_t caller = (uint64_t)__builtin_return_address(0);
+    const bool isolateGlobalRng = state == (uint32_t*)_addr(GLOBAL_RNG_STATE) &&
+        (IsStageObjectCallsite(caller) || IsPresentationRngCallsite(caller));
+    uint32_t savedGlobal[4] = {};
+    if (isolateGlobalRng)
+        std::memcpy(savedGlobal, state, sizeof(savedGlobal));
+
+    original(state);
+
+    if (isolateGlobalRng) {
+        std::memcpy(state, savedGlobal, sizeof(savedGlobal));
+        HookLog("PRESENTRNG frame=%d resim=%d caller=0x%llX state=preserved\n",
+                frame, g_isResimulating ? 1 : 0, caller);
+    }
 
     if (state && g_advanceTraceCount++ < 256) {
         uint64_t global = _addr(GLOBAL_RNG_STATE);
@@ -85,10 +130,20 @@ static void __fastcall hkRngNext(uint32_t* state)
         HookLog("RNGNEXT frame=%d resim=%d caller=0x%llX state=0x%llX domain=%s "
                 "before=%08X,%08X,%08X,%08X after=%08X,%08X,%08X,%08X\n",
                 frame, g_isResimulating ? 1 : 0,
-                (uint64_t)__builtin_return_address(0), (uint64_t)state, domain,
+                caller, (uint64_t)state, domain,
                 before[0], before[1], before[2], before[3],
                 state[0], state[1], state[2], state[3]);
     }
+}
+
+static void __fastcall hkRngNext(uint32_t* state)
+{
+    hkRngNextCommon(state, oRngNext);
+}
+
+static void __fastcall hkRngNextImpl(uint32_t* state)
+{
+    hkRngNextCommon(state, oRngNextImpl);
 }
 
 static float __fastcall hkRngAdvance(uint64_t stateArg, void* rngOwner)
@@ -110,8 +165,18 @@ static float __fastcall hkRngAdvance(uint64_t stateArg, void* rngOwner)
                     sizeof(ownerBefore));
     }
     std::memcpy(globalBefore, (void*)_addr(GLOBAL_RNG_STATE), sizeof(globalBefore));
+    const uint64_t caller = (uint64_t)__builtin_return_address(0);
+    const bool isolateGlobalRng = stateArg == _addr(GLOBAL_RNG_STATE) &&
+        (IsStageObjectCallsite(caller) || IsPresentationRngCallsite(caller));
     float result = oRngAdvance(stateArg, rngOwner);
     std::memcpy(globalAfter, (void*)_addr(GLOBAL_RNG_STATE), sizeof(globalAfter));
+
+    if (isolateGlobalRng) {
+        std::memcpy((void*)_addr(GLOBAL_RNG_STATE), globalBefore,
+                    sizeof(globalBefore));
+        HookLog("PRESENTRNGADV frame=%d resim=%d caller=0x%llX state=preserved\n",
+                frame, g_isResimulating ? 1 : 0, caller);
+    }
 
     // This is deliberately capped per frame: animation command streams can
     // legitimately consume many random values, but the first callers are the
@@ -126,7 +191,7 @@ static float __fastcall hkRngAdvance(uint64_t stateArg, void* rngOwner)
                 "owner=0x%llX result=%.9g global=%08X,%08X,%08X,%08X->%08X,%08X,%08X,%08X "
                 "ownerRng=%08X,%08X,%08X,%08X\n",
                 frame, g_isResimulating ? 1 : 0,
-                (uint64_t)__builtin_return_address(0), stateArg,
+                caller, stateArg,
                 (uint64_t)rngOwner, result,
                 globalBefore[0], globalBefore[1], globalBefore[2], globalBefore[3],
                 globalAfter[0], globalAfter[1], globalAfter[2], globalAfter[3],
@@ -267,9 +332,23 @@ static void __fastcall hkSetReservedAnki(void* character, int value)
 
 void Rollback_InitRngHooks()
 {
-    MH_STATUS status = MH_CreateHook((LPVOID)_addr(FN_SOUND_RANDOM_VARIANT),
-                                     (LPVOID)&hkSoundRandomVariant,
-                                     (LPVOID*)&oSoundRandomVariant);
+    MH_STATUS status = MH_CreateHook((LPVOID)_addr(FN_EFFECT_NEXT_RANDOM),
+                                     (LPVOID)&hkEffectNextRandom,
+                                     (LPVOID*)&oEffectNextRandom);
+    if (status == MH_OK) {
+        status = MH_EnableHook((LPVOID)_addr(FN_EFFECT_NEXT_RANDOM));
+        if (status == MH_OK)
+            HookLog("Rollback: forced effects onto local RNG at 0x%llX\n",
+                    (uint64_t)_addr(FN_EFFECT_NEXT_RANDOM));
+        else
+            HookLog("Rollback: failed to enable effect RNG isolation (%d)\n", status);
+    } else {
+        HookLog("Rollback: failed to hook effect RNG isolation (%d)\n", status);
+    }
+
+    status = MH_CreateHook((LPVOID)_addr(FN_SOUND_RANDOM_VARIANT),
+                           (LPVOID)&hkSoundRandomVariant,
+                           (LPVOID*)&oSoundRandomVariant);
     if (status == MH_OK) {
         status = MH_EnableHook((LPVOID)_addr(FN_SOUND_RANDOM_VARIANT));
         if (status == MH_OK)
@@ -282,8 +361,8 @@ void Rollback_InitRngHooks()
     }
 
     status = MH_CreateHook((LPVOID)_addr(FN_RNG_NEXT),
-                                     (LPVOID)&hkRngNext,
-                                     (LPVOID*)&oRngNext);
+                                      (LPVOID)&hkRngNext,
+                                      (LPVOID*)&oRngNext);
     if (status == MH_OK) {
         status = MH_EnableHook((LPVOID)_addr(FN_RNG_NEXT));
         if (status == MH_OK)
@@ -293,6 +372,20 @@ void Rollback_InitRngHooks()
             HookLog("Rollback: failed to enable next-state RNG trace (%d)\n", status);
     } else {
         HookLog("Rollback: failed to hook next-state RNG trace (%d)\n", status);
+    }
+
+    status = MH_CreateHook((LPVOID)_addr(FN_RNG_NEXT_IMPL),
+                           (LPVOID)&hkRngNextImpl,
+                           (LPVOID*)&oRngNextImpl);
+    if (status == MH_OK) {
+        status = MH_EnableHook((LPVOID)_addr(FN_RNG_NEXT_IMPL));
+        if (status == MH_OK)
+            HookLog("Rollback: hooked MtXorShift implementation trace at 0x%llX\n",
+                    (uint64_t)_addr(FN_RNG_NEXT_IMPL));
+        else
+            HookLog("Rollback: failed to enable implementation RNG trace (%d)\n", status);
+    } else {
+        HookLog("Rollback: failed to hook implementation RNG trace (%d)\n", status);
     }
 
     status = MH_CreateHook((LPVOID)_addr(FN_RNG_ADVANCE),

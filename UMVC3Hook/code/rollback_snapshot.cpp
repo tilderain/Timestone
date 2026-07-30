@@ -572,23 +572,9 @@ static int BuildRegionsUncached(Region* regions, int maxRegions,
 #endif
     );
 
-    // ---- 1b. sEffect per-instance RNG (sEffect+0x3C, 16 bytes) ----
-    //     Second within-round RNG source (rng_inventory.md §4.2/§5.1): seeded at
-    //     sEffect ctor (seed 426772233) and reseeded by sReplay__onRoundStart from
-    //     the round seed, then advances within the round.  g_sEffect__mpInstance
-    //     global at 0x140E17A38 (returned by aNextBattle__createProperty_4730).
-    //     Determinism harness invariant per rng_inventory.md §6.3: sEffect+0x3C
-    //     must match saved value byte-for-byte after restore.
-    {
-        uint64_t sEffect = read.operator()<uint64_t>(_addr(0x140E17A38));
-        if (sEffect) {
-            add((void*)(sEffect + 0x3C), 16, 0, 0, false
-#if ROLLBACK_SNAPDUMP_ENABLED
-                , "sEffect.rng"
-#endif
-            );
-        }
-    }
+    // sEffect+0x3C is presentation-only RNG. Effect updates are intentionally
+    // skipped during headless re-simulation, so this peer-local stream must not
+    // participate in authoritative snapshot comparison or restoration.
 
     // ---- 2. sShot manager header and shot ID pool ----
     // Keep intrusive sentinel topology live; recipes reconcile shot lifetime.
