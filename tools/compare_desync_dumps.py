@@ -126,7 +126,12 @@ EXPLICIT_BYTE_OVERRIDES = {
     *( (label, offset, 8)
        for label in ("uCharacter.team0", "uCharacter.team1")
        for offset in (0x3270, 0x3608, 0x3618, 0x3628, 0x3C40, 0x3DB0,
-                     0x6460, 0x6740, 0x67F0) ),
+                      0x6460, 0x6740, 0x67F0) ),
+    # Lazily populated character-owned pointers. These slots are null at the
+    # initial snapshot, so frame-0 pointer discovery cannot identify them.
+    *( (label, offset, 8)
+       for label in ("uCharacter.team0", "uCharacter.team1")
+       for offset in (0x650, 0x28B8) ),
 }
 FRAME0_EXPLICIT_BYTE_OVERRIDES = {
     ("uActionSideCamera", 0x18, 8),
@@ -943,7 +948,7 @@ def print_text_summary(report):
             concrete = (f", {region['concrete_type']}" if region.get("concrete_type")
                         else "")
             print(f"{region['meaningful_different_bytes']} differing byte(s){concrete}")
-            for difference in region["differences_sample"][:3]:
+            for difference in region["differences_sample"]:
                 fields = difference.get("known_fields", [])
                 field_text = ""
                 if fields:

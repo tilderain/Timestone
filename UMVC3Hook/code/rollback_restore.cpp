@@ -86,6 +86,9 @@ using UnitRemoveFn = char(__fastcall*)(void*, void*);
 static constexpr SnapshotRange CCHR_SCALAR_RESTORE_RANGES[] = {
     // Pointer-free cChr state immediately following the base object header.
     {0x28, 0x08},
+    // Embedded model/coordinate state reported as the first divergent block;
+    // restore it with the character snapshot rather than leaving it live.
+    {0x1B0, 0x70},
     // cActionTime-adjacent scalar state, including hitstop/time-scale values.
     {0x48, 0x38},
     // Early input and command-processing state used by the character FSM.
@@ -166,6 +169,10 @@ static constexpr SnapshotRange CCHR_POST_RESTORE_TAIL_RANGES[] = {
     {0x680D, 0x01}, {0x6810, 0x24}, {0x6828, 0x04}, {0x6840, 0x80},
     // Reapply cached attack-info transform data consumed by throw/contact logic.
     {0x68D0, 0x20},
+    // Recipe/model repair can refresh animation-owned extra-part counters.
+    // Keep the saved EP counts and animation selector adjacent state aligned
+    // before the next deterministic character tick.
+    {0x3F84, 0x18},
 };
 
 static constexpr SnapshotRange SMAIN_RESTORE_RANGES[] = {
