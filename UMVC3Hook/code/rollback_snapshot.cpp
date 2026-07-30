@@ -740,11 +740,11 @@ static int BuildRegionsUncached(Region* regions, int maxRegions,
     {
         uint64_t sCamera = read.operator()<uint64_t>(_addr(PTR_SCAMERA));
         if (sCamera) {
-            add((void*)sCamera, 0xD80, 0, 0, false
+            /*add((void*)sCamera, 0xD80, 0, 0, false
 #if ROLLBACK_SNAPDUMP_ENABLED
                 , "sCamera"
 #endif
-            );
+            );*/
             // First viewport slot at +0x50, stride 0x1A0, camera unit ptr at slot+8.
             // This is the uActionSideCamera gameplay anchor unit.
             camUnit = read.operator()<uint64_t>(sCamera + 0x58);
