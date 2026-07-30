@@ -126,7 +126,8 @@ static constexpr SnapshotRange CCHR_SCALAR_RESTORE_RANGES[] = {
     {0x1644, 0x04},
     // Character state/context values before the frame and identity fields.
     {0x1898, 0x30},
-    // Character identity, player/team membership, and body/assist settings.
+    // Character move-pass frame counter and identity/team membership.
+    {0x2D94, 0x04},
     {0x2D9C, 0x24},
     // Frame and identity-adjacent scalar state preceding mId.
     {0x2D80, 0x10},

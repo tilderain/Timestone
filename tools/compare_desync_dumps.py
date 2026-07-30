@@ -821,7 +821,12 @@ def compare_frame(dump_a, dump_b, frame_a, frame_b, max_regions, max_diffs,
     )
     result["structure_matches"] = (
         len(frame_a.regions) == len(frame_b.regions) and
-        frame_a.counts == frame_b.counts and
+        # Effect recipes describe peer-local presentation objects. Their
+        # counts can legitimately differ while authoritative regions match.
+        all(
+            frame_a.counts.get(name) == frame_b.counts.get(name)
+            for name in ("shots", "collision_clones", "model_render_states")
+        ) and
         all(
             a.size == b.size and a.skip_vtable == b.skip_vtable and
             resolver_a.resolve(a.address) == resolver_b.resolve(b.address) and
