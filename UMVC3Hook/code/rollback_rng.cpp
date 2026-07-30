@@ -23,6 +23,8 @@ static constexpr uintptr_t STAGE_OBJECT_CODE_BEGIN = 0x1401CFC20;
 static constexpr uintptr_t STAGE_OBJECT_CODE_END = 0x140200000;
 static constexpr uintptr_t EFFECT_RNG_CALLSITE_A = 0x14080D423;
 static constexpr uintptr_t EFFECT_RNG_CALLSITE_B = 0x14080D4A0;
+static constexpr uintptr_t SOUND_RNG_CALLSITE_A = 0x1405D4C47;
+static constexpr uintptr_t SOUND_RNG_CALLSITE_B = 0x1405D4CBB;
 static constexpr uintptr_t FN_SOUND_RANDOM_VARIANT = 0x1402A9110;
 static constexpr uintptr_t FN_HSIENKO_SELECT_ANKI = 0x1400A1260;
 static constexpr uintptr_t FN_SET_RESERVED_ANKI = 0x1400D4D90;
@@ -68,7 +70,9 @@ static bool IsStageObjectCallsite(uint64_t caller)
 static bool IsPresentationRngCallsite(uint64_t caller)
 {
     return caller == _addr(EFFECT_RNG_CALLSITE_A) ||
-           caller == _addr(EFFECT_RNG_CALLSITE_B);
+           caller == _addr(EFFECT_RNG_CALLSITE_B) ||
+           caller == _addr(SOUND_RNG_CALLSITE_A) ||
+           caller == _addr(SOUND_RNG_CALLSITE_B);
 }
 
 static uint64_t __fastcall hkEffectNextRandom(void* effect, int useEffectRng)
