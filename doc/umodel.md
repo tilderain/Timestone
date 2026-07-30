@@ -1,4 +1,67 @@
-This is deepseek made so it may be garbage
+This document is a reference for the UMVC3 x64 layout. The original PPC
+layout below is retained as historical context, but must not be applied to
+UMVC3 without the pointer-width and inheritance corrections in the verified
+section.
+
+## Verified UMVC3 x64 layout
+
+The live UMVC3 Ghidra database and the constructors/property builders verify
+these allocation boundaries:
+
+| Type | Size | Important boundary |
+|------|------|--------------------|
+| `uBaseModel` | `0x510` | base of `uModel` |
+| `uModel` | `0x12c0` | base of `uToonModel` |
+| `uToonModel` | `0x1300` | base of `uActorGameModel` |
+| `uActorGameModel` | `0x1450` | DTI allocation is 5200 bytes |
+
+UMVC3 is x86-64, so pointers are 8 bytes. The old Devil4/Dragon/RE5
+references are PPC-era layouts and are used only for semantic names and
+cross-version field identity.
+
+`uToonModel + 0x12c0` contains the inline, `0x40`-byte
+`uToonModel::cToonParam`. An earlier decompiler label identified its
+constructor as `uCoord__ctor`, but a `0x100`-byte `uCoord` would extend to
+`0x13c0` and overlap the `uActorGameModel` fields beginning at `0x1300`.
+The allocation boundaries and existing `uToonModel::cToonParam` type therefore
+disprove that label.
+
+### `uModel` fields confirmed in UMVC3
+
+| Offset | Size | Field | Evidence |
+|--------|------|-------|----------|
+| `+0x538` | 8 | `mpJoint` | `uModel__getJointCount`, destructor |
+| `+0x540` | 8 | `mJointTable` | `uModel__getJointCount`, constructor |
+| `+0x550` | 4 | `mModelStatus` | `uModel__GetFields` |
+| `+0x558` | 4 | `mMotionCalcFlag` | `uModel__GetFields` |
+| `+0x560` | `0xc00` | `mMotion[8]` | constructor calls eight `0x180`-byte slot constructors |
+| `+0x1180` | 16 | `mNullTransScale` | `uModel__GetFields` |
+| `+0x1190` | 16 | `mDeltaPos` | `uModel__GetFields` |
+| `+0x11a0` | 16 | `mDeltaQuat` | `uModel__GetFields` |
+| `+0x11b8` | `0x80` | `mpMotionList[16]` | accessor and destructor |
+| `+0x123c` | 1 | `mShowJointNo` | `uModel__GetFields` |
+| `+0x123e` | 1 | `mUpdateNormal` | `uModel__GetFields` |
+| `+0x1240` | 16 | `mMorphWeight[4]` | `uModel__GetFields` |
+| `+0x1260` | 16 | `mBasePlane` | `uModel__GetFields` |
+| `+0x1270` | 4 | `mWaistOffset` | `uModel__GetFields` |
+| `+0x1274` | 4 | `mWaistAdjustFactor` | `uModel__GetFields` |
+| `+0x1278` | 4 | `mWaistAdjust` | `uModel__GetFields` |
+| `+0x127c` | 20 | `mWaistAdjustCurve` | `uModel__GetFields`; older Devil4 reference agrees |
+| `+0x129c` | 1 | `mAnkleAdjust` | `uModel__GetFields` |
+| `+0x129d` | 1 | `mFootAdjust` | `uModel__GetFields` |
+
+### `uActorGameModel` fields confirmed in UMVC3
+
+`uActorGameModel` starts at `+0x1300` after the `uToonModel` base. The
+animation fields run through `+0x1340`; after four bytes of alignment padding,
+the inline `cActorGameModelAnm` object begins at `+0x1348` and occupies `0xa0`
+bytes. This agrees with the existing `mpOwner` field at absolute `+0x1348`.
+The remaining `+0x13e8..+0x144f` is constructor-cleared actor animation state;
+it remains a reserved span until its internal member boundaries are proven.
+
+The Ghidra script `BuildUModel.java` creates these structures under
+`/UMVC3/Auto`, checks all four sizes, and types the first parameter of known
+methods.
 
 Here's the complete uModel hierarchy layout:
 Full uModel Inheritance Chain (Dragon's Dogma / MT Framework)

@@ -150,3 +150,5 @@ Allow copy pasting ip on windows because it freezes
 generate snapshot during resim only unconfirmed frames
 
 Kill netplay's critical section spam
+
+Put ghidra_scripts into this folder
