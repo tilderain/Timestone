@@ -89,6 +89,10 @@ static constexpr SnapshotRange CCHR_SCALAR_RESTORE_RANGES[] = {
     // Embedded model/coordinate state reported as the first divergent block;
     // restore it with the character snapshot rather than leaving it live.
     {0x1B0, 0x70},
+    // Remaining narrow animation/command state exposed after restoring the
+    // preceding model block. Keep the experiment limited to observed bytes.
+    {0x1190, 0x04}, {0x1198, 0x04},
+    {0x1529, 0x02}, {0x2892, 0x02}, {0x2AAA, 0x02}, {0x3D38, 0x04},
     // cActionTime-adjacent scalar state, including hitstop/time-scale values.
     {0x48, 0x38},
     // Early input and command-processing state used by the character FSM.
@@ -165,6 +169,10 @@ static constexpr SnapshotRange CCHR_SCALAR_RESTORE_RANGES[] = {
 // These shared cChr fields are rebuilt by native post-restore helpers on some
 // rollback paths. Reapply the saved values after those helpers complete.
 static constexpr SnapshotRange CCHR_POST_RESTORE_TAIL_RANGES[] = {
+    // Native restore/repair can run a character phase after the main scalar
+    // copy. Reapply the per-frame move counter last so all roster members use
+    // the same snapshot timeline.
+    {0x2D94, 0x04},
     // Reapply throw-reaction reuse state after native model/character rebuilds.
     {0x680D, 0x01}, {0x6810, 0x24}, {0x6828, 0x04}, {0x6840, 0x80},
     // Reapply cached attack-info transform data consumed by throw/contact logic.
