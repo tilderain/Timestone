@@ -29,6 +29,22 @@ static constexpr uintptr_t SOUND_RNG_CALLSITE_B = 0x1405D4CBB;
 // logistic-map mode is disabled. Jitter is presentation-only.
 static constexpr uintptr_t CAMERA_JITTER_CALLSITE_A = 0x14092E29D;
 static constexpr uintptr_t CAMERA_JITTER_CALLSITE_B = 0x14092E2E7;
+static constexpr uintptr_t PARTICLE_RNG_CALLSITES[] = {
+    0x140550D7B, 0x140550DA2, 0x140550DCE, 0x140550F4B,
+    0x140550F5B, 0x140550F92, 0x1405513E2, 0x1407C1789,
+};
+static constexpr uintptr_t EFFECT_NOISE_RNG_CALLSITES[] = {
+    0x14062FE19, 0x14062FE25, 0x14062FE65, 0x14062FE90,
+    0x14062FEBD, 0x14062FF4E, 0x14062FF5A, 0x14062FF6F,
+    0x14062FFAF,
+};
+static constexpr uintptr_t CLOUD_RNG_CALLSITES[] = {
+    0x14070BFCB, 0x14070BFF2, 0x14070C01E, 0x14070C1A1,
+    0x14070C1B1, 0x14070C1E8, 0x14070C642, 0x14076C6BE,
+    0x14076CC76, 0x14076CC97, 0x14076CCC3, 0x14076CD75,
+    0x14076CD9C, 0x14076CE3B,
+};
+static constexpr uintptr_t SHADOW_RNG_CALLSITE = 0x14067584B;
 static constexpr uintptr_t FN_SOUND_RANDOM_VARIANT = 0x1402A9110;
 static constexpr uintptr_t FN_HSIENKO_SELECT_ANKI = 0x1400A1260;
 static constexpr uintptr_t FN_SET_RESERVED_ANKI = 0x1400D4D90;
@@ -73,12 +89,22 @@ static bool IsStageObjectCallsite(uint64_t caller)
 
 static bool IsPresentationRngCallsite(uint64_t caller)
 {
-    return caller == _addr(EFFECT_RNG_CALLSITE_A) ||
+    if (caller == _addr(EFFECT_RNG_CALLSITE_A) ||
            caller == _addr(EFFECT_RNG_CALLSITE_B) ||
            caller == _addr(SOUND_RNG_CALLSITE_A) ||
            caller == _addr(SOUND_RNG_CALLSITE_B) ||
            caller == _addr(CAMERA_JITTER_CALLSITE_A) ||
-           caller == _addr(CAMERA_JITTER_CALLSITE_B);
+           caller == _addr(CAMERA_JITTER_CALLSITE_B) ||
+           caller == _addr(SHADOW_RNG_CALLSITE)) {
+        return true;
+    }
+    for (uintptr_t address : PARTICLE_RNG_CALLSITES)
+        if (caller == _addr(address)) return true;
+    for (uintptr_t address : EFFECT_NOISE_RNG_CALLSITES)
+        if (caller == _addr(address)) return true;
+    for (uintptr_t address : CLOUD_RNG_CALLSITES)
+        if (caller == _addr(address)) return true;
+    return false;
 }
 
 static uint64_t __fastcall hkEffectNextRandom(void* effect, int useEffectRng)
@@ -134,7 +160,11 @@ static void __fastcall hkRngNextCommon(uint32_t* state, RngNextFn original)
                 frame, g_isResimulating ? 1 : 0, caller);
     }
 
-    if (state && g_advanceTraceCount++ < 256) {
+    // Never cap global-stream entries: one hidden presentation or direct
+    // caller is enough to shift the four-word state by one. Keep the cap for
+    // peer-local animation/effect streams, which can be extremely noisy.
+    const bool isGlobalState = state == (uint32_t*)_addr(GLOBAL_RNG_STATE);
+    if (state && (isGlobalState || g_advanceTraceCount++ < 256)) {
         uint64_t global = _addr(GLOBAL_RNG_STATE);
         const char* domain = (state == (uint32_t*)global) ? "global" : "other";
         HookLog("RNGNEXT frame=%d resim=%d caller=0x%llX state=0x%llX domain=%s "
