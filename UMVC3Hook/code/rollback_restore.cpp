@@ -26,6 +26,7 @@ static constexpr uintptr_t PTR_SMAIN = 0x140e177e8;
 static constexpr uintptr_t PTR_SMVC3MGR = 0x140d510a0;
 static constexpr uintptr_t PTR_SUNIT = 0x140e17698;
 static constexpr uintptr_t PTR_SCOLLISION = 0x140e18250;
+static constexpr uintptr_t PTR_SCAMERA = 0x140e17930;
 static constexpr uintptr_t PTR_SGAMEEFFECT = 0x140d46470;
 static constexpr uintptr_t FN_SSHOT_ENQUEUE_UNIT = 0x1401512A0;
 static constexpr uintptr_t FN_SSHOT_FLUSH_PENDING_UNITS = 0x1401517A0;
@@ -78,6 +79,18 @@ static constexpr size_t SHITSOLVER_DATA_OFF = 0x58;
 using SnapshotRange = RollbackSnapshotRange;
 using ShotRecipe = RollbackShotRecipe;
 using SnapshotSlot = RollbackSnapshotSlot;
+static constexpr SnapshotRange UACTION_CAMERA_SCALAR_RESTORE_RANGES[] = {
+    // cUnit transform/position state used by tag spawn placement and movement
+    // bounds. Restore the scalar payload after preserving camera-owned links.
+    {0x50, 0x50},
+    {0x80, 0x30},
+    {0xB8, 0x30},
+    {0xF0, 0x40},
+    {0x140, 0x40},
+    {0x180, 0x40},
+    {0x1C0, 0x40},
+    {0x450, 0x40},
+};
 using ShotEnqueueFn = char(__fastcall*)(void*, void*, int);
 using UnitAddFn = char(__fastcall*)(void*, int, void*, void*);
 using UnitRemoveFn = char(__fastcall*)(void*, void*);
@@ -177,6 +190,11 @@ static constexpr SnapshotRange CCHR_POST_RESTORE_TAIL_RANGES[] = {
     {0x680D, 0x01}, {0x6810, 0x24}, {0x6828, 0x04}, {0x6840, 0x80},
     // Reapply cached attack-info transform data consumed by throw/contact logic.
     {0x68D0, 0x20},
+    // Shot/effect reconstruction can refresh cChrTargetInfo payloads. These
+    // records control target, damage, throw, and parent-character state; their
+    // vtables and character pointers remain live outside these payload ranges.
+    {0x64A0, 0x70}, {0x6520, 0x70}, {0x65A0, 0x70},
+    {0x6620, 0x70}, {0x66A0, 0x70},
     // Recipe/model repair can refresh animation-owned extra-part counters.
     // Keep the saved EP counts and animation selector adjacent state aligned
     // before the next deterministic character tick.
@@ -212,6 +230,8 @@ static constexpr SnapshotRange SACTION_RESTORE_RANGES[] = {
 static constexpr SnapshotRange CCHR_TEAM_RESTORE_RANGES[] = {
     // Team delta, flags, life, meter, assists, X-Factor, and active action state.
     {0x50, 0xC0},
+    // Team program/transition flags, including mCPrgF at +0xFC.
+    {0xC0, 0x50},
     // Team character position, angle, replay, and remaining team gameplay state.
     {0x110, 0x1B0},
 };
@@ -967,6 +987,20 @@ void Rollback_RestoreSnapshot(int32_t frame)
                 }
                 if (!found)
                     *(uint64_t*)((uint8_t*)slot.regions[i].ptr + 0x48) = liveActive;
+            }
+        } else if ((uint64_t)slot.regions[i].ptr ==
+                   (*(uint64_t*)_addr(PTR_SCAMERA) ?
+                    *(uint64_t*)(*(uint64_t*)_addr(PTR_SCAMERA) + 0x58) : 0) &&
+                   slot.regions[i].size >= 0x500) {
+            // uActionSideCamera is authoritative for tag spawn placement and
+            // movement limits, but its cUnit links and embedded property
+            // buffers are peer-local. Copy only the scalar gameplay payload.
+            for (const SnapshotRange& range : UACTION_CAMERA_SCALAR_RESTORE_RANGES) {
+                if ((size_t)range.offset + range.size <= copySize) {
+                    std::memcpy((uint8_t*)slot.regions[i].ptr + range.offset,
+                                slot.data + offset + range.offset,
+                                range.size);
+                }
             }
         } else if (slot.regions[i].skipVtable && copySize > sizeof(uint64_t)) {
             uint64_t liveUnitState[sizeof(CUNIT_LIVE_STATE_OFFSETS) / sizeof(CUNIT_LIVE_STATE_OFFSETS[0])];
