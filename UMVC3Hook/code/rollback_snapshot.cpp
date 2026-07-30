@@ -1120,6 +1120,13 @@ void Rollback_SaveSnapshot(int32_t frame)
     if (slotIdx < 0) slotIdx += ROLLBACK_WINDOW;
     SnapshotSlot& slot = g_slots[slotIdx];
 
+    /*if (frame >= 14 && frame <= 20) {
+        uint64_t replay = *(uint64_t*)_addr(0x140d4d9d8);
+        int32_t replayFrame = replay ? *(int32_t*)(replay + 0x54) : -1;
+        HookLog("SNAPTRACE phase=begin frame=%d resim=%d replay=%d\n",
+                frame, g_isResimulating ? 1 : 0, replayFrame);
+    }*/
+
     Rollback_DestroyCollisionNodeClones(slot);
 
     if (slot.capacity < total) {
@@ -1159,10 +1166,10 @@ void Rollback_SaveSnapshot(int32_t frame)
     // Record the exact state captured at the rollback boundary. RNG hooks only
     // observe advances; this also exposes direct writes and snapshot timing.
     uint32_t globalRng[4] = {};
-    std::memcpy(globalRng, (void*)_addr(0x140D765D8), sizeof(globalRng));
-    HookLog("RNGSNAP frame=%d resim=%d state=%08X,%08X,%08X,%08X\n",
+    //std::memcpy(globalRng, (void*)_addr(0x140D765D8), sizeof(globalRng));
+    /*HookLog("RNGSNAP frame=%d resim=%d state=%08X,%08X,%08X,%08X\n",
             frame, g_isResimulating ? 1 : 0,
-            globalRng[0], globalRng[1], globalRng[2], globalRng[3]);
+            globalRng[0], globalRng[1], globalRng[2], globalRng[3]);*/
 
     static int lastSnapshotRegionCount = -1;
     if (count != lastSnapshotRegionCount) {
@@ -1266,6 +1273,11 @@ void Rollback_SaveSnapshot(int32_t frame)
     // the tick. Initialize with the prior prediction rather than stale received
     // ring data in case this frame is not confirmed yet.
     slot.remoteInput = Controller_GetUsedRemoteInput(frame);
+    /*if (frame >= 14 && frame <= 20) {
+        HookLog("SNAPTRACE phase=end frame=%d resim=%d local=0x%08X remote=0x%08X bytes=%zu\n",
+                frame, g_isResimulating ? 1 : 0, slot.localInput,
+                slot.remoteInput, slot.size);
+    }*/
 #if ROLLBACK_SNAPDUMP_ENABLED
     SnapDump_CaptureSnapshot(slot);
 #endif

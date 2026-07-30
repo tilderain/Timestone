@@ -1,0 +1,382 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>UMVC3 Rollback Diagnostics</title>
+<style>
+:root { color-scheme:dark; --bg:#1a1a2e; --panel:#16213e; --line:#0f3460; --text:#e0e0e0; --muted:#888; --cyan:#00d4ff; --red:#ff5252; --green:#4caf50; }
+* { box-sizing:border-box; }
+body { margin:0; height:100vh; overflow:hidden; background:var(--bg); color:var(--text); font:14px 'Segoe UI',system-ui,sans-serif; }
+button,input { font:inherit; }
+button { border:0; border-radius:4px; background:#0f3460; color:var(--text); padding:6px 14px; cursor:pointer; transition:background .15s; }
+button:hover { background:#1a5276; }
+button:disabled { opacity:.45; cursor:default; }
+.drop { min-height:100vh; display:grid; place-items:center; padding:24px; }
+.dropbox { width:calc(100% - 40px); height:calc(100vh - 40px); display:flex; align-items:center; justify-content:center; flex-direction:column; padding:30px; text-align:center; border:3px dashed #444; border-radius:12px; cursor:pointer; transition:all .2s; }
+.dropbox.over { border-color:var(--cyan); background:rgba(0,212,255,.08); }
+.dropbox h1 { margin:0 0 12px; font-size:24px; }
+.dropbox p { color:var(--muted); margin:8px 0; }
+.dropbox small { color:#666; }
+#app { display:none; height:100vh; flex-direction:column; }
+#app.active { display:flex; }
+#app.drag-over { outline:3px dashed var(--cyan); outline-offset:-10px; background:#122238; }
+.toolbar { display:flex; gap:12px; align-items:center; flex-wrap:wrap; padding:8px 16px; background:#16213e; border-bottom:1px solid #0f3460; }
+.toolbar .frame { color:var(--cyan); font-size:20px; font-weight:700; min-width:150px; text-align:center; }
+.toolbar input[type=range] { flex:1; min-width:120px; height:6px; accent-color:var(--cyan); cursor:pointer; }
+.toolbar .file { color:var(--muted); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:340px; }
+.toolbar .grow { flex:0; }
+.legend { display:flex; gap:16px; align-items:center; flex-wrap:wrap; padding:4px 16px; background:#0d1117; color:#888; border-bottom:1px solid #0f3460; font-size:12px; }
+.legend .spacer { flex:1; }
+.legend-item { display:flex; align-items:center; gap:6px; }
+.legend-dot { width:12px; height:12px; border-radius:50%; }
+.legend-ring { width:12px; height:12px; border:2px solid; border-radius:50%; }
+.content { display:grid; grid-template-columns:minmax(0,1fr) 380px; flex:1; min-height:0; }
+.main { min-width:0; display:flex; flex-direction:column; }
+.summary { display:flex; gap:20px; flex-wrap:wrap; padding:4px 16px; background:#0d1117; border-top:1px solid #0f3460; color:#666; font-size:12px; order:3; }
+.summary strong { color:var(--text); }
+.arena { position:relative; flex:1; min-height:0; background:#0d1117; }
+.arena canvas { display:block; width:100%; height:100%; }
+.arena-controls { display:none; }
+.timeline { position:absolute; z-index:5; left:12px; right:12px; bottom:12px; max-height:42%; overflow:auto; padding:12px 16px; border:1px solid #0f3460; border-radius:6px; background:rgba(22,33,62,.96); }
+.timeline h2,.inspector h2 { font-size:15px; margin:0 0 10px; }
+.empty { color:var(--muted); padding:30px 0; }
+.diff-row { display:grid; grid-template-columns:80px 1fr 120px; gap:10px; align-items:center; width:100%; text-align:left; margin:4px 0; }
+.diff-row .frame-link { color:var(--cyan); }
+.diff-row .region { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.diff-row .kind { color:var(--red); font-size:12px; }
+.inspector { border-left:1px solid #0f3460; background:#16213e; overflow:auto; padding:0; font-size:13px; }
+.section { border-bottom:1px solid #0f3460; padding:12px 16px; margin:0; }
+.inspector h2 { color:#666; font-size:12px; text-transform:uppercase; letter-spacing:1px; }
+table { width:100%; border-collapse:collapse; }
+th,td { padding:3px 6px; border-bottom:0; text-align:left; vertical-align:top; font-size:12px; }
+th { color:var(--muted); font-weight:500; }
+td { font-family:Consolas,'Courier New',monospace; }
+td code { color:#00d4ff; word-break:break-all; }
+.mismatch-bg, tr.mismatch-bg td, tr.mismatch-bg th { background:rgba(255,82,82,.15); }
+.char-header { display:flex; align-items:center; gap:8px; margin-bottom:6px; font-weight:600; }
+.char-header .dot { display:inline-block; width:10px; height:10px; border-radius:50%; }
+.p1-color { color:#4fc3f7; } .p2-color { color:#ef5350; }
+.ok { color:var(--green); } .bad { color:var(--red); }
+.warn { color:#d29922; }
+.hex { font-family:ui-monospace,Consolas,monospace; white-space:pre-wrap; word-break:break-all; color:#e6edf3; }
+.hint { color:var(--muted); font-size:12px; line-height:1.45; }
+@media (max-width:900px) { body { overflow:auto; } #app { min-height:100vh; height:auto; } .content { grid-template-columns:1fr; min-height:780px; } .arena { min-height:480px; } .inspector { border-left:0; border-top:1px solid var(--line); max-height:48vh; } }
+</style>
+</head>
+<body>
+<div id="drop" class="drop"><div id="dropbox" class="dropbox">
+  <h1>UMVC3 Rollback Diagnostics v2</h1>
+  <p>Drop one or two <b>.usdp</b> snapdumps to decode and compare rollback history.</p>
+  <p>NDJSON files remain accepted for quick raw inspection.</p>
+  <small>With two snapdumps, the first is treated as Host and the second as Client.</small>
+</div></div>
+<input id="files" type="file" accept=".usdp,.ndjson,.json,.jsonl,.txt" multiple hidden>
+<main id="app">
+  <div class="toolbar">
+    <button id="open">Open</button><button id="clear">Clear</button>
+    <button id="first" title="First frame">|◀</button><button id="prev" title="Previous frame">◀</button>
+    <span id="frame" class="frame">No frame</span>
+    <button id="next" title="Next frame">▶</button><button id="last" title="Last frame">▶|</button>
+    <input id="slider" type="range" min="0" max="0" value="0">
+    <span class="grow"></span><span id="file" class="file"></span>
+  </div>
+  <div class="legend">
+    <span class="legend-item"><span class="legend-dot" style="background:#2dd4bf"></span>P1 Host</span>
+    <span class="legend-item"><span class="legend-ring" style="border-color:#60a5fa"></span>P1 Client</span>
+    <span class="legend-item"><span class="legend-dot" style="background:#f59e0b"></span>P2 Host</span>
+    <span class="legend-item"><span class="legend-ring" style="border-color:#fb7185"></span>P2 Client</span>
+    <span id="visualLegend" class="legend-item">Character state: —</span>
+    <span class="spacer"></span>
+    <label><input id="showBench" type="checkbox" checked> Show assists</label>
+    <label><input id="showCollision" type="checkbox"> Show hitboxes</label>
+    <label><input id="showDifferences" type="checkbox"> Snapshot differences</label>
+  </div>
+  <div class="content"><section class="main">
+    <div id="arena" class="arena"><canvas id="canvas"></canvas>
+    <div id="differencePanel" class="timeline" hidden><h2>Snapshot differences</h2><div id="diffs"></div></div>
+    </div>
+    <div id="summary" class="summary"></div>
+  </section><aside id="inspector" class="inspector"></aside></div>
+</main>
+<script>
+'use strict';
+const MAGIC = 0x50445355, HEADER_SIZE = 96, FRAME_SIZE = 72, REGION_V1_SIZE = 48, REGION_V2_SIZE = 112;
+const ROLE = {0:'offline',1:'host',2:'client'};
+const state = { dumps:[], frames:[], index:0, current:null };
+const $ = id => document.getElementById(id);
+const canvas=$('canvas');
+
+function u8(view, at) { return view.getUint8(at); }
+function u32(view, at) { return view.getUint32(at, true); }
+function i32(view, at) { return view.getInt32(at, true); }
+function u64(view, at) { return Number(view.getBigUint64(at, true)); }
+function hex(value, width=8) { return value === undefined || value === null ? '—' : '0x' + Number(value).toString(16).padStart(width, '0'); }
+function readBytes(view, at, size) { return new Uint8Array(view.buffer, view.byteOffset + at, size); }
+function copyBytes(bytes) { return new Uint8Array(bytes); }
+function text(bytes) { return new TextDecoder().decode(bytes).replace(/\0.*$/,''); }
+
+function readVarint(view, cursor) {
+  let value=0, shift=0, byte;
+  do { if (cursor.at >= view.byteLength || shift > 35) throw Error('Invalid XOR-RLE varint'); byte=u8(view,cursor.at++); value += (byte & 127) * 2 ** shift; shift += 7; }
+  while (byte & 128);
+  return value;
+}
+function decodeXorRle(encoded, previous, size) {
+  if (!previous || previous.length !== size) throw Error('XOR-RLE frame has no same-sized predecessor');
+  const out=copyBytes(previous), cursor={at:0}; let dst=0;
+  while (dst < size) {
+    const tag=readVarint(encoded,cursor), run=Math.floor(tag/2);
+    if (!run || dst+run > size) throw Error('Invalid XOR-RLE run');
+    if (tag & 1) { if (cursor.at+run > encoded.byteLength) throw Error('Truncated XOR-RLE literal'); for(let i=0;i<run;i++) out[dst+i]^=u8(encoded,cursor.at+i); cursor.at+=run; }
+    dst+=run;
+  }
+  if (cursor.at !== encoded.byteLength) throw Error('Trailing XOR-RLE data');
+  return out;
+}
+function parseUsdp(file, fileName='snapdump.usdp') {
+  const view=new DataView(file), magic=u32(view,0), version=u32(view,4), headerSize=u32(view,8);
+  if (magic !== MAGIC) throw Error('Not a UMVC3 snapdump');
+  if (version !== 1 && version !== 2) throw Error('Unsupported snapdump version '+version);
+  if (headerSize < HEADER_SIZE) throw Error('Invalid snapdump header size');
+  const frameCount=u32(view,12), trigger=i32(view,16), role=u32(view,20), imageBase=u64(view,24), imageSize=u64(view,32);
+  const commit=text(readBytes(view,48,41)), frames=[], byFrame=new Map(); let at=headerSize, previous=null;
+  for(let n=0;n<frameCount;n++) {
+    if(at+FRAME_SIZE > view.byteLength) throw Error('Truncated frame header');
+    const number=i32(view,at), local=u32(view,at+4), remote=u32(view,at+8), regionCount=u32(view,at+12), shots=u32(view,at+16), effects=u32(view,at+20), clones=u32(view,at+24), models=u32(view,at+28), snapshotHash=u64(view,at+32), manifestHash=u64(view,at+40), rawSize=u64(view,at+48), encodedSize=u64(view,at+56), encoding=u8(view,at+64); at += FRAME_SIZE;
+    const regions=[]; let offset=0;
+    for(let r=0;r<regionCount;r++) {
+      const size=version>=2 ? REGION_V2_SIZE : REGION_V1_SIZE; if(at+size > view.byteLength) throw Error('Truncated region manifest');
+      const address=u64(view,at), regionSize=u64(view,at+8), owner=u64(view,at+16), vtable=u64(view,at+24), hash=u64(view,at+32), skip=u8(view,at+40), name=version>=2 ? text(readBytes(view,at+40+8,64)) : '';
+      regions.push({address,size:regionSize,owner,vtable,hash,skip,name,offset}); offset+=regionSize; at+=size;
+    }
+    if(offset !== rawSize) throw Error(`Frame ${number}: region size mismatch`);
+    if(at+encodedSize > view.byteLength) throw Error('Truncated snapshot payload');
+    const payload=readBytes(view,at,encodedSize); at+=encodedSize;
+    let data;
+    if(encoding===0) data=copyBytes(payload); else if(encoding===1) data=decodeXorRle(new DataView(payload.buffer,payload.byteOffset,payload.byteLength),previous,rawSize); else throw Error('Unknown snapshot encoding '+encoding);
+    if(data.length !== rawSize) throw Error('Decoded snapshot size mismatch');
+    const frame={number,local,remote,regions,data,shots,effects,clones,models,snapshotHash,manifestHash}; frames.push(frame); byFrame.set(number,frame); previous=data;
+  }
+  return {name:fileName, role:ROLE[role] || `role ${role}`, trigger,imageBase,imageSize,commit,frames,byFrame};
+}
+function parseJson(file, fileName='NDJSON') { const textValue=new TextDecoder().decode(file); const lines=textValue.split(/\r?\n/).filter(Boolean); const records=[]; for(const line of lines) { try { const value=JSON.parse(line); if(value.frame !== undefined) records.push(value); } catch(_) {} } return {name:fileName, role:'ndjson', frames:records.map(entry=>({number:entry.frame,data:entry})),byFrame:new Map(records.map(entry=>[entry.frame,{number:entry.frame,data:entry}]))}; }
+function valueAt(frame, region, offset, size) { return frame.data.slice(region.offset+offset, region.offset+offset+size); }
+function bytesHex(bytes) { return Array.from(bytes,b=>b.toString(16).padStart(2,'0')).join(' '); }
+function byteDiff(a,b) { if(!a||!b) return true; if(a.length!==b.length) return true; for(let i=0;i<a.length;i++) if(a[i]!==b[i]) return true; return false; }
+function regionView(frame, region) { return new DataView(frame.data.buffer,frame.data.byteOffset+region.offset,region.size); }
+function finiteFloat(view,offset) { if(offset+4>view.byteLength) return 0; const value=view.getFloat32(offset,true); return Number.isFinite(value)?value:0; }
+function fighterRegions(frame,team) { return frame?.regions.filter(region=>region.name===`uCharacter.team${team}`) || []; }
+function decodeFighters(dump,frame) {
+  if(!frame?.regions) return [];
+  const result=[];
+  for(let team=0;team<2;team++) {
+    const teamRegion=frame.regions.find(region=>region.name===`cChrTeam[${team}]`);
+    const activeAddress=teamRegion && teamRegion.size>=0x50 ? u64(regionView(frame,teamRegion),0x48) : 0;
+    fighterRegions(frame,team).forEach((region,slot)=>{
+      const view=regionView(frame,region), pos=[finiteFloat(view,0x50),finiteFloat(view,0x54),finiteFloat(view,0x58)];
+      const collision=[];
+      if($('showCollision').checked) {
+        for(let index=0;index<16;index++) {
+          const base=0x4210+index*0xB0;
+          if(base+0x44>view.byteLength || !u8(view,base+8)) continue;
+          const a=[finiteFloat(view,base+0x20),finiteFloat(view,base+0x24)], b=[finiteFloat(view,base+0x30),finiteFloat(view,base+0x34)], radius=Math.abs(finiteFloat(view,base+0x40));
+          if(radius>0 && radius<100000) collision.push({shape:'capsule',bank:'damage',index,a,b,radius,damaging:true});
+        }
+        const sphereBases=[0x4E20,0x5530,0x5C40];
+        for(let bank=0;bank<sphereBases.length;bank++) {
+          for(let index=0;index<16;index++) {
+            const base=sphereBases[bank]+index*0x70;
+            if(base+0x30>view.byteLength || !u8(view,base+8)) continue;
+            const center=[finiteFloat(view,base+0x20),finiteFloat(view,base+0x24)], radius=Math.abs(finiteFloat(view,base+0x2C));
+            if(radius>0 && radius<100000) collision.push({shape:'sphere',bank:`sphere${bank}`,index,center,radius,damaging:false});
+          }
+        }
+      }
+      result.push({team,slot,role:dump.role,pos,active:activeAddress===region.address,action:u32(view,0x1310),flags:u32(view,0x14F0),collision});
+    });
+  }
+  return result;
+}
+function fighterKey(fighter) { return `${fighter.team}:${fighter.slot}`; }
+function fighterPairs(frameNumber) {
+  const hostDump=state.dumps.find(dump=>dump.role==='host')||state.dumps[0];
+  const clientDump=state.dumps.find(dump=>dump.role==='client')||state.dumps[1];
+  const host=hostDump?decodeFighters(hostDump,hostDump.byFrame.get(frameNumber)):[];
+  const client=clientDump?decodeFighters(clientDump,clientDump.byFrame.get(frameNumber)):[];
+  const hostMap=new Map(host.map(fighter=>[fighterKey(fighter),fighter])),clientMap=new Map(client.map(fighter=>[fighterKey(fighter),fighter]));
+  return Array.from(new Set([...hostMap.keys(),...clientMap.keys()])).sort().map(key=>({key,host:hostMap.get(key)||null,client:clientMap.get(key)||null}));
+}
+function compareVisualFighters(frameNumber) {
+  if(state.dumps.length<2) return [];
+  const first=decodeFighters(state.dumps[0],state.dumps[0].byFrame.get(frameNumber));
+  const second=decodeFighters(state.dumps[1],state.dumps[1].byFrame.get(frameNumber));
+  const secondByKey=new Map(second.map(fighter=>[fighterKey(fighter),fighter]));
+  const mismatches=[];
+  for(const a of first) {
+    const b=secondByKey.get(fighterKey(a));
+    if(!b) { mismatches.push({key:fighterKey(a),a,b:null,position:true,flags:true,action:true,active:true,distance:null}); continue; }
+    const delta=a.pos.map((value,index)=>value-b.pos[index]);
+    const distance=Math.hypot(...delta);
+    const position=distance>0.001, flags=a.flags!==b.flags, action=a.action!==b.action, active=a.active!==b.active;
+    if(position||flags||action||active) mismatches.push({key:fighterKey(a),a,b,position,flags,action,active,distance,delta});
+  }
+  return mismatches;
+}
+function drawArena(frameNumber) {
+  const context=canvas.getContext('2d'), rect=$('arena').getBoundingClientRect(), dpr=window.devicePixelRatio||1, width=Math.max(1,rect.width), height=Math.max(1,rect.height);
+  canvas.width=Math.round(width*dpr); canvas.height=Math.round(height*dpr); context.setTransform(dpr,0,0,dpr,0,0); context.clearRect(0,0,width,height);
+  const fighters=[];
+  state.dumps.slice(0,2).forEach(dump=>fighters.push(...decodeFighters(dump,dump.byFrame.get(frameNumber))));
+  const visualMismatches=compareVisualFighters(frameNumber), mismatchByKey=new Map(visualMismatches.map(item=>[item.key,item]));
+  const visible=fighters.filter(fighter=>$('showBench').checked||fighter.active);
+  if(!visible.length) { context.fillStyle='#8b949e';context.font='16px system-ui';context.textAlign='center';context.fillText('No decoded character regions for this frame',width/2,height/2);return; }
+  let minX=Math.min(...visible.map(f=>f.pos[0])),maxX=Math.max(...visible.map(f=>f.pos[0])),minY=Math.min(0,...visible.map(f=>f.pos[1])),maxY=Math.max(100,...visible.map(f=>f.pos[1]));
+  for(const fighter of visible) for(const shape of fighter.collision) {
+    if(shape.shape==='capsule') {
+      minX=Math.min(minX,shape.a[0]-shape.radius,shape.b[0]-shape.radius);maxX=Math.max(maxX,shape.a[0]+shape.radius,shape.b[0]+shape.radius);minY=Math.min(minY,shape.a[1]-shape.radius,shape.b[1]-shape.radius);maxY=Math.max(maxY,shape.a[1]+shape.radius,shape.b[1]+shape.radius);
+    } else {
+      minX=Math.min(minX,shape.center[0]-shape.radius);maxX=Math.max(maxX,shape.center[0]+shape.radius);minY=Math.min(minY,shape.center[1]-shape.radius);maxY=Math.max(maxY,shape.center[1]+shape.radius);
+    }
+  }
+  const rangeX=Math.max(300,maxX-minX),rangeY=Math.max(180,maxY-minY),padding=54,scale=Math.min((width-padding*2)/rangeX,(height-padding*2)/rangeY)*.88,cx=(minX+maxX)/2,cy=(minY+maxY)/2;
+  const screen=(x,y)=>[width/2+(x-cx)*scale,height/2-(y-cy)*scale];
+  context.strokeStyle='rgba(255,255,255,.07)';context.lineWidth=1;
+  const grid=Math.pow(10,Math.floor(Math.log10(Math.max(rangeX,rangeY)/6)));
+  for(let x=Math.floor(minX/grid)*grid;x<=maxX+grid;x+=grid){const sx=screen(x,0)[0];context.beginPath();context.moveTo(sx,20);context.lineTo(sx,height-20);context.stroke()}
+  for(let y=Math.floor(minY/grid)*grid;y<=maxY+grid;y+=grid){const sy=screen(0,y)[1];context.beginPath();context.moveTo(20,sy);context.lineTo(width-20,sy);context.stroke()}
+  const ground=screen(0,0)[1];context.strokeStyle='rgba(255,255,255,.28)';context.lineWidth=2;context.beginPath();context.moveTo(20,ground);context.lineTo(width-20,ground);context.stroke();
+  const colors={host:['#2dd4bf','#f59e0b'],client:['#60a5fa','#fb7185'],offline:['#2dd4bf','#fb7185']};
+  for(const mismatch of visualMismatches) {
+    if(!mismatch.position||!mismatch.b) continue;
+    const a=screen(mismatch.a.pos[0],mismatch.a.pos[1]),b=screen(mismatch.b.pos[0],mismatch.b.pos[1]);
+    context.save();context.strokeStyle='#ff7b72';context.fillStyle='#ff7b72';context.lineWidth=2;context.setLineDash([4,3]);context.beginPath();context.moveTo(...a);context.lineTo(...b);context.stroke();context.setLineDash([]);context.font='bold 10px ui-monospace';context.textAlign='center';context.fillText(`Δ ${mismatch.distance.toFixed(3)}`,(a[0]+b[0])/2,(a[1]+b[1])/2-5);context.restore();
+  }
+  for(const fighter of visible) {
+    const mismatch=mismatchByKey.get(fighterKey(fighter)), color=(colors[fighter.role]||colors.offline)[fighter.team], [x,y]=screen(fighter.pos[0],fighter.pos[1]);
+    for(const shape of fighter.collision) {
+      const radius=Math.max(1,shape.radius*scale);
+      const hitboxColor=shape.damaging?'#ff2d55':color;
+      context.save();context.strokeStyle=hitboxColor;context.fillStyle=hitboxColor;context.lineWidth=1.5;context.setLineDash(fighter.role==='client'?[5,3]:[]);context.beginPath();
+      if(shape.shape==='capsule') {
+        const a=screen(...shape.a),b=screen(...shape.b);context.moveTo(...a);context.lineTo(...b);context.stroke();context.beginPath();context.arc(...a,radius,0,Math.PI*2);context.moveTo(b[0]+radius,b[1]);context.arc(...b,radius,0,Math.PI*2);
+      } else {
+        const center=screen(...shape.center);context.arc(...center,radius,0,Math.PI*2);
+      }
+      context.globalAlpha=fighter.active?.08:.025;context.fill();context.globalAlpha=fighter.active?.7:.22;context.stroke();context.restore();
+    }
+    context.save();context.globalAlpha=fighter.active?1:.35;context.strokeStyle=mismatch?'#ff7b72':color;context.fillStyle=color;context.lineWidth=mismatch?4:(fighter.active?3:1.5);context.setLineDash(fighter.role==='client'?[6,3]:[]);context.beginPath();context.arc(x,y,fighter.active?9:6,0,Math.PI*2);fighter.role==='host'||fighter.role==='offline'?context.fill():context.stroke();context.setLineDash([]);context.font=`${fighter.active?'bold ':''}11px ui-monospace`;context.textAlign='center';context.fillStyle=mismatch?'#ff7b72':color;context.fillText(`${fighter.role[0].toUpperCase()} P${fighter.team+1}:${fighter.slot}${fighter.active?' POINT':''}${mismatch?' DESYNC':''}`,x,y-15);context.font='10px ui-monospace';context.fillText(`act ${hex(fighter.action,4)} flags ${hex(fighter.flags,8)}`,x,y+25);context.restore();
+  }
+}
+function compareFrames(a,b) {
+  if(!a || !b) return [{region:'frame',offset:0,size:0,kind:'missing peer'}];
+  const diffs=[]; const count=Math.max(a.regions.length,b.regions.length);
+  for(let i=0;i<count;i++) { const ra=a.regions[i], rb=b.regions[i]; if(!ra||!rb) { diffs.push({region:`manifest[${i}]`,offset:0,size:0,kind:'structure'}); continue; }
+    if(ra.size!==rb.size || ra.owner!==rb.owner || ra.vtable!==rb.vtable || ra.name!==rb.name) { diffs.push({region:ra.name||rb.name||`region[${i}]`,offset:0,size:0,kind:'manifest'}); continue; }
+    const size=Math.min(ra.size,rb.size), aa=valueAt(a,ra,0,size), bb=valueAt(b,rb,0,size); let start=-1;
+    for(let p=0;p<size;p++) { if(aa[p]!==bb[p] && start<0) start=p; if((aa[p]===bb[p] || p===size-1) && start>=0) { const end=aa[p]===bb[p]?p:p+1; diffs.push({region:ra.name||`region[${i}]`,offset:start,size:end-start,kind:'bytes'}); start=-1; } }
+  }
+  return diffs;
+}
+function currentFrameNumber() { return state.frames[state.index] ?? null; }
+function currentFrame() {
+  const number=currentFrameNumber();
+  if(number === null) return null;
+  for(const dump of state.dumps) {
+    const frame=dump.byFrame.get(number);
+    if(frame) return frame;
+  }
+  return null;
+}
+function update() {
+  const frame=currentFrame(); state.current=frame; $('frame').textContent=frame ? `Frame ${frame.number} (${state.index+1}/${state.frames.length})` : 'No frame'; $('slider').max=Math.max(0,state.frames.length-1); $('slider').value=state.index;
+  if(!frame) { $('summary').textContent=''; $('diffs').innerHTML='<div class="empty">Open a snapdump to begin.</div>'; $('inspector').innerHTML=''; return; }
+  drawArena(frame.number);
+  const a=state.dumps[0]?.byFrame.get(frame.number), b=state.dumps[1]?.byFrame.get(frame.number);
+  const visualMismatches=compareVisualFighters(frame.number);
+  const compareEnabled=$('showDifferences').checked;
+  const diffs=compareEnabled && state.dumps.length>1 ? compareFrames(a,b) : [];
+  const comparisonStatus=!compareEnabled ? 'Comparison disabled' : state.dumps.length>1 ? (diffs.length ? `${diffs.length} differences` : 'Match') : 'Single dump';
+  const visualStatus=state.dumps.length<2?'Single peer':visualMismatches.length?`${visualMismatches.length} character desync${visualMismatches.length===1?'':'s'}`:'Character state matches';
+  $('visualLegend').innerHTML=`Character state: <span class="${visualMismatches.length?'bad':'ok'}">${visualStatus}</span>`;
+  $('summary').innerHTML=`<span>Frame <strong>${frame.number}</strong></span><span>Local <code>${hex(frame.local)}</code></span><span>Remote <code>${hex(frame.remote)}</code></span><span>Regions <strong>${frame.regions?.length ?? 'NDJSON'}</strong></span><span class="${visualMismatches.length?'bad':'ok'}">${visualStatus}</span><span class="${compareEnabled?(diffs.length?'bad':'ok'):''}">${comparisonStatus}</span>`;
+  if(compareEnabled) {
+    if(!diffs.length) $('diffs').innerHTML=state.dumps.length>1 ? '<div class="empty ok">No differences on this frame.</div>' : '<div class="empty">Load a second .usdp to compare peers.</div>';
+    else $('diffs').innerHTML=diffs.map((d,i)=>`<button class="diff-row" data-diff="${i}"><span class="frame-link">${frame.number}</span><span class="region">${d.region} +${hex(d.offset,4)}</span><span class="kind">${d.kind}${d.size?' ('+d.size+' B)':''}</span></button>`).join('');
+    $('diffs').querySelectorAll('[data-diff]').forEach((node,i)=>node.onclick=()=>inspectDiff(diffs[i],a,b));
+  } else {
+    $('diffs').textContent='';
+  }
+  $('inspector').innerHTML=`<div class="section"><h2>Frame ${frame.number}</h2><p class="hint">${state.dumps.map(d=>`${d.role}: ${d.name}`).join('<br>')}</p></div>`;
+  for(const pair of fighterPairs(frame.number)) {
+    const fighter=pair.host||pair.client, host=pair.host, client=pair.client, team=fighter.team, slot=fighter.slot;
+    const posSame=!!host&&!!client&&host.pos.every((value,index)=>Math.abs(value-client.pos[index])<=.001);
+    const actionSame=!!host&&!!client&&host.action===client.action;
+    const flagsSame=!!host&&!!client&&host.flags===client.flags;
+    const activeSame=!!host&&!!client&&host.active===client.active;
+    const allSame=posSame&&actionSame&&flagsSame&&activeSame;
+    const color=team===0?'p1-color':'p2-color', dot=team===0?'#4fc3f7':'#ef5350', role=slot===0?'Point':`Assist ${slot}`;
+    const row=(label,hostValue,clientValue,same,delta='')=>`<tr class="${same?'':'mismatch-bg'}"><th>${label}</th><td>${hostValue}</td><td>${clientValue}</td><td class="${same?'ok':'bad'}">${delta|| (same?'✓':'✗')}</td></tr>`;
+    let section=`<div class="section"><div class="char-header ${color}"><span class="dot" style="background:${dot}"></span>P${team+1} ${role}${allSame?'':' <span class="bad">DESYNC</span>'}</div><table><tr><th></th><th>Host</th><th>Client</th><th>Δ</th></tr>`;
+    for(let axis=0;axis<3;axis++) { const hv=host?host.pos[axis]:null,cv=client?client.pos[axis]:null,same=hv!==null&&cv!==null&&Math.abs(hv-cv)<=.001;section+=row(['X','Y','Z'][axis],hv===null?'—':hv.toFixed(4),cv===null?'—':cv.toFixed(4),same,hv===null||cv===null?'✗':(hv-cv).toFixed(4)); }
+    section+=row('Act',host?hex(host.action):'—',client?hex(client.action):'—',actionSame);
+    section+=row('mChrF',host?hex(host.flags):'—',client?hex(client.flags):'—',flagsSame);
+    section+=row('Point',host?String(host.active):'—',client?String(client.active):'—',activeSame);
+    const distance=host&&client?Math.hypot(...host.pos.map((value,index)=>value-client.pos[index])):null;
+    section+=`<tr class="${posSame?'':'mismatch-bg'}"><th>Δ Mag</th><td colspan="3" class="${posSame?'ok':'bad'}">${distance===null?'—':distance.toFixed(6)}</td></tr></table></div>`;
+    $('inspector').innerHTML+=section;
+  }
+  if(frame.regions) $('inspector').innerHTML += '<div class="section"><h2>Regions</h2><table><tr><th>Name</th><th>Size</th><th>Hash</th></tr>'+frame.regions.map(r=>`<tr><td>${r.name||'(unnamed)'}</td><td>${r.size}</td><td><code>${hex(r.hash,16)}</code></td></tr>`).join('')+'</table></div>';
+}
+function inspectDiff(diff,a,b) {
+  const ra=a?.regions.find(r=>(r.name||'')===diff.region) || a?.regions[Number((diff.region.match(/\[(\d+)\]/)||[])[1])]; const rb=b?.regions.find(r=>(r.name||'')===diff.region) || b?.regions[Number((diff.region.match(/\[(\d+)\]/)||[])[1])];
+  let html=`<div class="section"><h2>${diff.region} +${hex(diff.offset,4)}</h2><table><tr><th>Kind</th><td>${diff.kind}</td></tr><tr><th>Bytes</th><td>${diff.size}</td></tr></table></div>`;
+  if(ra&&rb&&diff.size) { const av=valueAt(a,ra,diff.offset,diff.size), bv=valueAt(b,rb,diff.offset,diff.size); html+=`<div class="section"><h2>Peer bytes</h2><table><tr><th>Host</th><td class="hex">${bytesHex(av)}</td></tr><tr><th>Client</th><td class="hex">${bytesHex(bv)}</td></tr></table></div>`; }
+  $('inspector').innerHTML=html;
+}
+function load(files) {
+  state.dumps=[]; state.frames=[]; state.index=0;
+  Promise.all(files.map(async file=>{ const buffer=await file.arrayBuffer(); return file.name.toLowerCase().endsWith('.usdp') ? parseUsdp(buffer,file.name) : parseJson(buffer,file.name); })).then(dumps=>{
+    dumps.sort((a,b)=>({host:0,client:1,offline:2,ndjson:3}[a.role] ?? 4)-({host:0,client:1,offline:2,ndjson:3}[b.role] ?? 4));
+    state.dumps=dumps; const numbers=new Set(dumps.flatMap(d=>d.frames.map(f=>f.number))); state.frames=Array.from(numbers).sort((x,y)=>x-y); $('file').textContent=dumps.map(d=>`${d.role}: ${d.name}`).join(' | '); $('drop').style.display='none'; $('app').classList.add('active'); update();
+  }).catch(error=>alert(`Could not load file: ${error.message}`));
+}
+function move(delta) { state.index=Math.max(0,Math.min(state.frames.length-1,state.index+delta)); update(); }
+function preventDocumentDrop(event) { event.preventDefault(); }
+function loadDroppedFiles(event, target) {
+  event.preventDefault();
+  target.classList.remove('drag-over', 'over');
+  const dropped = Array.from(event.dataTransfer.files);
+  if (dropped.length) load(dropped);
+}
+$('dropbox').onclick=()=>$('files').click();
+$('dropbox').ondragover=e=>{e.preventDefault();$('dropbox').classList.add('over')};
+$('dropbox').ondragleave=()=> $('dropbox').classList.remove('over');
+$('dropbox').ondrop=e=>loadDroppedFiles(e, $('dropbox'));
+$('app').ondragover=e=>{e.preventDefault();$('app').classList.add('drag-over')};
+$('app').ondragleave=e=>{if (!e.relatedTarget || !$('app').contains(e.relatedTarget)) $('app').classList.remove('drag-over')};
+$('app').ondrop=e=>loadDroppedFiles(e, $('app'));
+document.addEventListener('dragover', preventDocumentDrop);
+document.addEventListener('drop', preventDocumentDrop);
+$('files').onchange=e=>{load(Array.from(e.target.files));e.target.value=''};
+$('open').onclick=()=>$('files').click();
+$('clear').onclick=()=>{state.dumps=[];state.frames=[];state.index=0;$('app').classList.remove('active');$('drop').style.display='grid';update()};
+$('first').onclick=()=>{state.index=0;update()};
+$('last').onclick=()=>{state.index=state.frames.length-1;update()};
+$('prev').onclick=()=>move(-1);
+$('next').onclick=()=>move(1);
+$('slider').oninput=e=>{state.index=Number(e.target.value);update()};
+$('showBench').onchange=update;
+$('showCollision').onchange=update;
+$('showDifferences').onchange=()=>{$('differencePanel').hidden=!$('showDifferences').checked;update()};
+window.addEventListener('resize',()=>{const frame=currentFrame();if(frame)drawArena(frame.number)});
+document.onkeydown=e=>{
+  if(e.key==='ArrowLeft'||e.key==='ArrowRight') {
+    // Prevent a focused range input from moving once natively and once here.
+    e.preventDefault();
+    move(e.key==='ArrowLeft'?-1:1);
+  }
+};
+</script>
+</body>
+</html>

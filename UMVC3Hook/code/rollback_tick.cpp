@@ -96,7 +96,7 @@ static bool IsHeadlessGameplaySyncCategory(uint32_t category)
     // Keep sync filtering independent from move filtering so categories can be
     // omitted experimentally without suppressing their main gameplay update.
     switch (category) {
-        //case 3:  // Camera, needed to prevent screen jitter.
+        case 3:  // Camera, needed to prevent screen jitter.
         case 7:  // Character, shot, and game-effect preprocessing.
         case 8:  // Fighters and character-owned helpers.
         case 9:  // Character auxiliary units such as Morrigan shadows.
@@ -547,7 +547,10 @@ void Rollback_HeadlessTick(uint64_t sMain)
         profile.Add(&RollbackProfile::headlessRenderBeginArea,
         &RollbackProfile::headlessRenderBeginAreaMax);
 
-    // Advance the active battle action; this dispatches character frame logic.
+    // sAction is registered as a gameplay unit and is dispatched by the
+    // headless sUnit pass above. This helper is only the native action cleanup
+    // pass; calling the fighting dispatcher here would advance action timers
+    // twice.
     uint64_t manager = ((uint64_t(__fastcall*)())_addr(FN_MVC3MGR_GETINSTANCE))();
     uint64_t action = ((GetterFn)_addr(FN_MVC3MGR_GETACTION))(manager); // Resolve the active sAction.
     ((ObjectFn)_addr(FN_ACTION_SUBSTEP))(action); // Run the action substep and character moves.
@@ -622,7 +625,7 @@ void Rollback_HeadlessTick(uint64_t sMain)
         &RollbackProfile::headlessSimulationTailMax);
 
     manager = ((uint64_t(__fastcall*)())_addr(FN_MVC3MGR_GETINSTANCE))();
-    //VTableCall(manager, 0x30); // sMvc3Manager::move.
+    VTableCall(manager, 0x30); // sMvc3Manager::move.
     VTableCall(ManagerSubsystem(FN_GET_CHARACTER), 0x30); // sCharacter::move.
     //VTableCall(ManagerSubsystem(FN_GET_STAGE), 0x30); // sStage::move.
     VTableCall(ManagerSubsystem(FN_GET_SHOT), 0x30); // sShot::move.

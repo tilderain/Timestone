@@ -10,8 +10,13 @@
 extern void HookLog(const char* fmt, ...);
 
 static constexpr uintptr_t ADDR_CHARACTER_MOVE_BASE     = 0x14004BD30;
+static constexpr uintptr_t ADDR_CHARACTER_PRE_MOVE      = 0x14005E390;
+static constexpr uintptr_t ADDR_ACTION_SIDE_CAMERA_MOVE = 0x14001AA20;
 static constexpr uintptr_t ADDR_INPUT_MASK_POST_PROCESS  = 0x14002E5A0;
 static constexpr uintptr_t ADDR_GET_TEAM_INDEX           = 0x140004AC0;
+static constexpr uintptr_t ADDR_TEAM_COMMIT_SWAP         = 0x140021510;
+static constexpr uintptr_t ADDR_TEAM_UPDATE_AGGREGATE    = 0x140022870;
+static constexpr uintptr_t ADDR_ACTION_FIGHTING_CORE     = 0x140006370;
 
 static constexpr uintptr_t PTR_SCHARACTER  = 0x140d44a70;
 static constexpr uintptr_t TEAM0_OFFSET    = 0x40;
@@ -22,14 +27,80 @@ static constexpr uintptr_t NODE_NEXT_OFFSET = 0x10;
 
 static int32_t Diag_GetGameFrameCount()
 {
+    // Headless resimulation labels frames explicitly; sReplay remains on the
+    // live timeline while the native tick is replayed.
+    if (g_isResimulating)
+        return g_resimulateCurrentFrame;
+
     static constexpr uintptr_t G_PSREPLAY_PTR = 0x140d4d9d8;
     uint64_t sReplay = *(uint64_t*)_addr(G_PSREPLAY_PTR);
     if (!sReplay) return -1;
     return *(int32_t*)(sReplay + 0x54);
 }
 
+static bool Diag_TraceLifecycleFrame(int32_t frame)
+{
+    return (frame >= 14 && frame <= 20) || (frame >= 328 && frame <= 333);
+}
+
 static void(__fastcall* oCharacterMoveBase)(uint64_t uChar) = nullptr;
+static void(__fastcall* oCharacterPreMove)(uint64_t pre) = nullptr;
+static void(__fastcall* oActionSideCameraMove)(uint64_t camera) = nullptr;
 static void(__fastcall* oInputMaskPostProcess)(uint64_t cChrInput) = nullptr;
+static bool(__fastcall* oTeamCommitSwap)(uint64_t team) = nullptr;
+static void(__fastcall* oTeamUpdateAggregate)(uint64_t team) = nullptr;
+static void(__fastcall* oActionFightingCore)(uint64_t action) = nullptr;
+
+static int Diag_GetTeamIndex(uint64_t team)
+{
+    uint64_t sCharacter = *(uint64_t*)_addr(PTR_SCHARACTER);
+    if (!sCharacter || team == 0) return -1;
+    if (team == sCharacter + TEAM0_OFFSET) return 0;
+    if (team == sCharacter + TEAM1_OFFSET) return 1;
+    return -1;
+}
+
+static void Diag_LogTeamState(const char* phase, uint64_t team, int32_t frame)
+{
+    if (!team || (!g_isResimulating && !Diag_TraceLifecycleFrame(frame))) return;
+    HookLog("TEAMTRACE frame=%d resim=%d phase=%s team=%d team=0x%llX "
+            "active=0x%llX flag=%08X mCPrgF=%08X pending=%08X,%08X\n",
+            frame, g_isResimulating ? 1 : 0, phase, Diag_GetTeamIndex(team), team,
+            *(uint64_t*)(team + 0x48), *(uint32_t*)(team + 0x58),
+            *(uint32_t*)(team + 0xFC), *(uint32_t*)(team + 0xA0),
+            *(uint32_t*)(team + 0xA4));
+}
+
+static bool __fastcall hkTeamCommitSwap(uint64_t team)
+{
+    int32_t frame = Diag_GetGameFrameCount();
+    Diag_LogTeamState("commit-before", team, frame);
+    bool result = oTeamCommitSwap(team);
+    Diag_LogTeamState("commit-after", team, frame);
+    return result;
+}
+
+static void __fastcall hkTeamUpdateAggregate(uint64_t team)
+{
+    int32_t frame = Diag_GetGameFrameCount();
+    Diag_LogTeamState("aggregate-before", team, frame);
+    oTeamUpdateAggregate(team);
+    Diag_LogTeamState("aggregate-after", team, frame);
+}
+
+static void __fastcall hkActionFightingCore(uint64_t action)
+{
+    int32_t frame = Diag_GetGameFrameCount();
+    if (Diag_TraceLifecycleFrame(frame)) {
+        HookLog("ACTIONTRACE frame=%d resim=%d phase=before action=0x%llX\n",
+                frame, g_isResimulating ? 1 : 0, action);
+    }
+    oActionFightingCore(action);
+    if (Diag_TraceLifecycleFrame(frame)) {
+        HookLog("ACTIONTRACE frame=%d resim=%d phase=after action=0x%llX\n",
+                frame, g_isResimulating ? 1 : 0, action);
+    }
+}
 
 FrameDiagSnapshot g_liveFrameSnap[ROLLBACK_WINDOW_DIAG];
 FrameDiagSnapshot g_resimFrameSnap[ROLLBACK_WINDOW_DIAG];
@@ -62,6 +133,105 @@ void CaptureCharSnapshot(uint64_t uChar, uint32_t teamIdx, uint32_t charSlot, Ch
     snap.uCharAddr = uChar;
     snap.teamIdx = teamIdx;
     snap.charSlot = charSlot;
+}
+
+static void __fastcall hkActionSideCameraMove(uint64_t camera)
+{
+    int32_t frame = Diag_GetGameFrameCount();
+    bool trace = g_isResimulating;
+    uint8_t pre[0x20] = {};
+    uint64_t active[2] = {};
+    float activePos[2][3] = {};
+    uint64_t sCharacter = *(uint64_t*)_addr(PTR_SCHARACTER);
+    if (sCharacter) {
+        for (int team = 0; team < 2; ++team) {
+            uint64_t teamObject = sCharacter + (team == 0 ? TEAM0_OFFSET : TEAM1_OFFSET);
+            active[team] = *(uint64_t*)(teamObject + 0x48);
+            if (active[team]) {
+                activePos[team][0] = *(float*)(active[team] + 0x50);
+                activePos[team][1] = *(float*)(active[team] + 0x54);
+                activePos[team][2] = *(float*)(active[team] + 0x58);
+            }
+        }
+    }
+    if (camera)
+        std::memcpy(pre, (uint8_t*)camera + 0x80, sizeof(pre));
+
+    oActionSideCameraMove(camera);
+
+    if (camera) {
+        uint8_t post[0x20] = {};
+        std::memcpy(post, (uint8_t*)camera + 0x80, sizeof(post));
+        bool changed = std::memcmp(pre, post, sizeof(pre)) != 0;
+        if (trace || changed || Diag_TraceLifecycleFrame(frame)) {
+            HookLog("CAMTRACE frame=%d resim=%d changed=%d caller=0x%llX camera=0x%llX "
+                "active=0x%llX/0x%llX pos0=(%+.5f,%+.5f,%+.5f) "
+                "pos1=(%+.5f,%+.5f,%+.5f) "
+                "pre50=%02X,%02X,%02X,%02X,%02X,%02X,%02X,%02X "
+                "pre80=%02X,%02X,%02X,%02X,%02X,%02X,%02X,%02X "
+                "pre88=%02X,%02X,%02X,%02X,%02X,%02X,%02X,%02X "
+                "pre90=%02X,%02X,%02X,%02X,%02X,%02X,%02X,%02X "
+                "pre98=%02X,%02X,%02X,%02X,%02X,%02X,%02X,%02X "
+                "post80=%02X,%02X,%02X,%02X,%02X,%02X,%02X,%02X "
+                "post88=%02X,%02X,%02X,%02X,%02X,%02X,%02X,%02X "
+                "post90=%02X,%02X,%02X,%02X,%02X,%02X,%02X,%02X "
+                "post98=%02X,%02X,%02X,%02X,%02X,%02X,%02X,%02X\n",
+                frame, g_isResimulating ? 1 : 0, changed ? 1 : 0,
+                (uint64_t)__builtin_return_address(0), camera,
+                active[0], active[1],
+                activePos[0][0], activePos[0][1], activePos[0][2],
+                activePos[1][0], activePos[1][1], activePos[1][2],
+                ((uint8_t*)camera)[0x50], ((uint8_t*)camera)[0x51],
+                ((uint8_t*)camera)[0x52], ((uint8_t*)camera)[0x53],
+                ((uint8_t*)camera)[0x54], ((uint8_t*)camera)[0x55],
+                ((uint8_t*)camera)[0x56], ((uint8_t*)camera)[0x57],
+                pre[0], pre[1], pre[2], pre[3], pre[4], pre[5], pre[6], pre[7],
+                pre[8], pre[9], pre[10], pre[11], pre[12], pre[13], pre[14], pre[15],
+                pre[16], pre[17], pre[18], pre[19], pre[20], pre[21], pre[22], pre[23],
+                pre[24], pre[25], pre[26], pre[27], pre[28], pre[29], pre[30], pre[31],
+                post[0], post[1], post[2], post[3], post[4], post[5], post[6], post[7],
+                post[8], post[9], post[10], post[11], post[12], post[13], post[14], post[15],
+                post[16], post[17], post[18], post[19], post[20], post[21], post[22], post[23],
+                post[24], post[25], post[26], post[27], post[28], post[29], post[30], post[31]);
+        }
+    }
+}
+
+static void __fastcall hkCharacterPreMove(uint64_t pre)
+{
+    int32_t frame = Diag_GetGameFrameCount();
+    bool trace = g_isResimulating;
+    uint64_t sCharacter = *(uint64_t*)_addr(PTR_SCHARACTER);
+    if (trace && sCharacter) {
+        HookLog("PRETRACE frame=%d pre=0x%llX ", frame, pre);
+        for (int teamIndex = 0; teamIndex < 2; ++teamIndex) {
+            uint64_t team = sCharacter + (teamIndex == 0 ? TEAM0_OFFSET : TEAM1_OFFSET);
+            uint64_t active = *(uint64_t*)(team + 0x48);
+            HookLog("team%d flags=0x%08X active=0x%llX mCPrgF=0x%08X ",
+                    teamIndex, *(uint32_t*)(team + 0x58), active,
+                    *(uint32_t*)(team + 0xFC));
+            uint64_t node = team + TEAM_FIRST_NODE_OFFSET;
+            for (int slot = 0; node && slot < 3; ++slot) {
+                uint64_t character = *(uint64_t*)(node + NODE_CHR_OFFSET);
+                HookLog("c%d=0x%llX:u10=%llX:c14F8=%08X:c150C=%08X:"
+                        "151C=%08X:29D4=%08X:2AD0=%08X:2D94=%08X:"
+                        "64D4=%08X:6554=%08X ", slot,
+                        character,
+                        character ? *(uint64_t*)(character + 0x10) : 0,
+                        character ? *(uint32_t*)(character + 0x14F8) : 0,
+                        character ? *(uint32_t*)(character + 0x150C) : 0,
+                        character ? *(uint32_t*)(character + 0x151C) : 0,
+                        character ? *(uint32_t*)(character + 0x29D4) : 0,
+                        character ? *(uint32_t*)(character + 0x2AD0) : 0,
+                        character ? *(uint32_t*)(character + 0x2D94) : 0,
+                        character ? *(uint32_t*)(character + 0x64D4) : 0,
+                        character ? *(uint32_t*)(character + 0x6554) : 0);
+                node = *(uint64_t*)(node + NODE_NEXT_OFFSET);
+            }
+        }
+        HookLog("\n");
+    }
+    oCharacterPreMove(pre);
 }
 
 static void LogSnapshotDiff(const CharDiagSnapshot& live, const CharDiagSnapshot& resim,
@@ -357,11 +527,78 @@ static void __fastcall hkCharacterMoveBase(uint64_t uChar)
 
     CharDiagSnapshot preSnap;
     CaptureCharSnapshot(uChar, teamIdx, charSlot, preSnap);
+    uint32_t preMoveCounter = *(uint32_t*)(uChar + 0x2D94);
+    uint32_t prePrgF = *(uint32_t*)(uChar + 0x14F8);
+    uint8_t prePackedState[4] = {};
+    std::memcpy(prePackedState, (uint8_t*)uChar + 0x2888, sizeof(prePackedState));
+    uint8_t preTargetState[8] = {};
+    std::memcpy(preTargetState, (uint8_t*)uChar + 0x64D0, sizeof(preTargetState));
+    uint8_t preEp[20] = {};
+    std::memcpy(preEp, (uint8_t*)uChar + 0x3F84, sizeof(preEp));
 
     oCharacterMoveBase(uChar);
 
     CharDiagSnapshot postSnap;
     CaptureCharSnapshot(uChar, teamIdx, charSlot, postSnap);
+    uint32_t postMoveCounter = *(uint32_t*)(uChar + 0x2D94);
+    uint32_t postPrgF = *(uint32_t*)(uChar + 0x14F8);
+    uint8_t postPackedState[4] = {};
+    std::memcpy(postPackedState, (uint8_t*)uChar + 0x2888, sizeof(postPackedState));
+    uint8_t postTargetState[8] = {};
+    std::memcpy(postTargetState, (uint8_t*)uChar + 0x64D0, sizeof(postTargetState));
+    uint8_t postEp[20] = {};
+    std::memcpy(postEp, (uint8_t*)uChar + 0x3F84, sizeof(postEp));
+
+    // The EP counter block is authoritative animation state. Trace it around
+    // the native move so a rollback-only rewrite is distinguishable from a
+    // restore gap.
+    if (g_isResimulating) {
+        HookLog("EPTRACE frame=%d resim=%d team=%u slot=%u char=0x%llX "
+                "moveState=%02X,%02X,%02X,%02X "
+                "pre=%02X,%02X,%02X,%02X,%02X,%02X,%02X,%02X,%02X,%02X,%02X,%02X,%02X,%02X,%02X,%02X,%02X,%02X,%02X,%02X "
+                "post=%02X,%02X,%02X,%02X,%02X,%02X,%02X,%02X,%02X,%02X,%02X,%02X,%02X,%02X,%02X,%02X,%02X,%02X,%02X,%02X\n",
+                diagFrame, g_isResimulating ? 1 : 0, teamIdx, charSlot,
+                uChar,
+                *((uint8_t*)uChar + 0x2D94), *((uint8_t*)uChar + 0x2D95),
+                *((uint8_t*)uChar + 0x2D96), *((uint8_t*)uChar + 0x2D97),
+                preEp[0], preEp[1], preEp[2], preEp[3], preEp[4], preEp[5],
+                preEp[6], preEp[7], preEp[8], preEp[9], preEp[10], preEp[11],
+                preEp[12], preEp[13], preEp[14], preEp[15], preEp[16],
+                preEp[17], preEp[18], preEp[19],
+                postEp[0], postEp[1], postEp[2], postEp[3], postEp[4], postEp[5],
+                postEp[6], postEp[7], postEp[8], postEp[9], postEp[10], postEp[11],
+                 postEp[12], postEp[13], postEp[14], postEp[15], postEp[16],
+                 postEp[17], postEp[18], postEp[19]);
+        HookLog("FLAGTRACE frame=%d resim=1 team=%u slot=%u char=0x%llX "
+                "prgF=%08X->%08X packed2888=%02X,%02X,%02X,%02X->%02X,%02X,%02X,%02X "
+                "target64D0=%02X,%02X,%02X,%02X,%02X,%02X,%02X,%02X->%02X,%02X,%02X,%02X,%02X,%02X,%02X,%02X\n",
+                diagFrame, teamIdx, charSlot, uChar,
+                prePrgF, postPrgF,
+                prePackedState[0], prePackedState[1], prePackedState[2], prePackedState[3],
+                postPackedState[0], postPackedState[1], postPackedState[2], postPackedState[3],
+                preTargetState[0], preTargetState[1], preTargetState[2], preTargetState[3],
+                preTargetState[4], preTargetState[5], preTargetState[6], preTargetState[7],
+                postTargetState[0], postTargetState[1], postTargetState[2], postTargetState[3],
+                postTargetState[4], postTargetState[5], postTargetState[6], postTargetState[7]);
+        HookLog("TARGETTRACE frame=%d team=%u slot=%u char=0x%llX "
+                "t0=0x%llX:%08X,%08X,%08X,%08X "
+                "t1=0x%llX:%08X,%08X,%08X,%08X\n",
+                diagFrame, teamIdx, charSlot, uChar,
+                *(uint64_t*)(uChar + 0x6498),
+                *(uint32_t*)(uChar + 0x64CC), *(uint32_t*)(uChar + 0x64D0),
+                *(uint32_t*)(uChar + 0x64D4), *(uint32_t*)(uChar + 0x64D8),
+                *(uint64_t*)(uChar + 0x6528),
+                *(uint32_t*)(uChar + 0x655C), *(uint32_t*)(uChar + 0x6560),
+                *(uint32_t*)(uChar + 0x6564), *(uint32_t*)(uChar + 0x6568));
+    }
+
+    if (Diag_TraceLifecycleFrame(diagFrame)) {
+        HookLog("MOVETRACE frame=%d resim=%d team=%u slot=%u char=0x%llX "
+                "caller=0x%llX 2D94=%08X->%08X\n",
+                diagFrame, g_isResimulating ? 1 : 0, teamIdx, charSlot, uChar,
+                (uint64_t)__builtin_return_address(0),
+                preMoveCounter, postMoveCounter);
+    }
 
     if (frame < 0) return;
 
@@ -542,16 +779,40 @@ void Diag_InitHooks()
     MH_STATUS s;
 
     s = MH_CreateHook(
+        (LPVOID)_addr(ADDR_CHARACTER_PRE_MOVE),
+        (LPVOID)&hkCharacterPreMove,
+        (LPVOID*)&oCharacterPreMove
+    );
+    if (s == MH_OK)
+    {
+        MH_EnableHook((LPVOID)_addr(ADDR_CHARACTER_PRE_MOVE));
+    }
+    else
+        HookLog("Diag: Failed to hook uCharacterPre__move (%d)\n", s);
+
+    s = MH_CreateHook(
         (LPVOID)_addr(ADDR_CHARACTER_MOVE_BASE),
         (LPVOID)&hkCharacterMoveBase,
         (LPVOID*)&oCharacterMoveBase
     );
     if (s == MH_OK)
     {
-        //MH_EnableHook((LPVOID)_addr(ADDR_CHARACTER_MOVE_BASE));
+        MH_EnableHook((LPVOID)_addr(ADDR_CHARACTER_MOVE_BASE));
     }
     else
         HookLog("Diag: Failed to hook uCharacter__move_base (%d)\n", s);
+
+    s = MH_CreateHook(
+        (LPVOID)_addr(ADDR_ACTION_SIDE_CAMERA_MOVE),
+        (LPVOID)&hkActionSideCameraMove,
+        (LPVOID*)&oActionSideCameraMove
+    );
+    if (s == MH_OK)
+    {
+        MH_EnableHook((LPVOID)_addr(ADDR_ACTION_SIDE_CAMERA_MOVE));
+    }
+    else
+        HookLog("Diag: Failed to hook uActionSideCamera__move (%d)\n", s);
 
     s = MH_CreateHook(
         (LPVOID)_addr(ADDR_INPUT_MASK_POST_PROCESS),
@@ -564,6 +825,42 @@ void Diag_InitHooks()
     }
     else
         HookLog("Diag: Failed to hook inputMaskPostProcess (%d)\n", s);
+
+    s = MH_CreateHook(
+        (LPVOID)_addr(ADDR_TEAM_COMMIT_SWAP),
+        (LPVOID)&hkTeamCommitSwap,
+        (LPVOID*)&oTeamCommitSwap
+    );
+    if (s == MH_OK)
+    {
+        MH_EnableHook((LPVOID)_addr(ADDR_TEAM_COMMIT_SWAP));
+    }
+    else
+        HookLog("Diag: Failed to hook cChrTeam__commitPendingCharacterSwap (%d)\n", s);
+
+    s = MH_CreateHook(
+        (LPVOID)_addr(ADDR_TEAM_UPDATE_AGGREGATE),
+        (LPVOID)&hkTeamUpdateAggregate,
+        (LPVOID*)&oTeamUpdateAggregate
+    );
+    if (s == MH_OK)
+    {
+        MH_EnableHook((LPVOID)_addr(ADDR_TEAM_UPDATE_AGGREGATE));
+    }
+    else
+        HookLog("Diag: Failed to hook cChrTeam__updateAggregateState (%d)\n", s);
+
+    s = MH_CreateHook(
+        (LPVOID)_addr(ADDR_ACTION_FIGHTING_CORE),
+        (LPVOID)&hkActionFightingCore,
+        (LPVOID*)&oActionFightingCore
+    );
+    if (s == MH_OK)
+    {
+        MH_EnableHook((LPVOID)_addr(ADDR_ACTION_FIGHTING_CORE));
+    }
+    else
+        HookLog("Diag: Failed to hook sAction__stepFightingCore (%d)\n", s);
 
     HookLog("Diag: Init complete — diagnostic hooks installed\n");
 }

@@ -89,7 +89,10 @@ static constexpr SnapshotRange UACTION_CAMERA_SCALAR_RESTORE_RANGES[] = {
     {0x140, 0x40},
     {0x180, 0x40},
     {0x1C0, 0x40},
+    // Camera center and radius used by the anchor's bounds calculation.
+    {0x430, 0x20},
     {0x450, 0x40},
+    {0x510, 0x04},
 };
 using ShotEnqueueFn = char(__fastcall*)(void*, void*, int);
 using UnitAddFn = char(__fastcall*)(void*, int, void*, void*);
@@ -148,15 +151,23 @@ static constexpr SnapshotRange CCHR_SCALAR_RESTORE_RANGES[] = {
     {0x1644, 0x04},
     // Character state/context values before the frame and identity fields.
     {0x1898, 0x30},
-    // Character move-pass frame counter and identity/team membership.
-    {0x2D94, 0x04},
     {0x2D9C, 0x24},
     // Frame and identity-adjacent scalar state preceding mId.
     {0x2D80, 0x10},
     // Character body/assist configuration state.
     {0x28B8, 0x20},
-    // Character state values used by action and movement dispatch.
-    {0x2AD0, 0x20},
+    // Two paired 16-bit character transition/animation selectors. They are
+    // scalar fields, not ownership pointers, and sit outside the main
+    // animation request block.
+    {0x3CF0, 0x04}, {0x3E60, 0x04},
+    // cChrCmdLimit animation-flag predicate triplets in the embedded special
+    // and combo command matchers. Their packed masks can resemble aligned
+    // pointers, so the generic pointer guard otherwise retains live values.
+    {0x27B0, 0x0C}, {0x29C8, 0x0C},
+    // Character state values used by action and movement dispatch. The qword
+    // at +0x2AD0 is a peer-local resource pointer and must remain live; the
+    // following state payload is still part of the restored character FSM.
+    {0x2AD8, 0x18},
     // mWeaponNum controls native weapon-slot processing and collision setup.
     {0x3F38, 0x04},
     // mAnmNoReqAlive/Std/Cmd, request flags, and animation-rate state drive
@@ -179,19 +190,19 @@ static constexpr SnapshotRange CCHR_SCALAR_RESTORE_RANGES[] = {
     // (+0x6828 defaults to -1) and loses the restored matrix values.
     {0x680D, 0x01}, {0x6810, 0x24}, {0x6828, 0x04}, {0x6840, 0x80},
     {0x68D0, 0x20},
+    // cChr::updateChargeState consumes this charge timer on the next tick.
+    {0x68F0, 0x04},
 };
 
 // These shared cChr fields are rebuilt by native post-restore helpers on some
 // rollback paths. Reapply the saved values after those helpers complete.
 static constexpr SnapshotRange CCHR_POST_RESTORE_TAIL_RANGES[] = {
-    // Native restore/repair can run a character phase after the main scalar
-    // copy. Reapply the per-frame move counter last so all roster members use
-    // the same snapshot timeline.
-    {0x2D94, 0x04},
     // Reapply throw-reaction reuse state after native model/character rebuilds.
     {0x680D, 0x01}, {0x6810, 0x24}, {0x6828, 0x04}, {0x6840, 0x80},
     // Reapply cached attack-info transform data consumed by throw/contact logic.
     {0x68D0, 0x20},
+    // Native post-restore repair must not retain the live charge timer.
+    {0x68F0, 0x04},
     // Shot/effect reconstruction can refresh cChrTargetInfo payloads. These
     // records control target, damage, throw, and parent-character state; their
     // vtables and character pointers remain live outside these payload ranges.
@@ -204,6 +215,12 @@ static constexpr SnapshotRange CCHR_POST_RESTORE_TAIL_RANGES[] = {
     // Native animation/model repair can rewrite this tail scalar after the
     // main restore. Reapply it for deterministic character animation state.
     {0x3EA8, 0x04},
+    {0x3CF0, 0x04}, {0x3E60, 0x04},
+    // UI/model repair can also rebuild packed action flags and the action
+    // dispatch state used to schedule assist/tag entry. Keep these values on
+    // the restored simulation timeline.
+    {0x1518, 0x18},
+    {0x2AD8, 0x18},
 };
 
 static constexpr SnapshotRange SMAIN_RESTORE_RANGES[] = {
@@ -832,13 +849,13 @@ void Rollback_RestoreSnapshot(int32_t frame)
         }
         globalRngOffset += slot.regions[i].size;
     }
-    uint32_t liveGlobalRng[4] = {};
+    /*uint32_t liveGlobalRng[4] = {};
     std::memcpy(liveGlobalRng, (void*)_addr(0x140D765D8), sizeof(liveGlobalRng));
     HookLog("RNGRESTORE frame=%d stage=begin saved=%08X,%08X,%08X,%08X live=%08X,%08X,%08X,%08X found=%d\n",
             frame,
             savedGlobalRng[0], savedGlobalRng[1], savedGlobalRng[2], savedGlobalRng[3],
             liveGlobalRng[0], liveGlobalRng[1], liveGlobalRng[2], liveGlobalRng[3],
-            foundGlobalRng ? 1 : 0);
+            foundGlobalRng ? 1 : 0);*/
 
     // Restore using SAVED region metadata (addresses + sizes), not re-resolved.
     // This ensures dynamic objects (projectiles, effects) map to the exact
@@ -884,6 +901,35 @@ void Rollback_RestoreSnapshot(int32_t frame)
         }
         return false;
     };
+
+    auto traceRestoreState = [frame, team0, team1, &teamCharacters, teamCharacterCount](
+                                 const char* phase) {
+        uint64_t active0 = team0 ? *(uint64_t*)(team0 + 0x48) : 0;
+        uint64_t active1 = team1 ? *(uint64_t*)(team1 + 0x48) : 0;
+        HookLog("RESTORETRACE frame=%d phase=%s active0=0x%llX active1=0x%llX\n",
+                frame, phase, active0, active1);
+        for (size_t i = 0; i < teamCharacterCount; ++i) {
+            uint64_t character = teamCharacters[i];
+            HookLog("RESTORETRACE frame=%d phase=%s char[%u]=0x%llX "
+                    "unit10=0x%llX unit18=0x%llX unit20=0x%llX unit38=0x%llX "
+                    "14F8=0x%08X 151C=0x%08X 29D4=0x%08X 2AD0=0x%08X "
+                    "2D94=0x%08X 64D4=0x%08X 6554=0x%08X charge=%g\n",
+                    frame, phase, (unsigned)i, character,
+                    *(uint64_t*)(character + 0x10),
+                    *(uint64_t*)(character + 0x18),
+                    *(uint64_t*)(character + 0x20),
+                    *(uint64_t*)(character + 0x38),
+                    *(uint32_t*)(character + 0x14F8),
+                    *(uint32_t*)(character + 0x151C),
+                    *(uint32_t*)(character + 0x29D4),
+                    *(uint32_t*)(character + 0x2AD0),
+                    *(uint32_t*)(character + 0x2D94),
+                    *(uint32_t*)(character + 0x64D4),
+                    *(uint32_t*)(character + 0x6554),
+                    *(float*)(character + 0x68F0));
+        }
+    };
+    traceRestoreState("before");
     bool ownerStillMatches[MAX_REGIONS] = {};
     uint64_t liveOwnerPointers[MAX_REGIONS] = {};
     for (int i = 0; i < slot.regionCount; ++i) {
@@ -1049,8 +1095,13 @@ void Rollback_RestoreSnapshot(int32_t frame)
                  field < sizeof(CUNIT_LIVE_STATE_OFFSETS) / sizeof(CUNIT_LIVE_STATE_OFFSETS[0]);
                  ++field) {
                 uint32_t fieldOffset = CUNIT_LIVE_STATE_OFFSETS[field];
-                if (fieldOffset == 0x10 && isTeamCharacter((uint64_t)slot.regions[i].ptr))
-                    continue; // restore the saved MtObject alive/lifecycle flags
+                // The flag word controls whether a roster character is alive
+                // and participates in the move pass. TAC can restore an
+                // incoming character after the live timeline has marked it
+                // dead, so this must follow the saved frame. The other fields
+                // are intrusive links and remain peer-local.
+                if (fieldOffset == 0x18 || fieldOffset == 0x20 || fieldOffset == 0x38)
+                    continue;
                 *(uint64_t*)((uint8_t*)slot.regions[i].ptr + fieldOffset) = liveUnitState[field];
             }
             // Keep live draw-list/resource ownership and uModel lifecycle state,
@@ -1253,9 +1304,9 @@ void Rollback_RestoreSnapshot(int32_t frame)
     }
     const uint64_t regionsEnd = Profile_Now();
 
-    std::memcpy(liveGlobalRng, (void*)_addr(0x140D765D8), sizeof(liveGlobalRng));
+    /*std::memcpy(liveGlobalRng, (void*)_addr(0x140D765D8), sizeof(liveGlobalRng));
     HookLog("RNGRESTORE frame=%d stage=regions live=%08X,%08X,%08X,%08X\n",
-            frame, liveGlobalRng[0], liveGlobalRng[1], liveGlobalRng[2], liveGlobalRng[3]);
+            frame, liveGlobalRng[0], liveGlobalRng[1], liveGlobalRng[2], liveGlobalRng[3]);*/
 
     Rollback_RestoreCollisionNodeClones(slot);
     const uint64_t collisionClonesEnd = Profile_Now();
@@ -1298,9 +1349,9 @@ void Rollback_RestoreSnapshot(int32_t frame)
     RestoreShotAndEffectRecipes(slot);
     const uint64_t shotsEnd = Profile_Now();
 
-    std::memcpy(liveGlobalRng, (void*)_addr(0x140D765D8), sizeof(liveGlobalRng));
+    /*std::memcpy(liveGlobalRng, (void*)_addr(0x140D765D8), sizeof(liveGlobalRng));
     HookLog("RNGRESTORE frame=%d stage=recipes live=%08X,%08X,%08X,%08X\n",
-            frame, liveGlobalRng[0], liveGlobalRng[1], liveGlobalRng[2], liveGlobalRng[3]);
+            frame, liveGlobalRng[0], liveGlobalRng[1], liveGlobalRng[2], liveGlobalRng[3]);*/
 
     using SetChildMaterialModeFn = void(__fastcall*)(void*, int, uint8_t);
     auto setChildMaterialMode =
@@ -1380,9 +1431,11 @@ void Rollback_RestoreSnapshot(int32_t frame)
         }
     }
 
-    std::memcpy(liveGlobalRng, (void*)_addr(0x140D765D8), sizeof(liveGlobalRng));
+    traceRestoreState("after");
+
+    /*std::memcpy(liveGlobalRng, (void*)_addr(0x140D765D8), sizeof(liveGlobalRng));
     HookLog("RNGRESTORE frame=%d stage=complete live=%08X,%08X,%08X,%08X\n",
-            frame, liveGlobalRng[0], liveGlobalRng[1], liveGlobalRng[2], liveGlobalRng[3]);
+            frame, liveGlobalRng[0], liveGlobalRng[1], liveGlobalRng[2], liveGlobalRng[3]);*/
 
     if (g_activeRollbackProfile) {
         g_activeRollbackProfile->restoreTotal += uiEnd - profileStart;

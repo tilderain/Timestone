@@ -160,8 +160,8 @@ static void __fastcall hkRngNextCommon(uint32_t* state, RngNextFn original,
 
     if (isolateGlobalRng) {
         std::memcpy(state, savedGlobal, sizeof(savedGlobal));
-        HookLog("PRESENTRNG frame=%d resim=%d caller=0x%llX state=preserved\n",
-                frame, g_isResimulating ? 1 : 0, caller);
+        //HookLog("PRESENTRNG frame=%d resim=%d caller=0x%llX state=preserved\n",
+        //        frame, g_isResimulating ? 1 : 0, caller);
     }
 
     // Never cap global-stream entries: one hidden presentation or direct
@@ -171,12 +171,12 @@ static void __fastcall hkRngNextCommon(uint32_t* state, RngNextFn original,
     if (state && (isGlobalState || g_advanceTraceCount++ < 256)) {
         uint64_t global = _addr(GLOBAL_RNG_STATE);
         const char* domain = (state == (uint32_t*)global) ? "global" : "other";
-        HookLog("RNGNEXT frame=%d resim=%d caller=0x%llX state=0x%llX domain=%s "
+        /*HookLog("RNGNEXT frame=%d resim=%d caller=0x%llX state=0x%llX domain=%s "
                 "before=%08X,%08X,%08X,%08X after=%08X,%08X,%08X,%08X\n",
                 frame, g_isResimulating ? 1 : 0,
                 caller, (uint64_t)state, domain,
                 before[0], before[1], before[2], before[3],
-                state[0], state[1], state[2], state[3]);
+                state[0], state[1], state[2], state[3]);*/
     }
 }
 
@@ -220,8 +220,8 @@ static float __fastcall hkRngAdvance(uint64_t stateArg, void* rngOwner)
     if (isolateGlobalRng) {
         std::memcpy((void*)_addr(GLOBAL_RNG_STATE), globalBefore,
                     sizeof(globalBefore));
-        HookLog("PRESENTRNGADV frame=%d resim=%d caller=0x%llX state=preserved\n",
-                frame, g_isResimulating ? 1 : 0, caller);
+        //HookLog("PRESENTRNGADV frame=%d resim=%d caller=0x%llX state=preserved\n",
+        //        frame, g_isResimulating ? 1 : 0, caller);
     }
 
     // This is deliberately capped per frame: animation command streams can
@@ -233,7 +233,7 @@ static float __fastcall hkRngAdvance(uint64_t stateArg, void* rngOwner)
             std::memcpy(ownerAfter, (uint8_t*)rngOwner + 0x2D80,
                         sizeof(ownerAfter));
         }
-        HookLog("RNGADV frame=%d resim=%d caller=0x%llX stateArg=0x%llX "
+        /*HookLog("RNGADV frame=%d resim=%d caller=0x%llX stateArg=0x%llX "
                 "owner=0x%llX result=%.9g global=%08X,%08X,%08X,%08X->%08X,%08X,%08X,%08X "
                 "ownerRng=%08X,%08X,%08X,%08X\n",
                 frame, g_isResimulating ? 1 : 0,
@@ -241,7 +241,7 @@ static float __fastcall hkRngAdvance(uint64_t stateArg, void* rngOwner)
                 (uint64_t)rngOwner, result,
                 globalBefore[0], globalBefore[1], globalBefore[2], globalBefore[3],
                 globalAfter[0], globalAfter[1], globalAfter[2], globalAfter[3],
-                ownerBefore[0], ownerBefore[1], ownerBefore[2], ownerBefore[3]);
+                ownerBefore[0], ownerBefore[1], ownerBefore[2], ownerBefore[3]);*/
     }
     return result;
 }
@@ -304,7 +304,7 @@ static int __fastcall hkRandomIntRange(void* stateArg, int low, int high,
         std::memcpy(ownerAfter, (uint8_t*)rngOwner + 0x2D80, sizeof(ownerAfter));
 
     if (g_rngTraceCount++ < 32) {
-        HookLog("RNGTRACE frame=%d resim=%d caller=0x%llX stateArg=0x%llX owner=0x%llX "
+        /*HookLog("RNGTRACE frame=%d resim=%d caller=0x%llX stateArg=0x%llX owner=0x%llX "
                 "range=[%d,%d] result=%d global=%08X,%08X,%08X,%08X->%08X,%08X,%08X,%08X "
                 "ownerRng(+0x2D80)=%08X,%08X,%08X,%08X->%08X,%08X,%08X,%08X\n",
                 frame, g_isResimulating ? 1 : 0, caller, (uint64_t)stateArg,
@@ -312,7 +312,7 @@ static int __fastcall hkRandomIntRange(void* stateArg, int low, int high,
                 globalBefore[0], globalBefore[1], globalBefore[2], globalBefore[3],
                 globalAfter[0], globalAfter[1], globalAfter[2], globalAfter[3],
                 ownerBefore[0], ownerBefore[1], ownerBefore[2], ownerBefore[3],
-                ownerAfter[0], ownerAfter[1], ownerAfter[2], ownerAfter[3]);
+                ownerAfter[0], ownerAfter[1], ownerAfter[2], ownerAfter[3]);*/
     }
     return result;
 }
@@ -341,13 +341,13 @@ static int __fastcall hkHsienKoSelectAnki(void* character)
     uint64_t caller = (uint64_t)__builtin_return_address(0);
 
     if (g_ankiTraceCount++ < 64) {
-        HookLog("ANKITRACE frame=%d resim=%d caller=0x%llX char=0x%llX action=0x%08X "
+        /*HookLog("ANKITRACE frame=%d resim=%d caller=0x%llX char=0x%llX action=0x%08X "
                 "reserved=%d commandBefore(+0x13C4)=%08X callbackResult=%d "
                 "rng(+0x2D80)=%08X,%08X,%08X,%08X->%08X,%08X,%08X,%08X\n",
                 frame, g_isResimulating ? 1 : 0, caller, (uint64_t)character,
                 actionId, (int32_t)reservedBefore, commandBefore, result,
                 rngBefore[0], rngBefore[1], rngBefore[2], rngBefore[3],
-                rngAfter[0], rngAfter[1], rngAfter[2], rngAfter[3]);
+                rngAfter[0], rngAfter[1], rngAfter[2], rngAfter[3]);*/
     }
     return result;
 }
@@ -369,10 +369,10 @@ static void __fastcall hkSetReservedAnki(void* character, int value)
     oSetReservedAnki(character, value);
 
     if (g_ankiReserveTraceCount++ < 32) {
-        HookLog("ANKIRESERVE frame=%d resim=%d caller=0x%llX object=0x%llX "
+        /*HookLog("ANKIRESERVE frame=%d resim=%d caller=0x%llX object=0x%llX "
                 "action=0x%08X before=%d after=%d\n",
                 frame, g_isResimulating ? 1 : 0, caller, (uint64_t)character,
-                actionId, (int32_t)before, value);
+                actionId, (int32_t)before, value);*/
     }
 }
 

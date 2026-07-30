@@ -125,13 +125,18 @@ EXPLICIT_BYTE_OVERRIDES = {
     # pattern. Nearby four-byte fields remain visible.
     *( (label, offset, 8)
        for label in ("uCharacter.team0", "uCharacter.team1")
-       for offset in (0x3270, 0x3608, 0x3618, 0x3628, 0x3C40, 0x3DB0,
+       for offset in (0x2AD0, 0x3270, 0x3608, 0x3618, 0x3628, 0x3C40, 0x3DB0,
                       0x6460, 0x6740, 0x67F0) ),
     # Lazily populated character-owned pointers. These slots are null at the
     # initial snapshot, so frame-0 pointer discovery cannot identify them.
     *( (label, offset, 8)
        for label in ("uCharacter.team0", "uCharacter.team1")
        for offset in (0x650, 0x28B8) ),
+    # cChr's move-pass counter is initialized/advanced by each peer's native
+    # lifecycle and is uniformly offset even on the live path. It is not an
+    # authoritative gameplay value.
+    *( (label, 0x2D94, 4)
+       for label in ("uCharacter.team0", "uCharacter.team1") ),
 }
 FRAME0_EXPLICIT_BYTE_OVERRIDES = {
     ("uActionSideCamera", 0x18, 8),

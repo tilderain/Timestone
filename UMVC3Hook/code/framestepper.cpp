@@ -501,6 +501,13 @@ static void __fastcall HookedMove(void* sMvc3Main)
             Netplay_ClearInputQueues();
             Controller_ResetBuffers();
             Controller_ResetFrameEpoch();
+            // Establish the fight-clock epoch at the same mutual-release
+            // boundary on both peers. Otherwise the first stepFighting hook
+            // can capture a local pre-release frame and shift the round clock.
+            uint64_t releasedManager = *(uint64_t*)_addr(0x140D510A0);
+            uint64_t releasedAction = releasedManager
+                ? *(uint64_t*)(releasedManager + 0x48) : 0;
+            Controller_ResetFightTimer(releasedAction);
             Rollback_FreeSnapshots();
             g_battleSynchronized = true;
             if (g_trainingRestartBarrier) {

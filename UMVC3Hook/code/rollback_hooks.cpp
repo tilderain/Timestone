@@ -41,6 +41,11 @@ static void(__fastcall* oApplyCollisionPushCorrection)(
 using CChrSetPosFn = void(__fastcall*)(uint64_t, const float*);
 static CChrSetPosFn oCChrSetPos = nullptr;
 
+static bool TraceLifecycleFrame(int32_t frame)
+{
+    return true;
+}
+
 extern "C" int32_t Controller_GetNetFrameCount();
 extern "C" bool Controller_IsRollbackEnabled();
 extern "C" bool FrameStepper_IsBattleSynchronized();
@@ -84,6 +89,13 @@ static void __fastcall hkMvc3MainMove(uint64_t main)
     Rollback_SetMainInstance(main);
 
     int32_t curFrame = Controller_GetNetFrameCount();
+    int32_t traceFrame = g_isResimulating ? g_resimulateCurrentFrame : curFrame;
+    if (TraceLifecycleFrame(traceFrame)) {
+        uint64_t replay = *(uint64_t*)_addr(0x140d4d9d8);
+        int32_t replayFrame = replay ? *(int32_t*)(replay + 0x54) : -1;
+        HookLog("TICKTRACE phase=enter frame=%d resim=%d net=%d replay=%d main=0x%llX\n",
+                traceFrame, g_isResimulating ? 1 : 0, curFrame, replayFrame, main);
+    }
     if (g_restoreRequestedFrame >= 0) {
         int32_t restoreFrame = g_restoreRequestedFrame;
         g_restoreRequestedFrame = -1;
@@ -153,6 +165,12 @@ static void __fastcall hkMvc3MainMove(uint64_t main)
     RollbackMainMoveFn original = g_originalMvc3MainMove ? *g_originalMvc3MainMove : nullptr;
     if (g_isResimulating) {
         original(main);
+        if (TraceLifecycleFrame(g_resimulateCurrentFrame)) {
+            uint64_t replay = *(uint64_t*)_addr(0x140d4d9d8);
+            int32_t replayFrame = replay ? *(int32_t*)(replay + 0x54) : -1;
+            HookLog("TICKTRACE phase=exit frame=%d resim=1 replay=%d main=0x%llX\n",
+                    g_resimulateCurrentFrame, replayFrame, main);
+        }
         return;
     }
 
@@ -163,6 +181,13 @@ static void __fastcall hkMvc3MainMove(uint64_t main)
         NDJSON_CaptureFrame(curFrame, false, false);
 
     original(main);
+
+    if (TraceLifecycleFrame(curFrame)) {
+        uint64_t replay = *(uint64_t*)_addr(0x140d4d9d8);
+        int32_t replayFrame = replay ? *(int32_t*)(replay + 0x54) : -1;
+        HookLog("TICKTRACE phase=exit frame=%d resim=0 replay=%d main=0x%llX\n",
+                curFrame, replayFrame, main);
+    }
 
     if (curFrame >= 0)
         NDJSON_CaptureFrame(curFrame, false, true);
