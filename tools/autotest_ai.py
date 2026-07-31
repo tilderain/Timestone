@@ -1,0 +1,243 @@
+#!/usr/bin/env python3
+"""Run a focused UMVC3 autotest and prepare an AI desync report.
+
+Examples:
+  python tools/autotest_ai.py --character Ryu --moves "12,Hadoken"
+  python tools/autotest_ai.py --character Ryu --failed-tsv \
+      ".../autotest/20260728_193825_519_hawkeye_commands.tsv" --launch
+
+The game itself writes the TSV and host/client snapdumps. When --launch is
+used, the game is started through Wine from the game directory, and this
+script waits for the pair to exit, then compares the newest matching snapdump
+pair with tools/compare_desync_dumps.py.
+"""
+
+import argparse
+import csv
+import datetime as dt
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+
+EXIT_OK = 0
+EXIT_DESYNC = 1
+EXIT_USAGE = 2
+EXIT_LAUNCH_FAILED = 3
+EXIT_TIMEOUT = 4
+EXIT_MISSING_ARTIFACTS = 5
+EXIT_ANALYZER_FAILED = 6
+
+
+def failed_moves(path):
+    moves = []
+    with path.open("r", encoding="utf-8", errors="replace", newline="") as stream:
+        for row in csv.DictReader(stream, delimiter="\t"):
+            if row.get("result", "").upper() not in {"DESYNC", "FAIL", "ERROR"}:
+                continue
+            name = row.get("move", "").replace("\n", " ").strip()
+            if name and name not in moves:
+                moves.append(name)
+    return moves
+
+
+def quote_filter(moves):
+    return ",".join(move.replace(",", " ") for move in moves)
+
+
+def latest_report_pair(game_dir, not_before=None):
+    pattern = re.compile(r"desync_(\d{8}_\d{6})_(host|client)_f(-?\d+)\.usdp$")
+    entries = []
+    for path in game_dir.glob("desync_*.usdp"):
+        if not_before is not None and path.stat().st_mtime < not_before:
+            continue
+        match = pattern.fullmatch(path.name)
+        if not match:
+            continue
+        stamp = dt.datetime.strptime(match.group(1), "%Y%m%d_%H%M%S")
+        entries.append((stamp, match.group(2), int(match.group(3)), path))
+    for host in sorted((entry for entry in entries if entry[1] == "host"), reverse=True):
+        clients = [entry for entry in entries
+                   if entry[1] == "client" and entry[2] == host[2]
+                   and abs(entry[0] - host[0]) <= dt.timedelta(seconds=5)]
+        if clients:
+            return host[3], max(clients)[3]
+    return None
+
+
+def suite_completed(game_dir, not_before):
+    """Accept Wine's shutdown crash when the autotest itself completed."""
+    log_path = game_dir / "UMVC3Hook_host.log"
+    if log_path.is_file() and log_path.stat().st_mtime >= not_before:
+        try:
+            log = log_path.read_text(encoding="utf-8", errors="replace")
+            if "AutoTestSuite: command-line suite complete" in log:
+                return True
+        except OSError:
+            pass
+    for path in (game_dir / "autotest").glob("*_commands.tsv"):
+        if path.stat().st_mtime >= not_before:
+            return True
+    return False
+
+
+def build_plan(args, moves):
+    game = args.game.expanduser()
+    game_dir = args.game_dir.expanduser()
+    if not game.is_absolute():
+        game = (Path.cwd() / game).resolve()
+    if not game_dir.is_absolute():
+        game_dir = (Path.cwd() / game_dir).resolve()
+    move_filter = quote_filter(moves)
+    game_argv = [str(game), f"-autotest={args.character}",
+                 f"-autotest-moves={move_filter}", f"-autotest-repeat={args.repeat}"]
+    argv = [args.wine] + game_argv if args.wine else game_argv
+    plan = {
+        "schema": "umvc3_autotest_plan_v1",
+        "run_id": dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ"),
+        "character": args.character,
+        "moves": moves,
+        "repeat": args.repeat,
+        "executable": str(game),
+        "cwd": str(game_dir),
+        "argv": argv,
+    }
+    if args.wine:
+        plan["launcher"] = args.wine
+    if args.wine_prefix:
+        plan["wine_prefix"] = args.wine_prefix
+    return plan
+
+
+def emit(document, path=None):
+    rendered = json.dumps(document, indent=2)
+    if path:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(rendered + "\n", encoding="utf-8")
+    print(rendered)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--character", required=True)
+    parser.add_argument("--moves", help="comma-separated names or runtime ordinals")
+    parser.add_argument("--failed-tsv", type=Path,
+                        help="derive move names from DESYNC/FAIL/ERROR rows")
+    parser.add_argument("--repeat", type=int, default=5)
+    parser.add_argument("--game", type=Path,
+                        default=Path("../ULTIMATE MARVEL VS. CAPCOM 3/umvc3.exe"))
+    parser.add_argument("--game-dir", type=Path,
+                        default=Path("../ULTIMATE MARVEL VS. CAPCOM 3"))
+    parser.add_argument("--launch", action="store_true")
+    parser.add_argument("--json", action="store_true",
+                        help="emit a machine-readable plan or run manifest")
+    parser.add_argument("--wine", default="wine",
+                        help="wine launcher to use when launching (default: wine)")
+    parser.add_argument("--wine-prefix", default=None,
+                        help="set WINEPREFIX when launching the game")
+    parser.add_argument("--timeout", type=float, default=1800,
+                        help="launch timeout in seconds (default: 1800)")
+    parser.add_argument("--manifest", type=Path,
+                        help="write the plan/run manifest to this path")
+    parser.add_argument("--report", type=Path,
+                        help="write comparator JSON here after --launch")
+    args = parser.parse_args()
+
+    if args.repeat < 1 or args.repeat > 100:
+        parser.error("--repeat must be between 1 and 100")
+    if args.timeout <= 0:
+        parser.error("--timeout must be positive")
+    if args.moves and args.failed_tsv:
+        parser.error("use either --moves or --failed-tsv, not both")
+
+    moves = [part.strip() for part in args.moves.split(",") if part.strip()] if args.moves else []
+    if args.failed_tsv:
+        moves = failed_moves(args.failed_tsv)
+    if not moves:
+        parser.error("provide --moves or a TSV containing failed moves")
+
+    plan = build_plan(args, moves)
+    command = plan["argv"]
+
+    if not args.launch:
+        if args.json or args.manifest:
+            emit(plan, args.manifest)
+        else:
+            print("Launch command:")
+            print(" ".join(command))
+            print(f"Focused moves ({len(moves)}): {quote_filter(moves)}")
+        return EXIT_OK
+
+    started_at = time.time()
+    manifest = {**plan, "schema": "umvc3_autotest_run_v1",
+                "started_at": dt.datetime.fromtimestamp(
+                    started_at, dt.timezone.utc).isoformat(), "outcome": "running"}
+    env = dict(os.environ)
+    if args.wine_prefix:
+        env["WINEPREFIX"] = args.wine_prefix
+    try:
+        result = subprocess.run(command, cwd=plan["cwd"], env=env, timeout=args.timeout)
+    except subprocess.TimeoutExpired:
+        manifest.update(outcome="timeout", exit_code=EXIT_TIMEOUT)
+        emit(manifest, args.manifest)
+        return EXIT_TIMEOUT
+    except OSError as error:
+        manifest.update(outcome="launch_failed", exit_code=EXIT_LAUNCH_FAILED,
+                        error=str(error))
+        emit(manifest, args.manifest)
+        return EXIT_LAUNCH_FAILED
+    completed_with_shutdown_crash = (
+        result.returncode != 0 and suite_completed(Path(plan["cwd"]), started_at)
+    )
+    if result.returncode != 0 and not completed_with_shutdown_crash:
+        manifest.update(outcome="game_failed", exit_code=EXIT_LAUNCH_FAILED,
+                        game_exit_code=result.returncode)
+        emit(manifest, args.manifest)
+        return EXIT_LAUNCH_FAILED
+
+    pair = latest_report_pair(Path(plan["cwd"]), started_at)
+    if not pair:
+        manifest.update(outcome="no_desync_artifacts", exit_code=EXIT_OK,
+                        game_exit_code=result.returncode,
+                        shutdown_crash=completed_with_shutdown_crash)
+        emit(manifest, args.manifest)
+        return EXIT_OK
+    comparator = Path(__file__).with_name("compare_desync_dumps.py")
+    report_path = args.report or Path(plan["cwd"]) / "autotest" / "latest_ai_report.json"
+    if not report_path.is_absolute():
+        report_path = (Path.cwd() / report_path).resolve()
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    compare_result = subprocess.run(
+        [sys.executable, str(comparator), str(pair[0]), str(pair[1]),
+         "--output", str(report_path)],
+        cwd=Path(__file__).parents[1],
+    )
+    if not report_path.is_file():
+        manifest.update(outcome="analyzer_failed", exit_code=EXIT_ANALYZER_FAILED,
+                        analyzer_exit_code=compare_result.returncode)
+        emit(manifest, args.manifest)
+        return EXIT_ANALYZER_FAILED
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    desynced = report.get("verdict") == "diverged"
+    exit_code = EXIT_DESYNC if desynced else EXIT_OK
+    manifest.update(
+        outcome="desync" if desynced else "sync",
+        exit_code=exit_code,
+        game_exit_code=result.returncode,
+        shutdown_crash=completed_with_shutdown_crash,
+        analyzer_exit_code=compare_result.returncode,
+        artifacts={"host_dump": str(pair[0]), "client_dump": str(pair[1]),
+                   "report": str(report_path)},
+        first_divergence=report.get("first_divergence"),
+        diagnosis=report.get("diagnosis"),
+    )
+    emit(manifest, args.manifest)
+    return exit_code
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -11,6 +11,8 @@
 #include <cstdio>
 #include <cstring>
 #include <iterator>
+#include <cstdlib>
+#include <cctype>
 
 extern void HookLog(const char* fmt, ...);
 
@@ -141,12 +143,67 @@ char g_suiteTestDate[32] = {};
 char g_suiteCharacterName[64] = {};
 char g_suiteCharacterStem[64] = {};
 const char* g_suiteType = "commands";
+char g_suiteMoveFilter[512] = {};
+int32_t g_suiteRepeatCount = 1;
+bool g_suiteMoveFilterEnabled = false;
 constexpr int32_t SUITE_COMMAND_TIMEOUT = 600;
 constexpr int32_t SUITE_COMPLETION_TIMEOUT = 3600;
 constexpr int32_t SUITE_QUIET_FRAMES = 20;
 constexpr int32_t NET_SUITE_STABLE_FRAMES = 3;
 constexpr int32_t NET_SUITE_DESYNC_FRAMES = 1;
 constexpr int32_t NET_SUITE_HISTORY = 512;
+
+bool ContainsInsensitive(const char* haystack, const char* needle)
+{
+    if (!haystack || !needle || !needle[0]) return false;
+    for (const char* start = haystack; *start; ++start) {
+        const char* a = start;
+        const char* b = needle;
+        while (*a && *b && std::tolower((unsigned char)*a) ==
+                            std::tolower((unsigned char)*b)) {
+            ++a;
+            ++b;
+        }
+        if (!*b) return true;
+    }
+    return false;
+}
+
+bool FilterContainsNumber(const char* filter, int32_t number)
+{
+    char numberText[16];
+    snprintf(numberText, sizeof(numberText), "%d", number);
+    const char* cursor = filter;
+    while (cursor && *cursor) {
+        while (*cursor == ' ' || *cursor == ',') ++cursor;
+        char token[96] = {};
+        size_t length = 0;
+        while (*cursor && *cursor != ',' && length + 1 < sizeof(token))
+            token[length++] = *cursor++;
+        while (length && token[length - 1] == ' ') token[--length] = '\0';
+        if (strcmp(token, numberText) == 0) return true;
+        if (*cursor == ',') ++cursor;
+    }
+    return false;
+}
+
+bool MoveSelectorMatches(const char* filter, int32_t moveId, const char* name)
+{
+    if (!filter[0]) return true;
+    if (FilterContainsNumber(filter, moveId)) return true;
+    const char* cursor = filter;
+    while (cursor && *cursor) {
+        while (*cursor == ' ' || *cursor == ',') ++cursor;
+        char token[96] = {};
+        size_t length = 0;
+        while (*cursor && *cursor != ',' && length + 1 < sizeof(token))
+            token[length++] = *cursor++;
+        while (length && token[length - 1] == ' ') token[--length] = '\0';
+        if (token[0] && ContainsInsensitive(name, token)) return true;
+        if (*cursor == ',') ++cursor;
+    }
+    return false;
+}
 
 struct NetSuiteFrame {
     int32_t frame;
@@ -1080,6 +1137,10 @@ void DecodeCommandListText(uint64_t record, char* name, size_t capacity)
 void DumpCommandListArrays(int32_t playerIndex)
 {
     CommandListTextCache& cached = g_commandListText[playerIndex];
+    if (g_suiteMoveFilterEnabled) {
+        cached.textDumped = true;
+        return;
+    }
     if (cached.textDumped || !cached.resource || !cached.rowMetadata ||
         !cached.rowNotation || cached.rowCount <= 0)
         return;
@@ -1122,6 +1183,8 @@ void DumpCommandListArrays(int32_t playerIndex)
 void DumpRuntimeCommandArray(int32_t playerIndex, int32_t matcherIndex,
                              uint64_t resource, int32_t lineCount)
 {
+    if (g_suiteMoveFilterEnabled)
+        return;
     if (playerIndex < 0 || playerIndex > 1 || matcherIndex < 0 ||
         matcherIndex > 1 || !resource || lineCount <= 0 || lineCount > 0x1000)
         return;
@@ -1945,15 +2008,20 @@ bool StartSuite(int32_t playerIndex, bool facingLeft, bool deduplicate)
         return false;
     g_suiteRngSeed = *(uint32_t*)(replay + 0x58);
 
+    // Keep discovery separate from the filtered suite. Writing selected
+    // commands back into the discovery buffer corrupts entries that have not
+    // been visited yet and produces duplicate or seemingly looping commands.
+    AutoTestRuntimeCommand capturedCommands[AUTOTEST_MAX_RUNTIME_COMMANDS] = {};
     int32_t allCount = AutoTest_GetRuntimeCommands(
-        g_suiteCommands, AUTOTEST_MAX_RUNTIME_COMMANDS);
+        capturedCommands, AUTOTEST_MAX_RUNTIME_COMMANDS);
     using GetCommandByLine_t = uint64_t(__fastcall*)(uint64_t, uint32_t);
     static GetCommandByLine_t getCommandByLine =
         (GetCommandByLine_t)_addr(ADDR_GET_COMMAND_BY_LINE);
     int32_t commandCount = 0;
     int32_t duplicateCount = 0;
+    int32_t moveOrdinal = 0;
     for (int32_t i = 0; i < allCount; ++i) {
-        const AutoTestRuntimeCommand command = g_suiteCommands[i];
+        const AutoTestRuntimeCommand command = capturedCommands[i];
         if (command.playerIndex != playerIndex)
             continue;
 
@@ -1968,9 +2036,13 @@ bool StartSuite(int32_t playerIndex, bool facingLeft, bool deduplicate)
             command.resource, runtimeCommand);
         const bool isAir = command.matcherIndex == 0 &&
                            command.commandState == 1;
-        bool duplicate = false;
         const char* commandName = command.commandListName[0]
             ? command.commandListName : command.name;
+        ++moveOrdinal;
+        if (g_suiteMoveFilterEnabled &&
+            !MoveSelectorMatches(g_suiteMoveFilter, moveOrdinal, commandName))
+            continue;
+        bool duplicate = false;
         for (int32_t existing = 0; deduplicate && existing < commandCount;
              ++existing) {
             const AutoTestRuntimeCommand& existingCommand =
@@ -2006,6 +2078,26 @@ bool StartSuite(int32_t playerIndex, bool facingLeft, bool deduplicate)
     if (commandCount == 0)
         return false;
 
+    // Repeat selected commands as independent cases. Each case gets its own
+    // training reset and network move ID, making repeated desyncs easy to
+    // correlate with the corresponding TSV row and snapdump pair.
+    const int32_t baseCommandCount = commandCount;
+    const int32_t repeatCount = g_suiteMoveFilterEnabled ? g_suiteRepeatCount : 1;
+    if (repeatCount > 1) {
+        if (baseCommandCount > AUTOTEST_MAX_RUNTIME_COMMANDS / repeatCount)
+            return false;
+        for (int32_t repetition = 1; repetition < repeatCount; ++repetition) {
+            for (int32_t source = 0; source < baseCommandCount; ++source) {
+                const int32_t destination = repetition * baseCommandCount + source;
+                g_suiteCommands[destination] = g_suiteCommands[source];
+                g_suiteCommandIsCharge[destination] = g_suiteCommandIsCharge[source];
+                g_suiteCommandNotations[destination] = g_suiteCommandNotations[source];
+                g_suiteCommandHasNotation[destination] = g_suiteCommandHasNotation[source];
+            }
+        }
+        commandCount = baseCommandCount * repeatCount;
+    }
+
     InitializeSuiteResultFile(playerIndex, deduplicate);
 
     for (int32_t i = 0; i < commandCount; ++i) {
@@ -2020,7 +2112,8 @@ bool StartSuite(int32_t playerIndex, bool facingLeft, bool deduplicate)
     g_suiteStatus.active = true;
     g_suiteStatus.playerIndex = playerIndex;
     g_suiteStatus.currentCommand = 0;
-    g_suiteStatus.commandCount = commandCount + (int32_t)std::size(SUITE_MANUAL_SCRIPTS);
+    g_suiteStatus.commandCount = commandCount +
+        (g_suiteMoveFilterEnabled ? 0 : (int32_t)std::size(SUITE_MANUAL_SCRIPTS));
     g_suiteStatus.currentMatcher = -1;
     g_suiteStatus.currentLine = -1;
     g_suiteStatus.requiredQuietFrames = Netplay_IsActive()
@@ -2032,10 +2125,10 @@ bool StartSuite(int32_t playerIndex, bool facingLeft, bool deduplicate)
     g_netSuiteClient = false;
     g_netSuiteRestartPending = false;
     g_netSuiteMoveId = 0;
-    HookLog("AutoTestSuite: started %d manual cases and %d %scommands for P%d (%d duplicate moves removed)\n",
-            (int32_t)std::size(SUITE_MANUAL_SCRIPTS), commandCount,
+    HookLog("AutoTestSuite: started %d manual cases and %d %scommands for P%d (%d duplicate moves removed, repeat=%d)\n",
+            g_suiteMoveFilterEnabled ? 0 : (int32_t)std::size(SUITE_MANUAL_SCRIPTS), commandCount,
             deduplicate ? "unique " : "variant ", playerIndex + 1,
-            duplicateCount);
+            duplicateCount, repeatCount);
     return true;
 }
 
@@ -2045,9 +2138,46 @@ extern "C" bool AutoTest_StartSuite(int32_t playerIndex, bool facingLeft)
 }
 
 extern "C" bool AutoTest_StartVariantSuite(int32_t playerIndex,
-                                             bool facingLeft)
+                                              bool facingLeft)
 {
     return StartSuite(playerIndex, facingLeft, false);
+}
+
+extern "C" void AutoTest_ConfigureCommandLine(const char* commandLine)
+{
+    g_suiteMoveFilter[0] = '\0';
+    g_suiteRepeatCount = 1;
+    g_suiteMoveFilterEnabled = false;
+    if (!commandLine) return;
+
+    const char* moves = strstr(commandLine, "-autotest-moves=");
+    if (moves) {
+        moves += strlen("-autotest-moves=");
+        bool quoted = *moves == '"';
+        if (quoted) ++moves;
+        size_t length = 0;
+        while (moves[length] && length + 1 < sizeof(g_suiteMoveFilter) &&
+               ((!quoted && moves[length] != ' ') ||
+                (quoted && moves[length] != '"'))) {
+            g_suiteMoveFilter[length] = moves[length];
+            ++length;
+        }
+        g_suiteMoveFilter[length] = '\0';
+        g_suiteMoveFilterEnabled = length > 0;
+    }
+
+    const char* repeat = strstr(commandLine, "-autotest-repeat=");
+    if (repeat) {
+        repeat += strlen("-autotest-repeat=");
+        char* end = nullptr;
+        long value = strtol(repeat, &end, 10);
+        if (end != repeat && value >= 1 && value <= 100)
+            g_suiteRepeatCount = (int32_t)value;
+    }
+
+    if (g_suiteMoveFilterEnabled)
+        HookLog("AutoTestSuite: move filter=\"%s\" repeat=%d\n",
+                g_suiteMoveFilter, g_suiteRepeatCount);
 }
 
 extern "C" void AutoTest_Process()
@@ -2086,7 +2216,8 @@ extern "C" void AutoTest_Process()
             return;
         }
 
-        int32_t manualCount = (int32_t)std::size(SUITE_MANUAL_SCRIPTS);
+        int32_t manualCount = g_suiteMoveFilterEnabled
+            ? 0 : (int32_t)std::size(SUITE_MANUAL_SCRIPTS);
         g_suiteManualCase = g_suiteStatus.currentCommand < manualCount;
         const AutoTestRuntimeCommand* command = g_suiteManualCase
             ? nullptr

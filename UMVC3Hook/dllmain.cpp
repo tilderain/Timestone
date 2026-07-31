@@ -14,6 +14,7 @@
 #include "code/trainingboot.h"
 #include "code/netplay.h"
 #include "code/controller.h"
+#include "code/autotest.h"
 #include "code/diag.h"
 #include "code/exception.h"
 #include <Windows.h>
@@ -524,6 +525,7 @@ void OnInitializeHook()
 	}
 
 	const int autoTestCharacter = ParseAutoTestCharacter(cmdLineA);
+	AutoTest_ConfigureCommandLine(cmdLineA);
 	if (autoTestCharacter > 0 && ConfigureAutoTestDualTraining(autoTestCharacter)) {
 		trainingArg = true;
 		HookLog("UMVC3Hook: Detected -autotest=%s, launching dual training with all slots set to character ID %d\n",
@@ -608,7 +610,7 @@ void OnInitializeHook()
 	// NOP it so NetGallery is always created.
 	//   Original: 0F 84 90 00 00 00  (JZ +0x90)
 	//   Patched:  90 90 90 90 90 90  (NOP × 6)
-	Memory::VP::Nop(_addr(0x1402BA17E), 6);
+	//Memory::VP::Nop(_addr(0x1402BA17E), 6);
 	HookLog("UMVC3Hook: Patched uBattleUiCreatePauseMenu JZ→NOP (force NetGallery)\n");
 
 	// Patch 2: Change JNZ (skip real pause if online) to JMP (always skip).
@@ -623,7 +625,7 @@ void OnInitializeHook()
 	// Change the conditional jump to unconditional so the NetGallery always renders.
 	//   Original: 75 0C  (JNZ +0x0C)
 	//   Patched:  EB 0C  (JMP +0x0C)
-	Memory::VP::Patch<uint8_t>(_addr(0x1402E433B), 0xEB);
+	//Memory::VP::Patch<uint8_t>(_addr(0x1402E433B), 0xEB);
 	HookLog("UMVC3Hook: Patched uBattleUiPauseNetGallery_vfn5 JNZ→JMP (force render)\n");
 
 	if (opt == LAUNCH_DUAL_TRAINING) {

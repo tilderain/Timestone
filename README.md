@@ -12,6 +12,21 @@ autotest suite after both instances reach the synchronized battle boundary.
 Character names are case-insensitive and may omit spaces and punctuation.
 Both game processes close automatically after the suite completes.
 
+For AI-assisted desync investigation, restrict the run to selected moves and
+repeat each selected move independently:
+
+```text
+umvc3.exe -autotest=Ryu -autotest-moves="12,Hadoken" -autotest-repeat=5
+```
+
+`-autotest-moves` accepts comma-separated case-insensitive name fragments or
+numeric runtime move ordinals. Numeric ordinals refer to the character's
+runtime command list before duplicate removal. `-autotest-repeat` defaults to
+one and is limited to 100. Each repetition performs a synchronized training
+reset and receives its own move ID, so the TSV result and host/client
+snapdumps can be correlated. The existing date, character, move, checksum,
+and mismatch-frame metadata remains in the result TSV.
+
 Examples:
 
 ```text
@@ -19,6 +34,41 @@ umvc3.exe -autotest=Ryu
 umvc3.exe "-autotest=Phoenix Wright"
 umvc3.exe -autotest=27
 ```
+
+The host-side AI helper can derive a focused run from a prior result file and
+launch the game pair:
+
+```text
+python tools/autotest_ai.py --character Hawkeye \
+  --failed-tsv "../ULTIMATE MARVEL VS. CAPCOM 3/autotest/failed.tsv" \
+  --repeat 5 --launch
+```
+
+Without `--launch`, it only prints the command so an external test runner can
+start it. With `--launch`, it changes into the game directory, starts the game
+through Wine, waits for completion, finds the newest matching host/client
+`.usdp` pair, and writes `autotest/latest_ai_report.json` using
+`tools/compare_desync_dumps.py`. The Wine executable defaults to `wine` and can
+be overridden with `--wine`; a specific prefix can be set with `--wine-prefix`.
+
+External automation should request JSON instead of parsing the human-readable
+command:
+
+```text
+python tools/autotest_ai.py --character Ryu --moves "12,Hadoken" \
+  --repeat 5 --json --manifest autotest/plan.json
+```
+
+The JSON contains an absolute executable path, working directory, argument
+array, selected moves, repetition count, and run ID. For a managed launch, add
+`--launch --timeout 1800`; the final manifest also includes the outcome,
+artifact paths, comparator diagnosis, and first-divergence data. Only artifacts
+created after launch are considered, preventing stale dumps from an earlier
+run from being analyzed.
+
+Runner exit codes are `0` for sync/no desync artifacts, `1` for a confirmed
+desync report, `3` for launch/game failure, `4` for timeout, and `6` when the
+snapshot analyzer fails. Argument errors use argparse's standard exit code `2`.
 
 The network address and port come from `rollbacksetting.ini`. NDJSON capture
 continues to follow the existing NDJSON logging setting.
