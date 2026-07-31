@@ -134,6 +134,8 @@ SuitePhase g_suitePhase = SuitePhase::Idle;
 bool g_suiteFacingLeft = false;
 bool g_suiteMatchedCommand = false;
 bool g_suiteManualCase = false;
+bool g_suiteInitialRestartPending = false;
+bool g_suiteInitialRestartLeftFighting = false;
 float g_suiteDefenderLife = 0.0f;
 int32_t g_suiteDeadline = -1;
 uint32_t g_suiteIdleActions[2] = {};
@@ -2080,6 +2082,13 @@ bool StartSuite(int32_t playerIndex, bool facingLeft, bool deduplicate)
         return false;
     }
 
+    // The interactive Run All Commands/Variants paths use the same close
+    // spawn policy as command-line autotest. Offline can apply immediately;
+    // netplay reapplies it at each synchronized training-restart barrier.
+    g_autoTestCommandLineLaunch = true;
+    if (!Netplay_IsActive())
+        AutoTest_ApplyMatchStartPositions();
+
     uint64_t replay = *(uint64_t*)_addr(PTR_SREPLAY);
     if (!replay)
         return false;
@@ -2211,11 +2220,21 @@ bool StartSuite(int32_t playerIndex, bool facingLeft, bool deduplicate)
         ? NET_SUITE_STABLE_FRAMES : SUITE_QUIET_FRAMES;
     g_suiteFacingLeft = facingLeft;
     g_suiteMatchedCommand = false;
-    g_suitePhase = SuitePhase::StartCommand;
+    g_suitePhase = SuitePhase::WaitingForReset;
+    g_suiteStatus.waitingForReset = true;
+    g_suiteInitialRestartPending = true;
+    g_suiteInitialRestartLeftFighting = false;
     g_netSuiteActive = Netplay_IsActive();
     g_netSuiteClient = false;
     g_netSuiteRestartPending = false;
     g_netSuiteMoveId = 0;
+    if (g_netSuiteActive) {
+        g_netSuiteRestartPending = true;
+        AutoTest_PrepareForRestart();
+        FrameStepper_ScheduleAutoTestRestart(g_suiteRngSeed);
+    } else {
+        RequestTrainingReset();
+    }
     HookLog("AutoTestSuite: started %d manual cases and %d %scommands for P%d (%d duplicate moves removed, repeat=%d)\n",
             g_suiteManualCaseCount, commandCount,
             deduplicate ? "unique " : "variant ", playerIndex + 1,
@@ -2333,7 +2352,7 @@ extern "C" void AutoTest_Process()
         const AutoTestRuntimeCommand* command = g_suiteManualCase
             ? nullptr
             : &g_suiteCommands[g_suiteStatus.currentCommand - manualCount];
-    g_suiteStatus.currentMatcher = command ? command->matcherIndex : -1;
+        g_suiteStatus.currentMatcher = command ? command->matcherIndex : -1;
         g_suiteStatus.currentLine = command ? command->lineIndex : -1;
         if (g_suiteManualCase) {
             snprintf(g_suiteStatus.currentName,
@@ -2469,9 +2488,21 @@ extern "C" void AutoTest_Process()
             }
             if (!g_netSuiteRestartLeftFighting)
                 return;
+        } else if (g_suiteInitialRestartPending) {
+            if (actionStep != 5) {
+                g_suiteInitialRestartLeftFighting = true;
+                return;
+            }
+            if (!g_suiteInitialRestartLeftFighting)
+                return;
         }
         if (actionStep == 5) {
-            ++g_suiteStatus.currentCommand;
+            if (g_suiteInitialRestartPending) {
+                g_suiteInitialRestartPending = false;
+                HookLog("AutoTestSuite: initial training restart complete; starting first command\n");
+            } else {
+                ++g_suiteStatus.currentCommand;
+            }
             g_suiteStatus.waitingForReset = false;
             g_suitePhase = SuitePhase::StartCommand;
         }

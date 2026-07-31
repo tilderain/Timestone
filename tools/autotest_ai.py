@@ -149,6 +149,10 @@ def validate_suite_rows(game_dir, character, not_before):
                         continue
                     if row.get("suite_type", "") != "commands":
                         continue
+                    # Built-in manual scripts do not come from either command
+                    # matcher and therefore legitimately use -1/-1.
+                    if row.get("move", "") in {"Forward Throw", "Back Throw"}:
+                        continue
                     if row.get("matcher_id") in {None, "", "-1"} or \
                        row.get("line_id") in {None, "", "-1"}:
                         invalid.append({"tsv": str(path), "move": row.get("move", ""),
