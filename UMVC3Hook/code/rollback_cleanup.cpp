@@ -109,7 +109,8 @@ void Rollback_ClearStalePointers()
     if (!sCharacter) return;
 
     static constexpr uintptr_t SLOT_ARRAY_OFFSET = 0x6748;
-    static constexpr uint32_t SLOT_COUNT = 64;
+    static constexpr uint32_t SLOT_COUNT = 21;
+    static_assert(SLOT_ARRAY_OFFSET + SLOT_COUNT * sizeof(uint64_t) <= 0x67F0);
     static constexpr uint32_t STALE_SLOT_INDICES[] = {1, 14, 15};
     MemoryRegionCache memory;
 

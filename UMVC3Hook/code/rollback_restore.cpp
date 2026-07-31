@@ -59,7 +59,15 @@ static constexpr uint32_t CCHR_DRAW_STATE_END = CCHR_MOTION_BASE;
 static constexpr uint32_t CCHR_MODEL_TAIL_START = 0x1160;
 static constexpr uint32_t CCHR_MODEL_TAIL_END = 0x1300;
 static constexpr uint32_t CCHR_INPUT_OFFSET = 0x21C8;
-static constexpr size_t CCHR_INPUT_SIZE = 0x5A0;
+static constexpr size_t CCHR_INPUT_SIZE = 0x570;
+static constexpr uint32_t CCHR_ATTACK_CTRL_OFFSET = 0x1878;
+static constexpr uint32_t CCHR_COMMAND_OFFSETS[] = {0x2738, 0x2950};
+static constexpr size_t CCHR_COMMAND_SIZE = 0x218;
+static constexpr uint32_t CCHR_JOINT_HOLD_OFFSET = 0x2B70;
+static constexpr size_t CCHR_JOINT_HOLD_SIZE = 0xE0;
+static constexpr uint32_t CCHR_MESSAGE_OFFSET = 0x2C50;
+static constexpr size_t CCHR_MESSAGE_STRIDE = 0x30;
+static constexpr uint32_t CCHR_PAUSE_OFFSET = 0x2D70;
 static constexpr uint32_t SUNIT_CATEGORY_COUNT_OFFSET = 0xC38;
 static constexpr uint32_t SUNIT_CATEGORY_LISTS_OFFSET = 0x50;
 static constexpr uint32_t SUNIT_CATEGORY_LIST_STRIDE = 0x30;
@@ -136,24 +144,9 @@ static constexpr SnapshotRange CCHR_SCALAR_RESTORE_RANGES[] = {
     {0x1518, 0x18},
     // Remaining pointer-free state-check and animation-transition scalars.
     {0x154C, 0x14},
-    // Per-character motion/constraint work records, first block.
-    {0x1578, 0x70},
-    // Per-character motion/constraint work records, second block.
-    {0x15F8, 0x70},
-    // Per-character motion/constraint work records, third block.
-    {0x1678, 0x70},
-    // Per-character motion/constraint work records, fourth block.
-    {0x16F8, 0x70},
-    // Per-character motion/constraint work records, fifth block.
-    {0x1778, 0x70},
-    // Per-character motion/constraint work records, sixth block.
-    {0x17F8, 0x70},
-    // Character/variant index and related selection state.
-    {0x1870, 0x08},
-    // Scalar motion/constraint value within the work-record area.
-    {0x1644, 0x04},
+    // cChrAbility and cAtkCtrl have dedicated ownership-aware policies below.
     // Character state/context values before the frame and identity fields.
-    {0x1898, 0x30},
+    {0x18A0, 0x28},
     {0x2D9C, 0x24},
     // Frame and identity-adjacent scalar state preceding mId.
     {0x2D80, 0x10},
@@ -190,15 +183,21 @@ static constexpr SnapshotRange CCHR_SCALAR_RESTORE_RANGES[] = {
     {0x4D10, 0x100},
     // Damage-state header and counters.
     {0x6340, 0x10},
+    // Combo damage and gauge multipliers are packed gameplay floats.
+    {0x6350, 0x10},
     // Damage, air-state, combo, stun, and knockdown counters.
     {0x6360, 0xC8},
-    // The scalar immediately following the damage-state block diverges first
-    // at frame 1385; leaving it live causes the later flag transition.
-    {0x6428, 0x04},
+    // The shot reference is remapped after reconstruction; the following
+    // group, animation-serial, and hit-latch fields are scalar state.
+    {0x6428, 0x08}, {0x6430, 0x2C},
+    // Projectile repeat limits and defense/muteki selectors.
+    {0x67F8, 0x10},
     // cChr's throw-reaction reuse state and two cached attack-info transforms.
     // Leaving these on the live timeline changes the selected throw response
     // (+0x6828 defaults to -1) and loses the restored matrix values.
     {0x680D, 0x01}, {0x6810, 0x24}, {0x6828, 0x04}, {0x6840, 0x80},
+    // Combat/link finalization state, including the +0x68C4 latch.
+    {0x68C0, 0x10},
     {0x68D0, 0x20},
     // cChr::updateChargeState consumes this charge timer on the next tick.
     {0x68F0, 0x04},
@@ -207,6 +206,8 @@ static constexpr SnapshotRange CCHR_SCALAR_RESTORE_RANGES[] = {
 // These shared cChr fields are rebuilt by native post-restore helpers on some
 // rollback paths. Reapply the saved values after those helpers complete.
 static constexpr SnapshotRange CCHR_POST_RESTORE_TAIL_RANGES[] = {
+    {0x6350, 0x10}, {0x6430, 0x2C},
+    {0x67F8, 0x10}, {0x68C0, 0x10},
     // Reapply throw-reaction reuse state after native model/character rebuilds.
     {0x680D, 0x01}, {0x6810, 0x24}, {0x6828, 0x04}, {0x6840, 0x80},
     // Reapply cached attack-info transform data consumed by throw/contact logic.
@@ -767,21 +768,23 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
         }
     }
     for (void* character : characters) {
-        void** objectReturn = (void**)((uint8_t*)character + 0x90);
-        void* savedReference = *objectReturn;
-        bool resolved = false;
-        for (const ShotRecipe& saved : slot.shotRecipes) {
-            if (saved.savedPtr == savedReference) {
-                *objectReturn = saved.restoredPtr;
-                resolved = true;
-                break;
+        for (uint32_t referenceOffset : {0x90u, 0x6428u}) {
+            void** objectReturn = (void**)((uint8_t*)character + referenceOffset);
+            void* savedReference = *objectReturn;
+            bool resolved = false;
+            for (const ShotRecipe& saved : slot.shotRecipes) {
+                if (saved.savedPtr == savedReference) {
+                    *objectReturn = saved.restoredPtr;
+                    resolved = true;
+                    break;
+                }
             }
-        }
-        if (resolved) continue;
-        if (std::find(currentShots.begin(), currentShots.end(), savedReference) !=
-                currentShots.end() ||
-            (savedReference && !HasCallableDtiVirtual(savedReference))) {
-            *objectReturn = nullptr;
+            if (resolved) continue;
+            if (std::find(currentShots.begin(), currentShots.end(), savedReference) !=
+                    currentShots.end() ||
+                (savedReference && !HasCallableDtiVirtual(savedReference))) {
+                *objectReturn = nullptr;
+            }
         }
     }
 
@@ -943,6 +946,8 @@ void Rollback_RestoreSnapshot(int32_t frame)
     traceRestoreState("before");
     bool ownerStillMatches[MAX_REGIONS] = {};
     uint64_t liveOwnerPointers[MAX_REGIONS] = {};
+    uint32_t liveCommandLineCounts[MAX_REGIONS] = {};
+    bool commandLineRegion[MAX_REGIONS] = {};
     for (int i = 0; i < slot.regionCount; ++i) {
         uint64_t ownerSlot = slot.regions[i].ownerSlot;
         if (ownerSlot == 0) {
@@ -951,6 +956,17 @@ void Rollback_RestoreSnapshot(int32_t frame)
         }
         liveOwnerPointers[i] = *(uint64_t*)ownerSlot;
         ownerStillMatches[i] = liveOwnerPointers[i] == (uint64_t)slot.regions[i].ptr;
+        for (size_t characterIndex = 0;
+             characterIndex < teamCharacterCount && !commandLineRegion[i];
+             ++characterIndex) {
+            for (uint32_t commandOffset : CCHR_COMMAND_OFFSETS) {
+                if (ownerSlot == teamCharacters[characterIndex] + commandOffset + 0x178) {
+                    commandLineRegion[i] = true;
+                    liveCommandLineCounts[i] = *(uint32_t*)(ownerSlot - 0x08);
+                    break;
+                }
+            }
+        }
     }
     const uint64_t setupEnd = Profile_Now();
 
@@ -1150,6 +1166,96 @@ void Rollback_RestoreSnapshot(int32_t frame)
                 copySize,
                 concreteDti);
 
+            uint8_t* character = (uint8_t*)slot.regions[i].ptr;
+            const uint8_t* savedCharacter = slot.data + offset;
+
+            // cChrAbility owns an MtArray header and six inline Prim objects.
+            // Keep the owner and Prim vtables live and rewind their mutable
+            // gameplay payload. Prim+0x78 is a sound cookie consumed by reset;
+            // replaying a historical cookie could stop an unrelated live sound.
+            constexpr uint32_t abilityPrimOffset = 0x1578;
+            constexpr uint32_t abilityPrimStride = 0x80;
+            if (abilityPrimOffset + 6 * abilityPrimStride <= copySize) {
+                for (uint32_t prim = 0; prim < 6; ++prim) {
+                    uint32_t primOffset = abilityPrimOffset + prim * abilityPrimStride;
+                    std::memcpy(character + primOffset + sizeof(uint64_t),
+                                savedCharacter + primOffset + sizeof(uint64_t),
+                                0x70);
+                }
+            }
+
+            // cAtkCtrl's owner is this live character and mpResource belongs to
+            // the live resource graph. Only its mutable attack header follows
+            // the saved timeline; target tables are handled separately below.
+            if (CCHR_ATTACK_CTRL_OFFSET + 0x50 <= copySize) {
+                *(uint64_t*)(character + CCHR_ATTACK_CTRL_OFFSET + 0x10) =
+                    (uint64_t)character;
+                std::memcpy(character + CCHR_ATTACK_CTRL_OFFSET + 0x28,
+                            savedCharacter + CCHR_ATTACK_CTRL_OFFSET + 0x28,
+                            0x28);
+            }
+
+            // Both cChrCmd objects have identical ownership boundaries. Keep
+            // their vtables, static command resources and live line pointers;
+            // restore limit predicates, charge state, line count, and matcher
+            // progress/success fields deterministically.
+            for (uint32_t commandOffset : CCHR_COMMAND_OFFSETS) {
+                if (commandOffset + CCHR_COMMAND_SIZE > copySize) continue;
+                std::memcpy(character + commandOffset + 0x18,
+                            savedCharacter + commandOffset + 0x18, 0x120);
+                std::memcpy(character + commandOffset + 0x148,
+                            savedCharacter + commandOffset + 0x148, 0x18);
+                *(uint64_t*)(character + commandOffset + 0x140) =
+                    (uint64_t)character;
+                *(uint64_t*)(character + commandOffset + 0x160) =
+                    (uint64_t)character;
+                std::memcpy(character + commandOffset + 0x170,
+                            savedCharacter + commandOffset + 0x170, 0x08);
+                std::memcpy(character + commandOffset + 0x180,
+                            savedCharacter + commandOffset + 0x180,
+                            CCHR_COMMAND_SIZE - 0x180);
+            }
+
+            // Joint-hold state drives throw/grapple attachment transforms.
+            // Its owner is this character; only roster relationships are safe
+            // to carry across restore, while all selectors and matrices rewind.
+            if (CCHR_JOINT_HOLD_OFFSET + CCHR_JOINT_HOLD_SIZE <= copySize) {
+                *(uint64_t*)(character + CCHR_JOINT_HOLD_OFFSET + 0x08) =
+                    (uint64_t)character;
+                std::memcpy(character + CCHR_JOINT_HOLD_OFFSET + 0x10,
+                            savedCharacter + CCHR_JOINT_HOLD_OFFSET + 0x10, 0x08);
+                uint64_t savedTarget = *(const uint64_t*)(
+                    savedCharacter + CCHR_JOINT_HOLD_OFFSET + 0x18);
+                uint64_t liveTarget = *(uint64_t*)(
+                    character + CCHR_JOINT_HOLD_OFFSET + 0x18);
+                *(uint64_t*)(character + CCHR_JOINT_HOLD_OFFSET + 0x18) =
+                    (savedTarget == liveTarget || isTeamCharacter(savedTarget))
+                        ? savedTarget : 0;
+                std::memcpy(character + CCHR_JOINT_HOLD_OFFSET + 0x20,
+                            savedCharacter + CCHR_JOINT_HOLD_OFFSET + 0x20,
+                            CCHR_JOINT_HOLD_SIZE - 0x20);
+            }
+
+            // The six permanent message records are self-owned and have fixed
+            // types 1..6. Rewind only their mutable gameplay payload.
+            for (uint32_t message = 0; message < 6; ++message) {
+                uint32_t messageOffset = CCHR_MESSAGE_OFFSET +
+                    message * CCHR_MESSAGE_STRIDE;
+                if (messageOffset + CCHR_MESSAGE_STRIDE > copySize) break;
+                *(uint64_t*)(character + messageOffset + 0x08) =
+                    (uint64_t)character;
+                *(uint32_t*)(character + messageOffset + 0x10) = message + 1;
+                std::memcpy(character + messageOffset + 0x18,
+                            savedCharacter + messageOffset + 0x18, 0x0C);
+            }
+
+            // Preserve cChrPause's inline vtable and restore its mode/disable
+            // scalar state, including padding packed into the same dword.
+            if (CCHR_PAUSE_OFFSET + 0x10 <= copySize) {
+                std::memcpy(character + CCHR_PAUSE_OFFSET + 0x08,
+                            savedCharacter + CCHR_PAUSE_OFFSET + 0x08, 0x08);
+            }
+
             // uChrCpu's interpreter stack contains 32-bit script values, so
             // pairs of words can look like pointers to the generic guard. A
             // split restore of that stack and its cursor lets the VM combine
@@ -1328,6 +1434,10 @@ void Rollback_RestoreSnapshot(int32_t frame)
     for (int i = 0; i < slot.regionCount; ++i) {
         if (slot.regions[i].ownerSlot != 0 && !ownerStillMatches[i]) {
             *(uint64_t*)slot.regions[i].ownerSlot = liveOwnerPointers[i];
+            if (commandLineRegion[i]) {
+                *(uint32_t*)(slot.regions[i].ownerSlot - 0x08) =
+                    liveCommandLineCounts[i];
+            }
         }
     }
     const uint64_t ownerPointersEnd = Profile_Now();
@@ -1408,19 +1518,23 @@ void Rollback_RestoreSnapshot(int32_t frame)
                 }
             }
 
-            // mpThrowPairChr is a live cChr relationship, not a heap-owned
-            // resource pointer. The generic character restore preserves the
-            // current pointer, which can leave one side paired with a throw
-            // target from the prediction timeline. Reapply the saved pair
-            // only when it is null or belongs to the current team roster.
-            constexpr uint32_t THROW_PAIR_OFFSET = 0x6730;
-            if ((size_t)THROW_PAIR_OFFSET + sizeof(uint64_t) <= copySize) {
-                uint64_t savedPair = *(const uint64_t*)(
-                    slot.data + offset + THROW_PAIR_OFFSET);
-                if (savedPair == 0 || isTeamCharacter(savedPair)) {
-                    *(uint64_t*)((uint8_t*)slot.regions[i].ptr +
-                                 THROW_PAIR_OFFSET) = savedPair;
-                }
+            // Restore the complete linked-character group coherently. Roster
+            // allocations are stable; retired helper relationships are cleared
+            // rather than leaking prediction-timeline pointers into post-sync.
+            constexpr uint32_t RELATIONSHIP_OFFSETS[] = {
+                0x6718, 0x6720, 0x6728, 0x6730,
+            };
+            for (uint32_t relationshipOffset : RELATIONSHIP_OFFSETS) {
+                if ((size_t)relationshipOffset + sizeof(uint64_t) > copySize)
+                    continue;
+                uint64_t savedRelationship = *(const uint64_t*)(
+                    slot.data + offset + relationshipOffset);
+                uint64_t* liveRelationship = (uint64_t*)(
+                    (uint8_t*)slot.regions[i].ptr + relationshipOffset);
+                *liveRelationship =
+                    (savedRelationship == *liveRelationship ||
+                     isTeamCharacter(savedRelationship))
+                        ? savedRelationship : 0;
             }
         }
         offset += slot.regions[i].size;

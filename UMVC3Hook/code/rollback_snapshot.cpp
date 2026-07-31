@@ -1007,7 +1007,8 @@ static int BuildRegionsUncached(Region* regions, int maxRegions,
                     // ---- cChrCmd line buffers (heap-allocated per-command match state) ----
                     // Two embedded cChrCmd objects at uCharacter+0x2738 and +0x2950.
                     // Each has a heap-allocated line array at cmd+0x178 of n×0x20 B entries
-                    // (where n = cmd+0x170), with an 8-B count header at lines-8.
+                    // (where n = cmd+0x170). The eight bytes before the payload
+                    // are allocator metadata and remain owned by the live allocation.
                     // Without this, double-tap dash / back-dash / charge / combo command
                     // matching progress is lost on snapshot restore → resim eats different
                     // action transitions.  Verified via Ghidra cross-refs from cChrCmd__setOwner.
@@ -1016,7 +1017,7 @@ static int BuildRegionsUncached(Region* regions, int maxRegions,
                         uint64_t lines = read.operator()<uint64_t>(cmd + 0x178);
                         int n = read.operator()<int>(cmd + 0x170);
                         if (lines && n > 0 && n < 0x1000)
-                            add((void*)(lines - 8), (size_t)n * 0x20 + 8, 0, 0, false
+                            add((void*)lines, (size_t)n * 0x20, cmd + 0x178, 0, false
 #if ROLLBACK_SNAPDUMP_ENABLED
                                 , "uCharacter.commandLines"
 #endif
