@@ -2063,19 +2063,6 @@ extern "C" void AutoTest_Process()
     uint64_t action = GetAction();
     int32_t actionStep = action ? *(int32_t*)(action + 0xD8) : -1;
 
-    if (g_netSuiteActive && !g_netSuiteClient && !g_netSuiteRestartPending &&
-        g_desyncDetected &&
-        (g_suitePhase == SuitePhase::RunningCommand ||
-         g_suitePhase == SuitePhase::WaitingForCompletion)) {
-        if (g_netSuiteFirstMismatchFrame < 0) {
-            g_netSuiteFirstMismatchFrame = g_desyncFrame;
-            g_netSuiteFirstHostChecksum = g_desyncLocalCS;
-            g_netSuiteFirstClientChecksum = g_desyncRemoteCS;
-        }
-        FinishSuiteCommand(false, "persistent desync detected");
-        return;
-    }
-
     switch (g_suitePhase) {
     case SuitePhase::StartCommand: {
         if (actionStep != 5)

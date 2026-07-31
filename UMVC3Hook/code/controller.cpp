@@ -1610,7 +1610,12 @@ extern "C" void Controller_OnFrameEnd()
                 // else: no checksum for this frame (lost packet) — skip it,
                 // continue scanning older frames to find a longer streak
             }
-            if (consecutive >= DESYNC_CONSECUTIVE_MIN)
+            // Autotest performs its own move-scoped comparison between the
+            // host's confirmed live frame and the client's forced resim frame.
+            // The session-wide detector can still contain startup/setup
+            // mismatches (often before the move's start frame), so it must not
+            // publish a verdict while a suite move is active.
+            if (consecutive >= DESYNC_CONSECUTIVE_MIN && !AutoTest_IsActive())
             {
                 if (!g_desyncSeen && !g_desyncDetected)
                 {
