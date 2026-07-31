@@ -17,6 +17,9 @@ static constexpr uintptr_t ADDR_GET_TEAM_INDEX           = 0x140004AC0;
 static constexpr uintptr_t ADDR_TEAM_COMMIT_SWAP         = 0x140021510;
 static constexpr uintptr_t ADDR_TEAM_UPDATE_AGGREGATE    = 0x140022870;
 static constexpr uintptr_t ADDR_ACTION_FIGHTING_CORE     = 0x140006370;
+static constexpr uintptr_t ADDR_PER_FRAME_ACTION_UPDATE  = 0x14003C5A0;
+static constexpr uintptr_t ADDR_SELECT_ACTION_TABLE      = 0x1400425A0;
+static constexpr uintptr_t ADDR_SELECT_ACTION_TRANSITION = 0x14003CED0;
 
 static constexpr uintptr_t PTR_SCHARACTER  = 0x140d44a70;
 static constexpr uintptr_t TEAM0_OFFSET    = 0x40;
@@ -40,7 +43,7 @@ static int32_t Diag_GetGameFrameCount()
 
 static bool Diag_TraceLifecycleFrame(int32_t frame)
 {
-    return (frame >= 14 && frame <= 20) || (frame >= 328 && frame <= 333);
+    return false;
 }
 
 static void(__fastcall* oCharacterMoveBase)(uint64_t uChar) = nullptr;
@@ -50,6 +53,9 @@ static void(__fastcall* oInputMaskPostProcess)(uint64_t cChrInput) = nullptr;
 static bool(__fastcall* oTeamCommitSwap)(uint64_t team) = nullptr;
 static void(__fastcall* oTeamUpdateAggregate)(uint64_t team) = nullptr;
 static void(__fastcall* oActionFightingCore)(uint64_t action) = nullptr;
+static int(__fastcall* oPerFrameActionUpdate)(uint64_t character) = nullptr;
+static int(__fastcall* oSelectActionTable)(uint64_t character, char mode) = nullptr;
+static int(__fastcall* oSelectActionTransition)(uint64_t character) = nullptr;
 
 static int Diag_GetTeamIndex(uint64_t team)
 {
@@ -60,8 +66,75 @@ static int Diag_GetTeamIndex(uint64_t team)
     return -1;
 }
 
+static bool Diag_TraceActionFrame(int32_t frame)
+{
+    return false;
+}
+
+static void Diag_LogActionSelection(const char* phase, uint64_t character, int result = -1)
+{
+    int32_t frame = Diag_GetGameFrameCount();
+    if (!character || !Diag_TraceActionFrame(frame)) return;
+
+    auto word = [character](uint32_t offset) {
+        return *(uint32_t*)(character + offset);
+    };
+    auto commandWord = [character](uint32_t commandOffset, uint32_t offset) {
+        return *(uint32_t*)(character + commandOffset + offset);
+    };
+    HookLog("ACTIONSELECT frame=%d resim=%d phase=%s char=0x%llX result=%d "
+            "anm=%08X old=%08X req=%08X reqAlive=%08X reqStd=%08X reqCmd=%08X "
+            "anmF=%08X chrF=%08X prgF=%08X selector=%02X "
+            "spatk=%08X,%08X,%08X,%08X,%08X,%08X "
+            "combo=%08X,%08X,%08X,%08X,%08X,%08X "
+            "input=%08X,%08X,%08X,%08X,%08X,%08X,%08X,%08X\n",
+            frame, g_isResimulating ? 1 : 0, phase, character, result,
+            word(0x1310), word(0x1314), word(0x1318), word(0x3F48),
+            word(0x3F4C), word(0x3F50), word(0x14F0), word(0x14F8),
+            word(0x1500), *(uint8_t*)(character + 0x2C68),
+            commandWord(0x2738, 0x188), commandWord(0x2738, 0x18C),
+            commandWord(0x2738, 0x190), commandWord(0x2738, 0x194),
+            commandWord(0x2738, 0x198), commandWord(0x2738, 0x19C),
+            commandWord(0x2950, 0x188), commandWord(0x2950, 0x18C),
+            commandWord(0x2950, 0x190), commandWord(0x2950, 0x194),
+            commandWord(0x2950, 0x198), commandWord(0x2950, 0x19C),
+            *(uint32_t*)(character + 0x21C8 + 0x10),
+            *(uint32_t*)(character + 0x21C8 + 0x14),
+            *(uint32_t*)(character + 0x21C8 + 0x1C),
+            *(uint32_t*)(character + 0x21C8 + 0x20),
+            *(uint32_t*)(character + 0x21C8 + 0x24),
+            *(uint32_t*)(character + 0x21C8 + 0x560),
+            *(uint32_t*)(character + 0x21C8 + 0x568),
+            *(uint32_t*)(character + 0x21C8 + 0x56C));
+}
+
+static int __fastcall hkPerFrameActionUpdate(uint64_t character)
+{
+    Diag_LogActionSelection("perframe-before", character);
+    int result = oPerFrameActionUpdate(character);
+    Diag_LogActionSelection("perframe-after", character, result);
+    return result;
+}
+
+static int __fastcall hkSelectActionTable(uint64_t character, char mode)
+{
+    Diag_LogActionSelection(mode ? "table-before-mode1" : "table-before-mode0", character);
+    int result = oSelectActionTable(character, mode);
+    Diag_LogActionSelection(mode ? "table-after-mode1" : "table-after-mode0", character, result);
+    return result;
+}
+
+static int __fastcall hkSelectActionTransition(uint64_t character)
+{
+    Diag_LogActionSelection("transition-before", character);
+    int result = oSelectActionTransition(character);
+    Diag_LogActionSelection("transition-after", character, result);
+    return result;
+}
+
 static void Diag_LogTeamState(const char* phase, uint64_t team, int32_t frame)
 {
+    return;
     if (!team || (!g_isResimulating && !Diag_TraceLifecycleFrame(frame))) return;
     HookLog("TEAMTRACE frame=%d resim=%d phase=%s team=%d team=0x%llX "
             "active=0x%llX flag=%08X mCPrgF=%08X pending=%08X,%08X\n",
@@ -164,6 +237,7 @@ static void __fastcall hkActionSideCameraMove(uint64_t camera)
         std::memcpy(post, (uint8_t*)camera + 0x80, sizeof(post));
         bool changed = std::memcmp(pre, post, sizeof(pre)) != 0;
         if (trace || changed || Diag_TraceLifecycleFrame(frame)) {
+            return;
             HookLog("CAMTRACE frame=%d resim=%d changed=%d caller=0x%llX camera=0x%llX "
                 "active=0x%llX/0x%llX pos0=(%+.5f,%+.5f,%+.5f) "
                 "pos1=(%+.5f,%+.5f,%+.5f) "
@@ -203,33 +277,7 @@ static void __fastcall hkCharacterPreMove(uint64_t pre)
     bool trace = g_isResimulating;
     uint64_t sCharacter = *(uint64_t*)_addr(PTR_SCHARACTER);
     if (trace && sCharacter) {
-        HookLog("PRETRACE frame=%d pre=0x%llX ", frame, pre);
-        for (int teamIndex = 0; teamIndex < 2; ++teamIndex) {
-            uint64_t team = sCharacter + (teamIndex == 0 ? TEAM0_OFFSET : TEAM1_OFFSET);
-            uint64_t active = *(uint64_t*)(team + 0x48);
-            HookLog("team%d flags=0x%08X active=0x%llX mCPrgF=0x%08X ",
-                    teamIndex, *(uint32_t*)(team + 0x58), active,
-                    *(uint32_t*)(team + 0xFC));
-            uint64_t node = team + TEAM_FIRST_NODE_OFFSET;
-            for (int slot = 0; node && slot < 3; ++slot) {
-                uint64_t character = *(uint64_t*)(node + NODE_CHR_OFFSET);
-                HookLog("c%d=0x%llX:u10=%llX:c14F8=%08X:c150C=%08X:"
-                        "151C=%08X:29D4=%08X:2AD0=%08X:2D94=%08X:"
-                        "64D4=%08X:6554=%08X ", slot,
-                        character,
-                        character ? *(uint64_t*)(character + 0x10) : 0,
-                        character ? *(uint32_t*)(character + 0x14F8) : 0,
-                        character ? *(uint32_t*)(character + 0x150C) : 0,
-                        character ? *(uint32_t*)(character + 0x151C) : 0,
-                        character ? *(uint32_t*)(character + 0x29D4) : 0,
-                        character ? *(uint32_t*)(character + 0x2AD0) : 0,
-                        character ? *(uint32_t*)(character + 0x2D94) : 0,
-                        character ? *(uint32_t*)(character + 0x64D4) : 0,
-                        character ? *(uint32_t*)(character + 0x6554) : 0);
-                node = *(uint64_t*)(node + NODE_NEXT_OFFSET);
-            }
-        }
-        HookLog("\n");
+
     }
     oCharacterPreMove(pre);
 }
@@ -542,54 +590,12 @@ static void __fastcall hkCharacterMoveBase(uint64_t uChar)
     CaptureCharSnapshot(uChar, teamIdx, charSlot, postSnap);
     uint32_t postMoveCounter = *(uint32_t*)(uChar + 0x2D94);
     uint32_t postPrgF = *(uint32_t*)(uChar + 0x14F8);
-    uint8_t postPackedState[4] = {};
-    std::memcpy(postPackedState, (uint8_t*)uChar + 0x2888, sizeof(postPackedState));
-    uint8_t postTargetState[8] = {};
-    std::memcpy(postTargetState, (uint8_t*)uChar + 0x64D0, sizeof(postTargetState));
-    uint8_t postEp[20] = {};
-    std::memcpy(postEp, (uint8_t*)uChar + 0x3F84, sizeof(postEp));
 
     // The EP counter block is authoritative animation state. Trace it around
     // the native move so a rollback-only rewrite is distinguishable from a
     // restore gap.
     if (g_isResimulating) {
-        HookLog("EPTRACE frame=%d resim=%d team=%u slot=%u char=0x%llX "
-                "moveState=%02X,%02X,%02X,%02X "
-                "pre=%02X,%02X,%02X,%02X,%02X,%02X,%02X,%02X,%02X,%02X,%02X,%02X,%02X,%02X,%02X,%02X,%02X,%02X,%02X,%02X "
-                "post=%02X,%02X,%02X,%02X,%02X,%02X,%02X,%02X,%02X,%02X,%02X,%02X,%02X,%02X,%02X,%02X,%02X,%02X,%02X,%02X\n",
-                diagFrame, g_isResimulating ? 1 : 0, teamIdx, charSlot,
-                uChar,
-                *((uint8_t*)uChar + 0x2D94), *((uint8_t*)uChar + 0x2D95),
-                *((uint8_t*)uChar + 0x2D96), *((uint8_t*)uChar + 0x2D97),
-                preEp[0], preEp[1], preEp[2], preEp[3], preEp[4], preEp[5],
-                preEp[6], preEp[7], preEp[8], preEp[9], preEp[10], preEp[11],
-                preEp[12], preEp[13], preEp[14], preEp[15], preEp[16],
-                preEp[17], preEp[18], preEp[19],
-                postEp[0], postEp[1], postEp[2], postEp[3], postEp[4], postEp[5],
-                postEp[6], postEp[7], postEp[8], postEp[9], postEp[10], postEp[11],
-                 postEp[12], postEp[13], postEp[14], postEp[15], postEp[16],
-                 postEp[17], postEp[18], postEp[19]);
-        HookLog("FLAGTRACE frame=%d resim=1 team=%u slot=%u char=0x%llX "
-                "prgF=%08X->%08X packed2888=%02X,%02X,%02X,%02X->%02X,%02X,%02X,%02X "
-                "target64D0=%02X,%02X,%02X,%02X,%02X,%02X,%02X,%02X->%02X,%02X,%02X,%02X,%02X,%02X,%02X,%02X\n",
-                diagFrame, teamIdx, charSlot, uChar,
-                prePrgF, postPrgF,
-                prePackedState[0], prePackedState[1], prePackedState[2], prePackedState[3],
-                postPackedState[0], postPackedState[1], postPackedState[2], postPackedState[3],
-                preTargetState[0], preTargetState[1], preTargetState[2], preTargetState[3],
-                preTargetState[4], preTargetState[5], preTargetState[6], preTargetState[7],
-                postTargetState[0], postTargetState[1], postTargetState[2], postTargetState[3],
-                postTargetState[4], postTargetState[5], postTargetState[6], postTargetState[7]);
-        HookLog("TARGETTRACE frame=%d team=%u slot=%u char=0x%llX "
-                "t0=0x%llX:%08X,%08X,%08X,%08X "
-                "t1=0x%llX:%08X,%08X,%08X,%08X\n",
-                diagFrame, teamIdx, charSlot, uChar,
-                *(uint64_t*)(uChar + 0x6498),
-                *(uint32_t*)(uChar + 0x64CC), *(uint32_t*)(uChar + 0x64D0),
-                *(uint32_t*)(uChar + 0x64D4), *(uint32_t*)(uChar + 0x64D8),
-                *(uint64_t*)(uChar + 0x6528),
-                *(uint32_t*)(uChar + 0x655C), *(uint32_t*)(uChar + 0x6560),
-                *(uint32_t*)(uChar + 0x6564), *(uint32_t*)(uChar + 0x6568));
+
     }
 
     if (Diag_TraceLifecycleFrame(diagFrame)) {
@@ -647,80 +653,8 @@ static void __fastcall hkCharacterMoveBase(uint64_t uChar)
         }
 
         if (liveIdx >= 0) {
-            const CharDiagSnapshot& livePre = live.chars[liveIdx].pre;
-            const CharDiagSnapshot& livePost = live.chars[liveIdx].post;
 
-            if (std::memcmp(livePre.cchr, preSnap.cchr, CCHRINPUT_SIZE) != 0) {
-                HookLog("DASH_DIAG frame=%d team=%d slot=%d ENTRY cChrInput DIVERGED (save/restore gap!):\n",
-                        diagFrame, teamIdx, charSlot);
-                uint32_t* lw = (uint32_t*)livePre.cchr;
-                uint32_t* rw = (uint32_t*)preSnap.cchr;
-                for (int i = 0; i < CCHRINPUT_SIZE / 4; i++) {
-                    if (lw[i] != rw[i]) {
-                        HookLog("  +0x%03X: live=0x%08X resim=0x%08X", i*4, lw[i], rw[i]);
-                        if (i*4 == 0x10) HookLog(" [mOldHeld]");
-                        else if (i*4 == 0x14) HookLog(" [mHeld]");
-                        else if (i*4 == 0x560) HookLog(" [mRemapped]");
-                        else if (i*4 == 0x568) HookLog(" [mMask]");
-                        else if (i*4 == 0x56C) HookLog(" [mProcessed]");
-                        else if (i*4 >= 0x360 && i*4 < 0x560) HookLog(" [dirHist[%d]]", (i*4-0x360)/8);
-                        HookLog("\n");
-                    }
-                }
-            }
 
-            if (std::memcmp(livePost.cchr, postSnap.cchr, CCHRINPUT_SIZE) != 0) {
-                HookLog("DASH_DIAG frame=%d team=%d slot=%d EXIT cChrInput DIVERGED (execution diff):\n",
-                        diagFrame, teamIdx, charSlot);
-                uint32_t* lw = (uint32_t*)livePost.cchr;
-                uint32_t* rw = (uint32_t*)postSnap.cchr;
-                for (int i = 0; i < CCHRINPUT_SIZE / 4; i++) {
-                    if (lw[i] != rw[i]) {
-                        HookLog("  +0x%03X: live=0x%08X resim=0x%08X", i*4, lw[i], rw[i]);
-                        if (i*4 == 0x10) HookLog(" [mOldHeld]");
-                        else if (i*4 == 0x14) HookLog(" [mHeld]");
-                        else if (i*4 == 0x560) HookLog(" [mRemapped]");
-                        else if (i*4 == 0x568) HookLog(" [mMask]");
-                        else if (i*4 == 0x56C) HookLog(" [mProcessed]");
-                        else if (i*4 >= 0x360 && i*4 < 0x560) HookLog(" [dirHist[%d]]", (i*4-0x360)/8);
-                        HookLog("\n");
-                    }
-                }
-            }
-
-            if (livePost.posX != postSnap.posX || livePost.posY != postSnap.posY || livePost.posZ != postSnap.posZ) {
-                HookLog("DASH_DIAG frame=%d team=%d slot=%d POS POST: live=(%+.4f,%+.4f,%+.4f) resim=(%+.4f,%+.4f,%+.4f)\n",
-                        diagFrame, teamIdx, charSlot,
-                        livePost.posX, livePost.posY, livePost.posZ,
-                        postSnap.posX, postSnap.posY, postSnap.posZ);
-                float liveDx = livePost.posX - livePre.posX;
-                float liveDy = livePost.posY - livePre.posY;
-                float resimDx = postSnap.posX - preSnap.posX;
-                float resimDy = postSnap.posY - preSnap.posY;
-                if (liveDx != resimDx) {
-                    HookLog("DASH_DIAG frame=%d team=%d slot=%d VEL X: live=%.4f resim=%.4f diff=%.4f\n",
-                        diagFrame, teamIdx, charSlot, liveDx, resimDx, liveDx - resimDx);
-                }
-                if (liveDy != resimDy) {
-                    HookLog("DASH_DIAG frame=%d team=%d slot=%d VEL Y: live=%.4f resim=%.4f diff=%.4f\n",
-                        diagFrame, teamIdx, charSlot, liveDy, resimDy, liveDy - resimDy);
-                }
-            }
-
-            if (livePost.actionId != postSnap.actionId) {
-                HookLog("DASH_DIAG frame=%d team=%d slot=%d actionId POST: live=0x%08X resim=0x%08X (pre: live=0x%08X resim=0x%08X)\n",
-                        diagFrame, teamIdx, charSlot,
-                        livePost.actionId, postSnap.actionId,
-                        livePre.actionId, preSnap.actionId);
-            }
-
-            for (int i = 0; i < XORSHIFT_SIZE; i++) {
-                if (livePre.xorShift[i] != preSnap.xorShift[i]) {
-                    HookLog("DASH_DIAG frame=%d team=%d slot=%d RNG[%d] at ENTRY: live=0x%08X resim=0x%08X (SAVE/RESTORE GAP)\n",
-                            diagFrame, teamIdx, charSlot, i, livePre.xorShift[i], preSnap.xorShift[i]);
-                    break;
-                }
-            }
         }
     }
 }
@@ -861,6 +795,42 @@ void Diag_InitHooks()
     }
     else
         HookLog("Diag: Failed to hook sAction__stepFightingCore (%d)\n", s);
+
+    s = MH_CreateHook(
+        (LPVOID)_addr(ADDR_PER_FRAME_ACTION_UPDATE),
+        (LPVOID)&hkPerFrameActionUpdate,
+        (LPVOID*)&oPerFrameActionUpdate
+    );
+    if (s == MH_OK)
+    {
+        MH_EnableHook((LPVOID)_addr(ADDR_PER_FRAME_ACTION_UPDATE));
+    }
+    else
+        HookLog("Diag: Failed to hook cChr__perFrameActionUpdate (%d)\n", s);
+
+    s = MH_CreateHook(
+        (LPVOID)_addr(ADDR_SELECT_ACTION_TABLE),
+        (LPVOID)&hkSelectActionTable,
+        (LPVOID*)&oSelectActionTable
+    );
+    if (s == MH_OK)
+    {
+        MH_EnableHook((LPVOID)_addr(ADDR_SELECT_ACTION_TABLE));
+    }
+    else
+        HookLog("Diag: Failed to hook cChr__selectActionFromActionTable (%d)\n", s);
+
+    s = MH_CreateHook(
+        (LPVOID)_addr(ADDR_SELECT_ACTION_TRANSITION),
+        (LPVOID)&hkSelectActionTransition,
+        (LPVOID*)&oSelectActionTransition
+    );
+    if (s == MH_OK)
+    {
+        MH_EnableHook((LPVOID)_addr(ADDR_SELECT_ACTION_TRANSITION));
+    }
+    else
+        HookLog("Diag: Failed to hook uCharacter__selectActionTransition (%d)\n", s);
 
     HookLog("Diag: Init complete — diagnostic hooks installed\n");
 }

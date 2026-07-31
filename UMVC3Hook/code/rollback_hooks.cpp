@@ -43,7 +43,7 @@ static CChrSetPosFn oCChrSetPos = nullptr;
 
 static bool TraceLifecycleFrame(int32_t frame)
 {
-    return true;
+    return false;
 }
 
 extern "C" int32_t Controller_GetNetFrameCount();

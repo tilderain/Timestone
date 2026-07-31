@@ -152,3 +152,5 @@ generate snapshot during resim only unconfirmed frames
 Kill netplay's critical section spam
 
 Put ghidra_scripts into this folder
+
+Remove all useless diags

@@ -89,6 +89,9 @@ static constexpr SnapshotRange UACTION_CAMERA_SCALAR_RESTORE_RANGES[] = {
     {0x140, 0x40},
     {0x180, 0x40},
     {0x1C0, 0x40},
+    // uActionSideCamera::mFieldOfs[4], used by the camera anchor's
+    // per-frame tracked-position calculation.
+    {0x400, 0x10},
     // Camera center and radius used by the anchor's bounds calculation.
     {0x430, 0x20},
     {0x450, 0x40},
@@ -156,6 +159,10 @@ static constexpr SnapshotRange CCHR_SCALAR_RESTORE_RANGES[] = {
     {0x2D80, 0x10},
     // Character body/assist configuration state.
     {0x28B8, 0x20},
+    // Unknown one-byte character FSM state. It is the first authoritative
+    // mismatch in the 20260729_232517 desync pair and persists until the
+    // later action-selection divergence.
+    {0x28DC, 0x01},
     // Two paired 16-bit character transition/animation selectors. They are
     // scalar fields, not ownership pointers, and sit outside the main
     // animation request block.
@@ -185,6 +192,9 @@ static constexpr SnapshotRange CCHR_SCALAR_RESTORE_RANGES[] = {
     {0x6340, 0x10},
     // Damage, air-state, combo, stun, and knockdown counters.
     {0x6360, 0xC8},
+    // The scalar immediately following the damage-state block diverges first
+    // at frame 1385; leaving it live causes the later flag transition.
+    {0x6428, 0x04},
     // cChr's throw-reaction reuse state and two cached attack-info transforms.
     // Leaving these on the live timeline changes the selected throw response
     // (+0x6828 defaults to -1) and loses the restored matrix values.
@@ -904,6 +914,7 @@ void Rollback_RestoreSnapshot(int32_t frame)
 
     auto traceRestoreState = [frame, team0, team1, &teamCharacters, teamCharacterCount](
                                  const char* phase) {
+        return;
         uint64_t active0 = team0 ? *(uint64_t*)(team0 + 0x48) : 0;
         uint64_t active1 = team1 ? *(uint64_t*)(team1 + 0x48) : 0;
         HookLog("RESTORETRACE frame=%d phase=%s active0=0x%llX active1=0x%llX\n",
@@ -1394,6 +1405,21 @@ void Rollback_RestoreSnapshot(int32_t frame)
                     std::memcpy((uint8_t*)slot.regions[i].ptr + range.offset,
                                 slot.data + offset + range.offset,
                                 range.size);
+                }
+            }
+
+            // mpThrowPairChr is a live cChr relationship, not a heap-owned
+            // resource pointer. The generic character restore preserves the
+            // current pointer, which can leave one side paired with a throw
+            // target from the prediction timeline. Reapply the saved pair
+            // only when it is null or belongs to the current team roster.
+            constexpr uint32_t THROW_PAIR_OFFSET = 0x6730;
+            if ((size_t)THROW_PAIR_OFFSET + sizeof(uint64_t) <= copySize) {
+                uint64_t savedPair = *(const uint64_t*)(
+                    slot.data + offset + THROW_PAIR_OFFSET);
+                if (savedPair == 0 || isTeamCharacter(savedPair)) {
+                    *(uint64_t*)((uint8_t*)slot.regions[i].ptr +
+                                 THROW_PAIR_OFFSET) = savedPair;
                 }
             }
         }
