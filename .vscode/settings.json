@@ -2,6 +2,7 @@
 	"files.associations": {
 		"*.nut": "c",
 		"*.td": "c",
-		"system_error": "cpp"
+		"system_error": "cpp",
+		"*.tcc": "cpp"
 	}
 }

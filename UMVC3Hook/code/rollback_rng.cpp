@@ -251,6 +251,7 @@ static uint32_t __fastcall hkRChrCpuRngModN(void* cpu, uint32_t modulus)
     if (!Netplay_IsActive())
         return oRChrCpuRngModN(cpu, modulus);
 
+    return rand() % modulus;
     uint32_t savedState[4];
     void* globalState = (void*)_addr(GLOBAL_RNG_STATE);
     std::memcpy(savedState, globalState, sizeof(savedState));

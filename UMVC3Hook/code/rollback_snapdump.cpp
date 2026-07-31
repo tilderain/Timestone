@@ -150,6 +150,23 @@ bool WriteAll(FILE* file, const void* data, size_t size)
     return size == 0 || fwrite(data, 1, size, file) == size;
 }
 
+bool CreateParentDirectories(char* path)
+{
+    for (char* separator = path; *separator; ++separator) {
+        if (*separator != '\\' && *separator != '/')
+            continue;
+        char saved = *separator;
+        *separator = '\0';
+        bool validRoot = separator - path > 2;
+        bool created = !validRoot || CreateDirectoryA(path, nullptr) ||
+                       GetLastError() == ERROR_ALREADY_EXISTS;
+        *separator = saved;
+        if (!created)
+            return false;
+    }
+    return true;
+}
+
 } // namespace
 
 void SnapDump_CaptureSnapshot(const RollbackSnapshotSlot& slot)
@@ -213,7 +230,7 @@ void SnapDump_UpdateInputs(int32_t frame, uint32_t localInput, uint32_t remoteIn
     }
 }
 
-bool SnapDump_WriteHistory(int32_t triggerFrame)
+bool SnapDump_WriteHistory(int32_t triggerFrame, const char* relativePath)
 {
     if (g_dumpWritten) return true;
     std::vector<const HistoryFrame*> frames;
@@ -229,12 +246,18 @@ bool SnapDump_WriteHistory(int32_t triggerFrame)
     SYSTEMTIME time;
     GetLocalTime(&time);
     const char* role = Netplay_IsActive() ? (Netplay_IsHost() ? "host" : "client") : "offline";
-    char relative[128];
-    snprintf(relative, sizeof(relative), "desync_%04d%02d%02d_%02d%02d%02d_%s_f%d.usdp",
-             time.wYear, time.wMonth, time.wDay, time.wHour, time.wMinute,
-             time.wSecond, role, triggerFrame);
+    char defaultRelative[128];
+    if (!relativePath || !relativePath[0]) {
+        snprintf(defaultRelative, sizeof(defaultRelative),
+                 "desync_%04d%02d%02d_%02d%02d%02d_%s_f%d.usdp",
+                 time.wYear, time.wMonth, time.wDay, time.wHour, time.wMinute,
+                 time.wSecond, role, triggerFrame);
+        relativePath = defaultRelative;
+    }
     char path[512];
-    if (!Rollback_ResolveDllPath(path, sizeof(path), relative)) return false;
+    if (!Rollback_ResolveDllPath(path, sizeof(path), relativePath) ||
+        !CreateParentDirectories(path))
+        return false;
     FILE* file = fopen(path, "wb");
     if (!file) return false;
 

@@ -1,6 +1,7 @@
 #include "../pch.h"
 
 #include "rollback_ndjson.h"
+#include "autotest.h"
 #include "controller.h"
 #include "rollback_snapdump.h"
 #include "diag.h"
@@ -1211,7 +1212,10 @@ void NDJSON_ProcessInboundGroundTruth()
 extern "C" void Rollback_NotifyDesyncTriggered(int32_t frame)
 {
 #if ROLLBACK_SNAPDUMP_ENABLED
-    SnapDump_WriteHistory(frame);
+    char autoTestPath[MAX_PATH] = {};
+    SnapDump_WriteHistory(frame,
+        AutoTest_GetSnapDumpRelativePath(autoTestPath, sizeof(autoTestPath))
+            ? autoTestPath : nullptr);
 #endif
     NDJSON_NotifyDesyncTriggered(frame);
 }

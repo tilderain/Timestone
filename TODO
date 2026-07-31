@@ -154,3 +154,13 @@ Kill netplay's critical section spam
 Put ghidra_scripts into this folder
 
 Remove all useless diags
+
+
+D3DERR_NOTAVAILABLE : pcore->CreateDevice(
+mpUIThreadD3DCreateDeviceParam->Adapter,
+mpUIThreadD3DCreateDeviceParam->DeviceType,
+mpUIThreadD3DCreateDeviceParam->hFocusWindow,
+mpUIThreadD3DCreateDeviceParam->BehaviorFlags,
+mpUIThreadD3DCreateDeviceParam->pPresentationParameters,
+mpUIThreadD3DCreateDeviceParam->ppReturnedDeviceInterface)
+game sometimes errors this on launch

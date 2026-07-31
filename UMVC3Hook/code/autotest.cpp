@@ -2325,6 +2325,42 @@ extern "C" void AutoTest_OnDesyncDetected(int32_t frame)
     Rollback_ExportNetplayHistory(frame, path);
 }
 
+extern "C" bool AutoTest_GetSnapDumpRelativePath(char* path, size_t capacity)
+{
+    if (!path || capacity == 0 || !g_netSuiteActive ||
+        g_netSuiteMoveId == 0 || !Netplay_IsActive())
+        return false;
+
+    GetCommandListTextResource(g_suiteStatus.playerIndex,
+                               GetActiveCharacter(g_suiteStatus.playerIndex));
+    int32_t characterId = g_suiteStatus.playerIndex >= 0 &&
+                          g_suiteStatus.playerIndex <= 1
+        ? g_commandListText[g_suiteStatus.playerIndex].characterId : -1;
+    using GetCharacterName_t = const char*(__fastcall*)(int32_t);
+    static GetCharacterName_t getCharacterName =
+        (GetCharacterName_t)_addr(ADDR_GET_CHARACTER_NAME);
+    const char* characterName = characterId > 0
+        ? getCharacterName(characterId) : nullptr;
+
+    char safeCharacter[64] = {};
+    size_t length = 0;
+    const char* source = characterName && characterName[0]
+        ? characterName : "Unknown";
+    for (; *source && length + 1 < sizeof(safeCharacter); ++source) {
+        const char value = *source;
+        safeCharacter[length++] = ((value >= 'a' && value <= 'z') ||
+                                   (value >= 'A' && value <= 'Z') ||
+                                   (value >= '0' && value <= '9') ||
+                                   value == '-' || value == '_')
+            ? value : '_';
+    }
+
+    const char* role = Netplay_IsHost() ? "host" : "client";
+    int written = snprintf(path, capacity, "autotest/%s/%s_%u.usdp",
+                           safeCharacter, role, g_netSuiteMoveId);
+    return written > 0 && (size_t)written < capacity;
+}
+
 extern "C" void AutoTest_PrepareForRestart()
 {
     if (!g_netSuiteActive)

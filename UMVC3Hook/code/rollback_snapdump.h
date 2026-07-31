@@ -12,7 +12,7 @@ struct RollbackSnapshotSlot;
 
 void SnapDump_CaptureSnapshot(const RollbackSnapshotSlot& slot);
 void SnapDump_UpdateInputs(int32_t frame, uint32_t localInput, uint32_t remoteInput);
-bool SnapDump_WriteHistory(int32_t triggerFrame);
+bool SnapDump_WriteHistory(int32_t triggerFrame, const char* relativePath = nullptr);
 void SnapDump_Reset();
 
 #endif
