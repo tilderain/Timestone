@@ -144,8 +144,11 @@ char g_suiteCharacterName[64] = {};
 char g_suiteCharacterStem[64] = {};
 const char* g_suiteType = "commands";
 char g_suiteMoveFilter[512] = {};
-int32_t g_suiteRepeatCount = 1;
+int32_t g_suiteRepeatCount = 3;
 bool g_suiteMoveFilterEnabled = false;
+bool g_suiteManualSelection[std::size(SUITE_MANUAL_SCRIPTS)] = {};
+int32_t g_suiteManualCount = 0;
+int32_t g_suiteManualCaseCount = 0;
 constexpr int32_t SUITE_COMMAND_TIMEOUT = 600;
 constexpr int32_t SUITE_COMPLETION_TIMEOUT = 3600;
 constexpr int32_t SUITE_QUIET_FRAMES = 20;
@@ -203,6 +206,15 @@ bool MoveSelectorMatches(const char* filter, int32_t moveId, const char* name)
         if (*cursor == ',') ++cursor;
     }
     return false;
+}
+
+bool IsManualCaseSelected(int32_t manualIndex)
+{
+    if (!g_suiteMoveFilterEnabled)
+        return true;
+    return manualIndex >= 0 &&
+           manualIndex < (int32_t)std::size(SUITE_MANUAL_SCRIPTS) &&
+           g_suiteManualSelection[manualIndex];
 }
 
 struct NetSuiteFrame {
@@ -2020,6 +2032,18 @@ bool StartSuite(int32_t playerIndex, bool facingLeft, bool deduplicate)
     int32_t commandCount = 0;
     int32_t duplicateCount = 0;
     int32_t moveOrdinal = 0;
+    g_suiteManualCount = 0;
+    for (int32_t manualIndex = 0;
+         manualIndex < (int32_t)std::size(SUITE_MANUAL_SCRIPTS); ++manualIndex) {
+        g_suiteManualSelection[manualIndex] =
+            !g_suiteMoveFilterEnabled ||
+            MoveSelectorMatches(g_suiteMoveFilter, manualIndex + 1,
+                                SUITE_MANUAL_SCRIPTS[manualIndex].name);
+        if (g_suiteManualSelection[manualIndex])
+            ++g_suiteManualCount;
+    }
+    g_suiteManualCaseCount = g_suiteManualCount *
+        (g_suiteMoveFilterEnabled ? g_suiteRepeatCount : 1);
     for (int32_t i = 0; i < allCount; ++i) {
         const AutoTestRuntimeCommand command = capturedCommands[i];
         if (command.playerIndex != playerIndex)
@@ -2075,7 +2099,7 @@ bool StartSuite(int32_t playerIndex, bool facingLeft, bool deduplicate)
         g_suiteCommandHasNotation[commandCount] = hasNotation;
         ++commandCount;
     }
-    if (commandCount == 0)
+    if (commandCount == 0 && g_suiteManualCount == 0)
         return false;
 
     // Repeat selected commands as independent cases. Each case gets its own
@@ -2112,8 +2136,7 @@ bool StartSuite(int32_t playerIndex, bool facingLeft, bool deduplicate)
     g_suiteStatus.active = true;
     g_suiteStatus.playerIndex = playerIndex;
     g_suiteStatus.currentCommand = 0;
-    g_suiteStatus.commandCount = commandCount +
-        (g_suiteMoveFilterEnabled ? 0 : (int32_t)std::size(SUITE_MANUAL_SCRIPTS));
+    g_suiteStatus.commandCount = commandCount + g_suiteManualCaseCount;
     g_suiteStatus.currentMatcher = -1;
     g_suiteStatus.currentLine = -1;
     g_suiteStatus.requiredQuietFrames = Netplay_IsActive()
@@ -2126,7 +2149,7 @@ bool StartSuite(int32_t playerIndex, bool facingLeft, bool deduplicate)
     g_netSuiteRestartPending = false;
     g_netSuiteMoveId = 0;
     HookLog("AutoTestSuite: started %d manual cases and %d %scommands for P%d (%d duplicate moves removed, repeat=%d)\n",
-            g_suiteMoveFilterEnabled ? 0 : (int32_t)std::size(SUITE_MANUAL_SCRIPTS), commandCount,
+            g_suiteManualCaseCount, commandCount,
             deduplicate ? "unique " : "variant ", playerIndex + 1,
             duplicateCount, repeatCount);
     return true;
@@ -2146,7 +2169,7 @@ extern "C" bool AutoTest_StartVariantSuite(int32_t playerIndex,
 extern "C" void AutoTest_ConfigureCommandLine(const char* commandLine)
 {
     g_suiteMoveFilter[0] = '\0';
-    g_suiteRepeatCount = 1;
+    g_suiteRepeatCount = 3;
     g_suiteMoveFilterEnabled = false;
     if (!commandLine) return;
 
@@ -2216,9 +2239,21 @@ extern "C" void AutoTest_Process()
             return;
         }
 
-        int32_t manualCount = g_suiteMoveFilterEnabled
-            ? 0 : (int32_t)std::size(SUITE_MANUAL_SCRIPTS);
-        g_suiteManualCase = g_suiteStatus.currentCommand < manualCount;
+        int32_t manualOrdinal = 0;
+        int32_t selectedManualIndex = -1;
+        const int32_t targetManualOrdinal = g_suiteManualCount > 0
+            ? g_suiteStatus.currentCommand % g_suiteManualCount : -1;
+        for (int32_t manualIndex = 0;
+             manualIndex < (int32_t)std::size(SUITE_MANUAL_SCRIPTS); ++manualIndex) {
+            if (!g_suiteManualSelection[manualIndex])
+                continue;
+            if (manualOrdinal++ == targetManualOrdinal) {
+                selectedManualIndex = manualIndex;
+                break;
+            }
+        }
+        g_suiteManualCase = selectedManualIndex >= 0;
+        const int32_t manualCount = g_suiteManualCaseCount;
         const AutoTestRuntimeCommand* command = g_suiteManualCase
             ? nullptr
             : &g_suiteCommands[g_suiteStatus.currentCommand - manualCount];
@@ -2227,7 +2262,7 @@ extern "C" void AutoTest_Process()
         if (g_suiteManualCase) {
             snprintf(g_suiteStatus.currentName,
                      sizeof(g_suiteStatus.currentName), "%s",
-                     SUITE_MANUAL_SCRIPTS[g_suiteStatus.currentCommand].name);
+                      SUITE_MANUAL_SCRIPTS[selectedManualIndex].name);
         } else if (command->commandListName[0] && command->name[0] &&
                    strcmp(command->commandListName, command->name) != 0) {
             snprintf(g_suiteStatus.currentName,
@@ -2258,7 +2293,7 @@ extern "C" void AutoTest_Process()
         g_suiteStatus.defenderAction = g_suiteIdleActions[1];
         g_suiteMatchedCommand = false;
         if (g_suiteManualCase) {
-            ConfigureManualScript(g_suiteStatus.currentCommand,
+            ConfigureManualScript(selectedManualIndex,
                                   g_suiteStatus.playerIndex,
                                   g_suiteFacingLeft, frame + 5);
         } else {
@@ -2285,7 +2320,7 @@ extern "C" void AutoTest_Process()
             packet.variant_token = command
                 ? command->commandListVariantToken : -1;
             packet.manual_index = g_suiteManualCase
-                ? g_suiteStatus.currentCommand : -1;
+                ? selectedManualIndex : -1;
             packet.setup_frame = g_status.startFrame - 10;
             packet.start_frame = g_status.startFrame;
             packet.attacker_idle_action = g_suiteIdleActions[0];

@@ -22,7 +22,7 @@ umvc3.exe -autotest=Ryu -autotest-moves="12,Hadoken" -autotest-repeat=5
 `-autotest-moves` accepts comma-separated case-insensitive name fragments or
 numeric runtime move ordinals. Numeric ordinals refer to the character's
 runtime command list before duplicate removal. `-autotest-repeat` defaults to
-one and is limited to 100. Each repetition performs a synchronized training
+three for focused move runs and is limited to 100. Each repetition performs a synchronized training
 reset and receives its own move ID, so the TSV result and host/client
 snapdumps can be correlated. The existing date, character, move, checksum,
 and mismatch-frame metadata remains in the result TSV.

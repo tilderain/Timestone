@@ -127,7 +127,7 @@ def main():
     parser.add_argument("--moves", help="comma-separated names or runtime ordinals")
     parser.add_argument("--failed-tsv", type=Path,
                         help="derive move names from DESYNC/FAIL/ERROR rows")
-    parser.add_argument("--repeat", type=int, default=5)
+    parser.add_argument("--repeat", type=int, default=3)
     parser.add_argument("--game", type=Path,
                         default=Path("../ULTIMATE MARVEL VS. CAPCOM 3/umvc3.exe"))
     parser.add_argument("--game-dir", type=Path,
@@ -201,6 +201,14 @@ def main():
 
     pair = latest_report_pair(Path(plan["cwd"]), started_at)
     if not pair:
+        recent_results = [path for path in (Path(plan["cwd"]) / "autotest").glob("*_commands.tsv")
+                          if path.stat().st_mtime >= started_at]
+        if not recent_results:
+            manifest.update(outcome="autotest_not_started", exit_code=EXIT_LAUNCH_FAILED,
+                            game_exit_code=result.returncode,
+                            shutdown_crash=completed_with_shutdown_crash)
+            emit(manifest, args.manifest)
+            return EXIT_LAUNCH_FAILED
         manifest.update(outcome="no_desync_artifacts", exit_code=EXIT_OK,
                         game_exit_code=result.returncode,
                         shutdown_crash=completed_with_shutdown_crash)
