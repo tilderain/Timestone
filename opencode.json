@@ -27,7 +27,10 @@
       "x86_64-w64-mingw32-addr2line *": "allow",
       "python3 tools/autotest_ai.py": "allow",
       "python3 tools/autotest_ai.py *": "allow",
-      "python3 \"tools/autotest_ai.py\"*": "allow"
+      "python3 \"tools/autotest_ai.py\"*": "allow",
+      "python3 tools/compare_desync_dumps.py": "allow",
+      "python3 tools/compare_desync_dumps.py *": "allow",
+      "python3 \"tools/compare_desync_dumps.py\"*": "allow"
     },
     "external_directory": {
       "*": "ask",

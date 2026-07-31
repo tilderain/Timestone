@@ -39,9 +39,14 @@ def failed_moves(path):
         for row in csv.DictReader(stream, delimiter="\t"):
             if row.get("result", "").upper() not in {"DESYNC", "FAIL", "ERROR"}:
                 continue
-            name = row.get("move", "").replace("\n", " ").strip()
-            if name and name not in moves:
-                moves.append(name)
+            matcher_id = row.get("matcher_id", "").strip()
+            line_id = row.get("line_id", "").strip()
+            if matcher_id not in {"", "-1"} and line_id not in {"", "-1"}:
+                selector = f"{matcher_id}:{line_id}"
+            else:
+                selector = row.get("move", "").replace("\n", " ").strip()
+            if selector and selector not in moves:
+                moves.append(selector)
     return moves
 
 
@@ -49,21 +54,44 @@ def quote_filter(moves):
     return ",".join(move.replace(",", " ") for move in moves)
 
 
-def latest_report_pair(game_dir, not_before=None):
-    pattern = re.compile(r"desync_(\d{8}_\d{6})_(host|client)_f(-?\d+)\.usdp$")
+def latest_report_pair(game_dir, character, not_before=None):
+    """Find the newest complete pair in the character's autotest folder.
+
+    Current autotest output uses ``host_<move-id>.usdp`` and
+    ``client_<move-id>.usdp``. Keep support for the older timestamped names so
+    existing runs can still be analyzed.
+    """
+    character_dir = game_dir / "autotest" / character
+    search_dirs = [character_dir]
+    # Older builds wrote timestamped dumps directly in the game directory.
+    if game_dir != character_dir:
+        search_dirs.append(game_dir)
+    current_pattern = re.compile(r"(host|client)_(\d+)\.usdp$")
+    legacy_pattern = re.compile(
+        r"desync_(\d{8}_\d{6})_(host|client)_f(-?\d+)\.usdp$")
     entries = []
-    for path in game_dir.glob("desync_*.usdp"):
-        if not_before is not None and path.stat().st_mtime < not_before:
+    for directory in search_dirs:
+        if not directory.is_dir():
             continue
-        match = pattern.fullmatch(path.name)
-        if not match:
-            continue
-        stamp = dt.datetime.strptime(match.group(1), "%Y%m%d_%H%M%S")
-        entries.append((stamp, match.group(2), int(match.group(3)), path))
-    for host in sorted((entry for entry in entries if entry[1] == "host"), reverse=True):
+        for path in directory.glob("*.usdp"):
+            if not_before is not None and path.stat().st_mtime < not_before:
+                continue
+            match = current_pattern.fullmatch(path.name)
+            if match:
+                entries.append((path.stat().st_mtime, match.group(1),
+                                int(match.group(2)), path, None))
+                continue
+            match = legacy_pattern.fullmatch(path.name)
+            if match:
+                stamp = dt.datetime.strptime(match.group(1), "%Y%m%d_%H%M%S")
+                entries.append((stamp.timestamp(), match.group(2),
+                                int(match.group(3)), path, stamp))
+    for host in sorted((entry for entry in entries if entry[1] == "host"),
+                       reverse=True):
         clients = [entry for entry in entries
                    if entry[1] == "client" and entry[2] == host[2]
-                   and abs(entry[0] - host[0]) <= dt.timedelta(seconds=5)]
+                   and (host[4] is None or entry[4] is None or
+                        abs(entry[4] - host[4]) <= dt.timedelta(seconds=5))]
         if clients:
             return host[3], max(clients)[3]
     return None
@@ -79,10 +107,55 @@ def suite_completed(game_dir, not_before):
                 return True
         except OSError:
             pass
-    for path in (game_dir / "autotest").glob("*_commands.tsv"):
+    for path in (game_dir / "autotest").rglob("*_commands.tsv"):
         if path.stat().st_mtime >= not_before:
             return True
     return False
+
+
+def recent_desync_results(game_dir, character, not_before):
+    """Return DESYNC/FAIL/ERROR TSV rows produced by this run."""
+    results = []
+    for path in (game_dir / "autotest").rglob("*_commands.tsv"):
+        if path.stat().st_mtime < not_before:
+            continue
+        try:
+            with path.open("r", encoding="utf-8", errors="replace",
+                           newline="") as stream:
+                for row in csv.DictReader(stream, delimiter="\t"):
+                    if row.get("character", "").casefold() != character.casefold():
+                        continue
+                    if row.get("result", "").upper() in {"DESYNC", "FAIL", "ERROR"}:
+                        results.append({"tsv": str(path), "move": row.get("move", ""),
+                                        "result": row.get("result", ""),
+                                        "mismatch_frame": row.get("mismatch_frame", ""),
+                                        "reason": row.get("reason", "")})
+        except OSError:
+            continue
+    return results
+
+
+def validate_suite_rows(game_dir, character, not_before):
+    """Return malformed runtime rows that cannot identify their command."""
+    invalid = []
+    for path in (game_dir / "autotest").rglob("*_commands.tsv"):
+        if path.stat().st_mtime < not_before:
+            continue
+        try:
+            with path.open("r", encoding="utf-8", errors="replace",
+                           newline="") as stream:
+                for row in csv.DictReader(stream, delimiter="\t"):
+                    if row.get("character", "").casefold() != character.casefold():
+                        continue
+                    if row.get("suite_type", "") != "commands":
+                        continue
+                    if row.get("matcher_id") in {None, "", "-1"} or \
+                       row.get("line_id") in {None, "", "-1"}:
+                        invalid.append({"tsv": str(path), "move": row.get("move", ""),
+                                        "move_id": row.get("move_id", "")})
+        except OSError:
+            continue
+    return invalid
 
 
 def build_plan(args, moves):
@@ -199,21 +272,34 @@ def main():
         emit(manifest, args.manifest)
         return EXIT_LAUNCH_FAILED
 
-    pair = latest_report_pair(Path(plan["cwd"]), started_at)
+    desync_results = recent_desync_results(
+        Path(plan["cwd"]), args.character, started_at)
+    invalid_rows = validate_suite_rows(
+        Path(plan["cwd"]), args.character, started_at)
+    pair = latest_report_pair(Path(plan["cwd"]), args.character, started_at)
+    if invalid_rows:
+        manifest.update(outcome="incomplete", exit_code=EXIT_LAUNCH_FAILED,
+                        game_exit_code=result.returncode,
+                        shutdown_crash=completed_with_shutdown_crash,
+                        desync_results=desync_results,
+                        invalid_command_rows=invalid_rows)
+        emit(manifest, args.manifest)
+        return EXIT_LAUNCH_FAILED
     if not pair:
-        recent_results = [path for path in (Path(plan["cwd"]) / "autotest").glob("*_commands.tsv")
-                          if path.stat().st_mtime >= started_at]
-        if not recent_results:
+        if not suite_completed(Path(plan["cwd"]), started_at):
             manifest.update(outcome="autotest_not_started", exit_code=EXIT_LAUNCH_FAILED,
                             game_exit_code=result.returncode,
                             shutdown_crash=completed_with_shutdown_crash)
             emit(manifest, args.manifest)
             return EXIT_LAUNCH_FAILED
-        manifest.update(outcome="no_desync_artifacts", exit_code=EXIT_OK,
+        manifest.update(outcome="desync" if desync_results else "no_desync_artifacts",
+                        exit_code=EXIT_DESYNC if desync_results else EXIT_OK,
                         game_exit_code=result.returncode,
-                        shutdown_crash=completed_with_shutdown_crash)
+                        shutdown_crash=completed_with_shutdown_crash,
+                        desync_results=desync_results,
+                        invalid_command_rows=invalid_rows)
         emit(manifest, args.manifest)
-        return EXIT_OK
+        return EXIT_DESYNC if desync_results else EXIT_OK
     comparator = Path(__file__).with_name("compare_desync_dumps.py")
     report_path = args.report or Path(plan["cwd"]) / "autotest" / "latest_ai_report.json"
     if not report_path.is_absolute():
@@ -242,7 +328,15 @@ def main():
                    "report": str(report_path)},
         first_divergence=report.get("first_divergence"),
         diagnosis=report.get("diagnosis"),
+        desync_results=desync_results,
+        invalid_command_rows=invalid_rows,
     )
+    # The TSV records per-command failures; preserve that evidence even when
+    # the comparator report is incomplete or uses a different verdict shape.
+    if desync_results and not desynced:
+        manifest["outcome"] = "desync"
+        manifest["exit_code"] = EXIT_DESYNC
+        exit_code = EXIT_DESYNC
     emit(manifest, args.manifest)
     return exit_code
 

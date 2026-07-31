@@ -137,3 +137,4 @@ extern "C" void AutoTest_OnDesyncDetected(int32_t frame);
 extern "C" bool AutoTest_GetSnapDumpRelativePath(char* path, size_t capacity);
 extern "C" void AutoTest_PrepareForRestart();
 extern "C" void AutoTest_OnTrainingRestartExecuted();
+extern "C" void AutoTest_ApplyMatchStartPositions();

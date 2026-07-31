@@ -150,6 +150,7 @@ struct AutoTestStartPacket {
     uint32_t defender_idle_action;
     uint32_t facing_left;
     uint32_t round_seed;
+    float    setup_position[4];     // host-authoritative defender position
     char     move_name[96];
 };
 

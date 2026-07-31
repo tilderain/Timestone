@@ -35,13 +35,38 @@ responsible.
 
 ### 3.1 Discovery Run
 
-Launch the game with a selected character and focused move:
+Launch the game with a selected character and focused command ID:
 
 ```bash
-wine umvc3.exe -autotest=<character> -autotest-moves=<move> -autotest-repeat=1
+wine umvc3.exe -autotest=<character> -autotest-moves=<command-id> -autotest-repeat=1
 ```
 
-- Default repeat count: **1**. A single execution is sufficient to detect a 
+- The focused selector must be the numeric command ID emitted by the
+  `AutoTestSuite: list=<id>` log entry, not the human-readable command name.
+- For example, if the log contains
+  `AutoTestSuite: list=3 ... command="SERVBOT SURPRISE"`, launch with
+  `-autotest-moves=3`, not `-autotest-moves="SERVBOT SURPRISE"`.
+- Command names are display labels and may be duplicated, localized, or
+  changed by command-list extraction. They must not be used as the primary
+  selector for reproduction.
+- Record both the numeric command ID and the displayed command name in every
+  test result, report, and diagnosis so the result remains human-readable while
+  reproduction uses the stable ID.
+- For runtime command-list entries, the authoritative selector is the pair
+  `matcher_id` and `line_id` from the `AutoTestSuite: ... matcher=<id>
+  line=<id>` log entry. The AI must launch and reproduce a runtime command by
+  this matcher/line pair, written as `<matcher-id>:<line-id>` in
+  `-autotest-moves`, not by its displayed name or by a regenerated list
+  ordinal.
+- The autotest TSV must contain `matcher_id` and `line_id` columns for every
+  row. Preserve these values when importing a failed TSV or creating a focused
+  rerun. A missing or `-1` matcher/line pair is an invalid runtime test
+  selector and must be reported as `incomplete`, not treated as a successful
+-   reproduction.
+- Manual scripts such as `Forward Throw` and `Back Throw` are separate from
+  runtime command-list entries. They legitimately use `matcher_id=-1` and
+  `line_id=-1`; do not use those rows to identify runtime commands.
+- Default repeat count: **1**. A single execution is sufficient to detect a
   deterministic desync.
 - The autotest suite forces the **client to re-simulate every confirmed frame**, 
   providing comprehensive rollback stress without additional fault injection.
@@ -56,16 +81,34 @@ If the suite does not complete, classify as `incomplete` and retry.
 
 ### 3.2 Artifact Discovery
 
-After the game exits, search for matching `.usdp` snapdump pairs in the game 
-directory:
+For autotest runs, search under the dedicated snapdump root:
+
+```
+/media/god/tempData/SteamLibrary/steamapps/common/ULTIMATE MARVEL VS. CAPCOM 3/autotest/
+```
+
+Autotest snapdumps are sorted into character-named folders below this root. The
+character name comes from `-autotest=<character>`, so a Tron run is expected
+under:
+
+```
+/media/god/tempData/SteamLibrary/steamapps/common/ULTIMATE MARVEL VS. CAPCOM 3/autotest/Tron/
+```
+
+Search the selected character folder first, and only consider artifacts created
+after the launch timestamp. Do not use stale snapdumps from another character
+or an earlier run. Within that folder, match host and client snapdumps by the
+same timestamp and trigger frame:
 
 ```
 desync_<TIMESTAMP>_host_f<FRAME>.usdp
 desync_<TIMESTAMP>_client_f<FRAME>.usdp
 ```
 
-Only consider artifacts created **after the launch timestamp**. Timestamp and 
-trigger frame must match between host and client.
+The timestamp and trigger frame must match between host and client. If the
+character folder is missing, the run produced no usable autotest artifacts;
+classify the result according to the completion and artifact rules below rather
+than scanning unrelated character folders.
 
 ### 3.3 Snapdump Comparison
 
@@ -409,7 +452,7 @@ Before deep behavioral analysis, assess if the field is obviously gameplay-relev
    ```bash
    make -j8
    cp UMVC3Hook.asi "../ULTIMATE MARVEL VS. CAPCOM 3/"
-   wine umvc3.exe -autotest=Jill -autotest-moves="Forward Throw" -autotest-repeat=1
+   wine umvc3.exe -autotest=Jill -autotest-moves=<command-id> -autotest-repeat=1
    ```
 
 4. **Branch on result**:
@@ -573,7 +616,9 @@ if (g_isResimulating) {
 
 Cross-reference with the host/client logs:
 
-- Look for `AutoTestSuite: command=X/Y <MoveName>` around the divergent frame.
+   - Look for `AutoTestSuite: command=X/Y matcher=<matcher-id> line=<line-id> <MoveName>` around the divergent frame.
+   - Use the logged `matcher-id` and `line-id` as the runtime command identity;
+     the displayed move name is diagnostic text only.
 - Check for shot creation messages, AnmChr event dispatches, or projectile spawn 
   logs.
 - If the shot properties (position, velocity, owner, animation serial, timing) 
@@ -850,7 +895,7 @@ After applying the tentative fix:
 
 3. Re-run the exact same test case:
    ```bash
-   wine umvc3.exe -autotest=<character> -autotest-moves=<move> -autotest-repeat=1
+   wine umvc3.exe -autotest=<character> -autotest-moves=<command-id> -autotest-repeat=1
    ```
 
 4. Check for `.usdp` artifacts:
@@ -1531,7 +1576,7 @@ shows exception dialog.
 ### Iteration 1: Initial Discovery
 
 ```bash
-$ python3 tools/autotest_ai.py --character Jill --moves "Forward Throw" \
+$ python3 tools/autotest_ai.py --character Jill --moves <command-id> \
     --repeat 1 --launch --json --manifest run1.json
 ```
 
@@ -1593,7 +1638,7 @@ memcpy(dst + 0x143c, src + 0x143c, 4);
 ```bash
 $ make -j8
 $ cp UMVC3Hook.asi "../ULTIMATE MARVEL VS. CAPCOM 3/"
-$ python3 tools/autotest_ai.py --character Jill --moves "Forward Throw" \
+$ python3 tools/autotest_ai.py --character Jill --moves <command-id> \
     --repeat 1 --launch --json --manifest verify1.json
 ```
 
@@ -1655,7 +1700,7 @@ memcpy(dst + 0x2a40, src + 0x2a40, 4);
 ```bash
 $ make -j8
 $ cp UMVC3Hook.asi "../ULTIMATE MARVEL VS. CAPCOM 3/"
-$ python3 tools/autotest_ai.py --character Jill --moves "Forward Throw" \
+$ python3 tools/autotest_ai.py --character Jill --moves <command-id> \
     --repeat 1 --launch --json --manifest verify2.json
 ```
 
@@ -2064,7 +2109,7 @@ if any(kw in field_name.lower() for kw in visual_keywords):
 | Check snapshot coverage | `UMVC3Hook/code/rollback_snapshot.cpp` |
 | Verify structure definitions | Ghidra: umvc3.exe.unpacked.exe analysis |
 | Run comparison | `tools/compare_desync_dumps.py` |
-| Launch test | `wine umvc3.exe -autotest=<char> -autotest-moves=<move>` |
+| Launch test | `wine umvc3.exe -autotest=<char> -autotest-moves=<command-id>` |
 
 ### Critical Constraints
 - ✅ Single run (`--repeat=1`) detects deterministic desyncs
@@ -2138,7 +2183,7 @@ static constexpr SnapshotRange CCHR_SCALAR_RESTORE_RANGES[] = {
 ```bash
 make -j8
 cp UMVC3Hook.asi "../ULTIMATE MARVEL VS. CAPCOM 3/"
-wine umvc3.exe -autotest=Jill -autotest-moves="Forward Throw" -autotest-repeat=1
+wine umvc3.exe -autotest=Jill -autotest-moves=<command-id> -autotest-repeat=1
 ```
 
 **Result:** No `.usdp` files created → **Desync resolved!**
@@ -2297,7 +2342,7 @@ Proceed with gameplay hook? [y/n]
 ```bash
 make -j8
 cp UMVC3Hook.asi "../ULTIMATE MARVEL VS. CAPCOM 3/"
-wine umvc3.exe -autotest=Jill -autotest-moves="Forward Throw" -autotest-repeat=1
+wine umvc3.exe -autotest=Jill -autotest-moves=<command-id> -autotest-repeat=1
 ```
 
 **Result:** No `.usdp` files created → **Desync resolved with normalization!**
@@ -2576,7 +2621,7 @@ static constexpr SnapshotRange CCHR_SCALAR_RESTORE_RANGES[] = {
 ```bash
 make -j8
 cp UMVC3Hook.asi "../ULTIMATE MARVEL VS. CAPCOM 3/"
-wine umvc3.exe -autotest=Jill -autotest-moves="Forward Throw" -autotest-repeat=1
+wine umvc3.exe -autotest=Jill -autotest-moves=<command-id> -autotest-repeat=1
 ```
 
 **Result:** No `.usdp` files created → Desync resolved

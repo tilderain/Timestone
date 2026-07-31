@@ -94,7 +94,10 @@ static bool                     g_outboundAutoTestStartNew = false;
 static AutoTestStartPacket      g_inboundAutoTestStart = {};
 static bool                     g_inboundAutoTestStartNew = false;
 static CRITICAL_SECTION         g_autoTestStartCS;
-static constexpr size_t         MAX_AUTOTEST_FRAME_PACKETS = 512;
+// A client can report one checksum for every forced resimulated frame while
+// the host's game thread is busy comparing or restarting a case. ENet is
+// reliable, but this application queue must not discard the oldest reports.
+static constexpr size_t         MAX_AUTOTEST_FRAME_PACKETS = 4096;
 static AutoTestFramePacket      g_outboundAutoTestFrames[MAX_AUTOTEST_FRAME_PACKETS] = {};
 static size_t                   g_outboundAutoTestFrameHead = 0;
 static size_t                   g_outboundAutoTestFrameCount = 0;

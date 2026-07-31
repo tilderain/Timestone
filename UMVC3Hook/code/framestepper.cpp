@@ -498,6 +498,7 @@ static void __fastcall HookedMove(void* sMvc3Main)
                 HookLog("Netplay: cannot synchronize round RNG; sReplay unavailable\n");
                 return;
             }
+            AutoTest_ApplyMatchStartPositions();
             Netplay_ClearInputQueues();
             Controller_ResetBuffers();
             Controller_ResetFrameEpoch();

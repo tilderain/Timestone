@@ -144,8 +144,11 @@ char g_suiteCharacterName[64] = {};
 char g_suiteCharacterStem[64] = {};
 const char* g_suiteType = "commands";
 char g_suiteMoveFilter[512] = {};
-int32_t g_suiteRepeatCount = 3;
+// A normal suite must visit each case once. Repetition is opt-in through
+// -autotest-repeat=N so a flaky result is not mistaken for independent cases.
+int32_t g_suiteRepeatCount = 1;
 bool g_suiteMoveFilterEnabled = false;
+bool g_autoTestCommandLineLaunch = false;
 bool g_suiteManualSelection[std::size(SUITE_MANUAL_SCRIPTS)] = {};
 int32_t g_suiteManualCount = 0;
 int32_t g_suiteManualCaseCount = 0;
@@ -154,7 +157,7 @@ constexpr int32_t SUITE_COMPLETION_TIMEOUT = 3600;
 constexpr int32_t SUITE_QUIET_FRAMES = 20;
 constexpr int32_t NET_SUITE_STABLE_FRAMES = 3;
 constexpr int32_t NET_SUITE_DESYNC_FRAMES = 1;
-constexpr int32_t NET_SUITE_HISTORY = 512;
+constexpr int32_t NET_SUITE_HISTORY = 4096;
 
 bool ContainsInsensitive(const char* haystack, const char* needle)
 {
@@ -208,6 +211,19 @@ bool MoveSelectorMatches(const char* filter, int32_t moveId, const char* name)
     return false;
 }
 
+bool RuntimeCommandSelectorMatches(const char* filter,
+                                   int32_t matcherIndex,
+                                   int32_t lineIndex,
+                                   int32_t moveId,
+                                   const char* name)
+{
+    if (!filter[0]) return true;
+    char selector[48];
+    snprintf(selector, sizeof(selector), "%d:%d", matcherIndex, lineIndex);
+    return ContainsInsensitive(filter, selector) ||
+           MoveSelectorMatches(filter, moveId, name);
+}
+
 bool IsManualCaseSelected(int32_t manualIndex)
 {
     if (!g_suiteMoveFilterEnabled)
@@ -237,6 +253,10 @@ int32_t g_netSuiteLastComparedFrame = -1;
 int32_t g_netSuiteStableFrames = 0;
 int32_t g_netSuiteMismatchFrames = 0;
 int32_t g_netSuiteComparedFrames = 0;
+int32_t g_netSuiteReceivedFrames = 0;
+int32_t g_netSuiteDroppedFrames = 0;
+int32_t g_netSuiteLastClientFrame = -1;
+float g_netSuiteSetupPosition[4] = {};
 int32_t g_netSuiteFirstMismatchFrame = -1;
 uint32_t g_netSuiteFirstHostChecksum = 0;
 uint32_t g_netSuiteFirstClientChecksum = 0;
@@ -355,6 +375,26 @@ void PlaceDefenderNextToAttacker(int32_t attackerIndex)
     ((SetPosition_t)_addr(ADDR_SET_CHARACTER_POSITION))(defender, position);
 }
 
+extern "C" void AutoTest_ApplyMatchStartPositions()
+{
+    if (!g_autoTestCommandLineLaunch)
+        return;
+
+    constexpr float positions[2][4] = {
+        {-0.125f, 0.0f, 0.0f, 0.0f},
+        { 0.125f, 0.0f, 0.0f, 0.0f},
+    };
+    using SetPosition_t = void(__fastcall*)(uint64_t, const float*);
+    static SetPosition_t setPosition =
+        (SetPosition_t)_addr(ADDR_SET_CHARACTER_POSITION);
+    for (int32_t player = 0; player < 2; ++player) {
+        uint64_t character = GetActiveCharacter(player);
+        if (character)
+            setPosition(character, positions[player]);
+    }
+    HookLog("AutoTestNet: match-start positions applied P1=-0.125 P2=0.125\n");
+}
+
 void FillAttackerHyperGauge(int32_t attackerIndex)
 {
     uint64_t characters = *(uint64_t*)_addr(PTR_SCHARACTER);
@@ -445,7 +485,7 @@ void InitializeSuiteResultFile(int32_t playerIndex, bool deduplicate)
         g_suiteResultPath[0] = '\0';
         return;
     }
-    fprintf(file, "test_date\tcharacter\tsuite_type\tmove_id\tmove\tresult\tcompared_frames\tmismatch_frame\thost_checksum\tclient_checksum\treason\n");
+    fprintf(file, "test_date\tcharacter\tsuite_type\tmove_id\tmatcher_id\tline_id\tmove\tresult\tcompared_frames\tmismatch_frame\thost_checksum\tclient_checksum\treason\n");
     fclose(file);
     HookLog("AutoTestSuite: results -> %s (date=%s character=%s)\n",
             g_suiteResultPath, g_suiteTestDate, g_suiteCharacterName);
@@ -468,13 +508,14 @@ void WriteSuiteResult(bool passed, const char* reason)
         HookLog("AutoTestSuite: could not append %s\n", g_suiteResultPath);
         return;
     }
-    fprintf(file, "%s\t%s\t%s\t%u\t%s\t%s\t%d\t%d\t0x%08X\t0x%08X\t%s\n",
+    fprintf(file, "%s\t%s\t%s\t%u\t%d\t%d\t%s\t%s\t%d\t%d\t0x%08X\t0x%08X\t%s\n",
             g_suiteTestDate, g_suiteCharacterName, g_suiteType, moveId,
+            g_suiteStatus.currentMatcher, g_suiteStatus.currentLine,
             g_suiteStatus.currentName, outcome,
-            network ? g_netSuiteComparedFrames : 0,
+             network ? g_netSuiteComparedFrames : 0,
             network ? g_netSuiteFirstMismatchFrame : -1,
             network ? g_netSuiteFirstHostChecksum : 0,
-            network ? g_netSuiteFirstClientChecksum : 0, reason);
+             network ? g_netSuiteFirstClientChecksum : 0, reason);
     fclose(file);
 }
 
@@ -524,6 +565,9 @@ void ResetNetSuiteMoveState(uint32_t moveId, int32_t startFrame)
     g_netSuiteStableFrames = 0;
     g_netSuiteMismatchFrames = 0;
     g_netSuiteComparedFrames = 0;
+    g_netSuiteReceivedFrames = 0;
+    g_netSuiteDroppedFrames = 0;
+    g_netSuiteLastClientFrame = startFrame - 1;
     g_netSuiteFirstMismatchFrame = -1;
     g_netSuiteFirstHostChecksum = 0;
     g_netSuiteFirstClientChecksum = 0;
@@ -545,12 +589,13 @@ void ProcessNetSuiteSetup(int32_t frame)
                 g_netSuiteMoveId);
         return;
     }
-    PlaceDefenderNextToAttacker(g_suiteStatus.playerIndex);
     if (g_runningRuntimeHyper)
         FillAttackerHyperGauge(g_suiteStatus.playerIndex);
     g_netSuiteSetupApplied = true;
-    HookLog("AutoTestNet: move %u setup applied at frame %d seed=0x%08X\n",
-            g_netSuiteMoveId, frame, g_suiteRngSeed);
+    HookLog("AutoTestNet: move %u setup applied at frame %d pos=[%.6g,%.6g,%.6g,%.6g] seed=0x%08X\n",
+            g_netSuiteMoveId, frame, g_netSuiteSetupPosition[0],
+            g_netSuiteSetupPosition[1], g_netSuiteSetupPosition[2],
+            g_netSuiteSetupPosition[3], g_suiteRngSeed);
 }
 
 void ConfigureManualScript(int32_t manualIndex, int32_t playerIndex,
@@ -621,6 +666,11 @@ void StartInboundNetSuiteMove(const AutoTestStartPacket& packet)
     // configured gives diagnostics a move identity without injecting client input.
     g_status.active = false;
     ResetNetSuiteMoveState(packet.move_id, packet.start_frame);
+    // ResetNetSuiteMoveState clears per-case state, so copy the host's
+    // authoritative setup position after it has completed. Otherwise the
+    // client applies a zero position during ProcessNetSuiteSetup.
+    for (int i = 0; i < 4; ++i)
+        g_netSuiteSetupPosition[i] = packet.setup_position[i];
     g_netSuiteSetupFrame = packet.setup_frame;
     g_netSuiteSetupApplied = false;
     HookLog("AutoTestNet: client armed move %u %s at frame %d\n",
@@ -640,7 +690,16 @@ void ProcessNetSuitePackets()
     while (Netplay_GetInboundAutoTestFrame(report)) {
         if (report.move_id != g_netSuiteMoveId || report.frame < g_netSuiteStartFrame)
             continue;
-        g_netSuiteRemoteFrames[(uint32_t)report.frame % NET_SUITE_HISTORY] = report;
+        uint32_t idx = (uint32_t)report.frame % NET_SUITE_HISTORY;
+        if (g_netSuiteRemoteFrames[idx].frame == report.frame)
+            continue;
+        if (g_netSuiteRemoteFrames[idx].frame >= g_netSuiteStartFrame &&
+            g_netSuiteRemoteFrames[idx].frame != report.frame)
+            ++g_netSuiteDroppedFrames;
+        g_netSuiteRemoteFrames[idx] = report;
+        ++g_netSuiteReceivedFrames;
+        if (report.frame > g_netSuiteLastClientFrame)
+            g_netSuiteLastClientFrame = report.frame;
     }
 
     for (;;) {
@@ -696,12 +755,18 @@ void ProcessNetSuitePackets()
         g_netSuiteStableFrames = checksumMatch && bothIdle
             ? g_netSuiteStableFrames + 1 : 0;
         g_suiteStatus.quietFrames = g_netSuiteStableFrames;
-        if (g_netSuiteStableFrames >= NET_SUITE_STABLE_FRAMES &&
+    if (g_netSuiteStableFrames >= NET_SUITE_STABLE_FRAMES &&
             g_suitePhase == SuitePhase::WaitingForCompletion) {
-            char reason[96];
+            char reason[160];
             snprintf(reason, sizeof(reason),
-                     "checksums stable for %d idle frames",
-                     NET_SUITE_STABLE_FRAMES);
+                     "checksums stable for %d idle frames (%d/%d reports, %d replaced)",
+                     NET_SUITE_STABLE_FRAMES, g_netSuiteComparedFrames,
+                     g_netSuiteReceivedFrames, g_netSuiteDroppedFrames);
+            // A stable suffix is only meaningful after every frame through the
+            // current host frame has been compared. Otherwise a delayed client
+            // report can make an unfinished case look synchronized.
+            if (g_netSuiteLastComparedFrame < g_netSuiteLastClientFrame)
+                continue;
             FinishSuiteCommand(true, reason);
             return;
         }
@@ -2064,7 +2129,10 @@ bool StartSuite(int32_t playerIndex, bool facingLeft, bool deduplicate)
             ? command.commandListName : command.name;
         ++moveOrdinal;
         if (g_suiteMoveFilterEnabled &&
-            !MoveSelectorMatches(g_suiteMoveFilter, moveOrdinal, commandName))
+            !RuntimeCommandSelectorMatches(g_suiteMoveFilter,
+                                            command.matcherIndex,
+                                            command.lineIndex,
+                                            moveOrdinal, commandName))
             continue;
         bool duplicate = false;
         for (int32_t existing = 0; deduplicate && existing < commandCount;
@@ -2169,8 +2237,11 @@ extern "C" bool AutoTest_StartVariantSuite(int32_t playerIndex,
 extern "C" void AutoTest_ConfigureCommandLine(const char* commandLine)
 {
     g_suiteMoveFilter[0] = '\0';
-    g_suiteRepeatCount = 3;
+    g_suiteRepeatCount = 1;
     g_suiteMoveFilterEnabled = false;
+    g_autoTestCommandLineLaunch = commandLine &&
+        (strstr(commandLine, "-autotest=") ||
+         strstr(commandLine, "-autotest-client"));
     if (!commandLine) return;
 
     const char* moves = strstr(commandLine, "-autotest-moves=");
@@ -2239,25 +2310,30 @@ extern "C" void AutoTest_Process()
             return;
         }
 
-        int32_t manualOrdinal = 0;
         int32_t selectedManualIndex = -1;
-        const int32_t targetManualOrdinal = g_suiteManualCount > 0
-            ? g_suiteStatus.currentCommand % g_suiteManualCount : -1;
-        for (int32_t manualIndex = 0;
-             manualIndex < (int32_t)std::size(SUITE_MANUAL_SCRIPTS); ++manualIndex) {
-            if (!g_suiteManualSelection[manualIndex])
-                continue;
-            if (manualOrdinal++ == targetManualOrdinal) {
-                selectedManualIndex = manualIndex;
-                break;
+        const int32_t manualCount = g_suiteManualCaseCount;
+        // Manual cases occupy the first manualCount suite slots. The previous
+        // modulo test classified every later runtime command as a manual case,
+        // causing the suite to loop over Forward/Back Throw indefinitely.
+        if (g_suiteStatus.currentCommand < manualCount) {
+            int32_t manualOrdinal = 0;
+            const int32_t targetManualOrdinal = g_suiteManualCount > 0
+                ? g_suiteStatus.currentCommand % g_suiteManualCount : -1;
+            for (int32_t manualIndex = 0;
+                 manualIndex < (int32_t)std::size(SUITE_MANUAL_SCRIPTS); ++manualIndex) {
+                if (!g_suiteManualSelection[manualIndex])
+                    continue;
+                if (manualOrdinal++ == targetManualOrdinal) {
+                    selectedManualIndex = manualIndex;
+                    break;
+                }
             }
         }
         g_suiteManualCase = selectedManualIndex >= 0;
-        const int32_t manualCount = g_suiteManualCaseCount;
         const AutoTestRuntimeCommand* command = g_suiteManualCase
             ? nullptr
             : &g_suiteCommands[g_suiteStatus.currentCommand - manualCount];
-        g_suiteStatus.currentMatcher = command ? command->matcherIndex : -1;
+    g_suiteStatus.currentMatcher = command ? command->matcherIndex : -1;
         g_suiteStatus.currentLine = command ? command->lineIndex : -1;
         if (g_suiteManualCase) {
             snprintf(g_suiteStatus.currentName,
@@ -2274,8 +2350,6 @@ extern "C" void AutoTest_Process()
                      command->commandListName[0]
                          ? command->commandListName : command->name);
         }
-        if (!g_netSuiteActive)
-            PlaceDefenderNextToAttacker(g_suiteStatus.playerIndex);
         uint64_t attacker = GetActiveCharacter(g_suiteStatus.playerIndex);
         uint64_t defender = GetActiveCharacter(g_suiteStatus.playerIndex ^ 1);
         g_suiteDefenderLife = GetCharacterLife(defender);
@@ -2321,12 +2395,18 @@ extern "C" void AutoTest_Process()
                 ? command->commandListVariantToken : -1;
             packet.manual_index = g_suiteManualCase
                 ? selectedManualIndex : -1;
-            packet.setup_frame = g_status.startFrame - 10;
+            // Apply the authoritative placement at the same frame as the
+            // scripted input barrier. Applying it ten frames earlier allowed
+            // host/client local frame timing to select different teleport
+            // frames and left the setup state exposed to later game updates.
+            packet.setup_frame = g_status.startFrame;
             packet.start_frame = g_status.startFrame;
             packet.attacker_idle_action = g_suiteIdleActions[0];
             packet.defender_idle_action = g_suiteIdleActions[1];
             packet.facing_left = g_suiteFacingLeft ? 1u : 0u;
             packet.round_seed = g_suiteRngSeed;
+            for (int i = 0; i < 4; ++i)
+                packet.setup_position[i] = g_netSuiteSetupPosition[i];
             snprintf(packet.move_name, sizeof(packet.move_name), "%s",
                      g_suiteStatus.currentName);
             ResetNetSuiteMoveState(packet.move_id, packet.start_frame);
@@ -2414,14 +2494,18 @@ extern "C" bool AutoTest_GetForcedClientResim(int32_t currentFrame,
         !Netplay_IsActive() || Netplay_IsHost() || !outStartFrame || !outEndFrame)
         return false;
 
-    int32_t frame = g_netSuiteLastForcedFrame + 1;
-    if (frame < g_netSuiteStartFrame)
-        frame = g_netSuiteStartFrame;
-    if (frame >= currentFrame || !Controller_IsFrameConfirmed(frame))
+    int32_t start = g_netSuiteLastForcedFrame + 1;
+    if (start < g_netSuiteStartFrame)
+        start = g_netSuiteStartFrame;
+    int32_t end = start;
+    while (end < currentFrame && end - start < MAX_RESIM_FRAMES &&
+           Controller_IsFrameConfirmed(end))
+        ++end;
+    if (end == start)
         return false;
-    g_netSuiteLastForcedFrame = frame;
-    *outStartFrame = frame;
-    *outEndFrame = frame + 1;
+    g_netSuiteLastForcedFrame = end - 1;
+    *outStartFrame = start;
+    *outEndFrame = end;
     return true;
 }
 
