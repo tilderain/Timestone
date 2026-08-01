@@ -39,7 +39,7 @@ class AutoTestAiTest(unittest.TestCase):
             host.touch()
             client.touch()
             cutoff = max(host.stat().st_mtime, client.stat().st_mtime) + 1
-            self.assertIsNone(runner.latest_report_pair(root, cutoff))
+            self.assertIsNone(runner.latest_report_pair(root, "Ryu", cutoff))
 
     def test_latest_pair_accepts_fresh_matching_pair(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -49,7 +49,49 @@ class AutoTestAiTest(unittest.TestCase):
             host.touch()
             client.touch()
             before = min(host.stat().st_mtime, client.stat().st_mtime) - 1
-            self.assertEqual((host, client), runner.latest_report_pair(root, before))
+            self.assertEqual((host, client), runner.latest_report_pair(root, "Ryu", before))
+
+    def test_crash_artifact_details_extracts_fault(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "umvc3_crash.log"
+            path.write_text(
+                "commit=abc (dirty)\n"
+                "code=0xC0000005 exception=0x0 thread=7\n"
+                "RIP=0x0000000000000000 RSP=0x1 RBP=0x2\n"
+                "access=execute address=0x0000000000000000\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                {
+                    "path": str(path),
+                    "commit": "abc (dirty)",
+                    "code": "0xC0000005",
+                    "rip": "0x0000000000000000",
+                    "access": "execute",
+                    "access_address": "0x0000000000000000",
+                },
+                runner.crash_artifact_details(path),
+            )
+
+    def test_recent_crash_artifacts_ignores_unchanged_old_log(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            log = root / "nplive_old" / "umvc3_crash.log"
+            log.parent.mkdir()
+            log.write_text("=== UMVC3Hook crash old run ===\n", encoding="utf-8")
+            snapshot = runner.crash_artifact_snapshot(root)
+            self.assertEqual([], runner.recent_crash_artifacts(
+                root, log.stat().st_mtime - 1, snapshot))
+
+    def test_recent_crash_artifacts_accepts_new_crash_log(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            snapshot = runner.crash_artifact_snapshot(root)
+            log = root / "nplive_new" / "umvc3_crash.log"
+            log.parent.mkdir()
+            log.write_text("=== UMVC3Hook crash new run ===\n", encoding="utf-8")
+            self.assertEqual([str(log)], runner.recent_crash_artifacts(
+                root, log.stat().st_mtime - 1, snapshot))
 
 
 if __name__ == "__main__":

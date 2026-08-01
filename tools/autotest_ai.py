@@ -113,6 +113,72 @@ def suite_completed(game_dir, not_before):
     return False
 
 
+def crash_artifact_snapshot(game_dir):
+    """Capture existing crash logs before launching the game."""
+    snapshot = {}
+    for path in game_dir.glob("nplive_*/umvc3_crash.log"):
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        snapshot[str(path)] = (stat.st_mtime_ns, stat.st_size)
+    return snapshot
+
+
+def recent_crash_artifacts(game_dir, not_before, before=None):
+    """Return crash logs written by this launch.
+
+    Wine can return zero after a child game process crashes, so the process
+    status is not sufficient evidence that the game completed successfully.
+    The plugin writes one crash log per nplive client/host session; treat any
+    fresh log as authoritative failure evidence.
+    """
+    artifacts = []
+    for path in game_dir.glob("nplive_*/umvc3_crash.log"):
+        try:
+            if not path.is_file():
+                continue
+            stat = path.stat()
+            previous = before.get(str(path)) if before is not None else None
+            changed = previous is None or previous != (stat.st_mtime_ns, stat.st_size)
+            if not changed or stat.st_mtime < not_before:
+                continue
+            # Only plugin crash records are authoritative. This prevents an
+            # unrelated file with the same name from affecting classification.
+            with path.open("r", encoding="utf-8", errors="replace") as stream:
+                if "=== UMVC3Hook crash" not in stream.read():
+                    continue
+            artifacts.append(str(path))
+        except OSError:
+            continue
+    return sorted(artifacts)
+
+
+def crash_artifact_details(path):
+    """Extract stable fields from a plugin crash log for run manifests."""
+    details = {"path": str(path)}
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return details
+    patterns = {
+        "commit": r"^commit=([^\r\n]+)",
+        "code": r"^code=(0x[0-9A-Fa-f]+)",
+        "rip": r"^RIP=(0x[0-9A-Fa-f]+)",
+        "access": r"^access=([^ ]+) address=(0x[0-9A-Fa-f]+)",
+    }
+    for key, pattern in patterns.items():
+        match = re.search(pattern, text, re.MULTILINE)
+        if not match:
+            continue
+        if key == "access":
+            details["access"] = match.group(1)
+            details["access_address"] = match.group(2)
+        else:
+            details[key] = match.group(1)
+    return details
+
+
 def recent_desync_results(game_dir, character, not_before):
     """Return DESYNC/FAIL/ERROR TSV rows produced by this run."""
     results = []
@@ -250,6 +316,7 @@ def main():
         return EXIT_OK
 
     started_at = time.time()
+    crash_snapshot = crash_artifact_snapshot(Path(plan["cwd"]))
     manifest = {**plan, "schema": "umvc3_autotest_run_v1",
                 "started_at": dt.datetime.fromtimestamp(
                     started_at, dt.timezone.utc).isoformat(), "outcome": "running"}
@@ -270,9 +337,21 @@ def main():
     completed_with_shutdown_crash = (
         result.returncode != 0 and suite_completed(Path(plan["cwd"]), started_at)
     )
+    crash_artifacts = recent_crash_artifacts(
+        Path(plan["cwd"]), started_at, crash_snapshot)
+    if crash_artifacts:
+        manifest.update(outcome="game_crashed", exit_code=EXIT_LAUNCH_FAILED,
+                        game_exit_code=result.returncode,
+                        shutdown_crash=False,
+                        crash_artifacts=crash_artifacts,
+                        crashes=[crash_artifact_details(Path(path))
+                                 for path in crash_artifacts])
+        emit(manifest, args.manifest)
+        return EXIT_LAUNCH_FAILED
     if result.returncode != 0 and not completed_with_shutdown_crash:
         manifest.update(outcome="game_failed", exit_code=EXIT_LAUNCH_FAILED,
-                        game_exit_code=result.returncode)
+                        game_exit_code=result.returncode,
+                        crash_artifacts=[])
         emit(manifest, args.manifest)
         return EXIT_LAUNCH_FAILED
 
@@ -285,6 +364,7 @@ def main():
         manifest.update(outcome="incomplete", exit_code=EXIT_LAUNCH_FAILED,
                         game_exit_code=result.returncode,
                         shutdown_crash=completed_with_shutdown_crash,
+                        crash_artifacts=crash_artifacts,
                         desync_results=desync_results,
                         invalid_command_rows=invalid_rows)
         emit(manifest, args.manifest)
@@ -293,13 +373,15 @@ def main():
         if not suite_completed(Path(plan["cwd"]), started_at):
             manifest.update(outcome="autotest_not_started", exit_code=EXIT_LAUNCH_FAILED,
                             game_exit_code=result.returncode,
-                            shutdown_crash=completed_with_shutdown_crash)
+                            shutdown_crash=completed_with_shutdown_crash,
+                            crash_artifacts=crash_artifacts)
             emit(manifest, args.manifest)
             return EXIT_LAUNCH_FAILED
         manifest.update(outcome="desync" if desync_results else "no_desync_artifacts",
                         exit_code=EXIT_DESYNC if desync_results else EXIT_OK,
                         game_exit_code=result.returncode,
                         shutdown_crash=completed_with_shutdown_crash,
+                        crash_artifacts=crash_artifacts,
                         desync_results=desync_results,
                         invalid_command_rows=invalid_rows)
         emit(manifest, args.manifest)
@@ -327,6 +409,7 @@ def main():
         exit_code=exit_code,
         game_exit_code=result.returncode,
         shutdown_crash=completed_with_shutdown_crash,
+        crash_artifacts=crash_artifacts,
         analyzer_exit_code=compare_result.returncode,
         artifacts={"host_dump": str(pair[0]), "client_dump": str(pair[1]),
                    "report": str(report_path)},
