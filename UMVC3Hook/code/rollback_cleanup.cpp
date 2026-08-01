@@ -16,6 +16,7 @@ static constexpr uintptr_t PTR_SUNIT = 0x140e17698;
 static constexpr uintptr_t FN_GAMEUI_SET_TEAM_CHARACTER_ID = 0x140022610;
 static constexpr uintptr_t FN_MODEL_SET_CHILD_MATERIAL_MODE = 0x140200DB0;
 static constexpr uintptr_t FN_MODEL_UPDATE_CAMERA_VISIBILITY_MASK = 0x1405641A0;
+static constexpr uintptr_t DTI_DR_STRANGE = 0x140D450A8;
 static constexpr uintptr_t DTI_UCUTIN = 0x140D6BCC8;
 static constexpr uintptr_t TEAM0_OFFSET = 0x40;
 static constexpr uintptr_t TEAM1_OFFSET = 0x300;
@@ -153,17 +154,61 @@ static void RemoveMtDtiUnits()
     }
 }
 
+static void ClearDrStrangeEffectPointers(uint64_t character)
+{
+    if (!IsAccessibleRange(character, 0x6908) ||
+        GetObjectDti(character) != (uint64_t)_addr(DTI_DR_STRANGE))
+        return;
+
+    // Follow the same native shutdown path used by Dr. Strange before
+    // discarding these non-snapshotted presentation handles. This marks the
+    // units for normal deferred sUnit removal instead of orphaning them.
+    const uint32_t offsets[] = {0x68F0, 0x68F8, 0x6900};
+    for (uint32_t offset : offsets) {
+        uint64_t effect = *(uint64_t*)(character + offset);
+        if (effect && IsAccessibleRange(effect, 0x18)) {
+            uint64_t vtable = *(uint64_t*)effect;
+            if (IsAccessibleAddress(vtable + 0x78) &&
+                IsExecutableAddress(*(uint64_t*)(vtable + 0x78))) {
+                uint32_t state = *(uint32_t*)(effect + 0x10);
+                if ((state & 7u) < 3u)
+                    ((void(__fastcall*)(uint64_t))(*(uint64_t*)(vtable + 0x78)))
+                        (effect);
+            }
+        }
+        *(uint64_t*)(character + offset) = 0;
+    }
+}
+
+void Rollback_DetachDrStrangeEffects()
+{
+    uint64_t sCharacter = *(uint64_t*)_addr(PTR_SCHARACTER);
+    if (!sCharacter) return;
+
+    for (int teamIndex = 0; teamIndex < 2; ++teamIndex) {
+        uint64_t team = sCharacter + (teamIndex == 0 ? TEAM0_OFFSET : TEAM1_OFFSET);
+        uint64_t node = team + TEAM_FIRST_NODE_OFFSET;
+        for (int safety = 8; node && safety-- > 0;) {
+            if (!IsAccessibleRange(node, NODE_NEXT_OFFSET + sizeof(uint64_t)))
+                break;
+            uint64_t character = *(uint64_t*)(node + NODE_CHR_OFFSET);
+            if (character)
+                ClearDrStrangeEffectPointers(character);
+            node = *(uint64_t*)(node + NODE_NEXT_OFFSET);
+        }
+    }
+}
+
 void Rollback_RemoveStaleUiUnits()
 {
     // Restart tears down live UI children while sUnit can still retain their
     // nodes. Remove only the generic MtDTI headers; gameplay cleanup belongs
     // to the normal restore path below.
-    RemoveMtDtiUnits();
+    // The restart path owns scheduler teardown. Do not mutate sUnit lists here.
 }
 
 void Rollback_ClearStalePointers()
 {
-    RemoveMtDtiUnits();
     uint64_t sCharacter = *(uint64_t*)_addr(PTR_SCHARACTER);
     if (!sCharacter) return;
 

@@ -3,6 +3,7 @@
 #include <cstdint>
 
 void Rollback_ClearStalePointers();
+void Rollback_DetachDrStrangeEffects();
 void Rollback_RemoveStaleUiUnits();
 void Rollback_ClearGameEffectSlots();
 void Rollback_SyncActiveCharacterUi();

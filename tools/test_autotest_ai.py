@@ -18,7 +18,8 @@ class AutoTestAiTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             log = root / "UMVC3Hook_host.log"
-            log.write_text("AutoTestSuite: command-line suite complete\n", encoding="utf-8")
+            log.write_text("AutoTestSuite: Suite complete: 1 passed, 0 failed\n",
+                           encoding="utf-8")
             self.assertTrue(runner.suite_completed(root, log.stat().st_mtime - 1))
 
     def test_failed_moves_selects_unique_failures(self):

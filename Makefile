@@ -142,6 +142,7 @@ LIBS      := \
 	-lkernel32 \
 	-luser32 \
 	-lgdi32 \
+	-ldbghelp \
 	-lpsapi \
 	-lcomctl32 \
 	-lcomdlg32 \

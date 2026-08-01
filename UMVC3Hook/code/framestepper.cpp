@@ -330,7 +330,6 @@ static void __fastcall HookedMove(void* sMvc3Main)
                 ((SetRestartModeFn)_addr(0x140207530))(sAction,
                                                        g_restartButtonMode);
                 Controller_ResetFightTimer(sAction);
-                Rollback_RemoveStaleUiUnits();
             }
             Rollback_FreeSnapshots();
             Controller_ClearDesyncDetection();

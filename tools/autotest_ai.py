@@ -103,13 +103,10 @@ def suite_completed(game_dir, not_before):
     if log_path.is_file() and log_path.stat().st_mtime >= not_before:
         try:
             log = log_path.read_text(encoding="utf-8", errors="replace")
-            if "AutoTestSuite: command-line suite complete" in log:
+            if "AutoTestSuite: Suite complete:" in log:
                 return True
         except OSError:
             pass
-    for path in (game_dir / "autotest").rglob("*_commands.tsv"):
-        if path.stat().st_mtime >= not_before:
-            return True
     return False
 
 
