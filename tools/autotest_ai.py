@@ -324,7 +324,14 @@ def main():
     if args.wine_prefix:
         env["WINEPREFIX"] = args.wine_prefix
     try:
-        result = subprocess.run(command, cwd=plan["cwd"], env=env, timeout=args.timeout)
+        result = subprocess.run(
+            command,
+            cwd=plan["cwd"],
+            env=env,
+            timeout=args.timeout,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
     except subprocess.TimeoutExpired:
         manifest.update(outcome="timeout", exit_code=EXIT_TIMEOUT)
         emit(manifest, args.manifest)
