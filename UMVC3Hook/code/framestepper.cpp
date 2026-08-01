@@ -15,6 +15,7 @@
 #include "rollback.h"
 #include "controller.h"
 #include "autotest.h"
+#include "rollback_cleanup.h"
 
 // Netplay debug info from controller.cpp
 extern "C" int32_t Controller_GetDelayFrames();
@@ -329,6 +330,7 @@ static void __fastcall HookedMove(void* sMvc3Main)
                 ((SetRestartModeFn)_addr(0x140207530))(sAction,
                                                        g_restartButtonMode);
                 Controller_ResetFightTimer(sAction);
+                Rollback_RemoveStaleUiUnits();
             }
             Rollback_FreeSnapshots();
             Controller_ClearDesyncDetection();

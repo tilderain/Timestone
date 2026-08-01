@@ -52,6 +52,62 @@ void Rollback_InitOnlineBattleHook()
         HookLog("Netplay: failed to enable g__isOnlineBattle hook (%d)\n", status);
 }
 
+template <size_t N>
+static bool PatchBytes(uintptr_t address, const uint8_t (&expected)[N],
+                       const uint8_t (&replacement)[N])
+{
+    uint8_t* target = (uint8_t*)_addr(address);
+    if (memcmp(target, replacement, N) == 0)
+        return true;
+    if (memcmp(target, expected, N) != 0)
+        return false;
+
+    DWORD oldProtect = 0;
+    if (!VirtualProtect(target, N, PAGE_EXECUTE_READWRITE, &oldProtect))
+        return false;
+    memcpy(target, replacement, N);
+    FlushInstructionCache(GetCurrentProcess(), target, N);
+    DWORD ignored = 0;
+    VirtualProtect(target, N, oldProtect, &ignored);
+    return true;
+}
+
+void Rollback_PatchRenderCommandAllocationFailure()
+{
+    // These native paths all continue through null arena allocations. Redirect
+    // them to their existing failure/cleanup paths instead.
+    static constexpr uint8_t NULL_COMMAND[] = {0x0F, 0x84, 0x09, 0x01, 0x00, 0x00};
+    static constexpr uint8_t RETURN_FAILURE[] = {0x0F, 0x84, 0x9D, 0xFF, 0xFF, 0xFF};
+    static constexpr uint8_t NULL_BUCKET[] = {
+        0x74, 0x0C, 0x48, 0x05, 0x00, 0x10, 0x00, 0x00, 0x48,
+        0x89, 0x43, 0x30, 0xEB, 0x04, 0x48, 0x89, 0x73, 0x30,
+    };
+    static constexpr uint8_t CLEANUP_10[] = {
+        0x0F, 0x84, 0x40, 0x02, 0x00, 0x00, 0x48, 0x05, 0x00,
+        0x10, 0x00, 0x00, 0x48, 0x89, 0x43, 0x30, 0x90, 0x90,
+    };
+    static constexpr uint8_t CLEANUP_40[] = {
+        0x0F, 0x84, 0x74, 0x01, 0x00, 0x00, 0x48, 0x05, 0x00,
+        0x10, 0x00, 0x00, 0x48, 0x89, 0x43, 0x30, 0x90, 0x90,
+    };
+    static constexpr uint8_t CLEANUP_30[] = {
+        0x0F, 0x84, 0xD9, 0x00, 0x00, 0x00, 0x48, 0x05, 0x00,
+        0x10, 0x00, 0x00, 0x48, 0x89, 0x43, 0x30, 0x90, 0x90,
+    };
+    static constexpr uint8_t TYPE_3[] = {0x0F, 0x85, 0x6B, 0x02, 0x00, 0x00};
+    static constexpr uint8_t SKIP_TYPE_3[] = {0x0F, 0x85, 0xC0, 0x02, 0x00, 0x00};
+    static constexpr uint8_t CALL_DTOR[] = {0xFF, 0x50, 0x28};
+    static constexpr uint8_t SKIP_DTOR[] = {0x90, 0x90, 0x90};
+
+    bool ok = PatchBytes(0x140640707, NULL_COMMAND, RETURN_FAILURE) &&
+              PatchBytes(0x14063C6AF, TYPE_3, SKIP_TYPE_3) &&
+              PatchBytes(0x14063C755, NULL_BUCKET, CLEANUP_10) &&
+              PatchBytes(0x14063C821, NULL_BUCKET, CLEANUP_40) &&
+              PatchBytes(0x14063C8BC, NULL_BUCKET, CLEANUP_30) &&
+              PatchBytes(0x14055FC1A, CALL_DTOR, SKIP_DTOR);
+    HookLog("Render: %s native failure guards\n", ok ? "installed" : "failed to install");
+}
+
 bool Rollback_PatchNativeNetplayDeterminism()
 {
     // aAction__init normally reaches its serialization setup only when replay

@@ -1062,10 +1062,15 @@ static int BuildRegionsUncached(Region* regions, int maxRegions,
             }
         }
 
+        // Do not snapshot uCharacterPost's camera state. It is an unowned
+        // dynamic object and has no owner slot in the snapshot. Restoring its
+        // saved address after native list teardown can write into a replaced
+        // object and corrupt the model/joint graph.
+
         // uCharacterPost::sync owns the camera-relative fighter correction at
         // the end of category 18. Its center and cached point-character pair
         // feed both point recentering and incoming assist/TAC placement.
-        if (sUnit && categoryCount > SUNIT_CHARACTER_POST_CATEGORY) {
+        /*if (sUnit && categoryCount > SUNIT_CHARACTER_POST_CATEGORY) {
             uint64_t characterPost = read.operator()<uint64_t>(
                 sUnit + SUNIT_CATEGORY_LISTS_OFFSET +
                 SUNIT_CATEGORY_LIST_STRIDE * SUNIT_CHARACTER_POST_CATEGORY,
@@ -1080,7 +1085,7 @@ static int BuildRegionsUncached(Region* regions, int maxRegions,
 #endif
                 );
             }
-        }
+        }*/
     }
 
     // ---- 19-22. sUnit effect categories — SKIPPED (heap corruption) ---

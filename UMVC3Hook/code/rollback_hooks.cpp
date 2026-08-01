@@ -26,6 +26,9 @@ static constexpr uintptr_t FN_SCHEDULER_REBUILD = 0x14050F010;
 static constexpr uintptr_t FN_RCHRCPU_CLASS_FUNC = 0x140117280;
 static constexpr uintptr_t FN_SMAIN_MOVE = 0x140521DF0;
 static constexpr uintptr_t FN_APPLY_COLLISION_PUSH = 0x14004AD20;
+static constexpr uintptr_t MT_DTI_VTABLE_ADDR = 0x140A69ED8;
+static constexpr uintptr_t FN_MENU_OPTION_KBD_MOVE = 0x140001C40;
+static constexpr uintptr_t FN_MATERIAL_RESOURCE_STATE = 0x1405DD640;
 
 static RollbackMainMoveFn* g_originalMvc3MainMove = nullptr;
 static void(__fastcall* oCallSRender)(uint64_t) = nullptr;
@@ -249,8 +252,10 @@ static void __fastcall hkSoundMove(uint64_t sound)
 static void __fastcall hkGameUiMove(uint64_t gameUi)
 {
     RollbackHookProfileScope profile(RollbackHookProfileId::GameUiMove);
-    if (!g_isResimulating)
-        oGameUiMove(gameUi);
+    // UI owns live menu/effect objects that are not part of rollback
+    // snapshots. Keep its lifecycle moving during resimulation so a menu
+    // object cannot remain registered after its native destruction.
+    oGameUiMove(gameUi);
 }
 
 static void __fastcall hkBtGaugeLifeMove(uint64_t gauge)
@@ -304,6 +309,30 @@ static void __fastcall hkMainMove(uint64_t main)
     }
 }
 
+static void(__fastcall* oMenuOptionKbdMove)(uint64_t) = nullptr;
+static uint64_t(__fastcall* oMaterialResourceState)(uint64_t) = nullptr;
+
+static void __fastcall hkMenuOptionKbdMove(uint64_t object)
+{
+    uint64_t vtable = IsAccessiblePointer(object) ? *(uint64_t*)object : 0;
+    if (vtable == (uint64_t)_addr(MT_DTI_VTABLE_ADDR)) {
+        return;
+    }
+    oMenuOptionKbdMove(object);
+}
+
+static uint64_t __fastcall hkMaterialResourceState(uint64_t material)
+{
+    if (!IsAccessibleRange(material, 0xA8))
+        return 0;
+
+    uint64_t resource = *(uint64_t*)(material + 0xA0);
+    if (!resource || !IsAccessibleRange(resource, 0x28))
+        return 0;
+
+    return oMaterialResourceState(material);
+}
+
 void Rollback_InitMainHooks(RollbackMainMoveFn* originalMove)
 {
     g_originalMvc3MainMove = originalMove;
@@ -348,4 +377,12 @@ void Rollback_InitMainHooks(RollbackMainMoveFn* originalMove)
     EnableHook(FN_SMAIN_MOVE, (void*)&hkMainMove, (void**)&oMainMove,
                "Rollback: hooked sMain__move",
                "Rollback: failed to hook sMain__move (%d)\n");
+    EnableHook(FN_MENU_OPTION_KBD_MOVE, (void*)&hkMenuOptionKbdMove,
+               (void**)&oMenuOptionKbdMove,
+               "Rollback: guarded stale keyboard menu move",
+               "Rollback: failed to guard keyboard menu move (%d)\n");
+    EnableHook(FN_MATERIAL_RESOURCE_STATE, (void*)&hkMaterialResourceState,
+               (void**)&oMaterialResourceState,
+               "Rollback: guarded material resource state",
+               "Rollback: failed to guard material resource state (%d)\n");
 }

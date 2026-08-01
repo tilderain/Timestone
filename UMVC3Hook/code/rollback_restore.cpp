@@ -82,6 +82,7 @@ static constexpr uint32_t SSHOT_FIRST_CATEGORY = 10;
 static constexpr uint32_t SEFFECT_LAST_CATEGORY = 16;
 static constexpr int MAX_REGIONS = ROLLBACK_MAX_REGIONS;
 static constexpr size_t SHITSOLVER_SIZE = 0x3808C;
+static constexpr uint64_t MT_DTI_VTABLE = 0x140A69ED8;
 static constexpr size_t SHITSOLVER_DATA_OFF = 0x58;
 
 using SnapshotRange = RollbackSnapshotRange;
@@ -978,6 +979,15 @@ void Rollback_RestoreSnapshot(int32_t frame)
         }
         bool objectStillMatches = slot.regions[i].expectedVtable == 0 ||
             *(uint64_t*)slot.regions[i].ptr == slot.regions[i].expectedVtable;
+        if (*(uint64_t*)slot.regions[i].ptr == _addr(MT_DTI_VTABLE)) {
+            HookLog("Rollback: skipping region with MtDTI vtable ptr=0x%llX "
+                    "size=0x%zX owner=0x%llX expected=0x%llX\n",
+                    (uint64_t)slot.regions[i].ptr, copySize,
+                    slot.regions[i].ownerSlot,
+                    slot.regions[i].expectedVtable);
+            offset += slot.regions[i].size;
+            continue;
+        }
         if (slot.regions[i].ownerSlot == modelJointAllocationSlot &&
             slot.regions[i].size == SACTION_MODEL_JOINT_ALLOCATION_SIZE &&
             liveModelJointAllocation &&
@@ -1540,11 +1550,6 @@ void Rollback_RestoreSnapshot(int32_t frame)
         offset += slot.regions[i].size;
     }
 
-    // Character slot tables contain live model/resource references. Clearing
-    // all 64 entries makes restored dead characters invisible.
-    Rollback_SyncActiveCharacterUi();
-    const uint64_t uiEnd = Profile_Now();
-
     // Native shot/model/UI repair can run after the initial camera restore and
     // rewrite the anchor's position and tracking fields. Reapply the saved
     // authoritative camera scalars after all such repair work completes.
@@ -1578,7 +1583,8 @@ void Rollback_RestoreSnapshot(int32_t frame)
             frame, liveGlobalRng[0], liveGlobalRng[1], liveGlobalRng[2], liveGlobalRng[3]);*/
 
     if (g_activeRollbackProfile) {
-        g_activeRollbackProfile->restoreTotal += uiEnd - profileStart;
+        const uint64_t restoreEnd = Profile_Now();
+        g_activeRollbackProfile->restoreTotal += restoreEnd - profileStart;
         g_activeRollbackProfile->restoreSetup += setupEnd - profileStart;
         g_activeRollbackProfile->restoreRegions += regionsEnd - setupEnd;
         g_activeRollbackProfile->restoreCollisionClones += collisionClonesEnd - regionsEnd;
@@ -1587,7 +1593,7 @@ void Rollback_RestoreSnapshot(int32_t frame)
         g_activeRollbackProfile->restoreStalePointers += stalePointersEnd - hitSolverEnd;
         g_activeRollbackProfile->restoreEffectSlots += effectSlotsEnd - stalePointersEnd;
         g_activeRollbackProfile->restoreShots += shotsEnd - effectSlotsEnd;
-        g_activeRollbackProfile->restoreUi += uiEnd - shotsEnd;
+        g_activeRollbackProfile->restoreUi += restoreEnd - shotsEnd;
     }
 
 }

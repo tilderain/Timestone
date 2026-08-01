@@ -6,10 +6,13 @@
 
 #include <vector>
 
+extern void HookLog(const char* fmt, ...);
+
 static constexpr uintptr_t PTR_SCHARACTER = 0x140d44a70;
 static constexpr uintptr_t PTR_SGAMEUI = 0x140d53a18;
 static constexpr uintptr_t PTR_SGAMEEFFECT = 0x140d46470;
 static constexpr uintptr_t PTR_SMVC3MGR = 0x140d510a0;
+static constexpr uintptr_t PTR_SUNIT = 0x140e17698;
 static constexpr uintptr_t FN_GAMEUI_SET_TEAM_CHARACTER_ID = 0x140022610;
 static constexpr uintptr_t FN_MODEL_SET_CHILD_MATERIAL_MODE = 0x140200DB0;
 static constexpr uintptr_t FN_MODEL_UPDATE_CAMERA_VISIBILITY_MASK = 0x1405641A0;
@@ -26,7 +29,12 @@ static constexpr uintptr_t CCHR_WEAPON_ARRAY_OFFSET = 0x3F40;
 static constexpr uint32_t CUTIN_DRAW_LAYER_BITS = 0x00700000;
 static constexpr uint32_t NORMAL_DRAW_LAYER_BIT = 0x00000001;
 static constexpr uint32_t MTOBJECT_VISIBLE_FLAG = 0x00004000;
-
+static constexpr uint32_t SUNIT_CATEGORY_COUNT_OFFSET = 0xC38;
+static constexpr uint32_t SUNIT_CATEGORY_LISTS_OFFSET = 0x50;
+static constexpr uint32_t SUNIT_CATEGORY_LIST_STRIDE = 0x30;
+static constexpr uintptr_t MT_DTI_VTABLE = 0x140A69ED8;
+// uActorGameModel::releaseOwnedResources walks these cResource slots.
+// They are embedded in cChr's model tail at +0x1408..+0x1438.
 class MemoryRegionCache {
 public:
     bool IsAccessible(uint64_t address)
@@ -86,6 +94,15 @@ static bool HasCallableDtiVirtual(uint64_t object, MemoryRegionCache& memory)
     return memory.IsExecutable(*(uint64_t*)(vtable + 0x20));
 }
 
+static bool HasCallableVirtualMethod(uint64_t object, size_t offset,
+                                     MemoryRegionCache& memory)
+{
+    if (!HasCallableDtiVirtual(object, memory)) return false;
+    uint64_t vtable = *(uint64_t*)object;
+    if (!memory.IsAccessible(vtable + offset)) return false;
+    return memory.IsExecutable(*(uint64_t*)(vtable + offset));
+}
+
 static void ClearModelMaterialCache(uint64_t model, MemoryRegionCache& memory)
 {
     if (!HasCallableDtiVirtual(model, memory)) return;
@@ -98,13 +115,55 @@ static void ClearModelMaterialCache(uint64_t model, MemoryRegionCache& memory)
         uint64_t entry = entries + (uint64_t)i * sizeof(uint64_t);
         if (!memory.IsAccessible(entry)) break;
         uint64_t material = *(uint64_t*)entry;
-        if (material && !HasCallableDtiVirtual(material, memory))
+        if (material && !HasCallableVirtualMethod(material, 0x38, memory))
             *(uint64_t*)entry = 0;
     }
 }
 
+static void RemoveMtDtiUnits()
+{
+    uint64_t sUnit = *(uint64_t*)_addr(PTR_SUNIT);
+    if (!sUnit || !IsAccessibleRange(sUnit + SUNIT_CATEGORY_COUNT_OFFSET,
+                                     sizeof(uint32_t))) return;
+
+    uint32_t categoryCount = *(uint32_t*)(sUnit + SUNIT_CATEGORY_COUNT_OFFSET);
+    if (categoryCount > 64) categoryCount = 64;
+    for (uint32_t category = 0; category < categoryCount; ++category) {
+        uint64_t* headSlot = (uint64_t*)(sUnit + SUNIT_CATEGORY_LISTS_OFFSET +
+            category * SUNIT_CATEGORY_LIST_STRIDE);
+        if (!IsAccessibleRange((uint64_t)headSlot, sizeof(uint64_t))) continue;
+        uint64_t previous = 0;
+        uint64_t current = *headSlot;
+        for (int safety = 256; current && safety-- > 0;) {
+            if (!IsAccessibleRange(current, 0x20)) break;
+            uint64_t next = *(uint64_t*)(current + 0x18);
+            uint64_t vtable = *(uint64_t*)current;
+            if (vtable == _addr(MT_DTI_VTABLE)) {
+                HookLog("Rollback: removed MtDTI object from sUnit category=%u "
+                        "object=0x%llX\n", category, current);
+                if (previous)
+                    *(uint64_t*)(previous + 0x18) = next;
+                else
+                    *headSlot = next;
+            } else {
+                previous = current;
+            }
+            current = next;
+        }
+    }
+}
+
+void Rollback_RemoveStaleUiUnits()
+{
+    // Restart tears down live UI children while sUnit can still retain their
+    // nodes. Remove only the generic MtDTI headers; gameplay cleanup belongs
+    // to the normal restore path below.
+    RemoveMtDtiUnits();
+}
+
 void Rollback_ClearStalePointers()
 {
+    RemoveMtDtiUnits();
     uint64_t sCharacter = *(uint64_t*)_addr(PTR_SCHARACTER);
     if (!sCharacter) return;
 
@@ -121,7 +180,6 @@ void Rollback_ClearStalePointers()
             uint64_t character = *(uint64_t*)(node + NODE_CHR_OFFSET);
             if (character) {
                 ClearModelMaterialCache(character, memory);
-
                 uint32_t weaponCount = *(uint32_t*)(character + 0x3F38);
                 uint64_t weapons = *(uint64_t*)(character + 0x3F40);
                 if (weaponCount <= 256 && weapons && memory.IsAccessible(weapons)) {
@@ -130,17 +188,6 @@ void Rollback_ClearStalePointers()
                         if (!memory.IsAccessible(slot)) break;
                         ClearModelMaterialCache(*(uint64_t*)slot, memory);
                     }
-                }
-
-                // Effect retirement can leave any indexed slot pointing at an
-                // allocation whose vtable has already been overwritten.
-                for (uint32_t index = 0; index < SLOT_COUNT; ++index) {
-                    uint64_t slot = character + SLOT_ARRAY_OFFSET +
-                        (uint64_t)index * sizeof(uint64_t);
-                    if (!memory.IsAccessible(slot)) break;
-                    uint64_t object = *(uint64_t*)slot;
-                    if (object && !HasCallableDtiVirtual(object, memory))
-                        *(uint64_t*)slot = 0;
                 }
 
                 for (uint32_t index : STALE_SLOT_INDICES) {
