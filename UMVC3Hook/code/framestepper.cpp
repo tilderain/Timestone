@@ -516,7 +516,7 @@ static void __fastcall HookedMove(void* sMvc3Main)
                 g_trainingRestartLeftFighting = false;
                 AutoTest_OnTrainingRestartExecuted();
             }
-            Netplay_SetTimeout(5000);
+            Netplay_SetTimeout(AutoTest_IsActive() ? 2000 : 5000);
             HookLog("Netplay: Intro barrier released after RNG sync (generation=%u seed=0x%08X)\n",
                      g_battleGeneration, g_roundSeed);
         }
@@ -799,6 +799,12 @@ static void CloseGameAfterAutoTest()
 void FrameStepper_Process()
 {
     AutoTest_Process();
+
+    if (AutoTest_IsActive() && Netplay_TakePeerDisconnected()) {
+        HookLog("AutoTestSuite: remote peer disconnected; closing game\n");
+        CloseGameAfterAutoTest();
+        return;
+    }
 
     if (Netplay_GetInboundAutoTestComplete()) {
         HookLog("AutoTestSuite: remote command-line suite complete; closing game\n");

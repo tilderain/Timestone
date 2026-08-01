@@ -232,6 +232,7 @@ bool Netplay_GetInboundPacket(InputPacket& outPkt);
 
 // Returns true if netplay is active and the peer is still connected.
 bool Netplay_IsActive();
+bool Netplay_TakePeerDisconnected();
 
 // Returns true if this instance is the netplay host (server), false if client.
 bool Netplay_IsHost();

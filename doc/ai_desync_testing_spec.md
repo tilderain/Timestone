@@ -1890,6 +1890,13 @@ Only if fast path fails:
   missing_field_restore; verify with human review."
 - **Preserve audit trail**: Keep all intermediate JSON reports and logs for 
   post-analysis.
+- **Remove temporary diagnostic logging**: If logging is added to diagnose a 
+  crash or desync, remove it once the issue is fixed and verified. Keep only 
+  logging that is intentionally part of the permanent diagnostics design.
+- **Remove temporary diagnostic hooks**: Temporary hooks may be added to 
+  diagnose a crash or desync, but they must be removed once the issue is fixed 
+  and verified. Keep only hooks that are intentionally part of the permanent 
+  implementation.
 
 ### 12.4 Safety
 

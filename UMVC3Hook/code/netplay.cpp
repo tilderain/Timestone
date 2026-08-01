@@ -34,6 +34,7 @@ static HANDLE               g_serviceThread  = nullptr;
 static uint32_t             g_recvCount = 0;
 static uint32_t             g_lastRecv  = 0;
 static std::atomic<bool>    g_running { false };
+static std::atomic<bool>    g_peerDisconnected { false };
 static std::atomic<uint32_t> g_requestedTimeoutMs { 0 };
 
 // Delay + rollback control channel — small packets to keep both peers in sync.
@@ -598,6 +599,7 @@ static DWORD WINAPI Netplay_ServiceThread(LPVOID)
                 else if (event.type == ENET_EVENT_TYPE_DISCONNECT)
                 {
                     HookLog("Netplay: Remote peer disconnected\n");
+                    g_peerDisconnected = true;
                     // The game thread may not get another tick to consume a
                     // queued remote desync trigger. Save the rolling window
                     // before making the session inactive.
@@ -694,6 +696,7 @@ void Netplay_Init(ENetHost* host, ENetPeer* peer)
 
     g_recvCount = 0;
     g_lastRecv = 0;
+    g_peerDisconnected = false;
     g_requestedTimeoutMs = 0;
     g_running = true;
 
@@ -1076,6 +1079,11 @@ uint32_t Netplay_GetRemoteInput()
 bool Netplay_IsActive()
 {
     return g_active && g_running && g_peer != nullptr;
+}
+
+bool Netplay_TakePeerDisconnected()
+{
+    return g_peerDisconnected.exchange(false);
 }
 
 bool Netplay_IsHost()

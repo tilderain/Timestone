@@ -675,6 +675,7 @@ void StartInboundNetSuiteMove(const AutoTestStartPacket& packet)
         g_netSuiteSetupPosition[i] = packet.setup_position[i];
     g_netSuiteSetupFrame = packet.setup_frame;
     g_netSuiteSetupApplied = false;
+    Netplay_SetTimeout(1000);
     HookLog("AutoTestNet: client armed move %u %s at frame %d\n",
             packet.move_id, packet.move_name, packet.start_frame);
 }
@@ -1764,7 +1765,6 @@ extern "C" int32_t AutoTest_GetRuntimeCommands(
                 continue;
 
             GetCommandListTextResource(player, character);
-            DumpRuntimeCommandArray(player, matcherIndex, resource, lineCount);
 
             for (int32_t lineIndex = 0;
                  lineIndex < lineCount && written < capacity; ++lineIndex) {
@@ -2229,6 +2229,7 @@ bool StartSuite(int32_t playerIndex, bool facingLeft, bool deduplicate)
     g_netSuiteRestartPending = false;
     g_netSuiteMoveId = 0;
     if (g_netSuiteActive) {
+        Netplay_SetTimeout(1000);
         g_netSuiteRestartPending = true;
         AutoTest_PrepareForRestart();
         FrameStepper_ScheduleAutoTestRestart(g_suiteRngSeed);
