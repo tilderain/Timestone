@@ -747,6 +747,14 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
         Shot_RestoreArmState(fresh, saved);
         Shot_ApplyFlight(fresh, saved.flight);
 
+        // Some shots use +0x1F70 as a self-reference. Repoint it at the fresh
+        // allocation instead of retaining the captured shot's retired address.
+        void* savedSlot0 = nullptr;
+        std::memcpy(&savedSlot0, saved.flight.resourceScalars,
+                    sizeof(savedSlot0));
+        if (savedSlot0 == saved.savedPtr)
+            *(void**)((uint8_t*)fresh + 0x1F70) = fresh;
+
         // ApplyShotFlight preserves the category assigned by addUnit while
         // restoring the saved gameplay lifecycle bits.
         uint32_t* unitState = (uint32_t*)((uint8_t*)fresh + 0x10);
