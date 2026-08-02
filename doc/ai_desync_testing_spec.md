@@ -38,9 +38,13 @@ responsible.
 Launch the game with a selected character and focused command ID:
 
 ```bash
-wine umvc3.exe -autotest=<character> -autotest-moves=<command-id> -autotest-repeat=1
+wine umvc3.exe -autotest=<character> -autotest-moves=<command-id> \
+  -autotest-repeat=1 [-autotest-port=<port>]
 ```
 
+- `-autotest-port=<port>` selects the autotest host's ENet port from `1` to
+  `65535`. When omitted, the saved launch-menu port is used (default `7777`).
+  The spawned client receives the same port automatically through `-connect`.
 - The focused selector must be the numeric command ID emitted by the
   `AutoTestSuite: list=<id>` log entry, not the human-readable command name.
 - For example, if the log contains

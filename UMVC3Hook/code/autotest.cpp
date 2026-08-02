@@ -1757,6 +1757,8 @@ extern "C" int32_t AutoTest_GetRuntimeCommands(
 
         for (int32_t matcherIndex = 0;
              matcherIndex < 2 && written < capacity; ++matcherIndex) {
+            if (matcherIndex == 1)
+                continue;
             uint64_t matcher = character + COMMAND_MATCHER_OFFSETS[matcherIndex];
             int32_t lineCount = *(int32_t*)(matcher + 0x170);
             uint64_t lines = *(uint64_t*)(matcher + 0x178);

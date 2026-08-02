@@ -78,6 +78,10 @@ static bool g_autoTestLaunchPending = false;
 static bool g_autoTestLaunchRunning = false;
 static DWORD g_autoTestExitTick = 0;
 extern "C" bool FrameStepper_IsBattleSynchronized() { return g_battleSynchronized; }
+extern "C" bool FrameStepper_IsMatchRestartPending()
+{
+    return g_restartTargetFrame >= 0 || g_trainingRestartBarrier;
+}
 
 extern "C" void FrameStepper_ScheduleAutoTestRestart(uint32_t roundSeed)
 {
@@ -324,6 +328,7 @@ static void __fastcall HookedMove(void* sMvc3Main)
         uint64_t sReplay = *(uint64_t*)_addr(SREPLAY_PTR);
 
         if (restartNetplay && g_restartKind == RESTART_TRAINING) {
+            Rollback_ClearPendingReSimulation();
             if (sAction) {
                 using SetRestartModeFn = void(__fastcall*)(uint64_t, int32_t);
                 ((SetRestartModeFn)_addr(0x14000AF90))(sAction, 3);
@@ -738,6 +743,20 @@ static uint64_t __fastcall HookedGetInputBuf(uint64_t obj)
 // ---------------------------------------------------------------------------
 // Public: initialise hooks — call once from OnInitializeHook
 // ---------------------------------------------------------------------------
+void FrameStepper_InitNetplay()
+{
+    const LaunchDialogConfig& cfg = GetLaunchDialogConfig();
+    if (cfg.hostEnabled && cfg.enetHost && cfg.enetPeer && !Netplay_IsActive()) {
+        Netplay_Init(cfg.enetHost, cfg.enetPeer);
+    }
+    if (Netplay_IsActive()) {
+        HookLog("FrameStepper: Netplay initialized from launch config\n");
+        g_autoTestLaunchPending = IsAutoTestLaunchEnabled() && Netplay_IsHost();
+        Rollback_PatchNativeNetplayDeterminism();
+        Rollback_ApplyNetplayDeterminism();
+    }
+}
+
 void FrameStepper_Init()
 {
     LoadConfig();
@@ -758,21 +777,12 @@ void FrameStepper_Init()
         inputBufHooked = true;
     }
 
-    // Initialize netplay if the launch menu set up an enet host/peer
-    const LaunchDialogConfig& cfg = GetLaunchDialogConfig();
-    if (cfg.hostEnabled && cfg.enetHost && cfg.enetPeer) {
-        Netplay_Init(cfg.enetHost, cfg.enetPeer);
-        HookLog("FrameStepper: Netplay initialized from launch config\n");
-    }
-    g_autoTestLaunchPending = IsAutoTestLaunchEnabled() &&
-                              Netplay_IsActive() && Netplay_IsHost();
+    // Initialize immediately for normal launches and auto-connect clients.
+    // A dual-training host starts this after its deferred peer handshake.
+    FrameStepper_InitNetplay();
 
     // Initialize rollback snapshot engine (hooks sMvc3Main__move)
     Rollback_InitHooks();
-    if (Netplay_IsActive()) {
-        Rollback_PatchNativeNetplayDeterminism();
-        Rollback_ApplyNetplayDeterminism();
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -887,6 +897,7 @@ void FrameStepper_Process()
     while (Netplay_GetInboundRestartMatch(remoteRestartFrame, remoteRestartSeed,
                                            remoteRestartKind, remoteRestartButton)) {
         AutoTest_PrepareForRestart();
+        Rollback_ClearPendingReSimulation();
         g_restartTargetFrame = remoteRestartFrame;
         g_restartRoundSeed = remoteRestartSeed;
         g_restartKind = remoteRestartKind;

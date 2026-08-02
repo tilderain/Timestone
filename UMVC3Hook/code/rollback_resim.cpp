@@ -17,6 +17,8 @@
 
 extern void HookLog(const char* fmt, ...);
 extern bool g_multiResimEnabled;
+extern "C" bool FrameStepper_IsBattleSynchronized();
+extern "C" bool FrameStepper_IsMatchRestartPending();
 
 static_assert(sizeof(RollbackRegion) <= 64);
 
@@ -71,18 +73,41 @@ extern "C" void Rollback_UpdateSnapshotInputs(int32_t, uint32_t, uint32_t);
 
 void Rollback_RequestReSimulate(int32_t startFrame, int32_t endFrame)
 {
+    if (Netplay_IsActive() &&
+        (FrameStepper_IsMatchRestartPending() ||
+         !FrameStepper_IsBattleSynchronized())) {
+        HookLog("Rollback: dropped re-simulation request during match reset "
+                "[%d,%d)\n", startFrame, endFrame);
+        return;
+    }
     g_requestStart = startFrame;
     g_requestEnd = endFrame;
 }
 
 bool Rollback_ConsumeReSimRequest(int32_t& startFrame, int32_t& endFrame)
 {
+    if (Netplay_IsActive() &&
+        (FrameStepper_IsMatchRestartPending() ||
+         !FrameStepper_IsBattleSynchronized())) {
+        Rollback_ClearPendingReSimulation();
+        return false;
+    }
     if (g_requestStart < 0) return false;
     startFrame = g_requestStart;
     endFrame = g_requestEnd;
     g_requestStart = -1;
     g_requestEnd = -1;
     return true;
+}
+
+void Rollback_ClearPendingReSimulation()
+{
+    g_requestStart = -1;
+    g_requestEnd = -1;
+    g_restoreRequestedFrame = -1;
+    g_f7State = 0;
+    g_f7Remaining = 0;
+    g_f7DiagSession = -1;
 }
 
 void Rollback_SetMainInstance(uint64_t main)
@@ -98,22 +123,25 @@ void Rollback_InitReSimulationHooks()
 void Rollback_ResetReSimulation()
 {
     g_mainInstance = 0;
-    g_requestStart = -1;
-    g_requestEnd = -1;
     g_isResimulating = false;
     g_resimulateCurrentFrame = 0;
     g_postResimFrame = -1;
     g_resimReentranceDepth = 0;
-    g_restoreRequestedFrame = -1;
-    g_f7State = 0;
+    Rollback_ClearPendingReSimulation();
     g_f7StartFrame = 0;
-    g_f7Remaining = 0;
-    g_f7DiagSession = -1;
 }
 
 void Rollback_ReSimulate(int32_t startFrame, int32_t endFrame)
 {
     if (startFrame >= endFrame) return;
+    if (Netplay_IsActive() &&
+        (FrameStepper_IsMatchRestartPending() ||
+         !FrameStepper_IsBattleSynchronized())) {
+        HookLog("Rollback: blocked re-simulation during match reset "
+                "[%d,%d)\n", startFrame, endFrame);
+        Rollback_ClearPendingReSimulation();
+        return;
+    }
     if (g_isResimulating) {
         ++g_resimReentranceDepth;
         HookLog("Rollback: ignoring nested re-simulation depth=%d\n",

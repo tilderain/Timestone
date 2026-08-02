@@ -2,7 +2,7 @@
 
 **Purpose:** A Windows DLL plugin (`.asi`) for Ultimate Marvel vs. Capcom 3 that adds rollback netcode, replay system, training mode enhancements, and a debug menu.
 
-**Build:** `make -j8` using MinGW-w64 cross-compiler on Linux. 
+**Build:** `make -j8` using MinGW-w64 cross-compiler on Linux. The ASI is already symlinked and deployed, please don't check the location or attempt to install/copy it to the game folder.
 
 **Ghidra:** The Ghidra MCP is available, and should be used after consulting the docs on reverse engineering notes. If you are decompiling functions, please try to apply structs to the unknown and unnamed structs inside a function (if you have determined the struct such as cChrInput, sAction to be a suitable match).
 

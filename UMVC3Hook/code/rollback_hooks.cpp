@@ -13,7 +13,6 @@
 #include "../kiero/minhook/include/MinHook.h"
 
 #include <cmath>
-#include <cstring>
 
 extern void HookLog(const char* fmt, ...);
 
@@ -23,11 +22,6 @@ static constexpr uintptr_t FN_RENDER_END_FRAME = 0x14053A250;
 static constexpr uintptr_t FN_SSOUND_MOVE = 0x1405CC040;
 static constexpr uintptr_t FN_SGAMEUI_MOVE = 0x1402BE610;
 static constexpr uintptr_t FN_UBTGAUGELIFE_MOVE = 0x1402F6800;
-static constexpr uintptr_t FN_SCHEDULER_REBUILD = 0x14050F010;
-static constexpr uintptr_t FN_SCHEDULER_CLEAR_ENTRIES = 0x14050EC40;
-static constexpr uintptr_t FN_MT_ALLOCATOR_GET = 0x14045D4F0;
-static constexpr uintptr_t PTR_SCHEDULER_ALLOCATOR = 0x140E17480;
-static constexpr uintptr_t SCHEDULER_DEFAULT_ENTRY = 0x140A6C780;
 static constexpr uintptr_t FN_RCHRCPU_CLASS_FUNC = 0x140117280;
 static constexpr uintptr_t FN_SMAIN_MOVE = 0x140521DF0;
 static constexpr uintptr_t FN_APPLY_COLLISION_PUSH = 0x14004AD20;
@@ -41,7 +35,6 @@ static void(__fastcall* oMainMove)(uint64_t) = nullptr;
 static void(__fastcall* oSoundMove)(uint64_t) = nullptr;
 static void(__fastcall* oGameUiMove)(uint64_t) = nullptr;
 static void(__fastcall* oBtGaugeLifeMove)(uint64_t) = nullptr;
-static void(__fastcall* oSchedulerRebuild)(uint64_t) = nullptr;
 static bool(__fastcall* oRChrCpuClassFunc)(void*, void*) = nullptr;
 static void(__fastcall* oApplyCollisionPushCorrection)(
     uint64_t, int, uint64_t, uint64_t, uint64_t, uint32_t) = nullptr;
@@ -57,6 +50,7 @@ static bool TraceLifecycleFrame(int32_t frame)
 extern "C" int32_t Controller_GetNetFrameCount();
 extern "C" bool Controller_IsRollbackEnabled();
 extern "C" bool FrameStepper_IsBattleSynchronized();
+extern "C" bool FrameStepper_IsMatchRestartPending();
 extern "C" void Controller_ResolveRemoteInput(int32_t frame);
 extern bool g_multiResimEnabled;
 
@@ -95,6 +89,15 @@ static void __fastcall hkMvc3MainMove(uint64_t main)
     // Every accessibility helper remains cached within this frame generation.
     InvalidateMemoryQueryCache();
     Rollback_SetMainInstance(main);
+
+    // A late packet can queue a correction just before the synchronized
+    // restart packet arrives. Never carry that pre-reset request into the new
+    // match, where restoring the old snapshot graph would retire fresh UI and
+    // render resources.
+    if (Netplay_IsActive() &&
+        (FrameStepper_IsMatchRestartPending() ||
+         !FrameStepper_IsBattleSynchronized()))
+        Rollback_ClearPendingReSimulation();
 
     int32_t curFrame = Controller_GetNetFrameCount();
     int32_t traceFrame = g_isResimulating ? g_resimulateCurrentFrame : curFrame;
@@ -258,8 +261,11 @@ static void __fastcall hkGameUiMove(uint64_t gameUi)
 {
     RollbackHookProfileScope profile(RollbackHookProfileId::GameUiMove);
     // UI owns live menu/effect objects that are not part of rollback
-    // snapshots. Keep its lifecycle moving during resimulation so a menu
-    // object cannot remain registered after its native destruction.
+    // snapshots. Mutating that graph during headless resimulation leaks or
+    // retires presentation resources on every correction; let the next live
+    // frame advance the native lifecycle instead.
+    if (g_isResimulating)
+        return;
     oGameUiMove(gameUi);
 }
 
@@ -275,122 +281,6 @@ static void __fastcall hkBtGaugeLifeMove(uint64_t gauge)
     if (!system || !IsAccessibleAddress(system + 0x44))
         return;
     oBtGaugeLifeMove(gauge);
-}
-
-static void RebuildSchedulerEntriesSafely(uint64_t scheduler)
-{
-    using ClearEntriesFn = void(__fastcall*)(void*, uint8_t);
-    using GetAllocatorFn = void*(__fastcall*)(void*);
-    using AllocFn = void*(__fastcall*)(void*, size_t, size_t);
-    using FreeFn = void(__fastcall*)(void*, void*);
-    using ResourceCountFn = int(__fastcall*)(void*);
-
-    uint64_t resource = *(uint64_t*)(scheduler + 0x70);
-    if (!resource || !IsAccessibleRange(resource, 0x78)) return;
-    uint64_t resourceVtable = *(uint64_t*)resource;
-    if (!IsAccessibleRange(resourceVtable + 0x78, sizeof(uint64_t)) ||
-        !IsExecutableAddress(*(uint64_t*)(resourceVtable + 0x78))) {
-        return;
-    }
-
-    int count = ((ResourceCountFn)(*(uint64_t*)(resourceVtable + 0x78)))
-        ((void*)resource);
-    if (count <= 0) return;
-    if (count > 4096) {
-        HookLog("Rollback: rejected oversized scheduler resource count=%d\n", count);
-        return;
-    }
-
-    uint64_t resourceEntries = *(uint64_t*)(resource + 0x70);
-    const size_t resourceBytes = (size_t)count * 0x30;
-    if (!resourceEntries || !IsAccessibleRange(resourceEntries + 0x20,
-                                                resourceBytes)) {
-        HookLog("Rollback: rejected invalid scheduler resource entries count=%d\n",
-                count);
-        return;
-    }
-
-    void* allocator = ((GetAllocatorFn)_addr(FN_MT_ALLOCATOR_GET))(
-        (void*)_addr(PTR_SCHEDULER_ALLOCATOR));
-    if (!allocator || !IsAccessibleRange((uint64_t)allocator, 0x68)) return;
-    uint64_t allocatorVtable = *(uint64_t*)allocator;
-    if (!IsAccessibleRange(allocatorVtable + 0x60, sizeof(uint64_t)) ||
-        !IsExecutableAddress(*(uint64_t*)(allocatorVtable + 0x40)) ||
-        !IsExecutableAddress(*(uint64_t*)(allocatorVtable + 0x60))) {
-        return;
-    }
-
-    auto allocate = (AllocFn)(*(uint64_t*)(allocatorVtable + 0x40));
-    auto release = (FreeFn)(*(uint64_t*)(allocatorVtable + 0x60));
-    const size_t entryBytes = (size_t)count * 0x68;
-    void* entries = allocate(allocator, entryBytes, 0x10);
-    if (!entries || !IsAccessibleRange((uint64_t)entries, entryBytes)) {
-        if (entries) release(allocator, entries);
-        HookLog("Rollback: scheduler entry allocation failed count=%d bytes=%zu\n",
-                count, entryBytes);
-        return;
-    }
-
-    std::memset(entries, 0, entryBytes);
-    uint32_t activeCount = 0;
-    for (int index = 0; index < count; ++index) {
-        uint8_t* entry = (uint8_t*)entries + (size_t)index * 0x68;
-        uint8_t* resourceEntry = (uint8_t*)resourceEntries +
-            (size_t)index * 0x30 + 0x20;
-        *(uint64_t*)entry = (uint64_t)resourceEntry;
-        *(uint8_t*)(entry + 0x08) = *resourceEntry;
-        *(uint64_t*)(entry + 0x18) = _addr(SCHEDULER_DEFAULT_ENTRY);
-        if (*(uint8_t*)(entry + 0x08) == 2) ++activeCount;
-    }
-
-    if (activeCount == 0) {
-        ((ClearEntriesFn)_addr(FN_SCHEDULER_CLEAR_ENTRIES))((void*)scheduler, 1);
-        *(uint32_t*)(scheduler + 0x40) = (uint32_t)count;
-        *(uint64_t*)(scheduler + 0x58) = (uint64_t)entries;
-        *(uint64_t*)(scheduler + 0x60) = 0;
-        *(uint32_t*)(scheduler + 0x68) = 0;
-        return;
-    }
-
-    const size_t activeBytes = (size_t)activeCount * sizeof(void*);
-    void* activeEntries = allocate(allocator, activeBytes, 0x10);
-    if (!activeEntries || !IsAccessibleRange((uint64_t)activeEntries, activeBytes)) {
-        if (activeEntries) release(allocator, activeEntries);
-        release(allocator, entries);
-        HookLog("Rollback: active scheduler entry allocation failed count=%u bytes=%zu\n",
-                activeCount, activeBytes);
-        return;
-    }
-
-    uint32_t activeIndex = 0;
-    for (int index = 0; index < count; ++index) {
-        uint8_t* entry = (uint8_t*)entries + (size_t)index * 0x68;
-        if (*(uint8_t*)(entry + 0x08) == 2) {
-            ((uint64_t*)activeEntries)[activeIndex++] = (uint64_t)entry;
-        }
-    }
-
-    // Native clears the old arrays before allocating replacements. If the
-    // allocator is temporarily exhausted during a synchronized restart, keep
-    // the old scheduler state instead of turning a failed reallocation into a
-    // null traversal/freeze.
-    ((ClearEntriesFn)_addr(FN_SCHEDULER_CLEAR_ENTRIES))((void*)scheduler, 1);
-    *(uint32_t*)(scheduler + 0x40) = (uint32_t)count;
-    *(uint64_t*)(scheduler + 0x58) = (uint64_t)entries;
-    *(uint64_t*)(scheduler + 0x60) = (uint64_t)activeEntries;
-    *(uint32_t*)(scheduler + 0x68) = activeCount;
-}
-
-static void __fastcall hkSchedulerRebuild(uint64_t scheduler)
-{
-    RollbackHookProfileScope profile(RollbackHookProfileId::SchedulerRebuild);
-    if (g_isResimulating) {
-        uint32_t* state = (uint32_t*)(scheduler + 0x10);
-        *state = (*state & ~7u) | 3u;
-        return;
-    }
-    if (!IsAccessibleRange(scheduler, 0x78)) return;
-    RebuildSchedulerEntriesSafely(scheduler);
 }
 
 static bool __fastcall hkRChrCpuClassFunc(void* cpu, void* object)
@@ -482,10 +372,6 @@ void Rollback_InitMainHooks(RollbackMainMoveFn* originalMove)
                (void**)&oBtGaugeLifeMove,
                "Rollback: hooked uBtGaugeLife__move for re-simulation suppression",
                "Rollback: failed to hook uBtGaugeLife__move (%d)\n");
-    EnableHook(FN_SCHEDULER_REBUILD, (void*)&hkSchedulerRebuild,
-               (void**)&oSchedulerRebuild,
-               "Rollback: hooked uScheduler rebuild for re-simulation suppression",
-               "Rollback: failed to hook uScheduler rebuild (%d)\n");
     EnableHook(FN_RCHRCPU_CLASS_FUNC, (void*)&hkRChrCpuClassFunc,
                (void**)&oRChrCpuClassFunc,
                "Rollback: guarded rChrCpu script object cast",
@@ -498,7 +384,7 @@ void Rollback_InitMainHooks(RollbackMainMoveFn* originalMove)
                "Rollback: guarded stale keyboard menu move",
                "Rollback: failed to guard keyboard menu move (%d)\n");
     EnableHook(FN_MATERIAL_RESOURCE_STATE, (void*)&hkMaterialResourceState,
-               (void**)&oMaterialResourceState,
-               "Rollback: guarded material resource state",
-               "Rollback: failed to guard material resource state (%d)\n");
+                (void**)&oMaterialResourceState,
+                "Rollback: guarded material resource state",
+                "Rollback: failed to guard material resource state (%d)\n");
 }

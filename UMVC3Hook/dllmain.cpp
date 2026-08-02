@@ -121,6 +121,14 @@ static int  g_autoConnectPort = 0;
 // 0=none, 1=top-right (host), 2=bottom-left (client)
 static int g_windowCorner = 0;
 
+// D3D9 device creation is not safe to race across the host and spawned client
+// under Wine/Proton.  Keep the child launch behind the host's real device and
+// behind the rest of the startup patches.
+static volatile LONG g_launchSetupComplete = 0;
+static volatile LONG g_dualSpawnPending = 0;
+static volatile LONG g_dualClientSpawned = 0;
+static volatile LONG g_d3d9CreateDeviceHookReady = 0;
+
 static bool CharacterNamesEqual(const char* lhs, const char* rhs)
 {
 	while (*lhs || *rhs) {
@@ -169,6 +177,20 @@ static int ParseAutoTestCharacter(const char* cmdLine)
 			return i;
 	}
 	return 0;
+}
+
+static int ParseAutoTestPort(const char* cmdLine)
+{
+	const char* arg = strstr(cmdLine, "-autotest-port=");
+	if (!arg) return 0;
+
+	const char* value = arg + strlen("-autotest-port=");
+	char* end = nullptr;
+	long port = strtol(value, &end, 10);
+	if (end == value || (*end != '\0' && *end != ' ' && *end != '"') ||
+		port < 1 || port > 65535)
+		return -1;
+	return (int)port;
 }
 
 extern LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
@@ -415,30 +437,276 @@ long __stdcall hkEndScene(LPDIRECT3DDEVICE9 pDevice)
 	return oEndScene(pDevice);
 }
 
+static bool SpawnDualTrainingClient()
+{
+	if (InterlockedExchange(&g_dualSpawnPending, 0) == 0)
+		return false;
+
+	const LaunchDialogConfig& dlgCfg = GetLaunchDialogConfig();
+	ENetHost* server = dlgCfg.enetHost;
+	if (!server) {
+		HookLog("UMVC3Hook: Dual training - host disappeared before client spawn\n");
+		return false;
+	}
+
+	// The D3D9 CreateDevice hook serializes the actual driver operation, so the
+	// child can be launched immediately instead of waiting for this device.
+	wchar_t exePath[MAX_PATH];
+	GetModuleFileNameW(NULL, exePath, MAX_PATH);
+
+	wchar_t wIp[64];
+	MultiByteToWideChar(CP_ACP, 0, dlgCfg.hostIp, -1, wIp, 64);
+
+	const wchar_t* cpuArg = TrainingBoot_GetCpuMode() == TRAINING_CPU_BOTH
+		? L" -training-cpus"
+		: TrainingBoot_GetCpuMode() == TRAINING_CPU_P2_ONLY
+			? L" -training-p2-cpu" : L"";
+	const wchar_t* autoTestArg = IsAutoTestLaunchEnabled()
+		? L" -autotest-client" : L"";
+	wchar_t spawnCmd[MAX_PATH + 128];
+	swprintf(spawnCmd, MAX_PATH + 128, L"\"%ls\" -training%ls%ls -connect=%ls:%d",
+		exePath, cpuArg, autoTestArg, wIp, dlgCfg.hostPort);
+
+	STARTUPINFOW si = { sizeof(si) };
+	PROCESS_INFORMATION pi;
+	if (CreateProcessW(exePath, spawnCmd, NULL, NULL, FALSE,
+		CREATE_NEW_CONSOLE, NULL, NULL, &si, &pi)) {
+		CloseHandle(pi.hProcess);
+		CloseHandle(pi.hThread);
+		HookLog("UMVC3Hook: Spawned second instance after host D3D9 initialization with -training -connect=%s:%d\n",
+			dlgCfg.hostIp, dlgCfg.hostPort);
+	}
+	else {
+		HookLog("UMVC3Hook: Failed to spawn second instance (error %lu)\n", GetLastError());
+		return false;
+	}
+	InterlockedExchange(&g_dualClientSpawned, 1);
+	return true;
+}
+
+static void WaitForDualTrainingClient()
+{
+	if (InterlockedCompareExchange(&g_dualClientSpawned, 0, 0) == 0)
+		return;
+
+	const LaunchDialogConfig& dlgCfg = GetLaunchDialogConfig();
+	ENetHost* server = dlgCfg.enetHost;
+	if (!server)
+		return;
+
+	// Keep the existing launch handshake, but run it after the graphics race
+	// has been eliminated and outside DllMain.
+	ENetEvent event;
+	int timeoutMs = 15000;
+	int waited = 0;
+	while (waited < timeoutMs) {
+		int result = enet_host_service(server, &event, 100);
+		if (result > 0) {
+			if (event.type == ENET_EVENT_TYPE_CONNECT) {
+				event.peer->data = (void*)"connected";
+				SetNetworkHandles(server, event.peer);
+				SendTrainingLaunchPacket();
+				FrameStepper_InitNetplay();
+				HookLog("UMVC3Hook: Dual training - 2nd instance connected!\n");
+				break;
+			}
+			else if (event.type == ENET_EVENT_TYPE_RECEIVE) {
+				enet_packet_destroy(event.packet);
+			}
+		}
+		waited += 100;
+	}
+	if (!GetLaunchDialogConfig().enetPeer) {
+		HookLog("UMVC3Hook: Dual training - TIMEOUT waiting for 2nd instance (15s)\n");
+	}
+}
+
+// Native D3D9 device creation is a process-wide driver operation under
+// Wine/Proton.  Serialize only that operation across the host and child so
+// dual training can start immediately without reintroducing the rare startup
+// D3DERR_NOTAVAILABLE race.
+using Direct3D9CreateDeviceFn = HRESULT (WINAPI*)(
+	IDirect3D9*, UINT, D3DDEVTYPE, HWND, DWORD,
+	D3DPRESENT_PARAMETERS*, IDirect3DDevice9**);
+using Direct3DCreate9Fn = IDirect3D9* (WINAPI*)(UINT);
+
+static Direct3D9CreateDeviceFn g_originalD3D9CreateDevice = nullptr;
+static Direct3DCreate9Fn g_originalDirect3DCreate9 = nullptr;
+static HANDLE g_d3d9CreateDeviceMutex = nullptr;
+
+static HANDLE GetD3D9CreateDeviceMutex()
+{
+	HANDLE mutex = g_d3d9CreateDeviceMutex;
+	if (mutex)
+		return mutex;
+
+	HANDLE candidate = CreateMutexA(nullptr, FALSE,
+		"Local\\UMVC3Rollback_D3D9CreateDevice");
+	if (!candidate)
+		return nullptr;
+
+	PVOID previous = InterlockedCompareExchangePointer(
+		reinterpret_cast<PVOID volatile*>(&g_d3d9CreateDeviceMutex),
+		candidate, nullptr);
+	if (previous) {
+		CloseHandle(candidate);
+		return reinterpret_cast<HANDLE>(previous);
+	}
+	return candidate;
+}
+
+static HRESULT WINAPI HookD3D9CreateDevice(
+	IDirect3D9* d3d9,
+	UINT adapter,
+	D3DDEVTYPE deviceType,
+	HWND focusWindow,
+	DWORD behaviorFlags,
+	D3DPRESENT_PARAMETERS* presentationParameters,
+	IDirect3DDevice9** returnedDevice)
+{
+	if (!g_originalD3D9CreateDevice)
+		return D3DERR_DRIVERINTERNALERROR;
+
+	HANDLE mutex = GetD3D9CreateDeviceMutex();
+	DWORD waitResult = mutex ? WaitForSingleObject(mutex, 5000) : WAIT_FAILED;
+	const bool ownsMutex = waitResult == WAIT_OBJECT_0 ||
+		waitResult == WAIT_ABANDONED;
+
+	HRESULT result = E_FAIL;
+	for (int attempt = 0; attempt < 8; ++attempt) {
+		result = g_originalD3D9CreateDevice(
+			d3d9, adapter, deviceType, focusWindow, behaviorFlags,
+			presentationParameters, returnedDevice);
+		if (result != D3DERR_NOTAVAILABLE || attempt == 7)
+			break;
+		Sleep(25);
+	}
+
+	if (ownsMutex)
+		ReleaseMutex(mutex);
+
+	if (result == D3DERR_NOTAVAILABLE) {
+		HookLog("D3D9: CreateDevice remained unavailable after retries\n");
+	}
+	return result;
+}
+
+static void InstallD3D9CreateDeviceHook(IDirect3D9* d3d9)
+{
+	if (!d3d9 || g_originalD3D9CreateDevice)
+		return;
+
+	void** vtable = *(void***)d3d9;
+	if (!vtable || !vtable[16])
+		return;
+
+	void* target = vtable[16];
+	MH_STATUS status = MH_CreateHook(
+		target, (LPVOID)&HookD3D9CreateDevice,
+		(LPVOID*)&g_originalD3D9CreateDevice);
+	if (status != MH_OK) {
+		HookLog("D3D9: failed to hook IDirect3D9::CreateDevice (%d)\n", status);
+		return;
+	}
+
+	status = MH_EnableHook(target);
+	if (status != MH_OK && status != MH_ERROR_ENABLED) {
+		HookLog("D3D9: failed to enable IDirect3D9::CreateDevice (%d)\n", status);
+		return;
+	}
+
+	InterlockedExchange(&g_d3d9CreateDeviceHookReady, 1);
+	HookLog("D3D9: serialized IDirect3D9::CreateDevice\n");
+}
+
+static IDirect3D9* WINAPI HookDirect3DCreate9(UINT sdkVersion)
+{
+	IDirect3D9* d3d9 = g_originalDirect3DCreate9
+		? g_originalDirect3DCreate9(sdkVersion) : nullptr;
+	InstallD3D9CreateDeviceHook(d3d9);
+	return d3d9;
+}
+
+static void InstallD3D9Hooks()
+{
+	HMODULE d3d9Module = GetModuleHandleA("d3d9.dll");
+	if (!d3d9Module)
+		d3d9Module = LoadLibraryA("d3d9.dll");
+	if (!d3d9Module) {
+		HookLog("D3D9: d3d9.dll is not available for startup hook\n");
+		return;
+	}
+
+	void* create9Address = (void*)GetProcAddress(d3d9Module, "Direct3DCreate9");
+	if (!create9Address) {
+		HookLog("D3D9: Direct3DCreate9 export is unavailable\n");
+		return;
+	}
+
+	MH_STATUS status = MH_CreateHook(
+		create9Address, (LPVOID)&HookDirect3DCreate9,
+		(LPVOID*)&g_originalDirect3DCreate9);
+	if (status == MH_OK) {
+		status = MH_EnableHook(create9Address);
+	}
+	if (status != MH_OK && status != MH_ERROR_ALREADY_CREATED &&
+		status != MH_ERROR_ENABLED) {
+		HookLog("D3D9: failed to hook Direct3DCreate9 (%d)\n", status);
+		return;
+	}
+
+	// Install the COM method hook before the game creates its first device.
+	// This creates only the D3D9 interface and never a second device.
+	Direct3DCreate9Fn create9 = g_originalDirect3DCreate9
+		? g_originalDirect3DCreate9
+		: (Direct3DCreate9Fn)create9Address;
+	IDirect3D9* probe = create9(D3D_SDK_VERSION);
+	InstallD3D9CreateDeviceHook(probe);
+	if (probe)
+		probe->Release();
+}
+
 
 
 DWORD WINAPI MainThread(LPVOID lpReserved)
 {
 	BootTimer_Stamp("MainThread start");
 	Notifications->Init();
+
 	bool attached = false;
+	bool clientSpawned = false;
+	while (InterlockedCompareExchange(&g_launchSetupComplete, 0, 0) == 0)
+		Sleep(1);
+
 	do
 	{
 		// Reuse the engine's real D3D9 device. Kiero's normal initialization
 		// creates a second device, which serializes with native driver startup.
 		uint64_t render = *(uint64_t*)_addr(0x140E179A8);
 		void* device = render ? *(void**)(render + 0xB0) : nullptr;
-		if (device && kiero::initFromD3D9Device(device) == kiero::Status::Success)
-		{
-			kiero::bind(42, (void**)& oEndScene, (void*)hkEndScene);
-			BootTimer_Stamp("Hooked engine D3D9 device");
-			attached = true;
+		if (!clientSpawned &&
+			InterlockedCompareExchange(&g_dualSpawnPending, 0, 0) != 0 &&
+			(InterlockedCompareExchange(&g_d3d9CreateDeviceHookReady, 0, 0) != 0 || device)) {
+			clientSpawned = SpawnDualTrainingClient();
 		}
-		else
+		if (device) {
+			// EndScene may call into TheMenu and FrameStepper, so keep the hook
+			// itself behind the normal startup initialization barrier.
+			if (!attached &&
+				InterlockedCompareExchange(&g_launchSetupComplete, 0, 0) != 0 &&
+				kiero::initFromD3D9Device(device) == kiero::Status::Success)
+			{
+				kiero::bind(42, (void**)& oEndScene, (void*)hkEndScene);
+				BootTimer_Stamp("Hooked engine D3D9 device");
+				attached = true;
+			}
+		}
+		if (!attached)
 		{
 			Sleep(1);
 		}
 	} while (!attached);
+	WaitForDualTrainingClient();
 	return TRUE;
 }
 
@@ -525,11 +793,17 @@ void OnInitializeHook()
 	}
 
 	const int autoTestCharacter = ParseAutoTestCharacter(cmdLineA);
+	const int autoTestPort = ParseAutoTestPort(cmdLineA);
 	AutoTest_ConfigureCommandLine(cmdLineA);
-	if (autoTestCharacter > 0 && ConfigureAutoTestDualTraining(autoTestCharacter)) {
+	if (autoTestPort < 0) {
+		HookLog("UMVC3Hook: Invalid -autotest-port; use a port from 1 to 65535\n");
+	}
+	if (autoTestCharacter > 0 && autoTestPort >= 0 &&
+		ConfigureAutoTestDualTraining(autoTestCharacter, autoTestPort)) {
 		trainingArg = true;
-		HookLog("UMVC3Hook: Detected -autotest=%s, launching dual training with all slots set to character ID %d\n",
-			kCharNames[autoTestCharacter], autoTestCharacter);
+		HookLog("UMVC3Hook: Detected -autotest=%s, launching dual training with all slots set to character ID %d on port %d\n",
+			kCharNames[autoTestCharacter], autoTestCharacter,
+			GetLaunchDialogConfig().hostPort);
 	} else if (autoTestCharacter == 0) {
 		HookLog("UMVC3Hook: Invalid -autotest character; use a character name or ID 1-%d\n",
 			kCharNameCount - 1);
@@ -600,6 +874,7 @@ void OnInitializeHook()
 			HookLog("UMVC3Hook: FAILED to hook aTitleLogo__update\n");
 		}
 	}
+	InstallD3D9Hooks();
 
 	// ---- Netplay pause patches ----
 	// Force uBattleUiCreatePauseMenu_maybe (0x1402ba150) to always create the
@@ -638,7 +913,9 @@ void OnInitializeHook()
 
 		const LaunchDialogConfig& dlgCfg = GetLaunchDialogConfig();
 
-		// 1. Create enet host FIRST so it's listening before the 2nd instance starts
+		// Create the ENet host now so it is listening before the deferred child
+		// launch.  The child itself is started by MainThread after this process has
+		// completed native D3D9 device creation.
 		ENetAddress addr;
 		addr.host = ENET_HOST_ANY;
 		addr.port = (enet_uint16)dlgCfg.hostPort;
@@ -649,68 +926,11 @@ void OnInitializeHook()
 				dlgCfg.hostPort);
 		} else {
 			SetNetworkHandles(server, nullptr);
-			HookLog("UMVC3Hook: Dual training - hosting on port %d, waiting for 2nd instance...\n",
+			InterlockedExchange(&g_dualSpawnPending, 1);
+			if (InterlockedCompareExchange(&g_d3d9CreateDeviceHookReady, 0, 0) != 0)
+				SpawnDualTrainingClient();
+			HookLog("UMVC3Hook: Dual training - hosting on port %d, child launch protected by D3D9 device serialization\n",
 				dlgCfg.hostPort);
-		}
-
-		// 2. Spawn the second instance with -connect so it auto-connects back
-		wchar_t exePath[MAX_PATH];
-		GetModuleFileNameW(NULL, exePath, MAX_PATH);
-
-		// Use MultiByteToWideChar (locale-independent) for the IP address
-		wchar_t wIp[64];
-		MultiByteToWideChar(CP_ACP, 0, dlgCfg.hostIp, -1, wIp, 64);
-
-		// FIX: Use %ls for wide strings (GCC/MinGW treats %s as narrow char*, even in swprintf)
-		wchar_t spawnCmd[MAX_PATH + 128];
-		const wchar_t* cpuArg = TrainingBoot_GetCpuMode() == TRAINING_CPU_BOTH
-			? L" -training-cpus"
-			: TrainingBoot_GetCpuMode() == TRAINING_CPU_P2_ONLY
-				? L" -training-p2-cpu" : L"";
-		const wchar_t* autoTestArg = IsAutoTestLaunchEnabled()
-			? L" -autotest-client" : L"";
-		swprintf(spawnCmd, MAX_PATH + 128, L"\"%ls\" -training%ls%ls -connect=%ls:%d",
-			exePath, cpuArg, autoTestArg, wIp, dlgCfg.hostPort);
-
-		STARTUPINFOW si = { sizeof(si) };
-		PROCESS_INFORMATION pi;
-		if (CreateProcessW(exePath, spawnCmd, NULL, NULL, FALSE,
-			CREATE_NEW_CONSOLE, NULL, NULL, &si, &pi)) {
-			CloseHandle(pi.hProcess);
-			CloseHandle(pi.hThread);
-			HookLog("UMVC3Hook: Spawned second instance with -training -connect=%s:%d\n",
-				dlgCfg.hostIp, dlgCfg.hostPort);
-		}
-		else {
-			HookLog("UMVC3Hook: Failed to spawn second instance (error %lu)\n", GetLastError());
-		}
-
-		// 3. Wait for connection (only if host was created)
-		if (server) {
-			ENetEvent event;
-			int timeoutMs = 15000;  // 15s timeout (generous for localhost)
-			int waited = 0;
-			while (waited < timeoutMs) {
-				int result = enet_host_service(server, &event, 100);
-				if (result > 0) {
-					if (event.type == ENET_EVENT_TYPE_CONNECT) {
-						event.peer->data = (void*)"connected";
-						SetNetworkHandles(server, event.peer);
-						// The launch menu ran before this peer existed, so send the
-						// selected fighters/stage as the post-connect handshake.
-						SendTrainingLaunchPacket();
-						HookLog("UMVC3Hook: Dual training - 2nd instance connected!\n");
-						break;
-					}
-					else if (event.type == ENET_EVENT_TYPE_RECEIVE) {
-						enet_packet_destroy(event.packet);
-					}
-				}
-				waited += 100;
-			}
-			if (!GetLaunchDialogConfig().enetPeer) {
-				HookLog("UMVC3Hook: Dual training - TIMEOUT waiting for 2nd instance (15s)\n");
-			}
 		}
 	}
 
@@ -838,6 +1058,8 @@ void OnInitializeHook()
 	//InjectHook(_addr(0x14004ad20), tramp->Jump(InitMainLoop), PATCH_JUMP);//parts pyshics
 	//InjectHook(_addr(0x14004b9d0), tramp->Jump(InitMainLoop), PATCH_JUMP);//parts pyshics
 	//InjectHook(_addr(0x14004bd30), tramp->Jump(InitMainLoop), PATCH_JUMP);//parts fighter freeze
+	HookLog("UMVC3Hook: Startup patch and hook initialization complete\n");
+	InterlockedExchange(&g_launchSetupComplete, 1);
 }
 
 bool CheckGame()

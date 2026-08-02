@@ -376,12 +376,15 @@ void SetLaunchOption(LaunchOption opt)
     g_launchOption = opt;
 }
 
-bool ConfigureAutoTestDualTraining(int32_t characterId)
+bool ConfigureAutoTestDualTraining(int32_t characterId, int32_t hostPort)
 {
-    if (characterId < 1 || characterId >= kCharNameCount)
+    if (characterId < 1 || characterId >= kCharNameCount ||
+        hostPort < 0 || hostPort > 65535)
         return false;
 
     LoadRollbackSettings();
+    if (hostPort != 0)
+        g_dialogConfig.hostPort = hostPort;
     for (int i = 0; i < 3; ++i) {
         g_dialogConfig.p1Chars[i] = characterId;
         g_dialogConfig.p2Chars[i] = characterId;

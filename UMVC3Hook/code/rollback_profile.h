@@ -49,7 +49,6 @@ enum class RollbackHookProfileId : uint8_t {
     RenderEndFrame,
     SoundMove,
     GameUiMove,
-    SchedulerRebuild,
     ChrCpuClassFunc,
     MainMove,
     Count

@@ -9,7 +9,8 @@
 
 void Rollback_InitHooks()
 {
-    Rollback_PatchRenderCommandAllocationFailure();
+    Rollback_PatchBattleUiAllocationFailure();
+    Rollback_InitNativeNullGuards();
     Rollback_InitOnlineBattleHook();
     Rollback_InitReSimulationHooks();
     Rollback_InitRngHooks();

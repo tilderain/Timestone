@@ -5,6 +5,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 
 MODULE_PATH = Path(__file__).with_name("autotest_ai.py")
@@ -14,6 +15,20 @@ SPEC.loader.exec_module(runner)
 
 
 class AutoTestAiTest(unittest.TestCase):
+    def test_build_plan_includes_autotest_port(self):
+        args = SimpleNamespace(
+            character="Ryu",
+            game=Path("umvc3.exe"),
+            game_dir=Path("."),
+            repeat=1,
+            port=7788,
+            wine=None,
+            wine_prefix=None,
+        )
+        plan = runner.build_plan(args, ["12"])
+        self.assertIn("-autotest-port=7788", plan["argv"])
+        self.assertEqual(7788, plan["port"])
+
     def test_suite_completed_accepts_completed_host_log(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

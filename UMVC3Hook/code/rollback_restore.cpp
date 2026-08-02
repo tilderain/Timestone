@@ -1177,16 +1177,6 @@ void Rollback_RestoreSnapshot(int32_t frame)
                 copySize,
                 concreteDti);
 
-            //Dr strange??
-            if (concreteDti == (uint64_t)_addr(0x140D450A8) &&
-                copySize >= 0x6908) {
-                // Effect objects and their particle allocations are excluded
-                // from rollback. Never restore their historical owner handles.
-                *(uint64_t*)((uint8_t*)slot.regions[i].ptr + 0x68F0) = 0;
-                *(uint64_t*)((uint8_t*)slot.regions[i].ptr + 0x68F8) = 0;
-                *(uint64_t*)((uint8_t*)slot.regions[i].ptr + 0x6900) = 0;
-            }
-
             uint8_t* character = (uint8_t*)slot.regions[i].ptr;
             const uint8_t* savedCharacter = slot.data + offset;
 
@@ -1436,14 +1426,6 @@ void Rollback_RestoreSnapshot(int32_t frame)
                             CCHR_INPUT_SIZE);
             }
 
-
-            //Dr strange??
-            if (concreteDti == (uint64_t)_addr(0x140D450A8) &&
-                copySize >= 0x6908) {
-                *(uint64_t*)((uint8_t*)slot.regions[i].ptr + 0x68F0) = 0;
-                *(uint64_t*)((uint8_t*)slot.regions[i].ptr + 0x68F8) = 0;
-                *(uint64_t*)((uint8_t*)slot.regions[i].ptr + 0x6900) = 0;
-            }
         } else if (copySize > 0) {
             std::memcpy(slot.regions[i].ptr, slot.data + offset, copySize);
         }

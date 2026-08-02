@@ -3,6 +3,7 @@
 
 Examples:
   python tools/autotest_ai.py --character Ryu --moves "12,Hadoken"
+  python tools/autotest_ai.py --character Ryu --moves "12" --port 7788
   python tools/autotest_ai.py --character Ryu --failed-tsv \
       ".../autotest/20260728_193825_519_hawkeye_commands.tsv" --launch
 
@@ -234,7 +235,9 @@ def build_plan(args, moves):
         game_dir = (Path.cwd() / game_dir).resolve()
     move_filter = quote_filter(moves)
     game_argv = [str(game), f"-autotest={args.character}",
-                 f"-autotest-moves={move_filter}", f"-autotest-repeat={args.repeat}"]
+                  f"-autotest-moves={move_filter}", f"-autotest-repeat={args.repeat}"]
+    if args.port is not None:
+        game_argv.append(f"-autotest-port={args.port}")
     argv = [args.wine] + game_argv if args.wine else game_argv
     plan = {
         "schema": "umvc3_autotest_plan_v1",
@@ -246,6 +249,8 @@ def build_plan(args, moves):
         "cwd": str(game_dir),
         "argv": argv,
     }
+    if args.port is not None:
+        plan["port"] = args.port
     if args.wine:
         plan["launcher"] = args.wine
     if args.wine_prefix:
@@ -268,6 +273,8 @@ def main():
     parser.add_argument("--failed-tsv", type=Path,
                         help="derive move names from DESYNC/FAIL/ERROR rows")
     parser.add_argument("--repeat", type=int, default=3)
+    parser.add_argument("--port", type=int, default=None,
+                        help="autotest ENet host port (1-65535)")
     parser.add_argument("--game", type=Path,
                         default=Path("../ULTIMATE MARVEL VS. CAPCOM 3/umvc3.exe"))
     parser.add_argument("--game-dir", type=Path,
@@ -289,6 +296,8 @@ def main():
 
     if args.repeat < 1 or args.repeat > 100:
         parser.error("--repeat must be between 1 and 100")
+    if args.port is not None and not 1 <= args.port <= 65535:
+        parser.error("--port must be between 1 and 65535")
     if args.timeout <= 0:
         parser.error("--timeout must be positive")
     if args.moves and args.failed_tsv:

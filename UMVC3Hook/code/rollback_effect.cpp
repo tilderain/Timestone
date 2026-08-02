@@ -19,6 +19,7 @@ static_assert(sizeof(RollbackRegion) <= 64);
 
 static constexpr uintptr_t PTR_SMVC3MGR = 0x140d510a0;
 static constexpr uintptr_t PTR_SSTAGE = 0x140d4f718;
+static constexpr uintptr_t PTR_SCHARACTER = 0x140d44a70;
 static constexpr uintptr_t FN_SGAMEEFFECT_FLUSH_PENDING = 0x140130D00;
 static constexpr uintptr_t FN_UGAMEEFFECT_CREATE = 0x140131410;
 static constexpr uintptr_t FN_DRSTRANGE_UPDATE_SUMMONS = 0x14007B9E0;
@@ -37,6 +38,10 @@ static constexpr uint32_t SSTAGE_EFFECT_OFFSETS[] = {0x2050, 0x2058};
 static constexpr uint32_t PARTICLE_MANAGER_STRIDE = 0x150;
 static constexpr uint32_t PARTICLE_MANAGER_BUFFER_OFFSET = 0x130;
 static constexpr uint32_t MAX_PARTICLE_MANAGERS = 256;
+static constexpr uint32_t TEAM_OFFSETS[] = {0x40, 0x300};
+static constexpr uint32_t CHARACTER_EFFECT_SLOT_OFFSETS[] = {
+    0x68F0, 0x68F8, 0x6900, 0x6920,
+};
 
 using EffectCreateFn = void*(__fastcall*)(void*, int, int, void*, int, int,
     void*, void*, int, void*, int, uint32_t, void*);
@@ -60,6 +65,36 @@ static bool IsActiveUnit(void* unit)
     if (!unit) return false;
     uint32_t state = *(uint32_t*)((uint8_t*)unit + 0x10);
     return (state & 7u) < 3u && (state & 0x3F8u) != 0x3F8u;
+}
+
+static bool IsPersistentCharacterEffect(void* effect)
+{
+    uint64_t sCharacter = *(uint64_t*)_addr(PTR_SCHARACTER);
+    if (!sCharacter || !effect) return false;
+
+    for (uint32_t teamOffset : TEAM_OFFSETS) {
+        uint64_t node = sCharacter + teamOffset + 0x08;
+        for (int safety = 8; node && safety-- > 0;) {
+            if (!IsAccessibleRange(node, 0x18)) break;
+            uint64_t character = *(uint64_t*)(node + 0x08);
+            if (character && IsAccessibleRange(character, 0x6928)) {
+                // Character effect factories establish native ownership with
+                // MtObject__setField_640(effect, character). This also covers
+                // hyper effects retained in the character's indexed slots,
+                // which are not represented by the fixed tail handles below.
+                if (IsAccessibleRange((uint64_t)effect, 0x288) &&
+                    *(void**)((uint8_t*)effect + 0x280) == (void*)character) {
+                    return true;
+                }
+                for (uint32_t slotOffset : CHARACTER_EFFECT_SLOT_OFFSETS) {
+                    if (*(void**)(character + slotOffset) == effect)
+                        return true;
+                }
+            }
+            node = *(uint64_t*)(node + 0x10);
+        }
+    }
+    return false;
 }
 
 static void DetachEffectOwnedParticleState(void* effect)
@@ -433,7 +468,8 @@ int Effect_RetireCurrent(void* sUnit)
             if (g_activeRollbackProfile) ++g_activeRollbackProfile->restoreEffectVisits;
             void* next = *(void**)((uint8_t*)effect + 0x18);
             uint32_t* state = (uint32_t*)((uint8_t*)effect + 0x10);
-            if (IsEffectObject(effect) && (*state & 7u) < 3u) {
+            if (IsEffectObject(effect) && (*state & 7u) < 3u &&
+                !IsPersistentCharacterEffect(effect)) {
                 SanitizeStageEffectReferences(effect);
                 *state = (*state & ~7u) | 3u;
                 ++retired;
@@ -453,7 +489,8 @@ void Effect_SanitizeRetired(void* sUnit)
         for (int safety = 4096; effect && safety-- > 0;) {
             if (g_activeRollbackProfile) ++g_activeRollbackProfile->restoreEffectVisits;
             void* next = *(void**)((uint8_t*)effect + 0x18);
-            if (IsEffectObject(effect)) SanitizeEffectForDestruction(effect);
+            if (IsEffectObject(effect) && !IsPersistentCharacterEffect(effect))
+                SanitizeEffectForDestruction(effect);
             effect = next;
         }
     }

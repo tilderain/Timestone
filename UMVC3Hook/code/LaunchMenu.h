@@ -51,8 +51,9 @@ LaunchOption GetLaunchOption();
 void SetLaunchOption(LaunchOption opt);
 
 // Configure a dialog-free dual-training autotest launch. The selected
-// character is placed in every slot on both teams.
-bool ConfigureAutoTestDualTraining(int32_t characterId);
+// character is placed in every slot on both teams. A non-zero hostPort
+// overrides the saved network port.
+bool ConfigureAutoTestDualTraining(int32_t characterId, int32_t hostPort = 0);
 bool IsAutoTestLaunchEnabled();
 
 // Get the dialog config (characters, stage, network settings)

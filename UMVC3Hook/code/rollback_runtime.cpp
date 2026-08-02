@@ -1,6 +1,7 @@
 #include "../pch.h"
 
 #include "rollback.h"
+#include "rollback_memory.h"
 #include "mk10utils.h"
 #include "netplay.h"
 #include "../kiero/minhook/include/MinHook.h"
@@ -20,6 +21,234 @@ static constexpr uintptr_t ONLINE_CALLER_RETURNS[] = {
 };
 using IsOnlineBattleFn = bool(__fastcall*)(uint64_t battleSetting);
 static IsOnlineBattleFn g_originalIsOnlineBattle = nullptr;
+
+using MtObjectSetFlagFn = void(__fastcall*)(uint64_t, uint8_t);
+static MtObjectSetFlagFn g_originalMtObjectSetFlag = nullptr;
+using MtObjectIsAliveFn = bool(__fastcall*)(uint64_t);
+static MtObjectIsAliveFn g_originalMtObjectIsAlive = nullptr;
+using MtAnimSetFrameIndexFn = void(__fastcall*)(uint64_t, uint32_t);
+static MtAnimSetFrameIndexFn g_originalMtAnimSetFrameIndex = nullptr;
+using MtAnimUpdateFrameFn = uint32_t(__fastcall*)(uint64_t, uint64_t, uint64_t);
+static MtAnimUpdateFrameFn g_originalMtAnimUpdateFrame = nullptr;
+using ResetMaterialsFn = void(__fastcall*)(uint64_t);
+static ResetMaterialsFn g_originalResetMaterials = nullptr;
+using CutInAddCharacterFn = void(__fastcall*)(uint64_t, uint64_t);
+static CutInAddCharacterFn g_originalCutInAddCharacter = nullptr;
+using CutInSetVariantFn = void(__fastcall*)(uint64_t, uint32_t);
+static CutInSetVariantFn g_originalCutInSetVariant = nullptr;
+using CopyCharacterPositionFn = uint64_t(__fastcall*)(uint64_t, int, float, uint64_t);
+static CopyCharacterPositionFn g_originalCopyCharacterPosition = nullptr;
+static PVOID g_materialCloneRecoveryHandler = nullptr;
+
+static void __fastcall hkMtObjectSetFlag(uint64_t object, uint8_t enabled)
+{
+    // Some restart-time UI units pass a null MtAnim frame here after their
+    // resource lookup fails. There is no object state to update in that case.
+    if (!object || !HasCallableDtiVirtual((void*)object) ||
+        !g_originalMtObjectSetFlag) {
+        return;
+    }
+    g_originalMtObjectSetFlag(object, enabled);
+}
+
+static bool __fastcall hkMtObjectIsAlive(uint64_t object)
+{
+    // Native callers use this predicate as a vtable validity proof and then
+    // dispatch another virtual method. A recycled pointer can still be mapped
+    // and contain an alive-looking state word while its vtable is gone.
+    if (!object || !HasCallableDtiVirtual((void*)object) ||
+        !g_originalMtObjectIsAlive) {
+        return false;
+    }
+    return g_originalMtObjectIsAlive(object);
+}
+
+static void __fastcall hkMtAnimSetFrameIndex(uint64_t animation, uint32_t frame)
+{
+    // Several native UI setup routines call this after an allocation/constructor
+    // failure. Keep the failed unit out of the animation helper without
+    // changing valid frame-index writes.
+    if (!animation || !IsAccessibleRange(animation + 0x10, sizeof(uint32_t)))
+        return;
+    g_originalMtAnimSetFrameIndex(animation, frame);
+}
+
+static void __fastcall hkCutInAddCharacter(uint64_t cutIn, uint64_t character)
+{
+    // The animation command creates a cut-in conditionally but calls this
+    // helper unconditionally. A failed cut-in allocation has no participant
+    // list to update.
+    if (!cutIn || !character || !IsAccessibleRange(cutIn, 0x58) ||
+        !IsAccessibleRange(character, sizeof(uint64_t)) ||
+        !g_originalCutInAddCharacter) {
+        return;
+    }
+    g_originalCutInAddCharacter(cutIn, character);
+}
+
+static void __fastcall hkCutInSetVariant(uint64_t cutIn, uint32_t variant)
+{
+    // The same failed cut-in path reaches the camera propagation call after
+    // addCharacter. Leave the absent presentation object absent.
+    if (!cutIn || !IsAccessibleRange(cutIn + 0x670, 0x130) ||
+        !g_originalCutInSetVariant) {
+        return;
+    }
+    g_originalCutInSetVariant(cutIn, variant);
+}
+
+static uint64_t __fastcall hkCopyCharacterPosition(uint64_t character,
+                                                    int mode,
+                                                    float stiffDamage,
+                                                    uint64_t damageCharacter)
+{
+    if (mode == 0) {
+        uint64_t source = 0;
+        if (character <= UINT64_MAX - 0x6428 &&
+            IsAccessibleRange(character + 0x6428, sizeof(uint64_t))) {
+            source = *(uint64_t*)(character + 0x6428);
+        }
+
+        if (!source || source > UINT64_MAX - 0x5C ||
+            !IsAccessibleRange(source + 0x50, sizeof(float) * 3)) {
+            // FUN_1400E3020 has a separate stiff-damage side effect. Preserve
+            // that scalar even when its optional position source was retired.
+            if (damageCharacter && stiffDamage > 0.0f &&
+                damageCharacter <= UINT64_MAX - 0x4154 &&
+                IsAccessibleRange(damageCharacter + 0x4154, sizeof(float))) {
+                using GetStiffDamageFn = float(__fastcall*)(uint64_t);
+                using SetStiffDamageFn = void(__fastcall*)(uint64_t, float);
+                auto getStiffDamage = (GetStiffDamageFn)_addr(0x140032F50);
+                auto setStiffDamage = (SetStiffDamageFn)_addr(0x1400AEE10);
+                setStiffDamage(damageCharacter,
+                               getStiffDamage(damageCharacter) + stiffDamage);
+            }
+
+            static uint32_t logged = 0;
+            if (logged++ < 8) {
+                HookLog("Rollback: skipped null cChr+0x6428 position source "
+                        "chr=0x%llX source=0x%llX\n", character, source);
+            }
+            return 0;
+        }
+    }
+
+    return g_originalCopyCharacterPosition
+        ? g_originalCopyCharacterPosition(character, mode, stiffDamage,
+                                           damageCharacter)
+        : 0;
+}
+
+static LONG CALLBACK MaterialCloneRecoveryHandler(EXCEPTION_POINTERS* info)
+{
+    if (!info || !info->ExceptionRecord || !info->ContextRecord ||
+        info->ExceptionRecord->ExceptionCode != EXCEPTION_ACCESS_VIOLATION) {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+
+    CONTEXT* context = info->ContextRecord;
+    if (context->Rip != (DWORD64)_addr(0x1405DCA7F) || context->Rax != 0 ||
+        !IsAccessibleRange(context->Rsp + 0x48, sizeof(uint64_t))) {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+
+    // nDraw_Material__clone dereferences the result of its model clone before
+    // returning. Its caller, uBaseModel__resetMaterials, already handles a
+    // null clone through a fallback allocator. Resume at the clone epilogue so
+    // that caller-side recovery can run instead of fabricating a model here.
+    context->Rax = 0;
+    context->Rdi = 0;
+    context->Rip = (DWORD64)_addr(0x1405DCC8E);
+    return EXCEPTION_CONTINUE_EXECUTION;
+}
+
+static bool HasCallableVirtualMethod(uint64_t object, size_t offset)
+{
+    if (!HasCallableDtiVirtual((void*)object)) return false;
+    const uint64_t vtable = *(uint64_t*)object;
+    if (vtable > UINT64_MAX - offset ||
+        !IsAccessibleRange(vtable + offset, sizeof(uint64_t))) {
+        return false;
+    }
+    return IsExecutableAddress(*(uint64_t*)(vtable + offset));
+}
+
+static void __fastcall hkResetMaterials(uint64_t model)
+{
+    if (!model || !g_originalResetMaterials) {
+        return;
+    }
+
+    InvalidateMemoryQueryCache();
+    if (!IsAccessibleRange(model, 0x120))
+        return;
+
+    const uint32_t count = *(uint32_t*)(model + 0x118);
+    const uint64_t entries = *(uint64_t*)(model + 0x110);
+    if (count != 0 && (count > 4096 || !entries ||
+                       !IsAccessibleRange(entries,
+                                          (size_t)count * sizeof(uint64_t)))) {
+        HookLog("Render: discarded invalid material cache model=0x%llX "
+                "entries=0x%llX count=%u\n", model, entries, count);
+        *(uint32_t*)(model + 0x118) = 0;
+        return;
+    }
+
+    uint32_t invalid = 0;
+    for (uint32_t index = 0; index < count; ++index) {
+        uint64_t* entry = (uint64_t*)(entries +
+                                      (size_t)index * sizeof(uint64_t));
+        if (*entry && !HasCallableVirtualMethod(*entry, 0x28)) {
+            *entry = 0;
+            ++invalid;
+        }
+    }
+    if (invalid != 0) {
+        static uint32_t logged = 0;
+        if (logged++ < 32) {
+            HookLog("Render: cleared %u stale material cache entries "
+                    "model=0x%llX\n", invalid, model);
+        }
+    }
+    g_originalResetMaterials(model);
+    InvalidateMemoryQueryCache();
+}
+
+static bool HasInvalidMtAnimTable(uint64_t animation)
+{
+    if (!IsAccessibleRange(animation, 0x70)) return true;
+
+    const uint32_t count = *(uint32_t*)(animation + 0x68);
+    const uint64_t entries = *(uint64_t*)(animation + 0x60);
+    if (count == 0) return false;
+    if (count > 4096 || !entries ||
+        !IsAccessibleRange(entries, (size_t)count * sizeof(uint64_t))) {
+        return true;
+    }
+
+    for (uint32_t index = 0; index < count; ++index) {
+        const uint64_t entry = *(uint64_t*)(entries +
+                                            (size_t)index * sizeof(uint64_t));
+        if (!entry || !IsAccessibleRange(entry, sizeof(uint64_t))) return true;
+        const uint64_t vtable = *(uint64_t*)entry;
+        if (!vtable || !IsAccessibleAddress(vtable + 0x10)) return true;
+    }
+    return false;
+}
+
+static uint32_t __fastcall hkMtAnimUpdateFrame(uint64_t animation,
+                                                uint64_t resource,
+                                                uint64_t name)
+{
+    // Native returns UINT_MAX when no matching frame exists. Preserve that
+    // result for a table containing a recycled/null animation entry instead of
+    // dereferencing its invalid vtable.
+    if (!resource || !name || !IsAccessibleRange(resource + 0x08, sizeof(uint64_t)) ||
+        HasInvalidMtAnimTable(animation)) {
+        return 0xffffffffu;
+    }
+    return g_originalMtAnimUpdateFrame(animation, resource, name);
+}
 
 static bool __fastcall hkIsOnlineBattle(uint64_t battleSetting)
 {
@@ -72,40 +301,166 @@ static bool PatchBytes(uintptr_t address, const uint8_t (&expected)[N],
     return true;
 }
 
-void Rollback_PatchRenderCommandAllocationFailure()
+void Rollback_PatchBattleUiAllocationFailure()
 {
-    // These native paths all continue through null arena allocations. Redirect
-    // them to their existing failure/cleanup paths instead.
-    static constexpr uint8_t NULL_COMMAND[] = {0x0F, 0x84, 0x09, 0x01, 0x00, 0x00};
-    static constexpr uint8_t RETURN_FAILURE[] = {0x0F, 0x84, 0x9D, 0xFF, 0xFF, 0xFF};
-    static constexpr uint8_t NULL_BUCKET[] = {
-        0x74, 0x0C, 0x48, 0x05, 0x00, 0x10, 0x00, 0x00, 0x48,
-        0x89, 0x43, 0x30, 0xEB, 0x04, 0x48, 0x89, 0x73, 0x30,
-    };
-    static constexpr uint8_t CLEANUP_10[] = {
-        0x0F, 0x84, 0x40, 0x02, 0x00, 0x00, 0x48, 0x05, 0x00,
-        0x10, 0x00, 0x00, 0x48, 0x89, 0x43, 0x30, 0x90, 0x90,
-    };
-    static constexpr uint8_t CLEANUP_40[] = {
-        0x0F, 0x84, 0x74, 0x01, 0x00, 0x00, 0x48, 0x05, 0x00,
-        0x10, 0x00, 0x00, 0x48, 0x89, 0x43, 0x30, 0x90, 0x90,
-    };
-    static constexpr uint8_t CLEANUP_30[] = {
-        0x0F, 0x84, 0xD9, 0x00, 0x00, 0x00, 0x48, 0x05, 0x00,
-        0x10, 0x00, 0x00, 0x48, 0x89, 0x43, 0x30, 0x90, 0x90,
-    };
-    static constexpr uint8_t TYPE_3[] = {0x0F, 0x85, 0x6B, 0x02, 0x00, 0x00};
-    static constexpr uint8_t SKIP_TYPE_3[] = {0x0F, 0x85, 0xC0, 0x02, 0x00, 0x00};
-    static constexpr uint8_t CALL_DTOR[] = {0xFF, 0x50, 0x28};
-    static constexpr uint8_t SKIP_DTOR[] = {0x90, 0x90, 0x90};
+    // uBattleUi__setup has the same allocation contract as uBattleUiHit: its
+    // operator_new failure branches initialize a null unit and then continue
+    // into sUnit/MtAnim/MtArray calls. Redirect each failed unit to the native
+    // loop or block exit before those calls execute.
+    static constexpr uint8_t NULL_GAUGE_LIFE[] = {0x74, 0x0F};
+    static constexpr uint8_t SKIP_GAUGE_LIFE[] = {0x74, 0x4B};
+    static constexpr uint8_t NULL_GAUGE_HC[] = {0x74, 0x0F};
+    static constexpr uint8_t SKIP_GAUGE_HC[] = {0x74, 0x4B};
+    static constexpr uint8_t NULL_BATTLE_TIME[] = {0x74, 0x0D};
+    static constexpr uint8_t SKIP_BATTLE_TIME[] = {0x74, 0x49};
+    static constexpr uint8_t NULL_CARD_ICON[] = {0x74, 0x0D};
+    static constexpr uint8_t SKIP_CARD_ICON[] = {0x74, 0x3C};
+    static constexpr uint8_t NULL_KEY_DISPLAY[] = {0x74, 0x13};
+    static constexpr uint8_t SKIP_KEY_DISPLAY[] = {0x74, 0x42};
+    static constexpr uint8_t NULL_SCORE[] = {0x74, 0x0D};
+    static constexpr uint8_t SKIP_SCORE[] = {0x74, 0x33};
+    static constexpr uint8_t NULL_ROOM_WATCH[] = {0x74, 0x0D};
+    static constexpr uint8_t SKIP_ROOM_WATCH[] = {0x74, 0x3C};
+    static constexpr uint8_t NULL_AMBIENT_LIGHT[] = {0x74, 0x0B};
+    static constexpr uint8_t RETURN_NO_AMBIENT_LIGHT[] = {0x74, 0x48};
 
-    bool ok = PatchBytes(0x140640707, NULL_COMMAND, RETURN_FAILURE) &&
-              PatchBytes(0x14063C6AF, TYPE_3, SKIP_TYPE_3) &&
-              PatchBytes(0x14063C755, NULL_BUCKET, CLEANUP_10) &&
-              PatchBytes(0x14063C821, NULL_BUCKET, CLEANUP_40) &&
-              PatchBytes(0x14063C8BC, NULL_BUCKET, CLEANUP_30) &&
-              PatchBytes(0x14055FC1A, CALL_DTOR, SKIP_DTOR);
-    HookLog("Render: %s native failure guards\n", ok ? "installed" : "failed to install");
+    const bool battleUi =
+        PatchBytes(0x1402D2A32, NULL_GAUGE_LIFE, SKIP_GAUGE_LIFE) &&
+        PatchBytes(0x1402D2AA2, NULL_GAUGE_HC, SKIP_GAUGE_HC) &&
+        PatchBytes(0x1402D2B19, NULL_BATTLE_TIME, SKIP_BATTLE_TIME) &&
+        PatchBytes(0x1402D2BAA, NULL_CARD_ICON, SKIP_CARD_ICON) &&
+        PatchBytes(0x1402D2C79, NULL_KEY_DISPLAY, SKIP_KEY_DISPLAY) &&
+        PatchBytes(0x1402D2EB1, NULL_SCORE, SKIP_SCORE) &&
+        PatchBytes(0x1402D2F09, NULL_ROOM_WATCH, SKIP_ROOM_WATCH) &&
+        PatchBytes(0x1402D3146, NULL_AMBIENT_LIGHT,
+                   RETURN_NO_AMBIENT_LIGHT);
+    HookLog("Rollback: %s null uBattleUi allocation guards\n",
+            battleUi ? "installed" : "partially installed");
+
+    // uBattleUiHit__setup checks model allocation, but its null branches still
+    // add and initialize the null unit. Skip each failed iteration at its loop
+    // increment instead of reaching MtAnim__setFrameIndex(NULL).
+    static constexpr uint8_t NULL_HIT_MODEL_FIRST[] = {0x74, 0x0F};
+    static constexpr uint8_t SKIP_NULL_HIT_MODEL_FIRST[] = {0x74, 0x59};
+    static constexpr uint8_t NULL_HIT_MODEL_SECOND[] = {0x74, 0x12};
+    static constexpr uint8_t SKIP_NULL_HIT_MODEL_SECOND[] = {0x74, 0x69};
+    static constexpr uint8_t NULL_HIT_MODEL_THIRD[] = {0x74, 0x0F};
+    static constexpr uint8_t SKIP_NULL_HIT_MODEL_THIRD[] = {0x74, 0x59};
+    const bool first = PatchBytes(0x1402D88F3, NULL_HIT_MODEL_FIRST,
+                                  SKIP_NULL_HIT_MODEL_FIRST);
+    const bool second = PatchBytes(0x1402D8972, NULL_HIT_MODEL_SECOND,
+                                   SKIP_NULL_HIT_MODEL_SECOND);
+    const bool third = PatchBytes(0x1402D8A42, NULL_HIT_MODEL_THIRD,
+                                  SKIP_NULL_HIT_MODEL_THIRD);
+    HookLog("Rollback: %s null uBattleUiHit model allocation guards\n",
+            first && second && third ? "installed" : "partially installed");
+}
+
+void Rollback_InitNativeNullGuards()
+{
+    const MH_STATUS aliveStatus = MH_CreateHook(
+        (LPVOID)_addr(0x140001B80), (LPVOID)&hkMtObjectIsAlive,
+        (LPVOID*)&g_originalMtObjectIsAlive);
+    if (aliveStatus == MH_OK) {
+        const MH_STATUS enableStatus = MH_EnableHook((LPVOID)_addr(0x140001B80));
+        HookLog("Rollback: %s stale MtObject alive-state guard\n",
+                enableStatus == MH_OK ? "installed" : "failed to install");
+    } else {
+        HookLog("Rollback: failed to guard stale MtObject alive state (%d)\n",
+                aliveStatus);
+    }
+
+    const MH_STATUS frameIndexStatus = MH_CreateHook(
+        (LPVOID)_addr(0x1400F3150), (LPVOID)&hkMtAnimSetFrameIndex,
+        (LPVOID*)&g_originalMtAnimSetFrameIndex);
+    if (frameIndexStatus == MH_OK) {
+        const MH_STATUS enableStatus = MH_EnableHook((LPVOID)_addr(0x1400F3150));
+        HookLog("Rollback: %s null MtAnim frame-index guard\n",
+                enableStatus == MH_OK ? "installed" : "failed to install");
+    } else {
+        HookLog("Rollback: failed to guard null MtAnim frame index (%d)\n",
+                frameIndexStatus);
+    }
+
+    const MH_STATUS flagStatus = MH_CreateHook(
+        (LPVOID)_addr(0x140002A70), (LPVOID)&hkMtObjectSetFlag,
+        (LPVOID*)&g_originalMtObjectSetFlag);
+    if (flagStatus != MH_OK) {
+        HookLog("Rollback: failed to guard null MtObject flag target (%d)\n",
+                flagStatus);
+    } else {
+        const MH_STATUS enableStatus = MH_EnableHook((LPVOID)_addr(0x140002A70));
+        HookLog("Rollback: %s null MtObject flag target guard\n",
+                enableStatus == MH_OK ? "installed" : "failed to install");
+    }
+
+    const MH_STATUS resetMaterialsStatus = MH_CreateHook(
+        (LPVOID)_addr(0x14055FBC0), (LPVOID)&hkResetMaterials,
+        (LPVOID*)&g_originalResetMaterials);
+    if (resetMaterialsStatus == MH_OK) {
+        const MH_STATUS enableStatus = MH_EnableHook((LPVOID)_addr(0x14055FBC0));
+        HookLog("Rollback: %s stale material cache sanitizer\n",
+                enableStatus == MH_OK ? "installed" : "failed to install");
+    } else {
+        HookLog("Rollback: failed to hook material cache reset (%d)\n",
+                resetMaterialsStatus);
+    }
+
+    const MH_STATUS animStatus = MH_CreateHook(
+        (LPVOID)_addr(0x14050EE60), (LPVOID)&hkMtAnimUpdateFrame,
+        (LPVOID*)&g_originalMtAnimUpdateFrame);
+    if (animStatus != MH_OK) {
+        HookLog("Rollback: failed to guard malformed MtAnim table (%d)\n",
+                animStatus);
+    } else {
+        const MH_STATUS animEnableStatus = MH_EnableHook((LPVOID)_addr(0x14050EE60));
+        HookLog("Rollback: %s malformed MtAnim table guard\n",
+                animEnableStatus == MH_OK ? "installed" : "failed to install");
+    }
+
+    const MH_STATUS cutInAddStatus = MH_CreateHook(
+        (LPVOID)_addr(0x1404490C0), (LPVOID)&hkCutInAddCharacter,
+        (LPVOID*)&g_originalCutInAddCharacter);
+    if (cutInAddStatus == MH_OK) {
+        const MH_STATUS enableStatus = MH_EnableHook((LPVOID)_addr(0x1404490C0));
+        HookLog("Rollback: %s null uCutIn participant guard\n",
+                enableStatus == MH_OK ? "installed" : "failed to install");
+    } else {
+        HookLog("Rollback: failed to guard null uCutIn participant (%d)\n",
+                cutInAddStatus);
+    }
+
+    const MH_STATUS cutInVariantStatus = MH_CreateHook(
+        (LPVOID)_addr(0x14044B2D0), (LPVOID)&hkCutInSetVariant,
+        (LPVOID*)&g_originalCutInSetVariant);
+    if (cutInVariantStatus == MH_OK) {
+        const MH_STATUS enableStatus = MH_EnableHook((LPVOID)_addr(0x14044B2D0));
+        HookLog("Rollback: %s null uCutIn camera propagation guard\n",
+                enableStatus == MH_OK ? "installed" : "failed to install");
+    } else {
+        HookLog("Rollback: failed to guard null uCutIn camera propagation (%d)\n",
+                cutInVariantStatus);
+    }
+
+    const MH_STATUS copyPositionStatus = MH_CreateHook(
+        (LPVOID)_addr(0x1400E3020), (LPVOID)&hkCopyCharacterPosition,
+        (LPVOID*)&g_originalCopyCharacterPosition);
+    if (copyPositionStatus == MH_OK) {
+        const MH_STATUS enableStatus = MH_EnableHook((LPVOID)_addr(0x1400E3020));
+        HookLog("Rollback: %s null cChr+0x6428 position guard\n",
+                enableStatus == MH_OK ? "installed" : "failed to install");
+    } else {
+        HookLog("Rollback: failed to guard null cChr+0x6428 position (%d)\n",
+                copyPositionStatus);
+    }
+
+    if (!g_materialCloneRecoveryHandler) {
+        g_materialCloneRecoveryHandler = AddVectoredExceptionHandler(
+            1, &MaterialCloneRecoveryHandler);
+        HookLog("Rollback: material clone recovery %s\n",
+                g_materialCloneRecoveryHandler ? "installed" : "failed to install");
+    }
+
 }
 
 bool Rollback_PatchNativeNetplayDeterminism()
