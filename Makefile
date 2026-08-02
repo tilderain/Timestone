@@ -1,6 +1,8 @@
 # Makefile for UMVC3Hook - cross-compile Windows DLL with MinGW on Linux
 # Targets: Release x64 (.asi), Debug x64
 
+.DEFAULT_GOAL := all
+
 CXX       := x86_64-w64-mingw32-g++-win32
 CC        := x86_64-w64-mingw32-gcc-win32
 WINDRES   := x86_64-w64-mingw32-windres
@@ -97,6 +99,10 @@ RC_OBJ    := $(OBJDIR)/UMVC3Hook.res
 
 ALL_OBJ   := $(CPP_OBJ) $(C_OBJ) $(ENET_OBJ_FULL) $(RC_OBJ)
 DEP_FILES := $(CPP_OBJ:.o=.d) $(C_OBJ:.o=.d) $(ENET_OBJ_FULL:.o=.d)
+# An object without its compiler-generated dependency manifest is unsafe to
+# reuse: header layout changes would otherwise be invisible to make.
+MISSING_DEP_FILES := $(filter-out $(wildcard $(DEP_FILES)),$(DEP_FILES))
+MISSING_DEP_OBJS  := $(MISSING_DEP_FILES:.d=.o)
 
 # --- Include paths ---
 
@@ -159,7 +165,11 @@ LIBS      := \
 # Targets
 # ##############################################################################
 
-.PHONY: all clean release debug fix-includes
+.PHONY: all clean release debug fix-includes force-missing-dependency-rebuild
+
+force-missing-dependency-rebuild:
+
+$(MISSING_DEP_OBJS): force-missing-dependency-rebuild
 
 all:
 	@if $(MAKE) --no-print-directory -q $(OUTPUT); then \
@@ -175,8 +185,8 @@ release: fix-includes $(OBJDIR) $(OUTPUT)
 
 # ---------- Debug build ----------
 
-debug: CXXFLAGS  := -O0 -g -std=c++20 $(DEFINES) $(INCLUDES) -Wall
-debug: CFLAGS    := -O0 -g $(DEFINES) $(INCLUDES) -Wall
+debug: CXXFLAGS  := -O0 -g -std=c++20 -MMD -MP $(DEFINES) $(INCLUDES) -Wall
+debug: CFLAGS    := -O0 -g -MMD -MP $(DEFINES) $(INCLUDES) -Wall
 debug: DEFINES   := -D_DEBUG -DUMVC3HOOK_EXPORTS -D_WINDOWS -D_USRDLL -D_CRT_SECURE_NO_WARNINGS
 debug: fix-includes $(OBJDIR) $(OUTPUT)
 
