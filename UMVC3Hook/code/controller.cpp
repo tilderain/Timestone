@@ -1392,9 +1392,10 @@ extern "C" void Controller_OnFrameStart()
 
 // ---------------------------------------------------------------------------
 // Desync checksum — sum of quantized positions, HP, and actionId across all
-// characters, then mix in the global gameplay RNG state. Character state uses
-// order-independent addition and integer quantization to tolerate tiny
-// frame-timing float differences that are not visible desyncs.
+// characters, mix in each character's RNG state, then mix in the global
+// gameplay RNG state. Character state uses order-independent addition and
+// integer quantization to tolerate tiny frame-timing float differences that
+// are not visible desyncs.
 // ---------------------------------------------------------------------------
 static uint32_t ComputeChecksum()
 {
@@ -1418,6 +1419,10 @@ static uint32_t ComputeChecksum()
                 cs += (uint32_t)(qy < 0 ? -qy : qy);
                 cs += (uint32_t)(hp < 0 ? -hp : hp);
                 cs += *(uint32_t*)(character + 0x1310); // actionId
+
+                // Per-character MtXorShift state affects gameplay outcomes and
+                // must be part of the confirmed state comparison.
+                cs = (cs ^ *(uint32_t*)(character + 0x2D80)) * 16777619u;
             }
             node = *(uint64_t*)(node + NODE_NEXT_OFFSET);
         }
