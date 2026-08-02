@@ -654,7 +654,7 @@ void Rollback_HeadlessTick(uint64_t sMain)
 
     //VTableCall(MainMember(sMain, 0x40270), 0x30); // mpPrimitive::move.
     //VTableCall(MainMember(sMain, 0x401e0), 0x48); // mpCollision base cSystem::draw.
-    //((ObjectFn)_addr(FN_UPDATE_RENDER_STATE))(sMain); // Update sMvc3Main render/camera state.
+    //((ObjectFn)_addr(FN_UPDATE_RENDER_STATE))(sMain); // Update sMvc3Main render options:- Resolution- FullScreen- AltAntiAlias- TextureDetail- EffectVolume
     //VTableCall(MainMember(sMain, 0x40190), 0x30); // mpRender::move.
     //((ObjectFn)_addr(FN_RENDER_END_FRAME))(MainMember(sMain, 0x40190)); // End and present the render frame.
 

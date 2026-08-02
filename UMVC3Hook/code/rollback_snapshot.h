@@ -121,6 +121,13 @@ struct RollbackModelRenderState {
     bool character;
 };
 
+struct RollbackActionSideCameraState {
+    void* motionResource = nullptr;
+    void* motionParent = nullptr;
+    void* requestResource = nullptr;
+    void* requestParent = nullptr;
+};
+
 struct RollbackSnapshotSlot {
     int32_t frame = -1;
     uint8_t* data = nullptr;
@@ -134,6 +141,7 @@ struct RollbackSnapshotSlot {
     std::vector<RollbackEffectRecipe> effectRecipes;
     std::vector<RollbackCollisionNodeClone> collisionNodeClones;
     std::vector<RollbackModelRenderState> modelRenderStates;
+    RollbackActionSideCameraState actionSideCamera;
 };
 
 extern RollbackSnapshotSlot g_rollbackSnapshotSlots[ROLLBACK_WINDOW];

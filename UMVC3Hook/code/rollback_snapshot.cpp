@@ -83,11 +83,51 @@ static constexpr size_t SMAIN_SIZE = 0x40080;
 static constexpr int MAX_REGIONS = ROLLBACK_MAX_REGIONS;
 static constexpr int DYNAMIC_SAFETY = 128;
 static constexpr size_t SHITSOLVER_SIZE = 0x3808C;
+static constexpr uintptr_t FN_MTOBJECT_ADD_REF = 0x14050D100;
+static constexpr uintptr_t FN_CRESOURCE_RELEASE_REF = 0x14050D5A0;
+static constexpr uint32_t UACTION_CAMERA_MOTION_RESOURCE_OFFSET = 0x290;
+static constexpr uint32_t UACTION_CAMERA_MOTION_PARENT_OFFSET = 0x298;
+static constexpr uint32_t UACTION_CAMERA_REQUEST_RESOURCE_OFFSET = 0x3C0;
+static constexpr uint32_t UACTION_CAMERA_REQUEST_PARENT_OFFSET = 0x3D0;
 
 using Region = RollbackRegion;
 using SnapshotSlot = RollbackSnapshotSlot;
 RollbackSnapshotSlot g_rollbackSnapshotSlots[ROLLBACK_WINDOW];
 #define g_slots g_rollbackSnapshotSlots
+
+static void ReleaseActionSideCameraState(RollbackSnapshotSlot& slot)
+{
+    auto releaseRef = (void(__fastcall*)(void*))_addr(FN_CRESOURCE_RELEASE_REF);
+    if (slot.actionSideCamera.motionResource)
+        releaseRef(slot.actionSideCamera.motionResource);
+    if (slot.actionSideCamera.requestResource)
+        releaseRef(slot.actionSideCamera.requestResource);
+    slot.actionSideCamera = {};
+}
+
+static void CaptureActionSideCameraState(RollbackSnapshotSlot& slot)
+{
+    ReleaseActionSideCameraState(slot);
+
+    uint64_t sCamera = *(uint64_t*)_addr(PTR_SCAMERA);
+    uint64_t camera = sCamera ? *(uint64_t*)(sCamera + 0x58) : 0;
+    if (!camera) return;
+
+    slot.actionSideCamera.motionResource =
+        *(void**)(camera + UACTION_CAMERA_MOTION_RESOURCE_OFFSET);
+    slot.actionSideCamera.motionParent =
+        *(void**)(camera + UACTION_CAMERA_MOTION_PARENT_OFFSET);
+    slot.actionSideCamera.requestResource =
+        *(void**)(camera + UACTION_CAMERA_REQUEST_RESOURCE_OFFSET);
+    slot.actionSideCamera.requestParent =
+        *(void**)(camera + UACTION_CAMERA_REQUEST_PARENT_OFFSET);
+
+    auto addRef = (void(__fastcall*)(void*))_addr(FN_MTOBJECT_ADD_REF);
+    if (slot.actionSideCamera.motionResource)
+        addRef(slot.actionSideCamera.motionResource);
+    if (slot.actionSideCamera.requestResource)
+        addRef(slot.actionSideCamera.requestResource);
+}
 
 struct RegionDependency {
     uintptr_t address = 0;
@@ -1179,6 +1219,7 @@ void Rollback_SaveSnapshot(int32_t frame)
         offset += regions[i].size;
     }
     slot.size = offset;
+    CaptureActionSideCameraState(slot);
     const uint64_t copyRegionsEnd = Profile_Now();
 
     // Record the exact state captured at the rollback boundary. RNG hooks only
@@ -1359,6 +1400,7 @@ void Rollback_FreeSnapshots()
 
     for (int i = 0; i < ROLLBACK_WINDOW; ++i) {
         Rollback_DestroyCollisionNodeClones(g_slots[i]);
+        ReleaseActionSideCameraState(g_slots[i]);
         delete[] g_slots[i].data;
         g_slots[i].data        = nullptr;
         g_slots[i].size        = 0;

@@ -36,6 +36,8 @@ static constexpr uintptr_t FN_SUNIT_ADD_UNIT = 0x14051A6B0;
 static constexpr uintptr_t FN_SUNIT_REMOVE_UNIT = 0x14051B9F0;
 static constexpr uintptr_t FN_RESET_HITNODES = 0x140259E90;
 static constexpr uintptr_t FN_MODEL_SET_CHILD_MATERIAL_MODE = 0x140200DB0;
+static constexpr uintptr_t FN_MTOBJECT_ADD_REF = 0x14050D100;
+static constexpr uintptr_t FN_CRESOURCE_RELEASE_REF = 0x14050D5A0;
 
 static constexpr uintptr_t SMVC3MGR_ACTION_OFFSET = 0x48;
 static constexpr uint32_t SACTION_MODEL_JOINT_WRAPPER_OFFSET = 0x120;
@@ -99,6 +101,14 @@ static constexpr SnapshotRange UACTION_CAMERA_SCALAR_RESTORE_RANGES[] = {
     {0x140, 0x40},
     {0x180, 0x40},
     {0x1C0, 0x40},
+    // Embedded cMayaMotionWork used by scripted throw cameras. Preserve the
+    // reference-counted resource at +0x290 and character pointer at +0x298.
+    {0x230, 0x60},
+    {0x2A0, 0x120},
+    // Pending Maya-motion request. Its resource and parent pointers at
+    // +0x3C0/+0x3D0 are restored separately with ownership validation.
+    {0x3C8, 0x08},
+    {0x3D8, 0x20},
     // uActionSideCamera::mFieldOfs[4], used by the camera anchor's
     // per-frame tracked-position calculation.
     {0x400, 0x10},
@@ -923,6 +933,44 @@ void Rollback_RestoreSnapshot(int32_t frame)
         }
         return false;
     };
+    auto restoreActionSideCamera = [&slot, &isTeamCharacter](
+                                       uint64_t camera, const uint8_t* saved,
+                                       size_t copySize) {
+        for (const SnapshotRange& range : UACTION_CAMERA_SCALAR_RESTORE_RANGES) {
+            if ((size_t)range.offset + range.size <= copySize) {
+                std::memcpy((uint8_t*)camera + range.offset,
+                            saved + range.offset, range.size);
+            }
+        }
+
+        auto replaceResource = [](void** field, void* restored) {
+            if (*field == restored) return;
+            auto addRef = (void(__fastcall*)(void*))_addr(FN_MTOBJECT_ADD_REF);
+            auto releaseRef =
+                (void(__fastcall*)(void*))_addr(FN_CRESOURCE_RELEASE_REF);
+            if (restored) addRef(restored);
+            void* live = *field;
+            *field = restored;
+            if (live) releaseRef(live);
+        };
+        replaceResource((void**)(camera + 0x290),
+                        slot.actionSideCamera.motionResource);
+        replaceResource((void**)(camera + 0x3C0),
+                        slot.actionSideCamera.requestResource);
+
+        auto restoreCharacter = [&isTeamCharacter](void** field, void* restored) {
+            if (!restored || restored == *field ||
+                isTeamCharacter((uint64_t)restored)) {
+                *field = restored;
+            } else {
+                *field = nullptr;
+            }
+        };
+        restoreCharacter((void**)(camera + 0x298),
+                         slot.actionSideCamera.motionParent);
+        restoreCharacter((void**)(camera + 0x3D0),
+                         slot.actionSideCamera.requestParent);
+    };
 
     auto traceRestoreState = [frame, team0, team1, &teamCharacters, teamCharacterCount](
                                  const char* phase) {
@@ -1088,16 +1136,10 @@ void Rollback_RestoreSnapshot(int32_t frame)
                    (*(uint64_t*)_addr(PTR_SCAMERA) ?
                     *(uint64_t*)(*(uint64_t*)_addr(PTR_SCAMERA) + 0x58) : 0) &&
                    slot.regions[i].size >= 0x500) {
-            // uActionSideCamera is authoritative for tag spawn placement and
-            // movement limits, but its cUnit links and embedded property
-            // buffers are peer-local. Copy only the scalar gameplay payload.
-            for (const SnapshotRange& range : UACTION_CAMERA_SCALAR_RESTORE_RANGES) {
-                if ((size_t)range.offset + range.size <= copySize) {
-                    std::memcpy((uint8_t*)slot.regions[i].ptr + range.offset,
-                                slot.data + offset + range.offset,
-                                range.size);
-                }
-            }
+            // Restore camera gameplay and throw-cinematic state while retaining
+            // valid native ownership for its resource and character references.
+            restoreActionSideCamera((uint64_t)slot.regions[i].ptr,
+                                    slot.data + offset, copySize);
         } else if (slot.regions[i].skipVtable && copySize > sizeof(uint64_t)) {
             uint64_t liveUnitState[sizeof(CUNIT_LIVE_STATE_OFFSETS) / sizeof(CUNIT_LIVE_STATE_OFFSETS[0])];
             for (size_t field = 0;
@@ -1572,13 +1614,8 @@ void Rollback_RestoreSnapshot(int32_t frame)
             if (offset + copySize > slot.size)
                 copySize = slot.size - offset;
             if ((uint64_t)slot.regions[i].ptr == liveCameraUnit) {
-                for (const SnapshotRange& range : UACTION_CAMERA_SCALAR_RESTORE_RANGES) {
-                    if ((size_t)range.offset + range.size <= copySize) {
-                        std::memcpy((uint8_t*)liveCameraUnit + range.offset,
-                                    slot.data + offset + range.offset,
-                                    range.size);
-                    }
-                }
+                restoreActionSideCamera(liveCameraUnit, slot.data + offset,
+                                        copySize);
                 break;
             }
             offset += slot.regions[i].size;
