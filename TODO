@@ -164,3 +164,6 @@ mpUIThreadD3DCreateDeviceParam->BehaviorFlags,
 mpUIThreadD3DCreateDeviceParam->pPresentationParameters,
 mpUIThreadD3DCreateDeviceParam->ppReturnedDeviceInterface)
 game sometimes errors this on launch
+
+fix controller not working again
+perf regressions

@@ -22,6 +22,7 @@
 #include "diag.h"
 #include "autotest.h"
 #include "../kiero/minhook/include/MinHook.h"
+#include <cstdio>
 #include <cstdint>
 #include <cstring>
 
@@ -31,6 +32,32 @@ extern "C" bool Rollback_GetSnapshotInputs(int32_t frame, uint32_t* outLocal, ui
 extern "C" void Rollback_UpdateSnapshotInputs(int32_t frame, uint32_t localInput, uint32_t remoteInput);
 extern "C" void Rollback_CommitPendingNetplayLive(int32_t frame);
 extern "C" void Rollback_NotifyDesyncTriggered(int32_t frame);
+
+static constexpr bool INPUT_PROVENANCE_TRACE = true;
+
+static void TraceInputPacket(const char* marker, const char* path, int32_t localFrame,
+                             const InputPacket& packet, uint16_t validMask,
+                             uint16_t acceptedMask, uint16_t changedMask,
+                             uint16_t priorConfirmedMask)
+{
+    if (!INPUT_PROVENANCE_TRACE) return;
+
+    char inputs[NET_HISTORY_SIZE * 11 + 1] = {};
+    size_t offset = 0;
+    for (size_t i = 0; i < NET_HISTORY_SIZE && offset < sizeof(inputs); ++i) {
+        int written = std::snprintf(inputs + offset, sizeof(inputs) - offset,
+                                    "%s%08X", i ? "," : "", packet.inputs[i]);
+        if (written < 0 || (size_t)written >= sizeof(inputs) - offset) break;
+        offset += (size_t)written;
+    }
+
+    HookLog("%s path=%s local=%d start=%d end=%d flags=%u valid=%04X "
+            "accepted=%04X changed=%04X priorConfirmed=%04X inputs=%s\n",
+            marker, path, localFrame, (int32_t)packet.start_frame,
+            (int32_t)packet.start_frame + (int32_t)NET_HISTORY_SIZE - 1,
+            packet.flags, validMask, acceptedMask, changedMask,
+            priorConfirmedMask, inputs);
+}
 
 // ---------------------------------------------------------------------------
 // Addresses
@@ -609,6 +636,11 @@ extern "C" void Controller_ResolveRemoteInput(int32_t frame)
     {
         g_predictedInput[idx] = false;
         g_usedRemoteInput[idx] = g_receivedInput[idx];
+        if (INPUT_PROVENANCE_TRACE) {
+            HookLog("IPUSE phase=%s frame=%d source=confirmed value=%08X\n",
+                    g_isResimulating ? "resim" : "live", frame,
+                    g_usedRemoteInput[idx]);
+        }
     }
     else
     {
@@ -617,15 +649,28 @@ extern "C" void Controller_ResolveRemoteInput(int32_t frame)
         while (Netplay_GetInboundPacket(pkt))
         {
             int32_t pktMaxFrame = (int32_t)pkt.start_frame + NET_HISTORY_SIZE - 1;
-            if (pktMaxFrame <= g_lastRemoteFrame)
+            if (pktMaxFrame <= g_lastRemoteFrame) {
+                TraceInputPacket("IPRX", "resolve-dropped", g_netFrameCount, pkt,
+                                 0, 0, 0, 0);
                 continue;
+            }
+            uint16_t acceptedMask = 0;
+            uint16_t changedMask = 0;
+            uint16_t priorConfirmedMask = 0;
             for (size_t i = 0; i < NET_HISTORY_SIZE; i++)
             {
                 int32_t targetFrame = (int32_t)pkt.start_frame + (int32_t)i;
                 if (targetFrame >= 0)
                 {
-                    g_receivedInput[(uint32_t)targetFrame % RING_SIZE] = pkt.inputs[i];
-                    g_confirmedFrame[(uint32_t)targetFrame % RING_SIZE] = targetFrame;
+                    uint32_t targetIdx = (uint32_t)targetFrame % RING_SIZE;
+                    bool wasConfirmed = IsFrameConfirmed(targetFrame);
+                    uint32_t previous = g_receivedInput[targetIdx];
+                    if (wasConfirmed) priorConfirmedMask |= (uint16_t)(1u << i);
+                    if (!wasConfirmed || previous != pkt.inputs[i])
+                        changedMask |= (uint16_t)(1u << i);
+                    acceptedMask |= (uint16_t)(1u << i);
+                    g_receivedInput[targetIdx] = pkt.inputs[i];
+                    g_confirmedFrame[targetIdx] = targetFrame;
                     if (targetFrame > g_lastRemoteFrame)
                     {
                         g_lastRemoteFrame = targetFrame;
@@ -635,12 +680,19 @@ extern "C" void Controller_ResolveRemoteInput(int32_t frame)
             }
 
             LogReceivedPacket(pkt);
+            TraceInputPacket("IPRX", "resolve", g_netFrameCount, pkt, 0,
+                             acceptedMask, changedMask, priorConfirmedMask);
         }
 
         if (IsFrameConfirmed(frame))
         {
             g_predictedInput[idx] = false;
             g_usedRemoteInput[idx] = g_receivedInput[idx];
+            if (INPUT_PROVENANCE_TRACE) {
+                HookLog("IPUSE phase=%s frame=%d source=confirmed-after-drain value=%08X\n",
+                        g_isResimulating ? "resim" : "live", frame,
+                        g_usedRemoteInput[idx]);
+            }
             return;
         }
 
@@ -668,12 +720,14 @@ extern "C" void Controller_ResolveRemoteInput(int32_t frame)
 
         uint32_t prediction = 0;
         bool found = false;
+        int32_t predictionSourceFrame = -1;
         for (int32_t f = frame - 1; f >= 0 && f >= frame - 250; f--)
         {
             if (IsFrameConfirmed(f))
             {
                 prediction = g_receivedInput[f % RING_SIZE];
                 found = true;
+                predictionSourceFrame = f;
                 break;
             }
         }
@@ -685,6 +739,14 @@ extern "C" void Controller_ResolveRemoteInput(int32_t frame)
         g_predictedInput[idx] = true;
         g_predictedFrame[idx] = frame;
         g_usedRemoteInput[idx] = prediction;
+
+        if (INPUT_PROVENANCE_TRACE) {
+            HookLog("IPUSE phase=%s frame=%d source=prediction sourceFrame=%d "
+                    "value=%08X lastRemoteFrame=%d lastRemoteInput=%08X\n",
+                    g_isResimulating ? "resim" : "live", frame,
+                    predictionSourceFrame, prediction, g_lastRemoteFrame,
+                    g_lastRemoteInput);
+        }
 
         if (!alreadyPredicted)
         {
@@ -1074,6 +1136,9 @@ static void DrainAndProcessPackets()
     InputPacket inPkt;
     while (Netplay_GetInboundPacket(inPkt))
     {
+        uint16_t acceptedMask = 0;
+        uint16_t changedMask = 0;
+        uint16_t priorConfirmedMask = 0;
         // 1. Process inputs from the packet
         size_t framesToProcess = NET_HISTORY_SIZE;
         for (size_t i = 0; i < framesToProcess; i++)
@@ -1081,13 +1146,20 @@ static void DrainAndProcessPackets()
             int32_t targetFrame = (int32_t)inPkt.start_frame + (int32_t)i;
             if (targetFrame >= 0)
             {
+                bool wasConfirmed = IsFrameConfirmed(targetFrame);
+                if (wasConfirmed) priorConfirmedMask |= (uint16_t)(1u << i);
                 // History packets may revise a future frame during a delay
                 // transition. Accept that newest value until the frame has
                 // executed; past frames remain immutable in delay mode.
                 if (!IsFrameConfirmed(targetFrame) || targetFrame > g_netFrameCount)
                 {
-                    g_receivedInput[(uint32_t)targetFrame % RING_SIZE] = inPkt.inputs[i];
-                    g_confirmedFrame[(uint32_t)targetFrame % RING_SIZE] = targetFrame;
+                    uint32_t idx = (uint32_t)targetFrame % RING_SIZE;
+                    uint32_t previous = g_receivedInput[idx];
+                    if (!wasConfirmed || previous != inPkt.inputs[i])
+                        changedMask |= (uint16_t)(1u << i);
+                    acceptedMask |= (uint16_t)(1u << i);
+                    g_receivedInput[idx] = inPkt.inputs[i];
+                    g_confirmedFrame[idx] = targetFrame;
                     Rollback_UpdateRemoteInput(targetFrame, inPkt.inputs[i]);
                 }
 
@@ -1115,6 +1187,8 @@ static void DrainAndProcessPackets()
 
         g_remoteFrameAdvantage = inPkt.frame_advantage;
         LogReceivedPacket(inPkt);
+        TraceInputPacket("IPRX", "frame-start", g_netFrameCount, inPkt, 0,
+                         acceptedMask, changedMask, priorConfirmedMask);
     }
 }
 
@@ -1554,12 +1628,17 @@ extern "C" void Controller_OnFrameEnd()
             packetEndFrame = frame;
     }
     outPkt.start_frame = (uint32_t)(packetEndFrame - MAX_HISTORY + 1);
+    uint16_t validMask = 0;
     for (size_t i = 0; i < MAX_HISTORY; i++)
     {
         int32_t frame = (int32_t)outPkt.start_frame + (int32_t)i;
         uint32_t idx = (uint32_t)frame % RING_SIZE;
-        outPkt.inputs[i] = g_scheduledLocalFrame[idx] == frame
-            ? g_scheduledLocalInput[idx] : 0;
+        if (g_scheduledLocalFrame[idx] == frame) {
+            validMask |= (uint16_t)(1u << i);
+            outPkt.inputs[i] = g_scheduledLocalInput[idx];
+        } else {
+            outPkt.inputs[i] = 0;
+        }
     }
 
     if (!g_isResimulating && g_netFrameCount >= DESYNC_SKIP_FRAMES)
@@ -1586,6 +1665,17 @@ extern "C" void Controller_OnFrameEnd()
     // Fill frame advantage (GGPO-style) — tell the remote peer our local estimate.
     outPkt.frame_advantage = g_localFrameAdvantage;
     outPkt.flags           = 1;  // non-zero = real packet (seed packet has flags=0)
+
+    if (INPUT_PROVENANCE_TRACE) {
+        uint32_t executedIdx = (uint32_t)g_netFrameCount % RING_SIZE;
+        HookLog("IPSCHEDULE frame=%d delay=%d captured=%08X scheduledFrame=%d "
+                "scheduledValue=%08X executed=%08X\n",
+                g_netFrameCount, g_delayFrames, g_localPending, scheduledFrame,
+                g_scheduledLocalInput[scheduledIdx],
+                g_recordedLocalInput[executedIdx]);
+        TraceInputPacket("IPTX", "frame-end", g_netFrameCount, outPkt,
+                         validMask, 0, 0, 0);
+    }
 
     Netplay_SendPacket(outPkt);
 

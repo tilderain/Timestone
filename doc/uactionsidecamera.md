@@ -95,6 +95,23 @@ the request block can replay an already-consumed request.
 
 ## Rollback requirements
 
+Ordinary throws do not necessarily use Maya motion. In the 20260802_055706
+snapdump, `mIsMayaMotion` and `mReqMayaMotion` remain zero through the frame-4750
+camera split. The throw instead uses the normal tracking path described above.
+
+The camera also embeds `cAimInfo` at `+0xA0` with size `0x190`, ending at
+`+0x22F`. Its initialized tail ends at `+0x224`; `+0x225..+0x22F` is padding.
+The peer-specific values observed at `+0x228` in the 20260802_055706 dump are
+therefore not camera state. The control bytes at `+0x220..+0x224` diverge at
+frame 4737 before the normal throw-tracking update turns the mismatch into
+different position and target values.
+
+`cAimInfo::mMode` is at camera `+0xB0`. The original scalar ranges ended one
+range at `+0xAF` and resumed at `+0xB8`, so this field was captured but not
+restored. In the same dump it first differs at frame 4747 (`1` host, `0`
+client), before `cAimInfo::mState` at `+0xA8` differs at frame 4750 and the
+client camera stops advancing.
+
 The cinematic mode flags and their controlled state form one atomic rollback
 unit. Restoring `+0x588/+0x589` without the embedded work can produce either:
 
@@ -110,7 +127,8 @@ mReqMayaMotion = 1, request block already consumed
 
 which initializes motion from future or cleared request data.
 
-Rollback therefore restores the pointer-free ranges `+0x230..+0x28F`,
+Rollback therefore restores `cAimInfo::mMode`, the initialized `cAimInfo` tail
+through `+0x224`, followed by the ranges `+0x230..+0x28F`,
 `+0x2A0..+0x3BF`, `+0x3C8..+0x3CF`, and `+0x3D8..+0x3F7` together with the
 existing camera scalars and mode flags. The resources at `+0x290` and `+0x3C0`
 are pinned per snapshot with native reference counting. Parent pointers at

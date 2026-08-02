@@ -921,7 +921,7 @@ void NDJSON_SendResimNotify(int32_t startFrame, int32_t endFrame)
     packet.correctedTeam = Netplay_IsHost() ? 1 : 0;
     int32_t first = startFrame > 1 ? startFrame - 2 : 0;
     int count = 0;
-    for (int32_t frame = first; frame < endFrame + 2 && count < MAX_RESIM_FRAMES; ++frame) {
+    for (int32_t frame = first; frame < endFrame + 15 && count < MAX_RESIM_FRAMES; ++frame) {
         ResimFrameResult& result = packet.frames[count++];
         result.frame = frame;
         uint32_t liveIndex = (uint32_t)frame % 256;
@@ -1217,10 +1217,10 @@ extern "C" void Rollback_NotifyDesyncTriggered(int32_t frame)
 {
     if (g_pendingDesyncTriggerFrame >= 0) return;
     g_pendingDesyncTriggerFrame = frame;
-    g_pendingDesyncCaptureFrame = frame + 2;
+    g_pendingDesyncCaptureFrame = frame + 15;
     g_pendingDesyncCaptureWritten = false;
     HookLog("Desync: delaying pause and snapdump through frame %d\n",
-            frame + 2);
+            frame + 15);
 }
 
 extern "C" bool Rollback_ProcessDesyncDelay(int32_t currentFrame)

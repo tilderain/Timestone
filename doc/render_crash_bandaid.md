@@ -118,6 +118,11 @@ reconstructing entry arrays or forcing scheduler state to retired.
 - A version-checked vectored exception handler handles the null model result at
   `nDraw_Material__clone+0x1F` (`0x1405DCA7F`) and resumes at the native clone
   epilogue so the caller can use its existing fallback path.
+- A version-checked vectored exception handler handles the null optional cursor
+  returned while `uBtResultScoreVersus` initializes. At `0x14030A734`, native
+  code dereferences `uBtResultScoreVersus+0x248` despite the preceding lookup
+  accepting null; recovery skips that cursor dispatch and resumes at the native
+  epilogue (`0x14030A741`).
 
 The autotest-only hook that skipped `uScheduler__rebuildEntriesFromResource`
 was tested and removed. It avoided the immediate scheduler crash, but made the

@@ -39,6 +39,8 @@ static CutInSetVariantFn g_originalCutInSetVariant = nullptr;
 using CopyCharacterPositionFn = uint64_t(__fastcall*)(uint64_t, int, float, uint64_t);
 static CopyCharacterPositionFn g_originalCopyCharacterPosition = nullptr;
 static PVOID g_materialCloneRecoveryHandler = nullptr;
+static PVOID g_schedulerAllocationRecoveryHandler = nullptr;
+static PVOID g_resultScoreCursorRecoveryHandler = nullptr;
 
 static void __fastcall hkMtObjectSetFlag(uint64_t object, uint8_t enabled)
 {
@@ -159,6 +161,68 @@ static LONG CALLBACK MaterialCloneRecoveryHandler(EXCEPTION_POINTERS* info)
     context->Rax = 0;
     context->Rdi = 0;
     context->Rip = (DWORD64)_addr(0x1405DCC8E);
+    return EXCEPTION_CONTINUE_EXECUTION;
+}
+
+static LONG CALLBACK SchedulerAllocationRecoveryHandler(EXCEPTION_POINTERS* info)
+{
+    if (!info || !info->ExceptionRecord || !info->ContextRecord) {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+
+    const EXCEPTION_RECORD* exception = info->ExceptionRecord;
+    CONTEXT* context = info->ContextRecord;
+    if (exception->ExceptionCode != EXCEPTION_ACCESS_VIOLATION ||
+        exception->NumberParameters < 2 ||
+        exception->ExceptionInformation[0] != 1 ||
+        exception->ExceptionInformation[1] != 0 ||
+        context->Rbx > UINT64_MAX - 0x70 ||
+        !IsAccessibleRange(context->Rbx + 0x40, 0x30)) {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+
+    const DWORD64 firstEntriesWrite = (DWORD64)_addr(0x14050F0B5);
+    const DWORD64 typeEntriesWrite = (DWORD64)_addr(0x14050F169);
+    if (context->Rip == firstEntriesWrite && context->Rdx == 0) {
+        // The native allocator returned null for count * 0x68 bytes. Publish an
+        // empty scheduler and resume where RDI is restored before the epilogue.
+        *(uint32_t*)(context->Rbx + 0x40) = 0;
+        *(uint64_t*)(context->Rbx + 0x58) = 0;
+        *(uint64_t*)(context->Rbx + 0x60) = 0;
+        *(uint32_t*)(context->Rbx + 0x68) = 0;
+        context->Rip = (DWORD64)_addr(0x14050F13A);
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
+    if (context->Rip == typeEntriesWrite && context->Rax == 0) {
+        // The main entries remain valid; only the optional type-2 index failed.
+        *(uint64_t*)(context->Rbx + 0x60) = 0;
+        *(uint32_t*)(context->Rbx + 0x68) = 0;
+        context->Rip = (DWORD64)_addr(0x14050F176);
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
+static LONG CALLBACK ResultScoreCursorRecoveryHandler(EXCEPTION_POINTERS* info)
+{
+    if (!info || !info->ExceptionRecord || !info->ContextRecord) {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+
+    const EXCEPTION_RECORD* exception = info->ExceptionRecord;
+    CONTEXT* context = info->ContextRecord;
+    if (exception->ExceptionCode != EXCEPTION_ACCESS_VIOLATION ||
+        exception->NumberParameters < 2 ||
+        exception->ExceptionInformation[0] != 0 ||
+        exception->ExceptionInformation[1] != 0 ||
+        context->Rip != (DWORD64)_addr(0x14030A734) || context->Rcx != 0) {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+
+    // uBtResultScoreVersus setup stores a failed optional primitive lookup at
+    // +0x248, then dispatches through it without a null check. Skip only that
+    // cursor setup call and continue through the native epilogue.
+    context->Rip = (DWORD64)_addr(0x14030A741);
     return EXCEPTION_CONTINUE_EXECUTION;
 }
 
@@ -458,7 +522,30 @@ void Rollback_InitNativeNullGuards()
         g_materialCloneRecoveryHandler = AddVectoredExceptionHandler(
             1, &MaterialCloneRecoveryHandler);
         HookLog("Rollback: material clone recovery %s\n",
-                g_materialCloneRecoveryHandler ? "installed" : "failed to install");
+                 g_materialCloneRecoveryHandler ? "installed" : "failed to install");
+    }
+
+    if (!g_schedulerAllocationRecoveryHandler) {
+        g_schedulerAllocationRecoveryHandler = AddVectoredExceptionHandler(
+            1, &SchedulerAllocationRecoveryHandler);
+        HookLog("Rollback: scheduler allocation recovery %s\n",
+                g_schedulerAllocationRecoveryHandler
+                     ? "installed" : "failed to install");
+    }
+
+    if (!g_resultScoreCursorRecoveryHandler) {
+        static constexpr uint8_t EXPECTED_CURSOR_DEREFERENCE[] = {
+            0x48, 0x8B, 0x01,
+        };
+        const void* fault = (const void*)_addr(0x14030A734);
+        if (memcmp(fault, EXPECTED_CURSOR_DEREFERENCE,
+                   sizeof(EXPECTED_CURSOR_DEREFERENCE)) == 0) {
+            g_resultScoreCursorRecoveryHandler = AddVectoredExceptionHandler(
+                1, &ResultScoreCursorRecoveryHandler);
+        }
+        HookLog("Rollback: result score cursor recovery %s\n",
+                 g_resultScoreCursorRecoveryHandler
+                     ? "installed" : "failed to install");
     }
 
 }

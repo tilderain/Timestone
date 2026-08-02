@@ -89,18 +89,33 @@ static constexpr uint32_t UACTION_CAMERA_MOTION_RESOURCE_OFFSET = 0x290;
 static constexpr uint32_t UACTION_CAMERA_MOTION_PARENT_OFFSET = 0x298;
 static constexpr uint32_t UACTION_CAMERA_REQUEST_RESOURCE_OFFSET = 0x3C0;
 static constexpr uint32_t UACTION_CAMERA_REQUEST_PARENT_OFFSET = 0x3D0;
+static constexpr uintptr_t DTI_UACTION_SIDE_CAMERA = 0x140D44268;
 
 using Region = RollbackRegion;
 using SnapshotSlot = RollbackSnapshotSlot;
 RollbackSnapshotSlot g_rollbackSnapshotSlots[ROLLBACK_WINDOW];
 #define g_slots g_rollbackSnapshotSlots
 
+template <size_t SlotSize, size_t LocalInputOffset, size_t RemoteInputOffset>
+void RollbackSnapshotLayoutGuard<SlotSize, LocalInputOffset, RemoteInputOffset>::Require()
+{
+}
+
+template struct RollbackSnapshotLayoutGuard<
+    sizeof(RollbackSnapshotSlot),
+    offsetof(RollbackSnapshotSlot, localInput),
+    offsetof(RollbackSnapshotSlot, remoteInput)>;
+
 static void ReleaseActionSideCameraState(RollbackSnapshotSlot& slot)
 {
     auto releaseRef = (void(__fastcall*)(void*))_addr(FN_CRESOURCE_RELEASE_REF);
-    if (slot.actionSideCamera.motionResource)
+    if (slot.actionSideCamera.motionResource &&
+        IsAccessibleRange((uint64_t)slot.actionSideCamera.motionResource, 0x50) &&
+        HasCallableDtiVirtual(slot.actionSideCamera.motionResource))
         releaseRef(slot.actionSideCamera.motionResource);
-    if (slot.actionSideCamera.requestResource)
+    if (slot.actionSideCamera.requestResource &&
+        IsAccessibleRange((uint64_t)slot.actionSideCamera.requestResource, 0x50) &&
+        HasCallableDtiVirtual(slot.actionSideCamera.requestResource))
         releaseRef(slot.actionSideCamera.requestResource);
     slot.actionSideCamera = {};
 }
@@ -111,7 +126,11 @@ static void CaptureActionSideCameraState(RollbackSnapshotSlot& slot)
 
     uint64_t sCamera = *(uint64_t*)_addr(PTR_SCAMERA);
     uint64_t camera = sCamera ? *(uint64_t*)(sCamera + 0x58) : 0;
-    if (!camera) return;
+    if (!camera || !IsAccessibleRange(camera, 0x590) ||
+        !HasCallableDtiVirtual((void*)camera) ||
+        GetObjectDti(camera) != (uint64_t)_addr(DTI_UACTION_SIDE_CAMERA)) {
+        return;
+    }
 
     slot.actionSideCamera.motionResource =
         *(void**)(camera + UACTION_CAMERA_MOTION_RESOURCE_OFFSET);
@@ -121,6 +140,17 @@ static void CaptureActionSideCameraState(RollbackSnapshotSlot& slot)
         *(void**)(camera + UACTION_CAMERA_REQUEST_RESOURCE_OFFSET);
     slot.actionSideCamera.requestParent =
         *(void**)(camera + UACTION_CAMERA_REQUEST_PARENT_OFFSET);
+
+    if (slot.actionSideCamera.motionResource &&
+        (!IsAccessibleRange((uint64_t)slot.actionSideCamera.motionResource, 0x50) ||
+         !HasCallableDtiVirtual(slot.actionSideCamera.motionResource))) {
+        slot.actionSideCamera.motionResource = nullptr;
+    }
+    if (slot.actionSideCamera.requestResource &&
+        (!IsAccessibleRange((uint64_t)slot.actionSideCamera.requestResource, 0x50) ||
+         !HasCallableDtiVirtual(slot.actionSideCamera.requestResource))) {
+        slot.actionSideCamera.requestResource = nullptr;
+    }
 
     auto addRef = (void(__fastcall*)(void*))_addr(FN_MTOBJECT_ADD_REF);
     if (slot.actionSideCamera.motionResource)
@@ -801,7 +831,9 @@ static int BuildRegionsUncached(Region* regions, int maxRegions,
     //     drift (desync) that never self-corrects.  sCamera viewport[0]+8
     //     holds the pointer (confirmed via sCamera__refreshViewsForBoundary).
     {
-        if (camUnit) {
+        if (camUnit && IsAccessibleRange(camUnit, 0x590) &&
+            HasCallableDtiVirtual((void*)camUnit) &&
+            GetObjectDti(camUnit) == (uint64_t)_addr(DTI_UACTION_SIDE_CAMERA)) {
             read.operator()<uint64_t>(camUnit, true);
             uint64_t dtiPtr  = GetObjectDti(camUnit);
             uint32_t camSize = DecodeDtiSize(dtiPtr);
@@ -1351,10 +1383,18 @@ void Rollback_UpdateRemoteInput(int32_t frame, uint32_t input)
     SnapshotSlot& slot = g_slots[slotIdx];
     if (slot.data && slot.size > 0 && slot.regionCount > 0 && slot.frame == frame)
     {
+        uint32_t previous = slot.remoteInput;
         slot.remoteInput = input;
 #if ROLLBACK_SNAPDUMP_ENABLED
         SnapDump_UpdateInputs(frame, slot.localInput, input);
 #endif
+        HookLog("IPSNAPREMOTE frame=%d applied=1 old=%08X new=%08X local=%08X\n",
+                frame, previous, input, slot.localInput);
+    }
+    else
+    {
+        HookLog("IPSNAPREMOTE frame=%d applied=0 new=%08X slotFrame=%d\n",
+                frame, input, slot.frame);
     }
 }
 
@@ -1366,11 +1406,23 @@ extern "C" void Rollback_UpdateSnapshotInputs(int32_t frame, uint32_t localInput
 
     if (slot.frame == frame && slot.data && slot.size > 0)
     {
+        uint32_t previousLocal = slot.localInput;
+        uint32_t previousRemote = slot.remoteInput;
         slot.localInput = localInput;
         slot.remoteInput = remoteInput;
 #if ROLLBACK_SNAPDUMP_ENABLED
         SnapDump_UpdateInputs(frame, localInput, remoteInput);
 #endif
+        HookLog("IPSNAP frame=%d resim=%d applied=1 oldLocal=%08X oldRemote=%08X "
+                "newLocal=%08X newRemote=%08X\n",
+                frame, g_isResimulating ? 1 : 0, previousLocal, previousRemote,
+                localInput, remoteInput);
+    }
+    else
+    {
+        HookLog("IPSNAP frame=%d resim=%d applied=0 local=%08X remote=%08X slotFrame=%d\n",
+                frame, g_isResimulating ? 1 : 0, localInput, remoteInput,
+                slot.frame);
     }
 }
 

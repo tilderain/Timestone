@@ -144,6 +144,23 @@ struct RollbackSnapshotSlot {
     RollbackActionSideCameraState actionSideCamera;
 };
 
+// Encode the slot ABI into a required linker symbol. Translation units built
+// against a different slot stride or input offset cannot link together.
+template <size_t SlotSize, size_t LocalInputOffset, size_t RemoteInputOffset>
+struct RollbackSnapshotLayoutGuard {
+    static void Require();
+};
+
+using CurrentRollbackSnapshotLayoutGuard = RollbackSnapshotLayoutGuard<
+    sizeof(RollbackSnapshotSlot),
+    offsetof(RollbackSnapshotSlot, localInput),
+    offsetof(RollbackSnapshotSlot, remoteInput)>;
+
+inline void Rollback_RequireCurrentSnapshotLayout()
+{
+    CurrentRollbackSnapshotLayoutGuard::Require();
+}
+
 extern RollbackSnapshotSlot g_rollbackSnapshotSlots[ROLLBACK_WINDOW];
 
 int Rollback_BuildRegions(RollbackRegion* regions, int maxRegions);

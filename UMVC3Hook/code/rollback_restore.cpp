@@ -86,6 +86,7 @@ static constexpr uint32_t SEFFECT_LAST_CATEGORY = 16;
 static constexpr int MAX_REGIONS = ROLLBACK_MAX_REGIONS;
 static constexpr size_t SHITSOLVER_SIZE = 0x3808C;
 static constexpr uint64_t MT_DTI_VTABLE = 0x140A69ED8;
+static constexpr uintptr_t DTI_UACTION_SIDE_CAMERA = 0x140D44268;
 static constexpr size_t SHITSOLVER_DATA_OFF = 0x58;
 
 using SnapshotRange = RollbackSnapshotRange;
@@ -96,11 +97,18 @@ static constexpr SnapshotRange UACTION_CAMERA_SCALAR_RESTORE_RANGES[] = {
     // bounds. Restore the scalar payload after preserving camera-owned links.
     {0x50, 0x50},
     {0x80, 0x30},
+    // cAimInfo::mMode is isolated between its state header and reference
+    // fields. Leaving it live selects a different tracking mode after a throw
+    // camera command is replayed during re-simulation.
+    {0xB0, 0x04},
     {0xB8, 0x30},
     {0xF0, 0x40},
     {0x140, 0x40},
     {0x180, 0x40},
-    {0x1C0, 0x40},
+    // Complete the embedded cAimInfo through its initialized tail at +0x224.
+    // Its final interpolation flags drive ordinary throw tracking even when
+    // Maya motion is inactive; +0x225..+0x22F is tail padding.
+    {0x1C0, 0x65},
     // Embedded cMayaMotionWork used by scripted throw cameras. Preserve the
     // reference-counted resource at +0x290 and character pointer at +0x298.
     {0x230, 0x60},
@@ -863,6 +871,8 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
 
 void Rollback_RestoreSnapshot(int32_t frame)
 {
+    Rollback_RequireCurrentSnapshotLayout();
+
     const uint64_t profileStart = Profile_Now();
     int slotIdx = frame % ROLLBACK_WINDOW;
     if (slotIdx < 0) slotIdx += ROLLBACK_WINDOW;
@@ -952,6 +962,10 @@ void Rollback_RestoreSnapshot(int32_t frame)
         }
 
         auto replaceResource = [](void** field, void* restored) {
+            if (restored &&
+                (!IsAccessibleRange((uint64_t)restored, 0x50) ||
+                 !HasCallableDtiVirtual(restored)))
+                restored = nullptr;
             if (*field == restored) return;
             auto addRef = (void(__fastcall*)(void*))_addr(FN_MTOBJECT_ADD_REF);
             auto releaseRef =
@@ -959,7 +973,10 @@ void Rollback_RestoreSnapshot(int32_t frame)
             if (restored) addRef(restored);
             void* live = *field;
             *field = restored;
-            if (live) releaseRef(live);
+            if (live && IsAccessibleRange((uint64_t)live, 0x50) &&
+                HasCallableDtiVirtual(live)) {
+                releaseRef(live);
+            }
         };
         replaceResource((void**)(camera + 0x290),
                         slot.actionSideCamera.motionResource);
@@ -1142,8 +1159,11 @@ void Rollback_RestoreSnapshot(int32_t frame)
             }
         } else if ((uint64_t)slot.regions[i].ptr ==
                    (*(uint64_t*)_addr(PTR_SCAMERA) ?
-                    *(uint64_t*)(*(uint64_t*)_addr(PTR_SCAMERA) + 0x58) : 0) &&
-                   slot.regions[i].size >= 0x500) {
+                     *(uint64_t*)(*(uint64_t*)_addr(PTR_SCAMERA) + 0x58) : 0) &&
+                   slot.regions[i].size >= 0x500 &&
+                   HasCallableDtiVirtual(slot.regions[i].ptr) &&
+                   GetObjectDti((uint64_t)slot.regions[i].ptr) ==
+                       (uint64_t)_addr(DTI_UACTION_SIDE_CAMERA)) {
             // Restore camera gameplay and throw-cinematic state while retaining
             // valid native ownership for its resource and character references.
             restoreActionSideCamera((uint64_t)slot.regions[i].ptr,

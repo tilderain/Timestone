@@ -133,6 +133,8 @@ void Rollback_ResetReSimulation()
 
 void Rollback_ReSimulate(int32_t startFrame, int32_t endFrame)
 {
+    Rollback_RequireCurrentSnapshotLayout();
+
     if (startFrame >= endFrame) return;
     if (Netplay_IsActive() &&
         (FrameStepper_IsMatchRestartPending() ||

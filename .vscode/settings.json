@@ -3,6 +3,8 @@
 		"*.nut": "c",
 		"*.td": "c",
 		"system_error": "cpp",
-		"*.tcc": "cpp"
+		"*.tcc": "cpp",
+		"hash_map": "cpp",
+		"algorithm": "cpp"
 	}
 }
