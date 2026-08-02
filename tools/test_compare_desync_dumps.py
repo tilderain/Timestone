@@ -115,6 +115,39 @@ class CompareSnapDumpsTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "truncated dump header"):
             compare.load_dump(self.path_a)
 
+    def test_loads_v3_complete_shot_body_and_collision(self):
+        image_base = 0x140000000
+        header = compare.HEADER.pack(
+            compare.MAGIC, 3, compare.HEADER.size, 1, 10, 1,
+            image_base, 0x2000000, 0, b"test\0".ljust(41, b"\0"), 0, b"\0" * 6,
+        )
+        body = bytes(range(64))
+        primitive_data = bytes(range(compare.SHOT_PRIMITIVE_DATA_SIZE))
+        primitive = compare.SHOT_PRIMITIVE_V3.pack(
+            2, 3, 1, 7, 1, b"\0" * 2, 9, 0x10,
+            0x1111, 0x2222, 0x20, -1,
+        ) + primitive_data
+        record_size = compare.SHOT_V3.size + 48 + len(body) + len(primitive)
+        shot = compare.SHOT_V3.pack(
+            record_size, 4, 1, 1, 0, 0, 99, 0x1000, image_base + 0x1230,
+            image_base + 0x4560, 0x55, 0x2000, 0x3000, 0x4000,
+            0x5000, image_base + 0x6000, 1, b"\0" * 7,
+            0x7000, image_base + 0x8000, 0, b"\0" * 7,
+            -2, 0x9000, 3, 0xA000, 0, len(body), 1, 0,
+        ) + bytes(range(48)) + body + primitive
+        frame = compare.FRAME.pack(
+            10, 0x11, 0x22, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, b"\0" * 7,
+        )
+        self.path_a.write_bytes(header + frame + shot)
+
+        dump = compare.load_dump(self.path_a)
+        parsed = dump.frames[10].shots[0]
+        self.assertEqual(99, parsed["spawn_sequence"])
+        self.assertEqual(body, parsed["body"])
+        self.assertEqual(1, len(parsed["collision_primitives"]))
+        self.assertEqual(primitive_data[:0x24],
+                         parsed["collision_primitives"][0]["geometry"])
+
     def test_finds_latest_complete_snapdump_pair(self):
         directory = Path(self.tempdir.name)
         old_host = directory / "desync_20260729_062239_host_f425.usdp"

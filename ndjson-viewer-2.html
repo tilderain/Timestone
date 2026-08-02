@@ -108,7 +108,7 @@ td code { color:#00d4ff; word-break:break-all; }
 </main>
 <script>
 'use strict';
-const MAGIC = 0x50445355, HEADER_SIZE = 96, FRAME_SIZE = 72, REGION_V1_SIZE = 48, REGION_V2_SIZE = 112;
+const MAGIC = 0x50445355, HEADER_SIZE = 96, FRAME_SIZE = 72, REGION_V1_SIZE = 48, REGION_V2_SIZE = 112, SHOT_V3_SIZE = 164, SHOT_PRIMITIVE_V3_SIZE = 160;
 const ROLE = {0:'offline',1:'host',2:'client'};
 const state = { dumps:[], frames:[], index:0, current:null, arenaView:null, playing:false, playTimer:null };
 const $ = id => document.getElementById(id);
@@ -144,7 +144,7 @@ function decodeXorRle(encoded, previous, size) {
 function parseUsdp(file, fileName='snapdump.usdp') {
   const view=new DataView(file), magic=u32(view,0), version=u32(view,4), headerSize=u32(view,8);
   if (magic !== MAGIC) throw Error('Not a UMVC3 snapdump');
-  if (version !== 1 && version !== 2) throw Error('Unsupported snapdump version '+version);
+  if (version !== 1 && version !== 2 && version !== 3) throw Error('Unsupported snapdump version '+version);
   if (headerSize < HEADER_SIZE) throw Error('Invalid snapdump header size');
   const frameCount=u32(view,12), trigger=i32(view,16), role=u32(view,20), imageBase=u64(view,24), imageSize=u64(view,32);
   const commit=text(readBytes(view,48,41)), frames=[], byFrame=new Map(); let at=headerSize, previous=null;
@@ -163,7 +163,26 @@ function parseUsdp(file, fileName='snapdump.usdp') {
     let data;
     if(encoding===0) data=copyBytes(payload); else if(encoding===1) data=decodeXorRle(new DataView(payload.buffer,payload.byteOffset,payload.byteLength),previous,rawSize); else throw Error('Unknown snapshot encoding '+encoding);
     if(data.length !== rawSize) throw Error('Decoded snapshot size mismatch');
-    const frame={number,local,remote,regions,data,shots,effects,clones,models,snapshotHash,manifestHash}; frames.push(frame); byFrame.set(number,frame); previous=data;
+    const shotRecords=[];
+    if(version>=3) for(let shotIndex=0;shotIndex<shots;shotIndex++) {
+      if(at+SHOT_V3_SIZE>view.byteLength) throw Error(`Truncated frame ${number} shot header`);
+      const start=at, recordSize=u32(view,at), slotId=u32(view,at+4), kind=u8(view,at+8), hasRng=!!u8(view,at+9), hasZireitou=!!u8(view,at+10), spawnSequence=u64(view,at+12), address=u64(view,at+20), dti=u64(view,at+28), vtable=u64(view,at+36), initParam=u64(view,at+44), posData=u64(view,at+52), owner=u64(view,at+60), element=u64(view,at+68), objectRef1=u64(view,at+76), objectRef1Dti=u64(view,at+84), objectRef1Active=!!u8(view,at+92), objectRef2=u64(view,at+100), objectRef2Dti=u64(view,at+108), objectRef2Active=!!u8(view,at+116), exA9=i32(view,at+124), exA10=u64(view,at+128), exA11=i32(view,at+136), exA12=u64(view,at+140), bodySize=u32(view,at+152), primitiveCount=u32(view,at+156); at+=SHOT_V3_SIZE;
+      let preSpawnRng=null;
+      if(hasRng) { if(at+48>view.byteLength) throw Error('Truncated shot RNG'); preSpawnRng={global:copyBytes(readBytes(view,at,16)),effect:copyBytes(readBytes(view,at+16,16)),owner:copyBytes(readBytes(view,at+32,16))}; at+=48; }
+      if(at+bodySize>view.byteLength) throw Error('Truncated uShot body');
+      const body=copyBytes(readBytes(view,at,bodySize)); at+=bodySize;
+      const collisions=[];
+      for(let primitiveIndex=0;primitiveIndex<primitiveCount;primitiveIndex++) {
+        if(at+SHOT_PRIMITIVE_V3_SIZE>view.byteLength) throw Error('Truncated shot collision primitive');
+        const primitiveView=new DataView(view.buffer,view.byteOffset+at,SHOT_PRIMITIVE_V3_SIZE), metadataType=u32(primitiveView,8), geometryOffset=48;
+        const vec=offset=>[finiteFloat(primitiveView,offset),finiteFloat(primitiveView,offset+4),finiteFloat(primitiveView,offset+8)];
+        collisions.push({slot:u32(primitiveView,0),index:u32(primitiveView,4),metadataType,geometryType:u8(primitiveView,12),hasSourceGeometry:!!u8(primitiveView,13),collisionKind:u32(primitiveView,16),flags:u32(primitiveView,20),parent0:u64(primitiveView,24),parent1:u64(primitiveView,32),parent0ShotOffset:i32(primitiveView,40),parent1ShotOffset:i32(primitiveView,44),position:vec(geometryOffset),endPosition:vec(geometryOffset+0x10),radius:Math.abs(finiteFloat(primitiveView,geometryOffset+(metadataType===1?0x20:0x0C))),geometry:copyBytes(readBytes(primitiveView,geometryOffset,0x24)),parentState:copyBytes(readBytes(primitiveView,geometryOffset+0x24,0x0C)),localGeometry:copyBytes(readBytes(primitiveView,geometryOffset+0x30,0x20)),sourceGeometry:copyBytes(readBytes(primitiveView,geometryOffset+0x50,0x20))});
+        at+=SHOT_PRIMITIVE_V3_SIZE;
+      }
+      if(recordSize!==at-start) throw Error(`Frame ${number} shot ${shotIndex}: record size mismatch`);
+      shotRecords.push({slotId,kind,hasZireitou,spawnSequence,address,dti,vtable,initParam,posData,owner,element,objectRef1,objectRef1Dti,objectRef1Active,objectRef2,objectRef2Dti,objectRef2Active,exA9,exA10,exA11,exA12,preSpawnRng,body,collisions});
+    }
+    const frame={number,local,remote,regions,data,shots:shotRecords,shotCount:shots,effects,clones,models,snapshotHash,manifestHash}; frames.push(frame); byFrame.set(number,frame); previous=data;
   }
   return {name:fileName, role:ROLE[role] || `role ${role}`, trigger,imageBase,imageSize,commit,frames,byFrame};
 }
@@ -295,6 +314,26 @@ function decodeFighters(dump,frame) {
   return result;
 }
 function fighterKey(fighter) { return `${fighter.team}:${fighter.slot}`; }
+function decodeShots(dump,frame) {
+  if(!frame?.shots || !Array.isArray(frame.shots)) return [];
+  return frame.shots.map(shot=>{
+    const bodyView=new DataView(shot.body.buffer,shot.body.byteOffset,shot.body.byteLength);
+    const bodyVec=offset=>offset+12<=bodyView.byteLength?vector3(bodyView,offset):[0,0,0];
+    return {...shot,role:dump.role,state:bodyView.byteLength>=0x14?u32(bodyView,0x10):0,position:bodyVec(0x50),runtimePosition:bodyVec(0x418),timer:bodyView.byteLength>=0x1F64?finiteFloat(bodyView,0x1F60):0,lifeFrame:bodyView.byteLength>=0x207C?finiteFloat(bodyView,0x2078):0,velocity:bodyVec(0x20C0),speed:bodyView.byteLength>=0x20D4?finiteFloat(bodyView,0x20D0):0,step:bodyView.byteLength>=0x2130?u32(bodyView,0x212C):0};
+  });
+}
+function shotKey(shot) { return String(shot.spawnSequence); }
+function shotPairs(frameNumber) {
+  const hostDump=state.dumps.find(dump=>dump.role==='host')||state.dumps[0],clientDump=state.dumps.find(dump=>dump.role==='client')||state.dumps[1];
+  const host=hostDump?decodeShots(hostDump,hostDump.byFrame.get(frameNumber)):[],client=clientDump?decodeShots(clientDump,clientDump.byFrame.get(frameNumber)):[];
+  const hostMap=new Map(host.map(shot=>[shotKey(shot),shot])),clientMap=new Map(client.map(shot=>[shotKey(shot),shot]));
+  return Array.from(new Set([...hostMap.keys(),...clientMap.keys()])).sort((a,b)=>Number(a)-Number(b)).map(key=>({key,host:hostMap.get(key)||null,client:clientMap.get(key)||null}));
+}
+function shotBodyHex(body) {
+  const lines=[];
+  for(let offset=0;offset<body.length;offset+=16) lines.push(`${hex(offset,4).slice(2)}  ${bytesHex(body.slice(offset,offset+16))}`);
+  return lines.join('\n');
+}
 function fighterPairs(frameNumber) {
   const hostDump=state.dumps.find(dump=>dump.role==='host')||state.dumps[0];
   const clientDump=state.dumps.find(dump=>dump.role==='client')||state.dumps[1];
@@ -446,17 +485,25 @@ function drawArena(frameNumber) {
   canvas.width=Math.round(width*dpr); canvas.height=Math.round(height*dpr); context.setTransform(dpr,0,0,dpr,0,0); context.clearRect(0,0,width,height);
   const fighters=[];
   state.dumps.slice(0,2).forEach(dump=>fighters.push(...decodeFighters(dump,dump.byFrame.get(frameNumber))));
+  const shots=[];
+  state.dumps.slice(0,2).forEach(dump=>shots.push(...decodeShots(dump,dump.byFrame.get(frameNumber))));
   const cameraData=state.dumps.slice(0,2).map(dump=>({dump,data:describeCamera(dump.byFrame.get(frameNumber))}));
   const visualMismatches=compareVisualFighters(frameNumber), mismatchByKey=new Map(visualMismatches.map(item=>[item.key,item]));
   const visible=fighters.filter(fighter=>$('showBench').checked||fighter.active);
-  if(!visible.length) { state.arenaView={cameraData}; context.fillStyle='#8b949e';context.font='16px system-ui';context.textAlign='center';context.fillText('No decoded character regions for this frame',width/2,height/2);return; }
-  let minX=Math.min(...visible.map(f=>f.pos[0])),maxX=Math.max(...visible.map(f=>f.pos[0])),minY=Math.min(0,...visible.map(f=>f.pos[1])),maxY=Math.max(100,...visible.map(f=>f.pos[1]));
+  if(!visible.length&&!shots.length) { state.arenaView={cameraData}; context.fillStyle='#8b949e';context.font='16px system-ui';context.textAlign='center';context.fillText('No decoded characters or shots for this frame',width/2,height/2);return; }
+  const positions=[...visible.map(f=>f.pos),...shots.map(shot=>shot.position)];
+  let minX=Math.min(...positions.map(pos=>pos[0])),maxX=Math.max(...positions.map(pos=>pos[0])),minY=Math.min(0,...positions.map(pos=>pos[1])),maxY=Math.max(100,...positions.map(pos=>pos[1]));
   for(const fighter of visible) for(const shape of fighter.collision) {
     if(shape.shape==='capsule') {
       minX=Math.min(minX,shape.a[0]-shape.radius,shape.b[0]-shape.radius);maxX=Math.max(maxX,shape.a[0]+shape.radius,shape.b[0]+shape.radius);minY=Math.min(minY,shape.a[1]-shape.radius,shape.b[1]-shape.radius);maxY=Math.max(maxY,shape.a[1]+shape.radius,shape.b[1]+shape.radius);
     } else {
       minX=Math.min(minX,shape.center[0]-shape.radius);maxX=Math.max(maxX,shape.center[0]+shape.radius);minY=Math.min(minY,shape.center[1]-shape.radius);maxY=Math.max(maxY,shape.center[1]+shape.radius);
     }
+  }
+  for(const shot of shots) for(const shape of shot.collisions) {
+    if(!(shape.radius>0&&shape.radius<100000)) continue;
+    minX=Math.min(minX,shape.position[0]-shape.radius);maxX=Math.max(maxX,shape.position[0]+shape.radius);minY=Math.min(minY,shape.position[1]-shape.radius);maxY=Math.max(maxY,shape.position[1]+shape.radius);
+    if(shape.metadataType===1) { minX=Math.min(minX,shape.endPosition[0]-shape.radius);maxX=Math.max(maxX,shape.endPosition[0]+shape.radius);minY=Math.min(minY,shape.endPosition[1]-shape.radius);maxY=Math.max(maxY,shape.endPosition[1]+shape.radius); }
   }
   const rangeX=Math.max(300,maxX-minX),rangeY=Math.max(180,maxY-minY),padding=54,scale=Math.min((width-padding*2)/rangeX,(height-padding*2)/rangeY)*.88,cx=(minX+maxX)/2,cy=(minY+maxY)/2;
   state.arenaView={camera:[cx,cy],bounds:[minX,maxX,minY,maxY],scale,cameraData};
@@ -492,6 +539,17 @@ function drawArena(frameNumber) {
       context.globalAlpha=fighter.active?.7:.22;context.stroke();context.restore();
     }
     context.save();context.globalAlpha=fighter.active?1:.35;context.strokeStyle=mismatch?'#ff7b72':color;context.fillStyle=color;context.lineWidth=mismatch?4:(fighter.active?3:1.5);context.setLineDash(fighter.role==='client'?[6,3]:[]);context.beginPath();context.arc(x,y,fighter.active?9:6,0,Math.PI*2);fighter.role==='host'||fighter.role==='offline'?context.fill():context.stroke();context.setLineDash([]);context.font=`${fighter.active?'bold ':''}11px ui-monospace`;context.textAlign='center';context.fillStyle=mismatch?'#ff7b72':color;context.fillText(`${fighter.role[0].toUpperCase()} P${fighter.team+1}:${fighter.slot}${fighter.active?' POINT':''}${mismatch?' DESYNC':''}`,x,y-15);context.restore();
+  }
+  for(const shot of shots) {
+    const color=shot.role==='client'?'#c084fc':'#fbbf24';
+    for(const shape of shot.collisions) {
+      if(!$('showCollision').checked||!(shape.radius>0&&shape.radius<100000)) continue;
+      const a=screen(shape.position[0],shape.position[1]),radius=Math.max(1,shape.radius*scale);
+      context.save();context.strokeStyle=color;context.lineWidth=1.5;context.setLineDash(shot.role==='client'?[5,3]:[]);context.beginPath();
+      if(shape.metadataType===1) { const b=screen(shape.endPosition[0],shape.endPosition[1]);context.moveTo(...a);context.lineTo(...b);context.stroke();context.beginPath();context.arc(...a,radius,0,Math.PI*2);context.moveTo(b[0]+radius,b[1]);context.arc(...b,radius,0,Math.PI*2); } else context.arc(...a,radius,0,Math.PI*2);
+      context.stroke();context.restore();
+    }
+    const point=screen(shot.position[0],shot.position[1]);context.save();context.fillStyle=color;context.strokeStyle=color;context.setLineDash(shot.role==='client'?[4,2]:[]);context.beginPath();context.rect(point[0]-5,point[1]-5,10,10);shot.role==='client'?context.stroke():context.fill();context.setLineDash([]);context.font='bold 10px ui-monospace';context.textAlign='center';context.fillText(`${shot.role[0].toUpperCase()} shot #${shot.spawnSequence}`,point[0],point[1]-10);context.restore();
   }
 }
 function compareFrames(a,b) {
@@ -560,6 +618,36 @@ function update() {
     const distance=host&&client?Math.hypot(...host.pos.map((value,index)=>value-client.pos[index])):null;
     section+=`<tr class="${posSame?'':'mismatch-bg'}"><th>Δ Mag</th><td colspan="3" class="${posSame?'ok':'bad'}">${distance===null?'—':distance.toFixed(6)}</td></tr></table></div>`;
     $('inspector').innerHTML+=section;
+  }
+  const shots=shotPairs(frame.number);
+  if(shots.length) {
+    let shotSection='<div class="section"><h2>uShots</h2>';
+    for(const pair of shots) {
+      const host=pair.host,client=pair.client,shot=host||client;
+      const bodySame=!!host&&!!client&&!byteDiff(host.body,client.body),positionSame=!!host&&!!client&&host.position.every((value,index)=>Math.abs(value-client.position[index])<=.001),collisionSame=!!host&&!!client&&host.collisions.length===client.collisions.length&&host.collisions.every((value,index)=>{const other=client.collisions[index];return value.slot===other.slot&&value.index===other.index&&value.metadataType===other.metadataType&&value.radius===other.radius&&value.position.every((coordinate,axis)=>Math.abs(coordinate-other.position[axis])<=.001)&&value.endPosition.every((coordinate,axis)=>Math.abs(coordinate-other.endPosition[axis])<=.001);});
+      const same=bodySame&&collisionSame;
+      const fmtVec=value=>value?value.map(number=>number.toFixed(4)).join(', '):'—';
+      shotSection+=`<div class="char-header ${same?'':'bad'}">Shot #${shot.spawnSequence} ${same?'':'DESYNC'}</div><table><tr><th>Field</th><th>Host</th><th>Client</th><th>Match</th></tr>`;
+      const row=(label,a,b,matched)=>`<tr class="${matched?'':'mismatch-bg'}"><th>${label}</th><td>${a}</td><td>${b}</td><td class="${matched?'ok':'bad'}">${matched?'✓':'✗'}</td></tr>`;
+      shotSection+=row('Position',fmtVec(host?.position),fmtVec(client?.position),positionSame);
+      shotSection+=row('Runtime position',fmtVec(host?.runtimePosition),fmtVec(client?.runtimePosition),!!host&&!!client&&host.runtimePosition.every((v,i)=>Math.abs(v-client.runtimePosition[i])<=.001));
+      shotSection+=row('Velocity',fmtVec(host?.velocity),fmtVec(client?.velocity),!!host&&!!client&&host.velocity.every((v,i)=>Math.abs(v-client.velocity[i])<=.001));
+      shotSection+=row('State',host?hex(host.state):'—',client?hex(client.state):'—',!!host&&!!client&&host.state===client.state);
+      shotSection+=row('Timer',host?host.timer.toFixed(4):'—',client?client.timer.toFixed(4):'—',!!host&&!!client&&Math.abs(host.timer-client.timer)<=.001);
+      shotSection+=row('Life',host?host.lifeFrame.toFixed(4):'—',client?client.lifeFrame.toFixed(4):'—',!!host&&!!client&&Math.abs(host.lifeFrame-client.lifeFrame)<=.001);
+      shotSection+=row('Step',host?host.step:'—',client?client.step:'—',!!host&&!!client&&host.step===client.step);
+      shotSection+=row('Slot / kind',host?`${host.slotId} / ${host.kind?'extended':'standard'}`:'—',client?`${client.slotId} / ${client.kind?'extended':'standard'}`:'—',!!host&&!!client&&host.slotId===client.slotId&&host.kind===client.kind);
+      shotSection+=row('DTI',host?hex(host.dti,16):'—',client?hex(client.dti,16):'—',!!host&&!!client&&host.dti===client.dti);
+      shotSection+=row('Body',host?`${host.body.length} bytes`:'—',client?`${client.body.length} bytes`:'—',bodySame);
+      shotSection+=row('Collisions',host?host.collisions.length:'—',client?client.collisions.length:'—',collisionSame)+'</table>';
+      for(const side of [{label:'Host',value:host},{label:'Client',value:client}]) if(side.value) {
+        const value=side.value;
+        shotSection+=`<details><summary>${side.label} complete uShot details</summary><table><tr><th>Address</th><td>${hex(value.address,16)}</td></tr><tr><th>Vtable</th><td>${hex(value.vtable,16)}</td></tr><tr><th>Owner</th><td>${hex(value.owner,16)}</td></tr><tr><th>Element</th><td>${hex(value.element,16)}</td></tr><tr><th>Init param</th><td>${hex(value.initParam,16)}</td></tr><tr><th>Position data</th><td>${hex(value.posData,16)}</td></tr><tr><th>Object ref 1</th><td>${hex(value.objectRef1,16)} DTI ${hex(value.objectRef1Dti,16)} active ${value.objectRef1Active}</td></tr><tr><th>Object ref 2</th><td>${hex(value.objectRef2,16)} DTI ${hex(value.objectRef2Dti,16)} active ${value.objectRef2Active}</td></tr><tr><th>Extended args</th><td>${value.exA9}, ${hex(value.exA10,16)}, ${value.exA11}, ${hex(value.exA12,16)}</td></tr></table>`;
+        if(value.collisions.length) { shotSection+='<table><tr><th>Collision</th><th>Type / kind</th><th>World geometry</th><th>Flags / parents</th></tr>';for(const collision of value.collisions) shotSection+=`<tr><th>${collision.slot}:${collision.index}</th><td>${collision.metadataType===1?'capsule':'sphere'} / ${hex(collision.collisionKind)}</td><td>${fmtVec(collision.position)}${collision.metadataType===1?` → ${fmtVec(collision.endPosition)}`:''}<br>r=${collision.radius.toFixed(4)}</td><td>${hex(collision.flags)}<br>${hex(collision.parent0,16)} / ${hex(collision.parent1,16)}</td></tr>`;shotSection+='</table>'; }
+        shotSection+=`<details><summary>Raw uShot body (${value.body.length} bytes)</summary><pre class="hex">${shotBodyHex(value.body)}</pre></details></details>`;
+      }
+    }
+    $('inspector').innerHTML+=shotSection+'</div>';
   }
   const fullCharacters=compareMiscCharacterState(frame.number);
   if($('calculateCharacters').checked && fullCharacters.length) {

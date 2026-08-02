@@ -21,7 +21,7 @@ extern void HookLog(const char* fmt, ...);
 namespace {
 
 constexpr uint32_t DUMP_MAGIC = 0x50445355; // USDP
-constexpr uint32_t DUMP_VERSION = 2;
+constexpr uint32_t DUMP_VERSION = 3;
 constexpr int HISTORY_SIZE = 255;
 constexpr uint8_t ENCODING_RAW = 0;
 constexpr uint8_t ENCODING_XOR_RLE = 1;
@@ -69,9 +69,57 @@ struct RegionHeader {
     uint8_t reserved[7];
     char name[64];
 };
+
+struct ShotHeader {
+    uint32_t recordSize;
+    uint32_t slotId;
+    uint8_t kind;
+    uint8_t hasPreSpawnRng;
+    uint8_t hasZireitouState;
+    uint8_t reserved0;
+    uint64_t spawnSequence;
+    uint64_t savedPtr;
+    uint64_t dti;
+    uint64_t vtable;
+    uint64_t initParam;
+    uint64_t posData;
+    uint64_t ownerChr;
+    uint64_t shotElement;
+    uint64_t objectRef1;
+    uint64_t objectRef1Dti;
+    uint8_t objectRef1WasActiveUnit;
+    uint8_t reserved1[7];
+    uint64_t objectRef2;
+    uint64_t objectRef2Dti;
+    uint8_t objectRef2WasActiveUnit;
+    uint8_t reserved2[7];
+    int32_t exA9;
+    uint64_t exA10;
+    int32_t exA11;
+    uint64_t exA12;
+    uint32_t flightSize;
+    uint32_t bodySize;
+    uint32_t primitiveCount;
+    uint32_t reserved3;
+};
+
+struct PrimitiveHeader {
+    uint32_t slot;
+    uint32_t index;
+    uint32_t metadataType;
+    uint8_t geometryType;
+    uint8_t hasSourceGeometry;
+    uint8_t reserved[2];
+    uint32_t collisionKind;
+    uint32_t flags;
+    uint64_t parent0;
+    uint64_t parent1;
+    int32_t parent0ShotOffset;
+    int32_t parent1ShotOffset;
+};
 #pragma pack(pop)
 
-static_assert(DUMP_VERSION == 2);
+static_assert(DUMP_VERSION == 3);
 static_assert(sizeof(RegionHeader::name) == 64);
 
 struct HistoryFrame {
@@ -87,6 +135,7 @@ struct HistoryFrame {
     size_t regionOffset = 0;
     size_t capacity = 0;
     uint8_t* storage = nullptr;
+    std::vector<RollbackShotRecipe> shots;
 };
 
 struct CapturedRegion {
@@ -150,6 +199,89 @@ bool WriteAll(FILE* file, const void* data, size_t size)
     return size == 0 || fwrite(data, 1, size, file) == size;
 }
 
+template <typename T>
+void AppendValue(std::vector<uint8_t>& output, const T& value)
+{
+    const uint8_t* bytes = reinterpret_cast<const uint8_t*>(&value);
+    output.insert(output.end(), bytes, bytes + sizeof(value));
+}
+
+void AppendRange(std::vector<uint8_t>& output, const void* data, size_t size)
+{
+    if (size == 0) return;
+    const uint8_t* bytes = reinterpret_cast<const uint8_t*>(data);
+    output.insert(output.end(), bytes, bytes + size);
+}
+
+std::vector<uint8_t> SerializeShot(const RollbackShotRecipe& recipe)
+{
+    ShotHeader header = {};
+    header.slotId = recipe.slotId;
+    header.kind = (uint8_t)recipe.kind;
+    header.hasPreSpawnRng = recipe.hasPreSpawnRng ? 1 : 0;
+    header.hasZireitouState = recipe.flight.hasZireitouState ? 1 : 0;
+    header.spawnSequence = recipe.spawnSequence;
+    header.savedPtr = (uint64_t)recipe.savedPtr;
+    header.dti = recipe.concrete.dti;
+    header.vtable = recipe.concrete.vtable;
+    header.initParam = recipe.initParam;
+    header.posData = (uint64_t)recipe.posData;
+    header.ownerChr = (uint64_t)recipe.ownerChr;
+    header.shotElement = (uint64_t)recipe.shotElement;
+    header.objectRef1 = (uint64_t)recipe.objectRef1;
+    header.objectRef1Dti = recipe.objectRef1Dti;
+    header.objectRef1WasActiveUnit = recipe.objectRef1WasActiveUnit ? 1 : 0;
+    header.objectRef2 = (uint64_t)recipe.objectRef2;
+    header.objectRef2Dti = recipe.objectRef2Dti;
+    header.objectRef2WasActiveUnit = recipe.objectRef2WasActiveUnit ? 1 : 0;
+    header.exA9 = recipe.exA9;
+    header.exA10 = (uint64_t)recipe.exA10;
+    header.exA11 = recipe.exA11;
+    header.exA12 = (uint64_t)recipe.exA12;
+    header.bodySize = (uint32_t)recipe.concrete.body.size();
+    header.primitiveCount =
+        (uint32_t)recipe.concrete.collisionPrimitives.size();
+
+    std::vector<uint8_t> output;
+    output.reserve(sizeof(header) + header.bodySize +
+                   header.primitiveCount * (sizeof(PrimitiveHeader) + 0x70) +
+                   (header.hasPreSpawnRng ? 48 : 0));
+    AppendValue(output, header);
+    if (recipe.hasPreSpawnRng) {
+        AppendRange(output, recipe.preSpawnGlobalRng,
+                    sizeof(recipe.preSpawnGlobalRng));
+        AppendRange(output, recipe.preSpawnEffectRng,
+                    sizeof(recipe.preSpawnEffectRng));
+        AppendRange(output, recipe.preSpawnOwnerRng,
+                    sizeof(recipe.preSpawnOwnerRng));
+    }
+    AppendRange(output, recipe.concrete.body.data(), recipe.concrete.body.size());
+    for (const auto& primitive : recipe.concrete.collisionPrimitives) {
+        PrimitiveHeader primitiveHeader = {};
+        primitiveHeader.slot = primitive.slot;
+        primitiveHeader.index = primitive.index;
+        primitiveHeader.metadataType = primitive.metadataType;
+        primitiveHeader.geometryType = primitive.geometryType;
+        primitiveHeader.hasSourceGeometry = primitive.hasSourceGeometry ? 1 : 0;
+        primitiveHeader.collisionKind = primitive.collisionKind;
+        primitiveHeader.flags = primitive.flags;
+        primitiveHeader.parent0 = primitive.parent0;
+        primitiveHeader.parent1 = primitive.parent1;
+        primitiveHeader.parent0ShotOffset = primitive.parent0ShotOffset;
+        primitiveHeader.parent1ShotOffset = primitive.parent1ShotOffset;
+        AppendValue(output, primitiveHeader);
+        AppendRange(output, primitive.geometry, sizeof(primitive.geometry));
+        AppendRange(output, primitive.parentState, sizeof(primitive.parentState));
+        AppendRange(output, primitive.localGeometry,
+                    sizeof(primitive.localGeometry));
+        AppendRange(output, primitive.sourceGeometry,
+                    sizeof(primitive.sourceGeometry));
+    }
+    header.recordSize = (uint32_t)output.size();
+    std::memcpy(output.data(), &header, sizeof(header));
+    return output;
+}
+
 bool CreateParentDirectories(char* path)
 {
     for (char* separator = path; *separator; ++separator) {
@@ -211,6 +343,7 @@ void SnapDump_CaptureSnapshot(const RollbackSnapshotSlot& slot)
     destination.localInput = slot.localInput;
     destination.remoteInput = slot.remoteInput;
     destination.shotCount = (uint32_t)slot.shotRecipes.size();
+    destination.shots = slot.shotRecipes;
     destination.effectCount = (uint32_t)slot.effectRecipes.size();
     destination.collisionCloneCount = (uint32_t)slot.collisionNodeClones.size();
     destination.modelRenderStateCount = (uint32_t)slot.modelRenderStates.size();
@@ -334,6 +467,10 @@ bool SnapDump_WriteHistory(int32_t triggerFrame, const char* relativePath)
                                       regions.size() * sizeof(RegionHeader));
         success = success && WriteAll(file, useEncoded ? encoded.data() : frame->storage,
                                       (size_t)frameHeader.encodedSize);
+        for (const RollbackShotRecipe& shot : frame->shots) {
+            std::vector<uint8_t> serialized = SerializeShot(shot);
+            success = success && WriteAll(file, serialized.data(), serialized.size());
+        }
         previous = frame;
         if (!success) break;
     }

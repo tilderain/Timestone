@@ -13,11 +13,14 @@ from pathlib import Path
 
 
 MAGIC = 0x50445355
-VERSIONS = {1, 2}
+VERSIONS = {1, 2, 3}
 HEADER = struct.Struct("<IIIIiIQQQ41sB6s")
 FRAME = struct.Struct("<i7I4QB7s")
 REGION_V1 = struct.Struct("<5QB7s")
 REGION_V2 = struct.Struct("<5QB7s64s")
+SHOT_V3 = struct.Struct("<2I4B10QB7s2QB7siQiQ4I")
+SHOT_PRIMITIVE_V3 = struct.Struct("<3I2B2s2I2Q2i")
+SHOT_PRIMITIVE_DATA_SIZE = 0x70
 ROLE_NAMES = {0: "offline", 1: "host", 2: "client"}
 SNAPDUMP_NAME = re.compile(
     r"desync_(\d{8}_\d{6})_(host|client)_f(-?\d+)\.usdp$"
@@ -174,6 +177,7 @@ class FrameRecord:
     snapshot_hash: int
     manifest_hash: int
     data: bytes
+    shots: list
 
 
 @dataclass
@@ -390,8 +394,69 @@ def load_dump(path):
                 number, local_input, remote_input, regions,
                 {"shots": shot_count, "effects": effect_count,
                  "collision_clones": clone_count, "model_render_states": model_count},
-                snapshot_hash, manifest_hash, data,
+                snapshot_hash, manifest_hash, data, [],
             )
+            if version >= 3:
+                for shot_index in range(shot_count):
+                    start = file.tell()
+                    raw = SHOT_V3.unpack(read_exact(
+                        file, SHOT_V3.size, f"frame {number} shot {shot_index} header"
+                    ))
+                    (record_size, slot_id, kind, has_rng, has_zireitou, _reserved0,
+                     spawn_sequence, saved_ptr, dti, vtable, init_param, pos_data,
+                     owner_chr, shot_element, object_ref1, object_ref1_dti,
+                     object_ref1_active, _reserved1, object_ref2, object_ref2_dti,
+                     object_ref2_active, _reserved2, ex_a9, ex_a10, ex_a11, ex_a12,
+                     _flight_size, body_size, primitive_count, _reserved3) = raw
+                    minimum = SHOT_V3.size + (48 if has_rng else 0) + body_size + \
+                        primitive_count * (SHOT_PRIMITIVE_V3.size + SHOT_PRIMITIVE_DATA_SIZE)
+                    if record_size != minimum:
+                        raise ValueError(
+                            f"frame {number} shot {shot_index}: invalid record size {record_size}, expected {minimum}"
+                        )
+                    rng = read_exact(file, 48, f"frame {number} shot {shot_index} RNG") \
+                        if has_rng else b""
+                    body = read_exact(file, body_size, f"frame {number} shot {shot_index} body")
+                    primitives = []
+                    for primitive_index in range(primitive_count):
+                        primitive = SHOT_PRIMITIVE_V3.unpack(read_exact(
+                            file, SHOT_PRIMITIVE_V3.size,
+                            f"frame {number} shot {shot_index} primitive {primitive_index}"
+                        ))
+                        geometry = read_exact(
+                            file, SHOT_PRIMITIVE_DATA_SIZE,
+                            f"frame {number} shot {shot_index} primitive {primitive_index} data"
+                        )
+                        primitives.append({
+                            "slot": primitive[0], "index": primitive[1],
+                            "metadata_type": primitive[2], "geometry_type": primitive[3],
+                            "has_source_geometry": bool(primitive[4]),
+                            "collision_kind": primitive[6], "flags": primitive[7],
+                            "parent0": primitive[8], "parent1": primitive[9],
+                            "parent0_shot_offset": primitive[10],
+                            "parent1_shot_offset": primitive[11],
+                            "geometry": geometry[:0x24], "parent_state": geometry[0x24:0x30],
+                            "local_geometry": geometry[0x30:0x50],
+                            "source_geometry": geometry[0x50:0x70],
+                        })
+                    if file.tell() - start != record_size:
+                        raise ValueError(f"frame {number} shot {shot_index}: record boundary mismatch")
+                    frames[number].shots.append({
+                        "slot_id": slot_id, "kind": kind,
+                        "has_zireitou_state": bool(has_zireitou),
+                        "spawn_sequence": spawn_sequence, "saved_ptr": saved_ptr,
+                        "dti": dti, "vtable": vtable, "init_param": init_param,
+                        "pos_data": pos_data, "owner_chr": owner_chr,
+                        "shot_element": shot_element, "object_ref1": object_ref1,
+                        "object_ref1_dti": object_ref1_dti,
+                        "object_ref1_active": bool(object_ref1_active),
+                        "object_ref2": object_ref2, "object_ref2_dti": object_ref2_dti,
+                        "object_ref2_active": bool(object_ref2_active),
+                        "ex_a9": ex_a9, "ex_a10": ex_a10,
+                        "ex_a11": ex_a11, "ex_a12": ex_a12,
+                        "pre_spawn_rng": rng, "body": body,
+                        "collision_primitives": primitives,
+                    })
             previous = data
         if file.read(1):
             raise ValueError("trailing bytes after final frame")
@@ -786,6 +851,7 @@ def compare_frame(dump_a, dump_b, frame_a, frame_b, max_regions, max_diffs,
             "b_counts": frame_b.counts,
         },
         "regions": [],
+        "shots": [],
     }
     region_count = min(len(frame_a.regions), len(frame_b.regions))
     for index in range(region_count):
@@ -829,6 +895,41 @@ def compare_frame(dump_a, dump_b, frame_a, frame_b, max_regions, max_diffs,
     result["meaningful_different_bytes"] = sum(
         region.get("meaningful_different_bytes", 1) for region in result["regions"]
     )
+    shots_a = {shot["spawn_sequence"]: shot for shot in frame_a.shots}
+    shots_b = {shot["spawn_sequence"]: shot for shot in frame_b.shots}
+    for sequence in sorted(set(shots_a) | set(shots_b)):
+        shot_a, shot_b = shots_a.get(sequence), shots_b.get(sequence)
+        if shot_a is None or shot_b is None:
+            result["shots"].append({
+                "spawn_sequence": sequence,
+                "kind": "missing_peer",
+                "present_a": shot_a is not None,
+                "present_b": shot_b is not None,
+            })
+            continue
+        body_a, body_b = shot_a["body"], shot_b["body"]
+        primitive_a = shot_a["collision_primitives"]
+        primitive_b = shot_b["collision_primitives"]
+        body_differences = differing_byte_count(body_a, body_b) + abs(len(body_a) - len(body_b))
+        collision_matches = primitive_a == primitive_b
+        metadata_matches = all(
+            shot_a[name] == shot_b[name]
+            for name in ("slot_id", "kind", "dti", "init_param", "has_zireitou_state")
+        )
+        if body_differences or not collision_matches or not metadata_matches:
+            result["shots"].append({
+                "spawn_sequence": sequence,
+                "kind": "state",
+                "a_body_size": len(body_a), "b_body_size": len(body_b),
+                "body_different_bytes": body_differences,
+                "collision_matches": collision_matches,
+                "metadata_matches": metadata_matches,
+                "a_collision_count": len(primitive_a),
+                "b_collision_count": len(primitive_b),
+            })
+    result["meaningful_different_bytes"] += sum(
+        shot.get("body_different_bytes", 1) or 1 for shot in result["shots"]
+    )
     result["structure_matches"] = (
         len(frame_a.regions) == len(frame_b.regions) and
         # Effect recipes describe peer-local presentation objects. Their
@@ -837,6 +938,7 @@ def compare_frame(dump_a, dump_b, frame_a, frame_b, max_regions, max_diffs,
             frame_a.counts.get(name) == frame_b.counts.get(name)
             for name in ("shots", "collision_clones", "model_render_states")
         ) and
+        not result["shots"] and
         all(
             a.size == b.size and a.skip_vtable == b.skip_vtable and
             resolver_a.resolve(a.address) == resolver_b.resolve(b.address) and
@@ -971,6 +1073,14 @@ def print_text_summary(report):
                     if "a_value" in field:
                         print(f"      {field['name']} @ {field['offset']}: "
                               f"A={field['a_value']} B={field['b_value']}")
+    for shot in first.get("shots", []):
+        if shot["kind"] == "missing_peer":
+            print(f"  shot #{shot['spawn_sequence']}: missing on one peer")
+        else:
+            print(f"  shot #{shot['spawn_sequence']}: "
+                  f"{shot['body_different_bytes']} differing body byte(s), "
+                  f"collisions match={shot['collision_matches']}, "
+                  f"metadata match={shot['metadata_matches']}")
 
 
 def main():
