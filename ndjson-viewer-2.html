@@ -37,6 +37,8 @@ button:disabled { opacity:.45; cursor:default; }
 .summary strong { color:var(--text); }
 .arena { position:relative; flex:1; min-height:0; background:#0d1117; }
 .arena canvas { display:block; width:100%; height:100%; }
+.arena-info { position:absolute; z-index:2; top:12px; left:12px; padding:8px 10px; border:1px solid #0f3460; border-radius:5px; background:rgba(13,17,23,.88); color:#9da7b3; font:12px ui-monospace,Consolas,monospace; line-height:1.5; pointer-events:none; }
+.arena-info strong { color:var(--text); font-weight:600; }
 .arena-controls { display:none; }
 .timeline { position:absolute; z-index:5; left:12px; right:12px; bottom:12px; max-height:42%; overflow:auto; padding:12px 16px; border:1px solid #0f3460; border-radius:6px; background:rgba(22,33,62,.96); }
 .timeline h2,.inspector h2 { font-size:15px; margin:0 0 10px; }
@@ -78,6 +80,8 @@ td code { color:#00d4ff; word-break:break-all; }
     <button id="first" title="First frame">|◀</button><button id="prev" title="Previous frame">◀</button>
     <span id="frame" class="frame">No frame</span>
     <button id="next" title="Next frame">▶</button><button id="last" title="Last frame">▶|</button>
+    <button id="play" title="Play/Pause">▶ Play</button>
+    <label>Speed: <input id="speed" type="range" min="1" max="60" value="5"><span id="speedValue">5x</span></label>
     <input id="slider" type="range" min="0" max="0" value="0">
     <span class="grow"></span><span id="file" class="file"></span>
   </div>
@@ -96,7 +100,7 @@ td code { color:#00d4ff; word-break:break-all; }
     <label><input id="showDifferences" type="checkbox"> Snapshot differences</label>
   </div>
   <div class="content"><section class="main">
-    <div id="arena" class="arena"><canvas id="canvas"></canvas>
+    <div id="arena" class="arena"><canvas id="canvas"></canvas><div id="arenaInfo" class="arena-info">Viewer camera: —<br>Bounds: —</div>
     <div id="differencePanel" class="timeline" hidden><h2>Snapshot differences</h2><div id="diffs"></div></div>
     </div>
     <div id="summary" class="summary"></div>
@@ -106,7 +110,7 @@ td code { color:#00d4ff; word-break:break-all; }
 'use strict';
 const MAGIC = 0x50445355, HEADER_SIZE = 96, FRAME_SIZE = 72, REGION_V1_SIZE = 48, REGION_V2_SIZE = 112;
 const ROLE = {0:'offline',1:'host',2:'client'};
-const state = { dumps:[], frames:[], index:0, current:null };
+const state = { dumps:[], frames:[], index:0, current:null, arenaView:null, playing:false, playTimer:null };
 const $ = id => document.getElementById(id);
 const canvas=$('canvas');
 
@@ -169,6 +173,92 @@ function bytesHex(bytes) { return Array.from(bytes,b=>b.toString(16).padStart(2,
 function byteDiff(a,b) { if(!a||!b) return true; if(a.length!==b.length) return true; for(let i=0;i<a.length;i++) if(a[i]!==b[i]) return true; return false; }
 function regionView(frame, region) { return new DataView(frame.data.buffer,frame.data.byteOffset+region.offset,region.size); }
 function finiteFloat(view,offset) { if(offset+4>view.byteLength) return 0; const value=view.getFloat32(offset,true); return Number.isFinite(value)?value:0; }
+function vector3(view,offset) { return [finiteFloat(view,offset),finiteFloat(view,offset+4),finiteFloat(view,offset+8)]; }
+function findRegion(frame,name,size) {
+  const regions=frame?.regions||[];
+  const wanted=name.toLowerCase().replace(/[^a-z0-9]/g,'');
+  const normalized=item=>(item.name||'').toLowerCase().replace(/[^a-z0-9]/g,'');
+  return regions.find(item=>normalized(item)===wanted) ||
+    regions.find(item=>normalized(item).includes(wanted)) ||
+    // Version 1 snapdumps have no manifest names. These singleton sizes are
+    // stable and the regions are emitted in sCamera, uActionSideCamera order.
+    regions.find(item=>!item.name && (item.size===size ||
+      (wanted==='uactionsidecamera' && item.size>=0x500 && item.size<=0x600)));
+}
+function decodeGameCamera(frame) {
+  const region=findRegion(frame,'sCamera',0xD80);
+  if(!region || region.size<0xD80) return null;
+  // Viewport 0 starts at sCamera+0x50; its camera translation is at +0xD0.
+  const view=regionView(frame,region), position=[finiteFloat(view,0x120),finiteFloat(view,0x124),finiteFloat(view,0x128)];
+  // sCamera's render-region fields are the actual in-game viewport bounds.
+  const bounds=[finiteFloat(view,0xD50),finiteFloat(view,0xD54),finiteFloat(view,0xD58),finiteFloat(view,0xD5C)];
+  return {position,bounds};
+}
+function decodeActionSideCamera(frame) {
+  const region=findRegion(frame,'uActionSideCamera',0x590);
+  if(!region) return null;
+  const view=regionView(frame,region);
+  return {
+    aspect:finiteFloat(view,0x48),
+    position:vector3(view,0x50),
+    target:vector3(view,0x70),
+    center:vector3(view,0x430),
+    direction:vector3(view,0x440),
+    overlook:vector3(view,0x450),
+    // Native uActionSideCamera fields: mVarDist, mDistRate, mDistance,
+    // mRadius/mRadius2, and mCharDist.
+    varDist:finiteFloat(view,0x470),
+    distRate:finiteFloat(view,0x47C),
+    radius:finiteFloat(view,0x50C),
+    radius2:finiteFloat(view,0x510),
+    distance:finiteFloat(view,0x508),
+    charDist:finiteFloat(view,0x518),
+  };
+}
+function decodeGlobalRng(frame) {
+  const region=findRegion(frame,'globalRng',16);
+  if(!region || region.size<16) return null;
+  const view=regionView(frame,region);
+  return [u32(view,0),u32(view,4),u32(view,8),u32(view,12)];
+}
+function describeCamera(frame) {
+  const gameCamera=decodeGameCamera(frame), actionCamera=decodeActionSideCamera(frame), format=value=>value.toFixed(2);
+  $('arenaInfo').innerHTML=(gameCamera
+    ? `<strong>sCamera:</strong> (${gameCamera.position.map(format).join(', ')})<br><strong>sCamera bounds:</strong> ${gameCamera.bounds.map(format).join(' .. ')}`
+    : '<strong>sCamera:</strong> unavailable')+(actionCamera
+    ? `<br><strong>uActionSideCamera:</strong> (${actionCamera.position.map(format).join(', ')})<br><strong>Anchor:</strong> ${actionCamera.center.map(format).join(', ')} ± (${format(actionCamera.radius)}, ${format(actionCamera.radius2)})`
+    : '<br><strong>uActionSideCamera:</strong> unavailable');
+  return {gameCamera,actionCamera};
+}
+function cameraBounds(camera) {
+  if(!camera) return null;
+  // The side-camera's visible box follows its actual camera position. mvCenter
+  // is an internal tracking anchor and can remain unchanged while the camera
+  // is correcting toward a new target.
+  const center=camera.position;
+  // mRadius/mRadius2 are often -1 until the native boundary pass computes
+  // them. Use the camera's configured distance as a useful display fallback
+  // rather than suppressing the box entirely.
+  const baseRadius=camera.radius>0?camera.radius:Math.abs(camera.distance);
+  const aspect=camera.aspect>.2&&camera.aspect<5?camera.aspect:16/9;
+  const xRadius=baseRadius*aspect;
+  const yRadius=camera.radius2>0?camera.radius2:baseRadius;
+  if(!center.every(Number.isFinite) || !Number.isFinite(xRadius) || !Number.isFinite(yRadius) || xRadius<=0 || yRadius<=0 || xRadius>100000 || yRadius>100000) return null;
+  return {minX:center[0]-xRadius,maxX:center[0]+xRadius,minY:center[1]-yRadius,maxY:center[1]+yRadius};
+}
+function compareActionCameras(cameraData) {
+  if(cameraData.length<2 || !cameraData[0].data.actionCamera || !cameraData[1].data.actionCamera) return null;
+  const first=cameraData[0].data.actionCamera, second=cameraData[1].data.actionCamera;
+  const fields=[
+    ['Aspect',first.aspect,second.aspect],['Camera X',first.position[0],second.position[0]],['Camera Y',first.position[1],second.position[1]],['Camera Z',first.position[2],second.position[2]],
+    ['Target X',first.target[0],second.target[0]],['Target Y',first.target[1],second.target[1]],['Target Z',first.target[2],second.target[2]],
+    ['Center X',first.center[0],second.center[0]],['Center Y',first.center[1],second.center[1]],['Center Z',first.center[2],second.center[2]],
+    ['Direction X',first.direction[0],second.direction[0]],['Direction Y',first.direction[1],second.direction[1]],['Direction Z',first.direction[2],second.direction[2]],
+    ['Overlook X',first.overlook[0],second.overlook[0]],['Overlook Y',first.overlook[1],second.overlook[1]],['Overlook Z',first.overlook[2],second.overlook[2]],
+    ['mVarDist',first.varDist,second.varDist],['mDistRate',first.distRate,second.distRate],['mDistance',first.distance,second.distance],['mCharDist',first.charDist,second.charDist],['Bounds radius',first.radius,second.radius],['Bounds radius 2',first.radius2,second.radius2],
+  ];
+  return {fields, bounds:[cameraBounds(first),cameraBounds(second)]};
+}
 function fighterRegions(frame,team) { return frame?.regions.filter(region=>region.name===`uCharacter.team${team}`) || []; }
 function decodeFighters(dump,frame) {
   if(!frame?.regions) return [];
@@ -198,7 +288,8 @@ function decodeFighters(dump,frame) {
           }
         }
       }
-      result.push({team,slot,role:dump.role,pos,active:activeAddress===region.address,action:u32(view,0x1310),flags:u32(view,0x14F0),mCPrgF,collision});
+      const rng=view.byteLength>=0x2D90 ? [u32(view,0x2D80),u32(view,0x2D84),u32(view,0x2D88),u32(view,0x2D8C)] : null;
+      result.push({team,slot,role:dump.role,pos,active:activeAddress===region.address,action:u32(view,0x1310),flags:u32(view,0x14F0),mCPrgF,rng,collision});
     });
   }
   return result;
@@ -355,9 +446,10 @@ function drawArena(frameNumber) {
   canvas.width=Math.round(width*dpr); canvas.height=Math.round(height*dpr); context.setTransform(dpr,0,0,dpr,0,0); context.clearRect(0,0,width,height);
   const fighters=[];
   state.dumps.slice(0,2).forEach(dump=>fighters.push(...decodeFighters(dump,dump.byFrame.get(frameNumber))));
+  const cameraData=state.dumps.slice(0,2).map(dump=>({dump,data:describeCamera(dump.byFrame.get(frameNumber))}));
   const visualMismatches=compareVisualFighters(frameNumber), mismatchByKey=new Map(visualMismatches.map(item=>[item.key,item]));
   const visible=fighters.filter(fighter=>$('showBench').checked||fighter.active);
-  if(!visible.length) { context.fillStyle='#8b949e';context.font='16px system-ui';context.textAlign='center';context.fillText('No decoded character regions for this frame',width/2,height/2);return; }
+  if(!visible.length) { state.arenaView={cameraData}; context.fillStyle='#8b949e';context.font='16px system-ui';context.textAlign='center';context.fillText('No decoded character regions for this frame',width/2,height/2);return; }
   let minX=Math.min(...visible.map(f=>f.pos[0])),maxX=Math.max(...visible.map(f=>f.pos[0])),minY=Math.min(0,...visible.map(f=>f.pos[1])),maxY=Math.max(100,...visible.map(f=>f.pos[1]));
   for(const fighter of visible) for(const shape of fighter.collision) {
     if(shape.shape==='capsule') {
@@ -367,12 +459,19 @@ function drawArena(frameNumber) {
     }
   }
   const rangeX=Math.max(300,maxX-minX),rangeY=Math.max(180,maxY-minY),padding=54,scale=Math.min((width-padding*2)/rangeX,(height-padding*2)/rangeY)*.88,cx=(minX+maxX)/2,cy=(minY+maxY)/2;
+  state.arenaView={camera:[cx,cy],bounds:[minX,maxX,minY,maxY],scale,cameraData};
   const screen=(x,y)=>[width/2+(x-cx)*scale,height/2-(y-cy)*scale];
   context.strokeStyle='rgba(255,255,255,.07)';context.lineWidth=1;
   const grid=Math.pow(10,Math.floor(Math.log10(Math.max(rangeX,rangeY)/6)));
   for(let x=Math.floor(minX/grid)*grid;x<=maxX+grid;x+=grid){const sx=screen(x,0)[0];context.beginPath();context.moveTo(sx,20);context.lineTo(sx,height-20);context.stroke()}
   for(let y=Math.floor(minY/grid)*grid;y<=maxY+grid;y+=grid){const sy=screen(0,y)[1];context.beginPath();context.moveTo(20,sy);context.lineTo(width-20,sy);context.stroke()}
   const ground=screen(0,0)[1];context.strokeStyle='rgba(255,255,255,.28)';context.lineWidth=2;context.beginPath();context.moveTo(20,ground);context.lineTo(width-20,ground);context.stroke();
+  const cameraColors=['#00d4ff','#c084fc'];
+  for(const [index,cameraEntry] of cameraData.entries()) {
+    const bounds=cameraBounds(cameraEntry.data.actionCamera); if(!bounds) continue;
+    const topLeft=screen(bounds.minX,bounds.maxY),bottomRight=screen(bounds.maxX,bounds.minY),center=screen(cameraEntry.data.actionCamera.center[0],cameraEntry.data.actionCamera.center[1]);
+    context.save();context.strokeStyle=cameraColors[index];context.fillStyle=cameraColors[index];context.lineWidth=2;context.setLineDash([8,4]);context.strokeRect(topLeft[0],topLeft[1],bottomRight[0]-topLeft[0],bottomRight[1]-topLeft[1]);context.setLineDash([]);context.beginPath();context.moveTo(center[0]-7,center[1]);context.lineTo(center[0]+7,center[1]);context.moveTo(center[0],center[1]-7);context.lineTo(center[0],center[1]+7);context.stroke();context.font='bold 11px ui-monospace';context.textAlign='left';context.fillText(`${cameraEntry.dump.role} uActionSideCamera`,topLeft[0]+5,topLeft[1]+14);context.restore();
+  }
   const colors={host:['#2dd4bf','#f59e0b'],client:['#60a5fa','#fb7185'],offline:['#2dd4bf','#fb7185']};
   for(const mismatch of visualMismatches) {
     if(!mismatch.position||!mismatch.b) continue;
@@ -435,14 +534,20 @@ function update() {
     $('diffs').textContent='';
   }
   $('inspector').innerHTML=`<div class="section"><h2>Frame ${frame.number}</h2><p class="hint">${state.dumps.map(d=>`${d.role}: ${d.name}`).join('<br>')}</p></div>`;
+  const globalRng=state.dumps.slice(0,2).map(dump=>({dump,rng:decodeGlobalRng(dump.byFrame.get(frame.number))}));
+  if(globalRng.some(entry=>entry.rng)) {
+    const a=globalRng[0]?.rng?.[0],b=globalRng[1]?.rng?.[0],same=a!==undefined&&b!==undefined&&a===b;
+    $('inspector').innerHTML+=`<div class="section"><h2>Global RNG</h2><table><tr class="${same?'':'mismatch-bg'}"><th>RNG[0]</th><td>${a===undefined?'—':hex(a)}</td><td>${b===undefined?'—':hex(b)}</td><td class="${same?'ok':'bad'}">${same?'✓':'✗'}</td></tr></table></div>`;
+  }
   for(const pair of fighterPairs(frame.number)) {
     const fighter=pair.host||pair.client, host=pair.host, client=pair.client, team=fighter.team, slot=fighter.slot;
     const posSame=!!host&&!!client&&host.pos.every((value,index)=>Math.abs(value-client.pos[index])<=.001);
     const actionSame=!!host&&!!client&&host.action===client.action;
     const flagsSame=!!host&&!!client&&host.flags===client.flags;
     const mCPrgFSame=!!host&&!!client&&host.mCPrgF===client.mCPrgF;
+    const rngSame=!!host?.rng&&!!client?.rng&&host.rng.every((value,index)=>value===client.rng[index]);
     const activeSame=!!host&&!!client&&host.active===client.active;
-    const allSame=posSame&&actionSame&&flagsSame&&mCPrgFSame&&activeSame;
+    const allSame=posSame&&actionSame&&flagsSame&&mCPrgFSame&&rngSame&&activeSame;
     const color=team===0?'p1-color':'p2-color', dot=team===0?'#4fc3f7':'#ef5350', role=slot===0?'Point':`Assist ${slot}`;
     const row=(label,hostValue,clientValue,same,delta='')=>`<tr class="${same?'':'mismatch-bg'}"><th>${label}</th><td>${hostValue}</td><td>${clientValue}</td><td class="${same?'ok':'bad'}">${delta|| (same?'✓':'✗')}</td></tr>`;
     let section=`<div class="section"><div class="char-header ${color}"><span class="dot" style="background:${dot}"></span>P${team+1} ${role}${allSame?'':' <span class="bad">DESYNC</span>'}</div><table><tr><th></th><th>Host</th><th>Client</th><th>Δ</th></tr>`;
@@ -450,6 +555,7 @@ function update() {
     section+=row('Act',host?hex(host.action):'—',client?hex(client.action):'—',actionSame);
     section+=row('mChrF',host?hex(host.flags):'—',client?hex(client.flags):'—',flagsSame);
     section+=row('mCPrgF',host?hex(host.mCPrgF):'—',client?hex(client.mCPrgF):'—',mCPrgFSame);
+    section+=row('RNG[0]',host?.rng?hex(host.rng[0]):'—',client?.rng?hex(client.rng[0]):'—',!!host?.rng&&!!client?.rng&&host.rng[0]===client.rng[0]);
     section+=row('Point',host?String(host.active):'—',client?String(client.active):'—',activeSame);
     const distance=host&&client?Math.hypot(...host.pos.map((value,index)=>value-client.pos[index])):null;
     section+=`<tr class="${posSame?'':'mismatch-bg'}"><th>Δ Mag</th><td colspan="3" class="${posSame?'ok':'bad'}">${distance===null?'—':distance.toFixed(6)}</td></tr></table></div>`;
@@ -470,6 +576,25 @@ function update() {
     $('inspector').innerHTML+=misc+'</div>';
   }
   if($('showRegions').checked && frame.regions) $('inspector').innerHTML += '<div class="section"><h2>Regions</h2><table><tr><th>Name</th><th>Size</th><th>Hash</th></tr>'+frame.regions.map(r=>`<tr><td>${r.name||'(unnamed)'}</td><td>${r.size}</td><td><code>${hex(r.hash,16)}</code></td></tr>`).join('')+'</table></div>';
+  for(const cameraEntry of state.arenaView?.cameraData||[]) {
+    const camera=cameraEntry.data, fmt=value=>value.toFixed(4), action=camera.actionCamera, game=camera.gameCamera;
+    if(game) $('inspector').innerHTML+=`<div class="section"><h2>${cameraEntry.dump.role} sCamera region</h2><table><tr><th>Position</th><td>${game.position.map(fmt).join(', ')}</td></tr><tr><th>Bounds</th><td>${game.bounds.map(fmt).join(' .. ')}</td></tr></table></div>`;
+    if(action) { const bounds=cameraBounds(action); $('inspector').innerHTML+=`<div class="section"><h2>${cameraEntry.dump.role} uActionSideCamera</h2><table><tr><th>Camera position</th><td>${action.position.map(fmt).join(', ')}</td></tr><tr><th>Target position</th><td>${action.target.map(fmt).join(', ')}</td></tr><tr><th>Aspect ratio</th><td>${fmt(action.aspect)}</td></tr><tr><th>Anchor center</th><td>${action.center.map(fmt).join(', ')}</td></tr><tr><th>Anchor direction</th><td>${action.direction.map(fmt).join(', ')}</td></tr><tr><th>Overlook</th><td>${action.overlook.map(fmt).join(', ')}</td></tr><tr><th>mVarDist</th><td>${fmt(action.varDist)}</td></tr><tr><th>mDistRate</th><td>${fmt(action.distRate)}</td></tr><tr><th>mDistance</th><td>${fmt(action.distance)}</td></tr><tr><th>mCharDist</th><td>${fmt(action.charDist)}</td></tr><tr><th>Camera radii</th><td>${fmt(action.radius)} / ${fmt(action.radius2)}</td></tr><tr><th>Projected bounds</th><td>${bounds?`${fmt(bounds.minX)} .. ${fmt(bounds.maxX)} x ${fmt(bounds.minY)} .. ${fmt(bounds.maxY)}`:'unavailable'}</td></tr></table></div>`; }
+  }
+  const actionComparison=compareActionCameras(state.arenaView?.cameraData||[]);
+  if(actionComparison) {
+    const fmt=value=>value.toFixed(4), row=(label,a,b)=>{const same=Math.abs(a-b)<=.001;return `<tr class="${same?'':'mismatch-bg'}"><th>${label}</th><td>${fmt(a)}</td><td>${fmt(b)}</td><td class="${same?'ok':'bad'}">${fmt(a-b)}</td></tr>`;};
+    let comparison=`<div class="section"><h2>uActionSideCamera Comparison</h2><table><tr><th>Field</th><th>${state.arenaView.cameraData[0].dump.role}</th><th>${state.arenaView.cameraData[1].dump.role}</th><th>Δ</th></tr>`;
+    for(const field of actionComparison.fields) comparison+=row(field[0],field[1],field[2]);
+    comparison+='</table>';
+    const bounds=actionComparison.bounds;
+    if(bounds[0]&&bounds[1]) {
+      comparison+='<table><tr><th>Bounding box</th><th>Host</th><th>Client</th><th>Δ</th></tr>';
+      for(const [label,key] of [['Min X','minX'],['Max X','maxX'],['Min Y','minY'],['Max Y','maxY']]) comparison+=row(label,bounds[0][key],bounds[1][key]);
+      comparison+='</table>';
+    }
+    $('inspector').innerHTML+=comparison+'</div>';
+  }
 }
 function inspectDiff(diff,a,b) {
   const ra=a?.regions.find(r=>(r.name||'')===diff.region) || a?.regions[Number((diff.region.match(/\[(\d+)\]/)||[])[1])]; const rb=b?.regions.find(r=>(r.name||'')===diff.region) || b?.regions[Number((diff.region.match(/\[(\d+)\]/)||[])[1])];
@@ -478,6 +603,7 @@ function inspectDiff(diff,a,b) {
   $('inspector').innerHTML=html;
 }
 function load(files) {
+  stopPlayback();
   state.dumps=[]; state.frames=[]; state.index=0;
   Promise.all(files.map(async file=>{ const buffer=await file.arrayBuffer(); return file.name.toLowerCase().endsWith('.usdp') ? parseUsdp(buffer,file.name) : parseJson(buffer,file.name); })).then(dumps=>{
     dumps.sort((a,b)=>({host:0,client:1,offline:2,ndjson:3}[a.role] ?? 4)-({host:0,client:1,offline:2,ndjson:3}[b.role] ?? 4));
@@ -485,6 +611,13 @@ function load(files) {
   }).catch(error=>alert(`Could not load file: ${error.message}`));
 }
 function move(delta) { state.index=Math.max(0,Math.min(state.frames.length-1,state.index+delta)); update(); }
+function stopPlayback() { state.playing=false; clearInterval(state.playTimer); state.playTimer=null; $('play').textContent='▶ Play'; }
+function startPlayback() {
+  if(state.index>=state.frames.length-1) state.index=0;
+  state.playing=true; $('play').textContent='⏸ Pause';
+  state.playTimer=setInterval(()=>{ if(state.index>=state.frames.length-1) stopPlayback(); else move(1); },1000/Number($('speed').value));
+}
+function togglePlayback() { if(state.playing) stopPlayback(); else startPlayback(); }
 function preventDocumentDrop(event) { event.preventDefault(); }
 function loadDroppedFiles(event, target) {
   event.preventDefault();
@@ -503,12 +636,14 @@ document.addEventListener('dragover', preventDocumentDrop);
 document.addEventListener('drop', preventDocumentDrop);
 $('files').onchange=e=>{load(Array.from(e.target.files));e.target.value=''};
 $('open').onclick=()=>$('files').click();
-$('clear').onclick=()=>{state.dumps=[];state.frames=[];state.index=0;$('app').classList.remove('active');$('drop').style.display='grid';update()};
+$('clear').onclick=()=>{stopPlayback();state.dumps=[];state.frames=[];state.index=0;$('app').classList.remove('active');$('drop').style.display='grid';update()};
 $('first').onclick=()=>{state.index=0;update()};
 $('last').onclick=()=>{state.index=state.frames.length-1;update()};
 $('prev').onclick=()=>move(-1);
 $('next').onclick=()=>move(1);
 $('slider').oninput=e=>{state.index=Number(e.target.value);update()};
+$('play').onclick=togglePlayback;
+$('speed').oninput=()=>{ $('speedValue').textContent=`${$('speed').value}x`; if(state.playing) { stopPlayback(); startPlayback(); } };
 $('showBench').onchange=update;
 $('showCollision').onchange=update;
 $('showRegions').onchange=update;

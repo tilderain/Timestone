@@ -88,6 +88,28 @@ class CompareSnapDumpsTest(unittest.TestCase):
         difference = report["first_divergence"]["regions"][0]["differences_sample"][0]
         self.assertEqual("0xe", difference["offset"])
 
+    def test_can_compare_only_selected_frames(self):
+        base_a, base_b = 0x140000000, 0x150000000
+        same_a = struct.pack("<Q4s", base_a + 0x4567, b"same")
+        same_b = struct.pack("<Q4s", base_b + 0x4567, b"same")
+        different_a = struct.pack("<Q4s", base_a + 0x4567, b"host")
+        different_b = struct.pack("<Q4s", base_b + 0x4567, b"client")
+        write_dump(self.path_a, 1, base_a, [
+            (54, 0x11, 0x22, base_a + 0x1000, same_a),
+            (55, 0x11, 0x22, base_a + 0x1000, different_a),
+        ])
+        write_dump(self.path_b, 2, base_b, [
+            (54, 0x22, 0x11, base_b + 0x1000, same_b),
+            (55, 0x22, 0x11, base_b + 0x1000, different_b),
+        ])
+
+        report = compare.build_report(
+            compare.load_dump(self.path_a), compare.load_dump(self.path_b),
+            32, 16, selected_frames=[54],
+        )
+        self.assertEqual("match", report["verdict"])
+        self.assertEqual([54], report["coverage"]["selected_frames"])
+
     def test_rejects_truncated_dump(self):
         self.path_a.write_bytes(b"USDP")
         with self.assertRaisesRegex(ValueError, "truncated dump header"):

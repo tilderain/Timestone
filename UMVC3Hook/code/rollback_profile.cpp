@@ -263,7 +263,7 @@ void Profile_DumpEnabled(const RollbackProfile& profile, bool ndjsonEnabled,
         "unit_remove_effect_resource", "unit_remove_effect_generator",
         "unit_remove_effect_sub_buffers", "unit_remove_native", "unit_remove_recipe_cleanup",
         "kirigakure_effect_update", "render_end_frame", "sound_move",
-        "game_ui_move", "scheduler_rebuild", "chr_cpu_class_func", "main_move"
+        "game_ui_move", "chr_cpu_class_func", "main_move"
     };
     static_assert(sizeof(hookNames) / sizeof(hookNames[0]) ==
                   (size_t)RollbackHookProfileId::Count);

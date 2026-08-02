@@ -29,6 +29,10 @@ bool g_ndjsonIncludeDirHistory = false;
 
 namespace {
 
+int32_t g_pendingDesyncTriggerFrame = -1;
+int32_t g_pendingDesyncCaptureFrame = -1;
+bool g_pendingDesyncCaptureWritten = false;
+
 constexpr uintptr_t PTR_SCHARACTER = 0x140d44a70;
 constexpr uintptr_t PTR_SMAIN = 0x140e177e8;
 constexpr uintptr_t TEAM_OFFSETS[] = {0x40, 0x300};
@@ -1211,13 +1215,35 @@ void NDJSON_ProcessInboundGroundTruth()
 
 extern "C" void Rollback_NotifyDesyncTriggered(int32_t frame)
 {
+    if (g_pendingDesyncTriggerFrame >= 0) return;
+    g_pendingDesyncTriggerFrame = frame;
+    g_pendingDesyncCaptureFrame = frame + 2;
+    g_pendingDesyncCaptureWritten = false;
+    HookLog("Desync: delaying pause and snapdump through frame %d\n",
+            frame + 2);
+}
+
+extern "C" bool Rollback_ProcessDesyncDelay(int32_t currentFrame)
+{
+    if (g_pendingDesyncTriggerFrame < 0) return false;
+    const int32_t captureFrame = g_pendingDesyncCaptureFrame;
+    if (currentFrame < captureFrame) return true;
+    if (!g_pendingDesyncCaptureWritten) {
 #if ROLLBACK_SNAPDUMP_ENABLED
-    char autoTestPath[MAX_PATH] = {};
-    SnapDump_WriteHistory(frame,
-        AutoTest_GetSnapDumpRelativePath(autoTestPath, sizeof(autoTestPath))
-            ? autoTestPath : nullptr);
+        char autoTestPath[MAX_PATH] = {};
+        // Capture after the two-frame grace period so the dump contains the
+        // state immediately after the checksum mismatch, not only the stale
+        // history ending at the trigger frame.
+        SnapDump_WriteHistory(captureFrame,
+            AutoTest_GetSnapDumpRelativePath(autoTestPath, sizeof(autoTestPath))
+                ? autoTestPath : nullptr);
 #endif
-    NDJSON_NotifyDesyncTriggered(frame);
+        NDJSON_NotifyDesyncTriggered(g_pendingDesyncTriggerFrame);
+        g_pendingDesyncCaptureWritten = true;
+    }
+    g_pendingDesyncTriggerFrame = -1;
+    g_pendingDesyncCaptureFrame = -1;
+    return false;
 }
 
 extern "C" void Rollback_FlushNetplayLive(int32_t frame)

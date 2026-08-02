@@ -119,6 +119,11 @@ reconstructing entry arrays or forcing scheduler state to retired.
   `nDraw_Material__clone+0x1F` (`0x1405DCA7F`) and resumes at the native clone
   epilogue so the caller can use its existing fallback path.
 
+The autotest-only hook that skipped `uScheduler__rebuildEntriesFromResource`
+was tested and removed. It avoided the immediate scheduler crash, but made the
+HUD, toon effects, and stage invisible, and still froze after roughly 36 Iron
+Man restarts. It is not a valid workaround.
+
 These guards can suppress a crash while leaving a missing UI model, hit
 effect, cut-in, animation frame, or position update. They should be removed or
 reduced once the allocation and ownership transition is fixed at its source.

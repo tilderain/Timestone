@@ -949,6 +949,10 @@ void FrameStepper_Process()
         }
     }
 
+    const int32_t desyncProcessFrame = Controller_GetNetFrameCount();
+    const bool desyncCapturePending = g_desyncDetected &&
+        Rollback_ProcessDesyncDelay(desyncProcessFrame);
+
     // --- Desync auto-pause (works in any mode). ---
     // P key dismisses the alert and unpauses.  The overlay persists
     // (g_desyncSeen remains true) but future mismatches won't re-pause.
@@ -965,7 +969,7 @@ void FrameStepper_Process()
             if (Netplay_IsActive())
                 Netplay_SendDesyncUnpause();
         }
-        else if (g_desyncDetected && !AutoTest_IsActive())
+        else if (g_desyncDetected && !desyncCapturePending && !AutoTest_IsActive())
         {
             isPaused = true;
         }

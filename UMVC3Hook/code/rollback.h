@@ -50,6 +50,10 @@ extern bool g_ndjsonIncludeDirHistory;
 // Flush the rolling netplay NDJSON history when desync is triggered.
 extern "C" void Rollback_NotifyDesyncTriggered(int32_t frame);
 
+// Advance the delayed desync capture state from the game thread. Returns true
+// while the two-frame post-trigger capture window is still active.
+extern "C" bool Rollback_ProcessDesyncDelay(int32_t currentFrame);
+
 // Flush buffered netplay diagnostics during shutdown or peer disconnect.
 extern "C" void Rollback_FlushNetplayLive(int32_t frame);
 

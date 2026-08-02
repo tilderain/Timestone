@@ -869,8 +869,12 @@ def diagnose(first):
 
 
 def build_report(dump_a, dump_b, max_regions, max_diffs, include_timeline=False,
-                   structs=None, skip_frame0_pointers=DEFAULT_SKIP_FRAME0_POINTERS):
+                   structs=None, skip_frame0_pointers=DEFAULT_SKIP_FRAME0_POINTERS,
+                   selected_frames=None):
     common = sorted(set(dump_a.frames) & set(dump_b.frames))
+    if selected_frames is not None:
+        selected = set(selected_frames)
+        common = [frame for frame in common if frame in selected]
     pointer_overrides = (
         collect_frame0_pointer_overrides(dump_a, dump_b) |
         collect_explicit_region_overrides(dump_a, dump_b)
@@ -921,6 +925,7 @@ def build_report(dump_a, dump_b, max_regions, max_diffs, include_timeline=False,
             "common_frame_count": len(common),
             "common_first_frame": common[0] if common else None,
             "common_last_frame": common[-1] if common else None,
+            "selected_frames": sorted(selected_frames) if selected_frames is not None else None,
             "frames_only_a": sorted(set(dump_a.frames) - set(dump_b.frames)),
             "frames_only_b": sorted(set(dump_b.frames) - set(dump_a.frames)),
         },
@@ -982,6 +987,8 @@ def main():
                         help="maximum byte runs retained per region")
     parser.add_argument("--timeline", action="store_true",
                         help="scan all frames after finding the first divergence")
+    parser.add_argument("--frame", type=int, action="append", dest="frames",
+                        help="compare only this frame; may be specified multiple times")
     default_structs = Path(__file__).resolve().parents[1] / "ghidra_export" / "snapdump_structs.json"
     parser.add_argument("--structs", type=Path,
                         default=default_structs if default_structs.is_file() else None,
@@ -1008,6 +1015,7 @@ def main():
         report = build_report(
             dump_a, dump_b, args.max_regions, args.max_diffs, args.timeline, structs,
             args.skip_frame0_pointers,
+            args.frames,
         )
     except (OSError, ValueError, struct.error) as error:
         print(f"error: {error}", file=sys.stderr)

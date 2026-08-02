@@ -105,7 +105,14 @@ static constexpr SnapshotRange UACTION_CAMERA_SCALAR_RESTORE_RANGES[] = {
     // Camera center and radius used by the anchor's bounds calculation.
     {0x430, 0x20},
     {0x450, 0x40},
-    {0x510, 0x04},
+    // Runtime camera parameters used by zoom, fighter spacing, height
+    // correction, floor/overlook movement, and assist/TAC placement. The
+    // pointer at +0x4C8 is intentionally left live.
+    {0x490, 0x38},
+    {0x4D8, 0xA4},
+    // Camera mode/configuration flags consumed by movement and camera-
+    // relative fighter correction.
+    {0x57C, 0x0E},
 };
 using ShotEnqueueFn = char(__fastcall*)(void*, void*, int);
 using UnitAddFn = char(__fastcall*)(void*, int, void*, void*);
