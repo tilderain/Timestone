@@ -650,11 +650,19 @@ static int BuildRegionsUncached(Region* regions, int maxRegions,
 
     // ---- 2. sShot manager header and shot ID pool ----
     // Keep intrusive sentinel topology live; recipes reconcile shot lifetime.
+    // The 256-entry ID pool starts at +0x38 and its allocation cursor is at
+    // +0x438. Capture it separately from the manager header so repeated recipe
+    // construction cannot move the client's projectile-ID namespace forward.
     uint64_t sShot = read.operator()<uint64_t>(_addr(PTR_SSHOT));
     if (sShot) {
-        add((void*)sShot, 0x50, 0, 0, false
+        add((void*)sShot, 0x38, 0, 0, false
 #if ROLLBACK_SNAPDUMP_ENABLED
             , "sShot"
+#endif
+        );
+        add((void*)(sShot + 0x38), 0x404, 0, 0, false
+#if ROLLBACK_SNAPDUMP_ENABLED
+            , "sShot.idPool"
 #endif
         );
     }
@@ -1388,13 +1396,13 @@ void Rollback_UpdateRemoteInput(int32_t frame, uint32_t input)
 #if ROLLBACK_SNAPDUMP_ENABLED
         SnapDump_UpdateInputs(frame, slot.localInput, input);
 #endif
-        HookLog("IPSNAPREMOTE frame=%d applied=1 old=%08X new=%08X local=%08X\n",
-                frame, previous, input, slot.localInput);
+        /*HookLog("IPSNAPREMOTE frame=%d applied=1 old=%08X new=%08X local=%08X\n",
+                frame, previous, input, slot.localInput);*/
     }
     else
     {
-        HookLog("IPSNAPREMOTE frame=%d applied=0 new=%08X slotFrame=%d\n",
-                frame, input, slot.frame);
+        /*HookLog("IPSNAPREMOTE frame=%d applied=0 new=%08X slotFrame=%d\n",
+                frame, input, slot.frame);*/
     }
 }
 
@@ -1413,16 +1421,16 @@ extern "C" void Rollback_UpdateSnapshotInputs(int32_t frame, uint32_t localInput
 #if ROLLBACK_SNAPDUMP_ENABLED
         SnapDump_UpdateInputs(frame, localInput, remoteInput);
 #endif
-        HookLog("IPSNAP frame=%d resim=%d applied=1 oldLocal=%08X oldRemote=%08X "
+        /*HookLog("IPSNAP frame=%d resim=%d applied=1 oldLocal=%08X oldRemote=%08X "
                 "newLocal=%08X newRemote=%08X\n",
                 frame, g_isResimulating ? 1 : 0, previousLocal, previousRemote,
-                localInput, remoteInput);
+                localInput, remoteInput);*/
     }
     else
     {
-        HookLog("IPSNAP frame=%d resim=%d applied=0 local=%08X remote=%08X slotFrame=%d\n",
+        /*HookLog("IPSNAP frame=%d resim=%d applied=0 local=%08X remote=%08X slotFrame=%d\n",
                 frame, g_isResimulating ? 1 : 0, localInput, remoteInput,
-                slot.frame);
+                slot.frame);*/
     }
 }
 

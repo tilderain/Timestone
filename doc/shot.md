@@ -206,6 +206,49 @@ repair writes the local endpoints and computes each world endpoint as
 that otherwise cancel both X offsets inside virtual `+0x1C8`. It does not modify
 shared `rShot` metadata or collision-entry ownership.
 
+The AnmChr return slot at `cChr+0x90` is a union, not an unconditional object
+pointer. Shot reconstruction remaps it when it equals a captured shot, but must
+not clear non-pointer packed values merely because they lack a callable DTI. In
+the `20260802_144544` Chun-Li assist capture, both peers held
+`0x3F80000080000000` before frame 6249. Restore cleared that value only on the
+re-simulating client, transiently changing the animation command path so the
+host created `uShotVulcanKikouken` shot 16 while the client did not. The host's
+saved owner pre-spawn RNG exactly matched the client's unchanged character RNG,
+confirming that the later RNG mismatch was consumption by the missing shot.
+The confirmed shot-reference ring head at `cChr+0x6428` retains strict invalid
+object clearing.
+
+`sShot` owns a 256-entry projectile-ID pool at `+0x38..+0x437` and the next-ID
+cursor at `+0x438`. The old `0x50`-byte manager capture included only the first
+six entries. Reconstructing shots therefore advanced the client's allocator
+while the host retained its original IDs. In the `20260802_185718` Kikosho
+capture, `uShotShieldKikousyou::mId` was `29` on the host and `128`, `129`, then
+`130` on the client. The client then lost P2 assist 2 from the shot's
+`cAtkCtrl::TargetInfo` consumed-target entry, accepted an extra Kikosho hit, and
+acquired a Y-speed error that propagated into position differences of `1.5`,
+`3.75`, and `6.0` units. Snapshot the complete ID pool separately and reapply it
+after abandoned-shot destruction and after recipe factories finish, so temporary
+construction cannot alter the restored namespace.
+
+The ten projectile slot-active flags at `sGameConfig+0x4A89C` have the same
+restore-order requirement. The broad region pass restores them before current
+shots are destroyed, but native destruction clears the retired shot's slot.
+Reapply the saved flags after shot teardown and after recipe factories,
+alongside the shot ID allocator state.
+
+The follow-up `20260802_202847` capture disproved slot flags as the cause of the
+host-only Chun-Li shot. Both peers retained identical `01 01 00...` flags, and
+both executed one standard `sShot__spawnShot` call while re-simulating frame
+4052. Only the host returned `uShotVulcanKikouken`; only then did P2 assist 2's
+RNG advance through setup. Ghidra shows that the standard AnmChr case obtains
+the `rShot*` by name from the owner's resource table at `cChr+0x34F0` before
+calling `sShot__spawnShot`. Inside the spawn function, the only failures before
+setup are a null `rShot*` or failure to instantiate its DTI. The successful host
+recipe cannot record the failed client's call arguments, so the existing spawn
+hooks emit `SHOTSPAWNTRACE` during rollback with the element pointer and DTI,
+return value, caller, and owner RNG transition. This distinguishes missing
+resource-table state from a native factory failure on the next reproduction.
+
 Character target-processing tables must remain synchronized with the character
 body. `uCharacter__processTarget1` indexes seven heap-backed tables through
 `+0x1408..+0x1438` using packed counts at `+0x1440`, then calls virtual `+0x40`

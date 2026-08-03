@@ -84,6 +84,15 @@ fully synchronized or is transitioning through a restart:
 - GameUI movement is suppressed during headless resimulation so presentation
   resources are not mutated on every correction; the next live frame advances
   that native lifecycle.
+- Categories excluded from headless gameplay movement still receive a
+  cleanup-only pass for retired units. Native `sUnit__moveCategory` applies its
+  state 3/4 destruction state machine to every category before filtering active
+  object callbacks. Skipping a category entirely therefore starved effects in
+  categories 14-16, UI units, and other presentation lanes of the two passes
+  needed to remove multi-mask links, unlink the primary unit, and invoke its
+  deleting destructor. The cleanup-only pass reproduces those native lifecycle
+  transitions without moving, synchronizing, initializing, or drawing active
+  objects.
 
 The scheduler rebuild hook and hand-written scheduler allocator were removed.
 Native scheduler allocation and rebuild behavior is left intact instead of
@@ -128,6 +137,17 @@ The autotest-only hook that skipped `uScheduler__rebuildEntriesFromResource`
 was tested and removed. It avoided the immediate scheduler crash, but made the
 HUD, toon effects, and stage invisible, and still froze after roughly 36 Iron
 Man restarts. It is not a valid workaround.
+
+The effect sanitizer introduced in `ae90bb0` originally cleared every particle
+manager sub-buffer and set the manager count to zero when an effect generator
+was stale. Native `uEffect__releaseGenerator` at `0x1405E6890` uses that count to
+call `cParticleManager__releaseSubBuffer` at `0x14080C120`, then releases the
+manager array. Clearing valid ownership fields therefore suppressed frees on
+every rollback and could exhaust the shared allocator until effects, shots, and
+UI objects stopped allocating. The sanitizer now clears only inaccessible
+sub-buffer pointers. It preserves valid buffers and readable manager arrays for
+native destruction; malformed arrays retain their allocation pointer with a
+zero count so native teardown can at least release the containing array.
 
 These guards can suppress a crash while leaving a missing UI model, hit
 effect, cut-in, animation frame, or position update. They should be removed or

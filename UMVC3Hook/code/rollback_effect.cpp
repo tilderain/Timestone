@@ -97,7 +97,8 @@ static bool IsPersistentCharacterEffect(void* effect)
     return false;
 }
 
-static void DetachEffectOwnedParticleState(void* effect)
+static void SanitizeEffectOwnedParticleState(void* effect,
+                                             bool detachGenerator)
 {
     const uint32_t count = *(uint16_t*)((uint8_t*)effect + 0x208);
     const uint64_t managers = *(uint64_t*)((uint8_t*)effect + 0x220);
@@ -115,21 +116,28 @@ static void DetachEffectOwnedParticleState(void* effect)
         for (uint32_t index = 0; index < count; ++index) {
             uint8_t* manager = (uint8_t*)managers +
                 (size_t)index * PARTICLE_MANAGER_STRIDE;
-            // Keep the manager array owned by native destruction, but detach
-            // every buffer so releaseSubBuffer cannot return stale ownership
-            // to the allocator. This avoids leaking the array itself.
-            std::memset(manager + PARTICLE_MANAGER_BUFFER_OFFSET, 0, 0x18);
+            uint64_t buffer = *(uint64_t*)(
+                manager + PARTICLE_MANAGER_BUFFER_OFFSET);
+            if (buffer && !IsAccessiblePointer(buffer)) {
+                // Suppress only the invalid free. uEffect__releaseGenerator
+                // must retain the valid buffers, count, and manager array so
+                // native teardown can return their allocations.
+                std::memset(manager + PARTICLE_MANAGER_BUFFER_OFFSET, 0, 0x18);
+            }
         }
-        *(uint64_t*)((uint8_t*)effect + 0x218) = 0;
-        *(uint16_t*)((uint8_t*)effect + 0x208) = 0;
-        *(uint64_t*)((uint8_t*)effect + 0x228) = 0;
+        if (detachGenerator)
+            *(uint64_t*)((uint8_t*)effect + 0x218) = 0;
         return;
     }
 
-    *(uint64_t*)((uint8_t*)effect + 0x218) = 0;
+    if (detachGenerator)
+        *(uint64_t*)((uint8_t*)effect + 0x218) = 0;
     *(uint16_t*)((uint8_t*)effect + 0x208) = 0;
-    *(uint64_t*)((uint8_t*)effect + 0x220) = 0;
-    *(uint64_t*)((uint8_t*)effect + 0x228) = 0;
+    // Even when manager records are malformed, preserve a readable array
+    // pointer. Native teardown skips the zero-count loop and still frees the
+    // containing allocation.
+    if (!managers || !IsAccessibleRange(managers, 1))
+        *(uint64_t*)((uint8_t*)effect + 0x220) = 0;
 }
 
 static bool HasInvalidParticleManagerState(void* effect)
@@ -222,14 +230,14 @@ static void SanitizeEffectForDestruction(void* effect)
             // A stale generator can leave a mapped but invalid particle-manager
             // allocation behind. Native destruction would pass its sub-buffer
             // pointers to the allocator and walk corrupted heap metadata.
-            DetachEffectOwnedParticleState(effect);
+            SanitizeEffectOwnedParticleState(effect, true);
         }
     }
 
     {
         RollbackHookProfileScope profile(RollbackHookProfileId::UnitRemoveEffectSubBuffers);
         if (HasInvalidParticleManagerState(effect))
-            DetachEffectOwnedParticleState(effect);
+            SanitizeEffectOwnedParticleState(effect, false);
     }
 }
 

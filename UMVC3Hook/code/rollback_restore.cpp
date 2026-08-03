@@ -80,6 +80,11 @@ static constexpr uint32_t CUTIN_DRAW_LAYER_BITS = 0x00700000;
 static constexpr uint32_t MTOBJECT_VISIBLE_FLAG = 0x00004000;
 static constexpr size_t SMAIN_SIZE = 0x40080;
 static constexpr int SSHOT_CATEGORY = 10;
+static constexpr uint32_t SSHOT_ID_POOL_OFFSET = 0x38;
+static constexpr size_t SSHOT_ID_POOL_SIZE = 0x404;
+static constexpr uintptr_t PTR_SGAMECONFIG = 0x140D50F88;
+static constexpr uint32_t SGAMECONFIG_SHOT_SLOT_FLAGS_OFFSET = 0x4A89C;
+static constexpr size_t SGAMECONFIG_SHOT_SLOT_FLAGS_SIZE = 10;
 static constexpr uint32_t SAUX_FIRST_CATEGORY = 9;
 static constexpr uint32_t SSHOT_FIRST_CATEGORY = 10;
 static constexpr uint32_t SEFFECT_LAST_CATEGORY = 16;
@@ -610,6 +615,38 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
     const uint64_t sanitizeEffectsEnd = Profile_Now();
 
     void* sShot = *(void**)_addr(PTR_SSHOT);
+    void* sGameConfig = *(void**)_addr(PTR_SGAMECONFIG);
+    const uint8_t* savedShotIdPool = nullptr;
+    const uint8_t* savedShotSlotFlags = nullptr;
+    size_t regionOffset = 0;
+    for (int i = 0; i < slot.regionCount; ++i) {
+        if (slot.regions[i].ptr == (uint8_t*)sShot + SSHOT_ID_POOL_OFFSET &&
+            slot.regions[i].size >= SSHOT_ID_POOL_SIZE &&
+            regionOffset + SSHOT_ID_POOL_SIZE <= slot.size) {
+            savedShotIdPool = slot.data + regionOffset;
+        }
+        if (sGameConfig &&
+            slot.regions[i].ptr == (uint8_t*)sGameConfig +
+                SGAMECONFIG_SHOT_SLOT_FLAGS_OFFSET &&
+            slot.regions[i].size >= SGAMECONFIG_SHOT_SLOT_FLAGS_SIZE &&
+            regionOffset + SGAMECONFIG_SHOT_SLOT_FLAGS_SIZE <= slot.size) {
+            savedShotSlotFlags = slot.data + regionOffset;
+        }
+        regionOffset += slot.regions[i].size;
+        if (savedShotIdPool && savedShotSlotFlags) break;
+    }
+    // Destructing the abandoned shots clears their IDs. Rewind the allocator
+    // before running factories so setup observes the historical namespace.
+    if (savedShotIdPool) {
+        std::memcpy((uint8_t*)sShot + SSHOT_ID_POOL_OFFSET,
+                    savedShotIdPool, SSHOT_ID_POOL_SIZE);
+    }
+    // Abandoned-shot destruction updates these flags after the generic region
+    // restore. Reapply the historical values before reconstruction continues.
+    if (savedShotSlotFlags) {
+        std::memcpy((uint8_t*)sGameConfig + SGAMECONFIG_SHOT_SLOT_FLAGS_OFFSET,
+                    savedShotSlotFlags, SGAMECONFIG_SHOT_SLOT_FLAGS_SIZE);
+    }
     auto enqueueUnit = (ShotEnqueueFn)_addr(FN_SSHOT_ENQUEUE_UNIT);
     auto addUnit = (UnitAddFn)_addr(FN_SUNIT_ADD_UNIT);
     auto flushPendingUnits =
@@ -773,11 +810,12 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
     }
     const uint64_t respawnEnd = Profile_Now();
 
-    // cChr+0x90 is the animation interpreter's last-created object. Character
-    // restore rewinds it to a saved shot address, but reconstruction gives that
-    // shot a new allocation. Remap saved shots and discard references to shots
-    // that existed only in the abandoned timeline before an opcode performs
-    // isAlive/isKindOf on the field.
+    // cChr+0x90 is the animation interpreter's generic return-value union. It
+    // can hold a created object, but it also holds packed scalar/vector values.
+    // Character restore rewinds it to a saved shot address when it is an object,
+    // and reconstruction gives that shot a new allocation. Remap saved shots
+    // and discard pointer-shaped references to abandoned objects without
+    // clearing legitimate packed values.
     std::vector<void*> characters;
     uint64_t sCharacter = *(uint64_t*)_addr(PTR_SCHARACTER);
     for (int teamIndex = 0; sCharacter && teamIndex < 2; ++teamIndex) {
@@ -815,9 +853,14 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
                 }
             }
             if (resolved) continue;
-            if (std::find(currentShots.begin(), currentShots.end(), savedReference) !=
-                    currentShots.end() ||
-                (savedReference && !HasCallableDtiVirtual(savedReference))) {
+            const bool abandonedShot =
+                std::find(currentShots.begin(), currentShots.end(), savedReference) !=
+                currentShots.end();
+            const bool invalidObject = savedReference &&
+                (referenceOffset == 0x6428u ||
+                 IsLikelyPointer((uint64_t)savedReference)) &&
+                !HasCallableDtiVirtual(savedReference);
+            if (abandonedShot || invalidObject) {
                 *objectReturn = nullptr;
             }
         }
@@ -833,6 +876,18 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
         *pendingCountPtr = 0x200;
     }
     flushPendingUnits(sShot);
+
+    // Factory allocations are temporary reconstruction work. The concrete
+    // overlay restores each saved uShot::mId; now restore the matching pool and
+    // cursor so later gameplay spawns and destructors use the same namespace.
+    if (savedShotIdPool) {
+        std::memcpy((uint8_t*)sShot + SSHOT_ID_POOL_OFFSET,
+                    savedShotIdPool, SSHOT_ID_POOL_SIZE);
+    }
+    if (savedShotSlotFlags) {
+        std::memcpy((uint8_t*)sGameConfig + SGAMECONFIG_SHOT_SLOT_FLAGS_OFFSET,
+                    savedShotSlotFlags, SGAMECONFIG_SHOT_SLOT_FLAGS_SIZE);
+    }
 
     std::memcpy((void*)_addr(0x140d765d8), restoredGlobalRng, sizeof(restoredGlobalRng));
     if (sEffect) std::memcpy((void*)(sEffect + 0x3C), restoredEffectRng, sizeof(restoredEffectRng));

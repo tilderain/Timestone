@@ -104,6 +104,35 @@ static void CapturePreSpawnRng(RollbackShotRecipe& recipe, void* ownerChr)
     recipe.hasPreSpawnRng = true;
 }
 
+static void TraceResimShotSpawn(const char* kind,
+                                const RollbackShotRecipe& recipe,
+                                void* shot,
+                                void* caller)
+{
+    if (!g_activeRollbackProfile) return;
+
+    uint32_t ownerAfter[4] = {};
+    if (recipe.ownerChr) {
+        std::memcpy(ownerAfter, (uint8_t*)recipe.ownerChr + 0x2D80,
+                    sizeof(ownerAfter));
+    }
+    uint64_t elementDti = recipe.shotElement &&
+        HasCallableDtiVirtual(recipe.shotElement)
+        ? GetObjectDti((uint64_t)recipe.shotElement) : 0;
+    uint64_t replay = *(uint64_t*)_addr(PTR_SREPLAY);
+    int32_t frame = replay ? *(int32_t*)(replay + 0x54) : -1;
+    const uint32_t* ownerBefore =
+        reinterpret_cast<const uint32_t*>(recipe.preSpawnOwnerRng);
+    HookLog("SHOTSPAWNTRACE frame=%d kind=%s sequence=%llu caller=0x%llX "
+            "element=0x%llX elementDti=0x%llX owner=0x%llX slot=%u result=0x%llX "
+            "ownerRng=%08X,%08X,%08X,%08X->%08X,%08X,%08X,%08X\n",
+            frame, kind, recipe.spawnSequence, (uint64_t)caller,
+            (uint64_t)recipe.shotElement, elementDti, (uint64_t)recipe.ownerChr,
+            recipe.slotId, (uint64_t)shot,
+            ownerBefore[0], ownerBefore[1], ownerBefore[2], ownerBefore[3],
+            ownerAfter[0], ownerAfter[1], ownerAfter[2], ownerAfter[3]);
+}
+
 static void* __fastcall hkShotSpawn(void* manager, void* element, uint64_t initParam,
                                      void* posData, void* ownerChr, void* objectRef1,
                                      uint32_t slotId, void* objectRef2)
@@ -130,6 +159,8 @@ static void* __fastcall hkShotSpawn(void* manager, void* element, uint64_t initP
     CapturePreSpawnRng(recipe, ownerChr);
     void* shot = oShotSpawn(manager, element, initParam, posData, ownerChr,
                             objectRef1, slotId, objectRef2);
+    TraceResimShotSpawn("standard", recipe, shot,
+                        __builtin_return_address(0));
     InvalidateMemoryQueryCache();
     if (shot) {
         recipe.savedPtr = shot;
@@ -170,6 +201,8 @@ static void* __fastcall hkShotSpawnEx(void* manager, void* element, uint64_t ini
     CapturePreSpawnRng(recipe, ownerChr);
     void* shot = oShotSpawnEx(manager, element, initParam, posData, ownerChr,
                               objectRef1, slotId, objectRef2, a9, a10, a11, a12);
+    TraceResimShotSpawn("extended", recipe, shot,
+                        __builtin_return_address(0));
     InvalidateMemoryQueryCache();
     if (shot) {
         recipe.savedPtr = shot;

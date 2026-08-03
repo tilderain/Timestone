@@ -33,7 +33,7 @@ extern "C" void Rollback_UpdateSnapshotInputs(int32_t frame, uint32_t localInput
 extern "C" void Rollback_CommitPendingNetplayLive(int32_t frame);
 extern "C" void Rollback_NotifyDesyncTriggered(int32_t frame);
 
-static constexpr bool INPUT_PROVENANCE_TRACE = true;
+static constexpr bool INPUT_PROVENANCE_TRACE = false;
 
 static void TraceInputPacket(const char* marker, const char* path, int32_t localFrame,
                              const InputPacket& packet, uint16_t validMask,

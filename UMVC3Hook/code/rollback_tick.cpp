@@ -274,6 +274,58 @@ static void HeadlessUnitCategoryMove(uint64_t sMain, uint64_t sUnit,
     }
 }
 
+template <bool ProfilingEnabled>
+static void HeadlessUnitCategoryCleanup(uint64_t sMain, uint64_t sUnit,
+                                        uint32_t category)
+{
+    const uint64_t categoryBase = sUnit + SUNIT_CATEGORY_LISTS_OFFSET +
+        SUNIT_CATEGORY_LIST_STRIDE * category;
+    if ((*(uint32_t*)(categoryBase - 8) & 2u) != 0) return;
+
+    uint64_t unit = *(uint64_t*)categoryBase;
+    if (!unit) return;
+
+    VTableCall(sUnit, 0x78);
+    const uint64_t enabledMask = ~*(uint64_t*)(sUnit + 0x1848);
+    const float delta = *(float*)(categoryBase + 0x10) * *(float*)(sMain + 0x80);
+    while (unit) {
+        const uint64_t next = *(uint64_t*)(unit + 0x18);
+        if ((*(uint64_t*)(unit + 0x30) & enabledMask) == 0) {
+            *(float*)(unit + 0x28) = delta;
+            uint32_t stateFlags = *(uint32_t*)(unit + 0x10);
+            const uint32_t state = stateFlags & 7u;
+            if (state == 3 || state == 4) {
+                uint64_t dti = 0;
+                uint64_t start = 0;
+                if constexpr (ProfilingEnabled) {
+                    dti = GetObjectDti(unit);
+                    Profile_RegisterUnitObjectType(
+                        RollbackUnitProfilePhase::Move, category, dti);
+                    start = Profile_NowEnabled();
+                }
+                if (state == 3) {
+                    *(uint32_t*)(unit + 0x10) =
+                        (stateFlags & 0xfffffffcu) | 4u;
+                    ((void(__fastcall*)(uint64_t, uint64_t))
+                        _addr(FN_SUNIT_REMOVE_MULTI_MASK))(sUnit, unit);
+                } else {
+                    *(uint32_t*)(unit + 0x10) = stateFlags & 0xfffffff8u;
+                    ((void(__fastcall*)(uint64_t, uint64_t))
+                        _addr(FN_SUNIT_REMOVE_UNIT))(sUnit, unit);
+                    const uint64_t vtable = *(uint64_t*)unit;
+                    ((void(__fastcall*)(uint64_t, int))(*(uint64_t*)vtable))(unit, 1);
+                }
+                if constexpr (ProfilingEnabled) {
+                    Profile_RecordUnitObject(
+                        RollbackUnitProfilePhase::Move, category, dti,
+                        Profile_NowEnabled() - start);
+                }
+            }
+        }
+        unit = next;
+    }
+}
+
 
 // Replicates the per-category late-pass body used by sUnit__load
 // (0x14051BF10, phase 2) and sUnit__loadCategory (0x14051B6F0, phase 3).
@@ -369,7 +421,20 @@ static void HeadlessUnitPass(uint64_t sMain, uint64_t sUnit,
             const bool enabled = phase == RollbackUnitProfilePhase::Move
                 ? IsHeadlessGameplayUnitCategory(category)
                 : IsHeadlessGameplaySyncCategory(category);
-            if (!enabled) continue;
+            if (!enabled) {
+                if (phase == RollbackUnitProfilePhase::Move) {
+                    const uint64_t start = Profile_NowEnabled();
+                    if constexpr (ProfilingEnabled)
+                        HeadlessUnitCategoryCleanup<true>(sMain, sUnit, category);
+                    else
+                        HeadlessUnitCategoryCleanup<false>(sMain, sUnit, category);
+                    if constexpr (ProfilingEnabled) {
+                        Profile_RecordUnitCategory(
+                            phase, category, Profile_NowEnabled() - start);
+                    }
+                }
+                continue;
+            }
             if constexpr (ProfilingEnabled) {
                 const uint64_t start = Profile_NowEnabled();
                 if (phase == RollbackUnitProfilePhase::Move) {
