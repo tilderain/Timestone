@@ -586,11 +586,11 @@ void ProcessNetSuiteSetup(int32_t frame)
     if (!g_netSuiteActive || g_netSuiteSetupApplied ||
         g_netSuiteSetupFrame < 0 || frame < g_netSuiteSetupFrame)
         return;
-    if (!ResetSuiteRng()) {
-        HookLog("AutoTestNet: move %u setup could not reset RNG\n",
-                g_netSuiteMoveId);
-        return;
-    }
+    // The synchronized training-restart barrier already seeds every RNG domain
+    // before clearing snapshots and resetting the frame epoch. Reseeding here is
+    // an out-of-band state change that a client forced resim can overwrite by
+    // restoring the preceding frame, leaving its active character one RNG step
+    // ahead of the host.
     if (g_runningRuntimeHyper)
         FillAttackerHyperGauge(g_suiteStatus.playerIndex);
     g_netSuiteSetupApplied = true;
