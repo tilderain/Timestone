@@ -327,6 +327,8 @@ static void __fastcall HookedMove(void* sMvc3Main)
             ? *(uint64_t*)(sMvc3Manager + SMVC3MGR_ACTION_OFFSET) : 0;
         uint64_t sReplay = *(uint64_t*)_addr(SREPLAY_PTR);
 
+        Controller_ClearDesyncDetection();
+
         if (restartNetplay && g_restartKind == RESTART_TRAINING) {
             Rollback_ClearPendingReSimulation();
             if (sAction) {
@@ -337,7 +339,6 @@ static void __fastcall HookedMove(void* sMvc3Main)
                 Controller_ResetFightTimer(sAction);
             }
             Rollback_FreeSnapshots();
-            Controller_ClearDesyncDetection();
             Rollback_ResetNetplayHistoryBuffers();
             g_battleSynchronized = false;
             g_localReady = false;
@@ -930,6 +931,11 @@ void FrameStepper_Process()
     DesyncPacket desyncPacket;
     while (Netplay_GetInboundDesync(desyncPacket))
     {
+        // Discard stale alerts from the previous generation while the restart
+        // barrier is rebuilding the shared frame and RNG epochs.
+        if (Netplay_IsActive() && !FrameStepper_IsBattleSynchronized())
+            continue;
+
         if (desyncPacket.action == DESYNC_TRIGGER)
         {
             g_desyncDetected = true;

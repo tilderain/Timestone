@@ -317,6 +317,23 @@ static constexpr uint32_t DESYNC_THRESHOLD         = 0;
 static constexpr int32_t  DESYNC_SKIP_FRAMES       = 0;
 static constexpr int32_t  DESYNC_CONSECUTIVE_MIN   = 1;
 
+static void ResetDesyncDetection()
+{
+    g_desyncDetected = false;
+    g_desyncSeen = false;
+    g_desyncFrame = -1;
+    g_desyncLocalCS = 0;
+    g_desyncRemoteCS = 0;
+    std::memset(g_localChecksum, 0, sizeof(g_localChecksum));
+    std::memset(g_remoteChecksum, 0, sizeof(g_remoteChecksum));
+    std::memset(g_localChecksumFrame, 0xFF, sizeof(g_localChecksumFrame));
+    std::memset(g_remoteChecksumFrame, 0xFF, sizeof(g_remoteChecksumFrame));
+    std::memset(g_desyncChecked, 0xFF, sizeof(g_desyncChecked));
+    std::memset(g_desyncMismatch, 0, sizeof(g_desyncMismatch));
+    g_confirmedChecksumThrough = -1;
+    g_lastAdvertisedChecksumFrame = -1;
+}
+
 // ---------------------------------------------------------------------------
 // Frame advantage (GGPO-style) — RTT-based frame-count timesync
 // ---------------------------------------------------------------------------
@@ -412,19 +429,7 @@ extern "C" void Controller_ResetBuffers()
     g_lastRemoteFrame = -1;
     g_lastRemoteInput = 0;
     g_lastNonMultiCheckedFrame = -1;
-    g_desyncDetected   = false;
-    g_desyncSeen       = false;
-    g_desyncFrame      = -1;
-    g_desyncLocalCS    = 0;
-    g_desyncRemoteCS   = 0;
-    std::memset(g_localChecksum,    0, sizeof(g_localChecksum));
-    std::memset(g_remoteChecksum,   0, sizeof(g_remoteChecksum));
-    std::memset(g_localChecksumFrame,  0xFF, sizeof(g_localChecksumFrame));
-    std::memset(g_remoteChecksumFrame, 0xFF, sizeof(g_remoteChecksumFrame));
-    std::memset(g_desyncChecked,  0xFF, sizeof(g_desyncChecked));   // -1 per int32_t
-    std::memset(g_desyncMismatch, 0,    sizeof(g_desyncMismatch));
-    g_confirmedChecksumThrough = -1;
-    g_lastAdvertisedChecksumFrame = -1;
+    ResetDesyncDetection();
     g_localFrameAdvantage  = 0;
     g_remoteFrameAdvantage = 0;
     g_timesyncFrameCount   = 0;
@@ -441,21 +446,7 @@ extern "C" int32_t Controller_GetLastRemoteFrame()  { return g_lastRemoteFrame; 
 extern "C" int32_t Controller_GetRollbackFrames()   { return g_rollbackFrames; }
 extern "C" void Controller_ClearDesyncDetection()
 {
-    g_desyncDetected = false;
-    g_desyncSeen = false;
-    g_desyncFrame = -1;
-    g_desyncLocalCS = 0;
-    g_desyncRemoteCS = 0;
-
-    // Treat comparisons from the completed move as acknowledged so they cannot
-    // immediately retrigger after a training reset. New frames overwrite them.
-    for (int32_t i = 0; i < RING_SIZE; ++i) {
-        if (g_localChecksumFrame[i] == g_remoteChecksumFrame[i])
-            g_desyncChecked[i] = g_localChecksumFrame[i];
-        else
-            g_desyncChecked[i] = -1;
-        g_desyncMismatch[i] = false;
-    }
+    ResetDesyncDetection();
 }
 extern "C" uint32_t Controller_GetRecordedLocalInput(int32_t frame)
 {
@@ -1174,7 +1165,8 @@ static void DrainAndProcessPackets()
 
         // 2. Queue the piggybacked checksum. It is compared at frame end, after
         // any rollback requested by this packet has replaced speculative state.
-        if (g_netFrameCount >= DESYNC_SKIP_FRAMES)
+        if (FrameStepper_IsBattleSynchronized() &&
+            g_netFrameCount >= DESYNC_SKIP_FRAMES)
         {
             int32_t csFrame = (int32_t)inPkt.checksum_frame;
             if (csFrame >= 0)
@@ -1511,7 +1503,8 @@ static uint32_t ComputeChecksum()
 
 extern "C" void Controller_RecordFrameChecksum(int32_t frame)
 {
-    if (frame < DESYNC_SKIP_FRAMES) return;
+    if (!FrameStepper_IsBattleSynchronized() || frame < DESYNC_SKIP_FRAMES)
+        return;
     uint32_t idx = (uint32_t)frame % RING_SIZE;
     g_localChecksum[idx] = ComputeChecksum();
     g_localChecksumFrame[idx] = frame;
@@ -1539,6 +1532,9 @@ extern "C" bool Controller_GetFrameChecksum(int32_t frame, uint32_t* outChecksum
 
 static void UpdateConfirmedChecksums()
 {
+    if (!FrameStepper_IsBattleSynchronized())
+        return;
+
     while (g_confirmedChecksumThrough < g_netFrameCount)
     {
         int32_t next = g_confirmedChecksumThrough + 1;
@@ -1641,7 +1637,8 @@ extern "C" void Controller_OnFrameEnd()
         }
     }
 
-    if (!g_isResimulating && g_netFrameCount >= DESYNC_SKIP_FRAMES)
+    if (!g_isResimulating && FrameStepper_IsBattleSynchronized() &&
+        g_netFrameCount >= DESYNC_SKIP_FRAMES)
     {
         Controller_RecordFrameChecksum(g_netFrameCount);
         uint32_t liveChecksum = 0;
@@ -1680,7 +1677,8 @@ extern "C" void Controller_OnFrameEnd()
     Netplay_SendPacket(outPkt);
 
     // --- Desync comparison: scan backward from newest remote checksum. ---
-    if (!g_isResimulating && g_netFrameCount >= DESYNC_SKIP_FRAMES)
+    if (!g_isResimulating && FrameStepper_IsBattleSynchronized() &&
+        g_netFrameCount >= DESYNC_SKIP_FRAMES)
     {
         int32_t newestChecked = -1;
         for (int i = 0; i < RING_SIZE; i++)
