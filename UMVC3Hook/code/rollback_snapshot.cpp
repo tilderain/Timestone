@@ -77,8 +77,16 @@ static constexpr uint32_t SUNIT_CATEGORY_LISTS_OFFSET = 0x50;
 static constexpr uint32_t SUNIT_CATEGORY_LIST_STRIDE = 0x30;
 static constexpr uint32_t SUNIT_CHARACTER_CATEGORY = 8;
 static constexpr uint32_t SUNIT_CHARACTER_POST_CATEGORY = 18;
-static constexpr uint32_t UCHARACTER_POST_CAMERA_STATE_OFFSET = 0x40;
-static constexpr size_t UCHARACTER_POST_CAMERA_STATE_SIZE = 0x20;
+static constexpr uint32_t UCHARACTER_POST_SCALAR_STATE_OFFSET = 0x40;
+static constexpr size_t UCHARACTER_POST_SCALAR_STATE_SIZE = 0x10;
+static constexpr uint32_t UCHARACTER_POST_TEAM0_CACHE_OFFSET = 0x50;
+static constexpr uint32_t UCHARACTER_POST_TEAM1_CACHE_OFFSET = 0x58;
+static constexpr size_t UCHARACTER_POST_SIZE = 0x60;
+static constexpr uint32_t CUNIT_RNO_OFFSET = 0x08;
+static constexpr uint32_t CUNIT_UNIT_PARAM_OFFSET = 0x0C;
+static constexpr uint32_t CUNIT_FLAGS_OFFSET = 0x10;
+static constexpr uint32_t CUNIT_MOVE_ENABLED_FLAG = 0x400;
+static constexpr uint32_t CUNIT_GROUP_OFFSET = 0x30;
 static constexpr size_t SMAIN_SIZE = 0x40080;
 static constexpr int MAX_REGIONS = ROLLBACK_MAX_REGIONS;
 static constexpr int DYNAMIC_SAFETY = 128;
@@ -90,6 +98,7 @@ static constexpr uint32_t UACTION_CAMERA_MOTION_PARENT_OFFSET = 0x298;
 static constexpr uint32_t UACTION_CAMERA_REQUEST_RESOURCE_OFFSET = 0x3C0;
 static constexpr uint32_t UACTION_CAMERA_REQUEST_PARENT_OFFSET = 0x3D0;
 static constexpr uintptr_t DTI_UACTION_SIDE_CAMERA = 0x140D44268;
+static constexpr uintptr_t DTI_UCHARACTER_POST = 0x140D44D60;
 
 using Region = RollbackRegion;
 using SnapshotSlot = RollbackSnapshotSlot;
@@ -157,6 +166,76 @@ static void CaptureActionSideCameraState(RollbackSnapshotSlot& slot)
         addRef(slot.actionSideCamera.motionResource);
     if (slot.actionSideCamera.requestResource)
         addRef(slot.actionSideCamera.requestResource);
+}
+
+static void CaptureCharacterPostState(RollbackSnapshotSlot& slot)
+{
+    slot.characterPost = {};
+
+    uint64_t sUnit = *(uint64_t*)_addr(PTR_SUNIT);
+    if (!sUnit || *(uint32_t*)(sUnit + SUNIT_CATEGORY_COUNT_OFFSET) <=
+            SUNIT_CHARACTER_POST_CATEGORY) {
+        return;
+    }
+
+    uint64_t characterPost = *(uint64_t*)(
+        sUnit + SUNIT_CATEGORY_LISTS_OFFSET +
+        SUNIT_CATEGORY_LIST_STRIDE * SUNIT_CHARACTER_POST_CATEGORY);
+    if (!characterPost || !IsAccessibleRange(characterPost, UCHARACTER_POST_SIZE) ||
+        !HasCallableDtiVirtual((void*)characterPost) ||
+        GetObjectDti(characterPost) != (uint64_t)_addr(DTI_UCHARACTER_POST)) {
+        return;
+    }
+
+    // createProperty reflects mRno, mUnitParam, mDeltaTime, and mUnitGroup from
+    // cUnit. Preserve the two generic gameplay values, callback enablement, and
+    // unit-group dispatch mask. Do not copy the complete cUnit flags dword:
+    // lifecycle/category, Draw/Fix, and view bits share it with Move. List links
+    // at +0x18/+0x20 remain owned by the current sUnit allocation, while
+    // mDeltaTime at +0x28 is derived by sUnit immediately before every move.
+    slot.characterPost.rno = *(int32_t*)(characterPost + CUNIT_RNO_OFFSET);
+    slot.characterPost.unitParam =
+        *(int32_t*)(characterPost + CUNIT_UNIT_PARAM_OFFSET);
+    slot.characterPost.moveEnabled =
+        (*(uint32_t*)(characterPost + CUNIT_FLAGS_OFFSET) &
+         CUNIT_MOVE_ENABLED_FLAG) != 0;
+    slot.characterPost.unitGroup =
+        *(uint64_t*)(characterPost + CUNIT_GROUP_OFFSET);
+
+    // Ghidra constructor and access audit: +0x40..+0x4f is the complete
+    // class-specific scalar state. The only remaining class fields are the two
+    // cached character pointers at +0x50/+0x58.
+    static_assert(sizeof(slot.characterPost.scalarState) ==
+                  UCHARACTER_POST_SCALAR_STATE_SIZE);
+    std::memcpy(slot.characterPost.scalarState,
+                (const void*)(characterPost + UCHARACTER_POST_SCALAR_STATE_OFFSET),
+                UCHARACTER_POST_SCALAR_STATE_SIZE);
+
+    uint64_t cachedCharacters[2] = {
+        *(uint64_t*)(characterPost + UCHARACTER_POST_TEAM0_CACHE_OFFSET),
+        *(uint64_t*)(characterPost + UCHARACTER_POST_TEAM1_CACHE_OFFSET),
+    };
+    uint64_t sCharacter = *(uint64_t*)_addr(PTR_SCHARACTER);
+    for (int team = 0; sCharacter && team < 2; ++team) {
+        uint64_t node = sCharacter + (team == 0 ? TEAM0_OFFSET : TEAM1_OFFSET) +
+            TEAM_FIRST_NODE_OFFSET;
+        for (uint8_t member = 0; node && member < 8; ++member) {
+            uint64_t character = *(uint64_t*)(node + NODE_CHR_OFFSET);
+            if (character == cachedCharacters[team])
+                slot.characterPost.cachedCharacterMembers[team] = member;
+            node = *(uint64_t*)(node + NODE_NEXT_OFFSET);
+        }
+    }
+
+    // The cache is defined as one point character per team. Avoid carrying an
+    // unresolved prediction-timeline address into a future live allocation.
+    for (int team = 0; team < 2; ++team) {
+        if (cachedCharacters[team] != 0 &&
+            slot.characterPost.cachedCharacterMembers[team] == UINT8_MAX) {
+            return;
+        }
+    }
+    slot.characterPost.valid = true;
 }
 
 struct RegionDependency {
@@ -1147,25 +1226,9 @@ static int BuildRegionsUncached(Region* regions, int maxRegions,
         // saved address after native list teardown can write into a replaced
         // object and corrupt the model/joint graph.
 
-        // uCharacterPost::sync owns the camera-relative fighter correction at
-        // the end of category 18. Its center and cached point-character pair
-        // feed both point recentering and incoming assist/TAC placement.
-        /*if (sUnit && categoryCount > SUNIT_CHARACTER_POST_CATEGORY) {
-            uint64_t characterPost = read.operator()<uint64_t>(
-                sUnit + SUNIT_CATEGORY_LISTS_OFFSET +
-                SUNIT_CATEGORY_LIST_STRIDE * SUNIT_CHARACTER_POST_CATEGORY,
-                true);
-            if (characterPost && IsAccessibleAddress(
-                    characterPost + UCHARACTER_POST_CAMERA_STATE_OFFSET +
-                    UCHARACTER_POST_CAMERA_STATE_SIZE - 1)) {
-                add((void*)(characterPost + UCHARACTER_POST_CAMERA_STATE_OFFSET),
-                    UCHARACTER_POST_CAMERA_STATE_SIZE, 0, 0, false
-#if ROLLBACK_SNAPDUMP_ENABLED
-                    , "uCharacterPost.cameraState"
-#endif
-                );
-            }
-        }*/
+        // uCharacterPost is captured separately in the snapshot slot. Its
+        // scalar payload is copied into the current category-18 object and its
+        // two character references are remapped by roster member index.
     }
 
     // ---- 19-22. sUnit effect categories — SKIPPED (heap corruption) ---
@@ -1260,6 +1323,7 @@ void Rollback_SaveSnapshot(int32_t frame)
     }
     slot.size = offset;
     CaptureActionSideCameraState(slot);
+    CaptureCharacterPostState(slot);
     const uint64_t copyRegionsEnd = Profile_Now();
 
     // Record the exact state captured at the rollback boundary. RNG hooks only

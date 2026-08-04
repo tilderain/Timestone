@@ -75,6 +75,17 @@ static constexpr uint32_t SUNIT_CATEGORY_COUNT_OFFSET = 0xC38;
 static constexpr uint32_t SUNIT_CATEGORY_LISTS_OFFSET = 0x50;
 static constexpr uint32_t SUNIT_CATEGORY_LIST_STRIDE = 0x30;
 static constexpr uint32_t SUNIT_CHARACTER_CATEGORY = 8;
+static constexpr uint32_t SUNIT_CHARACTER_POST_CATEGORY = 18;
+static constexpr uintptr_t DTI_UCHARACTER_POST = 0x140D44D60;
+static constexpr uint32_t UCHARACTER_POST_SCALAR_STATE_OFFSET = 0x40;
+static constexpr size_t UCHARACTER_POST_SCALAR_STATE_SIZE = 0x10;
+static constexpr uint32_t UCHARACTER_POST_CHARACTER_CACHE_OFFSET = 0x50;
+static constexpr size_t UCHARACTER_POST_SIZE = 0x60;
+static constexpr uint32_t CUNIT_RNO_OFFSET = 0x08;
+static constexpr uint32_t CUNIT_UNIT_PARAM_OFFSET = 0x0C;
+static constexpr uint32_t CUNIT_FLAGS_OFFSET = 0x10;
+static constexpr uint32_t CUNIT_MOVE_ENABLED_FLAG = 0x400;
+static constexpr uint32_t CUNIT_GROUP_OFFSET = 0x30;
 static constexpr uint32_t CUNIT_LIVE_STATE_OFFSETS[] = {0x10, 0x18, 0x20, 0x38};
 static constexpr uint32_t CUTIN_DRAW_LAYER_BITS = 0x00700000;
 static constexpr uint32_t MTOBJECT_VISIBLE_FLAG = 0x00004000;
@@ -1085,6 +1096,54 @@ void Rollback_RestoreSnapshot(int32_t frame)
         }
         return false;
     };
+    auto restoreCharacterPostState = [&slot, sCharacter]() {
+        if (!slot.characterPost.valid) return;
+
+        uint64_t sUnit = *(uint64_t*)_addr(PTR_SUNIT);
+        if (!sUnit || *(uint32_t*)(sUnit + SUNIT_CATEGORY_COUNT_OFFSET) <=
+                SUNIT_CHARACTER_POST_CATEGORY) {
+            return;
+        }
+        uint64_t characterPost = *(uint64_t*)(
+            sUnit + SUNIT_CATEGORY_LISTS_OFFSET +
+            SUNIT_CATEGORY_LIST_STRIDE * SUNIT_CHARACTER_POST_CATEGORY);
+        if (!characterPost || !IsAccessibleRange(characterPost, UCHARACTER_POST_SIZE) ||
+            !HasCallableDtiVirtual((void*)characterPost) ||
+            GetObjectDti(characterPost) != (uint64_t)_addr(DTI_UCHARACTER_POST)) {
+            return;
+        }
+
+        *(int32_t*)(characterPost + CUNIT_RNO_OFFSET) = slot.characterPost.rno;
+        *(int32_t*)(characterPost + CUNIT_UNIT_PARAM_OFFSET) =
+            slot.characterPost.unitParam;
+        uint32_t* unitFlags = (uint32_t*)(characterPost + CUNIT_FLAGS_OFFSET);
+        *unitFlags = (*unitFlags & ~CUNIT_MOVE_ENABLED_FLAG) |
+            (slot.characterPost.moveEnabled ? CUNIT_MOVE_ENABLED_FLAG : 0);
+        *(uint64_t*)(characterPost + CUNIT_GROUP_OFFSET) =
+            slot.characterPost.unitGroup;
+
+        static_assert(sizeof(slot.characterPost.scalarState) ==
+                      UCHARACTER_POST_SCALAR_STATE_SIZE);
+        std::memcpy((void*)(characterPost + UCHARACTER_POST_SCALAR_STATE_OFFSET),
+                    slot.characterPost.scalarState,
+                    UCHARACTER_POST_SCALAR_STATE_SIZE);
+        for (int team = 0; team < 2; ++team) {
+            uint64_t character = 0;
+            uint8_t savedMember = slot.characterPost.cachedCharacterMembers[team];
+            uint64_t node = sCharacter
+                ? sCharacter + (team == 0 ? TEAM0_OFFSET : TEAM1_OFFSET) +
+                    TEAM_FIRST_NODE_OFFSET
+                : 0;
+            for (uint8_t member = 0; node && member <= savedMember && member < 8;
+                 ++member) {
+                if (member == savedMember)
+                    character = *(uint64_t*)(node + NODE_CHR_OFFSET);
+                node = *(uint64_t*)(node + NODE_NEXT_OFFSET);
+            }
+            *(uint64_t*)(characterPost + UCHARACTER_POST_CHARACTER_CACHE_OFFSET +
+                         team * sizeof(uint64_t)) = character;
+        }
+    };
     auto restoreActionSideCamera = [&slot, &isTeamCharacter](
                                        uint64_t camera, const uint8_t* saved,
                                        size_t copySize) {
@@ -1783,6 +1842,11 @@ void Rollback_RestoreSnapshot(int32_t frame)
             offset += slot.regions[i].size;
         }
     }
+
+    // Category 18 uses this persistent midpoint/cache after collision and
+    // character updates. Restore it into the current coordinator allocation so
+    // replay does not apply a prediction-timeline recenter to both fighters.
+    restoreCharacterPostState();
 
     traceRestoreState("after");
 

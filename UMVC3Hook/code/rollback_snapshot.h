@@ -129,6 +129,20 @@ struct RollbackActionSideCameraState {
     void* requestParent = nullptr;
 };
 
+struct RollbackCharacterPostState {
+    // Gameplay-relevant inherited cUnit state. The remaining cUnit fields are
+    // scheduler/list ownership, visual flags, or per-tick derived delta time.
+    int32_t rno = 0;
+    int32_t unitParam = 0;
+    bool moveEnabled = false;
+    uint64_t unitGroup = 0;
+    // Complete class-specific scalar payload at uCharacterPost+0x40..+0x4f.
+    // The two following pointers are remapped by roster index below.
+    uint8_t scalarState[0x10] = {};
+    uint8_t cachedCharacterMembers[2] = {UINT8_MAX, UINT8_MAX};
+    bool valid = false;
+};
+
 struct RollbackSnapshotSlot {
     int32_t frame = -1;
     uint8_t* data = nullptr;
@@ -143,6 +157,7 @@ struct RollbackSnapshotSlot {
     std::vector<RollbackCollisionNodeClone> collisionNodeClones;
     std::vector<RollbackModelRenderState> modelRenderStates;
     RollbackActionSideCameraState actionSideCamera;
+    RollbackCharacterPostState characterPost;
 };
 
 // Encode the slot ABI into a required linker symbol. Translation units built
