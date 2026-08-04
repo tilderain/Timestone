@@ -55,6 +55,7 @@ constexpr size_t NET_HISTORY_SIZE = 16;
 
 struct InputPacket {
     uint32_t type;               // PACKET_INPUT
+    uint32_t battle_generation;  // rejects in-flight packets from prior matches
     uint32_t start_frame;        // inputs[0] corresponds to this frame
     uint32_t checksum_frame;     // confirmed game frame, UINT32_MAX when absent
     uint32_t checksum;           // corrected state at checksum_frame
@@ -97,6 +98,7 @@ enum DesyncAction : uint32_t {
 
 struct DesyncPacket {
     uint32_t type;               // PACKET_DESYNC
+    uint32_t battle_generation;
     uint32_t action;             // DesyncAction
     int32_t  frame;
     uint32_t localChecksum;
@@ -170,6 +172,7 @@ enum BattleSyncFlags : uint32_t {
     BATTLE_SYNC_READY   = 1u << 0,
     BATTLE_SYNC_RELEASE = 1u << 1,
     BATTLE_SYNC_SEED    = 1u << 2,
+    BATTLE_SYNC_FIGHTING = 1u << 3,
 };
 
 static constexpr int MAX_RESIM_FRAMES = 16;

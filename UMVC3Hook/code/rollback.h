@@ -50,6 +50,9 @@ extern bool g_ndjsonIncludeDirHistory;
 // Flush the rolling netplay NDJSON history when desync is triggered.
 extern "C" void Rollback_NotifyDesyncTriggered(int32_t frame);
 
+// Cancel a delayed desync capture when its battle generation is reset.
+extern "C" void Rollback_ClearPendingDesyncCapture();
+
 // Advance the delayed desync capture state from the game thread. Returns true
 // while the two-frame post-trigger capture window is still active.
 extern "C" bool Rollback_ProcessDesyncDelay(int32_t currentFrame);

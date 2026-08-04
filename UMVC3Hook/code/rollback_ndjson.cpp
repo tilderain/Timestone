@@ -1220,7 +1220,14 @@ extern "C" void Rollback_NotifyDesyncTriggered(int32_t frame)
     g_pendingDesyncCaptureFrame = frame + 15;
     g_pendingDesyncCaptureWritten = false;
     HookLog("Desync: delaying pause and snapdump through frame %d\n",
-            frame + 15);
+             frame + 15);
+}
+
+extern "C" void Rollback_ClearPendingDesyncCapture()
+{
+    g_pendingDesyncTriggerFrame = -1;
+    g_pendingDesyncCaptureFrame = -1;
+    g_pendingDesyncCaptureWritten = false;
 }
 
 extern "C" bool Rollback_ProcessDesyncDelay(int32_t currentFrame)

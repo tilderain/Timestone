@@ -447,6 +447,17 @@ extern "C" int32_t Controller_GetRollbackFrames()   { return g_rollbackFrames; }
 extern "C" void Controller_ClearDesyncDetection()
 {
     ResetDesyncDetection();
+    // A reset can happen after the logical timeline has already advanced (for
+    // example when both peers enter fighting after a restart). Start the new
+    // checksum epoch at the current frame instead of waiting forever for
+    // checksum records from earlier frames that were intentionally discarded.
+    int32_t firstFrame = GetGameFrameCount();
+    if (firstFrame > 0)
+    {
+        g_confirmedChecksumThrough = firstFrame - 1;
+        g_lastAdvertisedChecksumFrame = firstFrame - 1;
+    }
+    Rollback_ClearPendingDesyncCapture();
 }
 extern "C" uint32_t Controller_GetRecordedLocalInput(int32_t frame)
 {
@@ -505,12 +516,20 @@ extern "C" void Controller_SetRollbackFrames(int32_t n)
 {
     if (n < 0)                  n = 0;
     if (n > ROLLBACK_WINDOW)    n = ROLLBACK_WINDOW;
+    if (n == g_rollbackFrames)
+        return;
+
     g_rollbackFrames = n;
     if (n == 0)
     {
         std::memset(g_predictedInput, 0, sizeof(g_predictedInput));
         std::memset(g_predictedFrame, -1, sizeof(g_predictedFrame));
+        Rollback_ClearPendingReSimulation();
     }
+
+    // A rollback-mode transition changes which frames are authoritative. Do not
+    // compare checksum records produced under the previous mode.
+    Controller_ClearDesyncDetection();
 }
 
 // ---------------------------------------------------------------------------
@@ -1045,6 +1064,10 @@ static uint64_t __fastcall hkGetsCurrentInput_withSOCD(uint64_t pad, uint32_t pl
 static void(__fastcall* oStepIntro)(uint64_t param_1) = nullptr;
 static void(__fastcall* oStepFighting)(uint64_t param_1) = nullptr;
 extern "C" bool FrameStepper_IsBattleSynchronized();
+extern "C" uint32_t FrameStepper_GetBattleGeneration();
+extern "C" bool FrameStepper_IsMatchRestartPending();
+extern "C" bool FrameStepper_IsDesyncCheckReady();
+extern "C" void FrameStepper_NotifyFighting();
 
 static void __fastcall hkStepIntro(uint64_t param_1)
 {
@@ -1099,6 +1122,7 @@ static void ApplySynchronizedFightTime(uint64_t sAction)
 static void __fastcall hkStepFighting(uint64_t sAction)
 {
     RollbackHookProfileScope profile(RollbackHookProfileId::StepFighting);
+    FrameStepper_NotifyFighting();
     ApplySynchronizedFightTime(sAction);
     oStepFighting(sAction);
     ApplySynchronizedFightTime(sAction);
@@ -1127,6 +1151,9 @@ static void DrainAndProcessPackets()
     InputPacket inPkt;
     while (Netplay_GetInboundPacket(inPkt))
     {
+        if (inPkt.battle_generation != FrameStepper_GetBattleGeneration())
+            continue;
+
         uint16_t acceptedMask = 0;
         uint16_t changedMask = 0;
         uint16_t priorConfirmedMask = 0;
@@ -1165,7 +1192,7 @@ static void DrainAndProcessPackets()
 
         // 2. Queue the piggybacked checksum. It is compared at frame end, after
         // any rollback requested by this packet has replaced speculative state.
-        if (FrameStepper_IsBattleSynchronized() &&
+        if (FrameStepper_IsDesyncCheckReady() &&
             g_netFrameCount >= DESYNC_SKIP_FRAMES)
         {
             int32_t csFrame = (int32_t)inPkt.checksum_frame;
@@ -1503,7 +1530,9 @@ static uint32_t ComputeChecksum()
 
 extern "C" void Controller_RecordFrameChecksum(int32_t frame)
 {
-    if (!FrameStepper_IsBattleSynchronized() || frame < DESYNC_SKIP_FRAMES)
+    if (!FrameStepper_IsDesyncCheckReady() ||
+        FrameStepper_IsMatchRestartPending() ||
+        frame < DESYNC_SKIP_FRAMES)
         return;
     uint32_t idx = (uint32_t)frame % RING_SIZE;
     g_localChecksum[idx] = ComputeChecksum();
@@ -1532,7 +1561,7 @@ extern "C" bool Controller_GetFrameChecksum(int32_t frame, uint32_t* outChecksum
 
 static void UpdateConfirmedChecksums()
 {
-    if (!FrameStepper_IsBattleSynchronized())
+    if (!FrameStepper_IsDesyncCheckReady() || FrameStepper_IsMatchRestartPending())
         return;
 
     while (g_confirmedChecksumThrough < g_netFrameCount)
@@ -1615,6 +1644,7 @@ extern "C" void Controller_OnFrameEnd()
     //     inputs[MAX_HISTORY-1]        → frame start_frame+MAX_HISTORY-1 (newest)
     //     checksum is piggybacked (Slippi-style) for desync detection.
     InputPacket outPkt = {};
+    outPkt.battle_generation = FrameStepper_GetBattleGeneration();
     outPkt.checksum_frame = 0xFFFFFFFFu;
     int32_t packetEndFrame = g_netFrameCount + g_delayFrames;
     for (int32_t frame = g_netFrameCount; frame < g_netFrameCount + MAX_HISTORY; ++frame)
@@ -1637,7 +1667,8 @@ extern "C" void Controller_OnFrameEnd()
         }
     }
 
-    if (!g_isResimulating && FrameStepper_IsBattleSynchronized() &&
+    if (!g_isResimulating && FrameStepper_IsDesyncCheckReady() &&
+        !FrameStepper_IsMatchRestartPending() &&
         g_netFrameCount >= DESYNC_SKIP_FRAMES)
     {
         Controller_RecordFrameChecksum(g_netFrameCount);
@@ -1677,7 +1708,8 @@ extern "C" void Controller_OnFrameEnd()
     Netplay_SendPacket(outPkt);
 
     // --- Desync comparison: scan backward from newest remote checksum. ---
-    if (!g_isResimulating && FrameStepper_IsBattleSynchronized() &&
+    if (!g_isResimulating && FrameStepper_IsDesyncCheckReady() &&
+        !FrameStepper_IsMatchRestartPending() &&
         g_netFrameCount >= DESYNC_SKIP_FRAMES)
     {
         int32_t newestChecked = -1;

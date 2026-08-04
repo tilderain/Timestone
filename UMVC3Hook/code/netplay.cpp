@@ -27,6 +27,8 @@ static size_t                   g_inboundHead = 0;
 static size_t                   g_inboundCount = 0;
 static CRITICAL_SECTION         g_inboundCS;
 
+extern "C" uint32_t FrameStepper_GetBattleGeneration();
+
 // Desync-check packet queue (separate from input packets).
 
 
@@ -962,6 +964,7 @@ void Netplay_SendDesyncTrigger(int32_t frame, uint32_t localChecksum,
 {
     ScopedCS lock(g_desyncCS);
     g_outboundDesync.type = PACKET_DESYNC;
+    g_outboundDesync.battle_generation = FrameStepper_GetBattleGeneration();
     g_outboundDesync.action = DESYNC_TRIGGER;
     g_outboundDesync.frame = frame;
     g_outboundDesync.localChecksum = localChecksum;
@@ -974,6 +977,7 @@ void Netplay_SendDesyncUnpause()
     ScopedCS lock(g_desyncCS);
     g_outboundDesync = {};
     g_outboundDesync.type = PACKET_DESYNC;
+    g_outboundDesync.battle_generation = FrameStepper_GetBattleGeneration();
     g_outboundDesync.action = DESYNC_UNPAUSE;
     g_outboundDesyncNew = true;
 }
@@ -1053,6 +1057,7 @@ void Netplay_SendInput(uint32_t rawInput)
 {
     InputPacket pkt = {};
     pkt.type        = PACKET_INPUT;
+    pkt.battle_generation = FrameStepper_GetBattleGeneration();
     pkt.start_frame = 0;
     pkt.inputs[0] = rawInput;
     // inputs[1..15] remain zero — unused for simple delay-based netplay.

@@ -74,10 +74,26 @@ static uint32_t g_advertisedBattleFlags = 0;
 static uint32_t g_battleAdvertiseTick = 0;
 static bool g_trainingRestartBarrier = false;
 static bool g_trainingRestartLeftFighting = false;
+static bool g_localFighting = false;
+static bool g_remoteFighting = false;
+static bool g_desyncCheckReady = false;
 static bool g_autoTestLaunchPending = false;
 static bool g_autoTestLaunchRunning = false;
 static DWORD g_autoTestExitTick = 0;
 extern "C" bool FrameStepper_IsBattleSynchronized() { return g_battleSynchronized; }
+extern "C" uint32_t FrameStepper_GetBattleGeneration() { return g_battleGeneration; }
+extern "C" bool FrameStepper_IsDesyncCheckReady() { return g_desyncCheckReady; }
+extern "C" void FrameStepper_NotifyFighting()
+{
+    if (!g_battleSynchronized || g_localFighting)
+        return;
+
+    g_localFighting = true;
+    g_advertisedBattleFlags = 0;
+    g_battleAdvertiseTick = 30;
+    HookLog("Netplay: local fighting state reached (generation=%u frame=%d)\n",
+            g_battleGeneration, Controller_GetNetFrameCount());
+}
 extern "C" bool FrameStepper_IsMatchRestartPending()
 {
     return g_restartTargetFrame >= 0 || g_trainingRestartBarrier;
@@ -331,6 +347,9 @@ static void __fastcall HookedMove(void* sMvc3Main)
 
         if (restartNetplay && g_restartKind == RESTART_TRAINING) {
             Rollback_ClearPendingReSimulation();
+            Netplay_ClearInputQueues();
+            Controller_ResetBuffers();
+            Rollback_ResetNetplayLiveLog();
             if (sAction) {
                 using SetRestartModeFn = void(__fastcall*)(uint64_t, int32_t);
                 ((SetRestartModeFn)_addr(0x14000AF90))(sAction, 3);
@@ -349,6 +368,9 @@ static void __fastcall HookedMove(void* sMvc3Main)
             g_roundSeedReady = true;
             g_trainingRestartBarrier = true;
             g_trainingRestartLeftFighting = false;
+            g_localFighting = false;
+            g_remoteFighting = false;
+            g_desyncCheckReady = false;
             ++g_battleGeneration;
             if (g_battleGeneration == 0)
                 g_battleGeneration = 1;
@@ -393,6 +415,9 @@ static void __fastcall HookedMove(void* sMvc3Main)
             g_remoteRelease = false;
             g_roundSeedReady = false;
             g_roundSeed = 0;
+            g_localFighting = false;
+            g_remoteFighting = false;
+            g_desyncCheckReady = false;
             ++g_battleGeneration;
             if (g_battleGeneration == 0)
                 g_battleGeneration = 1;
@@ -442,6 +467,7 @@ static void __fastcall HookedMove(void* sMvc3Main)
             {
                 g_remoteReady |= (remoteFlags & BATTLE_SYNC_READY) != 0;
                 g_remoteRelease |= (remoteFlags & BATTLE_SYNC_RELEASE) != 0;
+                g_remoteFighting |= (remoteFlags & BATTLE_SYNC_FIGHTING) != 0;
                 if (!Netplay_IsHost() && (remoteFlags & BATTLE_SYNC_SEED) != 0) {
                     g_roundSeed = remoteRoundSeed;
                     g_roundSeedReady = true;
@@ -449,12 +475,13 @@ static void __fastcall HookedMove(void* sMvc3Main)
             }
         }
 
+        typedef uint64_t(__fastcall* GetAction_t)();
+        static GetAction_t getAction = (GetAction_t)_addr(0x140001A90);
+        uint64_t action = getAction();
+        int32_t step = action ? *(int32_t*)(action + 0xD8) : 0;
+
         if (!g_battleSynchronized)
         {
-            typedef uint64_t(__fastcall* GetAction_t)();
-            static GetAction_t getAction = (GetAction_t)_addr(0x140001A90);
-            uint64_t action = getAction();
-            int32_t step = action ? *(int32_t*)(action + 0xD8) : 0;
             int32_t pendingStep = action ? *(int32_t*)(action + 0xDC) : -1;
             int32_t introSubstate = action ? *(int32_t*)(action + 0xE0) : 0;
 
@@ -489,6 +516,7 @@ static void __fastcall HookedMove(void* sMvc3Main)
 
         uint32_t localFlags = (g_localReady ? BATTLE_SYNC_READY : 0) |
                               (g_localRelease ? BATTLE_SYNC_RELEASE : 0) |
+                              (g_localFighting ? BATTLE_SYNC_FIGHTING : 0) |
                               (Netplay_IsHost() && g_roundSeedReady ? BATTLE_SYNC_SEED : 0);
         g_battleAdvertiseTick++;
         if (localFlags != 0 &&
@@ -526,6 +554,15 @@ static void __fastcall HookedMove(void* sMvc3Main)
             Netplay_SetTimeout(AutoTest_IsActive() ? 2000 : 5000);
             HookLog("Netplay: Intro barrier released after RNG sync (generation=%u seed=0x%08X)\n",
                      g_battleGeneration, g_roundSeed);
+        }
+
+        if (g_battleSynchronized && !g_desyncCheckReady &&
+            g_localFighting && g_remoteFighting)
+        {
+            Controller_ClearDesyncDetection();
+            g_desyncCheckReady = true;
+            HookLog("Netplay: desync checks enabled in fighting state (generation=%u frame=%d)\n",
+                    g_battleGeneration, Controller_GetNetFrameCount());
         }
 
         // Keep loading normally until this machine reaches the barrier. Once
@@ -873,6 +910,8 @@ void FrameStepper_Process()
     static bool prevRestart = false;
     if (KeyPressed(VK_F11, prevRestart))
     {
+        Controller_ClearDesyncDetection();
+        Rollback_ClearPendingReSimulation();
         int32_t targetFrame = Controller_GetNetFrameCount();
         uint64_t sReplay = *(uint64_t*)_addr(0x140D4D9D8);
         if (sReplay)
@@ -898,6 +937,7 @@ void FrameStepper_Process()
     while (Netplay_GetInboundRestartMatch(remoteRestartFrame, remoteRestartSeed,
                                            remoteRestartKind, remoteRestartButton)) {
         AutoTest_PrepareForRestart();
+        Controller_ClearDesyncDetection();
         Rollback_ClearPendingReSimulation();
         g_restartTargetFrame = remoteRestartFrame;
         g_restartRoundSeed = remoteRestartSeed;
@@ -933,7 +973,9 @@ void FrameStepper_Process()
     {
         // Discard stale alerts from the previous generation while the restart
         // barrier is rebuilding the shared frame and RNG epochs.
-        if (Netplay_IsActive() && !FrameStepper_IsBattleSynchronized())
+        if (Netplay_IsActive() &&
+            (!FrameStepper_IsBattleSynchronized() ||
+             desyncPacket.battle_generation != g_battleGeneration))
             continue;
 
         if (desyncPacket.action == DESYNC_TRIGGER)
