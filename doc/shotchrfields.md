@@ -30,10 +30,10 @@ Shot Candidates
   - Fresh reconstruction can therefore make lifecycle decisions using a different child-effect graph.
   - The +0x1F70 fix addresses the demonstrated Kikosho failure, but the remaining slots still require semantic reconstruction if another shot depends on them.
 - uShot+0x1F50: runtime mId
-  - Host Kikosho stayed at ID 1; reconstructed client IDs advanced through 21, 29, 35, etc.
-  - This field is not currently restored.
-  - It is distinct from mRequestAnmSerial at +0x211C, which is the ID used by the character shot-deduplication ring.
-  - I have not confirmed that +0x1F50 affects gameplay, so it should not be restored without tracing its consumers.
+  - The `20260802_220647` capture confirms this is gameplay-relevant allocator identity. Both peers spawned Kikosho IDs 16/17, but rollback reconstruction changed only the client shots to 18/19 while retaining the saved manager cursor.
+  - The mismatch changed target-consumption state at frame 4703, then propagated through P2 assist 2's mDSpd/mDAcl into a one-unit position difference at frame 4704.
+  - It is distinct from mRequestAnmSerial at +0x211C, which is used by the character shot-deduplication ring.
+  - Restore this four-byte scalar explicitly after preserving the surrounding fresh-owned cAtkCtrl/cArm block.
 Probably Derived
 - uCharacter+0x6A5 and +0x6B5
   - First differing bytes in the dump, inside the first uModel::Motion record.

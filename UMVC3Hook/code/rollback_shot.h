@@ -21,7 +21,6 @@ void Shot_CaptureFlight(void* shot, RollbackShotFlightState& state);
 void Shot_ApplyFlight(void* shot, const RollbackShotFlightState& state);
 void Shot_RestoreArmState(void* shot, const RollbackShotRecipe& recipe);
 void Shot_DetachEmbeddedEffect(void* shot);
-void Shot_ReleaseFreshEmbeddedEffectGraph(void* shot);
 int Shot_SanitizeCollisionSlotsForDestruction(void* shot);
 int Shot_SanitizeUnitCategoryLists(void* sUnit, uint32_t firstCategory,
                                    uint32_t lastCategory);

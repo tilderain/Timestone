@@ -249,6 +249,113 @@ hooks emit `SHOTSPAWNTRACE` during rollback with the element pointer and DTI,
 return value, caller, and owner RNG transition. This distinguishes missing
 resource-table state from a native factory failure on the next reproduction.
 
+The `20260802_220647` capture isolated the remaining Kikosho ID failure. Both
+peers spawned IDs `16/17` at frame 4701 with allocator cursor `18`. Restoring
+frame 4701 reconstructed the client's shots with factory IDs `18/19`; the
+manager pool was correctly rewound to cursor `18`, but the broad fresh-owner
+preservation range at `uShot+0x1470..+0x2077` also retained `uShot::mId` at
+`+0x1F50`. At frame 4703 the mismatched target-consumption identity produced an
+extra 168 damage and changed P2 assist 2's `mDSpd/mDAcl` from `0/0` to `-1/2`.
+At frame 4704 that propagated to the reported one-unit X-position difference.
+Reapply the saved four-byte `mId` after filtering fresh ownership fields; do not
+restore the position, which is only downstream evidence.
+
+The `20260802_225123` Kikosho snapdump found the next recipe omission. At frame
+370 both peers entered Kikosho phase 5, but only the host added the second
+sphere primitive that expands the explosion. `uShotShieldKikousyou_vfn118` at
+`0x140161B30` resolves attack-info through `cAtkCtrl+0x20`, then enumerates the
+resource hit-data entries and allocates one primitive per entry. The broad
+fresh-owner preservation had retained that map at `uShot+0x1490`; restore this
+resource-map binding together with the already-restored `cAtkCtrl+0x28`
+`mAtkInfoId`. Do not restore collision-slot allocations directly.
+
+The `20260803_000601/000602` pair showed a distinct Kikosho-owned-effect
+lifetime failure. At frame 4358 the client cleared P2 assist 2 from
+`cAtkCtrl::mTInfo` and `mTInfoEft`; at frame 4359 it accepted a duplicate hit,
+set the assist's `mDSpd/mDAcl` to `-1/2`, and produced the reported 1.5-unit Y
+position difference at frame 4360. The shot factory had correctly created fresh
+effects in `uShot+0x1F78/+0x1F80`, but retired effects still held the old shot
+through `uEffect+0x40` and `uGameEffect+0x280`. Because effect retirement is
+deferred while shot destruction is synchronous, the shot allocator could reuse
+that address and delayed old-effect cleanup could mutate the fresh callback
+slots. Retirement now detaches shot-valued parent, owner, and request-unit
+references before the old shot is destroyed. Saved effect addresses are never
+copied or remapped; the callback array remains exactly as native setup created
+it.
+
+The `20260803_010332` verification run exposed a regression in the attempted
+post-factory callback validation. Kikosho first exists at frame 2537. The host
+has fresh effects at `uShot+0x1F78/+0x1F80` and P2 assist 2 in both
+`cAtkCtrl+0x58` and `cAtkCtrl+0x658`; the reconstructed client has all four
+pointers cleared. At frame 2538 the client's `mTotalCombo` is already 2 while
+the host remains at 1, and the client continues incrementing on later frames.
+Native effect ownership is not necessarily finalized until pending-unit
+processing, so validating parent/owner/request-unit fields immediately after
+the shot factory can reject valid fresh effects. Since neither concrete restore
+nor `Shot_ApplyFlight` writes the callback array, every pointer there is already
+factory-created. Preserve it without post-factory validation while retaining
+the retiring-effect detachment described above.
+
+The `20260803_012706/012707` pair shows that preserving fresh callback pointers
+alone is insufficient. Both peers agree through frame 4403. The host's two
+Kikosho callbacks and its target pointers clear at frame 4404, then its
+`mTotalCombo` increments at frame 4405. The reconstructed client callbacks stay
+alive through frame 4405, clear at frame 4406, and its next hit occurs at frame
+4407. The shot ID, collision primitive, combo state, and target records matched
+before this two-frame lifecycle shift. Native reconstruction had restarted the
+callback effects at the beginning of their EFL timelines. Capture callback
+presence, DTI, and the pointer-free `uEffect+0x100..+0x107` flags and
+`+0x110..+0x137` timing state. Restore those scalars onto the corresponding
+factory-created effects while retaining their fresh resources, generators, and
+ownership links. If a callback was already null in the saved shot, retire the
+fresh replacement and keep the slot null rather than restarting a completed
+timeline.
+
+The `20260803_015146` verification pair shows that the outer `uEffect` clock is
+not the complete callback timeline. Both peers create Kikosho with matching
+`mId=6`, `mTotalCombo=2`, target entries, collision topology, and two callbacks
+at frame 1908. At frame 1913 the reconstructed client clears both callbacks and
+P2 assist 2 from `mTInfo` while the host retains them. The client consequently
+accepts hits at frames 1917, 1918, and 1919, reaching `mTotalCombo=7`; the host
+remains at 4. P2 assist 2 first receives the extra `mDSpd/mDAcl=-1/2` pulse at
+frame 1917 and its X position diverges at frame 1919. Ghidra confirms that
+`uEffect__moveAfter` derives callback completion from effect-local state beyond
+`+0x137` and invokes each fresh `cEffectUnitGenerator` through virtual `+0x88`;
+the generator's state determines whether `uEffect+0x206` remains active. Rewind
+the pointer-free effect completion fields and matching generator scalar fields
+onto the fresh graph. Preserve generator list links, owners, resource pointers,
+particle-manager arrays, buffers, and all other native allocations.
+
+The `20260803_024045/024046` pair exposes a separate capture-state ambiguity.
+At frame 4508 both peers have Kikosho `mId=17`, phase 1, timer 1, one collision
+primitive, and `mTotalCombo=1`, but the reconstructed client's callback and
+target slots are already null. The host retains both callbacks through frame
+4628. The next Kikosho appears at frame 4613; the client accepts repeated hits
+from frame 4614 while the host remains at one hit, producing the confirmed
+frame-4613 checksum mismatch. A callback pointer can be non-null while its
+pending effect is not yet sufficiently initialized for `IsEffectObject` and DTI
+state capture. Treat callback occupancy separately from successful scalar-state
+capture. A truly null saved slot retires a fresh replacement; an occupied but
+not-yet-queryable saved slot preserves the fresh callback without applying a
+partial timeline. A DTI mismatch likewise preserves the fresh native callback
+rather than clearing it.
+
+The `20260803_025957` pair initially suggested that callback state was being
+overwritten after factory creation, but the follow-up `20260803_032307` pair and
+Ghidra vtable resolution disproved that interpretation. At frame 4509 both peers
+have Kikosho `mId=20`, two callbacks, target occupancy `[1,0,1]`, and
+`mTotalCombo=1`. At frame 4510 only the reconstructed client has lost both
+callbacks and all target entries; it accepts another hit at frame 4511 and its
+target position diverges by frame 4513. `sGameEffect__flushPendingArray` at
+`0x140130D00` invokes virtual `+0x78`; for `uGameEffect`, that slot resolves to
+`uEffect__kill` at `0x140016F20`, which changes live unit state to retiring state
+3. It does not finalize generators. Kikosho setup already binds each callback to
+the shot, starts its EFL stream, and directly registers it with `sUnit` category
+13. Therefore, drain the pending kill queue only before abandoned-timeline
+teardown. Never flush it after shot reconstruction. Keep each factory-created
+callback alive and apply the saved pointer-free effect and generator state while
+retaining fresh resources, ownership, allocations, and topology.
+
 Character target-processing tables must remain synchronized with the character
 body. `uCharacter__processTarget1` indexes seven heap-backed tables through
 `+0x1408..+0x1438` using packed counts at `+0x1440`, then calls virtual `+0x40`

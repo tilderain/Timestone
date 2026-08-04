@@ -24,12 +24,12 @@ static constexpr uintptr_t FN_SGAMEEFFECT_FLUSH_PENDING = 0x140130D00;
 static constexpr uintptr_t FN_UGAMEEFFECT_CREATE = 0x140131410;
 static constexpr uintptr_t FN_DRSTRANGE_UPDATE_SUMMONS = 0x14007B9E0;
 static constexpr uintptr_t FN_EFFECT_DRAW = 0x1405E4E70;
-static constexpr uintptr_t FN_EFFECT_MOVE_AFTER = 0x1405E57A0;
 static constexpr uintptr_t FN_EFFECT_DTOR_RELEASE = 0x1405E07F0;
 static constexpr uintptr_t FN_EFFECT_VDTOR = 0x1405E08C0;
 static constexpr uintptr_t FN_PARTICLE_MANAGER_RELEASE_SUBBUFFER = 0x14080C120;
-static constexpr uintptr_t FN_CATKCTRL_CREATE_PROPERTY = 0x14000C810;
 static constexpr uintptr_t FN_KIRIGAKURE_EFFECT_UPDATE = 0x14013B050;
+static constexpr uintptr_t FN_SUNIT_REMOVE_UNIT = 0x14051B9F0;
+static constexpr uintptr_t FN_SUNIT_REMOVE_FROM_MULTI_MASK = 0x14051BAF0;
 static constexpr uintptr_t SMVC3MGR_ACTION_OFFSET = 0x48;
 static constexpr uint32_t SUNIT_CATEGORY_COUNT_OFFSET = 0xC38;
 static constexpr uint32_t SUNIT_CATEGORY_LISTS_OFFSET = 0x50;
@@ -38,6 +38,7 @@ static constexpr uint32_t SSTAGE_EFFECT_OFFSETS[] = {0x2050, 0x2058};
 static constexpr uint32_t PARTICLE_MANAGER_STRIDE = 0x150;
 static constexpr uint32_t PARTICLE_MANAGER_BUFFER_OFFSET = 0x130;
 static constexpr uint32_t MAX_PARTICLE_MANAGERS = 256;
+static constexpr uint32_t SSHOT_CATEGORY = 10;
 static constexpr uint32_t TEAM_OFFSETS[] = {0x40, 0x300};
 static constexpr uint32_t CHARACTER_EFFECT_SLOT_OFFSETS[] = {
     0x68F0, 0x68F8, 0x6900, 0x6920,
@@ -51,7 +52,6 @@ static constexpr int MAX_GENERATOR_NODES = 256;
 static EffectCreateFn oEffectCreate = nullptr;
 static void(__fastcall* oDrStrangeUpdateSummons)(void*) = nullptr;
 static void(__fastcall* oEffectDraw)(void*, void*) = nullptr;
-static void(__fastcall* oEffectMoveAfter)(void*) = nullptr;
 static void(__fastcall* oEffectDtorRelease)(void*) = nullptr;
 static void(__fastcall* oEffectVdtor)(void*, uint32_t) = nullptr;
 static void(__fastcall* oParticleManagerReleaseSubBuffer)(void*) = nullptr;
@@ -97,8 +97,33 @@ static bool IsPersistentCharacterEffect(void* effect)
     return false;
 }
 
-static void SanitizeEffectOwnedParticleState(void* effect,
-                                             bool detachGenerator)
+static bool IsShotUnitReference(uint64_t object)
+{
+    if (!object || !IsAccessibleRange(object, 0x14) ||
+        !IsUnitObject((void*)object)) {
+        return false;
+    }
+    return (*(uint32_t*)(object + 0x10) & 0x3F8u) ==
+        (SSHOT_CATEGORY << 3);
+}
+
+static void DetachRetiringEffectFromShot(void* effect)
+{
+    if (!IsAccessibleRange((uint64_t)effect, 0x290)) return;
+
+    // uShot setup binds owned uGameEffects through uEffect::mParent (+0x40),
+    // uGameEffect::mpOwner (+0x280), and sometimes mpRequestUnit (+0x288).
+    // A retired effect can outlive synchronous shot destruction; if the shot
+    // allocator reuses that address, delayed cleanup could act on the fresh
+    // shot and clear its newly-created callback slots.
+    for (uint32_t offset : {0x40u, 0x280u, 0x288u}) {
+        uint64_t* reference = (uint64_t*)((uint8_t*)effect + offset);
+        if (IsShotUnitReference(*reference))
+            *reference = 0;
+    }
+}
+
+static void SanitizeEffectOwnedParticleState(void* effect)
 {
     const uint32_t count = *(uint16_t*)((uint8_t*)effect + 0x208);
     const uint64_t managers = *(uint64_t*)((uint8_t*)effect + 0x220);
@@ -125,13 +150,9 @@ static void SanitizeEffectOwnedParticleState(void* effect,
                 std::memset(manager + PARTICLE_MANAGER_BUFFER_OFFSET, 0, 0x18);
             }
         }
-        if (detachGenerator)
-            *(uint64_t*)((uint8_t*)effect + 0x218) = 0;
         return;
     }
 
-    if (detachGenerator)
-        *(uint64_t*)((uint8_t*)effect + 0x218) = 0;
     *(uint16_t*)((uint8_t*)effect + 0x208) = 0;
     // Even when manager records are malformed, preserve a readable array
     // pointer. Native teardown skips the zero-count loop and still frees the
@@ -176,6 +197,8 @@ static void SanitizeEffectForDestruction(void* effect)
     if (g_activeRollbackProfile)
         ++g_activeRollbackProfile->restoreEffectSanitizeCalls;
 
+    DetachRetiringEffectFromShot(effect);
+
     {
         RollbackHookProfileScope profile(RollbackHookProfileId::UnitRemoveEffectResource);
         uint64_t resource = *(uint64_t*)((uint8_t*)effect + 0x108);
@@ -190,12 +213,11 @@ static void SanitizeEffectForDestruction(void* effect)
         RollbackHookProfileScope profile(RollbackHookProfileId::UnitRemoveEffectGenerator);
         uint64_t generator = *(uint64_t*)((uint8_t*)effect + 0x218);
         uint64_t node = generator;
+        uint64_t previous = 0;
         uint64_t cycleCheckpoint = generator;
         uint32_t cyclePower = 1;
         uint32_t cycleLength = 0;
         bool validGeneratorChain = true;
-        const uint64_t cAtkCtrlCreateProperty =
-            (uint64_t)_addr(FN_CATKCTRL_CREATE_PROPERTY);
         for (int count = 0; node != 0 && count < MAX_GENERATOR_NODES; ++count) {
             if (g_activeRollbackProfile)
                 ++g_activeRollbackProfile->restoreEffectGeneratorNodes;
@@ -204,10 +226,12 @@ static void SanitizeEffectForDestruction(void* effect)
                 break;
             }
             uint64_t vtable = *(uint64_t*)node;
-            if (!IsAccessibleRange(vtable, 0x90) ||
-                !IsExecutableAddress(*(uint64_t*)vtable) ||
-                !IsExecutableAddress(*(uint64_t*)(vtable + 0x88)) ||
-                *(uint64_t*)(vtable + 0x88) == cAtkCtrlCreateProperty) {
+            // uEffect__releaseGenerator reads only node+0x18 and invokes the
+            // deleting destructor in vtable slot 0. Requiring unrelated move
+            // callbacks here rejected valid generators and detached the whole
+            // chain, leaking every generator allocation on each restore.
+            if (!IsAccessibleRange(vtable, sizeof(uint64_t)) ||
+                !IsExecutableAddress(*(uint64_t*)vtable)) {
                 validGeneratorChain = false;
                 break;
             }
@@ -222,22 +246,28 @@ static void SanitizeEffectForDestruction(void* effect)
                 cyclePower *= 2;
                 cycleLength = 0;
             }
+            previous = node;
             node = next;
             if (count == MAX_GENERATOR_NODES - 1 && node != 0)
                 validGeneratorChain = false;
         }
         if (!validGeneratorChain) {
-            // A stale generator can leave a mapped but invalid particle-manager
-            // allocation behind. Native destruction would pass its sub-buffer
-            // pointers to the allocator and walk corrupted heap metadata.
-            SanitizeEffectOwnedParticleState(effect, true);
+            // Keep every validated prefix reclaimable. If the first node is
+            // already corrupt there is no safe native object to destroy;
+            // otherwise terminate the chain before the bad suffix and let the
+            // normal uEffect destructor release all validated generators.
+            if (previous)
+                *(uint64_t*)(previous + 0x18) = 0;
+            else
+                *(uint64_t*)((uint8_t*)effect + 0x218) = 0;
+            SanitizeEffectOwnedParticleState(effect);
         }
     }
 
     {
         RollbackHookProfileScope profile(RollbackHookProfileId::UnitRemoveEffectSubBuffers);
         if (HasInvalidParticleManagerState(effect))
-            SanitizeEffectOwnedParticleState(effect, false);
+            SanitizeEffectOwnedParticleState(effect);
     }
 }
 
@@ -323,44 +353,6 @@ static void __fastcall hkEffectDraw(void* effect, void* camera)
     oEffectDraw(effect, camera);
 }
 
-static bool HasStaleGeneratorDispatch(void* effect)
-{
-    if (!IsAccessibleRange((uint64_t)effect, 0x220)) return true;
-
-    const uint64_t cAtkCtrlCreateProperty =
-        (uint64_t)_addr(FN_CATKCTRL_CREATE_PROPERTY);
-    uint64_t node = *(uint64_t*)((uint8_t*)effect + 0x218);
-    for (int count = 0; node != 0 && count < MAX_GENERATOR_NODES; ++count) {
-        if (!IsAccessibleRange(node, 0x20)) return true;
-        uint64_t vtable = *(uint64_t*)node;
-        if (!IsAccessibleRange(vtable, 0x90) ||
-            !IsExecutableAddress(*(uint64_t*)(vtable + 0x88)) ||
-            *(uint64_t*)(vtable + 0x88) == cAtkCtrlCreateProperty) {
-            return true;
-        }
-        node = *(uint64_t*)(node + 0x18);
-    }
-    return node != 0;
-}
-
-static void __fastcall hkEffectMoveAfter(void* effect)
-{
-    if (!g_isResimulating || !HasStaleGeneratorDispatch(effect)) {
-        oEffectMoveAfter(effect);
-        return;
-    }
-    if (!IsAccessibleRange((uint64_t)effect, 0x80)) return;
-
-    // A recycled generator can dispatch cAtkCtrl::createProperty through the
-    // particle callback slot. Mark the effect retired directly; invoking the
-    // owner callback here can re-enter sUnit while its late pass is active.
-    Effect_PrepareUnitRemoval(effect);
-    *(uint16_t*)((uint8_t*)effect + 0x206) = 0;
-    *(uint32_t*)((uint8_t*)effect + 0x100) &= ~0x20u;
-    uint32_t state = *(uint32_t*)((uint8_t*)effect + 0x10);
-    *(uint32_t*)((uint8_t*)effect + 0x10) = (state & ~7u) | 3u;
-}
-
 static void __fastcall hkEffectDtorRelease(void* effect)
 {
     if (g_isResimulating)
@@ -436,8 +428,32 @@ void Effect_CaptureRecipes(RollbackSnapshotSlot& slot)
         if (!IsActiveUnit(recipe.restoredPtr)) continue;
         RollbackEffectRecipe saved = recipe;
         saved.savedPtr = recipe.restoredPtr;
+        ConcreteEffectSnapshot_Capture(recipe.restoredPtr, saved.state);
         slot.effectRecipes.push_back(saved);
     }
+}
+
+int Effect_RestoreRecipes(RollbackSnapshotSlot& slot)
+{
+    int restored = 0;
+    for (RollbackEffectRecipe& saved : slot.effectRecipes) {
+        void* sGameEffect = saved.sGameEffect;
+        if (!sGameEffect || !oEffectCreate) continue;
+        void* attachTo = saved.attachTo;
+        void* effect = oEffectCreate(sGameEffect, saved.effectId, saved.a3,
+                                     attachTo, saved.a5, saved.a6, saved.a7,
+                                     saved.a8, saved.a9, saved.a10, saved.a11,
+                                     saved.a12, saved.a13);
+        if (!effect) continue;
+        saved.restoredPtr = effect;
+        ConcreteEffectSnapshot_Restore(effect, saved.state);
+        RollbackEffectRecipe live = saved;
+        live.savedPtr = effect;
+        live.restoredPtr = effect;
+        g_liveEffectRecipes.push_back(live);
+        ++restored;
+    }
+    return restored;
 }
 
 void Effect_PrepareUnitRemoval(void* unit)
@@ -465,9 +481,10 @@ void Effect_FinishUnitRemoval(void* unit)
 
 int Effect_RetireCurrent(void* sUnit)
 {
+    if (!sUnit) return 0;
     DetachExAtkSpaceChildren();
     SanitizeStageEffectReferences();
-    int retired = 0;
+    std::vector<void*> abandoned;
     uint32_t categoryCount = *(uint32_t*)((uint8_t*)sUnit + SUNIT_CATEGORY_COUNT_OFFSET);
     for (uint32_t category = 13; category <= 16 && category < categoryCount; ++category) {
         void* effect = *(void**)((uint8_t*)sUnit + SUNIT_CATEGORY_LISTS_OFFSET +
@@ -475,17 +492,37 @@ int Effect_RetireCurrent(void* sUnit)
         for (int safety = 4096; effect && safety-- > 0;) {
             if (g_activeRollbackProfile) ++g_activeRollbackProfile->restoreEffectVisits;
             void* next = *(void**)((uint8_t*)effect + 0x18);
-            uint32_t* state = (uint32_t*)((uint8_t*)effect + 0x10);
-            if (IsEffectObject(effect) && (*state & 7u) < 3u &&
-                !IsPersistentCharacterEffect(effect)) {
-                SanitizeStageEffectReferences(effect);
-                *state = (*state & ~7u) | 3u;
-                ++retired;
-            }
+            if (IsEffectObject(effect) && !IsPersistentCharacterEffect(effect) &&
+                std::find(abandoned.begin(), abandoned.end(), effect) == abandoned.end())
+                abandoned.push_back(effect);
             effect = next;
         }
     }
-    return retired;
+
+    auto removeFromMultiMask =
+        (void(__fastcall*)(void*, void*))_addr(FN_SUNIT_REMOVE_FROM_MULTI_MASK);
+    auto removeUnit =
+        (char(__fastcall*)(void*, void*))_addr(FN_SUNIT_REMOVE_UNIT);
+    int destroyed = 0;
+    for (void* effect : abandoned) {
+        // State 3/4 effects from an earlier restore are still allocations and
+        // must not be skipped. Native deferred retirement needs two category
+        // ticks; repeated resims can otherwise allocate replacements faster
+        // than those ticks run and exhaust the effect heap.
+        SanitizeEffectForDestruction(effect);
+        SanitizeStageEffectReferences(effect);
+        removeFromMultiMask(sUnit, effect);
+        removeUnit(sUnit, effect);
+        if (!IsAccessibleRange((uint64_t)effect, sizeof(uint64_t))) continue;
+        uint64_t vtable = *(uint64_t*)effect;
+        if (!IsAccessibleRange(vtable, sizeof(uint64_t)) ||
+            !IsExecutableAddress(*(uint64_t*)vtable)) continue;
+        auto destroy = (void(__fastcall*)(void*, uint32_t))*(uint64_t*)vtable;
+        destroy(effect, 1);
+        ++destroyed;
+    }
+    g_liveEffectRecipes.clear();
+    return destroyed;
 }
 
 void Effect_SanitizeRetired(void* sUnit)
@@ -551,17 +588,6 @@ void Effect_InitHooks()
         HookLog("Rollback: guarded stale effect draw resources\n");
     } else {
         HookLog("Rollback: failed to guard stale effect draw resources (%d)\n",
-                status);
-    }
-
-    status = MH_CreateHook((LPVOID)_addr(FN_EFFECT_MOVE_AFTER),
-                           (LPVOID)&hkEffectMoveAfter,
-                           (LPVOID*)&oEffectMoveAfter);
-    if (status == MH_OK) {
-        MH_EnableHook((LPVOID)_addr(FN_EFFECT_MOVE_AFTER));
-        HookLog("Rollback: guarded stale effect generator dispatch\n");
-    } else {
-        HookLog("Rollback: failed to guard stale effect generator dispatch (%d)\n",
                 status);
     }
 

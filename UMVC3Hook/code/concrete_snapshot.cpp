@@ -22,6 +22,9 @@ constexpr uint32_t kMaxCollisionPrimitives = 128;
 constexpr uint32_t kAttackTargetTableCount = 3;
 constexpr uint32_t kAttackTargetCount = 32;
 constexpr size_t kAttackTargetStride = 0x18;
+constexpr size_t kShotCallbackEffectsOffset = 0x1F78;
+constexpr uint32_t kShotCallbackEffectCount = 13;
+constexpr uint32_t kMaxCallbackGenerators = 64;
 constexpr size_t kAttackTargetTables[kAttackTargetTableCount] = {
     // uShot embeds cAtkCtrl at +0x1470. Its three 0x300-byte TargetInfo
     // tables begin at cAtkCtrl +0x50/+0x350/+0x650.
@@ -513,7 +516,205 @@ bool ConcreteShotSnapshot_Capture(void* shot, ConcreteShotSnapshot& out)
     out.body.resize(size);
     std::memcpy(out.body.data(), shot, size);
     CaptureCollisionPrimitives((const uint8_t*)shot, out);
+    for (uint32_t index = 0; index < kShotCallbackEffectCount; ++index) {
+        void* effect = *(void**)((uint8_t*)shot + kShotCallbackEffectsOffset +
+                                index * sizeof(void*));
+        auto& state = out.callbackEffects[index];
+        state.occupied = effect != nullptr;
+        if (!effect || !IsEffectObject(effect) ||
+            !Accessible((uint64_t)effect, 0x138)) {
+            continue;
+        }
+        state.hasState = true;
+        state.dti = GetObjectDti((uint64_t)effect);
+        std::memcpy(state.flags100, (uint8_t*)effect + 0x100,
+                    sizeof(state.flags100));
+        std::memcpy(state.timing110, (uint8_t*)effect + 0x110,
+                    sizeof(state.timing110));
+        if (!Accessible((uint64_t)effect, 0x242)) continue;
+        std::memcpy(state.state1D0, (uint8_t*)effect + 0x1D0,
+                    sizeof(state.state1D0));
+        std::memcpy(state.state1E0, (uint8_t*)effect + 0x1E0,
+                    sizeof(state.state1E0));
+        std::memcpy(state.state1F8, (uint8_t*)effect + 0x1F8,
+                    sizeof(state.state1F8));
+        std::memcpy(state.state230, (uint8_t*)effect + 0x230,
+                    sizeof(state.state230));
+
+        uint64_t generator = *(uint64_t*)((uint8_t*)effect + 0x218);
+        for (uint32_t count = 0; generator && count < kMaxCallbackGenerators;
+             ++count) {
+            if (!Accessible(generator, 0x240)) break;
+            ConcreteShotSnapshot::CallbackEffectState::GeneratorState saved{};
+            saved.dti = GetObjectDti(generator);
+            if (!saved.dti) break;
+            std::memcpy(saved.state20, (void*)(generator + 0x20),
+                        sizeof(saved.state20));
+            std::memcpy(saved.state30, (void*)(generator + 0x30),
+                        sizeof(saved.state30));
+            std::memcpy(saved.state70, (void*)(generator + 0x70),
+                        sizeof(saved.state70));
+            std::memcpy(saved.stateB8, (void*)(generator + 0xB8),
+                        sizeof(saved.stateB8));
+            std::memcpy(saved.state110, (void*)(generator + 0x110),
+                        sizeof(saved.state110));
+            std::memcpy(saved.state19C, (void*)(generator + 0x19C),
+                        sizeof(saved.state19C));
+            std::memcpy(saved.state1F0, (void*)(generator + 0x1F0),
+                        sizeof(saved.state1F0));
+            saved.state238 = *(uint8_t*)(generator + 0x238);
+            state.generators.push_back(saved);
+            generator = *(uint64_t*)(generator + 0x18);
+        }
+    }
     return true;
+}
+
+bool ConcreteEffectSnapshot_Capture(
+    void* effect, ConcreteShotSnapshot::CallbackEffectState& state)
+{
+    state = {};
+    state.occupied = effect != nullptr;
+    if (!effect || !IsEffectObject(effect) ||
+        !Accessible((uint64_t)effect, 0x138))
+        return state.occupied;
+    state.hasState = true;
+    state.dti = GetObjectDti((uint64_t)effect);
+    std::memcpy(state.flags100, (uint8_t*)effect + 0x100,
+                sizeof(state.flags100));
+    std::memcpy(state.timing110, (uint8_t*)effect + 0x110,
+                sizeof(state.timing110));
+    if (!Accessible((uint64_t)effect, 0x242)) return true;
+    std::memcpy(state.state1D0, (uint8_t*)effect + 0x1D0,
+                sizeof(state.state1D0));
+    std::memcpy(state.state1E0, (uint8_t*)effect + 0x1E0,
+                sizeof(state.state1E0));
+    std::memcpy(state.state1F8, (uint8_t*)effect + 0x1F8,
+                sizeof(state.state1F8));
+    std::memcpy(state.state230, (uint8_t*)effect + 0x230,
+                sizeof(state.state230));
+    uint64_t generator = *(uint64_t*)((uint8_t*)effect + 0x218);
+    for (uint32_t count = 0; generator && count < kMaxCallbackGenerators;
+         ++count) {
+        if (!Accessible(generator, 0x240)) break;
+        ConcreteShotSnapshot::CallbackEffectState::GeneratorState saved{};
+        saved.dti = GetObjectDti(generator);
+        if (!saved.dti) break;
+        std::memcpy(saved.state20, (void*)(generator + 0x20), sizeof(saved.state20));
+        std::memcpy(saved.state30, (void*)(generator + 0x30), sizeof(saved.state30));
+        std::memcpy(saved.state70, (void*)(generator + 0x70), sizeof(saved.state70));
+        std::memcpy(saved.stateB8, (void*)(generator + 0xB8), sizeof(saved.stateB8));
+        std::memcpy(saved.state110, (void*)(generator + 0x110), sizeof(saved.state110));
+        std::memcpy(saved.state19C, (void*)(generator + 0x19C), sizeof(saved.state19C));
+        std::memcpy(saved.state1F0, (void*)(generator + 0x1F0), sizeof(saved.state1F0));
+        saved.state238 = *(uint8_t*)(generator + 0x238);
+        state.generators.push_back(saved);
+        generator = *(uint64_t*)(generator + 0x18);
+    }
+    return true;
+}
+
+bool ConcreteEffectSnapshot_Restore(
+    void* effect, const ConcreteShotSnapshot::CallbackEffectState& state)
+{
+    if (!effect || !state.hasState || !IsEffectObject(effect) ||
+        !Accessible((uint64_t)effect, 0x242) || GetObjectDti((uint64_t)effect) != state.dti)
+        return false;
+    std::memcpy((uint8_t*)effect + 0x100, state.flags100, sizeof(state.flags100));
+    std::memcpy((uint8_t*)effect + 0x110, state.timing110, sizeof(state.timing110));
+    std::memcpy((uint8_t*)effect + 0x1D0, state.state1D0, sizeof(state.state1D0));
+    std::memcpy((uint8_t*)effect + 0x1E0, state.state1E0, sizeof(state.state1E0));
+    std::memcpy((uint8_t*)effect + 0x1F8, state.state1F8, sizeof(state.state1F8));
+    std::memcpy((uint8_t*)effect + 0x230, state.state230, sizeof(state.state230));
+    uint64_t generator = *(uint64_t*)((uint8_t*)effect + 0x218);
+    for (const auto& saved : state.generators) {
+        if (!generator || !Accessible(generator, 0x240) ||
+            GetObjectDti(generator) != saved.dti) return false;
+        std::memcpy((void*)(generator + 0x20), saved.state20, sizeof(saved.state20));
+        std::memcpy((void*)(generator + 0x30), saved.state30, sizeof(saved.state30));
+        std::memcpy((void*)(generator + 0x70), saved.state70, sizeof(saved.state70));
+        std::memcpy((void*)(generator + 0xB8), saved.stateB8, sizeof(saved.stateB8));
+        std::memcpy((void*)(generator + 0x110), saved.state110, sizeof(saved.state110));
+        std::memcpy((void*)(generator + 0x19C), saved.state19C, sizeof(saved.state19C));
+        std::memcpy((void*)(generator + 0x1F0), saved.state1F0, sizeof(saved.state1F0));
+        *(uint8_t*)(generator + 0x238) = saved.state238;
+        generator = *(uint64_t*)(generator + 0x18);
+    }
+    return true;
+}
+
+void ConcreteShotSnapshot_RestoreCallbackEffects(
+    void* shot, const ConcreteShotSnapshot& snapshot)
+{
+    if (!shot) return;
+
+    for (uint32_t index = 0; index < kShotCallbackEffectCount; ++index) {
+        const auto& state = snapshot.callbackEffects[index];
+        void** slot = (void**)((uint8_t*)shot + kShotCallbackEffectsOffset +
+                              index * sizeof(void*));
+        void* effect = *slot;
+
+        // Do not destroy a fresh native callback during reconstruction. The
+        // factory has already established its ownership and category links;
+        // clearing or killing it here leaves a live orphan or makes the shot
+        // lose its callback on the next uShot::preMove.
+        if (!state.occupied) {
+            continue;
+        }
+
+        // Pending effects can occupy a callback slot before their complete DTI
+        // and generator graph becomes queryable. Preserve the factory-created
+        // replacement in that case; occupancy is authoritative, while scalar
+        // rewind is only possible for a fully captured effect.
+        if (!state.hasState)
+            continue;
+
+        if (!effect || !IsEffectObject(effect) ||
+            !Accessible((uint64_t)effect, 0x138) ||
+            GetObjectDti((uint64_t)effect) != state.dti) {
+            continue;
+        }
+
+        // Preserve the fresh generator/resource graph and native ownership,
+        // but rewind the pointer-free uEffect flags and timeline counters.
+        std::memcpy((uint8_t*)effect + 0x100, state.flags100,
+                    sizeof(state.flags100));
+        std::memcpy((uint8_t*)effect + 0x110, state.timing110,
+                    sizeof(state.timing110));
+        if (!Accessible((uint64_t)effect, 0x242)) continue;
+        std::memcpy((uint8_t*)effect + 0x1D0, state.state1D0,
+                    sizeof(state.state1D0));
+        std::memcpy((uint8_t*)effect + 0x1E0, state.state1E0,
+                    sizeof(state.state1E0));
+        std::memcpy((uint8_t*)effect + 0x1F8, state.state1F8,
+                    sizeof(state.state1F8));
+        std::memcpy((uint8_t*)effect + 0x230, state.state230,
+                    sizeof(state.state230));
+
+        uint64_t generator = *(uint64_t*)((uint8_t*)effect + 0x218);
+        for (const auto& saved : state.generators) {
+            if (!generator || !Accessible(generator, 0x240) ||
+                GetObjectDti(generator) != saved.dti) {
+                break;
+            }
+            std::memcpy((void*)(generator + 0x20), saved.state20,
+                        sizeof(saved.state20));
+            std::memcpy((void*)(generator + 0x30), saved.state30,
+                        sizeof(saved.state30));
+            std::memcpy((void*)(generator + 0x70), saved.state70,
+                        sizeof(saved.state70));
+            std::memcpy((void*)(generator + 0xB8), saved.stateB8,
+                        sizeof(saved.stateB8));
+            std::memcpy((void*)(generator + 0x110), saved.state110,
+                        sizeof(saved.state110));
+            std::memcpy((void*)(generator + 0x19C), saved.state19C,
+                        sizeof(saved.state19C));
+            std::memcpy((void*)(generator + 0x1F0), saved.state1F0,
+                        sizeof(saved.state1F0));
+            *(uint8_t*)(generator + 0x238) = saved.state238;
+            generator = *(uint64_t*)(generator + 0x18);
+        }
+    }
 }
 
 bool ConcreteShotSnapshot_Restore(void* shot,
@@ -572,6 +773,19 @@ bool ConcreteShotSnapshot_Restore(void* shot,
     // applied below through native accessors.
     PreserveRange(overlay.data(), live, liveSize, {0x1470, 0xC08});
 
+    // cAtkCtrl+0x20 is its attack-resource map. Kikosho phase 5 resolves the
+    // current attack-info entry through this binding before it creates its
+    // expanded explosion primitive. The factory's fresh map can describe a
+    // later resource state even when the restored mAtkInfoId matches, so keep
+     // the saved binding while leaving the surrounding inline owner fresh.
+     CopyRange(overlay.data(), source, liveSize, {0x1490, 0x08});
+
+    // Restore all known pointer-free cAtkCtrl scalars: mAtkInfoId, mFlag,
+    // mTotalCombo, mDelayTime, mLifeTime, mCountTime, mEndTime, and mAnmNo.
+    // The target-table MtArray headers immediately follow this range and stay
+    // owned by the fresh object; their validated entries are restored below.
+    CopyRange(overlay.data(), source, liveSize, {0x1498, 0x24});
+
     // Soul Fist stores a live uGameEffect pointer after its mode field.
     if (IsDti(snapshot.dti, kSoulFistDti)) {
         PreserveRange(overlay.data(), live, liveSize, {0x2148, 0x08});
@@ -591,6 +805,11 @@ bool ConcreteShotSnapshot_Restore(void* shot,
     // because it resembles an address.
     RestoreGeneratedRanges(overlay.data(), source, liveSize, snapshot.dti,
                            kGeneratedShotTailRanges);
+
+    // mId is scalar allocator state inside the otherwise fresh-owned cArm
+    // block. A reconstructed Kikosho kept its factory ID here while the ID
+    // pool was rewound, changing per-target hit consumption on the next tick.
+    CopyRange(overlay.data(), source, liveSize, {0x1F50, 0x04});
 
     if (IsDti(snapshot.dti, kKingKobunDti)) {
         // King Servbot changes movement phase when Motion[0]+0x0A reports

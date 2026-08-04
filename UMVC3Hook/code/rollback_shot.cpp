@@ -442,8 +442,8 @@ void Shot_InitHooks()
                 "Rollback: hooked missile emplacement joint guard",
                 "Rollback: failed to hook missile emplacement joint guard (%d)\n");
     InstallHook(FN_SUNIT_REMOVE_UNIT, (LPVOID)&hkUnitRemove, (void**)&oUnitRemove,
-                "Rollback: hooked sUnit__removeUnit for recipe lifetime",
-                "Rollback: failed to hook sUnit__removeUnit (%d)\n");
+                 "Rollback: hooked sUnit__removeUnit for recipe lifetime",
+                 "Rollback: failed to hook sUnit__removeUnit (%d)\n");
 }
 
 static bool IsZireitouShot(void* shot)
@@ -543,18 +543,6 @@ void Shot_DetachEmbeddedEffect(void* shot)
     *(uint64_t*)(effect + 0x228) = 0;
     *(uint32_t*)(effect + 0x208) = 0;
     *(uint32_t*)(effect + 0x210) = 0;
-}
-
-void Shot_ReleaseFreshEmbeddedEffectGraph(void* shot)
-{
-    constexpr uint32_t EFFECT_OFFSET = 0x2160;
-    constexpr uint32_t EFFECT_SIZE = 0x230;
-    if (!shot || !HasCallableDtiVirtual(shot)) return;
-    if (DecodeDtiSize(GetObjectDti((uint64_t)shot)) < EFFECT_OFFSET + EFFECT_SIZE)
-        return;
-    void* effect = (uint8_t*)shot + EFFECT_OFFSET;
-    if (IsEffectObject(effect))
-        ((void(__fastcall*)(void*))_addr(0x1405E6890))(effect);
 }
 
 int Shot_SanitizeCollisionSlotsForDestruction(void* shot)

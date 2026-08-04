@@ -9,6 +9,31 @@
 // body is still restored by ShotFlightState and the native factory keeps its
 // ownership/topology pointers valid.
 struct ConcreteShotSnapshot {
+    struct CallbackEffectState {
+        struct GeneratorState {
+            uint64_t dti = 0;
+            uint8_t state20[0x08] = {};
+            uint8_t state30[0x08] = {};
+            uint8_t state70[0x14] = {};
+            uint8_t stateB8[0x10] = {};
+            uint8_t state110[0x2C] = {};
+            uint8_t state19C[0x24] = {};
+            uint8_t state1F0[0x10] = {};
+            uint8_t state238 = 0;
+        };
+
+        bool occupied = false;
+        bool hasState = false;
+        uint64_t dti = 0;
+        uint8_t flags100[0x08] = {};
+        uint8_t timing110[0x28] = {};
+        uint8_t state1D0[0x08] = {};
+        uint8_t state1E0[0x10] = {};
+        uint8_t state1F8[0x20] = {};
+        uint8_t state230[0x12] = {};
+        std::vector<GeneratorState> generators;
+    };
+
     struct CollisionPrimitive {
         uint32_t slot = 0;
         uint32_t index = 0;
@@ -32,12 +57,19 @@ struct ConcreteShotSnapshot {
     uint64_t vtable = 0;
     std::vector<uint8_t> body;
     std::vector<CollisionPrimitive> collisionPrimitives;
+    CallbackEffectState callbackEffects[13];
 };
 
 bool ConcreteShotSnapshot_Capture(void* shot, ConcreteShotSnapshot& out);
 bool ConcreteShotSnapshot_Restore(void* shot, const ConcreteShotSnapshot& snapshot,
-                                  const void* const* validTargets,
-                                  size_t validTargetCount);
+                                   const void* const* validTargets,
+                                   size_t validTargetCount);
+void ConcreteShotSnapshot_RestoreCallbackEffects(
+    void* shot, const ConcreteShotSnapshot& snapshot);
+bool ConcreteEffectSnapshot_Capture(
+    void* effect, ConcreteShotSnapshot::CallbackEffectState& state);
+bool ConcreteEffectSnapshot_Restore(
+    void* effect, const ConcreteShotSnapshot::CallbackEffectState& state);
 // Reapply reconstructed capsule sources after the native shot hitbox update.
 // Reconstructed parent transforms can collapse data-derived world endpoints,
 // so this restores them directly at the outer update boundary.

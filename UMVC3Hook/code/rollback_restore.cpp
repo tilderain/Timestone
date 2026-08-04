@@ -192,6 +192,12 @@ static constexpr SnapshotRange CCHR_SCALAR_RESTORE_RANGES[] = {
     // scalar fields, not ownership pointers, and sit outside the main
     // animation request block.
     {0x3CF0, 0x04}, {0x3E60, 0x04},
+    // Mutable interpolation state in the two embedded cCnsHelper records at
+    // +0x3BF0 and +0x3D60. Their lock-angle output feeds joint matrices and
+    // fighter push-sphere centers. Preserve the vtable, self/reference fields,
+    // and update callback at helper+0x128 while rewinding scalar state.
+    {0x3D00, 0x08}, {0x3D10, 0x04}, {0x3D24, 0x0C}, {0x3D30, 0x40},
+    {0x3E70, 0x08}, {0x3E80, 0x04}, {0x3E94, 0x0C}, {0x3EA0, 0x40},
     // cChrCmdLimit animation-flag predicate triplets in the embedded special
     // and combo command matchers. Their packed masks can resemble aligned
     // pointers, so the generic pointer guard otherwise retains live values.
@@ -205,8 +211,10 @@ static constexpr SnapshotRange CCHR_SCALAR_RESTORE_RANGES[] = {
     // mAnmNoReqAlive/Std/Cmd, request flags, and animation-rate state drive
     // action-to-animation transitions during the next simulated frame.
     {0x3F48, 0x18C},
-    // Movement vector, forward/Y speed, acceleration, and adjacent motion state.
-    {0x40D4, 0x4C},
+    // Position, movement vectors, speed, acceleration, and adjacent motion
+    // state. Explicitly reapply these because packed float pairs can resemble
+    // pointers to the broad live-pointer guard.
+    {0x40B0, 0x70},
     // Hitbox/hurtbox and active collision state for the character.
     {0x4120, 0xD8},
     // Remaining pointer-free movement and collision scalars.
@@ -238,6 +246,11 @@ static constexpr SnapshotRange CCHR_SCALAR_RESTORE_RANGES[] = {
 // These shared cChr fields are rebuilt by native post-restore helpers on some
 // rollback paths. Reapply the saved values after those helpers complete.
 static constexpr SnapshotRange CCHR_POST_RESTORE_TAIL_RANGES[] = {
+    // Model/effect reconstruction may evaluate constraints again. Reapply the
+    // saved cCnsHelper interpolation state after all reconstruction work so the
+    // next joint pass starts from the restored timeline.
+    {0x3D00, 0x08}, {0x3D10, 0x04}, {0x3D24, 0x0C}, {0x3D30, 0x40},
+    {0x3E70, 0x08}, {0x3E80, 0x04}, {0x3E94, 0x0C}, {0x3EA0, 0x40},
     {0x6350, 0x10}, {0x6430, 0x2C},
     {0x67F8, 0x10}, {0x68C0, 0x10},
     // Reapply throw-reaction reuse state after native model/character rebuilds.
@@ -588,11 +601,12 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
     }
     const uint64_t destroyShotsEnd = Profile_Now();
 
-    // Concrete shot destructors can release attached uGameEffect objects
-    // directly. Those effects may still be present in sUnit's primary and
-    // multi-mask lists with a zeroed vtable, causing the next parallel move
-    // job to dispatch through null at vtable+0x40. Remove such dead entries
-    // after all shot-owned teardown has completed and before reconstruction.
+        // Concrete shot destructors can release attached uGameEffect objects
+        // directly. Those effects may still be present in sUnit's primary and
+        // multi-mask lists with a zeroed vtable, causing the next parallel move
+        // job to dispatch through null at vtable+0x40. Remove such dead entries
+        // after all abandoned shot teardown has completed and before
+        // reconstruction.
     // Only shot destructors can introduce the dead attached-effect entries this
     // second pass repairs. With no current shots, topology is unchanged since
     // the pre-restore sanitation pass, so rescanning every sUnit list is pure
@@ -699,7 +713,6 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
     uint64_t respawnPrepareTicks = 0;
     uint64_t respawnFactoryTicks = 0;
     uint64_t respawnRegisterTicks = 0;
-    uint64_t respawnReleaseEffectsTicks = 0;
     uint64_t respawnConcreteTicks = 0;
     uint64_t respawnOverlayTicks = 0;
     for (ShotRecipe& saved : slot.shotRecipes) {
@@ -740,9 +753,6 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
         }
         const uint64_t registerEnd = Profile_Now();
         respawnRegisterTicks += registerEnd - factoryEnd;
-        Shot_ReleaseFreshEmbeddedEffectGraph(fresh);
-        const uint64_t releaseEffectsEnd = Profile_Now();
-        respawnReleaseEffectsTicks += releaseEffectsEnd - registerEnd;
         const void* validTargets[6] = {};
         size_t validTargetCount = 0;
         uint64_t sCharacter = *(uint64_t*)_addr(PTR_SCHARACTER);
@@ -762,7 +772,7 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
                      (uint64_t)fresh);
         }
         const uint64_t concreteEnd = Profile_Now();
-        respawnConcreteTicks += concreteEnd - releaseEffectsEnd;
+        respawnConcreteTicks += concreteEnd - registerEnd;
         RestoreKingKobunHelper(fresh, saved);
         if (saved.concrete.dti == (uint64_t)_addr(0x140D4D2B0) &&
             saved.concrete.body.size() >= 0x2164) {
@@ -782,11 +792,6 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
                             saved.concrete.body.data() + range[0], range[1]);
             }
         }
-        // Concrete snapshots do not reconstruct the global particle-owner
-        // graph referenced by inline sEffect objects. Leave that graph
-        // detached so later native shot destruction cannot walk stale nodes.
-        Shot_DetachEmbeddedEffect(fresh);
-
         // Reapply confirmed pointer-free common fields after the broad object
         // overlay so packed floats/flags that resemble addresses still rewind.
         Shot_RestoreArmState(fresh, saved);
@@ -804,6 +809,12 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
         // restoring the saved gameplay lifecycle bits.
         uint32_t* unitState = (uint32_t*)((uint8_t*)fresh + 0x10);
         *unitState = (*unitState & ~0x3F8u) | (SSHOT_CATEGORY << 3);
+
+        // Restore the fresh callback effects only after the shot's attack,
+        // collision, phase, and transform scalars are in place. Do not kill or
+        // detach a factory-created effect here: native callback ownership and
+        // generator topology belong to the fresh allocation.
+        ConcreteShotSnapshot_RestoreCallbackEffects(fresh, saved.concrete);
         const uint64_t overlayEnd = Profile_Now();
         respawnOverlayTicks += overlayEnd - concreteEnd;
         respawnedShots++;
@@ -877,6 +888,23 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
     }
     flushPendingUnits(sShot);
 
+    // Restore independent effects only after all shots have their final fresh
+    // addresses. Effect recipes can refer to their originating shot through
+    // several factory arguments; remap those identities before reconstruction.
+    for (RollbackEffectRecipe& effect : slot.effectRecipes) {
+        for (const ShotRecipe& shot : slot.shotRecipes) {
+            auto remap = [&](void*& reference) {
+                if (reference == shot.savedPtr) reference = shot.restoredPtr;
+            };
+            remap(effect.attachTo);
+            remap(effect.a7);
+            remap(effect.a8);
+            remap(effect.a10);
+            remap(effect.a13);
+        }
+    }
+    Effect_RestoreRecipes(slot);
+
     // Factory allocations are temporary reconstruction work. The concrete
     // overlay restores each saved uShot::mId; now restore the matching pool and
     // cursor so later gameplay spawns and destructors use the same namespace.
@@ -912,7 +940,6 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
         g_activeRollbackProfile->restoreShotRespawnPrepare += respawnPrepareTicks;
         g_activeRollbackProfile->restoreShotRespawnFactory += respawnFactoryTicks;
         g_activeRollbackProfile->restoreShotRespawnRegister += respawnRegisterTicks;
-        g_activeRollbackProfile->restoreShotRespawnReleaseEffects += respawnReleaseEffectsTicks;
         g_activeRollbackProfile->restoreShotRespawnConcrete += respawnConcreteTicks;
         g_activeRollbackProfile->restoreShotRespawnOverlay += respawnOverlayTicks;
         g_activeRollbackProfile->restoreShotFinalize += finalizeEnd - respawnEnd;

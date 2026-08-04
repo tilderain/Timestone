@@ -741,7 +741,9 @@ def compare_region(index, region_a, region_b, dump_a, dump_b, frame_a, frame_b,
     if not details:
         raw_diff_bytes = differing_byte_count(data_a, data_b)
         ignored_diff_bytes = sum(
-            data_a[offset] != data_b[offset] for offset in ignored
+            data_a[offset] != data_b[offset]
+            for offset in ignored
+            if offset < len(data_a) and offset < len(data_b)
         )
         return {
             "region_index": index,

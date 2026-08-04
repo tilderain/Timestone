@@ -103,6 +103,7 @@ struct RollbackEffectRecipe {
     uint32_t a12;
     void* a13;
     uint64_t spawnSequence = 0;
+    ConcreteShotSnapshot::CallbackEffectState state;
 };
 
 struct RollbackCollisionNodeClone {
