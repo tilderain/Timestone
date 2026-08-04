@@ -64,6 +64,107 @@ static MissileEmplacementMoveFn oMissileEmplacementMove = nullptr;
 static std::unordered_map<void*, RollbackShotRecipe> g_liveShotRecipes;
 static uint64_t g_shotSpawnSequence = 0;
 static int g_kingKobunTraceCount = 0;
+static uint32_t g_unitLinkRepairLogCount = 0;
+
+static bool HasValidUnitLink(void* unit)
+{
+    return !unit || (IsAccessibleRange((uint64_t)unit, 0x28) &&
+                     IsUnitObject(unit));
+}
+
+static void RepairUnitLinksBeforeRemoval(void* manager, void* unit)
+{
+    if (!manager || !unit ||
+        !IsAccessibleRange((uint64_t)manager + SUNIT_CATEGORY_COUNT_OFFSET,
+                           sizeof(uint32_t)) ||
+        !IsAccessibleRange((uint64_t)unit, 0x28)) {
+        return;
+    }
+
+    uint32_t state = *(uint32_t*)((uint8_t*)unit + 0x10);
+    if ((state & 0x3F8u) == 0x3F8u) return;
+
+    uint32_t category = (state >> 3) & 0x7Fu;
+    uint32_t categoryCount = *(uint32_t*)((uint8_t*)manager +
+                                         SUNIT_CATEGORY_COUNT_OFFSET);
+    if (categoryCount > SUNIT_MAX_CATEGORIES)
+        categoryCount = SUNIT_MAX_CATEGORIES;
+
+    void* next = *(void**)((uint8_t*)unit + 0x18);
+    void* previous = *(void**)((uint8_t*)unit + 0x20);
+    bool linksValid = category < categoryCount && HasValidUnitLink(next) &&
+        HasValidUnitLink(previous);
+    if (linksValid) {
+        auto* head = (void**)((uint8_t*)manager + SUNIT_CATEGORY_LISTS_OFFSET +
+                              SUNIT_CATEGORY_LIST_STRIDE * category);
+        auto* tail = head + 1;
+        linksValid = previous
+            ? *(void**)((uint8_t*)previous + 0x18) == unit
+            : *head == unit;
+        linksValid = linksValid && (next
+            ? *(void**)((uint8_t*)next + 0x20) == unit
+            : *tail == unit);
+    }
+    if (linksValid) return;
+
+    void* foundPrevious = nullptr;
+    void* foundNext = nullptr;
+    uint32_t foundCategory = UINT32_MAX;
+    for (uint32_t scanCategory = 0;
+         scanCategory < categoryCount && foundCategory == UINT32_MAX;
+         ++scanCategory) {
+        void* scanPrevious = nullptr;
+        void* node = *(void**)((uint8_t*)manager + SUNIT_CATEGORY_LISTS_OFFSET +
+                               SUNIT_CATEGORY_LIST_STRIDE * scanCategory);
+        for (int safety = 4096; node && safety-- > 0;) {
+            if (!IsAccessibleRange((uint64_t)node, 0x20)) break;
+            void* scanNext = *(void**)((uint8_t*)node + 0x18);
+            if (node == unit) {
+                foundPrevious = scanPrevious;
+                foundNext = scanNext;
+                foundCategory = scanCategory;
+                break;
+            }
+            scanPrevious = node;
+            node = scanNext;
+        }
+    }
+
+    if (foundCategory != UINT32_MAX) {
+        auto* foundHead = (void**)((uint8_t*)manager +
+            SUNIT_CATEGORY_LISTS_OFFSET +
+            SUNIT_CATEGORY_LIST_STRIDE * foundCategory);
+        auto* foundTail = foundHead + 1;
+        if (!HasValidUnitLink(foundNext)) {
+            // The forward link is already allocator debris. Truncate the
+            // damaged suffix at this node so native unlink can safely repair
+            // the reachable prefix and category tail.
+            foundNext = nullptr;
+            *foundTail = unit;
+        }
+        *(void**)((uint8_t*)unit + 0x18) = foundNext;
+        *(void**)((uint8_t*)unit + 0x20) = foundPrevious;
+        *(uint32_t*)((uint8_t*)unit + 0x10) =
+            (state & ~0x3F8u) | (foundCategory << 3);
+    } else {
+        // The caller may immediately re-add a scheduler-created unit in a new
+        // category. Mark an orphan as detached so native removeUnit is a no-op.
+        *(void**)((uint8_t*)unit + 0x18) = nullptr;
+        *(void**)((uint8_t*)unit + 0x20) = nullptr;
+        *(uint32_t*)((uint8_t*)unit + 0x10) = state | 0x3F8u;
+    }
+
+    if (g_unitLinkRepairLogCount++ < 64) {
+        HookLog("Rollback: repaired corrupt sUnit links unit=0x%llX "
+                "state=0x%08X category=%u next=0x%llX previous=0x%llX "
+                "foundCategory=%u foundNext=0x%llX foundPrevious=0x%llX "
+                "caller=0x%llX\n",
+                (uint64_t)unit, state, category, (uint64_t)next,
+                (uint64_t)previous, foundCategory, (uint64_t)foundNext,
+                (uint64_t)foundPrevious,
+                (uint64_t)__builtin_return_address(0));
+    }
+}
 
 static bool IsActiveUnit(void* unit)
 {
@@ -405,6 +506,7 @@ static char __fastcall hkUnitRemove(void* manager, void* unit)
         Shot_DetachEmbeddedEffect(unit);
     }
     Effect_PrepareUnitRemoval(unit);
+    RepairUnitLinksBeforeRemoval(manager, unit);
     char result;
     {
         RollbackHookProfileScope child(RollbackHookProfileId::UnitRemoveNative);
