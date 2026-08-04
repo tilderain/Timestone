@@ -523,12 +523,45 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
     auto addRef = (void(__fastcall*)(void*))_addr(0x14050D100);
     auto releaseRef = (void(__fastcall*)(void*))_addr(0x14050D5A0);
     std::vector<void*> pinnedShotResources;
+    std::vector<void*> pinnedCallbackEffectResources;
     pinnedShotResources.reserve(slot.shotRecipes.size());
     for (const ShotRecipe& saved : slot.shotRecipes) {
         if (!saved.shotElement || !HasCallableDtiVirtual(saved.shotElement))
             continue;
         addRef(saved.shotElement);
         pinnedShotResources.push_back(saved.shotElement);
+    }
+
+
+   //////////////// ///// CHECK THE NECESSITY OF THIS /////////////////////
+
+    // Some shot factories synchronously request an EFL resource before they
+    // create their callback effects. Keep the current callback resources live
+    // across teardown so reconstruction cannot turn that request asynchronous
+    // and silently leave the fresh callback slots empty.
+    std::vector<void*> currentShots;
+    Shot_CollectCurrent(currentShots);
+    for (void* shot : currentShots) {
+        if (!IsAccessibleRange((uint64_t)shot + 0x1F78,
+                               13 * sizeof(void*))) {
+            continue;
+        }
+        for (uint32_t index = 0; index < 13; ++index) {
+            void* effect = *(void**)((uint8_t*)shot + 0x1F78 + index * 8);
+            if (!effect || !IsAccessibleRange((uint64_t)effect + 0x108,
+                                              sizeof(void*))) {
+                continue;
+            }
+            void* resource = *(void**)((uint8_t*)effect + 0x108);
+            if (!resource || !HasCallableDtiVirtual(resource) ||
+                std::find(pinnedCallbackEffectResources.begin(),
+                          pinnedCallbackEffectResources.end(), resource) !=
+                    pinnedCallbackEffectResources.end()) {
+                continue;
+            }
+            addRef(resource);
+            pinnedCallbackEffectResources.push_back(resource);
+        }
     }
     const uint64_t pinResourcesEnd = Profile_Now();
 
@@ -570,8 +603,6 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
     // 3 leaves the object in both sUnit and sShot for two more moveCategory
     // passes, so rollback would briefly run the retired shot beside its clone.
     int retiredShots = 0;
-    std::vector<void*> currentShots;
-    Shot_CollectCurrent(currentShots);
     if (g_activeRollbackProfile)
         g_activeRollbackProfile->restoreCurrentShots += (uint32_t)currentShots.size();
     const uint64_t collectShotsEnd = Profile_Now();
@@ -753,21 +784,30 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
         }
         const uint64_t registerEnd = Profile_Now();
         respawnRegisterTicks += registerEnd - factoryEnd;
-        const void* validTargets[6] = {};
-        size_t validTargetCount = 0;
+        // cAtkCtrl target tables deduplicate hits by exact cChr pointer. Team
+        // lists can contain active assist/proxy nodes beyond the three roster
+        // members, so collect the complete list; otherwise restore rejects an
+        // assist pointer but keeps its hit count, allowing repeated Kikosho hits.
+        std::vector<const void*> validTargets;
+        validTargets.reserve(16);
         uint64_t sCharacter = *(uint64_t*)_addr(PTR_SCHARACTER);
         for (int teamIndex = 0; sCharacter && teamIndex < 2; ++teamIndex) {
             uint64_t node = sCharacter +
                 (teamIndex == 0 ? TEAM0_OFFSET : TEAM1_OFFSET) +
                 TEAM_FIRST_NODE_OFFSET;
-            for (int member = 0; node && member < 3; ++member) {
+            for (int safety = 16; node && safety-- > 0;) {
                 void* character = *(void**)(node + NODE_CHR_OFFSET);
-                if (character) validTargets[validTargetCount++] = character;
+                if (character &&
+                    std::find(validTargets.begin(), validTargets.end(), character) ==
+                        validTargets.end()) {
+                    validTargets.push_back(character);
+                }
                 node = *(uint64_t*)(node + NODE_NEXT_OFFSET);
             }
         }
-        if (!ConcreteShotSnapshot_Restore(fresh, saved.concrete, validTargets,
-                                          validTargetCount)) {
+        if (!ConcreteShotSnapshot_Restore(fresh, saved.concrete,
+                                           validTargets.data(),
+                                           validTargets.size())) {
             HookLog("Rollback: restored shot 0x%llX has incomplete collision topology\n",
                      (uint64_t)fresh);
         }
@@ -924,6 +964,8 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
                     sizeof(characterRng.state));
     }
     for (void* resource : pinnedShotResources)
+        releaseRef(resource);
+    for (void* resource : pinnedCallbackEffectResources)
         releaseRef(resource);
     const uint64_t finalizeEnd = Profile_Now();
 

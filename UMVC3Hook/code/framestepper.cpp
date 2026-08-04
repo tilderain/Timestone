@@ -1235,10 +1235,10 @@ void FrameStepper_Draw()
                 "Autotest continuing without pause");
         } else if (g_desyncDetected) {
             ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.4f, 1.0f),
-                "Press P to unpause and continue");
+                "Press P to unpause or F11 for match restart");
         } else {
             ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f),
-                "(dismissed — further mismatches logged only)");
+                ":(");
         }
 
         ImGui::End();
