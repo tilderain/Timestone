@@ -24,7 +24,6 @@ static constexpr uintptr_t FN_SGAMEUI_MOVE = 0x1402BE610;
 static constexpr uintptr_t FN_UBTGAUGELIFE_MOVE = 0x1402F6800;
 static constexpr uintptr_t FN_RCHRCPU_CLASS_FUNC = 0x140117280;
 static constexpr uintptr_t FN_SMAIN_MOVE = 0x140521DF0;
-static constexpr uintptr_t FN_APPLY_COLLISION_PUSH = 0x14004AD20;
 static constexpr uintptr_t MT_DTI_VTABLE_ADDR = 0x140A69ED8;
 static constexpr uintptr_t FN_MENU_OPTION_KBD_MOVE = 0x140001C40;
 static constexpr uintptr_t FN_MATERIAL_RESOURCE_STATE = 0x1405DD640;
@@ -36,9 +35,6 @@ static void(__fastcall* oSoundMove)(uint64_t) = nullptr;
 static void(__fastcall* oGameUiMove)(uint64_t) = nullptr;
 static void(__fastcall* oBtGaugeLifeMove)(uint64_t) = nullptr;
 static bool(__fastcall* oRChrCpuClassFunc)(void*, void*) = nullptr;
-static void(__fastcall* oApplyCollisionPushCorrection)(
-    uint64_t, int, uint64_t, uint64_t, uint64_t, uint32_t) = nullptr;
-
 using CChrSetPosFn = void(__fastcall*)(uint64_t, const float*);
 static CChrSetPosFn oCChrSetPos = nullptr;
 
@@ -206,16 +202,6 @@ static void __fastcall hkMvc3MainMove(uint64_t main)
         NDJSON_DumpFrame(curFrame, 0);
 }
 
-static void __fastcall hkApplyCollisionPushCorrection(
-    uint64_t character, int phase, uint64_t collisionObject,
-    uint64_t otherCharacter, uint64_t collisionResult, uint32_t collisionSlot)
-{
-    if (phase != 0 && oApplyCollisionPushCorrection) {
-        oApplyCollisionPushCorrection(character, phase, collisionObject,
-                                      otherCharacter, collisionResult, collisionSlot);
-    }
-}
-
 static void __fastcall hkCallSRender(uint64_t render)
 {
     RollbackHookProfileScope profile(RollbackHookProfileId::RenderEndFrame);
@@ -352,12 +338,6 @@ void Rollback_InitMainHooks(RollbackMainMoveFn* originalMove)
         HookLog("Rollback: hooked cChr__setPos for resim diagnostics\n");
     else
         HookLog("Rollback: failed to hook cChr__setPos (%d)\n", status);
-
-    status = MH_CreateHook((LPVOID)_addr(FN_APPLY_COLLISION_PUSH),
-                           (LPVOID)&hkApplyCollisionPushCorrection,
-                           (LPVOID*)&oApplyCollisionPushCorrection);
-    if (status != MH_OK)
-        HookLog("Rollback: failed to disable player collision pushboxes (%d)\n", status);
 
     EnableHook(FN_RENDER_END_FRAME, (void*)&hkCallSRender, (void**)&oCallSRender,
                "Rollback: hooked sRender call",

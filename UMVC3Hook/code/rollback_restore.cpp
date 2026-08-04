@@ -196,8 +196,8 @@ static constexpr SnapshotRange CCHR_SCALAR_RESTORE_RANGES[] = {
     // +0x3BF0 and +0x3D60. Their lock-angle output feeds joint matrices and
     // fighter push-sphere centers. Preserve the vtable, self/reference fields,
     // and update callback at helper+0x128 while rewinding scalar state.
-    {0x3D00, 0x08}, {0x3D10, 0x04}, {0x3D24, 0x0C}, {0x3D30, 0x40},
-    {0x3E70, 0x08}, {0x3E80, 0x04}, {0x3E94, 0x0C}, {0x3EA0, 0x40},
+    {0x3D00, 0x08}, {0x3D10, 0x08}, {0x3D24, 0x0C}, {0x3D30, 0x40},
+    {0x3E70, 0x08}, {0x3E80, 0x08}, {0x3E94, 0x0C}, {0x3EA0, 0x40},
     // cChrCmdLimit animation-flag predicate triplets in the embedded special
     // and combo command matchers. Their packed masks can resemble aligned
     // pointers, so the generic pointer guard otherwise retains live values.
@@ -249,8 +249,11 @@ static constexpr SnapshotRange CCHR_POST_RESTORE_TAIL_RANGES[] = {
     // Model/effect reconstruction may evaluate constraints again. Reapply the
     // saved cCnsHelper interpolation state after all reconstruction work so the
     // next joint pass starts from the restored timeline.
-    {0x3D00, 0x08}, {0x3D10, 0x04}, {0x3D24, 0x0C}, {0x3D30, 0x40},
-    {0x3E70, 0x08}, {0x3E80, 0x04}, {0x3E94, 0x0C}, {0x3EA0, 0x40},
+    // helper+0x124 is the lock-angle interpolation state. The frame-783
+    // reproduction retained state 1 instead of restoring state 2,
+    // producing a different air push-sphere center at cChr+0x5CD0.
+    {0x3D00, 0x08}, {0x3D10, 0x08}, {0x3D24, 0x0C}, {0x3D30, 0x40},
+    {0x3E70, 0x08}, {0x3E80, 0x08}, {0x3E94, 0x0C}, {0x3EA0, 0x40},
     {0x6350, 0x10}, {0x6430, 0x2C},
     {0x67F8, 0x10}, {0x68C0, 0x10},
     // Reapply throw-reaction reuse state after native model/character rebuilds.
