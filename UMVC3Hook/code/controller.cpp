@@ -21,6 +21,7 @@
 #include "rollback_profile.h"
 #include "diag.h"
 #include "autotest.h"
+#include "framestepper.h"
 #include "../kiero/minhook/include/MinHook.h"
 #include <cstdio>
 #include <cstdint>
@@ -389,7 +390,13 @@ static int32_t GetGameFrameCount()
 extern "C" void Controller_ResetFrameEpoch()
 {
     uint64_t sReplay = *(uint64_t*)_addr(G_PSREPLAY_PTR);
-    g_gameFrameBase = sReplay ? *(int32_t*)(sReplay + 0x54) : 0;
+    // This runs at the mutual battle-release barrier. Using each process's
+    // current native counter as a base gives the peers different logical frame
+    // labels when they reach the barrier on different native ticks. Establish
+    // the same explicit epoch on both peers instead.
+    if (sReplay)
+        *(int32_t*)(sReplay + 0x54) = 0;
+    g_gameFrameBase = 0;
     g_netFrameCount = 0;
     g_fightFrameBase = -1;
 }
@@ -1242,11 +1249,8 @@ extern "C" void Controller_OnFrameStart()
     // If sReplay isn't ready yet, skip packet processing this frame.
     if (g_netFrameCount < 0) return;
 
-    // The intro barrier establishes a local frame base on each peer, so the
-    // native replay counters can retain a small process-local offset. Rebase
-    // the native counter onto the shared logical frame once it is known. This
-    // keeps native replay indexing in its normal small frame range while
-    // making snapshot state agree.
+    // Keep the native replay cursor on the shared logical epoch established at
+    // the mutual battle-release barrier.
     uint64_t sReplay = *(uint64_t*)_addr(G_PSREPLAY_PTR);
     if (sReplay) {
         *(int32_t*)(sReplay + 0x54) = g_netFrameCount;
@@ -1489,11 +1493,11 @@ extern "C" void Controller_OnFrameStart()
 }
 
 // ---------------------------------------------------------------------------
-// Desync checksum — sum of quantized positions, HP, and actionId across all
-// characters, mix in each character's RNG state, then mix in the global
-// gameplay RNG state. Character state uses order-independent addition and
-// integer quantization to tolerate tiny frame-timing float differences that
-// are not visible desyncs.
+// Desync checksum — sum of quantized positions, HP, actionId, and independently
+// hashed RNG state across all characters, then mix in the global gameplay RNG
+// state. Character state uses order-independent addition and integer
+// quantization to tolerate tiny frame-timing float differences that are not
+// visible desyncs.
 // ---------------------------------------------------------------------------
 static uint32_t ComputeChecksum()
 {
@@ -1518,9 +1522,14 @@ static uint32_t ComputeChecksum()
                 cs += (uint32_t)(hp < 0 ? -hp : hp);
                 cs += *(uint32_t*)(character + 0x1310); // actionId
 
-                // Per-character MtXorShift state affects gameplay outcomes and
-                // must be part of the confirmed state comparison.
-                cs = (cs ^ *(uint32_t*)(character + 0x2D80)) * 16777619u;
+                // Hash the complete MtXorShift state independently, then add it
+                // so team and linked-list traversal order cannot change cs.
+                const uint32_t* characterRng =
+                    (const uint32_t*)(character + 0x2D80);
+                uint32_t rngHash = 2166136261u;
+                for (int i = 0; i < 4; ++i)
+                    rngHash = (rngHash ^ characterRng[i]) * 16777619u;
+                cs += rngHash;
             }
             node = *(uint64_t*)(node + NODE_NEXT_OFFSET);
         }

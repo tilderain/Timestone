@@ -974,6 +974,7 @@ void FrameStepper_Process()
         // barrier is rebuilding the shared frame and RNG epochs.
         if (Netplay_IsActive() &&
             (!FrameStepper_IsBattleSynchronized() ||
+             FrameStepper_IsMatchRestartPending() ||
              desyncPacket.battle_generation != g_battleGeneration))
             continue;
 

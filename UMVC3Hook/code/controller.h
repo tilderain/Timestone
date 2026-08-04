@@ -79,6 +79,8 @@ void Controller_InitHooks();
 
 // Netplay ring buffer lifecycle — called from framestepper.cpp / netplay.cpp
 extern "C" void Controller_ResetBuffers();
+extern "C" void Controller_ClearDesyncDetection();
+extern "C" void Controller_ResetFrameEpoch();
 extern "C" void Controller_OnFrameStart();
 extern "C" void Controller_OnFrameEnd();
 

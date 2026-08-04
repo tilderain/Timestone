@@ -98,7 +98,7 @@ enum DesyncAction : uint32_t {
 
 struct DesyncPacket {
     uint32_t type;               // PACKET_DESYNC
-    uint32_t battle_generation;
+    uint32_t battle_generation;  // match epoch that produced this alert
     uint32_t action;             // DesyncAction
     int32_t  frame;
     uint32_t localChecksum;

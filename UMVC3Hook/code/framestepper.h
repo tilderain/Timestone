@@ -13,6 +13,8 @@ void FrameStepper_DrawAutoTest();
 void FrameStepper_SetDevice(LPDIRECT3DDEVICE9 device);
 void FrameStepper_Capture(LPDIRECT3DDEVICE9 pDevice);
 extern "C" void FrameStepper_ScheduleAutoTestRestart(uint32_t roundSeed);
+extern "C" bool FrameStepper_IsBattleSynchronized();
+extern "C" bool FrameStepper_IsMatchRestartPending();
 extern "C" uint32_t FrameStepper_GetBattleGeneration();
 extern "C" bool FrameStepper_IsDesyncCheckReady();
 extern "C" void FrameStepper_NotifyFighting();

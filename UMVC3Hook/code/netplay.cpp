@@ -7,6 +7,7 @@
 #include <Windows.h>
 
 extern void HookLog(const char* fmt, ...);
+extern "C" uint32_t FrameStepper_GetBattleGeneration();
 
 // ---------------------------------------------------------------------------
 // State
@@ -26,8 +27,6 @@ static InputPacket              g_inboundQueue[MAX_INBOUND_PACKETS] = {};
 static size_t                   g_inboundHead = 0;
 static size_t                   g_inboundCount = 0;
 static CRITICAL_SECTION         g_inboundCS;
-
-extern "C" uint32_t FrameStepper_GetBattleGeneration();
 
 // Desync-check packet queue (separate from input packets).
 
@@ -963,6 +962,7 @@ void Netplay_SendDesyncTrigger(int32_t frame, uint32_t localChecksum,
                                uint32_t remoteChecksum)
 {
     ScopedCS lock(g_desyncCS);
+    g_outboundDesync = {};
     g_outboundDesync.type = PACKET_DESYNC;
     g_outboundDesync.battle_generation = FrameStepper_GetBattleGeneration();
     g_outboundDesync.action = DESYNC_TRIGGER;
@@ -1059,10 +1059,10 @@ void Netplay_ClearInputQueues()
     }
     {
         ScopedCS lock(g_desyncCS);
-        g_inboundDesyncNew = false;
-        g_outboundDesyncNew = false;
         g_inboundDesync = {};
         g_outboundDesync = {};
+        g_inboundDesyncNew = false;
+        g_outboundDesyncNew = false;
     }
 }
 
