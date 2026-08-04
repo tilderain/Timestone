@@ -193,6 +193,24 @@ cChr+0x4F20
 cChr+0x5CD0
 cChr+0x5C40 begins the third cHitPrimSphere bank, the bank processed by uCharacter__updatePushSpheresAndQueueCorrection. +0x5CD0 lies in an active sphere’s world-geometry payload. This is strong evidence that the affected primitive was the active airborne push sphere in that sequence, although “air pushbox” is an action/configuration role rather than a distinct C++ primitive type.
 One frame later, the phase-0 push callback generated different values at cChr+0x6340, after which root position diverged.
+
+The `20260804_040449` pair exposed an additional restore-order dependency. At
+frame 6501, the affected Chun-Li again split at `mCnsNeck.mState` and the world
+centers at `+0x4F20/+0x5CD0`, followed by push correction and root-position
+differences at frame 6507. The four collision-set selectors at
+`cChr+0x6360..+0x636F` matched in the captured host and client frames:
+
+- `+0x6360`: capsule-bank selector.
+- `+0x6364`: sphere-bank-0 selector.
+- `+0x6368`: sphere-bank-2 selector used by fighter push collision.
+- `+0x636C`: sphere-bank-1 selector.
+
+The affected airborne character had selector `9` at `+0x6368`; ordinary
+grounded characters commonly had selector `1`. Native action/collision setup
+can rewrite these selectors during shot/model reconstruction and then restore
+the expected value during the following tick, so end-of-frame dumps alone do
+not expose the transient wrong selector. The selectors are now reapplied in
+the post-reconstruction character tail together with the helper state.
 Rollback Requirements
 The helper cannot safely be restored with one raw memcpy because it contains:
 - A vtable.

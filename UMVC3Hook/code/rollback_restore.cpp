@@ -254,7 +254,15 @@ static constexpr SnapshotRange CCHR_POST_RESTORE_TAIL_RANGES[] = {
     // producing a different air push-sphere center at cChr+0x5CD0.
     {0x3D00, 0x08}, {0x3D10, 0x08}, {0x3D24, 0x0C}, {0x3D30, 0x40},
     {0x3E70, 0x08}, {0x3E80, 0x08}, {0x3E94, 0x0C}, {0x3EA0, 0x40},
-    {0x6350, 0x10}, {0x6430, 0x2C},
+    {0x6350, 0x10},
+    // Active collision-set selectors for capsule bank 0 and sphere banks
+    // 0/2/1. +0x6368 selects the bank-2 set used for fighter push spheres
+    // (normally set 1 grounded and set 9 airborne). Reconstruction can run
+    // action/collision setup after the initial character copy; reapply these
+    // selectors before resimulation even when native setup writes the same
+    // final value later in the tick.
+    {0x6360, 0x10},
+    {0x6430, 0x2C},
     {0x67F8, 0x10}, {0x68C0, 0x10},
     // Reapply throw-reaction reuse state after native model/character rebuilds.
     {0x680D, 0x01}, {0x6810, 0x24}, {0x6828, 0x04}, {0x6840, 0x80},
