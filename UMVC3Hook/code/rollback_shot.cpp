@@ -31,6 +31,8 @@ static constexpr uintptr_t PTR_SREPLAY = 0x140d4d9d8;
 static constexpr uintptr_t FN_SSHOT_SPAWN = 0x140150E00;
 static constexpr uintptr_t FN_SSHOT_SPAWN_EX = 0x140150F40;
 static constexpr uintptr_t FN_USHOT_UPDATE_HITBOXES = 0x1401C9000;
+static constexpr uintptr_t FN_USHOT_KILL_CALLBACKS = 0x1401C9A20;
+static constexpr uintptr_t FN_USHOT_CLEAR_DEAD_CALLBACKS = 0x1401C9AB0;
 static constexpr uintptr_t FN_BUILD_ATTACH_MATRIX = 0x14014F960;
 static constexpr uintptr_t FN_SUNIT_REMOVE_UNIT = 0x14051B9F0;
 static constexpr uintptr_t FN_KING_KOBUN_MOVE = 0x1401BA2D0;
@@ -55,6 +57,8 @@ static ShotSpawnExFn oShotSpawnEx = nullptr;
 static UnitRemoveFn oUnitRemove = nullptr;
 static BuildAttachMatrixFn oBuildAttachMatrix = nullptr;
 static ShotUpdateHitboxesFn oShotUpdateHitboxes = nullptr;
+static void(__fastcall* oShotKillCallbacks)(void*, uint32_t) = nullptr;
+static void(__fastcall* oShotClearDeadCallbacks)(void*) = nullptr;
 static KingKobunMoveFn oKingKobunMove = nullptr;
 static MissileEmplacementMoveFn oMissileEmplacementMove = nullptr;
 static std::unordered_map<void*, RollbackShotRecipe> g_liveShotRecipes;
@@ -131,6 +135,18 @@ static void TraceResimShotSpawn(const char* kind,
             recipe.slotId, (uint64_t)shot,
             ownerBefore[0], ownerBefore[1], ownerBefore[2], ownerBefore[3],
             ownerAfter[0], ownerAfter[1], ownerAfter[2], ownerAfter[3]);
+
+    constexpr uintptr_t DTI_USHOT_SHIELD_KIKOUSYOU = 0x140D48F70;
+    if (shot && HasCallableDtiVirtual(shot) &&
+        GetObjectDti((uint64_t)shot) ==
+            (uint64_t)_addr(DTI_USHOT_SHIELD_KIKOUSYOU)) {
+        void* callback1 = *(void**)((uint8_t*)shot + 0x1F78);
+        void* callback2 = *(void**)((uint8_t*)shot + 0x1F80);
+        HookLog("KIKOSHOSPAWNRESULT frame=%d sequence=%llu shot=0x%llX "
+                "slot1=0x%llX slot2=0x%llX\n",
+                frame, recipe.spawnSequence, (uint64_t)shot,
+                (uint64_t)callback1, (uint64_t)callback2);
+    }
 }
 
 static void* __fastcall hkShotSpawn(void* manager, void* element, uint64_t initParam,
@@ -253,6 +269,80 @@ static void __fastcall hkShotUpdateHitboxes(void* shot)
     auto recipe = g_liveShotRecipes.find(shot);
     if (recipe != g_liveShotRecipes.end() && recipe->second.reconstructed)
         ConcreteShotSnapshot_ReapplyCapsules(shot, recipe->second.concrete);
+}
+
+static void __fastcall hkShotKillCallbacks(void* shot, uint32_t slot)
+{
+    constexpr uintptr_t DTI_USHOT_SHIELD_KIKOUSYOU = 0x140D48F70;
+    void* before[2] = {};
+    uint32_t states[2] = {};
+    const bool trace = shot && HasCallableDtiVirtual(shot) &&
+        GetObjectDti((uint64_t)shot) ==
+            (uint64_t)_addr(DTI_USHOT_SHIELD_KIKOUSYOU);
+    if (trace) {
+        for (uint32_t index = 0; index < 2; ++index) {
+            before[index] = *(void**)((uint8_t*)shot + 0x1F78 + index * 8);
+            if (before[index] &&
+                IsAccessibleRange((uint64_t)before[index] + 0x10, 4)) {
+                states[index] =
+                    *(uint32_t*)((uint8_t*)before[index] + 0x10);
+            }
+        }
+    }
+
+    void* caller = __builtin_return_address(0);
+    oShotKillCallbacks(shot, slot);
+
+    if (trace) {
+        void* after0 = *(void**)((uint8_t*)shot + 0x1F78);
+        void* after1 = *(void**)((uint8_t*)shot + 0x1F80);
+        if (before[0] != after0 || before[1] != after1) {
+            uint64_t replay = *(uint64_t*)_addr(PTR_SREPLAY);
+            int32_t frame = replay ? *(int32_t*)(replay + 0x54) : -1;
+            HookLog("KIKOSHOEFFECTKILL frame=%d resim=%d caller=0x%llX "
+                    "shot=0x%llX requested=%u "
+                    "slot1=0x%llX->0x%llX state1=0x%08X "
+                    "slot2=0x%llX->0x%llX state2=0x%08X\n",
+                    frame, g_isResimulating ? 1 : 0, (uint64_t)caller,
+                    (uint64_t)shot, slot,
+                    (uint64_t)before[0], (uint64_t)after0, states[0],
+                    (uint64_t)before[1], (uint64_t)after1, states[1]);
+        }
+    }
+}
+
+static void __fastcall hkShotClearDeadCallbacks(void* shot)
+{
+    constexpr uintptr_t DTI_USHOT_SHIELD_KIKOUSYOU = 0x140D48F70;
+    void* before[2] = {};
+    uint32_t states[2] = {};
+    const bool trace = shot && HasCallableDtiVirtual(shot) &&
+        GetObjectDti((uint64_t)shot) ==
+            (uint64_t)_addr(DTI_USHOT_SHIELD_KIKOUSYOU);
+    if (trace) {
+        for (uint32_t index = 0; index < 2; ++index) {
+            before[index] = *(void**)((uint8_t*)shot + 0x1F78 + index * 8);
+            if (before[index] && IsAccessibleRange((uint64_t)before[index] + 0x10, 4))
+                states[index] = *(uint32_t*)((uint8_t*)before[index] + 0x10);
+        }
+    }
+
+    oShotClearDeadCallbacks(shot);
+
+    if (trace) {
+        void* after0 = *(void**)((uint8_t*)shot + 0x1F78);
+        void* after1 = *(void**)((uint8_t*)shot + 0x1F80);
+        if (before[0] != after0 || before[1] != after1) {
+            uint64_t replay = *(uint64_t*)_addr(PTR_SREPLAY);
+            int32_t frame = replay ? *(int32_t*)(replay + 0x54) : -1;
+            HookLog("KIKOSHOEFFECTCLEAR frame=%d resim=%d shot=0x%llX "
+                    "slot1=0x%llX->0x%llX state1=0x%08X "
+                    "slot2=0x%llX->0x%llX state2=0x%08X\n",
+                    frame, g_isResimulating ? 1 : 0, (uint64_t)shot,
+                    (uint64_t)before[0], (uint64_t)after0, states[0],
+                    (uint64_t)before[1], (uint64_t)after1, states[1]);
+        }
+    }
 }
 
 static void __fastcall hkKingKobunMove(void* shot)
@@ -432,6 +522,16 @@ void Shot_InitHooks()
                 (void**)&oShotUpdateHitboxes,
                 "Rollback: hooked uShot hitbox update tail repair",
                 "Rollback: failed to hook uShot hitbox update tail repair (%d)\n");
+    /*InstallHook(FN_USHOT_KILL_CALLBACKS,
+                (LPVOID)&hkShotKillCallbacks,
+                (void**)&oShotKillCallbacks,
+                "Rollback: tracing Kikosho callback effect kills",
+                "Rollback: failed to trace Kikosho callback effect kills (%d)\n");
+    InstallHook(FN_USHOT_CLEAR_DEAD_CALLBACKS,
+                (LPVOID)&hkShotClearDeadCallbacks,
+                (void**)&oShotClearDeadCallbacks,
+                "Rollback: tracing Kikosho callback effect clears",
+                "Rollback: failed to trace Kikosho callback effect clears (%d)\n");*/
     InstallHook(FN_KING_KOBUN_MOVE, (LPVOID)&hkKingKobunMove,
                 (void**)&oKingKobunMove,
                 "Rollback: hooked uShotVulcanKingKobun::move trace",
@@ -534,15 +634,14 @@ void Shot_DetachEmbeddedEffect(void* shot)
         return;
     uint8_t* effect = (uint8_t*)shot + EFFECT_OFFSET;
     if (!IsEffectObject(effect)) return;
+    // The generator chain at +0x218 and particle-manager array at +0x220 are
+    // owned allocations. Release them before detaching the stale embedded graph;
+    // clearing these pointers first leaks every allocation on each reconstruction.
+    Effect_ReleaseOwnedAllocations(effect);
     *(uint64_t*)(effect + 0x50) = 0;
     *(uint64_t*)(effect + 0x58) = 0;
     *(uint64_t*)(effect + 0x60) = 0;
     *(uint32_t*)(effect + 0x70) = 0xFFFFFFFFu;
-    *(uint64_t*)(effect + 0x218) = 0;
-    *(uint64_t*)(effect + 0x220) = 0;
-    *(uint64_t*)(effect + 0x228) = 0;
-    *(uint32_t*)(effect + 0x208) = 0;
-    *(uint32_t*)(effect + 0x210) = 0;
 }
 
 int Shot_SanitizeCollisionSlotsForDestruction(void* shot)

@@ -22,10 +22,13 @@ static constexpr uintptr_t PTR_SSTAGE = 0x140d4f718;
 static constexpr uintptr_t PTR_SCHARACTER = 0x140d44a70;
 static constexpr uintptr_t FN_SGAMEEFFECT_FLUSH_PENDING = 0x140130D00;
 static constexpr uintptr_t FN_UGAMEEFFECT_CREATE = 0x140131410;
+static constexpr uintptr_t FN_UGAMEEFFECT_OPERATOR_NEW = 0x140139E00;
 static constexpr uintptr_t FN_DRSTRANGE_UPDATE_SUMMONS = 0x14007B9E0;
 static constexpr uintptr_t FN_EFFECT_DRAW = 0x1405E4E70;
 static constexpr uintptr_t FN_EFFECT_DTOR_RELEASE = 0x1405E07F0;
 static constexpr uintptr_t FN_EFFECT_VDTOR = 0x1405E08C0;
+static constexpr uintptr_t FN_EFFECT_CREATE_GENERATOR = 0x1405E27C0;
+static constexpr uintptr_t FN_EFFECT_RELEASE_GENERATOR = 0x1405E6890;
 static constexpr uintptr_t FN_PARTICLE_MANAGER_RELEASE_SUBBUFFER = 0x14080C120;
 static constexpr uintptr_t FN_KIRIGAKURE_EFFECT_UPDATE = 0x14013B050;
 static constexpr uintptr_t FN_SUNIT_REMOVE_UNIT = 0x14051B9F0;
@@ -50,10 +53,12 @@ using EffectCreateFn = void*(__fastcall*)(void*, int, int, void*, int, int,
 static constexpr int MAX_GENERATOR_NODES = 256;
 
 static EffectCreateFn oEffectCreate = nullptr;
+static void*(__fastcall* oGameEffectOperatorNew)(uint64_t, uint32_t) = nullptr;
 static void(__fastcall* oDrStrangeUpdateSummons)(void*) = nullptr;
 static void(__fastcall* oEffectDraw)(void*, void*) = nullptr;
 static void(__fastcall* oEffectDtorRelease)(void*) = nullptr;
 static void(__fastcall* oEffectVdtor)(void*, uint32_t) = nullptr;
+static uint64_t(__fastcall* oEffectCreateGenerator)(void*) = nullptr;
 static void(__fastcall* oParticleManagerReleaseSubBuffer)(void*) = nullptr;
 static void(__fastcall* oGameEffectFlushPending)(void*) = nullptr;
 static void(__fastcall* oKirigakureEffectUpdate)(void*) = nullptr;
@@ -329,6 +334,20 @@ static void* __fastcall hkEffectCreate(void* manager, int effectId, int a3,
     return effect;
 }
 
+static void* __fastcall hkGameEffectOperatorNew(uint64_t size, uint32_t alignment)
+{
+    void* effect = oGameEffectOperatorNew(size, alignment);
+    if (!effect) {
+        uint64_t replay = *(uint64_t*)_addr(0x140D4D9D8);
+        int32_t frame = replay ? *(int32_t*)(replay + 0x54) : -1;
+        HookLog("UGAMEEFFECTALLOCFAIL frame=%d resim=%d caller=0x%llX "
+                "size=%llu alignment=%u\n",
+                frame, g_isResimulating ? 1 : 0,
+                (uint64_t)__builtin_return_address(0), size, alignment);
+    }
+    return effect;
+}
+
 static void __fastcall hkDrStrangeUpdateSummons(void* character)
 {
     // These summons are presentation-only and their allocations are not part
@@ -365,6 +384,26 @@ static void __fastcall hkEffectVdtor(void* effect, uint32_t flags)
     if (g_isResimulating)
         Effect_PrepareUnitRemoval(effect);
     oEffectVdtor(effect, flags);
+}
+
+static uint64_t __fastcall hkEffectCreateGenerator(void* effect)
+{
+    uint64_t result = oEffectCreateGenerator(effect);
+    if ((uint8_t)result == 0 && effect &&
+        IsAccessibleRange((uint64_t)effect, 0x230)) {
+        uint64_t resource = *(uint64_t*)((uint8_t*)effect + 0x108);
+        uint16_t expectedManagers = resource &&
+            IsAccessibleRange(resource + 0x90, sizeof(uint16_t))
+            ? *(uint16_t*)(resource + 0x90) : 0;
+        HookLog("EFFECTALLOCFAIL effect=0x%llX resource=0x%llX expected=%u "
+                "generators=0x%llX managers=0x%llX count=%u flags=0x%08X\n",
+                (uint64_t)effect, resource, expectedManagers,
+                *(uint64_t*)((uint8_t*)effect + 0x218),
+                *(uint64_t*)((uint8_t*)effect + 0x220),
+                *(uint16_t*)((uint8_t*)effect + 0x208),
+                *(uint32_t*)((uint8_t*)effect + 0x100));
+    }
+    return result;
 }
 
 static void __fastcall hkParticleManagerReleaseSubBuffer(void* manager)
@@ -479,6 +518,13 @@ void Effect_FinishUnitRemoval(void* unit)
         g_liveEffectRecipes.end());
 }
 
+void Effect_ReleaseOwnedAllocations(void* effect)
+{
+    if (!effect || !IsAccessibleRange((uint64_t)effect, 0x230)) return;
+    SanitizeEffectForDestruction(effect);
+    ((void(__fastcall*)(void*))_addr(FN_EFFECT_RELEASE_GENERATOR))(effect);
+}
+
 int Effect_RetireCurrent(void* sUnit)
 {
     if (!sUnit) return 0;
@@ -569,6 +615,17 @@ void Effect_InitHooks()
         HookLog("Rollback: failed to hook uGameEffect factory (%d)\n", status);
     }
 
+    /*status = MH_CreateHook((LPVOID)_addr(FN_UGAMEEFFECT_OPERATOR_NEW),
+                           (LPVOID)&hkGameEffectOperatorNew,
+                           (LPVOID*)&oGameEffectOperatorNew);
+    if (status == MH_OK) {
+        MH_EnableHook((LPVOID)_addr(FN_UGAMEEFFECT_OPERATOR_NEW));
+        HookLog("Rollback: tracing direct uGameEffect allocation failures\n");
+    } else {
+        HookLog("Rollback: failed to trace direct uGameEffect allocation (%d)\n",
+                status);
+    }*/
+
     status = MH_CreateHook((LPVOID)_addr(FN_DRSTRANGE_UPDATE_SUMMONS),
                            (LPVOID)&hkDrStrangeUpdateSummons,
                            (LPVOID*)&oDrStrangeUpdateSummons);
@@ -612,6 +669,17 @@ void Effect_InitHooks()
         HookLog("Rollback: failed to guard direct uEffect virtual destructor (%d)\n",
                 status);
     }
+
+    /*status = MH_CreateHook((LPVOID)_addr(FN_EFFECT_CREATE_GENERATOR),
+                           (LPVOID)&hkEffectCreateGenerator,
+                           (LPVOID*)&oEffectCreateGenerator);
+    if (status == MH_OK) {
+        MH_EnableHook((LPVOID)_addr(FN_EFFECT_CREATE_GENERATOR));
+        HookLog("Rollback: tracing effect generator allocation failures\n");
+    } else {
+        HookLog("Rollback: failed to trace effect generator allocation (%d)\n",
+                status);
+    }*/
 
     status = MH_CreateHook((LPVOID)_addr(FN_PARTICLE_MANAGER_RELEASE_SUBBUFFER),
                            (LPVOID)&hkParticleManagerReleaseSubBuffer,
