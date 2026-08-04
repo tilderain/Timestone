@@ -1047,6 +1047,23 @@ void Netplay_ClearInputQueues()
         g_outboundNew = false;
         std::memset(&g_outboundPacket, 0, sizeof(g_outboundPacket));
     }
+    {
+        ScopedCS lock(g_resimNotifyCS);
+        g_inboundResimNotifyNew = false;
+        g_outboundResimNotifyNew = false;
+    }
+    {
+        ScopedCS lock(g_groundTruthCS);
+        g_inboundGroundTruthNew = false;
+        g_outboundGroundTruthNew = false;
+    }
+    {
+        ScopedCS lock(g_desyncCS);
+        g_inboundDesyncNew = false;
+        g_outboundDesyncNew = false;
+        g_inboundDesync = {};
+        g_outboundDesync = {};
+    }
 }
 
 // ---------------------------------------------------------------------------

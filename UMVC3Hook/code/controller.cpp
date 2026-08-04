@@ -32,6 +32,7 @@ extern "C" bool Rollback_GetSnapshotInputs(int32_t frame, uint32_t* outLocal, ui
 extern "C" void Rollback_UpdateSnapshotInputs(int32_t frame, uint32_t localInput, uint32_t remoteInput);
 extern "C" void Rollback_CommitPendingNetplayLive(int32_t frame);
 extern "C" void Rollback_NotifyDesyncTriggered(int32_t frame);
+extern "C" uint32_t FrameStepper_GetBattleGeneration();
 
 static constexpr bool INPUT_PROVENANCE_TRACE = false;
 
@@ -415,6 +416,7 @@ extern "C" void Controller_ResetBuffers()
     std::memset(g_scheduledLocalFrame, -1, sizeof(g_scheduledLocalFrame));
     std::memset(g_receivedInput,      0, sizeof(g_receivedInput));
     std::memset(g_confirmedFrame,    -1, sizeof(g_confirmedFrame));
+    std::memset(g_predictedInput,     0, sizeof(g_predictedInput));
     std::memset(g_predictedFrame,    -1, sizeof(g_predictedFrame));
     std::memset(g_usedRemoteInput,    0, sizeof(g_usedRemoteInput));
     std::memset(g_recordedLocalInput, 0, sizeof(g_recordedLocalInput));
@@ -658,6 +660,9 @@ extern "C" void Controller_ResolveRemoteInput(int32_t frame)
         InputPacket pkt;
         while (Netplay_GetInboundPacket(pkt))
         {
+            if (pkt.battle_generation != FrameStepper_GetBattleGeneration())
+                continue;
+
             int32_t pktMaxFrame = (int32_t)pkt.start_frame + NET_HISTORY_SIZE - 1;
             if (pktMaxFrame <= g_lastRemoteFrame) {
                 TraceInputPacket("IPRX", "resolve-dropped", g_netFrameCount, pkt,
