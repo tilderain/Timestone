@@ -68,8 +68,10 @@ static uint32_t g_unitLinkRepairLogCount = 0;
 
 static bool HasValidUnitLink(void* unit)
 {
-    return !unit || (IsAccessibleRange((uint64_t)unit, 0x28) &&
-                     IsUnitObject(unit));
+    // Link validation must not dispatch a DTI virtual. Some scheduler-owned
+    // units use a base layout where vtable+0x20 is a deleting destructor, not
+    // cUnit::getDTI. Reciprocal list checks below establish link identity.
+    return !unit || IsAccessibleRange((uint64_t)unit, 0x28);
 }
 
 static void RepairUnitLinksBeforeRemoval(void* manager, void* unit)

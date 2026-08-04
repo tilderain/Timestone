@@ -167,3 +167,4 @@ game sometimes errors this on launch
 
 fix controller not working again
 perf regressions
+    ---- remove every unnecessary hook, esp effect ones

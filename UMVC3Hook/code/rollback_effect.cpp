@@ -497,6 +497,11 @@ int Effect_RestoreRecipes(RollbackSnapshotSlot& slot)
 
 void Effect_PrepareUnitRemoval(void* unit)
 {
+    if (!unit || !IsAccessibleRange((uint64_t)unit, 0x14)) return;
+    const uint32_t category =
+        (*(uint32_t*)((uint8_t*)unit + 0x10) >> 3) & 0x7Fu;
+    if (category < 13 || category > 16) return;
+
     bool isEffect = false;
     {
         RollbackHookProfileScope profile(RollbackHookProfileId::UnitRemoveEffectCheck);

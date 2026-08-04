@@ -391,14 +391,13 @@ static void __fastcall HookedMove(void* sMvc3Main)
             *(uint32_t*)(sReplay + 0x58) = g_restartRoundSeed;
         }
         if (sAction) {
-            using ExecuteMatchPhaseFn = void(__fastcall*)(uint64_t, int32_t);
-            ((ExecuteMatchPhaseFn)_addr(0x140004B80))(sAction, 2);
-        }
-        if (sReplay) {
-            // Training mode skips this native round-start call. F11 still needs
-            // it to reseed global, effect, and every character RNG domain.
-            using ReplayRoundStartFn = void(__fastcall*)(uint64_t);
-            ((ReplayRoundStartFn)_addr(REPLAY_ROUND_START_ADDR))(sReplay);
+            // Follow the native rematch path. Phase 12 retires the previous
+            // camera, stage, shot, effect, and sUnit entries before returning
+            // to phase 2; jumping straight to phase 2 leaves stale unit nodes.
+            using SetRestartModeFn = void(__fastcall*)(uint64_t, int32_t);
+            using SetNextStepFn = void(__fastcall*)(uint64_t, int32_t);
+            ((SetRestartModeFn)_addr(0x14000AF90))(sAction, 1);
+            ((SetNextStepFn)_addr(0x14000AE00))(sAction, 12);
         }
 
         Rollback_FreeSnapshots();

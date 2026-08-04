@@ -194,11 +194,10 @@ cChr+0x5CD0
 cChr+0x5C40 begins the third cHitPrimSphere bank, the bank processed by uCharacter__updatePushSpheresAndQueueCorrection. +0x5CD0 lies in an active sphere’s world-geometry payload. This is strong evidence that the affected primitive was the active airborne push sphere in that sequence, although “air pushbox” is an action/configuration role rather than a distinct C++ primitive type.
 One frame later, the phase-0 push callback generated different values at cChr+0x6340, after which root position diverged.
 
-The `20260804_040449` pair exposed an additional restore-order dependency. At
-frame 6501, the affected Chun-Li again split at `mCnsNeck.mState` and the world
-centers at `+0x4F20/+0x5CD0`, followed by push correction and root-position
-differences at frame 6507. The four collision-set selectors at
-`cChr+0x6360..+0x636F` matched in the captured host and client frames:
+The `20260804_040449` pair reproduced the same chain. At frame 6501, the
+affected Chun-Li split at `mCnsNeck.mState` and the world centers at
+`+0x4F20/+0x5CD0`, followed by push correction and root-position differences
+at frame 6507. The four collision-set selectors at `cChr+0x6360..+0x636F` are:
 
 - `+0x6360`: capsule-bank selector.
 - `+0x6364`: sphere-bank-0 selector.
@@ -206,11 +205,17 @@ differences at frame 6507. The four collision-set selectors at
 - `+0x636C`: sphere-bank-1 selector.
 
 The affected airborne character had selector `9` at `+0x6368`; ordinary
-grounded characters commonly had selector `1`. Native action/collision setup
-can rewrite these selectors during shot/model reconstruction and then restore
-the expected value during the following tick, so end-of-frame dumps alone do
-not expose the transient wrong selector. The selectors are now reapplied in
-the post-reconstruction character tail together with the helper state.
+grounded characters commonly had selector `1`. All four selectors matched
+between peers from frame 6497 through frame 6507. That rules out a persistent
+host/client selector difference in the captured frames, but not a transient
+live-versus-restored difference before the first resimulated collision update.
+The broad character restore already includes these fields; they are also
+reapplied after reconstruction so native setup cannot leave bank 2 on the live
+grounded/airborne set for part of the replayed tick. The first captured
+pushbox-specific mismatch remains `mCnsNeck.mState` at frame 6501. This dump was
+already divergent at its first common frame 6342, including different shot
+topology, so an earlier dependency outside the available history may also have
+driven that state transition.
 Rollback Requirements
 The helper cannot safely be restored with one raw memcpy because it contains:
 - A vtable.
