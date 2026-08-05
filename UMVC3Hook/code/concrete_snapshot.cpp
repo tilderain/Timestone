@@ -753,6 +753,11 @@ bool ConcreteShotSnapshot_Restore(void* shot,
     PreserveLivePointers(overlay.data(), live, liveSize);
     const uint64_t pointerScanEnd = Profile_Now();
 
+    // uBaseModel's material-cache pointer and count form one native-owned
+    // header. Preserve both from the fresh object so a null fresh allocation
+    // cannot be paired with the saved object's nonzero count during teardown.
+    PreserveRange(overlay.data(), live, liveSize, {0x110, 0x10});
+
     // uModel's joint count and allocation pointers describe the freshly-built
     // native model. A saved count with a null live index array makes rendering
     // call through a null pointer during joint-order traversal.
