@@ -77,6 +77,7 @@ static constexpr uint32_t SUNIT_CATEGORY_LIST_STRIDE = 0x30;
 static constexpr uint32_t SUNIT_CHARACTER_CATEGORY = 8;
 static constexpr uint32_t SUNIT_CHARACTER_POST_CATEGORY = 18;
 static constexpr uintptr_t DTI_UCHARACTER_POST = 0x140D44D60;
+static constexpr uintptr_t DTI_UCHRWEAPON = 0x140D44968;
 static constexpr uint32_t UCHARACTER_POST_SCALAR_STATE_OFFSET = 0x40;
 static constexpr size_t UCHARACTER_POST_SCALAR_STATE_SIZE = 0x10;
 static constexpr uint32_t UCHARACTER_POST_CHARACTER_CACHE_OFFSET = 0x50;
@@ -1366,6 +1367,86 @@ void Rollback_RestoreSnapshot(int32_t frame)
             // valid native ownership for its resource and character references.
             restoreActionSideCamera((uint64_t)slot.regions[i].ptr,
                                     slot.data + offset, copySize);
+        } else if (slot.regions[i].skipVtable &&
+                   copySize >= CCHR_MODEL_TAIL_END &&
+                   HasCallableDtiVirtual(slot.regions[i].ptr) &&
+                   GetObjectDti((uint64_t)slot.regions[i].ptr) ==
+                       (uint64_t)_addr(DTI_UCHRWEAPON)) {
+            uint8_t* weapon = (uint8_t*)slot.regions[i].ptr;
+            const uint8_t* savedWeapon = slot.data + offset;
+
+            // Weapon allocations and resources remain live, but their model,
+            // motion, attachment, and joint state must rewind with the owner.
+            // A live weapon transform at frame 1094 displaced Dante's first
+            // three sword capsules while their local geometry still matched.
+            struct LivePointerField { uint32_t offset; uint64_t value; };
+            LivePointerField livePointers[256];
+            size_t livePointerCount = 0;
+            uint64_t liveUnitState[
+                sizeof(CUNIT_LIVE_STATE_OFFSETS) /
+                sizeof(CUNIT_LIVE_STATE_OFFSETS[0])];
+            for (size_t field = 0; field < std::size(liveUnitState); ++field) {
+                liveUnitState[field] = *(uint64_t*)(
+                    weapon + CUNIT_LIVE_STATE_OFFSETS[field]);
+            }
+            for (size_t fieldOffset = sizeof(uint64_t);
+                 fieldOffset + sizeof(uint64_t) <= copySize &&
+                 livePointerCount < std::size(livePointers);
+                 fieldOffset += sizeof(uint64_t)) {
+                uint64_t liveValue = *(uint64_t*)(weapon + fieldOffset);
+                uint64_t savedValue = *(const uint64_t*)(savedWeapon + fieldOffset);
+                if (IsLikelyPointer(liveValue) || IsLikelyPointer(savedValue)) {
+                    livePointers[livePointerCount++] = {
+                        (uint32_t)fieldOffset, liveValue
+                    };
+                }
+            }
+
+            std::memcpy(weapon + sizeof(uint64_t),
+                        savedWeapon + sizeof(uint64_t),
+                        copySize - sizeof(uint64_t));
+            for (size_t pointer = 0; pointer < livePointerCount; ++pointer) {
+                *(uint64_t*)(weapon + livePointers[pointer].offset) =
+                    livePointers[pointer].value;
+            }
+            for (size_t field = 0; field < std::size(liveUnitState); ++field) {
+                uint32_t fieldOffset = CUNIT_LIVE_STATE_OFFSETS[field];
+                if (fieldOffset == CUNIT_FLAGS_OFFSET) continue;
+                *(uint64_t*)(weapon + fieldOffset) = liveUnitState[field];
+            }
+
+            static constexpr SnapshotRange weaponScalarRanges[] = {
+                // uCoord parent selector, position, rotation, scale, and matrices.
+                {0x48, 0xB8},
+                // uModel flags and motion evaluation state around joint pointers.
+                {0x510, 0x28}, {0x550, 0x10},
+                // uModel motion/envelope state before its live owner pointer.
+                {0x1160, 0x18}, {0x1180, 0x30},
+                // uChrWeapon flags, attachment selectors, and cached matrices.
+                {0x1548, 0x98},
+            };
+            for (const SnapshotRange& range : weaponScalarRanges) {
+                if ((size_t)range.offset + range.size <= copySize) {
+                    std::memcpy(weapon + range.offset,
+                                savedWeapon + range.offset,
+                                range.size);
+                }
+            }
+            for (int motion = 0; motion < CCHR_MOTION_COUNT; ++motion) {
+                size_t motionBase = CCHR_MOTION_BASE +
+                    motion * CCHR_MOTION_STRIDE;
+                static constexpr SnapshotRange motionRestoreRanges[] = {
+                    {0x08, 0x118}, {0x140, 0x20}, {0x168, 0x08},
+                };
+                for (const SnapshotRange& range : motionRestoreRanges) {
+                    size_t fieldOffset = motionBase + range.offset;
+                    if (fieldOffset + range.size <= copySize) {
+                        std::memcpy(weapon + fieldOffset,
+                                    savedWeapon + fieldOffset,
+                                    range.size);
+                    }
+                }
+            }
         } else if (slot.regions[i].skipVtable && copySize > sizeof(uint64_t)) {
             uint64_t liveUnitState[sizeof(CUNIT_LIVE_STATE_OFFSETS) / sizeof(CUNIT_LIVE_STATE_OFFSETS[0])];
             for (size_t field = 0;

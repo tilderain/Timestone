@@ -72,6 +72,8 @@ static constexpr size_t CCHR_BLENDED_JOINT_STRIDE = 0x40;
 static constexpr uint32_t CCHR_EXTERNAL_ANIM_OFFSETS[] = {0x4200, 0x4E10, 0x5520, 0x5C30};
 static constexpr size_t CCHR_EXTERNAL_ANIM_SIZE = 0xE0;
 static constexpr int CCHR_MOTION_COUNT = 8;
+static constexpr uint32_t CCHR_WEAPON_COUNT_OFFSET = 0x3F38;
+static constexpr uint32_t CCHR_WEAPON_ARRAY_OFFSET = 0x3F40;
 static constexpr uint32_t SUNIT_CATEGORY_COUNT_OFFSET = 0xC38;
 static constexpr uint32_t SUNIT_CATEGORY_LISTS_OFFSET = 0x50;
 static constexpr uint32_t SUNIT_CATEGORY_LIST_STRIDE = 0x30;
@@ -99,6 +101,7 @@ static constexpr uint32_t UACTION_CAMERA_REQUEST_RESOURCE_OFFSET = 0x3C0;
 static constexpr uint32_t UACTION_CAMERA_REQUEST_PARENT_OFFSET = 0x3D0;
 static constexpr uintptr_t DTI_UACTION_SIDE_CAMERA = 0x140D44268;
 static constexpr uintptr_t DTI_UCHARACTER_POST = 0x140D44D60;
+static constexpr uintptr_t DTI_UCHRWEAPON = 0x140D44968;
 
 using Region = RollbackRegion;
 using SnapshotSlot = RollbackSnapshotSlot;
@@ -1160,6 +1163,104 @@ static int BuildRegionsUncached(Region* regions, int maxRegions,
                                 , "uCharacter.externalAnimation"
 #endif
                             );
+                        }
+                    }
+
+                    // Character collision chains can use a uChrWeapon as their
+                    // parent model. Capture each weapon's motion and joint
+                    // outputs so rollback does not build sword hitboxes from
+                    // prediction-timeline weapon transforms.
+                    uint32_t weaponCount = read.operator()<uint32_t>(
+                        character + CCHR_WEAPON_COUNT_OFFSET);
+                    uint64_t weaponArray = read.operator()<uint64_t>(
+                        character + CCHR_WEAPON_ARRAY_OFFSET);
+                    if (weaponArray && weaponCount <= 256 &&
+                        IsAccessibleRange(weaponArray,
+                            (size_t)weaponCount * sizeof(uint64_t))) {
+                        for (uint32_t weaponIndex = 0;
+                             weaponIndex < weaponCount && r < maxRegions;
+                             ++weaponIndex) {
+                            uint64_t weapon = read.operator()<uint64_t>(
+                                weaponArray + (size_t)weaponIndex * sizeof(uint64_t));
+                            if (!weapon || !HasCallableDtiVirtual((void*)weapon) ||
+                                GetObjectDti(weapon) != (uint64_t)_addr(DTI_UCHRWEAPON)) {
+                                continue;
+                            }
+
+                            uint64_t weaponVtable = read.operator()<uint64_t>(weapon, true);
+                            uint32_t weaponSize = DecodeDtiSize(GetObjectDti(weapon));
+                            if (weaponSize < 0x1300 || weaponSize > CCHR_MAX_SIZE)
+                                continue;
+                            add((void*)weapon, weaponSize, 0, weaponVtable, true
+#if ROLLBACK_SNAPDUMP_ENABLED
+                                , "uChrWeapon"
+#endif
+                            );
+
+                            uint32_t weaponJoints = read.operator()<uint32_t>(
+                                weapon + CCHR_NUM_JOINTS_OFFSET);
+                            if (weaponJoints == 0 || weaponJoints > 256)
+                                continue;
+
+                            size_t weaponBlendSize =
+                                CCHR_BLEND_BYTES_PER_JOINT * weaponJoints;
+                            for (int motion = 0; motion < CCHR_MOTION_COUNT; ++motion) {
+                                uint64_t ownerSlot = weapon + CCHR_MOTION_BASE +
+                                    motion * CCHR_MOTION_STRIDE + CCHR_BLEND_PTR_OFFSET;
+                                uint64_t blend = read.operator()<uint64_t>(ownerSlot);
+                                if (blend) {
+                                    add((void*)blend, weaponBlendSize, ownerSlot, 0, false
+#if ROLLBACK_SNAPDUMP_ENABLED
+                                        , "uChrWeapon.motionBlend"
+#endif
+                                    );
+                                }
+                            }
+
+                            uint32_t channelCount = read.operator()<uint32_t>(
+                                weapon + CCHR_MOTION_CHANNEL_COUNT_OFFSET);
+                            uint32_t motionCount = read.operator()<uint32_t>(
+                                weapon + CCHR_MOTION_COUNT_OFFSET);
+                            if (channelCount <= 4096 && motionCount <= CCHR_MOTION_COUNT) {
+                                uint64_t ownerSlot =
+                                    weapon + CCHR_MOTION_CHANNELS_PTR_OFFSET;
+                                uint64_t channels = read.operator()<uint64_t>(ownerSlot);
+                                size_t channelBytes = CCHR_MOTION_CHANNEL_STRIDE *
+                                    channelCount * motionCount;
+                                if (channels && channelBytes > 0) {
+                                    add((void*)channels, channelBytes, ownerSlot, 0, false
+#if ROLLBACK_SNAPDUMP_ENABLED
+                                        , "uChrWeapon.motionChannels"
+#endif
+                                    );
+                                }
+                            }
+
+                            struct WeaponJointBuffer {
+                                uint32_t ownerOffset;
+                                size_t stride;
+                                const char* name;
+                            };
+                            static constexpr WeaponJointBuffer weaponJointBuffers[] = {
+                                {CCHR_JOINT_STATE_PTR_OFFSET, CCHR_JOINT_STATE_STRIDE,
+                                 "uChrWeapon.jointStates"},
+                                {CCHR_JOINT_INDEX_PTR_OFFSET, 1,
+                                 "uChrWeapon.jointIndices"},
+                                {CCHR_BLENDED_JOINT_PTR_OFFSET, CCHR_BLENDED_JOINT_STRIDE,
+                                 "uChrWeapon.blendedJoints"},
+                            };
+                            for (const WeaponJointBuffer& buffer : weaponJointBuffers) {
+                                uint64_t ownerSlot = weapon + buffer.ownerOffset;
+                                uint64_t data = read.operator()<uint64_t>(ownerSlot);
+                                if (data) {
+                                    add((void*)data, buffer.stride * weaponJoints,
+                                        ownerSlot, 0, false
+#if ROLLBACK_SNAPDUMP_ENABLED
+                                        , buffer.name
+#endif
+                                    );
+                                }
+                            }
                         }
                     }
 

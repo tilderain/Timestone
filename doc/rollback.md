@@ -1189,3 +1189,19 @@ the remote peer. A mismatch means the simulation has diverged.
 5. **Restore** — on late input arrival, restore snapshot and re-simulate
 6. **CRC check** — hash and compare with peer each frame
 7. **Optimize** — shrink snapshot size, use copy-on-write if needed
+### Weapon-owned collision transforms
+
+Character collision attachments may use a `uChrWeapon` from the owner's array
+at `cChr+0x3F40` as their parent model. The weapon evaluates its own motion and
+joint matrices in `uChrWeapon__move` before `uCharacter__processCollision`
+updates the attached capsule endpoints.
+
+The `20260804_232406` Dante dump first shows the relevant geometry split at
+frame 1094. Team 1 capsule entries 0-2 have different world endpoints at
+`cChr+0x4230`, `+0x42E0`, and `+0x4390`, while their local endpoint offsets
+still match. Snapshotting only weapon visibility/render fields therefore left
+the weapon skeleton on the prediction timeline. Rollback now captures each
+roster weapon's body, motion channels, blend buffers, joint states, joint
+indices, and blended joint matrices. Restore retains live resource/ownership
+pointers and intrusive links while rewinding coordinate, motion, attachment,
+and matrix payloads.
