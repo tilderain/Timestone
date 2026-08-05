@@ -293,6 +293,11 @@ static constexpr SnapshotRange CCHR_POST_RESTORE_TAIL_RANGES[] = {
     // main restore. Reapply it for deterministic character animation state.
     {0x3EA8, 0x04},
     {0x3CF0, 0x04}, {0x3E60, 0x04},
+    // Character collision point caches can be refreshed while shot/model
+    // recipes are reconstructed. A stale cache produced peer-only contact at
+    // frame 1496 in the 20260804_224703 Dante desync, after which hit state and
+    // action selection diverged. Reapply the pointer-free points late.
+    {0x4D10, 0x100},
     // UI/model repair can also rebuild packed action flags and the action
     // dispatch state used to schedule assist/tag entry. Keep these values on
     // the restored simulation timeline.
@@ -1797,6 +1802,35 @@ void Rollback_RestoreSnapshot(int32_t frame)
                     std::memcpy((uint8_t*)slot.regions[i].ptr + range.offset,
                                 slot.data + offset + range.offset,
                                 range.size);
+                }
+            }
+
+/////////////////CHECK IF THIS IS NECESSARY //////
+
+            // Recipe reconstruction can also refresh the world geometry in
+            // the inline capsule bank. Preserve parent pointers and restore
+            // only the same pointer-free fields used by the initial character
+            // restore, immediately before re-simulation begins.
+            uint8_t* character = (uint8_t*)slot.regions[i].ptr;
+            const uint8_t* savedCharacter = slot.data + offset;
+            constexpr uint32_t capsuleBase = 0x4210;
+            constexpr uint32_t capsuleStride = 0xB0;
+            for (uint32_t primitive = 0; primitive < 16; ++primitive) {
+                uint32_t entry = capsuleBase + primitive * capsuleStride;
+                static constexpr SnapshotRange fields[] = {
+                    {0x08, 0x01},
+                    {0x10, 0x04},
+                    {0x20, 0x24},
+                    {0x50, 0x04},
+                    {0x68, 0x0C},
+                    {0x80, 0x20},
+                };
+                for (const SnapshotRange& field : fields) {
+                    if ((size_t)entry + field.offset + field.size <= copySize) {
+                        std::memcpy(character + entry + field.offset,
+                                    savedCharacter + entry + field.offset,
+                                    field.size);
+                    }
                 }
             }
 

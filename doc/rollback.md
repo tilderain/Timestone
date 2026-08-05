@@ -1080,6 +1080,16 @@ per-character flags are already captured in uCharacter's `+0x14f0..+0x1514`.
 | **Estimated conservative** | **~0x8000 bytes (~32 KB) per character** |
 | **All 6 characters** | **~192 KB at 32 KB each** |
 
+The `20260804_224703` Dante pair exposed a late-restore ordering issue in these
+two collision ranges. Frames through 1495 retained stale capsule world/local
+geometry and position-cache values without changing the visible action. At
+frame 1496 only the active Dante acquired different hit/combat state; the
+action split observed at frame 1497 was propagation from that peer-only
+contact. Shot/model recipe reconstruction runs after the initial character
+copy, so rollback restore now reapplies the pointer-free capsule fields and
+`+0x4D10..+0x4E0F` position cache after reconstruction. This is shared `cChr`
+collision state, not Dante's `mChargeTime`/`mChargeLV` concrete tail.
+
 The actual uCharacter size varies per character (determined by DTI at
 runtime). Character-specific fields for complex characters (Dante with
 his weapon switching, Dormammu with his summoned objects) extend beyond
