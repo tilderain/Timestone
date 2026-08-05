@@ -87,6 +87,13 @@ request 6. Its caller schedules the returned unit in `sUnit` category `0x19`.
 Calling the lower-level `sSavedata` request at `0x14075B970` without this
 registration and callback does not load the live gameplay binding tables.
 
+The stock apply callback copies the saved profile and then calls
+`0x1402555B0`, which both resolves per-player binding pointers and immediately
+updates seven live audio gains. Direct training boot keeps the native storage
+unit but replaces this callback: it copies the profile with `0x14021B510` and
+resolves only the two binding pointers through `0x14024F2C0`, avoiding audio
+reinitialization after title music has started.
+
 ## Plugin Boundary
 
 The plugin reads live translated input but owns netplay history in
