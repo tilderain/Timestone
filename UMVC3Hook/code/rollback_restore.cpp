@@ -1375,46 +1375,10 @@ void Rollback_RestoreSnapshot(int32_t frame)
             uint8_t* weapon = (uint8_t*)slot.regions[i].ptr;
             const uint8_t* savedWeapon = slot.data + offset;
 
-            // Weapon allocations and resources remain live, but their model,
-            // motion, attachment, and joint state must rewind with the owner.
-            // A live weapon transform at frame 1094 displaced Dante's first
-            // three sword capsules while their local geometry still matched.
-            struct LivePointerField { uint32_t offset; uint64_t value; };
-            LivePointerField livePointers[256];
-            size_t livePointerCount = 0;
-            uint64_t liveUnitState[
-                sizeof(CUNIT_LIVE_STATE_OFFSETS) /
-                sizeof(CUNIT_LIVE_STATE_OFFSETS[0])];
-            for (size_t field = 0; field < std::size(liveUnitState); ++field) {
-                liveUnitState[field] = *(uint64_t*)(
-                    weapon + CUNIT_LIVE_STATE_OFFSETS[field]);
-            }
-            for (size_t fieldOffset = sizeof(uint64_t);
-                 fieldOffset + sizeof(uint64_t) <= copySize &&
-                 livePointerCount < std::size(livePointers);
-                 fieldOffset += sizeof(uint64_t)) {
-                uint64_t liveValue = *(uint64_t*)(weapon + fieldOffset);
-                uint64_t savedValue = *(const uint64_t*)(savedWeapon + fieldOffset);
-                if (IsLikelyPointer(liveValue) || IsLikelyPointer(savedValue)) {
-                    livePointers[livePointerCount++] = {
-                        (uint32_t)fieldOffset, liveValue
-                    };
-                }
-            }
-
-            std::memcpy(weapon + sizeof(uint64_t),
-                        savedWeapon + sizeof(uint64_t),
-                        copySize - sizeof(uint64_t));
-            for (size_t pointer = 0; pointer < livePointerCount; ++pointer) {
-                *(uint64_t*)(weapon + livePointers[pointer].offset) =
-                    livePointers[pointer].value;
-            }
-            for (size_t field = 0; field < std::size(liveUnitState); ++field) {
-                uint32_t fieldOffset = CUNIT_LIVE_STATE_OFFSETS[field];
-                if (fieldOffset == CUNIT_FLAGS_OFFSET) continue;
-                *(uint64_t*)(weapon + fieldOffset) = liveUnitState[field];
-            }
-
+            // Keep all cUnit lifecycle, ownership, resource, and other unknown
+            // body state live. Rewind only known pointer-free model fields;
+            // broad body restore can reactivate a weapon while a live sound
+            // emitter still refers to its prediction-timeline object state.
             static constexpr SnapshotRange weaponScalarRanges[] = {
                 // uCoord parent selector, position, rotation, scale, and matrices.
                 {0x48, 0xB8},

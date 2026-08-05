@@ -4,33 +4,15 @@ Servbot Launcher
 623X
 
 
-
-
 Trish Round Trip 214H
 
 
 Morrigan
 Soul Fist (heal)
 
-
-Amaratsu
-	Some launch attack is desyncing Act FE
-
-
-Ryu
-	Big hadoken aimed up/normal aim desync position
-
-Aerial assists will sometimes desync (character attacking is spawned in the wrong spot?)
-
-
 Rollback past step transition (fade to black) will make black screen forever
 
 For non modded characters and shots we need to hardcode dti size
 
-Advancing guard desyncs
-
-Assist turns invisible forever?
-
 Cancel trolling DOWN sound and text
-
-Throw camera is getting stuck
+Cancel KO trolling

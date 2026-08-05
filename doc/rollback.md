@@ -1202,6 +1202,7 @@ frame 1094. Team 1 capsule entries 0-2 have different world endpoints at
 still match. Snapshotting only weapon visibility/render fields therefore left
 the weapon skeleton on the prediction timeline. Rollback now captures each
 roster weapon's body, motion channels, blend buffers, joint states, joint
-indices, and blended joint matrices. Restore retains live resource/ownership
-pointers and intrusive links while rewinding coordinate, motion, attachment,
-and matrix payloads.
+indices, and blended joint matrices. The body is restored through explicit
+pointer-free ranges only: lifecycle, resource/ownership pointers, intrusive
+links, and unknown fields remain live while coordinate, motion, attachment,
+and matrix payloads rewind.
