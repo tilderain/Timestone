@@ -934,22 +934,8 @@ static void ApplyScheduledDelayIfReady()
 // Hooked functions
 // ===========================================================================
 
-// Netplay always uses the local user's P1 bindings. The client still controls
-// team P2, but passing player index 1 here selects P2's often-unconfigured
-// sGameConfig button table. Directions do not use that table, which is why
-// movement worked while attack buttons were missing.
-static uint32_t __fastcall hkbuttonRemap(uint64_t playerIndex, uint32_t input,
-                                          uint8_t alternateMap)
-{
-    RollbackHookProfileScope profile(RollbackHookProfileId::ButtonRemap);
-    if (Netplay_IsActive())
-        playerIndex = 0;
-
-    return obuttonRemap(playerIndex, input, alternateMap);
-}
-
 extern "C" bool Controller_RemapSyntheticInput(uint32_t rawInput,
-                                                uint32_t* outInput)
+                                                 uint32_t* outInput)
 {
     if (!obuttonRemap || !outInput)
         return false;
@@ -2083,16 +2069,7 @@ void Controller_InitHooks()
     else
         HookLog("Controller: Failed to hook stepFighting (%d)\n", s);
 
-    // cChrInput__processFrameInput — netplay client/host synchronization
-    s = MH_CreateHook(
-        (LPVOID)_addr(ADDR_BUTTON_REMAP),
-        (LPVOID)&hkbuttonRemap,
-        (LPVOID*)&obuttonRemap
-    );
-    if (s == MH_OK)
-        MH_EnableHook((LPVOID)_addr(ADDR_BUTTON_REMAP));
-    else
-        HookLog("Controller: Failed to hook buttonRemap (%d)\n", s);
+    obuttonRemap = (decltype(obuttonRemap))_addr(ADDR_BUTTON_REMAP);
 
     // cChrInput__processFrameInput — netplay client/host synchronization
     s = MH_CreateHook(

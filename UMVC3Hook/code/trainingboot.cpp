@@ -3,6 +3,7 @@
 #include "../pch.h"
 #include "trainingboot.h"
 #include "mk10utils.h"
+#include "netplay.h"
 #include "../MemoryMgr.h"
 #include "../utils/Trampoline.h"
 #include <Windows.h>
@@ -76,13 +77,22 @@ static constexpr uintptr_t SLOT_CPU_CONTROL_OFFSET             = 0x18;
 static constexpr uintptr_t SPAD_INSTANCE_PTR                 = 0x140E174B8;
 static constexpr uintptr_t SMVC3MANAGER_INSTANCE_PTR         = 0x140D510A0;
 
-// sMvc3Pad controller configuration manager.
-// Ghidra: the public load/request method starts the storage-thread request;
-// the worker itself must not be called from the title update thread.
-static constexpr uintptr_t SMVC3PAD_INSTANCE_PTR             = 0x140E1B3E0;
-static constexpr uintptr_t SMVC3PAD_REQUEST_LOAD              = 0x14075B970;
-static constexpr uintptr_t SMVC3PAD_BUSY_OFFSET               = 0x3c;
-static constexpr uintptr_t SMVC3PAD_RESULT_OFFSET             = 0x40;
+// sGameConfig owns the two gameplay button-binding tables consumed by
+// cChrInput__buttonRemap. Netplay's client controls team P2, but should use
+// that machine's P1 bindings before transmitting the remapped logical input.
+static constexpr uintptr_t SGAMECONFIG_GET_INSTANCE           = 0x140001AB0;
+static constexpr uintptr_t SGAMECONFIG_START_NATIVE_LOAD      = 0x140253620;
+static constexpr uintptr_t SGAMECONFIG_GET_BUTTON_MAPPING     = 0x1402522A0;
+static constexpr uintptr_t SGAMECONFIG_SET_BINDING_TABLE      = 0x140254A20;
+static constexpr uintptr_t SGAMECONFIG_SELECT_BINDING_TABLE   = 0x140254C40;
+static constexpr uintptr_t SGAMECONFIG_STORAGE_BUSY_OFFSET    = 0x4D350;
+static constexpr uint32_t GAMEPLAY_BINDING_COUNT              = 11;
+
+static constexpr uintptr_t SUNIT_GET_INSTANCE                 = 0x140003160;
+static constexpr uintptr_t SUNIT_ADD_UNIT                      = 0x14051A6B0;
+static constexpr uintptr_t MTOBJECT_SET_FLAG_2000              = 0x1402545A0;
+static constexpr uint32_t STORAGE_UNIT_CATEGORY                = 0x19;
+static constexpr uintptr_t STORAGE_RESULT_OFFSET               = 0x4C;
 
 // sPad__initSlotInner receives the embedded Map object, not the slot base.
 static constexpr uintptr_t PAD_SLOT_BASE_OFFSET               = 0x58;
@@ -106,7 +116,7 @@ static TrainingBootConfig g_bootConfig = {
 };
 static bool g_hasBooted = false;
 static bool g_hooksInitialized = false;
-static bool g_controllerConfigRequested = false;
+static uint64_t g_gameConfigLoadUnit = 0;
 static TrainingBootCpuMode g_cpuMode = TRAINING_CPU_NONE;
 
 // ---------------------------------------------------------------------------
@@ -236,39 +246,89 @@ static void ConfigureTrainingMatchDefaults(uint64_t bs)
 // sMvc3Main__method_3D00 (called from keyboard reader) also checks:
 //   if (pad+0xc20 != 0 || pad+0xc30 != 0) → return 0 (blocked)
 // ---------------------------------------------------------------------------
-static bool LoadPlayerOneControllerConfig()
+static bool LoadNativeGameConfig()
 {
-    uint64_t config = *(uint64_t*)_addr(SMVC3PAD_INSTANCE_PTR);
+    typedef uint64_t(__fastcall* GetInstance_t)();
+    typedef uint64_t(__fastcall* StartLoad_t)(uint64_t);
+    typedef void(__fastcall* SetFlag_t)(uint64_t, uint8_t);
+    typedef uint64_t(__fastcall* AddUnit_t)(uint64_t, uint32_t, uint64_t);
+
+    uint64_t config = ((GetInstance_t)_addr(SGAMECONFIG_GET_INSTANCE))();
     if (!config) {
-        HookLog("TrainingBoot: WARNING - sMvc3Pad instance is not available\n");
-        return true;
+        HookLog("TrainingBoot: WARNING - sGameConfig is not available for native load\n");
+        return false;
     }
 
-    typedef uint64_t(__fastcall* RequestLoad_t)(uint64_t);
-    RequestLoad_t requestLoad = (RequestLoad_t)_addr(SMVC3PAD_REQUEST_LOAD);
-
-    if (!g_controllerConfigRequested) {
-        uint64_t result = requestLoad(config);
-        if (result == 8) {
-            HookLog("TrainingBoot: sMvc3Pad config load is already busy\n");
-        } else {
-            HookLog("TrainingBoot: requested sMvc3Pad controller config load\n");
+    if (!g_gameConfigLoadUnit) {
+        g_gameConfigLoadUnit = ((StartLoad_t)_addr(SGAMECONFIG_START_NATIVE_LOAD))(config);
+        if (!g_gameConfigLoadUnit) {
+            HookLog("TrainingBoot: native sGameConfig load could not be started\n");
+            return false;
         }
-        g_controllerConfigRequested = true;
+
+        ((SetFlag_t)_addr(MTOBJECT_SET_FLAG_2000))(g_gameConfigLoadUnit, 1);
+        uint64_t sUnit = ((GetInstance_t)_addr(SUNIT_GET_INSTANCE))();
+        ((AddUnit_t)_addr(SUNIT_ADD_UNIT))(
+            sUnit, STORAGE_UNIT_CATEGORY, g_gameConfigLoadUnit);
+        HookLog("TrainingBoot: started native sGameConfig storage unit\n");
         return false;
     }
 
-    if (*(int32_t*)(config + SMVC3PAD_BUSY_OFFSET) != 0)
+    int32_t result = *(int32_t*)(g_gameConfigLoadUnit + STORAGE_RESULT_OFFSET);
+    if (result == 0 || result == 1)
         return false;
 
-    int32_t result = *(int32_t*)(config + SMVC3PAD_RESULT_OFFSET);
-    if (result != 0) {
-        HookLog("TrainingBoot: sMvc3Pad controller config load failed (result=%d)\n",
-                result);
-    } else {
-        HookLog("TrainingBoot: sMvc3Pad controller config loaded\n");
-    }
+    // uStoragePC result 2 is success; 5 and 9 are native load errors. The
+    // success path has already invoked the sGameConfig apply callback before
+    // publishing the result.
+    if (result == 2)
+        HookLog("TrainingBoot: native sGameConfig loaded and applied\n");
+    else
+        HookLog("TrainingBoot: native sGameConfig load failed (result=%d)\n", result);
+
+    // The regular menu's parent unit clears this after consuming its child.
+    // Training boot owns the child directly, so release the busy gate here.
+    *(uint8_t*)(config + SGAMECONFIG_STORAGE_BUSY_OFFSET) = 0;
+
+    typedef void(__fastcall* KillUnit_t)(uint64_t);
+    KillUnit_t killUnit = (KillUnit_t)*(uint64_t*)(*(uint64_t*)g_gameConfigLoadUnit + 0x78);
+    killUnit(g_gameConfigLoadUnit);
+    g_gameConfigLoadUnit = 0;
     return true;
+}
+
+static void ApplyPlayerOneBindingsToPlayerTwo()
+{
+    if (!Netplay_IsActive() || Netplay_IsHost())
+        return;
+
+    typedef uint64_t(__fastcall* GetInstance_t)();
+    typedef uint32_t(__fastcall* GetBinding_t)(uint64_t, uint32_t, uint32_t, uint8_t);
+    typedef void(__fastcall* SetBindings_t)(uint64_t, uint32_t, const uint32_t*, uint8_t);
+    typedef void(__fastcall* SelectBindings_t)(uint64_t, uint32_t, uint32_t, uint8_t);
+
+    uint64_t config = ((GetInstance_t)_addr(SGAMECONFIG_GET_INSTANCE))();
+    if (!config) {
+        HookLog("TrainingBoot: WARNING - sGameConfig unavailable for netplay bindings\n");
+        return;
+    }
+
+    GetBinding_t getBinding = (GetBinding_t)_addr(SGAMECONFIG_GET_BUTTON_MAPPING);
+    SetBindings_t setBindings = (SetBindings_t)_addr(SGAMECONFIG_SET_BINDING_TABLE);
+    SelectBindings_t selectBindings =
+        (SelectBindings_t)_addr(SGAMECONFIG_SELECT_BINDING_TABLE);
+
+    for (uint8_t alternateMap = 0; alternateMap < 2; ++alternateMap) {
+        uint32_t bindings[GAMEPLAY_BINDING_COUNT];
+        for (uint32_t button = 0; button < GAMEPLAY_BINDING_COUNT; ++button)
+            bindings[button] = getBinding(config, 0, button, alternateMap);
+
+        setBindings(config, 1, bindings, alternateMap);
+        // Selection 3 means the per-player custom table written above.
+        selectBindings(config, 1, 3, alternateMap);
+    }
+
+    HookLog("TrainingBoot: Applied client P1 button bindings to local P2 input\n");
 }
 
 static void SetupPadToPlayerMapping()
@@ -334,10 +394,12 @@ void BootIntoTraining()
         return;
     }
 
-    // savedata/controller loading is asynchronous. Keep the title update
-    // hook active until the native sMvc3Pad request has settled.
-    if (!LoadPlayerOneControllerConfig())
+    // Savedata loading is asynchronous. Keep the title move hook active until
+    // the native uStoragePC has loaded and applied the complete sGameConfig.
+    if (!LoadNativeGameConfig())
         return;
+
+    ApplyPlayerOneBindingsToPlayerTwo();
 
     g_hasBooted = true;
 

@@ -75,9 +75,17 @@ sMvc3Manager mapping + cChrInput processing
 ```
 
 The exact function that copies every persisted `sMvc3Pad` field into live
-`sPad` state is outside this note's verified scope. The safe distinction is
-persisted game-specific controller configuration versus live hardware state,
-not the older claim that `sMvc3Pad` has unrelated `0x58`-stride slots.
+`sPad` state is outside this note's verified scope. Gameplay button bindings
+are separate again: `cChrInput__buttonRemap` reads them from `sGameConfig` via
+`0x1402522A0`. The native option menu writes an 11-entry player table with
+`0x140254A20` and selects that custom table with `0x140254C40`.
+
+The title/menu save-data path starts a full `sGameConfig` load through
+`0x140253620`. That function creates a `uStoragePC`, registers the `0x2550`-byte
+blob at `sGameConfig+0x4AE00`, installs apply callback `0x140253370`, and sets
+request 6. Its caller schedules the returned unit in `sUnit` category `0x19`.
+Calling the lower-level `sSavedata` request at `0x14075B970` without this
+registration and callback does not load the live gameplay binding tables.
 
 ## Plugin Boundary
 

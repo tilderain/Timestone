@@ -163,6 +163,8 @@ connected player-2 device. `SetupPadToPlayerMapping` currently:
   unassigned.
 - Clears keyboard-block bytes at `sPad+0xC20` and `sPad+0xC30`.
 - Reinitializes the player-1 translation map through `0x1405142A0`.
+- On a netplay client, copies both resolved P1 gameplay binding tables to P2
+  through the native `sGameConfig` setters before P2 input is transmitted.
 
 Comments showing forced player-2 active flags are disabled code and must not be
 reported as current behavior.
