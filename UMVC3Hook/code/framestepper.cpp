@@ -69,7 +69,10 @@ static bool g_localRelease = false;
 static bool g_remoteRelease = false;
 static bool g_roundSeedReady = false;
 static uint32_t g_roundSeed = 0;
-static uint32_t g_battleGeneration = 1;
+// Generation 0 is the pre-battle setup epoch. The first mutually released
+// battle advances to generation 1, just as every restart advances before its
+// replacement timeline becomes active.
+static uint32_t g_battleGeneration = 0;
 static uint32_t g_advertisedBattleFlags = 0;
 static uint32_t g_battleAdvertiseTick = 0;
 static bool g_trainingRestartBarrier = false;
@@ -533,6 +536,13 @@ static void __fastcall HookedMove(void* sMvc3Main)
                 return;
             }
             AutoTest_ApplyMatchStartPositions();
+
+            // Unlike restart generations, the initial setup handshake runs in
+            // generation 0. Advance before clearing the queues so anything the
+            // service thread delivers from setup is rejected by the active
+            // timeline's generation check.
+            if (g_battleGeneration == 0)
+                g_battleGeneration = 1;
             Netplay_ClearInputQueues();
             Controller_ResetBuffers();
             Controller_ResetFrameEpoch();

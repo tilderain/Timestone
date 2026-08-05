@@ -348,3 +348,204 @@ Compare character fields, collision geometry, action IDs, positions, RNG state,
 shot topology, and final ground-truth checksums. Presentation-only differences
 may be acceptable during replay, but gameplay state and RNG consumption must
 remain identical.
+
+## Assist And Reserve Hot-Path Gate
+
+Further Ghidra analysis established the exact branch that decides whether a
+character executes the full `uCharacter__move_base` path.
+
+The previously named `uDrStrangeSh__stateCheck_6290` at `0x140056290` has been
+renamed in Ghidra to `cChr__isMoveActive`. It returns true only when all three
+conditions hold:
+
+```text
+MtObject alive-state                         != 0
+(cUnit + 0x10) lifecycle state               == 2
+(cUnit + 0x10) callback/move-enable bit 0x400 != 0
+(cChr + 0x14F0) mChrF bit 0                  == 0
+```
+
+Its native implementation is effectively:
+
+```c
+bool cChr__isMoveActive(cChr* chr)
+{
+    return MtObject__isAliveState(chr) &&
+           ((chr->cUnitFlags & 7) == 2) &&
+           ((chr->cUnitFlags & 0x400) != 0) &&
+           ((chr->mChrF & 1) == 0);
+}
+```
+
+This predicate does not mean "is the point character." A reserve can remain a
+live category-8 unit with movement enabled while still being benched. The game
+uses additional character and team flags to select the cheap reserve path.
+
+At `0x14004BDE5`, `uCharacter__move_base` applies this decision:
+
+```text
+if cChr__isMoveActive(character):
+    enter full path
+else:
+    clear stale team-change state
+    busy = cChr__checkBusyState_6380(character)
+    transitionEligible = cChr__canPerformTeamChange(character)
+
+    if !transitionEligible || busy:
+        initialize input buffer
+        exit through finalization
+
+    enter full path
+```
+
+The exact full-path condition is therefore:
+
+```text
+cChr__isMoveActive(character) ||
+(!cChr__checkBusyState_6380(character) &&
+ cChr__canPerformTeamChange(character))
+```
+
+This corrects the earlier interpretation that `cChr__isMoveActive` alone was
+the active/reserve gate.
+
+### Reserve transition exception
+
+`cChr__canPerformTeamChange` at `0x140038AF0` is the mechanism that can
+intentionally send a non-active reserve into the expensive path. It first
+requires:
+
+- Team cached active animation flags `cChrTeam::mCAnmF` bit `0x2000` set.
+- The character's `cChr + 0x14F0` byte bit 7 clear.
+
+It then chooses a reserve by current DHC state:
+
+```text
+if team.mDHCCount == 0:
+    member 1 is eligible if team.mAliveMember bit 1 is set
+else if team.mDHCCount == 1 and the team transition count is at least 3:
+    member 2 is eligible
+```
+
+The character's current member ID is read from `cChr + 0x2DB0`. Ghidra's old
+generic getter at `0x140004800` has been renamed to `cChr__getMemberId`.
+
+This is not necessarily erroneous native behavior. The reserve is allowed to
+run full input, action, animation, and collision processing so it can enter a
+tag, DHC, or related team transition. The anomalous case is when this exception
+remains true for characters that are no longer pending entry.
+
+### State feeding the exception
+
+The hot-path exception depends on state from several owners:
+
+| Owner | Field | Role |
+|---|---:|---|
+| `cChr` | `+0x10` | cUnit lifecycle and movement-enable state |
+| `cChr` | `+0x14F0` | `mChrF`; bit 0 suppresses `cChr__isMoveActive`, byte bit 7 affects transition eligibility |
+| `cChr` | `+0x2DB0` | Current member ID, compared with 1 or 2 |
+| `cChrTeam` | `+0x48` | `mpCurrentChr` active-character pointer |
+| `cChrTeam` | `+0x60` | `mAliveMember` bitmask |
+| `cChrTeam` | `+0xBC` | `mDHCCount` |
+| `cChrTeam` | `+0xF8` | Cached active-character `mCAnmF`; bit `0x2000` opens the reserve exception |
+| `cChrTeam` | `+0xA0/+0xA4` | Pending current/next member IDs |
+| `sCharacter` | `+0x5C0..+0x5FF` | Two 0x20-byte delayed change-order records |
+
+`cChrTeam__updateAggregateState` at `0x140022870` recomputes team aggregates
+after character callbacks. In particular, it copies the active character's
+`mAnmF` into `team.mCAnmF`, rebuilds `mAliveMember`, and computes
+`mChangeEnable`, `mChangeEnable2`, and `mAssist`. This means the team fields used
+by the next character tick are derived late in the previous frame.
+
+### Swap and assist transition pipeline
+
+Tag and assist progression is distributed across several stages:
+
+1. `sCharacterChangeOrder__requestOrApplySwap` at `0x14001F690` either applies
+   an immediate transition or fills one 0x20-byte delayed change-order record.
+2. `sCharacterChangeOrder__advance` at `0x14001F860` advances its two timers,
+   checks assist-entry delays and action/game flags, and eventually publishes a
+   pending swap.
+3. `cChrTeam__setPendingCharacterSwap` stores swap mode and current/next member
+   IDs at team `+0x9C/+0xA0/+0xA4`.
+4. `cChrTeam__commitPendingCharacterSwap` at `0x140021510` swaps member IDs,
+   updates `mpCurrentChr`, clears the pending IDs, and resets character message
+   records.
+5. `cChrTeam__updateAggregateState` later rebuilds the cached team state used by
+   the next tick.
+
+The delayed change-order records are legitimately long-lived during assist
+entry. Mode 5 specifically consults assist-entry and assist-unlock delays and
+can keep a reserve transition pending while action flags permit it.
+
+### Likely rollback failure modes
+
+Current source restores all of the obvious scalar inputs:
+
+- Character `+0x14F0..+0x1517` is in `CCHR_SCALAR_RESTORE_RANGES`.
+- Character identity state `+0x2D9C..+0x2DBF` includes member ID.
+- Team `+0x50..+0x10F` includes `mAliveMember`, pending swap IDs,
+  `mDHCCount`, and `mCAnmF`.
+- `sCharacter +0x5C0..+0x5FF` captures both change-order records.
+- Character cUnit `+0x10` follows the saved frame, while intrusive links remain
+  live.
+
+Therefore the current evidence does not identify a simple missing snapshot
+range. More plausible causes are:
+
+1. **Legitimate historical state.** The restored frame is inside assist, tag,
+   DHC, or opening initialization, so reserves are supposed to run fully.
+2. **Mixed-frame team cache.** `team.mCAnmF`, `mAliveMember`, or pending IDs are
+   restored correctly initially but are recomputed from character state that
+   has already diverged or is processed in a different order during replay.
+3. **Change-order replay.** A restored delayed record advances again because its
+   timer, mode, or publication boundary is inconsistent with the restored team
+   pending IDs.
+4. **Member-ID/active-pointer disagreement.** `cChrTeam::mpCurrentChr`, character
+   `mMemberId`, and pending IDs describe different transition phases. The
+   restore validates the active pointer against the live roster but does not
+   otherwise normalize these fields, which is correct unless the saved tuple is
+   already internally inconsistent.
+5. **Busy-check disagreement.** `cChr__checkBusyState_6380` also reads team
+   ability aggregates, `mChrF`, and character status state. A false busy result
+   combined with stale transition eligibility opens the hot path.
+6. **Opening phase behavior.** `sAction__stepFightingCore` intentionally resets
+   all fighters, chooses initial active members, advances both change-order
+   records, commits pending swaps, and applies status to every roster member.
+   The early slow windows may therefore be correct initialization behavior, not
+   erroneous assist activation.
+
+### Diagnostic needed to prove the cause
+
+Profile each category-8 character immediately before the gate with:
+
+```text
+frame, team, character pointer
+member ID at +0x2DB0
+is team.mpCurrentChr
+cUnit flags at +0x10
+mChrF at +0x14F0
+isMoveActive result
+busy-check result
+canPerformTeamChange result
+team.mAliveMember at +0x60
+team.mDHCCount at +0xBC
+team.mCAnmF at +0xF8
+team pending mode/IDs at +0x9C/+0xA0/+0xA4
+change-order mode/timers/IDs at sCharacter+0x5C0 and +0x5E0
+```
+
+Record the same tuple on the original timeline and on resimulation. The first
+field that differs identifies the responsible boundary:
+
+- Different at restore completion: restore inconsistency.
+- Same after restore but different before the first character tick: ordering or
+  pre-character manager work.
+- Same at gate with all six eligible on both paths: legitimate native state.
+- Same active predicate but different busy/transition result: ability/status or
+  team-cache divergence.
+
+Do not optimize by checking only `character != team.mpCurrentChr`. Assists and
+incoming tag/DHC characters must run the full path before they become the active
+pointer. Any fast path needs to prove that no change-order record, pending swap,
+assist flag, tag action, or transition eligibility references that reserve.
