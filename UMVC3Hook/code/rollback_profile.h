@@ -5,7 +5,7 @@
 
 // Override to 0 at compile time for a profiling-free build.
 #ifndef UMVC3_ROLLBACK_PROFILING
-#define UMVC3_ROLLBACK_PROFILING 1
+#define UMVC3_ROLLBACK_PROFILING 0
 #endif
 inline constexpr bool ROLLBACK_PROFILING_ENABLED = UMVC3_ROLLBACK_PROFILING != 0;
 inline constexpr size_t ROLLBACK_UNIT_CATEGORY_COUNT = 64;
