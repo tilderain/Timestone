@@ -717,6 +717,14 @@ void FrameStepper_SetDevice(LPDIRECT3DDEVICE9 device)
         g_hWnd = cp.hFocusWindow;
 }
 
+void FrameStepper_InvalidateDeviceObjects()
+{
+    if (g_pPauseTexture) {
+        g_pPauseTexture->Release();
+        g_pPauseTexture = nullptr;
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Capture the current back buffer into a GPU texture so it can be drawn as a
 // static background during pause (avoids flicker from D3D9 buffer swaps).

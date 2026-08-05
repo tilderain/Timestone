@@ -196,8 +196,38 @@ static int ParseAutoTestPort(const char* cmdLine)
 extern LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
 EndScene oEndScene = NULL;
+using ResetDevice = HRESULT(__stdcall*)(LPDIRECT3DDEVICE9, D3DPRESENT_PARAMETERS*);
+static ResetDevice oResetDevice = nullptr;
 WNDPROC oWndProc;
 static HWND window = NULL;
+
+using AppD3DResultHandler = void(__fastcall*)(void*, int32_t, const char*, uintptr_t);
+static AppD3DResultHandler g_originalAppD3DResultHandler = nullptr;
+
+static void __fastcall HookAppD3DResultHandler(
+	void* app, int32_t result, const char* operation, uintptr_t context)
+{
+	if (result != 0) {
+		HookLog("D3D9: failure HRESULT=0x%08X operation=%s caller=%p thread=%lu context=%p\n",
+			(uint32_t)result, operation ? operation : "<null>",
+			__builtin_return_address(0), GetCurrentThreadId(), (void*)context);
+	}
+	g_originalAppD3DResultHandler(app, result, operation, context);
+}
+
+static void InstallAppD3DResultLogging()
+{
+	void* target = (void*)_addr(0x1405371F0);
+	MH_STATUS status = MH_CreateHook(
+		target, (LPVOID)&HookAppD3DResultHandler,
+		(LPVOID*)&g_originalAppD3DResultHandler);
+	if (status == MH_OK)
+		status = MH_EnableHook(target);
+	if (status == MH_OK || status == MH_ERROR_ENABLED)
+		HookLog("D3D9: installed fatal HRESULT context logging\n");
+	else
+		HookLog("D3D9: failed to install fatal HRESULT context logging (%d)\n", status);
+}
 
 // Direct-polling input injector that feeds ImGui's backend directly,
 // bypassing the Windows message queue entirely.
@@ -366,6 +396,25 @@ LRESULT __stdcall WndProc(const HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPar
 }
 bool init = false;
 bool first_msg = true;
+
+static HRESULT __stdcall hkResetDevice(
+	LPDIRECT3DDEVICE9 pDevice, D3DPRESENT_PARAMETERS* presentationParameters)
+{
+	if (init && ImGui::GetCurrentContext()) {
+		FrameStepper_InvalidateDeviceObjects();
+		ImGui_ImplDX9_InvalidateDeviceObjects();
+	}
+
+	HRESULT result = oResetDevice(pDevice, presentationParameters);
+	HookLog("D3D9: Reset returned 0x%08X\n", (uint32_t)result);
+
+	if (SUCCEEDED(result) && init && ImGui::GetCurrentContext()) {
+		FrameStepper_SetDevice(pDevice);
+		ImGui_ImplDX9_CreateDeviceObjects();
+	}
+	return result;
+}
+
 long __stdcall hkEndScene(LPDIRECT3DDEVICE9 pDevice)
 {
 	//Exception_UpdateTestHotkey();
@@ -696,6 +745,7 @@ DWORD WINAPI MainThread(LPVOID lpReserved)
 				InterlockedCompareExchange(&g_launchSetupComplete, 0, 0) != 0 &&
 				kiero::initFromD3D9Device(device) == kiero::Status::Success)
 			{
+				kiero::bind(16, (void**)&oResetDevice, (void*)hkResetDevice);
 				kiero::bind(42, (void**)& oEndScene, (void*)hkEndScene);
 				BootTimer_Stamp("Hooked engine D3D9 device");
 				attached = true;
@@ -863,6 +913,7 @@ void OnInitializeHook()
 	// Hook aTitleLogo__update to skip logo movies (epilepsy/Capcom/Marvel) in training mode
 	MH_STATUS mhStatus = MH_Initialize();
 	if (mhStatus == MH_OK || mhStatus == MH_ERROR_ALREADY_INITIALIZED) {
+		InstallAppD3DResultLogging();
 		if (MH_CreateHook(
 			(LPVOID)_addr(0x140217700),
 			(LPVOID)Hook_titleLogoUpdate,
@@ -874,7 +925,10 @@ void OnInitializeHook()
 			HookLog("UMVC3Hook: FAILED to hook aTitleLogo__update\n");
 		}
 	}
-	InstallD3D9Hooks();
+	// Device creation serialization only protects the two processes spawned for
+	// local dual training. Leave normal host/client D3D9 initialization untouched.
+	if (opt == LAUNCH_DUAL_TRAINING || g_autoConnectPort != 0)
+		InstallD3D9Hooks();
 
 	// ---- Netplay pause patches ----
 	// Force uBattleUiCreatePauseMenu_maybe (0x1402ba150) to always create the

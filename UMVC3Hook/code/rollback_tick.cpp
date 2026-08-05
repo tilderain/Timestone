@@ -694,7 +694,7 @@ void Rollback_HeadlessTick(uint64_t sMain)
     VTableCall(ManagerSubsystem(FN_GET_CHARACTER), 0x30); // sCharacter::move.
     //VTableCall(ManagerSubsystem(FN_GET_STAGE), 0x30); // sStage::move.
     VTableCall(ManagerSubsystem(FN_GET_SHOT), 0x30); // sShot::move.
-    //VTableCall(ManagerSubsystem(FN_GET_GAME_EFFECT), 0x30); // sGameEffect::move.
+    //VTableCall(ManagerSubsystem(FN_GET_GAME_EFFECT), 0x30); // sGameEffect::move. sGameEffect__tickAndPruneDead at 0x140130EA0??
     ((ObjectFn)_addr(FN_RESET_HIT_NODES))(ManagerSubsystem(FN_GET_HIT_SOLVER)); // Clear active hit-solver nodes.
     //VTableCall(ManagerSubsystem(FN_GET_REPLAY), 0x30); // sReplay::move.
     //VTableCall(ManagerSubsystem(FN_GET_GSOUND), 0x30); // sGSound::move.

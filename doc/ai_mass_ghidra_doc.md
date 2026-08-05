@@ -371,9 +371,68 @@ For example, if analysis establishes that the first parameter is `cChrInput *`,
 use that type instead of leaving `undefined8` or inventing a duplicate
 structure.
 
+**Mandatory parameter typing.** When the function's field accesses are clearly
+supported by an established class structure, the worker must change the first
+parameter to that class's pointer type as part of the same edit, even if the
+semantic rename itself is uncertain. "Clearly supported" means the function
+reads or writes class-relative fields that are already named in the structure,
+or the ownership sources above identify the class and the first parameter is
+used as its `this` pointer. Examples of the required outcome:
+
+```text
+void sMvc3Main__setPendingGraphicsOption(sMvc3Main *this, uint index, uint value)
+void cActionTime__startHitSlow(cActionTime *this, ...)
+MtGeomCapsule__getSupportPoint(MtGeomCapsule *this, ...)
+```
+
+A class-qualified name without a class-typed first parameter is incomplete:
+both changes belong together. If the exact field meaning is unknown but the
+class is established, still type the first parameter as `<Class> *` and record
+the unresolved fields. Only leave `undefined8`/`longlong` as the first
+parameter when no owning class can be established after the bounded context
+pass.
+
+Ownership recovery is a prerequisite for a useful semantic rename. A worker
+must not stop at an observed field offset, primitive type, or table access when
+the callers, vtable, constructor, DTI metadata, or sibling methods can identify
+the owning class. If the first parameter is an object pointer, inspect its direct
+callers and callees, constructor or factory paths, vtable references, and the
+existing class reference before choosing a neutral subsystem name. A function
+called with a known singleton or class instance should be named in that class's
+namespace whenever the evidence supports it.
+
+If ownership cannot be established after the bounded context pass, retain the
+raw `FUN_<address>` name and add an evidence-based comment. Do not manufacture a
+generic utility name merely to remove the `FUN_` prefix.
+
 ### 8.4 Behavioral Naming
 
-Names must describe established behavior, not merely restate implementation.
+Names must describe established behavior and its owning class, not merely
+restate an implementation detail. The worker must make a deliberate attempt to
+recover the real class method or subsystem function name before applying any
+rename. At minimum, inspect the function's direct callers, direct callees,
+vtable or constructor relationships, relevant strings or data, and the owning
+class reference when one exists. For a small helper, inspect every meaningful
+caller before deciding that its behavior is truly generic.
+
+The following are not semantic names and must not be applied:
+
+```text
+lookup_table_dword_140003180
+get_dword_at_0x4028c_140003180
+process_data_140003180
+function_140003180
+helper_140003180
+```
+
+These names only expose a primitive access, offset, or placeholder. If the
+function is a method of `sMain`, `uUiAnmSprite`, or another established owner,
+the name must use that class and the operation recovered from its callers, for
+example `sMain__getInputHistoryValue` or `uUiAnmSprite__saveInputState`, only
+when the surrounding evidence actually supports that meaning. If the owner is
+known but the exact operation is not, use an ownership-preserving placeholder
+such as `sMain__method_140003180` and a comment describing the observed behavior;
+do not promote a guessed table role to a semantic name.
 
 Preferred examples:
 
@@ -401,9 +460,13 @@ sGSound__playIronManVictoryQuote
 cChr__calculatePerfectHitboxCollision
 ```
 
-An address suffix is required when the semantic portion is intentionally broad
-or uncertain. It prevents collisions and communicates that the name is a
-classification rather than a recovered original symbol.
+An address suffix is acceptable only after the owner and a useful behavioral
+category have been established. It is not a substitute for ownership recovery.
+The category in an address-suffixed name must be supported by more than one
+implementation detail. `lookupTableEntry` is acceptable only when callers and
+data establish that the function selects an entry from a lookup table; a single
+DWORD load at a fixed offset is not sufficient. A primitive operation with no
+recoverable owner should remain `FUN_<address>` with a useful comment.
 
 ### 8.5 Signature Recovery
 
@@ -417,9 +480,14 @@ Check:
 - Whether the first parameter is a class instance.
 - Whether an apparent parameter is actually unused compiler residue.
 - Calling convention and hidden return-object parameters.
+- Whether the first parameter must be retyped to an established class pointer
+  per section 8.3. If the function's field accesses match named class fields,
+  the first parameter must be changed to `<Class> *` even when the semantic name
+  stays broad or address-suffixed.
 
 Do not force exact enum, const, reference, or ownership semantics without
-evidence. A correct `uint32_t` is better than an invented named enum.
+evidence. A correct `uint32_t` is better than an invented named enum. A correct
+`<Class> *` first parameter is never optional when the class is established.
 
 ### 8.6 Structure Application
 
@@ -766,9 +834,23 @@ be written into the canonical database.
 
 ### 9.3 Minimum Naming Standard
 
-A precise semantic rename requires `high` or `certain` confidence. `medium`
-confidence permits a conservative behavioral name. `low` confidence permits
-only an ownership/category placeholder or comment.
+A precise semantic rename requires `high` or `certain` confidence and a
+class-qualified or otherwise evidence-supported owner. `medium` confidence
+permits only a conservative owner-qualified behavioral name, usually with an
+address suffix. `low` confidence permits an ownership/category placeholder or
+comment, but not a guessed operation. `unknown` confidence must retain the raw
+name unless an existing meaningful owner-only name is already present.
+
+The following are mandatory rejection cases, regardless of confidence claims:
+
+- The name only describes a primitive load/store, field offset, register, or
+  inferred table representation.
+- The name uses `lookup`, `process`, `data`, `value`, `helper`, or `function`
+  without an established object and operation.
+- The name omits an owner that is recoverable from callers, vtables,
+  constructors, DTI metadata, or class references.
+- The name is based only on one decompiler-generated variable or one call site
+  when additional direct context is available.
 
 Existing meaningful names must not be replaced by lower-confidence names.
 
@@ -776,6 +858,13 @@ Existing meaningful names must not be replaced by lower-confidence names.
 
 Every assigned function must produce one result record, including functions
 that required no change:
+
+For any proposed rename, the result must separately record `owner_evidence` and
+`behavior_evidence`. These fields must cite the concrete callers, callees,
+vtable or constructor relationship, DTI/class reference, strings, or repeated
+data access that justify the class-qualified name. A statement such as "loads a
+DWORD from offset 0x4028c" is implementation evidence, not owner or behavioral
+evidence for a function name.
 
 ```json
 {
@@ -789,6 +878,13 @@ that required no change:
   "confidence": "medium",
   "classification": "state_update",
   "owner": "sGSound",
+  "owner_evidence": [
+    "three callers pass the sGSound singleton as rcx",
+    "the function is reached from the sGSound voice-management path"
+  ],
+  "behavior_evidence": [
+    "reads the active voice entry, validates its owner, and advances or retires it"
+  ],
   "summary": "Validates a voice table entry and advances or retires its state.",
   "evidence": [
     "all inspected callers pass the sGSound singleton as rcx",
@@ -857,15 +953,23 @@ For each assigned root:
 1. Identify the owning class and read `doc/ghidra_classes/<Class>.md` when it
    exists.
 2. Retrieve current details, variables, and decompilation.
-3. Inspect direct callers, callees, strings, structures, sibling methods, and
-   disassembly only as needed.
-4. Determine owner and behavior conservatively.
+3. Inspect direct callers, callees, strings, structures, sibling methods, vtable
+   references, constructors or factories, and disassembly as needed to recover
+   the owner and real operation. For object-pointer parameters, this context
+   pass is mandatory before naming.
+4. Determine owner and behavior conservatively. Do not name from a single field
+   offset, primitive load/store, or one decompiler-generated variable name.
 5. Identify unnamed class fields encountered in the decompilation and record
    evidence-supported field findings in the class reference.
-6. Apply a high-confidence semantic name or a medium-confidence broad name with
-   an address suffix.
+6. Apply a high-confidence class-qualified semantic name when the real operation
+   is established. A medium-confidence address-suffixed name is allowed only
+   when it still contains an evidence-supported owner and behavioral category.
+   Reject generic names such as `lookup_table_*`, `get_dword_at_*`,
+   `process_data_*`, or `helper_*`.
 7. Set a supported signature and apply existing structs to unknown parameters
-   when justified.
+   when justified. When field accesses clearly match an established class, retype
+   the first parameter to `<Class> *` (see section 8.3) and do not leave it as
+   `undefined8`/`longlong`.
 8. Add a concise comment for broad, ambiguous, or non-obvious behavior.
 9. Do not rename functions outside the assigned root list.
 10. Do not create or redesign shared structures; report structure dependencies.
@@ -925,13 +1029,18 @@ No broad renaming occurs during Pass 0.
 
 Workers process all candidates with bounded effort:
 
+- Recover the owning class or subsystem before attempting a semantic rename.
 - Resolve obvious wrappers, getters, setters, table lookups, lifecycle helpers,
   and class-owned operations.
 - Improve parameter types using existing structures.
-- Apply conservative names when broad behavior is clear.
+- Apply class-qualified names when the real operation is supported by callers,
+  callees, vtables, constructors, DTI metadata, or class references.
+- Preserve `FUN_<address>` with a comment when only an offset, primitive access,
+  or guessed table role is known.
 - Defer expensive dependencies.
 
-Pass 1 optimizes for coverage without guessing.
+Pass 1 optimizes for owner-qualified semantic coverage without guessing. Removing
+the `FUN_` prefix is not a completion metric by itself.
 
 ### 13.3 Pass 2: Dependency Resolution
 
@@ -1074,10 +1183,38 @@ math__normalizeQuat_140123450
 resource__validateHeader_140123450
 ```
 
-Use a neutral subsystem prefix only when the subsystem is supported by callers
-or data. Otherwise retain `FUN_<address>` and add a comment.
+Use a neutral subsystem prefix only when the subsystem is supported by multiple
+callers, data, or an established type. Never use a neutral prefix to conceal a
+missed class-owner analysis. Otherwise retain `FUN_<address>` and add a comment.
 
-### 15.2 Local Functions
+### 15.2 Name Quality Gate
+
+Before applying a rename, the worker must answer all of these questions in its
+result record:
+
+1. What class, namespace, or subsystem owns the function, and what evidence
+   establishes that ownership?
+2. What does the function do for its callers, rather than what instruction or
+   field access happens to be visible in the body?
+3. Which independent evidence sources support the proposed verb and object?
+4. Why is the proposed name more informative than the existing generated name?
+
+Reject the rename and preserve `FUN_<address>` when the proposed name would be
+unchanged in meaning by replacing the operation with `lookup`, `process`,
+`data`, `value`, `helper`, `function`, or an offset or type description. A raw
+placeholder plus a precise comment is better than a misleading semantic name.
+
+For class-owned functions, the minimum acceptable fallback is:
+
+```text
+<EstablishedClass>__method_<address>
+```
+
+with a comment containing the confirmed behavior and unresolved question. This
+fallback is allowed only after the worker has inspected ownership evidence; it
+must not be used as a shortcut before caller, callee, and class analysis.
+
+### 15.3 Local Functions
 
 An existing `Class__local_<address>` name is useful and should not be replaced
 with another vague placeholder. Improve it only when behavior is understood:
@@ -1316,17 +1453,23 @@ for each assigned root function:
         continue
 
     classify trivial behavior if possible
-    inspect direct callers/callees as needed
+    inspect direct callers/callees, vtables, constructors, and class references
+    before choosing an owner or semantic name
     inspect disassembly when decompilation is questionable
     identify owner and apply an existing struct when justified
+    if field accesses match an established class, retype the first parameter
+    to <Class> * even when the semantic name stays broad
     record evidence-supported unnamed fields in the class reference
 
-    if precise behavior is high confidence:
-        apply semantic name and supported signature
-    elif broad behavior is medium confidence:
-        apply conservative address-suffixed name
+    if owner and precise behavior are high confidence:
+        apply class-qualified semantic name and supported signature
+    elif owner and a useful broad category are medium confidence:
+        apply conservative owner-qualified address-suffixed name
     else:
-        preserve placeholder and document known facts
+        preserve FUN_<address> and document known facts
+
+    reject names based only on offsets, primitive types, table guesses,
+    or generic words such as lookup/process/data/value/helper/function
 
     verify function did not change concurrently
     record outcome, evidence, dependencies, and applied changes
