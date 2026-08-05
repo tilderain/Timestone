@@ -317,7 +317,7 @@ static int32_t   g_lastAdvertisedChecksumFrame = -1;
 
 static constexpr uint32_t DESYNC_THRESHOLD         = 0;
 static constexpr int32_t  DESYNC_SKIP_FRAMES       = 0;
-static constexpr int32_t  DESYNC_CONSECUTIVE_MIN   = 1;
+static constexpr int32_t  DESYNC_CONSECUTIVE_MIN   = 2;
 
 static void ResetDesyncDetection()
 {
