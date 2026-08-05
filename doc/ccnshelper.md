@@ -235,7 +235,8 @@ The scalar and inline state that must rewind includes:
 - Direction vectors.
 - Speed, weight, and character-state selectors.
 - Easing state.
-The current restore policy therefore uses narrow scalar ranges while preserving ownership and callback fields.
+The current restore policy therefore uses explicit pointer-free ranges and
+validated pointer remapping while preserving callback and vtable fields.
 The Restore Bug
 Before the fix, these ranges restored only helper +0x120:
 {0x3D10, 0x04} // mCnsHelper+0x120
@@ -244,7 +245,34 @@ That restored mSelfState but omitted the immediately adjacent mState at +0x124.
 They now restore both:
 {0x3D10, 0x08}
 {0x3E80, 0x08}
-The same ranges are reapplied after reconstruction because model/effect repair can evaluate constraints and overwrite their mutable state.
+The `20260805_004907` pair showed that restoring only these interpolation
+ranges was insufficient. Team 1 matched through frame 346, then split at frame
+347 in `mCnsNeck.mState` (`cChr+0x3E84`, host 2/client 1) and both active sphere
+centers (`+0x4F20/+0x5CD0`). The differing sphere geometry produced different
+push correction at `+0x6340` on frame 348. Collision-bank selectors remained
+identical.
+
+`cCnsHelper__updateLockAngle` chooses state 1/2 from more than `mState`: it also
+uses target/joint selectors, two inline `cLimitParam` records, `mpLimCurrent`,
+`mpRefCnsLock`, angle history, direction vectors, and easing state. Several of
+their packed scalar qwords satisfy the generic pointer heuristic, so broad
+character restore retained prediction-timeline values. The old `+0x3CF0` and
+`+0x3E60` four-byte copies were particularly unsafe because those offsets are
+the low halves of each helper's `mpLimCurrent` pointer.
+
+Restore now handles both embedded helpers as complete ownership-aware units:
+
+- Explicitly restore pointer-free configuration, limit, interpolation, angle,
+  direction, and easing ranges.
+- Restore `mpTgtUnit` only when it is null or a current roster character.
+- Remap `mpLimCurrent` only to one of the helper's two inline limit records.
+- Restore `mpRefCnsLock` only when it is null or points to one of the two
+  helpers embedded in the same character.
+- Preserve helper/limit vtables, the update callback at `+0x128`, and unknown
+  pointer identities.
+
+The ownership-aware helper restore is reapplied after reconstruction because
+model/effect repair can evaluate constraints and overwrite mutable state.
 Relevant code is in:
 - UMVC3Hook/code/rollback_restore.cpp:195
 - UMVC3Hook/code/rollback_restore.cpp:248

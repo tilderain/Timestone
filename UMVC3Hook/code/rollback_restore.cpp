@@ -200,16 +200,6 @@ static constexpr SnapshotRange CCHR_SCALAR_RESTORE_RANGES[] = {
     // mismatch in the 20260729_232517 desync pair and persists until the
     // later action-selection divergence.
     {0x28DC, 0x01},
-    // Two paired 16-bit character transition/animation selectors. They are
-    // scalar fields, not ownership pointers, and sit outside the main
-    // animation request block.
-    {0x3CF0, 0x04}, {0x3E60, 0x04},
-    // Mutable interpolation state in the two embedded cCnsHelper records at
-    // +0x3BF0 and +0x3D60. Their lock-angle output feeds joint matrices and
-    // fighter push-sphere centers. Preserve the vtable, self/reference fields,
-    // and update callback at helper+0x128 while rewinding scalar state.
-    {0x3D00, 0x08}, {0x3D10, 0x08}, {0x3D24, 0x0C}, {0x3D30, 0x40},
-    {0x3E70, 0x08}, {0x3E80, 0x08}, {0x3E94, 0x0C}, {0x3EA0, 0x40},
     // cChrCmdLimit animation-flag predicate triplets in the embedded special
     // and combo command matchers. Their packed masks can resemble aligned
     // pointers, so the generic pointer guard otherwise retains live values.
@@ -258,14 +248,6 @@ static constexpr SnapshotRange CCHR_SCALAR_RESTORE_RANGES[] = {
 // These shared cChr fields are rebuilt by native post-restore helpers on some
 // rollback paths. Reapply the saved values after those helpers complete.
 static constexpr SnapshotRange CCHR_POST_RESTORE_TAIL_RANGES[] = {
-    // Model/effect reconstruction may evaluate constraints again. Reapply the
-    // saved cCnsHelper interpolation state after all reconstruction work so the
-    // next joint pass starts from the restored timeline.
-    // helper+0x124 is the lock-angle interpolation state. The frame-783
-    // reproduction retained state 1 instead of restoring state 2,
-    // producing a different air push-sphere center at cChr+0x5CD0.
-    {0x3D00, 0x08}, {0x3D10, 0x08}, {0x3D24, 0x0C}, {0x3D30, 0x40},
-    {0x3E70, 0x08}, {0x3E80, 0x08}, {0x3E94, 0x0C}, {0x3EA0, 0x40},
     {0x6350, 0x10},
     // Active collision-set selectors for capsule bank 0 and sphere banks
     // 0/2/1. The initial character restore includes these at +0x6360, but
@@ -293,7 +275,6 @@ static constexpr SnapshotRange CCHR_POST_RESTORE_TAIL_RANGES[] = {
     // Native animation/model repair can rewrite this tail scalar after the
     // main restore. Reapply it for deterministic character animation state.
     {0x3EA8, 0x04},
-    {0x3CF0, 0x04}, {0x3E60, 0x04},
     // Character collision point caches can be refreshed while shot/model
     // recipes are reconstructed. A stale cache produced peer-only contact at
     // frame 1496 in the 20260804_224703 Dante desync, after which hit state and
@@ -1102,6 +1083,63 @@ void Rollback_RestoreSnapshot(int32_t frame)
         }
         return false;
     };
+    auto restoreCnsHelper = [&isTeamCharacter](
+                                uint8_t* character, const uint8_t* savedCharacter,
+                                size_t copySize, uint32_t helperOffset) {
+        // cCnsHelper drives constrained joints used by fighter push spheres.
+        // Packed flags and float pairs in these records look pointer-like to
+        // the broad character guard, so restore known scalar payloads exactly.
+        static constexpr SnapshotRange scalarRanges[] = {
+            {0x90, 0x18}, // enable, axis, joint, and interpolation selectors
+            {0xB8, 0x20}, // first inline cLimitParam payload; skip its vtable
+            {0xE0, 0x20}, // second inline cLimitParam payload; skip its vtable
+            {0x108, 0x10}, // speed, weight, and character-state selectors
+            {0x120, 0x08}, // mSelfState and mState
+            {0x130, 0x48}, // current/target angles, directions, and easing state
+        };
+        for (const SnapshotRange& range : scalarRanges) {
+            size_t fieldOffset = (size_t)helperOffset + range.offset;
+            if (fieldOffset + range.size <= copySize) {
+                std::memcpy(character + fieldOffset,
+                            savedCharacter + fieldOffset, range.size);
+            }
+        }
+
+        auto restorePointer = [&](uint32_t relativeOffset, uint64_t value) {
+            size_t fieldOffset = (size_t)helperOffset + relativeOffset;
+            if (fieldOffset + sizeof(uint64_t) <= copySize)
+                *(uint64_t*)(character + fieldOffset) = value;
+        };
+
+        size_t targetOffset = (size_t)helperOffset + 0xA8;
+        if (targetOffset + sizeof(uint64_t) <= copySize) {
+            uint64_t savedTarget = *(const uint64_t*)(savedCharacter + targetOffset);
+            if (savedTarget == 0 || isTeamCharacter(savedTarget))
+                restorePointer(0xA8, savedTarget);
+        }
+
+        size_t limitOffset = (size_t)helperOffset + 0x100;
+        if (limitOffset + sizeof(uint64_t) <= copySize) {
+            uint64_t savedLimit = *(const uint64_t*)(savedCharacter + limitOffset);
+            if (savedLimit == (uint64_t)character + helperOffset + 0xB0)
+                restorePointer(0x100, (uint64_t)character + helperOffset + 0xB0);
+            else if (savedLimit == (uint64_t)character + helperOffset + 0xD8)
+                restorePointer(0x100, (uint64_t)character + helperOffset + 0xD8);
+        }
+
+        // mpRefCnsLock may point to either helper embedded in this character.
+        // Remap only those validated identities; keep unknown native ownership.
+        size_t referenceOffset = (size_t)helperOffset + 0x118;
+        if (referenceOffset + sizeof(uint64_t) <= copySize) {
+            uint64_t savedReference = *(const uint64_t*)(
+                savedCharacter + referenceOffset);
+            if (savedReference == 0 ||
+                savedReference == (uint64_t)character + 0x3BF0 ||
+                savedReference == (uint64_t)character + 0x3D60) {
+                restorePointer(0x118, savedReference);
+            }
+        }
+    };
     auto restoreCharacterPostState = [&slot, sCharacter]() {
         if (!slot.characterPost.valid) return;
 
@@ -1500,6 +1538,9 @@ void Rollback_RestoreSnapshot(int32_t frame)
             uint8_t* character = (uint8_t*)slot.regions[i].ptr;
             const uint8_t* savedCharacter = slot.data + offset;
 
+            restoreCnsHelper(character, savedCharacter, copySize, 0x3BF0);
+            restoreCnsHelper(character, savedCharacter, copySize, 0x3D60);
+
             // cChrAbility owns an MtArray header and six inline Prim objects.
             // Keep the owner and Prim vtables live and rewind their mutable
             // gameplay payload. Prim+0x78 is a sound cookie consumed by reset;
@@ -1850,14 +1891,17 @@ void Rollback_RestoreSnapshot(int32_t frame)
                 }
             }
 
+            uint8_t* character = (uint8_t*)slot.regions[i].ptr;
+            const uint8_t* savedCharacter = slot.data + offset;
+            restoreCnsHelper(character, savedCharacter, copySize, 0x3BF0);
+            restoreCnsHelper(character, savedCharacter, copySize, 0x3D60);
+
 /////////////////CHECK IF THIS IS NECESSARY //////
 
             // Recipe reconstruction can also refresh the world geometry in
             // the inline capsule bank. Preserve parent pointers and restore
             // only the same pointer-free fields used by the initial character
             // restore, immediately before re-simulation begins.
-            uint8_t* character = (uint8_t*)slot.regions[i].ptr;
-            const uint8_t* savedCharacter = slot.data + offset;
             constexpr uint32_t capsuleBase = 0x4210;
             constexpr uint32_t capsuleStride = 0xB0;
             for (uint32_t primitive = 0; primitive < 16; ++primitive) {
