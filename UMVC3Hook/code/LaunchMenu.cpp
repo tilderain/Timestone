@@ -88,55 +88,69 @@ static volatile bool g_networkPolling = false;
 static HANDLE g_hPollThread = NULL;
 static bool g_isLaunching = false;
 
-static void GetRollbackSettingsPath(char* path, size_t pathSize)
+static void GetSettingsPath(const char* filename, char* path, size_t pathSize)
 {
-    wchar_t modulePath[MAX_PATH] = {};
-    GetModuleFileNameW(nullptr, modulePath, MAX_PATH);
-    wchar_t* slash = wcsrchr(modulePath, L'\\');
-    if (slash) slash[1] = L'\0';
-    wchar_t settingPath[MAX_PATH] = {};
-    swprintf(settingPath, MAX_PATH, L"%srollbacksetting.ini", modulePath);
-    WideCharToMultiByte(CP_ACP, 0, settingPath, -1, path, (int)pathSize, nullptr, nullptr);
+    DWORD length = GetModuleFileNameA(nullptr, path, (DWORD)pathSize);
+    if (length == 0 || length >= pathSize) {
+        path[0] = '\0';
+        return;
+    }
+
+    char* slash = strrchr(path, '\\');
+    char* forwardSlash = strrchr(path, '/');
+    if (!slash || (forwardSlash && forwardSlash > slash)) slash = forwardSlash;
+    char* filenameStart = slash ? slash + 1 : path;
+    snprintf(filenameStart, pathSize - (filenameStart - path), "%s", filename);
 }
 
 static void LoadRollbackSettings()
 {
-    char path[MAX_PATH] = {};
-    GetRollbackSettingsPath(path, sizeof(path));
+    char rollbackPath[MAX_PATH] = {};
+    GetSettingsPath("rollbacksetting.ini", rollbackPath, sizeof(rollbackPath));
     for (int i = 0; i < 3; ++i) {
         char key[16];
         snprintf(key, sizeof(key), "Slot%d", i + 1);
-        g_dialogConfig.p1Chars[i] = GetPrivateProfileIntA("P1", key, g_dialogConfig.p1Chars[i], path);
-        g_dialogConfig.p2Chars[i] = GetPrivateProfileIntA("P2", key, g_dialogConfig.p2Chars[i], path);
+        g_dialogConfig.p1Chars[i] = GetPrivateProfileIntA("P1", key, g_dialogConfig.p1Chars[i], rollbackPath);
+        g_dialogConfig.p2Chars[i] = GetPrivateProfileIntA("P2", key, g_dialogConfig.p2Chars[i], rollbackPath);
     }
 
-    GetPrivateProfileStringA("Network", "HostIp", "127.0.0.1",
+    char settingsPath[MAX_PATH] = {};
+    GetSettingsPath("UMVC3Hook.ini", settingsPath, sizeof(settingsPath));
+    GetPrivateProfileStringA("Network", "HostIp", "",
                              g_dialogConfig.hostIp,
-                             sizeof(g_dialogConfig.hostIp), path);
+                             sizeof(g_dialogConfig.hostIp), settingsPath);
     if (g_dialogConfig.hostIp[0] == '\0') {
-        strcpy(g_dialogConfig.hostIp, "127.0.0.1");
+        GetPrivateProfileStringA("Network", "HostIp", "127.0.0.1",
+                                 g_dialogConfig.hostIp,
+                                 sizeof(g_dialogConfig.hostIp), rollbackPath);
     }
-    g_dialogConfig.hostPort = GetPrivateProfileIntA(
-        "Network", "HostPort", g_dialogConfig.hostPort, path);
+
+    char port[16] = {};
+    GetPrivateProfileStringA("Network", "HostPort", "", port, sizeof(port), settingsPath);
+    g_dialogConfig.hostPort = port[0] != '\0'
+        ? atoi(port)
+        : GetPrivateProfileIntA("Network", "HostPort", g_dialogConfig.hostPort, rollbackPath);
 }
 
 static void SaveRollbackSettings()
 {
-    char path[MAX_PATH] = {};
-    GetRollbackSettingsPath(path, sizeof(path));
+    char rollbackPath[MAX_PATH] = {};
+    GetSettingsPath("rollbacksetting.ini", rollbackPath, sizeof(rollbackPath));
     for (int i = 0; i < 3; ++i) {
         char key[16], value[16];
         snprintf(key, sizeof(key), "Slot%d", i + 1);
         snprintf(value, sizeof(value), "%d", g_dialogConfig.p1Chars[i]);
-        WritePrivateProfileStringA("P1", key, value, path);
+        WritePrivateProfileStringA("P1", key, value, rollbackPath);
         snprintf(value, sizeof(value), "%d", g_dialogConfig.p2Chars[i]);
-        WritePrivateProfileStringA("P2", key, value, path);
+        WritePrivateProfileStringA("P2", key, value, rollbackPath);
     }
-    WritePrivateProfileStringA("Network", "HostIp", g_dialogConfig.hostIp, path);
 
+    char settingsPath[MAX_PATH] = {};
+    GetSettingsPath("UMVC3Hook.ini", settingsPath, sizeof(settingsPath));
+    WritePrivateProfileStringA("Network", "HostIp", g_dialogConfig.hostIp, settingsPath);
     char port[16];
     snprintf(port, sizeof(port), "%d", g_dialogConfig.hostPort);
-    WritePrivateProfileStringA("Network", "HostPort", port, path);
+    WritePrivateProfileStringA("Network", "HostPort", port, settingsPath);
 }
 
 void SendTrainingLaunchPacket()
