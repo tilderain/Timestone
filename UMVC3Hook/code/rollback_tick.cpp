@@ -140,6 +140,12 @@ static void VTableCall(uint64_t object, uint32_t vtableOffset)
     (*(ObjectFn*)(vtable + vtableOffset))(object);
 }
 
+static void VTableCall(uint64_t object, uint32_t vtableOffset, int value)
+{
+    uint64_t vtable = *(uint64_t*)object;
+    (*(void(__fastcall**)(uint64_t, int))(vtable + vtableOffset))(object, value);
+}
+
 static uint64_t MainMember(uint64_t sMain, uint32_t memberOffset)
 {
     return *(uint64_t*)(sMain + memberOffset);
@@ -215,7 +221,7 @@ static void HeadlessUnitCategoryMove(uint64_t sMain, uint64_t sUnit,
     if (!unit) return;
 
     const bool useJobs = (*(uint8_t*)(categoryBase - 8) & 1u) != 0;
-    VTableCall(sUnit, 0x78);
+    VTableCall(sUnit, 0x78, (int)category);
     const uint64_t enabledMask = ~*(uint64_t*)(sUnit + 0x1848);
     const float delta = *(float*)(categoryBase + 0x10) * *(float*)(sMain + 0x80);
 
@@ -285,7 +291,7 @@ static void HeadlessUnitCategoryCleanup(uint64_t sMain, uint64_t sUnit,
     uint64_t unit = *(uint64_t*)categoryBase;
     if (!unit) return;
 
-    VTableCall(sUnit, 0x78);
+    VTableCall(sUnit, 0x78, (int)category);
     const uint64_t enabledMask = ~*(uint64_t*)(sUnit + 0x1848);
     const float delta = *(float*)(categoryBase + 0x10) * *(float*)(sMain + 0x80);
     while (unit) {
@@ -344,7 +350,7 @@ static void HeadlessUnitCategoryPostMove(uint64_t sMain, uint64_t sUnit,
 
     const bool useJobs = phase == RollbackUnitProfilePhase::SyncSave &&
         (categoryFlags & 1u) != 0;
-    VTableCall(sUnit, 0x78);
+    VTableCall(sUnit, 0x78, (int)category);
     const uint64_t enabledMask = ~*(uint64_t*)(sUnit + 0x1848);
 
     while (unit) {
