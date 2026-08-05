@@ -106,7 +106,9 @@ Its primary job is work allocation, validation, and recovery.
 
 ### 4.2 Function Worker
 
-Function workers perform the brute-force analysis. Each worker receives a
+Function workers perform the brute-force analysis. Please provide a copy of this doc or tell the worker to read the doc.
+
+Each worker receives a
 fixed list of function entry addresses and must:
 
 1. Analyze only its assigned root functions.
