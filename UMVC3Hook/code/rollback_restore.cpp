@@ -105,6 +105,9 @@ static constexpr size_t SHITSOLVER_SIZE = 0x3808C;
 static constexpr uint64_t MT_DTI_VTABLE = 0x140A69ED8;
 static constexpr uintptr_t DTI_UACTION_SIDE_CAMERA = 0x140D44268;
 static constexpr size_t SHITSOLVER_DATA_OFF = 0x58;
+static constexpr uintptr_t VTABLE_UCAP_AMERICA = 0x140A71430;
+static constexpr uintptr_t DTI_USHOT_OPTION_SHIELD_SLASH = 0x140D48A68;
+static constexpr uint32_t UCAP_AMERICA_SHIELD_SLASH_OFFSET = 0x68F0;
 
 using SnapshotRange = RollbackSnapshotRange;
 using ShotRecipe = RollbackShotRecipe;
@@ -923,6 +926,49 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
                 *objectReturn = nullptr;
             }
         }
+    }
+
+    // TODO: Cache character-specific object slots during snapshot capture so
+    // restore does not repeatedly rediscover their owners from region metadata.
+    size_t regionDataOffset = 0;
+    for (int region = 0; region < slot.regionCount; ++region) {
+        const RollbackRegion& savedRegion = slot.regions[region];
+        if (savedRegion.expectedVtable ==
+                (uint64_t)_addr(VTABLE_UCAP_AMERICA) &&
+            UCAP_AMERICA_SHIELD_SLASH_OFFSET + sizeof(void*) <=
+                savedRegion.size &&
+            regionDataOffset + UCAP_AMERICA_SHIELD_SLASH_OFFSET +
+                sizeof(void*) <= slot.size) {
+            void* savedReference = nullptr;
+            std::memcpy(&savedReference,
+                        slot.data + regionDataOffset +
+                            UCAP_AMERICA_SHIELD_SLASH_OFFSET,
+                        sizeof(savedReference));
+
+            const ShotRecipe* match = nullptr;
+            bool ambiguous = false;
+            for (const ShotRecipe& saved : slot.shotRecipes) {
+                if (saved.ownerChr != savedRegion.ptr ||
+                    saved.concrete.dti !=
+                        (uint64_t)_addr(DTI_USHOT_OPTION_SHIELD_SLASH)) {
+                    continue;
+                }
+                if (saved.savedPtr == savedReference) {
+                    match = &saved;
+                    ambiguous = false;
+                    break;
+                }
+                ambiguous = match != nullptr;
+                match = &saved;
+            }
+
+            // Captain's +0x68F0 is a Shield Slash reference despite inherited
+            // property metadata describing a scalar at this offset.
+            *(void**)((uint8_t*)savedRegion.ptr +
+                      UCAP_AMERICA_SHIELD_SLASH_OFFSET) =
+                savedReference && match && !ambiguous ? match->restoredPtr : nullptr;
+        }
+        regionDataOffset += savedRegion.size;
     }
 
     // Native enqueue increments the counter before rejecting an overflow. A
