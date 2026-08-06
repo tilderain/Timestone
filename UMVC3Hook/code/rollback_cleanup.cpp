@@ -241,6 +241,24 @@ void Rollback_ClearStalePointers()
                     if (memory.IsAccessible(slot))
                         *(uint64_t*)slot = 0;
                 }
+
+                // Character status-effect commands call getDTI through every
+                // non-null indexed slot without validating its vtable. Rollback
+                // effect teardown can leave a destroyed allocation in a slot
+                // that is not one of the historically known stale indices.
+                for (uint32_t index = 0; index < SLOT_COUNT; ++index) {
+                    uint64_t slot = character + SLOT_ARRAY_OFFSET +
+                        (uint64_t)index * sizeof(uint64_t);
+                    if (!memory.IsAccessible(slot)) continue;
+                    uint64_t object = *(uint64_t*)slot;
+                    if (!object) continue;
+                    bool valid = HasCallableDtiVirtual(object, memory);
+                    uint64_t dti = valid ? GetObjectDti(object) : 0;
+                    if (!dti || !memory.IsAccessible(dti) ||
+                        !memory.IsAccessible(dti + 0x20)) {
+                        *(uint64_t*)slot = 0;
+                    }
+                }
             }
             node = *(uint64_t*)(node + NODE_NEXT_OFFSET);
         }

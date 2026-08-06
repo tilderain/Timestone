@@ -21,6 +21,7 @@ static constexpr uintptr_t PTR_SMVC3MGR = 0x140d510a0;
 static constexpr uintptr_t PTR_SSTAGE = 0x140d4f718;
 static constexpr uintptr_t PTR_SCHARACTER = 0x140d44a70;
 static constexpr uintptr_t FN_SGAMEEFFECT_FLUSH_PENDING = 0x140130D00;
+static constexpr uintptr_t FN_SGAMEEFFECT_FLUSH_HIT_MARKS = 0x140131070;
 static constexpr uintptr_t FN_UGAMEEFFECT_CREATE = 0x140131410;
 static constexpr uintptr_t FN_UGAMEEFFECT_OPERATOR_NEW = 0x140139E00;
 static constexpr uintptr_t FN_DRSTRANGE_UPDATE_SUMMONS = 0x14007B9E0;
@@ -61,6 +62,7 @@ static void(__fastcall* oEffectVdtor)(void*, uint32_t) = nullptr;
 static uint64_t(__fastcall* oEffectCreateGenerator)(void*) = nullptr;
 static void(__fastcall* oParticleManagerReleaseSubBuffer)(void*) = nullptr;
 static void(__fastcall* oGameEffectFlushPending)(void*) = nullptr;
+static void(__fastcall* oGameEffectFlushHitMarks)(void*) = nullptr;
 static void(__fastcall* oKirigakureEffectUpdate)(void*) = nullptr;
 static std::vector<RollbackEffectRecipe> g_liveEffectRecipes;
 static uint64_t g_effectSpawnSequence = 0;
@@ -450,6 +452,47 @@ static void __fastcall hkGameEffectFlushPending(void* manager)
     oGameEffectFlushPending(manager);
 }
 
+static void ClearInvalidCharacterIndexedEffects()
+{
+    constexpr uint32_t slotArrayOffset = 0x6748;
+    constexpr uint32_t slotCount = 21;
+    uint64_t sCharacter = *(uint64_t*)_addr(PTR_SCHARACTER);
+    if (!sCharacter) return;
+
+    for (uint32_t teamOffset : TEAM_OFFSETS) {
+        uint64_t node = sCharacter + teamOffset + 0x08;
+        for (int safety = 8; node && safety-- > 0;) {
+            if (!IsAccessibleRange(node, 0x18)) break;
+            uint64_t character = *(uint64_t*)(node + 0x08);
+            if (character && IsAccessibleRange(
+                    character + slotArrayOffset,
+                    slotCount * sizeof(uint64_t))) {
+                for (uint32_t index = 0; index < slotCount; ++index) {
+                    uint64_t* slot = (uint64_t*)(character + slotArrayOffset +
+                                                index * sizeof(uint64_t));
+                    uint64_t object = *slot;
+                    if (!object) continue;
+                    if (!HasCallableDtiVirtual((void*)object)) {
+                        *slot = 0;
+                        continue;
+                    }
+                    uint64_t dti = GetObjectDti(object);
+                    if (!dti || !IsAccessibleRange(dti, 0x28))
+                        *slot = 0;
+                }
+            }
+            node = *(uint64_t*)(node + 0x10);
+        }
+    }
+}
+
+static void __fastcall hkGameEffectFlushHitMarks(void* manager)
+{
+    if (g_isResimulating)
+        ClearInvalidCharacterIndexedEffects();
+    oGameEffectFlushHitMarks(manager);
+}
+
 static void __fastcall hkKirigakureEffectUpdate(void* effect)
 {
     RollbackHookProfileScope profile(RollbackHookProfileId::KirigakureEffectUpdate);
@@ -464,7 +507,13 @@ void Effect_CaptureRecipes(RollbackSnapshotSlot& slot)
     slot.effectRecipes.clear();
     slot.effectRecipes.reserve(g_liveEffectRecipes.size());
     for (const RollbackEffectRecipe& recipe : g_liveEffectRecipes) {
-        if (!IsActiveUnit(recipe.restoredPtr)) continue;
+        if (!recipe.restoredPtr ||
+            !IsAccessibleRange((uint64_t)recipe.restoredPtr, 0x290) ||
+            !IsEffectObject(recipe.restoredPtr) ||
+            !IsActiveUnit(recipe.restoredPtr) ||
+            IsPersistentCharacterEffect(recipe.restoredPtr)) {
+            continue;
+        }
         RollbackEffectRecipe saved = recipe;
         saved.savedPtr = recipe.restoredPtr;
         ConcreteEffectSnapshot_Capture(recipe.restoredPtr, saved.state);
@@ -475,15 +524,26 @@ void Effect_CaptureRecipes(RollbackSnapshotSlot& slot)
 int Effect_RestoreRecipes(RollbackSnapshotSlot& slot)
 {
     int restored = 0;
+    int failed = 0;
+    for (RollbackEffectRecipe& saved : slot.effectRecipes)
+        saved.restoredPtr = nullptr;
+
     for (RollbackEffectRecipe& saved : slot.effectRecipes) {
         void* sGameEffect = saved.sGameEffect;
-        if (!sGameEffect || !oEffectCreate) continue;
+        if (!sGameEffect || !oEffectCreate) {
+            ++failed;
+            continue;
+        }
+
         void* attachTo = saved.attachTo;
         void* effect = oEffectCreate(sGameEffect, saved.effectId, saved.a3,
                                      attachTo, saved.a5, saved.a6, saved.a7,
                                      saved.a8, saved.a9, saved.a10, saved.a11,
                                      saved.a12, saved.a13);
-        if (!effect) continue;
+        if (!effect) {
+            ++failed;
+            continue;
+        }
         saved.restoredPtr = effect;
         ConcreteEffectSnapshot_Restore(effect, saved.state);
         RollbackEffectRecipe live = saved;
@@ -491,6 +551,10 @@ int Effect_RestoreRecipes(RollbackSnapshotSlot& slot)
         live.restoredPtr = effect;
         g_liveEffectRecipes.push_back(live);
         ++restored;
+    }
+    if (failed != 0) {
+        HookLog("Rollback: effect recipes restored=%d failed=%d\n",
+                restored, failed);
     }
     return restored;
 }
@@ -607,6 +671,17 @@ void Effect_InitHooks()
         HookLog("Rollback: guarded sGameEffect pending-effect flush\n");
     } else {
         HookLog("Rollback: failed to guard sGameEffect pending-effect flush (%d)\n",
+                status);
+    }
+
+    status = MH_CreateHook((LPVOID)_addr(FN_SGAMEEFFECT_FLUSH_HIT_MARKS),
+                           (LPVOID)&hkGameEffectFlushHitMarks,
+                           (LPVOID*)&oGameEffectFlushHitMarks);
+    if (status == MH_OK) {
+        MH_EnableHook((LPVOID)_addr(FN_SGAMEEFFECT_FLUSH_HIT_MARKS));
+        HookLog("Rollback: guarded sGameEffect hit-mark effect slots\n");
+    } else {
+        HookLog("Rollback: failed to guard hit-mark effect slots (%d)\n",
                 status);
     }
 
