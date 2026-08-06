@@ -25,6 +25,10 @@ constexpr size_t kAttackTargetStride = 0x18;
 constexpr size_t kShotCallbackEffectsOffset = 0x1F78;
 constexpr uint32_t kShotCallbackEffectCount = 13;
 constexpr uint32_t kMaxCallbackGenerators = 64;
+constexpr uint32_t kMaxCallbackEffectCatchupFrames = 600;
+constexpr uintptr_t kEffectPrepareParticleManagers = 0x1405E66B0ull;
+constexpr uintptr_t kEffectAdvanceGenerators = 0x1405E67C0ull;
+constexpr uintptr_t kEffectFinalizeParticleManagers = 0x1405E6600ull;
 constexpr size_t kAttackTargetTables[kAttackTargetTableCount] = {
     // uShot embeds cAtkCtrl at +0x1470. Its three 0x300-byte TargetInfo
     // tables begin at cAtkCtrl +0x50/+0x350/+0x650.
@@ -675,6 +679,40 @@ void ConcreteShotSnapshot_RestoreCallbackEffects(
             continue;
         }
 
+        // Restoring an advanced generator state onto a fresh, empty particle
+        // graph skips every earlier emission. Replay the native generator
+        // substeps first to rebuild presentation buffers, then apply the saved
+        // scalars below to retain the exact gameplay completion state.
+        uint32_t catchupFrames = 0;
+        uint64_t generator = *(uint64_t*)((uint8_t*)effect + 0x218);
+        bool matchingGenerators = true;
+        for (const auto& saved : state.generators) {
+            if (!generator || !Accessible(generator, 0x240) ||
+                GetObjectDti(generator) != saved.dti) {
+                matchingGenerators = false;
+                break;
+            }
+            uint32_t elapsed = 0;
+            std::memcpy(&elapsed, saved.stateB8, sizeof(elapsed));
+            catchupFrames = std::max(catchupFrames, elapsed);
+            generator = *(uint64_t*)(generator + 0x18);
+        }
+        catchupFrames = std::min(catchupFrames,
+                                 kMaxCallbackEffectCatchupFrames);
+        if (matchingGenerators && catchupFrames != 0) {
+            auto prepare = (void(__fastcall*)(void*))
+                _addr(kEffectPrepareParticleManagers);
+            auto advance = (void(__fastcall*)(void*))
+                _addr(kEffectAdvanceGenerators);
+            auto finalize = (void(__fastcall*)(void*))
+                _addr(kEffectFinalizeParticleManagers);
+            for (uint32_t frame = 0; frame < catchupFrames; ++frame) {
+                prepare(effect);
+                advance(effect);
+                finalize(effect);
+            }
+        }
+
         // Preserve the fresh generator/resource graph and native ownership,
         // but rewind the pointer-free uEffect flags and timeline counters.
         std::memcpy((uint8_t*)effect + 0x100, state.flags100,
@@ -691,7 +729,7 @@ void ConcreteShotSnapshot_RestoreCallbackEffects(
         std::memcpy((uint8_t*)effect + 0x230, state.state230,
                     sizeof(state.state230));
 
-        uint64_t generator = *(uint64_t*)((uint8_t*)effect + 0x218);
+        generator = *(uint64_t*)((uint8_t*)effect + 0x218);
         for (const auto& saved : state.generators) {
             if (!generator || !Accessible(generator, 0x240) ||
                 GetObjectDti(generator) != saved.dti) {

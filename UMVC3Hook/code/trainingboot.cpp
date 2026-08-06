@@ -86,9 +86,13 @@ static constexpr uintptr_t SGAMECONFIG_RESOLVE_BINDING_TABLE  = 0x14024F2C0;
 static constexpr uintptr_t SGAMECONFIG_STORAGE_BUSY_OFFSET    = 0x4D350;
 static constexpr uintptr_t SGAMECONFIG_PROFILE_OFFSET         = 0x50;
 static constexpr uintptr_t SGAMECONFIG_LOADED_PROFILE_OFFSET  = 0x7A0;
+static constexpr uintptr_t SGAMECONFIG_P1_BINDINGS_OFFSET     = 0xC0;
+static constexpr uintptr_t SGAMECONFIG_P1_ALT_BINDINGS_OFFSET = 0x118;
+static constexpr uintptr_t SGAMECONFIG_DEVICE_TYPE_OFFSET     = 0x170;
+static constexpr uintptr_t SGAMECONFIG_SELECTION_OFFSET       = 0x178;
 static constexpr uintptr_t SGAMECONFIG_CTRL_TYPE_OFFSET       = 0x188;
 static constexpr uintptr_t SGAMECONFIG_BINDING_PTR_OFFSET     = 0x320;
-static constexpr uintptr_t SGAMECONFIG_COPY_PROFILE           = 0x14021B510;
+static constexpr size_t GAMEPLAY_BINDING_TABLE_SIZE           = 11 * sizeof(uint32_t);
 static constexpr uintptr_t CS_ENTER                            = 0x140006D00;
 static constexpr uintptr_t CS_LEAVE                            = 0x14000B860;
 
@@ -256,30 +260,42 @@ static uint8_t __fastcall ApplyLoadedGameConfig(uint64_t config,
                                                  uint32_t loadedSize)
 {
     if (!config || !loadedData || loadedSize <
-        SGAMECONFIG_LOADED_PROFILE_OFFSET + 0x210)
+        SGAMECONFIG_LOADED_PROFILE_OFFSET +
+            (SGAMECONFIG_CTRL_TYPE_OFFSET - SGAMECONFIG_PROFILE_OFFSET) +
+            sizeof(uint32_t))
         return 0;
 
     typedef void(__fastcall* Lock_t)(uint64_t);
-    typedef void(__fastcall* CopyProfile_t)(uint64_t, uint64_t);
     typedef uint64_t(__fastcall* ResolveTable_t)(uint64_t, uint32_t, uint8_t,
                                                   int32_t, int32_t);
 
+    const uint8_t* loadedProfile =
+        (const uint8_t*)(loadedData + SGAMECONFIG_LOADED_PROFILE_OFFSET);
+    auto loadedField = [loadedProfile](uintptr_t liveOffset) {
+        return loadedProfile + liveOffset - SGAMECONFIG_PROFILE_OFFSET;
+    };
+
+    // Import only P1's normal and alternate gameplay bindings. Copying the
+    // complete profile also changes voice, announcer, and presentation state.
     ((Lock_t)_addr(CS_ENTER))(config);
-    ((CopyProfile_t)_addr(SGAMECONFIG_COPY_PROFILE))(
-        config + SGAMECONFIG_PROFILE_OFFSET,
-        loadedData + SGAMECONFIG_LOADED_PROFILE_OFFSET);
+    std::memcpy((void*)(config + SGAMECONFIG_P1_BINDINGS_OFFSET),
+                loadedField(SGAMECONFIG_P1_BINDINGS_OFFSET),
+                GAMEPLAY_BINDING_TABLE_SIZE);
+    std::memcpy((void*)(config + SGAMECONFIG_P1_ALT_BINDINGS_OFFSET),
+                loadedField(SGAMECONFIG_P1_ALT_BINDINGS_OFFSET),
+                GAMEPLAY_BINDING_TABLE_SIZE);
     ((Lock_t)_addr(CS_LEAVE))(config);
 
-    // Native full-config apply also performs seven immediate audio gain
-    // updates. At training-boot time those silence title music on Windows, so
-    // rebuild only the binding pointers needed by cChrInput__buttonRemap.
-    uint8_t alternateMap = *(uint32_t*)(config + SGAMECONFIG_CTRL_TYPE_OFFSET) == 1;
+    uint8_t alternateMap =
+        *(const uint32_t*)loadedField(SGAMECONFIG_CTRL_TYPE_OFFSET) == 1;
+    int32_t deviceType =
+        *(const int32_t*)loadedField(SGAMECONFIG_DEVICE_TYPE_OFFSET);
+    int32_t selection =
+        *(const int32_t*)loadedField(SGAMECONFIG_SELECTION_OFFSET);
     ResolveTable_t resolveTable =
         (ResolveTable_t)_addr(SGAMECONFIG_RESOLVE_BINDING_TABLE);
-    for (uint32_t player = 0; player < 2; ++player) {
-        *(uint64_t*)(config + SGAMECONFIG_BINDING_PTR_OFFSET + player * 8) =
-            resolveTable(config, player, alternateMap, -1, -1);
-    }
+    *(uint64_t*)(config + SGAMECONFIG_BINDING_PTR_OFFSET) =
+        resolveTable(config, 0, alternateMap, deviceType, selection);
     return 1;
 }
 

@@ -782,6 +782,27 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
         // before the broad concrete overlay can copy any stale relationship.
         Shot_TrackReconstructed(fresh, saved);
         saved.restoredPtr = fresh;
+
+        // Resource-gated subclass setup can leave a reconstructed shot without
+        // callbacks. Retry its native setup before applying the saved body.
+        bool needsCallbackSetup = false;
+        for (uint32_t index = 0; index < 13; ++index) {
+            if (saved.concrete.callbackEffects[index].occupied &&
+                !*(void**)((uint8_t*)fresh + 0x1F78 + index * sizeof(void*))) {
+                needsCallbackSetup = true;
+                break;
+            }
+        }
+        if (needsCallbackSetup) {
+            uint64_t vtable = *(uint64_t*)fresh;
+            uint64_t setupAddress = vtable &&
+                IsAccessibleRange(vtable + 0x28, sizeof(uint64_t))
+                ? *(uint64_t*)(vtable + 0x28) : 0;
+            if (setupAddress && IsExecutableAddress(setupAddress)) {
+                auto setup = (void(__fastcall*)(void*))setupAddress;
+                setup(fresh);
+            }
+        }
         // Rebuild registration through the same pending-unit path used by the
         // native shot callers. Drain it before resimulation so all restored
         // shots enter the category list in one native registration pass.
