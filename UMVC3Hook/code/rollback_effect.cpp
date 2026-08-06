@@ -452,10 +452,32 @@ static void __fastcall hkGameEffectFlushPending(void* manager)
     oGameEffectFlushPending(manager);
 }
 
-static void ClearInvalidCharacterIndexedEffects()
+static void ClearInvalidCharacterIndexedEffects(uint64_t character)
 {
     constexpr uint32_t slotArrayOffset = 0x6748;
     constexpr uint32_t slotCount = 21;
+    if (!character || !IsAccessibleRange(
+            character + slotArrayOffset, slotCount * sizeof(uint64_t))) {
+        return;
+    }
+
+    for (uint32_t index = 0; index < slotCount; ++index) {
+        uint64_t* slot = (uint64_t*)(character + slotArrayOffset +
+                                    index * sizeof(uint64_t));
+        uint64_t object = *slot;
+        if (!object) continue;
+        if (!HasCallableDtiVirtual((void*)object)) {
+            *slot = 0;
+            continue;
+        }
+        uint64_t dti = GetObjectDti(object);
+        if (!dti || !IsAccessibleRange(dti, 0x28))
+            *slot = 0;
+    }
+}
+
+static void ClearInvalidCharacterIndexedEffects()
+{
     uint64_t sCharacter = *(uint64_t*)_addr(PTR_SCHARACTER);
     if (!sCharacter) return;
 
@@ -464,23 +486,7 @@ static void ClearInvalidCharacterIndexedEffects()
         for (int safety = 8; node && safety-- > 0;) {
             if (!IsAccessibleRange(node, 0x18)) break;
             uint64_t character = *(uint64_t*)(node + 0x08);
-            if (character && IsAccessibleRange(
-                    character + slotArrayOffset,
-                    slotCount * sizeof(uint64_t))) {
-                for (uint32_t index = 0; index < slotCount; ++index) {
-                    uint64_t* slot = (uint64_t*)(character + slotArrayOffset +
-                                                index * sizeof(uint64_t));
-                    uint64_t object = *slot;
-                    if (!object) continue;
-                    if (!HasCallableDtiVirtual((void*)object)) {
-                        *slot = 0;
-                        continue;
-                    }
-                    uint64_t dti = GetObjectDti(object);
-                    if (!dti || !IsAccessibleRange(dti, 0x28))
-                        *slot = 0;
-                }
-            }
+            ClearInvalidCharacterIndexedEffects(character);
             node = *(uint64_t*)(node + 0x10);
         }
     }
@@ -488,8 +494,26 @@ static void ClearInvalidCharacterIndexedEffects()
 
 static void __fastcall hkGameEffectFlushHitMarks(void* manager)
 {
-    if (g_isResimulating)
+    if (g_isResimulating) {
         ClearInvalidCharacterIndexedEffects();
+        // Hit-mark commands can target assist/proxy characters not reachable
+        // through the short team-list scan above. Native command dispatch reads
+        // their indexed effect slots and calls isKindOf without validating the
+        // stored object's vtable.
+        if (manager && IsAccessibleRange((uint64_t)manager, 0x1944)) {
+            uint32_t count = *(uint32_t*)((uint8_t*)manager + 0x1940);
+            if (count <= 128 && (!count || IsAccessibleRange(
+                    (uint64_t)manager + 0x140, (size_t)count * 0x30))) {
+                for (uint32_t index = 0; index < count; ++index) {
+                    uint8_t* entry = (uint8_t*)manager + 0x140 + index * 0x30;
+                    ClearInvalidCharacterIndexedEffects(
+                        *(uint64_t*)(entry + 0x18));
+                    ClearInvalidCharacterIndexedEffects(
+                        *(uint64_t*)(entry + 0x20));
+                }
+            }
+        }
+    }
     oGameEffectFlushHitMarks(manager);
 }
 
