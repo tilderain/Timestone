@@ -1206,3 +1206,13 @@ indices, and blended joint matrices. The body is restored through explicit
 pointer-free ranges only: lifecycle, resource/ownership pointers, intrusive
 links, and unknown fields remain live while coordinate, motion, attachment,
 and matrix payloads rewind.
+
+The `20260805_224555` Dante pair isolated a separate parent-identity failure at
+frame 1759. Capsule 0 had matching local geometry and parented to the character
+on both peers through frame 1758, but the re-simulating client retained weapon
+slot 0 from the discarded prediction timeline at `cHitPrimCapsule+0x58`. Its
+world endpoint moved to `(223.915, 63.698)` while the host remained at
+`(382.780, 0)`. Character primitive restore now reapplies saved null,
+owning-character, and own-weapon parent identities for capsules and spheres.
+Unknown dynamic parents remain live rather than restoring potentially stale
+shot or effect pointers.

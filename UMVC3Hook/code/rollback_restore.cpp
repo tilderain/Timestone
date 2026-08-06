@@ -68,6 +68,8 @@ static constexpr uint32_t CCHR_COMMAND_OFFSETS[] = {0x2738, 0x2950};
 static constexpr size_t CCHR_COMMAND_SIZE = 0x218;
 static constexpr uint32_t CCHR_JOINT_HOLD_OFFSET = 0x2B70;
 static constexpr size_t CCHR_JOINT_HOLD_SIZE = 0xE0;
+static constexpr uint32_t CCHR_WEAPON_COUNT_OFFSET = 0x3F38;
+static constexpr uint32_t CCHR_WEAPON_ARRAY_OFFSET = 0x3F40;
 static constexpr uint32_t CCHR_MESSAGE_OFFSET = 0x2C50;
 static constexpr size_t CCHR_MESSAGE_STRIDE = 0x30;
 static constexpr uint32_t CCHR_PAUSE_OFFSET = 0x2D70;
@@ -108,6 +110,23 @@ static constexpr size_t SHITSOLVER_DATA_OFF = 0x58;
 static constexpr uintptr_t VTABLE_UCAP_AMERICA = 0x140A71430;
 static constexpr uintptr_t DTI_USHOT_OPTION_SHIELD_SLASH = 0x140D48A68;
 static constexpr uint32_t UCAP_AMERICA_SHIELD_SLASH_OFFSET = 0x68F0;
+
+static bool IsStableCharacterCollisionParent(uint8_t* character, uint64_t parent)
+{
+    if (parent == 0 || parent == (uint64_t)character) return true;
+
+    uint32_t weaponCount = *(uint32_t*)(character + CCHR_WEAPON_COUNT_OFFSET);
+    uint64_t weaponArray = *(uint64_t*)(character + CCHR_WEAPON_ARRAY_OFFSET);
+    if (!weaponArray || weaponCount > 256 ||
+        !IsAccessibleRange(weaponArray, (size_t)weaponCount * sizeof(uint64_t))) {
+        return false;
+    }
+    for (uint32_t weapon = 0; weapon < weaponCount; ++weapon) {
+        if (*(uint64_t*)(weaponArray + (size_t)weapon * sizeof(uint64_t)) == parent)
+            return true;
+    }
+    return false;
+}
 
 using SnapshotRange = RollbackSnapshotRange;
 using ShotRecipe = RollbackShotRecipe;
@@ -1773,8 +1792,8 @@ void Rollback_RestoreSnapshot(int32_t frame)
 
             // The generic pointer guard above can mistake aligned primitive
             // flags, coordinates and IDs for addresses, retaining post-hit
-            // disabled geometry. Rewind confirmed pointer-free fields while
-            // preserving each primitive's vtable and live parent references.
+            // disabled geometry. Rewind confirmed gameplay fields and stable
+            // character/weapon parent identities while retaining dynamic owners.
             static constexpr uint32_t capsuleBase = 0x4210;
             static constexpr uint32_t capsuleStride = 0xB0;
             for (uint32_t primitive = 0; primitive < 16; ++primitive) {
@@ -1792,6 +1811,13 @@ void Rollback_RestoreSnapshot(int32_t frame)
                         std::memcpy((uint8_t*)slot.regions[i].ptr + entry + field.offset,
                                     slot.data + offset + entry + field.offset,
                                     field.size);
+                    }
+                }
+                for (uint32_t parentOffset : {0x58u, 0x60u}) {
+                    uint64_t savedParent = *(const uint64_t*)(
+                        savedCharacter + entry + parentOffset);
+                    if (IsStableCharacterCollisionParent(character, savedParent)) {
+                        *(uint64_t*)(character + entry + parentOffset) = savedParent;
                     }
                 }
             }
@@ -1816,6 +1842,10 @@ void Rollback_RestoreSnapshot(int32_t frame)
                                         field.size);
                         }
                     }
+                    uint64_t savedParent = *(const uint64_t*)(
+                        savedCharacter + entry + 0x38);
+                    if (IsStableCharacterCollisionParent(character, savedParent))
+                        *(uint64_t*)(character + entry + 0x38) = savedParent;
                 }
             }
 
@@ -1969,9 +1999,8 @@ void Rollback_RestoreSnapshot(int32_t frame)
 /////////////////CHECK IF THIS IS NECESSARY //////
 
             // Recipe reconstruction can also refresh the world geometry in
-            // the inline capsule bank. Preserve parent pointers and restore
-            // only the same pointer-free fields used by the initial character
-            // restore, immediately before re-simulation begins.
+            // the inline capsule bank. Restore the same gameplay fields and
+            // stable parent identities immediately before re-simulation begins.
             constexpr uint32_t capsuleBase = 0x4210;
             constexpr uint32_t capsuleStride = 0xB0;
             for (uint32_t primitive = 0; primitive < 16; ++primitive) {
@@ -1990,6 +2019,26 @@ void Rollback_RestoreSnapshot(int32_t frame)
                                     savedCharacter + entry + field.offset,
                                     field.size);
                     }
+                }
+                for (uint32_t parentOffset : {0x58u, 0x60u}) {
+                    uint64_t savedParent = *(const uint64_t*)(
+                        savedCharacter + entry + parentOffset);
+                    if (IsStableCharacterCollisionParent(character, savedParent)) {
+                        *(uint64_t*)(character + entry + parentOffset) = savedParent;
+                    }
+                }
+            }
+
+            constexpr uint32_t sphereBases[] = {0x4E20, 0x5530, 0x5C40};
+            constexpr uint32_t sphereStride = 0x70;
+            for (uint32_t base : sphereBases) {
+                for (uint32_t primitive = 0; primitive < 16; ++primitive) {
+                    uint32_t entry = base + primitive * sphereStride;
+                    if ((size_t)entry + 0x40 > copySize) continue;
+                    uint64_t savedParent = *(const uint64_t*)(
+                        savedCharacter + entry + 0x38);
+                    if (IsStableCharacterCollisionParent(character, savedParent))
+                        *(uint64_t*)(character + entry + 0x38) = savedParent;
                 }
             }
 
