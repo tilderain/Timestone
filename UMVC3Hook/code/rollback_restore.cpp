@@ -784,16 +784,19 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
         saved.restoredPtr = fresh;
 
         // Resource-gated subclass setup can leave a reconstructed shot without
-        // callbacks. Retry its native setup before applying the saved body.
-        bool needsCallbackSetup = false;
+        // callbacks. Retry only when every slot is empty: setup overwrites and
+        // registers all of its callbacks, so rerunning a partial setup orphans
+        // the callbacks that were already registered.
+        bool savedHasCallbacks = false;
+        bool freshHasCallbacks = false;
         for (uint32_t index = 0; index < 13; ++index) {
-            if (saved.concrete.callbackEffects[index].occupied &&
-                !*(void**)((uint8_t*)fresh + 0x1F78 + index * sizeof(void*))) {
-                needsCallbackSetup = true;
-                break;
-            }
+            savedHasCallbacks |=
+                saved.concrete.callbackEffects[index].occupied;
+            freshHasCallbacks |=
+                *(void**)((uint8_t*)fresh + 0x1F78 + index * sizeof(void*)) !=
+                nullptr;
         }
-        if (needsCallbackSetup) {
+        if (savedHasCallbacks && !freshHasCallbacks) {
             uint64_t vtable = *(uint64_t*)fresh;
             uint64_t setupAddress = vtable &&
                 IsAccessibleRange(vtable + 0x28, sizeof(uint64_t))
