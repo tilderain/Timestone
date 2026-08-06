@@ -193,11 +193,11 @@ static bool IsLinkedShot(void* shot)
 static bool IsTerminalShot(void* shot)
 {
     if (!shot || !IsActiveUnit(shot)) return false;
-    float lifeFrame = *(float*)((uint8_t*)shot + 0x2078);
-    float timer = *(float*)((uint8_t*)shot + 0x1F60);
     uint32_t step = *(uint32_t*)((uint8_t*)shot + 0x212C);
-    return std::isfinite(lifeFrame) && lifeFrame <= 0.0f &&
-           std::isfinite(timer) && timer > 0.0f && step == 3;
+    uint8_t flags = *(uint8_t*)((uint8_t*)shot + 0x1F64);
+    // Step 3 is uShot's cleanup branch. Once native hit judgment is disabled,
+    // reconstructing the still-linked object can resurrect stale collisions.
+    return step == 3 && (flags & 0x02) == 0;
 }
 
 static void CapturePreSpawnRng(RollbackShotRecipe& recipe, void* ownerChr)

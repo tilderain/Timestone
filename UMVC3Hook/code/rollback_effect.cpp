@@ -22,6 +22,8 @@ static constexpr uintptr_t PTR_SSTAGE = 0x140d4f718;
 static constexpr uintptr_t PTR_SCHARACTER = 0x140d44a70;
 static constexpr uintptr_t FN_SGAMEEFFECT_FLUSH_PENDING = 0x140130D00;
 static constexpr uintptr_t FN_SGAMEEFFECT_FLUSH_HIT_MARKS = 0x140131070;
+static constexpr uintptr_t FN_MTOBJECT_IS_KIND_OF = 0x14004F0B0;
+static constexpr uintptr_t FN_MTOBJECT_REPLACE_INDEXED_SLOT = 0x140056F30;
 static constexpr uintptr_t FN_UGAMEEFFECT_CREATE = 0x140131410;
 static constexpr uintptr_t FN_UGAMEEFFECT_OPERATOR_NEW = 0x140139E00;
 static constexpr uintptr_t FN_DRSTRANGE_UPDATE_SUMMONS = 0x14007B9E0;
@@ -63,6 +65,9 @@ static uint64_t(__fastcall* oEffectCreateGenerator)(void*) = nullptr;
 static void(__fastcall* oParticleManagerReleaseSubBuffer)(void*) = nullptr;
 static void(__fastcall* oGameEffectFlushPending)(void*) = nullptr;
 static void(__fastcall* oGameEffectFlushHitMarks)(void*) = nullptr;
+static uint8_t(__fastcall* oMtObjectIsKindOf)(void*, void*) = nullptr;
+static void(__fastcall* oMtObjectReplaceIndexedSlot)(void*, uint32_t, void*) =
+    nullptr;
 static void(__fastcall* oKirigakureEffectUpdate)(void*) = nullptr;
 static std::vector<RollbackEffectRecipe> g_liveEffectRecipes;
 static uint64_t g_effectSpawnSequence = 0;
@@ -517,6 +522,33 @@ static void __fastcall hkGameEffectFlushHitMarks(void* manager)
     oGameEffectFlushHitMarks(manager);
 }
 
+static uint8_t __fastcall hkMtObjectIsKindOf(void* object, void* dti)
+{
+    if (g_isResimulating) {
+        if (!object || !IsAccessibleRange((uint64_t)object, sizeof(uint64_t)))
+            return 0;
+        uint64_t vtable = *(uint64_t*)object;
+        if (!vtable || !IsAccessibleRange(vtable + 0x20, sizeof(uint64_t)) ||
+            !IsExecutableAddress(*(uint64_t*)(vtable + 0x20))) {
+            return 0;
+        }
+    }
+    return oMtObjectIsKindOf(object, dti);
+}
+
+static void __fastcall hkMtObjectReplaceIndexedSlot(
+    void* owner, uint32_t index, void* replacement)
+{
+    if (g_isResimulating && owner && index < 21 && IsAccessibleRange(
+            (uint64_t)owner + 0x6748 + index * sizeof(void*), sizeof(void*))) {
+        void** slot = (void**)((uint8_t*)owner + 0x6748 +
+                               index * sizeof(void*));
+        if (*slot && !HasCallableDtiVirtual(*slot))
+            *slot = nullptr;
+    }
+    oMtObjectReplaceIndexedSlot(owner, index, replacement);
+}
+
 static void __fastcall hkKirigakureEffectUpdate(void* effect)
 {
     RollbackHookProfileScope profile(RollbackHookProfileId::KirigakureEffectUpdate);
@@ -706,6 +738,27 @@ void Effect_InitHooks()
         HookLog("Rollback: guarded sGameEffect hit-mark effect slots\n");
     } else {
         HookLog("Rollback: failed to guard hit-mark effect slots (%d)\n",
+                status);
+    }
+
+    status = MH_CreateHook((LPVOID)_addr(FN_MTOBJECT_IS_KIND_OF),
+                           (LPVOID)&hkMtObjectIsKindOf,
+                           (LPVOID*)&oMtObjectIsKindOf);
+    if (status == MH_OK) {
+        MH_EnableHook((LPVOID)_addr(FN_MTOBJECT_IS_KIND_OF));
+        HookLog("Rollback: guarded stale MtObject type checks\n");
+    } else {
+        HookLog("Rollback: failed to guard MtObject type checks (%d)\n", status);
+    }
+
+    status = MH_CreateHook((LPVOID)_addr(FN_MTOBJECT_REPLACE_INDEXED_SLOT),
+                           (LPVOID)&hkMtObjectReplaceIndexedSlot,
+                           (LPVOID*)&oMtObjectReplaceIndexedSlot);
+    if (status == MH_OK) {
+        MH_EnableHook((LPVOID)_addr(FN_MTOBJECT_REPLACE_INDEXED_SLOT));
+        HookLog("Rollback: guarded stale indexed effect replacement\n");
+    } else {
+        HookLog("Rollback: failed to guard indexed effect replacement (%d)\n",
                 status);
     }
 

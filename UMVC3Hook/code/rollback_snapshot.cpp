@@ -726,9 +726,8 @@ static int BuildRegionsUncached(Region* regions, int maxRegions,
 #endif
     );
 
-    // sEffect+0x3C is presentation-only RNG. Effect updates are intentionally
-    // skipped during headless re-simulation, so this peer-local stream must not
-    // participate in authoritative snapshot comparison or restoration.
+    // sEffect+0x3C is peer-local presentation RNG. Shot recipes capture the
+    // exact pre-spawn value they need; it is not authoritative frame state.
 
     // ---- 2. sShot manager header and shot ID pool ----
     // Keep intrusive sentinel topology live; recipes reconcile shot lifetime.
