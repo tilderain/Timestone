@@ -134,6 +134,17 @@ Only recipes for shots still linked in `sShot` are copied into a frame snapshot.
 Terminal/deferred-cleanup cases are filtered so rollback does not resurrect a
 shot that was already dying.
 
+Reconstructed shots also validate character hit callbacks against the current
+category-8 `sUnit` character list. The `20260805_233025` Dante mirror dump had
+matching `uShotVulcanAirPlay` state through frame 3409, then the client accepted
+a contact with `0x0F4E4FD0`, an address absent from every captured roster,
+helper, shot, and snapshot region. That contact set `uShot+0x1FE0` to
+`0x08200020`, moved the shot from step 1 to step 2 at frame 3411, and removed it
+at frame 3412; the host continued until its later contact with a roster Dante.
+Only reconstructed-shot contacts whose target is no longer a registered
+character are rejected. Live shots and registered roster, assist, proxy, and
+helper characters retain native hit processing.
+
 ### Restore
 
 `RestoreShotAndEffectRecipes` performs these steps:
@@ -205,6 +216,16 @@ repair writes the local endpoints and computes each world endpoint as
 `shot position + source endpoint`. This bypasses reconstructed parent transforms
 that otherwise cancel both X offsets inside virtual `+0x1C8`. It does not modify
 shared `rShot` metadata or collision-entry ownership.
+The repair is limited to capsules whose native post-update world endpoints have
+actually collapsed to a zero-length span. The `20260806_002744/002745` Dante
+pair showed why valid capsules must remain native: each Acid Rain drop uses a
+swept capsule from its current position to its previous position. Shot position,
+matrices, movement, timers, and phase matched, but unconditional source
+reapplication froze the reconstructed client's trailing offset at `76.2` while
+the host advanced through `77.472`, `78.82`, and `80.25` as the drop accelerated.
+The split repeated three frames after every five-drop batch. Preserving a valid
+native span retains this shot-specific sweep while the zero-span Tron repair
+continues to handle genuinely collapsed geometry.
 
 The AnmChr return slot at `cChr+0x90` is a union, not an unconditional object
 pointer. Shot reconstruction remaps it when it equals a captured shot, but must

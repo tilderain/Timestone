@@ -907,6 +907,11 @@ void ConcreteShotSnapshot_ReapplyCapsules(
         uint32_t liveMetadataType = *(uint32_t*)(metadata + 0x14);
         if (liveMetadataType != 1) continue;
 
+        // Native swept capsules can intentionally span the current and prior
+        // shot positions. Only replace geometry that actually collapsed.
+        if (EndpointSpanSquared((const uint8_t*)(primitive + 0x20)) > 0.0001f)
+            continue;
+
         const float* start = (const float*)saved.sourceGeometry;
         const float* end = (const float*)(saved.sourceGeometry + 0x10);
         bool centered = std::fabs(start[0] + end[0]) < 0.01f;
