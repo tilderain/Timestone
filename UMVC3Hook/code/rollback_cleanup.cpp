@@ -215,7 +215,9 @@ void Rollback_ClearStalePointers()
     static constexpr uintptr_t SLOT_ARRAY_OFFSET = 0x6748;
     static constexpr uint32_t SLOT_COUNT = 21;
     static_assert(SLOT_ARRAY_OFFSET + SLOT_COUNT * sizeof(uint64_t) <= 0x67F0);
-    static constexpr uint32_t STALE_SLOT_INDICES[] = {1, 14, 15};
+    // Slots 14/15 commonly own persistent presentation effects. Preserve valid
+    // live owners and let the all-slot validation below clear only stale ones.
+    static constexpr uint32_t STALE_SLOT_INDICES[] = {1};
     MemoryRegionCache memory;
 
     for (int teamIndex = 0; teamIndex < 2; ++teamIndex) {

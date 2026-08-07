@@ -239,6 +239,17 @@ confirming that the later RNG mismatch was consumption by the missing shot.
 The confirmed shot-reference ring head at `cChr+0x6428` retains strict invalid
 object clearing.
 
+Character indexed slots 14/15 at `cChr+0x67B8/+0x67C0` commonly own persistent
+presentation effects. Unconditionally clearing those slots during every restore
+leaves their live effects orphaned and causes characters to allocate replacements
+on each replay. Trish Maximum Voltage exposed the gameplay consequence: stacked
+weapon effects temporarily exhausted the shared allocator, so otherwise valid
+`uShotVulcanEnergyBolt` factory calls returned null. The focused rerun logged a
+non-null `rShot` at AnmChr caller `0x14010637B`, successful construction at frame
+152, null construction at frames 156/160, and another success at frame 164.
+Preserve valid slot 14/15 owners globally and rely on the all-slot DTI/vtable
+validation pass to clear stale entries; slot 1 retains unconditional clearing.
+
 `sShot` owns a 256-entry projectile-ID pool at `+0x38..+0x437` and the next-ID
 cursor at `+0x438`. The old `0x50`-byte manager capture included only the first
 six entries. Reconstructing shots therefore advanced the client's allocator
