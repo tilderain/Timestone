@@ -170,6 +170,20 @@ fresh asynchronous model has rebuilt the eight joint records referenced through
 as `0x300` from the null table and dispatches through it. Reconstructed missiles
 defer movement until the complete fresh joint table is readable and each joint
 exposes a callable DTI virtual; ordinary live missiles retain native behavior.
+The emplacement setup is retried at its move boundary while the asynchronous
+model or motion resource is incomplete. The retry preserves the verified scalar
+tail at `+0x2120..+0x216f`, including the launch trigger at `+0x212c`, and runs
+before phase logic. Once ready, native `uModel__LoadResource` creates fresh joint
+and motion allocations; historical model pointers are never copied.
+
+Hidden Missiles also consumes pointer-free `uModel::Motion` playback fields to
+derive joint-driven child launch positions. Restore those fields with the same
+ownership-safe per-slot ranges used by King Servbot while preserving the fresh
+allocations at motion offsets `+0x160/+0x178`. The packed emplacement phase at
+`uShot+0x2144` can resemble an accessible pointer, so the verified concrete tail
+must be reapplied explicitly after the generic pointer filter. Without that
+reapply, rollback repeatedly restores phase zero and launches extra children,
+advancing Doom's RNG.
 
 The matrix restore is required even though later movement paths regenerate some
 of them. Generic pre-move collision and pose code can consume the saved attack

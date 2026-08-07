@@ -158,6 +158,7 @@ constexpr int32_t SUITE_COMMAND_TIMEOUT = 600;
 constexpr int32_t SUITE_COMPLETION_TIMEOUT = 3600;
 constexpr int32_t SUITE_QUIET_FRAMES = 20;
 constexpr int32_t NET_SUITE_STABLE_FRAMES = 3;
+constexpr int32_t LONG_LIVED_MOVE_QUIET_FRAMES = 120;
 constexpr int32_t NET_SUITE_DESYNC_FRAMES = 1;
 constexpr int32_t NET_SUITE_HISTORY = 4096;
 
@@ -175,6 +176,15 @@ bool ContainsInsensitive(const char* haystack, const char* needle)
         if (!*b) return true;
     }
     return false;
+}
+
+int32_t RequiredQuietFramesForMove(const char* name)
+{
+    // Hidden Missiles can return Doom to idle well before the emplacement has
+    // finished launching. Keep comparing both peers for two more seconds.
+    if (ContainsInsensitive(name, "Hidden Missiles"))
+        return LONG_LIVED_MOVE_QUIET_FRAMES;
+    return Netplay_IsActive() ? NET_SUITE_STABLE_FRAMES : SUITE_QUIET_FRAMES;
 }
 
 bool FilterContainsNumber(const char* filter, int32_t number)
@@ -758,12 +768,12 @@ void ProcessNetSuitePackets()
         g_netSuiteStableFrames = checksumMatch && bothIdle
             ? g_netSuiteStableFrames + 1 : 0;
         g_suiteStatus.quietFrames = g_netSuiteStableFrames;
-    if (g_netSuiteStableFrames >= NET_SUITE_STABLE_FRAMES &&
+        if (g_netSuiteStableFrames >= g_suiteStatus.requiredQuietFrames &&
             g_suitePhase == SuitePhase::WaitingForCompletion) {
             char reason[160];
             snprintf(reason, sizeof(reason),
                      "checksums stable for %d idle frames (%d/%d reports, %d replaced)",
-                     NET_SUITE_STABLE_FRAMES, g_netSuiteComparedFrames,
+                      g_suiteStatus.requiredQuietFrames, g_netSuiteComparedFrames,
                      g_netSuiteReceivedFrames, g_netSuiteDroppedFrames);
             // A stable suffix is only meaningful after every frame through the
             // current host frame has been compared. Otherwise a delayed client
@@ -2370,8 +2380,10 @@ extern "C" void AutoTest_Process()
             snprintf(g_suiteStatus.currentName,
                      sizeof(g_suiteStatus.currentName), "%s",
                      command->commandListName[0]
-                         ? command->commandListName : command->name);
+                          ? command->commandListName : command->name);
         }
+        g_suiteStatus.requiredQuietFrames =
+            RequiredQuietFramesForMove(g_suiteStatus.currentName);
         uint64_t attacker = GetActiveCharacter(g_suiteStatus.playerIndex);
         uint64_t defender = GetActiveCharacter(g_suiteStatus.playerIndex ^ 1);
         g_suiteDefenderLife = GetCharacterLife(defender);
@@ -2474,7 +2486,7 @@ extern "C" void AutoTest_Process()
 
         bool quiet = g_suiteStatus.charactersStable;
         g_suiteStatus.quietFrames = quiet ? g_suiteStatus.quietFrames + 1 : 0;
-        if (g_suiteStatus.quietFrames >= SUITE_QUIET_FRAMES) {
+        if (g_suiteStatus.quietFrames >= g_suiteStatus.requiredQuietFrames) {
             FinishSuiteCommand(true, "input completed and returned to idle");
         } else if (frame > g_suiteDeadline) {
             FinishSuiteCommand(false, "did not return to idle");

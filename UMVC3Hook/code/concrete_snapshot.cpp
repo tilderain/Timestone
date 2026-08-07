@@ -36,6 +36,7 @@ constexpr size_t kAttackTargetTables[kAttackTargetTableCount] = {
 // size itself always comes from the live object's DTI metadata.
 constexpr uintptr_t kSoulFistDti = 0x140D4B6E8ull;
 constexpr uintptr_t kKingKobunDti = 0x140D4D2B0ull;
+constexpr uintptr_t kMissileEmplacementDti = 0x140D49A60ull;
 constexpr uintptr_t kRyuDti = 0x140D45A10ull;
 constexpr uintptr_t kHsienKoDti = 0x140D455F8ull;
 constexpr uintptr_t kSpencerDti = 0x140D45D40ull;
@@ -816,11 +817,11 @@ bool ConcreteShotSnapshot_Restore(void* shot,
     // pool was rewound, changing per-target hit consumption on the next tick.
     CopyRange(overlay.data(), source, liveSize, {0x1F50, 0x04});
 
-    if (IsDti(snapshot.dti, kKingKobunDti)) {
-        // King Servbot changes movement phase when Motion[0]+0x0A reports
-        // completion bit 2. Reconstruction keeps fresh motion owners and
-        // resources, but must rewind their pointer-free playback state or every
-        // rollback restarts the controller animation before completion.
+    if (IsDti(snapshot.dti, kKingKobunDti) ||
+        IsDti(snapshot.dti, kMissileEmplacementDti)) {
+        // These shots consume model animation state in gameplay. Reconstruction
+        // keeps fresh motion owners and resources, but must rewind pointer-free
+        // playback state or joint-driven phases and launch positions restart.
         CopyRange(overlay.data(), source, liveSize, {0x550, 0x10});
         static constexpr SnapshotRange motionRestoreRanges[] = {
             {0x08, 0x118},

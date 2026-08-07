@@ -536,6 +536,7 @@ static void RestoreKingKobunHelper(void* shot, const ShotRecipe& saved)
 
 static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
 {
+    constexpr uintptr_t DTI_USHOT_VULCAN_MISSILE_EMPLACEMENT = 0x140D49A60;
     if (!Shot_HooksReady()) {
         HookLog("Rollback: shot restore skipped because lifecycle hooks are unavailable\n");
         return;
@@ -867,6 +868,15 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
         }
         const uint64_t concreteEnd = Profile_Now();
         respawnConcreteTicks += concreteEnd - registerEnd;
+        if (saved.concrete.dti ==
+                (uint64_t)_addr(DTI_USHOT_VULCAN_MISSILE_EMPLACEMENT) &&
+            saved.concrete.body.size() >= 0x2170) {
+            // The packed phase qword at +0x2140 can resemble an accessible
+            // pointer, causing the generic ownership filter to retain factory
+            // phase zero. This concrete tail is verified scalar state.
+            std::memcpy((uint8_t*)fresh + 0x2120,
+                        saved.concrete.body.data() + 0x2120, 0x50);
+        }
         RestoreKingKobunHelper(fresh, saved);
         if (saved.concrete.dti == (uint64_t)_addr(0x140D4D2B0) &&
             saved.concrete.body.size() >= 0x2164) {

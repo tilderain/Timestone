@@ -39,6 +39,7 @@ static constexpr uintptr_t FN_BUILD_ATTACH_MATRIX = 0x14014F960;
 static constexpr uintptr_t FN_SUNIT_REMOVE_UNIT = 0x14051B9F0;
 static constexpr uintptr_t FN_KING_KOBUN_MOVE = 0x1401BA2D0;
 static constexpr uintptr_t FN_MISSILE_EMPLACEMENT_MOVE = 0x14016F220;
+static constexpr uintptr_t DTI_USHOT_VULCAN_MISSILE_EMPLACEMENT = 0x140D49A60;
 static constexpr int DYNAMIC_SAFETY = 128;
 static constexpr int SSHOT_SENTINEL_COUNT = 10;
 static constexpr size_t SSHOT_NODE_OFFSET = 0x1450;
@@ -530,16 +531,56 @@ static void __fastcall hkKingKobunMove(void* shot)
     }
 }
 
-static void __fastcall hkMissileEmplacementMove(void* shot)
+static bool IsReconstructedMissileEmplacement(void* shot)
+{
+    auto recipe = g_liveShotRecipes.find(shot);
+    return recipe != g_liveShotRecipes.end() && recipe->second.reconstructed &&
+        HasCallableDtiVirtual(shot) &&
+        GetObjectDti((uint64_t)shot) ==
+             (uint64_t)_addr(DTI_USHOT_VULCAN_MISSILE_EMPLACEMENT);
+}
+
+static void RetryMissileEmplacementSetup(void* shot)
+{
+    constexpr size_t CONCRETE_STATE_OFFSET = 0x2120;
+    constexpr size_t CONCRETE_STATE_SIZE = 0x50;
+    uint8_t concreteState[CONCRETE_STATE_SIZE];
+    std::memcpy(concreteState, (uint8_t*)shot + CONCRETE_STATE_OFFSET,
+                sizeof(concreteState));
+
+    uint64_t vtable = *(uint64_t*)shot;
+    uint64_t setup = IsAccessibleRange(vtable + 0x28, sizeof(uint64_t))
+        ? *(uint64_t*)(vtable + 0x28) : 0;
+    if (setup && IsExecutableAddress(setup)) {
+        ((void(__fastcall*)(void*))setup)(shot);
+        InvalidateMemoryQueryCache();
+        std::memcpy((uint8_t*)shot + CONCRETE_STATE_OFFSET, concreteState,
+                    sizeof(concreteState));
+    }
+}
+
+static bool MissileEmplacementJointsReady(void* shot)
 {
     constexpr size_t JOINT_TABLE_OFFSET = 0x538;
     constexpr size_t JOINT_STRIDE = 0xC0;
-    constexpr uint32_t JOINT_COUNT = 8;
+    constexpr size_t JOINT_COUNT_OFFSET = 0x530;
+    uint32_t jointCount = *(uint32_t*)((uint8_t*)shot + JOINT_COUNT_OFFSET);
     uint64_t joints = *(uint64_t*)((uint8_t*)shot + JOINT_TABLE_OFFSET);
-    if (!joints || !IsAccessibleRange(joints, JOINT_STRIDE * JOINT_COUNT))
-        return;
-    for (uint32_t index = 0; index < JOINT_COUNT; ++index) {
-        if (!HasCallableDtiVirtual((void*)(joints + index * JOINT_STRIDE)))
+    bool ready = jointCount > 0 && jointCount <= 256 && joints &&
+        IsAccessibleRange(joints, JOINT_STRIDE * jointCount);
+    for (uint32_t index = 0; ready && index < jointCount; ++index) {
+        ready = HasCallableDtiVirtual(
+            (void*)(joints + index * JOINT_STRIDE));
+    }
+    return ready;
+}
+
+static void __fastcall hkMissileEmplacementMove(void* shot)
+{
+    if (IsReconstructedMissileEmplacement(shot) &&
+        !MissileEmplacementJointsReady(shot)) {
+        RetryMissileEmplacementSetup(shot);
+        if (!MissileEmplacementJointsReady(shot))
             return;
     }
     oMissileEmplacementMove(shot);
@@ -699,8 +740,8 @@ void Shot_InitHooks()
     InstallHook(FN_MISSILE_EMPLACEMENT_MOVE,
                 (LPVOID)&hkMissileEmplacementMove,
                 (void**)&oMissileEmplacementMove,
-                "Rollback: hooked missile emplacement joint guard",
-                "Rollback: failed to hook missile emplacement joint guard (%d)\n");
+                "Rollback: hooked reconstructed missile emplacement model retry",
+                "Rollback: failed to hook missile emplacement model retry (%d)\n");
     InstallHook(FN_SUNIT_REMOVE_UNIT, (LPVOID)&hkUnitRemove, (void**)&oUnitRemove,
                  "Rollback: hooked sUnit__removeUnit for recipe lifetime",
                  "Rollback: failed to hook sUnit__removeUnit (%d)\n");

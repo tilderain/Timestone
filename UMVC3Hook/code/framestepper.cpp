@@ -954,7 +954,10 @@ void FrameStepper_Process()
     while (Netplay_GetInboundRestartMatch(remoteRestartFrame, remoteRestartSeed,
                                            remoteRestartKind, remoteRestartButton)) {
         AutoTest_PrepareForRestart();
-        Controller_ClearDesyncDetection();
+        // Keep a delayed desync snapdump alive until the synchronized restart
+        // actually executes. Clearing here cancels the client's capture as
+        // soon as it receives the host's restart packet; execution clears the
+        // same state at the target frame below.
         Rollback_ClearPendingReSimulation();
         g_restartTargetFrame = remoteRestartFrame;
         g_restartRoundSeed = remoteRestartSeed;
