@@ -28,8 +28,10 @@ static constexpr uint32_t SUNIT_MULTI_MASK_COUNT_OFFSET = 0x1840;
 static constexpr uint32_t SUNIT_MULTI_MASK_ARRAYS_OFFSET = 0xC50;
 static constexpr uintptr_t VTABLE_USHOT_VULCAN_ZIREITOU = 0x140AC0E20;
 static constexpr uintptr_t PTR_SREPLAY = 0x140d4d9d8;
+static constexpr uintptr_t PTR_SUNIT = 0x140E17698;
 static constexpr uintptr_t FN_SSHOT_SPAWN = 0x140150E00;
 static constexpr uintptr_t FN_SSHOT_SPAWN_EX = 0x140150F40;
+static constexpr uintptr_t FN_USHOT_PROCESS_HIT_COLLISION = 0x1401C6950;
 static constexpr uintptr_t FN_USHOT_UPDATE_HITBOXES = 0x1401C9000;
 static constexpr uintptr_t FN_USHOT_KILL_CALLBACKS = 0x1401C9A20;
 static constexpr uintptr_t FN_USHOT_CLEAR_DEAD_CALLBACKS = 0x1401C9AB0;
@@ -41,6 +43,7 @@ static constexpr int DYNAMIC_SAFETY = 128;
 static constexpr int SSHOT_SENTINEL_COUNT = 10;
 static constexpr size_t SSHOT_NODE_OFFSET = 0x1450;
 static constexpr size_t SSHOT_NODE_NEXT = 0x08;
+static constexpr uint32_t SUNIT_CHARACTER_CATEGORY = 8;
 
 using ShotSpawnFn = void*(__fastcall*)(void*, void*, uint64_t, void*, void*,
     void*, uint32_t, void*);
@@ -48,6 +51,7 @@ using ShotSpawnExFn = void*(__fastcall*)(void*, void*, uint64_t, void*, void*,
     void*, uint32_t, void*, int, void*, int, void*);
 using UnitRemoveFn = char(__fastcall*)(void*, void*);
 using BuildAttachMatrixFn = void(__fastcall*)(void*, void*, char);
+using ShotProcessHitCollisionFn = void(__fastcall*)(void*, void*, void*);
 using ShotUpdateHitboxesFn = void(__fastcall*)(void*);
 using KingKobunMoveFn = void(__fastcall*)(void*);
 using MissileEmplacementMoveFn = void(__fastcall*)(void*);
@@ -56,6 +60,7 @@ static ShotSpawnFn oShotSpawn = nullptr;
 static ShotSpawnExFn oShotSpawnEx = nullptr;
 static UnitRemoveFn oUnitRemove = nullptr;
 static BuildAttachMatrixFn oBuildAttachMatrix = nullptr;
+static ShotProcessHitCollisionFn oShotProcessHitCollision = nullptr;
 static ShotUpdateHitboxesFn oShotUpdateHitboxes = nullptr;
 static void(__fastcall* oShotKillCallbacks)(void*, uint32_t) = nullptr;
 static void(__fastcall* oShotClearDeadCallbacks)(void*) = nullptr;
@@ -65,6 +70,7 @@ static std::unordered_map<void*, RollbackShotRecipe> g_liveShotRecipes;
 static uint64_t g_shotSpawnSequence = 0;
 static int g_kingKobunTraceCount = 0;
 static uint32_t g_unitLinkRepairLogCount = 0;
+static uint32_t g_staleHitTargetLogCount = 0;
 
 static bool HasValidUnitLink(void* unit)
 {
@@ -186,6 +192,27 @@ static bool IsLinkedShot(void* shot)
             if ((void*)(nodeRef - SSHOT_NODE_OFFSET) == shot) return true;
             nodeRef = *(uint64_t*)(nodeRef + SSHOT_NODE_NEXT);
         }
+    }
+    return false;
+}
+
+static bool IsCurrentCharacterCollisionTarget(void* target)
+{
+    uint64_t sUnit = *(uint64_t*)_addr(PTR_SUNIT);
+    if (!target || !sUnit ||
+        !IsAccessibleRange(sUnit + SUNIT_CATEGORY_COUNT_OFFSET,
+                           sizeof(uint32_t)) ||
+        *(uint32_t*)(sUnit + SUNIT_CATEGORY_COUNT_OFFSET) <=
+            SUNIT_CHARACTER_CATEGORY) {
+        return false;
+    }
+
+    void* character = *(void**)(sUnit + SUNIT_CATEGORY_LISTS_OFFSET +
+        SUNIT_CATEGORY_LIST_STRIDE * SUNIT_CHARACTER_CATEGORY);
+    for (int safety = 128; character && safety-- > 0;) {
+        if (character == target) return true;
+        if (!IsAccessibleRange((uint64_t)character, 0x20)) return false;
+        character = *(void**)((uint8_t*)character + 0x18);
     }
     return false;
 }
@@ -372,6 +399,29 @@ static void __fastcall hkShotUpdateHitboxes(void* shot)
     auto recipe = g_liveShotRecipes.find(shot);
     if (recipe != g_liveShotRecipes.end() && recipe->second.reconstructed)
         ConcreteShotSnapshot_ReapplyCapsules(shot, recipe->second.concrete);
+}
+
+static void __fastcall hkShotProcessHitCollision(void* shot, void* target,
+                                                  void* contact)
+{
+    auto recipe = g_liveShotRecipes.find(shot);
+    if (recipe != g_liveShotRecipes.end() && recipe->second.reconstructed &&
+        !IsCurrentCharacterCollisionTarget(target)) {
+        uint64_t dti = target && HasCallableDtiVirtual(target)
+            ? GetObjectDti((uint64_t)target) : 0;
+        uint32_t state = target &&
+            IsAccessibleRange((uint64_t)target + 0x10, sizeof(uint32_t))
+            ? *(uint32_t*)((uint8_t*)target + 0x10) : 0;
+        uint64_t replay = *(uint64_t*)_addr(PTR_SREPLAY);
+        int32_t frame = replay ? *(int32_t*)(replay + 0x54) : -1;
+        if (g_staleHitTargetLogCount++ < 64) {
+            HookLog("Rollback: rejected stale shot hit target frame=%d "
+                    "shot=0x%llX target=0x%llX dti=0x%llX state=0x%08X\n",
+                    frame, (uint64_t)shot, (uint64_t)target, dti, state);
+        }
+        return;
+    }
+    oShotProcessHitCollision(shot, target, contact);
 }
 
 static void __fastcall hkShotKillCallbacks(void* shot, uint32_t slot)
@@ -596,6 +646,7 @@ void Shot_Reset()
 {
     g_liveShotRecipes.clear();
     g_shotSpawnSequence = 0;
+    g_staleHitTargetLogCount = 0;
 }
 
 static void InstallHook(uintptr_t address, void* replacement, void** original,
@@ -626,6 +677,11 @@ void Shot_InitHooks()
                 (void**)&oShotUpdateHitboxes,
                 "Rollback: hooked uShot hitbox update tail repair",
                 "Rollback: failed to hook uShot hitbox update tail repair (%d)\n");
+    InstallHook(FN_USHOT_PROCESS_HIT_COLLISION,
+                (LPVOID)&hkShotProcessHitCollision,
+                (void**)&oShotProcessHitCollision,
+                "Rollback: hooked uShot hit collision validation",
+                "Rollback: failed to hook uShot hit collision validation (%d)\n");
     /*InstallHook(FN_USHOT_KILL_CALLBACKS,
                 (LPVOID)&hkShotKillCallbacks,
                 (void**)&oShotKillCallbacks,
