@@ -990,9 +990,13 @@ void FrameStepper_Process()
     {
         // Discard stale alerts from the previous generation while the restart
         // barrier is rebuilding the shared frame and RNG epochs.
+        // Autotest queues that restart immediately after a mismatch; keep the
+        // trigger so the client can write its snapdump before the reset.
+        const bool autoTestTrigger = desyncPacket.action == DESYNC_TRIGGER &&
+                                     AutoTest_IsActive();
         if (Netplay_IsActive() &&
             (!FrameStepper_IsBattleSynchronized() ||
-             FrameStepper_IsMatchRestartPending() ||
+             (FrameStepper_IsMatchRestartPending() && !autoTestTrigger) ||
              desyncPacket.battle_generation != g_battleGeneration))
             continue;
 
