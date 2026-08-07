@@ -174,7 +174,11 @@ The emplacement setup is retried at its move boundary while the asynchronous
 model or motion resource is incomplete. The retry preserves the verified scalar
 tail at `+0x2120..+0x216f`, including the launch trigger at `+0x212c`, and runs
 before phase logic. Once ready, native `uModel__LoadResource` creates fresh joint
-and motion allocations; historical model pointers are never copied.
+and motion allocations; historical model pointers are never copied. Setup can
+finish synchronously on the retry and immediately continue into launch logic,
+so preserve the same pointer-free motion playback ranges across that call. If
+setup resets them, the first child derives a different joint Y position while
+later children can still agree.
 
 Hidden Missiles also consumes pointer-free `uModel::Motion` playback fields to
 derive joint-driven child launch positions. Restore those fields with the same
@@ -184,6 +188,15 @@ allocations at motion offsets `+0x160/+0x178`. The packed emplacement phase at
 must be reapplied explicitly after the generic pointer filter. Without that
 reapply, rollback repeatedly restores phase zero and launches extra children,
 advancing Doom's RNG.
+
+Doom specializes inherited character tail `+0x68f0` as the active missile
+emplacement pointer. `uDoctorDoom__tick` validates this object every frame, and
+the combo-matcher callback `uDoctorDoom__checkShotTimerNegative` reads its
+`uShot+0x2078` lifetime to accept Hidden Missiles mash extensions. Generic
+character metadata incorrectly describes `+0x68f0` as a float, so restoring its
+scalar bytes clears the client reference after shot reconstruction. After all
+generic tail restoration, bind this slot to the unique fresh emplacement recipe
+owned by Doom; never copy the historical shot address.
 
 The matrix restore is required even though later movement paths regenerate some
 of them. Generic pre-move collision and pose code can consume the saved attack

@@ -544,9 +544,31 @@ static void RetryMissileEmplacementSetup(void* shot)
 {
     constexpr size_t CONCRETE_STATE_OFFSET = 0x2120;
     constexpr size_t CONCRETE_STATE_SIZE = 0x50;
+    constexpr size_t MOTION_HEADER_OFFSET = 0x550;
+    constexpr size_t MOTION_BASE = 0x560;
+    constexpr size_t MOTION_STRIDE = 0x180;
+    constexpr size_t MOTION_COUNT = 8;
+    struct MotionPlaybackState {
+        uint8_t state08[0x118];
+        uint8_t state140[0x20];
+        uint8_t state168[0x08];
+    };
     uint8_t concreteState[CONCRETE_STATE_SIZE];
+    uint8_t motionHeader[0x10];
+    MotionPlaybackState motionState[MOTION_COUNT];
     std::memcpy(concreteState, (uint8_t*)shot + CONCRETE_STATE_OFFSET,
                 sizeof(concreteState));
+    std::memcpy(motionHeader, (uint8_t*)shot + MOTION_HEADER_OFFSET,
+                sizeof(motionHeader));
+    for (size_t motion = 0; motion < MOTION_COUNT; ++motion) {
+        uint8_t* source = (uint8_t*)shot + MOTION_BASE + motion * MOTION_STRIDE;
+        std::memcpy(motionState[motion].state08, source + 0x08,
+                    sizeof(motionState[motion].state08));
+        std::memcpy(motionState[motion].state140, source + 0x140,
+                    sizeof(motionState[motion].state140));
+        std::memcpy(motionState[motion].state168, source + 0x168,
+                    sizeof(motionState[motion].state168));
+    }
 
     uint64_t vtable = *(uint64_t*)shot;
     uint64_t setup = IsAccessibleRange(vtable + 0x28, sizeof(uint64_t))
@@ -556,6 +578,18 @@ static void RetryMissileEmplacementSetup(void* shot)
         InvalidateMemoryQueryCache();
         std::memcpy((uint8_t*)shot + CONCRETE_STATE_OFFSET, concreteState,
                     sizeof(concreteState));
+        std::memcpy((uint8_t*)shot + MOTION_HEADER_OFFSET, motionHeader,
+                    sizeof(motionHeader));
+        for (size_t motion = 0; motion < MOTION_COUNT; ++motion) {
+            uint8_t* destination =
+                (uint8_t*)shot + MOTION_BASE + motion * MOTION_STRIDE;
+            std::memcpy(destination + 0x08, motionState[motion].state08,
+                        sizeof(motionState[motion].state08));
+            std::memcpy(destination + 0x140, motionState[motion].state140,
+                        sizeof(motionState[motion].state140));
+            std::memcpy(destination + 0x168, motionState[motion].state168,
+                        sizeof(motionState[motion].state168));
+        }
     }
 }
 

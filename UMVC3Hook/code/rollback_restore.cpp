@@ -108,8 +108,11 @@ static constexpr uint64_t MT_DTI_VTABLE = 0x140A69ED8;
 static constexpr uintptr_t DTI_UACTION_SIDE_CAMERA = 0x140D44268;
 static constexpr size_t SHITSOLVER_DATA_OFF = 0x58;
 static constexpr uintptr_t VTABLE_UCAP_AMERICA = 0x140A71430;
+static constexpr uintptr_t VTABLE_UDOCTOR_DOOM = 0x140A73A40;
 static constexpr uintptr_t DTI_USHOT_OPTION_SHIELD_SLASH = 0x140D48A68;
+static constexpr uintptr_t DTI_USHOT_VULCAN_MISSILE_EMPLACEMENT = 0x140D49A60;
 static constexpr uint32_t UCAP_AMERICA_SHIELD_SLASH_OFFSET = 0x68F0;
+static constexpr uint32_t UDOCTOR_DOOM_MISSILE_OFFSET = 0x68F0;
 
 static bool IsStableCharacterCollisionParent(uint8_t* character, uint64_t parent)
 {
@@ -536,7 +539,6 @@ static void RestoreKingKobunHelper(void* shot, const ShotRecipe& saved)
 
 static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
 {
-    constexpr uintptr_t DTI_USHOT_VULCAN_MISSILE_EMPLACEMENT = 0x140D49A60;
     if (!Shot_HooksReady()) {
         HookLog("Rollback: shot restore skipped because lifecycle hooks are unavailable\n");
         return;
@@ -2069,6 +2071,36 @@ void Rollback_RestoreSnapshot(int32_t frame)
                     (savedRelationship == *liveRelationship ||
                      isTeamCharacter(savedRelationship))
                         ? savedRelationship : 0;
+            }
+
+            if (slot.regions[i].expectedVtable ==
+                    (uint64_t)_addr(VTABLE_UDOCTOR_DOOM) &&
+                UDOCTOR_DOOM_MISSILE_OFFSET + sizeof(void*) <= copySize) {
+                void* savedReference = *(void* const*)(
+                    savedCharacter + UDOCTOR_DOOM_MISSILE_OFFSET);
+                const ShotRecipe* match = nullptr;
+                bool ambiguous = false;
+                for (const ShotRecipe& saved : slot.shotRecipes) {
+                    if (saved.ownerChr != slot.regions[i].ptr ||
+                        saved.concrete.dti != (uint64_t)_addr(
+                            DTI_USHOT_VULCAN_MISSILE_EMPLACEMENT)) {
+                        continue;
+                    }
+                    if (saved.savedPtr == savedReference) {
+                        match = &saved;
+                        ambiguous = false;
+                        break;
+                    }
+                    ambiguous = match != nullptr;
+                    match = &saved;
+                }
+
+                // Doom's concrete tail reuses inherited +0x68F0 as the active
+                // emplacement pointer. The combo matcher reads its life timer
+                // to accept mash extensions, so bind the unique fresh recipe
+                // after generic scalar-tail restoration.
+                *(void**)(character + UDOCTOR_DOOM_MISSILE_OFFSET) =
+                    match && !ambiguous ? match->restoredPtr : nullptr;
             }
         }
         offset += slot.regions[i].size;

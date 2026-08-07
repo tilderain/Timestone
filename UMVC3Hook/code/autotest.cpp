@@ -2039,6 +2039,21 @@ extern "C" bool AutoTest_StartRuntimeCommand(int32_t playerIndex,
         return false;
     }
 
+    if (ContainsInsensitive(commandListName, "Hidden Missiles")) {
+        // Exercise Doom's combo-matcher extension while the emplacement is
+        // active instead of testing only the initial 4+H creation path.
+        for (int32_t repeat = 0; repeat < 8; ++repeat) {
+            if (!AppendRuntimeInput(0x40, 0, 2) ||
+                !AppendRuntimeInput(0x40, 0x40, 2)) {
+                snprintf(g_runtimeExecutionError,
+                         sizeof(g_runtimeExecutionError),
+                         "Could not append Hidden Missiles mash input");
+                g_runtimeScript.stepCount = 0;
+                return false;
+            }
+        }
+    }
+
     if (variantToken == 20) {
         for (int32_t repeat = 0; repeat < 4; ++repeat) {
             if (!AppendRuntimeInput(0x80, 0, 2) ||
