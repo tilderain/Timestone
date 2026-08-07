@@ -13,6 +13,7 @@
 #include "../kiero/minhook/include/MinHook.h"
 
 #include <cmath>
+#include <cstring>
 
 extern void HookLog(const char* fmt, ...);
 
@@ -27,6 +28,12 @@ static constexpr uintptr_t FN_SMAIN_MOVE = 0x140521DF0;
 static constexpr uintptr_t MT_DTI_VTABLE_ADDR = 0x140A69ED8;
 static constexpr uintptr_t FN_MENU_OPTION_KBD_MOVE = 0x140001C40;
 static constexpr uintptr_t FN_MATERIAL_RESOURCE_STATE = 0x1405DD640;
+static constexpr uintptr_t FN_REBUILD_FRUSTUM_PLANES = 0x1405351D0;
+static constexpr uintptr_t PTR_SCAMERA = 0x140E17930;
+static constexpr uint32_t SCAMERA_VIEWPORT0_OFFSET = 0x50;
+static constexpr uint32_t VIEWPORT_CAMERA_OFFSET = 0x08;
+static constexpr uint32_t VIEWPORT_VIEW_MATRIX_OFFSET = 0xA0;
+static constexpr uint32_t CAMERA_GET_VIEW_MATRIX_VTABLE_OFFSET = 0x90;
 
 static RollbackMainMoveFn* g_originalMvc3MainMove = nullptr;
 static void(__fastcall* oCallSRender)(uint64_t) = nullptr;
@@ -37,6 +44,9 @@ static void(__fastcall* oBtGaugeLifeMove)(uint64_t) = nullptr;
 static bool(__fastcall* oRChrCpuClassFunc)(void*, void*) = nullptr;
 using CChrSetPosFn = void(__fastcall*)(uint64_t, const float*);
 static CChrSetPosFn oCChrSetPos = nullptr;
+using RebuildFrustumPlanesFn = void(__fastcall*)(uint64_t);
+using CameraGetViewMatrixFn = void(__fastcall*)(uint64_t, float*);
+static RebuildFrustumPlanesFn oRebuildFrustumPlanes = nullptr;
 
 static bool TraceLifecycleFrame(int32_t frame)
 {
@@ -325,6 +335,38 @@ static uint64_t __fastcall hkMaterialResourceState(uint64_t material)
     return oMaterialResourceState(material);
 }
 
+static void __fastcall hkRebuildFrustumPlanes(uint64_t viewport)
+{
+    uint64_t sCamera = *(uint64_t*)_addr(PTR_SCAMERA);
+    if (!Netplay_IsActive() || !sCamera ||
+        viewport != sCamera + SCAMERA_VIEWPORT0_OFFSET) {
+        oRebuildFrustumPlanes(viewport);
+        return;
+    }
+
+    uint64_t camera = *(uint64_t*)(viewport + VIEWPORT_CAMERA_OFFSET);
+    uint64_t vtable = camera ? *(uint64_t*)camera : 0;
+    uint64_t getViewMatrix = vtable
+        ? *(uint64_t*)(vtable + CAMERA_GET_VIEW_MATRIX_VTABLE_OFFSET) : 0;
+    if (!camera || !vtable || !IsAccessibleRange(camera, 0x50) ||
+        !IsAccessibleAddress(vtable + CAMERA_GET_VIEW_MATRIX_VTABLE_OFFSET) ||
+        !IsExecutableAddress(getViewMatrix)) {
+        oRebuildFrustumPlanes(viewport);
+        return;
+    }
+
+    // Gameplay bounds must use the logical camera, not peer-local screen shake.
+    // Restore the shaken matrix immediately so presentation remains unchanged.
+    alignas(16) float renderView[16];
+    alignas(16) float gameplayView[16];
+    void* viewMatrix = (void*)(viewport + VIEWPORT_VIEW_MATRIX_OFFSET);
+    std::memcpy(renderView, viewMatrix, sizeof(renderView));
+    ((CameraGetViewMatrixFn)getViewMatrix)(camera, gameplayView);
+    std::memcpy(viewMatrix, gameplayView, sizeof(gameplayView));
+    oRebuildFrustumPlanes(viewport);
+    std::memcpy(viewMatrix, renderView, sizeof(renderView));
+}
+
 void Rollback_InitMainHooks(RollbackMainMoveFn* originalMove)
 {
     g_originalMvc3MainMove = originalMove;
@@ -367,4 +409,8 @@ void Rollback_InitMainHooks(RollbackMainMoveFn* originalMove)
                 (void**)&oMaterialResourceState,
                 "Rollback: guarded material resource state",
                 "Rollback: failed to guard material resource state (%d)\n");
+    EnableHook(FN_REBUILD_FRUSTUM_PLANES, (void*)&hkRebuildFrustumPlanes,
+               (void**)&oRebuildFrustumPlanes,
+               "Rollback: isolated camera shake from gameplay bounds",
+               "Rollback: failed to isolate camera shake from gameplay bounds (%d)\n");
 }

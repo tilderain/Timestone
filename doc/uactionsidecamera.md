@@ -30,6 +30,49 @@ and frustum. Later, `sCamera__move @ 0x140532D80` derives render matrices from
 the camera unit. The late callbacks cannot compensate for skipped or incorrectly
 terminated motion in `uActionSideCamera__move`.
 
+## Vibration leakage into gameplay bounds
+
+The slot-0 boundary planes at `sCamera+0x90..+0xCF` are not derived solely from
+the logical `uActionSideCamera` position and target. Their producer chain is:
+
+```text
+sCamera__move @ 0x140532D80
+  -> uActionSideCamera__getViewMatrix @ 0x14001A700
+  -> when sVibration+0x840 is active:
+       sVibration__applyCameraShakeToView @ 0x140524220
+       reads slot-0 offsets at sVibration+0x820..+0x838
+  -> caches the resulting view matrix at viewport+0xA0
+
+uCamera__getBoundary @ 0x140545F70
+  -> sCamera__refreshViewsForBoundary @ 0x140535C80
+  -> sCameraViewport__rebuildFrustumPlanes @ 0x1405351D0
+       reads viewport+0xA0..+0xD8, +0xE0, and +0xF4
+       writes viewport+0x40..+0x9F
+```
+
+For viewport 0, `viewport+0x40` is `sCamera+0x90` and `viewport+0xA0` is
+`sCamera+0xF0`. `uCharacter__classifyCameraBounds @ 0x14004ECA0` later consumes
+these planes as gameplay state.
+
+This caused the Vergil ground Dimension Slash rollback desync. The logical
+camera body and projection inputs were byte-identical, but the cached view
+matrix contained different horizontal shake on each peer. At the failing
+radius-50 comparison, the host plane dot was `47.5856` while the client was
+`51.1809`. The resulting camera-boundary flag changed Vergil's direction and
+gameplay RNG consumption.
+
+The full `sCamera` snapshot does not solve this because each peer captures its
+own presentation-derived matrix. `sVibration` is not snapshotted, and the
+headless tick intentionally skips `sVibration::move`. Replacing the headless
+tick with the original native main tick also reproduces the desync because it
+starts from unrestored prediction-timeline vibration state.
+
+The deterministic correction point is the boundary refresh, not gameplay RNG:
+build its slot-0 frustum from `uActionSideCamera__getViewMatrix` without the
+vibration transform. The later normal `sCamera__move` can still apply vibration
+to the render view, preserving presentation while preventing camera shake from
+affecting gameplay classification.
+
 ## Cinematic dispatcher
 
 `uActionSideCamera__updateMayaMotionOrTracks @ 0x14001C0B0` implements the

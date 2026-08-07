@@ -13,6 +13,7 @@ extern void HookLog(const char* fmt, ...);
 
 static constexpr uintptr_t FN_RNG_RANDOM_INT = 0x14014EB30;
 static constexpr uintptr_t FN_RNG_ADVANCE = 0x14014EAB0;
+static constexpr uintptr_t FN_RNG_LERP_RANDOM = 0x14014EA70;
 static constexpr uintptr_t FN_RNG_NEXT = 0x14000AF80;
 static constexpr uintptr_t FN_RNG_NEXT_IMPL = 0x1404600F0;
 static constexpr uintptr_t FN_EFFECT_NEXT_RANDOM = 0x140543B70;
@@ -48,6 +49,11 @@ static constexpr uintptr_t CLOUD_RNG_CALLSITES[] = {
     0x14076CD9C, 0x14076CE3B,
 };
 static constexpr uintptr_t SHADOW_RNG_CALLSITE = 0x14067584B;
+static constexpr uintptr_t JIGENZAN_EFFECT_RNG_CALLSITES[] = {
+    0x1401C03B0, 0x1401C03D3,
+    0x1401C054E, 0x1401C0571,
+    0x1401C06FA, 0x1401C071D,
+};
 static constexpr uintptr_t FN_SOUND_RANDOM_VARIANT = 0x1402A9110;
 static constexpr uintptr_t FN_HSIENKO_SELECT_ANKI = 0x1400A1260;
 static constexpr uintptr_t FN_SET_RESERVED_ANKI = 0x1400D4D90;
@@ -56,6 +62,7 @@ static constexpr uintptr_t GLOBAL_RNG_STATE = 0x140D765D8;
 
 using RandomIntRangeFn = int(__fastcall*)(void*, int, int, void*);
 using RngAdvanceFn = float(__fastcall*)(uint64_t, void*);
+using RngLerpRandomFn = float(__fastcall*)(uint64_t, float, float, void*);
 using RngNextFn = void(__fastcall*)(uint32_t*);
 using EffectNextRandomFn = uint64_t(__fastcall*)(void*, int);
 using SoundRandomVariantFn = int(__fastcall*)(uint64_t, void*, int);
@@ -65,6 +72,7 @@ using RChrCpuRngModNFn = uint32_t(__fastcall*)(void*, uint32_t);
 
 static RandomIntRangeFn oRandomIntRange = nullptr;
 static RngAdvanceFn oRngAdvance = nullptr;
+static RngLerpRandomFn oRngLerpRandom = nullptr;
 static RngNextFn oRngNext = nullptr;
 static RngNextFn oRngNextImpl = nullptr;
 static EffectNextRandomFn oEffectNextRandom = nullptr;
@@ -78,8 +86,6 @@ static int g_ankiTraceFrame = -1;
 static int g_ankiTraceCount = 0;
 static int g_ankiReserveTraceFrame = -1;
 static int g_ankiReserveTraceCount = 0;
-static int g_advanceTraceFrame = -1;
-static int g_advanceTraceCount = 0;
 
 static int RngTraceFrame();
 
@@ -107,6 +113,8 @@ static bool IsPresentationRngCallsite(uint64_t caller)
     for (uintptr_t address : EFFECT_NOISE_RNG_CALLSITES)
         if (caller == _addr(address)) return true;
     for (uintptr_t address : CLOUD_RNG_CALLSITES)
+        if (caller == _addr(address)) return true;
+    for (uintptr_t address : JIGENZAN_EFFECT_RNG_CALLSITES)
         if (caller == _addr(address)) return true;
     return false;
 }
@@ -141,15 +149,6 @@ static void __fastcall hkRngNextCommon(uint32_t* state, RngNextFn original,
         return;
     }
 
-    int frame = RngTraceFrame();
-    if (frame != g_advanceTraceFrame) {
-        g_advanceTraceFrame = frame;
-        g_advanceTraceCount = 0;
-    }
-
-    uint32_t before[4] = {};
-    if (state)
-        std::memcpy(before, state, sizeof(before));
     const bool isolateGlobalRng = state == (uint32_t*)_addr(GLOBAL_RNG_STATE) &&
         (IsStageObjectCallsite(caller) || IsPresentationRngCallsite(caller));
     uint32_t savedGlobal[4] = {};
@@ -164,20 +163,6 @@ static void __fastcall hkRngNextCommon(uint32_t* state, RngNextFn original,
         //        frame, g_isResimulating ? 1 : 0, caller);
     }
 
-    // Never cap global-stream entries: one hidden presentation or direct
-    // caller is enough to shift the four-word state by one. Keep the cap for
-    // peer-local animation/effect streams, which can be extremely noisy.
-    const bool isGlobalState = state == (uint32_t*)_addr(GLOBAL_RNG_STATE);
-    if (state && (isGlobalState || g_advanceTraceCount++ < 256)) {
-        uint64_t global = _addr(GLOBAL_RNG_STATE);
-        const char* domain = (state == (uint32_t*)global) ? "global" : "other";
-        /*HookLog("RNGNEXT frame=%d resim=%d caller=0x%llX state=0x%llX domain=%s "
-                "before=%08X,%08X,%08X,%08X after=%08X,%08X,%08X,%08X\n",
-                frame, g_isResimulating ? 1 : 0,
-                caller, (uint64_t)state, domain,
-                before[0], before[1], before[2], before[3],
-                state[0], state[1], state[2], state[3]);*/
-    }
 }
 
 static void __fastcall hkRngNext(uint32_t* state)
@@ -197,52 +182,44 @@ static float __fastcall hkRngAdvance(uint64_t stateArg, void* rngOwner)
     if (!Netplay_IsActive())
         return oRngAdvance(stateArg, rngOwner);
 
-    int frame = RngTraceFrame();
-    if (frame != g_advanceTraceFrame) {
-        g_advanceTraceFrame = frame;
-        g_advanceTraceCount = 0;
-    }
-
     uint32_t globalBefore[4] = {};
     uint32_t globalAfter[4] = {};
-    uint32_t ownerBefore[4] = {};
-    if (rngOwner && IsAccessibleAddress((uint64_t)rngOwner + 0x2D8C)) {
-        std::memcpy(ownerBefore, (uint8_t*)rngOwner + 0x2D80,
-                    sizeof(ownerBefore));
-    }
     std::memcpy(globalBefore, (void*)_addr(GLOBAL_RNG_STATE), sizeof(globalBefore));
     const uint64_t caller = (uint64_t)__builtin_return_address(0);
-    const bool isolateGlobalRng = stateArg == _addr(GLOBAL_RNG_STATE) &&
-        (IsStageObjectCallsite(caller) || IsPresentationRngCallsite(caller));
+    const bool presentationCaller =
+        IsStageObjectCallsite(caller) || IsPresentationRngCallsite(caller);
     float result = oRngAdvance(stateArg, rngOwner);
     std::memcpy(globalAfter, (void*)_addr(GLOBAL_RNG_STATE), sizeof(globalAfter));
+    const bool usedGlobalRng =
+        std::memcmp(globalBefore, globalAfter, sizeof(globalBefore)) != 0;
 
-    if (isolateGlobalRng) {
+    if (presentationCaller && usedGlobalRng) {
         std::memcpy((void*)_addr(GLOBAL_RNG_STATE), globalBefore,
                     sizeof(globalBefore));
         //HookLog("PRESENTRNGADV frame=%d resim=%d caller=0x%llX state=preserved\n",
         //        frame, g_isResimulating ? 1 : 0, caller);
     }
+    return result;
+}
 
-    // This is deliberately capped per frame: animation command streams can
-    // legitimately consume many random values, but the first callers are the
-    // useful evidence for locating an unexpected branch.
-    if (g_advanceTraceCount++ < 128) {
-        uint32_t ownerAfter[4] = {};
-        if (rngOwner && IsAccessibleAddress((uint64_t)rngOwner + 0x2D8C)) {
-            std::memcpy(ownerAfter, (uint8_t*)rngOwner + 0x2D80,
-                        sizeof(ownerAfter));
-        }
-        /*HookLog("RNGADV frame=%d resim=%d caller=0x%llX stateArg=0x%llX "
-                "owner=0x%llX result=%.9g global=%08X,%08X,%08X,%08X->%08X,%08X,%08X,%08X "
-                "ownerRng=%08X,%08X,%08X,%08X\n",
-                frame, g_isResimulating ? 1 : 0,
-                caller, stateArg,
-                (uint64_t)rngOwner, result,
-                globalBefore[0], globalBefore[1], globalBefore[2], globalBefore[3],
-                globalAfter[0], globalAfter[1], globalAfter[2], globalAfter[3],
-                ownerBefore[0], ownerBefore[1], ownerBefore[2], ownerBefore[3]);*/
-    }
+static float __fastcall hkRngLerpRandom(uint64_t context, float low, float high,
+                                        void* rngOwner)
+{
+    if (!Netplay_IsActive())
+        return oRngLerpRandom(context, low, high, rngOwner);
+
+    const uint64_t caller = (uint64_t)__builtin_return_address(0);
+    uint32_t before[4] = {};
+    std::memcpy(before, (void*)_addr(GLOBAL_RNG_STATE), sizeof(before));
+    const float result = oRngLerpRandom(context, low, high, rngOwner);
+    uint32_t after[4] = {};
+    std::memcpy(after, (void*)_addr(GLOBAL_RNG_STATE), sizeof(after));
+    const bool usedGlobalRng =
+        std::memcmp(before, after, sizeof(before)) != 0;
+
+    if (usedGlobalRng && IsPresentationRngCallsite(caller))
+        std::memcpy((void*)_addr(GLOBAL_RNG_STATE), before, sizeof(before));
+
     return result;
 }
 
@@ -447,6 +424,20 @@ void Rollback_InitRngHooks()
             HookLog("Rollback: failed to enable shared RNG trace (%d)\n", status);
     } else {
         HookLog("Rollback: failed to hook shared RNG trace (%d)\n", status);
+    }
+
+    status = MH_CreateHook((LPVOID)_addr(FN_RNG_LERP_RANDOM),
+                           (LPVOID)&hkRngLerpRandom,
+                           (LPVOID*)&oRngLerpRandom);
+    if (status == MH_OK) {
+        status = MH_EnableHook((LPVOID)_addr(FN_RNG_LERP_RANDOM));
+        if (status == MH_OK)
+            HookLog("Rollback: isolated presentation lerp RNG at 0x%llX\n",
+                    (uint64_t)_addr(FN_RNG_LERP_RANDOM));
+        else
+            HookLog("Rollback: failed to enable lerp RNG isolation (%d)\n", status);
+    } else {
+        HookLog("Rollback: failed to hook lerp RNG isolation (%d)\n", status);
     }
 
     status = MH_CreateHook((LPVOID)_addr(FN_RCHRCPU_RNG_MOD_N),
