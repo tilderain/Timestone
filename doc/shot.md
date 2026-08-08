@@ -145,6 +145,14 @@ Only reconstructed-shot contacts whose target is no longer a registered
 character are rejected. Live shots and registered roster, assist, proxy, and
 helper characters retain native hit processing.
 
+Stage body references are not effect ownership. `sStage+0x2050` is the active
+`uStage` body used by `uShot__dispatchStageHitContact`, and `sStage+0x2058` is
+the previous body. Both can also appear in effect-category lists, but effect
+retirement must exclude them and leave their manager references intact. Clearing
+the references made reconstructed Okami Shuffle projectiles detect the floor but
+reject the queued stage contact, while destroying the bodies left `sStage`'s
+active array stale. Either failure prevented normal stage-contact processing.
+
 ### Restore
 
 `RestoreShotAndEffectRecipes` performs these steps:

@@ -40,7 +40,7 @@ static constexpr uintptr_t SMVC3MGR_ACTION_OFFSET = 0x48;
 static constexpr uint32_t SUNIT_CATEGORY_COUNT_OFFSET = 0xC38;
 static constexpr uint32_t SUNIT_CATEGORY_LISTS_OFFSET = 0x50;
 static constexpr uint32_t SUNIT_CATEGORY_LIST_STRIDE = 0x30;
-static constexpr uint32_t SSTAGE_EFFECT_OFFSETS[] = {0x2050, 0x2058};
+static constexpr uint32_t SSTAGE_BODY_OFFSETS[] = {0x2050, 0x2058};
 static constexpr uint32_t PARTICLE_MANAGER_STRIDE = 0x150;
 static constexpr uint32_t PARTICLE_MANAGER_BUFFER_OFFSET = 0x130;
 static constexpr uint32_t MAX_PARTICLE_MANAGERS = 256;
@@ -295,22 +295,6 @@ static void DetachExAtkSpaceChildren()
         !IsAccessibleAddress(exAtkSpace + 0x1D30)) return;
 
     std::memset((void*)(exAtkSpace + 0x1D18), 0, 4 * sizeof(uint64_t));
-}
-
-static void SanitizeStageEffectReferences(void* retiringEffect = nullptr)
-{
-    uint64_t sStage = *(uint64_t*)_addr(PTR_SSTAGE);
-    if (!sStage || !IsAccessibleRange(sStage, 0x2060)) return;
-
-    for (uint32_t offset : SSTAGE_EFFECT_OFFSETS) {
-        void** slot = (void**)(sStage + offset);
-        void* effect = *slot;
-        if (!effect) continue;
-        if (effect == retiringEffect || !IsEffectObject(effect) ||
-            !IsActiveUnit(effect)) {
-            *slot = nullptr;
-        }
-    }
 }
 
 static void* __fastcall hkEffectCreate(void* manager, int effectId, int a3,
@@ -654,7 +638,14 @@ int Effect_RetireCurrent(void* sUnit)
 {
     if (!sUnit) return 0;
     DetachExAtkSpaceChildren();
-    SanitizeStageEffectReferences();
+    void* stageBodies[2] = {};
+    uint64_t sStage = *(uint64_t*)_addr(PTR_SSTAGE);
+    if (sStage && IsAccessibleRange(sStage, 0x2060)) {
+        for (size_t index = 0; index < std::size(SSTAGE_BODY_OFFSETS); ++index) {
+            stageBodies[index] =
+                *(void**)(sStage + SSTAGE_BODY_OFFSETS[index]);
+        }
+    }
     std::vector<void*> abandoned;
     uint32_t categoryCount = *(uint32_t*)((uint8_t*)sUnit + SUNIT_CATEGORY_COUNT_OFFSET);
     for (uint32_t category = 13; category <= 16 && category < categoryCount; ++category) {
@@ -664,6 +655,7 @@ int Effect_RetireCurrent(void* sUnit)
             if (g_activeRollbackProfile) ++g_activeRollbackProfile->restoreEffectVisits;
             void* next = *(void**)((uint8_t*)effect + 0x18);
             if (IsEffectObject(effect) && !IsPersistentCharacterEffect(effect) &&
+                effect != stageBodies[0] && effect != stageBodies[1] &&
                 std::find(abandoned.begin(), abandoned.end(), effect) == abandoned.end())
                 abandoned.push_back(effect);
             effect = next;
@@ -681,7 +673,6 @@ int Effect_RetireCurrent(void* sUnit)
         // ticks; repeated resims can otherwise allocate replacements faster
         // than those ticks run and exhaust the effect heap.
         SanitizeEffectForDestruction(effect);
-        SanitizeStageEffectReferences(effect);
         removeFromMultiMask(sUnit, effect);
         removeUnit(sUnit, effect);
         if (!IsAccessibleRange((uint64_t)effect, sizeof(uint64_t))) continue;
