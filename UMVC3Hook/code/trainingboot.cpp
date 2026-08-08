@@ -82,26 +82,17 @@ static constexpr uintptr_t SMVC3MANAGER_INSTANCE_PTR         = 0x140D510A0;
 // that machine's P1 bindings before transmitting the remapped logical input.
 static constexpr uintptr_t SGAMECONFIG_GET_INSTANCE           = 0x140001AB0;
 static constexpr uintptr_t SGAMECONFIG_START_NATIVE_LOAD      = 0x140253620;
-static constexpr uintptr_t SGAMECONFIG_RESOLVE_BINDING_TABLE  = 0x14024F2C0;
+static constexpr uintptr_t SGAMECONFIG_GET_BUTTON_MAPPING     = 0x1402522A0;
+static constexpr uintptr_t SGAMECONFIG_SET_BINDING_TABLE      = 0x140254A20;
+static constexpr uintptr_t SGAMECONFIG_SELECT_BINDING_TABLE   = 0x140254C40;
 static constexpr uintptr_t SGAMECONFIG_STORAGE_BUSY_OFFSET    = 0x4D350;
-static constexpr uintptr_t SGAMECONFIG_PROFILE_OFFSET         = 0x50;
-static constexpr uintptr_t SGAMECONFIG_LOADED_PROFILE_OFFSET  = 0x7A0;
-static constexpr uintptr_t SGAMECONFIG_P1_BINDINGS_OFFSET     = 0xC0;
-static constexpr uintptr_t SGAMECONFIG_P1_ALT_BINDINGS_OFFSET = 0x118;
-static constexpr uintptr_t SGAMECONFIG_DEVICE_TYPE_OFFSET     = 0x170;
-static constexpr uintptr_t SGAMECONFIG_SELECTION_OFFSET       = 0x178;
-static constexpr uintptr_t SGAMECONFIG_CTRL_TYPE_OFFSET       = 0x188;
-static constexpr uintptr_t SGAMECONFIG_BINDING_PTR_OFFSET     = 0x320;
-static constexpr size_t GAMEPLAY_BINDING_TABLE_SIZE           = 11 * sizeof(uint32_t);
-static constexpr uintptr_t CS_ENTER                            = 0x140006D00;
-static constexpr uintptr_t CS_LEAVE                            = 0x14000B860;
+static constexpr uint32_t GAMEPLAY_BINDING_COUNT              = 11;
 
 static constexpr uintptr_t SUNIT_GET_INSTANCE                 = 0x140003160;
 static constexpr uintptr_t SUNIT_ADD_UNIT                      = 0x14051A6B0;
 static constexpr uintptr_t MTOBJECT_SET_FLAG_2000              = 0x1402545A0;
 static constexpr uint32_t STORAGE_UNIT_CATEGORY                = 0x19;
 static constexpr uintptr_t STORAGE_RESULT_OFFSET               = 0x4C;
-static constexpr uintptr_t STORAGE_CALLBACK_OFFSET             = 0x68;
 
 // sPad__initSlotInner receives the embedded Map object, not the slot base.
 static constexpr uintptr_t PAD_SLOT_BASE_OFFSET               = 0x58;
@@ -255,50 +246,6 @@ static void ConfigureTrainingMatchDefaults(uint64_t bs)
 // sMvc3Main__method_3D00 (called from keyboard reader) also checks:
 //   if (pad+0xc20 != 0 || pad+0xc30 != 0) → return 0 (blocked)
 // ---------------------------------------------------------------------------
-static uint8_t __fastcall ApplyLoadedGameConfig(uint64_t config,
-                                                 uint64_t loadedData,
-                                                 uint32_t loadedSize)
-{
-    if (!config || !loadedData || loadedSize <
-        SGAMECONFIG_LOADED_PROFILE_OFFSET +
-            (SGAMECONFIG_CTRL_TYPE_OFFSET - SGAMECONFIG_PROFILE_OFFSET) +
-            sizeof(uint32_t))
-        return 0;
-
-    typedef void(__fastcall* Lock_t)(uint64_t);
-    typedef uint64_t(__fastcall* ResolveTable_t)(uint64_t, uint32_t, uint8_t,
-                                                  int32_t, int32_t);
-
-    const uint8_t* loadedProfile =
-        (const uint8_t*)(loadedData + SGAMECONFIG_LOADED_PROFILE_OFFSET);
-    auto loadedField = [loadedProfile](uintptr_t liveOffset) {
-        return loadedProfile + liveOffset - SGAMECONFIG_PROFILE_OFFSET;
-    };
-
-    // Import only P1's normal and alternate gameplay bindings. Copying the
-    // complete profile also changes voice, announcer, and presentation state.
-    ((Lock_t)_addr(CS_ENTER))(config);
-    std::memcpy((void*)(config + SGAMECONFIG_P1_BINDINGS_OFFSET),
-                loadedField(SGAMECONFIG_P1_BINDINGS_OFFSET),
-                GAMEPLAY_BINDING_TABLE_SIZE);
-    std::memcpy((void*)(config + SGAMECONFIG_P1_ALT_BINDINGS_OFFSET),
-                loadedField(SGAMECONFIG_P1_ALT_BINDINGS_OFFSET),
-                GAMEPLAY_BINDING_TABLE_SIZE);
-    ((Lock_t)_addr(CS_LEAVE))(config);
-
-    uint8_t alternateMap =
-        *(const uint32_t*)loadedField(SGAMECONFIG_CTRL_TYPE_OFFSET) == 1;
-    int32_t deviceType =
-        *(const int32_t*)loadedField(SGAMECONFIG_DEVICE_TYPE_OFFSET);
-    int32_t selection =
-        *(const int32_t*)loadedField(SGAMECONFIG_SELECTION_OFFSET);
-    ResolveTable_t resolveTable =
-        (ResolveTable_t)_addr(SGAMECONFIG_RESOLVE_BINDING_TABLE);
-    *(uint64_t*)(config + SGAMECONFIG_BINDING_PTR_OFFSET) =
-        resolveTable(config, 0, alternateMap, deviceType, selection);
-    return 1;
-}
-
 static bool LoadNativeGameConfig()
 {
     typedef uint64_t(__fastcall* GetInstance_t)();
@@ -318,11 +265,6 @@ static bool LoadNativeGameConfig()
             HookLog("TrainingBoot: native sGameConfig load could not be started\n");
             return false;
         }
-
-        // Keep the native storage registration/state machine, but replace its
-        // broad post-load callback with the training-safe profile apply above.
-        *(uint64_t*)(g_gameConfigLoadUnit + STORAGE_CALLBACK_OFFSET) =
-            (uint64_t)&ApplyLoadedGameConfig;
 
         ((SetFlag_t)_addr(MTOBJECT_SET_FLAG_2000))(g_gameConfigLoadUnit, 1);
         uint64_t sUnit = ((GetInstance_t)_addr(SUNIT_GET_INSTANCE))();
@@ -361,6 +303,9 @@ static void ApplyPlayerOneBindingsToPlayerTwo()
         return;
 
     typedef uint64_t(__fastcall* GetInstance_t)();
+    typedef uint32_t(__fastcall* GetBinding_t)(uint64_t, uint32_t, uint32_t, uint8_t);
+    typedef void(__fastcall* SetBindings_t)(uint64_t, uint32_t, const uint32_t*, uint8_t);
+    typedef void(__fastcall* SelectBindings_t)(uint64_t, uint32_t, uint32_t, uint8_t);
 
     uint64_t config = ((GetInstance_t)_addr(SGAMECONFIG_GET_INSTANCE))();
     if (!config) {
@@ -368,11 +313,20 @@ static void ApplyPlayerOneBindingsToPlayerTwo()
         return;
     }
 
-    // cChrInput__buttonRemap reads these pointers before it accumulates the
-    // client's local input for transmission. Alias local P2 to the resolved P1
-    // table; the host injects the resulting logical mask without remapping it.
-    *(uint64_t*)(config + SGAMECONFIG_BINDING_PTR_OFFSET + 8) =
-        *(uint64_t*)(config + SGAMECONFIG_BINDING_PTR_OFFSET);
+    GetBinding_t getBinding = (GetBinding_t)_addr(SGAMECONFIG_GET_BUTTON_MAPPING);
+    SetBindings_t setBindings = (SetBindings_t)_addr(SGAMECONFIG_SET_BINDING_TABLE);
+    SelectBindings_t selectBindings =
+        (SelectBindings_t)_addr(SGAMECONFIG_SELECT_BINDING_TABLE);
+
+    for (uint8_t alternateMap = 0; alternateMap < 2; ++alternateMap) {
+        uint32_t bindings[GAMEPLAY_BINDING_COUNT];
+        for (uint32_t button = 0; button < GAMEPLAY_BINDING_COUNT; ++button)
+            bindings[button] = getBinding(config, 0, button, alternateMap);
+
+        setBindings(config, 1, bindings, alternateMap);
+        // Selection 3 means the per-player custom table written above.
+        selectBindings(config, 1, 3, alternateMap);
+    }
 
     HookLog("TrainingBoot: Applied client P1 button bindings to local P2 input\n");
 }
