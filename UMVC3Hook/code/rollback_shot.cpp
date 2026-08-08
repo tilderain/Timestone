@@ -50,6 +50,8 @@ static constexpr uintptr_t DTI_USHOT_VULCAN_MISSILE_EMPLACEMENT = 0x140D49A60;
 static constexpr uintptr_t DTI_USHOT_VULCAN_LEGION_TIGER = 0x140D4ABB8;
 static constexpr uintptr_t DTI_USHOT_SHIELD_REPULSOR_BLAST_SP = 0x140D4ADA0;
 static constexpr uintptr_t DTI_USHOT_VULCAN_WEAPON_CART = 0x140D4A1A8;
+static constexpr uintptr_t DTI_USHOT_VULCAN_NEMESIS_ROCKET_LAUNCHER = 0x140D4BA48;
+static constexpr uintptr_t DTI_USHOT_VULCAN_ROCKET_LAUNCHER_EXPLODE = 0x140D4BAC8;
 static constexpr int DYNAMIC_SAFETY = 128;
 static constexpr int SSHOT_SENTINEL_COUNT = 10;
 static constexpr size_t SSHOT_NODE_OFFSET = 0x1450;
@@ -342,6 +344,33 @@ static void RepairResimRepulsorBlastMotion(void* shot)
             shot, 0, 0, 0.0f, 0.0f, 1.0f, 0);
 }
 
+void Shot_RepairNemesisExplosionAttack(void* shot, void* parent)
+{
+    uint64_t shotDti = shot && HasCallableDtiVirtual(shot)
+        ? GetObjectDti((uint64_t)shot) : 0;
+    uint64_t parentDti = parent && HasCallableDtiVirtual(parent)
+        ? GetObjectDti((uint64_t)parent) : 0;
+    if (!shot || !parent || !HasCallableDtiVirtual(shot) ||
+        !HasCallableDtiVirtual(parent) ||
+        shotDti != (uint64_t)_addr(DTI_USHOT_VULCAN_ROCKET_LAUNCHER_EXPLODE) ||
+        parentDti !=
+            (uint64_t)_addr(DTI_USHOT_VULCAN_NEMESIS_ROCKET_LAUNCHER) ||
+        !IsAccessibleRange((uint64_t)shot + 0x1498, sizeof(uint32_t)) ||
+        !IsAccessibleRange((uint64_t)parent + 0x1498, sizeof(uint32_t))) {
+        return;
+    }
+
+    uint32_t& attackInfoId = *(uint32_t*)((uint8_t*)shot + 0x1498);
+    uint32_t parentAttackInfoId =
+        *(uint32_t*)((uint8_t*)parent + 0x1498);
+    if (attackInfoId == 0 && parentAttackInfoId != 0) {
+        // Native BIOWEAPON ASSAULT creation inherits attack 1 from the rocket.
+        // A rollback-created explosion can retain the factory default and apply
+        // the attack-0 air launch, moving its target 13.333 units farther.
+        attackInfoId = parentAttackInfoId;
+    }
+}
+
 static void* __fastcall hkShotSpawn(void* manager, void* element, uint64_t initParam,
                                      void* posData, void* ownerChr, void* objectRef1,
                                      uint32_t slotId, void* objectRef2)
@@ -412,6 +441,7 @@ static void* __fastcall hkShotSpawnEx(void* manager, void* element, uint64_t ini
     void* shot = oShotSpawnEx(manager, element, initParam, posData, ownerChr,
                               objectRef1, slotId, objectRef2, a9, a10, a11, a12);
     RepairResimRepulsorBlastMotion(shot);
+    Shot_RepairNemesisExplosionAttack(shot, (void*)initParam);
     TraceResimShotSpawn("extended", recipe, shot,
                         __builtin_return_address(0));
     InvalidateMemoryQueryCache();

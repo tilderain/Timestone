@@ -40,6 +40,7 @@ constexpr uintptr_t kMissileEmplacementDti = 0x140D49A60ull;
 constexpr uintptr_t kWeaponCartDti = 0x140D4A1A8ull;
 constexpr uintptr_t kLegionTigerDti = 0x140D4ABB8ull;
 constexpr uintptr_t kRepulsorBlastSpDti = 0x140D4ADA0ull;
+constexpr uintptr_t kRocketLauncherExplodeDti = 0x140D4BAC8ull;
 constexpr uintptr_t kVulcanAxeDti = 0x140D48808ull;
 constexpr uintptr_t kRyuDti = 0x140D45A10ull;
 constexpr uintptr_t kHsienKoDti = 0x140D455F8ull;
@@ -835,8 +836,13 @@ bool ConcreteShotSnapshot_Restore(void* shot,
     // current attack-info entry through this binding before it creates its
     // expanded explosion primitive. The factory's fresh map can describe a
     // later resource state even when the restored mAtkInfoId matches, so keep
-     // the saved binding while leaving the surrounding inline owner fresh.
-     CopyRange(overlay.data(), source, liveSize, {0x1490, 0x08});
+    // the saved binding while leaving the surrounding inline owner fresh.
+    // Nemesis's explosion is rebuilt from its remapped parent rocket; its fresh
+    // binding carries that parent's attack variant, while the saved client
+    // binding can still resolve the factory-default launch parameters.
+    if (!IsDti(snapshot.dti, kRocketLauncherExplodeDti)) {
+        CopyRange(overlay.data(), source, liveSize, {0x1490, 0x08});
+    }
 
     // Restore all known pointer-free cAtkCtrl scalars: mAtkInfoId, mFlag,
     // mTotalCombo, mDelayTime, mLifeTime, mCountTime, mEndTime, and mAnmNo.

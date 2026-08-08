@@ -117,6 +117,7 @@ static constexpr uintptr_t DTI_USHOT_VULCAN_LAND_MINE = 0x140D48D98;
 static constexpr uintptr_t DTI_USHOT_VULCAN_MISSILE_EMPLACEMENT = 0x140D49A60;
 static constexpr uintptr_t DTI_USHOT_VULCAN_WEAPON_CART = 0x140D4A1A8;
 static constexpr uintptr_t DTI_USHOT_SHIELD_WEAPON_CART_SPREAD = 0x140D4A098;
+static constexpr uintptr_t DTI_USHOT_VULCAN_ROCKET_LAUNCHER_EXPLODE = 0x140D4BAC8;
 static constexpr uintptr_t DTI_USHOT_VULCAN_LEGION_TIGER = 0x140D4ABB8;
 static constexpr uintptr_t DTI_USHOT_SHIELD_REPULSOR_BLAST_SP = 0x140D4ADA0;
 static constexpr uint32_t UCAP_AMERICA_SHIELD_SLASH_OFFSET = 0x68F0;
@@ -870,9 +871,11 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
         ShotRecipe remappedRecipe;
         const ShotRecipe* spawnRecipe = &saved;
         if (saved.concrete.dti ==
-            (uint64_t)_addr(DTI_USHOT_SHIELD_WEAPON_CART_SPREAD)) {
-            // Debris stores its parent cart in initParam rather than either
-            // validated object-reference field.
+                (uint64_t)_addr(DTI_USHOT_SHIELD_WEAPON_CART_SPREAD) ||
+            saved.concrete.dti ==
+                (uint64_t)_addr(DTI_USHOT_VULCAN_ROCKET_LAUNCHER_EXPLODE)) {
+            // These child shots store their parent in initParam rather than
+            // either validated object-reference field.
             for (const ShotRecipe& candidate : slot.shotRecipes) {
                 if (candidate.savedPtr == (void*)saved.initParam &&
                     candidate.restoredPtr) {
@@ -1063,6 +1066,9 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
         // overlay so packed floats/flags that resemble addresses still rewind.
         Shot_RestoreArmState(fresh, saved);
         Shot_ApplyFlight(fresh, saved.flight);
+        // Concrete restore can reapply the explosion's captured factory-default
+        // attack selector after native creation derived it from the parent.
+        Shot_RepairNemesisExplosionAttack(fresh, (void*)spawnRecipe->initParam);
         const bool legionTiger = saved.concrete.dti ==
             (uint64_t)_addr(DTI_USHOT_VULCAN_LEGION_TIGER);
         const bool repulsorBlast = saved.concrete.dti ==

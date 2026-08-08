@@ -19,6 +19,7 @@ void Shot_Reset();
 
 void Shot_CaptureFlight(void* shot, RollbackShotFlightState& state);
 void Shot_ApplyFlight(void* shot, const RollbackShotFlightState& state);
+void Shot_RepairNemesisExplosionAttack(void* shot, void* parent);
 void Shot_RestoreArmState(void* shot, const RollbackShotRecipe& recipe);
 void Shot_DetachEmbeddedEffect(void* shot);
 int Shot_SanitizeCollisionSlotsForDestruction(void* shot);
