@@ -147,6 +147,9 @@ static constexpr uintptr_t MVC3_MAIN_PTR    = 0x140E177E8;
 static constexpr uintptr_t MVC3_MANAGER_PTR = 0x140D510A0;
 static constexpr uintptr_t CHARACTER_PTR    = 0x140D44A70;
 static constexpr uintptr_t GAME_CONFIG_PTR  = 0x140D50F88;
+static constexpr uintptr_t MEMORY_ALLOCATOR_TABLE = 0x140D762F0;
+static constexpr uint32_t MEMORY_ALLOCATOR_COUNT = 64;
+static constexpr uint32_t EFFECT_ALLOCATOR_SLOT = 12;
 
 // Functions
 static constexpr uintptr_t SHOW_LOADING_ADDR = 0x140253380;
@@ -1118,6 +1121,127 @@ void FrameStepper_Process()
 // ---------------------------------------------------------------------------
 // Public: draw pause indicator overlay — call from hkEndScene (after ImGui::NewFrame)
 // ---------------------------------------------------------------------------
+static bool IsReadableMemory(uint64_t address, size_t size)
+{
+    MEMORY_BASIC_INFORMATION info = {};
+    if (!address || !VirtualQuery((void*)address, &info, sizeof(info)) ||
+        info.State != MEM_COMMIT || (info.Protect & (PAGE_GUARD | PAGE_NOACCESS))) {
+        return false;
+    }
+    uint64_t regionEnd = (uint64_t)info.BaseAddress + info.RegionSize;
+    return address <= regionEnd && size <= regionEnd - address;
+}
+
+static void DrawAllocatorMemory()
+{
+    static bool expanded = false;
+    ImVec2 displaySize = ImGui::GetIO().DisplaySize;
+    float height = displaySize.y - 24.0f;
+    if (height > 460.0f) height = 460.0f;
+    if (height < 220.0f) height = 220.0f;
+    float windowHeight = expanded ? height : 135.0f;
+
+    ImGui::SetNextWindowPos(ImVec2(displaySize.x - 12.0f, 12.0f),
+                            ImGuiCond_Always, ImVec2(1.0f, 0.0f));
+    ImGui::SetNextWindowSize(ImVec2(360.0f, windowHeight), ImGuiCond_Always);
+    ImGui::PushStyleColor(ImGuiCol_WindowBg,
+                          ImVec4(0.0f, 0.0f, 0.0f, 0.90f));
+    ImGui::Begin("##FrameStepperAllocators", nullptr,
+        ImGuiWindowFlags_NoTitleBar |
+        ImGuiWindowFlags_NoResize |
+        ImGuiWindowFlags_NoMove |
+        ImGuiWindowFlags_NoSavedSettings);
+
+    ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f),
+                       "MT ALLOCATOR MEMORY");
+    ImGui::SameLine();
+    if (ImGui::SmallButton(expanded ? "Collapse" : "Expand"))
+        expanded = !expanded;
+    ImGui::Separator();
+
+    uint64_t totalUsed = 0;
+    uint64_t totalPeak = 0;
+    uint64_t totalCapacity = 0;
+    uint32_t activeCount = 0;
+    bool unitMemoryFull = false;
+    uint64_t* allocatorTable =
+        (uint64_t*)_addr(MEMORY_ALLOCATOR_TABLE);
+
+    if (ImGui::BeginTable("##AllocatorMemoryTable", 3,
+            ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
+            ImGuiTableFlags_ScrollY | ImGuiTableFlags_SizingFixedFit,
+            ImVec2(0.0f, expanded ? height - 92.0f : 58.0f))) {
+        ImGui::TableSetupColumn("#");
+        ImGui::TableSetupColumn("Name");
+        ImGui::TableSetupColumn("Used / Peak / Capacity / Free (MB)");
+        ImGui::TableHeadersRow();
+
+        for (uint32_t slot = 0; slot < MEMORY_ALLOCATOR_COUNT; ++slot) {
+            uint64_t allocator = allocatorTable[slot];
+            if (!IsReadableMemory(allocator, 0x60)) continue;
+
+            uint64_t used = *(uint64_t*)(allocator + 0x08);
+            uint64_t peak = *(uint64_t*)(allocator + 0x10);
+            uint64_t capacity = *(uint64_t*)(allocator + 0x18);
+            uint64_t freeBytes = capacity > used ? capacity - used : 0;
+            const char* name = (const char*)(allocator + 0x21);
+
+            totalUsed += used;
+            totalPeak += peak;
+            totalCapacity += capacity;
+            ++activeCount;
+            if (slot == EFFECT_ALLOCATOR_SLOT)
+                unitMemoryFull = capacity && freeBytes < 0x40000;
+            if (!expanded && slot != EFFECT_ALLOCATOR_SLOT) continue;
+
+            ImGui::TableNextRow();
+            if (slot == EFFECT_ALLOCATOR_SLOT) {
+                ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg0,
+                    IM_COL32(105, 45, 145, 210));
+            }
+            ImGui::TableSetColumnIndex(0);
+            ImGui::Text("%u", slot);
+            ImGui::TableSetColumnIndex(1);
+            ImGui::Text("%.*s", 15, name);
+            ImGui::TableSetColumnIndex(2);
+            if (capacity && freeBytes < 0x40000) {
+                ImGui::TextColored(ImVec4(1.0f, 0.25f, 0.2f, 1.0f),
+                    "%.1f / %.1f / %.1f / %.1f",
+                    (double)used / (1024.0 * 1024.0),
+                    (double)peak / (1024.0 * 1024.0),
+                    (double)capacity / (1024.0 * 1024.0),
+                    (double)freeBytes / (1024.0 * 1024.0));
+            } else {
+                ImGui::Text("%.1f / %.1f / %.1f / %.1f",
+                    (double)used / (1024.0 * 1024.0),
+                    (double)peak / (1024.0 * 1024.0),
+                    (double)capacity / (1024.0 * 1024.0),
+                    (double)freeBytes / (1024.0 * 1024.0));
+            }
+        }
+        ImGui::EndTable();
+    }
+
+    uint64_t totalFree = totalCapacity > totalUsed
+        ? totalCapacity - totalUsed : 0;
+    constexpr double MIB = 1024.0 * 1024.0;
+    if (expanded) {
+        ImGui::Text("Active: %u  Used %.2f MB  Peak %.2f MB",
+            activeCount, (double)totalUsed / MIB, (double)totalPeak / MIB);
+        ImGui::Text("Capacity %.2f MB  Free %.2f MB",
+            (double)totalCapacity / MIB, (double)totalFree / MIB);
+        ImGui::TextDisabled(
+            "Free is aggregate; fragmentation can still fail allocations.");
+    }
+    if (unitMemoryFull) {
+        ImGui::TextColored(ImVec4(1.0f, 0.2f, 0.2f, 1.0f),
+                           "Unit memory is full!!");
+    }
+
+    ImGui::End();
+    ImGui::PopStyleColor();
+}
+
 void FrameStepper_Draw()
 {
     if (!IsTrainingMode())
@@ -1345,6 +1469,7 @@ void FrameStepper_Draw()
 
     ImGui::PopStyleColor();
     ImGui::End();
+    DrawAllocatorMemory();
 }
 
 void FrameStepper_DrawAutoTest()
