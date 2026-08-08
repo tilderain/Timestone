@@ -197,6 +197,14 @@ must be reapplied explicitly after the generic pointer filter. Without that
 reapply, rollback repeatedly restores phase zero and launches extra children,
 advancing Doom's RNG.
 
+Arthur's `uShotVulcanAxe` similarly requires an explicit scalar reapply at
+`uShot+0x21d0`. Its main callback advances this model/collision rotation
+accumulator by 18 degrees each frame. A saved `18.0f` forms qword `0x41900000`
+with the zero padding beside it, which can look like mapped memory to the generic
+ownership filter and leave the reconstructed factory value at zero. Reapplying
+the verified four-byte float after pointer filtering preserves the axe arc and
+the rotating hitbox without importing model pointers.
+
 Doom specializes inherited character tail `+0x68f0` as the active missile
 emplacement pointer. `uDoctorDoom__tick` validates this object every frame, and
 the combo-matcher callback `uDoctorDoom__checkShotTimerNegative` reads its

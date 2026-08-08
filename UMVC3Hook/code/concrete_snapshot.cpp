@@ -37,6 +37,7 @@ constexpr size_t kAttackTargetTables[kAttackTargetTableCount] = {
 constexpr uintptr_t kSoulFistDti = 0x140D4B6E8ull;
 constexpr uintptr_t kKingKobunDti = 0x140D4D2B0ull;
 constexpr uintptr_t kMissileEmplacementDti = 0x140D49A60ull;
+constexpr uintptr_t kVulcanAxeDti = 0x140D48808ull;
 constexpr uintptr_t kRyuDti = 0x140D45A10ull;
 constexpr uintptr_t kHsienKoDti = 0x140D455F8ull;
 constexpr uintptr_t kSpencerDti = 0x140D45D40ull;
@@ -811,6 +812,13 @@ bool ConcreteShotSnapshot_Restore(void* shot,
     // because it resembles an address.
     RestoreGeneratedRanges(overlay.data(), source, liveSize, snapshot.dti,
                            kGeneratedShotTailRanges);
+
+    if (IsDti(snapshot.dti, kVulcanAxeDti)) {
+        // Arthur's axe rotates its model and collision geometry from this
+        // accumulator. Values such as 18.0f resemble mapped addresses when
+        // read as a qword, so the generic ownership filter keeps factory zero.
+        CopyRange(overlay.data(), source, liveSize, {0x21D0, 0x04});
+    }
 
     // mId is scalar allocator state inside the otherwise fresh-owned cArm
     // block. A reconstructed Kikosho kept its factory ID here while the ID
