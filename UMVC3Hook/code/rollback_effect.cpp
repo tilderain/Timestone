@@ -636,6 +636,27 @@ void Effect_ReleaseOwnedAllocations(void* effect)
     ((void(__fastcall*)(void*))_addr(FN_EFFECT_RELEASE_GENERATOR))(effect);
 }
 
+bool Effect_RetireOne(void* sUnit, void* effect)
+{
+    if (!sUnit || !effect || !IsEffectObject(effect)) return false;
+
+    SanitizeEffectForDestruction(effect);
+    ((void(__fastcall*)(void*, void*))_addr(
+        FN_SUNIT_REMOVE_FROM_MULTI_MASK))(sUnit, effect);
+    ((char(__fastcall*)(void*, void*))_addr(FN_SUNIT_REMOVE_UNIT))(
+        sUnit, effect);
+    Effect_FinishUnitRemoval(effect);
+
+    if (!IsAccessibleRange((uint64_t)effect, sizeof(uint64_t))) return false;
+    uint64_t vtable = *(uint64_t*)effect;
+    if (!IsAccessibleRange(vtable, sizeof(uint64_t)) ||
+        !IsExecutableAddress(*(uint64_t*)vtable)) {
+        return false;
+    }
+    ((void(__fastcall*)(void*, uint32_t))*(uint64_t*)vtable)(effect, 1);
+    return true;
+}
+
 int Effect_RetireCurrent(void* sUnit)
 {
     if (!sUnit) return 0;

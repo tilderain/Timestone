@@ -74,7 +74,9 @@ bool ConcreteEffectSnapshot_Restore(
 // Reconstructed parent transforms can collapse data-derived world endpoints,
 // so this restores them directly at the outer update boundary.
 void ConcreteShotSnapshot_ReapplyCapsules(void* shot,
-                                          const ConcreteShotSnapshot& snapshot);
+                                           const ConcreteShotSnapshot& snapshot);
+void ConcreteShotSnapshot_RebuildLiveCapsuleWorld(
+    void* shot, const ConcreteShotSnapshot& snapshot);
 
 // Restore detected scalar spans from concrete character tails while retaining
 // live pointer/embedded-object ownership records, then apply verified overrides.

@@ -4,6 +4,7 @@
 
 #include "rollback_memory.h"
 #include "rollback_effect.h"
+#include "rollback.h"
 #include "rollback_profile.h"
 #include "rollback_snapshot.h"
 #include "mk10utils.h"
@@ -13,6 +14,7 @@
 #include <cmath>
 #include <cstring>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 extern void HookLog(const char* fmt, ...);
@@ -46,12 +48,18 @@ static constexpr uintptr_t FN_WEAPON_CART_SPAWN_DEBRIS = 0x14017A200;
 static constexpr uintptr_t FN_SSHOT_FLUSH_PENDING_UNITS = 0x1401517A0;
 static constexpr uintptr_t FN_CCHRNODE_SET_NEXT = 0x140003D50;
 static constexpr uintptr_t FN_UMODEL_PROCESS_ACTION_ANMCHR = 0x140529420;
+static constexpr uintptr_t FN_UMODEL_UPDATE_MOTION_EVALUATION = 0x140531A00;
+static constexpr uintptr_t FN_CRESOURCE_ASSIGN_SLOT = 0x140529730;
+static constexpr uintptr_t FN_CRESOURCE_RELEASE_REF = 0x14050D5A0;
+static constexpr uintptr_t FN_SRESOURCE_GET_INSTANCE = 0x140001B10;
+static constexpr uintptr_t FN_SRESOURCE_LOAD_SYNC = 0x140518BF0;
 static constexpr uintptr_t DTI_USHOT_VULCAN_MISSILE_EMPLACEMENT = 0x140D49A60;
 static constexpr uintptr_t DTI_USHOT_VULCAN_LEGION_TIGER = 0x140D4ABB8;
 static constexpr uintptr_t DTI_USHOT_SHIELD_REPULSOR_BLAST_SP = 0x140D4ADA0;
 static constexpr uintptr_t DTI_USHOT_VULCAN_WEAPON_CART = 0x140D4A1A8;
 static constexpr uintptr_t DTI_USHOT_VULCAN_NEMESIS_ROCKET_LAUNCHER = 0x140D4BA48;
 static constexpr uintptr_t DTI_USHOT_VULCAN_ROCKET_LAUNCHER_EXPLODE = 0x140D4BAC8;
+static constexpr uintptr_t DTI_USHOT_VULCAN_PENDULUM_LOG = 0x140D4C4C8;
 static constexpr int DYNAMIC_SAFETY = 128;
 static constexpr int SSHOT_SENTINEL_COUNT = 10;
 static constexpr size_t SSHOT_NODE_OFFSET = 0x1450;
@@ -87,6 +95,7 @@ static KingKobunMoveFn oKingKobunMove = nullptr;
 static MissileEmplacementMoveFn oMissileEmplacementMove = nullptr;
 static WeaponCartMoveFn oWeaponCartMove = nullptr;
 static std::unordered_map<void*, RollbackShotRecipe> g_liveShotRecipes;
+static std::unordered_set<void*> g_resimSpawnedPendulums;
 static uint64_t g_shotSpawnSequence = 0;
 static int g_kingKobunTraceCount = 0;
 static uint32_t g_unitLinkRepairLogCount = 0;
@@ -371,6 +380,143 @@ void Shot_RepairNemesisExplosionAttack(void* shot, void* parent)
     }
 }
 
+static bool PendulumMotionReady(void* shot)
+{
+    if (!shot || !IsAccessibleRange((uint64_t)shot + 0x6A0, 1)) return false;
+    return *(uint32_t*)((uint8_t*)shot + 0x530) > 0 &&
+        *(uint64_t*)((uint8_t*)shot + 0x538) != 0 &&
+        *(uint32_t*)((uint8_t*)shot + 0x550) != 0 &&
+        *(uint64_t*)((uint8_t*)shot + 0x640) != 0 &&
+        *(uint64_t*)((uint8_t*)shot + 0x660) != 0 &&
+        *(uint64_t*)((uint8_t*)shot + 0x680) != 0 &&
+        *(uint64_t*)((uint8_t*)shot + 0x688) != 0 &&
+        *(uint64_t*)((uint8_t*)shot + 0x690) != 0 &&
+        *(uint64_t*)((uint8_t*)shot + 0x698) != 0;
+}
+
+static void ProcessPendulumMotionIfReady(void* shot)
+{
+    float currentFrame = *(float*)((uint8_t*)shot + 0x1F58);
+    float previousFrame = std::max(currentFrame - 1.0f, 0.0f);
+    float sampleFrame = std::max(currentFrame - 4.0f, 0.0f);
+    ((uint64_t(__fastcall*)(void*, uint32_t, uint32_t, float, float, float,
+                           uint32_t))
+        _addr(FN_UMODEL_PROCESS_ACTION_ANMCHR))(
+            shot, 0, 0, 0.0f, sampleFrame, 1.0f, 0);
+    float poseFrame = currentFrame <= 3.0f ? currentFrame : previousFrame;
+    *(float*)((uint8_t*)shot + 0x5AC) = poseFrame;
+    *(float*)((uint8_t*)shot + 0x5B0) = std::max(poseFrame - 1.0f, 0.0f);
+}
+
+static void EvaluatePendulumPose(void* shot)
+{
+    if (*(float*)((uint8_t*)shot + 0x1F58) <= 3.0f) return;
+    ((void(__fastcall*)(void*))_addr(
+        FN_UMODEL_UPDATE_MOTION_EVALUATION))(shot);
+    uint64_t vtable = *(uint64_t*)shot;
+    if (!IsAccessibleRange(vtable + 0x90, 0x10)) return;
+    uint64_t updateWorld = *(uint64_t*)(vtable + 0x90);
+    uint64_t updateChildren = *(uint64_t*)(vtable + 0x98);
+    if (IsExecutableAddress(updateWorld)) {
+        ((void(__fastcall*)(void*))updateWorld)(shot);
+    }
+    if (IsExecutableAddress(updateChildren)) {
+        ((void(__fastcall*)(void*))updateChildren)(shot);
+    }
+    float currentFrame = *(float*)((uint8_t*)shot + 0x1F58);
+    *(float*)((uint8_t*)shot + 0x5AC) = currentFrame;
+    *(float*)((uint8_t*)shot + 0x5B0) = std::max(currentFrame - 1.0f, 0.0f);
+}
+
+static void LoadPendulumMotionSynchronously(void* shot)
+{
+    if (!shot || !IsAccessibleRange((uint64_t)shot + 0x11C0, 1)) return;
+    void* pending = *(void**)((uint8_t*)shot + 0x11B8);
+    if (!pending || !HasCallableDtiVirtual(pending) ||
+        !IsAccessibleRange((uint64_t)pending, 0x78)) {
+        return;
+    }
+    uint64_t table = *(uint64_t*)((uint8_t*)pending + 0x70);
+    if (table && IsAccessibleRange(table, 0x10) &&
+        *(uint16_t*)(table + 0x06) != 0 && *(uint64_t*)(table + 0x08) != 0) {
+        return;
+    }
+
+    uint64_t dti = GetObjectDti((uint64_t)pending);
+    uint64_t key = *(uint64_t*)((uint8_t*)pending + 0x60);
+    char* path = (char*)pending + 0x0C;
+    void* sResource = ((void*(__fastcall*)())_addr(
+        FN_SRESOURCE_GET_INSTANCE))();
+    if (!dti || !sResource) return;
+
+    void* loaded = ((void*(__fastcall*)(void*, void*, char*, uint64_t,
+                                       uint32_t))
+        _addr(FN_SRESOURCE_LOAD_SYNC))(
+            sResource, (void*)dti, path, key, 1);
+    if (!loaded) return;
+
+    ((void(__fastcall*)(void*, void*, uint32_t))_addr(
+        FN_CRESOURCE_ASSIGN_SLOT))(shot, loaded, 0);
+    ((void(__fastcall*)(void*))_addr(FN_CRESOURCE_RELEASE_REF))(loaded);
+    InvalidateMemoryQueryCache();
+}
+
+static void RepairResimPendulumModel(void* shot)
+{
+    auto liveRecipe = g_liveShotRecipes.find(shot);
+    bool reconstructed = liveRecipe != g_liveShotRecipes.end() &&
+        liveRecipe->second.reconstructed;
+    bool resimSpawned = g_resimSpawnedPendulums.find(shot) !=
+        g_resimSpawnedPendulums.end();
+    uint64_t observedDti = shot && HasCallableDtiVirtual(shot)
+        ? GetObjectDti((uint64_t)shot) : 0;
+    if ((!g_isResimulating && !reconstructed && !resimSpawned) || !shot ||
+        !HasCallableDtiVirtual(shot) ||
+        observedDti !=
+            (uint64_t)_addr(DTI_USHOT_VULCAN_PENDULUM_LOG)) {
+        return;
+    }
+
+    // Resolve motion-list resource slot 0 through the same native action path
+    // used by rendered model updates. Headless re-simulation does not dispatch
+    // the pending mAnmNoReq that normally performs this bind.
+    ProcessPendulumMotionIfReady(shot);
+    if (PendulumMotionReady(shot)) {
+        EvaluatePendulumPose(shot);
+        return;
+    }
+    LoadPendulumMotionSynchronously(shot);
+    ProcessPendulumMotionIfReady(shot);
+    if (PendulumMotionReady(shot)) {
+        EvaluatePendulumPose(shot);
+        return;
+    }
+
+    uint64_t vtable = *(uint64_t*)shot;
+    uint64_t setupAddress = IsAccessibleRange(vtable + 0x28, sizeof(uint64_t))
+        ? *(uint64_t*)(vtable + 0x28) : 0;
+    uint64_t sUnit = *(uint64_t*)_addr(PTR_SUNIT);
+    if (!setupAddress || !IsExecutableAddress(setupAddress) || !sUnit) return;
+
+    // Resource completion is dispatched between simulation ticks. Retry once
+    // per tick rather than blocking here; a sleep loop prevents the motion
+    // request from reaching its completion callback.
+    void* oldCallbacks[2] = {
+        *(void**)((uint8_t*)shot + 0x1F78),
+        *(void**)((uint8_t*)shot + 0x1F80),
+    };
+    ((void(__fastcall*)(void*))setupAddress)(shot);
+    InvalidateMemoryQueryCache();
+    ProcessPendulumMotionIfReady(shot);
+    if (PendulumMotionReady(shot)) EvaluatePendulumPose(shot);
+    for (uint32_t index = 0; index < 2; ++index) {
+        void* replacement = *(void**)((uint8_t*)shot + 0x1F78 + index * 8);
+        if (oldCallbacks[index] && replacement != oldCallbacks[index]) {
+            Effect_RetireOne((void*)sUnit, oldCallbacks[index]);
+        }
+    }
+}
+
 static void* __fastcall hkShotSpawn(void* manager, void* element, uint64_t initParam,
                                      void* posData, void* ownerChr, void* objectRef1,
                                      uint32_t slotId, void* objectRef2)
@@ -398,10 +544,16 @@ static void* __fastcall hkShotSpawn(void* manager, void* element, uint64_t initP
     void* shot = oShotSpawn(manager, element, initParam, posData, ownerChr,
                             objectRef1, slotId, objectRef2);
     RepairResimRepulsorBlastMotion(shot);
+    RepairResimPendulumModel(shot);
     TraceResimShotSpawn("standard", recipe, shot,
                         __builtin_return_address(0));
     InvalidateMemoryQueryCache();
     if (shot) {
+        if (g_isResimulating && HasCallableDtiVirtual(shot) &&
+            GetObjectDti((uint64_t)shot) ==
+                (uint64_t)_addr(DTI_USHOT_VULCAN_PENDULUM_LOG)) {
+            g_resimSpawnedPendulums.insert(shot);
+        }
         recipe.savedPtr = shot;
         recipe.restoredPtr = shot;
         g_liveShotRecipes[shot] = recipe;
@@ -441,11 +593,17 @@ static void* __fastcall hkShotSpawnEx(void* manager, void* element, uint64_t ini
     void* shot = oShotSpawnEx(manager, element, initParam, posData, ownerChr,
                               objectRef1, slotId, objectRef2, a9, a10, a11, a12);
     RepairResimRepulsorBlastMotion(shot);
+    RepairResimPendulumModel(shot);
     Shot_RepairNemesisExplosionAttack(shot, (void*)initParam);
     TraceResimShotSpawn("extended", recipe, shot,
                         __builtin_return_address(0));
     InvalidateMemoryQueryCache();
     if (shot) {
+        if (g_isResimulating && HasCallableDtiVirtual(shot) &&
+            GetObjectDti((uint64_t)shot) ==
+                (uint64_t)_addr(DTI_USHOT_VULCAN_PENDULUM_LOG)) {
+            g_resimSpawnedPendulums.insert(shot);
+        }
         recipe.savedPtr = shot;
         recipe.restoredPtr = shot;
         g_liveShotRecipes[shot] = recipe;
@@ -490,13 +648,28 @@ static void __fastcall hkBuildAttachMatrix(void* arm, void* output, char reset)
 static void __fastcall hkShotUpdateHitboxes(void* shot)
 {
     RollbackHookProfileScope profile(RollbackHookProfileId::ShotUpdateHitboxes);
+    RepairResimPendulumModel(shot);
     oShotUpdateHitboxes(shot);
     auto recipe = g_liveShotRecipes.find(shot);
+    bool pendulum = shot && HasCallableDtiVirtual(shot) &&
+        GetObjectDti((uint64_t)shot) ==
+            (uint64_t)_addr(DTI_USHOT_VULCAN_PENDULUM_LOG) &&
+        (g_isResimulating ||
+         (recipe != g_liveShotRecipes.end() &&
+          recipe->second.reconstructed));
+    if (pendulum) {
+        RepairResimPendulumModel(shot);
+        oShotUpdateHitboxes(shot);
+        ConcreteShotSnapshot_RebuildLiveCapsuleWorld(
+            shot, recipe->second.concrete);
+    }
     if (recipe != g_liveShotRecipes.end() && recipe->second.reconstructed &&
         recipe->second.concrete.dti !=
             (uint64_t)_addr(DTI_USHOT_VULCAN_LEGION_TIGER) &&
         recipe->second.concrete.dti !=
-            (uint64_t)_addr(DTI_USHOT_SHIELD_REPULSOR_BLAST_SP)) {
+            (uint64_t)_addr(DTI_USHOT_SHIELD_REPULSOR_BLAST_SP) &&
+        recipe->second.concrete.dti !=
+            (uint64_t)_addr(DTI_USHOT_VULCAN_PENDULUM_LOG)) {
         ConcreteShotSnapshot_ReapplyCapsules(shot, recipe->second.concrete);
     }
 }
@@ -930,6 +1103,7 @@ static char __fastcall hkUnitRemove(void* manager, void* unit)
     if (result && unit) {
         RollbackHookProfileScope child(RollbackHookProfileId::UnitRemoveRecipeCleanup);
         if (!IsLinkedShot(unit)) g_liveShotRecipes.erase(unit);
+        g_resimSpawnedPendulums.erase(unit);
         Effect_FinishUnitRemoval(unit);
     }
     return result;
@@ -1007,6 +1181,7 @@ void Shot_TrackReconstructed(void* shot, const RollbackShotRecipe& recipe)
 void Shot_Reset()
 {
     g_liveShotRecipes.clear();
+    g_resimSpawnedPendulums.clear();
     g_deferredWeaponCartDebris.clear();
     g_shotSpawnSequence = 0;
     g_staleHitTargetLogCount = 0;

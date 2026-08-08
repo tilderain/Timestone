@@ -118,6 +118,7 @@ static constexpr uintptr_t DTI_USHOT_VULCAN_MISSILE_EMPLACEMENT = 0x140D49A60;
 static constexpr uintptr_t DTI_USHOT_VULCAN_WEAPON_CART = 0x140D4A1A8;
 static constexpr uintptr_t DTI_USHOT_SHIELD_WEAPON_CART_SPREAD = 0x140D4A098;
 static constexpr uintptr_t DTI_USHOT_VULCAN_ROCKET_LAUNCHER_EXPLODE = 0x140D4BAC8;
+static constexpr uintptr_t DTI_USHOT_VULCAN_PENDULUM_LOG = 0x140D4C4C8;
 static constexpr uintptr_t DTI_USHOT_VULCAN_LEGION_TIGER = 0x140D4ABB8;
 static constexpr uintptr_t DTI_USHOT_SHIELD_REPULSOR_BLAST_SP = 0x140D4ADA0;
 static constexpr uint32_t UCAP_AMERICA_SHIELD_SLASH_OFFSET = 0x68F0;
@@ -587,6 +588,23 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
     std::vector<void*> currentShots;
     Shot_CollectCurrent(currentShots);
     for (void* shot : currentShots) {
+        if (HasCallableDtiVirtual(shot) &&
+            GetObjectDti((uint64_t)shot) ==
+                (uint64_t)_addr(DTI_USHOT_VULCAN_PENDULUM_LOG)) {
+            // Forced re-simulation reconstructs Pendulum every confirmed frame.
+            // Bridge its model and motion-list references across teardown so
+            // the asynchronous motion request can finish instead of restarting.
+            for (uint32_t offset : {0x100u, 0x11B8u}) {
+                void* resource = *(void**)((uint8_t*)shot + offset);
+                if (resource && HasCallableDtiVirtual(resource) &&
+                    std::find(pinnedShotResources.begin(),
+                              pinnedShotResources.end(), resource) ==
+                        pinnedShotResources.end()) {
+                    addRef(resource);
+                    pinnedShotResources.push_back(resource);
+                }
+            }
+        }
         // Cart reconstruction retires its 13 model effects before invoking the
         // fresh factory. Hold their resources alive across that ownership gap.
         if (HasCallableDtiVirtual(shot) &&

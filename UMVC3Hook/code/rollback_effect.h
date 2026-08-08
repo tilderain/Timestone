@@ -8,6 +8,7 @@ int Effect_RestoreRecipes(RollbackSnapshotSlot& slot);
 void Effect_PrepareUnitRemoval(void* unit);
 void Effect_FinishUnitRemoval(void* unit);
 void Effect_ReleaseOwnedAllocations(void* effect);
+bool Effect_RetireOne(void* sUnit, void* effect);
 int Effect_RetireCurrent(void* sUnit);
 bool Effect_RetireGameEffectModel(void* sUnit, void* effect);
 void Effect_SanitizeRetired(void* sUnit);

@@ -41,6 +41,7 @@ constexpr uintptr_t kWeaponCartDti = 0x140D4A1A8ull;
 constexpr uintptr_t kLegionTigerDti = 0x140D4ABB8ull;
 constexpr uintptr_t kRepulsorBlastSpDti = 0x140D4ADA0ull;
 constexpr uintptr_t kRocketLauncherExplodeDti = 0x140D4BAC8ull;
+constexpr uintptr_t kPendulumLogDti = 0x140D4C4C8ull;
 constexpr uintptr_t kVulcanAxeDti = 0x140D48808ull;
 constexpr uintptr_t kRyuDti = 0x140D45A10ull;
 constexpr uintptr_t kHsienKoDti = 0x140D455F8ull;
@@ -884,7 +885,8 @@ bool ConcreteShotSnapshot_Restore(void* shot,
 
     if (IsDti(snapshot.dti, kKingKobunDti) ||
         IsDti(snapshot.dti, kMissileEmplacementDti) ||
-        IsDti(snapshot.dti, kWeaponCartDti)) {
+        IsDti(snapshot.dti, kWeaponCartDti) ||
+        IsDti(snapshot.dti, kPendulumLogDti)) {
         // These shots consume model animation state in gameplay. Reconstruction
         // keeps fresh motion owners and resources, but must rewind pointer-free
         // playback state or joint-driven phases and launch positions restart.
@@ -1004,6 +1006,43 @@ void ConcreteShotSnapshot_ReapplyCapsules(
             localEnd[axis] = selectedEnd[axis];
             worldStart[axis] = shotPosition[axis] + selectedStart[axis];
             worldEnd[axis] = shotPosition[axis] + selectedEnd[axis];
+        }
+    }
+}
+
+void ConcreteShotSnapshot_RebuildLiveCapsuleWorld(
+    void* shot, const ConcreteShotSnapshot& snapshot)
+{
+    if (!shot) return;
+    const float* shotPosition = (const float*)((uint8_t*)shot + 0x50);
+    for (const auto& saved : snapshot.collisionPrimitives) {
+        if (saved.metadataType != 1 || !saved.hasSourceGeometry) continue;
+        uint64_t primitive = GetCollisionPrimitive(
+            (const uint8_t*)shot, saved.slot, saved.index);
+        if (!primitive) continue;
+
+        const float* localStart = (const float*)saved.sourceGeometry;
+        const float* localEnd =
+            (const float*)(saved.sourceGeometry + 0x10);
+        if (std::fabs(localStart[1] - localEnd[1]) < 0.01f) continue;
+        const float* currentWorldStart = (const float*)(primitive + 0x20);
+        const float* currentWorldEnd = (const float*)(primitive + 0x30);
+        bool dynamicYAxisCollapsed =
+            std::fabs(currentWorldStart[1] - shotPosition[1]) < 0.01f &&
+            std::fabs(currentWorldEnd[1] - shotPosition[1]) < 0.01f &&
+            (std::fabs(localStart[1]) >= 0.01f ||
+             std::fabs(localEnd[1]) >= 0.01f);
+        if (!dynamicYAxisCollapsed) continue;
+
+        float* liveLocalStart = (float*)(primitive + 0x80);
+        float* liveLocalEnd = (float*)(primitive + 0x90);
+        float* worldStart = (float*)(primitive + 0x20);
+        float* worldEnd = (float*)(primitive + 0x30);
+        for (size_t axis = 0; axis < 3; ++axis) {
+            liveLocalStart[axis] = localStart[axis];
+            liveLocalEnd[axis] = localEnd[axis];
+            worldStart[axis] = shotPosition[axis] + localStart[axis];
+            worldEnd[axis] = shotPosition[axis] + localEnd[axis];
         }
     }
 }
