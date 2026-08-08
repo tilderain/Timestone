@@ -219,8 +219,11 @@ static constexpr SnapshotRange CCHR_SCALAR_RESTORE_RANGES[] = {
     {0x14F0, 0x28},
     // Packed flag state immediately following the named character flags.
     {0x1518, 0x18},
-    // Remaining pointer-free state-check and animation-transition scalars.
-    {0x154C, 0x14},
+    // cChrStatus::mMode and the remaining pointer-free status scalars. The
+    // mode plus its adjacent 10000 scalar resembles a pointer-sized address,
+    // so the broad pointer guard otherwise keeps Phoenix Wright's future mode
+    // and selects action 0xBA instead of 0xBB during frame-60 resimulation.
+    {0x1548, 0x18},
     // cChrAbility and cAtkCtrl have dedicated ownership-aware policies below.
     // Character state/context values before the frame and identity fields.
     {0x18A0, 0x28},
