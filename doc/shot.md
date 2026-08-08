@@ -205,6 +205,18 @@ ownership filter and leave the reconstructed factory value at zero. Reapplying
 the verified four-byte float after pointer filtering preserves the axe arc and
 the rotating hitbox without importing model pointers.
 
+Chris's `uShotVulcanLandMine` creates its armed-grenade `uGameEffect` only when
+virtual `+0x318` handles stage contact. A frame-72 snapshot can therefore contain
+`mIsTakeOn=true` and an occupied callback slot at `uShot+0x1f78`, while its fresh
+factory reconstruction has neither experienced contact nor created that owned
+effect graph. Restoring the boolean alone suppresses the native initializer and
+the client never creates `uShotVulcanLandMineExplode` on frame 73. When the saved
+Land Mine records both the armed flag and occupied first callback but the fresh
+shot remains unarmed with an empty slot, reconstruction invokes the concrete
+native contact initializer once before applying the captured callback timeline.
+The intervention is DTI-gated and runs only during snapshot reconstruction; it
+does not copy the historical effect pointer or alter live shot contact handling.
+
 Doom specializes inherited character tail `+0x68f0` as the active missile
 emplacement pointer. `uDoctorDoom__tick` validates this object every frame, and
 the combo-matcher callback `uDoctorDoom__checkShotTimerNegative` reads its

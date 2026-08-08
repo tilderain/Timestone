@@ -110,6 +110,7 @@ static constexpr size_t SHITSOLVER_DATA_OFF = 0x58;
 static constexpr uintptr_t VTABLE_UCAP_AMERICA = 0x140A71430;
 static constexpr uintptr_t VTABLE_UDOCTOR_DOOM = 0x140A73A40;
 static constexpr uintptr_t DTI_USHOT_OPTION_SHIELD_SLASH = 0x140D48A68;
+static constexpr uintptr_t DTI_USHOT_VULCAN_LAND_MINE = 0x140D48D98;
 static constexpr uintptr_t DTI_USHOT_VULCAN_MISSILE_EMPLACEMENT = 0x140D49A60;
 static constexpr uint32_t UCAP_AMERICA_SHIELD_SLASH_OFFSET = 0x68F0;
 static constexpr uint32_t UDOCTOR_DOOM_MISSILE_OFFSET = 0x68F0;
@@ -826,6 +827,25 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
             if (setupAddress && IsExecutableAddress(setupAddress)) {
                 auto setup = (void(__fastcall*)(void*))setupAddress;
                 setup(fresh);
+            }
+        }
+        if (saved.concrete.dti ==
+                (uint64_t)_addr(DTI_USHOT_VULCAN_LAND_MINE) &&
+            saved.concrete.body.size() > 0x2214 &&
+            saved.concrete.body[0x2214] != 0 &&
+            saved.concrete.callbackEffects[0].occupied &&
+            *(void**)((uint8_t*)fresh + 0x1F78) == nullptr &&
+            *(uint8_t*)((uint8_t*)fresh + 0x2214) == 0) {
+            // Stage contact creates Chris's armed-grenade effect. A factory
+            // reconstruction has not seen that historical contact, so rebuild
+            // its owned graph before restoring the captured effect timeline.
+            uint64_t vtable = *(uint64_t*)fresh;
+            uint64_t contactAddress = vtable &&
+                IsAccessibleRange(vtable + 0x318, sizeof(uint64_t))
+                ? *(uint64_t*)(vtable + 0x318) : 0;
+            if (contactAddress && IsExecutableAddress(contactAddress)) {
+                auto contact = (void(__fastcall*)(void*, void*))contactAddress;
+                contact(fresh, nullptr);
             }
         }
         // Rebuild registration through the same pending-unit path used by the
