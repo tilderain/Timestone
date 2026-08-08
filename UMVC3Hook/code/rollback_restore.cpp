@@ -39,6 +39,8 @@ static constexpr uintptr_t FN_RESET_HITNODES = 0x140259E90;
 static constexpr uintptr_t FN_MODEL_SET_CHILD_MATERIAL_MODE = 0x140200DB0;
 static constexpr uintptr_t FN_MTOBJECT_ADD_REF = 0x14050D100;
 static constexpr uintptr_t FN_CRESOURCE_RELEASE_REF = 0x14050D5A0;
+static constexpr uintptr_t FN_UMODEL_PROCESS_ACTION_ANMCHR = 0x140529420;
+static constexpr uintptr_t FN_UMODEL_MOVE = 0x140566580;
 
 static constexpr uintptr_t SMVC3MGR_ACTION_OFFSET = 0x48;
 static constexpr uint32_t SACTION_MODEL_JOINT_WRAPPER_OFFSET = 0x120;
@@ -115,6 +117,7 @@ static constexpr uintptr_t DTI_USHOT_VULCAN_LAND_MINE = 0x140D48D98;
 static constexpr uintptr_t DTI_USHOT_VULCAN_MISSILE_EMPLACEMENT = 0x140D49A60;
 static constexpr uintptr_t DTI_USHOT_VULCAN_WEAPON_CART = 0x140D4A1A8;
 static constexpr uintptr_t DTI_USHOT_SHIELD_WEAPON_CART_SPREAD = 0x140D4A098;
+static constexpr uintptr_t DTI_USHOT_VULCAN_LEGION_TIGER = 0x140D4ABB8;
 static constexpr uint32_t UCAP_AMERICA_SHIELD_SLASH_OFFSET = 0x68F0;
 static constexpr uint32_t UDOCTOR_DOOM_MISSILE_OFFSET = 0x68F0;
 
@@ -849,6 +852,7 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
     uint64_t respawnRegisterTicks = 0;
     uint64_t respawnConcreteTicks = 0;
     uint64_t respawnOverlayTicks = 0;
+    bool waitedForTigerModel = false;
     for (ShotRecipe& saved : slot.shotRecipes) {
         const uint64_t prepareStart = Profile_Now();
         saved.restoredPtr = nullptr;
@@ -892,6 +896,37 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
         // before the broad concrete overlay can copy any stale relationship.
         Shot_TrackReconstructed(fresh, *spawnRecipe);
         saved.restoredPtr = fresh;
+
+        if (saved.concrete.dti ==
+                (uint64_t)_addr(DTI_USHOT_VULCAN_LEGION_TIGER)) {
+            auto tigerModelReady = [](void* model) {
+                uint32_t count = *(uint32_t*)((uint8_t*)model + 0x530);
+                uint64_t joints = *(uint64_t*)((uint8_t*)model + 0x538);
+                return count > 0 && count <= 256 && joints &&
+                    IsAccessibleRange(joints, (size_t)count * 0xC0);
+            };
+            uint64_t vtable = *(uint64_t*)fresh;
+            uint64_t setupAddress = vtable &&
+                IsAccessibleRange(vtable + 0x28, sizeof(uint64_t))
+                ? *(uint64_t*)(vtable + 0x28) : 0;
+            if (!tigerModelReady(fresh) && setupAddress &&
+                IsExecutableAddress(setupAddress)) {
+                auto setup = (void(__fastcall*)(void*))setupAddress;
+                // Like Missile Emplacement, Legion Tiger cannot advance until
+                // its model joints exist. Wait only for the first shared model;
+                // the remaining Tiger factories then resolve it from cache.
+                uint32_t attempts = waitedForTigerModel ? 1 : 500;
+                waitedForTigerModel = true;
+                while (!tigerModelReady(fresh) && attempts-- > 0) {
+                    setup(fresh);
+                    if (!tigerModelReady(fresh)) Sleep(1);
+                }
+                InvalidateMemoryQueryCache();
+                if (!tigerModelReady(fresh)) {
+                    HookLog("Rollback: Legion Tiger model unavailable after setup retry\n");
+                }
+            }
+        }
 
         // Resource-gated subclass setup can leave a reconstructed shot without
         // callbacks. Retry only when every slot is empty: setup overwrites and
@@ -1024,6 +1059,21 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
         // overlay so packed floats/flags that resemble addresses still rewind.
         Shot_RestoreArmState(fresh, saved);
         Shot_ApplyFlight(fresh, saved.flight);
+        if (saved.concrete.dti ==
+                (uint64_t)_addr(DTI_USHOT_VULCAN_LEGION_TIGER)) {
+            uint32_t animationNo = *(uint32_t*)((uint8_t*)fresh + 0x1310);
+            float animationTime = *(float*)((uint8_t*)fresh + 0x1328);
+            if (animationTime > 0.0f) {
+                ((uint64_t(__fastcall*)(void*, uint32_t, uint32_t, float,
+                                       float, float, uint32_t))
+                    _addr(FN_UMODEL_PROCESS_ACTION_ANMCHR))(
+                        fresh, 0, animationNo, 0.0f,
+                        std::max(0.0f, animationTime - 1.0f), 1.0f, 0x40);
+            }
+            // Reconstructed shots missed the model-category pass for this
+            // tick. Evaluate the restored/bound motion before hitbox dispatch.
+            ((void(__fastcall*)(void*))_addr(FN_UMODEL_MOVE))(fresh);
+        }
 
         // Some shots use +0x1F70 as a self-reference. Repoint it at the fresh
         // allocation instead of retaining the captured shot's retired address.

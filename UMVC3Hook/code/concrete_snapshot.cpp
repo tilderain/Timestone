@@ -38,6 +38,7 @@ constexpr uintptr_t kSoulFistDti = 0x140D4B6E8ull;
 constexpr uintptr_t kKingKobunDti = 0x140D4D2B0ull;
 constexpr uintptr_t kMissileEmplacementDti = 0x140D49A60ull;
 constexpr uintptr_t kWeaponCartDti = 0x140D4A1A8ull;
+constexpr uintptr_t kLegionTigerDti = 0x140D4ABB8ull;
 constexpr uintptr_t kVulcanAxeDti = 0x140D48808ull;
 constexpr uintptr_t kRyuDti = 0x140D45A10ull;
 constexpr uintptr_t kHsienKoDti = 0x140D455F8ull;
@@ -802,6 +803,17 @@ bool ConcreteShotSnapshot_Restore(void* shot,
     // native model. A saved count with a null live index array makes rendering
     // call through a null pointer during joint-order traversal.
     PreserveRange(overlay.data(), live, liveSize, {0x530, 0x30});
+
+    if (IsDti(snapshot.dti, kLegionTigerDti)) {
+        // A resim-only Legion Tiger can be captured before its asynchronous
+        // model becomes available. Once setup succeeds, do not overwrite that
+        // fresh model and Motion graph with the zero-model snapshot. Restore
+        // only uActorGameModel's pointer-free animation request/playback fields;
+        // native move evaluation rebuilds the matching joint pose from them.
+        PreserveRange(overlay.data(), live, liveSize, {0x100, 0x1200});
+        PreserveRange(overlay.data(), live, liveSize, {0x1348, 0x128});
+        CopyRange(overlay.data(), source, liveSize, {0x1300, 0x48});
+    }
 
     // uActorGameModel owns four resource references followed by seven helper
     // allocations in +0x13E8..+0x143F. Its destructor releases this complete

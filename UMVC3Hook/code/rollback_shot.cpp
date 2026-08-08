@@ -46,6 +46,7 @@ static constexpr uintptr_t FN_WEAPON_CART_SPAWN_DEBRIS = 0x14017A200;
 static constexpr uintptr_t FN_SSHOT_FLUSH_PENDING_UNITS = 0x1401517A0;
 static constexpr uintptr_t FN_CCHRNODE_SET_NEXT = 0x140003D50;
 static constexpr uintptr_t DTI_USHOT_VULCAN_MISSILE_EMPLACEMENT = 0x140D49A60;
+static constexpr uintptr_t DTI_USHOT_VULCAN_LEGION_TIGER = 0x140D4ABB8;
 static constexpr uintptr_t DTI_USHOT_VULCAN_WEAPON_CART = 0x140D4A1A8;
 static constexpr int DYNAMIC_SAFETY = 128;
 static constexpr int SSHOT_SENTINEL_COUNT = 10;
@@ -431,8 +432,11 @@ static void __fastcall hkShotUpdateHitboxes(void* shot)
     RollbackHookProfileScope profile(RollbackHookProfileId::ShotUpdateHitboxes);
     oShotUpdateHitboxes(shot);
     auto recipe = g_liveShotRecipes.find(shot);
-    if (recipe != g_liveShotRecipes.end() && recipe->second.reconstructed)
+    if (recipe != g_liveShotRecipes.end() && recipe->second.reconstructed &&
+        recipe->second.concrete.dti !=
+            (uint64_t)_addr(DTI_USHOT_VULCAN_LEGION_TIGER)) {
         ConcreteShotSnapshot_ReapplyCapsules(shot, recipe->second.concrete);
+    }
 }
 
 static void __fastcall hkShotProcessHitCollision(void* shot, void* target,
