@@ -36,6 +36,8 @@ static constexpr uintptr_t FN_PARTICLE_MANAGER_RELEASE_SUBBUFFER = 0x14080C120;
 static constexpr uintptr_t FN_KIRIGAKURE_EFFECT_UPDATE = 0x14013B050;
 static constexpr uintptr_t FN_SUNIT_REMOVE_UNIT = 0x14051B9F0;
 static constexpr uintptr_t FN_SUNIT_REMOVE_FROM_MULTI_MASK = 0x14051BAF0;
+static constexpr uintptr_t FN_MTOBJECT_IS_ALIVE = 0x140001B80;
+static constexpr uintptr_t DTI_UGAME_EFFECT_MODEL = 0x140D46ED0;
 static constexpr uintptr_t SMVC3MGR_ACTION_OFFSET = 0x48;
 static constexpr uint32_t SUNIT_CATEGORY_COUNT_OFFSET = 0xC38;
 static constexpr uint32_t SUNIT_CATEGORY_LISTS_OFFSET = 0x50;
@@ -685,6 +687,49 @@ int Effect_RetireCurrent(void* sUnit)
     }
     g_liveEffectRecipes.clear();
     return destroyed;
+}
+
+bool Effect_RetireGameEffectModel(void* sUnit, void* effect)
+{
+    if (!sUnit || !effect || !HasCallableDtiVirtual(effect) ||
+        GetObjectDti((uint64_t)effect) !=
+            (uint64_t)_addr(DTI_UGAME_EFFECT_MODEL)) {
+        return false;
+    }
+
+    // uGameEffectModel is scheduler-owned but is not a uEffect, so the generic
+    // retirement pass never reaches it. Mirror sGameEffect's native teardown.
+    if (((uint8_t(__fastcall*)(void*))_addr(FN_MTOBJECT_IS_ALIVE))(effect)) {
+        uint64_t vtable = *(uint64_t*)effect;
+        uint64_t finalize = IsAccessibleRange(vtable + 0x78, 8)
+            ? *(uint64_t*)(vtable + 0x78) : 0;
+        if (!finalize || !IsExecutableAddress(finalize)) return false;
+        ((void(__fastcall*)(void*))finalize)(effect);
+    }
+
+    uint32_t* stateFlags = (uint32_t*)((uint8_t*)effect + 0x10);
+    // Native retirement moves category state 3 -> 4 while unlinking secondary
+    // masks, then 4 -> 0 before removing the primary sUnit link.
+    if ((*stateFlags & 7u) == 3) {
+        *stateFlags = (*stateFlags & 0xFFFFFFFCu) | 4u;
+        ((void(__fastcall*)(void*, void*))_addr(
+            FN_SUNIT_REMOVE_FROM_MULTI_MASK))(sUnit, effect);
+    }
+    if ((*stateFlags & 7u) != 4) return false;
+
+    *stateFlags &= 0xFFFFFFF8u;
+    ((char(__fastcall*)(void*, void*))_addr(FN_SUNIT_REMOVE_UNIT))(
+        sUnit, effect);
+    // List removal does not free the object; virtual slot zero is the scalar
+    // deleting destructor and flag 1 requests storage release.
+    if (!IsAccessibleRange((uint64_t)effect, sizeof(uint64_t))) return false;
+    uint64_t vtable = *(uint64_t*)effect;
+    if (!IsAccessibleRange(vtable, sizeof(uint64_t)) ||
+        !IsExecutableAddress(*(uint64_t*)vtable)) {
+        return false;
+    }
+    ((void(__fastcall*)(void*, uint32_t))*(uint64_t*)vtable)(effect, 1);
+    return true;
 }
 
 void Effect_SanitizeRetired(void* sUnit)

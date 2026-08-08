@@ -31,6 +31,7 @@ static constexpr uintptr_t PTR_SCAMERA = 0x140e17930;
 static constexpr uintptr_t PTR_SGAMEEFFECT = 0x140d46470;
 static constexpr uintptr_t FN_SSHOT_ENQUEUE_UNIT = 0x1401512A0;
 static constexpr uintptr_t FN_SSHOT_FLUSH_PENDING_UNITS = 0x1401517A0;
+static constexpr uintptr_t FN_CCHRNODE_SET_NEXT = 0x140003D50;
 static constexpr uintptr_t FN_SGAMEEFFECT_FLUSH_PENDING = 0x140130D00;
 static constexpr uintptr_t FN_SUNIT_ADD_UNIT = 0x14051A6B0;
 static constexpr uintptr_t FN_SUNIT_REMOVE_UNIT = 0x14051B9F0;
@@ -112,6 +113,8 @@ static constexpr uintptr_t VTABLE_UDOCTOR_DOOM = 0x140A73A40;
 static constexpr uintptr_t DTI_USHOT_OPTION_SHIELD_SLASH = 0x140D48A68;
 static constexpr uintptr_t DTI_USHOT_VULCAN_LAND_MINE = 0x140D48D98;
 static constexpr uintptr_t DTI_USHOT_VULCAN_MISSILE_EMPLACEMENT = 0x140D49A60;
+static constexpr uintptr_t DTI_USHOT_VULCAN_WEAPON_CART = 0x140D4A1A8;
+static constexpr uintptr_t DTI_USHOT_SHIELD_WEAPON_CART_SPREAD = 0x140D4A098;
 static constexpr uint32_t UCAP_AMERICA_SHIELD_SLASH_OFFSET = 0x68F0;
 static constexpr uint32_t UDOCTOR_DOOM_MISSILE_OFFSET = 0x68F0;
 
@@ -576,6 +579,27 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
     std::vector<void*> currentShots;
     Shot_CollectCurrent(currentShots);
     for (void* shot : currentShots) {
+        // Cart reconstruction retires its 13 model effects before invoking the
+        // fresh factory. Hold their resources alive across that ownership gap.
+        if (HasCallableDtiVirtual(shot) &&
+            GetObjectDti((uint64_t)shot) ==
+                (uint64_t)_addr(DTI_USHOT_VULCAN_WEAPON_CART)) {
+            for (uint32_t index = 0; index < 13; ++index) {
+                void* effect = *(void**)((uint8_t*)shot + 0x2288 + index * 8);
+                if (!effect || !IsAccessibleRange((uint64_t)effect + 0x108,
+                                                   sizeof(void*))) {
+                    continue;
+                }
+                void* resource = *(void**)((uint8_t*)effect + 0x108);
+                if (resource && HasCallableDtiVirtual(resource) &&
+                    std::find(pinnedCallbackEffectResources.begin(),
+                              pinnedCallbackEffectResources.end(), resource) ==
+                        pinnedCallbackEffectResources.end()) {
+                    addRef(resource);
+                    pinnedCallbackEffectResources.push_back(resource);
+                }
+            }
+        }
         if (!IsAccessibleRange((uint64_t)shot + 0x1F78,
                                13 * sizeof(void*))) {
             continue;
@@ -626,7 +650,52 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
         // restore; observed failures cover move, finish, draw, and destruction.
         // Retire all effects through native two-phase cleanup. hkUnitRemove
         // sanitizes owned resource/generator fields at the destruction boundary.
-        retiredEffects = Effect_RetireCurrent(sUnit);
+        // The cart owns model effects outside the callback array handled by
+        // Effect_RetireCurrent, so retire them explicitly through sUnit.
+        std::vector<void*> retiredCartModels;
+        for (void* shot : currentShots) {
+            if (!HasCallableDtiVirtual(shot) ||
+                GetObjectDti((uint64_t)shot) !=
+                    (uint64_t)_addr(DTI_USHOT_VULCAN_WEAPON_CART)) {
+                continue;
+            }
+            for (uint32_t index = 0; index < 13; ++index) {
+                void* effect = *(void**)((uint8_t*)shot + 0x2288 + index * 8);
+                if (!effect ||
+                    std::find(retiredCartModels.begin(), retiredCartModels.end(),
+                              effect) != retiredCartModels.end()) {
+                    continue;
+                }
+                if (Effect_RetireGameEffectModel(sUnit, effect)) {
+                    retiredCartModels.push_back(effect);
+                    ++retiredEffects;
+                }
+            }
+        }
+        if (!retiredCartModels.empty()) {
+            // Clear both aliases before shot destruction can revisit an object
+            // whose scalar destructor already ran.
+            for (void* shot : currentShots) {
+                if (!HasCallableDtiVirtual(shot) ||
+                    GetObjectDti((uint64_t)shot) !=
+                        (uint64_t)_addr(DTI_USHOT_VULCAN_WEAPON_CART)) {
+                    continue;
+                }
+                for (uint32_t index = 0; index < 13; ++index) {
+                    void** slot = (void**)((uint8_t*)shot + 0x2288 + index * 8);
+                    if (std::find(retiredCartModels.begin(), retiredCartModels.end(),
+                                  *slot) != retiredCartModels.end()) {
+                        *slot = nullptr;
+                    }
+                    slot = (void**)((uint8_t*)shot + 0x1F78 + index * 8);
+                    if (std::find(retiredCartModels.begin(), retiredCartModels.end(),
+                                  *slot) != retiredCartModels.end()) {
+                        *slot = nullptr;
+                    }
+                }
+            }
+        }
+        retiredEffects += Effect_RetireCurrent(sUnit);
     }
     const uint64_t retireEffectsEnd = Profile_Now();
 
@@ -790,9 +859,27 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
         void* objectRef2 = ValidateShotObjectReference(
             saved.objectRef2, saved.objectRef2Dti,
             saved.objectRef2WasActiveUnit);
+        ShotRecipe remappedRecipe;
+        const ShotRecipe* spawnRecipe = &saved;
+        if (saved.concrete.dti ==
+            (uint64_t)_addr(DTI_USHOT_SHIELD_WEAPON_CART_SPREAD)) {
+            // Debris stores its parent cart in initParam rather than either
+            // validated object-reference field.
+            for (const ShotRecipe& candidate : slot.shotRecipes) {
+                if (candidate.savedPtr == (void*)saved.initParam &&
+                    candidate.restoredPtr) {
+                    remappedRecipe = saved;
+                    remappedRecipe.initParam =
+                        (uint64_t)candidate.restoredPtr;
+                    spawnRecipe = &remappedRecipe;
+                    break;
+                }
+            }
+        }
         const uint64_t factoryStart = Profile_Now();
         respawnPrepareTicks += factoryStart - prepareStart;
-        void* fresh = Shot_SpawnOriginal(sShot, saved, objectRef1, objectRef2);
+        void* fresh = Shot_SpawnOriginal(
+            sShot, *spawnRecipe, objectRef1, objectRef2);
         const uint64_t factoryEnd = Profile_Now();
         respawnFactoryTicks += factoryEnd - factoryStart;
         if (!fresh) {
@@ -803,7 +890,7 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
         // The factory may create an inline effect with a valid vtable, but its
         // owner/list links still point at the old prediction graph. Detach it
         // before the broad concrete overlay can copy any stale relationship.
-        Shot_TrackReconstructed(fresh, saved);
+        Shot_TrackReconstructed(fresh, *spawnRecipe);
         saved.restoredPtr = fresh;
 
         // Resource-gated subclass setup can leave a reconstructed shot without
@@ -827,6 +914,21 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
             if (setupAddress && IsExecutableAddress(setupAddress)) {
                 auto setup = (void(__fastcall*)(void*))setupAddress;
                 setup(fresh);
+            }
+        }
+        if (saved.concrete.dti ==
+                (uint64_t)_addr(DTI_USHOT_VULCAN_WEAPON_CART) &&
+            saved.ownerChr &&
+            IsAccessibleRange((uint64_t)fresh + 0x2288, sizeof(void*)) &&
+            IsAccessibleRange((uint64_t)saved.ownerChr + 0x6498,
+                              sizeof(void*))) {
+            void* modelEffect = *(void**)((uint8_t*)fresh + 0x2288);
+            if (modelEffect && HasCallableDtiVirtual(modelEffect)) {
+                // Debris attachment resolves joints through owner+0x6498; the
+                // saved node still names the retired primary model.
+                ((void(__fastcall*)(void*, void*))_addr(
+                    FN_CCHRNODE_SET_NEXT))(
+                        (uint8_t*)saved.ownerChr + 0x6490, modelEffect);
             }
         }
         if (saved.concrete.dti ==

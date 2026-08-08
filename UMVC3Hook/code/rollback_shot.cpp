@@ -29,6 +29,8 @@ static constexpr uint32_t SUNIT_MULTI_MASK_ARRAYS_OFFSET = 0xC50;
 static constexpr uintptr_t VTABLE_USHOT_VULCAN_ZIREITOU = 0x140AC0E20;
 static constexpr uintptr_t PTR_SREPLAY = 0x140d4d9d8;
 static constexpr uintptr_t PTR_SUNIT = 0x140E17698;
+static constexpr uintptr_t PTR_SSHOT = 0x140D47F40;
+static constexpr uintptr_t PTR_SGAMECONFIG = 0x140D50F88;
 static constexpr uintptr_t FN_SSHOT_SPAWN = 0x140150E00;
 static constexpr uintptr_t FN_SSHOT_SPAWN_EX = 0x140150F40;
 static constexpr uintptr_t FN_USHOT_PROCESS_HIT_COLLISION = 0x1401C6950;
@@ -39,12 +41,22 @@ static constexpr uintptr_t FN_BUILD_ATTACH_MATRIX = 0x14014F960;
 static constexpr uintptr_t FN_SUNIT_REMOVE_UNIT = 0x14051B9F0;
 static constexpr uintptr_t FN_KING_KOBUN_MOVE = 0x1401BA2D0;
 static constexpr uintptr_t FN_MISSILE_EMPLACEMENT_MOVE = 0x14016F220;
+static constexpr uintptr_t FN_WEAPON_CART_MOVE = 0x14017A9D0;
+static constexpr uintptr_t FN_WEAPON_CART_SPAWN_DEBRIS = 0x14017A200;
+static constexpr uintptr_t FN_SSHOT_FLUSH_PENDING_UNITS = 0x1401517A0;
+static constexpr uintptr_t FN_CCHRNODE_SET_NEXT = 0x140003D50;
 static constexpr uintptr_t DTI_USHOT_VULCAN_MISSILE_EMPLACEMENT = 0x140D49A60;
+static constexpr uintptr_t DTI_USHOT_VULCAN_WEAPON_CART = 0x140D4A1A8;
 static constexpr int DYNAMIC_SAFETY = 128;
 static constexpr int SSHOT_SENTINEL_COUNT = 10;
 static constexpr size_t SSHOT_NODE_OFFSET = 0x1450;
 static constexpr size_t SSHOT_NODE_NEXT = 0x08;
 static constexpr uint32_t SUNIT_CHARACTER_CATEGORY = 8;
+static constexpr size_t SSHOT_ID_POOL_OFFSET = 0x38;
+static constexpr size_t SSHOT_ID_POOL_SIZE = 0x404;
+static constexpr size_t SSHOT_PENDING_COUNT_OFFSET = 0x2448;
+static constexpr size_t SGAMECONFIG_SHOT_SLOT_FLAGS_OFFSET = 0x4A89C;
+static constexpr size_t SGAMECONFIG_SHOT_SLOT_FLAGS_SIZE = 10;
 
 using ShotSpawnFn = void*(__fastcall*)(void*, void*, uint64_t, void*, void*,
     void*, uint32_t, void*);
@@ -56,6 +68,7 @@ using ShotProcessHitCollisionFn = void(__fastcall*)(void*, void*, void*);
 using ShotUpdateHitboxesFn = void(__fastcall*)(void*);
 using KingKobunMoveFn = void(__fastcall*)(void*);
 using MissileEmplacementMoveFn = void(__fastcall*)(void*);
+using WeaponCartMoveFn = void(__fastcall*)(void*);
 
 static ShotSpawnFn oShotSpawn = nullptr;
 static ShotSpawnExFn oShotSpawnEx = nullptr;
@@ -67,11 +80,31 @@ static void(__fastcall* oShotKillCallbacks)(void*, uint32_t) = nullptr;
 static void(__fastcall* oShotClearDeadCallbacks)(void*) = nullptr;
 static KingKobunMoveFn oKingKobunMove = nullptr;
 static MissileEmplacementMoveFn oMissileEmplacementMove = nullptr;
+static WeaponCartMoveFn oWeaponCartMove = nullptr;
 static std::unordered_map<void*, RollbackShotRecipe> g_liveShotRecipes;
 static uint64_t g_shotSpawnSequence = 0;
 static int g_kingKobunTraceCount = 0;
 static uint32_t g_unitLinkRepairLogCount = 0;
 static uint32_t g_staleHitTargetLogCount = 0;
+
+// A reconstructed gate-2 transition may queue no child recipes. Replaying the
+// native debris spawn later must leave every deterministic allocator unchanged.
+struct DeferredWeaponCartDebris {
+    bool pending = false;
+    uint8_t preGlobalRng[16] = {};
+    uint8_t preEffectRng[16] = {};
+    uint8_t preOwnerRng[16] = {};
+    uint8_t postGlobalRng[16] = {};
+    uint8_t postEffectRng[16] = {};
+    uint8_t postOwnerRng[16] = {};
+    uint8_t preShotIdPool[SSHOT_ID_POOL_SIZE] = {};
+    uint8_t postShotIdPool[SSHOT_ID_POOL_SIZE] = {};
+    uint8_t preShotSlotFlags[SGAMECONFIG_SHOT_SLOT_FLAGS_SIZE] = {};
+    uint8_t postShotSlotFlags[SGAMECONFIG_SHOT_SLOT_FLAGS_SIZE] = {};
+};
+
+static std::unordered_map<void*, DeferredWeaponCartDebris>
+    g_deferredWeaponCartDebris;
 
 static bool HasValidUnitLink(void* unit)
 {
@@ -620,6 +653,194 @@ static void __fastcall hkMissileEmplacementMove(void* shot)
     oMissileEmplacementMove(shot);
 }
 
+static bool IsReconstructedWeaponCart(void* shot)
+{
+    auto recipe = g_liveShotRecipes.find(shot);
+    return recipe != g_liveShotRecipes.end() && recipe->second.reconstructed &&
+        HasCallableDtiVirtual(shot) &&
+        GetObjectDti((uint64_t)shot) ==
+            (uint64_t)_addr(DTI_USHOT_VULCAN_WEAPON_CART);
+}
+
+static bool WeaponCartMotionReady(void* shot)
+{
+    return *(uint32_t*)((uint8_t*)shot + 0x550) != 0;
+}
+
+static void CaptureWeaponCartTransitionState(
+    DeferredWeaponCartDebris& state, void* owner, bool post)
+{
+    // Capture both sides of the native transition so a deferred spawn can run
+    // with its original inputs and then restore the already-observed outputs.
+    uint8_t* globalRng = (uint8_t*)_addr(0x140D765D8);
+    uint64_t sEffect = *(uint64_t*)_addr(0x140E17A38);
+    uint8_t* effectRng = sEffect ? (uint8_t*)sEffect + 0x3C : nullptr;
+    void* sShot = *(void**)_addr(PTR_SSHOT);
+    void* sGameConfig = *(void**)_addr(PTR_SGAMECONFIG);
+
+    std::memcpy(post ? state.postGlobalRng : state.preGlobalRng,
+                globalRng, 16);
+    if (effectRng) {
+        std::memcpy(post ? state.postEffectRng : state.preEffectRng,
+                    effectRng, 16);
+    }
+    if (owner) {
+        std::memcpy(post ? state.postOwnerRng : state.preOwnerRng,
+                    (uint8_t*)owner + 0x2D80, 16);
+    }
+    if (sShot) {
+        std::memcpy(post ? state.postShotIdPool : state.preShotIdPool,
+                    (uint8_t*)sShot + SSHOT_ID_POOL_OFFSET,
+                    SSHOT_ID_POOL_SIZE);
+    }
+    if (sGameConfig) {
+        std::memcpy(post ? state.postShotSlotFlags : state.preShotSlotFlags,
+                    (uint8_t*)sGameConfig +
+                        SGAMECONFIG_SHOT_SLOT_FLAGS_OFFSET,
+                    SGAMECONFIG_SHOT_SLOT_FLAGS_SIZE);
+    }
+}
+
+static void RestoreWeaponCartTransitionState(
+    const DeferredWeaponCartDebris& state, void* owner, bool post)
+{
+    uint8_t* globalRng = (uint8_t*)_addr(0x140D765D8);
+    uint64_t sEffect = *(uint64_t*)_addr(0x140E17A38);
+    uint8_t* effectRng = sEffect ? (uint8_t*)sEffect + 0x3C : nullptr;
+    void* sShot = *(void**)_addr(PTR_SSHOT);
+    void* sGameConfig = *(void**)_addr(PTR_SGAMECONFIG);
+
+    std::memcpy(globalRng,
+                post ? state.postGlobalRng : state.preGlobalRng, 16);
+    if (effectRng) {
+        std::memcpy(effectRng,
+                    post ? state.postEffectRng : state.preEffectRng, 16);
+    }
+    if (owner) {
+        std::memcpy((uint8_t*)owner + 0x2D80,
+                    post ? state.postOwnerRng : state.preOwnerRng, 16);
+    }
+    if (sShot) {
+        std::memcpy((uint8_t*)sShot + SSHOT_ID_POOL_OFFSET,
+                    post ? state.postShotIdPool : state.preShotIdPool,
+                    SSHOT_ID_POOL_SIZE);
+    }
+    if (sGameConfig) {
+        std::memcpy((uint8_t*)sGameConfig +
+                        SGAMECONFIG_SHOT_SLOT_FLAGS_OFFSET,
+                    post ? state.postShotSlotFlags : state.preShotSlotFlags,
+                    SGAMECONFIG_SHOT_SLOT_FLAGS_SIZE);
+    }
+}
+
+static void RecoverWeaponCartEndTransition(void* shot, void* owner,
+                                           DeferredWeaponCartDebris& state)
+{
+    // Native gate-2 handling selects the explosion/return animation before it
+    // creates debris; reconstruction must reproduce that omitted side effect.
+    uint64_t vtable = *(uint64_t*)shot;
+    uint64_t selectMotion = IsAccessibleRange(vtable + 0x190, sizeof(uint64_t))
+        ? *(uint64_t*)(vtable + 0x190) : 0;
+    if (selectMotion && IsExecutableAddress(selectMotion)) {
+        uint32_t animation = *(uint8_t*)((uint8_t*)shot + 0x22F4) ? 7 : 3;
+        ((void(__fastcall*)(void*, uint32_t))selectMotion)(shot, animation);
+    }
+
+    void* sShot = *(void**)_addr(PTR_SSHOT);
+    if (!sShot) return;
+    uint32_t* pendingCount = (uint32_t*)((uint8_t*)sShot +
+                                         SSHOT_PENDING_COUNT_OFFSET);
+    if (*pendingCount == 0) {
+        // Run debris creation against pre-transition state, then put RNG and
+        // allocator bookkeeping back at the post-transition values.
+        RestoreWeaponCartTransitionState(state, owner, false);
+        ((void(__fastcall*)(void*))_addr(FN_WEAPON_CART_SPAWN_DEBRIS))(shot);
+        RestoreWeaponCartTransitionState(state, owner, true);
+    }
+
+    if (*pendingCount != 0) {
+        ((void(__fastcall*)(void*))_addr(FN_SSHOT_FLUSH_PENDING_UNITS))(sShot);
+        state.pending = false;
+    }
+}
+
+static void __fastcall hkWeaponCartMove(void* shot)
+{
+    auto liveRecipe = g_liveShotRecipes.find(shot);
+    bool reconstructed = liveRecipe != g_liveShotRecipes.end() &&
+        liveRecipe->second.reconstructed && IsReconstructedWeaponCart(shot);
+    void* owner = liveRecipe != g_liveShotRecipes.end()
+        ? liveRecipe->second.ownerChr : nullptr;
+    uint32_t beforeGate = *(uint32_t*)((uint8_t*)shot + 0x221C);
+    // The owner caches the primary model independently of the shot. Refresh it
+    // every move because forced reconstruction replaces that model each frame.
+    if (reconstructed && owner &&
+        IsAccessibleRange((uint64_t)shot + 0x2288, sizeof(void*)) &&
+        IsAccessibleRange((uint64_t)owner + 0x6498, sizeof(void*))) {
+        void* modelEffect = *(void**)((uint8_t*)shot + 0x2288);
+        if (modelEffect && HasCallableDtiVirtual(modelEffect)) {
+            ((void(__fastcall*)(void*, void*))_addr(FN_CCHRNODE_SET_NEXT))(
+                (uint8_t*)owner + 0x6490, modelEffect);
+        }
+    }
+    if (reconstructed && owner && beforeGate == 3) {
+        auto deferred = g_deferredWeaponCartDebris.find(owner);
+        if (deferred != g_deferredWeaponCartDebris.end() &&
+            deferred->second.pending) {
+            RecoverWeaponCartEndTransition(shot, owner, deferred->second);
+        }
+    }
+
+    DeferredWeaponCartDebris transitionState{};
+    bool captureTransition = reconstructed && owner && beforeGate == 2;
+    size_t liveRecipeCountBefore = g_liveShotRecipes.size();
+    if (captureTransition)
+        CaptureWeaponCartTransitionState(transitionState, owner, false);
+    if (reconstructed) {
+        if (!WeaponCartMotionReady(shot)) return;
+
+        // The primary cart effect normally raises this transition gate when
+        // mTimer reaches 67, then advances it after the timer-122 model tick.
+        // Forced reconstruction replaces that effect every frame, but the
+        // authoritative shot timer remains available.
+        constexpr size_t TIMER_OFFSET = 0x1F58;
+        constexpr size_t TRANSITION_GATE_OFFSET = 0x221C;
+        constexpr size_t LINEAR_SPEED_OFFSET = 0x2080;
+        float timer = *(float*)((uint8_t*)shot + TIMER_OFFSET);
+        if (timer >= 67.0f && timer < 122.0f) {
+            *(uint32_t*)((uint8_t*)shot + TRANSITION_GATE_OFFSET) = 1;
+            *(float*)((uint8_t*)shot + LINEAR_SPEED_OFFSET) = 0.0f;
+        }
+    }
+    oWeaponCartMove(shot);
+    uint32_t afterGate = *(uint32_t*)((uint8_t*)shot + 0x221C);
+    if (captureTransition && afterGate == 3) {
+        CaptureWeaponCartTransitionState(transitionState, owner, true);
+        // New live recipes prove native debris creation succeeded. Otherwise
+        // retain the transition snapshot for recovery on the next move.
+        if (g_liveShotRecipes.size() == liveRecipeCountBefore) {
+            transitionState.pending = true;
+            g_deferredWeaponCartDebris[owner] = std::move(transitionState);
+        } else {
+            g_deferredWeaponCartDebris.erase(owner);
+        }
+    }
+    if (reconstructed && *(float*)((uint8_t*)shot + 0x1F58) >= 122.0f &&
+        *(uint32_t*)((uint8_t*)shot + 0x221C) == 1) {
+        // The model effect normally performs this end-of-tick gate change.
+        *(uint32_t*)((uint8_t*)shot + 0x221C) = 2;
+        *(float*)((uint8_t*)shot + 0x2080) = 20.0f;
+    }
+    if (reconstructed && *(float*)((uint8_t*)shot + 0x1F58) >= 141.0f &&
+        *(uint32_t*)((uint8_t*)shot + 0x221C) == 3 &&
+        *(uint64_t*)((uint8_t*)shot + 0x568) != 0x68) {
+        // Gate 3 expects the first motion record at its return-slide cursor.
+        *(uint64_t*)((uint8_t*)shot + 0x558) = 0x20000044;
+        *(uint64_t*)((uint8_t*)shot + 0x568) = 0x68;
+        *(uint64_t*)((uint8_t*)shot + 0x570) = 0x44;
+    }
+}
+
 static char __fastcall hkUnitRemove(void* manager, void* unit)
 {
     RollbackHookProfileScope profile(RollbackHookProfileId::UnitRemove);
@@ -720,6 +941,7 @@ void Shot_TrackReconstructed(void* shot, const RollbackShotRecipe& recipe)
 void Shot_Reset()
 {
     g_liveShotRecipes.clear();
+    g_deferredWeaponCartDebris.clear();
     g_shotSpawnSequence = 0;
     g_staleHitTargetLogCount = 0;
 }
@@ -776,6 +998,10 @@ void Shot_InitHooks()
                 (void**)&oMissileEmplacementMove,
                 "Rollback: hooked reconstructed missile emplacement model retry",
                 "Rollback: failed to hook missile emplacement model retry (%d)\n");
+    InstallHook(FN_WEAPON_CART_MOVE, (LPVOID)&hkWeaponCartMove,
+                (void**)&oWeaponCartMove,
+                "Rollback: hooked reconstructed Weapon Cart model retry",
+                "Rollback: failed to hook Weapon Cart model retry (%d)\n");
     InstallHook(FN_SUNIT_REMOVE_UNIT, (LPVOID)&hkUnitRemove, (void**)&oUnitRemove,
                  "Rollback: hooked sUnit__removeUnit for recipe lifetime",
                  "Rollback: failed to hook sUnit__removeUnit (%d)\n");

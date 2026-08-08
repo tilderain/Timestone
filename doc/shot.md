@@ -197,6 +197,76 @@ must be reapplied explicitly after the generic pointer filter. Without that
 reapply, rollback repeatedly restores phase zero and launches extra children,
 advancing Doom's RNG.
 
+Frank's `uShotVulcanWeaponCart` also carries gameplay-facing model playback
+state. In the Frank frame-83 capture, both peers created the same `0x2300`-byte
+cart shot, but the host had an active motion header at `uShot+0x550` and
+populated motion-slot playback while the reconstructed client retained the
+fresh model's zero/default state. Restore the same pointer-free motion ranges
+used by King Servbot and Hidden Missiles while retaining the reconstructed
+joint, motion-resource, and model allocations. A reconstructed cart can be
+replaced every forced-resimulation frame before its asynchronous model finishes,
+leaving every saved client snapshot with the same inactive motion header. At the
+cart move boundary, retry native setup while that header remains inactive and
+defer movement if setup is still incomplete. Preserve the verified concrete
+gameplay tail across the retry, but allow setup to initialize fresh motion state;
+ordinary live carts retain native behavior. The primary cart effect separately
+raises the concrete transition gate at `uShot+0x221c` when the authoritative
+shot timer at `+0x1f58` reaches 67. Forced reconstruction can replace that effect
+every frame even after motion setup succeeds, leaving the gate at zero and the
+cart frozen. The same effect performs the end-of-tick transition to gate `2`
+when the timer reaches 122; that gate drives the cart's subsequent linear phase.
+For reconstructed carts only, derive gate `1` from timers 67 through 121 before
+native movement, then advance it to gate `2` after the timer-122 model tick. The
+gate-3 transition at timer 141 also resets the first `uModel::Motion` playback
+record. Reapply the verified header/cursor values at `+0x558`, `+0x568`, and
+`+0x570` if fresh reconstruction leaves the record in its invalid factory state;
+otherwise the return phase decrements its timer but never updates cart position.
+
+Weapon Cart's slot-0 type-5 primitive uses metadata type 0 and therefore the
+`cHitPrimSphere` layout. Sphere world/local centers are at `+0x20`/`+0x50` and
+the object is only `0x70` bytes; capsule fields at `+0x80` are out of bounds.
+Capture and restore metadata-type-0 primitives through the sphere layout rather
+than applying capsule ownership and endpoint offsets.
+
+During the model-driven phase, a reconstructed cart can briefly fall through to
+gate `2` and leave linear speed `20.0` at `uShot+0x2080` even after gate `1` is
+restored. Native attack-matrix generation adds that stale speed to the prior cart
+position, shifting the sphere hitbox by exactly 20 units from timer 69 onward.
+Keep speed zero with gate `1` through timer 121, then set speed 20 together with
+the authoritative gate-2 transition at timer 122.
+
+Weapon Cart reconstruction also exposes a heap-lifetime failure independent of
+the saved motion scalars. Native setup allocates 13 `uGameEffectModel` owners at
+`uShot+0x2288..+0x22e8` on every factory reconstruction. They use DTI
+`0x140d46ed0` and are not subclasses of `uEffect`, so the generic rollback effect
+retirement pass does not reclaim them. Restore-stage measurements showed roughly
+135 KB and 118 live allocator-slot-12 blocks accumulating per restored frame. At
+the frame-221 transition the host had 7,465,776 live bytes, 4,584 blocks, and a
+47,392-byte largest free block; the client had 16,716,288 live bytes, 13,133
+blocks, and a largest free block of only 752 bytes. All 12 debris resources and
+their DTI (`uShotShieldWeaponCartSpread`, `0x140d4a098`) were valid, but each
+`0x2150`-byte class allocation failed in `MtHeapAllocator::alloc`. The same heap
+pressure explains why the reconstructed cart loses its model and 16-joint graph
+before the explosion while its inline collision primitive can still move.
+
+`uGameEffectModel` cannot be synchronously scalar-deleted like `uEffect`; native
+`sGameEffect__purgeStaleEffectsViaSUnit` first invokes virtual `+0x78` and relies
+on category state transitions. Rollback cleanup mirrors those transitions for
+the 13 cart-owned models: finalize through `+0x78`, advance state `3 -> 4` while
+removing multi-mask links, then advance `4 -> 0`, remove the primary `sUnit`
+link, and invoke the scalar destructor. Pin their resources until fresh native
+setup completes. The debris attachment source is separately cached in
+`cChrNode(owner+0x6490)+0x08`; remap it to the fresh primary model at
+`cart+0x2288` after reconstruction and reinforce that binding at each
+reconstructed move boundary so attachment indices 5 through 18 cannot dispatch
+through the retired model's base `MtObject` vtable. With this cleanup,
+the reconstructed cart retains its model and 16 joints through gate 3, creates
+all debris, resumes return sliding, and remains checksum-synchronized.
+Each debris recipe also stores its parent cart pointer in `initParam`, outside
+the two validated object-reference fields. Remap that value from the captured
+cart recipe's `savedPtr` to its `restoredPtr` before running the debris factory;
+otherwise attachment dispatch receives the cart destroyed by the prior restore.
+
 Arthur's `uShotVulcanAxe` similarly requires an explicit scalar reapply at
 `uShot+0x21d0`. Its main callback advances this model/collision rotation
 accumulator by 18 degrees each frame. A saved `18.0f` forms qword `0x41900000`

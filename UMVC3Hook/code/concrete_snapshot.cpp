@@ -37,6 +37,7 @@ constexpr size_t kAttackTargetTables[kAttackTargetTableCount] = {
 constexpr uintptr_t kSoulFistDti = 0x140D4B6E8ull;
 constexpr uintptr_t kKingKobunDti = 0x140D4D2B0ull;
 constexpr uintptr_t kMissileEmplacementDti = 0x140D49A60ull;
+constexpr uintptr_t kWeaponCartDti = 0x140D4A1A8ull;
 constexpr uintptr_t kVulcanAxeDti = 0x140D48808ull;
 constexpr uintptr_t kRyuDti = 0x140D45A10ull;
 constexpr uintptr_t kHsienKoDti = 0x140D455F8ull;
@@ -372,23 +373,36 @@ void CaptureCollisionPrimitives(const uint8_t* shot, ConcreteShotSnapshot& out)
                 saved.metadataType = *(uint32_t*)(metadata + 0x14);
             saved.geometryType = *(uint8_t*)(primitive + 0x08);
             saved.collisionKind = *(uint32_t*)(primitive + 0x10);
-            std::memcpy(saved.geometry, (void*)(primitive + 0x20),
-                        sizeof(saved.geometry));
-            saved.flags = *(uint32_t*)(primitive + 0x50);
-            saved.parent0 = *(uint64_t*)(primitive + 0x58);
-            saved.parent1 = *(uint64_t*)(primitive + 0x60);
             auto shotOffset = [&](uint64_t parent) {
                 uintptr_t shotStart = (uintptr_t)shot;
                 uintptr_t shotEnd = shotStart + out.body.size();
                 return parent >= shotStart && parent < shotEnd
                     ? (int32_t)(parent - shotStart) : -1;
             };
+
+            if (saved.metadataType == 0) {
+                // cHitPrimSphere is 0x70 bytes: world center/radius at +0x20,
+                // flags/parent at +0x30/+0x38, and local center at +0x50.
+                std::memcpy(saved.geometry, (void*)(primitive + 0x20), 0x10);
+                saved.flags = *(uint32_t*)(primitive + 0x30);
+                saved.parent0 = *(uint64_t*)(primitive + 0x38);
+                std::memcpy(saved.parentState, (void*)(primitive + 0x40),
+                            sizeof(saved.parentState));
+                std::memcpy(saved.localGeometry, (void*)(primitive + 0x50),
+                            0x10);
+            } else {
+                std::memcpy(saved.geometry, (void*)(primitive + 0x20),
+                            sizeof(saved.geometry));
+                saved.flags = *(uint32_t*)(primitive + 0x50);
+                saved.parent0 = *(uint64_t*)(primitive + 0x58);
+                saved.parent1 = *(uint64_t*)(primitive + 0x60);
+                std::memcpy(saved.parentState, (void*)(primitive + 0x68),
+                            sizeof(saved.parentState));
+                std::memcpy(saved.localGeometry, (void*)(primitive + 0x80),
+                            sizeof(saved.localGeometry));
+            }
             saved.parent0ShotOffset = shotOffset(saved.parent0);
             saved.parent1ShotOffset = shotOffset(saved.parent1);
-            std::memcpy(saved.parentState, (void*)(primitive + 0x68),
-                        sizeof(saved.parentState));
-            std::memcpy(saved.localGeometry, (void*)(primitive + 0x80),
-                        sizeof(saved.localGeometry));
             std::memcpy(saved.sourceGeometry, saved.localGeometry,
                         sizeof(saved.sourceGeometry));
 
@@ -402,27 +416,36 @@ void CaptureCollisionPrimitives(const uint8_t* shot, ConcreteShotSnapshot& out)
             const float* worldEnd = (const float*)(saved.geometry + 0x10);
             const float* shotPos = (const float*)(shot + 0x50);
             const float* localStart = (const float*)saved.localGeometry;
-            const float* localEnd = (const float*)(saved.localGeometry + 0x10);
             float* sourceStart = (float*)saved.sourceGeometry;
             float* sourceEnd = (float*)(saved.sourceGeometry + 0x10);
             for (size_t axis = 0; axis < 3; ++axis) {
                 if (!std::isfinite(localStart[axis]) ||
-                    !std::isfinite(localEnd[axis]) ||
                     !std::isfinite(worldStart[axis]) ||
-                    !std::isfinite(worldEnd[axis]) ||
                     !std::isfinite(shotPos[axis])) {
                     continue;
                 }
 
                 float derivedStart = worldStart[axis] - shotPos[axis];
-                float derivedEnd = worldEnd[axis] - shotPos[axis];
-                bool localAxisEmpty = std::fabs(localStart[axis]) < 0.01f &&
-                    std::fabs(localEnd[axis]) < 0.01f;
-                bool derivedAxisPresent = std::fabs(derivedStart) >= 0.01f ||
-                    std::fabs(derivedEnd) >= 0.01f;
+                bool localAxisEmpty = std::fabs(localStart[axis]) < 0.01f;
+                bool derivedAxisPresent = std::fabs(derivedStart) >= 0.01f;
                 if (localAxisEmpty && derivedAxisPresent) {
                     sourceStart[axis] = derivedStart;
-                    sourceEnd[axis] = derivedEnd;
+                }
+
+                // Capsules have a second endpoint; spheres end after the first
+                // center/radius vector and must not read the following object.
+                if (saved.metadataType != 0) {
+                    const float* localEnd =
+                        (const float*)(saved.localGeometry + 0x10);
+                    if (!std::isfinite(localEnd[axis]) ||
+                        !std::isfinite(worldEnd[axis])) {
+                        continue;
+                    }
+                    float derivedEnd = worldEnd[axis] - shotPos[axis];
+                    if (std::fabs(localEnd[axis]) < 0.01f &&
+                        std::fabs(derivedEnd) >= 0.01f) {
+                        sourceEnd[axis] = derivedEnd;
+                    }
                 }
             }
             saved.hasSourceGeometry = HasLocalGeometry(saved.sourceGeometry);
@@ -454,20 +477,35 @@ void RestoreCollisionPrimitives(uint8_t* shot,
 
         *(uint8_t*)(primitive + 0x08) = saved.geometryType;
         *(uint32_t*)(primitive + 0x10) = saved.collisionKind;
-        std::memcpy((void*)(primitive + 0x20), saved.geometry,
-                    sizeof(saved.geometry));
-        *(uint32_t*)(primitive + 0x50) = saved.flags;
-        *(uint64_t*)(primitive + 0x58) = restoreParent(
-            saved.parent0, saved.parent0ShotOffset,
-            *(uint64_t*)(primitive + 0x58));
-        *(uint64_t*)(primitive + 0x60) = restoreParent(
-            saved.parent1, saved.parent1ShotOffset,
-            *(uint64_t*)(primitive + 0x60));
-        std::memcpy((void*)(primitive + 0x68), saved.parentState,
-                    sizeof(saved.parentState));
-        std::memcpy((void*)(primitive + 0x80), saved.localGeometry,
-                    sizeof(saved.localGeometry));
-
+        // metadataType selects the concrete allocation layout. Type 0 is a
+        // 0x70-byte cHitPrimSphere with one center and one parent; the other
+        // captured types use the larger capsule layout with two endpoints and
+        // two parent fields. Using capsule offsets for a sphere writes beyond
+        // the object into the following allocation.
+        if (saved.metadataType == 0) {
+            std::memcpy((void*)(primitive + 0x20), saved.geometry, 0x10);
+            *(uint32_t*)(primitive + 0x30) = saved.flags;
+            *(uint64_t*)(primitive + 0x38) = restoreParent(
+                saved.parent0, saved.parent0ShotOffset,
+                *(uint64_t*)(primitive + 0x38));
+            std::memcpy((void*)(primitive + 0x40), saved.parentState,
+                        sizeof(saved.parentState));
+            std::memcpy((void*)(primitive + 0x50), saved.localGeometry, 0x10);
+        } else {
+            std::memcpy((void*)(primitive + 0x20), saved.geometry,
+                        sizeof(saved.geometry));
+            *(uint32_t*)(primitive + 0x50) = saved.flags;
+            *(uint64_t*)(primitive + 0x58) = restoreParent(
+                saved.parent0, saved.parent0ShotOffset,
+                *(uint64_t*)(primitive + 0x58));
+            *(uint64_t*)(primitive + 0x60) = restoreParent(
+                saved.parent1, saved.parent1ShotOffset,
+                *(uint64_t*)(primitive + 0x60));
+            std::memcpy((void*)(primitive + 0x68), saved.parentState,
+                        sizeof(saved.parentState));
+            std::memcpy((void*)(primitive + 0x80), saved.localGeometry,
+                        sizeof(saved.localGeometry));
+        }
     }
 }
 
@@ -826,7 +864,8 @@ bool ConcreteShotSnapshot_Restore(void* shot,
     CopyRange(overlay.data(), source, liveSize, {0x1F50, 0x04});
 
     if (IsDti(snapshot.dti, kKingKobunDti) ||
-        IsDti(snapshot.dti, kMissileEmplacementDti)) {
+        IsDti(snapshot.dti, kMissileEmplacementDti) ||
+        IsDti(snapshot.dti, kWeaponCartDti)) {
         // These shots consume model animation state in gameplay. Reconstruction
         // keeps fresh motion owners and resources, but must rewind pointer-free
         // playback state or joint-driven phases and launch positions restart.
