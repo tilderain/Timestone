@@ -118,6 +118,7 @@ static constexpr uintptr_t DTI_USHOT_VULCAN_MISSILE_EMPLACEMENT = 0x140D49A60;
 static constexpr uintptr_t DTI_USHOT_VULCAN_WEAPON_CART = 0x140D4A1A8;
 static constexpr uintptr_t DTI_USHOT_SHIELD_WEAPON_CART_SPREAD = 0x140D4A098;
 static constexpr uintptr_t DTI_USHOT_VULCAN_LEGION_TIGER = 0x140D4ABB8;
+static constexpr uintptr_t DTI_USHOT_SHIELD_REPULSOR_BLAST_SP = 0x140D4ADA0;
 static constexpr uint32_t UCAP_AMERICA_SHIELD_SLASH_OFFSET = 0x68F0;
 static constexpr uint32_t UDOCTOR_DOOM_MISSILE_OFFSET = 0x68F0;
 
@@ -1059,16 +1060,21 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
         // overlay so packed floats/flags that resemble addresses still rewind.
         Shot_RestoreArmState(fresh, saved);
         Shot_ApplyFlight(fresh, saved.flight);
-        if (saved.concrete.dti ==
-                (uint64_t)_addr(DTI_USHOT_VULCAN_LEGION_TIGER)) {
-            uint32_t animationNo = *(uint32_t*)((uint8_t*)fresh + 0x1310);
+        const bool legionTiger = saved.concrete.dti ==
+            (uint64_t)_addr(DTI_USHOT_VULCAN_LEGION_TIGER);
+        const bool repulsorBlast = saved.concrete.dti ==
+            (uint64_t)_addr(DTI_USHOT_SHIELD_REPULSOR_BLAST_SP);
+        if (legionTiger || repulsorBlast) {
+            uint32_t animationNo = repulsorBlast ? 0 :
+                *(uint32_t*)((uint8_t*)fresh + 0x1310);
             float animationTime = *(float*)((uint8_t*)fresh + 0x1328);
-            if (animationTime > 0.0f) {
+            if (repulsorBlast || animationTime > 0.0f) {
                 ((uint64_t(__fastcall*)(void*, uint32_t, uint32_t, float,
                                        float, float, uint32_t))
                     _addr(FN_UMODEL_PROCESS_ACTION_ANMCHR))(
                         fresh, 0, animationNo, 0.0f,
-                        std::max(0.0f, animationTime - 1.0f), 1.0f, 0x40);
+                        std::max(0.0f, animationTime - 1.0f), 1.0f,
+                        legionTiger ? 0x40 : 0);
             }
             // Reconstructed shots missed the model-category pass for this
             // tick. Evaluate the restored/bound motion before hitbox dispatch.

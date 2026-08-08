@@ -45,8 +45,10 @@ static constexpr uintptr_t FN_WEAPON_CART_MOVE = 0x14017A9D0;
 static constexpr uintptr_t FN_WEAPON_CART_SPAWN_DEBRIS = 0x14017A200;
 static constexpr uintptr_t FN_SSHOT_FLUSH_PENDING_UNITS = 0x1401517A0;
 static constexpr uintptr_t FN_CCHRNODE_SET_NEXT = 0x140003D50;
+static constexpr uintptr_t FN_UMODEL_PROCESS_ACTION_ANMCHR = 0x140529420;
 static constexpr uintptr_t DTI_USHOT_VULCAN_MISSILE_EMPLACEMENT = 0x140D49A60;
 static constexpr uintptr_t DTI_USHOT_VULCAN_LEGION_TIGER = 0x140D4ABB8;
+static constexpr uintptr_t DTI_USHOT_SHIELD_REPULSOR_BLAST_SP = 0x140D4ADA0;
 static constexpr uintptr_t DTI_USHOT_VULCAN_WEAPON_CART = 0x140D4A1A8;
 static constexpr int DYNAMIC_SAFETY = 128;
 static constexpr int SSHOT_SENTINEL_COUNT = 10;
@@ -314,6 +316,32 @@ static void TraceResimShotSpawn(const char* kind,
     }
 }
 
+static void RepairResimRepulsorBlastMotion(void* shot)
+{
+    if (!g_isResimulating || !shot || !HasCallableDtiVirtual(shot) ||
+        GetObjectDti((uint64_t)shot) !=
+            (uint64_t)_addr(DTI_USHOT_SHIELD_REPULSOR_BLAST_SP) ||
+        !IsAccessibleRange((uint64_t)shot + 0x558, sizeof(uint32_t))) {
+        return;
+    }
+
+    uint32_t jointCount = *(uint32_t*)((uint8_t*)shot + 0x530);
+    uint64_t joints = *(uint64_t*)((uint8_t*)shot + 0x538);
+    uint32_t motionStatus = *(uint32_t*)((uint8_t*)shot + 0x550);
+    if (motionStatus || jointCount == 0 || jointCount > 256 || !joints ||
+        !IsAccessibleRange(joints, (size_t)jointCount * 0xC0)) {
+        return;
+    }
+
+    // Forced re-simulation can create the ball after its asynchronous model is
+    // ready but before setup successfully binds motion 0. Retry only that native
+    // bind; the normal model pass advances and evaluates it later this tick.
+    ((uint64_t(__fastcall*)(void*, uint32_t, uint32_t, float, float, float,
+                           uint32_t))
+        _addr(FN_UMODEL_PROCESS_ACTION_ANMCHR))(
+            shot, 0, 0, 0.0f, 0.0f, 1.0f, 0);
+}
+
 static void* __fastcall hkShotSpawn(void* manager, void* element, uint64_t initParam,
                                      void* posData, void* ownerChr, void* objectRef1,
                                      uint32_t slotId, void* objectRef2)
@@ -340,6 +368,7 @@ static void* __fastcall hkShotSpawn(void* manager, void* element, uint64_t initP
     CapturePreSpawnRng(recipe, ownerChr);
     void* shot = oShotSpawn(manager, element, initParam, posData, ownerChr,
                             objectRef1, slotId, objectRef2);
+    RepairResimRepulsorBlastMotion(shot);
     TraceResimShotSpawn("standard", recipe, shot,
                         __builtin_return_address(0));
     InvalidateMemoryQueryCache();
@@ -382,6 +411,7 @@ static void* __fastcall hkShotSpawnEx(void* manager, void* element, uint64_t ini
     CapturePreSpawnRng(recipe, ownerChr);
     void* shot = oShotSpawnEx(manager, element, initParam, posData, ownerChr,
                               objectRef1, slotId, objectRef2, a9, a10, a11, a12);
+    RepairResimRepulsorBlastMotion(shot);
     TraceResimShotSpawn("extended", recipe, shot,
                         __builtin_return_address(0));
     InvalidateMemoryQueryCache();
@@ -434,7 +464,9 @@ static void __fastcall hkShotUpdateHitboxes(void* shot)
     auto recipe = g_liveShotRecipes.find(shot);
     if (recipe != g_liveShotRecipes.end() && recipe->second.reconstructed &&
         recipe->second.concrete.dti !=
-            (uint64_t)_addr(DTI_USHOT_VULCAN_LEGION_TIGER)) {
+            (uint64_t)_addr(DTI_USHOT_VULCAN_LEGION_TIGER) &&
+        recipe->second.concrete.dti !=
+            (uint64_t)_addr(DTI_USHOT_SHIELD_REPULSOR_BLAST_SP)) {
         ConcreteShotSnapshot_ReapplyCapsules(shot, recipe->second.concrete);
     }
 }
