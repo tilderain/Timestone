@@ -400,8 +400,9 @@ bool ConfigureAutoTestDualTraining(int32_t characterId, int32_t hostPort)
     if (hostPort != 0)
         g_dialogConfig.hostPort = hostPort;
     for (int i = 0; i < 3; ++i) {
-        g_dialogConfig.p1Chars[i] = characterId;
-        g_dialogConfig.p2Chars[i] = characterId;
+        int32_t slotCharacter = characterId == 17 && i > 0 ? 1 : characterId;
+        g_dialogConfig.p1Chars[i] = slotCharacter;
+        g_dialogConfig.p2Chars[i] = slotCharacter;
     }
     g_dialogConfig.stageId = 0;
     g_launchOption = LAUNCH_DUAL_TRAINING;
@@ -409,8 +410,9 @@ bool ConfigureAutoTestDualTraining(int32_t characterId, int32_t hostPort)
 
     TrainingBootConfig cfg = {};
     for (int i = 0; i < 3; ++i) {
-        cfg.p1Chars[i] = characterId;
-        cfg.p2Chars[i] = characterId;
+        int32_t slotCharacter = characterId == 17 && i > 0 ? 1 : characterId;
+        cfg.p1Chars[i] = slotCharacter;
+        cfg.p2Chars[i] = slotCharacter;
     }
     cfg.stageId = 0;
     cfg.timerValue = 99;

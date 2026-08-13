@@ -2,6 +2,7 @@
 """Run a focused UMVC3 autotest and prepare an AI desync report.
 
 Examples:
+  python tools/autotest_ai.py --character Felicia --all-moves --launch
   python tools/autotest_ai.py --character Ryu --moves "12,Hadoken"
   python tools/autotest_ai.py --character Ryu --moves "12" --port 7788
   python tools/autotest_ai.py --character Ryu --failed-tsv \
@@ -233,9 +234,10 @@ def build_plan(args, moves):
         game = (Path.cwd() / game).resolve()
     if not game_dir.is_absolute():
         game_dir = (Path.cwd() / game_dir).resolve()
-    move_filter = quote_filter(moves)
-    game_argv = [str(game), f"-autotest={args.character}",
-                  f"-autotest-moves={move_filter}", f"-autotest-repeat={args.repeat}"]
+    game_argv = [str(game), f"-autotest={args.character}"]
+    if moves is not None:
+        game_argv.append(f"-autotest-moves={quote_filter(moves)}")
+    game_argv.append(f"-autotest-repeat={args.repeat}")
     if args.port is not None:
         game_argv.append(f"-autotest-port={args.port}")
     argv = [args.wine] + game_argv if args.wine else game_argv
@@ -243,7 +245,7 @@ def build_plan(args, moves):
         "schema": "umvc3_autotest_plan_v1",
         "run_id": dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ"),
         "character": args.character,
-        "moves": moves,
+        "moves": moves if moves is not None else "all",
         "repeat": args.repeat,
         "executable": str(game),
         "cwd": str(game_dir),
@@ -269,9 +271,13 @@ def emit(document, path=None):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--character", required=True)
-    parser.add_argument("--moves", help="comma-separated names or runtime ordinals")
-    parser.add_argument("--failed-tsv", type=Path,
-                        help="derive move names from DESYNC/FAIL/ERROR rows")
+    move_source = parser.add_mutually_exclusive_group(required=True)
+    move_source.add_argument("--all-moves", action="store_true",
+                             help="run the complete native character suite")
+    move_source.add_argument("--moves",
+                             help="comma-separated names or runtime ordinals")
+    move_source.add_argument("--failed-tsv", type=Path,
+                             help="derive move names from DESYNC/FAIL/ERROR rows")
     parser.add_argument("--repeat", type=int, default=3)
     parser.add_argument("--port", type=int, default=None,
                         help="autotest ENet host port (1-65535)")
@@ -300,14 +306,13 @@ def main():
         parser.error("--port must be between 1 and 65535")
     if args.timeout <= 0:
         parser.error("--timeout must be positive")
-    if args.moves and args.failed_tsv:
-        parser.error("use either --moves or --failed-tsv, not both")
-
-    moves = [part.strip() for part in args.moves.split(",") if part.strip()] if args.moves else []
+    moves = None if args.all_moves else []
+    if args.moves:
+        moves = [part.strip() for part in args.moves.split(",") if part.strip()]
     if args.failed_tsv:
         moves = failed_moves(args.failed_tsv)
-    if not moves:
-        parser.error("provide --moves or a TSV containing failed moves")
+    if moves == []:
+        parser.error("provide at least one move or a TSV containing failed moves")
 
     plan = build_plan(args, moves)
     command = plan["argv"]
@@ -318,7 +323,10 @@ def main():
         else:
             print("Launch command:")
             print(" ".join(command))
-            print(f"Focused moves ({len(moves)}): {quote_filter(moves)}")
+            if moves is None:
+                print("Moves: all")
+            else:
+                print(f"Focused moves ({len(moves)}): {quote_filter(moves)}")
         return EXIT_OK
 
     started_at = time.time()

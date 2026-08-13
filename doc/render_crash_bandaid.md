@@ -127,6 +127,11 @@ reconstructing entry arrays or forcing scheduler state to retired.
 - A version-checked vectored exception handler handles the null model result at
   `nDraw_Material__clone+0x1F` (`0x1405DCA7F`) and resumes at the native clone
   epilogue so the caller can use its existing fallback path.
+- A version-checked vectored exception handler handles render-command page
+  exhaustion at `0x140640011`. It restores the interrupted model helper's
+  nonvolatile registers, leaves the model command state dirty for a later retry,
+  and resumes at `sPrimitive_vfn17`'s zero-result epilogue so the failed draw is
+  omitted instead of copying command state through a null page pointer.
 - A version-checked vectored exception handler handles the null optional cursor
   returned while `uBtResultScoreVersus` initializes. At `0x14030A734`, native
   code dereferences `uBtResultScoreVersus+0x248` despite the preceding lookup

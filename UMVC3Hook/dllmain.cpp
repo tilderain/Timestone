@@ -396,6 +396,7 @@ LRESULT __stdcall WndProc(const HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPar
 }
 bool init = false;
 bool first_msg = true;
+static volatile LONG g_endSceneOverlayInFlight = 0;
 
 static HRESULT __stdcall hkResetDevice(
 	LPDIRECT3DDEVICE9 pDevice, D3DPRESENT_PARAMETERS* presentationParameters)
@@ -417,6 +418,11 @@ static HRESULT __stdcall hkResetDevice(
 
 long __stdcall hkEndScene(LPDIRECT3DDEVICE9 pDevice)
 {
+	// Dear ImGui owns one process-global context and cannot tolerate concurrent
+	// or reentrant EndScene callbacks mutating its current-window stack.
+	if (InterlockedCompareExchange(&g_endSceneOverlayInFlight, 1, 0) != 0)
+		return oEndScene(pDevice);
+
 	//Exception_UpdateTestHotkey();
 
 	if (!init)
@@ -483,6 +489,7 @@ long __stdcall hkEndScene(LPDIRECT3DDEVICE9 pDevice)
 	ImGui::Render();
 	ImGui_ImplDX9_RenderDrawData(ImGui::GetDrawData());
 
+	InterlockedExchange(&g_endSceneOverlayInFlight, 0);
 	return oEndScene(pDevice);
 }
 
@@ -851,8 +858,9 @@ void OnInitializeHook()
 	if (autoTestCharacter > 0 && autoTestPort >= 0 &&
 		ConfigureAutoTestDualTraining(autoTestCharacter, autoTestPort)) {
 		trainingArg = true;
-		HookLog("UMVC3Hook: Detected -autotest=%s, launching dual training with all slots set to character ID %d on port %d\n",
+		HookLog("UMVC3Hook: Detected -autotest=%s, launching dual training with character ID %d%s on port %d\n",
 			kCharNames[autoTestCharacter], autoTestCharacter,
+			autoTestCharacter == 17 ? " active and Ryu assists" : " in all slots",
 			GetLaunchDialogConfig().hostPort);
 	} else if (autoTestCharacter == 0) {
 		HookLog("UMVC3Hook: Invalid -autotest character; use a character name or ID 1-%d\n",

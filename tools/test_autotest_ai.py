@@ -29,6 +29,21 @@ class AutoTestAiTest(unittest.TestCase):
         self.assertIn("-autotest-port=7788", plan["argv"])
         self.assertEqual(7788, plan["port"])
 
+    def test_build_plan_all_moves_omits_move_filter(self):
+        args = SimpleNamespace(
+            character="Felicia",
+            game=Path("umvc3.exe"),
+            game_dir=Path("."),
+            repeat=1,
+            port=None,
+            wine=None,
+            wine_prefix=None,
+        )
+        plan = runner.build_plan(args, None)
+        self.assertEqual("all", plan["moves"])
+        self.assertFalse(any(arg.startswith("-autotest-moves=")
+                             for arg in plan["argv"]))
+
     def test_suite_completed_accepts_completed_host_log(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

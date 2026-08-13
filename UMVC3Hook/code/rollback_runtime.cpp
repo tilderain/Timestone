@@ -9,6 +9,7 @@
 extern void HookLog(const char* fmt, ...);
 
 static constexpr uintptr_t FN_IS_ONLINE_BATTLE = 0x140006AF0;
+static constexpr uintptr_t FN_NDRAW_MATERIAL_RELEASE = 0x14076F760;
 static constexpr uintptr_t ONLINE_CALLER_RETURNS[] = {
     0x14003F083, // cChr__resolveActionTransitionState
     0x14003F251, // cChr__resolveAdvancedGuardTransition
@@ -39,6 +40,7 @@ static CutInSetVariantFn g_originalCutInSetVariant = nullptr;
 using CopyCharacterPositionFn = uint64_t(__fastcall*)(uint64_t, int, float, uint64_t);
 static CopyCharacterPositionFn g_originalCopyCharacterPosition = nullptr;
 static PVOID g_materialCloneRecoveryHandler = nullptr;
+static PVOID g_modelCommandAllocationRecoveryHandler = nullptr;
 static PVOID g_schedulerAllocationRecoveryHandler = nullptr;
 static PVOID g_resultScoreCursorRecoveryHandler = nullptr;
 
@@ -163,6 +165,54 @@ static LONG CALLBACK MaterialCloneRecoveryHandler(EXCEPTION_POINTERS* info)
     context->Rip = (DWORD64)_addr(0x1405DCC8E);
     return EXCEPTION_CONTINUE_EXECUTION;
 }
+/// please check if this is necessary ////
+static LONG CALLBACK ModelCommandAllocationRecoveryHandler(EXCEPTION_POINTERS* info)
+{
+    if (!info || !info->ExceptionRecord || !info->ContextRecord) {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+
+    const EXCEPTION_RECORD* exception = info->ExceptionRecord;
+    CONTEXT* context = info->ContextRecord;
+    if (exception->ExceptionCode != EXCEPTION_ACCESS_VIOLATION ||
+        exception->NumberParameters < 2 ||
+        exception->ExceptionInformation[0] != 1 ||
+        exception->ExceptionInformation[1] != 0 ||
+        context->Rbx > UINT64_MAX - 0x260 ||
+        context->Rsp > UINT64_MAX - 0xB0 ||
+        !IsAccessibleRange(context->Rbx + 0x28, 0x238) ||
+        !IsAccessibleRange(context->Rsp + 0x60, 0x50)) {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+
+    if (context->Rip != (DWORD64)_addr(0x140640011) || context->Rcx != 0) {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+
+    const DWORD64 callerReturn = *(DWORD64*)(context->Rsp + 0x88);
+    if (callerReturn != (DWORD64)_addr(0x140650A05)) {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+
+    // The render page allocator returned null while uModel__method_56C0 was
+    // copying dirty command state. Restore FUN_14063f9b0's nonvolatile
+    // registers and unwind it, then skip the caller's primitive submission.
+    // Keep the model dirty so a later frame can retry after the page pool resets.
+    *(uint64_t*)(context->Rbx + 0x28) = 0;
+    *(uint64_t*)(context->Rbx + 0x30) = 0;
+    *(uint64_t*)(context->Rbx + 0x258) = 0;
+    *(uint32_t*)(context->Rbx + 0x130) |= 8;
+
+    context->R14 = *(DWORD64*)(context->Rsp + 0x60);
+    context->R15 = *(DWORD64*)(context->Rsp + 0x78);
+    context->Rbx = *(DWORD64*)(context->Rsp + 0x80);
+    context->Rsi = *(DWORD64*)(context->Rsp + 0xA0);
+    context->Rdi = *(DWORD64*)(context->Rsp + 0xA8);
+    context->Rsp += 0x90;
+    context->Rax = 0;
+    context->Rip = (DWORD64)_addr(0x140650BC5);
+    return EXCEPTION_CONTINUE_EXECUTION;
+}
 
 static LONG CALLBACK SchedulerAllocationRecoveryHandler(EXCEPTION_POINTERS* info)
 {
@@ -262,17 +312,32 @@ static void __fastcall hkResetMaterials(uint64_t model)
     for (uint32_t index = 0; index < count; ++index) {
         uint64_t* entry = (uint64_t*)(entries +
                                       (size_t)index * sizeof(uint64_t));
-        if (*entry && !HasCallableVirtualMethod(*entry, 0x28)) {
-            *entry = 0;
-            ++invalid;
+        bool validMaterial = false;
+        if (*entry && HasCallableVirtualMethod(*entry, 0x28)) {
+            const uint64_t vtable = *(uint64_t*)*entry;
+            const uint64_t release = *(uint64_t*)(vtable + 0x28);
+            validMaterial = release == (uint64_t)_addr(FN_NDRAW_MATERIAL_RELEASE);
+            if (!validMaterial) {
+                HookLog("RenderDiag: non-material cache entry model=0x%llX "
+                        "index=%u entry=0x%llX vtable=0x%llX "
+                        "slot28=0x%llX\n",
+                        model, index, *entry, vtable, release);
+            }
         }
+
+        if (*entry && !validMaterial)
+            ++invalid;
     }
     if (invalid != 0) {
         static uint32_t logged = 0;
         if (logged++ < 32) {
-            HookLog("Render: cleared %u stale material cache entries "
+            HookLog("Render: found %u stale material cache entries "
                     "model=0x%llX\n", invalid, model);
         }
+        // Native assumes all occupied entries implement Material::release.
+        // Leave the cache untouched for diagnostics rather than dispatching a
+        // different class's virtual slot or creating null holes for controllers.
+        return;
     }
     g_originalResetMaterials(model);
     InvalidateMemoryQueryCache();
@@ -523,6 +588,21 @@ void Rollback_InitNativeNullGuards()
             1, &MaterialCloneRecoveryHandler);
         HookLog("Rollback: material clone recovery %s\n",
                  g_materialCloneRecoveryHandler ? "installed" : "failed to install");
+    }
+
+    if (!g_modelCommandAllocationRecoveryHandler) {
+        static constexpr uint8_t EXPECTED_NULL_COMMAND_WRITE[] = {
+            0x48, 0x89, 0x01,
+        };
+        const void* fault = (const void*)_addr(0x140640011);
+        if (memcmp(fault, EXPECTED_NULL_COMMAND_WRITE,
+                   sizeof(EXPECTED_NULL_COMMAND_WRITE)) == 0) {
+            g_modelCommandAllocationRecoveryHandler = AddVectoredExceptionHandler(
+                1, &ModelCommandAllocationRecoveryHandler);
+        }
+        HookLog("Rollback: model command allocation recovery %s\n",
+                g_modelCommandAllocationRecoveryHandler
+                    ? "installed" : "failed to install");
     }
 
     if (!g_schedulerAllocationRecoveryHandler) {
