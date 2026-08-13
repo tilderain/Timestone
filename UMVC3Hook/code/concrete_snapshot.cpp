@@ -592,6 +592,7 @@ bool ConcreteShotSnapshot_Capture(void* shot, ConcreteShotSnapshot& out)
             ConcreteShotSnapshot::CallbackEffectState::GeneratorState saved{};
             saved.dti = GetObjectDti(generator);
             if (!saved.dti) break;
+            saved.resource = *(uint64_t*)(generator + 0x68);
             std::memcpy(saved.state20, (void*)(generator + 0x20),
                         sizeof(saved.state20));
             std::memcpy(saved.state30, (void*)(generator + 0x30),
@@ -644,6 +645,7 @@ bool ConcreteEffectSnapshot_Capture(
         ConcreteShotSnapshot::CallbackEffectState::GeneratorState saved{};
         saved.dti = GetObjectDti(generator);
         if (!saved.dti) break;
+        saved.resource = *(uint64_t*)(generator + 0x68);
         std::memcpy(saved.state20, (void*)(generator + 0x20), sizeof(saved.state20));
         std::memcpy(saved.state30, (void*)(generator + 0x30), sizeof(saved.state30));
         std::memcpy(saved.state70, (void*)(generator + 0x70), sizeof(saved.state70));
@@ -673,7 +675,8 @@ bool ConcreteEffectSnapshot_Restore(
     uint64_t generator = *(uint64_t*)((uint8_t*)effect + 0x218);
     for (const auto& saved : state.generators) {
         if (!generator || !Accessible(generator, 0x240) ||
-            GetObjectDti(generator) != saved.dti) return false;
+            GetObjectDti(generator) != saved.dti ||
+            *(uint64_t*)(generator + 0x68) != saved.resource) return false;
         std::memcpy((void*)(generator + 0x20), saved.state20, sizeof(saved.state20));
         std::memcpy((void*)(generator + 0x30), saved.state30, sizeof(saved.state30));
         std::memcpy((void*)(generator + 0x70), saved.state70, sizeof(saved.state70));
@@ -738,7 +741,8 @@ void ConcreteShotSnapshot_RestoreCallbackEffects(
         uint64_t generator = *(uint64_t*)((uint8_t*)effect + 0x218);
         for (const auto& saved : state.generators) {
             if (!generator || !Accessible(generator, 0x240) ||
-                GetObjectDti(generator) != saved.dti) {
+                GetObjectDti(generator) != saved.dti ||
+                *(uint64_t*)(generator + 0x68) != saved.resource) {
                 break;
             }
             std::memcpy((void*)(generator + 0x20), saved.state20,

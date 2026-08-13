@@ -232,8 +232,18 @@ bool RuntimeCommandSelectorMatches(const char* filter,
     if (!filter[0]) return true;
     char selector[48];
     snprintf(selector, sizeof(selector), "%d:%d", matcherIndex, lineIndex);
-    return ContainsInsensitive(filter, selector) ||
-           MoveSelectorMatches(filter, moveId, name);
+    const char* cursor = filter;
+    while (cursor && *cursor) {
+        while (*cursor == ' ' || *cursor == ',') ++cursor;
+        char token[96] = {};
+        size_t length = 0;
+        while (*cursor && *cursor != ',' && length + 1 < sizeof(token))
+            token[length++] = *cursor++;
+        while (length && token[length - 1] == ' ') token[--length] = '\0';
+        if (strcmp(token, selector) == 0) return true;
+        if (*cursor == ',') ++cursor;
+    }
+    return MoveSelectorMatches(filter, moveId, name);
 }
 
 bool IsManualCaseSelected(int32_t manualIndex)

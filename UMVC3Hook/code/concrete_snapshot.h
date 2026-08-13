@@ -12,6 +12,10 @@ struct ConcreteShotSnapshot {
     struct CallbackEffectState {
         struct GeneratorState {
             uint64_t dti = 0;
+            // Same-DTI generators can use different EFL track tables. Restore
+            // timeline/mode bytes only when the fresh node uses this exact
+            // immutable resource, or its flags may reference absent tracks.
+            uint64_t resource = 0;
             uint8_t state20[0x08] = {};
             uint8_t state30[0x08] = {};
             uint8_t state70[0x14] = {};
