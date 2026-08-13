@@ -1078,11 +1078,11 @@ void ConcreteCharacterSnapshot_RestoreFields(void* character,
         CopyRange(character, savedBody, bodySize, {0x68FC, 0x1C});
     }
 
-    /*if (IsDti(dti, kSpencerDti)) {
+    if (IsDti(dti, kSpencerDti)) {
         // uSpencer's complete 16-byte concrete tail is pointer-free. It holds
         // the wire-active latch, wire animation number and mUsrF consumed when
         // the grapple branches to its facing-specific action.
         CopyRange(character, savedBody, bodySize, {0x68F0, 0x10});
-    }*/
+    }
 
 }
