@@ -1875,7 +1875,7 @@ void Rollback_RestoreSnapshot(int32_t frame)
             // Keep the owner and Prim vtables live and rewind their mutable
             // gameplay payload. Prim+0x78 is a sound cookie consumed by reset;
             // replaying a historical cookie could stop an unrelated live sound.
-            constexpr uint32_t abilityPrimOffset = 0x1578;
+            constexpr uint32_t abilityPrimOffset = 0x1570;
             constexpr uint32_t abilityPrimStride = 0x80;
             if (abilityPrimOffset + 6 * abilityPrimStride <= copySize) {
                 for (uint32_t prim = 0; prim < 6; ++prim) {
