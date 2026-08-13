@@ -453,8 +453,34 @@ void Rollback_CaptureCollisionNodeClones(RollbackSnapshotSlot& slot)
         if (!HasCallableDtiVirtual(region.ptr)) continue;
 
         uint32_t childCount = *(const uint32_t*)((const uint8_t*)region.ptr + 0x20);
+        uint64_t childArray = *(const uint64_t*)((const uint8_t*)region.ptr + 0x30);
+        if (childCount > 4096 ||
+            (childCount != 0 &&
+             !IsAccessibleRange(childArray,
+                                (size_t)childCount * sizeof(uint64_t)))) {
+            HookLog("Rollback: collision wrapper has invalid child array "
+                    "wrapper=0x%llX count=%u data=0x%llX\n",
+                    (uint64_t)region.ptr, childCount, childArray);
+            continue;
+        }
+
+        RollbackCollisionNodeClone entry{};
+        entry.ownerSlot = region.ownerSlot;
+        entry.savedPtr = region.ptr;
+        entry.wrapperDti = GetObjectDti((uint64_t)region.ptr);
+        if (!entry.wrapperDti) continue;
+        entry.childCount = childCount;
+        std::memcpy(entry.scalarState, region.ptr, sizeof(entry.scalarState));
+        entry.childDtis.reserve(childCount);
+        for (uint32_t child = 0; child < childCount; ++child) {
+            uint64_t childPtr = *(const uint64_t*)(
+                childArray + (size_t)child * sizeof(uint64_t));
+            entry.childDtis.push_back(
+                childPtr && HasCallableDtiVirtual((void*)childPtr)
+                    ? GetObjectDti(childPtr) : 0);
+        }
         if (childCount == 0) {
-            slot.collisionNodeClones.push_back({region.ownerSlot, region.ptr, nullptr, 0});
+            slot.collisionNodeClones.push_back(std::move(entry));
             continue;
         }
 
@@ -463,7 +489,8 @@ void Rollback_CaptureCollisionNodeClones(RollbackSnapshotSlot& slot)
         createdClone = true;
         // Inherit the source child factory before deep-copying its children.
         copyNode(clone, region.ptr, false, true);
-        slot.collisionNodeClones.push_back({region.ownerSlot, region.ptr, clone, childCount});
+        entry.clone = clone;
+        slot.collisionNodeClones.push_back(std::move(entry));
     }
     if (createdClone) InvalidateMemoryQueryCache();
 }
@@ -476,18 +503,50 @@ void Rollback_RestoreCollisionNodeClones(RollbackSnapshotSlot& slot)
         (void(__fastcall*)(void*, uint32_t))_addr(FN_COLLISION_NODE_PRUNE_CHILD);
     bool mutatedChildren = false;
     for (const RollbackCollisionNodeClone& entry : slot.collisionNodeClones) {
-        if (*(uint64_t*)entry.ownerSlot != (uint64_t)entry.savedPtr ||
-            !HasCallableDtiVirtual(entry.savedPtr)) continue;
+        void* destination = *(void**)entry.ownerSlot;
+        if (!destination || !HasCallableDtiVirtual(destination) ||
+            GetObjectDti((uint64_t)destination) != entry.wrapperDti) {
+            HookLog("Rollback: collision wrapper incompatible owner=0x%llX "
+                    "saved=0x%llX live=0x%llX dti=0x%llX\n",
+                    entry.ownerSlot, (uint64_t)entry.savedPtr,
+                    (uint64_t)destination, entry.wrapperDti);
+            continue;
+        }
+
+        // Preserve the replacement allocation and its owned user-data object,
+        // but rewind the gameplay binding and setup state captured from the
+        // historical wrapper.
+        Rollback_RestoreExternalAnimBlock(destination, entry.scalarState,
+                                           sizeof(entry.scalarState));
 
         if (entry.childCount == 0) {
-            auto* childArray = (uint8_t*)entry.savedPtr + 0x18;
-            uint32_t liveCount = *(uint32_t*)((uint8_t*)entry.savedPtr + 0x20);
+            auto* childArray = (uint8_t*)destination + 0x18;
+            uint32_t liveCount = *(uint32_t*)((uint8_t*)destination + 0x20);
             mutatedChildren |= liveCount != 0;
             while (liveCount > 0)
                 pruneChild(childArray, --liveCount);
         } else if (HasCallableDtiVirtual(entry.clone)) {
-            copyNode(entry.savedPtr, entry.clone, false, true);
+            copyNode(destination, entry.clone, false, true);
             mutatedChildren = true;
+        }
+
+        uint32_t restoredCount = *(uint32_t*)((uint8_t*)destination + 0x20);
+        uint64_t restoredArray = *(uint64_t*)((uint8_t*)destination + 0x30);
+        bool valid = restoredCount == entry.childCount &&
+            entry.childDtis.size() == entry.childCount;
+        for (uint32_t child = 0; valid && child < restoredCount; ++child) {
+            uint64_t restoredChild = restoredArray ?
+                *(uint64_t*)(restoredArray + (size_t)child * sizeof(uint64_t)) : 0;
+            uint64_t restoredDti = restoredChild &&
+                HasCallableDtiVirtual((void*)restoredChild)
+                    ? GetObjectDti(restoredChild) : 0;
+            valid = restoredDti == entry.childDtis[child];
+        }
+        if (!valid) {
+            HookLog("Rollback: collision graph restore mismatch owner=0x%llX "
+                    "wrapper=0x%llX expectedChildren=%u actualChildren=%u\n",
+                    entry.ownerSlot, (uint64_t)destination,
+                    entry.childCount, restoredCount);
         }
     }
     if (mutatedChildren) InvalidateMemoryQueryCache();

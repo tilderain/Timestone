@@ -39,6 +39,8 @@ using CutInSetVariantFn = void(__fastcall*)(uint64_t, uint32_t);
 static CutInSetVariantFn g_originalCutInSetVariant = nullptr;
 using CopyCharacterPositionFn = uint64_t(__fastcall*)(uint64_t, int, float, uint64_t);
 static CopyCharacterPositionFn g_originalCopyCharacterPosition = nullptr;
+using ReplaceActiveStageFn = void(__fastcall*)(uint64_t, uint64_t);
+static ReplaceActiveStageFn g_originalReplaceActiveStage = nullptr;
 static PVOID g_materialCloneRecoveryHandler = nullptr;
 static PVOID g_modelCommandAllocationRecoveryHandler = nullptr;
 static PVOID g_schedulerAllocationRecoveryHandler = nullptr;
@@ -285,6 +287,44 @@ static bool HasCallableVirtualMethod(uint64_t object, size_t offset)
         return false;
     }
     return IsExecutableAddress(*(uint64_t*)(vtable + offset));
+}
+
+static void __fastcall hkReplaceActiveStage(uint64_t stageManager,
+                                             uint64_t newStage)
+{
+    constexpr uint32_t ACTIVE_STAGES_OFFSET = 0x2060;
+    constexpr uintptr_t FN_MTARRAY_GET_SIZE = 0x1400129C0;
+    constexpr uintptr_t FN_MTARRAY_GET_ELEMENT = 0x140010E40;
+    constexpr uintptr_t FN_MTARRAY_REMOVE_POINTER = 0x1400115D0;
+    constexpr uintptr_t STAGE_LOCK = 0x140D4F728;
+
+    if (stageManager &&
+        IsAccessibleRange(stageManager + ACTIVE_STAGES_OFFSET, 0x20)) {
+        uint64_t activeStages = stageManager + ACTIVE_STAGES_OFFSET;
+        auto getSize = (int(__fastcall*)(uint64_t))_addr(FN_MTARRAY_GET_SIZE);
+        auto getElement =
+            (uint64_t*(__fastcall*)(uint64_t, uint32_t))_addr(FN_MTARRAY_GET_ELEMENT);
+        auto removePointer =
+            (void(__fastcall*)(uint64_t, uint64_t))_addr(FN_MTARRAY_REMOVE_POINTER);
+
+        EnterCriticalSection((LPCRITICAL_SECTION)_addr(STAGE_LOCK));
+        if (getSize(activeStages) > 0) {
+            uint64_t* first = getElement(activeStages, 0);
+            uint64_t oldStage = first ? *first : 0;
+            if (oldStage && !HasCallableVirtualMethod(oldStage, 0xD8)) {
+                HookLog("Rollback: removed invalid active stage entry "
+                        "stage=0x%llX vtable=0x%llX\n",
+                        oldStage,
+                        IsAccessibleRange(oldStage, sizeof(uint64_t))
+                            ? *(uint64_t*)oldStage : 0);
+                removePointer(activeStages, oldStage);
+            }
+        }
+        LeaveCriticalSection((LPCRITICAL_SECTION)_addr(STAGE_LOCK));
+    }
+
+    if (g_originalReplaceActiveStage)
+        g_originalReplaceActiveStage(stageManager, newStage);
 }
 
 static void __fastcall hkResetMaterials(uint64_t model)
@@ -581,6 +621,18 @@ void Rollback_InitNativeNullGuards()
     } else {
         HookLog("Rollback: failed to guard null cChr+0x6428 position (%d)\n",
                 copyPositionStatus);
+    }
+
+    const MH_STATUS replaceStageStatus = MH_CreateHook(
+        (LPVOID)_addr(0x1401F02D0), (LPVOID)&hkReplaceActiveStage,
+        (LPVOID*)&g_originalReplaceActiveStage);
+    if (replaceStageStatus == MH_OK) {
+        const MH_STATUS enableStatus = MH_EnableHook((LPVOID)_addr(0x1401F02D0));
+        HookLog("Rollback: %s invalid active-stage replacement guard\n",
+                enableStatus == MH_OK ? "installed" : "failed to install");
+    } else {
+        HookLog("Rollback: failed to guard active-stage replacement (%d)\n",
+                replaceStageStatus);
     }
 
     if (!g_materialCloneRecoveryHandler) {

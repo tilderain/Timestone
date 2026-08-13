@@ -124,6 +124,10 @@ reconstructing entry arrays or forcing scheduler state to retired.
 - `uBaseModel__resetMaterials` validates and clears stale material-cache
   entries before native teardown, allowing valid material entries to follow the
   native release path.
+- `sStage__replaceActiveStage` removes an existing active-array entry when its
+  required virtual `+0xD8` callback is not executable. This covers a stale
+  stage-body entry observed during resimulation without changing valid stage
+  replacement behavior.
 - A version-checked vectored exception handler handles the null model result at
   `nDraw_Material__clone+0x1F` (`0x1405DCA7F`) and resumes at the native clone
   epilogue so the caller can use its existing fallback path.

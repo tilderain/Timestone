@@ -110,7 +110,10 @@ struct RollbackCollisionNodeClone {
     uint64_t ownerSlot;
     void* savedPtr;
     void* clone;
+    uint64_t wrapperDti;
     uint32_t childCount;
+    uint8_t scalarState[0xE0];
+    std::vector<uint64_t> childDtis;
 };
 
 struct RollbackModelRenderState {
