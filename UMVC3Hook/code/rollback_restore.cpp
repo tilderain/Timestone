@@ -39,6 +39,7 @@ static constexpr uintptr_t FN_RESET_HITNODES = 0x140259E90;
 static constexpr uintptr_t FN_MODEL_SET_CHILD_MATERIAL_MODE = 0x140200DB0;
 static constexpr uintptr_t FN_MTOBJECT_ADD_REF = 0x14050D100;
 static constexpr uintptr_t FN_CRESOURCE_RELEASE_REF = 0x14050D5A0;
+static constexpr uintptr_t FN_MTDTI_IS_KIND_OF = 0x1400039D0;
 static constexpr uintptr_t FN_UMODEL_PROCESS_ACTION_ANMCHR = 0x140529420;
 static constexpr uintptr_t FN_UMODEL_MOVE = 0x140566580;
 
@@ -83,6 +84,7 @@ static constexpr uint32_t SUNIT_CHARACTER_CATEGORY = 8;
 static constexpr uint32_t SUNIT_CHARACTER_POST_CATEGORY = 18;
 static constexpr uintptr_t DTI_UCHARACTER_POST = 0x140D44D60;
 static constexpr uintptr_t DTI_UCHRWEAPON = 0x140D44968;
+static constexpr uintptr_t DTI_USHOT_LASER = 0x140D482E8;
 static constexpr uint32_t UCHARACTER_POST_SCALAR_STATE_OFFSET = 0x40;
 static constexpr size_t UCHARACTER_POST_SCALAR_STATE_SIZE = 0x10;
 static constexpr uint32_t UCHARACTER_POST_CHARACTER_CACHE_OFFSET = 0x50;
@@ -671,15 +673,21 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
         }
         preSanitizeEnd = Profile_Now();
 
-        // Native shot death invokes virtual +0x78 before scalar destruction.
-        // Laser overrides and uShot__killAndCleanup use this stage to kill and
-        // detach callback EFLs. Directly invoking the scalar destructor skips
-        // that lifecycle and leaves generator/render trails owned by the
-        // abandoned timeline. Run it while callback effects are still alive;
-        // Effect_RetireCurrent below then reclaims the retired graphs.
+        // Laser finalizers kill and detach callback EFLs before scalar
+        // destruction. Applying this lifecycle callback to every shot also
+        // destroys non-laser attachment owners that saved effect recipes still
+        // need, causing Tron's Beacon Bomb to pass a freed parent to
+        // uEffect::setEffectParent. Restrict the stale-trail cleanup to the
+        // uShotLaser hierarchy it was introduced for.
         for (void* shot : currentShots) {
             if (!shot || !IsAccessibleRange((uint64_t)shot, sizeof(uint64_t)))
                 continue;
+            uint64_t dti = GetObjectDti((uint64_t)shot);
+            if (!dti || !((uint8_t(__fastcall*)(void*, void*))_addr(
+                    FN_MTDTI_IS_KIND_OF))((void*)dti,
+                                          (void*)_addr(DTI_USHOT_LASER))) {
+                continue;
+            }
             uint64_t vtable = *(uint64_t*)shot;
             uint64_t kill = IsAccessibleRange(vtable + 0x78, sizeof(uint64_t))
                 ? *(uint64_t*)(vtable + 0x78) : 0;
