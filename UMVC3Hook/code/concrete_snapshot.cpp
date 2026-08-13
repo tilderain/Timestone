@@ -917,12 +917,12 @@ bool ConcreteShotSnapshot_Restore(void* shot,
         }
     }
 
-    /*if (IsDti(snapshot.dti, kAttackWireDti)) {
-        // This unlabeled attack-wire block was separately verified from its
-        // constructor and collision callbacks. Its owned effect resource starts
-        // at +0x2150 and intentionally remains on the reconstructed timeline.
+    if (IsDti(snapshot.dti, kAttackWireDti)) {
+        // Attack Wire's hit/attached latches, mode, and retract timer. Leaving
+        // these at factory values makes one peer signal Spencer to retract.
+        // The owned effect resource starts at +0x2150 and remains live-owned.
         CopyRange(overlay.data(), source, liveSize, {0x2140, 0x10});
-    }*/
+    }
 
     // Copy the complete gameplay tail. The prefix contains cUnit ownership and
     // intrusive links and remains owned by the freshly-created object.
