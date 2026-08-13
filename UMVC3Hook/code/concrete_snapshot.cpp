@@ -696,6 +696,13 @@ void ConcreteShotSnapshot_RestoreCallbackEffects(
 {
     if (!shot) return;
 
+    if (IsDti(snapshot.dti, kAttackWireDti)) {
+        // Attack Wire's factory effect owns track buffers initialized for the
+        // fresh generator graph. Rewinding its presentation timeline can make
+        // a zero-length track active and underflow shiftHistoryBuffer.
+        return;
+    }
+
     for (uint32_t index = 0; index < kShotCallbackEffectCount; ++index) {
         const auto& state = snapshot.callbackEffects[index];
         void** slot = (void**)((uint8_t*)shot + kShotCallbackEffectsOffset +

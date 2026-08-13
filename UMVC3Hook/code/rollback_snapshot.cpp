@@ -402,9 +402,9 @@ static int BuildRegionsUncached(Region* regions, int maxRegions,
         }
     };
 
-    //int collisionExternalRegions = 0;
-    //size_t collisionExternalBytes = 0;
-    /*struct CollisionDiscoveryDiag {
+    int collisionExternalRegions = 0;
+    size_t collisionExternalBytes = 0;
+    struct CollisionDiscoveryDiag {
         uint64_t sCollision = 0;
         uint64_t sbc = 0;
         uint64_t moveMatrix = 0;
@@ -425,9 +425,9 @@ static int BuildRegionsUncached(Region* regions, int maxRegions,
         uint32_t sbcQueueDataPresent = 0;
         uint32_t moveQueuesPresent = 0;
         uint32_t moveThreadHeadersValid = 0;
-    } collisionDiag;*/
+    } collisionDiag;
 
-    /*auto logOwnedBufferRejection = [&](const char* label, uint64_t ownerSlot,
+    auto logOwnedBufferRejection = [&](const char* label, uint64_t ownerSlot,
                                        uint64_t ptr, size_t size) {
         return;
         static std::unordered_map<std::string, std::string> lastReasons;
@@ -701,7 +701,7 @@ static int BuildRegionsUncached(Region* regions, int maxRegions,
                 addNodeListBuffers(nodeList);
             }
         }
-    };*/
+    };
 
     // ---- 1. sReplay: frame counter only (sReplay+0x54). Full replay buffer
     //     has internal pointers that go stale. ---
@@ -775,6 +775,14 @@ static int BuildRegionsUncached(Region* regions, int maxRegions,
     //     mWorkCnt/B/Final tail @+0x38080.  The previous 0x34080 size truncated
     //     mid-SortBucketB, dropping ~16KB of bucket B and the work counters.
     {
+
+        ///Disabled sHitsolver
+        /*- sHitSolver__dispatchResolvedContacts at 0x140011EA0 invokes every resolver callback and then resets the active-node list.
+- sHitSolver__resetActiveNodes at 0x140011320 clears the active array and resets the embedded node-pool cursor at +0x30060.
+- New contacts are recreated through sHitSolver__addNode at 0x140010F20.
+- Project snapshots occur before the next native tick in rollback_hooks.cpp:177 and before each replay tick in rollback_resim.cpp:225. Therefore snapshots are taken after the previous frame's hit nodes were consumed and reset.
+- The current restore already discards restored hit work in rollback_restore.cpp:2159, making the bulk solver copy redundant.*/
+
     //    uint64_t sHitSolver = *(uint64_t*)_addr(PTR_SHITSOLVER);
     //    add((void*)sHitSolver, SHITSOLVER_SIZE);
     }
