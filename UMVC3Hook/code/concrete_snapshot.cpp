@@ -43,6 +43,7 @@ constexpr uintptr_t kRepulsorBlastSpDti = 0x140D4ADA0ull;
 constexpr uintptr_t kRocketLauncherExplodeDti = 0x140D4BAC8ull;
 constexpr uintptr_t kPendulumLogDti = 0x140D4C4C8ull;
 constexpr uintptr_t kVulcanAxeDti = 0x140D48808ull;
+constexpr uintptr_t kShikiDanKobunDti = 0x140D4D3D0ull;
 constexpr uintptr_t kRyuDti = 0x140D45A10ull;
 constexpr uintptr_t kHsienKoDti = 0x140D455F8ull;
 constexpr uintptr_t kSpencerDti = 0x140D45D40ull;
@@ -880,6 +881,13 @@ bool ConcreteShotSnapshot_Restore(void* shot,
         // accumulator. Values such as 18.0f resemble mapped addresses when
         // read as a qword, so the generic ownership filter keeps factory zero.
         CopyRange(overlay.data(), source, liveSize, {0x21D0, 0x04});
+    }
+
+    if (IsDti(snapshot.dti, kShikiDanKobunDti)) {
+        // Beacon Bomb's Servbot state machine keeps its random-selection phase
+        // and timer immediately after reflected mAttachOfs. Factory zero here
+        // reaches intInRange on a different tick and advances global RNG.
+        CopyRange(overlay.data(), source, liveSize, {0x2170, 0x10});
     }
 
     // mId is scalar allocator state inside the otherwise fresh-owned cArm
