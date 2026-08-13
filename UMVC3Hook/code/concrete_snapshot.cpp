@@ -48,6 +48,7 @@ constexpr uintptr_t kRyuDti = 0x140D45A10ull;
 constexpr uintptr_t kHsienKoDti = 0x140D455F8ull;
 constexpr uintptr_t kSpencerDti = 0x140D45D40ull;
 constexpr uintptr_t kAttackWireDti = 0x140D4CA20ull;
+constexpr uintptr_t kVulcanSwingWireDti = 0x140D4CB00ull;
 
 struct SnapshotRange {
     size_t offset;
@@ -928,6 +929,14 @@ bool ConcreteShotSnapshot_Restore(void* shot,
         // Attack Wire's hit/attached latches, mode, and retract timer. Leaving
         // these at factory values makes one peer signal Spencer to retract.
         // The owned effect resource starts at +0x2150 and remains live-owned.
+        CopyRange(overlay.data(), source, liveSize, {0x2140, 0x10});
+    }
+
+    if (IsDti(snapshot.dti, kVulcanSwingWireDti)) {
+        // Swing Wire's activation latch, variant and travel-start timer. Forced
+        // reconstruction otherwise resets the timer before its 10-frame branch
+        // can signal Spencer through cChr+0x1510. Effect ownership starts at
+        // +0x2150 and remains native to the fresh shot.
         CopyRange(overlay.data(), source, liveSize, {0x2140, 0x10});
     }
 
