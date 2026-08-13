@@ -671,6 +671,22 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
         }
         preSanitizeEnd = Profile_Now();
 
+        // Native shot death invokes virtual +0x78 before scalar destruction.
+        // Laser overrides and uShot__killAndCleanup use this stage to kill and
+        // detach callback EFLs. Directly invoking the scalar destructor skips
+        // that lifecycle and leaves generator/render trails owned by the
+        // abandoned timeline. Run it while callback effects are still alive;
+        // Effect_RetireCurrent below then reclaims the retired graphs.
+        for (void* shot : currentShots) {
+            if (!shot || !IsAccessibleRange((uint64_t)shot, sizeof(uint64_t)))
+                continue;
+            uint64_t vtable = *(uint64_t*)shot;
+            uint64_t kill = IsAccessibleRange(vtable + 0x78, sizeof(uint64_t))
+                ? *(uint64_t*)(vtable + 0x78) : 0;
+            if (kill && IsExecutableAddress(kill))
+                ((void(__fastcall*)(void*))kill)(shot);
+        }
+
         // Effect bodies and generator graphs are not rewound. Retaining even a
         // snapshot-era effect lets its independently advanced graph execute after
         // restore; observed failures cover move, finish, draw, and destruction.
