@@ -51,6 +51,8 @@ static constexpr uint32_t TEAM_OFFSETS[] = {0x40, 0x300};
 static constexpr uint32_t CHARACTER_EFFECT_SLOT_OFFSETS[] = {
     0x68F0, 0x68F8, 0x6900, 0x6920,
 };
+static constexpr uint32_t CHARACTER_INDEXED_EFFECTS_OFFSET = 0x6748;
+static constexpr uint32_t CHARACTER_INDEXED_EFFECT_COUNT = 21;
 
 using EffectCreateFn = void*(__fastcall*)(void*, int, int, void*, int, int,
     void*, void*, int, void*, int, uint32_t, void*);
@@ -74,6 +76,15 @@ static void(__fastcall* oKirigakureEffectUpdate)(void*) = nullptr;
 static std::vector<RollbackEffectRecipe> g_liveEffectRecipes;
 static uint64_t g_effectSpawnSequence = 0;
 
+static std::vector<void*> g_resimEffects;
+
+static void ForgetResimEffect(void* effect)
+{
+    g_resimEffects.erase(
+        std::remove(g_resimEffects.begin(), g_resimEffects.end(), effect),
+        g_resimEffects.end());
+}
+
 static bool IsActiveUnit(void* unit)
 {
     if (!unit) return false;
@@ -92,17 +103,18 @@ static bool IsPersistentCharacterEffect(void* effect)
             if (!IsAccessibleRange(node, 0x18)) break;
             uint64_t character = *(uint64_t*)(node + 0x08);
             if (character && IsAccessibleRange(character, 0x6928)) {
-                // Character effect factories establish native ownership with
-                // MtObject__setField_640(effect, character). This also covers
-                // hyper effects retained in the character's indexed slots,
-                // which are not represented by the fixed tail handles below.
-                if (IsAccessibleRange((uint64_t)effect, 0x288) &&
-                    *(void**)((uint8_t*)effect + 0x280) == (void*)character) {
-                    return true;
-                }
+                // mpOwner at effect+0x280 remains set after indexed-slot
+                // replacement. Only live character slots establish retention.
                 for (uint32_t slotOffset : CHARACTER_EFFECT_SLOT_OFFSETS) {
                     if (*(void**)(character + slotOffset) == effect)
                         return true;
+                }
+                for (uint32_t index = 0;
+                     index < CHARACTER_INDEXED_EFFECT_COUNT; ++index) {
+                    if (*(void**)(character + CHARACTER_INDEXED_EFFECTS_OFFSET +
+                                  index * sizeof(void*)) == effect) {
+                        return true;
+                    }
                 }
             }
             node = *(uint64_t*)(node + 0x10);
@@ -367,6 +379,7 @@ static void __fastcall hkEffectDraw(void* effect, void* camera)
 
 static void __fastcall hkEffectDtorRelease(void* effect)
 {
+    ForgetResimEffect(effect);
     if (g_isResimulating)
         Effect_PrepareUnitRemoval(effect);
     oEffectDtorRelease(effect);
@@ -374,6 +387,7 @@ static void __fastcall hkEffectDtorRelease(void* effect)
 
 static void __fastcall hkEffectVdtor(void* effect, uint32_t flags)
 {
+    ForgetResimEffect(effect);
     if (g_isResimulating)
         Effect_PrepareUnitRemoval(effect);
     oEffectVdtor(effect, flags);
@@ -382,6 +396,11 @@ static void __fastcall hkEffectVdtor(void* effect, uint32_t flags)
 static uint64_t __fastcall hkEffectCreateGenerator(void* effect)
 {
     uint64_t result = oEffectCreateGenerator(effect);
+    if (g_isResimulating && effect &&
+        std::find(g_resimEffects.begin(), g_resimEffects.end(), effect) ==
+            g_resimEffects.end()) {
+        g_resimEffects.push_back(effect);
+    }
     if ((uint8_t)result == 0 && effect &&
         IsAccessibleRange((uint64_t)effect, 0x230)) {
         uint64_t resource = *(uint64_t*)((uint8_t*)effect + 0x108);
@@ -445,15 +464,15 @@ static void __fastcall hkGameEffectFlushPending(void* manager)
 
 static void ClearInvalidCharacterIndexedEffects(uint64_t character)
 {
-    constexpr uint32_t slotArrayOffset = 0x6748;
-    constexpr uint32_t slotCount = 21;
     if (!character || !IsAccessibleRange(
-            character + slotArrayOffset, slotCount * sizeof(uint64_t))) {
+            character + CHARACTER_INDEXED_EFFECTS_OFFSET,
+            CHARACTER_INDEXED_EFFECT_COUNT * sizeof(uint64_t))) {
         return;
     }
 
-    for (uint32_t index = 0; index < slotCount; ++index) {
-        uint64_t* slot = (uint64_t*)(character + slotArrayOffset +
+    for (uint32_t index = 0; index < CHARACTER_INDEXED_EFFECT_COUNT; ++index) {
+        uint64_t* slot = (uint64_t*)(character +
+                                    CHARACTER_INDEXED_EFFECTS_OFFSET +
                                     index * sizeof(uint64_t));
         uint64_t object = *slot;
         if (!object) continue;
@@ -525,9 +544,11 @@ static uint8_t __fastcall hkMtObjectIsKindOf(void* object, void* dti)
 static void __fastcall hkMtObjectReplaceIndexedSlot(
     void* owner, uint32_t index, void* replacement)
 {
-    if (g_isResimulating && owner && index < 21 && IsAccessibleRange(
-            (uint64_t)owner + 0x6748 + index * sizeof(void*), sizeof(void*))) {
-        void** slot = (void**)((uint8_t*)owner + 0x6748 +
+    if (g_isResimulating && owner && index < CHARACTER_INDEXED_EFFECT_COUNT &&
+        IsAccessibleRange((uint64_t)owner + CHARACTER_INDEXED_EFFECTS_OFFSET +
+                          index * sizeof(void*), sizeof(void*))) {
+        void** slot = (void**)((uint8_t*)owner +
+                               CHARACTER_INDEXED_EFFECTS_OFFSET +
                                index * sizeof(void*));
         if (*slot && !HasCallableDtiVirtual(*slot))
             *slot = nullptr;
@@ -706,6 +727,25 @@ int Effect_RetireCurrent(void* sUnit)
         destroy(effect, 1);
         ++destroyed;
     }
+
+    // Native finalization can unlink a resimulation-created effect before its
+    // deferred scalar destruction. A subsequent restore cannot discover that
+    // detached object through sUnit, so reclaim tracked detached effects here.
+    std::vector<void*> detached;
+    for (void* effect : g_resimEffects) {
+        if (!effect || !IsAccessibleRange((uint64_t)effect, 0x14) ||
+            (*(uint32_t*)((uint8_t*)effect + 0x10) & 0x3F8u) != 0x3F8u ||
+            !IsEffectObject(effect) || IsPersistentCharacterEffect(effect) ||
+            effect == stageBodies[0] || effect == stageBodies[1]) {
+            continue;
+        }
+        detached.push_back(effect);
+    }
+    for (void* effect : detached) {
+        if (Effect_RetireOne(sUnit, effect)) {
+            ++destroyed;
+        }
+    }
     g_liveEffectRecipes.clear();
     return destroyed;
 }
@@ -772,6 +812,7 @@ void Effect_SanitizeRetired(void* sUnit)
 void Effect_Reset()
 {
     g_liveEffectRecipes.clear();
+    g_resimEffects.clear();
 }
 
 void Effect_InitHooks()
@@ -884,16 +925,16 @@ void Effect_InitHooks()
                 status);
     }
 
-    /*status = MH_CreateHook((LPVOID)_addr(FN_EFFECT_CREATE_GENERATOR),
-                           (LPVOID)&hkEffectCreateGenerator,
-                           (LPVOID*)&oEffectCreateGenerator);
+    status = MH_CreateHook((LPVOID)_addr(FN_EFFECT_CREATE_GENERATOR),
+                            (LPVOID)&hkEffectCreateGenerator,
+                            (LPVOID*)&oEffectCreateGenerator);
     if (status == MH_OK) {
         MH_EnableHook((LPVOID)_addr(FN_EFFECT_CREATE_GENERATOR));
-        HookLog("Rollback: tracing effect generator allocation failures\n");
+        HookLog("Rollback: tracking resimulation-created effects\n");
     } else {
-        HookLog("Rollback: failed to trace effect generator allocation (%d)\n",
+        HookLog("Rollback: failed to track resimulation-created effects (%d)\n",
                 status);
-    }*/
+    }
 
     status = MH_CreateHook((LPVOID)_addr(FN_PARTICLE_MANAGER_RELEASE_SUBBUFFER),
                            (LPVOID)&hkParticleManagerReleaseSubBuffer,
