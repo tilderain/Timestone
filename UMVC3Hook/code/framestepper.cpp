@@ -24,9 +24,6 @@ extern "C" int32_t Controller_GetLastRemoteFrame();
 extern "C" int32_t Controller_GetRollbackFrames();
 extern "C" uint32_t Controller_GetExpectedInput(uint32_t teamIdx, int32_t frame);
 
-// Multi-resimulation toggle from controller.cpp
-extern bool g_multiResimEnabled;
-
 // Desync detection flags from controller.cpp
 extern bool     g_desyncDetected;
 extern bool     g_desyncSeen;
@@ -1332,12 +1329,6 @@ void FrameStepper_Draw()
                 Netplay_SendRollback(curRollback);
             }
 
-            bool multiResimEnabled = g_multiResimEnabled;
-            if (ImGui::Checkbox("Multi ReSim", &multiResimEnabled))
-            {
-                Controller_SetMultiResimEnabled(multiResimEnabled);
-                Netplay_SendMultiResim(multiResimEnabled);
-            }
         }
 
         ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "P1: [%s]  0x%08X", DecodeDirection(p1), p1);
