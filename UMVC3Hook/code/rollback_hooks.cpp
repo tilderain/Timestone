@@ -229,6 +229,8 @@ static void __fastcall hkSoundMove(uint64_t sound)
     constexpr uint32_t FIRST_OFFSET = 0x70;
     constexpr uint32_t STRIDE = 0xB50;
     constexpr uint32_t MODEL_OFFSET = 0x80;
+    constexpr uint32_t JOINT_INDEX_OFFSET = 0x88;
+    constexpr uint32_t POSITION_MODE_OFFSET = 0xC0;
     constexpr uint32_t MAX_COUNT = 40;
     uint32_t count = *(uint32_t*)(sound + COUNT_OFFSET);
     if (count <= MAX_COUNT) {
@@ -243,9 +245,13 @@ static void __fastcall hkSoundMove(uint64_t sound)
             valid = valid && IsAccessiblePointer(vtable) &&
                 IsAccessibleAddress(vtable + 0xA0);
             uint64_t getMatrix = valid ? *(uint64_t*)(vtable + 0xA0) : 0;
-            if (!valid || !IsExecutableAddress(getMatrix)) {
-                HookLog("Rollback: detached stale sound scene model scene=%u model=0x%llX vtable=0x%llX\n",
-                        i, model, vtable);
+            int32_t jointIndex = *(int32_t*)(scene + JOINT_INDEX_OFFSET);
+            uint32_t positionMode = *(uint32_t*)(scene + POSITION_MODE_OFFSET);
+            if (!valid || !IsExecutableAddress(getMatrix) ||
+                (positionMode == 2 && jointIndex < 0)) {
+                HookLog("Rollback: detached stale sound scene model scene=%u "
+                        "model=0x%llX vtable=0x%llX mode=%u joint=%d\n",
+                        i, model, vtable, positionMode, jointIndex);
                 *modelSlot = 0;
             }
         }
