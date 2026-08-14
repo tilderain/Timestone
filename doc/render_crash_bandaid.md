@@ -121,10 +121,12 @@ reconstructing entry arrays or forcing scheduler state to retired.
   side effect but skips an absent `cChr+0x6428` position source.
 - `MtAnim__updateFrame` returns the native no-frame value `0xFFFFFFFF` for
   malformed animation tables.
-- The sound-move stale-model cleanup also removes mode-2 scene bindings with a
-  negative joint index. `sScene__updateSoundEnvLogf` otherwise passes `-1` to
-  the bound model's virtual `+0xA0` matrix lookup; the observed implementation
-  forwarded it to `MtVector3__op_assign` as address `0xFFFFFFFF`.
+- `sScene__updateSoundEnvLogf` validates its model binding immediately before
+  use and removes mode-2 bindings with a negative joint index. Validation in
+  `sSound__move` before native queue processing was too early because that same
+  move can create a bad binding. Native code otherwise passes `-1` to the
+  model's virtual `+0xA0` matrix lookup; the observed implementation forwarded
+  it to `MtVector3__op_assign` as address `0xFFFFFFFF`.
 - `uBaseModel__resetMaterials` validates and clears stale material-cache
   entries before native teardown, allowing valid material entries to follow the
   native release path.

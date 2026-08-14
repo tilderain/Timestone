@@ -21,6 +21,7 @@ static constexpr uintptr_t FN_SMVC3MAIN_MOVE = 0x1402594A0;
 static constexpr uintptr_t FN_CCHR_SET_POS = 0x140002AF0;
 static constexpr uintptr_t FN_RENDER_END_FRAME = 0x14053A250;
 static constexpr uintptr_t FN_SSOUND_MOVE = 0x1405CC040;
+static constexpr uintptr_t FN_SCENE_UPDATE_SOUND_ENV = 0x1405D6CD0;
 static constexpr uintptr_t FN_SGAMEUI_MOVE = 0x1402BE610;
 static constexpr uintptr_t FN_UBTGAUGELIFE_MOVE = 0x1402F6800;
 static constexpr uintptr_t FN_RCHRCPU_CLASS_FUNC = 0x140117280;
@@ -39,6 +40,7 @@ static RollbackMainMoveFn* g_originalMvc3MainMove = nullptr;
 static void(__fastcall* oCallSRender)(uint64_t) = nullptr;
 static void(__fastcall* oMainMove)(uint64_t) = nullptr;
 static void(__fastcall* oSoundMove)(uint64_t) = nullptr;
+static void(__fastcall* oSceneUpdateSoundEnv)(uint64_t) = nullptr;
 static void(__fastcall* oGameUiMove)(uint64_t) = nullptr;
 static void(__fastcall* oBtGaugeLifeMove)(uint64_t) = nullptr;
 static bool(__fastcall* oRChrCpuClassFunc)(void*, void*) = nullptr;
@@ -224,39 +226,33 @@ static void __fastcall hkSoundMove(uint64_t sound)
     RollbackHookProfileScope profile(RollbackHookProfileId::SoundMove);
     if (g_isResimulating)
         return;
+    oSoundMove(sound);
+}
 
-    constexpr uint32_t COUNT_OFFSET = 0x1CF50;
-    constexpr uint32_t FIRST_OFFSET = 0x70;
-    constexpr uint32_t STRIDE = 0xB50;
+static void __fastcall hkSceneUpdateSoundEnv(uint64_t scene)
+{
     constexpr uint32_t MODEL_OFFSET = 0x80;
     constexpr uint32_t JOINT_INDEX_OFFSET = 0x88;
     constexpr uint32_t POSITION_MODE_OFFSET = 0xC0;
-    constexpr uint32_t MAX_COUNT = 40;
-    uint32_t count = *(uint32_t*)(sound + COUNT_OFFSET);
-    if (count <= MAX_COUNT) {
-        for (uint32_t i = 0; i < count; ++i) {
-            uint64_t scene = sound + FIRST_OFFSET + (uint64_t)i * STRIDE;
-            uint64_t* modelSlot = (uint64_t*)(scene + MODEL_OFFSET);
-            uint64_t model = *modelSlot;
-            if (!model)
-                continue;
-            bool valid = IsBaseModelObject((void*)model);
-            uint64_t vtable = valid ? *(uint64_t*)model : 0;
-            valid = valid && IsAccessiblePointer(vtable) &&
-                IsAccessibleAddress(vtable + 0xA0);
-            uint64_t getMatrix = valid ? *(uint64_t*)(vtable + 0xA0) : 0;
-            int32_t jointIndex = *(int32_t*)(scene + JOINT_INDEX_OFFSET);
-            uint32_t positionMode = *(uint32_t*)(scene + POSITION_MODE_OFFSET);
-            if (!valid || !IsExecutableAddress(getMatrix) ||
-                (positionMode == 2 && jointIndex < 0)) {
-                HookLog("Rollback: detached stale sound scene model scene=%u "
-                        "model=0x%llX vtable=0x%llX mode=%u joint=%d\n",
-                        i, model, vtable, positionMode, jointIndex);
-                *modelSlot = 0;
-            }
+
+    uint64_t* modelSlot = (uint64_t*)(scene + MODEL_OFFSET);
+    uint64_t model = *modelSlot;
+    if (model) {
+        bool valid = IsBaseModelObject((void*)model);
+        uint64_t vtable = valid ? *(uint64_t*)model : 0;
+        valid = valid && IsAccessibleRange(vtable + 0xA0, sizeof(uint64_t));
+        uint64_t getMatrix = valid ? *(uint64_t*)(vtable + 0xA0) : 0;
+        int32_t jointIndex = *(int32_t*)(scene + JOINT_INDEX_OFFSET);
+        uint32_t positionMode = *(uint32_t*)(scene + POSITION_MODE_OFFSET);
+        if (!valid || !IsExecutableAddress(getMatrix) ||
+            (positionMode == 2 && jointIndex < 0)) {
+            HookLog("Rollback: detached stale sound scene model=0x%llX "
+                    "vtable=0x%llX mode=%u joint=%d\n",
+                    model, vtable, positionMode, jointIndex);
+            *modelSlot = 0;
         }
     }
-    oSoundMove(sound);
+    oSceneUpdateSoundEnv(scene);
 }
 
 static void __fastcall hkGameUiMove(uint64_t gameUi)
@@ -393,6 +389,10 @@ void Rollback_InitMainHooks(RollbackMainMoveFn* originalMove)
     EnableHook(FN_SSOUND_MOVE, (void*)&hkSoundMove, (void**)&oSoundMove,
                "Rollback: hooked sSound__move for headless re-simulation",
                "Rollback: failed to hook sSound__move (%d)\n");
+    EnableHook(FN_SCENE_UPDATE_SOUND_ENV, (void*)&hkSceneUpdateSoundEnv,
+               (void**)&oSceneUpdateSoundEnv,
+               "Rollback: guarded sound scene model binding",
+               "Rollback: failed to guard sound scene model binding (%d)\n");
     EnableHook(FN_SGAMEUI_MOVE, (void*)&hkGameUiMove, (void**)&oGameUiMove,
                "Rollback: hooked sGameUI__move for re-simulation suppression",
                "Rollback: failed to hook sGameUI__move (%d)\n");

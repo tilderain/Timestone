@@ -1169,7 +1169,8 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
         Shot_ApplyFlight(fresh, saved.flight);
         // Concrete restore can reapply the explosion's captured factory-default
         // attack selector after native creation derived it from the parent.
-        Shot_RepairNemesisExplosionAttack(fresh, (void*)spawnRecipe->initParam);
+        Shot_RepairNemesisExplosionAttack(
+            fresh, (void*)spawnRecipe->initParam, saved.spawnAttackInfoId);
         const bool legionTiger = saved.concrete.dti ==
             (uint64_t)_addr(DTI_USHOT_VULCAN_LEGION_TIGER);
         const bool repulsorBlast = saved.concrete.dti ==

@@ -76,6 +76,7 @@ struct RollbackShotRecipe {
     void* exA10;
     int exA11;
     void* exA12;
+    uint32_t spawnAttackInfoId = UINT32_MAX;
     RollbackShotFlightState flight;
     ConcreteShotSnapshot concrete;
     uint64_t spawnSequence = 0;

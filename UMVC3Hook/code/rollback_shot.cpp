@@ -353,7 +353,8 @@ static void RepairResimRepulsorBlastMotion(void* shot)
             shot, 0, 0, 0.0f, 0.0f, 1.0f, 0);
 }
 
-void Shot_RepairNemesisExplosionAttack(void* shot, void* parent)
+uint32_t Shot_RepairNemesisExplosionAttack(
+    void* shot, void* parent, uint32_t restoredId)
 {
     uint64_t shotDti = shot && HasCallableDtiVirtual(shot)
         ? GetObjectDti((uint64_t)shot) : 0;
@@ -366,18 +367,14 @@ void Shot_RepairNemesisExplosionAttack(void* shot, void* parent)
             (uint64_t)_addr(DTI_USHOT_VULCAN_EXATK_ROCKET_LAUNCHER) ||
         !IsAccessibleRange((uint64_t)shot + 0x1498, sizeof(uint32_t)) ||
         !IsAccessibleRange((uint64_t)parent + 0x1498, sizeof(uint32_t))) {
-        return;
+        return UINT32_MAX;
     }
 
     uint32_t& attackInfoId = *(uint32_t*)((uint8_t*)shot + 0x1498);
-    uint32_t parentAttackInfoId =
-        *(uint32_t*)((uint8_t*)parent + 0x1498);
-    if (attackInfoId == 0 && parentAttackInfoId != 0) {
-        // Native BIOWEAPON ASSAULT creation inherits attack 1 from the rocket.
-        // A rollback-created explosion can retain the factory default and apply
-        // the attack-0 air launch, moving its target 13.333 units farther.
-        attackInfoId = parentAttackInfoId;
-    }
+    uint32_t desiredId = restoredId != UINT32_MAX
+        ? restoredId : *(uint32_t*)((uint8_t*)parent + 0x1498);
+    attackInfoId = desiredId;
+    return desiredId;
 }
 
 static bool PendulumMotionReady(void* shot)
@@ -594,7 +591,8 @@ static void* __fastcall hkShotSpawnEx(void* manager, void* element, uint64_t ini
                               objectRef1, slotId, objectRef2, a9, a10, a11, a12);
     RepairResimRepulsorBlastMotion(shot);
     RepairResimPendulumModel(shot);
-    Shot_RepairNemesisExplosionAttack(shot, (void*)initParam);
+    recipe.spawnAttackInfoId =
+        Shot_RepairNemesisExplosionAttack(shot, (void*)initParam);
     TraceResimShotSpawn("extended", recipe, shot,
                         __builtin_return_address(0));
     InvalidateMemoryQueryCache();
@@ -649,8 +647,13 @@ static void __fastcall hkShotUpdateHitboxes(void* shot)
 {
     RollbackHookProfileScope profile(RollbackHookProfileId::ShotUpdateHitboxes);
     RepairResimPendulumModel(shot);
-    oShotUpdateHitboxes(shot);
     auto recipe = g_liveShotRecipes.find(shot);
+    if (recipe != g_liveShotRecipes.end()) {
+        Shot_RepairNemesisExplosionAttack(
+            shot, (void*)recipe->second.initParam,
+            recipe->second.spawnAttackInfoId);
+    }
+    oShotUpdateHitboxes(shot);
     bool pendulum = shot && HasCallableDtiVirtual(shot) &&
         GetObjectDti((uint64_t)shot) ==
             (uint64_t)_addr(DTI_USHOT_VULCAN_PENDULUM_LOG) &&
@@ -678,13 +681,13 @@ static void __fastcall hkShotProcessHitCollision(void* shot, void* target,
                                                   void* contact)
 {
     auto recipe = g_liveShotRecipes.find(shot);
-    if (recipe != g_liveShotRecipes.end() &&
-        (g_isResimulating || recipe->second.reconstructed)) {
+    if (recipe != g_liveShotRecipes.end()) {
         // The explosion factory can finalize cAtkCtrl after reconstruction's
         // initial repair. Reapply the parent's attack variant at the last
         // gameplay-safe point before the hit response consumes mAtkInfoId.
         Shot_RepairNemesisExplosionAttack(
-            shot, (void*)recipe->second.initParam);
+            shot, (void*)recipe->second.initParam,
+            recipe->second.spawnAttackInfoId);
     }
     if (recipe != g_liveShotRecipes.end() && recipe->second.reconstructed &&
         !IsCurrentCharacterCollisionTarget(target)) {

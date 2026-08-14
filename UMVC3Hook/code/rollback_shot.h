@@ -19,7 +19,8 @@ void Shot_Reset();
 
 void Shot_CaptureFlight(void* shot, RollbackShotFlightState& state);
 void Shot_ApplyFlight(void* shot, const RollbackShotFlightState& state);
-void Shot_RepairNemesisExplosionAttack(void* shot, void* parent);
+uint32_t Shot_RepairNemesisExplosionAttack(
+    void* shot, void* parent, uint32_t restoredId = UINT32_MAX);
 void Shot_RestoreArmState(void* shot, const RollbackShotRecipe& recipe);
 void Shot_DetachEmbeddedEffect(void* shot);
 int Shot_SanitizeCollisionSlotsForDestruction(void* shot);
