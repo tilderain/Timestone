@@ -1397,8 +1397,6 @@ void Rollback_SaveSnapshot(int32_t frame)
                 frame, g_isResimulating ? 1 : 0, replayFrame);
     }*/
 
-    Rollback_DestroyCollisionNodeClones(slot);
-
     if (slot.capacity < total) {
         size_t newCapacity = total;
         if (total <= SIZE_MAX - (SNAPSHOT_CAPACITY_GRANULARITY - 1)) {

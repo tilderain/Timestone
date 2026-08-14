@@ -449,7 +449,8 @@ void Rollback_CaptureCollisionNodeClones(RollbackSnapshotSlot& slot)
     auto copyNode =
         (void(__fastcall*)(void*, void*, bool, bool))_addr(FN_COLLISION_NODE_COPY);
 
-    bool createdClone = false;
+    size_t capturedCount = 0;
+    bool mutatedClones = false;
     for (int i = 0; i < slot.regionCount; ++i) {
         const RollbackRegion& region = slot.regions[i];
         if (!region.ownerSlot || region.size != CCHR_EXTERNAL_ANIM_SIZE) continue;
@@ -467,13 +468,29 @@ void Rollback_CaptureCollisionNodeClones(RollbackSnapshotSlot& slot)
             continue;
         }
 
-        RollbackCollisionNodeClone entry{};
+        const uint64_t wrapperDti = GetObjectDti((uint64_t)region.ptr);
+        if (!wrapperDti) continue;
+
+        size_t existingIndex = capturedCount;
+        while (existingIndex < slot.collisionNodeClones.size() &&
+               slot.collisionNodeClones[existingIndex].ownerSlot != region.ownerSlot) {
+            ++existingIndex;
+        }
+        if (existingIndex == slot.collisionNodeClones.size()) {
+            slot.collisionNodeClones.emplace_back();
+        } else if (existingIndex != capturedCount) {
+            std::swap(slot.collisionNodeClones[capturedCount],
+                      slot.collisionNodeClones[existingIndex]);
+        }
+
+        RollbackCollisionNodeClone& entry =
+            slot.collisionNodeClones[capturedCount];
         entry.ownerSlot = region.ownerSlot;
         entry.savedPtr = region.ptr;
-        entry.wrapperDti = GetObjectDti((uint64_t)region.ptr);
-        if (!entry.wrapperDti) continue;
+        entry.wrapperDti = wrapperDti;
         entry.childCount = childCount;
         std::memcpy(entry.scalarState, region.ptr, sizeof(entry.scalarState));
+        entry.childDtis.clear();
         entry.childDtis.reserve(childCount);
         for (uint32_t child = 0; child < childCount; ++child) {
             uint64_t childPtr = *(const uint64_t*)(
@@ -483,19 +500,38 @@ void Rollback_CaptureCollisionNodeClones(RollbackSnapshotSlot& slot)
                     ? GetObjectDti(childPtr) : 0);
         }
         if (childCount == 0) {
-            slot.collisionNodeClones.push_back(std::move(entry));
+            if (entry.clone) {
+                copyNode(entry.clone, region.ptr, false, true);
+                mutatedClones = true;
+            }
+            ++capturedCount;
             continue;
         }
 
-        void* clone = createNode(nullptr);
-        if (!clone) continue;
-        createdClone = true;
+        if (!entry.clone) {
+            entry.clone = createNode(nullptr);
+            if (!entry.clone) continue;
+        }
         // Inherit the source child factory before deep-copying its children.
-        copyNode(clone, region.ptr, false, true);
-        entry.clone = clone;
-        slot.collisionNodeClones.push_back(std::move(entry));
+        copyNode(entry.clone, region.ptr, false, true);
+        mutatedClones = true;
+        ++capturedCount;
     }
-    if (createdClone) InvalidateMemoryQueryCache();
+
+    // Ring slots retain native clone roots. copyFrom updates their children in
+    // place, so only owners absent from the new snapshot need destruction.
+    for (size_t i = capturedCount; i < slot.collisionNodeClones.size(); ++i) {
+        RollbackCollisionNodeClone& entry = slot.collisionNodeClones[i];
+        if (!entry.clone || !HasCallableDtiVirtual(entry.clone)) continue;
+        uint64_t vtable = *(uint64_t*)entry.clone;
+        auto destroy = (void(__fastcall*)(void*, uint32_t))*(uint64_t*)vtable;
+        if (destroy && IsAccessibleAddress((uint64_t)destroy)) {
+            destroy(entry.clone, 1);
+            mutatedClones = true;
+        }
+    }
+    slot.collisionNodeClones.resize(capturedCount);
+    if (mutatedClones) InvalidateMemoryQueryCache();
 }
 
 void Rollback_RestoreCollisionNodeClones(RollbackSnapshotSlot& slot)
