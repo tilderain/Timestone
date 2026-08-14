@@ -1,22 +1,14 @@
-add exception handler
-
-transmit controller config on start ..
 Somehow enable the pause menu mid match
 
 Transmit character start
 Synchronize button press for skip intro
 
 Desyncs-
-    Collision (pushing players)
-    Multi hit moves (morrigan air heavy)
-     /Restoring previous hitboxes on snapshot restore
-    Shot
     Morrigan's clone
 
 
 verbose logging?
 Only log to memory then write json at desync
-Json transmit on desync
 
 Auto updater
 
@@ -39,9 +31,6 @@ after the loop starts, the game thread might still sleep for a full millisecond 
 
 
 
-Controller gamepad for p1
-
-
 Rollback frames cfg
 
 Integrate into menuing
@@ -49,17 +38,8 @@ Integrate into menuing
 Hook into the existing lobby system?
 
 
-Fix the input display
-Other touchups for the shit
 Integrate input handling for chrsel and results
 Disable mouse for game
-
-
-//NOTE TODO: Investigate whether or not multiple resims is viable and is better for this.
-//i.e, resimulating to current frame with only 1 confirmed input and 8 predicted inputs, then if those predictions are wrong
-//resimulate AGAIN from that frame ...
-
-
 
 Switch to gecko net ...
 Transmit input for the frame as soon as we capture it
@@ -138,14 +118,15 @@ FFFFFFFF };
 Fix dead character ui swap
 Desync packet
 Reset match button
-
+```Temp Esc menu 
+    Resume
+    Restart match
+    Return to character sel
+    Exit match
 
 
 Game crashes when you fucking close it
-Controller face buttons don't fucking work on p2
-Save the ip to connect to
 Allow copy pasting ip on windows because it freezes
-
 
 generate snapshot during resim only unconfirmed frames
 
@@ -154,7 +135,6 @@ Kill netplay's critical section spam
 Put ghidra_scripts into this folder
 
 Remove all useless diags
-
 
 D3DERR_NOTAVAILABLE : pcore->CreateDevice(
 mpUIThreadD3DCreateDeviceParam->Adapter,
@@ -165,6 +145,5 @@ mpUIThreadD3DCreateDeviceParam->pPresentationParameters,
 mpUIThreadD3DCreateDeviceParam->ppReturnedDeviceInterface)
 game sometimes errors this on launch
 
-fix controller not working again
 perf regressions
     ---- remove every unnecessary hook, esp effect ones
