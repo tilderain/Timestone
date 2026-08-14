@@ -14,6 +14,9 @@ extern void HookLog(const char* fmt, ...);
 static constexpr uintptr_t FN_RNG_RANDOM_INT = 0x14014EB30;
 static constexpr uintptr_t FN_RNG_ADVANCE = 0x14014EAB0;
 static constexpr uintptr_t FN_RNG_LERP_RANDOM = 0x14014EA70;
+static constexpr uintptr_t FN_RNG_NEXT_FLOAT = 0x14014EE10;
+static constexpr uintptr_t FN_RNG_FLOAT_IN_RANGE = 0x140455550;
+static constexpr uintptr_t FN_RNG_INT_IN_RANGE = 0x140455590;
 static constexpr uintptr_t FN_RNG_NEXT = 0x14000AF80;
 static constexpr uintptr_t FN_RNG_NEXT_IMPL = 0x1404600F0;
 static constexpr uintptr_t FN_EFFECT_NEXT_RANDOM = 0x140543B70;
@@ -63,6 +66,9 @@ static constexpr uintptr_t GLOBAL_RNG_STATE = 0x140D765D8;
 using RandomIntRangeFn = int(__fastcall*)(void*, int, int, void*);
 using RngAdvanceFn = float(__fastcall*)(uint64_t, void*);
 using RngLerpRandomFn = float(__fastcall*)(uint64_t, float, float, void*);
+using RngNextFloatFn = float(__fastcall*)(uint32_t*);
+using RngFloatInRangeFn = float(__fastcall*)(float, float);
+using RngIntInRangeFn = int(__fastcall*)(int, int);
 using RngNextFn = void(__fastcall*)(uint32_t*);
 using EffectNextRandomFn = uint64_t(__fastcall*)(void*, int);
 using SoundRandomVariantFn = int(__fastcall*)(uint64_t, void*, int);
@@ -73,6 +79,9 @@ using RChrCpuRngModNFn = uint32_t(__fastcall*)(void*, uint32_t);
 static RandomIntRangeFn oRandomIntRange = nullptr;
 static RngAdvanceFn oRngAdvance = nullptr;
 static RngLerpRandomFn oRngLerpRandom = nullptr;
+static RngNextFloatFn oRngNextFloat = nullptr;
+static RngFloatInRangeFn oRngFloatInRange = nullptr;
+static RngIntInRangeFn oRngIntInRange = nullptr;
 static RngNextFn oRngNext = nullptr;
 static RngNextFn oRngNextImpl = nullptr;
 static EffectNextRandomFn oEffectNextRandom = nullptr;
@@ -175,6 +184,56 @@ static void __fastcall hkRngNextImpl(uint32_t* state)
 {
     hkRngNextCommon(state, oRngNextImpl,
                     (uint64_t)__builtin_return_address(0));
+}
+
+static float __fastcall hkRngNextFloat(uint32_t* state)
+{
+    const uint64_t caller = (uint64_t)__builtin_return_address(0);
+    const bool isolate = Netplay_IsActive() &&
+        state == (uint32_t*)_addr(GLOBAL_RNG_STATE) &&
+        IsStageObjectCallsite(caller);
+    uint32_t savedGlobal[4] = {};
+    if (isolate)
+        std::memcpy(savedGlobal, state, sizeof(savedGlobal));
+
+    const float result = oRngNextFloat(state);
+    if (isolate)
+        std::memcpy(state, savedGlobal, sizeof(savedGlobal));
+    return result;
+}
+
+static float __fastcall hkRngFloatInRange(float low, float high)
+{
+    const uint64_t caller = (uint64_t)__builtin_return_address(0);
+    const bool isolate = Netplay_IsActive() &&
+        IsStageObjectCallsite(caller);
+    uint32_t savedGlobal[4] = {};
+    if (isolate)
+        std::memcpy(savedGlobal, (void*)_addr(GLOBAL_RNG_STATE),
+                    sizeof(savedGlobal));
+
+    const float result = oRngFloatInRange(low, high);
+    if (isolate)
+        std::memcpy((void*)_addr(GLOBAL_RNG_STATE), savedGlobal,
+                    sizeof(savedGlobal));
+    return result;
+}
+
+static int __fastcall hkRngIntInRange(int low, int high)
+{
+    const uint64_t caller = (uint64_t)__builtin_return_address(0);
+    const bool isolate = Netplay_IsActive() &&
+        IsStageObjectCallsite(caller);
+    uint32_t savedGlobal[4] = {};
+    if (isolate)
+        std::memcpy(savedGlobal, (void*)_addr(GLOBAL_RNG_STATE),
+                    sizeof(savedGlobal));
+
+    const int result = oRngIntInRange(low, high);
+    if (isolate)
+        std::memcpy((void*)_addr(GLOBAL_RNG_STATE), savedGlobal,
+                    sizeof(savedGlobal));
+    return result;
 }
 
 static float __fastcall hkRngAdvance(uint64_t stateArg, void* rngOwner)
@@ -410,6 +469,45 @@ void Rollback_InitRngHooks()
             HookLog("Rollback: failed to enable implementation RNG trace (%d)\n", status);
     } else {
         HookLog("Rollback: failed to hook implementation RNG trace (%d)\n", status);
+    }
+
+    status = MH_CreateHook((LPVOID)_addr(FN_RNG_NEXT_FLOAT),
+                           (LPVOID)&hkRngNextFloat,
+                           (LPVOID*)&oRngNextFloat);
+    if (status == MH_OK) {
+        status = MH_EnableHook((LPVOID)_addr(FN_RNG_NEXT_FLOAT));
+        if (status == MH_OK)
+            HookLog("Rollback: isolated stage RNG float consumers\n");
+        else
+            HookLog("Rollback: failed to enable stage RNG float isolation (%d)\n", status);
+    } else {
+        HookLog("Rollback: failed to hook stage RNG float consumers (%d)\n", status);
+    }
+
+    status = MH_CreateHook((LPVOID)_addr(FN_RNG_FLOAT_IN_RANGE),
+                           (LPVOID)&hkRngFloatInRange,
+                           (LPVOID*)&oRngFloatInRange);
+    if (status == MH_OK) {
+        status = MH_EnableHook((LPVOID)_addr(FN_RNG_FLOAT_IN_RANGE));
+        if (status == MH_OK)
+            HookLog("Rollback: isolated stage float ranges\n");
+        else
+            HookLog("Rollback: failed to enable stage float-range isolation (%d)\n", status);
+    } else {
+        HookLog("Rollback: failed to hook stage float ranges (%d)\n", status);
+    }
+
+    status = MH_CreateHook((LPVOID)_addr(FN_RNG_INT_IN_RANGE),
+                           (LPVOID)&hkRngIntInRange,
+                           (LPVOID*)&oRngIntInRange);
+    if (status == MH_OK) {
+        status = MH_EnableHook((LPVOID)_addr(FN_RNG_INT_IN_RANGE));
+        if (status == MH_OK)
+            HookLog("Rollback: isolated stage integer ranges\n");
+        else
+            HookLog("Rollback: failed to enable stage integer-range isolation (%d)\n", status);
+    } else {
+        HookLog("Rollback: failed to hook stage integer ranges (%d)\n", status);
     }
 
     status = MH_CreateHook((LPVOID)_addr(FN_RNG_ADVANCE),
