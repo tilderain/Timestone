@@ -78,6 +78,77 @@ static uint64_t g_effectSpawnSequence = 0;
 
 static std::vector<void*> g_resimEffects;
 
+struct EffectTraceEntry {
+    uint64_t sequence;
+    uint64_t object;
+    uint64_t vtable;
+    uint64_t parent;
+    uint64_t resource;
+    uint64_t arg0;
+    uint64_t arg1;
+    int32_t frame;
+    uint32_t thread;
+    const char* event;
+};
+
+static constexpr uint32_t EFFECT_TRACE_CAPACITY = 512;
+static EffectTraceEntry g_effectTrace[EFFECT_TRACE_CAPACITY] = {};
+static volatile LONG64 g_effectTraceSequence = 0;
+
+static void TraceEffect(const char* event, void* object,
+                        uint64_t arg0 = 0, uint64_t arg1 = 0)
+{
+    const uint64_t sequence = (uint64_t)InterlockedIncrement64(
+        &g_effectTraceSequence);
+    EffectTraceEntry& entry = g_effectTrace[
+        sequence % EFFECT_TRACE_CAPACITY];
+    entry.sequence = 0;
+    entry.object = (uint64_t)object;
+    entry.vtable = object && IsAccessibleRange((uint64_t)object, 0x110)
+        ? *(uint64_t*)object : 0;
+    entry.parent = object && IsAccessibleRange((uint64_t)object, 0x110)
+        ? *(uint64_t*)((uint8_t*)object + 0x40) : 0;
+    entry.resource = object && IsAccessibleRange((uint64_t)object, 0x110)
+        ? *(uint64_t*)((uint8_t*)object + 0x108) : 0;
+    entry.arg0 = arg0;
+    entry.arg1 = arg1;
+    entry.frame = g_resimulateCurrentFrame;
+    entry.thread = GetCurrentThreadId();
+    entry.event = event;
+    MemoryBarrier();
+    entry.sequence = sequence;
+}
+
+bool Effect_DumpCrashTrace(FILE* file, uint64_t object)
+{
+    if (!file || !object) return false;
+    const uint64_t latest = (uint64_t)g_effectTraceSequence;
+    const uint64_t first = latest > EFFECT_TRACE_CAPACITY
+        ? latest - EFFECT_TRACE_CAPACITY + 1 : 1;
+    bool wroteHeader = false;
+    for (uint64_t sequence = first; sequence <= latest; ++sequence) {
+        const EffectTraceEntry& entry = g_effectTrace[
+            sequence % EFFECT_TRACE_CAPACITY];
+        if (entry.sequence != sequence || entry.object != object) continue;
+        if (!wroteHeader) {
+            std::fprintf(file, "effect lifecycle trace for 0x%016llX:\n",
+                         (unsigned long long)object);
+            wroteHeader = true;
+        }
+        std::fprintf(file,
+            "  seq=%llu event=%s frame=%d thread=%u vtable=0x%llX "
+            "parent=0x%llX resource=0x%llX arg0=0x%llX arg1=0x%llX\n",
+            (unsigned long long)entry.sequence,
+            entry.event ? entry.event : "?", entry.frame, entry.thread,
+            (unsigned long long)entry.vtable,
+            (unsigned long long)entry.parent,
+            (unsigned long long)entry.resource,
+            (unsigned long long)entry.arg0,
+            (unsigned long long)entry.arg1);
+    }
+    return wroteHeader;
+}
+
 static void ForgetResimEffect(void* effect)
 {
     g_resimEffects.erase(
@@ -90,6 +161,14 @@ static bool IsActiveUnit(void* unit)
     if (!unit) return false;
     uint32_t state = *(uint32_t*)((uint8_t*)unit + 0x10);
     return (state & 7u) < 3u && (state & 0x3F8u) != 0x3F8u;
+}
+
+static bool IsUsableEffectParent(void* parent)
+{
+    if (!parent || !HasCallableDtiVirtual(parent)) return false;
+    const uint64_t vtable = *(uint64_t*)parent;
+    return IsAccessibleRange(vtable + 0xA0, sizeof(uint64_t)) &&
+        IsExecutableAddress(*(uint64_t*)(vtable + 0xA0));
 }
 
 static bool IsPersistentCharacterEffect(void* effect)
@@ -319,6 +398,8 @@ static void* __fastcall hkEffectCreate(void* manager, int effectId, int a3,
     RollbackHookProfileScope profile(RollbackHookProfileId::EffectCreate);
     void* effect = oEffectCreate(manager, effectId, a3, attachTo, a5, a6, a7,
                                  a8, a9, a10, a11, a12, a13);
+    if constexpr (EFFECT_LIFECYCLE_TRACE_ENABLED)
+        TraceEffect("factory", effect, (uint64_t)a8, (uint64_t)attachTo);
     InvalidateMemoryQueryCache();
     if (effect) {
         RollbackEffectRecipe recipe = {
@@ -379,6 +460,8 @@ static void __fastcall hkEffectDraw(void* effect, void* camera)
 
 static void __fastcall hkEffectDtorRelease(void* effect)
 {
+    if constexpr (EFFECT_LIFECYCLE_TRACE_ENABLED)
+        TraceEffect("dtor-release", effect);
     ForgetResimEffect(effect);
     if (g_isResimulating)
         Effect_PrepareUnitRemoval(effect);
@@ -387,6 +470,8 @@ static void __fastcall hkEffectDtorRelease(void* effect)
 
 static void __fastcall hkEffectVdtor(void* effect, uint32_t flags)
 {
+    if constexpr (EFFECT_LIFECYCLE_TRACE_ENABLED)
+        TraceEffect("vdtor", effect, flags);
     ForgetResimEffect(effect);
     if (g_isResimulating)
         Effect_PrepareUnitRemoval(effect);
@@ -395,7 +480,11 @@ static void __fastcall hkEffectVdtor(void* effect, uint32_t flags)
 
 static uint64_t __fastcall hkEffectCreateGenerator(void* effect)
 {
+    if constexpr (EFFECT_LIFECYCLE_TRACE_ENABLED)
+        TraceEffect("generator-enter", effect);
     uint64_t result = oEffectCreateGenerator(effect);
+    if constexpr (EFFECT_LIFECYCLE_TRACE_ENABLED)
+        TraceEffect("generator-exit", effect, result);
     if (g_isResimulating && effect &&
         std::find(g_resimEffects.begin(), g_resimEffects.end(), effect) ==
             g_resimEffects.end()) {
@@ -577,7 +666,14 @@ void Effect_CaptureRecipes(RollbackSnapshotSlot& slot)
             IsPersistentCharacterEffect(recipe.restoredPtr)) {
             continue;
         }
+
+        // sGameEffect__spawn_Ex passes a8 to uEffect__setEffectParent. The
+        // original spawn argument can become stale when native code reparents
+        // the live effect, so capture the authoritative current mParent.
         RollbackEffectRecipe saved = recipe;
+        saved.a8 = *(void**)((uint8_t*)recipe.restoredPtr + 0x40);
+        saved.attachTo = *(void**)((uint8_t*)recipe.restoredPtr + 0x288);
+
         saved.savedPtr = recipe.restoredPtr;
         ConcreteEffectSnapshot_Capture(recipe.restoredPtr, saved.state);
         slot.effectRecipes.push_back(saved);
@@ -593,16 +689,29 @@ int Effect_RestoreRecipes(RollbackSnapshotSlot& slot)
 
     for (RollbackEffectRecipe& saved : slot.effectRecipes) {
         void* sGameEffect = saved.sGameEffect;
-        if (!sGameEffect || !oEffectCreate) {
+        if (!sGameEffect || !oEffectCreate ||
+            (saved.a8 && !IsUsableEffectParent(saved.a8)) ||
+            (saved.attachTo && IsLikelyPointer((uint64_t)saved.attachTo) &&
+             !HasCallableDtiVirtual(saved.attachTo))) {
             ++failed;
             continue;
         }
 
         void* attachTo = saved.attachTo;
+        if constexpr (EFFECT_LIFECYCLE_TRACE_ENABLED) {
+            if (saved.a8) {
+                TraceEffect("restore-parent", saved.a8,
+                            (uint64_t)saved.savedPtr,
+                            (uint32_t)saved.effectId);
+            }
+        }
         void* effect = oEffectCreate(sGameEffect, saved.effectId, saved.a3,
                                      attachTo, saved.a5, saved.a6, saved.a7,
                                      saved.a8, saved.a9, saved.a10, saved.a11,
                                      saved.a12, saved.a13);
+        if constexpr (EFFECT_LIFECYCLE_TRACE_ENABLED)
+            TraceEffect("restore-factory", effect, (uint64_t)saved.a8,
+                        (uint64_t)attachTo);
         if (!effect) {
             ++failed;
             continue;

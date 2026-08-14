@@ -128,6 +128,17 @@ reconstructing entry arrays or forcing scheduler state to retired.
   required virtual `+0xD8` callback is not executable. This covers a stale
   stage-body entry observed during resimulation without changing valid stage
   replacement behavior.
+- Independent effect capture replaces the original `a8` spawn argument with
+  the live effect's current `mParent` (`uEffect+0x40`) and refreshes the request
+  unit from `uGameEffect+0x288`. `a8` is the argument that
+  `sGameEffect__spawn_Ex` passes to `uEffect__setEffectParent`; retaining its
+  historical value after native reparenting caused restore to bind new effects
+  to retired Web Swing/block objects. Restore now rejects either live-object
+  argument if it is no longer callable immediately before the factory call.
+  Parent validation also requires an executable virtual slot `+0xA0`, which
+  `uEffect__getGeneratorSubParentWorldMatrix` dispatches while creating the
+  effect. A destructed object can retain the generic `MtObject` vtable and pass
+  a DTI-only check even though that matrix callback is null.
 - A version-checked vectored exception handler handles the null model result at
   `nDraw_Material__clone+0x1F` (`0x1405DCA7F`) and resumes at the native clone
   epilogue so the caller can use its existing fallback path.
