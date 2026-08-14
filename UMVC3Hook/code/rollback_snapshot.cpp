@@ -92,6 +92,7 @@ static constexpr uint32_t CUNIT_GROUP_OFFSET = 0x30;
 static constexpr size_t SMAIN_SIZE = 0x40080;
 static constexpr int MAX_REGIONS = ROLLBACK_MAX_REGIONS;
 static constexpr int DYNAMIC_SAFETY = 128;
+static constexpr size_t SNAPSHOT_CAPACITY_GRANULARITY = 256 * 1024;
 static constexpr size_t SHITSOLVER_SIZE = 0x3808C;
 static constexpr uintptr_t FN_MTOBJECT_ADD_REF = 0x14050D100;
 static constexpr uintptr_t FN_CRESOURCE_RELEASE_REF = 0x14050D5A0;
@@ -1399,17 +1400,22 @@ void Rollback_SaveSnapshot(int32_t frame)
     Rollback_DestroyCollisionNodeClones(slot);
 
     if (slot.capacity < total) {
+        size_t newCapacity = total;
+        if (total <= SIZE_MAX - (SNAPSHOT_CAPACITY_GRANULARITY - 1)) {
+            newCapacity = (total + SNAPSHOT_CAPACITY_GRANULARITY - 1) &
+                ~(SNAPSHOT_CAPACITY_GRANULARITY - 1);
+        }
         delete[] slot.data;
-        slot.data = new (std::nothrow) uint8_t[total];
+        slot.data = new (std::nothrow) uint8_t[newCapacity];
         if (!slot.data) {
             HookLog("Rollback: failed to allocate %zu-byte snapshot for frame %d\n",
-                    total, frame);
+                    newCapacity, frame);
             slot.capacity    = 0;
             slot.size        = 0;
             slot.regionCount = 0;
             return;
         }
-        slot.capacity = total;
+        slot.capacity = newCapacity;
     }
     const uint64_t allocationEnd = Profile_Now();
 

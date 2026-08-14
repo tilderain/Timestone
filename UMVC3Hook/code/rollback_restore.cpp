@@ -428,14 +428,17 @@ void Rollback_RestoreExternalAnimBlock(void* destination, const uint8_t* source,
 
 void Rollback_DestroyCollisionNodeClones(RollbackSnapshotSlot& slot)
 {
+    bool destroyedClone = false;
     for (const RollbackCollisionNodeClone& entry : slot.collisionNodeClones) {
         if (!entry.clone || !HasCallableDtiVirtual(entry.clone)) continue;
         uint64_t vtable = *(uint64_t*)entry.clone;
         auto destroy = (void(__fastcall*)(void*, uint32_t))*(uint64_t*)vtable;
-        if (destroy && IsAccessibleAddress((uint64_t)destroy))
+        if (destroy && IsAccessibleAddress((uint64_t)destroy)) {
             destroy(entry.clone, 1);
+            destroyedClone = true;
+        }
     }
-    InvalidateMemoryQueryCache();
+    if (destroyedClone) InvalidateMemoryQueryCache();
     slot.collisionNodeClones.clear();
 }
 
