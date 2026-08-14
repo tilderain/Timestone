@@ -227,6 +227,50 @@ constexpr DtiSnapshotRange kVerifiedShotScalarRanges[] = {
     {0x140D4B0D0ull, 0x2200, 0x20}, // uShotVulcanZireitou: gameplay tail state
 };
 
+// Concrete character-tail scalar/POD fields verified in Ghidra but absent from
+// the generated createProperty export. These are applied after reference
+// filtering so nearby live helper/effect ownership is never flattened.
+constexpr DtiSnapshotRange kVerifiedCharacterScalarRanges[] = {
+    {0x140D44F18ull, 0x6900, 0x08}, // uChunli: charge-ready and voice timer
+    {0x140D45020ull, 0x68F4, 0x08}, // uDormammu: spell stock and flare counter
+    {0x140D45020ull, 0x6920, 0x01}, // uDormammu: Stalking Flare lock
+    {0x140D44FE0ull, 0x68F0, 0x08}, // uDeadPool: teleport state
+    {0x140D45200ull, 0x6990, 0x30}, // uFrank: Kobun scale, offset, rotation
+    {0x140D45200ull, 0x69C4, 0x04}, // uFrank: level
+    {0x140D45200ull, 0x69DC, 0x04}, // uFrank: experience
+    {0x140D45200ull, 0x6A50, 0x01}, // uFrank: summon latch
+    {0x140D45248ull, 0x6930, 0x20}, // uGalactus: concrete vector state
+    {0x140D45408ull, 0x68FC, 0x18}, // uHawkEye: standing-S motion tuning
+    {0x140D45450ull, 0x6920, 0x05}, // uHiryu: Ouroboros state/latch
+    {0x140D45450ull, 0x6928, 0x04}, // uHiryu: Ouroboros state scalar
+    {0x140D45488ull, 0x6900, 0x01}, // uHulk: Gamma Wave fired latch
+    {0x140D45518ull, 0x68F8, 0x02}, // uIronMan: effect-state latches
+    {0x140D45578ull, 0x68F8, 0x01}, // uJill: Feral install latch
+    {0x140D45680ull, 0x68F0, 0x20}, // uMagneto: complete scalar tail
+    {0x140D456C0ull, 0x68F4, 0x04}, // uMayoi: initial-life cache
+    {0x140D45700ull, 0x68F4, 0x1C}, // uModok: Psionic and flight state
+    {0x140D458D0ull, 0x6908, 0x09}, // uNova: Nova Force and Centurion state
+    {0x140D45C58ull, 0x6909, 0x01}, // uSentinel: drone active lock
+    {0x140D45C58ull, 0x690C, 0x09}, // uSentinel: drone phase, timer, latch
+    {0x140D45D80ull, 0x68FC, 0x04}, // uSpiderMan: web-throw target ID
+    {0x140D45E18ull, 0x690C, 0x08}, // uSuperSkrull: Rolling Skrull height/state
+    {0x140D45E58ull, 0x68F0, 0x10}, // uTaskMaster: arrow velocity/action state
+    {0x140D45E58ull, 0x6900, 0x10}, // uTaskMaster: arrow/action state
+    {0x140D45EA0ull, 0x6900, 0x01}, // uThor: tornado-active latch
+    {0x140D45EA0ull, 0x6908, 0x04}, // uThor: speech stage
+    {0x140D45EA0ull, 0x6910, 0x08}, // uThor: speech variant/latch
+    {0x140D45F68ull, 0x691C, 0x04}, // uVergil: action state
+    {0x140D45F68ull, 0x6930, 0x0C}, // uVergil: concrete vector state
+    {0x140D45958ull, 0x68FC, 0x01}, // uRedArremer: Chaos Tide install latch
+    {0x140D45958ull, 0x6928, 0x04}, // uRedArremer: flight idle timer
+    {0x140D45FB0ull, 0x6900, 0x0C}, // uVJoe: concrete vector state
+    {0x140D45FF8ull, 0x690C, 0x04}, // uWesker: life-change tracker
+    {0x140D46038ull, 0x68F8, 0x01}, // uWolverine: Berserker install latch
+    {0x140D460C0ull, 0x6910, 0x01}, // uZero: Sogenmu installed latch
+    {0x140D46118ull, 0x7090, 0x04}, // uZeroSh: trace status/dispatch latch
+    {0x140D46158ull, 0x68F4, 0x08}, // uZombie: action timer and voice toggle
+};
+
 using GetPrimitiveFn = uint64_t(__fastcall*)(uint64_t, uint32_t);
 using GetMetadataFn = uint64_t(__fastcall*)(uint64_t, uint32_t);
 
@@ -321,6 +365,48 @@ void RestoreGeneratedRanges(void* destination, const uint8_t* source,
             CopyRange(destination, source, objectSize,
                       {range.offset, range.size});
         }
+    }
+}
+
+bool RangeOverlapsCharacterReference(const uint8_t* live,
+                                     const uint8_t* saved, size_t objectSize,
+                                     SnapshotRange range)
+{
+    if (!live || !saved || range.offset >= objectSize) return false;
+    size_t rangeEnd = std::min(range.offset + range.size, objectSize);
+    size_t wordStart = range.offset & ~(size_t)(alignof(uint32_t) - 1);
+    for (size_t offset = wordStart;
+         offset + sizeof(uint64_t) <= objectSize && offset < rangeEnd;
+         offset += alignof(uint32_t)) {
+        if (offset + sizeof(uint64_t) <= range.offset) continue;
+
+        uint64_t liveValue = 0;
+        uint64_t savedValue = 0;
+        std::memcpy(&liveValue, live + offset, sizeof(liveValue));
+        std::memcpy(&savedValue, saved + offset, sizeof(savedValue));
+        if ((IsLikelyPointer(liveValue) && Accessible(liveValue)) ||
+            (IsLikelyPointer(savedValue) && Accessible(savedValue))) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void RestoreCharacterGeneratedRanges(void* destination, const uint8_t* source,
+                                     size_t objectSize, uint64_t dti)
+{
+    const uint8_t* live = (const uint8_t*)destination;
+    for (const DtiSnapshotRange& range : kGeneratedCharacterTailRanges) {
+        if (!IsDti(dti, range.dti)) continue;
+
+        // Generated fields can be inferred from a subclass schema even when
+        // this build uses the same bytes as a helper/effect pointer. Preserve
+        // the whole live reference instead of copying only its low scalar word.
+        if (RangeOverlapsCharacterReference(
+                live, source, objectSize, {range.offset, range.size})) {
+            continue;
+        }
+        CopyRange(destination, source, objectSize, {range.offset, range.size});
     }
 }
 
@@ -1253,8 +1339,9 @@ void ConcreteCharacterSnapshot_RestoreFields(void* character,
     // explicitly so packed values cannot be mistaken for pointers.
     RestoreDetectedCharacterTailScalars(character, savedBody, bodySize);
 
+    RestoreCharacterGeneratedRanges(character, savedBody, bodySize, dti);
     RestoreGeneratedRanges(character, savedBody, bodySize, dti,
-                           kGeneratedCharacterTailRanges);
+                            kVerifiedCharacterScalarRanges);
 
     if (IsDti(dti, kRyuDti)) {
         // Restore retires every live effect without reconstructing or remapping
@@ -1266,10 +1353,9 @@ void ConcreteCharacterSnapshot_RestoreFields(void* character,
     }
 
     if (IsDti(dti, kHsienKoDti)) {
-        // Ghidra verified these as mReservedAnki, mBasePos, mPendulumLength,
-        // and mUsrF. The following +0x6918 field is a tracked helper pointer
-        // and is intentionally left on the live timeline.
-        CopyRange(character, savedBody, bodySize, {0x68FC, 0x1C});
+        // +0x68F0/+0x68F8 are helper units. Restore the intervening scalar
+        // state, base position, and pendulum state without overwriting either.
+        CopyRange(character, savedBody, bodySize, {0x6900, 0x20});
     }
 
     if (IsDti(dti, kSpencerDti)) {
