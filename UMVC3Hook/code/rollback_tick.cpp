@@ -64,7 +64,10 @@ static constexpr uint32_t SUNIT_CATEGORY_LIST_STRIDE  = 0x30;
 static constexpr uintptr_t FN_SUNIT_REMOVE_MULTI_MASK = 0x14051baf0;
 static constexpr uintptr_t FN_SUNIT_REMOVE_UNIT       = 0x14051b9f0;
 static constexpr uintptr_t FN_SMAIN_EXECUTE_JOB       = 0x140521230;
+static constexpr uintptr_t FN_MTOBJECT_IS_ALIVE       = 0x140001b80;
+static constexpr uintptr_t FN_UCHRCPU_RESET_MODE      = 0x140120a50;
 static constexpr uintptr_t DTI_UCHRCHAIN              = 0x140D44920;
+static constexpr uintptr_t DTI_UCHRCPU                = 0x140D463B0;
 
 static bool IsHeadlessGameplayUnitCategory(uint32_t category)
 {
@@ -134,6 +137,36 @@ static bool g_swapchainPatched = false;
 using ObjectFn = void(__fastcall*)(uint64_t);
 using GetterFn = uint64_t(__fastcall*)(uint64_t);
 
+static void VTableCall(uint64_t object, uint32_t vtableOffset);
+
+static bool RunDisabledCpuPostMove(uint64_t unit)
+{
+    if (*(uint32_t*)(unit + 0x6c) != 0) return false;
+
+    auto isAlive = (bool(__fastcall*)(uint64_t))_addr(FN_MTOBJECT_IS_ALIVE);
+    static constexpr uint32_t referenceOffsets[] = {0x58, 0x60, 0x1b08, 0x1ad0};
+    for (uint32_t offset : referenceOffsets) {
+        uint64_t& reference = *(uint64_t*)(unit + offset);
+        if (reference && !isAlive(reference)) reference = 0;
+    }
+
+    // Invalid core bindings take the native teardown path at vtable +0x78.
+    if (!*(uint64_t*)(unit + 0x40) || !*(uint64_t*)(unit + 0x48) ||
+        !*(uint64_t*)(unit + 0x58) || !*(uint64_t*)(unit + 0x60)) {
+        return false;
+    }
+
+    // Preserve the mode-transition reset, but omit busy-state and nearest-
+    // threat work that only feeds the disabled CPU script path.
+    ((ObjectFn)_addr(FN_UCHRCPU_RESET_MODE))(unit);
+    return true;
+}
+
+static void __fastcall DisabledCpuPostMove(uint64_t unit)
+{
+    if (!RunDisabledCpuPostMove(unit)) VTableCall(unit, 0x48);
+}
+
 static void VTableCall(uint64_t object, uint32_t vtableOffset)
 {
     uint64_t vtable = *(uint64_t*)object;
@@ -172,7 +205,12 @@ static void __fastcall ProfiledUnitObjectPostMove(uint64_t unit)
 {
     const uint64_t dti = GetObjectDti(unit);
     const uint64_t start = Profile_NowEnabled();
-    VTableCall(unit, VtableOffset);
+    if constexpr (Phase == RollbackUnitProfilePhase::SyncSave && Category == 21) {
+        if (dti != (uint64_t)_addr(DTI_UCHRCPU) || !RunDisabledCpuPostMove(unit))
+            VTableCall(unit, VtableOffset);
+    } else {
+        VTableCall(unit, VtableOffset);
+    }
     Profile_RecordUnitObject(Phase, (uint32_t)Category, dti,
                              Profile_NowEnabled() - start);
 }
@@ -384,7 +422,10 @@ static void HeadlessUnitCategoryPostMove(uint64_t sMain, uint64_t sUnit,
                 } else {
                     const uint32_t offset = phase == RollbackUnitProfilePhase::SyncJob
                         ? 0x50 : 0x48;
-                    callback = *(ObjectFn*)(*(uint64_t*)unit + offset);
+                    callback = phase == RollbackUnitProfilePhase::SyncSave &&
+                            category == 21 && dti == (uint64_t)_addr(DTI_UCHRCPU)
+                        ? DisabledCpuPostMove
+                        : *(ObjectFn*)(*(uint64_t*)unit + offset);
                 }
                 if (!useJobs) {
                     callback(unit);
