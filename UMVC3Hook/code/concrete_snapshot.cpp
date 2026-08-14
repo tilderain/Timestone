@@ -49,6 +49,7 @@ constexpr uintptr_t kHsienKoDti = 0x140D455F8ull;
 constexpr uintptr_t kSpencerDti = 0x140D45D40ull;
 constexpr uintptr_t kAttackWireDti = 0x140D4CA20ull;
 constexpr uintptr_t kVulcanSwingWireDti = 0x140D4CB00ull;
+constexpr uintptr_t kVulcanBoomerangDti = 0x140D4D660ull;
 
 struct SnapshotRange {
     size_t offset;
@@ -896,6 +897,12 @@ bool ConcreteShotSnapshot_Restore(void* shot,
         // and timer immediately after reflected mAttachOfs. Factory zero here
         // reaches intInRange on a different tick and advances global RNG.
         CopyRange(overlay.data(), source, liveSize, {0x2170, 0x10});
+    }
+
+    if (IsDti(snapshot.dti, kVulcanBoomerangDti)) {
+        // The embedded uCnsTSR ends at +0x2210. The remaining concrete tail is
+        // pointer-free homing direction, variant, return mode and phase state.
+        CopyRange(overlay.data(), source, liveSize, {0x2210, 0x30});
     }
 
     // mId is scalar allocator state inside the otherwise fresh-owned cArm
