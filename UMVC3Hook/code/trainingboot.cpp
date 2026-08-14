@@ -49,6 +49,7 @@ static constexpr uintptr_t CHAR_ID_ARRAY_OFFSET              = 0x3bc0c;
 
 // Training/versus options in sBattleSetting. These are consumed by the native
 // training UI setup after the battle descriptor has been restored.
+static constexpr uintptr_t BS_BACKUP_STAGE_ID_OFFSET             = 0x588;
 static constexpr uintptr_t BS_P2_METER_DEFAULT_OFFSET         = 0x29c;
 static constexpr uintptr_t BS_P1_METER_DEFAULT_OFFSET         = 0x2d4;
 static constexpr uintptr_t BS_HP_DRAIN_MODE_OFFSET            = 0x2d8;
@@ -436,6 +437,9 @@ void BootIntoTraining()
         WriteSlotEntry(bs, slot,     0, g_bootConfig.p1Chars[slot]);
         WriteSlotEntry(bs, slot + 3, 1, g_bootConfig.p2Chars[slot]);
     }
+    // restoreBackupAndInit restores the stage from the backup descriptor,
+    // not from the live mStageArea field set above.
+    *(int32_t*)(bs + BS_BACKUP_STAGE_ID_OFFSET) = g_bootConfig.stageId;
     // Set the backup flag so restoreBackupAndInit performs the restore
     *(char*)(bs + 0x590) = 1;
     HookLog("TrainingBoot: Backup flag set\n");
