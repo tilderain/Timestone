@@ -57,7 +57,7 @@ static constexpr uintptr_t DTI_USHOT_VULCAN_MISSILE_EMPLACEMENT = 0x140D49A60;
 static constexpr uintptr_t DTI_USHOT_VULCAN_LEGION_TIGER = 0x140D4ABB8;
 static constexpr uintptr_t DTI_USHOT_SHIELD_REPULSOR_BLAST_SP = 0x140D4ADA0;
 static constexpr uintptr_t DTI_USHOT_VULCAN_WEAPON_CART = 0x140D4A1A8;
-static constexpr uintptr_t DTI_USHOT_VULCAN_NEMESIS_ROCKET_LAUNCHER = 0x140D4BA48;
+static constexpr uintptr_t DTI_USHOT_VULCAN_EXATK_ROCKET_LAUNCHER = 0x140D4BA48;
 static constexpr uintptr_t DTI_USHOT_VULCAN_ROCKET_LAUNCHER_EXPLODE = 0x140D4BAC8;
 static constexpr uintptr_t DTI_USHOT_VULCAN_PENDULUM_LOG = 0x140D4C4C8;
 static constexpr int DYNAMIC_SAFETY = 128;
@@ -363,7 +363,7 @@ void Shot_RepairNemesisExplosionAttack(void* shot, void* parent)
         !HasCallableDtiVirtual(parent) ||
         shotDti != (uint64_t)_addr(DTI_USHOT_VULCAN_ROCKET_LAUNCHER_EXPLODE) ||
         parentDti !=
-            (uint64_t)_addr(DTI_USHOT_VULCAN_NEMESIS_ROCKET_LAUNCHER) ||
+            (uint64_t)_addr(DTI_USHOT_VULCAN_EXATK_ROCKET_LAUNCHER) ||
         !IsAccessibleRange((uint64_t)shot + 0x1498, sizeof(uint32_t)) ||
         !IsAccessibleRange((uint64_t)parent + 0x1498, sizeof(uint32_t))) {
         return;
@@ -678,6 +678,14 @@ static void __fastcall hkShotProcessHitCollision(void* shot, void* target,
                                                   void* contact)
 {
     auto recipe = g_liveShotRecipes.find(shot);
+    if (recipe != g_liveShotRecipes.end() &&
+        (g_isResimulating || recipe->second.reconstructed)) {
+        // The explosion factory can finalize cAtkCtrl after reconstruction's
+        // initial repair. Reapply the parent's attack variant at the last
+        // gameplay-safe point before the hit response consumes mAtkInfoId.
+        Shot_RepairNemesisExplosionAttack(
+            shot, (void*)recipe->second.initParam);
+    }
     if (recipe != g_liveShotRecipes.end() && recipe->second.reconstructed &&
         !IsCurrentCharacterCollisionTarget(target)) {
         uint64_t dti = target && HasCallableDtiVirtual(target)
