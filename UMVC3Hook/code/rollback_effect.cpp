@@ -176,28 +176,22 @@ static bool IsPersistentCharacterEffect(void* effect)
     uint64_t sCharacter = *(uint64_t*)_addr(PTR_SCHARACTER);
     if (!sCharacter || !effect) return false;
 
-    void* owner = IsAccessibleRange((uint64_t)effect + 0x280, sizeof(void*))
-        ? *(void**)((uint8_t*)effect + 0x280) : nullptr;
-
     for (uint32_t teamOffset : TEAM_OFFSETS) {
         uint64_t node = sCharacter + teamOffset + 0x08;
         for (int safety = 8; node && safety-- > 0;) {
             if (!IsAccessibleRange(node, 0x18)) break;
             uint64_t character = *(uint64_t*)(node + 0x08);
             if (character && IsAccessibleRange(character, 0x6928)) {
-                // A live character slot is the retention root. Keep both the
-                // slotted effect and direct children owned through +0x280.
+                // Only a live character slot establishes retention. Child
+                // effects still need native retirement to release their units.
                 for (uint32_t slotOffset : CHARACTER_EFFECT_SLOT_OFFSETS) {
-                    void* slottedEffect = *(void**)(character + slotOffset);
-                    if (slottedEffect == effect || slottedEffect == owner)
+                    if (*(void**)(character + slotOffset) == effect)
                         return true;
                 }
                 for (uint32_t index = 0;
                      index < CHARACTER_INDEXED_EFFECT_COUNT; ++index) {
-                    void* slottedEffect = *(void**)(
-                        character + CHARACTER_INDEXED_EFFECTS_OFFSET +
-                        index * sizeof(void*));
-                    if (slottedEffect == effect || slottedEffect == owner) {
+                    if (*(void**)(character + CHARACTER_INDEXED_EFFECTS_OFFSET +
+                                  index * sizeof(void*)) == effect) {
                         return true;
                     }
                 }
