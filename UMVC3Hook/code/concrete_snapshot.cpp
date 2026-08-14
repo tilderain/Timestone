@@ -70,6 +70,163 @@ constexpr DtiSnapshotRange kGeneratedShotTailRanges[] = {
 #include "generated_shot_tail_fields.inc"
 };
 
+// Scalar concrete-tail fields verified from constructors and gameplay virtuals
+// in Ghidra but absent from the generated createProperty export. Keep these
+// separate from the generated file and reapply them after ownership filtering.
+constexpr DtiSnapshotRange kVerifiedShotScalarRanges[] = {
+    {0x140D49A08ull, 0x2140, 0x04}, // uShotMissileDoomsMissile: flight parameter
+    {0x140D4CA20ull, 0x2140, 0x03}, // uShotOptionAttackWire: state flags
+    {0x140D4CA20ull, 0x2144, 0x08}, // uShotOptionAttackWire: mode/timer
+    {0x140D49250ull, 0x2140, 0x01}, // uShotOptionGrapple: attached latch
+    {0x140D4BD00ull, 0x2140, 0x04}, // uShotOptionHealingFieldGathering: range
+    {0x140D4D430ull, 0x21D8, 0x04}, // uShotOptionRoundTrip: owner orientation
+    {0x140D4D430ull, 0x22A4, 0x04}, // uShotOptionRoundTrip: owner rotation
+    {0x140D4D430ull, 0x22E0, 0x05}, // uShotOptionRoundTrip: rotation/side
+    {0x140D48780ull, 0x21C8, 0x04}, // uShotOptionSickleBoomerang: owner rotation
+    {0x140D4D118ull, 0x22E0, 0x20}, // uShotOptionSpadaBoomerang: phase/timing
+    {0x140D4CA60ull, 0x2148, 0x08}, // uShotOptionSwingWire: outbound timing
+    {0x140D4CA60ull, 0x2150, 0x01}, // uShotOptionSwingWire: outbound latch
+    {0x140D4CA60ull, 0x2154, 0x08}, // uShotOptionSwingWire: return timing
+    {0x140D4CA60ull, 0x215C, 0x01}, // uShotOptionSwingWire: return latch
+    {0x140D4CF60ull, 0x2160, 0x01}, // uShotLaserBigThunder: tail flag
+    {0x140D490D0ull, 0x2160, 0x04}, // uShotLaserCrystal: effect variant
+    {0x140D4BF38ull, 0x2170, 0x10}, // uShotLaserDarkFire: effect position
+    {0x140D49988ull, 0x2230, 0x04}, // uShotLaserDrDoomJS: tail state
+    {0x140D4BB08ull, 0x2240, 0x10}, // uShotLaserGMBeam: tail vector
+    {0x140D4C870ull, 0x2168, 0x01}, // uShotLaserHyperMysticBlast: update gate
+    {0x140D4C870ull, 0x216C, 0x04}, // uShotLaserHyperMysticBlast: state
+    {0x140D49118ull, 0x2160, 0x07}, // uShotLaserMillionCarat: timer/latches
+    {0x140D4C8B8ull, 0x2168, 0x04}, // uShotLaserMysticBlast: setup scalar
+    {0x140D499C8ull, 0x2230, 0x04}, // uShotLaserPlasmaBeam: phase
+    {0x140D4AD20ull, 0x2230, 0x04}, // uShotLaserProtonCannon: mode
+    {0x140D4C5B0ull, 0x23D0, 0x12}, // uShotLaserReflectSinkuHadouken: reflected state
+    {0x140D4D7E0ull, 0x2314, 0x08}, // uShotLaserRekkouha: timer/spawn phase
+    {0x140D48AA8ull, 0x2160, 0x01}, // uShotLaserSatelliteLaser: one-shot latch
+    {0x140D4C5F0ull, 0x2300, 0x04}, // uShotLaserSinkuHadouken: model offset
+    {0x140D49168ull, 0x2238, 0x01}, // uShotLaserThunderBolt: effect latch
+    {0x140D4BB90ull, 0x2140, 0x04}, // uShotShieldBodyBeam: collision phase
+    {0x140D4A920ull, 0x2140, 0x0D}, // uShotShieldFormationD: phase/motion
+    {0x140D4BD40ull, 0x2140, 0x0C}, // uShotShieldHealingField: phase/healing
+    {0x140D48F70ull, 0x2140, 0x04}, // uShotShieldKikousyou: collision phase
+    {0x140D4A9A8ull, 0x2140, 0x05}, // uShotShieldOuroborosExit: phase/side
+    {0x140D48A68ull, 0x2144, 0x0C}, // uShotOptionShieldSlash: rotation state
+    {0x140D48780ull, 0x2218, 0x04}, // uShotOptionSickleBoomerang: effect variant
+    {0x140D4A968ull, 0x2210, 0x04}, // uShotShieldOuroboros: instance mode
+    {0x140D4A968ull, 0x2218, 0x01}, // uShotShieldOuroboros: initial-shot latch
+    {0x140D4A968ull, 0x221C, 0x04}, // uShotShieldOuroboros: child count
+    {0x140D4A968ull, 0x2220, 0x01}, // uShotShieldOuroboros: owner-state latch
+    {0x140D4D470ull, 0x2148, 0x10}, // uShotShieldRaidSword: mode/rotation/timer
+    {0x140D4D4C8ull, 0x2214, 0x04}, // uShotShieldSpiralSword: update counter
+    {0x140D4D4C8ull, 0x21D4, 0x08}, // uShotShieldSpiralSword: owner rotation/orientation
+    {0x140D4D508ull, 0x21D4, 0x04}, // uShotShieldStormSword: owner rotation
+    {0x140D4D508ull, 0x2210, 0x06}, // uShotShieldStormSword: index/flags
+    {0x140D4CDE0ull, 0x2140, 0x04}, // uShotShieldSuperBurningSkrull: phase
+    {0x140D4A098ull, 0x2140, 0x08}, // uShotShieldWeaponCartSpread: variant/time
+    {0x140D49310ull, 0x2140, 0x08}, // uShotVulcanAcidRain: spawn state
+    {0x140D4AF00ull, 0x21D0, 0x10}, // uShotVulcanAnkihouBomb: owner transform
+    {0x140D4AF00ull, 0x2204, 0x04}, // uShotVulcanAnkihouBomb: owner state
+    {0x140D4AF00ull, 0x2210, 0x04}, // uShotVulcanAnkihouBomb: phase/variant
+    {0x140D4AF00ull, 0x2220, 0x30}, // uShotVulcanAnkihouBomb: trajectory/timing
+    {0x140D4AFE0ull, 0x21D0, 0x0C}, // uShotVulcanAnkihouRolling: owner trajectory
+    {0x140D4AFE0ull, 0x2210, 0x20}, // uShotVulcanAnkihouRolling: phase/timing
+    {0x140D4AFE0ull, 0x2230, 0x01}, // uShotVulcanAnkihouRolling: transition latch
+    {0x140D4CEC8ull, 0x2140, 0x05}, // uShotVulcanArrowShot: phase/flag
+    {0x140D48808ull, 0x21D0, 0x04}, // uShotVulcanAxe: rotation accumulator
+    {0x140D4D178ull, 0x2140, 0x04}, // uShotVulcanBarrier: phase
+    {0x140D4D1C8ull, 0x2140, 0x04}, // uShotVulcanBarrierSpread: phase
+    {0x140D4D1C8ull, 0x2150, 0x10}, // uShotVulcanBarrierSpread: target position
+    {0x140D4A588ull, 0x2140, 0x01}, // uShotVulcanBombArrow: exploded latch
+    {0x140D4A588ull, 0x2148, 0x08}, // uShotVulcanBombArrow: timer/subtype
+    {0x140D4A588ull, 0x2150, 0x08}, // uShotVulcanBombArrow: trajectory state
+    {0x140D4A5E8ull, 0x2140, 0x04}, // uShotVulcanBombArrowExplode: mode
+    {0x140D4D660ull, 0x21D4, 0x08}, // uShotVulcanBoomerang: owner rotation
+    {0x140D4D660ull, 0x2210, 0x26}, // uShotVulcanBoomerang: homing/return state
+    {0x140D49398ull, 0x21D8, 0x04}, // uShotVulcanBulletDanceFinish: owner rotation
+    {0x140D4D268ull, 0x2148, 0x01}, // uShotVulcanChushokuRash: tail flag
+    {0x140D4C080ull, 0x2140, 0x0D}, // uShotVulcanClaymoreMine: activation state
+    {0x140D4C080ull, 0x2150, 0x04}, // uShotVulcanClaymoreMine: detonation timer
+    {0x140D488B8ull, 0x2150, 0x10}, // uShotVulcanCrossSword: homing direction
+    {0x140D4C100ull, 0x2140, 0x01}, // uShotVulcanDigHole: flag
+    {0x140D4C100ull, 0x2144, 0x04}, // uShotVulcanDigHole: state
+    {0x140D4C6E0ull, 0x21D0, 0x0C}, // uShotVulcanDirectAttackBomb: owner transform
+    {0x140D4B888ull, 0x2140, 0x04}, // uShotVulcanDogMissile: variant
+    {0x140D4D220ull, 0x2140, 0x15}, // uShotVulcanEnergyBolt: direction/speed/flag
+    {0x140D4BBD8ull, 0x2140, 0x01}, // uShotVulcanEnergySpear: spawn latch
+    {0x140D4BC18ull, 0x2140, 0x02}, // uShotVulcanEnergySpearSpread: trigger flags
+    {0x140D4BA48ull, 0x2140, 0x01}, // uShotVulcanExatkRocketLauncher: spawn latch
+    {0x140D4BA48ull, 0x2144, 0x04}, // uShotVulcanExatkRocketLauncher: life limit
+    {0x140D4B658ull, 0x2140, 0x18}, // uShotVulcanFinishingShower: state/timing
+    {0x140D4B658ull, 0x2160, 0x10}, // uShotVulcanFinishingShower: vector
+    {0x140D4BF78ull, 0x2140, 0x04}, // uShotVulcanFire: effect variant
+    {0x140D48BB0ull, 0x21D0, 0x04}, // uShotVulcanFireGrenadeBomb: rotation
+    {0x140D48BB0ull, 0x2218, 0x01}, // uShotVulcanFireGrenadeBomb: stop latch
+    {0x140D4BFB8ull, 0x2144, 0x08}, // uShotVulcanFirePillar: state/vibration
+    {0x140D4AA70ull, 0x2140, 0x01}, // uShotVulcanFormationCBom: spawn latch
+    {0x140D4AAF0ull, 0x2140, 0x01}, // uShotVulcanFormationCSpread: spawn latch
+    {0x140D4BC60ull, 0x2140, 0x04}, // uShotVulcanGMPulse: variant
+    {0x140D4AC98ull, 0x2140, 0x14}, // uShotVulcanGammaSlam: movement state
+    {0x140D48900ull, 0x214C, 0x08}, // uShotVulcanGreatSorcery: event state
+    {0x140D48CD0ull, 0x21D0, 0x04}, // uShotVulcanHandGrenadeBomb: owner angle
+    {0x140D48CD0ull, 0x2214, 0x04}, // uShotVulcanHandGrenadeBomb: state/count
+    {0x140D4B020ull, 0x2140, 0x04}, // uShotVulcanHenkyouKi: state
+    {0x140D4B228ull, 0x2140, 0x01}, // uShotVulcanHyperGravitation: setup flag
+    {0x140D4C918ull, 0x2140, 0x09}, // uShotVulcanHyperMysticSmash: flags/state
+    {0x140D4C918ull, 0x21E4, 0x04}, // uShotVulcanHyperMysticSmash: owner gameplay float
+    {0x140D4C290ull, 0x2140, 0x0C}, // uShotVulcanHyperTrap: variant/flag/timer
+    {0x140D484D0ull, 0x21D8, 0x04}, // uShotVulcanHyoran: owner angle
+    {0x140D4B980ull, 0x2230, 0x04}, // uShotVulcanItemThrow: item type
+    {0x140D4D550ull, 0x2140, 0x0C}, // uShotVulcanJigenZan: timer/count/variant
+    {0x140D4BA90ull, 0x2140, 0x01}, // uShotVulcanNemesisRocketLauncher: spawn latch
+    {0x140D4BA90ull, 0x2144, 0x04}, // uShotVulcanNemesisRocketLauncher: life limit
+    {0x140D4A6B0ull, 0x2140, 0x01}, // uShotVulcanNetArrow: deferred-target flag
+    {0x140D49E78ull, 0x2140, 0x01}, // uShotVulcanOpticalMagic: state flag
+    {0x140D49EB8ull, 0x2140, 0x01}, // uShotVulcanOpticalMagicS: spawn latch
+    {0x140D4C4C8ull, 0x2140, 0x01}, // uShotVulcanPendulumLog: trigger latch
+    {0x140D4C4C8ull, 0x2144, 0x04}, // uShotVulcanPendulumLog: state
+    {0x140D49FC8ull, 0x2140, 0x0A}, // uShotVulcanPleaseHelpMe: state/timer/flags
+    {0x140D4A788ull, 0x2140, 0x08}, // uShotVulcanPoisonArrow: install parameters
+    {0x140D485E0ull, 0x2140, 0x01}, // uShotVulcanRaikou: one-shot latch
+    {0x140D4A7E8ull, 0x2140, 0x05}, // uShotVulcanRangingBladeArrow: timer/latch
+    {0x140D4D350ull, 0x21D4, 0x04}, // uShotVulcanRockThrow: owner rotation
+    {0x140D48EE8ull, 0x21D4, 0x04}, // uShotVulcanSatelliteLaserLock: owner rotation
+    {0x140D4B6B0ull, 0x2140, 0x08}, // uShotVulcanShilhouetteBlade: phase/time
+    {0x140D4C998ull, 0x2140, 0x18}, // uShotVulcanMysticStareBomb: phase/timing
+    {0x140D48EE8ull, 0x2228, 0x04}, // uShotVulcanSatelliteLaserLock: input timer
+    {0x140D4D3D0ull, 0x2140, 0x04}, // uShotVulcanShikiDanKobun: phase
+    {0x140D4D3D0ull, 0x2148, 0x0B}, // uShotVulcanShikiDanKobun: timestamp/flags
+    {0x140D4D6A0ull, 0x2140, 0x04}, // uShotVulcanShockingPinkBomb: contact count
+    {0x140D4D6A0ull, 0x2150, 0x30}, // uShotVulcanShockingPinkBomb: contact vectors
+    {0x140D4D6A0ull, 0x2184, 0x0C}, // uShotVulcanShockingPinkBomb: trajectory state
+    {0x140D4D6A0ull, 0x2198, 0x05}, // uShotVulcanShockingPinkBomb: end state
+    {0x140D4D6A0ull, 0x21A0, 0x04}, // uShotVulcanShockingPinkBomb: effect variant
+    {0x140D4D6A0ull, 0x21B8, 0x08}, // uShotVulcanShockingPinkBomb: effect/action state
+    {0x140D4D5E8ull, 0x2144, 0x05}, // uShotVulcanStormSwordSpread: timer/latch
+    {0x140D49520ull, 0x21D0, 0x04}, // uShotVulcanSomersaultGrenade: owner trajectory
+    {0x140D49520ull, 0x2210, 0x0C}, // uShotVulcanSomersaultGrenade: phase/trajectory
+    {0x140D495D0ull, 0x2140, 0x01}, // uShotVulcanSomersaultLasso: deferred-target flag
+    {0x140D49608ull, 0x21D0, 0x04}, // uShotVulcanSomersaultShuriken: owner trajectory
+    {0x140D49608ull, 0x2210, 0x08}, // uShotVulcanSomersaultShuriken: angle state
+    {0x140D4B6E8ull, 0x2140, 0x05}, // uShotVulcanSoulFist: mode/flag
+    {0x140D49BD0ull, 0x2140, 0x04}, // uShotVulcanSphereFlame: variant
+    {0x140D4A840ull, 0x2140, 0x0C}, // uShotVulcanSpreadArrow: mode/count/life
+    {0x140D4CB00ull, 0x2158, 0x01}, // uShotVulcanSwingWire: lifecycle flag
+    {0x140D4BE38ull, 0x2140, 0x04}, // uShotVulcanTKBind: phase
+    {0x140D4B078ull, 0x21D0, 0x04}, // uShotVulcanTenraiha: owner trajectory
+    {0x140D4B078ull, 0x2210, 0x24}, // uShotVulcanTenraiha: phase/random ranges
+    {0x140D49F88ull, 0x21D4, 0x04}, // uShotVulcanThrowRose: owner rotation
+    {0x140D4A120ull, 0x2140, 0x24}, // uShotVulcanThrowWeapon: weapon/movement state
+    {0x140D4A160ull, 0x2140, 0x24}, // uShotVulcanThrowWeaponB: weapon/movement state
+    {0x140D489E0ull, 0x2214, 0x01}, // uShotVulcanTorch: powered-up flag
+    {0x140D4C570ull, 0x2140, 0x05}, // uShotVulcanTrapLandMine: variant/armed state
+    {0x140D4C570ull, 0x2148, 0x08}, // uShotVulcanTrapLandMine: state/timer
+    {0x140D48700ull, 0x2210, 0x01}, // uShotVulcanTsutamaki: lifecycle flag
+    {0x140D4CB40ull, 0x2140, 0x05}, // uShotVulcanWebBall: scalar flags
+    {0x140D4CB88ull, 0x2140, 0x09}, // uShotVulcanWebMove: phase/timing
+    {0x140D4CBC8ull, 0x2144, 0x04}, // uShotVulcanWebThrow: phase timestamp
+    {0x140D4A228ull, 0x2200, 0x08}, // uShotVulcanWildPitch: spawn/variant state
+    {0x140D4B0D0ull, 0x2200, 0x20}, // uShotVulcanZireitou: gameplay tail state
+};
+
 using GetPrimitiveFn = uint64_t(__fastcall*)(uint64_t, uint32_t);
 using GetMetadataFn = uint64_t(__fastcall*)(uint64_t, uint32_t);
 
@@ -884,6 +1041,8 @@ bool ConcreteShotSnapshot_Restore(void* shot,
     // because it resembles an address.
     RestoreGeneratedRanges(overlay.data(), source, liveSize, snapshot.dti,
                            kGeneratedShotTailRanges);
+    RestoreGeneratedRanges(overlay.data(), source, liveSize, snapshot.dti,
+                           kVerifiedShotScalarRanges);
 
     if (IsDti(snapshot.dti, kVulcanAxeDti)) {
         // Arthur's axe rotates its model and collision geometry from this
