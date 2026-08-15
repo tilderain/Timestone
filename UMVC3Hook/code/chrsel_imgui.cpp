@@ -791,6 +791,18 @@ bool ChrSelImGui_IsOpen()
     return g_open;
 }
 
+bool ChrSelImGui_Open()
+{
+    if (g_open)
+        return true;
+    if (!CanOpenSelector()) {
+        SetStatus("Roster selector is only available during synchronized fighting");
+        return false;
+    }
+    BeginSynchronizedSession();
+    return g_open;
+}
+
 bool ChrSelImGui_ApplyPendingRoster(int32_t targetFrame)
 {
     if (!g_pendingRoster)

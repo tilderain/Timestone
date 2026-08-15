@@ -217,6 +217,7 @@
     <ClCompile Include="code\eNotifManager.cpp" />
     <ClCompile Include="code\eSettingsManager.cpp" />
     <ClCompile Include="code\framestepper.cpp" />
+    <ClCompile Include="code\escmenu_imgui.cpp" />
     <ClCompile Include="code\autotest.cpp" />
     <ClCompile Include="code\diag.cpp" />
     <ClCompile Include="code\exception.cpp" />

@@ -27,12 +27,24 @@ void eNotificationManager::Draw()
 {
 	if (m_bIsNotificationActive)
 	{
-		ImGui::SetNextWindowPos(ImVec2(5, 10));
-		ImGui::SetNextWindowSize(ImVec2(ImGui::GetIO().DisplaySize.x - 15.0f, 0.0f));
-		ImGui::Begin("setup", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoInputs
-			| ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing);
-		ImGui::TextUnformatted(szMessageBuffer);
-		ImGui::End();
+		ImDrawList* drawList = ImGui::GetForegroundDrawList();
+		const ImGuiStyle& style = ImGui::GetStyle();
+		const ImVec2 position(5.0f, 10.0f);
+		const ImVec2 textSize = ImGui::CalcTextSize(szMessageBuffer);
+		const ImVec2 size(ImGui::GetIO().DisplaySize.x - 15.0f,
+			textSize.y + style.WindowPadding.y * 2.0f);
+		const ImVec2 end(position.x + size.x, position.y + size.y);
+
+		drawList->AddRectFilled(position, end,
+			ImGui::GetColorU32(ImGuiCol_WindowBg), style.WindowRounding);
+		if (style.WindowBorderSize > 0.0f)
+			drawList->AddRect(position, end,
+				ImGui::GetColorU32(ImGuiCol_Border), style.WindowRounding,
+				0, style.WindowBorderSize);
+		drawList->AddText(
+			ImVec2(position.x + style.WindowPadding.x,
+			       position.y + style.WindowPadding.y),
+			ImGui::GetColorU32(ImGuiCol_Text), szMessageBuffer);
 	}
 }
 

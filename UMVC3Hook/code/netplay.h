@@ -51,6 +51,7 @@ enum PacketType : uint32_t {
     PACKET_LAUNCH_P2_SELECTION = 14, // LaunchP2SelectionPacket
     PACKET_LAUNCH_P1_SELECTION = 15, // LaunchP1SelectionPacket
     PACKET_EXTENSION = 16, // Plugin feature packet routed through generic reliable queue
+    PACKET_PLAYER_DISCONNECT = 17, // PlayerDisconnectPacket
 };
 
 #pragma pack(push, 1)
@@ -190,6 +191,10 @@ struct AutoTestCompletePacket {
     uint32_t type;               // PACKET_AUTOTEST_COMPLETE
 };
 
+struct PlayerDisconnectPacket {
+    uint32_t type;               // PACKET_PLAYER_DISCONNECT
+};
+
 enum BattleSyncFlags : uint32_t {
     BATTLE_SYNC_READY   = 1u << 0,
     BATTLE_SYNC_RELEASE = 1u << 1,
@@ -258,6 +263,11 @@ bool Netplay_GetInboundPacket(InputPacket& outPkt);
 // Returns true if netplay is active and the peer is still connected.
 bool Netplay_IsActive();
 bool Netplay_TakePeerDisconnected();
+
+// Notify the peer before a user-requested shutdown. Waits only until the
+// service thread has handed the reliable packet to ENet, not for a peer ACK.
+bool Netplay_SendPlayerDisconnect(uint32_t timeoutMs = 100);
+bool Netplay_TakePlayerDisconnectNotice();
 
 // Returns true if this instance is the netplay host (server), false if client.
 bool Netplay_IsHost();

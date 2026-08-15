@@ -11,6 +11,7 @@
 #include "code/UMVC3Camera.h"
 #include "code/LaunchMenu.h"
 #include "code/framestepper.h"
+#include "code/escmenu_imgui.h"
 #include "code/trainingboot.h"
 #include "code/netplay.h"
 #include "code/controller.h"
@@ -242,7 +243,8 @@ void PollKeyboardDirectly()
     static bool prevKeys[256] = { 0 };
     const bool menuOpen = TheMenu->GetActiveState();
     const bool rosterOpen = ChrSelImGui_IsOpen();
-    if (!menuOpen && !rosterOpen) {
+    const bool escMenuOpen = EscMenuImGui_IsOpen();
+    if (!menuOpen && !rosterOpen && !escMenuOpen) {
         io.ConfigFlags &= ~ImGuiConfigFlags_NavEnableKeyboard;
         memset(io.KeysDown, 0, sizeof(io.KeysDown));
         memset(prevKeys, 0, sizeof(prevKeys));
@@ -352,13 +354,13 @@ LRESULT __stdcall WndProc(const HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPar
     const bool keyboardMessage = uMsg == WM_KEYDOWN || uMsg == WM_KEYUP ||
         uMsg == WM_CHAR || uMsg == WM_SYSKEYDOWN || uMsg == WM_SYSKEYUP;
     const bool keyboardOverlayOpen = TheMenu->GetActiveState() ||
-        ChrSelImGui_IsOpen();
+        ChrSelImGui_IsOpen() || EscMenuImGui_IsOpen();
     // Mouse input is always useful; keyboard input is scoped to interactive UI.
     if (ImGui::GetCurrentContext() != nullptr &&
         (!keyboardMessage || keyboardOverlayOpen))
         ImGui_ImplWin32_WndProcHandler(hWnd, uMsg, wParam, lParam);
 
-    if (TheMenu->GetActiveState())
+    if (TheMenu->GetActiveState() || EscMenuImGui_IsOpen())
     {
         // Intercept keyboard Raw Input while menu is open so key presses do not trigger game actions
         if (uMsg == WM_INPUT)
@@ -454,6 +456,7 @@ long __stdcall hkEndScene(LPDIRECT3DDEVICE9 pDevice)
 
 	ImGui::NewFrame();
 	ImGui::GetIO().MouseDrawCursor = false;
+	EscMenuImGui_Update();
 
 	// Process menu logic, notifications, frame stepper, and freecam
 	// (formerly in a separate HookUpdate thread with Sleep(1))
@@ -466,9 +469,14 @@ long __stdcall hkEndScene(LPDIRECT3DDEVICE9 pDevice)
 		first_msg = false;
 		
 	}
-	Notifications->Draw();
+	if (Netplay_TakePlayerDisconnectNotice())
+	{
+		Notifications->SetNotificationTime(5500);
+		Notifications->PushNotification("The other player disconnected.");
+	}
 	extern void ChrSelImGui_Draw();
 	ChrSelImGui_Draw();
+	EscMenuImGui_Draw();
 
 	if (TheMenu->GetActiveState())
 	{
@@ -476,6 +484,7 @@ long __stdcall hkEndScene(LPDIRECT3DDEVICE9 pDevice)
 	}
 
 	FrameStepper_Draw();
+	Notifications->Draw();
 
 	ImGui::EndFrame();
 

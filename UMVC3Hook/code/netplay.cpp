@@ -38,6 +38,10 @@ static uint32_t             g_lastRecv  = 0;
 static std::atomic<bool>    g_running { false };
 static std::atomic<bool>    g_peerDisconnected { false };
 static std::atomic<uint32_t> g_requestedTimeoutMs { 0 };
+static std::atomic<bool>    g_playerDisconnectRequested { false };
+static std::atomic<bool>    g_playerDisconnectSent { false };
+static std::atomic<bool>    g_playerDisconnectSendSucceeded { false };
+static std::atomic<bool>    g_playerDisconnectNotice { false };
 
 // Delay + rollback control channel — small packets to keep both peers in sync.
 static int32_t              g_outboundDelay    = -1;
@@ -144,6 +148,21 @@ public:
     ~ScopedCS() { LeaveCriticalSection(m_cs); }
 };
 
+static void MarkPeerDisconnected(ENetPeer* peer, bool disconnectNow)
+{
+    g_peerDisconnected = true;
+    // The game thread may not get another tick to consume queued diagnostics.
+    Rollback_FlushNetplayLive(-1);
+    if (disconnectNow && peer)
+        enet_peer_disconnect_now(peer, 0);
+    g_running = false;
+    g_active = false;
+    if (g_peer == peer)
+        g_peer = nullptr;
+    if (peer)
+        peer->data = nullptr;
+}
+
 // ---------------------------------------------------------------------------
 // Service thread: owns ALL ENet calls
 // ---------------------------------------------------------------------------
@@ -158,6 +177,28 @@ static DWORD WINAPI Netplay_ServiceThread(LPVOID)
         {
             enet_peer_timeout(g_peer, 0, timeoutMs, timeoutMs);
             HookLog("Netplay: Peer timeout set to %u ms\n", timeoutMs);
+        }
+
+        if (g_playerDisconnectRequested.exchange(false))
+        {
+            bool sent = false;
+            if (g_peer)
+            {
+                const PlayerDisconnectPacket disconnect = {PACKET_PLAYER_DISCONNECT};
+                ENetPacket* packet = enet_packet_create(
+                    &disconnect, sizeof(disconnect), ENET_PACKET_FLAG_RELIABLE);
+                if (enet_peer_send(g_peer, 0, packet) == 0)
+                {
+                    enet_host_flush(g_host);
+                    sent = true;
+                }
+                else
+                {
+                    enet_packet_destroy(packet);
+                }
+            }
+            g_playerDisconnectSendSucceeded = sent;
+            g_playerDisconnectSent = true;
         }
 
         // --- Periodic stats (every ~3 seconds) ---
@@ -658,6 +699,14 @@ static DWORD WINAPI Netplay_ServiceThread(LPVOID)
                                     g_inboundAutoTestComplete = true;
                                 }
                                 break;
+                            case PACKET_PLAYER_DISCONNECT:
+                                if (event.packet->dataLength >= sizeof(PlayerDisconnectPacket))
+                                {
+                                    HookLog("Netplay: Remote player sent disconnect notice\n");
+                                    g_playerDisconnectNotice = true;
+                                    MarkPeerDisconnected(event.peer, true);
+                                }
+                                break;
                             case PACKET_EXTENSION:
                                 if (event.packet->dataLength <= MAX_EXTENSION_PACKET_SIZE)
                                 {
@@ -685,15 +734,7 @@ static DWORD WINAPI Netplay_ServiceThread(LPVOID)
                 else if (event.type == ENET_EVENT_TYPE_DISCONNECT)
                 {
                     HookLog("Netplay: Remote peer disconnected\n");
-                    g_peerDisconnected = true;
-                    // The game thread may not get another tick to consume a
-                    // queued remote desync trigger. Save the rolling window
-                    // before making the session inactive.
-                    Rollback_FlushNetplayLive(-1);
-                    g_running = false;
-                    g_active  = false;
-                    g_peer    = nullptr;
-                    event.peer->data = nullptr;
+                    MarkPeerDisconnected(event.peer, false);
                 }
                 else if (event.type == ENET_EVENT_TYPE_CONNECT)
                 {
@@ -789,6 +830,10 @@ void Netplay_Init(ENetHost* host, ENetPeer* peer)
     g_lastRecv = 0;
     g_peerDisconnected = false;
     g_requestedTimeoutMs = 0;
+    g_playerDisconnectRequested = false;
+    g_playerDisconnectSent = false;
+    g_playerDisconnectSendSucceeded = false;
+    g_playerDisconnectNotice = false;
     g_running = true;
 
     // Reset internal player pad ring buffers
@@ -1235,6 +1280,26 @@ bool Netplay_IsActive()
 bool Netplay_TakePeerDisconnected()
 {
     return g_peerDisconnected.exchange(false);
+}
+
+bool Netplay_SendPlayerDisconnect(uint32_t timeoutMs)
+{
+    if (!Netplay_IsActive())
+        return false;
+
+    g_playerDisconnectSent = false;
+    g_playerDisconnectSendSucceeded = false;
+    g_playerDisconnectRequested = true;
+
+    const DWORD start = GetTickCount();
+    while (!g_playerDisconnectSent && GetTickCount() - start < timeoutMs)
+        Sleep(1);
+    return g_playerDisconnectSent && g_playerDisconnectSendSucceeded;
+}
+
+bool Netplay_TakePlayerDisconnectNotice()
+{
+    return g_playerDisconnectNotice.exchange(false);
 }
 
 bool Netplay_IsHost()

@@ -102,6 +102,29 @@ extern "C" bool FrameStepper_IsMatchRestartPending()
     return g_restartTargetFrame >= 0 || g_trainingRestartBarrier;
 }
 
+extern "C" bool FrameStepper_RequestMatchRestart()
+{
+    if (g_restartTargetFrame >= 0 || g_trainingRestartBarrier)
+        return false;
+
+    Controller_ClearDesyncDetection();
+    Rollback_ClearPendingReSimulation();
+    int32_t targetFrame = Controller_GetNetFrameCount();
+    uint64_t sReplay = *(uint64_t*)_addr(0x140D4D9D8);
+    if (sReplay)
+        g_restartRoundSeed = *(uint32_t*)(sReplay + 0x58);
+    if (Netplay_IsActive()) {
+        targetFrame += 25;
+        Netplay_SendRestartMatch(targetFrame, g_restartRoundSeed);
+    }
+    g_restartKind = RESTART_FULL_MATCH;
+    g_restartButtonMode = 0;
+    g_restartTargetFrame = targetFrame;
+    HookLog("FrameStepper: scheduled match restart for frame %d (%s)\n",
+            targetFrame, Netplay_IsActive() ? "netplay" : "offline");
+    return true;
+}
+
 extern "C" void FrameStepper_ScheduleAutoTestRestart(uint32_t roundSeed)
 {
     if (!Netplay_IsActive() || !Netplay_IsHost() || g_restartTargetFrame >= 0)
@@ -993,26 +1016,7 @@ void FrameStepper_Process()
 
     static bool prevRestart = false;
     if (KeyPressed(VK_F11, prevRestart))
-    {
-        Controller_ClearDesyncDetection();
-        Rollback_ClearPendingReSimulation();
-        int32_t targetFrame = Controller_GetNetFrameCount();
-        uint64_t sReplay = *(uint64_t*)_addr(0x140D4D9D8);
-        if (sReplay)
-            g_restartRoundSeed = *(uint32_t*)(sReplay + 0x58);
-        if (Netplay_IsActive())
-        {
-            // Give the reliable packet time to arrive. The target itself is
-            // still absolute, so both machines perform the write together.
-            targetFrame += 25;
-            Netplay_SendRestartMatch(targetFrame, g_restartRoundSeed);
-        }
-        g_restartKind = RESTART_FULL_MATCH;
-        g_restartButtonMode = 0;
-        g_restartTargetFrame = targetFrame;
-        HookLog("FrameStepper: scheduled match restart for frame %d (%s)\n",
-                targetFrame, Netplay_IsActive() ? "netplay" : "offline");
-    }
+        FrameStepper_RequestMatchRestart();
 
     int32_t remoteRestartFrame = -1;
     uint32_t remoteRestartSeed = 0;
