@@ -122,7 +122,7 @@ static void ScheduleNetplayDelay(int32_t delay)
     // establish the synchronized neutral boundary.
     int32_t networkFrames = (int32_t)(Netplay_GetRTT() * 60 / 1000) + 2;
     int32_t leadFrames = networkFrames + 1;
-    if (leadFrames < 6) leadFrames = 6;
+    if (leadFrames > 15) leadFrames = 15;
     int32_t effectiveFrame = Controller_GetNetFrameCount() + leadFrames;
 
     Controller_ScheduleDelayFrames(delay, effectiveFrame);
