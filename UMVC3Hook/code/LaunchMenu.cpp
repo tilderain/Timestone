@@ -7,6 +7,7 @@
 #include <commctrl.h>
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 // HookLog from dllmain.cpp
@@ -77,6 +78,28 @@ static bool      g_isHost = false;          // true if we clicked Host, false if
 static bool      g_autoTestLaunch = false;
 static COLORREF  g_statusColor = RGB(0, 0, 0); // default black for status text
 static HBRUSH    g_hStatusBrush = nullptr;
+
+static uint64_t GetInviteLobbyId()
+{
+    const char* commandLine = GetCommandLineA();
+    constexpr const char* option = "+connect_lobby";
+    constexpr size_t optionLength = 14;
+
+    for (const char* match = commandLine; (match = strstr(match, option)) != nullptr;
+         match += optionLength) {
+        bool tokenStart = match == commandLine || match[-1] == ' ' || match[-1] == '\t';
+        const char* value = match + optionLength;
+        if (!tokenStart || (*value != ' ' && *value != '\t')) continue;
+        while (*value == ' ' || *value == '\t') ++value;
+
+        char* end = nullptr;
+        unsigned long long lobbyId = strtoull(value, &end, 10);
+        if (end != value && lobbyId != 0 &&
+            (*end == '\0' || *end == ' ' || *end == '\t' || *end == '"'))
+            return static_cast<uint64_t>(lobbyId);
+    }
+    return 0;
+}
 
 static int GetCharacterArchiveVariantCount(int characterId)
 {
@@ -426,6 +449,12 @@ LaunchOption ShowLaunchMenu()
     g_dialogConfig.enetHost = nullptr;
     g_dialogConfig.enetPeer = nullptr;
     SteamLobby_Initialize();
+    uint64_t inviteLobbyId = GetInviteLobbyId();
+    if (inviteLobbyId) {
+        HookLog("SteamLobby: received +connect_lobby invite for %llu\n",
+                static_cast<unsigned long long>(inviteLobbyId));
+        SteamLobby_Join(inviteLobbyId);
+    }
 
     // Create the launch dialog window
     const char CLASS_NAME[] = "UMVC3LaunchMenu";
