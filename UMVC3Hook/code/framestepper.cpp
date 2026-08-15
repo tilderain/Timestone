@@ -1290,12 +1290,18 @@ void FrameStepper_Draw()
             ImVec4 color = Netplay_IsHost()
                 ? ImVec4(1.0f, 0.9f, 0.1f, 1.0f)   // yellow for host
                 : ImVec4(0.3f, 0.7f, 1.0f, 1.0f);   // blue for client
-            ImGui::TextColored(color, "--%s--", role);
+            char roleLabel[32];
+            snprintf(roleLabel, sizeof(roleLabel), "--%s--", role);
+            static float roleLabelCenterX = -1.0f;
+            if (roleLabelCenterX < 0.0f)
+                roleLabelCenterX = ImGui::GetCursorPosX() + 75.f;
+            ImGui::SetCursorPosX(roleLabelCenterX - ImGui::CalcTextSize(roleLabel).x * 0.5f);
+            ImGui::TextColored(color, "%s", roleLabel);
             ImGui::TextColored(color, "Ping: %ums", Netplay_GetRTT() / 2);
             int32_t curDelay = Controller_GetDelayFrames();
             int32_t curRollback = Controller_GetRollbackFrames();
             ImGui::TextColored(color, "Frame: %d", Controller_GetNetFrameCount());
-            ImGui::TextColored(color, "LastRecv: %d", Controller_GetLastRemoteFrame());
+            ImGui::TextColored(color, "FPS: %.1f", ImGui::GetIO().Framerate);
             ImGui::TextColored(color, "Delay: %d  Rollback: %d", curDelay, curRollback);
 
             // Keep each control row vertical so the overlay stays compact in width.
