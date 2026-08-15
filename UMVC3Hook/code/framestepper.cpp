@@ -996,9 +996,10 @@ void FrameStepper_Process()
                 remoteRestartKind, remoteRestartFrame, remoteRestartSeed);
     }
 
-    // Netplay delay adjustment via [ (decrease) and ] (increase) keys.
-    // Works regardless of training mode so both sides can adjust mid-match.
+    // Netplay settings hotkeys. These work regardless of training mode so both
+    // sides can adjust them mid-match.
     static bool prevBracketL = false, prevBracketR = false;
+    static bool prevSemicolon = false, prevApostrophe = false;
     if (Netplay_IsActive())
     {
         if (KeyPressed(VK_OEM_4, prevBracketL))  // [ = decrease delay
@@ -1008,6 +1009,14 @@ void FrameStepper_Process()
         if (KeyPressed(VK_OEM_6, prevBracketR))  // ] = increase delay
         {
             AdjustNetplayDelay(1);
+        }
+        if (KeyPressed(VK_OEM_1, prevSemicolon))  // ; = decrease rollback
+        {
+            ScheduleNetplayRollback(Controller_GetRollbackFrames() - 1);
+        }
+        if (KeyPressed(VK_OEM_7, prevApostrophe))  // ' = increase rollback
+        {
+            ScheduleNetplayRollback(Controller_GetRollbackFrames() + 1);
         }
     }
 

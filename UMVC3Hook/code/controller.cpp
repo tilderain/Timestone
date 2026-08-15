@@ -250,7 +250,7 @@ static uint32_t  g_recordedGameInput[2][RING_SIZE];
 static int32_t   g_delayFrames     = 2;
 static int32_t   g_pendingDelayFrames = -1;
 static int32_t   g_pendingDelayEffectiveFrame = -1;
-static int32_t   g_rollbackFrames  = 1;
+static int32_t   g_rollbackFrames  = 8;
 static int32_t   g_pendingRollbackFrames = -1;
 static int32_t   g_pendingRollbackEffectiveFrame = -1;
 
@@ -1741,8 +1741,8 @@ static void UpdateConfirmedChecksums()
         g_desyncChecked[idx] = frame;
         g_desyncMismatch[idx] = diff > DESYNC_THRESHOLD;
         if (diff > DESYNC_THRESHOLD && !g_desyncSeen && !g_desyncDetected)
-            HookLog("DESYNC MISMATCH at confirmed frame %d: diff=%u local=0x%08X remote=0x%08X\n",
-                    frame, diff, local, remote);
+            HookLog("Note frame %d: local=0x%08X remote=0x%08X\n",
+                    frame, local, remote);
     }
 }
 
