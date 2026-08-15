@@ -1227,8 +1227,8 @@ static void DrawAllocatorMemory()
             activeCount, (double)totalUsed / MIB, (double)totalPeak / MIB);
         ImGui::Text("Capacity %.2f MB  Free %.2f MB",
             (double)totalCapacity / MIB, (double)totalFree / MIB);
-        ImGui::TextDisabled(
-            "Free is aggregate; fragmentation can still fail allocations.");
+        //ImGui::TextDisabled(
+            //"Free is aggregate; fragmentation can still fail allocations.");
     }
     if (unitMemoryFull) {
         ImGui::TextColored(ImVec4(1.0f, 0.2f, 0.2f, 1.0f),

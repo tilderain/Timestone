@@ -301,6 +301,21 @@ static void DisableClientMenuControls(HWND hDlg)
     HookLog("UMVC3Hook: Client menu controls disabled after connection\n");
 }
 
+static void DisableHostButtonsExceptTraining(HWND hDlg)
+{
+    for (HWND child = GetWindow(hDlg, GW_CHILD); child;
+         child = GetWindow(child, GW_HWNDNEXT)) {
+        char className[32] = {};
+        GetClassNameA(child, className, sizeof(className));
+        if (_stricmp(className, "BUTTON") == 0 &&
+            (GetWindowLongPtrA(child, GWL_STYLE) & BS_TYPEMASK) != BS_GROUPBOX &&
+            GetDlgCtrlID(child) != ID_LAUNCH_TRAINING) {
+            EnableWindow(child, FALSE);
+        }
+    }
+    HookLog("UMVC3Hook: Host buttons disabled after client connection\n");
+}
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -616,9 +631,6 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
             WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON,
             leftX, y, 240, 32, hDlg, (HMENU)ID_LAUNCH_DUAL, NULL, NULL);
 
-        CreateWindowA("STATIC", "Spawned instance will auto-enter training.",
-            WS_VISIBLE | WS_CHILD, leftX + 250, y + 8, 240, 18,
-            hDlg, NULL, NULL, NULL);
         y += 38;
 
         CreateWindowA("BUTTON", "Launch Dual Training with CPUs",
@@ -656,6 +668,7 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
                             if (g_isHost) {
                                 SetWindowTextA(hStatus, "Client connected");
                                 g_statusColor = RGB(0, 120, 215);
+                                DisableHostButtonsExceptTraining(hDlg);
                             } else {
                                 SetWindowTextA(hStatus, "Connected");
                                 g_statusColor = RGB(200, 180, 0);
