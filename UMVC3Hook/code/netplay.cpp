@@ -1,6 +1,7 @@
 #include "netplay.h"
 #include "rollback.h"
 #include "controller.h"
+#include "steam_transport.h"
 #include <cstring>
 #include <cstdio>
 #include <atomic>
@@ -1115,6 +1116,8 @@ bool Netplay_IsHost()
 
 uint32_t Netplay_GetRTT()
 {
+    if (SteamTransport_IsActive())
+        return SteamTransport_GetRTT();
     if (g_peer)
         return g_peer->roundTripTime;
     return 0;
@@ -1134,6 +1137,9 @@ void Netplay_Shutdown()
         CloseHandle(g_serviceThread);
         g_serviceThread = nullptr;
     }
+
+    if (SteamTransport_IsActive())
+        SteamTransport_Shutdown();
 
     if (g_peer)
     {

@@ -2,6 +2,7 @@
 #include "assist_names.h"
 #include "trainingboot.h"
 #include "netplay.h"
+#include "steam_lobby.h"
 #include <Windows.h>
 #include <algorithm>
 #include <cstdio>
@@ -104,6 +105,7 @@ static bool IsValidTrainingLaunchPacket(const LaunchTrainingPacket& packet)
 
 // Custom timer and window messages
 #define ID_NET_POLL_TIMER       5001
+#define ID_STEAM_POLL_TIMER     5002
 static volatile bool g_networkPolling = false;
 static HANDLE g_hPollThread = NULL;
 static bool g_isLaunching = false;
@@ -285,6 +287,7 @@ void CleanupNetworkOnExit()
         Netplay_Shutdown();
         g_dialogConfig.enetHost = nullptr;
         g_dialogConfig.enetPeer = nullptr;
+        SteamLobby_Shutdown(false);
         return;
     }
 
@@ -300,6 +303,7 @@ void CleanupNetworkOnExit()
         g_dialogConfig.enetHost = nullptr;
         g_dialogConfig.enetPeer = nullptr;
     }
+    SteamLobby_Shutdown(false);
 }
 
 // ---------------------------------------------------------------------------
@@ -344,6 +348,7 @@ enum CtrlId {
     ID_STEAM_CREATE_BTN   = 2302,
     ID_STEAM_LIST         = 2303,
     ID_STEAM_STATUS       = 2304,
+    ID_STEAM_JOIN_BTN     = 2305,
 };
 
 // ---------------------------------------------------------------------------
@@ -417,6 +422,7 @@ LaunchOption ShowLaunchMenu()
     g_dialogConfig.hostEnabled = false;
     g_dialogConfig.enetHost = nullptr;
     g_dialogConfig.enetPeer = nullptr;
+    SteamLobby_Initialize();
 
     // Create the launch dialog window
     const char CLASS_NAME[] = "UMVC3LaunchMenu";
@@ -719,8 +725,13 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
             leftX + 140, y, 120, 26,
             hDlg, (HMENU)ID_STEAM_CREATE_BTN, NULL, NULL);
 
-        CreateWindowA("STATIC", "",
-            WS_VISIBLE | WS_CHILD, leftX + 270, y + 4, 510, 18,
+        CreateWindowA("BUTTON", "Join Selected",
+            WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON,
+            leftX + 270, y, 120, 26,
+            hDlg, (HMENU)ID_STEAM_JOIN_BTN, NULL, NULL);
+
+        CreateWindowA("STATIC", SteamLobby_GetStatus(),
+            WS_VISIBLE | WS_CHILD, leftX + 400, y + 4, 380, 18,
             hDlg, (HMENU)ID_STEAM_STATUS, NULL, NULL);
         y += 30;
 
@@ -762,10 +773,54 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
             WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON,
             leftX, y, contentW, 32, hDlg, (HMENU)ID_LAUNCH_DUAL_P2_CPU, NULL, NULL);
 
+        SetTimer(hDlg, ID_STEAM_POLL_TIMER, 50, NULL);
         return msg == WM_INITDIALOG ? TRUE : 0;
     }
 
     case WM_TIMER:
+        if (wParam == ID_STEAM_POLL_TIMER) {
+            SteamLobby_Pump();
+            HWND hSteamStatus = GetDlgItem(hDlg, ID_STEAM_STATUS);
+            if (hSteamStatus) SetWindowTextA(hSteamStatus, SteamLobby_GetStatus());
+
+            if (SteamLobby_TakeResultsChanged()) {
+                HWND hList = GetDlgItem(hDlg, ID_STEAM_LIST);
+                if (hList) {
+                    SendMessageA(hList, LB_RESETCONTENT, 0, 0);
+                    for (size_t i = 0; i < SteamLobby_GetResultCount(); ++i) {
+                        uint64_t lobbyId = SteamLobby_GetResult(i);
+                        char label[96];
+                        snprintf(label, sizeof(label), "HeroNet Lobby %llu",
+                                 (unsigned long long)lobbyId);
+                        LRESULT row = SendMessageA(hList, LB_ADDSTRING, 0, (LPARAM)label);
+                        if (row != LB_ERR && row != LB_ERRSPACE)
+                            SendMessageA(hList, LB_SETITEMDATA, row, (LPARAM)lobbyId);
+                    }
+                }
+            }
+
+            ENetHost* steamHost = nullptr;
+            ENetPeer* steamPeer = nullptr;
+            bool steamIsHost = false;
+            if (SteamLobby_TakeNetworkHandles(&steamHost, &steamPeer, &steamIsHost)) {
+                g_dialogConfig.enetHost = steamHost;
+                g_dialogConfig.enetPeer = steamPeer;
+                g_dialogConfig.hostEnabled = true;
+                g_isHost = steamIsHost;
+                if (steamPeer) steamPeer->data = (void*)"connected";
+                SetTimer(hDlg, ID_NET_POLL_TIMER, 10, NULL);
+
+                HWND hStatus = GetDlgItem(hDlg, ID_NET_STATUS);
+                if (hStatus) {
+                    SetWindowTextA(hStatus, steamIsHost ? "Steam client connected" : "Steam connected");
+                    g_statusColor = steamIsHost ? RGB(0, 120, 215) : RGB(200, 180, 0);
+                    InvalidateRect(hStatus, NULL, TRUE);
+                }
+                if (steamIsHost) DisableHostButtonsExceptTraining(hDlg);
+                else DisableClientMenuControls(hDlg);
+            }
+            return 0;
+        }
         if (wParam == ID_NET_POLL_TIMER) {
             if (g_dialogConfig.enetHost) {
                 ENetEvent event;
@@ -1143,42 +1198,25 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
         case ID_STEAM_SEARCH_BTN:
         {
             HWND hList = GetDlgItem(hDlg, ID_STEAM_LIST);
-            HWND hStatus = GetDlgItem(hDlg, ID_STEAM_STATUS);
             if (hList) SendMessageA(hList, LB_RESETCONTENT, 0, 0);
-            if (hStatus) SetWindowTextA(hStatus, "Searching... (Steam SDK required)");
-
-            // Try to load steam_api and search for lobbies
-            HMODULE hSteam = LoadLibraryA("steam_api64.dll");
-            if (hSteam) {
-                // Steam API is available - try to init and use it
-                // This is a simplified approach; full lobby support needs Steamworks SDK headers
-                if (hList) {
-                    SendMessageA(hList, LB_ADDSTRING, 0, (LPARAM)"Steam loaded - lobby search needs SDK integration");
-                }
-                FreeLibrary(hSteam);
-            } else {
-                if (hList) {
-                    SendMessageA(hList, LB_ADDSTRING, 0, (LPARAM)"steam_api.dll not found in path");
-                    SendMessageA(hList, LB_ADDSTRING, 0, (LPARAM)"Place this DLL in the game directory");
-                }
-            }
+            SteamLobby_Search();
             return 0;
         }
 
         case ID_STEAM_CREATE_BTN:
         {
-            HWND hStatus = GetDlgItem(hDlg, ID_STEAM_STATUS);
-            if (hStatus) SetWindowTextA(hStatus, "Creating lobby... (Steam SDK required)");
+            SteamLobby_Create();
+            return 0;
+        }
 
-            HMODULE hSteam = LoadLibraryA("steam_api64.dll");
-            if (hSteam) {
-                HWND hList = GetDlgItem(hDlg, ID_STEAM_LIST);
-                if (hList) {
-                    SendMessageA(hList, LB_ADDSTRING, 0, (LPARAM)"Steam loaded - lobby creation needs SDK integration");
-                    SendMessageA(hList, LB_RESETCONTENT, 0, 0);
-                }
-                FreeLibrary(hSteam);
-            }
+        case ID_STEAM_JOIN_BTN:
+        {
+            HWND hList = GetDlgItem(hDlg, ID_STEAM_LIST);
+            if (!hList) return 0;
+            LRESULT row = SendMessageA(hList, LB_GETCURSEL, 0, 0);
+            if (row == LB_ERR) return 0;
+            uint64_t lobbyId = (uint64_t)SendMessageA(hList, LB_GETITEMDATA, row, 0);
+            if (lobbyId && lobbyId != (uint64_t)LB_ERR) SteamLobby_Join(lobbyId);
             return 0;
         }
         }
@@ -1205,6 +1243,7 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
         return 0;
 
     case WM_DESTROY:
+        KillTimer(hDlg, ID_STEAM_POLL_TIMER);
         if (!g_isLaunching) {
             CleanupNetwork(hDlg, true);  // user closed/cancelled — full cleanup
         } else {
@@ -1376,6 +1415,7 @@ static void CleanupNetwork(HWND hDlg, bool forceCleanup) {
     // so the enet host/peer survive for gameplay.
     if (g_dialogConfig.hostEnabled && !forceCleanup) {
         HookLog("UMVC3Hook: CleanupNetwork - skipping (host persists for gameplay)\n");
+        SteamLobby_Shutdown(true);
         return;
     }
 
@@ -1396,6 +1436,7 @@ static void CleanupNetwork(HWND hDlg, bool forceCleanup) {
         g_dialogConfig.enetPeer = nullptr;
     }
     g_dialogConfig.hostEnabled = false;
+    SteamLobby_Shutdown(false);
 
     if (hDlg) {
         HWND hStatus = GetDlgItem(hDlg, ID_NET_STATUS);

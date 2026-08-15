@@ -1,0 +1,19 @@
+#pragma once
+
+#include <cstddef>
+#include <cstdint>
+#include <enet/enet.h>
+
+bool SteamLobby_Initialize();
+void SteamLobby_Pump();
+void SteamLobby_Search();
+void SteamLobby_Create();
+void SteamLobby_Join(uint64_t lobbyId);
+void SteamLobby_Shutdown(bool preserveConnection);
+
+const char* SteamLobby_GetStatus();
+size_t SteamLobby_GetResultCount();
+uint64_t SteamLobby_GetResult(size_t index);
+bool SteamLobby_TakeResultsChanged();
+bool SteamLobby_TakeNetworkHandles(ENetHost** outHost, ENetPeer** outPeer,
+                                   bool* outIsHost);
