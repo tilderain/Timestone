@@ -12,6 +12,7 @@ void SteamLobby_Join(uint64_t lobbyId);
 void SteamLobby_Shutdown(bool preserveConnection);
 
 const char* SteamLobby_GetStatus();
+bool SteamLobby_HasLobby();
 size_t SteamLobby_GetResultCount();
 uint64_t SteamLobby_GetResult(size_t index);
 int SteamLobby_GetResultEstimatedPing(size_t index);

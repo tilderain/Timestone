@@ -825,6 +825,8 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
             SteamLobby_Pump();
             HWND hSteamStatus = GetDlgItem(hDlg, ID_STEAM_STATUS);
             if (hSteamStatus) SetWindowTextA(hSteamStatus, SteamLobby_GetStatus());
+            EnableWindow(GetDlgItem(hDlg, ID_STEAM_CREATE_BTN),
+                         SteamLobby_HasLobby() ? FALSE : TRUE);
 
             if (SteamLobby_TakeResultsChanged()) {
                 HWND hList = GetDlgItem(hDlg, ID_STEAM_LIST);

@@ -464,6 +464,10 @@ void SteamLobby_Search()
 void SteamLobby_Create()
 {
     if (!SteamLobby_Initialize() || g_pendingCall != PendingCall::None) return;
+    if (g_lobbyId) {
+        SetStatus("Already in a Steam lobby");
+        return;
+    }
     g_pendingHandle = g_api.CreateLobby(g_matchmaking, 2, 2); // public, two members
     g_pendingCall = PendingCall::Create;
     SetStatus("Creating HeroNet lobby...");
@@ -556,6 +560,11 @@ void SteamLobby_Pump()
 const char* SteamLobby_GetStatus()
 {
     return g_status;
+}
+
+bool SteamLobby_HasLobby()
+{
+    return g_lobbyId != 0;
 }
 
 size_t SteamLobby_GetResultCount()
