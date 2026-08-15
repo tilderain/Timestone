@@ -40,6 +40,7 @@ CPP_SRC   := \
 	$(SRCDIR)/code/framestepper.cpp \
 	$(SRCDIR)/code/dtieditor.cpp \
 	$(SRCDIR)/code/trainingboot.cpp \
+	$(SRCDIR)/code/chrsel_imgui.cpp \
 	$(SRCDIR)/code/controller.cpp \
 	$(SRCDIR)/code/autotest.cpp \
 	$(SRCDIR)/code/diag.cpp \

@@ -200,6 +200,7 @@ using ResetDevice = HRESULT(__stdcall*)(LPDIRECT3DDEVICE9, D3DPRESENT_PARAMETERS
 static ResetDevice oResetDevice = nullptr;
 WNDPROC oWndProc;
 static HWND window = NULL;
+extern bool ChrSelImGui_IsOpen();
 
 using AppD3DResultHandler = void(__fastcall*)(void*, int32_t, const char*, uintptr_t);
 static AppD3DResultHandler g_originalAppD3DResultHandler = nullptr;
@@ -229,61 +230,52 @@ static void InstallAppD3DResultLogging()
 		HookLog("D3D9: failed to install fatal HRESULT context logging (%d)\n", status);
 }
 
-// Direct-polling input injector that feeds ImGui's backend directly,
-// bypassing the Windows message queue entirely.
+// The game uses Raw Input and may suppress legacy WM_KEYDOWN messages. Mirror
+// physical keyboard state into ImGui every render frame, as a platform backend
+// normally would, and let ImGui own key-repeat timing.
 void PollKeyboardDirectly()
 {
-    if (!window || !TheMenu->GetActiveState())
+    if (!window || ImGui::GetCurrentContext() == nullptr)
         return;
 
     ImGuiIO& io = ImGui::GetIO();
     static bool prevKeys[256] = { 0 };
-    static float repeatTimers[256] = { 0 };
-    float deltaTime = io.DeltaTime;
+    const bool menuOpen = TheMenu->GetActiveState();
+    const bool rosterOpen = ChrSelImGui_IsOpen();
+    if (!menuOpen && !rosterOpen) {
+        io.ConfigFlags &= ~ImGuiConfigFlags_NavEnableKeyboard;
+        memset(io.KeysDown, 0, sizeof(io.KeysDown));
+        memset(prevKeys, 0, sizeof(prevKeys));
+        io.KeyCtrl = io.KeyShift = io.KeyAlt = false;
+        return;
+    }
 
-    for (int vk = 8; vk < 256; vk++)
+    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+    static const int navigationKeys[] = {
+        VK_TAB, VK_LEFT, VK_RIGHT, VK_UP, VK_DOWN, VK_PRIOR, VK_NEXT,
+        VK_HOME, VK_END, VK_INSERT, VK_DELETE, VK_BACK, VK_SPACE,
+        VK_RETURN, VK_ESCAPE
+    };
+    if (!menuOpen)
+        memset(io.KeysDown, 0, sizeof(io.KeysDown));
+    BYTE keyboardState[256] = { 0 };
+    const bool haveKeyboardState = menuOpen && GetKeyboardState(keyboardState);
+    const int lastKey = menuOpen ? 256 : (int)IM_ARRAYSIZE(navigationKeys);
+    for (int keyIndex = 0; keyIndex < lastKey; ++keyIndex)
     {
-        // Skip keys that aren't useful for typing or editing
-        if (vk > 13 && vk < 32 && vk != 27) continue;
-
-        bool isDown = (GetAsyncKeyState(vk) & 0x8000) != 0;
-        bool wasDown = prevKeys[vk];
+        const int vk = menuOpen ? keyIndex : navigationKeys[keyIndex];
+        const bool isDown = haveKeyboardState
+            ? (keyboardState[vk] & 0x80) != 0
+            : (GetAsyncKeyState(vk) & 0x8000) != 0;
+        const bool wasDown = prevKeys[vk];
         prevKeys[vk] = isDown;
+        io.KeysDown[vk] = isDown;
 
-        bool trigger = false;
-        if (isDown)
+        if (menuOpen && isDown && !wasDown)
         {
-            if (!wasDown)
-            {
-                trigger = true;
-                repeatTimers[vk] = 0.400f; // Delay before key starts repeating (400ms)
-            }
-            else
-            {
-                repeatTimers[vk] -= deltaTime;
-                if (repeatTimers[vk] <= 0.0f)
-                {
-                    trigger = true;
-                    repeatTimers[vk] = 0.050f; // Key repeat rate (50ms)
-                }
-            }
-        }
-
-        if (trigger)
-        {
-            // Simulate physical key-down event for navigation and shortcut keys
-            LPARAM lParam = (MapVirtualKey(vk, MAPVK_VK_TO_VSC) << 16) | 1;
-            ImGui_ImplWin32_WndProcHandler(window, WM_KEYDOWN, vk, lParam);
-
-            // Translate virtual key code to printable character
-            BYTE ks[256] = { 0 };
-            if (GetAsyncKeyState(VK_SHIFT) & 0x8000)   ks[VK_SHIFT] = 0x80;
-            if (GetAsyncKeyState(VK_CONTROL) & 0x8000) ks[VK_CONTROL] = 0x80;
-            if (GetAsyncKeyState(VK_MENU) & 0x8000)    ks[VK_MENU] = 0x80;
-            if (GetKeyState(VK_CAPITAL) & 0x0001)      ks[VK_CAPITAL] = 0x01;
-
             WCHAR wchar[4] = { 0 };
-            if (ToUnicode(vk, MapVirtualKey(vk, MAPVK_VK_TO_VSC), ks, wchar, 4, 0) > 0)
+            if (ToUnicode(vk, MapVirtualKey(vk, MAPVK_VK_TO_VSC),
+                          keyboardState, wchar, 4, 0) > 0)
             {
                 for (int i = 0; wchar[i] != 0 && i < 4; i++)
                 {
@@ -294,13 +286,10 @@ void PollKeyboardDirectly()
                 }
             }
         }
-        else if (wasDown && !isDown)
-        {
-            // Simulate physical key-up event
-            LPARAM lParam = (MapVirtualKey(vk, MAPVK_VK_TO_VSC) << 16) | 0xC0000001;
-            ImGui_ImplWin32_WndProcHandler(window, WM_KEYUP, vk, lParam);
-        }
     }
+    io.KeyCtrl = io.KeysDown[VK_CONTROL];
+    io.KeyShift = io.KeysDown[VK_SHIFT];
+    io.KeyAlt = io.KeysDown[VK_MENU];
 }
 
 
@@ -360,6 +349,15 @@ LRESULT __stdcall WndProc(const HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPar
         break;
     }
 
+    const bool keyboardMessage = uMsg == WM_KEYDOWN || uMsg == WM_KEYUP ||
+        uMsg == WM_CHAR || uMsg == WM_SYSKEYDOWN || uMsg == WM_SYSKEYUP;
+    const bool keyboardOverlayOpen = TheMenu->GetActiveState() ||
+        ChrSelImGui_IsOpen();
+    // Mouse input is always useful; keyboard input is scoped to interactive UI.
+    if (ImGui::GetCurrentContext() != nullptr &&
+        (!keyboardMessage || keyboardOverlayOpen))
+        ImGui_ImplWin32_WndProcHandler(hWnd, uMsg, wParam, lParam);
+
     if (TheMenu->GetActiveState())
     {
         // Intercept keyboard Raw Input while menu is open so key presses do not trigger game actions
@@ -383,13 +381,6 @@ LRESULT __stdcall WndProc(const HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPar
         {
             return 0; // Swallow event
         }
-    }
-
-    // Pass native mouse events directly through to ImGui
-    if (ImGui::GetCurrentContext() != nullptr)
-    {
-        if (ImGui_ImplWin32_WndProcHandler(hWnd, uMsg, wParam, lParam))
-            return true;
     }
 
     return CallWindowProc(oWndProc, hWnd, uMsg, wParam, lParam);
@@ -476,6 +467,8 @@ long __stdcall hkEndScene(LPDIRECT3DDEVICE9 pDevice)
 		
 	}
 	Notifications->Draw();
+	extern void ChrSelImGui_Draw();
+	ChrSelImGui_Draw();
 
 	if (TheMenu->GetActiveState())
 	{

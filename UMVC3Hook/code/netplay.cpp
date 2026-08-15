@@ -114,6 +114,20 @@ static bool                     g_outboundAutoTestComplete = false;
 static bool                     g_inboundAutoTestComplete = false;
 static CRITICAL_SECTION         g_autoTestCompleteCS;
 
+static constexpr size_t         MAX_EXTENSION_PACKET_SIZE = 256;
+static constexpr size_t         MAX_EXTENSION_PACKETS = 32;
+struct ExtensionPacket {
+    size_t size;
+    uint8_t data[MAX_EXTENSION_PACKET_SIZE];
+};
+static ExtensionPacket          g_outboundExtension[MAX_EXTENSION_PACKETS] = {};
+static size_t                   g_outboundExtensionHead = 0;
+static size_t                   g_outboundExtensionCount = 0;
+static ExtensionPacket          g_inboundExtension[MAX_EXTENSION_PACKETS] = {};
+static size_t                   g_inboundExtensionHead = 0;
+static size_t                   g_inboundExtensionCount = 0;
+static CRITICAL_SECTION         g_extensionCS;
+
 // One-time critical section initialization flag
 static bool                 g_csInitialized  = false;
 
@@ -449,6 +463,28 @@ static DWORD WINAPI Netplay_ServiceThread(LPVOID)
             enet_host_flush(g_host);
         }
 
+        ExtensionPacket extension = {};
+        bool hasExtension = false;
+        {
+            ScopedCS lock(g_extensionCS);
+            if (g_outboundExtensionCount != 0)
+            {
+                extension = g_outboundExtension[g_outboundExtensionHead];
+                g_outboundExtensionHead =
+                    (g_outboundExtensionHead + 1) % MAX_EXTENSION_PACKETS;
+                --g_outboundExtensionCount;
+                hasExtension = true;
+            }
+        }
+        if (hasExtension && g_peer)
+        {
+            ENetPacket* packet = enet_packet_create(
+                extension.data, extension.size, ENET_PACKET_FLAG_RELIABLE);
+            if (enet_peer_send(g_peer, 0, packet) != 0)
+                enet_packet_destroy(packet);
+            enet_host_flush(g_host);
+        }
+
         // --- Service the host ---
         if (g_host)
         {
@@ -622,6 +658,26 @@ static DWORD WINAPI Netplay_ServiceThread(LPVOID)
                                     g_inboundAutoTestComplete = true;
                                 }
                                 break;
+                            case PACKET_EXTENSION:
+                                if (event.packet->dataLength <= MAX_EXTENSION_PACKET_SIZE)
+                                {
+                                    ScopedCS lock(g_extensionCS);
+                                    if (g_inboundExtensionCount == MAX_EXTENSION_PACKETS)
+                                    {
+                                        g_inboundExtensionHead =
+                                            (g_inboundExtensionHead + 1) % MAX_EXTENSION_PACKETS;
+                                        --g_inboundExtensionCount;
+                                    }
+                                    size_t tail = (g_inboundExtensionHead +
+                                                   g_inboundExtensionCount) %
+                                                  MAX_EXTENSION_PACKETS;
+                                    g_inboundExtension[tail].size = event.packet->dataLength;
+                                    std::memcpy(g_inboundExtension[tail].data,
+                                                event.packet->data,
+                                                event.packet->dataLength);
+                                    ++g_inboundExtensionCount;
+                                }
+                                break;
                         }
                     }
                     enet_packet_destroy(event.packet);
@@ -689,6 +745,7 @@ void Netplay_Init(ENetHost* host, ENetPeer* peer)
         InitializeCriticalSection(&g_autoTestStartCS);
         InitializeCriticalSection(&g_autoTestFrameCS);
         InitializeCriticalSection(&g_autoTestCompleteCS);
+        InitializeCriticalSection(&g_extensionCS);
 
         g_outboundDelayNew = false;
         g_inboundDelayNew = false;
@@ -714,6 +771,10 @@ void Netplay_Init(ENetHost* host, ENetPeer* peer)
         g_inboundAutoTestFrameCount = 0;
         g_outboundAutoTestComplete = false;
         g_inboundAutoTestComplete = false;
+        g_outboundExtensionHead = 0;
+        g_outboundExtensionCount = 0;
+        g_inboundExtensionHead = 0;
+        g_inboundExtensionCount = 0;
         std::memset(&g_outboundPacket, 0, sizeof(InputPacket));
         g_csInitialized = true;
     }
@@ -1066,6 +1127,43 @@ bool Netplay_GetInboundRestartMatch(int32_t& outTargetFrame, uint32_t& outRoundS
     return true;
 }
 
+bool Netplay_SendExtensionPacket(const void* data, size_t size)
+{
+    if (!g_active || !g_csInitialized || !data || size < sizeof(uint32_t) ||
+        size > MAX_EXTENSION_PACKET_SIZE ||
+        *(const uint32_t*)data != PACKET_EXTENSION)
+        return false;
+
+    ScopedCS lock(g_extensionCS);
+    if (g_outboundExtensionCount == MAX_EXTENSION_PACKETS)
+        return false;
+    size_t tail = (g_outboundExtensionHead + g_outboundExtensionCount) %
+                  MAX_EXTENSION_PACKETS;
+    g_outboundExtension[tail].size = size;
+    std::memcpy(g_outboundExtension[tail].data, data, size);
+    ++g_outboundExtensionCount;
+    return true;
+}
+
+bool Netplay_GetExtensionPacket(void* data, size_t capacity, size_t& outSize)
+{
+    outSize = 0;
+    if (!g_active || !g_csInitialized || !data)
+        return false;
+
+    ScopedCS lock(g_extensionCS);
+    if (g_inboundExtensionCount == 0)
+        return false;
+    const ExtensionPacket& packet = g_inboundExtension[g_inboundExtensionHead];
+    if (capacity < packet.size)
+        return false;
+    outSize = packet.size;
+    std::memcpy(data, packet.data, packet.size);
+    g_inboundExtensionHead = (g_inboundExtensionHead + 1) % MAX_EXTENSION_PACKETS;
+    --g_inboundExtensionCount;
+    return true;
+}
+
 void Netplay_ClearInputQueues()
 {
     {
@@ -1207,6 +1305,7 @@ void Netplay_Shutdown()
         DeleteCriticalSection(&g_autoTestStartCS);
         DeleteCriticalSection(&g_autoTestFrameCS);
         DeleteCriticalSection(&g_autoTestCompleteCS);
+        DeleteCriticalSection(&g_extensionCS);
         g_csInitialized = false;
     }
 

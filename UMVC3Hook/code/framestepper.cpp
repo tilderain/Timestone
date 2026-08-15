@@ -35,6 +35,8 @@ using namespace Memory::VP;
 
 // HookLog from dllmain.cpp
 extern void HookLog(const char* fmt, ...);
+extern void ChrSelImGui_Update();
+extern bool ChrSelImGui_ApplyPendingRoster(int32_t targetFrame);
 
 // Netplay state queries from netplay.cpp
 extern bool Netplay_HasRemoteInput();
@@ -112,6 +114,23 @@ extern "C" void FrameStepper_ScheduleAutoTestRestart(uint32_t roundSeed)
                                 g_restartButtonMode);
     HookLog("AutoTestNet: synchronized mode-12 training restart scheduled for frame %d seed=0x%08X\n",
             g_restartTargetFrame, g_restartRoundSeed);
+}
+
+extern "C" bool FrameStepper_ScheduleRosterRestart(int32_t targetFrame,
+                                                    uint32_t roundSeed)
+{
+    if (g_restartTargetFrame >= 0 || g_trainingRestartBarrier)
+        return false;
+    const int32_t currentFrame = Controller_GetNetFrameCount();
+    if (Netplay_IsActive() && targetFrame < currentFrame + 3)
+        return false;
+
+    g_restartRoundSeed = roundSeed;
+    g_restartKind = RESTART_TRAINING;
+    // Native button mode 12 raises both team-reset flags (0x1000/0x2000).
+    g_restartButtonMode = 12;
+    g_restartTargetFrame = Netplay_IsActive() ? targetFrame : currentFrame;
+    return true;
 }
 
 static int32_t GetNetplaySettingsEffectiveFrame()
@@ -338,6 +357,8 @@ static void __fastcall HookedMove(void* sMvc3Main)
         return;
     }
 
+    ChrSelImGui_Update();
+
     if (isPaused)
     {
         if (advanceFrame)
@@ -369,6 +390,14 @@ static void __fastcall HookedMove(void* sMvc3Main)
     if (g_restartTargetFrame >= 0 &&
         (!restartNetplay || Controller_GetNetFrameCount() >= g_restartTargetFrame))
     {
+        if (!ChrSelImGui_ApplyPendingRoster(g_restartTargetFrame)) {
+            HookLog("FrameStepper: roster restart rejected at frame %d\n",
+                    g_restartTargetFrame);
+            g_restartTargetFrame = -1;
+            g_restartKind = RESTART_FULL_MATCH;
+            g_restartButtonMode = 0;
+            return;
+        }
         static constexpr uintptr_t MVC3_MANAGER_PTR = 0x140D510A0;
         static constexpr uintptr_t SMVC3MGR_ACTION_OFFSET = 0x48;
         static constexpr uintptr_t SREPLAY_PTR = 0x140D4D9D8;

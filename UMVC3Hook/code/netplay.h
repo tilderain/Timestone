@@ -50,6 +50,7 @@ enum PacketType : uint32_t {
     PACKET_AUTOTEST_COMPLETE = 13, // AutoTestCompletePacket
     PACKET_LAUNCH_P2_SELECTION = 14, // LaunchP2SelectionPacket
     PACKET_LAUNCH_P1_SELECTION = 15, // LaunchP1SelectionPacket
+    PACKET_EXTENSION = 16, // Plugin feature packet routed through generic reliable queue
 };
 
 #pragma pack(push, 1)
@@ -321,6 +322,11 @@ void Netplay_SendTrainingRestart(int32_t targetFrame, uint32_t roundSeed,
                                  int32_t buttonRestart);
 bool Netplay_GetInboundRestartMatch(int32_t& outTargetFrame, uint32_t& outRoundSeed,
                                     uint32_t& outKind, int32_t& outButtonRestart);
+
+// Generic reliable control channel for self-contained plugin features. Payloads
+// must begin with PACKET_EXTENSION and are limited to 256 bytes.
+bool Netplay_SendExtensionPacket(const void* data, size_t size);
+bool Netplay_GetExtensionPacket(void* data, size_t capacity, size_t& outSize);
 
 // Synchronize the multi-resimulation mode with the remote peer.
 void Netplay_SendMultiResim(bool enabled);
