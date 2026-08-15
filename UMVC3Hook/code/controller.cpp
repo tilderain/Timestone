@@ -250,7 +250,7 @@ static uint32_t  g_recordedGameInput[2][RING_SIZE];
 static int32_t   g_delayFrames     = 2;
 static int32_t   g_pendingDelayFrames = -1;
 static int32_t   g_pendingDelayEffectiveFrame = -1;
-static int32_t   g_rollbackFrames  = 8;
+static int32_t   g_rollbackFrames  = 1;
 
 static bool IsFrameConfirmed(int32_t frame)
 {
@@ -1368,10 +1368,9 @@ extern "C" void Controller_OnFrameStart()
         int step = action ? *(int*)(action + 0xD8) : 0;
         if (step >= 2)
         {
-            // Bound prediction by the configured input delay plus rollback
-            // window. Unlike the old consecutive-miss counter, this measures
-            // the actual oldest remote frame needed by the current timeline.
-            int32_t predictionBudget = g_delayFrames + g_rollbackFrames;
+            // Input delay shifts when inputs execute; it does not increase how
+            // far the simulation may roll back.
+            int32_t predictionBudget = g_rollbackFrames;
             if (g_netFrameCount > predictionBudget)
             {
                 int32_t oldestRequiredFrame = g_netFrameCount - predictionBudget;
