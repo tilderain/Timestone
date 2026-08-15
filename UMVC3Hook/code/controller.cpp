@@ -1006,6 +1006,15 @@ static uint32_t __fastcall hkbuttonRemap(uint64_t playerIndex, uint32_t rawInput
         currentInput = obuttonRemap(1, rawTestInput, alternateMap);
     } else {
         currentInput = obuttonRemap(playerIndex, rawInput, alternateMap);
+
+        // Training boot assigns the keyboard to P1, while a netplay client
+        // owns P2. Poll P1's native keyboard remap here so its internal
+        // focus/device gate remains authoritative, then merge the resulting
+        // logical actions with P2's remapped controller input.
+        if (!Netplay_IsHost() && context->ownerTeam == 1 &&
+            playerIndex == 1 && IsGameProcessForeground()) {
+            currentInput |= obuttonRemap(0, 0, alternateMap);
+        }
     }
 
     uint32_t resolved = ResolveTimelineInput(
@@ -1078,13 +1087,9 @@ static uint64_t __fastcall hkGetsCurrentInput_withSOCD(uint64_t pad, uint32_t pl
             }
             else if (playerIndex == 1)
             {
-                // Read the physical slot directly. Calling the original getter
-                // for player 0 can route through keyboard input because the
-                // boot path maps the keyboard to player 0.
-                uint32_t padInput = *(uint32_t*)(pad + PAD_SLOT_INPUT);
-                // Diagnostic: temporarily disable keyboard input for the
-                // netplay client's local P2 to isolate keyboard-map masking.
-                raw = ApplySOCD(padInput);
+                // Read the physical slot directly. Client keyboard input is
+                // merged after native remapping in hkbuttonRemap.
+                raw = ApplySOCD(*(uint32_t*)(pad + PAD_SLOT_INPUT));
             }
             else
             {

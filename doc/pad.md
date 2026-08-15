@@ -127,8 +127,11 @@ repeat state.
    `sPad + slotIndex * 0x2E0 + 0x1BC` and applies SOCD cleaning.
 
 The keyboard and pad sources are alternatives in this native getter, not an
-automatic OR. Current plugin capture may explicitly combine sources where its
-role/mode policy requires that behavior.
+automatic OR. On a netplay client, the plugin reads the physical pad here, then
+uses player 0's native keyboard remap from the scoped `buttonRemap` hook. Their
+logical masks are combined for local P2. This preserves the native keyboard
+focus/device gate and suppresses keyboard input while the process is not
+foreground.
 
 `0x1402B3950` is a related getter that reads object-relative `+0x1D0` instead of
 `+0x1BC` and uses an alternate keyboard translator. Intro code that calls this
