@@ -22,8 +22,12 @@ uses source symbols instead of line numbers because line numbers change often.
 
 ## Input Timeline
 
-- `cChrInput__processFrameInput` at `0x14002DD60` remains the final native
-  translation point before the plugin applies timeline input.
+- `cChrInput__processFrameInput` at `0x14002DD60` scopes the current character,
+  `cChrInput__buttonRemap` at `0x14002DA30` captures and substitutes the normal
+  pad path, and `cChrInput__swapLRIfFaceLeft` at `0x14002E560` covers native
+  action/CPU paths that bypass button remapping.
+- Timeline values are logical actions after physical button configuration but
+  before character-specific facing, ability, team, and pause transformations.
 - Local physical input is accumulated and scheduled at
   `currentFrame + delayFrames`.
 - Remote input is stored by absolute sender frame.

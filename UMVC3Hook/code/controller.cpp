@@ -81,7 +81,9 @@ static constexpr uintptr_t ADDR_METHOD_3D00              = 0x1402B3D00;
 
 // cChrInput__processFrameInput — the per-character input processor.
 static constexpr uintptr_t ADDR_PROCESS_FRAME_INPUT       = 0x14002DD60;
+static constexpr uintptr_t ADDR_IS_GAMEPLAY_ACTIVE        = 0x14002DCE0;
 static constexpr uintptr_t ADDR_BUTTON_REMAP              = 0x14002DA30;
+static constexpr uintptr_t ADDR_SWAP_LR_IF_FACE_LEFT      = 0x14002E560;
 // uAmaterasu__getter_4AC0 — returns the team index (0=P1, 1=P2) from a character object.
 static constexpr uintptr_t ADDR_GET_TEAM_INDEX            = 0x140004AC0;
 
@@ -108,6 +110,8 @@ static inputAutoRepeatTimerProcess_t oinputAutoRepeatTimerProcess = nullptr;
 static void(__fastcall* oprocessFrameInput)(uint64_t cChrInput) = nullptr;
 static uint32_t(__fastcall* obuttonRemap)(uint64_t playerIndex, uint32_t input,
                                           uint8_t alternateMap) = nullptr;
+static uint32_t(__fastcall* oswapLRIfFaceLeft)(uint64_t cChrInput,
+                                               uint32_t input) = nullptr;
 
 // ===========================================================================
 // Decompiled helper functions (inlined from game)
@@ -235,9 +239,9 @@ static int32_t   g_predictedFrame[RING_SIZE];
 // [playerIndex][frame % RING_SIZE]
 static uint32_t  g_rawLocalInput[2][RING_SIZE];
 
-// Game-native format input history per team.
-// Captured from cChrInput+0x14 (mHeld) AFTER oprocessFrameInput translation.
-// Used during offline resim to replay correct game-native values.
+// Final character-processed input history per team. This remains diagnostic;
+// the netplay timeline carries button-remapped input before character-specific
+// facing, ability, and suppression processing.
 static uint32_t  g_recordedGameInput[2][RING_SIZE];
 
 // Delay/rollback settings — defined here (above IsFrameConfirmed) because the
@@ -482,18 +486,7 @@ extern "C" uint32_t Controller_GetExpectedInput(uint32_t teamIdx, int32_t frame)
 {
     if (frame < 0) return 0;
     uint32_t idx = (uint32_t)frame % RING_SIZE;
-    if (Netplay_IsActive())
-    {
-        bool isLocal = Netplay_IsHost() ? (teamIdx == 0) : (teamIdx == 1);
-        if (isLocal)
-            return g_recordedGameInput[teamIdx & 1][idx];
-        else
-            return g_usedRemoteInput[idx];
-    }
-    else
-    {
-        return g_recordedGameInput[teamIdx & 1][idx];
-    }
+    return g_recordedGameInput[teamIdx & 1][idx];
 }
 extern "C" uint32_t Controller_GetReceivedRemoteInput(int32_t frame)
 {
@@ -571,12 +564,8 @@ extern "C" uint32_t Controller_GetCurrentFrameInput()
     return g_scheduledLocalFrame[idx] == frame ? g_scheduledLocalInput[idx] : 0;
 }
 
-// Override the local team's recorded game input for |frame| to |input|.
-// Called during re-simulation from Rollback_ReSimulate before each tick,
-// using the value saved in that frame's snapshot slot.
-// hkprocessFrameInput reads g_recordedGameInput[localTeamIdx][idx] during
-// re-sim, so pre-populating it from the snapshot makes the hook read the
-// correct historical input without any shift-buffer dependency.
+// Override offline resimulation's recorded input for |frame|. Netplay
+// resimulation reads canonical pre-facing input directly from the snapshot.
 extern "C" void Controller_InjectLocalInput(int32_t frame, uint32_t input)
 {
     uint32_t idx = (uint32_t)(frame >= 0 ? frame : 0) % RING_SIZE;
@@ -946,6 +935,102 @@ extern "C" bool Controller_RemapSyntheticInput(uint32_t rawInput,
     return true;
 }
 
+struct FrameInputRemapContext {
+    uint32_t ownerTeam;
+    uint32_t timelineTeam;
+    int32_t frame;
+    uint32_t timelineInput;
+    bool timelineResolved;
+    bool injectedAtButtonRemap;
+};
+
+static thread_local FrameInputRemapContext* g_frameInputRemapContext = nullptr;
+
+static uint32_t ResolveTimelineInput(FrameInputRemapContext* context,
+                                     uint32_t inputTeam, uint32_t currentInput,
+                                     bool captureCurrent)
+{
+    if (context->timelineResolved && context->timelineTeam == inputTeam)
+        return context->timelineInput;
+
+    context->timelineTeam = inputTeam;
+    uint32_t idx = (uint32_t)context->frame % RING_SIZE;
+    bool isLocal = Netplay_IsHost() ? (inputTeam == 0) : (inputTeam == 1);
+    uint32_t resolved;
+
+    if (g_isResimulating) {
+        uint32_t snapLocal = 0;
+        uint32_t snapRemote = 0;
+        if (Rollback_GetSnapshotInputs(context->frame, &snapLocal, &snapRemote))
+            resolved = isLocal ? snapLocal : snapRemote;
+        else
+            resolved = isLocal ? g_recordedLocalInput[idx] : g_usedRemoteInput[idx];
+    } else if (!isLocal) {
+        resolved = g_usedRemoteInput[idx];
+    } else if (context->frame <= g_delayFrames + g_rollbackFrames) {
+        resolved = 0;
+    } else {
+        if (captureCurrent)
+            g_localPending |= currentInput;
+        resolved = g_scheduledLocalFrame[idx] == context->frame
+            ? g_scheduledLocalInput[idx] : 0;
+    }
+
+    context->timelineInput = resolved;
+    context->timelineResolved = true;
+    return resolved;
+}
+
+static uint32_t __fastcall hkbuttonRemap(uint64_t playerIndex, uint32_t rawInput,
+                                         uint8_t alternateMap)
+{
+    RollbackHookProfileScope profile(RollbackHookProfileId::ButtonRemap);
+    FrameInputRemapContext* context = g_frameInputRemapContext;
+    if (!context || !Netplay_IsActive())
+        return obuttonRemap(playerIndex, rawInput, alternateMap);
+
+    uint32_t inputTeam = playerIndex < 2 ? (uint32_t)playerIndex
+                                         : context->ownerTeam;
+    uint32_t currentInput;
+    uint32_t rawTestInput = 0;
+    if (!g_isResimulating &&
+        AutoTest_GetInput(context->frame, inputTeam, &rawTestInput)) {
+        // Player index 0 has a native focus/menu shortcut that can ignore the
+        // supplied mask. Index 1 always performs ordinary gameplay remapping.
+        currentInput = obuttonRemap(1, rawTestInput, alternateMap);
+    } else {
+        currentInput = obuttonRemap(playerIndex, rawInput, alternateMap);
+    }
+
+    uint32_t resolved = ResolveTimelineInput(
+        context, inputTeam, currentInput, true);
+    context->injectedAtButtonRemap = true;
+    return resolved;
+}
+
+static uint32_t __fastcall hkswapLRIfFaceLeft(uint64_t cChrInput,
+                                              uint32_t input)
+{
+    FrameInputRemapContext* context = g_frameInputRemapContext;
+    if (!context || !Netplay_IsActive())
+        return oswapLRIfFaceLeft(cChrInput, input);
+
+    // The ordinary path already received canonical timeline input from
+    // hkbuttonRemap. Preserve native ability/team transformations applied
+    // between button remapping and facing conversion.
+    if (context->injectedAtButtonRemap)
+        return oswapLRIfFaceLeft(cChrInput, input);
+
+    // Every native source path that produces gameplay input converges on this
+    // helper, including action/CPU paths that bypass buttonRemap. The early
+    // action path leaves mHeld untouched after this call, so update it here as
+    // well as substituting the value passed through native facing conversion.
+    uint32_t resolved = ResolveTimelineInput(
+        context, context->timelineTeam, input, false);
+    *(uint32_t*)(cChrInput + 0x14) = resolved;
+    return oswapLRIfFaceLeft(cChrInput, resolved);
+}
+
 // ---------------------------------------------------------------------------
 // hkGetsCurrentInput_withSOCD
 // Hook on GetsCurrentInput_withSOCD at 0x1402B3700.
@@ -1002,10 +1087,7 @@ static uint64_t __fastcall hkGetsCurrentInput_withSOCD(uint64_t pad, uint32_t pl
             raw = oGetsCurrentInput_withSOCD(pad, playerIndex);
     }
 
-    // --- Capture raw input for ALL players every live frame (both netplay
-    //     and offline/training).  During resim these recorded values are
-    //     returned so the history rings inside cChrInput__processFrameInput
-    //     receive the correct historical inputs instead of current physical. ---
+    // Capture raw input for offline resimulation and input diagnostics.
     if (!g_isResimulating)
     {
         int32_t frame = GetGameFrameCount();
@@ -1015,24 +1097,17 @@ static uint64_t __fastcall hkGetsCurrentInput_withSOCD(uint64_t pad, uint32_t pl
         }
     }
 
-    // --- DURING RESIM: return recorded raw per-player input.
-    //     Note: For online, this value is immediately overwritten by
-    //     sNetPad__readBufferedInputForTeam inside the native
-    //     processFrameInput, so this only affects the offline resim
-    //     path or the intermediate buttonRemap step.
-    //     For online resim the TRUE input source is the netpad ring
-    //     (which we must snapshot-restore separately — see
-    //     Controller_SaveRollbackState sNetPad cursor save).
+    // During offline resimulation, replay the historical physical mask.
+    // Netplay instead injects its canonical logical value in hkbuttonRemap.
     if (g_isResimulating)
     {
         uint32_t idx = (uint32_t)g_resimulateCurrentFrame % RING_SIZE;
         if (is_active)
         {
-            bool isLocalPlayer = Netplay_IsHost() ? (playerIndex == 0) : (playerIndex == 1);
-            if (isLocalPlayer)
-                return g_recordedLocalInput[idx];
-            else
-                return g_usedRemoteInput[idx];
+            // Netplay resimulation injects canonical logical input after the
+            // native raw-to-logical remap. Do not reinterpret that value as a
+            // physical pad mask here.
+            return 0;
         }
         else
         {
@@ -1140,9 +1215,8 @@ static void __fastcall hkStepFighting(uint64_t sAction)
 //     (currentFrame + g_delayFrames - MAX_HISTORY + 1)
 //     → newest slot maps to (currentFrame + g_delayFrames) on the wire
 //
-// hkprocessFrameInput (per character, inside oMove):
-//   LOCAL:  accumulate, overwrite fields with delayed oldInputs value
-//   REMOTE: overwrite fields with g_receivedInput[currentFrame % RING_SIZE]
+// hkprocessFrameInput scopes the current character; hkbuttonRemap captures
+// local logical input and substitutes the scheduled local or remote timeline.
 // ---------------------------------------------------------------------------
 static void DrainAndProcessPackets()
 {
@@ -1772,181 +1846,50 @@ extern "C" void Controller_OnFrameEnd()
 // hkprocessFrameInput
 // Hook on processFrameInput at 0x14002DD60.
 //
-// LOCAL:  accumulate native-processed input, then overwrite character fields
-//         with the delayed value from g_oldInputs.
-// REMOTE: overwrite character fields with g_receivedInput[currentFrame].
-//
-// Both players experience the same delay: local via the shift buffer,
-// remote via the frame-indexed receive array and network transport.
+// Netplay timeline input is substituted by hkbuttonRemap while the original
+// function is running. Native eligibility, facing, ability, pause, and team
+// masks therefore remain authoritative.
 // ---------------------------------------------------------------------------
 static void __fastcall hkprocessFrameInput(uint64_t cChrInput)
 {
     RollbackHookProfileScope profile(RollbackHookProfileId::ProcessFrameInput);
-    // 1. Run native translation first so cChrInput fields (+0x14, etc.) populate normally.
-    oprocessFrameInput(cChrInput);
-
     uint64_t character = *(uint64_t*)(cChrInput + 0x8);
-    if (!character)
-        return;
-
     typedef uint32_t(__fastcall* getTeamIdx_t)(uint64_t);
     static getTeamIdx_t fnGetTeamIdx = (getTeamIdx_t)_addr(ADDR_GET_TEAM_INDEX);
-    uint32_t teamIdx = fnGetTeamIdx(character);
+    uint32_t teamIdx = character ? fnGetTeamIdx(character) : 0;
+    int32_t lookupFrame = g_isResimulating ? g_resimulateCurrentFrame
+                                            : GetGameFrameCount();
 
-    // Frame resolution: use resim frame or live game frame count
-    int32_t lookupFrame = g_isResimulating ? g_resimulateCurrentFrame : GetGameFrameCount();
-    if (lookupFrame < 0)
+    FrameInputRemapContext context = {
+        teamIdx, teamIdx, lookupFrame, 0, false, false
+    };
+    FrameInputRemapContext* previousContext = g_frameInputRemapContext;
+    if (Netplay_IsActive() && character && lookupFrame >= 0)
+        g_frameInputRemapContext = &context;
+    oprocessFrameInput(cChrInput);
+    g_frameInputRemapContext = previousContext;
+
+    if (!character || lookupFrame < 0)
+        return;
+
+    // Native processing clears reserve input, then returns here for ordinary
+    // assists. Preserve the same gate for offline post-native test injection.
+    typedef bool(__fastcall* isGameplayActive_t)(uint64_t);
+    static isGameplayActive_t fnIsGameplayActive =
+        (isGameplayActive_t)_addr(ADDR_IS_GAMEPLAY_ACTIVE);
+    if (!fnIsGameplayActive(cChrInput))
         return;
 
     uint32_t idx = (uint32_t)lookupFrame % RING_SIZE;
 
-    // The pad getter's index identifies a routed hardware slot, which is not a
-    // stable P1/P2 identity in training and dual-training modes. Inject here,
-    // where the owning team is known, but still run the raw mask through the
-    // game's native button map. The caller performs inputMaskPostProcess after
-    // this hook returns, so edge and command histories consume the override.
-    if (!g_isResimulating)
-    {
-        uint32_t rawTestInput = 0;
-        if (AutoTest_GetInput(lookupFrame, teamIdx, &rawTestInput))
-        {
-            // Native player index 0 has a focus/menu shortcut that can return a
-            // configuration aggregate without reading rawTestInput. Index 1
-            // takes the regular direction/button translation path and is safe
-            // for synthetic masks; team ownership is handled independently.
-            uint32_t resolved = 0;
-            if (!Controller_RemapSyntheticInput(rawTestInput, &resolved))
-                resolved = 0;
-            *(uint32_t*)(cChrInput + 0x14)  = resolved;
-            *(uint32_t*)(cChrInput + 0x560) = resolved;
-            *(uint32_t*)(cChrInput + 0x56C) = resolved;
-            *(uint32_t*)(cChrInput + 0x568) = 0;
-        }
-    }
-
     if (Netplay_IsActive())
     {
-        if (g_isResimulating)
-            DiagLogPreOverride(cChrInput, teamIdx);
-
-        if (g_isResimulating)
-        {
-            uint32_t snapLocal = 0;
-            uint32_t snapRemote = 0;
-            if (Rollback_GetSnapshotInputs(lookupFrame, &snapLocal, &snapRemote))
-            {
-                bool isLocal = Netplay_IsHost() ? (teamIdx == 0) : (teamIdx == 1);
-                uint32_t resolved = isLocal ? snapLocal : snapRemote;
-
-                //HookLog("[ResimInput] the local and remote input for this frame was local=0x%08X remote=0x%08X from the snapshot frame %d\n",
-                        //snapLocal, snapRemote, lookupFrame);
-
-                *(uint32_t*)(cChrInput + 0x14)  = resolved; // mHeld
-                *(uint32_t*)(cChrInput + 0x560) = resolved; // mRemapped
-                *(uint32_t*)(cChrInput + 0x56C) = resolved; // mProcessed
-                *(uint32_t*)(cChrInput + 0x568) = 0;        // mMask — clear
-            }
-            else
-            {
-                // Fallback to ring buffer arrays if snapshot lookup fails
-                if (Netplay_IsHost())
-                {
-                    uint32_t resolved = (teamIdx == 0) ? g_recordedGameInput[0][idx] : g_usedRemoteInput[idx];
-                    *(uint32_t*)(cChrInput + 0x14)  = resolved;
-                    *(uint32_t*)(cChrInput + 0x560) = resolved;
-                    *(uint32_t*)(cChrInput + 0x56C) = resolved;
-                    *(uint32_t*)(cChrInput + 0x568) = 0;
-                }
-                else
-                {
-                    uint32_t resolved = (teamIdx == 1) ? g_recordedGameInput[1][idx] : g_usedRemoteInput[idx];
-                    *(uint32_t*)(cChrInput + 0x14)  = resolved;
-                    *(uint32_t*)(cChrInput + 0x560) = resolved;
-                    *(uint32_t*)(cChrInput + 0x56C) = resolved;
-                    *(uint32_t*)(cChrInput + 0x568) = 0;
-                }
-            }
-        }
-        else
-        {
-            // Live Path
-            if (Netplay_IsHost())
-            {
-                if (teamIdx == 0)
-                {
-                    // Host P1 (Local)
-                    if (lookupFrame > g_delayFrames + g_rollbackFrames)
-                    {
-                        g_localPending |= *(uint32_t*)(cChrInput + 0x14);
-                        uint32_t delayed = g_scheduledLocalFrame[idx] == lookupFrame
-                            ? g_scheduledLocalInput[idx] : 0;
-                        g_recordedGameInput[0][idx] = delayed;
-                        *(uint32_t*)(cChrInput + 0x14)  = delayed;
-                        *(uint32_t*)(cChrInput + 0x560) = delayed;
-                        *(uint32_t*)(cChrInput + 0x56C) = delayed;
-                        *(uint32_t*)(cChrInput + 0x568) = 0;
-                    }
-                    else
-                    {
-                        g_recordedGameInput[0][idx] = 0;
-                        *(uint32_t*)(cChrInput + 0x14)  = 0;
-                        *(uint32_t*)(cChrInput + 0x560) = 0;
-                        *(uint32_t*)(cChrInput + 0x56C) = 0;
-                        *(uint32_t*)(cChrInput + 0x568) = 0;
-                    }
-                }
-                else if (teamIdx == 1)
-                {
-                    // Host P2 (Remote)
-                    uint32_t remote = g_usedRemoteInput[idx];
-                    *(uint32_t*)(cChrInput + 0x14)  = remote;
-                    *(uint32_t*)(cChrInput + 0x560) = remote;
-                    *(uint32_t*)(cChrInput + 0x56C) = remote;
-                    *(uint32_t*)(cChrInput + 0x568) = 0;
-                }
-            }
-            else // Client
-            {
-                if (teamIdx == 0)
-                {
-                    // Client P1 (Remote): read centrally-resolved input
-                    uint32_t remote = g_usedRemoteInput[idx];
-                    *(uint32_t*)(cChrInput + 0x14)  = remote;
-                    *(uint32_t*)(cChrInput + 0x560) = remote;
-                    *(uint32_t*)(cChrInput + 0x56C) = remote;
-                    *(uint32_t*)(cChrInput + 0x568) = 0;
-                }
-                else if (teamIdx == 1)
-                {
-                    // Client P2 (Local)
-                    if (lookupFrame > g_delayFrames + g_rollbackFrames)
-                    {
-                        g_localPending |= *(uint32_t*)(cChrInput + 0x14);
-                        uint32_t delayed = g_scheduledLocalFrame[idx] == lookupFrame
-                            ? g_scheduledLocalInput[idx] : 0;
-                        g_recordedGameInput[1][idx] = delayed;
-
-                        *(uint32_t*)(cChrInput + 0x14)  = delayed;
-                        *(uint32_t*)(cChrInput + 0x560) = delayed;
-                        *(uint32_t*)(cChrInput + 0x56C) = delayed;
-                        *(uint32_t*)(cChrInput + 0x568) = 0;
-                    }
-                    else
-                    {
-                        g_recordedGameInput[1][idx] = 0;
-                        *(uint32_t*)(cChrInput + 0x14)  = 0;
-                        *(uint32_t*)(cChrInput + 0x560) = 0;
-                        *(uint32_t*)(cChrInput + 0x56C) = 0;
-                        *(uint32_t*)(cChrInput + 0x568) = 0;
-                    }
-                }
-            }
-        }
+        // The original function has already applied the injected canonical
+        // timeline value and all character-specific transformations.
+        g_recordedGameInput[teamIdx & 1][idx] =
+            *(uint32_t*)(cChrInput + 0x14);
 
         DiagCaptureLiveRef(cChrInput, teamIdx, g_netFrameCount);
-
-        if (g_isResimulating)
-            DiagLogPostOverride(cChrInput, teamIdx);
 
         if (g_postResimFrame >= 0 && !g_isResimulating)
             DiagLogPostResim(cChrInput, teamIdx, g_netFrameCount);
@@ -1955,6 +1898,21 @@ static void __fastcall hkprocessFrameInput(uint64_t cChrInput)
     }
     else // Offline / Singleplayer / F7 test
     {
+        if (!g_isResimulating)
+        {
+            uint32_t rawTestInput = 0;
+            if (AutoTest_GetInput(lookupFrame, teamIdx, &rawTestInput))
+            {
+                uint32_t resolved = 0;
+                if (!Controller_RemapSyntheticInput(rawTestInput, &resolved))
+                    resolved = 0;
+                *(uint32_t*)(cChrInput + 0x14)  = resolved;
+                *(uint32_t*)(cChrInput + 0x560) = resolved;
+                *(uint32_t*)(cChrInput + 0x56C) = resolved;
+                *(uint32_t*)(cChrInput + 0x568) = 0;
+            }
+        }
+
         uint32_t inputVal;
         if (g_isResimulating)
         {
@@ -2069,7 +2027,28 @@ void Controller_InitHooks()
     else
         HookLog("Controller: Failed to hook stepFighting (%d)\n", s);
 
-    obuttonRemap = (decltype(obuttonRemap))_addr(ADDR_BUTTON_REMAP);
+    // Enforce timeline ownership at the common native facing-conversion seam.
+    // This also covers action/CPU sources that bypass buttonRemap.
+    s = MH_CreateHook(
+        (LPVOID)_addr(ADDR_SWAP_LR_IF_FACE_LEFT),
+        (LPVOID)&hkswapLRIfFaceLeft,
+        (LPVOID*)&oswapLRIfFaceLeft
+    );
+    if (s == MH_OK)
+        s = MH_EnableHook((LPVOID)_addr(ADDR_SWAP_LR_IF_FACE_LEFT));
+    if (s != MH_OK)
+        HookLog("Controller: Failed to hook swapLRIfFaceLeft (%d)\n", s);
+
+    // Capture canonical local input after physical button bindings resolve.
+    s = MH_CreateHook(
+        (LPVOID)_addr(ADDR_BUTTON_REMAP),
+        (LPVOID)&hkbuttonRemap,
+        (LPVOID*)&obuttonRemap
+    );
+    if (s == MH_OK)
+        s = MH_EnableHook((LPVOID)_addr(ADDR_BUTTON_REMAP));
+    if (s != MH_OK)
+        HookLog("Controller: Failed to hook buttonRemap (%d)\n", s);
 
     // cChrInput__processFrameInput — netplay client/host synchronization
     s = MH_CreateHook(

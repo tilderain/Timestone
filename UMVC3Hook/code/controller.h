@@ -84,10 +84,8 @@ extern "C" void Controller_ResetFrameEpoch();
 extern "C" void Controller_OnFrameStart();
 extern "C" void Controller_OnFrameEnd();
 
-// Capture the local player's delayed input for the current frame
-// (= g_oldInputs[MAX_HISTORY - g_delayFrames]).  Stored in the snapshot
-// slot so re-simulation reads it from the snapshot rather than relying
-// on a separate shift-buffer save/restore.
+// Return the canonical logical input scheduled for the current frame. It is
+// stored in the snapshot so resimulation does not depend on live device state.
 extern "C" uint32_t Controller_GetCurrentFrameInput();
 
 // Translate a synthetic raw pad mask without the netplay player-index rewrite.
@@ -95,14 +93,12 @@ extern "C" uint32_t Controller_GetCurrentFrameInput();
 extern "C" bool Controller_RemapSyntheticInput(uint32_t rawInput,
                                                 uint32_t* outInput);
 
-// Override the local team's recorded game input for a specific frame
-// to the value saved in that frame's snapshot slot.  Called before
-// each re-sim tick so hkprocessFrameInput reads the snapshot's input.
+// Override offline resimulation's recorded game input for a specific frame.
+// Netplay consumes canonical local input directly from the snapshot.
 extern "C" void Controller_InjectLocalInput(int32_t frame, uint32_t input);
 
-// Override the remote side's input for a specific frame to the value
-// saved in that frame's snapshot slot.  Sets g_usedRemoteInput so
-// hkprocessFrameInput reads the snapshot's remote input during re-sim.
+// Override the remote timeline for a specific frame. Netplay's scoped button
+// remap hook uses the snapshot first and this ring as its fallback.
 extern "C" void Controller_InjectRemoteInput(int32_t frame, uint32_t input);
 
 // Save/restore the local input shift buffer separately, so Rollback_ReSimulate

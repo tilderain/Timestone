@@ -171,18 +171,35 @@ reported as current behavior.
 
 ## Rollback Boundary
 
-`controller.cpp` hooks `cChrInput__processFrameInput` at `0x14002DD60`. During
-custom netplay it records translated local input by absolute frame, resolves
-remote input from the custom history, and overwrites per-character processed
-input for the simulated frame. Re-simulation injects the historical local and
-remote values without treating the current hardware slot as authoritative.
+`controller.cpp` hooks `cChrInput__processFrameInput` at `0x14002DD60` to scope
+timeline ownership to the character currently being processed. A nested hook
+on `cChrInput__buttonRemap` at `0x14002DA30` captures local input after physical
+button bindings become logical actions and substitutes delayed or remote input
+on the ordinary pad path. A second scoped hook at
+`cChrInput__swapLRIfFaceLeft` (`0x14002E560`) enforces the timeline for native
+action/CPU sources that bypass `buttonRemap`. The rest of native processing
+remains authoritative for facing conversion, ability inversion, team state,
+pause suppression, and final per-character fields. Re-simulation injects the
+same canonical pre-facing logical values from snapshots.
+
+The native function gates character input through
+`cChrInput__isGameplayActive` at `0x14002DCE0`. Member 0 is accepted directly.
+A reserve member is accepted only while eligible for a team transition, or
+while native active/local-control rules select it. An ordinary on-screen assist
+fails this gate after native processing clears its input. Because the timeline
+hooks run only inside the native function after this gate, they cannot
+repopulate an assist after its early return. The explicit predicate retained by
+the outer hook protects the separate offline post-native autotest path.
 
 ## Key Addresses
 
 | Address | Function |
 |---|---|
 | `0x140001B00` | `sPad__getInstance` |
+| `0x14002DA30` | `cChrInput__buttonRemap` |
+| `0x14002DCE0` | `cChrInput__isGameplayActive` |
 | `0x14002DD60` | `cChrInput__processFrameInput` |
+| `0x14002E560` | `cChrInput__swapLRIfFaceLeft` |
 | `0x1402B3700` | Main slot/keyboard getter with SOCD cleaning |
 | `0x1402B3950` | Alternate slot/keyboard getter with SOCD cleaning |
 | `0x14050FBA0` | `sPad` constructor |
