@@ -82,6 +82,9 @@ bool g_pingLocationPublished = false;
 ULONGLONG g_nextPingLocationAttempt = 0;
 ULONGLONG g_nextResultPingRefresh = 0;
 ULONGLONG g_resultPingRefreshDeadline = 0;
+HANDLE g_callbackThread = nullptr;
+volatile LONG g_stopCallbackThread = 0;
+bool g_callbacksOnUiThread = false;
 char g_status[256] = "Steam is not initialized";
 
 template <typename T>
@@ -136,6 +139,74 @@ bool ResolveExports()
     ok &= Resolve(g_api.IsCallCompleted, "SteamAPI_ISteamUtils_IsAPICallCompleted");
     ok &= Resolve(g_api.GetCallResult, "SteamAPI_ISteamUtils_GetAPICallResult");
     return ok;
+}
+
+DWORD WINAPI CallbackPumpThread(LPVOID)
+{
+    while (InterlockedCompareExchange(&g_stopCallbackThread, 0, 0) == 0) {
+        g_api.RunCallbacks();
+        Sleep(10);
+    }
+    return 0;
+}
+
+bool IsValveSteamApi()
+{
+    char path[MAX_PATH];
+    if (!GetModuleFileNameA(g_api.module, path, sizeof(path))) return false;
+
+    DWORD ignored = 0;
+    DWORD size = GetFileVersionInfoSizeA(path, &ignored);
+    if (!size) return false;
+    void* versionInfo = HeapAlloc(GetProcessHeap(), 0, size);
+    if (!versionInfo) return false;
+
+    bool isValve = false;
+    if (GetFileVersionInfoA(path, 0, size, versionInfo)) {
+        struct Translation { WORD language; WORD codePage; };
+        Translation* translations = nullptr;
+        UINT translationBytes = 0;
+        if (VerQueryValueA(versionInfo, "\\VarFileInfo\\Translation",
+                           reinterpret_cast<void**>(&translations), &translationBytes)) {
+            size_t count = translationBytes / sizeof(Translation);
+            for (size_t i = 0; i < count && !isValve; ++i) {
+                char query[64];
+                snprintf(query, sizeof(query), "\\StringFileInfo\\%04x%04x\\CompanyName",
+                         translations[i].language, translations[i].codePage);
+                char* company = nullptr;
+                UINT companyLength = 0;
+                if (VerQueryValueA(versionInfo, query, reinterpret_cast<void**>(&company),
+                                   &companyLength) && company) {
+                    for (const char* p = company; *p; ++p) {
+                        if (_strnicmp(p, "Valve", 5) == 0) {
+                            isValve = true;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    HeapFree(GetProcessHeap(), 0, versionInfo);
+    return isValve;
+}
+
+void StartCallbackPump()
+{
+    if (g_callbacksOnUiThread || g_callbackThread) return;
+    InterlockedExchange(&g_stopCallbackThread, 0);
+    g_callbackThread = CreateThread(nullptr, 0, CallbackPumpThread, nullptr, 0, nullptr);
+    if (!g_callbackThread)
+        HookLog("SteamLobby: failed to start Steam callback pump\n");
+}
+
+void StopCallbackPump()
+{
+    if (!g_callbackThread) return;
+    InterlockedExchange(&g_stopCallbackThread, 1);
+    WaitForSingleObject(g_callbackThread, 250);
+    CloseHandle(g_callbackThread);
+    g_callbackThread = nullptr;
 }
 
 template <typename T>
@@ -325,7 +396,10 @@ void PumpConnection()
 
 bool SteamLobby_Initialize()
 {
-    if (g_matchmaking && g_sockets) return true;
+    if (g_matchmaking && g_sockets) {
+        StartCallbackPump();
+        return true;
+    }
     g_api.module = GetModuleHandleA("steam_api64.dll");
     if (!g_api.module) g_api.module = LoadLibraryA("steam_api64.dll");
     if (!g_api.module) {
@@ -336,6 +410,9 @@ bool SteamLobby_Initialize()
         SetStatus("SteamAPI_Init failed; launch the game through Steam");
         return false;
     }
+    g_callbacksOnUiThread = IsValveSteamApi();
+    HookLog("SteamLobby: callback pump mode: %s\n",
+            g_callbacksOnUiThread ? "launch thread (Valve Steam API)" : "worker thread (compatibility)");
 
     void* client = g_api.GetClient();
     HSteamUser user = g_api.GetUser();
@@ -362,10 +439,12 @@ bool SteamLobby_Initialize()
         return false;
     }
     if (!g_networkingUtils) {
+        StartCallbackPump();
         SetStatus("Steam ready; ping estimates unavailable");
         return true;
     }
     g_networkingUtils->CheckPingDataUpToDate(1.0e10f);
+    StartCallbackPump();
     SetStatus("Steam ready");
     return true;
 }
@@ -402,7 +481,7 @@ void SteamLobby_Join(uint64_t lobbyId)
 void SteamLobby_Pump()
 {
     if (!g_matchmaking || !g_utils) return;
-    g_api.RunCallbacks();
+    if (g_callbacksOnUiThread) g_api.RunCallbacks();
 
     if (g_pendingCall == PendingCall::Search) {
         LobbyMatchList_t result = {};
@@ -529,6 +608,7 @@ bool SteamLobby_TakeNetworkHandles(ENetHost** outHost, ENetPeer** outPeer,
 
 void SteamLobby_Shutdown(bool preserveConnection)
 {
+    StopCallbackPump();
     if (preserveConnection) return;
     SteamTransport_Shutdown();
     if (g_sockets && g_listenSocket != k_HSteamListenSocket_Invalid)
