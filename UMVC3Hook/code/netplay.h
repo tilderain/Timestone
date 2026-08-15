@@ -48,6 +48,8 @@ enum PacketType : uint32_t {
     PACKET_AUTOTEST_START = 11, // AutoTestStartPacket
     PACKET_AUTOTEST_FRAME = 12, // AutoTestFramePacket
     PACKET_AUTOTEST_COMPLETE = 13, // AutoTestCompletePacket
+    PACKET_LAUNCH_P2_SELECTION = 14, // LaunchP2SelectionPacket
+    PACKET_LAUNCH_P1_SELECTION = 15, // LaunchP1SelectionPacket
 };
 
 #pragma pack(push, 1)
@@ -88,6 +90,21 @@ struct LaunchTrainingPacket {
     int32_t  p2Assists[3];
     int32_t  stageId;
     uint32_t flags;              // LaunchTrainingFlags
+};
+
+struct LaunchP2SelectionPacket {
+    uint32_t type;               // PACKET_LAUNCH_P2_SELECTION
+    int32_t  chars[3];
+    int32_t  colors[3];          // zero-based archive variant IDs
+    int32_t  assists[3];         // 0=Alpha, 1=Beta, 2=Gamma
+    uint32_t ready;
+};
+
+struct LaunchP1SelectionPacket {
+    uint32_t type;               // PACKET_LAUNCH_P1_SELECTION
+    int32_t  chars[3];
+    int32_t  colors[3];          // zero-based archive variant IDs
+    int32_t  assists[3];         // 0=Alpha, 1=Beta, 2=Gamma
 };
 
 enum LaunchTrainingFlags : uint32_t {

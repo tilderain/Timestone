@@ -75,6 +75,8 @@ static LaunchDialogConfig g_dialogConfig = {
     nullptr      // enetPeer
 };
 static bool      g_isHost = false;          // true if we clicked Host, false if Connect
+static bool      g_localReady = false;
+static bool      g_peerReady = false;
 static bool      g_autoTestLaunch = false;
 static COLORREF  g_statusColor = RGB(0, 0, 0); // default black for status text
 static HBRUSH    g_hStatusBrush = nullptr;
@@ -114,8 +116,8 @@ static bool IsValidTrainingLaunchPacket(const LaunchTrainingPacket& packet)
     if (packet.type != PACKET_LAUNCH_TRAINING)
         return false;
     for (int i = 0; i < 3; ++i) {
-        if (packet.p1Chars[i] < 1 || packet.p1Chars[i] >= kCharNameCount ||
-            packet.p2Chars[i] < 1 || packet.p2Chars[i] >= kCharNameCount ||
+        if (packet.p1Chars[i] < 0 || packet.p1Chars[i] >= kCharNameCount ||
+            packet.p2Chars[i] < 0 || packet.p2Chars[i] >= kCharNameCount ||
             packet.p1Colors[i] < 0 ||
             packet.p1Colors[i] >= GetCharacterArchiveVariantCount(packet.p1Chars[i]) ||
             packet.p2Colors[i] < 0 ||
@@ -359,6 +361,9 @@ enum CtrlId {
     ID_P2_ASSIST1         = 2024,
     ID_P2_ASSIST2         = 2025,
     ID_P2_ASSIST3         = 2026,
+    ID_RANDOMIZE_CHARS    = 2030,
+    ID_P2_LABEL           = 2031,
+    ID_PEER_READY         = 2032,
     // Stage combo
     ID_STAGE              = 2101,
     // Network controls
@@ -386,10 +391,16 @@ static void PopulateStageCombo(HWND hCombo, int defaultStageId);
 static int FindStageIndex(int stageId);
 static void UpdateCharFromCombo(HWND hDlg, int comboId, int slotIndex, int team);
 static void UpdateSlotOptionsFromCombos(HWND hDlg);
+static void RandomizeCharacters(HWND hDlg);
+static void ConfigureConnectedControls(HWND hDlg);
+static void SendP1Selection(HWND hDlg);
+static void SendP2Selection(HWND hDlg);
+static bool ApplyP1Selection(HWND hDlg, const LaunchP1SelectionPacket& packet);
+static bool ApplyP2Selection(HWND hDlg, const LaunchP2SelectionPacket& packet);
 static DWORD WINAPI NetworkPollThread(LPVOID lpParam);
 static void CleanupNetwork(HWND hDlg, bool forceCleanup = false);
 
-static void DisableClientMenuControls(HWND hDlg)
+static void ConfigureConnectedControls(HWND hDlg)
 {
     for (HWND child = GetWindow(hDlg, GW_CHILD); child;
          child = GetWindow(child, GW_HWNDNEXT)) {
@@ -402,22 +413,141 @@ static void DisableClientMenuControls(HWND hDlg)
             EnableWindow(child, FALSE);
         }
     }
-    HookLog("UMVC3Hook: Client menu controls disabled after connection\n");
+
+    if (g_isHost) {
+        for (int i = 0; i < 3; ++i) {
+            EnableWindow(GetDlgItem(hDlg, ID_P1_SLOT1 + i), TRUE);
+            EnableWindow(GetDlgItem(hDlg, ID_P1_COLOR1 + i), TRUE);
+            EnableWindow(GetDlgItem(hDlg, ID_P1_ASSIST1 + i), TRUE);
+        }
+        EnableWindow(GetDlgItem(hDlg, ID_STAGE), TRUE);
+        EnableWindow(GetDlgItem(hDlg, ID_LAUNCH_TRAINING), g_peerReady ? TRUE : FALSE);
+        SetWindowTextA(GetDlgItem(hDlg, ID_PEER_READY),
+                       g_peerReady ? "Peer ready" : "Peer not ready");
+        HookLog("UMVC3Hook: Host owns P1; waiting for peer P2 selection\n");
+    } else {
+        for (int i = 0; i < 3; ++i) {
+            EnableWindow(GetDlgItem(hDlg, ID_P2_SLOT1 + i), TRUE);
+            EnableWindow(GetDlgItem(hDlg, ID_P2_COLOR1 + i), TRUE);
+            EnableWindow(GetDlgItem(hDlg, ID_P2_ASSIST1 + i), TRUE);
+        }
+        EnableWindow(GetDlgItem(hDlg, ID_PEER_READY), TRUE);
+        SetWindowTextA(GetDlgItem(hDlg, ID_PEER_READY),
+                       g_localReady ? "Not Ready" : "Ready");
+        HookLog("UMVC3Hook: Client controls enabled for P2 selection\n");
+    }
 }
 
-static void DisableHostButtonsExceptTraining(HWND hDlg)
+static void SendP2Selection(HWND hDlg)
 {
-    for (HWND child = GetWindow(hDlg, GW_CHILD); child;
-         child = GetWindow(child, GW_HWNDNEXT)) {
-        char className[32] = {};
-        GetClassNameA(child, className, sizeof(className));
-        if (_stricmp(className, "BUTTON") == 0 &&
-            (GetWindowLongPtrA(child, GWL_STYLE) & BS_TYPEMASK) != BS_GROUPBOX &&
-            GetDlgCtrlID(child) != ID_LAUNCH_TRAINING) {
-            EnableWindow(child, FALSE);
-        }
+    if (g_isHost || !g_dialogConfig.enetHost || !g_dialogConfig.enetPeer) return;
+
+    for (int i = 0; i < 3; ++i)
+        UpdateCharFromCombo(hDlg, ID_P2_SLOT1 + i, i, 1);
+    UpdateSlotOptionsFromCombos(hDlg);
+
+    LaunchP2SelectionPacket packet = {};
+    packet.type = PACKET_LAUNCH_P2_SELECTION;
+    for (int i = 0; i < 3; ++i) {
+        packet.chars[i] = g_dialogConfig.p2Chars[i];
+        packet.colors[i] = g_dialogConfig.p2Colors[i];
+        packet.assists[i] = g_dialogConfig.p2Assists[i];
     }
-    HookLog("UMVC3Hook: Host buttons disabled after client connection\n");
+    packet.ready = g_localReady ? 1 : 0;
+
+    ENetPacket* enetPacket = enet_packet_create(
+        &packet, sizeof(packet), ENET_PACKET_FLAG_RELIABLE);
+    if (!enetPacket || enet_peer_send(g_dialogConfig.enetPeer, 0, enetPacket) != 0) {
+        if (enetPacket) enet_packet_destroy(enetPacket);
+        HookLog("UMVC3Hook: Failed to send P2 launch selection\n");
+        return;
+    }
+    enet_host_flush(g_dialogConfig.enetHost);
+    HookLog("UMVC3Hook: Sent P2 selection ready=%u\n", packet.ready);
+}
+
+static void SendP1Selection(HWND hDlg)
+{
+    if (!g_isHost || !g_dialogConfig.enetHost || !g_dialogConfig.enetPeer) return;
+
+    for (int i = 0; i < 3; ++i)
+        UpdateCharFromCombo(hDlg, ID_P1_SLOT1 + i, i, 0);
+    UpdateSlotOptionsFromCombos(hDlg);
+
+    LaunchP1SelectionPacket packet = {};
+    packet.type = PACKET_LAUNCH_P1_SELECTION;
+    for (int i = 0; i < 3; ++i) {
+        packet.chars[i] = g_dialogConfig.p1Chars[i];
+        packet.colors[i] = g_dialogConfig.p1Colors[i];
+        packet.assists[i] = g_dialogConfig.p1Assists[i];
+    }
+
+    ENetPacket* enetPacket = enet_packet_create(
+        &packet, sizeof(packet), ENET_PACKET_FLAG_RELIABLE);
+    if (!enetPacket || enet_peer_send(g_dialogConfig.enetPeer, 0, enetPacket) != 0) {
+        if (enetPacket) enet_packet_destroy(enetPacket);
+        HookLog("UMVC3Hook: Failed to send P1 launch selection\n");
+        return;
+    }
+    enet_host_flush(g_dialogConfig.enetHost);
+    HookLog("UMVC3Hook: Sent P1 launch selection\n");
+}
+
+static bool ApplyP1Selection(HWND hDlg, const LaunchP1SelectionPacket& packet)
+{
+    if (g_isHost || packet.type != PACKET_LAUNCH_P1_SELECTION) return false;
+    for (int i = 0; i < 3; ++i) {
+        if (packet.chars[i] < 0 || packet.chars[i] >= kCharNameCount ||
+            packet.colors[i] < 0 ||
+            packet.colors[i] >= GetCharacterArchiveVariantCount(packet.chars[i]) ||
+            packet.assists[i] < 0 || packet.assists[i] > 2)
+            return false;
+    }
+
+    for (int i = 0; i < 3; ++i) {
+        g_dialogConfig.p1Chars[i] = packet.chars[i];
+        g_dialogConfig.p1Colors[i] = packet.colors[i];
+        g_dialogConfig.p1Assists[i] = packet.assists[i];
+        SendMessageA(GetDlgItem(hDlg, ID_P1_SLOT1 + i),
+                     CB_SETCURSEL, packet.chars[i], 0);
+        PopulateColorCombo(GetDlgItem(hDlg, ID_P1_COLOR1 + i),
+                           packet.chars[i], packet.colors[i]);
+        PopulateAssistCombo(GetDlgItem(hDlg, ID_P1_ASSIST1 + i),
+                            packet.chars[i], packet.assists[i]);
+    }
+    HookLog("UMVC3Hook: Applied host P1 launch selection\n");
+    return true;
+}
+
+static bool ApplyP2Selection(HWND hDlg, const LaunchP2SelectionPacket& packet)
+{
+    if (!g_isHost || packet.type != PACKET_LAUNCH_P2_SELECTION || packet.ready > 1)
+        return false;
+    for (int i = 0; i < 3; ++i) {
+        if (packet.chars[i] < 0 || packet.chars[i] >= kCharNameCount ||
+            packet.colors[i] < 0 ||
+            packet.colors[i] >= GetCharacterArchiveVariantCount(packet.chars[i]) ||
+            packet.assists[i] < 0 || packet.assists[i] > 2)
+            return false;
+    }
+
+    for (int i = 0; i < 3; ++i) {
+        g_dialogConfig.p2Chars[i] = packet.chars[i];
+        g_dialogConfig.p2Colors[i] = packet.colors[i];
+        g_dialogConfig.p2Assists[i] = packet.assists[i];
+        SendMessageA(GetDlgItem(hDlg, ID_P2_SLOT1 + i),
+                     CB_SETCURSEL, packet.chars[i], 0);
+        PopulateColorCombo(GetDlgItem(hDlg, ID_P2_COLOR1 + i),
+                           packet.chars[i], packet.colors[i]);
+        PopulateAssistCombo(GetDlgItem(hDlg, ID_P2_ASSIST1 + i),
+                            packet.chars[i], packet.assists[i]);
+    }
+    g_peerReady = packet.ready != 0;
+    EnableWindow(GetDlgItem(hDlg, ID_LAUNCH_TRAINING), g_peerReady ? TRUE : FALSE);
+    SetWindowTextA(GetDlgItem(hDlg, ID_PEER_READY),
+                   g_peerReady ? "Peer ready" : "Peer not ready");
+    HookLog("UMVC3Hook: Applied peer P2 selection ready=%u\n", packet.ready);
+    return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -425,6 +555,8 @@ static void DisableHostButtonsExceptTraining(HWND hDlg)
 // ---------------------------------------------------------------------------
 LaunchOption ShowLaunchMenu()
 {
+    g_localReady = false;
+    g_peerReady = false;
     HINSTANCE hInst = GetModuleHandle(NULL);
     INITCOMMONCONTROLSEX controls = {sizeof(controls), ICC_LISTVIEW_CLASSES};
     InitCommonControlsEx(&controls);
@@ -593,7 +725,11 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
 
         // ---- Title ----
         CreateWindowA("STATIC", "Configure launch mode and match settings:",
-            WS_VISIBLE | WS_CHILD, leftX, y, contentW, 18, hDlg, NULL, NULL, NULL);
+            WS_VISIBLE | WS_CHILD, leftX, y, 600, 18, hDlg, NULL, NULL, NULL);
+        CreateWindowA("BUTTON", "Randomize Characters",
+            WS_VISIBLE | WS_CHILD | WS_TABSTOP | BS_PUSHBUTTON,
+            leftX + 620, y - 4, 180, 26,
+            hDlg, (HMENU)ID_RANDOMIZE_CHARS, NULL, NULL);
         y += 28;
 
         // ---- Character Select Section ----
@@ -615,7 +751,8 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
         for (int col = 0; col < 2; ++col) {
             int cx = col == 0 ? leftX + 10 : left2X;
             CreateWindowA("STATIC", col == 0 ? "P1" : "P2",
-                WS_VISIBLE | WS_CHILD, cx, y, 22, 18, hDlg, NULL, NULL, NULL);
+                WS_VISIBLE | WS_CHILD, cx, y, 22, 18,
+                hDlg, col == 0 ? NULL : (HMENU)ID_P2_LABEL, NULL, NULL);
             CreateWindowA("STATIC", "Character",
                 WS_VISIBLE | WS_CHILD, cx + 24, y, 130, 18, hDlg, NULL, NULL, NULL);
             CreateWindowA("STATIC", "Color",
@@ -790,13 +927,17 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
         y += 10;
         CreateWindowA("STATIC", "Choose how to launch the game:",
             WS_VISIBLE | WS_CHILD, leftX, y, 300, 18, hDlg, NULL, NULL, NULL);
+        CreateWindowA("BUTTON", "Ready",
+            WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON | WS_DISABLED,
+            leftX + 650, y - 5, 150, 26,
+            hDlg, (HMENU)ID_PEER_READY, NULL, NULL);
         y += 25;
 
         CreateWindowA("BUTTON", "Launch Normally",
             WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON,
             leftX, y, 395, 32, hDlg, (HMENU)ID_LAUNCH_NORMAL, NULL, NULL);
 
-        CreateWindowA("BUTTON", "Launch into Training Mode",
+        CreateWindowA("BUTTON", "Launch into Battle",
             WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON,
             leftX + 405, y, 395, 32, hDlg, (HMENU)ID_LAUNCH_TRAINING, NULL, NULL);
         y += 38;
@@ -882,8 +1023,9 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
                     g_statusColor = steamIsHost ? RGB(0, 120, 215) : RGB(200, 180, 0);
                     InvalidateRect(hStatus, NULL, TRUE);
                 }
-                if (steamIsHost) DisableHostButtonsExceptTraining(hDlg);
-                else DisableClientMenuControls(hDlg);
+                ConfigureConnectedControls(hDlg);
+                if (steamIsHost) SendP1Selection(hDlg);
+                else SendP2Selection(hDlg);
             }
             return 0;
         }
@@ -909,11 +1051,15 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
                             if (g_isHost) {
                                 SetWindowTextA(hStatus, "Client connected");
                                 g_statusColor = RGB(0, 120, 215);
-                                DisableHostButtonsExceptTraining(hDlg);
+                                g_peerReady = false;
+                                ConfigureConnectedControls(hDlg);
+                                SendP1Selection(hDlg);
                             } else {
-                                SetWindowTextA(hStatus, "Connected");
+                                SetWindowTextA(hStatus, "Connected - select your P2 team");
                                 g_statusColor = RGB(200, 180, 0);
-                                DisableClientMenuControls(hDlg);
+                                g_localReady = false;
+                                ConfigureConnectedControls(hDlg);
+                                SendP2Selection(hDlg);
                             }
                             InvalidateRect(hStatus, NULL, TRUE);
                         }
@@ -924,10 +1070,24 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
                             ip[0], ip[1], ip[2], ip[3],
                             event.peer->address.port);
                         g_dialogConfig.enetPeer = nullptr;
+                        g_localReady = false;
+                        g_peerReady = false;
                         CleanupNetwork(hDlg, true);
                     }
                     else if (event.type == ENET_EVENT_TYPE_RECEIVE) {
-                        if (event.packet->dataLength == sizeof(LaunchTrainingPacket) &&
+                        if (event.packet->dataLength == sizeof(LaunchP1SelectionPacket) &&
+                            *(uint32_t*)event.packet->data == PACKET_LAUNCH_P1_SELECTION) {
+                            if (!ApplyP1Selection(hDlg,
+                                    *(const LaunchP1SelectionPacket*)event.packet->data))
+                                HookLog("UMVC3Hook: Rejected invalid P1 launch selection\n");
+                        }
+                        else if (event.packet->dataLength == sizeof(LaunchP2SelectionPacket) &&
+                            *(uint32_t*)event.packet->data == PACKET_LAUNCH_P2_SELECTION) {
+                            if (!ApplyP2Selection(hDlg,
+                                    *(const LaunchP2SelectionPacket*)event.packet->data))
+                                HookLog("UMVC3Hook: Rejected invalid P2 launch selection\n");
+                        }
+                        else if (event.packet->dataLength == sizeof(LaunchTrainingPacket) &&
                             *(uint32_t*)event.packet->data == PACKET_LAUNCH_TRAINING) {
                             const LaunchTrainingPacket* launch =
                                 (const LaunchTrainingPacket*)event.packet->data;
@@ -956,6 +1116,20 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
 
     case WM_COMMAND:
         switch (LOWORD(wParam)) {
+        case ID_RANDOMIZE_CHARS:
+            RandomizeCharacters(hDlg);
+            return 0;
+
+        case ID_PEER_READY:
+            if (!g_isHost && g_dialogConfig.enetPeer) {
+                g_localReady = !g_localReady;
+                SetWindowTextA(GetDlgItem(hDlg, ID_PEER_READY),
+                               g_localReady ? "Not Ready" : "Ready");
+                if (g_localReady) SaveRollbackSettings();
+                SendP2Selection(hDlg);
+            }
+            return 0;
+
         // ---- Launch buttons ----
         case ID_LAUNCH_NORMAL:
         {
@@ -987,6 +1161,11 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
         case ID_LAUNCH_DUAL_CPUS:
         case ID_LAUNCH_DUAL_P2_CPU:
         {
+            if (LOWORD(wParam) == ID_LAUNCH_TRAINING && g_isHost &&
+                g_dialogConfig.enetPeer && !g_peerReady) {
+                HookLog("UMVC3Hook: Launch ignored because peer is not ready\n");
+                return 0;
+            }
             // Read character selections from combo boxes
             for (int i = 0; i < 3; i++) {
                 UpdateCharFromCombo(hDlg, ID_P1_SLOT1 + i, i, 0);
@@ -1097,14 +1276,40 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
                     }
                 }
             }
+            if (HIWORD(wParam) == CBN_SELCHANGE && !g_isHost &&
+                LOWORD(wParam) >= ID_P2_SLOT1 &&
+                LOWORD(wParam) <= ID_P2_SLOT3 && g_dialogConfig.enetPeer) {
+                g_localReady = false;
+                SetWindowTextA(GetDlgItem(hDlg, ID_PEER_READY), "Ready");
+                SendP2Selection(hDlg);
+            }
+            if (HIWORD(wParam) == CBN_SELCHANGE && g_isHost &&
+                LOWORD(wParam) >= ID_P1_SLOT1 &&
+                LOWORD(wParam) <= ID_P1_SLOT3 && g_dialogConfig.enetPeer)
+                SendP1Selection(hDlg);
             return 0;
 
         case ID_P1_COLOR1: case ID_P1_COLOR2: case ID_P1_COLOR3:
         case ID_P2_COLOR1: case ID_P2_COLOR2: case ID_P2_COLOR3:
         case ID_P1_ASSIST1: case ID_P1_ASSIST2: case ID_P1_ASSIST3:
         case ID_P2_ASSIST1: case ID_P2_ASSIST2: case ID_P2_ASSIST3:
-            if (HIWORD(wParam) == CBN_SELCHANGE)
+            if (HIWORD(wParam) == CBN_SELCHANGE) {
                 UpdateSlotOptionsFromCombos(hDlg);
+                int controlId = LOWORD(wParam);
+                if (!g_isHost &&
+                    ((controlId >= ID_P2_COLOR1 && controlId <= ID_P2_COLOR3) ||
+                     (controlId >= ID_P2_ASSIST1 && controlId <= ID_P2_ASSIST3)) &&
+                    g_dialogConfig.enetPeer) {
+                    g_localReady = false;
+                    SetWindowTextA(GetDlgItem(hDlg, ID_PEER_READY), "Ready");
+                    SendP2Selection(hDlg);
+                }
+                if (g_isHost &&
+                    ((controlId >= ID_P1_COLOR1 && controlId <= ID_P1_COLOR3) ||
+                     (controlId >= ID_P1_ASSIST1 && controlId <= ID_P1_ASSIST3)) &&
+                    g_dialogConfig.enetPeer)
+                    SendP1Selection(hDlg);
+            }
             return 0;
 
         // ---- Stage combo box ----
@@ -1471,6 +1676,58 @@ static void UpdateSlotOptionsFromCombos(HWND hDlg)
         } else {
             g_dialogConfig.p2Colors[index - 3] = color;
             g_dialogConfig.p2Assists[index - 3] = assist;
+        }
+    }
+}
+
+static uint32_t NextCharacterRandom()
+{
+    static uint32_t state = 0;
+    if (state == 0) {
+        LARGE_INTEGER counter = {};
+        QueryPerformanceCounter(&counter);
+        state = static_cast<uint32_t>(counter.QuadPart) ^
+                static_cast<uint32_t>(counter.QuadPart >> 32) ^
+                static_cast<uint32_t>(GetTickCount64());
+        if (state == 0) state = 1;
+    }
+    state ^= state << 13;
+    state ^= state >> 17;
+    state ^= state << 5;
+    return state;
+}
+
+static void RandomizeCharacters(HWND hDlg)
+{
+    constexpr int kPlayableCharacterCount = 50;
+    for (int team = 0; team < 2; ++team) {
+        int characters[kPlayableCharacterCount];
+        for (int i = 0; i < kPlayableCharacterCount; ++i)
+            characters[i] = i + 1;
+
+        for (int slot = 0; slot < 3; ++slot) {
+            int selected = slot + static_cast<int>(
+                NextCharacterRandom() % (kPlayableCharacterCount - slot));
+            std::swap(characters[slot], characters[selected]);
+            int characterId = characters[slot];
+            int index = team * 3 + slot;
+            int* teamCharacters = team == 0
+                ? g_dialogConfig.p1Chars : g_dialogConfig.p2Chars;
+            int* teamColors = team == 0
+                ? g_dialogConfig.p1Colors : g_dialogConfig.p2Colors;
+            int* teamAssists = team == 0
+                ? g_dialogConfig.p1Assists : g_dialogConfig.p2Assists;
+
+            teamCharacters[slot] = characterId;
+            teamColors[slot] = static_cast<int>(NextCharacterRandom() %
+                GetCharacterArchiveVariantCount(characterId));
+            teamAssists[slot] = static_cast<int>(NextCharacterRandom() % 3);
+            SendMessageA(GetDlgItem(hDlg, ID_P1_SLOT1 + index),
+                         CB_SETCURSEL, characterId, 0);
+            PopulateColorCombo(GetDlgItem(hDlg, ID_P1_COLOR1 + index),
+                               characterId, teamColors[slot]);
+            PopulateAssistCombo(GetDlgItem(hDlg, ID_P1_ASSIST1 + index),
+                                characterId, teamAssists[slot]);
         }
     }
 }
