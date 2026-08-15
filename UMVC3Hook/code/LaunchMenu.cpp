@@ -15,7 +15,7 @@ extern void HookLogSetFile(const char* filename);
 // Character and stage name tables
 // ---------------------------------------------------------------------------
 const char* kCharNames[] = {
-    "Random",
+    "None",
     "Ryu", "Chun-Li", "Akuma", "Chris", "Wesker",
     "Viewtiful Joe", "Dante", "Trish", "Frank West", "Spencer",
     "Arthur", "Amaterasu", "Zero", "Tron", "Morrigan",
@@ -64,7 +64,7 @@ static LaunchDialogConfig g_dialogConfig = {
     {0, 0, 0},   // p2Colors
     {0, 0, 0},   // p1Assists (Alpha)
     {0, 0, 0},   // p2Assists (Alpha)
-    0,           // stageId (Training Room)
+    STAGE_BONNE_WONDERLAND,
     "",          // hostIp
     7777,       // hostPort
     false,       // hostEnabled
@@ -146,6 +146,8 @@ static void LoadRollbackSettings()
         g_dialogConfig.p1Assists[i] = std::clamp(g_dialogConfig.p1Assists[i], 0, 2);
         g_dialogConfig.p2Assists[i] = std::clamp(g_dialogConfig.p2Assists[i], 0, 2);
     }
+    g_dialogConfig.stageId = GetPrivateProfileIntA(
+        "Training", "StageId", STAGE_BONNE_WONDERLAND, rollbackPath);
 
     char settingsPath[MAX_PATH] = {};
     GetSettingsPath("HeroNet.ini", settingsPath, sizeof(settingsPath));
@@ -187,6 +189,9 @@ static void SaveRollbackSettings()
         snprintf(value, sizeof(value), "%d", g_dialogConfig.p2Assists[i]);
         WritePrivateProfileStringA("P2", key, value, rollbackPath);
     }
+    char stageId[16];
+    snprintf(stageId, sizeof(stageId), "%d", g_dialogConfig.stageId);
+    WritePrivateProfileStringA("Training", "StageId", stageId, rollbackPath);
 
     char settingsPath[MAX_PATH] = {};
     GetSettingsPath("HeroNet.ini", settingsPath, sizeof(settingsPath));
