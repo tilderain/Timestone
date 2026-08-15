@@ -321,7 +321,10 @@ static int32_t   g_confirmedChecksumThrough = -1;
 static int32_t   g_lastAdvertisedChecksumFrame = -1;
 
 static constexpr uint32_t DESYNC_THRESHOLD         = 0;
-static constexpr int32_t  DESYNC_SKIP_FRAMES       = 0;
+// Restart setup can remain transient briefly after both peers report fighting.
+// Start each checksum epoch after that state has settled instead of treating
+// fresh startup differences as persistent match desyncs.
+static constexpr int32_t  DESYNC_SKIP_FRAMES       = 250;
 static constexpr int32_t  DESYNC_CONSECUTIVE_MIN   = 2;
 
 static void ResetDesyncDetection()
@@ -466,6 +469,8 @@ extern "C" void Controller_ClearDesyncDetection()
     // checksum epoch at the current frame instead of waiting forever for
     // checksum records from earlier frames that were intentionally discarded.
     int32_t firstFrame = GetGameFrameCount();
+    if (firstFrame < DESYNC_SKIP_FRAMES)
+        firstFrame = DESYNC_SKIP_FRAMES;
     if (firstFrame > 0)
     {
         g_confirmedChecksumThrough = firstFrame - 1;
