@@ -84,6 +84,7 @@ static constexpr uintptr_t ADDR_PROCESS_FRAME_INPUT       = 0x14002DD60;
 static constexpr uintptr_t ADDR_IS_GAMEPLAY_ACTIVE        = 0x14002DCE0;
 static constexpr uintptr_t ADDR_BUTTON_REMAP              = 0x14002DA30;
 static constexpr uintptr_t ADDR_SWAP_LR_IF_FACE_LEFT      = 0x14002E560;
+static constexpr uintptr_t ADDR_CPU_INPUT_SWAP_RETURN     = 0x14002DE57;
 // uAmaterasu__getter_4AC0 — returns the team index (0=P1, 1=P2) from a character object.
 static constexpr uintptr_t ADDR_GET_TEAM_INDEX            = 0x140004AC0;
 
@@ -1025,8 +1026,15 @@ static uint32_t __fastcall hkswapLRIfFaceLeft(uint64_t cChrInput,
     // helper, including action/CPU paths that bypass buttonRemap. The early
     // action path leaves mHeld untouched after this call, so update it here as
     // well as substituting the value passed through native facing conversion.
+    // The first swap call in the attached uChrCpu-controller path receives the
+    // CPU's freshly generated logical mask. If this peer owns that team, treat
+    // it exactly like freshly remapped physical input and schedule it onto the
+    // authoritative timeline. Other bypass callsites are replay/special paths
+    // and must not become new input authorities.
+    uintptr_t caller = (uintptr_t)__builtin_return_address(0);
+    bool captureCpuInput = caller == (uintptr_t)_addr(ADDR_CPU_INPUT_SWAP_RETURN);
     uint32_t resolved = ResolveTimelineInput(
-        context, context->timelineTeam, input, false);
+        context, context->timelineTeam, input, captureCpuInput);
     *(uint32_t*)(cChrInput + 0x14) = resolved;
     return oswapLRIfFaceLeft(cChrInput, resolved);
 }
