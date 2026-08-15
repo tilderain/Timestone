@@ -347,8 +347,10 @@ static constexpr SnapshotRange SACTION_RESTORE_RANGES[] = {
     {0x140, 0x08},
     // Action-side timing/transition state.
     {0x150, 0x08},
-    // Action flags and compact transition state.
-    {0x168, 0x09},
+    // Preserve mpFade at +0x168. It owns a live category-28 sUnit that is not
+    // part of the snapshot; restoring a pre-fade null pointer would orphan it
+    // and let post-match replay allocate a second permanent black overlay.
+    {0x170, 0x01},
     // Current action/frame counter value used by phase dispatch.
     {0x218, 0x04},
 };

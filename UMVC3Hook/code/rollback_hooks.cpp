@@ -30,6 +30,7 @@ static constexpr uintptr_t MT_DTI_VTABLE_ADDR = 0x140A69ED8;
 static constexpr uintptr_t FN_MENU_OPTION_KBD_MOVE = 0x140001C40;
 static constexpr uintptr_t FN_MATERIAL_RESOURCE_STATE = 0x1405DD640;
 static constexpr uintptr_t FN_REBUILD_FRUSTUM_PLANES = 0x1405351D0;
+static constexpr uintptr_t FN_UFADE_MOVE = 0x14044D510;
 static constexpr uintptr_t PTR_SCAMERA = 0x140E17930;
 static constexpr uint32_t SCAMERA_VIEWPORT0_OFFSET = 0x50;
 static constexpr uint32_t VIEWPORT_CAMERA_OFFSET = 0x08;
@@ -49,6 +50,7 @@ static CChrSetPosFn oCChrSetPos = nullptr;
 using RebuildFrustumPlanesFn = void(__fastcall*)(uint64_t);
 using CameraGetViewMatrixFn = void(__fastcall*)(uint64_t, float*);
 static RebuildFrustumPlanesFn oRebuildFrustumPlanes = nullptr;
+static void(__fastcall* oFadeMove)(uint64_t) = nullptr;
 
 static bool TraceLifecycleFrame(int32_t frame)
 {
@@ -267,6 +269,15 @@ static void __fastcall hkGameUiMove(uint64_t gameUi)
     oGameUiMove(gameUi);
 }
 
+static void __fastcall hkFadeMove(uint64_t fade)
+{
+    // uFade is presentation state owned by the live sUnit graph. Advancing it
+    // during a correction consumes its timer twice and can leave the screen
+    // black after the result transition retires the live UI hierarchy.
+    if (!g_isResimulating)
+        oFadeMove(fade);
+}
+
 static void __fastcall hkBtGaugeLifeMove(uint64_t gauge)
 {
     // sGameUI is suppressed during re-simulation, so its gauge dependencies
@@ -396,6 +407,9 @@ void Rollback_InitMainHooks(RollbackMainMoveFn* originalMove)
     EnableHook(FN_SGAMEUI_MOVE, (void*)&hkGameUiMove, (void**)&oGameUiMove,
                "Rollback: hooked sGameUI__move for re-simulation suppression",
                "Rollback: failed to hook sGameUI__move (%d)\n");
+    EnableHook(FN_UFADE_MOVE, (void*)&hkFadeMove, (void**)&oFadeMove,
+               "Rollback: hooked uFade__move for re-simulation suppression",
+               "Rollback: failed to hook uFade__move (%d)\n");
     EnableHook(FN_UBTGAUGELIFE_MOVE, (void*)&hkBtGaugeLifeMove,
                (void**)&oBtGaugeLifeMove,
                "Rollback: hooked uBtGaugeLife__move for re-simulation suppression",
