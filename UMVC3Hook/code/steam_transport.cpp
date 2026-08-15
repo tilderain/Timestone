@@ -30,6 +30,7 @@ static DWORD WINAPI BridgeThread(LPVOID)
                     HookLog("SteamTransport: send failed result=%d\n", (int)result);
                 enet_packet_destroy(event.packet);
             } else if (event.type == ENET_EVENT_TYPE_DISCONNECT) {
+                HookLog("SteamTransport: local ENet bridge peer disconnected\n");
                 g_bridgeRunning = false;
             }
         }
@@ -163,6 +164,8 @@ uint32_t SteamTransport_GetRTT()
 
 void SteamTransport_Shutdown()
 {
+    HookLog("SteamTransport: shutdown requested (running=%d, thread=%p)\n",
+            g_bridgeRunning.load() ? 1 : 0, g_bridgeThread);
     g_bridgeRunning = false;
     if (g_bridgeThread) {
         WaitForSingleObject(g_bridgeThread, 3000);

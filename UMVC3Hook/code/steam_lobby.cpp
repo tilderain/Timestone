@@ -617,8 +617,11 @@ bool SteamLobby_TakeNetworkHandles(ENetHost** outHost, ENetPeer** outPeer,
 
 void SteamLobby_Shutdown(bool preserveConnection)
 {
+    if (preserveConnection) {
+        HookLog("SteamLobby: transferred live connection to gameplay\n");
+        return;
+    }
     StopCallbackPump();
-    if (preserveConnection) return;
     SteamTransport_Shutdown();
     if (g_sockets && g_listenSocket != k_HSteamListenSocket_Invalid)
         g_sockets->CloseListenSocket(g_listenSocket);
