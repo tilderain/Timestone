@@ -82,6 +82,10 @@ struct LaunchTrainingPacket {
     uint32_t type;               // PACKET_LAUNCH_TRAINING
     int32_t  p1Chars[3];
     int32_t  p2Chars[3];
+    int32_t  p1Colors[3];        // zero-based archive variant IDs
+    int32_t  p2Colors[3];
+    int32_t  p1Assists[3];       // 0=Alpha, 1=Beta, 2=Gamma
+    int32_t  p2Assists[3];
     int32_t  stageId;
     uint32_t flags;              // LaunchTrainingFlags
 };

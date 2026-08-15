@@ -2,6 +2,7 @@
 #include "trainingboot.h"
 #include "netplay.h"
 #include <Windows.h>
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 
@@ -58,6 +59,10 @@ static LaunchOption g_launchOption = LAUNCH_NORMAL;
 static LaunchDialogConfig g_dialogConfig = {
     {1, 1, 1},   // p1Chars (Ryu, Ryu, Ryu)
     {1, 1, 1},   // p2Chars (Ryu, Ryu, Ryu)
+    {0, 0, 0},   // p1Colors
+    {0, 0, 0},   // p2Colors
+    {0, 0, 0},   // p1Assists (Alpha)
+    {0, 0, 0},   // p2Assists (Alpha)
     0,           // stageId (Training Room)
     "",          // hostIp
     7777,       // hostPort
@@ -70,13 +75,27 @@ static bool      g_autoTestLaunch = false;
 static COLORREF  g_statusColor = RGB(0, 0, 0); // default black for status text
 static HBRUSH    g_hStatusBrush = nullptr;
 
+static int GetCharacterArchiveVariantCount(int characterId)
+{
+    if (characterId == 51) return 1;
+    if (characterId == 3 || characterId == 5 ||
+        characterId == 35 || characterId == 39) return 9;
+    return characterId > 0 && characterId < kCharNameCount ? 8 : 1;
+}
+
 static bool IsValidTrainingLaunchPacket(const LaunchTrainingPacket& packet)
 {
     if (packet.type != PACKET_LAUNCH_TRAINING)
         return false;
     for (int i = 0; i < 3; ++i) {
         if (packet.p1Chars[i] < 1 || packet.p1Chars[i] >= kCharNameCount ||
-            packet.p2Chars[i] < 1 || packet.p2Chars[i] >= kCharNameCount)
+            packet.p2Chars[i] < 1 || packet.p2Chars[i] >= kCharNameCount ||
+            packet.p1Colors[i] < 0 ||
+            packet.p1Colors[i] >= GetCharacterArchiveVariantCount(packet.p1Chars[i]) ||
+            packet.p2Colors[i] < 0 ||
+            packet.p2Colors[i] >= GetCharacterArchiveVariantCount(packet.p2Chars[i]) ||
+            packet.p1Assists[i] < 0 || packet.p1Assists[i] > 2 ||
+            packet.p2Assists[i] < 0 || packet.p2Assists[i] > 2)
             return false;
     }
     return true;
@@ -112,6 +131,19 @@ static void LoadRollbackSettings()
         snprintf(key, sizeof(key), "Slot%d", i + 1);
         g_dialogConfig.p1Chars[i] = GetPrivateProfileIntA("P1", key, g_dialogConfig.p1Chars[i], rollbackPath);
         g_dialogConfig.p2Chars[i] = GetPrivateProfileIntA("P2", key, g_dialogConfig.p2Chars[i], rollbackPath);
+        snprintf(key, sizeof(key), "Color%d", i + 1);
+        g_dialogConfig.p1Colors[i] = GetPrivateProfileIntA("P1", key, g_dialogConfig.p1Colors[i], rollbackPath);
+        g_dialogConfig.p2Colors[i] = GetPrivateProfileIntA("P2", key, g_dialogConfig.p2Colors[i], rollbackPath);
+        snprintf(key, sizeof(key), "Assist%d", i + 1);
+        g_dialogConfig.p1Assists[i] = GetPrivateProfileIntA("P1", key, g_dialogConfig.p1Assists[i], rollbackPath);
+        g_dialogConfig.p2Assists[i] = GetPrivateProfileIntA("P2", key, g_dialogConfig.p2Assists[i], rollbackPath);
+
+        g_dialogConfig.p1Colors[i] = std::clamp(g_dialogConfig.p1Colors[i], 0,
+            GetCharacterArchiveVariantCount(g_dialogConfig.p1Chars[i]) - 1);
+        g_dialogConfig.p2Colors[i] = std::clamp(g_dialogConfig.p2Colors[i], 0,
+            GetCharacterArchiveVariantCount(g_dialogConfig.p2Chars[i]) - 1);
+        g_dialogConfig.p1Assists[i] = std::clamp(g_dialogConfig.p1Assists[i], 0, 2);
+        g_dialogConfig.p2Assists[i] = std::clamp(g_dialogConfig.p2Assists[i], 0, 2);
     }
 
     char settingsPath[MAX_PATH] = {};
@@ -143,6 +175,16 @@ static void SaveRollbackSettings()
         WritePrivateProfileStringA("P1", key, value, rollbackPath);
         snprintf(value, sizeof(value), "%d", g_dialogConfig.p2Chars[i]);
         WritePrivateProfileStringA("P2", key, value, rollbackPath);
+        snprintf(key, sizeof(key), "Color%d", i + 1);
+        snprintf(value, sizeof(value), "%d", g_dialogConfig.p1Colors[i]);
+        WritePrivateProfileStringA("P1", key, value, rollbackPath);
+        snprintf(value, sizeof(value), "%d", g_dialogConfig.p2Colors[i]);
+        WritePrivateProfileStringA("P2", key, value, rollbackPath);
+        snprintf(key, sizeof(key), "Assist%d", i + 1);
+        snprintf(value, sizeof(value), "%d", g_dialogConfig.p1Assists[i]);
+        WritePrivateProfileStringA("P1", key, value, rollbackPath);
+        snprintf(value, sizeof(value), "%d", g_dialogConfig.p2Assists[i]);
+        WritePrivateProfileStringA("P2", key, value, rollbackPath);
     }
 
     char settingsPath[MAX_PATH] = {};
@@ -161,6 +203,10 @@ void SendTrainingLaunchPacket()
     for (int i = 0; i < 3; ++i) {
         packet.p1Chars[i] = g_dialogConfig.p1Chars[i];
         packet.p2Chars[i] = g_dialogConfig.p2Chars[i];
+        packet.p1Colors[i] = g_dialogConfig.p1Colors[i];
+        packet.p2Colors[i] = g_dialogConfig.p2Colors[i];
+        packet.p1Assists[i] = g_dialogConfig.p1Assists[i];
+        packet.p2Assists[i] = g_dialogConfig.p2Assists[i];
     }
     packet.stageId = g_dialogConfig.stageId;
     switch (TrainingBoot_GetCpuMode()) {
@@ -196,6 +242,10 @@ bool ApplyTrainingLaunchPacket(const LaunchTrainingPacket& packet)
     for (int i = 0; i < 3; ++i) {
         g_dialogConfig.p1Chars[i] = packet.p1Chars[i];
         g_dialogConfig.p2Chars[i] = packet.p2Chars[i];
+        g_dialogConfig.p1Colors[i] = packet.p1Colors[i];
+        g_dialogConfig.p2Colors[i] = packet.p2Colors[i];
+        g_dialogConfig.p1Assists[i] = packet.p1Assists[i];
+        g_dialogConfig.p2Assists[i] = packet.p2Assists[i];
     }
     g_dialogConfig.stageId = packet.stageId;
     TrainingBoot_SetCpuMode(
@@ -207,6 +257,10 @@ bool ApplyTrainingLaunchPacket(const LaunchTrainingPacket& packet)
     for (int i = 0; i < 3; ++i) {
         cfg.p1Chars[i] = packet.p1Chars[i];
         cfg.p2Chars[i] = packet.p2Chars[i];
+        cfg.p1Colors[i] = packet.p1Colors[i];
+        cfg.p2Colors[i] = packet.p2Colors[i];
+        cfg.p1Assists[i] = packet.p1Assists[i];
+        cfg.p2Assists[i] = packet.p2Assists[i];
     }
     cfg.stageId = packet.stageId;
     cfg.timerValue = 99;
@@ -259,6 +313,18 @@ enum CtrlId {
     ID_P2_SLOT1           = 2004,
     ID_P2_SLOT2           = 2005,
     ID_P2_SLOT3           = 2006,
+    ID_P1_COLOR1          = 2011,
+    ID_P1_COLOR2          = 2012,
+    ID_P1_COLOR3          = 2013,
+    ID_P2_COLOR1          = 2014,
+    ID_P2_COLOR2          = 2015,
+    ID_P2_COLOR3          = 2016,
+    ID_P1_ASSIST1         = 2021,
+    ID_P1_ASSIST2         = 2022,
+    ID_P1_ASSIST3         = 2023,
+    ID_P2_ASSIST1         = 2024,
+    ID_P2_ASSIST2         = 2025,
+    ID_P2_ASSIST3         = 2026,
     // Stage combo
     ID_STAGE              = 2101,
     // Network controls
@@ -279,9 +345,12 @@ enum CtrlId {
 // ---------------------------------------------------------------------------
 static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam);
 static void PopulateCharCombo(HWND hCombo, int defaultCharId);
+static void PopulateColorCombo(HWND hCombo, int characterId, int defaultColor);
+static void PopulateAssistCombo(HWND hCombo, int defaultAssist);
 static void PopulateStageCombo(HWND hCombo, int defaultStageId);
 static int FindStageIndex(int stageId);
 static void UpdateCharFromCombo(HWND hDlg, int comboId, int slotIndex, int team);
+static void UpdateSlotOptionsFromCombos(HWND hDlg);
 static DWORD WINAPI NetworkPollThread(LPVOID lpParam);
 static void CleanupNetwork(HWND hDlg, bool forceCleanup = false);
 
@@ -328,6 +397,10 @@ LaunchOption ShowLaunchMenu()
     for (int i = 0; i < 3; i++) {
         g_dialogConfig.p1Chars[i] = def.p1Chars[i];
         g_dialogConfig.p2Chars[i] = def.p2Chars[i];
+        g_dialogConfig.p1Colors[i] = def.p1Colors[i];
+        g_dialogConfig.p2Colors[i] = def.p2Colors[i];
+        g_dialogConfig.p1Assists[i] = def.p1Assists[i];
+        g_dialogConfig.p2Assists[i] = def.p2Assists[i];
     }
     g_dialogConfig.stageId = def.stageId;
 
@@ -418,6 +491,10 @@ bool ConfigureAutoTestDualTraining(int32_t characterId, int32_t hostPort)
         int32_t slotCharacter = characterId == 17 && i > 0 ? 1 : characterId;
         g_dialogConfig.p1Chars[i] = slotCharacter;
         g_dialogConfig.p2Chars[i] = slotCharacter;
+        g_dialogConfig.p1Colors[i] = 0;
+        g_dialogConfig.p2Colors[i] = 0;
+        g_dialogConfig.p1Assists[i] = 0;
+        g_dialogConfig.p2Assists[i] = 0;
     }
     g_dialogConfig.stageId = 0;
     g_launchOption = LAUNCH_DUAL_TRAINING;
@@ -428,6 +505,10 @@ bool ConfigureAutoTestDualTraining(int32_t characterId, int32_t hostPort)
         int32_t slotCharacter = characterId == 17 && i > 0 ? 1 : characterId;
         cfg.p1Chars[i] = slotCharacter;
         cfg.p2Chars[i] = slotCharacter;
+        cfg.p1Colors[i] = 0;
+        cfg.p2Colors[i] = 0;
+        cfg.p1Assists[i] = 0;
+        cfg.p2Assists[i] = 0;
     }
     cfg.stageId = 0;
     cfg.timerValue = 99;
@@ -462,11 +543,8 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
     case WM_INITDIALOG:
     {
         int y = 15;
-        const int labelW = 80;
-        const int comboW = 180;
         const int leftX = 20;
         const int left2X = 280; // second column start
-        const int margin = 8;
 
         // ---- Title ----
         CreateWindowA("STATIC", "Configure launch mode and match settings:",
@@ -479,38 +557,73 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
             hDlg, NULL, NULL, NULL);
         y += 18;
 
-        struct CharSlot { const char* label; int ctrlId; int team; int slot; };
+        struct CharSlot { int ctrlId; int team; int slot; };
         CharSlot slots[6] = {
-            {"P1 Slot 1:", ID_P1_SLOT1, 0, 0},
-            {"P1 Slot 2:", ID_P1_SLOT2, 0, 1},
-            {"P1 Slot 3:", ID_P1_SLOT3, 0, 2},
-            {"P2 Slot 1:", ID_P2_SLOT1, 1, 0},
-            {"P2 Slot 2:", ID_P2_SLOT2, 1, 1},
-            {"P2 Slot 3:", ID_P2_SLOT3, 1, 2},
+            {ID_P1_SLOT1, 0, 0},
+            {ID_P1_SLOT2, 0, 1},
+            {ID_P1_SLOT3, 0, 2},
+            {ID_P2_SLOT1, 1, 0},
+            {ID_P2_SLOT2, 1, 1},
+            {ID_P2_SLOT3, 1, 2},
         };
+
+        for (int col = 0; col < 2; ++col) {
+            int cx = col == 0 ? leftX + 10 : left2X;
+            CreateWindowA("STATIC", col == 0 ? "P1" : "P2",
+                WS_VISIBLE | WS_CHILD, cx, y, 22, 18, hDlg, NULL, NULL, NULL);
+            CreateWindowA("STATIC", "Character",
+                WS_VISIBLE | WS_CHILD, cx + 24, y, 100, 18, hDlg, NULL, NULL, NULL);
+            CreateWindowA("STATIC", "Color",
+                WS_VISIBLE | WS_CHILD, cx + 128, y, 42, 18, hDlg, NULL, NULL, NULL);
+            CreateWindowA("STATIC", "Assist",
+                WS_VISIBLE | WS_CHILD, cx + 174, y, 56, 18, hDlg, NULL, NULL, NULL);
+        }
+        y += 18;
 
         for (int i = 0; i < 6; i++) {
             int col = i < 3 ? 0 : 1;
             int row = i % 3;
             int cx = col == 0 ? leftX + 10 : left2X;
-            int cy = y + row * 35;
+            int cy = y + row * 30;
 
-            CreateWindowA("STATIC", slots[i].label,
-                WS_VISIBLE | WS_CHILD, cx, cy + 4, labelW, 18,
+            char slotLabel[4];
+            snprintf(slotLabel, sizeof(slotLabel), "%d", row + 1);
+            CreateWindowA("STATIC", slotLabel,
+                WS_VISIBLE | WS_CHILD, cx, cy + 4, 20, 18,
                 hDlg, NULL, NULL, NULL);
 
-            HWND hCombo = CreateWindowA("COMBOBOX", "",
+            HWND hChar = CreateWindowA("COMBOBOX", "",
                 WS_VISIBLE | WS_CHILD | WS_TABSTOP |
                 CBS_DROPDOWN | CBS_HASSTRINGS | CBS_AUTOHSCROLL,
-                cx + labelW, cy, comboW, 200,
+                cx + 24, cy, 100, 200,
                 hDlg, (HMENU)slots[i].ctrlId, NULL, NULL);
 
             int defaultCharId = (slots[i].team == 0)
                 ? g_dialogConfig.p1Chars[slots[i].slot]
                 : g_dialogConfig.p2Chars[slots[i].slot];
-            PopulateCharCombo(hCombo, defaultCharId);
+            int defaultColor = (slots[i].team == 0)
+                ? g_dialogConfig.p1Colors[slots[i].slot]
+                : g_dialogConfig.p2Colors[slots[i].slot];
+            int defaultAssist = (slots[i].team == 0)
+                ? g_dialogConfig.p1Assists[slots[i].slot]
+                : g_dialogConfig.p2Assists[slots[i].slot];
+            PopulateCharCombo(hChar, defaultCharId);
+            SendMessageA(hChar, CB_SETDROPPEDWIDTH, 180, 0);
+
+            HWND hColor = CreateWindowA("COMBOBOX", "",
+                WS_VISIBLE | WS_CHILD | WS_TABSTOP | CBS_DROPDOWNLIST | CBS_HASSTRINGS,
+                cx + 128, cy, 42, 200,
+                hDlg, (HMENU)(ID_P1_COLOR1 + i), NULL, NULL);
+            PopulateColorCombo(hColor, defaultCharId, defaultColor);
+
+            HWND hAssist = CreateWindowA("COMBOBOX", "",
+                WS_VISIBLE | WS_CHILD | WS_TABSTOP | CBS_DROPDOWNLIST | CBS_HASSTRINGS,
+                cx + 174, cy, 56, 200,
+                hDlg, (HMENU)(ID_P1_ASSIST1 + i), NULL, NULL);
+            PopulateAssistCombo(hAssist, defaultAssist);
+            SendMessageA(hAssist, CB_SETDROPPEDWIDTH, 75, 0);
         }
-        y += 105;
+        y += 90;
 
         // ---- Stage Select ----
         y += 5;
@@ -722,6 +835,7 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
                 UpdateCharFromCombo(hDlg, ID_P1_SLOT1 + i, i, 0);
                 UpdateCharFromCombo(hDlg, ID_P2_SLOT1 + i, i, 1);
             }
+            UpdateSlotOptionsFromCombos(hDlg);
             SaveRollbackSettings();
             // Apply network config before launching
             HWND hIp = GetDlgItem(hDlg, ID_NET_IP);
@@ -750,6 +864,7 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
                 UpdateCharFromCombo(hDlg, ID_P1_SLOT1 + i, i, 0);
                 UpdateCharFromCombo(hDlg, ID_P2_SLOT1 + i, i, 1);
             }
+            UpdateSlotOptionsFromCombos(hDlg);
 
             // Read stage selection
             HWND hStage = GetDlgItem(hDlg, ID_STAGE);
@@ -781,6 +896,10 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
             for (int i = 0; i < 3; i++) {
                 cfg.p1Chars[i] = g_dialogConfig.p1Chars[i];
                 cfg.p2Chars[i] = g_dialogConfig.p2Chars[i];
+                cfg.p1Colors[i] = g_dialogConfig.p1Colors[i];
+                cfg.p2Colors[i] = g_dialogConfig.p2Colors[i];
+                cfg.p1Assists[i] = g_dialogConfig.p1Assists[i];
+                cfg.p2Assists[i] = g_dialogConfig.p2Assists[i];
             }
             cfg.stageId = g_dialogConfig.stageId;
             cfg.timerValue = 99;
@@ -810,6 +929,11 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
                     } else if (idx >= 3 && idx < 6) {
                         g_dialogConfig.p2Chars[idx - 3] = charId;
                     }
+                    int defaultColor = idx < 3
+                        ? g_dialogConfig.p1Colors[idx]
+                        : g_dialogConfig.p2Colors[idx - 3];
+                    PopulateColorCombo(GetDlgItem(hDlg, ID_P1_COLOR1 + idx),
+                                       charId, defaultColor);
                 }
             }
             if (HIWORD(wParam) == CBN_EDITCHANGE) {
@@ -826,10 +950,23 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
                         } else if (idx >= 3 && idx < 6) {
                             g_dialogConfig.p2Chars[idx - 3] = i;
                         }
+                        int defaultColor = idx < 3
+                            ? g_dialogConfig.p1Colors[idx]
+                            : g_dialogConfig.p2Colors[idx - 3];
+                        PopulateColorCombo(GetDlgItem(hDlg, ID_P1_COLOR1 + idx),
+                                           i, defaultColor);
                         break;
                     }
                 }
             }
+            return 0;
+
+        case ID_P1_COLOR1: case ID_P1_COLOR2: case ID_P1_COLOR3:
+        case ID_P2_COLOR1: case ID_P2_COLOR2: case ID_P2_COLOR3:
+        case ID_P1_ASSIST1: case ID_P1_ASSIST2: case ID_P1_ASSIST3:
+        case ID_P2_ASSIST1: case ID_P2_ASSIST2: case ID_P2_ASSIST3:
+            if (HIWORD(wParam) == CBN_SELCHANGE)
+                UpdateSlotOptionsFromCombos(hDlg);
             return 0;
 
         // ---- Stage combo box ----
@@ -1089,6 +1226,36 @@ static void PopulateCharCombo(HWND hCombo, int defaultCharId)
     SendMessageA(hCombo, CB_SETCURSEL, selectIdx, 0);
 }
 
+static void PopulateColorCombo(HWND hCombo, int characterId, int defaultColor)
+{
+    if (!hCombo) return;
+
+    SendMessageA(hCombo, CB_RESETCONTENT, 0, 0);
+    int variantCount = GetCharacterArchiveVariantCount(characterId);
+    defaultColor = std::clamp(defaultColor, 0, variantCount - 1);
+    for (int color = 0; color < variantCount; ++color) {
+        char label[8];
+        snprintf(label, sizeof(label), "%d", color + 1);
+        int idx = (int)SendMessageA(hCombo, CB_ADDSTRING, 0, (LPARAM)label);
+        SendMessageA(hCombo, CB_SETITEMDATA, idx, color);
+    }
+    SendMessageA(hCombo, CB_SETCURSEL, defaultColor, 0);
+}
+
+static void PopulateAssistCombo(HWND hCombo, int defaultAssist)
+{
+    if (!hCombo) return;
+
+    static const char* kAssistNames[] = {"Alpha", "Beta", "Gamma"};
+    defaultAssist = std::clamp(defaultAssist, 0, 2);
+    for (int assist = 0; assist < 3; ++assist) {
+        int idx = (int)SendMessageA(hCombo, CB_ADDSTRING, 0,
+                                    (LPARAM)kAssistNames[assist]);
+        SendMessageA(hCombo, CB_SETITEMDATA, idx, assist);
+    }
+    SendMessageA(hCombo, CB_SETCURSEL, defaultAssist, 0);
+}
+
 static void PopulateStageCombo(HWND hCombo, int defaultStageId)
 {
     if (!hCombo) return;
@@ -1148,6 +1315,35 @@ static void UpdateCharFromCombo(HWND hDlg, int comboId, int slotIndex, int team)
         g_dialogConfig.p1Chars[slotIndex] = 1;
     else
         g_dialogConfig.p2Chars[slotIndex] = 1;
+}
+
+static void UpdateSlotOptionsFromCombos(HWND hDlg)
+{
+    for (int index = 0; index < 6; ++index) {
+        HWND hColor = GetDlgItem(hDlg, ID_P1_COLOR1 + index);
+        HWND hAssist = GetDlgItem(hDlg, ID_P1_ASSIST1 + index);
+        int color = 0;
+        int assist = 0;
+
+        if (hColor) {
+            int selected = (int)SendMessageA(hColor, CB_GETCURSEL, 0, 0);
+            if (selected != CB_ERR)
+                color = (int)SendMessageA(hColor, CB_GETITEMDATA, selected, 0);
+        }
+        if (hAssist) {
+            int selected = (int)SendMessageA(hAssist, CB_GETCURSEL, 0, 0);
+            if (selected != CB_ERR)
+                assist = (int)SendMessageA(hAssist, CB_GETITEMDATA, selected, 0);
+        }
+
+        if (index < 3) {
+            g_dialogConfig.p1Colors[index] = color;
+            g_dialogConfig.p1Assists[index] = assist;
+        } else {
+            g_dialogConfig.p2Colors[index - 3] = color;
+            g_dialogConfig.p2Assists[index - 3] = assist;
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

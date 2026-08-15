@@ -102,6 +102,10 @@ enum UMVC3StageId : int32_t {
 struct TrainingBootConfig {
     int32_t p1Chars[3];   // Character IDs for P1 (point, assist1, assist2)
     int32_t p2Chars[3];   // Character IDs for P2 (point, assist1, assist2)
+    int32_t p1Colors[3];  // Zero-based character archive variant IDs
+    int32_t p2Colors[3];
+    int32_t p1Assists[3]; // 0=Alpha, 1=Beta, 2=Gamma
+    int32_t p2Assists[3];
     int32_t stageId;      // Stage ID
     int32_t timerValue;   // Timer in seconds (99 = infinite in training)
 };

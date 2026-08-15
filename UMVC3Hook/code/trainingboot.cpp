@@ -22,7 +22,8 @@ static constexpr uintptr_t BATTLE_SETTING_SET_STAGE_VALUE    = 0x1401cf640;
 static constexpr uintptr_t BATTLE_SETTING_SET_TIMER_VALUE    = 0x1401cf4f0;
 static constexpr uintptr_t BATTLE_SETTING_COMMIT_ONE_PLAY    = 0x140214a40;
 static constexpr uintptr_t BATTLE_SETTING_SET_CHAR_ID        = 0x140146560;
-static constexpr uintptr_t BATTLE_SETTING_SET_ASSIST_TYPE    = 0x1401461e0;
+static constexpr uintptr_t BATTLE_SETTING_SET_DRAW_MODE      = 0x1401461e0;
+static constexpr uintptr_t BATTLE_SETTING_SET_ASSIST_TYPE    = 0x140024d80;
 
 // sArea scene-chain manager
 static constexpr uintptr_t SAREA_INSTANCE_PTR                = 0x140e17a80;
@@ -112,6 +113,10 @@ static constexpr uintptr_t PAD_KEYBOARD_BLOCKED_2            = 0xc30;   // byte:
 static TrainingBootConfig g_bootConfig = {
     { CHR_MORRIGAN, CHR_MORRIGAN, CHR_MORRIGAN },   // P1 (all 3 slots = Wolverine)
     { CHR_MORRIGAN, CHR_MORRIGAN, CHR_MORRIGAN },   // P2 (all 3 slots = Wolverine)
+    { 0, 0, 0 }, // P1 colors
+    { 0, 0, 0 }, // P2 colors
+    { 0, 0, 0 }, // P1 assists (Alpha)
+    { 0, 0, 0 }, // P2 assists (Alpha)
     0,    // stage 
     99   // timer (99 = infinite in training)
 };
@@ -165,16 +170,18 @@ static void WriteCharacterId(uint64_t battleSetting, int team, int slot, int32_t
 // Native lookup scans slot+0x08 for team and treats a positive character ID at
 // slot+0x0c as an active entry.
 // ---------------------------------------------------------------------------
-static void WriteSlotEntry(uint64_t bs, int index, int teamId, int32_t charId)
+static void WriteSlotEntry(uint64_t bs, int index, int teamId, int32_t charId,
+                           int32_t color, int32_t assist)
 {
     uint64_t entry = bs + 0x378 + index * 0x58;
     typedef void(__fastcall* SetSlotValue_t)(uint64_t, int32_t);
 
     *(int32_t*)(entry + 0x08) = teamId;
     ((SetSlotValue_t)_addr(BATTLE_SETTING_SET_CHAR_ID))(entry, charId);
-    ((SetSlotValue_t)_addr(BATTLE_SETTING_SET_ASSIST_TYPE))(entry, 0);
-    HookLog("TrainingBoot: Native slot entry %d: team=%d charId=%d dti=%d\n",
-            index, teamId, charId, *(int32_t*)(entry + 0x10));
+    ((SetSlotValue_t)_addr(BATTLE_SETTING_SET_DRAW_MODE))(entry, color);
+    ((SetSlotValue_t)_addr(BATTLE_SETTING_SET_ASSIST_TYPE))(entry, assist);
+    HookLog("TrainingBoot: Native slot entry %d: team=%d charId=%d dti=%d color=%d assist=%d\n",
+            index, teamId, charId, *(int32_t*)(entry + 0x10), color, assist);
 }
 
 static void ConfigureTrainingMatchDefaults(uint64_t bs)
@@ -434,8 +441,10 @@ void BootIntoTraining()
     // creation otherwise depends on asynchronous archive completion order.
     // P1 = entries 0-2 (team 0), P2 = entries 3-5 (team 1).
     for (int slot = 0; slot < 3; slot++) {
-        WriteSlotEntry(bs, slot,     0, g_bootConfig.p1Chars[slot]);
-        WriteSlotEntry(bs, slot + 3, 1, g_bootConfig.p2Chars[slot]);
+        WriteSlotEntry(bs, slot, 0, g_bootConfig.p1Chars[slot],
+                       g_bootConfig.p1Colors[slot], g_bootConfig.p1Assists[slot]);
+        WriteSlotEntry(bs, slot + 3, 1, g_bootConfig.p2Chars[slot],
+                       g_bootConfig.p2Colors[slot], g_bootConfig.p2Assists[slot]);
     }
     // restoreBackupAndInit restores the stage from the backup descriptor,
     // not from the live mStageArea field set above.

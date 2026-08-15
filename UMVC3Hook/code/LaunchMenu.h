@@ -29,6 +29,10 @@ struct LaunchDialogConfig {
     // Character IDs for P1 and P2 (point, assist1, assist2)
     int32_t p1Chars[3];
     int32_t p2Chars[3];
+    int32_t p1Colors[3];
+    int32_t p2Colors[3];
+    int32_t p1Assists[3];
+    int32_t p2Assists[3];
     int32_t stageId;
     // Network host config
     char    hostIp[64];
