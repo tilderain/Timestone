@@ -530,6 +530,8 @@ extern "C" void Controller_SetRollbackFrames(int32_t n)
 {
     if (n < 0)                  n = 0;
     if (n > ROLLBACK_WINDOW)    n = ROLLBACK_WINDOW;
+    if (n == 0 && (g_delayFrames == 0 || g_pendingDelayFrames == 0))
+        n = 1;
     if (n == g_rollbackFrames)
         return;
 
@@ -550,6 +552,8 @@ extern "C" void Controller_ScheduleRollbackFrames(int32_t n, int32_t effectiveFr
 {
     if (n < 0) n = 0;
     if (n > ROLLBACK_WINDOW) n = ROLLBACK_WINDOW;
+    if (n == 0 && (g_delayFrames == 0 || g_pendingDelayFrames == 0))
+        n = 1;
     g_pendingRollbackFrames = n;
     g_pendingRollbackEffectiveFrame = effectiveFrame;
     HookLog("Netplay: rollback change to %d scheduled for frame %d\n",
@@ -908,8 +912,10 @@ extern "C" void Controller_SilentFrameEnd()
 
 extern "C" void Controller_SetDelayFrames(int32_t delay)
 {
-    if (delay < 1)                  delay = 1;
+    if (delay < 0)                  delay = 0;
     if (delay > MAX_HISTORY - 1)    delay = MAX_HISTORY - 1;
+    if (delay == 0 && g_rollbackFrames == 0)
+        delay = 1;
 
     if (delay == g_delayFrames)
         return;
@@ -920,8 +926,11 @@ extern "C" void Controller_SetDelayFrames(int32_t delay)
 
 extern "C" void Controller_ScheduleDelayFrames(int32_t delay, int32_t effectiveFrame)
 {
-    if (delay < 1) delay = 1;
+    if (delay < 0) delay = 0;
     if (delay > MAX_HISTORY - 1) delay = MAX_HISTORY - 1;
+    if (delay == 0 &&
+        (g_rollbackFrames == 0 || g_pendingRollbackFrames == 0))
+        delay = 1;
     g_pendingDelayFrames = delay;
     g_pendingDelayEffectiveFrame = effectiveFrame;
     HookLog("Netplay: delay change to %d scheduled for frame %d\n", delay, effectiveFrame);
@@ -954,11 +963,11 @@ static void ApplyScheduledDelayIfReady()
         }
     }
 
-    g_delayFrames = newDelay;
+    g_delayFrames = newDelay == 0 && g_rollbackFrames == 0 ? 1 : newDelay;
     g_pendingDelayFrames = -1;
     g_pendingDelayEffectiveFrame = -1;
     HookLog("Netplay: applied delay %d at frame %d\n",
-            newDelay, g_netFrameCount);
+            g_delayFrames, g_netFrameCount);
 }
 
 static bool IsRollbackChangeDue()
@@ -1034,7 +1043,8 @@ static uint32_t ResolveTimelineInput(FrameInputRemapContext* context,
         if (captureCurrent)
             g_localPending |= currentInput;
         resolved = g_scheduledLocalFrame[idx] == context->frame
-            ? g_scheduledLocalInput[idx] : 0;
+            ? g_scheduledLocalInput[idx]
+            : (g_delayFrames == 0 ? currentInput : 0);
     }
 
     context->timelineInput = resolved;
@@ -1399,11 +1409,17 @@ extern "C" void Controller_OnFrameStart()
     // g_lastRemoteFrame without confirming the frame a waiter needed.
     DrainAndProcessPackets();
 
-    // Confirm the speculative timeline under the old rollback setting before a
-    // smaller window can stop checking it. The setting is applied at frame end,
-    // after any correction requested during this frame has completed.
+    // Confirm the completed speculative timeline under the old rollback
+    // setting before a smaller window can stop checking it. Never wait for the
+    // current frame: at zero delay both peers produce that input during this
+    // tick, so waiting here would deadlock them before either can send it.
     if (IsRollbackChangeDue())
-        WaitForConfirmedFrame(g_netFrameCount, "rollback setting transition");
+    {
+        const int32_t lastCompletedFrame = g_netFrameCount - 1;
+        if (lastCompletedFrame >= 0)
+            WaitForConfirmedFrame(lastCompletedFrame,
+                                  "rollback setting transition");
+    }
 
     // Process inbound ground truth packets
     Rollback_ProcessInboundGroundTruth();
@@ -1771,8 +1787,18 @@ extern "C" void Controller_OnFrameEnd()
     //         leave gaps in g_recordedLocalInput and cause input display flicker.
     {
         uint32_t idx = (uint32_t)g_netFrameCount % RING_SIZE;
-        g_recordedLocalInput[idx] = g_scheduledLocalFrame[idx] == g_netFrameCount
-            ? g_scheduledLocalInput[idx] : 0;
+        g_recordedLocalInput[idx] =
+            g_scheduledLocalFrame[idx] == g_netFrameCount
+                ? g_scheduledLocalInput[idx]
+                : (g_delayFrames == 0 ? g_localPending : 0);
+
+        // With zero delay the local input becomes known during this tick, after
+        // its pre-tick snapshot was saved. Attach it now so a later correction
+        // replays the same input rather than the snapshot's initial neutral.
+        if (g_delayFrames == 0 && g_rollbackFrames > 0)
+            Rollback_UpdateSnapshotInputs(g_netFrameCount,
+                                          g_recordedLocalInput[idx],
+                                          g_usedRemoteInput[idx]);
     }
 
     // --- 3. Assign newly captured input to its absolute execution frame.

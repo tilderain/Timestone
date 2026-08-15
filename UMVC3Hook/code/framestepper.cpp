@@ -125,8 +125,12 @@ static int32_t GetNetplaySettingsEffectiveFrame()
 
 static void ScheduleNetplayDelay(int32_t delay)
 {
-    if (delay < 1) delay = 1;
+    if (delay < 0) delay = 0;
     if (delay > 15) delay = 15;
+    if (delay == 0 &&
+        (Controller_GetRollbackFrames() == 0 ||
+         Controller_IsRollbackChangePending()))
+        return;
 
     int32_t effectiveFrame = GetNetplaySettingsEffectiveFrame();
     Controller_ScheduleDelayFrames(delay, effectiveFrame);
@@ -146,6 +150,10 @@ static void ScheduleNetplayRollback(int32_t rollbackFrames)
         return;
     if (rollbackFrames < 0) rollbackFrames = 0;
     if (rollbackFrames > 16) rollbackFrames = 16;
+    if (rollbackFrames == 0 &&
+        (Controller_GetDelayFrames() == 0 ||
+         Controller_IsDelayChangePending()))
+        return;
 
     int32_t effectiveFrame = GetNetplaySettingsEffectiveFrame();
     Controller_ScheduleRollbackFrames(rollbackFrames, effectiveFrame);
@@ -465,7 +473,7 @@ static void __fastcall HookedMove(void* sMvc3Main)
         int32_t remoteDelayFrame = -1;
         while (Netplay_GetInboundDelay(remoteDelay, remoteDelayFrame))
         {
-            if (remoteDelay >= 1 && remoteDelay <= 15)
+            if (remoteDelay >= 0 && remoteDelay <= 15)
             {
                 if (remoteDelayFrame < Controller_GetNetFrameCount())
                     remoteDelayFrame = Controller_GetNetFrameCount();
