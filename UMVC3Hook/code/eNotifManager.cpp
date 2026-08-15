@@ -32,6 +32,7 @@ void eNotificationManager::Draw()
 		ImGui::Begin("setup", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoInputs
 			| ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing);
 		ImGui::TextUnformatted(szMessageBuffer);
+		ImGui::End();
 	}
 }
 

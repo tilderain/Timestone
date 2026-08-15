@@ -1352,7 +1352,10 @@ void DtiEditor_Draw()
 
     // --- Split: tree view (left) + details (right) ---
     ImGui::BeginChild("##dtiTreePane", ImVec2(400, -1), true);
-    for (size_t i = 0; i < g_filtered.size(); i++) {
+    ImGuiListClipper clipper;
+    clipper.Begin((int)g_filtered.size());
+    while (clipper.Step()) {
+    for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; ++i) {
         MtDTI* dti = g_filtered[i].dti;
         int depth = g_filtered[i].depth;
         if (!dti || !dti->className) continue;
@@ -1394,6 +1397,7 @@ void DtiEditor_Draw()
 
         ImGui::PopID();
         ImGui::Unindent(depth * 12.0f);
+    }
     }
 
     ImGui::EndChild(); // tree pane

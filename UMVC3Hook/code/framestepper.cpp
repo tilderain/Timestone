@@ -906,16 +906,17 @@ void FrameStepper_Init()
     Rollback_InitHooks();
 }
 
-// ---------------------------------------------------------------------------
-// Public: per-frame processing — call from HookProcessStuff
-// ---------------------------------------------------------------------------
 // Edge-detection helper for use on threads without a message queue.
-// GetAsyncKeyState's &1 bit is per-thread and requires a message pump;
-// on the HookUpdate thread it always returns 0.  This helper uses the
-// global &0x8000 (key-is-down) bit with tracked prior state instead.
+// FrameStepper_Process now runs on the render thread, so one bulk keyboard
+// snapshot avoids many expensive GetAsyncKeyState calls under Wine.
+static BYTE g_processKeyboardState[256] = {};
+static bool g_processKeyboardStateValid = false;
+
 static inline bool KeyPressed(int vk, bool& prevState)
 {
-    bool cur = (GetAsyncKeyState(vk) & 0x8000) != 0;
+    bool cur = g_processKeyboardStateValid
+        ? (g_processKeyboardState[vk] & 0x80) != 0
+        : (GetAsyncKeyState(vk) & 0x8000) != 0;
     bool pressed = cur && !prevState;
     prevState = cur;
     return pressed;
@@ -930,6 +931,7 @@ static void CloseGameAfterAutoTest()
 
 void FrameStepper_Process()
 {
+    g_processKeyboardStateValid = GetKeyboardState(g_processKeyboardState) != FALSE;
     AutoTest_Process();
 
     if (AutoTest_IsActive() && Netplay_TakePeerDisconnected()) {
@@ -970,7 +972,6 @@ void FrameStepper_Process()
             HookLog("AutoTestSuite: command-line suite started after synchronized training readiness\n");
         }
     }
-
     static bool prevDumpNDJSON = false;
     if (KeyPressed(VK_F10, prevDumpNDJSON))
     {
@@ -1032,7 +1033,6 @@ void FrameStepper_Process()
         HookLog("FrameStepper: received restart kind=%u target=%d seed=0x%08X\n",
                 remoteRestartKind, remoteRestartFrame, remoteRestartSeed);
     }
-
     // Netplay settings hotkeys. These work regardless of training mode so both
     // sides can adjust them mid-match.
     static bool prevBracketL = false, prevBracketR = false;
@@ -1056,7 +1056,6 @@ void FrameStepper_Process()
             ScheduleNetplayRollback(Controller_GetRollbackFrames() + 1);
         }
     }
-
     // Apply remote desync-screen actions on the game thread. These actions do
     // not send a response, preventing trigger/unpause packets from bouncing.
     DesyncPacket desyncPacket;
@@ -1118,7 +1117,6 @@ void FrameStepper_Process()
             isPaused = true;
         }
     }
-
     if (!IsTrainingMode())
     {
         if (isPaused && !g_desyncDetected) {
@@ -1130,7 +1128,6 @@ void FrameStepper_Process()
         }
         return;
     }
-
     // Toggle pause
     static bool prevPause = false;
     if (KeyPressed(KEY_PAUSE, prevPause))
