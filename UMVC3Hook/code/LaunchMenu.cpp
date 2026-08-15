@@ -6,6 +6,7 @@
 #include <Windows.h>
 #include <commctrl.h>
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -80,6 +81,21 @@ static bool      g_peerReady = false;
 static bool      g_autoTestLaunch = false;
 static COLORREF  g_statusColor = RGB(0, 0, 0); // default black for status text
 static HBRUSH    g_hStatusBrush = nullptr;
+
+static COLORREF GetPulsingColor(COLORREF low, COLORREF high)
+{
+    constexpr ULONGLONG periodMs = 2400;
+    constexpr double twoPi = 6.283185307179586;
+    const double phase = static_cast<double>(GetTickCount64() % periodMs) /
+                         static_cast<double>(periodMs) * twoPi;
+    const double blend = (std::sin(phase) + 1.0) * 0.5;
+    const auto channel = [blend](BYTE lowValue, BYTE highValue) {
+        return static_cast<BYTE>(lowValue + (highValue - lowValue) * blend);
+    };
+    return RGB(channel(GetRValue(low), GetRValue(high)),
+               channel(GetGValue(low), GetGValue(high)),
+               channel(GetBValue(low), GetBValue(high)));
+}
 
 static uint64_t GetInviteLobbyId()
 {
@@ -400,6 +416,20 @@ static bool ApplyP2Selection(HWND hDlg, const LaunchP2SelectionPacket& packet);
 static DWORD WINAPI NetworkPollThread(LPVOID lpParam);
 static void CleanupNetwork(HWND hDlg, bool forceCleanup = false);
 
+static void UpdateReadyButton(HWND hDlg)
+{
+    HWND button = GetDlgItem(hDlg, ID_PEER_READY);
+    if (!button) return;
+
+    const bool ready = g_isHost ? g_peerReady : g_localReady;
+    const char* text = g_isHost
+        ? (ready ? "Peer ready" : "Peer not ready")
+        : (ready ? "Ready" : "Click to Ready!");
+    SetWindowTextA(button, text);
+    ShowWindow(button, g_dialogConfig.enetPeer ? SW_SHOW : SW_HIDE);
+    InvalidateRect(button, NULL, TRUE);
+}
+
 static void ConfigureConnectedControls(HWND hDlg)
 {
     for (HWND child = GetWindow(hDlg, GW_CHILD); child;
@@ -422,8 +452,6 @@ static void ConfigureConnectedControls(HWND hDlg)
         }
         EnableWindow(GetDlgItem(hDlg, ID_STAGE), TRUE);
         EnableWindow(GetDlgItem(hDlg, ID_LAUNCH_TRAINING), g_peerReady ? TRUE : FALSE);
-        SetWindowTextA(GetDlgItem(hDlg, ID_PEER_READY),
-                       g_peerReady ? "Peer ready" : "Peer not ready");
         HookLog("UMVC3Hook: Host owns P1; waiting for peer P2 selection\n");
     } else {
         for (int i = 0; i < 3; ++i) {
@@ -432,10 +460,9 @@ static void ConfigureConnectedControls(HWND hDlg)
             EnableWindow(GetDlgItem(hDlg, ID_P2_ASSIST1 + i), TRUE);
         }
         EnableWindow(GetDlgItem(hDlg, ID_PEER_READY), TRUE);
-        SetWindowTextA(GetDlgItem(hDlg, ID_PEER_READY),
-                       g_localReady ? "Not Ready" : "Ready");
         HookLog("UMVC3Hook: Client controls enabled for P2 selection\n");
     }
+    UpdateReadyButton(hDlg);
 }
 
 static void SendP2Selection(HWND hDlg)
@@ -463,7 +490,6 @@ static void SendP2Selection(HWND hDlg)
         return;
     }
     enet_host_flush(g_dialogConfig.enetHost);
-    HookLog("UMVC3Hook: Sent P2 selection ready=%u\n", packet.ready);
 }
 
 static void SendP1Selection(HWND hDlg)
@@ -490,7 +516,6 @@ static void SendP1Selection(HWND hDlg)
         return;
     }
     enet_host_flush(g_dialogConfig.enetHost);
-    HookLog("UMVC3Hook: Sent P1 launch selection\n");
 }
 
 static bool ApplyP1Selection(HWND hDlg, const LaunchP1SelectionPacket& packet)
@@ -515,7 +540,6 @@ static bool ApplyP1Selection(HWND hDlg, const LaunchP1SelectionPacket& packet)
         PopulateAssistCombo(GetDlgItem(hDlg, ID_P1_ASSIST1 + i),
                             packet.chars[i], packet.assists[i]);
     }
-    HookLog("UMVC3Hook: Applied host P1 launch selection\n");
     return true;
 }
 
@@ -544,8 +568,7 @@ static bool ApplyP2Selection(HWND hDlg, const LaunchP2SelectionPacket& packet)
     }
     g_peerReady = packet.ready != 0;
     EnableWindow(GetDlgItem(hDlg, ID_LAUNCH_TRAINING), g_peerReady ? TRUE : FALSE);
-    SetWindowTextA(GetDlgItem(hDlg, ID_PEER_READY),
-                   g_peerReady ? "Peer ready" : "Peer not ready");
+    UpdateReadyButton(hDlg);
     HookLog("UMVC3Hook: Applied peer P2 selection ready=%u\n", packet.ready);
     return true;
 }
@@ -927,8 +950,8 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
         y += 10;
         CreateWindowA("STATIC", "Choose how to launch the game:",
             WS_VISIBLE | WS_CHILD, leftX, y, 300, 18, hDlg, NULL, NULL, NULL);
-        CreateWindowA("BUTTON", "Ready",
-            WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON | WS_DISABLED,
+        CreateWindowA("BUTTON", "Not Ready",
+            WS_CHILD | BS_OWNERDRAW | WS_DISABLED,
             leftX + 650, y - 5, 150, 26,
             hDlg, (HMENU)ID_PEER_READY, NULL, NULL);
         y += 25;
@@ -938,7 +961,7 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
             leftX, y, 395, 32, hDlg, (HMENU)ID_LAUNCH_NORMAL, NULL, NULL);
 
         CreateWindowA("BUTTON", "Launch into Battle",
-            WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON,
+            WS_VISIBLE | WS_CHILD | BS_OWNERDRAW,
             leftX + 405, y, 395, 32, hDlg, (HMENU)ID_LAUNCH_TRAINING, NULL, NULL);
         y += 38;
 
@@ -963,6 +986,11 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
 
     case WM_TIMER:
         if (wParam == ID_STEAM_POLL_TIMER) {
+            if (!g_isHost && g_dialogConfig.enetPeer && !g_localReady)
+                InvalidateRect(GetDlgItem(hDlg, ID_PEER_READY), NULL, FALSE);
+            if (g_isHost && g_dialogConfig.enetPeer && g_peerReady)
+                InvalidateRect(GetDlgItem(hDlg, ID_LAUNCH_TRAINING), NULL, FALSE);
+
             SteamLobby_Pump();
             HWND hSteamStatus = GetDlgItem(hDlg, ID_STEAM_STATUS);
             if (hSteamStatus) SetWindowTextA(hSteamStatus, SteamLobby_GetStatus());
@@ -1123,8 +1151,7 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
         case ID_PEER_READY:
             if (!g_isHost && g_dialogConfig.enetPeer) {
                 g_localReady = !g_localReady;
-                SetWindowTextA(GetDlgItem(hDlg, ID_PEER_READY),
-                               g_localReady ? "Not Ready" : "Ready");
+                UpdateReadyButton(hDlg);
                 if (g_localReady) SaveRollbackSettings();
                 SendP2Selection(hDlg);
             }
@@ -1280,7 +1307,7 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
                 LOWORD(wParam) >= ID_P2_SLOT1 &&
                 LOWORD(wParam) <= ID_P2_SLOT3 && g_dialogConfig.enetPeer) {
                 g_localReady = false;
-                SetWindowTextA(GetDlgItem(hDlg, ID_PEER_READY), "Ready");
+                UpdateReadyButton(hDlg);
                 SendP2Selection(hDlg);
             }
             if (HIWORD(wParam) == CBN_SELCHANGE && g_isHost &&
@@ -1299,9 +1326,9 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
                 if (!g_isHost &&
                     ((controlId >= ID_P2_COLOR1 && controlId <= ID_P2_COLOR3) ||
                      (controlId >= ID_P2_ASSIST1 && controlId <= ID_P2_ASSIST3)) &&
-                    g_dialogConfig.enetPeer) {
+                     g_dialogConfig.enetPeer) {
                     g_localReady = false;
-                    SetWindowTextA(GetDlgItem(hDlg, ID_PEER_READY), "Ready");
+                    UpdateReadyButton(hDlg);
                     SendP2Selection(hDlg);
                 }
                 if (g_isHost &&
@@ -1495,6 +1522,73 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
         }
         }
         break;
+
+    case WM_DRAWITEM:
+    {
+        const DRAWITEMSTRUCT* draw = reinterpret_cast<const DRAWITEMSTRUCT*>(lParam);
+        if (draw->CtlID == ID_LAUNCH_TRAINING) {
+            RECT rect = draw->rcItem;
+            const bool launchReady = g_isHost && g_dialogConfig.enetPeer && g_peerReady;
+            if (launchReady) {
+                HBRUSH brush = CreateSolidBrush(GetPulsingColor(
+                    RGB(70, 125, 165), RGB(95, 155, 190)));
+                FillRect(draw->hDC, &rect, brush);
+                DeleteObject(brush);
+                DrawEdge(draw->hDC, &rect,
+                         (draw->itemState & ODS_SELECTED) ? EDGE_SUNKEN : EDGE_RAISED,
+                         BF_RECT);
+                SetTextColor(draw->hDC, RGB(255, 255, 255));
+            } else {
+                UINT state = DFCS_BUTTONPUSH;
+                if (draw->itemState & ODS_SELECTED) state |= DFCS_PUSHED;
+                if (draw->itemState & ODS_DISABLED) state |= DFCS_INACTIVE;
+                DrawFrameControl(draw->hDC, &rect, DFC_BUTTON, state);
+                SetTextColor(draw->hDC, (draw->itemState & ODS_DISABLED)
+                    ? GetSysColor(COLOR_GRAYTEXT) : GetSysColor(COLOR_BTNTEXT));
+            }
+
+            SetBkMode(draw->hDC, TRANSPARENT);
+            if (draw->itemState & ODS_SELECTED)
+                OffsetRect(&rect, 1, 1);
+            DrawTextA(draw->hDC, "Launch into Battle", -1, &rect,
+                      DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            if (draw->itemState & ODS_FOCUS) {
+                InflateRect(&rect, -3, -3);
+                DrawFocusRect(draw->hDC, &rect);
+            }
+            return TRUE;
+        }
+
+        if (draw->CtlID != ID_PEER_READY) break;
+
+        RECT rect = draw->rcItem;
+        const bool ready = g_isHost ? g_peerReady : g_localReady;
+        COLORREF background = ready ? RGB(35, 150, 65) : RGB(190, 45, 45);
+        if (!g_isHost && !ready)
+            background = GetPulsingColor(RGB(145, 65, 65), RGB(185, 90, 90));
+        HBRUSH brush = CreateSolidBrush(background);
+        FillRect(draw->hDC, &rect, brush);
+        DeleteObject(brush);
+
+        DrawEdge(draw->hDC, &rect,
+                 (draw->itemState & ODS_SELECTED) ? EDGE_SUNKEN : EDGE_RAISED,
+                 BF_RECT);
+
+        char text[32] = {};
+        GetWindowTextA(draw->hwndItem, text, sizeof(text));
+        SetBkMode(draw->hDC, TRANSPARENT);
+        SetTextColor(draw->hDC, RGB(255, 255, 255));
+        if (draw->itemState & ODS_SELECTED)
+            OffsetRect(&rect, 1, 1);
+        DrawTextA(draw->hDC, text, -1, &rect,
+                  DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+        if (draw->itemState & ODS_FOCUS) {
+            InflateRect(&rect, -3, -3);
+            DrawFocusRect(draw->hDC, &rect);
+        }
+        return TRUE;
+    }
 
     case WM_CTLCOLORSTATIC:
     {
@@ -1762,6 +1856,8 @@ static void CleanupNetwork(HWND hDlg, bool forceCleanup) {
         g_dialogConfig.enetPeer = nullptr;
     }
     g_dialogConfig.hostEnabled = false;
+    g_localReady = false;
+    g_peerReady = false;
     SteamLobby_Shutdown(false);
 
     if (hDlg) {
@@ -1773,6 +1869,7 @@ static void CleanupNetwork(HWND hDlg, bool forceCleanup) {
         }
         EnableWindow(GetDlgItem(hDlg, ID_NET_HOST_BTN), TRUE);
         EnableWindow(GetDlgItem(hDlg, ID_NET_CONNECT_BTN), TRUE);
+        UpdateReadyButton(hDlg);
     }
 }
 

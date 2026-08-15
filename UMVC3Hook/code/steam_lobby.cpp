@@ -16,6 +16,8 @@ extern void HookLog(const char* fmt, ...);
 
 namespace {
 
+constexpr const char* kLobbyProtocol = "2";
+
 enum class PendingCall {
     None,
     Search,
@@ -655,7 +657,7 @@ void SteamLobby_Search()
 {
     if (!SteamLobby_Initialize() || g_pendingCall != PendingCall::None) return;
     g_api.AddStringFilter(g_matchmaking, "heronet", "1", 0);
-    g_api.AddStringFilter(g_matchmaking, "protocol", "2", 0);
+    g_api.AddStringFilter(g_matchmaking, "protocol", kLobbyProtocol, 0);
     g_api.AddSlotsFilter(g_matchmaking, 1);
     g_api.AddResultCountFilter(g_matchmaking, 50);
     g_pendingHandle = g_api.RequestLobbyList(g_matchmaking);
@@ -726,7 +728,7 @@ void SteamLobby_Pump()
                 g_pingLocationPublished = false;
                 g_nextPingLocationAttempt = 0;
                 g_api.SetLobbyData(g_matchmaking, g_lobbyId, "heronet", "1");
-                g_api.SetLobbyData(g_matchmaking, g_lobbyId, "protocol", "2");
+                g_api.SetLobbyData(g_matchmaking, g_lobbyId, "protocol", kLobbyProtocol);
                 g_api.SetLobbyData(g_matchmaking, g_lobbyId, "build", UMVC3HOOK_GIT_COMMIT);
                 g_api.SetLobbyData(g_matchmaking, g_lobbyId, "state", "waiting");
                 const char* username = g_friends ? g_api.GetPersonaName(g_friends) : "";
