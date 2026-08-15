@@ -48,6 +48,7 @@ constexpr uintptr_t kRyuDti = 0x140D45A10ull;
 constexpr uintptr_t kHsienKoDti = 0x140D455F8ull;
 constexpr uintptr_t kSpencerDti = 0x140D45D40ull;
 constexpr uintptr_t kAttackWireDti = 0x140D4CA20ull;
+constexpr uintptr_t kJamSessionDti = 0x140D49288ull;
 constexpr uintptr_t kVulcanSwingWireDti = 0x140D4CB00ull;
 constexpr uintptr_t kVulcanBoomerangDti = 0x140D4D660ull;
 
@@ -941,10 +942,15 @@ void ConcreteShotSnapshot_RestoreCallbackEffects(
 {
     if (!shot) return;
 
-    if (IsDti(snapshot.dti, kAttackWireDti)) {
+    if (IsDti(snapshot.dti, kAttackWireDti) ||
+        IsDti(snapshot.dti, kJamSessionDti)) {
         // Attack Wire's factory effect owns track buffers initialized for the
         // fresh generator graph. Rewinding its presentation timeline can make
         // a zero-length track active and underflow shiftHistoryBuffer.
+        // Jam Session likewise uses three factory callbacks. Rewinding their
+        // timelines made all three finish during client re-simulation and
+        // marked the still-live shot for removal; shot lifetime is restored
+        // independently by Shot_ApplyFlight.
         return;
     }
 

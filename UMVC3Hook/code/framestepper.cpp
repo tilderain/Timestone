@@ -1290,7 +1290,7 @@ void FrameStepper_Draw()
             ImVec4 color = Netplay_IsHost()
                 ? ImVec4(1.0f, 0.9f, 0.1f, 1.0f)   // yellow for host
                 : ImVec4(0.3f, 0.7f, 1.0f, 1.0f);   // blue for client
-            ImGui::TextColored(color, "NETPLAY: %s", role);
+            ImGui::TextColored(color, "--%s--", role);
             ImGui::TextColored(color, "Ping: %ums", Netplay_GetRTT() / 2);
             int32_t curDelay = Controller_GetDelayFrames();
             int32_t curRollback = Controller_GetRollbackFrames();
