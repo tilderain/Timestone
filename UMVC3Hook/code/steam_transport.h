@@ -8,6 +8,7 @@
 bool SteamTransport_CreateBridge(bool isHost, ISteamNetworkingSockets* sockets,
                                  HSteamNetConnection connection,
                                  ENetHost** outGameHost, ENetPeer** outGamePeer);
+void SteamTransport_Pump();
 bool SteamTransport_IsActive();
 uint32_t SteamTransport_GetRTT();
 void SteamTransport_Shutdown();

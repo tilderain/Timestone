@@ -11,58 +11,69 @@ static ENetHost* g_bridgeHost = nullptr;
 static ENetPeer* g_bridgePeer = nullptr;
 static HANDLE g_bridgeThread = nullptr;
 static std::atomic<bool> g_bridgeRunning{false};
+static std::atomic<bool> g_bridgeThreadStarted{false};
+static std::atomic_flag g_bridgePumpLock = ATOMIC_FLAG_INIT;
 static std::atomic<uint32_t> g_steamRTT{0};
+
+static void PumpBridgeOnce()
+{
+    if (!g_bridgeRunning || g_bridgePumpLock.test_and_set()) return;
+
+    ENetEvent event;
+    while (g_bridgeHost && enet_host_service(g_bridgeHost, &event, 0) > 0) {
+        if (event.type == ENET_EVENT_TYPE_RECEIVE) {
+            int flags = (event.packet->flags & ENET_PACKET_FLAG_RELIABLE)
+                ? k_nSteamNetworkingSend_Reliable
+                : k_nSteamNetworkingSend_UnreliableNoNagle;
+            EResult result = g_sockets->SendMessageToConnection(
+                g_connection, event.packet->data,
+                static_cast<uint32_t>(event.packet->dataLength), flags, nullptr);
+            if (result != k_EResultOK)
+                HookLog("SteamTransport: send failed result=%d\n", (int)result);
+            enet_packet_destroy(event.packet);
+        } else if (event.type == ENET_EVENT_TYPE_DISCONNECT) {
+            HookLog("SteamTransport: local ENet bridge peer disconnected\n");
+            g_bridgeRunning = false;
+        }
+    }
+
+    SteamNetworkingMessage_t* messages[32] = {};
+    int count = g_sockets->ReceiveMessagesOnConnection(g_connection, messages, 32);
+    for (int i = 0; i < count; ++i) {
+        SteamNetworkingMessage_t* message = messages[i];
+        enet_uint32 flags = (message->m_nFlags & k_nSteamNetworkingSend_Reliable)
+            ? ENET_PACKET_FLAG_RELIABLE : ENET_PACKET_FLAG_UNSEQUENCED;
+        ENetPacket* packet = enet_packet_create(message->m_pData, message->m_cbSize, flags);
+        if (!packet || enet_peer_send(g_bridgePeer, 0, packet) != 0) {
+            if (packet) enet_packet_destroy(packet);
+            HookLog("SteamTransport: failed to forward inbound message\n");
+        }
+        message->Release();
+    }
+    if (g_bridgeHost) enet_host_flush(g_bridgeHost);
+
+    SteamNetConnectionRealTimeStatus_t status = {};
+    EResult statusResult = g_sockets->GetConnectionRealTimeStatus(
+        g_connection, &status, 0, nullptr);
+    if (statusResult == k_EResultOK) {
+        if (status.m_nPing > 0) g_steamRTT = static_cast<uint32_t>(status.m_nPing);
+        if (status.m_eState == k_ESteamNetworkingConnectionState_ClosedByPeer ||
+            status.m_eState == k_ESteamNetworkingConnectionState_ProblemDetectedLocally) {
+            HookLog("SteamTransport: Steam connection ended, state=%d\n",
+                    (int)status.m_eState);
+            if (g_bridgePeer) enet_peer_disconnect_now(g_bridgePeer, 0);
+            g_bridgeRunning = false;
+        }
+    }
+    g_bridgePumpLock.clear();
+}
 
 static DWORD WINAPI BridgeThread(LPVOID)
 {
+    g_bridgeThreadStarted = true;
     HookLog("SteamTransport: bridge thread started\n");
     while (g_bridgeRunning) {
-        ENetEvent event;
-        while (g_bridgeHost && enet_host_service(g_bridgeHost, &event, 0) > 0) {
-            if (event.type == ENET_EVENT_TYPE_RECEIVE) {
-                int flags = (event.packet->flags & ENET_PACKET_FLAG_RELIABLE)
-                    ? k_nSteamNetworkingSend_Reliable
-                    : k_nSteamNetworkingSend_UnreliableNoNagle;
-                EResult result = g_sockets->SendMessageToConnection(
-                    g_connection, event.packet->data,
-                    static_cast<uint32_t>(event.packet->dataLength), flags, nullptr);
-                if (result != k_EResultOK)
-                    HookLog("SteamTransport: send failed result=%d\n", (int)result);
-                enet_packet_destroy(event.packet);
-            } else if (event.type == ENET_EVENT_TYPE_DISCONNECT) {
-                HookLog("SteamTransport: local ENet bridge peer disconnected\n");
-                g_bridgeRunning = false;
-            }
-        }
-
-        SteamNetworkingMessage_t* messages[32] = {};
-        int count = g_sockets->ReceiveMessagesOnConnection(g_connection, messages, 32);
-        for (int i = 0; i < count; ++i) {
-            SteamNetworkingMessage_t* message = messages[i];
-            enet_uint32 flags = (message->m_nFlags & k_nSteamNetworkingSend_Reliable)
-                ? ENET_PACKET_FLAG_RELIABLE : ENET_PACKET_FLAG_UNSEQUENCED;
-            ENetPacket* packet = enet_packet_create(message->m_pData, message->m_cbSize, flags);
-            if (!packet || enet_peer_send(g_bridgePeer, 0, packet) != 0) {
-                if (packet) enet_packet_destroy(packet);
-                HookLog("SteamTransport: failed to forward inbound message\n");
-            }
-            message->Release();
-        }
-        if (g_bridgeHost) enet_host_flush(g_bridgeHost);
-
-        SteamNetConnectionRealTimeStatus_t status = {};
-        EResult statusResult = g_sockets->GetConnectionRealTimeStatus(
-            g_connection, &status, 0, nullptr);
-        if (statusResult == k_EResultOK) {
-            if (status.m_nPing > 0) g_steamRTT = static_cast<uint32_t>(status.m_nPing);
-            if (status.m_eState == k_ESteamNetworkingConnectionState_ClosedByPeer ||
-                status.m_eState == k_ESteamNetworkingConnectionState_ProblemDetectedLocally) {
-                HookLog("SteamTransport: Steam connection ended, state=%d\n",
-                        (int)status.m_eState);
-                if (g_bridgePeer) enet_peer_disconnect_now(g_bridgePeer, 0);
-                g_bridgeRunning = false;
-            }
-        }
+        PumpBridgeOnce();
         Sleep(1);
     }
     HookLog("SteamTransport: bridge thread stopped\n");
@@ -139,6 +150,7 @@ bool SteamTransport_CreateBridge(bool isHost, ISteamNetworkingSockets* sockets,
     g_sockets = sockets;
     g_connection = connection;
     g_steamRTT = 0;
+    g_bridgeThreadStarted = false;
     g_bridgeRunning = true;
     g_bridgeThread = CreateThread(nullptr, 0, BridgeThread, nullptr, 0, nullptr);
     if (!g_bridgeThread) {
@@ -150,6 +162,13 @@ bool SteamTransport_CreateBridge(bool isHost, ISteamNetworkingSockets* sockets,
     }
     HookLog("SteamTransport: local ENet bridge ready (%s)\n", isHost ? "host" : "client");
     return true;
+}
+
+void SteamTransport_Pump()
+{
+    // A thread created during DLL initialization cannot run until the loader
+    // lock is released, so the launch dialog services the bridge temporarily.
+    if (!g_bridgeThreadStarted) PumpBridgeOnce();
 }
 
 bool SteamTransport_IsActive()
@@ -181,5 +200,6 @@ void SteamTransport_Shutdown()
         g_sockets->CloseConnection(g_connection, 1000, "HeroNet shutdown", false);
     g_connection = k_HSteamNetConnection_Invalid;
     g_sockets = nullptr;
+    g_bridgeThreadStarted = false;
     g_steamRTT = 0;
 }

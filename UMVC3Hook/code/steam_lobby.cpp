@@ -486,6 +486,7 @@ void SteamLobby_Pump()
 {
     if (!g_matchmaking || !g_utils) return;
     if (g_callbacksOnUiThread) g_api.RunCallbacks();
+    SteamTransport_Pump();
 
     if (g_pendingCall == PendingCall::Search) {
         LobbyMatchList_t result = {};
