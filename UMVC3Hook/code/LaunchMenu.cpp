@@ -115,7 +115,7 @@ static void LoadRollbackSettings()
     }
 
     char settingsPath[MAX_PATH] = {};
-    GetSettingsPath("UMVC3Hook.ini", settingsPath, sizeof(settingsPath));
+    GetSettingsPath("HeroNet.ini", settingsPath, sizeof(settingsPath));
     GetPrivateProfileStringA("Network", "HostIp", "",
                              g_dialogConfig.hostIp,
                              sizeof(g_dialogConfig.hostIp), settingsPath);
@@ -146,7 +146,7 @@ static void SaveRollbackSettings()
     }
 
     char settingsPath[MAX_PATH] = {};
-    GetSettingsPath("UMVC3Hook.ini", settingsPath, sizeof(settingsPath));
+    GetSettingsPath("HeroNet.ini", settingsPath, sizeof(settingsPath));
     WritePrivateProfileStringA("Network", "HostIp", g_dialogConfig.hostIp, settingsPath);
     char port[16];
     snprintf(port, sizeof(port), "%d", g_dialogConfig.hostPort);
@@ -846,7 +846,7 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
             SaveRollbackSettings();
 
             // Switch log to host-specific file
-            HookLogSetFile("UMVC3Hook_host.log");
+            HookLogSetFile("HeroNet_host.log");
             HookLog("UMVC3Hook: Host button clicked, port %d\n", g_dialogConfig.hostPort);
 
             // Create enet host (server mode)
@@ -908,7 +908,7 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
             SaveRollbackSettings();
 
             // Switch log to client-specific file
-            HookLogSetFile("UMVC3Hook_client.log");
+            HookLogSetFile("HeroNet_client.log");
             HookLog("UMVC3Hook: Connect button clicked, target %s:%d\n",
                 g_dialogConfig.hostIp, g_dialogConfig.hostPort);
 

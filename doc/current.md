@@ -28,6 +28,8 @@ uses source symbols instead of line numbers because line numbers change often.
   action/CPU paths that bypass button remapping.
 - Timeline values are logical actions after physical button configuration but
   before character-specific facing, ability, team, and pause transformations.
+- CPU-controlled teams capture the native `uChrCpu` logical mask at the first
+  facing-conversion call; only the peer owning that team publishes it.
 - Local physical input is accumulated and scheduled at
   `currentFrame + delayFrames`.
 - Remote input is stored by absolute sender frame.

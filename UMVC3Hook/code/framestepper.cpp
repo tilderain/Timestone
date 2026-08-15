@@ -669,14 +669,14 @@ static bool IsTrainingMode()
 }
 
 // ---------------------------------------------------------------------------
-// Load keybind config from UMVC3Hook.ini  [FrameStepper] section
+// Load keybind config from HeroNet.ini  [FrameStepper] section
 // ---------------------------------------------------------------------------
 static void LoadConfig()
 {
     wchar_t iniPath[MAX_PATH];
     GetModuleFileNameW(nullptr, iniPath, MAX_PATH);
     wcsrchr(iniPath, L'\\')[1] = L'\0';
-    wcscat(iniPath, L"UMVC3Hook.ini");
+    wcscat(iniPath, L"HeroNet.ini");
 
     KEY_PAUSE   = GetPrivateProfileIntW(L"FrameStepper", L"PauseKey",   VK_F2, iniPath);
     KEY_ADVANCE = GetPrivateProfileIntW(L"FrameStepper", L"AdvanceKey", VK_F3, iniPath);

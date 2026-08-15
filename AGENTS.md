@@ -23,7 +23,7 @@
 | `UMVC3Hook/code/trainingboot.cpp/h` | **Training mode boot**: bypasses title screen logos, directly configures a training match with chosen characters/stage, hooks game init sequence |
 | `UMVC3Hook/code/dtieditor.cpp/h` | **DTI property editor**: reverse-engineering tool that browses MT Framework's runtime type hierarchy (MtDTI) and captures live property values |
 | `UMVC3Hook/code/diag.cpp/h` | **Diagnostics**: per-frame character state snapshots (position, animation, RNG, flags), input history logging, NDJSON dump for debugging rollback |
-| `UMVC3Hook/code/eSettingsManager.cpp/h` | **Settings manager**: reads `UMVC3Hook.ini` at startup, exposes hotkey bindings (menu toggle, camera controls) and feature toggles |
+| `UMVC3Hook/code/eSettingsManager.cpp/h` | **Settings manager**: reads `HeroNet.ini` at startup, exposes hotkey bindings (menu toggle, camera controls) and feature toggles |
 | `UMVC3Hook/code/eNotifManager.cpp/h` | **OSD notifications**: on-screen text messages with fade timers, push-based API for alerting the user |
 | `UMVC3Hook/code/UMVC3Camera.cpp/h` | **Free camera**: overrides game camera position/rotation/FOV, keyboard-controlled movement, screenshot utility |
 | `UMVC3Hook/code/mk10utils.cpp/h` | **Address utilities**: base address relocation helpers (`_addr()`), converts hardcoded offsets to runtime addresses |
@@ -35,7 +35,7 @@
 | `UMVC3Hook/kiero/` | Kiero graphics hook + MinHook (vendored, x86/x64 hooking) |
 | `UMVC3Hook/utils/` | `Patterns.cpp/h` - memory pattern matching; `Trampoline.h`, `HookInit.hpp` |
 | `enet-1.3.18/` | ENet networking library (vendored, C source) |
-| `Base/` | Deployment files: `dinput8.dll` (ASI Loader), `UMVC3Hook.ini` (runtime config), compiled `UMVC3Hook.asi` |
+| `Base/` | Deployment files: `dinput8.dll` (ASI Loader), `HeroNet.ini` (runtime config), compiled `HeroNet.asi` |
 | `build/` | Build artifacts (object files, include fix symlinks) |
 | `doc/` | Design docs: rollback, netplay, re-simulation, threading, input, replay |
 | `addrs/` | Memory address dumps for reverse engineering |
@@ -48,5 +48,5 @@
 - **Ultimate ASI Loader** (`dinput8.dll`) - plugin injection into game process
 
 ## Runtime Config
-- `Base/UMVC3Hook.ini` - hotkeys (F1 menu), camera binds, settings
+- `Base/HeroNet.ini` - hotkeys (F1 menu), camera binds, settings
 - Plugin loads via `dinput8.dll` proxy → `UMVC3Hook.asi`

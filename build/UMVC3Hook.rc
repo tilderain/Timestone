@@ -12,11 +12,11 @@ BEGIN
     BEGIN
         BLOCK "040904E4"
         BEGIN
-            VALUE "FileDescription", "UMVC3 Hook"
+            VALUE "FileDescription", "HeroNet Rollback"
             VALUE "FileVersion", "1.0.0.0"
-            VALUE "InternalName", "UMVC3Hook"
-            VALUE "OriginalFilename", "UMVC3Hook.asi"
-            VALUE "ProductName", "UMVC3 Hook"
+            VALUE "InternalName", "HeroNet"
+            VALUE "OriginalFilename", "HeroNet.asi"
+            VALUE "ProductName", "HeroNet"
             VALUE "ProductVersion", "1.0.0.0"
         END
     END

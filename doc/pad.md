@@ -182,6 +182,12 @@ remains authoritative for facing conversion, ability inversion, team state,
 pause suppression, and final per-character fields. Re-simulation injects the
 same canonical pre-facing logical values from snapshots.
 
+The attached `uChrCpu` source reaches the first facing-conversion call with its
+fresh logical mask at return site `0x14002DE57`. The owning peer captures that
+specific value into the local timeline. Other calls that bypass `buttonRemap`
+are substituted but not captured, preventing replay or special-state values
+from becoming new network input.
+
 The native function gates character input through
 `cChrInput__isGameplayActive` at `0x14002DCE0`. Member 0 is accepted directly.
 A reserve member is accepted only while eligible for a team transition, or

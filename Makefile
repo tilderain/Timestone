@@ -20,8 +20,8 @@ BUILDDIR  := build
 OBJDIR    := $(BUILDDIR)/obj
 
 # Output: .asi is a renamed DLL loaded by Ultimate ASI Loader
-OUTPUT    := UMVC3Hook.asi
-MAP_FILE  := UMVC3Hook.map
+OUTPUT    := HeroNet.asi
+MAP_FILE  := HeroNet.map
 
 # --- Source files (from UMVC3Hook.vcxproj, Release|x64) ---
 
@@ -219,7 +219,7 @@ $(OBJDIR)/%.o: $(ENETDIR)/%.c
 
 # ---------- Resource file ----------
 
-$(BUILDDIR)/UMVC3Hook.rc:
+$(BUILDDIR)/UMVC3Hook.rc: Makefile
 	@mkdir -p $(@D)
 	@printf '%s\n' \
 		'VS_VERSION_INFO VERSIONINFO' \
@@ -236,11 +236,11 @@ $(BUILDDIR)/UMVC3Hook.rc:
 		'    BEGIN' \
 		'        BLOCK "040904E4"' \
 		'        BEGIN' \
-		'            VALUE "FileDescription", "UMVC3 Hook"' \
+		'            VALUE "FileDescription", "HeroNet Rollback"' \
 		'            VALUE "FileVersion", "1.0.0.0"' \
-		'            VALUE "InternalName", "UMVC3Hook"' \
-		'            VALUE "OriginalFilename", "UMVC3Hook.asi"' \
-		'            VALUE "ProductName", "UMVC3 Hook"' \
+		'            VALUE "InternalName", "HeroNet"' \
+		'            VALUE "OriginalFilename", "HeroNet.asi"' \
+		'            VALUE "ProductName", "HeroNet"' \
 		'            VALUE "ProductVersion", "1.0.0.0"' \
 		'        END' \
 		'    END' \

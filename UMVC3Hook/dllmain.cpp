@@ -970,7 +970,7 @@ void OnInitializeHook()
 		g_windowCorner = 1;
 
 		// Switch host log to host-specific file so host + client don't clobber each other
-		HookLogSetFile("UMVC3Hook_host.log");
+		HookLogSetFile("HeroNet_host.log");
 		HookLog("UMVC3Hook: Dual training host - switched to host log file\n");
 
 		const LaunchDialogConfig& dlgCfg = GetLaunchDialogConfig();
@@ -1002,7 +1002,7 @@ void OnInitializeHook()
 		g_windowCorner = 2;
 
 		// Switch client log to client-specific file so host + client don't clobber each other
-		HookLogSetFile("UMVC3Hook_client.log");
+		HookLogSetFile("HeroNet_client.log");
 
 		HookLog("UMVC3Hook: Auto-connecting to host %s:%d\n",
 			g_autoConnectIp, g_autoConnectPort);

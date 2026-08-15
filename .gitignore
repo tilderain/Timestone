@@ -364,6 +364,8 @@ FodyWeavers.xsd
 
 UMVC3Hook.asi
 UMVC3Hook.map
+HeroNet.asi
+HeroNet.map
 all.txt
 
 build/**

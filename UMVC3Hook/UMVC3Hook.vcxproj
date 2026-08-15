@@ -274,7 +274,7 @@
   <ImportGroup Label="ExtensionTargets">
   </ImportGroup>
   <Target Name="AfterBuild">
-    <Copy SourceFiles="$(ProjectDir)..\x64\Release\UMVC3Hook.asi" DestinationFolder="E:\SteamLibrary\steamapps\common\ULTIMATE MARVEL VS. CAPCOM 3" SkipUnchangedFiles="false" />
-    <!-- <Copy SourceFiles="$(ProjectDir)..\x64\Release\UMVC3Hook.asi" DestinationFolder="C:\Program Files (x86)\Steam\steamapps\common\ULTIMATE MARVEL VS. CAPCOM 3" SkipUnchangedFiles="false" /> -->
+    <Copy SourceFiles="$(ProjectDir)..\x64\Release\HeroNet.asi" DestinationFolder="E:\SteamLibrary\steamapps\common\ULTIMATE MARVEL VS. CAPCOM 3" SkipUnchangedFiles="false" />
+    <!-- <Copy SourceFiles="$(ProjectDir)..\x64\Release\HeroNet.asi" DestinationFolder="C:\Program Files (x86)\Steam\steamapps\common\ULTIMATE MARVEL VS. CAPCOM 3" SkipUnchangedFiles="false" /> -->
   </Target>
 </Project>

@@ -455,7 +455,6 @@ Before deep behavioral analysis, assess if the field is obviously gameplay-relev
 3. **Rebuild and verify** (2 minutes):
    ```bash
    make -j8
-   cp UMVC3Hook.asi "../ULTIMATE MARVEL VS. CAPCOM 3/"
    wine umvc3.exe -autotest=Jill -autotest-moves=<command-id> -autotest-repeat=1
    ```
 
@@ -894,8 +893,6 @@ After applying the tentative fix:
    ```bash
    make -j8
    ```
-
-2. Copy the new `UMVC3Hook.asi` to the game directory.
 
 3. Re-run the exact same test case:
    ```bash
@@ -1641,7 +1638,6 @@ memcpy(dst + 0x143c, src + 0x143c, 4);
 
 ```bash
 $ make -j8
-$ cp UMVC3Hook.asi "../ULTIMATE MARVEL VS. CAPCOM 3/"
 $ python3 tools/autotest_ai.py --character Jill --moves <command-id> \
     --repeat 1 --launch --json --manifest verify1.json
 ```
@@ -1703,7 +1699,6 @@ memcpy(dst + 0x2a40, src + 0x2a40, 4);
 
 ```bash
 $ make -j8
-$ cp UMVC3Hook.asi "../ULTIMATE MARVEL VS. CAPCOM 3/"
 $ python3 tools/autotest_ai.py --character Jill --moves <command-id> \
     --repeat 1 --launch --json --manifest verify2.json
 ```
@@ -2193,7 +2188,6 @@ static constexpr SnapshotRange CCHR_SCALAR_RESTORE_RANGES[] = {
 
 ```bash
 make -j8
-cp UMVC3Hook.asi "../ULTIMATE MARVEL VS. CAPCOM 3/"
 wine umvc3.exe -autotest=Jill -autotest-moves=<command-id> -autotest-repeat=1
 ```
 
@@ -2352,7 +2346,6 @@ Proceed with gameplay hook? [y/n]
 
 ```bash
 make -j8
-cp UMVC3Hook.asi "../ULTIMATE MARVEL VS. CAPCOM 3/"
 wine umvc3.exe -autotest=Jill -autotest-moves=<command-id> -autotest-repeat=1
 ```
 
@@ -2631,7 +2624,6 @@ static constexpr SnapshotRange CCHR_SCALAR_RESTORE_RANGES[] = {
 
 ```bash
 make -j8
-cp UMVC3Hook.asi "../ULTIMATE MARVEL VS. CAPCOM 3/"
 wine umvc3.exe -autotest=Jill -autotest-moves=<command-id> -autotest-repeat=1
 ```
 
