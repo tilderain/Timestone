@@ -39,9 +39,9 @@ extern void HookLog(const char* fmt, ...);
 // Netplay state queries from netplay.cpp
 extern bool Netplay_HasRemoteInput();
 extern bool Netplay_GetInboundDelay(int32_t& outDelay, int32_t& outEffectiveFrame);
-extern bool Netplay_GetInboundRollback(int32_t& outRollback);
+extern bool Netplay_GetInboundRollback(int32_t& outRollback, int32_t& outEffectiveFrame);
 extern void Netplay_SendDelay(int32_t delay, int32_t effectiveFrame);
-extern void Netplay_SendRollback(int32_t rollbackFrames);
+extern void Netplay_SendRollback(int32_t rollbackFrames, int32_t effectiveFrame);
 extern bool Netplay_GetInboundRestartMatch(int32_t& outTargetFrame, uint32_t& outRoundSeed,
                                            uint32_t& outKind, int32_t& outButtonRestart);
 extern void Netplay_SendRestartMatch(int32_t targetFrame, uint32_t roundSeed);
@@ -50,6 +50,7 @@ extern void Netplay_SendRestartMatch(int32_t targetFrame, uint32_t roundSeed);
 extern "C" void Controller_SetDelayFrames(int32_t delay);
 extern "C" void Controller_ScheduleDelayFrames(int32_t delay, int32_t effectiveFrame);
 extern "C" void Controller_SetRollbackFrames(int32_t n);
+extern "C" void Controller_ScheduleRollbackFrames(int32_t n, int32_t effectiveFrame);
 extern "C" void Controller_SetMultiResimEnabled(bool enabled);
 extern "C" void Controller_ResetBuffers();
 extern "C" void Controller_ResetFrameEpoch();
@@ -113,20 +114,42 @@ extern "C" void FrameStepper_ScheduleAutoTestRestart(uint32_t roundSeed)
             g_restartTargetFrame, g_restartRoundSeed);
 }
 
+static int32_t GetNetplaySettingsEffectiveFrame()
+{
+    // Reliable setting changes need a common future boundary. Do not cap this
+    // lead by the unrelated 15-frame input-delay limit.
+    int32_t leadFrames = (int32_t)(Netplay_GetRTT() * 60 / 1000) + 3;
+    if (leadFrames < 3) leadFrames = 3;
+    return Controller_GetNetFrameCount() + leadFrames;
+}
+
 static void ScheduleNetplayDelay(int32_t delay)
 {
     if (delay < 1) delay = 1;
     if (delay > 15) delay = 15;
 
-    // Give the reliable control packet one RTT to arrive before both peers
-    // establish the synchronized neutral boundary.
-    int32_t networkFrames = (int32_t)(Netplay_GetRTT() * 60 / 1000) + 2;
-    int32_t leadFrames = networkFrames + 1;
-    if (leadFrames > 15) leadFrames = 15;
-    int32_t effectiveFrame = Controller_GetNetFrameCount() + leadFrames;
-
+    int32_t effectiveFrame = GetNetplaySettingsEffectiveFrame();
     Controller_ScheduleDelayFrames(delay, effectiveFrame);
     Netplay_SendDelay(delay, effectiveFrame);
+}
+
+static void AdjustNetplayDelay(int32_t delta)
+{
+    if (Controller_IsDelayChangePending())
+        return;
+    ScheduleNetplayDelay(Controller_GetDelayFrames() + delta);
+}
+
+static void ScheduleNetplayRollback(int32_t rollbackFrames)
+{
+    if (Controller_IsRollbackChangePending())
+        return;
+    if (rollbackFrames < 0) rollbackFrames = 0;
+    if (rollbackFrames > 16) rollbackFrames = 16;
+
+    int32_t effectiveFrame = GetNetplaySettingsEffectiveFrame();
+    Controller_ScheduleRollbackFrames(rollbackFrames, effectiveFrame);
+    Netplay_SendRollback(rollbackFrames, effectiveFrame);
 }
 
 // ---------------------------------------------------------------------------
@@ -450,10 +473,16 @@ static void __fastcall HookedMove(void* sMvc3Main)
             }
         }
         int32_t remoteRollback = -1;
-        while (Netplay_GetInboundRollback(remoteRollback))
+        int32_t remoteRollbackFrame = -1;
+        while (Netplay_GetInboundRollback(remoteRollback, remoteRollbackFrame))
         {
             if (remoteRollback >= 0 && remoteRollback <= 16)
-                Controller_SetRollbackFrames(remoteRollback);
+            {
+                if (remoteRollbackFrame < Controller_GetNetFrameCount())
+                    remoteRollbackFrame = Controller_GetNetFrameCount();
+                Controller_ScheduleRollbackFrames(remoteRollback,
+                                                   remoteRollbackFrame);
+            }
         }
         bool remoteMultiResim = false;
         while (Netplay_GetInboundMultiResim(remoteMultiResim))
@@ -974,15 +1003,11 @@ void FrameStepper_Process()
     {
         if (KeyPressed(VK_OEM_4, prevBracketL))  // [ = decrease delay
         {
-            int32_t delay = Controller_GetDelayFrames() - 1;
-            if (delay < 1) delay = 1;
-            ScheduleNetplayDelay(delay);
+            AdjustNetplayDelay(-1);
         }
         if (KeyPressed(VK_OEM_6, prevBracketR))  // ] = increase delay
         {
-            int32_t delay = Controller_GetDelayFrames() + 1;
-            if (delay > 15) delay = 15;
-            ScheduleNetplayDelay(delay);
+            AdjustNetplayDelay(1);
         }
     }
 
@@ -1305,35 +1330,35 @@ void FrameStepper_Draw()
             ImGui::TextColored(color, "Delay: %d  Rollback: %d", curDelay, curRollback);
 
             // Keep each control row vertical so the overlay stays compact in width.
+            const bool delayPending = Controller_IsDelayChangePending();
+            if (delayPending) ImGui::BeginDisabled();
             if (ImGui::SmallButton("D-"))
             {
-                curDelay = Controller_GetDelayFrames() - 1;
-                if (curDelay < 1) curDelay = 1;
-                ScheduleNetplayDelay(curDelay);
+                AdjustNetplayDelay(-1);
             }
             ImGui::SameLine();
             if (ImGui::SmallButton("D+"))
             {
-                curDelay = Controller_GetDelayFrames() + 1;
-                if (curDelay > 15) curDelay = 15;
-                ScheduleNetplayDelay(curDelay);
+                AdjustNetplayDelay(1);
             }
+            if (delayPending) ImGui::EndDisabled();
 
+            const bool rollbackPending = Controller_IsRollbackChangePending();
+            if (rollbackPending) ImGui::BeginDisabled();
             if (ImGui::SmallButton("RB-"))
             {
                 curRollback = Controller_GetRollbackFrames() - 1;
                 if (curRollback < 0) curRollback = 0;
-                Controller_SetRollbackFrames(curRollback);
-                Netplay_SendRollback(curRollback);
+                ScheduleNetplayRollback(curRollback);
             }
             ImGui::SameLine();
             if (ImGui::SmallButton("RB+"))
             {
                 curRollback = Controller_GetRollbackFrames() + 1;
                 if (curRollback > 16) curRollback = 16;
-                Controller_SetRollbackFrames(curRollback);
-                Netplay_SendRollback(curRollback);
+                ScheduleNetplayRollback(curRollback);
             }
+            if (rollbackPending) ImGui::EndDisabled();
 
         }
 

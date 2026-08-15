@@ -251,6 +251,8 @@ static int32_t   g_delayFrames     = 2;
 static int32_t   g_pendingDelayFrames = -1;
 static int32_t   g_pendingDelayEffectiveFrame = -1;
 static int32_t   g_rollbackFrames  = 1;
+static int32_t   g_pendingRollbackFrames = -1;
+static int32_t   g_pendingRollbackEffectiveFrame = -1;
 
 static bool IsFrameConfirmed(int32_t frame)
 {
@@ -443,6 +445,8 @@ extern "C" void Controller_ResetBuffers()
     g_localPending    = 0;
     g_pendingDelayFrames = -1;
     g_pendingDelayEffectiveFrame = -1;
+    g_pendingRollbackFrames = -1;
+    g_pendingRollbackEffectiveFrame = -1;
     g_lastRemoteFrame = -1;
     g_lastRemoteInput = 0;
     g_lastNonMultiCheckedFrame = -1;
@@ -458,9 +462,11 @@ extern "C" void Controller_ResetBuffers()
 // Debug accessors — called from framestepper draw
 // ---------------------------------------------------------------------------
 extern "C" int32_t Controller_GetDelayFrames()      { return g_delayFrames; }
+extern "C" bool Controller_IsDelayChangePending()   { return g_pendingDelayFrames >= 0; }
 extern "C" int32_t Controller_GetNetFrameCount()    { return GetGameFrameCount(); }
 extern "C" int32_t Controller_GetLastRemoteFrame()  { return g_lastRemoteFrame; }
 extern "C" int32_t Controller_GetRollbackFrames()   { return g_rollbackFrames; }
+extern "C" bool Controller_IsRollbackChangePending(){ return g_pendingRollbackFrames >= 0; }
 extern "C" void Controller_ClearDesyncDetection()
 {
     ResetDesyncDetection();
@@ -538,6 +544,16 @@ extern "C" void Controller_SetRollbackFrames(int32_t n)
     // A rollback-mode transition changes which frames are authoritative. Do not
     // compare checksum records produced under the previous mode.
     Controller_ClearDesyncDetection();
+}
+
+extern "C" void Controller_ScheduleRollbackFrames(int32_t n, int32_t effectiveFrame)
+{
+    if (n < 0) n = 0;
+    if (n > ROLLBACK_WINDOW) n = ROLLBACK_WINDOW;
+    g_pendingRollbackFrames = n;
+    g_pendingRollbackEffectiveFrame = effectiveFrame;
+    HookLog("Netplay: rollback change to %d scheduled for frame %d\n",
+            n, effectiveFrame);
 }
 
 // ---------------------------------------------------------------------------
@@ -918,11 +934,50 @@ static void ApplyScheduledDelayIfReady()
 
     const int32_t newDelay = g_pendingDelayFrames;
 
+    // Increasing delay inserts execution frames. Repeat the newest queued
+    // logical input through that gap instead of manufacturing releases. These
+    // frames have not been advertised yet: before this transition the sender's
+    // packet history ended at currentFrame + oldDelay - 1.
+    if (newDelay > g_delayFrames)
+    {
+        const int32_t sourceFrame = g_netFrameCount + g_delayFrames - 1;
+        const uint32_t sourceIdx = (uint32_t)sourceFrame % RING_SIZE;
+        const uint32_t fillInput =
+            g_scheduledLocalFrame[sourceIdx] == sourceFrame
+                ? g_scheduledLocalInput[sourceIdx] : 0;
+        for (int32_t frame = g_netFrameCount + g_delayFrames;
+             frame < g_netFrameCount + newDelay; ++frame)
+        {
+            const uint32_t idx = (uint32_t)frame % RING_SIZE;
+            g_scheduledLocalInput[idx] = fillInput;
+            g_scheduledLocalFrame[idx] = frame;
+        }
+    }
+
     g_delayFrames = newDelay;
     g_pendingDelayFrames = -1;
     g_pendingDelayEffectiveFrame = -1;
     HookLog("Netplay: applied delay %d at frame %d\n",
             newDelay, g_netFrameCount);
+}
+
+static bool IsRollbackChangeDue()
+{
+    return g_pendingRollbackFrames >= 0 &&
+           g_netFrameCount >= g_pendingRollbackEffectiveFrame;
+}
+
+static void ApplyScheduledRollbackIfReady()
+{
+    if (!IsRollbackChangeDue())
+        return;
+
+    const int32_t rollbackFrames = g_pendingRollbackFrames;
+    g_pendingRollbackFrames = -1;
+    g_pendingRollbackEffectiveFrame = -1;
+    Controller_SetRollbackFrames(rollbackFrames);
+    HookLog("Netplay: applied rollback %d after frame %d\n",
+            rollbackFrames, g_netFrameCount);
 }
 
 // ===========================================================================
@@ -1344,6 +1399,12 @@ extern "C" void Controller_OnFrameStart()
     // g_lastRemoteFrame without confirming the frame a waiter needed.
     DrainAndProcessPackets();
 
+    // Confirm the speculative timeline under the old rollback setting before a
+    // smaller window can stop checking it. The setting is applied at frame end,
+    // after any correction requested during this frame has completed.
+    if (IsRollbackChangeDue())
+        WaitForConfirmedFrame(g_netFrameCount, "rollback setting transition");
+
     // Process inbound ground truth packets
     Rollback_ProcessInboundGroundTruth();
     
@@ -1718,11 +1779,14 @@ extern "C" void Controller_OnFrameEnd()
     // Existing scheduled frames are never relabeled by a delay change.
     int32_t scheduledFrame = g_netFrameCount + g_delayFrames;
     uint32_t scheduledIdx = (uint32_t)scheduledFrame % RING_SIZE;
-    if (g_scheduledLocalFrame[scheduledIdx] == scheduledFrame)
-        g_scheduledLocalInput[scheduledIdx] |= g_localPending;
-    else
+    if (g_scheduledLocalFrame[scheduledIdx] != scheduledFrame)
+    {
         g_scheduledLocalInput[scheduledIdx] = g_localPending;
-    g_scheduledLocalFrame[scheduledIdx] = scheduledFrame;
+        g_scheduledLocalFrame[scheduledIdx] = scheduledFrame;
+    }
+    // A delay decrease can target frames already queued under the old delay.
+    // Keep those advertised values authoritative; replacing or ORing them would
+    // make the local execution differ from a peer that already confirmed them.
 
     // Keep the legacy history populated for rollback save/restore diagnostics.
     memmove(&g_oldInputs[0], &g_oldInputs[1],
@@ -1797,6 +1861,8 @@ extern "C" void Controller_OnFrameEnd()
     }
 
     Netplay_SendPacket(outPkt);
+
+    ApplyScheduledRollbackIfReady();
 
     // --- Desync comparison: scan backward from newest remote checksum. ---
     if (!g_isResimulating && FrameStepper_IsDesyncCheckReady() &&

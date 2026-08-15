@@ -68,7 +68,7 @@ struct DelayPacket {
     uint32_t type;               // PACKET_DELAY
     int32_t  delay;              // delay frame count
     int32_t  rollbackFrames;     // rollback frame count (both sides stay in sync)
-    int32_t  effective_frame;    // absolute frame for the delay transition
+    int32_t  effective_frame;    // absolute frame for the included setting change
 };
 
 struct BattleReadyPacket {
@@ -261,7 +261,7 @@ void Netplay_Shutdown();
 void Netplay_SendDelay(int32_t delay, int32_t effectiveFrame = -1);
 
 // Send a rollback-frame control value to the remote peer.
-void Netplay_SendRollback(int32_t rollbackFrames);
+void Netplay_SendRollback(int32_t rollbackFrames, int32_t effectiveFrame = -1);
 
 // Send a resim-notify packet to the remote peer — signals which frames were
 // re-simulated due to a late-arriving input correction.  The caller should
@@ -286,7 +286,7 @@ bool Netplay_GetInboundGroundTruth(GroundTruthPacket& outGT);
 
 // Retrieve the last rollback value received from the remote peer.  Returns true
 // if a new value was available (it is consumed by this call).
-bool Netplay_GetInboundRollback(int32_t& outRollback);
+bool Netplay_GetInboundRollback(int32_t& outRollback, int32_t& outEffectiveFrame);
 
 // Startup rendezvous used after local intro initialization has completed.
 void Netplay_SendBattleReady(uint32_t generation, uint32_t flags, uint32_t roundSeed);

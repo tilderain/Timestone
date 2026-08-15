@@ -129,9 +129,11 @@ extern "C" bool Controller_GetFrameChecksum(int32_t frame, uint32_t* outChecksum
 
 // Netplay debug info — read from framestepper draw
 extern "C" int32_t  Controller_GetDelayFrames();
+extern "C" bool     Controller_IsDelayChangePending();
 extern "C" int32_t  Controller_GetNetFrameCount();
 extern "C" int32_t  Controller_GetLastRemoteFrame();
 extern "C" int32_t  Controller_GetRollbackFrames();
+extern "C" bool     Controller_IsRollbackChangePending();
 extern "C" bool     Controller_IsRollbackEnabled();
 
 // Frame confirmation check — returns true if remote input has arrived for this frame
@@ -155,6 +157,7 @@ extern "C" int32_t  Controller_GetRemoteFrameAdvantage();
 extern "C" void     Controller_SetDelayFrames(int32_t delay);
 extern "C" void     Controller_ScheduleDelayFrames(int32_t delay, int32_t effectiveFrame);
 extern "C" void     Controller_SetRollbackFrames(int32_t n);
+extern "C" void     Controller_ScheduleRollbackFrames(int32_t n, int32_t effectiveFrame);
 extern "C" void     Controller_ResetFightTimer(uint64_t sAction);
 
 // Desync detection flags — set by controller when checksums diverge.

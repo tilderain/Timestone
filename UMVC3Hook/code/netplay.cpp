@@ -44,11 +44,13 @@ static int32_t              g_outboundDelay    = -1;
 static int32_t              g_outboundDelayFrame = -1;
 static bool                 g_outboundDelayNew = false;
 static int32_t              g_outboundRollback = -1;
+static int32_t              g_outboundRollbackFrame = -1;
 static bool                 g_outboundRollbackNew = false;
 static int32_t              g_inboundDelay     = -1;
 static int32_t              g_inboundDelayFrame = -1;
 static bool                 g_inboundDelayNew  = false;
 static int32_t              g_inboundRollback  = -1;
+static int32_t              g_inboundRollbackFrame = -1;
 static bool                 g_inboundRollbackNew = false;
 static CRITICAL_SECTION     g_delayCS;
 
@@ -181,18 +183,23 @@ static DWORD WINAPI Netplay_ServiceThread(LPVOID)
 
         // --- Send delay/rollback control packet (if a new value is pending) ---
         bool hasNewDelay = false;
+        bool hasNewRollback = false;
         int32_t delayVal = -1;
         int32_t delayFrame = -1;
         int32_t rollbackVal = -1;
+        int32_t rollbackFrame = -1;
         {
             ScopedCS lock(g_delayCS);
-            if (g_outboundDelayNew || g_outboundRollbackNew)
-            {
+            if (g_outboundDelayNew) {
                 delayVal    = g_outboundDelay;
                 delayFrame  = g_outboundDelayFrame;
-                rollbackVal = g_outboundRollback;
                 hasNewDelay = true;
-                g_outboundDelayNew   = false;
+                g_outboundDelayNew = false;
+            }
+            if (g_outboundRollbackNew) {
+                rollbackVal = g_outboundRollback;
+                rollbackFrame = g_outboundRollbackFrame;
+                hasNewRollback = true;
                 g_outboundRollbackNew = false;
             }
         }
@@ -202,8 +209,24 @@ static DWORD WINAPI Netplay_ServiceThread(LPVOID)
             DelayPacket dp;
             dp.type           = PACKET_DELAY;
             dp.delay          = delayVal;
-            dp.rollbackFrames = rollbackVal;
+            dp.rollbackFrames = -1;
             dp.effective_frame = delayFrame;
+            ENetPacket* packet = enet_packet_create(
+                &dp, sizeof(DelayPacket), ENET_PACKET_FLAG_RELIABLE
+            );
+            if (enet_peer_send(g_peer, 0, packet) != 0) {
+                enet_packet_destroy(packet);
+            }
+            enet_host_flush(g_host);
+        }
+
+        if (hasNewRollback && g_peer)
+        {
+            DelayPacket dp;
+            dp.type = PACKET_DELAY;
+            dp.delay = -1;
+            dp.rollbackFrames = rollbackVal;
+            dp.effective_frame = rollbackFrame;
             ENetPacket* packet = enet_packet_create(
                 &dp, sizeof(DelayPacket), ENET_PACKET_FLAG_RELIABLE
             );
@@ -464,11 +487,16 @@ static DWORD WINAPI Netplay_ServiceThread(LPVOID)
                                     const DelayPacket* dp = (const DelayPacket*)event.packet->data;
                                     {
                                         ScopedCS lock(g_delayCS);
-                                        g_inboundDelay     = dp->delay;
-                                        g_inboundDelayFrame = dp->effective_frame;
-                                        g_inboundDelayNew  = true;
-                                        g_inboundRollback     = dp->rollbackFrames;
-                                        g_inboundRollbackNew = true;
+                                        if (dp->delay >= 0) {
+                                            g_inboundDelay = dp->delay;
+                                            g_inboundDelayFrame = dp->effective_frame;
+                                            g_inboundDelayNew = true;
+                                        }
+                                        if (dp->rollbackFrames >= 0) {
+                                            g_inboundRollback = dp->rollbackFrames;
+                                            g_inboundRollbackFrame = dp->effective_frame;
+                                            g_inboundRollbackNew = true;
+                                        }
                                     }
                                 }
                                 break;
@@ -759,10 +787,11 @@ void Netplay_SendDelay(int32_t delay, int32_t effectiveFrame)
     g_outboundDelayNew = true;
 }
 
-void Netplay_SendRollback(int32_t rollbackFrames)
+void Netplay_SendRollback(int32_t rollbackFrames, int32_t effectiveFrame)
 {
     ScopedCS lock(g_delayCS);
     g_outboundRollback = rollbackFrames;
+    g_outboundRollbackFrame = effectiveFrame;
     g_outboundRollbackNew = true;
 }
 
@@ -817,12 +846,13 @@ bool Netplay_GetInboundDelay(int32_t& outDelay, int32_t& outEffectiveFrame)
     return false;
 }
 
-bool Netplay_GetInboundRollback(int32_t& outRollback)
+bool Netplay_GetInboundRollback(int32_t& outRollback, int32_t& outEffectiveFrame)
 {
     ScopedCS lock(g_delayCS);
     if (g_inboundRollbackNew)
     {
         outRollback = g_inboundRollback;
+        outEffectiveFrame = g_inboundRollbackFrame;
         g_inboundRollbackNew = false;
         return true;
     }
