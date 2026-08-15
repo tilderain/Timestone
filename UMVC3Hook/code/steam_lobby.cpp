@@ -28,6 +28,7 @@ struct SteamAPI {
     HSteamUser (*GetUser)() = nullptr;
     HSteamPipe (*GetPipe)() = nullptr;
     void* (*GetClient)() = nullptr;
+    void* (*GetFriends)(void*, HSteamUser, HSteamPipe, const char*) = nullptr;
     void* (*GetMatchmaking)(void*, HSteamUser, HSteamPipe, const char*) = nullptr;
     void* (*GetUtils)(void*, HSteamPipe, const char*) = nullptr;
     void* (*GetGeneric)(void*, HSteamUser, HSteamPipe, const char*) = nullptr;
@@ -43,9 +44,13 @@ struct SteamAPI {
     int (*GetNumLobbyMembers)(void*, uint64_t) = nullptr;
     uint64_t (*GetLobbyMemberByIndex)(void*, uint64_t, int) = nullptr;
     uint64_t (*GetLobbyOwner)(void*, uint64_t) = nullptr;
+    bool (*RequestLobbyData)(void*, uint64_t) = nullptr;
     bool (*SetLobbyData)(void*, uint64_t, const char*, const char*) = nullptr;
     const char* (*GetLobbyData)(void*, uint64_t, const char*) = nullptr;
     bool (*SetLobbyJoinable)(void*, uint64_t, bool) = nullptr;
+
+    const char* (*GetPersonaName)(void*) = nullptr;
+    const char* (*GetFriendPersonaName)(void*, uint64_t) = nullptr;
 
     bool (*IsCallCompleted)(void*, SteamAPICall_t, bool*) = nullptr;
     bool (*GetCallResult)(void*, SteamAPICall_t, void*, int, int, bool*) = nullptr;
@@ -54,10 +59,15 @@ struct SteamAPI {
 SteamAPI g_api;
 void* g_matchmaking = nullptr;
 void* g_utils = nullptr;
+void* g_friends = nullptr;
 ISteamNetworkingSockets* g_sockets = nullptr;
+ISteamNetworkingUtils* g_networkingUtils = nullptr;
 SteamAPICall_t g_pendingHandle = 0;
 PendingCall g_pendingCall = PendingCall::None;
 uint64_t g_results[50] = {};
+int g_resultPings[50] = {};
+char g_resultNames[50][128] = {};
+char g_resultUsernames[50][128] = {};
 size_t g_resultCount = 0;
 bool g_resultsChanged = false;
 uint64_t g_lobbyId = 0;
@@ -68,6 +78,10 @@ ENetHost* g_gameHost = nullptr;
 ENetPeer* g_gamePeer = nullptr;
 bool g_handlesReady = false;
 bool g_bridgeCreated = false;
+bool g_pingLocationPublished = false;
+ULONGLONG g_nextPingLocationAttempt = 0;
+ULONGLONG g_nextResultPingRefresh = 0;
+ULONGLONG g_resultPingRefreshDeadline = 0;
 char g_status[256] = "Steam is not initialized";
 
 template <typename T>
@@ -98,6 +112,7 @@ bool ResolveExports()
     ok &= Resolve(g_api.GetUser, "SteamAPI_GetHSteamUser");
     ok &= Resolve(g_api.GetPipe, "SteamAPI_GetHSteamPipe");
     ok &= Resolve(g_api.GetClient, "SteamClient");
+    ok &= Resolve(g_api.GetFriends, "SteamAPI_ISteamClient_GetISteamFriends");
     ok &= Resolve(g_api.GetMatchmaking, "SteamAPI_ISteamClient_GetISteamMatchmaking");
     ok &= Resolve(g_api.GetUtils, "SteamAPI_ISteamClient_GetISteamUtils");
     ok &= Resolve(g_api.GetGeneric, "SteamAPI_ISteamClient_GetISteamGenericInterface");
@@ -112,9 +127,12 @@ bool ResolveExports()
     ok &= Resolve(g_api.GetNumLobbyMembers, "SteamAPI_ISteamMatchmaking_GetNumLobbyMembers");
     ok &= Resolve(g_api.GetLobbyMemberByIndex, "SteamAPI_ISteamMatchmaking_GetLobbyMemberByIndex");
     ok &= Resolve(g_api.GetLobbyOwner, "SteamAPI_ISteamMatchmaking_GetLobbyOwner");
+    ok &= Resolve(g_api.RequestLobbyData, "SteamAPI_ISteamMatchmaking_RequestLobbyData");
     ok &= Resolve(g_api.SetLobbyData, "SteamAPI_ISteamMatchmaking_SetLobbyData");
     ok &= Resolve(g_api.GetLobbyData, "SteamAPI_ISteamMatchmaking_GetLobbyData");
     ok &= Resolve(g_api.SetLobbyJoinable, "SteamAPI_ISteamMatchmaking_SetLobbyJoinable");
+    ok &= Resolve(g_api.GetPersonaName, "SteamAPI_ISteamFriends_GetPersonaName");
+    ok &= Resolve(g_api.GetFriendPersonaName, "SteamAPI_ISteamFriends_GetFriendPersonaName");
     ok &= Resolve(g_api.IsCallCompleted, "SteamAPI_ISteamUtils_IsAPICallCompleted");
     ok &= Resolve(g_api.GetCallResult, "SteamAPI_ISteamUtils_GetAPICallResult");
     return ok;
@@ -195,6 +213,91 @@ void PumpLobbyMembers()
     StartPeerConnection(remote);
 }
 
+void PumpPingLocation()
+{
+    if (!g_isHost || !g_lobbyId || g_pingLocationPublished || !g_networkingUtils)
+        return;
+
+    ULONGLONG now = GetTickCount64();
+    if (now < g_nextPingLocationAttempt) return;
+    g_nextPingLocationAttempt = now + 1000;
+
+    SteamNetworkPingLocation_t location = {};
+    if (g_networkingUtils->GetLocalPingLocation(location) < 0.0f) return;
+
+    char encoded[k_cchMaxSteamNetworkingPingLocationString] = {};
+    g_networkingUtils->ConvertPingLocationToString(location, encoded, sizeof(encoded));
+    if (!encoded[0] || !g_api.SetLobbyData(g_matchmaking, g_lobbyId, "location", encoded))
+        return;
+
+    g_pingLocationPublished = true;
+    HookLog("SteamLobby: published ping location %s\n", encoded);
+}
+
+int EstimateLobbyPing(uint64_t lobbyId)
+{
+    if (!g_networkingUtils || !lobbyId) return -1;
+    const char* encoded = g_api.GetLobbyData(g_matchmaking, lobbyId, "location");
+    if (!encoded || !encoded[0]) return -1;
+
+    SteamNetworkPingLocation_t location = {};
+    if (!g_networkingUtils->ParsePingLocationString(encoded, location)) return -1;
+    int ping = g_networkingUtils->EstimatePingTimeFromLocalHost(location);
+    return ping >= 0 ? ping : -1;
+}
+
+bool CopyResultText(char* destination, size_t destinationSize, const char* source)
+{
+    if (!source) source = "";
+    if (strncmp(destination, source, destinationSize) == 0) return false;
+    snprintf(destination, destinationSize, "%s", source);
+    return true;
+}
+
+bool RefreshResultMetadata(size_t index)
+{
+    uint64_t lobbyId = g_results[index];
+    bool changed = CopyResultText(g_resultNames[index], sizeof(g_resultNames[index]),
+                                  g_api.GetLobbyData(g_matchmaking, lobbyId, "name"));
+
+    const char* username = g_api.GetLobbyData(g_matchmaking, lobbyId, "username");
+    if ((!username || !username[0]) && g_friends) {
+        uint64_t owner = g_api.GetLobbyOwner(g_matchmaking, lobbyId);
+        username = owner ? g_api.GetFriendPersonaName(g_friends, owner) : "";
+    }
+    changed |= CopyResultText(g_resultUsernames[index], sizeof(g_resultUsernames[index]),
+                              username);
+    return changed;
+}
+
+void RefreshResultPings()
+{
+    ULONGLONG now = GetTickCount64();
+    if (!g_resultCount || now < g_nextResultPingRefresh ||
+        now >= g_resultPingRefreshDeadline)
+        return;
+
+    g_nextResultPingRefresh = now + 1000;
+    bool changed = false;
+    bool pending = false;
+    for (size_t i = 0; i < g_resultCount; ++i) {
+        changed |= RefreshResultMetadata(i);
+        if (g_resultPings[i] >= 0) continue;
+        int ping = EstimateLobbyPing(g_results[i]);
+        if (ping >= 0) {
+            g_resultPings[i] = ping;
+            changed = true;
+            HookLog("SteamLobby: estimated lobby %llu ping at %d ms\n",
+                    static_cast<unsigned long long>(g_results[i]), ping);
+        } else {
+            pending = true;
+            g_api.RequestLobbyData(g_matchmaking, g_results[i]);
+        }
+    }
+    if (changed) g_resultsChanged = true;
+    if (!pending) g_resultPingRefreshDeadline = 0;
+}
+
 void PumpConnection()
 {
     if (g_connection == k_HSteamNetConnection_Invalid || g_bridgeCreated) return;
@@ -223,10 +326,10 @@ void PumpConnection()
 bool SteamLobby_Initialize()
 {
     if (g_matchmaking && g_sockets) return true;
-    g_api.module = GetModuleHandleA("steam_api64e.dll");
-    if (!g_api.module) g_api.module = LoadLibraryA("steam_api64e.dll");
+    g_api.module = GetModuleHandleA("steam_api64.dll");
+    if (!g_api.module) g_api.module = LoadLibraryA("steam_api64.dll");
     if (!g_api.module) {
-        SetStatus("steam_api64e.dll was not found");
+        SetStatus("steam_api64.dll was not found");
         return false;
     }
     if (!ResolveExports() || !g_api.Init()) {
@@ -237,10 +340,19 @@ bool SteamLobby_Initialize()
     void* client = g_api.GetClient();
     HSteamUser user = g_api.GetUser();
     HSteamPipe pipe = g_api.GetPipe();
+    static const char* friendVersions[] = {
+        "SteamFriends017", "SteamFriends016", "SteamFriends015", "SteamFriends014"
+    };
+    for (const char* version : friendVersions) {
+        g_friends = g_api.GetFriends(client, user, pipe, version);
+        if (g_friends) break;
+    }
     g_matchmaking = g_api.GetMatchmaking(client, user, pipe, "SteamMatchMaking009");
     g_utils = g_api.GetUtils(client, pipe, "SteamUtils008");
     g_sockets = static_cast<ISteamNetworkingSockets*>(
         g_api.GetGeneric(client, user, pipe, k_SteamNetworkingSocketsVersion));
+    g_networkingUtils = static_cast<ISteamNetworkingUtils*>(
+        g_api.GetGeneric(client, user, pipe, k_SteamNetworkingUtilsVersion));
     if (!g_matchmaking || !g_utils) {
         SetStatus("Steam matchmaking interfaces are unavailable");
         return false;
@@ -249,6 +361,11 @@ bool SteamLobby_Initialize()
         SetStatus("SteamNetworkingSockets012 is unavailable through this Steam client");
         return false;
     }
+    if (!g_networkingUtils) {
+        SetStatus("Steam ready; ping estimates unavailable");
+        return true;
+    }
+    g_networkingUtils->CheckPingDataUpToDate(1.0e10f);
     SetStatus("Steam ready");
     return true;
 }
@@ -285,13 +402,22 @@ void SteamLobby_Join(uint64_t lobbyId)
 void SteamLobby_Pump()
 {
     if (!g_matchmaking || !g_utils) return;
+    g_api.RunCallbacks();
 
     if (g_pendingCall == PendingCall::Search) {
         LobbyMatchList_t result = {};
         if (TakeCallResult(result, k_iCallbackLobbyMatchList)) {
             g_resultCount = result.m_nLobbiesMatching < 50 ? result.m_nLobbiesMatching : 50;
-            for (size_t i = 0; i < g_resultCount; ++i)
+            for (size_t i = 0; i < g_resultCount; ++i) {
                 g_results[i] = g_api.GetLobbyByIndex(g_matchmaking, static_cast<int>(i));
+                g_api.RequestLobbyData(g_matchmaking, g_results[i]);
+                g_resultPings[i] = EstimateLobbyPing(g_results[i]);
+                g_resultNames[i][0] = '\0';
+                g_resultUsernames[i][0] = '\0';
+                RefreshResultMetadata(i);
+            }
+            g_nextResultPingRefresh = 0;
+            g_resultPingRefreshDeadline = GetTickCount64() + 15000;
             g_resultsChanged = true;
             g_pendingCall = PendingCall::None;
             g_pendingHandle = 0;
@@ -311,10 +437,19 @@ void SteamLobby_Pump()
             } else {
                 g_lobbyId = result.m_ulSteamIDLobby;
                 g_isHost = true;
+                g_pingLocationPublished = false;
+                g_nextPingLocationAttempt = 0;
                 g_api.SetLobbyData(g_matchmaking, g_lobbyId, "heronet", "1");
                 g_api.SetLobbyData(g_matchmaking, g_lobbyId, "protocol", "1");
                 g_api.SetLobbyData(g_matchmaking, g_lobbyId, "build", UMVC3HOOK_GIT_COMMIT);
                 g_api.SetLobbyData(g_matchmaking, g_lobbyId, "state", "waiting");
+                const char* username = g_friends ? g_api.GetPersonaName(g_friends) : "";
+                if (username && username[0]) {
+                    char lobbyName[128];
+                    snprintf(lobbyName, sizeof(lobbyName), "%s's Lobby", username);
+                    g_api.SetLobbyData(g_matchmaking, g_lobbyId, "name", lobbyName);
+                    g_api.SetLobbyData(g_matchmaking, g_lobbyId, "username", username);
+                }
                 SetStatusf("Lobby %llu created; waiting for opponent", g_lobbyId);
             }
         }
@@ -333,6 +468,8 @@ void SteamLobby_Pump()
         }
     }
 
+    PumpPingLocation();
+    RefreshResultPings();
     PumpLobbyMembers();
     PumpConnection();
 }
@@ -350,6 +487,26 @@ size_t SteamLobby_GetResultCount()
 uint64_t SteamLobby_GetResult(size_t index)
 {
     return index < g_resultCount ? g_results[index] : 0;
+}
+
+int SteamLobby_GetResultEstimatedPing(size_t index)
+{
+    return index < g_resultCount ? g_resultPings[index] : -1;
+}
+
+const char* SteamLobby_GetResultName(size_t index)
+{
+    return index < g_resultCount ? g_resultNames[index] : "";
+}
+
+const char* SteamLobby_GetResultUsername(size_t index)
+{
+    return index < g_resultCount ? g_resultUsernames[index] : "";
+}
+
+bool SteamLobby_ArePingEstimatesAvailable()
+{
+    return g_networkingUtils != nullptr;
 }
 
 bool SteamLobby_TakeResultsChanged()
@@ -384,4 +541,8 @@ void SteamLobby_Shutdown(bool preserveConnection)
     g_gamePeer = nullptr;
     g_handlesReady = false;
     g_bridgeCreated = false;
+    g_pingLocationPublished = false;
+    g_nextPingLocationAttempt = 0;
+    g_nextResultPingRefresh = 0;
+    g_resultPingRefreshDeadline = 0;
 }

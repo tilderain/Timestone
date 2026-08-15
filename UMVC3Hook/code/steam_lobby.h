@@ -14,6 +14,10 @@ void SteamLobby_Shutdown(bool preserveConnection);
 const char* SteamLobby_GetStatus();
 size_t SteamLobby_GetResultCount();
 uint64_t SteamLobby_GetResult(size_t index);
+int SteamLobby_GetResultEstimatedPing(size_t index);
+const char* SteamLobby_GetResultName(size_t index);
+const char* SteamLobby_GetResultUsername(size_t index);
+bool SteamLobby_ArePingEstimatesAvailable();
 bool SteamLobby_TakeResultsChanged();
 bool SteamLobby_TakeNetworkHandles(ENetHost** outHost, ENetPeer** outPeer,
                                    bool* outIsHost);

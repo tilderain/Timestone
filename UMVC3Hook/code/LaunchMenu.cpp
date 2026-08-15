@@ -4,6 +4,7 @@
 #include "netplay.h"
 #include "steam_lobby.h"
 #include <Windows.h>
+#include <commctrl.h>
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
@@ -402,6 +403,8 @@ static void DisableHostButtonsExceptTraining(HWND hDlg)
 LaunchOption ShowLaunchMenu()
 {
     HINSTANCE hInst = GetModuleHandle(NULL);
+    INITCOMMONCONTROLSEX controls = {sizeof(controls), ICC_LISTVIEW_CLASSES};
+    InitCommonControlsEx(&controls);
 
     // Default config from training boot
     const TrainingBootConfig& def = TrainingBoot_GetDefaultConfig();
@@ -436,7 +439,7 @@ LaunchOption ShowLaunchMenu()
 
     RegisterClassA(&wc);
 
-    int w = 840, h = 743;
+    int w = 840, h = 763;
     int x = (GetSystemMetrics(SM_CXSCREEN) - w) / 2;
     int y = (GetSystemMetrics(SM_CYSCREEN) - h) / 2;
 
@@ -711,7 +714,7 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
         // ---- Steam Lobby Section ----
         y += 5;
         CreateWindowA("BUTTON", "Steam Lobby",
-            WS_VISIBLE | WS_CHILD | BS_GROUPBOX, leftX, y, contentW, 160,
+            WS_VISIBLE | WS_CHILD | BS_GROUPBOX, leftX, y, contentW, 180,
             hDlg, NULL, NULL, NULL);
         y += 18;
 
@@ -735,13 +738,24 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
             hDlg, (HMENU)ID_STEAM_STATUS, NULL, NULL);
         y += 30;
 
-        // Lobby listbox
-        CreateWindowA("LISTBOX", "",
-            WS_VISIBLE | WS_CHILD | WS_TABSTOP | WS_BORDER |
-            LBS_STANDARD | LBS_NOINTEGRALHEIGHT,
-            leftX + 10, y, 780, 95,
+        // Lobby results table
+        HWND hLobbyList = CreateWindowExA(WS_EX_CLIENTEDGE, WC_LISTVIEWA, "",
+            WS_VISIBLE | WS_CHILD | WS_TABSTOP | WS_VSCROLL |
+            LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS,
+            leftX + 10, y, 780, 115,
             hDlg, (HMENU)ID_STEAM_LIST, NULL, NULL);
-        y += 100;
+        ListView_SetExtendedListViewStyle(hLobbyList, LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES);
+        const char* columnNames[] = {"Lobby Name", "Username", "Ping"};
+        const int columnWidths[] = {315, 290, 125};
+        for (int i = 0; i < 3; ++i) {
+            LVCOLUMNA column = {};
+            column.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_SUBITEM;
+            column.pszText = const_cast<char*>(columnNames[i]);
+            column.cx = columnWidths[i];
+            column.iSubItem = i;
+            ListView_InsertColumn(hLobbyList, i, &column);
+        }
+        y += 120;
 
         // ---- Launch Buttons ----
         y += 10;
@@ -786,15 +800,30 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
             if (SteamLobby_TakeResultsChanged()) {
                 HWND hList = GetDlgItem(hDlg, ID_STEAM_LIST);
                 if (hList) {
-                    SendMessageA(hList, LB_RESETCONTENT, 0, 0);
+                    ListView_DeleteAllItems(hList);
                     for (size_t i = 0; i < SteamLobby_GetResultCount(); ++i) {
                         uint64_t lobbyId = SteamLobby_GetResult(i);
-                        char label[96];
-                        snprintf(label, sizeof(label), "HeroNet Lobby %llu",
-                                 (unsigned long long)lobbyId);
-                        LRESULT row = SendMessageA(hList, LB_ADDSTRING, 0, (LPARAM)label);
-                        if (row != LB_ERR && row != LB_ERRSPACE)
-                            SendMessageA(hList, LB_SETITEMDATA, row, (LPARAM)lobbyId);
+                        int ping = SteamLobby_GetResultEstimatedPing(i);
+                        char pingText[32];
+                        if (ping >= 0) {
+                            snprintf(pingText, sizeof(pingText), "~%d ms", ping);
+                        } else if (SteamLobby_ArePingEstimatesAvailable()) {
+                            snprintf(pingText, sizeof(pingText), "Pending");
+                        } else {
+                            snprintf(pingText, sizeof(pingText), "Unavailable");
+                        }
+
+                        LVITEMA item = {};
+                        item.mask = LVIF_TEXT | LVIF_PARAM;
+                        item.iItem = static_cast<int>(i);
+                        item.pszText = const_cast<char*>(SteamLobby_GetResultName(i));
+                        item.lParam = static_cast<LPARAM>(lobbyId);
+                        int row = ListView_InsertItem(hList, &item);
+                        if (row >= 0) {
+                            ListView_SetItemText(hList, row, 1,
+                                const_cast<char*>(SteamLobby_GetResultUsername(i)));
+                            ListView_SetItemText(hList, row, 2, pingText);
+                        }
                     }
                 }
             }
@@ -1198,7 +1227,7 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
         case ID_STEAM_SEARCH_BTN:
         {
             HWND hList = GetDlgItem(hDlg, ID_STEAM_LIST);
-            if (hList) SendMessageA(hList, LB_RESETCONTENT, 0, 0);
+            if (hList) ListView_DeleteAllItems(hList);
             SteamLobby_Search();
             return 0;
         }
@@ -1213,10 +1242,13 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
         {
             HWND hList = GetDlgItem(hDlg, ID_STEAM_LIST);
             if (!hList) return 0;
-            LRESULT row = SendMessageA(hList, LB_GETCURSEL, 0, 0);
-            if (row == LB_ERR) return 0;
-            uint64_t lobbyId = (uint64_t)SendMessageA(hList, LB_GETITEMDATA, row, 0);
-            if (lobbyId && lobbyId != (uint64_t)LB_ERR) SteamLobby_Join(lobbyId);
+            int row = ListView_GetNextItem(hList, -1, LVNI_SELECTED);
+            if (row < 0) return 0;
+            LVITEMA item = {};
+            item.mask = LVIF_PARAM;
+            item.iItem = row;
+            if (ListView_GetItem(hList, &item) && item.lParam)
+                SteamLobby_Join(static_cast<uint64_t>(item.lParam));
             return 0;
         }
         }

@@ -12,6 +12,8 @@ using HSteamListenSocket = uint32_t;
 constexpr HSteamNetConnection k_HSteamNetConnection_Invalid = 0;
 constexpr HSteamListenSocket k_HSteamListenSocket_Invalid = 0;
 constexpr const char* k_SteamNetworkingSocketsVersion = "SteamNetworkingSockets012";
+constexpr const char* k_SteamNetworkingUtilsVersion = "SteamNetworkingUtils004";
+constexpr int k_cchMaxSteamNetworkingPingLocationString = 1024;
 
 enum EResult : int32_t {
     k_EResultOK = 1,
@@ -117,6 +119,25 @@ struct SteamNetworkingMessage_t {
     void Release() { m_pfnRelease(this); }
 };
 
+struct SteamNetworkPingLocation_t {
+    uint8_t m_data[512];
+};
+
+// The method order must match SteamNetworkingUtils004. Only the prefix used
+// by HeroNet is declared here.
+class ISteamNetworkingUtils {
+public:
+    virtual SteamNetworkingMessage_t* AllocateMessage(int) = 0;
+    virtual int GetRelayNetworkStatus(void*) = 0;
+    virtual float GetLocalPingLocation(SteamNetworkPingLocation_t&) = 0;
+    virtual int EstimatePingTimeBetweenTwoLocations(const SteamNetworkPingLocation_t&,
+                                                    const SteamNetworkPingLocation_t&) = 0;
+    virtual int EstimatePingTimeFromLocalHost(const SteamNetworkPingLocation_t&) = 0;
+    virtual void ConvertPingLocationToString(const SteamNetworkPingLocation_t&, char*, int) = 0;
+    virtual bool ParsePingLocationString(const char*, SteamNetworkPingLocation_t&) = 0;
+    virtual bool CheckPingDataUpToDate(float) = 0;
+};
+
 // The method order must match SteamNetworkingSockets012. Only the prefix used
 // by HeroNet is declared here.
 class ISteamNetworkingSockets {
@@ -170,6 +191,7 @@ struct LobbyEnter_t {
 
 static_assert(sizeof(SteamNetworkingIdentity) == 136);
 static_assert(sizeof(SteamNetworkingConfigValue_t) == 16);
+static_assert(sizeof(SteamNetworkPingLocation_t) == 512);
 static_assert(sizeof(LobbyMatchList_t) == 4);
 static_assert(sizeof(LobbyCreated_t) == 16);
 static_assert(sizeof(LobbyEnter_t) == 24);
