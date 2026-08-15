@@ -1,4 +1,5 @@
 #include "LaunchMenu.h"
+#include "assist_names.h"
 #include "trainingboot.h"
 #include "netplay.h"
 #include <Windows.h>
@@ -346,7 +347,7 @@ enum CtrlId {
 static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam);
 static void PopulateCharCombo(HWND hCombo, int defaultCharId);
 static void PopulateColorCombo(HWND hCombo, int characterId, int defaultColor);
-static void PopulateAssistCombo(HWND hCombo, int defaultAssist);
+static void PopulateAssistCombo(HWND hCombo, int characterId, int defaultAssist);
 static void PopulateStageCombo(HWND hCombo, int defaultStageId);
 static int FindStageIndex(int stageId);
 static void UpdateCharFromCombo(HWND hDlg, int comboId, int slotIndex, int team);
@@ -424,7 +425,7 @@ LaunchOption ShowLaunchMenu()
 
     RegisterClassA(&wc);
 
-    int w = 540, h = 743;
+    int w = 840, h = 743;
     int x = (GetSystemMetrics(SM_CXSCREEN) - w) / 2;
     int y = (GetSystemMetrics(SM_CYSCREEN) - h) / 2;
 
@@ -544,16 +545,17 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
     {
         int y = 15;
         const int leftX = 20;
-        const int left2X = 280; // second column start
+        const int left2X = 430; // second column start
+        const int contentW = 800;
 
         // ---- Title ----
         CreateWindowA("STATIC", "Configure launch mode and match settings:",
-            WS_VISIBLE | WS_CHILD, leftX, y, 500, 18, hDlg, NULL, NULL, NULL);
+            WS_VISIBLE | WS_CHILD, leftX, y, contentW, 18, hDlg, NULL, NULL, NULL);
         y += 28;
 
         // ---- Character Select Section ----
         CreateWindowA("BUTTON", "Character Select",
-            WS_VISIBLE | WS_CHILD | BS_GROUPBOX, leftX, y, 500, 175,
+            WS_VISIBLE | WS_CHILD | BS_GROUPBOX, leftX, y, contentW, 175,
             hDlg, NULL, NULL, NULL);
         y += 18;
 
@@ -572,11 +574,11 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
             CreateWindowA("STATIC", col == 0 ? "P1" : "P2",
                 WS_VISIBLE | WS_CHILD, cx, y, 22, 18, hDlg, NULL, NULL, NULL);
             CreateWindowA("STATIC", "Character",
-                WS_VISIBLE | WS_CHILD, cx + 24, y, 100, 18, hDlg, NULL, NULL, NULL);
+                WS_VISIBLE | WS_CHILD, cx + 24, y, 130, 18, hDlg, NULL, NULL, NULL);
             CreateWindowA("STATIC", "Color",
-                WS_VISIBLE | WS_CHILD, cx + 128, y, 42, 18, hDlg, NULL, NULL, NULL);
+                WS_VISIBLE | WS_CHILD, cx + 158, y, 45, 18, hDlg, NULL, NULL, NULL);
             CreateWindowA("STATIC", "Assist",
-                WS_VISIBLE | WS_CHILD, cx + 174, y, 56, 18, hDlg, NULL, NULL, NULL);
+                WS_VISIBLE | WS_CHILD, cx + 207, y, 170, 18, hDlg, NULL, NULL, NULL);
         }
         y += 18;
 
@@ -595,7 +597,7 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
             HWND hChar = CreateWindowA("COMBOBOX", "",
                 WS_VISIBLE | WS_CHILD | WS_TABSTOP |
                 CBS_DROPDOWN | CBS_HASSTRINGS | CBS_AUTOHSCROLL,
-                cx + 24, cy, 100, 200,
+                cx + 24, cy, 130, 200,
                 hDlg, (HMENU)slots[i].ctrlId, NULL, NULL);
 
             int defaultCharId = (slots[i].team == 0)
@@ -612,23 +614,23 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
 
             HWND hColor = CreateWindowA("COMBOBOX", "",
                 WS_VISIBLE | WS_CHILD | WS_TABSTOP | CBS_DROPDOWNLIST | CBS_HASSTRINGS,
-                cx + 128, cy, 42, 200,
+                cx + 158, cy, 45, 200,
                 hDlg, (HMENU)(ID_P1_COLOR1 + i), NULL, NULL);
             PopulateColorCombo(hColor, defaultCharId, defaultColor);
 
             HWND hAssist = CreateWindowA("COMBOBOX", "",
                 WS_VISIBLE | WS_CHILD | WS_TABSTOP | CBS_DROPDOWNLIST | CBS_HASSTRINGS,
-                cx + 174, cy, 56, 200,
+                cx + 207, cy, 170, 200,
                 hDlg, (HMENU)(ID_P1_ASSIST1 + i), NULL, NULL);
-            PopulateAssistCombo(hAssist, defaultAssist);
-            SendMessageA(hAssist, CB_SETDROPPEDWIDTH, 75, 0);
+            PopulateAssistCombo(hAssist, defaultCharId, defaultAssist);
+            SendMessageA(hAssist, CB_SETDROPPEDWIDTH, 220, 0);
         }
         y += 90;
 
         // ---- Stage Select ----
         y += 5;
         CreateWindowA("BUTTON", "Stage Select",
-            WS_VISIBLE | WS_CHILD | BS_GROUPBOX, leftX, y, 500, 52,
+            WS_VISIBLE | WS_CHILD | BS_GROUPBOX, leftX, y, contentW, 52,
             hDlg, NULL, NULL, NULL);
         y += 18;
 
@@ -639,7 +641,7 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
         HWND hStage = CreateWindowA("COMBOBOX", "",
             WS_VISIBLE | WS_CHILD | WS_TABSTOP |
             CBS_DROPDOWN | CBS_HASSTRINGS | CBS_AUTOHSCROLL,
-            leftX + 65, y, 300, 200,
+            leftX + 65, y, 600, 200,
             hDlg, (HMENU)ID_STAGE, NULL, NULL);
         PopulateStageCombo(hStage, g_dialogConfig.stageId);
         y += 35;
@@ -647,7 +649,7 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
         // ---- Network Section ----
         y += 5;
         CreateWindowA("BUTTON", "Network (Direct Connect)",
-            WS_VISIBLE | WS_CHILD | BS_GROUPBOX, leftX, y, 500, 75,
+            WS_VISIBLE | WS_CHILD | BS_GROUPBOX, leftX, y, contentW, 75,
             hDlg, NULL, NULL, NULL);
         y += 18;
 
@@ -658,7 +660,7 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
         HWND hIpEdit = CreateWindowA("EDIT", g_dialogConfig.hostIp,
             WS_VISIBLE | WS_CHILD | WS_TABSTOP | WS_BORDER | ES_AUTOHSCROLL |
             ES_NOHIDESEL,
-            leftX + 35, y, 140, 22,
+            leftX + 35, y, 300, 22,
             hDlg, (HMENU)ID_NET_IP, NULL, NULL);
         if (hIpEdit) {
             // Keep clipboard pastes bounded and leave the native EDIT
@@ -668,24 +670,24 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
         }
 
         CreateWindowA("STATIC", "Port:",
-            WS_VISIBLE | WS_CHILD, leftX + 185, y + 4, 35, 18,
+            WS_VISIBLE | WS_CHILD, leftX + 345, y + 4, 35, 18,
             hDlg, NULL, NULL, NULL);
 
         char portStr[16];
         snprintf(portStr, sizeof(portStr), "%d", g_dialogConfig.hostPort);
         HWND hPortEdit = CreateWindowA("EDIT", portStr,
             WS_VISIBLE | WS_CHILD | WS_TABSTOP | WS_BORDER | ES_AUTOHSCROLL | ES_NUMBER,
-            leftX + 220, y, 60, 22,
+            leftX + 380, y, 60, 22,
             hDlg, (HMENU)ID_NET_PORT, NULL, NULL);
 
         CreateWindowA("BUTTON", "Host Game",
             WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON,
-            leftX + 300, y - 2, 90, 26,
+            leftX + 500, y - 2, 130, 26,
             hDlg, (HMENU)ID_NET_HOST_BTN, NULL, NULL);
 
         CreateWindowA("BUTTON", "Connect",
             WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON,
-            leftX + 395, y - 2, 90, 26,
+            leftX + 640, y - 2, 130, 26,
             hDlg, (HMENU)ID_NET_CONNECT_BTN, NULL, NULL);
 
         // Status row
@@ -698,7 +700,7 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
         // ---- Steam Lobby Section ----
         y += 5;
         CreateWindowA("BUTTON", "Steam Lobby",
-            WS_VISIBLE | WS_CHILD | BS_GROUPBOX, leftX, y, 500, 160,
+            WS_VISIBLE | WS_CHILD | BS_GROUPBOX, leftX, y, contentW, 160,
             hDlg, NULL, NULL, NULL);
         y += 18;
 
@@ -713,7 +715,7 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
             hDlg, (HMENU)ID_STEAM_CREATE_BTN, NULL, NULL);
 
         CreateWindowA("STATIC", "",
-            WS_VISIBLE | WS_CHILD, leftX + 270, y + 4, 220, 18,
+            WS_VISIBLE | WS_CHILD, leftX + 270, y + 4, 510, 18,
             hDlg, (HMENU)ID_STEAM_STATUS, NULL, NULL);
         y += 30;
 
@@ -721,7 +723,7 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
         CreateWindowA("LISTBOX", "",
             WS_VISIBLE | WS_CHILD | WS_TABSTOP | WS_BORDER |
             LBS_STANDARD | LBS_NOINTEGRALHEIGHT,
-            leftX + 10, y, 480, 95,
+            leftX + 10, y, 780, 95,
             hDlg, (HMENU)ID_STEAM_LIST, NULL, NULL);
         y += 100;
 
@@ -733,27 +735,27 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
 
         CreateWindowA("BUTTON", "Launch Normally",
             WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON,
-            leftX, y, 240, 32, hDlg, (HMENU)ID_LAUNCH_NORMAL, NULL, NULL);
+            leftX, y, 395, 32, hDlg, (HMENU)ID_LAUNCH_NORMAL, NULL, NULL);
 
         CreateWindowA("BUTTON", "Launch into Training Mode",
             WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON,
-            leftX + 250, y, 240, 32, hDlg, (HMENU)ID_LAUNCH_TRAINING, NULL, NULL);
+            leftX + 405, y, 395, 32, hDlg, (HMENU)ID_LAUNCH_TRAINING, NULL, NULL);
         y += 38;
 
         CreateWindowA("BUTTON", "Training Mode + Spawn 2nd Instance",
             WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON,
-            leftX, y, 240, 32, hDlg, (HMENU)ID_LAUNCH_DUAL, NULL, NULL);
+            leftX, y, contentW, 32, hDlg, (HMENU)ID_LAUNCH_DUAL, NULL, NULL);
 
         y += 38;
 
         CreateWindowA("BUTTON", "Launch Dual Training with CPUs",
             WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON,
-            leftX, y, 490, 32, hDlg, (HMENU)ID_LAUNCH_DUAL_CPUS, NULL, NULL);
+            leftX, y, contentW, 32, hDlg, (HMENU)ID_LAUNCH_DUAL_CPUS, NULL, NULL);
         y += 38;
 
         CreateWindowA("BUTTON", "Launch Dual Training with P2 CPU",
             WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON,
-            leftX, y, 490, 32, hDlg, (HMENU)ID_LAUNCH_DUAL_P2_CPU, NULL, NULL);
+            leftX, y, contentW, 32, hDlg, (HMENU)ID_LAUNCH_DUAL_P2_CPU, NULL, NULL);
 
         return msg == WM_INITDIALOG ? TRUE : 0;
     }
@@ -934,6 +936,11 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
                         : g_dialogConfig.p2Colors[idx - 3];
                     PopulateColorCombo(GetDlgItem(hDlg, ID_P1_COLOR1 + idx),
                                        charId, defaultColor);
+                    int defaultAssist = idx < 3
+                        ? g_dialogConfig.p1Assists[idx]
+                        : g_dialogConfig.p2Assists[idx - 3];
+                    PopulateAssistCombo(GetDlgItem(hDlg, ID_P1_ASSIST1 + idx),
+                                        charId, defaultAssist);
                 }
             }
             if (HIWORD(wParam) == CBN_EDITCHANGE) {
@@ -955,6 +962,11 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
                             : g_dialogConfig.p2Colors[idx - 3];
                         PopulateColorCombo(GetDlgItem(hDlg, ID_P1_COLOR1 + idx),
                                            i, defaultColor);
+                        int defaultAssist = idx < 3
+                            ? g_dialogConfig.p1Assists[idx]
+                            : g_dialogConfig.p2Assists[idx - 3];
+                        PopulateAssistCombo(GetDlgItem(hDlg, ID_P1_ASSIST1 + idx),
+                                            i, defaultAssist);
                         break;
                     }
                 }
@@ -1242,15 +1254,19 @@ static void PopulateColorCombo(HWND hCombo, int characterId, int defaultColor)
     SendMessageA(hCombo, CB_SETCURSEL, defaultColor, 0);
 }
 
-static void PopulateAssistCombo(HWND hCombo, int defaultAssist)
+static void PopulateAssistCombo(HWND hCombo, int characterId, int defaultAssist)
 {
     if (!hCombo) return;
 
-    static const char* kAssistNames[] = {"Alpha", "Beta", "Gamma"};
+    static const char* kFallbackNames[] = {"Alpha", "Beta", "Gamma"};
+    SendMessageA(hCombo, CB_RESETCONTENT, 0, 0);
     defaultAssist = std::clamp(defaultAssist, 0, 2);
     for (int assist = 0; assist < 3; ++assist) {
+        const char* name = characterId >= 0 && characterId < 52
+            ? kAssistMoveNames[characterId].names[assist]
+            : kFallbackNames[assist];
         int idx = (int)SendMessageA(hCombo, CB_ADDSTRING, 0,
-                                    (LPARAM)kAssistNames[assist]);
+                                    (LPARAM)name);
         SendMessageA(hCombo, CB_SETITEMDATA, idx, assist);
     }
     SendMessageA(hCombo, CB_SETCURSEL, defaultAssist, 0);
