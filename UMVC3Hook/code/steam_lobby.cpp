@@ -3,7 +3,9 @@
 #include "steam_api_compat.h"
 #include "steam_transport.h"
 #include <Windows.h>
+#include <atomic>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 extern void HookLog(const char* fmt, ...);
@@ -32,6 +34,8 @@ struct SteamAPI {
     void* (*GetMatchmaking)(void*, HSteamUser, HSteamPipe, const char*) = nullptr;
     void* (*GetUtils)(void*, HSteamPipe, const char*) = nullptr;
     void* (*GetGeneric)(void*, HSteamUser, HSteamPipe, const char*) = nullptr;
+    void (*RegisterCallback)(void*, int) = nullptr;
+    void (*UnregisterCallback)(void*) = nullptr;
 
     SteamAPICall_t (*RequestLobbyList)(void*) = nullptr;
     void (*AddStringFilter)(void*, const char*, const char*, int) = nullptr;
@@ -48,6 +52,7 @@ struct SteamAPI {
     bool (*SetLobbyData)(void*, uint64_t, const char*, const char*) = nullptr;
     const char* (*GetLobbyData)(void*, uint64_t, const char*) = nullptr;
     bool (*SetLobbyJoinable)(void*, uint64_t, bool) = nullptr;
+    bool (*SetRichPresence)(void*, const char*, const char*) = nullptr;
 
     const char* (*GetPersonaName)(void*) = nullptr;
     const char* (*GetFriendPersonaName)(void*, uint64_t) = nullptr;
@@ -85,7 +90,107 @@ ULONGLONG g_resultPingRefreshDeadline = 0;
 HANDLE g_callbackThread = nullptr;
 volatile LONG g_stopCallbackThread = 0;
 bool g_callbacksOnUiThread = false;
+bool g_joinCallbacksRegistered = false;
+std::atomic<uint64_t> g_pendingJoinLobby{0};
+uint64_t g_peerSteamId = 0;
+char g_peerUsername[128] = {};
 char g_status[256] = "Steam is not initialized";
+
+class SteamCallbackBase {
+public:
+    SteamCallbackBase() : m_nCallbackFlags(0), m_iCallback(0) {}
+    virtual void Run(void* param) = 0;
+    virtual void Run(void* param, bool ioFailure, SteamAPICall_t call) = 0;
+    int GetICallback() { return m_iCallback; }
+    virtual int GetCallbackSizeBytes() = 0;
+
+protected:
+    uint8_t m_nCallbackFlags;
+    int m_iCallback;
+};
+
+void QueueJoinLobby(uint64_t lobbyId)
+{
+    if (lobbyId) g_pendingJoinLobby.store(lobbyId, std::memory_order_release);
+}
+
+bool IsSpace(char value)
+{
+    return value == ' ' || value == '\t' || value == '\r' || value == '\n';
+}
+
+bool ParseLobbyConnectString(const char* connect, uint64_t& lobbyId)
+{
+    if (!connect) return false;
+
+    constexpr char prefix[] = "+connect_lobby";
+    constexpr size_t prefixLength = sizeof(prefix) - 1;
+    while (IsSpace(*connect)) ++connect;
+    if (strncmp(connect, prefix, prefixLength) != 0) return false;
+    connect += prefixLength;
+    if (!IsSpace(*connect)) return false;
+    while (IsSpace(*connect)) ++connect;
+
+    char* end = nullptr;
+    unsigned long long parsed = strtoull(connect, &end, 10);
+    if (end == connect || parsed == 0) return false;
+    while (IsSpace(*end)) ++end;
+    if (*end != '\0' && *end != '"') return false;
+
+    lobbyId = static_cast<uint64_t>(parsed);
+    return true;
+}
+
+class GameLobbyJoinRequestedCallback final : public SteamCallbackBase {
+public:
+    GameLobbyJoinRequestedCallback()
+    {
+        m_iCallback = k_iCallbackGameLobbyJoinRequested;
+    }
+
+    void Run(void* param) override
+    {
+        if (!param) return;
+        auto* request = static_cast<GameLobbyJoinRequestedCompat_t*>(param);
+        QueueJoinLobby(request->m_steamIDLobby);
+    }
+
+    void Run(void* param, bool, SteamAPICall_t) override { Run(param); }
+
+    int GetCallbackSizeBytes() override
+    {
+        return sizeof(GameLobbyJoinRequestedCompat_t);
+    }
+};
+
+class GameRichPresenceJoinRequestedCallback final : public SteamCallbackBase {
+public:
+    GameRichPresenceJoinRequestedCallback()
+    {
+        m_iCallback = k_iCallbackGameRichPresenceJoinRequested;
+    }
+
+    void Run(void* param) override
+    {
+        if (!param) return;
+        auto* request = static_cast<GameRichPresenceJoinRequestedCompat_t*>(param);
+        uint64_t lobbyId = 0;
+        if (ParseLobbyConnectString(request->m_rgchConnect, lobbyId))
+            QueueJoinLobby(lobbyId);
+    }
+
+    void Run(void* param, bool, SteamAPICall_t) override { Run(param); }
+
+    int GetCallbackSizeBytes() override
+    {
+        return sizeof(GameRichPresenceJoinRequestedCompat_t);
+    }
+};
+
+GameLobbyJoinRequestedCallback g_gameLobbyJoinRequestedCallback;
+GameRichPresenceJoinRequestedCallback g_gameRichPresenceJoinRequestedCallback;
+static_assert(sizeof(GameLobbyJoinRequestedCallback) == 16);
+static_assert(sizeof(GameRichPresenceJoinRequestedCallback) == 16);
 
 template <typename T>
 bool Resolve(T& target, const char* name)
@@ -93,6 +198,13 @@ bool Resolve(T& target, const char* name)
     target = reinterpret_cast<T>(GetProcAddress(g_api.module, name));
     if (!target) HookLog("SteamLobby: missing export %s\n", name);
     return target != nullptr;
+}
+
+template <typename T>
+void ResolveOptional(T& target, const char* name)
+{
+    target = reinterpret_cast<T>(GetProcAddress(g_api.module, name));
+    if (!target) HookLog("SteamLobby: optional export %s is unavailable\n", name);
 }
 
 void SetStatus(const char* status)
@@ -119,6 +231,8 @@ bool ResolveExports()
     ok &= Resolve(g_api.GetMatchmaking, "SteamAPI_ISteamClient_GetISteamMatchmaking");
     ok &= Resolve(g_api.GetUtils, "SteamAPI_ISteamClient_GetISteamUtils");
     ok &= Resolve(g_api.GetGeneric, "SteamAPI_ISteamClient_GetISteamGenericInterface");
+    ok &= Resolve(g_api.RegisterCallback, "SteamAPI_RegisterCallback");
+    ok &= Resolve(g_api.UnregisterCallback, "SteamAPI_UnregisterCallback");
     ok &= Resolve(g_api.RequestLobbyList, "SteamAPI_ISteamMatchmaking_RequestLobbyList");
     ok &= Resolve(g_api.AddStringFilter, "SteamAPI_ISteamMatchmaking_AddRequestLobbyListStringFilter");
     ok &= Resolve(g_api.AddSlotsFilter, "SteamAPI_ISteamMatchmaking_AddRequestLobbyListFilterSlotsAvailable");
@@ -134,11 +248,72 @@ bool ResolveExports()
     ok &= Resolve(g_api.SetLobbyData, "SteamAPI_ISteamMatchmaking_SetLobbyData");
     ok &= Resolve(g_api.GetLobbyData, "SteamAPI_ISteamMatchmaking_GetLobbyData");
     ok &= Resolve(g_api.SetLobbyJoinable, "SteamAPI_ISteamMatchmaking_SetLobbyJoinable");
+    ResolveOptional(g_api.SetRichPresence, "SteamAPI_ISteamFriends_SetRichPresence");
     ok &= Resolve(g_api.GetPersonaName, "SteamAPI_ISteamFriends_GetPersonaName");
     ok &= Resolve(g_api.GetFriendPersonaName, "SteamAPI_ISteamFriends_GetFriendPersonaName");
     ok &= Resolve(g_api.IsCallCompleted, "SteamAPI_ISteamUtils_IsAPICallCompleted");
     ok &= Resolve(g_api.GetCallResult, "SteamAPI_ISteamUtils_GetAPICallResult");
     return ok;
+}
+
+bool RegisterJoinCallbacks()
+{
+    if (g_joinCallbacksRegistered) return true;
+    if (!g_api.RegisterCallback || !g_api.UnregisterCallback) return false;
+
+    g_api.RegisterCallback(&g_gameLobbyJoinRequestedCallback,
+                           k_iCallbackGameLobbyJoinRequested);
+    g_api.RegisterCallback(&g_gameRichPresenceJoinRequestedCallback,
+                           k_iCallbackGameRichPresenceJoinRequested);
+    g_joinCallbacksRegistered = true;
+    HookLog("SteamLobby: registered Steam join callbacks\n");
+    return true;
+}
+
+void UnregisterJoinCallbacks()
+{
+    if (!g_joinCallbacksRegistered || !g_api.UnregisterCallback) return;
+    g_api.UnregisterCallback(&g_gameLobbyJoinRequestedCallback);
+    g_api.UnregisterCallback(&g_gameRichPresenceJoinRequestedCallback);
+    g_joinCallbacksRegistered = false;
+}
+
+void SetRichPresence(const char* key, const char* value)
+{
+    if (g_friends && g_api.SetRichPresence)
+        g_api.SetRichPresence(g_friends, key, value ? value : "");
+}
+
+void PublishLobbyRichPresence()
+{
+    if (!g_isHost || !g_lobbyId) return;
+
+    char connect[64];
+    snprintf(connect, sizeof(connect), "+connect_lobby %llu",
+             static_cast<unsigned long long>(g_lobbyId));
+    SetRichPresence("status", "Waiting in HeroNet launch menu");
+    SetRichPresence("connect", connect);
+}
+
+void ClearLobbyRichPresence()
+{
+    SetRichPresence("connect", "");
+    SetRichPresence("status", "");
+}
+
+void PumpQueuedJoinRequest()
+{
+    if (g_pendingCall != PendingCall::None) return;
+
+    uint64_t lobbyId = g_pendingJoinLobby.exchange(0, std::memory_order_acq_rel);
+    if (!lobbyId) return;
+    if (g_lobbyId || g_bridgeCreated) {
+        SetStatus("Already connected to a Steam lobby");
+        return;
+    }
+    HookLog("SteamLobby: joining queued lobby invite %llu\n",
+            static_cast<unsigned long long>(lobbyId));
+    SteamLobby_Join(lobbyId);
 }
 
 DWORD WINAPI CallbackPumpThread(LPVOID)
@@ -236,9 +411,21 @@ void ConnectionOptions(SteamNetworkingConfigValue_t (&options)[2])
     options[1].m_val.m_int32 = 0; // Never exchange peer IP candidates; force relay transport.
 }
 
+void RefreshPeerUsername()
+{
+    const char* username = g_friends && g_peerSteamId
+        ? g_api.GetFriendPersonaName(g_friends, g_peerSteamId)
+        : nullptr;
+    snprintf(g_peerUsername, sizeof(g_peerUsername), "%s",
+             username && username[0] ? username : "Unknown");
+}
+
 void StartPeerConnection(uint64_t remoteId)
 {
     if (!remoteId || g_connection != k_HSteamNetConnection_Invalid) return;
+
+    g_peerSteamId = remoteId;
+    RefreshPeerUsername();
 
     SteamNetworkingConfigValue_t options[2];
     ConnectionOptions(options);
@@ -384,7 +571,14 @@ void PumpConnection()
         g_bridgeCreated = true;
         g_handlesReady = true;
         g_api.SetLobbyJoinable(g_matchmaking, g_lobbyId, false);
-        SetStatus("Steam peer connected");
+        ClearLobbyRichPresence();
+        RefreshPeerUsername();
+        snprintf(g_status, sizeof(g_status), "Connected to %s (SteamID %llu)",
+                 g_peerUsername,
+                 static_cast<unsigned long long>(g_peerSteamId));
+        HookLog("SteamLobby: peer connected username=\"%s\" steamid=%llu\n",
+                g_peerUsername,
+                static_cast<unsigned long long>(g_peerSteamId));
     } else if (status.m_eState == k_ESteamNetworkingConnectionState_ClosedByPeer ||
                status.m_eState == k_ESteamNetworkingConnectionState_ProblemDetectedLocally) {
         SetStatus("Steam peer connection failed");
@@ -397,6 +591,10 @@ void PumpConnection()
 bool SteamLobby_Initialize()
 {
     if (g_matchmaking && g_sockets) {
+        if (!RegisterJoinCallbacks()) {
+            SetStatus("Steam join callbacks are unavailable");
+            return false;
+        }
         StartCallbackPump();
         return true;
     }
@@ -436,6 +634,10 @@ bool SteamLobby_Initialize()
     }
     if (!g_sockets) {
         SetStatus("SteamNetworkingSockets012 is unavailable through this Steam client");
+        return false;
+    }
+    if (!RegisterJoinCallbacks()) {
+        SetStatus("Steam join callbacks are unavailable");
         return false;
     }
     if (!g_networkingUtils) {
@@ -534,6 +736,7 @@ void SteamLobby_Pump()
                     g_api.SetLobbyData(g_matchmaking, g_lobbyId, "name", lobbyName);
                     g_api.SetLobbyData(g_matchmaking, g_lobbyId, "username", username);
                 }
+                PublishLobbyRichPresence();
                 SetStatusf("Lobby %llu created; waiting for opponent", g_lobbyId);
             }
         }
@@ -552,6 +755,8 @@ void SteamLobby_Pump()
         }
     }
 
+    PumpQueuedJoinRequest();
+
     PumpPingLocation();
     RefreshResultPings();
     PumpLobbyMembers();
@@ -561,6 +766,16 @@ void SteamLobby_Pump()
 const char* SteamLobby_GetStatus()
 {
     return g_status;
+}
+
+uint64_t SteamLobby_GetPeerSteamId()
+{
+    return g_peerSteamId;
+}
+
+const char* SteamLobby_GetPeerUsername()
+{
+    return g_peerUsername;
 }
 
 bool SteamLobby_HasLobby()
@@ -623,15 +838,20 @@ void SteamLobby_Shutdown(bool preserveConnection)
         return;
     }
     StopCallbackPump();
+    UnregisterJoinCallbacks();
     SteamTransport_Shutdown();
     if (g_sockets && g_listenSocket != k_HSteamListenSocket_Invalid)
         g_sockets->CloseListenSocket(g_listenSocket);
     g_listenSocket = k_HSteamListenSocket_Invalid;
     g_connection = k_HSteamNetConnection_Invalid;
+    ClearLobbyRichPresence();
     if (g_matchmaking && g_lobbyId) g_api.LeaveLobby(g_matchmaking, g_lobbyId);
+    g_pendingJoinLobby.store(0, std::memory_order_release);
     g_lobbyId = 0;
     g_gameHost = nullptr;
     g_gamePeer = nullptr;
+    g_peerSteamId = 0;
+    g_peerUsername[0] = '\0';
     g_handlesReady = false;
     g_bridgeCreated = false;
     g_pingLocationPublished = false;

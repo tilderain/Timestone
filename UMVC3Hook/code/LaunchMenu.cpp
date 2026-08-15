@@ -736,7 +736,7 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
         // Status row
         y += 28;
         CreateWindowA("STATIC", "Ready",
-            WS_VISIBLE | WS_CHILD, leftX + 10, y + 4, 200, 18,
+            WS_VISIBLE | WS_CHILD, leftX + 10, y + 4, 780, 18,
             hDlg, (HMENU)ID_NET_STATUS, NULL, NULL);
         y += 30;
 
@@ -872,7 +872,13 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
 
                 HWND hStatus = GetDlgItem(hDlg, ID_NET_STATUS);
                 if (hStatus) {
-                    SetWindowTextA(hStatus, steamIsHost ? "Steam client connected" : "Steam connected");
+                    char peerStatus[256];
+                    snprintf(peerStatus, sizeof(peerStatus),
+                             "Steam connected: %s (SteamID %llu)",
+                             SteamLobby_GetPeerUsername(),
+                             static_cast<unsigned long long>(
+                                 SteamLobby_GetPeerSteamId()));
+                    SetWindowTextA(hStatus, peerStatus);
                     g_statusColor = steamIsHost ? RGB(0, 120, 215) : RGB(200, 180, 0);
                     InvalidateRect(hStatus, NULL, TRUE);
                 }

@@ -187,6 +187,16 @@ struct LobbyEnter_t {
     uint8_t m_pad[3];
     uint32_t m_EChatRoomEnterResponse;
 };
+
+struct GameLobbyJoinRequestedCompat_t {
+    uint64_t m_steamIDLobby;
+    uint64_t m_steamIDFriend;
+};
+
+struct GameRichPresenceJoinRequestedCompat_t {
+    uint64_t m_steamIDFriend;
+    char m_rgchConnect[256];
+};
 #pragma pack(pop)
 
 static_assert(sizeof(SteamNetworkingIdentity) == 136);
@@ -195,7 +205,11 @@ static_assert(sizeof(SteamNetworkPingLocation_t) == 512);
 static_assert(sizeof(LobbyMatchList_t) == 4);
 static_assert(sizeof(LobbyCreated_t) == 16);
 static_assert(sizeof(LobbyEnter_t) == 24);
+static_assert(sizeof(GameLobbyJoinRequestedCompat_t) == 16);
+static_assert(sizeof(GameRichPresenceJoinRequestedCompat_t) == 264);
 
 constexpr int k_iCallbackLobbyEnter = 504;
 constexpr int k_iCallbackLobbyMatchList = 510;
 constexpr int k_iCallbackLobbyCreated = 513;
+constexpr int k_iCallbackGameLobbyJoinRequested = 333;
+constexpr int k_iCallbackGameRichPresenceJoinRequested = 337;
