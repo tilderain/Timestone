@@ -2,6 +2,7 @@
 
 #include "steam_api_compat.h"
 #include "steam_transport.h"
+#include "umvc3.h"
 #include <Windows.h>
 #include <atomic>
 #include <cstdio>
@@ -16,7 +17,7 @@ extern void HookLog(const char* fmt, ...);
 
 namespace {
 
-constexpr const char* kLobbyProtocol = "2";
+constexpr const char* kLobbyProtocol = UMVC3HOOK_VERSION;
 
 enum class PendingCall {
     None,
