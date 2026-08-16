@@ -157,7 +157,6 @@ STRIP_ASI := 1
 LIBS      := \
 	-ld3d9 \
 	-ld3dcompiler \
-	-lxinput \
 	-lkernel32 \
 	-luser32 \
 	-lgdi32 \

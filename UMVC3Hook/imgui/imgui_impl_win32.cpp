@@ -46,6 +46,34 @@ static INT64                g_TicksPerSecond = 0;
 static ImGuiMouseCursor     g_LastMouseCursor = ImGuiMouseCursor_COUNT;
 static bool                 g_HasGamepad = false;
 static bool                 g_WantUpdateHasGamepad = true;
+typedef DWORD (WINAPI* XInputGetCapabilitiesFn)(DWORD, DWORD, XINPUT_CAPABILITIES*);
+typedef DWORD (WINAPI* XInputGetStateFn)(DWORD, XINPUT_STATE*);
+static XInputGetCapabilitiesFn g_XInputGetCapabilities = NULL;
+static XInputGetStateFn        g_XInputGetState = NULL;
+
+static bool ImGui_ImplWin32_LoadXInput()
+{
+    if (g_XInputGetCapabilities && g_XInputGetState)
+        return true;
+
+    const char* dll_names[] = { "xinput1_4.dll", "xinput1_3.dll", "xinput9_1_0.dll" };
+    for (const char* dll_name : dll_names)
+    {
+        HMODULE module = ::LoadLibraryA(dll_name);
+        if (!module)
+            continue;
+
+        g_XInputGetCapabilities = (XInputGetCapabilitiesFn)::GetProcAddress(module, "XInputGetCapabilities");
+        g_XInputGetState = (XInputGetStateFn)::GetProcAddress(module, "XInputGetState");
+        if (g_XInputGetCapabilities && g_XInputGetState)
+            return true;
+
+        g_XInputGetCapabilities = NULL;
+        g_XInputGetState = NULL;
+        ::FreeLibrary(module);
+    }
+    return false;
+}
 
 // Functions
 bool    ImGui_ImplWin32_Init(void* hwnd)
@@ -160,19 +188,24 @@ static void ImGui_ImplWin32_UpdateGamepads()
     memset(io.NavInputs, 0, sizeof(io.NavInputs));
     if ((io.ConfigFlags & ImGuiConfigFlags_NavEnableGamepad) == 0)
         return;
+    if (!ImGui_ImplWin32_LoadXInput())
+    {
+        io.BackendFlags &= ~ImGuiBackendFlags_HasGamepad;
+        return;
+    }
 
     // Calling XInputGetState() every frame on disconnected gamepads is unfortunately too slow.
     // Instead we refresh gamepad availability by calling XInputGetCapabilities() _only_ after receiving WM_DEVICECHANGE.
     if (g_WantUpdateHasGamepad)
     {
         XINPUT_CAPABILITIES caps;
-        g_HasGamepad = (XInputGetCapabilities(0, XINPUT_FLAG_GAMEPAD, &caps) == ERROR_SUCCESS);
+        g_HasGamepad = (g_XInputGetCapabilities(0, XINPUT_FLAG_GAMEPAD, &caps) == ERROR_SUCCESS);
         g_WantUpdateHasGamepad = false;
     }
 
     XINPUT_STATE xinput_state;
     io.BackendFlags &= ~ImGuiBackendFlags_HasGamepad;
-    if (g_HasGamepad && XInputGetState(0, &xinput_state) == ERROR_SUCCESS)
+    if (g_HasGamepad && g_XInputGetState(0, &xinput_state) == ERROR_SUCCESS)
     {
         const XINPUT_GAMEPAD& gamepad = xinput_state.Gamepad;
         io.BackendFlags |= ImGuiBackendFlags_HasGamepad;
@@ -322,4 +355,3 @@ IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hwnd, UINT msg, WPARA
     }
     return 0;
 }
-

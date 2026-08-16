@@ -8,7 +8,6 @@
 #include "../sigscan.h"
 #include <vector>
 #include "defaults.h"
-#include <XInput.h>
 #include "dtieditor.h"      
 #include "framestepper.h"
 #include <intrin.h>
@@ -70,14 +69,6 @@ void UMVC3Menu::Process()
 	UpdateControls();
 }
 
-
-
-DWORD GetState(DWORD t, XINPUT_STATE* state) {
-	CONTEXT context;
-	RtlCaptureContext(&context);
-	printf("%x - %x - %x - %x\n", context.Rbx, context.Rbp, context.Rbp + 0x4f4f8, context.Rbp - 0x4f4f8);
-	return XInputGetState(t, state);;
-}
 
 
 void UMVC3Menu::Draw()
