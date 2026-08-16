@@ -1241,38 +1241,7 @@ BOOL WINAPI DllMain(HMODULE hMod, DWORD dwReason, LPVOID lpReserved)
 	switch (dwReason)
 	{
 	case DLL_PROCESS_ATTACH:
-		if (CheckGame())
-		{
-			Exception_InstallHandler();
-			BootTimer_Init();
-			BootTimer_Stamp("DllMain entry");
-
-			// Install CreateFileA/W hooks to log every file open
-			/*{
-				MH_STATUS mh = MH_Initialize();
-				if (mh == MH_OK || mh == MH_ERROR_ALREADY_INITIALIZED) {
-					MH_CreateHookApi(L"kernel32", "CreateFileA",
-						(LPVOID)g_hkCreateFileA, (LPVOID*)&g_hkCreateFileA_orig);
-					MH_CreateHookApi(L"kernel32", "CreateFileW",
-						(LPVOID)g_hkCreateFileW, (LPVOID*)&g_hkCreateFileW_orig);
-					MH_EnableHook(MH_ALL_HOOKS);
-				}
-			}*/
-
-			SettingsMgr->Init();
-			DisableThreadLibraryCalls(hMod);
-
-			if (enet_initialize() != 0) {
-				HookLog("UMVC3Hook: Failed to initialize enet!\n");
-			} else {
-				HookLog("UMVC3Hook: enet initialized successfully\n");
-			}
-
-			CreateThread(nullptr, 0, MainThread, hMod, 0, nullptr);
-			BootTimer_Stamp("Before OnInitializeHook");
-			OnInitializeHook();
-			BootTimer_Stamp("After OnInitializeHook");
-		}
+		DisableThreadLibraryCalls(hMod);
 		break;
 	case DLL_PROCESS_DETACH:
 		Exception_RemoveHandler();
@@ -1282,4 +1251,43 @@ BOOL WINAPI DllMain(HMODULE hMod, DWORD dwReason, LPVOID lpReserved)
 		break;
 	}
 	return TRUE;
+}
+
+// Ultimate ASI Loader invokes this export after LoadLibrary has returned.  The
+// launch menu pumps Windows messages and must never run while DllMain holds the
+// loader lock; clipboard, IME, accessibility, and themed-control code may load
+// DLLs and otherwise deadlock the process.
+extern "C" __declspec(dllexport) void InitializeASI()
+{
+	if (!CheckGame())
+		return;
+
+
+	// Install CreateFileA/W hooks to log every file open
+	/*{
+		MH_STATUS mh = MH_Initialize();
+		if (mh == MH_OK || mh == MH_ERROR_ALREADY_INITIALIZED) {
+			MH_CreateHookApi(L"kernel32", "CreateFileA",
+				(LPVOID)g_hkCreateFileA, (LPVOID*)&g_hkCreateFileA_orig);
+			MH_CreateHookApi(L"kernel32", "CreateFileW",
+				(LPVOID)g_hkCreateFileW, (LPVOID*)&g_hkCreateFileW_orig);
+			MH_EnableHook(MH_ALL_HOOKS);
+		}
+	}*/
+
+	Exception_InstallHandler();
+	BootTimer_Init();
+	BootTimer_Stamp("InitializeASI entry");
+	SettingsMgr->Init();
+
+	if (enet_initialize() != 0) {
+		HookLog("UMVC3Hook: Failed to initialize enet!\n");
+	} else {
+		HookLog("UMVC3Hook: enet initialized successfully\n");
+	}
+
+	CreateThread(nullptr, 0, MainThread, nullptr, 0, nullptr);
+	BootTimer_Stamp("Before OnInitializeHook");
+	OnInitializeHook();
+	BootTimer_Stamp("After OnInitializeHook");
 }
