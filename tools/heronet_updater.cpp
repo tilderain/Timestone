@@ -675,9 +675,10 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int)
     }
     std::wstring download = target + L".download";
     std::wstring backup = target + L".old";
-    wchar_t updaterExecutable[MAX_PATH] = {};
-    GetModuleFileNameW(nullptr, updaterExecutable, MAX_PATH);
-    std::wstring pendingUpdater = std::wstring(updaterExecutable) + L".new";
+    std::wstring pendingUpdater = target;
+    size_t targetSlash = pendingUpdater.find_last_of(L"\\/");
+    pendingUpdater.resize(targetSlash == std::wstring::npos ? 0 : targetSlash + 1);
+    pendingUpdater += L"HeroNetUpdater.exe.new";
     LocalFree(argv);
 
     if (startup) {

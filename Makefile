@@ -8,6 +8,7 @@ CC        := x86_64-w64-mingw32-gcc-win32
 WINDRES   := x86_64-w64-mingw32-windres
 DLLTOOL   := x86_64-w64-mingw32-dlltool
 AR        := x86_64-w64-mingw32-ar
+STRIP     := x86_64-w64-mingw32-strip
 GIT_COMMIT := $(shell git rev-parse HEAD 2>/dev/null || printf unknown)
 GIT_DIRTY := $(if $(shell git status --porcelain --untracked-files=normal 2>/dev/null),1,0)
 GIT_DIR := $(shell git rev-parse --git-dir 2>/dev/null)
@@ -23,6 +24,7 @@ OBJDIR    := $(BUILDDIR)/obj
 
 # Output: .asi is a renamed DLL loaded by Ultimate ASI Loader
 OUTPUT    := HeroNet.asi
+UNSTRIPPED_OUTPUT := HeroNet-unstripped.asi
 UPDATER_OUTPUT := HeroNetUpdater.exe
 MAP_FILE  := HeroNet.map
 
@@ -149,6 +151,7 @@ CXXFLAGS  := $(PERF_FLAGS) -std=c++20 -fpermissive -MMD -MP $(DEFINES) $(INCLUDE
 CFLAGS    := $(PERF_FLAGS) -MMD -MP $(DEFINES) $(INCLUDES) -Wall -Wno-unused-variable
 LDFLAGS   := -shared -static-libgcc -static-libstdc++ -flto=auto \
 	-fuse-linker-plugin -Wl,--gc-sections -Wl,-O2 -Wl,-Map,$(MAP_FILE)
+STRIP_ASI := 1
 LIBS      := \
 	-ld3d9 \
 	-ld3dcompiler \
@@ -196,12 +199,16 @@ release: fix-includes $(OBJDIR) $(OUTPUT) $(UPDATER_OUTPUT)
 debug: CXXFLAGS  := -O0 -g -std=c++20 -MMD -MP $(DEFINES) $(INCLUDES) -Wall
 debug: CFLAGS    := -O0 -g -MMD -MP $(DEFINES) $(INCLUDES) -Wall
 debug: DEFINES   := -D_DEBUG -DUMVC3HOOK_EXPORTS -D_WINDOWS -D_USRDLL -D_CRT_SECURE_NO_WARNINGS
+debug: STRIP_ASI := 0
 debug: fix-includes $(OBJDIR) $(OUTPUT)
 
 # ---------- Link ----------
 
 $(OUTPUT): $(ALL_OBJ)
-	$(CXX) $(LDFLAGS) -o $@ $^ $(LIBS)
+	$(CXX) $(LDFLAGS) -o $(UNSTRIPPED_OUTPUT) $^ $(LIBS)
+	cp $(UNSTRIPPED_OUTPUT) $@.tmp
+	@if [ "$(STRIP_ASI)" = "1" ]; then $(STRIP) --strip-all $@.tmp; fi
+	mv $@.tmp $@
 	@echo "=== Built: $(OUTPUT) ==="
 
 $(UPDATER_OUTPUT): tools/heronet_updater.cpp Makefile
@@ -303,7 +310,7 @@ $(OBJDIR):
 # ---------- Clean ----------
 
 clean:
-	rm -rf $(BUILDDIR) $(OUTPUT) $(UPDATER_OUTPUT) $(MAP_FILE)
+	rm -rf $(BUILDDIR) $(OUTPUT) $(UNSTRIPPED_OUTPUT) $(UPDATER_OUTPUT) $(MAP_FILE)
 
 # ---------- Install (example path - adjust to your UMVC3 install) ----------
 
