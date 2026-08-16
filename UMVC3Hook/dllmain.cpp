@@ -599,7 +599,7 @@ static HANDLE GetD3D9CreateDeviceMutex()
 		return mutex;
 
 	HANDLE candidate = CreateMutexA(nullptr, FALSE,
-		"Local\\UMVC3Rollback_D3D9CreateDevice");
+		"Local\\HeroNet_D3D9CreateDevice");
 	if (!candidate)
 		return nullptr;
 

@@ -8,7 +8,6 @@
 #include "../sigscan.h"
 #include <vector>
 #include "defaults.h"
-#include "generated.h"
 #include <XInput.h>
 #include "dtieditor.h"      
 #include "framestepper.h"
