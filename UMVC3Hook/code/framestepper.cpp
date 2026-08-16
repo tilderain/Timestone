@@ -101,7 +101,7 @@ extern "C" bool FrameStepper_IsMatchRestartPending()
     return g_restartTargetFrame >= 0 || g_trainingRestartBarrier;
 }
 
-static bool RequestMatchRestart(bool immediate)
+static bool RequestMatchRestart()
 {
     if (g_restartTargetFrame >= 0 || g_trainingRestartBarrier)
         return false;
@@ -113,8 +113,6 @@ static bool RequestMatchRestart(bool immediate)
     if (sReplay)
         g_restartRoundSeed = *(uint32_t*)(sReplay + 0x58);
     if (Netplay_IsActive()) {
-        if (!immediate)
-            targetFrame += 25;
         Netplay_SendRestartMatch(targetFrame, g_restartRoundSeed);
     }
     g_restartKind = RESTART_FULL_MATCH;
@@ -127,7 +125,7 @@ static bool RequestMatchRestart(bool immediate)
 
 extern "C" bool FrameStepper_RequestMatchRestart()
 {
-    return RequestMatchRestart(false);
+    return RequestMatchRestart();
 }
 
 extern "C" void FrameStepper_ScheduleAutoTestRestart(uint32_t roundSeed)
@@ -1026,7 +1024,7 @@ void FrameStepper_Process()
     static bool prevRestart = false;
     if (KeyPressed(VK_F11, prevRestart)) {
         const bool desyncWait = isPaused && g_desyncDetected;
-        if (RequestMatchRestart(desyncWait) && desyncWait) {
+        if (RequestMatchRestart() && desyncWait) {
             g_desyncDetected = false;
             g_desyncSeen = true;
             UnpauseFrameStepper();

@@ -24,7 +24,6 @@ constexpr uint32_t kAttackTargetCount = 32;
 constexpr size_t kAttackTargetStride = 0x18;
 constexpr size_t kShotCallbackEffectsOffset = 0x1F78;
 constexpr uint32_t kShotCallbackEffectCount = 13;
-constexpr uint32_t kMaxCallbackGenerators = 64;
 constexpr size_t kAttackTargetTables[kAttackTargetTableCount] = {
     // uShot embeds cAtkCtrl at +0x1470. Its three 0x300-byte TargetInfo
     // tables begin at cAtkCtrl +0x50/+0x350/+0x650.
@@ -833,32 +832,6 @@ bool ConcreteShotSnapshot_Capture(void* shot, ConcreteShotSnapshot& out)
         std::memcpy(state.state230, (uint8_t*)effect + 0x230,
                     sizeof(state.state230));
 
-        uint64_t generator = *(uint64_t*)((uint8_t*)effect + 0x218);
-        for (uint32_t count = 0; generator && count < kMaxCallbackGenerators;
-             ++count) {
-            if (!Accessible(generator, 0x240)) break;
-            ConcreteShotSnapshot::CallbackEffectState::GeneratorState saved{};
-            saved.dti = GetObjectDti(generator);
-            if (!saved.dti) break;
-            saved.resource = *(uint64_t*)(generator + 0x68);
-            std::memcpy(saved.state20, (void*)(generator + 0x20),
-                        sizeof(saved.state20));
-            std::memcpy(saved.state30, (void*)(generator + 0x30),
-                        sizeof(saved.state30));
-            std::memcpy(saved.state70, (void*)(generator + 0x70),
-                        sizeof(saved.state70));
-            std::memcpy(saved.stateB8, (void*)(generator + 0xB8),
-                        sizeof(saved.stateB8));
-            std::memcpy(saved.state110, (void*)(generator + 0x110),
-                        sizeof(saved.state110));
-            std::memcpy(saved.state19C, (void*)(generator + 0x19C),
-                        sizeof(saved.state19C));
-            std::memcpy(saved.state1F0, (void*)(generator + 0x1F0),
-                        sizeof(saved.state1F0));
-            saved.state238 = *(uint8_t*)(generator + 0x238);
-            state.generators.push_back(saved);
-            generator = *(uint64_t*)(generator + 0x18);
-        }
     }
     return true;
 }
@@ -886,25 +859,6 @@ bool ConcreteEffectSnapshot_Capture(
                 sizeof(state.state1F8));
     std::memcpy(state.state230, (uint8_t*)effect + 0x230,
                 sizeof(state.state230));
-    uint64_t generator = *(uint64_t*)((uint8_t*)effect + 0x218);
-    for (uint32_t count = 0; generator && count < kMaxCallbackGenerators;
-         ++count) {
-        if (!Accessible(generator, 0x240)) break;
-        ConcreteShotSnapshot::CallbackEffectState::GeneratorState saved{};
-        saved.dti = GetObjectDti(generator);
-        if (!saved.dti) break;
-        saved.resource = *(uint64_t*)(generator + 0x68);
-        std::memcpy(saved.state20, (void*)(generator + 0x20), sizeof(saved.state20));
-        std::memcpy(saved.state30, (void*)(generator + 0x30), sizeof(saved.state30));
-        std::memcpy(saved.state70, (void*)(generator + 0x70), sizeof(saved.state70));
-        std::memcpy(saved.stateB8, (void*)(generator + 0xB8), sizeof(saved.stateB8));
-        std::memcpy(saved.state110, (void*)(generator + 0x110), sizeof(saved.state110));
-        std::memcpy(saved.state19C, (void*)(generator + 0x19C), sizeof(saved.state19C));
-        std::memcpy(saved.state1F0, (void*)(generator + 0x1F0), sizeof(saved.state1F0));
-        saved.state238 = *(uint8_t*)(generator + 0x238);
-        state.generators.push_back(saved);
-        generator = *(uint64_t*)(generator + 0x18);
-    }
     return true;
 }
 
@@ -920,21 +874,6 @@ bool ConcreteEffectSnapshot_Restore(
     std::memcpy((uint8_t*)effect + 0x1E0, state.state1E0, sizeof(state.state1E0));
     std::memcpy((uint8_t*)effect + 0x1F8, state.state1F8, sizeof(state.state1F8));
     std::memcpy((uint8_t*)effect + 0x230, state.state230, sizeof(state.state230));
-    uint64_t generator = *(uint64_t*)((uint8_t*)effect + 0x218);
-    for (const auto& saved : state.generators) {
-        if (!generator || !Accessible(generator, 0x240) ||
-            GetObjectDti(generator) != saved.dti ||
-            *(uint64_t*)(generator + 0x68) != saved.resource) return false;
-        std::memcpy((void*)(generator + 0x20), saved.state20, sizeof(saved.state20));
-        std::memcpy((void*)(generator + 0x30), saved.state30, sizeof(saved.state30));
-        std::memcpy((void*)(generator + 0x70), saved.state70, sizeof(saved.state70));
-        std::memcpy((void*)(generator + 0xB8), saved.stateB8, sizeof(saved.stateB8));
-        std::memcpy((void*)(generator + 0x110), saved.state110, sizeof(saved.state110));
-        std::memcpy((void*)(generator + 0x19C), saved.state19C, sizeof(saved.state19C));
-        std::memcpy((void*)(generator + 0x1F0), saved.state1F0, sizeof(saved.state1F0));
-        *(uint8_t*)(generator + 0x238) = saved.state238;
-        generator = *(uint64_t*)(generator + 0x18);
-    }
     return true;
 }
 
@@ -986,8 +925,8 @@ void ConcreteShotSnapshot_RestoreCallbackEffects(
             continue;
         }
 
-        // Preserve the fresh generator/resource graph and native ownership,
-        // but rewind the pointer-free uEffect flags and timeline counters.
+        // Preserve the fresh generator/resource graph and native timeline,
+        // while rewinding only pointer-free uEffect state.
         std::memcpy((uint8_t*)effect + 0x100, state.flags100,
                     sizeof(state.flags100));
         std::memcpy((uint8_t*)effect + 0x110, state.timing110,
@@ -1002,30 +941,6 @@ void ConcreteShotSnapshot_RestoreCallbackEffects(
         std::memcpy((uint8_t*)effect + 0x230, state.state230,
                     sizeof(state.state230));
 
-        uint64_t generator = *(uint64_t*)((uint8_t*)effect + 0x218);
-        for (const auto& saved : state.generators) {
-            if (!generator || !Accessible(generator, 0x240) ||
-                GetObjectDti(generator) != saved.dti ||
-                *(uint64_t*)(generator + 0x68) != saved.resource) {
-                break;
-            }
-            std::memcpy((void*)(generator + 0x20), saved.state20,
-                        sizeof(saved.state20));
-            std::memcpy((void*)(generator + 0x30), saved.state30,
-                        sizeof(saved.state30));
-            std::memcpy((void*)(generator + 0x70), saved.state70,
-                        sizeof(saved.state70));
-            std::memcpy((void*)(generator + 0xB8), saved.stateB8,
-                        sizeof(saved.stateB8));
-            std::memcpy((void*)(generator + 0x110), saved.state110,
-                        sizeof(saved.state110));
-            std::memcpy((void*)(generator + 0x19C), saved.state19C,
-                        sizeof(saved.state19C));
-            std::memcpy((void*)(generator + 0x1F0), saved.state1F0,
-                        sizeof(saved.state1F0));
-            *(uint8_t*)(generator + 0x238) = saved.state238;
-            generator = *(uint64_t*)(generator + 0x18);
-        }
     }
 }
 

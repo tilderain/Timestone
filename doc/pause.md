@@ -105,9 +105,10 @@ boundary. This is independent of native `uBattleUiPause` construction:
   clearing one-frame advance state and releasing the captured pause texture. If
   a desync alert is active, it also dismisses the alert locally and sends
   `DESYNC_UNPAUSE` during netplay.
-- Pressing `F11` on the paused desync-wait screen requests a full restart at the
-  current synchronized frame instead of the normal 25-frame lead. The restart
-  packet also releases the receiver's desync pause so phase-12 cleanup can run.
+- Pressing `F11`, choosing Restart Match, or confirming a result requests a full
+  restart at the current frame without a scheduled frame lead. A restart packet
+  received during a desync wait also releases the pause so phase-12 cleanup can
+  run.
 - Restart packets carry the battle generation in which they were requested.
   Packets delivered after that generation has already restarted are discarded,
   preventing an old immediate request from firing again at the same frame in

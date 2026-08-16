@@ -85,6 +85,7 @@ constexpr uintptr_t STAGE_HAS_LIVE_BODY = 0x1401F0950;
 constexpr uintptr_t GAME_UI_SET_CHAR = 0x14024E160;
 constexpr uintptr_t GAME_UI_SET_COLOR = 0x14024E120;
 constexpr uintptr_t GAME_UI_SET_ASSIST = 0x14024E100;
+constexpr uintptr_t GAME_UI_IS_CHAR_VARIANT_SELECTABLE = 0x1402BC990;
 constexpr uintptr_t ACTION_GET_INSTANCE = 0x140001A90;
 constexpr uintptr_t ACTION_OR_GAME_FLAG = 0x14000ADD0;
 
@@ -214,6 +215,30 @@ int VariantCount(int characterId)
     return characterId > 0 && characterId < kCharNameCount ? 8 : 1;
 }
 
+bool IsColorSelectable(int characterId, int color)
+{
+    if (characterId <= 0 || characterId >= kCharNameCount || color < 0)
+        return false;
+
+    using GetInstanceFn = uint64_t(__fastcall*)();
+    using IsSelectableFn = bool(__fastcall*)(uint64_t, uint32_t, int32_t);
+    const uint64_t gameUi = ((GetInstanceFn)_addr(GAME_UI_GET_INSTANCE))();
+    return gameUi && ((IsSelectableFn)_addr(GAME_UI_IS_CHAR_VARIANT_SELECTABLE))(
+        gameUi, static_cast<uint32_t>(characterId), color);
+}
+
+int NormalizeColor(int characterId, int color)
+{
+    if (IsColorSelectable(characterId, color))
+        return color;
+
+    for (int candidate = 0; candidate < VariantCount(characterId); ++candidate) {
+        if (IsColorSelectable(characterId, candidate))
+            return candidate;
+    }
+    return 0;
+}
+
 bool ValidateRoster(const RosterConfig& roster)
 {
     for (int team = 0; team < 2; ++team) {
@@ -222,6 +247,7 @@ bool ValidateRoster(const RosterConfig& roster)
             if (character <= 0 || character >= kCharNameCount ||
                 roster.colors[team][member] < 0 ||
                 roster.colors[team][member] >= VariantCount(character) ||
+                !IsColorSelectable(character, roster.colors[team][member]) ||
                 roster.assists[team][member] < 0 ||
                 roster.assists[team][member] > 2)
                 return false;
@@ -256,8 +282,9 @@ bool ReadCurrentRoster(RosterConfig& roster)
             continue;
         const int member = counts[team]++;
         roster.chars[team][member] = character;
-        roster.colors[team][member] =
-            std::clamp(*(int32_t*)(slot + 0x14), 0, VariantCount(character) - 1);
+        roster.colors[team][member] = NormalizeColor(
+            character, std::clamp(*(int32_t*)(slot + 0x14),
+                                  0, VariantCount(character) - 1));
         roster.assists[team][member] =
             std::clamp(*(int32_t*)(slot + 0x1C), 0, 2);
     }
@@ -289,8 +316,9 @@ void NormalizeRoster(RosterConfig& roster)
             }
             if (character <= 0 || character >= kCharNameCount)
                 character = CHR_RYU;
-            roster.colors[team][member] = std::clamp(
-                roster.colors[team][member], 0, VariantCount(character) - 1);
+            roster.colors[team][member] = NormalizeColor(
+                character, std::clamp(roster.colors[team][member],
+                                     0, VariantCount(character) - 1));
             roster.assists[team][member] = std::clamp(
                 roster.assists[team][member], 0, 2);
         }
@@ -575,9 +603,8 @@ bool DrawTeam(int team, bool editable)
         }
         if (selected != g_roster.chars[team][member]) {
             g_roster.chars[team][member] = selected;
-            g_roster.colors[team][member] = std::min(
-                g_roster.colors[team][member],
-                VariantCount(g_roster.chars[team][member]) - 1);
+            g_roster.colors[team][member] = NormalizeColor(
+                selected, g_roster.colors[team][member]);
         }
 
         const int variantCount = VariantCount(g_roster.chars[team][member]);
@@ -586,6 +613,8 @@ bool DrawTeam(int team, bool editable)
                       g_roster.colors[team][member] + 1);
         if (ImGui::BeginCombo("Color", colorPreview)) {
             for (int color = 0; color < variantCount; ++color) {
+                if (!IsColorSelectable(g_roster.chars[team][member], color))
+                    continue;
                 char label[24];
                 std::snprintf(label, sizeof(label), "Color %d", color + 1);
                 if (ImGui::Selectable(label,
@@ -774,7 +803,7 @@ void ChrSelImGui_Draw()
     }
 
     ImGui::Separator();
-    if (ImGui::Button(Netplay_IsActive() ? "Commit Roster" : "Apply Roster")) {
+    if (ImGui::Button(Netplay_IsActive() ? "Apply Roster" : "Apply Roster")) {
         CommitSelection();
     }
 
