@@ -92,6 +92,10 @@ static constexpr uintptr_t ADDR_GET_TEAM_INDEX            = 0x140004AC0;
 static constexpr uintptr_t ADDR_STEP_INTRO                 = 0x140007D90;
 // sAction__stepFighting — replace offline local-delta fight clocks during netplay.
 static constexpr uintptr_t ADDR_STEP_FIGHTING              = 0x140007080;
+// sAction__stepResult8 — winner outro and continue-to-results input.
+static constexpr uintptr_t ADDR_STEP_RESULT8               = 0x14000A990;
+static constexpr uintptr_t ADDR_PAD_RAW_INPUT              = 0x1402B3B80;
+static constexpr uintptr_t ADDR_PAD_UNIT_FLAGS             = 0x140001A70;
 
 // Character manager singleton (for desync checksum traversal)
 static constexpr uintptr_t PTR_SCHARACTER                  = 0x140d44a70;
@@ -1219,6 +1223,7 @@ static uint64_t __fastcall hkGetsCurrentInput_withSOCD(uint64_t pad, uint32_t pl
 // ---------------------------------------------------------------------------
 static void(__fastcall* oStepIntro)(uint64_t param_1) = nullptr;
 static void(__fastcall* oStepFighting)(uint64_t param_1) = nullptr;
+static void(__fastcall* oStepResult8)(uint64_t param_1) = nullptr;
 extern "C" bool FrameStepper_IsBattleSynchronized();
 extern "C" uint32_t FrameStepper_GetBattleGeneration();
 extern "C" bool FrameStepper_IsMatchRestartPending();
@@ -1282,6 +1287,45 @@ static void __fastcall hkStepFighting(uint64_t sAction)
     ApplySynchronizedFightTime(sAction);
     oStepFighting(sAction);
     ApplySynchronizedFightTime(sAction);
+}
+
+static bool IsEitherPlayerResultContinuePressed()
+{
+    auto getManager = (uint64_t(__fastcall*)())_addr(ADDR_MVC3_MGR_GET_INSTANCE);
+    auto getPlayerPad = (int32_t(__fastcall*)(uint64_t, uint32_t))
+        _addr(ADGR_MGR_GET_PLAYER_CHAR);
+    auto getPad = (uint64_t(__fastcall*)())_addr(ADDR_PAD_GET_INSTANCE);
+    auto getRawInput = (uint32_t(__fastcall*)(uint64_t, uint32_t))
+        _addr(ADDR_PAD_RAW_INPUT);
+    auto getUnitFlags = (uint32_t(__fastcall*)(uint64_t))
+        _addr(ADDR_PAD_UNIT_FLAGS);
+
+    const uint64_t manager = getManager();
+    const uint64_t pad = getPad();
+    if (!manager || !pad)
+        return false;
+
+    const uint32_t continueMask = getUnitFlags(pad);
+    for (uint32_t team = 0; team < 2; ++team) {
+        const int32_t padIndex = getPlayerPad(manager, team);
+        if (padIndex >= 0 && (getRawInput(pad, (uint32_t)padIndex) & continueMask))
+            return true;
+    }
+    return false;
+}
+
+static void __fastcall hkStepResult8(uint64_t sAction)
+{
+    if (Netplay_IsActive()) {
+        if (!FrameStepper_IsMatchRestartPending() &&
+            IsEitherPlayerResultContinuePressed()) {
+            FrameStepper_RequestMatchRestart();
+        }
+        if (FrameStepper_IsMatchRestartPending())
+            return;
+    }
+
+    oStepResult8(sAction);
 }
 
 // ---------------------------------------------------------------------------
@@ -2135,6 +2179,18 @@ void Controller_InitHooks()
         MH_EnableHook((LPVOID)_addr(ADDR_STEP_FIGHTING));
     else
         HookLog("Controller: Failed to hook stepFighting (%d)\n", s);
+
+    // Replace the native winner-only result confirmation with a synchronized
+    // restart request from either player's mapped pad during custom netplay.
+    s = MH_CreateHook(
+        (LPVOID)_addr(ADDR_STEP_RESULT8),
+        (LPVOID)&hkStepResult8,
+        (LPVOID*)&oStepResult8
+    );
+    if (s == MH_OK)
+        MH_EnableHook((LPVOID)_addr(ADDR_STEP_RESULT8));
+    else
+        HookLog("Controller: Failed to hook stepResult8 (%d)\n", s);
 
     // Enforce timeline ownership at the common native facing-conversion seam.
     // This also covers action/CPU sources that bypass buttonRemap.

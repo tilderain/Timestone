@@ -232,7 +232,8 @@ $(OBJDIR)/code/exception.o: $(GIT_COMMIT_DEPS)
 
 # These objects display or compare the release version supplied by Make.
 $(OBJDIR)/dllmain.o $(OBJDIR)/code/LaunchMenu.o \
-	$(OBJDIR)/code/umvc3menu.o $(OBJDIR)/code/updater.o: Makefile
+	$(OBJDIR)/code/umvc3menu.o $(OBJDIR)/code/updater.o \
+	$(OBJDIR)/code/steam_lobby.o: Makefile
 
 # ---------- Compile C ----------
 

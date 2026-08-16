@@ -119,6 +119,10 @@ void Updater_Init()
     if (GetFileAttributesA(updaterPath) == INVALID_FILE_ATTRIBUTES) {
         DWORD error = GetLastError();
         LogUpdater(log, "Updater executable is unavailable, error=%lu", error);
+        MessageBoxA(nullptr,
+            "HeroNetUpdater.exe is missing. Automatic update checks are disabled.\n\n"
+            "Place HeroNetUpdater.exe beside HeroNet.asi to restore updates.",
+            "HeroNet Updater Missing", MB_OK | MB_ICONWARNING);
         if (log)
             std::fclose(log);
         return;
