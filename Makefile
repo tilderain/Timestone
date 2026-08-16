@@ -26,6 +26,8 @@ OBJDIR    := $(BUILDDIR)/obj
 OUTPUT    := HeroNet.asi
 UNSTRIPPED_OUTPUT := HeroNet-unstripped.asi
 UPDATER_OUTPUT := HeroNetUpdater.exe
+PACKAGE_OUTPUT := HeroNet.zip
+LOADER_DLL := dinput8.dll
 MAP_FILE  := HeroNet.map
 
 # --- Source files (from UMVC3Hook.vcxproj, Release|x64) ---
@@ -183,7 +185,7 @@ force-missing-dependency-rebuild:
 $(MISSING_DEP_OBJS): force-missing-dependency-rebuild
 
 all:
-	@if $(MAKE) --no-print-directory -q $(OUTPUT) $(UPDATER_OUTPUT); then \
+	@if $(MAKE) --no-print-directory -q $(PACKAGE_OUTPUT); then \
 		echo "=== No changes: release outputs are up to date ==="; \
 	else \
 		$(MAKE) --no-print-directory release; \
@@ -192,7 +194,7 @@ all:
 # ---------- Release build ----------
 
 release: CXXFLAGS += -DNDEBUG
-release: fix-includes $(OBJDIR) $(OUTPUT) $(UPDATER_OUTPUT)
+release: fix-includes $(OBJDIR) $(PACKAGE_OUTPUT)
 
 # ---------- Debug build ----------
 
@@ -218,8 +220,13 @@ $(UPDATER_OUTPUT): tools/heronet_updater.cpp Makefile
 		-DHERONET_VERSION=\"$(VERSION)\" \
 		-static-libgcc -static-libstdc++ -mwindows \
 		-Wl,--gc-sections -Wl,-s -o $@ $< \
-		-lwinhttp -lbcrypt -lcomctl32 -lshell32 -lversion
+		-lwinhttp -lbcrypt -lcomctl32 -lshell32 -lversion -lole32 -loleaut32 -luuid
 	@echo "=== Built: $(UPDATER_OUTPUT) ==="
+
+$(PACKAGE_OUTPUT): $(LOADER_DLL) $(OUTPUT) $(UPDATER_OUTPUT)
+	rm -f $@
+	zip -j -0 $@ $^
+	@echo "=== Built: $(PACKAGE_OUTPUT) ==="
 
 # ---------- Compile C++ ----------
 
@@ -311,7 +318,7 @@ $(OBJDIR):
 # ---------- Clean ----------
 
 clean:
-	rm -rf $(BUILDDIR) $(OUTPUT) $(UNSTRIPPED_OUTPUT) $(UPDATER_OUTPUT) $(MAP_FILE)
+	rm -rf $(BUILDDIR) $(OUTPUT) $(UNSTRIPPED_OUTPUT) $(UPDATER_OUTPUT) $(PACKAGE_OUTPUT) $(MAP_FILE)
 
 # ---------- Install (example path - adjust to your UMVC3 install) ----------
 
@@ -326,7 +333,7 @@ install: $(OUTPUT) $(UPDATER_OUTPUT)
 help:
 	@echo "Targets:"
 	@echo "  all         - Build release (default)"
-	@echo "  release     - Release build, optimized"
+	@echo "  release     - Release build and HeroNet.zip package"
 	@echo "  debug       - Debug build (-O0 -g)"
 	@echo "  clean       - Remove build artifacts"
 	@echo "  install     - Copy .asi to UMVC3 game directory"

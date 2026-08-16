@@ -1,11 +1,13 @@
 #include <windows.h>
 #include <commctrl.h>
 #include <shellapi.h>
+#include <shldisp.h>
 #include <tlhelp32.h>
 #include <winhttp.h>
 #include <bcrypt.h>
 
 #include <cstdio>
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -238,8 +240,11 @@ bool ParseReleaseAsset(const std::string& json, const char* assetName,
 bool ParseLatestRelease(const std::string& json, std::string& tag,
     std::string& url, std::string& sha256)
 {
-    return ExtractJsonString(json, "tag_name", 0, tag) &&
-        ParseReleaseAsset(json, "HeroNet.asi", url, sha256);
+    if (!ExtractJsonString(json, "tag_name", 0, tag))
+        return false;
+    if (ParseReleaseAsset(json, "HeroNet.zip", url, sha256))
+        return true;
+    return ParseReleaseAsset(json, "HeroNet.asi", url, sha256);
 }
 
 std::wstring Utf8ToWide(const std::string& text)
@@ -461,6 +466,317 @@ bool IsPlausibleAsi(const std::wstring& path)
     return valid;
 }
 
+bool IsZipArchive(const std::wstring& path)
+{
+    HANDLE file = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ,
+        nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE)
+        return false;
+    unsigned char signature[4] = {};
+    DWORD read = 0;
+    bool zip = ReadFile(file, signature, sizeof(signature), &read, nullptr) &&
+        read == sizeof(signature) && signature[0] == 'P' &&
+        signature[1] == 'K' &&
+        ((signature[2] == 3 && signature[3] == 4) ||
+         (signature[2] == 5 && signature[3] == 6));
+    CloseHandle(file);
+    return zip;
+}
+
+uint16_t ZipU16(const std::vector<unsigned char>& data, size_t offset)
+{
+    return static_cast<uint16_t>(data[offset]) |
+        (static_cast<uint16_t>(data[offset + 1]) << 8);
+}
+
+uint32_t ZipU32(const std::vector<unsigned char>& data, size_t offset)
+{
+    return static_cast<uint32_t>(data[offset]) |
+        (static_cast<uint32_t>(data[offset + 1]) << 8) |
+        (static_cast<uint32_t>(data[offset + 2]) << 16) |
+        (static_cast<uint32_t>(data[offset + 3]) << 24);
+}
+
+enum class StoredZipResult {
+    Extracted,
+    NotFound,
+    Unsupported,
+    Invalid
+};
+
+StoredZipResult ExtractStoredZipEntry(const std::wstring& archive,
+    const char* wantedName, const std::wstring& destination)
+{
+    HANDLE file = CreateFileW(archive.c_str(), GENERIC_READ, FILE_SHARE_READ,
+        nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE)
+        return StoredZipResult::Invalid;
+    LARGE_INTEGER fileSize = {};
+    bool valid = GetFileSizeEx(file, &fileSize) && fileSize.QuadPart >= 22 &&
+        fileSize.QuadPart <= 0xffffffffULL;
+    std::vector<unsigned char> zip(valid
+        ? static_cast<size_t>(fileSize.QuadPart) : 0);
+    DWORD read = 0;
+    if (valid)
+        valid = ReadFile(file, zip.data(), static_cast<DWORD>(zip.size()),
+            &read, nullptr) && read == zip.size();
+    CloseHandle(file);
+    if (!valid)
+        return StoredZipResult::Invalid;
+
+    size_t searchStart = zip.size() > 22 + 0xffff
+        ? zip.size() - (22 + 0xffff) : 0;
+    size_t eocd = std::string::npos;
+    for (size_t pos = zip.size() - 22;; --pos) {
+        if (ZipU32(zip, pos) == 0x06054b50) {
+            eocd = pos;
+            break;
+        }
+        if (pos == searchStart)
+            break;
+    }
+    if (eocd == std::string::npos || ZipU16(zip, eocd + 4) != 0 ||
+        ZipU16(zip, eocd + 6) != 0 ||
+        ZipU16(zip, eocd + 8) != ZipU16(zip, eocd + 10))
+        return StoredZipResult::Invalid;
+
+    size_t entries = ZipU16(zip, eocd + 10);
+    size_t centralSize = ZipU32(zip, eocd + 12);
+    size_t cursor = ZipU32(zip, eocd + 16);
+    if (cursor > zip.size() || centralSize > zip.size() - cursor)
+        return StoredZipResult::Invalid;
+
+    bool found = false;
+    uint16_t method = 0;
+    size_t compressedSize = 0;
+    size_t uncompressedSize = 0;
+    size_t localOffset = 0;
+    for (size_t i = 0; i < entries; ++i) {
+        if (cursor > zip.size() || zip.size() - cursor < 46 ||
+            ZipU32(zip, cursor) != 0x02014b50)
+            return StoredZipResult::Invalid;
+        size_t nameLength = ZipU16(zip, cursor + 28);
+        size_t extraLength = ZipU16(zip, cursor + 30);
+        size_t commentLength = ZipU16(zip, cursor + 32);
+        size_t recordSize = 46 + nameLength + extraLength + commentLength;
+        if (recordSize > zip.size() - cursor)
+            return StoredZipResult::Invalid;
+        std::string name(reinterpret_cast<const char*>(zip.data() + cursor + 46),
+            nameLength);
+        size_t slash = name.find_last_of("/\\");
+        const char* baseName = name.c_str() +
+            (slash == std::string::npos ? 0 : slash + 1);
+        if (_stricmp(baseName, wantedName) == 0) {
+            if (found || (ZipU16(zip, cursor + 8) & 1) != 0)
+                return StoredZipResult::Invalid;
+            found = true;
+            method = ZipU16(zip, cursor + 10);
+            compressedSize = ZipU32(zip, cursor + 20);
+            uncompressedSize = ZipU32(zip, cursor + 24);
+            localOffset = ZipU32(zip, cursor + 42);
+        }
+        cursor += recordSize;
+    }
+    if (!found)
+        return StoredZipResult::NotFound;
+    if (method != 0)
+        return StoredZipResult::Unsupported;
+    if (compressedSize != uncompressedSize || localOffset > zip.size() ||
+        zip.size() - localOffset < 30 ||
+        ZipU32(zip, localOffset) != 0x04034b50)
+        return StoredZipResult::Invalid;
+    size_t dataOffset = localOffset + 30 + ZipU16(zip, localOffset + 26) +
+        ZipU16(zip, localOffset + 28);
+    if (dataOffset > zip.size() || uncompressedSize > zip.size() - dataOffset)
+        return StoredZipResult::Invalid;
+
+    HANDLE output = CreateFileW(destination.c_str(), GENERIC_WRITE, 0, nullptr,
+        CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (output == INVALID_HANDLE_VALUE)
+        return StoredZipResult::Invalid;
+    DWORD written = 0;
+    bool wrote = WriteFile(output, zip.data() + dataOffset,
+        static_cast<DWORD>(uncompressedSize), &written, nullptr) &&
+        written == uncompressedSize;
+    CloseHandle(output);
+    if (!wrote) {
+        DeleteFileW(destination.c_str());
+        return StoredZipResult::Invalid;
+    }
+    return StoredZipResult::Extracted;
+}
+
+void DeleteDirectoryTree(const std::wstring& directory)
+{
+    WIN32_FIND_DATAW entry = {};
+    HANDLE search = FindFirstFileW((directory + L"\\*").c_str(), &entry);
+    if (search != INVALID_HANDLE_VALUE) {
+        do {
+            if (wcscmp(entry.cFileName, L".") == 0 ||
+                wcscmp(entry.cFileName, L"..") == 0)
+                continue;
+            std::wstring path = directory + L"\\" + entry.cFileName;
+            if (entry.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+                DeleteDirectoryTree(path);
+            else {
+                SetFileAttributesW(path.c_str(), FILE_ATTRIBUTE_NORMAL);
+                DeleteFileW(path.c_str());
+            }
+        } while (FindNextFileW(search, &entry));
+        FindClose(search);
+    }
+    RemoveDirectoryW(directory.c_str());
+}
+
+void ScanExtractedFiles(const std::wstring& directory,
+    const wchar_t* wantedName, std::wstring& found, unsigned int& matches,
+    ULONGLONG& totalSize, unsigned int& fileCount)
+{
+    WIN32_FIND_DATAW entry = {};
+    HANDLE search = FindFirstFileW((directory + L"\\*").c_str(), &entry);
+    if (search == INVALID_HANDLE_VALUE)
+        return;
+    do {
+        if (wcscmp(entry.cFileName, L".") == 0 ||
+            wcscmp(entry.cFileName, L"..") == 0)
+            continue;
+        std::wstring path = directory + L"\\" + entry.cFileName;
+        if (entry.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+            ScanExtractedFiles(path, wantedName, found, matches, totalSize,
+                fileCount);
+        } else {
+            ++fileCount;
+            totalSize += (static_cast<ULONGLONG>(entry.nFileSizeHigh) << 32) |
+                entry.nFileSizeLow;
+            if (_wcsicmp(entry.cFileName, wantedName) == 0) {
+                found = path;
+                ++matches;
+            }
+        }
+    } while (FindNextFileW(search, &entry));
+    FindClose(search);
+}
+
+bool ExtractZipPackage(const std::wstring& archive,
+    const std::wstring& asiDestination, const std::wstring& updaterDestination,
+    bool& updaterExtracted)
+{
+    StoredZipResult asiResult = ExtractStoredZipEntry(
+        archive, "HeroNet.asi", asiDestination);
+    if (asiResult == StoredZipResult::Extracted) {
+        StoredZipResult updaterResult = ExtractStoredZipEntry(
+            archive, "HeroNetUpdater.exe", updaterDestination);
+        updaterExtracted = updaterResult == StoredZipResult::Extracted;
+        return updaterResult == StoredZipResult::Extracted ||
+            updaterResult == StoredZipResult::NotFound;
+    }
+    if (asiResult != StoredZipResult::Unsupported)
+        return false;
+
+    std::wstring staging = archive + L".stage";
+    DeleteDirectoryTree(staging);
+    if (!CreateDirectoryW(staging.c_str(), nullptr))
+        return false;
+
+    HRESULT initialized = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    bool uninitialize = SUCCEEDED(initialized);
+    IShellDispatch* shell = nullptr;
+    Folder* archiveFolder = nullptr;
+    Folder* stagingFolder = nullptr;
+    FolderItems* items = nullptr;
+    HRESULT result = SUCCEEDED(initialized) ? CoCreateInstance(CLSID_Shell,
+        nullptr, CLSCTX_INPROC_SERVER, IID_IShellDispatch,
+        reinterpret_cast<void**>(&shell)) : initialized;
+
+    VARIANT archivePath;
+    VARIANT stagingPath;
+    VariantInit(&archivePath);
+    VariantInit(&stagingPath);
+    archivePath.vt = VT_BSTR;
+    archivePath.bstrVal = SysAllocString(archive.c_str());
+    stagingPath.vt = VT_BSTR;
+    stagingPath.bstrVal = SysAllocString(staging.c_str());
+    if (SUCCEEDED(result) &&
+        (!shell || !archivePath.bstrVal || !stagingPath.bstrVal))
+        result = E_OUTOFMEMORY;
+    if (SUCCEEDED(result))
+        result = shell->NameSpace(archivePath, &archiveFolder);
+    if (SUCCEEDED(result) && !archiveFolder)
+        result = E_NOINTERFACE;
+    if (SUCCEEDED(result))
+        result = shell->NameSpace(stagingPath, &stagingFolder);
+    if (SUCCEEDED(result) && !stagingFolder)
+        result = E_NOINTERFACE;
+    if (SUCCEEDED(result))
+        result = archiveFolder->Items(&items);
+    if (SUCCEEDED(result) && !items)
+        result = E_NOINTERFACE;
+    if (SUCCEEDED(result)) {
+        VARIANT source;
+        VARIANT options;
+        VariantInit(&source);
+        VariantInit(&options);
+        source.vt = VT_DISPATCH;
+        source.pdispVal = items;
+        options.vt = VT_I4;
+        options.lVal = FOF_SILENT | FOF_NOCONFIRMATION | FOF_NOERRORUI;
+        result = stagingFolder->CopyHere(source, options);
+    }
+
+    std::wstring asiPath;
+    std::wstring updaterPath;
+    unsigned int stableTicks = 0;
+    ULONGLONG previousSize = ~0ULL;
+    unsigned int previousCount = ~0U;
+    for (int attempt = 0; SUCCEEDED(result) && attempt < 600; ++attempt) {
+        unsigned int asiMatches = 0;
+        unsigned int updaterMatches = 0;
+        unsigned int fileCount = 0;
+        ULONGLONG totalSize = 0;
+        asiPath.clear();
+        updaterPath.clear();
+        ScanExtractedFiles(staging, L"HeroNet.asi", asiPath, asiMatches,
+            totalSize, fileCount);
+        ScanExtractedFiles(staging, L"HeroNetUpdater.exe", updaterPath,
+            updaterMatches, totalSize, fileCount);
+        if (asiMatches > 1 || updaterMatches > 1) {
+            result = E_FAIL;
+            break;
+        }
+        if (asiMatches == 1 && totalSize == previousSize &&
+            fileCount == previousCount)
+            ++stableTicks;
+        else
+            stableTicks = 0;
+        if (stableTicks >= 10)
+            break;
+        previousSize = totalSize;
+        previousCount = fileCount;
+        Sleep(100);
+        PumpWindowMessages();
+    }
+
+    if (items) items->Release();
+    if (stagingFolder) stagingFolder->Release();
+    if (archiveFolder) archiveFolder->Release();
+    if (shell) shell->Release();
+    VariantClear(&stagingPath);
+    VariantClear(&archivePath);
+    if (uninitialize)
+        CoUninitialize();
+
+    updaterExtracted = false;
+    bool ok = SUCCEEDED(result) && !asiPath.empty() && stableTicks >= 10 &&
+        CopyFileW(asiPath.c_str(), asiDestination.c_str(), FALSE);
+    if (ok && !updaterPath.empty()) {
+        updaterExtracted = CopyFileW(updaterPath.c_str(),
+            updaterDestination.c_str(), FALSE) != FALSE;
+        ok = updaterExtracted;
+    }
+    DeleteDirectoryTree(staging);
+    return ok;
+}
+
 bool VerifySha256(const std::wstring& path, const wchar_t* expected)
 {
     if (!expected || wcslen(expected) != 64)
@@ -674,6 +990,8 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int)
         sha256 = sha256Text;
     }
     std::wstring download = target + L".download";
+    std::wstring zipDownload = download + L".zip";
+    std::wstring extractedAsi = target + L".zip.asi";
     std::wstring backup = target + L".old";
     std::wstring pendingUpdater = target;
     size_t targetSlash = pendingUpdater.find_last_of(L"\\/");
@@ -700,23 +1018,45 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int)
     DownloadProgress progress;
     CreateProgressWindow(progress);
     DeleteFileW(download.c_str());
+    DeleteFileW(zipDownload.c_str());
+    DeleteFileW(extractedAsi.c_str());
     bool downloadValid = Download(url, download, &progress,
-        L"Downloading HeroNet.asi from tilderain/NormalRepo");
-    if (downloadValid) {
+        L"Downloading HeroNet update from tilderain/NormalRepo");
+    bool updaterFromArchive = false;
+    if (downloadValid && IsZipArchive(download)) {
+        SetProgressStage(&progress, L"Verifying HeroNet ZIP SHA-256 digest...");
+        downloadValid = VerifySha256(download, sha256.c_str());
+        if (downloadValid) {
+            SetProgressStage(&progress, L"Extracting HeroNet update...");
+            downloadValid = MoveFileW(download.c_str(), zipDownload.c_str()) &&
+                ExtractZipPackage(zipDownload, extractedAsi, pendingUpdater,
+                    updaterFromArchive) &&
+                IsPlausibleAsi(extractedAsi) &&
+                (!updaterFromArchive || IsPlausibleAsi(pendingUpdater));
+            if (downloadValid) {
+                DeleteFileW(zipDownload.c_str());
+                downloadValid = MoveFileW(extractedAsi.c_str(),
+                    download.c_str()) != FALSE;
+            }
+        }
+    } else if (downloadValid) {
         SetProgressStage(&progress, L"Verifying GitHub SHA-256 digest...");
         downloadValid = IsPlausibleAsi(download) &&
             VerifySha256(download, sha256.c_str());
     }
     if (!downloadValid) {
         DeleteFileW(download.c_str());
+        DeleteFileW(zipDownload.c_str());
+        DeleteFileW(extractedAsi.c_str());
+        DeleteFileW(pendingUpdater.c_str());
         CloseProgressWindow(progress);
         if (startup)
             RelaunchGame(gameExecutable);
-        ShowError(L"The HeroNet.asi download failed or did not match its GitHub SHA-256 digest.");
+        ShowError(L"The HeroNet update failed validation or did not match its GitHub SHA-256 digest.");
         return 3;
     }
 
-    if (!updaterUrl.empty()) {
+    if (!updaterFromArchive && !updaterUrl.empty()) {
         progress.startedAt = GetTickCount64();
         DeleteFileW(pendingUpdater.c_str());
         bool updaterValid = Download(
