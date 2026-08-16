@@ -3,6 +3,8 @@
 #include "trainingboot.h"
 #include "netplay.h"
 #include "steam_lobby.h"
+#include "updater.h"
+#include "umvc3.h"
 #include <Windows.h>
 #include <commctrl.h>
 #include <algorithm>
@@ -578,6 +580,7 @@ static bool ApplyP2Selection(HWND hDlg, const LaunchP2SelectionPacket& packet)
 // ---------------------------------------------------------------------------
 LaunchOption ShowLaunchMenu()
 {
+    Updater_Init();
     g_localReady = false;
     g_peerReady = false;
     HINSTANCE hInst = GetModuleHandle(NULL);
@@ -979,6 +982,12 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
         CreateWindowA("BUTTON", "Launch Dual Training with P2 CPU",
             WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON,
             leftX, y, contentW, 32, hDlg, (HMENU)ID_LAUNCH_DUAL_P2_CPU, NULL, NULL);
+
+        char versionText[64] = {};
+        snprintf(versionText, sizeof(versionText), "HeroNet v%s", UMVC3HOOK_VERSION);
+        CreateWindowA("STATIC", versionText,
+            WS_VISIBLE | WS_CHILD | SS_RIGHT,
+            leftX + 600, 685, 200, 18, hDlg, NULL, NULL, NULL);
 
         SetTimer(hDlg, ID_STEAM_POLL_TIMER, 50, NULL);
         return msg == WM_INITDIALOG ? TRUE : 0;

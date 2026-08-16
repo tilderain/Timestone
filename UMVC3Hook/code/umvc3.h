@@ -1,7 +1,9 @@
 #pragma once
 #include "mk10utils.h"
 
-#define UMVC3HOOK_VERSION "0.1"
+#ifndef UMVC3HOOK_VERSION
+#define UMVC3HOOK_VERSION "0.1.0"
+#endif
 
 
 struct vector {

@@ -13,6 +13,8 @@ GIT_DIRTY := $(if $(shell git status --porcelain --untracked-files=normal 2>/dev
 GIT_DIR := $(shell git rev-parse --git-dir 2>/dev/null)
 GIT_HEAD_REF := $(shell git symbolic-ref -q HEAD 2>/dev/null)
 GIT_COMMIT_DEPS := $(if $(GIT_DIR),$(GIT_DIR)/HEAD $(if $(GIT_HEAD_REF),$(GIT_DIR)/$(GIT_HEAD_REF)))
+VERSION    := 0.1.0
+VERSION_RC := $(shell printf '%s.0' '$(VERSION)' | tr . ,)
 
 SRCDIR    := UMVC3Hook
 ENETDIR   := enet-1.3.18
@@ -21,6 +23,7 @@ OBJDIR    := $(BUILDDIR)/obj
 
 # Output: .asi is a renamed DLL loaded by Ultimate ASI Loader
 OUTPUT    := HeroNet.asi
+UPDATER_OUTPUT := HeroNetUpdater.exe
 MAP_FILE  := HeroNet.map
 
 # --- Source files (from UMVC3Hook.vcxproj, Release|x64) ---
@@ -32,6 +35,7 @@ CPP_SRC   := \
 	$(SRCDIR)/pch.cpp \
 	$(SRCDIR)/code/umvc3.cpp \
 	$(SRCDIR)/code/umvc3menu.cpp \
+	$(SRCDIR)/code/updater.cpp \
 	$(SRCDIR)/code/LaunchMenu.cpp \
 	$(SRCDIR)/code/eSettingsManager.cpp \
 	$(SRCDIR)/code/eNotifManager.cpp \
@@ -141,7 +145,7 @@ DEFINES   := \
 PERF_FLAGS := -O3 -flto=auto -fuse-linker-plugin -fipa-pta \
 	-fdevirtualize-at-ltrans -fomit-frame-pointer \
 	-ffunction-sections -fdata-sections
-CXXFLAGS  := $(PERF_FLAGS) -std=c++20 -fpermissive -MMD -MP $(DEFINES) $(INCLUDES) -DUMVC3HOOK_GIT_COMMIT=\"$(GIT_COMMIT)\" -DUMVC3HOOK_GIT_DIRTY=$(GIT_DIRTY) -Wall -Wno-unused-variable -Wno-unused-function
+CXXFLAGS  := $(PERF_FLAGS) -std=c++20 -fpermissive -MMD -MP $(DEFINES) $(INCLUDES) -DUMVC3HOOK_VERSION=\"$(VERSION)\" -DUMVC3HOOK_GIT_COMMIT=\"$(GIT_COMMIT)\" -DUMVC3HOOK_GIT_DIRTY=$(GIT_DIRTY) -Wall -Wno-unused-variable -Wno-unused-function
 CFLAGS    := $(PERF_FLAGS) -MMD -MP $(DEFINES) $(INCLUDES) -Wall -Wno-unused-variable
 LDFLAGS   := -shared -static-libgcc -static-libstdc++ -flto=auto \
 	-fuse-linker-plugin -Wl,--gc-sections -Wl,-O2 -Wl,-Map,$(MAP_FILE)
@@ -176,8 +180,8 @@ force-missing-dependency-rebuild:
 $(MISSING_DEP_OBJS): force-missing-dependency-rebuild
 
 all:
-	@if $(MAKE) --no-print-directory -q $(OUTPUT); then \
-		echo "=== No changes: $(OUTPUT) is up to date ==="; \
+	@if $(MAKE) --no-print-directory -q $(OUTPUT) $(UPDATER_OUTPUT); then \
+		echo "=== No changes: release outputs are up to date ==="; \
 	else \
 		$(MAKE) --no-print-directory release; \
 	fi
@@ -185,7 +189,7 @@ all:
 # ---------- Release build ----------
 
 release: CXXFLAGS += -DNDEBUG
-release: fix-includes $(OBJDIR) $(OUTPUT)
+release: fix-includes $(OBJDIR) $(OUTPUT) $(UPDATER_OUTPUT)
 
 # ---------- Debug build ----------
 
@@ -200,6 +204,16 @@ $(OUTPUT): $(ALL_OBJ)
 	$(CXX) $(LDFLAGS) -o $@ $^ $(LIBS)
 	@echo "=== Built: $(OUTPUT) ==="
 
+$(UPDATER_OUTPUT): tools/heronet_updater.cpp Makefile
+	$(CXX) -Os -flto -ffunction-sections -fdata-sections -std=c++20 \
+		-DWIN32_LEAN_AND_MEAN -DNOMINMAX \
+		-D_WIN32_WINNT=0x0601 -DWINVER=0x0601 \
+		-DHERONET_VERSION=\"$(VERSION)\" \
+		-static-libgcc -static-libstdc++ -mwindows \
+		-Wl,--gc-sections -Wl,-s -o $@ $< \
+		-lwinhttp -lbcrypt -lcomctl32 -lshell32 -lversion
+	@echo "=== Built: $(UPDATER_OUTPUT) ==="
+
 # ---------- Compile C++ ----------
 
 $(OBJDIR)/%.o: $(SRCDIR)/%.cpp
@@ -208,6 +222,10 @@ $(OBJDIR)/%.o: $(SRCDIR)/%.cpp
 
 # Recompile when HEAD or the current branch advances.
 $(OBJDIR)/code/exception.o: $(GIT_COMMIT_DEPS)
+
+# These objects display or compare the release version supplied by Make.
+$(OBJDIR)/dllmain.o $(OBJDIR)/code/LaunchMenu.o \
+	$(OBJDIR)/code/umvc3menu.o $(OBJDIR)/code/updater.o: Makefile
 
 # ---------- Compile C ----------
 
@@ -228,8 +246,8 @@ $(BUILDDIR)/UMVC3Hook.rc: Makefile
 	@printf '%s\n' \
 		'VS_VERSION_INFO VERSIONINFO' \
 		'' \
-		'FILEVERSION     1,0,0,0' \
-		'PRODUCTVERSION  1,0,0,0' \
+		'FILEVERSION     $(VERSION_RC)' \
+		'PRODUCTVERSION  $(VERSION_RC)' \
 		'FILEFLAGSMASK   0x3fL' \
 		'FILEFLAGS       0x0L' \
 		'FILEOS          0x40004L' \
@@ -241,11 +259,11 @@ $(BUILDDIR)/UMVC3Hook.rc: Makefile
 		'        BLOCK "040904E4"' \
 		'        BEGIN' \
 		'            VALUE "FileDescription", "HeroNet Rollback"' \
-		'            VALUE "FileVersion", "1.0.0.0"' \
+		'            VALUE "FileVersion", "$(VERSION)"' \
 		'            VALUE "InternalName", "HeroNet"' \
 		'            VALUE "OriginalFilename", "HeroNet.asi"' \
 		'            VALUE "ProductName", "HeroNet"' \
-		'            VALUE "ProductVersion", "1.0.0.0"' \
+		'            VALUE "ProductVersion", "$(VERSION)"' \
 		'        END' \
 		'    END' \
 		'    BLOCK "VarFileInfo"' \
@@ -285,14 +303,15 @@ $(OBJDIR):
 # ---------- Clean ----------
 
 clean:
-	rm -rf $(BUILDDIR) $(OUTPUT) $(MAP_FILE)
+	rm -rf $(BUILDDIR) $(OUTPUT) $(UPDATER_OUTPUT) $(MAP_FILE)
 
 # ---------- Install (example path - adjust to your UMVC3 install) ----------
 
 INSTALL_DIR ?= ../ULTIMATE MARVEL VS. CAPCOM 3
 
-install: $(OUTPUT)
+install: $(OUTPUT) $(UPDATER_OUTPUT)
 	cp "$(OUTPUT)" "$(INSTALL_DIR)/"
+	cp "$(UPDATER_OUTPUT)" "$(INSTALL_DIR)/"
 
 # ---------- Help ----------
 
