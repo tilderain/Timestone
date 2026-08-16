@@ -79,7 +79,7 @@ bool CreateProgressWindow(DownloadProgress& progress)
         return false;
 
     progress.source = CreateWindowExW(0, L"STATIC",
-        L"Connecting to github.com/tilderain/NormalRepo...",
+        L"Connecting to github.com/tilderain/Timestone...",
         WS_CHILD | WS_VISIBLE, 20, 18, 450, 20,
         progress.window, nullptr, instance, nullptr);
     progress.bar = CreateWindowExW(0, PROGRESS_CLASSW, nullptr,
@@ -166,7 +166,7 @@ bool FetchLatestRelease(std::string& response)
     HINTERNET connection = session ? WinHttpConnect(session, L"api.github.com",
         INTERNET_DEFAULT_HTTPS_PORT, 0) : nullptr;
     HINTERNET request = connection ? WinHttpOpenRequest(connection, L"GET",
-        L"/repos/tilderain/NormalRepo/releases/latest", nullptr,
+        L"/repos/tilderain/Timestone/releases/latest", nullptr,
         WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE) : nullptr;
     bool ok = request && WinHttpSendRequest(request,
         WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0) &&
@@ -1021,7 +1021,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int)
     DeleteFileW(zipDownload.c_str());
     DeleteFileW(extractedAsi.c_str());
     bool downloadValid = Download(url, download, &progress,
-        L"Downloading Timestone update from tilderain/NormalRepo");
+        L"Downloading Timestone update from tilderain/Timestone");
     bool updaterFromArchive = false;
     if (downloadValid && IsZipArchive(download)) {
         SetProgressStage(&progress, L"Verifying Timestone ZIP SHA-256 digest...");
@@ -1061,7 +1061,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int)
         DeleteFileW(pendingUpdater.c_str());
         bool updaterValid = Download(
             updaterUrl, pendingUpdater, &progress,
-            L"Downloading TimestoneUpdater.exe from tilderain/NormalRepo");
+            L"Downloading TimestoneUpdater.exe from tilderain/Timestone");
         if (updaterValid) {
             SetProgressStage(&progress,
                 L"Verifying updater SHA-256 digest...");

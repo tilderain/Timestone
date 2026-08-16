@@ -8,7 +8,7 @@ Makefile on Linux is supported for now (cross compiling a dll)
 
 `make` builds both `Timestone.asi` and `TimestoneUpdater.exe`. Install both files
 beside the game executable. When the launch menu opens, the ASI asks the updater
-to check the latest public release at `github.com/tilderain/NormalRepo`.
+to check the latest public release at `github.com/tilderain/Timestone`.
 
 Each GitHub release must use a numeric tag such as `0.1.1` or `v0.1.1` and
 contain assets named exactly `Timestone.asi` and `TimestoneUpdater.exe`. Both assets
