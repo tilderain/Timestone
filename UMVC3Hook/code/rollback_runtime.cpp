@@ -27,6 +27,8 @@ using MtObjectSetFlagFn = void(__fastcall*)(uint64_t, uint8_t);
 static MtObjectSetFlagFn g_originalMtObjectSetFlag = nullptr;
 using MtObjectIsAliveFn = bool(__fastcall*)(uint64_t);
 static MtObjectIsAliveFn g_originalMtObjectIsAlive = nullptr;
+using RocketRaccoonPlaySfxFn = void(__fastcall*)(uint64_t);
+static RocketRaccoonPlaySfxFn g_originalRocketRaccoonPlaySfx = nullptr;
 using MtAnimSetFrameIndexFn = void(__fastcall*)(uint64_t, uint32_t);
 static MtAnimSetFrameIndexFn g_originalMtAnimSetFrameIndex = nullptr;
 using MtAnimUpdateFrameFn = uint32_t(__fastcall*)(uint64_t, uint64_t, uint64_t);
@@ -67,6 +69,25 @@ static bool __fastcall hkMtObjectIsAlive(uint64_t object)
         return false;
     }
     return g_originalMtObjectIsAlive(object);
+}
+
+static void __fastcall hkRocketRaccoonPlaySfx(uint64_t character)
+{
+    // Native code treats isAlive as proof that these objects implement virtual
+    // +0xD8. A retired child effect can retain state 1/2 after its derived
+    // destructor has replaced the vtable with the shorter MtObject base table.
+    static constexpr uint32_t effectOffsets[] = {0x68F8, 0x6900, 0x6930};
+    for (uint32_t offset : effectOffsets) {
+        uint64_t* slot = (uint64_t*)(character + offset);
+        uint64_t object = *slot;
+        if (!object || !IsAccessibleRange(object, sizeof(uint64_t))) continue;
+
+        uint64_t vtable = *(uint64_t*)object;
+        uint64_t callback = IsAccessibleRange(vtable + 0xD8, sizeof(uint64_t))
+            ? *(uint64_t*)(vtable + 0xD8) : 0;
+        if (!callback || !IsExecutableAddress(callback)) *slot = 0;
+    }
+    g_originalRocketRaccoonPlaySfx(character);
 }
 
 static void __fastcall hkMtAnimSetFrameIndex(uint64_t animation, uint32_t frame)
@@ -537,6 +558,18 @@ void Rollback_InitNativeNullGuards()
     } else {
         HookLog("Rollback: failed to guard stale MtObject alive state (%d)\n",
                 aliveStatus);
+    }
+
+    const MH_STATUS rocketEffectStatus = MH_CreateHook(
+        (LPVOID)_addr(0x1400C56B0), (LPVOID)&hkRocketRaccoonPlaySfx,
+        (LPVOID*)&g_originalRocketRaccoonPlaySfx);
+    if (rocketEffectStatus == MH_OK) {
+        const MH_STATUS enableStatus = MH_EnableHook((LPVOID)_addr(0x1400C56B0));
+        HookLog("Rollback: %s stale Rocket Raccoon effect guard\n",
+                enableStatus == MH_OK ? "installed" : "failed to install");
+    } else {
+        HookLog("Rollback: failed to guard stale Rocket Raccoon effects (%d)\n",
+                rocketEffectStatus);
     }
 
     const MH_STATUS frameIndexStatus = MH_CreateHook(
