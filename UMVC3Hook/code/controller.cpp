@@ -323,6 +323,7 @@ static uint32_t  g_localChecksum[RING_SIZE];
 static uint32_t  g_remoteChecksum[RING_SIZE];
 static int32_t   g_localChecksumFrame[RING_SIZE];
 static int32_t   g_remoteChecksumFrame[RING_SIZE];
+static bool      g_localChecksumConfirmed[RING_SIZE];
 static int32_t   g_desyncChecked[RING_SIZE];   // frame number when checksum was compared, -1 = unchecked
 static bool      g_desyncMismatch[RING_SIZE];  // true if that frame exceeded threshold
 static int32_t   g_confirmedChecksumThrough = -1;
@@ -333,7 +334,7 @@ static constexpr uint32_t DESYNC_THRESHOLD         = 0;
 // Start each checksum epoch after that state has settled instead of treating
 // fresh startup differences as persistent match desyncs.
 static constexpr int32_t  DESYNC_SKIP_FRAMES       = 250;
-static constexpr int32_t  DESYNC_CONSECUTIVE_MIN   = 2;
+static constexpr int32_t  DESYNC_CONSECUTIVE_MIN   = 1;
 
 static void ResetDesyncDetection()
 {
@@ -346,6 +347,7 @@ static void ResetDesyncDetection()
     std::memset(g_remoteChecksum, 0, sizeof(g_remoteChecksum));
     std::memset(g_localChecksumFrame, 0xFF, sizeof(g_localChecksumFrame));
     std::memset(g_remoteChecksumFrame, 0xFF, sizeof(g_remoteChecksumFrame));
+    std::memset(g_localChecksumConfirmed, 0, sizeof(g_localChecksumConfirmed));
     std::memset(g_desyncChecked, 0xFF, sizeof(g_desyncChecked));
     std::memset(g_desyncMismatch, 0, sizeof(g_desyncMismatch));
     g_confirmedChecksumThrough = -1;
@@ -1424,6 +1426,13 @@ static void DrainAndProcessPackets()
             if (csFrame >= 0)
             {
                 uint32_t ridx = (uint32_t)csFrame % RING_SIZE;
+                if (g_remoteChecksumFrame[ridx] == csFrame &&
+                    g_remoteChecksum[ridx] != inPkt.checksum &&
+                    g_desyncChecked[ridx] == csFrame)
+                {
+                    g_desyncChecked[ridx] = -1;
+                    g_desyncMismatch[ridx] = false;
+                }
                 g_remoteChecksum[ridx] = inPkt.checksum;
                 g_remoteChecksumFrame[ridx] = csFrame;
             }
@@ -1775,6 +1784,8 @@ extern "C" void Controller_RecordFrameChecksum(int32_t frame)
     uint32_t idx = (uint32_t)frame % RING_SIZE;
     g_localChecksum[idx] = ComputeChecksum();
     g_localChecksumFrame[idx] = frame;
+    g_localChecksumConfirmed[idx] = IsFrameConfirmed(frame) &&
+        g_usedRemoteInput[idx] == g_receivedInput[idx];
 
     // A corrected frame invalidates any earlier comparison for that frame.
     // Confirmed-only comparison normally prevents this, but clearing the tags
@@ -1808,6 +1819,17 @@ static void UpdateConfirmedChecksums()
         uint32_t idx = (uint32_t)next % RING_SIZE;
         if (!IsFrameConfirmed(next) || g_localChecksumFrame[idx] != next)
             break;
+
+        // A checksum recorded during prediction or an incomplete re-simulation
+        // is not authoritative merely because its input arrived later. Promote
+        // it only when the exact input used to produce it matches confirmation;
+        // otherwise wait for corrected re-simulation to replace the record.
+        if (!g_localChecksumConfirmed[idx])
+        {
+            if (g_usedRemoteInput[idx] != g_receivedInput[idx])
+                break;
+            g_localChecksumConfirmed[idx] = true;
+        }
         g_confirmedChecksumThrough = next;
     }
 
@@ -1817,6 +1839,7 @@ static void UpdateConfirmedChecksums()
     {
         uint32_t idx = (uint32_t)frame % RING_SIZE;
         if (g_localChecksumFrame[idx] != frame ||
+            !g_localChecksumConfirmed[idx] ||
             g_remoteChecksumFrame[idx] != frame ||
             g_desyncChecked[idx] == frame)
             continue;
@@ -1932,7 +1955,8 @@ extern "C" void Controller_OnFrameEnd()
         if (checksumFrame <= g_confirmedChecksumThrough)
         {
             uint32_t idx = (uint32_t)checksumFrame % RING_SIZE;
-            if (g_localChecksumFrame[idx] == checksumFrame)
+            if (g_localChecksumFrame[idx] == checksumFrame &&
+                g_localChecksumConfirmed[idx])
             {
                 outPkt.checksum_frame = (uint32_t)checksumFrame;
                 outPkt.checksum = g_localChecksum[idx];
@@ -1975,18 +1999,13 @@ extern "C" void Controller_OnFrameEnd()
         if (newestChecked >= 0)
         {
             int consecutive = 0;
-            for (int32_t f = newestChecked; f >= 0 && consecutive < DESYNC_CONSECUTIVE_MIN; f--)
+            for (int32_t f = newestChecked;
+                 f >= 0 && consecutive < DESYNC_CONSECUTIVE_MIN; --f)
             {
                 int32_t idx = f % RING_SIZE;
-                if (g_desyncChecked[idx] == f)
-                {
-                    if (g_desyncMismatch[idx])
-                        consecutive++;
-                    else
-                        break;  // matched within threshold — streak broken
-                }
-                // else: no checksum for this frame (lost packet) — skip it,
-                // continue scanning older frames to find a longer streak
+                if (g_desyncChecked[idx] != f || !g_desyncMismatch[idx])
+                    break;
+                consecutive++;
             }
             // Autotest performs its own move-scoped comparison between the
             // host's confirmed live frame and the client's forced resim frame.
