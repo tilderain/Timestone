@@ -101,9 +101,23 @@ extern "C" bool FrameStepper_IsMatchRestartPending()
     return g_restartTargetFrame >= 0 || g_trainingRestartBarrier;
 }
 
+static bool IsPastIntroStep()
+{
+    typedef uint64_t(__fastcall* GetAction_t)();
+    const uint64_t action = ((GetAction_t)_addr(0x140001A90))();
+    if (!action)
+        return false;
+
+    const int32_t step = *(int32_t*)(action + 0xD8);
+    // Phase 12 is the native restart cleanup path and returns to intro.
+    return step >= 3 && step != 12;
+}
+
 static bool RequestMatchRestart()
 {
     if (g_restartTargetFrame >= 0 || g_trainingRestartBarrier)
+        return false;
+    if (!IsPastIntroStep())
         return false;
 
     Controller_ClearDesyncDetection();
@@ -1022,7 +1036,7 @@ void FrameStepper_Process()
     }
 
     static bool prevRestart = false;
-    if (KeyPressed(VK_F11, prevRestart)) {
+    if (IsPastIntroStep() && KeyPressed(VK_F11, prevRestart)) {
         const bool desyncWait = isPaused && g_desyncDetected;
         if (RequestMatchRestart() && desyncWait) {
             g_desyncDetected = false;
@@ -1036,26 +1050,28 @@ void FrameStepper_Process()
     uint32_t remoteRestartSeed = 0;
     uint32_t remoteRestartKind = RESTART_FULL_MATCH;
     int32_t remoteRestartButton = 0;
-    while (Netplay_GetInboundRestartMatch(remoteRestartFrame, remoteRestartSeed,
-                                           remoteRestartKind, remoteRestartButton)) {
-        AutoTest_PrepareForRestart();
-        // Keep a delayed desync snapdump alive until the synchronized restart
-        // actually executes. Clearing here cancels the client's capture as
-        // soon as it receives the host's restart packet; execution clears the
-        // same state at the target frame below.
-        Rollback_ClearPendingReSimulation();
-        g_restartTargetFrame = remoteRestartFrame;
-        g_restartRoundSeed = remoteRestartSeed;
-        g_restartKind = remoteRestartKind;
-        g_restartButtonMode = remoteRestartButton;
-        if (g_desyncDetected || g_desyncSeen)
-        {
-            g_desyncDetected = false;
-            g_desyncSeen = true;
-            UnpauseFrameStepper();
+    if (IsPastIntroStep()) {
+        while (Netplay_GetInboundRestartMatch(remoteRestartFrame, remoteRestartSeed,
+                                               remoteRestartKind, remoteRestartButton)) {
+            AutoTest_PrepareForRestart();
+            // Keep a delayed desync snapdump alive until the synchronized restart
+            // actually executes. Clearing here cancels the client's capture as
+            // soon as it receives the host's restart packet; execution clears the
+            // same state at the target frame below.
+            Rollback_ClearPendingReSimulation();
+            g_restartTargetFrame = remoteRestartFrame;
+            g_restartRoundSeed = remoteRestartSeed;
+            g_restartKind = remoteRestartKind;
+            g_restartButtonMode = remoteRestartButton;
+            if (g_desyncDetected || g_desyncSeen)
+            {
+                g_desyncDetected = false;
+                g_desyncSeen = true;
+                UnpauseFrameStepper();
+            }
+            HookLog("FrameStepper: received restart kind=%u target=%d seed=0x%08X\n",
+                    remoteRestartKind, remoteRestartFrame, remoteRestartSeed);
         }
-        HookLog("FrameStepper: received restart kind=%u target=%d seed=0x%08X\n",
-                remoteRestartKind, remoteRestartFrame, remoteRestartSeed);
     }
     // Netplay settings hotkeys. These work regardless of training mode so both
     // sides can adjust them mid-match.
