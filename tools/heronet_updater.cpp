@@ -778,6 +778,10 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int)
     DeleteFileW(download.c_str());
     if (startup) {
         SetProgressStage(&progress, L"Update complete. Relaunching UMVC3...");
+        for (int i = 0; i < 10; ++i) {
+            Sleep(100);
+            PumpWindowMessages();
+        }
         if (!RelaunchGame(gameExecutable)) {
             CloseProgressWindow(progress);
             ShowError(L"HeroNet was updated, but UMVC3 could not be relaunched.");
