@@ -123,6 +123,7 @@ static constexpr uintptr_t DTI_USHOT_VULCAN_ROCKET_LAUNCHER_EXPLODE = 0x140D4BAC
 static constexpr uintptr_t DTI_USHOT_VULCAN_PENDULUM_LOG = 0x140D4C4C8;
 static constexpr uintptr_t DTI_USHOT_VULCAN_LEGION_TIGER = 0x140D4ABB8;
 static constexpr uintptr_t DTI_USHOT_SHIELD_REPULSOR_BLAST_SP = 0x140D4ADA0;
+static constexpr uintptr_t DTI_USHOT_SHIELD_SPIRAL_SWORD = 0x140D4D4C8;
 static constexpr uint32_t UCAP_AMERICA_SHIELD_SLASH_OFFSET = 0x68F0;
 static constexpr uint32_t UDOCTOR_DOOM_MISSILE_OFFSET = 0x68F0;
 
@@ -1031,8 +1032,36 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
         }
         const uint64_t factoryStart = Profile_Now();
         respawnPrepareTicks += factoryStart - prepareStart;
+
+        uint8_t spiralSwordSlots[6] = {};
+        uint8_t* spiralSwordSlotTable = nullptr;
+        if (saved.concrete.dti ==
+                (uint64_t)_addr(DTI_USHOT_SHIELD_SPIRAL_SWORD) &&
+            saved.ownerChr && saved.concrete.body.size() >= 0x2214 &&
+            IsAccessibleRange((uint64_t)saved.ownerChr + 0x68F0,
+                              sizeof(spiralSwordSlots))) {
+            uint32_t swordId = 0;
+            std::memcpy(&swordId, saved.concrete.body.data() + 0x2210,
+                        sizeof(swordId));
+            if (swordId >= 1 && swordId <= sizeof(spiralSwordSlots)) {
+                // Native setup claims the first free owner slot. The historical
+                // occupancy table is already restored, so expose only this
+                // sword's saved slot while its factory runs.
+                spiralSwordSlotTable =
+                    (uint8_t*)saved.ownerChr + 0x68F0;
+                std::memcpy(spiralSwordSlots, spiralSwordSlotTable,
+                            sizeof(spiralSwordSlots));
+                std::memset(spiralSwordSlotTable, 1,
+                            sizeof(spiralSwordSlots));
+                spiralSwordSlotTable[swordId - 1] = 0;
+            }
+        }
         void* fresh = Shot_SpawnOriginal(
             sShot, *spawnRecipe, objectRef1, objectRef2);
+        if (spiralSwordSlotTable) {
+            std::memcpy(spiralSwordSlotTable, spiralSwordSlots,
+                        sizeof(spiralSwordSlots));
+        }
         const uint64_t factoryEnd = Profile_Now();
         respawnFactoryTicks += factoryEnd - factoryStart;
         if (!fresh) {
