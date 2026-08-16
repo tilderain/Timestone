@@ -197,7 +197,7 @@ void SteamTransport_Shutdown()
         g_bridgePeer = nullptr;
     }
     if (g_sockets && g_connection != k_HSteamNetConnection_Invalid)
-        g_sockets->CloseConnection(g_connection, 1000, "HeroNet shutdown", false);
+        g_sockets->CloseConnection(g_connection, 1000, "Timestone shutdown", false);
     g_connection = k_HSteamNetConnection_Invalid;
     g_sockets = nullptr;
     g_bridgeThreadStarted = false;

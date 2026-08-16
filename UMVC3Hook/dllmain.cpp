@@ -599,7 +599,7 @@ static HANDLE GetD3D9CreateDeviceMutex()
 		return mutex;
 
 	HANDLE candidate = CreateMutexA(nullptr, FALSE,
-		"Local\\HeroNet_D3D9CreateDevice");
+		"Local\\Timestone_D3D9CreateDevice");
 	if (!candidate)
 		return nullptr;
 
@@ -972,7 +972,7 @@ void OnInitializeHook()
 		g_windowCorner = 1;
 
 		// Switch host log to host-specific file so host + client don't clobber each other
-		HookLogSetFile("HeroNet_host.log");
+		HookLogSetFile("Timestone_host.log");
 		HookLog("UMVC3Hook: Dual training host - switched to host log file\n");
 
 		const LaunchDialogConfig& dlgCfg = GetLaunchDialogConfig();
@@ -1004,7 +1004,7 @@ void OnInitializeHook()
 		g_windowCorner = 2;
 
 		// Switch client log to client-specific file so host + client don't clobber each other
-		HookLogSetFile("HeroNet_client.log");
+		HookLogSetFile("Timestone_client.log");
 
 		HookLog("UMVC3Hook: Auto-connecting to host %s:%d\n",
 			g_autoConnectIp, g_autoConnectPort);

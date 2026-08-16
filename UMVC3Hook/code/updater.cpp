@@ -43,9 +43,9 @@ void Updater_Init()
         slash = strrchr(updaterPath, '/');
     if (slash)
         std::snprintf(slash + 1, MAX_PATH - (slash + 1 - updaterPath),
-            "HeroNetUpdater.exe");
+            "TimestoneUpdater.exe");
     else
-        std::snprintf(updaterPath, MAX_PATH, "HeroNetUpdater.exe");
+        std::snprintf(updaterPath, MAX_PATH, "TimestoneUpdater.exe");
 
     char logPath[MAX_PATH] = {};
     std::snprintf(logPath, MAX_PATH, "%s", updaterPath);
@@ -54,7 +54,7 @@ void Updater_Init()
         logName = strrchr(logPath, '/');
     std::snprintf(logName ? logName + 1 : logPath,
         logName ? MAX_PATH - (logName + 1 - logPath) : MAX_PATH,
-        "HeroNetUpdater.log");
+        "TimestoneUpdater.log");
     FILE* log = std::fopen(logPath, "a");
 
     char pendingUpdaterPath[MAX_PATH + 8] = {};
@@ -120,9 +120,9 @@ void Updater_Init()
         DWORD error = GetLastError();
         LogUpdater(log, "Updater executable is unavailable, error=%lu", error);
         MessageBoxA(nullptr,
-            "HeroNetUpdater.exe is missing. Automatic update checks are disabled.\n\n"
-            "Place HeroNetUpdater.exe beside HeroNet.asi to restore updates.",
-            "HeroNet Updater Missing", MB_OK | MB_ICONWARNING);
+            "TimestoneUpdater.exe is missing. Automatic update checks are disabled.\n\n"
+            "Place TimestoneUpdater.exe beside Timestone.asi to restore updates.",
+            "Timestone Updater Missing", MB_OK | MB_ICONWARNING);
         if (log)
             std::fclose(log);
         return;

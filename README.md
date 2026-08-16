@@ -6,20 +6,20 @@ Makefile on Linux is supported for now (cross compiling a dll)
 
 # Updates
 
-`make` builds both `HeroNet.asi` and `HeroNetUpdater.exe`. Install both files
+`make` builds both `Timestone.asi` and `TimestoneUpdater.exe`. Install both files
 beside the game executable. When the launch menu opens, the ASI asks the updater
 to check the latest public release at `github.com/tilderain/NormalRepo`.
 
 Each GitHub release must use a numeric tag such as `0.1.1` or `v0.1.1` and
-contain assets named exactly `HeroNet.asi` and `HeroNetUpdater.exe`. Both assets
+contain assets named exactly `Timestone.asi` and `TimestoneUpdater.exe`. Both assets
 are verified against their GitHub SHA-256 digests. The updater stores its own
-replacement as `HeroNetUpdater.exe.new`; the updated ASI installs it before the
+replacement as `TimestoneUpdater.exe.new`; the updated ASI installs it before the
 next launch-menu update check. The updater retains the previous ASI as
-`HeroNet.asi.old` and never modifies configuration files. Update the `VERSION`
+`Timestone.asi.old` and never modifies configuration files. Update the `VERSION`
 value in the `Makefile` before publishing a release.
 
-Launching `HeroNetUpdater.exe` directly checks the version resource of the
-adjacent `HeroNet.asi` and offers to install a newer release. The ASI launches
+Launching `TimestoneUpdater.exe` directly checks the version resource of the
+adjacent `Timestone.asi` and offers to install a newer release. The ASI launches
 the same check quietly at startup; it displays a prompt only when an update is
 available. Accepting the launch-menu prompt downloads and verifies the update,
 closes UMVC3, replaces the ASI, and relaunches the game.

@@ -196,7 +196,7 @@ static void LoadRollbackSettings()
         "Training", "StageId", STAGE_BONNE_WONDERLAND, rollbackPath);
 
     char settingsPath[MAX_PATH] = {};
-    GetSettingsPath("HeroNet.ini", settingsPath, sizeof(settingsPath));
+    GetSettingsPath("Timestone.ini", settingsPath, sizeof(settingsPath));
     GetPrivateProfileStringA("Network", "HostIp", "",
                              g_dialogConfig.hostIp,
                              sizeof(g_dialogConfig.hostIp), settingsPath);
@@ -240,7 +240,7 @@ static void SaveRollbackSettings()
     WritePrivateProfileStringA("Training", "StageId", stageId, rollbackPath);
 
     char settingsPath[MAX_PATH] = {};
-    GetSettingsPath("HeroNet.ini", settingsPath, sizeof(settingsPath));
+    GetSettingsPath("Timestone.ini", settingsPath, sizeof(settingsPath));
     WritePrivateProfileStringA("Network", "HostIp", g_dialogConfig.hostIp, settingsPath);
     char port[16];
     snprintf(port, sizeof(port), "%d", g_dialogConfig.hostPort);
@@ -984,7 +984,7 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
             leftX, y, contentW, 32, hDlg, (HMENU)ID_LAUNCH_DUAL_P2_CPU, NULL, NULL);
 
         char versionText[64] = {};
-        snprintf(versionText, sizeof(versionText), "HeroNet v%s", UMVC3HOOK_VERSION);
+        snprintf(versionText, sizeof(versionText), "Timestone v%s", UMVC3HOOK_VERSION);
         CreateWindowA("STATIC", versionText,
             WS_VISIBLE | WS_CHILD | SS_RIGHT,
             leftX + 600, 685, 200, 18, hDlg, NULL, NULL, NULL);
@@ -1375,7 +1375,7 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
             SaveRollbackSettings();
 
             // Switch log to host-specific file
-            HookLogSetFile("HeroNet_host.log");
+            HookLogSetFile("Timestone_host.log");
             HookLog("UMVC3Hook: Host button clicked, port %d\n", g_dialogConfig.hostPort);
 
             // Create enet host (server mode)
@@ -1437,7 +1437,7 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
             SaveRollbackSettings();
 
             // Switch log to client-specific file
-            HookLogSetFile("HeroNet_client.log");
+            HookLogSetFile("Timestone_client.log");
             HookLog("UMVC3Hook: Connect button clicked, target %s:%d\n",
                 g_dialogConfig.hostIp, g_dialogConfig.hostPort);
 

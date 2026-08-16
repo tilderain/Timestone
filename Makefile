@@ -23,12 +23,12 @@ BUILDDIR  := build
 OBJDIR    := $(BUILDDIR)/obj
 
 # Output: .asi is a renamed DLL loaded by Ultimate ASI Loader
-OUTPUT    := HeroNet.asi
-UNSTRIPPED_OUTPUT := HeroNet-unstripped.asi
-UPDATER_OUTPUT := HeroNetUpdater.exe
-PACKAGE_OUTPUT := HeroNet.zip
+OUTPUT    := Timestone.asi
+UNSTRIPPED_OUTPUT := Timestone-unstripped.asi
+UPDATER_OUTPUT := TimestoneUpdater.exe
+PACKAGE_OUTPUT := Timestone.zip
 LOADER_DLL := dinput8.dll
-MAP_FILE  := HeroNet.map
+MAP_FILE  := Timestone.map
 
 # --- Source files (from UMVC3Hook.vcxproj, Release|x64) ---
 
@@ -212,11 +212,11 @@ $(OUTPUT): $(ALL_OBJ)
 	mv $@.tmp $@
 	@echo "=== Built: $(OUTPUT) ==="
 
-$(UPDATER_OUTPUT): tools/heronet_updater.cpp Makefile
+$(UPDATER_OUTPUT): tools/timestone_updater.cpp Makefile
 	$(CXX) -Os -flto -ffunction-sections -fdata-sections -std=c++20 \
 		-DWIN32_LEAN_AND_MEAN -DNOMINMAX \
 		-D_WIN32_WINNT=0x0601 -DWINVER=0x0601 \
-		-DHERONET_VERSION=\"$(VERSION)\" \
+		-DTIMESTONE_VERSION=\"$(VERSION)\" \
 		-static-libgcc -static-libstdc++ -mwindows \
 		-Wl,--gc-sections -Wl,-s -o $@ $< \
 		-lwinhttp -lbcrypt -lcomctl32 -lshell32 -lversion -lole32 -loleaut32 -luuid
@@ -272,11 +272,11 @@ $(BUILDDIR)/UMVC3Hook.rc: Makefile
 		'    BEGIN' \
 		'        BLOCK "040904E4"' \
 		'        BEGIN' \
-		'            VALUE "FileDescription", "HeroNet Rollback"' \
+		'            VALUE "FileDescription", "Timestone Rollback"' \
 		'            VALUE "FileVersion", "$(VERSION)"' \
-		'            VALUE "InternalName", "HeroNet"' \
-		'            VALUE "OriginalFilename", "HeroNet.asi"' \
-		'            VALUE "ProductName", "HeroNet"' \
+		'            VALUE "InternalName", "Timestone"' \
+		'            VALUE "OriginalFilename", "Timestone.asi"' \
+		'            VALUE "ProductName", "Timestone"' \
 		'            VALUE "ProductVersion", "$(VERSION)"' \
 		'        END' \
 		'    END' \
@@ -332,7 +332,7 @@ install: $(OUTPUT) $(UPDATER_OUTPUT)
 help:
 	@echo "Targets:"
 	@echo "  all         - Build release (default)"
-	@echo "  release     - Release build and HeroNet.zip package"
+	@echo "  release     - Release build and Timestone.zip package"
 	@echo "  debug       - Debug build (-O0 -g)"
 	@echo "  clean       - Remove build artifacts"
 	@echo "  install     - Copy .asi to UMVC3 game directory"

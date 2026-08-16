@@ -101,7 +101,7 @@ def latest_report_pair(game_dir, character, not_before=None):
 
 def suite_completed(game_dir, not_before):
     """Accept Wine's shutdown crash when the autotest itself completed."""
-    log_path = game_dir / "HeroNet_host.log"
+    log_path = game_dir / "Timestone_host.log"
     if log_path.is_file() and log_path.stat().st_mtime >= not_before:
         try:
             log = log_path.read_text(encoding="utf-8", errors="replace")

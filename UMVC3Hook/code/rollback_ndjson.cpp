@@ -275,7 +275,7 @@ void InitLiveLog()
 
     char logPath[260];
     snprintf(logPath, sizeof(logPath), "%s/%s", directory,
-             Netplay_IsHost() ? "HeroNet_host.log" : "HeroNet_client.log");
+             Netplay_IsHost() ? "Timestone_host.log" : "Timestone_client.log");
     HookLogSetFile(logPath);
 
     for (int i = 0; i < PENDING_HISTORY; ++i) {

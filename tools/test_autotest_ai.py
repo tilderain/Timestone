@@ -47,7 +47,7 @@ class AutoTestAiTest(unittest.TestCase):
     def test_suite_completed_accepts_completed_host_log(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            log = root / "HeroNet_host.log"
+            log = root / "Timestone_host.log"
             log.write_text("AutoTestSuite: Suite complete: 1 passed, 0 failed\n",
                            encoding="utf-8")
             self.assertTrue(runner.suite_completed(root, log.stat().st_mtime - 1))

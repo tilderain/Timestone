@@ -364,12 +364,12 @@ FodyWeavers.xsd
 
 UMVC3Hook.asi
 UMVC3Hook.map
-HeroNet.asi
-HeroNet-unstripped.asi
-HeroNetUpdater.exe
-HeroNet.map
+Timestone.asi
+Timestone-unstripped.asi
+TimestoneUpdater.exe
+Timestone.map
 all.txt
 
 build/**
 
-HeroNet.zip
+Timestone.zip

@@ -11,15 +11,15 @@
 #include <string>
 #include <vector>
 
-#ifndef HERONET_VERSION
-#define HERONET_VERSION "0.1.0"
+#ifndef TIMESTONE_VERSION
+#define TIMESTONE_VERSION "0.1.0"
 #endif
 
 namespace {
 
 void ShowError(const wchar_t* message)
 {
-    MessageBoxW(nullptr, message, L"HeroNet Updater", MB_OK | MB_ICONERROR);
+    MessageBoxW(nullptr, message, L"Timestone Updater", MB_OK | MB_ICONERROR);
 }
 
 void ShowFileError(const wchar_t* message, DWORD error)
@@ -53,7 +53,7 @@ bool CreateProgressWindow(DownloadProgress& progress)
     };
     InitCommonControlsEx(&controls);
 
-    static const wchar_t className[] = L"HeroNetUpdaterProgress";
+    static const wchar_t className[] = L"TimestoneUpdaterProgress";
     static bool registered = false;
     HINSTANCE instance = GetModuleHandleW(nullptr);
     if (!registered) {
@@ -73,7 +73,7 @@ bool CreateProgressWindow(DownloadProgress& progress)
     int x = (GetSystemMetrics(SM_CXSCREEN) - width) / 2;
     int y = (GetSystemMetrics(SM_CYSCREEN) - height) / 2;
     progress.window = CreateWindowExW(WS_EX_TOPMOST, className,
-        L"HeroNet Updater", WS_OVERLAPPED | WS_CAPTION | WS_VISIBLE,
+        L"Timestone Updater", WS_OVERLAPPED | WS_CAPTION | WS_VISIBLE,
         x, y, width, height, nullptr, nullptr, instance, nullptr);
     if (!progress.window)
         return false;
@@ -156,7 +156,7 @@ bool ReadResponse(HINTERNET request, std::string& response)
 
 bool FetchLatestRelease(std::string& response)
 {
-    HINTERNET session = WinHttpOpen(L"HeroNetUpdater/1.0",
+    HINTERNET session = WinHttpOpen(L"TimestoneUpdater/1.0",
         WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME,
         WINHTTP_NO_PROXY_BYPASS, 0);
     DWORD secureProtocols = WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2;
@@ -242,9 +242,9 @@ bool ParseLatestRelease(const std::string& json, std::string& tag,
 {
     if (!ExtractJsonString(json, "tag_name", 0, tag))
         return false;
-    if (ParseReleaseAsset(json, "HeroNet.zip", url, sha256))
+    if (ParseReleaseAsset(json, "Timestone.zip", url, sha256))
         return true;
-    return ParseReleaseAsset(json, "HeroNet.asi", url, sha256);
+    return ParseReleaseAsset(json, "Timestone.asi", url, sha256);
 }
 
 std::wstring Utf8ToWide(const std::string& text)
@@ -267,7 +267,7 @@ bool GetSiblingAsiPath(std::wstring& path)
     path.assign(executable, length);
     size_t slash = path.find_last_of(L"\\/");
     path.resize(slash == std::wstring::npos ? 0 : slash + 1);
-    path += L"HeroNet.asi";
+    path += L"Timestone.asi";
     return true;
 }
 
@@ -380,7 +380,7 @@ bool Download(const std::wstring& url, const std::wstring& destination,
     if (!CrackUrl(url, parts, host, path))
         return false;
 
-    HINTERNET session = WinHttpOpen(L"HeroNetUpdater/1.0",
+    HINTERNET session = WinHttpOpen(L"TimestoneUpdater/1.0",
         WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME,
         WINHTTP_NO_PROXY_BYPASS, 0);
     DWORD secureProtocols = WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2;
@@ -662,10 +662,10 @@ bool ExtractZipPackage(const std::wstring& archive,
     bool& updaterExtracted)
 {
     StoredZipResult asiResult = ExtractStoredZipEntry(
-        archive, "HeroNet.asi", asiDestination);
+        archive, "Timestone.asi", asiDestination);
     if (asiResult == StoredZipResult::Extracted) {
         StoredZipResult updaterResult = ExtractStoredZipEntry(
-            archive, "HeroNetUpdater.exe", updaterDestination);
+            archive, "TimestoneUpdater.exe", updaterDestination);
         updaterExtracted = updaterResult == StoredZipResult::Extracted;
         return updaterResult == StoredZipResult::Extracted ||
             updaterResult == StoredZipResult::NotFound;
@@ -735,9 +735,9 @@ bool ExtractZipPackage(const std::wstring& archive,
         ULONGLONG totalSize = 0;
         asiPath.clear();
         updaterPath.clear();
-        ScanExtractedFiles(staging, L"HeroNet.asi", asiPath, asiMatches,
+        ScanExtractedFiles(staging, L"Timestone.asi", asiPath, asiMatches,
             totalSize, fileCount);
-        ScanExtractedFiles(staging, L"HeroNetUpdater.exe", updaterPath,
+        ScanExtractedFiles(staging, L"TimestoneUpdater.exe", updaterPath,
             updaterMatches, totalSize, fileCount);
         if (asiMatches > 1 || updaterMatches > 1) {
             result = E_FAIL;
@@ -918,7 +918,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int)
             GetFileAttributesW(target.c_str()) == INVALID_FILE_ATTRIBUTES) {
             LocalFree(argv);
             if (manual)
-                ShowError(L"HeroNet.asi was not found beside HeroNetUpdater.exe.");
+                ShowError(L"Timestone.asi was not found beside TimestoneUpdater.exe.");
             return 2;
         }
         std::wstring currentVersion;
@@ -927,7 +927,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int)
         if (suppliedVersion)
             currentVersion = suppliedVersion;
         else if (!GetInstalledVersion(target, currentVersion))
-            currentVersion = Utf8ToWide(HERONET_VERSION);
+            currentVersion = Utf8ToWide(TIMESTONE_VERSION);
         std::string json;
         std::string latestTag;
         std::string downloadUrl;
@@ -938,29 +938,29 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int)
             !ParseLatestRelease(json, latestTag, downloadUrl, digest)) {
             LocalFree(argv);
             if (manual)
-                ShowError(L"Could not read the latest HeroNet release from GitHub.");
+                ShowError(L"Could not read the latest Timestone release from GitHub.");
             return 3;
         }
-        ParseReleaseAsset(json, "HeroNetUpdater.exe",
+        ParseReleaseAsset(json, "TimestoneUpdater.exe",
             updaterDownloadUrl, updaterDigest);
         std::wstring latestVersion = Utf8ToWide(latestTag);
         if (!IsNewerVersion(latestVersion.c_str(), currentVersion.c_str())) {
             LocalFree(argv);
             if (manual) {
                 wchar_t message[256] = {};
-                swprintf(message, 256, L"HeroNet %ls is already up to date.",
+                swprintf(message, 256, L"Timestone.asi %ls is already up to date.",
                     currentVersion.c_str());
-                MessageBoxW(nullptr, message, L"HeroNet Updater",
+                MessageBoxW(nullptr, message, L"Timestone Updater",
                     MB_OK | MB_ICONINFORMATION);
             }
             return 0;
         }
         wchar_t prompt[384] = {};
         swprintf(prompt, 384,
-            L"A HeroNet update is required.\n\nInstalled: %ls\nAvailable: %ls\n\n"
+            L"A Timestone update is required.\n\nInstalled: %ls\nAvailable: %ls\n\n"
             L"Update now? UMVC3 will close and restart automatically.",
             currentVersion.c_str(), latestVersion.c_str());
-        if (MessageBoxW(nullptr, prompt, L"HeroNet Updater",
+        if (MessageBoxW(nullptr, prompt, L"Timestone Updater",
                 MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON1) != IDYES) {
             LocalFree(argv);
             return 0;
@@ -996,7 +996,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int)
     std::wstring pendingUpdater = target;
     size_t targetSlash = pendingUpdater.find_last_of(L"\\/");
     pendingUpdater.resize(targetSlash == std::wstring::npos ? 0 : targetSlash + 1);
-    pendingUpdater += L"HeroNetUpdater.exe.new";
+    pendingUpdater += L"TimestoneUpdater.exe.new";
     LocalFree(argv);
 
     if (startup) {
@@ -1021,13 +1021,13 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int)
     DeleteFileW(zipDownload.c_str());
     DeleteFileW(extractedAsi.c_str());
     bool downloadValid = Download(url, download, &progress,
-        L"Downloading HeroNet update from tilderain/NormalRepo");
+        L"Downloading Timestone update from tilderain/NormalRepo");
     bool updaterFromArchive = false;
     if (downloadValid && IsZipArchive(download)) {
-        SetProgressStage(&progress, L"Verifying HeroNet ZIP SHA-256 digest...");
+        SetProgressStage(&progress, L"Verifying Timestone ZIP SHA-256 digest...");
         downloadValid = VerifySha256(download, sha256.c_str());
         if (downloadValid) {
-            SetProgressStage(&progress, L"Extracting HeroNet update...");
+            SetProgressStage(&progress, L"Extracting Timestone update...");
             downloadValid = MoveFileW(download.c_str(), zipDownload.c_str()) &&
                 ExtractZipPackage(zipDownload, extractedAsi, pendingUpdater,
                     updaterFromArchive) &&
@@ -1052,7 +1052,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int)
         CloseProgressWindow(progress);
         if (startup)
             RelaunchGame(gameExecutable);
-        ShowError(L"The HeroNet update failed validation or did not match its GitHub SHA-256 digest.");
+        ShowError(L"The Timestone update failed validation or did not match its GitHub SHA-256 digest.");
         return 3;
     }
 
@@ -1061,7 +1061,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int)
         DeleteFileW(pendingUpdater.c_str());
         bool updaterValid = Download(
             updaterUrl, pendingUpdater, &progress,
-            L"Downloading HeroNetUpdater.exe from tilderain/NormalRepo");
+            L"Downloading TimestoneUpdater.exe from tilderain/NormalRepo");
         if (updaterValid) {
             SetProgressStage(&progress,
                 L"Verifying updater SHA-256 digest...");
@@ -1074,7 +1074,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int)
             CloseProgressWindow(progress);
             if (startup)
                 RelaunchGame(gameExecutable);
-            ShowError(L"HeroNetUpdater.exe failed to download or did not match its GitHub SHA-256 digest.");
+            ShowError(L"TimestoneUpdater.exe failed to download or did not match its GitHub SHA-256 digest.");
             return 3;
         }
     }
@@ -1086,14 +1086,14 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int)
                 SetProgressStage(&progress, L"Waiting for UMVC3 to close...");
                 MessageBoxW(nullptr,
                     L"The update is downloaded. Close UMVC3 to finish installing it.",
-                    L"HeroNet Updater", MB_OK | MB_ICONINFORMATION);
+                    L"Timestone Updater", MB_OK | MB_ICONINFORMATION);
             }
             WaitForSingleObject(process, INFINITE);
             CloseHandle(process);
         }
     }
 
-    SetProgressStage(&progress, L"Installing HeroNet update...");
+    SetProgressStage(&progress, L"Installing Timestone update...");
     if (!CopyFileW(target.c_str(), backup.c_str(), FALSE)) {
         DWORD error = GetLastError();
         DeleteFileW(download.c_str());
@@ -1101,7 +1101,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int)
         CloseProgressWindow(progress);
         if (startup)
             RelaunchGame(gameExecutable);
-        ShowFileError(L"Could not create a backup of the installed HeroNet.asi.", error);
+        ShowFileError(L"Could not create a backup of the installed Timestone.asi.", error);
         return 4;
     }
     if (!CopyFileW(download.c_str(), target.c_str(), FALSE)) {
@@ -1124,14 +1124,14 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int)
         }
         if (!RelaunchGame(gameExecutable)) {
             CloseProgressWindow(progress);
-            ShowError(L"HeroNet was updated, but UMVC3 could not be relaunched.");
+            ShowError(L"Timestone was updated, but UMVC3 could not be relaunched.");
             return 6;
         }
         CloseProgressWindow(progress);
     } else if (localCheck) {
         CloseProgressWindow(progress);
-        MessageBoxW(nullptr, L"HeroNet was updated successfully.",
-            L"HeroNet Updater", MB_OK | MB_ICONINFORMATION);
+        MessageBoxW(nullptr, L"Timestone was updated successfully.",
+            L"Timestone Updater", MB_OK | MB_ICONINFORMATION);
     } else {
         CloseProgressWindow(progress);
     }

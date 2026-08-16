@@ -12,11 +12,11 @@ BEGIN
     BEGIN
         BLOCK "040904E4"
         BEGIN
-            VALUE "FileDescription", "HeroNet Rollback"
+            VALUE "FileDescription", "Timestone Rollback"
             VALUE "FileVersion", "0.1.0"
-            VALUE "InternalName", "HeroNet"
-            VALUE "OriginalFilename", "HeroNet.asi"
-            VALUE "ProductName", "HeroNet"
+            VALUE "InternalName", "Timestone"
+            VALUE "OriginalFilename", "Timestone.asi"
+            VALUE "ProductName", "Timestone"
             VALUE "ProductVersion", "0.1.0"
         END
     END

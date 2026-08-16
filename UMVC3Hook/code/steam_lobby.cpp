@@ -294,7 +294,7 @@ void PublishLobbyRichPresence()
     char connect[64];
     snprintf(connect, sizeof(connect), "+connect_lobby %llu",
              static_cast<unsigned long long>(g_lobbyId));
-    SetRichPresence("status", "Waiting in HeroNet launch menu");
+    SetRichPresence("status", "Waiting in Timestone launch menu");
     SetRichPresence("connect", connect);
 }
 
@@ -657,13 +657,13 @@ bool SteamLobby_Initialize()
 void SteamLobby_Search()
 {
     if (!SteamLobby_Initialize() || g_pendingCall != PendingCall::None) return;
-    g_api.AddStringFilter(g_matchmaking, "heronet", "1", 0);
+    g_api.AddStringFilter(g_matchmaking, "Timestone", "1", 0);
     g_api.AddStringFilter(g_matchmaking, "protocol", kLobbyProtocol, 0);
     g_api.AddSlotsFilter(g_matchmaking, 1);
     g_api.AddResultCountFilter(g_matchmaking, 50);
     g_pendingHandle = g_api.RequestLobbyList(g_matchmaking);
     g_pendingCall = PendingCall::Search;
-    SetStatus("Searching for HeroNet lobbies...");
+    SetStatus("Searching for Timestone lobbies...");
 }
 
 void SteamLobby_Create()
@@ -675,7 +675,7 @@ void SteamLobby_Create()
     }
     g_pendingHandle = g_api.CreateLobby(g_matchmaking, 2, 2); // public, two members
     g_pendingCall = PendingCall::Create;
-    SetStatus("Creating HeroNet lobby...");
+    SetStatus("Creating Timestone lobby...");
 }
 
 void SteamLobby_Join(uint64_t lobbyId)
@@ -684,7 +684,7 @@ void SteamLobby_Join(uint64_t lobbyId)
     g_pendingHandle = g_api.JoinLobby(g_matchmaking, lobbyId);
     g_pendingCall = PendingCall::Join;
     g_isHost = false;
-    SetStatus("Joining HeroNet lobby...");
+    SetStatus("Joining Timestone lobby...");
 }
 
 void SteamLobby_Pump()
@@ -711,9 +711,9 @@ void SteamLobby_Pump()
             g_pendingCall = PendingCall::None;
             g_pendingHandle = 0;
             if (g_resultCount == 1)
-                snprintf(g_status, sizeof(g_status), "Found 1 HeroNet lobby");
+                snprintf(g_status, sizeof(g_status), "Found 1 Timestone lobby");
             else
-                snprintf(g_status, sizeof(g_status), "Found %u HeroNet lobbies",
+                snprintf(g_status, sizeof(g_status), "Found %u Timestone lobbies",
                          (unsigned)g_resultCount);
         }
     } else if (g_pendingCall == PendingCall::Create) {
@@ -728,7 +728,7 @@ void SteamLobby_Pump()
                 g_isHost = true;
                 g_pingLocationPublished = false;
                 g_nextPingLocationAttempt = 0;
-                g_api.SetLobbyData(g_matchmaking, g_lobbyId, "heronet", "1");
+                g_api.SetLobbyData(g_matchmaking, g_lobbyId, "Timestone", "1");
                 g_api.SetLobbyData(g_matchmaking, g_lobbyId, "protocol", kLobbyProtocol);
                 g_api.SetLobbyData(g_matchmaking, g_lobbyId, "build", UMVC3HOOK_GIT_COMMIT);
                 g_api.SetLobbyData(g_matchmaking, g_lobbyId, "state", "waiting");

@@ -124,7 +124,7 @@ struct SteamNetworkPingLocation_t {
 };
 
 // The method order must match SteamNetworkingUtils004. Only the prefix used
-// by HeroNet is declared here.
+// by Timestone is declared here.
 class ISteamNetworkingUtils {
 public:
     virtual SteamNetworkingMessage_t* AllocateMessage(int) = 0;
@@ -139,7 +139,7 @@ public:
 };
 
 // The method order must match SteamNetworkingSockets012. Only the prefix used
-// by HeroNet is declared here.
+// by Timestone is declared here.
 class ISteamNetworkingSockets {
 public:
     virtual HSteamListenSocket CreateListenSocketIP(const SteamNetworkingIPAddr&, int,
