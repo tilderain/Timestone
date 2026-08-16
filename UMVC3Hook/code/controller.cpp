@@ -1218,10 +1218,8 @@ static uint64_t __fastcall hkGetsCurrentInput_withSOCD(uint64_t pad, uint32_t pl
 // ---------------------------------------------------------------------------
 // hkStepIntro
 // Hook on sAction__stepIntro at 0x140007D90.
-// When netplay is active, lets the intro initialize for a few frames then
-// skips deterministically at frame 10 (same frame on both sides via frame 0
-// sync), avoiding both the black-screen from zero-frame intros and the
-// desync from button-based skipping.
+// During netplay, lets native phase 2 initialize but blocks its transition
+// until both peers have completed the battle-ready handshake.
 // ---------------------------------------------------------------------------
 static void(__fastcall* oStepIntro)(uint64_t param_1) = nullptr;
 static void(__fastcall* oStepFighting)(uint64_t param_1) = nullptr;
@@ -1236,12 +1234,23 @@ extern "C" void FrameStepper_NotifyFighting();
 static void __fastcall hkStepIntro(uint64_t param_1)
 {
     RollbackHookProfileScope profile(RollbackHookProfileId::StepIntro);
-    if (Netplay_IsActive() && FrameStepper_IsBattleSynchronized()) {
-        auto setCountdown = (void(__fastcall*)(uint64_t, int))_addr(0x14000AE00);
-        setCountdown(param_1, 3);
+    if (!Netplay_IsActive()) {
+        oStepIntro(param_1);
         return;
     }
+
+    auto setNextStep = (void(__fastcall*)(uint64_t, int))_addr(0x14000AE00);
+    if (FrameStepper_IsBattleSynchronized()) {
+        setNextStep(param_1, 3);
+        return;
+    }
+
     oStepIntro(param_1);
+
+    // A held confirmation button can make the native intro queue countdown in
+    // its first tick. Keep phase 2 active until both peers release the barrier.
+    if (*(int32_t*)(param_1 + 0xDC) >= 0)
+        setNextStep(param_1, -1);
 }
 
 // Native online play derives these clocks from the synchronized netpad cursor
