@@ -13,11 +13,12 @@ struct ConcreteShotSnapshot {
         bool occupied = false;
         bool hasState = false;
         uint64_t dti = 0;
+        uint64_t resource = 0;
         uint8_t flags100[0x08] = {};
         uint8_t timing110[0x28] = {};
         uint8_t state1D0[0x08] = {};
         uint8_t state1E0[0x10] = {};
-        uint8_t state1F8[0x20] = {};
+        uint8_t state1F8[0x0C] = {};
         uint8_t state230[0x12] = {};
     };
 

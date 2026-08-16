@@ -818,6 +818,7 @@ bool ConcreteShotSnapshot_Capture(void* shot, ConcreteShotSnapshot& out)
         }
         state.hasState = true;
         state.dti = GetObjectDti((uint64_t)effect);
+        state.resource = *(uint64_t*)((uint8_t*)effect + 0x108);
         std::memcpy(state.flags100, (uint8_t*)effect + 0x100,
                     sizeof(state.flags100));
         std::memcpy(state.timing110, (uint8_t*)effect + 0x110,
@@ -846,6 +847,7 @@ bool ConcreteEffectSnapshot_Capture(
         return state.occupied;
     state.hasState = true;
     state.dti = GetObjectDti((uint64_t)effect);
+    state.resource = *(uint64_t*)((uint8_t*)effect + 0x108);
     std::memcpy(state.flags100, (uint8_t*)effect + 0x100,
                 sizeof(state.flags100));
     std::memcpy(state.timing110, (uint8_t*)effect + 0x110,
@@ -866,7 +868,9 @@ bool ConcreteEffectSnapshot_Restore(
     void* effect, const ConcreteShotSnapshot::CallbackEffectState& state)
 {
     if (!effect || !state.hasState || !IsEffectObject(effect) ||
-        !Accessible((uint64_t)effect, 0x242) || GetObjectDti((uint64_t)effect) != state.dti)
+        !Accessible((uint64_t)effect, 0x242) ||
+        GetObjectDti((uint64_t)effect) != state.dti ||
+        *(uint64_t*)((uint8_t*)effect + 0x108) != state.resource)
         return false;
     std::memcpy((uint8_t*)effect + 0x100, state.flags100, sizeof(state.flags100));
     std::memcpy((uint8_t*)effect + 0x110, state.timing110, sizeof(state.timing110));
@@ -921,12 +925,14 @@ void ConcreteShotSnapshot_RestoreCallbackEffects(
 
         if (!effect || !IsEffectObject(effect) ||
             !Accessible((uint64_t)effect, 0x138) ||
-            GetObjectDti((uint64_t)effect) != state.dti) {
+            GetObjectDti((uint64_t)effect) != state.dti ||
+            *(uint64_t*)((uint8_t*)effect + 0x108) != state.resource) {
             continue;
         }
 
-        // Preserve the fresh generator/resource graph and native timeline,
-        // while rewinding only pointer-free uEffect state.
+        // DTI alone does not identify the EFL resource that defines generator
+        // tracks. Preserve the fresh graph unless it uses the captured resource,
+        // and never overwrite its generator counts at +0x204..+0x217.
         std::memcpy((uint8_t*)effect + 0x100, state.flags100,
                     sizeof(state.flags100));
         std::memcpy((uint8_t*)effect + 0x110, state.timing110,
