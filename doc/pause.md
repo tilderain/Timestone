@@ -101,8 +101,17 @@ boundary. This is independent of native `uBattleUiPause` construction:
   requested; a captured D3D frame is presented as the background.
 - Custom netplay sends `PACKET_DESYNC` actions for desync trigger and desync
   unpause. Remote actions are applied on the game thread.
-- Pressing `P` dismisses a desync alert locally and sends `DESYNC_UNPAUSE` when
-  netplay is active.
+- Pressing `P` always performs the frame stepper's full unpause action, including
+  clearing one-frame advance state and releasing the captured pause texture. If
+  a desync alert is active, it also dismisses the alert locally and sends
+  `DESYNC_UNPAUSE` during netplay.
+- Pressing `F11` on the paused desync-wait screen requests a full restart at the
+  current synchronized frame instead of the normal 25-frame lead. The restart
+  packet also releases the receiver's desync pause so phase-12 cleanup can run.
+- Restart packets carry the battle generation in which they were requested.
+  Packets delivered after that generation has already restarted are discarded,
+  preventing an old immediate request from firing again at the same frame in
+  the replacement match.
 
 This protocol synchronizes the plugin's desync-screen stop/dismiss action. It
 does not synchronize arbitrary native pause-menu opening, navigation, or quit

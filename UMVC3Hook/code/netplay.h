@@ -130,6 +130,7 @@ struct DesyncPacket {
 
 struct RestartMatchPacket {
     uint32_t type;               // PACKET_RESTART_MATCH
+    uint32_t battle_generation;  // match epoch that requested this restart
     int32_t  target_frame;       // synchronized net frame to restart on
     uint32_t round_seed;         // deterministic gameplay RNG seed
     uint32_t kind;               // RestartMatchKind

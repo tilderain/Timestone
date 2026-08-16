@@ -32,6 +32,10 @@ the native confirmation-mask test on both teams' mapped pads. Either player's
 confirmation calls `FrameStepper_RequestMatchRestart`, which sends the existing
 reliable synchronized restart request and schedules native phase-12 cleanup.
 
+The same override hooks `sAction__stepResult9_10_11` at `0x14000A3B0`. If the
+outro reaches the actual result screen without an earlier confirmation, either
+player's confirmation there requests the direct restart as well.
+
 While that restart is pending, the hook does not call the original phase-8
 handler. This prevents phase 9 and its result-screen objects from being created
 during the synchronization lead time. Offline and native game flows retain the
@@ -43,6 +47,7 @@ original phase-8 behavior.
 |---|---|
 | `0x140006D20` | `sAction__move`, action-phase dispatcher |
 | `0x14000A990` | `sAction__stepResult8`, winner outro/result transition |
+| `0x14000A3B0` | `sAction__stepResult9_10_11`, active result-screen flow |
 | `0x14000AE00` | Queue the next action phase in `mStepOrder` |
 | `0x140001A70` | Return the pad menu-confirmation mask at `sPad+0xBD8` |
 | `0x14025AC40` | Resolve a team's mapped pad index |

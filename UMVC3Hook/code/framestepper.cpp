@@ -102,7 +102,7 @@ extern "C" bool FrameStepper_IsMatchRestartPending()
     return g_restartTargetFrame >= 0 || g_trainingRestartBarrier;
 }
 
-extern "C" bool FrameStepper_RequestMatchRestart()
+static bool RequestMatchRestart(bool immediate)
 {
     if (g_restartTargetFrame >= 0 || g_trainingRestartBarrier)
         return false;
@@ -114,7 +114,8 @@ extern "C" bool FrameStepper_RequestMatchRestart()
     if (sReplay)
         g_restartRoundSeed = *(uint32_t*)(sReplay + 0x58);
     if (Netplay_IsActive()) {
-        targetFrame += 25;
+        if (!immediate)
+            targetFrame += 25;
         Netplay_SendRestartMatch(targetFrame, g_restartRoundSeed);
     }
     g_restartKind = RESTART_FULL_MATCH;
@@ -123,6 +124,11 @@ extern "C" bool FrameStepper_RequestMatchRestart()
     HookLog("FrameStepper: scheduled match restart for frame %d (%s)\n",
             targetFrame, Netplay_IsActive() ? "netplay" : "offline");
     return true;
+}
+
+extern "C" bool FrameStepper_RequestMatchRestart()
+{
+    return RequestMatchRestart(false);
 }
 
 extern "C" void FrameStepper_ScheduleAutoTestRestart(uint32_t roundSeed)
@@ -945,6 +951,16 @@ static inline bool KeyPressed(int vk, bool& prevState)
     return pressed;
 }
 
+static void UnpauseFrameStepper()
+{
+    isPaused = false;
+    advanceFrame = false;
+    if (g_pPauseTexture) {
+        g_pPauseTexture->Release();
+        g_pPauseTexture = nullptr;
+    }
+}
+
 static void CloseGameAfterAutoTest()
 {
     if (g_hWnd && PostMessageW(g_hWnd, WM_CLOSE, 0, 0))
@@ -1015,8 +1031,15 @@ void FrameStepper_Process()
     }
 
     static bool prevRestart = false;
-    if (KeyPressed(VK_F11, prevRestart))
-        FrameStepper_RequestMatchRestart();
+    if (KeyPressed(VK_F11, prevRestart)) {
+        const bool desyncWait = isPaused && g_desyncDetected;
+        if (RequestMatchRestart(desyncWait) && desyncWait) {
+            g_desyncDetected = false;
+            g_desyncSeen = true;
+            UnpauseFrameStepper();
+            HookLog("FrameStepper: F11 applied immediate restart from desync wait screen\n");
+        }
+    }
 
     int32_t remoteRestartFrame = -1;
     uint32_t remoteRestartSeed = 0;
@@ -1034,6 +1057,12 @@ void FrameStepper_Process()
         g_restartRoundSeed = remoteRestartSeed;
         g_restartKind = remoteRestartKind;
         g_restartButtonMode = remoteRestartButton;
+        if (g_desyncDetected || g_desyncSeen)
+        {
+            g_desyncDetected = false;
+            g_desyncSeen = true;
+            UnpauseFrameStepper();
+        }
         HookLog("FrameStepper: received restart kind=%u target=%d seed=0x%08X\n",
                 remoteRestartKind, remoteRestartFrame, remoteRestartSeed);
     }
@@ -1091,8 +1120,7 @@ void FrameStepper_Process()
         {
             g_desyncDetected = false;
             g_desyncSeen = true;
-            isPaused = false;
-            advanceFrame = false;
+            UnpauseFrameStepper();
         }
     }
 
@@ -1101,22 +1129,25 @@ void FrameStepper_Process()
         Rollback_ProcessDesyncDelay(desyncProcessFrame);
 
     // --- Desync auto-pause (works in any mode). ---
-    // P key dismisses the alert and unpauses.  The overlay persists
-    // (g_desyncSeen remains true) but future mismatches won't re-pause.
+    // P always performs the complete frame-stepper unpause action. If a desync
+    // alert exists, it also dismisses and synchronizes that alert.
     static bool prevDesyncP = false;
     bool desyncActive = g_desyncDetected || g_desyncSeen;
-    if (desyncActive)
+    const bool pPressed = KeyPressed(0x50, prevDesyncP);
+    if (pPressed)
     {
-        if (KeyPressed(0x50, prevDesyncP))
+        UnpauseFrameStepper();
+        if (desyncActive)
         {
             g_desyncDetected = false;
-            g_desyncSeen     = true;
-            isPaused         = false;
-            advanceFrame     = false;
+            g_desyncSeen = true;
             if (Netplay_IsActive())
                 Netplay_SendDesyncUnpause();
         }
-        else if (g_desyncDetected && !desyncCapturePending && !AutoTest_IsActive())
+    }
+    if (desyncActive)
+    {
+        if (!pPressed && g_desyncDetected && !desyncCapturePending && !AutoTest_IsActive())
         {
             isPaused = true;
         }
@@ -1124,11 +1155,7 @@ void FrameStepper_Process()
     if (!IsTrainingMode())
     {
         if (isPaused && !g_desyncDetected) {
-            isPaused = false;
-            if (g_pPauseTexture) {
-                g_pPauseTexture->Release();
-                g_pPauseTexture = nullptr;
-            }
+            UnpauseFrameStepper();
         }
         return;
     }
@@ -1145,11 +1172,7 @@ void FrameStepper_Process()
         }
         else
         {
-            // Free the snapshot on unpause
-            if (g_pPauseTexture) {
-                g_pPauseTexture->Release();
-                g_pPauseTexture = nullptr;
-            }
+            UnpauseFrameStepper();
         }
     }
 

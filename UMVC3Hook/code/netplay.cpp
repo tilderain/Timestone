@@ -1136,6 +1136,7 @@ void Netplay_SendRestartMatch(int32_t targetFrame, uint32_t roundSeed)
 {
     ScopedCS lock(g_restartCS);
     g_outboundRestart.type = PACKET_RESTART_MATCH;
+    g_outboundRestart.battle_generation = FrameStepper_GetBattleGeneration();
     g_outboundRestart.target_frame = targetFrame;
     g_outboundRestart.round_seed = roundSeed;
     g_outboundRestart.kind = RESTART_FULL_MATCH;
@@ -1148,6 +1149,7 @@ void Netplay_SendTrainingRestart(int32_t targetFrame, uint32_t roundSeed,
 {
     ScopedCS lock(g_restartCS);
     g_outboundRestart.type = PACKET_RESTART_MATCH;
+    g_outboundRestart.battle_generation = FrameStepper_GetBattleGeneration();
     g_outboundRestart.target_frame = targetFrame;
     g_outboundRestart.round_seed = roundSeed;
     g_outboundRestart.kind = RESTART_TRAINING;
@@ -1164,6 +1166,14 @@ bool Netplay_GetInboundRestartMatch(int32_t& outTargetFrame, uint32_t& outRoundS
     ScopedCS lock(g_restartCS);
     if (!g_inboundRestartNew)
         return false;
+    if (g_inboundRestart.battle_generation != FrameStepper_GetBattleGeneration()) {
+        HookLog("Netplay: discarded stale restart generation=%u current=%u target=%d\n",
+                g_inboundRestart.battle_generation,
+                FrameStepper_GetBattleGeneration(),
+                g_inboundRestart.target_frame);
+        g_inboundRestartNew = false;
+        return false;
+    }
     outTargetFrame = g_inboundRestart.target_frame;
     outRoundSeed = g_inboundRestart.round_seed;
     outKind = g_inboundRestart.kind;
