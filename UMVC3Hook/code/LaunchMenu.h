@@ -6,6 +6,7 @@
 struct LaunchTrainingPacket;
 
 enum LaunchOption {
+    LAUNCH_CANCELLED = -1,
     LAUNCH_NORMAL = 0,
     LAUNCH_TRAINING = 1,
     LAUNCH_DUAL_TRAINING = 2,
@@ -45,7 +46,7 @@ struct LaunchDialogConfig {
 
 // Shows a Win32 dialog before the game initializes.
 // Blocks until the user makes a selection.
-// Returns the chosen LaunchOption.
+// Returns LAUNCH_CANCELLED if the user closes the window.
 LaunchOption ShowLaunchMenu();
 
 // Returns the launch option chosen at startup.

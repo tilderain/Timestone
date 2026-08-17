@@ -1614,7 +1614,7 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
     }
 
     case WM_CLOSE:
-        g_launchOption = LAUNCH_NORMAL;
+        g_launchOption = LAUNCH_CANCELLED;
         DestroyWindow(hDlg);
         PostQuitMessage(0);
         return 0;

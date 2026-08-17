@@ -908,6 +908,11 @@ void OnInitializeHook()
 	if (!trainingArg) {
 		opt = ShowLaunchMenu();
 	}
+	if (opt == LAUNCH_CANCELLED) {
+		HookLog("UMVC3Hook: Launch menu closed; exiting game\n");
+		ExitProcess(0);
+		return;
+	}
 
 	//if (opt == LAUNCH_TRAINING || opt == LAUNCH_DUAL_TRAINING) {
 		// Patch aTitleLogo__processBootSequence @ 0x1402179ab: change JZ (0x74) to JMP (0xEB).
