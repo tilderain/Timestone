@@ -590,11 +590,24 @@ void PumpConnection()
     } else if (status.m_eState == k_ESteamNetworkingConnectionState_ClosedByPeer ||
                status.m_eState == k_ESteamNetworkingConnectionState_ProblemDetectedLocally) {
         HSteamNetConnection failedConnection = g_connection;
+        SteamNetConnectionInfo_t info = {};
+        bool hasInfo = g_sockets->GetConnectionInfo(failedConnection, &info);
+        if (hasInfo) {
+            HookLog("SteamLobby: peer connection failed state=%d reason=%d debug=\"%s\" connection=\"%s\"\n",
+                    static_cast<int>(info.m_eState), info.m_eEndReason,
+                    info.m_szEndDebug, info.m_szConnectionDescription);
+            snprintf(g_status, sizeof(g_status),
+                     "Steam connection failed (%d): %.160s; retrying...",
+                     info.m_eEndReason, info.m_szEndDebug);
+        } else {
+            HookLog("SteamLobby: peer connection failed state=%d; connection details unavailable\n",
+                    static_cast<int>(status.m_eState));
+            SetStatus("Steam peer connection failed; retrying...");
+        }
         g_connection = k_HSteamNetConnection_Invalid;
         g_sockets->CloseConnection(failedConnection, 1001,
                                    "Timestone connection retry", false);
         g_nextConnectionAttempt = GetTickCount64() + 1000;
-        SetStatus("Steam peer connection failed; retrying...");
     }
 }
 

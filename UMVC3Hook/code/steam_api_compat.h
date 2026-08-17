@@ -79,8 +79,26 @@ struct SteamNetworkingConfigValue_t {
     } m_val;
 };
 
-struct SteamNetConnectionInfo_t;
 struct SteamNetConnectionRealTimeLaneStatus_t;
+
+constexpr int k_cchSteamNetworkingMaxConnectionCloseReason = 128;
+constexpr int k_cchSteamNetworkingMaxConnectionDescription = 128;
+
+struct SteamNetConnectionInfo_t {
+    SteamNetworkingIdentity m_identityRemote;
+    int64_t m_nUserData;
+    HSteamListenSocket m_hListenSocket;
+    SteamNetworkingIPAddr m_addrRemote;
+    uint16_t m_pad;
+    uint32_t m_idPOPRemote;
+    uint32_t m_idPOPRelay;
+    ESteamNetworkingConnectionState m_eState;
+    int32_t m_eEndReason;
+    char m_szEndDebug[k_cchSteamNetworkingMaxConnectionCloseReason];
+    char m_szConnectionDescription[k_cchSteamNetworkingMaxConnectionDescription];
+    int32_t m_nFlags;
+    uint32_t reserved[63];
+};
 
 struct SteamNetConnectionRealTimeStatus_t {
     ESteamNetworkingConnectionState m_eState;
@@ -202,6 +220,7 @@ struct GameRichPresenceJoinRequestedCompat_t {
 
 static_assert(sizeof(SteamNetworkingIdentity) == 136);
 static_assert(sizeof(SteamNetworkingConfigValue_t) == 16);
+static_assert(sizeof(SteamNetConnectionInfo_t) == 696);
 static_assert(sizeof(SteamNetworkPingLocation_t) == 512);
 static_assert(sizeof(LobbyMatchList_t) == 4);
 static_assert(sizeof(LobbyCreated_t) == 16);
