@@ -89,6 +89,7 @@ bool g_handlesReady = false;
 bool g_bridgeCreated = false;
 bool g_pingLocationPublished = false;
 ULONGLONG g_nextPingLocationAttempt = 0;
+ULONGLONG g_nextConnectionAttempt = 0;
 ULONGLONG g_nextResultPingRefresh = 0;
 ULONGLONG g_resultPingRefreshDeadline = 0;
 HANDLE g_callbackThread = nullptr;
@@ -428,6 +429,7 @@ void RefreshPeerUsername()
 void StartPeerConnection(uint64_t remoteId)
 {
     if (!remoteId || g_connection != k_HSteamNetConnection_Invalid) return;
+    if (GetTickCount64() < g_nextConnectionAttempt) return;
 
     g_peerSteamId = remoteId;
     RefreshPeerUsername();
@@ -448,7 +450,8 @@ void StartPeerConnection(uint64_t remoteId)
     identity.data.m_steamID64 = remoteId;
     g_connection = g_sockets->ConnectP2P(identity, 733, 2, options);
     if (g_connection == k_HSteamNetConnection_Invalid) {
-        SetStatus("Failed to start Steam P2P connection");
+        g_nextConnectionAttempt = GetTickCount64() + 1000;
+        SetStatus("Failed to start Steam P2P connection; retrying...");
         return;
     }
     SetStatus("Establishing Steam relay connection...");
@@ -586,8 +589,12 @@ void PumpConnection()
                 static_cast<unsigned long long>(g_peerSteamId));
     } else if (status.m_eState == k_ESteamNetworkingConnectionState_ClosedByPeer ||
                status.m_eState == k_ESteamNetworkingConnectionState_ProblemDetectedLocally) {
-        SetStatus("Steam peer connection failed");
+        HSteamNetConnection failedConnection = g_connection;
         g_connection = k_HSteamNetConnection_Invalid;
+        g_sockets->CloseConnection(failedConnection, 1001,
+                                   "Timestone connection retry", false);
+        g_nextConnectionAttempt = GetTickCount64() + 1000;
+        SetStatus("Steam peer connection failed; retrying...");
     }
 }
 
@@ -650,6 +657,7 @@ bool SteamLobby_Initialize()
         SetStatus("Steam ready; ping estimates unavailable");
         return true;
     }
+    g_networkingUtils->InitRelayNetworkAccess();
     g_networkingUtils->CheckPingDataUpToDate(1.0e10f);
     StartCallbackPump();
     SetStatus("Steam ready");
@@ -729,6 +737,7 @@ void SteamLobby_Pump()
             } else {
                 g_lobbyId = result.m_ulSteamIDLobby;
                 g_isHost = true;
+                g_nextConnectionAttempt = 0;
                 g_pingLocationPublished = false;
                 g_nextPingLocationAttempt = 0;
                 g_api.SetLobbyData(g_matchmaking, g_lobbyId, "Timestone", "1");
@@ -756,6 +765,7 @@ void SteamLobby_Pump()
             } else {
                 g_lobbyId = result.m_ulSteamIDLobby;
                 g_isHost = false;
+                g_nextConnectionAttempt = 0;
                 SetStatus("Lobby joined; connecting to owner...");
             }
         }
@@ -862,6 +872,7 @@ void SteamLobby_Shutdown(bool preserveConnection)
     g_bridgeCreated = false;
     g_pingLocationPublished = false;
     g_nextPingLocationAttempt = 0;
+    g_nextConnectionAttempt = 0;
     g_nextResultPingRefresh = 0;
     g_resultPingRefreshDeadline = 0;
 }
