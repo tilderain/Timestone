@@ -44,6 +44,7 @@ struct SteamAPI {
     void (*AddStringFilter)(void*, const char*, const char*, int) = nullptr;
     void (*AddSlotsFilter)(void*, int) = nullptr;
     void (*AddResultCountFilter)(void*, int) = nullptr;
+    void (*AddDistanceFilter)(void*, int) = nullptr;
     SteamAPICall_t (*CreateLobby)(void*, int, int) = nullptr;
     SteamAPICall_t (*JoinLobby)(void*, uint64_t) = nullptr;
     void (*LeaveLobby)(void*, uint64_t) = nullptr;
@@ -240,6 +241,7 @@ bool ResolveExports()
     ok &= Resolve(g_api.AddStringFilter, "SteamAPI_ISteamMatchmaking_AddRequestLobbyListStringFilter");
     ok &= Resolve(g_api.AddSlotsFilter, "SteamAPI_ISteamMatchmaking_AddRequestLobbyListFilterSlotsAvailable");
     ok &= Resolve(g_api.AddResultCountFilter, "SteamAPI_ISteamMatchmaking_AddRequestLobbyListResultCountFilter");
+    ok &= Resolve(g_api.AddDistanceFilter, "SteamAPI_ISteamMatchmaking_AddRequestLobbyListDistanceFilter");
     ok &= Resolve(g_api.CreateLobby, "SteamAPI_ISteamMatchmaking_CreateLobby");
     ok &= Resolve(g_api.JoinLobby, "SteamAPI_ISteamMatchmaking_JoinLobby");
     ok &= Resolve(g_api.LeaveLobby, "SteamAPI_ISteamMatchmaking_LeaveLobby");
@@ -661,6 +663,7 @@ void SteamLobby_Search()
     g_api.AddStringFilter(g_matchmaking, "protocol", kLobbyProtocol, 0);
     g_api.AddSlotsFilter(g_matchmaking, 1);
     g_api.AddResultCountFilter(g_matchmaking, 50);
+    g_api.AddDistanceFilter(g_matchmaking, 3); // k_ELobbyDistanceFilterWorldwide
     g_pendingHandle = g_api.RequestLobbyList(g_matchmaking);
     g_pendingCall = PendingCall::Search;
     SetStatus("Searching for Timestone lobbies...");
