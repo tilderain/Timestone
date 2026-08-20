@@ -483,6 +483,12 @@ the pointer-free effect completion fields and matching generator scalar fields
 onto the fresh graph. Preserve generator list links, owners, resource pointers,
 particle-manager arrays, buffers, and all other native allocations.
 
+`cParticleManager` entries in `uEffect::mJointArray` are plain embedded records,
+not MtObjects. Never validate their first qword as a vtable. Doing so marks every
+valid manager array malformed, zeros `mJointNum`, and causes
+`uEffect::releaseGenerator` to skip all per-manager `releaseSubBuffer` calls,
+leaking particle buffers while freeing only the containing array.
+
 The `20260803_024045/024046` pair exposes a separate capture-state ambiguity.
 At frame 4508 both peers have Kikosho `mId=17`, phase 1, timer 1, one collision
 primitive, and `mTotalCombo=1`, but the reconstructed client's callback and

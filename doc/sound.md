@@ -21,6 +21,24 @@ Current `hkSound_move` behavior is:
   `+0xA0`.
 - Call native `sSound__move` after that cosmetic attachment validation.
 
+Sound starts are also guarded at `sGSound__callVoicePlayOrStopVt` at
+`0x1402A3380`. Re-simulation drops play dispatches (`flag == 0`) because the
+audio backend is intentionally not rewound; replaying them would stack another
+voice for every correction. Stop dispatches remain enabled so a corrected
+timeline can retire a voice started by the live path. Hooking this lower helper
+keeps the surrounding `cRef` initialization and reset paths intact.
+
+That dispatch is not used by structured voice allocation. Character and shot
+paths such as MODOK's `sGSound__playVoiceExt_AD60` create voices through the
+shared allocator at `0x1402A21F0`. Re-simulation replaces that allocation with
+the native disabled-`cRef` initializer at `0x1400239C0`. This is important for
+looping shots: Jamming Bomb, Fire Carpet, Light Wall, Healing Field, TK Bind,
+Barrier, Ankihou, and Shocking Pink retain a cookie that their destructor passes
+to `cGSound__stopSoundByCookie`. A disabled cookie is safe to stop and cannot
+orphan a backend loop when the shot is reconstructed repeatedly. The separate
+raw start wrapper `sSound__playSoundWithDb` at `0x1405D28B0` is also suppressed
+during re-simulation; cookie-based stop paths remain enabled.
+
 This prevents headless ticks and stale post-rollback model references from
 advancing or dereferencing audio-scene presentation state. Type validation is
 required because a freed model address can be reused by another valid object;

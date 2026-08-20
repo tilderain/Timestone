@@ -54,7 +54,9 @@ static_assert(sizeof(ChrSelPacket) <= 256);
 
 bool g_open = false;
 bool g_pendingRoster = false;
+bool g_randomizeRestartPending = false;
 bool g_archiveRequestsPending = false;
+bool g_fullTransitionRequested = false;
 uint32_t g_session = 0;
 uint32_t g_revision = 0;
 uint32_t g_remoteRevision = 0;
@@ -70,10 +72,10 @@ constexpr uintptr_t SLOT_SET_CHAR_ID = 0x140146560;
 constexpr uintptr_t SLOT_SET_DRAW_MODE = 0x1401461E0;
 constexpr uintptr_t SLOT_SET_ASSIST = 0x140024D80;
 constexpr uintptr_t CHARACTER_REQUEST_ARCHIVES = 0x140059600;
-constexpr uintptr_t CHARACTER_RELEASE_ARCHIVES = 0x140059BC0;
 constexpr uintptr_t CHARACTER_ARCHIVES_READY = 0x1400592F0;
 constexpr uintptr_t CHARACTER_ARCHIVE_LOAD_STATE = 0x140058F40;
 constexpr uintptr_t CHARACTER_UPDATE_ARCHIVES = 0x14001F2E0;
+constexpr uintptr_t CHARACTER_RELEASE_ARCHIVE_SLOT = 0x14001DF90;
 constexpr uintptr_t CHARACTER_COLLECT_TEAM_SOUND_SLOTS = 0x140059180;
 constexpr uintptr_t CHARACTER_REMAP_TEAM_SOUND = 0x140059210;
 constexpr uintptr_t GAME_CONFIG_GET_INSTANCE = 0x140001AB0;
@@ -162,10 +164,12 @@ void LogResetState()
     }
     static int32_t lastStep = -1;
     static int32_t lastStepFrame = -1;
-    static uint32_t unchangedFrames = 0;
+    static ULONGLONG lastLogTick = 0;
     const bool changed = step != lastStep || stepFrame != lastStepFrame;
-    if (changed || ++unchangedFrames >= 120) {
-        unchangedFrames = 0;
+    const ULONGLONG now = GetTickCount64();
+    const bool shouldLog = changed || now - lastLogTick >= 5000;
+    if (shouldLog) {
+        lastLogTick = now;
         HookLog("ChrSelImGui: reset state step=%d order=%d subframe=%d restartMode=%d flags=0x%08X paused=%d\n",
                 step, order, stepFrame, *(int32_t*)(action + 0x118),
                 *(uint32_t*)(action + 0xC4), paused);
@@ -173,7 +177,7 @@ void LogResetState()
     lastStep = step;
     lastStepFrame = stepFrame;
 
-    if (step == 12 && stepFrame == 3 && unchangedFrames == 0) {
+    if (step == 12 && stepFrame == 3 && shouldLog) {
         const uint64_t characters = ((GetInstanceFn)_addr(CHARACTER_GET_INSTANCE))();
         const uint64_t stage = ((GetInstanceFn)_addr(STAGE_GET_INSTANCE))();
         const bool archivesReady = characters && g_originalArchivesReady &&
@@ -525,20 +529,12 @@ bool AcceptCommit(const ChrSelPacket& packet)
         packet.targetFrame < Controller_GetNetFrameCount() + 3)
         return false;
 
+    if (!FrameStepper_ScheduleRosterRestart(packet.targetFrame, packet.roundSeed))
+        return false;
+
     g_pendingConfig = packet.roster;
     g_pendingTargetFrame = packet.targetFrame;
     g_pendingRoster = true;
-    // The active battle slots still describe the old team here, so preload
-    // character-local archives now and pairwise team audio after the barrier.
-    g_archiveRequestsPending = !RequestRosterArchives(g_pendingConfig, false);
-    if (!g_archiveRequestsPending)
-        HookLog("ChrSelImGui: replacement archive requests accepted before barrier\n");
-    if (!FrameStepper_ScheduleRosterRestart(packet.targetFrame, packet.roundSeed)) {
-        g_pendingRoster = false;
-        g_archiveRequestsPending = false;
-        g_pendingTargetFrame = -1;
-        return false;
-    }
     g_open = false;
     SetStatus("Roster committed; waiting for synchronized reset");
     HookLog("ChrSelImGui: roster restart scheduled frame=%d session=%u\n",
@@ -633,6 +629,26 @@ void CommitSelection()
         SendPacket(packet);
 }
 
+void BeginRandomizeAndRestart()
+{
+    if (g_randomizeRestartPending)
+        return;
+    // Every process sees the physical F9 key in local multi-instance play.
+    // Let the host produce the single authoritative full-roster commit.
+    if (Netplay_IsActive() && !Netplay_IsHost())
+        return;
+    if (!g_open)
+        BeginSynchronizedSession();
+    if (!g_open)
+        return;
+
+    RandomizeRoster(true);
+    SendLocalUpdate();
+    // Match the UI flow: randomization is published on this tick and the
+    // restart is committed on the next one.
+    g_randomizeRestartPending = true;
+}
+
 bool DrawTeam(int team, bool editable)
 {
     bool changed = false;
@@ -712,121 +728,27 @@ bool DrawTeam(int team, bool editable)
     return changed;
 }
 
-void WriteRosterAtBarrier()
-{
-    using GetInstanceFn = uint64_t(__fastcall*)();
-    using SlotSetterFn = void(__fastcall*)(uint64_t, int32_t);
-    using ReleaseFn = void(__fastcall*)(uint64_t, int32_t, uint32_t,
-                                         uint32_t, int32_t, int32_t);
-    using CollectTeamSoundsFn = void(__fastcall*)(int32_t, int32_t,
-                                                   int32_t*, int32_t*);
-    using RemapTeamSoundFn = int32_t(__fastcall*)(int32_t, int32_t);
-    using GetLanguageFn = int32_t(__fastcall*)(uint64_t);
-    using UiSetterFn = void(__fastcall*)(uint64_t, int32_t, int32_t, int32_t);
-    using OrGameFlagFn = void(__fastcall*)(uint64_t, uint32_t);
-
-    const uint64_t battleSetting = GetBattleSetting();
-    const uint64_t characters = ((GetInstanceFn)_addr(CHARACTER_GET_INSTANCE))();
-    const uint64_t gameUi = ((GetInstanceFn)_addr(GAME_UI_GET_INSTANCE))();
-    if (!battleSetting || !characters)
-        return;
-
-    const uint64_t gameConfig = ((GetInstanceFn)_addr(GAME_CONFIG_GET_INSTANCE))();
-    const int32_t language = gameConfig
-        ? ((GetLanguageFn)_addr(GAME_CONFIG_GET_LANGUAGE))(gameConfig) : 0;
-    CollectTeamSoundsFn collectTeamSounds =
-        (CollectTeamSoundsFn)_addr(CHARACTER_COLLECT_TEAM_SOUND_SLOTS);
-    RemapTeamSoundFn remapTeamSound =
-        (RemapTeamSoundFn)_addr(CHARACTER_REMAP_TEAM_SOUND);
-    ReleaseFn release = (ReleaseFn)_addr(CHARACTER_RELEASE_ARCHIVES);
-    for (int index = 0; index < 6; ++index) {
-        const uint64_t slot = battleSetting + 0x38 + index * 0x58;
-        const int oldCharacter = *(int32_t*)(slot + 0x0C);
-        if (oldCharacter <= 0 || oldCharacter >= kCharNameCount)
-            continue;
-        int32_t otherA = 0;
-        int32_t otherB = 0;
-        collectTeamSounds(index / 3, index % 3, &otherA, &otherB);
-        release(characters, oldCharacter,
-                *(uint32_t*)(slot + 0x14), *(uint32_t*)(slot + 0x44),
-                remapTeamSound(otherA, language),
-                remapTeamSound(otherB, language));
-    }
-
-    SlotSetterFn setCharacter = (SlotSetterFn)_addr(SLOT_SET_CHAR_ID);
-    SlotSetterFn setColor = (SlotSetterFn)_addr(SLOT_SET_DRAW_MODE);
-    SlotSetterFn setAssist = (SlotSetterFn)_addr(SLOT_SET_ASSIST);
-    UiSetterFn setUiCharacter = (UiSetterFn)_addr(GAME_UI_SET_CHAR);
-    UiSetterFn setUiColor = (UiSetterFn)_addr(GAME_UI_SET_COLOR);
-    UiSetterFn setUiAssist = (UiSetterFn)_addr(GAME_UI_SET_ASSIST);
-
-    for (int team = 0; team < 2; ++team) {
-        for (int member = 0; member < 3; ++member) {
-            const int index = team * 3 + member;
-            const int character = g_pendingConfig.chars[team][member];
-            const int color = g_pendingConfig.colors[team][member];
-            const int assist = g_pendingConfig.assists[team][member];
-            for (uintptr_t base : {uintptr_t(0x38), uintptr_t(0x378)}) {
-                const uint64_t slot = battleSetting + base + index * 0x58;
-                *(int32_t*)(slot + 0x08) = team;
-                setCharacter(slot, character);
-                setColor(slot, color);
-                setAssist(slot, assist);
-                // uCharacter__setup_base reads this as its character-sound
-                // selector. Retaining the outgoing value mixes paths such as
-                // Chris/chr_cc_jp with Dante's dan.srqr.
-                *(int32_t*)(slot + 0x30) = 1;
-                // Native archive requests read slot +0x44 for the category-4
-                // character sound variant. Normal initialized slots use 1.
-                *(int32_t*)(slot + 0x44) = 1;
-            }
-            if (gameUi) {
-                setUiCharacter(gameUi, team, member, character);
-                setUiColor(gameUi, team, member, color);
-                setUiAssist(gameUi, team, member, assist);
-            }
-            HookLog("ChrSelImGui: barrier slot[%d] team=%d char=%d color=%d assist=%d\n",
-                    index, team, character, color, assist);
-        }
-    }
-
-    // Cache entries released above remain occupied until sCharacter::move
-    // retires them. Keep retrying from ChrSelImGui_Update while reset advances.
-    g_archiveRequestsPending = !RequestRosterArchives(g_pendingConfig, true);
-    if (g_archiveRequestsPending)
-        HookLog("ChrSelImGui: archive cache busy at barrier; retrying during reset\n");
-
-    const uint64_t action = ((GetInstanceFn)_addr(ACTION_GET_INSTANCE))();
-    if (action) {
-        ((OrGameFlagFn)_addr(ACTION_OR_GAME_FLAG))(action, 0x3000);
-        HookLog("ChrSelImGui: armed both team rebuild flags actionFlags=0x%08X\n",
-                *(uint32_t*)(action + 0xC4));
-    } else {
-        HookLog("ChrSelImGui: WARNING sAction unavailable while arming team rebuild\n");
-    }
-}
-
 } // namespace
 
 void ChrSelImGui_Update()
 {
+    TrainingBoot_UpdateRestart();
     EnsureArchiveReadyHook();
     LogResetState();
 
-    if (g_archiveRequestsPending) {
-        static uint32_t retryFrames = 0;
-        if (RequestRosterArchives(g_pendingConfig, true)) {
-            g_archiveRequestsPending = false;
-            retryFrames = 0;
-            HookLog("ChrSelImGui: all replacement archive requests accepted\n");
-        } else if (++retryFrames % 120 == 0) {
-            HookLog("ChrSelImGui: replacement archives still waiting for cache slots\n");
-        }
+    if (g_randomizeRestartPending) {
+        g_randomizeRestartPending = false;
+        if (g_open)
+            CommitSelection();
     }
 
     static bool previousF8 = false;
     if (KeyPressed(VK_F8, previousF8) && !g_open)
         RequestOpen();
+
+    static bool previousF9 = false;
+    if (KeyPressed(VK_F9, previousF9))
+        BeginRandomizeAndRestart();
 
     ChrSelPacket packet = {};
     size_t packetSize = 0;
@@ -914,10 +836,29 @@ bool ChrSelImGui_ApplyPendingRoster(int32_t targetFrame)
     if (targetFrame != g_pendingTargetFrame || !ValidateRoster(g_pendingConfig))
         return false;
 
-    WriteRosterAtBarrier();
-    g_resetDiagnosticsActive = true;
-    HookLog("ChrSelImGui: applied roster at synchronized frame %d\n", targetFrame);
+    TrainingBootConfig config = TrainingBoot_GetDefaultConfig();
+    for (int member = 0; member < 3; ++member) {
+        config.p1Chars[member] = g_pendingConfig.chars[0][member];
+        config.p2Chars[member] = g_pendingConfig.chars[1][member];
+        config.p1Colors[member] = g_pendingConfig.colors[0][member];
+        config.p2Colors[member] = g_pendingConfig.colors[1][member];
+        config.p1Assists[member] = g_pendingConfig.assists[0][member];
+        config.p2Assists[member] = g_pendingConfig.assists[1][member];
+    }
+    if (!TrainingBoot_RestartWithConfig(config))
+        return false;
+
+    g_fullTransitionRequested = true;
+    HookLog("ChrSelImGui: queued full roster loading transition at synchronized frame %d\n",
+            targetFrame);
     g_pendingRoster = false;
     g_pendingTargetFrame = -1;
     return true;
+}
+
+bool ChrSelImGui_TakeFullTransitionRequested()
+{
+    const bool requested = g_fullTransitionRequested;
+    g_fullTransitionRequested = false;
+    return requested;
 }

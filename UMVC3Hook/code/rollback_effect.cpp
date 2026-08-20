@@ -235,13 +235,6 @@ static void SanitizeEffectOwnedParticleState(void* effect)
     bool validArray = managers && count <= MAX_PARTICLE_MANAGERS &&
         IsAccessibleRange(managers, count == 0 ? 1 :
                           (size_t)count * PARTICLE_MANAGER_STRIDE);
-    for (uint32_t index = 0; validArray && index < count; ++index) {
-        uint8_t* manager = (uint8_t*)managers +
-            (size_t)index * PARTICLE_MANAGER_STRIDE;
-        uint64_t vtable = *(uint64_t*)manager;
-        validArray = IsAccessibleRange(vtable, 0x28) &&
-            IsExecutableAddress(*(uint64_t*)(vtable + 0x20));
-    }
     if (validArray) {
         for (uint32_t index = 0; index < count; ++index) {
             uint8_t* manager = (uint8_t*)managers +
@@ -284,12 +277,6 @@ static bool HasInvalidParticleManagerState(void* effect)
     for (uint32_t index = 0; index < count; ++index) {
         uint8_t* manager = (uint8_t*)managers +
             (size_t)index * PARTICLE_MANAGER_STRIDE;
-        uint64_t vtable = *(uint64_t*)manager;
-        if (!IsAccessibleRange(vtable, 0x28) ||
-            !IsExecutableAddress(*(uint64_t*)(vtable + 0x20))) {
-            return true;
-        }
-
         uint64_t buffer = *(uint64_t*)(manager + PARTICLE_MANAGER_BUFFER_OFFSET);
         if (buffer && !IsAccessiblePointer(buffer)) return true;
     }

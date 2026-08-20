@@ -124,6 +124,10 @@ static TrainingBootConfig g_bootConfig = {
 static bool g_hasBooted = false;
 static bool g_hooksInitialized = false;
 static uint64_t g_gameConfigLoadUnit = 0;
+static bool g_skipNativeConfigLoad = false;
+static bool g_restartConfigPending = false;
+static bool g_restartTransitionActive = false;
+static bool g_restartSawActionSetup = false;
 static TrainingBootCpuMode g_cpuMode = TRAINING_CPU_NONE;
 
 // ---------------------------------------------------------------------------
@@ -438,7 +442,7 @@ void BootIntoTraining()
 
     // Savedata loading is asynchronous. Keep the title move hook active until
     // the native uStoragePC has loaded and applied the complete sGameConfig.
-    if (!LoadNativeGameConfig())
+    if (!g_skipNativeConfigLoad && !LoadNativeGameConfig())
         return;
 
     NormalizeBootColors();
@@ -580,6 +584,68 @@ void BootIntoTraining()
     SetArea_t setArea = (SetArea_t)(*(uint64_t*)(*(uint64_t*)sArea + 0x50));
     setArea(sArea, (void*)_addr(ACHRSELBLANK_DTI));
     HookLog("TrainingBoot: Queued aChrSelectBlank battle transition\n");
+}
+
+bool TrainingBoot_RestartWithConfig(const TrainingBootConfig& cfg)
+{
+    g_bootConfig = cfg;
+    uint64_t sArea = *(uint64_t*)_addr(SAREA_INSTANCE_PTR);
+    if (!sArea)
+        return false;
+
+    typedef void(__fastcall* SetArea_t)(uint64_t, void*);
+    SetArea_t setArea = (SetArea_t)(*(uint64_t*)(*(uint64_t*)sArea + 0x50));
+    setArea(sArea, (void*)_addr(ACHRSELBLANK_DTI));
+    g_restartConfigPending = true;
+    g_restartTransitionActive = true;
+    g_restartSawActionSetup = false;
+    HookLog("TrainingBoot: queued roster teardown before applying new settings\n");
+    return true;
+}
+
+void TrainingBoot_UpdateRestart()
+{
+    if (!g_restartTransitionActive)
+        return;
+
+    uint64_t sArea = *(uint64_t*)_addr(SAREA_INSTANCE_PTR);
+    if (!sArea)
+        return;
+
+    if (g_restartConfigPending) {
+        // sArea clears its pending target only after finalizing the divergent
+        // old action/stage branch and constructing the loading intermediary.
+        if (*(uint64_t*)(sArea + 0x7040) != 0)
+            return;
+
+        g_hasBooted = false;
+        g_skipNativeConfigLoad = true;
+        BootIntoTraining();
+        g_skipNativeConfigLoad = false;
+        if (!g_hasBooted)
+            return;
+
+        g_restartConfigPending = false;
+        g_restartSawActionSetup = false;
+        HookLog("TrainingBoot: applied roster after old battle teardown\n");
+        return;
+    }
+
+    typedef uint64_t(__fastcall* GetInstance_t)();
+    const uint64_t action = ((GetInstance_t)_addr(0x140001A90))();
+    const int32_t step = action ? *(int32_t*)(action + 0xD8) : 0;
+    if (step != 2)
+        g_restartSawActionSetup = true;
+    if (g_restartSawActionSetup && step == 2 &&
+        *(uint64_t*)(sArea + 0x7040) == 0) {
+        g_restartTransitionActive = false;
+        HookLog("TrainingBoot: new roster action reached completed intro setup\n");
+    }
+}
+
+bool TrainingBoot_IsRestartPending()
+{
+    return g_restartTransitionActive;
 }
 
 // ---------------------------------------------------------------------------

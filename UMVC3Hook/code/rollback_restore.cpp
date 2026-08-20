@@ -1203,6 +1203,13 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
             HookLog("Rollback: restored shot 0x%llX has incomplete collision topology\n",
                      (uint64_t)fresh);
         }
+        if (saved.concrete.body.size() >= 0x1F54) {
+            // Keep the native identity exact even when the fallback factory
+            // temporarily consumed a different ID before allocator rewind.
+            std::memcpy((uint8_t*)fresh + 0x1F50,
+                        saved.concrete.body.data() + 0x1F50,
+                        sizeof(uint32_t));
+        }
         const uint64_t concreteEnd = Profile_Now();
         respawnConcreteTicks += concreteEnd - registerEnd;
         if (saved.concrete.dti ==

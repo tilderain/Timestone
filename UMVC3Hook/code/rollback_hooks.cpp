@@ -21,6 +21,10 @@ static constexpr uintptr_t FN_SMVC3MAIN_MOVE = 0x1402594A0;
 static constexpr uintptr_t FN_CCHR_SET_POS = 0x140002AF0;
 static constexpr uintptr_t FN_RENDER_END_FRAME = 0x14053A250;
 static constexpr uintptr_t FN_SSOUND_MOVE = 0x1405CC040;
+static constexpr uintptr_t FN_GSOUND_VOICE_DISPATCH = 0x1402A3380;
+static constexpr uintptr_t FN_GSOUND_CREATE_VOICE = 0x1402A21F0;
+static constexpr uintptr_t FN_SOUND_PLAY_WITH_DB = 0x1405D28B0;
+static constexpr uintptr_t FN_CREF_INIT_DISABLED = 0x1400239C0;
 static constexpr uintptr_t FN_SCENE_UPDATE_SOUND_ENV = 0x1405D6CD0;
 static constexpr uintptr_t FN_SGAMEUI_MOVE = 0x1402BE610;
 static constexpr uintptr_t FN_UBTGAUGELIFE_MOVE = 0x1402F6800;
@@ -41,6 +45,11 @@ static RollbackMainMoveFn* g_originalMvc3MainMove = nullptr;
 static void(__fastcall* oCallSRender)(uint64_t) = nullptr;
 static void(__fastcall* oMainMove)(uint64_t) = nullptr;
 static void(__fastcall* oSoundMove)(uint64_t) = nullptr;
+static void(__fastcall* oGSoundVoiceDispatch)(void*, void*, char) = nullptr;
+static uint64_t*(__fastcall* oGSoundCreateVoice)(void*, uint64_t*, void*, void*,
+                                                 char) = nullptr;
+static void(__fastcall* oSoundPlayWithDb)(void*, void*, uint32_t, uint64_t,
+                                          uint32_t, float, uint8_t, int) = nullptr;
 static void(__fastcall* oSceneUpdateSoundEnv)(uint64_t) = nullptr;
 static void(__fastcall* oGameUiMove)(uint64_t) = nullptr;
 static void(__fastcall* oBtGaugeLifeMove)(uint64_t) = nullptr;
@@ -231,6 +240,42 @@ static void __fastcall hkSoundMove(uint64_t sound)
     oSoundMove(sound);
 }
 
+static void __fastcall hkGSoundVoiceDispatch(void* dispatcher, void* voice,
+                                              char stop)
+{
+    // Sound state is not rewound. Replaying a start stacks another audible
+    // voice, while stops still need to retire voices started on the live path.
+    if (g_isResimulating && stop == 0)
+        return;
+    oGSoundVoiceDispatch(dispatcher, voice, stop);
+}
+
+static uint64_t* __fastcall hkGSoundCreateVoice(void* dispatcher,
+                                                uint64_t* cookie,
+                                                void* voiceData,
+                                                void* request,
+                                                char recursive)
+{
+    if (g_isResimulating) {
+        // Shot destructors may stop this cookie later. Return the engine's
+        // ordinary disabled cRef instead of leaving an uninitialized handle.
+        return ((uint64_t*(__fastcall*)(uint64_t*, uint64_t))
+            _addr(FN_CREF_INIT_DISABLED))(cookie, UINT64_MAX);
+    }
+    return oGSoundCreateVoice(dispatcher, cookie, voiceData, request, recursive);
+}
+
+static void __fastcall hkSoundPlayWithDb(void* sound, void* resource,
+                                         uint32_t bank, uint64_t cue,
+                                         uint32_t index, float gain,
+                                         uint8_t flags, int gainIsDb)
+{
+    if (!g_isResimulating) {
+        oSoundPlayWithDb(sound, resource, bank, cue, index, gain, flags,
+                         gainIsDb);
+    }
+}
+
 static void __fastcall hkSceneUpdateSoundEnv(uint64_t scene)
 {
     constexpr uint32_t MODEL_OFFSET = 0x80;
@@ -400,6 +445,18 @@ void Rollback_InitMainHooks(RollbackMainMoveFn* originalMove)
     EnableHook(FN_SSOUND_MOVE, (void*)&hkSoundMove, (void**)&oSoundMove,
                "Rollback: hooked sSound__move for headless re-simulation",
                "Rollback: failed to hook sSound__move (%d)\n");
+    EnableHook(FN_GSOUND_VOICE_DISPATCH, (void*)&hkGSoundVoiceDispatch,
+               (void**)&oGSoundVoiceDispatch,
+               "Rollback: suppressed replayed sound starts",
+               "Rollback: failed to suppress replayed sound starts (%d)\n");
+    EnableHook(FN_GSOUND_CREATE_VOICE, (void*)&hkGSoundCreateVoice,
+               (void**)&oGSoundCreateVoice,
+               "Rollback: suppressed replayed voice allocation",
+               "Rollback: failed to suppress replayed voice allocation (%d)\n");
+    EnableHook(FN_SOUND_PLAY_WITH_DB, (void*)&hkSoundPlayWithDb,
+               (void**)&oSoundPlayWithDb,
+               "Rollback: suppressed replayed raw sound starts",
+               "Rollback: failed to suppress replayed raw sound starts (%d)\n");
     EnableHook(FN_SCENE_UPDATE_SOUND_ENV, (void*)&hkSceneUpdateSoundEnv,
                (void**)&oSceneUpdateSoundEnv,
                "Rollback: guarded sound scene model binding",

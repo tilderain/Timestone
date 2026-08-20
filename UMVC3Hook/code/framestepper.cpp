@@ -16,6 +16,7 @@
 #include "controller.h"
 #include "autotest.h"
 #include "rollback_cleanup.h"
+#include "trainingboot.h"
 
 // Netplay debug info from controller.cpp
 extern "C" int32_t Controller_GetDelayFrames();
@@ -37,6 +38,7 @@ using namespace Memory::VP;
 extern void HookLog(const char* fmt, ...);
 extern void ChrSelImGui_Update();
 extern bool ChrSelImGui_ApplyPendingRoster(int32_t targetFrame);
+extern bool ChrSelImGui_TakeFullTransitionRequested();
 
 // Netplay state queries from netplay.cpp
 extern bool Netplay_HasRemoteInput();
@@ -63,6 +65,7 @@ static int32_t g_restartTargetFrame = -1;
 static uint32_t g_restartRoundSeed = 0;
 static uint32_t g_restartKind = RESTART_FULL_MATCH;
 static int32_t g_restartButtonMode = 0;
+static bool g_nativeRestartTransitionPending = false;
 static bool g_localReady = false;
 static bool g_remoteReady = false;
 static bool g_localRelease = false;
@@ -104,7 +107,8 @@ extern "C" void FrameStepper_NotifyFighting()
 }
 extern "C" bool FrameStepper_IsMatchRestartPending()
 {
-    return g_restartTargetFrame >= 0 || g_trainingRestartBarrier;
+    return g_restartTargetFrame >= 0 || g_trainingRestartBarrier ||
+           g_nativeRestartTransitionPending;
 }
 
 static bool IsPastIntroStep()
@@ -485,6 +489,8 @@ static void __fastcall HookedMove(void* sMvc3Main)
             g_restartButtonMode = 0;
             return;
         }
+        const bool fullRosterTransition =
+            ChrSelImGui_TakeFullTransitionRequested();
         static constexpr uintptr_t MVC3_MANAGER_PTR = 0x140D510A0;
         static constexpr uintptr_t SMVC3MGR_ACTION_OFFSET = 0x48;
         static constexpr uintptr_t SREPLAY_PTR = 0x140D4D9D8;
@@ -540,7 +546,7 @@ static void __fastcall HookedMove(void* sMvc3Main)
             *(uint32_t*)(sReplay + 0x23424) = g_restartRoundSeed;
             *(uint32_t*)(sReplay + 0x58) = g_restartRoundSeed;
         }
-        if (sAction) {
+        if (sAction && !fullRosterTransition) {
             // Follow the native rematch path. Phase 12 retires the previous
             // camera, stage, shot, effect, and sUnit entries before returning
             // to phase 2; jumping straight to phase 2 leaves stale unit nodes.
@@ -548,6 +554,10 @@ static void __fastcall HookedMove(void* sMvc3Main)
             using SetNextStepFn = void(__fastcall*)(uint64_t, int32_t);
             ((SetRestartModeFn)_addr(0x14000AF90))(sAction, 1);
             ((SetNextStepFn)_addr(0x14000AE00))(sAction, 12);
+            g_nativeRestartTransitionPending = restartNetplay;
+        }
+        else if (fullRosterTransition) {
+            g_nativeRestartTransitionPending = restartNetplay;
         }
 
         Rollback_FreeSnapshots();
@@ -575,9 +585,10 @@ static void __fastcall HookedMove(void* sMvc3Main)
         }
         g_restartTargetFrame = -1;
 
-        HookLog("FrameStepper: restarted match (%s, generation=%u seed=0x%08X)\n",
-                 restartNetplay ? "netplay" : "offline",
-                 g_battleGeneration, g_restartRoundSeed);
+        HookLog("FrameStepper: queued %s (%s, generation=%u seed=0x%08X)\n",
+                  fullRosterTransition ? "full roster transition" : "match restart",
+                  restartNetplay ? "netplay" : "offline",
+                  g_battleGeneration, g_restartRoundSeed);
         }
     }
 
@@ -634,10 +645,29 @@ static void __fastcall HookedMove(void* sMvc3Main)
         static GetAction_t getAction = (GetAction_t)_addr(0x140001A90);
         uint64_t action = getAction();
         int32_t step = action ? *(int32_t*)(action + 0xD8) : 0;
+        int32_t pendingStep = action ? *(int32_t*)(action + 0xDC) : -1;
+
+        if (g_nativeRestartTransitionPending && action &&
+            !TrainingBoot_IsRestartPending())
+        {
+            if (step == 2)
+            {
+                g_nativeRestartTransitionPending = false;
+                HookLog("FrameStepper: native match restart reached intro (generation=%u)\n",
+                        g_battleGeneration);
+            }
+            else if (step >= 8 && step <= 11 && pendingStep < 0)
+            {
+                using SetNextStepFn = void(__fastcall*)(uint64_t, int32_t);
+                ((SetNextStepFn)_addr(0x14000AE00))(action, 12);
+                pendingStep = 12;
+                HookLog("FrameStepper: requeued dropped phase-12 restart from step=%d "
+                        "(generation=%u)\n", step, g_battleGeneration);
+            }
+        }
 
         if (!g_battleSynchronized)
         {
-            int32_t pendingStep = action ? *(int32_t*)(action + 0xDC) : -1;
             int32_t introSubstate = action ? *(int32_t*)(action + 0xE0) : 0;
             MaybeLogHandshakeStall(action, step, pendingStep, introSubstate);
 
@@ -649,7 +679,8 @@ static void __fastcall HookedMove(void* sMvc3Main)
                     HookLog("AutoTestNet: local training restart ready (generation=%u)\n",
                             g_battleGeneration);
                 }
-            } else if (!g_localReady && step == 2 && pendingStep < 0)
+            } else if (!g_localReady && !TrainingBoot_IsRestartPending() &&
+                       step == 2 && pendingStep < 0)
             {
                 g_localReady = true;
                 // Phase 2 setup is completed by sAction__executeMatchPhase

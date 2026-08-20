@@ -130,5 +130,10 @@ TrainingBootCpuMode TrainingBoot_GetCpuMode();
 // aNextBattle. Called once from the aTitle__update hook.
 void BootIntoTraining();
 
+// Re-enter training through the full character-select loading transition.
+bool TrainingBoot_RestartWithConfig(const TrainingBootConfig& cfg);
+void TrainingBoot_UpdateRestart();
+bool TrainingBoot_IsRestartPending();
+
 // Init the hook on aTitle__update.
 void TrainingBoot_InitHooks();
