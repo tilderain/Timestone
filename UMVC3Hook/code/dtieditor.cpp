@@ -688,6 +688,187 @@ static void DtiEditor_EnsureCollected()
         g_allDtis.size(), g_props.size(), g_vtableMap.size());
 }
 
+static const char* PropertyTypeName(uint16_t type)
+{
+    switch (type) {
+    case PROP_CLASS:    return "Class";
+    case PROP_CLASSREF: return "ClassRef";
+    case PROP_BOOL:     return "Bool";
+    case PROP_U32:      return "U32";
+    case PROP_S32:      return "S32";
+    case PROP_F32:      return "F32";
+    case PROP_STRING:   return "String";
+    case PROP_MATRIX:   return "Matrix";
+    case PROP_VECTOR3:  return "Vector3";
+    default:            return "Unknown";
+    }
+}
+
+static uint32_t GetDtiSize(const MtDTI* dti)
+{
+    // The low 23 bits of the packed flags hold the instance size in words.
+    return dti ? (dti->flags & 0x007FFFFF) << 2 : 0;
+}
+
+static void WriteJsonString(FILE* file, const char* value)
+{
+    fputc('"', file);
+    if (value) {
+        for (const unsigned char* p = (const unsigned char*)value; *p; ++p) {
+            switch (*p) {
+            case '\\': fputs("\\\\", file); break;
+            case '"':  fputs("\\\"", file); break;
+            case '\b': fputs("\\b", file); break;
+            case '\f': fputs("\\f", file); break;
+            case '\n': fputs("\\n", file); break;
+            case '\r': fputs("\\r", file); break;
+            case '\t': fputs("\\t", file); break;
+            default:
+                // Preserve arbitrary game strings while keeping the file valid UTF-8 JSON.
+                if (*p < 0x20 || *p >= 0x7F)
+                    fprintf(file, "\\u%04x", *p);
+                else
+                    fputc(*p, file);
+                break;
+            }
+        }
+    }
+    fputc('"', file);
+}
+
+static bool GetDtiDumpPath(char* path, size_t pathSize)
+{
+    char modulePath[MAX_PATH] = {};
+    DWORD length = GetModuleFileNameA(nullptr, modulePath, sizeof(modulePath));
+    if (length == 0 || length >= sizeof(modulePath)) return false;
+
+    char* slash = strrchr(modulePath, '\\');
+    if (!slash) return false;
+    slash[1] = '\0';
+
+    int written = snprintf(path, pathSize, "%sdti_dump.json", modulePath);
+    return written > 0 && (size_t)written < pathSize;
+}
+
+struct ExportedProperty {
+    const CapturedProperty* property;
+    const char* declaringClass;
+    uint32_t offset;
+    bool offsetValid;
+};
+
+static bool HasExportedProperty(const std::vector<ExportedProperty>& properties,
+                                const CapturedProperty& candidate)
+{
+    if (!candidate.name) return true;
+    for (const ExportedProperty& existing : properties) {
+        if (existing.property->name &&
+            strcmp(existing.property->name, candidate.name) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool DumpAllDtiClassesToJson(char* outputPath, size_t outputPathSize)
+{
+    CollectAllDtis();
+    BuildFilteredList();
+    if (!GetDtiDumpPath(outputPath, outputPathSize)) return false;
+
+    FILE* file = fopen(outputPath, "wb");
+    if (!file) return false;
+
+    size_t classCount = 0;
+    for (MtDTI* dti : g_allDtis) {
+        if (dti && IsReadableCStr(dti->className)) ++classCount;
+    }
+
+    fprintf(file,
+        "{\n  \"version\": 2,\n  \"class_count\": %zu,\n"
+        "  \"captured_property_count\": %zu,\n  \"classes\": [\n",
+        classCount, g_props.size());
+
+    bool firstClass = true;
+    const uintptr_t rootSentinel = GetRootSentinelAddr();
+    for (MtDTI* dti : g_allDtis) {
+        if (!dti || !IsReadableCStr(dti->className)) continue;
+        if (!firstClass) fputs(",\n", file);
+        firstClass = false;
+
+        const uint32_t dtiSize = GetDtiSize(dti);
+        fputs("    {\n      \"name\": ", file);
+        WriteJsonString(file, dti->className);
+        fprintf(file,
+            ",\n      \"address\": \"0x%llx\","
+            "\n      \"hash\": \"0x%08x\","
+            "\n      \"size\": %u,"
+            "\n      \"size_hex\": \"0x%x\","
+            "\n      \"parent\": ",
+            (unsigned long long)(uintptr_t)dti, dti->nameHash,
+            dtiSize, dtiSize);
+
+        if (dti->parent && (uintptr_t)dti->parent != rootSentinel &&
+            IsReadableCStr(dti->parent->className)) {
+            WriteJsonString(file, dti->parent->className);
+        } else {
+            fputs("null", file);
+        }
+        fputs(",\n      \"members\": [", file);
+
+        // Derived properties win when a name is overridden by an ancestor.
+        std::vector<ExportedProperty> members;
+        for (MtDTI* current = dti;
+             current && (uintptr_t)current != rootSentinel;
+             current = current->parent) {
+            if (!IsReadableCStr(current->className)) continue;
+            for (const CapturedProperty& property : g_props) {
+                if (property.nameHash != current->nameHash ||
+                    !IsReadableCStr(property.name) ||
+                    HasExportedProperty(members, property)) {
+                    continue;
+                }
+
+                ExportedProperty exported = {&property, current->className, 0, false};
+                if (property.ownerPtr && property.dataPtr >= property.ownerPtr) {
+                    uintptr_t offset = property.dataPtr - property.ownerPtr;
+                    if (offset <= UINT32_MAX && offset < dtiSize) {
+                        exported.offset = (uint32_t)offset;
+                        exported.offsetValid = true;
+                    }
+                }
+                members.push_back(exported);
+            }
+        }
+
+        for (size_t i = 0; i < members.size(); ++i) {
+            const ExportedProperty& member = members[i];
+            if (i != 0) fputc(',', file);
+            fputs("\n        {\"name\": ", file);
+            WriteJsonString(file, member.property->name);
+            fputs(", \"type\": ", file);
+            WriteJsonString(file, PropertyTypeName(member.property->type));
+            fprintf(file, ", \"type_code\": %u, \"declared_by\": ",
+                    member.property->type);
+            WriteJsonString(file, member.declaringClass);
+            fputs(", \"offset\": ", file);
+            if (member.offsetValid)
+                fprintf(file, "\"0x%x\"", member.offset);
+            else
+                fputs("null", file);
+            fputc('}', file);
+        }
+        if (!members.empty()) fputc('\n', file);
+        fputs("      ]\n    }", file);
+    }
+
+    fputs("\n  ]\n}\n", file);
+    return fclose(file) == 0;
+}
+
+static char g_lastDtiDumpPath[MAX_PATH] = {};
+static bool g_lastDtiDumpSucceeded = false;
+
 // ---------------------------------------------------------------------------
 // Temporarily make a page writable, write data, then restore protection.
 // ---------------------------------------------------------------------------
@@ -1305,6 +1486,27 @@ void DtiEditor_Draw()
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Copy displayed DTI class names to clipboard");
     ImGui::SameLine();
+    if (ImGui::SmallButton("Dump JSON")) {
+        g_lastDtiDumpSucceeded = DumpAllDtiClassesToJson(
+            g_lastDtiDumpPath, sizeof(g_lastDtiDumpPath));
+        if (g_lastDtiDumpSucceeded) {
+            HookLog("DTI Editor: dumped %zu classes and %zu captured properties to %s\n",
+                g_allDtis.size(), g_props.size(), g_lastDtiDumpPath);
+        } else {
+            HookLog("DTI Editor: failed to dump classes to JSON\n");
+        }
+    }
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Dump all registered DTI classes and captured members to dti_dump.json");
+    ImGui::SameLine();
+    if (g_lastDtiDumpPath[0]) {
+        ImGui::TextColored(
+            g_lastDtiDumpSucceeded ? ImVec4(0.4f, 1.0f, 0.4f, 1.0f)
+                                   : ImVec4(1.0f, 0.4f, 0.4f, 1.0f),
+            "%s", g_lastDtiDumpSucceeded ? "JSON saved" : "JSON failed");
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", g_lastDtiDumpPath);
+        ImGui::SameLine();
+    }
     ImGui::Text("  (%zu types / %zu loaded)", g_filtered.size(), g_allDtis.size());
     ImGui::SameLine();
     if (ImGui::SmallButton(g_showPropPane ? "Hide Props" : "Show Props")) {
