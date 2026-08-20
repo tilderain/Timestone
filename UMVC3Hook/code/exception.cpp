@@ -201,6 +201,50 @@ bool TryGetObjectDtiName(uintptr_t object, char* output, size_t outputSize)
     return SafeCopyString(className, output, outputSize);
 }
 
+void WriteObjectVirtualSlot(FILE* file, uintptr_t object, uintptr_t offset)
+{
+    uintptr_t vtable = 0;
+    uintptr_t target = 0;
+    if (!SafeReadPointer(object, &vtable) ||
+        vtable > UINTPTR_MAX - offset ||
+        !SafeReadPointer(vtable + offset, &target)) {
+        return;
+    }
+
+    std::fprintf(file, " vtable=0x%016llX vtable+0x%llX=0x%016llX executable=%d",
+        static_cast<unsigned long long>(vtable),
+        static_cast<unsigned long long>(offset),
+        static_cast<unsigned long long>(target),
+        IsExecutableAddress(target) ? 1 : 0);
+}
+
+void WriteNameEqualsFaultDetails(FILE* file, const CONTEXT* context)
+{
+#if defined(_M_X64) || defined(__x86_64__)
+    const uintptr_t module = reinterpret_cast<uintptr_t>(GetModuleHandleA(nullptr));
+    if (!module || module > UINTPTR_MAX - (0x14000418C - kPreferredImageBase) ||
+        context->Rip != module + (0x14000418C - kPreferredImageBase)) {
+        return;
+    }
+
+    char comparedName[128] = {};
+    const bool hasComparedName = SafeCopyString(
+        context->Rdx, comparedName, sizeof(comparedName));
+    std::fprintf(file, "name_equals_fault: this=0x%016llX",
+        static_cast<unsigned long long>(context->Rcx));
+    if (hasComparedName)
+        std::fprintf(file, " compare=\"%s\"", comparedName);
+    else
+        std::fprintf(file, " compare_ptr=0x%016llX",
+            static_cast<unsigned long long>(context->Rdx));
+    WriteObjectVirtualSlot(file, context->Rcx, 0x68);
+    std::fprintf(file, "\n");
+#else
+    (void)file;
+    (void)context;
+#endif
+}
+
 int FindLoadedCharacter(const CrashCharacter* characters, size_t count,
                         uintptr_t candidate, uintptr_t* interiorOffset)
 {
@@ -354,6 +398,8 @@ void WriteCrashObjectCandidates(FILE* file, const CONTEXT* context,
             values[i].name, static_cast<unsigned long long>(values[i].value));
         if (hasDtiName)
             std::fprintf(file, " dti=\"%s\"", dtiName);
+        if (hasDtiName)
+            WriteObjectVirtualSlot(file, values[i].value, 0x68);
         if (characterIndex >= 0) {
             const CrashCharacter& character = characters[characterIndex];
             std::fprintf(file, " character_dti=\"%s\" team=%d slot=%d",
@@ -373,6 +419,73 @@ void WriteCrashObjectCandidates(FILE* file, const CONTEXT* context,
     (void)characters;
     (void)characterCount;
     std::fprintf(file, "crashing object candidates: <unsupported architecture>\n");
+#endif
+}
+
+void WriteStackObjectCandidates(FILE* file, const CONTEXT* context,
+                                const CrashCharacter* characters,
+                                size_t characterCount)
+{
+#if defined(_M_X64) || defined(__x86_64__)
+    constexpr size_t stackEntries = 96;
+    constexpr size_t maxObjects = 32;
+    std::fprintf(file, "stack scan (named MT objects):\n");
+    if (!IsReadableRange(context->Rsp, stackEntries * sizeof(uintptr_t))) {
+        std::fprintf(file, "  <stack unreadable>\n");
+        return;
+    }
+
+    const auto* stack = reinterpret_cast<const uintptr_t*>(context->Rsp);
+    uintptr_t reported[maxObjects] = {};
+    size_t reportedCount = 0;
+    for (size_t i = 0; i < stackEntries && reportedCount < maxObjects; ++i) {
+        const uintptr_t value = stack[i];
+        if (value < 0x10000 ||
+            !IsReadableRange(value, sizeof(uintptr_t))) {
+            continue;
+        }
+
+        bool duplicate = false;
+        for (size_t previous = 0; previous < reportedCount; ++previous)
+            duplicate |= reported[previous] == value;
+        if (duplicate)
+            continue;
+
+        char dtiName[96] = {};
+        const bool hasDtiName = TryGetObjectDtiName(
+            value, dtiName, sizeof(dtiName));
+        uintptr_t interiorOffset = 0;
+        const int characterIndex = FindLoadedCharacter(
+            characters, characterCount, value, &interiorOffset);
+        if (!hasDtiName && characterIndex < 0)
+            continue;
+
+        reported[reportedCount++] = value;
+        std::fprintf(file, "  RSP+0x%03llX value=0x%016llX",
+            static_cast<unsigned long long>(i * sizeof(uintptr_t)),
+            static_cast<unsigned long long>(value));
+        if (hasDtiName)
+            std::fprintf(file, " dti=\"%s\"", dtiName);
+        if (hasDtiName)
+            WriteObjectVirtualSlot(file, value, 0x68);
+        if (characterIndex >= 0) {
+            const CrashCharacter& character = characters[characterIndex];
+            std::fprintf(file, " character_dti=\"%s\" team=%d slot=%d",
+                character.dtiName[0] ? character.dtiName : "<unavailable>",
+                character.team, character.slot);
+            if (interiorOffset)
+                std::fprintf(file, " object_offset=0x%llX",
+                    static_cast<unsigned long long>(interiorOffset));
+        }
+        std::fprintf(file, "\n");
+    }
+    if (reportedCount == 0)
+        std::fprintf(file, "  <no named MT object found>\n");
+#else
+    (void)context;
+    (void)characters;
+    (void)characterCount;
+    std::fprintf(file, "stack scan (named MT objects): <unsupported architecture>\n");
 #endif
 }
 
@@ -600,6 +713,7 @@ LONG WINAPI ExceptionHandler(PEXCEPTION_POINTERS info)
         }
 
         ResolveAddress(file, "fault: ", context->Rip);
+        WriteNameEqualsFaultDetails(file, context);
         CrashCharacter loadedCharacters[kMaxLoadedCharacters] = {};
         const size_t loadedCharacterCount = CollectLoadedCharacters(
             loadedCharacters, kMaxLoadedCharacters);
@@ -623,6 +737,8 @@ LONG WINAPI ExceptionHandler(PEXCEPTION_POINTERS info)
             }
         }
         WriteUnwindBacktrace(file, context);
+        WriteStackObjectCandidates(file, context, loadedCharacters,
+                                   loadedCharacterCount);
         std::fprintf(file, "stack scan (executable addresses):\n");
         constexpr size_t stackEntries = 96;
         if (IsReadableRange(context->Rsp, stackEntries * sizeof(uintptr_t))) {
