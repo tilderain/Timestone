@@ -38,7 +38,7 @@ epochs are phase-offset by ~7 frames.
    **own** release moment. The READY/RELEASE handshake
    (`UMVC3Hook/code/framestepper.cpp:503-512`) is real-time/network paced, so the
    two machines can observe the barrier release at slightly different native
-   counters (different `step==2 && introSubstate>0` observation points, latency,
+    counters (different `step==2 && pendingStep<0` observation points, latency,
    per-machine pacing). That difference becomes a phase offset in logical numbering.
 
 2. **The write-back rebase locks the offset in.** Every frame,

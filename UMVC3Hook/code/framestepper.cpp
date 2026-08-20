@@ -82,6 +82,12 @@ static bool g_desyncCheckReady = false;
 static bool g_autoTestLaunchPending = false;
 static bool g_autoTestLaunchRunning = false;
 static DWORD g_autoTestExitTick = 0;
+
+// Emit one compact diagnostic if a handshake generation remains blocked.
+static DWORD g_handshakeStartTick = 0;
+static uint32_t g_handshakeTraceGeneration = 0;
+static bool g_handshakeStallLogged = false;
+
 extern "C" bool FrameStepper_IsBattleSynchronized() { return g_battleSynchronized; }
 extern "C" uint32_t FrameStepper_GetBattleGeneration() { return g_battleGeneration; }
 extern "C" bool FrameStepper_IsDesyncCheckReady() { return g_desyncCheckReady; }
@@ -253,6 +259,46 @@ static bool SynchronizeRoundRng(uint32_t seed)
     using ReplayRoundStartFn = void(__fastcall*)(uint64_t);
     ((ReplayRoundStartFn)_addr(REPLAY_ROUND_START_ADDR))(sReplay);
     return true;
+}
+
+static void MaybeLogHandshakeStall(uint64_t action, int32_t step,
+                                   int32_t pendingStep, int32_t introSubstate)
+{
+    const DWORD now = GetTickCount();
+    if (g_handshakeTraceGeneration != g_battleGeneration) {
+        g_handshakeTraceGeneration = g_battleGeneration;
+        g_handshakeStartTick = now;
+        g_handshakeStallLogged = false;
+    }
+    if (g_handshakeStallLogged || now - g_handshakeStartTick < 5000)
+        return;
+
+    uint64_t replay = *(uint64_t*)_addr(0x140D4D9D8);
+    int32_t replayFrame = replay ? *(int32_t*)(replay + 0x54) : -1;
+    HookLog("Netplay: startup barrier stalled action=0x%llX step=%d pending=%d "
+            "sub=%d replay=%d ready=%d/%d release=%d/%d seed=%d flags=0x%X "
+            "generation=%u\n",
+            action, step, pendingStep, introSubstate, replayFrame,
+            g_localReady ? 1 : 0, g_remoteReady ? 1 : 0,
+            g_localRelease ? 1 : 0, g_remoteRelease ? 1 : 0,
+            g_roundSeedReady ? 1 : 0, g_advertisedBattleFlags,
+            g_battleGeneration);
+    g_handshakeStallLogged = true;
+}
+
+static void TryCaptureHostRoundSeed()
+{
+    if (!Netplay_IsHost() || g_roundSeedReady)
+        return;
+
+    uint64_t replay = *(uint64_t*)_addr(0x140D4D9D8);
+    if (!replay)
+        return;
+
+    g_roundSeed = *(uint32_t*)(replay + 0x58);
+    g_roundSeedReady = true;
+    HookLog("Netplay: captured host round seed 0x%08X for generation=%u\n",
+            g_roundSeed, g_battleGeneration);
 }
 
 // ---------------------------------------------------------------------------
@@ -592,6 +638,7 @@ static void __fastcall HookedMove(void* sMvc3Main)
         {
             int32_t pendingStep = action ? *(int32_t*)(action + 0xDC) : -1;
             int32_t introSubstate = action ? *(int32_t*)(action + 0xE0) : 0;
+            MaybeLogHandshakeStall(action, step, pendingStep, introSubstate);
 
             if (g_trainingRestartBarrier) {
                 if (step != 5)
@@ -601,19 +648,20 @@ static void __fastcall HookedMove(void* sMvc3Main)
                     HookLog("AutoTestNet: local training restart ready (generation=%u)\n",
                             g_battleGeneration);
                 }
-            } else if (!g_localReady && step == 2 && pendingStep < 0 && introSubstate > 0)
+            } else if (!g_localReady && step == 2 && pendingStep < 0)
             {
                 g_localReady = true;
-                if (Netplay_IsHost()) {
-                    uint64_t sReplay = *(uint64_t*)_addr(0x140D4D9D8);
-                    if (sReplay) {
-                        g_roundSeed = *(uint32_t*)(sReplay + 0x58);
-                        g_roundSeedReady = true;
-                    }
-                }
+                // Phase 2 setup is completed by sAction__executeMatchPhase
+                // before the first intro tick. mSubStep may still be zero if
+                // that tick was gated by a native pause on this frame.
                 HookLog("Netplay: Local intro ready (generation=%u, substate=%d)\n",
                          g_battleGeneration, introSubstate);
             }
+
+            // Do not permanently strand the host if sReplay is published one
+            // tick after phase 2 becomes visible on this machine.
+            if (g_localReady)
+                TryCaptureHostRoundSeed();
 
             // RELEASE acknowledges that this peer observed the remote READY.
             // A one-way READY is insufficient: its sender may otherwise stay
@@ -901,11 +949,14 @@ static uint64_t __fastcall HookedGetInputBuf(uint64_t obj)
 void FrameStepper_InitNetplay()
 {
     const LaunchDialogConfig& cfg = GetLaunchDialogConfig();
+    HookLog("FrameStepper: launch netplay config hostEnabled=%d host=%p peer=%p\n",
+            cfg.hostEnabled ? 1 : 0, (void*)cfg.enetHost, (void*)cfg.enetPeer);
     if (cfg.hostEnabled && cfg.enetHost && cfg.enetPeer && !Netplay_IsActive()) {
         Netplay_Init(cfg.enetHost, cfg.enetPeer);
     }
     if (Netplay_IsActive()) {
-        HookLog("FrameStepper: Netplay initialized from launch config\n");
+        HookLog("FrameStepper: Netplay initialized from launch config (role=%s)\n",
+                Netplay_IsHost() ? "host" : "client");
         g_autoTestLaunchPending = IsAutoTestLaunchEnabled() && Netplay_IsHost();
         Rollback_PatchNativeNetplayDeterminism();
         Rollback_ApplyNetplayDeterminism();

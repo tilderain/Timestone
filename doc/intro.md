@@ -116,9 +116,10 @@ if (Netplay_IsActive() && FrameStepper_IsBattleSynchronized()) {
 ```
 
 Before the battle-ready barrier, it calls the original intro function. The
-override therefore does not skip immediately when netplay merely becomes
-active, nor does it depend on intro button input. The shared readiness gate is
-the synchronization contract for the custom transport.
+shared readiness gate is established when phase 2 has been entered and no next
+phase is queued; `mSubStep` may still be zero if the first intro tick was
+gated by a native pause. The override therefore does not skip merely because
+netplay became active, nor does it depend on intro button input.
 
 ## Key Addresses
 

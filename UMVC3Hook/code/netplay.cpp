@@ -35,6 +35,16 @@ static CRITICAL_SECTION         g_inboundCS;
 static HANDLE               g_serviceThread  = nullptr;
 static uint32_t             g_recvCount = 0;
 static uint32_t             g_lastRecv  = 0;
+static bool                 g_readyTxDiagValid = false;
+static uint32_t             g_readyTxDiagGeneration = 0;
+static uint32_t             g_readyTxDiagFlags = 0;
+static uint32_t             g_readyTxDiagSeed = 0;
+static int                   g_readyTxDiagResult = 0;
+static int                   g_readyTxDiagPeerState = -1;
+static bool                 g_readyRxDiagValid = false;
+static uint32_t             g_readyRxDiagGeneration = 0;
+static uint32_t             g_readyRxDiagFlags = 0;
+static uint32_t             g_readyRxDiagSeed = 0;
 static std::atomic<bool>    g_running { false };
 static std::atomic<bool>    g_peerDisconnected { false };
 static std::atomic<uint32_t> g_requestedTimeoutMs { 0 };
@@ -355,10 +365,44 @@ static DWORD WINAPI Netplay_ServiceThread(LPVOID)
             ENetPacket* packet = enet_packet_create(
                 &readyPkt, sizeof(BattleReadyPacket), ENET_PACKET_FLAG_RELIABLE
             );
-            if (enet_peer_send(g_peer, 0, packet) != 0) {
+            int sendResult = packet ? enet_peer_send(g_peer, 0, packet) : -1;
+            const int peerState = (int)g_peer->state;
+            if (!g_readyTxDiagValid ||
+                g_readyTxDiagGeneration != readyPkt.generation ||
+                g_readyTxDiagFlags != readyPkt.flags ||
+                g_readyTxDiagSeed != readyPkt.round_seed ||
+                g_readyTxDiagResult != sendResult ||
+                g_readyTxDiagPeerState != peerState) {
+                HookLog("Netplay: BattleReady TX gen=%u flags=0x%X seed=0x%08X "
+                        "result=%d peerState=%d\n",
+                        readyPkt.generation, readyPkt.flags, readyPkt.round_seed,
+                        sendResult, peerState);
+            }
+            g_readyTxDiagValid = true;
+            g_readyTxDiagGeneration = readyPkt.generation;
+            g_readyTxDiagFlags = readyPkt.flags;
+            g_readyTxDiagSeed = readyPkt.round_seed;
+            g_readyTxDiagResult = sendResult;
+            g_readyTxDiagPeerState = peerState;
+            if (sendResult != 0 && packet) {
                 enet_packet_destroy(packet);
             }
             enet_host_flush(g_host);
+        }
+        else if (hasBattleReady)
+        {
+            if (!g_readyTxDiagValid || g_readyTxDiagGeneration != readyPkt.generation ||
+                g_readyTxDiagFlags != readyPkt.flags || g_readyTxDiagPeerState != -1) {
+                HookLog("Netplay: BattleReady TX dropped gen=%u flags=0x%X "
+                        "because peer is null\n",
+                        readyPkt.generation, readyPkt.flags);
+            }
+            g_readyTxDiagValid = true;
+            g_readyTxDiagGeneration = readyPkt.generation;
+            g_readyTxDiagFlags = readyPkt.flags;
+            g_readyTxDiagSeed = readyPkt.round_seed;
+            g_readyTxDiagResult = -1;
+            g_readyTxDiagPeerState = -1;
         }
 
         // --- Send desync screen control packet ---
@@ -536,6 +580,10 @@ static DWORD WINAPI Netplay_ServiceThread(LPVOID)
                 {
                     if (event.packet->dataLength >= 4)
                     {
+                        // Count all protocol packets. The old counter only
+                        // counted input packets, making a working startup
+                        // handshake look like a completely idle connection.
+                        g_recvCount++;
                         uint32_t pktType = *(uint32_t*)event.packet->data;
                         switch (pktType)
                         {
@@ -554,7 +602,6 @@ static DWORD WINAPI Netplay_ServiceThread(LPVOID)
                                         g_inboundQueue[tail] = *inPkt;
                                         ++g_inboundCount;
                                     }
-                                    g_recvCount++;
                                 }
                                 break;
 
@@ -606,6 +653,19 @@ static DWORD WINAPI Netplay_ServiceThread(LPVOID)
                                 if (event.packet->dataLength >= sizeof(BattleReadyPacket))
                                 {
                                     const BattleReadyPacket* brp = (const BattleReadyPacket*)event.packet->data;
+                                    if (!g_readyRxDiagValid ||
+                                        g_readyRxDiagGeneration != brp->generation ||
+                                        g_readyRxDiagFlags != brp->flags ||
+                                        g_readyRxDiagSeed != brp->round_seed) {
+                                        HookLog("Netplay: BattleReady RX gen=%u flags=0x%X "
+                                                "seed=0x%08X\n",
+                                                brp->generation, brp->flags,
+                                                brp->round_seed);
+                                    }
+                                    g_readyRxDiagValid = true;
+                                    g_readyRxDiagGeneration = brp->generation;
+                                    g_readyRxDiagFlags = brp->flags;
+                                    g_readyRxDiagSeed = brp->round_seed;
                                     ScopedCS lock(g_battleReadyCS);
                                     g_inboundBattleReady = *brp;
                                     g_inboundBattleReadyNew = true;
@@ -828,6 +888,8 @@ void Netplay_Init(ENetHost* host, ENetPeer* peer)
 
     g_recvCount = 0;
     g_lastRecv = 0;
+    g_readyTxDiagValid = false;
+    g_readyRxDiagValid = false;
     g_peerDisconnected = false;
     g_requestedTimeoutMs = 0;
     g_playerDisconnectRequested = false;
