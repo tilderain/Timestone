@@ -333,7 +333,7 @@ static constexpr uint32_t DESYNC_THRESHOLD         = 0;
 // Restart setup can remain transient briefly after both peers report fighting.
 // Start each checksum epoch after that state has settled instead of treating
 // fresh startup differences as persistent match desyncs.
-static constexpr int32_t  DESYNC_SKIP_FRAMES       = 250;
+static constexpr int32_t  DESYNC_SKIP_FRAMES       = 50;
 static constexpr int32_t  DESYNC_CONSECUTIVE_MIN   = 1;
 
 static void ResetDesyncDetection()
@@ -665,6 +665,28 @@ extern "C" void Controller_RestoreInputHistory()
     LogOldInputs("post-restore");
 }
 
+static void QueueInboundChecksum(const InputPacket& packet)
+{
+    if (!FrameStepper_IsDesyncCheckReady() ||
+        g_netFrameCount < DESYNC_SKIP_FRAMES)
+        return;
+
+    int32_t frame = (int32_t)packet.checksum_frame;
+    if (frame < 0)
+        return;
+
+    uint32_t idx = (uint32_t)frame % RING_SIZE;
+    if (g_remoteChecksumFrame[idx] == frame &&
+        g_remoteChecksum[idx] != packet.checksum &&
+        g_desyncChecked[idx] == frame)
+    {
+        g_desyncChecked[idx] = -1;
+        g_desyncMismatch[idx] = false;
+    }
+    g_remoteChecksum[idx] = packet.checksum;
+    g_remoteChecksumFrame[idx] = frame;
+}
+
 // Centrally resolve the remote input for a given game frame into
 // g_usedRemoteInput.  Called once per frame in Controller_OnFrameStart
 // (for the current live frame) and once per re-simmed frame in the
@@ -693,9 +715,13 @@ extern "C" void Controller_ResolveRemoteInput(int32_t frame)
             if (pkt.battle_generation != FrameStepper_GetBattleGeneration())
                 continue;
 
+            // Even packets whose input history is entirely stale carry the
+            // next checksum in the sender's confirmed checksum stream.
+            QueueInboundChecksum(pkt);
+
             int32_t pktMaxFrame = (int32_t)pkt.start_frame + NET_HISTORY_SIZE - 1;
             if (pktMaxFrame <= g_lastRemoteFrame) {
-                TraceInputPacket("IPRX", "resolve-dropped", g_netFrameCount, pkt,
+                TraceInputPacket("IPRX", "resolve-checksum-only", g_netFrameCount, pkt,
                                  0, 0, 0, 0);
                 continue;
             }
@@ -1381,6 +1407,8 @@ static void DrainAndProcessPackets()
         if (inPkt.battle_generation != FrameStepper_GetBattleGeneration())
             continue;
 
+        QueueInboundChecksum(inPkt);
+
         uint16_t acceptedMask = 0;
         uint16_t changedMask = 0;
         uint16_t priorConfirmedMask = 0;
@@ -1414,27 +1442,6 @@ static void DrainAndProcessPackets()
                     g_lastRemoteFrame = targetFrame;
                     g_lastRemoteInput = inPkt.inputs[i];
                 }
-            }
-        }
-
-        // 2. Queue the piggybacked checksum. It is compared at frame end, after
-        // any rollback requested by this packet has replaced speculative state.
-        if (FrameStepper_IsDesyncCheckReady() &&
-            g_netFrameCount >= DESYNC_SKIP_FRAMES)
-        {
-            int32_t csFrame = (int32_t)inPkt.checksum_frame;
-            if (csFrame >= 0)
-            {
-                uint32_t ridx = (uint32_t)csFrame % RING_SIZE;
-                if (g_remoteChecksumFrame[ridx] == csFrame &&
-                    g_remoteChecksum[ridx] != inPkt.checksum &&
-                    g_desyncChecked[ridx] == csFrame)
-                {
-                    g_desyncChecked[ridx] = -1;
-                    g_desyncMismatch[ridx] = false;
-                }
-                g_remoteChecksum[ridx] = inPkt.checksum;
-                g_remoteChecksumFrame[ridx] = csFrame;
             }
         }
 
