@@ -26,6 +26,27 @@ namespace {
 PVOID g_exceptionHandler = nullptr;
 volatile LONG g_crashInFlight = 0;
 
+constexpr uintptr_t kPreferredImageBase = 0x140000000;
+constexpr uintptr_t kSCharacterPointer = 0x140D44A70;
+constexpr uintptr_t kTeam0Offset = 0x40;
+constexpr uintptr_t kTeam1Offset = 0x300;
+// cChrTeam__getNextNode starts at the embedded sentinel (+0x08) and reads
+// its intrusive link at +0x10, making the live head pointer team+0x18.
+constexpr uintptr_t kTeamFirstNodeOffset = 0x18;
+constexpr uintptr_t kNodeCharacterOffset = 0x08;
+constexpr uintptr_t kNodeNextOffset = 0x10;
+// This is only a corruption/cycle guard, not a roster-size assumption. Normal
+// traversal continues until the team list terminates.
+constexpr size_t kMaxCharacterNodesPerTeam = 64;
+constexpr size_t kMaxLoadedCharacters = kMaxCharacterNodesPerTeam * 2;
+
+struct CrashCharacter {
+    uintptr_t object = 0;
+    int team = -1;
+    int slot = -1;
+    char dtiName[96] = {};
+};
+
 bool IsCatastrophicException(DWORD code)
 {
     switch (code) {
@@ -105,6 +126,254 @@ bool IsExecutableAddress(uintptr_t address)
     const DWORD executable = PAGE_EXECUTE | PAGE_EXECUTE_READ |
         PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
     return (memory.Protect & executable) != 0;
+}
+
+bool IsMainModuleAddress(uintptr_t address)
+{
+    HMODULE module = nullptr;
+    HMODULE mainModule = GetModuleHandleA(nullptr);
+    if (!mainModule || !GetModuleHandleExA(
+            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            reinterpret_cast<LPCSTR>(address), &module)) {
+        return false;
+    }
+    return module == mainModule;
+}
+
+bool SafeReadPointer(uintptr_t address, uintptr_t* value)
+{
+    if (!value || !IsReadableRange(address, sizeof(*value)))
+        return false;
+    *value = *reinterpret_cast<const uintptr_t*>(address);
+    return true;
+}
+
+bool SafeCopyString(uintptr_t address, char* output, size_t outputSize)
+{
+    if (!output || outputSize == 0 || !address)
+        return false;
+
+    for (size_t i = 0; i + 1 < outputSize; ++i) {
+        if (address > UINTPTR_MAX - i || !IsReadableRange(address + i, 1)) {
+            output[0] = '\0';
+            return false;
+        }
+        const unsigned char character =
+            *reinterpret_cast<const unsigned char*>(address + i);
+        if (character == '\0') {
+            output[i] = '\0';
+            return i != 0;
+        }
+        output[i] = character >= 0x20 && character <= 0x7E
+            ? static_cast<char>(character) : '?';
+    }
+    output[outputSize - 1] = '\0';
+    return false;
+}
+
+bool TryGetObjectDtiName(uintptr_t object, char* output, size_t outputSize)
+{
+    if (!output || outputSize == 0 || !IsReadableRange(object, sizeof(uintptr_t)))
+        return false;
+
+    uintptr_t vtable = 0;
+    if (!SafeReadPointer(object, &vtable) ||
+        !IsReadableRange(vtable, 0x28)) {
+        return false;
+    }
+
+    uintptr_t getDti = 0;
+    if (vtable > UINTPTR_MAX - 0x20 ||
+        !SafeReadPointer(vtable + 0x20, &getDti) ||
+        !IsExecutableAddress(getDti) || !IsMainModuleAddress(getDti)) {
+        return false;
+    }
+
+    // MtObject's DTI virtual is the least invasive way to identify a live
+    // object. Only dispatch after validating both the vtable and its target.
+    using GetDtiFunction = uintptr_t(__fastcall*)(uintptr_t);
+    const uintptr_t dti = reinterpret_cast<GetDtiFunction>(getDti)(object);
+    uintptr_t className = 0;
+    if (dti > UINTPTR_MAX - 0x08 ||
+        !SafeReadPointer(dti + 0x08, &className))
+        return false;
+    return SafeCopyString(className, output, outputSize);
+}
+
+int FindLoadedCharacter(const CrashCharacter* characters, size_t count,
+                        uintptr_t candidate, uintptr_t* interiorOffset)
+{
+    for (size_t i = 0; i < count; ++i) {
+        if (candidate == characters[i].object) {
+            if (interiorOffset) *interiorOffset = 0;
+            return static_cast<int>(i);
+        }
+
+        // Register values can point at a field inside cChr instead of its
+        // base. The nominal object extent is enough for crash-time labeling.
+        if (candidate >= characters[i].object &&
+            candidate - characters[i].object < 0x6A60) {
+            if (interiorOffset)
+                *interiorOffset = candidate - characters[i].object;
+            return static_cast<int>(i);
+        }
+    }
+    return -1;
+}
+
+size_t CollectLoadedCharacters(CrashCharacter* characters, size_t capacity)
+{
+    if (!characters || capacity == 0)
+        return 0;
+
+    const uintptr_t module = reinterpret_cast<uintptr_t>(GetModuleHandleA(nullptr));
+    if (!module || module > UINTPTR_MAX -
+        (kSCharacterPointer - kPreferredImageBase))
+        return 0;
+
+    uintptr_t sCharacter = 0;
+    if (!SafeReadPointer(module + (kSCharacterPointer - kPreferredImageBase),
+                         &sCharacter) || !sCharacter) {
+        return 0;
+    }
+
+    const uintptr_t teamOffsets[] = {kTeam0Offset, kTeam1Offset};
+    size_t count = 0;
+    for (int team = 0; team < 2 && count < capacity; ++team) {
+        uintptr_t node = 0;
+        if (sCharacter > UINTPTR_MAX - teamOffsets[team] - kTeamFirstNodeOffset ||
+            !SafeReadPointer(sCharacter + teamOffsets[team] + kTeamFirstNodeOffset,
+                             &node)) {
+            continue;
+        }
+
+        uintptr_t visited[kMaxCharacterNodesPerTeam] = {};
+        size_t visitedCount = 0;
+        for (size_t slot = 0; node && slot < kMaxCharacterNodesPerTeam &&
+             count < capacity; ++slot) {
+            bool repeated = false;
+            for (size_t i = 0; i < visitedCount; ++i) {
+                if (visited[i] == node) {
+                    repeated = true;
+                    break;
+                }
+            }
+            if (repeated || visitedCount >= kMaxCharacterNodesPerTeam)
+                break;
+            visited[visitedCount++] = node;
+
+            uintptr_t character = 0;
+            uintptr_t next = 0;
+            if (node > UINTPTR_MAX - kNodeCharacterOffset ||
+                !SafeReadPointer(node + kNodeCharacterOffset, &character)) {
+                break;
+            }
+            if (node <= UINTPTR_MAX - kNodeNextOffset)
+                SafeReadPointer(node + kNodeNextOffset, &next);
+
+            if (character) {
+                CrashCharacter& entry = characters[count++];
+                entry.object = character;
+                entry.team = team;
+                entry.slot = static_cast<int>(slot);
+                TryGetObjectDtiName(character, entry.dtiName,
+                                    sizeof(entry.dtiName));
+            }
+            node = next;
+        }
+    }
+    return count;
+}
+
+void WriteLoadedCharacters(FILE* file, const CrashCharacter* characters, size_t count)
+{
+    std::fprintf(file, "loaded characters:\n");
+    if (count == 0) {
+        std::fprintf(file, "  <unavailable>\n");
+        return;
+    }
+
+    for (size_t i = 0; i < count; ++i) {
+        const CrashCharacter& entry = characters[i];
+        std::fprintf(file,
+            "  team=%d slot=%d object=0x%016llX",
+            entry.team, entry.slot,
+            static_cast<unsigned long long>(entry.object));
+        if (entry.dtiName[0])
+            std::fprintf(file, " dti=\"%s\"", entry.dtiName);
+        else
+            std::fprintf(file, " dti=<unavailable>");
+        std::fprintf(file, "\n");
+    }
+}
+
+void WriteCrashObjectCandidates(FILE* file, const CONTEXT* context,
+                                const CrashCharacter* characters,
+                                size_t characterCount)
+{
+#if defined(_M_X64) || defined(__x86_64__)
+    struct RegisterValue {
+        const char* name;
+        uintptr_t value;
+    };
+    const RegisterValue values[] = {
+        {"RAX", context->Rax}, {"RBX", context->Rbx},
+        {"RCX", context->Rcx}, {"RDX", context->Rdx},
+        {"RSI", context->Rsi}, {"RDI", context->Rdi},
+        {"R8", context->R8}, {"R9", context->R9},
+        {"R10", context->R10}, {"R11", context->R11},
+        {"R12", context->R12}, {"R13", context->R13},
+        {"R14", context->R14}, {"R15", context->R15},
+    };
+
+    std::fprintf(file, "crashing object candidates (best effort):\n");
+    bool found = false;
+    for (size_t i = 0; i < sizeof(values) / sizeof(values[0]); ++i) {
+        if (values[i].value < 0x10000 ||
+            !IsReadableRange(values[i].value, sizeof(uintptr_t))) {
+            continue;
+        }
+
+        bool duplicate = false;
+        for (size_t previous = 0; previous < i; ++previous)
+            duplicate |= values[previous].value == values[i].value;
+        if (duplicate)
+            continue;
+
+        char dtiName[96] = {};
+        const bool hasDtiName = TryGetObjectDtiName(
+            values[i].value, dtiName, sizeof(dtiName));
+        uintptr_t interiorOffset = 0;
+        const int characterIndex = FindLoadedCharacter(
+            characters, characterCount, values[i].value, &interiorOffset);
+        if (!hasDtiName && characterIndex < 0)
+            continue;
+
+        std::fprintf(file, "  %s=0x%016llX",
+            values[i].name, static_cast<unsigned long long>(values[i].value));
+        if (hasDtiName)
+            std::fprintf(file, " dti=\"%s\"", dtiName);
+        if (characterIndex >= 0) {
+            const CrashCharacter& character = characters[characterIndex];
+            std::fprintf(file, " character_dti=\"%s\" team=%d slot=%d",
+                character.dtiName[0] ? character.dtiName : "<unavailable>",
+                character.team, character.slot);
+            if (interiorOffset)
+                std::fprintf(file, " object_offset=0x%llX",
+                    static_cast<unsigned long long>(interiorOffset));
+        }
+        std::fprintf(file, "\n");
+        found = true;
+    }
+    if (!found)
+        std::fprintf(file, "  <no named MT Framework object in registers>\n");
+#else
+    (void)context;
+    (void)characters;
+    (void)characterCount;
+    std::fprintf(file, "crashing object candidates: <unsupported architecture>\n");
+#endif
 }
 
 bool IsNetGalleryTeardownFault(const EXCEPTION_RECORD* exception, const CONTEXT* context)
@@ -331,6 +600,12 @@ LONG WINAPI ExceptionHandler(PEXCEPTION_POINTERS info)
         }
 
         ResolveAddress(file, "fault: ", context->Rip);
+        CrashCharacter loadedCharacters[kMaxLoadedCharacters] = {};
+        const size_t loadedCharacterCount = CollectLoadedCharacters(
+            loadedCharacters, kMaxLoadedCharacters);
+        WriteLoadedCharacters(file, loadedCharacters, loadedCharacterCount);
+        WriteCrashObjectCandidates(file, context, loadedCharacters,
+                                    loadedCharacterCount);
         if constexpr (EFFECT_LIFECYCLE_TRACE_ENABLED) {
             const uint64_t effectCandidates[] = {
                 context->Rdi, context->Rcx, context->Rdx,

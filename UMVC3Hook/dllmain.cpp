@@ -901,6 +901,8 @@ void OnInitializeHook()
 
 		HookLog("UMVC3Hook: Detected -connect argument, target %s:%d\n",
 			g_autoConnectIp, g_autoConnectPort);
+		if (g_autoConnectPort > 0)
+			SetLaunchOption(LAUNCH_DUAL_TRAINING);
 	}
 
 	// Show launch menu on first instance only
@@ -972,7 +974,7 @@ void OnInitializeHook()
 	//Memory::VP::Patch<uint8_t>(_addr(0x1402E433B), 0xEB);
 	HookLog("UMVC3Hook: Patched uBattleUiPauseNetGallery_vfn5 JNZ→JMP (force render)\n");
 
-	if (opt == LAUNCH_DUAL_TRAINING) {
+	if (opt == LAUNCH_DUAL_TRAINING && g_autoConnectPort == 0) {
 		// Position host window to top-right corner
 		g_windowCorner = 1;
 

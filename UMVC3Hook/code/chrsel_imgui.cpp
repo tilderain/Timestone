@@ -325,6 +325,62 @@ void NormalizeRoster(RosterConfig& roster)
     }
 }
 
+uint32_t NextCharacterRandom()
+{
+    static uint32_t state = 0;
+    if (state == 0) {
+        LARGE_INTEGER counter = {};
+        QueryPerformanceCounter(&counter);
+        state = static_cast<uint32_t>(counter.QuadPart) ^
+                static_cast<uint32_t>(counter.QuadPart >> 32) ^
+                static_cast<uint32_t>(GetTickCount64());
+        if (state == 0)
+            state = 1;
+    }
+    state ^= state << 13;
+    state ^= state >> 17;
+    state ^= state << 5;
+    return state;
+}
+
+bool CanEditAllTeams()
+{
+    return !Netplay_IsActive() || GetLaunchOption() == LAUNCH_DUAL_TRAINING;
+}
+
+void RandomizeRoster(bool allTeams)
+{
+    constexpr int kPlayableCharacterCount = 50;
+    const int firstTeam = allTeams ? 0 : (Netplay_IsHost() ? 0 : 1);
+    const int lastTeam = allTeams ? 1 : firstTeam;
+    for (int team = firstTeam; team <= lastTeam; ++team) {
+        int characters[kPlayableCharacterCount];
+        for (int i = 0; i < kPlayableCharacterCount; ++i)
+            characters[i] = i + 1;
+
+        for (int member = 0; member < 3; ++member) {
+            const int selected = member + static_cast<int>(
+                NextCharacterRandom() % (kPlayableCharacterCount - member));
+            std::swap(characters[member], characters[selected]);
+
+            const int character = characters[member];
+            g_roster.chars[team][member] = character;
+
+            int selectableColors[9];
+            int selectableColorCount = 0;
+            for (int color = 0; color < VariantCount(character); ++color) {
+                if (IsColorSelectable(character, color))
+                    selectableColors[selectableColorCount++] = color;
+            }
+            g_roster.colors[team][member] = selectableColorCount > 0
+                ? selectableColors[NextCharacterRandom() % selectableColorCount]
+                : 0;
+            g_roster.assists[team][member] =
+                static_cast<int>(NextCharacterRandom() % 3);
+        }
+    }
+}
+
 bool CanOpenSelector()
 {
     if (GetLaunchOption() != LAUNCH_TRAINING &&
@@ -392,7 +448,10 @@ void BeginSynchronizedSession()
     g_revision = 1;
     g_remoteRevision = 0;
     g_open = true;
-    SetStatus("Either player can commit the synchronized roster");
+    SetStatus(CanEditAllTeams()
+        ? "Both clients can edit and commit the full roster"
+        : Netplay_IsHost() ? "Edit P1; the client edits P2"
+                           : "Edit P2; the host edits P1");
     SendPacket(MakePacket(CHRSEL_OPEN));
 }
 
@@ -404,13 +463,16 @@ void SendLocalUpdate()
     SendPacket(MakePacket(CHRSEL_UPDATE));
 }
 
-void CopyRemoteOwnedTeam(const ChrSelPacket& packet)
+void CopyRemoteRoster(const ChrSelPacket& packet)
 {
-    const int remoteTeam = Netplay_IsHost() ? 1 : 0;
-    for (int member = 0; member < 3; ++member) {
-        g_roster.chars[remoteTeam][member] = packet.roster.chars[remoteTeam][member];
-        g_roster.colors[remoteTeam][member] = packet.roster.colors[remoteTeam][member];
-        g_roster.assists[remoteTeam][member] = packet.roster.assists[remoteTeam][member];
+    const int firstTeam = CanEditAllTeams() ? 0 : (Netplay_IsHost() ? 1 : 0);
+    const int lastTeam = CanEditAllTeams() ? 1 : firstTeam;
+    for (int team = firstTeam; team <= lastTeam; ++team) {
+        for (int member = 0; member < 3; ++member) {
+            g_roster.chars[team][member] = packet.roster.chars[team][member];
+            g_roster.colors[team][member] = packet.roster.colors[team][member];
+            g_roster.assists[team][member] = packet.roster.assists[team][member];
+        }
     }
 }
 
@@ -495,17 +557,19 @@ void HandlePacket(const ChrSelPacket& packet)
             return;
         if (!g_open || packet.session != g_session) {
             g_session = packet.session;
-            g_revision = 1;
+            g_revision = packet.revision;
             g_remoteRevision = packet.revision;
             g_roster = packet.roster;
             g_open = true;
         } else {
-            CopyRemoteOwnedTeam(packet);
+            CopyRemoteRoster(packet);
+            g_revision = std::max(g_revision, packet.revision);
             g_remoteRevision = std::max(g_remoteRevision, packet.revision);
         }
-        SetStatus(Netplay_IsHost()
-            ? "Select P1; either player can commit"
-            : "Select P2; either player can commit");
+        SetStatus(CanEditAllTeams()
+            ? "Both clients can edit and commit the full roster"
+            : Netplay_IsHost() ? "Edit P1; the client edits P2"
+                               : "Edit P2; the host edits P1");
         SendLocalUpdate();
         return;
     }
@@ -515,8 +579,9 @@ void HandlePacket(const ChrSelPacket& packet)
         if (!g_open || packet.revision <= g_remoteRevision ||
             !ValidateRoster(packet.roster))
             return;
+        g_revision = std::max(g_revision, packet.revision);
         g_remoteRevision = packet.revision;
-        CopyRemoteOwnedTeam(packet);
+        CopyRemoteRoster(packet);
         return;
     }
     if (packet.action == CHRSEL_CANCEL) {
@@ -787,8 +852,19 @@ void ChrSelImGui_Draw()
                  ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings);
     ImGui::Separator();
 
-    const int ownedTeam = !Netplay_IsActive() ? -1 : Netplay_IsHost() ? 0 : 1;
+    const bool allTeamsEditable = CanEditAllTeams();
+    const int ownedTeam = allTeamsEditable ? -1 : (Netplay_IsHost() ? 0 : 1);
     bool changed = false;
+    if (ImGui::Button("Randomize Characters")) {
+        RandomizeRoster(allTeamsEditable);
+        changed = true;
+    }
+    ImGui::SameLine();
+    ImGui::TextUnformatted(allTeamsEditable
+        ? "Both clients may edit every slot"
+        : ownedTeam == 0 ? "You may edit P1 slots"
+                         : "You may edit P2 slots");
+
     if (ImGui::BeginTable("##RosterTeams", 2,
                           ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_SizingStretchSame)) {
         for (int team = 0; team < 2; ++team) {
