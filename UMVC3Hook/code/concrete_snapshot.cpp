@@ -48,6 +48,7 @@ constexpr uintptr_t kHsienKoDti = 0x140D455F8ull;
 constexpr uintptr_t kSpencerDti = 0x140D45D40ull;
 constexpr uintptr_t kAttackWireDti = 0x140D4CA20ull;
 constexpr uintptr_t kJamSessionDti = 0x140D49288ull;
+constexpr uintptr_t kInfernoDti = 0x140D49790ull;
 constexpr uintptr_t kShockingPinkBombDti = 0x140D4D6A0ull;
 constexpr uintptr_t kVulcanSwingWireDti = 0x140D4CB00ull;
 constexpr uintptr_t kVulcanBoomerangDti = 0x140D4D660ull;
@@ -888,6 +889,7 @@ void ConcreteShotSnapshot_RestoreCallbackEffects(
 
     if (IsDti(snapshot.dti, kAttackWireDti) ||
         IsDti(snapshot.dti, kJamSessionDti) ||
+        IsDti(snapshot.dti, kInfernoDti) ||
         IsDti(snapshot.dti, kShockingPinkBombDti)) {
         // Attack Wire's factory effect owns track buffers initialized for the
         // fresh generator graph. Rewinding its presentation timeline can make
@@ -896,6 +898,9 @@ void ConcreteShotSnapshot_RestoreCallbackEffects(
         // timelines made all three finish during client re-simulation and
         // marked the still-live shot for removal; shot lifetime is restored
         // independently by Shot_ApplyFlight.
+        // Dormammu's Inferno uses the same factory callback path in slot 1.
+        // Rewinding it made the client remove the assist shot after seven
+        // re-simulated frames while the host kept it alive.
         // Shocking Pink rebuilds callback slot 2 with a fresh particle manager
         // and track table. Its captured timeline can activate a descriptor from
         // the retired graph, so leave that callback on its native timeline.
