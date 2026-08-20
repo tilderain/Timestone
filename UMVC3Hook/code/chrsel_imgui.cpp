@@ -825,10 +825,8 @@ void ChrSelImGui_Update()
     }
 
     static bool previousF8 = false;
-    const bool f8 = (GetAsyncKeyState(VK_F8) & 0x8000) != 0;
-    if (f8 && !previousF8 && !g_open)
+    if (KeyPressed(VK_F8, previousF8) && !g_open)
         RequestOpen();
-    previousF8 = f8;
 
     ChrSelPacket packet = {};
     size_t packetSize = 0;

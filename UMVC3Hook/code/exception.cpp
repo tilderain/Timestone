@@ -1,5 +1,6 @@
 #include "../pch.h"
 #include "exception.h"
+#include "framestepper.h"
 #include "netplay.h"
 #include "rollback.h"
 #include "rollback_effect.h"
@@ -800,8 +801,7 @@ void Exception_RemoveHandler()
 void Exception_UpdateTestHotkey()
 {
     static bool wasDown = false;
-    const bool isDown = (GetAsyncKeyState(VK_F4) & 0x8000) != 0;
-    if (isDown && !wasDown) {
+    if (KeyPressed(VK_F4, wasDown)) {
         const ULONG_PTR details[] = {
             1, // Write access.
             0  // Address that would have been written.
@@ -809,5 +809,4 @@ void Exception_UpdateTestHotkey()
         RaiseException(EXCEPTION_ACCESS_VIOLATION, EXCEPTION_NONCONTINUABLE,
             static_cast<DWORD>(sizeof(details) / sizeof(details[0])), details);
     }
-    wasDown = isDown;
 }

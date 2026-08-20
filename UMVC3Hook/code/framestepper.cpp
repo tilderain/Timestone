@@ -992,19 +992,27 @@ void FrameStepper_Init()
     Rollback_InitHooks();
 }
 
-// Edge-detection helper for use on threads without a message queue.
-// FrameStepper_Process now runs on the render thread, so one bulk keyboard
-// snapshot avoids many expensive GetAsyncKeyState calls under Wine.
+// Shared render-frame keyboard snapshot avoids repeated per-key Win32 calls.
 static BYTE g_processKeyboardState[256] = {};
 static bool g_processKeyboardStateValid = false;
 
-static inline bool KeyPressed(int vk, bool& prevState)
+void UpdateKeyboardState()
 {
-    bool cur = g_processKeyboardStateValid
-        ? (g_processKeyboardState[vk] & 0x80) != 0
-        : (GetAsyncKeyState(vk) & 0x8000) != 0;
-    bool pressed = cur && !prevState;
-    prevState = cur;
+    g_processKeyboardStateValid =
+        GetKeyboardState(g_processKeyboardState) != FALSE;
+}
+
+bool KeyDown(int vk)
+{
+    return g_processKeyboardStateValid && vk >= 0 && vk < 256 &&
+        (g_processKeyboardState[vk] & 0x80) != 0;
+}
+
+bool KeyPressed(int vk, bool& previousState)
+{
+    const bool currentState = KeyDown(vk);
+    const bool pressed = currentState && !previousState;
+    previousState = currentState;
     return pressed;
 }
 
@@ -1027,7 +1035,6 @@ static void CloseGameAfterAutoTest()
 
 void FrameStepper_Process()
 {
-    g_processKeyboardStateValid = GetKeyboardState(g_processKeyboardState) != FALSE;
     AutoTest_Process();
 
     if (AutoTest_IsActive() && Netplay_TakePeerDisconnected()) {

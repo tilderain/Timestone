@@ -268,7 +268,7 @@ void PollKeyboardDirectly()
         const int vk = menuOpen ? keyIndex : navigationKeys[keyIndex];
         const bool isDown = haveKeyboardState
             ? (keyboardState[vk] & 0x80) != 0
-            : (GetAsyncKeyState(vk) & 0x8000) != 0;
+            : KeyDown(vk);
         const bool wasDown = prevKeys[vk];
         prevKeys[vk] = isDown;
         io.KeysDown[vk] = isDown;
@@ -447,6 +447,7 @@ long __stdcall hkEndScene(LPDIRECT3DDEVICE9 pDevice)
 
 	// Capture the current back buffer if a snapshot was requested (pause / advance)
 	FrameStepper_Capture(pDevice);
+	UpdateKeyboardState();
 
 	ImGui_ImplDX9_NewFrame();
 	ImGui_ImplWin32_NewFrame();

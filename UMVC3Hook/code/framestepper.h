@@ -13,6 +13,9 @@ void FrameStepper_DrawAutoTest();
 void FrameStepper_SetDevice(LPDIRECT3DDEVICE9 device);
 void FrameStepper_InvalidateDeviceObjects();
 void FrameStepper_Capture(LPDIRECT3DDEVICE9 pDevice);
+void UpdateKeyboardState();
+bool KeyDown(int vk);
+bool KeyPressed(int vk, bool& previousState);
 extern "C" void FrameStepper_ScheduleAutoTestRestart(uint32_t roundSeed);
 extern "C" bool FrameStepper_ScheduleRosterRestart(int32_t targetFrame,
                                                     uint32_t roundSeed);

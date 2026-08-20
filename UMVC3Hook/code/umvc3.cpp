@@ -16,37 +16,37 @@ void UMVC3Hooks::HookProcessStuff()
 
 	if (TheMenu->m_bFreeCam)
 	{
-		if (GetAsyncKeyState(SettingsMgr->iFreeCameraKeyXPlus))
+		if (KeyDown(SettingsMgr->iFreeCameraKeyXPlus))
 			TheMenu->camPos.X += TheMenu->m_nFreeCameraSpeed;
-		if (GetAsyncKeyState(SettingsMgr->iFreeCameraKeyXMinus))
+		if (KeyDown(SettingsMgr->iFreeCameraKeyXMinus))
 			TheMenu->camPos.X -= TheMenu->m_nFreeCameraSpeed;
-		if (GetAsyncKeyState(SettingsMgr->iFreeCameraKeyYPlus))
+		if (KeyDown(SettingsMgr->iFreeCameraKeyYPlus))
 			TheMenu->camPos.Y += TheMenu->m_nFreeCameraSpeed;
-		if (GetAsyncKeyState(SettingsMgr->iFreeCameraKeyYMinus))
+		if (KeyDown(SettingsMgr->iFreeCameraKeyYMinus))
 			TheMenu->camPos.Y -= TheMenu->m_nFreeCameraSpeed;
-		if (GetAsyncKeyState(SettingsMgr->iFreeCameraKeyZPlus))
+		if (KeyDown(SettingsMgr->iFreeCameraKeyZPlus))
 			TheMenu->camPos.Z += TheMenu->m_nFreeCameraSpeed;
-		if (GetAsyncKeyState(SettingsMgr->iFreeCameraKeyZMinus))
+		if (KeyDown(SettingsMgr->iFreeCameraKeyZMinus))
 			TheMenu->camPos.Z -= TheMenu->m_nFreeCameraSpeed;
 
-		if (GetAsyncKeyState(SettingsMgr->iFreeCameraKeyYawMinus))
+		if (KeyDown(SettingsMgr->iFreeCameraKeyYawMinus))
 			TheMenu->camRot.X -= TheMenu->m_nFreeCameraRotationSpeed;
-		if (GetAsyncKeyState(SettingsMgr->iFreeCameraKeyYawPlus))
+		if (KeyDown(SettingsMgr->iFreeCameraKeyYawPlus))
 			TheMenu->camRot.X += TheMenu->m_nFreeCameraRotationSpeed;
 
-		if (GetAsyncKeyState(SettingsMgr->iFreeCameraKeyRollMinus))
+		if (KeyDown(SettingsMgr->iFreeCameraKeyRollMinus))
 			TheMenu->camRot.Z -= TheMenu->m_nFreeCameraRotationSpeed;
-		if (GetAsyncKeyState(SettingsMgr->iFreeCameraKeyRollPlus))
+		if (KeyDown(SettingsMgr->iFreeCameraKeyRollPlus))
 			TheMenu->camRot.Z += TheMenu->m_nFreeCameraRotationSpeed;
 
-		if (GetAsyncKeyState(SettingsMgr->iFreeCameraKeyPitchMinus))
+		if (KeyDown(SettingsMgr->iFreeCameraKeyPitchMinus))
 			TheMenu->camRot.Y -= TheMenu->m_nFreeCameraRotationSpeed;
-		if (GetAsyncKeyState(SettingsMgr->iFreeCameraKeyPitchPlus))
+		if (KeyDown(SettingsMgr->iFreeCameraKeyPitchPlus))
 			TheMenu->camRot.Y += TheMenu->m_nFreeCameraRotationSpeed;
 
-		if (GetAsyncKeyState(SettingsMgr->iFreeCameraKeyFOVMinus))
+		if (KeyDown(SettingsMgr->iFreeCameraKeyFOVMinus))
 			TheMenu->camFov -= 0.1f;
-		if (GetAsyncKeyState(SettingsMgr->iFreeCameraKeyFOVPlus))
+		if (KeyDown(SettingsMgr->iFreeCameraKeyFOVPlus))
 			TheMenu->camFov += 0.1f;
 	}
 }

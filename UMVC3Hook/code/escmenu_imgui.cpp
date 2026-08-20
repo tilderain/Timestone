@@ -27,14 +27,12 @@ void ExitGame()
 void EscMenuImGui_Update()
 {
     static bool previousEscape = false;
-    const bool escape = (GetAsyncKeyState(VK_ESCAPE) & 0x8000) != 0;
-    if (escape && !previousEscape) {
+    if (KeyPressed(VK_ESCAPE, previousEscape)) {
         if (g_open)
             g_open = false;
         else if (!ChrSelImGui_IsOpen() && !TheMenu->GetActiveState())
             g_open = true;
     }
-    previousEscape = escape;
 }
 
 void EscMenuImGui_Draw()

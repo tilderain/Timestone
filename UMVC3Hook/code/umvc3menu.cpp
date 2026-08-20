@@ -12,7 +12,6 @@
 #include "framestepper.h"
 #include <intrin.h>
 
-static int64 timer = GetTickCount64();
 bool runAheadEnabled = false;
 
 
@@ -94,10 +93,9 @@ void UMVC3Menu::Draw()
 
 void UMVC3Menu::UpdateControls()
 {
-	if (GetAsyncKeyState(VK_F1))
+    static bool previousF1 = false;
+	if (KeyPressed(VK_F1, previousF1))
 	{
-		if (GetTickCount64() - timer <= 150) return;
-		timer = GetTickCount64();
 		m_bIsActive ^= 1;
 	}
 
