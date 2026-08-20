@@ -247,6 +247,21 @@ static void SaveRollbackSettings()
     WritePrivateProfileStringA("Network", "HostPort", port, settingsPath);
 }
 
+void SaveRosterToIni(const int32_t chars[2][3],
+                     const int32_t colors[2][3],
+                     const int32_t assists[2][3])
+{
+    for (int i = 0; i < 3; ++i) {
+        g_dialogConfig.p1Chars[i] = chars[0][i];
+        g_dialogConfig.p2Chars[i] = chars[1][i];
+        g_dialogConfig.p1Colors[i] = colors[0][i];
+        g_dialogConfig.p2Colors[i] = colors[1][i];
+        g_dialogConfig.p1Assists[i] = assists[0][i];
+        g_dialogConfig.p2Assists[i] = assists[1][i];
+    }
+    SaveRollbackSettings();
+}
+
 void SendTrainingLaunchPacket()
 {
     if (!g_dialogConfig.enetPeer || !g_dialogConfig.enetHost) return;

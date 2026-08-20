@@ -74,5 +74,11 @@ void SendTrainingLaunchPacket();
 // dual-training client before its training boot sequence begins.
 bool ApplyTrainingLaunchPacket(const LaunchTrainingPacket& packet);
 
+// Persist an in-match selected roster (chars/colors/assists, P1 = [0],
+// P2 = [1]) to rollbacksetting.ini in the same layout the launch dialog uses.
+void SaveRosterToIni(const int32_t chars[2][3],
+                     const int32_t colors[2][3],
+                     const int32_t assists[2][3]);
+
 // Clean up any active network session (call on DLL detach / game exit)
 void CleanupNetworkOnExit();

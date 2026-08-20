@@ -628,6 +628,7 @@ void CommitSelection()
         SetStatus("A restart is already pending");
         return;
     }
+    SaveRosterToIni(g_roster.chars, g_roster.colors, g_roster.assists);
     if (Netplay_IsActive())
         SendPacket(packet);
 }
