@@ -172,9 +172,10 @@ extern "C" bool FrameStepper_ScheduleRosterRestart(int32_t targetFrame,
         return false;
 
     g_restartRoundSeed = roundSeed;
-    g_restartKind = RESTART_TRAINING;
-    // Native button mode 12 raises both team-reset flags (0x1000/0x2000).
-    g_restartButtonMode = 12;
+    // Use the full phase-12 restart path. The training-button path preserves
+    // flagged game effects whose owning characters are replaced by the roster.
+    g_restartKind = RESTART_FULL_MATCH;
+    g_restartButtonMode = 0;
     g_restartTargetFrame = Netplay_IsActive() ? targetFrame : currentFrame;
     return true;
 }
