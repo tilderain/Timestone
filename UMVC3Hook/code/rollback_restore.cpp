@@ -33,7 +33,6 @@ static constexpr uintptr_t PTR_SCAMERA = 0x140e17930;
 static constexpr uintptr_t PTR_SGAMEEFFECT = 0x140d46470;
 static constexpr uintptr_t FN_SSHOT_ENQUEUE_UNIT = 0x1401512A0;
 static constexpr uintptr_t FN_SSHOT_FLUSH_PENDING_UNITS = 0x1401517A0;
-static constexpr uintptr_t FN_CCHRNODE_SET_NEXT = 0x140003D50;
 static constexpr uintptr_t FN_SGAMEEFFECT_FLUSH_PENDING = 0x140130D00;
 static constexpr uintptr_t FN_SUNIT_ADD_UNIT = 0x14051A6B0;
 static constexpr uintptr_t FN_SUNIT_REMOVE_UNIT = 0x14051B9F0;
@@ -42,8 +41,6 @@ static constexpr uintptr_t FN_MODEL_SET_CHILD_MATERIAL_MODE = 0x140200DB0;
 static constexpr uintptr_t FN_MTOBJECT_ADD_REF = 0x14050D100;
 static constexpr uintptr_t FN_CRESOURCE_RELEASE_REF = 0x14050D5A0;
 static constexpr uintptr_t FN_MTDTI_IS_KIND_OF = 0x1400039D0;
-static constexpr uintptr_t FN_UMODEL_PROCESS_ACTION_ANMCHR = 0x140529420;
-static constexpr uintptr_t FN_UMODEL_MOVE = 0x140566580;
 
 static constexpr uintptr_t SMVC3MGR_ACTION_OFFSET = 0x48;
 static constexpr uint32_t SACTION_MODEL_JOINT_WRAPPER_OFFSET = 0x120;
@@ -119,11 +116,8 @@ static constexpr uintptr_t VTABLE_UDOCTOR_DOOM = 0x140A73A40;
 static constexpr uintptr_t DTI_USHOT_OPTION_SHIELD_SLASH = 0x140D48A68;
 static constexpr uintptr_t DTI_USHOT_VULCAN_LAND_MINE = 0x140D48D98;
 static constexpr uintptr_t DTI_USHOT_VULCAN_MISSILE_EMPLACEMENT = 0x140D49A60;
-static constexpr uintptr_t DTI_USHOT_VULCAN_WEAPON_CART = 0x140D4A1A8;
 static constexpr uintptr_t DTI_USHOT_SHIELD_WEAPON_CART_SPREAD = 0x140D4A098;
 static constexpr uintptr_t DTI_USHOT_VULCAN_ROCKET_LAUNCHER_EXPLODE = 0x140D4BAC8;
-static constexpr uintptr_t DTI_USHOT_VULCAN_LEGION_TIGER = 0x140D4ABB8;
-static constexpr uintptr_t DTI_USHOT_SHIELD_REPULSOR_BLAST_SP = 0x140D4ADA0;
 static constexpr uintptr_t DTI_USHOT_SHIELD_SPIRAL_SWORD = 0x140D4D4C8;
 static constexpr uint32_t UCAP_AMERICA_SHIELD_SLASH_OFFSET = 0x68F0;
 static constexpr uint32_t UDOCTOR_DOOM_MISSILE_OFFSET = 0x68F0;
@@ -695,43 +689,8 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
     std::vector<void*> currentShots;
     Shot_CollectCurrent(currentShots);
     for (void* shot : currentShots) {
-        if (HasCallableDtiVirtual(shot)) {
-            const ShotModelPolicy* modelPolicy =
-                Rollback_FindShotModelPolicy(GetObjectDti((uint64_t)shot));
-            for (uint32_t index = 0;
-                 modelPolicy && index < modelPolicy->resourceCount; ++index) {
-                uint32_t offset = modelPolicy->resourceOffsets[index];
-                void* resource = *(void**)((uint8_t*)shot + offset);
-                if (resource && HasCallableDtiVirtual(resource) &&
-                    std::find(pinnedShotResources.begin(),
-                              pinnedShotResources.end(), resource) ==
-                        pinnedShotResources.end()) {
-                    addRef(resource);
-                    pinnedShotResources.push_back(resource);
-                }
-            }
-        }
-        // Cart reconstruction retires its 13 model effects before invoking the
-        // fresh factory. Hold their resources alive across that ownership gap.
-        if (HasCallableDtiVirtual(shot) &&
-            GetObjectDti((uint64_t)shot) ==
-                (uint64_t)_addr(DTI_USHOT_VULCAN_WEAPON_CART)) {
-            for (uint32_t index = 0; index < 13; ++index) {
-                void* effect = *(void**)((uint8_t*)shot + 0x2288 + index * 8);
-                if (!effect || !IsAccessibleRange((uint64_t)effect + 0x108,
-                                                   sizeof(void*))) {
-                    continue;
-                }
-                void* resource = *(void**)((uint8_t*)effect + 0x108);
-                if (resource && HasCallableDtiVirtual(resource) &&
-                    std::find(pinnedCallbackEffectResources.begin(),
-                              pinnedCallbackEffectResources.end(), resource) ==
-                        pinnedCallbackEffectResources.end()) {
-                    addRef(resource);
-                    pinnedCallbackEffectResources.push_back(resource);
-                }
-            }
-        }
+        Rollback_PinShotModelResources(
+            shot, pinnedShotResources, pinnedCallbackEffectResources);
         if (!IsAccessibleRange((uint64_t)shot + 0x1F78,
                                13 * sizeof(void*))) {
             continue;
@@ -806,49 +765,7 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
         // sanitizes owned resource/generator fields at the destruction boundary.
         // The cart owns model effects outside the callback array handled by
         // Effect_RetireCurrent, so retire them explicitly through sUnit.
-        std::vector<void*> retiredCartModels;
-        for (void* shot : currentShots) {
-            if (!HasCallableDtiVirtual(shot) ||
-                GetObjectDti((uint64_t)shot) !=
-                    (uint64_t)_addr(DTI_USHOT_VULCAN_WEAPON_CART)) {
-                continue;
-            }
-            for (uint32_t index = 0; index < 13; ++index) {
-                void* effect = *(void**)((uint8_t*)shot + 0x2288 + index * 8);
-                if (!effect ||
-                    std::find(retiredCartModels.begin(), retiredCartModels.end(),
-                              effect) != retiredCartModels.end()) {
-                    continue;
-                }
-                if (Effect_RetireGameEffectModel(sUnit, effect)) {
-                    retiredCartModels.push_back(effect);
-                    ++retiredEffects;
-                }
-            }
-        }
-        if (!retiredCartModels.empty()) {
-            // Clear both aliases before shot destruction can revisit an object
-            // whose scalar destructor already ran.
-            for (void* shot : currentShots) {
-                if (!HasCallableDtiVirtual(shot) ||
-                    GetObjectDti((uint64_t)shot) !=
-                        (uint64_t)_addr(DTI_USHOT_VULCAN_WEAPON_CART)) {
-                    continue;
-                }
-                for (uint32_t index = 0; index < 13; ++index) {
-                    void** slot = (void**)((uint8_t*)shot + 0x2288 + index * 8);
-                    if (std::find(retiredCartModels.begin(), retiredCartModels.end(),
-                                  *slot) != retiredCartModels.end()) {
-                        *slot = nullptr;
-                    }
-                    slot = (void**)((uint8_t*)shot + 0x1F78 + index * 8);
-                    if (std::find(retiredCartModels.begin(), retiredCartModels.end(),
-                                  *slot) != retiredCartModels.end()) {
-                        *slot = nullptr;
-                    }
-                }
-            }
-        }
+        retiredEffects += Rollback_RetireShotModelEffects(sUnit, currentShots);
         retiredEffects += Effect_RetireCurrent(sUnit);
     }
     const uint64_t retireEffectsEnd = Profile_Now();
@@ -1078,20 +995,8 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
         Shot_TrackReconstructed(fresh, *spawnRecipe);
         saved.restoredPtr = fresh;
 
-        const ShotModelPolicy* modelPolicy =
-            Rollback_FindShotModelPolicy(saved.concrete.dti);
-        if (modelPolicy && modelPolicy->retrySetupAfterSpawn) {
-            bool alreadyWaited = std::find(waitedForModelDtis.begin(),
-                                           waitedForModelDtis.end(),
-                                           modelPolicy->dtiAddress) !=
-                                 waitedForModelDtis.end();
-            if (!alreadyWaited)
-                waitedForModelDtis.push_back(modelPolicy->dtiAddress);
-            // Wait only for the first shared model of each DTI. Later factories
-            // should resolve the resource from the cache populated by that setup.
-            Rollback_RetryShotModelSetup(fresh, *modelPolicy,
-                                         alreadyWaited ? 1 : 500);
-        }
+        Rollback_PrepareShotModelAfterSpawn(
+            fresh, saved.concrete.dti, waitedForModelDtis);
 
         // Resource-gated subclass setup can leave a reconstructed shot without
         // callbacks. Retry only when every slot is empty: setup overwrites and
@@ -1116,21 +1021,8 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
                 setup(fresh);
             }
         }
-        if (saved.concrete.dti ==
-                (uint64_t)_addr(DTI_USHOT_VULCAN_WEAPON_CART) &&
-            saved.ownerChr &&
-            IsAccessibleRange((uint64_t)fresh + 0x2288, sizeof(void*)) &&
-            IsAccessibleRange((uint64_t)saved.ownerChr + 0x6498,
-                              sizeof(void*))) {
-            void* modelEffect = *(void**)((uint8_t*)fresh + 0x2288);
-            if (modelEffect && HasCallableDtiVirtual(modelEffect)) {
-                // Debris attachment resolves joints through owner+0x6498; the
-                // saved node still names the retired primary model.
-                ((void(__fastcall*)(void*, void*))_addr(
-                    FN_CCHRNODE_SET_NEXT))(
-                        (uint8_t*)saved.ownerChr + 0x6490, modelEffect);
-            }
-        }
+        Rollback_RestoreShotModelLinks(
+            fresh, saved.ownerChr, saved.concrete.dti);
         if (saved.concrete.dti ==
                 (uint64_t)_addr(DTI_USHOT_VULCAN_LAND_MINE) &&
             saved.concrete.body.size() > 0x2214 &&
@@ -1235,32 +1127,9 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
         // attack selector after native creation derived it from the parent.
         Shot_RepairNemesisExplosionAttack(
             fresh, (void*)spawnRecipe->initParam, saved.spawnAttackInfoId);
-        const bool legionTiger = saved.concrete.dti ==
-            (uint64_t)_addr(DTI_USHOT_VULCAN_LEGION_TIGER);
-        const bool repulsorBlast = saved.concrete.dti ==
-            (uint64_t)_addr(DTI_USHOT_SHIELD_REPULSOR_BLAST_SP);
-        if (legionTiger || repulsorBlast) {
-            uint32_t animationNo = *(uint32_t*)((uint8_t*)fresh + 0x1310);
-            if (repulsorBlast && saved.concrete.body.size() >= 0x56A) {
-                uint16_t savedMotionNo = 0;
-                std::memcpy(&savedMotionNo,
-                            saved.concrete.body.data() + 0x568,
-                            sizeof(savedMotionNo));
-                animationNo = savedMotionNo;
-            }
-            float animationTime = *(float*)((uint8_t*)fresh + 0x1328);
-            if (repulsorBlast || animationTime > 0.0f) {
-                ((uint64_t(__fastcall*)(void*, uint32_t, uint32_t, float,
-                                       float, float, uint32_t))
-                    _addr(FN_UMODEL_PROCESS_ACTION_ANMCHR))(
-                        fresh, 0, animationNo, 0.0f,
-                        std::max(0.0f, animationTime - 1.0f), 1.0f,
-                        legionTiger ? 0x40 : 0);
-            }
-            // Reconstructed shots missed the model-category pass for this
-            // tick. Evaluate the restored/bound motion before hitbox dispatch.
-            ((void(__fastcall*)(void*))_addr(FN_UMODEL_MOVE))(fresh);
-        }
+        Rollback_EvaluateRestoredShotModel(
+            fresh, saved.concrete.dti, saved.concrete.body.data(),
+            saved.concrete.body.size());
 
         // Some shots use +0x1F70 as a self-reference. Repoint it at the fresh
         // allocation instead of retaining the captured shot's retired address.

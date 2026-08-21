@@ -1191,9 +1191,7 @@ bool ConcreteShotSnapshot_Restore(void* shot,
     // pool was rewound, changing per-target hit consumption on the next tick.
     CopyRange(overlay.data(), source, liveSize, {0x1F50, 0x04});
 
-    const ShotModelPolicy* modelPolicy =
-        Rollback_FindShotModelPolicy(snapshot.dti);
-    if (modelPolicy && modelPolicy->restorePlayback) {
+    if (Rollback_ShouldRestoreShotModelPlayback(snapshot.dti)) {
         // These shots consume model animation state in gameplay. Reconstruction
         // keeps fresh motion owners and resources, but must rewind pointer-free
         // playback state or joint-driven phases and launch positions restart.

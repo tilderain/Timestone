@@ -2,18 +2,19 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <vector>
 
-struct ShotModelPolicy {
-    uintptr_t dtiAddress;
-    const char* name;
-    uint32_t resourceOffsets[2];
-    uint32_t resourceCount;
-    bool restorePlayback;
-    bool retrySetupAfterSpawn;
-};
-
-const ShotModelPolicy* Rollback_FindShotModelPolicy(uint64_t runtimeDti);
-bool Rollback_IsShotModelReady(void* shot);
-bool Rollback_RetryShotModelSetup(void* shot,
-                                  const ShotModelPolicy& policy,
-                                  uint32_t attempts);
+bool Rollback_ShouldRestoreShotModelPlayback(uint64_t runtimeDti);
+void Rollback_PinShotModelResources(
+    void* shot, std::vector<void*>& pinnedShotResources,
+    std::vector<void*>& pinnedEffectResources);
+int Rollback_RetireShotModelEffects(
+    void* sUnit, const std::vector<void*>& currentShots);
+void Rollback_PrepareShotModelAfterSpawn(
+    void* shot, uint64_t runtimeDti,
+    std::vector<uintptr_t>& waitedForModelDtis);
+void Rollback_RestoreShotModelLinks(void* shot, void* ownerChr,
+                                    uint64_t runtimeDti);
+void Rollback_EvaluateRestoredShotModel(void* shot, uint64_t runtimeDti,
+                                        const uint8_t* savedBody,
+                                        size_t savedBodySize);
