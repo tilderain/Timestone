@@ -26,6 +26,8 @@ static constexpr uintptr_t FN_GSOUND_VOICE_DISPATCH = 0x1402A3380;
 static constexpr uintptr_t FN_GSOUND_CREATE_VOICE = 0x1402A21F0;
 static constexpr uintptr_t FN_SOUND_PLAY_WITH_DB = 0x1405D28B0;
 static constexpr uintptr_t FN_CREF_INIT_DISABLED = 0x1400239C0;
+static constexpr uint32_t GSOUND_VOICE_REQUEST_FLAGS_OFFSET = 0x30;
+static constexpr uint32_t GSOUND_VOICE_REQUEST_LOOP = 0x80;
 static constexpr uintptr_t FN_SCENE_UPDATE_SOUND_ENV = 0x1405D6CD0;
 static constexpr uintptr_t FN_SGAMEUI_MOVE = 0x1402BE610;
 static constexpr uintptr_t FN_UBTGAUGELIFE_MOVE = 0x1402F6800;
@@ -265,7 +267,11 @@ static uint64_t* __fastcall hkGSoundCreateVoice(void* dispatcher,
                                                 void* request,
                                                 char recursive)
 {
-    if (g_isResimulating) {
+    const bool isLooping = request &&
+        (*(const uint32_t*)((const uint8_t*)request +
+                            GSOUND_VOICE_REQUEST_FLAGS_OFFSET) &
+         GSOUND_VOICE_REQUEST_LOOP) != 0;
+    if (g_isResimulating && isLooping) {
         // Shot destructors may stop this cookie later. Return the engine's
         // ordinary disabled cRef instead of leaving an uninitialized handle.
         return ((uint64_t*(__fastcall*)(uint64_t*, uint64_t))
@@ -460,8 +466,8 @@ void Rollback_InitMainHooks(RollbackMainMoveFn* originalMove)
                "Rollback: failed to suppress replayed sound starts (%d)\n");
     EnableHook(FN_GSOUND_CREATE_VOICE, (void*)&hkGSoundCreateVoice,
                (void**)&oGSoundCreateVoice,
-               "Rollback: suppressed replayed voice allocation",
-               "Rollback: failed to suppress replayed voice allocation (%d)\n");
+               "Rollback: suppressed replayed looping voice allocation",
+               "Rollback: failed to suppress replayed looping voice allocation (%d)\n");
     EnableHook(FN_SOUND_PLAY_WITH_DB, (void*)&hkSoundPlayWithDb,
                (void**)&oSoundPlayWithDb,
                "Rollback: suppressed replayed raw sound starts",

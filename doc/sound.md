@@ -30,14 +30,18 @@ keeps the surrounding `cRef` initialization and reset paths intact.
 
 That dispatch is not used by structured voice allocation. Character and shot
 paths such as MODOK's `sGSound__playVoiceExt_AD60` create voices through the
-shared allocator at `0x1402A21F0`. Re-simulation replaces that allocation with
-the native disabled-`cRef` initializer at `0x1400239C0`. This is important for
-looping shots: Jamming Bomb, Fire Carpet, Light Wall, Healing Field, TK Bind,
-Barrier, Ankihou, and Shocking Pink retain a cookie that their destructor passes
-to `cGSound__stopSoundByCookie`. A disabled cookie is safe to stop and cannot
-orphan a backend loop when the shot is reconstructed repeatedly. The separate
-raw start wrapper `sSound__playSoundWithDb` at `0x1405D28B0` is also suppressed
-during re-simulation; cookie-based stop paths remain enabled.
+shared allocator at `0x1402A21F0`. During re-simulation, allocations whose voice
+request has the persistent-loop flag `0x80` at request `+0x30` are replaced with
+the native disabled-`cRef` initializer at `0x1400239C0`; ordinary structured
+voices still use the native allocator. The `sGSound__playVoiceExt_AD60` path sets
+this flag before allocation, while the ordinary `sGSound__playVoice_AC40` path
+does not. This is important for looping shots: Jamming Bomb, Fire Carpet, Light
+Wall, Healing Field, TK Bind, Barrier, Ankihou, and Shocking Pink retain a cookie
+that their destructor passes to `cGSound__stopSoundByCookie`. A disabled cookie
+is safe to stop and cannot orphan a backend loop when the shot is reconstructed
+repeatedly. The separate raw start wrapper `sSound__playSoundWithDb` at
+`0x1405D28B0` is also suppressed during re-simulation; cookie-based stop paths
+remain enabled.
 
 This prevents headless ticks and stale post-rollback model references from
 advancing or dereferencing audio-scene presentation state. Type validation is
