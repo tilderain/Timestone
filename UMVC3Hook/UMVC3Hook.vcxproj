@@ -206,6 +206,7 @@
     <ClInclude Include="code\rollback_diagnostics.h" />
     <ClInclude Include="code\rollback_hooks.h" />
     <ClInclude Include="code\rollback_memory.h" />
+    <ClInclude Include="code\rollback_model_policy.h" />
     <ClInclude Include="code\rollback_restore.h" />
     <ClInclude Include="code\rollback_resim.h" />
     <ClInclude Include="code\rollback_snapshot.h" />
@@ -230,6 +231,7 @@
     <ClCompile Include="code\rollback_diagnostics.cpp" />
     <ClCompile Include="code\rollback_hooks.cpp" />
     <ClCompile Include="code\rollback_memory.cpp" />
+    <ClCompile Include="code\rollback_model_policy.cpp" />
     <ClCompile Include="code\rollback_restore.cpp" />
     <ClCompile Include="code\rollback_snapshot.cpp" />
     <ClCompile Include="code\rollback_resim.cpp" />

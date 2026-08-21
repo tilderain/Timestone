@@ -4,6 +4,7 @@
 #include "rollback_cleanup.h"
 #include "rollback_effect.h"
 #include "rollback_memory.h"
+#include "rollback_model_policy.h"
 #include "rollback_profile.h"
 #include "rollback_shot.h"
 #include "rollback_snapshot.h"
@@ -117,12 +118,10 @@ static constexpr uintptr_t VTABLE_UCAP_AMERICA = 0x140A71430;
 static constexpr uintptr_t VTABLE_UDOCTOR_DOOM = 0x140A73A40;
 static constexpr uintptr_t DTI_USHOT_OPTION_SHIELD_SLASH = 0x140D48A68;
 static constexpr uintptr_t DTI_USHOT_VULCAN_LAND_MINE = 0x140D48D98;
-static constexpr uintptr_t DTI_USHOT_VULCAN_HAND_GRENADE_BOMB = 0x140D48CD0;
 static constexpr uintptr_t DTI_USHOT_VULCAN_MISSILE_EMPLACEMENT = 0x140D49A60;
 static constexpr uintptr_t DTI_USHOT_VULCAN_WEAPON_CART = 0x140D4A1A8;
 static constexpr uintptr_t DTI_USHOT_SHIELD_WEAPON_CART_SPREAD = 0x140D4A098;
 static constexpr uintptr_t DTI_USHOT_VULCAN_ROCKET_LAUNCHER_EXPLODE = 0x140D4BAC8;
-static constexpr uintptr_t DTI_USHOT_VULCAN_PENDULUM_LOG = 0x140D4C4C8;
 static constexpr uintptr_t DTI_USHOT_VULCAN_LEGION_TIGER = 0x140D4ABB8;
 static constexpr uintptr_t DTI_USHOT_SHIELD_REPULSOR_BLAST_SP = 0x140D4ADA0;
 static constexpr uintptr_t DTI_USHOT_SHIELD_SPIRAL_SWORD = 0x140D4D4C8;
@@ -696,31 +695,12 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
     std::vector<void*> currentShots;
     Shot_CollectCurrent(currentShots);
     for (void* shot : currentShots) {
-        if (HasCallableDtiVirtual(shot) &&
-            GetObjectDti((uint64_t)shot) ==
-                (uint64_t)_addr(DTI_USHOT_VULCAN_PENDULUM_LOG)) {
-            // Forced re-simulation reconstructs Pendulum every confirmed frame.
-            // Bridge its model and motion-list references across teardown so
-            // the asynchronous motion request can finish instead of restarting.
-            for (uint32_t offset : {0x100u, 0x11B8u}) {
-                void* resource = *(void**)((uint8_t*)shot + offset);
-                if (resource && HasCallableDtiVirtual(resource) &&
-                    std::find(pinnedShotResources.begin(),
-                              pinnedShotResources.end(), resource) ==
-                        pinnedShotResources.end()) {
-                    addRef(resource);
-                    pinnedShotResources.push_back(resource);
-                }
-            }
-        }
-        if (HasCallableDtiVirtual(shot) &&
-            GetObjectDti((uint64_t)shot) ==
-                (uint64_t)_addr(DTI_USHOT_VULCAN_HAND_GRENADE_BOMB)) {
-            // Keep the loaded grenade model and motion-list resources cached
-            // while the old shot is destroyed. The fresh factory can then bind
-            // native model ownership instead of restarting an async load every
-            // forced-resimulation frame.
-            for (uint32_t offset : {0x100u, 0x11B0u}) {
+        if (HasCallableDtiVirtual(shot)) {
+            const ShotModelPolicy* modelPolicy =
+                Rollback_FindShotModelPolicy(GetObjectDti((uint64_t)shot));
+            for (uint32_t index = 0;
+                 modelPolicy && index < modelPolicy->resourceCount; ++index) {
+                uint32_t offset = modelPolicy->resourceOffsets[index];
                 void* resource = *(void**)((uint8_t*)shot + offset);
                 if (resource && HasCallableDtiVirtual(resource) &&
                     std::find(pinnedShotResources.begin(),
@@ -1023,8 +1003,7 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
     uint64_t respawnRegisterTicks = 0;
     uint64_t respawnConcreteTicks = 0;
     uint64_t respawnOverlayTicks = 0;
-    bool waitedForTigerModel = false;
-    bool waitedForHandGrenadeModel = false;
+    std::vector<uintptr_t> waitedForModelDtis;
     for (ShotRecipe& saved : slot.shotRecipes) {
         const uint64_t prepareStart = Profile_Now();
         saved.restoredPtr = nullptr;
@@ -1099,62 +1078,19 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
         Shot_TrackReconstructed(fresh, *spawnRecipe);
         saved.restoredPtr = fresh;
 
-        if (saved.concrete.dti ==
-                (uint64_t)_addr(DTI_USHOT_VULCAN_LEGION_TIGER)) {
-            auto tigerModelReady = [](void* model) {
-                uint32_t count = *(uint32_t*)((uint8_t*)model + 0x530);
-                uint64_t joints = *(uint64_t*)((uint8_t*)model + 0x538);
-                return count > 0 && count <= 256 && joints &&
-                    IsAccessibleRange(joints, (size_t)count * 0xC0);
-            };
-            uint64_t vtable = *(uint64_t*)fresh;
-            uint64_t setupAddress = vtable &&
-                IsAccessibleRange(vtable + 0x28, sizeof(uint64_t))
-                ? *(uint64_t*)(vtable + 0x28) : 0;
-            if (!tigerModelReady(fresh) && setupAddress &&
-                IsExecutableAddress(setupAddress)) {
-                auto setup = (void(__fastcall*)(void*))setupAddress;
-                // Like Missile Emplacement, Legion Tiger cannot advance until
-                // its model joints exist. Wait only for the first shared model;
-                // the remaining Tiger factories then resolve it from cache.
-                uint32_t attempts = waitedForTigerModel ? 1 : 500;
-                waitedForTigerModel = true;
-                while (!tigerModelReady(fresh) && attempts-- > 0) {
-                    setup(fresh);
-                    if (!tigerModelReady(fresh)) Sleep(1);
-                }
-                InvalidateMemoryQueryCache();
-                if (!tigerModelReady(fresh)) {
-                    HookLog("Rollback: Legion Tiger model unavailable after setup retry\n");
-                }
-            }
-        }
-        if (saved.concrete.dti ==
-                (uint64_t)_addr(DTI_USHOT_VULCAN_HAND_GRENADE_BOMB)) {
-            auto grenadeModelReady = [](void* model) {
-                uint32_t count = *(uint32_t*)((uint8_t*)model + 0x530);
-                uint64_t joints = *(uint64_t*)((uint8_t*)model + 0x538);
-                return count > 0 && count <= 256 && joints &&
-                    IsAccessibleRange(joints, (size_t)count * 0xC0);
-            };
-            uint64_t vtable = *(uint64_t*)fresh;
-            uint64_t setupAddress = vtable &&
-                IsAccessibleRange(vtable + 0x28, sizeof(uint64_t))
-                ? *(uint64_t*)(vtable + 0x28) : 0;
-            if (!grenadeModelReady(fresh) && setupAddress &&
-                IsExecutableAddress(setupAddress)) {
-                auto setup = (void(__fastcall*)(void*))setupAddress;
-                uint32_t attempts = waitedForHandGrenadeModel ? 1 : 500;
-                waitedForHandGrenadeModel = true;
-                while (!grenadeModelReady(fresh) && attempts-- > 0) {
-                    setup(fresh);
-                    if (!grenadeModelReady(fresh)) Sleep(1);
-                }
-                InvalidateMemoryQueryCache();
-                if (!grenadeModelReady(fresh)) {
-                    HookLog("Rollback: Hand Grenade model unavailable after setup retry\n");
-                }
-            }
+        const ShotModelPolicy* modelPolicy =
+            Rollback_FindShotModelPolicy(saved.concrete.dti);
+        if (modelPolicy && modelPolicy->retrySetupAfterSpawn) {
+            bool alreadyWaited = std::find(waitedForModelDtis.begin(),
+                                           waitedForModelDtis.end(),
+                                           modelPolicy->dtiAddress) !=
+                                 waitedForModelDtis.end();
+            if (!alreadyWaited)
+                waitedForModelDtis.push_back(modelPolicy->dtiAddress);
+            // Wait only for the first shared model of each DTI. Later factories
+            // should resolve the resource from the cache populated by that setup.
+            Rollback_RetryShotModelSetup(fresh, *modelPolicy,
+                                         alreadyWaited ? 1 : 500);
         }
 
         // Resource-gated subclass setup can leave a reconstructed shot without

@@ -3,6 +3,7 @@
 #include "concrete_snapshot.h"
 #include "mk10utils.h"
 #include "rollback_memory.h"
+#include "rollback_model_policy.h"
 #include "rollback_profile.h"
 
 #include <cmath>
@@ -35,14 +36,9 @@ constexpr size_t kAttackTargetTables[kAttackTargetTableCount] = {
 // They are used only to select the exceptional subclass policy; the object
 // size itself always comes from the live object's DTI metadata.
 constexpr uintptr_t kSoulFistDti = 0x140D4B6E8ull;
-constexpr uintptr_t kKingKobunDti = 0x140D4D2B0ull;
-constexpr uintptr_t kMissileEmplacementDti = 0x140D49A60ull;
-constexpr uintptr_t kWeaponCartDti = 0x140D4A1A8ull;
 constexpr uintptr_t kLegionTigerDti = 0x140D4ABB8ull;
 constexpr uintptr_t kRepulsorBlastSpDti = 0x140D4ADA0ull;
 constexpr uintptr_t kRocketLauncherExplodeDti = 0x140D4BAC8ull;
-constexpr uintptr_t kPendulumLogDti = 0x140D4C4C8ull;
-constexpr uintptr_t kHandGrenadeBombDti = 0x140D48CD0ull;
 constexpr uintptr_t kVulcanAxeDti = 0x140D48808ull;
 constexpr uintptr_t kShikiDanKobunDti = 0x140D4D3D0ull;
 constexpr uintptr_t kRyuDti = 0x140D45A10ull;
@@ -1195,11 +1191,9 @@ bool ConcreteShotSnapshot_Restore(void* shot,
     // pool was rewound, changing per-target hit consumption on the next tick.
     CopyRange(overlay.data(), source, liveSize, {0x1F50, 0x04});
 
-    if (IsDti(snapshot.dti, kKingKobunDti) ||
-        IsDti(snapshot.dti, kMissileEmplacementDti) ||
-        IsDti(snapshot.dti, kWeaponCartDti) ||
-        IsDti(snapshot.dti, kPendulumLogDti) ||
-        IsDti(snapshot.dti, kHandGrenadeBombDti)) {
+    const ShotModelPolicy* modelPolicy =
+        Rollback_FindShotModelPolicy(snapshot.dti);
+    if (modelPolicy && modelPolicy->restorePlayback) {
         // These shots consume model animation state in gameplay. Reconstruction
         // keeps fresh motion owners and resources, but must rewind pointer-free
         // playback state or joint-driven phases and launch positions restart.
