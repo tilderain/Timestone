@@ -94,6 +94,15 @@ constexpr InputStep BACK_THROW[] = {
     {0, 45},
 };
 
+constexpr InputStep PINEAPPLE_SURPRISE[] = {
+    {IN_DOWN, 2},
+    {IN_DOWN | IN_RIGHT, 2},
+    {IN_RIGHT | IN_X, 1},
+    {0, 4},
+    {IN_Y, 1},
+    {0, 45},
+};
+
 constexpr InputScript SCRIPTS[] = {
     {"QCF + Light", QCF_LIGHT, std::size(QCF_LIGHT)},
     {"QCB + Light", QCB_LIGHT, std::size(QCB_LIGHT)},
@@ -104,6 +113,7 @@ constexpr InputScript SCRIPTS[] = {
 constexpr InputScript SUITE_MANUAL_SCRIPTS[] = {
     {"Forward Throw", FORWARD_THROW, std::size(FORWARD_THROW)},
     {"Back Throw", BACK_THROW, std::size(BACK_THROW)},
+    {"Pineapple Surprise", PINEAPPLE_SURPRISE, std::size(PINEAPPLE_SURPRISE)},
 };
 
 AutoTestStatus g_status = {
@@ -266,13 +276,15 @@ struct NetSuiteCaseSetup {
     const char* characterName;
     int32_t matcherIndex;
     int32_t lineIndex;
+    int32_t manualIndex;
     float defenderOffset;
     int32_t quietFrames;
 };
 
 constexpr NetSuiteCaseSetup NET_SUITE_CASE_SETUPS[] = {
-    {"Chris", 0, 28, 500.0f, LONG_LIVED_MOVE_QUIET_FRAMES},
-    {"Chris", 0, 29, 500.0f, LONG_LIVED_MOVE_QUIET_FRAMES},
+    {"Chris", 0, 28, -1, 500.0f, LONG_LIVED_MOVE_QUIET_FRAMES},
+    {"Chris", 0, 29, -1, 500.0f, LONG_LIVED_MOVE_QUIET_FRAMES},
+    {"DeadPool", -1, -1, 2, 500.0f, LONG_LIVED_MOVE_QUIET_FRAMES},
 };
 
 bool g_netSuiteActive = false;
@@ -423,16 +435,22 @@ extern "C" void AutoTest_ApplyMatchStartPositions()
     for (const NetSuiteCaseSetup& setup : NET_SUITE_CASE_SETUPS) {
         char selector[32];
         snprintf(selector, sizeof(selector), "%d:%d", setup.matcherIndex,
-                 setup.lineIndex);
+                  setup.lineIndex);
+        bool selected = setup.manualIndex >= 0
+            ? MoveSelectorMatches(g_suiteMoveFilter, setup.manualIndex + 1,
+                                  SUITE_MANUAL_SCRIPTS[setup.manualIndex].name)
+            : RuntimeCommandSelectorMatches(g_suiteMoveFilter,
+                                            setup.matcherIndex,
+                                            setup.lineIndex, -1, "");
         if (g_suiteMoveFilterEnabled &&
             _stricmp(g_autoTestCharacterName, setup.characterName) == 0 &&
-            RuntimeCommandSelectorMatches(g_suiteMoveFilter,
-                                          setup.matcherIndex,
-                                          setup.lineIndex, -1, "")) {
+            selected) {
             positions[0][0] = -setup.defenderOffset * 0.5f;
             positions[1][0] = setup.defenderOffset * 0.5f;
+            const char* caseName = setup.manualIndex >= 0
+                ? SUITE_MANUAL_SCRIPTS[setup.manualIndex].name : selector;
             HookLog("AutoTestNet: matched position case %s %s distance=%.6g\n",
-                    setup.characterName, selector, setup.defenderOffset);
+                    setup.characterName, caseName, setup.defenderOffset);
             break;
         }
     }
@@ -2478,8 +2496,11 @@ extern "C" void AutoTest_Process()
             RequiredQuietFramesForMove(g_suiteStatus.currentName);
         for (const NetSuiteCaseSetup& setup : NET_SUITE_CASE_SETUPS) {
             if (_stricmp(g_autoTestCharacterName, setup.characterName) == 0 &&
-                g_suiteStatus.currentMatcher == setup.matcherIndex &&
-                g_suiteStatus.currentLine == setup.lineIndex) {
+                ((setup.manualIndex >= 0 &&
+                  selectedManualIndex == setup.manualIndex) ||
+                 (setup.manualIndex < 0 &&
+                  g_suiteStatus.currentMatcher == setup.matcherIndex &&
+                  g_suiteStatus.currentLine == setup.lineIndex))) {
                 g_suiteStatus.requiredQuietFrames = setup.quietFrames;
                 break;
             }

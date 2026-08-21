@@ -35,6 +35,7 @@ constexpr ShotModelPolicy SHOT_MODEL_POLICIES[] = {
     {0x140D4D2B0, "King Kobun", {0x100, 0x11B0}, 2, true, false},
     {0x140D48BB0, "Fire Grenade", {0x100, 0x11B0}, 2, true, true},
     {0x140D48CD0, "Hand Grenade", {0x100, 0x11B0}, 2, true, true},
+    {0x140D49520, "Somersault Grenade", {0x100, 0x11B0}, 2, true, true},
 
     // Existing model-driven shots using the shared playback overlay or setup
     // readiness check. Pin their primary model and motion resources; Cart's

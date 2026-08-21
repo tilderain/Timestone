@@ -46,6 +46,7 @@ static constexpr uintptr_t FN_MISSILE_EMPLACEMENT_MOVE = 0x14016F220;
 static constexpr uintptr_t FN_WEAPON_CART_MOVE = 0x14017A9D0;
 static constexpr uintptr_t FN_WEAPON_CART_SPAWN_DEBRIS = 0x14017A200;
 static constexpr uintptr_t FN_HAND_GRENADE_CONTACT = 0x14015D180;
+static constexpr uintptr_t FN_SOMERSAULT_GRENADE_CONTACT = 0x140168550;
 static constexpr uintptr_t FN_SSHOT_FLUSH_PENDING_UNITS = 0x1401517A0;
 static constexpr uintptr_t FN_CCHRNODE_SET_NEXT = 0x140003D50;
 static constexpr uintptr_t FN_UMODEL_PROCESS_ACTION_ANMCHR = 0x140529420;
@@ -63,6 +64,7 @@ static constexpr uintptr_t DTI_USHOT_VULCAN_ROCKET_LAUNCHER_EXPLODE = 0x140D4BAC
 static constexpr uintptr_t DTI_USHOT_VULCAN_PENDULUM_LOG = 0x140D4C4C8;
 static constexpr uintptr_t DTI_USHOT_VULCAN_FIRE_GRENADE_BOMB = 0x140D48BB0;
 static constexpr uintptr_t DTI_USHOT_VULCAN_HAND_GRENADE_BOMB = 0x140D48CD0;
+static constexpr uintptr_t DTI_USHOT_VULCAN_SOMERSAULT_GRENADE = 0x140D49520;
 static constexpr int DYNAMIC_SAFETY = 128;
 static constexpr int SSHOT_SENTINEL_COUNT = 10;
 static constexpr size_t SSHOT_NODE_OFFSET = 0x1450;
@@ -86,6 +88,7 @@ using KingKobunMoveFn = void(__fastcall*)(void*);
 using MissileEmplacementMoveFn = void(__fastcall*)(void*);
 using WeaponCartMoveFn = void(__fastcall*)(void*);
 using HandGrenadeContactFn = void(__fastcall*)(void*, void*);
+using SomersaultGrenadeContactFn = void(__fastcall*)(void*, void*);
 
 static ShotSpawnFn oShotSpawn = nullptr;
 static ShotSpawnExFn oShotSpawnEx = nullptr;
@@ -99,6 +102,7 @@ static KingKobunMoveFn oKingKobunMove = nullptr;
 static MissileEmplacementMoveFn oMissileEmplacementMove = nullptr;
 static WeaponCartMoveFn oWeaponCartMove = nullptr;
 static HandGrenadeContactFn oHandGrenadeContact = nullptr;
+static SomersaultGrenadeContactFn oSomersaultGrenadeContact = nullptr;
 static std::unordered_map<void*, RollbackShotRecipe> g_liveShotRecipes;
 static std::unordered_set<void*> g_resimSpawnedPendulums;
 static uint64_t g_shotSpawnSequence = 0;
@@ -940,6 +944,22 @@ static void __fastcall hkHandGrenadeContact(void* shot, void* contact)
     }
 }
 
+static void __fastcall hkSomersaultGrenadeContact(void* shot, void* contact)
+{
+    bool somersaultGrenade = shot && HasCallableDtiVirtual(shot) &&
+        GetObjectDti((uint64_t)shot) ==
+            (uint64_t)_addr(DTI_USHOT_VULCAN_SOMERSAULT_GRENADE);
+    if (somersaultGrenade &&
+        *(uint32_t*)((uint8_t*)shot + 0x2210) > 0 &&
+        *(float*)((uint8_t*)shot + 0x2088) < 0.0f) {
+        // Reconstructed collision can retain the previous floor overlap after
+        // the bounce. Accepting it again flips upward velocity back downward.
+        *(uint32_t*)((uint8_t*)shot + 0x1FE0) &= ~0x00200000u;
+        return;
+    }
+    oSomersaultGrenadeContact(shot, contact);
+}
+
 static bool IsReconstructedWeaponCart(void* shot)
 {
     auto recipe = g_liveShotRecipes.find(shot);
@@ -1291,6 +1311,11 @@ void Shot_InitHooks()
                 (void**)&oHandGrenadeContact,
                 "Rollback: hooked Hand Grenade first-contact repair",
                 "Rollback: failed to hook Hand Grenade contact (%d)\n");
+    InstallHook(FN_SOMERSAULT_GRENADE_CONTACT,
+                (LPVOID)&hkSomersaultGrenadeContact,
+                (void**)&oSomersaultGrenadeContact,
+                "Rollback: hooked Somersault Grenade contact repair",
+                "Rollback: failed to hook Somersault Grenade contact (%d)\n");
     InstallHook(FN_WEAPON_CART_MOVE, (LPVOID)&hkWeaponCartMove,
                 (void**)&oWeaponCartMove,
                 "Rollback: hooked reconstructed Weapon Cart model retry",
