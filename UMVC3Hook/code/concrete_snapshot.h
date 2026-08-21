@@ -10,8 +10,22 @@
 // ownership/topology pointers valid.
 struct ConcreteShotSnapshot {
     struct CallbackEffectState {
+        struct GeneratorState {
+            uint64_t dti = 0;
+            uint64_t resource = 0;
+            uint8_t state20[0x08] = {};
+            uint8_t state30[0x08] = {};
+            uint8_t state70[0x14] = {};
+            uint8_t stateB8[0x10] = {};
+            uint8_t state110[0x2C] = {};
+            uint8_t state19C[0x24] = {};
+            uint8_t state1F0[0x10] = {};
+            uint8_t state238 = 0;
+        };
+
         bool occupied = false;
         bool hasState = false;
+        bool hasGeneratorState = false;
         uint64_t dti = 0;
         uint64_t resource = 0;
         uint8_t flags100[0x08] = {};
@@ -20,6 +34,7 @@ struct ConcreteShotSnapshot {
         uint8_t state1E0[0x10] = {};
         uint8_t state1F8[0x0C] = {};
         uint8_t state230[0x12] = {};
+        std::vector<GeneratorState> generators;
     };
 
     struct CollisionPrimitive {
