@@ -713,6 +713,17 @@ void ProcessNetSuitePackets()
     while (Netplay_GetInboundAutoTestFrame(report)) {
         if (report.move_id != g_netSuiteMoveId || report.frame < g_netSuiteStartFrame)
             continue;
+        // The start frame may not yet have a confirmed snapshot when the client
+        // begins forced resimulation. In that case it can only report the next
+        // frame; do not wait forever for a report that was never generated.
+        if (g_netSuiteComparedFrames == 0 &&
+            g_netSuiteLastComparedFrame == g_netSuiteStartFrame - 1 &&
+            report.frame > g_netSuiteStartFrame) {
+            HookLog("AutoTestNet: first client report is frame %d; "
+                    "starting comparison there instead of frame %d\n",
+                    report.frame, g_netSuiteStartFrame);
+            g_netSuiteLastComparedFrame = report.frame - 1;
+        }
         uint32_t idx = (uint32_t)report.frame % NET_SUITE_HISTORY;
         if (g_netSuiteRemoteFrames[idx].frame == report.frame)
             continue;

@@ -1256,8 +1256,14 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
         const bool repulsorBlast = saved.concrete.dti ==
             (uint64_t)_addr(DTI_USHOT_SHIELD_REPULSOR_BLAST_SP);
         if (legionTiger || repulsorBlast) {
-            uint32_t animationNo = repulsorBlast ? 0 :
-                *(uint32_t*)((uint8_t*)fresh + 0x1310);
+            uint32_t animationNo = *(uint32_t*)((uint8_t*)fresh + 0x1310);
+            if (repulsorBlast && saved.concrete.body.size() >= 0x56A) {
+                uint16_t savedMotionNo = 0;
+                std::memcpy(&savedMotionNo,
+                            saved.concrete.body.data() + 0x568,
+                            sizeof(savedMotionNo));
+                animationNo = savedMotionNo;
+            }
             float animationTime = *(float*)((uint8_t*)fresh + 0x1328);
             if (repulsorBlast || animationTime > 0.0f) {
                 ((uint64_t(__fastcall*)(void*, uint32_t, uint32_t, float,

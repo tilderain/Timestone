@@ -239,13 +239,19 @@ constexpr DtiSnapshotRange kVerifiedCharacterScalarRanges[] = {
     {0x140D44F18ull, 0x6900, 0x08}, // uChunli: charge-ready and voice timer
     {0x140D45020ull, 0x68F4, 0x08}, // uDormammu: spell stock and flare counter
     {0x140D45020ull, 0x6920, 0x01}, // uDormammu: Stalking Flare lock
+    {0x140D45068ull, 0x68F8, 0x04}, // uDrDoom: single-animation action latch
     {0x140D44FE0ull, 0x68F0, 0x08}, // uDeadPool: teleport state
     {0x140D45200ull, 0x6990, 0x30}, // uFrank: Kobun scale, offset, rotation
     {0x140D45200ull, 0x69C4, 0x04}, // uFrank: level
     {0x140D45200ull, 0x69DC, 0x04}, // uFrank: experience
+    {0x140D45200ull, 0x69EC, 0x08}, // uFrank: weapon speed and throw ID
+    {0x140D45200ull, 0x6A48, 0x08}, // uFrank: throw and action wait timers
     {0x140D45200ull, 0x6A50, 0x01}, // uFrank: summon latch
     {0x140D45248ull, 0x6930, 0x20}, // uGalactus: concrete vector state
     {0x140D45408ull, 0x68FC, 0x18}, // uHawkEye: standing-S motion tuning
+    {0x140D45408ull, 0x6918, 0x04}, // uHawkEye: standing-S charge counter
+    {0x140D44F60ull, 0x6908, 0x04}, // uCViper: Optic Laser charge timer
+    {0x140D45450ull, 0x6900, 0x01}, // uHiryu: team-state transition latch
     {0x140D45450ull, 0x6920, 0x05}, // uHiryu: Ouroboros state/latch
     {0x140D45450ull, 0x6928, 0x04}, // uHiryu: Ouroboros state scalar
     {0x140D45488ull, 0x6900, 0x01}, // uHulk: Gamma Wave fired latch
@@ -266,8 +272,11 @@ constexpr DtiSnapshotRange kVerifiedCharacterScalarRanges[] = {
     {0x140D45EA0ull, 0x6910, 0x08}, // uThor: speech variant/latch
     {0x140D45F68ull, 0x691C, 0x04}, // uVergil: action state
     {0x140D45F68ull, 0x6930, 0x0C}, // uVergil: concrete vector state
-    {0x140D45958ull, 0x68FC, 0x01}, // uRedArremer: Chaos Tide install latch
+    {0x140D45958ull, 0x68F4, 0x01}, // uRedArremer: active-ability latch
+    {0x140D45958ull, 0x68FC, 0x02}, // uRedArremer: sync and Chaos Tide latches
     {0x140D45958ull, 0x6928, 0x04}, // uRedArremer: flight idle timer
+    {0x140D459D8ull, 0x6954, 0x09}, // uRRaccoon: weapon action and movement state
+    {0x140D459D8ull, 0x6960, 0x04}, // uRRaccoon: voice timer
     {0x140D45FB0ull, 0x6900, 0x0C}, // uVJoe: concrete vector state
     {0x140D45FF8ull, 0x690C, 0x04}, // uWesker: life-change tracker
     {0x140D46038ull, 0x68F8, 0x01}, // uWolverine: Berserker install latch
