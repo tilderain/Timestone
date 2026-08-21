@@ -117,6 +117,7 @@ static constexpr uintptr_t VTABLE_UCAP_AMERICA = 0x140A71430;
 static constexpr uintptr_t VTABLE_UDOCTOR_DOOM = 0x140A73A40;
 static constexpr uintptr_t DTI_USHOT_OPTION_SHIELD_SLASH = 0x140D48A68;
 static constexpr uintptr_t DTI_USHOT_VULCAN_LAND_MINE = 0x140D48D98;
+static constexpr uintptr_t DTI_USHOT_VULCAN_HAND_GRENADE_BOMB = 0x140D48CD0;
 static constexpr uintptr_t DTI_USHOT_VULCAN_MISSILE_EMPLACEMENT = 0x140D49A60;
 static constexpr uintptr_t DTI_USHOT_VULCAN_WEAPON_CART = 0x140D4A1A8;
 static constexpr uintptr_t DTI_USHOT_SHIELD_WEAPON_CART_SPREAD = 0x140D4A098;
@@ -712,6 +713,24 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
                 }
             }
         }
+        if (HasCallableDtiVirtual(shot) &&
+            GetObjectDti((uint64_t)shot) ==
+                (uint64_t)_addr(DTI_USHOT_VULCAN_HAND_GRENADE_BOMB)) {
+            // Keep the loaded grenade model and motion-list resources cached
+            // while the old shot is destroyed. The fresh factory can then bind
+            // native model ownership instead of restarting an async load every
+            // forced-resimulation frame.
+            for (uint32_t offset : {0x100u, 0x11B0u}) {
+                void* resource = *(void**)((uint8_t*)shot + offset);
+                if (resource && HasCallableDtiVirtual(resource) &&
+                    std::find(pinnedShotResources.begin(),
+                              pinnedShotResources.end(), resource) ==
+                        pinnedShotResources.end()) {
+                    addRef(resource);
+                    pinnedShotResources.push_back(resource);
+                }
+            }
+        }
         // Cart reconstruction retires its 13 model effects before invoking the
         // fresh factory. Hold their resources alive across that ownership gap.
         if (HasCallableDtiVirtual(shot) &&
@@ -1005,6 +1024,7 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
     uint64_t respawnConcreteTicks = 0;
     uint64_t respawnOverlayTicks = 0;
     bool waitedForTigerModel = false;
+    bool waitedForHandGrenadeModel = false;
     for (ShotRecipe& saved : slot.shotRecipes) {
         const uint64_t prepareStart = Profile_Now();
         saved.restoredPtr = nullptr;
@@ -1106,6 +1126,33 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
                 InvalidateMemoryQueryCache();
                 if (!tigerModelReady(fresh)) {
                     HookLog("Rollback: Legion Tiger model unavailable after setup retry\n");
+                }
+            }
+        }
+        if (saved.concrete.dti ==
+                (uint64_t)_addr(DTI_USHOT_VULCAN_HAND_GRENADE_BOMB)) {
+            auto grenadeModelReady = [](void* model) {
+                uint32_t count = *(uint32_t*)((uint8_t*)model + 0x530);
+                uint64_t joints = *(uint64_t*)((uint8_t*)model + 0x538);
+                return count > 0 && count <= 256 && joints &&
+                    IsAccessibleRange(joints, (size_t)count * 0xC0);
+            };
+            uint64_t vtable = *(uint64_t*)fresh;
+            uint64_t setupAddress = vtable &&
+                IsAccessibleRange(vtable + 0x28, sizeof(uint64_t))
+                ? *(uint64_t*)(vtable + 0x28) : 0;
+            if (!grenadeModelReady(fresh) && setupAddress &&
+                IsExecutableAddress(setupAddress)) {
+                auto setup = (void(__fastcall*)(void*))setupAddress;
+                uint32_t attempts = waitedForHandGrenadeModel ? 1 : 500;
+                waitedForHandGrenadeModel = true;
+                while (!grenadeModelReady(fresh) && attempts-- > 0) {
+                    setup(fresh);
+                    if (!grenadeModelReady(fresh)) Sleep(1);
+                }
+                InvalidateMemoryQueryCache();
+                if (!grenadeModelReady(fresh)) {
+                    HookLog("Rollback: Hand Grenade model unavailable after setup retry\n");
                 }
             }
         }

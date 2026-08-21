@@ -520,11 +520,31 @@ static bool SpawnDualTrainingClient()
 		? L" -training-cpus"
 		: TrainingBoot_GetCpuMode() == TRAINING_CPU_P2_ONLY
 			? L" -training-p2-cpu" : L"";
-	const wchar_t* autoTestArg = IsAutoTestLaunchEnabled()
-		? L" -autotest-client" : L"";
-	wchar_t spawnCmd[MAX_PATH + 128];
-	swprintf(spawnCmd, MAX_PATH + 128, L"\"%ls\" -training%ls%ls -connect=%ls:%d",
-		exePath, cpuArg, autoTestArg, wIp, dlgCfg.hostPort);
+	wchar_t autoTestArgs[768] = {};
+	if (IsAutoTestLaunchEnabled()) {
+		wcscpy(autoTestArgs, L" -autotest-client");
+		const wchar_t* commandLine = GetCommandLineW();
+		const struct { const wchar_t* source; const wchar_t* forwarded; } options[] = {
+			{L"-autotest=", L"-autotest-case-character="},
+			{L"-autotest-moves=", L"-autotest-case-moves="},
+		};
+		for (const auto& option : options) {
+			const wchar_t* value = wcsstr(commandLine, option.source);
+			if (!value)
+				continue;
+			value += wcslen(option.source);
+			const wchar_t* end = value;
+			while (*end && *end != L' ')
+				++end;
+			size_t used = wcslen(autoTestArgs);
+			swprintf(autoTestArgs + used,
+				std::size(autoTestArgs) - used, L" %ls%.*ls",
+				option.forwarded, (int)(end - value), value);
+		}
+	}
+	wchar_t spawnCmd[MAX_PATH + 896];
+	swprintf(spawnCmd, std::size(spawnCmd), L"\"%ls\" -training%ls%ls -connect=%ls:%d",
+		exePath, cpuArg, autoTestArgs, wIp, dlgCfg.hostPort);
 
 	STARTUPINFOW si = { sizeof(si) };
 	PROCESS_INFORMATION pi;

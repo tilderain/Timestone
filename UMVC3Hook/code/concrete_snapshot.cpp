@@ -42,6 +42,7 @@ constexpr uintptr_t kLegionTigerDti = 0x140D4ABB8ull;
 constexpr uintptr_t kRepulsorBlastSpDti = 0x140D4ADA0ull;
 constexpr uintptr_t kRocketLauncherExplodeDti = 0x140D4BAC8ull;
 constexpr uintptr_t kPendulumLogDti = 0x140D4C4C8ull;
+constexpr uintptr_t kHandGrenadeBombDti = 0x140D48CD0ull;
 constexpr uintptr_t kVulcanAxeDti = 0x140D48808ull;
 constexpr uintptr_t kShikiDanKobunDti = 0x140D4D3D0ull;
 constexpr uintptr_t kRyuDti = 0x140D45A10ull;
@@ -1197,7 +1198,8 @@ bool ConcreteShotSnapshot_Restore(void* shot,
     if (IsDti(snapshot.dti, kKingKobunDti) ||
         IsDti(snapshot.dti, kMissileEmplacementDti) ||
         IsDti(snapshot.dti, kWeaponCartDti) ||
-        IsDti(snapshot.dti, kPendulumLogDti)) {
+        IsDti(snapshot.dti, kPendulumLogDti) ||
+        IsDti(snapshot.dti, kHandGrenadeBombDti)) {
         // These shots consume model animation state in gameplay. Reconstruction
         // keeps fresh motion owners and resources, but must rewind pointer-free
         // playback state or joint-driven phases and launch positions restart.

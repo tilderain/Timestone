@@ -146,6 +146,7 @@ char g_suiteCharacterName[64] = {};
 char g_suiteCharacterStem[64] = {};
 const char* g_suiteType = "commands";
 char g_suiteMoveFilter[512] = {};
+char g_autoTestCharacterName[64] = {};
 // A normal suite must visit each case once. Repetition is opt-in through
 // -autotest-repeat=N so a flaky result is not mistaken for independent cases.
 int32_t g_suiteRepeatCount = 1;
@@ -259,6 +260,18 @@ struct NetSuiteFrame {
     int32_t frame;
     uint32_t checksum;
     bool charactersIdle;
+};
+
+struct NetSuiteCaseSetup {
+    const char* characterName;
+    int32_t matcherIndex;
+    int32_t lineIndex;
+    float defenderOffset;
+    int32_t quietFrames;
+};
+
+constexpr NetSuiteCaseSetup NET_SUITE_CASE_SETUPS[] = {
+    {"Chris", 0, 28, 500.0f, LONG_LIVED_MOVE_QUIET_FRAMES},
 };
 
 bool g_netSuiteActive = false;
@@ -402,10 +415,26 @@ extern "C" void AutoTest_ApplyMatchStartPositions()
     if (!g_autoTestCommandLineLaunch)
         return;
 
-    constexpr float positions[2][4] = {
+    float positions[2][4] = {
         {-0.125f, 0.0f, 0.0f, 0.0f},
         { 0.125f, 0.0f, 0.0f, 0.0f},
     };
+    for (const NetSuiteCaseSetup& setup : NET_SUITE_CASE_SETUPS) {
+        char selector[32];
+        snprintf(selector, sizeof(selector), "%d:%d", setup.matcherIndex,
+                 setup.lineIndex);
+        if (g_suiteMoveFilterEnabled &&
+            _stricmp(g_autoTestCharacterName, setup.characterName) == 0 &&
+            RuntimeCommandSelectorMatches(g_suiteMoveFilter,
+                                          setup.matcherIndex,
+                                          setup.lineIndex, -1, "")) {
+            positions[0][0] = -setup.defenderOffset * 0.5f;
+            positions[1][0] = setup.defenderOffset * 0.5f;
+            HookLog("AutoTestNet: matched position case %s %s distance=%.6g\n",
+                    setup.characterName, selector, setup.defenderOffset);
+            break;
+        }
+    }
     using SetPosition_t = void(__fastcall*)(uint64_t, const float*);
     static SetPosition_t setPosition =
         (SetPosition_t)_addr(ADDR_SET_CHARACTER_POSITION);
@@ -414,7 +443,8 @@ extern "C" void AutoTest_ApplyMatchStartPositions()
         if (character)
             setPosition(character, positions[player]);
     }
-    HookLog("AutoTestNet: match-start positions applied P1=-0.125 P2=0.125\n");
+    HookLog("AutoTestNet: match-start positions applied P1=%.6g P2=%.6g\n",
+            positions[0][0], positions[1][0]);
 }
 
 void FillAttackerHyperGauge(int32_t attackerIndex)
@@ -654,6 +684,8 @@ void StartInboundNetSuiteMove(const AutoTestStartPacket& packet)
     g_suiteStatus = {};
     g_suiteStatus.active = true;
     g_suiteStatus.playerIndex = packet.player_index;
+    g_suiteStatus.currentMatcher = packet.matcher_index;
+    g_suiteStatus.currentLine = packet.line_index;
     g_suiteIdleActions[0] = packet.attacker_idle_action;
     g_suiteIdleActions[1] = packet.defender_idle_action;
     snprintf(g_suiteStatus.currentName, sizeof(g_suiteStatus.currentName),
@@ -2305,6 +2337,7 @@ extern "C" bool AutoTest_StartVariantSuite(int32_t playerIndex,
 extern "C" void AutoTest_ConfigureCommandLine(const char* commandLine)
 {
     g_suiteMoveFilter[0] = '\0';
+    g_autoTestCharacterName[0] = '\0';
     g_suiteRepeatCount = 1;
     g_suiteMoveFilterEnabled = false;
     g_autoTestCommandLineLaunch = commandLine &&
@@ -2312,9 +2345,31 @@ extern "C" void AutoTest_ConfigureCommandLine(const char* commandLine)
          strstr(commandLine, "-autotest-client"));
     if (!commandLine) return;
 
-    const char* moves = strstr(commandLine, "-autotest-moves=");
+    const char* character = strstr(commandLine, "-autotest-case-character=");
+    size_t characterPrefixLength = strlen("-autotest-case-character=");
+    if (!character) {
+        character = strstr(commandLine, "-autotest=");
+        characterPrefixLength = strlen("-autotest=");
+    }
+    if (character) {
+        character += characterPrefixLength;
+        size_t length = 0;
+        while (character[length] && character[length] != ' ' &&
+               length + 1 < sizeof(g_autoTestCharacterName)) {
+            g_autoTestCharacterName[length] = character[length];
+            ++length;
+        }
+        g_autoTestCharacterName[length] = '\0';
+    }
+
+    const char* moves = strstr(commandLine, "-autotest-case-moves=");
+    size_t movesPrefixLength = strlen("-autotest-case-moves=");
+    if (!moves) {
+        moves = strstr(commandLine, "-autotest-moves=");
+        movesPrefixLength = strlen("-autotest-moves=");
+    }
     if (moves) {
-        moves += strlen("-autotest-moves=");
+        moves += movesPrefixLength;
         bool quoted = *moves == '"';
         if (quoted) ++moves;
         size_t length = 0;
@@ -2420,8 +2475,19 @@ extern "C" void AutoTest_Process()
         }
         g_suiteStatus.requiredQuietFrames =
             RequiredQuietFramesForMove(g_suiteStatus.currentName);
+        for (const NetSuiteCaseSetup& setup : NET_SUITE_CASE_SETUPS) {
+            if (_stricmp(g_autoTestCharacterName, setup.characterName) == 0 &&
+                g_suiteStatus.currentMatcher == setup.matcherIndex &&
+                g_suiteStatus.currentLine == setup.lineIndex) {
+                g_suiteStatus.requiredQuietFrames = setup.quietFrames;
+                break;
+            }
+        }
         uint64_t attacker = GetActiveCharacter(g_suiteStatus.playerIndex);
         uint64_t defender = GetActiveCharacter(g_suiteStatus.playerIndex ^ 1);
+        if (defender)
+            std::memcpy(g_netSuiteSetupPosition, (void*)(defender + 0x50),
+                        sizeof(g_netSuiteSetupPosition));
         g_suiteDefenderLife = GetCharacterLife(defender);
         g_suiteStatus.dealtDamage = false;
         g_suiteStatus.charactersStable = false;
