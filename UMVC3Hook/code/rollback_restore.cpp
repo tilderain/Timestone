@@ -216,6 +216,9 @@ static constexpr SnapshotRange CCHR_SCALAR_RESTORE_RANGES[] = {
     {0x1308, 0x40},
     // Character constraint, animation, and state-check scalars.
     {0x1350, 0x98},
+    // Action-placement hip scaling. The packed {1.0f, 0.0f} default resembles
+    // a pointer-sized address and is otherwise retained from the live frame.
+    {0x1480, 0x08},
     // mChrF through mEtcF and related character/program flags.
     {0x14F0, 0x28},
     // Packed flag state immediately following the named character flags.
@@ -229,8 +232,10 @@ static constexpr SnapshotRange CCHR_SCALAR_RESTORE_RANGES[] = {
     // Character state/context values before the frame and identity fields.
     {0x18A0, 0x28},
     {0x2D9C, 0x24},
-    // Frame and identity-adjacent scalar state preceding mId.
+    // Per-character RNG state and the moveAfter frame counter. The setup flag
+    // at +0x2D90 remains live, while immutable identity begins at +0x2D98.
     {0x2D80, 0x10},
+    {0x2D94, 0x04},
     // Character body/assist configuration state.
     {0x28B8, 0x20},
     // Unknown one-byte character FSM state. It is the first authoritative
@@ -285,6 +290,8 @@ static constexpr SnapshotRange CCHR_SCALAR_RESTORE_RANGES[] = {
 // These shared cChr fields are rebuilt by native post-restore helpers on some
 // rollback paths. Reapply the saved values after those helpers complete.
 static constexpr SnapshotRange CCHR_POST_RESTORE_TAIL_RANGES[] = {
+    // cChrStatus::setMode can refresh these during native model repair.
+    {0x1480, 0x08},
     {0x6350, 0x10},
     // Active collision-set selectors for capsule bank 0 and sphere banks
     // 0/2/1. The initial character restore includes these at +0x6360, but
@@ -1913,6 +1920,21 @@ void Rollback_RestoreSnapshot(int32_t frame)
                 }
             }
         } else if (slot.regions[i].skipVtable && copySize > sizeof(uint64_t)) {
+            static constexpr uint32_t targetTableOffsets[] = {
+                0x1408, 0x1410, 0x1418, 0x1420,
+                0x1428, 0x1430, 0x1438,
+            };
+            uint64_t liveTargetTables[std::size(targetTableOffsets)] = {};
+            uint32_t liveTargetCounts = 0;
+            bool hasTargetTableState = copySize >= 0x1444;
+            if (hasTargetTableState) {
+                for (size_t target = 0; target < std::size(targetTableOffsets); ++target) {
+                    liveTargetTables[target] = *(uint64_t*)(
+                        (uint8_t*)slot.regions[i].ptr + targetTableOffsets[target]);
+                }
+                liveTargetCounts = *(uint32_t*)((uint8_t*)slot.regions[i].ptr + 0x1440);
+            }
+
             uint64_t liveUnitState[sizeof(CUNIT_LIVE_STATE_OFFSETS) / sizeof(CUNIT_LIVE_STATE_OFFSETS[0])];
             for (size_t field = 0;
                  field < sizeof(CUNIT_LIVE_STATE_OFFSETS) / sizeof(CUNIT_LIVE_STATE_OFFSETS[0]);
@@ -1992,6 +2014,23 @@ void Rollback_RestoreSnapshot(int32_t frame)
                                 slot.data + offset + range.offset,
                                 range.size);
                 }
+            }
+
+            // Each packed nibble is the active-entry bound for its heap table.
+            // Rewind it only when the live owner still identifies the captured
+            // allocation; otherwise retain the count belonging to the current
+            // allocation rather than pairing a saved bound with a new table.
+            if (hasTargetTableState) {
+                uint32_t targetCounts = *(const uint32_t*)(slot.data + offset + 0x1440);
+                for (size_t target = 0; target < std::size(targetTableOffsets); ++target) {
+                    uint64_t savedTable = *(const uint64_t*)(
+                        slot.data + offset + targetTableOffsets[target]);
+                    if (liveTargetTables[target] == savedTable) continue;
+                    uint32_t shift = (uint32_t)target * 4;
+                    targetCounts = (targetCounts & ~(0xFu << shift)) |
+                        (liveTargetCounts & (0xFu << shift));
+                }
+                *(uint32_t*)((uint8_t*)slot.regions[i].ptr + 0x1440) = targetCounts;
             }
 
             uint64_t concreteDti = GetObjectDti((uint64_t)slot.regions[i].ptr);
