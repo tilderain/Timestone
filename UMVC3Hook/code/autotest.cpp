@@ -103,6 +103,28 @@ constexpr InputStep PINEAPPLE_SURPRISE[] = {
     {0, 45},
 };
 
+constexpr InputStep AIR_NINJA_STARS[] = {
+    {IN_UP, 1},
+    {0, 8},
+    {IN_DOWN, 2},
+    {IN_DOWN | IN_RIGHT, 2},
+    {IN_RIGHT | IN_X, 1},
+    {0, 4},
+    {IN_X, 1},
+    {0, 45},
+};
+
+constexpr InputStep AIR_BOLOS[] = {
+    {IN_UP, 1},
+    {0, 8},
+    {IN_DOWN, 2},
+    {IN_DOWN | IN_RIGHT, 2},
+    {IN_RIGHT | IN_X, 1},
+    {0, 4},
+    {IN_B, 1},
+    {0, 45},
+};
+
 constexpr InputScript SCRIPTS[] = {
     {"QCF + Light", QCF_LIGHT, std::size(QCF_LIGHT)},
     {"QCB + Light", QCB_LIGHT, std::size(QCB_LIGHT)},
@@ -114,7 +136,19 @@ constexpr InputScript SUITE_MANUAL_SCRIPTS[] = {
     {"Forward Throw", FORWARD_THROW, std::size(FORWARD_THROW)},
     {"Back Throw", BACK_THROW, std::size(BACK_THROW)},
     {"Pineapple Surprise", PINEAPPLE_SURPRISE, std::size(PINEAPPLE_SURPRISE)},
+    {"Air Ninja Stars", AIR_NINJA_STARS, std::size(AIR_NINJA_STARS)},
+    {"Air Bolos", AIR_BOLOS, std::size(AIR_BOLOS)},
 };
+
+constexpr const char* SUITE_MANUAL_SCRIPT_CHARACTERS[] = {
+    nullptr,
+    nullptr,
+    "DeadPool",
+    "DeadPool",
+    "DeadPool",
+};
+static_assert(std::size(SUITE_MANUAL_SCRIPT_CHARACTERS) ==
+              std::size(SUITE_MANUAL_SCRIPTS));
 
 AutoTestStatus g_status = {
     false, 0, 0, -1, -1, -1, 0, -1, -1, -1, -1, -1, 0,
@@ -285,6 +319,7 @@ constexpr NetSuiteCaseSetup NET_SUITE_CASE_SETUPS[] = {
     {"Chris", 0, 28, -1, 500.0f, LONG_LIVED_MOVE_QUIET_FRAMES},
     {"Chris", 0, 29, -1, 500.0f, LONG_LIVED_MOVE_QUIET_FRAMES},
     {"DeadPool", -1, -1, 2, 500.0f, LONG_LIVED_MOVE_QUIET_FRAMES},
+    {"DeadPool", -1, -1, 4, 200.0f, LONG_LIVED_MOVE_QUIET_FRAMES},
 };
 
 bool g_netSuiteActive = false;
@@ -2208,10 +2243,14 @@ bool StartSuite(int32_t playerIndex, bool facingLeft, bool deduplicate)
     g_suiteManualCount = 0;
     for (int32_t manualIndex = 0;
          manualIndex < (int32_t)std::size(SUITE_MANUAL_SCRIPTS); ++manualIndex) {
+        const char* requiredCharacter =
+            SUITE_MANUAL_SCRIPT_CHARACTERS[manualIndex];
         g_suiteManualSelection[manualIndex] =
-            !g_suiteMoveFilterEnabled ||
-            MoveSelectorMatches(g_suiteMoveFilter, manualIndex + 1,
-                                SUITE_MANUAL_SCRIPTS[manualIndex].name);
+            (!requiredCharacter ||
+             _stricmp(g_autoTestCharacterName, requiredCharacter) == 0) &&
+            (!g_suiteMoveFilterEnabled ||
+             MoveSelectorMatches(g_suiteMoveFilter, manualIndex + 1,
+                                 SUITE_MANUAL_SCRIPTS[manualIndex].name));
         if (g_suiteManualSelection[manualIndex])
             ++g_suiteManualCount;
     }
