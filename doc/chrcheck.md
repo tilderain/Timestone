@@ -4,7 +4,7 @@ Repository context:
 - Binary: `umvc3.exe.unpacked.exe`
 - Current rollback restoration: `UMVC3Hook/code/rollback_restore.cpp`
 - Relevant array: `CCHR_SCALAR_RESTORE_RANGES`
-- Existing notes: `doc/umodel.md`, `doc/rollback.md`, `doc/chrfields.md`, `doc/sunit_categories.md`
+- Existing notes: `doc/umodel.md`, `doc/current.md`, `doc/chrfields.md`, `doc/sunit_categories.md`
 - Some existing comments and documentation contain obsolete PPC-era or incorrectly converted offsets. Do not trust them without native x64 evidence.
 - Actual `cChrInput` is embedded at `uCharacter+0x21C8`.
 - Verified x64 base boundaries currently include:

@@ -54,17 +54,8 @@ These preserve observations and reasoning from particular builds or captures.
 They are not descriptions of the current implementation:
 
 - [`dash_resim_root_cause.md`](dash_resim_root_cause.md)
-- [`fable`](fable)
-- [`fable2`](fable2)
 - [`fable3`](fable3)
 - [`fable3raw`](fable3raw)
-- [`optsave`](optsave)
-- [`resimrootcause.md`](resimrootcause.md)
-- [`rollback.md`](rollback.md)
-- [`rollback_comprehensive.md`](rollback_comprehensive.md)
-- [`rollback_rollback_context.txt`](rollback_rollback_context.txt)
-- [`rollbackcur.md`](rollbackcur.md)
-- [`test.md`](test.md)
 
 Historical root-cause documents may contain claims that were disproved by a
 later capture. Their headers identify the superseding material. Preserve them
