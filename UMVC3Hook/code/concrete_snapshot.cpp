@@ -1038,7 +1038,7 @@ void ConcreteShotSnapshot_RestoreCallbackEffects(
 
         // DTI alone does not identify the EFL resource that defines generator
         // tracks. Preserve the fresh graph unless it uses the captured resource,
-        // and never overwrite its generator counts at +0x204..+0x217.
+        // and stop scalar restoration before the live list count at +0x208.
         std::memcpy((uint8_t*)effect + 0x100, state.flags100,
                     sizeof(state.flags100));
         std::memcpy((uint8_t*)effect + 0x110, state.timing110,
