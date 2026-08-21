@@ -1030,7 +1030,7 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
                         int ping = SteamLobby_GetResultEstimatedPing(i);
                         char pingText[32];
                         if (ping >= 0) {
-                            snprintf(pingText, sizeof(pingText), "~%d ms", ping);
+                            snprintf(pingText, sizeof(pingText), "~%d ms", ping / 2);
                         } else if (SteamLobby_ArePingEstimatesAvailable()) {
                             snprintf(pingText, sizeof(pingText), "Pending");
                         } else {
