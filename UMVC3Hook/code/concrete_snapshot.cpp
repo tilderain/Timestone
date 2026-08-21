@@ -53,6 +53,8 @@ constexpr uintptr_t kInfernoDti = 0x140D49790ull;
 constexpr uintptr_t kShockingPinkBombDti = 0x140D4D6A0ull;
 constexpr uintptr_t kVulcanSwingWireDti = 0x140D4CB00ull;
 constexpr uintptr_t kVulcanBoomerangDti = 0x140D4D660ull;
+constexpr uintptr_t kShotLaserDti = 0x140D482E8ull;
+constexpr uintptr_t kDtiIsKindOf = 0x1400039D0ull;
 
 struct SnapshotRange {
     size_t offset;
@@ -334,6 +336,24 @@ uint32_t DtiSize(uint64_t dti)
 bool IsDti(uint64_t dti, uintptr_t expected)
 {
     return dti == (uint64_t)_addr(expected);
+}
+
+bool IsDtiKindOf(uint64_t dti, uintptr_t expected)
+{
+    return dti && ((uint8_t(__fastcall*)(void*, void*))_addr(kDtiIsKindOf))(
+        (void*)dti, (void*)_addr(expected));
+}
+
+bool IsLaserOwnedEffect(void* effect)
+{
+    if (!effect) return false;
+    for (size_t offset : {0x40u, 0x280u, 0x288u}) {
+        if (!Accessible((uint64_t)effect + offset, sizeof(void*))) continue;
+        void* owner = *(void**)((uint8_t*)effect + offset);
+        uint64_t ownerDti = GetDti(owner);
+        if (IsDtiKindOf(ownerDti, kShotLaserDti)) return true;
+    }
+    return false;
 }
 
 bool IsGameImageAddress(uint64_t address)
@@ -791,69 +811,66 @@ void RestoreAttackTargets(uint8_t* shot, const uint8_t* saved,
 
 } // namespace
 
-static bool CaptureEffectGenerators(
+static bool CaptureGeneratorEmissionState(
     void* effect, ConcreteShotSnapshot::CallbackEffectState& state)
 {
-    state.generators.clear();
+    state.generatorEmissionStates.clear();
     uint64_t generator = *(uint64_t*)((uint8_t*)effect + 0x218);
     for (uint32_t count = 0; generator; ++count) {
-        if (count >= kMaxCallbackGenerators || !Accessible(generator, 0x240)) {
-            state.generators.clear();
+        if (count >= kMaxCallbackGenerators || !Accessible(generator, 0x200)) {
+            state.generatorEmissionStates.clear();
             return false;
         }
 
-        ConcreteShotSnapshot::CallbackEffectState::GeneratorState saved{};
+        ConcreteShotSnapshot::CallbackEffectState::GeneratorEmissionState saved{};
         saved.dti = GetObjectDti(generator);
         if (!saved.dti) {
-            state.generators.clear();
+            state.generatorEmissionStates.clear();
             return false;
         }
         saved.resource = *(uint64_t*)(generator + 0x68);
-        std::memcpy(saved.state20, (void*)(generator + 0x20), sizeof(saved.state20));
-        std::memcpy(saved.state30, (void*)(generator + 0x30), sizeof(saved.state30));
-        std::memcpy(saved.state70, (void*)(generator + 0x70), sizeof(saved.state70));
-        std::memcpy(saved.stateB8, (void*)(generator + 0xB8), sizeof(saved.stateB8));
-        std::memcpy(saved.state110, (void*)(generator + 0x110), sizeof(saved.state110));
-        std::memcpy(saved.state19C, (void*)(generator + 0x19C), sizeof(saved.state19C));
-        std::memcpy(saved.state1F0, (void*)(generator + 0x1F0), sizeof(saved.state1F0));
-        saved.state238 = *(uint8_t*)(generator + 0x238);
-        state.generators.push_back(saved);
+        saved.phase = *(uint8_t*)(generator + 0x77);
+        std::memcpy(saved.timing78, (void*)(generator + 0x78),
+                    sizeof(saved.timing78));
+        saved.elapsed = *(uint32_t*)(generator + 0xB8);
+        std::memcpy(saved.spawnCounters, (void*)(generator + 0x1F4),
+                    sizeof(saved.spawnCounters));
+        state.generatorEmissionStates.push_back(saved);
         generator = *(uint64_t*)(generator + 0x18);
     }
     return true;
 }
 
-static bool RestoreEffectGenerators(
+static bool RestoreGeneratorEmissionState(
     void* effect, const ConcreteShotSnapshot::CallbackEffectState& state)
 {
-    if (!state.hasGeneratorState) return false;
+    if (!state.hasGeneratorEmissionState) return false;
 
     std::vector<uint64_t> generators;
-    generators.reserve(state.generators.size());
+    generators.reserve(state.generatorEmissionStates.size());
     uint64_t generator = *(uint64_t*)((uint8_t*)effect + 0x218);
     for (size_t index = 0; generator; ++index) {
-        if (index >= state.generators.size() ||
-            !Accessible(generator, 0x240) ||
-            GetObjectDti(generator) != state.generators[index].dti ||
-            *(uint64_t*)(generator + 0x68) != state.generators[index].resource) {
+        if (index >= state.generatorEmissionStates.size() ||
+            !Accessible(generator, 0x200) ||
+            GetObjectDti(generator) != state.generatorEmissionStates[index].dti ||
+            *(uint64_t*)(generator + 0x68) !=
+                state.generatorEmissionStates[index].resource) {
             return false;
         }
         generators.push_back(generator);
         generator = *(uint64_t*)(generator + 0x18);
     }
-    if (generators.size() != state.generators.size()) return false;
+    if (generators.size() != state.generatorEmissionStates.size()) return false;
 
     for (size_t index = 0; index < generators.size(); ++index) {
         generator = generators[index];
-        const auto& saved = state.generators[index];
-        std::memcpy((void*)(generator + 0x20), saved.state20, sizeof(saved.state20));
-        std::memcpy((void*)(generator + 0x30), saved.state30, sizeof(saved.state30));
-        std::memcpy((void*)(generator + 0x70), saved.state70, sizeof(saved.state70));
-        std::memcpy((void*)(generator + 0xB8), saved.stateB8, sizeof(saved.stateB8));
-        std::memcpy((void*)(generator + 0x110), saved.state110, sizeof(saved.state110));
-        std::memcpy((void*)(generator + 0x19C), saved.state19C, sizeof(saved.state19C));
-        std::memcpy((void*)(generator + 0x1F0), saved.state1F0, sizeof(saved.state1F0));
-        *(uint8_t*)(generator + 0x238) = saved.state238;
+        const auto& saved = state.generatorEmissionStates[index];
+        *(uint8_t*)(generator + 0x77) = saved.phase;
+        std::memcpy((void*)(generator + 0x78), saved.timing78,
+                    sizeof(saved.timing78));
+        *(uint32_t*)(generator + 0xB8) = saved.elapsed;
+        std::memcpy((void*)(generator + 0x1F4), saved.spawnCounters,
+                    sizeof(saved.spawnCounters));
     }
     return true;
 }
@@ -901,7 +918,8 @@ bool ConcreteShotSnapshot_Capture(void* shot, ConcreteShotSnapshot& out)
                     sizeof(state.state1F8));
         std::memcpy(state.state230, (uint8_t*)effect + 0x230,
                     sizeof(state.state230));
-        state.hasGeneratorState = CaptureEffectGenerators(effect, state);
+        state.hasGeneratorEmissionState =
+            CaptureGeneratorEmissionState(effect, state);
     }
     return true;
 }
@@ -930,7 +948,8 @@ bool ConcreteEffectSnapshot_Capture(
                 sizeof(state.state1F8));
     std::memcpy(state.state230, (uint8_t*)effect + 0x230,
                 sizeof(state.state230));
-    state.hasGeneratorState = CaptureEffectGenerators(effect, state);
+    state.hasGeneratorEmissionState =
+        CaptureGeneratorEmissionState(effect, state);
     return true;
 }
 
@@ -948,7 +967,10 @@ bool ConcreteEffectSnapshot_Restore(
     std::memcpy((uint8_t*)effect + 0x1E0, state.state1E0, sizeof(state.state1E0));
     std::memcpy((uint8_t*)effect + 0x1F8, state.state1F8, sizeof(state.state1F8));
     std::memcpy((uint8_t*)effect + 0x230, state.state230, sizeof(state.state230));
-    RestoreEffectGenerators(effect, state);
+    // Laser strips need to generate fresh history from frame zero. Applying an
+    // advanced emission cursor to an empty manager graph leaves them invisible.
+    if (!IsLaserOwnedEffect(effect))
+        RestoreGeneratorEmissionState(effect, state);
     return true;
 }
 
@@ -1021,7 +1043,8 @@ void ConcreteShotSnapshot_RestoreCallbackEffects(
                     sizeof(state.state1F8));
         std::memcpy((uint8_t*)effect + 0x230, state.state230,
                     sizeof(state.state230));
-        RestoreEffectGenerators(effect, state);
+        if (!IsDtiKindOf(snapshot.dti, kShotLaserDti))
+            RestoreGeneratorEmissionState(effect, state);
     }
 }
 
