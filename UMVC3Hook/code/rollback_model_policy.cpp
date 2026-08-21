@@ -15,11 +15,12 @@ constexpr ShotModelPolicy SHOT_MODEL_POLICIES[] = {
     {0x140D48CD0, "Hand Grenade", {0x100, 0x11B0}, 2, true, true},
 
     // Existing model-driven shots using the shared playback overlay or setup
-    // readiness check. Empty resource lists preserve their current pinning policy.
-    {0x140D49A60, "Missile Emplacement", {}, 0, true, false},
-    {0x140D4A1A8, "Weapon Cart", {}, 0, true, false},
+    // readiness check. Pin their primary model and motion resources; Cart's
+    // separately-owned model effects still use their dedicated pinning path.
+    {0x140D49A60, "Missile Emplacement", {0x100, 0x11B0}, 2, true, false},
+    {0x140D4A1A8, "Weapon Cart", {0x100, 0x11B0}, 2, true, false},
     {0x140D4C4C8, "Pendulum Log", {0x100, 0x11B8}, 2, true, false},
-    {0x140D4ABB8, "Legion Tiger", {}, 0, false, true},
+    {0x140D4ABB8, "Legion Tiger", {0x100, 0x11B0}, 2, false, true},
 };
 
 }
