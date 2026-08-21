@@ -93,8 +93,7 @@ void UMVC3Menu::Draw()
 
 void UMVC3Menu::UpdateControls()
 {
-    static bool previousF1 = false;
-	if (KeyPressed(VK_F1, previousF1))
+	if (KeyPressed(VK_F1))
 	{
 		m_bIsActive ^= 1;
 	}

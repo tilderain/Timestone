@@ -800,8 +800,7 @@ void Exception_RemoveHandler()
 
 void Exception_UpdateTestHotkey()
 {
-    static bool wasDown = false;
-    if (KeyPressed(VK_F4, wasDown)) {
+    if (KeyPressed(VK_F4)) {
         const ULONG_PTR details[] = {
             1, // Write access.
             0  // Address that would have been written.

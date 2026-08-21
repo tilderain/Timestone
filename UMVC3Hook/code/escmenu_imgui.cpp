@@ -26,8 +26,7 @@ void ExitGame()
 
 void EscMenuImGui_Update()
 {
-    static bool previousEscape = false;
-    if (KeyPressed(VK_ESCAPE, previousEscape)) {
+    if (KeyPressed(VK_ESCAPE)) {
         if (g_open)
             g_open = false;
         else if (!ChrSelImGui_IsOpen() && !TheMenu->GetActiveState())

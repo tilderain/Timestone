@@ -742,12 +742,10 @@ void ChrSelImGui_Update()
             CommitSelection();
     }
 
-    static bool previousF8 = false;
-    if (KeyPressed(VK_F8, previousF8) && !g_open)
+    if (KeyPressed(VK_F8) && !g_open)
         RequestOpen();
 
-    static bool previousF9 = false;
-    if (KeyPressed(VK_F9, previousF9))
+    if (KeyPressed(VK_F9))
         BeginRandomizeAndRestart();
 
     ChrSelPacket packet = {};

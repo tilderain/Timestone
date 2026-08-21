@@ -1025,12 +1025,43 @@ void FrameStepper_Init()
 
 // Shared render-frame keyboard snapshot avoids repeated per-key Win32 calls.
 static BYTE g_processKeyboardState[256] = {};
+static bool g_processKeyboardPressed[256] = {};
+static bool g_processKeyboardArmed[256] = {};
+static DWORD g_processKeyboardReleaseTick[256] = {};
 static bool g_processKeyboardStateValid = false;
+static bool g_processKeyboardStateInitialized = false;
 
 void UpdateKeyboardState()
 {
-    g_processKeyboardStateValid =
-        GetKeyboardState(g_processKeyboardState) != FALSE;
+    BYTE currentState[256] = {};
+    if (GetKeyboardState(currentState) == FALSE) {
+        memset(g_processKeyboardPressed, 0, sizeof(g_processKeyboardPressed));
+        g_processKeyboardStateValid = false;
+        return;
+    }
+
+    const DWORD now = GetTickCount();
+    for (int vk = 0; vk < 256; ++vk) {
+        const bool isDown = (currentState[vk] & 0x80) != 0;
+        g_processKeyboardPressed[vk] = false;
+
+        if (!g_processKeyboardStateInitialized) {
+            g_processKeyboardArmed[vk] = !isDown;
+        } else if (isDown) {
+            g_processKeyboardPressed[vk] = g_processKeyboardArmed[vk];
+            g_processKeyboardArmed[vk] = false;
+            g_processKeyboardReleaseTick[vk] = 0;
+        } else if (!g_processKeyboardArmed[vk]) {
+            if (g_processKeyboardReleaseTick[vk] == 0) {
+                g_processKeyboardReleaseTick[vk] = now;
+            } else if (now - g_processKeyboardReleaseTick[vk] >= 30) {
+                g_processKeyboardArmed[vk] = true;
+            }
+        }
+    }
+    memcpy(g_processKeyboardState, currentState, sizeof(g_processKeyboardState));
+    g_processKeyboardStateValid = true;
+    g_processKeyboardStateInitialized = true;
 }
 
 bool KeyDown(int vk)
@@ -1039,12 +1070,14 @@ bool KeyDown(int vk)
         (g_processKeyboardState[vk] & 0x80) != 0;
 }
 
-bool KeyPressed(int vk, bool& previousState)
+bool KeyPressed(int vk)
 {
-    const bool currentState = KeyDown(vk);
-    const bool pressed = currentState && !previousState;
-    previousState = currentState;
-    return pressed;
+    if (!g_processKeyboardStateValid || vk < 0 || vk >= 256 ||
+        !g_processKeyboardPressed[vk])
+        return false;
+
+    g_processKeyboardPressed[vk] = false;
+    return true;
 }
 
 static void UnpauseFrameStepper()
@@ -1106,8 +1139,7 @@ void FrameStepper_Process()
             HookLog("AutoTestSuite: command-line suite started after synchronized training readiness\n");
         }
     }
-    static bool prevDumpNDJSON = false;
-    if (KeyPressed(VK_F10, prevDumpNDJSON))
+    if (KeyPressed(VK_F10))
     {
         const int32_t frame = Controller_GetNetFrameCount();
         Rollback_DumpNetplayHistory(frame);
@@ -1125,8 +1157,7 @@ void FrameStepper_Process()
                 remoteDumpFrame);
     }
 
-    static bool prevRestart = false;
-    if (IsPastIntroStep() && KeyPressed(VK_F11, prevRestart)) {
+    if (IsPastIntroStep() && KeyPressed(VK_F11)) {
         const bool desyncWait = isPaused && g_desyncDetected;
         if (RequestMatchRestart() && desyncWait) {
             g_desyncDetected = false;
@@ -1165,23 +1196,21 @@ void FrameStepper_Process()
     }
     // Netplay settings hotkeys. These work regardless of training mode so both
     // sides can adjust them mid-match.
-    static bool prevBracketL = false, prevBracketR = false;
-    static bool prevSemicolon = false, prevApostrophe = false;
     if (Netplay_IsActive())
     {
-        if (KeyPressed(VK_OEM_4, prevBracketL))  // [ = decrease delay
+        if (KeyPressed(VK_OEM_4))  // [ = decrease delay
         {
             AdjustNetplayDelay(-1);
         }
-        if (KeyPressed(VK_OEM_6, prevBracketR))  // ] = increase delay
+        if (KeyPressed(VK_OEM_6))  // ] = increase delay
         {
             AdjustNetplayDelay(1);
         }
-        if (KeyPressed(VK_OEM_1, prevSemicolon))  // ; = decrease rollback
+        if (KeyPressed(VK_OEM_1))  // ; = decrease rollback
         {
             ScheduleNetplayRollback(Controller_GetRollbackFrames() - 1);
         }
-        if (KeyPressed(VK_OEM_7, prevApostrophe))  // ' = increase rollback
+        if (KeyPressed(VK_OEM_7))  // ' = increase rollback
         {
             ScheduleNetplayRollback(Controller_GetRollbackFrames() + 1);
         }
@@ -1228,9 +1257,8 @@ void FrameStepper_Process()
     // --- Desync auto-pause (works in any mode). ---
     // P always performs the complete frame-stepper unpause action. If a desync
     // alert exists, it also dismisses and synchronizes that alert.
-    static bool prevDesyncP = false;
     bool desyncActive = g_desyncDetected || g_desyncSeen;
-    const bool pPressed = KeyPressed(0x50, prevDesyncP);
+    const bool pPressed = KeyPressed('P');
     if (pPressed)
     {
         UnpauseFrameStepper();
@@ -1251,14 +1279,13 @@ void FrameStepper_Process()
     }
     if (!IsTrainingMode())
     {
-        if (isPaused && !g_desyncDetected) {
-            UnpauseFrameStepper();
-        }
+        // The character graph can disappear briefly while the native pause
+        // popup initializes. Do not interpret that transient as an unpause;
+        // P remains available globally to leave a paused state.
         return;
     }
     // Toggle pause
-    static bool prevPause = false;
-    if (KeyPressed(KEY_PAUSE, prevPause))
+    if (KeyPressed(KEY_PAUSE))
     {
         isPaused = !isPaused;
         if (isPaused)
@@ -1274,8 +1301,7 @@ void FrameStepper_Process()
     }
 
     // Advance one frame while paused
-    static bool prevAdvance = false;
-    if (isPaused && KeyPressed(KEY_ADVANCE, prevAdvance))
+    if (isPaused && KeyPressed(KEY_ADVANCE))
     {
         advanceFrame = true;
         g_captureRequested = true; // snapshot the advanced frame
@@ -1288,17 +1314,16 @@ void FrameStepper_Process()
         auto sReplay = *(uint64_t*)_addr(0x140d4d9d8);
         int32_t curFrame = sReplay ? *(int32_t*)(sReplay + 0x54) : 0;
 
-        static bool prevF5 = false, prevF6 = false, prevF7 = false;
-        if (KeyPressed(VK_F5, prevF5)) {
+        if (KeyPressed(VK_F5)) {
             Rollback_SaveSnapshot(curFrame);
             lastSaveFrame = curFrame;
             HookLog("Rollback: saved snapshot at game frame %d\n", curFrame);
         }
-        if (KeyPressed(VK_F6, prevF6)) {
+        if (KeyPressed(VK_F6)) {
             g_restoreRequestedFrame = lastSaveFrame;
             HookLog("Rollback: requesting restore to frame %d (deferred to frame boundary)\n", lastSaveFrame);
         }
-        if (KeyPressed(VK_F7, prevF7)) {
+        if (KeyPressed(VK_F7)) {
             g_f7State = 1;
             g_f7StartFrame = curFrame;
             g_f7Remaining = 8;
