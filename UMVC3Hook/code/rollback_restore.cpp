@@ -26,6 +26,7 @@ static constexpr uintptr_t PTR_SHITSOLVER = 0x140d44060;
 static constexpr uintptr_t PTR_SMAIN = 0x140e177e8;
 static constexpr uintptr_t PTR_SMVC3MGR = 0x140d510a0;
 static constexpr uintptr_t PTR_SUNIT = 0x140e17698;
+static constexpr uintptr_t DTI_UIRONMAN = 0x140D45518;
 static constexpr uintptr_t PTR_SCOLLISION = 0x140e18250;
 static constexpr uintptr_t PTR_SCAMERA = 0x140e17930;
 static constexpr uintptr_t PTR_SGAMEEFFECT = 0x140d46470;
@@ -2048,6 +2049,23 @@ void Rollback_RestoreSnapshot(int32_t frame)
 
             uint8_t* character = (uint8_t*)slot.regions[i].ptr;
             const uint8_t* savedCharacter = slot.data + offset;
+
+            if (concreteDti == (uint64_t)_addr(DTI_UIRONMAN) &&
+                copySize >= 0x6928) {
+                // Iron Man treats these as weak uGameEffect references and
+                // dispatches virtual +0x78/+0xD8 after only an isAlive check.
+                // A retired effect address can be reused by an unrelated live
+                // object, making that check pass with an incompatible vtable.
+                for (uint32_t effectOffset : {0x68F0u, 0x6900u, 0x6920u}) {
+                    void** effectSlot = (void**)(character + effectOffset);
+                    if (*effectSlot && !IsEffectObject(*effectSlot)) {
+                        HookLog("Rollback: cleared stale Iron Man effect slot "
+                                "+0x%X object=0x%llX\n", effectOffset,
+                                (uint64_t)*effectSlot);
+                        *effectSlot = nullptr;
+                    }
+                }
+            }
 
             restoreCnsHelper(character, savedCharacter, copySize, 0x3BF0);
             restoreCnsHelper(character, savedCharacter, copySize, 0x3D60);
