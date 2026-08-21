@@ -61,6 +61,7 @@ static constexpr uintptr_t DTI_USHOT_VULCAN_WEAPON_CART = 0x140D4A1A8;
 static constexpr uintptr_t DTI_USHOT_VULCAN_EXATK_ROCKET_LAUNCHER = 0x140D4BA48;
 static constexpr uintptr_t DTI_USHOT_VULCAN_ROCKET_LAUNCHER_EXPLODE = 0x140D4BAC8;
 static constexpr uintptr_t DTI_USHOT_VULCAN_PENDULUM_LOG = 0x140D4C4C8;
+static constexpr uintptr_t DTI_USHOT_VULCAN_FIRE_GRENADE_BOMB = 0x140D48BB0;
 static constexpr uintptr_t DTI_USHOT_VULCAN_HAND_GRENADE_BOMB = 0x140D48CD0;
 static constexpr int DYNAMIC_SAFETY = 128;
 static constexpr int SSHOT_SENTINEL_COUNT = 10;
@@ -909,12 +910,20 @@ static void __fastcall hkMissileEmplacementMove(void* shot)
 
 static void __fastcall hkHandGrenadeContact(void* shot, void* contact)
 {
-    bool handGrenade = shot && HasCallableDtiVirtual(shot) &&
-        GetObjectDti((uint64_t)shot) ==
-            (uint64_t)_addr(DTI_USHOT_VULCAN_HAND_GRENADE_BOMB);
-    if (handGrenade && *(uint32_t*)((uint8_t*)shot + 0x2214) == 1 &&
+    uint64_t dti = shot && HasCallableDtiVirtual(shot)
+        ? GetObjectDti((uint64_t)shot) : 0;
+    bool fireGrenade = dti ==
+        (uint64_t)_addr(DTI_USHOT_VULCAN_FIRE_GRENADE_BOMB);
+    bool grenade = fireGrenade ||
+        dti == (uint64_t)_addr(DTI_USHOT_VULCAN_HAND_GRENADE_BOMB);
+    uint32_t boundCount = grenade
+        ? *(uint32_t*)((uint8_t*)shot + 0x2214) : 0;
+    bool staleUpwardContact = fireGrenade && boundCount > 0 &&
+        *(float*)((uint8_t*)shot + 0x2088) < 0.0f;
+    bool repeatedHandGrenadeContact = !fireGrenade && boundCount == 1 &&
         (*(uint32_t*)((uint8_t*)shot + 0x1FE0) & 0x10000000u) != 0 &&
-        *(float*)((uint8_t*)shot + 0x2088) < 0.0f) {
+        *(float*)((uint8_t*)shot + 0x2088) < 0.0f;
+    if (staleUpwardContact || repeatedHandGrenadeContact) {
         // A reconstructed primitive can retain its prior floor overlap for one
         // frame after bouncing. Native live movement is upward at this point,
         // so this is the old contact, not the next physical bounce.
@@ -923,7 +932,7 @@ static void __fastcall hkHandGrenadeContact(void* shot, void* contact)
     }
 
     oHandGrenadeContact(shot, contact);
-    if (handGrenade &&
+    if (grenade &&
         *(uint32_t*)((uint8_t*)shot + 0x2214) == 1) {
         // Reconstructed collision lacks the host's first-contact latch. Without
         // it the same floor contact is accepted again and advances bounce phase.

@@ -272,6 +272,7 @@ struct NetSuiteCaseSetup {
 
 constexpr NetSuiteCaseSetup NET_SUITE_CASE_SETUPS[] = {
     {"Chris", 0, 28, 500.0f, LONG_LIVED_MOVE_QUIET_FRAMES},
+    {"Chris", 0, 29, 500.0f, LONG_LIVED_MOVE_QUIET_FRAMES},
 };
 
 bool g_netSuiteActive = false;

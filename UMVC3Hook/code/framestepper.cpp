@@ -1251,7 +1251,9 @@ void FrameStepper_Process()
     }
 
     const int32_t desyncProcessFrame = Controller_GetNetFrameCount();
-    const bool desyncCapturePending = g_desyncDetected &&
+    // A synchronized autotest restart clears the UI desync flag when its
+    // packet arrives, but the delayed capture must continue through trigger+15.
+    const bool desyncCapturePending =
         Rollback_ProcessDesyncDelay(desyncProcessFrame);
 
     // --- Desync auto-pause (works in any mode). ---
