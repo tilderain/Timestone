@@ -68,10 +68,10 @@ motion, joint, root-motion, position, collision, RNG, helper, and team aggregate
 state. `uCharacterPost__move` can subsequently register collision primitives
 from those results.
 
-## Confirmed Restore Gap
+## Fixed Restore Gap
 
-The character snapshot contains the complete cUnit flag word at `cChr+0x10`,
-but ordinary roster-character restore does not retain the saved value.
+The character snapshot contains the complete cUnit flag word at `cChr+0x10`.
+The restore previously discarded that saved value for roster characters.
 
 In `rollback_restore.cpp`:
 
@@ -79,15 +79,18 @@ In `rollback_restore.cpp`:
 2. Restore saves those qwords from the prediction timeline.
 3. It copies the snapshot character body.
 4. It then writes the preserved live qwords back.
-5. The loop excludes only intrusive-link offsets `+0x18`, `+0x20`, and `+0x38`.
-   It writes the live prediction-time qword back at `+0x10`.
+5. The old loop excluded only intrusive-link offsets `+0x18`, `+0x20`, and
+   `+0x38`. It wrote the live prediction-time qword back at `+0x10`.
 
-The implementation contradicts its adjacent comment, which says the flag word
-must follow the saved frame. No later ordinary-character restore range corrects
-`+0x10`. `uCharacterPost` has a dedicated saved move-enable bit, but roster
-characters do not.
+The restore now leaves the snapshot's `+0x10` qword in place for the six roster
+characters. Helper cChr objects retain the old live-lifecycle policy so rewind
+cannot re-run their setup/createProperty lifecycle. Intrusive links at `+0x18`,
+`+0x20`, and `+0x38` remain live for every object. Roster `+0x10` is also
+excluded from the broad pointer-preservation scan so an aligned inactive flag
+combination cannot be misclassified and restored from the live timeline later.
 
-This gap can create an erroneous full reserve update under the following state:
+The old gap could create an erroneous full reserve update under the following
+state:
 
 ```text
 saved mChrF.bit0 == 0
@@ -95,15 +98,15 @@ saved cUnit state was inactive or move-disabled
 live prediction cUnit state is active and move-enabled
 ```
 
-Restore then combines historical `mChrF` with live lifecycle/move flags, causing
-the character to pass `cChr__isMoveActive`. The headless category-8 traversal
-uses the same live `+0x10` state to decide whether to dispatch the callback.
-Four reserve objects can independently inherit this mismatch.
+The old restore combined historical `mChrF` with live lifecycle/move flags,
+causing the character to pass `cChr__isMoveActive`. The headless category-8
+traversal uses the same `+0x10` state to decide whether to dispatch the callback.
+Four reserve objects could independently inherit this mismatch.
 
 ## Explanatory Limit
 
-The `+0x10` gap is a real possible mechanism, but static analysis does not prove
-that it caused the measured opening windows.
+The former `+0x10` gap was a real possible mechanism, but static analysis does
+not prove that it caused the measured opening windows.
 
 In ordinary bench frames, profiling showed six category-8 callbacks but only two
 full input paths. This proves all six cUnits were already active and
@@ -112,9 +115,9 @@ character restore explicitly reapplies `+0x14F0..+0x1517` from the snapshot.
 During native opening reset, all six saved `mChrF.bit0` values are intentionally
 clear.
 
-The cUnit gap matters specifically at a lifecycle boundary where saved and live
-`+0x10` eligibility differ. It cannot turn a correctly restored
-`mChrF.bit0 == 1` bench character move-active by itself.
+The fix matters specifically at a lifecycle boundary where saved and live
+`+0x10` eligibility differ. It does not change ordinary bench frames where the
+saved and live cUnit flags already agree.
 
 ## Other Restore Asymmetries
 
@@ -167,8 +170,35 @@ Interpretation:
 
 ## Verdict
 
-Live preservation of `cChr+0x10` is the only confirmed restore gap directly
-inside the three-term `cChr__isMoveActive` predicate. It can leave four reserves
-move-active across a saved cUnit lifecycle/move-enable transition. It is not yet
-proven to explain the observed six-character opening state, which has a complete
-native explanation through `uCharacter__resetForMatch`.
+Live preservation of roster `cChr+0x10` was the only confirmed restore gap
+directly inside the three-term `cChr__isMoveActive` predicate. Roster characters
+now restore this qword from the snapshot, while helper lifecycle and all
+intrusive links remain live. The old defect is not proven to explain the
+observed six-character opening state, which has a complete native explanation
+through `uCharacter__resetForMatch`.
+
+
+Restoring cUnit+0x10
+Advantages:
+- Character callback eligibility matches the snapshot.
+- Prevents prediction-time state == 2 or Move == 1 from making historical reserves update.
+- Restores characters that were active historically but became inactive on the prediction timeline.
+- Keeps cChr__isMoveActive internally consistent with restored mChrF.
+Risks:
+- Restoring lifecycle states 1, 3, or 4 can make native sUnit setup, unlink, or destroy an already-live roster object.
+- Restoring mMoveLine can disagree with the live intrusive list containing the character.
+- Restoring draw, visibility, fix, and draw-view bits rewinds presentation state unnecessarily.
+- The current qword restoration also rewinds mDrawMode at +0x14.
+- Live resource ownership and scheduler links may no longer agree with the restored lifecycle flags.
+Not restoring it
+Advantages:
+- Lifecycle flags remain consistent with the live sUnit lists and allocations.
+- Avoids repeating setup or destruction.
+- Preserves current renderer visibility and draw state.
+- This is safer for dynamically created helper characters.
+Risks:
+- Produces mixed-frame character state: historical mChrF, actions, and status combined with prediction-time callback eligibility.
+- A reserve can receive an extra full update.
+- A historically active character can incorrectly miss its update.
+- TAC, tag, assist, or defeat transitions can observe the wrong alive/move state.
+- The first replayed frame can already diverge before character logic has a chance to correct it.

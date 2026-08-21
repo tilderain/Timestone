@@ -1935,6 +1935,10 @@ void Rollback_RestoreSnapshot(int32_t frame)
             for (size_t fieldOffset = sizeof(uint64_t);
                  fieldOffset + sizeof(uint64_t) <= copySize && livePointerCount < 512;
                  fieldOffset += sizeof(uint64_t)) {
+                if (fieldOffset == CUNIT_FLAGS_OFFSET &&
+                    isTeamCharacter((uint64_t)slot.regions[i].ptr)) {
+                    continue;
+                }
                 uint64_t liveValue = *(uint64_t*)((uint8_t*)slot.regions[i].ptr + fieldOffset);
                 uint64_t savedValue = *(uint64_t*)(slot.data + offset + fieldOffset);
                 if (IsLikelyPointer(liveValue) || IsLikelyPointer(savedValue)) {
@@ -1946,21 +1950,20 @@ void Rollback_RestoreSnapshot(int32_t frame)
             std::memcpy((uint8_t*)slot.regions[i].ptr + sizeof(uint64_t),
                         slot.data + offset + sizeof(uint64_t),
                         copySize - sizeof(uint64_t));
-            // cChr derives from cUnit. Preserve its live lifecycle state and
-            // intrusive links: rewinding +0x10 can re-run setup/createProperty
-            // for an already-live helper, while rewinding the links corrupts
-            // sUnit traversal shared with objects outside this snapshot.
+            // cChr derives from cUnit. Roster lifecycle/move flags must follow
+            // the saved frame, while helper lifecycle state stays live to avoid
+            // re-running setup/createProperty. Intrusive links always remain
+            // live because their lists include objects outside this snapshot.
             for (size_t field = 0;
                  field < sizeof(CUNIT_LIVE_STATE_OFFSETS) / sizeof(CUNIT_LIVE_STATE_OFFSETS[0]);
                  ++field) {
                 uint32_t fieldOffset = CUNIT_LIVE_STATE_OFFSETS[field];
-                // The flag word controls whether a roster character is alive
-                // and participates in the move pass. TAC can restore an
-                // incoming character after the live timeline has marked it
-                // dead, so this must follow the saved frame. The other fields
-                // are intrusive links and remain peer-local.
                 if (fieldOffset == 0x18 || fieldOffset == 0x20 || fieldOffset == 0x38)
                     continue;
+                if (fieldOffset == CUNIT_FLAGS_OFFSET &&
+                    isTeamCharacter((uint64_t)slot.regions[i].ptr)) {
+                    continue;
+                }
                 *(uint64_t*)((uint8_t*)slot.regions[i].ptr + fieldOffset) = liveUnitState[field];
             }
             // Keep live draw-list/resource ownership and uModel lifecycle state,
