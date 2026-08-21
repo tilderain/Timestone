@@ -146,7 +146,6 @@ struct SteamNetworkPingLocation_t {
 class ISteamNetworkingUtils {
 public:
     virtual SteamNetworkingMessage_t* AllocateMessage(int) = 0;
-    virtual void InitRelayNetworkAccess() = 0;
     virtual int GetRelayNetworkStatus(void*) = 0;
     virtual float GetLocalPingLocation(SteamNetworkPingLocation_t&) = 0;
     virtual int EstimatePingTimeBetweenTwoLocations(const SteamNetworkPingLocation_t&,

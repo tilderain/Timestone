@@ -670,7 +670,6 @@ bool SteamLobby_Initialize()
         SetStatus("Steam ready; ping estimates unavailable");
         return true;
     }
-    g_networkingUtils->InitRelayNetworkAccess();
     g_networkingUtils->CheckPingDataUpToDate(1.0e10f);
     StartCallbackPump();
     SetStatus("Steam ready");
