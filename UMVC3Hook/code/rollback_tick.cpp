@@ -750,7 +750,7 @@ void Rollback_HeadlessTick(uint64_t sMain)
     //((ObjectFn)_addr(FN_AI_SUBSTEP))(MainMember(sMain, 0x40240)); // Run the AI substep helper.
     //VTableCall(MainMember(sMain, 0x401d8), 0x30); // mpEffect::move.
     //VTableCall(MainMember(sMain, 0x40208), 0x30); // mpGpuParticle::move.
-    VTableCall(MainMember(sMain, 0x401b0), 0x30); // mpCamera::move.
+    VTableCall(MainMember(sMain, 0x401b0), 0x30); // mpCamera::move.     ////Check if this is needed and the perf cost
     //VTableCall(MainMember(sMain, 0x401f0), 0x30); // mpSound::move.
     //VTableCall(MainMember(sMain, 0x40248), 0x30); // mpScene::move.
     //VTableCall(MainMember(sMain, 0x40258), 0x30); // mpShadow::move.

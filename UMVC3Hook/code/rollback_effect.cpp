@@ -77,6 +77,7 @@ static std::vector<RollbackEffectRecipe> g_liveEffectRecipes;
 static uint64_t g_effectSpawnSequence = 0;
 
 static std::vector<void*> g_resimEffects;
+static thread_local bool g_inGameEffectFlushHitMarks = false;
 
 struct EffectTraceEntry {
     uint64_t sequence;
@@ -580,7 +581,9 @@ static void ClearInvalidCharacterIndexedEffects()
 
 static void __fastcall hkGameEffectFlushHitMarks(void* manager)
 {
-    if (g_isResimulating) {
+    // A replayed effect can be destroyed during resimulation while its
+    // character slot is consumed by the outer live tick immediately afterward.
+    if (g_isResimulating || g_postResimFrame >= 0) {
         ClearInvalidCharacterIndexedEffects();
         // Hit-mark commands can target assist/proxy characters not reachable
         // through the short team-list scan above. Native command dispatch reads
@@ -600,12 +603,16 @@ static void __fastcall hkGameEffectFlushHitMarks(void* manager)
             }
         }
     }
+    const bool wasFlushing = g_inGameEffectFlushHitMarks;
+    g_inGameEffectFlushHitMarks = true;
     oGameEffectFlushHitMarks(manager);
+    g_inGameEffectFlushHitMarks = wasFlushing;
 }
 
 static uint8_t __fastcall hkMtObjectIsKindOf(void* object, void* dti)
 {
-    if (g_isResimulating) {
+    if (g_isResimulating || g_postResimFrame >= 0 ||
+        g_inGameEffectFlushHitMarks) {
         if (!object || !IsAccessibleRange((uint64_t)object, sizeof(uint64_t)))
             return 0;
         uint64_t vtable = *(uint64_t*)object;
@@ -620,7 +627,9 @@ static uint8_t __fastcall hkMtObjectIsKindOf(void* object, void* dti)
 static void __fastcall hkMtObjectReplaceIndexedSlot(
     void* owner, uint32_t index, void* replacement)
 {
-    if (g_isResimulating && owner && index < CHARACTER_INDEXED_EFFECT_COUNT &&
+    if ((g_isResimulating || g_postResimFrame >= 0 ||
+         g_inGameEffectFlushHitMarks) &&
+        owner && index < CHARACTER_INDEXED_EFFECT_COUNT &&
         IsAccessibleRange((uint64_t)owner + CHARACTER_INDEXED_EFFECTS_OFFSET +
                           index * sizeof(void*), sizeof(void*))) {
         void** slot = (void**)((uint8_t*)owner +
