@@ -1,5 +1,6 @@
 #include "netplay.h"
 #include "rollback.h"
+#include "rollback_diagnostics.h"
 #include "controller.h"
 #include "steam_transport.h"
 #include <cstring>
@@ -182,6 +183,7 @@ static DWORD WINAPI Netplay_ServiceThread(LPVOID)
 
     while (g_running)
     {
+        Rollback_FreezeWatchdogPoll();
         uint32_t timeoutMs = g_requestedTimeoutMs.exchange(0);
         if (timeoutMs != 0 && g_peer)
         {

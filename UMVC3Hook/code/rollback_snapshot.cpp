@@ -53,6 +53,10 @@ static constexpr uintptr_t NODE_CHR_OFFSET = 0x08;
 static constexpr uintptr_t NODE_NEXT_OFFSET = 0x10;
 static constexpr uintptr_t TEAM_FIRST_NODE_OFFSET = 0x08;
 static constexpr size_t MAX_CHAR_SIZE = 0x40000;
+// cChr's shared body ends where concrete character tails begin. Some helper
+// subclasses, including uFeliciaF, are smaller than the historical 0x6A60
+// fallback; expanding them overwrites unrelated allocations placed after them.
+static constexpr size_t CCHR_MIN_SIZE = 0x68F0;
 static constexpr size_t CCHR_NOMINAL_SIZE = 0x6A60;
 static constexpr size_t CCHR_MAX_SIZE = 30000;
 static constexpr uint32_t CCHR_NUM_JOINTS_OFFSET = 0x530;
@@ -1030,7 +1034,7 @@ static int BuildRegionsUncached(Region* regions, int maxRegions,
                     uint64_t dtiPtr = GetObjectDti(character);
                     uint32_t charSize = DecodeDtiSize(dtiPtr);
                     uint32_t finalSize = charSize;
-                    if (finalSize < CCHR_NOMINAL_SIZE || finalSize > CCHR_MAX_SIZE) {
+                    if (finalSize < CCHR_MIN_SIZE || finalSize > CCHR_MAX_SIZE) {
                         finalSize = CCHR_NOMINAL_SIZE;
                     }
                     uint32_t* animFields = (uint32_t*)(character + 0x1300);

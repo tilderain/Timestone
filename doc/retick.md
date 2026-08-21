@@ -161,6 +161,24 @@ Ryu's action-227 path requires additional care: suppressing the final enqueue
 does not permit skipping the preceding timer, index, positional RNG, or random
 voice-selection work.
 
+## uCharacterPost Movement
+
+`uCharacterPost__move` at `0x14005E2E0` contains no render or presentation-only
+work. It validates two cached character pointers, walks both teams, calls
+`uCharacter__movePost` at `0x14004B680` for every character, and then calls
+`sReplay__processPerFrame` at `0x1401CEFD0`.
+
+`uCharacter__movePost` is collision work despite its late placement. It resets
+the character collision object's move state, updates as many as 16 embedded
+collision primitives, and queues active objects and contact callbacks with
+`sCollision`. Skipping it would change collision registration and contact
+results. `sReplay__processPerFrame` advances recording/playback counters and can
+write replay input, so it is also simulation state rather than presentation.
+
+The estimated removable presentation cost in `uCharacterPost__move` is
+therefore `0.000 ms/frame`. Any measurable category-18 move cost belongs to
+collision and replay processing, not rendering.
+
 ## Cause Of uRyu Timing Spikes
 
 The profile shows two distinct character-movement regimes.
@@ -252,7 +270,7 @@ cheap finalization path or continue through the full path containing:
 The existing `process_frame_input` hook count is therefore a useful proxy for
 the number of full-path characters in each replay window.
 
-## Expected Gain From The Two Model Skips
+## Expected Gain From Presentation Skips
 
 The likely steady-state gain from suppressing the two presentation-oriented
 model helpers is modest:
@@ -260,12 +278,86 @@ model helpers is modest:
 | Candidate | Estimated saving |
 |---|---:|
 | Camera visibility mask | 0.002-0.008 ms/frame total |
-| Auxiliary render texture | 0.005-0.050 ms/frame normally |
-| Combined normal estimate | 0.02-0.08 ms/frame |
-| Render-heavy optimistic case | 0.10-0.15 ms/frame |
+| Auxiliary render texture | 0.0008-0.0021 ms/frame observed |
+| Combined model-helper estimate | 0.003-0.010 ms/frame |
+| Unsampled allocation/upload case | Unknown |
 
-For a normal headless tick of `1.31 ms/frame`, the likely improvement is about
-2-6%, with an optimistic state-dependent result around 8-11%.
+These are profile-derived static estimates rather than isolated microbenchmarks.
+With the normal two-character full path, the camera estimate implies
+approximately `0.001-0.004 ms` per camera-mask call. The measured
+auxiliary-texture helper averaged approximately `0.0003 ms` per call. It remains
+state-dependent: its cheap branch only checks or releases a context resource,
+while its expensive branch can allocate a texture, walk every model joint, and
+upload staging data.
+
+The shared `sGSound` voice-parameter update is estimated at another
+`0.001-0.010 ms` per call when its uncontended critical section reaches voice
+lookup and parameter application. It can be cheaper when the stored parameter
+already selects no update. For two full-path characters, a reasonable total is
+`0.002-0.020 ms/frame`; for six full-path characters it is roughly
+`0.006-0.060 ms/frame`. This range is less certain than the model estimates
+because the supplied profile did not time this helper separately.
+
+Combining all three shared presentation candidates gives the following working
+budget:
+
+| State | Estimated presentation-only time |
+|---|---:|
+| One full-path character | 0.002-0.015 ms/frame |
+| Normal two-character full path | 0.005-0.030 ms/frame |
+| Six-character full path | 0.015-0.090 ms/frame |
+| `uCharacterPost__move` | 0.000 ms/frame removable |
+
+### Current resimulation behavior
+
+None of the three shared candidates above is currently skipped at its own call
+site:
+
+| Candidate | Skipped during resimulation? | Current path |
+|---|---|---|
+| `uModel__updateCameraVisibilityMask` | No | `uCharacter__move_base` calls the unhooked `0x1402021D0 -> 0x140200CB0` model thunk, which calls this helper unconditionally. |
+| `uModel__updateAuxRenderTexture` | No | The same unhooked model thunk calls it immediately after visibility-mask maintenance. |
+| `FUN_1402B1280` voice-parameter update | No | The wrapper still locks `sGSound`, resolves voice references, applies parameters, and stores its per-character value. Separate hooks suppress voice creation, audible starts, and `sSound__move`, but not this update. |
+| `uCharacterPost__move` | No | Category 18 is enabled in the headless move pass, so the coordinator and its collision/replay children run. No presentation-only child work was identified. |
+
+There is an existing, separate presentation skip at `0x1402021E0`.
+`hkCharacterModelPostMove` in `rollback_runtime.cpp` returns during resimulation
+instead of running the `uCharacter__moveAfter` tail that updates toon materials
+and cut-in lighting. This is not the `0x1402021D0` model-movement thunk containing
+the visibility and auxiliary-texture helpers; the adjacent addresses dispatch
+different native functions.
+
+The high ends cover auxiliary-texture allocation/upload and are not expected on
+every frame. Direct QPC scopes around the three helpers are required for tighter
+hardware-specific numbers; at these durations, profiler overhead should be
+measured with an empty scope and subtracted.
+
+### Auxiliary-texture measurement
+
+A temporary QPC hook measured nine eight-frame rollback windows. Across all
+windows, `uModel__updateAuxRenderTexture` received 248 calls and consumed
+`0.0759 ms` total:
+
+| Measurement | Observed value |
+|---|---:|
+| Aggregate per replayed frame | `0.00105 ms` |
+| Average call | `0.000306 ms` |
+| Largest observed call | `0.0007 ms` |
+| Normal call count | 3 calls/frame |
+| Opening/high-activity call count | 7 calls/frame |
+
+Normal windows ranged from `0.0008-0.00115 ms/frame`; the seven-call opening
+window measured `0.00204 ms/frame`. These numbers are an order of magnitude
+below the earlier static estimate and are consistent with the cheap
+resource-check path rather than meaningful texture allocation or joint-data
+upload. QPC overhead is included, so the native cost may be lower still. The
+helper is not a useful optimization target in these states; a branch counter
+would be needed to prove whether a rare expensive allocation/upload path occurs
+in other matchups.
+
+For a normal headless tick of `1.31 ms/frame`, the measured auxiliary-texture
+helper accounts for approximately `0.08%`. The unmeasured camera and voice
+candidates dominate the remaining working estimate.
 
 For the seven-frame `75-82` rollback, the estimated saving is approximately
 `0.14-0.56 ms`, reducing `13.19 ms` total to about `12.63-13.05 ms`.

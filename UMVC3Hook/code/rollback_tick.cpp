@@ -3,6 +3,7 @@
 #include "rollback.h"
 #include "rollback_profile.h"
 #include "rollback_memory.h"
+#include "rollback_diagnostics.h"
 #include "rollback_tick.h"
 #include "mk10utils.h"
 
@@ -138,6 +139,16 @@ using ObjectFn = void(__fastcall*)(uint64_t);
 using GetterFn = uint64_t(__fastcall*)(uint64_t);
 
 static void VTableCall(uint64_t object, uint32_t vtableOffset);
+
+static const char* WatchdogPhaseName(RollbackUnitProfilePhase phase)
+{
+    switch (phase) {
+    case RollbackUnitProfilePhase::Move: return "headless-unit-move";
+    case RollbackUnitProfilePhase::SyncJob: return "headless-unit-sync-job";
+    case RollbackUnitProfilePhase::SyncSave: return "headless-unit-sync-save";
+    default: return "headless-unit-unknown";
+    }
+}
 
 static bool RunDisabledCpuPostMove(uint64_t unit)
 {
@@ -294,6 +305,8 @@ static void HeadlessUnitCategoryMove(uint64_t sMain, uint64_t sUnit,
 
             if ((stateFlags & 7u) == 2 && (stateFlags & 0x400u) != 0 &&
                 IsHeadlessGameplayUnitObject(dti)) {
+                Rollback_FreezeWatchdogUnit("headless-unit-move", category,
+                                            unit, dti, g_resimulateCurrentFrame);
                 if (!useJobs) {
                     if constexpr (ProfilingEnabled)
                         PROFILED_UNIT_OBJECT_MOVES[category](unit);
@@ -408,6 +421,8 @@ static void HeadlessUnitCategoryPostMove(uint64_t sMain, uint64_t sUnit,
 
             if ((stateFlags & 7u) == 2 && (stateFlags & 0x400u) != 0 &&
                 IsHeadlessGameplayUnitObject(dti)) {
+                Rollback_FreezeWatchdogUnit(WatchdogPhaseName(phase), category,
+                                            unit, dti, g_resimulateCurrentFrame);
                 if (initialized) {
                     VTableCall(unit, 0x40);
                     if (phase == RollbackUnitProfilePhase::SyncSave)
@@ -616,6 +631,7 @@ void Rollback_PatchDrawCalls(bool enable)
 void Rollback_HeadlessTick(uint64_t sMain)
 {
     RollbackHeadlessProfileTimer profile;
+    Rollback_FreezeWatchdogHeartbeat("headless-begin", g_resimulateCurrentFrame);
 
     // Characters cache this value as the identity of shots spawned this frame.
     // Native sMain derives it from local wall time, which is not peer-stable.
@@ -654,6 +670,7 @@ void Rollback_HeadlessTick(uint64_t sMain)
     //VTableCall(MainMember(sMain, 0x40270), 0x48); // mpPrimitive::draw.
     //VTableCall(MainMember(sMain, 0x40208), 0x48); // mpGpuParticle::draw.
     //((ObjectFn)_addr(FN_RENDER_BEGIN_FRAME))(MainMember(sMain, 0x40190)); // Begin/submit the render frame.
+    Rollback_FreezeWatchdogHeartbeat("headless-area", g_resimulateCurrentFrame);
     VTableCall(MainMember(sMain, 0x40200), 0x30); // mpArea::move.
 
         profile.Add(&RollbackProfile::headlessRenderBeginArea,
@@ -665,6 +682,7 @@ void Rollback_HeadlessTick(uint64_t sMain)
     // twice.
     uint64_t manager = ((uint64_t(__fastcall*)())_addr(FN_MVC3MGR_GETINSTANCE))();
     uint64_t action = ((GetterFn)_addr(FN_MVC3MGR_GETACTION))(manager); // Resolve the active sAction.
+    Rollback_FreezeWatchdogHeartbeat("headless-action", g_resimulateCurrentFrame);
     ((ObjectFn)_addr(FN_ACTION_SUBSTEP))(action); // Run the action substep and character moves.
 
         profile.Add(&RollbackProfile::headlessAction,
@@ -691,6 +709,7 @@ void Rollback_HeadlessTick(uint64_t sMain)
         &RollbackProfile::headlessGameplaySetupMax);
 
     const uint64_t sUnit = MainMember(sMain, 0x401a0);
+    Rollback_FreezeWatchdogHeartbeat("headless-unit-move-pass", g_resimulateCurrentFrame);
     HeadlessUnitPass<ROLLBACK_PROFILING_ENABLED>(
         sMain, sUnit, RollbackUnitProfilePhase::Move, 1,
         SUNIT_MOVE_CATEGORY_VTABLE);
@@ -698,6 +717,7 @@ void Rollback_HeadlessTick(uint64_t sMain)
         profile.Add(&RollbackProfile::headlessUnitMove,
         &RollbackProfile::headlessUnitMoveMax);
 
+    Rollback_FreezeWatchdogHeartbeat("headless-collision", g_resimulateCurrentFrame);
     VTableCall(MainMember(sMain, 0x401e0), 0x30); // mpCollision base cSystem::move.
     VTableCall(ManagerSubsystem(FN_GET_HIT_SOLVER), 0x30); // sHitSolver::move.
 
@@ -710,6 +730,7 @@ void Rollback_HeadlessTick(uint64_t sMain)
     // save/load transition work and synchronizes any queued unit jobs.
 
     //VTableCall(MainMember(sMain, 0x401a0), 0x68); //REQUIRED
+    Rollback_FreezeWatchdogHeartbeat("headless-sync-job-pass", g_resimulateCurrentFrame);
     HeadlessUnitPass<ROLLBACK_PROFILING_ENABLED>(
         sMain, sUnit, RollbackUnitProfilePhase::SyncJob, 2,
         SUNIT_SYNC_JOB_VTABLE); // REQUIRED
@@ -718,6 +739,7 @@ void Rollback_HeadlessTick(uint64_t sMain)
     // the normal non-job-wrapper category synchronization pass.
     
     //VTableCall(MainMember(sMain, 0x401a0), 0x58); //REQUIRED
+    Rollback_FreezeWatchdogHeartbeat("headless-sync-save-pass", g_resimulateCurrentFrame);
     HeadlessUnitPass<ROLLBACK_PROFILING_ENABLED>(
         sMain, sUnit, RollbackUnitProfilePhase::SyncSave, 3,
         SUNIT_SYNC_SAVE_VTABLE); // REQUIRED
@@ -736,6 +758,7 @@ void Rollback_HeadlessTick(uint64_t sMain)
         profile.Add(&RollbackProfile::headlessSimulationTail,
         &RollbackProfile::headlessSimulationTailMax);
 
+    Rollback_FreezeWatchdogHeartbeat("headless-manager-tail", g_resimulateCurrentFrame);
     manager = ((uint64_t(__fastcall*)())_addr(FN_MVC3MGR_GETINSTANCE))();
     VTableCall(manager, 0x30); // sMvc3Manager::move.
     VTableCall(ManagerSubsystem(FN_GET_CHARACTER), 0x30); // sCharacter::move.
@@ -794,5 +817,6 @@ void Rollback_HeadlessTick(uint64_t sMain)
     //}
         profile.Add(&RollbackProfile::headlessAltF4,
         &RollbackProfile::headlessAltF4Max);
+        Rollback_FreezeWatchdogHeartbeat("headless-complete", g_resimulateCurrentFrame);
         profile.Finish();
 }

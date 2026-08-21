@@ -195,25 +195,21 @@ using UnitRemoveFn = char(__fastcall*)(void*, void*);
 static constexpr SnapshotRange CCHR_SCALAR_RESTORE_RANGES[] = {
     // Pointer-free cChr state immediately following the base object header.
     {0x28, 0x08},
-    // Embedded model/coordinate state reported as the first divergent block;
-    // restore it with the character snapshot rather than leaving it live.
-    {0x1B0, 0x70},
-    // Remaining narrow animation/command state exposed after restoring the
-    // preceding model block. Keep the experiment limited to observed bytes.
+    // Narrow uModel animation state outside the live uBaseModel block.
     {0x1190, 0x04}, {0x1198, 0x04},
     {0x1529, 0x02}, {0x2892, 0x02}, {0x2AAA, 0x02}, {0x3D38, 0x04},
     // cActionTime-adjacent scalar state, including hitstop/time-scale values.
     {0x48, 0x38},
-    // Early input and command-processing state used by the character FSM.
-    {0x80, 0x100},
+    // uCoord transform state ends at +0x100. The following uBaseModel block
+    // through +0x50f owns resources, materials, render caches, and cache flags;
+    // it must remain on the live presentation timeline.
+    {0x80, 0x80},
     // Input repeat/transition scalar at the end of the preceding input block.
     {0xA8, 0x04},
-    // Per-character input history and derived directional/button state.
-    {0x12C, 0x40},
-    // Motion[8] timing/state header used by character animation updates.
-    {0x550, 0x10},
-    // Assist and action sub-flags: mAssistFlags and adjacent action flags.
-    {0x29E, 0x12},
+    // mMotionCalcFlag affects deterministic joint/motion calculation. Keep
+    // mModelStatus at +0x550 on the live resource timeline; Motion[8] begins
+    // at +0x560, not +0x550.
+    {0x558, 0x04},
     // Animation-state header: delta coefficient and current animation values.
     {0x1300, 0x08},
     // Remaining pointer-free animation timing and transition state.

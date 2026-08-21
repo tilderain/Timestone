@@ -2,6 +2,7 @@
 
 #include "rollback.h"
 #include "rollback_memory.h"
+#include "rollback_diagnostics.h"
 #include "mk10utils.h"
 #include "netplay.h"
 #include "../kiero/minhook/include/MinHook.h"
@@ -10,6 +11,11 @@ extern void HookLog(const char* fmt, ...);
 
 static constexpr uintptr_t FN_IS_ONLINE_BATTLE = 0x140006AF0;
 static constexpr uintptr_t FN_NDRAW_MATERIAL_RELEASE = 0x14076F760;
+static constexpr uintptr_t PTR_SCHARACTER = 0x140D44A70;
+static constexpr uintptr_t TEAM_OFFSETS[] = {0x40, 0x300};
+static constexpr uintptr_t TEAM_FIRST_NODE_OFFSET = 0x08;
+static constexpr uintptr_t NODE_CHARACTER_OFFSET = 0x08;
+static constexpr uintptr_t NODE_NEXT_OFFSET = 0x10;
 static constexpr uintptr_t ONLINE_CALLER_RETURNS[] = {
     0x14003F083, // cChr__resolveActionTransitionState
     0x14003F251, // cChr__resolveAdvancedGuardTransition
@@ -35,6 +41,16 @@ using MtAnimUpdateFrameFn = uint32_t(__fastcall*)(uint64_t, uint64_t, uint64_t);
 static MtAnimUpdateFrameFn g_originalMtAnimUpdateFrame = nullptr;
 using ResetMaterialsFn = void(__fastcall*)(uint64_t);
 static ResetMaterialsFn g_originalResetMaterials = nullptr;
+using BaseModelRenderSetupFn = void(__fastcall*)(uint64_t, uint64_t);
+static BaseModelRenderSetupFn g_originalBaseModelRenderSetup = nullptr;
+using ToonMaterialUpdateFn = void(__fastcall*)(uint64_t);
+static ToonMaterialUpdateFn g_originalToonMaterialUpdate = nullptr;
+using ParticleGeneratorModelUpdateFn = void(__fastcall*)(uint64_t);
+static ParticleGeneratorModelUpdateFn g_originalParticleGeneratorModelUpdate = nullptr;
+using GetJointPosFn = void*(__fastcall*)(uint64_t, void*);
+static GetJointPosFn g_originalGetJointPos = nullptr;
+using CharacterModelPostMoveFn = void(__fastcall*)(uint64_t);
+static CharacterModelPostMoveFn g_originalCharacterModelPostMove = nullptr;
 using CutInAddCharacterFn = void(__fastcall*)(uint64_t, uint64_t);
 static CutInAddCharacterFn g_originalCutInAddCharacter = nullptr;
 using CutInSetVariantFn = void(__fastcall*)(uint64_t, uint32_t);
@@ -47,6 +63,109 @@ static PVOID g_materialCloneRecoveryHandler = nullptr;
 static PVOID g_modelCommandAllocationRecoveryHandler = nullptr;
 static PVOID g_schedulerAllocationRecoveryHandler = nullptr;
 static PVOID g_resultScoreCursorRecoveryHandler = nullptr;
+static uint64_t g_pendingMaterialRepairs[64] = {};
+static size_t g_pendingMaterialRepairCount = 0;
+
+static bool HasCallableVirtualMethod(uint64_t object, size_t offset);
+
+static bool IsLiveCharacterModel(uint64_t model)
+{
+    const uint64_t sCharacter = *(uint64_t*)_addr(PTR_SCHARACTER);
+    if (!model || !sCharacter)
+        return false;
+
+    for (int team = 0; team < 2; ++team) {
+        uint64_t node = sCharacter + TEAM_OFFSETS[team] +
+            TEAM_FIRST_NODE_OFFSET;
+        for (int safety = 0; node && safety < 64; ++safety) {
+            if (!IsAccessibleRange(node + NODE_CHARACTER_OFFSET,
+                                   sizeof(uint64_t)) ||
+                !IsAccessibleRange(node + NODE_NEXT_OFFSET,
+                                   sizeof(uint64_t))) {
+                break;
+            }
+            const uint64_t character =
+                *(uint64_t*)(node + NODE_CHARACTER_OFFSET);
+            if (character == model)
+                return true;
+            if (character && IsAccessibleRange(character + 0x3F38, 0x10)) {
+                const uint32_t weaponCount = *(uint32_t*)(character + 0x3F38);
+                const uint64_t weapons = *(uint64_t*)(character + 0x3F40);
+                if (weapons && weaponCount <= 256 &&
+                    IsAccessibleRange(weapons,
+                        (size_t)weaponCount * sizeof(uint64_t))) {
+                    for (uint32_t i = 0; i < weaponCount; ++i) {
+                        if (*(uint64_t*)(weapons + (size_t)i * sizeof(uint64_t)) ==
+                            model) {
+                            return true;
+                        }
+                    }
+                }
+            }
+            node = *(uint64_t*)(node + NODE_NEXT_OFFSET);
+        }
+    }
+    return false;
+}
+
+static bool IsValidCachedMaterial(uint64_t material)
+{
+    if (!material || !HasCallableVirtualMethod(material, 0x28))
+        return false;
+    const uint64_t vtable = *(uint64_t*)material;
+    return *(uint64_t*)(vtable + 0x28) ==
+        (uint64_t)_addr(FN_NDRAW_MATERIAL_RELEASE);
+}
+
+static bool IsMaterialCacheReady(uint64_t model)
+{
+    if (!model || !IsAccessibleRange(model + 0x100, 0x20))
+        return false;
+    const uint32_t count = *(uint32_t*)(model + 0x118);
+    const uint64_t entries = *(uint64_t*)(model + 0x110);
+    if (count == 0)
+        return true;
+    if (count > 4096 || !entries ||
+        !IsAccessibleRange(entries, (size_t)count * sizeof(uint64_t))) {
+        return false;
+    }
+    for (uint32_t index = 0; index < count; ++index) {
+        if (!IsValidCachedMaterial(*(uint64_t*)(entries +
+                (size_t)index * sizeof(uint64_t)))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static void MarkMaterialRepairPending(uint64_t model)
+{
+    for (size_t i = 0; i < g_pendingMaterialRepairCount; ++i) {
+        if (g_pendingMaterialRepairs[i] == model)
+            return;
+    }
+    if (g_pendingMaterialRepairCount <
+        sizeof(g_pendingMaterialRepairs) / sizeof(g_pendingMaterialRepairs[0]))
+        g_pendingMaterialRepairs[g_pendingMaterialRepairCount++] = model;
+}
+
+static size_t FindPendingMaterialRepair(uint64_t model)
+{
+    for (size_t i = 0; i < g_pendingMaterialRepairCount; ++i) {
+        if (g_pendingMaterialRepairs[i] == model)
+            return i;
+    }
+    return SIZE_MAX;
+}
+
+static void ClearPendingMaterialRepair(size_t index)
+{
+    if (index >= g_pendingMaterialRepairCount)
+        return;
+    --g_pendingMaterialRepairCount;
+    g_pendingMaterialRepairs[index] =
+        g_pendingMaterialRepairs[g_pendingMaterialRepairCount];
+}
 
 static void __fastcall hkMtObjectSetFlag(uint64_t object, uint8_t enabled)
 {
@@ -354,6 +473,14 @@ static void __fastcall hkResetMaterials(uint64_t model)
         return;
     }
 
+    if (g_isResimulating && IsLiveCharacterModel(model)) {
+        // Material instances and their reference counts belong to the live
+        // renderer. Replaying or batching action-change resets outside their
+        // native order can release entries still referenced by another model.
+        MarkMaterialRepairPending(model);
+        return;
+    }
+
     InvalidateMemoryQueryCache();
     if (!IsAccessibleRange(model, 0x120))
         return;
@@ -362,9 +489,7 @@ static void __fastcall hkResetMaterials(uint64_t model)
     const uint64_t entries = *(uint64_t*)(model + 0x110);
     if (count != 0 && (count > 4096 || !entries ||
                        !IsAccessibleRange(entries,
-                                          (size_t)count * sizeof(uint64_t)))) {
-        HookLog("Render: discarded invalid material cache model=0x%llX "
-                "entries=0x%llX count=%u\n", model, entries, count);
+                                           (size_t)count * sizeof(uint64_t)))) {
         *(uint32_t*)(model + 0x118) = 0;
         return;
     }
@@ -373,35 +498,137 @@ static void __fastcall hkResetMaterials(uint64_t model)
     for (uint32_t index = 0; index < count; ++index) {
         uint64_t* entry = (uint64_t*)(entries +
                                       (size_t)index * sizeof(uint64_t));
-        bool validMaterial = false;
-        if (*entry && HasCallableVirtualMethod(*entry, 0x28)) {
-            const uint64_t vtable = *(uint64_t*)*entry;
-            const uint64_t release = *(uint64_t*)(vtable + 0x28);
-            validMaterial = release == (uint64_t)_addr(FN_NDRAW_MATERIAL_RELEASE);
-            if (!validMaterial) {
-                HookLog("RenderDiag: non-material cache entry model=0x%llX "
-                        "index=%u entry=0x%llX vtable=0x%llX "
-                        "slot28=0x%llX\n",
-                        model, index, *entry, vtable, release);
-            }
-        }
-
-        if (*entry && !validMaterial)
+        const bool validMaterial = IsValidCachedMaterial(*entry);
+        if (*entry && !validMaterial) {
+            // The cached object has already been recycled into another MT
+            // class. Native reset treats a null slot as missing and rebuilds
+            // it from the current model resource without dispatching release
+            // through the stale object's unrelated vtable.
+            *entry = 0;
             ++invalid;
-    }
-    if (invalid != 0) {
-        static uint32_t logged = 0;
-        if (logged++ < 32) {
-            HookLog("Render: found %u stale material cache entries "
-                    "model=0x%llX\n", invalid, model);
         }
-        // Native assumes all occupied entries implement Material::release.
-        // Leave the cache untouched for diagnostics rather than dispatching a
-        // different class's virtual slot or creating null holes for controllers.
-        return;
+    }
+    Rollback_FreezeWatchdogMaterial(model, count, invalid,
+                                    g_isResimulating ? g_resimulateCurrentFrame : -1);
+    if (invalid != 0) {
+        // A callable material vtable does not prove that another entry has not
+        // already released the same allocation. Once any recycled member is
+        // present, discard the complete derived cache and let native rebuild
+        // it from the current resource without releasing stale aliases.
+        memset((void*)entries, 0, (size_t)count * sizeof(uint64_t));
     }
     g_originalResetMaterials(model);
+    Rollback_FreezeWatchdogHeartbeat("material-reset-complete",
+                                     g_isResimulating ? g_resimulateCurrentFrame : -1);
     InvalidateMemoryQueryCache();
+
+    if (!g_isResimulating) {
+        const size_t pending = FindPendingMaterialRepair(model);
+        if (pending != SIZE_MAX && IsMaterialCacheReady(model))
+            ClearPendingMaterialRepair(pending);
+    }
+}
+
+static bool RepairPendingMaterialCache(uint64_t model)
+{
+    const size_t pending = FindPendingMaterialRepair(model);
+    if (pending == SIZE_MAX)
+        return true;
+
+    InvalidateMemoryQueryCache();
+    if (!IsMaterialCacheReady(model)) {
+        hkResetMaterials(model);
+        InvalidateMemoryQueryCache();
+    }
+    if (!IsMaterialCacheReady(model))
+        return false;
+
+    const size_t remaining = FindPendingMaterialRepair(model);
+    if (remaining != SIZE_MAX)
+        ClearPendingMaterialRepair(remaining);
+    return true;
+}
+
+static void __fastcall hkBaseModelRenderSetup(uint64_t model,
+                                               uint64_t renderContext)
+{
+    if (!model || !g_originalBaseModelRenderSetup)
+        return;
+
+    if (!RepairPendingMaterialCache(model)) {
+        return;
+    }
+    g_originalBaseModelRenderSetup(model, renderContext);
+}
+
+static void __fastcall hkToonMaterialUpdate(uint64_t model)
+{
+    if (!model || !g_originalToonMaterialUpdate)
+        return;
+
+    if (!RepairPendingMaterialCache(model)) {
+        return;
+    }
+    g_originalToonMaterialUpdate(model);
+}
+
+static void __fastcall hkParticleGeneratorModelUpdate(uint64_t generator)
+{
+    // This virtual updates particle-model transforms and material bindings.
+    // Its resources remain on the live presentation timeline and can have null
+    // slots while a corrected effect timeline is replayed headlessly.
+    if (!g_isResimulating && g_originalParticleGeneratorModelUpdate)
+        g_originalParticleGeneratorModelUpdate(generator);
+}
+
+static void* WriteDefaultJointPosition(void* output)
+{
+    if (output)
+        memcpy(output, (void*)_addr(0x140D2AAB0), 0x10);
+    return output;
+}
+
+static void* __fastcall hkGetJointPos(uint64_t object, void* output)
+{
+    if (!g_isResimulating)
+        return g_originalGetJointPos
+            ? g_originalGetJointPos(object, output)
+            : WriteDefaultJointPosition(output);
+
+    if (!object || !output || !g_originalGetJointPos ||
+        !IsAccessibleRange(object, 0x18)) {
+        return WriteDefaultJointPosition(output);
+    }
+
+    const uint64_t owner = *(uint64_t*)(object + 0x08);
+    if (!owner || !IsAccessibleRange(owner + 0x40, sizeof(uint64_t)))
+        return g_originalGetJointPos(object, output);
+    const uint64_t model = *(uint64_t*)(owner + 0x40);
+    if (!model || !IsAccessibleRange(model + 0x110, 0x0C))
+        return g_originalGetJointPos(object, output);
+
+    const uint32_t count = *(uint32_t*)(model + 0x118);
+    const uint64_t entries = *(uint64_t*)(model + 0x110);
+    if (count > 4096 || (count && (!entries ||
+        !IsAccessibleRange(entries, (size_t)count * sizeof(uint64_t))))) {
+        return WriteDefaultJointPosition(output);
+    }
+    for (uint32_t i = 0; i < count; ++i) {
+        const uint64_t entry =
+            *(uint64_t*)(entries + (size_t)i * sizeof(uint64_t));
+        if (!entry || !HasCallableVirtualMethod(entry, 0x48))
+            return WriteDefaultJointPosition(output);
+    }
+    return g_originalGetJointPos(object, output);
+}
+
+static void __fastcall hkCharacterModelPostMove(uint64_t character)
+{
+    // uCharacter__moveAfter has completed its combat/status work before this
+    // character-only thunk runs uToonModel material updates and cut-in light
+    // propagation. Presentation resources stay on the live timeline.
+    if (!g_isResimulating && g_originalCharacterModelPostMove)
+        g_originalCharacterModelPostMove(character);
 }
 
 static bool HasInvalidMtAnimTable(uint64_t animation)
@@ -548,6 +775,14 @@ void Rollback_PatchBattleUiAllocationFailure()
 
 void Rollback_InitNativeNullGuards()
 {
+    const MH_STATUS characterModelStatus = MH_CreateHook(
+        (LPVOID)_addr(0x1402021E0), (LPVOID)&hkCharacterModelPostMove,
+        (LPVOID*)&g_originalCharacterModelPostMove);
+    if (characterModelStatus == MH_OK &&
+        MH_EnableHook((LPVOID)_addr(0x1402021E0)) == MH_OK) {
+        HookLog("Rollback: installed headless character model post-move filter\n");
+    }
+
     const MH_STATUS aliveStatus = MH_CreateHook(
         (LPVOID)_addr(0x140001B80), (LPVOID)&hkMtObjectIsAlive,
         (LPVOID*)&g_originalMtObjectIsAlive);
@@ -606,6 +841,38 @@ void Rollback_InitNativeNullGuards()
     } else {
         HookLog("Rollback: failed to hook material cache reset (%d)\n",
                 resetMaterialsStatus);
+    }
+
+    const MH_STATUS renderSetupStatus = MH_CreateHook(
+        (LPVOID)_addr(0x14055FDC0), (LPVOID)&hkBaseModelRenderSetup,
+        (LPVOID*)&g_originalBaseModelRenderSetup);
+    if (renderSetupStatus == MH_OK &&
+        MH_EnableHook((LPVOID)_addr(0x14055FDC0)) == MH_OK) {
+        HookLog("Rollback: installed live material cache repair\n");
+    }
+
+    const MH_STATUS toonMaterialStatus = MH_CreateHook(
+        (LPVOID)_addr(0x140564110), (LPVOID)&hkToonMaterialUpdate,
+        (LPVOID*)&g_originalToonMaterialUpdate);
+    if (toonMaterialStatus == MH_OK &&
+        MH_EnableHook((LPVOID)_addr(0x140564110)) == MH_OK) {
+        HookLog("Rollback: installed toon material cache repair\n");
+    }
+
+    const MH_STATUS particleModelStatus = MH_CreateHook(
+        (LPVOID)_addr(0x140898730), (LPVOID)&hkParticleGeneratorModelUpdate,
+        (LPVOID*)&g_originalParticleGeneratorModelUpdate);
+    if (particleModelStatus == MH_OK &&
+        MH_EnableHook((LPVOID)_addr(0x140898730)) == MH_OK) {
+        HookLog("Rollback: installed headless particle-model update filter\n");
+    }
+
+    const MH_STATUS jointPosStatus = MH_CreateHook(
+        (LPVOID)_addr(0x140549F50), (LPVOID)&hkGetJointPos,
+        (LPVOID*)&g_originalGetJointPos);
+    if (jointPosStatus == MH_OK &&
+        MH_EnableHook((LPVOID)_addr(0x140549F50)) == MH_OK) {
+        HookLog("Rollback: installed null model-joint entry guard\n");
     }
 
     const MH_STATUS animStatus = MH_CreateHook(

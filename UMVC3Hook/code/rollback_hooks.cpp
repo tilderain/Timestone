@@ -8,6 +8,7 @@
 #include "netplay.h"
 #include "rollback.h"
 #include "rollback_memory.h"
+#include "rollback_diagnostics.h"
 #include "rollback_profile.h"
 #include "rollback_ndjson.h"
 #include "../kiero/minhook/include/MinHook.h"
@@ -119,6 +120,7 @@ static void __fastcall hkMvc3MainMove(uint64_t main)
         Rollback_ClearPendingReSimulation();
 
     int32_t curFrame = Controller_GetNetFrameCount();
+    Rollback_FreezeWatchdogHeartbeat("main-enter", curFrame);
     int32_t traceFrame = g_isResimulating ? g_resimulateCurrentFrame : curFrame;
     if (TraceLifecycleFrame(traceFrame)) {
         uint64_t replay = *(uint64_t*)_addr(0x140d4d9d8);
@@ -170,6 +172,7 @@ static void __fastcall hkMvc3MainMove(uint64_t main)
             if (!shouldResim)
                 shouldResim = AutoTest_GetForcedClientResim(curFrame, &start, &end);
             if (shouldResim) {
+                Rollback_FreezeWatchdogHeartbeat("rollback-resimulate", curFrame);
                 Rollback_ReSimulate(start, end);
                 const uint64_t postResimStart = Profile_Now();
                 if (g_ndjsonLoggingEnabled)
@@ -194,7 +197,11 @@ static void __fastcall hkMvc3MainMove(uint64_t main)
 
     RollbackMainMoveFn original = g_originalMvc3MainMove ? *g_originalMvc3MainMove : nullptr;
     if (g_isResimulating) {
+        Rollback_FreezeWatchdogHeartbeat("resim-native-main-move",
+                                         g_resimulateCurrentFrame);
         original(main);
+        Rollback_FreezeWatchdogHeartbeat("resim-native-main-complete",
+                                         g_resimulateCurrentFrame);
         if (TraceLifecycleFrame(g_resimulateCurrentFrame)) {
             uint64_t replay = *(uint64_t*)_addr(0x140d4d9d8);
             int32_t replayFrame = replay ? *(int32_t*)(replay + 0x54) : -1;
@@ -210,7 +217,9 @@ static void __fastcall hkMvc3MainMove(uint64_t main)
     if (curFrame >= 0)
         NDJSON_CaptureFrame(curFrame, false, false);
 
+    Rollback_FreezeWatchdogHeartbeat("native-main-move", curFrame);
     original(main);
+    Rollback_FreezeWatchdogHeartbeat("native-main-complete", curFrame);
 
     if (TraceLifecycleFrame(curFrame)) {
         uint64_t replay = *(uint64_t*)_addr(0x140d4d9d8);

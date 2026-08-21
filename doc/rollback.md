@@ -272,11 +272,7 @@ submitted.
 | +0x1560  | 4    | **mStateCheck**     | state check value (read by FUN_14005a4f0, combined with flag masks) |
 | +0x1878  | 4    | char/variant idx    | character/variant index    |
 | +0x212c  | 1    | active byte         | active state               |
-| +0x29e   | 2    | **mAssistFlags**    | assist entry/DHC condition flags |
-| +0x29f   | 1    | mActionFlags1      | action state sub-flags     |
-| +0x2a0   | 1    | mActionFlags2      | more action flags          |
-| +0x2a1   | 1    | mActionFlags3      | char-specific state flag   |
-| +0x2ac   | 4    | **mStateCtx**      | state context / state check parameter |
+| +0x29e..+0x2ac | — | `uBaseModel` render state | Earlier assist/state labels were incorrect; this span is inside the verified `uBaseModel` base ending at +0x510. |
 | +0x2d94  | 4    | frame counter       | incremented per frame      |
 | +0x2d9c  | 4    | **mId**             | character ID               |
 | +0x2da0  | 4    | mPlrId             | player ID                  |
@@ -866,7 +862,7 @@ from the saved input frames.
 - cChrInput (input state) — ~0x570 bytes each
 - cChrAbility (ability flags) — ~0xD0 bytes each
 - uCharacter flags (+0x14f0..+0x1514) — ~40 bytes each
-- uCharacter assist flags (+0x29e..+0x2ac) — ~16 bytes each
+- `uBaseModel` state at +0x29e..+0x2ac is presentation-owned and must not be treated as character assist state.
 - uCharacter animation state (+0x1300..+0x1400) — ~256 bytes each
 - uCharacter damage/combo state (+0x6398..+0x63FC) — ~104 bytes each
 - cActionTime per-character (hitstop/blockstun) — ~0x80 bytes each

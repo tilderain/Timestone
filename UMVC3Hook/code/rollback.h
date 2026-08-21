@@ -69,6 +69,7 @@ void Rollback_ResetNetplayHistoryBuffers();
 // Does not initialize logging, capture game state, or mutate the rolling buffers.
 bool Rollback_FlushNDJSONOnCrash();
 
+
 // Start a fresh rolling netplay NDJSON log for a restarted match.
 void Rollback_ResetNetplayLiveLog();
 

@@ -18,6 +18,7 @@
 #include "mk10utils.h"
 #include "netplay.h"
 #include "rollback.h"
+#include "rollback_diagnostics.h"
 #include "rollback_profile.h"
 #include "diag.h"
 #include "autotest.h"
@@ -1457,6 +1458,7 @@ static void WaitForConfirmedFrame(int32_t frame, const char* reason)
     if (IsFrameConfirmed(frame) || !Netplay_IsActive())
         return;
 
+    Rollback_FreezeWatchdogHeartbeat(reason, g_netFrameCount);
     //HookLog("Netplay: waiting for remote input frame %d (%s, local=%d, lastRemote=%d)\n",
     //        frame, reason, g_netFrameCount, g_lastRemoteFrame);
     while (!IsFrameConfirmed(frame) && Netplay_IsActive())
@@ -1464,6 +1466,8 @@ static void WaitForConfirmedFrame(int32_t frame, const char* reason)
         SwitchToThread();
         DrainAndProcessPackets();
     }
+    Rollback_FreezeWatchdogHeartbeat("confirmed-frame-wait-complete",
+                                     g_netFrameCount);
     //HookLog("Netplay: remote input frame %d wait complete (active=%d, lastRemote=%d)\n",
     //        frame, Netplay_IsActive() ? 1 : 0, g_lastRemoteFrame);
 }
