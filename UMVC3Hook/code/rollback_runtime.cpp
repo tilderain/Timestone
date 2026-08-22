@@ -11,6 +11,7 @@ extern void HookLog(const char* fmt, ...);
 
 static constexpr uintptr_t FN_IS_ONLINE_BATTLE = 0x140006AF0;
 static constexpr uintptr_t FN_NDRAW_MATERIAL_RELEASE = 0x14076F760;
+static constexpr uintptr_t VTABLE_MTOBJECT = 0x140A6A510;
 static constexpr uintptr_t PTR_SCHARACTER = 0x140D44A70;
 static constexpr uintptr_t TEAM_OFFSETS[] = {0x40, 0x300};
 static constexpr uintptr_t TEAM_FIRST_NODE_OFFSET = 0x08;
@@ -182,8 +183,10 @@ static bool __fastcall hkMtObjectIsAlive(uint64_t object)
 {
     // Native callers use this predicate as a vtable validity proof and then
     // dispatch another virtual method. A recycled pointer can still be mapped
-    // and contain an alive-looking state word while its vtable is gone.
+    // and contain an alive-looking state word after its derived destructor has
+    // replaced the vtable with the shorter MtObject base table.
     if (!object || !HasCallableDtiVirtual((void*)object) ||
+        *(uint64_t*)object == (uint64_t)_addr(VTABLE_MTOBJECT) ||
         !g_originalMtObjectIsAlive) {
         return false;
     }
