@@ -291,19 +291,28 @@ Vergil does not retain a pointer array for summoned swords. The 18 bytes at
 six Storm swords. Each shot retains its own `mSwordId`; Vergil's command handler
 finds candidates by scanning `sShot`. Clearing a flag releases that sword while
 the shot can remain linked for its exit animation, so restore must not infer a
-true flag merely from a surviving recipe. Restore the captured availability
-bytes normally; do not clear true bits based on the reconstructed recipe set,
-because a true bit can legitimately outlive a terminal-filtered recipe. Sword
-factories scan their six-byte availability group to assign `mSwordId`, so expose
-only the saved ID as available during each factory call, then restore the group.
-Raid Sword's factory additionally sets `uVergil::mUsrF & 4`, so reconstruction
-preserves and restores the complete `mUsrF` dword around that call. The focused
-`Spiral Swords S+L Release` test first exposed this side effect at frame 291 and
-the resulting one-sided action selection at frame 308. Removing both a proposed
-exemption from the generic cleanup-step-3 filter and the post-reconstruction
-availability reconciliation remained synchronized through focused repeated
-runs, so Vergil swords retain the normal terminal-shot and character-restore
-policies.
+true flag merely from a surviving recipe. Recipe presence is also insufficient
+to rebuild the availability bytes: a true bit can legitimately outlive a
+terminal-filtered recipe. Keep the captured character flags and retain Vergil
+swords through generic cleanup step 3 so their native callbacks clear the exact
+bit at the correct time. The `20260822_033957` pair demonstrates this lifecycle:
+filtering Spiral Sword 2 at frame 1153 prevented the reconstructed client from
+clearing its bit at frame 1164, which selected action `0xf0` instead of the
+host's slash action `0xb5` at frame 1180. Sword factories scan their six-byte
+availability group to assign `mSwordId`, so expose only the saved ID as available
+during each factory call, then restore the group. Raid Sword's factory
+additionally sets `uVergil::mUsrF & 4`, so reconstruction preserves and restores
+the complete `mUsrF` dword around that call.
+
+Retained terminal swords require one additional factory-state repair. Their
+fresh callback effect starts active even though restored generic step 3 expects
+the effect to be shutting down. Replay `uGameEffect::resetEffectState` after the
+terminal step is restored and before captured callback timing is reapplied. In
+the `20260822_034708/034707` pair, failing to do so left reconstructed Spiral
+Sword 3 frozen at step 3 with update counter 119 from the oldest retained frame
+486 through frame 732. Its allocation changed across rollbacks, confirming that
+the client repeatedly recreated the sword stuck to Vergil; action selection then
+diverged at frame 723.
 
 Haggar's pipe is `uShotVulcanIronPipeRolling` (`0x140d4a4e8`, size `0x2230`).
 Its constructor at `0x14017e4a0` creates a pointer-bearing model/effect owner at

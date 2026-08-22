@@ -78,6 +78,7 @@ constexpr uintptr_t FN_MTOBJECT_ADD_REF = 0x14050D100;
 constexpr uintptr_t FN_UMODEL_PROCESS_ACTION_ANMCHR = 0x140529420;
 constexpr uintptr_t FN_UMODEL_MOVE = 0x140566580;
 constexpr uintptr_t FN_UMODEL_UPDATE_MOTION_EVALUATION = 0x140531A00;
+constexpr uintptr_t FN_UGAMEEFFECT_RESET_EFFECT_STATE = 0x14017BD90;
 constexpr uintptr_t FN_CRESOURCE_ASSIGN_SLOT = 0x140529730;
 constexpr uintptr_t FN_CRESOURCE_RELEASE_REF = 0x14050D5A0;
 constexpr uintptr_t FN_SRESOURCE_GET_INSTANCE = 0x140001B10;
@@ -1132,6 +1133,20 @@ uint32_t Rollback_RepairNemesisExplosionAttack(
 void Rollback_RestoreShotClassState(
     void* shot, const RollbackShotRecipe& saved, void* spawnParent)
 {
+    if (saved.flight.step == 3 &&
+        (saved.concrete.dti ==
+             (uint64_t)_addr(DTI_USHOT_SHIELD_SPIRAL_SWORD) ||
+         saved.concrete.dti ==
+             (uint64_t)_addr(DTI_USHOT_SHIELD_RAID_SWORD) ||
+         saved.concrete.dti ==
+             (uint64_t)_addr(DTI_USHOT_SHIELD_STORM_SWORD))) {
+        // The factory creates an active callback effect. Re-enter native
+        // cleanup before callback timing is restored, otherwise a step-3 sword
+        // can remain attached to Vergil and be recreated on every rollback.
+        ((void(__fastcall*)(void*))_addr(FN_UGAMEEFFECT_RESET_EFFECT_STATE))(
+            shot);
+    }
+
     if (saved.concrete.dti ==
             (uint64_t)_addr(DTI_USHOT_VULCAN_MISSILE_EMPLACEMENT) &&
         saved.concrete.body.size() >= 0x2170) {

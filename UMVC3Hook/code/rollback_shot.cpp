@@ -28,6 +28,9 @@ static constexpr uint32_t SUNIT_MAX_CATEGORIES = 64;
 static constexpr uint32_t SUNIT_MULTI_MASK_COUNT_OFFSET = 0x1840;
 static constexpr uint32_t SUNIT_MULTI_MASK_ARRAYS_OFFSET = 0xC50;
 static constexpr uintptr_t VTABLE_USHOT_VULCAN_ZIREITOU = 0x140AC0E20;
+static constexpr uintptr_t DTI_USHOT_SHIELD_RAID_SWORD = 0x140D4D470;
+static constexpr uintptr_t DTI_USHOT_SHIELD_SPIRAL_SWORD = 0x140D4D4C8;
+static constexpr uintptr_t DTI_USHOT_SHIELD_STORM_SWORD = 0x140D4D508;
 static constexpr uintptr_t PTR_SREPLAY = 0x140d4d9d8;
 static constexpr uintptr_t PTR_SUNIT = 0x140E17698;
 static constexpr uintptr_t FN_SSHOT_SPAWN = 0x140150E00;
@@ -212,6 +215,18 @@ static bool IsTerminalShot(void* shot)
     if (!shot || !IsActiveUnit(shot)) return false;
     uint32_t step = *(uint32_t*)((uint8_t*)shot + 0x212C);
     uint8_t flags = *(uint8_t*)((uint8_t*)shot + 0x1F64);
+    if (step == 3 && (flags & 0x02) == 0 &&
+        HasCallableDtiVirtual(shot)) {
+        uint64_t dti = GetObjectDti((uint64_t)shot);
+        // Vergil's sword remains authoritative during cleanup. Its native
+        // callback advances the local step and clears exactly one availability
+        // bit; filtering it would force restore to guess that timing.
+        if (dti == (uint64_t)_addr(DTI_USHOT_SHIELD_RAID_SWORD) ||
+            dti == (uint64_t)_addr(DTI_USHOT_SHIELD_SPIRAL_SWORD) ||
+            dti == (uint64_t)_addr(DTI_USHOT_SHIELD_STORM_SWORD)) {
+            return false;
+        }
+    }
     // Step 3 is uShot's cleanup branch. Once native hit judgment is disabled,
     // reconstructing the still-linked object can resurrect stale collisions.
     return step == 3 && (flags & 0x02) == 0;
