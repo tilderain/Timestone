@@ -40,6 +40,7 @@ constexpr uintptr_t DTI_USHOT_OPTION_SPADA_BOOMERANG = 0x140D4D118;
 constexpr uintptr_t DTI_USHOT_VULCAN_CROSS_SWORD = 0x140D488B8;
 constexpr uintptr_t DTI_USHOT_VULCAN_FIRE_GRENADE_BOMB = 0x140D48BB0;
 constexpr uintptr_t DTI_USHOT_VULCAN_HAND_GRENADE_BOMB = 0x140D48CD0;
+constexpr uintptr_t DTI_USHOT_VULCAN_IRON_PIPE_ROLLING = 0x140D4A4E8;
 constexpr uintptr_t DTI_USHOT_VULCAN_LAND_MINE = 0x140D48D98;
 constexpr uintptr_t DTI_USHOT_SHIELD_KIKOUSYOU = 0x140D48F70;
 constexpr uintptr_t DTI_USHOT_VULCAN_SOMERSAULT_GRENADE = 0x140D49520;
@@ -121,6 +122,7 @@ constexpr ShotModelPolicy SHOT_MODEL_POLICIES[] = {
     {0x140D4D2B0, "King Kobun", {0x100, 0x11B0}, 2, true, true},
     {0x140D48BB0, "Fire Grenade", {0x100, 0x11B0}, 2, true, true},
     {0x140D48CD0, "Hand Grenade", {0x100, 0x11B0}, 2, true, true},
+    {0x140D4A4E8, "Iron Pipe", {0x100, 0x11B0}, 2, true, true},
     {0x140D49520, "Somersault Grenade", {0x100, 0x11B0}, 2, true, true},
 
     // Existing model-driven shots using the shared playback overlay or setup

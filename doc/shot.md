@@ -286,6 +286,17 @@ shot reconstruction, character-shot repair derives the detector from successful
 while a reconstructed sword exists and clears stale state when a terminal sword
 was omitted or its factory failed.
 
+Haggar's pipe is `uShotVulcanIronPipeRolling` (`0x140d4a4e8`, size `0x2230`).
+Its constructor at `0x14017e4a0` creates a pointer-bearing model/effect owner at
+`+0x2140`; setup at `0x14017eaa0` asynchronously loads the Haggar pipe MOD into
+the shot model and binds that embedded owner back to the shot. The movement and
+ground-bounce callback at `0x14017e670` advances the model transform, explicitly
+updates its world/child matrices, and copies the resulting pose into the shot's
+transform state. This matches the existing Hand Grenade model lifecycle, so the
+restore policy pins `+0x100` and `+0x11b0`, restores pointer-free model playback,
+and retries setup when a reconstructed pipe's model is not ready. The embedded
+owner itself remains fresh and is never copied from the retired pipe.
+
 Chris's `uShotVulcanLandMine` creates its armed-grenade `uGameEffect` only when
 virtual `+0x318` handles stage contact. A frame-72 snapshot can therefore contain
 `mIsTakeOn=true` and an occupied callback slot at `uShot+0x1f78`, while its fresh
