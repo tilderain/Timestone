@@ -26,6 +26,8 @@ closes UMVC3, replaces the ASI, and relaunches the game.
 
 # Automated dual training
 
+Use `-five-bars` with a training launch to start both teams with five hyper bars.
+
 Launch the game with `-autotest=<character>` to start a dual-training pair,
 place the selected character in all P1 and P2 slots, and run the unique-command
 autotest suite after both instances reach the synchronized battle boundary.

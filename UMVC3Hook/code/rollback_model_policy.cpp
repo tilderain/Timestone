@@ -52,6 +52,7 @@ constexpr uintptr_t DTI_USHOT_SHIELD_WEAPON_CART_SPREAD = 0x140D4A098;
 constexpr uintptr_t DTI_USHOT_VULCAN_EXATK_ROCKET_LAUNCHER = 0x140D4BA48;
 constexpr uintptr_t DTI_USHOT_VULCAN_ROCKET_LAUNCHER_EXPLODE = 0x140D4BAC8;
 constexpr uintptr_t DTI_USHOT_SHIELD_SPIRAL_SWORD = 0x140D4D4C8;
+constexpr uintptr_t DTI_USHOT_VULCAN_STORM_SWORD_SPREAD = 0x140D4D5E8;
 constexpr uintptr_t DTI_USHOT_VULCAN_KING_KOBUN = 0x140D4D2B0;
 constexpr uintptr_t DTI_UKOBUN = 0x140D455B0;
 constexpr uintptr_t VTABLE_UARTHUR = 0x140A70CD0;
@@ -1007,18 +1008,25 @@ bool Rollback_RemapShotSpawnParent(
     if (saved.concrete.dti !=
             (uint64_t)_addr(DTI_USHOT_SHIELD_WEAPON_CART_SPREAD) &&
         saved.concrete.dti !=
-            (uint64_t)_addr(DTI_USHOT_VULCAN_ROCKET_LAUNCHER_EXPLODE)) {
+            (uint64_t)_addr(DTI_USHOT_VULCAN_ROCKET_LAUNCHER_EXPLODE) &&
+        saved.concrete.dti !=
+            (uint64_t)_addr(DTI_USHOT_VULCAN_STORM_SWORD_SPREAD)) {
         return false;
     }
+    remapped = saved;
     for (const RollbackShotRecipe& candidate : recipes) {
         if (candidate.savedPtr == (void*)saved.initParam &&
             candidate.restoredPtr) {
-            remapped = saved;
             remapped.initParam = (uint64_t)candidate.restoredPtr;
             return true;
         }
     }
-    return false;
+    // A child can survive in the snapshot after its terminal parent recipe was
+    // intentionally omitted. Never pass that retired allocation to cArm. The
+    // factory supports a null attachment, and restore reapplies the child's
+    // captured position, quaternion, flight state, and attack matrices.
+    remapped.initParam = 0;
+    return true;
 }
 
 void Rollback_PrepareShotFactory(

@@ -352,6 +352,18 @@ static bool ValidAttachDispatchObject(uint64_t object)
            IsExecutableAddress(*(uint64_t*)(vtable + 0x2D0));
 }
 
+static bool ValidAttachMatrixSource(uint64_t object, int32_t jointIndex)
+{
+    if (!object) return true;
+    if (!HasCallableDtiVirtual((void*)object)) return false;
+
+    // Indexed attachment dispatch expects a model/unit matrix callback. A
+    // recycled particle generator can have an executable +0xA0 slot, but that
+    // slot consumes RDX as a model pointer rather than a joint index.
+    return jointIndex < 0 || IsBaseModelObject((void*)object) ||
+           IsUnitObject((void*)object) || IsEffectObject((void*)object);
+}
+
 static void __fastcall hkBuildAttachMatrix(void* arm, void* output, char reset)
 {
     RollbackHookProfileScope profile(RollbackHookProfileId::BuildAttachMatrix);
@@ -366,9 +378,11 @@ static void __fastcall hkBuildAttachMatrix(void* arm, void* output, char reset)
     uint64_t primary = *(uint64_t*)(bytes + 0x70);
     uint64_t secondary = *(uint64_t*)(bytes + 0x78);
     uint64_t tertiary = *(uint64_t*)(bytes + 0x80);
+    int32_t secondaryJoint = *(int32_t*)(bytes + 0x88);
+    int32_t tertiaryJoint = *(int32_t*)(bytes + 0x8C);
     if (ValidAttachDispatchObject(primary) &&
-        (secondary == 0 || HasCallableDtiVirtual((void*)secondary)) &&
-        (tertiary == 0 || HasCallableDtiVirtual((void*)tertiary))) {
+        ValidAttachMatrixSource(secondary, secondaryJoint) &&
+        ValidAttachMatrixSource(tertiary, tertiaryJoint)) {
         oBuildAttachMatrix(arm, output, reset);
         return;
     }

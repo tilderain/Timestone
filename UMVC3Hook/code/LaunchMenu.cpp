@@ -287,6 +287,8 @@ void SendTrainingLaunchPacket()
         packet.flags = 0;
         break;
     }
+    if (TrainingBoot_GetFiveBarStart())
+        packet.flags |= LAUNCH_TRAINING_FIVE_BARS;
     ENetPacket* enetPacket = enet_packet_create(&packet, sizeof(packet), ENET_PACKET_FLAG_RELIABLE);
     if (!enetPacket || enet_peer_send(g_dialogConfig.enetPeer, 0, enetPacket) != 0) {
         if (enetPacket) enet_packet_destroy(enetPacket);
@@ -319,6 +321,7 @@ bool ApplyTrainingLaunchPacket(const LaunchTrainingPacket& packet)
         (packet.flags & LAUNCH_TRAINING_BOTH_CPUS) ? TRAINING_CPU_BOTH :
         (packet.flags & LAUNCH_TRAINING_P2_CPU) ? TRAINING_CPU_P2_ONLY :
         TRAINING_CPU_NONE);
+    TrainingBoot_SetFiveBarStart((packet.flags & LAUNCH_TRAINING_FIVE_BARS) != 0);
 
     TrainingBootConfig cfg = {};
     for (int i = 0; i < 3; ++i) {

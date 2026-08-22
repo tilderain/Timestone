@@ -876,6 +876,10 @@ void OnInitializeHook()
 		TrainingBoot_SetCpuMode(TRAINING_CPU_P2_ONLY);
 		HookLog("UMVC3Hook: Training CPU control enabled for P2\n");
 	}
+	if (strstr(cmdLineA, "-five-bars")) {
+		TrainingBoot_SetFiveBarStart(true);
+		HookLog("UMVC3Hook: Five-bar starting meter enabled for both teams\n");
+	}
 
 	const int autoTestCharacter = ParseAutoTestCharacter(cmdLineA);
 	const int autoTestPort = ParseAutoTestPort(cmdLineA);

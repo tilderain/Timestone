@@ -24,6 +24,9 @@ static constexpr uintptr_t BATTLE_SETTING_COMMIT_ONE_PLAY    = 0x140214a40;
 static constexpr uintptr_t BATTLE_SETTING_SET_CHAR_ID        = 0x140146560;
 static constexpr uintptr_t BATTLE_SETTING_SET_DRAW_MODE      = 0x1401461e0;
 static constexpr uintptr_t BATTLE_SETTING_SET_ASSIST_TYPE    = 0x140024d80;
+static constexpr uintptr_t ACTION_EXECUTE_MATCH_PHASE         = 0x140004b80;
+static constexpr uintptr_t SCHARACTER_GET_INSTANCE            = 0x140001aa0;
+static constexpr uintptr_t SCHARACTER_SET_TEAM_METER          = 0x14005a320;
 
 // sArea scene-chain manager
 static constexpr uintptr_t SAREA_INSTANCE_PTR                = 0x140e17a80;
@@ -129,6 +132,7 @@ static bool g_restartConfigPending = false;
 static bool g_restartTransitionActive = false;
 static bool g_restartSawActionSetup = false;
 static TrainingBootCpuMode g_cpuMode = TRAINING_CPU_NONE;
+static bool g_fiveBarStart = false;
 
 // ---------------------------------------------------------------------------
 // Extern from dllmain.cpp
@@ -157,6 +161,16 @@ void TrainingBoot_SetCpuMode(TrainingBootCpuMode mode)
 TrainingBootCpuMode TrainingBoot_GetCpuMode()
 {
     return g_cpuMode;
+}
+
+void TrainingBoot_SetFiveBarStart(bool enabled)
+{
+    g_fiveBarStart = enabled;
+}
+
+bool TrainingBoot_GetFiveBarStart()
+{
+    return g_fiveBarStart;
 }
 
 // ---------------------------------------------------------------------------
@@ -197,14 +211,16 @@ static void ConfigureTrainingMatchDefaults(uint64_t bs)
     ((SetCpuLevel_t)_addr(0x140146430))(bs, 0xff);
 
     // Native training setup multiplies these values by 10000 when initializing
-    // the two team meters. Keep both teams at the regular-versus default of 1.
-    *(int32_t*)(bs + BS_P1_METER_DEFAULT_OFFSET) = 1;
-    *(int32_t*)(bs + BS_P2_METER_DEFAULT_OFFSET) = 1;
+    // the two team meters.
+    const int32_t startingMeter = g_fiveBarStart ? 5 : 1;
+    *(int32_t*)(bs + BS_P1_METER_DEFAULT_OFFSET) = startingMeter;
+    *(int32_t*)(bs + BS_P2_METER_DEFAULT_OFFSET) = startingMeter;
 
     // Zero is the normal HP-drain behavior used by the native training path.
     *(int32_t*)(bs + BS_HP_DRAIN_MODE_OFFSET) = 0;
 
-    HookLog("TrainingBoot: Defaults set (CPU=Very Hard, meter P1/P2=1, HP drain=normal)\n");
+    HookLog("TrainingBoot: Defaults set (CPU=Very Hard, meter P1/P2=%d, HP drain=normal)\n",
+            startingMeter);
 
     for (int team = 0; team < 2; ++team) {
         const int32_t cpuControl =
@@ -653,6 +669,8 @@ bool TrainingBoot_IsRestartPending()
 // ---------------------------------------------------------------------------
 typedef void(__fastcall* TitleUpdate_t)(uint64_t);
 static TitleUpdate_t oTitleUpdate = nullptr;
+typedef void(__fastcall* ExecuteMatchPhase_t)(uint64_t, int32_t, uint64_t, uint64_t);
+static ExecuteMatchPhase_t oExecuteMatchPhase = nullptr;
 
 void __fastcall Hook_titleUpdate(uint64_t param_1)
 {
@@ -664,6 +682,25 @@ void __fastcall Hook_titleUpdate(uint64_t param_1)
     if (oTitleUpdate) {
         oTitleUpdate(param_1);
     }
+}
+
+static void __fastcall Hook_executeMatchPhase(uint64_t action, int32_t phase,
+                                               uint64_t unit, uint64_t context)
+{
+    oExecuteMatchPhase(action, phase, unit, context);
+    if (!g_fiveBarStart || phase != 1)
+        return;
+
+    typedef uint64_t(__fastcall* GetInstance_t)();
+    typedef void(__fastcall* SetTeamMeter_t)(uint64_t, int32_t, float);
+    uint64_t characters = ((GetInstance_t)_addr(SCHARACTER_GET_INSTANCE))();
+    if (!characters)
+        return;
+
+    SetTeamMeter_t setTeamMeter = (SetTeamMeter_t)_addr(SCHARACTER_SET_TEAM_METER);
+    setTeamMeter(characters, 0, 50000.0f);
+    setTeamMeter(characters, 1, 50000.0f);
+    HookLog("TrainingBoot: Applied five-bar meter at round start\n");
 }
 
 // ---------------------------------------------------------------------------
@@ -689,6 +726,18 @@ void TrainingBoot_InitHooks()
     }
     else {
         HookLog("TrainingBoot: FAILED to hook aTitle__update\n");
+    }
+
+    if (MH_CreateHook(
+        (LPVOID)_addr(ACTION_EXECUTE_MATCH_PHASE),
+        (LPVOID)Hook_executeMatchPhase,
+        (LPVOID*)&oExecuteMatchPhase
+    ) == MH_OK) {
+        MH_EnableHook((LPVOID)_addr(ACTION_EXECUTE_MATCH_PHASE));
+        HookLog("TrainingBoot: Hooked sAction__executeMatchPhase\n");
+    }
+    else {
+        HookLog("TrainingBoot: FAILED to hook sAction__executeMatchPhase\n");
     }
 
     g_hooksInitialized = true;

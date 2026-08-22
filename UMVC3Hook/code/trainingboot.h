@@ -126,6 +126,10 @@ enum TrainingBootCpuMode {
 void TrainingBoot_SetCpuMode(TrainingBootCpuMode mode);
 TrainingBootCpuMode TrainingBoot_GetCpuMode();
 
+// Controls whether both teams begin with five hyper bars instead of one.
+void TrainingBoot_SetFiveBarStart(bool enabled);
+bool TrainingBoot_GetFiveBarStart();
+
 // Execute the boot sequence: configure sBattleSetting and transition to
 // aNextBattle. Called once from the aTitle__update hook.
 void BootIntoTraining();

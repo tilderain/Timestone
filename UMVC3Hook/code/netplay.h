@@ -112,6 +112,7 @@ struct LaunchP1SelectionPacket {
 enum LaunchTrainingFlags : uint32_t {
     LAUNCH_TRAINING_BOTH_CPUS = 1 << 0,
     LAUNCH_TRAINING_P2_CPU = 1 << 1,
+    LAUNCH_TRAINING_FIVE_BARS = 1 << 2,
 };
 
 enum DesyncAction : uint32_t {
