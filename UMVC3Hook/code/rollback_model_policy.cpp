@@ -51,7 +51,9 @@ constexpr uintptr_t DTI_USHOT_VULCAN_MISSILE_EMPLACEMENT = 0x140D49A60;
 constexpr uintptr_t DTI_USHOT_SHIELD_WEAPON_CART_SPREAD = 0x140D4A098;
 constexpr uintptr_t DTI_USHOT_VULCAN_EXATK_ROCKET_LAUNCHER = 0x140D4BA48;
 constexpr uintptr_t DTI_USHOT_VULCAN_ROCKET_LAUNCHER_EXPLODE = 0x140D4BAC8;
+constexpr uintptr_t DTI_USHOT_SHIELD_RAID_SWORD = 0x140D4D470;
 constexpr uintptr_t DTI_USHOT_SHIELD_SPIRAL_SWORD = 0x140D4D4C8;
+constexpr uintptr_t DTI_USHOT_SHIELD_STORM_SWORD = 0x140D4D508;
 constexpr uintptr_t DTI_USHOT_VULCAN_STORM_SWORD_SPREAD = 0x140D4D5E8;
 constexpr uintptr_t DTI_USHOT_VULCAN_KING_KOBUN = 0x140D4D2B0;
 constexpr uintptr_t DTI_UKOBUN = 0x140D455B0;
@@ -59,6 +61,7 @@ constexpr uintptr_t VTABLE_UARTHUR = 0x140A70CD0;
 constexpr uintptr_t VTABLE_UCAP_AMERICA = 0x140A71430;
 constexpr uintptr_t VTABLE_UDOCTOR_DOOM = 0x140A73A40;
 constexpr uintptr_t VTABLE_UTRISH = 0x140A81A20;
+constexpr uintptr_t VTABLE_UVERGIL = 0x140A82440;
 constexpr uintptr_t PTR_SUNIT = 0x140E17698;
 constexpr uintptr_t PTR_SREPLAY = 0x140D4D9D8;
 constexpr uintptr_t PTR_SSHOT = 0x140D47F40;
@@ -88,6 +91,8 @@ constexpr uint32_t UCAP_AMERICA_SHIELD_SLASH_OFFSET = 0x68F0;
 constexpr uint32_t UARTHUR_CROSS_SWORD_FLAG_OFFSET = 0x68F9;
 constexpr uint32_t UDOCTOR_DOOM_MISSILE_OFFSET = 0x68F0;
 constexpr uint32_t UTRISH_SPADA_BOOMERANG_OFFSET = 0x68F0;
+constexpr uint32_t UVERGIL_SWORD_FLAGS_OFFSET = 0x68F0;
+constexpr uint32_t UVERGIL_SWORD_FLAGS_COUNT = 18;
 constexpr size_t SSHOT_ID_POOL_OFFSET = 0x38;
 constexpr size_t SSHOT_ID_POOL_SIZE = 0x404;
 constexpr size_t SSHOT_PENDING_COUNT_OFFSET = 0x2448;
@@ -1152,6 +1157,53 @@ void Rollback_RemapCharacterShotLinks(
         }
         *((uint8_t*)character + UARTHUR_CROSS_SWORD_FLAG_OFFSET) =
             hasCrossSword ? 1 : 0;
+        return;
+    }
+
+    if (expectedVtable == (uint64_t)_addr(VTABLE_UVERGIL)) {
+        if (savedCharacterSize <
+            UVERGIL_SWORD_FLAGS_OFFSET + UVERGIL_SWORD_FLAGS_COUNT) {
+            return;
+        }
+
+        // These are availability bits, not shot pointers. Native clears a bit
+        // to release a sword while that shot remains linked for its exit. Keep
+        // saved false bits, but never retain a true bit when its sword recipe
+        // was terminal-filtered or failed reconstruction.
+        uint8_t* flags = (uint8_t*)character + UVERGIL_SWORD_FLAGS_OFFSET;
+        std::memcpy(flags, savedCharacter + UVERGIL_SWORD_FLAGS_OFFSET,
+                    UVERGIL_SWORD_FLAGS_COUNT);
+        bool reconstructed[UVERGIL_SWORD_FLAGS_COUNT] = {};
+        for (const RollbackShotRecipe& saved : recipes) {
+            if (saved.ownerChr != character || !saved.restoredPtr) continue;
+
+            uint32_t groupOffset = 0;
+            uint32_t swordIdOffset = 0;
+            if (saved.concrete.dti ==
+                (uint64_t)_addr(DTI_USHOT_SHIELD_SPIRAL_SWORD)) {
+                swordIdOffset = 0x2210;
+            } else if (saved.concrete.dti ==
+                       (uint64_t)_addr(DTI_USHOT_SHIELD_RAID_SWORD)) {
+                groupOffset = 6;
+                swordIdOffset = 0x2140;
+            } else if (saved.concrete.dti ==
+                       (uint64_t)_addr(DTI_USHOT_SHIELD_STORM_SWORD)) {
+                groupOffset = 12;
+                swordIdOffset = 0x2210;
+            } else {
+                continue;
+            }
+            if (saved.concrete.body.size() < swordIdOffset + sizeof(uint32_t))
+                continue;
+
+            uint32_t swordId = 0;
+            std::memcpy(&swordId, saved.concrete.body.data() + swordIdOffset,
+                        sizeof(swordId));
+            if (swordId >= 1 && swordId <= 6)
+                reconstructed[groupOffset + swordId - 1] = true;
+        }
+        for (uint32_t index = 0; index < UVERGIL_SWORD_FLAGS_COUNT; ++index)
+            if (flags[index] && !reconstructed[index]) flags[index] = 0;
         return;
     }
 

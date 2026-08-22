@@ -286,6 +286,18 @@ shot reconstruction, character-shot repair derives the detector from successful
 while a reconstructed sword exists and clears stale state when a terminal sword
 was omitted or its factory failed.
 
+Vergil does not retain a pointer array for summoned swords. The 18 bytes at
+`uVergil+0x68f0..+0x6901` are availability flags for six Spiral, six Raid, and
+six Storm swords. Each shot retains its own `mSwordId`; Vergil's command handler
+finds candidates by scanning `sShot`. Clearing a flag releases that sword while
+the shot can remain linked for its exit animation, so restore must not infer a
+true flag merely from a surviving recipe. After reconstruction, preserve saved
+false flags and clear only saved true flags that have no successfully restored
+shot with the matching class and `mSwordId`. In the `20260822_021657` pair, the
+first such stale flag appears at frame 1931 (`Spiral 6` true on the client with
+no Spiral recipe), followed by `mUsrF` divergence at frame 2079 and different
+Vergil animation/action selection at frame 2092.
+
 Haggar's pipe is `uShotVulcanIronPipeRolling` (`0x140d4a4e8`, size `0x2230`).
 Its constructor at `0x14017e4a0` creates a pointer-bearing model/effect owner at
 `+0x2140`; setup at `0x14017eaa0` asynchronously loads the Haggar pipe MOD into
