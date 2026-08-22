@@ -455,6 +455,7 @@ bool IsReconstructedShot(void* shot, uintptr_t dtiAddress,
 
 void RetryMissileEmplacementSetup(void* shot)
 {
+    constexpr size_t TRANSFORM_STATE_OFFSET = 0x50;
     constexpr size_t CONCRETE_STATE_OFFSET = 0x2120;
     constexpr size_t MOTION_HEADER_OFFSET = 0x550;
     constexpr size_t MOTION_BASE = 0x560;
@@ -465,9 +466,12 @@ void RetryMissileEmplacementSetup(void* shot)
         uint8_t state140[0x20];
         uint8_t state168[0x08];
     };
+    uint8_t transformState[0xB0];
     uint8_t concreteState[0x50];
     uint8_t motionHeader[0x10];
     MotionPlaybackState motionState[MOTION_COUNT];
+    std::memcpy(transformState, (uint8_t*)shot + TRANSFORM_STATE_OFFSET,
+                sizeof(transformState));
     std::memcpy(concreteState, (uint8_t*)shot + CONCRETE_STATE_OFFSET,
                 sizeof(concreteState));
     std::memcpy(motionHeader, (uint8_t*)shot + MOTION_HEADER_OFFSET,
@@ -487,6 +491,11 @@ void RetryMissileEmplacementSetup(void* shot)
     if (!setup || !IsExecutableAddress(setup)) return;
     ((void(__fastcall*)(void*))setup)(shot);
     InvalidateMemoryQueryCache();
+    // Setup mirrors Z and replaces orientation from Doom's side flag. The
+    // snapshot already contains that transform, so a readiness retry must not
+    // apply the side conversion a second time.
+    std::memcpy((uint8_t*)shot + TRANSFORM_STATE_OFFSET, transformState,
+                sizeof(transformState));
     std::memcpy((uint8_t*)shot + CONCRETE_STATE_OFFSET, concreteState,
                 sizeof(concreteState));
     std::memcpy((uint8_t*)shot + MOTION_HEADER_OFFSET, motionHeader,

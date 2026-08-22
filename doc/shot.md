@@ -188,6 +188,16 @@ so preserve the same pointer-free motion playback ranges across that call. If
 setup resets them, the first child derives a different joint Y position while
 later children can still agree.
 
+The retry must also preserve `uShot+0x50..+0xff`. Emplacement setup reads Doom's
+side flag at `uCharacter+0x14f8` bit 22, mirrors position Z, and replaces the
+orientation. Reapplying that non-idempotent conversion to an already-restored
+transform puts one peer on the opposite side. In the `20260822_041421` pair,
+the first child at frame 2558 consequently launched at Z `-181.974` versus
+`118.026`, an exact 300-unit difference inherited from emplacement Z
+`-150/+150`; later homing made the direction error conspicuous around frame
+2622. Preserve the authoritative transform while allowing setup to rebuild its
+fresh model, joint, and motion allocations.
+
 Hidden Missiles also consumes pointer-free `uModel::Motion` playback fields to
 derive joint-driven child launch positions. Restore those fields with the same
 ownership-safe per-slot ranges used by King Servbot while preserving the fresh
