@@ -291,12 +291,19 @@ Vergil does not retain a pointer array for summoned swords. The 18 bytes at
 six Storm swords. Each shot retains its own `mSwordId`; Vergil's command handler
 finds candidates by scanning `sShot`. Clearing a flag releases that sword while
 the shot can remain linked for its exit animation, so restore must not infer a
-true flag merely from a surviving recipe. After reconstruction, preserve saved
-false flags and clear only saved true flags that have no successfully restored
-shot with the matching class and `mSwordId`. In the `20260822_021657` pair, the
-first such stale flag appears at frame 1931 (`Spiral 6` true on the client with
-no Spiral recipe), followed by `mUsrF` divergence at frame 2079 and different
-Vergil animation/action selection at frame 2092.
+true flag merely from a surviving recipe. Restore the captured availability
+bytes normally; do not clear true bits based on the reconstructed recipe set,
+because a true bit can legitimately outlive a terminal-filtered recipe. Sword
+factories scan their six-byte availability group to assign `mSwordId`, so expose
+only the saved ID as available during each factory call, then restore the group.
+Raid Sword's factory additionally sets `uVergil::mUsrF & 4`, so reconstruction
+preserves and restores the complete `mUsrF` dword around that call. The focused
+`Spiral Swords S+L Release` test first exposed this side effect at frame 291 and
+the resulting one-sided action selection at frame 308. Removing both a proposed
+exemption from the generic cleanup-step-3 filter and the post-reconstruction
+availability reconciliation remained synchronized through focused repeated
+runs, so Vergil swords retain the normal terminal-shot and character-restore
+policies.
 
 Haggar's pipe is `uShotVulcanIronPipeRolling` (`0x140d4a4e8`, size `0x2230`).
 Its constructor at `0x14017e4a0` creates a pointer-bearing model/effect owner at

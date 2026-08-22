@@ -9,6 +9,8 @@ struct RollbackShotRecipe;
 struct RollbackShotFactoryPolicyState {
     uint8_t ownerSlots[6] = {};
     uint8_t* ownerSlotTable = nullptr;
+    uint32_t ownerUsrF = 0;
+    uint32_t* ownerUsrFField = nullptr;
 };
 
 void Rollback_InitShotModelPolicyHooks();

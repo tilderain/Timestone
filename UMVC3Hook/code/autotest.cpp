@@ -139,6 +139,24 @@ constexpr InputStep EVIDENCE_DISCARD[] = {
     {IN_X | IN_A, 1},
 };
 
+constexpr InputStep VERGIL_SPIRAL_SWORDS_RELEASE[] = {
+    {IN_RIGHT, 2},
+    {IN_DOWN, 2},
+    {IN_DOWN | IN_RIGHT | IN_X | IN_Y, 1},
+    {0, 90},
+    {IN_A | IN_X, 1}, {0, 19},
+    {IN_A | IN_X, 1}, {0, 19},
+    {IN_A | IN_X, 1}, {0, 19},
+    {IN_A | IN_X, 1}, {0, 19},
+    {IN_A | IN_X, 1}, {0, 19},
+    {IN_A | IN_X, 1}, {0, 19},
+    {IN_A | IN_X, 1}, {0, 19},
+    {IN_A | IN_X, 1}, {0, 19},
+    {IN_A | IN_X, 1}, {0, 19},
+    {IN_A | IN_X, 1},
+    {0, 120},
+};
+
 constexpr InputScript SCRIPTS[] = {
     {"QCF + Light", QCF_LIGHT, std::size(QCF_LIGHT)},
     {"QCB + Light", QCB_LIGHT, std::size(QCB_LIGHT)},
@@ -155,7 +173,11 @@ constexpr InputScript SUITE_MANUAL_SCRIPTS[] = {
     {"Get 'Em Missile Assist", GET_EM_MISSILE_ASSIST,
      std::size(GET_EM_MISSILE_ASSIST)},
     {"Evidence Discard", EVIDENCE_DISCARD, std::size(EVIDENCE_DISCARD)},
+    {"Spiral Swords S+L Release", VERGIL_SPIRAL_SWORDS_RELEASE,
+     std::size(VERGIL_SPIRAL_SWORDS_RELEASE)},
 };
+
+constexpr int32_t MANUAL_VERGIL_SPIRAL_SWORDS = 7;
 
 constexpr const char* SUITE_MANUAL_SCRIPT_CHARACTERS[] = {
     nullptr,
@@ -165,6 +187,7 @@ constexpr const char* SUITE_MANUAL_SCRIPT_CHARACTERS[] = {
     "DeadPool",
     "Phoenix Wright",
     "Phoenix Wright",
+    "Vergil",
 };
 static_assert(std::size(SUITE_MANUAL_SCRIPT_CHARACTERS) ==
               std::size(SUITE_MANUAL_SCRIPTS));
@@ -341,6 +364,8 @@ constexpr NetSuiteCaseSetup NET_SUITE_CASE_SETUPS[] = {
     {"DeadPool", -1, -1, 4, 200.0f, LONG_LIVED_MOVE_QUIET_FRAMES},
     {"Phoenix Wright", -1, -1, 6, 500.0f, LONG_LIVED_MOVE_QUIET_FRAMES},
     {"Tron", 0, 24, -1, 0.0f, LONG_LIVED_MOVE_QUIET_FRAMES},
+    {"Vergil", -1, -1, MANUAL_VERGIL_SPIRAL_SWORDS, 500.0f,
+     LONG_LIVED_MOVE_QUIET_FRAMES},
 };
 
 bool g_netSuiteActive = false;
@@ -348,6 +373,7 @@ bool g_netSuiteClient = false;
 bool g_netSuiteRestartPending = false;
 bool g_netSuiteRestartExecuted = false;
 bool g_netSuiteRestartLeftFighting = false;
+bool g_netSuiteFillHyperGauge = false;
 uint32_t g_netSuiteMoveId = 0;
 int32_t g_netSuiteStartFrame = -1;
 int32_t g_netSuiteSetupFrame = -1;
@@ -719,7 +745,7 @@ void ProcessNetSuiteSetup(int32_t frame)
     // an out-of-band state change that a client forced resim can overwrite by
     // restoring the preceding frame, leaving its active character one RNG step
     // ahead of the host.
-    if (g_runningRuntimeHyper)
+    if (g_netSuiteFillHyperGauge)
         FillAttackerHyperGauge(g_suiteStatus.playerIndex);
     using SetPosition_t = void(__fastcall*)(uint64_t, const float*);
     SetPosition_t setPosition =
@@ -749,6 +775,9 @@ void ConfigureManualScript(int32_t manualIndex, int32_t playerIndex,
     };
     g_facingLeft = facingLeft;
     g_runningRuntimeCommand = false;
+    g_runningRuntimeHyper = manualIndex == MANUAL_VERGIL_SPIRAL_SWORDS;
+    if (g_runningRuntimeHyper && !Netplay_IsActive())
+        FillAttackerHyperGauge(playerIndex);
     g_runningManualCommand = manualIndex;
 }
 
@@ -818,6 +847,7 @@ void StartInboundNetSuiteMove(const AutoTestStartPacket& packet)
                 sizeof(g_netSuiteShotIdPool));
     g_netSuiteSetupFrame = packet.setup_frame;
     g_netSuiteSetupApplied = false;
+    g_netSuiteFillHyperGauge = packet.fill_hyper_gauge != 0;
     Netplay_SetTimeout(1000);
     HookLog("AutoTestNet: client armed move %u %s at frame %d\n",
             packet.move_id, packet.move_name, packet.start_frame);
@@ -2644,16 +2674,18 @@ extern "C" void AutoTest_Process()
                 ? command->commandListVariantToken : -1;
             packet.manual_index = g_suiteManualCase
                 ? selectedManualIndex : -1;
-            // Apply the authoritative placement at the same frame as the
-            // scripted input barrier. Applying it ten frames earlier allowed
-            // host/client local frame timing to select different teleport
-            // frames and left the setup state exposed to later game updates.
-            packet.setup_frame = g_status.startFrame;
+            // Apply authoritative setup just before the scripted input barrier.
+            // The client can observe the setup frame one live tick later than
+            // the host; two frames ensure forced replay starts from a snapshot
+            // that already contains setup on both peers. A longer lead allowed
+            // normal game updates to drift placement before the command.
+            packet.setup_frame = g_status.startFrame - 2;
             packet.start_frame = g_status.startFrame;
             packet.attacker_idle_action = g_suiteIdleActions[0];
             packet.defender_idle_action = g_suiteIdleActions[1];
             packet.facing_left = g_suiteFacingLeft ? 1u : 0u;
             packet.round_seed = g_suiteRngSeed;
+            packet.fill_hyper_gauge = g_runningRuntimeHyper ? 1u : 0u;
             std::memcpy(packet.setup_positions, g_netSuiteSetupPositions,
                         sizeof(packet.setup_positions));
             std::memcpy(packet.shot_id_pool, g_netSuiteShotIdPool,
@@ -2663,6 +2695,7 @@ extern "C" void AutoTest_Process()
             ResetNetSuiteMoveState(packet.move_id, packet.start_frame);
             g_netSuiteSetupFrame = packet.setup_frame;
             g_netSuiteSetupApplied = false;
+            g_netSuiteFillHyperGauge = packet.fill_hyper_gauge != 0;
             g_netSuiteRestartPending = false;
             Netplay_SendAutoTestStart(packet);
             HookLog("AutoTestNet: host started move %u %s at frame %d\n",
