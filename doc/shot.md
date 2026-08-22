@@ -275,6 +275,17 @@ ownership filter and leave the reconstructed factory value at zero. Reapplying
 the verified four-byte float after pointer filtering preserves the axe arc and
 the rotating hitbox without importing model pointers.
 
+Arthur's Cross Sword availability detector is the boolean `mIsCrossSword` at
+`uArthur+0x68f9`, not a shot pointer. Setup writes one and both the concrete kill
+callback and its target-loss callback write zero. Generic cleanup-step filtering
+can omit a terminal Cross Sword recipe before native kill clears the detector;
+restoring the character byte then leaves Arthur permanently unable to throw
+another Cross Sword because no reconstructed object remains to clear it. After
+shot reconstruction, character-shot repair derives the detector from successful
+`uShotVulcanCrossSword` recipes owned by that Arthur. This retains the lockout
+while a reconstructed sword exists and clears stale state when a terminal sword
+was omitted or its factory failed.
+
 Chris's `uShotVulcanLandMine` creates its armed-grenade `uGameEffect` only when
 virtual `+0x318` handles stage contact. A frame-72 snapshot can therefore contain
 `mIsTakeOn=true` and an occupied callback slot at `uShot+0x1f78`, while its fresh

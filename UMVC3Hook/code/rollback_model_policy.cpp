@@ -37,6 +37,7 @@ constexpr uintptr_t DTI_USHOT_SHIELD_REPULSOR_BLAST_SP = 0x140D4ADA0;
 constexpr uintptr_t DTI_USHOT_LASER = 0x140D482E8;
 constexpr uintptr_t DTI_USHOT_OPTION_SHIELD_SLASH = 0x140D48A68;
 constexpr uintptr_t DTI_USHOT_OPTION_SPADA_BOOMERANG = 0x140D4D118;
+constexpr uintptr_t DTI_USHOT_VULCAN_CROSS_SWORD = 0x140D488B8;
 constexpr uintptr_t DTI_USHOT_VULCAN_FIRE_GRENADE_BOMB = 0x140D48BB0;
 constexpr uintptr_t DTI_USHOT_VULCAN_HAND_GRENADE_BOMB = 0x140D48CD0;
 constexpr uintptr_t DTI_USHOT_VULCAN_LAND_MINE = 0x140D48D98;
@@ -49,6 +50,7 @@ constexpr uintptr_t DTI_USHOT_VULCAN_ROCKET_LAUNCHER_EXPLODE = 0x140D4BAC8;
 constexpr uintptr_t DTI_USHOT_SHIELD_SPIRAL_SWORD = 0x140D4D4C8;
 constexpr uintptr_t DTI_USHOT_VULCAN_KING_KOBUN = 0x140D4D2B0;
 constexpr uintptr_t DTI_UKOBUN = 0x140D455B0;
+constexpr uintptr_t VTABLE_UARTHUR = 0x140A70CD0;
 constexpr uintptr_t VTABLE_UCAP_AMERICA = 0x140A71430;
 constexpr uintptr_t VTABLE_UDOCTOR_DOOM = 0x140A73A40;
 constexpr uintptr_t VTABLE_UTRISH = 0x140A81A20;
@@ -78,6 +80,7 @@ constexpr uint32_t SUNIT_CATEGORY_LISTS_OFFSET = 0x50;
 constexpr uint32_t SUNIT_CATEGORY_LIST_STRIDE = 0x30;
 constexpr uint32_t SUNIT_CHARACTER_CATEGORY = 8;
 constexpr uint32_t UCAP_AMERICA_SHIELD_SLASH_OFFSET = 0x68F0;
+constexpr uint32_t UARTHUR_CROSS_SWORD_FLAG_OFFSET = 0x68F9;
 constexpr uint32_t UDOCTOR_DOOM_MISSILE_OFFSET = 0x68F0;
 constexpr uint32_t UTRISH_SPADA_BOOMERANG_OFFSET = 0x68F0;
 constexpr size_t SSHOT_ID_POOL_OFFSET = 0x38;
@@ -1066,6 +1069,27 @@ void Rollback_RemapCharacterShotLinks(
     void* character, uint64_t expectedVtable, const uint8_t* savedCharacter,
     size_t savedCharacterSize, const std::vector<RollbackShotRecipe>& recipes)
 {
+    if (expectedVtable == (uint64_t)_addr(VTABLE_UARTHUR)) {
+        if (savedCharacterSize <= UARTHUR_CROSS_SWORD_FLAG_OFFSET) return;
+
+        // Native clears this detector from Cross Sword's kill callbacks. A shot
+        // already in cleanup step 3 is intentionally omitted from the snapshot,
+        // so restoring the saved byte can otherwise leave Arthur locked out with
+        // no surviving shot to clear it. Derive it from the reconstructed set.
+        bool hasCrossSword = false;
+        for (const RollbackShotRecipe& saved : recipes) {
+            if (saved.ownerChr == character && saved.restoredPtr &&
+                saved.concrete.dti ==
+                    (uint64_t)_addr(DTI_USHOT_VULCAN_CROSS_SWORD)) {
+                hasCrossSword = true;
+                break;
+            }
+        }
+        *((uint8_t*)character + UARTHUR_CROSS_SWORD_FLAG_OFFSET) =
+            hasCrossSword ? 1 : 0;
+        return;
+    }
+
     uintptr_t shotDti = 0;
     uint32_t offset = 0;
     if (expectedVtable == (uint64_t)_addr(VTABLE_UCAP_AMERICA)) {
