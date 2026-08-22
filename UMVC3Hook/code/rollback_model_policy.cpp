@@ -36,6 +36,7 @@ constexpr uintptr_t DTI_USHOT_VULCAN_LEGION_TIGER = 0x140D4ABB8;
 constexpr uintptr_t DTI_USHOT_SHIELD_REPULSOR_BLAST_SP = 0x140D4ADA0;
 constexpr uintptr_t DTI_USHOT_LASER = 0x140D482E8;
 constexpr uintptr_t DTI_USHOT_OPTION_SHIELD_SLASH = 0x140D48A68;
+constexpr uintptr_t DTI_USHOT_OPTION_SPADA_BOOMERANG = 0x140D4D118;
 constexpr uintptr_t DTI_USHOT_VULCAN_FIRE_GRENADE_BOMB = 0x140D48BB0;
 constexpr uintptr_t DTI_USHOT_VULCAN_HAND_GRENADE_BOMB = 0x140D48CD0;
 constexpr uintptr_t DTI_USHOT_VULCAN_LAND_MINE = 0x140D48D98;
@@ -50,6 +51,7 @@ constexpr uintptr_t DTI_USHOT_VULCAN_KING_KOBUN = 0x140D4D2B0;
 constexpr uintptr_t DTI_UKOBUN = 0x140D455B0;
 constexpr uintptr_t VTABLE_UCAP_AMERICA = 0x140A71430;
 constexpr uintptr_t VTABLE_UDOCTOR_DOOM = 0x140A73A40;
+constexpr uintptr_t VTABLE_UTRISH = 0x140A81A20;
 constexpr uintptr_t PTR_SUNIT = 0x140E17698;
 constexpr uintptr_t PTR_SREPLAY = 0x140D4D9D8;
 constexpr uintptr_t PTR_SSHOT = 0x140D47F40;
@@ -77,6 +79,7 @@ constexpr uint32_t SUNIT_CATEGORY_LIST_STRIDE = 0x30;
 constexpr uint32_t SUNIT_CHARACTER_CATEGORY = 8;
 constexpr uint32_t UCAP_AMERICA_SHIELD_SLASH_OFFSET = 0x68F0;
 constexpr uint32_t UDOCTOR_DOOM_MISSILE_OFFSET = 0x68F0;
+constexpr uint32_t UTRISH_SPADA_BOOMERANG_OFFSET = 0x68F0;
 constexpr size_t SSHOT_ID_POOL_OFFSET = 0x38;
 constexpr size_t SSHOT_ID_POOL_SIZE = 0x404;
 constexpr size_t SSHOT_PENDING_COUNT_OFFSET = 0x2448;
@@ -1071,6 +1074,9 @@ void Rollback_RemapCharacterShotLinks(
     } else if (expectedVtable == (uint64_t)_addr(VTABLE_UDOCTOR_DOOM)) {
         shotDti = DTI_USHOT_VULCAN_MISSILE_EMPLACEMENT;
         offset = UDOCTOR_DOOM_MISSILE_OFFSET;
+    } else if (expectedVtable == (uint64_t)_addr(VTABLE_UTRISH)) {
+        shotDti = DTI_USHOT_OPTION_SPADA_BOOMERANG;
+        offset = UTRISH_SPADA_BOOMERANG_OFFSET;
     } else {
         return;
     }
@@ -1092,8 +1098,9 @@ void Rollback_RemapCharacterShotLinks(
         ambiguous = match != nullptr;
         match = &saved;
     }
-    bool requireSavedReference = expectedVtable ==
-        (uint64_t)_addr(VTABLE_UCAP_AMERICA);
+    bool requireSavedReference =
+        expectedVtable == (uint64_t)_addr(VTABLE_UCAP_AMERICA) ||
+        expectedVtable == (uint64_t)_addr(VTABLE_UTRISH);
     *(void**)((uint8_t*)character + offset) =
         (!requireSavedReference || savedReference) && match && !ambiguous
             ? match->restoredPtr : nullptr;

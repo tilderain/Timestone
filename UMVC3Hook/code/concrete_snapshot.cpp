@@ -85,6 +85,8 @@ constexpr DtiSnapshotRange kVerifiedShotScalarRanges[] = {
     {0x140D4D430ull, 0x22A4, 0x04}, // uShotOptionRoundTrip: owner rotation
     {0x140D4D430ull, 0x22E0, 0x05}, // uShotOptionRoundTrip: rotation/side
     {0x140D48780ull, 0x21C8, 0x04}, // uShotOptionSickleBoomerang: owner rotation
+    {0x140D4D118ull, 0x21D0, 0x0C}, // uShotOptionSpadaBoomerang: primary owner rotation
+    {0x140D4D118ull, 0x22A0, 0x0C}, // uShotOptionSpadaBoomerang: secondary owner rotation
     {0x140D4D118ull, 0x22E0, 0x20}, // uShotOptionSpadaBoomerang: phase/timing
     {0x140D4CA60ull, 0x2148, 0x08}, // uShotOptionSwingWire: outbound timing
     {0x140D4CA60ull, 0x2150, 0x01}, // uShotOptionSwingWire: outbound latch
