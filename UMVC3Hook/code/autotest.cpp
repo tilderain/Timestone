@@ -269,7 +269,8 @@ int32_t RequiredQuietFramesForMove(const char* name)
 {
     // Hidden Missiles can return Doom to idle well before the emplacement has
     // finished launching. Keep comparing both peers for two more seconds.
-    if (ContainsInsensitive(name, "Hidden Missiles"))
+    if (ContainsInsensitive(name, "Hidden Missiles") ||
+        ContainsInsensitive(name, "Blue Light Special"))
         return LONG_LIVED_MOVE_QUIET_FRAMES;
     return Netplay_IsActive() ? NET_SUITE_STABLE_FRAMES : SUITE_QUIET_FRAMES;
 }

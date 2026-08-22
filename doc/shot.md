@@ -265,13 +265,15 @@ on category state transitions. Rollback cleanup mirrors those transitions for
 the 13 cart-owned models: finalize through `+0x78`, advance state `3 -> 4` while
 removing multi-mask links, then advance `4 -> 0`, remove the primary `sUnit`
 link, and invoke the scalar destructor. Pin their resources until fresh native
-setup completes. The debris attachment source is separately cached in
-`cChrNode(owner+0x6490)+0x08`; remap it to the fresh primary model at
-`cart+0x2288` after reconstruction and reinforce that binding at each
-reconstructed move boundary so attachment indices 5 through 18 cannot dispatch
-through the retired model's base `MtObject` vtable. With this cleanup,
-the reconstructed cart retains its model and 16 joints through gate 3, creates
-all debris, resumes return sliding, and remains checksum-synchronized.
+setup completes. `owner+0x6490` is a `cChrTargetInfo`, and its `+0x08` field is
+the target-character pointer consumed by Frank's zombies and by the cart debris
+factory. Never replace it with the primary model at `cart+0x2288`: after that
+model allocation is reused by the cart's inline `cAtkCtrl`, zombie movement
+calls character-name virtuals on the attack controller and crashes. The debris
+factory receives the reconstructed parent cart through its remapped `initParam`;
+that parent remap is sufficient for attachment identity. With model cleanup and
+the parent remap, the cart creates all debris, resumes return sliding, and
+remains checksum-synchronized.
 Each debris recipe also stores its parent cart pointer in `initParam`, outside
 the two validated object-reference fields. Remap that value from the captured
 cart recipe's `savedPtr` to its `restoredPtr` before running the debris factory;

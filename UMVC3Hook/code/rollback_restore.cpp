@@ -932,8 +932,6 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
                 setup(fresh);
             }
         }
-        Rollback_RestoreShotModelLinks(
-            fresh, saved.ownerChr, saved.concrete.dti);
         Rollback_RebuildShotStateBeforeRegistration(fresh, saved);
         // Rebuild registration through the same pending-unit path used by the
         // native shot callers. Drain it before resimulation so all restored
@@ -1597,6 +1595,10 @@ void Rollback_RestoreSnapshot(int32_t frame)
                 {0x510, 0x28}, {0x550, 0x10},
                 // uModel motion/envelope state before its live owner pointer.
                 {0x1160, 0x18}, {0x1180, 0x30},
+                // mAimTrans/mAimRot/mAimScale drive the weapon coordinate used
+                // by character collision attachments. Keep each inline vtable
+                // and rewind its pointer-free interpolation payload.
+                {0x1458, 0x48}, {0x14A8, 0x48}, {0x14F8, 0x48},
                 // uChrWeapon flags, attachment selectors, and cached matrices.
                 {0x1548, 0x98},
             };

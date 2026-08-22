@@ -73,7 +73,6 @@ constexpr uintptr_t FN_WEAPON_CART_SPAWN_DEBRIS = 0x14017A200;
 constexpr uintptr_t FN_HAND_GRENADE_CONTACT = 0x14015D180;
 constexpr uintptr_t FN_SOMERSAULT_GRENADE_CONTACT = 0x140168550;
 constexpr uintptr_t FN_SSHOT_FLUSH_PENDING_UNITS = 0x1401517A0;
-constexpr uintptr_t FN_CCHRNODE_SET_NEXT = 0x140003D50;
 constexpr uintptr_t FN_MTOBJECT_ADD_REF = 0x14050D100;
 constexpr uintptr_t FN_UMODEL_PROCESS_ACTION_ANMCHR = 0x140529420;
 constexpr uintptr_t FN_UMODEL_MOVE = 0x140566580;
@@ -618,15 +617,6 @@ void __fastcall hkWeaponCartMove(void* shot)
         shot, DTI_USHOT_VULCAN_WEAPON_CART, &recipe);
     void* owner = reconstructed ? recipe.ownerChr : nullptr;
     uint32_t beforeGate = *(uint32_t*)((uint8_t*)shot + 0x221C);
-    if (reconstructed && owner &&
-        IsAccessibleRange((uint64_t)shot + 0x2288, sizeof(void*)) &&
-        IsAccessibleRange((uint64_t)owner + 0x6498, sizeof(void*))) {
-        void* modelEffect = *(void**)((uint8_t*)shot + 0x2288);
-        if (modelEffect && HasCallableDtiVirtual(modelEffect)) {
-            ((void(__fastcall*)(void*, void*))_addr(FN_CCHRNODE_SET_NEXT))(
-                (uint8_t*)owner + 0x6490, modelEffect);
-        }
-    }
     if (reconstructed && owner && beforeGate == 3) {
         auto deferred = g_deferredWeaponCartDebris.find(owner);
         if (deferred != g_deferredWeaponCartDebris.end() &&
@@ -934,25 +924,6 @@ void Rollback_PrepareShotModelAfterSpawn(
     // Wait only for the first shared model of each DTI. Later factories should
     // resolve the resource from the cache populated by that setup.
     RetryShotModelSetup(shot, *policy, alreadyWaited ? 1 : 500);
-}
-
-void Rollback_RestoreShotModelLinks(void* shot, void* ownerChr,
-                                    uint64_t runtimeDti)
-{
-    if (!shot || !ownerChr ||
-        runtimeDti != (uint64_t)_addr(DTI_USHOT_VULCAN_WEAPON_CART) ||
-        !IsAccessibleRange((uint64_t)shot + 0x2288, sizeof(void*)) ||
-        !IsAccessibleRange((uint64_t)ownerChr + 0x6498, sizeof(void*))) {
-        return;
-    }
-    void* modelEffect = *(void**)((uint8_t*)shot + 0x2288);
-    if (!modelEffect || !HasCallableDtiVirtual(modelEffect))
-        return;
-
-    // Debris attachment resolves joints through owner+0x6498; the saved node
-    // still names the retired primary model.
-    ((void(__fastcall*)(void*, void*))_addr(FN_CCHRNODE_SET_NEXT))(
-        (uint8_t*)ownerChr + 0x6490, modelEffect);
 }
 
 void Rollback_EvaluateRestoredShotModel(void* shot, uint64_t runtimeDti,
