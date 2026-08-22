@@ -1017,6 +1017,8 @@ bool Rollback_PatchNativeNetplayDeterminism()
 
 void Rollback_ApplyNetplayDeterminism()
 {
+    // Called from HookedMove on the game thread. Several native setters below
+    // rewrite timing or subsystem state and are unsafe during parallel startup.
     using SetFrameWaitFn = void(__fastcall*)(uint64_t, bool);
     using SetMoveLineParallelFn = void(__fastcall*)(uint64_t, int, bool);
     using GetCollisionMoveMatrixFn = uint64_t(__fastcall*)(uint64_t);

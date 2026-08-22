@@ -448,6 +448,16 @@ static void __fastcall HookedMove(void* sMvc3Main)
         return;
     }
 
+    // These setters rewrite live sMain timing and subsystem state. Applying
+    // them from the initialization thread can race native startup before the
+    // first game tick, so perform them here on the game thread instead.
+    static bool netplayDeterminismApplied = false;
+    if (Netplay_IsActive() && !netplayDeterminismApplied)
+    {
+        Rollback_ApplyNetplayDeterminism();
+        netplayDeterminismApplied = true;
+    }
+
     ChrSelImGui_Update();
 
     if (isPaused)
@@ -991,7 +1001,6 @@ void FrameStepper_InitNetplay()
                 Netplay_IsHost() ? "host" : "client");
         g_autoTestLaunchPending = IsAutoTestLaunchEnabled() && Netplay_IsHost();
         Rollback_PatchNativeNetplayDeterminism();
-        Rollback_ApplyNetplayDeterminism();
     }
 }
 

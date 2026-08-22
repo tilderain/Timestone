@@ -37,6 +37,9 @@ constexpr uintptr_t ADDR_SET_CHARACTER_POSITION = 0x140002AF0;
 constexpr uintptr_t ADDR_REPLAY_ROUND_START = 0x1401CFA90;
 constexpr uintptr_t PTR_SHOT_LISTS = 0x140D47F90;
 constexpr uintptr_t MVC3_MANAGER_CUTIN_OFFSET = 0xB50;
+constexpr uintptr_t PTR_SSHOT = 0x140D47F40;
+constexpr size_t SSHOT_ID_POOL_OFFSET = 0x38;
+constexpr size_t SSHOT_ID_POOL_SIZE = 0x404;
 constexpr uintptr_t TEAM_OFFSETS[] = {0x40, 0x300};
 constexpr uintptr_t TEAM_ACTIVE_CHARACTER_OFFSET = 0x48;
 constexpr uintptr_t COMMAND_MATCHER_OFFSETS[] = {0x2738, 0x2950};
@@ -130,6 +133,12 @@ constexpr InputStep GET_EM_MISSILE_ASSIST[] = {
     {0, 120},
 };
 
+constexpr InputStep EVIDENCE_DISCARD[] = {
+    {IN_X | IN_A, 1},
+    {0, 30},
+    {IN_X | IN_A, 1},
+};
+
 constexpr InputScript SCRIPTS[] = {
     {"QCF + Light", QCF_LIGHT, std::size(QCF_LIGHT)},
     {"QCB + Light", QCB_LIGHT, std::size(QCB_LIGHT)},
@@ -145,6 +154,7 @@ constexpr InputScript SUITE_MANUAL_SCRIPTS[] = {
     {"Air Bolos", AIR_BOLOS, std::size(AIR_BOLOS)},
     {"Get 'Em Missile Assist", GET_EM_MISSILE_ASSIST,
      std::size(GET_EM_MISSILE_ASSIST)},
+    {"Evidence Discard", EVIDENCE_DISCARD, std::size(EVIDENCE_DISCARD)},
 };
 
 constexpr const char* SUITE_MANUAL_SCRIPT_CHARACTERS[] = {
@@ -153,6 +163,7 @@ constexpr const char* SUITE_MANUAL_SCRIPT_CHARACTERS[] = {
     "DeadPool",
     "DeadPool",
     "DeadPool",
+    "Phoenix Wright",
     "Phoenix Wright",
 };
 static_assert(std::size(SUITE_MANUAL_SCRIPT_CHARACTERS) ==
@@ -328,6 +339,7 @@ constexpr NetSuiteCaseSetup NET_SUITE_CASE_SETUPS[] = {
     {"Chris", 0, 29, -1, 500.0f, LONG_LIVED_MOVE_QUIET_FRAMES},
     {"DeadPool", -1, -1, 2, 500.0f, LONG_LIVED_MOVE_QUIET_FRAMES},
     {"DeadPool", -1, -1, 4, 200.0f, LONG_LIVED_MOVE_QUIET_FRAMES},
+    {"Phoenix Wright", -1, -1, 6, 500.0f, LONG_LIVED_MOVE_QUIET_FRAMES},
     {"Tron", 0, 24, -1, 0.0f, LONG_LIVED_MOVE_QUIET_FRAMES},
 };
 
@@ -348,7 +360,8 @@ int32_t g_netSuiteComparedFrames = 0;
 int32_t g_netSuiteReceivedFrames = 0;
 int32_t g_netSuiteDroppedFrames = 0;
 int32_t g_netSuiteLastClientFrame = -1;
-float g_netSuiteSetupPosition[4] = {};
+float g_netSuiteSetupPositions[2][4] = {};
+uint8_t g_netSuiteShotIdPool[SSHOT_ID_POOL_SIZE] = {};
 int32_t g_netSuiteFirstMismatchFrame = -1;
 uint32_t g_netSuiteFirstHostChecksum = 0;
 uint32_t g_netSuiteFirstClientChecksum = 0;
@@ -708,11 +721,23 @@ void ProcessNetSuiteSetup(int32_t frame)
     // ahead of the host.
     if (g_runningRuntimeHyper)
         FillAttackerHyperGauge(g_suiteStatus.playerIndex);
+    using SetPosition_t = void(__fastcall*)(uint64_t, const float*);
+    SetPosition_t setPosition =
+        (SetPosition_t)_addr(ADDR_SET_CHARACTER_POSITION);
+    for (int32_t player = 0; player < 2; ++player) {
+        uint64_t character = GetActiveCharacter(player);
+        if (character)
+            setPosition(character, g_netSuiteSetupPositions[player]);
+    }
+    uint64_t sShot = *(uint64_t*)_addr(PTR_SSHOT);
+    if (sShot) {
+        std::memcpy((void*)(sShot + SSHOT_ID_POOL_OFFSET),
+                    g_netSuiteShotIdPool, sizeof(g_netSuiteShotIdPool));
+    }
     g_netSuiteSetupApplied = true;
-    HookLog("AutoTestNet: move %u setup applied at frame %d pos=[%.6g,%.6g,%.6g,%.6g] seed=0x%08X\n",
-            g_netSuiteMoveId, frame, g_netSuiteSetupPosition[0],
-            g_netSuiteSetupPosition[1], g_netSuiteSetupPosition[2],
-            g_netSuiteSetupPosition[3], g_suiteRngSeed);
+    HookLog("AutoTestNet: move %u setup applied at frame %d P1=%.6g P2=%.6g seed=0x%08X\n",
+            g_netSuiteMoveId, frame, g_netSuiteSetupPositions[0][0],
+            g_netSuiteSetupPositions[1][0], g_suiteRngSeed);
 }
 
 void ConfigureManualScript(int32_t manualIndex, int32_t playerIndex,
@@ -786,10 +811,11 @@ void StartInboundNetSuiteMove(const AutoTestStartPacket& packet)
     g_status.active = false;
     ResetNetSuiteMoveState(packet.move_id, packet.start_frame);
     // ResetNetSuiteMoveState clears per-case state, so copy the host's
-    // authoritative setup position after it has completed. Otherwise the
-    // client applies a zero position during ProcessNetSuiteSetup.
-    for (int i = 0; i < 4; ++i)
-        g_netSuiteSetupPosition[i] = packet.setup_position[i];
+    // authoritative positions after it has completed.
+    std::memcpy(g_netSuiteSetupPositions, packet.setup_positions,
+                sizeof(g_netSuiteSetupPositions));
+    std::memcpy(g_netSuiteShotIdPool, packet.shot_id_pool,
+                sizeof(g_netSuiteShotIdPool));
     g_netSuiteSetupFrame = packet.setup_frame;
     g_netSuiteSetupApplied = false;
     Netplay_SetTimeout(1000);
@@ -2562,9 +2588,19 @@ extern "C" void AutoTest_Process()
         }
         uint64_t attacker = GetActiveCharacter(g_suiteStatus.playerIndex);
         uint64_t defender = GetActiveCharacter(g_suiteStatus.playerIndex ^ 1);
-        if (defender)
-            std::memcpy(g_netSuiteSetupPosition, (void*)(defender + 0x50),
-                        sizeof(g_netSuiteSetupPosition));
+        for (int32_t player = 0; player < 2; ++player) {
+            uint64_t character = GetActiveCharacter(player);
+            if (character)
+                std::memcpy(g_netSuiteSetupPositions[player],
+                            (void*)(character + 0x50),
+                            sizeof(g_netSuiteSetupPositions[player]));
+        }
+        uint64_t sShot = *(uint64_t*)_addr(PTR_SSHOT);
+        if (sShot) {
+            std::memcpy(g_netSuiteShotIdPool,
+                        (void*)(sShot + SSHOT_ID_POOL_OFFSET),
+                        sizeof(g_netSuiteShotIdPool));
+        }
         g_suiteDefenderLife = GetCharacterLife(defender);
         g_suiteStatus.dealtDamage = false;
         g_suiteStatus.charactersStable = false;
@@ -2618,8 +2654,10 @@ extern "C" void AutoTest_Process()
             packet.defender_idle_action = g_suiteIdleActions[1];
             packet.facing_left = g_suiteFacingLeft ? 1u : 0u;
             packet.round_seed = g_suiteRngSeed;
-            for (int i = 0; i < 4; ++i)
-                packet.setup_position[i] = g_netSuiteSetupPosition[i];
+            std::memcpy(packet.setup_positions, g_netSuiteSetupPositions,
+                        sizeof(packet.setup_positions));
+            std::memcpy(packet.shot_id_pool, g_netSuiteShotIdPool,
+                        sizeof(packet.shot_id_pool));
             snprintf(packet.move_name, sizeof(packet.move_name), "%s",
                      g_suiteStatus.currentName);
             ResetNetSuiteMoveState(packet.move_id, packet.start_frame);

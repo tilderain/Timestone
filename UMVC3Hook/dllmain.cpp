@@ -529,16 +529,21 @@ static bool SpawnDualTrainingClient()
 			{L"-autotest-moves=", L"-autotest-case-moves="},
 		};
 		for (const auto& option : options) {
-			const wchar_t* value = wcsstr(commandLine, option.source);
-			if (!value)
+			const wchar_t* match = wcsstr(commandLine, option.source);
+			if (!match)
 				continue;
-			value += wcslen(option.source);
+			const bool quotedArgument = match > commandLine && match[-1] == L'"';
+			const wchar_t* value = match + wcslen(option.source);
+			const bool quotedValue = *value == L'"';
+			if (quotedValue)
+				++value;
 			const wchar_t* end = value;
-			while (*end && *end != L' ')
+			while (*end && *end != L'"' &&
+				(quotedArgument || quotedValue || *end != L' '))
 				++end;
 			size_t used = wcslen(autoTestArgs);
 			swprintf(autoTestArgs + used,
-				std::size(autoTestArgs) - used, L" %ls%.*ls",
+				std::size(autoTestArgs) - used, L" %ls\"%.*ls\"",
 				option.forwarded, (int)(end - value), value);
 		}
 	}

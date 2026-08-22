@@ -378,16 +378,17 @@ at `0x14020385F` from `JNZ` to `JMP`. This forces only the determinism branch in
 does not hook `g__isOnlineBattle`, whose other 91 call sites activate native netpad, session, UI, and
 reward behavior. New action epochs therefore run the game's own setup and set `aAction+0x6D` to one.
 
-`Rollback_ApplyNetplayDeterminism` also applies the same switches immediately for an action epoch
+`Rollback_ApplyNetplayDeterminism` applies the same switches on the first game tick for an action epoch
 that may already exist when custom netplay initializes: it enables frame wait, clears all 64 `sUnit`
 move-line parallel bits, disables the collision move-matrix parallel flags, disables `sHitSolver`
-multithreading, and clears the battle-runtime parallel byte. It runs again when a synchronized restart
-creates a new battle epoch.
+multithreading, and clears the battle-runtime parallel byte. The patched native initialization branch
+applies those settings when a synchronized restart creates a new battle epoch.
 
 The plugin does not force the entire regular `sMain` executor to one thread.
 Only the native-equivalent gameplay switches above are serialized, leaving the
-worker pool available for unrelated engine work. These battle-local settings
-are applied at custom-netplay initialization and synchronized netplay restart.
+worker pool available for unrelated engine work. Existing battle-local state is
+updated on the first custom-netplay game tick; subsequent action epochs use the
+patched native initialization branch.
 
 ### Correction: generic constraint collision is not proven fighter push collision
 

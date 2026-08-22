@@ -329,6 +329,26 @@ writes the actor request; the skipped model-category pass normally performs the
 evaluation to resim-created Dog Missile. Recipe restoration uses `0xCB` as a
 recovery value only when an older captured recipe is already invalid.
 
+Phoenix Wright's discarded evidence projectile is `uShotVulcanItemThrow`
+(`0x140d4b980`, size `0x2240`). Setup at `0x140199b00` reads evidence variant
+state at `+0x2210`, asynchronously loads one of twelve variant MOD resources
+under `chr\\Naruhodo\\weapon\\cmn\\`, and initializes the shot model. Movement at
+`0x1401996e0` advances its model-backed pose and uses that state for landing and
+bounce transitions. Apply the full model restore policy: pin resources at
+`+0x100` and `+0x11b0`, restore pointer-free model playback, and retry setup
+after reconstruction. The focused Evidence Discard case must also remain active
+for the long-lived 120-frame quiet window because the projectile first appears
+roughly 18 frames after the second scripted input; completing at the normal
+three-frame threshold can carry client reconstruction state into the next
+training restart.
+
+Explicitly restore Item Throw's pointer-free concrete tail at
+`+0x2210..+0x222f`. Packed angular speed `10.0f` and landing count `1` form
+`0x000000013f200000`, which resembles an image pointer and is otherwise retained
+from fresh factory state by the generic ownership filter. The native concrete
+bounce callback remains authoritative; rollback does not synthesize its landing
+transition.
+
 Chris's `uShotVulcanLandMine` creates its armed-grenade `uGameEffect` only when
 virtual `+0x318` handles stage contact. A frame-72 snapshot can therefore contain
 `mIsTakeOn=true` and an occupied callback slot at `uShot+0x1f78`, while its fresh

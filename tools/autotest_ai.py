@@ -223,7 +223,7 @@ def validate_suite_rows(game_dir, character, not_before):
                     # matcher and therefore legitimately use -1/-1.
                     if row.get("move", "") in {
                             "Forward Throw", "Back Throw",
-                            "Get 'Em Missile Assist"}:
+                            "Get 'Em Missile Assist", "Evidence Discard"}:
                         continue
                     if row.get("matcher_id") in {None, "", "-1"} or \
                        row.get("line_id") in {None, "", "-1"}:

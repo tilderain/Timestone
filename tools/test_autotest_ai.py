@@ -86,6 +86,20 @@ class AutoTestAiTest(unittest.TestCase):
             before = min(host.stat().st_mtime, client.stat().st_mtime) - 1
             self.assertEqual((host, client), runner.latest_report_pair(root, "Ryu", before))
 
+    def test_validate_suite_rows_accepts_evidence_discard_manual_case(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            autotest = root / "autotest"
+            autotest.mkdir()
+            path = autotest / "results_commands.tsv"
+            path.write_text(
+                "character\tsuite_type\tmove_id\tmatcher_id\tline_id\tmove\tresult\n"
+                "Naruhodo\tcommands\t1\t-1\t-1\tEvidence Discard\tSYNC\n",
+                encoding="utf-8",
+            )
+            self.assertEqual([], runner.validate_suite_rows(
+                root, "Naruhodo", path.stat().st_mtime - 1))
+
     def test_crash_artifact_details_extracts_fault(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "umvc3_crash.log"

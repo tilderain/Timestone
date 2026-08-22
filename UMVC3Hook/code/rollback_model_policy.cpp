@@ -35,6 +35,7 @@ constexpr uintptr_t DTI_USHOT_VULCAN_WEAPON_CART = 0x140D4A1A8;
 constexpr uintptr_t DTI_USHOT_VULCAN_LEGION_TIGER = 0x140D4ABB8;
 constexpr uintptr_t DTI_USHOT_SHIELD_REPULSOR_BLAST_SP = 0x140D4ADA0;
 constexpr uintptr_t DTI_USHOT_VULCAN_DOG_MISSILE = 0x140D4B888;
+constexpr uintptr_t DTI_USHOT_VULCAN_ITEM_THROW = 0x140D4B980;
 constexpr uint16_t DOG_MISSILE_MOTION_NO = 0x00CB;
 constexpr uintptr_t DTI_USHOT_LASER = 0x140D482E8;
 constexpr uintptr_t DTI_USHOT_OPTION_SHIELD_SLASH = 0x140D48A68;
@@ -127,6 +128,8 @@ constexpr ShotModelPolicy SHOT_MODEL_POLICIES[] = {
     {0x140D4A4E8, "Iron Pipe", {0x100, 0x11B0}, 2, true, true},
     {0x140D49520, "Somersault Grenade", {0x100, 0x11B0}, 2, true, true},
     {0x140D4B888, "Dog Missile", {0x100, 0x11B0}, 2, true, true},
+    {DTI_USHOT_VULCAN_ITEM_THROW, "Evidence Item Throw",
+     {0x100, 0x11B0}, 2, true, true},
 
     // Existing model-driven shots using the shared playback overlay or setup
     // readiness check. Pin their primary model and motion resources; Cart's
@@ -725,9 +728,10 @@ uint32_t Rollback_AfterShotSpawn(void* shot, void* parent)
     RepairResimRepulsorBlastMotion(shot);
     RepairResimDogMissileMotion(shot);
     RepairResimPendulumModel(shot, nullptr);
-    if (g_isResimulating && shot && HasCallableDtiVirtual(shot) &&
-        GetObjectDti((uint64_t)shot) == (uint64_t)_addr(0x140D4C4C8)) {
-        g_resimSpawnedPendulums.insert(shot);
+    if (g_isResimulating && shot && HasCallableDtiVirtual(shot)) {
+        uint64_t dti = GetObjectDti((uint64_t)shot);
+        if (dti == (uint64_t)_addr(0x140D4C4C8))
+            g_resimSpawnedPendulums.insert(shot);
     }
     return Rollback_RepairNemesisExplosionAttack(shot, parent);
 }

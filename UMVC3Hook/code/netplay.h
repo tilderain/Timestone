@@ -176,7 +176,8 @@ struct AutoTestStartPacket {
     uint32_t defender_idle_action;
     uint32_t facing_left;
     uint32_t round_seed;
-    float    setup_position[4];     // host-authoritative defender position
+    float    setup_positions[2][4]; // host-authoritative fighter positions
+    uint8_t  shot_id_pool[0x404];   // host-authoritative sShot +0x38 state
     char     move_name[96];
 };
 

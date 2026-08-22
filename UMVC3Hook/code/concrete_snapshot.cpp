@@ -39,6 +39,7 @@ constexpr uintptr_t kSoulFistDti = 0x140D4B6E8ull;
 constexpr uintptr_t kLegionTigerDti = 0x140D4ABB8ull;
 constexpr uintptr_t kRepulsorBlastSpDti = 0x140D4ADA0ull;
 constexpr uintptr_t kDogMissileDti = 0x140D4B888ull;
+constexpr uintptr_t kItemThrowDti = 0x140D4B980ull;
 constexpr uintptr_t kRocketLauncherExplodeDti = 0x140D4BAC8ull;
 constexpr uintptr_t kVulcanAxeDti = 0x140D48808ull;
 constexpr uintptr_t kShikiDanKobunDti = 0x140D4D3D0ull;
@@ -1174,6 +1175,13 @@ bool ConcreteShotSnapshot_Restore(void* shot,
         // accumulator. Values such as 18.0f resemble mapped addresses when
         // read as a qword, so the generic ownership filter keeps factory zero.
         CopyRange(overlay.data(), source, liveSize, {0x21D0, 0x04});
+    }
+
+    if (IsDti(snapshot.dti, kItemThrowDti)) {
+        // Item Throw's angle speed and landing count pack into values near the
+        // image address range after its first bounce. Reapply the verified
+        // pointer-free variant, rotation, bounce, height, and scale tail.
+        CopyRange(overlay.data(), source, liveSize, {0x2210, 0x20});
     }
 
     if (IsDti(snapshot.dti, kShikiDanKobunDti)) {
