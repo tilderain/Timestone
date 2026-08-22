@@ -663,7 +663,8 @@ bool DrawTeam(int team, bool editable)
         ImGui::TextUnformatted(member == 0 ? "Point" : member == 1 ? "Second" : "Anchor");
 
         int selected = g_roster.chars[team][member];
-        if (ImGui::BeginCombo("Character", kCharNames[selected])) {
+        if (ImGui::BeginCombo("Character", kCharNames[selected],
+                              ImGuiComboFlags_HeightLargest)) {
             if (ImGui::IsKeyPressed(ImGui::GetKeyIndex(ImGuiKey_UpArrow), true)) {
                 selected = selected > 1 ? selected - 1 : kCharNameCount - 1;
                 changed = true;
