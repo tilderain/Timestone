@@ -123,6 +123,7 @@ constexpr ShotModelPolicy SHOT_MODEL_POLICIES[] = {
     {0x140D49A60, "Missile Emplacement", {0x100, 0x11B0}, 2, true, false},
     {0x140D4A1A8, "Weapon Cart", {0x100, 0x11B0}, 2, true, false},
     {0x140D4C4C8, "Pendulum Log", {0x100, 0x11B8}, 2, true, false},
+    {0x140D4D2F0, "Servbot Launcher", {0x100, 0x11B0}, 2, true, false},
     {0x140D4ABB8, "Legion Tiger", {0x100, 0x11B0}, 2, false, true},
 };
 

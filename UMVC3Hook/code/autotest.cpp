@@ -320,6 +320,7 @@ constexpr NetSuiteCaseSetup NET_SUITE_CASE_SETUPS[] = {
     {"Chris", 0, 29, -1, 500.0f, LONG_LIVED_MOVE_QUIET_FRAMES},
     {"DeadPool", -1, -1, 2, 500.0f, LONG_LIVED_MOVE_QUIET_FRAMES},
     {"DeadPool", -1, -1, 4, 200.0f, LONG_LIVED_MOVE_QUIET_FRAMES},
+    {"Tron", 0, 24, -1, 0.0f, LONG_LIVED_MOVE_QUIET_FRAMES},
 };
 
 bool g_netSuiteActive = false;
@@ -480,12 +481,14 @@ extern "C" void AutoTest_ApplyMatchStartPositions()
         if (g_suiteMoveFilterEnabled &&
             _stricmp(g_autoTestCharacterName, setup.characterName) == 0 &&
             selected) {
-            positions[0][0] = -setup.defenderOffset * 0.5f;
-            positions[1][0] = setup.defenderOffset * 0.5f;
             const char* caseName = setup.manualIndex >= 0
                 ? SUITE_MANUAL_SCRIPTS[setup.manualIndex].name : selector;
-            HookLog("AutoTestNet: matched position case %s %s distance=%.6g\n",
-                    setup.characterName, caseName, setup.defenderOffset);
+            if (setup.defenderOffset > 0.0f) {
+                positions[0][0] = -setup.defenderOffset * 0.5f;
+                positions[1][0] = setup.defenderOffset * 0.5f;
+                HookLog("AutoTestNet: matched position case %s %s distance=%.6g\n",
+                        setup.characterName, caseName, setup.defenderOffset);
+            }
             break;
         }
     }
