@@ -125,6 +125,11 @@ constexpr InputStep AIR_BOLOS[] = {
     {0, 45},
 };
 
+constexpr InputStep GET_EM_MISSILE_ASSIST[] = {
+    {IN_LB, 1},
+    {0, 120},
+};
+
 constexpr InputScript SCRIPTS[] = {
     {"QCF + Light", QCF_LIGHT, std::size(QCF_LIGHT)},
     {"QCB + Light", QCB_LIGHT, std::size(QCB_LIGHT)},
@@ -138,6 +143,8 @@ constexpr InputScript SUITE_MANUAL_SCRIPTS[] = {
     {"Pineapple Surprise", PINEAPPLE_SURPRISE, std::size(PINEAPPLE_SURPRISE)},
     {"Air Ninja Stars", AIR_NINJA_STARS, std::size(AIR_NINJA_STARS)},
     {"Air Bolos", AIR_BOLOS, std::size(AIR_BOLOS)},
+    {"Get 'Em Missile Assist", GET_EM_MISSILE_ASSIST,
+     std::size(GET_EM_MISSILE_ASSIST)},
 };
 
 constexpr const char* SUITE_MANUAL_SCRIPT_CHARACTERS[] = {
@@ -146,6 +153,7 @@ constexpr const char* SUITE_MANUAL_SCRIPT_CHARACTERS[] = {
     "DeadPool",
     "DeadPool",
     "DeadPool",
+    "Phoenix Wright",
 };
 static_assert(std::size(SUITE_MANUAL_SCRIPT_CHARACTERS) ==
               std::size(SUITE_MANUAL_SCRIPTS));
@@ -2413,9 +2421,14 @@ extern "C" void AutoTest_ConfigureCommandLine(const char* commandLine)
         characterPrefixLength = strlen("-autotest=");
     }
     if (character) {
+        const bool quotedArgument = character > commandLine &&
+                                    character[-1] == '"';
         character += characterPrefixLength;
+        bool quotedValue = *character == '"';
+        if (quotedValue) ++character;
         size_t length = 0;
-        while (character[length] && character[length] != ' ' &&
+        while (character[length] && character[length] != '"' &&
+               (quotedArgument || quotedValue || character[length] != ' ') &&
                length + 1 < sizeof(g_autoTestCharacterName)) {
             g_autoTestCharacterName[length] = character[length];
             ++length;

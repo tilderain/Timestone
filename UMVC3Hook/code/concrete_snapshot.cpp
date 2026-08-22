@@ -38,6 +38,7 @@ constexpr size_t kAttackTargetTables[kAttackTargetTableCount] = {
 constexpr uintptr_t kSoulFistDti = 0x140D4B6E8ull;
 constexpr uintptr_t kLegionTigerDti = 0x140D4ABB8ull;
 constexpr uintptr_t kRepulsorBlastSpDti = 0x140D4ADA0ull;
+constexpr uintptr_t kDogMissileDti = 0x140D4B888ull;
 constexpr uintptr_t kRocketLauncherExplodeDti = 0x140D4BAC8ull;
 constexpr uintptr_t kVulcanAxeDti = 0x140D48808ull;
 constexpr uintptr_t kShikiDanKobunDti = 0x140D4D3D0ull;
@@ -1192,6 +1193,13 @@ bool ConcreteShotSnapshot_Restore(void* shot,
     // block. A reconstructed Kikosho kept its factory ID here while the ID
     // pool was rewound, changing per-target hit consumption on the next tick.
     CopyRange(overlay.data(), source, liveSize, {0x1F50, 0x04});
+
+    if (IsDti(snapshot.dti, kDogMissileDti)) {
+        // Repeated setup selects the dog animation again. Restore the complete
+        // pointer-free actor playback header so mAnmTime does not restart while
+        // mAnmTimePass and the uModel Motion cursor continue from the snapshot.
+        CopyRange(overlay.data(), source, liveSize, {0x1300, 0x48});
+    }
 
     if (Rollback_ShouldRestoreShotModelPlayback(snapshot.dti)) {
         // These shots consume model animation state in gameplay. Reconstruction

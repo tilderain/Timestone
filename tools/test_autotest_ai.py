@@ -15,6 +15,10 @@ SPEC.loader.exec_module(runner)
 
 
 class AutoTestAiTest(unittest.TestCase):
+    def test_artifact_character_name_maps_phoenix_wright(self):
+        self.assertEqual("Naruhodo", runner.artifact_character_name("Phoenix Wright"))
+        self.assertEqual("Ryu", runner.artifact_character_name("Ryu"))
+
     def test_build_plan_includes_autotest_port(self):
         args = SimpleNamespace(
             character="Ryu",

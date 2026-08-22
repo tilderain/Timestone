@@ -34,6 +34,8 @@ struct ShotModelPolicy {
 constexpr uintptr_t DTI_USHOT_VULCAN_WEAPON_CART = 0x140D4A1A8;
 constexpr uintptr_t DTI_USHOT_VULCAN_LEGION_TIGER = 0x140D4ABB8;
 constexpr uintptr_t DTI_USHOT_SHIELD_REPULSOR_BLAST_SP = 0x140D4ADA0;
+constexpr uintptr_t DTI_USHOT_VULCAN_DOG_MISSILE = 0x140D4B888;
+constexpr uint16_t DOG_MISSILE_MOTION_NO = 0x00CB;
 constexpr uintptr_t DTI_USHOT_LASER = 0x140D482E8;
 constexpr uintptr_t DTI_USHOT_OPTION_SHIELD_SLASH = 0x140D48A68;
 constexpr uintptr_t DTI_USHOT_OPTION_SPADA_BOOMERANG = 0x140D4D118;
@@ -124,6 +126,7 @@ constexpr ShotModelPolicy SHOT_MODEL_POLICIES[] = {
     {0x140D48CD0, "Hand Grenade", {0x100, 0x11B0}, 2, true, true},
     {0x140D4A4E8, "Iron Pipe", {0x100, 0x11B0}, 2, true, true},
     {0x140D49520, "Somersault Grenade", {0x100, 0x11B0}, 2, true, true},
+    {0x140D4B888, "Dog Missile", {0x100, 0x11B0}, 2, true, true},
 
     // Existing model-driven shots using the shared playback overlay or setup
     // readiness check. Pin their primary model and motion resources; Cart's
@@ -258,6 +261,25 @@ void RepairResimRepulsorBlastMotion(void* shot)
                            uint32_t))
         _addr(FN_UMODEL_PROCESS_ACTION_ANMCHR))(
             shot, 0, 0, 0.0f, 0.0f, 1.0f, 0);
+}
+
+void RepairResimDogMissileMotion(void* shot)
+{
+    if (!g_isResimulating || !shot || !HasCallableDtiVirtual(shot) ||
+        GetObjectDti((uint64_t)shot) !=
+            (uint64_t)_addr(DTI_USHOT_VULCAN_DOG_MISSILE)) {
+        return;
+    }
+
+    // Dog setup only writes actor request 0/1. The normal model-category pass
+    // maps it to NHweapon_l0 entry 0xCB, but a resim-spawned shot misses that
+    // pass and otherwise remains at MotionNo 0xFFFF with no resource bindings.
+    ((uint64_t(__fastcall*)(void*, uint32_t, uint32_t, float, float, float,
+                           uint32_t))
+        _addr(FN_UMODEL_PROCESS_ACTION_ANMCHR))(
+            shot, 0, DOG_MISSILE_MOTION_NO, 0.0f, 0.0f, 1.0f, 0x40);
+    if (*(uint16_t*)((uint8_t*)shot + 0x568) == DOG_MISSILE_MOTION_NO)
+        ((void(__fastcall*)(void*))_addr(FN_UMODEL_MOVE))(shot);
 }
 
 bool PendulumMotionReady(void* shot)
@@ -701,6 +723,7 @@ void Rollback_ForgetShotModelPolicy(void* shot)
 uint32_t Rollback_AfterShotSpawn(void* shot, void* parent)
 {
     RepairResimRepulsorBlastMotion(shot);
+    RepairResimDogMissileMotion(shot);
     RepairResimPendulumModel(shot, nullptr);
     if (g_isResimulating && shot && HasCallableDtiVirtual(shot) &&
         GetObjectDti((uint64_t)shot) == (uint64_t)_addr(0x140D4C4C8)) {
@@ -946,6 +969,32 @@ void Rollback_EvaluateRestoredShotModel(void* shot, uint64_t runtimeDti,
     ((void(__fastcall*)(void*))_addr(FN_UMODEL_MOVE))(shot);
 }
 
+void Rollback_EvaluateRestoredDogMissileModel(void* shot,
+                                               uint64_t runtimeDti)
+{
+    if (!shot || runtimeDti !=
+            (uint64_t)_addr(DTI_USHOT_VULCAN_DOG_MISSILE)) {
+        return;
+    }
+
+    // Match Legion Tiger's reconstruction path, but pass the saved uModel
+    // motion-list entry rather than mAnmNo. Dog setup requests actor animation
+    // 0/1, which native actor processing maps to motion 0xCB. Passing 0 directly
+    // makes processActionAnmchr invalidate Motion[0] as an unresolved entry.
+    uint16_t motionNo = *(uint16_t*)((uint8_t*)shot + 0x568);
+    if (motionNo == UINT16_MAX)
+        motionNo = DOG_MISSILE_MOTION_NO;
+    float animationTime = *(float*)((uint8_t*)shot + 0x1328);
+    if (animationTime > 0.0f) {
+        ((uint64_t(__fastcall*)(void*, uint32_t, uint32_t, float, float,
+                               float, uint32_t))
+            _addr(FN_UMODEL_PROCESS_ACTION_ANMCHR))(
+                shot, 0, motionNo, 0.0f,
+                std::max(0.0f, animationTime - 1.0f), 1.0f, 0x40);
+    }
+    ((void(__fastcall*)(void*))_addr(FN_UMODEL_MOVE))(shot);
+}
+
 bool Rollback_RemapShotSpawnParent(
     const RollbackShotRecipe& saved,
     const std::vector<RollbackShotRecipe>& recipes,
@@ -1073,6 +1122,8 @@ void Rollback_RemapCharacterShotLinks(
 {
     if (expectedVtable == (uint64_t)_addr(VTABLE_UARTHUR)) {
         if (savedCharacterSize <= UARTHUR_CROSS_SWORD_FLAG_OFFSET) return;
+
+        // Native clears t (savedCharacterSize <= UARTHUR_CROSS_SWORD_FLAG_OFFSET) return;
 
         // Native clears this detector from Cross Sword's kill callbacks. A shot
         // already in cleanup step 3 is intentionally omitted from the snapshot,

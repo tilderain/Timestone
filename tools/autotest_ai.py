@@ -56,6 +56,11 @@ def quote_filter(moves):
     return ",".join(move.replace(",", " ") for move in moves)
 
 
+def artifact_character_name(character):
+    # The executable reports Phoenix Wright by its internal roster name.
+    return "Naruhodo" if character.casefold() == "phoenix wright" else character
+
+
 def latest_report_pair(game_dir, character, not_before=None):
     """Find the newest complete pair in the character's autotest folder.
 
@@ -216,7 +221,9 @@ def validate_suite_rows(game_dir, character, not_before):
                         continue
                     # Built-in manual scripts do not come from either command
                     # matcher and therefore legitimately use -1/-1.
-                    if row.get("move", "") in {"Forward Throw", "Back Throw"}:
+                    if row.get("move", "") in {
+                            "Forward Throw", "Back Throw",
+                            "Get 'Em Missile Assist"}:
                         continue
                     if row.get("matcher_id") in {None, "", "-1"} or \
                        row.get("line_id") in {None, "", "-1"}:
@@ -376,11 +383,12 @@ def main():
         emit(manifest, args.manifest)
         return EXIT_LAUNCH_FAILED
 
+    artifact_character = artifact_character_name(args.character)
     desync_results = recent_desync_results(
-        Path(plan["cwd"]), args.character, started_at)
+        Path(plan["cwd"]), artifact_character, started_at)
     invalid_rows = validate_suite_rows(
-        Path(plan["cwd"]), args.character, started_at)
-    pair = latest_report_pair(Path(plan["cwd"]), args.character, started_at)
+        Path(plan["cwd"]), artifact_character, started_at)
+    pair = latest_report_pair(Path(plan["cwd"]), artifact_character, started_at)
     if invalid_rows:
         manifest.update(outcome="incomplete", exit_code=EXIT_LAUNCH_FAILED,
                         game_exit_code=result.returncode,

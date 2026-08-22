@@ -1098,6 +1098,17 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
     }
     flushPendingUnits(sShot);
 
+    // Model-driven shots are reconstructed after the native model-category pass
+    // for this tick. Evaluate their saved playback only after the pending-shot
+    // flush has finalized fresh category links and lifecycle state. Evaluating
+    // inside the recipe loop left Dog Missile one pose behind when Motion[0]
+    // looped: its frame-192 model tick ran while the shot was still pending.
+    for (const RollbackShotRecipe& saved : slot.shotRecipes) {
+        if (!saved.restoredPtr) continue;
+        Rollback_EvaluateRestoredDogMissileModel(
+            saved.restoredPtr, saved.concrete.dti);
+    }
+
     // Restore independent effects only after all shots have their final fresh
     // addresses. Effect recipes can refer to their originating shot through
     // several factory arguments; remap those identities before reconstruction.

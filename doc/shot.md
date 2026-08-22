@@ -297,6 +297,38 @@ restore policy pins `+0x100` and `+0x11b0`, restores pointer-free model playback
 and retries setup when a reconstructed pipe's model is not ready. The embedded
 owner itself remains fresh and is never copied from the retired pipe.
 
+Phoenix Wright's dog Missile is `uShotVulcanDogMissile` (`0x140d4b888`). Its
+setup at `0x140198db0` asynchronously loads the costume-specific dog MOD and
+`NHweapon_l0` motion list, binds both to the shot model, and selects animation
+zero or one from the variant at `+0x2140`. It therefore uses the full
+model-driven restore policy: pin resources at `+0x100` and `+0x11b0`, restore
+pointer-free model playback, and retry native setup after reconstruction. In
+the `20260821_223404` capture, both peers' `Motion[0]` cursor advanced and looped
+identically, but the reconstructed client's `uActorGameModel::mAnmTime` at
+`+0x1328` restarted at three while the host advanced to 21. Restore the complete
+pointer-free actor playback header at `+0x1300..+0x1347`, then run `uModel::move`
+after reconstruction because the fresh shot missed that tick's model-category
+pass. The `20260821_225002` capture localized the missed pass: gameplay position
+still matched, but the host looped Motion[0] on frame 192 while the client did so
+on frame 193. Run the compensating model evaluation only after the native
+pending-shot flush has finalized the fresh shot's category links and lifecycle
+state. Restoring that cursor and calling `uModel::move` still left the client one
+pose behind. Use Legion Tiger's reconstruction sequence instead: call
+`uModel::processActionAnmchr` with the saved `Motion[0].mMotionNo` and actor time,
+then run `uModel::move` to evaluate the rebound motion on the fresh model. The
+`20260821_230649` pair established why the motion number matters: Dog setup writes
+actor request `0/1`, but native actor processing maps it to motion-list entry
+`0xCB`. Passing actor animation number `0` directly made the entry lookup fail
+and produced `mMotionNo=0xFFFF`, flags `0x5`, and null motion bindings.
+
+The focused `Get 'Em Missile Assist` test then showed `0xFFFF` in the client's
+first captured Missile frame. That object was spawned during headless
+re-simulation, not reconstructed from a valid recipe. Native Dog setup only
+writes the actor request; the skipped model-category pass normally performs the
+`0xCB` binding. `Rollback_AfterShotSpawn` now applies that binding and one model
+evaluation to resim-created Dog Missile. Recipe restoration uses `0xCB` as a
+recovery value only when an older captured recipe is already invalid.
+
 Chris's `uShotVulcanLandMine` creates its armed-grenade `uGameEffect` only when
 virtual `+0x318` handles stage contact. A frame-72 snapshot can therefore contain
 `mIsTakeOn=true` and an occupied callback slot at `uShot+0x1f78`, while its fresh
@@ -563,6 +595,14 @@ the shot origin. The `20260724_220943` capture demonstrated this case: shot
 movement and lifetime matched, while the host capsules remained degenerate and
 the client used the expected `-110,+30` to `+110,+30` local endpoints.
 Leaving the modified vectors in shared `rShot` storage corrupted allocator state
+during later effect-generator allocation in the `20260724_220644` crash. It must
+not replace the metadata pointer at collision entry
+`+0x48`: the `20260724_212647` capture showed that doing so made all four
+reconstructed swarm capsules disappear on the next resim tick, even though the
+primitive arrays and shots remained present.
+
+This is reconstruction, not heap rewind. A restored shot may have a different
+address from the shot captured in the snapshot. Code or state
 during later effect-generator allocation in the `20260724_220644` crash. It must
 not replace the metadata pointer at collision entry
 `+0x48`: the `20260724_212647` capture showed that doing so made all four

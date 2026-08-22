@@ -704,14 +704,15 @@ bool ConfigureAutoTestDualTraining(int32_t characterId, int32_t hostPort)
     LoadRollbackSettings();
     if (hostPort != 0)
         g_dialogConfig.hostPort = hostPort;
+    const int32_t autoTestAssist = characterId == 23 ? 2 : 0;
     for (int i = 0; i < 3; ++i) {
         int32_t slotCharacter = characterId == 17 && i > 0 ? 1 : characterId;
         g_dialogConfig.p1Chars[i] = slotCharacter;
         g_dialogConfig.p2Chars[i] = slotCharacter;
         g_dialogConfig.p1Colors[i] = 0;
         g_dialogConfig.p2Colors[i] = 0;
-        g_dialogConfig.p1Assists[i] = 0;
-        g_dialogConfig.p2Assists[i] = 0;
+        g_dialogConfig.p1Assists[i] = autoTestAssist;
+        g_dialogConfig.p2Assists[i] = autoTestAssist;
     }
     g_dialogConfig.stageId = 0;
     g_launchOption = LAUNCH_DUAL_TRAINING;
@@ -724,8 +725,8 @@ bool ConfigureAutoTestDualTraining(int32_t characterId, int32_t hostPort)
         cfg.p2Chars[i] = slotCharacter;
         cfg.p1Colors[i] = 0;
         cfg.p2Colors[i] = 0;
-        cfg.p1Assists[i] = 0;
-        cfg.p2Assists[i] = 0;
+        cfg.p1Assists[i] = autoTestAssist;
+        cfg.p2Assists[i] = autoTestAssist;
     }
     cfg.stageId = 0;
     cfg.timerValue = 99;
