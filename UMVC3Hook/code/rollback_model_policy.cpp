@@ -112,7 +112,7 @@ std::unordered_map<void*, DeferredWeaponCartDebris> g_deferredWeaponCartDebris;
 constexpr ShotModelPolicy SHOT_MODEL_POLICIES[] = {
     // King Kobun and Hand Grenade consume model playback in gameplay.
     // Their non-model helper/contact repairs deliberately remain class-specific.
-    {0x140D4D2B0, "King Kobun", {0x100, 0x11B0}, 2, true, false},
+    {0x140D4D2B0, "King Kobun", {0x100, 0x11B0}, 2, true, true},
     {0x140D48BB0, "Fire Grenade", {0x100, 0x11B0}, 2, true, true},
     {0x140D48CD0, "Hand Grenade", {0x100, 0x11B0}, 2, true, true},
     {0x140D49520, "Somersault Grenade", {0x100, 0x11B0}, 2, true, true},
