@@ -5,6 +5,7 @@
 #include "rollback_memory.h"
 #include "rollback_effect.h"
 #include "rollback.h"
+#include "rollback_model_policy.h"
 #include "rollback_profile.h"
 #include "rollback_snapshot.h"
 #include "mk10utils.h"
@@ -14,11 +15,9 @@
 #include <cmath>
 #include <cstring>
 #include <unordered_map>
-#include <unordered_set>
 #include <vector>
 
 extern void HookLog(const char* fmt, ...);
-extern bool g_multiResimEnabled;
 
 static_assert(sizeof(RollbackRegion) <= 64);
 
@@ -31,50 +30,17 @@ static constexpr uint32_t SUNIT_MULTI_MASK_ARRAYS_OFFSET = 0xC50;
 static constexpr uintptr_t VTABLE_USHOT_VULCAN_ZIREITOU = 0x140AC0E20;
 static constexpr uintptr_t PTR_SREPLAY = 0x140d4d9d8;
 static constexpr uintptr_t PTR_SUNIT = 0x140E17698;
-static constexpr uintptr_t PTR_SSHOT = 0x140D47F40;
-static constexpr uintptr_t PTR_SGAMECONFIG = 0x140D50F88;
 static constexpr uintptr_t FN_SSHOT_SPAWN = 0x140150E00;
 static constexpr uintptr_t FN_SSHOT_SPAWN_EX = 0x140150F40;
 static constexpr uintptr_t FN_USHOT_PROCESS_HIT_COLLISION = 0x1401C6950;
 static constexpr uintptr_t FN_USHOT_UPDATE_HITBOXES = 0x1401C9000;
-static constexpr uintptr_t FN_USHOT_KILL_CALLBACKS = 0x1401C9A20;
-static constexpr uintptr_t FN_USHOT_CLEAR_DEAD_CALLBACKS = 0x1401C9AB0;
 static constexpr uintptr_t FN_BUILD_ATTACH_MATRIX = 0x14014F960;
 static constexpr uintptr_t FN_SUNIT_REMOVE_UNIT = 0x14051B9F0;
-static constexpr uintptr_t FN_KING_KOBUN_MOVE = 0x1401BA2D0;
-static constexpr uintptr_t FN_MISSILE_EMPLACEMENT_MOVE = 0x14016F220;
-static constexpr uintptr_t FN_WEAPON_CART_MOVE = 0x14017A9D0;
-static constexpr uintptr_t FN_WEAPON_CART_SPAWN_DEBRIS = 0x14017A200;
-static constexpr uintptr_t FN_HAND_GRENADE_CONTACT = 0x14015D180;
-static constexpr uintptr_t FN_SOMERSAULT_GRENADE_CONTACT = 0x140168550;
-static constexpr uintptr_t FN_SSHOT_FLUSH_PENDING_UNITS = 0x1401517A0;
-static constexpr uintptr_t FN_CCHRNODE_SET_NEXT = 0x140003D50;
-static constexpr uintptr_t FN_UMODEL_PROCESS_ACTION_ANMCHR = 0x140529420;
-static constexpr uintptr_t FN_UMODEL_UPDATE_MOTION_EVALUATION = 0x140531A00;
-static constexpr uintptr_t FN_CRESOURCE_ASSIGN_SLOT = 0x140529730;
-static constexpr uintptr_t FN_CRESOURCE_RELEASE_REF = 0x14050D5A0;
-static constexpr uintptr_t FN_SRESOURCE_GET_INSTANCE = 0x140001B10;
-static constexpr uintptr_t FN_SRESOURCE_LOAD_SYNC = 0x140518BF0;
-static constexpr uintptr_t DTI_USHOT_VULCAN_MISSILE_EMPLACEMENT = 0x140D49A60;
-static constexpr uintptr_t DTI_USHOT_VULCAN_LEGION_TIGER = 0x140D4ABB8;
-static constexpr uintptr_t DTI_USHOT_SHIELD_REPULSOR_BLAST_SP = 0x140D4ADA0;
-static constexpr uintptr_t DTI_USHOT_VULCAN_WEAPON_CART = 0x140D4A1A8;
-static constexpr uintptr_t DTI_USHOT_VULCAN_EXATK_ROCKET_LAUNCHER = 0x140D4BA48;
-static constexpr uintptr_t DTI_USHOT_VULCAN_ROCKET_LAUNCHER_EXPLODE = 0x140D4BAC8;
-static constexpr uintptr_t DTI_USHOT_VULCAN_PENDULUM_LOG = 0x140D4C4C8;
-static constexpr uintptr_t DTI_USHOT_VULCAN_FIRE_GRENADE_BOMB = 0x140D48BB0;
-static constexpr uintptr_t DTI_USHOT_VULCAN_HAND_GRENADE_BOMB = 0x140D48CD0;
-static constexpr uintptr_t DTI_USHOT_VULCAN_SOMERSAULT_GRENADE = 0x140D49520;
 static constexpr int DYNAMIC_SAFETY = 128;
 static constexpr int SSHOT_SENTINEL_COUNT = 10;
 static constexpr size_t SSHOT_NODE_OFFSET = 0x1450;
 static constexpr size_t SSHOT_NODE_NEXT = 0x08;
 static constexpr uint32_t SUNIT_CHARACTER_CATEGORY = 8;
-static constexpr size_t SSHOT_ID_POOL_OFFSET = 0x38;
-static constexpr size_t SSHOT_ID_POOL_SIZE = 0x404;
-static constexpr size_t SSHOT_PENDING_COUNT_OFFSET = 0x2448;
-static constexpr size_t SGAMECONFIG_SHOT_SLOT_FLAGS_OFFSET = 0x4A89C;
-static constexpr size_t SGAMECONFIG_SHOT_SLOT_FLAGS_SIZE = 10;
 
 using ShotSpawnFn = void*(__fastcall*)(void*, void*, uint64_t, void*, void*,
     void*, uint32_t, void*);
@@ -84,11 +50,6 @@ using UnitRemoveFn = char(__fastcall*)(void*, void*);
 using BuildAttachMatrixFn = void(__fastcall*)(void*, void*, char);
 using ShotProcessHitCollisionFn = void(__fastcall*)(void*, void*, void*);
 using ShotUpdateHitboxesFn = void(__fastcall*)(void*);
-using KingKobunMoveFn = void(__fastcall*)(void*);
-using MissileEmplacementMoveFn = void(__fastcall*)(void*);
-using WeaponCartMoveFn = void(__fastcall*)(void*);
-using HandGrenadeContactFn = void(__fastcall*)(void*, void*);
-using SomersaultGrenadeContactFn = void(__fastcall*)(void*, void*);
 
 static ShotSpawnFn oShotSpawn = nullptr;
 static ShotSpawnExFn oShotSpawnEx = nullptr;
@@ -96,38 +57,10 @@ static UnitRemoveFn oUnitRemove = nullptr;
 static BuildAttachMatrixFn oBuildAttachMatrix = nullptr;
 static ShotProcessHitCollisionFn oShotProcessHitCollision = nullptr;
 static ShotUpdateHitboxesFn oShotUpdateHitboxes = nullptr;
-static void(__fastcall* oShotKillCallbacks)(void*, uint32_t) = nullptr;
-static void(__fastcall* oShotClearDeadCallbacks)(void*) = nullptr;
-static KingKobunMoveFn oKingKobunMove = nullptr;
-static MissileEmplacementMoveFn oMissileEmplacementMove = nullptr;
-static WeaponCartMoveFn oWeaponCartMove = nullptr;
-static HandGrenadeContactFn oHandGrenadeContact = nullptr;
-static SomersaultGrenadeContactFn oSomersaultGrenadeContact = nullptr;
 static std::unordered_map<void*, RollbackShotRecipe> g_liveShotRecipes;
-static std::unordered_set<void*> g_resimSpawnedPendulums;
 static uint64_t g_shotSpawnSequence = 0;
-static int g_kingKobunTraceCount = 0;
 static uint32_t g_unitLinkRepairLogCount = 0;
 static uint32_t g_staleHitTargetLogCount = 0;
-
-// A reconstructed gate-2 transition may queue no child recipes. Replaying the
-// native debris spawn later must leave every deterministic allocator unchanged.
-struct DeferredWeaponCartDebris {
-    bool pending = false;
-    uint8_t preGlobalRng[16] = {};
-    uint8_t preEffectRng[16] = {};
-    uint8_t preOwnerRng[16] = {};
-    uint8_t postGlobalRng[16] = {};
-    uint8_t postEffectRng[16] = {};
-    uint8_t postOwnerRng[16] = {};
-    uint8_t preShotIdPool[SSHOT_ID_POOL_SIZE] = {};
-    uint8_t postShotIdPool[SSHOT_ID_POOL_SIZE] = {};
-    uint8_t preShotSlotFlags[SGAMECONFIG_SHOT_SLOT_FLAGS_SIZE] = {};
-    uint8_t postShotSlotFlags[SGAMECONFIG_SHOT_SLOT_FLAGS_SIZE] = {};
-};
-
-static std::unordered_map<void*, DeferredWeaponCartDebris>
-    g_deferredWeaponCartDebris;
 
 static bool HasValidUnitLink(void* unit)
 {
@@ -323,204 +256,7 @@ static void TraceResimShotSpawn(const char* kind,
             ownerBefore[0], ownerBefore[1], ownerBefore[2], ownerBefore[3],
             ownerAfter[0], ownerAfter[1], ownerAfter[2], ownerAfter[3]);
 
-    constexpr uintptr_t DTI_USHOT_SHIELD_KIKOUSYOU = 0x140D48F70;
-    if (shot && HasCallableDtiVirtual(shot) &&
-        GetObjectDti((uint64_t)shot) ==
-            (uint64_t)_addr(DTI_USHOT_SHIELD_KIKOUSYOU)) {
-        void* callback1 = *(void**)((uint8_t*)shot + 0x1F78);
-        void* callback2 = *(void**)((uint8_t*)shot + 0x1F80);
-        HookLog("KIKOSHOSPAWNRESULT frame=%d sequence=%llu shot=0x%llX "
-                "slot1=0x%llX slot2=0x%llX\n",
-                frame, recipe.spawnSequence, (uint64_t)shot,
-                (uint64_t)callback1, (uint64_t)callback2);
-    }
-}
-
-static void RepairResimRepulsorBlastMotion(void* shot)
-{
-    if (!g_isResimulating || !shot || !HasCallableDtiVirtual(shot) ||
-        GetObjectDti((uint64_t)shot) !=
-            (uint64_t)_addr(DTI_USHOT_SHIELD_REPULSOR_BLAST_SP) ||
-        !IsAccessibleRange((uint64_t)shot + 0x558, sizeof(uint32_t))) {
-        return;
-    }
-
-    uint32_t jointCount = *(uint32_t*)((uint8_t*)shot + 0x530);
-    uint64_t joints = *(uint64_t*)((uint8_t*)shot + 0x538);
-    uint32_t motionStatus = *(uint32_t*)((uint8_t*)shot + 0x550);
-    if (motionStatus || jointCount == 0 || jointCount > 256 || !joints ||
-        !IsAccessibleRange(joints, (size_t)jointCount * 0xC0)) {
-        return;
-    }
-
-    // Forced re-simulation can create the ball after its asynchronous model is
-    // ready but before setup successfully binds motion 0. Retry only that native
-    // bind; the normal model pass advances and evaluates it later this tick.
-    ((uint64_t(__fastcall*)(void*, uint32_t, uint32_t, float, float, float,
-                           uint32_t))
-        _addr(FN_UMODEL_PROCESS_ACTION_ANMCHR))(
-            shot, 0, 0, 0.0f, 0.0f, 1.0f, 0);
-}
-
-uint32_t Shot_RepairNemesisExplosionAttack(
-    void* shot, void* parent, uint32_t restoredId)
-{
-    uint64_t shotDti = shot && HasCallableDtiVirtual(shot)
-        ? GetObjectDti((uint64_t)shot) : 0;
-    uint64_t parentDti = parent && HasCallableDtiVirtual(parent)
-        ? GetObjectDti((uint64_t)parent) : 0;
-    if (!shot || !parent || !HasCallableDtiVirtual(shot) ||
-        !HasCallableDtiVirtual(parent) ||
-        shotDti != (uint64_t)_addr(DTI_USHOT_VULCAN_ROCKET_LAUNCHER_EXPLODE) ||
-        parentDti !=
-            (uint64_t)_addr(DTI_USHOT_VULCAN_EXATK_ROCKET_LAUNCHER) ||
-        !IsAccessibleRange((uint64_t)shot + 0x1498, sizeof(uint32_t)) ||
-        !IsAccessibleRange((uint64_t)parent + 0x1498, sizeof(uint32_t))) {
-        return UINT32_MAX;
-    }
-
-    uint32_t& attackInfoId = *(uint32_t*)((uint8_t*)shot + 0x1498);
-    uint32_t desiredId = restoredId != UINT32_MAX
-        ? restoredId : *(uint32_t*)((uint8_t*)parent + 0x1498);
-    attackInfoId = desiredId;
-    return desiredId;
-}
-
-static bool PendulumMotionReady(void* shot)
-{
-    if (!shot || !IsAccessibleRange((uint64_t)shot + 0x6A0, 1)) return false;
-    return *(uint32_t*)((uint8_t*)shot + 0x530) > 0 &&
-        *(uint64_t*)((uint8_t*)shot + 0x538) != 0 &&
-        *(uint32_t*)((uint8_t*)shot + 0x550) != 0 &&
-        *(uint64_t*)((uint8_t*)shot + 0x640) != 0 &&
-        *(uint64_t*)((uint8_t*)shot + 0x660) != 0 &&
-        *(uint64_t*)((uint8_t*)shot + 0x680) != 0 &&
-        *(uint64_t*)((uint8_t*)shot + 0x688) != 0 &&
-        *(uint64_t*)((uint8_t*)shot + 0x690) != 0 &&
-        *(uint64_t*)((uint8_t*)shot + 0x698) != 0;
-}
-
-static void ProcessPendulumMotionIfReady(void* shot)
-{
-    float currentFrame = *(float*)((uint8_t*)shot + 0x1F58);
-    float previousFrame = std::max(currentFrame - 1.0f, 0.0f);
-    float sampleFrame = std::max(currentFrame - 4.0f, 0.0f);
-    ((uint64_t(__fastcall*)(void*, uint32_t, uint32_t, float, float, float,
-                           uint32_t))
-        _addr(FN_UMODEL_PROCESS_ACTION_ANMCHR))(
-            shot, 0, 0, 0.0f, sampleFrame, 1.0f, 0);
-    float poseFrame = currentFrame <= 3.0f ? currentFrame : previousFrame;
-    *(float*)((uint8_t*)shot + 0x5AC) = poseFrame;
-    *(float*)((uint8_t*)shot + 0x5B0) = std::max(poseFrame - 1.0f, 0.0f);
-}
-
-static void EvaluatePendulumPose(void* shot)
-{
-    if (*(float*)((uint8_t*)shot + 0x1F58) <= 3.0f) return;
-    ((void(__fastcall*)(void*))_addr(
-        FN_UMODEL_UPDATE_MOTION_EVALUATION))(shot);
-    uint64_t vtable = *(uint64_t*)shot;
-    if (!IsAccessibleRange(vtable + 0x90, 0x10)) return;
-    uint64_t updateWorld = *(uint64_t*)(vtable + 0x90);
-    uint64_t updateChildren = *(uint64_t*)(vtable + 0x98);
-    if (IsExecutableAddress(updateWorld)) {
-        ((void(__fastcall*)(void*))updateWorld)(shot);
-    }
-    if (IsExecutableAddress(updateChildren)) {
-        ((void(__fastcall*)(void*))updateChildren)(shot);
-    }
-    float currentFrame = *(float*)((uint8_t*)shot + 0x1F58);
-    *(float*)((uint8_t*)shot + 0x5AC) = currentFrame;
-    *(float*)((uint8_t*)shot + 0x5B0) = std::max(currentFrame - 1.0f, 0.0f);
-}
-
-static void LoadPendulumMotionSynchronously(void* shot)
-{
-    if (!shot || !IsAccessibleRange((uint64_t)shot + 0x11C0, 1)) return;
-    void* pending = *(void**)((uint8_t*)shot + 0x11B8);
-    if (!pending || !HasCallableDtiVirtual(pending) ||
-        !IsAccessibleRange((uint64_t)pending, 0x78)) {
-        return;
-    }
-    uint64_t table = *(uint64_t*)((uint8_t*)pending + 0x70);
-    if (table && IsAccessibleRange(table, 0x10) &&
-        *(uint16_t*)(table + 0x06) != 0 && *(uint64_t*)(table + 0x08) != 0) {
-        return;
-    }
-
-    uint64_t dti = GetObjectDti((uint64_t)pending);
-    uint64_t key = *(uint64_t*)((uint8_t*)pending + 0x60);
-    char* path = (char*)pending + 0x0C;
-    void* sResource = ((void*(__fastcall*)())_addr(
-        FN_SRESOURCE_GET_INSTANCE))();
-    if (!dti || !sResource) return;
-
-    void* loaded = ((void*(__fastcall*)(void*, void*, char*, uint64_t,
-                                       uint32_t))
-        _addr(FN_SRESOURCE_LOAD_SYNC))(
-            sResource, (void*)dti, path, key, 1);
-    if (!loaded) return;
-
-    ((void(__fastcall*)(void*, void*, uint32_t))_addr(
-        FN_CRESOURCE_ASSIGN_SLOT))(shot, loaded, 0);
-    ((void(__fastcall*)(void*))_addr(FN_CRESOURCE_RELEASE_REF))(loaded);
-    InvalidateMemoryQueryCache();
-}
-
-static void RepairResimPendulumModel(void* shot)
-{
-    auto liveRecipe = g_liveShotRecipes.find(shot);
-    bool reconstructed = liveRecipe != g_liveShotRecipes.end() &&
-        liveRecipe->second.reconstructed;
-    bool resimSpawned = g_resimSpawnedPendulums.find(shot) !=
-        g_resimSpawnedPendulums.end();
-    uint64_t observedDti = shot && HasCallableDtiVirtual(shot)
-        ? GetObjectDti((uint64_t)shot) : 0;
-    if ((!g_isResimulating && !reconstructed && !resimSpawned) || !shot ||
-        !HasCallableDtiVirtual(shot) ||
-        observedDti !=
-            (uint64_t)_addr(DTI_USHOT_VULCAN_PENDULUM_LOG)) {
-        return;
-    }
-
-    // Resolve motion-list resource slot 0 through the same native action path
-    // used by rendered model updates. Headless re-simulation does not dispatch
-    // the pending mAnmNoReq that normally performs this bind.
-    ProcessPendulumMotionIfReady(shot);
-    if (PendulumMotionReady(shot)) {
-        EvaluatePendulumPose(shot);
-        return;
-    }
-    LoadPendulumMotionSynchronously(shot);
-    ProcessPendulumMotionIfReady(shot);
-    if (PendulumMotionReady(shot)) {
-        EvaluatePendulumPose(shot);
-        return;
-    }
-
-    uint64_t vtable = *(uint64_t*)shot;
-    uint64_t setupAddress = IsAccessibleRange(vtable + 0x28, sizeof(uint64_t))
-        ? *(uint64_t*)(vtable + 0x28) : 0;
-    uint64_t sUnit = *(uint64_t*)_addr(PTR_SUNIT);
-    if (!setupAddress || !IsExecutableAddress(setupAddress) || !sUnit) return;
-
-    // Resource completion is dispatched between simulation ticks. Retry once
-    // per tick rather than blocking here; a sleep loop prevents the motion
-    // request from reaching its completion callback.
-    void* oldCallbacks[2] = {
-        *(void**)((uint8_t*)shot + 0x1F78),
-        *(void**)((uint8_t*)shot + 0x1F80),
-    };
-    ((void(__fastcall*)(void*))setupAddress)(shot);
-    InvalidateMemoryQueryCache();
-    ProcessPendulumMotionIfReady(shot);
-    if (PendulumMotionReady(shot)) EvaluatePendulumPose(shot);
-    for (uint32_t index = 0; index < 2; ++index) {
-        void* replacement = *(void**)((uint8_t*)shot + 0x1F78 + index * 8);
-        if (oldCallbacks[index] && replacement != oldCallbacks[index]) {
-            Effect_RetireOne((void*)sUnit, oldCallbacks[index]);
-        }
-    }
+    Rollback_TraceShotPolicySpawn(shot, recipe.spawnSequence, frame);
 }
 
 static void* __fastcall hkShotSpawn(void* manager, void* element, uint64_t initParam,
@@ -549,17 +285,11 @@ static void* __fastcall hkShotSpawn(void* manager, void* element, uint64_t initP
     CapturePreSpawnRng(recipe, ownerChr);
     void* shot = oShotSpawn(manager, element, initParam, posData, ownerChr,
                             objectRef1, slotId, objectRef2);
-    RepairResimRepulsorBlastMotion(shot);
-    RepairResimPendulumModel(shot);
+    Rollback_AfterShotSpawn(shot, nullptr);
     TraceResimShotSpawn("standard", recipe, shot,
                         __builtin_return_address(0));
     InvalidateMemoryQueryCache();
     if (shot) {
-        if (g_isResimulating && HasCallableDtiVirtual(shot) &&
-            GetObjectDti((uint64_t)shot) ==
-                (uint64_t)_addr(DTI_USHOT_VULCAN_PENDULUM_LOG)) {
-            g_resimSpawnedPendulums.insert(shot);
-        }
         recipe.savedPtr = shot;
         recipe.restoredPtr = shot;
         g_liveShotRecipes[shot] = recipe;
@@ -598,19 +328,12 @@ static void* __fastcall hkShotSpawnEx(void* manager, void* element, uint64_t ini
     CapturePreSpawnRng(recipe, ownerChr);
     void* shot = oShotSpawnEx(manager, element, initParam, posData, ownerChr,
                               objectRef1, slotId, objectRef2, a9, a10, a11, a12);
-    RepairResimRepulsorBlastMotion(shot);
-    RepairResimPendulumModel(shot);
     recipe.spawnAttackInfoId =
-        Shot_RepairNemesisExplosionAttack(shot, (void*)initParam);
+        Rollback_AfterShotSpawn(shot, (void*)initParam);
     TraceResimShotSpawn("extended", recipe, shot,
                         __builtin_return_address(0));
     InvalidateMemoryQueryCache();
     if (shot) {
-        if (g_isResimulating && HasCallableDtiVirtual(shot) &&
-            GetObjectDti((uint64_t)shot) ==
-                (uint64_t)_addr(DTI_USHOT_VULCAN_PENDULUM_LOG)) {
-            g_resimSpawnedPendulums.insert(shot);
-        }
         recipe.savedPtr = shot;
         recipe.restoredPtr = shot;
         g_liveShotRecipes[shot] = recipe;
@@ -655,33 +378,18 @@ static void __fastcall hkBuildAttachMatrix(void* arm, void* output, char reset)
 static void __fastcall hkShotUpdateHitboxes(void* shot)
 {
     RollbackHookProfileScope profile(RollbackHookProfileId::ShotUpdateHitboxes);
-    RepairResimPendulumModel(shot);
     auto recipe = g_liveShotRecipes.find(shot);
-    if (recipe != g_liveShotRecipes.end()) {
-        Shot_RepairNemesisExplosionAttack(
-            shot, (void*)recipe->second.initParam,
-            recipe->second.spawnAttackInfoId);
-    }
+    const RollbackShotRecipe* policyRecipe = recipe != g_liveShotRecipes.end()
+        ? &recipe->second : nullptr;
+    Rollback_BeforeShotHitboxUpdate(shot, policyRecipe);
     oShotUpdateHitboxes(shot);
-    bool pendulum = shot && HasCallableDtiVirtual(shot) &&
-        GetObjectDti((uint64_t)shot) ==
-            (uint64_t)_addr(DTI_USHOT_VULCAN_PENDULUM_LOG) &&
-        (g_isResimulating ||
-         (recipe != g_liveShotRecipes.end() &&
-          recipe->second.reconstructed));
-    if (pendulum) {
-        RepairResimPendulumModel(shot);
+    if (Rollback_AfterShotHitboxUpdate(shot, policyRecipe)) {
         oShotUpdateHitboxes(shot);
         ConcreteShotSnapshot_RebuildLiveCapsuleWorld(
             shot, recipe->second.concrete);
     }
     if (recipe != g_liveShotRecipes.end() && recipe->second.reconstructed &&
-        recipe->second.concrete.dti !=
-            (uint64_t)_addr(DTI_USHOT_VULCAN_LEGION_TIGER) &&
-        recipe->second.concrete.dti !=
-            (uint64_t)_addr(DTI_USHOT_SHIELD_REPULSOR_BLAST_SP) &&
-        recipe->second.concrete.dti !=
-            (uint64_t)_addr(DTI_USHOT_VULCAN_PENDULUM_LOG)) {
+        Rollback_ShouldReapplyShotCapsules(recipe->second.concrete.dti)) {
         ConcreteShotSnapshot_ReapplyCapsules(shot, recipe->second.concrete);
     }
 }
@@ -690,14 +398,8 @@ static void __fastcall hkShotProcessHitCollision(void* shot, void* target,
                                                   void* contact)
 {
     auto recipe = g_liveShotRecipes.find(shot);
-    if (recipe != g_liveShotRecipes.end()) {
-        // The explosion factory can finalize cAtkCtrl after reconstruction's
-        // initial repair. Reapply the parent's attack variant at the last
-        // gameplay-safe point before the hit response consumes mAtkInfoId.
-        Shot_RepairNemesisExplosionAttack(
-            shot, (void*)recipe->second.initParam,
-            recipe->second.spawnAttackInfoId);
-    }
+    Rollback_BeforeShotHitCollision(
+        shot, recipe != g_liveShotRecipes.end() ? &recipe->second : nullptr);
     if (recipe != g_liveShotRecipes.end() && recipe->second.reconstructed &&
         !IsCurrentCharacterCollisionTarget(target)) {
         uint64_t dti = target && HasCallableDtiVirtual(target)
@@ -715,437 +417,6 @@ static void __fastcall hkShotProcessHitCollision(void* shot, void* target,
         return;
     }
     oShotProcessHitCollision(shot, target, contact);
-}
-
-static void __fastcall hkShotKillCallbacks(void* shot, uint32_t slot)
-{
-    constexpr uintptr_t DTI_USHOT_SHIELD_KIKOUSYOU = 0x140D48F70;
-    void* before[2] = {};
-    uint32_t states[2] = {};
-    const bool trace = shot && HasCallableDtiVirtual(shot) &&
-        GetObjectDti((uint64_t)shot) ==
-            (uint64_t)_addr(DTI_USHOT_SHIELD_KIKOUSYOU);
-    if (trace) {
-        for (uint32_t index = 0; index < 2; ++index) {
-            before[index] = *(void**)((uint8_t*)shot + 0x1F78 + index * 8);
-            if (before[index] &&
-                IsAccessibleRange((uint64_t)before[index] + 0x10, 4)) {
-                states[index] =
-                    *(uint32_t*)((uint8_t*)before[index] + 0x10);
-            }
-        }
-    }
-
-    void* caller = __builtin_return_address(0);
-    oShotKillCallbacks(shot, slot);
-
-    if (trace) {
-        void* after0 = *(void**)((uint8_t*)shot + 0x1F78);
-        void* after1 = *(void**)((uint8_t*)shot + 0x1F80);
-        if (before[0] != after0 || before[1] != after1) {
-            uint64_t replay = *(uint64_t*)_addr(PTR_SREPLAY);
-            int32_t frame = replay ? *(int32_t*)(replay + 0x54) : -1;
-            HookLog("KIKOSHOEFFECTKILL frame=%d resim=%d caller=0x%llX "
-                    "shot=0x%llX requested=%u "
-                    "slot1=0x%llX->0x%llX state1=0x%08X "
-                    "slot2=0x%llX->0x%llX state2=0x%08X\n",
-                    frame, g_isResimulating ? 1 : 0, (uint64_t)caller,
-                    (uint64_t)shot, slot,
-                    (uint64_t)before[0], (uint64_t)after0, states[0],
-                    (uint64_t)before[1], (uint64_t)after1, states[1]);
-        }
-    }
-}
-
-static void __fastcall hkShotClearDeadCallbacks(void* shot)
-{
-    constexpr uintptr_t DTI_USHOT_SHIELD_KIKOUSYOU = 0x140D48F70;
-    void* before[2] = {};
-    uint32_t states[2] = {};
-    const bool trace = shot && HasCallableDtiVirtual(shot) &&
-        GetObjectDti((uint64_t)shot) ==
-            (uint64_t)_addr(DTI_USHOT_SHIELD_KIKOUSYOU);
-    if (trace) {
-        for (uint32_t index = 0; index < 2; ++index) {
-            before[index] = *(void**)((uint8_t*)shot + 0x1F78 + index * 8);
-            if (before[index] && IsAccessibleRange((uint64_t)before[index] + 0x10, 4))
-                states[index] = *(uint32_t*)((uint8_t*)before[index] + 0x10);
-        }
-    }
-
-    oShotClearDeadCallbacks(shot);
-
-    if (trace) {
-        void* after0 = *(void**)((uint8_t*)shot + 0x1F78);
-        void* after1 = *(void**)((uint8_t*)shot + 0x1F80);
-        if (before[0] != after0 || before[1] != after1) {
-            uint64_t replay = *(uint64_t*)_addr(PTR_SREPLAY);
-            int32_t frame = replay ? *(int32_t*)(replay + 0x54) : -1;
-            HookLog("KIKOSHOEFFECTCLEAR frame=%d resim=%d shot=0x%llX "
-                    "slot1=0x%llX->0x%llX state1=0x%08X "
-                    "slot2=0x%llX->0x%llX state2=0x%08X\n",
-                    frame, g_isResimulating ? 1 : 0, (uint64_t)shot,
-                    (uint64_t)before[0], (uint64_t)after0, states[0],
-                    (uint64_t)before[1], (uint64_t)after1, states[1]);
-        }
-    }
-}
-
-static void __fastcall hkKingKobunMove(void* shot)
-{
-    RollbackHookProfileScope profile(RollbackHookProfileId::KingKobunMove);
-    bool trace = shot && GetObjectDti((uint64_t)shot) ==
-        (uint64_t)_addr(0x140D4D2B0) && g_kingKobunTraceCount < 128;
-    uint32_t beforeMode = 0;
-    uint32_t beforePhase = 0;
-    float beforePos = 0.0f;
-    if (trace) {
-        beforeMode = *(uint32_t*)((uint8_t*)shot + 0x214C);
-        beforePhase = *(uint32_t*)((uint8_t*)shot + 0x2140);
-        beforePos = *(float*)((uint8_t*)shot + 0x50);
-    }
-    oKingKobunMove(shot);
-    if (trace) {
-        uint64_t replay = *(uint64_t*)_addr(PTR_SREPLAY);
-        int frame = replay ? *(int32_t*)(replay + 0x54) : -1;
-        HookLog("KINGMOVE shot=0x%llX frame=%d resim=%d mode=%u->%u phase=%u->%u "
-                "x=%.6g->%.6g speed=%.6g dt=%.6g facing=%u helper=0x%llX state=0x%08X\n",
-                (uint64_t)shot, frame, g_multiResimEnabled ? 1 : 0,
-                beforeMode, *(uint32_t*)((uint8_t*)shot + 0x214C),
-                beforePhase, *(uint32_t*)((uint8_t*)shot + 0x2140),
-                beforePos, *(float*)((uint8_t*)shot + 0x50),
-                *(float*)((uint8_t*)shot + 0x2150),
-                *(float*)((uint8_t*)shot + 0x28),
-                *(uint8_t*)((uint8_t*)shot + 0x2154),
-                *(uint64_t*)((uint8_t*)shot + 0x2158),
-                *(uint32_t*)((uint8_t*)shot + 0x10));
-        ++g_kingKobunTraceCount;
-    }
-}
-
-static bool IsReconstructedMissileEmplacement(void* shot)
-{
-    auto recipe = g_liveShotRecipes.find(shot);
-    return recipe != g_liveShotRecipes.end() && recipe->second.reconstructed &&
-        HasCallableDtiVirtual(shot) &&
-        GetObjectDti((uint64_t)shot) ==
-             (uint64_t)_addr(DTI_USHOT_VULCAN_MISSILE_EMPLACEMENT);
-}
-
-static void RetryMissileEmplacementSetup(void* shot)
-{
-    constexpr size_t CONCRETE_STATE_OFFSET = 0x2120;
-    constexpr size_t CONCRETE_STATE_SIZE = 0x50;
-    constexpr size_t MOTION_HEADER_OFFSET = 0x550;
-    constexpr size_t MOTION_BASE = 0x560;
-    constexpr size_t MOTION_STRIDE = 0x180;
-    constexpr size_t MOTION_COUNT = 8;
-    struct MotionPlaybackState {
-        uint8_t state08[0x118];
-        uint8_t state140[0x20];
-        uint8_t state168[0x08];
-    };
-    uint8_t concreteState[CONCRETE_STATE_SIZE];
-    uint8_t motionHeader[0x10];
-    MotionPlaybackState motionState[MOTION_COUNT];
-    std::memcpy(concreteState, (uint8_t*)shot + CONCRETE_STATE_OFFSET,
-                sizeof(concreteState));
-    std::memcpy(motionHeader, (uint8_t*)shot + MOTION_HEADER_OFFSET,
-                sizeof(motionHeader));
-    for (size_t motion = 0; motion < MOTION_COUNT; ++motion) {
-        uint8_t* source = (uint8_t*)shot + MOTION_BASE + motion * MOTION_STRIDE;
-        std::memcpy(motionState[motion].state08, source + 0x08,
-                    sizeof(motionState[motion].state08));
-        std::memcpy(motionState[motion].state140, source + 0x140,
-                    sizeof(motionState[motion].state140));
-        std::memcpy(motionState[motion].state168, source + 0x168,
-                    sizeof(motionState[motion].state168));
-    }
-
-    uint64_t vtable = *(uint64_t*)shot;
-    uint64_t setup = IsAccessibleRange(vtable + 0x28, sizeof(uint64_t))
-        ? *(uint64_t*)(vtable + 0x28) : 0;
-    if (setup && IsExecutableAddress(setup)) {
-        ((void(__fastcall*)(void*))setup)(shot);
-        InvalidateMemoryQueryCache();
-        std::memcpy((uint8_t*)shot + CONCRETE_STATE_OFFSET, concreteState,
-                    sizeof(concreteState));
-        std::memcpy((uint8_t*)shot + MOTION_HEADER_OFFSET, motionHeader,
-                    sizeof(motionHeader));
-        for (size_t motion = 0; motion < MOTION_COUNT; ++motion) {
-            uint8_t* destination =
-                (uint8_t*)shot + MOTION_BASE + motion * MOTION_STRIDE;
-            std::memcpy(destination + 0x08, motionState[motion].state08,
-                        sizeof(motionState[motion].state08));
-            std::memcpy(destination + 0x140, motionState[motion].state140,
-                        sizeof(motionState[motion].state140));
-            std::memcpy(destination + 0x168, motionState[motion].state168,
-                        sizeof(motionState[motion].state168));
-        }
-    }
-}
-
-static bool MissileEmplacementJointsReady(void* shot)
-{
-    constexpr size_t JOINT_TABLE_OFFSET = 0x538;
-    constexpr size_t JOINT_STRIDE = 0xC0;
-    constexpr size_t JOINT_COUNT_OFFSET = 0x530;
-    uint32_t jointCount = *(uint32_t*)((uint8_t*)shot + JOINT_COUNT_OFFSET);
-    uint64_t joints = *(uint64_t*)((uint8_t*)shot + JOINT_TABLE_OFFSET);
-    bool ready = jointCount > 0 && jointCount <= 256 && joints &&
-        IsAccessibleRange(joints, JOINT_STRIDE * jointCount);
-    for (uint32_t index = 0; ready && index < jointCount; ++index) {
-        ready = HasCallableDtiVirtual(
-            (void*)(joints + index * JOINT_STRIDE));
-    }
-    return ready;
-}
-
-static void __fastcall hkMissileEmplacementMove(void* shot)
-{
-    if (IsReconstructedMissileEmplacement(shot) &&
-        !MissileEmplacementJointsReady(shot)) {
-        RetryMissileEmplacementSetup(shot);
-        if (!MissileEmplacementJointsReady(shot))
-            return;
-    }
-    oMissileEmplacementMove(shot);
-}
-
-static void __fastcall hkHandGrenadeContact(void* shot, void* contact)
-{
-    uint64_t dti = shot && HasCallableDtiVirtual(shot)
-        ? GetObjectDti((uint64_t)shot) : 0;
-    bool fireGrenade = dti ==
-        (uint64_t)_addr(DTI_USHOT_VULCAN_FIRE_GRENADE_BOMB);
-    bool grenade = fireGrenade ||
-        dti == (uint64_t)_addr(DTI_USHOT_VULCAN_HAND_GRENADE_BOMB);
-    uint32_t boundCount = grenade
-        ? *(uint32_t*)((uint8_t*)shot + 0x2214) : 0;
-    bool staleUpwardContact = fireGrenade && boundCount > 0 &&
-        *(float*)((uint8_t*)shot + 0x2088) < 0.0f;
-    bool repeatedHandGrenadeContact = !fireGrenade && boundCount == 1 &&
-        (*(uint32_t*)((uint8_t*)shot + 0x1FE0) & 0x10000000u) != 0 &&
-        *(float*)((uint8_t*)shot + 0x2088) < 0.0f;
-    if (staleUpwardContact || repeatedHandGrenadeContact) {
-        // A reconstructed primitive can retain its prior floor overlap for one
-        // frame after bouncing. Native live movement is upward at this point,
-        // so this is the old contact, not the next physical bounce.
-        *(uint32_t*)((uint8_t*)shot + 0x1FE0) &= ~0x00200000u;
-        return;
-    }
-
-    oHandGrenadeContact(shot, contact);
-    if (grenade &&
-        *(uint32_t*)((uint8_t*)shot + 0x2214) == 1) {
-        // Reconstructed collision lacks the host's first-contact latch. Without
-        // it the same floor contact is accepted again and advances bounce phase.
-        *(uint32_t*)((uint8_t*)shot + 0x1FE0) |= 0x10000000u;
-    }
-}
-
-static void __fastcall hkSomersaultGrenadeContact(void* shot, void* contact)
-{
-    bool somersaultGrenade = shot && HasCallableDtiVirtual(shot) &&
-        GetObjectDti((uint64_t)shot) ==
-            (uint64_t)_addr(DTI_USHOT_VULCAN_SOMERSAULT_GRENADE);
-    if (somersaultGrenade &&
-        *(uint32_t*)((uint8_t*)shot + 0x2210) > 0 &&
-        *(float*)((uint8_t*)shot + 0x2088) < 0.0f) {
-        // Reconstructed collision can retain the previous floor overlap after
-        // the bounce. Accepting it again flips upward velocity back downward.
-        *(uint32_t*)((uint8_t*)shot + 0x1FE0) &= ~0x00200000u;
-        return;
-    }
-    oSomersaultGrenadeContact(shot, contact);
-}
-
-static bool IsReconstructedWeaponCart(void* shot)
-{
-    auto recipe = g_liveShotRecipes.find(shot);
-    return recipe != g_liveShotRecipes.end() && recipe->second.reconstructed &&
-        HasCallableDtiVirtual(shot) &&
-        GetObjectDti((uint64_t)shot) ==
-            (uint64_t)_addr(DTI_USHOT_VULCAN_WEAPON_CART);
-}
-
-static bool WeaponCartMotionReady(void* shot)
-{
-    return *(uint32_t*)((uint8_t*)shot + 0x550) != 0;
-}
-
-static void CaptureWeaponCartTransitionState(
-    DeferredWeaponCartDebris& state, void* owner, bool post)
-{
-    // Capture both sides of the native transition so a deferred spawn can run
-    // with its original inputs and then restore the already-observed outputs.
-    uint8_t* globalRng = (uint8_t*)_addr(0x140D765D8);
-    uint64_t sEffect = *(uint64_t*)_addr(0x140E17A38);
-    uint8_t* effectRng = sEffect ? (uint8_t*)sEffect + 0x3C : nullptr;
-    void* sShot = *(void**)_addr(PTR_SSHOT);
-    void* sGameConfig = *(void**)_addr(PTR_SGAMECONFIG);
-
-    std::memcpy(post ? state.postGlobalRng : state.preGlobalRng,
-                globalRng, 16);
-    if (effectRng) {
-        std::memcpy(post ? state.postEffectRng : state.preEffectRng,
-                    effectRng, 16);
-    }
-    if (owner) {
-        std::memcpy(post ? state.postOwnerRng : state.preOwnerRng,
-                    (uint8_t*)owner + 0x2D80, 16);
-    }
-    if (sShot) {
-        std::memcpy(post ? state.postShotIdPool : state.preShotIdPool,
-                    (uint8_t*)sShot + SSHOT_ID_POOL_OFFSET,
-                    SSHOT_ID_POOL_SIZE);
-    }
-    if (sGameConfig) {
-        std::memcpy(post ? state.postShotSlotFlags : state.preShotSlotFlags,
-                    (uint8_t*)sGameConfig +
-                        SGAMECONFIG_SHOT_SLOT_FLAGS_OFFSET,
-                    SGAMECONFIG_SHOT_SLOT_FLAGS_SIZE);
-    }
-}
-
-static void RestoreWeaponCartTransitionState(
-    const DeferredWeaponCartDebris& state, void* owner, bool post)
-{
-    uint8_t* globalRng = (uint8_t*)_addr(0x140D765D8);
-    uint64_t sEffect = *(uint64_t*)_addr(0x140E17A38);
-    uint8_t* effectRng = sEffect ? (uint8_t*)sEffect + 0x3C : nullptr;
-    void* sShot = *(void**)_addr(PTR_SSHOT);
-    void* sGameConfig = *(void**)_addr(PTR_SGAMECONFIG);
-
-    std::memcpy(globalRng,
-                post ? state.postGlobalRng : state.preGlobalRng, 16);
-    if (effectRng) {
-        std::memcpy(effectRng,
-                    post ? state.postEffectRng : state.preEffectRng, 16);
-    }
-    if (owner) {
-        std::memcpy((uint8_t*)owner + 0x2D80,
-                    post ? state.postOwnerRng : state.preOwnerRng, 16);
-    }
-    if (sShot) {
-        std::memcpy((uint8_t*)sShot + SSHOT_ID_POOL_OFFSET,
-                    post ? state.postShotIdPool : state.preShotIdPool,
-                    SSHOT_ID_POOL_SIZE);
-    }
-    if (sGameConfig) {
-        std::memcpy((uint8_t*)sGameConfig +
-                        SGAMECONFIG_SHOT_SLOT_FLAGS_OFFSET,
-                    post ? state.postShotSlotFlags : state.preShotSlotFlags,
-                    SGAMECONFIG_SHOT_SLOT_FLAGS_SIZE);
-    }
-}
-
-static void RecoverWeaponCartEndTransition(void* shot, void* owner,
-                                           DeferredWeaponCartDebris& state)
-{
-    // Native gate-2 handling selects the explosion/return animation before it
-    // creates debris; reconstruction must reproduce that omitted side effect.
-    uint64_t vtable = *(uint64_t*)shot;
-    uint64_t selectMotion = IsAccessibleRange(vtable + 0x190, sizeof(uint64_t))
-        ? *(uint64_t*)(vtable + 0x190) : 0;
-    if (selectMotion && IsExecutableAddress(selectMotion)) {
-        uint32_t animation = *(uint8_t*)((uint8_t*)shot + 0x22F4) ? 7 : 3;
-        ((void(__fastcall*)(void*, uint32_t))selectMotion)(shot, animation);
-    }
-
-    void* sShot = *(void**)_addr(PTR_SSHOT);
-    if (!sShot) return;
-    uint32_t* pendingCount = (uint32_t*)((uint8_t*)sShot +
-                                         SSHOT_PENDING_COUNT_OFFSET);
-    if (*pendingCount == 0) {
-        // Run debris creation against pre-transition state, then put RNG and
-        // allocator bookkeeping back at the post-transition values.
-        RestoreWeaponCartTransitionState(state, owner, false);
-        ((void(__fastcall*)(void*))_addr(FN_WEAPON_CART_SPAWN_DEBRIS))(shot);
-        RestoreWeaponCartTransitionState(state, owner, true);
-    }
-
-    if (*pendingCount != 0) {
-        ((void(__fastcall*)(void*))_addr(FN_SSHOT_FLUSH_PENDING_UNITS))(sShot);
-        state.pending = false;
-    }
-}
-
-static void __fastcall hkWeaponCartMove(void* shot)
-{
-    auto liveRecipe = g_liveShotRecipes.find(shot);
-    bool reconstructed = liveRecipe != g_liveShotRecipes.end() &&
-        liveRecipe->second.reconstructed && IsReconstructedWeaponCart(shot);
-    void* owner = liveRecipe != g_liveShotRecipes.end()
-        ? liveRecipe->second.ownerChr : nullptr;
-    uint32_t beforeGate = *(uint32_t*)((uint8_t*)shot + 0x221C);
-    // The owner caches the primary model independently of the shot. Refresh it
-    // every move because forced reconstruction replaces that model each frame.
-    if (reconstructed && owner &&
-        IsAccessibleRange((uint64_t)shot + 0x2288, sizeof(void*)) &&
-        IsAccessibleRange((uint64_t)owner + 0x6498, sizeof(void*))) {
-        void* modelEffect = *(void**)((uint8_t*)shot + 0x2288);
-        if (modelEffect && HasCallableDtiVirtual(modelEffect)) {
-            ((void(__fastcall*)(void*, void*))_addr(FN_CCHRNODE_SET_NEXT))(
-                (uint8_t*)owner + 0x6490, modelEffect);
-        }
-    }
-    if (reconstructed && owner && beforeGate == 3) {
-        auto deferred = g_deferredWeaponCartDebris.find(owner);
-        if (deferred != g_deferredWeaponCartDebris.end() &&
-            deferred->second.pending) {
-            RecoverWeaponCartEndTransition(shot, owner, deferred->second);
-        }
-    }
-
-    DeferredWeaponCartDebris transitionState{};
-    bool captureTransition = reconstructed && owner && beforeGate == 2;
-    size_t liveRecipeCountBefore = g_liveShotRecipes.size();
-    if (captureTransition)
-        CaptureWeaponCartTransitionState(transitionState, owner, false);
-    if (reconstructed) {
-        if (!WeaponCartMotionReady(shot)) return;
-
-        // The primary cart effect normally raises this transition gate when
-        // mTimer reaches 67, then advances it after the timer-122 model tick.
-        // Forced reconstruction replaces that effect every frame, but the
-        // authoritative shot timer remains available.
-        constexpr size_t TIMER_OFFSET = 0x1F58;
-        constexpr size_t TRANSITION_GATE_OFFSET = 0x221C;
-        constexpr size_t LINEAR_SPEED_OFFSET = 0x2080;
-        float timer = *(float*)((uint8_t*)shot + TIMER_OFFSET);
-        if (timer >= 67.0f && timer < 122.0f) {
-            *(uint32_t*)((uint8_t*)shot + TRANSITION_GATE_OFFSET) = 1;
-            *(float*)((uint8_t*)shot + LINEAR_SPEED_OFFSET) = 0.0f;
-        }
-    }
-    oWeaponCartMove(shot);
-    uint32_t afterGate = *(uint32_t*)((uint8_t*)shot + 0x221C);
-    if (captureTransition && afterGate == 3) {
-        CaptureWeaponCartTransitionState(transitionState, owner, true);
-        // New live recipes prove native debris creation succeeded. Otherwise
-        // retain the transition snapshot for recovery on the next move.
-        if (g_liveShotRecipes.size() == liveRecipeCountBefore) {
-            transitionState.pending = true;
-            g_deferredWeaponCartDebris[owner] = std::move(transitionState);
-        } else {
-            g_deferredWeaponCartDebris.erase(owner);
-        }
-    }
-    if (reconstructed && *(float*)((uint8_t*)shot + 0x1F58) >= 122.0f &&
-        *(uint32_t*)((uint8_t*)shot + 0x221C) == 1) {
-        // The model effect normally performs this end-of-tick gate change.
-        *(uint32_t*)((uint8_t*)shot + 0x221C) = 2;
-        *(float*)((uint8_t*)shot + 0x2080) = 20.0f;
-    }
-    if (reconstructed && *(float*)((uint8_t*)shot + 0x1F58) >= 141.0f &&
-        *(uint32_t*)((uint8_t*)shot + 0x221C) == 3 &&
-        *(uint64_t*)((uint8_t*)shot + 0x568) != 0x68) {
-        // Gate 3 expects the first motion record at its return-slide cursor.
-        *(uint64_t*)((uint8_t*)shot + 0x558) = 0x20000044;
-        *(uint64_t*)((uint8_t*)shot + 0x568) = 0x68;
-        *(uint64_t*)((uint8_t*)shot + 0x570) = 0x44;
-    }
 }
 
 static char __fastcall hkUnitRemove(void* manager, void* unit)
@@ -1171,7 +442,7 @@ static char __fastcall hkUnitRemove(void* manager, void* unit)
     if (result && unit) {
         RollbackHookProfileScope child(RollbackHookProfileId::UnitRemoveRecipeCleanup);
         if (!IsLinkedShot(unit)) g_liveShotRecipes.erase(unit);
-        g_resimSpawnedPendulums.erase(unit);
+        Rollback_ForgetShotModelPolicy(unit);
         Effect_FinishUnitRemoval(unit);
     }
     return result;
@@ -1217,6 +488,11 @@ bool Shot_GetRecipe(void* shot, RollbackShotRecipe& recipe)
     return true;
 }
 
+size_t Shot_GetRecipeCount()
+{
+    return g_liveShotRecipes.size();
+}
+
 void Shot_CollectCurrent(std::vector<void*>& shots)
 {
     shots.clear();
@@ -1249,8 +525,7 @@ void Shot_TrackReconstructed(void* shot, const RollbackShotRecipe& recipe)
 void Shot_Reset()
 {
     g_liveShotRecipes.clear();
-    g_resimSpawnedPendulums.clear();
-    g_deferredWeaponCartDebris.clear();
+    Rollback_ResetShotModelPolicy();
     g_shotSpawnSequence = 0;
     g_staleHitTargetLogCount = 0;
 }
@@ -1288,38 +563,7 @@ void Shot_InitHooks()
                 (void**)&oShotProcessHitCollision,
                 "Rollback: hooked uShot hit collision validation",
                 "Rollback: failed to hook uShot hit collision validation (%d)\n");
-    /*InstallHook(FN_USHOT_KILL_CALLBACKS,
-                (LPVOID)&hkShotKillCallbacks,
-                (void**)&oShotKillCallbacks,
-                "Rollback: tracing Kikosho callback effect kills",
-                "Rollback: failed to trace Kikosho callback effect kills (%d)\n");
-    InstallHook(FN_USHOT_CLEAR_DEAD_CALLBACKS,
-                (LPVOID)&hkShotClearDeadCallbacks,
-                (void**)&oShotClearDeadCallbacks,
-                "Rollback: tracing Kikosho callback effect clears",
-                "Rollback: failed to trace Kikosho callback effect clears (%d)\n");*/
-    InstallHook(FN_KING_KOBUN_MOVE, (LPVOID)&hkKingKobunMove,
-                (void**)&oKingKobunMove,
-                "Rollback: hooked uShotVulcanKingKobun::move trace",
-                "Rollback: failed to hook uShotVulcanKingKobun::move (%d)\n");
-    InstallHook(FN_MISSILE_EMPLACEMENT_MOVE,
-                (LPVOID)&hkMissileEmplacementMove,
-                (void**)&oMissileEmplacementMove,
-                "Rollback: hooked reconstructed missile emplacement model retry",
-                "Rollback: failed to hook missile emplacement model retry (%d)\n");
-    InstallHook(FN_HAND_GRENADE_CONTACT, (LPVOID)&hkHandGrenadeContact,
-                (void**)&oHandGrenadeContact,
-                "Rollback: hooked Hand Grenade first-contact repair",
-                "Rollback: failed to hook Hand Grenade contact (%d)\n");
-    InstallHook(FN_SOMERSAULT_GRENADE_CONTACT,
-                (LPVOID)&hkSomersaultGrenadeContact,
-                (void**)&oSomersaultGrenadeContact,
-                "Rollback: hooked Somersault Grenade contact repair",
-                "Rollback: failed to hook Somersault Grenade contact (%d)\n");
-    InstallHook(FN_WEAPON_CART_MOVE, (LPVOID)&hkWeaponCartMove,
-                (void**)&oWeaponCartMove,
-                "Rollback: hooked reconstructed Weapon Cart model retry",
-                "Rollback: failed to hook Weapon Cart model retry (%d)\n");
+    Rollback_InitShotModelPolicyHooks();
     InstallHook(FN_SUNIT_REMOVE_UNIT, (LPVOID)&hkUnitRemove, (void**)&oUnitRemove,
                  "Rollback: hooked sUnit__removeUnit for recipe lifetime",
                  "Rollback: failed to hook sUnit__removeUnit (%d)\n");

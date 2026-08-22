@@ -40,7 +40,6 @@ static constexpr uintptr_t FN_RESET_HITNODES = 0x140259E90;
 static constexpr uintptr_t FN_MODEL_SET_CHILD_MATERIAL_MODE = 0x140200DB0;
 static constexpr uintptr_t FN_MTOBJECT_ADD_REF = 0x14050D100;
 static constexpr uintptr_t FN_CRESOURCE_RELEASE_REF = 0x14050D5A0;
-static constexpr uintptr_t FN_MTDTI_IS_KIND_OF = 0x1400039D0;
 
 static constexpr uintptr_t SMVC3MGR_ACTION_OFFSET = 0x48;
 static constexpr uint32_t SACTION_MODEL_JOINT_WRAPPER_OFFSET = 0x120;
@@ -83,7 +82,6 @@ static constexpr uint32_t SUNIT_CHARACTER_CATEGORY = 8;
 static constexpr uint32_t SUNIT_CHARACTER_POST_CATEGORY = 18;
 static constexpr uintptr_t DTI_UCHARACTER_POST = 0x140D44D60;
 static constexpr uintptr_t DTI_UCHRWEAPON = 0x140D44968;
-static constexpr uintptr_t DTI_USHOT_LASER = 0x140D482E8;
 static constexpr uint32_t UCHARACTER_POST_SCALAR_STATE_OFFSET = 0x40;
 static constexpr size_t UCHARACTER_POST_SCALAR_STATE_SIZE = 0x10;
 static constexpr uint32_t UCHARACTER_POST_CHARACTER_CACHE_OFFSET = 0x50;
@@ -111,16 +109,6 @@ static constexpr size_t SHITSOLVER_SIZE = 0x3808C;
 static constexpr uint64_t MT_DTI_VTABLE = 0x140A69ED8;
 static constexpr uintptr_t DTI_UACTION_SIDE_CAMERA = 0x140D44268;
 static constexpr size_t SHITSOLVER_DATA_OFF = 0x58;
-static constexpr uintptr_t VTABLE_UCAP_AMERICA = 0x140A71430;
-static constexpr uintptr_t VTABLE_UDOCTOR_DOOM = 0x140A73A40;
-static constexpr uintptr_t DTI_USHOT_OPTION_SHIELD_SLASH = 0x140D48A68;
-static constexpr uintptr_t DTI_USHOT_VULCAN_LAND_MINE = 0x140D48D98;
-static constexpr uintptr_t DTI_USHOT_VULCAN_MISSILE_EMPLACEMENT = 0x140D49A60;
-static constexpr uintptr_t DTI_USHOT_SHIELD_WEAPON_CART_SPREAD = 0x140D4A098;
-static constexpr uintptr_t DTI_USHOT_VULCAN_ROCKET_LAUNCHER_EXPLODE = 0x140D4BAC8;
-static constexpr uintptr_t DTI_USHOT_SHIELD_SPIRAL_SWORD = 0x140D4D4C8;
-static constexpr uint32_t UCAP_AMERICA_SHIELD_SLASH_OFFSET = 0x68F0;
-static constexpr uint32_t UDOCTOR_DOOM_MISSILE_OFFSET = 0x68F0;
 
 static bool IsStableCharacterCollisionParent(uint8_t* character, uint64_t parent)
 {
@@ -614,43 +602,6 @@ static bool IsActiveUnit(void* unit)
     return (state & 7u) < 3u && (state & 0x3F8u) != 0x3F8u;
 }
 
-static void RestoreKingKobunHelper(void* shot, const ShotRecipe& saved)
-{
-    constexpr uintptr_t KING_KOBUN_DTI = 0x140D4D2B0;
-    constexpr uintptr_t KOBUN_DTI = 0x140D455B0;
-    constexpr size_t HELPER_OFFSET = 0x2158;
-    if (!shot || saved.concrete.dti != (uint64_t)_addr(KING_KOBUN_DTI) ||
-        saved.concrete.body.size() < HELPER_OFFSET + sizeof(uint64_t)) {
-        return;
-    }
-
-    void* savedHelper = *(void**)(saved.concrete.body.data() + HELPER_OFFSET);
-    void* helper = ValidateShotObjectReference(
-        savedHelper, (uint64_t)_addr(KOBUN_DTI), true);
-
-    // King Servbot setup normally obtains this relationship from Tron's
-    // transient action-side-camera state. That lookup is no longer populated
-    // when a historical shot is reconstructed, so fall back to the unique live
-    // uKobun helper in the character category.
-    if (!helper) {
-        uint64_t sUnit = *(uint64_t*)_addr(PTR_SUNIT);
-        if (sUnit && *(uint32_t*)(sUnit + SUNIT_CATEGORY_COUNT_OFFSET) >
-                         SUNIT_CHARACTER_CATEGORY) {
-            uint64_t node = *(uint64_t*)(sUnit + SUNIT_CATEGORY_LISTS_OFFSET +
-                SUNIT_CATEGORY_LIST_STRIDE * SUNIT_CHARACTER_CATEGORY);
-            for (int safety = 64; node && safety-- > 0; node = *(uint64_t*)(node + 0x18)) {
-                if (GetObjectDti(node) == (uint64_t)_addr(KOBUN_DTI) &&
-                    IsActiveUnit((void*)node)) {
-                    if (helper) return; // Ambiguous: do not bind another player's helper.
-                    helper = (void*)node;
-                }
-            }
-        }
-    }
-
-    *(void**)((uint8_t*)shot + HELPER_OFFSET) = helper;
-}
-
 static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
 {
     if (!Shot_HooksReady()) {
@@ -746,9 +697,7 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
             if (!shot || !IsAccessibleRange((uint64_t)shot, sizeof(uint64_t)))
                 continue;
             uint64_t dti = GetObjectDti((uint64_t)shot);
-            if (!dti || !((uint8_t(__fastcall*)(void*, void*))_addr(
-                    FN_MTDTI_IS_KIND_OF))((void*)dti,
-                                          (void*)_addr(DTI_USHOT_LASER))) {
+            if (!Rollback_ShouldFinalizeShotBeforeRetirement(dti)) {
                 continue;
             }
             uint64_t vtable = *(uint64_t*)shot;
@@ -933,55 +882,17 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
             saved.objectRef2WasActiveUnit);
         ShotRecipe remappedRecipe;
         const ShotRecipe* spawnRecipe = &saved;
-        if (saved.concrete.dti ==
-                (uint64_t)_addr(DTI_USHOT_SHIELD_WEAPON_CART_SPREAD) ||
-            saved.concrete.dti ==
-                (uint64_t)_addr(DTI_USHOT_VULCAN_ROCKET_LAUNCHER_EXPLODE)) {
-            // These child shots store their parent in initParam rather than
-            // either validated object-reference field.
-            for (const ShotRecipe& candidate : slot.shotRecipes) {
-                if (candidate.savedPtr == (void*)saved.initParam &&
-                    candidate.restoredPtr) {
-                    remappedRecipe = saved;
-                    remappedRecipe.initParam =
-                        (uint64_t)candidate.restoredPtr;
-                    spawnRecipe = &remappedRecipe;
-                    break;
-                }
-            }
-        }
+        if (Rollback_RemapShotSpawnParent(
+                saved, slot.shotRecipes, remappedRecipe))
+            spawnRecipe = &remappedRecipe;
         const uint64_t factoryStart = Profile_Now();
         respawnPrepareTicks += factoryStart - prepareStart;
 
-        uint8_t spiralSwordSlots[6] = {};
-        uint8_t* spiralSwordSlotTable = nullptr;
-        if (saved.concrete.dti ==
-                (uint64_t)_addr(DTI_USHOT_SHIELD_SPIRAL_SWORD) &&
-            saved.ownerChr && saved.concrete.body.size() >= 0x2214 &&
-            IsAccessibleRange((uint64_t)saved.ownerChr + 0x68F0,
-                              sizeof(spiralSwordSlots))) {
-            uint32_t swordId = 0;
-            std::memcpy(&swordId, saved.concrete.body.data() + 0x2210,
-                        sizeof(swordId));
-            if (swordId >= 1 && swordId <= sizeof(spiralSwordSlots)) {
-                // Native setup claims the first free owner slot. The historical
-                // occupancy table is already restored, so expose only this
-                // sword's saved slot while its factory runs.
-                spiralSwordSlotTable =
-                    (uint8_t*)saved.ownerChr + 0x68F0;
-                std::memcpy(spiralSwordSlots, spiralSwordSlotTable,
-                            sizeof(spiralSwordSlots));
-                std::memset(spiralSwordSlotTable, 1,
-                            sizeof(spiralSwordSlots));
-                spiralSwordSlotTable[swordId - 1] = 0;
-            }
-        }
+        RollbackShotFactoryPolicyState factoryPolicy;
+        Rollback_PrepareShotFactory(saved, factoryPolicy);
         void* fresh = Shot_SpawnOriginal(
             sShot, *spawnRecipe, objectRef1, objectRef2);
-        if (spiralSwordSlotTable) {
-            std::memcpy(spiralSwordSlotTable, spiralSwordSlots,
-                        sizeof(spiralSwordSlots));
-        }
+        Rollback_FinishShotFactory(factoryPolicy);
         const uint64_t factoryEnd = Profile_Now();
         respawnFactoryTicks += factoryEnd - factoryStart;
         if (!fresh) {
@@ -1023,25 +934,7 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
         }
         Rollback_RestoreShotModelLinks(
             fresh, saved.ownerChr, saved.concrete.dti);
-        if (saved.concrete.dti ==
-                (uint64_t)_addr(DTI_USHOT_VULCAN_LAND_MINE) &&
-            saved.concrete.body.size() > 0x2214 &&
-            saved.concrete.body[0x2214] != 0 &&
-            saved.concrete.callbackEffects[0].occupied &&
-            *(void**)((uint8_t*)fresh + 0x1F78) == nullptr &&
-            *(uint8_t*)((uint8_t*)fresh + 0x2214) == 0) {
-            // Stage contact creates Chris's armed-grenade effect. A factory
-            // reconstruction has not seen that historical contact, so rebuild
-            // its owned graph before restoring the captured effect timeline.
-            uint64_t vtable = *(uint64_t*)fresh;
-            uint64_t contactAddress = vtable &&
-                IsAccessibleRange(vtable + 0x318, sizeof(uint64_t))
-                ? *(uint64_t*)(vtable + 0x318) : 0;
-            if (contactAddress && IsExecutableAddress(contactAddress)) {
-                auto contact = (void(__fastcall*)(void*, void*))contactAddress;
-                contact(fresh, nullptr);
-            }
-        }
+        Rollback_RebuildShotStateBeforeRegistration(fresh, saved);
         // Rebuild registration through the same pending-unit path used by the
         // native shot callers. Drain it before resimulation so all restored
         // shots enter the category list in one native registration pass.
@@ -1091,45 +984,14 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
         }
         const uint64_t concreteEnd = Profile_Now();
         respawnConcreteTicks += concreteEnd - registerEnd;
-        if (saved.concrete.dti ==
-                (uint64_t)_addr(DTI_USHOT_VULCAN_MISSILE_EMPLACEMENT) &&
-            saved.concrete.body.size() >= 0x2170) {
-            // The packed phase qword at +0x2140 can resemble an accessible
-            // pointer, causing the generic ownership filter to retain factory
-            // phase zero. This concrete tail is verified scalar state.
-            std::memcpy((uint8_t*)fresh + 0x2120,
-                        saved.concrete.body.data() + 0x2120, 0x50);
-        }
-        RestoreKingKobunHelper(fresh, saved);
-        if (saved.concrete.dti == (uint64_t)_addr(0x140D4D2B0) &&
-            saved.concrete.body.size() >= 0x2164) {
-            // These are the controller's scalar mode/phase fields. The broad
-            // shot overlay deliberately preserves pointer-looking words, and
-            // +0x2158 is fixed separately above; explicitly restore the
-            // remaining King Servbot fields so reconstruction cannot leave the
-            // fresh factory mode latched at its pre-move state.
-            static constexpr size_t kingRanges[][2] = {
-                {0x2140, 0x08},
-                {0x214C, 0x04},
-                {0x2150, 0x08},
-                {0x2160, 0x04},
-            };
-            for (const auto& range : kingRanges) {
-                std::memcpy((uint8_t*)fresh + range[0],
-                            saved.concrete.body.data() + range[0], range[1]);
-            }
-        }
         // Reapply confirmed pointer-free common fields after the broad object
         // overlay so packed floats/flags that resemble addresses still rewind.
         Shot_RestoreArmState(fresh, saved);
         Shot_ApplyFlight(fresh, saved.flight);
         // Concrete restore can reapply the explosion's captured factory-default
         // attack selector after native creation derived it from the parent.
-        Shot_RepairNemesisExplosionAttack(
-            fresh, (void*)spawnRecipe->initParam, saved.spawnAttackInfoId);
-        Rollback_EvaluateRestoredShotModel(
-            fresh, saved.concrete.dti, saved.concrete.body.data(),
-            saved.concrete.body.size());
+        Rollback_RestoreShotClassState(
+            fresh, saved, (void*)spawnRecipe->initParam);
 
         // Some shots use +0x1F70 as a self-reference. Repoint it at the fresh
         // allocation instead of retaining the captured shot's retired address.
@@ -1216,40 +1078,11 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
     size_t regionDataOffset = 0;
     for (int region = 0; region < slot.regionCount; ++region) {
         const RollbackRegion& savedRegion = slot.regions[region];
-        if (savedRegion.expectedVtable ==
-                (uint64_t)_addr(VTABLE_UCAP_AMERICA) &&
-            UCAP_AMERICA_SHIELD_SLASH_OFFSET + sizeof(void*) <=
-                savedRegion.size &&
-            regionDataOffset + UCAP_AMERICA_SHIELD_SLASH_OFFSET +
-                sizeof(void*) <= slot.size) {
-            void* savedReference = nullptr;
-            std::memcpy(&savedReference,
-                        slot.data + regionDataOffset +
-                            UCAP_AMERICA_SHIELD_SLASH_OFFSET,
-                        sizeof(savedReference));
-
-            const ShotRecipe* match = nullptr;
-            bool ambiguous = false;
-            for (const ShotRecipe& saved : slot.shotRecipes) {
-                if (saved.ownerChr != savedRegion.ptr ||
-                    saved.concrete.dti !=
-                        (uint64_t)_addr(DTI_USHOT_OPTION_SHIELD_SLASH)) {
-                    continue;
-                }
-                if (saved.savedPtr == savedReference) {
-                    match = &saved;
-                    ambiguous = false;
-                    break;
-                }
-                ambiguous = match != nullptr;
-                match = &saved;
-            }
-
-            // Captain's +0x68F0 is a Shield Slash reference despite inherited
-            // property metadata describing a scalar at this offset.
-            *(void**)((uint8_t*)savedRegion.ptr +
-                      UCAP_AMERICA_SHIELD_SLASH_OFFSET) =
-                savedReference && match && !ambiguous ? match->restoredPtr : nullptr;
+        if (regionDataOffset + savedRegion.size <= slot.size) {
+            Rollback_RemapCharacterShotLinks(
+                savedRegion.ptr, savedRegion.expectedVtable,
+                slot.data + regionDataOffset, savedRegion.size,
+                slot.shotRecipes);
         }
         regionDataOffset += savedRegion.size;
     }
@@ -2353,35 +2186,9 @@ void Rollback_RestoreSnapshot(int32_t frame)
                         ? savedRelationship : 0;
             }
 
-            if (slot.regions[i].expectedVtable ==
-                    (uint64_t)_addr(VTABLE_UDOCTOR_DOOM) &&
-                UDOCTOR_DOOM_MISSILE_OFFSET + sizeof(void*) <= copySize) {
-                void* savedReference = *(void* const*)(
-                    savedCharacter + UDOCTOR_DOOM_MISSILE_OFFSET);
-                const ShotRecipe* match = nullptr;
-                bool ambiguous = false;
-                for (const ShotRecipe& saved : slot.shotRecipes) {
-                    if (saved.ownerChr != slot.regions[i].ptr ||
-                        saved.concrete.dti != (uint64_t)_addr(
-                            DTI_USHOT_VULCAN_MISSILE_EMPLACEMENT)) {
-                        continue;
-                    }
-                    if (saved.savedPtr == savedReference) {
-                        match = &saved;
-                        ambiguous = false;
-                        break;
-                    }
-                    ambiguous = match != nullptr;
-                    match = &saved;
-                }
-
-                // Doom's concrete tail reuses inherited +0x68F0 as the active
-                // emplacement pointer. The combo matcher reads its life timer
-                // to accept mash extensions, so bind the unique fresh recipe
-                // after generic scalar-tail restoration.
-                *(void**)(character + UDOCTOR_DOOM_MISSILE_OFFSET) =
-                    match && !ambiguous ? match->restoredPtr : nullptr;
-            }
+            Rollback_RemapCharacterShotLinks(
+                (void*)character, slot.regions[i].expectedVtable,
+                savedCharacter, copySize, slot.shotRecipes);
         }
         offset += slot.regions[i].size;
     }
