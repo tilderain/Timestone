@@ -1380,19 +1380,18 @@ int Rollback_BuildRegions(Region* regions, int maxRegions)
 void Rollback_SaveSnapshot(int32_t frame)
 {
     const uint64_t profileStart = Profile_Now();
-    Region regions[MAX_REGIONS];
-    int count = Rollback_BuildRegions(regions, MAX_REGIONS);
+    int slotIdx = frame % ROLLBACK_WINDOW;
+    if (slotIdx < 0) slotIdx += ROLLBACK_WINDOW;
+    SnapshotSlot& slot = g_slots[slotIdx];
+
+    int count = Rollback_BuildRegions(slot.regions, MAX_REGIONS);
     if (count == 0) return;
     const uint64_t buildRegionsEnd = Profile_Now();
 
     size_t total = 0;
     for (int i = 0; i < count; ++i) {
-        total += regions[i].size;
+        total += slot.regions[i].size;
     }
-
-    int slotIdx = frame % ROLLBACK_WINDOW;
-    if (slotIdx < 0) slotIdx += ROLLBACK_WINDOW;
-    SnapshotSlot& slot = g_slots[slotIdx];
 
     /*if (frame >= 14 && frame <= 20) {
         uint64_t replay = *(uint64_t*)_addr(0x140d4d9d8);
@@ -1426,16 +1425,9 @@ void Rollback_SaveSnapshot(int32_t frame)
     slot.regionCount = count;
     slot.frame = frame;
     for (int i = 0; i < count; ++i) {
-        slot.regions[i].ptr  = regions[i].ptr;
-        slot.regions[i].size = regions[i].size;
-        slot.regions[i].ownerSlot = regions[i].ownerSlot;
-        slot.regions[i].expectedVtable = regions[i].expectedVtable;
-        slot.regions[i].skipVtable = regions[i].skipVtable;
-#if ROLLBACK_SNAPDUMP_ENABLED
-        slot.regions[i].snapDumpName = regions[i].snapDumpName;
-#endif
-        std::memcpy(slot.data + offset, regions[i].ptr, regions[i].size);
-        offset += regions[i].size;
+        const Region& region = slot.regions[i];
+        std::memcpy(slot.data + offset, region.ptr, region.size);
+        offset += region.size;
     }
     slot.size = offset;
     CaptureActionSideCameraState(slot);
@@ -1455,9 +1447,9 @@ void Rollback_SaveSnapshot(int32_t frame)
         int collisionIndex = -1;
         size_t collisionSize = 0;
         for (int i = 0; i < count; ++i) {
-            if ((uintptr_t)regions[i].ptr == *(uint64_t*)_addr(PTR_SCOLLISION)) {
+            if ((uintptr_t)slot.regions[i].ptr == *(uint64_t*)_addr(PTR_SCOLLISION)) {
                 collisionIndex = i;
-                collisionSize = regions[i].size;
+                collisionSize = slot.regions[i].size;
                 break;
             }
         }

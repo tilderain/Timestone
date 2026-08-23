@@ -147,16 +147,33 @@ sample requirements in section 5.
 
 ### 4.4 Repetition
 
-For exploratory ranking, one valid 1,000-2,000-frame run is sufficient. Before
-claiming an optimization is verified, collect at least:
+For exploratory ranking, one valid 1,000-2,000-frame run is sufficient. Begin
+verification with one valid baseline and one valid candidate run under the same
+conditions. Before launching more games, inspect the raw profiles as described
+in section 6.6 to determine whether the targeted change can be separated from
+run-to-run battle variance.
 
-- One baseline run.
-- One candidate run under the same conditions.
-- One additional baseline or candidate run to estimate variance.
+Do not require a fixed number of repetitions solely because the aggregate
+improvement is below a percentage threshold. A small change may still be
+measurable when its natural workload is constant and its targeted bucket shifts
+consistently across rollback windows and both peers. Conversely, a large total
+time change is not convincing when it comes from different native actions,
+shots, effects, or rollback depths rather than the modified code.
 
-For small improvements below 5%, use at least three baseline and three
-candidate runs. CPU battle trajectories vary, so tiny single-run differences
-are not reliable.
+Launch additional baseline or candidate games only when the existing profiles
+cannot resolve the question, including when:
+
+- The targeted bucket lacks per-window or per-operation timing.
+- Baseline and candidate workloads differ materially after normalization.
+- Host and client results disagree without an understood state-dependent cause.
+- The per-window confidence interval includes no change by a meaningful margin.
+- A few outliers dominate the result.
+- The claim concerns whole-run latency but unrelated gameplay work masks the
+  targeted saving.
+
+When more runs are necessary, add the minimum number needed to resolve the
+specific ambiguity. Record why the existing profiles were insufficient rather
+than applying an automatic three-baseline/three-candidate rule.
 
 ### 4.5 Automated Runner
 
@@ -378,6 +395,46 @@ For `restore` and `shot_restore`, report:
 For `post_resim` entries, separately aggregate `notify_ms`, `resolve_ms`,
 `save_snapshot_ms`, and `total_ms`.
 
+### 6.6 Distinguishing a Change from Run Variance
+
+Inspect the existing raw baseline and candidate profiles before requesting more
+game runs. Aggregate rollback totals are highly sensitive to CPU battle
+trajectory and must not be the sole variance test.
+
+For the targeted bucket:
+
+1. Choose its natural unit of work, such as snapshot saves, replayed frames,
+   restore windows, calls, visits, copied bytes, regions, shots, effects, or
+   generator nodes.
+2. Confirm workload invariants. Compare region count and bytes for snapshots,
+   call and visit counts for hooks, object and recipe counts for restore work,
+   and rollback depth for per-frame phases.
+3. Normalize each rollback entry by that unit before comparing baseline and
+   candidate. Prefer ratios such as `copy_regions_ms / snapshot.count` over
+   whole-run totals when the change affects one snapshot operation.
+4. Compare host and client independently. Agreement in direction and magnitude
+   is evidence that a targeted shift is not merely one peer's battle path.
+5. Inspect the per-window distribution, including median, trimmed mean,
+   percentiles, and outliers. Stratify by rollback depth or object workload when
+   those variables affect cost.
+6. When sample count permits, bootstrap rollback windows separately by side to
+   estimate a confidence interval for the normalized difference. Use a fixed
+   seed and report the method. A window bootstrap measures within-run timing
+   variance; it does not eliminate a run-wide configuration or workload bias.
+7. Compare matching frame ranges or equivalent workload buckets when available.
+   Do not force frame pairing when CPU trajectories have diverged.
+8. Verify attribution: the measured reduction must appear in the bucket changed
+   by the patch and must not be explained by fewer calls, smaller snapshots,
+   shallower rollback, or less gameplay activity unless that workload reduction
+   is the intended optimization.
+
+The existing profiles are sufficient when the target workload is comparable,
+both peers show a consistent normalized shift, the per-window analysis excludes
+no change by a useful margin, and correctness artifacts are clean. In that case,
+do not run more games merely to satisfy a repetition count. If these conditions
+are not met, classify the performance result as inconclusive and collect only
+the additional evidence needed to address the identified uncertainty.
+
 ## 7. Selecting an Optimization Candidate
 
 ### 7.1 Evidence Threshold
@@ -490,6 +547,12 @@ object workload differs too much to explain the targeted result.
 The measured saving should approximately agree with the reduction in the
 targeted bucket. If total time improves but the targeted bucket does not, treat
 the result as run variance until reproduced.
+
+If total time regresses or fluctuates because unrelated gameplay work differs,
+but section 6.6 isolates a repeatable reduction in the targeted bucket under a
+constant normalized workload, report the narrow targeted improvement rather
+than misclassifying the patch from aggregate time alone. Do not extrapolate that
+narrow result into an unsupported whole-run speedup.
 
 ### 9.2 Correctness Validation
 
