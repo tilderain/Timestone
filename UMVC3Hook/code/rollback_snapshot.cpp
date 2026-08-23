@@ -250,7 +250,6 @@ struct RegionDependency {
     uintptr_t address = 0;
     uint64_t value = 0;
     uint8_t size = 0;
-    bool requireAccessible = false;
 };
 
 struct RegionDependencies {
@@ -260,7 +259,7 @@ struct RegionDependencies {
     bool overflow = false;
 
     template <typename T>
-    T read(uintptr_t address, bool requireAccessible = false)
+    T read(uintptr_t address)
     {
         static_assert(sizeof(T) <= sizeof(uint64_t));
         T value = *(T*)address;
@@ -268,7 +267,6 @@ struct RegionDependencies {
             RegionDependency& dependency = values[count++];
             dependency.address = address;
             dependency.size = sizeof(T);
-            dependency.requireAccessible = requireAccessible;
             std::memcpy(&dependency.value, &value, sizeof(T));
         } else {
             overflow = true;
@@ -286,67 +284,11 @@ struct RegionCache {
 
 static RegionCache g_regionCache;
 
-class DependencyMemoryCache {
-public:
-    bool isAccessible(uintptr_t address, size_t size)
-    {
-        if (address < 0x10000 || address >= 0x0000800000000000ull ||
-            size == 0 || size - 1 > UINTPTR_MAX - address) {
-            return false;
-        }
-        if (lastRegion_ < count_) {
-            const MemoryRegion& region = regions_[lastRegion_];
-            if (address >= region.start && address + size <= region.end)
-                return region.accessible;
-        }
-        for (size_t i = 0; i < count_; ++i) {
-            const MemoryRegion& region = regions_[i];
-            if (address >= region.start && address + size <= region.end)
-            {
-                lastRegion_ = i;
-                return region.accessible;
-            }
-        }
-
-        MEMORY_BASIC_INFORMATION mbi = {};
-        if (VirtualQuery((void*)address, &mbi, sizeof(mbi)) == 0) return false;
-        const bool accessible = mbi.State == MEM_COMMIT &&
-            (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) == 0;
-        MemoryRegion queried = {
-            (uintptr_t)mbi.BaseAddress,
-            (uintptr_t)mbi.BaseAddress + mbi.RegionSize,
-            accessible,
-        };
-        if (count_ < MAX_CACHED_REGIONS) {
-            lastRegion_ = count_;
-            regions_[count_++] = queried;
-        }
-        return accessible && address + size <= queried.end;
-    }
-
-private:
-    static constexpr size_t MAX_CACHED_REGIONS = 256;
-
-    struct MemoryRegion {
-        uintptr_t start;
-        uintptr_t end;
-        bool accessible;
-    };
-    MemoryRegion regions_[MAX_CACHED_REGIONS];
-    size_t count_ = 0;
-    size_t lastRegion_ = SIZE_MAX;
-};
-
 static bool RegionDependenciesValid(const RegionDependencies& dependencies)
 {
     if (dependencies.overflow) return false;
-    DependencyMemoryCache memory;
     for (size_t i = 0; i < dependencies.count; ++i) {
         const RegionDependency& dependency = dependencies.values[i];
-        if (dependency.requireAccessible &&
-            !memory.isAccessible(dependency.address, dependency.size)) {
-            return false;
-        }
         uint64_t value = 0;
         std::memcpy(&value, (void*)dependency.address, dependency.size);
         if (value != dependency.value) return false;
@@ -401,9 +343,8 @@ static int BuildRegionsUncached(Region* regions, int maxRegions,
     if (!regions || maxRegions < 1) return 0;
 
     int r = 0;
-    auto read = [&]<typename T>(uintptr_t address,
-                                bool requireAccessible = false) {
-        return dependencies.read<T>(address, requireAccessible);
+    auto read = [&]<typename T>(uintptr_t address) {
+        return dependencies.read<T>(address);
     };
     auto add = [&](void* ptr, size_t sz, uint64_t ownerSlot = 0,
                    uint64_t expectedVtable = 0, bool skipVtable = false
@@ -954,7 +895,7 @@ static int BuildRegionsUncached(Region* regions, int maxRegions,
         if (camUnit && IsAccessibleRange(camUnit, 0x590) &&
             HasCallableDtiVirtual((void*)camUnit) &&
             GetObjectDti(camUnit) == (uint64_t)_addr(DTI_UACTION_SIDE_CAMERA)) {
-            read.operator()<uint64_t>(camUnit, true);
+            read.operator()<uint64_t>(camUnit);
             uint64_t dtiPtr  = GetObjectDti(camUnit);
             uint32_t camSize = DecodeDtiSize(dtiPtr);
             if (camSize < 0x100 || camSize > 0x2000) {
@@ -985,12 +926,12 @@ static int BuildRegionsUncached(Region* regions, int maxRegions,
         if (sAction && IsAccessibleAddress(
                 sAction + SACTION_MODEL_JOINT_WRAPPER_OFFSET)) {
             uint64_t modelJointWrapper = read.operator()<uint64_t>(
-                sAction + SACTION_MODEL_JOINT_WRAPPER_OFFSET, true);
+                sAction + SACTION_MODEL_JOINT_WRAPPER_OFFSET);
             if (modelJointWrapper && IsAccessibleAddress(
                     modelJointWrapper + SACTION_MODEL_JOINT_ALLOCATION_OFFSET)) {
                 uint64_t allocationSlot = modelJointWrapper +
                     SACTION_MODEL_JOINT_ALLOCATION_OFFSET;
-                uint64_t allocation = read.operator()<uint64_t>(allocationSlot, true);
+                uint64_t allocation = read.operator()<uint64_t>(allocationSlot);
                 if (allocation && IsAccessibleAddress(
                         allocation + SACTION_MODEL_JOINT_ALLOCATION_SIZE - 1)) {
                     // sAction__getModelJoint returns allocation+0x10. Capture
@@ -1047,7 +988,7 @@ static int BuildRegionsUncached(Region* regions, int maxRegions,
                     if (teamCharacterCount < 6) {
                         teamCharacters[teamCharacterCount++] = character;
                     }
-                    uint64_t vtable = read.operator()<uint64_t>(character, true);
+                    uint64_t vtable = read.operator()<uint64_t>(character);
                     uint64_t dtiFunc = (vtable >= 0x140000000) ? *(uint64_t*)(vtable + 0x20) : 0;
                     uint64_t dtiPtr = GetObjectDti(character);
                     uint32_t charSize = DecodeDtiSize(dtiPtr);
@@ -1187,7 +1128,7 @@ static int BuildRegionsUncached(Region* regions, int maxRegions,
                         uint64_t ownerSlot = character + animOffset;
                         uint64_t anim = read.operator()<uint64_t>(ownerSlot);
                         if (anim && HasCallableDtiVirtual((void*)anim)) {
-                            read.operator()<uint64_t>(anim, true);
+                            read.operator()<uint64_t>(anim);
                             add((void*)anim, CCHR_EXTERNAL_ANIM_SIZE, ownerSlot, 0, false
 #if ROLLBACK_SNAPDUMP_ENABLED
                                 , "uCharacter.externalAnimation"
@@ -1217,7 +1158,7 @@ static int BuildRegionsUncached(Region* regions, int maxRegions,
                                 continue;
                             }
 
-                            uint64_t weaponVtable = read.operator()<uint64_t>(weapon, true);
+                            uint64_t weaponVtable = read.operator()<uint64_t>(weapon);
                             uint32_t weaponSize = DecodeDtiSize(GetObjectDti(weapon));
                             if (weaponSize < 0x1300 || weaponSize > CCHR_MAX_SIZE)
                                 continue;
@@ -1342,7 +1283,7 @@ static int BuildRegionsUncached(Region* regions, int maxRegions,
                     }
                 }
                 if (!isTeamCharacter) {
-                    read.operator()<uint64_t>(helper, true);
+                    read.operator()<uint64_t>(helper);
                     uint32_t helperSize = DecodeDtiSize(GetObjectDti(helper));
                     if (helperSize >= 8 && helperSize <= CCHR_MAX_SIZE) {
                         add((void*)helper, helperSize, 0, *(uint64_t*)helper, true

@@ -147,3 +147,6 @@ game sometimes errors this on launch
 
 perf regressions
     ---- remove every unnecessary hook, esp effect ones
+
+
+simplify launch menu code

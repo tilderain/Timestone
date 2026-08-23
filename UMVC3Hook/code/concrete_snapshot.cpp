@@ -362,7 +362,6 @@ bool IsLaserOwnedEffect(void* effect)
 {
     if (!effect) return false;
     for (size_t offset : {0x40u, 0x280u, 0x288u}) {
-        if (!Accessible((uint64_t)effect + offset, sizeof(void*))) continue;
         void* owner = *(void**)((uint8_t*)effect + offset);
         uint64_t ownerDti = GetDti(owner);
         if (IsDtiKindOf(ownerDti, kShotLaserDti)) return true;
@@ -421,8 +420,7 @@ bool RangeOverlapsCharacterReference(const uint8_t* live,
         uint64_t savedValue = 0;
         std::memcpy(&liveValue, live + offset, sizeof(liveValue));
         std::memcpy(&savedValue, saved + offset, sizeof(savedValue));
-        if ((IsLikelyPointer(liveValue) && Accessible(liveValue)) ||
-            (IsLikelyPointer(savedValue) && Accessible(savedValue))) {
+        if (IsLikelyPointer(liveValue) || IsLikelyPointer(savedValue)) {
             return true;
         }
     }
@@ -455,8 +453,7 @@ void PreserveLivePointers(uint8_t* overlay, const uint8_t* live,
          offset += sizeof(uint64_t)) {
         uint64_t liveValue = *(const uint64_t*)(live + offset);
         uint64_t savedValue = *(const uint64_t*)(overlay + offset);
-        if ((IsLikelyPointer(liveValue) && Accessible(liveValue)) ||
-            (IsLikelyPointer(savedValue) && Accessible(savedValue))) {
+        if (IsLikelyPointer(liveValue) || IsLikelyPointer(savedValue)) {
             std::memcpy(overlay + offset, live + offset, sizeof(uint64_t));
         }
     }
@@ -541,14 +538,7 @@ void RestoreDetectedCharacterTailScalars(void* character,
         uint64_t savedValue = 0;
         std::memcpy(&liveValue, live + offset, sizeof(liveValue));
         std::memcpy(&savedValue, savedBody + offset, sizeof(savedValue));
-        bool livePointer = IsLikelyPointer(liveValue) && Accessible(liveValue);
-        bool savedPointer = IsLikelyPointer(savedValue) && Accessible(savedValue);
-        bool staleTransition =
-            (liveValue == 0 && savedValue >= 0x10000 &&
-             savedValue < 0x0000800000000000ull && (savedValue & 7) == 0) ||
-            (savedValue == 0 && liveValue >= 0x10000 &&
-             liveValue < 0x0000800000000000ull && (liveValue & 7) == 0);
-        if (livePointer || savedPointer || staleTransition) {
+        if (IsLikelyPointer(liveValue) || IsLikelyPointer(savedValue)) {
             size_t recordStart = offset >= 8 ? offset - 8 : 0;
             preserveRange(recordStart, offset + sizeof(uint64_t) + 16);
         }
@@ -609,34 +599,34 @@ std::vector<SnapshotRange> FindEmbeddedObjects(const uint8_t* live,
 uint64_t GetCollisionPrimitive(const uint8_t* shot, uint32_t slotIndex,
                                uint32_t primitiveIndex)
 {
+    if (slotIndex >= kShotCollisionSlotCount) return 0;
     uint64_t slot = *(const uint64_t*)(shot + kShotCollisionSlotsOffset +
                                       slotIndex * sizeof(uint64_t));
-    if (!Accessible(slot, 0x24)) return 0;
+    if (!slot) return 0;
 
     uint64_t vtable = *(uint64_t*)slot;
-    if (!Accessible(vtable + 0x90)) return 0;
+    if (!vtable) return 0;
     GetPrimitiveFn getPrimitive = *(GetPrimitiveFn*)(vtable + 0x88);
-    if (!getPrimitive || !Executable((uint64_t)getPrimitive)) return 0;
+    if (!getPrimitive) return 0;
 
     uint32_t count = *(uint32_t*)(slot + 0x20);
     if (count > kMaxCollisionPrimitives || primitiveIndex >= count) return 0;
-    uint64_t primitive = getPrimitive(slot, primitiveIndex);
-    return Accessible(primitive, 0xA0) ? primitive : 0;
+    return getPrimitive(slot, primitiveIndex);
 }
 
 uint64_t GetCollisionMetadata(const uint8_t* shot, uint32_t slotIndex,
                               uint32_t primitiveIndex)
 {
+    if (slotIndex >= kShotCollisionSlotCount) return 0;
     uint64_t slot = *(const uint64_t*)(shot + kShotCollisionSlotsOffset +
                                       slotIndex * sizeof(uint64_t));
-    if (!Accessible(slot, 0x24)) return 0;
+    if (!slot) return 0;
 
     uint32_t count = *(uint32_t*)(slot + 0x20);
     if (count > kMaxCollisionPrimitives || primitiveIndex >= count) return 0;
 
     auto getMetadata = (GetMetadataFn)_addr(0x1405AA900);
-    uint64_t metadata = getMetadata(slot, primitiveIndex);
-    return Accessible(metadata, 0x60) ? metadata : 0;
+    return getMetadata(slot, primitiveIndex);
 }
 
 void CaptureCollisionPrimitives(const uint8_t* shot, ConcreteShotSnapshot& out)
@@ -644,7 +634,7 @@ void CaptureCollisionPrimitives(const uint8_t* shot, ConcreteShotSnapshot& out)
     for (uint32_t slot = 0; slot < kShotCollisionSlotCount; ++slot) {
         uint64_t collisionSlot = *(const uint64_t*)(
             shot + kShotCollisionSlotsOffset + slot * sizeof(uint64_t));
-        if (!Accessible(collisionSlot, 0x24)) continue;
+        if (!collisionSlot) continue;
 
         uint32_t count = *(uint32_t*)(collisionSlot + 0x20);
         if (count > kMaxCollisionPrimitives) continue;
@@ -831,7 +821,7 @@ static bool CaptureGeneratorEmissionState(
     state.generatorEmissionStates.clear();
     uint64_t generator = *(uint64_t*)((uint8_t*)effect + 0x218);
     for (uint32_t count = 0; generator; ++count) {
-        if (count >= kMaxCallbackGenerators || !Accessible(generator, 0x200)) {
+        if (count >= kMaxCallbackGenerators) {
             state.generatorEmissionStates.clear();
             return false;
         }
@@ -865,7 +855,6 @@ static bool RestoreGeneratorEmissionState(
     uint64_t generator = *(uint64_t*)((uint8_t*)effect + 0x218);
     for (size_t index = 0; generator; ++index) {
         if (index >= state.generatorEmissionStates.size() ||
-            !Accessible(generator, 0x200) ||
             GetObjectDti(generator) != state.generatorEmissionStates[index].dti ||
             *(uint64_t*)(generator + 0x68) !=
                 state.generatorEmissionStates[index].resource) {
@@ -896,8 +885,7 @@ bool ConcreteShotSnapshot_Capture(void* shot, ConcreteShotSnapshot& out)
 
     uint64_t dti = GetDti(shot);
     uint32_t size = DtiSize(dti);
-    if (size < kShotBodyStart || size > kMaxObjectSize ||
-        !Accessible((uint64_t)shot, size)) {
+    if (size < kShotBodyStart || size > kMaxObjectSize) {
         return false;
     }
 
@@ -912,18 +900,15 @@ bool ConcreteShotSnapshot_Capture(void* shot, ConcreteShotSnapshot& out)
                                 index * sizeof(void*));
         auto& state = out.callbackEffects[index];
         state.occupied = effect != nullptr;
-        if (!effect || !IsEffectObject(effect) ||
-            !Accessible((uint64_t)effect, 0x138)) {
-            continue;
-        }
+        uint64_t effectDti = GetDti(effect);
+        if (!effectDti) continue;
         state.hasState = true;
-        state.dti = GetObjectDti((uint64_t)effect);
+        state.dti = effectDti;
         state.resource = *(uint64_t*)((uint8_t*)effect + 0x108);
         std::memcpy(state.flags100, (uint8_t*)effect + 0x100,
                     sizeof(state.flags100));
         std::memcpy(state.timing110, (uint8_t*)effect + 0x110,
                     sizeof(state.timing110));
-        if (!Accessible((uint64_t)effect, 0x242)) continue;
         std::memcpy(state.state1D0, (uint8_t*)effect + 0x1D0,
                     sizeof(state.state1D0));
         std::memcpy(state.state1E0, (uint8_t*)effect + 0x1E0,
@@ -943,9 +928,7 @@ bool ConcreteEffectSnapshot_Capture(
 {
     state = {};
     state.occupied = effect != nullptr;
-    if (!effect || !IsEffectObject(effect) ||
-        !Accessible((uint64_t)effect, 0x138))
-        return state.occupied;
+    if (!effect) return false;
     state.hasState = true;
     state.dti = GetObjectDti((uint64_t)effect);
     state.resource = *(uint64_t*)((uint8_t*)effect + 0x108);
@@ -953,7 +936,6 @@ bool ConcreteEffectSnapshot_Capture(
                 sizeof(state.flags100));
     std::memcpy(state.timing110, (uint8_t*)effect + 0x110,
                 sizeof(state.timing110));
-    if (!Accessible((uint64_t)effect, 0x242)) return true;
     std::memcpy(state.state1D0, (uint8_t*)effect + 0x1D0,
                 sizeof(state.state1D0));
     std::memcpy(state.state1E0, (uint8_t*)effect + 0x1E0,
@@ -970,8 +952,7 @@ bool ConcreteEffectSnapshot_Capture(
 bool ConcreteEffectSnapshot_Restore(
     void* effect, const ConcreteShotSnapshot::CallbackEffectState& state)
 {
-    if (!effect || !state.hasState || !IsEffectObject(effect) ||
-        !Accessible((uint64_t)effect, 0x242) ||
+    if (!effect || !state.hasState ||
         GetObjectDti((uint64_t)effect) != state.dti ||
         *(uint64_t*)((uint8_t*)effect + 0x108) != state.resource)
         return false;
@@ -1038,9 +1019,7 @@ void ConcreteShotSnapshot_RestoreCallbackEffects(
         if (!state.hasState)
             continue;
 
-        if (!effect || !IsEffectObject(effect) ||
-            !Accessible((uint64_t)effect, 0x138) ||
-            GetObjectDti((uint64_t)effect) != state.dti ||
+        if (!effect || GetDti(effect) != state.dti ||
             *(uint64_t*)((uint8_t*)effect + 0x108) != state.resource) {
             continue;
         }
@@ -1052,7 +1031,6 @@ void ConcreteShotSnapshot_RestoreCallbackEffects(
                     sizeof(state.flags100));
         std::memcpy((uint8_t*)effect + 0x110, state.timing110,
                     sizeof(state.timing110));
-        if (!Accessible((uint64_t)effect, 0x242)) continue;
         std::memcpy((uint8_t*)effect + 0x1D0, state.state1D0,
                     sizeof(state.state1D0));
         std::memcpy((uint8_t*)effect + 0x1E0, state.state1E0,
@@ -1077,8 +1055,7 @@ bool ConcreteShotSnapshot_Restore(void* shot,
 
     uint64_t liveDti = GetDti(shot);
     uint32_t liveSize = DtiSize(liveDti);
-    if (liveDti != snapshot.dti || liveSize != snapshot.body.size() ||
-        !Accessible((uint64_t)shot, liveSize)) {
+    if (liveDti != snapshot.dti || liveSize != snapshot.body.size()) {
         return false;
     }
     const uint64_t validateEnd = Profile_Now();
@@ -1095,10 +1072,10 @@ bool ConcreteShotSnapshot_Restore(void* shot,
 
     // Restore the complete common uShot gameplay body rather than the sparse
     // ShotFlightState ranges alone. Keep allocations, resources and external
-    // references from the freshly-created object wherever either timeline's
-    // qword resolves to committed memory. This also lets a fresh null clear a
-    // stale saved pointer. Confirmed scalar flight ranges are applied after
-    // this overlay by the caller.
+    // references from the freshly-created object wherever either timeline has
+    // a pointer-shaped qword. This also lets a fresh null clear a stale saved
+    // pointer. Confirmed scalar flight ranges are applied after this overlay by
+    // the caller.
     PreserveLivePointers(overlay.data(), live, liveSize);
     const uint64_t pointerScanEnd = Profile_Now();
 
