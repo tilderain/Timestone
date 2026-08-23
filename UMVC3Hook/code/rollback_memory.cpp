@@ -25,6 +25,27 @@ thread_local size_t g_lastMemoryRegion = SIZE_MAX;
 thread_local size_t g_nextMemoryRegionReplacement = 0;
 volatile LONG g_memoryCacheEpoch = 1;
 
+bool IsGameImageRange(uint64_t address, size_t size)
+{
+    static const uint64_t imageBase = (uint64_t)GetMKXEntryPoint();
+    static const uint64_t imageEnd = []() {
+        const auto* dos = (const IMAGE_DOS_HEADER*)GetMKXEntryPoint();
+        if (!dos || dos->e_magic != IMAGE_DOS_SIGNATURE) return (uint64_t)0;
+        const auto* nt = (const IMAGE_NT_HEADERS64*)(
+            (const uint8_t*)dos + dos->e_lfanew);
+        if (nt->Signature != IMAGE_NT_SIGNATURE) return (uint64_t)0;
+        return (uint64_t)dos + nt->OptionalHeader.SizeOfImage;
+    }();
+    return address >= imageBase && address <= imageEnd &&
+        size <= imageEnd - address;
+}
+
+bool IsGameDti(uint64_t dti)
+{
+    return IsGameImageRange(dti, 0x38) &&
+        IsGameImageRange(*(const uint64_t*)dti, 0x10);
+}
+
 void SynchronizeMemoryCacheEpoch()
 {
     LONG epoch = InterlockedCompareExchange(&g_memoryCacheEpoch, 0, 0);
@@ -81,6 +102,7 @@ bool IsObjectKindOf(const void* object, uintptr_t expectedDti)
     uint64_t dti = GetObjectDti((uint64_t)object);
     const uint64_t targetDti = _addr(expectedDti);
     for (int depth = 0; dti && depth < 128; ++depth) {
+        if (!IsGameDti(dti)) return false;
         if (dti == targetDti) return true;
         uint64_t parent = *(const uint64_t*)(dti + 0x20);
         if (parent == dti) return false;
@@ -94,10 +116,12 @@ bool IsObjectKindOf(const void* object, uintptr_t expectedDti)
 uint64_t GetObjectDti(uint64_t object)
 {
     uint64_t vtable = *(uint64_t*)object;
-    if (vtable && vtable >= 0x140000000) {
+    if (IsGameImageRange(vtable, 0x28)) {
         auto getDti = (uint64_t(__fastcall*)(uint64_t))(*(uint64_t*)(vtable + 0x20));
-        if (getDti && (uint64_t)getDti >= 0x140000000)
-            return getDti(object);
+        if (getDti && IsGameImageRange((uint64_t)getDti, 1)) {
+            uint64_t dti = getDti(object);
+            return IsGameDti(dti) ? dti : 0;
+        }
     }
     return 0;
 }

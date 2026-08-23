@@ -54,6 +54,7 @@ constexpr uintptr_t kOilBalloonGroundOilDti = 0x140D4C478ull;
 constexpr uintptr_t kVulcanSwingWireDti = 0x140D4CB00ull;
 constexpr uintptr_t kVulcanBoomerangDti = 0x140D4D660ull;
 constexpr uintptr_t kShotLaserDti = 0x140D482E8ull;
+constexpr uintptr_t kEffectDti = 0x140E18698ull;
 constexpr uintptr_t kDtiIsKindOf = 0x1400039D0ull;
 
 struct SnapshotRange {
@@ -819,6 +820,9 @@ static bool CaptureGeneratorEmissionState(
     void* effect, ConcreteShotSnapshot::CallbackEffectState& state)
 {
     state.generatorEmissionStates.clear();
+    uint64_t effectDti = GetDti(effect);
+    if (!IsDtiKindOf(effectDti, kEffectDti)) return false;
+
     uint64_t generator = *(uint64_t*)((uint8_t*)effect + 0x218);
     for (uint32_t count = 0; generator; ++count) {
         if (count >= kMaxCallbackGenerators) {
@@ -901,7 +905,7 @@ bool ConcreteShotSnapshot_Capture(void* shot, ConcreteShotSnapshot& out)
         auto& state = out.callbackEffects[index];
         state.occupied = effect != nullptr;
         uint64_t effectDti = GetDti(effect);
-        if (!effectDti) continue;
+        if (!IsDtiKindOf(effectDti, kEffectDti)) continue;
         state.hasState = true;
         state.dti = effectDti;
         state.resource = *(uint64_t*)((uint8_t*)effect + 0x108);
@@ -929,8 +933,10 @@ bool ConcreteEffectSnapshot_Capture(
     state = {};
     state.occupied = effect != nullptr;
     if (!effect) return false;
+    uint64_t effectDti = GetDti(effect);
+    if (!IsDtiKindOf(effectDti, kEffectDti)) return true;
     state.hasState = true;
-    state.dti = GetObjectDti((uint64_t)effect);
+    state.dti = effectDti;
     state.resource = *(uint64_t*)((uint8_t*)effect + 0x108);
     std::memcpy(state.flags100, (uint8_t*)effect + 0x100,
                 sizeof(state.flags100));
