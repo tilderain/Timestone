@@ -85,6 +85,12 @@ static bool g_desyncCheckReady = false;
 static bool g_autoTestLaunchPending = false;
 static bool g_autoTestLaunchRunning = false;
 static DWORD g_autoTestExitTick = 0;
+static int32_t g_trainingFrameLimit = 0;
+static int32_t g_trainingFramesElapsed = 0;
+static int32_t g_trainingLastFrame = -1;
+static uint32_t g_trainingLastGeneration = 0;
+static bool g_trainingFrameCountingActive = false;
+static bool g_trainingFrameLimitExitRequested = false;
 
 // Emit one compact diagnostic if a handshake generation remains blocked.
 static DWORD g_handshakeStartTick = 0;
@@ -94,6 +100,15 @@ static bool g_handshakeStallLogged = false;
 extern "C" bool FrameStepper_IsBattleSynchronized() { return g_battleSynchronized; }
 extern "C" uint32_t FrameStepper_GetBattleGeneration() { return g_battleGeneration; }
 extern "C" bool FrameStepper_IsDesyncCheckReady() { return g_desyncCheckReady; }
+void FrameStepper_SetTrainingFrameLimit(int32_t frames)
+{
+    g_trainingFrameLimit = frames;
+    g_trainingFramesElapsed = 0;
+    g_trainingLastFrame = -1;
+    g_trainingLastGeneration = 0;
+    g_trainingFrameCountingActive = false;
+    g_trainingFrameLimitExitRequested = false;
+}
 extern "C" void FrameStepper_NotifyFighting()
 {
     if (!g_battleSynchronized || g_localFighting)
@@ -104,6 +119,12 @@ extern "C" void FrameStepper_NotifyFighting()
     g_battleAdvertiseTick = 30;
     HookLog("Netplay: local fighting state reached (generation=%u frame=%d)\n",
             g_battleGeneration, Controller_GetNetFrameCount());
+    if (g_trainingFrameLimit > 0) {
+        HookLog("FrameStepper: training frame limit counting started "
+                "(limit=%d elapsed=%d generation=%u)\n",
+                g_trainingFrameLimit, g_trainingFramesElapsed,
+                g_battleGeneration);
+    }
 }
 extern "C" bool FrameStepper_IsMatchRestartPending()
 {
@@ -1099,7 +1120,7 @@ static void UnpauseFrameStepper()
     }
 }
 
-static void CloseGameAfterAutoTest()
+static void CloseGame()
 {
     if (g_hWnd && PostMessageW(g_hWnd, WM_CLOSE, 0, 0))
         return;
@@ -1110,22 +1131,57 @@ void FrameStepper_Process()
 {
     AutoTest_Process();
 
+    if (g_trainingFrameLimit > 0 && !g_trainingFrameLimitExitRequested &&
+        !g_isResimulating)
+    {
+        typedef uint64_t(__fastcall* GetAction_t)();
+        static GetAction_t getAction = (GetAction_t)_addr(0x140001A90);
+        const uint64_t action = getAction();
+        const bool isFighting = g_battleSynchronized && g_localFighting &&
+            action && *(int32_t*)(action + 0xD8) == 5;
+        const int32_t frame = Controller_GetNetFrameCount();
+        if (isFighting && frame >= 0) {
+            if (!g_trainingFrameCountingActive ||
+                g_trainingLastGeneration != g_battleGeneration) {
+                g_trainingFrameCountingActive = true;
+                g_trainingLastGeneration = g_battleGeneration;
+                g_trainingLastFrame = frame;
+                ++g_trainingFramesElapsed;
+            } else if (frame > g_trainingLastFrame) {
+                g_trainingFramesElapsed += frame - g_trainingLastFrame;
+                g_trainingLastFrame = frame;
+            }
+
+            if (g_trainingFramesElapsed >= g_trainingFrameLimit) {
+                g_trainingFrameLimitExitRequested = true;
+                HookLog("FrameStepper: training frame limit reached "
+                        "(limit=%d elapsed=%d generation=%u frame=%d); closing\n",
+                        g_trainingFrameLimit, g_trainingFramesElapsed,
+                        g_battleGeneration, frame);
+                CloseGame();
+                return;
+            }
+        } else {
+            g_trainingFrameCountingActive = false;
+        }
+    }
+
     if (AutoTest_IsActive() && Netplay_TakePeerDisconnected()) {
         HookLog("AutoTestSuite: remote peer disconnected; closing game\n");
-        CloseGameAfterAutoTest();
+        CloseGame();
         return;
     }
 
     if (Netplay_GetInboundAutoTestComplete()) {
         HookLog("AutoTestSuite: remote command-line suite complete; closing game\n");
-        CloseGameAfterAutoTest();
+        CloseGame();
         return;
     }
 
     if (g_autoTestExitTick && GetTickCount() - g_autoTestExitTick < 0x80000000u) {
         HookLog("AutoTestSuite: completion delivered; closing host game\n");
         g_autoTestExitTick = 0;
-        CloseGameAfterAutoTest();
+        CloseGame();
         return;
     }
 

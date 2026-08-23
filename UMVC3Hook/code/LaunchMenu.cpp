@@ -737,6 +737,29 @@ bool ConfigureAutoTestDualTraining(int32_t characterId, int32_t hostPort)
     return true;
 }
 
+void ConfigureCommandLineDualTraining()
+{
+    LoadRollbackSettings();
+    if (g_dialogConfig.hostIp[0] == '\0')
+        strcpy(g_dialogConfig.hostIp, "127.0.0.1");
+    if (g_dialogConfig.hostPort <= 0 || g_dialogConfig.hostPort > 65535)
+        g_dialogConfig.hostPort = 7777;
+
+    TrainingBootConfig cfg = {};
+    for (int i = 0; i < 3; ++i) {
+        cfg.p1Chars[i] = g_dialogConfig.p1Chars[i];
+        cfg.p2Chars[i] = g_dialogConfig.p2Chars[i];
+        cfg.p1Colors[i] = g_dialogConfig.p1Colors[i];
+        cfg.p2Colors[i] = g_dialogConfig.p2Colors[i];
+        cfg.p1Assists[i] = g_dialogConfig.p1Assists[i];
+        cfg.p2Assists[i] = g_dialogConfig.p2Assists[i];
+    }
+    cfg.stageId = g_dialogConfig.stageId;
+    cfg.timerValue = 99;
+    TrainingBoot_SetConfig(cfg);
+    g_launchOption = LAUNCH_DUAL_TRAINING;
+}
+
 bool IsAutoTestLaunchEnabled()
 {
     return g_autoTestLaunch;

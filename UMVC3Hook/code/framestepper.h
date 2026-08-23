@@ -13,6 +13,7 @@ void FrameStepper_DrawAutoTest();
 void FrameStepper_SetDevice(LPDIRECT3DDEVICE9 device);
 void FrameStepper_InvalidateDeviceObjects();
 void FrameStepper_Capture(LPDIRECT3DDEVICE9 pDevice);
+void FrameStepper_SetTrainingFrameLimit(int32_t frames);
 void UpdateKeyboardState();
 bool KeyDown(int vk);
 bool KeyPressed(int vk);

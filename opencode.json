@@ -30,7 +30,10 @@
       "python3 \"tools/autotest_ai.py\"*": "allow",
       "python3 tools/compare_desync_dumps.py": "allow",
       "python3 tools/compare_desync_dumps.py *": "allow",
-      "python3 \"tools/compare_desync_dumps.py\"*": "allow"
+      "python3 \"tools/compare_desync_dumps.py\"*": "allow",
+      "python3 tools/rollback_profile_ai.py": "allow",
+      "python3 tools/rollback_profile_ai.py *": "allow",
+      "python3 \"tools/rollback_profile_ai.py\"*": "allow"
     },
     "external_directory": {
       "*": "ask",

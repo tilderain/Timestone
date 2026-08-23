@@ -117,6 +117,7 @@ static void BootTimer_Dump()
 // Auto-connect target (passed via -connect on command line for spawned 2nd instance)
 static char g_autoConnectIp[64] = "";
 static int  g_autoConnectPort = 0;
+static int  g_trainingFrameLimit = 0;
 
 // Window corner positioning for dual training
 // 0=none, 1=top-right (host), 2=bottom-left (client)
@@ -192,6 +193,20 @@ static int ParseAutoTestPort(const char* cmdLine)
 		port < 1 || port > 65535)
 		return -1;
 	return (int)port;
+}
+
+static int ParseTrainingFrameLimit(const char* cmdLine)
+{
+	const char* arg = strstr(cmdLine, "-training-frame-limit=");
+	if (!arg) return 0;
+
+	const char* value = arg + strlen("-training-frame-limit=");
+	char* end = nullptr;
+	long frames = strtol(value, &end, 10);
+	if (end == value || (*end != '\0' && *end != ' ' && *end != '"') ||
+		frames < 1 || frames > 10000000)
+		return -1;
+	return (int)frames;
 }
 
 extern LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
@@ -520,6 +535,11 @@ static bool SpawnDualTrainingClient()
 		? L" -training-cpus"
 		: TrainingBoot_GetCpuMode() == TRAINING_CPU_P2_ONLY
 			? L" -training-p2-cpu" : L"";
+	wchar_t frameLimitArg[64] = {};
+	if (g_trainingFrameLimit > 0) {
+		swprintf(frameLimitArg, std::size(frameLimitArg),
+			L" -training-frame-limit=%d", g_trainingFrameLimit);
+	}
 	wchar_t autoTestArgs[768] = {};
 	if (IsAutoTestLaunchEnabled()) {
 		wcscpy(autoTestArgs, L" -autotest-client");
@@ -548,8 +568,9 @@ static bool SpawnDualTrainingClient()
 		}
 	}
 	wchar_t spawnCmd[MAX_PATH + 896];
-	swprintf(spawnCmd, std::size(spawnCmd), L"\"%ls\" -training%ls%ls -connect=%ls:%d",
-		exePath, cpuArg, autoTestArgs, wIp, dlgCfg.hostPort);
+	swprintf(spawnCmd, std::size(spawnCmd),
+		L"\"%ls\" -training%ls%ls%ls -connect=%ls:%d",
+		exePath, cpuArg, frameLimitArg, autoTestArgs, wIp, dlgCfg.hostPort);
 
 	STARTUPINFOW si = { sizeof(si) };
 	PROCESS_INFORMATION pi;
@@ -557,7 +578,9 @@ static bool SpawnDualTrainingClient()
 		CREATE_NEW_CONSOLE, NULL, NULL, &si, &pi)) {
 		CloseHandle(pi.hProcess);
 		CloseHandle(pi.hThread);
-		HookLog("UMVC3Hook: Spawned second instance after host D3D9 initialization with -training -connect=%s:%d\n",
+		HookLog("UMVC3Hook: Spawned second instance after host D3D9 initialization "
+			"(cpuMode=%d frameLimit=%d connect=%s:%d)\n",
+			(int)TrainingBoot_GetCpuMode(), g_trainingFrameLimit,
 			dlgCfg.hostIp, dlgCfg.hostPort);
 	}
 	else {
@@ -870,7 +893,9 @@ void OnInitializeHook()
 	}
 	if (strstr(cmdLineA, "-training-cpus")) {
 		TrainingBoot_SetCpuMode(TRAINING_CPU_BOTH);
-		HookLog("UMVC3Hook: Training CPU control enabled for both teams\n");
+		ConfigureCommandLineDualTraining();
+		trainingArg = true;
+		HookLog("UMVC3Hook: Dual training CPU control enabled for both teams\n");
 	}
 	else if (strstr(cmdLineA, "-training-p2-cpu")) {
 		TrainingBoot_SetCpuMode(TRAINING_CPU_P2_ONLY);
@@ -883,6 +908,16 @@ void OnInitializeHook()
 
 	const int autoTestCharacter = ParseAutoTestCharacter(cmdLineA);
 	const int autoTestPort = ParseAutoTestPort(cmdLineA);
+	g_trainingFrameLimit = ParseTrainingFrameLimit(cmdLineA);
+	if (g_trainingFrameLimit < 0) {
+		HookLog("UMVC3Hook: Invalid -training-frame-limit; use an integer from 1 to 10000000\n");
+		g_trainingFrameLimit = 0;
+	}
+	FrameStepper_SetTrainingFrameLimit(g_trainingFrameLimit);
+	if (g_trainingFrameLimit > 0) {
+		HookLog("UMVC3Hook: Training frame limit set to %d fighting frames\n",
+			g_trainingFrameLimit);
+	}
 	AutoTest_ConfigureCommandLine(cmdLineA);
 	if (autoTestPort < 0) {
 		HookLog("UMVC3Hook: Invalid -autotest-port; use a port from 1 to 65535\n");
