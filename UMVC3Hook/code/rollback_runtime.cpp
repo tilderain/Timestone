@@ -793,6 +793,26 @@ static bool PatchBytes(uintptr_t address, const uint8_t (&expected)[N],
     return true;
 }
 
+bool Rollback_PatchHitSolverAlwaysInline()
+{
+    // sHitSolver__move can send ordinary batches through two worker jobs.
+    // Jump directly to its native in-place coalesce/sort path for every batch
+    // so forward simulation and rollback use the same algorithm.
+    // This changes spike performance of hitsolver from upwards of 3ms per frame, to 0.03ms per frame
+    static constexpr uint8_t SELECT_WORKER_OR_INLINE[] = {
+        0x0F, 0x84, 0xB5, 0x01, 0x00, 0x00, // JZ 0x140011BFD
+    };
+    static constexpr uint8_t ALWAYS_INLINE[] = {
+        0xE9, 0xB6, 0x01, 0x00, 0x00, 0x90, // JMP 0x140011BFD; NOP
+    };
+
+    const bool patched = PatchBytes(0x140011A42, SELECT_WORKER_OR_INLINE,
+                                    ALWAYS_INLINE);
+    HookLog("Rollback: HitSolver always-inline patch %s\n",
+            patched ? "installed" : "failed");
+    return patched;
+}
+
 void Rollback_PatchBattleUiAllocationFailure()
 {
     // uBattleUi__setup has the same allocation contract as uBattleUiHit: its

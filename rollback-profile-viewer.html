@@ -1,112 +1,1910 @@
 <!doctype html>
 <html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Rollback Profile Viewer</title>
-<style>
-:root{--bg:#090d12;--panel:#111820;--panel2:#151f29;--line:#263442;--text:#e7edf2;--muted:#82909c;--blue:#52a9ff;--cyan:#56d6c7;--amber:#f6bd60;--red:#f07178;--purple:#b39ddb;--green:#78c091;--shadow:0 18px 60px #0007}*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 8% 0,#132333 0,transparent 32rem),var(--bg);color:var(--text);font:14px/1.45 Inter,Segoe UI,system-ui,sans-serif}button,input,select{font:inherit}.hidden{display:none!important}.drop{min-height:100vh;display:grid;place-items:center;padding:24px}.drop-card{width:min(680px,100%);padding:62px 34px;text-align:center;border:1px dashed #4a6172;border-radius:18px;background:#101821d9;box-shadow:var(--shadow);cursor:pointer}.drop-card.drag{border-color:var(--cyan);background:#12252a}.mark{font:700 13px/1 ui-monospace,monospace;letter-spacing:.16em;color:var(--cyan);text-transform:uppercase}.drop h1{margin:14px 0 8px;font-size:clamp(30px,6vw,56px);letter-spacing:-.04em}.drop p{color:var(--muted);font-size:16px}.button{display:inline-flex;align-items:center;gap:8px;border:1px solid #42627a;background:#172738;color:var(--text);padding:9px 14px;border-radius:8px;cursor:pointer}.button:hover{border-color:var(--blue);background:#1a3044}.app{min-height:100vh}.topbar{position:sticky;top:0;z-index:5;display:flex;align-items:center;gap:14px;padding:12px 18px;background:#0b1118ed;border-bottom:1px solid var(--line);backdrop-filter:blur(14px)}.brand{font-weight:800;letter-spacing:-.02em}.file{color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.spacer{flex:1}.content{max-width:1600px;margin:auto;padding:22px}.metrics{display:grid;grid-template-columns:repeat(6,minmax(130px,1fr));gap:12px}.card,.panel{border:1px solid var(--line);background:linear-gradient(145deg,#131c25,#0f161e);border-radius:12px;box-shadow:0 8px 30px #0002}.card{padding:16px}.card label,.eyebrow{display:block;color:var(--muted);text-transform:uppercase;letter-spacing:.09em;font-size:10px;font-weight:700}.value{margin-top:6px;font:700 25px/1.1 ui-monospace,SFMono-Regular,Consolas,monospace}.sub{margin-top:7px;color:var(--muted);font-size:12px}.grid{display:grid;grid-template-columns:minmax(0,2fr) minmax(300px,1fr);gap:14px;margin-top:14px}.panel{padding:16px;min-width:0}.panel-head{display:flex;align-items:center;gap:12px;margin-bottom:12px}.panel h2{margin:0;font-size:15px}.panel-head .hint{color:var(--muted);font-size:12px}.chart-wrap{height:360px;position:relative}.chart-wrap.small{height:310px}canvas{width:100%;height:100%;display:block}.controls{display:flex;gap:8px;flex-wrap:wrap;margin-left:auto}select,input[type=number]{border:1px solid var(--line);background:#0d151d;color:var(--text);padding:6px 8px;border-radius:7px}.legend{display:flex;gap:13px;flex-wrap:wrap;margin-top:10px;color:var(--muted);font-size:11px}.legend span{display:flex;align-items:center;gap:5px}.dot{width:8px;height:8px;border-radius:2px}.bars{display:grid;gap:10px}.bar-row{display:grid;grid-template-columns:150px minmax(80px,1fr) 72px;align-items:center;gap:10px}.bar-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#cbd5dc}.track{height:8px;background:#091017;border-radius:99px;overflow:hidden}.fill{height:100%;border-radius:99px;background:linear-gradient(90deg,var(--blue),var(--cyan))}.bar-val{text-align:right;font:12px ui-monospace,monospace;color:var(--muted)}.hook-row{display:grid;gap:5px}.hook-head{display:flex;align-items:baseline;justify-content:space-between;gap:10px}.hook-name{color:#cbd5dc;font:12px ui-monospace,monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.hook-total{color:var(--text);font:700 12px ui-monospace,monospace;white-space:nowrap}.hook-stats{color:var(--muted);font:10px ui-monospace,monospace;white-space:nowrap}.selected-row{display:grid;grid-template-columns:150px minmax(80px,1fr) 72px;grid-template-rows:auto auto;align-items:center;column-gap:10px;row-gap:4px}.selected-name{grid-column:1;grid-row:1;color:#cbd5dc;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.selected-track{grid-column:2;grid-row:1}.selected-value{grid-column:3;grid-row:1;text-align:right;color:var(--muted);font:12px ui-monospace,monospace}.selected-context{grid-column:2/4;grid-row:2;color:var(--muted);font:10px ui-monospace,monospace}.detail-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:14px;align-items:start}.detail-title{display:flex;align-items:end;gap:12px}.detail-title strong{font:700 22px ui-monospace,monospace}.pill{padding:3px 7px;border:1px solid var(--line);border-radius:99px;color:var(--muted);font-size:11px}.table-wrap{overflow:auto;max-height:430px}table{width:100%;border-collapse:collapse;font-size:12px}th{position:sticky;top:0;background:#111a23;color:var(--muted);text-align:right;font-size:10px;text-transform:uppercase;letter-spacing:.07em}th:first-child,td:first-child{text-align:left}th,td{padding:8px 9px;border-bottom:1px solid #202c37}td{text-align:right;font-family:ui-monospace,SFMono-Regular,Consolas,monospace}tbody tr{cursor:pointer}tbody tr:hover,tbody tr.selected{background:#182633}.empty{padding:44px;text-align:center;color:var(--muted)}.tooltip{position:fixed;z-index:20;pointer-events:none;background:#071018ed;border:1px solid #40566a;border-radius:8px;padding:9px 11px;box-shadow:var(--shadow);font:12px ui-monospace,monospace;white-space:nowrap}.error{color:var(--red);margin-top:12px}@media(max-width:1050px){.metrics{grid-template-columns:repeat(3,1fr)}.grid,.detail-grid{grid-template-columns:1fr}}@media(max-width:600px){.content{padding:12px}.metrics{grid-template-columns:repeat(2,1fr)}.topbar{flex-wrap:wrap}.file{width:100%;order:3}.bar-row,.selected-row{grid-template-columns:110px minmax(60px,1fr) 62px}.hook-stats,.selected-context{white-space:normal}.chart-wrap{height:300px}}
-</style>
-</head>
-<body>
-<section id="drop" class="drop"><div id="dropCard" class="drop-card"><div class="mark">UMVC3 rollback telemetry</div><h1>Profile Viewer</h1><p>Drop <code>rollback_profile.json</code> here or choose a file. Everything stays in your browser.</p><button id="browse" class="button">Open profile</button><div id="error" class="error"></div></div></section>
-<input id="fileInput" type="file" accept=".json,application/json" hidden>
-<main id="app" class="app hidden">
-  <header class="topbar"><span class="mark">RB</span><span class="brand">Rollback Profile</span><span id="fileName" class="file"></span><span class="spacer"></span><button id="open" class="button">Open another</button></header>
-  <div class="content">
-    <section id="metrics" class="metrics"></section>
-    <section class="grid">
-      <article class="panel"><div class="panel-head"><div><span class="eyebrow">Timeline</span><h2>Rollback cost by frame</h2></div><span class="hint">Click a bar for details</span><div class="controls"><label>Show <select id="limit"><option>50</option><option selected>100</option><option>250</option><option value="0">All</option></select></label></div></div><div class="chart-wrap"><canvas id="timeline"></canvas></div><div id="legend" class="legend"></div></article>
-      <article class="panel"><div class="panel-head"><div><span class="eyebrow">Aggregate</span><h2>Where time goes</h2></div></div><div class="chart-wrap small"><canvas id="donut"></canvas></div><div id="phaseBars" class="bars"></div></article>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Rollback Profile Viewer</title>
+    <style>
+      :root {
+        --bg: #090d12;
+        --panel: #111820;
+        --panel2: #151f29;
+        --line: #263442;
+        --text: #e7edf2;
+        --muted: #82909c;
+        --blue: #52a9ff;
+        --cyan: #56d6c7;
+        --amber: #f6bd60;
+        --red: #f07178;
+        --purple: #b39ddb;
+        --green: #78c091;
+        --shadow: 0 18px 60px #0007;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        background:
+          radial-gradient(circle at 8% 0, #132333 0, transparent 32rem),
+          var(--bg);
+        color: var(--text);
+        font:
+          14px/1.45 Inter,
+          Segoe UI,
+          system-ui,
+          sans-serif;
+      }
+      button,
+      input,
+      select {
+        font: inherit;
+      }
+      .hidden {
+        display: none !important;
+      }
+      .drop {
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        padding: 24px;
+      }
+      .drop-card {
+        width: min(680px, 100%);
+        padding: 62px 34px;
+        text-align: center;
+        border: 1px dashed #4a6172;
+        border-radius: 18px;
+        background: #101821d9;
+        box-shadow: var(--shadow);
+        cursor: pointer;
+      }
+      .drop-card.drag {
+        border-color: var(--cyan);
+        background: #12252a;
+      }
+      .mark {
+        font:
+          700 13px/1 ui-monospace,
+          monospace;
+        letter-spacing: 0.16em;
+        color: var(--cyan);
+        text-transform: uppercase;
+      }
+      .drop h1 {
+        margin: 14px 0 8px;
+        font-size: clamp(30px, 6vw, 56px);
+        letter-spacing: -0.04em;
+      }
+      .drop p {
+        color: var(--muted);
+        font-size: 16px;
+      }
+      .button {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        border: 1px solid #42627a;
+        background: #172738;
+        color: var(--text);
+        padding: 9px 14px;
+        border-radius: 8px;
+        cursor: pointer;
+      }
+      .button:hover {
+        border-color: var(--blue);
+        background: #1a3044;
+      }
+      .app {
+        min-height: 100vh;
+      }
+      .topbar {
+        position: sticky;
+        top: 0;
+        z-index: 5;
+        display: flex;
+        align-items: center;
+        gap: 14px;
+        padding: 12px 18px;
+        background: #0b1118ed;
+        border-bottom: 1px solid var(--line);
+        backdrop-filter: blur(14px);
+      }
+      .brand {
+        font-weight: 800;
+        letter-spacing: -0.02em;
+      }
+      .file {
+        color: var(--muted);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .spacer {
+        flex: 1;
+      }
+      .content {
+        max-width: 1600px;
+        margin: auto;
+        padding: 22px;
+      }
+      .metrics {
+        display: grid;
+        grid-template-columns: repeat(6, minmax(130px, 1fr));
+        gap: 12px;
+      }
+      .card,
+      .panel {
+        border: 1px solid var(--line);
+        background: linear-gradient(145deg, #131c25, #0f161e);
+        border-radius: 12px;
+        box-shadow: 0 8px 30px #0002;
+      }
+      .card {
+        padding: 16px;
+      }
+      .card label,
+      .eyebrow {
+        display: block;
+        color: var(--muted);
+        text-transform: uppercase;
+        letter-spacing: 0.09em;
+        font-size: 10px;
+        font-weight: 700;
+      }
+      .value {
+        margin-top: 6px;
+        font:
+          700 25px/1.1 ui-monospace,
+          SFMono-Regular,
+          Consolas,
+          monospace;
+      }
+      .sub {
+        margin-top: 7px;
+        color: var(--muted);
+        font-size: 12px;
+      }
+      .grid {
+        display: grid;
+        grid-template-columns: minmax(0, 2fr) minmax(300px, 1fr);
+        gap: 14px;
+        margin-top: 14px;
+      }
+      .panel {
+        padding: 16px;
+        min-width: 0;
+      }
+      .panel-head {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        margin-bottom: 12px;
+      }
+      .panel h2 {
+        margin: 0;
+        font-size: 15px;
+      }
+      .panel-head .hint {
+        color: var(--muted);
+        font-size: 12px;
+      }
+      .chart-wrap {
+        height: 360px;
+        position: relative;
+      }
+      .chart-wrap.small {
+        height: 310px;
+      }
+      canvas {
+        width: 100%;
+        height: 100%;
+        display: block;
+      }
+      .controls {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+        margin-left: auto;
+      }
+      select,
+      input[type="number"] {
+        border: 1px solid var(--line);
+        background: #0d151d;
+        color: var(--text);
+        padding: 6px 8px;
+        border-radius: 7px;
+      }
+      .legend {
+        display: flex;
+        gap: 13px;
+        flex-wrap: wrap;
+        margin-top: 10px;
+        color: var(--muted);
+        font-size: 11px;
+      }
+      .legend span {
+        display: flex;
+        align-items: center;
+        gap: 5px;
+      }
+      .dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 2px;
+      }
+      .bars {
+        display: grid;
+        gap: 10px;
+      }
+      .bar-row {
+        display: grid;
+        grid-template-columns: 150px minmax(80px, 1fr) 72px;
+        align-items: center;
+        gap: 10px;
+      }
+      .bar-name {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        color: #cbd5dc;
+      }
+      .track {
+        height: 8px;
+        background: #091017;
+        border-radius: 99px;
+        overflow: hidden;
+      }
+      .fill {
+        height: 100%;
+        border-radius: 99px;
+        background: linear-gradient(90deg, var(--blue), var(--cyan));
+        transform-origin: left;
+        animation: bar-grow 650ms cubic-bezier(0.22, 1, 0.36, 1) both;
+      }
+      @keyframes bar-grow {
+        from {
+          transform: scaleX(0);
+        }
+        to {
+          transform: scaleX(1);
+        }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .fill {
+          animation-duration: 1ms;
+        }
+      }
+      .bar-val {
+        text-align: right;
+        font:
+          12px ui-monospace,
+          monospace;
+        color: var(--muted);
+      }
+      .hook-row {
+        display: grid;
+        gap: 5px;
+      }
+      .hook-head {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 10px;
+      }
+      .hook-name {
+        color: #cbd5dc;
+        font:
+          12px ui-monospace,
+          monospace;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .hook-total {
+        color: var(--text);
+        font:
+          700 12px ui-monospace,
+          monospace;
+        white-space: nowrap;
+      }
+      .hook-stats {
+        color: var(--muted);
+        font:
+          10px ui-monospace,
+          monospace;
+        white-space: nowrap;
+      }
+      .selected-row {
+        display: grid;
+        grid-template-columns: 150px minmax(80px, 1fr) 72px;
+        grid-template-rows: auto auto;
+        align-items: center;
+        column-gap: 10px;
+        row-gap: 4px;
+      }
+      .selected-name {
+        grid-column: 1;
+        grid-row: 1;
+        color: #cbd5dc;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .selected-track {
+        grid-column: 2;
+        grid-row: 1;
+      }
+      .selected-value {
+        grid-column: 3;
+        grid-row: 1;
+        text-align: right;
+        color: var(--muted);
+        font:
+          12px ui-monospace,
+          monospace;
+      }
+      .selected-context {
+        grid-column: 2/4;
+        grid-row: 2;
+        color: var(--muted);
+        font:
+          10px ui-monospace,
+          monospace;
+      }
+      .detail-grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 14px;
+        margin-top: 14px;
+        align-items: start;
+      }
+      .detail-title {
+        display: flex;
+        align-items: end;
+        gap: 12px;
+      }
+      .detail-title strong {
+        font:
+          700 22px ui-monospace,
+          monospace;
+      }
+      .pill {
+        padding: 3px 7px;
+        border: 1px solid var(--line);
+        border-radius: 99px;
+        color: var(--muted);
+        font-size: 11px;
+      }
+      .table-wrap {
+        overflow: auto;
+        max-height: 430px;
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 12px;
+      }
+      th {
+        position: sticky;
+        top: 0;
+        background: #111a23;
+        color: var(--muted);
+        text-align: right;
+        font-size: 10px;
+        text-transform: uppercase;
+        letter-spacing: 0.07em;
+      }
+      th:first-child,
+      td:first-child {
+        text-align: left;
+      }
+      th,
+      td {
+        padding: 8px 9px;
+        border-bottom: 1px solid #202c37;
+      }
+      td {
+        text-align: right;
+        font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+      }
+      tbody tr {
+        cursor: pointer;
+      }
+      tbody tr:hover,
+      tbody tr.selected {
+        background: #182633;
+      }
+      .empty {
+        padding: 44px;
+        text-align: center;
+        color: var(--muted);
+      }
+      .tooltip {
+        position: fixed;
+        z-index: 20;
+        pointer-events: none;
+        background: #071018ed;
+        border: 1px solid #40566a;
+        border-radius: 8px;
+        padding: 9px 11px;
+        box-shadow: var(--shadow);
+        font:
+          12px ui-monospace,
+          monospace;
+        white-space: nowrap;
+      }
+      .error {
+        color: var(--red);
+        margin-top: 12px;
+      }
+      @media (max-width: 1050px) {
+        .metrics {
+          grid-template-columns: repeat(3, 1fr);
+        }
+        .grid,
+        .detail-grid {
+          grid-template-columns: 1fr;
+        }
+      }
+      @media (max-width: 600px) {
+        .content {
+          padding: 12px;
+        }
+        .metrics {
+          grid-template-columns: repeat(2, 1fr);
+        }
+        .topbar {
+          flex-wrap: wrap;
+        }
+        .file {
+          width: 100%;
+          order: 3;
+        }
+        .bar-row,
+        .selected-row {
+          grid-template-columns: 110px minmax(60px, 1fr) 62px;
+        }
+        .hook-stats,
+        .selected-context {
+          white-space: normal;
+        }
+        .chart-wrap {
+          height: 300px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <section id="drop" class="drop">
+      <div id="dropCard" class="drop-card">
+        <div class="mark">UMVC3 rollback telemetry</div>
+        <h1>Profile Viewer</h1>
+        <p>
+          Drop <code>rollback_profile.json</code> here or choose a file.
+          Everything stays in your browser.
+        </p>
+        <button id="browse" class="button">Open profile</button>
+        <div id="error" class="error"></div>
+      </div>
     </section>
-    <section class="detail-grid">
-      <article class="panel"><div class="panel-head"><div><span id="detailEyebrow" class="eyebrow">All rollbacks</span><div class="detail-title"><strong id="selectedRange">Average</strong><span id="selectedMeta" class="pill"></span></div></div><div class="controls"><label>Values <select id="selectedMode"><option value="frame" selected>Average / frame</option><option value="total">Rollback total</option></select></label></div></div><div id="selectedBars" class="bars"></div></article>
-      <article class="panel"><div class="panel-head"><div><span class="eyebrow">Inclusive hook timing</span><h2>Most expensive hooks</h2></div></div><div id="hookBars" class="bars"></div></article>
-    </section>
-    <section class="panel" style="margin-top:14px"><div class="panel-head"><div><span class="eyebrow">Headless tick breakdown</span><h2>Rollback_HeadlessTick sections</h2></div><span class="hint">Average per replayed frame | rollback total | maximum single frame</span></div><div id="headlessBars" class="bars"></div></section>
-    <section class="panel" style="margin-top:14px"><div class="panel-head"><div><span class="eyebrow">Entity breakdown</span><h2>Every sUnit entity type by category, phase, and DTI</h2></div><span class="hint">All linked entities | move, phase 2, and phase 3 callback timing</span><div class="controls"><label>Sort <select id="unitObjectSort"><option value="time" selected>Time</option><option value="category">Category / phase / DTI</option></select></label></div></div><div id="unitObjectBars" class="bars"></div></section>
-    <section class="panel" style="margin-top:14px"><div class="panel-head"><div><span class="eyebrow">Retirement breakdown</span><h2>Headless cleanup by category and DTI</h2></div><span class="hint">State 3/4 transitions in categories filtered from gameplay movement</span></div><div id="cleanupBars" class="bars"></div></section>
-    <section class="panel" style="margin-top:14px"><div class="panel-head"><div><span class="eyebrow">Records</span><h2>Rollback windows</h2></div><span id="recordCount" class="hint"></span></div><div class="table-wrap"><table><thead><tr><th>Frames</th><th>Depth</th><th>Total</th><th>Restore</th><th>Snapshots</th><th>Native tick</th><th>JSON</th><th>Cut-in repair</th><th>Post-save</th></tr></thead><tbody id="records"></tbody></table></div></section>
-  </div>
-</main>
-<div id="tooltip" class="tooltip hidden"></div>
-<script>
-const $=s=>document.querySelector(s);let rollbacks=[],postByFrame=new Map(),selected=-1,fileLabel='';
-const colors={restore:'#f07178',frame_snapshot:'#52a9ff',native_tick:'#56d6c7',frame_json:'#f6bd60',other:'#657786'};
-const labels={restore:'Restore',frame_snapshot:'Snapshots',native_tick:'Native tick',frame_json:'Frame JSON',other:'Other'};
-const phaseKeys=['restore','frame_snapshot','native_tick','frame_json'];
-const headlessGameplayCategories=new Set([3,7,8,9,10,11,12,13,18,21]);
-function fmt(v,d=2){return Number.isFinite(v)?v.toFixed(d):'-'}function avg(a,key){return a.length?a.reduce((s,x)=>s+(key(x)||0),0)/a.length:0}function percentile(a,p){if(!a.length)return 0;const s=[...a].sort((x,y)=>x-y);return s[Math.min(s.length-1,Math.floor((s.length-1)*p))]}
-function loadFile(file){fileLabel=file.name;const r=new FileReader;r.onload=()=>{try{load(JSON.parse(r.result))}catch(e){$('#error').textContent='Could not parse JSON: '+e.message}};r.readAsText(file)}
-function load(data){if(!Array.isArray(data))throw Error('Expected a JSON array');rollbacks=data.filter(x=>x&&x.type==='rollback');postByFrame=new Map(data.filter(x=>x&&x.type==='post_resim').map(x=>[x.frame,x]));if(!rollbacks.length)throw Error('No rollback records found');$('#drop').classList.add('hidden');$('#app').classList.remove('hidden');$('#fileName').textContent=fileLabel;selected=-1;render()}
-function render(){renderMetrics();renderTimeline();renderAggregate();renderTable();select(selected,false)}
-function renderMetrics(){const depths=rollbacks.map(r=>r.frame_count),totals=rollbacks.map(r=>r.total_ms),replayed=depths.reduce((a,b)=>a+b,0),post=[...postByFrame.values()];const cards=[['Rollbacks',rollbacks.length,'captured windows'],['Frames replayed',replayed,fmt(avg(rollbacks,r=>r.frame_count),1)+' avg depth'],['Average total',fmt(avg(rollbacks,r=>r.total_ms))+' ms','per rollback'],['P95 total',fmt(percentile(totals,.95))+' ms','worst-tail latency'],['Average restore',fmt(avg(rollbacks,r=>r.restore?.total_ms))+' ms',fmt(avg(rollbacks,r=>r.restore?.total_ms)/avg(rollbacks,r=>r.total_ms)*100,1)+'% of total'],['Post-resim save',fmt(avg(post,r=>r.save_snapshot_ms))+' ms','average current-frame save']];$('#metrics').innerHTML=cards.map(c=>`<div class="card"><label>${c[0]}</label><div class="value">${c[1]}</div><div class="sub">${c[2]}</div></div>`).join('')}
-function dimensions(canvas){const d=devicePixelRatio||1,r=canvas.getBoundingClientRect();canvas.width=Math.max(1,r.width*d);canvas.height=Math.max(1,r.height*d);const c=canvas.getContext('2d');c.setTransform(d,0,0,d,0,0);return{c,w:r.width,h:r.height}}
-function shown(){const n=+$(`#limit`).value;return n?rollbacks.slice(-n):rollbacks}
-function renderTimeline(){const canvas=$('#timeline'),{c,w,h}=dimensions(canvas),data=shown(),pad={l:48,r:15,t:15,b:35},cw=w-pad.l-pad.r,ch=h-pad.t-pad.b,max=Math.max(...data.map(x=>x.total_ms),1),gap=Math.max(1,Math.min(4,cw/data.length*.18)),bw=Math.max(1,(cw-gap*(data.length-1))/data.length);c.clearRect(0,0,w,h);c.strokeStyle='#263442';c.fillStyle='#82909c';c.font='11px ui-monospace';c.textAlign='right';for(let i=0;i<=4;i++){const y=pad.t+ch*i/4,v=max*(1-i/4);c.beginPath();c.moveTo(pad.l,y);c.lineTo(w-pad.r,y);c.stroke();c.fillText(fmt(v,0)+' ms',pad.l-7,y+4)}data.forEach((r,i)=>{const x=pad.l+i*(bw+gap);let y=pad.t+ch;const vals={restore:r.phases_ms?.restore||0,frame_snapshot:r.phases_ms?.frame_snapshot||0,native_tick:r.phases_ms?.native_tick||0,frame_json:r.phases_ms?.frame_json||0};vals.other=Math.max(0,r.total_ms-Object.values(vals).reduce((a,b)=>a+b,0));phaseKeys.concat('other').forEach(k=>{const bh=vals[k]/max*ch;y-=bh;c.fillStyle=colors[k];c.fillRect(x,y,bw,bh)});r._hit={x,x2:x+bw,y:pad.t,y2:pad.t+ch}});c.fillStyle='#82909c';c.textAlign='center';const ticks=Math.min(8,data.length);for(let i=0;i<ticks;i++){const ix=Math.round(i*(data.length-1)/Math.max(1,ticks-1)),x=pad.l+ix*(bw+gap)+bw/2;c.fillText(data[ix].start_frame,x,h-12)}canvas.onmousemove=e=>chartMove(e,canvas,data);canvas.onmouseleave=()=>$('#tooltip').classList.add('hidden');canvas.onclick=e=>{const r=hit(e,canvas,data);if(r)select(rollbacks.indexOf(r),false)};$('#legend').innerHTML=phaseKeys.concat('other').map(k=>`<span><i class="dot" style="background:${colors[k]}"></i>${labels[k]}</span>`).join('')}
-function hit(e,canvas,data){const x=e.clientX-canvas.getBoundingClientRect().left;return data.find(r=>r._hit&&x>=r._hit.x&&x<=r._hit.x2)}function chartMove(e,canvas,data){const r=hit(e,canvas,data),t=$('#tooltip');if(!r){t.classList.add('hidden');return}t.innerHTML=`frames ${r.start_frame}-${r.end_frame} (${r.frame_count})<br>total ${fmt(r.total_ms,3)} ms<br>restore ${fmt(r.restore?.total_ms,3)} ms`;t.style.left=Math.min(innerWidth-190,e.clientX+14)+'px';t.style.top=(e.clientY+14)+'px';t.classList.remove('hidden')}
-function aggregate(){const sums={};phaseKeys.forEach(k=>sums[k]=rollbacks.reduce((s,r)=>s+(r.phases_ms?.[k]||0),0));sums.other=Math.max(0,rollbacks.reduce((s,r)=>s+r.total_ms,0)-Object.values(sums).reduce((a,b)=>a+b,0));return sums}
-function renderAggregate(){const a=aggregate(),total=Object.values(a).reduce((x,y)=>x+y,0),canvas=$('#donut'),{c,w,h}=dimensions(canvas),cx=w/2,cy=h/2,r=Math.min(w,h)*.34;c.clearRect(0,0,w,h);let angle=-Math.PI/2;phaseKeys.concat('other').forEach(k=>{const n=a[k]/total*Math.PI*2;c.beginPath();c.arc(cx,cy,r,angle,angle+n);c.arc(cx,cy,r*.58,angle+n,angle,true);c.closePath();c.fillStyle=colors[k];c.fill();angle+=n});c.textAlign='center';c.fillStyle='#e7edf2';c.font='700 22px ui-monospace';c.fillText(fmt(total/rollbacks.length,1),cx,cy);c.fillStyle='#82909c';c.font='11px system-ui';c.fillText('ms / rollback',cx,cy+19);$('#phaseBars').innerHTML=phaseKeys.concat('other').map(k=>bar(labels[k],a[k]/total*100,fmt(a[k]/total*100,1)+'%',colors[k])).join('')}
-function bar(name,pct,val,color){return `<div class="bar-row"><span class="bar-name" title="${name}">${name}</span><div class="track"><div class="fill" style="width:${Math.max(0,Math.min(100,pct))}%;background:${color||''}"></div></div><span class="bar-val">${val}</span></div>`}
-function renderHooks(r){const a=[...(r?.hooks||[])].sort((x,y)=>y.total_ms-x.total_ms).slice(0,12),max=a[0]?.total_ms||1;$('#hookBars').innerHTML=a.map(x=>{const avgUs=x.calls?x.total_ms*1000/x.calls:0;return `<div class="hook-row"><div class="hook-head"><span class="hook-name" title="${x.name}">${x.name}</span><span class="hook-total">${fmt(x.total_ms)} ms total</span></div><div class="track"><div class="fill" style="width:${x.total_ms/max*100}%"></div></div><div class="hook-stats">${x.calls.toLocaleString()} calls | ${fmt(avgUs)} us avg | ${fmt(x.max_us/1000)} ms max</div></div>`}).join('')||'<div class="empty">No hook samples.</div>'}
-function renderHeadless(r){const h=r?.headless_tick,frames=Math.max(1,r?.frame_count||0),sections=[{name:'Total headless tick',total:h?.total_ms,maximum:h?.max_ms},...[['Timing, focus, input', 'timing_input'],['Early draw and collision', 'early_draw_collision'],['Viewport setup', 'viewport_setup'],['Render begin and area', 'render_begin_area'],['Battle action', 'action'],['Input devices', 'input_devices'],['Gameplay setup', 'gameplay_setup'],['Unit move', 'unit_move'],['Collision and hit solver', 'collision_hit'],['Unit synchronization', 'unit_sync'],['Simulation tail', 'simulation_tail'],['Manager core', 'manager_core'],['Network and services', 'network_services'],['Render completion', 'render'],['Post-frame work', 'post_frame'],['Alt+F4 handling', 'alt_f4']].map(([name,key])=>({name,total:h?.[key+'_ms'],maximum:h?.[key+'_max_ms']}))].filter(x=>Number.isFinite(x.total)),max=Math.max(...sections.map(x=>x.total/frames),0);$('#headlessBars').innerHTML=sections.map(x=>`<div class="hook-row"><div class="hook-head"><span class="hook-name" title="${x.name}">${x.name}</span><span class="hook-total">${fmt(x.total/frames)} ms / frame</span></div><div class="track"><div class="fill" style="width:${max?x.total/frames/max*100:0}%"></div></div><div class="hook-stats">${fmt(x.total)} ms rollback total | ${fmt(x.maximum)} ms max frame</div></div>`).join('')||'<div class="empty">No headless tick section samples. Load a profile generated by a build with detailed headless profiling.</div>'}
-function isCleanupObject(x){return x?.phase==='move'&&!headlessGameplayCategories.has(x.category)&&Number(x.calls)>0}
-function renderUnitObjects(r){const frames=Math.max(1,r?.frame_count||0),phaseNames={move:'move',sync_job:'sync phase 2',sync_save:'sync phase 3'},categories=new Map((r?.unit_categories||[]).map(x=>[x.category,x.name])),phaseOrder={move:0,sync_job:1,sync_save:2},a=[...(r?.unit_objects||[])],sort=$('#unitObjectSort')?.value||'time';a.sort(sort==='time'?(x,y)=>y.total_ms-x.total_ms||x.category-y.category||(phaseOrder[x.phase]??9)-(phaseOrder[y.phase]??9)||x.name.localeCompare(y.name):(x,y)=>x.category-y.category||(phaseOrder[x.phase]??9)-(phaseOrder[y.phase]??9)||x.name.localeCompare(y.name)||y.total_ms-x.total_ms);const max=Math.max(...a.map(x=>x.total_ms/frames),0);$('#unitObjectBars').innerHTML=a.map(x=>{const category=categories.get(x.category)||`Group${x.category}`,cleanup=isCleanupObject(x),phase=cleanup?'cleanup':phaseNames[x.phase]||x.phase||'move',title=`Category ${x.category} ${category} | ${phase} | ${x.name} | ${x.dti}`;return `<div class="hook-row"><div class="hook-head"><span class="hook-name" title="${title}">Category ${x.category} ${category} | ${phase} | ${x.name}</span><span class="hook-total">${fmt(x.total_ms/frames,3)} ms / frame</span></div><div class="track"><div class="fill" style="width:${max?x.total_ms/frames/max*100:0}%"></div></div><div class="hook-stats">${Number(x.visits||0).toLocaleString()} list visits | ${x.calls.toLocaleString()} ${cleanup?'cleanups':'callbacks'} | ${fmt(x.calls/frames,2)} calls/frame | ${fmt(x.avg_us,2)} us avg | ${fmt(x.max_us/1000,3)} ms max</div></div>`}).join('')||'<div class="empty">No sUnit entities sampled. Load a profile generated by a build with phase-aware entity profiling.</div>'}
-function aggregateCleanup(){const categories=new Map,objects=new Map;let frames=0;rollbacks.forEach(r=>{frames+=Number(r.frame_count||0);(r.unit_categories||[]).forEach(c=>categories.set(c.category,c.name));(r.unit_objects||[]).filter(isCleanupObject).forEach(x=>{const key=x.category+':'+x.dti,o=objects.get(key)||{...x,visits:0,calls:0,total_ms:0,max_us:0};o.visits+=Number(x.visits||0);o.calls+=Number(x.calls||0);o.total_ms+=Number(x.total_ms||0);o.max_us=Math.max(o.max_us,Number(x.max_us||0));objects.set(key,o)})});return{frame_count:frames,unit_categories:[...categories].map(([category,name])=>({category,name})),unit_objects:[...objects.values()].map(x=>({...x,avg_us:x.calls?x.total_ms*1000/x.calls:0}))}}
-function renderCleanup(r){const frames=Math.max(1,r?.frame_count||0),categories=new Map((r?.unit_categories||[]).map(x=>[x.category,x.name])),a=(r?.unit_objects||[]).filter(isCleanupObject).sort((x,y)=>y.total_ms-x.total_ms),max=Math.max(...a.map(x=>x.total_ms/frames),0);$('#cleanupBars').innerHTML=a.map(x=>{const category=categories.get(x.category)||`Group${x.category}`,title=`Category ${x.category} ${category} | ${x.name} | ${x.dti}`;return `<div class="hook-row"><div class="hook-head"><span class="hook-name" title="${title}">Category ${x.category} ${category} | ${x.name}</span><span class="hook-total">${fmt(x.total_ms/frames,3)} ms / replayed frame</span></div><div class="track"><div class="fill" style="width:${max?x.total_ms/frames/max*100:0}%"></div></div><div class="hook-stats">${Number(x.calls||0).toLocaleString()} cleanups | ${Number(x.visits||0).toLocaleString()} visits | ${fmt(x.avg_us,2)} us avg | ${fmt(x.max_us/1000,3)} ms max | ${fmt(x.total_ms,3)} ms total</div></div>`}).join('')||'<div class="empty">No state 3/4 cleanup occurred in categories filtered from gameplay movement.</div>'}
-function meanObject(items){if(!items.length)return{};const keys=new Set(items.flatMap(x=>x&&typeof x==='object'?Object.keys(x):[])),result={};keys.forEach(k=>{const values=items.map(x=>x?.[k]).filter(v=>v!==undefined);if(values.some(v=>Array.isArray(v)))return;if(values.every(Number.isFinite))result[k]=values.reduce((a,b)=>a+b,0)/values.length;else if(values.some(v=>v&&typeof v==='object'))result[k]=meanObject(values.filter(v=>v&&typeof v==='object'));});return result}
-function averageRollback(){const r=meanObject(rollbacks),hooks=new Map,categories=new Map,objects=new Map;rollbacks.forEach(x=>{(x.hooks||[]).forEach(h=>{if(!hooks.has(h.name))hooks.set(h.name,[]);hooks.get(h.name).push(h)});(x.unit_categories||[]).forEach(c=>{const key=c.phase+':'+c.category;if(!categories.has(key))categories.set(key,[]);categories.get(key).push(c)});(x.unit_objects||[]).forEach(o=>{const key=(o.phase||'move')+':'+o.category+':'+o.dti;if(!objects.has(key))objects.set(key,[]);objects.get(key).push(o)})});r.hooks=[...hooks].map(([name,items])=>({name,...meanObject(items)}));r.unit_categories=[...categories].map(([,items])=>({...items[0],...meanObject(items)}));r.unit_objects=[...objects].map(([,items])=>({...items[0],...meanObject(items)}));return r}
-function select(i,scroll=true){const all=i<0||!rollbacks[i];selected=all?-1:i;const r=all?averageRollback():rollbacks[i],posts=[...postByFrame.values()],p=all?meanObject(posts):postByFrame.get(r.end_frame),pct=(v,parent)=>parent?fmt(v/parent*100,1)+'%':null,average=$('#selectedMode').value==='frame',frames=Math.max(1,r.frame_count||0),saves=Math.max(1,r.snapshot?.count||0);renderHooks(r);renderHeadless(r);renderUnitObjects(r);renderCleanup(all?aggregateCleanup():r);$('#detailEyebrow').textContent=all?'All rollbacks':'Selected rollback';$('#selectedRange').textContent=all?'Average':`${r.start_frame} - ${r.end_frame}`;$('#selectedMeta').textContent=average?`${all?fmt(r.frame_count,1):r.frame_count} frames | ${fmt(r.total_ms/frames)} ms/frame amortized | ${fmt(r.total_ms)} ms total${all?' average':''}`:`${all?fmt(r.frame_count,1):r.frame_count} frames | ${fmt(r.total_ms)} ms total${all?' average':''}`;const entries=[
-  {name:'Restore',value:r.restore?.total_ms,divisor:1,unit:'ms once',detail:`${pct(r.restore?.total_ms,r.total_ms)} of rollback | one restore before replay`},
-  {name:'  Restore setup',value:r.restore?.setup_ms,divisor:1,unit:'ms once',detail:'validate slot and prepare live owner pointers'},
-  {name:'  Restore regions',value:r.restore?.regions_ms,divisor:1,unit:'ms once',detail:'apply packed state and character fixups'},
-  {name:'  Restore collision clones',value:r.restore?.collision_clones_ms,divisor:1,unit:'ms once',detail:'deep-copy saved collision graphs into live wrappers'},
-  {name:'  Restore owner pointers',value:r.restore?.owner_pointers_ms,divisor:1,unit:'ms once',detail:'repair owner slots whose allocations changed'},
-  {name:'  Reset hit solver',value:r.restore?.hit_solver_ms,divisor:1,unit:'ms once',detail:'discard transient pending hit work'},
-  {name:'  Clear effect slots',value:r.restore?.effect_slots_ms,divisor:1,unit:'ms once',detail:'remove references to retired effects'},
-  {name:'  Sync character UI',value:r.restore?.ui_ms,divisor:1,unit:'ms once',detail:'repair active character presentation state'},
-  {name:'Snapshot saves',value:r.snapshot?.total_ms,divisor:saves,unit:'ms / save',detail:`${pct(r.snapshot?.total_ms,r.total_ms)} of rollback | ${r.snapshot?.count||0} saves`},
-  {name:'Native tick',value:r.phases_ms?.native_tick,divisor:frames,unit:'ms / frame',detail:`${pct(r.phases_ms?.native_tick,r.total_ms)} of rollback | ${r.frame_count} ticks`},
-  {name:'Frame JSON',value:r.phases_ms?.frame_json,divisor:frames,unit:'ms / frame',detail:`${pct(r.phases_ms?.frame_json,r.total_ms)} of rollback | ${r.frame_count} frames`},
-  {name:'Timing resync',value:r.phases_ms?.timing_resync,divisor:1,unit:'ms once',detail:'resynchronize live sMain timing after replay'},
-  {name:'Cut-in repair',value:r.phases_ms?.cutin_repair,divisor:1,unit:'ms once',detail:'repair orphaned cut-in draw and material state'},
-  {name:'Patch disable',value:r.phases_ms?.patch_disable,divisor:1,unit:'ms once',detail:'restore sleep, present, swapchain, and draw-call patches'},
-  {name:'Stale pointers',value:r.restore?.stale_pointers_ms,divisor:1,unit:'ms once',detail:`${pct(r.restore?.stale_pointers_ms,r.restore?.total_ms)} of restore`},
-  {name:'Shots/effects',value:r.restore?.shots_ms,divisor:1,unit:'ms once',detail:`${pct(r.restore?.shots_ms,r.restore?.total_ms)} of restore`},
-  {name:'  Destroy shots',value:r.shot_restore?.destroy_shots_ms,divisor:1,unit:'ms once',detail:`${r.shot_restore?.current_shots||0} current shots`},
-  {name:'  Sanitize effects',value:r.shot_restore?.sanitize_effects_ms,divisor:1,unit:'ms once',detail:`${r.shot_restore?.effect_sanitize_calls||0} effects | ${r.shot_restore?.generator_nodes||0} generator nodes`},
-  {name:'  Respawn shots',value:r.shot_restore?.respawn_ms,divisor:1,unit:'ms once',detail:`${r.shot_restore?.saved_shots||0} saved shots`},
-  {name:'    Native factory',value:r.shot_restore?.respawn_factory_ms,divisor:1,unit:'ms once',detail:'construct shot and native owned effects'},
-  {name:'    Concrete restore',value:r.shot_restore?.respawn_concrete_ms,divisor:1,unit:'ms once',detail:'restore body, collision topology, and target links'},
-  {name:'      Pointer scan',value:r.shot_restore?.concrete_pointer_scan_ms,divisor:1,unit:'ms once',detail:'preserve live and saved pointer-looking words'},
-  {name:'      Embedded live',value:r.shot_restore?.concrete_embedded_live_ms,divisor:1,unit:'ms once',detail:'discover live inline owner objects'},
-  {name:'      Embedded saved',value:r.shot_restore?.concrete_embedded_saved_ms,divisor:1,unit:'ms once',detail:'discover saved inline owner objects'},
-  {name:'      Collision restore',value:r.shot_restore?.concrete_collision_ms,divisor:1,unit:'ms once',detail:'restore and verify collision primitives'},
-  {name:'      Concrete validate',value:r.shot_restore?.concrete_validate_ms,divisor:1,unit:'ms once',detail:'validate live DTI, size, and memory'},
-  {name:'      Copy body',value:r.shot_restore?.concrete_copy_body_ms,divisor:1,unit:'ms once',detail:'create saved body overlay'},
-  {name:'      Apply body',value:r.shot_restore?.concrete_apply_body_ms,divisor:1,unit:'ms once',detail:'copy filtered overlay into live shot'},
-  {name:'      Target restore',value:r.shot_restore?.concrete_targets_ms,divisor:1,unit:'ms once',detail:'restore attack target tables'},
-  {name:'    Release effects',value:r.shot_restore?.respawn_release_effects_ms,divisor:1,unit:'ms once',detail:'release fresh embedded particle graph'},
-  {name:'    Overlay state',value:r.shot_restore?.respawn_overlay_ms,divisor:1,unit:'ms once',detail:'class fixups and common flight state'},
-  {name:'    Register shots',value:r.shot_restore?.respawn_register_ms,divisor:1,unit:'ms once',detail:'recipe map and pending-unit registration'},
-  {name:'    Prepare shots',value:r.shot_restore?.respawn_prepare_ms,divisor:1,unit:'ms once',detail:'restore RNG and validate object references'},
-  {name:'  Pre-sanitize lists',value:r.shot_restore?.pre_sanitize_ms,divisor:1,unit:'ms once',detail:'validate sUnit lists before teardown'},
-  {name:'  Post-sanitize lists',value:r.shot_restore?.post_sanitize_ms,divisor:1,unit:'ms once',detail:'validate sUnit lists after shot destruction'},
-  {name:'  Retire effects',value:r.shot_restore?.retire_effects_ms,divisor:1,unit:'ms once',detail:`${r.shot_restore?.effect_visits||0} effect visits across both passes`},
-  {name:'  Collect shots',value:r.shot_restore?.collect_shots_ms,divisor:1,unit:'ms once',detail:'find currently linked shots'},
-  {name:'  Respawn setup',value:r.shot_restore?.respawn_setup_ms,divisor:1,unit:'ms once',detail:'prepare managers and preserve RNG'},
-  {name:'  Finalize shots',value:r.shot_restore?.finalize_ms,divisor:1,unit:'ms once',detail:'flush registrations, restore RNG, release resources'},
-  {name:'  Pin resources',value:r.shot_restore?.pin_resources_ms,divisor:1,unit:'ms once',detail:'retain saved shot resources'},
-  {name:'Build regions',value:r.snapshot?.build_regions_ms,divisor:saves,unit:'ms / save',detail:`${pct(r.snapshot?.build_regions_ms,r.snapshot?.total_ms)} of snapshot saves`},
-  {name:'  Copy regions',value:r.snapshot?.copy_regions_ms,divisor:saves,unit:'ms / save',detail:`${fmt(r.snapshot?.avg_kib)} KiB | ${fmt(r.snapshot?.avg_regions,1)} regions average`},
-  {name:'  Recycle/allocate',value:r.snapshot?.recycle_allocate_ms,divisor:saves,unit:'ms / save',detail:'reuse or grow snapshot slot storage'},
-  {name:'  Save metadata',value:r.snapshot?.metadata_ms,divisor:saves,unit:'ms / save',detail:'store region descriptors and diagnostics'},
-  {name:'  Collision clones',value:r.snapshot?.collision_clones_ms,divisor:saves,unit:'ms / save',detail:'retain external animation/collision objects'},
-  {name:'  Shot recipes',value:r.snapshot?.shot_recipes_ms,divisor:saves,unit:'ms / save',detail:'capture shot and effect reconstruction state'},
-  {name:'Post-resim save',value:p?.save_snapshot_ms,divisor:1,unit:'ms once',detail:'after rollback | not included in total'}
-].filter(x=>Number.isFinite(x.value)).map(x=>({...x,displayValue:average?x.value/x.divisor:x.value,displayUnit:average?x.unit:'ms total'})).sort((a,b)=>b.displayValue-a.displayValue),max=entries[0]?.displayValue||1;$('#selectedBars').classList.remove('empty');$('#selectedBars').innerHTML=entries.map(x=>`<div class="selected-row"><span class="selected-name">${x.name}</span><div class="track selected-track"><div class="fill" style="width:${x.displayValue/max*100}%"></div></div><span class="selected-value">${fmt(x.displayValue)} ${x.displayUnit}</span><span class="selected-context">${x.detail}</span></div>`).join('');document.querySelectorAll('#records tr').forEach((tr,n)=>tr.classList.toggle('selected',!all&&n===i));if(scroll)document.querySelector('#records tr.selected')?.scrollIntoView({block:'nearest'})}
-function renderTable(){const body=$('#records');body.innerHTML=rollbacks.map((r,i)=>{const p=postByFrame.get(r.end_frame);return `<tr data-i="${i}"><td>${r.start_frame}-${r.end_frame}</td><td>${r.frame_count}</td><td>${fmt(r.total_ms)}</td><td>${fmt(r.restore?.total_ms)}</td><td>${fmt(r.snapshot?.total_ms)}</td><td>${fmt(r.phases_ms?.native_tick)}</td><td>${fmt(r.phases_ms?.frame_json)}</td><td>${fmt(r.phases_ms?.cutin_repair,3)}</td><td>${fmt(p?.save_snapshot_ms)}</td></tr>`}).join('');body.onclick=e=>{const tr=e.target.closest('tr');if(tr)select(+tr.dataset.i)};$('#recordCount').textContent=rollbacks.length+' records'}
-const input=$('#fileInput');$('#browse').onclick=e=>{e.stopPropagation();input.click()};$('#open').onclick=()=>input.click();$('#dropCard').onclick=()=>input.click();input.onchange=()=>input.files[0]&&loadFile(input.files[0]);['dragenter','dragover'].forEach(n=>document.addEventListener(n,e=>{e.preventDefault();$('#dropCard').classList.add('drag')}));['dragleave','drop'].forEach(n=>document.addEventListener(n,e=>{e.preventDefault();$('#dropCard').classList.remove('drag')}));document.addEventListener('drop',e=>e.dataTransfer.files[0]&&loadFile(e.dataTransfer.files[0]));$('#limit').onchange=renderTimeline;$('#selectedMode').onchange=()=>select(selected,false);$('#unitObjectSort').onchange=()=>select(selected,false);addEventListener('resize',()=>rollbacks.length&&(renderTimeline(),renderAggregate()));
-</script>
-</body>
+    <input id="fileInput" type="file" accept=".json,application/json" hidden />
+    <main id="app" class="app hidden">
+      <header class="topbar">
+        <span class="mark">RB</span><span class="brand">Rollback Profile</span
+        ><span id="fileName" class="file"></span><span class="spacer"></span
+        ><button id="open" class="button">Open another</button>
+      </header>
+      <div class="content">
+        <section id="metrics" class="metrics"></section>
+        <section class="grid">
+          <article class="panel">
+            <div class="panel-head">
+              <div>
+                <span class="eyebrow">Timeline</span>
+                <h2>Rollback cost by frame</h2>
+              </div>
+              <span class="hint">Click a bar for details</span>
+              <div class="controls">
+                <label
+                  >Show
+                  <select id="limit">
+                    <option>50</option>
+                    <option selected>100</option>
+                    <option>250</option>
+                    <option value="0">All</option>
+                  </select></label
+                >
+              </div>
+            </div>
+            <div class="chart-wrap"><canvas id="timeline"></canvas></div>
+            <div id="legend" class="legend"></div>
+          </article>
+          <article class="panel">
+            <div class="panel-head">
+              <div>
+                <span class="eyebrow">Aggregate</span>
+                <h2>Where time goes</h2>
+              </div>
+            </div>
+            <div class="chart-wrap small"><canvas id="donut"></canvas></div>
+            <div id="phaseBars" class="bars"></div>
+          </article>
+        </section>
+        <section class="detail-grid">
+          <article class="panel">
+            <div class="panel-head">
+              <div>
+                <span id="detailEyebrow" class="eyebrow">All rollbacks</span>
+                <div class="detail-title">
+                  <strong id="selectedRange">Average</strong
+                  ><span id="selectedMeta" class="pill"></span>
+                </div>
+              </div>
+              <div class="controls">
+                <label
+                  >Values
+                  <select id="selectedMode">
+                    <option value="frame" selected>Average / frame</option>
+                    <option value="total">Rollback total</option>
+                  </select></label
+                >
+              </div>
+            </div>
+            <div id="selectedBars" class="bars"></div>
+          </article>
+          <article class="panel">
+            <div class="panel-head">
+              <div>
+                <span class="eyebrow">Inclusive hook timing</span>
+                <h2>Most expensive hooks</h2>
+              </div>
+            </div>
+            <div id="hookBars" class="bars"></div>
+          </article>
+        </section>
+        <section class="panel" style="margin-top: 14px">
+          <div class="panel-head">
+            <div>
+              <span class="eyebrow">Headless tick breakdown</span>
+              <h2>Rollback_HeadlessTick sections</h2>
+            </div>
+            <span class="hint"
+              >Average per replayed frame | rollback total | maximum single
+              frame</span
+            >
+          </div>
+          <div id="headlessBars" class="bars"></div>
+        </section>
+        <section class="detail-grid">
+          <article class="panel">
+            <div class="panel-head">
+              <div>
+                <span class="eyebrow">Collision workload</span>
+                <h2>Hit solver nodes</h2>
+              </div>
+              <span class="hint"
+                >Per replayed frame | total | maximum frame</span
+              >
+            </div>
+            <div id="hitSolverBars" class="bars"></div>
+          </article>
+          <article class="panel">
+            <div class="panel-head">
+              <div>
+                <span class="eyebrow">Snapshot workload</span>
+                <h2>Clone and recipe operations</h2>
+              </div>
+              <span class="hint">Per snapshot save | rollback total</span>
+            </div>
+            <div id="snapshotWorkBars" class="bars"></div>
+          </article>
+        </section>
+        <section class="panel" style="margin-top: 14px">
+          <div class="panel-head">
+            <div>
+              <span class="eyebrow">Entity breakdown</span>
+              <h2>Every sUnit entity type by category, phase, and DTI</h2>
+            </div>
+            <span class="hint"
+              >All linked entities | move, phase 2, and phase 3 callback
+              timing</span
+            >
+            <div class="controls">
+              <label
+                >Sort
+                <select id="unitObjectSort">
+                  <option value="time" selected>Time</option>
+                  <option value="category">Category / phase / DTI</option>
+                </select></label
+              >
+            </div>
+          </div>
+          <div id="unitObjectBars" class="bars"></div>
+        </section>
+        <section class="panel" style="margin-top: 14px">
+          <div class="panel-head">
+            <div>
+              <span class="eyebrow">Retirement breakdown</span>
+              <h2>Headless cleanup by category and DTI</h2>
+            </div>
+            <span class="hint"
+              >State 3/4 transitions in categories filtered from gameplay
+              movement</span
+            >
+          </div>
+          <div id="cleanupBars" class="bars"></div>
+        </section>
+        <section class="panel" style="margin-top: 14px">
+          <div class="panel-head">
+            <div>
+              <span class="eyebrow">Records</span>
+              <h2>Rollback windows</h2>
+            </div>
+            <span id="recordCount" class="hint"></span>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Frames</th>
+                  <th>Depth</th>
+                  <th>Total</th>
+                  <th>Restore</th>
+                  <th>Snapshots</th>
+                  <th>Native tick</th>
+                  <th>JSON</th>
+                  <th>Cut-in repair</th>
+                  <th>Post-save</th>
+                </tr>
+              </thead>
+              <tbody id="records"></tbody>
+            </table>
+          </div>
+        </section>
+      </div>
+    </main>
+    <div id="tooltip" class="tooltip hidden"></div>
+    <script>
+      const $ = (s) => document.querySelector(s);
+      let rollbacks = [],
+        postByFrame = new Map(),
+        selected = -1,
+        fileLabel = "";
+      const debug = (message, details) =>
+        console.log(
+          `[rollback-profile-viewer ${performance.now().toFixed(1)}ms] ${message}${details === undefined ? "" : " " + JSON.stringify(details)}`,
+        );
+      addEventListener("error", (e) =>
+        console.error(
+          "[rollback-profile-viewer] Uncaught error",
+          e.error || e.message,
+        ),
+      );
+      addEventListener("unhandledrejection", (e) =>
+        console.error(
+          "[rollback-profile-viewer] Unhandled rejection",
+          e.reason,
+        ),
+      );
+      const colors = {
+        restore: "#f07178",
+        frame_snapshot: "#52a9ff",
+        native_tick: "#56d6c7",
+        frame_json: "#f6bd60",
+        other: "#657786",
+      };
+      const labels = {
+        restore: "Restore",
+        frame_snapshot: "Snapshots",
+        native_tick: "Native tick",
+        frame_json: "Frame JSON",
+        other: "Other",
+      };
+      const phaseKeys = [
+        "restore",
+        "frame_snapshot",
+        "native_tick",
+        "frame_json",
+      ];
+      const headlessGameplayCategories = new Set([
+        3, 7, 8, 9, 10, 11, 12, 13, 18, 21,
+      ]);
+      function fmt(v, d = 2) {
+        return Number.isFinite(v) ? v.toFixed(d) : "-";
+      }
+      function avg(a, key) {
+        return a.length
+          ? a.reduce((s, x) => s + (key(x) || 0), 0) / a.length
+          : 0;
+      }
+      function percentile(a, p) {
+        if (!a.length) return 0;
+        const s = [...a].sort((x, y) => x - y);
+        return s[Math.min(s.length - 1, Math.floor((s.length - 1) * p))];
+      }
+      function loadFile(file) {
+        fileLabel = file.name;
+        debug("Reading file", { name: file.name, size: file.size });
+        const r = new FileReader();
+        r.onload = () => {
+          try {
+            debug("File read complete", { characters: r.result.length });
+            load(JSON.parse(r.result));
+          } catch (e) {
+            console.error("[rollback-profile-viewer] File load failed", e);
+            $("#error").textContent = "Could not parse JSON: " + e.message;
+          }
+        };
+        r.onerror = () =>
+          console.error("[rollback-profile-viewer] FileReader failed", r.error);
+        r.readAsText(file);
+      }
+      function load(data) {
+        if (!Array.isArray(data)) throw Error("Expected a JSON array");
+        rollbacks = data.filter((x) => x && x.type === "rollback");
+        postByFrame = new Map(
+          data
+            .filter((x) => x && x.type === "post_resim")
+            .map((x) => [x.frame, x]),
+        );
+        debug("Profile parsed", {
+          records: data.length,
+          rollbacks: rollbacks.length,
+          postResim: postByFrame.size,
+        });
+        if (!rollbacks.length) throw Error("No rollback records found");
+        $("#drop").classList.add("hidden");
+        $("#app").classList.remove("hidden");
+        $("#fileName").textContent = fileLabel;
+        selected = -1;
+        debug("App made visible", { app: $("#app").getBoundingClientRect() });
+        render();
+      }
+      let chartTimer = 0,
+        chartRetry = 0,
+        chartAnimationFrame = 0;
+      function inspectCanvas(canvas) {
+        const r = canvas.getBoundingClientRect(),
+          s = getComputedStyle(canvas),
+          p = getComputedStyle(canvas.parentElement),
+          pixels = canvas
+            .getContext("2d")
+            .getImageData(0, 0, canvas.width, canvas.height).data;
+        let visiblePixels = 0;
+        for (let i = 3; i < pixels.length; i += 4)
+          if (pixels[i]) visiblePixels++;
+        debug("Canvas inspection", {
+          id: canvas.id,
+          rect: { x: r.x, y: r.y, width: r.width, height: r.height },
+          bitmap: { width: canvas.width, height: canvas.height },
+          style: {
+            display: s.display,
+            visibility: s.visibility,
+            opacity: s.opacity,
+            width: s.width,
+            height: s.height,
+            transform: s.transform,
+          },
+          parent: {
+            display: p.display,
+            visibility: p.visibility,
+            opacity: p.opacity,
+            width: p.width,
+            height: p.height,
+            overflow: p.overflow,
+          },
+          visiblePixels,
+        });
+        return visiblePixels;
+      }
+      function animateCharts() {
+        cancelAnimationFrame(chartAnimationFrame);
+        if (matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+        const started = performance.now(),
+          duration = 750;
+        function frame(now) {
+          const elapsed = Math.min(1, (now - started) / duration),
+            progress = 1 - Math.pow(1 - elapsed, 3);
+          renderTimeline(progress, false);
+          renderAggregate(progress, false, false);
+          if (elapsed < 1) chartAnimationFrame = requestAnimationFrame(frame);
+        }
+        chartAnimationFrame = requestAnimationFrame(frame);
+      }
+      function drawCharts() {
+        if (!rollbacks.length) return;
+        debug("Drawing charts", { attempt: chartRetry + 1 });
+        let timelinePixels = 0,
+          donutPixels = 0;
+        try {
+          renderTimeline();
+          debug("Timeline rendered");
+          timelinePixels = inspectCanvas($("#timeline"));
+        } catch (e) {
+          console.error("[rollback-profile-viewer] Timeline render failed", e);
+        }
+        try {
+          renderAggregate();
+          debug("Aggregate rendered");
+          donutPixels = inspectCanvas($("#donut"));
+          debug("Phase bars inspection", {
+            children: $("#phaseBars").children.length,
+            display: getComputedStyle($("#phaseBars")).display,
+            visibility: getComputedStyle($("#phaseBars")).visibility,
+            opacity: getComputedStyle($("#phaseBars")).opacity,
+          });
+        } catch (e) {
+          console.error("[rollback-profile-viewer] Aggregate render failed", e);
+        }
+        if ((!timelinePixels || !donutPixels) && chartRetry < 5) {
+          chartRetry++;
+          debug("Empty canvas detected; retrying", {
+            timelinePixels,
+            donutPixels,
+            nextAttempt: chartRetry + 1,
+          });
+          setTimeout(() => requestAnimationFrame(drawCharts), 50);
+        } else {
+          animateCharts();
+          debug("Chart drawing finished", {
+            timelinePixels,
+            donutPixels,
+            attempts: chartRetry + 1,
+          });
+          chartRetry = 0;
+        }
+      }
+      function scheduleCharts() {
+        clearTimeout(chartTimer);
+        cancelAnimationFrame(chartAnimationFrame);
+        chartRetry = 0;
+        debug("Chart redraw scheduled", { delayMs: 150 });
+        chartTimer = setTimeout(() => {
+          const width = $("#app").offsetWidth;
+          debug("Chart timer fired", { appWidth: width });
+          requestAnimationFrame(() => {
+            debug("Chart animation frame fired");
+            drawCharts();
+          });
+        }, 150);
+      }
+      function render() {
+        debug("Main render started");
+        scheduleCharts();
+        try {
+          renderMetrics();
+          debug("Metrics rendered");
+        } catch (e) {
+          console.error("[rollback-profile-viewer] Metrics render failed", e);
+        }
+        try {
+          renderTable();
+          debug("Table rendered");
+        } catch (e) {
+          console.error("[rollback-profile-viewer] Table render failed", e);
+        }
+        try {
+          select(selected, false);
+          debug("Details rendered");
+        } catch (e) {
+          console.error("[rollback-profile-viewer] Detail render failed", e);
+        }
+      }
+      function renderMetrics() {
+        const depths = rollbacks.map((r) => r.frame_count),
+          totals = rollbacks.map((r) => r.total_ms),
+          replayed = depths.reduce((a, b) => a + b, 0),
+          post = [...postByFrame.values()];
+        const cards = [
+          ["Rollbacks", rollbacks.length, "captured windows"],
+          [
+            "Frames replayed",
+            replayed,
+            fmt(
+              avg(rollbacks, (r) => r.frame_count),
+              1,
+            ) + " avg depth",
+          ],
+          [
+            "Average total",
+            fmt(avg(rollbacks, (r) => r.total_ms)) + " ms",
+            "per rollback",
+          ],
+          [
+            "P95 total",
+            fmt(percentile(totals, 0.95)) + " ms",
+            "worst-tail latency",
+          ],
+          [
+            "Average replay frame",
+            fmt(avg(rollbacks, (r) => r.avg_frame_ms)) + " ms",
+            "measured headless frame",
+          ],
+          [
+            "Maximum replay frame",
+            fmt(Math.max(...rollbacks.map((r) => r.max_frame_ms || 0))) + " ms",
+            "worst single replayed frame",
+          ],
+          [
+            "Average restore",
+            fmt(avg(rollbacks, (r) => r.restore?.total_ms)) + " ms",
+            fmt(
+              (avg(rollbacks, (r) => r.restore?.total_ms) /
+                avg(rollbacks, (r) => r.total_ms)) *
+                100,
+              1,
+            ) + "% of total",
+          ],
+          [
+            "Post-resim save",
+            fmt(avg(post, (r) => r.save_snapshot_ms)) + " ms",
+            "average current-frame save",
+          ],
+        ];
+        $("#metrics").innerHTML = cards
+          .map(
+            (c) =>
+              `<div class="card"><label>${c[0]}</label><div class="value">${c[1]}</div><div class="sub">${c[2]}</div></div>`,
+          )
+          .join("");
+      }
+      function dimensions(canvas, resize = true) {
+        const d = devicePixelRatio || 1,
+          r = canvas.getBoundingClientRect(),
+          w = resize ? Math.max(1, r.width) : canvas._logicalWidth,
+          h = resize ? Math.max(1, r.height) : canvas._logicalHeight;
+        if (resize) {
+          debug("Canvas measured", {
+            id: canvas.id,
+            rect: { width: r.width, height: r.height },
+            client: { width: canvas.clientWidth, height: canvas.clientHeight },
+            logical: { w, h },
+            dpr: d,
+          });
+          canvas.width = Math.round(w * d);
+          canvas.height = Math.round(h * d);
+          canvas._logicalWidth = w;
+          canvas._logicalHeight = h;
+        }
+        const c = canvas.getContext("2d");
+        if (!c) throw Error(`Could not create 2D context for #${canvas.id}`);
+        c.setTransform(d, 0, 0, d, 0, 0);
+        return { c, w, h };
+      }
+      function shown() {
+        const n = +$(`#limit`).value;
+        return n ? rollbacks.slice(-n) : rollbacks;
+      }
+      function renderTimeline(progress = 1, resize = true) {
+        const canvas = $("#timeline"),
+          { c, w, h } = dimensions(canvas, resize),
+          data = shown(),
+          pad = { l: 48, r: 15, t: 15, b: 35 },
+          cw = w - pad.l - pad.r,
+          ch = h - pad.t - pad.b,
+          max = Math.max(...data.map((x) => x.total_ms), 1),
+          gap = Math.max(1, Math.min(4, (cw / data.length) * 0.18)),
+          bw = Math.max(1, (cw - gap * (data.length - 1)) / data.length);
+        c.clearRect(0, 0, w, h);
+        c.strokeStyle = "#263442";
+        c.fillStyle = "#82909c";
+        c.font = "11px ui-monospace";
+        c.textAlign = "right";
+        for (let i = 0; i <= 4; i++) {
+          const y = pad.t + (ch * i) / 4,
+            v = max * (1 - i / 4);
+          c.beginPath();
+          c.moveTo(pad.l, y);
+          c.lineTo(w - pad.r, y);
+          c.stroke();
+          c.fillText(fmt(v, 0) + " ms", pad.l - 7, y + 4);
+        }
+        data.forEach((r, i) => {
+          const x = pad.l + i * (bw + gap);
+          let y = pad.t + ch;
+          const vals = {
+            restore: r.phases_ms?.restore || 0,
+            frame_snapshot: r.phases_ms?.frame_snapshot || 0,
+            native_tick: r.phases_ms?.native_tick || 0,
+            frame_json: r.phases_ms?.frame_json || 0,
+          };
+          vals.other = Math.max(
+            0,
+            r.total_ms - Object.values(vals).reduce((a, b) => a + b, 0),
+          );
+          phaseKeys.concat("other").forEach((k) => {
+            const bh = (vals[k] / max) * ch * progress;
+            y -= bh;
+            c.fillStyle = colors[k];
+            c.fillRect(x, y, bw, bh);
+          });
+          r._hit = { x, x2: x + bw, y: pad.t, y2: pad.t + ch };
+        });
+        c.fillStyle = "#82909c";
+        c.textAlign = "center";
+        const ticks = Math.min(8, data.length);
+        for (let i = 0; i < ticks; i++) {
+          const ix = Math.round(
+              (i * (data.length - 1)) / Math.max(1, ticks - 1),
+            ),
+            x = pad.l + ix * (bw + gap) + bw / 2;
+          c.fillText(data[ix].start_frame, x, h - 12);
+        }
+        canvas.onmousemove = (e) => chartMove(e, canvas, data);
+        canvas.onmouseleave = () => $("#tooltip").classList.add("hidden");
+        canvas.onclick = (e) => {
+          const r = hit(e, canvas, data);
+          if (r) select(rollbacks.indexOf(r), false);
+        };
+        $("#legend").innerHTML = phaseKeys
+          .concat("other")
+          .map(
+            (k) =>
+              `<span><i class="dot" style="background:${colors[k]}"></i>${labels[k]}</span>`,
+          )
+          .join("");
+      }
+      function hit(e, canvas, data) {
+        const rect = canvas.getBoundingClientRect(),
+          x =
+            ((e.clientX - rect.left) * (canvas._logicalWidth || canvas.width)) /
+            Math.max(1, rect.width);
+        return data.find((r) => r._hit && x >= r._hit.x && x <= r._hit.x2);
+      }
+      function chartMove(e, canvas, data) {
+        const r = hit(e, canvas, data),
+          t = $("#tooltip");
+        if (!r) {
+          t.classList.add("hidden");
+          return;
+        }
+        t.innerHTML = `frames ${r.start_frame}-${r.end_frame} (${r.frame_count})<br>total ${fmt(r.total_ms, 3)} ms<br>restore ${fmt(r.restore?.total_ms, 3)} ms`;
+        t.style.left = Math.min(innerWidth - 190, e.clientX + 14) + "px";
+        t.style.top = e.clientY + 14 + "px";
+        t.classList.remove("hidden");
+      }
+      function aggregate() {
+        const sums = {};
+        phaseKeys.forEach(
+          (k) =>
+            (sums[k] = rollbacks.reduce(
+              (s, r) => s + (r.phases_ms?.[k] || 0),
+              0,
+            )),
+        );
+        sums.other = Math.max(
+          0,
+          rollbacks.reduce((s, r) => s + r.total_ms, 0) -
+            Object.values(sums).reduce((a, b) => a + b, 0),
+        );
+        return sums;
+      }
+      function renderAggregate(progress = 1, updateBars = true, resize = true) {
+        const a = aggregate(),
+          total = Object.values(a).reduce((x, y) => x + y, 0),
+          canvas = $("#donut"),
+          { c, w, h } = dimensions(canvas, resize),
+          cx = w / 2,
+          cy = h / 2,
+          r = Math.min(w, h) * 0.34;
+        c.clearRect(0, 0, w, h);
+        let usedAngle = 0;
+        const visibleAngle = Math.PI * 2 * progress;
+        phaseKeys.concat("other").forEach((k) => {
+          const segmentAngle = (a[k] / total) * Math.PI * 2,
+            drawnAngle = Math.min(
+              segmentAngle,
+              Math.max(0, visibleAngle - usedAngle),
+            ),
+            startAngle = -Math.PI / 2 + usedAngle;
+          if (drawnAngle > 0) {
+            c.beginPath();
+            c.arc(cx, cy, r, startAngle, startAngle + drawnAngle);
+            c.arc(cx, cy, r * 0.58, startAngle + drawnAngle, startAngle, true);
+            c.closePath();
+            c.fillStyle = colors[k];
+            c.fill();
+          }
+          usedAngle += segmentAngle;
+        });
+        c.textAlign = "center";
+        c.fillStyle = "#e7edf2";
+        c.font = "700 22px ui-monospace";
+        c.fillText(fmt(total / rollbacks.length, 1), cx, cy);
+        c.fillStyle = "#82909c";
+        c.font = "11px system-ui";
+        c.fillText("ms / rollback", cx, cy + 19);
+        if (updateBars)
+          $("#phaseBars").innerHTML = phaseKeys
+            .concat("other")
+            .map((k) =>
+              bar(
+                labels[k],
+                (a[k] / total) * 100,
+                fmt((a[k] / total) * 100, 1) + "%",
+                colors[k],
+              ),
+            )
+            .join("");
+      }
+      function bar(name, pct, val, color) {
+        return `<div class="bar-row"><span class="bar-name" title="${name}">${name}</span><div class="track"><div class="fill" style="width:${Math.max(0, Math.min(100, pct))}%;background:${color || ""}"></div></div><span class="bar-val">${val}</span></div>`;
+      }
+      function renderHooks(r) {
+        const a = [...(r?.hooks || [])]
+            .sort((x, y) => y.total_ms - x.total_ms)
+            .slice(0, 12),
+          max = a[0]?.total_ms || 1;
+        $("#hookBars").innerHTML =
+          a
+            .map((x) => {
+              const avgUs = x.calls ? (x.total_ms * 1000) / x.calls : 0;
+              return `<div class="hook-row"><div class="hook-head"><span class="hook-name" title="${x.name}">${x.name}</span><span class="hook-total">${fmt(x.total_ms)} ms total</span></div><div class="track"><div class="fill" style="width:${(x.total_ms / max) * 100}%"></div></div><div class="hook-stats">${x.calls.toLocaleString()} calls | ${fmt(avgUs)} us avg | ${fmt(x.max_us / 1000)} ms max</div></div>`;
+            })
+            .join("") || '<div class="empty">No hook samples.</div>';
+      }
+      function renderHeadless(r) {
+        const h = r?.headless_tick,
+          frames = Math.max(1, r?.frame_count || 0),
+          sections = [
+            {
+              name: "Total headless tick",
+              total: h?.total_ms,
+              maximum: h?.max_ms,
+            },
+            ...[
+              ["Timing, focus, input", "timing_input"],
+              ["Early draw and collision", "early_draw_collision"],
+              ["Viewport setup", "viewport_setup"],
+              ["Render begin and area", "render_begin_area"],
+              ["Battle action", "action"],
+              ["Input devices", "input_devices"],
+              ["Gameplay setup", "gameplay_setup"],
+              ["Unit move", "unit_move"],
+              ["Collision and hit solver", "collision_hit"],
+              ["Unit synchronization", "unit_sync"],
+              ["Simulation tail", "simulation_tail"],
+              ["Manager core", "manager_core"],
+              ["Network and services", "network_services"],
+              ["Render completion", "render"],
+              ["Post-frame work", "post_frame"],
+              ["Alt+F4 handling", "alt_f4"],
+            ].map(([name, key]) => ({
+              name,
+              total: h?.[key + "_ms"],
+              maximum: h?.[key + "_max_ms"],
+            })),
+          ].filter((x) => Number.isFinite(x.total)),
+          max = Math.max(...sections.map((x) => x.total / frames), 0);
+        $("#headlessBars").innerHTML =
+          sections
+            .map(
+              (x) =>
+                `<div class="hook-row"><div class="hook-head"><span class="hook-name" title="${x.name}">${x.name}</span><span class="hook-total">${fmt(x.total / frames)} ms / frame</span></div><div class="track"><div class="fill" style="width:${max ? (x.total / frames / max) * 100 : 0}%"></div></div><div class="hook-stats">${fmt(x.total)} ms rollback total | ${fmt(x.maximum)} ms max frame</div></div>`,
+            )
+            .join("") ||
+          '<div class="empty">No headless tick section samples. Load a profile generated by a build with detailed headless profiling.</div>';
+      }
+      function renderHitSolver(r) {
+        const h = r?.headless_tick?.hit_solver,
+          frames = Number(h?.frames || 0),
+          rows = [
+            {
+              name: "Input nodes",
+              total: Number(h?.input_nodes || 0),
+              maximum: Number(h?.input_nodes_max || 0),
+            },
+            {
+              name: "Output nodes",
+              total: Number(h?.output_nodes || 0),
+              maximum: Number(h?.output_nodes_max || 0),
+            },
+          ],
+          max = Math.max(
+            ...rows.map((x) => (frames ? x.total / frames : 0)),
+            0,
+          );
+        $("#hitSolverBars").innerHTML = frames
+          ? rows
+              .map((x) => {
+                const perFrame = x.total / frames;
+                return `<div class="hook-row"><div class="hook-head"><span class="hook-name">${x.name}</span><span class="hook-total">${fmt(perFrame, 2)} / frame</span></div><div class="track"><div class="fill" style="width:${max ? (perFrame / max) * 100 : 0}%"></div></div><div class="hook-stats">${Math.round(x.total).toLocaleString()} total nodes | ${Math.round(x.maximum).toLocaleString()} max frame | ${fmt(frames, 1)} sampled frames</div></div>`;
+              })
+              .join("")
+          : '<div class="empty">No hit solver workload counters in this profile.</div>';
+      }
+      function renderSnapshotWork(r) {
+        const snapshot = r?.snapshot,
+          saves = Number(snapshot?.count || 0),
+          definitions = [
+            ["Clone wrappers", "clone_wrappers"],
+            ["Clone children", "clone_children"],
+            ["Clone copies", "clone_copies"],
+            ["Empty clone copies", "clone_empty_copies"],
+            ["Clone creates", "clone_creates"],
+            ["Clone destroys", "clone_destroys"],
+            ["Shot recipes", "shot_recipe_count"],
+          ],
+          hasCounters = definitions.some(([, key]) => key in (snapshot || {})),
+          rows = definitions.map(([name, key]) => ({
+            name,
+            total: Number(snapshot?.[key] || 0),
+          })),
+          max = Math.max(...rows.map((x) => (saves ? x.total / saves : 0)), 0);
+        $("#snapshotWorkBars").innerHTML =
+          saves && hasCounters
+            ? rows
+                .map((x) => {
+                  const perSave = x.total / saves;
+                  return `<div class="hook-row"><div class="hook-head"><span class="hook-name">${x.name}</span><span class="hook-total">${fmt(perSave, 2)} / save</span></div><div class="track"><div class="fill" style="width:${max ? (perSave / max) * 100 : 0}%"></div></div><div class="hook-stats">${fmt(x.total, 1)} rollback total | ${fmt(saves, 1)} snapshot saves</div></div>`;
+                })
+                .join("")
+            : '<div class="empty">No snapshot workload counters in this profile.</div>';
+      }
+      function isCleanupObject(x) {
+        return (
+          x?.phase === "move" &&
+          !headlessGameplayCategories.has(x.category) &&
+          Number(x.calls) > 0
+        );
+      }
+      function renderUnitObjects(r) {
+        const frames = Math.max(1, r?.frame_count || 0),
+          phaseNames = {
+            move: "move",
+            sync_job: "sync phase 2",
+            sync_save: "sync phase 3",
+          },
+          categories = new Map(
+            (r?.unit_categories || []).map((x) => [x.category, x.name]),
+          ),
+          phaseOrder = { move: 0, sync_job: 1, sync_save: 2 },
+          a = [...(r?.unit_objects || [])],
+          sort = $("#unitObjectSort")?.value || "time";
+        a.sort(
+          sort === "time"
+            ? (x, y) =>
+                y.total_ms - x.total_ms ||
+                x.category - y.category ||
+                (phaseOrder[x.phase] ?? 9) - (phaseOrder[y.phase] ?? 9) ||
+                x.name.localeCompare(y.name)
+            : (x, y) =>
+                x.category - y.category ||
+                (phaseOrder[x.phase] ?? 9) - (phaseOrder[y.phase] ?? 9) ||
+                x.name.localeCompare(y.name) ||
+                y.total_ms - x.total_ms,
+        );
+        const max = Math.max(...a.map((x) => x.total_ms / frames), 0);
+        $("#unitObjectBars").innerHTML =
+          a
+            .map((x) => {
+              const category =
+                  categories.get(x.category) || `Group${x.category}`,
+                cleanup = isCleanupObject(x),
+                phase = cleanup
+                  ? "cleanup"
+                  : phaseNames[x.phase] || x.phase || "move",
+                title = `Category ${x.category} ${category} | ${phase} | ${x.name} | ${x.dti}`;
+              return `<div class="hook-row"><div class="hook-head"><span class="hook-name" title="${title}">Category ${x.category} ${category} | ${phase} | ${x.name}</span><span class="hook-total">${fmt(x.total_ms / frames, 3)} ms / frame</span></div><div class="track"><div class="fill" style="width:${max ? (x.total_ms / frames / max) * 100 : 0}%"></div></div><div class="hook-stats">${Number(x.visits || 0).toLocaleString()} list visits | ${x.calls.toLocaleString()} ${cleanup ? "cleanups" : "callbacks"} | ${fmt(x.calls / frames, 2)} calls/frame | ${fmt(x.avg_us, 2)} us avg | ${fmt(x.max_us / 1000, 3)} ms max</div></div>`;
+            })
+            .join("") ||
+          '<div class="empty">No sUnit entities sampled. Load a profile generated by a build with phase-aware entity profiling.</div>';
+      }
+      function aggregateCleanup() {
+        const categories = new Map(),
+          objects = new Map();
+        let frames = 0;
+        rollbacks.forEach((r) => {
+          frames += Number(r.frame_count || 0);
+          (r.unit_categories || []).forEach((c) =>
+            categories.set(c.category, c.name),
+          );
+          (r.unit_objects || []).filter(isCleanupObject).forEach((x) => {
+            const key = x.category + ":" + x.dti,
+              o = objects.get(key) || {
+                ...x,
+                visits: 0,
+                calls: 0,
+                total_ms: 0,
+                max_us: 0,
+              };
+            o.visits += Number(x.visits || 0);
+            o.calls += Number(x.calls || 0);
+            o.total_ms += Number(x.total_ms || 0);
+            o.max_us = Math.max(o.max_us, Number(x.max_us || 0));
+            objects.set(key, o);
+          });
+        });
+        return {
+          frame_count: frames,
+          unit_categories: [...categories].map(([category, name]) => ({
+            category,
+            name,
+          })),
+          unit_objects: [...objects.values()].map((x) => ({
+            ...x,
+            avg_us: x.calls ? (x.total_ms * 1000) / x.calls : 0,
+          })),
+        };
+      }
+      function renderCleanup(r) {
+        const frames = Math.max(1, r?.frame_count || 0),
+          categories = new Map(
+            (r?.unit_categories || []).map((x) => [x.category, x.name]),
+          ),
+          a = (r?.unit_objects || [])
+            .filter(isCleanupObject)
+            .sort((x, y) => y.total_ms - x.total_ms),
+          max = Math.max(...a.map((x) => x.total_ms / frames), 0);
+        $("#cleanupBars").innerHTML =
+          a
+            .map((x) => {
+              const category =
+                  categories.get(x.category) || `Group${x.category}`,
+                title = `Category ${x.category} ${category} | ${x.name} | ${x.dti}`;
+              return `<div class="hook-row"><div class="hook-head"><span class="hook-name" title="${title}">Category ${x.category} ${category} | ${x.name}</span><span class="hook-total">${fmt(x.total_ms / frames, 3)} ms / replayed frame</span></div><div class="track"><div class="fill" style="width:${max ? (x.total_ms / frames / max) * 100 : 0}%"></div></div><div class="hook-stats">${Number(x.calls || 0).toLocaleString()} cleanups | ${Number(x.visits || 0).toLocaleString()} visits | ${fmt(x.avg_us, 2)} us avg | ${fmt(x.max_us / 1000, 3)} ms max | ${fmt(x.total_ms, 3)} ms total</div></div>`;
+            })
+            .join("") ||
+          '<div class="empty">No state 3/4 cleanup occurred in categories filtered from gameplay movement.</div>';
+      }
+      function meanObject(items) {
+        if (!items.length) return {};
+        const keys = new Set(
+            items.flatMap((x) =>
+              x && typeof x === "object" ? Object.keys(x) : [],
+            ),
+          ),
+          result = {};
+        keys.forEach((k) => {
+          const values = items
+            .map((x) => x?.[k])
+            .filter((v) => v !== undefined);
+          if (values.some((v) => Array.isArray(v))) return;
+          if (values.every(Number.isFinite))
+            result[k] = values.reduce((a, b) => a + b, 0) / values.length;
+          else if (values.some((v) => v && typeof v === "object"))
+            result[k] = meanObject(
+              values.filter((v) => v && typeof v === "object"),
+            );
+        });
+        return result;
+      }
+      function averageRollback() {
+        const r = meanObject(rollbacks),
+          hooks = new Map(),
+          categories = new Map(),
+          objects = new Map();
+        rollbacks.forEach((x) => {
+          (x.hooks || []).forEach((h) => {
+            if (!hooks.has(h.name)) hooks.set(h.name, []);
+            hooks.get(h.name).push(h);
+          });
+          (x.unit_categories || []).forEach((c) => {
+            const key = c.phase + ":" + c.category;
+            if (!categories.has(key)) categories.set(key, []);
+            categories.get(key).push(c);
+          });
+          (x.unit_objects || []).forEach((o) => {
+            const key = (o.phase || "move") + ":" + o.category + ":" + o.dti;
+            if (!objects.has(key)) objects.set(key, []);
+            objects.get(key).push(o);
+          });
+        });
+        r.hooks = [...hooks].map(([name, items]) => ({
+          name,
+          ...meanObject(items),
+        }));
+        r.unit_categories = [...categories].map(([, items]) => ({
+          ...items[0],
+          ...meanObject(items),
+        }));
+        r.unit_objects = [...objects].map(([, items]) => ({
+          ...items[0],
+          ...meanObject(items),
+        }));
+        return r;
+      }
+      function select(i, scroll = true) {
+        const all = i < 0 || !rollbacks[i];
+        selected = all ? -1 : i;
+        const r = all ? averageRollback() : rollbacks[i],
+          posts = [...postByFrame.values()],
+          p = all ? meanObject(posts) : postByFrame.get(r.end_frame),
+          pct = (v, parent) =>
+            parent ? fmt((v / parent) * 100, 1) + "%" : null,
+          average = $("#selectedMode").value === "frame",
+          frames = Math.max(1, r.frame_count || 0),
+          saves = Math.max(1, r.snapshot?.count || 0);
+        renderHooks(r);
+        renderHeadless(r);
+        renderHitSolver(r);
+        renderSnapshotWork(r);
+        renderUnitObjects(r);
+        renderCleanup(all ? aggregateCleanup() : r);
+        $("#detailEyebrow").textContent = all
+          ? "All rollbacks"
+          : "Selected rollback";
+        $("#selectedRange").textContent = all
+          ? "Average"
+          : `${r.start_frame} - ${r.end_frame}`;
+        $("#selectedMeta").textContent = average
+          ? `${all ? fmt(r.frame_count, 1) : r.frame_count} frames | ${fmt(r.total_ms / frames)} ms/frame amortized | ${fmt(r.total_ms)} ms total${all ? " average" : ""}`
+          : `${all ? fmt(r.frame_count, 1) : r.frame_count} frames | ${fmt(r.total_ms)} ms total${all ? " average" : ""}`;
+        const entries = [
+            {
+              name: "Restore",
+              value: r.restore?.total_ms,
+              divisor: 1,
+              unit: "ms once",
+              detail: `${pct(r.restore?.total_ms, r.total_ms)} of rollback | one restore before replay`,
+            },
+            {
+              name: "  Restore setup",
+              value: r.restore?.setup_ms,
+              divisor: 1,
+              unit: "ms once",
+              detail: "validate slot and prepare live owner pointers",
+            },
+            {
+              name: "  Restore regions",
+              value: r.restore?.regions_ms,
+              divisor: 1,
+              unit: "ms once",
+              detail: "apply packed state and character fixups",
+            },
+            {
+              name: "  Restore collision clones",
+              value: r.restore?.collision_clones_ms,
+              divisor: 1,
+              unit: "ms once",
+              detail: "deep-copy saved collision graphs into live wrappers",
+            },
+            {
+              name: "  Restore owner pointers",
+              value: r.restore?.owner_pointers_ms,
+              divisor: 1,
+              unit: "ms once",
+              detail: "repair owner slots whose allocations changed",
+            },
+            {
+              name: "  Reset hit solver",
+              value: r.restore?.hit_solver_ms,
+              divisor: 1,
+              unit: "ms once",
+              detail: "discard transient pending hit work",
+            },
+            {
+              name: "  Clear effect slots",
+              value: r.restore?.effect_slots_ms,
+              divisor: 1,
+              unit: "ms once",
+              detail: "remove references to retired effects",
+            },
+            {
+              name: "  Sync character UI",
+              value: r.restore?.ui_ms,
+              divisor: 1,
+              unit: "ms once",
+              detail: "repair active character presentation state",
+            },
+            {
+              name: "Snapshot saves",
+              value: r.snapshot?.total_ms,
+              divisor: saves,
+              unit: "ms / save",
+              detail: `${pct(r.snapshot?.total_ms, r.total_ms)} of rollback | ${r.snapshot?.count || 0} saves`,
+            },
+            {
+              name: "Patch enable",
+              value: r.phases_ms?.patch_enable,
+              divisor: 1,
+              unit: "ms once",
+              detail: "enable headless rollback patches",
+            },
+            {
+              name: "Input history save",
+              value: r.phases_ms?.input_history_save,
+              divisor: 1,
+              unit: "ms once",
+              detail: "preserve live input history before replay",
+            },
+            {
+              name: "Diagnostics setup",
+              value: r.phases_ms?.diag_setup,
+              divisor: 1,
+              unit: "ms once",
+              detail: "prepare rollback diagnostics",
+            },
+            {
+              name: "Pre-restore JSON",
+              value: r.phases_ms?.pre_restore_json,
+              divisor: 1,
+              unit: "ms once",
+              detail: "capture diagnostic state before restore",
+            },
+            {
+              name: "Input availability",
+              value: r.phases_ms?.input_availability,
+              divisor: 1,
+              unit: "ms once",
+              detail: "validate replay input range",
+            },
+            {
+              name: "Frame input",
+              value: r.phases_ms?.frame_input,
+              divisor: frames,
+              unit: "ms / frame",
+              detail: "apply replay input",
+            },
+            {
+              name: "Frame diagnostics (pre)",
+              value: r.phases_ms?.frame_diag_pre,
+              divisor: frames,
+              unit: "ms / frame",
+              detail: "capture pre-tick diagnostics",
+            },
+            {
+              name: "Native tick",
+              value: r.phases_ms?.native_tick,
+              divisor: frames,
+              unit: "ms / frame",
+              detail: `${pct(r.phases_ms?.native_tick, r.total_ms)} of rollback | ${r.frame_count} ticks | ${fmt(r.phases_ms?.native_tick_max)} ms max`,
+            },
+            {
+              name: "Frame JSON",
+              value: r.phases_ms?.frame_json,
+              divisor: frames,
+              unit: "ms / frame",
+              detail: `${pct(r.phases_ms?.frame_json, r.total_ms)} of rollback | ${r.frame_count} frames`,
+            },
+            {
+              name: "Frame snapshot",
+              value: r.phases_ms?.frame_snapshot,
+              divisor: frames,
+              unit: "ms / frame",
+              detail: "save replayed frame snapshots",
+            },
+            {
+              name: "Frame input end",
+              value: r.phases_ms?.frame_input_end,
+              divisor: frames,
+              unit: "ms / frame",
+              detail: "finalize replay input",
+            },
+            {
+              name: "Frame diagnostics (post)",
+              value: r.phases_ms?.frame_diag_post,
+              divisor: frames,
+              unit: "ms / frame",
+              detail: "capture post-tick diagnostics",
+            },
+            {
+              name: "Input history restore",
+              value: r.phases_ms?.input_history_restore,
+              divisor: 1,
+              unit: "ms once",
+              detail: "restore live input history after replay",
+            },
+            {
+              name: "Timing resync",
+              value: r.phases_ms?.timing_resync,
+              divisor: 1,
+              unit: "ms once",
+              detail: "resynchronize live sMain timing after replay",
+            },
+            {
+              name: "Cut-in repair",
+              value: r.phases_ms?.cutin_repair,
+              divisor: 1,
+              unit: "ms once",
+              detail: "repair orphaned cut-in draw and material state",
+            },
+            {
+              name: "Patch disable",
+              value: r.phases_ms?.patch_disable,
+              divisor: 1,
+              unit: "ms once",
+              detail:
+                "restore sleep, present, swapchain, and draw-call patches",
+            },
+            {
+              name: "Stale pointers",
+              value: r.restore?.stale_pointers_ms,
+              divisor: 1,
+              unit: "ms once",
+              detail: `${pct(r.restore?.stale_pointers_ms, r.restore?.total_ms)} of restore`,
+            },
+            {
+              name: "Shots/effects",
+              value: r.restore?.shots_ms,
+              divisor: 1,
+              unit: "ms once",
+              detail: `${pct(r.restore?.shots_ms, r.restore?.total_ms)} of restore`,
+            },
+            {
+              name: "  Destroy shots",
+              value: r.shot_restore?.destroy_shots_ms,
+              divisor: 1,
+              unit: "ms once",
+              detail: `${r.shot_restore?.current_shots || 0} current shots`,
+            },
+            {
+              name: "  Sanitize effects",
+              value: r.shot_restore?.sanitize_effects_ms,
+              divisor: 1,
+              unit: "ms once",
+              detail: `${r.shot_restore?.effect_sanitize_calls || 0} effects | ${r.shot_restore?.generator_nodes || 0} generator nodes`,
+            },
+            {
+              name: "  Respawn shots",
+              value: r.shot_restore?.respawn_ms,
+              divisor: 1,
+              unit: "ms once",
+              detail: `${r.shot_restore?.saved_shots || 0} saved shots`,
+            },
+            {
+              name: "    Native factory",
+              value: r.shot_restore?.respawn_factory_ms,
+              divisor: 1,
+              unit: "ms once",
+              detail: "construct shot and native owned effects",
+            },
+            {
+              name: "    Concrete restore",
+              value: r.shot_restore?.respawn_concrete_ms,
+              divisor: 1,
+              unit: "ms once",
+              detail: "restore body, collision topology, and target links",
+            },
+            {
+              name: "      Pointer scan",
+              value: r.shot_restore?.concrete_pointer_scan_ms,
+              divisor: 1,
+              unit: "ms once",
+              detail: "preserve live and saved pointer-looking words",
+            },
+            {
+              name: "      Embedded live",
+              value: r.shot_restore?.concrete_embedded_live_ms,
+              divisor: 1,
+              unit: "ms once",
+              detail: "discover live inline owner objects",
+            },
+            {
+              name: "      Embedded saved",
+              value: r.shot_restore?.concrete_embedded_saved_ms,
+              divisor: 1,
+              unit: "ms once",
+              detail: "discover saved inline owner objects",
+            },
+            {
+              name: "      Collision restore",
+              value: r.shot_restore?.concrete_collision_ms,
+              divisor: 1,
+              unit: "ms once",
+              detail: "restore and verify collision primitives",
+            },
+            {
+              name: "      Concrete validate",
+              value: r.shot_restore?.concrete_validate_ms,
+              divisor: 1,
+              unit: "ms once",
+              detail: "validate live DTI, size, and memory",
+            },
+            {
+              name: "      Copy body",
+              value: r.shot_restore?.concrete_copy_body_ms,
+              divisor: 1,
+              unit: "ms once",
+              detail: "create saved body overlay",
+            },
+            {
+              name: "      Apply body",
+              value: r.shot_restore?.concrete_apply_body_ms,
+              divisor: 1,
+              unit: "ms once",
+              detail: "copy filtered overlay into live shot",
+            },
+            {
+              name: "      Target restore",
+              value: r.shot_restore?.concrete_targets_ms,
+              divisor: 1,
+              unit: "ms once",
+              detail: "restore attack target tables",
+            },
+            {
+              name: "    Release effects",
+              value: r.shot_restore?.respawn_release_effects_ms,
+              divisor: 1,
+              unit: "ms once",
+              detail: "release fresh embedded particle graph",
+            },
+            {
+              name: "    Overlay state",
+              value: r.shot_restore?.respawn_overlay_ms,
+              divisor: 1,
+              unit: "ms once",
+              detail: "class fixups and common flight state",
+            },
+            {
+              name: "    Register shots",
+              value: r.shot_restore?.respawn_register_ms,
+              divisor: 1,
+              unit: "ms once",
+              detail: "recipe map and pending-unit registration",
+            },
+            {
+              name: "    Prepare shots",
+              value: r.shot_restore?.respawn_prepare_ms,
+              divisor: 1,
+              unit: "ms once",
+              detail: "restore RNG and validate object references",
+            },
+            {
+              name: "  Pre-sanitize lists",
+              value: r.shot_restore?.pre_sanitize_ms,
+              divisor: 1,
+              unit: "ms once",
+              detail: "validate sUnit lists before teardown",
+            },
+            {
+              name: "  Post-sanitize lists",
+              value: r.shot_restore?.post_sanitize_ms,
+              divisor: 1,
+              unit: "ms once",
+              detail: "validate sUnit lists after shot destruction",
+            },
+            {
+              name: "  Retire effects",
+              value: r.shot_restore?.retire_effects_ms,
+              divisor: 1,
+              unit: "ms once",
+              detail: `${r.shot_restore?.effect_visits || 0} effect visits across both passes`,
+            },
+            {
+              name: "  Collect shots",
+              value: r.shot_restore?.collect_shots_ms,
+              divisor: 1,
+              unit: "ms once",
+              detail: "find currently linked shots",
+            },
+            {
+              name: "  Respawn setup",
+              value: r.shot_restore?.respawn_setup_ms,
+              divisor: 1,
+              unit: "ms once",
+              detail: "prepare managers and preserve RNG",
+            },
+            {
+              name: "  Finalize shots",
+              value: r.shot_restore?.finalize_ms,
+              divisor: 1,
+              unit: "ms once",
+              detail: "flush registrations, restore RNG, release resources",
+            },
+            {
+              name: "  Pin resources",
+              value: r.shot_restore?.pin_resources_ms,
+              divisor: 1,
+              unit: "ms once",
+              detail: "retain saved shot resources",
+            },
+            {
+              name: "Build regions",
+              value: r.snapshot?.build_regions_ms,
+              divisor: saves,
+              unit: "ms / save",
+              detail: `${pct(r.snapshot?.build_regions_ms, r.snapshot?.total_ms)} of snapshot saves`,
+            },
+            {
+              name: "  Copy regions",
+              value: r.snapshot?.copy_regions_ms,
+              divisor: saves,
+              unit: "ms / save",
+              detail: `${fmt(r.snapshot?.avg_kib)} KiB | ${fmt(r.snapshot?.avg_regions, 1)} regions average`,
+            },
+            {
+              name: "  Recycle/allocate",
+              value: r.snapshot?.recycle_allocate_ms,
+              divisor: saves,
+              unit: "ms / save",
+              detail: "reuse or grow snapshot slot storage",
+            },
+            {
+              name: "  Save metadata",
+              value: r.snapshot?.metadata_ms,
+              divisor: saves,
+              unit: "ms / save",
+              detail: "store region descriptors and diagnostics",
+            },
+            {
+              name: "  Collision clones",
+              value: r.snapshot?.collision_clones_ms,
+              divisor: saves,
+              unit: "ms / save",
+              detail: "retain external animation/collision objects",
+            },
+            {
+              name: "  Shot recipes",
+              value: r.snapshot?.shot_recipes_ms,
+              divisor: saves,
+              unit: "ms / save",
+              detail: "capture shot and effect reconstruction state",
+            },
+            {
+              name: "Post-resim save",
+              value: p?.save_snapshot_ms,
+              divisor: 1,
+              unit: "ms once",
+              detail: "after rollback | not included in total",
+            },
+          ]
+            .filter((x) => Number.isFinite(x.value))
+            .map((x) => ({
+              ...x,
+              displayValue: average ? x.value / x.divisor : x.value,
+              displayUnit: average ? x.unit : "ms total",
+            }))
+            .sort((a, b) => b.displayValue - a.displayValue),
+          max = entries[0]?.displayValue || 1;
+        $("#selectedBars").classList.remove("empty");
+        $("#selectedBars").innerHTML = entries
+          .map(
+            (x) =>
+              `<div class="selected-row"><span class="selected-name">${x.name}</span><div class="track selected-track"><div class="fill" style="width:${(x.displayValue / max) * 100}%"></div></div><span class="selected-value">${fmt(x.displayValue)} ${x.displayUnit}</span><span class="selected-context">${x.detail}</span></div>`,
+          )
+          .join("");
+        document
+          .querySelectorAll("#records tr")
+          .forEach((tr, n) => tr.classList.toggle("selected", !all && n === i));
+        if (scroll)
+          document
+            .querySelector("#records tr.selected")
+            ?.scrollIntoView({ block: "nearest" });
+      }
+      function renderTable() {
+        const body = $("#records");
+        body.innerHTML = rollbacks
+          .map((r, i) => {
+            const p = postByFrame.get(r.end_frame);
+            return `<tr data-i="${i}"><td>${r.start_frame}-${r.end_frame}</td><td>${r.frame_count}</td><td>${fmt(r.total_ms)}</td><td>${fmt(r.restore?.total_ms)}</td><td>${fmt(r.snapshot?.total_ms)}</td><td>${fmt(r.phases_ms?.native_tick)}</td><td>${fmt(r.phases_ms?.frame_json)}</td><td>${fmt(r.phases_ms?.cutin_repair, 3)}</td><td>${fmt(p?.save_snapshot_ms)}</td></tr>`;
+          })
+          .join("");
+        body.onclick = (e) => {
+          const tr = e.target.closest("tr");
+          if (tr) select(+tr.dataset.i);
+        };
+        $("#recordCount").textContent = rollbacks.length + " records";
+      }
+      const input = $("#fileInput");
+      $("#browse").onclick = (e) => {
+        e.stopPropagation();
+        input.click();
+      };
+      $("#open").onclick = () => input.click();
+      $("#dropCard").onclick = () => input.click();
+      input.onchange = () => input.files[0] && loadFile(input.files[0]);
+      ["dragenter", "dragover"].forEach((n) =>
+        document.addEventListener(n, (e) => {
+          e.preventDefault();
+          $("#dropCard").classList.add("drag");
+        }),
+      );
+      ["dragleave", "drop"].forEach((n) =>
+        document.addEventListener(n, (e) => {
+          e.preventDefault();
+          $("#dropCard").classList.remove("drag");
+        }),
+      );
+      document.addEventListener(
+        "drop",
+        (e) => e.dataTransfer.files[0] && loadFile(e.dataTransfer.files[0]),
+      );
+      $("#limit").onchange = scheduleCharts;
+      $("#selectedMode").onchange = () => select(selected, false);
+      $("#unitObjectSort").onchange = () => select(selected, false);
+      addEventListener("resize", scheduleCharts);
+    </script>
+  </body>
 </html>

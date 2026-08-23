@@ -264,7 +264,7 @@ void Profile_DumpEnabled(const RollbackProfile& profile, bool ndjsonEnabled,
         "unit_remove_effect_sub_buffers", "unit_remove_native", "unit_remove_recipe_cleanup",
         "kirigakure_effect_update", "render_end_frame", "sound_move",
         "game_ui_move", "chr_cpu_class_func", "main_move",
-        "model_bounds_from_joints"
+        "model_bounds_from_joints", "collision_move", "hit_solver_move"
     };
     static_assert(sizeof(hookNames) / sizeof(hookNames[0]) ==
                   (size_t)RollbackHookProfileId::Count);
@@ -293,7 +293,10 @@ void Profile_DumpEnabled(const RollbackProfile& profile, bool ndjsonEnabled,
                  "\"input_devices_ms\":%.6f,\"input_devices_max_ms\":%.6f,"
                  "\"gameplay_setup_ms\":%.6f,\"gameplay_setup_max_ms\":%.6f,"
                  "\"unit_move_ms\":%.6f,\"unit_move_max_ms\":%.6f,"
-                 "\"collision_hit_ms\":%.6f,\"collision_hit_max_ms\":%.6f,"
+                  "\"collision_hit_ms\":%.6f,\"collision_hit_max_ms\":%.6f,"
+                  "\"hit_solver\":{\"frames\":%u,\"input_nodes\":%llu,"
+                  "\"output_nodes\":%llu,\"input_nodes_max\":%u,"
+                  "\"output_nodes_max\":%u},"
                  "\"unit_sync_ms\":%.6f,\"unit_sync_max_ms\":%.6f,"
                  "\"simulation_tail_ms\":%.6f,\"simulation_tail_max_ms\":%.6f,"
                  "\"manager_core_ms\":%.6f,\"manager_core_max_ms\":%.6f,"
@@ -308,8 +311,8 @@ void Profile_DumpEnabled(const RollbackProfile& profile, bool ndjsonEnabled,
                  "\"shot_recipes_ms\":%.6f,\"clone_wrappers\":%u,"
                  "\"clone_children\":%u,\"clone_copies\":%u,"
                  "\"clone_empty_copies\":%u,\"clone_creates\":%u,"
-                 "\"clone_destroys\":%u},"
-                "\"restore\":{\"total_ms\":%.6f,\"setup_ms\":%.6f,\"regions_ms\":%.6f,"
+                 "\"clone_destroys\":%u,\"shot_recipe_count\":%u},"
+                 "\"restore\":{\"total_ms\":%.6f,\"setup_ms\":%.6f,\"regions_ms\":%.6f,"
                 "\"collision_clones_ms\":%.6f,\"owner_pointers_ms\":%.6f,"
                  "\"hit_solver_ms\":%.6f,\"stale_pointers_ms\":%.6f,"
                  "\"effect_slots_ms\":%.6f,\"shots_ms\":%.6f,\"ui_ms\":%.6f},"
@@ -348,9 +351,13 @@ void Profile_DumpEnabled(const RollbackProfile& profile, bool ndjsonEnabled,
                  Profile_Ms(profile.headlessAction), Profile_Ms(profile.headlessActionMax),
                  Profile_Ms(profile.headlessInputDevices), Profile_Ms(profile.headlessInputDevicesMax),
                  Profile_Ms(profile.headlessGameplaySetup), Profile_Ms(profile.headlessGameplaySetupMax),
-                 Profile_Ms(profile.headlessUnitMove), Profile_Ms(profile.headlessUnitMoveMax),
-                 Profile_Ms(profile.headlessCollisionHit), Profile_Ms(profile.headlessCollisionHitMax),
-                 Profile_Ms(profile.headlessUnitSync), Profile_Ms(profile.headlessUnitSyncMax),
+                  Profile_Ms(profile.headlessUnitMove), Profile_Ms(profile.headlessUnitMoveMax),
+                  Profile_Ms(profile.headlessCollisionHit), Profile_Ms(profile.headlessCollisionHitMax),
+                  profile.hitSolverFrames,
+                  (unsigned long long)profile.hitSolverInputNodes,
+                  (unsigned long long)profile.hitSolverOutputNodes,
+                  profile.hitSolverInputNodesMax, profile.hitSolverOutputNodesMax,
+                  Profile_Ms(profile.headlessUnitSync), Profile_Ms(profile.headlessUnitSyncMax),
                  Profile_Ms(profile.headlessSimulationTail), Profile_Ms(profile.headlessSimulationTailMax),
                  Profile_Ms(profile.headlessManagerCore), Profile_Ms(profile.headlessManagerCoreMax),
                  Profile_Ms(profile.headlessNetworkServices), Profile_Ms(profile.headlessNetworkServicesMax),
@@ -367,6 +374,7 @@ void Profile_DumpEnabled(const RollbackProfile& profile, bool ndjsonEnabled,
                  profile.snapshotCloneWrappers, profile.snapshotCloneChildren,
                  profile.snapshotCloneCopies, profile.snapshotCloneEmptyCopies,
                  profile.snapshotCloneCreates, profile.snapshotCloneDestroys,
+                 profile.snapshotShotRecipeCount,
                  Profile_Ms(profile.restoreTotal), Profile_Ms(profile.restoreSetup),
                 Profile_Ms(profile.restoreRegions), Profile_Ms(profile.restoreCollisionClones),
                  Profile_Ms(profile.restoreOwnerPointers), Profile_Ms(profile.restoreHitSolver),

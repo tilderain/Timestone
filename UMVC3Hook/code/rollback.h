@@ -97,6 +97,7 @@ void Rollback_SetMainInstance(uint64_t main);
 
 // Hook setup — installs the sMvc3Main__move hook for re-simulation stepping.
 void Rollback_InitHooks();
+bool Rollback_PatchHitSolverAlwaysInline();
 void Rollback_PatchBattleUiAllocationFailure();
 void Rollback_InitNativeNullGuards();
 

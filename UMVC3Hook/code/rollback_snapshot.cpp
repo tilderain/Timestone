@@ -1547,6 +1547,12 @@ void Rollback_SaveSnapshot(int32_t frame)
     Effect_CaptureRecipes(slot);
     const uint64_t shotRecipesEnd = Profile_Now();
 
+    if constexpr (ROLLBACK_PROFILING_ENABLED) {
+        if (g_activeRollbackProfile)
+            g_activeRollbackProfile->snapshotShotRecipeCount +=
+                (uint32_t)slot.shotRecipes.size();
+    }
+
     Profile_RecordSnapshot(profileStart, buildRegionsEnd, allocationEnd, copyRegionsEnd,
                            snapshotMetadataEnd, collisionClonesEnd, shotRecipesEnd,
                            offset, (uint32_t)count);

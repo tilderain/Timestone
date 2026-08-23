@@ -341,7 +341,9 @@ uint64_t GetDti(void* object)
 
 uint32_t DtiSize(uint64_t dti)
 {
-    if (!dti || !Accessible(dti + 0x30, sizeof(uint32_t))) return 0;
+    // Every caller passes a fresh GetDti result, which already validated this
+    // exact size field without any intervening native work.
+    if (!dti) return 0;
     return (*(uint32_t*)(dti + 0x30) & 0x7FFFFF) << 2;
 }
 

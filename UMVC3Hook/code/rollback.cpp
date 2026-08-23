@@ -9,6 +9,7 @@
 
 void Rollback_InitHooks()
 {
+    Rollback_PatchHitSolverAlwaysInline();
     Rollback_PatchBattleUiAllocationFailure();
     Rollback_InitNativeNullGuards();
     Rollback_InitOnlineBattleHook();

@@ -710,7 +710,7 @@ void Rollback_HeadlessTick(uint64_t sMain)
 
     const uint64_t sUnit = MainMember(sMain, 0x401a0);
     Rollback_FreezeWatchdogHeartbeat("headless-unit-move-pass", g_resimulateCurrentFrame);
-    HeadlessUnitPass<ROLLBACK_PROFILING_ENABLED>(
+        HeadlessUnitPass<ROLLBACK_PROFILING_ENABLED>(
         sMain, sUnit, RollbackUnitProfilePhase::Move, 1,
         SUNIT_MOVE_CATEGORY_VTABLE);
 
@@ -718,8 +718,28 @@ void Rollback_HeadlessTick(uint64_t sMain)
         &RollbackProfile::headlessUnitMoveMax);
 
     Rollback_FreezeWatchdogHeartbeat("headless-collision", g_resimulateCurrentFrame);
-    VTableCall(MainMember(sMain, 0x401e0), 0x30); // mpCollision base cSystem::move.
-    VTableCall(ManagerSubsystem(FN_GET_HIT_SOLVER), 0x30); // sHitSolver::move.
+    {
+        RollbackHookProfileScope collisionProfile(RollbackHookProfileId::CollisionMove);
+        VTableCall(MainMember(sMain, 0x401e0), 0x30); // mpCollision base cSystem::move.
+    }
+    const uint64_t hitSolver = ManagerSubsystem(FN_GET_HIT_SOLVER);
+    if constexpr (ROLLBACK_PROFILING_ENABLED) {
+        const uint32_t inputNodes = *(uint32_t*)(hitSolver + 0x40);
+        g_activeRollbackProfile->hitSolverInputNodes += inputNodes;
+        g_activeRollbackProfile->hitSolverInputNodesMax =
+            std::max(g_activeRollbackProfile->hitSolverInputNodesMax, inputNodes);
+        ++g_activeRollbackProfile->hitSolverFrames;
+    }
+    {
+        RollbackHookProfileScope hitSolverProfile(RollbackHookProfileId::HitSolverMove);
+        VTableCall(hitSolver, 0x30); // sHitSolver::move.
+    }
+    if constexpr (ROLLBACK_PROFILING_ENABLED) {
+        const uint32_t outputNodes = *(uint32_t*)(hitSolver + 0x40);
+        g_activeRollbackProfile->hitSolverOutputNodes += outputNodes;
+        g_activeRollbackProfile->hitSolverOutputNodesMax =
+            std::max(g_activeRollbackProfile->hitSolverOutputNodesMax, outputNodes);
+    }
 
         profile.Add(&RollbackProfile::headlessCollisionHit,
         &RollbackProfile::headlessCollisionHitMax);
