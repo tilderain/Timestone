@@ -427,6 +427,103 @@ missing, using the current motion number, cursor, and flags. This rebuilds the
 resource-derived slot without advancing playback; the native `uShot__preMove`
 model evaluation remains the sole frame advance.
 
+The `20260822_200341` pair exposed the preceding actor-command half of the same
+reconstruction defect. At frame 1637 both boards were at Y `-10.0`, but the
+host's embedded `cActorGameModelAnm` at `+0x1348` had `mAnmType=0`, `mKeyIdx=1`,
+and a command block at `+0x1390`; the client retained fresh setup state
+`mAnmType=1`, `mKeyIdx=0`, and a null command block. At frame 1638 the client
+snapped to the terminal Y `4.5` and later froze on motion zero, while the host
+followed motion zero through Y `-5.71042`, `-0.9375`, and `2.86874` before
+selecting motion one. A resim-spawned board can commit actor animation zero
+without running the model-category command bind. Before repairing its primary
+motion pointers, force `cActorGameModelAnm__bindActionCommandState` only when
+`+0x1390` is null,
+using the restored actor animation number at `+0x1310`. This recreates the
+resource-derived AnmChr command state without replaying it on an already-bound
+board. Restrict this forced initialization to opening model motion zero. In the
+`20260822_202346` follow-up, frames 935-942 matched through the opening motion
+and transition to motion one, but the client's motion-one command binding became
+temporarily null at frame 943. Forcing the actor state check again at frame 944
+scheduled a fresh motion-one selection; the client cursor reset from `7/6` to
+`1/0` at frame 945 and repeated the snapping animation. Later motions use only
+the pointer-binding repair, which preserves the current playback cursor.
+
+The `20260822_203516` pair then showed that binding opening motion zero alone is
+not sufficient. Frames 271-275 matched, but at frame 276 the client's actor
+command block disappeared at terminal motion-zero cursor `6/5`. The forced
+state check recreated the resource at command index zero; at frame 277 the host
+advanced to command index two and motion one while the client remained at
+terminal motion zero. After rebuilding a missing opening command block, run
+`cActorGameModelAnm__advanceCommandBlock` once against the restored actor time
+and re-read the selected model motion before repairing its pointers. This
+consumes the pending motion-zero transition without re-entering an already
+active motion one.
+
+The `20260822_204458` pair exposed the cached-resource branch of this repair.
+Frame 3512 matched at Y `-10.0` and motion cursor `1/0`. Rebuilding the client's
+opening command made its primary bindings ready immediately, so the repair
+returned with Motion[0] reset to cursor `0/0` and the root transform reset to
+default Y `4.5`. At frame 3513 the host had naturally risen to Y `-5.71042` at
+cursor `2/1`; the client restarted the opening pose and remained two frames
+behind until both selected motion one. Preserve Motion[0]'s pointer-free scalar
+state and `uCoord+0x1b0..+0x21f` around command and pointer binding whenever the
+selected motion number does not change. A genuine motion-zero-to-one command
+transition keeps its newly selected playback state.
+
+The `20260822_205056` pair showed that preserving the transform is insufficient
+when binding completes after the frame's native model tick. At frame 1250 both
+peers had motion-zero cursor `2/1`, but the host evaluated Y `-5.71042` while the
+client retained setup Y `4.5` through the rest of the rise. Motion-one bindings
+also disappeared at frames 1261-1262, leaving its pose at setup defaults despite
+a matching cursor. After restoring pointer-free playback onto newly available
+bindings, call `uModel__updateMotionEvaluation` and the model's world/child
+transform virtuals once. This samples the restored cursor without calling
+`uModel::move` or advancing playback, avoiding the earlier double-speed bug.
+
+The `20260822_205548` pair still had an asynchronous first-frame gap. At frame
+3123 the client had no primary motion bindings; at frame 3124 its cursor reached
+`2/1` but its pose remained at default Y `4.5`, and the bindings became usable
+only at frame 3125. Its actor command block also remained null through most of
+motion one. Resolve the pending Prickle motion resource at `+0x11b0`
+synchronously with `sResource__loadResourceSync` and assign it through the
+native cResource slot-zero path before command reconstruction. Rebuild every
+null actor command block as in the initial repair, but preserve playback and
+pose whenever command advancement keeps the same motion number. This retains
+the original repair's command continuity without restarting active motion one.
+
+The `20260822_210224` pair showed that command reconstruction from the per-frame
+hitbox hook resets evaluated joint state even when captured motion and root
+scalars match. Keep that hook limited to pointer-only motion binding repair;
+native `uShot__preMove` remains the sole playback and pose evaluator.
+
+The `20260822_211553` pair isolated a different path from resim-time spawning:
+a snapshot-reconstructed client board first appeared at frame 1601 with its
+restored actor time and motion cursor, but fresh setup command state
+(`mAnmType=1`, null command block). Pointer repair made the model ready while
+motion zero remained frozen at cursor 6; the host entered motion one and the
+checksum diverged at frame 1613. During final reconstructed-shot class restore,
+bind the saved actor animation once and advance its command block against the
+restored actor time. If catch-up retains the saved motion number, preserve its
+pointer-free playback state and root pose around the operation. This gives the
+first native tick valid command continuity without re-entering command repair
+from the per-frame hitbox path.
+
+The `20260822_212355` follow-up showed that applying this repair to an already
+active Motion[1] is destructive even when its logged scalars are preserved.
+At frame 620 the client restored Motion[1] cursor `2/1`; binding animation zero
+again retained the cursor and root position but reset uncaptured evaluated joint
+state, leaving the visible board reset while scalar playback continued. Rebuild
+actor command state only for restored opening Motion[0]. Motion[1] playback does
+not require that command block, and the later animation-zero-to-one phase change
+naturally performs its own native bind.
+
+The temporary uncapped `PRICKLETRACE` instrumentation also showed that
+`Rollback_AfterShotSpawn` runs before Prickle setup populates its animation and
+resource fields. Its synchronous load, command bind, and Motion[0] bind were all
+no-ops and have been removed. The final repair consists only of opening
+Motion[0] command reconstruction during class restore and pointer-only motion
+binding repair when a reconstructed model lacks derived bindings.
+
 Rocket Raccoon's Pendulum Log has a one-frame collision transition when its
 uncached motion resource first binds. In the `20260822_170619` pair, both peers'
 capsule geometry matched through Pendulum time 14 and again from time 16, but at
@@ -442,7 +539,8 @@ animated frames native.
 
 Rocket Raccoon's `uShotVulcanOilBalloonGroundOil` (`0x140d4c478`) creates a
 slot-1 callback effect with a fresh particle generator and manager graph. The
-`20260822_175251` rollback crash reached `cParticleGenerator_vfn17` through
+`20260822_175251` rollback crash reached
+`cParticleGenerator__updateAndSpawnParticles` through
 `uEffect__moveAfter`; the live billboard generator's free-list tail at `+0xf8`
 had become the float bit pattern `-2.0f` (`0xc0000000`). Do not rewind captured
 effect or generator emission scalars onto this factory-created callback. Keep

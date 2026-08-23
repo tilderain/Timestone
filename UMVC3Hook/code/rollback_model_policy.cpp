@@ -84,6 +84,8 @@ constexpr uintptr_t FN_CRESOURCE_ASSIGN_SLOT = 0x140529730;
 constexpr uintptr_t FN_CRESOURCE_RELEASE_REF = 0x14050D5A0;
 constexpr uintptr_t FN_SRESOURCE_GET_INSTANCE = 0x140001B10;
 constexpr uintptr_t FN_SRESOURCE_LOAD_SYNC = 0x140518BF0;
+constexpr uintptr_t FN_CACTOR_GAME_MODEL_ANM_BIND_COMMAND = 0x140013680;
+constexpr uintptr_t FN_CACTOR_GAME_MODEL_ANM_ADVANCE_COMMAND = 0x140013040;
 constexpr uint32_t SUNIT_CATEGORY_COUNT_OFFSET = 0xC38;
 constexpr uint32_t SUNIT_CATEGORY_LISTS_OFFSET = 0x50;
 constexpr uint32_t SUNIT_CATEGORY_LIST_STRIDE = 0x30;
@@ -295,16 +297,43 @@ void RepairResimDogMissileMotion(void* shot)
 
 bool PrimaryMotionBindingsReady(void* shot);
 
+void LoadPrickleBoardMotionSynchronously(void* shot)
+{
+    if (!shot || !IsAccessibleRange((uint64_t)shot + 0x11B8, 1)) return;
+    void* pending = *(void**)((uint8_t*)shot + 0x11B0);
+    if (!pending || !HasCallableDtiVirtual(pending) ||
+        !IsAccessibleRange((uint64_t)pending, 0x78)) {
+        return;
+    }
+    uint64_t dti = GetObjectDti((uint64_t)pending);
+    uint64_t key = *(uint64_t*)((uint8_t*)pending + 0x60);
+    char* path = (char*)pending + 0x0C;
+    void* sResource = ((void*(__fastcall*)())_addr(
+        FN_SRESOURCE_GET_INSTANCE))();
+    if (!dti || !sResource) return;
+    void* loaded = ((void*(__fastcall*)(void*, void*, char*, uint64_t,
+                                       uint32_t))
+        _addr(FN_SRESOURCE_LOAD_SYNC))(
+            sResource, (void*)dti, path, key, 1);
+    if (!loaded) return;
+    ((void(__fastcall*)(void*, void*, uint32_t))_addr(
+        FN_CRESOURCE_ASSIGN_SLOT))(shot, loaded, 0);
+    ((void(__fastcall*)(void*))_addr(FN_CRESOURCE_RELEASE_REF))(loaded);
+    InvalidateMemoryQueryCache();
+}
+
 void RepairPrickleBoardMotionBindings(
     void* shot, const RollbackShotRecipe* recipe)
 {
-    if ((!g_isResimulating && !(recipe && recipe->reconstructed)) || !shot ||
-        !HasCallableDtiVirtual(shot) ||
+    if (!shot || !HasCallableDtiVirtual(shot) ||
         GetObjectDti((uint64_t)shot) !=
-            (uint64_t)_addr(DTI_USHOT_VULCAN_PRICKLE_BOARD) ||
-        !IsShotModelReady(shot) || PrimaryMotionBindingsReady(shot)) {
+            (uint64_t)_addr(DTI_USHOT_VULCAN_PRICKLE_BOARD)) {
         return;
     }
+    if ((!g_isResimulating && !(recipe && recipe->reconstructed)) ||
+        !IsShotModelReady(shot)) return;
+
+    if (PrimaryMotionBindingsReady(shot)) return;
 
     uint16_t motionNo = *(uint16_t*)((uint8_t*)shot + 0x568);
     if (motionNo == UINT16_MAX) motionNo = 0;
@@ -320,7 +349,8 @@ void RepairPrickleBoardMotionBindings(
 
     // processActionAnmchr rebuilds the resource-owned bindings but also resets
     // playback. Keep the exact saved cursor and completion edge while retaining
-    // the newly bound pointer slots.
+    // the newly bound pointer slots. The native shot tick remains responsible
+    // for advancing and evaluating the model pose.
     static constexpr size_t scalarRanges[][2] = {
         {0x08, 0xD8}, {0xE8, 0x18}, {0x108, 0x18},
         {0x140, 0x20}, {0x168, 0x08},
@@ -328,6 +358,57 @@ void RepairPrickleBoardMotionBindings(
     for (const auto& range : scalarRanges) {
         std::memcpy((uint8_t*)shot + 0x560 + range[0],
                     savedMotion + range[0], range[1]);
+    }
+}
+
+void RestoreReconstructedPrickleBoardCommandState(
+    void* shot, const RollbackShotRecipe& saved)
+{
+    if (!shot || saved.concrete.dti !=
+            (uint64_t)_addr(DTI_USHOT_VULCAN_PRICKLE_BOARD) ||
+        !HasCallableDtiVirtual(shot) ||
+        GetObjectDti((uint64_t)shot) != saved.concrete.dti) {
+        return;
+    }
+
+    uint16_t savedMotionNo = *(uint16_t*)((uint8_t*)shot + 0x568);
+    if (savedMotionNo != 0) return;
+
+    LoadPrickleBoardMotionSynchronously(shot);
+    uint8_t savedMotion[0x180];
+    uint8_t savedRootPose[0x70];
+    std::memcpy(savedMotion, (uint8_t*)shot + 0x560,
+                sizeof(savedMotion));
+    std::memcpy(savedRootPose, (uint8_t*)shot + 0x1B0,
+                sizeof(savedRootPose));
+
+    int32_t animationNo = *(int32_t*)((uint8_t*)shot + 0x1310);
+    if (animationNo < 0)
+        animationNo = *(int32_t*)((uint8_t*)shot + 0x1318);
+    if (animationNo < 0) return;
+
+    uint8_t bound = ((uint8_t(__fastcall*)(void*, int32_t, uint32_t, uint8_t))
+        _addr(FN_CACTOR_GAME_MODEL_ANM_BIND_COMMAND))(
+            (uint8_t*)shot + 0x1348, animationNo, 0, 1);
+    if (!bound) return;
+    ((void(__fastcall*)(void*))_addr(
+        FN_CACTOR_GAME_MODEL_ANM_ADVANCE_COMMAND))(
+            (uint8_t*)shot + 0x1348);
+
+    // Binding rebuilds resource-owned pointers but can also restart playback.
+    // If command catch-up selected the same motion as the snapshot, retain its
+    // exact cursor and pose while keeping the newly derived command/bindings.
+    if (*(uint16_t*)((uint8_t*)shot + 0x568) == savedMotionNo) {
+        static constexpr size_t scalarRanges[][2] = {
+            {0x08, 0xD8}, {0xE8, 0x18}, {0x108, 0x18},
+            {0x140, 0x20}, {0x168, 0x08},
+        };
+        for (const auto& range : scalarRanges) {
+            std::memcpy((uint8_t*)shot + 0x560 + range[0],
+                        savedMotion + range[0], range[1]);
+        }
+        std::memcpy((uint8_t*)shot + 0x1B0, savedRootPose,
+                    sizeof(savedRootPose));
     }
 }
 
@@ -1218,6 +1299,7 @@ void Rollback_RestoreShotClassState(
     }
     Rollback_RepairNemesisExplosionAttack(
         shot, spawnParent, saved.spawnAttackInfoId);
+    RestoreReconstructedPrickleBoardCommandState(shot, saved);
     Rollback_EvaluateRestoredShotModel(
         shot, saved.concrete.dti, saved.concrete.body.data(),
         saved.concrete.body.size());
