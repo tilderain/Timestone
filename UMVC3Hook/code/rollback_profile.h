@@ -51,6 +51,9 @@ enum class RollbackHookProfileId : uint8_t {
     GameUiMove,
     ChrCpuClassFunc,
     MainMove,
+    ModelBoundsFromJoints,
+    CollisionMove,
+    HitSolverMove,
     Count
 };
 
@@ -140,6 +143,11 @@ struct RollbackProfile {
     uint64_t headlessUnitMoveMax = 0;
     uint64_t headlessCollisionHit = 0;
     uint64_t headlessCollisionHitMax = 0;
+    uint64_t hitSolverInputNodes = 0;
+    uint64_t hitSolverOutputNodes = 0;
+    uint32_t hitSolverInputNodesMax = 0;
+    uint32_t hitSolverOutputNodesMax = 0;
+    uint32_t hitSolverFrames = 0;
     uint64_t headlessUnitSync = 0;
     uint64_t headlessUnitSyncMax = 0;
     uint64_t headlessSimulationTail = 0;
@@ -170,6 +178,13 @@ struct RollbackProfile {
     uint64_t snapshotBytes = 0;
     uint64_t snapshotRegions = 0;
     uint32_t snapshotCount = 0;
+    uint32_t snapshotCloneWrappers = 0;
+    uint32_t snapshotCloneChildren = 0;
+    uint32_t snapshotCloneCopies = 0;
+    uint32_t snapshotCloneEmptyCopies = 0;
+    uint32_t snapshotCloneCreates = 0;
+    uint32_t snapshotCloneDestroys = 0;
+    uint32_t snapshotShotRecipeCount = 0;
     uint64_t unitCategoryTicks[(size_t)RollbackUnitProfilePhase::Count]
                               [ROLLBACK_UNIT_CATEGORY_COUNT] = {};
     uint64_t unitCategoryMaxTicks[(size_t)RollbackUnitProfilePhase::Count]
@@ -209,7 +224,7 @@ void Profile_RecordUnitCategory(RollbackUnitProfilePhase phase, uint32_t categor
 void Profile_RegisterUnitObjectType(RollbackUnitProfilePhase phase, uint32_t category,
                                     uint64_t dti);
 void Profile_RecordUnitObject(RollbackUnitProfilePhase phase, uint32_t category,
-                              uint64_t dti, uint64_t ticks);
+                               uint64_t dti, uint64_t ticks);
 void Profile_RecordSnapshotEnabled(uint64_t profileStart, uint64_t buildRegionsEnd,
                                    uint64_t allocationEnd, uint64_t copyRegionsEnd,
                                    uint64_t snapshotMetadataEnd, uint64_t collisionClonesEnd,
