@@ -41,6 +41,11 @@ handler. This prevents phase 9 and its result-screen objects from being created
 during the synchronization lead time. Offline and native game flows retain the
 original phase-8 behavior.
 
+Phase-7 fade ownership can differ because rollback retains the live `mpFade`
+unit. Custom netplay therefore masks `mGameF.0x800000` only for the duration of
+`cChrInput_inputMaskPostProcess`; the native fade flag and lifecycle remain
+unchanged while local fade allocation cannot suppress one peer's input.
+
 ## Key Addresses
 
 | Address | Verified role |

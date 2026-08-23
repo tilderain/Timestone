@@ -1453,23 +1453,31 @@ static void DrainAndProcessPackets()
     }
 }
 
-static void WaitForConfirmedFrame(int32_t frame, const char* reason)
+static bool WaitForConfirmedFrame(int32_t frame, const char* reason)
 {
     if (IsFrameConfirmed(frame) || !Netplay_IsActive())
-        return;
+        return true;
 
     Rollback_FreezeWatchdogHeartbeat(reason, g_netFrameCount);
     //HookLog("Netplay: waiting for remote input frame %d (%s, local=%d, lastRemote=%d)\n",
     //        frame, reason, g_netFrameCount, g_lastRemoteFrame);
-    while (!IsFrameConfirmed(frame) && Netplay_IsActive())
+    while (!IsFrameConfirmed(frame) && Netplay_IsActive() &&
+           !Netplay_HasInboundRestartMatch())
     {
         SwitchToThread();
         DrainAndProcessPackets();
+    }
+    if (!IsFrameConfirmed(frame) && Netplay_HasInboundRestartMatch()) {
+        Rollback_FreezeWatchdogHeartbeat("restart pending", g_netFrameCount);
+        HookLog("Netplay: interrupted %s wait for pending match restart at frame %d\n",
+                reason, g_netFrameCount);
+        return false;
     }
     Rollback_FreezeWatchdogHeartbeat("confirmed-frame-wait-complete",
                                      g_netFrameCount);
     //HookLog("Netplay: remote input frame %d wait complete (active=%d, lastRemote=%d)\n",
     //        frame, Netplay_IsActive() ? 1 : 0, g_lastRemoteFrame);
+    return IsFrameConfirmed(frame) || !Netplay_IsActive();
 }
 
 // ---------------------------------------------------------------------------
@@ -1506,9 +1514,11 @@ extern "C" void Controller_OnFrameStart()
     if (IsRollbackChangeDue())
     {
         const int32_t lastCompletedFrame = g_netFrameCount - 1;
-        if (lastCompletedFrame >= 0)
-            WaitForConfirmedFrame(lastCompletedFrame,
-                                  "rollback setting transition");
+        if (lastCompletedFrame >= 0) {
+            if (!WaitForConfirmedFrame(lastCompletedFrame,
+                                       "rollback setting transition"))
+                return;
+        }
     }
 
     // Process inbound ground truth packets
@@ -1541,7 +1551,9 @@ extern "C" void Controller_OnFrameStart()
             if (g_netFrameCount > predictionBudget)
             {
                 int32_t oldestRequiredFrame = g_netFrameCount - predictionBudget;
-                WaitForConfirmedFrame(oldestRequiredFrame, "prediction budget exhausted");
+                if (!WaitForConfirmedFrame(oldestRequiredFrame,
+                                           "prediction budget exhausted"))
+                    return;
             }
 
         // Multi-resim checks the rolling window continuously. Non-multi only
@@ -1596,7 +1608,9 @@ extern "C" void Controller_OnFrameStart()
                     // Non-multi does not replace snapshots inside the replay.
                     // Confirm the whole batch first so no frame in it can need
                     // correction a second time.
-                    WaitForConfirmedFrame(g_netFrameCount, "non-multi definitive batch");
+                    if (!WaitForConfirmedFrame(g_netFrameCount,
+                                               "non-multi definitive batch"))
+                        return;
                     checkEnd = g_netFrameCount;
                 }
 
@@ -1671,7 +1685,8 @@ extern "C" void Controller_OnFrameStart()
     {
         // --- Legacy delay-based fallback: spin-wait for current frame's input.
         int32_t neededFrame = g_netFrameCount;
-        WaitForConfirmedFrame(neededFrame, "delay mode");
+        if (!WaitForConfirmedFrame(neededFrame, "delay mode"))
+            return;
     }
 
     // --- Centrally resolve this frame's remote input so hkprocessFrameInput

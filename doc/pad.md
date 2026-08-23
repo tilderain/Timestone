@@ -200,6 +200,11 @@ hooks run only inside the native function after this gate, they cannot
 repopulate an assist after its early return. The explicit predicate retained by
 the outer hook protects the separate offline post-native autotest path.
 
+Snapshot restore explicitly rewinds the embedded `cChrInput` scalar payload at
+`cChr+0x21D8..+0x2737`. Its rings and final input masks are pointer-free, but
+packed pairs such as a zero previous mask followed by direction `2` can resemble
+an aligned address to the generic character pointer guard.
+
 ## Key Addresses
 
 | Address | Function |

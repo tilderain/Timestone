@@ -211,6 +211,10 @@ static constexpr SnapshotRange CCHR_SCALAR_RESTORE_RANGES[] = {
     // so the broad pointer guard otherwise keeps Phoenix Wright's future mode
     // and selects action 0xBA instead of 0xBB during frame-60 resimulation.
     {0x1548, 0x18},
+    // cChrInput is pointer-free after its vtable and character owner. Packed
+    // input-history words can otherwise resemble aligned pointers and remain
+    // stale after rollback.
+    //{0x21D8, 0x560},
     // cChrAbility and cAtkCtrl have dedicated ownership-aware policies below.
     // Character state/context values before the frame and identity fields.
     {0x18A0, 0x28},

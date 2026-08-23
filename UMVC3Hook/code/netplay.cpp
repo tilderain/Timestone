@@ -1246,6 +1246,16 @@ bool Netplay_GetInboundRestartMatch(int32_t& outTargetFrame, uint32_t& outRoundS
     return true;
 }
 
+bool Netplay_HasInboundRestartMatch()
+{
+    if (!g_active || !g_csInitialized)
+        return false;
+
+    ScopedCS lock(g_restartCS);
+    return g_inboundRestartNew &&
+           g_inboundRestart.battle_generation == FrameStepper_GetBattleGeneration();
+}
+
 bool Netplay_SendExtensionPacket(const void* data, size_t size)
 {
     if (!g_active || !g_csInitialized || !data || size < sizeof(uint32_t) ||

@@ -661,43 +661,22 @@ static void __fastcall hkCharacterMoveBase(uint64_t uChar)
 
 static void __fastcall hkInputMaskPostProcess(uint64_t cChrInput)
 {
-    uint64_t frameCnt_before = cChrInput ? *(uint64_t*)(cChrInput + 0x18) : 0;
-    uint32_t head590_before = cChrInput ? *(uint32_t*)(cChrInput + 0x590) : 0;
-    uint32_t head594_before = cChrInput ? *(uint32_t*)(cChrInput + 0x594) : 0;
-    uint64_t dirHistSlot_before = 0;
-    if (cChrInput) {
-        uint32_t slotIdx = (uint32_t)(frameCnt_before & 0x3F);
-        dirHistSlot_before = *(uint64_t*)(cChrInput + 0x360 + slotIdx * 8);
+    uint32_t* gameFlags = nullptr;
+    bool restoreFadeFlag = false;
+    if (Netplay_IsActive()) {
+        auto getAction = (uint64_t(__fastcall*)())_addr(0x140001A90);
+        const uint64_t action = getAction();
+        if (action && *(int32_t*)(action + 0xD8) == 7) {
+            gameFlags = (uint32_t*)(action + 0xC4);
+            restoreFadeFlag = (*gameFlags & 0x800000) != 0;
+            *gameFlags &= ~0x800000u;
+        }
     }
 
     oInputMaskPostProcess(cChrInput);
 
-    if (cChrInput && g_isResimulating) {
-        uint64_t frameCnt = *(uint64_t*)(cChrInput + 0x18);
-        uint32_t slotIdx = (uint32_t)(frameCnt & 0x3F);
-        uint64_t dirHistSlot = *(uint64_t*)(cChrInput + 0x360 + slotIdx * 8);
-        uint32_t head590 = *(uint32_t*)(cChrInput + 0x590);
-        uint32_t head594 = *(uint32_t*)(cChrInput + 0x594);
-
-        if (dirHistSlot != dirHistSlot_before) {
-            uint64_t uChar = *(uint64_t*)(cChrInput + 0x08);
-            uint32_t teamIdx = 0;
-            if (uChar) {
-                typedef uint32_t(__fastcall* getTeamIdx_t)(uint64_t);
-                static getTeamIdx_t fnGetTeamIdx = (getTeamIdx_t)_addr(ADDR_GET_TEAM_INDEX);
-                teamIdx = fnGetTeamIdx(uChar);
-            }
-            //HookLog("DIRHIST_DIAG frame=%d team=%d dirHist[%u]: before=0x%016llX after=0x%016llX h590=0x%08X h594=0x%08X cntr=%llu\n",
-            //        g_resimulateCurrentFrame, teamIdx, slotIdx,
-            //        dirHistSlot_before, dirHistSlot, head590, head594, frameCnt);
-
-            uint32_t dirMask = (uint32_t)(dirHistSlot >> 32);
-            uint32_t dirMaskBefore = (uint32_t)(dirHistSlot_before >> 32);
-            if (dirMask != dirMaskBefore) {
-            //    HookLog("DIRHIST_DIAG   direction mask: 0x%04X \u2192 0x%04X\n", dirMaskBefore, dirMask);
-            }
-        }
-    }
+    if (restoreFadeFlag)
+        *gameFlags |= 0x800000;
 }
 
 void Diag_ResetBuffers()
@@ -755,7 +734,7 @@ void Diag_InitHooks()
     );
     if (s == MH_OK)
     {
-        //MH_EnableHook((LPVOID)_addr(ADDR_INPUT_MASK_POST_PROCESS));
+        MH_EnableHook((LPVOID)_addr(ADDR_INPUT_MASK_POST_PROCESS));
     }
     else
         HookLog("Diag: Failed to hook inputMaskPostProcess (%d)\n", s);

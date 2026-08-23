@@ -336,6 +336,7 @@ void Netplay_SendTrainingRestart(int32_t targetFrame, uint32_t roundSeed,
                                  int32_t buttonRestart);
 bool Netplay_GetInboundRestartMatch(int32_t& outTargetFrame, uint32_t& outRoundSeed,
                                     uint32_t& outKind, int32_t& outButtonRestart);
+bool Netplay_HasInboundRestartMatch();
 
 // Generic reliable control channel for self-contained plugin features. Payloads
 // must begin with PACKET_EXTENSION and are limited to 256 bytes.
