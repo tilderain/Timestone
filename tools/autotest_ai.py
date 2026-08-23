@@ -57,8 +57,13 @@ def quote_filter(moves):
 
 
 def artifact_character_name(character):
-    # The executable reports Phoenix Wright by its internal roster name.
-    return "Naruhodo" if character.casefold() == "phoenix wright" else character
+    # The executable reports some characters by their internal roster names.
+    internal_names = {
+        "frank west": "Frank",
+        "phoenix wright": "Naruhodo",
+        "rocket raccoon": "RRaccoon",
+    }
+    return internal_names.get(character.casefold(), character)
 
 
 def latest_report_pair(game_dir, character, not_before=None):

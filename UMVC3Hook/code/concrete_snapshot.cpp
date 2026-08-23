@@ -297,6 +297,11 @@ bool Accessible(uint64_t address, size_t size = sizeof(uint64_t))
     return IsAccessibleRange(address, size);
 }
 
+bool IsMappedPointer(uint64_t value)
+{
+    return IsLikelyPointer(value) && Accessible(value);
+}
+
 bool Executable(uint64_t address)
 {
     return IsExecutableAddress(address);
@@ -421,7 +426,7 @@ bool RangeOverlapsCharacterReference(const uint8_t* live,
         uint64_t savedValue = 0;
         std::memcpy(&liveValue, live + offset, sizeof(liveValue));
         std::memcpy(&savedValue, saved + offset, sizeof(savedValue));
-        if (IsLikelyPointer(liveValue) || IsLikelyPointer(savedValue)) {
+        if (IsMappedPointer(liveValue) || IsMappedPointer(savedValue)) {
             return true;
         }
     }
@@ -454,7 +459,7 @@ void PreserveLivePointers(uint8_t* overlay, const uint8_t* live,
          offset += sizeof(uint64_t)) {
         uint64_t liveValue = *(const uint64_t*)(live + offset);
         uint64_t savedValue = *(const uint64_t*)(overlay + offset);
-        if (IsLikelyPointer(liveValue) || IsLikelyPointer(savedValue)) {
+        if (IsMappedPointer(liveValue) || IsMappedPointer(savedValue)) {
             std::memcpy(overlay + offset, live + offset, sizeof(uint64_t));
         }
     }
@@ -539,7 +544,11 @@ void RestoreDetectedCharacterTailScalars(void* character,
         uint64_t savedValue = 0;
         std::memcpy(&liveValue, live + offset, sizeof(liveValue));
         std::memcpy(&savedValue, savedBody + offset, sizeof(savedValue));
-        if (IsLikelyPointer(liveValue) || IsLikelyPointer(savedValue)) {
+        bool staleTransition =
+            (liveValue == 0 && IsLikelyPointer(savedValue)) ||
+            (savedValue == 0 && IsLikelyPointer(liveValue));
+        if (IsMappedPointer(liveValue) || IsMappedPointer(savedValue) ||
+            staleTransition) {
             size_t recordStart = offset >= 8 ? offset - 8 : 0;
             preserveRange(recordStart, offset + sizeof(uint64_t) + 16);
         }
