@@ -1,8 +1,10 @@
 # `sCollision` Rollback Snapshot
 
-**Status: Current focused reference. Verified against Ghidra and `rollback.cpp`
-on 2026-07-23.** Collision restore combines an ownership-aware singleton copy,
-discovered external buffers, and deep clones of character attachment nodes.
+**Status: Current focused reference. Verified against Ghidra and rollback code
+on 2026-08-23.** Active collision restore covers character and shot primitives
+plus deep clones of character attachment nodes. The broader ownership-aware
+singleton and external-buffer discovery implementation remains in the source but
+is currently disabled.
 
 ## Native Singleton
 
@@ -32,6 +34,9 @@ and synchronization ownership.
 
 ## Singleton Restore Policy
 
+This policy documents the dormant full-singleton path. The current region builder
+does not add `sCollision` or its external buffers to snapshots.
+
 `RestoreSCollisionBody` does not flat-copy all `0x239E0` bytes. It preserves:
 
 - The `cSystem` base and its critical section.
@@ -43,6 +48,10 @@ Other inline state is restored from the selected snapshot. This avoids replacing
 current allocation ownership with stale historical addresses.
 
 ## External Discovery
+
+This discovery code is currently disabled with the singleton capture. Its range
+checks remain necessary if the path is re-enabled because it walks allocator-owned
+trees and variable-capacity arrays that can be malformed or replaced.
 
 `BuildRegions` follows verified ownership headers and adds external regions only
 when pointers, counts, capacities, and address ranges pass safety checks. Each
@@ -113,6 +122,32 @@ copies the cloned node/child graph back through the native copy function. If an
 external owner changed, the live owner pointer is restored rather than writing
 to abandoned memory.
 
+### Primitive parent identities
+
+The 16 inline capsules and three banks of 16 inline spheres no longer restore raw
+historical parent pointers. Ghidra confirms that
+`uCharacter__addCapsuleCollisionPrimitive` and
+`uCharacter__addSphereCollisionPrimitive` select either the character itself or
+an entry in the character's `+0x3F40` weapon array. Snapshot capture therefore
+classifies each known parent as:
+
+- `None`
+- `Character`
+- `Weapon[index]`
+
+Restore resolves `Weapon[index]` through the current live weapon array and
+reapplies these identities after both the initial character overlay and the late
+post-reconstruction collision overlay. A parent that is neither the character
+nor an authoritative weapon-array member is left live; it is not guessed from
+address accessibility or copied from the historical frame.
+
+The 2026-08-23 weapon-heavy dual-CPU validation completed 1,000 frames on both
+peers with 1,179 replayed frames across 161 rollback windows and no crash or
+desync artifacts. Dedicated counters recorded 2,283 weapon-parent identities on
+the host and 1,314 on the client, with zero unclassified parents on both sides:
+
+`rollback_profile_runs/20260823T222533.323416Z_character_collision_weapon_parent_coverage_1000`
+
 The fourth attachment participates in native fighter push callback setup:
 `uCharacter__applyCollisionPushCorrection` consumes contact information and
 accumulates a correction into the owning character. Its known geometry payload
@@ -178,5 +213,7 @@ member identifier.
 - Keep pointer-array capacities/counts validated and bounded.
 - Clone polymorphic character collision graphs through native constructors/copy
   logic rather than raw heap-body allocation.
+- Restore inline character primitive parents by `Character` or `Weapon[index]`
+  identity, never by an unclassified historical address.
 - Treat generic chain collision and fighter gameplay collision as separate until
   runtime provenance connects them.

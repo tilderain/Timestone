@@ -156,6 +156,21 @@ struct RollbackCharacterShotReference {
         RollbackCharacterShotReferenceRole::AnimationReturn;
 };
 
+enum class RollbackCharacterCollisionParentKind : uint8_t {
+    None,
+    Character,
+    Weapon,
+};
+
+struct RollbackCharacterCollisionParentReference {
+    void* character = nullptr;
+    uint64_t expectedCharacterVtable = 0;
+    uint32_t offset = 0;
+    uint16_t weaponIndex = 0;
+    RollbackCharacterCollisionParentKind kind =
+        RollbackCharacterCollisionParentKind::None;
+};
+
 struct RollbackCollisionNodeClone {
     uint64_t ownerSlot;
     void* savedPtr;
@@ -210,6 +225,8 @@ struct RollbackSnapshotSlot {
     std::vector<RollbackCharacterEffectState> characterEffectStates;
     std::vector<RollbackCharacterEffectReference> characterEffectReferences;
     std::vector<RollbackCharacterShotReference> characterShotReferences;
+    std::vector<RollbackCharacterCollisionParentReference>
+        characterCollisionParentReferences;
     std::vector<RollbackCollisionNodeClone> collisionNodeClones;
     std::vector<RollbackModelRenderState> modelRenderStates;
     RollbackActionSideCameraState actionSideCamera;

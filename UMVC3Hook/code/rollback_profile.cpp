@@ -313,9 +313,14 @@ void Profile_DumpEnabled(const RollbackProfile& profile, bool ndjsonEnabled,
                  "\"clone_wrappers\":%u,"
                  "\"clone_children\":%u,\"clone_copies\":%u,"
                  "\"clone_empty_copies\":%u,\"clone_creates\":%u,"
-                  "\"clone_destroys\":%u,\"shot_recipe_count\":%u,"
-                  "\"character_shot_reference_count\":%u,"
-                  "\"character_effect_reference_count\":%u,"
+                   "\"clone_destroys\":%u,\"shot_recipe_count\":%u,"
+                   "\"character_shot_reference_count\":%u,"
+                   "\"character_collision_parent_reference_count\":%u,"
+                   "\"character_collision_parent_none_count\":%u,"
+                   "\"character_collision_parent_character_count\":%u,"
+                   "\"character_collision_parent_weapon_count\":%u,"
+                   "\"character_collision_parent_unclassified_count\":%u,"
+                   "\"character_effect_reference_count\":%u,"
                   "\"character_effect_reference_none_count\":%u,"
                   "\"character_effect_reference_reconstructed_count\":%u,"
                   "\"character_effect_reference_retained_count\":%u},"
@@ -390,9 +395,14 @@ void Profile_DumpEnabled(const RollbackProfile& profile, bool ndjsonEnabled,
                  profile.snapshotCloneWrappers, profile.snapshotCloneChildren,
                  profile.snapshotCloneCopies, profile.snapshotCloneEmptyCopies,
                  profile.snapshotCloneCreates, profile.snapshotCloneDestroys,
-                  profile.snapshotShotRecipeCount,
-                  profile.snapshotCharacterShotReferenceCount,
-                  profile.snapshotCharacterEffectReferenceCount,
+                   profile.snapshotShotRecipeCount,
+                   profile.snapshotCharacterShotReferenceCount,
+                   profile.snapshotCharacterCollisionParentReferenceCount,
+                   profile.snapshotCharacterCollisionParentNoneCount,
+                   profile.snapshotCharacterCollisionParentCharacterCount,
+                   profile.snapshotCharacterCollisionParentWeaponCount,
+                   profile.snapshotCharacterCollisionParentUnclassifiedCount,
+                   profile.snapshotCharacterEffectReferenceCount,
                   profile.snapshotCharacterEffectReferenceNoneCount,
                   profile.snapshotCharacterEffectReferenceReconstructedCount,
                   profile.snapshotCharacterEffectReferenceRetainedCount,

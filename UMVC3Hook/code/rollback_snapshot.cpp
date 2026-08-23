@@ -230,6 +230,98 @@ static void CaptureCharacterPostState(RollbackSnapshotSlot& slot)
     slot.characterPost.valid = true;
 }
 
+static void CaptureCharacterCollisionParentReferences(RollbackSnapshotSlot& slot)
+{
+    slot.characterCollisionParentReferences.clear();
+    uint32_t noneCount = 0;
+    uint32_t characterCount = 0;
+    uint32_t weaponCountTotal = 0;
+    uint32_t unclassifiedCount = 0;
+
+    uint64_t sCharacter = *(uint64_t*)_addr(PTR_SCHARACTER);
+    if (!sCharacter) return;
+
+    std::unordered_set<uint64_t> capturedCharacters;
+    auto captureCharacter = [&](uint64_t character) {
+        if (!character || !capturedCharacters.insert(character).second) return;
+
+        const uint64_t expectedVtable = *(uint64_t*)character;
+        uint32_t weaponCount = *(uint32_t*)(character + CCHR_WEAPON_COUNT_OFFSET);
+        uint64_t weaponArray = *(uint64_t*)(character + CCHR_WEAPON_ARRAY_OFFSET);
+        if (!weaponArray || weaponCount > 256) weaponCount = 0;
+
+        auto captureParent = [&](uint32_t offset) {
+            uint64_t parent = *(uint64_t*)(character + offset);
+            RollbackCharacterCollisionParentReference reference{};
+            reference.character = (void*)character;
+            reference.expectedCharacterVtable = expectedVtable;
+            reference.offset = offset;
+
+            if (!parent) {
+                reference.kind = RollbackCharacterCollisionParentKind::None;
+                ++noneCount;
+            } else if (parent == character) {
+                reference.kind = RollbackCharacterCollisionParentKind::Character;
+                ++characterCount;
+            } else {
+                uint32_t weaponIndex = 0;
+                while (weaponIndex < weaponCount &&
+                       *(uint64_t*)(weaponArray +
+                           (size_t)weaponIndex * sizeof(uint64_t)) != parent) {
+                    ++weaponIndex;
+                }
+                if (weaponIndex == weaponCount) {
+                    ++unclassifiedCount;
+                    return;
+                }
+                reference.kind = RollbackCharacterCollisionParentKind::Weapon;
+                reference.weaponIndex = (uint16_t)weaponIndex;
+                ++weaponCountTotal;
+            }
+            slot.characterCollisionParentReferences.push_back(reference);
+        };
+
+        constexpr uint32_t capsuleBase = 0x4210;
+        constexpr uint32_t capsuleStride = 0xB0;
+        for (uint32_t primitive = 0; primitive < 16; ++primitive) {
+            uint32_t entry = capsuleBase + primitive * capsuleStride;
+            captureParent(entry + 0x58);
+            captureParent(entry + 0x60);
+        }
+
+        constexpr uint32_t sphereBases[] = {0x4E20, 0x5530, 0x5C40};
+        constexpr uint32_t sphereStride = 0x70;
+        for (uint32_t base : sphereBases) {
+            for (uint32_t primitive = 0; primitive < 16; ++primitive)
+                captureParent(base + primitive * sphereStride + 0x38);
+        }
+    };
+
+    for (int team = 0; team < 2; ++team) {
+        uint64_t node = sCharacter + (team == 0 ? TEAM0_OFFSET : TEAM1_OFFSET) +
+            TEAM_FIRST_NODE_OFFSET;
+        for (int safety = 16; node && safety-- > 0;) {
+            captureCharacter(*(uint64_t*)(node + NODE_CHR_OFFSET));
+            node = *(uint64_t*)(node + NODE_NEXT_OFFSET);
+        }
+    }
+
+    if constexpr (ROLLBACK_PROFILING_ENABLED) {
+        if (g_activeRollbackProfile) {
+            g_activeRollbackProfile->snapshotCharacterCollisionParentReferenceCount +=
+                (uint32_t)slot.characterCollisionParentReferences.size();
+            g_activeRollbackProfile->snapshotCharacterCollisionParentNoneCount +=
+                noneCount;
+            g_activeRollbackProfile->snapshotCharacterCollisionParentCharacterCount +=
+                characterCount;
+            g_activeRollbackProfile->snapshotCharacterCollisionParentWeaponCount +=
+                weaponCountTotal;
+            g_activeRollbackProfile->snapshotCharacterCollisionParentUnclassifiedCount +=
+                unclassifiedCount;
+        }
+    }
+}
+
 struct RegionDependency {
     uintptr_t address = 0;
     uint64_t value = 0;
@@ -1405,6 +1497,7 @@ void Rollback_SaveSnapshot(int32_t frame)
     // Native clones keep reference-managed geometry alive after attack-end
     // clears the live node's child array.
     Rollback_CaptureCollisionNodeClones(slot);
+    CaptureCharacterCollisionParentReferences(slot);
     const uint64_t collisionClonesEnd = Profile_Now();
 
     // Cut-ins independently change character visibility, model draw routing,
@@ -1599,6 +1692,7 @@ void Rollback_FreeSnapshots()
         g_slots[i].effectRecipes.clear();
         g_slots[i].characterEffectStates.clear();
         g_slots[i].characterEffectReferences.clear();
+        g_slots[i].characterCollisionParentReferences.clear();
         g_slots[i].modelRenderStates.clear();
     }
     Shot_Reset();

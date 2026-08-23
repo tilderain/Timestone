@@ -195,6 +195,11 @@ struct RollbackProfile {
     uint32_t snapshotCloneDestroys = 0;
     uint32_t snapshotShotRecipeCount = 0;
     uint32_t snapshotCharacterShotReferenceCount = 0;
+    uint32_t snapshotCharacterCollisionParentReferenceCount = 0;
+    uint32_t snapshotCharacterCollisionParentNoneCount = 0;
+    uint32_t snapshotCharacterCollisionParentCharacterCount = 0;
+    uint32_t snapshotCharacterCollisionParentWeaponCount = 0;
+    uint32_t snapshotCharacterCollisionParentUnclassifiedCount = 0;
     uint32_t snapshotCharacterEffectReferenceCount = 0;
     uint32_t snapshotCharacterEffectReferenceNoneCount = 0;
     uint32_t snapshotCharacterEffectReferenceReconstructedCount = 0;

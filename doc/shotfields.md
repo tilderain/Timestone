@@ -363,6 +363,27 @@ must not be copied as scalar bytes.
 The common callback array at `uShot+0x1F78..+0x1FDF` remains separately handled
 by factory reconstruction and pointer-free effect timeline restoration.
 
+### Follow-Up: Shot-Owned Effect Identities
+
+Class-specific managed effect pointers should eventually use the same typed
+identity model as character-owned effects. Capture the shot field role and the
+effect recipe's `spawnSequence`, reconstruct shots first, reconstruct independent
+effects second, then bind each fresh effect address into its reconstructed shot.
+Initial audited targets are:
+
+| Shot | Offset | Effect relationship |
+|---|---:|---|
+| `uShotLaserDarkFire` | `+0x2160` | Managed child effect |
+| `uShotLaserHyperMysticBlast` | `+0x2160` | Managed child effect |
+| `uShotLaserMysticBlast` | `+0x2160` | Managed child effect |
+| `uShotLaserThunderBolt` | `+0x2230` | Command effect |
+| `uShotVulcanSoulFist` | `+0x2148` | Managed child effect |
+
+Do not convert the common callback array to effect `spawnSequence` identities.
+Those effects are already recreated by the shot factory and restored by callback
+slot index. Likewise, do not classify nearby resource, model, helper, or embedded
+owner fields as effects without class-specific lifecycle evidence.
+
 Do not flat-restore the references in this ledger. Historical effect, resource,
 child-shot, and helper addresses must instead use native factory reconstruction,
 saved-to-restored shot remapping, or a validated resource/effect recipe.

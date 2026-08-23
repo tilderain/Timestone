@@ -110,20 +110,37 @@ static constexpr uint64_t MT_DTI_VTABLE = 0x140A69ED8;
 static constexpr uintptr_t DTI_UACTION_SIDE_CAMERA = 0x140D44268;
 static constexpr size_t SHITSOLVER_DATA_OFF = 0x58;
 
-static bool IsStableCharacterCollisionParent(uint8_t* character, uint64_t parent)
+static void RestoreCharacterCollisionParentReferences(RollbackSnapshotSlot& slot)
 {
-    if (parent == 0 || parent == (uint64_t)character) return true;
+    for (const RollbackCharacterCollisionParentReference& reference :
+         slot.characterCollisionParentReferences) {
+        auto* character = (uint8_t*)reference.character;
+        if (!character || *(uint64_t*)character != reference.expectedCharacterVtable)
+            continue;
 
-    uint32_t weaponCount = *(uint32_t*)(character + CCHR_WEAPON_COUNT_OFFSET);
-    uint64_t weaponArray = *(uint64_t*)(character + CCHR_WEAPON_ARRAY_OFFSET);
-    if (!weaponArray || weaponCount > 256) {
-        return false;
+        void* parent = nullptr;
+        switch (reference.kind) {
+        case RollbackCharacterCollisionParentKind::None:
+            break;
+        case RollbackCharacterCollisionParentKind::Character:
+            parent = character;
+            break;
+        case RollbackCharacterCollisionParentKind::Weapon: {
+            uint32_t weaponCount =
+                *(uint32_t*)(character + CCHR_WEAPON_COUNT_OFFSET);
+            void** weapons =
+                *(void***)(character + CCHR_WEAPON_ARRAY_OFFSET);
+            if (!weapons || weaponCount > 256 ||
+                reference.weaponIndex >= weaponCount) {
+                continue;
+            }
+            parent = weapons[reference.weaponIndex];
+            if (!parent) continue;
+            break;
+        }
+        }
+        *(void**)(character + reference.offset) = parent;
     }
-    for (uint32_t weapon = 0; weapon < weaponCount; ++weapon) {
-        if (*(uint64_t*)(weaponArray + (size_t)weapon * sizeof(uint64_t)) == parent)
-            return true;
-    }
-    return false;
 }
 
 using SnapshotRange = RollbackSnapshotRange;
@@ -1938,13 +1955,6 @@ void Rollback_RestoreSnapshot(int32_t frame)
                                     field.size);
                     }
                 }
-                for (uint32_t parentOffset : {0x58u, 0x60u}) {
-                    uint64_t savedParent = *(const uint64_t*)(
-                        savedCharacter + entry + parentOffset);
-                    if (IsStableCharacterCollisionParent(character, savedParent)) {
-                        *(uint64_t*)(character + entry + parentOffset) = savedParent;
-                    }
-                }
             }
 
             static constexpr uint32_t sphereBases[] = {0x4E20, 0x5530, 0x5C40};
@@ -1967,10 +1977,6 @@ void Rollback_RestoreSnapshot(int32_t frame)
                                         field.size);
                         }
                     }
-                    uint64_t savedParent = *(const uint64_t*)(
-                        savedCharacter + entry + 0x38);
-                    if (IsStableCharacterCollisionParent(character, savedParent))
-                        *(uint64_t*)(character + entry + 0x38) = savedParent;
                 }
             }
 
@@ -2017,6 +2023,7 @@ void Rollback_RestoreSnapshot(int32_t frame)
         }
         offset += slot.regions[i].size;
     }
+    RestoreCharacterCollisionParentReferences(slot);
     const uint64_t regionsEnd = Profile_Now();
 
     /*std::memcpy(liveGlobalRng, (void*)_addr(0x140D765D8), sizeof(liveGlobalRng));
@@ -2145,13 +2152,6 @@ void Rollback_RestoreSnapshot(int32_t frame)
                                     field.size);
                     }
                 }
-                for (uint32_t parentOffset : {0x58u, 0x60u}) {
-                    uint64_t savedParent = *(const uint64_t*)(
-                        savedCharacter + entry + parentOffset);
-                    if (IsStableCharacterCollisionParent(character, savedParent)) {
-                        *(uint64_t*)(character + entry + parentOffset) = savedParent;
-                    }
-                }
             }
 
             constexpr uint32_t sphereBases[] = {0x4E20, 0x5530, 0x5C40};
@@ -2160,10 +2160,6 @@ void Rollback_RestoreSnapshot(int32_t frame)
                 for (uint32_t primitive = 0; primitive < 16; ++primitive) {
                     uint32_t entry = base + primitive * sphereStride;
                     if ((size_t)entry + 0x40 > copySize) continue;
-                    uint64_t savedParent = *(const uint64_t*)(
-                        savedCharacter + entry + 0x38);
-                    if (IsStableCharacterCollisionParent(character, savedParent))
-                        *(uint64_t*)(character + entry + 0x38) = savedParent;
                 }
             }
 
@@ -2192,6 +2188,7 @@ void Rollback_RestoreSnapshot(int32_t frame)
         }
         offset += slot.regions[i].size;
     }
+    RestoreCharacterCollisionParentReferences(slot);
     const uint64_t characterReferencesLateStart = Profile_Now();
     Rollback_RestoreCharacterShotReferences(slot);
     const uint64_t characterShotReferencesLateEnd = Profile_Now();
