@@ -124,6 +124,7 @@ void Rollback_ResetReSimulation()
 {
     g_mainInstance = 0;
     g_isResimulating = false;
+    Rollback_ClearDeferredModelBounds();
     g_resimulateCurrentFrame = 0;
     g_postResimFrame = -1;
     g_resimReentranceDepth = 0;
@@ -159,6 +160,7 @@ void Rollback_ReSimulate(int32_t startFrame, int32_t endFrame)
     RollbackProfile profile;
     Profile_BeginRollback(profile, startFrame, endFrame);
     const uint64_t profileStart = Profile_Now();
+    Rollback_ClearDeferredModelBounds();
     g_isResimulating = true;
 
     uint64_t phaseStart = Profile_Now();
@@ -256,6 +258,7 @@ void Rollback_ReSimulate(int32_t startFrame, int32_t endFrame)
     if (main) Rollback_ResyncMainTiming(main);
     Profile_AddElapsed(&RollbackProfile::timingResync, phaseStart);
     g_isResimulating = false;
+    Rollback_FlushDeferredModelBounds();
 
     // A rollback can begin after cChrTeam::active changed but before the model
     // callback made the incoming point visible. Normalize both current point

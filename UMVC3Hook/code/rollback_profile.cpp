@@ -263,7 +263,8 @@ void Profile_DumpEnabled(const RollbackProfile& profile, bool ndjsonEnabled,
         "unit_remove_effect_resource", "unit_remove_effect_generator",
         "unit_remove_effect_sub_buffers", "unit_remove_native", "unit_remove_recipe_cleanup",
         "kirigakure_effect_update", "render_end_frame", "sound_move",
-        "game_ui_move", "chr_cpu_class_func", "main_move"
+        "game_ui_move", "chr_cpu_class_func", "main_move",
+        "model_bounds_from_joints"
     };
     static_assert(sizeof(hookNames) / sizeof(hookNames[0]) ==
                   (size_t)RollbackHookProfileId::Count);
@@ -303,8 +304,11 @@ void Profile_DumpEnabled(const RollbackProfile& profile, bool ndjsonEnabled,
                  "\"snapshot\":{\"count\":%u,\"total_ms\":%.6f,\"avg_ms\":%.6f,"
                 "\"avg_kib\":%.6f,\"avg_regions\":%.6f,\"build_regions_ms\":%.6f,"
                 "\"recycle_allocate_ms\":%.6f,\"copy_regions_ms\":%.6f,"
-                "\"metadata_ms\":%.6f,\"collision_clones_ms\":%.6f,"
-                "\"shot_recipes_ms\":%.6f},"
+                 "\"metadata_ms\":%.6f,\"collision_clones_ms\":%.6f,"
+                 "\"shot_recipes_ms\":%.6f,\"clone_wrappers\":%u,"
+                 "\"clone_children\":%u,\"clone_copies\":%u,"
+                 "\"clone_empty_copies\":%u,\"clone_creates\":%u,"
+                 "\"clone_destroys\":%u},"
                 "\"restore\":{\"total_ms\":%.6f,\"setup_ms\":%.6f,\"regions_ms\":%.6f,"
                 "\"collision_clones_ms\":%.6f,\"owner_pointers_ms\":%.6f,"
                  "\"hit_solver_ms\":%.6f,\"stale_pointers_ms\":%.6f,"
@@ -358,9 +362,12 @@ void Profile_DumpEnabled(const RollbackProfile& profile, bool ndjsonEnabled,
                 (double)profile.snapshotBytes / snapshotDivisor / 1024.0,
                 (double)profile.snapshotRegions / snapshotDivisor,
                 Profile_Ms(profile.saveBuildRegions), Profile_Ms(profile.saveRecycleAndAllocate),
-                Profile_Ms(profile.saveCopyRegions), Profile_Ms(profile.saveMetadata),
-                Profile_Ms(profile.saveCollisionClones), Profile_Ms(profile.saveShotRecipes),
-                Profile_Ms(profile.restoreTotal), Profile_Ms(profile.restoreSetup),
+                 Profile_Ms(profile.saveCopyRegions), Profile_Ms(profile.saveMetadata),
+                 Profile_Ms(profile.saveCollisionClones), Profile_Ms(profile.saveShotRecipes),
+                 profile.snapshotCloneWrappers, profile.snapshotCloneChildren,
+                 profile.snapshotCloneCopies, profile.snapshotCloneEmptyCopies,
+                 profile.snapshotCloneCreates, profile.snapshotCloneDestroys,
+                 Profile_Ms(profile.restoreTotal), Profile_Ms(profile.restoreSetup),
                 Profile_Ms(profile.restoreRegions), Profile_Ms(profile.restoreCollisionClones),
                  Profile_Ms(profile.restoreOwnerPointers), Profile_Ms(profile.restoreHitSolver),
                  Profile_Ms(profile.restoreStalePointers), Profile_Ms(profile.restoreEffectSlots),

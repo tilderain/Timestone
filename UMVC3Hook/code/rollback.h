@@ -84,6 +84,10 @@ void Rollback_ApplyNetplayDeterminism();
 // netplay without enabling native session, netpad, or lifecycle behavior.
 void Rollback_InitOnlineBattleHook();
 
+// Coalesce presentation-only model bounds scans across replayed frames.
+void Rollback_ClearDeferredModelBounds();
+void Rollback_FlushDeferredModelBounds();
+
 // Request a re-simulate from the controller layer — consumed by hkMvc3Main_move.
 // Called when late-arriving remote input differs from what was predicted.
 void Rollback_RequestReSimulate(int32_t startFrame, int32_t endFrame);

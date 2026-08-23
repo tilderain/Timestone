@@ -128,3 +128,74 @@ its median and trimmed distribution agree with the host result.
 `optimization_verified` for restore setup bookkeeping. The candidate is
 retained. The combined rollback result improved 4.40%, but no whole-run claim is
 made from one battle because native gameplay workload still varied.
+
+## Collision Clone Child Validation
+
+### Investigation
+
+Snapshot profiling now records collision-wrapper, child, copy, creation, and
+destruction counts. The measured roster captured exactly 28 external-animation
+wrappers per save, approximately 127 children, and approximately 16 native deep
+copies. Each ring slot created only six clone roots over the entire run and
+destroyed none, confirming that root allocation and ownership reuse were
+already effective.
+
+The capture path nevertheless called `HasCallableDtiVirtual()` for every child
+immediately before passing the same graph to native `copyFrom`. The restore path
+repeated that check for every child immediately after native `copyFrom` created
+the graph. Native copying already requires those children to be callable, so
+the extra `VirtualQuery`-based passes provided no additional safety. The
+retained change reads each child DTI directly while preserving native clone
+creation, deep copying, destruction, scalar state, child order, and post-copy
+DTI comparison.
+
+### Capture Result
+
+Baseline:
+`rollback_profile_runs/20260823T081719.700858Z_baseline_clone_workload`
+
+Candidate:
+`rollback_profile_runs/20260823T081855.541526Z_candidate_direct_clone_child_dti`
+
+| Collision-clone capture per save | Baseline | Candidate | Change |
+|---|---:|---:|---:|
+| Host median | 125.807 us | 54.817 us | -56.43% |
+| Client median | 130.471 us | 55.486 us | -57.47% |
+| Host 10% trimmed mean | 126.191 us | 55.225 us | -56.24% |
+| Client 10% trimmed mean | 131.169 us | 56.794 us | -56.70% |
+
+The 95% bootstrap intervals were `-59.31%` to `-53.40%` for the host median
+and `-59.64%` to `-53.39%` for the client median. Wrapper, child, and deep-copy
+workloads remained equivalent between runs.
+
+### Restore Result
+
+Baseline:
+`rollback_profile_runs/20260823T081855.541526Z_candidate_direct_clone_child_dti`
+
+Candidate:
+`rollback_profile_runs/20260823T082033.654484Z_candidate_direct_restored_child_dti`
+
+| Collision-clone restore per window | Baseline | Candidate | Change |
+|---|---:|---:|---:|
+| Host median | 99.700 us | 45.400 us | -54.46% |
+| Client median | 95.400 us | 42.600 us | -55.35% |
+| Host 10% trimmed mean | 102.210 us | 44.488 us | -56.47% |
+| Client 10% trimmed mean | 102.448 us | 43.040 us | -57.99% |
+
+Both median bootstrap intervals excluded no change. Both runs completed on both
+peers without crashes or desync artifacts. The two changes are retained.
+
+## Snapshot Copy Experiments
+
+The snapshot contains exactly 330 regions and 1540.157 KiB per save. Two
+byte-for-byte copy strategies were tested without changing coverage or region
+metadata:
+
+- Coalescing adjacent source regions produced `-0.48%` to `+0.97%` median
+  changes across peers, with all robust confidence intervals including zero.
+- SSE2 non-temporal stores for regions of at least 128 KiB produced median
+  changes of `+0.97%` on both peers and did not improve trimmed means.
+
+The optimized CRT `memcpy` path remains faster or equivalent for this workload,
+so both snapshot-copy candidates were reverted.

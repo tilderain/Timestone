@@ -134,6 +134,64 @@ throws, and joint-attached projectiles consume this state. Render-adjacent field
 names do not prove presentation-only ownership; world matrices and model joints
 are part of deterministic combat simulation.
 
+### Aggregate model bounds
+
+The final call inside `uModel__updateJointMatrix` was previously named
+`sRender__playbackDrawListsInner`. Ghidra analysis shows that it is
+`uModel__updateBoundsFromJoints` at `0x140568F30`.
+
+This function scans the completed joint matrices and the model resource's joint
+bounding spheres. It writes only derived aggregate model state:
+
+- Center and radius at `uModel + 0x1B0..+0x1BF`.
+- Derived bounds matrices at `uModel + 0x1C0..+0x1FF`.
+- Half extents at `uModel + 0x200..+0x20F`.
+- Cached root position at `uModel + 0x210..+0x218`.
+
+`uModel__submitForRender` and `uModel__cullVs2FrustumCascade` consume these
+fields for visibility and frustum decisions. The later character push, attack,
+hurt, attachment, and projectile collision passes instead consume the world and
+joint matrices that were already completed before this call. The character
+camera-bound classifier also uses `uCoord` position and camera planes rather
+than the aggregate model bounds.
+
+Two additional structural checks support this classification:
+
+- `uModel__updateBoneMatrices` already accepts bit `1` as a native request to
+  skip this bounds refresh while still evaluating the required joint matrices.
+- Character restore intentionally keeps `cChr + 0x80..+0x55F` on the live
+  presentation timeline. That range contains the visibility and aggregate-bound
+  fields rather than restoring them as deterministic character state.
+
+This makes the bounds scan a strong presentation-only coalescing candidate. It
+should not be removed permanently: defer it while resimulating, remember each
+model that reached it, and execute it once from the final corrected joint state
+before the first post-rollback draw. This preserves exact final render bounds
+while replacing N per-joint scans with one.
+
+### Safe coalescing shape
+
+The three model helpers can use the same fixed-capacity deferred-model list:
+
+1. During `g_isResimulating`, record the model and return from
+   `uModel__updateCameraVisibilityMask`, `uModel__updateAuxRenderTexture`, or
+   `uModel__updateBoundsFromJoints`.
+2. After the final replayed frame and after `g_isResimulating` becomes false,
+   discard dead/replaced model pointers.
+3. Run each deferred helper once for every surviving model before rendering.
+
+Coalescing is safer than an unconditional resimulation early return. A pure
+skip can leave visibility, texture data, or model bounds on the prediction
+timeline for the first corrected draw. None of these helpers has temporal
+gameplay state, so final-state recomputation is sufficient.
+
+The embedded `cChrEyes__update` is not in this group. Although eye motion is
+visual, it advances smoothed gaze-controller state and mutates eye and child
+joint transforms. Replaying only its final call is not equivalent to replaying
+all intermediate updates. Material-mode commands are also unsafe to discard:
+an intermediate command can establish the persistent material state required by
+the final corrected frame.
+
 ## Embedded Sound Candidates
 
 Character movement invokes sound services even though the outer `sSound__move`
@@ -317,6 +375,7 @@ site:
 |---|---|---|
 | `uModel__updateCameraVisibilityMask` | No | `uCharacter__move_base` calls the unhooked `0x1402021D0 -> 0x140200CB0` model thunk, which calls this helper unconditionally. |
 | `uModel__updateAuxRenderTexture` | No | The same unhooked model thunk calls it immediately after visibility-mask maintenance. |
+| `uModel__updateBoundsFromJoints` | No | Character vtable `+0x98` reaches `uCharacter__updateConstraints -> uActorShareModel__updateJointMatricesAndConstraints -> uModel__updateJointMatrix`, which performs this per-joint bounds scan after the required joint update. |
 | `FUN_1402B1280` voice-parameter update | No | The wrapper still locks `sGSound`, resolves voice references, applies parameters, and stores its per-character value. Separate hooks suppress voice creation, audible starts, and `sSound__move`, but not this update. |
 | `uCharacterPost__move` | No | Category 18 is enabled in the headless move pass, so the coordinator and its collision/replay children run. No presentation-only child work was identified. |
 
@@ -354,6 +413,77 @@ upload. QPC overhead is included, so the native cost may be lower still. The
 helper is not a useful optimization target in these states; a branch counter
 would be needed to prove whether a rare expensive allocation/upload path occurs
 in other matchups.
+
+### Aggregate-bounds measurement
+
+The profiling-only `model_bounds_from_joints` hook measured the complete native
+function in the 2,000-fighting-frame session
+`nplive_20260823_011313_{host,client}`:
+
+| Measurement | Host | Client |
+|---|---:|---:|
+| Rollback windows | 156 | 191 |
+| Replayed frames | 1,127 | 1,374 |
+| Bounds calls | 3,991 | 4,822 |
+| Calls/replayed frame | 3.541 | 3.509 |
+| Bounds total | 35.9048 ms | 43.0248 ms |
+| Aggregate average/call | 8.996 us | 8.923 us |
+| Window median average/call | 9.617 us | 10.063 us |
+| Window p95 average/call | 13.157 us | 12.867 us |
+| Bounds/replayed frame | 0.03186 ms | 0.03131 ms |
+| Window median/replayed frame | 0.03181 ms | 0.03170 ms |
+| Window p95/replayed frame | 0.04840 ms | 0.04646 ms |
+| Share of unit movement | 1.99% | 3.02% |
+
+The host recorded one `681.4 us` maximum in window `1832-1840`. Removing that
+window leaves 3,967 calls averaging `8.803 us` with a `68.4 us` maximum, closely
+matching the client. The isolated maximum is therefore consistent with a local
+scheduling/preemption event rather than ordinary bounds work.
+
+The measured normal cost is about three times the earlier static estimate and
+is large enough to be a useful secondary optimization. Estimating one final
+call per model per rollback window from each window's call density removes about
+85.7-85.8% of calls. At the measured average this predicts savings of:
+
+- Host: 30.78 ms over the run, or `0.0273 ms/replayed frame`.
+- Client: 36.93 ms over the run, or `0.0269 ms/replayed frame`.
+- Typical seven-frame correction: approximately `0.19 ms`.
+
+The exact saving requires recording distinct model pointers because models can
+appear or retire inside a rollback window. The close peer agreement is already
+sufficient to prioritize a defer-and-flush implementation over the much cheaper
+auxiliary-texture helper.
+
+### Deferred-bounds candidate
+
+The candidate implementation records each model that requests a bounds scan
+during resimulation, skips duplicate intermediate scans, and refreshes each
+surviving model once after the final corrected frame. A fixed 512-entry queue
+avoids replay-time allocation and falls back to native execution if it fills.
+
+Candidate profile:
+
+```text
+rollback_profile_runs/20260823T082359.701265Z_candidate_deferred_model_bounds
+```
+
+| Measurement | Baseline host | Candidate host | Baseline client | Candidate client |
+|---|---:|---:|---:|---:|
+| Replayed frames | 1,127 | 1,127 | 1,374 | 1,110 |
+| Bounds calls/frame | 3.541 | 0.472 | 3.509 | 0.469 |
+| Bounds ms/frame | 0.03186 | 0.00464 | 0.03131 | 0.00460 |
+| Average executed call | 8.996 us | 9.832 us | 8.923 us | 9.804 us |
+
+The candidate removed 86.6% of calls on both peers. Normalized bounds cost fell
+by `0.02722 ms/replayed frame` on host and `0.02671 ms/replayed frame` on client,
+matching the pre-implementation prediction. The remaining calls are the final
+per-model refreshes, so their slightly higher average is consistent with a
+different model mix rather than queue overhead.
+
+Both peers completed the 2,000-fighting-frame run. The runner found no crash or
+desync artifacts. Aggregate rollback time is not used as the acceptance signal
+because the candidate and baseline followed different battle workloads; the
+direct hook bucket provides the attributable comparison.
 
 For a normal headless tick of `1.31 ms/frame`, the measured auxiliary-texture
 helper accounts for approximately `0.08%`. The unmeasured camera and voice
@@ -412,6 +542,7 @@ Instrument `uCharacter__move_base` rather than continuing to treat the entire
 - Time in `uModel__move`.
 - Separate time in `uModel__updateCameraVisibilityMask`.
 - Separate time in `uModel__updateAuxRenderTexture`.
+- Separate time in `uModel__updateBoundsFromJoints`.
 - Time in collision sphere and geometry rebuilding.
 - Time in finalization callbacks.
 

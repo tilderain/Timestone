@@ -3,6 +3,7 @@
 #include "rollback.h"
 #include "rollback_memory.h"
 #include "rollback_diagnostics.h"
+#include "rollback_profile.h"
 #include "mk10utils.h"
 #include "netplay.h"
 #include "../kiero/minhook/include/MinHook.h"
@@ -52,6 +53,16 @@ using GetJointPosFn = void*(__fastcall*)(uint64_t, void*);
 static GetJointPosFn g_originalGetJointPos = nullptr;
 using CharacterModelPostMoveFn = void(__fastcall*)(uint64_t);
 static CharacterModelPostMoveFn g_originalCharacterModelPostMove = nullptr;
+using ModelBoundsFromJointsFn = void(__fastcall*)(uint64_t);
+static ModelBoundsFromJointsFn g_originalModelBoundsFromJoints = nullptr;
+struct DeferredModelBounds {
+    uint64_t model;
+    uint64_t vtable;
+};
+static constexpr size_t DEFERRED_MODEL_BOUNDS_CAPACITY = 512;
+static DeferredModelBounds
+    g_deferredModelBounds[DEFERRED_MODEL_BOUNDS_CAPACITY] = {};
+static size_t g_deferredModelBoundsCount = 0;
 using CutInAddCharacterFn = void(__fastcall*)(uint64_t, uint64_t);
 static CutInAddCharacterFn g_originalCutInAddCharacter = nullptr;
 using CutInSetVariantFn = void(__fastcall*)(uint64_t, uint32_t);
@@ -634,6 +645,52 @@ static void __fastcall hkCharacterModelPostMove(uint64_t character)
         g_originalCharacterModelPostMove(character);
 }
 
+static void __fastcall hkModelBoundsFromJoints(uint64_t model)
+{
+    if (g_isResimulating && model &&
+        IsAccessibleRange(model, sizeof(uint64_t))) {
+        for (size_t i = 0; i < g_deferredModelBoundsCount; ++i) {
+            if (g_deferredModelBounds[i].model == model) {
+                g_deferredModelBounds[i].vtable = *(uint64_t*)model;
+                return;
+            }
+        }
+        if (g_deferredModelBoundsCount < DEFERRED_MODEL_BOUNDS_CAPACITY) {
+            g_deferredModelBounds[g_deferredModelBoundsCount++] = {
+                model, *(uint64_t*)model
+            };
+            return;
+        }
+    }
+
+    RollbackHookProfileScope profile(
+        RollbackHookProfileId::ModelBoundsFromJoints);
+    if (g_originalModelBoundsFromJoints)
+        g_originalModelBoundsFromJoints(model);
+}
+
+void Rollback_ClearDeferredModelBounds()
+{
+    g_deferredModelBoundsCount = 0;
+}
+
+void Rollback_FlushDeferredModelBounds()
+{
+    const size_t count = g_deferredModelBoundsCount;
+    g_deferredModelBoundsCount = 0;
+    for (size_t i = 0; i < count; ++i) {
+        const DeferredModelBounds& entry = g_deferredModelBounds[i];
+        if (!entry.model || !entry.vtable ||
+            !IsAccessibleRange(entry.model, 0x220) ||
+            *(uint64_t*)entry.model != entry.vtable ||
+            ((*(uint32_t*)(entry.model + 0x10) & 7u) - 1u) >= 2u ||
+            !HasCallableDtiVirtual((void*)entry.model)) {
+            continue;
+        }
+        hkModelBoundsFromJoints(entry.model);
+    }
+}
+
 static bool HasInvalidMtAnimTable(uint64_t animation)
 {
     if (!IsAccessibleRange(animation, 0x70)) return true;
@@ -778,6 +835,19 @@ void Rollback_PatchBattleUiAllocationFailure()
 
 void Rollback_InitNativeNullGuards()
 {
+    const MH_STATUS modelBoundsStatus = MH_CreateHook(
+        (LPVOID)_addr(0x140568F30), (LPVOID)&hkModelBoundsFromJoints,
+        (LPVOID*)&g_originalModelBoundsFromJoints);
+    if (modelBoundsStatus == MH_OK) {
+        const MH_STATUS enableStatus =
+            MH_EnableHook((LPVOID)_addr(0x140568F30));
+        HookLog("Rollback: %s deferred model bounds filter\n",
+                enableStatus == MH_OK ? "installed" : "failed to install");
+    } else {
+        HookLog("Rollback: failed to hook deferred model bounds filter (%d)\n",
+                modelBoundsStatus);
+    }
+
     const MH_STATUS characterModelStatus = MH_CreateHook(
         (LPVOID)_addr(0x1402021E0), (LPVOID)&hkCharacterModelPostMove,
         (LPVOID*)&g_originalCharacterModelPostMove);

@@ -444,6 +444,11 @@ void Rollback_CaptureCollisionNodeClones(RollbackSnapshotSlot& slot)
 
     size_t capturedCount = 0;
     bool mutatedClones = false;
+    uint32_t capturedChildren = 0;
+    uint32_t cloneCopies = 0;
+    uint32_t emptyCloneCopies = 0;
+    uint32_t cloneCreates = 0;
+    uint32_t cloneDestroys = 0;
     for (int i = 0; i < slot.regionCount; ++i) {
         const RollbackRegion& region = slot.regions[i];
         if (!region.ownerSlot || region.size != CCHR_EXTERNAL_ANIM_SIZE) continue;
@@ -482,20 +487,23 @@ void Rollback_CaptureCollisionNodeClones(RollbackSnapshotSlot& slot)
         entry.savedPtr = region.ptr;
         entry.wrapperDti = wrapperDti;
         entry.childCount = childCount;
+        capturedChildren += childCount;
         std::memcpy(entry.scalarState, region.ptr, sizeof(entry.scalarState));
-        entry.childDtis.clear();
-        entry.childDtis.reserve(childCount);
+        entry.childDtis.resize(childCount);
         for (uint32_t child = 0; child < childCount; ++child) {
             uint64_t childPtr = *(const uint64_t*)(
                 childArray + (size_t)child * sizeof(uint64_t));
-            entry.childDtis.push_back(
-                childPtr && HasCallableDtiVirtual((void*)childPtr)
-                    ? GetObjectDti(childPtr) : 0);
+            // copyFrom consumes these same native children immediately below;
+            // an additional VirtualQuery-based validity pass cannot make that
+            // operation safe and only repeats work for every captured child.
+            entry.childDtis[child] = childPtr ? GetObjectDti(childPtr) : 0;
         }
         if (childCount == 0) {
             if (entry.clone) {
                 copyNode(entry.clone, region.ptr, false, true);
                 mutatedClones = true;
+                ++cloneCopies;
+                ++emptyCloneCopies;
             }
             ++capturedCount;
             continue;
@@ -504,10 +512,12 @@ void Rollback_CaptureCollisionNodeClones(RollbackSnapshotSlot& slot)
         if (!entry.clone) {
             entry.clone = createNode(nullptr);
             if (!entry.clone) continue;
+            ++cloneCreates;
         }
         // Inherit the source child factory before deep-copying its children.
         copyNode(entry.clone, region.ptr, false, true);
         mutatedClones = true;
+        ++cloneCopies;
         ++capturedCount;
     }
 
@@ -521,10 +531,21 @@ void Rollback_CaptureCollisionNodeClones(RollbackSnapshotSlot& slot)
         if (destroy && IsAccessibleAddress((uint64_t)destroy)) {
             destroy(entry.clone, 1);
             mutatedClones = true;
+            ++cloneDestroys;
         }
     }
     slot.collisionNodeClones.resize(capturedCount);
     if (mutatedClones) InvalidateMemoryQueryCache();
+    if constexpr (ROLLBACK_PROFILING_ENABLED) {
+        if (g_activeRollbackProfile) {
+            g_activeRollbackProfile->snapshotCloneWrappers += capturedCount;
+            g_activeRollbackProfile->snapshotCloneChildren += capturedChildren;
+            g_activeRollbackProfile->snapshotCloneCopies += cloneCopies;
+            g_activeRollbackProfile->snapshotCloneEmptyCopies += emptyCloneCopies;
+            g_activeRollbackProfile->snapshotCloneCreates += cloneCreates;
+            g_activeRollbackProfile->snapshotCloneDestroys += cloneDestroys;
+        }
+    }
 }
 
 void Rollback_RestoreCollisionNodeClones(RollbackSnapshotSlot& slot)
@@ -569,9 +590,10 @@ void Rollback_RestoreCollisionNodeClones(RollbackSnapshotSlot& slot)
         for (uint32_t child = 0; valid && child < restoredCount; ++child) {
             uint64_t restoredChild = restoredArray ?
                 *(uint64_t*)(restoredArray + (size_t)child * sizeof(uint64_t)) : 0;
-            uint64_t restoredDti = restoredChild &&
-                HasCallableDtiVirtual((void*)restoredChild)
-                    ? GetObjectDti(restoredChild) : 0;
+            // Native copyFrom has just produced this graph and already requires
+            // callable children. Compare identity without repeating a memory
+            // query for every child.
+            uint64_t restoredDti = restoredChild ? GetObjectDti(restoredChild) : 0;
             valid = restoredDti == entry.childDtis[child];
         }
         if (!valid) {
