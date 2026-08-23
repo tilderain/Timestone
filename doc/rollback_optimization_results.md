@@ -211,10 +211,11 @@ because native callers treat a true result as permission for another virtual
 dispatch. However, the vtable and `getDTI` executable target are immutable game
 module metadata and were being revalidated on every call.
 
-The retained change checks the object allocation every time, rejects the base
-vtable every time, and uses a 256-entry thread-local direct-mapped cache only
-for vtables that have already passed the complete range and executable checks.
-Unknown or colliding vtables still take the original validation path.
+For callers that require a vtable proof, the retained change checks the object
+allocation, rejects the base vtable, and uses a 256-entry thread-local
+direct-mapped cache only for vtables that have already passed the complete
+range and executable checks. Unknown or colliding vtables still take the
+original validation path.
 
 Baseline:
 `rollback_profile_runs/20260823T085430.224674Z_baseline_lifetime_hook_validation`
@@ -233,3 +234,30 @@ All robust bootstrap intervals excluded no change. At the baseline call rate,
 the reduction is approximately 0.19-0.21 ms per replayed frame, or about
 1.3-1.4 ms for a typical 6.6-frame rollback window. Both peers completed
 without crash or desync artifacts.
+
+### Active Character Caller Scope
+
+Caller profiling found that return address `0x14005629E` in
+`cChr__isMoveActive` accounts for approximately 57% of rollback-time
+`MtObject::isAlive` calls. Ghidra confirms that this caller passes its current
+`cChr` `this` pointer and immediately reads more fields from the same character.
+The global allocation and vtable proof therefore cannot make this specific
+caller safer. It now calls the original state predicate directly, while all
+other callers retain the cached vtable validation above.
+
+Baseline:
+`rollback_profile_runs/20260823T085909.589795Z_candidate_is_alive_vtable_cache`
+
+Candidate:
+`rollback_profile_runs/20260823T091816.959237Z_candidate_trust_active_character_is_alive`
+
+| `isAlive` hook cost per call | Baseline | Candidate | Change |
+|---|---:|---:|---:|
+| Host median | 0.3873 us | 0.3064 us | -20.90% |
+| Client median | 0.3864 us | 0.3199 us | -17.21% |
+| Host 10% trimmed mean | 0.3895 us | 0.3115 us | -20.04% |
+| Client 10% trimmed mean | 0.3880 us | 0.3235 us | -16.61% |
+
+All robust bootstrap intervals excluded no change. This saves approximately
+0.04-0.05 ms per replayed frame, or 0.29-0.36 ms for a typical rollback
+window. Both peers completed without crash or desync artifacts.

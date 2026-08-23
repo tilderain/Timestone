@@ -192,6 +192,10 @@ static void __fastcall hkMtObjectSetFlag(uint64_t object, uint8_t enabled)
 
 static bool __fastcall hkMtObjectIsAlive(uint64_t object)
 {
+    if ((uint64_t)__builtin_return_address(0) ==
+        (uint64_t)_addr(0x14005629E)) {
+        return g_originalMtObjectIsAlive(object);
+    }
     // Native callers use this predicate as a vtable validity proof and then
     // dispatch another virtual method. A recycled pointer can still be mapped
     // and contain an alive-looking state word after its derived destructor has
