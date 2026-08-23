@@ -5,6 +5,7 @@
 #include <vector>
 
 struct RollbackShotRecipe;
+struct RollbackEffectRecipe;
 
 struct RollbackShotFactoryPolicyState {
     uint8_t ownerSlots[6] = {};
@@ -56,5 +57,8 @@ void Rollback_RestoreShotClassState(
 void Rollback_RemapCharacterShotLinks(
     void* character, uint64_t expectedVtable, const uint8_t* savedCharacter,
     size_t savedCharacterSize, const std::vector<RollbackShotRecipe>& recipes);
+void Rollback_RemapCharacterEffectLinks(
+    void* character, uint64_t expectedVtable, const uint8_t* savedCharacter,
+    size_t savedCharacterSize, const std::vector<RollbackEffectRecipe>& recipes);
 uint32_t Rollback_RepairNemesisExplosionAttack(
     void* shot, void* parent, uint32_t restoredId = UINT32_MAX);

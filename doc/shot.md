@@ -440,6 +440,15 @@ resource changes from pending to ready. Cached resources begin ready and do not
 trigger the repair. Keep the local geometry, radius, metadata, and subsequent
 animated frames native.
 
+Rocket Raccoon's `uShotVulcanOilBalloonGroundOil` (`0x140d4c478`) creates a
+slot-1 callback effect with a fresh particle generator and manager graph. The
+`20260822_175251` rollback crash reached `cParticleGenerator_vfn17` through
+`uEffect__moveAfter`; the live billboard generator's free-list tail at `+0xf8`
+had become the float bit pattern `-2.0f` (`0xc0000000`). Do not rewind captured
+effect or generator emission scalars onto this factory-created callback. Keep
+the fresh effect on its native timeline so its particle pool topology and
+emission cursor remain coherent.
+
 Chris's `uShotVulcanLandMine` creates its armed-grenade `uGameEffect` only when
 virtual `+0x318` handles stage contact. A frame-72 snapshot can therefore contain
 `mIsTakeOn=true` and an occupied callback slot at `uShot+0x1f78`, while its fresh

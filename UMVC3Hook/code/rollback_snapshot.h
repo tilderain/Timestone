@@ -107,6 +107,12 @@ struct RollbackEffectRecipe {
     ConcreteShotSnapshot::CallbackEffectState state;
 };
 
+struct RollbackCharacterEffectState {
+    void* character = nullptr;
+    uint32_t ownerOffset = 0;
+    ConcreteShotSnapshot::CallbackEffectState state;
+};
+
 struct RollbackCollisionNodeClone {
     uint64_t ownerSlot;
     void* savedPtr;
@@ -158,6 +164,7 @@ struct RollbackSnapshotSlot {
     uint32_t remoteInput = 0;
     std::vector<RollbackShotRecipe> shotRecipes;
     std::vector<RollbackEffectRecipe> effectRecipes;
+    std::vector<RollbackCharacterEffectState> characterEffectStates;
     std::vector<RollbackCollisionNodeClone> collisionNodeClones;
     std::vector<RollbackModelRenderState> modelRenderStates;
     RollbackActionSideCameraState actionSideCamera;

@@ -52,7 +52,72 @@ to the concrete character object.
 | `0x140D46038` | `uWolverine` | `+0x68F8/1` | Berserker install latch | `uWolverine__uWolverine` | High |
 | `0x140D460C0` | `uZero` | `+0x6910/1` | Sogenmu install latch | `uZero__uZero` | High |
 | `0x140D45958` | `uRedArremer` | `+0x68F4/1`, `+0x68FC/2`, `+0x6928/4` | ability, sync/install latches, flight-idle timer | ctor, `tick`, `sync` | High |
-| `0x140D459D8` | `uRRaccoon` | `+0x6954/9`, `+0x6960/4` | weapon action, movement state/latch, voice timer | gameplay callbacks | High |
+| `0x140D459D8` | `uRRaccoon` | `+0x6950/2`, `+0x6954/9`, `+0x6960/4` | airborne phase flags, weapon action, movement state/latch, voice timer | gameplay callbacks and `20260822_174256` snapdump | High |
+
+Rocket's twelve weak references are not one homogeneous trap array. Ghidra
+confirms effect owners at `+0x68F0`, `+0x68F8`, `+0x6900`, and `+0x6930`.
+The two middle effects are created by the airborne tumble callback; creating the
+second one initializes `mYSpd`, `mYAcl`, and the accumulator at `+0x6958`, so
+their presence also acts as an indirect gameplay latch. Four fixed slots at
+`+0x6908..+0x6920` retain active shots by command type. The three-entry ring at
+`+0x6938..+0x6948` enforces another shot limit: when full, native code compares
+`uShot+0x1F58`, marks the oldest shot for removal through `+0x1FEC/+0x2078`, and
+replaces its entry. These seven shot references are gameplay-authoritative even
+though the pointed-to objects must be reconstructed rather than byte-restored.
+`+0x6928` is validated and cleaned with the fixed group, but its producer and
+exact object family remain unresolved.
+
+Shot reconstruction allocates new objects, so preserving the live values in
+the seven confirmed slots would retain prediction-timeline addresses. After all
+saved shots are recreated, `Rollback_RemapCharacterShotLinks` now reads each
+slot from the saved character body, finds the exact recipe by `savedPtr` and
+Rocket ownership, and writes its `restoredPtr`. A null or omitted saved shot
+clears the slot. This also preserves the historical ordering of the three-entry
+replacement ring. Effect owners and unresolved `+0x6928` are intentionally not
+treated as shot links.
+
+The `20260822_174256` capture resolves the adjacent bytes `+0x6950/+0x6951`.
+They alternate while Rocket is in airborne action 33. At frame 384, stale phase
+state made the client advance `+0x6958` from `-0.6` to `-0.9` while the host
+reset it to `-0.3`; inherited `mYSpd` consequently became `-0.6` versus `0.0`.
+The final pointer at `+0x6948` causes generic pointer-neighborhood preservation
+through `+0x695F`, so these two bytes require an explicit verified scalar range.
+
+The `20260822_195413` jetpack capture exposes the corresponding effect-owner
+problem. Host and client movement state still matches at frame 901. At frame
+902, the host has retired the tumble effect at `+0x6930`, while the client still
+holds a non-null owner. On frame 903 that owner changes the native cleanup path:
+host/client `mYAcl` becomes `-0.30/-0.75`, `mUsrF` becomes `2/0`, and
+`+0x6950/+0x695C` diverge. The visible frame-905 fall difference is propagation.
+After independent effects are recreated, `Rollback_RemapCharacterEffectLinks`
+now maps Rocket's saved `+0x68F0`, `+0x68F8`, `+0x6900`, and `+0x6930` values to
+the exact effect recipe `restoredPtr`. Saved-null owners are cleared; unmatched
+non-null owners remain live because persistent effects are intentionally omitted
+from recipe capture.
+
+The `20260822_200217` capture shows that `+0x68F8/+0x6900` cannot use that
+persistent-effect policy. Both peers enter action 33 with identical movement
+state and both owners present. At frame 242, the host's second effect reaches
+native expiry and is recreated, resetting `+0x6958` from `-0.9` to `-0.3` and
+`mYSpd` from `-0.6` to `0.0`; the client's preserved effect remains alive and
+advances those values to `-1.2` and `-0.9`. These effects are therefore short-
+lived gameplay timers despite being stored in character effect slots.
+
+The attempted ordinary recipe policy was invalidated by `20260822_200755`.
+Rocket creates these two objects through `sGameEffect__spawn_Short`, which
+bypasses the hooked general factory, so snapdump still reported zero effect
+recipes. Excluding them from persistent retention caused restore to destroy both
+objects without a factory recipe to recreate them. At frame 142, one peer
+therefore entered normal fall cleanup (`mYAcl=-0.75`, `mUsrF=0`, `+0x695C=1`)
+while the other retained float gravity (`-0.30`, `mUsrF=2`). Frame 144 was
+propagation.
+
+The two owners remain persistent and retain their native topology. Each
+snapshot now captures their existing concrete timing/generator state in
+`characterEffectStates`; restore reapplies that state in place before replay.
+This rewinds the short effects' expiry cadence without unsupported destruction
+or recreation. The general effect recipe and persistence policies remain
+unchanged for other effects.
 
 `uFrank` also has three `0x30`-byte constructor-initialized tables at
 `+0x68F8`, `+0x6928`, and `+0x6958`. They are pointer-free by the current
@@ -167,7 +232,7 @@ not restored explicitly.
 | `uNova` | `+0x6908/9` Nova Force/Centurion state | `+0x68F0/0x18` effects | high confidence pointer conflict |
 | `uPhoenix` | generated fields | `+0x6920/0x10` command `cRef` | other bytes unresolved |
 | `uRedArremer` | `+0x68F4/1`, `+0x68FC/2`, `+0x6928/4` | `+0x6900/8` effect; `+0x6908/0x20` references | `+0x68F8/4` reset-only state unresolved |
-| `uRRaccoon` | `+0x6954/9`, `+0x6960/4` action/movement/voice state | `+0x68F0/0x60` unit pointers | `+0x6950/2` reset-only flags unresolved; generated range is pointer-filtered |
+| `uRRaccoon` | `+0x6950/2`, `+0x6954/9`, `+0x6960/4` airborne phase/action/movement/voice state | `+0x68F0/0x60` unit pointers | generated range is pointer-filtered |
 | `uRedArremerSh` | `+0x68F0/1`, `+0x68F4/4`, `+0x68F8/2`, `+0x6908/1`, `+0x6938/4` | `+0x6910/8` effect | remaining bytes unresolved |
 | `uRyu` | special existing policy restores Shinku/Ranbu scalar state | `+0x6918/8`, `+0x6928/0x10` rebuilt/cleared by recipe | high confidence |
 | `uSentinel` | `+0x6909/1`, `+0x690C/9` drone state | `+0x68F0/8`, `+0x6900/8` effects | high confidence pointer conflict |
@@ -245,7 +310,7 @@ post-trace latch is restored explicitly.
 | `uHiryu` | `0x6930` | `+0x6900/1` team-state latch; `+0x6920/4`, `+0x6924/1`, `+0x6928/4` Ouroboros state | `+0x68F8/8` option unit; `+0x6910/0x10` Ouroboros frozen-target `MtArray` |
 | `uLeilei` / `uHsienKo` | `0x6930` | `+0x6900/4` reserved state, `+0x6908/0x0C` base position, `+0x6918/4` pendulum length, `+0x691C/4` state | `+0x68F0/0x10` helper units; `+0x6928/8` command reference |
 | `uNaruhodo` / `uPhoenixWright` | `0x69B0` | generated keep-item/reversal state `+0x6918/0x0D`; remaining helper state bank is not semantically typed | evidence slots `+0x68F0/0x28`, helper `+0x6928/8`, command reference `+0x6930/8` |
-| `uRRaccoon` / `uRocketRaccoon` | `0x6970` | gameplay action/movement/voice state `+0x6954/9`, `+0x6960/4`; reset-only `+0x6950/2` unresolved | twelve bomb/mine unit pointers `+0x68F0/0x60` |
+| `uRRaccoon` / `uRocketRaccoon` | `0x6970` | airborne phase flags `+0x6950/2`; gameplay action/movement/voice state `+0x6954/9`, `+0x6960/4` | twelve weak unit pointers `+0x68F0/0x60`, split between effects and active-shot limits |
 | `uRedArremer` / `uFirebrand` | `0x6930` | `+0x68F4/1` ability latch, `+0x68FC/2` sync/Chaos Tide latches, `+0x6928/4` flight-idle timer; reset-only `+0x68F8/4` unresolved | Chaos Tide effect `+0x6900/8`; four reference slots `+0x6908/0x20` |
 | `uVJoe` / `uViewtifulJoe` | `0x6910` | generated `+0x68F0/1` Shocking Pink latch; `+0x6900/0x0C` vector | none |
 | `uZeroSh` | size unavailable | `+0x7090/4` trace status/dispatch latch | embedded `cChrTrace` begins `+0x68F0`; internal extent remains live/unrestored |
@@ -315,7 +380,7 @@ unsafe ownership findings.
 | 43 | Sentinel | `0x140D45C58` | verified drone state; Hyper/drone owners |
 | 44 | X-23 | `0x140D46080` | Trigger Install owner; generated range filtered |
 | 45 | Nova | `0x140D458D0` | verified Nova Force/Centurion state; effect owners |
-| 46 | Rocket Raccoon | `0x140D459D8` | verified action/movement/voice state; trap owners; reset flags unresolved |
+| 46 | Rocket Raccoon | `0x140D459D8` | verified airborne phase/action/movement/voice state; effect and active-shot owners |
 | 47 | Ghost Rider | `0x140D452B0` | chain/Hellfire owner range; generated range filtered |
 | 48 | Iron Fist | `0x140D454D0` | generated chain state; effect/MtArray owners |
 | 49 | Doctor Strange | `0x140D450A8` | constructor tail remains unresolved; no gameplay ownership proven |

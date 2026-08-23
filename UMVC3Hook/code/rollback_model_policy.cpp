@@ -61,6 +61,7 @@ constexpr uintptr_t DTI_UKOBUN = 0x140D455B0;
 constexpr uintptr_t VTABLE_UARTHUR = 0x140A70CD0;
 constexpr uintptr_t VTABLE_UCAP_AMERICA = 0x140A71430;
 constexpr uintptr_t VTABLE_UDOCTOR_DOOM = 0x140A73A40;
+constexpr uintptr_t VTABLE_URROCKET_RACCOON = 0x140A7DF30;
 constexpr uintptr_t VTABLE_UTRISH = 0x140A81A20;
 constexpr uintptr_t PTR_SUNIT = 0x140E17698;
 constexpr uintptr_t PTR_SREPLAY = 0x140D4D9D8;
@@ -1249,6 +1250,28 @@ void Rollback_RemapCharacterShotLinks(
         return;
     }
 
+    if (expectedVtable == (uint64_t)_addr(VTABLE_URROCKET_RACCOON)) {
+        static constexpr uint32_t shotOffsets[] = {
+            0x6908, 0x6910, 0x6918, 0x6920,
+            0x6938, 0x6940, 0x6948,
+        };
+        for (uint32_t offset : shotOffsets) {
+            if ((size_t)offset + sizeof(void*) > savedCharacterSize) continue;
+
+            void* savedReference = *(void* const*)(savedCharacter + offset);
+            void* restoredReference = nullptr;
+            for (const RollbackShotRecipe& saved : recipes) {
+                if (saved.ownerChr == character &&
+                    saved.savedPtr == savedReference) {
+                    restoredReference = saved.restoredPtr;
+                    break;
+                }
+            }
+            *(void**)((uint8_t*)character + offset) = restoredReference;
+        }
+        return;
+    }
+
     uintptr_t shotDti = 0;
     uint32_t offset = 0;
     if (expectedVtable == (uint64_t)_addr(VTABLE_UCAP_AMERICA)) {
@@ -1287,4 +1310,32 @@ void Rollback_RemapCharacterShotLinks(
     *(void**)((uint8_t*)character + offset) =
         (!requireSavedReference || savedReference) && match && !ambiguous
             ? match->restoredPtr : nullptr;
+}
+
+void Rollback_RemapCharacterEffectLinks(
+    void* character, uint64_t expectedVtable, const uint8_t* savedCharacter,
+    size_t savedCharacterSize, const std::vector<RollbackEffectRecipe>& recipes)
+{
+    if (expectedVtable != (uint64_t)_addr(VTABLE_URROCKET_RACCOON)) return;
+
+    static constexpr uint32_t effectOffsets[] = {
+        //Maybe only the jetpack effect is needed here, check later?
+        0x68F0, 0x68F8, 0x6900, 0x6930,
+    };
+    for (uint32_t offset : effectOffsets) {
+        if ((size_t)offset + sizeof(void*) > savedCharacterSize) continue;
+
+        void* savedReference = *(void* const*)(savedCharacter + offset);
+        void** liveReference = (void**)((uint8_t*)character + offset);
+        if (!savedReference) {
+            *liveReference = nullptr;
+            continue;
+        }
+        for (const RollbackEffectRecipe& saved : recipes) {
+            if (saved.savedPtr == savedReference) {
+                *liveReference = saved.restoredPtr;
+                break;
+            }
+        }
+    }
 }

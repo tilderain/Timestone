@@ -38,6 +38,7 @@ static constexpr uintptr_t FN_SUNIT_REMOVE_UNIT = 0x14051B9F0;
 static constexpr uintptr_t FN_SUNIT_REMOVE_FROM_MULTI_MASK = 0x14051BAF0;
 static constexpr uintptr_t FN_MTOBJECT_IS_ALIVE = 0x140001B80;
 static constexpr uintptr_t DTI_UGAME_EFFECT_MODEL = 0x140D46ED0;
+static constexpr uintptr_t VTABLE_URROCKET_RACCOON = 0x140A7DF30;
 static constexpr uintptr_t SMVC3MGR_ACTION_OFFSET = 0x48;
 static constexpr uint32_t SUNIT_CATEGORY_COUNT_OFFSET = 0xC38;
 static constexpr uint32_t SUNIT_CATEGORY_LISTS_OFFSET = 0x50;
@@ -653,6 +654,7 @@ static void __fastcall hkKirigakureEffectUpdate(void* effect)
 void Effect_CaptureRecipes(RollbackSnapshotSlot& slot)
 {
     slot.effectRecipes.clear();
+    slot.characterEffectStates.clear();
     slot.effectRecipes.reserve(g_liveEffectRecipes.size());
     for (const RollbackEffectRecipe& recipe : g_liveEffectRecipes) {
         if (!recipe.restoredPtr ||
@@ -673,6 +675,50 @@ void Effect_CaptureRecipes(RollbackSnapshotSlot& slot)
         saved.savedPtr = recipe.restoredPtr;
         ConcreteEffectSnapshot_Capture(recipe.restoredPtr, saved.state);
         slot.effectRecipes.push_back(saved);
+    }
+
+    // Rocket's jetpack effects use the short factory and never enter the
+    // general recipe tracker. Their lifetime controls periodic float resets,
+    // so capture the timing state of the retained live objects explicitly.
+    uint64_t sCharacter = *(uint64_t*)_addr(PTR_SCHARACTER);
+    for (uint32_t teamOffset : TEAM_OFFSETS) {
+        uint64_t node = sCharacter ? sCharacter + teamOffset + 0x08 : 0;
+        for (int safety = 8; node && safety-- > 0;) {
+            if (!IsAccessibleRange(node, 0x18)) break;
+            void* character = *(void**)(node + 0x08);
+            if (character && IsAccessibleRange((uint64_t)character, 0x6908) &&
+                *(uint64_t*)character ==
+                    (uint64_t)_addr(VTABLE_URROCKET_RACCOON)) {
+                for (uint32_t offset : {0x68F8u, 0x6900u}) {
+                    void* effect = *(void**)((uint8_t*)character + offset);
+                    if (!effect || !IsEffectObject(effect)) continue;
+                    RollbackCharacterEffectState saved;
+                    saved.character = character;
+                    saved.ownerOffset = offset;
+                    ConcreteEffectSnapshot_Capture(effect, saved.state);
+                    slot.characterEffectStates.push_back(std::move(saved));
+                }
+            }
+            node = *(uint64_t*)(node + 0x10);
+        }
+    }
+}
+
+void Effect_RestoreCharacterStates(RollbackSnapshotSlot& slot)
+{
+    for (const RollbackCharacterEffectState& saved :
+         slot.characterEffectStates) {
+        if (!saved.character ||
+            !IsAccessibleRange((uint64_t)saved.character,
+                               saved.ownerOffset + sizeof(void*)) ||
+            *(uint64_t*)saved.character !=
+                (uint64_t)_addr(VTABLE_URROCKET_RACCOON)) {
+            continue;
+        }
+        void* effect = *(void**)((uint8_t*)saved.character +
+                                 saved.ownerOffset);
+        if (effect && IsEffectObject(effect))
+            ConcreteEffectSnapshot_Restore(effect, saved.state);
     }
 }
 

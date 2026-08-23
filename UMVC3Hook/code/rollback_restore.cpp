@@ -1123,6 +1123,22 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
         }
     }
     Effect_RestoreRecipes(slot);
+    Effect_RestoreCharacterStates(slot);
+
+    // Rocket's tumble callbacks use effect-owner presence as an initialization
+    // latch for gravity and movement state. Reconnect saved owners to the fresh
+    // effect allocations before the first replayed character tick.
+    size_t effectLinkOffset = 0;
+    for (int region = 0; region < slot.regionCount; ++region) {
+        const RollbackRegion& savedRegion = slot.regions[region];
+        if (effectLinkOffset + savedRegion.size <= slot.size) {
+            Rollback_RemapCharacterEffectLinks(
+                savedRegion.ptr, savedRegion.expectedVtable,
+                slot.data + effectLinkOffset, savedRegion.size,
+                slot.effectRecipes);
+        }
+        effectLinkOffset += savedRegion.size;
+    }
 
     // Factory allocations are temporary reconstruction work. The concrete
     // overlay restores each saved uShot::mId; now restore the matching pool and
@@ -2202,6 +2218,9 @@ void Rollback_RestoreSnapshot(int32_t frame)
             Rollback_RemapCharacterShotLinks(
                 (void*)character, slot.regions[i].expectedVtable,
                 savedCharacter, copySize, slot.shotRecipes);
+            Rollback_RemapCharacterEffectLinks(
+                (void*)character, slot.regions[i].expectedVtable,
+                savedCharacter, copySize, slot.effectRecipes);
         }
         offset += slot.regions[i].size;
     }

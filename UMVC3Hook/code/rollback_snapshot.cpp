@@ -1649,6 +1649,7 @@ void Rollback_FreeSnapshots()
         g_slots[i].frame       = -1;
         g_slots[i].shotRecipes.clear();
         g_slots[i].effectRecipes.clear();
+        g_slots[i].characterEffectStates.clear();
         g_slots[i].modelRenderStates.clear();
     }
     Shot_Reset();
