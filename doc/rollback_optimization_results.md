@@ -199,3 +199,37 @@ metadata:
 
 The optimized CRT `memcpy` path remains faster or equivalent for this workload,
 so both snapshot-copy candidates were reverted.
+
+## `MtObject::isAlive` Vtable Validation Cache
+
+### Investigation
+
+Temporary call-site profiling showed that the rollback safety hook for
+`MtObject::isAlive` runs approximately 589-598 times per replayed frame. The
+hook must still reject unmapped objects and the shorter base `MtObject` vtable,
+because native callers treat a true result as permission for another virtual
+dispatch. However, the vtable and `getDTI` executable target are immutable game
+module metadata and were being revalidated on every call.
+
+The retained change checks the object allocation every time, rejects the base
+vtable every time, and uses a 256-entry thread-local direct-mapped cache only
+for vtables that have already passed the complete range and executable checks.
+Unknown or colliding vtables still take the original validation path.
+
+Baseline:
+`rollback_profile_runs/20260823T085430.224674Z_baseline_lifetime_hook_validation`
+
+Candidate:
+`rollback_profile_runs/20260823T085909.589795Z_candidate_is_alive_vtable_cache`
+
+| `isAlive` hook cost per call | Baseline | Candidate | Change |
+|---|---:|---:|---:|
+| Host median | 0.7189 us | 0.3873 us | -46.12% |
+| Client median | 0.6883 us | 0.3864 us | -43.86% |
+| Host 10% trimmed mean | 0.7307 us | 0.3895 us | -46.69% |
+| Client 10% trimmed mean | 0.7018 us | 0.3880 us | -44.71% |
+
+All robust bootstrap intervals excluded no change. At the baseline call rate,
+the reduction is approximately 0.19-0.21 ms per replayed frame, or about
+1.3-1.4 ms for a typical 6.6-frame rollback window. Both peers completed
+without crash or desync artifacts.

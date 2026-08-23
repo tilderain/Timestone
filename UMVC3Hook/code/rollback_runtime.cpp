@@ -196,10 +196,21 @@ static bool __fastcall hkMtObjectIsAlive(uint64_t object)
     // dispatch another virtual method. A recycled pointer can still be mapped
     // and contain an alive-looking state word after its derived destructor has
     // replaced the vtable with the shorter MtObject base table.
-    if (!object || !HasCallableDtiVirtual((void*)object) ||
-        *(uint64_t*)object == (uint64_t)_addr(VTABLE_MTOBJECT) ||
-        !g_originalMtObjectIsAlive) {
+    if (!object || !g_originalMtObjectIsAlive ||
+        !IsAccessibleRange(object, sizeof(uint64_t))) {
         return false;
+    }
+    const uint64_t vtable = *(uint64_t*)object;
+    if (vtable == (uint64_t)_addr(VTABLE_MTOBJECT)) {
+        return false;
+    }
+    static thread_local uint64_t validatedVtables[256] = {};
+    uint64_t& cached = validatedVtables[(vtable >> 3) & 0xFF];
+    if (cached != vtable) {
+        if (!IsAccessibleRange(vtable, 0x28)) return false;
+        const uint64_t getDti = *(uint64_t*)(vtable + 0x20);
+        if (!getDti || !IsExecutableAddress(getDti)) return false;
+        cached = vtable;
     }
     return g_originalMtObjectIsAlive(object);
 }
