@@ -276,6 +276,7 @@ constexpr DtiSnapshotRange kVerifiedCharacterScalarRanges[] = {
     {0x140D45958ull, 0x68F4, 0x01}, // uRedArremer: active-ability latch
     {0x140D45958ull, 0x68FC, 0x02}, // uRedArremer: sync and Chaos Tide latches
     {0x140D45958ull, 0x6928, 0x04}, // uRedArremer: flight idle timer
+    {0x140D459D8ull, 0x6950, 0x02}, // uRRaccoon: airborne movement phase flags
     {0x140D459D8ull, 0x6954, 0x09}, // uRRaccoon: weapon action and movement state
     {0x140D459D8ull, 0x6960, 0x04}, // uRRaccoon: voice timer
     {0x140D45FB0ull, 0x6900, 0x0C}, // uVJoe: concrete vector state
@@ -1375,6 +1376,22 @@ void ConcreteShotSnapshot_RebuildLiveCapsuleWorld(
             worldStart[axis] = shotPosition[axis] + localStart[axis];
             worldEnd[axis] = shotPosition[axis] + localEnd[axis];
         }
+    }
+
+    if (!Rollback_ConsumePendulumCollisionReset(shot, snapshot.dti))
+        return;
+
+    // Native collision observes the reset pose on the frame the asynchronous
+    // motion becomes ready; synchronous reconstruction skips that state.
+    for (const auto& saved : snapshot.collisionPrimitives) {
+        if (saved.metadataType != 1 || saved.geometryType != 6) continue;
+        uint64_t primitive = GetCollisionPrimitive(
+            (const uint8_t*)shot, saved.slot, saved.index);
+        if (!primitive) continue;
+        float* worldStart = (float*)(primitive + 0x20);
+        float* worldEnd = (float*)(primitive + 0x30);
+        for (size_t axis = 0; axis < 3; ++axis)
+            worldStart[axis] = worldEnd[axis] = shotPosition[axis];
     }
 }
 

@@ -389,6 +389,57 @@ from fresh factory state by the generic ownership filter. The native concrete
 bounce callback remains authoritative; rollback does not synthesize its landing
 transition.
 
+Rocket Raccoon's Mr. Flapper / Bear Trap (`623M`) is
+`uShotVulcanPrickleBoard` (`0x140d4c528`, size `0x2140`). Setup at
+`0x1401a6c40` asynchronously loads the trap MOD and motion
+resource, binds them to the inherited shot model, selects motion zero, and
+creates the trap effect. Apply the full model restore policy: pin resources at
+`+0x100` and `+0x11b0`, restore pointer-free model playback, and retry native
+setup after reconstruction. The `20260822_165835` capture confirms the live
+host shot as DTI `0x140d4c528`, vtable `0x140ad4600`; the adjacent
+`uShotVulcanTrapLandMine` DTI does not occur in that pair.
+
+Prickle Board collision is model-driven. In the `20260822_171614` pair, the
+host's capsule followed the opening animation and activated naturally, while
+the reconstructed client's Motion[0] remained in transitional state `0x40000`;
+its capsule stayed at the setup pose and the shot retired without activating.
+The activation virtual at `0x1401a6b90` queues actor animation one, changes
+phase `+0x212c` to two, and copies configured speed `+0x2094` to live speed
+`+0x2084`.
+The `20260822_172208` follow-up showed that running `uModel::move` before every
+hitbox update evaluates the reconstructed board twice per simulation frame: the
+client motion cursor advanced `2, 4, 6` while the host advanced `1, 2, 3`, then
+the client froze at the completed motion-zero pose. The Dog Missile deferred
+evaluation has the same ordering problem: `uShot__preMove` already calls
+`uModel::move`, so the explicit evaluation creates the Motion[0] completion edge
+outside native shot ordering.
+
+The `20260822_173038` capture exposes the actual reconstruction defect. At the
+last matching completion frame, host and client Motion[0] scalar state is
+identical, but only the host has resource-derived bindings at `+0x680`, `+0x688`,
+`+0x690`, and `+0x698`. The reconstructed client has nulls in all four slots;
+the weaker `IsShotModelReady` check sees valid joints and incorrectly reports
+ready. On the next native model tick, the host consumes the completion edge and
+selects motion one, while the client changes the terminal flag from one to four
+and remains frozen on motion zero. Before hitbox generation, re-run
+`uModel__processActionAnmchr` only while these primary motion bindings are
+missing, using the current motion number, cursor, and flags. This rebuilds the
+resource-derived slot without advancing playback; the native `uShot__preMove`
+model evaluation remains the sole frame advance.
+
+Rocket Raccoon's Pendulum Log has a one-frame collision transition when its
+uncached motion resource first binds. In the `20260822_170619` pair, both peers'
+capsule geometry matched through Pendulum time 14 and again from time 16, but at
+time 15 (frame 1061) only the host sampled the reset model pose: both world
+endpoints equaled the shot origin while the local capsule geometry remained
+unchanged. Synchronous reconstruction had bound and evaluated the motion from
+the first shot frame, skipping this native intermediate state. Track the
+original asynchronous motion resource at `+0x11b8` and collapse the
+reconstructed Pendulum's world endpoints to its position exactly when that
+resource changes from pending to ready. Cached resources begin ready and do not
+trigger the repair. Keep the local geometry, radius, metadata, and subsequent
+animated frames native.
+
 Chris's `uShotVulcanLandMine` creates its armed-grenade `uGameEffect` only when
 virtual `+0x318` handles stage contact. A frame-72 snapshot can therefore contain
 `mIsTakeOn=true` and an occupied callback slot at `uShot+0x1f78`, while its fresh

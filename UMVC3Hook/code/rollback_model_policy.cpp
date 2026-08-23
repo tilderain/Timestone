@@ -48,6 +48,7 @@ constexpr uintptr_t DTI_USHOT_VULCAN_LAND_MINE = 0x140D48D98;
 constexpr uintptr_t DTI_USHOT_SHIELD_KIKOUSYOU = 0x140D48F70;
 constexpr uintptr_t DTI_USHOT_VULCAN_SOMERSAULT_GRENADE = 0x140D49520;
 constexpr uintptr_t DTI_USHOT_VULCAN_MISSILE_EMPLACEMENT = 0x140D49A60;
+constexpr uintptr_t DTI_USHOT_VULCAN_PRICKLE_BOARD = 0x140D4C528;
 constexpr uintptr_t DTI_USHOT_SHIELD_WEAPON_CART_SPREAD = 0x140D4A098;
 constexpr uintptr_t DTI_USHOT_VULCAN_EXATK_ROCKET_LAUNCHER = 0x140D4BA48;
 constexpr uintptr_t DTI_USHOT_VULCAN_ROCKET_LAUNCHER_EXPLODE = 0x140D4BAC8;
@@ -104,6 +105,7 @@ ShotMoveFn oKingKobunMove = nullptr;
 ShotMoveFn oMissileEmplacementMove = nullptr;
 ShotMoveFn oWeaponCartMove = nullptr;
 std::unordered_set<void*> g_resimSpawnedPendulums;
+std::unordered_map<void*, bool> g_pendulumNativeMotionReady;
 int g_kingKobunTraceCount = 0;
 
 struct DeferredWeaponCartDebris {
@@ -131,6 +133,8 @@ constexpr ShotModelPolicy SHOT_MODEL_POLICIES[] = {
     {0x140D4A4E8, "Iron Pipe", {0x100, 0x11B0}, 2, true, true},
     {0x140D49520, "Somersault Grenade", {0x100, 0x11B0}, 2, true, true},
     {0x140D4B888, "Dog Missile", {0x100, 0x11B0}, 2, true, true},
+    {DTI_USHOT_VULCAN_PRICKLE_BOARD, "Bear Trap",
+     {0x100, 0x11B0}, 2, true, true},
     {DTI_USHOT_VULCAN_ITEM_THROW, "Evidence Item Throw",
      {0x100, 0x11B0}, 2, true, true},
 
@@ -288,7 +292,45 @@ void RepairResimDogMissileMotion(void* shot)
         ((void(__fastcall*)(void*))_addr(FN_UMODEL_MOVE))(shot);
 }
 
-bool PendulumMotionReady(void* shot)
+bool PrimaryMotionBindingsReady(void* shot);
+
+void RepairPrickleBoardMotionBindings(
+    void* shot, const RollbackShotRecipe* recipe)
+{
+    if ((!g_isResimulating && !(recipe && recipe->reconstructed)) || !shot ||
+        !HasCallableDtiVirtual(shot) ||
+        GetObjectDti((uint64_t)shot) !=
+            (uint64_t)_addr(DTI_USHOT_VULCAN_PRICKLE_BOARD) ||
+        !IsShotModelReady(shot) || PrimaryMotionBindingsReady(shot)) {
+        return;
+    }
+
+    uint16_t motionNo = *(uint16_t*)((uint8_t*)shot + 0x568);
+    if (motionNo == UINT16_MAX) motionNo = 0;
+    float motionFrame = *(float*)((uint8_t*)shot + 0x5AC);
+    uint32_t motionFlags = *(uint32_t*)((uint8_t*)shot + 0x570);
+    uint8_t savedMotion[0x180];
+    std::memcpy(savedMotion, (uint8_t*)shot + 0x560,
+                sizeof(savedMotion));
+    ((uint64_t(__fastcall*)(void*, uint32_t, uint32_t, float, float, float,
+                           uint32_t))
+        _addr(FN_UMODEL_PROCESS_ACTION_ANMCHR))(
+            shot, 0, motionNo, 0.0f, motionFrame, 1.0f, motionFlags);
+
+    // processActionAnmchr rebuilds the resource-owned bindings but also resets
+    // playback. Keep the exact saved cursor and completion edge while retaining
+    // the newly bound pointer slots.
+    static constexpr size_t scalarRanges[][2] = {
+        {0x08, 0xD8}, {0xE8, 0x18}, {0x108, 0x18},
+        {0x140, 0x20}, {0x168, 0x08},
+    };
+    for (const auto& range : scalarRanges) {
+        std::memcpy((uint8_t*)shot + 0x560 + range[0],
+                    savedMotion + range[0], range[1]);
+    }
+}
+
+bool PrimaryMotionBindingsReady(void* shot)
 {
     if (!shot || !IsAccessibleRange((uint64_t)shot + 0x6A0, 1)) return false;
     return *(uint32_t*)((uint8_t*)shot + 0x530) > 0 &&
@@ -300,6 +342,20 @@ bool PendulumMotionReady(void* shot)
         *(uint64_t*)((uint8_t*)shot + 0x688) != 0 &&
         *(uint64_t*)((uint8_t*)shot + 0x690) != 0 &&
         *(uint64_t*)((uint8_t*)shot + 0x698) != 0;
+}
+
+bool PendulumNativeMotionReady(void* shot)
+{
+    if (!shot || !IsAccessibleRange((uint64_t)shot + 0x11C0, 1))
+        return false;
+    void* pending = *(void**)((uint8_t*)shot + 0x11B8);
+    if (!pending || !HasCallableDtiVirtual(pending) ||
+        !IsAccessibleRange((uint64_t)pending, 0x78)) {
+        return false;
+    }
+    uint64_t table = *(uint64_t*)((uint8_t*)pending + 0x70);
+    return table && IsAccessibleRange(table, 0x10) &&
+        *(uint16_t*)(table + 0x06) != 0 && *(uint64_t*)(table + 0x08) != 0;
 }
 
 void ProcessPendulumMotionIfReady(void* shot)
@@ -342,11 +398,7 @@ void LoadPendulumMotionSynchronously(void* shot)
         !IsAccessibleRange((uint64_t)pending, 0x78)) {
         return;
     }
-    uint64_t table = *(uint64_t*)((uint8_t*)pending + 0x70);
-    if (table && IsAccessibleRange(table, 0x10) &&
-        *(uint16_t*)(table + 0x06) != 0 && *(uint64_t*)(table + 0x08) != 0) {
-        return;
-    }
+    if (PendulumNativeMotionReady(shot)) return;
     uint64_t dti = GetObjectDti((uint64_t)pending);
     uint64_t key = *(uint64_t*)((uint8_t*)pending + 0x60);
     char* path = (char*)pending + 0x0C;
@@ -377,13 +429,13 @@ void RepairResimPendulumModel(
         return;
     }
     ProcessPendulumMotionIfReady(shot);
-    if (PendulumMotionReady(shot)) {
+    if (PrimaryMotionBindingsReady(shot)) {
         EvaluatePendulumPose(shot);
         return;
     }
     LoadPendulumMotionSynchronously(shot);
     ProcessPendulumMotionIfReady(shot);
-    if (PendulumMotionReady(shot)) {
+    if (PrimaryMotionBindingsReady(shot)) {
         EvaluatePendulumPose(shot);
         return;
     }
@@ -399,7 +451,7 @@ void RepairResimPendulumModel(
     ((void(__fastcall*)(void*))setupAddress)(shot);
     InvalidateMemoryQueryCache();
     ProcessPendulumMotionIfReady(shot);
-    if (PendulumMotionReady(shot)) EvaluatePendulumPose(shot);
+    if (PrimaryMotionBindingsReady(shot)) EvaluatePendulumPose(shot);
     for (uint32_t index = 0; index < 2; ++index) {
         void* replacement = *(void**)((uint8_t*)shot + 0x1F78 + index * 8);
         if (oldCallbacks[index] && replacement != oldCallbacks[index])
@@ -718,12 +770,14 @@ void InstallPolicyHook(uintptr_t address, void* replacement, void** original,
 void Rollback_ResetShotModelPolicy()
 {
     g_resimSpawnedPendulums.clear();
+    g_pendulumNativeMotionReady.clear();
     g_deferredWeaponCartDebris.clear();
 }
 
 void Rollback_ForgetShotModelPolicy(void* shot)
 {
     g_resimSpawnedPendulums.erase(shot);
+    g_pendulumNativeMotionReady.erase(shot);
 }
 
 uint32_t Rollback_AfterShotSpawn(void* shot, void* parent)
@@ -742,6 +796,7 @@ uint32_t Rollback_AfterShotSpawn(void* shot, void* parent)
 void Rollback_BeforeShotHitboxUpdate(
     void* shot, const RollbackShotRecipe* recipe)
 {
+    RepairPrickleBoardMotionBindings(shot, recipe);
     RepairResimPendulumModel(shot, recipe);
     if (recipe) {
         Rollback_RepairNemesisExplosionAttack(
@@ -757,6 +812,19 @@ bool Rollback_AfterShotHitboxUpdate(
         (g_isResimulating || (recipe && recipe->reconstructed));
     if (pendulum) RepairResimPendulumModel(shot, recipe);
     return pendulum;
+}
+
+bool Rollback_ConsumePendulumCollisionReset(void* shot, uint64_t runtimeDti)
+{
+    if (!shot || runtimeDti != (uint64_t)_addr(0x140D4C4C8))
+        return false;
+
+    bool ready = PendulumNativeMotionReady(shot);
+    auto [entry, inserted] = g_pendulumNativeMotionReady.emplace(shot, ready);
+    if (inserted) return false;
+    bool transitioned = !entry->second && ready;
+    entry->second = ready;
+    return transitioned;
 }
 
 void Rollback_BeforeShotHitCollision(

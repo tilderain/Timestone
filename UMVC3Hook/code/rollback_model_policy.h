@@ -21,6 +21,7 @@ void Rollback_BeforeShotHitboxUpdate(
     void* shot, const RollbackShotRecipe* recipe);
 bool Rollback_AfterShotHitboxUpdate(
     void* shot, const RollbackShotRecipe* recipe);
+bool Rollback_ConsumePendulumCollisionReset(void* shot, uint64_t runtimeDti);
 void Rollback_BeforeShotHitCollision(
     void* shot, const RollbackShotRecipe* recipe);
 void Rollback_TraceShotPolicySpawn(
