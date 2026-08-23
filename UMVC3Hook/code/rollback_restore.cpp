@@ -116,8 +116,7 @@ static bool IsStableCharacterCollisionParent(uint8_t* character, uint64_t parent
 
     uint32_t weaponCount = *(uint32_t*)(character + CCHR_WEAPON_COUNT_OFFSET);
     uint64_t weaponArray = *(uint64_t*)(character + CCHR_WEAPON_ARRAY_OFFSET);
-    if (!weaponArray || weaponCount > 256 ||
-        !IsAccessibleRange(weaponArray, (size_t)weaponCount * sizeof(uint64_t))) {
+    if (!weaponArray || weaponCount > 256) {
         return false;
     }
     for (uint32_t weapon = 0; weapon < weaponCount; ++weapon) {
@@ -423,10 +422,10 @@ void Rollback_DestroyCollisionNodeClones(RollbackSnapshotSlot& slot)
 {
     bool destroyedClone = false;
     for (const RollbackCollisionNodeClone& entry : slot.collisionNodeClones) {
-        if (!entry.clone || !HasCallableDtiVirtual(entry.clone)) continue;
+        if (!entry.clone) continue;
         uint64_t vtable = *(uint64_t*)entry.clone;
         auto destroy = (void(__fastcall*)(void*, uint32_t))*(uint64_t*)vtable;
-        if (destroy && IsAccessibleAddress((uint64_t)destroy)) {
+        if (destroy) {
             destroy(entry.clone, 1);
             destroyedClone = true;
         }
@@ -452,14 +451,10 @@ void Rollback_CaptureCollisionNodeClones(RollbackSnapshotSlot& slot)
     for (int i = 0; i < slot.regionCount; ++i) {
         const RollbackRegion& region = slot.regions[i];
         if (!region.ownerSlot || region.size != CCHR_EXTERNAL_ANIM_SIZE) continue;
-        if (!HasCallableDtiVirtual(region.ptr)) continue;
 
         uint32_t childCount = *(const uint32_t*)((const uint8_t*)region.ptr + 0x20);
         uint64_t childArray = *(const uint64_t*)((const uint8_t*)region.ptr + 0x30);
-        if (childCount > 4096 ||
-            (childCount != 0 &&
-             !IsAccessibleRange(childArray,
-                                (size_t)childCount * sizeof(uint64_t)))) {
+        if (childCount > 4096 || (childCount != 0 && !childArray)) {
             HookLog("Rollback: collision wrapper has invalid child array "
                     "wrapper=0x%llX count=%u data=0x%llX\n",
                     (uint64_t)region.ptr, childCount, childArray);
@@ -525,10 +520,10 @@ void Rollback_CaptureCollisionNodeClones(RollbackSnapshotSlot& slot)
     // place, so only owners absent from the new snapshot need destruction.
     for (size_t i = capturedCount; i < slot.collisionNodeClones.size(); ++i) {
         RollbackCollisionNodeClone& entry = slot.collisionNodeClones[i];
-        if (!entry.clone || !HasCallableDtiVirtual(entry.clone)) continue;
+        if (!entry.clone) continue;
         uint64_t vtable = *(uint64_t*)entry.clone;
         auto destroy = (void(__fastcall*)(void*, uint32_t))*(uint64_t*)vtable;
-        if (destroy && IsAccessibleAddress((uint64_t)destroy)) {
+        if (destroy) {
             destroy(entry.clone, 1);
             mutatedClones = true;
             ++cloneDestroys;
@@ -557,7 +552,7 @@ void Rollback_RestoreCollisionNodeClones(RollbackSnapshotSlot& slot)
     bool mutatedChildren = false;
     for (const RollbackCollisionNodeClone& entry : slot.collisionNodeClones) {
         void* destination = *(void**)entry.ownerSlot;
-        if (!destination || !HasCallableDtiVirtual(destination) ||
+        if (!destination ||
             GetObjectDti((uint64_t)destination) != entry.wrapperDti) {
             HookLog("Rollback: collision wrapper incompatible owner=0x%llX "
                     "saved=0x%llX live=0x%llX dti=0x%llX\n",
@@ -578,7 +573,7 @@ void Rollback_RestoreCollisionNodeClones(RollbackSnapshotSlot& slot)
             mutatedChildren |= liveCount != 0;
             while (liveCount > 0)
                 pruneChild(childArray, --liveCount);
-        } else if (HasCallableDtiVirtual(entry.clone)) {
+        } else if (entry.clone) {
             copyNode(destination, entry.clone, false, true);
             mutatedChildren = true;
         }
@@ -668,18 +663,11 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
     for (void* shot : currentShots) {
         Rollback_PinShotModelResources(
             shot, pinnedShotResources, pinnedCallbackEffectResources);
-        if (!IsAccessibleRange((uint64_t)shot + 0x1F78,
-                               13 * sizeof(void*))) {
-            continue;
-        }
         for (uint32_t index = 0; index < 13; ++index) {
             void* effect = *(void**)((uint8_t*)shot + 0x1F78 + index * 8);
-            if (!effect || !IsAccessibleRange((uint64_t)effect + 0x108,
-                                              sizeof(void*))) {
-                continue;
-            }
+            if (!effect) continue;
             void* resource = *(void**)((uint8_t*)effect + 0x108);
-            if (!resource || !HasCallableDtiVirtual(resource) ||
+            if (!resource ||
                 std::find(pinnedCallbackEffectResources.begin(),
                           pinnedCallbackEffectResources.end(), resource) !=
                     pinnedCallbackEffectResources.end()) {
@@ -720,16 +708,13 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
         // uEffect::setEffectParent. Restrict the stale-trail cleanup to the
         // uShotLaser hierarchy it was introduced for.
         for (void* shot : currentShots) {
-            if (!shot || !IsAccessibleRange((uint64_t)shot, sizeof(uint64_t)))
-                continue;
             uint64_t dti = GetObjectDti((uint64_t)shot);
             if (!Rollback_ShouldFinalizeShotBeforeRetirement(dti)) {
                 continue;
             }
             uint64_t vtable = *(uint64_t*)shot;
-            uint64_t kill = IsAccessibleRange(vtable + 0x78, sizeof(uint64_t))
-                ? *(uint64_t*)(vtable + 0x78) : 0;
-            if (kill && IsExecutableAddress(kill))
+            uint64_t kill = *(uint64_t*)(vtable + 0x78);
+            if (kill)
                 ((void(__fastcall*)(void*))kill)(shot);
         }
 
@@ -950,10 +935,8 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
         }
         if (savedHasCallbacks && !freshHasCallbacks) {
             uint64_t vtable = *(uint64_t*)fresh;
-            uint64_t setupAddress = vtable &&
-                IsAccessibleRange(vtable + 0x28, sizeof(uint64_t))
-                ? *(uint64_t*)(vtable + 0x28) : 0;
-            if (setupAddress && IsExecutableAddress(setupAddress)) {
+            uint64_t setupAddress = *(uint64_t*)(vtable + 0x28);
+            if (setupAddress) {
                 auto setup = (void(__fastcall*)(void*))setupAddress;
                 setup(fresh);
             }
@@ -1364,8 +1347,7 @@ void Rollback_RestoreSnapshot(int32_t frame)
         uint64_t characterPost = *(uint64_t*)(
             sUnit + SUNIT_CATEGORY_LISTS_OFFSET +
             SUNIT_CATEGORY_LIST_STRIDE * SUNIT_CHARACTER_POST_CATEGORY);
-        if (!characterPost || !IsAccessibleRange(characterPost, UCHARACTER_POST_SIZE) ||
-            !HasCallableDtiVirtual((void*)characterPost) ||
+        if (!characterPost ||
             GetObjectDti(characterPost) != (uint64_t)_addr(DTI_UCHARACTER_POST)) {
             return;
         }
@@ -1412,10 +1394,6 @@ void Rollback_RestoreSnapshot(int32_t frame)
         }
 
         auto replaceResource = [](void** field, void* restored) {
-            if (restored &&
-                (!IsAccessibleRange((uint64_t)restored, 0x50) ||
-                 !HasCallableDtiVirtual(restored)))
-                restored = nullptr;
             if (*field == restored) return;
             auto addRef = (void(__fastcall*)(void*))_addr(FN_MTOBJECT_ADD_REF);
             auto releaseRef =
@@ -1423,8 +1401,7 @@ void Rollback_RestoreSnapshot(int32_t frame)
             if (restored) addRef(restored);
             void* live = *field;
             *field = restored;
-            if (live && IsAccessibleRange((uint64_t)live, 0x50) &&
-                HasCallableDtiVirtual(live)) {
+            if (live) {
                 releaseRef(live);
             }
         };
@@ -1599,9 +1576,8 @@ void Rollback_RestoreSnapshot(int32_t frame)
             }
         } else if ((uint64_t)slot.regions[i].ptr ==
                    (*(uint64_t*)_addr(PTR_SCAMERA) ?
-                     *(uint64_t*)(*(uint64_t*)_addr(PTR_SCAMERA) + 0x58) : 0) &&
+                      *(uint64_t*)(*(uint64_t*)_addr(PTR_SCAMERA) + 0x58) : 0) &&
                    slot.regions[i].size >= 0x500 &&
-                   HasCallableDtiVirtual(slot.regions[i].ptr) &&
                    GetObjectDti((uint64_t)slot.regions[i].ptr) ==
                        (uint64_t)_addr(DTI_UACTION_SIDE_CAMERA)) {
             // Restore camera gameplay and throw-cinematic state while retaining
@@ -1610,7 +1586,6 @@ void Rollback_RestoreSnapshot(int32_t frame)
                                     slot.data + offset, copySize);
         } else if (slot.regions[i].skipVtable &&
                    copySize >= CCHR_MODEL_TAIL_END &&
-                   HasCallableDtiVirtual(slot.regions[i].ptr) &&
                    GetObjectDti((uint64_t)slot.regions[i].ptr) ==
                        (uint64_t)_addr(DTI_UCHRWEAPON)) {
             uint8_t* weapon = (uint8_t*)slot.regions[i].ptr;
@@ -2121,7 +2096,7 @@ void Rollback_RestoreSnapshot(int32_t frame)
     auto setChildMaterialMode =
         (SetChildMaterialModeFn)_addr(FN_MODEL_SET_CHILD_MATERIAL_MODE);
     for (const RollbackModelRenderState& saved : slot.modelRenderStates) {
-        if (!saved.model || !HasCallableDtiVirtual(saved.model) ||
+        if (!saved.model ||
             *(uint64_t*)saved.model != saved.expectedVtable) {
             continue;
         }

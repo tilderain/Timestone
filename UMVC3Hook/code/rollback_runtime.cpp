@@ -90,22 +90,14 @@ static bool IsLiveCharacterModel(uint64_t model)
         uint64_t node = sCharacter + TEAM_OFFSETS[team] +
             TEAM_FIRST_NODE_OFFSET;
         for (int safety = 0; node && safety < 64; ++safety) {
-            if (!IsAccessibleRange(node + NODE_CHARACTER_OFFSET,
-                                   sizeof(uint64_t)) ||
-                !IsAccessibleRange(node + NODE_NEXT_OFFSET,
-                                   sizeof(uint64_t))) {
-                break;
-            }
             const uint64_t character =
                 *(uint64_t*)(node + NODE_CHARACTER_OFFSET);
             if (character == model)
                 return true;
-            if (character && IsAccessibleRange(character + 0x3F38, 0x10)) {
+            if (character) {
                 const uint32_t weaponCount = *(uint32_t*)(character + 0x3F38);
                 const uint64_t weapons = *(uint64_t*)(character + 0x3F40);
-                if (weapons && weaponCount <= 256 &&
-                    IsAccessibleRange(weapons,
-                        (size_t)weaponCount * sizeof(uint64_t))) {
+                if (weapons && weaponCount <= 256) {
                     for (uint32_t i = 0; i < weaponCount; ++i) {
                         if (*(uint64_t*)(weapons + (size_t)i * sizeof(uint64_t)) ==
                             model) {
@@ -183,8 +175,7 @@ static void __fastcall hkMtObjectSetFlag(uint64_t object, uint8_t enabled)
 {
     // Some restart-time UI units pass a null MtAnim frame here after their
     // resource lookup fails. There is no object state to update in that case.
-    if (!object || !HasCallableDtiVirtual((void*)object) ||
-        !g_originalMtObjectSetFlag) {
+    if (!object || !g_originalMtObjectSetFlag) {
         return;
     }
     g_originalMtObjectSetFlag(object, enabled);
@@ -243,7 +234,7 @@ static void __fastcall hkMtAnimSetFrameIndex(uint64_t animation, uint32_t frame)
     // Several native UI setup routines call this after an allocation/constructor
     // failure. Keep the failed unit out of the animation helper without
     // changing valid frame-index writes.
-    if (!animation || !IsAccessibleRange(animation + 0x10, sizeof(uint32_t)))
+    if (!animation)
         return;
     g_originalMtAnimSetFrameIndex(animation, frame);
 }
@@ -253,9 +244,7 @@ static void __fastcall hkCutInAddCharacter(uint64_t cutIn, uint64_t character)
     // The animation command creates a cut-in conditionally but calls this
     // helper unconditionally. A failed cut-in allocation has no participant
     // list to update.
-    if (!cutIn || !character || !IsAccessibleRange(cutIn, 0x58) ||
-        !IsAccessibleRange(character, sizeof(uint64_t)) ||
-        !g_originalCutInAddCharacter) {
+    if (!cutIn || !character || !g_originalCutInAddCharacter) {
         return;
     }
     g_originalCutInAddCharacter(cutIn, character);
@@ -265,8 +254,7 @@ static void __fastcall hkCutInSetVariant(uint64_t cutIn, uint32_t variant)
 {
     // The same failed cut-in path reaches the camera propagation call after
     // addCharacter. Leave the absent presentation object absent.
-    if (!cutIn || !IsAccessibleRange(cutIn + 0x670, 0x130) ||
-        !g_originalCutInSetVariant) {
+    if (!cutIn || !g_originalCutInSetVariant) {
         return;
     }
     g_originalCutInSetVariant(cutIn, variant);
@@ -279,8 +267,7 @@ static uint64_t __fastcall hkCopyCharacterPosition(uint64_t character,
 {
     if (mode == 0) {
         uint64_t source = 0;
-        if (character <= UINT64_MAX - 0x6428 &&
-            IsAccessibleRange(character + 0x6428, sizeof(uint64_t))) {
+        if (character <= UINT64_MAX - 0x6428) {
             source = *(uint64_t*)(character + 0x6428);
         }
 
@@ -289,8 +276,7 @@ static uint64_t __fastcall hkCopyCharacterPosition(uint64_t character,
             // FUN_1400E3020 has a separate stiff-damage side effect. Preserve
             // that scalar even when its optional position source was retired.
             if (damageCharacter && stiffDamage > 0.0f &&
-                damageCharacter <= UINT64_MAX - 0x4154 &&
-                IsAccessibleRange(damageCharacter + 0x4154, sizeof(float))) {
+                damageCharacter <= UINT64_MAX - 0x4154) {
                 using GetStiffDamageFn = float(__fastcall*)(uint64_t);
                 using SetStiffDamageFn = void(__fastcall*)(uint64_t, float);
                 auto getStiffDamage = (GetStiffDamageFn)_addr(0x140032F50);
@@ -449,7 +435,7 @@ static LONG CALLBACK ResultScoreCursorRecoveryHandler(EXCEPTION_POINTERS* info)
 
 static bool HasCallableVirtualMethod(uint64_t object, size_t offset)
 {
-    if (!HasCallableDtiVirtual((void*)object)) return false;
+    if (!object || !IsAccessibleRange(object, sizeof(uint64_t))) return false;
     const uint64_t vtable = *(uint64_t*)object;
     if (vtable > UINT64_MAX - offset ||
         !IsAccessibleRange(vtable + offset, sizeof(uint64_t))) {
@@ -467,8 +453,7 @@ static void __fastcall hkReplaceActiveStage(uint64_t stageManager,
     constexpr uintptr_t FN_MTARRAY_REMOVE_POINTER = 0x1400115D0;
     constexpr uintptr_t STAGE_LOCK = 0x140D4F728;
 
-    if (stageManager &&
-        IsAccessibleRange(stageManager + ACTIVE_STAGES_OFFSET, 0x20)) {
+    if (stageManager) {
         uint64_t activeStages = stageManager + ACTIVE_STAGES_OFFSET;
         auto getSize = (int(__fastcall*)(uint64_t))_addr(FN_MTARRAY_GET_SIZE);
         auto getElement =
@@ -511,9 +496,6 @@ static void __fastcall hkResetMaterials(uint64_t model)
     }
 
     InvalidateMemoryQueryCache();
-    if (!IsAccessibleRange(model, 0x120))
-        return;
-
     const uint32_t count = *(uint32_t*)(model + 0x118);
     const uint64_t entries = *(uint64_t*)(model + 0x110);
     if (count != 0 && (count > 4096 || !entries ||
@@ -624,16 +606,15 @@ static void* __fastcall hkGetJointPos(uint64_t object, void* output)
             ? g_originalGetJointPos(object, output)
             : WriteDefaultJointPosition(output);
 
-    if (!object || !output || !g_originalGetJointPos ||
-        !IsAccessibleRange(object, 0x18)) {
+    if (!object || !output || !g_originalGetJointPos) {
         return WriteDefaultJointPosition(output);
     }
 
     const uint64_t owner = *(uint64_t*)(object + 0x08);
-    if (!owner || !IsAccessibleRange(owner + 0x40, sizeof(uint64_t)))
+    if (!owner)
         return g_originalGetJointPos(object, output);
     const uint64_t model = *(uint64_t*)(owner + 0x40);
-    if (!model || !IsAccessibleRange(model + 0x110, 0x0C))
+    if (!model)
         return g_originalGetJointPos(object, output);
 
     const uint32_t count = *(uint32_t*)(model + 0x118);
@@ -662,8 +643,7 @@ static void __fastcall hkCharacterModelPostMove(uint64_t character)
 
 static void __fastcall hkModelBoundsFromJoints(uint64_t model)
 {
-    if (g_isResimulating && model &&
-        IsAccessibleRange(model, sizeof(uint64_t))) {
+    if (g_isResimulating && model) {
         for (size_t i = 0; i < g_deferredModelBoundsCount; ++i) {
             if (g_deferredModelBounds[i].model == model) {
                 g_deferredModelBounds[i].vtable = *(uint64_t*)model;
@@ -698,8 +678,7 @@ void Rollback_FlushDeferredModelBounds()
         if (!entry.model || !entry.vtable ||
             !IsAccessibleRange(entry.model, 0x220) ||
             *(uint64_t*)entry.model != entry.vtable ||
-            ((*(uint32_t*)(entry.model + 0x10) & 7u) - 1u) >= 2u ||
-            !HasCallableDtiVirtual((void*)entry.model)) {
+            ((*(uint32_t*)(entry.model + 0x10) & 7u) - 1u) >= 2u) {
             continue;
         }
         hkModelBoundsFromJoints(entry.model);
@@ -735,8 +714,7 @@ static uint32_t __fastcall hkMtAnimUpdateFrame(uint64_t animation,
     // Native returns UINT_MAX when no matching frame exists. Preserve that
     // result for a table containing a recycled/null animation entry instead of
     // dereferencing its invalid vtable.
-    if (!resource || !name || !IsAccessibleRange(resource + 0x08, sizeof(uint64_t)) ||
-        HasInvalidMtAnimTable(animation)) {
+    if (!resource || !name || HasInvalidMtAnimTable(animation)) {
         return 0xffffffffu;
     }
     return g_originalMtAnimUpdateFrame(animation, resource, name);

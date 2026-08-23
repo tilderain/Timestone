@@ -98,7 +98,7 @@ static bool HasCallableDtiVirtual(uint64_t object, MemoryRegionCache& memory)
 static bool HasCallableVirtualMethod(uint64_t object, size_t offset,
                                      MemoryRegionCache& memory)
 {
-    if (!HasCallableDtiVirtual(object, memory)) return false;
+    if (!object || !memory.IsAccessible(object)) return false;
     uint64_t vtable = *(uint64_t*)object;
     if (!memory.IsAccessible(vtable + offset)) return false;
     return memory.IsExecutable(*(uint64_t*)(vtable + offset));
@@ -106,7 +106,7 @@ static bool HasCallableVirtualMethod(uint64_t object, size_t offset,
 
 static void ClearModelMaterialCache(uint64_t model, MemoryRegionCache& memory)
 {
-    if (!HasCallableDtiVirtual(model, memory)) return;
+    if (!model || !memory.IsAccessible(model + 0x118)) return;
 
     uint64_t entries = *(uint64_t*)(model + 0x110);
     uint32_t count = *(uint32_t*)(model + 0x118);
@@ -124,15 +124,13 @@ static void ClearModelMaterialCache(uint64_t model, MemoryRegionCache& memory)
 static void RemoveMtDtiUnits()
 {
     uint64_t sUnit = *(uint64_t*)_addr(PTR_SUNIT);
-    if (!sUnit || !IsAccessibleRange(sUnit + SUNIT_CATEGORY_COUNT_OFFSET,
-                                     sizeof(uint32_t))) return;
+    if (!sUnit) return;
 
     uint32_t categoryCount = *(uint32_t*)(sUnit + SUNIT_CATEGORY_COUNT_OFFSET);
     if (categoryCount > 64) categoryCount = 64;
     for (uint32_t category = 0; category < categoryCount; ++category) {
         uint64_t* headSlot = (uint64_t*)(sUnit + SUNIT_CATEGORY_LISTS_OFFSET +
             category * SUNIT_CATEGORY_LIST_STRIDE);
-        if (!IsAccessibleRange((uint64_t)headSlot, sizeof(uint64_t))) continue;
         uint64_t previous = 0;
         uint64_t current = *headSlot;
         for (int safety = 256; current && safety-- > 0;) {
@@ -156,8 +154,7 @@ static void RemoveMtDtiUnits()
 
 static void ClearDrStrangeEffectPointers(uint64_t character)
 {
-    if (!IsAccessibleRange(character, 0x6908) ||
-        GetObjectDti(character) != (uint64_t)_addr(DTI_DR_STRANGE))
+    if (GetObjectDti(character) != (uint64_t)_addr(DTI_DR_STRANGE))
         return;
 
     // Follow the same native shutdown path used by Dr. Strange before
@@ -189,8 +186,6 @@ void Rollback_DetachDrStrangeEffects()
         uint64_t team = sCharacter + (teamIndex == 0 ? TEAM0_OFFSET : TEAM1_OFFSET);
         uint64_t node = team + TEAM_FIRST_NODE_OFFSET;
         for (int safety = 8; node && safety-- > 0;) {
-            if (!IsAccessibleRange(node, NODE_NEXT_OFFSET + sizeof(uint64_t)))
-                break;
             uint64_t character = *(uint64_t*)(node + NODE_CHR_OFFSET);
             if (character)
                 ClearDrStrangeEffectPointers(character);
@@ -256,8 +251,7 @@ void Rollback_ClearStalePointers()
                     if (!object) continue;
                     bool valid = HasCallableDtiVirtual(object, memory);
                     uint64_t dti = valid ? GetObjectDti(object) : 0;
-                    if (!dti || !memory.IsAccessible(dti) ||
-                        !memory.IsAccessible(dti + 0x20)) {
+                    if (!dti) {
                         *(uint64_t*)slot = 0;
                     }
                 }
@@ -301,10 +295,7 @@ void Rollback_SyncActiveCharacterVisibility()
         if (!validCutin) return false;
         uint32_t count = *(uint32_t*)(cutin + 0x48);
         uint64_t entries = *(uint64_t*)(cutin + 0x58);
-        if (count > 16 || (count && !IsAccessibleRange(
-                entries, (size_t)count * sizeof(uint64_t)))) {
-            return false;
-        }
+        if (count > 16 || (count && !entries)) return false;
         for (uint32_t i = 0; i < count; ++i) {
             if (*(uint64_t*)(entries + (uint64_t)i * sizeof(uint64_t)) == character)
                 return true;
@@ -320,7 +311,7 @@ void Rollback_SyncActiveCharacterVisibility()
         (UpdateCameraVisibilityMaskFn)_addr(FN_MODEL_UPDATE_CAMERA_VISIBILITY_MASK);
     auto restoreNormalModel = [setChildMaterialMode, updateCameraVisibilityMask](
                                   uint64_t model, bool restoreVisibility) {
-        if (!model || !HasCallableDtiVirtual((void*)model)) return;
+        if (!model) return;
         uint32_t& drawLayer = *(uint32_t*)(model + CUNIT_DRAW_LAYER_MASK_OFFSET);
         drawLayer = (drawLayer & ~CUTIN_DRAW_LAYER_BITS) | NORMAL_DRAW_LAYER_BIT;
         if (restoreVisibility) {
@@ -338,7 +329,7 @@ void Rollback_SyncActiveCharacterVisibility()
         uint64_t team = sCharacter +
             (teamIndex == 0 ? TEAM0_OFFSET : TEAM1_OFFSET);
         uint64_t character = *(uint64_t*)(team + 0x48);
-        if (!character || !HasCallableDtiVirtual((void*)character)) continue;
+        if (!character) continue;
 
         // Draw-layer bits can themselves be stale, so only a live uCutIn that
         // actually lists this character may keep the active point hidden.
@@ -347,8 +338,7 @@ void Rollback_SyncActiveCharacterVisibility()
         restoreNormalModel(character, true);
         uint32_t weaponCount = *(uint32_t*)(character + CCHR_WEAPON_COUNT_OFFSET);
         uint64_t weapons = *(uint64_t*)(character + CCHR_WEAPON_ARRAY_OFFSET);
-        if (!weapons || weaponCount > 256 || !IsAccessibleRange(
-                weapons, (size_t)weaponCount * sizeof(uint64_t))) {
+        if (!weapons || weaponCount > 256) {
             continue;
         }
         for (uint32_t weapon = 0; weapon < weaponCount; ++weapon) {
@@ -377,9 +367,9 @@ void Rollback_RepairOrphanedCutinRenderState()
     using SetChildMaterialModeFn = void(__fastcall*)(void*, int, uint8_t);
     auto setChildMaterialMode =
         (SetChildMaterialModeFn)_addr(FN_MODEL_SET_CHILD_MATERIAL_MODE);
-    auto restoreModel = [setChildMaterialMode](uint64_t model, bool restoreVisibility,
-                                                bool validateUnit) {
-        if (!model || (validateUnit && !IsUnitObject((void*)model))) return;
+    auto restoreModel = [setChildMaterialMode](uint64_t model,
+                                                bool restoreVisibility) {
+        if (!model) return;
         uint32_t& drawLayer = *(uint32_t*)(model + CUNIT_DRAW_LAYER_MASK_OFFSET);
         if ((drawLayer & CUTIN_DRAW_LAYER_BITS) == 0) return;
         drawLayer = (drawLayer & ~CUTIN_DRAW_LAYER_BITS) | NORMAL_DRAW_LAYER_BIT;
@@ -401,17 +391,16 @@ void Rollback_RepairOrphanedCutinRenderState()
                  CUTIN_DRAW_LAYER_BITS) == 0) {
                 continue;
             }
-            restoreModel(character, true, false);
+            restoreModel(character, true);
 
             uint32_t weaponCount = *(uint32_t*)(character + CCHR_WEAPON_COUNT_OFFSET);
             uint64_t weapons = *(uint64_t*)(character + CCHR_WEAPON_ARRAY_OFFSET);
-            if (!weapons || weaponCount > 256 ||
-                !IsAccessibleRange(weapons, (size_t)weaponCount * sizeof(uint64_t))) {
+            if (!weapons || weaponCount > 256) {
                 continue;
             }
             for (uint32_t weapon = 0; weapon < weaponCount; ++weapon)
                 restoreModel(*(uint64_t*)(weapons + (uint64_t)weapon * sizeof(uint64_t)),
-                             false, true);
+                              false);
         }
     }
 }

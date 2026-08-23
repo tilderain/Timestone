@@ -25,6 +25,8 @@ extern void HookLog(const char* fmt, ...);
 namespace {
 
 PVOID g_exceptionHandler = nullptr;
+LPTOP_LEVEL_EXCEPTION_FILTER g_previousUnhandledExceptionFilter = nullptr;
+bool g_unhandledExceptionFilterInstalled = false;
 volatile LONG g_crashInFlight = 0;
 
 constexpr uintptr_t kPreferredImageBase = 0x140000000;
@@ -51,6 +53,7 @@ struct CrashCharacter {
 bool IsCatastrophicException(DWORD code)
 {
     switch (code) {
+    case EXCEPTION_BREAKPOINT:
     case EXCEPTION_ACCESS_VIOLATION:
     case EXCEPTION_IN_PAGE_ERROR:
     case EXCEPTION_ILLEGAL_INSTRUCTION:
@@ -60,6 +63,11 @@ bool IsCatastrophicException(DWORD code)
     case EXCEPTION_INT_OVERFLOW:
     case EXCEPTION_ARRAY_BOUNDS_EXCEEDED:
     case STATUS_HEAP_CORRUPTION:
+    case 0xC0000409: // STATUS_STACK_BUFFER_OVERRUN
+    case 0xC0000417: // STATUS_INVALID_CRUNTIME_PARAMETER
+    case 0xC0000420: // STATUS_ASSERTION_FAILURE
+    case 0xC0000602: // STATUS_FAIL_FAST_EXCEPTION
+    case 0x40000015: // STATUS_FATAL_APP_EXIT
         return true;
     default:
         return false;
@@ -71,7 +79,8 @@ bool IsAutoTestProcess()
     const char* commandLine = GetCommandLineA();
     return commandLine &&
         (std::strstr(commandLine, "-autotest=") ||
-         std::strstr(commandLine, "-autotest-client"));
+         std::strstr(commandLine, "-autotest-client") ||
+         std::strstr(commandLine, "-training-cpus"));
 }
 
 const char* BaseName(const char* path)
@@ -651,13 +660,13 @@ void WriteUnwindBacktrace(FILE* file, const CONTEXT* exceptionContext)
 #endif
 }
 
-LONG WINAPI ExceptionHandler(PEXCEPTION_POINTERS info)
+LONG HandleException(PEXCEPTION_POINTERS info, bool catastrophicOnly)
 {
     if (!info || !info->ExceptionRecord || !info->ContextRecord)
         return EXCEPTION_CONTINUE_SEARCH;
 
     const DWORD code = info->ExceptionRecord->ExceptionCode;
-    if (!IsCatastrophicException(code))
+    if (catastrophicOnly && !IsCatastrophicException(code))
         return EXCEPTION_CONTINUE_SEARCH;
     if (IsNetGalleryTeardownFault(info->ExceptionRecord, info->ContextRecord))
         return EXCEPTION_CONTINUE_SEARCH;
@@ -674,6 +683,36 @@ LONG WINAPI ExceptionHandler(PEXCEPTION_POINTERS info)
             "%s/umvc3_crash.log", netplayDirectory);
     } else {
         GetFullPathNameA("umvc3_crash.log", MAX_PATH, crashLogPath, nullptr);
+    }
+
+    // Commit a minimal artifact before calling rollback, CRT-heavy, or unwind
+    // diagnostics. If reporting itself faults, this still identifies the
+    // original exception and makes automated runs classify it as a crash.
+    FILE* preamble = std::fopen(crashLogPath, "a");
+    if (preamble) {
+        std::fprintf(preamble,
+            "\n=== UMVC3Hook crash capture started ===\n"
+            "commit=%s%s code=0x%08lX exception=%p thread=%lu "
+            "rip=0x%016llX rsp=0x%016llX\n",
+            UMVC3HOOK_GIT_COMMIT, UMVC3HOOK_GIT_DIRTY ? " (dirty)" : "",
+            static_cast<unsigned long>(code),
+            info->ExceptionRecord->ExceptionAddress,
+            static_cast<unsigned long>(GetCurrentThreadId()),
+            static_cast<unsigned long long>(info->ContextRecord->Rip),
+            static_cast<unsigned long long>(info->ContextRecord->Rsp));
+        std::fflush(preamble);
+        std::fclose(preamble);
+    }
+
+    if (!IsAutoTestProcess()) {
+        char message[MAX_PATH + 96] = {};
+        std::snprintf(message, sizeof(message),
+            "The game just freaking crashed! Crash log available at %s", crashLogPath);
+        MessageBoxA(nullptr, message, "UMVC3Hook Crash",
+                    MB_OK | MB_ICONERROR | MB_SYSTEMMODAL);
+    } else {
+        HookLog("UMVC3Hook: automated crash recorded at %s; message box suppressed\n",
+                crashLogPath);
     }
 
     const bool ndjsonFlushed = Rollback_FlushNDJSONOnCrash();
@@ -763,39 +802,48 @@ LONG WINAPI ExceptionHandler(PEXCEPTION_POINTERS info)
         std::fclose(file);
     }
 
-    if (!IsAutoTestProcess()) {
-        char message[MAX_PATH + 96] = {};
-        std::snprintf(message, sizeof(message),
-            "The game just freaking crashed! Crash log available at %s", crashLogPath);
-        MessageBoxA(nullptr, message, "UMVC3Hook Crash", MB_OK | MB_ICONERROR | MB_SYSTEMMODAL);
-    } else {
-        HookLog("UMVC3Hook: autotest crash recorded at %s; message box suppressed\n",
-            crashLogPath);
-    }
-
     return EXCEPTION_CONTINUE_SEARCH;
+}
+
+LONG CALLBACK VectoredExceptionHandler(PEXCEPTION_POINTERS info)
+{
+    return HandleException(info, true);
+}
+
+LONG WINAPI UnhandledExceptionHandler(PEXCEPTION_POINTERS info)
+{
+    // Reaching the top-level filter proves this exception is fatal even when
+    // its code is not in the first-chance catastrophic allowlist.
+    return HandleException(info, false);
 }
 
 } // namespace
 
 void Exception_InstallHandler()
 {
-    if (g_exceptionHandler)
+    if (g_exceptionHandler || g_unhandledExceptionFilterInstalled)
         return;
 
     g_crashInFlight = 0;
-    g_exceptionHandler = AddVectoredExceptionHandler(1, ExceptionHandler);
-    HookLog("UMVC3Hook: crash exception handler %s\n",
-        g_exceptionHandler ? "installed" : "FAILED to install");
+    g_exceptionHandler = AddVectoredExceptionHandler(1, VectoredExceptionHandler);
+    g_previousUnhandledExceptionFilter =
+        SetUnhandledExceptionFilter(UnhandledExceptionHandler);
+    g_unhandledExceptionFilterInstalled = true;
+    HookLog("UMVC3Hook: crash handlers vectored=%s unhandled=installed\n",
+        g_exceptionHandler ? "installed" : "FAILED");
 }
 
 void Exception_RemoveHandler()
 {
-    if (!g_exceptionHandler)
-        return;
-
-    RemoveVectoredExceptionHandler(g_exceptionHandler);
-    g_exceptionHandler = nullptr;
+    if (g_exceptionHandler) {
+        RemoveVectoredExceptionHandler(g_exceptionHandler);
+        g_exceptionHandler = nullptr;
+    }
+    if (g_unhandledExceptionFilterInstalled) {
+        SetUnhandledExceptionFilter(g_previousUnhandledExceptionFilter);
+        g_previousUnhandledExceptionFilter = nullptr;
+        g_unhandledExceptionFilterInstalled = false;
+    }
 }
 
 void Exception_UpdateTestHotkey()

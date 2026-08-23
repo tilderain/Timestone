@@ -82,7 +82,6 @@ bool IsObjectKindOf(const void* object, uintptr_t expectedDti)
     const uint64_t targetDti = _addr(expectedDti);
     for (int depth = 0; dti && depth < 128; ++depth) {
         if (dti == targetDti) return true;
-        if (!IsAccessibleAddress(dti + 0x20)) return false;
         uint64_t parent = *(const uint64_t*)(dti + 0x20);
         if (parent == dti) return false;
         dti = parent;

@@ -106,12 +106,10 @@ static void TraceEffect(const char* event, void* object,
         sequence % EFFECT_TRACE_CAPACITY];
     entry.sequence = 0;
     entry.object = (uint64_t)object;
-    entry.vtable = object && IsAccessibleRange((uint64_t)object, 0x110)
-        ? *(uint64_t*)object : 0;
-    entry.parent = object && IsAccessibleRange((uint64_t)object, 0x110)
-        ? *(uint64_t*)((uint8_t*)object + 0x40) : 0;
-    entry.resource = object && IsAccessibleRange((uint64_t)object, 0x110)
-        ? *(uint64_t*)((uint8_t*)object + 0x108) : 0;
+    const bool readable = object && IsAccessibleRange((uint64_t)object, 0x110);
+    entry.vtable = readable ? *(uint64_t*)object : 0;
+    entry.parent = readable ? *(uint64_t*)((uint8_t*)object + 0x40) : 0;
+    entry.resource = readable ? *(uint64_t*)((uint8_t*)object + 0x108) : 0;
     entry.arg0 = arg0;
     entry.arg1 = arg1;
     entry.frame = g_resimulateCurrentFrame;
@@ -181,9 +179,8 @@ static bool IsPersistentCharacterEffect(void* effect)
     for (uint32_t teamOffset : TEAM_OFFSETS) {
         uint64_t node = sCharacter + teamOffset + 0x08;
         for (int safety = 8; node && safety-- > 0;) {
-            if (!IsAccessibleRange(node, 0x18)) break;
             uint64_t character = *(uint64_t*)(node + 0x08);
-            if (character && IsAccessibleRange(character, 0x6928)) {
+            if (character) {
                 // Only a live character slot establishes retention. Child
                 // effects still need native retirement to release their units.
                 for (uint32_t slotOffset : CHARACTER_EFFECT_SLOT_OFFSETS) {
@@ -216,8 +213,6 @@ static bool IsShotUnitReference(uint64_t object)
 
 static void DetachRetiringEffectFromShot(void* effect)
 {
-    if (!IsAccessibleRange((uint64_t)effect, 0x290)) return;
-
     // uShot setup binds owned uGameEffects through uEffect::mParent (+0x40),
     // uGameEffect::mpOwner (+0x280), and sometimes mpRequestUnit (+0x288).
     // A retired effect can outlive synchronous shot destruction; if the shot
@@ -263,14 +258,11 @@ static void SanitizeEffectOwnedParticleState(void* effect)
 
 static bool HasInvalidParticleManagerState(void* effect)
 {
-    if (!IsAccessibleRange((uint64_t)effect, 0x230)) return true;
-
     const uint32_t count = *(uint16_t*)((uint8_t*)effect + 0x208);
     const uint64_t managers = *(uint64_t*)((uint8_t*)effect + 0x220);
     if (!managers) return count != 0;
-    if (count > MAX_PARTICLE_MANAGERS || !IsAccessibleRange(managers, 1))
-        return true;
-    if (count == 0) return false;
+    if (count > MAX_PARTICLE_MANAGERS) return true;
+    if (count == 0) return !IsAccessibleRange(managers, 1);
     if (!IsAccessibleRange(managers,
                            (size_t)count * PARTICLE_MANAGER_STRIDE)) {
         return true;
@@ -287,7 +279,7 @@ static bool HasInvalidParticleManagerState(void* effect)
 
 static void SanitizeEffectForDestruction(void* effect)
 {
-    if (!effect || !IsAccessibleRange((uint64_t)effect, 0x230)) return;
+    if (!effect) return;
     if (g_activeRollbackProfile)
         ++g_activeRollbackProfile->restoreEffectSanitizeCalls;
 
@@ -368,13 +360,11 @@ static void SanitizeEffectForDestruction(void* effect)
 static void DetachExAtkSpaceChildren()
 {
     uint64_t sMvc3Mgr = *(uint64_t*)_addr(PTR_SMVC3MGR);
-    if (!sMvc3Mgr || !IsAccessibleAddress(sMvc3Mgr + SMVC3MGR_ACTION_OFFSET))
-        return;
+    if (!sMvc3Mgr) return;
     uint64_t sAction = *(uint64_t*)(sMvc3Mgr + SMVC3MGR_ACTION_OFFSET);
-    if (!sAction || !IsAccessibleAddress(sAction + 0x148)) return;
+    if (!sAction) return;
     uint64_t exAtkSpace = *(uint64_t*)(sAction + 0x148);
-    if (!exAtkSpace || !HasCallableDtiVirtual((void*)exAtkSpace) ||
-        !IsAccessibleAddress(exAtkSpace + 0x1D30)) return;
+    if (!exAtkSpace) return;
 
     std::memset((void*)(exAtkSpace + 0x1D18), 0, 4 * sizeof(uint64_t));
 }
@@ -433,9 +423,6 @@ static void __fastcall hkDrStrangeUpdateSummons(void* character)
 
 static void __fastcall hkEffectDraw(void* effect, void* camera)
 {
-    if (!IsAccessibleRange((uint64_t)effect, 0x220))
-        return;
-
     uint64_t resource = *(uint64_t*)((uint8_t*)effect + 0x108);
     if (resource && !HasCallableDtiVirtual((void*)resource))
         return;
@@ -479,8 +466,7 @@ static uint64_t __fastcall hkEffectCreateGenerator(void* effect)
             g_resimEffects.end()) {
         g_resimEffects.push_back(effect);
     }
-    if ((uint8_t)result == 0 && effect &&
-        IsAccessibleRange((uint64_t)effect, 0x230)) {
+    if ((uint8_t)result == 0 && effect) {
         uint64_t resource = *(uint64_t*)((uint8_t*)effect + 0x108);
         uint16_t expectedManagers = resource &&
             IsAccessibleRange(resource + 0x90, sizeof(uint16_t))
@@ -498,8 +484,7 @@ static uint64_t __fastcall hkEffectCreateGenerator(void* effect)
 
 static void __fastcall hkParticleManagerReleaseSubBuffer(void* manager)
 {
-    if (g_isResimulating && IsAccessibleRange(
-            (uint64_t)manager, PARTICLE_MANAGER_STRIDE)) {
+    if (g_isResimulating && manager) {
         uint64_t buffer = *(uint64_t*)((uint8_t*)manager +
                                       PARTICLE_MANAGER_BUFFER_OFFSET);
         if (buffer && !IsAccessiblePointer(buffer)) {
@@ -542,11 +527,7 @@ static void __fastcall hkGameEffectFlushPending(void* manager)
 
 static void ClearInvalidCharacterIndexedEffects(uint64_t character)
 {
-    if (!character || !IsAccessibleRange(
-            character + CHARACTER_INDEXED_EFFECTS_OFFSET,
-            CHARACTER_INDEXED_EFFECT_COUNT * sizeof(uint64_t))) {
-        return;
-    }
+    if (!character) return;
 
     for (uint32_t index = 0; index < CHARACTER_INDEXED_EFFECT_COUNT; ++index) {
         uint64_t* slot = (uint64_t*)(character +
@@ -559,7 +540,7 @@ static void ClearInvalidCharacterIndexedEffects(uint64_t character)
             continue;
         }
         uint64_t dti = GetObjectDti(object);
-        if (!dti || !IsAccessibleRange(dti, 0x28))
+        if (!dti)
             *slot = 0;
     }
 }
@@ -572,7 +553,6 @@ static void ClearInvalidCharacterIndexedEffects()
     for (uint32_t teamOffset : TEAM_OFFSETS) {
         uint64_t node = sCharacter + teamOffset + 0x08;
         for (int safety = 8; node && safety-- > 0;) {
-            if (!IsAccessibleRange(node, 0x18)) break;
             uint64_t character = *(uint64_t*)(node + 0x08);
             ClearInvalidCharacterIndexedEffects(character);
             node = *(uint64_t*)(node + 0x10);
@@ -590,10 +570,9 @@ static void __fastcall hkGameEffectFlushHitMarks(void* manager)
         // through the short team-list scan above. Native command dispatch reads
         // their indexed effect slots and calls isKindOf without validating the
         // stored object's vtable.
-        if (manager && IsAccessibleRange((uint64_t)manager, 0x1944)) {
+        if (manager) {
             uint32_t count = *(uint32_t*)((uint8_t*)manager + 0x1940);
-            if (count <= 128 && (!count || IsAccessibleRange(
-                    (uint64_t)manager + 0x140, (size_t)count * 0x30))) {
+            if (count <= 128) {
                 for (uint32_t index = 0; index < count; ++index) {
                     uint8_t* entry = (uint8_t*)manager + 0x140 + index * 0x30;
                     ClearInvalidCharacterIndexedEffects(
@@ -630,9 +609,7 @@ static void __fastcall hkMtObjectReplaceIndexedSlot(
 {
     if ((g_isResimulating || g_postResimFrame >= 0 ||
          g_inGameEffectFlushHitMarks) &&
-        owner && index < CHARACTER_INDEXED_EFFECT_COUNT &&
-        IsAccessibleRange((uint64_t)owner + CHARACTER_INDEXED_EFFECTS_OFFSET +
-                          index * sizeof(void*), sizeof(void*))) {
+        owner && index < CHARACTER_INDEXED_EFFECT_COUNT) {
         void** slot = (void**)((uint8_t*)owner +
                                CHARACTER_INDEXED_EFFECTS_OFFSET +
                                index * sizeof(void*));
@@ -658,7 +635,6 @@ void Effect_CaptureRecipes(RollbackSnapshotSlot& slot)
     slot.effectRecipes.reserve(g_liveEffectRecipes.size());
     for (const RollbackEffectRecipe& recipe : g_liveEffectRecipes) {
         if (!recipe.restoredPtr ||
-            !IsAccessibleRange((uint64_t)recipe.restoredPtr, 0x290) ||
             !IsEffectObject(recipe.restoredPtr) ||
             !IsActiveUnit(recipe.restoredPtr) ||
             IsPersistentCharacterEffect(recipe.restoredPtr)) {
@@ -684,9 +660,8 @@ void Effect_CaptureRecipes(RollbackSnapshotSlot& slot)
     for (uint32_t teamOffset : TEAM_OFFSETS) {
         uint64_t node = sCharacter ? sCharacter + teamOffset + 0x08 : 0;
         for (int safety = 8; node && safety-- > 0;) {
-            if (!IsAccessibleRange(node, 0x18)) break;
             void* character = *(void**)(node + 0x08);
-            if (character && IsAccessibleRange((uint64_t)character, 0x6908) &&
+            if (character &&
                 *(uint64_t*)character ==
                     (uint64_t)_addr(VTABLE_URROCKET_RACCOON)) {
                 for (uint32_t offset : {0x68F8u, 0x6900u}) {
@@ -709,8 +684,6 @@ void Effect_RestoreCharacterStates(RollbackSnapshotSlot& slot)
     for (const RollbackCharacterEffectState& saved :
          slot.characterEffectStates) {
         if (!saved.character ||
-            !IsAccessibleRange((uint64_t)saved.character,
-                               saved.ownerOffset + sizeof(void*)) ||
             *(uint64_t*)saved.character !=
                 (uint64_t)_addr(VTABLE_URROCKET_RACCOON)) {
             continue;
@@ -775,7 +748,7 @@ int Effect_RestoreRecipes(RollbackSnapshotSlot& slot)
 
 void Effect_PrepareUnitRemoval(void* unit)
 {
-    if (!unit || !IsAccessibleRange((uint64_t)unit, 0x14)) return;
+    if (!unit) return;
     const uint32_t category =
         (*(uint32_t*)((uint8_t*)unit + 0x10) >> 3) & 0x7Fu;
     if (category < 13 || category > 16) return;
@@ -803,7 +776,7 @@ void Effect_FinishUnitRemoval(void* unit)
 
 void Effect_ReleaseOwnedAllocations(void* effect)
 {
-    if (!effect || !IsAccessibleRange((uint64_t)effect, 0x230)) return;
+    if (!effect) return;
     SanitizeEffectForDestruction(effect);
     ((void(__fastcall*)(void*))_addr(FN_EFFECT_RELEASE_GENERATOR))(effect);
 }
@@ -819,12 +792,7 @@ bool Effect_RetireOne(void* sUnit, void* effect)
         sUnit, effect);
     Effect_FinishUnitRemoval(effect);
 
-    if (!IsAccessibleRange((uint64_t)effect, sizeof(uint64_t))) return false;
     uint64_t vtable = *(uint64_t*)effect;
-    if (!IsAccessibleRange(vtable, sizeof(uint64_t)) ||
-        !IsExecutableAddress(*(uint64_t*)vtable)) {
-        return false;
-    }
     ((void(__fastcall*)(void*, uint32_t))*(uint64_t*)vtable)(effect, 1);
     return true;
 }
@@ -835,7 +803,7 @@ int Effect_RetireCurrent(void* sUnit)
     DetachExAtkSpaceChildren();
     void* stageBodies[2] = {};
     uint64_t sStage = *(uint64_t*)_addr(PTR_SSTAGE);
-    if (sStage && IsAccessibleRange(sStage, 0x2060)) {
+    if (sStage) {
         for (size_t index = 0; index < std::size(SSTAGE_BODY_OFFSETS); ++index) {
             stageBodies[index] =
                 *(void**)(sStage + SSTAGE_BODY_OFFSETS[index]);
@@ -870,10 +838,7 @@ int Effect_RetireCurrent(void* sUnit)
         SanitizeEffectForDestruction(effect);
         removeFromMultiMask(sUnit, effect);
         removeUnit(sUnit, effect);
-        if (!IsAccessibleRange((uint64_t)effect, sizeof(uint64_t))) continue;
         uint64_t vtable = *(uint64_t*)effect;
-        if (!IsAccessibleRange(vtable, sizeof(uint64_t)) ||
-            !IsExecutableAddress(*(uint64_t*)vtable)) continue;
         auto destroy = (void(__fastcall*)(void*, uint32_t))*(uint64_t*)vtable;
         destroy(effect, 1);
         ++destroyed;
@@ -903,7 +868,7 @@ int Effect_RetireCurrent(void* sUnit)
 
 bool Effect_RetireGameEffectModel(void* sUnit, void* effect)
 {
-    if (!sUnit || !effect || !HasCallableDtiVirtual(effect) ||
+    if (!sUnit || !effect ||
         GetObjectDti((uint64_t)effect) !=
             (uint64_t)_addr(DTI_UGAME_EFFECT_MODEL)) {
         return false;
@@ -913,9 +878,8 @@ bool Effect_RetireGameEffectModel(void* sUnit, void* effect)
     // retirement pass never reaches it. Mirror sGameEffect's native teardown.
     if (((uint8_t(__fastcall*)(void*))_addr(FN_MTOBJECT_IS_ALIVE))(effect)) {
         uint64_t vtable = *(uint64_t*)effect;
-        uint64_t finalize = IsAccessibleRange(vtable + 0x78, 8)
-            ? *(uint64_t*)(vtable + 0x78) : 0;
-        if (!finalize || !IsExecutableAddress(finalize)) return false;
+        uint64_t finalize = *(uint64_t*)(vtable + 0x78);
+        if (!finalize) return false;
         ((void(__fastcall*)(void*))finalize)(effect);
     }
 
@@ -934,12 +898,7 @@ bool Effect_RetireGameEffectModel(void* sUnit, void* effect)
         sUnit, effect);
     // List removal does not free the object; virtual slot zero is the scalar
     // deleting destructor and flag 1 requests storage release.
-    if (!IsAccessibleRange((uint64_t)effect, sizeof(uint64_t))) return false;
     uint64_t vtable = *(uint64_t*)effect;
-    if (!IsAccessibleRange(vtable, sizeof(uint64_t)) ||
-        !IsExecutableAddress(*(uint64_t*)vtable)) {
-        return false;
-    }
     ((void(__fastcall*)(void*, uint32_t))*(uint64_t*)vtable)(effect, 1);
     return true;
 }

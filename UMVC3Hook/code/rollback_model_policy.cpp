@@ -162,10 +162,7 @@ const ShotModelPolicy* FindShotModelPolicy(uint64_t runtimeDti)
 
 bool IsShotModelReady(void* shot)
 {
-    if (!shot || !IsAccessibleRange((uint64_t)shot + 0x538,
-                                     sizeof(uint64_t))) {
-        return false;
-    }
+    if (!shot) return false;
     uint32_t count = *(uint32_t*)((uint8_t*)shot + 0x530);
     uint64_t joints = *(uint64_t*)((uint8_t*)shot + 0x538);
     return count > 0 && count <= 256 && joints &&
@@ -177,15 +174,11 @@ bool RetryShotModelSetup(void* shot, const ShotModelPolicy& policy,
 {
     if (IsShotModelReady(shot))
         return true;
-    if (!shot || !IsAccessibleRange((uint64_t)shot, sizeof(uint64_t)))
-        return false;
+    if (!shot) return false;
 
     uint64_t vtable = *(uint64_t*)shot;
-    uint64_t setupAddress = vtable &&
-        IsAccessibleRange(vtable + 0x28, sizeof(uint64_t))
-        ? *(uint64_t*)(vtable + 0x28) : 0;
-    if (!setupAddress || !IsExecutableAddress(setupAddress))
-        return false;
+    uint64_t setupAddress = *(uint64_t*)(vtable + 0x28);
+    if (!setupAddress) return false;
 
     auto setup = (void(__fastcall*)(void*))setupAddress;
     while (!IsShotModelReady(shot) && attempts-- > 0) {
@@ -204,7 +197,10 @@ bool RetryShotModelSetup(void* shot, const ShotModelPolicy& policy,
 
 void PinUnique(void* resource, std::vector<void*>& pinnedResources)
 {
-    if (!resource || !HasCallableDtiVirtual(resource) ||
+    // sResource::addRef deliberately DebugBreaks when the current count is not
+    // positive. Shot fields can retain a retired resource after native teardown;
+    // RTTI callability is incidental, while this is addRef's actual contract.
+    if (!resource || *(int32_t*)((uint8_t*)resource + 0x4C) <= 0 ||
         std::find(pinnedResources.begin(), pinnedResources.end(), resource) !=
             pinnedResources.end()) {
         return;
@@ -257,10 +253,9 @@ void RestoreKingKobunHelper(void* shot, const RollbackShotRecipe& saved)
 
 void RepairResimRepulsorBlastMotion(void* shot)
 {
-    if (!g_isResimulating || !shot || !HasCallableDtiVirtual(shot) ||
+    if (!g_isResimulating || !shot ||
         GetObjectDti((uint64_t)shot) !=
-            (uint64_t)_addr(DTI_USHOT_SHIELD_REPULSOR_BLAST_SP) ||
-        !IsAccessibleRange((uint64_t)shot + 0x558, sizeof(uint32_t))) {
+            (uint64_t)_addr(DTI_USHOT_SHIELD_REPULSOR_BLAST_SP)) {
         return;
     }
     uint32_t jointCount = *(uint32_t*)((uint8_t*)shot + 0x530);
@@ -278,7 +273,7 @@ void RepairResimRepulsorBlastMotion(void* shot)
 
 void RepairResimDogMissileMotion(void* shot)
 {
-    if (!g_isResimulating || !shot || !HasCallableDtiVirtual(shot) ||
+    if (!g_isResimulating || !shot ||
         GetObjectDti((uint64_t)shot) !=
             (uint64_t)_addr(DTI_USHOT_VULCAN_DOG_MISSILE)) {
         return;
@@ -299,7 +294,7 @@ bool PrimaryMotionBindingsReady(void* shot);
 
 void LoadPrickleBoardMotionSynchronously(void* shot)
 {
-    if (!shot || !IsAccessibleRange((uint64_t)shot + 0x11B8, 1)) return;
+    if (!shot) return;
     void* pending = *(void**)((uint8_t*)shot + 0x11B0);
     if (!pending || !HasCallableDtiVirtual(pending) ||
         !IsAccessibleRange((uint64_t)pending, 0x78)) {
@@ -325,7 +320,7 @@ void LoadPrickleBoardMotionSynchronously(void* shot)
 void RepairPrickleBoardMotionBindings(
     void* shot, const RollbackShotRecipe* recipe)
 {
-    if (!shot || !HasCallableDtiVirtual(shot) ||
+    if (!shot ||
         GetObjectDti((uint64_t)shot) !=
             (uint64_t)_addr(DTI_USHOT_VULCAN_PRICKLE_BOARD)) {
         return;
@@ -366,7 +361,6 @@ void RestoreReconstructedPrickleBoardCommandState(
 {
     if (!shot || saved.concrete.dti !=
             (uint64_t)_addr(DTI_USHOT_VULCAN_PRICKLE_BOARD) ||
-        !HasCallableDtiVirtual(shot) ||
         GetObjectDti((uint64_t)shot) != saved.concrete.dti) {
         return;
     }
@@ -414,7 +408,7 @@ void RestoreReconstructedPrickleBoardCommandState(
 
 bool PrimaryMotionBindingsReady(void* shot)
 {
-    if (!shot || !IsAccessibleRange((uint64_t)shot + 0x6A0, 1)) return false;
+    if (!shot) return false;
     return *(uint32_t*)((uint8_t*)shot + 0x530) > 0 &&
         *(uint64_t*)((uint8_t*)shot + 0x538) != 0 &&
         *(uint32_t*)((uint8_t*)shot + 0x550) != 0 &&
@@ -428,8 +422,7 @@ bool PrimaryMotionBindingsReady(void* shot)
 
 bool PendulumNativeMotionReady(void* shot)
 {
-    if (!shot || !IsAccessibleRange((uint64_t)shot + 0x11C0, 1))
-        return false;
+    if (!shot) return false;
     void* pending = *(void**)((uint8_t*)shot + 0x11B8);
     if (!pending || !HasCallableDtiVirtual(pending) ||
         !IsAccessibleRange((uint64_t)pending, 0x78)) {
@@ -460,12 +453,11 @@ void EvaluatePendulumPose(void* shot)
     ((void(__fastcall*)(void*))_addr(
         FN_UMODEL_UPDATE_MOTION_EVALUATION))(shot);
     uint64_t vtable = *(uint64_t*)shot;
-    if (!IsAccessibleRange(vtable + 0x90, 0x10)) return;
     uint64_t updateWorld = *(uint64_t*)(vtable + 0x90);
     uint64_t updateChildren = *(uint64_t*)(vtable + 0x98);
-    if (IsExecutableAddress(updateWorld))
+    if (updateWorld)
         ((void(__fastcall*)(void*))updateWorld)(shot);
-    if (IsExecutableAddress(updateChildren))
+    if (updateChildren)
         ((void(__fastcall*)(void*))updateChildren)(shot);
     float currentFrame = *(float*)((uint8_t*)shot + 0x1F58);
     *(float*)((uint8_t*)shot + 0x5AC) = currentFrame;
@@ -474,7 +466,7 @@ void EvaluatePendulumPose(void* shot)
 
 void LoadPendulumMotionSynchronously(void* shot)
 {
-    if (!shot || !IsAccessibleRange((uint64_t)shot + 0x11C0, 1)) return;
+    if (!shot) return;
     void* pending = *(void**)((uint8_t*)shot + 0x11B8);
     if (!pending || !HasCallableDtiVirtual(pending) ||
         !IsAccessibleRange((uint64_t)pending, 0x78)) {
@@ -504,8 +496,7 @@ void RepairResimPendulumModel(
     bool reconstructed = recipe && recipe->reconstructed;
     bool resimSpawned = g_resimSpawnedPendulums.find(shot) !=
         g_resimSpawnedPendulums.end();
-    uint64_t observedDti = shot && HasCallableDtiVirtual(shot)
-        ? GetObjectDti((uint64_t)shot) : 0;
+    uint64_t observedDti = shot ? GetObjectDti((uint64_t)shot) : 0;
     if ((!g_isResimulating && !reconstructed && !resimSpawned) || !shot ||
         observedDti != (uint64_t)_addr(0x140D4C4C8)) {
         return;
@@ -522,10 +513,9 @@ void RepairResimPendulumModel(
         return;
     }
     uint64_t vtable = *(uint64_t*)shot;
-    uint64_t setupAddress = IsAccessibleRange(vtable + 0x28, sizeof(uint64_t))
-        ? *(uint64_t*)(vtable + 0x28) : 0;
+    uint64_t setupAddress = *(uint64_t*)(vtable + 0x28);
     uint64_t sUnit = *(uint64_t*)_addr(PTR_SUNIT);
-    if (!setupAddress || !IsExecutableAddress(setupAddress) || !sUnit) return;
+    if (!setupAddress || !sUnit) return;
     void* oldCallbacks[2] = {
         *(void**)((uint8_t*)shot + 0x1F78),
         *(void**)((uint8_t*)shot + 0x1F80),
@@ -547,6 +537,7 @@ void __fastcall hkKingKobunMove(void* shot)
     bool trace = shot && GetObjectDti((uint64_t)shot) ==
         (uint64_t)_addr(DTI_USHOT_VULCAN_KING_KOBUN) &&
         g_kingKobunTraceCount < 128;
+
     uint32_t beforeMode = 0;
     uint32_t beforePhase = 0;
     float beforePos = 0.0f;
@@ -578,7 +569,6 @@ bool IsReconstructedShot(void* shot, uintptr_t dtiAddress,
 {
     RollbackShotRecipe found;
     if (!Shot_GetRecipe(shot, found) || !found.reconstructed ||
-        !HasCallableDtiVirtual(shot) ||
         GetObjectDti((uint64_t)shot) != (uint64_t)_addr(dtiAddress)) {
         return false;
     }
@@ -619,9 +609,8 @@ void RetryMissileEmplacementSetup(void* shot)
                     sizeof(motionState[motion].state168));
     }
     uint64_t vtable = *(uint64_t*)shot;
-    uint64_t setup = IsAccessibleRange(vtable + 0x28, sizeof(uint64_t))
-        ? *(uint64_t*)(vtable + 0x28) : 0;
-    if (!setup || !IsExecutableAddress(setup)) return;
+    uint64_t setup = *(uint64_t*)(vtable + 0x28);
+    if (!setup) return;
     ((void(__fastcall*)(void*))setup)(shot);
     InvalidateMemoryQueryCache();
     // Setup mirrors Z and replaces orientation from Doom's side flag. The
@@ -652,7 +641,7 @@ bool MissileEmplacementJointsReady(void* shot)
     bool ready = jointCount > 0 && jointCount <= 256 && joints &&
         IsAccessibleRange(joints, 0xC0 * jointCount);
     for (uint32_t index = 0; ready && index < jointCount; ++index)
-        ready = HasCallableDtiVirtual((void*)(joints + index * 0xC0));
+        ready = *(uint64_t*)(joints + index * 0xC0) != 0;
     return ready;
 }
 
@@ -723,9 +712,8 @@ void RecoverWeaponCartEndTransition(void* shot, void* owner,
                                     DeferredWeaponCartDebris& state)
 {
     uint64_t vtable = *(uint64_t*)shot;
-    uint64_t selectMotion = IsAccessibleRange(vtable + 0x190, sizeof(uint64_t))
-        ? *(uint64_t*)(vtable + 0x190) : 0;
-    if (selectMotion && IsExecutableAddress(selectMotion)) {
+    uint64_t selectMotion = *(uint64_t*)(vtable + 0x190);
+    if (selectMotion) {
         uint32_t animation = *(uint8_t*)((uint8_t*)shot + 0x22F4) ? 7 : 3;
         ((void(__fastcall*)(void*, uint32_t))selectMotion)(shot, animation);
     }
@@ -798,8 +786,7 @@ void __fastcall hkWeaponCartMove(void* shot)
 
 void __fastcall hkHandGrenadeContact(void* shot, void* contact)
 {
-    uint64_t dti = shot && HasCallableDtiVirtual(shot)
-        ? GetObjectDti((uint64_t)shot) : 0;
+    uint64_t dti = shot ? GetObjectDti((uint64_t)shot) : 0;
     bool fireGrenade = dti ==
         (uint64_t)_addr(DTI_USHOT_VULCAN_FIRE_GRENADE_BOMB);
     bool grenade = fireGrenade ||
@@ -823,7 +810,7 @@ void __fastcall hkHandGrenadeContact(void* shot, void* contact)
 
 void __fastcall hkSomersaultGrenadeContact(void* shot, void* contact)
 {
-    bool somersaultGrenade = shot && HasCallableDtiVirtual(shot) &&
+    bool somersaultGrenade = shot &&
         GetObjectDti((uint64_t)shot) ==
             (uint64_t)_addr(DTI_USHOT_VULCAN_SOMERSAULT_GRENADE);
     if (somersaultGrenade &&
@@ -867,7 +854,7 @@ uint32_t Rollback_AfterShotSpawn(void* shot, void* parent)
     RepairResimRepulsorBlastMotion(shot);
     RepairResimDogMissileMotion(shot);
     RepairResimPendulumModel(shot, nullptr);
-    if (g_isResimulating && shot && HasCallableDtiVirtual(shot)) {
+    if (g_isResimulating && shot) {
         uint64_t dti = GetObjectDti((uint64_t)shot);
         if (dti == (uint64_t)_addr(0x140D4C4C8))
             g_resimSpawnedPendulums.insert(shot);
@@ -889,7 +876,7 @@ void Rollback_BeforeShotHitboxUpdate(
 bool Rollback_AfterShotHitboxUpdate(
     void* shot, const RollbackShotRecipe* recipe)
 {
-    bool pendulum = shot && HasCallableDtiVirtual(shot) &&
+    bool pendulum = shot &&
         GetObjectDti((uint64_t)shot) == (uint64_t)_addr(0x140D4C4C8) &&
         (g_isResimulating || (recipe && recipe->reconstructed));
     if (pendulum) RepairResimPendulumModel(shot, recipe);
@@ -921,7 +908,7 @@ void Rollback_BeforeShotHitCollision(
 void Rollback_TraceShotPolicySpawn(
     void* shot, uint64_t spawnSequence, int32_t frame)
 {
-    if (!shot || !HasCallableDtiVirtual(shot) ||
+    if (!shot ||
         GetObjectDti((uint64_t)shot) !=
             (uint64_t)_addr(DTI_USHOT_SHIELD_KIKOUSYOU)) {
         return;
@@ -943,10 +930,10 @@ bool Rollback_ShouldReapplyShotCapsules(uint64_t runtimeDti)
 
 void Rollback_InitShotModelPolicyHooks()
 {
-    InstallPolicyHook(FN_KING_KOBUN_MOVE, (LPVOID)&hkKingKobunMove,
+    /*InstallPolicyHook(FN_KING_KOBUN_MOVE, (LPVOID)&hkKingKobunMove,
                       (void**)&oKingKobunMove,
                       "Rollback: hooked uShotVulcanKingKobun::move trace",
-                      "Rollback: failed to hook uShotVulcanKingKobun::move (%d)\n");
+                      "Rollback: failed to hook uShotVulcanKingKobun::move (%d)\n");*/
     InstallPolicyHook(FN_MISSILE_EMPLACEMENT_MOVE,
                       (LPVOID)&hkMissileEmplacementMove,
                       (void**)&oMissileEmplacementMove,
@@ -984,8 +971,7 @@ void Rollback_PinShotModelResources(
     void* shot, std::vector<void*>& pinnedShotResources,
     std::vector<void*>& pinnedEffectResources)
 {
-    if (!shot || !HasCallableDtiVirtual(shot))
-        return;
+    if (!shot) return;
 
     uint64_t runtimeDti = GetObjectDti((uint64_t)shot);
     const ShotModelPolicy* policy = FindShotModelPolicy(runtimeDti);
@@ -999,10 +985,7 @@ void Rollback_PinShotModelResources(
         return;
     for (uint32_t index = 0; index < 13; ++index) {
         void* effect = *(void**)((uint8_t*)shot + 0x2288 + index * 8);
-        if (!effect || !IsAccessibleRange((uint64_t)effect + 0x108,
-                                           sizeof(void*))) {
-            continue;
-        }
+        if (!effect) continue;
         PinUnique(*(void**)((uint8_t*)effect + 0x108), pinnedEffectResources);
     }
 }
@@ -1013,7 +996,7 @@ int Rollback_RetireShotModelEffects(
     std::vector<void*> retiredModels;
     int retiredCount = 0;
     for (void* shot : currentShots) {
-        if (!shot || !HasCallableDtiVirtual(shot) ||
+        if (!shot ||
             GetObjectDti((uint64_t)shot) !=
                 (uint64_t)_addr(DTI_USHOT_VULCAN_WEAPON_CART)) {
             continue;
@@ -1035,7 +1018,7 @@ int Rollback_RetireShotModelEffects(
     if (retiredModels.empty())
         return retiredCount;
     for (void* shot : currentShots) {
-        if (!shot || !HasCallableDtiVirtual(shot) ||
+        if (!shot ||
             GetObjectDti((uint64_t)shot) !=
                 (uint64_t)_addr(DTI_USHOT_VULCAN_WEAPON_CART)) {
             continue;
@@ -1178,12 +1161,9 @@ void Rollback_PrepareShotFactory(
                (uint64_t)_addr(DTI_USHOT_SHIELD_RAID_SWORD)) {
         groupOffset = 6;
         swordIdOffset = 0x2140;
-        if (IsAccessibleRange((uint64_t)saved.ownerChr + 0x1510,
-                              sizeof(state.ownerUsrF))) {
-            state.ownerUsrFField =
-                (uint32_t*)((uint8_t*)saved.ownerChr + 0x1510);
-            state.ownerUsrF = *state.ownerUsrFField;
-        }
+        state.ownerUsrFField =
+            (uint32_t*)((uint8_t*)saved.ownerChr + 0x1510);
+        state.ownerUsrF = *state.ownerUsrFField;
     } else if (saved.concrete.dti ==
                (uint64_t)_addr(DTI_USHOT_SHIELD_STORM_SWORD)) {
         groupOffset = 12;
@@ -1191,9 +1171,7 @@ void Rollback_PrepareShotFactory(
     } else {
         return;
     }
-    if (saved.concrete.body.size() < swordIdOffset + sizeof(uint32_t) ||
-        !IsAccessibleRange((uint64_t)saved.ownerChr + 0x68F0 + groupOffset,
-                           sizeof(state.ownerSlots))) {
+    if (saved.concrete.body.size() < swordIdOffset + sizeof(uint32_t)) {
         return;
     }
 
@@ -1233,25 +1211,19 @@ void Rollback_RebuildShotStateBeforeRegistration(
         return;
     }
     uint64_t vtable = *(uint64_t*)shot;
-    uint64_t contactAddress = vtable &&
-        IsAccessibleRange(vtable + 0x318, sizeof(uint64_t))
-        ? *(uint64_t*)(vtable + 0x318) : 0;
-    if (contactAddress && IsExecutableAddress(contactAddress))
+    uint64_t contactAddress = *(uint64_t*)(vtable + 0x318);
+    if (contactAddress)
         ((void(__fastcall*)(void*, void*))contactAddress)(shot, nullptr);
 }
 
 uint32_t Rollback_RepairNemesisExplosionAttack(
     void* shot, void* parent, uint32_t restoredId)
 {
-    uint64_t shotDti = shot && HasCallableDtiVirtual(shot)
-        ? GetObjectDti((uint64_t)shot) : 0;
-    uint64_t parentDti = parent && HasCallableDtiVirtual(parent)
-        ? GetObjectDti((uint64_t)parent) : 0;
+    uint64_t shotDti = shot ? GetObjectDti((uint64_t)shot) : 0;
+    uint64_t parentDti = parent ? GetObjectDti((uint64_t)parent) : 0;
     if (!shot || !parent ||
         shotDti != (uint64_t)_addr(DTI_USHOT_VULCAN_ROCKET_LAUNCHER_EXPLODE) ||
-        parentDti != (uint64_t)_addr(DTI_USHOT_VULCAN_EXATK_ROCKET_LAUNCHER) ||
-        !IsAccessibleRange((uint64_t)shot + 0x1498, sizeof(uint32_t)) ||
-        !IsAccessibleRange((uint64_t)parent + 0x1498, sizeof(uint32_t))) {
+        parentDti != (uint64_t)_addr(DTI_USHOT_VULCAN_EXATK_ROCKET_LAUNCHER)) {
         return UINT32_MAX;
     }
     uint32_t& attackInfoId = *(uint32_t*)((uint8_t*)shot + 0x1498);

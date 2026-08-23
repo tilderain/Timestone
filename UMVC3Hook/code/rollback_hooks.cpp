@@ -344,26 +344,12 @@ static void __fastcall hkBtGaugeLifeMove(uint64_t gauge)
     // are not guaranteed to be initialized for the accompanying sUnit pass.
     if (g_isResimulating)
         return;
-    if (!IsAccessibleRange(gauge, 0x60))
-        return;
-    uint64_t system = *(uint64_t*)(gauge + 0x58);
-    if (!system || !IsAccessibleAddress(system + 0x44))
-        return;
     oBtGaugeLifeMove(gauge);
 }
 
 static bool __fastcall hkRChrCpuClassFunc(void* cpu, void* object)
 {
     RollbackHookProfileScope profile(RollbackHookProfileId::ChrCpuClassFunc);
-    uint64_t address = (uint64_t)object;
-    if (!IsAccessiblePointer(address))
-        return false;
-    uint64_t vtable = *(uint64_t*)address;
-    if (!IsAccessiblePointer(vtable) || !IsAccessibleAddress(vtable + 0x20))
-        return false;
-    uint64_t getDti = *(uint64_t*)(vtable + 0x20);
-    if (!IsExecutableAddress(getDti))
-        return false;
     return oRChrCpuClassFunc(cpu, object);
 }
 
@@ -421,9 +407,7 @@ static void __fastcall hkRebuildFrustumPlanes(uint64_t viewport)
     uint64_t vtable = camera ? *(uint64_t*)camera : 0;
     uint64_t getViewMatrix = vtable
         ? *(uint64_t*)(vtable + CAMERA_GET_VIEW_MATRIX_VTABLE_OFFSET) : 0;
-    if (!camera || !vtable || !IsAccessibleRange(camera, 0x50) ||
-        !IsAccessibleAddress(vtable + CAMERA_GET_VIEW_MATRIX_VTABLE_OFFSET) ||
-        !IsExecutableAddress(getViewMatrix)) {
+    if (!camera || !vtable || !getViewMatrix) {
         oRebuildFrustumPlanes(viewport);
         return;
     }

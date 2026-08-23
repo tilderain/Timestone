@@ -126,13 +126,9 @@ template struct RollbackSnapshotLayoutGuard<
 static void ReleaseActionSideCameraState(RollbackSnapshotSlot& slot)
 {
     auto releaseRef = (void(__fastcall*)(void*))_addr(FN_CRESOURCE_RELEASE_REF);
-    if (slot.actionSideCamera.motionResource &&
-        IsAccessibleRange((uint64_t)slot.actionSideCamera.motionResource, 0x50) &&
-        HasCallableDtiVirtual(slot.actionSideCamera.motionResource))
+    if (slot.actionSideCamera.motionResource)
         releaseRef(slot.actionSideCamera.motionResource);
-    if (slot.actionSideCamera.requestResource &&
-        IsAccessibleRange((uint64_t)slot.actionSideCamera.requestResource, 0x50) &&
-        HasCallableDtiVirtual(slot.actionSideCamera.requestResource))
+    if (slot.actionSideCamera.requestResource)
         releaseRef(slot.actionSideCamera.requestResource);
     slot.actionSideCamera = {};
 }
@@ -143,8 +139,7 @@ static void CaptureActionSideCameraState(RollbackSnapshotSlot& slot)
 
     uint64_t sCamera = *(uint64_t*)_addr(PTR_SCAMERA);
     uint64_t camera = sCamera ? *(uint64_t*)(sCamera + 0x58) : 0;
-    if (!camera || !IsAccessibleRange(camera, 0x590) ||
-        !HasCallableDtiVirtual((void*)camera) ||
+    if (!camera ||
         GetObjectDti(camera) != (uint64_t)_addr(DTI_UACTION_SIDE_CAMERA)) {
         return;
     }
@@ -157,17 +152,6 @@ static void CaptureActionSideCameraState(RollbackSnapshotSlot& slot)
         *(void**)(camera + UACTION_CAMERA_REQUEST_RESOURCE_OFFSET);
     slot.actionSideCamera.requestParent =
         *(void**)(camera + UACTION_CAMERA_REQUEST_PARENT_OFFSET);
-
-    if (slot.actionSideCamera.motionResource &&
-        (!IsAccessibleRange((uint64_t)slot.actionSideCamera.motionResource, 0x50) ||
-         !HasCallableDtiVirtual(slot.actionSideCamera.motionResource))) {
-        slot.actionSideCamera.motionResource = nullptr;
-    }
-    if (slot.actionSideCamera.requestResource &&
-        (!IsAccessibleRange((uint64_t)slot.actionSideCamera.requestResource, 0x50) ||
-         !HasCallableDtiVirtual(slot.actionSideCamera.requestResource))) {
-        slot.actionSideCamera.requestResource = nullptr;
-    }
 
     auto addRef = (void(__fastcall*)(void*))_addr(FN_MTOBJECT_ADD_REF);
     if (slot.actionSideCamera.motionResource)
@@ -189,8 +173,7 @@ static void CaptureCharacterPostState(RollbackSnapshotSlot& slot)
     uint64_t characterPost = *(uint64_t*)(
         sUnit + SUNIT_CATEGORY_LISTS_OFFSET +
         SUNIT_CATEGORY_LIST_STRIDE * SUNIT_CHARACTER_POST_CATEGORY);
-    if (!characterPost || !IsAccessibleRange(characterPost, UCHARACTER_POST_SIZE) ||
-        !HasCallableDtiVirtual((void*)characterPost) ||
+    if (!characterPost ||
         GetObjectDti(characterPost) != (uint64_t)_addr(DTI_UCHARACTER_POST)) {
         return;
     }
@@ -400,8 +383,7 @@ static int BuildRegionsUncached(Region* regions, int maxRegions,
         else if (!ptr) reason = "null data pointer";
         else if (!size) reason = "zero size";
         else if (size > 0x1000000) reason = "size exceeds limit";
-        else if (!IsAccessiblePointer(ptr)) reason = "start inaccessible";
-        else if (!IsAccessibleAddress(ptr + size - 1)) reason = "end inaccessible";
+        else if (!IsAccessibleRange(ptr, size)) reason = "range inaccessible";
         if (!reason) return;
 
         char state[192];
@@ -421,7 +403,7 @@ static int BuildRegionsUncached(Region* regions, int maxRegions,
 #endif
                               ) {
         if (!ownerSlot || !ptr || !size || size > 0x1000000 ||
-            !IsAccessiblePointer(ptr) || !IsAccessibleAddress(ptr + size - 1)) {
+            !IsAccessibleRange(ptr, size)) {
             return;
         }
         if (r >= maxRegions) return;
@@ -892,8 +874,7 @@ static int BuildRegionsUncached(Region* regions, int maxRegions,
     //     drift (desync) that never self-corrects.  sCamera viewport[0]+8
     //     holds the pointer (confirmed via sCamera__refreshViewsForBoundary).
     {
-        if (camUnit && IsAccessibleRange(camUnit, 0x590) &&
-            HasCallableDtiVirtual((void*)camUnit) &&
+        if (camUnit &&
             GetObjectDti(camUnit) == (uint64_t)_addr(DTI_UACTION_SIDE_CAMERA)) {
             read.operator()<uint64_t>(camUnit);
             uint64_t dtiPtr  = GetObjectDti(camUnit);
@@ -1127,7 +1108,7 @@ static int BuildRegionsUncached(Region* regions, int maxRegions,
                     for (uint32_t animOffset : CCHR_EXTERNAL_ANIM_OFFSETS) {
                         uint64_t ownerSlot = character + animOffset;
                         uint64_t anim = read.operator()<uint64_t>(ownerSlot);
-                        if (anim && HasCallableDtiVirtual((void*)anim)) {
+                        if (anim) {
                             read.operator()<uint64_t>(anim);
                             add((void*)anim, CCHR_EXTERNAL_ANIM_SIZE, ownerSlot, 0, false
 #if ROLLBACK_SNAPDUMP_ENABLED
@@ -1145,15 +1126,13 @@ static int BuildRegionsUncached(Region* regions, int maxRegions,
                         character + CCHR_WEAPON_COUNT_OFFSET);
                     uint64_t weaponArray = read.operator()<uint64_t>(
                         character + CCHR_WEAPON_ARRAY_OFFSET);
-                    if (weaponArray && weaponCount <= 256 &&
-                        IsAccessibleRange(weaponArray,
-                            (size_t)weaponCount * sizeof(uint64_t))) {
+                    if (weaponArray && weaponCount <= 256) {
                         for (uint32_t weaponIndex = 0;
                              weaponIndex < weaponCount && r < maxRegions;
                              ++weaponIndex) {
                             uint64_t weapon = read.operator()<uint64_t>(
                                 weaponArray + (size_t)weaponIndex * sizeof(uint64_t));
-                            if (!weapon || !HasCallableDtiVirtual((void*)weapon) ||
+                            if (!weapon ||
                                 GetObjectDti(weapon) != (uint64_t)_addr(DTI_UCHRWEAPON)) {
                                 continue;
                             }
@@ -1453,9 +1432,7 @@ void Rollback_SaveSnapshot(int32_t frame)
         captureModelRenderState(character, true);
         uint32_t weaponCount = *(uint32_t*)((uint8_t*)character + 0x3F38);
         void** weapons = *(void***)((uint8_t*)character + 0x3F40);
-        if (!weapons || weaponCount > 256 ||
-            !IsAccessibleRange((uint64_t)weapons,
-                               (size_t)weaponCount * sizeof(void*))) {
+        if (!weapons || weaponCount > 256) {
             return;
         }
         for (uint32_t i = 0; i < weaponCount; ++i)

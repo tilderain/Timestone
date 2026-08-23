@@ -75,12 +75,7 @@ static bool HasValidUnitLink(void* unit)
 
 static void RepairUnitLinksBeforeRemoval(void* manager, void* unit)
 {
-    if (!manager || !unit ||
-        !IsAccessibleRange((uint64_t)manager + SUNIT_CATEGORY_COUNT_OFFSET,
-                           sizeof(uint32_t)) ||
-        !IsAccessibleRange((uint64_t)unit, 0x28)) {
-        return;
-    }
+    if (!manager || !unit) return;
 
     uint32_t state = *(uint32_t*)((uint8_t*)unit + 0x10);
     if ((state & 0x3F8u) == 0x3F8u) return;
@@ -193,8 +188,6 @@ static bool IsCurrentCharacterCollisionTarget(void* target)
 {
     uint64_t sUnit = *(uint64_t*)_addr(PTR_SUNIT);
     if (!target || !sUnit ||
-        !IsAccessibleRange(sUnit + SUNIT_CATEGORY_COUNT_OFFSET,
-                           sizeof(uint32_t)) ||
         *(uint32_t*)(sUnit + SUNIT_CATEGORY_COUNT_OFFSET) <=
             SUNIT_CHARACTER_CATEGORY) {
         return false;
@@ -204,7 +197,6 @@ static bool IsCurrentCharacterCollisionTarget(void* target)
         SUNIT_CATEGORY_LIST_STRIDE * SUNIT_CHARACTER_CATEGORY);
     for (int safety = 128; character && safety-- > 0;) {
         if (character == target) return true;
-        if (!IsAccessibleRange((uint64_t)character, 0x20)) return false;
         character = *(void**)((uint8_t*)character + 0x18);
     }
     return false;
@@ -215,8 +207,7 @@ static bool IsTerminalShot(void* shot)
     if (!shot || !IsActiveUnit(shot)) return false;
     uint32_t step = *(uint32_t*)((uint8_t*)shot + 0x212C);
     uint8_t flags = *(uint8_t*)((uint8_t*)shot + 0x1F64);
-    if (step == 3 && (flags & 0x02) == 0 &&
-        HasCallableDtiVirtual(shot)) {
+    if (step == 3 && (flags & 0x02) == 0) {
         uint64_t dti = GetObjectDti((uint64_t)shot);
         // Vergil's sword remains authoritative during cleanup. Its native
         // callback advances the local step and clears exactly one availability
@@ -243,37 +234,6 @@ static void CapturePreSpawnRng(RollbackShotRecipe& recipe, void* ownerChr)
     recipe.hasPreSpawnRng = true;
 }
 
-static void TraceResimShotSpawn(const char* kind,
-                                const RollbackShotRecipe& recipe,
-                                void* shot,
-                                void* caller)
-{
-    if (!g_activeRollbackProfile) return;
-
-    uint32_t ownerAfter[4] = {};
-    if (recipe.ownerChr) {
-        std::memcpy(ownerAfter, (uint8_t*)recipe.ownerChr + 0x2D80,
-                    sizeof(ownerAfter));
-    }
-    uint64_t elementDti = recipe.shotElement &&
-        HasCallableDtiVirtual(recipe.shotElement)
-        ? GetObjectDti((uint64_t)recipe.shotElement) : 0;
-    uint64_t replay = *(uint64_t*)_addr(PTR_SREPLAY);
-    int32_t frame = replay ? *(int32_t*)(replay + 0x54) : -1;
-    const uint32_t* ownerBefore =
-        reinterpret_cast<const uint32_t*>(recipe.preSpawnOwnerRng);
-    HookLog("SHOTSPAWNTRACE frame=%d kind=%s sequence=%llu caller=0x%llX "
-            "element=0x%llX elementDti=0x%llX owner=0x%llX slot=%u result=0x%llX "
-            "ownerRng=%08X,%08X,%08X,%08X->%08X,%08X,%08X,%08X\n",
-            frame, kind, recipe.spawnSequence, (uint64_t)caller,
-            (uint64_t)recipe.shotElement, elementDti, (uint64_t)recipe.ownerChr,
-            recipe.slotId, (uint64_t)shot,
-            ownerBefore[0], ownerBefore[1], ownerBefore[2], ownerBefore[3],
-            ownerAfter[0], ownerAfter[1], ownerAfter[2], ownerAfter[3]);
-
-    Rollback_TraceShotPolicySpawn(shot, recipe.spawnSequence, frame);
-}
-
 static void* __fastcall hkShotSpawn(void* manager, void* element, uint64_t initParam,
                                      void* posData, void* ownerChr, void* objectRef1,
                                      uint32_t slotId, void* objectRef2)
@@ -285,14 +245,12 @@ static void* __fastcall hkShotSpawn(void* manager, void* element, uint64_t initP
     recipe.posData = posData;
     recipe.ownerChr = ownerChr;
     recipe.objectRef1 = objectRef1;
-    recipe.objectRef1Dti = objectRef1 && HasCallableDtiVirtual(objectRef1)
-        ? GetObjectDti((uint64_t)objectRef1) : 0;
+    recipe.objectRef1Dti = objectRef1 ? GetObjectDti((uint64_t)objectRef1) : 0;
     recipe.objectRef1WasActiveUnit = objectRef1 && IsUnitObject(objectRef1) &&
         IsActiveUnit(objectRef1);
     recipe.slotId = slotId;
     recipe.objectRef2 = objectRef2;
-    recipe.objectRef2Dti = objectRef2 && HasCallableDtiVirtual(objectRef2)
-        ? GetObjectDti((uint64_t)objectRef2) : 0;
+    recipe.objectRef2Dti = objectRef2 ? GetObjectDti((uint64_t)objectRef2) : 0;
     recipe.objectRef2WasActiveUnit = objectRef2 && IsUnitObject(objectRef2) &&
         IsActiveUnit(objectRef2);
     recipe.kind = RollbackShotSpawnKind::Standard;
@@ -301,8 +259,6 @@ static void* __fastcall hkShotSpawn(void* manager, void* element, uint64_t initP
     void* shot = oShotSpawn(manager, element, initParam, posData, ownerChr,
                             objectRef1, slotId, objectRef2);
     Rollback_AfterShotSpawn(shot, nullptr);
-    TraceResimShotSpawn("standard", recipe, shot,
-                        __builtin_return_address(0));
     InvalidateMemoryQueryCache();
     if (shot) {
         recipe.savedPtr = shot;
@@ -324,14 +280,12 @@ static void* __fastcall hkShotSpawnEx(void* manager, void* element, uint64_t ini
     recipe.posData = posData;
     recipe.ownerChr = ownerChr;
     recipe.objectRef1 = objectRef1;
-    recipe.objectRef1Dti = objectRef1 && HasCallableDtiVirtual(objectRef1)
-        ? GetObjectDti((uint64_t)objectRef1) : 0;
+    recipe.objectRef1Dti = objectRef1 ? GetObjectDti((uint64_t)objectRef1) : 0;
     recipe.objectRef1WasActiveUnit = objectRef1 && IsUnitObject(objectRef1) &&
         IsActiveUnit(objectRef1);
     recipe.slotId = slotId;
     recipe.objectRef2 = objectRef2;
-    recipe.objectRef2Dti = objectRef2 && HasCallableDtiVirtual(objectRef2)
-        ? GetObjectDti((uint64_t)objectRef2) : 0;
+    recipe.objectRef2Dti = objectRef2 ? GetObjectDti((uint64_t)objectRef2) : 0;
     recipe.objectRef2WasActiveUnit = objectRef2 && IsUnitObject(objectRef2) &&
         IsActiveUnit(objectRef2);
     recipe.kind = RollbackShotSpawnKind::Extended;
@@ -345,8 +299,6 @@ static void* __fastcall hkShotSpawnEx(void* manager, void* element, uint64_t ini
                               objectRef1, slotId, objectRef2, a9, a10, a11, a12);
     recipe.spawnAttackInfoId =
         Rollback_AfterShotSpawn(shot, (void*)initParam);
-    TraceResimShotSpawn("extended", recipe, shot,
-                        __builtin_return_address(0));
     InvalidateMemoryQueryCache();
     if (shot) {
         recipe.savedPtr = shot;
@@ -358,8 +310,7 @@ static void* __fastcall hkShotSpawnEx(void* manager, void* element, uint64_t ini
 
 static bool ValidAttachDispatchObject(uint64_t object)
 {
-    if (!object || !IsAccessiblePointer(object) ||
-        !HasCallableDtiVirtual((void*)object)) return false;
+    if (!object || !HasCallableDtiVirtual((void*)object)) return false;
     uint64_t vtable = *(uint64_t*)object;
     return IsAccessibleAddress(vtable + 0x2C8) &&
            IsAccessibleAddress(vtable + 0x2D0) &&
@@ -370,19 +321,19 @@ static bool ValidAttachDispatchObject(uint64_t object)
 static bool ValidAttachMatrixSource(uint64_t object, int32_t jointIndex)
 {
     if (!object) return true;
-    if (!HasCallableDtiVirtual((void*)object)) return false;
+    if (jointIndex < 0) return HasCallableDtiVirtual((void*)object);
 
     // Indexed attachment dispatch expects a model/unit matrix callback. A
     // recycled particle generator can have an executable +0xA0 slot, but that
     // slot consumes RDX as a model pointer rather than a joint index.
-    return jointIndex < 0 || IsBaseModelObject((void*)object) ||
-           IsUnitObject((void*)object) || IsEffectObject((void*)object);
+    return IsBaseModelObject((void*)object) || IsUnitObject((void*)object) ||
+           IsEffectObject((void*)object);
 }
 
 static void __fastcall hkBuildAttachMatrix(void* arm, void* output, char reset)
 {
     RollbackHookProfileScope profile(RollbackHookProfileId::BuildAttachMatrix);
-    if (!arm || !output || !IsAccessiblePointer((uint64_t)arm + 0xD0)) return;
+    if (!arm || !output) return;
     void* shot = (uint8_t*)arm - 0x1DC0;
     auto recipe = g_liveShotRecipes.find(shot);
     if (recipe == g_liveShotRecipes.end() || !recipe->second.reconstructed) {
@@ -681,7 +632,7 @@ void Shot_DetachEmbeddedEffect(void* shot)
 {
     constexpr uint32_t EFFECT_OFFSET = 0x2160;
     constexpr uint32_t EFFECT_SIZE = 0x230;
-    if (!shot || !HasCallableDtiVirtual(shot)) return;
+    if (!shot) return;
     if (DecodeDtiSize(GetObjectDti((uint64_t)shot)) < EFFECT_OFFSET + EFFECT_SIZE)
         return;
     uint8_t* effect = (uint8_t*)shot + EFFECT_OFFSET;
@@ -698,7 +649,7 @@ void Shot_DetachEmbeddedEffect(void* shot)
 
 int Shot_SanitizeCollisionSlotsForDestruction(void* shot)
 {
-    if (!shot || !IsAccessiblePointer((uint64_t)shot + 0x2078)) return 0;
+    if (!shot) return 0;
     int sanitized = 0;
     auto* bytes = (uint8_t*)shot;
     for (uint32_t index = 0; index < 4; ++index) {
@@ -708,7 +659,7 @@ int Shot_SanitizeCollisionSlotsForDestruction(void* shot)
         uint32_t capacity = *(uint32_t*)(slot + 0x24);
         uint64_t entries = *(uint64_t*)(slot + 0x30);
         bool malformed = count > capacity || count > 128 ||
-            (count != 0 && !IsAccessiblePointer(entries)) ||
+            (count != 0 && !entries) ||
             (entries != 0 && !IsAccessiblePointer(entries));
         if (!malformed) continue;
         std::memset((void*)(slot + 0x20), 0, 0x18);
@@ -720,7 +671,7 @@ int Shot_SanitizeCollisionSlotsForDestruction(void* shot)
 int Shot_SanitizeUnitCategoryLists(void* sUnit, uint32_t firstCategory,
                                    uint32_t lastCategory)
 {
-    if (!sUnit || !IsAccessiblePointer((uint64_t)sUnit)) return 0;
+    if (!sUnit) return 0;
 
     struct ValidatedUnit {
         void* unit;
@@ -766,9 +717,7 @@ int Shot_SanitizeUnitCategoryLists(void* sUnit, uint32_t firstCategory,
             uint64_t character = *(uint64_t*)((uint8_t*)sUnit +
                 SUNIT_CATEGORY_LISTS_OFFSET + SUNIT_CATEGORY_LIST_STRIDE * 8);
             for (int safety = 64; character && safety-- > 0;) {
-                if (!IsAccessibleRange(character, 0x20)) break;
-                uint64_t characterDti = HasCallableDtiVirtual((void*)character)
-                    ? GetObjectDti(character) : 0;
+                uint64_t characterDti = GetObjectDti(character);
                 uint32_t characterSize = DecodeDtiSize(characterDti);
                 if (characterSize >= 8 && characterSize <= 0x40000 &&
                     address >= character && address < character + characterSize) {
@@ -903,9 +852,7 @@ void Shot_RemoveFromAllMultiMaskArrays(void* sUnit, void* unit)
         uint32_t* count = (uint32_t*)(array + 0x08);
         uint32_t capacity = *(uint32_t*)(array + 0x0C);
         void** entries = *(void***)(array + 0x18);
-        if (*count > capacity || !entries ||
-            !IsAccessibleAddress((uint64_t)entries +
-                                 (size_t)capacity * sizeof(void*))) {
+        if (*count > capacity || !entries) {
             continue;
         }
 
