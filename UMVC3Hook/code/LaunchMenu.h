@@ -34,6 +34,7 @@ struct LaunchDialogConfig {
     int32_t p2Colors[3];
     int32_t p1Assists[3];
     int32_t p2Assists[3];
+    bool    simpleMode[2];
     int32_t stageId;
     // Network host config
     char    hostIp[64];

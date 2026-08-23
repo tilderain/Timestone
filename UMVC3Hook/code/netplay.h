@@ -90,6 +90,7 @@ struct LaunchTrainingPacket {
     int32_t  p2Colors[3];
     int32_t  p1Assists[3];       // 0=Alpha, 1=Beta, 2=Gamma
     int32_t  p2Assists[3];
+    uint32_t simpleMode[2];
     int32_t  stageId;
     uint32_t flags;              // LaunchTrainingFlags
 };
@@ -99,6 +100,7 @@ struct LaunchP2SelectionPacket {
     int32_t  chars[3];
     int32_t  colors[3];          // zero-based archive variant IDs
     int32_t  assists[3];         // 0=Alpha, 1=Beta, 2=Gamma
+    uint32_t simpleMode;
     uint32_t ready;
 };
 
@@ -107,6 +109,7 @@ struct LaunchP1SelectionPacket {
     int32_t  chars[3];
     int32_t  colors[3];          // zero-based archive variant IDs
     int32_t  assists[3];         // 0=Alpha, 1=Beta, 2=Gamma
+    uint32_t simpleMode;
 };
 
 enum LaunchTrainingFlags : uint32_t {

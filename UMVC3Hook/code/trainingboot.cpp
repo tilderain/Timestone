@@ -26,7 +26,9 @@ static constexpr uintptr_t BATTLE_SETTING_SET_DRAW_MODE      = 0x1401461e0;
 static constexpr uintptr_t BATTLE_SETTING_SET_ASSIST_TYPE    = 0x140024d80;
 static constexpr uintptr_t ACTION_EXECUTE_MATCH_PHASE         = 0x140004b80;
 static constexpr uintptr_t SCHARACTER_GET_INSTANCE            = 0x140001aa0;
+static constexpr uintptr_t SCHARACTER_GET_TEAM                = 0x140001b60;
 static constexpr uintptr_t SCHARACTER_SET_TEAM_METER          = 0x14005a320;
+static constexpr uintptr_t CCHRTEAM_SET_EASY_MODE             = 0x1400203d0;
 
 // sArea scene-chain manager
 static constexpr uintptr_t SAREA_INSTANCE_PTR                = 0x140e17a80;
@@ -121,6 +123,7 @@ static TrainingBootConfig g_bootConfig = {
     { 0, 0, 0 }, // P2 colors
     { 0, 0, 0 }, // P1 assists (Alpha)
     { 0, 0, 0 }, // P2 assists (Alpha)
+    { false, false }, // Normal controls
     0,    // stage 
     99   // timer (99 = infinite in training)
 };
@@ -234,6 +237,27 @@ static void ConfigureTrainingMatchDefaults(uint64_t bs)
         }
     }
     HookLog("TrainingBoot: CPU control mode=%d\n", (int)g_cpuMode);
+}
+
+static void ApplySimpleModes()
+{
+    typedef uint64_t(__fastcall* GetInstance_t)();
+    typedef uint64_t(__fastcall* GetTeam_t)(uint64_t, int32_t);
+    typedef void(__fastcall* SetEasyMode_t)(uint64_t, int32_t);
+    const uint64_t characters = ((GetInstance_t)_addr(SCHARACTER_GET_INSTANCE))();
+    if (!characters)
+        return;
+
+    for (int team = 0; team < 2; ++team) {
+        const uint64_t chrTeam = ((GetTeam_t)_addr(SCHARACTER_GET_TEAM))(
+            characters, team);
+        if (chrTeam) {
+            ((SetEasyMode_t)_addr(CCHRTEAM_SET_EASY_MODE))(
+                chrTeam, g_bootConfig.simpleMode[team]);
+        }
+    }
+    HookLog("TrainingBoot: Applied Simple Mode P1=%d P2=%d\n",
+            g_bootConfig.simpleMode[0], g_bootConfig.simpleMode[1]);
 }
 
 // ---------------------------------------------------------------------------
@@ -543,10 +567,11 @@ void BootIntoTraining()
     // 2. Restore backup — copies slot data from bs+0x378 to bs+0x38,
     //    sets up game UI with character selections, runs training init.
     typedef void(__fastcall* RestoreBackup_t)(uint64_t);
-    ((RestoreBackup_t)_addr(BATTLE_SETTING_RESTORE_BACKUP))(bs);
-    HookLog("TrainingBoot: Backup restored\n");
+     ((RestoreBackup_t)_addr(BATTLE_SETTING_RESTORE_BACKUP))(bs);
+     HookLog("TrainingBoot: Backup restored\n");
+     ApplySimpleModes();
 
-    for (int team = 0; team < 2; ++team) {
+     for (int team = 0; team < 2; ++team) {
         for (int member = 0; member < 3; ++member) {
             int found = -1;
             for (int index = 0, occurrence = 0; index < 6; ++index) {
@@ -596,10 +621,10 @@ void BootIntoTraining()
         return;
     }
 
-    typedef void(__fastcall* SetArea_t)(uint64_t, void*);
-    SetArea_t setArea = (SetArea_t)(*(uint64_t*)(*(uint64_t*)sArea + 0x50));
-    setArea(sArea, (void*)_addr(ACHRSELBLANK_DTI));
-    HookLog("TrainingBoot: Queued aChrSelectBlank battle transition\n");
+     typedef void(__fastcall* SetArea_t)(uint64_t, void*);
+     SetArea_t setArea = (SetArea_t)(*(uint64_t*)(*(uint64_t*)sArea + 0x50));
+     setArea(sArea, (void*)_addr(ACHRSELBLANK_DTI));
+     HookLog("TrainingBoot: Queued aChrSelectBlank battle transition\n");
 }
 
 bool TrainingBoot_RestartWithConfig(const TrainingBootConfig& cfg)

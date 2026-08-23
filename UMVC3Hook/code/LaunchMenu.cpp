@@ -70,6 +70,7 @@ static LaunchDialogConfig g_dialogConfig = {
     {0, 0, 0},   // p2Colors
     {0, 0, 0},   // p1Assists (Alpha)
     {0, 0, 0},   // p2Assists (Alpha)
+    {false, false}, // Simple Mode controls
     STAGE_BONNE_WONDERLAND,
     "",          // hostIp
     7777,       // hostPort
@@ -131,7 +132,8 @@ static int GetCharacterArchiveVariantCount(int characterId)
 
 static bool IsValidTrainingLaunchPacket(const LaunchTrainingPacket& packet)
 {
-    if (packet.type != PACKET_LAUNCH_TRAINING)
+    if (packet.type != PACKET_LAUNCH_TRAINING ||
+        packet.simpleMode[0] > 1 || packet.simpleMode[1] > 1)
         return false;
     for (int i = 0; i < 3; ++i) {
         if (packet.p1Chars[i] < 0 || packet.p1Chars[i] >= kCharNameCount ||
@@ -192,6 +194,10 @@ static void LoadRollbackSettings()
         g_dialogConfig.p1Assists[i] = std::clamp(g_dialogConfig.p1Assists[i], 0, 2);
         g_dialogConfig.p2Assists[i] = std::clamp(g_dialogConfig.p2Assists[i], 0, 2);
     }
+    g_dialogConfig.simpleMode[0] = GetPrivateProfileIntA(
+        "P1", "SimpleMode", g_dialogConfig.simpleMode[0], rollbackPath) != 0;
+    g_dialogConfig.simpleMode[1] = GetPrivateProfileIntA(
+        "P2", "SimpleMode", g_dialogConfig.simpleMode[1], rollbackPath) != 0;
     g_dialogConfig.stageId = GetPrivateProfileIntA(
         "Training", "StageId", STAGE_BONNE_WONDERLAND, rollbackPath);
 
@@ -235,6 +241,10 @@ static void SaveRollbackSettings()
         snprintf(value, sizeof(value), "%d", g_dialogConfig.p2Assists[i]);
         WritePrivateProfileStringA("P2", key, value, rollbackPath);
     }
+    WritePrivateProfileStringA("P1", "SimpleMode",
+                               g_dialogConfig.simpleMode[0] ? "1" : "0", rollbackPath);
+    WritePrivateProfileStringA("P2", "SimpleMode",
+                               g_dialogConfig.simpleMode[1] ? "1" : "0", rollbackPath);
     char stageId[16];
     snprintf(stageId, sizeof(stageId), "%d", g_dialogConfig.stageId);
     WritePrivateProfileStringA("Training", "StageId", stageId, rollbackPath);
@@ -276,6 +286,8 @@ void SendTrainingLaunchPacket()
         packet.p2Assists[i] = g_dialogConfig.p2Assists[i];
     }
     packet.stageId = g_dialogConfig.stageId;
+    packet.simpleMode[0] = g_dialogConfig.simpleMode[0];
+    packet.simpleMode[1] = g_dialogConfig.simpleMode[1];
     switch (TrainingBoot_GetCpuMode()) {
     case TRAINING_CPU_P2_ONLY:
         packet.flags = LAUNCH_TRAINING_P2_CPU;
@@ -317,6 +329,8 @@ bool ApplyTrainingLaunchPacket(const LaunchTrainingPacket& packet)
         g_dialogConfig.p2Assists[i] = packet.p2Assists[i];
     }
     g_dialogConfig.stageId = packet.stageId;
+    g_dialogConfig.simpleMode[0] = packet.simpleMode[0] != 0;
+    g_dialogConfig.simpleMode[1] = packet.simpleMode[1] != 0;
     TrainingBoot_SetCpuMode(
         (packet.flags & LAUNCH_TRAINING_BOTH_CPUS) ? TRAINING_CPU_BOTH :
         (packet.flags & LAUNCH_TRAINING_P2_CPU) ? TRAINING_CPU_P2_ONLY :
@@ -333,6 +347,8 @@ bool ApplyTrainingLaunchPacket(const LaunchTrainingPacket& packet)
         cfg.p2Assists[i] = packet.p2Assists[i];
     }
     cfg.stageId = packet.stageId;
+    cfg.simpleMode[0] = packet.simpleMode[0] != 0;
+    cfg.simpleMode[1] = packet.simpleMode[1] != 0;
     cfg.timerValue = 99;
     TrainingBoot_SetConfig(cfg);
     HookLog("UMVC3Hook: Applied launch packet P1=%d/%d/%d P2=%d/%d/%d stage=%d\n",
@@ -397,6 +413,8 @@ enum CtrlId {
     ID_P2_ASSIST1         = 2024,
     ID_P2_ASSIST2         = 2025,
     ID_P2_ASSIST3         = 2026,
+    ID_P1_SIMPLE_MODE     = 2027,
+    ID_P2_SIMPLE_MODE     = 2028,
     ID_RANDOMIZE_CHARS    = 2030,
     ID_P2_LABEL           = 2031,
     ID_PEER_READY         = 2032,
@@ -471,6 +489,7 @@ static void ConfigureConnectedControls(HWND hDlg)
             EnableWindow(GetDlgItem(hDlg, ID_P1_ASSIST1 + i), TRUE);
         }
         EnableWindow(GetDlgItem(hDlg, ID_STAGE), TRUE);
+        EnableWindow(GetDlgItem(hDlg, ID_P1_SIMPLE_MODE), TRUE);
         EnableWindow(GetDlgItem(hDlg, ID_LAUNCH_TRAINING), g_peerReady ? TRUE : FALSE);
         HookLog("UMVC3Hook: Host owns P1; waiting for peer P2 selection\n");
     } else {
@@ -480,6 +499,7 @@ static void ConfigureConnectedControls(HWND hDlg)
             EnableWindow(GetDlgItem(hDlg, ID_P2_ASSIST1 + i), TRUE);
         }
         EnableWindow(GetDlgItem(hDlg, ID_PEER_READY), TRUE);
+        EnableWindow(GetDlgItem(hDlg, ID_P2_SIMPLE_MODE), TRUE);
         HookLog("UMVC3Hook: Client controls enabled for P2 selection\n");
     }
     UpdateReadyButton(hDlg);
@@ -501,6 +521,7 @@ static void SendP2Selection(HWND hDlg)
         packet.assists[i] = g_dialogConfig.p2Assists[i];
     }
     packet.ready = g_localReady ? 1 : 0;
+    packet.simpleMode = g_dialogConfig.simpleMode[1];
 
     ENetPacket* enetPacket = enet_packet_create(
         &packet, sizeof(packet), ENET_PACKET_FLAG_RELIABLE);
@@ -527,6 +548,7 @@ static void SendP1Selection(HWND hDlg)
         packet.colors[i] = g_dialogConfig.p1Colors[i];
         packet.assists[i] = g_dialogConfig.p1Assists[i];
     }
+    packet.simpleMode = g_dialogConfig.simpleMode[0];
 
     ENetPacket* enetPacket = enet_packet_create(
         &packet, sizeof(packet), ENET_PACKET_FLAG_RELIABLE);
@@ -540,7 +562,8 @@ static void SendP1Selection(HWND hDlg)
 
 static bool ApplyP1Selection(HWND hDlg, const LaunchP1SelectionPacket& packet)
 {
-    if (g_isHost || packet.type != PACKET_LAUNCH_P1_SELECTION) return false;
+    if (g_isHost || packet.type != PACKET_LAUNCH_P1_SELECTION ||
+        packet.simpleMode > 1) return false;
     for (int i = 0; i < 3; ++i) {
         if (packet.chars[i] < 0 || packet.chars[i] >= kCharNameCount ||
             packet.colors[i] < 0 ||
@@ -560,12 +583,16 @@ static bool ApplyP1Selection(HWND hDlg, const LaunchP1SelectionPacket& packet)
         PopulateAssistCombo(GetDlgItem(hDlg, ID_P1_ASSIST1 + i),
                             packet.chars[i], packet.assists[i]);
     }
+    g_dialogConfig.simpleMode[0] = packet.simpleMode != 0;
+    SendMessageA(GetDlgItem(hDlg, ID_P1_SIMPLE_MODE), BM_SETCHECK,
+                 g_dialogConfig.simpleMode[0] ? BST_CHECKED : BST_UNCHECKED, 0);
     return true;
 }
 
 static bool ApplyP2Selection(HWND hDlg, const LaunchP2SelectionPacket& packet)
 {
-    if (!g_isHost || packet.type != PACKET_LAUNCH_P2_SELECTION || packet.ready > 1)
+    if (!g_isHost || packet.type != PACKET_LAUNCH_P2_SELECTION ||
+        packet.ready > 1 || packet.simpleMode > 1)
         return false;
     for (int i = 0; i < 3; ++i) {
         if (packet.chars[i] < 0 || packet.chars[i] >= kCharNameCount ||
@@ -574,6 +601,9 @@ static bool ApplyP2Selection(HWND hDlg, const LaunchP2SelectionPacket& packet)
             packet.assists[i] < 0 || packet.assists[i] > 2)
             return false;
     }
+    g_dialogConfig.simpleMode[1] = packet.simpleMode != 0;
+    SendMessageA(GetDlgItem(hDlg, ID_P2_SIMPLE_MODE), BM_SETCHECK,
+                 g_dialogConfig.simpleMode[1] ? BST_CHECKED : BST_UNCHECKED, 0);
 
     for (int i = 0; i < 3; ++i) {
         g_dialogConfig.p2Chars[i] = packet.chars[i];
@@ -616,6 +646,8 @@ LaunchOption ShowLaunchMenu()
         g_dialogConfig.p2Assists[i] = def.p2Assists[i];
     }
     g_dialogConfig.stageId = def.stageId;
+    g_dialogConfig.simpleMode[0] = def.simpleMode[0];
+    g_dialogConfig.simpleMode[1] = def.simpleMode[1];
 
     // Default network settings, then restore the last target from disk.
     strcpy(g_dialogConfig.hostIp, "127.0.0.1");
@@ -644,7 +676,7 @@ LaunchOption ShowLaunchMenu()
 
     RegisterClassA(&wc);
 
-    int w = 840, h = 763;
+    int w = 840, h = 788;
     int x = (GetSystemMetrics(SM_CXSCREEN) - w) / 2;
     int y = (GetSystemMetrics(SM_CYSCREEN) - h) / 2;
 
@@ -717,6 +749,8 @@ bool ConfigureAutoTestDualTraining(int32_t characterId, int32_t hostPort)
         g_dialogConfig.p1Assists[i] = autoTestAssist;
         g_dialogConfig.p2Assists[i] = autoTestAssist;
     }
+    g_dialogConfig.simpleMode[0] = false;
+    g_dialogConfig.simpleMode[1] = false;
     g_dialogConfig.stageId = 0;
     g_launchOption = LAUNCH_DUAL_TRAINING;
     g_autoTestLaunch = true;
@@ -755,6 +789,8 @@ void ConfigureCommandLineDualTraining()
         cfg.p2Assists[i] = g_dialogConfig.p2Assists[i];
     }
     cfg.stageId = g_dialogConfig.stageId;
+    cfg.simpleMode[0] = g_dialogConfig.simpleMode[0];
+    cfg.simpleMode[1] = g_dialogConfig.simpleMode[1];
     cfg.timerValue = 99;
     TrainingBoot_SetConfig(cfg);
     g_launchOption = LAUNCH_DUAL_TRAINING;
@@ -802,7 +838,7 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
 
         // ---- Character Select Section ----
         CreateWindowA("BUTTON", "Character Select",
-            WS_VISIBLE | WS_CHILD | BS_GROUPBOX, leftX, y, contentW, 175,
+            WS_VISIBLE | WS_CHILD | BS_GROUPBOX, leftX, y, contentW, 200,
             hDlg, NULL, NULL, NULL);
         y += 18;
 
@@ -874,6 +910,20 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
             SendMessageA(hAssist, CB_SETDROPPEDWIDTH, 220, 0);
         }
         y += 90;
+
+        HWND p1Simple = CreateWindowA("BUTTON", "Simple Mode Controls",
+            WS_VISIBLE | WS_CHILD | WS_TABSTOP | BS_AUTOCHECKBOX,
+            leftX + 34, y, 180, 20,
+            hDlg, (HMENU)ID_P1_SIMPLE_MODE, NULL, NULL);
+        HWND p2Simple = CreateWindowA("BUTTON", "Simple Mode Controls",
+            WS_VISIBLE | WS_CHILD | WS_TABSTOP | BS_AUTOCHECKBOX,
+            left2X + 34, y, 180, 20,
+            hDlg, (HMENU)ID_P2_SIMPLE_MODE, NULL, NULL);
+        SendMessageA(p1Simple, BM_SETCHECK,
+                     g_dialogConfig.simpleMode[0] ? BST_CHECKED : BST_UNCHECKED, 0);
+        SendMessageA(p2Simple, BM_SETCHECK,
+                     g_dialogConfig.simpleMode[1] ? BST_CHECKED : BST_UNCHECKED, 0);
+        y += 25;
 
         // ---- Stage Select ----
         y += 5;
@@ -1029,7 +1079,7 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
         snprintf(versionText, sizeof(versionText), "Timestone v%s", UMVC3HOOK_VERSION);
         CreateWindowA("STATIC", versionText,
             WS_VISIBLE | WS_CHILD | SS_RIGHT,
-            leftX + 600, 685, 200, 18, hDlg, NULL, NULL, NULL);
+            leftX + 600, 710, 200, 18, hDlg, NULL, NULL, NULL);
 
         SetTimer(hDlg, ID_STEAM_POLL_TIMER, 50, NULL);
         return msg == WM_INITDIALOG ? TRUE : 0;
@@ -1208,6 +1258,24 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
             }
             return 0;
 
+        case ID_P1_SIMPLE_MODE:
+        case ID_P2_SIMPLE_MODE:
+            if (HIWORD(wParam) == BN_CLICKED) {
+                const int team = LOWORD(wParam) == ID_P1_SIMPLE_MODE ? 0 : 1;
+                g_dialogConfig.simpleMode[team] = SendMessageA(
+                    (HWND)lParam, BM_GETCHECK, 0, 0) == BST_CHECKED;
+                if (g_dialogConfig.enetPeer) {
+                    if (team == 0 && g_isHost)
+                        SendP1Selection(hDlg);
+                    if (team == 1 && !g_isHost) {
+                        g_localReady = false;
+                        UpdateReadyButton(hDlg);
+                        SendP2Selection(hDlg);
+                    }
+                }
+            }
+            return 0;
+
         // ---- Launch buttons ----
         case ID_LAUNCH_NORMAL:
         {
@@ -1287,6 +1355,8 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
                 cfg.p2Assists[i] = g_dialogConfig.p2Assists[i];
             }
             cfg.stageId = g_dialogConfig.stageId;
+            cfg.simpleMode[0] = g_dialogConfig.simpleMode[0];
+            cfg.simpleMode[1] = g_dialogConfig.simpleMode[1];
             cfg.timerValue = 99;
             TrainingBoot_SetConfig(cfg);
 

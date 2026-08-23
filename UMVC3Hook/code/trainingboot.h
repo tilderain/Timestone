@@ -106,6 +106,7 @@ struct TrainingBootConfig {
     int32_t p2Colors[3];
     int32_t p1Assists[3]; // 0=Alpha, 1=Beta, 2=Gamma
     int32_t p2Assists[3];
+    bool simpleMode[2];   // Team-specific Simple Mode controls
     int32_t stageId;      // Stage ID
     int32_t timerValue;   // Timer in seconds (99 = infinite in training)
 };

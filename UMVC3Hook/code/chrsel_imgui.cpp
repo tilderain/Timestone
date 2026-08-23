@@ -33,6 +33,7 @@ struct RosterConfig {
     int32_t chars[2][3];
     int32_t colors[2][3];
     int32_t assists[2][3];
+    uint8_t simpleMode[2];
 };
 
 #pragma pack(push, 1)
@@ -67,6 +68,7 @@ char g_status[160] = {};
 
 constexpr uintptr_t BATTLE_SETTING_GET_INSTANCE = 0x140004700;
 constexpr uintptr_t CHARACTER_GET_INSTANCE = 0x140001AA0;
+constexpr uintptr_t CHARACTER_GET_TEAM = 0x140001B60;
 constexpr uintptr_t GAME_UI_GET_INSTANCE = 0x140001AC0;
 constexpr uintptr_t SLOT_SET_CHAR_ID = 0x140146560;
 constexpr uintptr_t SLOT_SET_DRAW_MODE = 0x1401461E0;
@@ -246,6 +248,8 @@ int NormalizeColor(int characterId, int color)
 bool ValidateRoster(const RosterConfig& roster)
 {
     for (int team = 0; team < 2; ++team) {
+        if (roster.simpleMode[team] > 1)
+            return false;
         for (int member = 0; member < 3; ++member) {
             const int character = roster.chars[team][member];
             if (character <= 0 || character >= kCharNameCount ||
@@ -292,6 +296,16 @@ bool ReadCurrentRoster(RosterConfig& roster)
         roster.assists[team][member] =
             std::clamp(*(int32_t*)(slot + 0x1C), 0, 2);
     }
+    using GetInstanceFn = uint64_t(__fastcall*)();
+    using GetTeamFn = uint64_t(__fastcall*)(uint64_t, int32_t);
+    const uint64_t characters = ((GetInstanceFn)_addr(CHARACTER_GET_INSTANCE))();
+    for (int team = 0; characters && team < 2; ++team) {
+        const uint64_t chrTeam = ((GetTeamFn)_addr(CHARACTER_GET_TEAM))(
+            characters, team);
+        roster.simpleMode[team] = chrTeam
+            ? static_cast<uint8_t>((*(uint32_t*)(chrTeam + 0x58) >> 12) & 1)
+            : 0;
+    }
     return counts[0] == 3 && counts[1] == 3 && ValidateRoster(roster);
 }
 
@@ -306,6 +320,9 @@ void ReadFallbackRoster(RosterConfig& roster)
         roster.assists[0][member] = config.p1Assists[member];
         roster.assists[1][member] = config.p2Assists[member];
     }
+    const TrainingBootConfig& defaults = TrainingBoot_GetDefaultConfig();
+    roster.simpleMode[0] = defaults.simpleMode[0];
+    roster.simpleMode[1] = defaults.simpleMode[1];
 }
 
 void NormalizeRoster(RosterConfig& roster)
@@ -472,6 +489,7 @@ void CopyRemoteRoster(const ChrSelPacket& packet)
     const int firstTeam = CanEditAllTeams() ? 0 : (Netplay_IsHost() ? 1 : 0);
     const int lastTeam = CanEditAllTeams() ? 1 : firstTeam;
     for (int team = firstTeam; team <= lastTeam; ++team) {
+        g_roster.simpleMode[team] = packet.roster.simpleMode[team];
         for (int member = 0; member < 3; ++member) {
             g_roster.chars[team][member] = packet.roster.chars[team][member];
             g_roster.colors[team][member] = packet.roster.colors[team][member];
@@ -552,10 +570,23 @@ void HandlePacket(const ChrSelPacket& packet)
         if (!ValidateRoster(packet.roster) || !CanOpenSelector())
             return;
         if (!g_open || packet.session != g_session) {
+            const int ownedTeam = Netplay_IsHost() ? 0 : 1;
+            RosterConfig current = {};
+            bool haveCurrentSimple = false;
+            if (Netplay_IsActive()) {
+                if (g_open) {
+                    current = g_roster;
+                    haveCurrentSimple = true;
+                } else {
+                    haveCurrentSimple = ReadCurrentRoster(current);
+                }
+            }
             g_session = packet.session;
             g_revision = packet.revision;
             g_remoteRevision = packet.revision;
             g_roster = packet.roster;
+            if (haveCurrentSimple)
+                g_roster.simpleMode[ownedTeam] = current.simpleMode[ownedTeam];
             g_open = true;
         } else {
             CopyRemoteRoster(packet);
@@ -657,6 +688,11 @@ bool DrawTeam(int team, bool editable)
                                  : ImVec4(1.0f, 0.45f, 0.55f, 1.0f),
                        "P%d TEAM", team + 1);
     if (!editable) ImGui::BeginDisabled();
+    bool simpleMode = g_roster.simpleMode[team] != 0;
+    if (ImGui::Checkbox("Simple Mode Controls", &simpleMode)) {
+        g_roster.simpleMode[team] = simpleMode;
+        changed = true;
+    }
     for (int member = 0; member < 3; ++member) {
         ImGui::PushID(member);
         ImGui::Separator();
@@ -844,6 +880,8 @@ bool ChrSelImGui_ApplyPendingRoster(int32_t targetFrame)
         config.p1Assists[member] = g_pendingConfig.assists[0][member];
         config.p2Assists[member] = g_pendingConfig.assists[1][member];
     }
+    config.simpleMode[0] = g_pendingConfig.simpleMode[0] != 0;
+    config.simpleMode[1] = g_pendingConfig.simpleMode[1] != 0;
     if (!TrainingBoot_RestartWithConfig(config))
         return false;
 
