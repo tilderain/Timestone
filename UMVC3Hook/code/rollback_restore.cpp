@@ -1457,7 +1457,6 @@ void Rollback_RestoreSnapshot(int32_t frame)
     bool ownerStillMatches[MAX_REGIONS] = {};
     uint64_t liveOwnerPointers[MAX_REGIONS] = {};
     uint32_t liveCommandLineCounts[MAX_REGIONS] = {};
-    bool commandLineRegion[MAX_REGIONS] = {};
     for (int i = 0; i < slot.regionCount; ++i) {
         uint64_t ownerSlot = slot.regions[i].ownerSlot;
         if (ownerSlot == 0) {
@@ -1466,17 +1465,8 @@ void Rollback_RestoreSnapshot(int32_t frame)
         }
         liveOwnerPointers[i] = *(uint64_t*)ownerSlot;
         ownerStillMatches[i] = liveOwnerPointers[i] == (uint64_t)slot.regions[i].ptr;
-        for (size_t characterIndex = 0;
-             characterIndex < teamCharacterCount && !commandLineRegion[i];
-             ++characterIndex) {
-            for (uint32_t commandOffset : CCHR_COMMAND_OFFSETS) {
-                if (ownerSlot == teamCharacters[characterIndex] + commandOffset + 0x178) {
-                    commandLineRegion[i] = true;
-                    liveCommandLineCounts[i] = *(uint32_t*)(ownerSlot - 0x08);
-                    break;
-                }
-            }
-        }
+        if (slot.regions[i].commandLine)
+            liveCommandLineCounts[i] = *(uint32_t*)(ownerSlot - 0x08);
     }
     const uint64_t setupEnd = Profile_Now();
 
@@ -2065,7 +2055,7 @@ void Rollback_RestoreSnapshot(int32_t frame)
     for (int i = 0; i < slot.regionCount; ++i) {
         if (slot.regions[i].ownerSlot != 0 && !ownerStillMatches[i]) {
             *(uint64_t*)slot.regions[i].ownerSlot = liveOwnerPointers[i];
-            if (commandLineRegion[i]) {
+            if (slot.regions[i].commandLine) {
                 *(uint32_t*)(slot.regions[i].ownerSlot - 0x08) =
                     liveCommandLineCounts[i];
             }

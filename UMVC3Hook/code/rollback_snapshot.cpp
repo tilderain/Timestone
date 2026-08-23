@@ -294,30 +294,47 @@ public:
             size == 0 || size - 1 > UINTPTR_MAX - address) {
             return false;
         }
-        for (const MemoryRegion& region : regions_) {
+        if (lastRegion_ < count_) {
+            const MemoryRegion& region = regions_[lastRegion_];
             if (address >= region.start && address + size <= region.end)
                 return region.accessible;
+        }
+        for (size_t i = 0; i < count_; ++i) {
+            const MemoryRegion& region = regions_[i];
+            if (address >= region.start && address + size <= region.end)
+            {
+                lastRegion_ = i;
+                return region.accessible;
+            }
         }
 
         MEMORY_BASIC_INFORMATION mbi = {};
         if (VirtualQuery((void*)address, &mbi, sizeof(mbi)) == 0) return false;
         const bool accessible = mbi.State == MEM_COMMIT &&
             (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) == 0;
-        regions_.push_back({
+        MemoryRegion queried = {
             (uintptr_t)mbi.BaseAddress,
             (uintptr_t)mbi.BaseAddress + mbi.RegionSize,
             accessible,
-        });
-        return accessible && address + size <= regions_.back().end;
+        };
+        if (count_ < MAX_CACHED_REGIONS) {
+            lastRegion_ = count_;
+            regions_[count_++] = queried;
+        }
+        return accessible && address + size <= queried.end;
     }
 
 private:
+    static constexpr size_t MAX_CACHED_REGIONS = 256;
+
     struct MemoryRegion {
         uintptr_t start;
         uintptr_t end;
         bool accessible;
     };
-    std::vector<MemoryRegion> regions_;
+    MemoryRegion regions_[MAX_CACHED_REGIONS];
+    size_t count_ = 0;
+    size_t lastRegion_ = SIZE_MAX;
 };
 
 static bool RegionDependenciesValid(const RegionDependencies& dependencies)
@@ -400,6 +417,7 @@ static int BuildRegionsUncached(Region* regions, int maxRegions,
             regions[r].ownerSlot = ownerSlot;
             regions[r].expectedVtable = expectedVtable;
             regions[r].skipVtable = skipVtable;
+            regions[r].commandLine = false;
 #if ROLLBACK_SNAPDUMP_ENABLED
             regions[r].snapDumpName = snapDumpName;
 #endif
@@ -1288,12 +1306,16 @@ static int BuildRegionsUncached(Region* regions, int maxRegions,
                         uint64_t cmd   = character + cmdOff;
                         uint64_t lines = read.operator()<uint64_t>(cmd + 0x178);
                         int n = read.operator()<int>(cmd + 0x170);
-                        if (lines && n > 0 && n < 0x1000)
+                        if (lines && n > 0 && n < 0x1000) {
+                            int previousCount = r;
                             add((void*)lines, (size_t)n * 0x20, cmd + 0x178, 0, false
 #if ROLLBACK_SNAPDUMP_ENABLED
                                 , "uCharacter.commandLines"
 #endif
                             );
+                            if (r > previousCount)
+                                regions[r - 1].commandLine = true;
+                        }
                     }
                 }
                 node = read.operator()<uint64_t>(node + NODE_NEXT_OFFSET);

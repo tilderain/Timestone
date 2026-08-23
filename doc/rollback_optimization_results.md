@@ -1,0 +1,130 @@
+# Rollback Optimization Results
+
+## Stack-Backed Region Dependency Cache
+
+### Test Configuration
+
+```text
+Commit: 7eae058a7c2edbedefe5c87c35b303ee39a8aa0d (dirty profiling build)
+Profiling enabled: yes
+Roster/stage: unchanged saved dual-training configuration
+CPU mode: both teams
+Multi-resim: enabled
+Target fighting frames: 1000
+Baseline: rollback_profile_runs/20260823T070820.341980Z_candidate_direct_snapshot_regions_repeat
+Candidate: rollback_profile_runs/20260823T072140.682190Z_candidate_dependency_stack_cache
+```
+
+### Hotspot Evidence
+
+`RegionDependenciesValid()` created and grew a temporary `std::vector` on every
+snapshot to cache fresh `VirtualQuery` results. The optimized baseline spent
+74.6111 ms in `build_regions_ms` across 1,460 snapshot saves, or approximately
+51.1 microseconds per save. Region construction represented about 12% of the
+measured snapshot path.
+
+The candidate replaces only that transient vector with a bounded stack array
+and a last-hit index. It retains fresh memory queries, the same address ranges,
+the same accessibility decisions, and the same dependency value comparisons.
+It does not change captured state or native gameplay behavior.
+
+### A/B Result
+
+Every profile reported exactly 330 regions and 1540.157 KiB per snapshot.
+Aggregate rollback time was not used to judge this candidate because native
+action and projectile workloads differed substantially between runs.
+
+| `build_regions_ms` per save | Baseline | Candidate | Change |
+|---|---:|---:|---:|
+| Host weighted mean | 50.989 us | 47.966 us | -5.93% |
+| Client weighted mean | 51.213 us | 49.458 us | -3.43% |
+| Host median | 48.782 us | 44.438 us | -8.91% |
+| Client median | 48.400 us | 44.217 us | -8.64% |
+| Host 10% trimmed mean | 49.503 us | 45.974 us | -7.13% |
+| Client 10% trimmed mean | 49.154 us | 45.185 us | -8.07% |
+
+A fixed-seed, 10,000-iteration rollback-window bootstrap produced these 95%
+intervals for the normalized change:
+
+| Statistic | Host | Client |
+|---|---:|---:|
+| Median | -14.63% to -1.58% | -14.77% to -2.04% |
+| 10% trimmed mean | -12.99% to -1.34% | -13.15% to -2.04% |
+
+The weighted-mean intervals included zero because a small number of timing
+outliers dominated that statistic. Both robust measures agree across peers and
+exclude no change.
+
+### Correctness
+
+- Both peers reached the 1,000-frame limit and exited normally.
+- No crash artifacts were produced.
+- No desync artifacts were produced.
+- Snapshot region count and byte size were unchanged.
+
+### Verdict
+
+`optimization_verified` for the narrow region-dependency validation bucket.
+The candidate is retained. No whole-run speedup is claimed because unrelated
+native gameplay variance dominated aggregate rollback time.
+
+## Command-Line Region Metadata
+
+### Test Configuration
+
+```text
+Commit: 7eae058a7c2edbedefe5c87c35b303ee39a8aa0d (dirty profiling build)
+Profiling enabled: yes
+Roster/stage: unchanged saved dual-training configuration
+CPU mode: both teams
+Multi-resim: enabled
+Target fighting frames: 1000
+Baseline: rollback_profile_runs/20260823T072140.682190Z_candidate_dependency_stack_cache
+Candidate: rollback_profile_runs/20260823T073954.381616Z_candidate_command_region_metadata
+```
+
+### Investigation
+
+Restore setup previously rediscovered command-line regions by comparing every
+owned snapshot region against both command offsets for every team character.
+Snapshot construction already identifies these regions when it captures the
+two `cChrCmd` line buffers per character.
+
+The candidate stores that identity in an existing padding byte of
+`RollbackRegion`. Restore then reads the live command-line count directly for
+marked regions. Captured bytes, region size, owner validation, allocation-count
+restoration, and command state are unchanged.
+
+### A/B Result
+
+| `restore.setup_ms` per window | Baseline | Candidate | Change |
+|---|---:|---:|---:|
+| Host median | 39.800 us | 32.100 us | -19.35% |
+| Client median | 42.400 us | 32.350 us | -23.70% |
+| Host 10% trimmed mean | 43.930 us | 29.764 us | -32.25% |
+| Client 10% trimmed mean | 42.341 us | 31.939 us | -24.57% |
+
+A fixed-seed, 10,000-iteration rollback-window bootstrap produced these 95%
+intervals for the normalized change:
+
+| Statistic | Host | Client |
+|---|---:|---:|
+| Median | -37.64% to -8.68% | -34.86% to -10.44% |
+| 10% trimmed mean | -42.07% to -22.94% | -32.13% to -12.78% |
+
+The client arithmetic mean was dominated by a small number of setup outliers;
+its median and trimmed distribution agree with the host result.
+
+### Correctness
+
+- Both peers reached the 1,000-frame limit and exited normally.
+- No crash artifacts were produced.
+- No desync artifacts were produced.
+- Snapshot region count and byte size were unchanged.
+- Command-line ownership and live allocation-count restoration remain active.
+
+### Verdict
+
+`optimization_verified` for restore setup bookkeeping. The candidate is
+retained. The combined rollback result improved 4.40%, but no whole-run claim is
+made from one battle because native gameplay workload still varied.

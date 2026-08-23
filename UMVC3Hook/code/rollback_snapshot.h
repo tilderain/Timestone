@@ -21,6 +21,7 @@ struct RollbackRegion {
     uint64_t ownerSlot;
     uint64_t expectedVtable;
     bool skipVtable;
+    bool commandLine;
 #if ROLLBACK_SNAPDUMP_ENABLED
     const char* snapDumpName;
 #endif
