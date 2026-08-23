@@ -21,7 +21,7 @@ extern void HookLog(const char* fmt, ...);
 namespace {
 
 constexpr uint32_t DUMP_MAGIC = 0x50445355; // USDP
-constexpr uint32_t DUMP_VERSION = 3;
+constexpr uint32_t DUMP_VERSION = 4;
 constexpr int HISTORY_SIZE = 255;
 constexpr uint8_t ENCODING_RAW = 0;
 constexpr uint8_t ENCODING_XOR_RLE = 1;
@@ -87,11 +87,13 @@ struct ShotHeader {
     uint64_t shotElement;
     uint64_t objectRef1;
     uint64_t objectRef1Dti;
-    uint8_t objectRef1WasActiveUnit;
+    uint64_t objectRef1ShotSequence;
+    uint8_t objectRef1Kind;
     uint8_t reserved1[7];
     uint64_t objectRef2;
     uint64_t objectRef2Dti;
-    uint8_t objectRef2WasActiveUnit;
+    uint64_t objectRef2ShotSequence;
+    uint8_t objectRef2Kind;
     uint8_t reserved2[7];
     int32_t exA9;
     uint64_t exA10;
@@ -119,7 +121,7 @@ struct PrimitiveHeader {
 };
 #pragma pack(pop)
 
-static_assert(DUMP_VERSION == 3);
+static_assert(DUMP_VERSION == 4);
 static_assert(sizeof(RegionHeader::name) == 64);
 
 struct HistoryFrame {
@@ -228,12 +230,14 @@ std::vector<uint8_t> SerializeShot(const RollbackShotRecipe& recipe)
     header.posData = (uint64_t)recipe.posData;
     header.ownerChr = (uint64_t)recipe.ownerChr;
     header.shotElement = (uint64_t)recipe.shotElement;
-    header.objectRef1 = (uint64_t)recipe.objectRef1;
-    header.objectRef1Dti = recipe.objectRef1Dti;
-    header.objectRef1WasActiveUnit = recipe.objectRef1WasActiveUnit ? 1 : 0;
-    header.objectRef2 = (uint64_t)recipe.objectRef2;
-    header.objectRef2Dti = recipe.objectRef2Dti;
-    header.objectRef2WasActiveUnit = recipe.objectRef2WasActiveUnit ? 1 : 0;
+    header.objectRef1 = (uint64_t)recipe.objectRef1.savedPtr;
+    header.objectRef1Dti = recipe.objectRef1.expectedDti;
+    header.objectRef1ShotSequence = recipe.objectRef1.shotSpawnSequence;
+    header.objectRef1Kind = (uint8_t)recipe.objectRef1.kind;
+    header.objectRef2 = (uint64_t)recipe.objectRef2.savedPtr;
+    header.objectRef2Dti = recipe.objectRef2.expectedDti;
+    header.objectRef2ShotSequence = recipe.objectRef2.shotSpawnSequence;
+    header.objectRef2Kind = (uint8_t)recipe.objectRef2.kind;
     header.exA9 = recipe.exA9;
     header.exA10 = (uint64_t)recipe.exA10;
     header.exA11 = recipe.exA11;

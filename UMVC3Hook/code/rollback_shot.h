@@ -5,6 +5,7 @@
 
 struct RollbackShotFlightState;
 struct RollbackShotRecipe;
+struct RollbackShotReference;
 struct RollbackSnapshotSlot;
 
 void Shot_InitHooks();
@@ -13,6 +14,8 @@ void Shot_CaptureRecipes(RollbackSnapshotSlot& slot);
 bool Shot_GetRecipe(void* shot, RollbackShotRecipe& recipe);
 size_t Shot_GetRecipeCount();
 void Shot_CollectCurrent(std::vector<void*>& shots);
+void Shot_PrepareReferenceResolution();
+void* Shot_ResolveReference(const RollbackShotReference& reference);
 void* Shot_SpawnOriginal(void* manager, const RollbackShotRecipe& recipe,
                          void* objectRef1, void* objectRef2);
 void Shot_TrackReconstructed(void* shot, const RollbackShotRecipe& recipe);

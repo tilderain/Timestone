@@ -354,20 +354,6 @@ static constexpr SnapshotRange CCHR_TEAM_RESTORE_RANGES[] = {
     {0x110, 0x1B0},
 };
 
-static bool IsActiveUnit(void* unit);
-
-static void* ValidateShotObjectReference(void* reference, uint64_t expectedDti,
-                                         bool expectedActiveUnit)
-{
-    if (!reference) return nullptr;
-    if (!expectedDti || !HasCallableDtiVirtual(reference) ||
-        GetObjectDti((uint64_t)reference) != expectedDti) {
-        return nullptr;
-    }
-    if (expectedActiveUnit && !IsActiveUnit(reference)) return nullptr;
-    return reference;
-}
-
 namespace {
 
 constexpr size_t SCOLLISION_SIZE = 0x239E0;
@@ -615,13 +601,6 @@ static void RestorePreSpawnRng(const ShotRecipe& recipe)
                     recipe.preSpawnOwnerRng, 16);
 }
 
-
-static bool IsActiveUnit(void* unit)
-{
-    if (!unit) return false;
-    uint32_t state = *(uint32_t*)((uint8_t*)unit + 0x10);
-    return (state & 7u) < 3u && (state & 0x3F8u) != 0x3F8u;
-}
 
 static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
 {
@@ -881,16 +860,13 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
     uint64_t respawnConcreteTicks = 0;
     uint64_t respawnOverlayTicks = 0;
     std::vector<uintptr_t> waitedForModelDtis;
+    Shot_PrepareReferenceResolution();
     for (ShotRecipe& saved : slot.shotRecipes) {
         const uint64_t prepareStart = Profile_Now();
         saved.restoredPtr = nullptr;
         RestorePreSpawnRng(saved);
-        void* objectRef1 = ValidateShotObjectReference(
-            saved.objectRef1, saved.objectRef1Dti,
-            saved.objectRef1WasActiveUnit);
-        void* objectRef2 = ValidateShotObjectReference(
-            saved.objectRef2, saved.objectRef2Dti,
-            saved.objectRef2WasActiveUnit);
+        void* objectRef1 = Shot_ResolveReference(saved.objectRef1);
+        void* objectRef2 = Shot_ResolveReference(saved.objectRef2);
         ShotRecipe remappedRecipe;
         const ShotRecipe* spawnRecipe = &saved;
         if (Rollback_RemapShotSpawnParent(

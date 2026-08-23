@@ -58,6 +58,15 @@ struct RollbackShotFlightState {
 
 enum class RollbackShotSpawnKind : uint8_t { Standard, Extended };
 
+enum class RollbackShotReferenceKind : uint8_t { None, StableUnit, Shot };
+
+struct RollbackShotReference {
+    void* savedPtr = nullptr;
+    uint64_t expectedDti = 0;
+    uint64_t shotSpawnSequence = 0;
+    RollbackShotReferenceKind kind = RollbackShotReferenceKind::None;
+};
+
 struct RollbackShotRecipe {
     void* savedPtr;
     void* restoredPtr;
@@ -65,13 +74,9 @@ struct RollbackShotRecipe {
     uint64_t initParam;
     void* posData;
     void* ownerChr;
-    void* objectRef1;
-    uint64_t objectRef1Dti;
-    bool objectRef1WasActiveUnit;
+    RollbackShotReference objectRef1;
     uint32_t slotId;
-    void* objectRef2;
-    uint64_t objectRef2Dti;
-    bool objectRef2WasActiveUnit;
+    RollbackShotReference objectRef2;
     RollbackShotSpawnKind kind;
     int exA9;
     void* exA10;

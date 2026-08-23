@@ -15,6 +15,7 @@
 #include <cmath>
 #include <cstring>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 extern void HookLog(const char* fmt, ...);
@@ -32,6 +33,7 @@ static constexpr uintptr_t DTI_USHOT_SHIELD_RAID_SWORD = 0x140D4D470;
 static constexpr uintptr_t DTI_USHOT_SHIELD_SPIRAL_SWORD = 0x140D4D4C8;
 static constexpr uintptr_t DTI_USHOT_SHIELD_STORM_SWORD = 0x140D4D508;
 static constexpr uintptr_t PTR_SREPLAY = 0x140d4d9d8;
+static constexpr uintptr_t PTR_SCHARACTER = 0x140d44a70;
 static constexpr uintptr_t PTR_SUNIT = 0x140E17698;
 static constexpr uintptr_t FN_SSHOT_SPAWN = 0x140150E00;
 static constexpr uintptr_t FN_SSHOT_SPAWN_EX = 0x140150F40;
@@ -44,6 +46,11 @@ static constexpr int SSHOT_SENTINEL_COUNT = 10;
 static constexpr size_t SSHOT_NODE_OFFSET = 0x1450;
 static constexpr size_t SSHOT_NODE_NEXT = 0x08;
 static constexpr uint32_t SUNIT_CHARACTER_CATEGORY = 8;
+static constexpr uintptr_t TEAM0_OFFSET = 0x40;
+static constexpr uintptr_t TEAM1_OFFSET = 0x300;
+static constexpr uintptr_t TEAM_FIRST_NODE_OFFSET = 0x08;
+static constexpr uintptr_t NODE_CHR_OFFSET = 0x08;
+static constexpr uintptr_t NODE_NEXT_OFFSET = 0x10;
 
 using ShotSpawnFn = void*(__fastcall*)(void*, void*, uint64_t, void*, void*,
     void*, uint32_t, void*);
@@ -61,6 +68,9 @@ static BuildAttachMatrixFn oBuildAttachMatrix = nullptr;
 static ShotProcessHitCollisionFn oShotProcessHitCollision = nullptr;
 static ShotUpdateHitboxesFn oShotUpdateHitboxes = nullptr;
 static std::unordered_map<void*, RollbackShotRecipe> g_liveShotRecipes;
+static std::unordered_map<uint64_t, void*> g_liveShotsBySequence;
+static std::unordered_set<void*> g_stableReferenceUnits;
+static bool g_stableReferenceUnitsReady = false;
 static uint64_t g_shotSpawnSequence = 0;
 static uint32_t g_unitLinkRepairLogCount = 0;
 static uint32_t g_staleHitTargetLogCount = 0;
@@ -169,6 +179,67 @@ static bool IsActiveUnit(void* unit)
     return (state & 7u) < 3u && (state & 0x3F8u) != 0x3F8u;
 }
 
+static RollbackShotReference CaptureShotReference(void* reference)
+{
+    RollbackShotReference captured{};
+    if (!reference) return captured;
+
+    captured.savedPtr = reference;
+    captured.expectedDti = GetObjectDti((uint64_t)reference);
+    auto shot = g_liveShotRecipes.find(reference);
+    if (shot != g_liveShotRecipes.end()) {
+        captured.kind = RollbackShotReferenceKind::Shot;
+        captured.shotSpawnSequence = shot->second.spawnSequence;
+    } else {
+        // The native factory stores these arguments as request-unit and target
+        // references. Non-shot identities must therefore resolve through a
+        // live unit registry rather than through their historical address.
+        captured.kind = RollbackShotReferenceKind::StableUnit;
+    }
+    return captured;
+}
+
+static void BuildStableReferenceUnits();
+
+void Shot_PrepareReferenceResolution()
+{
+    g_stableReferenceUnits.clear();
+    g_stableReferenceUnitsReady = false;
+    BuildStableReferenceUnits();
+}
+
+static void BuildStableReferenceUnits()
+{
+    if (g_stableReferenceUnitsReady) return;
+    g_stableReferenceUnitsReady = true;
+    g_stableReferenceUnits.reserve(256);
+
+    uint64_t sCharacter = *(uint64_t*)_addr(PTR_SCHARACTER);
+    for (int team = 0; sCharacter && team < 2; ++team) {
+        uint64_t node = sCharacter + (team == 0 ? TEAM0_OFFSET : TEAM1_OFFSET) +
+            TEAM_FIRST_NODE_OFFSET;
+        for (int safety = 16; node && safety-- > 0;) {
+            void* character = *(void**)(node + NODE_CHR_OFFSET);
+            if (character) g_stableReferenceUnits.insert(character);
+            node = *(uint64_t*)(node + NODE_NEXT_OFFSET);
+        }
+    }
+
+    uint64_t sUnit = *(uint64_t*)_addr(PTR_SUNIT);
+    if (!sUnit) return;
+    uint32_t categoryCount = *(uint32_t*)(sUnit + SUNIT_CATEGORY_COUNT_OFFSET);
+    if (categoryCount > SUNIT_MAX_CATEGORIES)
+        categoryCount = SUNIT_MAX_CATEGORIES;
+    for (uint32_t category = 0; category < categoryCount; ++category) {
+        void* unit = *(void**)(sUnit + SUNIT_CATEGORY_LISTS_OFFSET +
+                               SUNIT_CATEGORY_LIST_STRIDE * category);
+        for (int safety = 4096; unit && safety-- > 0;) {
+            g_stableReferenceUnits.insert(unit);
+            unit = *(void**)((uint8_t*)unit + 0x18);
+        }
+    }
+}
+
 static bool IsLinkedShot(void* shot)
 {
     for (int list = 0; list < SSHOT_SENTINEL_COUNT; ++list) {
@@ -244,15 +315,9 @@ static void* __fastcall hkShotSpawn(void* manager, void* element, uint64_t initP
     recipe.initParam = initParam;
     recipe.posData = posData;
     recipe.ownerChr = ownerChr;
-    recipe.objectRef1 = objectRef1;
-    recipe.objectRef1Dti = objectRef1 ? GetObjectDti((uint64_t)objectRef1) : 0;
-    recipe.objectRef1WasActiveUnit = objectRef1 && IsUnitObject(objectRef1) &&
-        IsActiveUnit(objectRef1);
+    recipe.objectRef1 = CaptureShotReference(objectRef1);
     recipe.slotId = slotId;
-    recipe.objectRef2 = objectRef2;
-    recipe.objectRef2Dti = objectRef2 ? GetObjectDti((uint64_t)objectRef2) : 0;
-    recipe.objectRef2WasActiveUnit = objectRef2 && IsUnitObject(objectRef2) &&
-        IsActiveUnit(objectRef2);
+    recipe.objectRef2 = CaptureShotReference(objectRef2);
     recipe.kind = RollbackShotSpawnKind::Standard;
     recipe.spawnSequence = ++g_shotSpawnSequence;
     CapturePreSpawnRng(recipe, ownerChr);
@@ -264,6 +329,7 @@ static void* __fastcall hkShotSpawn(void* manager, void* element, uint64_t initP
         recipe.savedPtr = shot;
         recipe.restoredPtr = shot;
         g_liveShotRecipes[shot] = recipe;
+        g_liveShotsBySequence[recipe.spawnSequence] = shot;
     }
     return shot;
 }
@@ -279,15 +345,9 @@ static void* __fastcall hkShotSpawnEx(void* manager, void* element, uint64_t ini
     recipe.initParam = initParam;
     recipe.posData = posData;
     recipe.ownerChr = ownerChr;
-    recipe.objectRef1 = objectRef1;
-    recipe.objectRef1Dti = objectRef1 ? GetObjectDti((uint64_t)objectRef1) : 0;
-    recipe.objectRef1WasActiveUnit = objectRef1 && IsUnitObject(objectRef1) &&
-        IsActiveUnit(objectRef1);
+    recipe.objectRef1 = CaptureShotReference(objectRef1);
     recipe.slotId = slotId;
-    recipe.objectRef2 = objectRef2;
-    recipe.objectRef2Dti = objectRef2 ? GetObjectDti((uint64_t)objectRef2) : 0;
-    recipe.objectRef2WasActiveUnit = objectRef2 && IsUnitObject(objectRef2) &&
-        IsActiveUnit(objectRef2);
+    recipe.objectRef2 = CaptureShotReference(objectRef2);
     recipe.kind = RollbackShotSpawnKind::Extended;
     recipe.exA9 = a9;
     recipe.exA10 = a10;
@@ -304,6 +364,7 @@ static void* __fastcall hkShotSpawnEx(void* manager, void* element, uint64_t ini
         recipe.savedPtr = shot;
         recipe.restoredPtr = shot;
         g_liveShotRecipes[shot] = recipe;
+        g_liveShotsBySequence[recipe.spawnSequence] = shot;
     }
     return shot;
 }
@@ -407,6 +468,8 @@ static char __fastcall hkUnitRemove(void* manager, void* unit)
         RollbackHookProfileScope child(RollbackHookProfileId::UnitRemoveRecipeLookup);
         recipe = g_liveShotRecipes.find(unit);
     }
+    const uint64_t recipeSequence = recipe != g_liveShotRecipes.end()
+        ? recipe->second.spawnSequence : 0;
     if (recipe != g_liveShotRecipes.end() && recipe->second.reconstructed) {
         RollbackHookProfileScope child(RollbackHookProfileId::UnitRemoveShotDetach);
         Shot_DetachEmbeddedEffect(unit);
@@ -421,7 +484,10 @@ static char __fastcall hkUnitRemove(void* manager, void* unit)
     InvalidateMemoryQueryCache();
     if (result && unit) {
         RollbackHookProfileScope child(RollbackHookProfileId::UnitRemoveRecipeCleanup);
-        if (!IsLinkedShot(unit)) g_liveShotRecipes.erase(unit);
+        if (!IsLinkedShot(unit)) {
+            if (recipeSequence) g_liveShotsBySequence.erase(recipeSequence);
+            g_liveShotRecipes.erase(unit);
+        }
         Rollback_ForgetShotModelPolicy(unit);
         Effect_FinishUnitRemoval(unit);
     }
@@ -482,6 +548,24 @@ void Shot_CollectCurrent(std::vector<void*>& shots)
     }
 }
 
+void* Shot_ResolveReference(const RollbackShotReference& reference)
+{
+    if (reference.kind == RollbackShotReferenceKind::None) return nullptr;
+    if (reference.kind == RollbackShotReferenceKind::Shot) {
+        auto shot = g_liveShotsBySequence.find(reference.shotSpawnSequence);
+        return shot != g_liveShotsBySequence.end() ? shot->second : nullptr;
+    }
+
+    BuildStableReferenceUnits();
+    if (g_stableReferenceUnits.find(reference.savedPtr) ==
+        g_stableReferenceUnits.end()) return nullptr;
+    if (reference.expectedDti &&
+        GetObjectDti((uint64_t)reference.savedPtr) != reference.expectedDti) {
+        return nullptr;
+    }
+    return reference.savedPtr;
+}
+
 void* Shot_SpawnOriginal(void* manager, const RollbackShotRecipe& recipe,
                          void* objectRef1, void* objectRef2)
 {
@@ -500,11 +584,15 @@ void Shot_TrackReconstructed(void* shot, const RollbackShotRecipe& recipe)
     live.restoredPtr = shot;
     live.reconstructed = true;
     g_liveShotRecipes[shot] = live;
+    g_liveShotsBySequence[live.spawnSequence] = shot;
 }
 
 void Shot_Reset()
 {
     g_liveShotRecipes.clear();
+    g_liveShotsBySequence.clear();
+    g_stableReferenceUnits.clear();
+    g_stableReferenceUnitsReady = false;
     Rollback_ResetShotModelPolicy();
     g_shotSpawnSequence = 0;
     g_staleHitTargetLogCount = 0;
