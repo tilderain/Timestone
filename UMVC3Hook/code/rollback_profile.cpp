@@ -308,10 +308,12 @@ void Profile_DumpEnabled(const RollbackProfile& profile, bool ndjsonEnabled,
                 "\"avg_kib\":%.6f,\"avg_regions\":%.6f,\"build_regions_ms\":%.6f,"
                 "\"recycle_allocate_ms\":%.6f,\"copy_regions_ms\":%.6f,"
                  "\"metadata_ms\":%.6f,\"collision_clones_ms\":%.6f,"
-                 "\"shot_recipes_ms\":%.6f,\"clone_wrappers\":%u,"
+                 "\"shot_recipes_ms\":%.6f,\"character_shot_references_ms\":%.6f,"
+                 "\"clone_wrappers\":%u,"
                  "\"clone_children\":%u,\"clone_copies\":%u,"
                  "\"clone_empty_copies\":%u,\"clone_creates\":%u,"
-                 "\"clone_destroys\":%u,\"shot_recipe_count\":%u},"
+                  "\"clone_destroys\":%u,\"shot_recipe_count\":%u,"
+                  "\"character_shot_reference_count\":%u},"
                  "\"restore\":{\"total_ms\":%.6f,\"setup_ms\":%.6f,\"regions_ms\":%.6f,"
                 "\"collision_clones_ms\":%.6f,\"owner_pointers_ms\":%.6f,"
                  "\"hit_solver_ms\":%.6f,\"stale_pointers_ms\":%.6f,"
@@ -319,7 +321,8 @@ void Profile_DumpEnabled(const RollbackProfile& profile, bool ndjsonEnabled,
                  "\"shot_restore\":{\"pin_resources_ms\":%.6f,\"pre_sanitize_ms\":%.6f,"
                  "\"retire_effects_ms\":%.6f,\"collect_shots_ms\":%.6f,"
                  "\"destroy_shots_ms\":%.6f,\"post_sanitize_ms\":%.6f,"
-                 "\"sanitize_effects_ms\":%.6f,\"respawn_setup_ms\":%.6f,"
+                  "\"sanitize_effects_ms\":%.6f,\"respawn_setup_ms\":%.6f,"
+                  "\"reference_cache_ms\":%.6f,"
                  "\"respawn_ms\":%.6f,\"respawn_prepare_ms\":%.6f,"
                  "\"respawn_factory_ms\":%.6f,\"respawn_register_ms\":%.6f,"
                  "\"respawn_release_effects_ms\":%.6f,\"respawn_concrete_ms\":%.6f,"
@@ -327,7 +330,10 @@ void Profile_DumpEnabled(const RollbackProfile& profile, bool ndjsonEnabled,
                  "\"concrete_pointer_scan_ms\":%.6f,\"concrete_embedded_live_ms\":%.6f,"
                  "\"concrete_embedded_saved_ms\":%.6f,\"concrete_apply_body_ms\":%.6f,"
                  "\"concrete_targets_ms\":%.6f,\"concrete_collision_ms\":%.6f,"
-                 "\"respawn_overlay_ms\":%.6f,\"finalize_ms\":%.6f,"
+                  "\"respawn_overlay_ms\":%.6f,\"finalize_ms\":%.6f,"
+                  "\"character_references_early_ms\":%.6f,"
+                  "\"character_references_late_ms\":%.6f,"
+                  "\"character_reference_count\":%u,"
                  "\"effect_visits\":%u,\"effect_sanitize_calls\":%u,"
                  "\"generator_nodes\":%u,\"current_shots\":%u,\"saved_shots\":%u},"
                  "\"unit_categories\":[",
@@ -370,11 +376,13 @@ void Profile_DumpEnabled(const RollbackProfile& profile, bool ndjsonEnabled,
                 (double)profile.snapshotRegions / snapshotDivisor,
                 Profile_Ms(profile.saveBuildRegions), Profile_Ms(profile.saveRecycleAndAllocate),
                  Profile_Ms(profile.saveCopyRegions), Profile_Ms(profile.saveMetadata),
-                 Profile_Ms(profile.saveCollisionClones), Profile_Ms(profile.saveShotRecipes),
+                  Profile_Ms(profile.saveCollisionClones), Profile_Ms(profile.saveShotRecipes),
+                  Profile_Ms(profile.saveCharacterShotReferences),
                  profile.snapshotCloneWrappers, profile.snapshotCloneChildren,
                  profile.snapshotCloneCopies, profile.snapshotCloneEmptyCopies,
                  profile.snapshotCloneCreates, profile.snapshotCloneDestroys,
-                 profile.snapshotShotRecipeCount,
+                  profile.snapshotShotRecipeCount,
+                  profile.snapshotCharacterShotReferenceCount,
                  Profile_Ms(profile.restoreTotal), Profile_Ms(profile.restoreSetup),
                 Profile_Ms(profile.restoreRegions), Profile_Ms(profile.restoreCollisionClones),
                  Profile_Ms(profile.restoreOwnerPointers), Profile_Ms(profile.restoreHitSolver),
@@ -387,7 +395,8 @@ void Profile_DumpEnabled(const RollbackProfile& profile, bool ndjsonEnabled,
                  Profile_Ms(profile.restoreShotDestroy),
                  Profile_Ms(profile.restoreShotPostSanitize),
                  Profile_Ms(profile.restoreShotSanitizeEffects),
-                 Profile_Ms(profile.restoreShotRespawnSetup),
+                  Profile_Ms(profile.restoreShotRespawnSetup),
+                  Profile_Ms(profile.restoreShotReferenceCache),
                  Profile_Ms(profile.restoreShotRespawn),
                  Profile_Ms(profile.restoreShotRespawnPrepare),
                  Profile_Ms(profile.restoreShotRespawnFactory),
@@ -402,8 +411,11 @@ void Profile_DumpEnabled(const RollbackProfile& profile, bool ndjsonEnabled,
                  Profile_Ms(profile.restoreConcreteApplyBody),
                  Profile_Ms(profile.restoreConcreteTargets),
                  Profile_Ms(profile.restoreConcreteCollision),
-                 Profile_Ms(profile.restoreShotRespawnOverlay),
-                 Profile_Ms(profile.restoreShotFinalize),
+                  Profile_Ms(profile.restoreShotRespawnOverlay),
+                  Profile_Ms(profile.restoreShotFinalize),
+                  Profile_Ms(profile.restoreCharacterShotReferencesEarly),
+                  Profile_Ms(profile.restoreCharacterShotReferencesLate),
+                  profile.restoreCharacterShotReferenceCount,
                  profile.restoreEffectVisits, profile.restoreEffectSanitizeCalls,
                  profile.restoreEffectGeneratorNodes, profile.restoreCurrentShots,
                   profile.restoreSavedShots);

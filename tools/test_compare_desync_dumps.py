@@ -148,6 +148,34 @@ class CompareSnapDumpsTest(unittest.TestCase):
         self.assertEqual(primitive_data[:0x24],
                          parsed["collision_primitives"][0]["geometry"])
 
+    def test_loads_v4_shot_reference_identities(self):
+        image_base = 0x140000000
+        header = compare.HEADER.pack(
+            compare.MAGIC, 4, compare.HEADER.size, 1, 10, 1,
+            image_base, 0x2000000, 0, b"test\0".ljust(41, b"\0"), 0, b"\0" * 6,
+        )
+        body = b"v4-shot"
+        record_size = compare.SHOT_V4.size + len(body)
+        shot = compare.SHOT_V4.pack(
+            record_size, 4, 1, 0, 0, 0, 99, 0x1000, image_base + 0x1230,
+            image_base + 0x4560, 0x55, 0x2000, 0x3000, 0x4000,
+            0x5000, image_base + 0x6000, 77, 2, b"\0" * 7,
+            0x7000, image_base + 0x8000, 0, 1, b"\0" * 7,
+            -2, 0x9000, 3, 0xA000, 0, len(body), 0, 0,
+        ) + body
+        frame = compare.FRAME.pack(
+            10, 0x11, 0x22, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, b"\0" * 7,
+        )
+        self.path_a.write_bytes(header + frame + shot)
+
+        parsed = compare.load_dump(self.path_a).frames[10].shots[0]
+        self.assertEqual(77, parsed["object_ref1_shot_sequence"])
+        self.assertEqual(2, parsed["object_ref1_kind"])
+        self.assertEqual(0, parsed["object_ref2_shot_sequence"])
+        self.assertEqual(1, parsed["object_ref2_kind"])
+        self.assertIsNone(parsed["object_ref1_active"])
+        self.assertEqual(body, parsed["body"])
+
     def test_finds_latest_complete_snapdump_pair(self):
         directory = Path(self.tempdir.name)
         old_host = directory / "desync_20260729_062239_host_f425.usdp"

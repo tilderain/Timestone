@@ -7,6 +7,7 @@
 #include "mk10utils.h"
 #include "rollback_effect.h"
 #include "rollback_memory.h"
+#include "rollback_model_policy.h"
 #include "rollback_profile.h"
 #include "rollback_restore.h"
 #include "rollback_resim.h"
@@ -1462,6 +1463,9 @@ void Rollback_SaveSnapshot(int32_t frame)
         }
     }
     Shot_CaptureRecipes(slot);
+    const uint64_t shotRecipesCapturedEnd = Profile_Now();
+    Rollback_CaptureCharacterShotReferences(slot);
+    const uint64_t characterShotReferencesEnd = Profile_Now();
     Effect_CaptureRecipes(slot);
     const uint64_t shotRecipesEnd = Profile_Now();
 
@@ -1469,6 +1473,12 @@ void Rollback_SaveSnapshot(int32_t frame)
         if (g_activeRollbackProfile)
             g_activeRollbackProfile->snapshotShotRecipeCount +=
                 (uint32_t)slot.shotRecipes.size();
+        if (g_activeRollbackProfile) {
+            g_activeRollbackProfile->saveCharacterShotReferences +=
+                characterShotReferencesEnd - shotRecipesCapturedEnd;
+            g_activeRollbackProfile->snapshotCharacterShotReferenceCount +=
+                (uint32_t)slot.characterShotReferences.size();
+        }
     }
 
     Profile_RecordSnapshot(profileStart, buildRegionsEnd, allocationEnd, copyRegionsEnd,

@@ -119,6 +119,24 @@ struct RollbackCharacterEffectState {
     ConcreteShotSnapshot::CallbackEffectState state;
 };
 
+enum class RollbackCharacterShotReferenceRole : uint8_t {
+    AnimationReturn,
+    ObjectReturn,
+    RocketShot,
+    ShieldSlash,
+    MissileEmplacement,
+    SpadaBoomerang,
+};
+
+struct RollbackCharacterShotReference {
+    void* character = nullptr;
+    uint64_t expectedVtable = 0;
+    uint64_t shotSpawnSequence = 0;
+    uint32_t offset = 0;
+    RollbackCharacterShotReferenceRole role =
+        RollbackCharacterShotReferenceRole::AnimationReturn;
+};
+
 struct RollbackCollisionNodeClone {
     uint64_t ownerSlot;
     void* savedPtr;
@@ -171,6 +189,7 @@ struct RollbackSnapshotSlot {
     std::vector<RollbackShotRecipe> shotRecipes;
     std::vector<RollbackEffectRecipe> effectRecipes;
     std::vector<RollbackCharacterEffectState> characterEffectStates;
+    std::vector<RollbackCharacterShotReference> characterShotReferences;
     std::vector<RollbackCollisionNodeClone> collisionNodeClones;
     std::vector<RollbackModelRenderState> modelRenderStates;
     RollbackActionSideCameraState actionSideCamera;

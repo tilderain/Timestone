@@ -108,8 +108,9 @@ td code { color:#00d4ff; word-break:break-all; }
 </main>
 <script>
 'use strict';
-const MAGIC = 0x50445355, HEADER_SIZE = 96, FRAME_SIZE = 72, REGION_V1_SIZE = 48, REGION_V2_SIZE = 112, SHOT_V3_SIZE = 164, SHOT_PRIMITIVE_V3_SIZE = 160;
+const MAGIC = 0x50445355, HEADER_SIZE = 96, FRAME_SIZE = 72, REGION_V1_SIZE = 48, REGION_V2_SIZE = 112, SHOT_V3_SIZE = 164, SHOT_V4_SIZE = 180, SHOT_PRIMITIVE_V3_SIZE = 160;
 const ROLE = {0:'offline',1:'host',2:'client'};
+const SHOT_REFERENCE_KIND = {0:'none',1:'stable unit',2:'shot'};
 const state = { dumps:[], frames:[], index:0, current:null, arenaView:null, playing:false, playTimer:null };
 const $ = id => document.getElementById(id);
 const canvas=$('canvas');
@@ -144,7 +145,7 @@ function decodeXorRle(encoded, previous, size) {
 function parseUsdp(file, fileName='snapdump.usdp') {
   const view=new DataView(file), magic=u32(view,0), version=u32(view,4), headerSize=u32(view,8);
   if (magic !== MAGIC) throw Error('Not a UMVC3 snapdump');
-  if (version !== 1 && version !== 2 && version !== 3) throw Error('Unsupported snapdump version '+version);
+  if (version !== 1 && version !== 2 && version !== 3 && version !== 4) throw Error('Unsupported snapdump version '+version);
   if (headerSize < HEADER_SIZE) throw Error('Invalid snapdump header size');
   const frameCount=u32(view,12), trigger=i32(view,16), role=u32(view,20), imageBase=u64(view,24), imageSize=u64(view,32);
   const commit=text(readBytes(view,48,41)), frames=[], byFrame=new Map(); let at=headerSize, previous=null;
@@ -165,8 +166,16 @@ function parseUsdp(file, fileName='snapdump.usdp') {
     if(data.length !== rawSize) throw Error('Decoded snapshot size mismatch');
     const shotRecords=[];
     if(version>=3) for(let shotIndex=0;shotIndex<shots;shotIndex++) {
-      if(at+SHOT_V3_SIZE>view.byteLength) throw Error(`Truncated frame ${number} shot header`);
-      const start=at, recordSize=u32(view,at), slotId=u32(view,at+4), kind=u8(view,at+8), hasRng=!!u8(view,at+9), hasZireitou=!!u8(view,at+10), spawnSequence=u64(view,at+12), address=u64(view,at+20), dti=u64(view,at+28), vtable=u64(view,at+36), initParam=u64(view,at+44), posData=u64(view,at+52), owner=u64(view,at+60), element=u64(view,at+68), objectRef1=u64(view,at+76), objectRef1Dti=u64(view,at+84), objectRef1Active=!!u8(view,at+92), objectRef2=u64(view,at+100), objectRef2Dti=u64(view,at+108), objectRef2Active=!!u8(view,at+116), exA9=i32(view,at+124), exA10=u64(view,at+128), exA11=i32(view,at+136), exA12=u64(view,at+140), bodySize=u32(view,at+152), primitiveCount=u32(view,at+156); at+=SHOT_V3_SIZE;
+      const shotHeaderSize=version>=4?SHOT_V4_SIZE:SHOT_V3_SIZE;
+      if(at+shotHeaderSize>view.byteLength) throw Error(`Truncated frame ${number} shot header`);
+      const start=at, recordSize=u32(view,at), slotId=u32(view,at+4), kind=u8(view,at+8), hasRng=!!u8(view,at+9), hasZireitou=!!u8(view,at+10), spawnSequence=u64(view,at+12), address=u64(view,at+20), dti=u64(view,at+28), vtable=u64(view,at+36), initParam=u64(view,at+44), posData=u64(view,at+52), owner=u64(view,at+60), element=u64(view,at+68), objectRef1=u64(view,at+76), objectRef1Dti=u64(view,at+84);
+      let objectRef1Active=null,objectRef1ShotSequence=null,objectRef1Kind=null,objectRef2,objectRef2Dti,objectRef2Active=null,objectRef2ShotSequence=null,objectRef2Kind=null,exA9,exA10,exA11,exA12,bodySize,primitiveCount;
+      if(version>=4) {
+        objectRef1ShotSequence=u64(view,at+92); objectRef1Kind=u8(view,at+100); objectRef2=u64(view,at+108); objectRef2Dti=u64(view,at+116); objectRef2ShotSequence=u64(view,at+124); objectRef2Kind=u8(view,at+132); exA9=i32(view,at+140); exA10=u64(view,at+144); exA11=i32(view,at+152); exA12=u64(view,at+156); bodySize=u32(view,at+168); primitiveCount=u32(view,at+172);
+      } else {
+        objectRef1Active=!!u8(view,at+92); objectRef2=u64(view,at+100); objectRef2Dti=u64(view,at+108); objectRef2Active=!!u8(view,at+116); exA9=i32(view,at+124); exA10=u64(view,at+128); exA11=i32(view,at+136); exA12=u64(view,at+140); bodySize=u32(view,at+152); primitiveCount=u32(view,at+156);
+      }
+      at+=shotHeaderSize;
       let preSpawnRng=null;
       if(hasRng) { if(at+48>view.byteLength) throw Error('Truncated shot RNG'); preSpawnRng={global:copyBytes(readBytes(view,at,16)),effect:copyBytes(readBytes(view,at+16,16)),owner:copyBytes(readBytes(view,at+32,16))}; at+=48; }
       if(at+bodySize>view.byteLength) throw Error('Truncated uShot body');
@@ -180,7 +189,7 @@ function parseUsdp(file, fileName='snapdump.usdp') {
         at+=SHOT_PRIMITIVE_V3_SIZE;
       }
       if(recordSize!==at-start) throw Error(`Frame ${number} shot ${shotIndex}: record size mismatch`);
-      shotRecords.push({slotId,kind,hasZireitou,spawnSequence,address,dti,vtable,initParam,posData,owner,element,objectRef1,objectRef1Dti,objectRef1Active,objectRef2,objectRef2Dti,objectRef2Active,exA9,exA10,exA11,exA12,preSpawnRng,body,collisions});
+      shotRecords.push({slotId,kind,hasZireitou,spawnSequence,address,dti,vtable,initParam,posData,owner,element,objectRef1,objectRef1Dti,objectRef1Active,objectRef1ShotSequence,objectRef1Kind,objectRef2,objectRef2Dti,objectRef2Active,objectRef2ShotSequence,objectRef2Kind,exA9,exA10,exA11,exA12,preSpawnRng,body,collisions});
     }
     const frame={number,local,remote,regions,data,shots:shotRecords,shotCount:shots,effects,clones,models,snapshotHash,manifestHash}; frames.push(frame); byFrame.set(number,frame); previous=data;
   }
@@ -642,7 +651,9 @@ function update() {
       shotSection+=row('Collisions',host?host.collisions.length:'—',client?client.collisions.length:'—',collisionSame)+'</table>';
       for(const side of [{label:'Host',value:host},{label:'Client',value:client}]) if(side.value) {
         const value=side.value;
-        shotSection+=`<details><summary>${side.label} complete uShot details</summary><table><tr><th>Address</th><td>${hex(value.address,16)}</td></tr><tr><th>Vtable</th><td>${hex(value.vtable,16)}</td></tr><tr><th>Owner</th><td>${hex(value.owner,16)}</td></tr><tr><th>Element</th><td>${hex(value.element,16)}</td></tr><tr><th>Init param</th><td>${hex(value.initParam,16)}</td></tr><tr><th>Position data</th><td>${hex(value.posData,16)}</td></tr><tr><th>Object ref 1</th><td>${hex(value.objectRef1,16)} DTI ${hex(value.objectRef1Dti,16)} active ${value.objectRef1Active}</td></tr><tr><th>Object ref 2</th><td>${hex(value.objectRef2,16)} DTI ${hex(value.objectRef2Dti,16)} active ${value.objectRef2Active}</td></tr><tr><th>Extended args</th><td>${value.exA9}, ${hex(value.exA10,16)}, ${value.exA11}, ${hex(value.exA12,16)}</td></tr></table>`;
+        const ref1Identity=value.objectRef1Kind===null?`active ${value.objectRef1Active}`:`${SHOT_REFERENCE_KIND[value.objectRef1Kind]||'kind '+value.objectRef1Kind}, shot #${value.objectRef1ShotSequence}`;
+        const ref2Identity=value.objectRef2Kind===null?`active ${value.objectRef2Active}`:`${SHOT_REFERENCE_KIND[value.objectRef2Kind]||'kind '+value.objectRef2Kind}, shot #${value.objectRef2ShotSequence}`;
+        shotSection+=`<details><summary>${side.label} complete uShot details</summary><table><tr><th>Address</th><td>${hex(value.address,16)}</td></tr><tr><th>Vtable</th><td>${hex(value.vtable,16)}</td></tr><tr><th>Owner</th><td>${hex(value.owner,16)}</td></tr><tr><th>Element</th><td>${hex(value.element,16)}</td></tr><tr><th>Init param</th><td>${hex(value.initParam,16)}</td></tr><tr><th>Position data</th><td>${hex(value.posData,16)}</td></tr><tr><th>Object ref 1</th><td>${hex(value.objectRef1,16)} DTI ${hex(value.objectRef1Dti,16)} ${ref1Identity}</td></tr><tr><th>Object ref 2</th><td>${hex(value.objectRef2,16)} DTI ${hex(value.objectRef2Dti,16)} ${ref2Identity}</td></tr><tr><th>Extended args</th><td>${value.exA9}, ${hex(value.exA10,16)}, ${value.exA11}, ${hex(value.exA12,16)}</td></tr></table>`;
         if(value.collisions.length) { shotSection+='<table><tr><th>Collision</th><th>Type / kind</th><th>World geometry</th><th>Flags / parents</th></tr>';for(const collision of value.collisions) shotSection+=`<tr><th>${collision.slot}:${collision.index}</th><td>${collision.metadataType===1?'capsule':'sphere'} / ${hex(collision.collisionKind)}</td><td>${fmtVec(collision.position)}${collision.metadataType===1?` → ${fmtVec(collision.endPosition)}`:''}<br>r=${collision.radius.toFixed(4)}</td><td>${hex(collision.flags)}<br>${hex(collision.parent0,16)} / ${hex(collision.parent1,16)}</td></tr>`;shotSection+='</table>'; }
         shotSection+=`<details><summary>Raw uShot body (${value.body.length} bytes)</summary><pre class="hex">${shotBodyHex(value.body)}</pre></details></details>`;
       }

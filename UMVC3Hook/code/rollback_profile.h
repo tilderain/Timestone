@@ -92,6 +92,7 @@ struct RollbackProfile {
     uint64_t restoreShotPostSanitize = 0;
     uint64_t restoreShotSanitizeEffects = 0;
     uint64_t restoreShotRespawnSetup = 0;
+    uint64_t restoreShotReferenceCache = 0;
     uint64_t restoreShotRespawn = 0;
     uint64_t restoreShotRespawnPrepare = 0;
     uint64_t restoreShotRespawnFactory = 0;
@@ -108,6 +109,9 @@ struct RollbackProfile {
     uint64_t restoreConcreteCollision = 0;
     uint64_t restoreShotRespawnOverlay = 0;
     uint64_t restoreShotFinalize = 0;
+    uint64_t restoreCharacterShotReferencesEarly = 0;
+    uint64_t restoreCharacterShotReferencesLate = 0;
+    uint32_t restoreCharacterShotReferenceCount = 0;
     uint32_t restoreEffectVisits = 0;
     uint32_t restoreEffectSanitizeCalls = 0;
     uint32_t restoreEffectGeneratorNodes = 0;
@@ -175,6 +179,7 @@ struct RollbackProfile {
     uint64_t saveMetadata = 0;
     uint64_t saveCollisionClones = 0;
     uint64_t saveShotRecipes = 0;
+    uint64_t saveCharacterShotReferences = 0;
     uint64_t snapshotBytes = 0;
     uint64_t snapshotRegions = 0;
     uint32_t snapshotCount = 0;
@@ -185,6 +190,7 @@ struct RollbackProfile {
     uint32_t snapshotCloneCreates = 0;
     uint32_t snapshotCloneDestroys = 0;
     uint32_t snapshotShotRecipeCount = 0;
+    uint32_t snapshotCharacterShotReferenceCount = 0;
     uint64_t unitCategoryTicks[(size_t)RollbackUnitProfilePhase::Count]
                               [ROLLBACK_UNIT_CATEGORY_COUNT] = {};
     uint64_t unitCategoryMaxTicks[(size_t)RollbackUnitProfilePhase::Count]

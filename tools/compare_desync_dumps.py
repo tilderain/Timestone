@@ -13,12 +13,13 @@ from pathlib import Path
 
 
 MAGIC = 0x50445355
-VERSIONS = {1, 2, 3}
+VERSIONS = {1, 2, 3, 4}
 HEADER = struct.Struct("<IIIIiIQQQ41sB6s")
 FRAME = struct.Struct("<i7I4QB7s")
 REGION_V1 = struct.Struct("<5QB7s")
 REGION_V2 = struct.Struct("<5QB7s64s")
 SHOT_V3 = struct.Struct("<2I4B10QB7s2QB7siQiQ4I")
+SHOT_V4 = struct.Struct("<2I4B11QB7s3QB7siQiQ4I")
 SHOT_PRIMITIVE_V3 = struct.Struct("<3I2B2s2I2Q2i")
 SHOT_PRIMITIVE_DATA_SIZE = 0x70
 ROLE_NAMES = {0: "offline", 1: "host", 2: "client"}
@@ -399,16 +400,32 @@ def load_dump(path):
             if version >= 3:
                 for shot_index in range(shot_count):
                     start = file.tell()
-                    raw = SHOT_V3.unpack(read_exact(
-                        file, SHOT_V3.size, f"frame {number} shot {shot_index} header"
+                    shot_struct = SHOT_V4 if version >= 4 else SHOT_V3
+                    raw = shot_struct.unpack(read_exact(
+                        file, shot_struct.size, f"frame {number} shot {shot_index} header"
                     ))
-                    (record_size, slot_id, kind, has_rng, has_zireitou, _reserved0,
-                     spawn_sequence, saved_ptr, dti, vtable, init_param, pos_data,
-                     owner_chr, shot_element, object_ref1, object_ref1_dti,
-                     object_ref1_active, _reserved1, object_ref2, object_ref2_dti,
-                     object_ref2_active, _reserved2, ex_a9, ex_a10, ex_a11, ex_a12,
-                     _flight_size, body_size, primitive_count, _reserved3) = raw
-                    minimum = SHOT_V3.size + (48 if has_rng else 0) + body_size + \
+                    if version >= 4:
+                        (record_size, slot_id, kind, has_rng, has_zireitou, _reserved0,
+                         spawn_sequence, saved_ptr, dti, vtable, init_param, pos_data,
+                         owner_chr, shot_element, object_ref1, object_ref1_dti,
+                         object_ref1_shot_sequence, object_ref1_kind, _reserved1,
+                         object_ref2, object_ref2_dti, object_ref2_shot_sequence,
+                         object_ref2_kind, _reserved2, ex_a9, ex_a10, ex_a11, ex_a12,
+                         _flight_size, body_size, primitive_count, _reserved3) = raw
+                        object_ref1_active = None
+                        object_ref2_active = None
+                    else:
+                        (record_size, slot_id, kind, has_rng, has_zireitou, _reserved0,
+                         spawn_sequence, saved_ptr, dti, vtable, init_param, pos_data,
+                         owner_chr, shot_element, object_ref1, object_ref1_dti,
+                         object_ref1_active, _reserved1, object_ref2, object_ref2_dti,
+                         object_ref2_active, _reserved2, ex_a9, ex_a10, ex_a11, ex_a12,
+                         _flight_size, body_size, primitive_count, _reserved3) = raw
+                        object_ref1_shot_sequence = None
+                        object_ref2_shot_sequence = None
+                        object_ref1_kind = None
+                        object_ref2_kind = None
+                    minimum = shot_struct.size + (48 if has_rng else 0) + body_size + \
                         primitive_count * (SHOT_PRIMITIVE_V3.size + SHOT_PRIMITIVE_DATA_SIZE)
                     if record_size != minimum:
                         raise ValueError(
@@ -449,9 +466,15 @@ def load_dump(path):
                         "pos_data": pos_data, "owner_chr": owner_chr,
                         "shot_element": shot_element, "object_ref1": object_ref1,
                         "object_ref1_dti": object_ref1_dti,
-                        "object_ref1_active": bool(object_ref1_active),
+                        "object_ref1_active": (bool(object_ref1_active)
+                                               if object_ref1_active is not None else None),
+                        "object_ref1_shot_sequence": object_ref1_shot_sequence,
+                        "object_ref1_kind": object_ref1_kind,
                         "object_ref2": object_ref2, "object_ref2_dti": object_ref2_dti,
-                        "object_ref2_active": bool(object_ref2_active),
+                        "object_ref2_active": (bool(object_ref2_active)
+                                               if object_ref2_active is not None else None),
+                        "object_ref2_shot_sequence": object_ref2_shot_sequence,
+                        "object_ref2_kind": object_ref2_kind,
                         "ex_a9": ex_a9, "ex_a10": ex_a10,
                         "ex_a11": ex_a11, "ex_a12": ex_a12,
                         "pre_spawn_rng": rng, "body": body,

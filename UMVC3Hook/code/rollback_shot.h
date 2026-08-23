@@ -12,9 +12,11 @@ void Shot_InitHooks();
 bool Shot_HooksReady();
 void Shot_CaptureRecipes(RollbackSnapshotSlot& slot);
 bool Shot_GetRecipe(void* shot, RollbackShotRecipe& recipe);
+bool Shot_GetSpawnSequence(void* shot, uint64_t& spawnSequence);
 size_t Shot_GetRecipeCount();
 void Shot_CollectCurrent(std::vector<void*>& shots);
-void Shot_PrepareReferenceResolution();
+void Shot_PrepareReferenceResolution(
+    const std::vector<RollbackShotRecipe>& recipes);
 void* Shot_ResolveReference(const RollbackShotReference& reference);
 void* Shot_SpawnOriginal(void* manager, const RollbackShotRecipe& recipe,
                          void* objectRef1, void* objectRef2);

@@ -860,7 +860,9 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
     uint64_t respawnConcreteTicks = 0;
     uint64_t respawnOverlayTicks = 0;
     std::vector<uintptr_t> waitedForModelDtis;
-    Shot_PrepareReferenceResolution();
+    const uint64_t referenceCacheStart = Profile_Now();
+    Shot_PrepareReferenceResolution(slot.shotRecipes);
+    const uint64_t referenceCacheEnd = Profile_Now();
     for (ShotRecipe& saved : slot.shotRecipes) {
         const uint64_t prepareStart = Profile_Now();
         saved.restoredPtr = nullptr;
@@ -1030,19 +1032,22 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
                 characters.push_back(character);
         }
     }
+    const uint64_t characterReferencesEarlyStart = Profile_Now();
+    Rollback_RestoreCharacterShotReferences(slot);
+    const uint64_t characterReferencesEarlyEnd = Profile_Now();
     for (void* character : characters) {
         for (uint32_t referenceOffset : {0x90u, 0x6428u}) {
+            bool typedShotReference = std::any_of(
+                slot.characterShotReferences.begin(),
+                slot.characterShotReferences.end(),
+                [=](const RollbackCharacterShotReference& saved) {
+                    return saved.character == character &&
+                           saved.offset == referenceOffset;
+                });
+            if (typedShotReference) continue;
+
             void** objectReturn = (void**)((uint8_t*)character + referenceOffset);
             void* savedReference = *objectReturn;
-            bool resolved = false;
-            for (const ShotRecipe& saved : slot.shotRecipes) {
-                if (saved.savedPtr == savedReference) {
-                    *objectReturn = saved.restoredPtr;
-                    resolved = true;
-                    break;
-                }
-            }
-            if (resolved) continue;
             const bool abandonedShot =
                 std::find(currentShots.begin(), currentShots.end(), savedReference) !=
                 currentShots.end();
@@ -1158,6 +1163,8 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
         g_activeRollbackProfile->restoreShotPostSanitize += postSanitizeEnd - destroyShotsEnd;
         g_activeRollbackProfile->restoreShotSanitizeEffects += sanitizeEffectsEnd - postSanitizeEnd;
         g_activeRollbackProfile->restoreShotRespawnSetup += respawnSetupEnd - sanitizeEffectsEnd;
+        g_activeRollbackProfile->restoreShotReferenceCache +=
+            referenceCacheEnd - referenceCacheStart;
         g_activeRollbackProfile->restoreShotRespawn += respawnEnd - respawnSetupEnd;
         g_activeRollbackProfile->restoreShotRespawnPrepare += respawnPrepareTicks;
         g_activeRollbackProfile->restoreShotRespawnFactory += respawnFactoryTicks;
@@ -1165,6 +1172,10 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
         g_activeRollbackProfile->restoreShotRespawnConcrete += respawnConcreteTicks;
         g_activeRollbackProfile->restoreShotRespawnOverlay += respawnOverlayTicks;
         g_activeRollbackProfile->restoreShotFinalize += finalizeEnd - respawnEnd;
+        g_activeRollbackProfile->restoreCharacterShotReferencesEarly +=
+            characterReferencesEarlyEnd - characterReferencesEarlyStart;
+        g_activeRollbackProfile->restoreCharacterShotReferenceCount +=
+            (uint32_t)slot.characterShotReferences.size();
     }
 
     if (failedShots != 0) {
@@ -2190,6 +2201,12 @@ void Rollback_RestoreSnapshot(int32_t frame)
                 savedCharacter, copySize, slot.effectRecipes);
         }
         offset += slot.regions[i].size;
+    }
+    const uint64_t characterReferencesLateStart = Profile_Now();
+    Rollback_RestoreCharacterShotReferences(slot);
+    if (g_activeRollbackProfile) {
+        g_activeRollbackProfile->restoreCharacterShotReferencesLate +=
+            Profile_Now() - characterReferencesLateStart;
     }
 
     // Native shot/model/UI repair can run after the initial camera restore and

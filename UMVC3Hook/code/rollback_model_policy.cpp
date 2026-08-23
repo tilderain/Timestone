@@ -64,6 +64,7 @@ constexpr uintptr_t VTABLE_UDOCTOR_DOOM = 0x140A73A40;
 constexpr uintptr_t VTABLE_URROCKET_RACCOON = 0x140A7DF30;
 constexpr uintptr_t VTABLE_UTRISH = 0x140A81A20;
 constexpr uintptr_t PTR_SUNIT = 0x140E17698;
+constexpr uintptr_t PTR_SCHARACTER = 0x140D44A70;
 constexpr uintptr_t PTR_SREPLAY = 0x140D4D9D8;
 constexpr uintptr_t PTR_SSHOT = 0x140D47F40;
 constexpr uintptr_t PTR_SGAMECONFIG = 0x140D50F88;
@@ -90,6 +91,11 @@ constexpr uint32_t SUNIT_CATEGORY_COUNT_OFFSET = 0xC38;
 constexpr uint32_t SUNIT_CATEGORY_LISTS_OFFSET = 0x50;
 constexpr uint32_t SUNIT_CATEGORY_LIST_STRIDE = 0x30;
 constexpr uint32_t SUNIT_CHARACTER_CATEGORY = 8;
+constexpr uintptr_t TEAM0_OFFSET = 0x40;
+constexpr uintptr_t TEAM1_OFFSET = 0x300;
+constexpr uintptr_t TEAM_FIRST_NODE_OFFSET = 0x08;
+constexpr uintptr_t NODE_CHR_OFFSET = 0x08;
+constexpr uintptr_t NODE_NEXT_OFFSET = 0x10;
 constexpr uint32_t UCAP_AMERICA_SHIELD_SLASH_OFFSET = 0x68F0;
 constexpr uint32_t UARTHUR_CROSS_SWORD_FLAG_OFFSET = 0x68F9;
 constexpr uint32_t UDOCTOR_DOOM_MISSILE_OFFSET = 0x68F0;
@@ -1304,66 +1310,119 @@ void Rollback_RemapCharacterShotLinks(
         return;
     }
 
-    if (expectedVtable == (uint64_t)_addr(VTABLE_URROCKET_RACCOON)) {
-        static constexpr uint32_t shotOffsets[] = {
-            0x6908, 0x6910, 0x6918, 0x6920,
-            0x6938, 0x6940, 0x6948,
-        };
-        for (uint32_t offset : shotOffsets) {
-            if ((size_t)offset + sizeof(void*) > savedCharacterSize) continue;
+}
 
-            void* savedReference = *(void* const*)(savedCharacter + offset);
-            void* restoredReference = nullptr;
-            for (const RollbackShotRecipe& saved : recipes) {
-                if (saved.ownerChr == character &&
-                    saved.savedPtr == savedReference) {
-                    restoredReference = saved.restoredPtr;
-                    break;
-                }
-            }
-            *(void**)((uint8_t*)character + offset) = restoredReference;
+void Rollback_CaptureCharacterShotReferences(RollbackSnapshotSlot& slot)
+{
+    slot.characterShotReferences.clear();
+
+    std::unordered_set<void*> characters;
+    uint64_t sCharacter = *(uint64_t*)_addr(PTR_SCHARACTER);
+    for (int team = 0; sCharacter && team < 2; ++team) {
+        uint64_t node = sCharacter + (team == 0 ? TEAM0_OFFSET : TEAM1_OFFSET) +
+            TEAM_FIRST_NODE_OFFSET;
+        for (int safety = 16; node && safety-- > 0;) {
+            void* character = *(void**)(node + NODE_CHR_OFFSET);
+            if (character) characters.insert(character);
+            node = *(uint64_t*)(node + NODE_NEXT_OFFSET);
         }
-        return;
+    }
+    uint64_t sUnit = *(uint64_t*)_addr(PTR_SUNIT);
+    if (sUnit && *(uint32_t*)(sUnit + SUNIT_CATEGORY_COUNT_OFFSET) >
+                     SUNIT_CHARACTER_CATEGORY) {
+        void* character = *(void**)(sUnit + SUNIT_CATEGORY_LISTS_OFFSET +
+            SUNIT_CATEGORY_LIST_STRIDE * SUNIT_CHARACTER_CATEGORY);
+        for (int safety = 64; character && safety-- > 0;) {
+            characters.insert(character);
+            character = *(void**)((uint8_t*)character + 0x18);
+        }
     }
 
-    uintptr_t shotDti = 0;
-    uint32_t offset = 0;
-    if (expectedVtable == (uint64_t)_addr(VTABLE_UCAP_AMERICA)) {
-        shotDti = DTI_USHOT_OPTION_SHIELD_SLASH;
-        offset = UCAP_AMERICA_SHIELD_SLASH_OFFSET;
-    } else if (expectedVtable == (uint64_t)_addr(VTABLE_UDOCTOR_DOOM)) {
-        shotDti = DTI_USHOT_VULCAN_MISSILE_EMPLACEMENT;
-        offset = UDOCTOR_DOOM_MISSILE_OFFSET;
-    } else if (expectedVtable == (uint64_t)_addr(VTABLE_UTRISH)) {
-        shotDti = DTI_USHOT_OPTION_SPADA_BOOMERANG;
-        offset = UTRISH_SPADA_BOOMERANG_OFFSET;
-    } else {
-        return;
-    }
-    if ((size_t)offset + sizeof(void*) > savedCharacterSize) return;
+    auto findUniqueOwnedShot = [&](void* character, uintptr_t dti,
+                                   bool enabled) {
+        uint64_t sequence = 0;
+        if (!enabled) return sequence;
+        for (const RollbackShotRecipe& shot : slot.shotRecipes) {
+            if (shot.ownerChr != character ||
+                shot.concrete.dti != (uint64_t)_addr(dti)) continue;
+            if (sequence) return (uint64_t)0;
+            sequence = shot.spawnSequence;
+        }
+        return sequence;
+    };
 
-    void* savedReference = *(void* const*)(savedCharacter + offset);
-    const RollbackShotRecipe* match = nullptr;
-    bool ambiguous = false;
-    for (const RollbackShotRecipe& saved : recipes) {
-        if (saved.ownerChr != character ||
-            saved.concrete.dti != (uint64_t)_addr(shotDti)) {
+    size_t dataOffset = 0;
+    for (int regionIndex = 0; regionIndex < slot.regionCount; ++regionIndex) {
+        const RollbackRegion& region = slot.regions[regionIndex];
+        if (dataOffset + region.size > slot.size) break;
+        if (characters.find(region.ptr) == characters.end()) {
+            dataOffset += region.size;
             continue;
         }
-        if (saved.savedPtr == savedReference) {
-            match = &saved;
-            ambiguous = false;
-            break;
+
+        const uint8_t* savedCharacter = slot.data + dataOffset;
+        auto capture = [&](uint32_t offset,
+                           RollbackCharacterShotReferenceRole role,
+                           uintptr_t fallbackDti = 0,
+                           bool captureEmpty = false) {
+            if ((size_t)offset + sizeof(void*) > region.size) return;
+            void* savedPointer = *(void* const*)(savedCharacter + offset);
+            uint64_t sequence = 0;
+            bool tracked = savedPointer &&
+                Shot_GetSpawnSequence(savedPointer, sequence);
+            if (!tracked && fallbackDti) {
+                sequence = findUniqueOwnedShot(
+                    region.ptr, fallbackDti, captureEmpty || savedPointer);
+            }
+            if (!tracked && !sequence && !captureEmpty) return;
+            slot.characterShotReferences.push_back({
+                region.ptr, region.expectedVtable, sequence, offset, role,
+            });
+        };
+
+        capture(0x90, RollbackCharacterShotReferenceRole::AnimationReturn);
+        capture(0x6428, RollbackCharacterShotReferenceRole::ObjectReturn);
+
+        if (region.expectedVtable == (uint64_t)_addr(VTABLE_URROCKET_RACCOON)) {
+            for (uint32_t offset : {
+                    0x6908u, 0x6910u, 0x6918u, 0x6920u,
+                    0x6938u, 0x6940u, 0x6948u}) {
+                capture(offset, RollbackCharacterShotReferenceRole::RocketShot,
+                        0, true);
+            }
+        } else if (region.expectedVtable ==
+                   (uint64_t)_addr(VTABLE_UCAP_AMERICA)) {
+            capture(UCAP_AMERICA_SHIELD_SLASH_OFFSET,
+                    RollbackCharacterShotReferenceRole::ShieldSlash,
+                    DTI_USHOT_OPTION_SHIELD_SLASH);
+        } else if (region.expectedVtable ==
+                   (uint64_t)_addr(VTABLE_UDOCTOR_DOOM)) {
+            capture(UDOCTOR_DOOM_MISSILE_OFFSET,
+                    RollbackCharacterShotReferenceRole::MissileEmplacement,
+                    DTI_USHOT_VULCAN_MISSILE_EMPLACEMENT, true);
+        } else if (region.expectedVtable == (uint64_t)_addr(VTABLE_UTRISH)) {
+            capture(UTRISH_SPADA_BOOMERANG_OFFSET,
+                    RollbackCharacterShotReferenceRole::SpadaBoomerang,
+                    DTI_USHOT_OPTION_SPADA_BOOMERANG);
         }
-        ambiguous = match != nullptr;
-        match = &saved;
+        dataOffset += region.size;
     }
-    bool requireSavedReference =
-        expectedVtable == (uint64_t)_addr(VTABLE_UCAP_AMERICA) ||
-        expectedVtable == (uint64_t)_addr(VTABLE_UTRISH);
-    *(void**)((uint8_t*)character + offset) =
-        (!requireSavedReference || savedReference) && match && !ambiguous
-            ? match->restoredPtr : nullptr;
+}
+
+void Rollback_RestoreCharacterShotReferences(RollbackSnapshotSlot& slot)
+{
+    for (const RollbackCharacterShotReference& saved :
+         slot.characterShotReferences) {
+        if (!saved.character || *(uint64_t*)saved.character != saved.expectedVtable)
+            continue;
+        RollbackShotReference reference{};
+        reference.kind = saved.shotSpawnSequence
+            ? RollbackShotReferenceKind::Shot
+            : RollbackShotReferenceKind::None;
+        reference.shotSpawnSequence = saved.shotSpawnSequence;
+        *(void**)((uint8_t*)saved.character + saved.offset) =
+            Shot_ResolveReference(reference);
+    }
 }
 
 void Rollback_RemapCharacterEffectLinks(

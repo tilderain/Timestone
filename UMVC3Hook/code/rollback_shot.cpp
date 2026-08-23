@@ -201,9 +201,21 @@ static RollbackShotReference CaptureShotReference(void* reference)
 
 static void BuildStableReferenceUnits();
 
-void Shot_PrepareReferenceResolution()
+void Shot_PrepareReferenceResolution(
+    const std::vector<RollbackShotRecipe>& recipes)
 {
     g_stableReferenceUnits.clear();
+    g_stableReferenceUnitsReady = true;
+    bool needsStableUnits = false;
+    for (const RollbackShotRecipe& recipe : recipes) {
+        if (recipe.objectRef1.kind == RollbackShotReferenceKind::StableUnit ||
+            recipe.objectRef2.kind == RollbackShotReferenceKind::StableUnit) {
+            needsStableUnits = true;
+            break;
+        }
+    }
+    if (!needsStableUnits) return;
+
     g_stableReferenceUnitsReady = false;
     BuildStableReferenceUnits();
 }
@@ -531,6 +543,14 @@ bool Shot_GetRecipe(void* shot, RollbackShotRecipe& recipe)
     auto found = g_liveShotRecipes.find(shot);
     if (found == g_liveShotRecipes.end()) return false;
     recipe = found->second;
+    return true;
+}
+
+bool Shot_GetSpawnSequence(void* shot, uint64_t& spawnSequence)
+{
+    auto found = g_liveShotRecipes.find(shot);
+    if (found == g_liveShotRecipes.end()) return false;
+    spawnSequence = found->second.spawnSequence;
     return true;
 }
 

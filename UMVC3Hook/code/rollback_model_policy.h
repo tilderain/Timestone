@@ -6,6 +6,7 @@
 
 struct RollbackShotRecipe;
 struct RollbackEffectRecipe;
+struct RollbackSnapshotSlot;
 
 struct RollbackShotFactoryPolicyState {
     uint8_t ownerSlots[6] = {};
@@ -57,6 +58,8 @@ void Rollback_RestoreShotClassState(
 void Rollback_RemapCharacterShotLinks(
     void* character, uint64_t expectedVtable, const uint8_t* savedCharacter,
     size_t savedCharacterSize, const std::vector<RollbackShotRecipe>& recipes);
+void Rollback_CaptureCharacterShotReferences(RollbackSnapshotSlot& slot);
+void Rollback_RestoreCharacterShotReferences(RollbackSnapshotSlot& slot);
 void Rollback_RemapCharacterEffectLinks(
     void* character, uint64_t expectedVtable, const uint8_t* savedCharacter,
     size_t savedCharacterSize, const std::vector<RollbackEffectRecipe>& recipes);
