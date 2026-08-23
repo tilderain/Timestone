@@ -632,6 +632,7 @@ void Effect_CaptureRecipes(RollbackSnapshotSlot& slot)
 {
     slot.effectRecipes.clear();
     slot.characterEffectStates.clear();
+    slot.characterEffectReferences.clear();
     slot.effectRecipes.reserve(g_liveEffectRecipes.size());
     for (const RollbackEffectRecipe& recipe : g_liveEffectRecipes) {
         if (!recipe.restoredPtr ||
@@ -669,13 +670,105 @@ void Effect_CaptureRecipes(RollbackSnapshotSlot& slot)
                     if (!effect || !IsEffectObject(effect)) continue;
                     RollbackCharacterEffectState saved;
                     saved.character = character;
+                    saved.effect = effect;
+                    saved.expectedEffectVtable = *(uint64_t*)effect;
                     saved.ownerOffset = offset;
                     ConcreteEffectSnapshot_Capture(effect, saved.state);
                     slot.characterEffectStates.push_back(std::move(saved));
                 }
+
+                const uint64_t referenceCaptureStart = Profile_Now();
+                for (uint32_t offset : {0x68F0u, 0x68F8u, 0x6900u, 0x6930u}) {
+                    void* effect = *(void**)((uint8_t*)character + offset);
+                    RollbackCharacterEffectReference reference{};
+                    reference.character = character;
+                    reference.expectedCharacterVtable = *(uint64_t*)character;
+                    reference.offset = offset;
+
+                    auto recipe = std::find_if(
+                        slot.effectRecipes.begin(), slot.effectRecipes.end(),
+                        [effect](const RollbackEffectRecipe& saved) {
+                            return effect && saved.savedPtr == effect;
+                        });
+                    if (recipe != slot.effectRecipes.end()) {
+                        reference.kind =
+                            RollbackCharacterEffectReferenceKind::Reconstructed;
+                        reference.effectSpawnSequence = recipe->spawnSequence;
+                    } else {
+                        auto retained = std::find_if(
+                            slot.characterEffectStates.begin(),
+                            slot.characterEffectStates.end(),
+                            [character, offset](
+                                const RollbackCharacterEffectState& saved) {
+                                return saved.character == character &&
+                                       saved.ownerOffset == offset;
+                            });
+                        if (retained != slot.characterEffectStates.end()) {
+                            reference.kind =
+                                RollbackCharacterEffectReferenceKind::Retained;
+                            reference.retainedEffect = retained->effect;
+                            reference.expectedEffectVtable =
+                                retained->expectedEffectVtable;
+                        }
+                    }
+                    slot.characterEffectReferences.push_back(reference);
+                }
+                Profile_AddElapsed(
+                    &RollbackProfile::saveCharacterEffectReferences,
+                    referenceCaptureStart);
             }
             node = *(uint64_t*)(node + 0x10);
         }
+    }
+    if constexpr (ROLLBACK_PROFILING_ENABLED) {
+        if (g_activeRollbackProfile) {
+            g_activeRollbackProfile->snapshotCharacterEffectReferenceCount +=
+                (uint32_t)slot.characterEffectReferences.size();
+            for (const RollbackCharacterEffectReference& reference :
+                 slot.characterEffectReferences) {
+                if (reference.kind ==
+                    RollbackCharacterEffectReferenceKind::Reconstructed) {
+                    ++g_activeRollbackProfile->
+                        snapshotCharacterEffectReferenceReconstructedCount;
+                } else if (reference.kind ==
+                           RollbackCharacterEffectReferenceKind::Retained) {
+                    ++g_activeRollbackProfile->
+                        snapshotCharacterEffectReferenceRetainedCount;
+                } else {
+                    ++g_activeRollbackProfile->
+                        snapshotCharacterEffectReferenceNoneCount;
+                }
+            }
+        }
+    }
+}
+
+void Effect_RestoreCharacterReferences(RollbackSnapshotSlot& slot)
+{
+    for (const RollbackCharacterEffectReference& saved :
+         slot.characterEffectReferences) {
+        if (!saved.character ||
+            *(uint64_t*)saved.character != saved.expectedCharacterVtable) {
+            continue;
+        }
+
+        void* effect = nullptr;
+        if (saved.kind ==
+            RollbackCharacterEffectReferenceKind::Reconstructed) {
+            auto recipe = std::find_if(
+                slot.effectRecipes.begin(), slot.effectRecipes.end(),
+                [&](const RollbackEffectRecipe& candidate) {
+                    return candidate.spawnSequence == saved.effectSpawnSequence;
+                });
+            if (recipe != slot.effectRecipes.end()) effect = recipe->restoredPtr;
+        } else if (saved.kind ==
+                   RollbackCharacterEffectReferenceKind::Retained) {
+            if (saved.retainedEffect &&
+                *(uint64_t*)saved.retainedEffect == saved.expectedEffectVtable) {
+                effect = saved.retainedEffect;
+            }
+        }
+        *(void**)((uint8_t*)saved.character + saved.offset) = effect;
     }
 }
 
@@ -688,10 +781,10 @@ void Effect_RestoreCharacterStates(RollbackSnapshotSlot& slot)
                 (uint64_t)_addr(VTABLE_URROCKET_RACCOON)) {
             continue;
         }
-        void* effect = *(void**)((uint8_t*)saved.character +
-                                 saved.ownerOffset);
-        if (effect && IsEffectObject(effect))
-            ConcreteEffectSnapshot_Restore(effect, saved.state);
+        if (saved.effect &&
+            *(uint64_t*)saved.effect == saved.expectedEffectVtable) {
+            ConcreteEffectSnapshot_Restore(saved.effect, saved.state);
+        }
     }
 }
 

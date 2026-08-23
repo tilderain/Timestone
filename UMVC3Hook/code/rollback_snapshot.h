@@ -115,8 +115,27 @@ struct RollbackEffectRecipe {
 
 struct RollbackCharacterEffectState {
     void* character = nullptr;
+    void* effect = nullptr;
+    uint64_t expectedEffectVtable = 0;
     uint32_t ownerOffset = 0;
     ConcreteShotSnapshot::CallbackEffectState state;
+};
+
+enum class RollbackCharacterEffectReferenceKind : uint8_t {
+    None,
+    Reconstructed,
+    Retained,
+};
+
+struct RollbackCharacterEffectReference {
+    void* character = nullptr;
+    void* retainedEffect = nullptr;
+    uint64_t expectedCharacterVtable = 0;
+    uint64_t expectedEffectVtable = 0;
+    uint64_t effectSpawnSequence = 0;
+    uint32_t offset = 0;
+    RollbackCharacterEffectReferenceKind kind =
+        RollbackCharacterEffectReferenceKind::None;
 };
 
 enum class RollbackCharacterShotReferenceRole : uint8_t {
@@ -189,6 +208,7 @@ struct RollbackSnapshotSlot {
     std::vector<RollbackShotRecipe> shotRecipes;
     std::vector<RollbackEffectRecipe> effectRecipes;
     std::vector<RollbackCharacterEffectState> characterEffectStates;
+    std::vector<RollbackCharacterEffectReference> characterEffectReferences;
     std::vector<RollbackCharacterShotReference> characterShotReferences;
     std::vector<RollbackCollisionNodeClone> collisionNodeClones;
     std::vector<RollbackModelRenderState> modelRenderStates;

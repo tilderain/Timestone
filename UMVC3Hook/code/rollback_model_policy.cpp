@@ -1424,31 +1424,3 @@ void Rollback_RestoreCharacterShotReferences(RollbackSnapshotSlot& slot)
             Shot_ResolveReference(reference);
     }
 }
-
-void Rollback_RemapCharacterEffectLinks(
-    void* character, uint64_t expectedVtable, const uint8_t* savedCharacter,
-    size_t savedCharacterSize, const std::vector<RollbackEffectRecipe>& recipes)
-{
-    if (expectedVtable != (uint64_t)_addr(VTABLE_URROCKET_RACCOON)) return;
-
-    static constexpr uint32_t effectOffsets[] = {
-        //Maybe only the jetpack effect is needed here, check later?
-        0x68F0, 0x68F8, 0x6900, 0x6930,
-    };
-    for (uint32_t offset : effectOffsets) {
-        if ((size_t)offset + sizeof(void*) > savedCharacterSize) continue;
-
-        void* savedReference = *(void* const*)(savedCharacter + offset);
-        void** liveReference = (void**)((uint8_t*)character + offset);
-        if (!savedReference) {
-            *liveReference = nullptr;
-            continue;
-        }
-        for (const RollbackEffectRecipe& saved : recipes) {
-            if (saved.savedPtr == savedReference) {
-                *liveReference = saved.restoredPtr;
-                break;
-            }
-        }
-    }
-}

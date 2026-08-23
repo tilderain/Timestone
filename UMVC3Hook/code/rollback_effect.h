@@ -12,6 +12,7 @@ bool Effect_DumpCrashTrace(FILE* file, uint64_t object);
 void Effect_CaptureRecipes(RollbackSnapshotSlot& slot);
 int Effect_RestoreRecipes(RollbackSnapshotSlot& slot);
 void Effect_RestoreCharacterStates(RollbackSnapshotSlot& slot);
+void Effect_RestoreCharacterReferences(RollbackSnapshotSlot& slot);
 void Effect_PrepareUnitRemoval(void* unit);
 void Effect_FinishUnitRemoval(void* unit);
 void Effect_ReleaseOwnedAllocations(void* effect);

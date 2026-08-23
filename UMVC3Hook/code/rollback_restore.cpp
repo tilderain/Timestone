@@ -1113,22 +1113,10 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
         }
     }
     Effect_RestoreRecipes(slot);
+    const uint64_t characterEffectReferencesEarlyStart = Profile_Now();
+    Effect_RestoreCharacterReferences(slot);
+    const uint64_t characterEffectReferencesEarlyEnd = Profile_Now();
     Effect_RestoreCharacterStates(slot);
-
-    // Rocket's tumble callbacks use effect-owner presence as an initialization
-    // latch for gravity and movement state. Reconnect saved owners to the fresh
-    // effect allocations before the first replayed character tick.
-    size_t effectLinkOffset = 0;
-    for (int region = 0; region < slot.regionCount; ++region) {
-        const RollbackRegion& savedRegion = slot.regions[region];
-        if (effectLinkOffset + savedRegion.size <= slot.size) {
-            Rollback_RemapCharacterEffectLinks(
-                savedRegion.ptr, savedRegion.expectedVtable,
-                slot.data + effectLinkOffset, savedRegion.size,
-                slot.effectRecipes);
-        }
-        effectLinkOffset += savedRegion.size;
-    }
 
     // Factory allocations are temporary reconstruction work. The concrete
     // overlay restores each saved uShot::mId; now restore the matching pool and
@@ -1176,6 +1164,11 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
             characterReferencesEarlyEnd - characterReferencesEarlyStart;
         g_activeRollbackProfile->restoreCharacterShotReferenceCount +=
             (uint32_t)slot.characterShotReferences.size();
+        g_activeRollbackProfile->restoreCharacterEffectReferencesEarly +=
+            characterEffectReferencesEarlyEnd -
+            characterEffectReferencesEarlyStart;
+        g_activeRollbackProfile->restoreCharacterEffectReferenceCount +=
+            (uint32_t)slot.characterEffectReferences.size();
     }
 
     if (failedShots != 0) {
@@ -2196,17 +2189,18 @@ void Rollback_RestoreSnapshot(int32_t frame)
             Rollback_RemapCharacterShotLinks(
                 (void*)character, slot.regions[i].expectedVtable,
                 savedCharacter, copySize, slot.shotRecipes);
-            Rollback_RemapCharacterEffectLinks(
-                (void*)character, slot.regions[i].expectedVtable,
-                savedCharacter, copySize, slot.effectRecipes);
         }
         offset += slot.regions[i].size;
     }
     const uint64_t characterReferencesLateStart = Profile_Now();
     Rollback_RestoreCharacterShotReferences(slot);
+    const uint64_t characterShotReferencesLateEnd = Profile_Now();
+    Effect_RestoreCharacterReferences(slot);
     if (g_activeRollbackProfile) {
         g_activeRollbackProfile->restoreCharacterShotReferencesLate +=
-            Profile_Now() - characterReferencesLateStart;
+            characterShotReferencesLateEnd - characterReferencesLateStart;
+        g_activeRollbackProfile->restoreCharacterEffectReferencesLate +=
+            Profile_Now() - characterShotReferencesLateEnd;
     }
 
     // Native shot/model/UI repair can run after the initial camera restore and
