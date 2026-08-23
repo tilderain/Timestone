@@ -1125,7 +1125,6 @@ void Rollback_ApplyNetplayDeterminism()
     // Called from HookedMove on the game thread. Several native setters below
     // rewrite timing or subsystem state and are unsafe during parallel startup.
     using SetFrameWaitFn = void(__fastcall*)(uint64_t, bool);
-    using SetJobThreadNumFn = void(__fastcall*)(uint64_t, uint32_t);
     using SetMoveLineParallelFn = void(__fastcall*)(uint64_t, int, bool);
     using GetCollisionMoveMatrixFn = uint64_t(__fastcall*)(uint64_t);
     using GetInstanceFn = uint64_t(__fastcall*)();
@@ -1137,10 +1136,8 @@ void Rollback_ApplyNetplayDeterminism()
     uint64_t sHitSolver = *(uint64_t*)_addr(0x140d44060);
     uint64_t battleRuntime = ((GetInstanceFn)_addr(0x140004730))();
 
-    if (sMain) {
-        ((SetJobThreadNumFn)_addr(0x140522450))(sMain, 1);
+    if (sMain)
         ((SetFrameWaitFn)_addr(0x140522420))(sMain, true);
-    }
     if (sUnit) {
         auto setMoveLineParallel = (SetMoveLineParallelFn)_addr(0x140207b10);
         for (int category = 0; category < 64; ++category)
@@ -1156,5 +1153,5 @@ void Rollback_ApplyNetplayDeterminism()
     if (battleRuntime)
         ((SetBoolFn)_addr(0x140207c30))(battleRuntime, false);
 
-    HookLog("Netplay: applied gameplay serialization with one sMain job thread\n");
+    HookLog("Netplay: applied native gameplay parallelism settings\n");
 }
