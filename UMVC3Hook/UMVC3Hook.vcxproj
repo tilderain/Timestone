@@ -160,7 +160,6 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <ClInclude Include="code\defaults.h" />
     <ClInclude Include="code\diag.h" />
     <ClInclude Include="code\eNotifManager.h" />
     <ClInclude Include="code\rollback.h" />

@@ -162,8 +162,6 @@ state. The full native replay payload is intentionally not restored:
 - Plugin input history is indexed separately by custom frame number.
 - Re-simulation injects historical local/remote input at the character-input
   boundary.
-- The debug-menu replay buffer in `defaults.h` is a separate legacy plugin
-  feature, not `sReplay`'s 18,000-entry records.
 
 ## Key Addresses
 

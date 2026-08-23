@@ -28,8 +28,6 @@
 | `UMVC3Hook/code/UMVC3Camera.cpp/h` | **Free camera**: overrides game camera position/rotation/FOV, keyboard-controlled movement, screenshot utility |
 | `UMVC3Hook/code/mk10utils.cpp/h` | **Address utilities**: base address relocation helpers (`_addr()`), converts hardcoded offsets to runtime addresses |
 | `UMVC3Hook/code/umvc3.cpp/h` | **Base hooks**: version string, camera info struct, `HookProcessStuff()` and `HookCamera()` trampolines |
-| `UMVC3Hook/code/defaults.h` | **Legacy types & helpers**: `Fighter` struct, `ScriptableFighter`, `SaveLoadState()` for old snapshot approach, replay buffer (pre-rollback), `hook()` template wrappers |
-| `UMVC3Hook/code/generated.h` | **Auto-generated code** (7577 lines): decompiled character tick functions from Ghidra, used for headless re-simulation |
 | `UMVC3Hook/code/propertytable.h` | **Property table** (1318 lines): auto-generated mapping of function addresses → DTI class names for the DTI editor |
 | `UMVC3Hook/imgui/` | Dear ImGui library (vendored, DX9/DX11/Win32 backends) |
 | `UMVC3Hook/kiero/` | Kiero graphics hook + MinHook (vendored, x86/x64 hooking) |
@@ -38,7 +36,6 @@
 | `Base/` | Deployment files: `dinput8.dll` (ASI Loader), `Timestone.ini` (runtime config), compiled `Timestone.asi` |
 | `build/` | Build artifacts (object files, include fix symlinks) |
 | `doc/` | Design docs: rollback, netplay, re-simulation, threading, input, replay |
-| `addrs/` | Memory address dumps for reverse engineering |
 | `gen_proptable.py` | Python script to auto-generate property tables |
 
 ## Key Dependencies (all vendored)

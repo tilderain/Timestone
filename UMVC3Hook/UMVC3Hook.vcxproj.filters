@@ -132,12 +132,6 @@
     <ClInclude Include="sigscan.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="code\defaults.h">
-      <Filter>Header Files\code</Filter>
-    </ClInclude>
-    <ClInclude Include="code\generated.h">
-      <Filter>Header Files\code</Filter>
-    </ClInclude>
     <ClInclude Include="code\rollback.h">
       <Filter>Header Files\code</Filter>
     </ClInclude>
