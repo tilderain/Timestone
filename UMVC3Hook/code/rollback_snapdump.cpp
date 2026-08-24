@@ -25,6 +25,7 @@ constexpr uint32_t DUMP_VERSION = 4;
 constexpr int HISTORY_SIZE = 255;
 constexpr uint8_t ENCODING_RAW = 0;
 constexpr uint8_t ENCODING_XOR_RLE = 1;
+static_assert(HISTORY_SIZE > ROLLBACK_WINDOW);
 
 #pragma pack(push, 1)
 struct DumpHeader {
@@ -305,30 +306,49 @@ bool CreateParentDirectories(char* path)
 
 } // namespace
 
-void SnapDump_CaptureSnapshot(const RollbackSnapshotSlot& slot)
+uint8_t* SnapDump_AcquireSnapshotStorage(int32_t frame, size_t byteSize,
+                                         int regionCount, size_t* capacity)
 {
-    if (slot.frame < 0 || !slot.data || slot.size == 0 || slot.regionCount <= 0) return;
-    HistoryFrame& destination = g_history[(uint32_t)slot.frame % HISTORY_SIZE];
-    const size_t regionOffset = (slot.size + alignof(CapturedRegion) - 1) &
+    if (capacity) *capacity = 0;
+    if (frame < 0 || byteSize == 0 || regionCount <= 0) return nullptr;
+
+    HistoryFrame& destination = g_history[(uint32_t)frame % HISTORY_SIZE];
+    const size_t regionOffset = (byteSize + alignof(CapturedRegion) - 1) &
                                 ~(alignof(CapturedRegion) - 1);
     const size_t required = regionOffset +
-                            (size_t)slot.regionCount * sizeof(CapturedRegion);
+                            (size_t)regionCount * sizeof(CapturedRegion);
     if (destination.capacity < required) {
         const size_t megabyte = 1024 * 1024;
         const size_t newCapacity = (required + megabyte - 1) & ~(megabyte - 1);
         uint8_t* storage = new (std::nothrow) uint8_t[newCapacity];
         if (!storage) {
-            destination.frame = -1;
             HookLog("SnapDump: failed to allocate %zu bytes for frame %d\n",
-                    newCapacity, slot.frame);
-            return;
+                    newCapacity, frame);
+            return nullptr;
         }
         delete[] destination.storage;
         destination.storage = storage;
         destination.capacity = newCapacity;
     }
 
-    std::memcpy(destination.storage, slot.data, slot.size);
+    if (capacity) *capacity = destination.capacity;
+    return destination.storage;
+}
+
+void SnapDump_CaptureSnapshot(const RollbackSnapshotSlot& slot)
+{
+    if (slot.frame < 0 || !slot.data || slot.size == 0 || slot.regionCount <= 0) return;
+    HistoryFrame& destination = g_history[(uint32_t)slot.frame % HISTORY_SIZE];
+    const size_t regionOffset = (slot.size + alignof(CapturedRegion) - 1) &
+                                ~(alignof(CapturedRegion) - 1);
+    if (!SnapDump_AcquireSnapshotStorage(slot.frame, slot.size,
+                                         slot.regionCount, nullptr)) {
+        destination.frame = -1;
+        return;
+    }
+
+    if (destination.storage != slot.data)
+        std::memcpy(destination.storage, slot.data, slot.size);
     CapturedRegion* captured = reinterpret_cast<CapturedRegion*>(
         destination.storage + regionOffset);
     for (int i = 0; i < slot.regionCount; ++i) {

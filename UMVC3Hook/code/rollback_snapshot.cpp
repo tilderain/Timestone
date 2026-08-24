@@ -1435,7 +1435,25 @@ void Rollback_SaveSnapshot(int32_t frame)
                 frame, g_isResimulating ? 1 : 0, replayFrame);
     }*/
 
-    if (slot.capacity < total) {
+    bool hasSharedStorage = false;
+#if ROLLBACK_SNAPDUMP_ENABLED
+    size_t sharedCapacity = 0;
+    if (uint8_t* sharedData = SnapDump_AcquireSnapshotStorage(
+            frame, total, count, &sharedCapacity)) {
+        if (slot.ownsData)
+            delete[] slot.data;
+        slot.data = sharedData;
+        slot.capacity = sharedCapacity;
+        slot.ownsData = false;
+        hasSharedStorage = true;
+    }
+#endif
+    if (!hasSharedStorage && !slot.ownsData) {
+        slot.data = nullptr;
+        slot.capacity = 0;
+        slot.ownsData = true;
+    }
+    if (!hasSharedStorage && slot.capacity < total) {
         size_t newCapacity = total;
         if (total <= SIZE_MAX - (SNAPSHOT_CAPACITY_GRANULARITY - 1)) {
             newCapacity = (total + SNAPSHOT_CAPACITY_GRANULARITY - 1) &
@@ -1682,10 +1700,12 @@ void Rollback_FreeSnapshots()
     for (int i = 0; i < ROLLBACK_WINDOW; ++i) {
         Rollback_DestroyCollisionNodeClones(g_slots[i]);
         ReleaseActionSideCameraState(g_slots[i]);
-        delete[] g_slots[i].data;
+        if (g_slots[i].ownsData)
+            delete[] g_slots[i].data;
         g_slots[i].data        = nullptr;
         g_slots[i].size        = 0;
         g_slots[i].capacity    = 0;
+        g_slots[i].ownsData    = true;
         g_slots[i].regionCount = 0;
         g_slots[i].frame       = -1;
         g_slots[i].shotRecipes.clear();

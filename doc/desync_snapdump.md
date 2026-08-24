@@ -12,7 +12,7 @@ implementation and all integration calls during preprocessing. Such a build
 performs no snapdump hashing, allocation, copying, branching, or desync file
 work and has no snapdump history memory allocation.
 
-The rollback plugin retains the last 128 packed rollback snapshots independently
+The rollback plugin retains the last 255 packed rollback snapshots independently
 of optional NDJSON logging. At the normal confirmed-checksum desync trigger, both
 peers write a `desync_*_host_fN.usdp` or `desync_*_client_fN.usdp` file beside the
 plugin DLL.
@@ -35,8 +35,9 @@ At the expected 2-3 MiB per snapshot without projectiles, the in-process history
 uses approximately 256-384 MiB plus dynamic shot/collision data. Each slot is
 released when its absolute frame is overwritten or rollback state is reset.
 
-The per-frame capture path performs one snapshot-byte copy and one compact
-region-metadata pass. Slot storage is reused and grows in 1 MiB increments.
+The packed snapshot bytes are shared with the live 16-frame rollback ring, so
+the per-frame capture path performs only the original live-region copy and one
+compact region-metadata pass. Slot storage is reused and grows in 1 MiB increments.
 Snapshot hashes, per-region hashes, name expansion, manifest construction, and
 XOR/RLE compression are deferred until the desync trigger has paused the match.
 

@@ -216,6 +216,7 @@ struct RollbackSnapshotSlot {
     uint8_t* data = nullptr;
     size_t size = 0;
     size_t capacity = 0;
+    bool ownsData = true;
     RollbackRegion regions[ROLLBACK_MAX_REGIONS];
     int regionCount = 0;
     uint32_t localInput = 0;

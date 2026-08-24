@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 
 // Code-only diagnostic toggle. Set to 0 for a build with the recorder and every
@@ -10,6 +11,8 @@
 
 struct RollbackSnapshotSlot;
 
+uint8_t* SnapDump_AcquireSnapshotStorage(int32_t frame, size_t byteSize,
+                                         int regionCount, size_t* capacity);
 void SnapDump_CaptureSnapshot(const RollbackSnapshotSlot& slot);
 void SnapDump_UpdateInputs(int32_t frame, uint32_t localInput, uint32_t remoteInput);
 bool SnapDump_WriteHistory(int32_t triggerFrame, const char* relativePath = nullptr);
