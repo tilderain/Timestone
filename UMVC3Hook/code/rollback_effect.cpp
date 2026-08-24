@@ -525,6 +525,14 @@ static void __fastcall hkGameEffectFlushPending(void* manager)
     oGameEffectFlushPending(manager);
 }
 
+static bool IsValidCharacterIndexedEffect(void* object)
+{
+    if (!object || !IsEffectObject(object)) return false;
+    uint64_t vtable = *(uint64_t*)object;
+    return IsAccessibleRange(vtable + 0x78, sizeof(uint64_t)) &&
+           IsExecutableAddress(*(uint64_t*)(vtable + 0x78));
+}
+
 static void ClearInvalidCharacterIndexedEffects(uint64_t character)
 {
     if (!character) return;
@@ -535,12 +543,7 @@ static void ClearInvalidCharacterIndexedEffects(uint64_t character)
                                     index * sizeof(uint64_t));
         uint64_t object = *slot;
         if (!object) continue;
-        if (!HasCallableDtiVirtual((void*)object)) {
-            *slot = 0;
-            continue;
-        }
-        uint64_t dti = GetObjectDti(object);
-        if (!dti)
+        if (!IsValidCharacterIndexedEffect((void*)object))
             *slot = 0;
     }
 }
@@ -613,7 +616,7 @@ static void __fastcall hkMtObjectReplaceIndexedSlot(
         void** slot = (void**)((uint8_t*)owner +
                                CHARACTER_INDEXED_EFFECTS_OFFSET +
                                index * sizeof(void*));
-        if (*slot && !HasCallableDtiVirtual(*slot))
+        if (*slot && !IsValidCharacterIndexedEffect(*slot))
             *slot = nullptr;
     }
     oMtObjectReplaceIndexedSlot(owner, index, replacement);
