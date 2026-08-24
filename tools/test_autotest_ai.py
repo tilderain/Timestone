@@ -15,7 +15,8 @@ SPEC.loader.exec_module(runner)
 
 
 class AutoTestAiTest(unittest.TestCase):
-    def test_artifact_character_name_maps_phoenix_wright(self):
+    def test_artifact_character_name_maps_internal_roster_names(self):
+        self.assertEqual("CapAmerica", runner.artifact_character_name("Captain America"))
         self.assertEqual("Naruhodo", runner.artifact_character_name("Phoenix Wright"))
         self.assertEqual("Ryu", runner.artifact_character_name("Ryu"))
 
@@ -99,6 +100,20 @@ class AutoTestAiTest(unittest.TestCase):
             )
             self.assertEqual([], runner.validate_suite_rows(
                 root, "Naruhodo", path.stat().st_mtime - 1))
+
+    def test_validate_suite_rows_accepts_pineapple_surprise_manual_case(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            autotest = root / "autotest"
+            autotest.mkdir()
+            path = autotest / "results_commands.tsv"
+            path.write_text(
+                "character\tsuite_type\tmove_id\tmatcher_id\tline_id\tmove\tresult\n"
+                "DeadPool\tcommands\t1\t-1\t-1\tPineapple Surprise\tSYNC\n",
+                encoding="utf-8",
+            )
+            self.assertEqual([], runner.validate_suite_rows(
+                root, "Deadpool", path.stat().st_mtime - 1))
 
     def test_crash_artifact_details_extracts_fault(self):
         with tempfile.TemporaryDirectory() as directory:

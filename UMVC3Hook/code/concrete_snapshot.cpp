@@ -9,6 +9,8 @@
 #include <cmath>
 #include <cstring>
 
+extern void HookLog(const char* fmt, ...);
+
 namespace {
 
 constexpr uintptr_t kMinGameAddress = 0x140000000ull;
@@ -53,6 +55,9 @@ constexpr uintptr_t kShockingPinkBombDti = 0x140D4D6A0ull;
 constexpr uintptr_t kOilBalloonGroundOilDti = 0x140D4C478ull;
 constexpr uintptr_t kVulcanSwingWireDti = 0x140D4CB00ull;
 constexpr uintptr_t kVulcanBoomerangDti = 0x140D4D660ull;
+
+uint64_t GetDti(void* object);
+
 constexpr uintptr_t kShotLaserDti = 0x140D482E8ull;
 constexpr uintptr_t kEffectDti = 0x140E18698ull;
 constexpr uintptr_t kDtiIsKindOf = 0x1400039D0ull;
@@ -812,9 +817,10 @@ void RestoreAttackTargets(uint8_t* shot, const uint8_t* saved,
                  ++target) {
                 validTarget = savedTarget == (uint64_t)validTargets[target];
             }
-            // TargetInfo only owns character references. Restrict historical
-            // pointers to the current roster instead of accepting an unrelated
-            // live MtObject that happens to reuse the old address.
+            // TargetInfo stores characters and manager-owned stage bodies.
+            // Restrict historical pointers to the caller's current stable
+            // targets instead of accepting an unrelated allocation that happens
+            // to reuse the old address.
             if (validTarget) {
                 *(uint64_t*)(shot + entry + 0x08) = savedTarget;
             }
@@ -1054,8 +1060,9 @@ void ConcreteShotSnapshot_RestoreCallbackEffects(
                     sizeof(state.state1F8));
         std::memcpy((uint8_t*)effect + 0x230, state.state230,
                     sizeof(state.state230));
-        if (!IsDtiKindOf(snapshot.dti, kShotLaserDti))
+        if (!IsDtiKindOf(snapshot.dti, kShotLaserDti)) {
             RestoreGeneratorEmissionState(effect, state);
+        }
     }
 }
 

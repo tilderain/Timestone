@@ -22,6 +22,7 @@ extern void HookLog(const char* fmt, ...);
 static_assert(sizeof(RollbackRegion) <= 64);
 
 static constexpr uintptr_t PTR_SCHARACTER = 0x140d44a70;
+static constexpr uintptr_t PTR_SSTAGE = 0x140d4f718;
 static constexpr uintptr_t PTR_SSHOT = 0x140d47f40;
 static constexpr uintptr_t PTR_SHITSOLVER = 0x140d44060;
 static constexpr uintptr_t PTR_SMAIN = 0x140e177e8;
@@ -950,10 +951,11 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
         }
         const uint64_t registerEnd = Profile_Now();
         respawnRegisterTicks += registerEnd - factoryEnd;
-        // cAtkCtrl target tables deduplicate hits by exact cChr pointer. Team
-        // lists can contain active assist/proxy nodes beyond the three roster
-        // members, so collect the complete list; otherwise restore rejects an
-        // assist pointer but keeps its hit count, allowing repeated Kikosho hits.
+        // cAtkCtrl target tables deduplicate hits by exact gameplay-object
+        // pointer. Team lists can contain active assist/proxy nodes beyond the
+        // three roster members, so collect the complete list; otherwise restore
+        // rejects an assist pointer but keeps its hit count, allowing repeated
+        // Kikosho hits.
         std::vector<const void*> validTargets;
         validTargets.reserve(16);
         uint64_t sCharacter = *(uint64_t*)_addr(PTR_SCHARACTER);
@@ -969,6 +971,20 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
                     validTargets.push_back(character);
                 }
                 node = *(uint64_t*)(node + NODE_NEXT_OFFSET);
+            }
+        }
+        // Stage contacts use the same TargetInfo table. Keep the manager-owned
+        // active and previous stage bodies so an already-consumed floor contact
+        // is not accepted again after shot reconstruction.
+        uint64_t sStage = *(uint64_t*)_addr(PTR_SSTAGE);
+        if (sStage) {
+            for (uint32_t offset : {0x2050u, 0x2058u}) {
+                void* stageBody = *(void**)(sStage + offset);
+                if (stageBody &&
+                    std::find(validTargets.begin(), validTargets.end(), stageBody) ==
+                        validTargets.end()) {
+                    validTargets.push_back(stageBody);
+                }
             }
         }
         if (!ConcreteShotSnapshot_Restore(fresh, saved.concrete,

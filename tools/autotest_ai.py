@@ -59,6 +59,7 @@ def quote_filter(moves):
 def artifact_character_name(character):
     # The executable reports some characters by their internal roster names.
     internal_names = {
+        "captain america": "CapAmerica",
         "frank west": "Frank",
         "phoenix wright": "Naruhodo",
         "rocket raccoon": "RRaccoon",
@@ -228,6 +229,8 @@ def validate_suite_rows(game_dir, character, not_before):
                     # matcher and therefore legitimately use -1/-1.
                     if row.get("move", "") in {
                             "Forward Throw", "Back Throw",
+                            "Pineapple Surprise", "Air Ninja Stars",
+                            "Air Bolos",
                             "Get 'Em Missile Assist", "Evidence Discard",
                             "Spiral Swords S+L Release"}:
                         continue

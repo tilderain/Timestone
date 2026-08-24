@@ -356,18 +356,31 @@ struct NetSuiteCaseSetup {
     int32_t manualIndex;
     float defenderOffset;
     int32_t quietFrames;
+    int32_t airInputDelayFrames;
 };
 
 constexpr NetSuiteCaseSetup NET_SUITE_CASE_SETUPS[] = {
-    {"Chris", 0, 28, -1, 500.0f, LONG_LIVED_MOVE_QUIET_FRAMES},
-    {"Chris", 0, 29, -1, 500.0f, LONG_LIVED_MOVE_QUIET_FRAMES},
-    {"DeadPool", -1, -1, 2, 500.0f, LONG_LIVED_MOVE_QUIET_FRAMES},
-    {"DeadPool", -1, -1, 4, 200.0f, LONG_LIVED_MOVE_QUIET_FRAMES},
-    {"Phoenix Wright", -1, -1, 6, 500.0f, LONG_LIVED_MOVE_QUIET_FRAMES},
-    {"Tron", 0, 24, -1, 0.0f, LONG_LIVED_MOVE_QUIET_FRAMES},
+    {"Captain America", 0, 29, -1, 300.0f, LONG_LIVED_MOVE_QUIET_FRAMES, 32},
+    {"Chris", 0, 28, -1, 500.0f, LONG_LIVED_MOVE_QUIET_FRAMES, 6},
+    {"Chris", 0, 29, -1, 500.0f, LONG_LIVED_MOVE_QUIET_FRAMES, 6},
+    {"DeadPool", -1, -1, 2, 500.0f, LONG_LIVED_MOVE_QUIET_FRAMES, 6},
+    {"DeadPool", -1, -1, 4, 200.0f, LONG_LIVED_MOVE_QUIET_FRAMES, 6},
+    {"Phoenix Wright", -1, -1, 6, 500.0f, LONG_LIVED_MOVE_QUIET_FRAMES, 6},
+    {"Tron", 0, 24, -1, 0.0f, LONG_LIVED_MOVE_QUIET_FRAMES, 6},
     {"Vergil", -1, -1, MANUAL_VERGIL_SPIRAL_SWORDS, 500.0f,
-     LONG_LIVED_MOVE_QUIET_FRAMES},
+     LONG_LIVED_MOVE_QUIET_FRAMES, 6},
 };
+
+int32_t AirInputDelayFrames(int32_t matcherIndex, int32_t lineIndex)
+{
+    for (const NetSuiteCaseSetup& setup : NET_SUITE_CASE_SETUPS) {
+        if (setup.manualIndex < 0 &&
+            setup.matcherIndex == matcherIndex && setup.lineIndex == lineIndex &&
+            _stricmp(g_autoTestCharacterName, setup.characterName) == 0)
+            return setup.airInputDelayFrames;
+    }
+    return 6;
+}
 
 bool g_netSuiteActive = false;
 bool g_netSuiteClient = false;
@@ -2131,7 +2144,8 @@ extern "C" bool AutoTest_StartRuntimeCommand(int32_t playerIndex,
                      "Could not map jump input for air-only command");
             return false;
         }
-        g_runtimeInputSteps[g_runtimeScript.stepCount++] = {0, 6};
+        g_runtimeInputSteps[g_runtimeScript.stepCount++] = {
+            0, AirInputDelayFrames(matcherIndex, lineIndex)};
     }
     for (int32_t i = 0; i < stepCount; ++i) {
         uint64_t step = getCommandStep(resource, command, (uint32_t)i);

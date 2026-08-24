@@ -41,12 +41,9 @@ constexpr uintptr_t DTI_USHOT_LASER = 0x140D482E8;
 constexpr uintptr_t DTI_USHOT_OPTION_SHIELD_SLASH = 0x140D48A68;
 constexpr uintptr_t DTI_USHOT_OPTION_SPADA_BOOMERANG = 0x140D4D118;
 constexpr uintptr_t DTI_USHOT_VULCAN_CROSS_SWORD = 0x140D488B8;
-constexpr uintptr_t DTI_USHOT_VULCAN_FIRE_GRENADE_BOMB = 0x140D48BB0;
-constexpr uintptr_t DTI_USHOT_VULCAN_HAND_GRENADE_BOMB = 0x140D48CD0;
 constexpr uintptr_t DTI_USHOT_VULCAN_IRON_PIPE_ROLLING = 0x140D4A4E8;
 constexpr uintptr_t DTI_USHOT_VULCAN_LAND_MINE = 0x140D48D98;
 constexpr uintptr_t DTI_USHOT_SHIELD_KIKOUSYOU = 0x140D48F70;
-constexpr uintptr_t DTI_USHOT_VULCAN_SOMERSAULT_GRENADE = 0x140D49520;
 constexpr uintptr_t DTI_USHOT_VULCAN_MISSILE_EMPLACEMENT = 0x140D49A60;
 constexpr uintptr_t DTI_USHOT_VULCAN_PRICKLE_BOARD = 0x140D4C528;
 constexpr uintptr_t DTI_USHOT_SHIELD_WEAPON_CART_SPREAD = 0x140D4A098;
@@ -73,8 +70,6 @@ constexpr uintptr_t FN_KING_KOBUN_MOVE = 0x1401BA2D0;
 constexpr uintptr_t FN_MISSILE_EMPLACEMENT_MOVE = 0x14016F220;
 constexpr uintptr_t FN_WEAPON_CART_MOVE = 0x14017A9D0;
 constexpr uintptr_t FN_WEAPON_CART_SPAWN_DEBRIS = 0x14017A200;
-constexpr uintptr_t FN_HAND_GRENADE_CONTACT = 0x14015D180;
-constexpr uintptr_t FN_SOMERSAULT_GRENADE_CONTACT = 0x140168550;
 constexpr uintptr_t FN_SSHOT_FLUSH_PENDING_UNITS = 0x1401517A0;
 constexpr uintptr_t FN_MTOBJECT_ADD_REF = 0x14050D100;
 constexpr uintptr_t FN_UMODEL_PROCESS_ACTION_ANMCHR = 0x140529420;
@@ -106,10 +101,7 @@ constexpr size_t SSHOT_PENDING_COUNT_OFFSET = 0x2448;
 constexpr size_t SGAMECONFIG_SHOT_SLOT_FLAGS_OFFSET = 0x4A89C;
 constexpr size_t SGAMECONFIG_SHOT_SLOT_FLAGS_SIZE = 10;
 
-using GrenadeContactFn = void(__fastcall*)(void*, void*);
 using ShotMoveFn = void(__fastcall*)(void*);
-GrenadeContactFn oHandGrenadeContact = nullptr;
-GrenadeContactFn oSomersaultGrenadeContact = nullptr;
 ShotMoveFn oKingKobunMove = nullptr;
 ShotMoveFn oMissileEmplacementMove = nullptr;
 ShotMoveFn oWeaponCartMove = nullptr;
@@ -790,44 +782,6 @@ void __fastcall hkWeaponCartMove(void* shot)
     }
 }
 
-void __fastcall hkHandGrenadeContact(void* shot, void* contact)
-{
-    uint64_t dti = shot ? GetObjectDti((uint64_t)shot) : 0;
-    bool fireGrenade = dti ==
-        (uint64_t)_addr(DTI_USHOT_VULCAN_FIRE_GRENADE_BOMB);
-    bool grenade = fireGrenade ||
-        dti == (uint64_t)_addr(DTI_USHOT_VULCAN_HAND_GRENADE_BOMB);
-    uint32_t boundCount = grenade
-        ? *(uint32_t*)((uint8_t*)shot + 0x2214) : 0;
-    bool staleUpwardContact = fireGrenade && boundCount > 0 &&
-        *(float*)((uint8_t*)shot + 0x2088) < 0.0f;
-    bool repeatedHandGrenadeContact = !fireGrenade && boundCount == 1 &&
-        (*(uint32_t*)((uint8_t*)shot + 0x1FE0) & 0x10000000u) != 0 &&
-        *(float*)((uint8_t*)shot + 0x2088) < 0.0f;
-    if (staleUpwardContact || repeatedHandGrenadeContact) {
-        *(uint32_t*)((uint8_t*)shot + 0x1FE0) &= ~0x00200000u;
-        return;
-    }
-
-    oHandGrenadeContact(shot, contact);
-    if (grenade && *(uint32_t*)((uint8_t*)shot + 0x2214) == 1)
-        *(uint32_t*)((uint8_t*)shot + 0x1FE0) |= 0x10000000u;
-}
-
-void __fastcall hkSomersaultGrenadeContact(void* shot, void* contact)
-{
-    bool somersaultGrenade = shot &&
-        GetObjectDti((uint64_t)shot) ==
-            (uint64_t)_addr(DTI_USHOT_VULCAN_SOMERSAULT_GRENADE);
-    if (somersaultGrenade &&
-        *(uint32_t*)((uint8_t*)shot + 0x2210) > 0 &&
-        *(float*)((uint8_t*)shot + 0x2088) < 0.0f) {
-        *(uint32_t*)((uint8_t*)shot + 0x1FE0) &= ~0x00200000u;
-        return;
-    }
-    oSomersaultGrenadeContact(shot, contact);
-}
-
 void InstallPolicyHook(uintptr_t address, void* replacement, void** original,
                        const char* success, const char* failure)
 {
@@ -945,15 +899,6 @@ void Rollback_InitShotModelPolicyHooks()
                       (void**)&oMissileEmplacementMove,
                       "Rollback: hooked reconstructed missile emplacement model retry",
                       "Rollback: failed to hook missile emplacement model retry (%d)\n");
-    InstallPolicyHook(FN_HAND_GRENADE_CONTACT, (LPVOID)&hkHandGrenadeContact,
-                      (void**)&oHandGrenadeContact,
-                      "Rollback: hooked Hand Grenade first-contact repair",
-                      "Rollback: failed to hook Hand Grenade contact (%d)\n");
-    InstallPolicyHook(FN_SOMERSAULT_GRENADE_CONTACT,
-                      (LPVOID)&hkSomersaultGrenadeContact,
-                      (void**)&oSomersaultGrenadeContact,
-                      "Rollback: hooked Somersault Grenade contact repair",
-                      "Rollback: failed to hook Somersault Grenade contact (%d)\n");
     InstallPolicyHook(FN_WEAPON_CART_MOVE, (LPVOID)&hkWeaponCartMove,
                       (void**)&oWeaponCartMove,
                       "Rollback: hooked reconstructed Weapon Cart model retry",

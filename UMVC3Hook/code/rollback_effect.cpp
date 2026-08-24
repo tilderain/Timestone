@@ -163,6 +163,14 @@ static bool IsActiveUnit(void* unit)
     return (state & 7u) < 3u && (state & 0x3F8u) != 0x3F8u;
 }
 
+static bool IsRollbackEffectCategory(void* effect)
+{
+    if (!effect) return false;
+    const uint32_t category =
+        (*(uint32_t*)((uint8_t*)effect + 0x10) >> 3) & 0x7Fu;
+    return category >= 13 && category <= 16;
+}
+
 static bool IsUsableEffectParent(void* parent)
 {
     if (!parent || !HasCallableDtiVirtual(parent)) return false;
@@ -380,7 +388,10 @@ static void* __fastcall hkEffectCreate(void* manager, int effectId, int a3,
     if constexpr (EFFECT_LIFECYCLE_TRACE_ENABLED)
         TraceEffect("factory", effect, (uint64_t)a8, (uint64_t)attachTo);
     InvalidateMemoryQueryCache();
-    if (effect) {
+    // Rollback retirement owns only gameplay effect categories 13-16. Tracking
+    // HUD effects from categories 29-31 would recreate them without retiring
+    // their originals, splitting UI model and particle ownership on restart.
+    if (effect && IsRollbackEffectCategory(effect)) {
         RollbackEffectRecipe recipe = {
             effect, effect, manager, effectId, a3, attachTo, a5, a6, a7, a8,
             a9, a10, a11, a12, a13
@@ -461,7 +472,7 @@ static uint64_t __fastcall hkEffectCreateGenerator(void* effect)
     uint64_t result = oEffectCreateGenerator(effect);
     if constexpr (EFFECT_LIFECYCLE_TRACE_ENABLED)
         TraceEffect("generator-exit", effect, result);
-    if (g_isResimulating && effect &&
+    if (g_isResimulating && IsRollbackEffectCategory(effect) &&
         std::find(g_resimEffects.begin(), g_resimEffects.end(), effect) ==
             g_resimEffects.end()) {
         g_resimEffects.push_back(effect);
@@ -641,6 +652,7 @@ void Effect_CaptureRecipes(RollbackSnapshotSlot& slot)
         if (!recipe.restoredPtr ||
             !IsEffectObject(recipe.restoredPtr) ||
             !IsActiveUnit(recipe.restoredPtr) ||
+            !IsRollbackEffectCategory(recipe.restoredPtr) ||
             IsPersistentCharacterEffect(recipe.restoredPtr)) {
             continue;
         }
