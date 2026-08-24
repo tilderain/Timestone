@@ -114,7 +114,6 @@ extern "C" void Controller_LogReSimFrame(int32_t frame);
 
 // Check and log whether received remote input exists for each frame in [startFrame, endFrame).
 // Prints all results as a single contiguous block before resimulation begins.
-extern "C" void Controller_LogReceivedInputAvailability(int32_t startFrame, int32_t endFrame);
 // Debug: dump g_oldInputs buffer contents to HookLog
 extern "C" void Controller_DumpOldInputs(const char* label);
 

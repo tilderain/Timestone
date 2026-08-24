@@ -1,6 +1,7 @@
 #include "../pch.h"
 #include "rollback_profile.h"
 #include "rollback.h"
+#include "rollback_diagnostics.h"
 #include "netplay.h"
 #include "mk10utils.h"
 
@@ -15,25 +16,14 @@ static FILE* Profile_OpenJson()
     char desiredPath[MAX_PATH] = {};
 
     if (Netplay_IsActive()) {
-        char netplayDirectory[MAX_PATH];
-        if (!Rollback_GetNetplayLiveDirectory(netplayDirectory, sizeof(netplayDirectory)))
+        char directory[MAX_PATH] = {};
+        if (!Rollback_GetNetplayOutputDirectory(directory, sizeof(directory)))
             return nullptr;
         snprintf(desiredPath, sizeof(desiredPath), "%s/rollback_profile.json",
-                 netplayDirectory);
-    } else {
-        HMODULE module = nullptr;
-        if (!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
-                                GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                                (LPCSTR)&Profile_OpenJson, &module))
-            return nullptr;
-
-        if (!GetModuleFileNameA(module, desiredPath, sizeof(desiredPath))) return nullptr;
-        char* separator = strrchr(desiredPath, '\\');
-        if (separator)
-            snprintf(separator + 1, desiredPath + sizeof(desiredPath) - separator - 1,
-                     "rollback_profile.json");
-        else
-            snprintf(desiredPath, sizeof(desiredPath), "rollback_profile.json");
+                 directory);
+    } else if (Rollback_ResolveDllPath(desiredPath, sizeof(desiredPath),
+                                      "rollback_profile.json") < 0) {
+        return nullptr;
     }
 
     if (strcmp(path, desiredPath) != 0) {
@@ -246,8 +236,7 @@ void Profile_RecordSnapshotEnabled(uint64_t profileStart, uint64_t buildRegionsE
     ++g_activeRollbackProfile->snapshotCount;
 }
 
-void Profile_DumpEnabled(const RollbackProfile& profile, bool ndjsonEnabled,
-                         bool multiResimEnabled)
+void Profile_DumpEnabled(const RollbackProfile& profile, bool multiResimEnabled)
 {
     const int frameCount = profile.endFrame - profile.startFrame;
     const double frameDivisor = frameCount > 0 ? (double)frameCount : 1.0;
@@ -276,13 +265,12 @@ void Profile_DumpEnabled(const RollbackProfile& profile, bool ndjsonEnabled,
         fprintf(json,
                 "  {\"type\":\"rollback\",\"start_frame\":%d,\"end_frame\":%d,"
                 "\"frame_count\":%d,\"total_ms\":%.6f,\"avg_frame_ms\":%.6f,"
-                "\"max_frame_ms\":%.6f,\"ndjson_enabled\":%s,\"multi_resim_enabled\":%s,"
-                "\"phases_ms\":{\"patch_enable\":%.6f,\"input_history_save\":%.6f,"
-                "\"diag_setup\":%.6f,\"pre_restore_json\":%.6f,\"restore\":%.6f,"
-                "\"input_availability\":%.6f,\"frame_input\":%.6f,\"frame_diag_pre\":%.6f,"
-                "\"frame_json\":%.6f,\"frame_snapshot\":%.6f,\"native_tick\":%.6f,"
+                 "\"max_frame_ms\":%.6f,\"multi_resim_enabled\":%s,"
+                 "\"phases_ms\":{\"patch_enable\":%.6f,\"input_history_save\":%.6f,"
+                 "\"restore\":%.6f,\"frame_input\":%.6f,"
+                 "\"frame_snapshot\":%.6f,\"native_tick\":%.6f,"
                  "\"native_tick_max\":%.6f,\"frame_input_end\":%.6f,"
-                 "\"frame_diag_post\":%.6f,\"input_history_restore\":%.6f,"
+                 "\"input_history_restore\":%.6f,"
                  "\"timing_resync\":%.6f,\"cutin_repair\":%.6f,\"patch_disable\":%.6f},"
                  "\"headless_tick\":{\"total_ms\":%.6f,\"max_ms\":%.6f,"
                  "\"timing_input_ms\":%.6f,\"timing_input_max_ms\":%.6f,"
@@ -352,14 +340,12 @@ void Profile_DumpEnabled(const RollbackProfile& profile, bool ndjsonEnabled,
                  "\"unit_categories\":[",
                 profile.startFrame, profile.endFrame, frameCount, Profile_Ms(profile.total),
                 Profile_Ms(profile.frameTotal) / frameDivisor, Profile_Ms(profile.frameTotalMax),
-                ndjsonEnabled ? "true" : "false", multiResimEnabled ? "true" : "false",
-                Profile_Ms(profile.patchEnable), Profile_Ms(profile.inputHistorySave),
-                Profile_Ms(profile.diagSetup), Profile_Ms(profile.preRestoreJson),
-                Profile_Ms(profile.restoreTotal), Profile_Ms(profile.inputAvailability),
-                Profile_Ms(profile.frameInput), Profile_Ms(profile.frameDiagPre),
-                Profile_Ms(profile.frameJson), Profile_Ms(profile.frameSnapshot),
-                Profile_Ms(profile.frameNativeTick), Profile_Ms(profile.frameNativeTickMax),
-                 Profile_Ms(profile.frameInputEnd), Profile_Ms(profile.frameDiagPost),
+                 multiResimEnabled ? "true" : "false",
+                 Profile_Ms(profile.patchEnable), Profile_Ms(profile.inputHistorySave),
+                 Profile_Ms(profile.restoreTotal), Profile_Ms(profile.frameInput),
+                 Profile_Ms(profile.frameSnapshot),
+                 Profile_Ms(profile.frameNativeTick), Profile_Ms(profile.frameNativeTickMax),
+                  Profile_Ms(profile.frameInputEnd),
                   Profile_Ms(profile.inputHistoryRestore), Profile_Ms(profile.timingResync),
                   Profile_Ms(profile.cutinRepair), Profile_Ms(profile.patchDisable),
                  Profile_Ms(profile.headlessTotal), Profile_Ms(profile.headlessTotalMax),
@@ -506,9 +492,9 @@ void Profile_DumpEnabled(const RollbackProfile& profile, bool ndjsonEnabled,
 
 }
 
-void Profile_DumpPostResimEnabled(int32_t frame, uint64_t notifyTicks,
-                                 uint64_t resolveTicks, uint64_t saveSnapshotTicks,
-                                 uint64_t totalTicks)
+void Profile_DumpPostResimEnabled(int32_t frame, uint64_t resolveTicks,
+                                  uint64_t saveSnapshotTicks,
+                                  uint64_t totalTicks)
 {
     FILE* json = Profile_OpenJson();
     if (!json) return;
@@ -516,9 +502,9 @@ void Profile_DumpPostResimEnabled(int32_t frame, uint64_t notifyTicks,
     const bool firstEntry = ftell(json) == 2;
     if (!firstEntry) fputs(",\n", json);
     fprintf(json,
-            "  {\"type\":\"post_resim\",\"frame\":%d,\"notify_ms\":%.6f,"
-            "\"resolve_ms\":%.6f,\"save_snapshot_ms\":%.6f,\"total_ms\":%.6f}",
-            frame, Profile_Ms(notifyTicks), Profile_Ms(resolveTicks),
+            "  {\"type\":\"post_resim\",\"frame\":%d,\"resolve_ms\":%.6f,"
+            "\"save_snapshot_ms\":%.6f,\"total_ms\":%.6f}",
+            frame, Profile_Ms(resolveTicks),
             Profile_Ms(saveSnapshotTicks), Profile_Ms(totalTicks));
     Profile_CloseJson(json);
 }

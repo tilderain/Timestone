@@ -3,6 +3,7 @@
 #include "framestepper.h"
 #include "netplay.h"
 #include "rollback.h"
+#include "rollback_diagnostics.h"
 #include "rollback_effect.h"
 
 #include <cstdint>
@@ -675,13 +676,15 @@ LONG HandleException(PEXCEPTION_POINTERS info, bool catastrophicOnly)
 
     const EXCEPTION_RECORD* exception = info->ExceptionRecord;
     const CONTEXT* context = info->ContextRecord;
-    char crashLogPath[MAX_PATH] = "umvc3_crash.log";
-    char netplayDirectory[MAX_PATH] = {};
+    char crashLogPath[MAX_PATH] = {};
+    char outputDirectory[MAX_PATH] = {};
     if (Netplay_IsActive() &&
-        Rollback_GetNetplayLiveDirectory(netplayDirectory, sizeof(netplayDirectory))) {
-        std::snprintf(crashLogPath, sizeof(crashLogPath),
-            "%s/umvc3_crash.log", netplayDirectory);
-    } else {
+        Rollback_GetNetplayOutputDirectory(outputDirectory,
+                                           sizeof(outputDirectory))) {
+        snprintf(crashLogPath, sizeof(crashLogPath), "%s/umvc3_crash.log",
+                 outputDirectory);
+    } else if (Rollback_ResolveDllPath(crashLogPath, sizeof(crashLogPath),
+                                      "umvc3_crash.log") < 0) {
         GetFullPathNameA("umvc3_crash.log", MAX_PATH, crashLogPath, nullptr);
     }
 
@@ -715,8 +718,6 @@ LONG HandleException(PEXCEPTION_POINTERS info, bool catastrophicOnly)
                 crashLogPath);
     }
 
-    const bool ndjsonFlushed = Rollback_FlushNDJSONOnCrash();
-
     FILE* file = std::fopen(crashLogPath, "a");
     if (file) {
         SYSTEMTIME time{};
@@ -730,8 +731,6 @@ LONG HandleException(PEXCEPTION_POINTERS info, bool catastrophicOnly)
             UMVC3HOOK_GIT_DIRTY ? " (dirty)" : "",
             static_cast<unsigned long>(code),
             exception->ExceptionAddress, static_cast<unsigned long>(GetCurrentThreadId()));
-        std::fprintf(file, "ndjson_flush=%s\n", ndjsonFlushed ? "completed" : "unavailable");
-
         std::fprintf(file,
             "RIP=0x%016llX RSP=0x%016llX RBP=0x%016llX\n"
             "RAX=0x%016llX RBX=0x%016llX RCX=0x%016llX RDX=0x%016llX\n"

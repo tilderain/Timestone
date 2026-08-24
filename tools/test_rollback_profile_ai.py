@@ -21,7 +21,6 @@ def rollback_entry(frame_count, total_ms, max_frame_ms=1.0):
         "total_ms": total_ms,
         "avg_frame_ms": total_ms / frame_count,
         "max_frame_ms": max_frame_ms,
-        "ndjson_enabled": False,
         "multi_resim_enabled": True,
         "phases_ms": {"native_tick": total_ms / 2, "native_tick_max": max_frame_ms},
         "headless_tick": {"total_ms": total_ms / 3, "max_ms": max_frame_ms},
@@ -53,13 +52,6 @@ class RollbackProfileAiTest(unittest.TestCase):
         self.assertEqual(6.0, summary["headless_tick"]["max_ms"])
         self.assertAlmostEqual(0.25, summary["snapshot"]["avg_ms"])
         self.assertAlmostEqual(106.8, summary["snapshot"]["avg_kib"])
-
-    def test_summary_rejects_ndjson_profile(self):
-        entry = rollback_entry(4, 8.0)
-        entry["ndjson_enabled"] = True
-        summary = runner.summarize_profile([entry], "client")
-        self.assertFalse(summary["valid"])
-        self.assertIn("NDJSON enabled", summary["errors"][0])
 
     def test_recent_profiles_collects_all_fresh_generations(self):
         with tempfile.TemporaryDirectory() as directory:

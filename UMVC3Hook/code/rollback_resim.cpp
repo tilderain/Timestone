@@ -7,13 +7,10 @@
 #include "rollback_resim.h"
 #include "rollback_snapshot.h"
 #include "rollback_tick.h"
-#include "rollback_ndjson.h"
 #include "controller.h"
 #include "autotest.h"
 #include "mk10utils.h"
 #include "netplay.h"
-
-#include <string>
 
 extern void HookLog(const char* fmt, ...);
 extern bool g_multiResimEnabled;
@@ -30,9 +27,7 @@ int32_t g_restoreRequestedFrame = -1;
 int g_f7State = 0;
 int32_t g_f7StartFrame = 0;
 int g_f7Remaining = 0;
-int g_f7DiagSession = -1;
 
-static constexpr uintptr_t PTR_SREPLAY = 0x140d4d9d8;
 static constexpr uintptr_t PTR_SMAIN = 0x140e177e8;
 static int32_t g_requestStart = -1;
 static int32_t g_requestEnd = -1;
@@ -107,7 +102,6 @@ void Rollback_ClearPendingReSimulation()
     g_restoreRequestedFrame = -1;
     g_f7State = 0;
     g_f7Remaining = 0;
-    g_f7DiagSession = -1;
 }
 
 void Rollback_SetMainInstance(uint64_t main)
@@ -174,28 +168,8 @@ void Rollback_ReSimulate(int32_t startFrame, int32_t endFrame)
     Controller_SaveInputHistory();
     Profile_AddElapsed(&RollbackProfile::inputHistorySave, phaseStart);
 
-    phaseStart = Profile_Now();
-    if (g_f7DiagSession < 0)
-        (void)NDJSON_BeginSession();
-    Profile_AddElapsed(&RollbackProfile::diagSetup, phaseStart);
-
-    int32_t liveFrame = -1;
-    uint64_t replay = *(uint64_t*)_addr(PTR_SREPLAY);
-    if (replay) liveFrame = *(int32_t*)(replay + 0x54);
-    phaseStart = Profile_Now();
-    if (liveFrame >= 0 && Netplay_IsActive()) {
-        std::string json = NDJSON_GenerateNetplayLive(
-            liveFrame, false, "pre_restore_prediction", startFrame, endFrame);
-        if (!json.empty()) NDJSON_WriteNetplayLive(json);
-    }
-    Profile_AddElapsed(&RollbackProfile::preRestoreJson, phaseStart);
-
     Rollback_RestoreSnapshot(startFrame);
     const bool reuseStartSnapshot = CanReuseRestoredSnapshot(startFrame);
-
-    phaseStart = Profile_Now();
-    Controller_LogReceivedInputAvailability(startFrame, endFrame);
-    Profile_AddElapsed(&RollbackProfile::inputAvailability, phaseStart);
 
     for (int32_t frame = startFrame; frame < endFrame; ++frame) {
         RollbackProfileTimer timer;
@@ -214,16 +188,6 @@ void Rollback_ReSimulate(int32_t startFrame, int32_t endFrame)
         Controller_InjectRemoteInput(frame, remoteInput);
         timer.Add(&RollbackProfile::frameInput);
 
-        NDJSON_CaptureFrame(frame, true, false);
-        timer.Add(&RollbackProfile::frameDiagPre);
-        if (Netplay_IsActive()) {
-            NDJSON_DiscardPendingNetplayLive(frame);
-            std::string json = NDJSON_GenerateNetplayLive(frame, true);
-            if (!json.empty()) NDJSON_WriteNetplayLive(json);
-        } else {
-            NDJSON_DumpFrame(frame, 1);
-        }
-        timer.Add(&RollbackProfile::frameJson);
         if (g_multiResimEnabled && (frame != startFrame || !reuseStartSnapshot)) {
             Rollback_SaveSnapshot(frame);
             Rollback_UpdateSnapshotInputs(frame, localInput, remoteInput);
@@ -242,9 +206,6 @@ void Rollback_ReSimulate(int32_t startFrame, int32_t endFrame)
         }
         Controller_LogReSimFrame(frame);
         timer.Add(&RollbackProfile::frameInputEnd);
-        NDJSON_CaptureFrame(frame, true, true);
-        NDJSON_QueuePendingResimDump(frame);
-        timer.Add(&RollbackProfile::frameDiagPost);
         timer.Finish();
     }
 
@@ -274,5 +235,5 @@ void Rollback_ReSimulate(int32_t startFrame, int32_t endFrame)
     Rollback_PatchDrawCalls(false);
     Profile_AddElapsed(&RollbackProfile::patchDisable, phaseStart);
     Profile_EndRollback(profile, profileStart);
-    Profile_Dump(profile, g_ndjsonLoggingEnabled, g_multiResimEnabled);
+    Profile_Dump(profile, g_multiResimEnabled);
 }

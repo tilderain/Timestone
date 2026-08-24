@@ -66,7 +66,6 @@ CPP_SRC   := \
 	$(SRCDIR)/code/rollback_resim.cpp \
 	$(SRCDIR)/code/rollback_runtime.cpp \
 	$(SRCDIR)/code/rollback_tick.cpp \
-	$(SRCDIR)/code/rollback_ndjson.cpp \
 	$(SRCDIR)/code/rollback_profile.cpp \
 	$(SRCDIR)/code/rollback_rng.cpp \
 	$(SRCDIR)/code/rollback_shot.cpp \

@@ -92,8 +92,7 @@ Runner exit codes are `0` for sync/no desync artifacts, `1` for a confirmed
 desync report, `3` for launch/game failure, `4` for timeout, and `6` when the
 snapshot analyzer fails. Argument errors use argparse's standard exit code `2`.
 
-The network address and port come from `rollbacksetting.ini`. NDJSON capture
-continues to follow the existing NDJSON logging setting.
+The network address and port come from `rollbacksetting.ini`.
 
 # Credits
 

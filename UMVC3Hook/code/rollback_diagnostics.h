@@ -5,6 +5,8 @@
 
 int Rollback_ResolveDllPath(char* destination, size_t destinationLength,
                             const char* relativePath);
+bool Rollback_GetNetplayOutputDirectory(char* destination, size_t destinationLength);
+void Rollback_ResetNetplayOutputDirectory();
 uint64_t Rollback_Fnv1a64(const void* data, size_t length);
 
 inline constexpr bool ROLLBACK_FREEZE_WATCHDOG_ENABLED = true;

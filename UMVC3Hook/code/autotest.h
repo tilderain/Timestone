@@ -133,7 +133,6 @@ extern "C" bool AutoTest_GetForcedClientResim(int32_t currentFrame,
                                                 int32_t* outEndFrame);
 extern "C" void AutoTest_OnResimFrame(int32_t frame, uint32_t checksum);
 extern "C" void AutoTest_OnLiveFrame(int32_t frame, uint32_t checksum);
-extern "C" void AutoTest_OnDesyncDetected(int32_t frame);
 extern "C" bool AutoTest_GetSnapDumpRelativePath(char* path, size_t capacity);
 extern "C" void AutoTest_PrepareForRestart();
 extern "C" void AutoTest_OnTrainingRestartExecuted();

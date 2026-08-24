@@ -13,9 +13,11 @@
 #include "netplay.h"
 #include "LaunchMenu.h"
 #include "rollback.h"
+#include "rollback_snapdump.h"
 #include "controller.h"
 #include "autotest.h"
 #include "rollback_cleanup.h"
+#include "rollback_diagnostics.h"
 #include "trainingboot.h"
 
 // Netplay debug info from controller.cpp
@@ -536,7 +538,10 @@ static void __fastcall HookedMove(void* sMvc3Main)
             Rollback_ClearPendingReSimulation();
             Netplay_ClearInputQueues();
             Controller_ResetBuffers();
-            Rollback_ResetNetplayLiveLog();
+            Rollback_ResetNetplayOutputDirectory();
+            char outputDirectory[MAX_PATH] = {};
+            Rollback_GetNetplayOutputDirectory(outputDirectory,
+                                               sizeof(outputDirectory));
             if (sAction) {
                 using SetRestartModeFn = void(__fastcall*)(uint64_t, int32_t);
                 ((SetRestartModeFn)_addr(0x14000AF90))(sAction, 3);
@@ -545,7 +550,6 @@ static void __fastcall HookedMove(void* sMvc3Main)
                 Controller_ResetFightTimer(sAction);
             }
             Rollback_FreeSnapshots();
-            Rollback_ResetNetplayHistoryBuffers();
             g_battleSynchronized = false;
             g_localReady = false;
             g_remoteReady = false;
@@ -596,7 +600,10 @@ static void __fastcall HookedMove(void* sMvc3Main)
             Netplay_ClearInputQueues();
             Controller_ResetBuffers();
             Controller_ResetFrameEpoch();
-            Rollback_ResetNetplayLiveLog();
+            Rollback_ResetNetplayOutputDirectory();
+            char outputDirectory[MAX_PATH] = {};
+            Rollback_GetNetplayOutputDirectory(outputDirectory,
+                                               sizeof(outputDirectory));
 
             g_battleSynchronized = false;
             g_localReady = false;
@@ -1022,6 +1029,9 @@ void FrameStepper_InitNetplay()
                 Netplay_IsHost() ? "host" : "client");
         g_autoTestLaunchPending = IsAutoTestLaunchEnabled() && Netplay_IsHost();
         Rollback_PatchNativeNetplayDeterminism();
+        char outputDirectory[MAX_PATH] = {};
+        Rollback_GetNetplayOutputDirectory(outputDirectory,
+                                           sizeof(outputDirectory));
     }
 }
 
@@ -1207,19 +1217,31 @@ void FrameStepper_Process()
     if (KeyPressed(VK_F10))
     {
         const int32_t frame = Controller_GetNetFrameCount();
-        Rollback_DumpNetplayHistory(frame);
+#if ROLLBACK_SNAPDUMP_ENABLED
+        SYSTEMTIME time = {};
+        GetLocalTime(&time);
+        char timestamp[16] = {};
+        snprintf(timestamp, sizeof(timestamp), "%04u%02u%02u_%02u%02u%02u",
+                 time.wYear, time.wMonth, time.wDay, time.wHour, time.wMinute,
+                 time.wSecond);
+        SnapDump_WriteManualHistory(frame, timestamp);
         if (Netplay_IsActive())
-            Netplay_SendDumpNDJSON(frame);
-        HookLog("FrameStepper: F10 dumped NDJSON through frame %d%s\n",
-                frame, Netplay_IsActive() ? " on both peers" : "");
+            Netplay_SendSnapDump(frame, timestamp);
+        HookLog("FrameStepper: F10 wrote snapdump through frame %d%s\n",
+                 frame, Netplay_IsActive() ? " on both peers" : "");
+#endif
     }
 
     int32_t remoteDumpFrame = -1;
-    while (Netplay_GetInboundDumpNDJSON(remoteDumpFrame))
+    char remoteDumpTimestamp[16] = {};
+    while (Netplay_GetInboundSnapDump(remoteDumpFrame, remoteDumpTimestamp,
+                                      sizeof(remoteDumpTimestamp)))
     {
-        Rollback_DumpNetplayHistory(remoteDumpFrame);
-        HookLog("FrameStepper: remote F10 dumped NDJSON through frame %d\n",
-                remoteDumpFrame);
+#if ROLLBACK_SNAPDUMP_ENABLED
+        SnapDump_WriteManualHistory(remoteDumpFrame, remoteDumpTimestamp);
+#endif
+        HookLog("FrameStepper: remote F10 wrote snapdump through frame %d\n",
+                 remoteDumpFrame);
     }
 
     if (IsPastIntroStep() && KeyPressed(VK_F11)) {
@@ -1305,7 +1327,6 @@ void FrameStepper_Process()
             g_desyncLocalCS = desyncPacket.remoteChecksum;
             g_desyncRemoteCS = desyncPacket.localChecksum;
             Rollback_NotifyDesyncTriggered(desyncPacket.frame);
-            AutoTest_OnDesyncDetected(desyncPacket.frame);
         }
         else if (desyncPacket.action == DESYNC_UNPAUSE)
         {

@@ -248,6 +248,7 @@ constexpr int32_t NET_SUITE_STABLE_FRAMES = 3;
 constexpr int32_t LONG_LIVED_MOVE_QUIET_FRAMES = 120;
 constexpr int32_t NET_SUITE_DESYNC_FRAMES = 1;
 constexpr int32_t NET_SUITE_HISTORY = 4096;
+constexpr int32_t MAX_FORCED_RESIM_FRAMES = 16;
 
 bool ContainsInsensitive(const char* haystack, const char* needle)
 {
@@ -709,12 +710,6 @@ void FinishSuiteCommand(bool passed, const char* reason)
     g_runningManualCommand = -1;
     WriteSuiteResult(passed, reason);
     if (g_netSuiteActive && Netplay_IsActive() && Netplay_IsHost()) {
-        if (!passed && g_netSuiteFirstMismatchFrame >= 0) {
-            char path[MAX_PATH];
-            snprintf(path, sizeof(path), "autotest/%s_%u_host.ndjson",
-                     g_suiteCharacterStem, g_netSuiteMoveId);
-            Rollback_ExportNetplayHistory(g_netSuiteFirstMismatchFrame, path);
-        }
         g_netSuiteRestartPending = true;
         AutoTest_PrepareForRestart();
         FrameStepper_ScheduleAutoTestRestart(g_suiteRngSeed);
@@ -2809,7 +2804,7 @@ extern "C" bool AutoTest_GetForcedClientResim(int32_t currentFrame,
     if (start < g_netSuiteStartFrame)
         start = g_netSuiteStartFrame;
     int32_t end = start;
-    while (end < currentFrame && end - start < MAX_RESIM_FRAMES &&
+    while (end < currentFrame && end - start < MAX_FORCED_RESIM_FRAMES &&
            Controller_IsFrameConfirmed(end))
         ++end;
     if (end == start)
@@ -2841,36 +2836,6 @@ extern "C" void AutoTest_OnLiveFrame(int32_t frame, uint32_t checksum)
         return;
     uint32_t idx = (uint32_t)frame % NET_SUITE_HISTORY;
     g_netSuiteLiveFrames[idx] = {frame, checksum, BothCharactersIdle()};
-}
-
-extern "C" void AutoTest_OnDesyncDetected(int32_t frame)
-{
-    if (!g_netSuiteActive || !g_netSuiteClient || g_netSuiteMoveId == 0)
-        return;
-
-    if (!g_suiteCharacterStem[0]) {
-        GetCommandListTextResource(g_suiteStatus.playerIndex,
-                                   GetActiveCharacter(g_suiteStatus.playerIndex));
-        int32_t characterId = g_commandListText[g_suiteStatus.playerIndex].characterId;
-        using GetCharacterName_t = const char*(__fastcall*)(int32_t);
-        static GetCharacterName_t getCharacterName =
-            (GetCharacterName_t)_addr(ADDR_GET_CHARACTER_NAME);
-        const char* name = characterId > 0 ? getCharacterName(characterId) : nullptr;
-        snprintf(g_suiteCharacterStem, sizeof(g_suiteCharacterStem), "%s",
-                 name && name[0] ? name : "unknown");
-        for (char* c = g_suiteCharacterStem; *c; ++c) {
-            if (*c >= 'A' && *c <= 'Z')
-                *c = (char)(*c - 'A' + 'a');
-            else if (!((*c >= 'a' && *c <= 'z') ||
-                       (*c >= '0' && *c <= '9') || *c == '-' || *c == '_'))
-                *c = '_';
-        }
-    }
-
-    char path[MAX_PATH];
-    snprintf(path, sizeof(path), "autotest/%s_%u_client.ndjson",
-             g_suiteCharacterStem, g_netSuiteMoveId);
-    Rollback_ExportNetplayHistory(frame, path);
 }
 
 extern "C" bool AutoTest_GetSnapDumpRelativePath(char* path, size_t capacity)

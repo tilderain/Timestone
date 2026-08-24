@@ -37,14 +37,12 @@
 enum PacketType : uint32_t {
     PACKET_INPUT = 0,  // InputPacket
     PACKET_DELAY = 1,  // DelayPacket
-    PACKET_RESIM_NOTIFY = 2,  // ResimNotifyPacket
-    PACKET_GROUND_TRUTH = 4,  // GroundTruthPacket
     PACKET_BATTLE_READY = 5,  // BattleReadyPacket
     PACKET_LAUNCH_TRAINING = 6, // LaunchTrainingPacket
     PACKET_DESYNC = 7,  // DesyncPacket
     PACKET_RESTART_MATCH = 8, // RestartMatchPacket
     PACKET_MULTI_RESIM = 9, // MultiResimPacket
-    PACKET_DUMP_NDJSON = 10, // DumpNdjsonPacket
+    PACKET_SNAPDUMP = 10, // SnapDumpPacket
     PACKET_AUTOTEST_START = 11, // AutoTestStartPacket
     PACKET_AUTOTEST_FRAME = 12, // AutoTestFramePacket
     PACKET_AUTOTEST_COMPLETE = 13, // AutoTestCompletePacket
@@ -151,9 +149,10 @@ struct MultiResimPacket {
     uint32_t enabled;            // 0 = disabled, 1 = enabled
 };
 
-struct DumpNdjsonPacket {
-    uint32_t type;               // PACKET_DUMP_NDJSON
+struct SnapDumpPacket {
+    uint32_t type;               // PACKET_SNAPDUMP
     int32_t  frame;              // final frame included in the rolling dump
+    char timestamp[16];          // YYYYMMDD_HHMMSS from the requesting peer
 };
 
 enum AutoTestCaseType : uint32_t {
@@ -209,49 +208,6 @@ enum BattleSyncFlags : uint32_t {
     BATTLE_SYNC_FIGHTING = 1u << 3,
 };
 
-static constexpr int MAX_RESIM_FRAMES = 16;
-
-struct ResimCharState {
-    uint32_t actionId;
-    float    posX, posY, posZ;
-    uint32_t flags;
-    uint32_t mHeld;
-    uint64_t frameCnt;
-    uint32_t rng[4];
-};
-
-struct ResimFrameResult {
-    int32_t  frame;
-    ResimCharState p1Pre;     // P1 (team 0) point character pre-resim state
-    ResimCharState p1Post;    // P1 point character post-resim state
-    ResimCharState p2Pre;     // P2 (team 1) point character pre-resim state
-    ResimCharState p2Post;    // P2 point character post-resim state
-    uint32_t usedInput;
-    uint32_t recvInput;
-};
-
-struct ResimNotifyPacket {
-    uint32_t type;               // PACKET_RESIM_NOTIFY
-    int32_t  resimStartFrame;    // first frame of re-simulation
-    int32_t  resimEndFrame;      // end frame (exclusive)
-    uint32_t correctedTeam;      // which team (0 or 1) had its input corrected
-    uint32_t frameCount;         // number of valid entries in frames[]
-    ResimFrameResult frames[MAX_RESIM_FRAMES];
-};
-
-struct GroundTruthFrame {
-    int32_t  frame;
-    ResimCharState p1Live;
-    ResimCharState p2Live;
-};
-
-struct GroundTruthPacket {
-    uint32_t         type;        // PACKET_GROUND_TRUTH
-    int32_t          startFrame;
-    int32_t          endFrame;
-    uint32_t         frameCount;
-    GroundTruthFrame frames[MAX_RESIM_FRAMES];
-};
 #pragma pack(pop)
 
 // Hand over the ENet host/peer and start the service thread.
@@ -298,26 +254,9 @@ void Netplay_SendDelay(int32_t delay, int32_t effectiveFrame = -1);
 // Send a rollback-frame control value to the remote peer.
 void Netplay_SendRollback(int32_t rollbackFrames, int32_t effectiveFrame = -1);
 
-// Send a resim-notify packet to the remote peer — signals which frames were
-// re-simulated due to a late-arriving input correction.  The caller should
-// fill ringIdx fields (correctedTeam, frameCount, frames[]) before sending.
-void Netplay_SendResimNotify(const ResimNotifyPacket& pkt);
-
-// Retrieve the last resim-notify received from the remote peer.  Returns true
-// if a new notification was available (consumed by this call).
-bool Netplay_GetInboundResimNotify(ResimNotifyPacket& outNotify);
-
 // Retrieve the last delay value received from the remote peer.  Returns true
 // if a new value was available (it is consumed by this call).
 bool Netplay_GetInboundDelay(int32_t& outDelay, int32_t& outEffectiveFrame);
-
-// Send a ground-truth packet to the remote peer — provides the non-simulating
-// side's exact live state for the requested frame range.
-void Netplay_SendGroundTruth(const GroundTruthPacket& pkt);
-
-// Retrieve the last ground-truth packet received from the remote peer.
-// Returns true if a new packet was available (consumed by this call).
-bool Netplay_GetInboundGroundTruth(GroundTruthPacket& outGT);
 
 // Retrieve the last rollback value received from the remote peer.  Returns true
 // if a new value was available (it is consumed by this call).
@@ -350,9 +289,10 @@ bool Netplay_GetExtensionPacket(void* data, size_t capacity, size_t& outSize);
 void Netplay_SendMultiResim(bool enabled);
 bool Netplay_GetInboundMultiResim(bool& outEnabled);
 
-// Request that both peers dump their current rolling NDJSON history.
-void Netplay_SendDumpNDJSON(int32_t frame);
-bool Netplay_GetInboundDumpNDJSON(int32_t& outFrame);
+// Request that the peer write snapdump history using the requester's timestamp.
+void Netplay_SendSnapDump(int32_t frame, const char* timestamp);
+bool Netplay_GetInboundSnapDump(int32_t& outFrame, char* timestamp,
+                                size_t timestampSize);
 
 // Host starts each suite case; the client reports every post-resim frame.
 void Netplay_SendAutoTestStart(const AutoTestStartPacket& packet);

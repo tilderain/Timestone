@@ -12,8 +12,8 @@ implementation and all integration calls during preprocessing. Such a build
 performs no snapdump hashing, allocation, copying, branching, or desync file
 work and has no snapdump history memory allocation.
 
-The rollback plugin retains the last 255 packed rollback snapshots independently
-of optional NDJSON logging. At the normal confirmed-checksum desync trigger, both
+The rollback plugin retains the last 255 packed rollback snapshots. At the
+normal confirmed-checksum desync trigger, both
 peers write a `desync_*_host_fN.usdp` or `desync_*_client_fN.usdp` file beside the
 plugin DLL.
 

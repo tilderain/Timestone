@@ -160,9 +160,6 @@ def summarize_profile(entries, side):
         for field in ("total_ms", "avg_frame_ms", "max_frame_ms"):
             if not finite_nonnegative(entry.get(field)):
                 errors.append(f"rollback[{index}] has invalid {field}")
-        if entry.get("ndjson_enabled") is not False:
-            errors.append(f"rollback[{index}] has NDJSON enabled")
-
     frame_counts = [entry.get("frame_count", 0) for entry in rollback
                     if isinstance(entry.get("frame_count"), int)]
     total_values = [float(entry.get("total_ms", 0)) for entry in rollback

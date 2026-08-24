@@ -32,7 +32,6 @@ extern void HookLog(const char* fmt, ...);
 
 extern "C" bool Rollback_GetSnapshotInputs(int32_t frame, uint32_t* outLocal, uint32_t* outRemote);
 extern "C" void Rollback_UpdateSnapshotInputs(int32_t frame, uint32_t localInput, uint32_t remoteInput);
-extern "C" void Rollback_CommitPendingNetplayLive(int32_t frame);
 extern "C" void Rollback_NotifyDesyncTriggered(int32_t frame);
 extern "C" uint32_t FrameStepper_GetBattleGeneration();
 
@@ -841,96 +840,6 @@ extern "C" void Controller_LogReSimFrame(int32_t frame)
             IsFrameConfirmed(frame) ? g_receivedInput[idx] : 0);
 }
 
-// ---------------------------------------------------------------------------
-// Controller_LogResimNotify — called when remote peer reports a re-simulation.
-// Logs both the packet data (sender's pre/post state for P1+P2 point chars)
-// and the local g_liveRef historical live reference so both sides' states
-// can be directly compared.
-// ---------------------------------------------------------------------------
-static void Controller_LogResimNotify(const ResimNotifyPacket& pkt)
-{
-    if (pkt.resimStartFrame >= pkt.resimEndFrame) return;
-    HookLog("ResimNotify: remote re-simmed frames [%d, %d) correctedTeam=%u frameCount=%u\n",
-            pkt.resimStartFrame, pkt.resimEndFrame, pkt.correctedTeam, pkt.frameCount);
-
-    for (uint32_t fi = 0; fi < pkt.frameCount; fi++)
-    {
-        const auto& rf = pkt.frames[fi];
-        uint32_t idx = (uint32_t)rf.frame % RING_SIZE;
-        bool confirmed = IsFrameConfirmed(rf.frame);
-
-        HookLog("ResimNotify frame=%d: used=0x%08X recv=0x%08X %s\n",
-                rf.frame, rf.usedInput, rf.recvInput,
-                confirmed ? "CONFIRMED" : "PREDICTED");
-
-        // Packet data: sender's pre and post for both teams' point chars
-        HookLog("ResimNotify frame=%d P1-pre:  act=0x%08X pos=(%.4f,%.4f,%.4f) fl=0x%08X mHeld=0x%08X fcnt=%llu rng=[0x%08X,0x%08X,0x%08X,0x%08X]\n",
-                rf.frame,
-                rf.p1Pre.actionId, rf.p1Pre.posX, rf.p1Pre.posY, rf.p1Pre.posZ,
-                rf.p1Pre.flags, rf.p1Pre.mHeld, (unsigned long long)rf.p1Pre.frameCnt,
-                rf.p1Pre.rng[0], rf.p1Pre.rng[1], rf.p1Pre.rng[2], rf.p1Pre.rng[3]);
-        HookLog("ResimNotify frame=%d P1-post: act=0x%08X pos=(%.4f,%.4f,%.4f) fl=0x%08X mHeld=0x%08X fcnt=%llu rng=[0x%08X,0x%08X,0x%08X,0x%08X]\n",
-                rf.frame,
-                rf.p1Post.actionId, rf.p1Post.posX, rf.p1Post.posY, rf.p1Post.posZ,
-                rf.p1Post.flags, rf.p1Post.mHeld, (unsigned long long)rf.p1Post.frameCnt,
-                rf.p1Post.rng[0], rf.p1Post.rng[1], rf.p1Post.rng[2], rf.p1Post.rng[3]);
-        HookLog("ResimNotify frame=%d P2-pre:  act=0x%08X pos=(%.4f,%.4f,%.4f) fl=0x%08X mHeld=0x%08X fcnt=%llu rng=[0x%08X,0x%08X,0x%08X,0x%08X]\n",
-                rf.frame,
-                rf.p2Pre.actionId, rf.p2Pre.posX, rf.p2Pre.posY, rf.p2Pre.posZ,
-                rf.p2Pre.flags, rf.p2Pre.mHeld, (unsigned long long)rf.p2Pre.frameCnt,
-                rf.p2Pre.rng[0], rf.p2Pre.rng[1], rf.p2Pre.rng[2], rf.p2Pre.rng[3]);
-        HookLog("ResimNotify frame=%d P2-post: act=0x%08X pos=(%.4f,%.4f,%.4f) fl=0x%08X mHeld=0x%08X fcnt=%llu rng=[0x%08X,0x%08X,0x%08X,0x%08X]\n",
-                rf.frame,
-                rf.p2Post.actionId, rf.p2Post.posX, rf.p2Post.posY, rf.p2Post.posZ,
-                rf.p2Post.flags, rf.p2Post.mHeld, (unsigned long long)rf.p2Post.frameCnt,
-                rf.p2Post.rng[0], rf.p2Post.rng[1], rf.p2Post.rng[2], rf.p2Post.rng[3]);
-    }
-}
-
-extern "C" void Controller_LogReceivedInputAvailability(int32_t startFrame, int32_t endFrame)
-{
-    return;
-    if (startFrame >= endFrame) return;
-
-    int32_t predictedCount = 0;
-    int32_t confirmedCount = 0;
-    int32_t correctPredictionCount = 0;
-    int32_t conflictCount = 0;
-
-    //HookLog("[%s] Remote input summary for re-sim frames [%d, %d):\n",
-    //        Netplay_IsHost() ? "host" : "client", startFrame, endFrame);
-    //HookLog("  %-8s %-12s %-12s %s\n", "Frame", "Predicted", "Received", "Status");
-    for (int32_t f = startFrame; f < endFrame; f++)
-    {
-        uint32_t idx = (uint32_t)f % RING_SIZE;
-        bool confirmed = IsFrameConfirmed(f);
-        uint32_t predicted = g_usedRemoteInput[idx];
-        uint32_t received = confirmed ? g_receivedInput[idx] : 0;
-        const char* status;
-        if (confirmed) {
-            if (g_predictedInput[idx] && predicted == received) {
-                status = "PREDICTED_CORRECT";
-                correctPredictionCount++;
-            } else if (predicted == received) {
-                status = "CONFIRMED";
-                confirmedCount++;
-            } else {
-                status = "CONFLICT";
-                conflictCount++;
-            }
-        } else {
-            status = "PREDICTED";
-            predictedCount++;
-        }
-        //HookLog("  %-8d 0x%08X 0x%08X %s\n", f, predicted, received, status);
-    }
-    if (conflictCount == 0 && correctPredictionCount > 0)
-    {
-    //    HookLog("  >>> All predictions correct for frames [%d, %d)\n", startFrame, endFrame);
-    }
-    //HookLog("  summary: %d correct, %d confirmed, %d conflict, %d predicted out of %d frames\n",
-    //        correctPredictionCount, confirmedCount, conflictCount, predictedCount, endFrame - startFrame);
-}
 // Silent frame-boundary helpers for re-simulation — maintain the local input
 // shift buffer without draining inbound packets or sending outbound data.
 extern "C" void Controller_SilentFrameStart()
@@ -1521,21 +1430,6 @@ extern "C" void Controller_OnFrameStart()
         }
     }
 
-    // Process inbound ground truth packets
-    Rollback_ProcessInboundGroundTruth();
-    
-    // --- Drain resim-notify packets from the remote peer ---
-    // The remote side notifies us whenever it re-simulates a range of frames
-    // due to late-arriving input correction.  We dump our live character state
-    // for those frames to enable cross-side diagnostic comparison.
-    {
-        ResimNotifyPacket rnPkt;
-        while (Netplay_GetInboundResimNotify(rnPkt))
-        {
-            //Controller_LogResimNotify(rnPkt.resimStartFrame, rnPkt.resimEndFrame);
-        }
-    }
-
     if (g_rollbackFrames > 0)
     {
         // Only do rollback logic once the sAction battle step has started.
@@ -1619,7 +1513,6 @@ extern "C" void Controller_OnFrameStart()
                 {
                     if (IsFrameConfirmed(f))
                     {
-                        Rollback_CommitPendingNetplayLive(f);
                     }
                 }
 
@@ -1663,7 +1556,6 @@ extern "C" void Controller_OnFrameStart()
                 {
                     if (IsFrameConfirmed(f))
                     {
-                        Rollback_CommitPendingNetplayLive(f);
                     }
                 }
             }

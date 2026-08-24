@@ -2,6 +2,7 @@
 
 #include "rollback_diagnostics.h"
 #include "rollback_memory.h"
+#include "netplay.h"
 
 #include <cstdio>
 #include <cstring>
@@ -9,6 +10,9 @@
 
 EXTERN_C IMAGE_DOS_HEADER __ImageBase;
 extern void HookLog(const char* fmt, ...);
+extern void HookLogSetFile(const char* filename);
+
+static char g_netplayOutputDirectory[MAX_PATH] = {};
 
 static std::atomic<uint64_t> g_freezeHeartbeat{0};
 static std::atomic<DWORD> g_freezeThreadId{0};
@@ -40,6 +44,56 @@ int Rollback_ResolveDllPath(char* destination, size_t destinationLength,
     else
         modulePath[0] = '\0';
     return snprintf(destination, destinationLength, "%s%s", modulePath, relativePath);
+}
+
+bool Rollback_GetNetplayOutputDirectory(char* destination, size_t destinationLength)
+{
+    if (!destination || destinationLength == 0 || !Netplay_IsActive())
+        return false;
+
+    if (!g_netplayOutputDirectory[0]) {
+        SYSTEMTIME time = {};
+        GetLocalTime(&time);
+        const char* role = Netplay_IsHost() ? "host" : "client";
+        char stem[96] = {};
+        snprintf(stem, sizeof(stem), "nplive_%04u%02u%02u_%02u%02u%02u_%s",
+                 time.wYear, time.wMonth, time.wDay, time.wHour, time.wMinute,
+                 time.wSecond, role);
+
+        for (unsigned suffix = 0; suffix < 1000; ++suffix) {
+            char relative[MAX_PATH] = {};
+            if (suffix == 0)
+                snprintf(relative, sizeof(relative), "%s", stem);
+            else
+                snprintf(relative, sizeof(relative), "%s_r%u", stem, suffix);
+            char candidate[MAX_PATH] = {};
+            if (Rollback_ResolveDllPath(candidate, sizeof(candidate), relative) < 0)
+                return false;
+            if (CreateDirectoryA(candidate, nullptr)) {
+                snprintf(g_netplayOutputDirectory,
+                         sizeof(g_netplayOutputDirectory), "%s", candidate);
+                break;
+            }
+            if (GetLastError() != ERROR_ALREADY_EXISTS)
+                return false;
+        }
+        if (!g_netplayOutputDirectory[0]) return false;
+
+        char logPath[MAX_PATH] = {};
+        snprintf(logPath, sizeof(logPath), "%s/Timestone_%s.log",
+                 g_netplayOutputDirectory, role);
+        HookLogSetFile(logPath);
+        HookLog("Netplay: diagnostics -> %s\n", g_netplayOutputDirectory);
+    }
+
+    int written = snprintf(destination, destinationLength, "%s",
+                           g_netplayOutputDirectory);
+    return written > 0 && (size_t)written < destinationLength;
+}
+
+void Rollback_ResetNetplayOutputDirectory()
+{
+    g_netplayOutputDirectory[0] = '\0';
 }
 
 uint64_t Rollback_Fnv1a64(const void* data, size_t length)

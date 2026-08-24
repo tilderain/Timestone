@@ -69,20 +69,6 @@ static int32_t              g_inboundRollbackFrame = -1;
 static bool                 g_inboundRollbackNew = false;
 static CRITICAL_SECTION     g_delayCS;
 
-// Resim-notify channel — informs the remote peer which frames were re-simulated.
-static ResimNotifyPacket    g_outboundResimNotify = {};
-static bool                 g_outboundResimNotifyNew = false;
-static ResimNotifyPacket    g_inboundResimNotify = {};
-static bool                 g_inboundResimNotifyNew = false;
-static CRITICAL_SECTION     g_resimNotifyCS;
-
-// Ground-truth channel — non-simulating side's exact live state for verification.
-static GroundTruthPacket    g_outboundGroundTruth = {};
-static bool                 g_outboundGroundTruthNew = false;
-static GroundTruthPacket    g_inboundGroundTruth = {};
-static bool                 g_inboundGroundTruthNew = false;
-static CRITICAL_SECTION     g_groundTruthCS;
-
 static BattleReadyPacket    g_outboundBattleReady = {};
 static bool                 g_outboundBattleReadyNew = false;
 static BattleReadyPacket    g_inboundBattleReady = {};
@@ -104,11 +90,11 @@ static bool                     g_outboundMultiResimNew = false;
 static MultiResimPacket         g_inboundMultiResim = {};
 static bool                     g_inboundMultiResimNew = false;
 static CRITICAL_SECTION         g_multiResimCS;
-static DumpNdjsonPacket         g_outboundDumpNDJSON = {};
-static bool                     g_outboundDumpNDJSONNew = false;
-static DumpNdjsonPacket         g_inboundDumpNDJSON = {};
-static bool                     g_inboundDumpNDJSONNew = false;
-static CRITICAL_SECTION         g_dumpNDJSONCS;
+static SnapDumpPacket           g_outboundSnapDump = {};
+static bool                     g_outboundSnapDumpNew = false;
+static SnapDumpPacket           g_inboundSnapDump = {};
+static bool                     g_inboundSnapDumpNew = false;
+static CRITICAL_SECTION         g_snapDumpCS;
 static AutoTestStartPacket      g_outboundAutoTestStart = {};
 static bool                     g_outboundAutoTestStartNew = false;
 static AutoTestStartPacket      g_inboundAutoTestStart = {};
@@ -163,7 +149,6 @@ static void MarkPeerDisconnected(ENetPeer* peer, bool disconnectNow)
 {
     g_peerDisconnected = true;
     // The game thread may not get another tick to consume queued diagnostics.
-    Rollback_FlushNetplayLive(-1);
     if (disconnectNow && peer)
         enet_peer_disconnect_now(peer, 0);
     g_running = false;
@@ -303,54 +288,6 @@ static DWORD WINAPI Netplay_ServiceThread(LPVOID)
             enet_host_flush(g_host);
         }
 
-        // --- Send outbound resim-notify packet ---
-        bool hasNewResimNotify = false;
-        ResimNotifyPacket rnPkt = {};
-        {
-            ScopedCS lock(g_resimNotifyCS);
-            if (g_outboundResimNotifyNew)
-            {
-                rnPkt = g_outboundResimNotify;
-                hasNewResimNotify = true;
-                g_outboundResimNotifyNew = false;
-            }
-        }
-
-        if (hasNewResimNotify && g_peer)
-        {
-            ENetPacket* packet = enet_packet_create(
-                &rnPkt, sizeof(ResimNotifyPacket), ENET_PACKET_FLAG_RELIABLE
-            );
-            if (enet_peer_send(g_peer, 0, packet) != 0) {
-                enet_packet_destroy(packet);
-            }
-            enet_host_flush(g_host);
-        }
-
-        // --- Send outbound ground-truth packet ---
-        bool hasNewGroundTruth = false;
-        GroundTruthPacket gtPkt = {};
-        {
-            ScopedCS lock(g_groundTruthCS);
-            if (g_outboundGroundTruthNew)
-            {
-                gtPkt = g_outboundGroundTruth;
-                hasNewGroundTruth = true;
-                g_outboundGroundTruthNew = false;
-            }
-        }
-
-        if (hasNewGroundTruth && g_peer)
-        {
-            ENetPacket* packet = enet_packet_create(
-                &gtPkt, sizeof(GroundTruthPacket), ENET_PACKET_FLAG_RELIABLE
-            );
-            if (enet_peer_send(g_peer, 0, packet) != 0) {
-                enet_packet_destroy(packet);
-            }
-            enet_host_flush(g_host);
-        }
-
         bool hasBattleReady = false;
         BattleReadyPacket readyPkt = {};
         {
@@ -471,21 +408,21 @@ static DWORD WINAPI Netplay_ServiceThread(LPVOID)
             enet_host_flush(g_host);
         }
 
-        bool hasDumpNDJSON = false;
-        DumpNdjsonPacket dumpNDJSONPkt = {};
+        bool hasSnapDump = false;
+        SnapDumpPacket snapDumpPacket = {};
         {
-            ScopedCS lock(g_dumpNDJSONCS);
-            if (g_outboundDumpNDJSONNew)
+            ScopedCS lock(g_snapDumpCS);
+            if (g_outboundSnapDumpNew)
             {
-                dumpNDJSONPkt = g_outboundDumpNDJSON;
-                hasDumpNDJSON = true;
-                g_outboundDumpNDJSONNew = false;
+                snapDumpPacket = g_outboundSnapDump;
+                hasSnapDump = true;
+                g_outboundSnapDumpNew = false;
             }
         }
-        if (hasDumpNDJSON && g_peer)
+        if (hasSnapDump && g_peer)
         {
             ENetPacket* packet = enet_packet_create(
-                &dumpNDJSONPkt, sizeof(DumpNdjsonPacket), ENET_PACKET_FLAG_RELIABLE
+                &snapDumpPacket, sizeof(SnapDumpPacket), ENET_PACKET_FLAG_RELIABLE
             );
             if (enet_peer_send(g_peer, 0, packet) != 0)
                 enet_packet_destroy(packet);
@@ -627,30 +564,6 @@ static DWORD WINAPI Netplay_ServiceThread(LPVOID)
                                 }
                                 break;
 
-                            case PACKET_RESIM_NOTIFY:
-                                if (event.packet->dataLength >= sizeof(ResimNotifyPacket))
-                                {
-                                    const ResimNotifyPacket* rnp = (const ResimNotifyPacket*)event.packet->data;
-                                    {
-                                        ScopedCS lock(g_resimNotifyCS);
-                                        g_inboundResimNotify = *rnp;
-                                        g_inboundResimNotifyNew = true;
-                                    }
-                                }
-                                break;
-
-                            case PACKET_GROUND_TRUTH:
-                                if (event.packet->dataLength >= sizeof(GroundTruthPacket))
-                                {
-                                    const GroundTruthPacket* gtp = (const GroundTruthPacket*)event.packet->data;
-                                    {
-                                        ScopedCS lock(g_groundTruthCS);
-                                        g_inboundGroundTruth = *gtp;
-                                        g_inboundGroundTruthNew = true;
-                                    }
-                                }
-                                break;
-
                             case PACKET_BATTLE_READY:
                                 if (event.packet->dataLength >= sizeof(BattleReadyPacket))
                                 {
@@ -712,14 +625,16 @@ static DWORD WINAPI Netplay_ServiceThread(LPVOID)
                                 }
                                 break;
 
-                            case PACKET_DUMP_NDJSON:
-                                if (event.packet->dataLength >= sizeof(DumpNdjsonPacket))
+                            case PACKET_SNAPDUMP:
+                                if (event.packet->dataLength >= sizeof(SnapDumpPacket))
                                 {
-                                    const DumpNdjsonPacket* dnp =
-                                        (const DumpNdjsonPacket*)event.packet->data;
-                                    ScopedCS lock(g_dumpNDJSONCS);
-                                    g_inboundDumpNDJSON = *dnp;
-                                    g_inboundDumpNDJSONNew = true;
+                                    const SnapDumpPacket* packet =
+                                        (const SnapDumpPacket*)event.packet->data;
+                                    ScopedCS lock(g_snapDumpCS);
+                                    g_inboundSnapDump = *packet;
+                                    g_inboundSnapDump.timestamp[
+                                        sizeof(g_inboundSnapDump.timestamp) - 1] = '\0';
+                                    g_inboundSnapDumpNew = true;
                                 }
                                 break;
 
@@ -838,13 +753,11 @@ void Netplay_Init(ENetHost* host, ENetPeer* peer)
         InitializeCriticalSection(&g_outboundCS);
         InitializeCriticalSection(&g_inboundCS);
         InitializeCriticalSection(&g_delayCS);
-        InitializeCriticalSection(&g_resimNotifyCS);
-        InitializeCriticalSection(&g_groundTruthCS);
         InitializeCriticalSection(&g_battleReadyCS);
         InitializeCriticalSection(&g_desyncCS);
         InitializeCriticalSection(&g_restartCS);
         InitializeCriticalSection(&g_multiResimCS);
-        InitializeCriticalSection(&g_dumpNDJSONCS);
+        InitializeCriticalSection(&g_snapDumpCS);
         InitializeCriticalSection(&g_autoTestStartCS);
         InitializeCriticalSection(&g_autoTestFrameCS);
         InitializeCriticalSection(&g_autoTestCompleteCS);
@@ -852,10 +765,6 @@ void Netplay_Init(ENetHost* host, ENetPeer* peer)
 
         g_outboundDelayNew = false;
         g_inboundDelayNew = false;
-        g_outboundResimNotifyNew = false;
-        g_inboundResimNotifyNew = false;
-        g_outboundGroundTruthNew = false;
-        g_inboundGroundTruthNew = false;
         g_outboundBattleReadyNew = false;
         g_inboundBattleReadyNew = false;
         g_outboundDesyncNew = false;
@@ -864,8 +773,8 @@ void Netplay_Init(ENetHost* host, ENetPeer* peer)
         g_inboundRestartNew = false;
         g_outboundMultiResimNew = false;
         g_inboundMultiResimNew = false;
-        g_outboundDumpNDJSONNew = false;
-        g_inboundDumpNDJSONNew = false;
+        g_outboundSnapDumpNew = false;
+        g_inboundSnapDumpNew = false;
         g_outboundAutoTestStartNew = false;
         g_inboundAutoTestStartNew = false;
         g_outboundAutoTestFrameHead = 0;
@@ -965,44 +874,6 @@ void Netplay_SendRollback(int32_t rollbackFrames, int32_t effectiveFrame)
     g_outboundRollbackNew = true;
 }
 
-void Netplay_SendResimNotify(const ResimNotifyPacket& pkt)
-{
-    ScopedCS lock(g_resimNotifyCS);
-    g_outboundResimNotify = pkt;
-    g_outboundResimNotifyNew = true;
-}
-
-bool Netplay_GetInboundResimNotify(ResimNotifyPacket& outNotify)
-{
-    ScopedCS lock(g_resimNotifyCS);
-    if (g_inboundResimNotifyNew)
-    {
-        outNotify = g_inboundResimNotify;
-        g_inboundResimNotifyNew = false;
-        return true;
-    }
-    return false;
-}
-
-void Netplay_SendGroundTruth(const GroundTruthPacket& pkt)
-{
-    ScopedCS lock(g_groundTruthCS);
-    g_outboundGroundTruth = pkt;
-    g_outboundGroundTruthNew = true;
-}
-
-bool Netplay_GetInboundGroundTruth(GroundTruthPacket& outGT)
-{
-    ScopedCS lock(g_groundTruthCS);
-    if (g_inboundGroundTruthNew)
-    {
-        outGT = g_inboundGroundTruth;
-        g_inboundGroundTruthNew = false;
-        return true;
-    }
-    return false;
-}
-
 bool Netplay_GetInboundDelay(int32_t& outDelay, int32_t& outEffectiveFrame)
 {
     ScopedCS lock(g_delayCS);
@@ -1047,24 +918,31 @@ bool Netplay_GetInboundMultiResim(bool& outEnabled)
     return true;
 }
 
-void Netplay_SendDumpNDJSON(int32_t frame)
+void Netplay_SendSnapDump(int32_t frame, const char* timestamp)
 {
-    ScopedCS lock(g_dumpNDJSONCS);
-    g_outboundDumpNDJSON.type = PACKET_DUMP_NDJSON;
-    g_outboundDumpNDJSON.frame = frame;
-    g_outboundDumpNDJSONNew = true;
+    ScopedCS lock(g_snapDumpCS);
+    g_outboundSnapDump = {};
+    g_outboundSnapDump.type = PACKET_SNAPDUMP;
+    g_outboundSnapDump.frame = frame;
+    if (timestamp)
+        strncpy(g_outboundSnapDump.timestamp, timestamp,
+                sizeof(g_outboundSnapDump.timestamp) - 1);
+    g_outboundSnapDumpNew = true;
 }
 
-bool Netplay_GetInboundDumpNDJSON(int32_t& outFrame)
+bool Netplay_GetInboundSnapDump(int32_t& outFrame, char* timestamp,
+                                size_t timestampSize)
 {
-    if (!g_active || !g_csInitialized)
+    if (!g_active || !g_csInitialized || !timestamp || timestampSize == 0)
         return false;
 
-    ScopedCS lock(g_dumpNDJSONCS);
-    if (!g_inboundDumpNDJSONNew)
+    ScopedCS lock(g_snapDumpCS);
+    if (!g_inboundSnapDumpNew)
         return false;
-    outFrame = g_inboundDumpNDJSON.frame;
-    g_inboundDumpNDJSONNew = false;
+    outFrame = g_inboundSnapDump.frame;
+    strncpy(timestamp, g_inboundSnapDump.timestamp, timestampSize - 1);
+    timestamp[timestampSize - 1] = '\0';
+    g_inboundSnapDumpNew = false;
     return true;
 }
 
@@ -1306,16 +1184,6 @@ void Netplay_ClearInputQueues()
         std::memset(&g_outboundPacket, 0, sizeof(g_outboundPacket));
     }
     {
-        ScopedCS lock(g_resimNotifyCS);
-        g_inboundResimNotifyNew = false;
-        g_outboundResimNotifyNew = false;
-    }
-    {
-        ScopedCS lock(g_groundTruthCS);
-        g_inboundGroundTruthNew = false;
-        g_outboundGroundTruthNew = false;
-    }
-    {
         ScopedCS lock(g_desyncCS);
         g_inboundDesync = {};
         g_outboundDesync = {};
@@ -1403,9 +1271,6 @@ uint32_t Netplay_GetRTT()
 void Netplay_Shutdown()
 {
     HookLog("Netplay: Shutting down...\n");
-    int32_t liveFrame = Controller_GetNetFrameCount();
-    if (liveFrame >= 0)
-        Rollback_FlushNetplayLive(liveFrame);
     g_running = false;
 
     if (g_serviceThread)
@@ -1444,13 +1309,11 @@ void Netplay_Shutdown()
         DeleteCriticalSection(&g_inboundCS);
 
         DeleteCriticalSection(&g_delayCS);
-        DeleteCriticalSection(&g_resimNotifyCS);
-        DeleteCriticalSection(&g_groundTruthCS);
         DeleteCriticalSection(&g_battleReadyCS);
         DeleteCriticalSection(&g_desyncCS);
         DeleteCriticalSection(&g_restartCS);
         DeleteCriticalSection(&g_multiResimCS);
-        DeleteCriticalSection(&g_dumpNDJSONCS);
+        DeleteCriticalSection(&g_snapDumpCS);
         DeleteCriticalSection(&g_autoTestStartCS);
         DeleteCriticalSection(&g_autoTestFrameCS);
         DeleteCriticalSection(&g_autoTestCompleteCS);

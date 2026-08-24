@@ -70,10 +70,9 @@ td code { color:#00d4ff; word-break:break-all; }
 <div id="drop" class="drop"><div id="dropbox" class="dropbox">
   <h1>UMVC3 Rollback Diagnostics v2</h1>
   <p>Drop one or two <b>.usdp</b> snapdumps to decode and compare rollback history.</p>
-  <p>NDJSON files remain accepted for quick raw inspection.</p>
   <small>With two snapdumps, the first is treated as Host and the second as Client.</small>
 </div></div>
-<input id="files" type="file" accept=".usdp,.ndjson,.json,.jsonl,.txt" multiple hidden>
+<input id="files" type="file" accept=".usdp" multiple hidden>
 <main id="app">
   <div class="toolbar">
     <button id="open">Open</button><button id="clear">Clear</button>
@@ -195,7 +194,6 @@ function parseUsdp(file, fileName='snapdump.usdp') {
   }
   return {name:fileName, role:ROLE[role] || `role ${role}`, trigger,imageBase,imageSize,commit,frames,byFrame};
 }
-function parseJson(file, fileName='NDJSON') { const textValue=new TextDecoder().decode(file); const lines=textValue.split(/\r?\n/).filter(Boolean); const records=[]; for(const line of lines) { try { const value=JSON.parse(line); if(value.frame !== undefined) records.push(value); } catch(_) {} } return {name:fileName, role:'ndjson', frames:records.map(entry=>({number:entry.frame,data:entry})),byFrame:new Map(records.map(entry=>[entry.frame,{number:entry.frame,data:entry}]))}; }
 function valueAt(frame, region, offset, size) { return frame.data.slice(region.offset+offset, region.offset+offset+size); }
 function bytesHex(bytes) { return Array.from(bytes,b=>b.toString(16).padStart(2,'0')).join(' '); }
 function byteDiff(a,b) { if(!a||!b) return true; if(a.length!==b.length) return true; for(let i=0;i<a.length;i++) if(a[i]!==b[i]) return true; return false; }
@@ -592,7 +590,7 @@ function update() {
   const comparisonStatus=!compareEnabled ? 'Comparison disabled' : state.dumps.length>1 ? (diffs.length ? `${diffs.length} differences` : 'Match') : 'Single dump';
   const visualStatus=state.dumps.length<2?'Single peer':visualMismatches.length?`${visualMismatches.length} character desync${visualMismatches.length===1?'':'s'}`:'Character state matches';
   $('visualLegend').innerHTML=`Character state: <span class="${visualMismatches.length?'bad':'ok'}">${visualStatus}</span>`;
-  $('summary').innerHTML=`<span>Frame <strong>${frame.number}</strong></span><span>Local <code>${hex(frame.local)}</code></span><span>Remote <code>${hex(frame.remote)}</code></span><span>Regions <strong>${frame.regions?.length ?? 'NDJSON'}</strong></span><span class="${visualMismatches.length?'bad':'ok'}">${visualStatus}</span><span class="${compareEnabled?(diffs.length?'bad':'ok'):''}">${comparisonStatus}</span>`;
+  $('summary').innerHTML=`<span>Frame <strong>${frame.number}</strong></span><span>Local <code>${hex(frame.local)}</code></span><span>Remote <code>${hex(frame.remote)}</code></span><span>Regions <strong>${frame.regions.length}</strong></span><span class="${visualMismatches.length?'bad':'ok'}">${visualStatus}</span><span class="${compareEnabled?(diffs.length?'bad':'ok'):''}">${comparisonStatus}</span>`;
   if(compareEnabled) {
     if(!diffs.length) $('diffs').innerHTML=state.dumps.length>1 ? '<div class="empty ok">No differences on this frame.</div>' : '<div class="empty">Load a second .usdp to compare peers.</div>';
     else $('diffs').innerHTML=diffs.map((d,i)=>`<button class="diff-row" data-diff="${i}"><span class="frame-link">${frame.number}</span><span class="region">${d.region} +${hex(d.offset,4)}</span><span class="kind">${d.kind}${d.size?' ('+d.size+' B)':''}</span></button>`).join('');
@@ -704,8 +702,12 @@ function inspectDiff(diff,a,b) {
 function load(files) {
   stopPlayback();
   state.dumps=[]; state.frames=[]; state.index=0;
-  Promise.all(files.map(async file=>{ const buffer=await file.arrayBuffer(); return file.name.toLowerCase().endsWith('.usdp') ? parseUsdp(buffer,file.name) : parseJson(buffer,file.name); })).then(dumps=>{
-    dumps.sort((a,b)=>({host:0,client:1,offline:2,ndjson:3}[a.role] ?? 4)-({host:0,client:1,offline:2,ndjson:3}[b.role] ?? 4));
+  Promise.resolve().then(async()=>{
+    if(files.length<1 || files.length>2) throw Error('Select one or two .usdp snapdumps');
+    if(files.some(file=>!file.name.toLowerCase().endsWith('.usdp'))) throw Error('Only .usdp snapdumps are supported');
+    return Promise.all(files.map(async file=>parseUsdp(await file.arrayBuffer(),file.name)));
+  }).then(dumps=>{
+    dumps.sort((a,b)=>({host:0,client:1,offline:2}[a.role] ?? 3)-({host:0,client:1,offline:2}[b.role] ?? 3));
     state.dumps=dumps; const numbers=new Set(dumps.flatMap(d=>d.frames.map(f=>f.number))); state.frames=Array.from(numbers).sort((x,y)=>x-y); $('file').textContent=dumps.map(d=>`${d.role}: ${d.name}`).join(' | '); $('drop').style.display='none'; $('app').classList.add('active'); update();
   }).catch(error=>alert(`Could not load file: ${error.message}`));
 }

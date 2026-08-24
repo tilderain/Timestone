@@ -93,10 +93,8 @@ uses source symbols instead of line numbers because line numbers change often.
 - Global RNG, `sEffect` RNG, and per-character RNG are snapshot concerns.
 - Input packets carry checksums; a mismatch synchronizes a desync warning and
   pause state between peers.
-- Resimulation and ground-truth packets are diagnostic channels, not authority
-  for gameplay correction.
-- NDJSON logging can capture live, resimulated, projectile, collision, input,
-  and RNG state. It is expensive and controlled by diagnostic toggles.
+- Snapdumps retain packed rollback history for byte-level desync comparison.
+- F10 writes matching host/client snapdumps during netplay.
 
 ## Threads
 

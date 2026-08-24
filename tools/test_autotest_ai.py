@@ -140,7 +140,7 @@ class AutoTestAiTest(unittest.TestCase):
     def test_recent_crash_artifacts_ignores_unchanged_old_log(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            log = root / "nplive_old" / "umvc3_crash.log"
+            log = root / "nplive_old_host" / "umvc3_crash.log"
             log.parent.mkdir()
             log.write_text("=== UMVC3Hook crash old run ===\n", encoding="utf-8")
             snapshot = runner.crash_artifact_snapshot(root)
@@ -151,7 +151,7 @@ class AutoTestAiTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             snapshot = runner.crash_artifact_snapshot(root)
-            log = root / "nplive_new" / "umvc3_crash.log"
+            log = root / "nplive_new_client" / "umvc3_crash.log"
             log.parent.mkdir()
             log.write_text("=== UMVC3Hook crash new run ===\n", encoding="utf-8")
             self.assertEqual([str(log)], runner.recent_crash_artifacts(

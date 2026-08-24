@@ -1,6 +1,16 @@
 #include "../pch.h"
 
 #include "rollback_snapdump.h"
+#include "autotest.h"
+
+extern void HookLog(const char* fmt, ...);
+
+namespace {
+
+int32_t g_pendingDesyncTriggerFrame = -1;
+int32_t g_pendingDesyncCaptureFrame = -1;
+
+} // namespace
 
 #if ROLLBACK_SNAPDUMP_ENABLED
 
@@ -16,8 +26,6 @@
 #include <ctime>
 #include <new>
 #include <vector>
-
-extern void HookLog(const char* fmt, ...);
 
 namespace {
 
@@ -527,6 +535,29 @@ bool SnapDump_WriteHistory(int32_t triggerFrame, const char* relativePath)
     return true;
 }
 
+bool SnapDump_WriteManualHistory(int32_t frame, const char* timestamp)
+{
+    if (!timestamp || strlen(timestamp) != 15 || timestamp[8] != '_') {
+        HookLog("SnapDump: rejected invalid manual timestamp\n");
+        return false;
+    }
+    for (size_t i = 0; i < 15; ++i) {
+        if (i == 8) continue;
+        if (timestamp[i] < '0' || timestamp[i] > '9') {
+            HookLog("SnapDump: rejected invalid manual timestamp %s\n", timestamp);
+            return false;
+        }
+    }
+
+    const char* role = Netplay_IsActive()
+        ? (Netplay_IsHost() ? "host" : "client") : "offline";
+    char relativePath[128] = {};
+    snprintf(relativePath, sizeof(relativePath), "desync_%s_%s_f%d.usdp",
+             timestamp, role, frame);
+    g_dumpWritten = false;
+    return SnapDump_WriteHistory(frame, relativePath);
+}
+
 void SnapDump_Reset()
 {
     for (HistoryFrame& frame : g_history) {
@@ -537,3 +568,40 @@ void SnapDump_Reset()
 }
 
 #endif
+
+extern "C" void Rollback_NotifyDesyncTriggered(int32_t frame)
+{
+    if (g_pendingDesyncTriggerFrame >= 0) return;
+    g_pendingDesyncTriggerFrame = frame;
+    g_pendingDesyncCaptureFrame = frame + 15;
+    HookLog("Desync: delaying pause and snapdump through frame %d\n",
+            g_pendingDesyncCaptureFrame);
+}
+
+extern "C" void Rollback_ClearPendingDesyncCapture()
+{
+    g_pendingDesyncTriggerFrame = -1;
+    g_pendingDesyncCaptureFrame = -1;
+}
+
+extern "C" bool Rollback_ProcessDesyncDelay(int32_t currentFrame)
+{
+    if (g_pendingDesyncTriggerFrame < 0) return false;
+    const int32_t captureFrame = g_pendingDesyncCaptureFrame;
+    if (currentFrame < captureFrame) return true;
+
+#if ROLLBACK_SNAPDUMP_ENABLED
+    char autoTestPath[MAX_PATH] = {};
+    if (!SnapDump_WriteHistory(captureFrame,
+            AutoTest_GetSnapDumpRelativePath(autoTestPath, sizeof(autoTestPath))
+                ? autoTestPath : nullptr)) {
+        HookLog("Desync: snapdump failed; retaining capture through frame %d for retry\n",
+                captureFrame);
+        return true;
+    }
+#endif
+
+    g_pendingDesyncTriggerFrame = -1;
+    g_pendingDesyncCaptureFrame = -1;
+    return false;
+}

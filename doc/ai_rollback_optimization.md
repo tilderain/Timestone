@@ -47,16 +47,14 @@ be reported as successful optimization runs.
 3. Do not deploy, copy, or inspect the installed ASI location. The project is
    already deployed through its existing setup.
 4. Use a release build. Debug timings are not representative.
-5. Keep NDJSON logging disabled during performance measurement. Every analyzed
-   rollback entry must report `"ndjson_enabled": false`.
-6. Do not change rollback depth, delay, multi-resim mode, roster, stage, CPU
+5. Do not change rollback depth, delay, multi-resim mode, roster, stage, CPU
    mode, or other test conditions between baseline and candidate runs.
-7. Optimize one independently measurable candidate at a time.
-8. Never accept a speedup that changes deterministic state or merely avoids
+6. Optimize one independently measurable candidate at a time.
+7. Never accept a speedup that changes deterministic state or merely avoids
    rollback work by reducing the number or depth of rollback windows.
-9. Do not optimize logging or profiling instrumentation unless the profile and
+8. Do not optimize logging or profiling instrumentation unless the profile and
    a dedicated control measurement prove it is the production bottleneck.
-10. Prefer optimizations in the mod's snapshot, restore, re-simulation,
+9. Prefer optimizations in the mod's snapshot, restore, re-simulation,
     bookkeeping, traversal, allocation, and policy code. Native gameplay code is
     too risky to alter merely because it is expensive.
 11. Do not disable or bypass a native gameplay function unless there is clear
@@ -214,7 +212,7 @@ profiles form a valid pair.
 
 ### 5.1 Profile Location
 
-Each netplay process writes its own session directory beside the loaded plugin:
+Each netplay process writes its own diagnostics directory beside the loaded plugin:
 
 ```text
 nplive_<TIMESTAMP>_host/rollback_profile.json
@@ -222,19 +220,8 @@ nplive_<TIMESTAMP>_client/rollback_profile.json
 ```
 
 A reset or rematch may create a suffixed directory such as `_r1`. Use only
-directories created after the test launch timestamp. Match host and client
-sessions by timestamp and logs; never analyze a stale profile from an earlier
-run.
-
-When profiling is active and NDJSON is disabled, the log reports:
-
-```text
-NetplayLive: profile session -> <directory>
-```
-
-Use that path as the authoritative artifact location. Preserve the raw host and
-client JSON files before beginning another run because a later session may
-replace or split artifacts.
+directories created after the test launch timestamp. Preserve the raw host and
+client JSON files before beginning another run.
 
 ### 5.2 JSON Structure
 
@@ -242,8 +229,8 @@ replace or split artifacts.
 
 - `type: "rollback"`: one complete rollback window from `start_frame` through
   `end_frame`.
-- `type: "post_resim"`: work performed after re-simulation, including notify,
-  input resolution, and the final snapshot save.
+- `type: "post_resim"`: input resolution and final snapshot work performed
+  after re-simulation.
 
 Do not combine these entry types as if they had the same schema. Analyze
 rollback-window cost first, then report post-resim overhead separately.
@@ -256,9 +243,8 @@ A profile is `profile_ready` only when all of the following are true:
 2. At least one side contains `rollback` entries.
 3. All analyzed entries have `frame_count > 0` and finite non-negative timing
    values.
-4. All analyzed entries have `ndjson_enabled == false`.
-5. Baseline and candidate use the same `multi_resim_enabled` value.
-6. The combined evidence contains at least 30 rollback windows and 200 replayed
+4. Baseline and candidate use the same `multi_resim_enabled` value.
+5. The combined evidence contains at least 30 rollback windows and 200 replayed
    frames.
 
 The 30-window and 200-frame thresholds are minimums, not targets. Prefer 50 or

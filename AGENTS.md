@@ -22,7 +22,7 @@
 | `UMVC3Hook/code/LaunchMenu.cpp/h` | **Launch dialog**: Win32 pre-init dialog for selecting Normal/Training/Dual Training mode, character/stage selection, ENet host/connect configuration |
 | `UMVC3Hook/code/trainingboot.cpp/h` | **Training mode boot**: bypasses title screen logos, directly configures a training match with chosen characters/stage, hooks game init sequence |
 | `UMVC3Hook/code/dtieditor.cpp/h` | **DTI property editor**: reverse-engineering tool that browses MT Framework's runtime type hierarchy (MtDTI) and captures live property values |
-| `UMVC3Hook/code/diag.cpp/h` | **Diagnostics**: per-frame character state snapshots (position, animation, RNG, flags), input history logging, NDJSON dump for debugging rollback |
+| `UMVC3Hook/code/diag.cpp/h` | **Diagnostics**: per-frame character state snapshots (position, animation, RNG, flags) and input history logging |
 | `UMVC3Hook/code/eSettingsManager.cpp/h` | **Settings manager**: reads `Timestone.ini` at startup, exposes hotkey bindings (menu toggle, camera controls) and feature toggles |
 | `UMVC3Hook/code/eNotifManager.cpp/h` | **OSD notifications**: on-screen text messages with fade timers, push-based API for alerting the user |
 | `UMVC3Hook/code/UMVC3Camera.cpp/h` | **Free camera**: overrides game camera position/rotation/FOV, keyboard-controlled movement, screenshot utility |

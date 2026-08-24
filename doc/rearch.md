@@ -102,12 +102,8 @@ presentation and unrelated manager work.
 
 ### Diagnostics
 
-Frame JSON generation has measured between approximately 1 and 6 ms per replayed
-frame. This instrumentation is useful for development but cannot remain enabled
-in a production latency configuration.
-
-Profiling also adds overhead. Production measurements must be repeated with
-NDJSON and detailed profiling disabled after correctness is established.
+Profiling adds overhead. Production measurements must be repeated with detailed
+profiling disabled after correctness is established.
 
 ## Architectural Floor
 
@@ -228,13 +224,9 @@ single-frame corrections to fit comfortably within one presentation frame.
 
 ### 8. Production diagnostics mode
 
-Provide distinct runtime modes:
-
-- Correctness mode: full NDJSON, divergence data, expensive sanitation, and
-  detailed profiling.
-- Performance profiling mode: timing counters without frame JSON.
-- Production mode: no per-frame JSON, no broad sanitation unless an invariant
-  fails, and minimal telemetry.
+Use snapdumps for correctness investigation, detailed timing counters for
+performance profiling, and minimal telemetry in production. Broad sanitation
+should run only when required by a concrete invariant.
 
 Performance conclusions should be based on production mode after correctness
 has been verified with the same test cases.

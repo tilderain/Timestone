@@ -10,7 +10,6 @@
 #include "rollback_memory.h"
 #include "rollback_diagnostics.h"
 #include "rollback_profile.h"
-#include "rollback_ndjson.h"
 #include "../kiero/minhook/include/MinHook.h"
 
 #include <cmath>
@@ -140,19 +139,15 @@ static void __fastcall hkMvc3MainMove(uint64_t main)
     if (g_f7State == 1) {
         g_f7StartFrame = Controller_GetNetFrameCount();
         Rollback_SaveSnapshot(g_f7StartFrame);
-        g_f7DiagSession = NDJSON_BeginSession(true);
         g_f7State = 2;
         HookLog("F7: snapshot saved at frame %d, recording %d frames\n",
                 g_f7StartFrame, g_f7Remaining);
     }
     if (g_f7State == 2 && --g_f7Remaining <= 0) {
-        if (g_f7DiagSession >= 0)
-            NDJSON_DumpFrame(curFrame, 0);
         g_f7State = 0;
         HookLog("F7: %d frames recorded, restoring frame %d and re-simulating\n",
                 8, g_f7StartFrame);
         Rollback_ReSimulate(g_f7StartFrame, g_f7StartFrame + 8);
-        g_f7DiagSession = -1;
         int32_t updatedFrame = Controller_GetNetFrameCount();
         if (updatedFrame >= 0) {
             Rollback_SaveSnapshot(updatedFrame);
@@ -177,16 +172,13 @@ static void __fastcall hkMvc3MainMove(uint64_t main)
                 Rollback_FreezeWatchdogHeartbeat("rollback-resimulate", curFrame);
                 Rollback_ReSimulate(start, end);
                 const uint64_t postResimStart = Profile_Now();
-                if (g_ndjsonLoggingEnabled)
-                    NDJSON_SendResimNotify(start, end);
-                const uint64_t notifyEnd = Profile_Now();
                 Controller_ResolveRemoteInput(curFrame);
                 const uint64_t postSaveStart = Profile_Now();
                 Rollback_SaveSnapshot(curFrame);
                 const uint64_t postSaveEnd = Profile_Now();
                 if (Profile_Enabled()) {
-                    Profile_DumpPostResim(curFrame, notifyEnd - postResimStart,
-                                          postSaveStart - notifyEnd,
+                    Profile_DumpPostResim(curFrame,
+                                          postSaveStart - postResimStart,
                                           postSaveEnd - postSaveStart,
                                           postSaveEnd - postResimStart);
                 }
@@ -214,10 +206,6 @@ static void __fastcall hkMvc3MainMove(uint64_t main)
     }
 
     curFrame = Controller_GetNetFrameCount();
-    if (Netplay_IsActive() && curFrame >= 0)
-        NDJSON_DumpNetplayLive(curFrame);
-    if (curFrame >= 0)
-        NDJSON_CaptureFrame(curFrame, false, false);
 
     Rollback_FreezeWatchdogHeartbeat("native-main-move", curFrame);
     original(main);
@@ -230,10 +218,6 @@ static void __fastcall hkMvc3MainMove(uint64_t main)
                 curFrame, replayFrame, main);
     }
 
-    if (curFrame >= 0)
-        NDJSON_CaptureFrame(curFrame, false, true);
-    if (g_f7DiagSession >= 0 && g_f7State == 2)
-        NDJSON_DumpFrame(curFrame, 0);
 }
 
 static void __fastcall hkCallSRender(uint64_t render)
