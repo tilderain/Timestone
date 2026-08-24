@@ -50,7 +50,7 @@ static constexpr uint32_t MAX_PARTICLE_MANAGERS = 256;
 static constexpr uint32_t SSHOT_CATEGORY = 10;
 static constexpr uint32_t TEAM_OFFSETS[] = {0x40, 0x300};
 static constexpr uint32_t CHARACTER_EFFECT_SLOT_OFFSETS[] = {
-    0x68F0, 0x68F8, 0x6900, 0x6920,
+    0x68F0, 0x68F8, 0x6900, 0x6908, 0x6910, 0x6920,
 };
 static constexpr uint32_t CHARACTER_INDEXED_EFFECTS_OFFSET = 0x6748;
 static constexpr uint32_t CHARACTER_INDEXED_EFFECT_COUNT = 21;

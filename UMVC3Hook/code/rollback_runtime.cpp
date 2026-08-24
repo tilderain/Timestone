@@ -196,6 +196,7 @@ static bool __fastcall hkMtObjectIsAlive(uint64_t object)
         return false;
     }
     const uint64_t vtable = *(uint64_t*)object;
+    if (!vtable) return false;
     if (vtable == (uint64_t)_addr(VTABLE_MTOBJECT)) {
         return false;
     }
