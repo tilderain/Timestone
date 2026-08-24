@@ -1236,15 +1236,21 @@ extern "C" bool Rollback_ProcessDesyncDelay(int32_t currentFrame)
     const int32_t captureFrame = g_pendingDesyncCaptureFrame;
     if (currentFrame < captureFrame) return true;
     if (!g_pendingDesyncCaptureWritten) {
+        bool snapDumpWritten = true;
 #if ROLLBACK_SNAPDUMP_ENABLED
         char autoTestPath[MAX_PATH] = {};
         // Capture after the two-frame grace period so the dump contains the
         // state immediately after the checksum mismatch, not only the stale
         // history ending at the trigger frame.
-        SnapDump_WriteHistory(captureFrame,
+        snapDumpWritten = SnapDump_WriteHistory(captureFrame,
             AutoTest_GetSnapDumpRelativePath(autoTestPath, sizeof(autoTestPath))
                 ? autoTestPath : nullptr);
 #endif
+        if (!snapDumpWritten) {
+            HookLog("Desync: snapdump failed; retaining capture through frame %d for retry\n",
+                    captureFrame);
+            return true;
+        }
         NDJSON_NotifyDesyncTriggered(g_pendingDesyncTriggerFrame);
         g_pendingDesyncCaptureWritten = true;
     }

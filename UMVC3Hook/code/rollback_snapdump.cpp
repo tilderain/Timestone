@@ -10,6 +10,7 @@
 #include "rollback_snapshot.h"
 
 #include <algorithm>
+#include <cerrno>
 #include <cstdio>
 #include <cstring>
 #include <ctime>
@@ -398,7 +399,10 @@ bool SnapDump_WriteHistory(int32_t triggerFrame, const char* relativePath)
     std::sort(frames.begin(), frames.end(), [](const HistoryFrame* a, const HistoryFrame* b) {
         return a->frame < b->frame;
     });
-    if (frames.empty()) return false;
+    if (frames.empty()) {
+        HookLog("SnapDump: no snapshots available through frame %d\n", triggerFrame);
+        return false;
+    }
 
     SYSTEMTIME time;
     GetLocalTime(&time);
@@ -412,11 +416,23 @@ bool SnapDump_WriteHistory(int32_t triggerFrame, const char* relativePath)
         relativePath = defaultRelative;
     }
     char path[512];
-    if (!Rollback_ResolveDllPath(path, sizeof(path), relativePath) ||
-        !CreateParentDirectories(path))
+    if (!Rollback_ResolveDllPath(path, sizeof(path), relativePath)) {
+        HookLog("SnapDump: failed to resolve output path %s\n", relativePath);
         return false;
+    }
+    if (!CreateParentDirectories(path)) {
+        HookLog("SnapDump: failed to create output directories for %s error=%lu\n",
+                path, GetLastError());
+        return false;
+    }
     FILE* file = fopen(path, "wb");
-    if (!file) return false;
+    if (!file) {
+        HookLog("SnapDump: failed to open %s errno=%d\n", path, errno);
+        return false;
+    }
+
+    HookLog("SnapDump: writing %u snapshots through frame %d -> %s\n",
+            (uint32_t)frames.size(), triggerFrame, path);
 
     DumpHeader header = {};
     header.magic = DUMP_MAGIC;
