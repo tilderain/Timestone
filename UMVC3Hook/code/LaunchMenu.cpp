@@ -155,6 +155,7 @@ static bool IsValidTrainingLaunchPacket(const LaunchTrainingPacket& packet)
 static volatile bool g_networkPolling = false;
 static HANDLE g_hPollThread = NULL;
 static bool g_isLaunching = false;
+static bool g_directConnectExpanded = false;
 
 static void GetSettingsPath(const char* filename, char* path, size_t pathSize)
 {
@@ -217,6 +218,8 @@ static void LoadRollbackSettings()
     g_dialogConfig.hostPort = port[0] != '\0'
         ? atoi(port)
         : GetPrivateProfileIntA("Network", "HostPort", g_dialogConfig.hostPort, rollbackPath);
+    g_directConnectExpanded = GetPrivateProfileIntA(
+        "Network", "DirectConnectExpanded", 0, settingsPath) != 0;
 }
 
 static void SaveRollbackSettings()
@@ -425,6 +428,9 @@ enum CtrlId {
     ID_NET_HOST_BTN       = 2203,
     ID_NET_STATUS         = 2204,
     ID_NET_CONNECT_BTN    = 2205,
+    ID_NET_TOGGLE         = 2206,
+    ID_NET_IP_LABEL       = 2207,
+    ID_NET_PORT_LABEL     = 2208,
     // Steam lobby controls
     ID_STEAM_SEARCH_BTN   = 2301,
     ID_STEAM_CREATE_BTN   = 2302,
@@ -432,6 +438,8 @@ enum CtrlId {
     ID_STEAM_STATUS       = 2304,
     ID_STEAM_JOIN_BTN     = 2305,
     ID_STEAM_TYPE         = 2306,
+    ID_LAUNCH_PROMPT      = 2401,
+    ID_VERSION_LABEL      = 2402,
 };
 
 // ---------------------------------------------------------------------------
@@ -448,6 +456,7 @@ static void UpdateSlotOptionsFromCombos(HWND hDlg);
 static void RandomizeCharacters(HWND hDlg);
 static void ConfigureConnectedControls(HWND hDlg);
 static void ResetLaunchMenuButtonState(HWND hDlg);
+static void SetDirectConnectExpanded(HWND hDlg, bool expanded);
 static void SendP1Selection(HWND hDlg);
 static void SendP2Selection(HWND hDlg);
 static bool ApplyP1Selection(HWND hDlg, const LaunchP1SelectionPacket& packet);
@@ -604,6 +613,56 @@ static void ResetLaunchMenuButtonState(HWND hDlg)
     ShowWindow(GetDlgItem(hDlg, ID_PEER_READY), SW_HIDE);
 }
 
+static void SetDirectConnectExpanded(HWND hDlg, bool expanded)
+{
+    if (g_directConnectExpanded == expanded) return;
+
+    constexpr int expandedHeight = 56;
+    const int directControls[] = {
+        ID_NET_IP_LABEL, ID_NET_IP, ID_NET_PORT_LABEL, ID_NET_PORT,
+        ID_NET_HOST_BTN, ID_NET_CONNECT_BTN, ID_NET_STATUS,
+    };
+    for (int id : directControls)
+        ShowWindow(GetDlgItem(hDlg, id), expanded ? SW_SHOW : SW_HIDE);
+
+    const int launchControls[] = {
+        ID_LAUNCH_PROMPT, ID_LAUNCH_NORMAL, ID_LAUNCH_TRAINING,
+        ID_LAUNCH_DUAL, ID_LAUNCH_DUAL_CPUS, ID_LAUNCH_DUAL_P2_CPU,
+        ID_VERSION_LABEL,
+    };
+    const int offset = expanded ? expandedHeight : -expandedHeight;
+    for (int id : launchControls) {
+        HWND control = GetDlgItem(hDlg, id);
+        if (!control) continue;
+        RECT rect = {};
+        GetWindowRect(control, &rect);
+        MapWindowPoints(NULL, hDlg, reinterpret_cast<POINT*>(&rect), 2);
+        SetWindowPos(control, NULL, rect.left, rect.top + offset, 0, 0,
+                     SWP_NOACTIVATE | SWP_NOZORDER | SWP_NOSIZE);
+    }
+
+    HWND toggle = GetDlgItem(hDlg, ID_NET_TOGGLE);
+    if (toggle)
+        SetWindowTextA(toggle, expanded ? "Hide IP Connect"
+                                        : "Advanced: IP Connect");
+
+    RECT windowRect = {};
+    GetWindowRect(hDlg, &windowRect);
+    SetWindowPos(hDlg, NULL, 0, 0,
+                 windowRect.right - windowRect.left,
+                 windowRect.bottom - windowRect.top + offset,
+                 SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOZORDER);
+    g_directConnectExpanded = expanded;
+
+    char settingsPath[MAX_PATH] = {};
+    GetSettingsPath("Timestone.ini", settingsPath, sizeof(settingsPath));
+    WritePrivateProfileStringA("Network", "DirectConnectExpanded",
+                               expanded ? "1" : "0", settingsPath);
+
+    RedrawWindow(hDlg, NULL, NULL,
+                 RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW);
+}
+
 static void SendP2Selection(HWND hDlg)
 {
     if (g_isHost || !g_dialogConfig.enetHost || !g_dialogConfig.enetPeer) return;
@@ -640,6 +699,12 @@ static void SendP1Selection(HWND hDlg)
     for (int i = 0; i < 3; ++i)
         UpdateCharFromCombo(hDlg, ID_P1_SLOT1 + i, i, 0);
     UpdateSlotOptionsFromCombos(hDlg);
+    HWND stage = GetDlgItem(hDlg, ID_STAGE);
+    int stageSelection = stage
+        ? static_cast<int>(SendMessageA(stage, CB_GETCURSEL, 0, 0))
+        : CB_ERR;
+    if (stageSelection >= 0 && stageSelection < kStageCount)
+        g_dialogConfig.stageId = kStages[stageSelection].id;
 
     LaunchP1SelectionPacket packet = {};
     packet.type = PACKET_LAUNCH_P1_SELECTION;
@@ -650,6 +715,7 @@ static void SendP1Selection(HWND hDlg)
         packet.assists[i] = g_dialogConfig.p1Assists[i];
     }
     packet.simpleMode = g_dialogConfig.simpleMode[0];
+    packet.stageId = g_dialogConfig.stageId;
 
     ENetPacket* enetPacket = enet_packet_create(
         &packet, sizeof(packet), ENET_PACKET_FLAG_RELIABLE);
@@ -672,6 +738,8 @@ static bool ApplyP1Selection(HWND hDlg, const LaunchP1SelectionPacket& packet)
             packet.assists[i] < 0 || packet.assists[i] > 2)
             return false;
     }
+    const int stageIndex = FindStageIndex(packet.stageId);
+    if (kStages[stageIndex].id != packet.stageId) return false;
 
     for (int i = 0; i < 3; ++i) {
         g_dialogConfig.p1Chars[i] = packet.chars[i];
@@ -687,6 +755,8 @@ static bool ApplyP1Selection(HWND hDlg, const LaunchP1SelectionPacket& packet)
     g_dialogConfig.simpleMode[0] = packet.simpleMode != 0;
     SendMessageA(GetDlgItem(hDlg, ID_P1_SIMPLE_MODE), BM_SETCHECK,
                  g_dialogConfig.simpleMode[0] ? BST_CHECKED : BST_UNCHECKED, 0);
+    g_dialogConfig.stageId = packet.stageId;
+    SendMessageA(GetDlgItem(hDlg, ID_STAGE), CB_SETCURSEL, stageIndex, 0);
     return true;
 }
 
@@ -778,7 +848,7 @@ LaunchOption ShowLaunchMenu()
 
     RegisterClassA(&wc);
 
-    int w = 840, h = 815;
+    int w = 840, h = 780;
     int x = (GetSystemMetrics(SM_CXSCREEN) - w) / 2;
     int y = (GetSystemMetrics(SM_CYSCREEN) - h) / 2;
 
@@ -939,6 +1009,7 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
         y += 28;
 
         // ---- Character Select Section ----
+        const int characterSectionTop = y;
         CreateWindowA("BUTTON", "Character Select",
             WS_VISIBLE | WS_CHILD | BS_GROUPBOX, leftX, y, contentW, 200,
             hDlg, NULL, NULL, NULL);
@@ -1046,57 +1117,6 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
         PopulateStageCombo(hStage, g_dialogConfig.stageId);
         y += 35;
 
-        // ---- Network Section ----
-        y += 5;
-        CreateWindowA("BUTTON", "Network (Direct Connect)",
-            WS_VISIBLE | WS_CHILD | BS_GROUPBOX, leftX, y, contentW, 75,
-            hDlg, NULL, NULL, NULL);
-        y += 18;
-
-        CreateWindowA("STATIC", "IP:",
-            WS_VISIBLE | WS_CHILD, leftX + 10, y + 4, 25, 18,
-            hDlg, NULL, NULL, NULL);
-
-        HWND hIpEdit = CreateWindowA("EDIT", g_dialogConfig.hostIp,
-            WS_VISIBLE | WS_CHILD | WS_TABSTOP | WS_BORDER | ES_AUTOHSCROLL |
-            ES_NOHIDESEL,
-            leftX + 35, y, 300, 22,
-            hDlg, (HMENU)ID_NET_IP, NULL, NULL);
-        if (hIpEdit) {
-            // Keep clipboard pastes bounded and leave the native EDIT
-            // clipboard handling (Ctrl+C/Ctrl+V and context-menu paste) intact.
-            SendMessageA(hIpEdit, EM_SETLIMITTEXT,
-                         (WPARAM)(sizeof(g_dialogConfig.hostIp) - 1), 0);
-        }
-
-        CreateWindowA("STATIC", "Port:",
-            WS_VISIBLE | WS_CHILD, leftX + 345, y + 4, 35, 18,
-            hDlg, NULL, NULL, NULL);
-
-        char portStr[16];
-        snprintf(portStr, sizeof(portStr), "%d", g_dialogConfig.hostPort);
-        HWND hPortEdit = CreateWindowA("EDIT", portStr,
-            WS_VISIBLE | WS_CHILD | WS_TABSTOP | WS_BORDER | ES_AUTOHSCROLL | ES_NUMBER,
-            leftX + 380, y, 60, 22,
-            hDlg, (HMENU)ID_NET_PORT, NULL, NULL);
-
-        CreateWindowA("BUTTON", "Host Game",
-            WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON,
-            leftX + 500, y - 2, 130, 26,
-            hDlg, (HMENU)ID_NET_HOST_BTN, NULL, NULL);
-
-        CreateWindowA("BUTTON", "Connect",
-            WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON,
-            leftX + 640, y - 2, 130, 26,
-            hDlg, (HMENU)ID_NET_CONNECT_BTN, NULL, NULL);
-
-        // Status row
-        y += 28;
-        CreateWindowA("STATIC", "Ready",
-            WS_VISIBLE | WS_CHILD, leftX + 10, y + 4, 780, 18,
-            hDlg, (HMENU)ID_NET_STATUS, NULL, NULL);
-        y += 30;
-
         // ---- Steam Lobby Section ----
         y += 5;
         CreateWindowA("BUTTON", "Steam Lobby",
@@ -1159,13 +1179,60 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
         }
         y += 155;
 
+        // ---- Direct Connect Section ----
+        y += 8;
+        CreateWindowA("BUTTON", "Advanced: IP Connect",
+            WS_VISIBLE | WS_CHILD | WS_TABSTOP | BS_PUSHBUTTON,
+            leftX, y, contentW, 26,
+            hDlg, (HMENU)ID_NET_TOGGLE, NULL, NULL);
+        y += 34;
+
+        CreateWindowA("STATIC", "IP:",
+            WS_CHILD, leftX + 10, y + 4, 25, 18,
+            hDlg, (HMENU)ID_NET_IP_LABEL, NULL, NULL);
+
+        HWND hIpEdit = CreateWindowA("EDIT", g_dialogConfig.hostIp,
+            WS_CHILD | WS_TABSTOP | WS_BORDER | ES_AUTOHSCROLL | ES_NOHIDESEL,
+            leftX + 35, y, 300, 22,
+            hDlg, (HMENU)ID_NET_IP, NULL, NULL);
+        if (hIpEdit) {
+            // Keep clipboard pastes bounded and leave native clipboard handling intact.
+            SendMessageA(hIpEdit, EM_SETLIMITTEXT,
+                         (WPARAM)(sizeof(g_dialogConfig.hostIp) - 1), 0);
+        }
+
+        CreateWindowA("STATIC", "Port:",
+            WS_CHILD, leftX + 345, y + 4, 35, 18,
+            hDlg, (HMENU)ID_NET_PORT_LABEL, NULL, NULL);
+
+        char portStr[16];
+        snprintf(portStr, sizeof(portStr), "%d", g_dialogConfig.hostPort);
+        CreateWindowA("EDIT", portStr,
+            WS_CHILD | WS_TABSTOP | WS_BORDER | ES_AUTOHSCROLL | ES_NUMBER,
+            leftX + 380, y, 60, 22,
+            hDlg, (HMENU)ID_NET_PORT, NULL, NULL);
+
+        CreateWindowA("BUTTON", "Host Game",
+            WS_CHILD | BS_PUSHBUTTON,
+            leftX + 500, y - 2, 130, 26,
+            hDlg, (HMENU)ID_NET_HOST_BTN, NULL, NULL);
+
+        CreateWindowA("BUTTON", "Connect",
+            WS_CHILD | BS_PUSHBUTTON,
+            leftX + 640, y - 2, 130, 26,
+            hDlg, (HMENU)ID_NET_CONNECT_BTN, NULL, NULL);
+
+        CreateWindowA("STATIC", "Ready",
+            WS_CHILD, leftX + 10, y + 32, 780, 18,
+            hDlg, (HMENU)ID_NET_STATUS, NULL, NULL);
+
         // ---- Launch Buttons ----
-        y += 10;
         CreateWindowA("STATIC", "Choose how to launch the game:",
-            WS_VISIBLE | WS_CHILD, leftX, y, 300, 18, hDlg, NULL, NULL, NULL);
+            WS_VISIBLE | WS_CHILD, leftX, y, 300, 18,
+            hDlg, (HMENU)ID_LAUNCH_PROMPT, NULL, NULL);
         CreateWindowA("BUTTON", "Not Ready",
             WS_CHILD | BS_OWNERDRAW | WS_DISABLED,
-            leftX + 650, y - 5, 150, 26,
+            leftX + contentW - 160, characterSectionTop + 124, 150, 26,
             hDlg, (HMENU)ID_PEER_READY, NULL, NULL);
         y += 25;
 
@@ -1197,7 +1264,13 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
         snprintf(versionText, sizeof(versionText), "Timestone v%s", UMVC3HOOK_VERSION);
         CreateWindowA("STATIC", versionText,
             WS_VISIBLE | WS_CHILD | SS_RIGHT,
-            leftX + 600, y + 40, 200, 18, hDlg, NULL, NULL, NULL);
+            leftX + 600, y + 40, 200, 18,
+            hDlg, (HMENU)ID_VERSION_LABEL, NULL, NULL);
+
+        if (g_directConnectExpanded) {
+            g_directConnectExpanded = false;
+            SetDirectConnectExpanded(hDlg, true);
+        }
 
         SetTimer(hDlg, ID_STEAM_POLL_TIMER, 50, NULL);
         return msg == WM_INITDIALOG ? TRUE : 0;
@@ -1270,7 +1343,7 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
                 if (hStatus) {
                     char peerStatus[256];
                     snprintf(peerStatus, sizeof(peerStatus),
-                             "Steam connected: %s (SteamID %llu)",
+                             "Steam connected: %s (SteamID %llu). Make your selection, NOW",
                              SteamLobby_GetPeerUsername(),
                              static_cast<unsigned long long>(
                                  SteamLobby_GetPeerSteamId()));
@@ -1304,13 +1377,13 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
                         HWND hStatus = GetDlgItem(hDlg, ID_NET_STATUS);
                         if (hStatus) {
                             if (g_isHost) {
-                                SetWindowTextA(hStatus, "Client connected");
+                                SetWindowTextA(hStatus, "Client connected: make your selection, NOW");
                                 g_statusColor = RGB(0, 120, 215);
                                 g_peerReady = false;
                                 ConfigureConnectedControls(hDlg);
                                 SendP1Selection(hDlg);
                             } else {
-                                SetWindowTextA(hStatus, "Connected - select your P2 team");
+                                SetWindowTextA(hStatus, "Connected: make your selection, NOW");
                                 g_statusColor = RGB(200, 180, 0);
                                 g_localReady = false;
                                 ConfigureConnectedControls(hDlg);
@@ -1671,8 +1744,14 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
                 int sel = (int)SendMessageA(hCombo, CB_GETCURSEL, 0, 0);
                 if (sel != CB_ERR && sel >= 0 && sel < kStageCount) {
                     g_dialogConfig.stageId = kStages[sel].id;
+                    if (g_isHost && g_dialogConfig.enetPeer)
+                        SendP1Selection(hDlg);
                 }
             }
+            return 0;
+
+        case ID_NET_TOGGLE:
+            SetDirectConnectExpanded(hDlg, !g_directConnectExpanded);
             return 0;
 
         // ---- Network Host button ----

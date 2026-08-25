@@ -1,12 +1,12 @@
 #pragma once
-
+#include <cstdint>
 
 class eNotificationManager {
 public:
 	char szMessageBuffer[2048] = {};
 	bool m_bIsNotificationActive;
-	int  m_nNotificationTime;
-	unsigned int m_tTimer;
+	uint64_t m_nNotificationTime;
+	uint64_t m_tTimer;
 
 
 	void Init();

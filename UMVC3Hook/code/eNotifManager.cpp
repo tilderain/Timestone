@@ -12,13 +12,13 @@ eNotificationManager* Notifications = new eNotificationManager();
 void eNotificationManager::Init()
 {
 	m_bIsNotificationActive = false;
-	m_tTimer = GetTickCount() & 0x7FFFFFFF;
+	m_tTimer = GetTickCount64();
 }
 
 void eNotificationManager::Update()
 {
 	if (GetTickCount64() - m_tTimer <= m_nNotificationTime) return;
-	m_tTimer = GetTickCount() & 0x7FFFFFFF;
+	m_tTimer = GetTickCount64();
 
 	m_bIsNotificationActive = false;
 }
@@ -59,5 +59,6 @@ void eNotificationManager::PushNotification(const char * format, ...)
 	va_start(args, format);
 	vsprintf(szMessageBuffer, format, args);
 	va_end(args);
+	m_tTimer = GetTickCount64();
 	m_bIsNotificationActive = true;
 }
