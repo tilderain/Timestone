@@ -109,6 +109,9 @@ extern "C" void Controller_RestoreInputHistory();
 // Centrally resolve remote input for a given frame into g_usedRemoteInput.
 extern "C" void Controller_ResolveRemoteInput(int32_t frame);
 
+// Capture the resolved remote input immediately before simulating this frame.
+extern "C" void Controller_MarkFrameInputProcessed(int32_t frame);
+
 // Log the inputs used during a re-simmed frame for debugging.
 extern "C" void Controller_LogReSimFrame(int32_t frame);
 

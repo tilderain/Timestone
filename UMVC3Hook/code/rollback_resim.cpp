@@ -181,6 +181,7 @@ void Rollback_ReSimulate(int32_t startFrame, int32_t endFrame)
         if (Netplay_IsActive()) {
             Controller_ResolveRemoteInput(frame);
             remoteInput = Controller_GetUsedRemoteInput(frame);
+            Controller_MarkFrameInputProcessed(frame);
         }
         Rollback_UpdateSnapshotInputs(frame, localInput, remoteInput);
         Controller_SilentFrameStart();

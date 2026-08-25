@@ -285,6 +285,12 @@ static bool      g_predictedInput[RING_SIZE];
 // late-arriving corrections that require a rollback + re-sim.
 static uint32_t  g_usedRemoteInput[RING_SIZE];
 
+// Immutable provenance for the most recent simulation of each absolute frame.
+// g_usedRemoteInput may be updated when a late packet arrives, so it cannot by
+// itself prove which input produced an already-recorded checksum.
+static uint32_t  g_processedRemoteInput[RING_SIZE];
+static int32_t   g_processedRemoteFrame[RING_SIZE];
+
 // Records the exact delayed local input executed on each live frame.
 // Read directly during re-simulation to replay the original local input
 // instead of reading the real-time physical device, preventing input
@@ -324,6 +330,7 @@ static uint32_t  g_remoteChecksum[RING_SIZE];
 static int32_t   g_localChecksumFrame[RING_SIZE];
 static int32_t   g_remoteChecksumFrame[RING_SIZE];
 static bool      g_localChecksumConfirmed[RING_SIZE];
+static uint32_t  g_localChecksumRemoteInput[RING_SIZE];
 static int32_t   g_desyncChecked[RING_SIZE];   // frame number when checksum was compared, -1 = unchecked
 static bool      g_desyncMismatch[RING_SIZE];  // true if that frame exceeded threshold
 static int32_t   g_confirmedChecksumThrough = -1;
@@ -348,6 +355,8 @@ static void ResetDesyncDetection()
     std::memset(g_localChecksumFrame, 0xFF, sizeof(g_localChecksumFrame));
     std::memset(g_remoteChecksumFrame, 0xFF, sizeof(g_remoteChecksumFrame));
     std::memset(g_localChecksumConfirmed, 0, sizeof(g_localChecksumConfirmed));
+    std::memset(g_localChecksumRemoteInput, 0,
+                sizeof(g_localChecksumRemoteInput));
     std::memset(g_desyncChecked, 0xFF, sizeof(g_desyncChecked));
     std::memset(g_desyncMismatch, 0, sizeof(g_desyncMismatch));
     g_confirmedChecksumThrough = -1;
@@ -444,6 +453,8 @@ extern "C" void Controller_ResetBuffers()
     std::memset(g_predictedInput,     0, sizeof(g_predictedInput));
     std::memset(g_predictedFrame,    -1, sizeof(g_predictedFrame));
     std::memset(g_usedRemoteInput,    0, sizeof(g_usedRemoteInput));
+    std::memset(g_processedRemoteInput, 0, sizeof(g_processedRemoteInput));
+    std::memset(g_processedRemoteFrame, -1, sizeof(g_processedRemoteFrame));
     std::memset(g_recordedLocalInput, 0, sizeof(g_recordedLocalInput));
     std::memset(g_rawLocalInput,      0, sizeof(g_rawLocalInput));  // 2D [2][RING_SIZE]
     std::memset(g_recordedGameInput,  0, sizeof(g_recordedGameInput));
@@ -825,6 +836,15 @@ extern "C" void Controller_ResolveRemoteInput(int32_t frame)
                     //frame, prediction, g_lastRemoteFrame);
         }
     }
+}
+
+extern "C" void Controller_MarkFrameInputProcessed(int32_t frame)
+{
+    if (frame < 0)
+        return;
+    uint32_t idx = (uint32_t)frame % RING_SIZE;
+    g_processedRemoteInput[idx] = g_usedRemoteInput[idx];
+    g_processedRemoteFrame[idx] = frame;
 }
 
 // Log the inputs used during a re-simmed frame for debugging.
@@ -1585,6 +1605,7 @@ extern "C" void Controller_OnFrameStart()
     //     just reads from g_usedRemoteInput (no per-character resolution logic).
     //     Must run for both rollback and delay-based paths.
     Controller_ResolveRemoteInput(g_netFrameCount);
+    Controller_MarkFrameInputProcessed(g_netFrameCount);
 
     // Rollback_SaveSnapshot runs outside this hook, before current-frame input
     // resolution. Attach the exact inputs this live tick will execute so a later
@@ -1702,8 +1723,10 @@ extern "C" void Controller_RecordFrameChecksum(int32_t frame)
     uint32_t idx = (uint32_t)frame % RING_SIZE;
     g_localChecksum[idx] = ComputeChecksum();
     g_localChecksumFrame[idx] = frame;
-    g_localChecksumConfirmed[idx] = IsFrameConfirmed(frame) &&
-        g_usedRemoteInput[idx] == g_receivedInput[idx];
+    g_localChecksumRemoteInput[idx] = g_processedRemoteInput[idx];
+    g_localChecksumConfirmed[idx] =
+        g_processedRemoteFrame[idx] == frame && IsFrameConfirmed(frame) &&
+        g_localChecksumRemoteInput[idx] == g_receivedInput[idx];
 
     // A corrected frame invalidates any earlier comparison for that frame.
     // Confirmed-only comparison normally prevents this, but clearing the tags
@@ -1738,13 +1761,13 @@ static void UpdateConfirmedChecksums()
         if (!IsFrameConfirmed(next) || g_localChecksumFrame[idx] != next)
             break;
 
-        // A checksum recorded during prediction or an incomplete re-simulation
-        // is not authoritative merely because its input arrived later. Promote
-        // it only when the exact input used to produce it matches confirmation;
-        // otherwise wait for corrected re-simulation to replace the record.
+        // Correct predictions become authoritative when their input arrives.
+        // Compare against the immutable input captured when this checksum's
+        // simulation ran, never g_usedRemoteInput (late packets overwrite it).
         if (!g_localChecksumConfirmed[idx])
         {
-            if (g_usedRemoteInput[idx] != g_receivedInput[idx])
+            if (g_processedRemoteFrame[idx] != next ||
+                g_localChecksumRemoteInput[idx] != g_receivedInput[idx])
                 break;
             g_localChecksumConfirmed[idx] = true;
         }
@@ -1756,7 +1779,8 @@ static void UpdateConfirmedChecksums()
     for (int32_t frame = first; frame <= g_confirmedChecksumThrough; ++frame)
     {
         uint32_t idx = (uint32_t)frame % RING_SIZE;
-        if (g_localChecksumFrame[idx] != frame ||
+        if (!IsFrameConfirmed(frame) ||
+            g_localChecksumFrame[idx] != frame ||
             !g_localChecksumConfirmed[idx] ||
             g_remoteChecksumFrame[idx] != frame ||
             g_desyncChecked[idx] == frame)
