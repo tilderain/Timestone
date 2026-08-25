@@ -10,7 +10,7 @@
 
 EXTERN_C IMAGE_DOS_HEADER __ImageBase;
 extern void HookLog(const char* fmt, ...);
-extern void HookLogSetFile(const char* filename);
+extern bool HookLogCreateAlias(const char* filename);
 
 static char g_netplayOutputDirectory[MAX_PATH] = {};
 
@@ -55,20 +55,24 @@ bool Rollback_GetNetplayOutputDirectory(char* destination, size_t destinationLen
         SYSTEMTIME time = {};
         GetLocalTime(&time);
         const char* role = Netplay_IsHost() ? "host" : "client";
+        char logRoot[MAX_PATH] = {};
+        if (Rollback_ResolveDllPath(logRoot, sizeof(logRoot), "rollback_logs") < 0 ||
+            (!CreateDirectoryA(logRoot, nullptr) &&
+             GetLastError() != ERROR_ALREADY_EXISTS)) {
+            return false;
+        }
         char stem[96] = {};
         snprintf(stem, sizeof(stem), "nplive_%04u%02u%02u_%02u%02u%02u_%s",
                  time.wYear, time.wMonth, time.wDay, time.wHour, time.wMinute,
                  time.wSecond, role);
 
         for (unsigned suffix = 0; suffix < 1000; ++suffix) {
-            char relative[MAX_PATH] = {};
-            if (suffix == 0)
-                snprintf(relative, sizeof(relative), "%s", stem);
-            else
-                snprintf(relative, sizeof(relative), "%s_r%u", stem, suffix);
             char candidate[MAX_PATH] = {};
-            if (Rollback_ResolveDllPath(candidate, sizeof(candidate), relative) < 0)
-                return false;
+            if (suffix == 0)
+                snprintf(candidate, sizeof(candidate), "%s/%s", logRoot, stem);
+            else
+                snprintf(candidate, sizeof(candidate), "%s/%s_r%u", logRoot,
+                         stem, suffix);
             if (CreateDirectoryA(candidate, nullptr)) {
                 snprintf(g_netplayOutputDirectory,
                          sizeof(g_netplayOutputDirectory), "%s", candidate);
@@ -82,7 +86,14 @@ bool Rollback_GetNetplayOutputDirectory(char* destination, size_t destinationLen
         char logPath[MAX_PATH] = {};
         snprintf(logPath, sizeof(logPath), "%s/Timestone_%s.log",
                  g_netplayOutputDirectory, role);
-        HookLogSetFile(logPath);
+        if (!HookLogCreateAlias(logPath)) {
+            const DWORD error = GetLastError();
+            RemoveDirectoryA(g_netplayOutputDirectory);
+            g_netplayOutputDirectory[0] = '\0';
+            HookLog("Netplay: failed to link diagnostics log %s error=%lu\n",
+                    logPath, error);
+            return false;
+        }
         HookLog("Netplay: diagnostics -> %s\n", g_netplayOutputDirectory);
     }
 

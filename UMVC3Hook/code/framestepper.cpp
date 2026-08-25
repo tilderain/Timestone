@@ -18,6 +18,7 @@
 #include "autotest.h"
 #include "rollback_cleanup.h"
 #include "rollback_diagnostics.h"
+#include "rollback_profile.h"
 #include "trainingboot.h"
 
 // Netplay debug info from controller.cpp
@@ -539,9 +540,11 @@ static void __fastcall HookedMove(void* sMvc3Main)
             Netplay_ClearInputQueues();
             Controller_ResetBuffers();
             Rollback_ResetNetplayOutputDirectory();
-            char outputDirectory[MAX_PATH] = {};
-            Rollback_GetNetplayOutputDirectory(outputDirectory,
-                                               sizeof(outputDirectory));
+            if (Profile_Enabled()) {
+                char outputDirectory[MAX_PATH] = {};
+                Rollback_GetNetplayOutputDirectory(outputDirectory,
+                                                   sizeof(outputDirectory));
+            }
             if (sAction) {
                 using SetRestartModeFn = void(__fastcall*)(uint64_t, int32_t);
                 ((SetRestartModeFn)_addr(0x14000AF90))(sAction, 3);
@@ -601,9 +604,11 @@ static void __fastcall HookedMove(void* sMvc3Main)
             Controller_ResetBuffers();
             Controller_ResetFrameEpoch();
             Rollback_ResetNetplayOutputDirectory();
-            char outputDirectory[MAX_PATH] = {};
-            Rollback_GetNetplayOutputDirectory(outputDirectory,
-                                               sizeof(outputDirectory));
+            if (Profile_Enabled()) {
+                char outputDirectory[MAX_PATH] = {};
+                Rollback_GetNetplayOutputDirectory(outputDirectory,
+                                                   sizeof(outputDirectory));
+            }
 
             g_battleSynchronized = false;
             g_localReady = false;
@@ -1029,9 +1034,11 @@ void FrameStepper_InitNetplay()
                 Netplay_IsHost() ? "host" : "client");
         g_autoTestLaunchPending = IsAutoTestLaunchEnabled() && Netplay_IsHost();
         Rollback_PatchNativeNetplayDeterminism();
-        char outputDirectory[MAX_PATH] = {};
-        Rollback_GetNetplayOutputDirectory(outputDirectory,
-                                           sizeof(outputDirectory));
+        if (Profile_Enabled()) {
+            char outputDirectory[MAX_PATH] = {};
+            Rollback_GetNetplayOutputDirectory(outputDirectory,
+                                               sizeof(outputDirectory));
+        }
     }
 }
 
@@ -1723,51 +1730,7 @@ void FrameStepper_Draw()
     ImGui::Dummy(ImVec2(sz + 6.0f, sz));
     ImGui::SameLine();
     ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "PAUSED  %d", frameCounter);
-    /*
-    // Input buffer display (captured from cChrInput__getInputBuffer hook)
-    if (g_inputBufValid) {
-        ImGui::TextColored(ImVec4(1.0f, 0.9f, 0.5f, 1.0f), "InputBuf @ 0x%llX (obj=0x%llX)", g_inputBufPtr, g_inputBufBase);
-        ImGui::Text("  idx      value");
-        for (int i = 0; i < 10 && i < g_inputBufFrames; i++) {
-            ImGui::Text("  [%d]  0x%08X", i, g_inputBuf[i]);
-        }
-    }
 
-    // Network-relevant input display (captured from HookedMove after oMove)
-    if (g_netDataValid) {
-        ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.4f, 1.0f), "Net send(bs+0xd58): 0x%08X", g_netP1Input);
-        ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.8f, 1.0f), "P2 getInput(pad,1): 0x%08X", g_netP2Read);
-    }
-
-    // 1. Get the native sAction battle-state singleton.
-    typedef uint64_t(__fastcall* GetAction_t)();
-    GetAction_t getAction = (GetAction_t)_addr(0x140001A90);
-    uint64_t action = getAction();
-
-    if (action) {
-        uint32_t flags      = *(uint32_t*)(action + 0xC4);
-        int      step       = *(int*)(action + 0xD8);
-        int      phase      = *(int*)(action + 0xDC);
-        int      transition = *(int*)(action + 0x174);
-
-        ImGui::TextColored(ImVec4(1, 0.5f, 0, 1), "--- DIAGNOSTICS ---");
-        ImGui::Text("sAction: 0x%llX", action);
-        ImGui::Text("Flags (+0xC4): 0x%08X", flags);
-        ImGui::Text("Step (+0xD8): %d", step);
-        ImGui::Text("Phase (+0xDC): %d", phase);
-        ImGui::Text("Trans (+0x174): 0x%08X", transition);
-    }
-
-    // 2. Get the sGameUI instance
-    typedef uint64_t(__fastcall* GetGameUI_t)();
-    GetGameUI_t getGameUI = (GetGameUI_t)_addr(0x140001AC0);
-    uint64_t ui = getGameUI();
-
-    if (ui) {
-        uint64_t uiElement = *(uint64_t*)(ui + 0x5AA8);
-        ImGui::Text("sGameUI: 0x%llX", ui);
-        ImGui::Text("UI Element (+0x5AA8): 0x%llX", uiElement);
-    }*/
 
     ImGui::PopStyleColor();
     ImGui::End();

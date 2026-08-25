@@ -19,6 +19,7 @@
 #include "code/diag.h"
 #include "code/exception.h"
 #include <Windows.h>
+#include <atomic>
 #include <cstdio>
 #include "kiero/minhook/include/MinHook.h"
 #include <enet/enet.h>
@@ -27,15 +28,27 @@
 // Log file for hook debugging
 FILE* g_hookLog = nullptr;
 static SRWLOCK g_hookLogLock = SRWLOCK_INIT;
+static char g_hookLogFilename[MAX_PATH] = {};
 
 void HookLogSetFile(const char* filename)
 {
 	AcquireSRWLockExclusive(&g_hookLogLock);
+	if (strcmp(g_hookLogFilename, filename) == 0) {
+		ReleaseSRWLockExclusive(&g_hookLogLock);
+		return;
+	}
+	fflush(stderr);
 	if (g_hookLog) {
+		fflush(g_hookLog);
 		fclose(g_hookLog);
 		g_hookLog = nullptr;
 	}
-	g_hookLog = fopen(filename, "w");
+	// Unlink a previous run's root filename so its nplive hard links keep the
+	// old file instead of being truncated when this instance starts logging.
+	DeleteFileA(filename);
+	const bool copiedHistory = g_hookLogFilename[0] &&
+		CopyFileA(g_hookLogFilename, filename, FALSE);
+	g_hookLog = fopen(filename, copiedHistory ? "a" : "w");
 	if (g_hookLog) {
 		fprintf(g_hookLog, "=== UMVC3Hook Log Start (switched to %s) ===\n", filename);
 		fflush(g_hookLog);
@@ -43,7 +56,20 @@ void HookLogSetFile(const char* filename)
 	// Also redirect stderr to the new log file for Wine crash logs
 	// Use append mode so it doesn't truncate what g_hookLog just wrote
 	freopen(filename, "a", stderr);
+	snprintf(g_hookLogFilename, sizeof(g_hookLogFilename), "%s", filename);
 	ReleaseSRWLockExclusive(&g_hookLogLock);
+}
+
+bool HookLogCreateAlias(const char* filename)
+{
+	AcquireSRWLockExclusive(&g_hookLogLock);
+	fflush(stderr);
+	if (g_hookLog)
+		fflush(g_hookLog);
+	const bool created = g_hookLogFilename[0] &&
+		CreateHardLinkA(filename, g_hookLogFilename, nullptr);
+	ReleaseSRWLockExclusive(&g_hookLogLock);
+	return created;
 }
 
 void HookLog(const char* fmt, ...)
@@ -66,6 +92,63 @@ void HookLog(const char* fmt, ...)
 		va_end(args2);
 	}
 	ReleaseSRWLockExclusive(&g_hookLogLock);
+}
+
+void HookLogWriteRecent(FILE* file)
+{
+	if (!file)
+		return;
+
+	fprintf(file, "---- recent HookLog lines (up to 25) ----\n");
+	FILE* source = fopen(g_hookLogFilename, "rb");
+	if (!source || fseek(source, 0, SEEK_END) != 0) {
+		if (source)
+			fclose(source);
+		fprintf(file, "  <unavailable>\n");
+		return;
+	}
+
+	const long end = ftell(source);
+	if (end <= 0) {
+		fclose(source);
+		fprintf(file, end == 0 ? "  <none>\n" : "  <unavailable>\n");
+		return;
+	}
+	long start = end;
+	int lineCount = 0;
+	while (start > 0 && lineCount < 25) {
+		--start;
+		if (fseek(source, start, SEEK_SET) != 0)
+			break;
+		const int c = fgetc(source);
+		if (c == '\n' && start + 1 < end) {
+			++lineCount;
+			if (lineCount == 25)
+				++start;
+		}
+	}
+	if (fseek(source, start, SEEK_SET) == 0) {
+		int c = 0;
+		int lastWritten = '\n';
+		while ((c = fgetc(source)) != EOF) {
+			if (c == '\r') {
+				const int next = fgetc(source);
+				if (next != '\n') {
+					fputc(c, file);
+					lastWritten = c;
+				}
+				c = next;
+				if (c == EOF)
+					break;
+			}
+			fputc(c, file);
+			lastWritten = c;
+		}
+		if (lastWritten != '\n')
+			fputc('\n', file);
+	}
+	fclose(source);
+	fprintf(file, "---- end recent HookLog lines ----\n");
 }
 
 using namespace Memory::VP;
@@ -126,10 +209,12 @@ static int g_windowCorner = 0;
 // D3D9 device creation is not safe to race across the host and spawned client
 // under Wine/Proton.  Keep the child launch behind the host's real device and
 // behind the rest of the startup patches.
-static volatile LONG g_launchSetupComplete = 0;
-static volatile LONG g_dualSpawnPending = 0;
-static volatile LONG g_dualClientSpawned = 0;
-static volatile LONG g_d3d9CreateDeviceHookReady = 0;
+static std::atomic<bool> g_launchSetupComplete { false };
+static HANDLE g_launchSetupCompleteEvent = nullptr;
+static std::atomic<bool> g_dualSpawnPending { false };
+static std::atomic<bool> g_dualClientSpawned { false };
+static std::atomic<bool> g_d3d9CreateDeviceHookReady { false };
+static HANDLE g_dualHostDeviceReadyEvent = nullptr;
 
 static bool CharacterNamesEqual(const char* lhs, const char* rhs)
 {
@@ -513,7 +598,7 @@ long __stdcall hkEndScene(LPDIRECT3DDEVICE9 pDevice)
 
 static bool SpawnDualTrainingClient()
 {
-	if (InterlockedExchange(&g_dualSpawnPending, 0) == 0)
+	if (!g_dualSpawnPending.exchange(false, std::memory_order_acq_rel))
 		return false;
 
 	const LaunchDialogConfig& dlgCfg = GetLaunchDialogConfig();
@@ -523,8 +608,8 @@ static bool SpawnDualTrainingClient()
 		return false;
 	}
 
-	// The D3D9 CreateDevice hook serializes the actual driver operation, so the
-	// child can be launched immediately instead of waiting for this device.
+	// Process initialization can overlap. The child's hooked CreateDevice waits
+	// for the host's real device before entering the serialized driver call.
 	wchar_t exePath[MAX_PATH];
 	GetModuleFileNameW(NULL, exePath, MAX_PATH);
 
@@ -587,13 +672,13 @@ static bool SpawnDualTrainingClient()
 		HookLog("UMVC3Hook: Failed to spawn second instance (error %lu)\n", GetLastError());
 		return false;
 	}
-	InterlockedExchange(&g_dualClientSpawned, 1);
+	g_dualClientSpawned.store(true, std::memory_order_release);
 	return true;
 }
 
 static void WaitForDualTrainingClient()
 {
-	if (InterlockedCompareExchange(&g_dualClientSpawned, 0, 0) == 0)
+	if (!g_dualClientSpawned.load(std::memory_order_acquire))
 		return;
 
 	const LaunchDialogConfig& dlgCfg = GetLaunchDialogConfig();
@@ -662,6 +747,30 @@ static HANDLE GetD3D9CreateDeviceMutex()
 	return candidate;
 }
 
+static HANDLE GetDualHostDeviceReadyEvent()
+{
+	HANDLE event = g_dualHostDeviceReadyEvent;
+	if (event)
+		return event;
+
+	const int port = g_autoConnectPort > 0
+		? g_autoConnectPort : GetLaunchDialogConfig().hostPort;
+	char name[64] = {};
+	snprintf(name, sizeof(name), "Local\\Timestone_D3D9HostReady_%d", port);
+	HANDLE candidate = CreateEventA(nullptr, TRUE, FALSE, name);
+	if (!candidate)
+		return nullptr;
+
+	PVOID previous = InterlockedCompareExchangePointer(
+		reinterpret_cast<PVOID volatile*>(&g_dualHostDeviceReadyEvent),
+		candidate, nullptr);
+	if (previous) {
+		CloseHandle(candidate);
+		return reinterpret_cast<HANDLE>(previous);
+	}
+	return candidate;
+}
+
 static HRESULT WINAPI HookD3D9CreateDevice(
 	IDirect3D9* d3d9,
 	UINT adapter,
@@ -673,6 +782,14 @@ static HRESULT WINAPI HookD3D9CreateDevice(
 {
 	if (!g_originalD3D9CreateDevice)
 		return D3DERR_DRIVERINTERNALERROR;
+
+	// Let both processes initialize in parallel, but never let the spawned
+	// client win the actual driver-device race against its host.
+	if (g_autoConnectPort != 0) {
+		HANDLE hostReady = GetDualHostDeviceReadyEvent();
+		if (hostReady && WaitForSingleObject(hostReady, 15000) != WAIT_OBJECT_0)
+			HookLog("D3D9: timed out waiting for dual-training host device\n");
+	}
 
 	HANDLE mutex = GetD3D9CreateDeviceMutex();
 	DWORD waitResult = mutex ? WaitForSingleObject(mutex, 5000) : WAIT_FAILED;
@@ -722,7 +839,7 @@ static void InstallD3D9CreateDeviceHook(IDirect3D9* d3d9)
 		return;
 	}
 
-	InterlockedExchange(&g_d3d9CreateDeviceHookReady, 1);
+	g_d3d9CreateDeviceHookReady.store(true, std::memory_order_release);
 	HookLog("D3D9: serialized IDirect3D9::CreateDevice\n");
 }
 
@@ -782,8 +899,12 @@ DWORD WINAPI MainThread(LPVOID lpReserved)
 
 	bool attached = false;
 	bool clientSpawned = false;
-	while (InterlockedCompareExchange(&g_launchSetupComplete, 0, 0) == 0)
-		Sleep(1);
+	if (g_launchSetupCompleteEvent) {
+		WaitForSingleObject(g_launchSetupCompleteEvent, INFINITE);
+	} else {
+		while (!g_launchSetupComplete.load(std::memory_order_acquire))
+			Sleep(1);
+	}
 
 	do
 	{
@@ -791,20 +912,32 @@ DWORD WINAPI MainThread(LPVOID lpReserved)
 		// creates a second device, which serializes with native driver startup.
 		uint64_t render = *(uint64_t*)_addr(0x140E179A8);
 		void* device = render ? *(void**)(render + 0xB0) : nullptr;
+		if (device && GetLaunchOption() == LAUNCH_DUAL_TRAINING) {
+			HANDLE hostReady = GetDualHostDeviceReadyEvent();
+			if (hostReady)
+				SetEvent(hostReady);
+		}
 		if (!clientSpawned &&
-			InterlockedCompareExchange(&g_dualSpawnPending, 0, 0) != 0 &&
-			(InterlockedCompareExchange(&g_d3d9CreateDeviceHookReady, 0, 0) != 0 || device)) {
+			g_dualSpawnPending.load(std::memory_order_acquire) &&
+			(g_d3d9CreateDeviceHookReady.load(std::memory_order_acquire) || device)) {
 			clientSpawned = SpawnDualTrainingClient();
 		}
 		if (device) {
 			// EndScene may call into TheMenu and FrameStepper, so keep the hook
 			// itself behind the normal startup initialization barrier.
-			if (!attached &&
-				InterlockedCompareExchange(&g_launchSetupComplete, 0, 0) != 0 &&
-				kiero::initFromD3D9Device(device) == kiero::Status::Success)
+			if (!attached && kiero::initFromD3D9Device(device) == kiero::Status::Success)
 			{
-				kiero::bind(16, (void**)&oResetDevice, (void*)hkResetDevice);
-				kiero::bind(42, (void**)& oEndScene, (void*)hkEndScene);
+				const kiero::Status::Enum resetStatus =
+					kiero::bind(16, (void**)&oResetDevice, (void*)hkResetDevice);
+				if (resetStatus != kiero::Status::Success)
+					HookLog("D3D9: failed to hook Reset (%d)\n", (int)resetStatus);
+				const kiero::Status::Enum endSceneStatus =
+					kiero::bind(42, (void**)&oEndScene, (void*)hkEndScene);
+				if (endSceneStatus != kiero::Status::Success) {
+					HookLog("D3D9: failed to hook EndScene (%d); dual-training child not started\n",
+						(int)endSceneStatus);
+					return FALSE;
+				}
 				BootTimer_Stamp("Hooked engine D3D9 device");
 				attached = true;
 			}
@@ -1022,7 +1155,7 @@ void OnInitializeHook()
 	//   Original: 0F 84 90 00 00 00  (JZ +0x90)
 	//   Patched:  90 90 90 90 90 90  (NOP × 6)
 	//Memory::VP::Nop(_addr(0x1402BA17E), 6);
-	HookLog("UMVC3Hook: Patched uBattleUiCreatePauseMenu JZ→NOP (force NetGallery)\n");
+	//HookLog("UMVC3Hook: Patched uBattleUiCreatePauseMenu JZ→NOP (force NetGallery)\n");
 
 	// Patch 2: Change JNZ (skip real pause if online) to JMP (always skip).
 	//   Original: 75 5C  (JNZ +0x5C)
@@ -1037,7 +1170,7 @@ void OnInitializeHook()
 	//   Original: 75 0C  (JNZ +0x0C)
 	//   Patched:  EB 0C  (JMP +0x0C)
 	//Memory::VP::Patch<uint8_t>(_addr(0x1402E433B), 0xEB);
-	HookLog("UMVC3Hook: Patched uBattleUiPauseNetGallery_vfn5 JNZ→JMP (force render)\n");
+	//HookLog("UMVC3Hook: Patched uBattleUiPauseNetGallery_vfn5 JNZ→JMP (force render)\n");
 
 	if (opt == LAUNCH_DUAL_TRAINING && g_autoConnectPort == 0) {
 		// Position host window to top-right corner
@@ -1049,9 +1182,8 @@ void OnInitializeHook()
 
 		const LaunchDialogConfig& dlgCfg = GetLaunchDialogConfig();
 
-		// Create the ENet host now so it is listening before the deferred child
-		// launch.  The child itself is started by MainThread after this process has
-		// completed native D3D9 device creation.
+		// Create the ENet host before launching the child. Both processes initialize
+		// in parallel; the child gates only its D3D9 CreateDevice call on the host.
 		ENetAddress addr;
 		addr.host = ENET_HOST_ANY;
 		addr.port = (enet_uint16)dlgCfg.hostPort;
@@ -1062,8 +1194,11 @@ void OnInitializeHook()
 				dlgCfg.hostPort);
 		} else {
 			SetNetworkHandles(server, nullptr);
-			InterlockedExchange(&g_dualSpawnPending, 1);
-			if (InterlockedCompareExchange(&g_d3d9CreateDeviceHookReady, 0, 0) != 0)
+			g_dualSpawnPending.store(true, std::memory_order_release);
+			HANDLE hostReady = GetDualHostDeviceReadyEvent();
+			if (hostReady)
+				ResetEvent(hostReady);
+			if (g_d3d9CreateDeviceHookReady.load(std::memory_order_acquire))
 				SpawnDualTrainingClient();
 			HookLog("UMVC3Hook: Dual training - hosting on port %d, child launch protected by D3D9 device serialization\n",
 				dlgCfg.hostPort);
@@ -1195,7 +1330,9 @@ void OnInitializeHook()
 	//InjectHook(_addr(0x14004b9d0), tramp->Jump(InitMainLoop), PATCH_JUMP);//parts pyshics
 	//InjectHook(_addr(0x14004bd30), tramp->Jump(InitMainLoop), PATCH_JUMP);//parts fighter freeze
 	HookLog("UMVC3Hook: Startup patch and hook initialization complete\n");
-	InterlockedExchange(&g_launchSetupComplete, 1);
+	g_launchSetupComplete.store(true, std::memory_order_release);
+	if (g_launchSetupCompleteEvent)
+		SetEvent(g_launchSetupCompleteEvent);
 }
 
 bool CheckGame()
@@ -1213,59 +1350,6 @@ bool CheckGame()
 	}
 }
 
-void AntiDebugPatch()
-{
-	//HookLog("[AntiDebug] Applying anti-debug patches...\n");
-
-	// Patch IsDebuggerPresent to always return FALSE
-	/*auto pIsDebuggerPresent = GetProcAddress(GetModuleHandleA("kernel32.dll"), "IsDebuggerPresent");
-	if (pIsDebuggerPresent) {
-		DWORD oldProtect;
-		VirtualProtect((LPVOID)pIsDebuggerPresent, 3, PAGE_EXECUTE_READWRITE, &oldProtect);
-		uint8_t patch[] = { 0x31, 0xC0, 0xC3 }; // xor eax,eax; ret
-		memcpy(pIsDebuggerPresent, patch, 3);
-		VirtualProtect((LPVOID)pIsDebuggerPresent, 3, oldProtect, &oldProtect);
-		HookLog("[AntiDebug] Patched IsDebuggerPresent\n");
-	}
-
-	// Patch CheckRemoteDebuggerPresent to always return FALSE
-	auto pCheckRemoteDebuggerPresent = GetProcAddress(GetModuleHandleA("kernel32.dll"), "CheckRemoteDebuggerPresent");
-	if (pCheckRemoteDebuggerPresent) {
-		DWORD oldProtect;
-		VirtualProtect((LPVOID)pCheckRemoteDebuggerPresent, 6, PAGE_EXECUTE_READWRITE, &oldProtect);
-		// xor eax,eax; mov [rdx],eax; ret  -> returns FALSE and writes 0 to the output flag
-		uint8_t patch[] = { 0x31, 0xC0, 0x89, 0x02, 0xC3 };
-		memcpy(pCheckRemoteDebuggerPresent, patch, 5);
-		VirtualProtect((LPVOID)pCheckRemoteDebuggerPresent, 6, oldProtect, &oldProtect);
-		HookLog("[AntiDebug] Patched CheckRemoteDebuggerPresent\n");
-	}
-
-	// Use NtSetInformationProcess to clear the PEB BeingDebugged flag
-	// This also handles direct PEB reads that bypass IsDebuggerPresent
-	typedef long (WINAPI *NtSetInformationProcess_t)(HANDLE, ULONG, PVOID, ULONG);
-	auto pNtSetInformationProcess = (NtSetInformationProcess_t)
-		GetProcAddress(GetModuleHandleA("ntdll.dll"), "NtSetInformationProcess");
-	if (pNtSetInformationProcess) {
-		ULONG debugFlags = 1; // ProcessDebugFlags = 1 means "not being debugged"
-		long status = pNtSetInformationProcess(GetCurrentProcess(), 0x1F, &debugFlags, sizeof(debugFlags));
-		HookLog("[AntiDebug] NtSetInformationProcess(ProcessDebugFlags): 0x%X\n", status);
-	}*/
-
-	// Install VEH to catch the packer's crash at umvc3+0x257c58
-	// The crash is a page fault from callq *0x50(%r8) with r8=1
-	// We catch it and advance RIP past the faulting instruction
-	/*AddVectoredExceptionHandler(1, [](EXCEPTION_POINTERS* ep) -> LONG {
-		static uintptr_t crashBase = (uintptr_t)GetModuleHandleA(NULL) + 0x257c58;
-		if (ep->ExceptionRecord->ExceptionCode == EXCEPTION_ACCESS_VIOLATION &&
-			ep->ExceptionRecord->ExceptionAddress == (void*)crashBase) {
-			// Skip past the 4-byte callq instruction
-			ep->ContextRecord->Rip += 4;
-			return EXCEPTION_CONTINUE_EXECUTION;
-		}
-		return EXCEPTION_CONTINUE_SEARCH;
-	});*/
-	//HookLog("[AntiDebug] Installed VEH for packer crash at +0x257c58\n");
-}
 
 // ---------------------------------------------------------------------------
 // CreateFileW hook to log file loads during boot
@@ -1320,6 +1404,10 @@ BOOL WINAPI DllMain(HMODULE hMod, DWORD dwReason, LPVOID lpReserved)
 		CleanupNetworkOnExit();
 		enet_deinitialize();
 		kiero::shutdown();
+		if (g_launchSetupCompleteEvent) {
+			CloseHandle(g_launchSetupCompleteEvent);
+			g_launchSetupCompleteEvent = nullptr;
+		}
 		break;
 	}
 	return TRUE;
@@ -1351,6 +1439,7 @@ extern "C" __declspec(dllexport) void InitializeASI()
 	BootTimer_Init();
 	BootTimer_Stamp("InitializeASI entry");
 	SettingsMgr->Init();
+	g_launchSetupCompleteEvent = CreateEventA(nullptr, TRUE, FALSE, nullptr);
 
 	if (enet_initialize() != 0) {
 		HookLog("UMVC3Hook: Failed to initialize enet!\n");

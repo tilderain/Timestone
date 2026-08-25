@@ -423,8 +423,18 @@ bool SnapDump_WriteHistory(int32_t triggerFrame, const char* relativePath)
                  time.wSecond, role, triggerFrame);
         relativePath = defaultRelative;
     }
+    char logRelative[512];
+    const bool isAutoTestPath = strncmp(relativePath, "autotest/", 9) == 0 ||
+                                strncmp(relativePath, "autotest\\", 9) == 0;
+    int relativeLength = snprintf(logRelative, sizeof(logRelative), "%s%s",
+                                  isAutoTestPath ? "" : "rollback_logs/",
+                                  relativePath);
+    if (relativeLength < 0 || (size_t)relativeLength >= sizeof(logRelative)) {
+        HookLog("SnapDump: output path is too long: %s\n", relativePath);
+        return false;
+    }
     char path[512];
-    if (!Rollback_ResolveDllPath(path, sizeof(path), relativePath)) {
+    if (Rollback_ResolveDllPath(path, sizeof(path), logRelative) < 0) {
         HookLog("SnapDump: failed to resolve output path %s\n", relativePath);
         return false;
     }
@@ -530,6 +540,11 @@ bool SnapDump_WriteHistory(int32_t triggerFrame, const char* relativePath)
         return false;
     }
     g_dumpWritten = true;
+    if (Netplay_IsActive()) {
+        char outputDirectory[MAX_PATH] = {};
+        Rollback_GetNetplayOutputDirectory(outputDirectory,
+                                           sizeof(outputDirectory));
+    }
     HookLog("SnapDump: wrote %u snapshots through frame %d -> %s\n",
             (uint32_t)frames.size(), triggerFrame, path);
     return true;

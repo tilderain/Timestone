@@ -14,6 +14,7 @@
 #include <winver.h>
 
 extern void HookLog(const char* fmt, ...);
+extern void HookLogWriteRecent(FILE* file);
 
 #ifndef UMVC3HOOK_GIT_COMMIT
 #define UMVC3HOOK_GIT_COMMIT "unknown"
@@ -795,6 +796,7 @@ LONG HandleException(PEXCEPTION_POINTERS info, bool catastrophicOnly)
         } else {
             std::fprintf(file, "  <stack unreadable>\n");
         }
+        HookLogWriteRecent(file);
         WriteLoadedModules(file);
         std::fprintf(file, "=== end crash ===\n");
         std::fflush(file);
