@@ -73,8 +73,6 @@ struct RollbackProfile {
     uint64_t total = 0;
     uint64_t patchEnable = 0;
     uint64_t inputHistorySave = 0;
-    uint64_t diagSetup = 0;
-    uint64_t preRestoreJson = 0;
     uint64_t restoreTotal = 0;
     uint64_t restoreSetup = 0;
     uint64_t restoreRegions = 0;
@@ -121,15 +119,11 @@ struct RollbackProfile {
     uint32_t restoreCurrentShots = 0;
     uint32_t restoreSavedShots = 0;
     uint64_t restoreUi = 0;
-    uint64_t inputAvailability = 0;
     uint64_t frameInput = 0;
-    uint64_t frameDiagPre = 0;
-    uint64_t frameJson = 0;
     uint64_t frameSnapshot = 0;
     uint64_t frameNativeTick = 0;
     uint64_t frameNativeTickMax = 0;
     uint64_t frameInputEnd = 0;
-    uint64_t frameDiagPost = 0;
     uint64_t frameTotal = 0;
     uint64_t frameTotalMax = 0;
     uint64_t headlessTimingInput = 0;
@@ -248,11 +242,10 @@ void Profile_RecordSnapshotEnabled(uint64_t profileStart, uint64_t buildRegionsE
                                    uint64_t allocationEnd, uint64_t copyRegionsEnd,
                                    uint64_t snapshotMetadataEnd, uint64_t collisionClonesEnd,
                                    uint64_t shotRecipesEnd, size_t bytes, uint32_t regions);
-void Profile_DumpEnabled(const RollbackProfile& profile, bool ndjsonEnabled,
-                         bool multiResimEnabled);
-void Profile_DumpPostResimEnabled(int32_t frame, uint64_t notifyTicks,
-                                  uint64_t resolveTicks, uint64_t saveSnapshotTicks,
-                                  uint64_t totalTicks);
+void Profile_DumpEnabled(const RollbackProfile& profile, bool multiResimEnabled);
+void Profile_DumpPostResimEnabled(int32_t frame, uint64_t resolveTicks,
+                                   uint64_t saveSnapshotTicks,
+                                   uint64_t totalTicks);
 
 inline constexpr bool Profile_Enabled()
 {
@@ -303,20 +296,19 @@ inline void Profile_RecordSnapshot(uint64_t profileStart, uint64_t buildRegionsE
     }
 }
 
-inline void Profile_Dump(const RollbackProfile& profile, bool ndjsonEnabled,
-                         bool multiResimEnabled)
+inline void Profile_Dump(const RollbackProfile& profile, bool multiResimEnabled)
 {
     if constexpr (ROLLBACK_PROFILING_ENABLED)
-        Profile_DumpEnabled(profile, ndjsonEnabled, multiResimEnabled);
+        Profile_DumpEnabled(profile, multiResimEnabled);
 }
 
-inline void Profile_DumpPostResim(int32_t frame, uint64_t notifyTicks,
-                                  uint64_t resolveTicks, uint64_t saveSnapshotTicks,
-                                  uint64_t totalTicks)
+inline void Profile_DumpPostResim(int32_t frame, uint64_t resolveTicks,
+                                   uint64_t saveSnapshotTicks,
+                                   uint64_t totalTicks)
 {
     if constexpr (ROLLBACK_PROFILING_ENABLED) {
-        Profile_DumpPostResimEnabled(frame, notifyTicks, resolveTicks,
-                                     saveSnapshotTicks, totalTicks);
+        Profile_DumpPostResimEnabled(frame, resolveTicks, saveSnapshotTicks,
+                                      totalTicks);
     }
 }
 
