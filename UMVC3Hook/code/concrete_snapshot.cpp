@@ -54,6 +54,7 @@ constexpr uintptr_t kJamSessionDti = 0x140D49288ull;
 constexpr uintptr_t kInfernoDti = 0x140D49790ull;
 constexpr uintptr_t kShockingPinkBombDti = 0x140D4D6A0ull;
 constexpr uintptr_t kOilBalloonGroundOilDti = 0x140D4C478ull;
+constexpr uintptr_t kDarkPhoenixFireDti = 0x140D4BDA0ull;
 constexpr uintptr_t kVulcanSwingWireDti = 0x140D4CB00ull;
 constexpr uintptr_t kVulcanBoomerangDti = 0x140D4D660ull;
 
@@ -1001,7 +1002,8 @@ void ConcreteShotSnapshot_RestoreCallbackEffects(
         IsDti(snapshot.dti, kJamSessionDti) ||
         IsDti(snapshot.dti, kInfernoDti) ||
         IsDti(snapshot.dti, kShockingPinkBombDti) ||
-        IsDti(snapshot.dti, kOilBalloonGroundOilDti)) {
+        IsDti(snapshot.dti, kOilBalloonGroundOilDti) ||
+        IsDti(snapshot.dti, kDarkPhoenixFireDti)) {
         // Attack Wire's factory effect owns track buffers initialized for the
         // fresh generator graph. Rewinding its presentation timeline can make
         // a zero-length track active and underflow shiftHistoryBuffer.
@@ -1018,6 +1020,8 @@ void ConcreteShotSnapshot_RestoreCallbackEffects(
         // Ground Oil's slot-1 effect likewise owns a fresh particle pool. Its
         // rewound emission state can overrun that pool and corrupt the free-list
         // tail at cParticleGenerator+0xF8.
+        // Dark Phoenix Fire has the same fresh-pool invariant. Rewinding its
+        // callback emission cursor corrupted the active-list head at +0xE0.
         // Fire Grenade's callback can contain a generator whose descriptor is
         // not ready on the reconstructed frame. Restoring an advanced emission
         // phase makes moveAfter consume that unavailable descriptor immediately.
