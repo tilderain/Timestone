@@ -898,6 +898,11 @@ bool SteamLobby_HasLobby()
     return g_lobbyId != 0;
 }
 
+bool SteamLobby_IsCreating()
+{
+    return g_pendingCall == PendingCall::Create;
+}
+
 bool SteamLobby_IsHostedLobby(uint64_t lobbyId)
 {
     return g_isHost && lobbyId != 0 && lobbyId == g_lobbyId;
@@ -994,6 +999,7 @@ void SteamLobby_Shutdown(bool preserveConnection)
         HookLog("SteamLobby: transferred live connection to gameplay\n");
         return;
     }
+    bool leftLobby = g_lobbyId != 0;
     StopCallbackPump();
     UnregisterJoinCallbacks();
     bool bridgeActive = SteamTransport_IsActive();
@@ -1031,4 +1037,5 @@ void SteamLobby_Shutdown(bool preserveConnection)
     g_connectionDeadline = 0;
     g_nextResultPingRefresh = 0;
     g_resultPingRefreshDeadline = 0;
+    if (leftLobby) SetStatus("Left Steam lobby");
 }

@@ -519,6 +519,34 @@ static void UpdateReadyButton(HWND hDlg)
     InvalidateRect(button, NULL, TRUE);
 }
 
+static void UpdateSteamLobbyButton(HWND hDlg)
+{
+    HWND button = GetDlgItem(hDlg, ID_STEAM_CREATE_BTN);
+    if (!button) return;
+    bool hasLobby = SteamLobby_HasLobby();
+    SetWindowTextA(button, hasLobby ? "Leave Lobby" : "Create Lobby");
+    EnableWindow(button, hasLobby || !SteamLobby_IsCreating());
+}
+
+static void JoinSelectedSteamLobby(HWND hDlg)
+{
+    HWND list = GetDlgItem(hDlg, ID_STEAM_LIST);
+    if (!list) return;
+    int row = ListView_GetNextItem(list, -1, LVNI_SELECTED);
+    if (row < 0) return;
+
+    LVITEMA item = {};
+    item.mask = LVIF_PARAM;
+    item.iItem = row;
+    if (!ListView_GetItem(list, &item) || !item.lParam) return;
+
+    uint64_t lobbyId = static_cast<uint64_t>(item.lParam);
+    if (SteamLobby_IsHostedLobby(lobbyId)) return;
+    if (SteamLobby_HasLobby() || g_dialogConfig.enetHost)
+        CleanupNetwork(hDlg, true);
+    SteamLobby_Join(lobbyId);
+}
+
 static void ConfigureConnectedControls(HWND hDlg)
 {
     for (HWND child = GetWindow(hDlg, GW_CHILD); child;
@@ -1083,7 +1111,7 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
             leftX + 140, y, 120, 26,
             hDlg, (HMENU)ID_STEAM_CREATE_BTN, NULL, NULL);
 
-        CreateWindowA("BUTTON", "Join Selected",
+        CreateWindowA("BUTTON", "Join Lobby",
             WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON | WS_DISABLED,
             leftX + 270, y, 120, 26,
             hDlg, (HMENU)ID_STEAM_JOIN_BTN, NULL, NULL);
@@ -1175,8 +1203,7 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
                             MB_OK | MB_ICONERROR);
             HWND hSteamStatus = GetDlgItem(hDlg, ID_STEAM_STATUS);
             if (hSteamStatus) SetWindowTextA(hSteamStatus, SteamLobby_GetStatus());
-            EnableWindow(GetDlgItem(hDlg, ID_STEAM_CREATE_BTN),
-                         SteamLobby_HasLobby() ? FALSE : TRUE);
+            UpdateSteamLobbyButton(hDlg);
 
             if (SteamLobby_TakeResultsChanged()) {
                 HWND hList = GetDlgItem(hDlg, ID_STEAM_LIST);
@@ -1375,6 +1402,12 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
             }
             EnableWindow(GetDlgItem(hDlg, ID_STEAM_JOIN_BTN),
                          lobbyId && !SteamLobby_IsHostedLobby(lobbyId));
+            return 0;
+        }
+
+        if (header->code == NM_DBLCLK) {
+            const auto* activate = reinterpret_cast<const NMITEMACTIVATE*>(lParam);
+            if (activate->iItem >= 0) JoinSelectedSteamLobby(hDlg);
             return 0;
         }
 
@@ -1776,27 +1809,17 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
 
         case ID_STEAM_CREATE_BTN:
         {
-            SteamLobby_Create();
+            if (SteamLobby_HasLobby())
+                CleanupNetwork(hDlg, true);
+            else
+                SteamLobby_Create();
+            UpdateSteamLobbyButton(hDlg);
             return 0;
         }
 
         case ID_STEAM_JOIN_BTN:
         {
-            HWND hList = GetDlgItem(hDlg, ID_STEAM_LIST);
-            if (!hList) return 0;
-            int row = ListView_GetNextItem(hList, -1, LVNI_SELECTED);
-            if (row < 0) return 0;
-            LVITEMA item = {};
-            item.mask = LVIF_PARAM;
-            item.iItem = row;
-            if (ListView_GetItem(hList, &item) && item.lParam)
-            {
-                uint64_t lobbyId = static_cast<uint64_t>(item.lParam);
-                if (SteamLobby_IsHostedLobby(lobbyId)) return 0;
-                if (SteamLobby_HasLobby() || g_dialogConfig.enetHost)
-                    CleanupNetwork(hDlg, true);
-                SteamLobby_Join(lobbyId);
-            }
+            JoinSelectedSteamLobby(hDlg);
             return 0;
         }
         }
