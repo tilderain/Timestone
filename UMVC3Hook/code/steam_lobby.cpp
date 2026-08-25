@@ -749,7 +749,7 @@ void SteamLobby_Search()
     g_api.AddDistanceFilter(g_matchmaking, 3); // k_ELobbyDistanceFilterWorldwide
     g_pendingHandle = g_api.RequestLobbyList(g_matchmaking);
     g_pendingCall = PendingCall::Search;
-    SetStatus("Searching for Timestone lobbies...");
+    SetStatus("Searching for lobbies...");
 }
 
 void SteamLobby_Create()
@@ -761,7 +761,7 @@ void SteamLobby_Create()
     }
     g_pendingHandle = g_api.CreateLobby(g_matchmaking, 2, 2); // public, two members
     g_pendingCall = PendingCall::Create;
-    SetStatus("Creating Timestone lobby...");
+    SetStatus("Creating lobby...");
 }
 
 void SteamLobby_Join(uint64_t lobbyId)
@@ -780,7 +780,7 @@ void SteamLobby_Join(uint64_t lobbyId)
     g_pendingHandle = g_api.JoinLobby(g_matchmaking, lobbyId);
     g_pendingCall = PendingCall::Join;
     g_isHost = false;
-    SetStatus("Joining Timestone lobby...");
+    SetStatus("Joining lobby...");
 }
 
 void SteamLobby_Pump()
@@ -807,9 +807,9 @@ void SteamLobby_Pump()
             g_pendingCall = PendingCall::None;
             g_pendingHandle = 0;
             if (g_resultCount == 1)
-                snprintf(g_status, sizeof(g_status), "Found 1 Timestone lobby");
+                snprintf(g_status, sizeof(g_status), "Found 1 lobby");
             else
-                snprintf(g_status, sizeof(g_status), "Found %u Timestone lobbies",
+                snprintf(g_status, sizeof(g_status), "Found %u lobbies",
                          (unsigned)g_resultCount);
         }
     } else if (g_pendingCall == PendingCall::Create) {
@@ -896,6 +896,11 @@ const char* SteamLobby_GetPeerUsername()
 bool SteamLobby_HasLobby()
 {
     return g_lobbyId != 0;
+}
+
+bool SteamLobby_IsHostedLobby(uint64_t lobbyId)
+{
+    return g_isHost && lobbyId != 0 && lobbyId == g_lobbyId;
 }
 
 size_t SteamLobby_GetResultCount()

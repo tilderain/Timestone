@@ -1084,7 +1084,7 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
             hDlg, (HMENU)ID_STEAM_CREATE_BTN, NULL, NULL);
 
         CreateWindowA("BUTTON", "Join Selected",
-            WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON,
+            WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON | WS_DISABLED,
             leftX + 270, y, 120, 26,
             hDlg, (HMENU)ID_STEAM_JOIN_BTN, NULL, NULL);
 
@@ -1356,6 +1356,44 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
             }
         }
         return 0;
+
+    case WM_NOTIFY:
+    {
+        const NMHDR* header = reinterpret_cast<const NMHDR*>(lParam);
+        if (!header || header->idFrom != ID_STEAM_LIST) break;
+
+        if (header->code == LVN_ITEMCHANGED) {
+            HWND hList = header->hwndFrom;
+            int row = ListView_GetNextItem(hList, -1, LVNI_SELECTED);
+            uint64_t lobbyId = 0;
+            if (row >= 0) {
+                LVITEMA item = {};
+                item.mask = LVIF_PARAM;
+                item.iItem = row;
+                if (ListView_GetItem(hList, &item))
+                    lobbyId = static_cast<uint64_t>(item.lParam);
+            }
+            EnableWindow(GetDlgItem(hDlg, ID_STEAM_JOIN_BTN),
+                         lobbyId && !SteamLobby_IsHostedLobby(lobbyId));
+            return 0;
+        }
+
+        if (header->code == NM_CUSTOMDRAW) {
+            auto* draw = reinterpret_cast<NMLVCUSTOMDRAW*>(lParam);
+            if (draw->nmcd.dwDrawStage == CDDS_PREPAINT)
+                return CDRF_NOTIFYITEMDRAW;
+            if (draw->nmcd.dwDrawStage == CDDS_ITEMPREPAINT) {
+                LVITEMA item = {};
+                item.mask = LVIF_PARAM;
+                item.iItem = static_cast<int>(draw->nmcd.dwItemSpec);
+                if (ListView_GetItem(header->hwndFrom, &item) &&
+                    SteamLobby_IsHostedLobby(static_cast<uint64_t>(item.lParam))) {
+                    draw->clrText = GetSysColor(COLOR_GRAYTEXT);
+                }
+            }
+        }
+        break;
+    }
 
     case WM_COMMAND:
         switch (LOWORD(wParam)) {
@@ -1754,6 +1792,7 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
             if (ListView_GetItem(hList, &item) && item.lParam)
             {
                 uint64_t lobbyId = static_cast<uint64_t>(item.lParam);
+                if (SteamLobby_IsHostedLobby(lobbyId)) return 0;
                 if (SteamLobby_HasLobby() || g_dialogConfig.enetHost)
                     CleanupNetwork(hDlg, true);
                 SteamLobby_Join(lobbyId);
