@@ -431,6 +431,7 @@ enum CtrlId {
     ID_STEAM_LIST         = 2303,
     ID_STEAM_STATUS       = 2304,
     ID_STEAM_JOIN_BTN     = 2305,
+    ID_STEAM_TYPE         = 2306,
 };
 
 // ---------------------------------------------------------------------------
@@ -526,6 +527,8 @@ static void UpdateSteamLobbyButton(HWND hDlg)
     bool hasLobby = SteamLobby_HasLobby();
     SetWindowTextA(button, hasLobby ? "Leave Lobby" : "Create Lobby");
     EnableWindow(button, hasLobby || !SteamLobby_IsCreating());
+    EnableWindow(GetDlgItem(hDlg, ID_STEAM_TYPE),
+                 !hasLobby && !SteamLobby_IsCreating());
 }
 
 static void JoinSelectedSteamLobby(HWND hDlg)
@@ -775,7 +778,7 @@ LaunchOption ShowLaunchMenu()
 
     RegisterClassA(&wc);
 
-    int w = 840, h = 788;
+    int w = 840, h = 815;
     int x = (GetSystemMetrics(SM_CXSCREEN) - w) / 2;
     int y = (GetSystemMetrics(SM_CYSCREEN) - h) / 2;
 
@@ -1097,7 +1100,7 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
         // ---- Steam Lobby Section ----
         y += 5;
         CreateWindowA("BUTTON", "Steam Lobby",
-            WS_VISIBLE | WS_CHILD | BS_GROUPBOX, leftX, y, contentW, 180,
+            WS_VISIBLE | WS_CHILD | BS_GROUPBOX, leftX, y, contentW, 235,
             hDlg, NULL, NULL, NULL);
         y += 18;
 
@@ -1111,21 +1114,37 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
             leftX + 140, y, 120, 26,
             hDlg, (HMENU)ID_STEAM_CREATE_BTN, NULL, NULL);
 
+        CreateWindowA("STATIC", "Type:",
+            WS_VISIBLE | WS_CHILD,
+            leftX + 270, y + 4, 35, 18,
+            hDlg, NULL, NULL, NULL);
+
+        HWND hLobbyType = CreateWindowA("COMBOBOX", "",
+            WS_VISIBLE | WS_CHILD | WS_TABSTOP | CBS_DROPDOWNLIST | CBS_HASSTRINGS,
+            leftX + 305, y, 120, 100,
+            hDlg, (HMENU)ID_STEAM_TYPE, NULL, NULL);
+        SendMessageA(hLobbyType, CB_ADDSTRING, 0, (LPARAM)"Public");
+        SendMessageA(hLobbyType, CB_ADDSTRING, 0, (LPARAM)"Friends Only");
+        SendMessageA(hLobbyType, CB_ADDSTRING, 0, (LPARAM)"Private");
+        SendMessageA(hLobbyType, CB_SETCURSEL, 0, 0);
+
         CreateWindowA("BUTTON", "Join Lobby",
             WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON | WS_DISABLED,
-            leftX + 270, y, 120, 26,
+            leftX + 435, y, 120, 26,
             hDlg, (HMENU)ID_STEAM_JOIN_BTN, NULL, NULL);
 
-        CreateWindowA("STATIC", SteamLobby_GetStatus(),
-            WS_VISIBLE | WS_CHILD, leftX + 400, y + 4, 380, 18,
-            hDlg, (HMENU)ID_STEAM_STATUS, NULL, NULL);
         y += 30;
+
+        CreateWindowA("STATIC", SteamLobby_GetStatus(),
+            WS_VISIBLE | WS_CHILD, leftX + 10, y + 2, 780, 18,
+            hDlg, (HMENU)ID_STEAM_STATUS, NULL, NULL);
+        y += 22;
 
         // Lobby results table
         HWND hLobbyList = CreateWindowExA(WS_EX_CLIENTEDGE, WC_LISTVIEWA, "",
             WS_VISIBLE | WS_CHILD | WS_TABSTOP | WS_VSCROLL |
             LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS,
-            leftX + 10, y, 780, 115,
+            leftX + 10, y, 780, 150,
             hDlg, (HMENU)ID_STEAM_LIST, NULL, NULL);
         ListView_SetExtendedListViewStyle(hLobbyList, LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES);
         const char* columnNames[] = {"Lobby Name", "Username", "Ping"};
@@ -1138,7 +1157,7 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
             column.iSubItem = i;
             ListView_InsertColumn(hLobbyList, i, &column);
         }
-        y += 120;
+        y += 155;
 
         // ---- Launch Buttons ----
         y += 10;
@@ -1178,7 +1197,7 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
         snprintf(versionText, sizeof(versionText), "Timestone v%s", UMVC3HOOK_VERSION);
         CreateWindowA("STATIC", versionText,
             WS_VISIBLE | WS_CHILD | SS_RIGHT,
-            leftX + 600, 710, 200, 18, hDlg, NULL, NULL, NULL);
+            leftX + 600, y + 40, 200, 18, hDlg, NULL, NULL, NULL);
 
         SetTimer(hDlg, ID_STEAM_POLL_TIMER, 50, NULL);
         return msg == WM_INITDIALOG ? TRUE : 0;
@@ -1811,8 +1830,15 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
         {
             if (SteamLobby_HasLobby())
                 CleanupNetwork(hDlg, true);
-            else
-                SteamLobby_Create();
+            else {
+                int selection = static_cast<int>(SendMessageA(
+                    GetDlgItem(hDlg, ID_STEAM_TYPE), CB_GETCURSEL, 0, 0));
+                SteamLobbyType type = selection == 1
+                    ? SteamLobbyType::FriendsOnly
+                    : selection == 2 ? SteamLobbyType::Private
+                                     : SteamLobbyType::Public;
+                SteamLobby_Create(type);
+            }
             UpdateSteamLobbyButton(hDlg);
             return 0;
         }

@@ -4,10 +4,16 @@
 #include <cstdint>
 #include <enet/enet.h>
 
+enum class SteamLobbyType : int {
+    Private = 0,
+    FriendsOnly = 1,
+    Public = 2,
+};
+
 bool SteamLobby_Initialize();
 void SteamLobby_Pump();
 void SteamLobby_Search();
-void SteamLobby_Create();
+void SteamLobby_Create(SteamLobbyType type);
 void SteamLobby_Join(uint64_t lobbyId);
 void SteamLobby_Shutdown(bool preserveConnection);
 
