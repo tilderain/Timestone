@@ -99,6 +99,7 @@ volatile LONG g_stopCallbackThread = 0;
 bool g_callbacksOnUiThread = false;
 bool g_joinCallbacksRegistered = false;
 std::atomic<uint64_t> g_pendingJoinLobby{0};
+std::atomic<uint64_t> g_replacementJoinLobby{0};
 uint64_t g_peerSteamId = 0;
 uint64_t g_rejectedPeerSteamId = 0;
 char g_peerUsername[128] = {};
@@ -319,9 +320,14 @@ void SetRichPresence(const char* key, const char* value)
         g_api.SetRichPresence(g_friends, key, value ? value : "");
 }
 
+void ClearLobbyRichPresence();
+
 void PublishLobbyRichPresence()
 {
-    if (!g_isHost || !g_lobbyId) return;
+    if (!g_isHost || !g_lobbyId || g_bridgeCreated) {
+        ClearLobbyRichPresence();
+        return;
+    }
 
     char connect[64];
     snprintf(connect, sizeof(connect), "+connect_lobby %llu",
@@ -342,10 +348,6 @@ void PumpQueuedJoinRequest()
 
     uint64_t lobbyId = g_pendingJoinLobby.exchange(0, std::memory_order_acq_rel);
     if (!lobbyId) return;
-    if (g_lobbyId || g_bridgeCreated) {
-        SetStatus("Already connected to a Steam lobby");
-        return;
-    }
     HookLog("SteamLobby: joining queued lobby invite %llu\n",
             static_cast<unsigned long long>(lobbyId));
     SteamLobby_Join(lobbyId);
@@ -725,6 +727,7 @@ bool SteamLobby_Initialize()
         SetStatus("Steam join callbacks are unavailable");
         return false;
     }
+    ClearLobbyRichPresence();
     if (!g_networkingUtils) {
         StartCallbackPump();
         SetStatus("Steam ready; ping estimates unavailable");
@@ -764,6 +767,16 @@ void SteamLobby_Create()
 void SteamLobby_Join(uint64_t lobbyId)
 {
     if (!lobbyId || !SteamLobby_Initialize() || g_pendingCall != PendingCall::None) return;
+    if (lobbyId == g_lobbyId) {
+        SetStatus("Already in the selected Steam lobby");
+        return;
+    }
+    if (g_lobbyId || g_bridgeCreated) {
+        g_replacementJoinLobby.store(lobbyId, std::memory_order_release);
+        SetStatus("Leaving current lobby before joining another...");
+        return;
+    }
+    ClearLobbyRichPresence();
     g_pendingHandle = g_api.JoinLobby(g_matchmaking, lobbyId);
     g_pendingCall = PendingCall::Join;
     g_isHost = false;
@@ -849,6 +862,7 @@ void SteamLobby_Pump()
                 }
                 g_lobbyId = result.m_ulSteamIDLobby;
                 g_isHost = false;
+                ClearLobbyRichPresence();
                 g_nextConnectionAttempt = 0;
                 g_connectionDeadline = GetTickCount64() + kPeerConnectionTimeoutMs;
                 SetStatus("Lobby joined; connecting to owner...");
@@ -929,6 +943,13 @@ bool SteamLobby_TakeVersionMismatch(char* message, size_t messageSize)
     return true;
 }
 
+bool SteamLobby_TakeReplacementJoin(uint64_t* lobbyId)
+{
+    if (!lobbyId) return false;
+    *lobbyId = g_replacementJoinLobby.exchange(0, std::memory_order_acq_rel);
+    return *lobbyId != 0;
+}
+
 bool SteamLobby_ResetHostPeer()
 {
     if (!g_isHost || !g_lobbyId) return false;
@@ -982,8 +1003,10 @@ void SteamLobby_Shutdown(bool preserveConnection)
     g_listenSocket = k_HSteamListenSocket_Invalid;
     g_connection = k_HSteamNetConnection_Invalid;
     ClearLobbyRichPresence();
-    if (g_matchmaking && g_lobbyId) g_api.LeaveLobby(g_matchmaking, g_lobbyId);
+    if (g_matchmaking && g_lobbyId)
+        g_api.LeaveLobby(g_matchmaking, g_lobbyId);
     g_pendingJoinLobby.store(0, std::memory_order_release);
+    g_replacementJoinLobby.store(0, std::memory_order_release);
     g_pendingCall = PendingCall::None;
     g_pendingHandle = 0;
     g_lobbyId = 0;

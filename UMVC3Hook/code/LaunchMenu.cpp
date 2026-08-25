@@ -1164,6 +1164,11 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
                 InvalidateRect(GetDlgItem(hDlg, ID_LAUNCH_TRAINING), NULL, FALSE);
 
             SteamLobby_Pump();
+            uint64_t replacementLobby = 0;
+            if (SteamLobby_TakeReplacementJoin(&replacementLobby)) {
+                CleanupNetwork(hDlg, true);
+                SteamLobby_Join(replacementLobby);
+            }
             char mismatch[256];
             if (SteamLobby_TakeVersionMismatch(mismatch, sizeof(mismatch)))
                 MessageBoxA(hDlg, mismatch, "Timestone Version Mismatch",
@@ -1747,7 +1752,12 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
             item.mask = LVIF_PARAM;
             item.iItem = row;
             if (ListView_GetItem(hList, &item) && item.lParam)
-                SteamLobby_Join(static_cast<uint64_t>(item.lParam));
+            {
+                uint64_t lobbyId = static_cast<uint64_t>(item.lParam);
+                if (SteamLobby_HasLobby() || g_dialogConfig.enetHost)
+                    CleanupNetwork(hDlg, true);
+                SteamLobby_Join(lobbyId);
+            }
             return 0;
         }
         }
