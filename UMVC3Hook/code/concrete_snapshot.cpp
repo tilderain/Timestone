@@ -41,6 +41,7 @@ constexpr uintptr_t kSoulFistDti = 0x140D4B6E8ull;
 constexpr uintptr_t kLegionTigerDti = 0x140D4ABB8ull;
 constexpr uintptr_t kRepulsorBlastSpDti = 0x140D4ADA0ull;
 constexpr uintptr_t kDogMissileDti = 0x140D4B888ull;
+constexpr uintptr_t kFireGrenadeExplodeDti = 0x140D48BB0ull;
 constexpr uintptr_t kItemThrowDti = 0x140D4B980ull;
 constexpr uintptr_t kRocketLauncherExplodeDti = 0x140D4BAC8ull;
 constexpr uintptr_t kVulcanAxeDti = 0x140D48808ull;
@@ -996,6 +997,7 @@ void ConcreteShotSnapshot_RestoreCallbackEffects(
     if (!shot) return;
 
     if (IsDti(snapshot.dti, kAttackWireDti) ||
+        IsDti(snapshot.dti, kFireGrenadeExplodeDti) ||
         IsDti(snapshot.dti, kJamSessionDti) ||
         IsDti(snapshot.dti, kInfernoDti) ||
         IsDti(snapshot.dti, kShockingPinkBombDti) ||
@@ -1016,6 +1018,9 @@ void ConcreteShotSnapshot_RestoreCallbackEffects(
         // Ground Oil's slot-1 effect likewise owns a fresh particle pool. Its
         // rewound emission state can overrun that pool and corrupt the free-list
         // tail at cParticleGenerator+0xF8.
+        // Fire Grenade's callback can contain a generator whose descriptor is
+        // not ready on the reconstructed frame. Restoring an advanced emission
+        // phase makes moveAfter consume that unavailable descriptor immediately.
         return;
     }
 
