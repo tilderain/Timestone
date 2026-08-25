@@ -95,6 +95,7 @@ struct LaunchTrainingPacket {
 
 struct LaunchP2SelectionPacket {
     uint32_t type;               // PACKET_LAUNCH_P2_SELECTION
+    char protocol[32];           // UMVC3HOOK_VERSION
     int32_t  chars[3];
     int32_t  colors[3];          // zero-based archive variant IDs
     int32_t  assists[3];         // 0=Alpha, 1=Beta, 2=Gamma
@@ -104,6 +105,7 @@ struct LaunchP2SelectionPacket {
 
 struct LaunchP1SelectionPacket {
     uint32_t type;               // PACKET_LAUNCH_P1_SELECTION
+    char protocol[32];           // UMVC3HOOK_VERSION
     int32_t  chars[3];
     int32_t  colors[3];          // zero-based archive variant IDs
     int32_t  assists[3];         // 0=Alpha, 1=Beta, 2=Gamma

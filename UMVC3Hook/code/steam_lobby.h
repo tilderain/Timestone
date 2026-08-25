@@ -22,5 +22,7 @@ const char* SteamLobby_GetResultName(size_t index);
 const char* SteamLobby_GetResultUsername(size_t index);
 bool SteamLobby_ArePingEstimatesAvailable();
 bool SteamLobby_TakeResultsChanged();
+bool SteamLobby_TakeVersionMismatch(char* message, size_t messageSize);
+bool SteamLobby_ResetHostPeer();
 bool SteamLobby_TakeNetworkHandles(ENetHost** outHost, ENetPeer** outPeer,
                                    bool* outIsHost);

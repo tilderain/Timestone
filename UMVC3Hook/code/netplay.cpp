@@ -2,6 +2,7 @@
 #include "rollback.h"
 #include "rollback_diagnostics.h"
 #include "controller.h"
+#include "steam_lobby.h"
 #include "steam_transport.h"
 #include <cstring>
 #include <cstdio>
@@ -1280,8 +1281,7 @@ void Netplay_Shutdown()
         g_serviceThread = nullptr;
     }
 
-    if (SteamTransport_IsActive())
-        SteamTransport_Shutdown();
+    SteamLobby_Shutdown(false);
 
     if (g_peer)
     {

@@ -18,6 +18,7 @@ extern void HookLog(const char* fmt, ...);
 namespace {
 
 constexpr const char* kLobbyProtocol = UMVC3HOOK_VERSION;
+constexpr ULONGLONG kPeerConnectionTimeoutMs = 25000;
 
 enum class PendingCall {
     None,
@@ -90,6 +91,7 @@ bool g_bridgeCreated = false;
 bool g_pingLocationPublished = false;
 ULONGLONG g_nextPingLocationAttempt = 0;
 ULONGLONG g_nextConnectionAttempt = 0;
+ULONGLONG g_connectionDeadline = 0;
 ULONGLONG g_nextResultPingRefresh = 0;
 ULONGLONG g_resultPingRefreshDeadline = 0;
 HANDLE g_callbackThread = nullptr;
@@ -98,8 +100,11 @@ bool g_callbacksOnUiThread = false;
 bool g_joinCallbacksRegistered = false;
 std::atomic<uint64_t> g_pendingJoinLobby{0};
 uint64_t g_peerSteamId = 0;
+uint64_t g_rejectedPeerSteamId = 0;
 char g_peerUsername[128] = {};
 char g_status[256] = "Steam is not initialized";
+char g_versionMismatch[256] = {};
+bool g_versionMismatchPending = false;
 
 class SteamCallbackBase {
 public:
@@ -222,6 +227,30 @@ void SetStatusf(const char* format, uint64_t value)
 {
     snprintf(g_status, sizeof(g_status), format, static_cast<unsigned long long>(value));
     HookLog("SteamLobby: %s\n", g_status);
+}
+
+void SetVersionMismatch(const char* remoteProtocol)
+{
+    unsigned remoteMajor = 0, remoteMinor = 0, remotePatch = 0;
+    unsigned localMajor = 0, localMinor = 0, localPatch = 0;
+    bool parsedRemote = remoteProtocol &&
+        sscanf(remoteProtocol, "%u.%u.%u", &remoteMajor, &remoteMinor, &remotePatch) == 3;
+    bool parsedLocal = sscanf(kLobbyProtocol, "%u.%u.%u",
+                              &localMajor, &localMinor, &localPatch) == 3;
+    bool remoteOlder = !parsedRemote || (parsedLocal &&
+        (remoteMajor < localMajor ||
+         (remoteMajor == localMajor && remoteMinor < localMinor) ||
+         (remoteMajor == localMajor && remoteMinor == localMinor &&
+          remotePatch < localPatch)));
+    snprintf(g_versionMismatch, sizeof(g_versionMismatch),
+             "%s\n\nYour version: %s\nTheir version: %s",
+             remoteOlder
+                 ? "The other player is running an older version."
+                 : "Your version does not match, please update Timestone",
+             kLobbyProtocol,
+             remoteProtocol && remoteProtocol[0] ? remoteProtocol : "unknown");
+    g_versionMismatchPending = true;
+    SetStatus("Steam lobby version does not match");
 }
 
 bool ResolveExports()
@@ -429,7 +458,13 @@ void RefreshPeerUsername()
 void StartPeerConnection(uint64_t remoteId)
 {
     if (!remoteId || g_connection != k_HSteamNetConnection_Invalid) return;
-    if (GetTickCount64() < g_nextConnectionAttempt) return;
+    ULONGLONG now = GetTickCount64();
+    if (!g_connectionDeadline) {
+        g_connectionDeadline = now + kPeerConnectionTimeoutMs;
+        HookLog("SteamLobby: peer connection deadline started (%llu ms)\n",
+                static_cast<unsigned long long>(kPeerConnectionTimeoutMs));
+    }
+    if (now < g_nextConnectionAttempt) return;
 
     g_peerSteamId = remoteId;
     RefreshPeerUsername();
@@ -475,6 +510,8 @@ void PumpLobbyMembers()
                 break;
             }
         }
+        if (remote == g_rejectedPeerSteamId) return;
+        g_rejectedPeerSteamId = 0;
     }
     StartPeerConnection(remote);
 }
@@ -566,7 +603,29 @@ void RefreshResultPings()
 
 void PumpConnection()
 {
-    if (g_connection == k_HSteamNetConnection_Invalid || g_bridgeCreated) return;
+    if (g_bridgeCreated) return;
+    if (g_connectionDeadline && GetTickCount64() >= g_connectionDeadline) {
+        if (g_connection != k_HSteamNetConnection_Invalid) {
+            g_sockets->CloseConnection(g_connection, 1002,
+                                       "Timestone connection timed out", false);
+            g_connection = k_HSteamNetConnection_Invalid;
+        }
+        if (g_listenSocket != k_HSteamListenSocket_Invalid) {
+            g_sockets->CloseListenSocket(g_listenSocket);
+            g_listenSocket = k_HSteamListenSocket_Invalid;
+        }
+        ClearLobbyRichPresence();
+        if (g_lobbyId) g_api.LeaveLobby(g_matchmaking, g_lobbyId);
+        g_lobbyId = 0;
+        g_isHost = false;
+        g_peerSteamId = 0;
+        g_peerUsername[0] = '\0';
+        g_nextConnectionAttempt = 0;
+        g_connectionDeadline = 0;
+        SetStatus("Steam peer connection timed out; left lobby");
+        return;
+    }
+    if (g_connection == k_HSteamNetConnection_Invalid) return;
     SteamNetConnectionRealTimeStatus_t status = {};
     EResult result = g_sockets->GetConnectionRealTimeStatus(g_connection, &status, 0, nullptr);
     if (result != k_EResultOK) return;
@@ -578,6 +637,7 @@ void PumpConnection()
         }
         g_bridgeCreated = true;
         g_handlesReady = true;
+        g_connectionDeadline = 0;
         g_api.SetLobbyJoinable(g_matchmaking, g_lobbyId, false);
         ClearLobbyRichPresence();
         RefreshPeerUsername();
@@ -749,7 +809,9 @@ void SteamLobby_Pump()
             } else {
                 g_lobbyId = result.m_ulSteamIDLobby;
                 g_isHost = true;
+                g_rejectedPeerSteamId = 0;
                 g_nextConnectionAttempt = 0;
+                g_connectionDeadline = 0;
                 g_pingLocationPublished = false;
                 g_nextPingLocationAttempt = 0;
                 g_api.SetLobbyData(g_matchmaking, g_lobbyId, "Timestone", "1");
@@ -775,9 +837,20 @@ void SteamLobby_Pump()
             if (result.m_EChatRoomEnterResponse != 1 || !result.m_ulSteamIDLobby) {
                 SetStatus("Could not enter Steam lobby");
             } else {
+                const char* marker = g_api.GetLobbyData(
+                    g_matchmaking, result.m_ulSteamIDLobby, "Timestone");
+                const char* protocol = g_api.GetLobbyData(
+                    g_matchmaking, result.m_ulSteamIDLobby, "protocol");
+                if (!marker || strcmp(marker, "1") != 0 || !protocol ||
+                    strcmp(protocol, kLobbyProtocol) != 0) {
+                    SetVersionMismatch(protocol);
+                    g_api.LeaveLobby(g_matchmaking, result.m_ulSteamIDLobby);
+                    return;
+                }
                 g_lobbyId = result.m_ulSteamIDLobby;
                 g_isHost = false;
                 g_nextConnectionAttempt = 0;
+                g_connectionDeadline = GetTickCount64() + kPeerConnectionTimeoutMs;
                 SetStatus("Lobby joined; connecting to owner...");
             }
         }
@@ -848,6 +921,36 @@ bool SteamLobby_TakeResultsChanged()
     return changed;
 }
 
+bool SteamLobby_TakeVersionMismatch(char* message, size_t messageSize)
+{
+    if (!g_versionMismatchPending || !message || messageSize == 0) return false;
+    snprintf(message, messageSize, "%s", g_versionMismatch);
+    g_versionMismatchPending = false;
+    return true;
+}
+
+bool SteamLobby_ResetHostPeer()
+{
+    if (!g_isHost || !g_lobbyId) return false;
+
+    g_rejectedPeerSteamId = g_peerSteamId;
+    SteamTransport_Shutdown();
+    g_connection = k_HSteamNetConnection_Invalid;
+    g_gameHost = nullptr;
+    g_gamePeer = nullptr;
+    g_peerSteamId = 0;
+    g_peerUsername[0] = '\0';
+    g_handlesReady = false;
+    g_bridgeCreated = false;
+    g_nextConnectionAttempt = 0;
+    g_connectionDeadline = 0;
+    g_api.SetLobbyJoinable(g_matchmaking, g_lobbyId, true);
+    g_api.SetLobbyData(g_matchmaking, g_lobbyId, "state", "waiting");
+    PublishLobbyRichPresence();
+    SetStatus("Rejected incompatible player; waiting for opponent");
+    return true;
+}
+
 bool SteamLobby_TakeNetworkHandles(ENetHost** outHost, ENetPeer** outPeer,
                                    bool* outIsHost)
 {
@@ -867,7 +970,13 @@ void SteamLobby_Shutdown(bool preserveConnection)
     }
     StopCallbackPump();
     UnregisterJoinCallbacks();
+    bool bridgeActive = SteamTransport_IsActive();
     SteamTransport_Shutdown();
+    if (!bridgeActive && g_sockets &&
+        g_connection != k_HSteamNetConnection_Invalid) {
+        g_sockets->CloseConnection(g_connection, 1000,
+                                   "Timestone shutdown", false);
+    }
     if (g_sockets && g_listenSocket != k_HSteamListenSocket_Invalid)
         g_sockets->CloseListenSocket(g_listenSocket);
     g_listenSocket = k_HSteamListenSocket_Invalid;
@@ -875,16 +984,23 @@ void SteamLobby_Shutdown(bool preserveConnection)
     ClearLobbyRichPresence();
     if (g_matchmaking && g_lobbyId) g_api.LeaveLobby(g_matchmaking, g_lobbyId);
     g_pendingJoinLobby.store(0, std::memory_order_release);
+    g_pendingCall = PendingCall::None;
+    g_pendingHandle = 0;
     g_lobbyId = 0;
+    g_isHost = false;
     g_gameHost = nullptr;
     g_gamePeer = nullptr;
     g_peerSteamId = 0;
+    g_rejectedPeerSteamId = 0;
     g_peerUsername[0] = '\0';
+    g_versionMismatch[0] = '\0';
+    g_versionMismatchPending = false;
     g_handlesReady = false;
     g_bridgeCreated = false;
     g_pingLocationPublished = false;
     g_nextPingLocationAttempt = 0;
     g_nextConnectionAttempt = 0;
+    g_connectionDeadline = 0;
     g_nextResultPingRefresh = 0;
     g_resultPingRefreshDeadline = 0;
 }

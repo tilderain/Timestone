@@ -365,7 +365,6 @@ void CleanupNetworkOnExit()
         Netplay_Shutdown();
         g_dialogConfig.enetHost = nullptr;
         g_dialogConfig.enetPeer = nullptr;
-        SteamLobby_Shutdown(false);
         return;
     }
 
@@ -447,12 +446,64 @@ static void UpdateCharFromCombo(HWND hDlg, int comboId, int slotIndex, int team)
 static void UpdateSlotOptionsFromCombos(HWND hDlg);
 static void RandomizeCharacters(HWND hDlg);
 static void ConfigureConnectedControls(HWND hDlg);
+static void ResetLaunchMenuButtonState(HWND hDlg);
 static void SendP1Selection(HWND hDlg);
 static void SendP2Selection(HWND hDlg);
 static bool ApplyP1Selection(HWND hDlg, const LaunchP1SelectionPacket& packet);
 static bool ApplyP2Selection(HWND hDlg, const LaunchP2SelectionPacket& packet);
 static DWORD WINAPI NetworkPollThread(LPVOID lpParam);
 static void CleanupNetwork(HWND hDlg, bool forceCleanup = false);
+
+static bool IsCompatibleProtocol(const char (&protocol)[32])
+{
+    return memchr(protocol, '\0', sizeof(protocol)) != nullptr &&
+           strcmp(protocol, UMVC3HOOK_VERSION) == 0;
+}
+
+static void ShowVersionMismatch(HWND hDlg, const char* remoteVersion)
+{
+    unsigned remoteMajor = 0, remoteMinor = 0, remotePatch = 0;
+    unsigned localMajor = 0, localMinor = 0, localPatch = 0;
+    bool parsedRemote = remoteVersion &&
+        sscanf(remoteVersion, "%u.%u.%u", &remoteMajor, &remoteMinor, &remotePatch) == 3;
+    bool parsedLocal = sscanf(UMVC3HOOK_VERSION, "%u.%u.%u",
+                              &localMajor, &localMinor, &localPatch) == 3;
+    bool remoteOlder = !parsedRemote || (parsedLocal &&
+        (remoteMajor < localMajor ||
+         (remoteMajor == localMajor && remoteMinor < localMinor) ||
+         (remoteMajor == localMajor && remoteMinor == localMinor &&
+          remotePatch < localPatch)));
+    char message[256];
+    snprintf(message, sizeof(message),
+             "%s\n\nYour version: %s\nTheir version: %s",
+             remoteOlder
+                 ? "The other player is running an older version."
+                 : "Your version does not match, please update Timestone",
+             UMVC3HOOK_VERSION,
+             remoteVersion && remoteVersion[0] ? remoteVersion : "unknown");
+    if (g_isHost) {
+        HookLog("UMVC3Hook: Rejected incompatible peer: %s\n", message);
+        bool steamHost = SteamLobby_ResetHostPeer();
+        if (!steamHost && g_dialogConfig.enetPeer)
+            enet_peer_disconnect_now(g_dialogConfig.enetPeer, 0);
+        if (steamHost && g_dialogConfig.enetHost)
+            enet_host_destroy(g_dialogConfig.enetHost);
+        g_dialogConfig.enetPeer = nullptr;
+        if (steamHost) g_dialogConfig.enetHost = nullptr;
+        g_localReady = false;
+        g_peerReady = false;
+        ResetLaunchMenuButtonState(hDlg);
+        EnableWindow(GetDlgItem(hDlg, ID_NET_HOST_BTN), FALSE);
+        EnableWindow(GetDlgItem(hDlg, ID_NET_CONNECT_BTN), FALSE);
+        HWND status = GetDlgItem(hDlg, ID_NET_STATUS);
+        if (status) SetWindowTextA(status,
+            steamHost ? "Rejected incompatible player; waiting in Steam lobby"
+                      : "Rejected incompatible player; still listening");
+        return;
+    }
+    MessageBoxA(hDlg, message, "Timestone Version Mismatch", MB_OK | MB_ICONERROR);
+    CleanupNetwork(hDlg, true);
+}
 
 static void UpdateReadyButton(HWND hDlg)
 {
@@ -505,6 +556,23 @@ static void ConfigureConnectedControls(HWND hDlg)
     UpdateReadyButton(hDlg);
 }
 
+static void ResetLaunchMenuButtonState(HWND hDlg)
+{
+    if (!hDlg) return;
+    for (HWND child = GetWindow(hDlg, GW_CHILD); child;
+         child = GetWindow(child, GW_HWNDNEXT)) {
+        char className[32] = {};
+        GetClassNameA(child, className, sizeof(className));
+        if (_stricmp(className, "BUTTON") == 0 ||
+            _stricmp(className, "COMBOBOX") == 0 ||
+            _stricmp(className, "EDIT") == 0 ||
+            _stricmp(className, "LISTBOX") == 0) {
+            EnableWindow(child, TRUE);
+        }
+    }
+    ShowWindow(GetDlgItem(hDlg, ID_PEER_READY), SW_HIDE);
+}
+
 static void SendP2Selection(HWND hDlg)
 {
     if (g_isHost || !g_dialogConfig.enetHost || !g_dialogConfig.enetPeer) return;
@@ -515,6 +583,7 @@ static void SendP2Selection(HWND hDlg)
 
     LaunchP2SelectionPacket packet = {};
     packet.type = PACKET_LAUNCH_P2_SELECTION;
+    snprintf(packet.protocol, sizeof(packet.protocol), "%s", UMVC3HOOK_VERSION);
     for (int i = 0; i < 3; ++i) {
         packet.chars[i] = g_dialogConfig.p2Chars[i];
         packet.colors[i] = g_dialogConfig.p2Colors[i];
@@ -543,6 +612,7 @@ static void SendP1Selection(HWND hDlg)
 
     LaunchP1SelectionPacket packet = {};
     packet.type = PACKET_LAUNCH_P1_SELECTION;
+    snprintf(packet.protocol, sizeof(packet.protocol), "%s", UMVC3HOOK_VERSION);
     for (int i = 0; i < 3; ++i) {
         packet.chars[i] = g_dialogConfig.p1Chars[i];
         packet.colors[i] = g_dialogConfig.p1Colors[i];
@@ -563,7 +633,7 @@ static void SendP1Selection(HWND hDlg)
 static bool ApplyP1Selection(HWND hDlg, const LaunchP1SelectionPacket& packet)
 {
     if (g_isHost || packet.type != PACKET_LAUNCH_P1_SELECTION ||
-        packet.simpleMode > 1) return false;
+        !IsCompatibleProtocol(packet.protocol) || packet.simpleMode > 1) return false;
     for (int i = 0; i < 3; ++i) {
         if (packet.chars[i] < 0 || packet.chars[i] >= kCharNameCount ||
             packet.colors[i] < 0 ||
@@ -592,6 +662,7 @@ static bool ApplyP1Selection(HWND hDlg, const LaunchP1SelectionPacket& packet)
 static bool ApplyP2Selection(HWND hDlg, const LaunchP2SelectionPacket& packet)
 {
     if (!g_isHost || packet.type != PACKET_LAUNCH_P2_SELECTION ||
+        !IsCompatibleProtocol(packet.protocol) ||
         packet.ready > 1 || packet.simpleMode > 1)
         return false;
     for (int i = 0; i < 3; ++i) {
@@ -1093,6 +1164,10 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
                 InvalidateRect(GetDlgItem(hDlg, ID_LAUNCH_TRAINING), NULL, FALSE);
 
             SteamLobby_Pump();
+            char mismatch[256];
+            if (SteamLobby_TakeVersionMismatch(mismatch, sizeof(mismatch)))
+                MessageBoxA(hDlg, mismatch, "Timestone Version Mismatch",
+                            MB_OK | MB_ICONERROR);
             HWND hSteamStatus = GetDlgItem(hDlg, ID_STEAM_STATUS);
             if (hSteamStatus) SetWindowTextA(hSteamStatus, SteamLobby_GetStatus());
             EnableWindow(GetDlgItem(hDlg, ID_STEAM_CREATE_BTN),
@@ -1204,16 +1279,50 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
                         CleanupNetwork(hDlg, true);
                     }
                     else if (event.type == ENET_EVENT_TYPE_RECEIVE) {
+                        uint32_t packetType = event.packet->dataLength >= sizeof(uint32_t)
+                            ? *(uint32_t*)event.packet->data : UINT32_MAX;
+                        if (packetType == PACKET_LAUNCH_P1_SELECTION &&
+                            event.packet->dataLength != sizeof(LaunchP1SelectionPacket)) {
+                            enet_packet_destroy(event.packet);
+                            ShowVersionMismatch(hDlg, nullptr);
+                            return 0;
+                        }
                         if (event.packet->dataLength == sizeof(LaunchP1SelectionPacket) &&
-                            *(uint32_t*)event.packet->data == PACKET_LAUNCH_P1_SELECTION) {
+                            packetType == PACKET_LAUNCH_P1_SELECTION) {
+                            const auto& selection =
+                                *(const LaunchP1SelectionPacket*)event.packet->data;
+                            if (!IsCompatibleProtocol(selection.protocol)) {
+                                char remoteVersion[sizeof(selection.protocol) + 1] = {};
+                                memcpy(remoteVersion, selection.protocol,
+                                       sizeof(selection.protocol));
+                                enet_packet_destroy(event.packet);
+                                ShowVersionMismatch(hDlg, remoteVersion);
+                                return 0;
+                            }
                             if (!ApplyP1Selection(hDlg,
-                                    *(const LaunchP1SelectionPacket*)event.packet->data))
+                                    selection))
                                 HookLog("UMVC3Hook: Rejected invalid P1 launch selection\n");
                         }
+                        else if (packetType == PACKET_LAUNCH_P2_SELECTION &&
+                                 event.packet->dataLength != sizeof(LaunchP2SelectionPacket)) {
+                            enet_packet_destroy(event.packet);
+                            ShowVersionMismatch(hDlg, nullptr);
+                            return 0;
+                        }
                         else if (event.packet->dataLength == sizeof(LaunchP2SelectionPacket) &&
-                            *(uint32_t*)event.packet->data == PACKET_LAUNCH_P2_SELECTION) {
+                                 packetType == PACKET_LAUNCH_P2_SELECTION) {
+                            const auto& selection =
+                                *(const LaunchP2SelectionPacket*)event.packet->data;
+                            if (!IsCompatibleProtocol(selection.protocol)) {
+                                char remoteVersion[sizeof(selection.protocol) + 1] = {};
+                                memcpy(remoteVersion, selection.protocol,
+                                       sizeof(selection.protocol));
+                                enet_packet_destroy(event.packet);
+                                ShowVersionMismatch(hDlg, remoteVersion);
+                                return 0;
+                            }
                             if (!ApplyP2Selection(hDlg,
-                                    *(const LaunchP2SelectionPacket*)event.packet->data))
+                                    selection))
                                 HookLog("UMVC3Hook: Rejected invalid P2 launch selection\n");
                         }
                         else if (event.packet->dataLength == sizeof(LaunchTrainingPacket) &&
@@ -1988,8 +2097,7 @@ static void CleanupNetwork(HWND hDlg, bool forceCleanup) {
             SetWindowTextA(hStatus, "Ready");
             InvalidateRect(hStatus, NULL, TRUE);
         }
-        EnableWindow(GetDlgItem(hDlg, ID_NET_HOST_BTN), TRUE);
-        EnableWindow(GetDlgItem(hDlg, ID_NET_CONNECT_BTN), TRUE);
+        ResetLaunchMenuButtonState(hDlg);
         UpdateReadyButton(hDlg);
     }
 }
