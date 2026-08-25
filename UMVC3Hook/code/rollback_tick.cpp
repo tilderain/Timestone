@@ -277,6 +277,19 @@ static void HeadlessUnitCategoryMove(uint64_t sMain, uint64_t sUnit,
     while (unit) {
         const uint64_t next = *(uint64_t*)(unit + 0x18);
         const uint64_t dti = GetObjectDti(unit);
+        if (!dti) {
+            HookLog("Rollback: detached malformed unit category=%u unit=0x%llX "
+                    "vtable=0x%llX\n", category, unit, *(uint64_t*)unit);
+            uint32_t stateFlags = *(uint32_t*)(unit + 0x10);
+            *(uint32_t*)(unit + 0x10) = (stateFlags & 0xfffffffcu) | 4u;
+            ((void(__fastcall*)(uint64_t, uint64_t))
+                _addr(FN_SUNIT_REMOVE_MULTI_MASK))(sUnit, unit);
+            *(uint32_t*)(unit + 0x10) = stateFlags & 0xfffffff8u;
+            ((void(__fastcall*)(uint64_t, uint64_t))
+                _addr(FN_SUNIT_REMOVE_UNIT))(sUnit, unit);
+            unit = next;
+            continue;
+        }
         if constexpr (ProfilingEnabled)
             Profile_RegisterUnitObjectType(RollbackUnitProfilePhase::Move, category, dti);
         if ((*(uint64_t*)(unit + 0x30) & enabledMask) == 0) {
