@@ -1,4 +1,5 @@
 #include "steam_transport.h"
+#include "netplay.h"
 
 #include <Windows.h>
 #include <atomic>
@@ -89,6 +90,7 @@ static ENetHost* CreateLoopbackServer(enet_uint16& outPort)
         address.port = static_cast<enet_uint16>(38000 + ((firstPort - 38000 + i) % 1000));
         ENetHost* host = enet_host_create(&address, 1, 2, 0, 0);
         if (host) {
+            Netplay_ConfigureHostLimits(host);
             outPort = address.port;
             return host;
         }
@@ -107,6 +109,7 @@ bool SteamTransport_CreateBridge(bool isHost, ISteamNetworkingSockets* sockets,
     enet_uint16 port = 0;
     ENetHost* server = CreateLoopbackServer(port);
     ENetHost* client = enet_host_create(nullptr, 1, 2, 0, 0);
+    Netplay_ConfigureHostLimits(client);
     if (!server || !client) {
         if (server) enet_host_destroy(server);
         if (client) enet_host_destroy(client);

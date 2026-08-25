@@ -2,6 +2,7 @@
 #include "rollback.h"
 #include "rollback_diagnostics.h"
 #include "controller.h"
+#include "LaunchMenu.h"
 #include "steam_lobby.h"
 #include "steam_transport.h"
 #include <cstring>
@@ -158,6 +159,11 @@ static void MarkPeerDisconnected(ENetPeer* peer, bool disconnectNow)
         g_peer = nullptr;
     if (peer)
         peer->data = nullptr;
+}
+
+static bool AutoTestPacketsAllowed()
+{
+    return GetLaunchOption() == LAUNCH_DUAL_TRAINING;
 }
 
 // ---------------------------------------------------------------------------
@@ -640,18 +646,22 @@ static DWORD WINAPI Netplay_ServiceThread(LPVOID)
                                 break;
 
                             case PACKET_AUTOTEST_START:
-                                if (event.packet->dataLength >= sizeof(AutoTestStartPacket))
+                                if (AutoTestPacketsAllowed() &&
+                                    event.packet->dataLength >= sizeof(AutoTestStartPacket))
                                 {
                                     const AutoTestStartPacket* asp =
                                         (const AutoTestStartPacket*)event.packet->data;
                                     ScopedCS lock(g_autoTestStartCS);
                                     g_inboundAutoTestStart = *asp;
+                                    g_inboundAutoTestStart.move_name[
+                                        sizeof(g_inboundAutoTestStart.move_name) - 1] = '\0';
                                     g_inboundAutoTestStartNew = true;
                                 }
                                 break;
 
                             case PACKET_AUTOTEST_FRAME:
-                                if (event.packet->dataLength >= sizeof(AutoTestFramePacket))
+                                if (AutoTestPacketsAllowed() &&
+                                    event.packet->dataLength >= sizeof(AutoTestFramePacket))
                                 {
                                     const AutoTestFramePacket* afp =
                                         (const AutoTestFramePacket*)event.packet->data;
@@ -671,7 +681,8 @@ static DWORD WINAPI Netplay_ServiceThread(LPVOID)
                                 break;
 
                             case PACKET_AUTOTEST_COMPLETE:
-                                if (event.packet->dataLength >= sizeof(AutoTestCompletePacket))
+                                if (AutoTestPacketsAllowed() &&
+                                    event.packet->dataLength >= sizeof(AutoTestCompletePacket))
                                 {
                                     ScopedCS lock(g_autoTestCompleteCS);
                                     g_inboundAutoTestComplete = true;
@@ -730,6 +741,14 @@ static DWORD WINAPI Netplay_ServiceThread(LPVOID)
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
+void Netplay_ConfigureHostLimits(ENetHost* host)
+{
+    if (!host)
+        return;
+    host->maximumPacketSize = NET_MAX_PACKET_SIZE;
+    host->maximumWaitingData = NET_MAX_WAITING_DATA;
+}
+
 void Netplay_Init(ENetHost* host, ENetPeer* peer)
 {
     if (g_running || g_serviceThread)
@@ -949,6 +968,8 @@ bool Netplay_GetInboundSnapDump(int32_t& outFrame, char* timestamp,
 
 void Netplay_SendAutoTestStart(const AutoTestStartPacket& packet)
 {
+    if (!AutoTestPacketsAllowed())
+        return;
     ScopedCS lock(g_autoTestStartCS);
     g_outboundAutoTestStart = packet;
     g_outboundAutoTestStart.type = PACKET_AUTOTEST_START;
@@ -957,7 +978,7 @@ void Netplay_SendAutoTestStart(const AutoTestStartPacket& packet)
 
 bool Netplay_GetInboundAutoTestStart(AutoTestStartPacket& outPacket)
 {
-    if (!g_active || !g_csInitialized)
+    if (!AutoTestPacketsAllowed() || !g_active || !g_csInitialized)
         return false;
     ScopedCS lock(g_autoTestStartCS);
     if (!g_inboundAutoTestStartNew)
@@ -969,7 +990,7 @@ bool Netplay_GetInboundAutoTestStart(AutoTestStartPacket& outPacket)
 
 void Netplay_SendAutoTestComplete()
 {
-    if (!g_active || !g_csInitialized)
+    if (!AutoTestPacketsAllowed() || !g_active || !g_csInitialized)
         return;
     ScopedCS lock(g_autoTestCompleteCS);
     g_outboundAutoTestComplete = true;
@@ -977,7 +998,7 @@ void Netplay_SendAutoTestComplete()
 
 bool Netplay_GetInboundAutoTestComplete()
 {
-    if (!g_active || !g_csInitialized)
+    if (!AutoTestPacketsAllowed() || !g_active || !g_csInitialized)
         return false;
     ScopedCS lock(g_autoTestCompleteCS);
     bool complete = g_inboundAutoTestComplete;
@@ -987,6 +1008,8 @@ bool Netplay_GetInboundAutoTestComplete()
 
 void Netplay_SendAutoTestFrame(const AutoTestFramePacket& packet)
 {
+    if (!AutoTestPacketsAllowed())
+        return;
     ScopedCS lock(g_autoTestFrameCS);
     if (g_outboundAutoTestFrameCount == MAX_AUTOTEST_FRAME_PACKETS)
     {
@@ -1003,7 +1026,7 @@ void Netplay_SendAutoTestFrame(const AutoTestFramePacket& packet)
 
 bool Netplay_GetInboundAutoTestFrame(AutoTestFramePacket& outPacket)
 {
-    if (!g_active || !g_csInitialized)
+    if (!AutoTestPacketsAllowed() || !g_active || !g_csInitialized)
         return false;
     ScopedCS lock(g_autoTestFrameCS);
     if (g_inboundAutoTestFrameCount == 0)

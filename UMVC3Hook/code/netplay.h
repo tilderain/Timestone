@@ -1,4 +1,5 @@
 #pragma once
+#include <cstddef>
 #include <cstdint>
 #include <enet/enet.h>
 
@@ -54,6 +55,8 @@ enum PacketType : uint32_t {
 
 #pragma pack(push, 1)
 constexpr size_t NET_HISTORY_SIZE = 16;
+constexpr size_t NET_MAX_PACKET_SIZE = 2 * 1024;
+constexpr size_t NET_MAX_WAITING_DATA = 256 * 1024;
 
 struct InputPacket {
     uint32_t type;               // PACKET_INPUT
@@ -212,6 +215,12 @@ enum BattleSyncFlags : uint32_t {
 };
 
 #pragma pack(pop)
+
+static_assert(sizeof(AutoTestStartPacket) <= NET_MAX_PACKET_SIZE,
+              "largest netplay packet exceeds ENet packet limit");
+
+// Restrict ENet's allocation limits to the small payloads used by this protocol.
+void Netplay_ConfigureHostLimits(ENetHost* host);
 
 // Hand over the ENet host/peer and start the service thread.
 void Netplay_Init(ENetHost* host, ENetPeer* peer);

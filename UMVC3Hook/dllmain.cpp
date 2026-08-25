@@ -1193,6 +1193,7 @@ void OnInitializeHook()
 			HookLog("UMVC3Hook: Dual training - FAILED to create enet host on port %d\n",
 				dlgCfg.hostPort);
 		} else {
+			Netplay_ConfigureHostLimits(server);
 			SetNetworkHandles(server, nullptr);
 			g_dualSpawnPending.store(true, std::memory_order_release);
 			HANDLE hostReady = GetDualHostDeviceReadyEvent();
@@ -1218,6 +1219,7 @@ void OnInitializeHook()
 
 		ENetHost* client = enet_host_create(NULL, 1, 2, 0, 0);
 		if (client) {
+			Netplay_ConfigureHostLimits(client);
 			ENetAddress targetAddr;
 			if (enet_address_set_host_ip(&targetAddr, g_autoConnectIp) != 0) {
 				enet_address_set_host(&targetAddr, g_autoConnectIp);

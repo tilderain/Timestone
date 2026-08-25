@@ -1789,6 +1789,7 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
                 if (hStatus) SetWindowTextA(hStatus, "Host: enet_host_create failed!");
                 return 0;
             }
+            Netplay_ConfigureHostLimits(server);
 
             HookLog("UMVC3Hook: enet_host_create OK on port %d, host addr=%u.%u.%u.%u:%u\n",
                 g_dialogConfig.hostPort,
@@ -1848,6 +1849,7 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
                 if (hStatus) SetWindowTextA(hStatus, "Connect: enet_host_create failed!");
                 return 0;
             }
+            Netplay_ConfigureHostLimits(client);
 
             HookLog("UMVC3Hook: Client enet_host_create OK, client addr=%u.%u.%u.%u:%u\n",
                 (client->address.host >> 0) & 0xFF,
