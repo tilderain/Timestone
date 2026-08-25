@@ -154,6 +154,8 @@ public:
     virtual void ConvertPingLocationToString(const SteamNetworkPingLocation_t&, char*, int) = 0;
     virtual bool ParsePingLocationString(const char*, SteamNetworkPingLocation_t&) = 0;
     virtual bool CheckPingDataUpToDate(float) = 0;
+
+    void InitRelayNetworkAccess() { CheckPingDataUpToDate(1.0e10f); }
 };
 
 // The method order must match SteamNetworkingSockets012. Only the prefix used
