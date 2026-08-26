@@ -566,7 +566,7 @@ long __stdcall hkEndScene(LPDIRECT3DDEVICE9 pDevice)
 	if (first_msg)
 	{
 		Notifications->SetNotificationTime(5500);
-		Notifications->PushNotification("UMVC3Hook 0.1.0 is running!", UMVC3HOOK_VERSION);
+		Notifications->PushNotification("Timestone %s is running!", UMVC3HOOK_VERSION);
 		first_msg = false;
 		
 	}

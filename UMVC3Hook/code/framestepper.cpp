@@ -94,6 +94,7 @@ static int32_t g_trainingLastFrame = -1;
 static uint32_t g_trainingLastGeneration = 0;
 static bool g_trainingFrameCountingActive = false;
 static bool g_trainingFrameLimitExitRequested = false;
+static int g_statusHudMode = 2;
 
 // Emit one compact diagnostic if a handshake generation remains blocked.
 static DWORD g_handshakeStartTick = 0;
@@ -894,15 +895,47 @@ static bool IsTrainingMode()
 // ---------------------------------------------------------------------------
 // Load keybind config from Timestone.ini  [FrameStepper] section
 // ---------------------------------------------------------------------------
+static void GetConfigPath(char* path, size_t pathSize)
+{
+    DWORD length = GetModuleFileNameA(nullptr, path, (DWORD)pathSize);
+    if (length == 0 || length >= pathSize) {
+        path[0] = '\0';
+        return;
+    }
+
+    char* slash = strrchr(path, '\\');
+    char* forwardSlash = strrchr(path, '/');
+    if (!slash || (forwardSlash && forwardSlash > slash))
+        slash = forwardSlash;
+    char* filename = slash ? slash + 1 : path;
+    snprintf(filename, pathSize - (filename - path), "Timestone.ini");
+}
+
 static void LoadConfig()
 {
-    wchar_t iniPath[MAX_PATH];
-    GetModuleFileNameW(nullptr, iniPath, MAX_PATH);
-    wcsrchr(iniPath, L'\\')[1] = L'\0';
-    wcscat(iniPath, L"Timestone.ini");
+    char iniPath[MAX_PATH];
+    GetConfigPath(iniPath, sizeof(iniPath));
 
-    KEY_PAUSE   = GetPrivateProfileIntW(L"FrameStepper", L"PauseKey",   VK_F2, iniPath);
-    KEY_ADVANCE = GetPrivateProfileIntW(L"FrameStepper", L"AdvanceKey", VK_F3, iniPath);
+    KEY_PAUSE   = GetPrivateProfileIntA("FrameStepper", "PauseKey",   VK_F2, iniPath);
+    KEY_ADVANCE = GetPrivateProfileIntA("FrameStepper", "AdvanceKey", VK_F3, iniPath);
+    g_statusHudMode = GetPrivateProfileIntA(
+        "FrameStepper", "StatusHudMode", 2, iniPath);
+    if (g_statusHudMode < 0 || g_statusHudMode > 2)
+        g_statusHudMode = 2;
+}
+
+static void SaveStatusHudMode()
+{
+    char iniPath[MAX_PATH];
+    GetConfigPath(iniPath, sizeof(iniPath));
+    if (!iniPath[0])
+        return;
+
+    char value[2] = { (char)('0' + g_statusHudMode), '\0' };
+    if (!WritePrivateProfileStringA(
+            "FrameStepper", "StatusHudMode", value, iniPath)) {
+        HookLog("FrameStepper: failed to save HUD mode to %s\n", iniPath);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1303,6 +1336,11 @@ void FrameStepper_Process()
     // sides can adjust them mid-match.
     if (Netplay_IsActive())
     {
+        if (KeyPressed(VK_F3))
+        {
+            g_statusHudMode = (g_statusHudMode + 2) % 3;
+            SaveStatusHudMode();
+        }
         if (KeyPressed(VK_OEM_4))  // [ = decrease delay
         {
             AdjustNetplayDelay(-1);
@@ -1584,7 +1622,8 @@ void FrameStepper_Draw()
     }
 
     // --- Always-visible P1/P2 pad input window (top-left) ---
-    if (Controller_GetNetFrameCount() >= 0)
+    if (Controller_GetNetFrameCount() >= 0 &&
+        (!Netplay_IsActive() || g_statusHudMode != 0))
     {
         // sReplay advances during oMove, but processFrameInput records under the
         // frame value from the start of that tick. Display the input that made
@@ -1609,64 +1648,71 @@ void FrameStepper_Draw()
 
         // Netplay status (always visible when netplay is active, shown at the top)
         if (Netplay_IsActive()) {
-            const char* role = Netplay_IsHost() ? "HOST" : "CLIENT";
             ImVec4 color = Netplay_IsHost()
                 ? ImVec4(1.0f, 0.9f, 0.1f, 1.0f)   // yellow for host
                 : ImVec4(0.3f, 0.7f, 1.0f, 1.0f);   // blue for client
-            char roleLabel[32];
-            snprintf(roleLabel, sizeof(roleLabel), "--%s--", role);
-            static float roleLabelCenterX = -1.0f;
-            if (roleLabelCenterX < 0.0f)
-                roleLabelCenterX = ImGui::GetCursorPosX() + 75.f;
-            ImGui::SetCursorPosX(roleLabelCenterX - ImGui::CalcTextSize(roleLabel).x * 0.5f);
-            ImGui::TextColored(color, "%s", roleLabel);
-            ImGui::TextColored(color, "Ping: %ums", Netplay_GetRTT() / 2);
             int32_t curDelay = Controller_GetDelayFrames();
             int32_t curRollback = Controller_GetRollbackFrames();
-            ImGui::TextColored(color, "Frame: %d", Controller_GetNetFrameCount());
-            ImGui::TextColored(color, "FPS: %.1f", ImGui::GetIO().Framerate);
-            ImGui::TextColored(color, "Delay: %d  Rollback: %d", curDelay, curRollback);
+            if (g_statusHudMode == 1) {
+                ImGui::TextColored(color, "Ping %u", Netplay_GetRTT() / 2);
+                ImGui::TextColored(color, "Delay %d", curDelay);
+                ImGui::TextColored(color, "Rollb %d", curRollback);
+            } else {
+                const char* role = Netplay_IsHost() ? "HOST" : "CLIENT";
+                char roleLabel[32];
+                snprintf(roleLabel, sizeof(roleLabel), "--%s--", role);
+                static float roleLabelCenterX = -1.0f;
+                if (roleLabelCenterX < 0.0f)
+                    roleLabelCenterX = ImGui::GetCursorPosX() + 75.f;
+                ImGui::SetCursorPosX(roleLabelCenterX - ImGui::CalcTextSize(roleLabel).x * 0.5f);
+                ImGui::TextColored(color, "%s", roleLabel);
+                ImGui::TextColored(color, "Ping: %ums", Netplay_GetRTT() / 2);
+                ImGui::TextColored(color, "Frame: %d", Controller_GetNetFrameCount());
+                ImGui::TextColored(color, "FPS: %.1f", ImGui::GetIO().Framerate);
+                ImGui::TextColored(color, "Delay: %d  Rollback: %d", curDelay, curRollback);
 
-            // Keep each control row vertical so the overlay stays compact in width.
-            const bool delayPending = Controller_IsDelayChangePending();
-            if (delayPending) ImGui::BeginDisabled();
-            if (ImGui::SmallButton("D-"))
-            {
-                AdjustNetplayDelay(-1);
-            }
-            ImGui::SameLine();
-            if (ImGui::SmallButton("D+"))
-            {
-                AdjustNetplayDelay(1);
-            }
-            if (delayPending) ImGui::EndDisabled();
+                // Keep each control row vertical so the overlay stays compact in width.
+                const bool delayPending = Controller_IsDelayChangePending();
+                if (delayPending) ImGui::BeginDisabled();
+                if (ImGui::SmallButton("D-"))
+                {
+                    AdjustNetplayDelay(-1);
+                }
+                ImGui::SameLine();
+                if (ImGui::SmallButton("D+"))
+                {
+                    AdjustNetplayDelay(1);
+                }
+                if (delayPending) ImGui::EndDisabled();
 
-            const bool rollbackPending = Controller_IsRollbackChangePending();
-            if (rollbackPending) ImGui::BeginDisabled();
-            if (ImGui::SmallButton("RB-"))
-            {
-                curRollback = Controller_GetRollbackFrames() - 1;
-                if (curRollback < 0) curRollback = 0;
-                ScheduleNetplayRollback(curRollback);
+                const bool rollbackPending = Controller_IsRollbackChangePending();
+                if (rollbackPending) ImGui::BeginDisabled();
+                if (ImGui::SmallButton("RB-"))
+                {
+                    curRollback = Controller_GetRollbackFrames() - 1;
+                    if (curRollback < 0) curRollback = 0;
+                    ScheduleNetplayRollback(curRollback);
+                }
+                ImGui::SameLine();
+                if (ImGui::SmallButton("RB+"))
+                {
+                    curRollback = Controller_GetRollbackFrames() + 1;
+                    if (curRollback > 16) curRollback = 16;
+                    ScheduleNetplayRollback(curRollback);
+                }
+                if (rollbackPending) ImGui::EndDisabled();
             }
-            ImGui::SameLine();
-            if (ImGui::SmallButton("RB+"))
-            {
-                curRollback = Controller_GetRollbackFrames() + 1;
-                if (curRollback > 16) curRollback = 16;
-                ScheduleNetplayRollback(curRollback);
-            }
-            if (rollbackPending) ImGui::EndDisabled();
-
         }
 
-        ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "P1: [%s]  0x%08X", DecodeDirection(p1), p1);
-        if (btns1[0])
-            ImGui::SameLine(), ImGui::TextColored(ImVec4(0.7f, 0.9f, 1.0f, 1.0f), "%s", btns1);
+        if (g_statusHudMode == 2 || !Netplay_IsActive()) {
+            ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "P1: [%s]  0x%08X", DecodeDirection(p1), p1);
+            if (btns1[0])
+                ImGui::SameLine(), ImGui::TextColored(ImVec4(0.7f, 0.9f, 1.0f, 1.0f), "%s", btns1);
 
-        ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.6f, 1.0f), "P2: [%s]  0x%08X", DecodeDirection(p2), p2);
-        if (btns2[0])
-            ImGui::SameLine(), ImGui::TextColored(ImVec4(0.7f, 1.0f, 0.8f, 1.0f), "%s", btns2);
+            ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.6f, 1.0f), "P2: [%s]  0x%08X", DecodeDirection(p2), p2);
+            if (btns2[0])
+                ImGui::SameLine(), ImGui::TextColored(ImVec4(0.7f, 1.0f, 0.8f, 1.0f), "%s", btns2);
+        }
 
         ImGui::PopStyleColor();
         ImGui::End();

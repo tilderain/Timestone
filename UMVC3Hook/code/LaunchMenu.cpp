@@ -229,7 +229,8 @@ static bool ConfirmDisclaimer()
 {
     char settingsPath[MAX_PATH] = {};
     GetSettingsPath("Timestone.ini", settingsPath, sizeof(settingsPath));
-    if (GetPrivateProfileIntA("General", "DisclaimerAccepted", 0, settingsPath) != 0)
+    if (GetPrivateProfileIntA("General", "SoulSignedAway", 0, settingsPath) != 0 ||
+        GetPrivateProfileIntA("General", "DisclaimerAccepted", 0, settingsPath) != 0)
         return true;
 
     HHOOK hook = SetWindowsHookExA(WH_CBT, DisclaimerMessageBoxHook, NULL,
@@ -247,7 +248,7 @@ static bool ConfirmDisclaimer()
         return false;
 
     if (!WritePrivateProfileStringA(
-            "General", "DisclaimerAccepted", "1", settingsPath)) {
+            "General", "SoulSignedAway", "1", settingsPath)) {
         HookLog("UMVC3Hook: Failed to save disclaimer acceptance to %s\n",
                 settingsPath);
     }
