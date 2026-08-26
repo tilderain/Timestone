@@ -1140,9 +1140,9 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
                 hDlg, NULL, NULL, NULL);
 
             HWND hChar = CreateWindowA("COMBOBOX", "",
-                WS_VISIBLE | WS_CHILD | WS_TABSTOP |
+                WS_VISIBLE | WS_CHILD | WS_TABSTOP | WS_VSCROLL |
                 CBS_DROPDOWN | CBS_HASSTRINGS | CBS_AUTOHSCROLL,
-                cx + 24, cy, 130, 200,
+                cx + 24, cy, 130, 400,
                 hDlg, (HMENU)slots[i].ctrlId, NULL, NULL);
 
             int defaultCharId = (slots[i].team == 0)
@@ -1198,7 +1198,7 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
             hDlg, NULL, NULL, NULL);
 
         HWND hStage = CreateWindowA("COMBOBOX", "",
-            WS_VISIBLE | WS_CHILD | WS_TABSTOP |
+            WS_VISIBLE | WS_CHILD | WS_TABSTOP | WS_VSCROLL |
             CBS_DROPDOWN | CBS_HASSTRINGS | CBS_AUTOHSCROLL,
             leftX + 65, y, 600, 200,
             hDlg, (HMENU)ID_STAGE, NULL, NULL);

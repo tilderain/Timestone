@@ -1117,6 +1117,11 @@ bool KeyDown(int vk)
         (g_processKeyboardState[vk] & 0x80) != 0;
 }
 
+static bool DebugControlsDisabledForNetplay()
+{
+    return Netplay_IsActive() && GetLaunchOption() != LAUNCH_DUAL_TRAINING;
+}
+
 bool KeyPressed(int vk)
 {
     if (!g_processKeyboardStateValid || vk < 0 || vk >= 256 ||
@@ -1124,6 +1129,12 @@ bool KeyPressed(int vk)
         return false;
 
     g_processKeyboardPressed[vk] = false;
+
+    const bool debugKey = vk == VK_F1 || vk == VK_F5 || vk == VK_F6 ||
+                          vk == VK_F7 || vk == VK_F10;
+    if (debugKey && DebugControlsDisabledForNetplay())
+        return false;
+
     return true;
 }
 
@@ -1382,16 +1393,16 @@ void FrameStepper_Process()
     // Toggle pause
     if (KeyPressed(KEY_PAUSE))
     {
-        isPaused = !isPaused;
         if (isPaused)
         {
+            UnpauseFrameStepper();
+        }
+        else if (!DebugControlsDisabledForNetplay())
+        {
+            isPaused = true;
             frameCounter = 0;
             ShowPopup();
             g_captureRequested = true; // snapshot the current frame
-        }
-        else
-        {
-            UnpauseFrameStepper();
         }
     }
 
