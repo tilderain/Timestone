@@ -4,11 +4,9 @@ Armonte- Many reverse engineering and documentation, Shot snapshot, inspiration 
 
 Hkhann- Prior reverse engineering, the one who started it all with the OG UMVC3Rollback repo
 
-Ryn (wistfulhopes)- Prior reverse engineering
-
-anotak- Prior reverse engineering
-
 Eternal Yoshi- Prior reverse engineering
+
+Ryn (wistfulhopes), anotak, Gneiss- Prior reverse engineering
 
 Archeroflegend- Framestepper, playtesting
 
