@@ -172,6 +172,59 @@ static void GetSettingsPath(const char* filename, char* path, size_t pathSize)
     snprintf(filenameStart, pathSize - (filenameStart - path), "%s", filename);
 }
 
+static void CALLBACK LayoutDisclaimerMessageBox(HWND dialog, UINT, UINT_PTR timerId, DWORD)
+{
+    KillTimer(dialog, timerId);
+
+    HWND acceptButton = GetDlgItem(dialog, IDYES);
+    HWND rejectButton = GetDlgItem(dialog, IDNO);
+    if (!acceptButton || !rejectButton)
+        return;
+
+    SetWindowTextA(acceptButton, "Sign my soul away boss");
+    SetWindowTextA(rejectButton, "No Wtf??");
+
+    RECT windowRect = {};
+    RECT clientRect = {};
+    GetWindowRect(dialog, &windowRect);
+    GetClientRect(dialog, &clientRect);
+    constexpr int desiredClientWidth = 600;
+    if (clientRect.right < desiredClientWidth) {
+        const int extraWidth = desiredClientWidth - clientRect.right;
+        SetWindowPos(dialog, NULL, windowRect.left - extraWidth / 2, windowRect.top,
+                     windowRect.right - windowRect.left + extraWidth,
+                     windowRect.bottom - windowRect.top,
+                     SWP_NOACTIVATE | SWP_NOZORDER);
+        GetClientRect(dialog, &clientRect);
+    }
+
+    RECT acceptRect = {};
+    GetWindowRect(acceptButton, &acceptRect);
+    MapWindowPoints(NULL, dialog, reinterpret_cast<POINT*>(&acceptRect), 2);
+    constexpr int acceptWidth = 190;
+    constexpr int rejectWidth = 90;
+    constexpr int centeredGap = 28;
+    const int x = (clientRect.right - acceptWidth - centeredGap - rejectWidth) / 2;
+    const int rejectX = clientRect.right - rejectWidth - 12;
+    HDWP positions = BeginDeferWindowPos(2);
+    positions = DeferWindowPos(
+        positions, acceptButton, NULL, x, acceptRect.top, acceptWidth,
+        acceptRect.bottom - acceptRect.top, SWP_NOACTIVATE | SWP_NOZORDER);
+    positions = DeferWindowPos(
+        positions, rejectButton, NULL, rejectX, acceptRect.top, rejectWidth,
+        acceptRect.bottom - acceptRect.top, SWP_NOACTIVATE | SWP_NOZORDER);
+    EndDeferWindowPos(positions);
+    RedrawWindow(dialog, NULL, NULL,
+                 RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW);
+}
+
+static LRESULT CALLBACK DisclaimerMessageBoxHook(int code, WPARAM wParam, LPARAM lParam)
+{
+    if (code == HCBT_ACTIVATE)
+        SetTimer(reinterpret_cast<HWND>(wParam), 0, 1, LayoutDisclaimerMessageBox);
+    return CallNextHookEx(NULL, code, wParam, lParam);
+}
+
 static bool ConfirmDisclaimer()
 {
     char settingsPath[MAX_PATH] = {};
@@ -179,6 +232,8 @@ static bool ConfirmDisclaimer()
     if (GetPrivateProfileIntA("General", "DisclaimerAccepted", 0, settingsPath) != 0)
         return true;
 
+    HHOOK hook = SetWindowsHookExA(WH_CBT, DisclaimerMessageBoxHook, NULL,
+                                   GetCurrentThreadId());
     const int result = MessageBoxA(
         NULL,
         "This is buggy, broken, and untested! If you have comments, questions, "
@@ -186,6 +241,8 @@ static bool ConfirmDisclaimer()
         "them immediately!\n\nDo you agree?",
         "Warning",
         MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2 | MB_SETFOREGROUND);
+    if (hook)
+        UnhookWindowsHookEx(hook);
     if (result != IDYES)
         return false;
 
