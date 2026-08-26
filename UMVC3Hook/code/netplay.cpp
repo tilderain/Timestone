@@ -161,7 +161,7 @@ static void MarkPeerDisconnected(ENetPeer* peer, bool disconnectNow)
         peer->data = nullptr;
 }
 
-static bool AutoTestPacketsAllowed()
+static bool DualTrainingControlPacketsAllowed()
 {
     return GetLaunchOption() == LAUNCH_DUAL_TRAINING;
 }
@@ -426,7 +426,7 @@ static DWORD WINAPI Netplay_ServiceThread(LPVOID)
                 g_outboundSnapDumpNew = false;
             }
         }
-        if (hasSnapDump && g_peer)
+        if (hasSnapDump && g_peer && DualTrainingControlPacketsAllowed())
         {
             ENetPacket* packet = enet_packet_create(
                 &snapDumpPacket, sizeof(SnapDumpPacket), ENET_PACKET_FLAG_RELIABLE
@@ -633,7 +633,8 @@ static DWORD WINAPI Netplay_ServiceThread(LPVOID)
                                 break;
 
                             case PACKET_SNAPDUMP:
-                                if (event.packet->dataLength >= sizeof(SnapDumpPacket))
+                                if (DualTrainingControlPacketsAllowed() &&
+                                    event.packet->dataLength >= sizeof(SnapDumpPacket))
                                 {
                                     const SnapDumpPacket* packet =
                                         (const SnapDumpPacket*)event.packet->data;
@@ -646,7 +647,7 @@ static DWORD WINAPI Netplay_ServiceThread(LPVOID)
                                 break;
 
                             case PACKET_AUTOTEST_START:
-                                if (AutoTestPacketsAllowed() &&
+                                if (DualTrainingControlPacketsAllowed() &&
                                     event.packet->dataLength >= sizeof(AutoTestStartPacket))
                                 {
                                     const AutoTestStartPacket* asp =
@@ -660,7 +661,7 @@ static DWORD WINAPI Netplay_ServiceThread(LPVOID)
                                 break;
 
                             case PACKET_AUTOTEST_FRAME:
-                                if (AutoTestPacketsAllowed() &&
+                                if (DualTrainingControlPacketsAllowed() &&
                                     event.packet->dataLength >= sizeof(AutoTestFramePacket))
                                 {
                                     const AutoTestFramePacket* afp =
@@ -681,7 +682,7 @@ static DWORD WINAPI Netplay_ServiceThread(LPVOID)
                                 break;
 
                             case PACKET_AUTOTEST_COMPLETE:
-                                if (AutoTestPacketsAllowed() &&
+                                if (DualTrainingControlPacketsAllowed() &&
                                     event.packet->dataLength >= sizeof(AutoTestCompletePacket))
                                 {
                                     ScopedCS lock(g_autoTestCompleteCS);
@@ -940,6 +941,9 @@ bool Netplay_GetInboundMultiResim(bool& outEnabled)
 
 void Netplay_SendSnapDump(int32_t frame, const char* timestamp)
 {
+    if (!DualTrainingControlPacketsAllowed())
+        return;
+
     ScopedCS lock(g_snapDumpCS);
     g_outboundSnapDump = {};
     g_outboundSnapDump.type = PACKET_SNAPDUMP;
@@ -957,6 +961,11 @@ bool Netplay_GetInboundSnapDump(int32_t& outFrame, char* timestamp,
         return false;
 
     ScopedCS lock(g_snapDumpCS);
+    if (!DualTrainingControlPacketsAllowed())
+    {
+        g_inboundSnapDumpNew = false;
+        return false;
+    }
     if (!g_inboundSnapDumpNew)
         return false;
     outFrame = g_inboundSnapDump.frame;
@@ -968,7 +977,7 @@ bool Netplay_GetInboundSnapDump(int32_t& outFrame, char* timestamp,
 
 void Netplay_SendAutoTestStart(const AutoTestStartPacket& packet)
 {
-    if (!AutoTestPacketsAllowed())
+    if (!DualTrainingControlPacketsAllowed())
         return;
     ScopedCS lock(g_autoTestStartCS);
     g_outboundAutoTestStart = packet;
@@ -978,7 +987,7 @@ void Netplay_SendAutoTestStart(const AutoTestStartPacket& packet)
 
 bool Netplay_GetInboundAutoTestStart(AutoTestStartPacket& outPacket)
 {
-    if (!AutoTestPacketsAllowed() || !g_active || !g_csInitialized)
+    if (!DualTrainingControlPacketsAllowed() || !g_active || !g_csInitialized)
         return false;
     ScopedCS lock(g_autoTestStartCS);
     if (!g_inboundAutoTestStartNew)
@@ -990,7 +999,7 @@ bool Netplay_GetInboundAutoTestStart(AutoTestStartPacket& outPacket)
 
 void Netplay_SendAutoTestComplete()
 {
-    if (!AutoTestPacketsAllowed() || !g_active || !g_csInitialized)
+    if (!DualTrainingControlPacketsAllowed() || !g_active || !g_csInitialized)
         return;
     ScopedCS lock(g_autoTestCompleteCS);
     g_outboundAutoTestComplete = true;
@@ -998,7 +1007,7 @@ void Netplay_SendAutoTestComplete()
 
 bool Netplay_GetInboundAutoTestComplete()
 {
-    if (!AutoTestPacketsAllowed() || !g_active || !g_csInitialized)
+    if (!DualTrainingControlPacketsAllowed() || !g_active || !g_csInitialized)
         return false;
     ScopedCS lock(g_autoTestCompleteCS);
     bool complete = g_inboundAutoTestComplete;
@@ -1008,7 +1017,7 @@ bool Netplay_GetInboundAutoTestComplete()
 
 void Netplay_SendAutoTestFrame(const AutoTestFramePacket& packet)
 {
-    if (!AutoTestPacketsAllowed())
+    if (!DualTrainingControlPacketsAllowed())
         return;
     ScopedCS lock(g_autoTestFrameCS);
     if (g_outboundAutoTestFrameCount == MAX_AUTOTEST_FRAME_PACKETS)
@@ -1026,7 +1035,7 @@ void Netplay_SendAutoTestFrame(const AutoTestFramePacket& packet)
 
 bool Netplay_GetInboundAutoTestFrame(AutoTestFramePacket& outPacket)
 {
-    if (!AutoTestPacketsAllowed() || !g_active || !g_csInitialized)
+    if (!DualTrainingControlPacketsAllowed() || !g_active || !g_csInitialized)
         return false;
     ScopedCS lock(g_autoTestFrameCS);
     if (g_inboundAutoTestFrameCount == 0)

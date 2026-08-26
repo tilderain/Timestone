@@ -230,9 +230,10 @@ def validate_suite_rows(game_dir, character, not_before):
                     if row.get("move", "") in {
                             "Forward Throw", "Back Throw",
                             "Pineapple Surprise", "Air Ninja Stars",
-                            "Air Bolos",
-                            "Get 'Em Missile Assist", "Evidence Discard",
-                            "Spiral Swords S+L Release"}:
+                             "Air Bolos",
+                             "Get 'Em Missile Assist", "Evidence Discard",
+                             "Flamethrower 4H",
+                             "Spiral Swords S+L Release"}:
                         continue
                     if row.get("matcher_id") in {None, "", "-1"} or \
                        row.get("line_id") in {None, "", "-1"}:

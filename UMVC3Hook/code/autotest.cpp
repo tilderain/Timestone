@@ -139,6 +139,11 @@ constexpr InputStep EVIDENCE_DISCARD[] = {
     {IN_X | IN_A, 1},
 };
 
+constexpr InputStep CHRIS_FLAMETHROWER[] = {
+    {IN_LEFT | IN_B, 1},
+    {0, 45},
+};
+
 constexpr InputStep VERGIL_SPIRAL_SWORDS_RELEASE[] = {
     {IN_RIGHT, 2},
     {IN_DOWN, 2},
@@ -173,11 +178,14 @@ constexpr InputScript SUITE_MANUAL_SCRIPTS[] = {
     {"Get 'Em Missile Assist", GET_EM_MISSILE_ASSIST,
      std::size(GET_EM_MISSILE_ASSIST)},
     {"Evidence Discard", EVIDENCE_DISCARD, std::size(EVIDENCE_DISCARD)},
+    {"Flamethrower 4H", CHRIS_FLAMETHROWER,
+     std::size(CHRIS_FLAMETHROWER)},
     {"Spiral Swords S+L Release", VERGIL_SPIRAL_SWORDS_RELEASE,
      std::size(VERGIL_SPIRAL_SWORDS_RELEASE)},
 };
 
-constexpr int32_t MANUAL_VERGIL_SPIRAL_SWORDS = 7;
+constexpr int32_t MANUAL_CHRIS_FLAMETHROWER = 7;
+constexpr int32_t MANUAL_VERGIL_SPIRAL_SWORDS = 8;
 
 constexpr const char* SUITE_MANUAL_SCRIPT_CHARACTERS[] = {
     nullptr,
@@ -187,6 +195,7 @@ constexpr const char* SUITE_MANUAL_SCRIPT_CHARACTERS[] = {
     "DeadPool",
     "Phoenix Wright",
     "Phoenix Wright",
+    "Chris",
     "Vergil",
 };
 static_assert(std::size(SUITE_MANUAL_SCRIPT_CHARACTERS) ==
@@ -364,6 +373,8 @@ constexpr NetSuiteCaseSetup NET_SUITE_CASE_SETUPS[] = {
     {"Captain America", 0, 29, -1, 300.0f, LONG_LIVED_MOVE_QUIET_FRAMES, 32},
     {"Chris", 0, 28, -1, 500.0f, LONG_LIVED_MOVE_QUIET_FRAMES, 6},
     {"Chris", 0, 29, -1, 500.0f, LONG_LIVED_MOVE_QUIET_FRAMES, 6},
+    {"Chris", -1, -1, MANUAL_CHRIS_FLAMETHROWER, 250.0f,
+     LONG_LIVED_MOVE_QUIET_FRAMES, 6},
     {"DeadPool", -1, -1, 2, 500.0f, LONG_LIVED_MOVE_QUIET_FRAMES, 6},
     {"DeadPool", -1, -1, 4, 200.0f, LONG_LIVED_MOVE_QUIET_FRAMES, 6},
     {"Phoenix Wright", -1, -1, 6, 500.0f, LONG_LIVED_MOVE_QUIET_FRAMES, 6},

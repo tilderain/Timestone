@@ -301,7 +301,8 @@ bool Netplay_GetExtensionPacket(void* data, size_t capacity, size_t& outSize);
 void Netplay_SendMultiResim(bool enabled);
 bool Netplay_GetInboundMultiResim(bool& outEnabled);
 
-// Request that the peer write snapdump history using the requester's timestamp.
+// In dual training only, request that the peer write snapdump history using the
+// requester's timestamp.
 void Netplay_SendSnapDump(int32_t frame, const char* timestamp);
 bool Netplay_GetInboundSnapDump(int32_t& outFrame, char* timestamp,
                                 size_t timestampSize);

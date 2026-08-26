@@ -94,7 +94,8 @@ uses source symbols instead of line numbers because line numbers change often.
 - Input packets carry checksums; a mismatch synchronizes a desync warning and
   pause state between peers.
 - Snapdumps retain packed rollback history for byte-level desync comparison.
-- F10 writes matching host/client snapdumps during netplay.
+- F10 writes matching host/client snapdumps during dual-training netplay. The
+  snapdump control packet is rejected in every other launch mode.
 
 ## Threads
 
