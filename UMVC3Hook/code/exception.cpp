@@ -616,6 +616,20 @@ void WriteUnwindBacktrace(FILE* file, const CONTEXT* exceptionContext)
     CONTEXT context = *exceptionContext;
     std::fprintf(file, "unwind backtrace:\n");
 
+    // An indirect call through null records RIP=0, but RSP still points at the
+    // caller's return address. Seed unwinding from that address instead of
+    // emitting an empty backtrace for one of the most useful crash signatures.
+    if (!context.Rip) {
+        if (!IsReadableRange(context.Rsp, sizeof(uintptr_t)))
+            return;
+        const uintptr_t caller =
+            *reinterpret_cast<const uintptr_t*>(context.Rsp);
+        if (!IsExecutableAddress(caller))
+            return;
+        context.Rip = caller;
+        context.Rsp += sizeof(uintptr_t);
+    }
+
     constexpr size_t maxFrames = 64;
     for (size_t frame = 0; frame < maxFrames && context.Rip; ++frame) {
         char tag[24] = {};

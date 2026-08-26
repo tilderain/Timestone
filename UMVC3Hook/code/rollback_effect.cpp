@@ -48,6 +48,8 @@ static constexpr uint32_t PARTICLE_MANAGER_STRIDE = 0x150;
 static constexpr uint32_t PARTICLE_MANAGER_BUFFER_OFFSET = 0x130;
 static constexpr uint32_t MAX_PARTICLE_MANAGERS = 256;
 static constexpr uint32_t SSHOT_CATEGORY = 10;
+static constexpr uint32_t SSHOT_CALLBACK_EFFECTS_OFFSET = 0x1F78;
+static constexpr uint32_t SSHOT_CALLBACK_EFFECT_COUNT = 13;
 static constexpr uint32_t TEAM_OFFSETS[] = {0x40, 0x300};
 static constexpr uint32_t CHARACTER_EFFECT_SLOT_OFFSETS[] = {
     0x68F0, 0x68F8, 0x6900, 0x6908, 0x6910, 0x6920,
@@ -223,13 +225,21 @@ static void DetachRetiringEffectFromShot(void* effect)
 {
     // uShot setup binds owned uGameEffects through uEffect::mParent (+0x40),
     // uGameEffect::mpOwner (+0x280), and sometimes mpRequestUnit (+0x288).
-    // A retired effect can outlive synchronous shot destruction; if the shot
-    // allocator reuses that address, delayed cleanup could act on the fresh
-    // shot and clear its newly-created callback slots.
+    // Clear both sides before freeing the effect. Otherwise the later shot
+    // destructor can release the same allocation through its callback array.
+    // If the shot allocator reuses that address, delayed cleanup must also not
+    // clear the fresh shot's newly-created callback slots.
     for (uint32_t offset : {0x40u, 0x280u, 0x288u}) {
         uint64_t* reference = (uint64_t*)((uint8_t*)effect + offset);
-        if (IsShotUnitReference(*reference))
-            *reference = 0;
+        if (!IsShotUnitReference(*reference)) continue;
+
+        uint8_t* shot = (uint8_t*)*reference;
+        for (uint32_t index = 0; index < SSHOT_CALLBACK_EFFECT_COUNT; ++index) {
+            void** slot = (void**)(shot + SSHOT_CALLBACK_EFFECTS_OFFSET +
+                                   index * sizeof(void*));
+            if (*slot == effect) *slot = nullptr;
+        }
+        *reference = 0;
     }
 }
 
