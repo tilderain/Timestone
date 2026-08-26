@@ -21,6 +21,8 @@
 #include <Windows.h>
 #include <atomic>
 #include <cstdio>
+#include <string>
+#include <vector>
 #include "kiero/minhook/include/MinHook.h"
 #include <enet/enet.h>
 //#include "code/generated.h"
@@ -29,6 +31,7 @@
 FILE* g_hookLog = nullptr;
 static SRWLOCK g_hookLogLock = SRWLOCK_INIT;
 static char g_hookLogFilename[MAX_PATH] = {};
+static HMODULE g_asiModule = nullptr;
 
 void HookLogSetFile(const char* filename)
 {
@@ -92,6 +95,92 @@ void HookLog(const char* fmt, ...)
 		va_end(args2);
 	}
 	ReleaseSRWLockExclusive(&g_hookLogLock);
+}
+
+static void CollectInstalledAsiFiles(const char* directory, bool recursive,
+	const char* selfPath, std::vector<std::string>& files)
+{
+	char pattern[MAX_PATH] = {};
+	if (snprintf(pattern, sizeof(pattern), "%s\\*", directory) >=
+		(int)sizeof(pattern))
+		return;
+
+	WIN32_FIND_DATAA entry = {};
+	HANDLE search = FindFirstFileA(pattern, &entry);
+	if (search == INVALID_HANDLE_VALUE)
+		return;
+
+	do {
+		if (strcmp(entry.cFileName, ".") == 0 ||
+			strcmp(entry.cFileName, "..") == 0)
+			continue;
+
+		char path[MAX_PATH] = {};
+		if (snprintf(path, sizeof(path), "%s\\%s", directory,
+				entry.cFileName) >= (int)sizeof(path))
+			continue;
+
+		if (entry.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+			if (recursive &&
+				!(entry.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT))
+				CollectInstalledAsiFiles(path, true, selfPath, files);
+			continue;
+		}
+
+		const char* extension = strrchr(entry.cFileName, '.');
+		if (extension && _stricmp(extension, ".asi") == 0 &&
+			_stricmp(path, selfPath) != 0)
+			files.emplace_back(path);
+	} while (FindNextFileA(search, &entry));
+	FindClose(search);
+}
+
+static void WarnAboutOtherInstalledAsiModules()
+{
+	char gameDirectory[MAX_PATH] = {};
+	DWORD gamePathLength = GetModuleFileNameA(
+		nullptr, gameDirectory, sizeof(gameDirectory));
+	if (!gamePathLength || gamePathLength >= sizeof(gameDirectory))
+		return;
+	char* filename = strrchr(gameDirectory, '\\');
+	if (!filename)
+		filename = strrchr(gameDirectory, '/');
+	if (!filename)
+		return;
+	*filename = '\0';
+
+	char selfPath[MAX_PATH] = {};
+	if (!GetModuleFileNameA(g_asiModule, selfPath, sizeof(selfPath)))
+		return;
+
+	std::vector<std::string> files;
+	CollectInstalledAsiFiles(gameDirectory, false, selfPath, files);
+	char pluginDirectory[MAX_PATH] = {};
+	snprintf(pluginDirectory, sizeof(pluginDirectory), "%s\\scripts", gameDirectory);
+	CollectInstalledAsiFiles(pluginDirectory, true, selfPath, files);
+	snprintf(pluginDirectory, sizeof(pluginDirectory), "%s\\plugins", gameDirectory);
+	CollectInstalledAsiFiles(pluginDirectory, true, selfPath, files);
+	if (files.empty())
+		return;
+
+	std::string message =
+		"YOU HAVE OTHER MODS INSTALLED.\r\n"
+		"THIS WILL CRASH AND BREAK YOUR GAME.\r\n"
+		"PLEASE REMOVE THEM:";
+	const size_t gameDirectoryLength = strlen(gameDirectory);
+	for (const std::string& path : files) {
+		const char* displayPath = path.c_str();
+		if (_strnicmp(displayPath, gameDirectory, gameDirectoryLength) == 0 &&
+			(displayPath[gameDirectoryLength] == '\\' ||
+			 displayPath[gameDirectoryLength] == '/'))
+			displayPath += gameDirectoryLength + 1;
+		message += "\r\n";
+		message += displayPath;
+		HookLog("UMVC3Hook: Detected incompatible installed ASI: %s\n",
+			displayPath);
+	}
+	MessageBoxA(nullptr, message.c_str(), "why",
+		MB_OK | MB_ICONERROR | MB_SETFOREGROUND);
 }
 
 void HookLogWriteRecent(FILE* file)
@@ -996,6 +1085,7 @@ void OnInitializeHook()
 	}
 
 	HookLog("UMVC3Hook::OnInitializeHook() | Begin!\n");
+	WarnAboutOtherInstalledAsiModules();
 
 	// Patch single-instance mutex check: JNZ -> JMP to allow multiple instances
 	Memory::VP::Patch<uint8_t>(_addr(0x14051E1CB), 0xEB);
@@ -1399,6 +1489,7 @@ BOOL WINAPI DllMain(HMODULE hMod, DWORD dwReason, LPVOID lpReserved)
 	switch (dwReason)
 	{
 	case DLL_PROCESS_ATTACH:
+		g_asiModule = hMod;
 		DisableThreadLibraryCalls(hMod);
 		break;
 	case DLL_PROCESS_DETACH:

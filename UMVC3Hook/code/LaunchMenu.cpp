@@ -156,6 +156,7 @@ static volatile bool g_networkPolling = false;
 static HANDLE g_hPollThread = NULL;
 static bool g_isLaunching = false;
 static bool g_directConnectExpanded = false;
+static int g_lobbyTypeSelection = 0;
 
 static void GetSettingsPath(const char* filename, char* path, size_t pathSize)
 {
@@ -303,6 +304,20 @@ static void LoadRollbackSettings()
         : GetPrivateProfileIntA("Network", "HostPort", g_dialogConfig.hostPort, rollbackPath);
     g_directConnectExpanded = GetPrivateProfileIntA(
         "Network", "DirectConnectExpanded", 0, settingsPath) != 0;
+    g_lobbyTypeSelection = std::clamp(
+        static_cast<int>(GetPrivateProfileIntA(
+            "Network", "LobbyType", 0, settingsPath)), 0, 2);
+}
+
+static void SaveLobbyTypeSelection()
+{
+    char settingsPath[MAX_PATH] = {};
+    GetSettingsPath("Timestone.ini", settingsPath, sizeof(settingsPath));
+    char value[2] = { static_cast<char>('0' + g_lobbyTypeSelection), '\0' };
+    if (!WritePrivateProfileStringA(
+            "Network", "LobbyType", value, settingsPath)) {
+        HookLog("UMVC3Hook: Failed to save lobby type to %s\n", settingsPath);
+    }
 }
 
 static void SaveRollbackSettings()
@@ -1235,7 +1250,7 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
         SendMessageA(hLobbyType, CB_ADDSTRING, 0, (LPARAM)"Public");
         SendMessageA(hLobbyType, CB_ADDSTRING, 0, (LPARAM)"Friends Only");
         SendMessageA(hLobbyType, CB_ADDSTRING, 0, (LPARAM)"Private");
-        SendMessageA(hLobbyType, CB_SETCURSEL, 0, 0);
+        SendMessageA(hLobbyType, CB_SETCURSEL, g_lobbyTypeSelection, 0);
 
         CreateWindowA("BUTTON", "Join Lobby",
             WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON | WS_DISABLED,
@@ -1989,6 +2004,17 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
         }
 
         // ---- Steam Lobby buttons ----
+        case ID_STEAM_TYPE:
+            if (HIWORD(wParam) == CBN_SELCHANGE) {
+                int selection = static_cast<int>(SendMessageA(
+                    reinterpret_cast<HWND>(lParam), CB_GETCURSEL, 0, 0));
+                if (selection >= 0 && selection <= 2) {
+                    g_lobbyTypeSelection = selection;
+                    SaveLobbyTypeSelection();
+                }
+            }
+            return 0;
+
         case ID_STEAM_SEARCH_BTN:
         {
             HWND hList = GetDlgItem(hDlg, ID_STEAM_LIST);
