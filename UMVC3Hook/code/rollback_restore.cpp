@@ -662,9 +662,9 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
             shot, pinnedShotResources, pinnedCallbackEffectResources);
         for (uint32_t index = 0; index < 13; ++index) {
             void* effect = *(void**)((uint8_t*)shot + 0x1F78 + index * 8);
-            if (!effect) continue;
+            if (!effect || !IsEffectObject(effect)) continue;
             void* resource = *(void**)((uint8_t*)effect + 0x108);
-            if (!resource ||
+            if (!resource || !HasCallableDtiVirtual(resource) ||
                 std::find(pinnedCallbackEffectResources.begin(),
                           pinnedCallbackEffectResources.end(), resource) !=
                     pinnedCallbackEffectResources.end()) {

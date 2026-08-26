@@ -197,8 +197,9 @@ void PinUnique(void* resource, std::vector<void*>& pinnedResources)
 {
     // sResource::addRef deliberately DebugBreaks when the current count is not
     // positive. Shot fields can retain a retired resource after native teardown;
-    // RTTI callability is incidental, while this is addRef's actual contract.
-    if (!resource || *(int32_t*)((uint8_t*)resource + 0x4C) <= 0 ||
+    // require a resource object before reading that count or changing ownership.
+    if (!resource || !HasCallableDtiVirtual(resource) ||
+        *(int32_t*)((uint8_t*)resource + 0x4C) <= 0 ||
         std::find(pinnedResources.begin(), pinnedResources.end(), resource) !=
             pinnedResources.end()) {
         return;
