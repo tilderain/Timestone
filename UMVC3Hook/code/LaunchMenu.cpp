@@ -172,6 +172,31 @@ static void GetSettingsPath(const char* filename, char* path, size_t pathSize)
     snprintf(filenameStart, pathSize - (filenameStart - path), "%s", filename);
 }
 
+static bool ConfirmDisclaimer()
+{
+    char settingsPath[MAX_PATH] = {};
+    GetSettingsPath("Timestone.ini", settingsPath, sizeof(settingsPath));
+    if (GetPrivateProfileIntA("General", "DisclaimerAccepted", 0, settingsPath) != 0)
+        return true;
+
+    const int result = MessageBoxA(
+        NULL,
+        "This is buggy, broken, and untested! If you have comments, questions, "
+        "death threats, I will listen to them, but I have the right not to fix "
+        "them immediately!\n\nDo you agree?",
+        "Warning",
+        MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2 | MB_SETFOREGROUND);
+    if (result != IDYES)
+        return false;
+
+    if (!WritePrivateProfileStringA(
+            "General", "DisclaimerAccepted", "1", settingsPath)) {
+        HookLog("UMVC3Hook: Failed to save disclaimer acceptance to %s\n",
+                settingsPath);
+    }
+    return true;
+}
+
 static void LoadRollbackSettings()
 {
     char rollbackPath[MAX_PATH] = {};
@@ -800,6 +825,9 @@ static bool ApplyP2Selection(HWND hDlg, const LaunchP2SelectionPacket& packet)
 // ---------------------------------------------------------------------------
 LaunchOption ShowLaunchMenu()
 {
+    if (!ConfirmDisclaimer())
+        return LAUNCH_CANCELLED;
+
     Updater_Init();
     g_localReady = false;
     g_peerReady = false;
