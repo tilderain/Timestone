@@ -533,6 +533,7 @@ static void PopulateColorCombo(HWND hCombo, int characterId, int defaultColor);
 static void PopulateAssistCombo(HWND hCombo, int characterId, int defaultAssist);
 static void PopulateStageCombo(HWND hCombo, int defaultStageId);
 static int FindStageIndex(int stageId);
+static int FindComboItemByData(HWND hCombo, int data);
 static void UpdateCharFromCombo(HWND hDlg, int comboId, int slotIndex, int team);
 static void UpdateSlotOptionsFromCombos(HWND hDlg);
 static void RandomizeCharacters(HWND hDlg);
@@ -785,8 +786,9 @@ static void SendP1Selection(HWND hDlg)
     int stageSelection = stage
         ? static_cast<int>(SendMessageA(stage, CB_GETCURSEL, 0, 0))
         : CB_ERR;
-    if (stageSelection >= 0 && stageSelection < kStageCount)
-        g_dialogConfig.stageId = kStages[stageSelection].id;
+    if (stageSelection != CB_ERR)
+        g_dialogConfig.stageId = static_cast<int>(
+            SendMessageA(stage, CB_GETITEMDATA, stageSelection, 0));
 
     LaunchP1SelectionPacket packet = {};
     packet.type = PACKET_LAUNCH_P1_SELECTION;
@@ -838,7 +840,8 @@ static bool ApplyP1Selection(HWND hDlg, const LaunchP1SelectionPacket& packet)
     SendMessageA(GetDlgItem(hDlg, ID_P1_SIMPLE_MODE), BM_SETCHECK,
                  g_dialogConfig.simpleMode[0] ? BST_CHECKED : BST_UNCHECKED, 0);
     g_dialogConfig.stageId = packet.stageId;
-    SendMessageA(GetDlgItem(hDlg, ID_STAGE), CB_SETCURSEL, stageIndex, 0);
+    SendMessageA(GetDlgItem(hDlg, ID_STAGE), CB_SETCURSEL,
+                 FindComboItemByData(GetDlgItem(hDlg, ID_STAGE), packet.stageId), 0);
     return true;
 }
 
@@ -1685,9 +1688,9 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
             HWND hStage = GetDlgItem(hDlg, ID_STAGE);
             if (hStage) {
                 int sel = (int)SendMessageA(hStage, CB_GETCURSEL, 0, 0);
-                if (sel != CB_ERR && sel >= 0 && sel < kStageCount) {
-                    g_dialogConfig.stageId = kStages[sel].id;
-                }
+                if (sel != CB_ERR)
+                    g_dialogConfig.stageId = static_cast<int>(
+                        SendMessageA(hStage, CB_GETITEMDATA, sel, 0));
             }
 
             // Read network config
@@ -1827,8 +1830,9 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
             if (HIWORD(wParam) == CBN_SELCHANGE) {
                 HWND hCombo = (HWND)lParam;
                 int sel = (int)SendMessageA(hCombo, CB_GETCURSEL, 0, 0);
-                if (sel != CB_ERR && sel >= 0 && sel < kStageCount) {
-                    g_dialogConfig.stageId = kStages[sel].id;
+                if (sel != CB_ERR) {
+                    g_dialogConfig.stageId = static_cast<int>(
+                        SendMessageA(hCombo, CB_GETITEMDATA, sel, 0));
                     if (g_isHost && g_dialogConfig.enetPeer)
                         SendP1Selection(hDlg);
                 }
@@ -2182,11 +2186,14 @@ static void PopulateStageCombo(HWND hCombo, int defaultStageId)
 {
     if (!hCombo) return;
 
+    const int visibleStageIds[] = {STAGE_BONNE_WONDERLAND, 0, 100};
     int selectIdx = 0;
-    for (int i = 0; i < kStageCount; i++) {
-        int idx = (int)SendMessageA(hCombo, CB_ADDSTRING, 0, (LPARAM)kStages[i].name);
-        SendMessageA(hCombo, CB_SETITEMDATA, idx, kStages[i].id);
-        if (kStages[i].id == defaultStageId) {
+    for (int stageId : visibleStageIds) {
+        const int stageIndex = FindStageIndex(stageId);
+        int idx = (int)SendMessageA(hCombo, CB_ADDSTRING, 0,
+                                    (LPARAM)kStages[stageIndex].name);
+        SendMessageA(hCombo, CB_SETITEMDATA, idx, stageId);
+        if (stageId == defaultStageId) {
             selectIdx = idx;
         }
     }
@@ -2201,6 +2208,17 @@ static int FindStageIndex(int stageId)
             return i;
     }
     return 0;
+}
+
+static int FindComboItemByData(HWND hCombo, int data)
+{
+    if (!hCombo) return CB_ERR;
+    const int count = static_cast<int>(SendMessageA(hCombo, CB_GETCOUNT, 0, 0));
+    for (int i = 0; i < count; ++i) {
+        if (static_cast<int>(SendMessageA(hCombo, CB_GETITEMDATA, i, 0)) == data)
+            return i;
+    }
+    return CB_ERR;
 }
 
 static void UpdateCharFromCombo(HWND hDlg, int comboId, int slotIndex, int team)
