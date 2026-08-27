@@ -240,6 +240,30 @@ void HookLogWriteRecent(FILE* file)
 	fprintf(file, "---- end recent HookLog lines ----\n");
 }
 
+void HookLogAppendFile(const char* filename, long offset)
+{
+	if (!filename || offset < 0)
+		return;
+
+	FILE* source = fopen(filename, "r");
+	if (!source || fseek(source, offset, SEEK_SET) != 0) {
+		if (source)
+			fclose(source);
+		return;
+	}
+
+	AcquireSRWLockExclusive(&g_hookLogLock);
+	if (g_hookLog) {
+		char buffer[4096];
+		size_t bytesRead = 0;
+		while ((bytesRead = fread(buffer, 1, sizeof(buffer), source)) != 0)
+			fwrite(buffer, 1, bytesRead, g_hookLog);
+		fflush(g_hookLog);
+	}
+	ReleaseSRWLockExclusive(&g_hookLogLock);
+	fclose(source);
+}
+
 using namespace Memory::VP;
 
 // ---------------------------------------------------------------------------

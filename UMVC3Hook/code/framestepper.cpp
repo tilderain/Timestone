@@ -40,7 +40,7 @@ using namespace Memory::VP;
 // HookLog from dllmain.cpp
 extern void HookLog(const char* fmt, ...);
 extern void ChrSelImGui_Update();
-extern bool ChrSelImGui_ApplyPendingRoster(int32_t targetFrame);
+extern bool ChrSelImGui_ApplyRestart(int32_t targetFrame);
 extern bool ChrSelImGui_TakeFullTransitionRequested();
 
 // Netplay state queries from netplay.cpp
@@ -516,13 +516,15 @@ static void __fastcall HookedMove(void* sMvc3Main)
     if (g_restartTargetFrame >= 0 &&
         (!restartNetplay || Controller_GetNetFrameCount() >= g_restartTargetFrame))
     {
-        if (!ChrSelImGui_ApplyPendingRoster(g_restartTargetFrame)) {
-            HookLog("FrameStepper: roster restart rejected at frame %d\n",
-                    g_restartTargetFrame);
-            g_restartTargetFrame = -1;
-            g_restartKind = RESTART_FULL_MATCH;
-            g_restartButtonMode = 0;
-            return;
+        if (g_restartKind == RESTART_FULL_MATCH) {
+            if (!ChrSelImGui_ApplyRestart(g_restartTargetFrame)) {
+                HookLog("FrameStepper: character-select restart rejected at frame %d\n",
+                        g_restartTargetFrame);
+                g_restartTargetFrame = -1;
+                g_restartKind = RESTART_FULL_MATCH;
+                g_restartButtonMode = 0;
+                return;
+            }
         }
         const bool fullRosterTransition =
             ChrSelImGui_TakeFullTransitionRequested();

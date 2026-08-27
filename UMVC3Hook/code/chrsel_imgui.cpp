@@ -907,31 +907,41 @@ bool ChrSelImGui_Open()
     return g_open;
 }
 
-bool ChrSelImGui_ApplyPendingRoster(int32_t targetFrame)
+bool ChrSelImGui_ApplyRestart(int32_t targetFrame)
 {
-    if (!g_pendingRoster)
-        return true;
-    if (targetFrame != g_pendingTargetFrame || !ValidateRoster(g_pendingConfig))
-        return false;
+    RosterConfig restartRoster = {};
+    if (g_pendingRoster) {
+        if (targetFrame != g_pendingTargetFrame ||
+            !ValidateRoster(g_pendingConfig))
+            return false;
+        restartRoster = g_pendingConfig;
+    } else {
+        if (!ReadCurrentRoster(restartRoster)) {
+            ReadFallbackRoster(restartRoster);
+            NormalizeRoster(restartRoster);
+        }
+        if (!ValidateRoster(restartRoster))
+            return false;
+    }
 
     TrainingBootConfig config = TrainingBoot_GetDefaultConfig();
     for (int member = 0; member < 3; ++member) {
-        config.p1Chars[member] = g_pendingConfig.chars[0][member];
-        config.p2Chars[member] = g_pendingConfig.chars[1][member];
-        config.p1Colors[member] = g_pendingConfig.colors[0][member];
-        config.p2Colors[member] = g_pendingConfig.colors[1][member];
-        config.p1Assists[member] = g_pendingConfig.assists[0][member];
-        config.p2Assists[member] = g_pendingConfig.assists[1][member];
+        config.p1Chars[member] = restartRoster.chars[0][member];
+        config.p2Chars[member] = restartRoster.chars[1][member];
+        config.p1Colors[member] = restartRoster.colors[0][member];
+        config.p2Colors[member] = restartRoster.colors[1][member];
+        config.p1Assists[member] = restartRoster.assists[0][member];
+        config.p2Assists[member] = restartRoster.assists[1][member];
     }
-    config.simpleMode[0] = g_pendingConfig.simpleMode[0] != 0;
-    config.simpleMode[1] = g_pendingConfig.simpleMode[1] != 0;
-    config.autoJump[0] = g_pendingConfig.autoJump[0] != 0;
-    config.autoJump[1] = g_pendingConfig.autoJump[1] != 0;
+    config.simpleMode[0] = restartRoster.simpleMode[0] != 0;
+    config.simpleMode[1] = restartRoster.simpleMode[1] != 0;
+    config.autoJump[0] = restartRoster.autoJump[0] != 0;
+    config.autoJump[1] = restartRoster.autoJump[1] != 0;
     if (!TrainingBoot_RestartWithConfig(config))
         return false;
 
     g_fullTransitionRequested = true;
-    HookLog("ChrSelImGui: queued full roster loading transition at synchronized frame %d\n",
+    HookLog("ChrSelImGui: queued character-select restart at synchronized frame %d\n",
             targetFrame);
     g_pendingRoster = false;
     g_pendingTargetFrame = -1;

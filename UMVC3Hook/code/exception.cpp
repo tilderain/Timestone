@@ -14,6 +14,7 @@
 #include <winver.h>
 
 extern void HookLog(const char* fmt, ...);
+extern void HookLogAppendFile(const char* filename, long offset);
 extern void HookLogWriteRecent(FILE* file);
 
 #ifndef UMVC3HOOK_GIT_COMMIT
@@ -706,8 +707,11 @@ LONG HandleException(PEXCEPTION_POINTERS info, bool catastrophicOnly)
     // Commit a minimal artifact before calling rollback, CRT-heavy, or unwind
     // diagnostics. If reporting itself faults, this still identifies the
     // original exception and makes automated runs classify it as a crash.
+    long crashLogStart = -1;
     FILE* preamble = std::fopen(crashLogPath, "a");
     if (preamble) {
+        if (std::fseek(preamble, 0, SEEK_END) == 0)
+            crashLogStart = std::ftell(preamble);
         std::fprintf(preamble,
             "\n=== UMVC3Hook crash capture started ===\n"
             "commit=%s%s code=0x%08lX exception=%p thread=%lu "
@@ -816,6 +820,8 @@ LONG HandleException(PEXCEPTION_POINTERS info, bool catastrophicOnly)
         std::fflush(file);
         std::fclose(file);
     }
+
+    HookLogAppendFile(crashLogPath, crashLogStart);
 
     return EXCEPTION_CONTINUE_SEARCH;
 }
