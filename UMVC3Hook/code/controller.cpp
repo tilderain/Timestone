@@ -331,10 +331,9 @@ static int32_t   g_localChecksumFrame[RING_SIZE];
 static int32_t   g_remoteChecksumFrame[RING_SIZE];
 static bool      g_localChecksumConfirmed[RING_SIZE];
 static uint32_t  g_localChecksumRemoteInput[RING_SIZE];
+static int32_t   g_localChecksumAdvertisedFrame[RING_SIZE];
 static int32_t   g_desyncChecked[RING_SIZE];   // frame number when checksum was compared, -1 = unchecked
 static bool      g_desyncMismatch[RING_SIZE];  // true if that frame exceeded threshold
-static int32_t   g_confirmedChecksumThrough = -1;
-static int32_t   g_lastAdvertisedChecksumFrame = -1;
 
 static constexpr uint32_t DESYNC_THRESHOLD         = 0;
 // Restart setup can remain transient briefly after both peers report fighting.
@@ -357,10 +356,10 @@ static void ResetDesyncDetection()
     std::memset(g_localChecksumConfirmed, 0, sizeof(g_localChecksumConfirmed));
     std::memset(g_localChecksumRemoteInput, 0,
                 sizeof(g_localChecksumRemoteInput));
+    std::memset(g_localChecksumAdvertisedFrame, 0xFF,
+                sizeof(g_localChecksumAdvertisedFrame));
     std::memset(g_desyncChecked, 0xFF, sizeof(g_desyncChecked));
     std::memset(g_desyncMismatch, 0, sizeof(g_desyncMismatch));
-    g_confirmedChecksumThrough = -1;
-    g_lastAdvertisedChecksumFrame = -1;
 }
 
 // ---------------------------------------------------------------------------
@@ -489,18 +488,6 @@ extern "C" bool Controller_IsRollbackChangePending(){ return g_pendingRollbackFr
 extern "C" void Controller_ClearDesyncDetection()
 {
     ResetDesyncDetection();
-    // A reset can happen after the logical timeline has already advanced (for
-    // example when both peers enter fighting after a restart). Start the new
-    // checksum epoch at the current frame instead of waiting forever for
-    // checksum records from earlier frames that were intentionally discarded.
-    int32_t firstFrame = GetGameFrameCount();
-    if (firstFrame < DESYNC_SKIP_FRAMES)
-        firstFrame = DESYNC_SKIP_FRAMES;
-    if (firstFrame > 0)
-    {
-        g_confirmedChecksumThrough = firstFrame - 1;
-        g_lastAdvertisedChecksumFrame = firstFrame - 1;
-    }
     Rollback_ClearPendingDesyncCapture();
 }
 extern "C" uint32_t Controller_GetRecordedLocalInput(int32_t frame)
@@ -1724,6 +1711,7 @@ extern "C" void Controller_RecordFrameChecksum(int32_t frame)
     g_localChecksum[idx] = ComputeChecksum();
     g_localChecksumFrame[idx] = frame;
     g_localChecksumRemoteInput[idx] = g_processedRemoteInput[idx];
+    g_localChecksumAdvertisedFrame[idx] = -1;
     g_localChecksumConfirmed[idx] =
         g_processedRemoteFrame[idx] == frame && IsFrameConfirmed(frame) &&
         g_localChecksumRemoteInput[idx] == g_receivedInput[idx];
@@ -1754,34 +1742,26 @@ static void UpdateConfirmedChecksums()
     if (!FrameStepper_IsDesyncCheckReady() || FrameStepper_IsMatchRestartPending())
         return;
 
-    while (g_confirmedChecksumThrough < g_netFrameCount)
+    // Confirm each recorded frame independently. A checksum can be absent when
+    // detection is reset at a frame boundary; a contiguous frontier would then
+    // block publication and comparison for the rest of the round.
+    int32_t first = g_netFrameCount - RING_SIZE + 1;
+    if (first < DESYNC_SKIP_FRAMES) first = DESYNC_SKIP_FRAMES;
+    for (int32_t frame = first; frame <= g_netFrameCount; ++frame)
     {
-        int32_t next = g_confirmedChecksumThrough + 1;
-        uint32_t idx = (uint32_t)next % RING_SIZE;
-        if (!IsFrameConfirmed(next) || g_localChecksumFrame[idx] != next)
-            break;
+        uint32_t idx = (uint32_t)frame % RING_SIZE;
+        if (g_localChecksumFrame[idx] != frame || !IsFrameConfirmed(frame))
+            continue;
 
         // Correct predictions become authoritative when their input arrives.
         // Compare against the immutable input captured when this checksum's
         // simulation ran, never g_usedRemoteInput (late packets overwrite it).
-        if (!g_localChecksumConfirmed[idx])
-        {
-            if (g_processedRemoteFrame[idx] != next ||
-                g_localChecksumRemoteInput[idx] != g_receivedInput[idx])
-                break;
+        if (!g_localChecksumConfirmed[idx] &&
+            g_processedRemoteFrame[idx] == frame &&
+            g_localChecksumRemoteInput[idx] == g_receivedInput[idx])
             g_localChecksumConfirmed[idx] = true;
-        }
-        g_confirmedChecksumThrough = next;
-    }
 
-    int32_t first = g_confirmedChecksumThrough - RING_SIZE + 1;
-    if (first < 0) first = 0;
-    for (int32_t frame = first; frame <= g_confirmedChecksumThrough; ++frame)
-    {
-        uint32_t idx = (uint32_t)frame % RING_SIZE;
-        if (!IsFrameConfirmed(frame) ||
-            g_localChecksumFrame[idx] != frame ||
-            !g_localChecksumConfirmed[idx] ||
+        if (!g_localChecksumConfirmed[idx] ||
             g_remoteChecksumFrame[idx] != frame ||
             g_desyncChecked[idx] == frame)
             continue;
@@ -1893,16 +1873,23 @@ extern "C" void Controller_OnFrameEnd()
             AutoTest_OnLiveFrame(g_netFrameCount, liveChecksum);
         UpdateConfirmedChecksums();
 
-        int32_t checksumFrame = g_lastAdvertisedChecksumFrame + 1;
-        if (checksumFrame <= g_confirmedChecksumThrough)
+        // Publish the oldest confirmed record that has not been sent. Missing
+        // records do not strand the checksum stream for the remainder of the
+        // round, and a corrected re-simulation can republish its frame.
+        int32_t first = g_netFrameCount - RING_SIZE + 1;
+        if (first < DESYNC_SKIP_FRAMES) first = DESYNC_SKIP_FRAMES;
+        for (int32_t checksumFrame = first;
+             checksumFrame <= g_netFrameCount; ++checksumFrame)
         {
             uint32_t idx = (uint32_t)checksumFrame % RING_SIZE;
             if (g_localChecksumFrame[idx] == checksumFrame &&
-                g_localChecksumConfirmed[idx])
+                g_localChecksumConfirmed[idx] &&
+                g_localChecksumAdvertisedFrame[idx] != checksumFrame)
             {
                 outPkt.checksum_frame = (uint32_t)checksumFrame;
                 outPkt.checksum = g_localChecksum[idx];
-                g_lastAdvertisedChecksumFrame = checksumFrame;
+                g_localChecksumAdvertisedFrame[idx] = checksumFrame;
+                break;
             }
         }
     }
