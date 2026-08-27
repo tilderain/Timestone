@@ -1782,20 +1782,11 @@ extern "C" void Controller_OnFrameEnd()
     if (!Netplay_IsActive())
         return;
 
-    // Use the authoritative post-tick frame counter (advanced during oMove)
-    // for the recording index so it matches the render thread's read index.
-    int32_t completedFrame = GetGameFrameCount();
-
     // Input hooks force this startup window to zero, but we must still send its
     // history. In delay mode both peers otherwise reach frame delay+1 and wait
     // before either has ever queued a packet, producing a symmetric deadlock.
 
-    // --- 1. Resolve remote input for the completed frame index so the rendering
-    //         thread doesn't read stale/unresolved data from the previous ring buffer loop.
-    if (g_rollbackFrames > 0 || IsFrameConfirmed(completedFrame))
-        Controller_ResolveRemoteInput(completedFrame);
-
-    // --- 2. Record the local input assigned to this absolute frame.
+    // --- 1. Record the local input assigned to this absolute frame.
     //         Done at the frame boundary rather than inside hkprocessFrameInput
     //         because per-character processFrameInput is not called during
     //         cinematic freezes, hitstun, or transition screens, which would
@@ -1816,7 +1807,7 @@ extern "C" void Controller_OnFrameEnd()
                                           g_usedRemoteInput[idx]);
     }
 
-    // --- 3. Assign newly captured input to its absolute execution frame.
+    // --- 2. Assign newly captured input to its absolute execution frame.
     // Existing scheduled frames are never relabeled by a delay change.
     int32_t scheduledFrame = g_netFrameCount + g_delayFrames;
     uint32_t scheduledIdx = (uint32_t)scheduledFrame % RING_SIZE;
@@ -1834,7 +1825,7 @@ extern "C" void Controller_OnFrameEnd()
             (MAX_HISTORY - 1) * sizeof(uint32_t));
     g_oldInputs[MAX_HISTORY - 1] = g_localPending;
 
-    // --- 4. Build outbound packet — inputs[] are absolute-frame-indexed.
+    // --- 3. Build outbound packet — inputs[] are absolute-frame-indexed.
     //     start_frame = (currentFrame + delay) - MAX_HISTORY + 1
     //     inputs[0]                    → frame start_frame          (oldest)
     //     inputs[MAX_HISTORY-1]        → frame start_frame+MAX_HISTORY-1 (newest)
