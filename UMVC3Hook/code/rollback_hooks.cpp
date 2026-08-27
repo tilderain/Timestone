@@ -10,6 +10,7 @@
 #include "rollback_memory.h"
 #include "rollback_diagnostics.h"
 #include "rollback_profile.h"
+#include "steam_lobby.h"
 #include "../kiero/minhook/include/MinHook.h"
 
 #include <cmath>
@@ -37,6 +38,11 @@ static constexpr uintptr_t FN_MENU_OPTION_KBD_MOVE = 0x140001C40;
 static constexpr uintptr_t FN_MATERIAL_RESOURCE_STATE = 0x1405DD640;
 static constexpr uintptr_t FN_REBUILD_FRUSTUM_PLANES = 0x1405351D0;
 static constexpr uintptr_t FN_UFADE_MOVE = 0x14044D510;
+static constexpr uintptr_t FN_UBTSCORE_UPDATE = 0x14030BC50;
+static constexpr uintptr_t FN_UI_FONT_SET_TEXT = 0x1402CEF30;
+static constexpr uintptr_t FN_UI_SET_VISIBLE = 0x140002A70;
+static constexpr uintptr_t FN_GAME_CONFIG_GET_INSTANCE = 0x140001AB0;
+static constexpr uintptr_t FN_FORMAT_PLAYER_NAME = 0x14024F720;
 static constexpr uintptr_t PTR_SCAMERA = 0x140E17930;
 static constexpr uint32_t SCAMERA_VIEWPORT0_OFFSET = 0x50;
 static constexpr uint32_t VIEWPORT_CAMERA_OFFSET = 0x08;
@@ -62,6 +68,85 @@ using RebuildFrustumPlanesFn = void(__fastcall*)(uint64_t);
 using CameraGetViewMatrixFn = void(__fastcall*)(uint64_t, float*);
 static RebuildFrustumPlanesFn oRebuildFrustumPlanes = nullptr;
 static void(__fastcall* oFadeMove)(uint64_t) = nullptr;
+using BtScoreUpdateFn = void(__fastcall*)(uint64_t, uint64_t, uint64_t, uint64_t);
+static BtScoreUpdateFn oBtScoreUpdate = nullptr;
+
+static void CopySafeUtf8Name(char (&out)[32], const char* name)
+{
+    size_t written = 0;
+    const auto* source = (const uint8_t*)name;
+    while (source && *source && written < sizeof(out) - 1) {
+        const uint8_t lead = *source;
+        size_t length = 1;
+        bool valid = lead >= 0x20 && lead != 0x7F;
+        if (lead >= 0xC2 && lead <= 0xDF) {
+            length = 2;
+            valid = (source[1] & 0xC0) == 0x80;
+        } else if (lead >= 0xE0 && lead <= 0xEF) {
+            length = 3;
+            valid = (source[1] & 0xC0) == 0x80 &&
+                    (source[2] & 0xC0) == 0x80 &&
+                    (lead != 0xE0 || source[1] >= 0xA0) &&
+                    (lead != 0xED || source[1] < 0xA0);
+        } else if (lead >= 0xF0 && lead <= 0xF4) {
+            length = 4;
+            valid = (source[1] & 0xC0) == 0x80 &&
+                    (source[2] & 0xC0) == 0x80 &&
+                    (source[3] & 0xC0) == 0x80 &&
+                    (lead != 0xF0 || source[1] >= 0x90) &&
+                    (lead != 0xF4 || source[1] < 0x90);
+        } else if (lead >= 0x80) {
+            valid = false;
+        }
+
+        if (!valid) {
+            out[written++] = '?';
+            ++source;
+            continue;
+        }
+        if (written + length >= sizeof(out)) break;
+        std::memcpy(out + written, source, length);
+        written += length;
+        source += length;
+    }
+    out[written] = '\0';
+}
+
+static void SetFightingName(uint64_t widget, const char* name)
+{
+    if (!widget || !name || !name[0]) return;
+
+    char safeName[32] = {};
+    CopySafeUtf8Name(safeName, name);
+    uint64_t gameConfig = ((uint64_t(__fastcall*)())
+        _addr(FN_GAME_CONFIG_GET_INSTANCE))();
+    const char* displayName = gameConfig
+        ? ((const char*(__fastcall*)(uint64_t, const void*, uint32_t))
+               _addr(FN_FORMAT_PLAYER_NAME))(gameConfig, safeName, 16)
+        : safeName;
+    ((void(__fastcall*)(uint64_t, const char*))_addr(FN_UI_FONT_SET_TEXT))(
+        widget, displayName);
+    ((void(__fastcall*)(uint64_t, bool))_addr(FN_UI_SET_VISIBLE))(widget, true);
+}
+
+static void __fastcall hkBtScoreUpdate(uint64_t score, uint64_t a2,
+                                        uint64_t a3, uint64_t a4)
+{
+    oBtScoreUpdate(score, a2, a3, a4);
+    if (!Netplay_IsActive()) return;
+
+    const bool hasSteamNames = SteamLobby_HasPeerProfile();
+    const char* localName = hasSteamNames ? SteamLobby_GetLocalUsername() : nullptr;
+    const char* peerName = hasSteamNames ? SteamLobby_GetPeerUsername() : nullptr;
+    const char* p1Name = hasSteamNames
+        ? (Netplay_IsHost() ? localName : peerName)
+        : (Netplay_IsHost() ? "Me" : "Opp");
+    const char* p2Name = hasSteamNames
+        ? (Netplay_IsHost() ? peerName : localName)
+        : (Netplay_IsHost() ? "Opp" : "Me");
+    SetFightingName(*(uint64_t*)(score + 0xC8), p1Name);
+    SetFightingName(*(uint64_t*)(score + 0xF0), p2Name);
+}
 
 static bool TraceLifecycleFrame(int32_t frame)
 {
@@ -451,9 +536,13 @@ void Rollback_InitMainHooks(RollbackMainMoveFn* originalMove)
                "Rollback: hooked uFade__move for re-simulation suppression",
                "Rollback: failed to hook uFade__move (%d)\n");
     EnableHook(FN_UBTGAUGELIFE_MOVE, (void*)&hkBtGaugeLifeMove,
-               (void**)&oBtGaugeLifeMove,
-               "Rollback: hooked uBtGaugeLife__move for re-simulation suppression",
-               "Rollback: failed to hook uBtGaugeLife__move (%d)\n");
+                (void**)&oBtGaugeLifeMove,
+                "Rollback: hooked uBtGaugeLife__move for re-simulation suppression",
+                "Rollback: failed to hook uBtGaugeLife__move (%d)\n");
+    EnableHook(FN_UBTSCORE_UPDATE, (void*)&hkBtScoreUpdate,
+               (void**)&oBtScoreUpdate,
+               "Rollback: hooked native fighting-name display",
+               "Rollback: failed to hook native fighting-name display (%d)\n");
     EnableHook(FN_RCHRCPU_CLASS_FUNC, (void*)&hkRChrCpuClassFunc,
                (void**)&oRChrCpuClassFunc,
                "Rollback: guarded rChrCpu script object cast",

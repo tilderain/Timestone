@@ -114,6 +114,7 @@ uint64_t g_peerSteamId = 0;
 uint64_t g_gamePeerSteamId = 0;
 uint64_t g_rejectedPeerSteamId = 0;
 char g_peerUsername[128] = {};
+char g_localUsername[128] = {};
 char g_lobbyName[128] = {};
 char g_status[256] = "Steam is not initialized";
 char g_versionMismatch[256] = {};
@@ -807,6 +808,9 @@ bool SteamLobby_Initialize()
         g_friends = g_api.GetFriends(client, user, pipe, version);
         if (g_friends) break;
     }
+    const char* localUsername = g_friends ? g_api.GetPersonaName(g_friends) : nullptr;
+    snprintf(g_localUsername, sizeof(g_localUsername), "%s",
+             localUsername && localUsername[0] ? localUsername : "");
     g_matchmaking = g_api.GetMatchmaking(client, user, pipe, "SteamMatchMaking009");
     g_utils = g_api.GetUtils(client, pipe, "SteamUtils008");
     g_sockets = static_cast<ISteamNetworkingSockets*>(
@@ -987,6 +991,11 @@ void SteamLobby_Pump()
 const char* SteamLobby_GetStatus()
 {
     return g_status;
+}
+
+const char* SteamLobby_GetLocalUsername()
+{
+    return g_localUsername;
 }
 
 uint64_t SteamLobby_GetPeerSteamId()
