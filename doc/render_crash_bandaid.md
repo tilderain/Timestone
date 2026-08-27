@@ -200,6 +200,23 @@ under Wine or Proton:
 This changes startup ordering and adds process-wide synchronization, but does
 not make D3D9 or the native game initialization thread-safe in general.
 
+### Fullscreen Adapter Mode Overflow
+
+`sRender__enumerateAdapterModes` at `0x140538050` asks D3D9 for the adapter mode
+count and writes every qualifying mode into 92-byte records beginning at
+`sRender+0x87A8E8`. The following field is at `sRender+0x8804E8`, so the array
+has capacity for exactly 256 records. The native enumeration loop does not
+enforce that capacity. G-Sync/VRR drivers can report more than 256 modes,
+causing the mode records to overwrite the renderer's count and lookup arrays.
+The later fullscreen reset can consequently fail with `D3DERR_INVALIDCALL`
+(`0x8876086C`), which the game reports as `ERR09 : Unsupported function.`
+
+The startup D3D9 interface hook now clamps `GetAdapterModeCount` to 256 before
+the game builds this table. This prevents the overwrite while preserving the
+game's exclusive-fullscreen path and its normal mode validation. Unlike the
+comparable RE HD workaround, it does not force borderless windowed mode or
+override the selected presentation interval.
+
 ### Autotest Changes
 
 - Runtime autotest command collection skips the second command matcher. This

@@ -583,6 +583,31 @@ static volatile LONG g_endSceneOverlayInFlight = 0;
 static HRESULT __stdcall hkResetDevice(
 	LPDIRECT3DDEVICE9 pDevice, D3DPRESENT_PARAMETERS* presentationParameters)
 {
+	if (presentationParameters) {
+		/// TRACE LOG
+		HookLog("D3D9: Reset params device=%p bb=%ux%u format=%u count=%u "
+			"ms=%u quality=%u swap=%u hwnd=%p windowed=%d autoDepth=%d "
+			"depthFormat=%u flags=0x%08X refresh=%u interval=0x%08X\n",
+			pDevice,
+			presentationParameters->BackBufferWidth,
+			presentationParameters->BackBufferHeight,
+			(UINT)presentationParameters->BackBufferFormat,
+			presentationParameters->BackBufferCount,
+			(UINT)presentationParameters->MultiSampleType,
+			presentationParameters->MultiSampleQuality,
+			(UINT)presentationParameters->SwapEffect,
+			presentationParameters->hDeviceWindow,
+			presentationParameters->Windowed,
+			presentationParameters->EnableAutoDepthStencil,
+			(UINT)presentationParameters->AutoDepthStencilFormat,
+			presentationParameters->Flags,
+			presentationParameters->FullScreen_RefreshRateInHz,
+			presentationParameters->PresentationInterval);
+	} else {
+		HookLog("D3D9: Reset params device=%p presentationParameters=<null>\n",
+			pDevice);
+	}
+
 	if (init && ImGui::GetCurrentContext()) {
 		FrameStepper_InvalidateDeviceObjects();
 		ImGui_ImplDX9_InvalidateDeviceObjects();
@@ -590,6 +615,29 @@ static HRESULT __stdcall hkResetDevice(
 
 	HRESULT result = oResetDevice(pDevice, presentationParameters);
 	HookLog("D3D9: Reset returned 0x%08X\n", (uint32_t)result);
+	if (FAILED(result)) {
+		/// TRACE LOG
+		D3DDEVICE_CREATION_PARAMETERS creation = {};
+		D3DDISPLAYMODE displayMode = {};
+		const HRESULT creationResult = pDevice->GetCreationParameters(&creation);
+		const HRESULT displayResult = pDevice->GetDisplayMode(0, &displayMode);
+		const HRESULT cooperativeResult = pDevice->TestCooperativeLevel();
+		HookLog("D3D9: Reset failure state cooperative=0x%08X "
+			"creation=0x%08X adapter=%u deviceType=%u focusWindow=%p behavior=0x%08X "
+			"display=0x%08X mode=%ux%u@%u format=%u swapChains=%u\n",
+			(uint32_t)cooperativeResult,
+			(uint32_t)creationResult,
+			creation.AdapterOrdinal,
+			(UINT)creation.DeviceType,
+			creation.hFocusWindow,
+			creation.BehaviorFlags,
+			(uint32_t)displayResult,
+			displayMode.Width,
+			displayMode.Height,
+			displayMode.RefreshRate,
+			(UINT)displayMode.Format,
+			pDevice->GetNumberOfSwapChains());
+	}
 
 	if (SUCCEEDED(result) && init && ImGui::GetCurrentContext()) {
 		FrameStepper_SetDevice(pDevice);
@@ -809,11 +857,35 @@ static void WaitForDualTrainingClient()
 using Direct3D9CreateDeviceFn = HRESULT (WINAPI*)(
 	IDirect3D9*, UINT, D3DDEVTYPE, HWND, DWORD,
 	D3DPRESENT_PARAMETERS*, IDirect3DDevice9**);
+using Direct3D9GetAdapterModeCountFn = UINT (WINAPI*)(
+	IDirect3D9*, UINT, D3DFORMAT);
 using Direct3DCreate9Fn = IDirect3D9* (WINAPI*)(UINT);
 
 static Direct3D9CreateDeviceFn g_originalD3D9CreateDevice = nullptr;
+static Direct3D9GetAdapterModeCountFn g_originalD3D9GetAdapterModeCount = nullptr;
 static Direct3DCreate9Fn g_originalDirect3DCreate9 = nullptr;
 static HANDLE g_d3d9CreateDeviceMutex = nullptr;
+static bool g_serializeD3D9CreateDevice = false;
+
+static UINT WINAPI HookD3D9GetAdapterModeCount(
+	IDirect3D9* d3d9, UINT adapter, D3DFORMAT format)
+{
+	const UINT count = g_originalD3D9GetAdapterModeCount
+		? g_originalD3D9GetAdapterModeCount(d3d9, adapter, format) : 0;
+	HookLog("D3D9: GetAdapterModeCount adapter=%u format=%u reported=%u\n",
+		adapter, (UINT)format, count);
+	constexpr UINT kGameModeCapacity = 256;
+	if (count > kGameModeCapacity) {
+		static volatile LONG logged = 0;
+		if (InterlockedCompareExchange(&logged, 1, 0) == 0) {
+			HookLog("D3D9: clamped adapter mode count from %u to %u "
+				"(prevented sRender mode-list overflow)\n",
+				count, kGameModeCapacity);
+		}
+		return kGameModeCapacity;
+	}
+	return count;
+}
 
 static HANDLE GetD3D9CreateDeviceMutex()
 {
@@ -871,6 +943,40 @@ static HRESULT WINAPI HookD3D9CreateDevice(
 {
 	if (!g_originalD3D9CreateDevice)
 		return D3DERR_DRIVERINTERNALERROR;
+	if (presentationParameters) {
+		/// TRACE LOG
+		HookLog("D3D9: CreateDevice params adapter=%u deviceType=%u focusWindow=%p "
+			"behavior=0x%08X bb=%ux%u format=%u count=%u ms=%u quality=%u "
+			"swap=%u hwnd=%p windowed=%d autoDepth=%d depthFormat=%u "
+			"flags=0x%08X refresh=%u interval=0x%08X\n",
+			adapter, (UINT)deviceType, focusWindow, behaviorFlags,
+			presentationParameters->BackBufferWidth,
+			presentationParameters->BackBufferHeight,
+			(UINT)presentationParameters->BackBufferFormat,
+			presentationParameters->BackBufferCount,
+			(UINT)presentationParameters->MultiSampleType,
+			presentationParameters->MultiSampleQuality,
+			(UINT)presentationParameters->SwapEffect,
+			presentationParameters->hDeviceWindow,
+			presentationParameters->Windowed,
+			presentationParameters->EnableAutoDepthStencil,
+			(UINT)presentationParameters->AutoDepthStencilFormat,
+			presentationParameters->Flags,
+			presentationParameters->FullScreen_RefreshRateInHz,
+			presentationParameters->PresentationInterval);
+	} else {
+		HookLog("D3D9: CreateDevice params adapter=%u presentationParameters=<null>\n",
+			adapter);
+	}
+
+	if (!g_serializeD3D9CreateDevice) {
+		const HRESULT result = g_originalD3D9CreateDevice(
+			d3d9, adapter, deviceType, focusWindow, behaviorFlags,
+			presentationParameters, returnedDevice);
+		HookLog("D3D9: CreateDevice returned 0x%08X device=%p\n",
+			(uint32_t)result, returnedDevice ? *returnedDevice : nullptr);
+		return result;
+	}
 
 	// Let both processes initialize in parallel, but never let the spawned
 	// client win the actual driver-device race against its host.
@@ -901,16 +1007,36 @@ static HRESULT WINAPI HookD3D9CreateDevice(
 	if (result == D3DERR_NOTAVAILABLE) {
 		HookLog("D3D9: CreateDevice remained unavailable after retries\n");
 	}
+	HookLog("D3D9: CreateDevice returned 0x%08X device=%p\n",
+		(uint32_t)result, returnedDevice ? *returnedDevice : nullptr);
 	return result;
 }
 
 static void InstallD3D9CreateDeviceHook(IDirect3D9* d3d9)
 {
-	if (!d3d9 || g_originalD3D9CreateDevice)
+	if (!d3d9)
 		return;
 
 	void** vtable = *(void***)d3d9;
-	if (!vtable || !vtable[16])
+	if (!vtable)
+		return;
+
+	if (!g_originalD3D9GetAdapterModeCount && vtable[6]) {
+		void* modeCountTarget = vtable[6];
+		MH_STATUS modeCountStatus = MH_CreateHook(
+			modeCountTarget, (LPVOID)&HookD3D9GetAdapterModeCount,
+			(LPVOID*)&g_originalD3D9GetAdapterModeCount);
+		if (modeCountStatus == MH_OK)
+			modeCountStatus = MH_EnableHook(modeCountTarget);
+		if (modeCountStatus == MH_OK || modeCountStatus == MH_ERROR_ENABLED) {
+			HookLog("D3D9: protected fixed-capacity adapter mode list\n");
+		} else {
+			HookLog("D3D9: failed to hook IDirect3D9::GetAdapterModeCount (%d)\n",
+				modeCountStatus);
+		}
+	}
+
+	if (g_originalD3D9CreateDevice || !vtable[16])
 		return;
 
 	void* target = vtable[16];
@@ -1230,10 +1356,12 @@ void OnInitializeHook()
 			HookLog("UMVC3Hook: FAILED to hook aTitleLogo__update\n");
 		}
 	}
-	// Device creation serialization only protects the two processes spawned for
-	// local dual training. Leave normal host/client D3D9 initialization untouched.
-	if (opt == LAUNCH_DUAL_TRAINING || g_autoConnectPort != 0)
-		InstallD3D9Hooks();
+	// Install before sRender enumerates display modes. The mode-count hook protects
+	// its fixed 256-entry array. Keep CreateDevice serialization scoped to the two
+	// processes launched for local dual training.
+	g_serializeD3D9CreateDevice =
+		opt == LAUNCH_DUAL_TRAINING || g_autoConnectPort != 0;
+	InstallD3D9Hooks();
 
 	// ---- Netplay pause patches ----
 	// Force uBattleUiCreatePauseMenu_maybe (0x1402ba150) to always create the
