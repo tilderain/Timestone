@@ -46,6 +46,7 @@ constexpr uintptr_t DTI_USHOT_VULCAN_LAND_MINE = 0x140D48D98;
 constexpr uintptr_t DTI_USHOT_SHIELD_KIKOUSYOU = 0x140D48F70;
 constexpr uintptr_t DTI_USHOT_VULCAN_MISSILE_EMPLACEMENT = 0x140D49A60;
 constexpr uintptr_t DTI_USHOT_VULCAN_PRICKLE_BOARD = 0x140D4C528;
+constexpr uintptr_t DTI_USHOT_VULCAN_OUROBOROS_SHOT = 0x140D4AC00;
 constexpr uintptr_t DTI_USHOT_SHIELD_WEAPON_CART_SPREAD = 0x140D4A098;
 constexpr uintptr_t DTI_USHOT_VULCAN_EXATK_ROCKET_LAUNCHER = 0x140D4BA48;
 constexpr uintptr_t DTI_USHOT_VULCAN_ROCKET_LAUNCHER_EXPLODE = 0x140D4BAC8;
@@ -1075,6 +1076,8 @@ bool Rollback_RemapShotSpawnParent(
 {
     if (saved.concrete.dti !=
             (uint64_t)_addr(DTI_USHOT_SHIELD_WEAPON_CART_SPREAD) &&
+        saved.concrete.dti !=
+            (uint64_t)_addr(DTI_USHOT_VULCAN_OUROBOROS_SHOT) &&
         saved.concrete.dti !=
             (uint64_t)_addr(DTI_USHOT_VULCAN_ROCKET_LAUNCHER_EXPLODE) &&
         saved.concrete.dti !=
