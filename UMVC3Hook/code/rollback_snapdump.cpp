@@ -22,6 +22,7 @@ int32_t g_pendingDesyncCaptureFrame = -1;
 #include <algorithm>
 #include <cerrno>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <ctime>
 #include <new>
@@ -396,8 +397,32 @@ void SnapDump_UpdateInputs(int32_t frame, uint32_t localInput, uint32_t remoteIn
     }
 }
 
+bool SnapDump_WritesEnabled()
+{
+    char iniPath[MAX_PATH] = {};
+    if (Rollback_ResolveDllPath(iniPath, sizeof(iniPath), "Timestone.ini") < 0)
+        return false;
+
+    char value[16] = {};
+    GetPrivateProfileStringA(
+        "Rollback", "EnableSnapDumpWrites", "", value, sizeof(value), iniPath);
+    if (!value[0]) {
+        if (!WritePrivateProfileStringA(
+                "Rollback", "EnableSnapDumpWrites", "0", iniPath)) {
+            HookLog("SnapDump: failed to add EnableSnapDumpWrites=0 to %s\n",
+                    iniPath);
+        }
+        return false;
+    }
+    return std::strtol(value, nullptr, 10) != 0;
+}
+
 bool SnapDump_WriteHistory(int32_t triggerFrame, const char* relativePath)
 {
+    if (!SnapDump_WritesEnabled()) {
+        HookLog("SnapDump: write skipped; set [Rollback] EnableSnapDumpWrites=1 in Timestone.ini to enable\n");
+        return true;
+    }
     if (g_dumpWritten) return true;
     std::vector<const HistoryFrame*> frames;
     for (const HistoryFrame& frame : g_history) {

@@ -537,6 +537,7 @@ enum CtrlId {
     ID_RANDOMIZE_CHARS    = 2030,
     ID_P2_LABEL           = 2031,
     ID_PEER_READY         = 2032,
+    ID_PING_LABEL         = 2033,
     // Stage combo
     ID_STAGE              = 2101,
     // Network controls
@@ -574,7 +575,9 @@ static void UpdateCharFromCombo(HWND hDlg, int comboId, int slotIndex, int team)
 static void UpdateSlotOptionsFromCombos(HWND hDlg);
 static void RandomizeCharacters(HWND hDlg);
 static void ConfigureConnectedControls(HWND hDlg);
+static void FocusLaunchMenu(HWND hDlg);
 static void ResetLaunchMenuButtonState(HWND hDlg);
+static void UpdatePingLabel(HWND hDlg);
 static void SetDirectConnectExpanded(HWND hDlg, bool expanded);
 static void SendP1Selection(HWND hDlg);
 static void SendP2Selection(HWND hDlg);
@@ -648,6 +651,23 @@ static void UpdateReadyButton(HWND hDlg)
     InvalidateRect(button, NULL, TRUE);
 }
 
+static void UpdatePingLabel(HWND hDlg)
+{
+    HWND label = GetDlgItem(hDlg, ID_PING_LABEL);
+    if (!label) return;
+
+    ENetPeer* peer = g_dialogConfig.enetPeer;
+    if (!peer || peer->state != ENET_PEER_STATE_CONNECTED) {
+        ShowWindow(label, SW_HIDE);
+        return;
+    }
+
+    char text[32];
+    snprintf(text, sizeof(text), "Ping: %u ms", peer->roundTripTime);
+    SetWindowTextA(label, text);
+    ShowWindow(label, SW_SHOW);
+}
+
 static void UpdateSteamLobbyButton(HWND hDlg)
 {
     HWND button = GetDlgItem(hDlg, ID_STEAM_CREATE_BTN);
@@ -715,6 +735,21 @@ static void ConfigureConnectedControls(HWND hDlg)
         HookLog("UMVC3Hook: Client controls enabled for P2 selection\n");
     }
     UpdateReadyButton(hDlg);
+    UpdatePingLabel(hDlg);
+}
+
+static void FocusLaunchMenu(HWND hDlg)
+{
+    if (IsIconic(hDlg))
+        ShowWindow(hDlg, SW_RESTORE);
+
+    // Briefly use the topmost band so the menu is raised even if another
+    // process owns the foreground, then return it to the normal Z-order.
+    SetWindowPos(hDlg, HWND_TOPMOST, 0, 0, 0, 0,
+                 SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+    SetWindowPos(hDlg, HWND_NOTOPMOST, 0, 0, 0, 0,
+                 SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+    SetForegroundWindow(hDlg);
 }
 
 static void ResetLaunchMenuButtonState(HWND hDlg)
@@ -732,6 +767,7 @@ static void ResetLaunchMenuButtonState(HWND hDlg)
         }
     }
     ShowWindow(GetDlgItem(hDlg, ID_PEER_READY), SW_HIDE);
+    ShowWindow(GetDlgItem(hDlg, ID_PING_LABEL), SW_HIDE);
 }
 
 static void SetDirectConnectExpanded(HWND hDlg, bool expanded)
@@ -1218,6 +1254,10 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
             WS_VISIBLE | WS_CHILD | WS_TABSTOP | BS_AUTOCHECKBOX,
             left2X + 34, y, 180, 20,
             hDlg, (HMENU)ID_P2_SIMPLE_MODE, NULL, NULL);
+        CreateWindowA("STATIC", "Ping: -- ms",
+            WS_CHILD,
+            leftX + 220, y + 2, 120, 18,
+            hDlg, (HMENU)ID_PING_LABEL, NULL, NULL);
         SendMessageA(p1Simple, BM_SETCHECK,
                      g_dialogConfig.simpleMode[0] ? BST_CHECKED : BST_UNCHECKED, 0);
         SendMessageA(p2Simple, BM_SETCHECK,
@@ -1492,7 +1532,9 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
                 ConfigureConnectedControls(hDlg);
                 if (steamIsHost) SendP1Selection(hDlg);
                 else SendP2Selection(hDlg);
+                FocusLaunchMenu(hDlg);
             }
+            UpdatePingLabel(hDlg);
             return 0;
         }
         if (wParam == ID_NET_POLL_TIMER) {
@@ -1529,6 +1571,7 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
                             }
                             InvalidateRect(hStatus, NULL, TRUE);
                         }
+                        FocusLaunchMenu(hDlg);
                     }
                     else if (event.type == ENET_EVENT_TYPE_DISCONNECT) {
                         uint8_t* ip = (uint8_t*)&event.peer->address.host;
@@ -1611,6 +1654,7 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
                     CleanupNetwork(hDlg, true);
                 }
             }
+            UpdatePingLabel(hDlg);
         }
         return 0;
 
@@ -2168,6 +2212,12 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
     case WM_CTLCOLORSTATIC:
     {
         HWND hCtrl = (HWND)lParam;
+        if (hCtrl == GetDlgItem(hDlg, ID_PING_LABEL)) {
+            HDC hdc = (HDC)wParam;
+            SetTextColor(hdc, RGB(0, 100, 0));
+            SetBkMode(hdc, TRANSPARENT);
+            return (INT_PTR)GetSysColorBrush(COLOR_WINDOW);
+        }
         if (hCtrl == GetDlgItem(hDlg, ID_NET_STATUS)) {
             HDC hdc = (HDC)wParam;
             SetTextColor(hdc, g_statusColor);

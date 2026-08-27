@@ -1277,11 +1277,17 @@ void FrameStepper_Process()
         snprintf(timestamp, sizeof(timestamp), "%04u%02u%02u_%02u%02u%02u",
                  time.wYear, time.wMonth, time.wDay, time.wHour, time.wMinute,
                  time.wSecond);
-        SnapDump_WriteManualHistory(frame, timestamp);
-        if (Netplay_IsActive())
-            Netplay_SendSnapDump(frame, timestamp);
-        HookLog("FrameStepper: F10 wrote snapdump through frame %d%s\n",
-                 frame, Netplay_IsActive() ? " on both peers" : "");
+        if (SnapDump_WritesEnabled()) {
+            const bool wroteSnapDump = SnapDump_WriteManualHistory(frame, timestamp);
+            if (Netplay_IsActive())
+                Netplay_SendSnapDump(frame, timestamp);
+            if (wroteSnapDump) {
+                HookLog("FrameStepper: F10 wrote snapdump through frame %d%s\n",
+                        frame, Netplay_IsActive() ? " on both peers" : "");
+            }
+        } else {
+            HookLog("FrameStepper: F10 snapdump skipped; enable it in Timestone.ini\n");
+        }
 #endif
     }
 
@@ -1291,10 +1297,12 @@ void FrameStepper_Process()
                                       sizeof(remoteDumpTimestamp)))
     {
 #if ROLLBACK_SNAPDUMP_ENABLED
-        SnapDump_WriteManualHistory(remoteDumpFrame, remoteDumpTimestamp);
+        if (SnapDump_WritesEnabled() && SnapDump_WriteManualHistory(
+                remoteDumpFrame, remoteDumpTimestamp)) {
+            HookLog("FrameStepper: remote F10 wrote snapdump through frame %d\n",
+                    remoteDumpFrame);
+        }
 #endif
-        HookLog("FrameStepper: remote F10 wrote snapdump through frame %d\n",
-                 remoteDumpFrame);
     }
 
     if (IsPastIntroStep() && KeyPressed(VK_F11)) {
