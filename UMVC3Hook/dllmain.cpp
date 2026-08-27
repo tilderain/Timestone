@@ -612,6 +612,33 @@ static HWND g_d3d9FocusWindow = nullptr;
 static UINT g_borderlessBackBufferWidth = 0;
 static UINT g_borderlessBackBufferHeight = 0;
 
+static void MatchImGuiToRenderTarget(LPDIRECT3DDEVICE9 device)
+{
+	IDirect3DSurface9* renderTarget = nullptr;
+	if (FAILED(device->GetRenderTarget(0, &renderTarget)) || !renderTarget)
+		return;
+
+	D3DSURFACE_DESC desc = {};
+	const HRESULT descResult = renderTarget->GetDesc(&desc);
+	renderTarget->Release();
+	if (FAILED(descResult) || !desc.Width || !desc.Height)
+		return;
+
+	ImGuiIO& io = ImGui::GetIO();
+	const ImVec2 clientSize = io.DisplaySize;
+	if (clientSize.x <= 0.0f || clientSize.y <= 0.0f)
+		return;
+
+	// Borderless presentation may stretch a game-resolution back buffer to a
+	// monitor-sized client area. ImGui renders into that back buffer, so use its
+	// coordinate space rather than the Win32 client dimensions.
+	if (io.MousePos.x >= 0.0f && io.MousePos.y >= 0.0f) {
+		io.MousePos.x *= (float)desc.Width / clientSize.x;
+		io.MousePos.y *= (float)desc.Height / clientSize.y;
+	}
+	io.DisplaySize = ImVec2((float)desc.Width, (float)desc.Height);
+}
+
 static void PrepareD3D9PresentationParameters(
 	D3DPRESENT_PARAMETERS* parameters, const char* operation)
 {
@@ -812,6 +839,7 @@ long __stdcall hkEndScene(LPDIRECT3DDEVICE9 pDevice)
 
 	ImGui_ImplDX9_NewFrame();
 	ImGui_ImplWin32_NewFrame();
+	MatchImGuiToRenderTarget(pDevice);
 
 	// Inject inputs directly from hardware, bypassing the Windows message queue
 	PollKeyboardDirectly();

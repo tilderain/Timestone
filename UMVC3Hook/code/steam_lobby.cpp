@@ -111,6 +111,7 @@ bool g_joinCallbacksRegistered = false;
 std::atomic<uint64_t> g_pendingJoinLobby{0};
 std::atomic<uint64_t> g_replacementJoinLobby{0};
 uint64_t g_peerSteamId = 0;
+uint64_t g_gamePeerSteamId = 0;
 uint64_t g_rejectedPeerSteamId = 0;
 char g_peerUsername[128] = {};
 char g_lobbyName[128] = {};
@@ -1000,14 +1001,21 @@ const char* SteamLobby_GetPeerUsername()
 
 bool SteamLobby_OpenPeerProfile()
 {
-    if (!g_peerSteamId) return false;
+    const uint64_t profileSteamId = g_peerSteamId
+        ? g_peerSteamId : g_gamePeerSteamId;
+    if (!profileSteamId) return false;
 
     char profileUrl[96];
     snprintf(profileUrl, sizeof(profileUrl),
              "https://steamcommunity.com/profiles/%llu",
-             static_cast<unsigned long long>(g_peerSteamId));
+             static_cast<unsigned long long>(profileSteamId));
     return reinterpret_cast<INT_PTR>(ShellExecuteA(
                nullptr, "open", profileUrl, nullptr, nullptr, SW_SHOWNORMAL)) > 32;
+}
+
+bool SteamLobby_HasPeerProfile()
+{
+    return g_peerSteamId != 0 || g_gamePeerSteamId != 0;
 }
 
 bool SteamLobby_HasLobby()
@@ -1121,6 +1129,7 @@ bool SteamLobby_TakeNetworkHandles(ENetHost** outHost, ENetPeer** outPeer,
 void SteamLobby_Shutdown(bool preserveConnection)
 {
     if (preserveConnection) {
+        g_gamePeerSteamId = g_peerSteamId;
         HookLog("SteamLobby: transferred live connection to gameplay\n");
         return;
     }
