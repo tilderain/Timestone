@@ -271,6 +271,25 @@ uint64_t GetBattleSetting()
     return ((GetInstanceFn)_addr(BATTLE_SETTING_GET_INSTANCE))();
 }
 
+bool ReadLocalAutoJumpPreference()
+{
+    using GetInstanceFn = uint64_t(__fastcall*)();
+    const uint64_t gameConfig =
+        ((GetInstanceFn)_addr(GAME_CONFIG_GET_INSTANCE))();
+    return gameConfig && *(uint8_t*)(gameConfig + 0x192) != 0;
+}
+
+void LoadOwnedAutoJumpPreference(RosterConfig& roster)
+{
+    const uint8_t enabled = ReadLocalAutoJumpPreference();
+    if (Netplay_IsActive()) {
+        roster.autoJump[Netplay_IsHost() ? 0 : 1] = enabled;
+    } else {
+        roster.autoJump[0] = enabled;
+        roster.autoJump[1] = enabled;
+    }
+}
+
 bool ReadCurrentRoster(RosterConfig& roster)
 {
     const uint64_t battleSetting = GetBattleSetting();
@@ -463,6 +482,7 @@ void BeginSynchronizedSession()
         ReadFallbackRoster(current);
         HookLog("ChrSelImGui: live roster read failed; using launch configuration\n");
     }
+    LoadOwnedAutoJumpPreference(current);
     NormalizeRoster(current);
     if (!ValidateRoster(current)) {
         HookLog("ChrSelImGui: roster normalization failed unexpectedly\n");
@@ -495,12 +515,16 @@ void CopyRemoteRoster(const ChrSelPacket& packet)
     const int lastTeam = CanEditAllTeams() ? 1 : firstTeam;
     for (int team = firstTeam; team <= lastTeam; ++team) {
         g_roster.simpleMode[team] = packet.roster.simpleMode[team];
-        g_roster.autoJump[team] = packet.roster.autoJump[team];
         for (int member = 0; member < 3; ++member) {
             g_roster.chars[team][member] = packet.roster.chars[team][member];
             g_roster.colors[team][member] = packet.roster.colors[team][member];
             g_roster.assists[team][member] = packet.roster.assists[team][member];
         }
+    }
+    if (Netplay_IsActive()) {
+        const int remoteOwnedTeam = Netplay_IsHost() ? 1 : 0;
+        g_roster.autoJump[remoteOwnedTeam] =
+            packet.roster.autoJump[remoteOwnedTeam];
     }
 }
 
@@ -586,6 +610,7 @@ void HandlePacket(const ChrSelPacket& packet)
                 } else {
                     haveCurrentTeamOptions = ReadCurrentRoster(current);
                 }
+                LoadOwnedAutoJumpPreference(current);
             }
             g_session = packet.session;
             g_revision = packet.revision;
@@ -701,12 +726,16 @@ bool DrawTeam(int team, bool editable)
         g_roster.simpleMode[team] = simpleMode;
         changed = true;
     }
+    const bool autoJumpEditable = !Netplay_IsActive() ||
+        team == (Netplay_IsHost() ? 0 : 1);
+    if (!autoJumpEditable) ImGui::BeginDisabled();
     const bool autoJump = g_roster.autoJump[team] != 0;
     if (ImGui::Button(autoJump ? "Auto Super Jump: ON"
                                : "Auto Super Jump: OFF")) {
         g_roster.autoJump[team] = !autoJump;
         changed = true;
     }
+    if (!autoJumpEditable) ImGui::EndDisabled();
     for (int member = 0; member < 3; ++member) {
         ImGui::PushID(member);
         ImGui::Separator();

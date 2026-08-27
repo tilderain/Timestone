@@ -92,6 +92,8 @@ struct LaunchTrainingPacket {
     int32_t  p1Assists[3];       // 0=Alpha, 1=Beta, 2=Gamma
     int32_t  p2Assists[3];
     uint32_t simpleMode[2];
+    uint32_t autoJump[2];
+    uint32_t autoJumpValidMask;   // bit 0=P1 value valid, bit 1=P2 value valid
     int32_t  stageId;
     uint32_t flags;              // LaunchTrainingFlags
 };
@@ -278,6 +280,10 @@ bool Netplay_GetInboundRollback(int32_t& outRollback, int32_t& outEffectiveFrame
 void Netplay_SendBattleReady(uint32_t generation, uint32_t flags, uint32_t roundSeed);
 bool Netplay_GetInboundBattleReady(uint32_t& outGeneration, uint32_t& outFlags,
                                    uint32_t& outRoundSeed);
+
+// Exchange post-savedata team preferences as part of the launch settings.
+void Netplay_SendLaunchTrainingSettings(const LaunchTrainingPacket& packet);
+bool Netplay_GetInboundLaunchTrainingSettings(LaunchTrainingPacket& outPacket);
 
 // Synchronize the desync warning and its P-key dismissal with the peer.
 void Netplay_SendDesyncTrigger(int32_t frame, uint32_t localChecksum,

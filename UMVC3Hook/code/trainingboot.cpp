@@ -30,6 +30,8 @@ static constexpr uintptr_t SCHARACTER_GET_TEAM                = 0x140001b60;
 static constexpr uintptr_t SCHARACTER_SET_TEAM_METER          = 0x14005a320;
 static constexpr uintptr_t CCHRTEAM_SET_EASY_MODE             = 0x1400203d0;
 static constexpr uintptr_t BATTLE_SETTING_SET_TEAM_AUTO_JUMP  = 0x1402074d0;
+static constexpr uintptr_t ACTION_AUTO_JUMP_P1_RETURN         = 0x140203e44;
+static constexpr uintptr_t ACTION_AUTO_JUMP_P2_RETURN         = 0x140203e6a;
 
 // sArea scene-chain manager
 static constexpr uintptr_t SAREA_INSTANCE_PTR                = 0x140e17a80;
@@ -132,12 +134,16 @@ static TrainingBootConfig g_bootConfig = {
 static bool g_hasBooted = false;
 static bool g_hooksInitialized = false;
 static uint64_t g_gameConfigLoadUnit = 0;
+static bool g_nativeGameConfigLoaded = false;
 static bool g_skipNativeConfigLoad = false;
 static bool g_restartConfigPending = false;
 static bool g_restartTransitionActive = false;
 static bool g_restartSawActionSetup = false;
 static TrainingBootCpuMode g_cpuMode = TRAINING_CPU_NONE;
 static bool g_fiveBarStart = false;
+static bool g_initialAutoJumpSent = false;
+static bool g_initialAutoJumpReceived = false;
+static bool g_initialAutoJumpSynchronized = false;
 
 // ---------------------------------------------------------------------------
 // Extern from dllmain.cpp
@@ -436,6 +442,57 @@ static void ApplyPlayerOneBindingsToPlayerTwo()
     HookLog("TrainingBoot: Applied client P1 button bindings to local P2 input\n");
 }
 
+static bool SynchronizeInitialAutoJump()
+{
+    if (g_initialAutoJumpSynchronized)
+        return true;
+
+    typedef uint64_t(__fastcall* GetInstance_t)();
+    const uint64_t gameConfig =
+        ((GetInstance_t)_addr(SGAMECONFIG_GET_INSTANCE))();
+    if (!gameConfig)
+        return false;
+
+    const bool localEnabled = *(uint8_t*)(gameConfig + 0x192) != 0;
+    if (!Netplay_IsActive()) {
+        g_bootConfig.autoJump[0] = localEnabled;
+        g_bootConfig.autoJump[1] = localEnabled;
+        g_initialAutoJumpSynchronized = true;
+        return true;
+    }
+
+    const int localTeam = Netplay_IsHost() ? 0 : 1;
+    g_bootConfig.autoJump[localTeam] = localEnabled;
+    if (!g_initialAutoJumpSent) {
+        LaunchTrainingPacket packet = {};
+        packet.type = PACKET_LAUNCH_TRAINING;
+        packet.autoJump[localTeam] = localEnabled ? 1u : 0u;
+        packet.autoJumpValidMask = 1u << localTeam;
+        Netplay_SendLaunchTrainingSettings(packet);
+        g_initialAutoJumpSent = true;
+        HookLog("TrainingBoot: Sent initial AutoJump launch setting team=%d enabled=%d\n",
+                localTeam, localEnabled);
+    }
+
+    LaunchTrainingPacket packet = {};
+    if (!g_initialAutoJumpReceived &&
+        Netplay_GetInboundLaunchTrainingSettings(packet)) {
+        const int remoteTeam = Netplay_IsHost() ? 1 : 0;
+        const uint32_t remoteMask = 1u << remoteTeam;
+        if ((packet.autoJumpValidMask & remoteMask) != 0) {
+            g_bootConfig.autoJump[remoteTeam] =
+                packet.autoJump[remoteTeam] != 0;
+            g_initialAutoJumpReceived = true;
+            HookLog("TrainingBoot: Received initial AutoJump launch setting team=%d enabled=%u\n",
+                    remoteTeam, packet.autoJump[remoteTeam]);
+        }
+    }
+
+    g_initialAutoJumpSynchronized =
+        g_initialAutoJumpSent && g_initialAutoJumpReceived;
+    return g_initialAutoJumpSynchronized;
+}
+
 static void SetupPadToPlayerMapping()
 {
     // --- sMvc3Manager: pad-slot→player assignment ---
@@ -501,7 +558,16 @@ void BootIntoTraining()
 
     // Savedata loading is asynchronous. Keep the title move hook active until
     // the native uStoragePC has loaded and applied the complete sGameConfig.
-    if (!g_skipNativeConfigLoad && !LoadNativeGameConfig())
+    if (!g_skipNativeConfigLoad && !g_nativeGameConfigLoaded) {
+        if (!LoadNativeGameConfig())
+            return;
+        g_nativeGameConfigLoaded = true;
+    }
+
+    // Savedata owns each process's AutoJump preference. Exchange those local
+    // values before the first aAction is constructed so both peers enter the
+    // initial battle with host=P1 and client=P2 settings already resolved.
+    if (!SynchronizeInitialAutoJump())
         return;
 
     NormalizeBootColors();
@@ -734,22 +800,23 @@ void __fastcall Hook_titleUpdate(uint64_t param_1)
 static void __fastcall Hook_setTeamAutoJump(uint64_t battleSetting,
                                              int32_t team, bool enabled)
 {
-    const int configTeam = team == 0 ? 0 : 1;
-    oSetTeamAutoJump(battleSetting, team, g_bootConfig.autoJump[configTeam]);
+    const uintptr_t caller =
+        (uintptr_t)__builtin_return_address(0);
+    const bool constructingBattle =
+        caller == (uintptr_t)_addr(ACTION_AUTO_JUMP_P1_RETURN) ||
+        caller == (uintptr_t)_addr(ACTION_AUTO_JUMP_P2_RETURN);
+    if (constructingBattle) {
+        const int configTeam = team == 0 ? 0 : 1;
+        enabled = g_bootConfig.autoJump[configTeam];
+    }
+    oSetTeamAutoJump(battleSetting, team, enabled);
 }
 
 static void __fastcall Hook_executeMatchPhase(uint64_t action, int32_t phase,
                                                uint64_t unit, uint64_t context)
 {
     oExecuteMatchPhase(action, phase, unit, context);
-    if (phase != 1)
-        return;
-
-    // aAction initialization copies the global AutoJump option to both teams.
-    // Reapply the synchronized per-team values after that native setup.
-    ApplyTeamAutoJump();
-
-    if (!g_fiveBarStart)
+    if (!g_fiveBarStart || phase != 1)
         return;
 
     typedef uint64_t(__fastcall* GetInstance_t)();

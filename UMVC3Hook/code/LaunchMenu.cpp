@@ -133,7 +133,9 @@ static int GetCharacterArchiveVariantCount(int characterId)
 static bool IsValidTrainingLaunchPacket(const LaunchTrainingPacket& packet)
 {
     if (packet.type != PACKET_LAUNCH_TRAINING ||
-        packet.simpleMode[0] > 1 || packet.simpleMode[1] > 1)
+        packet.simpleMode[0] > 1 || packet.simpleMode[1] > 1 ||
+        packet.autoJump[0] > 1 || packet.autoJump[1] > 1 ||
+        packet.autoJumpValidMask > 3)
         return false;
     for (int i = 0; i < 3; ++i) {
         if (packet.p1Chars[i] < 0 || packet.p1Chars[i] >= kCharNameCount ||
@@ -463,6 +465,10 @@ bool ApplyTrainingLaunchPacket(const LaunchTrainingPacket& packet)
     cfg.stageId = packet.stageId;
     cfg.simpleMode[0] = packet.simpleMode[0] != 0;
     cfg.simpleMode[1] = packet.simpleMode[1] != 0;
+    if ((packet.autoJumpValidMask & 1) != 0)
+        cfg.autoJump[0] = packet.autoJump[0] != 0;
+    if ((packet.autoJumpValidMask & 2) != 0)
+        cfg.autoJump[1] = packet.autoJump[1] != 0;
     cfg.timerValue = 99;
     TrainingBoot_SetConfig(cfg);
     HookLog("UMVC3Hook: Applied launch packet P1=%d/%d/%d P2=%d/%d/%d stage=%d\n",

@@ -76,6 +76,11 @@ static bool                 g_outboundBattleReadyNew = false;
 static BattleReadyPacket    g_inboundBattleReady = {};
 static bool                 g_inboundBattleReadyNew = false;
 static CRITICAL_SECTION     g_battleReadyCS;
+static LaunchTrainingPacket g_outboundLaunchTraining = {};
+static bool                 g_outboundLaunchTrainingNew = false;
+static LaunchTrainingPacket g_inboundLaunchTraining = {};
+static bool                 g_inboundLaunchTrainingNew = false;
+static CRITICAL_SECTION     g_launchTrainingCS;
 
 static DesyncPacket             g_outboundDesync = {};
 static bool                     g_outboundDesyncNew = false;
@@ -292,6 +297,26 @@ static DWORD WINAPI Netplay_ServiceThread(LPVOID)
             if (enet_peer_send(g_peer, 0, packet) != 0) {
                 enet_packet_destroy(packet);
             }
+            enet_host_flush(g_host);
+        }
+
+        bool hasLaunchTraining = false;
+        LaunchTrainingPacket launchTraining = {};
+        {
+            ScopedCS lock(g_launchTrainingCS);
+            if (g_outboundLaunchTrainingNew)
+            {
+                launchTraining = g_outboundLaunchTraining;
+                hasLaunchTraining = true;
+                g_outboundLaunchTrainingNew = false;
+            }
+        }
+        if (hasLaunchTraining && g_peer)
+        {
+            ENetPacket* packet = enet_packet_create(
+                &launchTraining, sizeof(launchTraining), ENET_PACKET_FLAG_RELIABLE);
+            if (enet_peer_send(g_peer, 0, packet) != 0)
+                enet_packet_destroy(packet);
             enet_host_flush(g_host);
         }
 
@@ -533,6 +558,21 @@ static DWORD WINAPI Netplay_ServiceThread(LPVOID)
                         uint32_t pktType = *(uint32_t*)event.packet->data;
                         switch (pktType)
                         {
+                            case PACKET_LAUNCH_TRAINING:
+                                if (event.packet->dataLength >= sizeof(LaunchTrainingPacket))
+                                {
+                                    const LaunchTrainingPacket* packet =
+                                        (const LaunchTrainingPacket*)event.packet->data;
+                                    if (packet->autoJump[0] <= 1 &&
+                                        packet->autoJump[1] <= 1 &&
+                                        packet->autoJumpValidMask <= 3)
+                                    {
+                                        ScopedCS lock(g_launchTrainingCS);
+                                        g_inboundLaunchTraining = *packet;
+                                        g_inboundLaunchTrainingNew = true;
+                                    }
+                                }
+                                break;
                             case PACKET_INPUT:
                                 if (event.packet->dataLength >= sizeof(InputPacket))
                                 {
@@ -775,6 +815,7 @@ void Netplay_Init(ENetHost* host, ENetPeer* peer)
         InitializeCriticalSection(&g_inboundCS);
         InitializeCriticalSection(&g_delayCS);
         InitializeCriticalSection(&g_battleReadyCS);
+        InitializeCriticalSection(&g_launchTrainingCS);
         InitializeCriticalSection(&g_desyncCS);
         InitializeCriticalSection(&g_restartCS);
         InitializeCriticalSection(&g_multiResimCS);
@@ -788,6 +829,8 @@ void Netplay_Init(ENetHost* host, ENetPeer* peer)
         g_inboundDelayNew = false;
         g_outboundBattleReadyNew = false;
         g_inboundBattleReadyNew = false;
+        g_outboundLaunchTrainingNew = false;
+        g_inboundLaunchTrainingNew = false;
         g_outboundDesyncNew = false;
         g_inboundDesyncNew = false;
         g_outboundRestartNew = false;
@@ -919,6 +962,28 @@ bool Netplay_GetInboundRollback(int32_t& outRollback, int32_t& outEffectiveFrame
         return true;
     }
     return false;
+}
+
+void Netplay_SendLaunchTrainingSettings(const LaunchTrainingPacket& packet)
+{
+    if (!g_active || !g_csInitialized)
+        return;
+    ScopedCS lock(g_launchTrainingCS);
+    g_outboundLaunchTraining = packet;
+    g_outboundLaunchTraining.type = PACKET_LAUNCH_TRAINING;
+    g_outboundLaunchTrainingNew = true;
+}
+
+bool Netplay_GetInboundLaunchTrainingSettings(LaunchTrainingPacket& outPacket)
+{
+    if (!g_active || !g_csInitialized)
+        return false;
+    ScopedCS lock(g_launchTrainingCS);
+    if (!g_inboundLaunchTrainingNew)
+        return false;
+    outPacket = g_inboundLaunchTraining;
+    g_inboundLaunchTrainingNew = false;
+    return true;
 }
 
 void Netplay_SendMultiResim(bool enabled)
@@ -1342,6 +1407,7 @@ void Netplay_Shutdown()
 
         DeleteCriticalSection(&g_delayCS);
         DeleteCriticalSection(&g_battleReadyCS);
+        DeleteCriticalSection(&g_launchTrainingCS);
         DeleteCriticalSection(&g_desyncCS);
         DeleteCriticalSection(&g_restartCS);
         DeleteCriticalSection(&g_multiResimCS);
