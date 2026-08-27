@@ -583,18 +583,82 @@ static volatile LONG g_initialD3D9ResetComplete = 0;
 static SRWLOCK g_d3d9DeviceLock = SRWLOCK_INIT;
 static unsigned int g_overlayInitDeferredFrames = 0;
 static bool g_serializeD3D9CreateDevice = false;
+static bool g_borderlessPresentationRequested = false;
+static HWND g_d3d9FocusWindow = nullptr;
+static UINT g_borderlessBackBufferWidth = 0;
+static UINT g_borderlessBackBufferHeight = 0;
+
+static void PrepareD3D9PresentationParameters(
+	D3DPRESENT_PARAMETERS* parameters, const char* operation)
+{
+	if (!parameters)
+		return;
+
+	if (parameters->Windowed)
+		return;
+
+	g_borderlessPresentationRequested = true;
+	g_borderlessBackBufferWidth = parameters->BackBufferWidth;
+	g_borderlessBackBufferHeight = parameters->BackBufferHeight;
+	parameters->Windowed = TRUE;
+	parameters->FullScreen_RefreshRateInHz = 0;
+	HookLog("D3D9: converted fullscreen %s to windowed borderless "
+		"(interval=0x%08X)\n",
+		operation,
+		parameters->PresentationInterval);
+}
+
+static void ApplyD3D9BorderlessWindow()
+{
+	if (!g_borderlessPresentationRequested || !g_d3d9FocusWindow)
+		return;
+
+	HMONITOR monitor = MonitorFromWindow(
+		g_d3d9FocusWindow, MONITOR_DEFAULTTONEAREST);
+	MONITORINFO info = { sizeof(info) };
+	if (!monitor || !GetMonitorInfoA(monitor, &info))
+		return;
+
+	LONG_PTR style = GetWindowLongPtrA(g_d3d9FocusWindow, GWL_STYLE);
+	style &= ~(WS_CAPTION | WS_THICKFRAME | WS_MINIMIZEBOX |
+		WS_MAXIMIZEBOX | WS_SYSMENU);
+	style |= WS_POPUP;
+	SetWindowLongPtrA(g_d3d9FocusWindow, GWL_STYLE, style);
+
+	LONG_PTR exStyle = GetWindowLongPtrA(g_d3d9FocusWindow, GWL_EXSTYLE);
+	exStyle &= ~(WS_EX_DLGMODALFRAME | WS_EX_WINDOWEDGE |
+		WS_EX_CLIENTEDGE | WS_EX_STATICEDGE);
+	SetWindowLongPtrA(g_d3d9FocusWindow, GWL_EXSTYLE, exStyle);
+
+	const RECT& rect = info.rcMonitor;
+	int x = rect.left;
+	int y = rect.top;
+	int width = rect.right - rect.left;
+	int height = rect.bottom - rect.top;
+	if (g_serializeD3D9CreateDevice &&
+		g_borderlessBackBufferWidth && g_borderlessBackBufferHeight) {
+		width = (int)g_borderlessBackBufferWidth;
+		height = (int)g_borderlessBackBufferHeight;
+		if (g_windowCorner == 1)
+			x = rect.right - width;
+		else if (g_windowCorner == 2)
+			y = rect.bottom - height;
+	}
+	SetWindowPos(g_d3d9FocusWindow, HWND_TOP,
+		x, y, width, height,
+		SWP_FRAMECHANGED | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+	HookLog("D3D9: applied borderless window position=%d,%d size=%dx%d\n",
+		x, y, width, height);
+}
 
 static HRESULT __stdcall hkResetDevice(
 	LPDIRECT3DDEVICE9 pDevice, D3DPRESENT_PARAMETERS* presentationParameters)
 {
 	AcquireSRWLockExclusive(&g_d3d9DeviceLock);
 
-	if (g_serializeD3D9CreateDevice && presentationParameters &&
-		!presentationParameters->Windowed) {
-		presentationParameters->Windowed = TRUE;
-		presentationParameters->FullScreen_RefreshRateInHz = 0;
-		HookLog("D3D9: forced dual-training Reset to windowed mode\n");
-	}
+	if (!g_d3d9FocusWindow && presentationParameters)
+		g_d3d9FocusWindow = presentationParameters->hDeviceWindow;
+	PrepareD3D9PresentationParameters(presentationParameters, "Reset");
 
 	if (presentationParameters) {
 		/// TRACE LOG
@@ -658,6 +722,8 @@ static HRESULT __stdcall hkResetDevice(
 	}
 	if (SUCCEEDED(result))
 		InterlockedExchange(&g_initialD3D9ResetComplete, 1);
+	if (SUCCEEDED(result))
+		ApplyD3D9BorderlessWindow();
 
 	ReleaseSRWLockExclusive(&g_d3d9DeviceLock);
 	return result;
@@ -692,6 +758,8 @@ long __stdcall hkEndScene(LPDIRECT3DDEVICE9 pDevice)
 		D3DDEVICE_CREATION_PARAMETERS params;
 		pDevice->GetCreationParameters(&params);
 		window = params.hFocusWindow;
+		g_d3d9FocusWindow = window;
+		ApplyD3D9BorderlessWindow();
 
 		if (g_windowCorner) {
 			RECT rect;
@@ -976,12 +1044,9 @@ static HRESULT WINAPI HookD3D9CreateDevice(
 {
 	if (!g_originalD3D9CreateDevice)
 		return D3DERR_DRIVERINTERNALERROR;
-	if (g_serializeD3D9CreateDevice && presentationParameters &&
-		!presentationParameters->Windowed) {
-		presentationParameters->Windowed = TRUE;
-		presentationParameters->FullScreen_RefreshRateInHz = 0;
-		HookLog("D3D9: forced dual-training CreateDevice to windowed mode\n");
-	}
+	g_d3d9FocusWindow = focusWindow ? focusWindow :
+		(presentationParameters ? presentationParameters->hDeviceWindow : nullptr);
+	PrepareD3D9PresentationParameters(presentationParameters, "CreateDevice");
 	if (presentationParameters) {
 		/// TRACE LOG
 		HookLog("D3D9: CreateDevice params adapter=%u deviceType=%u focusWindow=%p "
@@ -1014,6 +1079,8 @@ static HRESULT WINAPI HookD3D9CreateDevice(
 			presentationParameters, returnedDevice);
 		HookLog("D3D9: CreateDevice returned 0x%08X device=%p\n",
 			(uint32_t)result, returnedDevice ? *returnedDevice : nullptr);
+		if (SUCCEEDED(result))
+			ApplyD3D9BorderlessWindow();
 		return result;
 	}
 
@@ -1048,6 +1115,8 @@ static HRESULT WINAPI HookD3D9CreateDevice(
 	}
 	HookLog("D3D9: CreateDevice returned 0x%08X device=%p\n",
 		(uint32_t)result, returnedDevice ? *returnedDevice : nullptr);
+	if (SUCCEEDED(result))
+		ApplyD3D9BorderlessWindow();
 	return result;
 }
 
