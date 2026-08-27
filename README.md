@@ -94,9 +94,10 @@ snapshot analyzer fails. Argument errors use argparse's standard exit code `2`.
 
 The network address and port come from `rollbacksetting.ini`.
 
+
 # Credits
 
-Armonte- Many reverse engineering and documentation, Shot snapshot, inspiration from his repo (multi asi loader, exception handler)
+Armonte- Many reverse engineering and documentation, Shot snapshot base, inspiration from his repo (exception handler.. etc)
 
 Hkhann- Prior reverse engineering, the one who started it all with the OG UMVC3Rollback repo
 

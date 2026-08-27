@@ -157,6 +157,7 @@ static HANDLE g_hPollThread = NULL;
 static bool g_isLaunching = false;
 static bool g_directConnectExpanded = false;
 static int g_lobbyTypeSelection = 0;
+static char g_lobbyName[128] = {};
 
 static void GetSettingsPath(const char* filename, char* path, size_t pathSize)
 {
@@ -307,6 +308,8 @@ static void LoadRollbackSettings()
     g_lobbyTypeSelection = std::clamp(
         static_cast<int>(GetPrivateProfileIntA(
             "Network", "LobbyType", 0, settingsPath)), 0, 2);
+    GetPrivateProfileStringA("Network", "LobbyName", "", g_lobbyName,
+                             sizeof(g_lobbyName), settingsPath);
 }
 
 static void SaveLobbyTypeSelection()
@@ -317,6 +320,16 @@ static void SaveLobbyTypeSelection()
     if (!WritePrivateProfileStringA(
             "Network", "LobbyType", value, settingsPath)) {
         HookLog("UMVC3Hook: Failed to save lobby type to %s\n", settingsPath);
+    }
+}
+
+static void SaveLobbyName()
+{
+    char settingsPath[MAX_PATH] = {};
+    GetSettingsPath("Timestone.ini", settingsPath, sizeof(settingsPath));
+    if (!WritePrivateProfileStringA(
+            "Network", "LobbyName", g_lobbyName, settingsPath)) {
+        HookLog("UMVC3Hook: Failed to save lobby name to %s\n", settingsPath);
     }
 }
 
@@ -536,6 +549,7 @@ enum CtrlId {
     ID_STEAM_STATUS       = 2304,
     ID_STEAM_JOIN_BTN     = 2305,
     ID_STEAM_TYPE         = 2306,
+    ID_STEAM_NAME         = 2307,
     ID_LAUNCH_PROMPT      = 2401,
     ID_VERSION_LABEL      = 2402,
 };
@@ -636,6 +650,8 @@ static void UpdateSteamLobbyButton(HWND hDlg)
     SetWindowTextA(button, hasLobby ? "Leave Lobby" : "Create Lobby");
     EnableWindow(button, hasLobby || !SteamLobby_IsCreating());
     EnableWindow(GetDlgItem(hDlg, ID_STEAM_TYPE),
+                  !hasLobby && !SteamLobby_IsCreating());
+    EnableWindow(GetDlgItem(hDlg, ID_STEAM_NAME),
                  !hasLobby && !SteamLobby_IsCreating());
 }
 
@@ -1256,6 +1272,18 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
             WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON | WS_DISABLED,
             leftX + 435, y, 120, 26,
             hDlg, (HMENU)ID_STEAM_JOIN_BTN, NULL, NULL);
+
+        CreateWindowA("STATIC", "Name:",
+            WS_VISIBLE | WS_CHILD,
+            leftX + 565, y + 4, 40, 18,
+            hDlg, NULL, NULL, NULL);
+
+        HWND hLobbyName = CreateWindowA("EDIT", g_lobbyName,
+            WS_VISIBLE | WS_CHILD | WS_TABSTOP | WS_BORDER | ES_AUTOHSCROLL,
+            leftX + 610, y + 2, 180, 22,
+            hDlg, (HMENU)ID_STEAM_NAME, NULL, NULL);
+        SendMessageA(hLobbyName, EM_SETLIMITTEXT,
+                     (WPARAM)(sizeof(g_lobbyName) - 1), 0);
 
         y += 30;
 
@@ -2015,6 +2043,15 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
             }
             return 0;
 
+        case ID_STEAM_NAME:
+            if (HIWORD(wParam) == EN_KILLFOCUS) {
+                GetWindowTextA(reinterpret_cast<HWND>(lParam), g_lobbyName,
+                               sizeof(g_lobbyName));
+                SaveLobbyName();
+                SteamLobby_SetName(g_lobbyName);
+            }
+            return 0;
+
         case ID_STEAM_SEARCH_BTN:
         {
             HWND hList = GetDlgItem(hDlg, ID_STEAM_LIST);
@@ -2028,6 +2065,10 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
             if (SteamLobby_HasLobby())
                 CleanupNetwork(hDlg, true);
             else {
+                GetWindowTextA(GetDlgItem(hDlg, ID_STEAM_NAME), g_lobbyName,
+                               sizeof(g_lobbyName));
+                SaveLobbyName();
+                SteamLobby_SetName(g_lobbyName);
                 int selection = static_cast<int>(SendMessageA(
                     GetDlgItem(hDlg, ID_STEAM_TYPE), CB_GETCURSEL, 0, 0));
                 SteamLobbyType type = selection == 1

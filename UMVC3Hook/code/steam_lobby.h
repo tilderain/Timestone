@@ -13,6 +13,7 @@ enum class SteamLobbyType : int {
 bool SteamLobby_Initialize();
 void SteamLobby_Pump();
 void SteamLobby_Search();
+void SteamLobby_SetName(const char* name);
 void SteamLobby_Create(SteamLobbyType type);
 void SteamLobby_Join(uint64_t lobbyId);
 void SteamLobby_Shutdown(bool preserveConnection);

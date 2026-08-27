@@ -103,6 +103,7 @@ std::atomic<uint64_t> g_replacementJoinLobby{0};
 uint64_t g_peerSteamId = 0;
 uint64_t g_rejectedPeerSteamId = 0;
 char g_peerUsername[128] = {};
+char g_lobbyName[128] = {};
 char g_status[256] = "Steam is not initialized";
 char g_versionMismatch[256] = {};
 bool g_versionMismatchPending = false;
@@ -752,6 +753,13 @@ void SteamLobby_Search()
     SetStatus("Searching for lobbies...");
 }
 
+void SteamLobby_SetName(const char* name)
+{
+    snprintf(g_lobbyName, sizeof(g_lobbyName), "%s", name ? name : "");
+    if (g_isHost && g_lobbyId && g_matchmaking)
+        g_api.SetLobbyData(g_matchmaking, g_lobbyId, "name", g_lobbyName);
+}
+
 void SteamLobby_Create(SteamLobbyType type)
 {
     if (!SteamLobby_Initialize() || g_pendingCall != PendingCall::None) return;
@@ -833,10 +841,14 @@ void SteamLobby_Pump()
                 g_api.SetLobbyData(g_matchmaking, g_lobbyId, "state", "waiting");
                 const char* username = g_friends ? g_api.GetPersonaName(g_friends) : "";
                 if (username && username[0]) {
-                    char lobbyName[128];
-                    snprintf(lobbyName, sizeof(lobbyName), "%s's Lobby", username);
-                    g_api.SetLobbyData(g_matchmaking, g_lobbyId, "name", lobbyName);
                     g_api.SetLobbyData(g_matchmaking, g_lobbyId, "username", username);
+                }
+                if (g_lobbyName[0]) {
+                    g_api.SetLobbyData(g_matchmaking, g_lobbyId, "name", g_lobbyName);
+                } else if (username && username[0]) {
+                    char fallbackName[128];
+                    snprintf(fallbackName, sizeof(fallbackName), "%s's Lobby", username);
+                    g_api.SetLobbyData(g_matchmaking, g_lobbyId, "name", fallbackName);
                 }
                 PublishLobbyRichPresence();
                 SetStatusf("Lobby %llu created; waiting for opponent", g_lobbyId);
