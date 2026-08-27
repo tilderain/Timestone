@@ -582,11 +582,19 @@ static volatile LONG g_endSceneOverlayInFlight = 0;
 static volatile LONG g_initialD3D9ResetComplete = 0;
 static SRWLOCK g_d3d9DeviceLock = SRWLOCK_INIT;
 static unsigned int g_overlayInitDeferredFrames = 0;
+static bool g_serializeD3D9CreateDevice = false;
 
 static HRESULT __stdcall hkResetDevice(
 	LPDIRECT3DDEVICE9 pDevice, D3DPRESENT_PARAMETERS* presentationParameters)
 {
 	AcquireSRWLockExclusive(&g_d3d9DeviceLock);
+
+	if (g_serializeD3D9CreateDevice && presentationParameters &&
+		!presentationParameters->Windowed) {
+		presentationParameters->Windowed = TRUE;
+		presentationParameters->FullScreen_RefreshRateInHz = 0;
+		HookLog("D3D9: forced dual-training Reset to windowed mode\n");
+	}
 
 	if (presentationParameters) {
 		/// TRACE LOG
@@ -891,7 +899,6 @@ static Direct3D9CreateDeviceFn g_originalD3D9CreateDevice = nullptr;
 static Direct3D9GetAdapterModeCountFn g_originalD3D9GetAdapterModeCount = nullptr;
 static Direct3DCreate9Fn g_originalDirect3DCreate9 = nullptr;
 static HANDLE g_d3d9CreateDeviceMutex = nullptr;
-static bool g_serializeD3D9CreateDevice = false;
 
 static UINT WINAPI HookD3D9GetAdapterModeCount(
 	IDirect3D9* d3d9, UINT adapter, D3DFORMAT format)
@@ -969,6 +976,12 @@ static HRESULT WINAPI HookD3D9CreateDevice(
 {
 	if (!g_originalD3D9CreateDevice)
 		return D3DERR_DRIVERINTERNALERROR;
+	if (g_serializeD3D9CreateDevice && presentationParameters &&
+		!presentationParameters->Windowed) {
+		presentationParameters->Windowed = TRUE;
+		presentationParameters->FullScreen_RefreshRateInHz = 0;
+		HookLog("D3D9: forced dual-training CreateDevice to windowed mode\n");
+	}
 	if (presentationParameters) {
 		/// TRACE LOG
 		HookLog("D3D9: CreateDevice params adapter=%u deviceType=%u focusWindow=%p "

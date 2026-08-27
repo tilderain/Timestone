@@ -92,8 +92,8 @@ native reflection properties where available.
 | `0x588` | `4` | `mBackupStgID` | Backed-up stage ID. |
 | `0x58C` | `4` | `mBackupCtrlModeType` | Backed-up control-mode value from `sGameConfig`. |
 | `0x590` | `1` | `mBackupMainChrFlag` | Marks the backup as valid and pending restoration. |
-| `0x591` | `1` | unknown P1 Boolean | Reflected Japanese debug/training option. |
-| `0x592` | `1` | unknown P2 Boolean | Reflected Japanese debug/training option. |
+| `0x591` | `1` | team 0 AutoJump | Effective automatic-super-jump setting for team 0. |
+| `0x592` | `1` | team 1 AutoJump | Effective automatic-super-jump setting for team 1. |
 | `0x593` | `1` | `3.0 X-Factor` | Reflected X-Factor option. |
 | `0x594` | `1` | unknown training Boolean | Exported through `rBattleSetting`; exact label is garbled. |
 | `0x5E0` | `4` | input-history delay/index | Used by the per-character input-history transform. |

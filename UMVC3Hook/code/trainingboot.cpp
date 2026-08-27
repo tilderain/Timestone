@@ -29,6 +29,7 @@ static constexpr uintptr_t SCHARACTER_GET_INSTANCE            = 0x140001aa0;
 static constexpr uintptr_t SCHARACTER_GET_TEAM                = 0x140001b60;
 static constexpr uintptr_t SCHARACTER_SET_TEAM_METER          = 0x14005a320;
 static constexpr uintptr_t CCHRTEAM_SET_EASY_MODE             = 0x1400203d0;
+static constexpr uintptr_t BATTLE_SETTING_SET_TEAM_AUTO_JUMP  = 0x1402074d0;
 
 // sArea scene-chain manager
 static constexpr uintptr_t SAREA_INSTANCE_PTR                = 0x140e17a80;
@@ -124,6 +125,7 @@ static TrainingBootConfig g_bootConfig = {
     { 0, 0, 0 }, // P1 assists (Alpha)
     { 0, 0, 0 }, // P2 assists (Alpha)
     { false, false }, // Normal controls
+    { false, false }, // Automatic super jump disabled
     0,    // stage 
     99   // timer (99 = infinite in training)
 };
@@ -258,6 +260,23 @@ static void ApplySimpleModes()
     }
     HookLog("TrainingBoot: Applied Simple Mode P1=%d P2=%d\n",
             g_bootConfig.simpleMode[0], g_bootConfig.simpleMode[1]);
+}
+
+static void ApplyTeamAutoJump()
+{
+    typedef uint64_t(__fastcall* GetInstance_t)();
+    typedef void(__fastcall* SetTeamAutoJump_t)(uint64_t, int32_t, bool);
+    const uint64_t battleSetting =
+        ((GetInstance_t)_addr(BATTLE_SETTING_GET_INSTANCE))();
+    if (!battleSetting)
+        return;
+
+    for (int team = 0; team < 2; ++team) {
+        ((SetTeamAutoJump_t)_addr(BATTLE_SETTING_SET_TEAM_AUTO_JUMP))(
+            battleSetting, team, g_bootConfig.autoJump[team]);
+    }
+    HookLog("TrainingBoot: Applied AutoJump P1=%d P2=%d\n",
+            g_bootConfig.autoJump[0], g_bootConfig.autoJump[1]);
 }
 
 // ---------------------------------------------------------------------------
@@ -570,6 +589,7 @@ void BootIntoTraining()
      ((RestoreBackup_t)_addr(BATTLE_SETTING_RESTORE_BACKUP))(bs);
      HookLog("TrainingBoot: Backup restored\n");
      ApplySimpleModes();
+     ApplyTeamAutoJump();
 
      for (int team = 0; team < 2; ++team) {
         for (int member = 0; member < 3; ++member) {
@@ -696,6 +716,8 @@ typedef void(__fastcall* TitleUpdate_t)(uint64_t);
 static TitleUpdate_t oTitleUpdate = nullptr;
 typedef void(__fastcall* ExecuteMatchPhase_t)(uint64_t, int32_t, uint64_t, uint64_t);
 static ExecuteMatchPhase_t oExecuteMatchPhase = nullptr;
+typedef void(__fastcall* SetTeamAutoJump_t)(uint64_t, int32_t, bool);
+static SetTeamAutoJump_t oSetTeamAutoJump = nullptr;
 
 void __fastcall Hook_titleUpdate(uint64_t param_1)
 {
@@ -709,11 +731,25 @@ void __fastcall Hook_titleUpdate(uint64_t param_1)
     }
 }
 
+static void __fastcall Hook_setTeamAutoJump(uint64_t battleSetting,
+                                             int32_t team, bool enabled)
+{
+    const int configTeam = team == 0 ? 0 : 1;
+    oSetTeamAutoJump(battleSetting, team, g_bootConfig.autoJump[configTeam]);
+}
+
 static void __fastcall Hook_executeMatchPhase(uint64_t action, int32_t phase,
                                                uint64_t unit, uint64_t context)
 {
     oExecuteMatchPhase(action, phase, unit, context);
-    if (!g_fiveBarStart || phase != 1)
+    if (phase != 1)
+        return;
+
+    // aAction initialization copies the global AutoJump option to both teams.
+    // Reapply the synchronized per-team values after that native setup.
+    ApplyTeamAutoJump();
+
+    if (!g_fiveBarStart)
         return;
 
     typedef uint64_t(__fastcall* GetInstance_t)();
@@ -751,6 +787,18 @@ void TrainingBoot_InitHooks()
     }
     else {
         HookLog("TrainingBoot: FAILED to hook aTitle__update\n");
+    }
+
+    if (MH_CreateHook(
+        (LPVOID)_addr(BATTLE_SETTING_SET_TEAM_AUTO_JUMP),
+        (LPVOID)Hook_setTeamAutoJump,
+        (LPVOID*)&oSetTeamAutoJump
+    ) == MH_OK) {
+        MH_EnableHook((LPVOID)_addr(BATTLE_SETTING_SET_TEAM_AUTO_JUMP));
+        HookLog("TrainingBoot: Hooked team AutoJump setter\n");
+    }
+    else {
+        HookLog("TrainingBoot: FAILED to hook team AutoJump setter\n");
     }
 
     if (MH_CreateHook(

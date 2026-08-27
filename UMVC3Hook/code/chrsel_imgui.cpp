@@ -34,6 +34,7 @@ struct RosterConfig {
     int32_t colors[2][3];
     int32_t assists[2][3];
     uint8_t simpleMode[2];
+    uint8_t autoJump[2];
 };
 
 #pragma pack(push, 1)
@@ -248,7 +249,7 @@ int NormalizeColor(int characterId, int color)
 bool ValidateRoster(const RosterConfig& roster)
 {
     for (int team = 0; team < 2; ++team) {
-        if (roster.simpleMode[team] > 1)
+        if (roster.simpleMode[team] > 1 || roster.autoJump[team] > 1)
             return false;
         for (int member = 0; member < 3; ++member) {
             const int character = roster.chars[team][member];
@@ -306,6 +307,8 @@ bool ReadCurrentRoster(RosterConfig& roster)
             ? static_cast<uint8_t>((*(uint32_t*)(chrTeam + 0x58) >> 12) & 1)
             : 0;
     }
+    roster.autoJump[0] = *(uint8_t*)(battleSetting + 0x591) != 0;
+    roster.autoJump[1] = *(uint8_t*)(battleSetting + 0x592) != 0;
     return counts[0] == 3 && counts[1] == 3 && ValidateRoster(roster);
 }
 
@@ -323,6 +326,8 @@ void ReadFallbackRoster(RosterConfig& roster)
     const TrainingBootConfig& defaults = TrainingBoot_GetDefaultConfig();
     roster.simpleMode[0] = defaults.simpleMode[0];
     roster.simpleMode[1] = defaults.simpleMode[1];
+    roster.autoJump[0] = defaults.autoJump[0];
+    roster.autoJump[1] = defaults.autoJump[1];
 }
 
 void NormalizeRoster(RosterConfig& roster)
@@ -490,6 +495,7 @@ void CopyRemoteRoster(const ChrSelPacket& packet)
     const int lastTeam = CanEditAllTeams() ? 1 : firstTeam;
     for (int team = firstTeam; team <= lastTeam; ++team) {
         g_roster.simpleMode[team] = packet.roster.simpleMode[team];
+        g_roster.autoJump[team] = packet.roster.autoJump[team];
         for (int member = 0; member < 3; ++member) {
             g_roster.chars[team][member] = packet.roster.chars[team][member];
             g_roster.colors[team][member] = packet.roster.colors[team][member];
@@ -572,21 +578,23 @@ void HandlePacket(const ChrSelPacket& packet)
         if (!g_open || packet.session != g_session) {
             const int ownedTeam = Netplay_IsHost() ? 0 : 1;
             RosterConfig current = {};
-            bool haveCurrentSimple = false;
+            bool haveCurrentTeamOptions = false;
             if (Netplay_IsActive()) {
                 if (g_open) {
                     current = g_roster;
-                    haveCurrentSimple = true;
+                    haveCurrentTeamOptions = true;
                 } else {
-                    haveCurrentSimple = ReadCurrentRoster(current);
+                    haveCurrentTeamOptions = ReadCurrentRoster(current);
                 }
             }
             g_session = packet.session;
             g_revision = packet.revision;
             g_remoteRevision = packet.revision;
             g_roster = packet.roster;
-            if (haveCurrentSimple)
+            if (haveCurrentTeamOptions) {
                 g_roster.simpleMode[ownedTeam] = current.simpleMode[ownedTeam];
+                g_roster.autoJump[ownedTeam] = current.autoJump[ownedTeam];
+            }
             g_open = true;
         } else {
             CopyRemoteRoster(packet);
@@ -691,6 +699,12 @@ bool DrawTeam(int team, bool editable)
     bool simpleMode = g_roster.simpleMode[team] != 0;
     if (ImGui::Checkbox("Simple Mode Controls", &simpleMode)) {
         g_roster.simpleMode[team] = simpleMode;
+        changed = true;
+    }
+    const bool autoJump = g_roster.autoJump[team] != 0;
+    if (ImGui::Button(autoJump ? "Auto Super Jump: ON"
+                               : "Auto Super Jump: OFF")) {
+        g_roster.autoJump[team] = !autoJump;
         changed = true;
     }
     for (int member = 0; member < 3; ++member) {
@@ -882,6 +896,8 @@ bool ChrSelImGui_ApplyPendingRoster(int32_t targetFrame)
     }
     config.simpleMode[0] = g_pendingConfig.simpleMode[0] != 0;
     config.simpleMode[1] = g_pendingConfig.simpleMode[1] != 0;
+    config.autoJump[0] = g_pendingConfig.autoJump[0] != 0;
+    config.autoJump[1] = g_pendingConfig.autoJump[1] != 0;
     if (!TrainingBoot_RestartWithConfig(config))
         return false;
 
