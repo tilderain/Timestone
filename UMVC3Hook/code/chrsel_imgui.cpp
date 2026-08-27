@@ -253,10 +253,11 @@ bool ValidateRoster(const RosterConfig& roster)
             return false;
         for (int member = 0; member < 3; ++member) {
             const int character = roster.chars[team][member];
-            if (character <= 0 || character >= kCharNameCount ||
+            if (character < 0 || character >= kCharNameCount ||
                 roster.colors[team][member] < 0 ||
                 roster.colors[team][member] >= VariantCount(character) ||
-                !IsColorSelectable(character, roster.colors[team][member]) ||
+                (character != 0 &&
+                 !IsColorSelectable(character, roster.colors[team][member])) ||
                 roster.assists[team][member] < 0 ||
                 roster.assists[team][member] > 2)
                 return false;
@@ -355,12 +356,17 @@ void NormalizeRoster(RosterConfig& roster)
     for (int team = 0; team < 2; ++team) {
         for (int member = 0; member < 3; ++member) {
             int& character = roster.chars[team][member];
-            if (character <= 0 || character >= kCharNameCount) {
+            if (character < 0 || character >= kCharNameCount) {
                 character = team == 0
                     ? defaults.p1Chars[member] : defaults.p2Chars[member];
             }
-            if (character <= 0 || character >= kCharNameCount)
+            if (character < 0 || character >= kCharNameCount)
                 character = CHR_RYU;
+            if (character == 0) {
+                roster.colors[team][member] = 0;
+                roster.assists[team][member] = 0;
+                continue;
+            }
             roster.colors[team][member] = NormalizeColor(
                 character, std::clamp(roster.colors[team][member],
                                      0, VariantCount(character) - 1));
@@ -745,14 +751,14 @@ bool DrawTeam(int team, bool editable)
         if (ImGui::BeginCombo("Character", kCharNames[selected],
                               ImGuiComboFlags_HeightLargest)) {
             if (ImGui::IsKeyPressed(ImGui::GetKeyIndex(ImGuiKey_UpArrow), true)) {
-                selected = selected > 1 ? selected - 1 : kCharNameCount - 1;
+                selected = selected > 0 ? selected - 1 : kCharNameCount - 1;
                 changed = true;
             }
             if (ImGui::IsKeyPressed(ImGui::GetKeyIndex(ImGuiKey_DownArrow), true)) {
-                selected = selected + 1 < kCharNameCount ? selected + 1 : 1;
+                selected = selected + 1 < kCharNameCount ? selected + 1 : 0;
                 changed = true;
             }
-            for (int character = 1; character < kCharNameCount; ++character) {
+            for (int character = 0; character < kCharNameCount; ++character) {
                 const bool isSelected = character == selected;
                 if (ImGui::Selectable(kCharNames[character], isSelected)) {
                     selected = character;
@@ -765,14 +771,22 @@ bool DrawTeam(int team, bool editable)
         }
         if (selected != g_roster.chars[team][member]) {
             g_roster.chars[team][member] = selected;
-            g_roster.colors[team][member] = NormalizeColor(
+            g_roster.colors[team][member] = selected == 0 ? 0 : NormalizeColor(
                 selected, g_roster.colors[team][member]);
+            if (selected == 0)
+                g_roster.assists[team][member] = 0;
         }
 
+        const bool hasCharacter = g_roster.chars[team][member] != 0;
+        if (!hasCharacter) ImGui::BeginDisabled();
         const int variantCount = VariantCount(g_roster.chars[team][member]);
         char colorPreview[24];
-        std::snprintf(colorPreview, sizeof(colorPreview), "Color %d",
-                      g_roster.colors[team][member] + 1);
+        if (hasCharacter) {
+            std::snprintf(colorPreview, sizeof(colorPreview), "Color %d",
+                          g_roster.colors[team][member] + 1);
+        } else {
+            std::snprintf(colorPreview, sizeof(colorPreview), "N/A");
+        }
         if (ImGui::BeginCombo("Color", colorPreview)) {
             for (int color = 0; color < variantCount; ++color) {
                 if (!IsColorSelectable(g_roster.chars[team][member], color))
@@ -801,6 +815,7 @@ bool DrawTeam(int team, bool editable)
             }
             ImGui::EndCombo();
         }
+        if (!hasCharacter) ImGui::EndDisabled();
         ImGui::PopID();
     }
     if (!editable) ImGui::EndDisabled();
