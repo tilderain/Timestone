@@ -4,6 +4,7 @@
 #include "steam_transport.h"
 #include "umvc3.h"
 #include <Windows.h>
+#include <shellapi.h>
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
@@ -995,6 +996,18 @@ uint64_t SteamLobby_GetPeerSteamId()
 const char* SteamLobby_GetPeerUsername()
 {
     return g_peerUsername;
+}
+
+bool SteamLobby_OpenPeerProfile()
+{
+    if (!g_peerSteamId) return false;
+
+    char profileUrl[96];
+    snprintf(profileUrl, sizeof(profileUrl),
+             "https://steamcommunity.com/profiles/%llu",
+             static_cast<unsigned long long>(g_peerSteamId));
+    return reinterpret_cast<INT_PTR>(ShellExecuteA(
+               nullptr, "open", profileUrl, nullptr, nullptr, SW_SHOWNORMAL)) > 32;
 }
 
 bool SteamLobby_HasLobby()

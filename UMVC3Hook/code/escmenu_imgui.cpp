@@ -3,6 +3,7 @@
 #include "escmenu_imgui.h"
 #include "framestepper.h"
 #include "netplay.h"
+#include "steam_lobby.h"
 #include "umvc3menu.h"
 #include <Windows.h>
 
@@ -63,6 +64,11 @@ void EscMenuImGui_Draw()
         g_open = false;
     if (ImGui::Button("Character Select (f8)", buttonSize) && ChrSelImGui_Open())
         g_open = false;
+    const bool steamProfileAvailable = SteamLobby_GetPeerSteamId() != 0;
+    if (!steamProfileAvailable) ImGui::BeginDisabled();
+    if (ImGui::Button("Open Opponent Steam Profile", buttonSize))
+        SteamLobby_OpenPeerProfile();
+    if (!steamProfileAvailable) ImGui::EndDisabled();
     if (ImGui::Button("Exit Game", buttonSize))
         ExitGame();
 

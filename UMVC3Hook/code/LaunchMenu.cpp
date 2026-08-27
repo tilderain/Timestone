@@ -84,6 +84,13 @@ static bool      g_peerReady = false;
 static bool      g_autoTestLaunch = false;
 static COLORREF  g_statusColor = RGB(0, 0, 0); // default black for status text
 static HBRUSH    g_hStatusBrush = nullptr;
+static HWND      g_hChatWindow = nullptr;
+static HWND      g_hChatHistory = nullptr;
+static HWND      g_hChatInput = nullptr;
+static WNDPROC   g_chatInputWndProc = nullptr;
+static char      g_chatOpponentName[128] = "Opponent";
+static ULONGLONG g_chatRateWindowStart = 0;
+static unsigned  g_chatRateCount = 0;
 
 static COLORREF GetPulsingColor(COLORREF low, COLORREF high)
 {
@@ -154,6 +161,9 @@ static bool IsValidTrainingLaunchPacket(const LaunchTrainingPacket& packet)
 // Custom timer and window messages
 #define ID_NET_POLL_TIMER       5001
 #define ID_STEAM_POLL_TIMER     5002
+static constexpr char kChatWindowClass[] = "UMVC3LaunchChat";
+static constexpr int kChatTranscriptLimit = 16 * 1024;
+static constexpr unsigned kChatMessagesPerSecond = 20;
 static volatile bool g_networkPolling = false;
 static HANDLE g_hPollThread = NULL;
 static bool g_isLaunching = false;
@@ -559,12 +569,20 @@ enum CtrlId {
     ID_STEAM_NAME         = 2307,
     ID_LAUNCH_PROMPT      = 2401,
     ID_VERSION_LABEL      = 2402,
+    // Peer chat controls
+    ID_CHAT_CONNECTION    = 2501,
+    ID_CHAT_PROFILE       = 2502,
+    ID_CHAT_HISTORY       = 2503,
+    ID_CHAT_INPUT         = 2504,
+    ID_CHAT_SEND          = 2505,
 };
 
 // ---------------------------------------------------------------------------
 // Forward declarations
 // ---------------------------------------------------------------------------
 static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam);
+static LRESULT CALLBACK ChatWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
+static LRESULT CALLBACK ChatInputWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 static void PopulateCharCombo(HWND hCombo, int defaultCharId);
 static void PopulateColorCombo(HWND hCombo, int characterId, int defaultColor);
 static void PopulateAssistCombo(HWND hCombo, int characterId, int defaultAssist);
@@ -576,6 +594,9 @@ static void UpdateSlotOptionsFromCombos(HWND hDlg);
 static void RandomizeCharacters(HWND hDlg);
 static void ConfigureConnectedControls(HWND hDlg);
 static void FocusLaunchMenu(HWND hDlg);
+static void ShowChatWindow(HWND hDlg);
+static void DestroyChatWindow();
+static void ReceiveChatPacket(const LaunchChatPacket& packet);
 static void ResetLaunchMenuButtonState(HWND hDlg);
 static void UpdatePingLabel(HWND hDlg);
 static void SetDirectConnectExpanded(HWND hDlg, bool expanded);
@@ -750,6 +771,228 @@ static void FocusLaunchMenu(HWND hDlg)
     SetWindowPos(hDlg, HWND_NOTOPMOST, 0, 0, 0, 0,
                  SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
     SetForegroundWindow(hDlg);
+}
+
+static bool IsValidChatText(const char* text, size_t length)
+{
+    if (!text || length == 0 || length > LAUNCH_CHAT_MAX_MESSAGE)
+        return false;
+    for (size_t i = 0; i < length; ++i) {
+        const unsigned char value = static_cast<unsigned char>(text[i]);
+        if (value < 0x20 || value == 0x7f)
+            return false;
+    }
+    return true;
+}
+
+static void AppendChatText(const char* text)
+{
+    if (!g_hChatHistory || !text) return;
+
+    const int currentLength = GetWindowTextLengthA(g_hChatHistory);
+    const int addedLength = static_cast<int>(strlen(text));
+    const int excess = currentLength + addedLength - kChatTranscriptLimit;
+    if (excess > 0) {
+        SendMessageA(g_hChatHistory, EM_SETSEL, 0, excess);
+        SendMessageA(g_hChatHistory, EM_REPLACESEL, FALSE,
+                     reinterpret_cast<LPARAM>(""));
+    }
+    SendMessageA(g_hChatHistory, EM_SETSEL, -1, -1);
+    SendMessageA(g_hChatHistory, EM_REPLACESEL, FALSE,
+                 reinterpret_cast<LPARAM>(text));
+}
+
+static void AppendChatMessage(const char* sender, const char* message, size_t length)
+{
+    char line[LAUNCH_CHAT_MAX_MESSAGE + sizeof(g_chatOpponentName) + 8];
+    snprintf(line, sizeof(line), "%s: %.*s\r\n", sender,
+             static_cast<int>(length), message);
+    AppendChatText(line);
+}
+
+static void SendChatMessage()
+{
+    if (!g_hChatInput || !g_dialogConfig.enetHost || !g_dialogConfig.enetPeer)
+        return;
+
+    char message[LAUNCH_CHAT_MAX_MESSAGE + 1] = {};
+    const int length = GetWindowTextA(g_hChatInput, message, sizeof(message));
+    if (!IsValidChatText(message, length))
+        return;
+
+    LaunchChatPacket packet = {};
+    packet.type = PACKET_LAUNCH_CHAT;
+    packet.length = static_cast<uint16_t>(length);
+    memcpy(packet.message, message, length);
+    ENetPacket* enetPacket = enet_packet_create(
+        &packet, sizeof(packet), ENET_PACKET_FLAG_RELIABLE);
+    if (!enetPacket || enet_peer_send(g_dialogConfig.enetPeer, 0, enetPacket) != 0) {
+        if (enetPacket) enet_packet_destroy(enetPacket);
+        HookLog("UMVC3Hook: Failed to send launch chat packet\n");
+        return;
+    }
+
+    enet_host_flush(g_dialogConfig.enetHost);
+    AppendChatMessage("You", message, length);
+    SetWindowTextA(g_hChatInput, "");
+    SetFocus(g_hChatInput);
+}
+
+static void ReceiveChatPacket(const LaunchChatPacket& packet)
+{
+    if (packet.type != PACKET_LAUNCH_CHAT || packet.reserved != 0 ||
+        !IsValidChatText(packet.message, packet.length)) {
+        HookLog("UMVC3Hook: Rejected malformed launch chat packet\n");
+        return;
+    }
+    for (size_t i = packet.length; i < sizeof(packet.message); ++i) {
+        if (packet.message[i] != '\0') {
+            HookLog("UMVC3Hook: Rejected non-canonical launch chat packet\n");
+            return;
+        }
+    }
+
+    const ULONGLONG now = GetTickCount64();
+    if (now - g_chatRateWindowStart >= 1000) {
+        g_chatRateWindowStart = now;
+        g_chatRateCount = 0;
+    }
+    if (g_chatRateCount >= kChatMessagesPerSecond) {
+        if (g_chatRateCount == kChatMessagesPerSecond)
+            HookLog("UMVC3Hook: Rate-limiting launch chat packets\n");
+        ++g_chatRateCount;
+        return;
+    }
+    ++g_chatRateCount;
+    AppendChatMessage(g_chatOpponentName, packet.message, packet.length);
+}
+
+static void ShowChatWindow(HWND hDlg)
+{
+    const char* opponent = SteamLobby_GetPeerSteamId()
+        ? SteamLobby_GetPeerUsername() : "Opponent";
+    if (!opponent || !opponent[0]) opponent = "Opponent";
+    size_t opponentLength = strnlen(opponent, sizeof(g_chatOpponentName) - 1);
+    for (size_t i = 0; i < opponentLength; ++i) {
+        const unsigned char value = static_cast<unsigned char>(opponent[i]);
+        g_chatOpponentName[i] = value < 0x20 || value == 0x7f ? '?' : opponent[i];
+    }
+    g_chatOpponentName[opponentLength] = '\0';
+
+    if (!g_hChatWindow) {
+        RECT ownerRect = {};
+        RECT workArea = {};
+        GetWindowRect(hDlg, &ownerRect);
+        SystemParametersInfoA(SPI_GETWORKAREA, 0, &workArea, 0);
+        constexpr int width = 370;
+        constexpr int height = 440;
+        int x = ownerRect.right + 12;
+        if (x + width > workArea.right)
+            x = ownerRect.left - width - 12;
+        x = std::clamp(x, static_cast<int>(workArea.left),
+                      static_cast<int>(workArea.right) - width);
+        int y = std::clamp(static_cast<int>(ownerRect.top),
+                           static_cast<int>(workArea.top),
+                           static_cast<int>(workArea.bottom) - height);
+        g_hChatWindow = CreateWindowExA(
+            WS_EX_TOOLWINDOW, kChatWindowClass, "Peer Chat",
+            WS_CAPTION | WS_SYSMENU | WS_VISIBLE,
+            x, y, width, height, hDlg, nullptr, GetModuleHandle(NULL), nullptr);
+    }
+
+    if (!g_hChatWindow) return;
+    char connection[sizeof(g_chatOpponentName) + 40];
+    snprintf(connection, sizeof(connection), "You are now connected to %s",
+             g_chatOpponentName);
+    SetWindowTextA(GetDlgItem(g_hChatWindow, ID_CHAT_CONNECTION), connection);
+    EnableWindow(GetDlgItem(g_hChatWindow, ID_CHAT_PROFILE),
+                 SteamLobby_GetPeerSteamId() ? TRUE : FALSE);
+    char systemLine[sizeof(connection) + 4];
+    snprintf(systemLine, sizeof(systemLine), "%s\r\n", connection);
+    AppendChatText(systemLine);
+    ShowWindow(g_hChatWindow, SW_SHOW);
+}
+
+static void DestroyChatWindow()
+{
+    if (g_hChatWindow)
+        DestroyWindow(g_hChatWindow);
+    g_hChatWindow = nullptr;
+    g_hChatHistory = nullptr;
+    g_hChatInput = nullptr;
+    g_chatRateWindowStart = 0;
+    g_chatRateCount = 0;
+}
+
+static LRESULT CALLBACK ChatInputWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
+{
+    if (wParam == VK_RETURN && msg == WM_KEYDOWN) {
+        SendChatMessage();
+        return 0;
+    }
+    if (wParam == VK_RETURN && msg == WM_CHAR)
+        return 0;
+    return g_chatInputWndProc
+        ? CallWindowProcA(g_chatInputWndProc, hWnd, msg, wParam, lParam)
+        : DefWindowProcA(hWnd, msg, wParam, lParam);
+}
+
+static LRESULT CALLBACK ChatWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
+{
+    switch (msg) {
+    case WM_CREATE:
+        CreateWindowA("STATIC", "", WS_VISIBLE | WS_CHILD,
+                      12, 12, 336, 34, hWnd,
+                      reinterpret_cast<HMENU>(ID_CHAT_CONNECTION), nullptr, nullptr);
+        CreateWindowA("BUTTON", "Open Opponent Steam Profile",
+                      WS_VISIBLE | WS_CHILD | WS_TABSTOP | BS_PUSHBUTTON,
+                      12, 50, 336, 28, hWnd,
+                      reinterpret_cast<HMENU>(ID_CHAT_PROFILE), nullptr, nullptr);
+        g_hChatHistory = CreateWindowExA(
+            WS_EX_CLIENTEDGE, "EDIT", "",
+            WS_VISIBLE | WS_CHILD | WS_VSCROLL | ES_LEFT | ES_MULTILINE |
+                ES_AUTOVSCROLL | ES_READONLY,
+            12, 86, 336, 260, hWnd,
+            reinterpret_cast<HMENU>(ID_CHAT_HISTORY), nullptr, nullptr);
+        g_hChatInput = CreateWindowExA(
+            WS_EX_CLIENTEDGE, "EDIT", "",
+            WS_VISIBLE | WS_CHILD | WS_TABSTOP | ES_AUTOHSCROLL,
+            12, 354, 256, 26, hWnd,
+            reinterpret_cast<HMENU>(ID_CHAT_INPUT), nullptr, nullptr);
+        SendMessageA(g_hChatInput, EM_SETLIMITTEXT, LAUNCH_CHAT_MAX_MESSAGE, 0);
+        g_chatInputWndProc = reinterpret_cast<WNDPROC>(SetWindowLongPtrA(
+            g_hChatInput, GWLP_WNDPROC,
+            reinterpret_cast<LONG_PTR>(ChatInputWndProc)));
+        CreateWindowA("BUTTON", "Send",
+                      WS_VISIBLE | WS_CHILD | WS_TABSTOP | BS_DEFPUSHBUTTON,
+                      276, 353, 72, 28, hWnd,
+                      reinterpret_cast<HMENU>(ID_CHAT_SEND), nullptr, nullptr);
+        return 0;
+
+    case WM_COMMAND:
+        if (LOWORD(wParam) == ID_CHAT_SEND && HIWORD(wParam) == BN_CLICKED) {
+            SendChatMessage();
+            return 0;
+        }
+        if (LOWORD(wParam) == ID_CHAT_PROFILE && HIWORD(wParam) == BN_CLICKED) {
+            SteamLobby_OpenPeerProfile();
+            return 0;
+        }
+        break;
+
+    case WM_CLOSE:
+        DestroyWindow(hWnd);
+        return 0;
+
+    case WM_DESTROY:
+        if (g_hChatWindow == hWnd) {
+            g_hChatWindow = nullptr;
+            g_hChatHistory = nullptr;
+            g_hChatInput = nullptr;
+        }
+        return 0;
+    }
+    return DefWindowProcA(hWnd, msg, wParam, lParam);
 }
 
 static void ResetLaunchMenuButtonState(HWND hDlg)
@@ -1010,6 +1253,14 @@ LaunchOption ShowLaunchMenu()
 
     RegisterClassA(&wc);
 
+    WNDCLASSA chatClass = {};
+    chatClass.lpfnWndProc = ChatWndProc;
+    chatClass.hInstance = hInst;
+    chatClass.lpszClassName = kChatWindowClass;
+    chatClass.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+    chatClass.hCursor = LoadCursor(NULL, IDC_ARROW);
+    RegisterClassA(&chatClass);
+
     int w = 840, h = 780;
     int x = (GetSystemMetrics(SM_CXSCREEN) - w) / 2;
     int y = (GetSystemMetrics(SM_CYSCREEN) - h) / 2;
@@ -1028,6 +1279,7 @@ LaunchOption ShowLaunchMenu()
     }
 
     UnregisterClassA(CLASS_NAME, hInst);
+    UnregisterClassA(kChatWindowClass, hInst);
 
     // Only clean up network if NOT launching into gameplay
     if (!g_isLaunching || !g_dialogConfig.hostEnabled) {
@@ -1532,6 +1784,7 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
                 ConfigureConnectedControls(hDlg);
                 if (steamIsHost) SendP1Selection(hDlg);
                 else SendP2Selection(hDlg);
+                if (steamPeer) ShowChatWindow(hDlg);
                 FocusLaunchMenu(hDlg);
             }
             UpdatePingLabel(hDlg);
@@ -1571,6 +1824,7 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
                             }
                             InvalidateRect(hStatus, NULL, TRUE);
                         }
+                        ShowChatWindow(hDlg);
                         FocusLaunchMenu(hDlg);
                     }
                     else if (event.type == ENET_EVENT_TYPE_DISCONNECT) {
@@ -1581,12 +1835,23 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
                         g_dialogConfig.enetPeer = nullptr;
                         g_localReady = false;
                         g_peerReady = false;
+                        DestroyChatWindow();
                         CleanupNetwork(hDlg, true);
                     }
                     else if (event.type == ENET_EVENT_TYPE_RECEIVE) {
                         uint32_t packetType = event.packet->dataLength >= sizeof(uint32_t)
                             ? *(uint32_t*)event.packet->data : UINT32_MAX;
-                        if (packetType == PACKET_LAUNCH_P1_SELECTION &&
+                        if (packetType == PACKET_LAUNCH_CHAT) {
+                            if (event.packet->dataLength == sizeof(LaunchChatPacket)) {
+                                const auto& chat =
+                                    *reinterpret_cast<const LaunchChatPacket*>(
+                                        event.packet->data);
+                                ReceiveChatPacket(chat);
+                            } else {
+                                HookLog("UMVC3Hook: Rejected wrong-sized launch chat packet\n");
+                            }
+                        }
+                        else if (packetType == PACKET_LAUNCH_P1_SELECTION &&
                             event.packet->dataLength != sizeof(LaunchP1SelectionPacket)) {
                             enet_packet_destroy(event.packet);
                             ShowVersionMismatch(hDlg, nullptr);
@@ -2470,6 +2735,8 @@ static void RandomizeCharacters(HWND hDlg)
 // ---------------------------------------------------------------------------
 
 static void CleanupNetwork(HWND hDlg, bool forceCleanup) {
+    DestroyChatWindow();
+
     // When launching into the game with an active connection, skip destruction
     // so the enet host/peer survive for gameplay.
     if (g_dialogConfig.hostEnabled && !forceCleanup) {

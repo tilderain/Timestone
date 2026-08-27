@@ -51,6 +51,7 @@ enum PacketType : uint32_t {
     PACKET_LAUNCH_P1_SELECTION = 15, // LaunchP1SelectionPacket
     PACKET_EXTENSION = 16, // Plugin feature packet routed through generic reliable queue
     PACKET_PLAYER_DISCONNECT = 17, // PlayerDisconnectPacket
+    PACKET_LAUNCH_CHAT = 18, // LaunchChatPacket
 };
 
 #pragma pack(push, 1)
@@ -117,6 +118,16 @@ struct LaunchP1SelectionPacket {
     uint32_t simpleMode;
     int32_t  stageId;
 };
+
+constexpr size_t LAUNCH_CHAT_MAX_MESSAGE = 256;
+
+struct LaunchChatPacket {
+    uint32_t type;               // PACKET_LAUNCH_CHAT
+    uint16_t length;             // bytes used in message; no terminator required
+    uint16_t reserved;           // must be zero
+    char message[LAUNCH_CHAT_MAX_MESSAGE];
+};
+static_assert(sizeof(LaunchChatPacket) == 264);
 
 enum LaunchTrainingFlags : uint32_t {
     LAUNCH_TRAINING_BOTH_CPUS = 1 << 0,

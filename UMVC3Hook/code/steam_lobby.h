@@ -21,6 +21,7 @@ void SteamLobby_Shutdown(bool preserveConnection);
 const char* SteamLobby_GetStatus();
 uint64_t SteamLobby_GetPeerSteamId();
 const char* SteamLobby_GetPeerUsername();
+bool SteamLobby_OpenPeerProfile();
 bool SteamLobby_HasLobby();
 bool SteamLobby_IsCreating();
 bool SteamLobby_IsHostedLobby(uint64_t lobbyId);
