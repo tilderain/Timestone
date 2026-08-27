@@ -579,10 +579,15 @@ LRESULT __stdcall WndProc(const HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPar
 bool init = false;
 bool first_msg = true;
 static volatile LONG g_endSceneOverlayInFlight = 0;
+static volatile LONG g_initialD3D9ResetComplete = 0;
+static SRWLOCK g_d3d9DeviceLock = SRWLOCK_INIT;
+static unsigned int g_overlayInitDeferredFrames = 0;
 
 static HRESULT __stdcall hkResetDevice(
 	LPDIRECT3DDEVICE9 pDevice, D3DPRESENT_PARAMETERS* presentationParameters)
 {
+	AcquireSRWLockExclusive(&g_d3d9DeviceLock);
+
 	if (presentationParameters) {
 		/// TRACE LOG
 		HookLog("D3D9: Reset params device=%p bb=%ux%u format=%u count=%u "
@@ -643,6 +648,10 @@ static HRESULT __stdcall hkResetDevice(
 		FrameStepper_SetDevice(pDevice);
 		ImGui_ImplDX9_CreateDeviceObjects();
 	}
+	if (SUCCEEDED(result))
+		InterlockedExchange(&g_initialD3D9ResetComplete, 1);
+
+	ReleaseSRWLockExclusive(&g_d3d9DeviceLock);
 	return result;
 }
 
@@ -652,11 +661,26 @@ long __stdcall hkEndScene(LPDIRECT3DDEVICE9 pDevice)
 	// or reentrant EndScene callbacks mutating its current-window stack.
 	if (InterlockedCompareExchange(&g_endSceneOverlayInFlight, 1, 0) != 0)
 		return oEndScene(pDevice);
+	AcquireSRWLockExclusive(&g_d3d9DeviceLock);
 
 	//Exception_UpdateTestHotkey();
 
 	if (!init)
 	{
+		// The engine performs an initial resize shortly after its first EndScene.
+		// Keep plugin-owned default-pool resources out of that first Reset. Fall
+		// back after roughly five seconds for launch paths that never reset.
+		const bool resetComplete =
+			InterlockedCompareExchange(&g_initialD3D9ResetComplete, 0, 0) != 0;
+		if (!resetComplete && ++g_overlayInitDeferredFrames < 300) {
+			const long result = oEndScene(pDevice);
+			ReleaseSRWLockExclusive(&g_d3d9DeviceLock);
+			InterlockedExchange(&g_endSceneOverlayInFlight, 0);
+			return result;
+		}
+		HookLog("D3D9: initializing overlay after %s\n",
+			resetComplete ? "successful initial Reset" : "Reset wait timeout");
+
 		D3DDEVICE_CREATION_PARAMETERS params;
 		pDevice->GetCreationParameters(&params);
 		window = params.hFocusWindow;
@@ -678,7 +702,7 @@ long __stdcall hkEndScene(LPDIRECT3DDEVICE9 pDevice)
 		InitImGui(pDevice);
 		FrameStepper_SetDevice(pDevice);
 		init = true;
-		BootTimer_Stamp("First hkEndScene");
+		BootTimer_Stamp("Initialized ImGui overlay");
 		BootTimer_Dump();
 	}
 
@@ -729,8 +753,10 @@ long __stdcall hkEndScene(LPDIRECT3DDEVICE9 pDevice)
 	ImGui::Render();
 	ImGui_ImplDX9_RenderDrawData(ImGui::GetDrawData());
 
+	const long result = oEndScene(pDevice);
+	ReleaseSRWLockExclusive(&g_d3d9DeviceLock);
 	InterlockedExchange(&g_endSceneOverlayInFlight, 0);
-	return oEndScene(pDevice);
+	return result;
 }
 
 static bool SpawnDualTrainingClient()
