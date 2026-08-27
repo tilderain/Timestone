@@ -1227,7 +1227,7 @@ int g_dbg_lastMsg = 0;
 void OnInitializeHook()
 {
 	// Open log file for hook debugging (append mode so 2nd instance doesn't clobber)
-	HookLogSetFile("UMVC3Hook.log");
+	HookLogSetFile("Timestone.log");
 
 	if (SettingsMgr->bEnableConsoleWindow)
 	{
