@@ -126,6 +126,7 @@ constexpr DtiSnapshotRange kVerifiedShotScalarRanges[] = {
     {0x140D4A9A8ull, 0x2140, 0x05}, // uShotShieldOuroborosExit: phase/side
     {0x140D48A68ull, 0x2144, 0x0C}, // uShotOptionShieldSlash: rotation state
     {0x140D48780ull, 0x2218, 0x04}, // uShotOptionSickleBoomerang: effect variant
+    {0x140D4A968ull, 0x21D0, 0x04}, // uShotShieldOuroboros: orbit rotation
     {0x140D4A968ull, 0x2210, 0x04}, // uShotShieldOuroboros: instance mode
     {0x140D4A968ull, 0x2218, 0x01}, // uShotShieldOuroboros: initial-shot latch
     {0x140D4A968ull, 0x221C, 0x04}, // uShotShieldOuroboros: child count

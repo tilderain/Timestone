@@ -89,7 +89,7 @@ added to `kVerifiedShotScalarRanges`.
 | `0x140D49168` | `uShotLaserThunderBolt` | `+0x2238/1` effect latch |
 | `0x140D48A68` | `uShotOptionShieldSlash` | `+0x2144/0x0C` rotation state |
 | `0x140D48780` | `uShotOptionSickleBoomerang` | `+0x2218/4` effect variant |
-| `0x140D4A968` | `uShotShieldOuroboros` | `+0x2210/4`, `+0x2218/1`, `+0x221C/4`, `+0x2220/1` |
+| `0x140D4A968` | `uShotShieldOuroboros` | `+0x21D0/4`, `+0x2210/4`, `+0x2218/1`, `+0x221C/4`, `+0x2220/1` |
 | `0x140D4D470` | `uShotShieldRaidSword` | `+0x2148/0x10` mode, rotation, timer |
 | `0x140D4D4C8` | `uShotShieldSpiralSword` | `+0x2214/4` update counter |
 | `0x140D48808` | `uShotVulcanAxe` | `+0x21D0/4` rotation accumulator |

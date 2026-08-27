@@ -47,6 +47,7 @@ constexpr uintptr_t DTI_USHOT_SHIELD_KIKOUSYOU = 0x140D48F70;
 constexpr uintptr_t DTI_USHOT_VULCAN_MISSILE_EMPLACEMENT = 0x140D49A60;
 constexpr uintptr_t DTI_USHOT_VULCAN_PRICKLE_BOARD = 0x140D4C528;
 constexpr uintptr_t DTI_USHOT_VULCAN_OUROBOROS_SHOT = 0x140D4AC00;
+constexpr uintptr_t DTI_USHOT_SHIELD_OUROBOROS_EXIT = 0x140D4A9A8;
 constexpr uintptr_t DTI_USHOT_SHIELD_WEAPON_CART_SPREAD = 0x140D4A098;
 constexpr uintptr_t DTI_USHOT_VULCAN_EXATK_ROCKET_LAUNCHER = 0x140D4BA48;
 constexpr uintptr_t DTI_USHOT_VULCAN_ROCKET_LAUNCHER_EXPLODE = 0x140D4BAC8;
@@ -147,6 +148,7 @@ constexpr ShotModelPolicy SHOT_MODEL_POLICIES[] = {
     {0x140D4A1A8, "Weapon Cart", {0x100, 0x11B0}, 2, true, false},
     {0x140D4C4C8, "Pendulum Log", {0x100, 0x11B8}, 2, true, false},
     {0x140D4D2F0, "Servbot Launcher", {0x100, 0x11B0}, 2, true, false},
+    {0x140D4A968, "Ouroboros", {0x100, 0x11B0}, 2, true, false},
     {0x140D4ABB8, "Legion Tiger", {0x100, 0x11B0}, 2, false, true},
 };
 
@@ -1078,6 +1080,8 @@ bool Rollback_RemapShotSpawnParent(
             (uint64_t)_addr(DTI_USHOT_SHIELD_WEAPON_CART_SPREAD) &&
         saved.concrete.dti !=
             (uint64_t)_addr(DTI_USHOT_VULCAN_OUROBOROS_SHOT) &&
+        saved.concrete.dti !=
+            (uint64_t)_addr(DTI_USHOT_SHIELD_OUROBOROS_EXIT) &&
         saved.concrete.dti !=
             (uint64_t)_addr(DTI_USHOT_VULCAN_ROCKET_LAUNCHER_EXPLODE) &&
         saved.concrete.dti !=
