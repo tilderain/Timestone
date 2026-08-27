@@ -24,6 +24,7 @@ const char* SteamLobby_GetPeerUsername();
 bool SteamLobby_HasLobby();
 bool SteamLobby_IsCreating();
 bool SteamLobby_IsHostedLobby(uint64_t lobbyId);
+bool SteamLobby_IsFriendLobby(uint64_t lobbyId);
 size_t SteamLobby_GetResultCount();
 uint64_t SteamLobby_GetResult(size_t index);
 int SteamLobby_GetResultEstimatedPing(size_t index);

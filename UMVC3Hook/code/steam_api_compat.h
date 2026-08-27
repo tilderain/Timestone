@@ -194,6 +194,14 @@ struct LobbyMatchList_t {
     uint32_t m_nLobbiesMatching;
 };
 
+struct FriendGameInfo_t {
+    uint64_t m_gameID;
+    uint32_t m_unGameIP;
+    uint16_t m_usGamePort;
+    uint16_t m_usQueryPort;
+    uint64_t m_steamIDLobby;
+};
+
 struct LobbyCreated_t {
     EResult m_eResult;
     uint32_t m_pad;
@@ -224,6 +232,7 @@ static_assert(sizeof(SteamNetworkingConfigValue_t) == 16);
 static_assert(sizeof(SteamNetConnectionInfo_t) == 696);
 static_assert(sizeof(SteamNetworkPingLocation_t) == 512);
 static_assert(sizeof(LobbyMatchList_t) == 4);
+static_assert(sizeof(FriendGameInfo_t) == 24);
 static_assert(sizeof(LobbyCreated_t) == 16);
 static_assert(sizeof(LobbyEnter_t) == 24);
 static_assert(sizeof(GameLobbyJoinRequestedCompat_t) == 16);

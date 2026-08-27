@@ -19,6 +19,10 @@ namespace {
 
 constexpr const char* kLobbyProtocol = UMVC3HOOK_VERSION;
 constexpr ULONGLONG kPeerConnectionTimeoutMs = 25000;
+constexpr size_t kMaxPublicLobbyResults = 50;
+constexpr size_t kMaxFriendLobbyCandidates = 50;
+constexpr size_t kMaxLobbyResults = kMaxPublicLobbyResults + kMaxFriendLobbyCandidates;
+constexpr int k_EFriendFlagImmediate = 0x04;
 
 enum class PendingCall {
     None,
@@ -61,6 +65,9 @@ struct SteamAPI {
 
     const char* (*GetPersonaName)(void*) = nullptr;
     const char* (*GetFriendPersonaName)(void*, uint64_t) = nullptr;
+    int (*GetFriendCount)(void*, int) = nullptr;
+    uint64_t (*GetFriendByIndex)(void*, int, int) = nullptr;
+    bool (*GetFriendGamePlayed)(void*, uint64_t, FriendGameInfo_t*) = nullptr;
 
     bool (*IsCallCompleted)(void*, SteamAPICall_t, bool*) = nullptr;
     bool (*GetCallResult)(void*, SteamAPICall_t, void*, int, int, bool*) = nullptr;
@@ -74,11 +81,13 @@ ISteamNetworkingSockets* g_sockets = nullptr;
 ISteamNetworkingUtils* g_networkingUtils = nullptr;
 SteamAPICall_t g_pendingHandle = 0;
 PendingCall g_pendingCall = PendingCall::None;
-uint64_t g_results[50] = {};
-int g_resultPings[50] = {};
-char g_resultNames[50][128] = {};
-char g_resultUsernames[50][128] = {};
+uint64_t g_results[kMaxLobbyResults] = {};
+int g_resultPings[kMaxLobbyResults] = {};
+char g_resultNames[kMaxLobbyResults][128] = {};
+char g_resultUsernames[kMaxLobbyResults][128] = {};
 size_t g_resultCount = 0;
+uint64_t g_friendLobbyCandidates[kMaxFriendLobbyCandidates] = {};
+size_t g_friendLobbyCandidateCount = 0;
 bool g_resultsChanged = false;
 uint64_t g_lobbyId = 0;
 bool g_isHost = false;
@@ -288,6 +297,9 @@ bool ResolveExports()
     ResolveOptional(g_api.SetRichPresence, "SteamAPI_ISteamFriends_SetRichPresence");
     ok &= Resolve(g_api.GetPersonaName, "SteamAPI_ISteamFriends_GetPersonaName");
     ok &= Resolve(g_api.GetFriendPersonaName, "SteamAPI_ISteamFriends_GetFriendPersonaName");
+    ResolveOptional(g_api.GetFriendCount, "SteamAPI_ISteamFriends_GetFriendCount");
+    ResolveOptional(g_api.GetFriendByIndex, "SteamAPI_ISteamFriends_GetFriendByIndex");
+    ResolveOptional(g_api.GetFriendGamePlayed, "SteamAPI_ISteamFriends_GetFriendGamePlayed");
     ok &= Resolve(g_api.IsCallCompleted, "SteamAPI_ISteamUtils_IsAPICallCompleted");
     ok &= Resolve(g_api.GetCallResult, "SteamAPI_ISteamUtils_GetAPICallResult");
     return ok;
@@ -576,15 +588,96 @@ bool RefreshResultMetadata(size_t index)
     return changed;
 }
 
+bool HasResult(uint64_t lobbyId)
+{
+    for (size_t i = 0; i < g_resultCount; ++i) {
+        if (g_results[i] == lobbyId) return true;
+    }
+    return false;
+}
+
+void AddResult(uint64_t lobbyId)
+{
+    if (!lobbyId || HasResult(lobbyId) || g_resultCount >= kMaxLobbyResults) return;
+    size_t index = g_resultCount++;
+    g_results[index] = lobbyId;
+    g_resultPings[index] = EstimateLobbyPing(lobbyId);
+    g_resultNames[index][0] = '\0';
+    g_resultUsernames[index][0] = '\0';
+    RefreshResultMetadata(index);
+}
+
+void UpdateSearchStatus()
+{
+    if (g_resultCount == 1)
+        snprintf(g_status, sizeof(g_status), "Found 1 lobby");
+    else
+        snprintf(g_status, sizeof(g_status), "Found %u lobbies",
+                 static_cast<unsigned>(g_resultCount));
+}
+
+void CollectFriendLobbyCandidates()
+{
+    g_friendLobbyCandidateCount = 0;
+    if (!g_friends || !g_api.GetFriendCount || !g_api.GetFriendByIndex ||
+        !g_api.GetFriendGamePlayed)
+        return;
+
+    int friendCount = g_api.GetFriendCount(g_friends, k_EFriendFlagImmediate);
+    for (int i = 0; i < friendCount &&
+                    g_friendLobbyCandidateCount < kMaxFriendLobbyCandidates; ++i) {
+        uint64_t friendId = g_api.GetFriendByIndex(g_friends, i, k_EFriendFlagImmediate);
+        FriendGameInfo_t gameInfo = {};
+        if (!friendId || !g_api.GetFriendGamePlayed(g_friends, friendId, &gameInfo) ||
+            !gameInfo.m_steamIDLobby)
+            continue;
+
+        bool duplicate = false;
+        for (size_t candidate = 0; candidate < g_friendLobbyCandidateCount; ++candidate) {
+            if (g_friendLobbyCandidates[candidate] == gameInfo.m_steamIDLobby) {
+                duplicate = true;
+                break;
+            }
+        }
+        if (duplicate) continue;
+        g_friendLobbyCandidates[g_friendLobbyCandidateCount++] = gameInfo.m_steamIDLobby;
+        g_api.RequestLobbyData(g_matchmaking, gameInfo.m_steamIDLobby);
+    }
+    HookLog("SteamLobby: found %u friend lobby candidates\n",
+            static_cast<unsigned>(g_friendLobbyCandidateCount));
+}
+
+bool MergeFriendLobbyCandidates()
+{
+    bool changed = false;
+    for (size_t i = 0; i < g_friendLobbyCandidateCount; ++i) {
+        uint64_t lobbyId = g_friendLobbyCandidates[i];
+        if (HasResult(lobbyId)) continue;
+
+        const char* marker = g_api.GetLobbyData(g_matchmaking, lobbyId, "Timestone");
+        const char* protocol = g_api.GetLobbyData(g_matchmaking, lobbyId, "protocol");
+        if (marker && strcmp(marker, "1") == 0 && protocol &&
+            strcmp(protocol, kLobbyProtocol) == 0) {
+            AddResult(lobbyId);
+            changed = true;
+            HookLog("SteamLobby: added friend lobby %llu to search results\n",
+                    static_cast<unsigned long long>(lobbyId));
+        } else {
+            g_api.RequestLobbyData(g_matchmaking, lobbyId);
+        }
+    }
+    if (changed) UpdateSearchStatus();
+    return changed;
+}
+
 void RefreshResultPings()
 {
     ULONGLONG now = GetTickCount64();
-    if (!g_resultCount || now < g_nextResultPingRefresh ||
-        now >= g_resultPingRefreshDeadline)
+    if (now < g_nextResultPingRefresh || now >= g_resultPingRefreshDeadline)
         return;
 
     g_nextResultPingRefresh = now + 1000;
-    bool changed = false;
+    bool changed = MergeFriendLobbyCandidates();
     bool pending = false;
     for (size_t i = 0; i < g_resultCount; ++i) {
         changed |= RefreshResultMetadata(i);
@@ -600,6 +693,8 @@ void RefreshResultPings()
             g_api.RequestLobbyData(g_matchmaking, g_results[i]);
         }
     }
+    for (size_t i = 0; i < g_friendLobbyCandidateCount; ++i)
+        pending |= !HasResult(g_friendLobbyCandidates[i]);
     if (changed) g_resultsChanged = true;
     if (!pending) g_resultPingRefreshDeadline = 0;
 }
@@ -800,25 +895,22 @@ void SteamLobby_Pump()
     if (g_pendingCall == PendingCall::Search) {
         LobbyMatchList_t result = {};
         if (TakeCallResult(result, k_iCallbackLobbyMatchList)) {
-            g_resultCount = result.m_nLobbiesMatching < 50 ? result.m_nLobbiesMatching : 50;
-            for (size_t i = 0; i < g_resultCount; ++i) {
-                g_results[i] = g_api.GetLobbyByIndex(g_matchmaking, static_cast<int>(i));
-                g_api.RequestLobbyData(g_matchmaking, g_results[i]);
-                g_resultPings[i] = EstimateLobbyPing(g_results[i]);
-                g_resultNames[i][0] = '\0';
-                g_resultUsernames[i][0] = '\0';
-                RefreshResultMetadata(i);
+            g_resultCount = 0;
+            size_t publicCount = result.m_nLobbiesMatching < kMaxPublicLobbyResults
+                ? result.m_nLobbiesMatching : kMaxPublicLobbyResults;
+            for (size_t i = 0; i < publicCount; ++i) {
+                uint64_t lobbyId = g_api.GetLobbyByIndex(g_matchmaking, static_cast<int>(i));
+                g_api.RequestLobbyData(g_matchmaking, lobbyId);
+                AddResult(lobbyId);
             }
+            CollectFriendLobbyCandidates();
+            MergeFriendLobbyCandidates();
             g_nextResultPingRefresh = 0;
             g_resultPingRefreshDeadline = GetTickCount64() + 15000;
             g_resultsChanged = true;
             g_pendingCall = PendingCall::None;
             g_pendingHandle = 0;
-            if (g_resultCount == 1)
-                snprintf(g_status, sizeof(g_status), "Found 1 lobby");
-            else
-                snprintf(g_status, sizeof(g_status), "Found %u lobbies",
-                         (unsigned)g_resultCount);
+            UpdateSearchStatus();
         }
     } else if (g_pendingCall == PendingCall::Create) {
         LobbyCreated_t result = {};
@@ -918,6 +1010,14 @@ bool SteamLobby_IsCreating()
 bool SteamLobby_IsHostedLobby(uint64_t lobbyId)
 {
     return g_isHost && lobbyId != 0 && lobbyId == g_lobbyId;
+}
+
+bool SteamLobby_IsFriendLobby(uint64_t lobbyId)
+{
+    for (size_t i = 0; i < g_friendLobbyCandidateCount; ++i) {
+        if (g_friendLobbyCandidates[i] == lobbyId) return true;
+    }
+    return false;
 }
 
 size_t SteamLobby_GetResultCount()

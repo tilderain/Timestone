@@ -1643,9 +1643,12 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
                 LVITEMA item = {};
                 item.mask = LVIF_PARAM;
                 item.iItem = static_cast<int>(draw->nmcd.dwItemSpec);
-                if (ListView_GetItem(header->hwndFrom, &item) &&
-                    SteamLobby_IsHostedLobby(static_cast<uint64_t>(item.lParam))) {
-                    draw->clrText = GetSysColor(COLOR_GRAYTEXT);
+                if (ListView_GetItem(header->hwndFrom, &item)) {
+                    uint64_t lobbyId = static_cast<uint64_t>(item.lParam);
+                    if (SteamLobby_IsHostedLobby(lobbyId))
+                        draw->clrText = GetSysColor(COLOR_GRAYTEXT);
+                    else if (SteamLobby_IsFriendLobby(lobbyId))
+                        draw->clrText = RGB(0, 128, 0);
                 }
             }
         }
