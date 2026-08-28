@@ -198,9 +198,9 @@ static AutomaticNetplaySettings GetAutomaticNetplaySettings(enet_uint32 pingMs)
 {
     if (pingMs < 24)  return {2, 0};
     if (pingMs < 36) return {3, 0};
-    if (pingMs < 48)  return {2, 2};
-    if (pingMs < 60)  return {2, 3};
-    if (pingMs < 100) return {2, 8};
+    if (pingMs < 48)  return {3, 2};
+    if (pingMs < 60)  return {3, 3};
+    if (pingMs < 100) return {3, 7};
     if (pingMs < 140) return {3, 7};
     if (pingMs < 190) return {4, 7};
     if (pingMs < 250) return {5, 7};
@@ -700,6 +700,7 @@ static DWORD WINAPI NetworkPollThread(LPVOID lpParam);
 static void CleanupNetwork(HWND hDlg, bool forceCleanup = false);
 static void CreateBattleSetupControls(HWND hDlg);
 static void ApplyLaunchMenuFont(HWND hDlg);
+static void ReturnBattleSetupToLobbies(HWND hDlg);
 
 static bool IsCompatibleProtocol(const char (&protocol)[32])
 {
@@ -1692,6 +1693,15 @@ static void CreateBattleSetupControls(HWND hDlg)
     SetTimer(hDlg, ID_STEAM_POLL_TIMER, 50, NULL);
 }
 
+static void ReturnBattleSetupToLobbies(HWND hDlg)
+{
+    if (!g_battleSetupOnly || g_battleLobbyReturnRequest) return;
+    g_battleLobbyReturnRequest = true;
+    g_launchOption = LAUNCH_CANCELLED;
+    DestroyWindow(hDlg);
+    PostQuitMessage(0);
+}
+
 static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
 {
     switch (msg) {
@@ -2037,6 +2047,10 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
                 InvalidateRect(GetDlgItem(hDlg, ID_LAUNCH_TRAINING), NULL, FALSE);
 
             SteamLobby_Pump();
+            if (g_battleSetupOnly && SteamLobby_GetPeerSteamId() == 0) {
+                ReturnBattleSetupToLobbies(hDlg);
+                return 0;
+            }
             uint64_t replacementLobby = 0;
             if (SteamLobby_TakeReplacementJoin(&replacementLobby)) {
                 CleanupNetwork(hDlg, true);
@@ -2103,10 +2117,8 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
                 if (hStatus) {
                     char peerStatus[256];
                     snprintf(peerStatus, sizeof(peerStatus),
-                             "Steam connected: %s (SteamID %llu). Make your selection, NOW",
-                             SteamLobby_GetPeerUsername(),
-                             static_cast<unsigned long long>(
-                                 SteamLobby_GetPeerSteamId()));
+                             "Steam connected: %s. Make your selection, NOW",
+                             SteamLobby_GetPeerUsername());
                     SetWindowTextA(hStatus, peerStatus);
                     g_statusColor = steamIsHost ? RGB(0, 120, 215) : RGB(200, 180, 0);
                     InvalidateRect(hStatus, NULL, TRUE);
@@ -2166,7 +2178,13 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
                         g_localReady = false;
                         g_peerReady = false;
                         DestroyChatWindow();
+                        if (g_battleSetupOnly) {
+                            ReturnBattleSetupToLobbies(hDlg);
+                            return 0;
+                        }
                         CleanupNetwork(hDlg, true);
+                        SteamLobby_Initialize();
+                        SteamLobby_Search();
                     }
                     else if (event.type == ENET_EVENT_TYPE_RECEIVE) {
                         uint32_t packetType = event.packet->dataLength >= sizeof(uint32_t)
@@ -2262,7 +2280,13 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
                     }
                 } else if (result < 0) {
                     HookLog("UMVC3Hook: enet_host_service error: %d\n", result);
+                    if (g_battleSetupOnly) {
+                        ReturnBattleSetupToLobbies(hDlg);
+                        return 0;
+                    }
                     CleanupNetwork(hDlg, true);
+                    SteamLobby_Initialize();
+                    SteamLobby_Search();
                 }
             }
             UpdatePingLabel(hDlg);
@@ -2591,10 +2615,7 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
 
         case ID_BATTLE_LEAVE:
             if (g_battleSetupOnly) {
-                g_battleLobbyReturnRequest = true;
-                g_launchOption = LAUNCH_CANCELLED;
-                DestroyWindow(hDlg);
-                PostQuitMessage(0);
+                ReturnBattleSetupToLobbies(hDlg);
             }
             return 0;
 
@@ -2889,10 +2910,7 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
 
     case WM_CLOSE:
         if (g_battleSetupOnly) {
-            g_battleLobbyReturnRequest = true;
-            g_launchOption = LAUNCH_CANCELLED;
-            DestroyWindow(hDlg);
-            PostQuitMessage(0);
+            ReturnBattleSetupToLobbies(hDlg);
             return 0;
         }
         g_launchOption = LAUNCH_CANCELLED;
