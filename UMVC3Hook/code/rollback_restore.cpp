@@ -1466,9 +1466,9 @@ void Rollback_RestoreSnapshot(int32_t frame)
         }
     };
     traceRestoreState("before");
-    bool ownerStillMatches[MAX_REGIONS] = {};
-    uint64_t liveOwnerPointers[MAX_REGIONS] = {};
-    uint32_t liveCommandLineCounts[MAX_REGIONS] = {};
+    bool ownerStillMatches[MAX_REGIONS];
+    uint64_t liveOwnerPointers[MAX_REGIONS];
+    uint32_t liveCommandLineCounts[MAX_REGIONS];
     for (int i = 0; i < slot.regionCount; ++i) {
         uint64_t ownerSlot = slot.regions[i].ownerSlot;
         if (ownerSlot == 0) {

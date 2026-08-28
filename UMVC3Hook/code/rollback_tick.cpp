@@ -498,14 +498,13 @@ static void HeadlessUnitPass(uint64_t sMain, uint64_t sUnit,
                 : IsHeadlessGameplaySyncCategory(category);
             if (!enabled) {
                 if (phase == RollbackUnitProfilePhase::Move) {
-                    const uint64_t start = Profile_NowEnabled();
-                    if constexpr (ProfilingEnabled)
-                        HeadlessUnitCategoryCleanup<true>(sMain, sUnit, category);
-                    else
-                        HeadlessUnitCategoryCleanup<false>(sMain, sUnit, category);
                     if constexpr (ProfilingEnabled) {
+                        const uint64_t start = Profile_NowEnabled();
+                        HeadlessUnitCategoryCleanup<true>(sMain, sUnit, category);
                         Profile_RecordUnitCategory(
                             phase, category, Profile_NowEnabled() - start);
+                    } else {
+                        HeadlessUnitCategoryCleanup<false>(sMain, sUnit, category);
                     }
                 }
                 continue;

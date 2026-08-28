@@ -366,7 +366,20 @@ static bool RegionDependenciesValid(const RegionDependencies& dependencies)
     for (size_t i = 0; i < dependencies.count; ++i) {
         const RegionDependency& dependency = dependencies.values[i];
         uint64_t value = 0;
-        std::memcpy(&value, (void*)dependency.address, dependency.size);
+        switch (dependency.size) {
+        case sizeof(uint64_t):
+            std::memcpy(&value, (void*)dependency.address, sizeof(uint64_t));
+            break;
+        case sizeof(uint32_t): {
+            uint32_t value32;
+            std::memcpy(&value32, (void*)dependency.address, sizeof(value32));
+            value = value32;
+            break;
+        }
+        default:
+            std::memcpy(&value, (void*)dependency.address, dependency.size);
+            break;
+        }
         if (value != dependency.value) return false;
     }
     return true;
@@ -413,8 +426,8 @@ static void TraverseAndAddDynamicList(uint64_t listHead, size_t nextOffset,
 // ===========================================================================
 // Region List Builder — enumerates all snapshot-worthy memory
 // ===========================================================================
-static int BuildRegionsUncached(Region* regions, int maxRegions,
-                                RegionDependencies& dependencies)
+[[gnu::noinline, gnu::cold]] static int BuildRegionsUncached(
+    Region* regions, int maxRegions, RegionDependencies& dependencies)
 {
     if (!regions || maxRegions < 1) return 0;
 

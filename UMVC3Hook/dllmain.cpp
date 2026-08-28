@@ -18,6 +18,7 @@
 #include "code/autotest.h"
 #include "code/diag.h"
 #include "code/exception.h"
+#include "code/mk10utils.h"
 #include <Windows.h>
 #include <atomic>
 #include <cstdio>
@@ -1911,6 +1912,7 @@ BOOL WINAPI DllMain(HMODULE hMod, DWORD dwReason, LPVOID lpReserved)
 // DLLs and otherwise deadlock the process.
 extern "C" __declspec(dllexport) void InitializeASI()
 {
+	InitializeGameAddressBase();
 	if (!CheckGame())
 		return;
 

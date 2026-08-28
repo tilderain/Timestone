@@ -8,6 +8,8 @@
 #include "netplay.h"
 #include "../kiero/minhook/include/MinHook.h"
 
+#include <atomic>
+
 extern void HookLog(const char* fmt, ...);
 
 static constexpr uintptr_t FN_IS_ONLINE_BATTLE = 0x140006AF0;
@@ -36,6 +38,7 @@ using MtObjectSetFlagFn = void(__fastcall*)(uint64_t, uint8_t);
 static MtObjectSetFlagFn g_originalMtObjectSetFlag = nullptr;
 using MtObjectIsAliveFn = bool(__fastcall*)(uint64_t);
 static MtObjectIsAliveFn g_originalMtObjectIsAlive = nullptr;
+static std::atomic<uint64_t> g_validatedMtObjectVtables[256] = {};
 using RocketRaccoonPlaySfxFn = void(__fastcall*)(uint64_t);
 static RocketRaccoonPlaySfxFn g_originalRocketRaccoonPlaySfx = nullptr;
 using MtAnimSetFrameIndexFn = void(__fastcall*)(uint64_t, uint32_t);
@@ -246,13 +249,13 @@ static bool __fastcall hkMtObjectIsAlive(uint64_t object)
     if (vtable == (uint64_t)_addr(VTABLE_MTOBJECT)) {
         return false;
     }
-    static thread_local uint64_t validatedVtables[256] = {};
-    uint64_t& cached = validatedVtables[(vtable >> 3) & 0xFF];
-    if (cached != vtable) {
+    std::atomic<uint64_t>& cached =
+        g_validatedMtObjectVtables[(vtable >> 3) & 0xFF];
+    if (cached.load(std::memory_order_relaxed) != vtable) {
         if (!IsAccessibleRange(vtable, 0x28)) return false;
         const uint64_t getDti = *(uint64_t*)(vtable + 0x20);
         if (!getDti || !IsExecutableAddress(getDti)) return false;
-        cached = vtable;
+        cached.store(vtable, std::memory_order_relaxed);
     }
     return g_originalMtObjectIsAlive(object);
 }
