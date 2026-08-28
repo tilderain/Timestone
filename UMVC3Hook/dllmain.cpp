@@ -611,6 +611,41 @@ static bool g_borderlessPresentationRequested = false;
 static HWND g_d3d9FocusWindow = nullptr;
 static UINT g_borderlessBackBufferWidth = 0;
 static UINT g_borderlessBackBufferHeight = 0;
+static volatile LONG g_firstD3D9ResetSeen = 0;
+static bool g_haveSuccessfulCreateParameters = false;
+static IDirect3DDevice9* g_createdD3D9Device = nullptr;
+static D3DPRESENT_PARAMETERS g_successfulCreateParameters = {};
+
+static bool D3D9PresentationParametersEqual(
+	const D3DPRESENT_PARAMETERS& lhs,
+	const D3DPRESENT_PARAMETERS& rhs)
+{
+	return lhs.BackBufferWidth == rhs.BackBufferWidth &&
+		lhs.BackBufferHeight == rhs.BackBufferHeight &&
+		lhs.BackBufferFormat == rhs.BackBufferFormat &&
+		lhs.BackBufferCount == rhs.BackBufferCount &&
+		lhs.MultiSampleType == rhs.MultiSampleType &&
+		lhs.MultiSampleQuality == rhs.MultiSampleQuality &&
+		lhs.SwapEffect == rhs.SwapEffect &&
+		lhs.hDeviceWindow == rhs.hDeviceWindow &&
+		lhs.Windowed == rhs.Windowed &&
+		lhs.EnableAutoDepthStencil == rhs.EnableAutoDepthStencil &&
+		lhs.AutoDepthStencilFormat == rhs.AutoDepthStencilFormat &&
+		lhs.Flags == rhs.Flags &&
+		lhs.FullScreen_RefreshRateInHz == rhs.FullScreen_RefreshRateInHz &&
+		lhs.PresentationInterval == rhs.PresentationInterval;
+}
+
+static void RememberSuccessfulD3D9Create(
+	HRESULT result, D3DPRESENT_PARAMETERS* parameters,
+	IDirect3DDevice9** returnedDevice)
+{
+	if (FAILED(result) || !parameters || !returnedDevice || !*returnedDevice)
+		return;
+	g_successfulCreateParameters = *parameters;
+	g_createdD3D9Device = *returnedDevice;
+	g_haveSuccessfulCreateParameters = true;
+}
 
 static void MatchImGuiToRenderTarget(LPDIRECT3DDEVICE9 device)
 {
@@ -741,8 +776,34 @@ static HRESULT __stdcall hkResetDevice(
 		ImGui_ImplDX9_InvalidateDeviceObjects();
 	}
 
-	HRESULT result = oResetDevice(pDevice, presentationParameters);
-	HookLog("D3D9: Reset returned 0x%08X\n", (uint32_t)result);
+	const bool firstReset =
+		InterlockedCompareExchange(&g_firstD3D9ResetSeen, 1, 0) == 0;
+	const HRESULT cooperativeBeforeReset = firstReset
+		? pDevice->TestCooperativeLevel() : D3D_OK;
+	const bool redundantHealthyStartupReset = firstReset &&
+		cooperativeBeforeReset == D3D_OK &&
+		g_haveSuccessfulCreateParameters &&
+		pDevice == g_createdD3D9Device && presentationParameters &&
+		D3D9PresentationParametersEqual(
+			*presentationParameters, g_successfulCreateParameters);
+
+	HRESULT result = D3D_OK;
+	if (redundantHealthyStartupReset) {
+		HookLog("D3D9: skipped redundant healthy initial Reset "
+			"(parameters match CreateDevice)\n");
+	} else {
+		if (firstReset) {
+			HookLog("D3D9: initial Reset requires real call "
+				"(cooperative=0x%08X deviceMatch=%d parametersMatch=%d)\n",
+				(uint32_t)cooperativeBeforeReset,
+				pDevice == g_createdD3D9Device,
+				g_haveSuccessfulCreateParameters && presentationParameters &&
+				D3D9PresentationParametersEqual(
+					*presentationParameters, g_successfulCreateParameters));
+		}
+		result = oResetDevice(pDevice, presentationParameters);
+		HookLog("D3D9: Reset returned 0x%08X\n", (uint32_t)result);
+	}
 	if (result == D3DERR_INVALIDCALL && presentationParameters &&
 		presentationParameters->PresentationInterval !=
 			D3DPRESENT_INTERVAL_IMMEDIATE) {
@@ -1142,6 +1203,8 @@ static HRESULT WINAPI HookD3D9CreateDevice(
 		const HRESULT result = g_originalD3D9CreateDevice(
 			d3d9, adapter, deviceType, focusWindow, behaviorFlags,
 			presentationParameters, returnedDevice);
+		RememberSuccessfulD3D9Create(
+			result, presentationParameters, returnedDevice);
 		HookLog("D3D9: CreateDevice returned 0x%08X device=%p\n",
 			(uint32_t)result, returnedDevice ? *returnedDevice : nullptr);
 		if (SUCCEEDED(result))
@@ -1178,6 +1241,7 @@ static HRESULT WINAPI HookD3D9CreateDevice(
 	if (result == D3DERR_NOTAVAILABLE) {
 		HookLog("D3D9: CreateDevice remained unavailable after retries\n");
 	}
+	RememberSuccessfulD3D9Create(result, presentationParameters, returnedDevice);
 	HookLog("D3D9: CreateDevice returned 0x%08X device=%p\n",
 		(uint32_t)result, returnedDevice ? *returnedDevice : nullptr);
 	if (SUCCEEDED(result))
