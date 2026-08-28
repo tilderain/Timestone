@@ -216,7 +216,7 @@ void HookLogWriteRecent(FILE* file)
 		ReleaseSRWLockExclusive(&g_hookLogLock);
 	}
 
-	fprintf(file, "---- recent HookLog lines (up to 25) ----\n");
+	fprintf(file, "---- recent HookLog lines (up to 50) ----\n");
 	FILE* source = fopen(g_hookLogFilename, "rb");
 	if (!source || fseek(source, 0, SEEK_END) != 0) {
 		if (source)
@@ -233,14 +233,14 @@ void HookLogWriteRecent(FILE* file)
 	}
 	long start = end;
 	int lineCount = 0;
-	while (start > 0 && lineCount < 25) {
+	while (start > 0 && lineCount < 50) {
 		--start;
 		if (fseek(source, start, SEEK_SET) != 0)
 			break;
 		const int c = fgetc(source);
 		if (c == '\n' && start + 1 < end) {
 			++lineCount;
-			if (lineCount == 25)
+			if (lineCount == 50)
 				++start;
 		}
 	}
