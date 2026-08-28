@@ -5,6 +5,7 @@
 #include "trainingboot.h"
 #include "netplay.h"
 #include "steam_lobby.h"
+#include "steam_transport.h"
 #include "updater.h"
 #include "umvc3.h"
 #include <Windows.h>
@@ -224,6 +225,14 @@ static void ResetPingSamples(ENetPeer* peer = nullptr)
     g_lastPingSampleTime = 0;
 }
 
+static enet_uint32 GetLaunchPingMs(ENetPeer* peer)
+{
+    const uint32_t roundTripTime = SteamTransport_IsActive()
+        ? SteamTransport_GetRTT()
+        : peer ? peer->roundTripTime : 0;
+    return roundTripTime / 2;
+}
+
 static void CollectPingSample(ENetPeer* peer)
 {
     if (peer != g_pingSamplePeer)
@@ -235,7 +244,8 @@ static void CollectPingSample(ENetPeer* peer)
         return;
     g_lastPingSampleTime = now;
 
-    const enet_uint32 pingMs = peer->roundTripTime / 2;
+    const enet_uint32 pingMs = GetLaunchPingMs(peer);
+    if (pingMs == 0) return;
     if (g_pingSampleCount == kPingSampleCapacity)
         g_pingSampleSum -= g_pingSamples[g_nextPingSample];
     else
@@ -781,9 +791,12 @@ static void UpdatePingLabel(HWND hDlg)
 
     CollectPingSample(peer);
     char text[64];
-    if (g_pingSampleCount < kMinPingSamples) {
+    const enet_uint32 currentPingMs = GetLaunchPingMs(peer);
+    if (currentPingMs == 0) {
+        snprintf(text, sizeof(text), "Ping: measuring Steam connection...");
+    } else if (g_pingSampleCount < kMinPingSamples) {
         snprintf(text, sizeof(text), "Ping: %u ms (Sampling %zu/%zu)",
-                 peer->roundTripTime / 2, g_pingSampleCount, kMinPingSamples);
+                 currentPingMs, g_pingSampleCount, kMinPingSamples);
     } else {
         const enet_uint32 pingMs = static_cast<enet_uint32>(
             (g_pingSampleSum + g_pingSampleCount / 2) / g_pingSampleCount);
