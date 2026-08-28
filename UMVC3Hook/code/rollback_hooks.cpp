@@ -138,14 +138,10 @@ static void __fastcall hkBtScoreUpdate(uint64_t score, uint64_t a2,
     const bool hasSteamNames = SteamLobby_HasPeerProfile();
     const char* localName = hasSteamNames ? SteamLobby_GetLocalUsername() : nullptr;
     const char* peerName = hasSteamNames ? SteamLobby_GetPeerUsername() : nullptr;
-    const char* p1Name = hasSteamNames
-        ? (Netplay_IsHost() ? localName : peerName)
-        : (Netplay_IsHost() ? "Me" : "Opp");
-    const char* p2Name = hasSteamNames
-        ? (Netplay_IsHost() ? peerName : localName)
-        : (Netplay_IsHost() ? "Opp" : "Me");
-    SetFightingName(*(uint64_t*)(score + 0xC8), p1Name);
-    SetFightingName(*(uint64_t*)(score + 0xF0), p2Name);
+    const char* localDisplayName = hasSteamNames ? localName : "Me";
+    const char* peerDisplayName = hasSteamNames ? peerName : "Opp";
+    SetFightingName(*(uint64_t*)(score + 0xC8), localDisplayName);
+    SetFightingName(*(uint64_t*)(score + 0xF0), peerDisplayName);
 }
 
 static bool TraceLifecycleFrame(int32_t frame)
