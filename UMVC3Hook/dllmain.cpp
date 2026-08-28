@@ -1400,7 +1400,7 @@ void OnInitializeHook()
 	Memory::VP::Patch<uint8_t>(_addr(0x1402B4140), 0xB0);  // MOV AL,
 	Memory::VP::Patch<uint8_t>(_addr(0x1402B4141), 0x01);  //   1
 	Memory::VP::Patch<uint8_t>(_addr(0x1402B4142), 0xC3);  // RET
-	HookLog("UMVC3Hook: Patched FUN_1402b4140 to always return true (slot always alive)\n");
+	HookLog("UMVC3Hook: Patched sPad__isSlotValidAndConnected to always return true (slot always alive)\n");
 
 	// Check for command-line args using GetCommandLineA (avoids wchar_t size mismatch
 	// between Linux/GCC (32-bit) and Windows/MSVC (16-bit) under Wine/Proton)
