@@ -806,28 +806,27 @@ static HRESULT __stdcall hkResetDevice(
 
 	const bool firstReset =
 		InterlockedCompareExchange(&g_firstD3D9ResetSeen, 1, 0) == 0;
-	const HRESULT cooperativeBeforeReset = firstReset
-		? pDevice->TestCooperativeLevel() : D3D_OK;
-	const bool redundantHealthyStartupReset = firstReset &&
+	const HRESULT cooperativeBeforeReset = pDevice->TestCooperativeLevel();
+	const bool parametersMatch = g_haveSuccessfulCreateParameters &&
+		presentationParameters && D3D9PresentationParametersEqual(
+			*presentationParameters, g_successfulCreateParameters);
+	const bool redundantHealthyReset =
 		cooperativeBeforeReset == D3D_OK &&
 		g_haveSuccessfulCreateParameters &&
-		pDevice == g_createdD3D9Device && presentationParameters &&
-		D3D9PresentationParametersEqual(
-			*presentationParameters, g_successfulCreateParameters);
+		pDevice == g_createdD3D9Device && parametersMatch;
 
 	HRESULT result = D3D_OK;
-	if (redundantHealthyStartupReset) {
-		HookLog("D3D9: skipped redundant healthy initial Reset "
-			"(parameters match CreateDevice)\n");
+	if (redundantHealthyReset) {
+		HookLog("D3D9: skipped redundant healthy %sReset "
+			"(parameters match active presentation state)\n",
+			firstReset ? "initial " : "");
 	} else {
 		if (firstReset) {
 			HookLog("D3D9: initial Reset requires real call "
 				"(cooperative=0x%08X deviceMatch=%d parametersMatch=%d)\n",
 				(uint32_t)cooperativeBeforeReset,
 				pDevice == g_createdD3D9Device,
-				g_haveSuccessfulCreateParameters && presentationParameters &&
-				D3D9PresentationParametersEqual(
-					*presentationParameters, g_successfulCreateParameters));
+				parametersMatch);
 		}
 		result = oResetDevice(pDevice, presentationParameters);
 		HookLog("D3D9: Reset returned 0x%08X\n", (uint32_t)result);
@@ -873,6 +872,11 @@ static HRESULT __stdcall hkResetDevice(
 	if (SUCCEEDED(result) && init && ImGui::GetCurrentContext()) {
 		FrameStepper_SetDevice(pDevice);
 		ImGui_ImplDX9_CreateDeviceObjects();
+	}
+	if (SUCCEEDED(result) && presentationParameters) {
+		g_successfulCreateParameters = *presentationParameters;
+		g_createdD3D9Device = pDevice;
+		g_haveSuccessfulCreateParameters = true;
 	}
 	if (SUCCEEDED(result))
 		InterlockedExchange(&g_initialD3D9ResetComplete, 1);
