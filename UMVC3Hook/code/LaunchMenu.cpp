@@ -1,5 +1,6 @@
 #include "LaunchMenu.h"
 #include "assist_names.h"
+#include "controller.h"
 #include "trainingboot.h"
 #include "netplay.h"
 #include "steam_lobby.h"
@@ -170,6 +171,72 @@ static bool g_isLaunching = false;
 static bool g_directConnectExpanded = false;
 static int g_lobbyTypeSelection = 0;
 static char g_lobbyName[128] = {};
+static constexpr size_t kPingSampleCapacity = 120;
+static constexpr size_t kMinPingSamples = 60;
+static constexpr ULONGLONG kPingSampleIntervalMs = 50;
+static ENetPeer* g_pingSamplePeer = nullptr;
+static enet_uint32 g_pingSamples[kPingSampleCapacity] = {};
+static size_t g_pingSampleCount = 0;
+static size_t g_nextPingSample = 0;
+static uint64_t g_pingSampleSum = 0;
+static ULONGLONG g_lastPingSampleTime = 0;
+
+struct AutomaticNetplaySettings {
+    int32_t delay;
+    int32_t rollback;
+};
+
+static AutomaticNetplaySettings GetAutomaticNetplaySettings(enet_uint32 pingMs)
+{
+    if (pingMs < 24)  return {2, 0};
+    if (pingMs < 36) return {3, 0};
+    if (pingMs < 48)  return {2, 2};
+    if (pingMs < 60)  return {2, 3};
+    if (pingMs < 100) return {2, 8};
+    if (pingMs < 140) return {3, 7};
+    if (pingMs < 190) return {4, 7};
+    if (pingMs < 250) return {5, 7};
+    return {6, 7};
+}
+
+static AutomaticNetplaySettings ApplyAutomaticNetplaySettings(enet_uint32 pingMs)
+{
+    const AutomaticNetplaySettings settings = GetAutomaticNetplaySettings(pingMs);
+    Controller_SetDelayFrames(settings.delay);
+    Controller_SetRollbackFrames(settings.rollback);
+    return settings;
+}
+
+static void ResetPingSamples(ENetPeer* peer = nullptr)
+{
+    g_pingSamplePeer = peer;
+    g_pingSampleCount = 0;
+    g_nextPingSample = 0;
+    g_pingSampleSum = 0;
+    g_lastPingSampleTime = 0;
+}
+
+static void CollectPingSample(ENetPeer* peer)
+{
+    if (peer != g_pingSamplePeer)
+        ResetPingSamples(peer);
+
+    const ULONGLONG now = GetTickCount64();
+    if (g_lastPingSampleTime != 0 &&
+        now - g_lastPingSampleTime < kPingSampleIntervalMs)
+        return;
+    g_lastPingSampleTime = now;
+
+    const enet_uint32 pingMs = peer->roundTripTime / 2;
+    if (g_pingSampleCount == kPingSampleCapacity)
+        g_pingSampleSum -= g_pingSamples[g_nextPingSample];
+    else
+        ++g_pingSampleCount;
+
+    g_pingSamples[g_nextPingSample] = pingMs;
+    g_pingSampleSum += pingMs;
+    g_nextPingSample = (g_nextPingSample + 1) % kPingSampleCapacity;
+}
 
 static void GetSettingsPath(const char* filename, char* path, size_t pathSize)
 {
@@ -401,6 +468,21 @@ void SaveRosterToIni(const int32_t chars[2][3],
 void SendTrainingLaunchPacket()
 {
     if (!g_dialogConfig.enetPeer || !g_dialogConfig.enetHost) return;
+
+    DelayPacket settingsPacket = {};
+    settingsPacket.type = PACKET_DELAY;
+    settingsPacket.delay = Controller_GetDelayFrames();
+    settingsPacket.rollbackFrames = Controller_GetRollbackFrames();
+    settingsPacket.effective_frame = -1;
+    ENetPacket* enetSettings = enet_packet_create(
+        &settingsPacket, sizeof(settingsPacket), ENET_PACKET_FLAG_RELIABLE);
+    if (!enetSettings ||
+        enet_peer_send(g_dialogConfig.enetPeer, 0, enetSettings) != 0) {
+        if (enetSettings) enet_packet_destroy(enetSettings);
+        HookLog("UMVC3Hook: Failed to send automatic netplay settings\n");
+        return;
+    }
+
     LaunchTrainingPacket packet = {};
     packet.type = PACKET_LAUNCH_TRAINING;
     for (int i = 0; i < 3; ++i) {
@@ -679,12 +761,24 @@ static void UpdatePingLabel(HWND hDlg)
 
     ENetPeer* peer = g_dialogConfig.enetPeer;
     if (!peer || peer->state != ENET_PEER_STATE_CONNECTED) {
+        ResetPingSamples();
         ShowWindow(label, SW_HIDE);
         return;
     }
 
-    char text[32];
-    snprintf(text, sizeof(text), "Ping: %u ms", peer->roundTripTime);
+    CollectPingSample(peer);
+    char text[64];
+    if (g_pingSampleCount < kMinPingSamples) {
+        snprintf(text, sizeof(text), "Ping: %u ms (Sampling %zu/%zu)",
+                 peer->roundTripTime / 2, g_pingSampleCount, kMinPingSamples);
+    } else {
+        const enet_uint32 pingMs = static_cast<enet_uint32>(
+            (g_pingSampleSum + g_pingSampleCount / 2) / g_pingSampleCount);
+        const AutomaticNetplaySettings settings =
+            ApplyAutomaticNetplaySettings(pingMs);
+        snprintf(text, sizeof(text), "Ping: %u ms (Auto %dD/%dR)",
+                 pingMs, settings.delay, settings.rollback);
+    }
     SetWindowTextA(label, text);
     ShowWindow(label, SW_SHOW);
 }
@@ -1508,7 +1602,7 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
             hDlg, (HMENU)ID_P2_SIMPLE_MODE, NULL, NULL);
         CreateWindowA("STATIC", "Ping: -- ms",
             WS_CHILD,
-            leftX + 220, y + 2, 120, 18,
+            leftX + 220, y + 2, 200, 18,
             hDlg, (HMENU)ID_PING_LABEL, NULL, NULL);
         SendMessageA(p1Simple, BM_SETCHECK,
                      g_dialogConfig.simpleMode[0] ? BST_CHECKED : BST_UNCHECKED, 0);
@@ -1880,7 +1974,7 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
                             return 0;
                         }
                         else if (event.packet->dataLength == sizeof(LaunchP2SelectionPacket) &&
-                                 packetType == PACKET_LAUNCH_P2_SELECTION) {
+                                  packetType == PACKET_LAUNCH_P2_SELECTION) {
                             const auto& selection =
                                 *(const LaunchP2SelectionPacket*)event.packet->data;
                             if (!IsCompatibleProtocol(selection.protocol)) {
@@ -1891,9 +1985,25 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
                                 ShowVersionMismatch(hDlg, remoteVersion);
                                 return 0;
                             }
-                            if (!ApplyP2Selection(hDlg,
-                                    selection))
-                                HookLog("UMVC3Hook: Rejected invalid P2 launch selection\n");
+                             if (!ApplyP2Selection(hDlg,
+                                     selection))
+                                 HookLog("UMVC3Hook: Rejected invalid P2 launch selection\n");
+                         }
+                        else if (event.packet->dataLength == sizeof(DelayPacket) &&
+                                 packetType == PACKET_DELAY) {
+                            const auto& settings =
+                                *(const DelayPacket*)event.packet->data;
+                            if (settings.delay >= 0 && settings.delay <= 15 &&
+                                settings.rollbackFrames >= 0 &&
+                                settings.rollbackFrames <= 16 &&
+                                (settings.delay != 0 || settings.rollbackFrames != 0)) {
+                                Controller_SetDelayFrames(settings.delay);
+                                Controller_SetRollbackFrames(settings.rollbackFrames);
+                                HookLog("UMVC3Hook: Applied host netplay settings %dD/%dR\n",
+                                        settings.delay, settings.rollbackFrames);
+                            } else {
+                                HookLog("UMVC3Hook: Rejected invalid host netplay settings\n");
+                            }
                         }
                         else if (event.packet->dataLength == sizeof(LaunchTrainingPacket) &&
                             *(uint32_t*)event.packet->data == PACKET_LAUNCH_TRAINING) {
