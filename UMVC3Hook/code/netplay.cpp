@@ -155,6 +155,7 @@ public:
 static void MarkPeerDisconnected(ENetPeer* peer, bool disconnectNow)
 {
     g_peerDisconnected = true;
+    g_playerDisconnectNotice = true;
     // The game thread may not get another tick to consume queued diagnostics.
     if (disconnectNow && peer)
         enet_peer_disconnect_now(peer, 0);
@@ -733,7 +734,6 @@ static DWORD WINAPI Netplay_ServiceThread(LPVOID)
                                 if (event.packet->dataLength >= sizeof(PlayerDisconnectPacket))
                                 {
                                     HookLog("Netplay: Remote player sent disconnect notice\n");
-                                    g_playerDisconnectNotice = true;
                                     MarkPeerDisconnected(event.peer, true);
                                 }
                                 break;
@@ -1324,7 +1324,7 @@ uint32_t Netplay_GetRemoteInput()
 
 bool Netplay_IsActive()
 {
-    return g_active && g_running && g_peer != nullptr;
+    return g_running.load();
 }
 
 bool Netplay_TakePeerDisconnected()

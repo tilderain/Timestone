@@ -95,6 +95,7 @@ static uint32_t g_trainingLastGeneration = 0;
 static bool g_trainingFrameCountingActive = false;
 static bool g_trainingFrameLimitExitRequested = false;
 static int g_statusHudMode = 2;
+static bool g_opponentDisconnected = false;
 
 // Emit one compact diagnostic if a handshake generation remains blocked.
 static DWORD g_handshakeStartTick = 0;
@@ -786,7 +787,7 @@ static void __fastcall HookedMove(void* sMvc3Main)
                 g_trainingRestartLeftFighting = false;
                 AutoTest_OnTrainingRestartExecuted();
             }
-            Netplay_SetTimeout(AutoTest_IsActive() ? 2000 : 5000);
+            Netplay_SetTimeout(AutoTest_IsActive() ? 2000 : 4000);
             HookLog("Netplay: Intro barrier released after RNG sync (generation=%u seed=0x%08X)\n",
                      g_battleGeneration, g_roundSeed);
         }
@@ -1058,6 +1059,7 @@ static uint64_t __fastcall HookedGetInputBuf(uint64_t obj)
 // ---------------------------------------------------------------------------
 void FrameStepper_InitNetplay()
 {
+    g_opponentDisconnected = false;
     const LaunchDialogConfig& cfg = GetLaunchDialogConfig();
     HookLog("FrameStepper: launch netplay config hostEnabled=%d host=%p peer=%p\n",
             cfg.hostEnabled ? 1 : 0, (void*)cfg.enetHost, (void*)cfg.enetPeer);
@@ -1075,6 +1077,11 @@ void FrameStepper_InitNetplay()
                                                sizeof(outputDirectory));
         }
     }
+}
+
+void FrameStepper_ShowOpponentDisconnected()
+{
+    g_opponentDisconnected = true;
 }
 
 void FrameStepper_Init()
@@ -1612,6 +1619,26 @@ static void DrawAllocatorMemory()
 
 void FrameStepper_Draw()
 {
+    if (g_opponentDisconnected)
+    {
+        ImGui::SetNextWindowPos(ImVec2(ImGui::GetIO().DisplaySize.x * 0.5f,
+                                       ImGui::GetIO().DisplaySize.y * 0.18f),
+                                ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+        ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.0f, 0.0f, 0.0f, 0.92f));
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
+        ImGui::Begin("##OpponentDisconnectedOverlay", nullptr,
+            ImGuiWindowFlags_NoTitleBar |
+            ImGuiWindowFlags_NoResize |
+            ImGuiWindowFlags_NoMove |
+            ImGuiWindowFlags_NoScrollbar |
+            ImGuiWindowFlags_NoSavedSettings |
+            ImGuiWindowFlags_AlwaysAutoResize |
+            ImGuiWindowFlags_NoInputs);
+        ImGui::Text("Your opp disconnected.");
+        ImGui::End();
+        ImGui::PopStyleColor(2);
+    }
+
     if (!IsTrainingMode())
         return;
 

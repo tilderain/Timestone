@@ -861,8 +861,7 @@ long __stdcall hkEndScene(LPDIRECT3DDEVICE9 pDevice)
 	}
 	if (Netplay_TakePlayerDisconnectNotice())
 	{
-		Notifications->SetNotificationTime(5500);
-		Notifications->PushNotification("The other player disconnected.");
+		FrameStepper_ShowOpponentDisconnected();
 	}
 	extern void ChrSelImGui_Draw();
 	ChrSelImGui_Draw();

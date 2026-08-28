@@ -1,4 +1,5 @@
 #include "LaunchMenu.h"
+#include "LaunchMenu_compact.h"
 #include "assist_names.h"
 #include "controller.h"
 #include "trainingboot.h"
@@ -85,6 +86,7 @@ static bool      g_peerReady = false;
 static bool      g_autoTestLaunch = false;
 static COLORREF  g_statusColor = RGB(0, 0, 0); // default black for status text
 static HBRUSH    g_hStatusBrush = nullptr;
+static HFONT     g_hLaunchFont = nullptr;
 static HWND      g_hChatWindow = nullptr;
 static HWND      g_hChatHistory = nullptr;
 static HWND      g_hChatInput = nullptr;
@@ -168,6 +170,12 @@ static constexpr unsigned kChatMessagesPerSecond = 20;
 static volatile bool g_networkPolling = false;
 static HANDLE g_hPollThread = NULL;
 static bool g_isLaunching = false;
+static bool g_battleSetupOnly = false;
+static bool g_compactMode = false;
+static bool g_compactAdvancedRequest = false;
+static bool g_compactBattleSetupRequest = false;
+static bool g_battleLobbyReturnRequest = false;
+static bool g_regularCompactRequest = false;
 static bool g_directConnectExpanded = false;
 static int g_lobbyTypeSelection = 0;
 static char g_lobbyName[128] = {};
@@ -306,7 +314,7 @@ static LRESULT CALLBACK DisclaimerMessageBoxHook(int code, WPARAM wParam, LPARAM
     return CallNextHookEx(NULL, code, wParam, lParam);
 }
 
-static bool ConfirmDisclaimer()
+bool ConfirmLaunchDisclaimer()
 {
     char settingsPath[MAX_PATH] = {};
     GetSettingsPath("Timestone.ini", settingsPath, sizeof(settingsPath));
@@ -651,6 +659,8 @@ enum CtrlId {
     ID_STEAM_NAME         = 2307,
     ID_LAUNCH_PROMPT      = 2401,
     ID_VERSION_LABEL      = 2402,
+    ID_ADVANCED_MENU      = 2403,
+    ID_BATTLE_LEAVE       = 2404,
     // Peer chat controls
     ID_CHAT_CONNECTION    = 2501,
     ID_CHAT_PROFILE       = 2502,
@@ -688,6 +698,8 @@ static bool ApplyP1Selection(HWND hDlg, const LaunchP1SelectionPacket& packet);
 static bool ApplyP2Selection(HWND hDlg, const LaunchP2SelectionPacket& packet);
 static DWORD WINAPI NetworkPollThread(LPVOID lpParam);
 static void CleanupNetwork(HWND hDlg, bool forceCleanup = false);
+static void CreateBattleSetupControls(HWND hDlg);
+static void ApplyLaunchMenuFont(HWND hDlg);
 
 static bool IsCompatibleProtocol(const char (&protocol)[32])
 {
@@ -849,6 +861,9 @@ static void ConfigureConnectedControls(HWND hDlg)
         EnableWindow(GetDlgItem(hDlg, ID_P2_SIMPLE_MODE), TRUE);
         HookLog("UMVC3Hook: Client controls enabled for P2 selection\n");
     }
+    if (g_battleSetupOnly)
+        EnableWindow(GetDlgItem(hDlg, ID_BATTLE_LEAVE), TRUE);
+    EnableWindow(GetDlgItem(hDlg, ID_RANDOMIZE_CHARS), TRUE);
     UpdateReadyButton(hDlg);
     UpdatePingLabel(hDlg);
 }
@@ -1061,6 +1076,7 @@ static LRESULT CALLBACK ChatWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
                       WS_VISIBLE | WS_CHILD | WS_TABSTOP | BS_DEFPUSHBUTTON,
                       276, 353, 72, 28, hWnd,
                       reinterpret_cast<HMENU>(ID_CHAT_SEND), nullptr, nullptr);
+        ApplyLaunchMenuFont(hWnd);
         return 0;
 
     case WM_COMMAND:
@@ -1122,7 +1138,7 @@ static void SetDirectConnectExpanded(HWND hDlg, bool expanded)
     const int launchControls[] = {
         ID_LAUNCH_PROMPT, ID_LAUNCH_NORMAL, ID_LAUNCH_TRAINING,
         ID_LAUNCH_DUAL, ID_LAUNCH_DUAL_CPUS, ID_LAUNCH_DUAL_P2_CPU,
-        ID_VERSION_LABEL,
+        ID_VERSION_LABEL, ID_ADVANCED_MENU,
     };
     const int offset = expanded ? expandedHeight : -expandedHeight;
     for (int id : launchControls) {
@@ -1294,12 +1310,20 @@ static bool ApplyP2Selection(HWND hDlg, const LaunchP2SelectionPacket& packet)
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
-LaunchOption ShowLaunchMenu()
+static LaunchOption ShowLaunchMenuWindow(bool battleSetupOnly, bool compactMode)
 {
-    if (!ConfirmDisclaimer())
-        return LAUNCH_CANCELLED;
-
     Updater_Init();
+    g_isLaunching = false;
+    g_battleSetupOnly = battleSetupOnly;
+    g_compactMode = compactMode;
+    if (!g_compactMode && !g_battleSetupOnly)
+        g_regularCompactRequest = false;
+    if (g_battleSetupOnly)
+        g_battleLobbyReturnRequest = false;
+    if (g_compactMode) {
+        g_compactAdvancedRequest = false;
+        g_compactBattleSetupRequest = false;
+    }
     g_localReady = false;
     g_peerReady = false;
     HINSTANCE hInst = GetModuleHandle(NULL);
@@ -1328,7 +1352,7 @@ LaunchOption ShowLaunchMenu()
     g_dialogConfig.enetHost = nullptr;
     g_dialogConfig.enetPeer = nullptr;
     SteamLobby_Initialize();
-    uint64_t inviteLobbyId = GetInviteLobbyId();
+    uint64_t inviteLobbyId = g_battleSetupOnly ? 0 : GetInviteLobbyId();
     if (inviteLobbyId) {
         HookLog("SteamLobby: received +connect_lobby invite for %llu\n",
                 static_cast<unsigned long long>(inviteLobbyId));
@@ -1355,12 +1379,14 @@ LaunchOption ShowLaunchMenu()
     chatClass.hCursor = LoadCursor(NULL, IDC_ARROW);
     RegisterClassA(&chatClass);
 
-    int w = 840, h = 780;
+    int w = g_compactMode ? 656 : 840;
+    int h = g_compactMode ? 448 : (g_battleSetupOnly ? 430 : 780);
     int x = (GetSystemMetrics(SM_CXSCREEN) - w) / 2;
     int y = (GetSystemMetrics(SM_CYSCREEN) - h) / 2;
 
     HWND hWnd = CreateWindowExA(
-        0, CLASS_NAME, "UMVC3Hook - Launch Mode",
+        0, CLASS_NAME, g_compactMode ? "Timestone"
+            : g_battleSetupOnly ? "Battle Setup" : "Launch Mode",
         WS_CAPTION | WS_SYSMENU | WS_VISIBLE | WS_MINIMIZEBOX,
         x, y, w, h,
         NULL, NULL, hInst, NULL
@@ -1398,6 +1424,44 @@ LaunchOption ShowLaunchMenu()
     }
 
     return g_launchOption;
+}
+
+LaunchOption ShowRegularLaunchMenu(bool battleSetupOnly)
+{
+    return ShowLaunchMenuWindow(battleSetupOnly, false);
+}
+
+LaunchOption ShowCompactLaunchMenu()
+{
+    return ShowLaunchMenuWindow(false, true);
+}
+
+bool TakeCompactAdvancedRequest()
+{
+    const bool requested = g_compactAdvancedRequest;
+    g_compactAdvancedRequest = false;
+    return requested;
+}
+
+bool TakeCompactBattleSetupRequest()
+{
+    const bool requested = g_compactBattleSetupRequest;
+    g_compactBattleSetupRequest = false;
+    return requested;
+}
+
+bool TakeBattleLobbyReturnRequest()
+{
+    const bool requested = g_battleLobbyReturnRequest;
+    g_battleLobbyReturnRequest = false;
+    return requested;
+}
+
+bool TakeRegularCompactRequest()
+{
+    const bool requested = g_regularCompactRequest;
+    g_regularCompactRequest = false;
+    return requested;
 }
 
 LaunchOption GetLaunchOption()
@@ -1496,12 +1560,164 @@ void SetNetworkHandles(ENetHost* host, ENetPeer* peer)
 // ---------------------------------------------------------------------------
 // Dialog procedure
 // ---------------------------------------------------------------------------
+static BOOL CALLBACK SetLaunchControlFont(HWND control, LPARAM font)
+{
+    SendMessageA(control, WM_SETFONT, font, TRUE);
+    return TRUE;
+}
+
+static void ApplyLaunchMenuFont(HWND hDlg)
+{
+    if (!g_hLaunchFont) {
+        HDC dc = GetDC(hDlg);
+        const int dpi = dc ? GetDeviceCaps(dc, LOGPIXELSY) : 96;
+        if (dc) ReleaseDC(hDlg, dc);
+
+        LOGFONTA font = {};
+        font.lfHeight = -MulDiv(10, dpi, 72);
+        font.lfWeight = FW_NORMAL;
+        font.lfCharSet = DEFAULT_CHARSET;
+        font.lfQuality = CLEARTYPE_QUALITY;
+        snprintf(font.lfFaceName, sizeof(font.lfFaceName), "MS Shell Dlg 2");
+        g_hLaunchFont = CreateFontIndirectA(&font);
+    }
+
+    if (!g_hLaunchFont) return;
+    SendMessageA(hDlg, WM_SETFONT, reinterpret_cast<WPARAM>(g_hLaunchFont), TRUE);
+    EnumChildWindows(hDlg, SetLaunchControlFont,
+                     reinterpret_cast<LPARAM>(g_hLaunchFont));
+}
+
+static void CreateBattleSetupControls(HWND hDlg)
+{
+    constexpr int leftX = 20;
+    constexpr int rightX = 430;
+    constexpr int contentW = 800;
+
+    CreateWindowA("STATIC", "Choose characters and stage for this battle:",
+        WS_VISIBLE | WS_CHILD, leftX, 12, 500, 18, hDlg, NULL, NULL, NULL);
+    CreateWindowA("BUTTON", "Randomize Characters",
+        WS_VISIBLE | WS_CHILD | WS_TABSTOP | BS_PUSHBUTTON,
+        leftX + 620, 8, 180, 26,
+        hDlg, (HMENU)ID_RANDOMIZE_CHARS, NULL, NULL);
+
+    CreateWindowA("BUTTON", "Character Select",
+        WS_VISIBLE | WS_CHILD | BS_GROUPBOX, leftX, 38, contentW, 190,
+        hDlg, NULL, NULL, NULL);
+
+    for (int team = 0; team < 2; ++team) {
+        const int x = team == 0 ? leftX + 10 : rightX;
+        CreateWindowA("STATIC", team == 0 ? "P1" : "P2",
+            WS_VISIBLE | WS_CHILD, x, 58, 22, 18,
+            hDlg, team == 0 ? NULL : (HMENU)ID_P2_LABEL, NULL, NULL);
+        CreateWindowA("STATIC", "Character", WS_VISIBLE | WS_CHILD,
+            x + 24, 58, 130, 18, hDlg, NULL, NULL, NULL);
+        CreateWindowA("STATIC", "Color", WS_VISIBLE | WS_CHILD,
+            x + 158, 58, 45, 18, hDlg, NULL, NULL, NULL);
+        CreateWindowA("STATIC", "Assist", WS_VISIBLE | WS_CHILD,
+            x + 207, 58, 170, 18, hDlg, NULL, NULL, NULL);
+
+        for (int slot = 0; slot < 3; ++slot) {
+            const int index = team * 3 + slot;
+            const int y = 78 + slot * 30;
+            char slotLabel[4];
+            snprintf(slotLabel, sizeof(slotLabel), "%d", slot + 1);
+            CreateWindowA("STATIC", slotLabel, WS_VISIBLE | WS_CHILD,
+                x, y + 4, 20, 18, hDlg, NULL, NULL, NULL);
+
+            const int character = team == 0 ? g_dialogConfig.p1Chars[slot]
+                                             : g_dialogConfig.p2Chars[slot];
+            const int color = team == 0 ? g_dialogConfig.p1Colors[slot]
+                                         : g_dialogConfig.p2Colors[slot];
+            const int assist = team == 0 ? g_dialogConfig.p1Assists[slot]
+                                          : g_dialogConfig.p2Assists[slot];
+            HWND charCombo = CreateWindowA("COMBOBOX", "",
+                WS_VISIBLE | WS_CHILD | WS_TABSTOP | WS_VSCROLL |
+                    CBS_DROPDOWN | CBS_HASSTRINGS | CBS_AUTOHSCROLL,
+                x + 24, y, 130, 400, hDlg,
+                reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_P1_SLOT1 + index)),
+                NULL, NULL);
+            PopulateCharCombo(charCombo, character);
+            SendMessageA(charCombo, CB_SETDROPPEDWIDTH, 180, 0);
+
+            HWND colorCombo = CreateWindowA("COMBOBOX", "",
+                WS_VISIBLE | WS_CHILD | WS_TABSTOP | CBS_DROPDOWNLIST | CBS_HASSTRINGS,
+                x + 158, y, 45, 200, hDlg,
+                reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_P1_COLOR1 + index)),
+                NULL, NULL);
+            PopulateColorCombo(colorCombo, character, color);
+
+            HWND assistCombo = CreateWindowA("COMBOBOX", "",
+                WS_VISIBLE | WS_CHILD | WS_TABSTOP | CBS_DROPDOWNLIST | CBS_HASSTRINGS,
+                x + 207, y, 170, 200, hDlg,
+                reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_P1_ASSIST1 + index)),
+                NULL, NULL);
+            PopulateAssistCombo(assistCombo, character, assist);
+            SendMessageA(assistCombo, CB_SETDROPPEDWIDTH, 220, 0);
+        }
+
+        HWND simple = CreateWindowA("BUTTON", "Simple Mode Controls",
+            WS_VISIBLE | WS_CHILD | WS_TABSTOP | BS_AUTOCHECKBOX,
+            x + 24, 174, 180, 20, hDlg,
+            (HMENU)(team == 0 ? ID_P1_SIMPLE_MODE : ID_P2_SIMPLE_MODE), NULL, NULL);
+        SendMessageA(simple, BM_SETCHECK,
+            g_dialogConfig.simpleMode[team] ? BST_CHECKED : BST_UNCHECKED, 0);
+    }
+
+    CreateWindowA("STATIC", "Ping: -- ms", WS_CHILD,
+        leftX + 230, 176, 190, 18, hDlg, (HMENU)ID_PING_LABEL, NULL, NULL);
+
+    CreateWindowA("BUTTON", "Stage Select", WS_VISIBLE | WS_CHILD | BS_GROUPBOX,
+        leftX, 236, contentW, 52, hDlg, NULL, NULL, NULL);
+    CreateWindowA("STATIC", "Stage:", WS_VISIBLE | WS_CHILD,
+        leftX + 10, 258, 50, 18, hDlg, NULL, NULL, NULL);
+    HWND stage = CreateWindowA("COMBOBOX", "",
+        WS_VISIBLE | WS_CHILD | WS_TABSTOP | WS_VSCROLL |
+            CBS_DROPDOWN | CBS_HASSTRINGS | CBS_AUTOHSCROLL,
+        leftX + 65, 254, 600, 200, hDlg, (HMENU)ID_STAGE, NULL, NULL);
+    PopulateStageCombo(stage, g_dialogConfig.stageId);
+
+    CreateWindowA("BUTTON", "Leave Lobby",
+        WS_VISIBLE | WS_CHILD | WS_TABSTOP | BS_PUSHBUTTON,
+        leftX, 294, 130, 28, hDlg, (HMENU)ID_BATTLE_LEAVE, NULL, NULL);
+    CreateWindowA("STATIC", "Connecting to Steam peer...", WS_VISIBLE | WS_CHILD,
+        leftX + 140, 300, 445, 18, hDlg, (HMENU)ID_NET_STATUS, NULL, NULL);
+    CreateWindowA("BUTTON", "Not Ready",
+        WS_CHILD | BS_OWNERDRAW | WS_DISABLED,
+        leftX + 610, 294, 190, 28, hDlg, (HMENU)ID_PEER_READY, NULL, NULL);
+    CreateWindowA("BUTTON", "Launch into Battle",
+        WS_VISIBLE | WS_CHILD | BS_OWNERDRAW | WS_DISABLED,
+        leftX, 330, contentW, 36, hDlg, (HMENU)ID_LAUNCH_TRAINING, NULL, NULL);
+
+    SetTimer(hDlg, ID_STEAM_POLL_TIMER, 50, NULL);
+}
+
 static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
 {
     switch (msg) {
     case WM_CREATE:
     case WM_INITDIALOG:
     {
+        if (g_compactMode) {
+            const CompactLaunchMenuControlIds ids = {
+                ID_STEAM_SEARCH_BTN, ID_STEAM_CREATE_BTN, ID_STEAM_JOIN_BTN,
+                ID_STEAM_TYPE, ID_STEAM_NAME, ID_STEAM_STATUS, ID_STEAM_LIST,
+                ID_LAUNCH_NORMAL, ID_ADVANCED_MENU,
+            };
+            CreateCompactLaunchMenuControls(hDlg, ids, g_lobbyTypeSelection,
+                                            g_lobbyName);
+            ApplyLaunchMenuFont(hDlg);
+            SetTimer(hDlg, ID_STEAM_POLL_TIMER, 50, NULL);
+            SteamLobby_Search();
+            return msg == WM_INITDIALOG ? TRUE : 0;
+        }
+
+        if (g_battleSetupOnly) {
+            CreateBattleSetupControls(hDlg);
+            ApplyLaunchMenuFont(hDlg);
+            return msg == WM_INITDIALOG ? TRUE : 0;
+        }
+
         int y = 15;
         const int leftX = 20;
         const int left2X = 430; // second column start
@@ -1791,11 +2007,24 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
             leftX + 600, y + 40, 200, 18,
             hDlg, (HMENU)ID_VERSION_LABEL, NULL, NULL);
 
+        char settingsPath[MAX_PATH] = {};
+        GetSettingsPath("Timestone.ini", settingsPath, sizeof(settingsPath));
+        HWND advancedMenu = CreateWindowA("BUTTON", "Advanced launch menu",
+            WS_VISIBLE | WS_CHILD | WS_TABSTOP | BS_AUTOCHECKBOX,
+            leftX, y + 36, 300, 22,
+            hDlg, (HMENU)ID_ADVANCED_MENU, NULL, NULL);
+        SendMessageA(advancedMenu, BM_SETCHECK,
+            GetPrivateProfileIntA("General", "UseRegularLaunchMenu", 0,
+                                  settingsPath) != 0
+                ? BST_CHECKED : BST_UNCHECKED,
+            0);
+
         if (g_directConnectExpanded) {
             g_directConnectExpanded = false;
             SetDirectConnectExpanded(hDlg, true);
         }
 
+        ApplyLaunchMenuFont(hDlg);
         SetTimer(hDlg, ID_STEAM_POLL_TIMER, 50, NULL);
         return msg == WM_INITDIALOG ? TRUE : 0;
     }
@@ -1820,6 +2049,13 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
             HWND hSteamStatus = GetDlgItem(hDlg, ID_STEAM_STATUS);
             if (hSteamStatus) SetWindowTextA(hSteamStatus, SteamLobby_GetStatus());
             UpdateSteamLobbyButton(hDlg);
+
+            if (g_compactMode && SteamLobby_GetPeerSteamId() != 0) {
+                g_compactBattleSetupRequest = true;
+                DestroyWindow(hDlg);
+                PostQuitMessage(0);
+                return 0;
+            }
 
             if (SteamLobby_TakeResultsChanged()) {
                 HWND hList = GetDlgItem(hDlg, ID_STEAM_LIST);
@@ -2084,6 +2320,15 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
         switch (LOWORD(wParam)) {
         case ID_RANDOMIZE_CHARS:
             RandomizeCharacters(hDlg);
+            if (g_dialogConfig.enetPeer) {
+                if (g_isHost) {
+                    SendP1Selection(hDlg);
+                } else {
+                    g_localReady = false;
+                    UpdateReadyButton(hDlg);
+                    SendP2Selection(hDlg);
+                }
+            }
             return 0;
 
         case ID_PEER_READY:
@@ -2116,6 +2361,14 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
         // ---- Launch buttons ----
         case ID_LAUNCH_NORMAL:
         {
+            if (g_compactMode) {
+                g_isLaunching = true;
+                g_launchOption = LAUNCH_NORMAL;
+                DestroyWindow(hDlg);
+                PostQuitMessage(0);
+                return 0;
+            }
+
             for (int i = 0; i < 3; ++i) {
                 UpdateCharFromCombo(hDlg, ID_P1_SLOT1 + i, i, 0);
                 UpdateCharFromCombo(hDlg, ID_P2_SLOT1 + i, i, 1);
@@ -2313,6 +2566,36 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
 
         case ID_NET_TOGGLE:
             SetDirectConnectExpanded(hDlg, !g_directConnectExpanded);
+            return 0;
+
+        case ID_ADVANCED_MENU:
+            if (HIWORD(wParam) == BN_CLICKED) {
+                char settingsPath[MAX_PATH] = {};
+                GetSettingsPath("Timestone.ini", settingsPath, sizeof(settingsPath));
+                const bool enabled = SendMessageA(
+                    reinterpret_cast<HWND>(lParam), BM_GETCHECK, 0, 0) == BST_CHECKED;
+                WritePrivateProfileStringA("General", "UseRegularLaunchMenu",
+                                           enabled ? "1" : "0", settingsPath);
+                if (g_compactMode && enabled) {
+                    g_compactAdvancedRequest = true;
+                    DestroyWindow(hDlg);
+                    PostQuitMessage(0);
+                } else if (!g_compactMode && !g_battleSetupOnly && !enabled) {
+                    g_regularCompactRequest = true;
+                    g_launchOption = LAUNCH_CANCELLED;
+                    DestroyWindow(hDlg);
+                    PostQuitMessage(0);
+                }
+            }
+            return 0;
+
+        case ID_BATTLE_LEAVE:
+            if (g_battleSetupOnly) {
+                g_battleLobbyReturnRequest = true;
+                g_launchOption = LAUNCH_CANCELLED;
+                DestroyWindow(hDlg);
+                PostQuitMessage(0);
+            }
             return 0;
 
         // ---- Network Host button ----
@@ -2605,6 +2888,13 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
     }
 
     case WM_CLOSE:
+        if (g_battleSetupOnly) {
+            g_battleLobbyReturnRequest = true;
+            g_launchOption = LAUNCH_CANCELLED;
+            DestroyWindow(hDlg);
+            PostQuitMessage(0);
+            return 0;
+        }
         g_launchOption = LAUNCH_CANCELLED;
         DestroyWindow(hDlg);
         PostQuitMessage(0);
@@ -2612,7 +2902,10 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
 
     case WM_DESTROY:
         KillTimer(hDlg, ID_STEAM_POLL_TIMER);
-        if (!g_isLaunching) {
+        if (g_compactMode &&
+            (g_compactAdvancedRequest || g_compactBattleSetupRequest)) {
+            // The next launch window continues using this Steam session.
+        } else if (!g_isLaunching) {
             CleanupNetwork(hDlg, true);  // user closed/cancelled — full cleanup
         } else {
             CleanupNetwork(hDlg, false); // launching — preserve host for gameplay
@@ -2620,6 +2913,10 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
         if (g_hStatusBrush) {
             DeleteObject(g_hStatusBrush);
             g_hStatusBrush = nullptr;
+        }
+        if (g_hLaunchFont) {
+            DeleteObject(g_hLaunchFont);
+            g_hLaunchFont = nullptr;
         }
         PostQuitMessage(0);
         return 0;
@@ -2808,7 +3105,9 @@ static uint32_t NextCharacterRandom()
 static void RandomizeCharacters(HWND hDlg)
 {
     constexpr int kPlayableCharacterCount = 50;
-    for (int team = 0; team < 2; ++team) {
+    const int firstTeam = g_dialogConfig.enetPeer ? (g_isHost ? 0 : 1) : 0;
+    const int teamCount = g_dialogConfig.enetPeer ? 1 : 2;
+    for (int team = firstTeam; team < firstTeam + teamCount; ++team) {
         int characters[kPlayableCharacterCount];
         for (int i = 0; i < kPlayableCharacterCount; ++i)
             characters[i] = i + 1;

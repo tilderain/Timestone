@@ -959,6 +959,7 @@ void SteamLobby_Pump()
             g_pendingHandle = 0;
             if (result.m_EChatRoomEnterResponse != 1 || !result.m_ulSteamIDLobby) {
                 SetStatus("Could not enter Steam lobby");
+                SteamLobby_Search();
             } else {
                 const char* marker = g_api.GetLobbyData(
                     g_matchmaking, result.m_ulSteamIDLobby, "Timestone");
@@ -968,6 +969,7 @@ void SteamLobby_Pump()
                     strcmp(protocol, kLobbyProtocol) != 0) {
                     SetVersionMismatch(protocol);
                     g_api.LeaveLobby(g_matchmaking, result.m_ulSteamIDLobby);
+                    SteamLobby_Search();
                     return;
                 }
                 g_lobbyId = result.m_ulSteamIDLobby;
@@ -977,6 +979,9 @@ void SteamLobby_Pump()
                 g_connectionDeadline = GetTickCount64() + kPeerConnectionTimeoutMs;
                 SetStatus("Lobby joined; connecting to owner...");
             }
+        } else if (g_pendingCall == PendingCall::None) {
+            // TakeCallResult clears the pending call when the Steam request fails.
+            SteamLobby_Search();
         }
     }
 
