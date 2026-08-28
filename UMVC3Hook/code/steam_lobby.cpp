@@ -63,6 +63,7 @@ struct SteamAPI {
     const char* (*GetLobbyData)(void*, uint64_t, const char*) = nullptr;
     bool (*SetLobbyJoinable)(void*, uint64_t, bool) = nullptr;
     bool (*SetRichPresence)(void*, const char*, const char*) = nullptr;
+    void (*SetPlayedWith)(void*, uint64_t) = nullptr;
 
     const char* (*GetPersonaName)(void*) = nullptr;
     const char* (*GetFriendPersonaName)(void*, uint64_t) = nullptr;
@@ -298,6 +299,7 @@ bool ResolveExports()
     ok &= Resolve(g_api.GetLobbyData, "SteamAPI_ISteamMatchmaking_GetLobbyData");
     ok &= Resolve(g_api.SetLobbyJoinable, "SteamAPI_ISteamMatchmaking_SetLobbyJoinable");
     ResolveOptional(g_api.SetRichPresence, "SteamAPI_ISteamFriends_SetRichPresence");
+    ResolveOptional(g_api.SetPlayedWith, "SteamAPI_ISteamFriends_SetPlayedWith");
     ok &= Resolve(g_api.GetPersonaName, "SteamAPI_ISteamFriends_GetPersonaName");
     ok &= Resolve(g_api.GetFriendPersonaName, "SteamAPI_ISteamFriends_GetFriendPersonaName");
     ResolveOptional(g_api.GetFriendCount, "SteamAPI_ISteamFriends_GetFriendCount");
@@ -484,7 +486,14 @@ void StartPeerConnection(uint64_t remoteId)
     }
     if (now < g_nextConnectionAttempt) return;
 
-    g_peerSteamId = remoteId;
+    if (g_peerSteamId != remoteId) {
+        g_peerSteamId = remoteId;
+        if (g_friends && g_api.SetPlayedWith) {
+            g_api.SetPlayedWith(g_friends, g_peerSteamId);
+            HookLog("SteamLobby: reported lobby peer %llu to Steam Recent Players\n",
+                    static_cast<unsigned long long>(g_peerSteamId));
+        }
+    }
     RefreshPeerUsername();
 
     SteamNetworkingConfigValue_t options[2];
