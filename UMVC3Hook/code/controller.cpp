@@ -25,6 +25,7 @@
 #include "framestepper.h"
 #include "../kiero/minhook/include/MinHook.h"
 #include <cstdio>
+#include <atomic>
 #include <cstdint>
 #include <cstring>
 
@@ -36,6 +37,35 @@ extern "C" void Rollback_NotifyDesyncTriggered(int32_t frame);
 extern "C" uint32_t FrameStepper_GetBattleGeneration();
 
 static constexpr bool INPUT_PROVENANCE_TRACE = false;
+static std::atomic<bool> g_predictionBudgetExhausted{false};
+static std::atomic<uint64_t> g_predictionBudgetExhaustedSince{0};
+
+static void ClearPredictionBudgetExhausted()
+{
+    g_predictionBudgetExhausted.store(false, std::memory_order_release);
+    g_predictionBudgetExhaustedSince.store(0, std::memory_order_release);
+}
+
+static void SetPredictionBudgetExhausted()
+{
+    if (!g_predictionBudgetExhausted.exchange(true, std::memory_order_acq_rel))
+        g_predictionBudgetExhaustedSince.store(GetTickCount64(),
+                                                std::memory_order_release);
+}
+
+extern "C" bool Controller_IsPredictionBudgetExhausted()
+{
+    return g_predictionBudgetExhausted.load(std::memory_order_acquire);
+}
+
+extern "C" bool Controller_ShouldShowPredictionBudgetExhausted()
+{
+    if (!Controller_IsPredictionBudgetExhausted())
+        return false;
+    const uint64_t since =
+        g_predictionBudgetExhaustedSince.load(std::memory_order_acquire);
+    return since != 0 && GetTickCount64() - since >= 3000;
+}
 
 static void TraceInputPacket(const char* marker, const char* path, int32_t localFrame,
                              const InputPacket& packet, uint16_t validMask,
@@ -1396,11 +1426,37 @@ static bool WaitForConfirmedFrame(int32_t frame, const char* reason)
     return IsFrameConfirmed(frame) || !Netplay_IsActive();
 }
 
+static bool WaitForPredictionBudgetFrame(int32_t frame)
+{
+    SetPredictionBudgetExhausted();
+    Rollback_FreezeWatchdogHeartbeat("prediction budget exhausted",
+                                     g_netFrameCount);
+    while (!IsFrameConfirmed(frame) && Netplay_IsActive() &&
+           !Netplay_HasInboundRestartMatch() &&
+           !Controller_ShouldShowPredictionBudgetExhausted())
+    {
+        SwitchToThread();
+        DrainAndProcessPackets();
+    }
+
+    if (IsFrameConfirmed(frame)) {
+        ClearPredictionBudgetExhausted();
+        Rollback_FreezeWatchdogHeartbeat("prediction-budget-wait-complete",
+                                         g_netFrameCount);
+        return true;
+    }
+    if (!Netplay_IsActive() || Netplay_HasInboundRestartMatch())
+        ClearPredictionBudgetExhausted();
+    return false;
+}
+
 // ---------------------------------------------------------------------------
 extern "C" void Controller_OnFrameStart()
 {
-    if (!Netplay_IsActive())
+    if (!Netplay_IsActive()) {
+        ClearPredictionBudgetExhausted();
         return;
+    }
 
     g_netFrameCount = GetGameFrameCount();
     // If sReplay isn't ready yet, skip packet processing this frame.
@@ -1452,9 +1508,10 @@ extern "C" void Controller_OnFrameStart()
             if (g_netFrameCount > predictionBudget)
             {
                 int32_t oldestRequiredFrame = g_netFrameCount - predictionBudget;
-                if (!WaitForConfirmedFrame(oldestRequiredFrame,
-                                           "prediction budget exhausted"))
-                    return;
+                if (!IsFrameConfirmed(oldestRequiredFrame)) {
+                    if (!WaitForPredictionBudgetFrame(oldestRequiredFrame))
+                        return;
+                }
             }
 
         // Multi-resim checks the rolling window continuously. Non-multi only
@@ -1577,11 +1634,13 @@ extern "C" void Controller_OnFrameStart()
                     g_lastNonMultiCheckedFrame++;
                 }
             }
+            }
         }
-    }
+        ClearPredictionBudgetExhausted();
     }
     else
     {
+        ClearPredictionBudgetExhausted();
         // --- Legacy delay-based fallback: spin-wait for current frame's input.
         int32_t neededFrame = g_netFrameCount;
         if (!WaitForConfirmedFrame(neededFrame, "delay mode"))

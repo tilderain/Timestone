@@ -137,6 +137,8 @@ extern "C" int32_t  Controller_GetLastRemoteFrame();
 extern "C" int32_t  Controller_GetRollbackFrames();
 extern "C" bool     Controller_IsRollbackChangePending();
 extern "C" bool     Controller_IsRollbackEnabled();
+extern "C" bool     Controller_IsPredictionBudgetExhausted();
+extern "C" bool     Controller_ShouldShowPredictionBudgetExhausted();
 
 // Frame confirmation check — returns true if remote input has arrived for this frame
 extern "C" bool     Controller_IsFrameConfirmed(int32_t frame);

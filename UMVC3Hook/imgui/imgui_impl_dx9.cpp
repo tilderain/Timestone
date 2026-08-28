@@ -25,6 +25,8 @@
 #include "imgui.h"
 #include "imgui_impl_dx9.h"
 
+extern void HookLog(const char* fmt, ...);
+
 // DirectX
 #include <d3d9.h>
 #define DIRECTINPUT_VERSION 0x0800
@@ -127,8 +129,13 @@ void ImGui_ImplDX9_RenderDrawData(ImDrawData* draw_data)
 
     // Backup the DX9 state
     IDirect3DStateBlock9* d3d9_state_block = NULL;
-    if (g_pd3dDevice->CreateStateBlock(D3DSBT_PIXELSTATE, &d3d9_state_block) < 0)
+    if (g_pd3dDevice->CreateStateBlock(D3DSBT_ALL, &d3d9_state_block) < 0)
         return;
+    if (d3d9_state_block->Capture() < 0)
+    {
+        d3d9_state_block->Release();
+        return;
+    }
 
     // Backup the DX9 transform (DX9 documentation suggests that it is included in the StateBlock but it doesn't appear to)
     D3DMATRIX last_world, last_view, last_projection;
@@ -143,9 +150,16 @@ void ImGui_ImplDX9_RenderDrawData(ImDrawData* draw_data)
     CUSTOMVERTEX* vtx_dst;
     ImDrawIdx* idx_dst;
     if (g_pVB->Lock(0, (UINT)(draw_data->TotalVtxCount * sizeof(CUSTOMVERTEX)), (void**)&vtx_dst, D3DLOCK_DISCARD) < 0)
+    {
+        d3d9_state_block->Release();
         return;
+    }
     if (g_pIB->Lock(0, (UINT)(draw_data->TotalIdxCount * sizeof(ImDrawIdx)), (void**)&idx_dst, D3DLOCK_DISCARD) < 0)
+    {
+        g_pVB->Unlock();
+        d3d9_state_block->Release();
         return;
+    }
     for (int n = 0; n < draw_data->CmdListsCount; n++)
     {
         const ImDrawList* cmd_list = draw_data->CmdLists[n];
@@ -272,9 +286,23 @@ void ImGui_ImplDX9_InvalidateDeviceObjects()
 {
     if (!g_pd3dDevice)
         return;
-    if (g_pVB) { g_pVB->Release(); g_pVB = NULL; }
-    if (g_pIB) { g_pIB->Release(); g_pIB = NULL; }
-    if (g_FontTexture) { g_FontTexture->Release(); g_FontTexture = NULL; ImGui::GetIO().Fonts->TexID = NULL; } // We copied g_pFontTextureView to io.Fonts->TexID so let's clear that as well.
+    // The old PIXELSTATE-only backup left these default-pool resources bound
+    // on the device. Drop the device's references before releasing our own so
+    // IDirect3DDevice9::Reset can satisfy its resource-lifetime contract.
+    g_pd3dDevice->SetStreamSource(0, NULL, 0, 0);
+    g_pd3dDevice->SetIndices(NULL);
+    g_pd3dDevice->SetTexture(0, NULL);
+    ULONG vbRefs = 0;
+    ULONG ibRefs = 0;
+    ULONG fontRefs = 0;
+    void* vb = g_pVB;
+    void* ib = g_pIB;
+    void* font = g_FontTexture;
+    if (g_pVB) { vbRefs = g_pVB->Release(); g_pVB = NULL; }
+    if (g_pIB) { ibRefs = g_pIB->Release(); g_pIB = NULL; }
+    if (g_FontTexture) { fontRefs = g_FontTexture->Release(); g_FontTexture = NULL; ImGui::GetIO().Fonts->TexID = NULL; } // We copied g_pFontTextureView to io.Fonts->TexID so let's clear that as well.
+    HookLog("D3D9: ImGui invalidate vb=%p refs=%lu ib=%p refs=%lu "
+        "font=%p refs=%lu\n", vb, vbRefs, ib, ibRefs, font, fontRefs);
 }
 
 void ImGui_ImplDX9_NewFrame()

@@ -644,6 +644,14 @@ static volatile LONG g_firstD3D9ResetSeen = 0;
 static bool g_haveSuccessfulCreateParameters = false;
 static IDirect3DDevice9* g_createdD3D9Device = nullptr;
 static D3DPRESENT_PARAMETERS g_successfulCreateParameters = {};
+static DWORD g_d3d9CreateDeviceThreadId = 0;
+static volatile LONG g_lastEndSceneThreadId = 0;
+using AppResetD3DDeviceOnUIThread = uint64_t(__fastcall*)(
+	void*, IDirect3DDevice9*, D3DPRESENT_PARAMETERS*);
+static AppResetD3DDeviceOnUIThread g_originalAppResetD3DDeviceOnUIThread = nullptr;
+using Mvc3MainSyncGraphicsSettings = bool(__fastcall*)(void*);
+static Mvc3MainSyncGraphicsSettings g_originalMvc3MainSyncGraphicsSettings = nullptr;
+static bool g_loggedSuppressedGraphicsSync = false;
 
 static bool D3D9PresentationParametersEqual(
 	const D3DPRESENT_PARAMETERS& lhs,
@@ -766,6 +774,77 @@ static void ApplyD3D9BorderlessWindow()
 		x, y, width, height);
 }
 
+static void LogD3D9ResetResourceState(
+	IDirect3DDevice9* device, const char* phase)
+{
+	if (!device)
+		return;
+
+	HookLog("D3D9: Reset state %s thread=%lu createThread=%lu "
+		"endSceneThread=%ld cooperative=0x%08X swapChains=%u\n",
+		phase, GetCurrentThreadId(), g_d3d9CreateDeviceThreadId,
+		InterlockedCompareExchange(&g_lastEndSceneThreadId, 0, 0),
+		(uint32_t)device->TestCooperativeLevel(),
+		device->GetNumberOfSwapChains());
+
+	IDirect3DVertexBuffer9* stream = nullptr;
+	UINT streamOffset = 0;
+	UINT streamStride = 0;
+	const HRESULT streamResult = device->GetStreamSource(
+		0, &stream, &streamOffset, &streamStride);
+	ULONG streamRefs = 0;
+	if (stream)
+		streamRefs = stream->Release();
+	HookLog("D3D9: Reset state %s stream0 result=0x%08X object=%p "
+		"offset=%u stride=%u refsAfterProbe=%lu\n",
+		phase, (uint32_t)streamResult, stream, streamOffset, streamStride,
+		streamRefs);
+
+	IDirect3DIndexBuffer9* indices = nullptr;
+	const HRESULT indexResult = device->GetIndices(&indices);
+	ULONG indexRefs = 0;
+	if (indices)
+		indexRefs = indices->Release();
+	HookLog("D3D9: Reset state %s indices result=0x%08X object=%p "
+		"refsAfterProbe=%lu\n",
+		phase, (uint32_t)indexResult, indices, indexRefs);
+
+	for (DWORD stage = 0; stage < 8; ++stage) {
+		IDirect3DBaseTexture9* texture = nullptr;
+		const HRESULT textureResult = device->GetTexture(stage, &texture);
+		if (!texture && SUCCEEDED(textureResult))
+			continue;
+		ULONG textureRefs = 0;
+		if (texture)
+			textureRefs = texture->Release();
+		HookLog("D3D9: Reset state %s texture%lu result=0x%08X object=%p "
+			"refsAfterProbe=%lu\n",
+			phase, stage, (uint32_t)textureResult, texture, textureRefs);
+	}
+
+	for (DWORD index = 0; index < 4; ++index) {
+		IDirect3DSurface9* target = nullptr;
+		const HRESULT targetResult = device->GetRenderTarget(index, &target);
+		if (!target && FAILED(targetResult) && index != 0)
+			continue;
+		ULONG targetRefs = 0;
+		if (target)
+			targetRefs = target->Release();
+		HookLog("D3D9: Reset state %s target%lu result=0x%08X object=%p "
+			"refsAfterProbe=%lu\n",
+			phase, index, (uint32_t)targetResult, target, targetRefs);
+	}
+
+	IDirect3DSurface9* depth = nullptr;
+	const HRESULT depthResult = device->GetDepthStencilSurface(&depth);
+	ULONG depthRefs = 0;
+	if (depth)
+		depthRefs = depth->Release();
+	HookLog("D3D9: Reset state %s depth result=0x%08X object=%p "
+		"refsAfterProbe=%lu\n",
+		phase, (uint32_t)depthResult, depth, depthRefs);
+}
+
 static HRESULT __stdcall hkResetDevice(
 	LPDIRECT3DDEVICE9 pDevice, D3DPRESENT_PARAMETERS* presentationParameters)
 {
@@ -773,7 +852,6 @@ static HRESULT __stdcall hkResetDevice(
 
 	if (!g_d3d9FocusWindow && presentationParameters)
 		g_d3d9FocusWindow = presentationParameters->hDeviceWindow;
-	PrepareD3D9PresentationParameters(presentationParameters, "Reset");
 
 	if (presentationParameters) {
 		/// TRACE LOG
@@ -800,38 +878,47 @@ static HRESULT __stdcall hkResetDevice(
 			pDevice);
 	}
 
-	if (init && ImGui::GetCurrentContext()) {
-		FrameStepper_InvalidateDeviceObjects();
-		ImGui_ImplDX9_InvalidateDeviceObjects();
-	}
-
 	const bool firstReset =
 		InterlockedCompareExchange(&g_firstD3D9ResetSeen, 1, 0) == 0;
 	const HRESULT cooperativeBeforeReset = pDevice->TestCooperativeLevel();
 	const bool parametersMatch = g_haveSuccessfulCreateParameters &&
 		presentationParameters && D3D9PresentationParametersEqual(
 			*presentationParameters, g_successfulCreateParameters);
-	const bool redundantHealthyReset =
-		cooperativeBeforeReset == D3D_OK &&
-		g_haveSuccessfulCreateParameters &&
-		pDevice == g_createdD3D9Device && parametersMatch;
-
-	HRESULT result = D3D_OK;
-	if (redundantHealthyReset) {
-		HookLog("D3D9: skipped redundant healthy %sReset "
-			"(parameters match active presentation state)\n",
-			firstReset ? "initial " : "");
-	} else {
-		if (firstReset) {
-			HookLog("D3D9: initial Reset requires real call "
-				"(cooperative=0x%08X deviceMatch=%d parametersMatch=%d)\n",
-				(uint32_t)cooperativeBeforeReset,
-				pDevice == g_createdD3D9Device,
-				parametersMatch);
-		}
-		result = oResetDevice(pDevice, presentationParameters);
-		HookLog("D3D9: Reset returned 0x%08X\n", (uint32_t)result);
+	const bool suppressHealthyReset = cooperativeBeforeReset == D3D_OK &&
+		g_haveSuccessfulCreateParameters && pDevice == g_createdD3D9Device;
+	if (suppressHealthyReset) {
+		HookLog("D3D9: suppressed healthy %sReset "
+			"(parametersMatch=%d active=%ux%u requested=%ux%u)\n",
+			firstReset ? "initial " : "", parametersMatch,
+			g_successfulCreateParameters.BackBufferWidth,
+			g_successfulCreateParameters.BackBufferHeight,
+			presentationParameters ? presentationParameters->BackBufferWidth : 0,
+			presentationParameters ? presentationParameters->BackBufferHeight : 0);
+		if (presentationParameters)
+			*presentationParameters = g_successfulCreateParameters;
+		InterlockedExchange(&g_initialD3D9ResetComplete, 1);
+		ReleaseSRWLockExclusive(&g_d3d9DeviceLock);
+		return D3D_OK;
 	}
+
+	PrepareD3D9PresentationParameters(presentationParameters, "Reset");
+
+	LogD3D9ResetResourceState(pDevice, "before-plugin-invalidate");
+	if (init && ImGui::GetCurrentContext()) {
+		FrameStepper_InvalidateDeviceObjects();
+		ImGui_ImplDX9_InvalidateDeviceObjects();
+	}
+	LogD3D9ResetResourceState(pDevice, "after-plugin-invalidate");
+
+	if (firstReset) {
+		HookLog("D3D9: initial Reset requires real call "
+			"(cooperative=0x%08X deviceMatch=%d parametersMatch=%d)\n",
+			(uint32_t)cooperativeBeforeReset,
+			pDevice == g_createdD3D9Device,
+			parametersMatch);
+	}
+	HRESULT result = oResetDevice(pDevice, presentationParameters);
+	HookLog("D3D9: Reset returned 0x%08X\n", (uint32_t)result);
 	if (result == D3DERR_INVALIDCALL && presentationParameters &&
 		presentationParameters->PresentationInterval !=
 			D3DPRESENT_INTERVAL_IMMEDIATE) {
@@ -888,8 +975,81 @@ static HRESULT __stdcall hkResetDevice(
 	return result;
 }
 
+static uint64_t __fastcall HookAppResetD3DDeviceOnUIThread(
+	void* app, IDirect3DDevice9* device,
+	D3DPRESENT_PARAMETERS* presentationParameters)
+{
+	const HRESULT cooperative = device
+		? device->TestCooperativeLevel() : D3DERR_INVALIDCALL;
+	const bool parametersMatch = g_haveSuccessfulCreateParameters &&
+		presentationParameters && D3D9PresentationParametersEqual(
+			*presentationParameters, g_successfulCreateParameters);
+	const bool redundantHealthyReset = cooperative == D3D_OK &&
+		device == g_createdD3D9Device && g_haveSuccessfulCreateParameters &&
+		parametersMatch;
+	if (redundantHealthyReset) {
+		HookLog("D3D9: suppressed native redundant Reset submission "
+			"(active=%ux%u)\n",
+			g_successfulCreateParameters.BackBufferWidth,
+			g_successfulCreateParameters.BackBufferHeight);
+		InterlockedExchange(&g_initialD3D9ResetComplete, 1);
+		return 1;
+	}
+
+	HookLog("D3D9: forwarding native Reset submission "
+		"(cooperative=0x%08X deviceMatch=%d parametersMatch=%d)\n",
+		(uint32_t)cooperative, device == g_createdD3D9Device,
+		parametersMatch);
+	return g_originalAppResetD3DDeviceOnUIThread(
+		app, device, presentationParameters);
+}
+
+static bool __fastcall HookMvc3MainSyncGraphicsSettings(void* mvc3Main)
+{
+	if (g_createdD3D9Device && g_haveSuccessfulCreateParameters &&
+		g_createdD3D9Device->TestCooperativeLevel() == D3D_OK) {
+		if (!g_loggedSuppressedGraphicsSync) {
+			HookLog("D3D9: suppressed delayed graphics settings sync "
+				"after successful CreateDevice\n");
+			g_loggedSuppressedGraphicsSync = true;
+		}
+		return false;
+	}
+	return g_originalMvc3MainSyncGraphicsSettings(mvc3Main);
+}
+
+static void InstallNativeD3D9ResetSubmissionHook()
+{
+	void* syncTarget = (void*)_addr(0x140259BC0);
+	MH_STATUS syncStatus = MH_CreateHook(
+		syncTarget, (LPVOID)&HookMvc3MainSyncGraphicsSettings,
+		(LPVOID*)&g_originalMvc3MainSyncGraphicsSettings);
+	if (syncStatus == MH_OK)
+		syncStatus = MH_EnableHook(syncTarget);
+	if (syncStatus == MH_OK || syncStatus == MH_ERROR_ENABLED) {
+		HookLog("D3D9: installed delayed graphics settings sync guard\n");
+	} else {
+		HookLog("D3D9: failed to install graphics settings sync guard (%d)\n",
+			syncStatus);
+	}
+
+	void* target = (void*)_addr(0x14051F6A0);
+	MH_STATUS status = MH_CreateHook(
+		target, (LPVOID)&HookAppResetD3DDeviceOnUIThread,
+		(LPVOID*)&g_originalAppResetD3DDeviceOnUIThread);
+	if (status == MH_OK)
+		status = MH_EnableHook(target);
+	if (status == MH_OK || status == MH_ERROR_ENABLED) {
+		HookLog("D3D9: installed native Reset submission guard\n");
+	} else {
+		HookLog("D3D9: failed to install native Reset submission guard (%d)\n",
+			status);
+	}
+}
+
 long __stdcall hkEndScene(LPDIRECT3DDEVICE9 pDevice)
 {
+	InterlockedExchange(&g_lastEndSceneThreadId, (LONG)GetCurrentThreadId());
 	// Dear ImGui owns one process-global context and cannot tolerate concurrent
 	// or reentrant EndScene callbacks mutating its current-window stack.
 	if (InterlockedCompareExchange(&g_endSceneOverlayInFlight, 1, 0) != 0)
@@ -1203,6 +1363,7 @@ static HRESULT WINAPI HookD3D9CreateDevice(
 {
 	if (!g_originalD3D9CreateDevice)
 		return D3DERR_DRIVERINTERNALERROR;
+	g_d3d9CreateDeviceThreadId = GetCurrentThreadId();
 	g_d3d9FocusWindow = focusWindow ? focusWindow :
 		(presentationParameters ? presentationParameters->hDeviceWindow : nullptr);
 	PrepareD3D9PresentationParameters(presentationParameters, "CreateDevice");
@@ -1617,6 +1778,7 @@ void OnInitializeHook()
 	MH_STATUS mhStatus = MH_Initialize();
 	if (mhStatus == MH_OK || mhStatus == MH_ERROR_ALREADY_INITIALIZED) {
 		InstallAppD3DResultLogging();
+		InstallNativeD3D9ResetSubmissionHook();
 		if (MH_CreateHook(
 			(LPVOID)_addr(0x140217700),
 			(LPVOID)Hook_titleLogoUpdate,

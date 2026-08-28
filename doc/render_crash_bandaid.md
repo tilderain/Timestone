@@ -217,6 +217,41 @@ game's exclusive-fullscreen path and its normal mode validation. Unlike the
 comparable RE HD workaround, it does not force borderless windowed mode or
 override the selected presentation interval.
 
+Some injected overlays retain unbound default-pool resources, which makes any
+otherwise valid `IDirect3DDevice9::Reset` fail and leaves the device in
+`D3DERR_DEVICENOTRESET`. The Reset hook therefore suppresses presentation
+changes while the tracked device is healthy and writes the active presentation
+parameters back to the caller. A real Reset is still allowed when
+`TestCooperativeLevel` reports that device-loss recovery is required. Runtime
+resolution, fullscreen, and VSync changes consequently do not take effect on a
+healthy device; they require a restart that creates the device with the new
+settings.
+
+The whole `sRender__applyWindowAndResize` function must not be skipped. Startup
+dirty mask `0x54` initializes the renderer pointer at `sRender+0x8676E8`;
+`sRender__move` later passes that pointer to `sCamera::vfn27`, which immediately
+writes through it at offset `0x5C0`. Skipping this work causes the access
+violation at `0x140532854` seen in crash captures.
+
+The game also sets renderer dirty flags to `0x14` after `CreateDevice`, forcing
+a redundant startup rebuild. A native hook at
+`sApp__resetD3DDeviceOnUIThread` (`0x14051F6A0`) intercepts the three-argument
+UI-thread Reset submission before an overlay can bypass the D3D9 vtable hook.
+Ghidra confirms that this function stores the device and presentation pointer
+at `sApp+0x2AD8` and `sApp+0x2AE8`, submits job type `4`, waits for completion,
+and returns `1` on success. The hook returns that native success value when the
+tracked device is healthy and the complete request matches the successful
+`CreateDevice` parameters. Device-loss recovery and real changes continue
+through the original function.
+
+The inconsistent startup Reset originates in
+`sMvc3Main__updateGraphicsSettings`: after device creation it consumes pending
+graphics options through `sMvc3Main__syncGraphicsSettings` (`0x140259BC0`),
+applying Resolution and FullScreen through property callbacks over multiple
+frames. A hook returns `false` from that synchronization once the correctly
+sized tracked device is healthy, clearing the pending state before it can
+mutate renderer presentation state or submit another Reset.
+
 ### Autotest Changes
 
 - Runtime autotest command collection skips the second command matcher. This

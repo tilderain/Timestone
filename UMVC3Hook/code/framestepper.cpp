@@ -459,6 +459,14 @@ static void CaptureNetInput();
 static bool IsTrainingMode();
 static constexpr uintptr_t SGAMEUI_GET_INSTANCE              = 0x140001ac0;
 
+static void PresentFrozenFrame()
+{
+    if (!g_pDevice)
+        return;
+    if (SUCCEEDED(g_pDevice->BeginScene()))
+        g_pDevice->EndScene();
+    g_pDevice->Present(nullptr, nullptr, nullptr, nullptr);
+}
 
 extern "C" void Controller_OnFrameStart();
 extern "C" void Controller_OnFrameEnd();
@@ -508,6 +516,11 @@ static void __fastcall HookedMove(void* sMvc3Main)
             if (Netplay_IsActive())
             {
                 Controller_OnFrameStart();
+                if (Controller_IsPredictionBudgetExhausted()) {
+                    if (Controller_ShouldShowPredictionBudgetExhausted())
+                        PresentFrozenFrame();
+                    return;
+                }
             }
             oMove(sMvc3Main);
             if (Netplay_IsActive())
@@ -515,12 +528,8 @@ static void __fastcall HookedMove(void* sMvc3Main)
                 Controller_OnFrameEnd();
             }
         }
-        else if (g_pDevice)
-        {
-            if (SUCCEEDED(g_pDevice->BeginScene()))
-                g_pDevice->EndScene();
-            g_pDevice->Present(nullptr, nullptr, nullptr, nullptr);
-        }
+        else
+            PresentFrozenFrame();
         return;
     }
 
@@ -820,7 +829,14 @@ static void __fastcall HookedMove(void* sMvc3Main)
             return;
 
         if (g_battleSynchronized)
+        {
             Controller_OnFrameStart();
+            if (Controller_IsPredictionBudgetExhausted()) {
+                if (Controller_ShouldShowPredictionBudgetExhausted())
+                    PresentFrozenFrame();
+                return;
+            }
+        }
     }
 
     oMove(sMvc3Main);
@@ -1203,6 +1219,21 @@ static void UnpauseFrameStepper()
     }
 }
 
+static void ToggleFrameStepperPause()
+{
+    if (isPaused)
+    {
+        UnpauseFrameStepper();
+    }
+    else if (!DebugControlsDisabledForNetplay())
+    {
+        isPaused = true;
+        frameCounter = 0;
+        ShowPopup();
+        g_captureRequested = true;
+    }
+}
+
 static void CloseGame()
 {
     if (g_hWnd && PostMessageW(g_hWnd, WM_CLOSE, 0, 0))
@@ -1460,19 +1491,7 @@ void FrameStepper_Process()
     }
     // Toggle pause
     if (KeyPressed(KEY_PAUSE))
-    {
-        if (isPaused)
-        {
-            UnpauseFrameStepper();
-        }
-        else if (!DebugControlsDisabledForNetplay())
-        {
-            isPaused = true;
-            frameCounter = 0;
-            ShowPopup();
-            g_captureRequested = true; // snapshot the current frame
-        }
-    }
+        ToggleFrameStepperPause();
 
     // Advance one frame while paused
     if (isPaused && KeyPressed(KEY_ADVANCE))
@@ -1650,6 +1669,35 @@ void FrameStepper_Draw()
         ImGui::Text("Your opp disconnected.");
         ImGui::End();
         ImGui::PopStyleColor(2);
+    }
+
+    if (!g_opponentDisconnected &&
+        Controller_ShouldShowPredictionBudgetExhausted())
+    {
+        ImGui::SetNextWindowPos(ImVec2(ImGui::GetIO().DisplaySize.x * 0.5f,
+                                       ImGui::GetIO().DisplaySize.y * 0.18f),
+                                ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+        ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.15f, 0.09f, 0.0f, 0.92f));
+        ImGui::Begin("##PredictionBudgetExhaustedOverlay", nullptr,
+            ImGuiWindowFlags_NoTitleBar |
+            ImGuiWindowFlags_NoResize |
+            ImGuiWindowFlags_NoMove |
+            ImGuiWindowFlags_NoScrollbar |
+            ImGuiWindowFlags_NoSavedSettings |
+            ImGuiWindowFlags_AlwaysAutoResize |
+            ImGuiWindowFlags_NoInputs);
+
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.65f, 0.1f, 1.0f));
+        ImGui::SetWindowFontScale(2.5f);
+        ImGui::Text("WAITING FOR OPPONENT");
+        ImGui::SetWindowFontScale(1.0f);
+        ImGui::PopStyleColor();
+        ImGui::Text("Your stopped getting input from your opp.");
+        ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.4f, 1.0f),
+            "Maybe you lost internet, or maybe their pc froze or crashed or lost internet or something.");
+
+        ImGui::End();
+        ImGui::PopStyleColor();
     }
 
     if (!IsTrainingMode())
@@ -1849,6 +1897,12 @@ void FrameStepper_DrawAutoTest()
     static int scriptIndex = 0;
     static int playerIndex = 0;
     static bool facingLeft = false;
+
+    const bool pauseDisabled = !isPaused && DebugControlsDisabledForNetplay();
+    if (pauseDisabled) ImGui::BeginDisabled();
+    if (ImGui::SmallButton(isPaused ? "Unpause (F2)" : "Pause (F2)"))
+        ToggleFrameStepperPause();
+    if (pauseDisabled) ImGui::EndDisabled();
 
     if (ImGui::BeginCombo("Move", AutoTest_GetScriptName(scriptIndex))) {
         for (int i = 0; i < AutoTest_GetScriptCount(); ++i) {
