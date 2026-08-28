@@ -1,5 +1,6 @@
 #include "LaunchMenu.h"
 #include "LaunchMenu_compact.h"
+#include "LaunchMenu_settings.h"
 #include "assist_names.h"
 #include "controller.h"
 #include "trainingboot.h"
@@ -671,6 +672,7 @@ enum CtrlId {
     ID_VERSION_LABEL      = 2402,
     ID_ADVANCED_MENU      = 2403,
     ID_BATTLE_LEAVE       = 2404,
+    ID_ADVANCED_CONFIG    = 2405,
     // Peer chat controls
     ID_CHAT_CONNECTION    = 2501,
     ID_CHAT_PROFILE       = 2502,
@@ -1152,7 +1154,7 @@ static void SetDirectConnectExpanded(HWND hDlg, bool expanded)
     const int launchControls[] = {
         ID_LAUNCH_PROMPT, ID_LAUNCH_NORMAL, ID_LAUNCH_TRAINING,
         ID_LAUNCH_DUAL, ID_LAUNCH_DUAL_CPUS, ID_LAUNCH_DUAL_P2_CPU,
-        ID_VERSION_LABEL, ID_ADVANCED_MENU,
+        ID_VERSION_LABEL, ID_ADVANCED_MENU, ID_ADVANCED_CONFIG,
     };
     const int offset = expanded ? expandedHeight : -expandedHeight;
     for (int id : launchControls) {
@@ -1750,7 +1752,7 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
             const CompactLaunchMenuControlIds ids = {
                 ID_STEAM_SEARCH_BTN, ID_STEAM_CREATE_BTN, ID_STEAM_JOIN_BTN,
                 ID_STEAM_TYPE, ID_STEAM_NAME, ID_STEAM_STATUS, ID_STEAM_LIST,
-                ID_LAUNCH_NORMAL, ID_ADVANCED_MENU,
+                ID_LAUNCH_NORMAL, ID_ADVANCED_CONFIG, ID_ADVANCED_MENU,
             };
             CreateCompactLaunchMenuControls(hDlg, ids, g_lobbyTypeSelection,
                                             g_lobbyName);
@@ -2066,6 +2068,10 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
                                   settingsPath) != 0
                 ? BST_CHECKED : BST_UNCHECKED,
             0);
+        CreateWindowA("BUTTON", "Advanced Config",
+            WS_VISIBLE | WS_CHILD | WS_TABSTOP | BS_PUSHBUTTON,
+            leftX + 310, y + 34, 180, 26,
+            hDlg, (HMENU)ID_ADVANCED_CONFIG, NULL, NULL);
 
         if (g_directConnectExpanded) {
             g_directConnectExpanded = false;
@@ -2380,6 +2386,10 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
 
     case WM_COMMAND:
         switch (LOWORD(wParam)) {
+        case ID_ADVANCED_CONFIG:
+            ShowAdvancedConfigModal(hDlg);
+            return 0;
+
         case ID_RANDOMIZE_CHARS:
             RandomizeCharacters(hDlg);
             if (g_dialogConfig.enetPeer) {

@@ -12,6 +12,7 @@
 #include "../kiero/minhook/include/MinHook.h"
 #include "netplay.h"
 #include "LaunchMenu.h"
+#include "LaunchMenu_settings.h"
 #include "rollback.h"
 #include "rollback_snapdump.h"
 #include "controller.h"
@@ -474,12 +475,24 @@ static void __fastcall HookedMove(void* sMvc3Main)
         return;
     }
 
+    static bool advancedConfigApplied = false;
+    if (!advancedConfigApplied)
+        advancedConfigApplied = ApplyAdvancedLaunchConfig();
+
     // These setters rewrite live sMain timing and subsystem state. Applying
     // them from the initialization thread can race native startup before the
     // first game tick, so perform them here on the game thread instead.
+    static bool gameplayExecutionSettingsApplied = false;
     static bool netplayDeterminismApplied = false;
-    if (Netplay_IsActive() && !netplayDeterminismApplied)
-    {
+    if (!gameplayExecutionSettingsApplied) {
+        if (Netplay_IsActive()) {
+            Rollback_ApplyNetplayDeterminism();
+            netplayDeterminismApplied = true;
+        } else {
+            Rollback_DisableGameplayParallelism();
+        }
+        gameplayExecutionSettingsApplied = true;
+    } else if (Netplay_IsActive() && !netplayDeterminismApplied) {
         Rollback_ApplyNetplayDeterminism();
         netplayDeterminismApplied = true;
     }

@@ -135,6 +135,9 @@
     <ClInclude Include="code\rollback.h">
       <Filter>Header Files\code</Filter>
     </ClInclude>
+    <ClInclude Include="code\LaunchMenu_settings.h">
+      <Filter>Header Files\code</Filter>
+    </ClInclude>
     <ClInclude Include="code\concrete_snapshot.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -294,6 +297,9 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="code\rollback.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="code\LaunchMenu_settings.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="code\rollback_cleanup.cpp">

@@ -48,6 +48,7 @@ extern "C" bool Rollback_ProcessDesyncDelay(int32_t currentFrame);
 
 // Reproduce the native online battle's gameplay serialization switches.
 bool Rollback_PatchNativeNetplayDeterminism();
+void Rollback_DisableGameplayParallelism();
 void Rollback_ApplyNetplayDeterminism();
 
 // Enable selected deterministic and combat online branches during custom ENet

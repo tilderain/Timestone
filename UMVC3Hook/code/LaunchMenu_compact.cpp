@@ -90,6 +90,10 @@ void CreateCompactLaunchMenuControls(HWND window,
         WS_VISIBLE | WS_CHILD | WS_TABSTOP | BS_DEFPUSHBUTTON,
         x + width - 300, 318, 300, 42, window,
         reinterpret_cast<HMENU>(static_cast<INT_PTR>(ids.normal)), NULL, NULL);
+    CreateWindowA("BUTTON", "Advanced Config",
+        WS_VISIBLE | WS_CHILD | WS_TABSTOP | BS_PUSHBUTTON,
+        x, 318, 180, 42, window,
+        reinterpret_cast<HMENU>(static_cast<INT_PTR>(ids.config)), NULL, NULL);
 
     char version[64] = {};
     snprintf(version, sizeof(version), "Timestone    v%s", UMVC3HOOK_VERSION);

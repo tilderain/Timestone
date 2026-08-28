@@ -11,6 +11,7 @@ struct CompactLaunchMenuControlIds {
     int status;
     int list;
     int normal;
+    int config;
     int advanced;
 };
 
