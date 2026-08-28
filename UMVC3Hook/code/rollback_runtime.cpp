@@ -12,6 +12,7 @@ extern void HookLog(const char* fmt, ...);
 
 static constexpr uintptr_t FN_IS_ONLINE_BATTLE = 0x140006AF0;
 static constexpr uintptr_t FN_NDRAW_MATERIAL_RELEASE = 0x14076F760;
+static constexpr uintptr_t FN_UMODEL_MOTION_DTOR = 0x140526000;
 static constexpr uintptr_t VTABLE_MTOBJECT = 0x140A6A510;
 static constexpr uintptr_t PTR_SCHARACTER = 0x140D44A70;
 static constexpr uintptr_t TEAM_OFFSETS[] = {0x40, 0x300};
@@ -71,6 +72,9 @@ using CopyCharacterPositionFn = uint64_t(__fastcall*)(uint64_t, int, float, uint
 static CopyCharacterPositionFn g_originalCopyCharacterPosition = nullptr;
 using ReplaceActiveStageFn = void(__fastcall*)(uint64_t, uint64_t);
 static ReplaceActiveStageFn g_originalReplaceActiveStage = nullptr;
+using UModelMotionDtorFn = void(__fastcall*)(uint64_t);
+static UModelMotionDtorFn g_originalUModelMotionDtor = nullptr;
+static LONG g_invalidMotionFreeCount = 0;
 static PVOID g_materialCloneRecoveryHandler = nullptr;
 static PVOID g_modelCommandAllocationRecoveryHandler = nullptr;
 static PVOID g_schedulerAllocationRecoveryHandler = nullptr;
@@ -79,6 +83,48 @@ static uint64_t g_pendingMaterialRepairs[64] = {};
 static size_t g_pendingMaterialRepairCount = 0;
 
 static bool HasCallableVirtualMethod(uint64_t object, size_t offset);
+
+static bool HasMotionAllocationOwner(uint64_t allocation,
+                                     uint64_t& block,
+                                     uint64_t& owner)
+{
+    block = 0;
+    owner = 0;
+    if (!allocation)
+        return true;
+
+    const uint64_t headerOffset = *(uint64_t*)(allocation - sizeof(uint64_t));
+    block = allocation - headerOffset;
+    owner = *(uint64_t*)(block + sizeof(uint64_t));
+    return owner && *(uint32_t*)(owner + 0x10) != 0;
+}
+
+static void __fastcall hkUModelMotionDtor(uint64_t motion)
+{
+    if (!motion || !g_originalUModelMotionDtor)
+        return;
+
+    uint64_t* allocationSlot = (uint64_t*)(motion + 0x160);
+    const uint64_t allocation = *allocationSlot;
+    uint64_t block = 0;
+    uint64_t owner = 0;
+    if (!HasMotionAllocationOwner(allocation, block, owner)) {
+        const LONG count = InterlockedIncrement(&g_invalidMotionFreeCount);
+        if (count <= 16) {
+            HookLog("Rollback: suppressed stale uModel::Motion free "
+                    "motion=0x%llX allocation=0x%llX block=0x%llX owner=0x%llX "
+                    "caller=0x%llX count=%ld\n",
+                    motion, allocation, block, owner,
+                    (uint64_t)__builtin_return_address(0), count);
+        }
+        *allocationSlot = 0;
+    }
+
+    g_originalUModelMotionDtor(motion);
+    // Native leaves this dead pointer behind; clear it so repeated retirement
+    // of a stale model cannot free the same allocation again.
+    *allocationSlot = 0;
+}
 
 static bool IsLiveCharacterModel(uint64_t model)
 {
@@ -849,6 +895,19 @@ void Rollback_PatchBattleUiAllocationFailure()
 
 void Rollback_InitNativeNullGuards()
 {
+    const MH_STATUS motionDtorStatus = MH_CreateHook(
+        (LPVOID)_addr(FN_UMODEL_MOTION_DTOR), (LPVOID)&hkUModelMotionDtor,
+        (LPVOID*)&g_originalUModelMotionDtor);
+    if (motionDtorStatus == MH_OK) {
+        const MH_STATUS enableStatus =
+            MH_EnableHook((LPVOID)_addr(FN_UMODEL_MOTION_DTOR));
+        HookLog("Rollback: %s stale uModel::Motion free guard\n",
+                enableStatus == MH_OK ? "installed" : "failed to install");
+    } else {
+        HookLog("Rollback: failed to hook uModel::Motion destructor (%d)\n",
+                motionDtorStatus);
+    }
+
     const MH_STATUS modelBoundsStatus = MH_CreateHook(
         (LPVOID)_addr(0x140568F30), (LPVOID)&hkModelBoundsFromJoints,
         (LPVOID*)&g_originalModelBoundsFromJoints);
