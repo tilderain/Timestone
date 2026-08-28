@@ -31,18 +31,39 @@
 FILE* g_hookLog = nullptr;
 static SRWLOCK g_hookLogLock = SRWLOCK_INIT;
 static char g_hookLogFilename[MAX_PATH] = {};
+static char g_hookLogBuffer[64 * 1024] = {};
+static char g_hookConsoleBuffer[64 * 1024] = {};
+static bool g_hookConsoleBuffered = false;
+static ULONGLONG g_hookLogLastFlush = 0;
 static HMODULE g_asiModule = nullptr;
+
+static void HookLogConfigureConsoleLocked()
+{
+	if (!g_hookConsoleBuffered) {
+		g_hookConsoleBuffered = setvbuf(stdout, g_hookConsoleBuffer, _IOFBF,
+		                                 sizeof(g_hookConsoleBuffer)) == 0;
+	}
+}
+
+static void HookLogFlushLocked()
+{
+	if (g_hookLog)
+		fflush(g_hookLog);
+	fflush(stdout);
+	g_hookLogLastFlush = GetTickCount64();
+}
 
 void HookLogSetFile(const char* filename)
 {
 	AcquireSRWLockExclusive(&g_hookLogLock);
+	HookLogConfigureConsoleLocked();
 	if (strcmp(g_hookLogFilename, filename) == 0) {
 		ReleaseSRWLockExclusive(&g_hookLogLock);
 		return;
 	}
 	fflush(stderr);
 	if (g_hookLog) {
-		fflush(g_hookLog);
+		HookLogFlushLocked();
 		fclose(g_hookLog);
 		g_hookLog = nullptr;
 	}
@@ -53,8 +74,9 @@ void HookLogSetFile(const char* filename)
 		CopyFileA(g_hookLogFilename, filename, FALSE);
 	g_hookLog = fopen(filename, copiedHistory ? "a" : "w");
 	if (g_hookLog) {
+		setvbuf(g_hookLog, g_hookLogBuffer, _IOFBF, sizeof(g_hookLogBuffer));
 		fprintf(g_hookLog, "=== UMVC3Hook Log Start (switched to %s) ===\n", filename);
-		fflush(g_hookLog);
+		HookLogFlushLocked();
 	}
 	// Also redirect stderr to the new log file for Wine crash logs
 	// Use append mode so it doesn't truncate what g_hookLog just wrote
@@ -67,8 +89,7 @@ bool HookLogCreateAlias(const char* filename)
 {
 	AcquireSRWLockExclusive(&g_hookLogLock);
 	fflush(stderr);
-	if (g_hookLog)
-		fflush(g_hookLog);
+	HookLogFlushLocked();
 	const bool created = g_hookLogFilename[0] &&
 		CreateHardLinkA(filename, g_hookLogFilename, nullptr);
 	ReleaseSRWLockExclusive(&g_hookLogLock);
@@ -79,21 +100,24 @@ void HookLog(const char* fmt, ...)
 {
 	//return;
 	AcquireSRWLockExclusive(&g_hookLogLock);
+	HookLogConfigureConsoleLocked();
 	va_list args;
 	va_start(args, fmt);
-
-	// Always print to console/debugger
-	vprintf(fmt, args);
+	vfprintf(stdout, fmt, args);
 	va_end(args);
 
-	// Also write to log file
 	if (g_hookLog) {
-		va_list args2;
-		va_start(args2, fmt);
-		vfprintf(g_hookLog, fmt, args2);
-		fflush(g_hookLog);
-		va_end(args2);
+		va_list fileArgs;
+		va_start(fileArgs, fmt);
+		vfprintf(g_hookLog, fmt, fileArgs);
+		va_end(fileArgs);
+
 	}
+	// Avoid a Wine console or disk write for every gameplay log line. Both CRT
+	// buffers still flush when full, with this timer limiting delayed output.
+	const ULONGLONG now = GetTickCount64();
+	if (now - g_hookLogLastFlush >= 1000)
+		HookLogFlushLocked();
 	ReleaseSRWLockExclusive(&g_hookLogLock);
 }
 
@@ -187,6 +211,10 @@ void HookLogWriteRecent(FILE* file)
 {
 	if (!file)
 		return;
+	if (TryAcquireSRWLockExclusive(&g_hookLogLock)) {
+		HookLogFlushLocked();
+		ReleaseSRWLockExclusive(&g_hookLogLock);
+	}
 
 	fprintf(file, "---- recent HookLog lines (up to 25) ----\n");
 	FILE* source = fopen(g_hookLogFilename, "rb");
@@ -258,7 +286,7 @@ void HookLogAppendFile(const char* filename, long offset)
 		size_t bytesRead = 0;
 		while ((bytesRead = fread(buffer, 1, sizeof(buffer), source)) != 0)
 			fwrite(buffer, 1, bytesRead, g_hookLog);
-		fflush(g_hookLog);
+		HookLogFlushLocked();
 	}
 	ReleaseSRWLockExclusive(&g_hookLogLock);
 	fclose(source);
