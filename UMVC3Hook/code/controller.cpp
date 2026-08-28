@@ -253,10 +253,10 @@ static uint32_t  g_recordedGameInput[2][RING_SIZE];
 
 // Delay/rollback settings — defined here (above IsFrameConfirmed) because the
 // startup-window confirmation check reads them.
-static int32_t   g_delayFrames     = 2;
+static int32_t   g_delayFrames     = 3;
 static int32_t   g_pendingDelayFrames = -1;
 static int32_t   g_pendingDelayEffectiveFrame = -1;
-static int32_t   g_rollbackFrames  = 8;
+static int32_t   g_rollbackFrames  = 7;
 static int32_t   g_pendingRollbackFrames = -1;
 static int32_t   g_pendingRollbackEffectiveFrame = -1;
 
