@@ -1326,7 +1326,10 @@ static bool ApplyP2Selection(HWND hDlg, const LaunchP2SelectionPacket& packet)
 // ---------------------------------------------------------------------------
 static LaunchOption ShowLaunchMenuWindow(bool battleSetupOnly, bool compactMode)
 {
+    HookLog("UMVC3Hook: Launch window setup begin compact=%d battleSetup=%d\n",
+            compactMode, battleSetupOnly);
     Updater_Init();
+    HookLog("UMVC3Hook: Updater startup check complete\n");
     g_isLaunching = false;
     g_battleSetupOnly = battleSetupOnly;
     g_compactMode = compactMode;
@@ -1365,7 +1368,10 @@ static LaunchOption ShowLaunchMenuWindow(bool battleSetupOnly, bool compactMode)
     g_dialogConfig.hostEnabled = false;
     g_dialogConfig.enetHost = nullptr;
     g_dialogConfig.enetPeer = nullptr;
-    SteamLobby_Initialize();
+    HookLog("UMVC3Hook: Initializing Steam lobby support\n");
+    const bool steamLobbyReady = SteamLobby_Initialize();
+    HookLog("UMVC3Hook: Steam lobby initialization %s\n",
+            steamLobbyReady ? "complete" : "unavailable");
     uint64_t inviteLobbyId = g_battleSetupOnly ? 0 : GetInviteLobbyId();
     if (inviteLobbyId) {
         HookLog("SteamLobby: received +connect_lobby invite for %llu\n",
@@ -1383,7 +1389,10 @@ static LaunchOption ShowLaunchMenuWindow(bool battleSetupOnly, bool compactMode)
     wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
     wc.hCursor = LoadCursor(NULL, IDC_ARROW);
 
-    RegisterClassA(&wc);
+    const ATOM windowClass = RegisterClassA(&wc);
+    if (!windowClass && GetLastError() != ERROR_CLASS_ALREADY_EXISTS)
+        HookLog("UMVC3Hook: Launch window class registration failed error=%lu\n",
+                GetLastError());
 
     WNDCLASSA chatClass = {};
     chatClass.lpfnWndProc = ChatWndProc;
@@ -1391,7 +1400,10 @@ static LaunchOption ShowLaunchMenuWindow(bool battleSetupOnly, bool compactMode)
     chatClass.lpszClassName = kChatWindowClass;
     chatClass.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
     chatClass.hCursor = LoadCursor(NULL, IDC_ARROW);
-    RegisterClassA(&chatClass);
+    const ATOM registeredChatClass = RegisterClassA(&chatClass);
+    if (!registeredChatClass && GetLastError() != ERROR_CLASS_ALREADY_EXISTS)
+        HookLog("UMVC3Hook: Chat window class registration failed error=%lu\n",
+                GetLastError());
 
     int w = g_compactMode ? 656 : 840;
     int h = g_compactMode ? 448 : (g_battleSetupOnly ? 430 : 780);
@@ -1406,10 +1418,23 @@ static LaunchOption ShowLaunchMenuWindow(bool battleSetupOnly, bool compactMode)
         NULL, NULL, hInst, NULL
     );
 
-    MSG msg = {};
-    while (GetMessage(&msg, NULL, 0, 0)) {
-        TranslateMessage(&msg);
-        DispatchMessage(&msg);
+    if (!hWnd) {
+        HookLog("UMVC3Hook: Launch window creation failed error=%lu; continuing normal launch\n",
+                GetLastError());
+        g_launchOption = LAUNCH_NORMAL;
+    } else {
+        HookLog("UMVC3Hook: Launch window created successfully\n");
+        MSG msg = {};
+        BOOL messageResult = 0;
+        while ((messageResult = GetMessage(&msg, NULL, 0, 0)) > 0) {
+            TranslateMessage(&msg);
+            DispatchMessage(&msg);
+        }
+        if (messageResult < 0) {
+            HookLog("UMVC3Hook: Launch window message loop failed error=%lu; continuing normal launch\n",
+                    GetLastError());
+            g_launchOption = LAUNCH_NORMAL;
+        }
     }
 
     UnregisterClassA(CLASS_NAME, hInst);

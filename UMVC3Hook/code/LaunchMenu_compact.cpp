@@ -5,6 +5,8 @@
 #include <cstdio>
 #include <cstring>
 
+extern void HookLog(const char* fmt, ...);
+
 namespace {
 
 void GetSettingsPath(char* path, size_t pathSize)
@@ -101,17 +103,23 @@ void CreateCompactLaunchMenuControls(HWND window,
 
 LaunchOption ShowLaunchMenu()
 {
-    if (!ConfirmLaunchDisclaimer()) return LAUNCH_CANCELLED;
+    HookLog("UMVC3Hook: Checking launch disclaimer\n");
+    if (!ConfirmLaunchDisclaimer()) {
+        HookLog("UMVC3Hook: Launch disclaimer declined or closed\n");
+        return LAUNCH_CANCELLED;
+    }
 
     char settingsPath[MAX_PATH] = {};
     GetSettingsPath(settingsPath, sizeof(settingsPath));
     if (GetPrivateProfileIntA("General", "UseRegularLaunchMenu", 0,
                               settingsPath) != 0) {
+        HookLog("UMVC3Hook: Opening regular launch menu\n");
         const LaunchOption result = ShowRegularLaunchMenu(false);
         if (!TakeRegularCompactRequest()) return result;
     }
 
     for (;;) {
+        HookLog("UMVC3Hook: Opening compact launch menu\n");
         LaunchOption result = ShowCompactLaunchMenu();
         if (TakeCompactAdvancedRequest()) {
             result = ShowRegularLaunchMenu(false);
