@@ -34,8 +34,37 @@ struct DownloadProgress {
     HWND source = nullptr;
     HWND status = nullptr;
     HWND bar = nullptr;
+    HFONT font = nullptr;
     ULONGLONG startedAt = 0;
 };
+
+BOOL CALLBACK SetProgressControlFont(HWND control, LPARAM font)
+{
+    SendMessageW(control, WM_SETFONT, font, TRUE);
+    return TRUE;
+}
+
+void ApplyProgressWindowFont(DownloadProgress& progress)
+{
+    HDC dc = GetDC(progress.window);
+    const int dpi = dc ? GetDeviceCaps(dc, LOGPIXELSY) : 96;
+    if (dc) ReleaseDC(progress.window, dc);
+
+    LOGFONTW font = {};
+    font.lfHeight = -MulDiv(10, dpi, 72);
+    font.lfWeight = FW_NORMAL;
+    font.lfCharSet = DEFAULT_CHARSET;
+    font.lfQuality = CLEARTYPE_QUALITY;
+    swprintf(font.lfFaceName, LF_FACESIZE, L"MS Shell Dlg 2");
+    progress.font = CreateFontIndirectW(&font);
+    if (!progress.font)
+        return;
+
+    SendMessageW(progress.window, WM_SETFONT,
+        reinterpret_cast<WPARAM>(progress.font), TRUE);
+    EnumChildWindows(progress.window, SetProgressControlFont,
+        reinterpret_cast<LPARAM>(progress.font));
+}
 
 void PumpWindowMessages()
 {
@@ -88,6 +117,7 @@ bool CreateProgressWindow(DownloadProgress& progress)
     progress.status = CreateWindowExW(0, L"STATIC", L"Preparing download...",
         WS_CHILD | WS_VISIBLE, 20, 84, 450, 20,
         progress.window, nullptr, instance, nullptr);
+    ApplyProgressWindowFont(progress);
     SendMessageW(progress.bar, PBM_SETRANGE32, 0, 1000);
     progress.startedAt = GetTickCount64();
     UpdateWindow(progress.window);
@@ -134,6 +164,9 @@ void CloseProgressWindow(DownloadProgress& progress)
     if (progress.window)
         DestroyWindow(progress.window);
     progress.window = nullptr;
+    if (progress.font)
+        DeleteObject(progress.font);
+    progress.font = nullptr;
     PumpWindowMessages();
 }
 
