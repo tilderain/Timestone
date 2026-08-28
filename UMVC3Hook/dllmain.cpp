@@ -743,6 +743,20 @@ static HRESULT __stdcall hkResetDevice(
 
 	HRESULT result = oResetDevice(pDevice, presentationParameters);
 	HookLog("D3D9: Reset returned 0x%08X\n", (uint32_t)result);
+	if (result == D3DERR_INVALIDCALL && presentationParameters &&
+		presentationParameters->PresentationInterval !=
+			D3DPRESENT_INTERVAL_IMMEDIATE) {
+		D3DPRESENT_PARAMETERS retryParameters = *presentationParameters;
+		retryParameters.Windowed = TRUE;
+		retryParameters.FullScreen_RefreshRateInHz = 0;
+		retryParameters.PresentationInterval = D3DPRESENT_INTERVAL_IMMEDIATE;
+		HookLog("D3D9: retrying failed Reset with VSync disabled\n");
+		result = oResetDevice(pDevice, &retryParameters);
+		HookLog("D3D9: VSync-disabled Reset returned 0x%08X\n",
+			(uint32_t)result);
+		if (SUCCEEDED(result))
+			*presentationParameters = retryParameters;
+	}
 	if (FAILED(result)) {
 		/// TRACE LOG
 		D3DDEVICE_CREATION_PARAMETERS creation = {};
