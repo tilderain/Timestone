@@ -118,7 +118,7 @@ uint64_t GetObjectDti(uint64_t object)
     uint64_t vtable = *(uint64_t*)object;
     if (IsGameImageRange(vtable, 0x28)) {
         auto getDti = (uint64_t(__fastcall*)(uint64_t))(*(uint64_t*)(vtable + 0x20));
-        if (getDti && IsGameImageRange((uint64_t)getDti, 1)) {
+        if (getDti && IsExecutableAddress((uint64_t)getDti)) {
             uint64_t dti = getDti(object);
             return IsGameDti(dti) ? dti : 0;
         }

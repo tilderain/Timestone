@@ -831,7 +831,8 @@ void Rollback_BeforeShotHitboxUpdate(
 {
     RepairPrickleBoardMotionBindings(shot, recipe);
     RepairResimPendulumModel(shot, recipe);
-    if (recipe) {
+    if (recipe && recipe->concrete.dti ==
+            (uint64_t)_addr(DTI_USHOT_VULCAN_ROCKET_LAUNCHER_EXPLODE)) {
         Rollback_RepairNemesisExplosionAttack(
             shot, (void*)recipe->initParam, recipe->spawnAttackInfoId);
     }
