@@ -162,7 +162,8 @@ PERF_FLAGS := -O3 -flto=auto -fuse-linker-plugin -fipa-pta \
 CXXFLAGS  := $(PERF_FLAGS) -std=c++20 -fpermissive -MMD -MP $(DEFINES) $(INCLUDES) -DUMVC3HOOK_VERSION=\"$(VERSION)\" -DUMVC3HOOK_GIT_COMMIT=\"$(GIT_COMMIT)\" -DUMVC3HOOK_GIT_DIRTY=$(GIT_DIRTY) -Wall -Wno-unused-variable -Wno-unused-function
 CFLAGS    := $(PERF_FLAGS) -MMD -MP $(DEFINES) $(INCLUDES) -Wall -Wno-unused-variable
 LDFLAGS   := -shared -static-libgcc -static-libstdc++ -flto=auto \
-	-fuse-linker-plugin -Wl,--gc-sections -Wl,-O2 -Wl,-Map,$(MAP_FILE)
+	-fuse-linker-plugin -Wl,--gc-sections -Wl,-O2 -Wl,-Map,$(MAP_FILE) \
+	-static   # -shared -static: the driver's implicit -lmcfgthread then resolves statically (mingw mcf thread model)
 STRIP_ASI := 1
 LIBS      := \
 	-ld3d9 \
@@ -227,7 +228,7 @@ $(UPDATER_OUTPUT): tools/timestone_updater.cpp Makefile
 		-DWIN32_LEAN_AND_MEAN -DNOMINMAX \
 		-D_WIN32_WINNT=0x0601 -DWINVER=0x0601 \
 		-DTIMESTONE_VERSION=\"$(VERSION)\" \
-		-static-libgcc -static-libstdc++ -mwindows \
+		-static -mwindows \
 		-Wl,--gc-sections -Wl,-s -o $@ $< \
 		-lwinhttp -lbcrypt -lcomctl32 -lshell32 -lversion -lole32 -loleaut32 -luuid
 	@echo "=== Built: $(UPDATER_OUTPUT) ==="
