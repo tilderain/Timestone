@@ -108,6 +108,8 @@ jobs:
     needs: [build, sign]
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
+    env:
+      GH_REPO: ${{ github.repository }}   # gh ignores GITHUB_REPOSITORY; needs this or --repo
     outputs:
       created: ${{ steps.check.outputs.exists == 'false' }}
     steps:
@@ -121,7 +123,10 @@ jobs:
       env:
         GH_TOKEN: ${{ github.token }}
       run: |
-        if gh release list --json tagName --jq '.[].tagName' | grep -qx "v${{ needs.build.outputs.version }}"; then
+        set -e
+        TAGS="$(gh release list --json tagName --jq '.[].tagName')"
+        echo "existing release tags: $TAGS"
+        if printf '%s\n' "$TAGS" | grep -qx "v${{ needs.build.outputs.version }}"; then
           echo "exists=true" >> "$GITHUB_OUTPUT"
         else
           echo "exists=false" >> "$GITHUB_OUTPUT"
@@ -166,6 +171,8 @@ jobs:
     needs: [build, release-draft]
     if: ${{ github.event_name == 'push' && needs.release-draft.outputs.created == 'true' }}
     runs-on: ubuntu-latest
+    env:
+      GH_REPO: ${{ github.repository }}   # gh ignores GITHUB_REPOSITORY; needs this or --repo
     environment: prerelease   # pauses for manual approval — required reviewers in repo settings
     steps:
     - name: Publish draft as prerelease
@@ -179,6 +186,8 @@ jobs:
     needs: [build, prerelease, release-draft]
     if: ${{ github.event_name == 'push' && needs.release-draft.outputs.created == 'true' }}
     runs-on: ubuntu-latest
+    env:
+      GH_REPO: ${{ github.repository }}   # gh ignores GITHUB_REPOSITORY; needs this or --repo
     environment: release   # pauses for manual approval — required reviewers in repo settings
     steps:
     - name: Promote prerelease to full release
