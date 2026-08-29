@@ -4,6 +4,7 @@
 
 #include <cstdio>
 #include <cstring>
+#include <cstdint>
 
 extern void HookLog(const char* fmt, ...);
 
@@ -16,6 +17,24 @@ constexpr char SETTINGS_CLASS[] = "TimestoneAdvancedConfig";
 
 bool g_settingsLoaded = false;
 bool g_runSingleThreaded = false;
+
+template <size_t N>
+bool PatchBytes(uintptr_t address, const uint8_t (&expected)[N],
+                const uint8_t (&replacement)[N])
+{
+    uint8_t* target = reinterpret_cast<uint8_t*>(_addr(address));
+    if (memcmp(target, replacement, N) == 0) return true;
+    if (memcmp(target, expected, N) != 0) return false;
+
+    DWORD oldProtect = 0;
+    if (!VirtualProtect(target, N, PAGE_EXECUTE_READWRITE, &oldProtect))
+        return false;
+    memcpy(target, replacement, N);
+    FlushInstructionCache(GetCurrentProcess(), target, N);
+    DWORD ignored = 0;
+    VirtualProtect(target, N, oldProtect, &ignored);
+    return true;
+}
 
 void GetSettingsPath(char* path, size_t pathSize)
 {
@@ -173,6 +192,43 @@ void ShowAdvancedConfigModal(HWND owner)
     SetFocus(owner);
 }
 
+bool PrepareAdvancedLaunchConfig()
+{
+    LoadSettings();
+    if (!g_runSingleThreaded) return true;
+
+    // sMain__dispatchAndWaitJobs normally queues work to the delay-job ring and
+    // waits for workers. Use its native inline branch before suppressing worker
+    // creation, otherwise an asynchronous batch would wait forever.
+    static constexpr uint8_t DELAY_DISPATCH[] = {
+        0x0F, 0x84, 0xBB, 0x00, 0x00, 0x00,
+    };
+    static constexpr uint8_t DELAY_INLINE[] = {
+        0xE9, 0xBC, 0x00, 0x00, 0x00, 0x90,
+    };
+    if (!PatchBytes(0x14095ECD9, DELAY_DISPATCH, DELAY_INLINE)) {
+        HookLog("Advanced Config: failed to force delay jobs inline\n");
+        return false;
+    }
+
+    // sMain's constructor passes the detected logical CPU count in EDX. Zero
+    // is a supported input and makes createDelayJobThread skip every worker.
+    static constexpr uint8_t LOAD_DELAY_THREAD_COUNT[] = {
+        0x8B, 0x97, 0x88, 0x00, 0x04, 0x00,
+    };
+    static constexpr uint8_t ZERO_DELAY_THREAD_COUNT[] = {
+        0x33, 0xD2, 0x90, 0x90, 0x90, 0x90,
+    };
+    if (!PatchBytes(0x14051FC6D, LOAD_DELAY_THREAD_COUNT,
+                    ZERO_DELAY_THREAD_COUNT)) {
+        HookLog("Advanced Config: failed to disable delay-job workers\n");
+        return false;
+    }
+
+    HookLog("Advanced Config: delay jobs forced inline; workers disabled\n");
+    return true;
+}
+
 bool ApplyAdvancedLaunchConfig()
 {
     LoadSettings();
@@ -183,6 +239,6 @@ bool ApplyAdvancedLaunchConfig()
 
     using SetJobThreadNumFn = void(__fastcall*)(uint64_t, uint32_t);
     ((SetJobThreadNumFn)_addr(0x140522450))(sMain, 1);
-    HookLog("Advanced Config: forced sMain regular jobs to one thread\n");
+    HookLog("Advanced Config: regular jobs forced inline\n");
     return true;
 }

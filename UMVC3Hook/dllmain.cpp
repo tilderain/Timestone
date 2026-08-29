@@ -10,6 +10,7 @@
 #include "code/eSettingsManager.h"
 #include "code/UMVC3Camera.h"
 #include "code/LaunchMenu.h"
+#include "code/LaunchMenu_settings.h"
 #include "code/framestepper.h"
 #include "code/escmenu_imgui.h"
 #include "code/trainingboot.h"
@@ -1790,6 +1791,7 @@ void OnInitializeHook()
 		ExitProcess(0);
 		return;
 	}
+	PrepareAdvancedLaunchConfig();
 	EnableReturnToLaunchMenuOnExit();
 
 	//if (opt == LAUNCH_TRAINING || opt == LAUNCH_DUAL_TRAINING) {

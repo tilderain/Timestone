@@ -105,6 +105,17 @@ argument. Type 2 is not proven to mean a persistent or repeating job.
 This machinery is generic. Describing it specifically as graphics loading,
 texture streaming, or cleanup requires tracing individual producers.
 
+The advanced `EntireGameSingleThreaded` option forces
+`sMain__dispatchAndWaitJobs @ 0x14095EC90` through its existing inline callback
+branch before native startup. It also changes the logical-processor argument at
+the `sMain` constructor's `sMain__createDelayJobThread` call to zero, which the
+native creation function handles by creating no delay workers. The inline patch
+must be installed first: suppressing workers while retaining ring submission
+would leave callers waiting forever for unconsumed jobs.
+
+The same option sets the regular-job count to one on the first game tick. It
+does not disable the dedicated rendering thread or plugin-owned threads.
+
 ## Plugin Threads
 
 The plugin has two explicit thread roles:
