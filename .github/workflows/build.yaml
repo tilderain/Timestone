@@ -2,9 +2,9 @@ name: build
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [ "movement" ]
   pull_request:
-    branches: [ "main" ]
+    branches: [ "movement" ]
 
 permissions:
   contents: write
