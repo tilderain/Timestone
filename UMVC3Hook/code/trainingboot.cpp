@@ -105,10 +105,6 @@ static constexpr uintptr_t MTOBJECT_SET_FLAG_2000              = 0x1402545A0;
 static constexpr uint32_t STORAGE_UNIT_CATEGORY                = 0x19;
 static constexpr uintptr_t STORAGE_RESULT_OFFSET               = 0x4C;
 
-// sPad__initSlotInner receives the embedded Map object, not the slot base.
-static constexpr uintptr_t PAD_SLOT_BASE_OFFSET               = 0x58;
-static constexpr uintptr_t PAD_SLOT_MAP_OFFSET                = 0x198;
-
 // Offsets within sMvc3Manager:
 static constexpr uintptr_t MANAGER_PAD_ASSIGN_OFFSET         = 0x140;   // int32_t[4] pad-slot→player index (-1=unassigned, 0=P1, 1=P2)
 
@@ -515,15 +511,10 @@ static void SetupPadToPlayerMapping()
         *(uint8_t*)(sPad + PAD_KEYBOARD_BLOCKED_1) = 0;
         *(uint8_t*)(sPad + PAD_KEYBOARD_BLOCKED_2) = 0;
 
-        // Reapply the native P1 keyboard translation table. The pad
-        // constructor normally does this before savedata/controller setup.
-        typedef void(__fastcall* InitSlotInner_t)(uint64_t);
-        InitSlotInner_t initSlotInner = (InitSlotInner_t)_addr(0x1405142A0);
-        uint64_t p1Map = sPad + PAD_SLOT_BASE_OFFSET + PAD_SLOT_MAP_OFFSET;
-        initSlotInner(p1Map);
+        // Preserve the live per-device map. Its constructor default initializer
+        // would overwrite controller assignments loaded earlier in startup.
         HookLog("TrainingBoot: Keyboard-disable flags cleared (pad+0x%x, pad+0x%x)\n",
                 PAD_KEYBOARD_BLOCKED_1, PAD_KEYBOARD_BLOCKED_2);
-        HookLog("TrainingBoot: Reinitialized P1 keyboard/controller map\n");
 
         // Force slot 1 (P2) device-active flags to non-zero so the game thinks
         // a physical controller is plugged in for P2. This prevents the
