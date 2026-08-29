@@ -144,6 +144,12 @@ jobs:
         GH_TOKEN: ${{ github.token }}
       run: |
         set -e
+        # PR dev prereleases (vX-dev-prN) refresh on every push; only the main
+        # release is guarded against re-creation once a version exists.
+        if [ "${{ github.event_name }}" = "pull_request" ]; then
+          echo "exists=false" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
         TAGS="$(gh release list --json tagName --jq '.[].tagName')"
         echo "existing release tags: $TAGS"
         if printf '%s\n' "$TAGS" | grep -qx "v${{ needs.build.outputs.tag }}"; then
