@@ -17,6 +17,7 @@ jobs:
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
     outputs:
       version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.tag.outputs.tag }}
     steps:
     - uses: actions/checkout@v4
 
@@ -35,6 +36,15 @@ jobs:
       run: |
         VERSION="$(awk '/^VERSION[[:space:]]*:=/ {print $3; exit}' Makefile)"
         echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+    - name: Compute release tag
+      id: tag
+      run: |
+        if [ "${{ github.event_name }}" = "pull_request" ]; then
+          echo "tag=v${{ steps.version.outputs.version }}-dev-pr${{ github.event.pull_request.number }}" >> "$GITHUB_OUTPUT"
+        else
+          echo "tag=v${{ steps.version.outputs.version }}" >> "$GITHUB_OUTPUT"
+        fi
 
     - name: Build package
       run: nix build .#timestone
@@ -115,7 +125,7 @@ jobs:
 
   release-draft:
     needs: [build, sign]
-    if: github.event_name == 'push'
+    if: ${{ github.event_name == 'push' || github.event_name == 'pull_request' }}   # PR builds get a -dev-prN prerelease
     runs-on: ubuntu-latest
     env:
       GH_REPO: ${{ github.repository }}   # gh ignores GITHUB_REPOSITORY; needs this or --repo
@@ -136,7 +146,7 @@ jobs:
         set -e
         TAGS="$(gh release list --json tagName --jq '.[].tagName')"
         echo "existing release tags: $TAGS"
-        if printf '%s\n' "$TAGS" | grep -qx "v${{ needs.build.outputs.version }}"; then
+        if printf '%s\n' "$TAGS" | grep -qx "v${{ needs.build.outputs.tag }}"; then
           echo "exists=true" >> "$GITHUB_OUTPUT"
         else
           echo "exists=false" >> "$GITHUB_OUTPUT"
@@ -146,8 +156,8 @@ jobs:
       if: steps.check.outputs.exists == 'false'
       uses: softprops/action-gh-release@v3   # v2 is deprecated (Node 20)
       with:
-        tag_name: v${{ needs.build.outputs.version }}
-        name: Timestone ${{ needs.build.outputs.version }}
+        tag_name: v${{ needs.build.outputs.tag }}
+        name: Timestone ${{ needs.build.outputs.tag }}
         files: dist/Timestone.zip
         body: |
           Please join the discord if you are going to test this!!!
@@ -190,5 +200,5 @@ jobs:
       env:
         GH_TOKEN: ${{ github.token }}
       run: |
-        VERSION="v${{ needs.build.outputs.version }}"
-        gh release edit "$VERSION" --prerelease=false
+        TAG="v${{ needs.build.outputs.tag }}"
+        gh release edit "$TAG" --prerelease=false
