@@ -455,6 +455,30 @@ static constexpr uintptr_t GET_CURRENT_INPUT_ADDR = 0x1402B3700;
 typedef void(__fastcall* Move_t)(void*);
 static Move_t oMove = nullptr;
 
+static float GetGameUpdatesPerSecond(int32_t currentFrame)
+{
+    static ULONGLONG sampleStart = 0;
+    static int32_t sampleFrame = -1;
+    static float updatesPerSecond = 0.0f;
+
+    const ULONGLONG now = GetTickCount64();
+    if (sampleStart == 0 || currentFrame < sampleFrame) {
+        sampleStart = now;
+        sampleFrame = currentFrame;
+        updatesPerSecond = 0.0f;
+        return updatesPerSecond;
+    }
+
+    const ULONGLONG elapsedMs = now - sampleStart;
+    if (elapsedMs >= 1000) {
+        updatesPerSecond = static_cast<float>(currentFrame - sampleFrame) *
+                           (1000.0f / static_cast<float>(elapsedMs));
+        sampleStart = now;
+        sampleFrame = currentFrame;
+    }
+    return updatesPerSecond;
+}
+
 // Forward declarations
 static void CaptureNetInput();
 static bool IsTrainingMode();
@@ -1729,7 +1753,8 @@ void FrameStepper_Draw()
         // sReplay advances during oMove, but processFrameInput records under the
         // frame value from the start of that tick. Display the input that made
         // the currently rendered frame, not the device state for the next tick.
-        int32_t frame = Controller_GetNetFrameCount() - 1;
+        const int32_t currentFrame = Controller_GetNetFrameCount();
+        int32_t frame = currentFrame - 1;
         uint32_t p1 = Controller_GetExpectedInput(0, frame);
         uint32_t p2 = Controller_GetExpectedInput(1, frame);
 
@@ -1768,8 +1793,9 @@ void FrameStepper_Draw()
                 ImGui::SetCursorPosX(roleLabelCenterX - ImGui::CalcTextSize(roleLabel).x * 0.5f);
                 ImGui::TextColored(color, "%s", roleLabel);
                 ImGui::TextColored(color, "Ping: %ums", Netplay_GetRTT() / 2);
-                ImGui::TextColored(color, "Frame: %d", Controller_GetNetFrameCount());
-                ImGui::TextColored(color, "FPS: %.1f", ImGui::GetIO().Framerate);
+                ImGui::TextColored(color, "Frame: %d", currentFrame);
+                ImGui::TextColored(color, "FPS: %.1f",
+                                   GetGameUpdatesPerSecond(currentFrame));
                 ImGui::TextColored(color, "Delay: %d  Rollback: %d", curDelay, curRollback);
 
                 // Keep each control row vertical so the overlay stays compact in width.
