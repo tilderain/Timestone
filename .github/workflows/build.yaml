@@ -1,0 +1,40 @@
+name: build
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: [self-hosted, nixos]
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Extract version
+      id: version
+      run: |
+        VERSION="$(awk '/^VERSION[[:space:]]*:=/ {print $3; exit}' Makefile)"
+        echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+    - name: Build package
+      run: nix build .#timestone
+
+    - name: Stage release assets
+      run: |
+        mkdir -p dist
+        cp -L result/Timestone.zip result/Timestone.asi result/TimestoneUpdater.exe dist/
+
+    - name: Create GitHub release
+      if: github.event_name == 'push'
+      uses: softprops/action-gh-release@v2
+      with:
+        tag_name: v${{ steps.version.outputs.version }}
+        name: Timestone ${{ steps.version.outputs.version }}
+        files: dist/*
+        generate_release_notes: true

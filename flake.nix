@@ -34,7 +34,7 @@
           buildPhase = "make clean && make release";
           installPhase = ''
             mkdir -p "$out"
-            cp Timestone.asi TimestoneUpdater.exe dinput8.dll "$out/"
+            cp Timestone.asi TimestoneUpdater.exe dinput8.dll Timestone.zip "$out/"
           '';
         };
       });
