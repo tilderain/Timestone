@@ -7,12 +7,15 @@ on:
     branches: [ "movement" ]
 
 permissions:
-  contents: write
+  contents: write   # softprops/action-gh-release
+  actions: write    # actions/upload-artifact & download-artifact (explicit permissions zero unlisted scopes)
 
 jobs:
   build:
     runs-on: [self-hosted, nixos]
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
     - uses: actions/checkout@v4
 
@@ -30,11 +33,86 @@ jobs:
         mkdir -p dist
         cp -L result/Timestone.zip result/Timestone.asi result/TimestoneUpdater.exe dist/
 
+    - name: Upload unsigned artifacts
+      uses: actions/upload-artifact@v7
+      with:
+        name: timestone-unsigned
+        path: dist/
+        if-no-files-found: error
+
+  sign:
+    needs: build
+    runs-on: windows-2025
+    steps:
+    - uses: actions/download-artifact@v8
+      with:
+        name: timestone-unsigned
+        path: dist
+
+    - name: Unpack zip and stage .asi as .dll for signing
+      shell: pwsh
+      run: |
+        Expand-Archive -Path dist\Timestone.zip -DestinationPath work -Force
+        Copy-Item work\Timestone.asi work\Timestone.dll -Force   # .asi is a PE DLL; not in ArtifactSigning's type list
+
+    - name: Sign with Azure Artifact Signing
+      uses: azure/artifact-signing-action@v2
+      with:
+        endpoint: https://eus.codesigning.azure.net/
+        signing-account-name: Timestone
+        certificate-profile-name: TimestoneTesting
+        azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+        azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
+        azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+        files-folder: ${{ github.workspace }}\work
+        files-folder-filter: dll,exe
+        file-digest: SHA256
+        timestamp-rfc3161: http://timestamp.acs.microsoft.com
+        timestamp-digest: SHA256
+
+    - name: Verify signatures
+      shell: pwsh
+      run: |
+        $files = Get-ChildItem work\*.dll, work\*.exe
+        foreach ($f in $files) {
+          $sig = Get-AuthenticodeSignature $f.FullName
+          if ($sig.Status -eq 'NotSigned' -or $sig.Status -eq 'HashMismatch') {
+            throw "Signature missing/invalid for $($f.Name): $($sig.Status)"
+          }
+          Write-Host "Signed: $($f.Name) status=$($sig.Status) cert=$($sig.SignerCertificate.Subject)"
+        }
+
+    - name: Restore .asi name and rebuild zip
+      shell: pwsh
+      run: |
+        Copy-Item work\Timestone.dll dist\Timestone.asi -Force
+        Copy-Item work\dinput8.dll, work\TimestoneUpdater.exe dist\ -Force
+        Remove-Item dist\Timestone.zip -Force
+        Compress-Archive -Path dist\dinput8.dll, dist\Timestone.asi, dist\TimestoneUpdater.exe -DestinationPath dist\Timestone.zip
+
+    - name: Upload signed artifacts
+      uses: actions/upload-artifact@v7
+      with:
+        name: timestone-signed
+        path: dist/
+        if-no-files-found: error
+
+  release:
+    needs: [build, sign]   # build needed for outputs.version
+    if: github.event_name == 'push'
+    runs-on: [self-hosted, nixos]
+    permissions:
+      contents: write   # job-level overrides workflow-level; must re-declare
+    steps:
+    - uses: actions/download-artifact@v8
+      with:
+        name: timestone-signed
+        path: dist
+
     - name: Create GitHub release
-      if: github.event_name == 'push'
       uses: softprops/action-gh-release@v2
       with:
-        tag_name: v${{ steps.version.outputs.version }}
-        name: Timestone ${{ steps.version.outputs.version }}
+        tag_name: v${{ needs.build.outputs.version }}
+        name: Timestone ${{ needs.build.outputs.version }}
         files: dist/*
         generate_release_notes: true
