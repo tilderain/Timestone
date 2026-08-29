@@ -125,7 +125,7 @@ jobs:
     steps:
     - uses: actions/download-artifact@v8
       with:
-        name: timestone-signed
+        name: Timestone-v${{ needs.build.outputs.version }}
         path: dist
 
     - name: Check for existing release
