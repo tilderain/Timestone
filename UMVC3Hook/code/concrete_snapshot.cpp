@@ -887,6 +887,23 @@ static bool RestoreGeneratorEmissionState(
     }
     if (generators.size() != state.generatorEmissionStates.size()) return false;
 
+    // Mode 0 enters cParticleGenerator__shiftHistoryBuffer, whose unsigned
+    // loop requires particle+0x9D to be nonzero. A fresh factory graph can
+    // contain a not-yet-initialized mode-0 particle; rewinding the generator
+    // phase would move it immediately and underflow the history index.
+    for (uint64_t current : generators) {
+        uint64_t particle = *(uint64_t*)(current + 0xE0);
+        uint32_t count = 0;
+        while (particle && count++ < 0x10000) {
+            if (*(uint8_t*)(particle + 0x9C) == 0 &&
+                *(uint8_t*)(particle + 0x9D) == 0) {
+                return false;
+            }
+            particle = *(uint64_t*)(particle + 0x08);
+        }
+        if (particle) return false;
+    }
+
     for (size_t index = 0; index < generators.size(); ++index) {
         generator = generators[index];
         const auto& saved = state.generatorEmissionStates[index];
