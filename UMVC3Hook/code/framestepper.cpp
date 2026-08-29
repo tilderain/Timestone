@@ -1238,7 +1238,7 @@ static void CloseGame()
 {
     if (g_hWnd && PostMessageW(g_hWnd, WM_CLOSE, 0, 0))
         return;
-    CleanupNetworkOnExit();
+    PrepareForGameExit();
     ExitProcess(0);
 }
 

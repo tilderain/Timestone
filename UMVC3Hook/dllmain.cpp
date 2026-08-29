@@ -579,10 +579,30 @@ fontConfig.SizePixels     = 12.0f; // use exact integer sizes: 9, 10, 12, 14, 16
 	}
 }
 
+static BOOL WINAPI ConsoleControlHandler(DWORD controlType)
+{
+	switch (controlType)
+	{
+	case CTRL_CLOSE_EVENT:
+		PrepareForGameExit();
+		return TRUE;
+	case CTRL_LOGOFF_EVENT:
+	case CTRL_SHUTDOWN_EVENT:
+		DisableReturnToLaunchMenuOnExit();
+		CleanupNetworkOnExit();
+		return TRUE;
+	default:
+		return FALSE;
+	}
+}
+
 LRESULT __stdcall WndProc(const HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 {
-    if (uMsg == WM_CLOSE || uMsg == WM_DESTROY ||
-        (uMsg == WM_ENDSESSION && wParam != FALSE))
+    if (uMsg == WM_QUERYENDSESSION)
+        DisableReturnToLaunchMenuOnExit();
+    if (uMsg == WM_CLOSE || uMsg == WM_DESTROY)
+        PrepareForGameExit();
+    else if (uMsg == WM_ENDSESSION && wParam != FALSE)
         CleanupNetworkOnExit();
 
     switch (uMsg)
@@ -1644,6 +1664,9 @@ void OnInitializeHook()
 		freopen("CONIN$", "r", stdin);
 		freopen("CONOUT$", "w", stdout);
 	}
+	if (!SetConsoleCtrlHandler(ConsoleControlHandler, TRUE))
+		HookLog("UMVC3Hook: Failed to install console close handler (error %lu)\n",
+			GetLastError());
 
 	HookLog("UMVC3Hook::OnInitializeHook() | Begin!\n");
 	WarnAboutOtherInstalledAsiModules();
@@ -1767,6 +1790,7 @@ void OnInitializeHook()
 		ExitProcess(0);
 		return;
 	}
+	EnableReturnToLaunchMenuOnExit();
 
 	//if (opt == LAUNCH_TRAINING || opt == LAUNCH_DUAL_TRAINING) {
 		// Patch aTitleLogo__processBootSequence @ 0x1402179ab: change JZ (0x74) to JMP (0xEB).

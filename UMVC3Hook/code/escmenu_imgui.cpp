@@ -20,7 +20,7 @@ void ExitGame()
     HWND window = GetForegroundWindow();
     if (window && PostMessageW(window, WM_CLOSE, 0, 0))
         return;
-    CleanupNetworkOnExit();
+    PrepareForGameExit();
     ExitProcess(0);
 }
 

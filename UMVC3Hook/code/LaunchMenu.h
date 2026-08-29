@@ -94,3 +94,13 @@ void SaveRosterToIni(const int32_t chars[2][3],
 
 // Idempotently notify the peer, leave Steam, and close the active network session.
 void CleanupNetworkOnExit();
+
+// Arm a fresh launch-menu process after gameplay has been selected. Dual
+// training is intentionally excluded because its two processes exit independently.
+void EnableReturnToLaunchMenuOnExit();
+
+// Perform one-time exit cleanup and start the fresh launch-menu process when armed.
+void PrepareForGameExit();
+
+// Prevent a relaunch when Windows is ending the user session.
+void DisableReturnToLaunchMenuOnExit();
