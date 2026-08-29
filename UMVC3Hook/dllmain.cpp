@@ -35,7 +35,6 @@ static SRWLOCK g_hookLogLock = SRWLOCK_INIT;
 static char g_hookLogFilename[MAX_PATH] = {};
 static std::vector<char> g_hookLogBuffer;
 static std::string g_hookLogSnapshotFilename;
-static char g_hookConsoleBuffer[64 * 1024] = {};
 static bool g_hookConsoleOutputEnabled = false;
 static HMODULE g_asiModule = nullptr;
 
@@ -1815,8 +1814,7 @@ void OnInitializeHook()
 		AllocConsole();
 		freopen("CONIN$", "r", stdin);
 		freopen("CONOUT$", "w", stdout);
-		setvbuf(stdout, g_hookConsoleBuffer, _IOFBF,
-			sizeof(g_hookConsoleBuffer));
+		setvbuf(stdout, nullptr, _IONBF, 0);
 		g_hookConsoleOutputEnabled = true;
 	}
 	if (!SetConsoleCtrlHandler(ConsoleControlHandler, TRUE))
