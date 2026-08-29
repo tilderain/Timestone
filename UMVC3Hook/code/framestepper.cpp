@@ -40,6 +40,7 @@ using namespace Memory::VP;
 
 // HookLog from dllmain.cpp
 extern void HookLog(const char* fmt, ...);
+extern void HookLogFlush();
 extern void ChrSelImGui_Update();
 extern bool ChrSelImGui_ApplyRestart(int32_t targetFrame);
 extern bool ChrSelImGui_TakeFullTransitionRequested();
@@ -549,6 +550,7 @@ static void __fastcall HookedMove(void* sMvc3Main)
                 return;
             }
         }
+        HookLogFlush();
         const bool fullRosterTransition =
             ChrSelImGui_TakeFullTransitionRequested();
         static constexpr uintptr_t MVC3_MANAGER_PTR = 0x140D510A0;
