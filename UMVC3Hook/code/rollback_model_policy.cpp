@@ -813,7 +813,7 @@ void Rollback_ForgetShotModelPolicy(void* shot)
     g_pendulumNativeMotionReady.erase(shot);
 }
 
-uint32_t Rollback_AfterShotSpawn(void* shot, void* parent)
+void Rollback_AfterShotSpawn(void* shot, void* parent)
 {
     RepairResimRepulsorBlastMotion(shot);
     RepairResimDogMissileMotion(shot);
@@ -823,7 +823,14 @@ uint32_t Rollback_AfterShotSpawn(void* shot, void* parent)
         if (dti == (uint64_t)_addr(0x140D4C4C8))
             g_resimSpawnedPendulums.insert(shot);
     }
-    return Rollback_RepairNemesisExplosionAttack(shot, parent);
+    uint64_t shotDti = shot ? GetObjectDti((uint64_t)shot) : 0;
+    uint64_t parentDti = parent ? GetObjectDti((uint64_t)parent) : 0;
+    if (shot && parent &&
+        shotDti == (uint64_t)_addr(DTI_USHOT_VULCAN_ROCKET_LAUNCHER_EXPLODE) &&
+        parentDti == (uint64_t)_addr(DTI_USHOT_VULCAN_EXATK_ROCKET_LAUNCHER)) {
+        *(uint32_t*)((uint8_t*)shot + 0x1498) =
+            *(uint32_t*)((uint8_t*)parent + 0x1498);
+    }
 }
 
 void Rollback_BeforeShotHitboxUpdate(
@@ -831,11 +838,6 @@ void Rollback_BeforeShotHitboxUpdate(
 {
     RepairPrickleBoardMotionBindings(shot, recipe);
     RepairResimPendulumModel(shot, recipe);
-    if (recipe && recipe->concrete.dti ==
-            (uint64_t)_addr(DTI_USHOT_VULCAN_ROCKET_LAUNCHER_EXPLODE)) {
-        Rollback_RepairNemesisExplosionAttack(
-            shot, (void*)recipe->initParam, recipe->spawnAttackInfoId);
-    }
 }
 
 bool Rollback_AfterShotHitboxUpdate(
@@ -859,15 +861,6 @@ bool Rollback_ConsumePendulumCollisionReset(void* shot, uint64_t runtimeDti)
     bool transitioned = !entry->second && ready;
     entry->second = ready;
     return transitioned;
-}
-
-void Rollback_BeforeShotHitCollision(
-    void* shot, const RollbackShotRecipe* recipe)
-{
-    if (recipe) {
-        Rollback_RepairNemesisExplosionAttack(
-            shot, (void*)recipe->initParam, recipe->spawnAttackInfoId);
-    }
 }
 
 void Rollback_TraceShotPolicySpawn(
@@ -1176,24 +1169,8 @@ void Rollback_RebuildShotStateBeforeRegistration(
         ((void(__fastcall*)(void*, void*))contactAddress)(shot, nullptr);
 }
 
-uint32_t Rollback_RepairNemesisExplosionAttack(
-    void* shot, void* parent, uint32_t restoredId)
-{
-    uint64_t shotDti = shot ? GetObjectDti((uint64_t)shot) : 0;
-    uint64_t parentDti = parent ? GetObjectDti((uint64_t)parent) : 0;
-    if (!shot || !parent ||
-        shotDti != (uint64_t)_addr(DTI_USHOT_VULCAN_ROCKET_LAUNCHER_EXPLODE) ||
-        parentDti != (uint64_t)_addr(DTI_USHOT_VULCAN_EXATK_ROCKET_LAUNCHER)) {
-        return UINT32_MAX;
-    }
-    uint32_t& attackInfoId = *(uint32_t*)((uint8_t*)shot + 0x1498);
-    attackInfoId = restoredId != UINT32_MAX
-        ? restoredId : *(uint32_t*)((uint8_t*)parent + 0x1498);
-    return attackInfoId;
-}
-
 void Rollback_RestoreShotClassState(
-    void* shot, const RollbackShotRecipe& saved, void* spawnParent)
+    void* shot, const RollbackShotRecipe& saved)
 {
     if (saved.flight.step == 3 &&
         (saved.concrete.dti ==
@@ -1229,8 +1206,6 @@ void Rollback_RestoreShotClassState(
                         saved.concrete.body.data() + range[0], range[1]);
         }
     }
-    Rollback_RepairNemesisExplosionAttack(
-        shot, spawnParent, saved.spawnAttackInfoId);
     RestoreReconstructedPrickleBoardCommandState(shot, saved);
     Rollback_EvaluateRestoredShotModel(
         shot, saved.concrete.dti, saved.concrete.body.data(),

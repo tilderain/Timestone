@@ -369,8 +369,7 @@ static void* __fastcall hkShotSpawnEx(void* manager, void* element, uint64_t ini
     CapturePreSpawnRng(recipe, ownerChr);
     void* shot = oShotSpawnEx(manager, element, initParam, posData, ownerChr,
                               objectRef1, slotId, objectRef2, a9, a10, a11, a12);
-    recipe.spawnAttackInfoId =
-        Rollback_AfterShotSpawn(shot, (void*)initParam);
+    Rollback_AfterShotSpawn(shot, (void*)initParam);
     InvalidateMemoryQueryCache();
     if (shot) {
         recipe.savedPtr = shot;
@@ -451,8 +450,6 @@ static void __fastcall hkShotProcessHitCollision(void* shot, void* target,
                                                   void* contact)
 {
     auto recipe = g_liveShotRecipes.find(shot);
-    Rollback_BeforeShotHitCollision(
-        shot, recipe != g_liveShotRecipes.end() ? &recipe->second : nullptr);
     if (recipe != g_liveShotRecipes.end() && recipe->second.reconstructed &&
         !IsCurrentCharacterCollisionTarget(target)) {
         uint64_t dti = target && HasCallableDtiVirtual(target)
