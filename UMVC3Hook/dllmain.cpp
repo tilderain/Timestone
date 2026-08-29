@@ -35,10 +35,12 @@ static SRWLOCK g_hookLogLock = SRWLOCK_INIT;
 static char g_hookLogFilename[MAX_PATH] = {};
 static std::vector<char> g_hookLogBuffer;
 static std::string g_hookLogSnapshotFilename;
+static char g_hookConsoleBuffer[64 * 1024] = {};
 static bool g_hookConsoleOutputEnabled = false;
 static HMODULE g_asiModule = nullptr;
 
 static constexpr size_t kHookLogMaxBytes = 4 * 1024 * 1024;
+static constexpr size_t kHookLogRetainedBytes = 3 * 1024 * 1024;
 static constexpr char kHookLogDiscardMarker[] =
 	"=== older log entries discarded ===\n";
 
@@ -72,24 +74,19 @@ static void HookLogAppendLocked(const char* data, size_t length)
 		return;
 
 	const size_t markerLength = sizeof(kHookLogDiscardMarker) - 1;
-	if (g_hookLogBuffer.size() >= markerLength &&
-		memcmp(g_hookLogBuffer.data(), kHookLogDiscardMarker,
-			markerLength) == 0) {
-		g_hookLogBuffer.erase(g_hookLogBuffer.begin(),
-			g_hookLogBuffer.begin() + markerLength);
-	}
+	const size_t keepBudget = kHookLogRetainedBytes - markerLength;
+	size_t keepStart = g_hookLogBuffer.size() - keepBudget;
+	while (keepStart < g_hookLogBuffer.size() &&
+		g_hookLogBuffer[keepStart] != '\n')
+		++keepStart;
+	if (keepStart < g_hookLogBuffer.size())
+		++keepStart;
 
-	const size_t keepBudget = kHookLogMaxBytes - markerLength;
-	size_t discard = g_hookLogBuffer.size() - keepBudget;
-	while (discard < g_hookLogBuffer.size() &&
-		g_hookLogBuffer[discard] != '\n')
-		++discard;
-	if (discard < g_hookLogBuffer.size())
-		++discard;
-	g_hookLogBuffer.erase(g_hookLogBuffer.begin(),
-		g_hookLogBuffer.begin() + discard);
-	g_hookLogBuffer.insert(g_hookLogBuffer.begin(), kHookLogDiscardMarker,
-		kHookLogDiscardMarker + markerLength);
+	const size_t keepLength = g_hookLogBuffer.size() - keepStart;
+	memmove(g_hookLogBuffer.data() + markerLength,
+		g_hookLogBuffer.data() + keepStart, keepLength);
+	memcpy(g_hookLogBuffer.data(), kHookLogDiscardMarker, markerLength);
+	g_hookLogBuffer.resize(markerLength + keepLength);
 }
 
 static bool HookLogWriteSnapshotLocked(const char* filename)
@@ -1841,7 +1838,8 @@ void OnInitializeHook()
 		AllocConsole();
 		freopen("CONIN$", "r", stdin);
 		freopen("CONOUT$", "w", stdout);
-		setvbuf(stdout, nullptr, _IONBF, 0);
+		setvbuf(stdout, g_hookConsoleBuffer, _IOFBF,
+			sizeof(g_hookConsoleBuffer));
 		g_hookConsoleOutputEnabled = true;
 	}
 	if (!SetConsoleCtrlHandler(ConsoleControlHandler, TRUE))

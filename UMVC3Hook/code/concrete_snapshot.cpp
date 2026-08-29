@@ -891,7 +891,12 @@ static bool RestoreGeneratorEmissionState(
     // loop requires particle+0x9D to be nonzero. A fresh factory graph can
     // contain a not-yet-initialized mode-0 particle; rewinding the generator
     // phase would move it immediately and underflow the history index.
-    for (uint64_t current : generators) {
+    for (size_t index = 0; index < generators.size(); ++index) {
+        uint64_t current = generators[index];
+        if (*(uint8_t*)(current + 0x77) ==
+            state.generatorEmissionStates[index].phase) {
+            continue;
+        }
         uint64_t particle = *(uint64_t*)(current + 0xE0);
         uint32_t count = 0;
         while (particle && count++ < 0x10000) {
