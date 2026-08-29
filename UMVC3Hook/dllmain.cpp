@@ -1932,6 +1932,7 @@ void OnInitializeHook()
 		HookLog("UMVC3Hook: Opening launch menu\n");
 		opt = ShowLaunchMenu();
 		HookLog("UMVC3Hook: Launch menu returned option %d\n", (int)opt);
+		HookLogFlush();
 	}
 	if (opt == LAUNCH_CANCELLED) {
 		HookLog("UMVC3Hook: Launch menu closed; exiting game\n");
