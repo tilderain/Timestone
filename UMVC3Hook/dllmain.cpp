@@ -55,6 +55,12 @@ static bool HookLogConsoleEnabledByConfig()
 		filename = forwardSlash;
 	filename = filename ? filename + 1 : iniPath;
 	snprintf(filename, sizeof(iniPath) - (filename - iniPath), "Timestone.ini");
+	char configuredValue[32] = {};
+	if (GetPrivateProfileStringA("Settings", "EnableConsole", "",
+			configuredValue, sizeof(configuredValue), iniPath) == 0) {
+		WritePrivateProfileStringA("Settings", "EnableConsole", "0", iniPath);
+		return false;
+	}
 	return GetPrivateProfileIntA("Settings", "EnableConsole", 0, iniPath) == 1;
 }
 
