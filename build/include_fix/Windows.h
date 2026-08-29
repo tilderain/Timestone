@@ -1,1 +1,0 @@
-/nix/store/y7nh4wm31shax8r6j7y8hhmxg4zl6v1l-x86_64-w64-mingw32-gcc-15.3.0/lib/gcc/x86_64-w64-mingw32/15.3.0/../../../../x86_64-w64-mingw32/sys-include/windows.h
