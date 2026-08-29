@@ -2,6 +2,7 @@
 #include "../imgui/imgui.h"
 #include "escmenu_imgui.h"
 #include "framestepper.h"
+#include "LaunchMenu.h"
 #include "netplay.h"
 #include "steam_lobby.h"
 #include "umvc3menu.h"
@@ -16,10 +17,10 @@ bool g_open = false;
 
 void ExitGame()
 {
-    Netplay_SendPlayerDisconnect();
     HWND window = GetForegroundWindow();
     if (window && PostMessageW(window, WM_CLOSE, 0, 0))
         return;
+    CleanupNetworkOnExit();
     ExitProcess(0);
 }
 

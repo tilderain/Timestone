@@ -16,9 +16,9 @@ static std::atomic<bool> g_bridgeThreadStarted{false};
 static std::atomic_flag g_bridgePumpLock = ATOMIC_FLAG_INIT;
 static std::atomic<uint32_t> g_steamRTT{0};
 
-static void PumpBridgeOnce()
+static bool PumpBridgeOnce()
 {
-    if (!g_bridgeRunning || g_bridgePumpLock.test_and_set()) return;
+    if (!g_bridgeRunning || g_bridgePumpLock.test_and_set()) return false;
 
     ENetEvent event;
     while (g_bridgeHost && enet_host_service(g_bridgeHost, &event, 0) > 0) {
@@ -67,6 +67,7 @@ static void PumpBridgeOnce()
         }
     }
     g_bridgePumpLock.clear();
+    return true;
 }
 
 static DWORD WINAPI BridgeThread(LPVOID)
@@ -188,6 +189,10 @@ void SteamTransport_Shutdown()
 {
     HookLog("SteamTransport: shutdown requested (running=%d, thread=%p)\n",
             g_bridgeRunning.load() ? 1 : 0, g_bridgeThread);
+    const DWORD flushDeadline = GetTickCount() + 50;
+    while (g_bridgeRunning && !PumpBridgeOnce() &&
+           GetTickCount() < flushDeadline)
+        Sleep(1);
     g_bridgeRunning = false;
     if (g_bridgeThread) {
         WaitForSingleObject(g_bridgeThread, 3000);

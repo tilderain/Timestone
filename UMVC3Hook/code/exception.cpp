@@ -1,6 +1,7 @@
 #include "../pch.h"
 #include "exception.h"
 #include "framestepper.h"
+#include "LaunchMenu.h"
 #include "netplay.h"
 #include "rollback.h"
 #include "rollback_diagnostics.h"
@@ -835,7 +836,9 @@ LONG WINAPI UnhandledExceptionHandler(PEXCEPTION_POINTERS info)
 {
     // Reaching the top-level filter proves this exception is fatal even when
     // its code is not in the first-chance catastrophic allowlist.
-    return HandleException(info, false);
+    const LONG result = HandleException(info, false);
+    CleanupNetworkOnExit();
+    return result;
 }
 
 } // namespace

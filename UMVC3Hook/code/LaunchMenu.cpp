@@ -588,9 +588,14 @@ bool ApplyTrainingLaunchPacket(const LaunchTrainingPacket& packet)
     return true;
 }
 
-// Declare global cleanup for DLL detach
+// Process-wide cleanup may be reached through multiple shutdown paths.
+static volatile LONG g_exitCleanupStarted = 0;
+
 void CleanupNetworkOnExit()
 {
+    if (InterlockedExchange(&g_exitCleanupStarted, 1) != 0)
+        return;
+
     // If netplay took over the host/peer, let it do the cleanup
     if (Netplay_IsActive()) {
         Netplay_Shutdown();

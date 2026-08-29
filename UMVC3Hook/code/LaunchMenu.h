@@ -92,5 +92,5 @@ void SaveRosterToIni(const int32_t chars[2][3],
                      const int32_t colors[2][3],
                      const int32_t assists[2][3]);
 
-// Clean up any active network session (call on DLL detach / game exit)
+// Idempotently notify the peer, leave Steam, and close the active network session.
 void CleanupNetworkOnExit();

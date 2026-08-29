@@ -581,6 +581,10 @@ fontConfig.SizePixels     = 12.0f; // use exact integer sizes: 9, 10, 12, 14, 16
 
 LRESULT __stdcall WndProc(const HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 {
+    if (uMsg == WM_CLOSE || uMsg == WM_DESTROY ||
+        (uMsg == WM_ENDSESSION && wParam != FALSE))
+        CleanupNetworkOnExit();
+
     switch (uMsg)
     {
     case WM_KILLFOCUS:
@@ -1759,6 +1763,7 @@ void OnInitializeHook()
 	}
 	if (opt == LAUNCH_CANCELLED) {
 		HookLog("UMVC3Hook: Launch menu closed; exiting game\n");
+		CleanupNetworkOnExit();
 		ExitProcess(0);
 		return;
 	}

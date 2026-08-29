@@ -1369,6 +1369,8 @@ uint32_t Netplay_GetRTT()
 void Netplay_Shutdown()
 {
     HookLog("Netplay: Shutting down...\n");
+    if (Netplay_IsActive())
+        Netplay_SendPlayerDisconnect(250);
     g_running = false;
 
     if (g_serviceThread)
