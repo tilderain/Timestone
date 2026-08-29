@@ -22,7 +22,7 @@ GIT_DIRTY := $(if $(shell git status --porcelain --untracked-files=normal 2>/dev
 GIT_DIR := $(shell git rev-parse --git-dir 2>/dev/null)
 GIT_HEAD_REF := $(shell git symbolic-ref -q HEAD 2>/dev/null)
 GIT_COMMIT_DEPS := $(if $(GIT_DIR),$(GIT_DIR)/HEAD $(if $(GIT_HEAD_REF),$(GIT_DIR)/$(GIT_HEAD_REF)))
-VERSION    := 0.2.2
+VERSION    := 0.2.3
 VERSION_RC := $(shell printf '%s.0' '$(VERSION)' | tr . ,)
 
 SRCDIR    := UMVC3Hook

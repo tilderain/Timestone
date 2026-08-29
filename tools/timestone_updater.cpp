@@ -931,6 +931,39 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int)
         ShowError(L"Could not parse updater arguments.");
         return 2;
     }
+    if (HasArgument(argc, argv, L"--return-menu-watch")) {
+        const wchar_t* pidText = ArgumentValue(argc, argv, L"--pid");
+        const wchar_t* gameText = ArgumentValue(argc, argv, L"--game-exe");
+        const wchar_t* eventText = ArgumentValue(argc, argv, L"--cancel-event");
+        if (!pidText || !gameText || !eventText) {
+            LocalFree(argv);
+            return 2;
+        }
+
+        const DWORD pid = wcstoul(pidText, nullptr, 10);
+        const std::wstring gameExecutable = gameText;
+        const std::wstring eventName = eventText;
+        LocalFree(argv);
+
+        HANDLE process = OpenProcess(SYNCHRONIZE, FALSE, pid);
+        HANDLE cancelEvent = OpenEventW(SYNCHRONIZE, FALSE, eventName.c_str());
+        if (!process) {
+            if (cancelEvent) CloseHandle(cancelEvent);
+            return RelaunchGame(gameExecutable) ? 0 : 4;
+        }
+
+        HANDLE waits[2] = {process, cancelEvent};
+        const DWORD result = cancelEvent
+            ? WaitForMultipleObjects(2, waits, FALSE, INFINITE)
+            : WaitForSingleObject(process, INFINITE);
+        CloseHandle(process);
+        if (cancelEvent) CloseHandle(cancelEvent);
+        if (result != WAIT_OBJECT_0)
+            return 0;
+
+        Sleep(100);
+        return RelaunchGame(gameExecutable) ? 0 : 4;
+    }
     bool manual = argc == 1;
     bool startup = HasArgument(argc, argv, L"--startup");
     bool localCheck = manual || startup;
