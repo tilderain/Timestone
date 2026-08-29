@@ -165,9 +165,16 @@ connected player-2 device. `SetupPadToPlayerMapping` currently:
 - Maps manager slots 0 and 1 to players 0 and 1, leaving slots 2 and 3
   unassigned.
 - Clears keyboard-block bytes at `sPad+0xC20` and `sPad+0xC30`.
-- Reinitializes the player-1 translation map through `0x1405142A0`.
 - On a netplay client, copies both resolved P1 gameplay binding tables to P2
   through the native `sGameConfig` setters before P2 input is transmitted.
+
+Training boot must not call
+`sPad__Map__resetDefaultTranslation @ 0x1405142A0` after startup. `sPad::PadSlot`
+already calls it from its constructor. The function writes the fixed default
+32-byte DirectInput translation table at map-relative `+0x118..+0x137` and
+clears `+0x138..+0x13B`; calling it again can overwrite the player's loaded
+physical-button assignments while leaving the higher-level `sGameConfig`
+layout selection unchanged.
 
 Comments showing forced player-2 active flags are disabled code and must not be
 reported as current behavior.
