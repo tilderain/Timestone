@@ -11,6 +11,17 @@ constexpr uintptr_t DTI_CUNIT = 0x140E173D0;
 constexpr uintptr_t DTI_UEFFECT = 0x140E18698;
 constexpr uintptr_t DTI_UBASEMODEL = 0x140E17D48;
 constexpr size_t MAX_CACHED_MEMORY_REGIONS = 256;
+constexpr size_t MAX_GAME_EXECUTABLE_RANGES = 16;
+
+struct AddressRange {
+    uint64_t start;
+    uint64_t end;
+};
+
+struct GameExecutableRanges {
+    AddressRange ranges[MAX_GAME_EXECUTABLE_RANGES];
+    size_t count;
+};
 
 struct CachedMemoryRegion {
     uint64_t start;
@@ -38,6 +49,42 @@ bool IsGameImageRange(uint64_t address, size_t size)
     }();
     return address >= imageBase && address <= imageEnd &&
         size <= imageEnd - address;
+}
+
+bool IsGameExecutableAddress(uint64_t address)
+{
+    static const GameExecutableRanges executableRanges = []() {
+        GameExecutableRanges result = {};
+        const auto* dos = (const IMAGE_DOS_HEADER*)GetMKXEntryPoint();
+        if (!dos || dos->e_magic != IMAGE_DOS_SIGNATURE) return result;
+        const auto* nt = (const IMAGE_NT_HEADERS64*)(
+            (const uint8_t*)dos + dos->e_lfanew);
+        if (nt->Signature != IMAGE_NT_SIGNATURE) return result;
+
+        const uint64_t imageBase = (uint64_t)dos;
+        const uint64_t imageSize = nt->OptionalHeader.SizeOfImage;
+        const IMAGE_SECTION_HEADER* section = IMAGE_FIRST_SECTION(nt);
+        for (WORD i = 0; i < nt->FileHeader.NumberOfSections &&
+                         result.count < MAX_GAME_EXECUTABLE_RANGES; ++i) {
+            if ((section[i].Characteristics & IMAGE_SCN_MEM_EXECUTE) == 0)
+                continue;
+            const uint64_t start = section[i].VirtualAddress;
+            const uint64_t size = std::max<uint64_t>(
+                section[i].Misc.VirtualSize, section[i].SizeOfRawData);
+            if (start >= imageSize || size == 0) continue;
+            result.ranges[result.count++] = {
+                imageBase + start,
+                imageBase + std::min(imageSize, start + size),
+            };
+        }
+        return result;
+    }();
+
+    for (size_t i = 0; i < executableRanges.count; ++i) {
+        const AddressRange& range = executableRanges.ranges[i];
+        if (address >= range.start && address < range.end) return true;
+    }
+    return false;
 }
 
 bool IsGameDti(uint64_t dti)
@@ -118,7 +165,9 @@ uint64_t GetObjectDti(uint64_t object)
     uint64_t vtable = *(uint64_t*)object;
     if (IsGameImageRange(vtable, 0x28)) {
         auto getDti = (uint64_t(__fastcall*)(uint64_t))(*(uint64_t*)(vtable + 0x20));
-        if (getDti && IsExecutableAddress((uint64_t)getDti)) {
+        const uint64_t getDtiAddress = (uint64_t)getDti;
+        if (getDti && (IsGameExecutableAddress(getDtiAddress) ||
+                       IsExecutableAddress(getDtiAddress))) {
             uint64_t dti = getDti(object);
             return IsGameDti(dti) ? dti : 0;
         }
