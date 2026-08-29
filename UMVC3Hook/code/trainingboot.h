@@ -134,7 +134,7 @@ bool TrainingBoot_GetFiveBarStart();
 
 // Execute the boot sequence: configure sBattleSetting and transition to
 // aNextBattle. Called once from the aTitle__update hook.
-void BootIntoTraining();
+void BootIntoTraining(bool queueAreaTransition = true);
 
 // Re-enter training through the full character-select loading transition.
 bool TrainingBoot_RestartWithConfig(const TrainingBootConfig& cfg);
