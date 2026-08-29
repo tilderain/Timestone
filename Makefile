@@ -3,12 +3,20 @@
 
 .DEFAULT_GOAL := all
 
-CXX       := x86_64-w64-mingw32-g++-win32
-CC        := x86_64-w64-mingw32-gcc-win32
-WINDRES   := x86_64-w64-mingw32-windres
-DLLTOOL   := x86_64-w64-mingw32-dlltool
-AR        := x86_64-w64-mingw32-ar
-STRIP     := x86_64-w64-mingw32-strip
+UNAME_S := $(shell uname -s 2>/dev/null || echo Windows)
+ifeq ($(filter MINGW% MSYS% CYGWIN%,$(UNAME_S)),)
+CROSS ?= x86_64-w64-mingw32-
+else
+CROSS ?=
+endif
+
+CXX      := $(CROSS)g++
+CC       := $(CROSS)gcc
+WINDRES  := $(CROSS)windres
+DLLTOOL  := $(CROSS)dlltool
+AR       := $(CROSS)ar
+STRIP    := $(CROSS)strip
+ZIP      ?= zip
 GIT_COMMIT := $(shell git rev-parse HEAD 2>/dev/null || printf unknown)
 GIT_DIRTY := $(if $(shell git status --porcelain --untracked-files=normal 2>/dev/null),1,0)
 GIT_DIR := $(shell git rev-parse --git-dir 2>/dev/null)
@@ -226,7 +234,7 @@ $(UPDATER_OUTPUT): tools/timestone_updater.cpp Makefile
 
 $(PACKAGE_OUTPUT): $(LOADER_DLL) $(OUTPUT) $(UPDATER_OUTPUT)
 	rm -f $@
-	zip -j -0 $@ $^
+	$(ZIP) -j -0 $@ $^
 	@echo "=== Built: $(PACKAGE_OUTPUT) ==="
 
 # ---------- Compile C++ ----------
@@ -299,17 +307,23 @@ $(RC_OBJ): $(BUILDDIR)/UMVC3Hook.rc $(SRCDIR)/resource.h | $(INCLUDE_FIX_STAMP)
 INCLUDE_FIX_DIR := $(BUILDDIR)/include_fix
 INCLUDE_FIX_STAMP := $(INCLUDE_FIX_DIR)/.stamp
 
+MINGW_INCLUDE := $(shell $(CC) -E -x c - -v < /dev/null 2>&1 | \
+	sed -n 's/^ //p' | while read d; do [ -f "$$d/windows.h" ] && { printf '%s' "$$d"; break; }; done)
+
 fix-includes: $(INCLUDE_FIX_STAMP)
 
+ifeq ($(filter MINGW% MSYS% CYGWIN%,$(UNAME_S)),)
 $(INCLUDE_FIX_STAMP):
 	@mkdir -p $(INCLUDE_FIX_DIR)
-	@test -L $(INCLUDE_FIX_DIR)/Windows.h 2>/dev/null || \
-		ln -sf /usr/x86_64-w64-mingw32/include/windows.h $(INCLUDE_FIX_DIR)/Windows.h
-	@test -L $(INCLUDE_FIX_DIR)/Psapi.h 2>/dev/null || \
-		ln -sf /usr/x86_64-w64-mingw32/include/psapi.h $(INCLUDE_FIX_DIR)/Psapi.h
-	@test -L $(INCLUDE_FIX_DIR)/XInput.h 2>/dev/null || \
-		ln -sf /usr/x86_64-w64-mingw32/include/xinput.h $(INCLUDE_FIX_DIR)/XInput.h
+	@test -L $(INCLUDE_FIX_DIR)/Windows.h 2>/dev/null || ln -sf "$(MINGW_INCLUDE)/windows.h" $(INCLUDE_FIX_DIR)/Windows.h
+	@test -L $(INCLUDE_FIX_DIR)/Psapi.h   2>/dev/null || ln -sf "$(MINGW_INCLUDE)/psapi.h"    $(INCLUDE_FIX_DIR)/Psapi.h
+	@test -L $(INCLUDE_FIX_DIR)/XInput.h  2>/dev/null || ln -sf "$(MINGW_INCLUDE)/xinput.h"   $(INCLUDE_FIX_DIR)/XInput.h
 	@touch $@
+else
+$(INCLUDE_FIX_STAMP):
+	@mkdir -p $(INCLUDE_FIX_DIR)
+	@touch $@
+endif
 
 $(OBJDIR):
 	mkdir -p $(OBJDIR)
@@ -343,4 +357,4 @@ help:
 	@echo "  INSTALL_DIR - UMVC3 install path (default: ~/.steam/...)"
 	@echo ""
 	@echo "Dependencies:"
-	@echo "  apt install g++-mingw-w64-x86-64 mingw-w64"
+	@echo "  Requires a MinGW-w64 toolchain (gcc, g++, windres, binutils) and zip; see flake.nix"

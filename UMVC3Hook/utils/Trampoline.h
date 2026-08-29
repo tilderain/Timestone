@@ -6,6 +6,7 @@
 #include <cassert>
 #include <memory>
 #include <cstring>
+#include <utility>
 
 // Trampoline class for big (>2GB) jumps
 // Never needed in 32-bit processes so in those cases this does nothing but forwards to Memory functions
