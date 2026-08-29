@@ -1693,9 +1693,9 @@ void FrameStepper_Draw()
         ImGui::Text("WAITING FOR OPPONENT");
         ImGui::SetWindowFontScale(1.0f);
         ImGui::PopStyleColor();
-        ImGui::Text("Your stopped getting input from your opp.");
+        ImGui::Text("You stopped getting input from your opp.");
         ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.4f, 1.0f),
-            "Maybe you lost internet, or maybe their pc froze or crashed or lost internet or something.");
+            "Either player may have lost connection, or your opponent's game may have froze/crashed");
 
         ImGui::End();
         ImGui::PopStyleColor();
