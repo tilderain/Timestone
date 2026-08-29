@@ -659,6 +659,9 @@ static void __fastcall hkCharacterMoveBase(uint64_t uChar)
     }
 }
 
+/// @brief Move this
+/// @param cChrInput  Move this
+/// @return  Move this
 static void __fastcall hkInputMaskPostProcess(uint64_t cChrInput)
 {
     uint32_t* gameFlags = nullptr;
@@ -691,7 +694,7 @@ void Diag_InitHooks()
 {
     MH_STATUS s;
 
-    s = MH_CreateHook(
+    /*s = MH_CreateHook(
         (LPVOID)_addr(ADDR_CHARACTER_PRE_MOVE),
         (LPVOID)&hkCharacterPreMove,
         (LPVOID*)&oCharacterPreMove
@@ -702,7 +705,7 @@ void Diag_InitHooks()
     }
     else
         HookLog("Diag: Failed to hook uCharacterPre__move (%d)\n", s);
-
+    
     s = MH_CreateHook(
         (LPVOID)_addr(ADDR_CHARACTER_MOVE_BASE),
         (LPVOID)&hkCharacterMoveBase,
@@ -726,7 +729,7 @@ void Diag_InitHooks()
     }
     else
         HookLog("Diag: Failed to hook uActionSideCamera__move (%d)\n", s);
-
+    */
     s = MH_CreateHook(
         (LPVOID)_addr(ADDR_INPUT_MASK_POST_PROCESS),
         (LPVOID)&hkInputMaskPostProcess,
@@ -739,7 +742,7 @@ void Diag_InitHooks()
     else
         HookLog("Diag: Failed to hook inputMaskPostProcess (%d)\n", s);
 
-    s = MH_CreateHook(
+    /*s = MH_CreateHook(
         (LPVOID)_addr(ADDR_TEAM_COMMIT_SWAP),
         (LPVOID)&hkTeamCommitSwap,
         (LPVOID*)&oTeamCommitSwap
@@ -811,5 +814,5 @@ void Diag_InitHooks()
     else
         HookLog("Diag: Failed to hook uCharacter__selectActionTransition (%d)\n", s);
 
-    HookLog("Diag: Init complete — diagnostic hooks installed\n");
+    HookLog("Diag: Init complete — diagnostic hooks installed\n");*/
 }
