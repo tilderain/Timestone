@@ -10,7 +10,7 @@
 
 EXTERN_C IMAGE_DOS_HEADER __ImageBase;
 extern void HookLog(const char* fmt, ...);
-extern bool HookLogCreateAlias(const char* filename);
+extern bool HookLogSetSnapshotFile(const char* filename);
 
 static char g_netplayOutputDirectory[MAX_PATH] = {};
 
@@ -86,11 +86,11 @@ bool Rollback_GetNetplayOutputDirectory(char* destination, size_t destinationLen
         char logPath[MAX_PATH] = {};
         snprintf(logPath, sizeof(logPath), "%s/Timestone_%s.log",
                  g_netplayOutputDirectory, role);
-        if (!HookLogCreateAlias(logPath)) {
+        if (!HookLogSetSnapshotFile(logPath)) {
             const DWORD error = GetLastError();
             RemoveDirectoryA(g_netplayOutputDirectory);
             g_netplayOutputDirectory[0] = '\0';
-            HookLog("Netplay: failed to link diagnostics log %s error=%lu\n",
+            HookLog("Netplay: failed to register diagnostics log %s error=%lu\n",
                     logPath, error);
             return false;
         }

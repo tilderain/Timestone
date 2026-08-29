@@ -548,7 +548,7 @@ static void SetupPadToPlayerMapping()
 // Sequence: set up chars/stage → set battle type → agent reset → restore backup →
 //           UI flags → create loading screen → area transition → pad mapping
 // ---------------------------------------------------------------------------
-void BootIntoTraining()
+void BootIntoTraining(bool queueAreaTransition)
 {
     BootTimer_Stamp("BootIntoTraining start");
 
@@ -697,20 +697,24 @@ void BootIntoTraining()
     //    late for the first controller-assignment check.
     SetupPadToPlayerMapping();
 
-    // 6. Queue the native transition intermediary. It waits for stage resources,
-    //    resolves aStage%03d, and queues that DTI; sArea then constructs the
-    //    target's area-parent chain through aGame and aAction.
-    uint64_t sArea = *(uint64_t*)_addr(SAREA_INSTANCE_PTR);
-    if (!sArea) {
-        HookLog("TrainingBoot: FAILED - sArea instance is null\n");
-        g_hasBooted = false;
-        return;
-    }
+    // Initial boot still needs the native transition intermediary. A roster
+    // restart is already inside aChrSelectBlank after retiring the old battle;
+    // queueing it again would destroy and recreate the same loading area.
+    if (queueAreaTransition) {
+        uint64_t sArea = *(uint64_t*)_addr(SAREA_INSTANCE_PTR);
+        if (!sArea) {
+            HookLog("TrainingBoot: FAILED - sArea instance is null\n");
+            g_hasBooted = false;
+            return;
+        }
 
-     typedef void(__fastcall* SetArea_t)(uint64_t, void*);
-     SetArea_t setArea = (SetArea_t)(*(uint64_t*)(*(uint64_t*)sArea + 0x50));
-     setArea(sArea, (void*)_addr(ACHRSELBLANK_DTI));
-     HookLog("TrainingBoot: Queued aChrSelectBlank battle transition\n");
+        typedef void(__fastcall* SetArea_t)(uint64_t, void*);
+        SetArea_t setArea = (SetArea_t)(*(uint64_t*)(*(uint64_t*)sArea + 0x50));
+        setArea(sArea, (void*)_addr(ACHRSELBLANK_DTI));
+        HookLog("TrainingBoot: Queued aChrSelectBlank battle transition\n");
+    } else {
+        HookLog("TrainingBoot: Reusing active aChrSelectBlank transition\n");
+    }
 }
 
 bool TrainingBoot_RestartWithConfig(const TrainingBootConfig& cfg)
@@ -747,7 +751,7 @@ void TrainingBoot_UpdateRestart()
 
         g_hasBooted = false;
         g_skipNativeConfigLoad = true;
-        BootIntoTraining();
+        BootIntoTraining(false);
         g_skipNativeConfigLoad = false;
         if (!g_hasBooted)
             return;

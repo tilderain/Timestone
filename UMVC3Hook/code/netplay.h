@@ -82,6 +82,7 @@ struct BattleReadyPacket {
     uint32_t generation;         // distinguishes later rounds/rematches
     uint32_t flags;              // BattleSyncFlags advertised by the sender
     uint32_t round_seed;         // host-authoritative gameplay RNG seed
+    uint32_t opening_member;     // owned team's synchronized opening member (0..2)
 };
 
 struct LaunchTrainingPacket {
@@ -225,10 +226,13 @@ enum BattleSyncFlags : uint32_t {
     BATTLE_SYNC_RELEASE = 1u << 1,
     BATTLE_SYNC_SEED    = 1u << 2,
     BATTLE_SYNC_FIGHTING = 1u << 3,
+    BATTLE_SYNC_OPENING_READY = 1u << 4,
+    BATTLE_SYNC_OPENING_RELEASE = 1u << 5,
 };
 
 #pragma pack(pop)
 
+static_assert(sizeof(BattleReadyPacket) == 20);
 static_assert(sizeof(AutoTestStartPacket) <= NET_MAX_PACKET_SIZE,
               "largest netplay packet exceeds ENet packet limit");
 
@@ -287,10 +291,11 @@ bool Netplay_GetInboundDelay(int32_t& outDelay, int32_t& outEffectiveFrame);
 // if a new value was available (it is consumed by this call).
 bool Netplay_GetInboundRollback(int32_t& outRollback, int32_t& outEffectiveFrame);
 
-// Startup rendezvous used after local intro initialization has completed.
-void Netplay_SendBattleReady(uint32_t generation, uint32_t flags, uint32_t roundSeed);
+// Startup rendezvous for opening-member selection and post-init intro readiness.
+void Netplay_SendBattleReady(uint32_t generation, uint32_t flags, uint32_t roundSeed,
+                             uint32_t openingMember);
 bool Netplay_GetInboundBattleReady(uint32_t& outGeneration, uint32_t& outFlags,
-                                   uint32_t& outRoundSeed);
+                                   uint32_t& outRoundSeed, uint32_t& outOpeningMember);
 
 // Exchange post-savedata team preferences as part of the launch settings.
 void Netplay_SendLaunchTrainingSettings(const LaunchTrainingPacket& packet);

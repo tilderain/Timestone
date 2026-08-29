@@ -1006,10 +1006,7 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
         // overlay so packed floats/flags that resemble addresses still rewind.
         Shot_RestoreArmState(fresh, saved);
         Shot_ApplyFlight(fresh, saved.flight);
-        // Concrete restore can reapply the explosion's captured factory-default
-        // attack selector after native creation derived it from the parent.
-        Rollback_RestoreShotClassState(
-            fresh, saved, (void*)spawnRecipe->initParam);
+        Rollback_RestoreShotClassState(fresh, saved);
 
         // Some shots use +0x1F70 as a self-reference. Repoint it at the fresh
         // allocation instead of retaining the captured shot's retired address.

@@ -84,6 +84,12 @@ extern "C" void Controller_ResetFrameEpoch();
 extern "C" void Controller_OnFrameStart();
 extern "C" void Controller_OnFrameEnd();
 
+// Resolve and install the synchronized assist-button opening team order.
+extern "C" uint32_t Controller_CaptureOpeningMember();
+extern "C" void Controller_SetOpeningMembers(uint32_t team0Member,
+                                              uint32_t team1Member);
+extern "C" void Controller_ClearOpeningMembers();
+
 // Return the canonical logical input scheduled for the current frame. It is
 // stored in the snapshot so resimulation does not depend on live device state.
 extern "C" uint32_t Controller_GetCurrentFrameInput();

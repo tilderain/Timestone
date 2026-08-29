@@ -17,14 +17,12 @@ struct RollbackShotFactoryPolicyState {
 void Rollback_InitShotModelPolicyHooks();
 void Rollback_ResetShotModelPolicy();
 void Rollback_ForgetShotModelPolicy(void* shot);
-uint32_t Rollback_AfterShotSpawn(void* shot, void* parent);
+void Rollback_AfterShotSpawn(void* shot, void* parent);
 void Rollback_BeforeShotHitboxUpdate(
     void* shot, const RollbackShotRecipe* recipe);
 bool Rollback_AfterShotHitboxUpdate(
     void* shot, const RollbackShotRecipe* recipe);
 bool Rollback_ConsumePendulumCollisionReset(void* shot, uint64_t runtimeDti);
-void Rollback_BeforeShotHitCollision(
-    void* shot, const RollbackShotRecipe* recipe);
 void Rollback_TraceShotPolicySpawn(
     void* shot, uint64_t spawnSequence, int32_t frame);
 bool Rollback_ShouldReapplyShotCapsules(uint64_t runtimeDti);
@@ -53,11 +51,9 @@ void Rollback_FinishShotFactory(RollbackShotFactoryPolicyState& state);
 void Rollback_RebuildShotStateBeforeRegistration(
     void* shot, const RollbackShotRecipe& saved);
 void Rollback_RestoreShotClassState(
-    void* shot, const RollbackShotRecipe& saved, void* spawnParent);
+    void* shot, const RollbackShotRecipe& saved);
 void Rollback_RemapCharacterShotLinks(
     void* character, uint64_t expectedVtable, const uint8_t* savedCharacter,
     size_t savedCharacterSize, const std::vector<RollbackShotRecipe>& recipes);
 void Rollback_CaptureCharacterShotReferences(RollbackSnapshotSlot& slot);
 void Rollback_RestoreCharacterShotReferences(RollbackSnapshotSlot& slot);
-uint32_t Rollback_RepairNemesisExplosionAttack(
-    void* shot, void* parent, uint32_t restoredId = UINT32_MAX);

@@ -17,6 +17,7 @@
 extern void HookLog(const char* fmt, ...);
 extern void HookLogAppendFile(const char* filename, long offset);
 extern void HookLogWriteRecent(FILE* file);
+extern void HookLogTryFlush();
 
 #ifndef UMVC3HOOK_GIT_COMMIT
 #define UMVC3HOOK_GIT_COMMIT "unknown"
@@ -823,6 +824,7 @@ LONG HandleException(PEXCEPTION_POINTERS info, bool catastrophicOnly)
     }
 
     HookLogAppendFile(crashLogPath, crashLogStart);
+    HookLogTryFlush();
 
     return EXCEPTION_CONTINUE_SEARCH;
 }

@@ -42,12 +42,14 @@ static bool                 g_readyTxDiagValid = false;
 static uint32_t             g_readyTxDiagGeneration = 0;
 static uint32_t             g_readyTxDiagFlags = 0;
 static uint32_t             g_readyTxDiagSeed = 0;
+static uint32_t             g_readyTxDiagOpeningMember = 0;
 static int                   g_readyTxDiagResult = 0;
 static int                   g_readyTxDiagPeerState = -1;
 static bool                 g_readyRxDiagValid = false;
 static uint32_t             g_readyRxDiagGeneration = 0;
 static uint32_t             g_readyRxDiagFlags = 0;
 static uint32_t             g_readyRxDiagSeed = 0;
+static uint32_t             g_readyRxDiagOpeningMember = 0;
 static std::atomic<bool>    g_running { false };
 static std::atomic<bool>    g_peerDisconnected { false };
 static std::atomic<uint32_t> g_requestedTimeoutMs { 0 };
@@ -343,17 +345,19 @@ static DWORD WINAPI Netplay_ServiceThread(LPVOID)
                 g_readyTxDiagGeneration != readyPkt.generation ||
                 g_readyTxDiagFlags != readyPkt.flags ||
                 g_readyTxDiagSeed != readyPkt.round_seed ||
+                g_readyTxDiagOpeningMember != readyPkt.opening_member ||
                 g_readyTxDiagResult != sendResult ||
                 g_readyTxDiagPeerState != peerState) {
                 HookLog("Netplay: BattleReady TX gen=%u flags=0x%X seed=0x%08X "
-                        "result=%d peerState=%d\n",
+                        "opening=%u result=%d peerState=%d\n",
                         readyPkt.generation, readyPkt.flags, readyPkt.round_seed,
-                        sendResult, peerState);
+                        readyPkt.opening_member, sendResult, peerState);
             }
             g_readyTxDiagValid = true;
             g_readyTxDiagGeneration = readyPkt.generation;
             g_readyTxDiagFlags = readyPkt.flags;
             g_readyTxDiagSeed = readyPkt.round_seed;
+            g_readyTxDiagOpeningMember = readyPkt.opening_member;
             g_readyTxDiagResult = sendResult;
             g_readyTxDiagPeerState = peerState;
             if (sendResult != 0 && packet) {
@@ -373,6 +377,7 @@ static DWORD WINAPI Netplay_ServiceThread(LPVOID)
             g_readyTxDiagGeneration = readyPkt.generation;
             g_readyTxDiagFlags = readyPkt.flags;
             g_readyTxDiagSeed = readyPkt.round_seed;
+            g_readyTxDiagOpeningMember = readyPkt.opening_member;
             g_readyTxDiagResult = -1;
             g_readyTxDiagPeerState = -1;
         }
@@ -619,16 +624,19 @@ static DWORD WINAPI Netplay_ServiceThread(LPVOID)
                                     if (!g_readyRxDiagValid ||
                                         g_readyRxDiagGeneration != brp->generation ||
                                         g_readyRxDiagFlags != brp->flags ||
-                                        g_readyRxDiagSeed != brp->round_seed) {
+                                        g_readyRxDiagSeed != brp->round_seed ||
+                                        g_readyRxDiagOpeningMember != brp->opening_member) {
                                         HookLog("Netplay: BattleReady RX gen=%u flags=0x%X "
-                                                "seed=0x%08X\n",
+                                                "seed=0x%08X opening=%u\n",
                                                 brp->generation, brp->flags,
-                                                brp->round_seed);
+                                                brp->round_seed,
+                                                brp->opening_member);
                                     }
                                     g_readyRxDiagValid = true;
                                     g_readyRxDiagGeneration = brp->generation;
                                     g_readyRxDiagFlags = brp->flags;
                                     g_readyRxDiagSeed = brp->round_seed;
+                                    g_readyRxDiagOpeningMember = brp->opening_member;
                                     ScopedCS lock(g_battleReadyCS);
                                     g_inboundBattleReady = *brp;
                                     g_inboundBattleReadyNew = true;
@@ -1112,18 +1120,20 @@ bool Netplay_GetInboundAutoTestFrame(AutoTestFramePacket& outPacket)
     return true;
 }
 
-void Netplay_SendBattleReady(uint32_t generation, uint32_t flags, uint32_t roundSeed)
+void Netplay_SendBattleReady(uint32_t generation, uint32_t flags, uint32_t roundSeed,
+                             uint32_t openingMember)
 {
     ScopedCS lock(g_battleReadyCS);
     g_outboundBattleReady.type = PACKET_BATTLE_READY;
     g_outboundBattleReady.generation = generation;
     g_outboundBattleReady.flags = flags;
     g_outboundBattleReady.round_seed = roundSeed;
+    g_outboundBattleReady.opening_member = openingMember;
     g_outboundBattleReadyNew = true;
 }
 
 bool Netplay_GetInboundBattleReady(uint32_t& outGeneration, uint32_t& outFlags,
-                                   uint32_t& outRoundSeed)
+                                   uint32_t& outRoundSeed, uint32_t& outOpeningMember)
 {
     ScopedCS lock(g_battleReadyCS);
     if (!g_inboundBattleReadyNew)
@@ -1131,6 +1141,7 @@ bool Netplay_GetInboundBattleReady(uint32_t& outGeneration, uint32_t& outFlags,
     outGeneration = g_inboundBattleReady.generation;
     outFlags = g_inboundBattleReady.flags;
     outRoundSeed = g_inboundBattleReady.round_seed;
+    outOpeningMember = g_inboundBattleReady.opening_member;
     g_inboundBattleReadyNew = false;
     return true;
 }

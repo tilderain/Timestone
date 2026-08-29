@@ -30,6 +30,7 @@ static constexpr uint32_t GSOUND_VOICE_REQUEST_FLAGS_OFFSET = 0x30;
 static constexpr uint32_t GSOUND_VOICE_REQUEST_LOOP = 0x80;
 static constexpr uintptr_t FN_SCENE_UPDATE_SOUND_ENV = 0x1405D6CD0;
 static constexpr uintptr_t FN_SGAMEUI_MOVE = 0x1402BE610;
+static constexpr uintptr_t FN_UBTGAUGEHC_MOVE = 0x1402F2AC0;
 static constexpr uintptr_t FN_UBTGAUGELIFE_MOVE = 0x1402F6800;
 static constexpr uintptr_t FN_RCHRCPU_CLASS_FUNC = 0x140117280;
 static constexpr uintptr_t FN_SMAIN_MOVE = 0x140521DF0;
@@ -60,6 +61,7 @@ static void(__fastcall* oSoundPlayWithDb)(void*, void*, uint32_t, uint64_t,
                                           uint32_t, float, uint8_t, int) = nullptr;
 static void(__fastcall* oSceneUpdateSoundEnv)(uint64_t) = nullptr;
 static void(__fastcall* oGameUiMove)(uint64_t) = nullptr;
+static void(__fastcall* oBtGaugeHcMove)(uint64_t) = nullptr;
 static void(__fastcall* oBtGaugeLifeMove)(uint64_t) = nullptr;
 static bool(__fastcall* oRChrCpuClassFunc)(void*, void*) = nullptr;
 using CChrSetPosFn = void(__fastcall*)(uint64_t, const float*);
@@ -412,7 +414,20 @@ static void __fastcall hkBtGaugeLifeMove(uint64_t gauge)
     // are not guaranteed to be initialized for the accompanying sUnit pass.
     if (g_isResimulating)
         return;
+    if (!*(uint64_t*)(gauge + 0x58))
+        return;
     oBtGaugeLifeMove(gauge);
+}
+
+static void __fastcall hkBtGaugeHcMove(uint64_t gauge)
+{
+    if (g_isResimulating)
+        return;
+    // These embedded material jobs are constructed with the gauge and lose
+    // their vtables during teardown. Do not move a partially destroyed gauge.
+    if (!*(uint64_t*)(gauge + 0xC0) || !*(uint64_t*)(gauge + 0xC40))
+        return;
+    oBtGaugeHcMove(gauge);
 }
 
 static bool __fastcall hkRChrCpuClassFunc(void* cpu, void* object)
@@ -534,6 +549,10 @@ void Rollback_InitMainHooks(RollbackMainMoveFn* originalMove)
     EnableHook(FN_UFADE_MOVE, (void*)&hkFadeMove, (void**)&oFadeMove,
                "Rollback: hooked uFade__move for re-simulation suppression",
                "Rollback: failed to hook uFade__move (%d)\n");
+    EnableHook(FN_UBTGAUGEHC_MOVE, (void*)&hkBtGaugeHcMove,
+               (void**)&oBtGaugeHcMove,
+               "Rollback: guarded uBtGaugeHc__move",
+               "Rollback: failed to guard uBtGaugeHc__move (%d)\n");
     EnableHook(FN_UBTGAUGELIFE_MOVE, (void*)&hkBtGaugeLifeMove,
                 (void**)&oBtGaugeLifeMove,
                 "Rollback: hooked uBtGaugeLife__move for re-simulation suppression",

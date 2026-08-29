@@ -113,6 +113,7 @@ static constexpr uintptr_t ADDR_METHOD_3D00              = 0x1402B3D00;
 static constexpr uintptr_t ADDR_PROCESS_FRAME_INPUT       = 0x14002DD60;
 static constexpr uintptr_t ADDR_IS_GAMEPLAY_ACTIVE        = 0x14002DCE0;
 static constexpr uintptr_t ADDR_BUTTON_REMAP              = 0x14002DA30;
+static constexpr uintptr_t ADDR_OPENING_REMAP_RETURN      = 0x14000650C;
 static constexpr uintptr_t ADDR_SWAP_LR_IF_FACE_LEFT      = 0x14002E560;
 static constexpr uintptr_t ADDR_CPU_INPUT_SWAP_RETURN     = 0x14002DE57;
 // uAmaterasu__getter_4AC0 — returns the team index (0=P1, 1=P2) from a character object.
@@ -149,6 +150,8 @@ static uint32_t(__fastcall* obuttonRemap)(uint64_t playerIndex, uint32_t input,
                                           uint8_t alternateMap) = nullptr;
 static uint32_t(__fastcall* oswapLRIfFaceLeft)(uint64_t cChrInput,
                                                uint32_t input) = nullptr;
+static uint32_t g_openingMembers[2] = {};
+static bool g_openingMembersValid = false;
 
 // ===========================================================================
 // Decompiled helper functions (inlined from game)
@@ -1037,6 +1040,13 @@ static uint32_t __fastcall hkbuttonRemap(uint64_t playerIndex, uint32_t rawInput
                                          uint8_t alternateMap)
 {
     RollbackHookProfileScope profile(RollbackHookProfileId::ButtonRemap);
+    uintptr_t caller = (uintptr_t)__builtin_return_address(0);
+    if (Netplay_IsActive() && g_openingMembersValid && playerIndex < 2 &&
+        caller == (uintptr_t)_addr(ADDR_OPENING_REMAP_RETURN)) {
+        uint32_t member = g_openingMembers[playerIndex];
+        return member == 2 ? IN_RB : (member == 1 ? IN_LB : 0);
+    }
+
     FrameInputRemapContext* context = g_frameInputRemapContext;
     if (!context || !Netplay_IsActive())
         return obuttonRemap(playerIndex, rawInput, alternateMap);
@@ -1188,6 +1198,59 @@ static uint64_t __fastcall hkGetsCurrentInput_withSOCD(uint64_t pad, uint32_t pl
     }
 
     return raw;
+}
+
+extern "C" uint32_t Controller_CaptureOpeningMember()
+{
+    if (!Netplay_IsActive() || !obuttonRemap || !oGetsCurrentInput_withSOCD)
+        return 0;
+
+    const uint32_t team = Netplay_IsHost() ? 0u : 1u;
+    using GetInstanceFn = uint64_t(__fastcall*)();
+    using GetTeamFn = uint64_t(__fastcall*)(uint64_t, uint32_t);
+    using GetTeamFlagsFn = uint32_t(__fastcall*)(uint64_t);
+    using GetPlayerPadFn = uint32_t(__fastcall*)(uint64_t, uint32_t);
+
+    uint64_t sCharacter = ((GetInstanceFn)_addr(0x140001AA0))();
+    uint64_t manager = ((GetInstanceFn)_addr(ADDR_MVC3_MGR_GET_INSTANCE))();
+    uint64_t pad = ((GetInstanceFn)_addr(ADDR_PAD_GET_INSTANCE))();
+    if (!sCharacter || !manager || !pad)
+        return 0;
+
+    uint64_t chrTeam = ((GetTeamFn)_addr(0x140001B60))(sCharacter, team);
+    if (!chrTeam)
+        return 0;
+
+    uint32_t teamFlags = ((GetTeamFlagsFn)_addr(0x1406D1C80))(chrTeam);
+    uint8_t alternateMap = (uint8_t)((teamFlags >> 12) & 1);
+    uint32_t playerIndex =
+        ((GetPlayerPadFn)_addr(ADGR_MGR_GET_PLAYER_CHAR))(manager, team);
+    uint32_t rawInput = (uint32_t)hkGetsCurrentInput_withSOCD(pad, playerIndex);
+    uint32_t logicalInput = obuttonRemap(team, rawInput, alternateMap);
+
+    if (!Netplay_IsHost() && team == 1 && IsGameProcessForeground())
+        logicalInput |= obuttonRemap(0, 0, alternateMap);
+
+    if (logicalInput & IN_RB)
+        return 2;
+    if (logicalInput & IN_LB)
+        return 1;
+    return 0;
+}
+
+extern "C" void Controller_SetOpeningMembers(uint32_t team0Member,
+                                               uint32_t team1Member)
+{
+    g_openingMembers[0] = team0Member <= 2 ? team0Member : 0;
+    g_openingMembers[1] = team1Member <= 2 ? team1Member : 0;
+    g_openingMembersValid = true;
+}
+
+extern "C" void Controller_ClearOpeningMembers()
+{
+    g_openingMembers[0] = 0;
+    g_openingMembers[1] = 0;
+    g_openingMembersValid = false;
 }
 
 // ---------------------------------------------------------------------------

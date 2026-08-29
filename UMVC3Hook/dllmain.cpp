@@ -10,6 +10,7 @@
 #include "code/eSettingsManager.h"
 #include "code/UMVC3Camera.h"
 #include "code/LaunchMenu.h"
+#include "code/LaunchMenu_settings.h"
 #include "code/framestepper.h"
 #include "code/escmenu_imgui.h"
 #include "code/trainingboot.h"
@@ -28,97 +29,271 @@
 #include <enet/enet.h>
 //#include "code/generated.h"
 
-// Log file for hook debugging
-FILE* g_hookLog = nullptr;
+// Hook logging stays in memory during gameplay and is persisted only at
+// explicit lifecycle boundaries.
 static SRWLOCK g_hookLogLock = SRWLOCK_INIT;
 static char g_hookLogFilename[MAX_PATH] = {};
-static char g_hookLogBuffer[64 * 1024] = {};
-static char g_hookConsoleBuffer[64 * 1024] = {};
-static bool g_hookConsoleBuffered = false;
-static ULONGLONG g_hookLogLastFlush = 0;
+static std::vector<char> g_hookLogBuffer;
+static std::string g_hookLogSnapshotFilename;
+static bool g_hookConsoleOutputEnabled = false;
 static HMODULE g_asiModule = nullptr;
 
-static void HookLogConfigureConsoleLocked()
+static constexpr size_t kHookLogMaxBytes = 4 * 1024 * 1024;
+static constexpr char kHookLogDiscardMarker[] =
+	"=== older log entries discarded ===\n";
+
+static bool HookLogConsoleEnabledByConfig()
 {
-	if (!g_hookConsoleBuffered) {
-		g_hookConsoleBuffered = setvbuf(stdout, g_hookConsoleBuffer, _IOFBF,
-		                                 sizeof(g_hookConsoleBuffer)) == 0;
+	char iniPath[MAX_PATH] = {};
+	const DWORD length = GetModuleFileNameA(nullptr, iniPath, sizeof(iniPath));
+	if (!length || length >= sizeof(iniPath))
+		return false;
+	char* filename = strrchr(iniPath, '\\');
+	char* forwardSlash = strrchr(iniPath, '/');
+	if (!filename || (forwardSlash && forwardSlash > filename))
+		filename = forwardSlash;
+	filename = filename ? filename + 1 : iniPath;
+	snprintf(filename, sizeof(iniPath) - (filename - iniPath), "Timestone.ini");
+	char configuredValue[32] = {};
+	if (GetPrivateProfileStringA("Settings", "EnableConsole", "",
+			configuredValue, sizeof(configuredValue), iniPath) == 0) {
+		WritePrivateProfileStringA("Settings", "EnableConsole", "0", iniPath);
+		return false;
 	}
+	return GetPrivateProfileIntA("Settings", "EnableConsole", 0, iniPath) == 1;
 }
 
-static void HookLogFlushLocked()
+static void HookLogAppendLocked(const char* data, size_t length)
 {
-	if (g_hookLog)
-		fflush(g_hookLog);
-	fflush(stdout);
-	g_hookLogLastFlush = GetTickCount64();
+	if (!data || !length)
+		return;
+	g_hookLogBuffer.insert(g_hookLogBuffer.end(), data, data + length);
+	if (g_hookLogBuffer.size() <= kHookLogMaxBytes)
+		return;
+
+	const size_t markerLength = sizeof(kHookLogDiscardMarker) - 1;
+	if (g_hookLogBuffer.size() >= markerLength &&
+		memcmp(g_hookLogBuffer.data(), kHookLogDiscardMarker,
+			markerLength) == 0) {
+		g_hookLogBuffer.erase(g_hookLogBuffer.begin(),
+			g_hookLogBuffer.begin() + markerLength);
+	}
+
+	const size_t keepBudget = kHookLogMaxBytes - markerLength;
+	size_t discard = g_hookLogBuffer.size() - keepBudget;
+	while (discard < g_hookLogBuffer.size() &&
+		g_hookLogBuffer[discard] != '\n')
+		++discard;
+	if (discard < g_hookLogBuffer.size())
+		++discard;
+	g_hookLogBuffer.erase(g_hookLogBuffer.begin(),
+		g_hookLogBuffer.begin() + discard);
+	g_hookLogBuffer.insert(g_hookLogBuffer.begin(), kHookLogDiscardMarker,
+		kHookLogDiscardMarker + markerLength);
+}
+
+static bool HookLogWriteSnapshotLocked(const char* filename)
+{
+	char temporaryFilename[MAX_PATH + 32] = {};
+	if (snprintf(temporaryFilename, sizeof(temporaryFilename), "%s.tmp.%lu",
+			filename, static_cast<unsigned long>(GetCurrentProcessId())) >=
+			static_cast<int>(sizeof(temporaryFilename)))
+		return false;
+	DeleteFileA(temporaryFilename);
+	FILE* output = fopen(temporaryFilename, "wb");
+	if (!output)
+		return false;
+	bool success = g_hookLogBuffer.empty() ||
+		fwrite(g_hookLogBuffer.data(), 1, g_hookLogBuffer.size(), output) ==
+			g_hookLogBuffer.size();
+	success = success && fflush(output) == 0;
+	success = fclose(output) == 0 && success;
+	if (!success || !MoveFileExA(temporaryFilename, filename,
+			MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+		DeleteFileA(temporaryFilename);
+		return false;
+	}
+	return true;
+}
+
+static bool HookLogWriteSnapshotLocked()
+{
+	return g_hookLogSnapshotFilename.empty() ||
+		HookLogWriteSnapshotLocked(g_hookLogSnapshotFilename.c_str());
+}
+
+static bool HookLogFlushLocked()
+{
+	if (g_hookConsoleOutputEnabled)
+		fflush(stdout);
+	if (!g_hookLogFilename[0])
+		return false;
+	if (g_hookLogBuffer.empty())
+		return true;
+	if (!HookLogWriteSnapshotLocked())
+		return false;
+
+	FILE* source = fopen(g_hookLogFilename, "rb");
+	__int64 oldSize = 0;
+	if (source) {
+		if (_fseeki64(source, 0, SEEK_END) != 0 ||
+			(oldSize = _ftelli64(source)) < 0) {
+			fclose(source);
+			return false;
+		}
+	} else if (GetFileAttributesA(g_hookLogFilename) != INVALID_FILE_ATTRIBUTES) {
+		return false;
+	}
+
+	const size_t newBytes = g_hookLogBuffer.size();
+	const size_t availableForOld = kHookLogMaxBytes - newBytes;
+	const size_t discardMarkerLength = sizeof(kHookLogDiscardMarker) - 1;
+	const bool trimOld = static_cast<unsigned long long>(oldSize) >
+		availableForOld;
+	size_t oldBudget = availableForOld;
+	bool writeDiscardMarker = false;
+	if (trimOld) {
+		writeDiscardMarker = availableForOld >= discardMarkerLength;
+		oldBudget = writeDiscardMarker
+			? availableForOld - discardMarkerLength : 0;
+	}
+
+	if (source) {
+		__int64 start = oldSize > static_cast<__int64>(oldBudget)
+			? oldSize - static_cast<__int64>(oldBudget) : 0;
+		if (start > 0 && oldBudget > 0) {
+			if (_fseeki64(source, start - 1, SEEK_SET) != 0) {
+				fclose(source);
+				return false;
+			}
+			const int previous = fgetc(source);
+			if (previous != '\n') {
+				int c = 0;
+				while ((c = fgetc(source)) != EOF && c != '\n') {}
+			}
+		} else if (_fseeki64(source, start, SEEK_SET) != 0) {
+			fclose(source);
+			return false;
+		}
+	}
+
+	char temporaryFilename[MAX_PATH + 32] = {};
+	if (snprintf(temporaryFilename, sizeof(temporaryFilename), "%s.tmp.%lu",
+			g_hookLogFilename, static_cast<unsigned long>(GetCurrentProcessId())) >=
+			static_cast<int>(sizeof(temporaryFilename))) {
+		if (source)
+			fclose(source);
+		return false;
+	}
+	DeleteFileA(temporaryFilename);
+	FILE* output = fopen(temporaryFilename, "wb");
+	if (!output) {
+		if (source)
+			fclose(source);
+		return false;
+	}
+
+	bool success = true;
+	if (writeDiscardMarker)
+		success = fwrite(kHookLogDiscardMarker, 1, discardMarkerLength,
+			output) == discardMarkerLength;
+	if (source && oldBudget > 0) {
+		char copyBuffer[16 * 1024];
+		size_t bytesRead = 0;
+		while (success &&
+			(bytesRead = fread(copyBuffer, 1, sizeof(copyBuffer), source)) != 0) {
+			success = fwrite(copyBuffer, 1, bytesRead, output) == bytesRead;
+		}
+		if (ferror(source))
+			success = false;
+	}
+	if (source)
+		fclose(source);
+	if (success)
+		success = fwrite(g_hookLogBuffer.data(), 1, newBytes, output) == newBytes;
+	success = success && fflush(output) == 0;
+	success = fclose(output) == 0 && success;
+	if (!success || !MoveFileExA(temporaryFilename, g_hookLogFilename,
+			MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+		DeleteFileA(temporaryFilename);
+		return false;
+	}
+
+	g_hookLogBuffer.clear();
+	return true;
 }
 
 void HookLogSetFile(const char* filename)
 {
 	AcquireSRWLockExclusive(&g_hookLogLock);
-	HookLogConfigureConsoleLocked();
+	if (g_hookLogBuffer.capacity() == 0)
+		g_hookLogBuffer.reserve(kHookLogMaxBytes);
 	if (strcmp(g_hookLogFilename, filename) == 0) {
 		ReleaseSRWLockExclusive(&g_hookLogLock);
 		return;
 	}
-	fflush(stderr);
-	if (g_hookLog) {
-		HookLogFlushLocked();
-		fclose(g_hookLog);
-		g_hookLog = nullptr;
-	}
-	// Unlink a previous run's root filename so its nplive hard links keep the
-	// old file instead of being truncated when this instance starts logging.
-	DeleteFileA(filename);
-	const bool copiedHistory = g_hookLogFilename[0] &&
-		CopyFileA(g_hookLogFilename, filename, FALSE);
-	g_hookLog = fopen(filename, copiedHistory ? "a" : "w");
-	if (g_hookLog) {
-		setvbuf(g_hookLog, g_hookLogBuffer, _IOFBF, sizeof(g_hookLogBuffer));
-		fprintf(g_hookLog, "=== UMVC3Hook Log Start (switched to %s) ===\n", filename);
-		HookLogFlushLocked();
-	}
-	// Also redirect stderr to the new log file for Wine crash logs
-	// Use append mode so it doesn't truncate what g_hookLog just wrote
-	freopen(filename, "a", stderr);
 	snprintf(g_hookLogFilename, sizeof(g_hookLogFilename), "%s", filename);
+	g_hookLogSnapshotFilename.clear();
+	SYSTEMTIME time = {};
+	GetLocalTime(&time);
+	char marker[MAX_PATH + 96] = {};
+	const int markerLength = snprintf(marker, sizeof(marker),
+		"=== UMVC3Hook Log Start %04u-%02u-%02u %02u:%02u:%02u.%03u "
+		"(switched to %s) ===\n",
+		time.wYear, time.wMonth, time.wDay, time.wHour, time.wMinute,
+		time.wSecond, time.wMilliseconds, filename);
+	if (markerLength > 0)
+		HookLogAppendLocked(marker,
+			std::min<int>(markerLength, sizeof(marker) - 1));
 	ReleaseSRWLockExclusive(&g_hookLogLock);
 }
 
-bool HookLogCreateAlias(const char* filename)
+bool HookLogSetSnapshotFile(const char* filename)
 {
 	AcquireSRWLockExclusive(&g_hookLogLock);
-	fflush(stderr);
-	HookLogFlushLocked();
-	const bool created = g_hookLogFilename[0] &&
-		CreateHardLinkA(filename, g_hookLogFilename, nullptr);
+	const bool created = g_hookLogFilename[0] && filename && filename[0];
+	if (created)
+		g_hookLogSnapshotFilename = filename;
 	ReleaseSRWLockExclusive(&g_hookLogLock);
 	return created;
 }
 
+void HookLogFlush()
+{
+	AcquireSRWLockExclusive(&g_hookLogLock);
+	HookLogFlushLocked();
+	ReleaseSRWLockExclusive(&g_hookLogLock);
+}
+
+void HookLogTryFlush()
+{
+	if (!TryAcquireSRWLockExclusive(&g_hookLogLock))
+		return;
+	HookLogFlushLocked();
+	ReleaseSRWLockExclusive(&g_hookLogLock);
+}
+
 void HookLog(const char* fmt, ...)
 {
-	//return;
 	AcquireSRWLockExclusive(&g_hookLogLock);
-	HookLogConfigureConsoleLocked();
+	char stackBuffer[2048] = {};
 	va_list args;
 	va_start(args, fmt);
-	vfprintf(stdout, fmt, args);
+	const int length = vsnprintf(stackBuffer, sizeof(stackBuffer), fmt, args);
 	va_end(args);
-
-	if (g_hookLog) {
-		va_list fileArgs;
-		va_start(fileArgs, fmt);
-		vfprintf(g_hookLog, fmt, fileArgs);
-		va_end(fileArgs);
-
+	if (length > 0 && length < (int)sizeof(stackBuffer)) {
+		HookLogAppendLocked(stackBuffer, length);
+		if (g_hookConsoleOutputEnabled)
+			fwrite(stackBuffer, 1, length, stdout);
+	} else if (length >= (int)sizeof(stackBuffer)) {
+		std::vector<char> formatted(static_cast<size_t>(length) + 1);
+		va_start(args, fmt);
+		vsnprintf(formatted.data(), formatted.size(), fmt, args);
+		va_end(args);
+		HookLogAppendLocked(formatted.data(), length);
+		if (g_hookConsoleOutputEnabled)
+			fwrite(formatted.data(), 1, length, stdout);
 	}
-	// Avoid a Wine console or disk write for every gameplay log line. Both CRT
-	// buffers still flush when full, with this timer limiting delayed output.
-	const ULONGLONG now = GetTickCount64();
-	if (now - g_hookLogLastFlush >= 1000)
-		HookLogFlushLocked();
 	ReleaseSRWLockExclusive(&g_hookLogLock);
 }
 
@@ -212,60 +387,34 @@ void HookLogWriteRecent(FILE* file)
 {
 	if (!file)
 		return;
-	if (TryAcquireSRWLockExclusive(&g_hookLogLock)) {
-		HookLogFlushLocked();
-		ReleaseSRWLockExclusive(&g_hookLogLock);
-	}
-
 	fprintf(file, "---- recent HookLog lines (up to 50) ----\n");
-	FILE* source = fopen(g_hookLogFilename, "rb");
-	if (!source || fseek(source, 0, SEEK_END) != 0) {
-		if (source)
-			fclose(source);
+	if (!TryAcquireSRWLockExclusive(&g_hookLogLock)) {
 		fprintf(file, "  <unavailable>\n");
 		return;
 	}
-
-	const long end = ftell(source);
-	if (end <= 0) {
-		fclose(source);
-		fprintf(file, end == 0 ? "  <none>\n" : "  <unavailable>\n");
+	if (g_hookLogBuffer.empty()) {
+		ReleaseSRWLockExclusive(&g_hookLogLock);
+		fprintf(file, "  <none>\n");
+		fprintf(file, "---- end recent HookLog lines ----\n");
 		return;
 	}
-	long start = end;
+
+	size_t start = 0;
 	int lineCount = 0;
-	while (start > 0 && lineCount < 50) {
-		--start;
-		if (fseek(source, start, SEEK_SET) != 0)
-			break;
-		const int c = fgetc(source);
-		if (c == '\n' && start + 1 < end) {
+	for (size_t i = g_hookLogBuffer.size(); i > 0; --i) {
+		if (g_hookLogBuffer[i - 1] == '\n' && i < g_hookLogBuffer.size()) {
 			++lineCount;
-			if (lineCount == 50)
-				++start;
-		}
-	}
-	if (fseek(source, start, SEEK_SET) == 0) {
-		int c = 0;
-		int lastWritten = '\n';
-		while ((c = fgetc(source)) != EOF) {
-			if (c == '\r') {
-				const int next = fgetc(source);
-				if (next != '\n') {
-					fputc(c, file);
-					lastWritten = c;
-				}
-				c = next;
-				if (c == EOF)
-					break;
+			if (lineCount == 50) {
+				start = i;
+				break;
 			}
-			fputc(c, file);
-			lastWritten = c;
 		}
-		if (lastWritten != '\n')
-			fputc('\n', file);
 	}
-	fclose(source);
+	fwrite(g_hookLogBuffer.data() + start, 1,
+		g_hookLogBuffer.size() - start, file);
+	if (g_hookLogBuffer.back() != '\n')
+		fputc('\n', file);
+	ReleaseSRWLockExclusive(&g_hookLogLock);
 	fprintf(file, "---- end recent HookLog lines ----\n");
 }
 
@@ -281,15 +430,14 @@ void HookLogAppendFile(const char* filename, long offset)
 		return;
 	}
 
-	AcquireSRWLockExclusive(&g_hookLogLock);
-	if (g_hookLog) {
+	if (TryAcquireSRWLockExclusive(&g_hookLogLock)) {
 		char buffer[4096];
 		size_t bytesRead = 0;
 		while ((bytesRead = fread(buffer, 1, sizeof(buffer), source)) != 0)
-			fwrite(buffer, 1, bytesRead, g_hookLog);
+			HookLogAppendLocked(buffer, bytesRead);
 		HookLogFlushLocked();
+		ReleaseSRWLockExclusive(&g_hookLogLock);
 	}
-	ReleaseSRWLockExclusive(&g_hookLogLock);
 	fclose(source);
 }
 
@@ -590,6 +738,7 @@ static BOOL WINAPI ConsoleControlHandler(DWORD controlType)
 	case CTRL_SHUTDOWN_EVENT:
 		DisableReturnToLaunchMenuOnExit();
 		CleanupNetworkOnExit();
+		HookLogFlush();
 		return TRUE;
 	default:
 		return FALSE;
@@ -602,8 +751,10 @@ LRESULT __stdcall WndProc(const HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPar
         DisableReturnToLaunchMenuOnExit();
     if (uMsg == WM_CLOSE || uMsg == WM_DESTROY)
         PrepareForGameExit();
-    else if (uMsg == WM_ENDSESSION && wParam != FALSE)
+    else if (uMsg == WM_ENDSESSION && wParam != FALSE) {
         CleanupNetworkOnExit();
+        HookLogFlush();
+    }
 
     switch (uMsg)
     {
@@ -1633,13 +1784,40 @@ void __fastcall Hook_titleLogoUpdate(uintptr_t param_1)
 		firstCall = false;
 	}
 
+	const bool trainingBoot =
+		GetLaunchOption() == LAUNCH_TRAINING ||
+		GetLaunchOption() == LAUNCH_DUAL_TRAINING;
+
+	const int parentState = *(int*)(param_1 + 0x78);
+	if (trainingBoot && parentState == 1) {
+		// State 1 normally creates and advances the Capcom/Marvel presentation.
+		// Archive I/O advances independently, so poll its native readiness gate
+		// without running the presentation or allowing it to reach title setup.
+		typedef uintptr_t(__fastcall* GetManager_t)();
+		typedef bool(__fastcall* AreArchivesLoaded_t)(uintptr_t, int32_t);
+		const uintptr_t manager =
+			((GetManager_t)_addr(0x140001AF0))();
+		if (manager &&
+			((AreArchivesLoaded_t)_addr(0x14025AC60))(manager, -1)) {
+			BootIntoTraining();
+		}
+		return;
+	}
+
+	// State 2 launches the title/menu area. This is only a fallback if the game
+	// enters the hook after state 1 has already advanced.
+	if (trainingBoot && parentState == 2) {
+		BootIntoTraining();
+		return;
+	}
+
 	oTitleLogoUpdate(param_1);
 
-	// State 0 queues the common boot archives needed by battle. Once it advances,
-	// configure training immediately; aTitle itself is only menu setup here.
-	if (GetLaunchOption() == LAUNCH_TRAINING || GetLaunchOption() == LAUNCH_DUAL_TRAINING) {
-		int parentState = *(int*)(param_1 + 0x78);
-		if (parentState == 1) {
+	// State 0 queues the common boot archives needed by battle. Start the config
+	// load immediately after it advances, before state 1 is held above.
+	if (trainingBoot) {
+		const int nextState = *(int*)(param_1 + 0x78);
+		if (nextState == 1 || nextState == 2) {
 			BootIntoTraining();
 		}
 	}
@@ -1658,11 +1836,13 @@ void OnInitializeHook()
 	// Open log file for hook debugging (append mode so 2nd instance doesn't clobber)
 	HookLogSetFile("Timestone.log");
 
-	if (SettingsMgr->bEnableConsoleWindow)
+	if (HookLogConsoleEnabledByConfig())
 	{
 		AllocConsole();
 		freopen("CONIN$", "r", stdin);
 		freopen("CONOUT$", "w", stdout);
+		setvbuf(stdout, nullptr, _IONBF, 0);
+		g_hookConsoleOutputEnabled = true;
 	}
 	if (!SetConsoleCtrlHandler(ConsoleControlHandler, TRUE))
 		HookLog("UMVC3Hook: Failed to install console close handler (error %lu)\n",
@@ -1783,13 +1963,16 @@ void OnInitializeHook()
 		HookLog("UMVC3Hook: Opening launch menu\n");
 		opt = ShowLaunchMenu();
 		HookLog("UMVC3Hook: Launch menu returned option %d\n", (int)opt);
+		HookLogFlush();
 	}
 	if (opt == LAUNCH_CANCELLED) {
 		HookLog("UMVC3Hook: Launch menu closed; exiting game\n");
 		CleanupNetworkOnExit();
+		HookLogFlush();
 		ExitProcess(0);
 		return;
 	}
+	PrepareAdvancedLaunchConfig();
 	EnableReturnToLaunchMenuOnExit();
 
 	//if (opt == LAUNCH_TRAINING || opt == LAUNCH_DUAL_TRAINING) {

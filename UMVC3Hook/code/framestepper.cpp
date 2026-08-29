@@ -40,6 +40,7 @@ using namespace Memory::VP;
 
 // HookLog from dllmain.cpp
 extern void HookLog(const char* fmt, ...);
+extern void HookLogFlush();
 extern void ChrSelImGui_Update();
 extern bool ChrSelImGui_ApplyRestart(int32_t targetFrame);
 extern bool ChrSelImGui_TakeFullTransitionRequested();
@@ -86,6 +87,13 @@ static bool g_trainingRestartLeftFighting = false;
 static bool g_localFighting = false;
 static bool g_remoteFighting = false;
 static bool g_desyncCheckReady = false;
+static bool g_localOpeningReady = false;
+static bool g_remoteOpeningReady = false;
+static bool g_localOpeningRelease = false;
+static bool g_remoteOpeningRelease = false;
+static bool g_openingMembersApplied = false;
+static uint32_t g_localOpeningMember = 0;
+static uint32_t g_remoteOpeningMember = 0;
 static bool g_autoTestLaunchPending = false;
 static bool g_autoTestLaunchRunning = false;
 static DWORD g_autoTestExitTick = 0;
@@ -106,6 +114,17 @@ static bool g_handshakeStallLogged = false;
 extern "C" bool FrameStepper_IsBattleSynchronized() { return g_battleSynchronized; }
 extern "C" uint32_t FrameStepper_GetBattleGeneration() { return g_battleGeneration; }
 extern "C" bool FrameStepper_IsDesyncCheckReady() { return g_desyncCheckReady; }
+static void ResetOpeningMemberHandshake()
+{
+    g_localOpeningReady = false;
+    g_remoteOpeningReady = false;
+    g_localOpeningRelease = false;
+    g_remoteOpeningRelease = false;
+    g_openingMembersApplied = false;
+    g_localOpeningMember = 0;
+    g_remoteOpeningMember = 0;
+    Controller_ClearOpeningMembers();
+}
 void FrameStepper_SetTrainingFrameLimit(int32_t frames)
 {
     g_trainingFrameLimit = frames;
@@ -454,6 +473,30 @@ static constexpr uintptr_t GET_CURRENT_INPUT_ADDR = 0x1402B3700;
 typedef void(__fastcall* Move_t)(void*);
 static Move_t oMove = nullptr;
 
+static float GetGameUpdatesPerSecond(int32_t currentFrame)
+{
+    static ULONGLONG sampleStart = 0;
+    static int32_t sampleFrame = -1;
+    static float updatesPerSecond = 0.0f;
+
+    const ULONGLONG now = GetTickCount64();
+    if (sampleStart == 0 || currentFrame < sampleFrame) {
+        sampleStart = now;
+        sampleFrame = currentFrame;
+        updatesPerSecond = 0.0f;
+        return updatesPerSecond;
+    }
+
+    const ULONGLONG elapsedMs = now - sampleStart;
+    if (elapsedMs >= 1000) {
+        updatesPerSecond = static_cast<float>(currentFrame - sampleFrame) *
+                           (1000.0f / static_cast<float>(elapsedMs));
+        sampleStart = now;
+        sampleFrame = currentFrame;
+    }
+    return updatesPerSecond;
+}
+
 // Forward declarations
 static void CaptureNetInput();
 static bool IsTrainingMode();
@@ -549,6 +592,7 @@ static void __fastcall HookedMove(void* sMvc3Main)
                 return;
             }
         }
+        HookLogFlush();
         const bool fullRosterTransition =
             ChrSelImGui_TakeFullTransitionRequested();
         static constexpr uintptr_t MVC3_MANAGER_PTR = 0x140D510A0;
@@ -594,6 +638,7 @@ static void __fastcall HookedMove(void* sMvc3Main)
             ++g_battleGeneration;
             if (g_battleGeneration == 0)
                 g_battleGeneration = 1;
+            ResetOpeningMemberHandshake();
             g_advertisedBattleFlags = 0;
             g_battleAdvertiseTick = 0;
             HookLog("FrameStepper: requested synchronized training restart buttonMode=%d frame=%d generation=%u seed=0x%08X\n",
@@ -649,6 +694,7 @@ static void __fastcall HookedMove(void* sMvc3Main)
             ++g_battleGeneration;
             if (g_battleGeneration == 0)
                 g_battleGeneration = 1;
+            ResetOpeningMemberHandshake();
             g_advertisedBattleFlags = 0;
             g_battleAdvertiseTick = 0;
         }
@@ -695,14 +741,23 @@ static void __fastcall HookedMove(void* sMvc3Main)
         uint32_t remoteGeneration = 0;
         uint32_t remoteFlags = 0;
         uint32_t remoteRoundSeed = 0;
+        uint32_t remoteOpeningMember = 0;
         while (Netplay_GetInboundBattleReady(remoteGeneration, remoteFlags,
-                                              remoteRoundSeed))
+                                              remoteRoundSeed,
+                                              remoteOpeningMember))
         {
             if (remoteGeneration == g_battleGeneration)
             {
                 g_remoteReady |= (remoteFlags & BATTLE_SYNC_READY) != 0;
                 g_remoteRelease |= (remoteFlags & BATTLE_SYNC_RELEASE) != 0;
                 g_remoteFighting |= (remoteFlags & BATTLE_SYNC_FIGHTING) != 0;
+                if ((remoteFlags & BATTLE_SYNC_OPENING_READY) != 0 &&
+                    remoteOpeningMember <= 2) {
+                    g_remoteOpeningMember = remoteOpeningMember;
+                    g_remoteOpeningReady = true;
+                }
+                g_remoteOpeningRelease |=
+                    (remoteFlags & BATTLE_SYNC_OPENING_RELEASE) != 0;
                 if (!Netplay_IsHost() && (remoteFlags & BATTLE_SYNC_SEED) != 0) {
                     g_roundSeed = remoteRoundSeed;
                     g_roundSeedReady = true;
@@ -715,6 +770,21 @@ static void __fastcall HookedMove(void* sMvc3Main)
         uint64_t action = getAction();
         int32_t step = action ? *(int32_t*)(action + 0xD8) : 0;
         int32_t pendingStep = action ? *(int32_t*)(action + 0xDC) : -1;
+        const bool enteringIntro = action && pendingStep == 2 && step != 2 &&
+                                   !g_trainingRestartBarrier;
+
+        if (!g_battleSynchronized && enteringIntro) {
+            if (!g_localOpeningReady) {
+                g_localOpeningMember = Controller_CaptureOpeningMember();
+                g_localOpeningReady = true;
+                HookLog("Netplay: opening member selected team=%u member=%u "
+                        "generation=%u\n",
+                        Netplay_IsHost() ? 0u : 1u, g_localOpeningMember,
+                        g_battleGeneration);
+            }
+            if (g_remoteOpeningReady)
+                g_localOpeningRelease = true;
+        }
 
         if (g_nativeRestartTransitionPending && action &&
             !TrainingBoot_IsRestartPending())
@@ -774,14 +844,34 @@ static void __fastcall HookedMove(void* sMvc3Main)
         uint32_t localFlags = (g_localReady ? BATTLE_SYNC_READY : 0) |
                               (g_localRelease ? BATTLE_SYNC_RELEASE : 0) |
                               (g_localFighting ? BATTLE_SYNC_FIGHTING : 0) |
-                              (Netplay_IsHost() && g_roundSeedReady ? BATTLE_SYNC_SEED : 0);
+                              (Netplay_IsHost() && g_roundSeedReady ? BATTLE_SYNC_SEED : 0) |
+                              (g_localOpeningReady ? BATTLE_SYNC_OPENING_READY : 0) |
+                              (g_localOpeningRelease ? BATTLE_SYNC_OPENING_RELEASE : 0);
         g_battleAdvertiseTick++;
         if (localFlags != 0 &&
             (localFlags != g_advertisedBattleFlags || g_battleAdvertiseTick >= 30))
         {
-            Netplay_SendBattleReady(g_battleGeneration, localFlags, g_roundSeed);
+            Netplay_SendBattleReady(g_battleGeneration, localFlags, g_roundSeed,
+                                    g_localOpeningMember);
             g_advertisedBattleFlags = localFlags;
             g_battleAdvertiseTick = 0;
+        }
+
+        if (!g_battleSynchronized && enteringIntro) {
+            if (!g_localOpeningRelease || !g_remoteOpeningRelease)
+                return;
+
+            if (!g_openingMembersApplied) {
+                uint32_t team0Member = Netplay_IsHost()
+                    ? g_localOpeningMember : g_remoteOpeningMember;
+                uint32_t team1Member = Netplay_IsHost()
+                    ? g_remoteOpeningMember : g_localOpeningMember;
+                Controller_SetOpeningMembers(team0Member, team1Member);
+                g_openingMembersApplied = true;
+                HookLog("Netplay: opening members synchronized p1=%u p2=%u "
+                        "generation=%u\n", team0Member, team1Member,
+                        g_battleGeneration);
+            }
         }
 
         if (!g_battleSynchronized && g_localRelease && g_remoteRelease)
@@ -1693,9 +1783,9 @@ void FrameStepper_Draw()
         ImGui::Text("WAITING FOR OPPONENT");
         ImGui::SetWindowFontScale(1.0f);
         ImGui::PopStyleColor();
-        ImGui::Text("Your stopped getting input from your opp.");
+        ImGui::Text("You stopped getting input from your opp.");
         ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.4f, 1.0f),
-            "Maybe you lost internet, or maybe their pc froze or crashed or lost internet or something.");
+            "Either player may have lost connection, or your opponent's game may have froze/crashed");
 
         ImGui::End();
         ImGui::PopStyleColor();
@@ -1727,7 +1817,8 @@ void FrameStepper_Draw()
         // sReplay advances during oMove, but processFrameInput records under the
         // frame value from the start of that tick. Display the input that made
         // the currently rendered frame, not the device state for the next tick.
-        int32_t frame = Controller_GetNetFrameCount() - 1;
+        const int32_t currentFrame = Controller_GetNetFrameCount();
+        int32_t frame = currentFrame - 1;
         uint32_t p1 = Controller_GetExpectedInput(0, frame);
         uint32_t p2 = Controller_GetExpectedInput(1, frame);
 
@@ -1766,8 +1857,9 @@ void FrameStepper_Draw()
                 ImGui::SetCursorPosX(roleLabelCenterX - ImGui::CalcTextSize(roleLabel).x * 0.5f);
                 ImGui::TextColored(color, "%s", roleLabel);
                 ImGui::TextColored(color, "Ping: %ums", Netplay_GetRTT() / 2);
-                ImGui::TextColored(color, "Frame: %d", Controller_GetNetFrameCount());
-                ImGui::TextColored(color, "FPS: %.1f", ImGui::GetIO().Framerate);
+                ImGui::TextColored(color, "Frame: %d", currentFrame);
+                ImGui::TextColored(color, "FPS: %.1f",
+                                   GetGameUpdatesPerSecond(currentFrame));
                 ImGui::TextColored(color, "Delay: %d  Rollback: %d", curDelay, curRollback);
 
                 // Keep each control row vertical so the overlay stays compact in width.

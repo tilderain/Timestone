@@ -20,6 +20,7 @@
 // HookLog from dllmain.cpp
 extern void HookLog(const char* fmt, ...);
 extern void HookLogSetFile(const char* filename);
+extern void HookLogFlush();
 
 // ---------------------------------------------------------------------------
 // Character and stage name tables
@@ -689,19 +690,24 @@ void PrepareForGameExit()
 {
     CleanupNetworkOnExit();
     if (InterlockedCompareExchange(&g_returnToLaunchMenuArmed, 0, 1) != 1 ||
-        InterlockedExchange(&g_returnToLaunchMenuStarted, 1) != 0)
+        InterlockedExchange(&g_returnToLaunchMenuStarted, 1) != 0) {
+        HookLogFlush();
         return;
+    }
 
     // The detached watcher survives forced console termination and relaunches
     // only after this process has fully exited.
-    if (InterlockedCompareExchange(&g_returnToLaunchMenuWatcherStarted, 0, 0) != 0)
+    if (InterlockedCompareExchange(&g_returnToLaunchMenuWatcherStarted, 0, 0) != 0) {
+        HookLogFlush();
         return;
+    }
 
     wchar_t exePath[MAX_PATH] = {};
     const DWORD length = GetModuleFileNameW(nullptr, exePath, MAX_PATH);
     if (length == 0 || length >= MAX_PATH) {
         HookLog("UMVC3Hook: Failed to resolve executable for launch-menu return (error %lu)\n",
                 GetLastError());
+        HookLogFlush();
         return;
     }
 
@@ -715,12 +721,14 @@ void PrepareForGameExit()
                         creationFlags, nullptr, nullptr, &startup, &process)) {
         HookLog("UMVC3Hook: Failed to return to launch menu (error %lu)\n",
                 GetLastError());
+        HookLogFlush();
         return;
     }
 
     CloseHandle(process.hThread);
     CloseHandle(process.hProcess);
     HookLog("UMVC3Hook: Started fresh launch-menu process\n");
+    HookLogFlush();
 }
 
 // ---------------------------------------------------------------------------
