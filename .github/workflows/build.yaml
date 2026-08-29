@@ -104,17 +104,31 @@ jobs:
         path: dist/
         if-no-files-found: error
 
-  release:
-    needs: [build, sign]   # build needed for outputs.version
+  release-draft:
+    needs: [build, sign]
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
+    outputs:
+      created: ${{ steps.check.outputs.exists == 'false' }}
     steps:
     - uses: actions/download-artifact@v8
       with:
         name: timestone-signed
         path: dist
 
-    - name: Create GitHub release
+    - name: Check for existing release
+      id: check
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        if gh release list --json tagName --jq '.[].tagName' | grep -qx "v${{ needs.build.outputs.version }}"; then
+          echo "exists=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "exists=false" >> "$GITHUB_OUTPUT"
+        fi
+
+    - name: Create draft release
+      if: steps.check.outputs.exists == 'false'
       uses: softprops/action-gh-release@v3   # v2 is deprecated (Node 20)
       with:
         tag_name: v${{ needs.build.outputs.version }}
@@ -146,3 +160,30 @@ jobs:
           John2143- "Sponsorship"
           Those random guys who played with me in an ingame lobby one day
         generate_release_notes: true   # appends What's Changed commit list after the custom body
+        draft: true   # human gate: devs promote via the environment approvals below
+
+  prerelease:
+    needs: [build, release-draft]
+    if: ${{ github.event_name == 'push' && needs.release-draft.outputs.created == 'true' }}
+    runs-on: ubuntu-latest
+    environment: prerelease   # pauses for manual approval — required reviewers in repo settings
+    steps:
+    - name: Publish draft as prerelease
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        VERSION="v${{ needs.build.outputs.version }}"
+        gh release edit "$VERSION" --draft=false --prerelease
+
+  release:
+    needs: [build, prerelease, release-draft]
+    if: ${{ github.event_name == 'push' && needs.release-draft.outputs.created == 'true' }}
+    runs-on: ubuntu-latest
+    environment: release   # pauses for manual approval — required reviewers in repo settings
+    steps:
+    - name: Promote prerelease to full release
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        VERSION="v${{ needs.build.outputs.version }}"
+        gh release edit "$VERSION" --prerelease=false
