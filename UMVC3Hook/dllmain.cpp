@@ -1784,13 +1784,40 @@ void __fastcall Hook_titleLogoUpdate(uintptr_t param_1)
 		firstCall = false;
 	}
 
+	const bool trainingBoot =
+		GetLaunchOption() == LAUNCH_TRAINING ||
+		GetLaunchOption() == LAUNCH_DUAL_TRAINING;
+
+	const int parentState = *(int*)(param_1 + 0x78);
+	if (trainingBoot && parentState == 1) {
+		// State 1 normally creates and advances the Capcom/Marvel presentation.
+		// Archive I/O advances independently, so poll its native readiness gate
+		// without running the presentation or allowing it to reach title setup.
+		typedef uintptr_t(__fastcall* GetManager_t)();
+		typedef bool(__fastcall* AreArchivesLoaded_t)(uintptr_t, int32_t);
+		const uintptr_t manager =
+			((GetManager_t)_addr(0x140001AF0))();
+		if (manager &&
+			((AreArchivesLoaded_t)_addr(0x14025AC60))(manager, -1)) {
+			BootIntoTraining();
+		}
+		return;
+	}
+
+	// State 2 launches the title/menu area. This is only a fallback if the game
+	// enters the hook after state 1 has already advanced.
+	if (trainingBoot && parentState == 2) {
+		BootIntoTraining();
+		return;
+	}
+
 	oTitleLogoUpdate(param_1);
 
-	// State 0 queues the common boot archives needed by battle. Once it advances,
-	// configure training immediately; aTitle itself is only menu setup here.
-	if (GetLaunchOption() == LAUNCH_TRAINING || GetLaunchOption() == LAUNCH_DUAL_TRAINING) {
-		int parentState = *(int*)(param_1 + 0x78);
-		if (parentState == 1) {
+	// State 0 queues the common boot archives needed by battle. Start the config
+	// load immediately after it advances, before state 1 is held above.
+	if (trainingBoot) {
+		const int nextState = *(int*)(param_1 + 0x78);
+		if (nextState == 1 || nextState == 2) {
 			BootIntoTraining();
 		}
 	}
