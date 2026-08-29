@@ -35,7 +35,7 @@ jobs:
     - name: Stage release assets
       run: |
         mkdir -p dist
-        cp -L result/Timestone.zip result/Timestone.asi result/TimestoneUpdater.exe dist/
+        cp -L result/Timestone.asi result/TimestoneUpdater.exe result/dinput8.dll dist/
 
     - name: Upload unsigned artifacts
       uses: actions/upload-artifact@v7
@@ -56,10 +56,8 @@ jobs:
     - name: Unpack zip and stage Timestone binaries for signing
       shell: pwsh
       run: |
-        Expand-Archive -Path dist\Timestone.zip -DestinationPath work -Force
-        New-Item -ItemType Directory -Path sign -Force | Out-Null
-        Copy-Item work\Timestone.asi sign\Timestone.dll -Force   # .asi is a PE DLL; not in ArtifactSigning's type list
-        Copy-Item work\TimestoneUpdater.exe sign\ -Force   # dinput8.dll (ASI loader) stays unsigned
+        Copy-Item dist\Timestone.asi sign\Timestone.dll -Force   # .asi is a PE DLL; not in ArtifactSigning's type list
+        Copy-Item dist\TimestoneUpdater.exe sign\ -Force   # dinput8.dll (ASI loader) stays unsigned
 
     - name: Sign with Azure Artifact Signing
       uses: azure/artifact-signing-action@v2
@@ -94,7 +92,6 @@ jobs:
         Copy-Item sign\Timestone.dll dist\Timestone.asi -Force
         Copy-Item sign\TimestoneUpdater.exe dist\ -Force
         Copy-Item work\dinput8.dll dist\ -Force   # unsigned — original from the zip
-        Remove-Item dist\Timestone.zip -Force
         Compress-Archive -Path dist\dinput8.dll, dist\Timestone.asi, dist\TimestoneUpdater.exe -DestinationPath dist\Timestone.zip
 
     - name: Upload signed artifacts
