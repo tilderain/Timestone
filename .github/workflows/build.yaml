@@ -121,6 +121,7 @@ jobs:
       GH_REPO: ${{ github.repository }}   # gh ignores GITHUB_REPOSITORY; needs this or --repo
     outputs:
       created: ${{ steps.check.outputs.exists == 'false' }}
+    environment: prerelease   # pauses for manual approval — required reviewers in repo settings
     steps:
     - uses: actions/download-artifact@v8
       with:
@@ -174,25 +175,11 @@ jobs:
           John2143- "Sponsorship"
           Those random guys who played with me in an ingame lobby one day
         generate_release_notes: true   # appends What's Changed commit list after the custom body
-        draft: true   # human gate: devs promote via the environment approvals below
-
-  prerelease:
-    needs: [build, release-draft]
-    if: ${{ github.event_name == 'push' && needs.release-draft.outputs.created == 'true' }}
-    runs-on: ubuntu-latest
-    env:
-      GH_REPO: ${{ github.repository }}   # gh ignores GITHUB_REPOSITORY; needs this or --repo
-    environment: prerelease   # pauses for manual approval — required reviewers in repo settings
-    steps:
-    - name: Publish draft as prerelease
-      env:
-        GH_TOKEN: ${{ github.token }}
-      run: |
-        VERSION="v${{ needs.build.outputs.version }}"
-        gh release edit "$VERSION" --draft=false --prerelease
+        draft: false  # human gate: devs promote via the environment approvals below
+        prerelease: true
 
   release:
-    needs: [build, prerelease, release-draft]
+    needs: [build, release-draft]
     if: ${{ github.event_name == 'push' && needs.release-draft.outputs.created == 'true' }}
     runs-on: ubuntu-latest
     env:
