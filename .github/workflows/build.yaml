@@ -120,4 +120,38 @@ jobs:
         tag_name: v${{ needs.build.outputs.version }}
         name: Timestone ${{ needs.build.outputs.version }}
         files: dist/Timestone.zip
-        generate_release_notes: true
+        body: |
+          Please join the discord if you are going to test this!!!
+          https://discord.gg/BvDNwPzwy4
+
+          MAKE SURE YOU HAVE NO MODS INSTALLED WHEN PLAYING THIS
+
+          Everything is broken, desyncs occassionally, crashes occassionally
+
+          To install, extract the contents of Timestone.zip into your marvel folder
+
+          Primary connection method is Steam Lobby, make a lobby or search for lobbies and join. You can use invite to game in Steam, and you can right click join when someone is hosting a lobby.
+
+          There is an issue with BITDEFENDER. Bitdefender WILL crash your game, please add an exclusion for marvel folder / disable it
+
+          Credits
+
+          Armonte- Many reverse engineering and documentation, Shot snapshot base, inspiration from his repo (exception handler.. etc)
+
+          Hkhann- Prior reverse engineering, the one who started it all with the OG UMVC3Rollback repo
+
+          catboy_friender- Help with Hkhann's repo
+
+          Eternal Yoshi- Prior reverse engineering, playtesting
+
+          Ryn (wistfulhopes), anotak, Gneiss- Prior reverse engineering
+
+          Archeroflegend- Framestepper, playtesting and harassment
+
+          ermaccer- UMVC3Hook
+
+          Vevota- Playtesting and harassment
+
+          John2143- "Sponsorship"
+
+          Those random guys who played with me in an ingame lobby one day
