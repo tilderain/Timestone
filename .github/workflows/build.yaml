@@ -110,7 +110,7 @@ jobs:
       uses: actions/upload-artifact@v7
       with:
         name: Timestone-v${{ needs.build.outputs.version }}
-        path: dist/
+        path: out/
         if-no-files-found: error
 
   release-draft:
