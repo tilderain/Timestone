@@ -837,7 +837,7 @@ LONG WINAPI UnhandledExceptionHandler(PEXCEPTION_POINTERS info)
     // Reaching the top-level filter proves this exception is fatal even when
     // its code is not in the first-chance catastrophic allowlist.
     const LONG result = HandleException(info, false);
-    CleanupNetworkOnExit();
+    PrepareForGameExit();
     return result;
 }
 
