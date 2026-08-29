@@ -23,6 +23,7 @@ jobs:
     - name: Install Nix
       uses: DeterminateSystems/nix-installer-action@v22
 
+    # Nix caching to allow faster builds via deps
     - name: Enable Nix cache (GitHub Actions)
       uses: DeterminateSystems/magic-nix-cache-action@v14
       with:
