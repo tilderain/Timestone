@@ -270,6 +270,15 @@ void HookLogTryFlush()
 	ReleaseSRWLockExclusive(&g_hookLogLock);
 }
 
+static void HookLogWriteConsoleLocked(const char* data, size_t length)
+{
+	if (!g_hookConsoleOutputEnabled)
+		return;
+	fwrite(data, 1, length, stdout);
+	if (memchr(data, '\n', length))
+		fflush(stdout);
+}
+
 void HookLog(const char* fmt, ...)
 {
 	AcquireSRWLockExclusive(&g_hookLogLock);
@@ -280,16 +289,14 @@ void HookLog(const char* fmt, ...)
 	va_end(args);
 	if (length > 0 && length < (int)sizeof(stackBuffer)) {
 		HookLogAppendLocked(stackBuffer, length);
-		if (g_hookConsoleOutputEnabled)
-			fwrite(stackBuffer, 1, length, stdout);
+		HookLogWriteConsoleLocked(stackBuffer, length);
 	} else if (length >= (int)sizeof(stackBuffer)) {
 		std::vector<char> formatted(static_cast<size_t>(length) + 1);
 		va_start(args, fmt);
 		vsnprintf(formatted.data(), formatted.size(), fmt, args);
 		va_end(args);
 		HookLogAppendLocked(formatted.data(), length);
-		if (g_hookConsoleOutputEnabled)
-			fwrite(formatted.data(), 1, length, stdout);
+		HookLogWriteConsoleLocked(formatted.data(), length);
 	}
 	ReleaseSRWLockExclusive(&g_hookLogLock);
 }
