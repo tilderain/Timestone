@@ -212,13 +212,7 @@ bool IsExecutableAddress(uint64_t value)
     if (value < 0x10000 || value >= 0x0000800000000000ull) return false;
     if (const CachedMemoryRegion* region = GetCachedMemoryRegion(value))
         return region->executable;
-    MEMORY_BASIC_INFORMATION mbi = {};
-    if (VirtualQuery((void*)value, &mbi, sizeof(mbi)) == 0) return false;
-    if (mbi.State != MEM_COMMIT || (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) != 0)
-        return false;
-    const DWORD executable = PAGE_EXECUTE | PAGE_EXECUTE_READ |
-        PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
-    return (mbi.Protect & executable) != 0;
+    return false;
 }
 
 bool IsAccessibleRange(uint64_t value, size_t size)
