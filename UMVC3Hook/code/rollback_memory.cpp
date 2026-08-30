@@ -165,9 +165,7 @@ uint64_t GetObjectDti(uint64_t object)
     uint64_t vtable = *(uint64_t*)object;
     if (IsGameImageRange(vtable, 0x28)) {
         auto getDti = (uint64_t(__fastcall*)(uint64_t))(*(uint64_t*)(vtable + 0x20));
-        const uint64_t getDtiAddress = (uint64_t)getDti;
-        if (getDti && (IsGameExecutableAddress(getDtiAddress) ||
-                       IsExecutableAddress(getDtiAddress))) {
+        if (getDti && IsExecutableAddress((uint64_t)getDti)) {
             uint64_t dti = getDti(object);
             return IsGameDti(dti) ? dti : 0;
         }
@@ -210,6 +208,7 @@ bool IsAccessibleAddress(uint64_t value)
 
 bool IsExecutableAddress(uint64_t value)
 {
+    if (IsGameExecutableAddress(value)) return true;
     if (value < 0x10000 || value >= 0x0000800000000000ull) return false;
     if (const CachedMemoryRegion* region = GetCachedMemoryRegion(value))
         return region->executable;
