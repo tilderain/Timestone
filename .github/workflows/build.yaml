@@ -78,6 +78,7 @@ jobs:
         Copy-Item dist\TimestoneUpdater.exe sign\ -Force   # dinput8.dll (ASI loader) stays unsigned
 
     - name: Sign with Azure Artifact Signing
+      if: vars.ENABLE_SIGNING == 'true'   # feature flag — set the ENABLE_SIGNING repo variable to 'true' to re-enable
       uses: azure/artifact-signing-action@v2
       with:
         endpoint: https://eus.codesigning.azure.net/
@@ -93,6 +94,7 @@ jobs:
         timestamp-digest: SHA256
 
     - name: Verify signatures
+      if: vars.ENABLE_SIGNING == 'true'
       shell: pwsh
       run: |
         $files = Get-ChildItem sign\*.dll, sign\*.exe
