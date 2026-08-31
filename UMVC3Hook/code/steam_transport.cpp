@@ -1,4 +1,5 @@
 #include "steam_transport.h"
+#include "launch_music.h"
 #include "netplay.h"
 
 #include <Windows.h>
@@ -189,6 +190,7 @@ void SteamTransport_Shutdown()
 {
     HookLog("SteamTransport: shutdown requested (running=%d, thread=%p)\n",
             g_bridgeRunning.load() ? 1 : 0, g_bridgeThread);
+    LaunchMusic_Stop();
     const DWORD flushDeadline = GetTickCount() + 50;
     while (g_bridgeRunning && !PumpBridgeOnce() &&
            GetTickCount() < flushDeadline)

@@ -143,12 +143,12 @@ LRESULT CALLBACK SettingsWndProc(HWND window, UINT message,
             "STATIC",
             "Sets game worker count to 1. May massively improve performance by 100% "
             "on pcs with bad thread work, but may decrease performance by about 10% on higher end pcs.",
-            WS_VISIBLE | WS_CHILD, 18, 16, 374, 38,
+            WS_VISIBLE | WS_CHILD, 18, 16, 374, 50,
             window, nullptr, nullptr, nullptr);
         HWND checkbox = CreateWindowA(
             "BUTTON", "Run entire game single-threaded",
             WS_VISIBLE | WS_CHILD | WS_TABSTOP | BS_AUTOCHECKBOX,
-            18, 62, 300, 24, window,
+            18, 72, 300, 24, window,
             reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_SINGLE_THREADED)),
             nullptr, nullptr);
         HWND save = CreateWindowA(
