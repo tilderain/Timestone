@@ -280,7 +280,7 @@ $(OBJDIR)/%.o: $(ENETDIR)/%.c
 
 # ---------- Resource file ----------
 
-$(BUILDDIR)/UMVC3Hook.rc: Makefile
+$(BUILDDIR)/UMVC3Hook.rc: Makefile $(SRCDIR)/Timestone.manifest
 	@mkdir -p $(@D)
 	@printf '%s\n' \
 		'VS_VERSION_INFO VERSIONINFO' \
@@ -309,7 +309,9 @@ $(BUILDDIR)/UMVC3Hook.rc: Makefile
 		'    BEGIN' \
 		'        VALUE "Translation", 0x409, 1252' \
 		'    END' \
-		'END' > $@
+		'END' \
+		'' \
+		'2 24 "UMVC3Hook/Timestone.manifest"' > $@
 
 $(RC_OBJ): $(BUILDDIR)/UMVC3Hook.rc $(SRCDIR)/resource.h | $(INCLUDE_FIX_STAMP)
 	@mkdir -p $(@D)

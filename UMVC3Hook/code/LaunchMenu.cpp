@@ -1679,6 +1679,27 @@ static LaunchOption ShowLaunchMenuWindow(bool battleSetupOnly, bool compactMode)
             reinterpret_cast<HANDLE>(static_cast<INT_PTR>(-4)));
     }
 
+    HMODULE asiModule = nullptr;
+    HANDLE visualStylesContext = INVALID_HANDLE_VALUE;
+    ULONG_PTR visualStylesCookie = 0;
+    if (GetModuleHandleExA(
+            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            reinterpret_cast<LPCSTR>(&ShowLaunchMenuWindow), &asiModule)) {
+        ACTCTXA context = {};
+        context.cbSize = sizeof(context);
+        context.dwFlags = ACTCTX_FLAG_HMODULE_VALID |
+                          ACTCTX_FLAG_RESOURCE_NAME_VALID;
+        context.hModule = asiModule;
+        context.lpResourceName = MAKEINTRESOURCEA(2);
+        visualStylesContext = CreateActCtxA(&context);
+        if (visualStylesContext != INVALID_HANDLE_VALUE &&
+            !ActivateActCtx(visualStylesContext, &visualStylesCookie)) {
+            ReleaseActCtx(visualStylesContext);
+            visualStylesContext = INVALID_HANDLE_VALUE;
+        }
+    }
+
     HDC screenDc = GetDC(nullptr);
     const int dpi = screenDc ? GetDeviceCaps(screenDc, LOGPIXELSX) : 96;
     if (screenDc) ReleaseDC(nullptr, screenDc);
@@ -1714,6 +1735,10 @@ static LaunchOption ShowLaunchMenuWindow(bool battleSetupOnly, bool compactMode)
         }
     }
 
+    if (visualStylesCookie)
+        DeactivateActCtx(0, visualStylesCookie);
+    if (visualStylesContext != INVALID_HANDLE_VALUE)
+        ReleaseActCtx(visualStylesContext);
     if (setThreadDpiAwarenessContext && previousDpiContext)
         setThreadDpiAwarenessContext(previousDpiContext);
 
