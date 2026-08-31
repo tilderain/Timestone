@@ -505,19 +505,13 @@ static constexpr uintptr_t SGAMEUI_REQUEST_PAUSE             = 0x1402bf730;
 static constexpr uintptr_t SGAMEUI_CONSUME_PAUSE_REQUEST     = 0x1402c1600;
 static constexpr uintptr_t SGAMEUI_CREATE_POPUP              = 0x1402bb470;
 static constexpr uintptr_t SGAMEUI_GET_POPUP                 = 0x1402bc890;
-static constexpr uintptr_t SGAMEUI_QUERY_POPUP               = 0x1402bc850;
 static constexpr uintptr_t SGAMEUI_CLOSE_POPUP               = 0x1402bdb20;
 static constexpr uintptr_t UUI_POPUP_CONFIGURE               = 0x14032abe0;
 static constexpr uintptr_t UUI_POPUP_SET_MESSAGE_RESOURCE    = 0x1402c0120;
-static constexpr uintptr_t UUI_CHOICE_POPUP_CONFIGURE        = 0x140323170;
-static constexpr uintptr_t UUI_POPUP_SET_MODAL_ATTR          = 0x1402833c0;
 static constexpr int       NETWORK_WAIT_MESSAGE_ID           = 0x75b;
-static constexpr int       OPPONENT_DISCONNECTED_MESSAGE_ID  = 1742;
 
 static bool g_predictionWaitPopupActive = false;
 static uint32_t g_predictionWaitPopupHandle = 0;
-static bool g_opponentDisconnectedPopupCreated = false;
-static uint32_t g_opponentDisconnectedPopupHandle = 0;
 
 static void SetPredictionWaitPopup(bool active)
 {
@@ -585,50 +579,6 @@ static void SetPredictionWaitPopup(bool active)
     HookLog("Netplay: native waiting popup closed\n");
 }
 
-static void ShowOpponentDisconnectedPopup()
-{
-    if (g_opponentDisconnectedPopupCreated)
-        return;
-
-    using GetGameUi_t = uint64_t(__fastcall*)();
-    using CreatePopup_t = uint32_t(__fastcall*)(uint64_t, int, uint32_t, int);
-    using QueryPopup_t = uint64_t(__fastcall*)(uint64_t, uint32_t*);
-    using ClosePopup_t = void(__fastcall*)(uint64_t, uint32_t*);
-    using ConfigureChoicePopup_t = void(__fastcall*)(
-        uint64_t, int, int, uint8_t, int, int, int);
-    using SetModalAttr_t = void(__fastcall*)(uint64_t);
-
-    auto getGameUi = reinterpret_cast<GetGameUi_t>(_addr(SGAMEUI_GET_INSTANCE));
-    uint64_t gameUi = getGameUi();
-    if (!gameUi)
-        return;
-
-    auto createPopup = reinterpret_cast<CreatePopup_t>(
-        _addr(SGAMEUI_CREATE_POPUP));
-    g_opponentDisconnectedPopupHandle = createPopup(gameUi, 2, 0, 10000);
-
-    auto queryPopup = reinterpret_cast<QueryPopup_t>(_addr(SGAMEUI_QUERY_POPUP));
-    uint64_t popup = queryPopup(gameUi, &g_opponentDisconnectedPopupHandle);
-    if (!popup) {
-        auto closePopup = reinterpret_cast<ClosePopup_t>(
-            _addr(SGAMEUI_CLOSE_POPUP));
-        closePopup(gameUi, &g_opponentDisconnectedPopupHandle);
-        g_opponentDisconnectedPopupHandle = 0;
-        return;
-    }
-
-    auto configurePopup = reinterpret_cast<ConfigureChoicePopup_t>(
-        _addr(UUI_CHOICE_POPUP_CONFIGURE));
-    configurePopup(popup, 2, OPPONENT_DISCONNECTED_MESSAGE_ID, 0, 0, 0, 2);
-    auto setModalAttr = reinterpret_cast<SetModalAttr_t>(
-        _addr(UUI_POPUP_SET_MODAL_ATTR));
-    setModalAttr(popup);
-    g_opponentDisconnectedPopupCreated = true;
-    HookLog("Netplay: native opponent-disconnected popup opened handle=%u message=0x%X\n",
-            g_opponentDisconnectedPopupHandle,
-            OPPONENT_DISCONNECTED_MESSAGE_ID);
-}
-
 static void PresentFrozenFrame()
 {
     if (!g_pDevice)
@@ -679,8 +629,6 @@ static void __fastcall HookedMove(void* sMvc3Main)
 
     if (!Netplay_IsActive())
         SetPredictionWaitPopup(false);
-    if (g_opponentDisconnected)
-        ShowOpponentDisconnectedPopup();
 
     if (isPaused)
     {
@@ -1315,8 +1263,6 @@ static uint64_t __fastcall HookedGetInputBuf(uint64_t obj)
 void FrameStepper_InitNetplay()
 {
     g_opponentDisconnected = false;
-    g_opponentDisconnectedPopupCreated = false;
-    g_opponentDisconnectedPopupHandle = 0;
     const LaunchDialogConfig& cfg = GetLaunchDialogConfig();
     HookLog("FrameStepper: launch netplay config hostEnabled=%d host=%p peer=%p\n",
             cfg.hostEnabled ? 1 : 0, (void*)cfg.enetHost, (void*)cfg.enetPeer);
@@ -1880,6 +1826,26 @@ static void DrawAllocatorMemory()
 
 void FrameStepper_Draw()
 {
+    if (g_opponentDisconnected)
+    {
+        ImGui::SetNextWindowPos(ImVec2(ImGui::GetIO().DisplaySize.x * 0.5f,
+                                       ImGui::GetIO().DisplaySize.y * 0.18f),
+                                ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+        ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.0f, 0.0f, 0.0f, 0.92f));
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
+        ImGui::Begin("##OpponentDisconnectedOverlay", nullptr,
+            ImGuiWindowFlags_NoTitleBar |
+            ImGuiWindowFlags_NoResize |
+            ImGuiWindowFlags_NoMove |
+            ImGuiWindowFlags_NoScrollbar |
+            ImGuiWindowFlags_NoSavedSettings |
+            ImGuiWindowFlags_AlwaysAutoResize |
+            ImGuiWindowFlags_NoInputs);
+        ImGui::Text("Your opp disconnected.");
+        ImGui::End();
+        ImGui::PopStyleColor(2);
+    }
+
     if (!IsTrainingMode())
         return;
 
