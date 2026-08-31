@@ -13,6 +13,7 @@ struct CompactLaunchMenuControlIds {
     int normal;
     int config;
     int advanced;
+    int musicMute;
 };
 
 void CreateCompactLaunchMenuControls(HWND window,

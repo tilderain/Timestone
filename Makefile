@@ -54,6 +54,7 @@ CPP_SRC   := \
 	$(SRCDIR)/code/LaunchMenu.cpp \
 	$(SRCDIR)/code/LaunchMenu_compact.cpp \
 	$(SRCDIR)/code/LaunchMenu_settings.cpp \
+	$(SRCDIR)/code/launch_music.cpp \
 	$(SRCDIR)/code/eSettingsManager.cpp \
 	$(SRCDIR)/code/eNotifManager.cpp \
 	$(SRCDIR)/code/UMVC3Camera.cpp \
@@ -99,6 +100,7 @@ CPP_SRC   := \
 	$(SRCDIR)/utils/Patterns.cpp
 
 C_SRC     := \
+	$(SRCDIR)/third_party/stb_vorbis.c \
 	$(SRCDIR)/kiero/minhook/src/hook.c \
 	$(SRCDIR)/kiero/minhook/src/buffer.c \
 	$(SRCDIR)/kiero/minhook/src/trampoline.c \
@@ -263,6 +265,11 @@ $(OBJDIR)/dllmain.o $(OBJDIR)/code/LaunchMenu.o \
 $(OBJDIR)/%.o: $(SRCDIR)/%.c
 	@mkdir -p $(@D)
 	$(CC) $(CFLAGS) -c $< -o $@
+
+$(OBJDIR)/third_party/stb_vorbis.o: $(SRCDIR)/third_party/stb_vorbis.c
+	@mkdir -p $(@D)
+	$(CC) $(filter-out -O3,$(CFLAGS)) -Os \
+		-DSTB_VORBIS_NO_PUSHDATA_API -DSTB_VORBIS_MAX_CHANNELS=6 -c $< -o $@
 
 # ---------- Compile enet C ----------
 

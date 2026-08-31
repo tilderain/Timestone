@@ -11,6 +11,7 @@
 #include "code/UMVC3Camera.h"
 #include "code/LaunchMenu.h"
 #include "code/LaunchMenu_settings.h"
+#include "code/launch_music.h"
 #include "code/framestepper.h"
 #include "code/escmenu_imgui.h"
 #include "code/trainingboot.h"
@@ -1967,6 +1968,9 @@ void OnInitializeHook()
 	if (!trainingArg) {
 		HookLog("UMVC3Hook: Opening launch menu\n");
 		opt = ShowLaunchMenu();
+		// This is intentionally redundant with ShowLaunchMenu's scope guard:
+		// gameplay must never inherit the decoder thread or its WinMM handle.
+		LaunchMusic_Stop();
 		HookLog("UMVC3Hook: Launch menu returned option %d\n", (int)opt);
 		HookLogFlush();
 	}

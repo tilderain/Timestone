@@ -1,5 +1,6 @@
 #include "LaunchMenu.h"
 #include "LaunchMenu_compact.h"
+#include "launch_music.h"
 
 #include <commctrl.h>
 #include <cstdio>
@@ -36,6 +37,10 @@ void CreateCompactLaunchMenuControls(HWND window,
     CreateWindowA("BUTTON", "Steam Lobbies",
         WS_VISIBLE | WS_CHILD | BS_GROUPBOX,
         x, 12, width, 292, window, NULL, NULL, NULL);
+    CreateWindowA("BUTTON", "Mute Lobby Music",
+        WS_CHILD | WS_TABSTOP | BS_AUTOCHECKBOX,
+        x + width - 158, 8, 148, 24, window,
+        reinterpret_cast<HMENU>(static_cast<INT_PTR>(ids.musicMute)), NULL, NULL);
     CreateWindowA("BUTTON", "Search",
         WS_VISIBLE | WS_CHILD | WS_TABSTOP | BS_PUSHBUTTON,
         x + 10, 34, 84, 26, window,
@@ -107,6 +112,10 @@ void CreateCompactLaunchMenuControls(HWND window,
 
 LaunchOption ShowLaunchMenu()
 {
+    struct MusicStopGuard {
+        ~MusicStopGuard() { LaunchMusic_Stop(); }
+    } musicStopGuard;
+
     HookLog("UMVC3Hook: Checking launch disclaimer\n");
     if (!ConfirmLaunchDisclaimer()) {
         HookLog("UMVC3Hook: Launch disclaimer declined or closed\n");

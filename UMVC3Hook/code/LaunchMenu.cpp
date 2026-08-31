@@ -3,6 +3,7 @@
 #include "LaunchMenu_settings.h"
 #include "assist_names.h"
 #include "controller.h"
+#include "launch_music.h"
 #include "trainingboot.h"
 #include "netplay.h"
 #include "steam_lobby.h"
@@ -790,6 +791,7 @@ enum CtrlId {
     ID_ADVANCED_MENU      = 2403,
     ID_BATTLE_LEAVE       = 2404,
     ID_ADVANCED_CONFIG    = 2405,
+    ID_LOBBY_MUSIC_MUTE   = 2406,
     // Peer chat controls
     ID_CHAT_CONNECTION    = 2501,
     ID_CHAT_PROFILE       = 2502,
@@ -830,6 +832,7 @@ static void CleanupNetwork(HWND hDlg, bool forceCleanup = false);
 static void CreateBattleSetupControls(HWND hDlg);
 static void ApplyLaunchMenuFont(HWND hDlg);
 static void ReturnBattleSetupToLobbies(HWND hDlg);
+static void UpdateLobbyMusicCheckbox(HWND hDlg);
 
 static bool IsCompatibleProtocol(const char (&protocol)[32])
 {
@@ -997,6 +1000,7 @@ static void ConfigureConnectedControls(HWND hDlg)
     if (g_battleSetupOnly)
         EnableWindow(GetDlgItem(hDlg, ID_BATTLE_LEAVE), TRUE);
     EnableWindow(GetDlgItem(hDlg, ID_RANDOMIZE_CHARS), TRUE);
+    UpdateLobbyMusicCheckbox(hDlg);
     UpdateReadyButton(hDlg);
     UpdatePingLabel(hDlg);
 }
@@ -1254,6 +1258,20 @@ static void ResetLaunchMenuButtonState(HWND hDlg)
     }
     ShowWindow(GetDlgItem(hDlg, ID_PEER_READY), SW_HIDE);
     ShowWindow(GetDlgItem(hDlg, ID_PING_LABEL), SW_HIDE);
+}
+
+static void UpdateLobbyMusicCheckbox(HWND hDlg)
+{
+    HWND checkbox = GetDlgItem(hDlg, ID_LOBBY_MUSIC_MUTE);
+    if (!checkbox) return;
+    if (!g_dialogConfig.enetPeer) {
+        ShowWindow(checkbox, SW_HIDE);
+        return;
+    }
+    SendMessageA(checkbox, BM_SETCHECK,
+                 LaunchMusic_IsMuted() ? BST_CHECKED : BST_UNCHECKED, 0);
+    EnableWindow(checkbox, TRUE);
+    ShowWindow(checkbox, SW_SHOW);
 }
 
 static void SetDirectConnectExpanded(HWND hDlg, bool expanded)
@@ -1753,7 +1771,11 @@ static void CreateBattleSetupControls(HWND hDlg)
     constexpr int contentW = 800;
 
     CreateWindowA("STATIC", "Choose characters and stage for this battle:",
-        WS_VISIBLE | WS_CHILD, leftX, 12, 500, 18, hDlg, NULL, NULL, NULL);
+        WS_VISIBLE | WS_CHILD, leftX, 12, 440, 18, hDlg, NULL, NULL, NULL);
+    CreateWindowA("BUTTON", "Mute Lobby Music",
+        WS_CHILD | WS_TABSTOP | BS_AUTOCHECKBOX,
+        leftX + 470, 8, 140, 26,
+        hDlg, (HMENU)ID_LOBBY_MUSIC_MUTE, NULL, NULL);
     CreateWindowA("BUTTON", "Randomize Characters",
         WS_VISIBLE | WS_CHILD | WS_TABSTOP | BS_PUSHBUTTON,
         leftX + 620, 8, 180, 26,
@@ -1870,10 +1892,12 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
                 ID_STEAM_SEARCH_BTN, ID_STEAM_CREATE_BTN, ID_STEAM_JOIN_BTN,
                 ID_STEAM_TYPE, ID_STEAM_NAME, ID_STEAM_STATUS, ID_STEAM_LIST,
                 ID_LAUNCH_NORMAL, ID_ADVANCED_CONFIG, ID_ADVANCED_MENU,
+                ID_LOBBY_MUSIC_MUTE,
             };
             CreateCompactLaunchMenuControls(hDlg, ids, g_lobbyTypeSelection,
-                                            g_lobbyName);
+                                             g_lobbyName);
             ApplyLaunchMenuFont(hDlg);
+            UpdateLobbyMusicCheckbox(hDlg);
             SetTimer(hDlg, ID_STEAM_POLL_TIMER, 50, NULL);
             SteamLobby_Search();
             return msg == WM_INITDIALOG ? TRUE : 0;
@@ -1882,6 +1906,7 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
         if (g_battleSetupOnly) {
             CreateBattleSetupControls(hDlg);
             ApplyLaunchMenuFont(hDlg);
+            UpdateLobbyMusicCheckbox(hDlg);
             return msg == WM_INITDIALOG ? TRUE : 0;
         }
 
@@ -1892,7 +1917,11 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
 
         // ---- Title ----
         CreateWindowA("STATIC", "Configure launch mode and match settings:",
-            WS_VISIBLE | WS_CHILD, leftX, y, 600, 18, hDlg, NULL, NULL, NULL);
+            WS_VISIBLE | WS_CHILD, leftX, y, 440, 18, hDlg, NULL, NULL, NULL);
+        CreateWindowA("BUTTON", "Mute Lobby Music",
+            WS_CHILD | WS_TABSTOP | BS_AUTOCHECKBOX,
+            leftX + 470, y - 4, 140, 26,
+            hDlg, (HMENU)ID_LOBBY_MUSIC_MUTE, NULL, NULL);
         CreateWindowA("BUTTON", "Randomize Characters",
             WS_VISIBLE | WS_CHILD | WS_TABSTOP | BS_PUSHBUTTON,
             leftX + 620, y - 4, 180, 26,
@@ -2196,6 +2225,7 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
         }
 
         ApplyLaunchMenuFont(hDlg);
+        UpdateLobbyMusicCheckbox(hDlg);
         SetTimer(hDlg, ID_STEAM_POLL_TIMER, 50, NULL);
         return msg == WM_INITDIALOG ? TRUE : 0;
     }
@@ -2208,6 +2238,7 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
                 InvalidateRect(GetDlgItem(hDlg, ID_LAUNCH_TRAINING), NULL, FALSE);
 
             SteamLobby_Pump();
+            UpdateLobbyMusicCheckbox(hDlg);
             if (g_battleSetupOnly && SteamLobby_GetPeerSteamId() == 0) {
                 ReturnBattleSetupToLobbies(hDlg);
                 return 0;
@@ -2272,6 +2303,7 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
                 g_dialogConfig.hostEnabled = true;
                 g_isHost = steamIsHost;
                 if (steamPeer) steamPeer->data = (void*)"connected";
+                LaunchMusic_Start();
                 SetTimer(hDlg, ID_NET_POLL_TIMER, 10, NULL);
 
                 HWND hStatus = GetDlgItem(hDlg, ID_NET_STATUS);
@@ -2306,6 +2338,7 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
                             event.peer->address.port, g_isHost);
                         g_dialogConfig.enetPeer = event.peer;
                         event.peer->data = (void*)"connected";
+                        LaunchMusic_Start();
 
                         // Keep a generous timeout through loading and the intro barrier.
                         enet_peer_timeout(event.peer, 0, 15000, 15000);
@@ -2336,6 +2369,7 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
                             ip[0], ip[1], ip[2], ip[3],
                             event.peer->address.port);
                         g_dialogConfig.enetPeer = nullptr;
+                        UpdateLobbyMusicCheckbox(hDlg);
                         g_localReady = false;
                         g_peerReady = false;
                         DestroyChatWindow();
@@ -2755,6 +2789,15 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
 
         case ID_NET_TOGGLE:
             SetDirectConnectExpanded(hDlg, !g_directConnectExpanded);
+            return 0;
+
+        case ID_LOBBY_MUSIC_MUTE:
+            if (HIWORD(wParam) == BN_CLICKED) {
+                const bool muted = SendMessageA(
+                    reinterpret_cast<HWND>(lParam), BM_GETCHECK, 0, 0) == BST_CHECKED;
+                LaunchMusic_SetMuted(muted);
+                UpdateLobbyMusicCheckbox(hDlg);
+            }
             return 0;
 
         case ID_ADVANCED_MENU:
