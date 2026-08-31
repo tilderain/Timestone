@@ -64,7 +64,7 @@ extern "C" bool Controller_ShouldShowPredictionBudgetExhausted()
         return false;
     const uint64_t since =
         g_predictionBudgetExhaustedSince.load(std::memory_order_acquire);
-    return since != 0 && GetTickCount64() - since >= 2000;
+    return since != 0 && GetTickCount64() - since >= 4000;
 }
 
 static void TraceInputPacket(const char* marker, const char* path, int32_t localFrame,

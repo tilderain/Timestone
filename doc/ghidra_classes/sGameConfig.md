@@ -11,7 +11,7 @@
 combat-parameter service. It is not the standalone `sBattleSetting` match
 descriptor.
 
-`sMvc3Manager__createGameConfig @ 0x140253580` allocates `0x514B0` bytes with
+`sMvc3Manager__createGameConfig @ 0x1402535B0` allocates `0x514B0` bytes with
 `0x10` alignment and calls `sGameConfig__ctor @ 0x14024ECE0`. The constructor
 publishes the singleton at `0x140D50F88`; `sGameConfig__getInstance @
 0x140001AB0` returns that pointer. The object derives from `cSystem`, and most
@@ -30,7 +30,7 @@ The vtable at `0x140B07E50` has ten entries:
 | `6` | `0x140253490` | `move` |
 | `7` | `0x1407E1A10` | shared no-op |
 | `8` | `0x1407E1A10` | shared no-op |
-| `9` | `0x140255260` | one-time battle/audio initialization |
+| `9` | `0x140255260` | `initializeOnce` (battle/audio initialization) |
 
 ## Confirmed Fields
 

@@ -96,6 +96,9 @@
     <ClInclude Include="code\mk10utils.h">
       <Filter>Header Files\code</Filter>
     </ClInclude>
+    <ClInclude Include="code\gameui.h">
+      <Filter>Header Files\code</Filter>
+    </ClInclude>
     <ClInclude Include="IniReader.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -246,6 +249,9 @@
       <Filter>Header Files\code</Filter>
     </ClCompile>
     <ClCompile Include="code\mk10utils.cpp">
+      <Filter>Header Files\code</Filter>
+    </ClCompile>
+    <ClCompile Include="code\gameui.cpp">
       <Filter>Header Files\code</Filter>
     </ClCompile>
     <ClCompile Include="IniReader.cpp">

@@ -165,6 +165,7 @@
     <ClInclude Include="code\rollback.h" />
     <ClInclude Include="code\eSettingsManager.h" />
     <ClInclude Include="code\framestepper.h" />
+    <ClInclude Include="code\gameui.h" />
     <ClInclude Include="code\LaunchMenu_settings.h" />
     <ClInclude Include="code\generated.h" />
     <ClInclude Include="code\mk10utils.h" />
@@ -218,6 +219,7 @@
     <ClCompile Include="code\eNotifManager.cpp" />
     <ClCompile Include="code\eSettingsManager.cpp" />
     <ClCompile Include="code\framestepper.cpp" />
+    <ClCompile Include="code\gameui.cpp" />
     <ClCompile Include="code\LaunchMenu_settings.cpp" />
     <ClCompile Include="code\escmenu_imgui.cpp" />
     <ClCompile Include="code\autotest.cpp" />

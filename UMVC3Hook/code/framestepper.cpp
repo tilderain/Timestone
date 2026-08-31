@@ -3,6 +3,7 @@
 // Ported from umvc3_framestep by Gneiss and EternalYoshi.
 #include "../pch.h"
 #include "framestepper.h"
+#include "gameui.h"
 #include "mk10utils.h"       // _addr
 #include "../MemoryMgr.h"
 #include "../utils/Trampoline.h"
@@ -110,6 +111,9 @@ static bool g_opponentDisconnected = false;
 static DWORD g_handshakeStartTick = 0;
 static uint32_t g_handshakeTraceGeneration = 0;
 static bool g_handshakeStallLogged = false;
+static bool g_delayRestartWaitPopup = false;
+static ULONGLONG g_restartWaitStartTick = 0;
+static uint8_t g_restartWaitPopupBarrier = 0;
 
 extern "C" bool FrameStepper_IsBattleSynchronized() { return g_battleSynchronized; }
 extern "C" uint32_t FrameStepper_GetBattleGeneration() { return g_battleGeneration; }
@@ -500,133 +504,30 @@ static float GetGameUpdatesPerSecond(int32_t currentFrame)
 // Forward declarations
 static void CaptureNetInput();
 static bool IsTrainingMode();
-static constexpr uintptr_t SGAMEUI_GET_INSTANCE              = 0x140001ac0;
-static constexpr uintptr_t SGAMEUI_REQUEST_PAUSE             = 0x1402bf730;
-static constexpr uintptr_t SGAMEUI_CONSUME_PAUSE_REQUEST     = 0x1402c1600;
-static constexpr uintptr_t SGAMEUI_CREATE_POPUP              = 0x1402bb470;
-static constexpr uintptr_t SGAMEUI_GET_POPUP                 = 0x1402bc890;
-static constexpr uintptr_t SGAMEUI_QUERY_POPUP               = 0x1402bc850;
-static constexpr uintptr_t SGAMEUI_CLOSE_POPUP               = 0x1402bdb20;
-static constexpr uintptr_t UUI_POPUP_CONFIGURE               = 0x14032abe0;
-static constexpr uintptr_t UUI_POPUP_SET_MESSAGE_RESOURCE    = 0x1402c0120;
-static constexpr uintptr_t UUI_CHOICE_POPUP_CONFIGURE        = 0x140323170;
-static constexpr uintptr_t UUI_POPUP_SET_MODAL_ATTR          = 0x1402833c0;
-static constexpr int       NETWORK_WAIT_MESSAGE_ID           = 0x75b;
-static constexpr int       OPPONENT_DISCONNECTED_MESSAGE_ID  = 1742;
+static constexpr ULONGLONG MATCH_RESTART_WAIT_POPUP_DELAY_MS = 1500;
 
-static bool g_predictionWaitPopupActive = false;
-static uint32_t g_predictionWaitPopupHandle = 0;
-static bool g_opponentDisconnectedPopupCreated = false;
-static uint32_t g_opponentDisconnectedPopupHandle = 0;
+enum class PreMatchWaitBarrier : uint8_t {
+    Opening = 1,
+    Intro = 2,
+};
 
-static void SetPredictionWaitPopup(bool active)
+static bool ShouldTickPreMatchWaitPopup(PreMatchWaitBarrier barrier)
 {
-    if (active == g_predictionWaitPopupActive)
-        return;
+    if (!g_delayRestartWaitPopup)
+        return true;
 
-    using GetGameUi_t = uint64_t(__fastcall*)();
-    using RequestPause_t = void(__fastcall*)(uint64_t, char, uint8_t);
-    using ConsumePauseRequest_t = void(__fastcall*)(uint64_t);
-    using CreatePopup_t = uint32_t(__fastcall*)(uint64_t, int, uint32_t, int);
-    using GetPopup_t = uint64_t(__fastcall*)(uint64_t, uint32_t*);
-    using ClosePopup_t = void(__fastcall*)(uint64_t, uint32_t*);
-    using ConfigurePopup_t = void(__fastcall*)(uint64_t, int, int, uint32_t);
-    using SetMessageResource_t = void(__fastcall*)(uint64_t, int);
-    auto getGameUi = reinterpret_cast<GetGameUi_t>(_addr(SGAMEUI_GET_INSTANCE));
-    uint64_t gameUi = getGameUi();
-    if (!gameUi)
-        return;
+    const uint8_t barrierId = static_cast<uint8_t>(barrier);
+    if (g_restartWaitPopupBarrier != 0)
+        return g_restartWaitPopupBarrier == barrierId;
 
-    auto requestPause = reinterpret_cast<RequestPause_t>(
-        _addr(SGAMEUI_REQUEST_PAUSE));
-    auto consumePauseRequest = reinterpret_cast<ConsumePauseRequest_t>(
-        _addr(SGAMEUI_CONSUME_PAUSE_REQUEST));
-    if (active) {
-        requestPause(gameUi, 1, 1);
-        consumePauseRequest(gameUi);
+    const ULONGLONG now = GetTickCount64();
+    if (g_restartWaitStartTick == 0)
+        g_restartWaitStartTick = now;
+    if (now - g_restartWaitStartTick < MATCH_RESTART_WAIT_POPUP_DELAY_MS)
+        return false;
 
-        auto createPopup = reinterpret_cast<CreatePopup_t>(
-            _addr(SGAMEUI_CREATE_POPUP));
-        g_predictionWaitPopupHandle = createPopup(gameUi, 1, 0, 10000);
-
-        auto getPopup = reinterpret_cast<GetPopup_t>(_addr(SGAMEUI_GET_POPUP));
-        uint64_t popup = getPopup(gameUi, &g_predictionWaitPopupHandle);
-        if (!popup) {
-            auto closePopup = reinterpret_cast<ClosePopup_t>(
-                _addr(SGAMEUI_CLOSE_POPUP));
-            closePopup(gameUi, &g_predictionWaitPopupHandle);
-            g_predictionWaitPopupHandle = 0;
-            requestPause(gameUi, 0, 1);
-            consumePauseRequest(gameUi);
-            return;
-        }
-
-        auto configurePopup = reinterpret_cast<ConfigurePopup_t>(
-            _addr(UUI_POPUP_CONFIGURE));
-        configurePopup(popup, 1, NETWORK_WAIT_MESSAGE_ID, 0);
-        auto setMessageResource = reinterpret_cast<SetMessageResource_t>(
-            _addr(UUI_POPUP_SET_MESSAGE_RESOURCE));
-        setMessageResource(popup, 0);
-        g_predictionWaitPopupActive = true;
-        HookLog("Netplay: native waiting popup opened handle=%u\n",
-                g_predictionWaitPopupHandle);
-        return;
-    }
-
-    if (g_predictionWaitPopupHandle) {
-        auto closePopup = reinterpret_cast<ClosePopup_t>(
-            _addr(SGAMEUI_CLOSE_POPUP));
-        closePopup(gameUi, &g_predictionWaitPopupHandle);
-        g_predictionWaitPopupHandle = 0;
-    }
-    requestPause(gameUi, 0, 1);
-    consumePauseRequest(gameUi);
-    g_predictionWaitPopupActive = false;
-    HookLog("Netplay: native waiting popup closed\n");
-}
-
-static void ShowOpponentDisconnectedPopup()
-{
-    if (g_opponentDisconnectedPopupCreated)
-        return;
-
-    using GetGameUi_t = uint64_t(__fastcall*)();
-    using CreatePopup_t = uint32_t(__fastcall*)(uint64_t, int, uint32_t, int);
-    using QueryPopup_t = uint64_t(__fastcall*)(uint64_t, uint32_t*);
-    using ClosePopup_t = void(__fastcall*)(uint64_t, uint32_t*);
-    using ConfigureChoicePopup_t = void(__fastcall*)(
-        uint64_t, int, int, uint8_t, int, int, int);
-    using SetModalAttr_t = void(__fastcall*)(uint64_t);
-
-    auto getGameUi = reinterpret_cast<GetGameUi_t>(_addr(SGAMEUI_GET_INSTANCE));
-    uint64_t gameUi = getGameUi();
-    if (!gameUi)
-        return;
-
-    auto createPopup = reinterpret_cast<CreatePopup_t>(
-        _addr(SGAMEUI_CREATE_POPUP));
-    g_opponentDisconnectedPopupHandle = createPopup(gameUi, 2, 0, 10000);
-
-    auto queryPopup = reinterpret_cast<QueryPopup_t>(_addr(SGAMEUI_QUERY_POPUP));
-    uint64_t popup = queryPopup(gameUi, &g_opponentDisconnectedPopupHandle);
-    if (!popup) {
-        auto closePopup = reinterpret_cast<ClosePopup_t>(
-            _addr(SGAMEUI_CLOSE_POPUP));
-        closePopup(gameUi, &g_opponentDisconnectedPopupHandle);
-        g_opponentDisconnectedPopupHandle = 0;
-        return;
-    }
-
-    auto configurePopup = reinterpret_cast<ConfigureChoicePopup_t>(
-        _addr(UUI_CHOICE_POPUP_CONFIGURE));
-    configurePopup(popup, 2, OPPONENT_DISCONNECTED_MESSAGE_ID, 0, 0, 0, 2);
-    auto setModalAttr = reinterpret_cast<SetModalAttr_t>(
-        _addr(UUI_POPUP_SET_MODAL_ATTR));
-    setModalAttr(popup);
-    g_opponentDisconnectedPopupCreated = true;
-    HookLog("Netplay: native opponent-disconnected popup opened handle=%u message=0x%X\n",
-            g_opponentDisconnectedPopupHandle,
-            OPPONENT_DISCONNECTED_MESSAGE_ID);
+    g_restartWaitPopupBarrier = barrierId;
+    return true;
 }
 
 static void PresentFrozenFrame()
@@ -677,10 +578,14 @@ static void __fastcall HookedMove(void* sMvc3Main)
 
     ChrSelImGui_Update();
 
-    if (!Netplay_IsActive())
-        SetPredictionWaitPopup(false);
+    if (!Netplay_IsActive()) {
+        GameUI_SetWaitingForOpponent(false);
+        g_delayRestartWaitPopup = false;
+        g_restartWaitStartTick = 0;
+        g_restartWaitPopupBarrier = 0;
+    }
     if (g_opponentDisconnected)
-        ShowOpponentDisconnectedPopup();
+        GameUI_TryShowOpponentDisconnected();
 
     if (isPaused)
     {
@@ -738,6 +643,9 @@ static void __fastcall HookedMove(void* sMvc3Main)
         Controller_ClearDesyncDetection();
 
         if (restartNetplay && g_restartKind == RESTART_TRAINING) {
+            g_delayRestartWaitPopup = false;
+            g_restartWaitStartTick = 0;
+            g_restartWaitPopupBarrier = 0;
             Rollback_ClearPendingReSimulation();
             Netplay_ClearInputQueues();
             Controller_ResetBuffers();
@@ -803,6 +711,9 @@ static void __fastcall HookedMove(void* sMvc3Main)
 
         Rollback_FreeSnapshots();
         if (restartNetplay) {
+            g_delayRestartWaitPopup = true;
+            g_restartWaitStartTick = 0;
+            g_restartWaitPopupBarrier = 0;
             Netplay_ClearInputQueues();
             Controller_ResetBuffers();
             Controller_ResetFrameEpoch();
@@ -990,8 +901,18 @@ static void __fastcall HookedMove(void* sMvc3Main)
         }
 
         if (!g_battleSynchronized && enteringIntro) {
-            if (!g_localOpeningRelease || !g_remoteOpeningRelease)
+            if (!g_localOpeningRelease || !g_remoteOpeningRelease) {
+                // The native network-wait pause blocks sAction from consuming
+                // pendingStep while leaving the popup's UI move line active.
+                // Keep ticking the pre-match scene so the modal can animate.
+                if (ShouldTickPreMatchWaitPopup(PreMatchWaitBarrier::Opening)) {
+                    GameUI_SetWaitingForOpponent(true);
+                    oMove(sMvc3Main);
+                }
                 return;
+            }
+
+            GameUI_SetWaitingForOpponent(false);
 
             if (!g_openingMembersApplied) {
                 uint32_t team0Member = Netplay_IsHost()
@@ -1026,6 +947,9 @@ static void __fastcall HookedMove(void* sMvc3Main)
             Controller_ResetFightTimer(releasedAction);
             Rollback_FreeSnapshots();
             g_battleSynchronized = true;
+            g_delayRestartWaitPopup = false;
+            g_restartWaitStartTick = 0;
+            g_restartWaitPopupBarrier = 0;
             if (g_trainingRestartBarrier) {
                 g_trainingRestartBarrier = false;
                 g_trainingRestartLeftFighting = false;
@@ -1047,8 +971,13 @@ static void __fastcall HookedMove(void* sMvc3Main)
 
         // Keep loading normally until this machine reaches the barrier. Once
         // ready, freeze it until the mutual acknowledgement is complete.
-        if (g_localReady && !g_battleSynchronized)
+        if (g_localReady && !g_battleSynchronized) {
+            if (ShouldTickPreMatchWaitPopup(PreMatchWaitBarrier::Intro)) {
+                GameUI_SetWaitingForOpponent(true);
+                oMove(sMvc3Main);
+            }
             return;
+        }
 
         if (g_battleSynchronized)
         {
@@ -1056,12 +985,12 @@ static void __fastcall HookedMove(void* sMvc3Main)
             if (Controller_IsPredictionBudgetExhausted()) {
                 const bool showWait =
                     Controller_ShouldShowPredictionBudgetExhausted();
-                SetPredictionWaitPopup(showWait);
+                GameUI_SetWaitingForOpponent(showWait);
                 if (showWait)
                     oMove(sMvc3Main);
                 return;
             }
-            SetPredictionWaitPopup(false);
+            GameUI_SetWaitingForOpponent(false);
         }
     }
 
@@ -1315,8 +1244,7 @@ static uint64_t __fastcall HookedGetInputBuf(uint64_t obj)
 void FrameStepper_InitNetplay()
 {
     g_opponentDisconnected = false;
-    g_opponentDisconnectedPopupCreated = false;
-    g_opponentDisconnectedPopupHandle = 0;
+    GameUI_ResetOpponentDisconnectedPopup();
     const LaunchDialogConfig& cfg = GetLaunchDialogConfig();
     HookLog("FrameStepper: launch netplay config hostEnabled=%d host=%p peer=%p\n",
             cfg.hostEnabled ? 1 : 0, (void*)cfg.enetHost, (void*)cfg.enetPeer);
@@ -1880,6 +1808,8 @@ static void DrawAllocatorMemory()
 
 void FrameStepper_Draw()
 {
+    GameUI_DrawOpponentDisconnectedFallback(g_opponentDisconnected);
+
     if (!IsTrainingMode())
         return;
 
