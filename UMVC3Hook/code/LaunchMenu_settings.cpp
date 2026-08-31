@@ -18,6 +18,57 @@ constexpr char SETTINGS_CLASS[] = "TimestoneAdvancedConfig";
 bool g_settingsLoaded = false;
 bool g_runSingleThreaded = false;
 
+UINT GetWindowDpi(HWND window)
+{
+    using GetDpiForWindowFn = UINT (WINAPI*)(HWND);
+    const auto getDpiForWindow = reinterpret_cast<GetDpiForWindowFn>(
+        GetProcAddress(GetModuleHandleA("user32.dll"), "GetDpiForWindow"));
+    if (getDpiForWindow) {
+        const UINT dpi = getDpiForWindow(window);
+        if (dpi) return dpi;
+    }
+    HDC dc = GetDC(window);
+    const UINT dpi = dc ? static_cast<UINT>(GetDeviceCaps(dc, LOGPIXELSX)) : 96;
+    if (dc) ReleaseDC(window, dc);
+    return dpi ? dpi : 96;
+}
+
+void ApplyDpi(HWND window, UINT oldDpi, UINT newDpi)
+{
+    if (oldDpi != newDpi) {
+        for (HWND child = GetWindow(window, GW_CHILD); child;
+             child = GetWindow(child, GW_HWNDNEXT)) {
+            RECT rect = {};
+            GetWindowRect(child, &rect);
+            MapWindowPoints(nullptr, window, reinterpret_cast<POINT*>(&rect), 2);
+            SetWindowPos(child, nullptr,
+                         MulDiv(rect.left, newDpi, oldDpi),
+                         MulDiv(rect.top, newDpi, oldDpi),
+                         MulDiv(rect.right - rect.left, newDpi, oldDpi),
+                         MulDiv(rect.bottom - rect.top, newDpi, oldDpi),
+                         SWP_NOACTIVATE | SWP_NOZORDER);
+        }
+    }
+
+    HFONT oldFont = reinterpret_cast<HFONT>(GetPropA(window, "TimestoneSettingsFont"));
+    LOGFONTA description = {};
+    description.lfHeight = -MulDiv(10, newDpi, 72);
+    description.lfCharSet = DEFAULT_CHARSET;
+    description.lfQuality = CLEARTYPE_QUALITY;
+    snprintf(description.lfFaceName, sizeof(description.lfFaceName), "MS Shell Dlg 2");
+    HFONT font = CreateFontIndirectA(&description);
+    if (font) {
+        SetPropA(window, "TimestoneSettingsFont", font);
+        for (HWND child = GetWindow(window, GW_CHILD); child;
+             child = GetWindow(child, GW_HWNDNEXT)) {
+            SendMessageA(child, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+        }
+        if (oldFont) DeleteObject(oldFont);
+    }
+    SetPropA(window, "TimestoneSettingsDpi",
+             reinterpret_cast<HANDLE>(static_cast<INT_PTR>(newDpi)));
+}
+
 template <size_t N>
 bool PatchBytes(uintptr_t address, const uint8_t (&expected)[N],
                 const uint8_t (&replacement)[N])
@@ -81,12 +132,6 @@ void SaveSettings(HWND window)
     }
 }
 
-void SetControlFont(HWND control)
-{
-    SendMessageA(control, WM_SETFONT,
-                 reinterpret_cast<WPARAM>(GetStockObject(DEFAULT_GUI_FONT)), TRUE);
-}
-
 LRESULT CALLBACK SettingsWndProc(HWND window, UINT message,
                                  WPARAM wParam, LPARAM lParam)
 {
@@ -114,13 +159,23 @@ LRESULT CALLBACK SettingsWndProc(HWND window, UINT message,
             "BUTTON", "Cancel", WS_VISIBLE | WS_CHILD | WS_TABSTOP | BS_PUSHBUTTON,
             310, 104, 82, 28, window,
             reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_CANCEL)), nullptr, nullptr);
-        SetControlFont(description);
-        SetControlFont(checkbox);
-        SetControlFont(save);
-        SetControlFont(cancel);
+        ApplyDpi(window, 96, GetWindowDpi(window));
         SendMessageA(checkbox, BM_SETCHECK,
                      g_runSingleThreaded ? BST_CHECKED : BST_UNCHECKED, 0);
         SetFocus(checkbox);
+        return 0;
+    }
+    case WM_DPICHANGED:
+    {
+        const UINT oldDpi = static_cast<UINT>(reinterpret_cast<INT_PTR>(
+            GetPropA(window, "TimestoneSettingsDpi")));
+        const UINT newDpi = HIWORD(wParam);
+        ApplyDpi(window, oldDpi ? oldDpi : 96, newDpi);
+        const RECT* suggested = reinterpret_cast<const RECT*>(lParam);
+        SetWindowPos(window, nullptr, suggested->left, suggested->top,
+                     suggested->right - suggested->left,
+                     suggested->bottom - suggested->top,
+                     SWP_NOACTIVATE | SWP_NOZORDER);
         return 0;
     }
     case WM_COMMAND:
@@ -137,6 +192,15 @@ LRESULT CALLBACK SettingsWndProc(HWND window, UINT message,
     case WM_CLOSE:
         DestroyWindow(window);
         return 0;
+    case WM_DESTROY:
+    {
+        HFONT font = reinterpret_cast<HFONT>(
+            GetPropA(window, "TimestoneSettingsFont"));
+        if (font) DeleteObject(font);
+        RemovePropA(window, "TimestoneSettingsFont");
+        RemovePropA(window, "TimestoneSettingsDpi");
+        return 0;
+    }
     }
     return DefWindowProcA(window, message, wParam, lParam);
 }
@@ -161,8 +225,9 @@ void ShowAdvancedConfigModal(HWND owner)
 
     RECT ownerRect = {};
     GetWindowRect(owner, &ownerRect);
-    constexpr int width = 428;
-    constexpr int height = 178;
+    const UINT dpi = GetWindowDpi(owner);
+    const int width = MulDiv(428, dpi, 96);
+    const int height = MulDiv(178, dpi, 96);
     const int x = ownerRect.left + ((ownerRect.right - ownerRect.left) - width) / 2;
     const int y = ownerRect.top + ((ownerRect.bottom - ownerRect.top) - height) / 2;
 

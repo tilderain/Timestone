@@ -91,7 +91,6 @@ static bool      g_peerReady = false;
 static bool      g_autoTestLaunch = false;
 static COLORREF  g_statusColor = RGB(0, 0, 0); // default black for status text
 static HBRUSH    g_hStatusBrush = nullptr;
-static HFONT     g_hLaunchFont = nullptr;
 static HWND      g_hChatWindow = nullptr;
 static HWND      g_hChatHistory = nullptr;
 static HWND      g_hChatInput = nullptr;
@@ -842,7 +841,11 @@ static bool ApplyP2Selection(HWND hDlg, const LaunchP2SelectionPacket& packet);
 static DWORD WINAPI NetworkPollThread(LPVOID lpParam);
 static void CleanupNetwork(HWND hDlg, bool forceCleanup = false);
 static void CreateBattleSetupControls(HWND hDlg);
+static UINT GetLaunchWindowDpi(HWND hWnd);
 static void ApplyLaunchMenuFont(HWND hDlg);
+static void InitializeDpiLayout(HWND hWnd);
+static void UpdateDpiLayout(HWND hWnd, UINT newDpi);
+static void DestroyDpiLayout(HWND hWnd);
 static void ReturnBattleSetupToLobbies(HWND hDlg);
 static void UpdateLobbyMusicCheckbox(HWND hDlg);
 
@@ -1208,11 +1211,13 @@ static void ShowChatWindow(HWND hDlg)
         RECT workArea = {};
         GetWindowRect(hDlg, &ownerRect);
         SystemParametersInfoA(SPI_GETWORKAREA, 0, &workArea, 0);
-        constexpr int width = 370;
-        constexpr int height = 440;
-        int x = ownerRect.right + 12;
+        const UINT dpi = GetLaunchWindowDpi(hDlg);
+        const int width = MulDiv(370, dpi, 96);
+        const int height = MulDiv(440, dpi, 96);
+        const int gap = MulDiv(12, dpi, 96);
+        int x = ownerRect.right + gap;
         if (x + width > workArea.right)
-            x = ownerRect.left - width - 12;
+            x = ownerRect.left - width - gap;
         x = std::clamp(x, static_cast<int>(workArea.left),
                       static_cast<int>(workArea.right) - width);
         int y = std::clamp(static_cast<int>(ownerRect.top),
@@ -1232,10 +1237,17 @@ static void ShowChatWindow(HWND hDlg)
     const bool hasSteamPeer = SteamLobby_GetPeerSteamId() != 0;
     HWND connectionLabel = GetDlgItem(g_hChatWindow, ID_CHAT_CONNECTION);
     HWND profileButton = GetDlgItem(g_hChatWindow, ID_CHAT_PROFILE);
-    SetWindowPos(connectionLabel, nullptr, hasSteamPeer ? 84 : 12, 12,
-                 hasSteamPeer ? 264 : 336, 34, SWP_NOZORDER);
-    SetWindowPos(profileButton, nullptr, hasSteamPeer ? 84 : 12, 50,
-                 hasSteamPeer ? 264 : 336, 28, SWP_NOZORDER);
+    const UINT chatDpi = GetLaunchWindowDpi(g_hChatWindow);
+    SetWindowPos(connectionLabel, nullptr,
+                 MulDiv(hasSteamPeer ? 84 : 12, chatDpi, 96),
+                 MulDiv(12, chatDpi, 96),
+                 MulDiv(hasSteamPeer ? 264 : 336, chatDpi, 96),
+                 MulDiv(34, chatDpi, 96), SWP_NOZORDER);
+    SetWindowPos(profileButton, nullptr,
+                 MulDiv(hasSteamPeer ? 84 : 12, chatDpi, 96),
+                 MulDiv(50, chatDpi, 96),
+                 MulDiv(hasSteamPeer ? 264 : 336, chatDpi, 96),
+                 MulDiv(28, chatDpi, 96), SWP_NOZORDER);
     EnableWindow(profileButton, hasSteamPeer ? TRUE : FALSE);
     UpdateChatAvatar();
     char systemLine[sizeof(connection) + 4];
@@ -1302,8 +1314,22 @@ static LRESULT CALLBACK ChatWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
                       WS_VISIBLE | WS_CHILD | WS_TABSTOP | BS_DEFPUSHBUTTON,
                       276, 353, 72, 28, hWnd,
                       reinterpret_cast<HMENU>(ID_CHAT_SEND), nullptr, nullptr);
+        InitializeDpiLayout(hWnd);
         ApplyLaunchMenuFont(hWnd);
         return 0;
+
+    case WM_DPICHANGED:
+    {
+        const UINT dpi = HIWORD(wParam);
+        UpdateDpiLayout(hWnd, dpi);
+        const RECT* suggested = reinterpret_cast<const RECT*>(lParam);
+        SetWindowPos(hWnd, nullptr, suggested->left, suggested->top,
+                     suggested->right - suggested->left,
+                     suggested->bottom - suggested->top,
+                     SWP_NOACTIVATE | SWP_NOZORDER);
+        ApplyLaunchMenuFont(hWnd);
+        return 0;
+    }
 
     case WM_COMMAND:
         if (LOWORD(wParam) == ID_CHAT_SEND && HIWORD(wParam) == BN_CLICKED) {
@@ -1321,6 +1347,7 @@ static LRESULT CALLBACK ChatWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
         return 0;
 
     case WM_DESTROY:
+        DestroyDpiLayout(hWnd);
         if (g_hChatWindow == hWnd) {
             ClearChatAvatar();
             g_hChatWindow = nullptr;
@@ -1368,7 +1395,10 @@ static void SetDirectConnectExpanded(HWND hDlg, bool expanded)
 {
     if (g_directConnectExpanded == expanded) return;
 
-    constexpr int expandedHeight = 56;
+    UINT layoutDpi = static_cast<UINT>(reinterpret_cast<INT_PTR>(
+        GetPropA(hDlg, "TimestoneLayoutDpi")));
+    if (!layoutDpi) layoutDpi = 96;
+    const int expandedHeight = MulDiv(56, layoutDpi, 96);
     const int directControls[] = {
         ID_NET_IP_LABEL, ID_NET_IP, ID_NET_PORT_LABEL, ID_NET_PORT,
         ID_NET_HOST_BTN, ID_NET_CONNECT_BTN, ID_NET_STATUS,
@@ -1637,8 +1667,23 @@ static LaunchOption ShowLaunchMenuWindow(bool battleSetupOnly, bool compactMode)
         HookLog("UMVC3Hook: Chat window class registration failed error=%lu\n",
                 GetLastError());
 
-    int w = g_compactMode ? 656 : 840;
-    int h = g_compactMode ? 448 : (g_battleSetupOnly ? 430 : 780);
+    using SetThreadDpiAwarenessContextFn = HANDLE (WINAPI*)(HANDLE);
+    const auto setThreadDpiAwarenessContext =
+        reinterpret_cast<SetThreadDpiAwarenessContextFn>(GetProcAddress(
+            GetModuleHandleA("user32.dll"), "SetThreadDpiAwarenessContext"));
+    HANDLE previousDpiContext = nullptr;
+    if (setThreadDpiAwarenessContext) {
+        // DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2. Resolve it dynamically
+        // so the project can retain its Windows 7 compile target.
+        previousDpiContext = setThreadDpiAwarenessContext(
+            reinterpret_cast<HANDLE>(static_cast<INT_PTR>(-4)));
+    }
+
+    HDC screenDc = GetDC(nullptr);
+    const int dpi = screenDc ? GetDeviceCaps(screenDc, LOGPIXELSX) : 96;
+    if (screenDc) ReleaseDC(nullptr, screenDc);
+    int w = MulDiv(g_compactMode ? 656 : 840, dpi, 96);
+    int h = MulDiv(g_compactMode ? 448 : (g_battleSetupOnly ? 430 : 780), dpi, 96);
     int x = (GetSystemMetrics(SM_CXSCREEN) - w) / 2;
     int y = (GetSystemMetrics(SM_CYSCREEN) - h) / 2;
 
@@ -1668,6 +1713,9 @@ static LaunchOption ShowLaunchMenuWindow(bool battleSetupOnly, bool compactMode)
             g_launchOption = LAUNCH_NORMAL;
         }
     }
+
+    if (setThreadDpiAwarenessContext && previousDpiContext)
+        setThreadDpiAwarenessContext(previousDpiContext);
 
     UnregisterClassA(CLASS_NAME, hInst);
     UnregisterClassA(kChatWindowClass, hInst);
@@ -1837,26 +1885,99 @@ static BOOL CALLBACK SetLaunchControlFont(HWND control, LPARAM font)
     return TRUE;
 }
 
-static void ApplyLaunchMenuFont(HWND hDlg)
+static UINT GetLaunchWindowDpi(HWND hWnd)
 {
-    if (!g_hLaunchFont) {
-        HDC dc = GetDC(hDlg);
-        const int dpi = dc ? GetDeviceCaps(dc, LOGPIXELSY) : 96;
-        if (dc) ReleaseDC(hDlg, dc);
-
-        LOGFONTA font = {};
-        font.lfHeight = -MulDiv(10, dpi, 72);
-        font.lfWeight = FW_NORMAL;
-        font.lfCharSet = DEFAULT_CHARSET;
-        font.lfQuality = CLEARTYPE_QUALITY;
-        snprintf(font.lfFaceName, sizeof(font.lfFaceName), "MS Shell Dlg 2");
-        g_hLaunchFont = CreateFontIndirectA(&font);
+    using GetDpiForWindowFn = UINT (WINAPI*)(HWND);
+    const auto getDpiForWindow = reinterpret_cast<GetDpiForWindowFn>(
+        GetProcAddress(GetModuleHandleA("user32.dll"), "GetDpiForWindow"));
+    if (getDpiForWindow) {
+        const UINT dpi = getDpiForWindow(hWnd);
+        if (dpi) return dpi;
     }
 
-    if (!g_hLaunchFont) return;
-    SendMessageA(hDlg, WM_SETFONT, reinterpret_cast<WPARAM>(g_hLaunchFont), TRUE);
+    HDC dc = GetDC(hWnd);
+    const UINT dpi = dc ? static_cast<UINT>(GetDeviceCaps(dc, LOGPIXELSX)) : 96;
+    if (dc) ReleaseDC(hWnd, dc);
+    return dpi ? dpi : 96;
+}
+
+static void ScaleLaunchMenuChildren(HWND hWnd, UINT oldDpi, UINT newDpi)
+{
+    if (!oldDpi || oldDpi == newDpi) return;
+
+    for (HWND child = GetWindow(hWnd, GW_CHILD); child;
+         child = GetWindow(child, GW_HWNDNEXT)) {
+        RECT rect = {};
+        GetWindowRect(child, &rect);
+        MapWindowPoints(nullptr, hWnd, reinterpret_cast<POINT*>(&rect), 2);
+        SetWindowPos(child, nullptr,
+                     MulDiv(rect.left, newDpi, oldDpi),
+                     MulDiv(rect.top, newDpi, oldDpi),
+                     MulDiv(rect.right - rect.left, newDpi, oldDpi),
+                     MulDiv(rect.bottom - rect.top, newDpi, oldDpi),
+                     SWP_NOACTIVATE | SWP_NOZORDER);
+
+        char className[32] = {};
+        GetClassNameA(child, className, sizeof(className));
+        if (_stricmp(className, WC_LISTVIEWA) == 0) {
+            HWND header = ListView_GetHeader(child);
+            const int columnCount = header ? Header_GetItemCount(header) : 0;
+            for (int column = 0; column < columnCount; ++column) {
+                ListView_SetColumnWidth(child, column, MulDiv(
+                    ListView_GetColumnWidth(child, column), newDpi, oldDpi));
+            }
+        } else if (_stricmp(className, "COMBOBOX") == 0) {
+            const LRESULT width = SendMessageA(child, CB_GETDROPPEDWIDTH, 0, 0);
+            if (width > 0) {
+                SendMessageA(child, CB_SETDROPPEDWIDTH,
+                             MulDiv(static_cast<int>(width), newDpi, oldDpi), 0);
+            }
+        }
+    }
+}
+
+static void InitializeDpiLayout(HWND hWnd)
+{
+    const UINT dpi = GetLaunchWindowDpi(hWnd);
+    SetPropA(hWnd, "TimestoneLayoutDpi",
+             reinterpret_cast<HANDLE>(static_cast<INT_PTR>(dpi)));
+    ScaleLaunchMenuChildren(hWnd, 96, dpi);
+}
+
+static void UpdateDpiLayout(HWND hWnd, UINT newDpi)
+{
+    const UINT oldDpi = static_cast<UINT>(reinterpret_cast<INT_PTR>(
+        GetPropA(hWnd, "TimestoneLayoutDpi")));
+    ScaleLaunchMenuChildren(hWnd, oldDpi ? oldDpi : 96, newDpi);
+    SetPropA(hWnd, "TimestoneLayoutDpi",
+             reinterpret_cast<HANDLE>(static_cast<INT_PTR>(newDpi)));
+}
+
+static void DestroyDpiLayout(HWND hWnd)
+{
+    HFONT font = reinterpret_cast<HFONT>(GetPropA(hWnd, "TimestoneLaunchFont"));
+    if (font) DeleteObject(font);
+    RemovePropA(hWnd, "TimestoneLaunchFont");
+    RemovePropA(hWnd, "TimestoneLayoutDpi");
+}
+
+static void ApplyLaunchMenuFont(HWND hDlg)
+{
+    HFONT oldFont = reinterpret_cast<HFONT>(
+        GetPropA(hDlg, "TimestoneLaunchFont"));
+    LOGFONTA font = {};
+    font.lfHeight = -MulDiv(10, GetLaunchWindowDpi(hDlg), 72);
+    font.lfWeight = FW_NORMAL;
+    font.lfCharSet = DEFAULT_CHARSET;
+    font.lfQuality = CLEARTYPE_QUALITY;
+    snprintf(font.lfFaceName, sizeof(font.lfFaceName), "MS Shell Dlg 2");
+    HFONT launchFont = CreateFontIndirectA(&font);
+    if (!launchFont) return;
+    SetPropA(hDlg, "TimestoneLaunchFont", launchFont);
+    SendMessageA(hDlg, WM_SETFONT, reinterpret_cast<WPARAM>(launchFont), TRUE);
     EnumChildWindows(hDlg, SetLaunchControlFont,
-                     reinterpret_cast<LPARAM>(g_hLaunchFont));
+                     reinterpret_cast<LPARAM>(launchFont));
+    if (oldFont) DeleteObject(oldFont);
 }
 
 static void CreateBattleSetupControls(HWND hDlg)
@@ -1992,6 +2113,7 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
             };
             CreateCompactLaunchMenuControls(hDlg, ids, g_lobbyTypeSelection,
                                              g_lobbyName);
+            InitializeDpiLayout(hDlg);
             ApplyLaunchMenuFont(hDlg);
             UpdateLobbyMusicCheckbox(hDlg);
             SetTimer(hDlg, ID_STEAM_POLL_TIMER, 50, NULL);
@@ -2001,6 +2123,7 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
 
         if (g_battleSetupOnly) {
             CreateBattleSetupControls(hDlg);
+            InitializeDpiLayout(hDlg);
             ApplyLaunchMenuFont(hDlg);
             UpdateLobbyMusicCheckbox(hDlg);
             return msg == WM_INITDIALOG ? TRUE : 0;
@@ -2317,6 +2440,7 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
             leftX + 310, y + 34, 180, 26,
             hDlg, (HMENU)ID_ADVANCED_CONFIG, NULL, NULL);
 
+        InitializeDpiLayout(hDlg);
         if (g_directConnectExpanded) {
             g_directConnectExpanded = false;
             SetDirectConnectExpanded(hDlg, true);
@@ -2326,6 +2450,19 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
         UpdateLobbyMusicCheckbox(hDlg);
         SetTimer(hDlg, ID_STEAM_POLL_TIMER, 50, NULL);
         return msg == WM_INITDIALOG ? TRUE : 0;
+    }
+
+    case WM_DPICHANGED:
+    {
+        const UINT dpi = HIWORD(wParam);
+        UpdateDpiLayout(hDlg, dpi);
+        const RECT* suggested = reinterpret_cast<const RECT*>(lParam);
+        SetWindowPos(hDlg, nullptr, suggested->left, suggested->top,
+                     suggested->right - suggested->left,
+                     suggested->bottom - suggested->top,
+                     SWP_NOACTIVATE | SWP_NOZORDER);
+        ApplyLaunchMenuFont(hDlg);
+        return 0;
     }
 
     case WM_TIMER:
@@ -3242,6 +3379,7 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
         return 0;
 
     case WM_DESTROY:
+        DestroyDpiLayout(hDlg);
         KillTimer(hDlg, ID_STEAM_POLL_TIMER);
         if (g_compactMode &&
             (g_compactAdvancedRequest || g_compactBattleSetupRequest)) {
@@ -3254,10 +3392,6 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
         if (g_hStatusBrush) {
             DeleteObject(g_hStatusBrush);
             g_hStatusBrush = nullptr;
-        }
-        if (g_hLaunchFont) {
-            DeleteObject(g_hLaunchFont);
-            g_hLaunchFont = nullptr;
         }
         PostQuitMessage(0);
         return 0;
