@@ -120,6 +120,35 @@ static bool HookLogWriteSnapshotLocked()
 		HookLogWriteSnapshotLocked(g_hookLogSnapshotFilename.c_str());
 }
 
+static void HookLogRotatePreviousSessionLocked(const char* filename)
+{
+	if (!filename || !filename[0] ||
+		GetFileAttributesA(filename) == INVALID_FILE_ATTRIBUTES)
+		return;
+
+	const char* extension = strrchr(filename, '.');
+	const char* backslash = strrchr(filename, '\\');
+	const char* forwardSlash = strrchr(filename, '/');
+	const char* separator = backslash;
+	if (!separator || (forwardSlash && forwardSlash > separator))
+		separator = forwardSlash;
+	if (extension && separator && extension < separator)
+		extension = nullptr;
+
+	char previousFilename[MAX_PATH] = {};
+	const int written = extension
+		? snprintf(previousFilename, sizeof(previousFilename),
+			"%.*s.previous%s", static_cast<int>(extension - filename),
+			filename, extension)
+		: snprintf(previousFilename, sizeof(previousFilename),
+			"%s.previous.log", filename);
+	if (written <= 0 || written >= static_cast<int>(sizeof(previousFilename)))
+		return;
+
+	MoveFileExA(filename, previousFilename,
+		MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
+}
+
 static bool HookLogFlushLocked()
 {
 	if (g_hookConsoleOutputEnabled)
@@ -131,91 +160,16 @@ static bool HookLogFlushLocked()
 	if (!HookLogWriteSnapshotLocked())
 		return false;
 
-	FILE* source = fopen(g_hookLogFilename, "rb");
-	__int64 oldSize = 0;
-	if (source) {
-		if (_fseeki64(source, 0, SEEK_END) != 0 ||
-			(oldSize = _ftelli64(source)) < 0) {
-			fclose(source);
-			return false;
-		}
-	} else if (GetFileAttributesA(g_hookLogFilename) != INVALID_FILE_ATTRIBUTES) {
-		return false;
-	}
-
 	const size_t newBytes = g_hookLogBuffer.size();
-	const size_t availableForOld = kHookLogMaxBytes - newBytes;
-	const size_t discardMarkerLength = sizeof(kHookLogDiscardMarker) - 1;
-	const bool trimOld = static_cast<unsigned long long>(oldSize) >
-		availableForOld;
-	size_t oldBudget = availableForOld;
-	bool writeDiscardMarker = false;
-	if (trimOld) {
-		writeDiscardMarker = availableForOld >= discardMarkerLength;
-		oldBudget = writeDiscardMarker
-			? availableForOld - discardMarkerLength : 0;
-	}
-
-	if (source) {
-		__int64 start = oldSize > static_cast<__int64>(oldBudget)
-			? oldSize - static_cast<__int64>(oldBudget) : 0;
-		if (start > 0 && oldBudget > 0) {
-			if (_fseeki64(source, start - 1, SEEK_SET) != 0) {
-				fclose(source);
-				return false;
-			}
-			const int previous = fgetc(source);
-			if (previous != '\n') {
-				int c = 0;
-				while ((c = fgetc(source)) != EOF && c != '\n') {}
-			}
-		} else if (_fseeki64(source, start, SEEK_SET) != 0) {
-			fclose(source);
-			return false;
-		}
-	}
-
-	char temporaryFilename[MAX_PATH + 32] = {};
-	if (snprintf(temporaryFilename, sizeof(temporaryFilename), "%s.tmp.%lu",
-			g_hookLogFilename, static_cast<unsigned long>(GetCurrentProcessId())) >=
-			static_cast<int>(sizeof(temporaryFilename))) {
-		if (source)
-			fclose(source);
+	FILE* output = fopen(g_hookLogFilename, "ab");
+	if (!output)
 		return false;
-	}
-	DeleteFileA(temporaryFilename);
-	FILE* output = fopen(temporaryFilename, "wb");
-	if (!output) {
-		if (source)
-			fclose(source);
-		return false;
-	}
 
-	bool success = true;
-	if (writeDiscardMarker)
-		success = fwrite(kHookLogDiscardMarker, 1, discardMarkerLength,
-			output) == discardMarkerLength;
-	if (source && oldBudget > 0) {
-		char copyBuffer[16 * 1024];
-		size_t bytesRead = 0;
-		while (success &&
-			(bytesRead = fread(copyBuffer, 1, sizeof(copyBuffer), source)) != 0) {
-			success = fwrite(copyBuffer, 1, bytesRead, output) == bytesRead;
-		}
-		if (ferror(source))
-			success = false;
-	}
-	if (source)
-		fclose(source);
-	if (success)
-		success = fwrite(g_hookLogBuffer.data(), 1, newBytes, output) == newBytes;
+	bool success = fwrite(g_hookLogBuffer.data(), 1, newBytes, output) == newBytes;
 	success = success && fflush(output) == 0;
 	success = fclose(output) == 0 && success;
-	if (!success || !MoveFileExA(temporaryFilename, g_hookLogFilename,
-			MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
-		DeleteFileA(temporaryFilename);
+	if (!success)
 		return false;
-	}
 
 	g_hookLogBuffer.clear();
 	return true;
@@ -230,6 +184,7 @@ void HookLogSetFile(const char* filename)
 		ReleaseSRWLockExclusive(&g_hookLogLock);
 		return;
 	}
+	HookLogRotatePreviousSessionLocked(filename);
 	snprintf(g_hookLogFilename, sizeof(g_hookLogFilename), "%s", filename);
 	g_hookLogSnapshotFilename.clear();
 	SYSTEMTIME time = {};
