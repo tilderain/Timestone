@@ -108,6 +108,7 @@ struct TrainingBootConfig {
     int32_t p2Assists[3];
     bool simpleMode[2];   // Team-specific Simple Mode controls
     bool autoJump[2];     // Team-specific automatic super jump
+    uint8_t voiceLanguage[2][3]; // Per-character voice: 0=Japanese, 1=English
     int32_t stageId;      // Stage ID
     int32_t timerValue;   // Timer in seconds (99 = infinite in training)
 };

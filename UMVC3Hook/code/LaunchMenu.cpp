@@ -154,7 +154,7 @@ static bool IsValidTrainingLaunchPacket(const LaunchTrainingPacket& packet)
     if (packet.type != PACKET_LAUNCH_TRAINING ||
         packet.simpleMode[0] > 1 || packet.simpleMode[1] > 1 ||
         packet.autoJump[0] > 1 || packet.autoJump[1] > 1 ||
-        packet.autoJumpValidMask > 3)
+        packet.autoJumpValidMask > 3 || packet.voiceValidMask > 3)
         return false;
     for (int i = 0; i < 3; ++i) {
         if (packet.p1Chars[i] < 0 || packet.p1Chars[i] >= kCharNameCount ||
@@ -164,7 +164,9 @@ static bool IsValidTrainingLaunchPacket(const LaunchTrainingPacket& packet)
             packet.p2Colors[i] < 0 ||
             packet.p2Colors[i] >= GetCharacterArchiveVariantCount(packet.p2Chars[i]) ||
             packet.p1Assists[i] < 0 || packet.p1Assists[i] > 2 ||
-            packet.p2Assists[i] < 0 || packet.p2Assists[i] > 2)
+            packet.p2Assists[i] < 0 || packet.p2Assists[i] > 2 ||
+            packet.voiceLanguage[0][i] > 1 ||
+            packet.voiceLanguage[1][i] > 1)
             return false;
     }
     return true;
@@ -579,6 +581,10 @@ bool ApplyTrainingLaunchPacket(const LaunchTrainingPacket& packet)
         cfg.p2Colors[i] = packet.p2Colors[i];
         cfg.p1Assists[i] = packet.p1Assists[i];
         cfg.p2Assists[i] = packet.p2Assists[i];
+        if ((packet.voiceValidMask & 1) != 0)
+            cfg.voiceLanguage[0][i] = packet.voiceLanguage[0][i];
+        if ((packet.voiceValidMask & 2) != 0)
+            cfg.voiceLanguage[1][i] = packet.voiceLanguage[1][i];
     }
     cfg.stageId = packet.stageId;
     cfg.simpleMode[0] = packet.simpleMode[0] != 0;
@@ -2935,7 +2941,7 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
                 LOWORD(wParam) == ID_LAUNCH_DUAL_P2_CPU ? TRAINING_CPU_P2_ONLY :
                 TRAINING_CPU_NONE);
             SendTrainingLaunchPacket();
-            TrainingBootConfig cfg;
+            TrainingBootConfig cfg = {};
             for (int i = 0; i < 3; i++) {
                 cfg.p1Chars[i] = g_dialogConfig.p1Chars[i];
                 cfg.p2Chars[i] = g_dialogConfig.p2Chars[i];

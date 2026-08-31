@@ -571,8 +571,18 @@ static DWORD WINAPI Netplay_ServiceThread(LPVOID)
                                         (const LaunchTrainingPacket*)event.packet->data;
                                     if (packet->autoJump[0] <= 1 &&
                                         packet->autoJump[1] <= 1 &&
-                                        packet->autoJumpValidMask <= 3)
+                                        packet->autoJumpValidMask <= 3 &&
+                                        packet->voiceValidMask <= 3)
                                     {
+                                        bool validVoice = true;
+                                        for (int team = 0; team < 2; ++team) {
+                                            for (int member = 0; member < 3; ++member) {
+                                                if (packet->voiceLanguage[team][member] > 1)
+                                                    validVoice = false;
+                                            }
+                                        }
+                                        if (!validVoice)
+                                            break;
                                         ScopedCS lock(g_launchTrainingCS);
                                         g_inboundLaunchTraining = *packet;
                                         g_inboundLaunchTrainingNew = true;

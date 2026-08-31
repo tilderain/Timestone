@@ -96,6 +96,8 @@ struct LaunchTrainingPacket {
     uint32_t simpleMode[2];
     uint32_t autoJump[2];
     uint32_t autoJumpValidMask;   // bit 0=P1 value valid, bit 1=P2 value valid
+    uint8_t  voiceLanguage[2][3]; // 0=Japanese, 1=English
+    uint8_t  voiceValidMask;      // bit 0=P1 values valid, bit 1=P2 values valid
     int32_t  stageId;
     uint32_t flags;              // LaunchTrainingFlags
 };

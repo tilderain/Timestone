@@ -96,6 +96,7 @@ static constexpr uintptr_t SGAMECONFIG_START_NATIVE_LOAD      = 0x140253620;
 static constexpr uintptr_t SGAMECONFIG_GET_BUTTON_MAPPING     = 0x1402522A0;
 static constexpr uintptr_t SGAMECONFIG_SET_BINDING_TABLE      = 0x140254A20;
 static constexpr uintptr_t SGAMECONFIG_SELECT_BINDING_TABLE   = 0x140254C40;
+static constexpr uintptr_t SGAMECONFIG_GET_CHARACTER_VOICE    = 0x140251BD0;
 static constexpr uintptr_t SGAMECONFIG_STORAGE_BUSY_OFFSET    = 0x4D350;
 static constexpr uint32_t GAMEPLAY_BINDING_COUNT              = 11;
 
@@ -124,6 +125,7 @@ static TrainingBootConfig g_bootConfig = {
     { 0, 0, 0 }, // P2 assists (Alpha)
     { false, false }, // Normal controls
     { false, false }, // Automatic super jump disabled
+    { { 0, 0, 0 }, { 0, 0, 0 } }, // Character voice language
     0,    // stage 
     99   // timer (99 = infinite in training)
 };
@@ -137,9 +139,9 @@ static bool g_restartTransitionActive = false;
 static bool g_restartSawActionSetup = false;
 static TrainingBootCpuMode g_cpuMode = TRAINING_CPU_NONE;
 static bool g_fiveBarStart = false;
-static bool g_initialAutoJumpSent = false;
-static bool g_initialAutoJumpReceived = false;
-static bool g_initialAutoJumpSynchronized = false;
+static bool g_initialSettingsSent = false;
+static bool g_initialSettingsReceived = false;
+static bool g_initialSettingsSynchronized = false;
 
 // ---------------------------------------------------------------------------
 // Extern from dllmain.cpp
@@ -197,7 +199,7 @@ static void WriteCharacterId(uint64_t battleSetting, int team, int slot, int32_t
 // slot+0x0c as an active entry.
 // ---------------------------------------------------------------------------
 static void WriteSlotEntry(uint64_t bs, int index, int teamId, int32_t charId,
-                           int32_t color, int32_t assist)
+                           int32_t color, int32_t assist, uint8_t voiceLanguage)
 {
     uint64_t entry = bs + 0x378 + index * 0x58;
     typedef void(__fastcall* SetSlotValue_t)(uint64_t, int32_t);
@@ -206,8 +208,10 @@ static void WriteSlotEntry(uint64_t bs, int index, int teamId, int32_t charId,
     ((SetSlotValue_t)_addr(BATTLE_SETTING_SET_CHAR_ID))(entry, charId);
     ((SetSlotValue_t)_addr(BATTLE_SETTING_SET_DRAW_MODE))(entry, color);
     ((SetSlotValue_t)_addr(BATTLE_SETTING_SET_ASSIST_TYPE))(entry, assist);
-    HookLog("TrainingBoot: Native slot entry %d: team=%d charId=%d dti=%d color=%d assist=%d\n",
-            index, teamId, charId, *(int32_t*)(entry + 0x10), color, assist);
+    *(uint32_t*)(entry + 0x44) = voiceLanguage;
+    HookLog("TrainingBoot: Native slot entry %d: team=%d charId=%d dti=%d color=%d assist=%d voice=%u\n",
+            index, teamId, charId, *(int32_t*)(entry + 0x10), color, assist,
+            voiceLanguage);
 }
 
 static void ConfigureTrainingMatchDefaults(uint64_t bs)
@@ -438,9 +442,18 @@ static void ApplyPlayerOneBindingsToPlayerTwo()
     HookLog("TrainingBoot: Applied client P1 button bindings to local P2 input\n");
 }
 
-static bool SynchronizeInitialAutoJump()
+static uint8_t GetCharacterVoiceLanguage(uint64_t gameConfig, int32_t character)
 {
-    if (g_initialAutoJumpSynchronized)
+    using GetVoice_t = bool(__fastcall*)(uint64_t, uint32_t);
+    if (character > 25)
+        return 1;
+    return ((GetVoice_t)_addr(SGAMECONFIG_GET_CHARACTER_VOICE))(
+        gameConfig, static_cast<uint32_t>(character)) ? 1u : 0u;
+}
+
+static bool SynchronizeInitialPlayerSettings()
+{
+    if (g_initialSettingsSynchronized)
         return true;
 
     typedef uint64_t(__fastcall* GetInstance_t)();
@@ -453,40 +466,72 @@ static bool SynchronizeInitialAutoJump()
     if (!Netplay_IsActive()) {
         g_bootConfig.autoJump[0] = localEnabled;
         g_bootConfig.autoJump[1] = localEnabled;
-        g_initialAutoJumpSynchronized = true;
+        for (int team = 0; team < 2; ++team) {
+            for (int member = 0; member < 3; ++member) {
+                const int32_t character = team == 0
+                    ? g_bootConfig.p1Chars[member] : g_bootConfig.p2Chars[member];
+                g_bootConfig.voiceLanguage[team][member] =
+                    GetCharacterVoiceLanguage(gameConfig, character);
+            }
+        }
+        g_initialSettingsSynchronized = true;
         return true;
     }
 
     const int localTeam = Netplay_IsHost() ? 0 : 1;
     g_bootConfig.autoJump[localTeam] = localEnabled;
-    if (!g_initialAutoJumpSent) {
+    for (int member = 0; member < 3; ++member) {
+        const int32_t character = localTeam == 0
+            ? g_bootConfig.p1Chars[member] : g_bootConfig.p2Chars[member];
+        g_bootConfig.voiceLanguage[localTeam][member] =
+            GetCharacterVoiceLanguage(gameConfig, character);
+    }
+    if (!g_initialSettingsSent) {
         LaunchTrainingPacket packet = {};
         packet.type = PACKET_LAUNCH_TRAINING;
         packet.autoJump[localTeam] = localEnabled ? 1u : 0u;
         packet.autoJumpValidMask = 1u << localTeam;
+        for (int member = 0; member < 3; ++member) {
+            packet.voiceLanguage[localTeam][member] =
+                g_bootConfig.voiceLanguage[localTeam][member];
+        }
+        packet.voiceValidMask = 1u << localTeam;
         Netplay_SendLaunchTrainingSettings(packet);
-        g_initialAutoJumpSent = true;
-        HookLog("TrainingBoot: Sent initial AutoJump launch setting team=%d enabled=%d\n",
-                localTeam, localEnabled);
+        g_initialSettingsSent = true;
+        HookLog("TrainingBoot: Sent initial settings team=%d AutoJump=%d voice=%u/%u/%u\n",
+                localTeam, localEnabled,
+                packet.voiceLanguage[localTeam][0],
+                packet.voiceLanguage[localTeam][1],
+                packet.voiceLanguage[localTeam][2]);
     }
 
     LaunchTrainingPacket packet = {};
-    if (!g_initialAutoJumpReceived &&
+    if (!g_initialSettingsReceived &&
         Netplay_GetInboundLaunchTrainingSettings(packet)) {
         const int remoteTeam = Netplay_IsHost() ? 1 : 0;
         const uint32_t remoteMask = 1u << remoteTeam;
-        if ((packet.autoJumpValidMask & remoteMask) != 0) {
+        if ((packet.autoJumpValidMask & remoteMask) != 0 &&
+            (packet.voiceValidMask & remoteMask) != 0) {
             g_bootConfig.autoJump[remoteTeam] =
                 packet.autoJump[remoteTeam] != 0;
-            g_initialAutoJumpReceived = true;
-            HookLog("TrainingBoot: Received initial AutoJump launch setting team=%d enabled=%u\n",
-                    remoteTeam, packet.autoJump[remoteTeam]);
+            for (int member = 0; member < 3; ++member) {
+                const int32_t character = remoteTeam == 0
+                    ? g_bootConfig.p1Chars[member] : g_bootConfig.p2Chars[member];
+                g_bootConfig.voiceLanguage[remoteTeam][member] = character > 25
+                    ? 1u : packet.voiceLanguage[remoteTeam][member];
+            }
+            g_initialSettingsReceived = true;
+            HookLog("TrainingBoot: Received initial settings team=%d AutoJump=%u voice=%u/%u/%u\n",
+                    remoteTeam, packet.autoJump[remoteTeam],
+                    g_bootConfig.voiceLanguage[remoteTeam][0],
+                    g_bootConfig.voiceLanguage[remoteTeam][1],
+                    g_bootConfig.voiceLanguage[remoteTeam][2]);
         }
     }
 
-    g_initialAutoJumpSynchronized =
-        g_initialAutoJumpSent && g_initialAutoJumpReceived;
-    return g_initialAutoJumpSynchronized;
+    g_initialSettingsSynchronized =
+        g_initialSettingsSent && g_initialSettingsReceived;
+    return g_initialSettingsSynchronized;
 }
 
 static void SetupPadToPlayerMapping()
@@ -555,10 +600,10 @@ void BootIntoTraining(bool queueAreaTransition)
         g_nativeGameConfigLoaded = true;
     }
 
-    // Savedata owns each process's AutoJump preference. Exchange those local
-    // values before the first aAction is constructed so both peers enter the
-    // initial battle with host=P1 and client=P2 settings already resolved.
-    if (!SynchronizeInitialAutoJump())
+    // Savedata owns each process's AutoJump and character-voice preferences.
+    // Exchange them before the first aAction is constructed so both peers
+    // enter the initial battle with host=P1 and client=P2 settings resolved.
+    if (!SynchronizeInitialPlayerSettings())
         return;
 
     NormalizeBootColors();
@@ -598,9 +643,11 @@ void BootIntoTraining(bool queueAreaTransition)
     // P1 = entries 0-2 (team 0), P2 = entries 3-5 (team 1).
     for (int slot = 0; slot < 3; slot++) {
         WriteSlotEntry(bs, slot, 0, g_bootConfig.p1Chars[slot],
-                       g_bootConfig.p1Colors[slot], g_bootConfig.p1Assists[slot]);
+                       g_bootConfig.p1Colors[slot], g_bootConfig.p1Assists[slot],
+                       g_bootConfig.voiceLanguage[0][slot]);
         WriteSlotEntry(bs, slot + 3, 1, g_bootConfig.p2Chars[slot],
-                       g_bootConfig.p2Colors[slot], g_bootConfig.p2Assists[slot]);
+                       g_bootConfig.p2Colors[slot], g_bootConfig.p2Assists[slot],
+                       g_bootConfig.voiceLanguage[1][slot]);
     }
     // restoreBackupAndInit restores the stage from the backup descriptor,
     // not from the live mStageArea field set above.

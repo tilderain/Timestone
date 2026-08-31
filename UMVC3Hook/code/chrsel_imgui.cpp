@@ -36,6 +36,7 @@ struct RosterConfig {
     int32_t assists[2][3];
     uint8_t simpleMode[2];
     uint8_t autoJump[2];
+    uint8_t voiceLanguage[2][3];
 };
 
 #pragma pack(push, 1)
@@ -88,6 +89,7 @@ constexpr uintptr_t CHARACTER_COLLECT_TEAM_SOUND_SLOTS = 0x140059180;
 constexpr uintptr_t CHARACTER_REMAP_TEAM_SOUND = 0x140059210;
 constexpr uintptr_t GAME_CONFIG_GET_INSTANCE = 0x140001AB0;
 constexpr uintptr_t GAME_CONFIG_GET_LANGUAGE = 0x140004840;
+constexpr uintptr_t GAME_CONFIG_GET_CHARACTER_VOICE = 0x140251BD0;
 constexpr uintptr_t MAIN_GET_INSTANCE = 0x140003150;
 constexpr uintptr_t MAIN_IS_PAUSED_THIS_FRAME = 0x140006B50;
 constexpr uintptr_t STAGE_GET_INSTANCE = 0x1400047E0;
@@ -207,7 +209,8 @@ void LogResetState()
                             loadState(characters, 1, character, color),
                             loadState(characters, 2, character, color),
                             loadState(characters, 3, character, color),
-                            loadState(characters, 4, character, 1));
+                            loadState(characters, 4, character,
+                                      g_pendingConfig.voiceLanguage[team][member]));
                 }
             }
         }
@@ -264,7 +267,9 @@ bool ValidateRoster(const RosterConfig& roster)
                 (character != 0 &&
                  !IsColorSelectable(character, roster.colors[team][member])) ||
                 roster.assists[team][member] < 0 ||
-                roster.assists[team][member] > 2)
+                roster.assists[team][member] > 2 ||
+                roster.voiceLanguage[team][member] > 1 ||
+                (character > 25 && roster.voiceLanguage[team][member] != 1))
                 return false;
         }
     }
@@ -283,6 +288,30 @@ bool ReadLocalAutoJumpPreference()
     const uint64_t gameConfig =
         ((GetInstanceFn)_addr(GAME_CONFIG_GET_INSTANCE))();
     return gameConfig && *(uint8_t*)(gameConfig + 0x192) != 0;
+}
+
+uint8_t ReadCharacterVoicePreference(int32_t character)
+{
+    if (character > 25)
+        return 1;
+    using GetInstanceFn = uint64_t(__fastcall*)();
+    using GetVoiceFn = bool(__fastcall*)(uint64_t, uint32_t);
+    const uint64_t gameConfig =
+        ((GetInstanceFn)_addr(GAME_CONFIG_GET_INSTANCE))();
+    return gameConfig && ((GetVoiceFn)_addr(GAME_CONFIG_GET_CHARACTER_VOICE))(
+        gameConfig, static_cast<uint32_t>(character)) ? 1u : 0u;
+}
+
+void LoadOwnedVoicePreferences(RosterConfig& roster)
+{
+    const int firstTeam = Netplay_IsActive() ? (Netplay_IsHost() ? 0 : 1) : 0;
+    const int lastTeam = Netplay_IsActive() ? firstTeam : 1;
+    for (int team = firstTeam; team <= lastTeam; ++team) {
+        for (int member = 0; member < 3; ++member) {
+            roster.voiceLanguage[team][member] =
+                ReadCharacterVoicePreference(roster.chars[team][member]);
+        }
+    }
 }
 
 void LoadOwnedAutoJumpPreference(RosterConfig& roster)
@@ -321,6 +350,8 @@ bool ReadCurrentRoster(RosterConfig& roster)
                                   0, VariantCount(character) - 1));
         roster.assists[team][member] =
             std::clamp(*(int32_t*)(slot + 0x1C), 0, 2);
+        roster.voiceLanguage[team][member] =
+            static_cast<uint8_t>(std::clamp(*(int32_t*)(slot + 0x44), 0, 1));
     }
     using GetInstanceFn = uint64_t(__fastcall*)();
     using GetTeamFn = uint64_t(__fastcall*)(uint64_t, int32_t);
@@ -370,6 +401,7 @@ void NormalizeRoster(RosterConfig& roster)
             if (character == 0) {
                 roster.colors[team][member] = 0;
                 roster.assists[team][member] = 0;
+                roster.voiceLanguage[team][member] = 0;
                 continue;
             }
             roster.colors[team][member] = NormalizeColor(
@@ -377,6 +409,8 @@ void NormalizeRoster(RosterConfig& roster)
                                      0, VariantCount(character) - 1));
             roster.assists[team][member] = std::clamp(
                 roster.assists[team][member], 0, 2);
+            roster.voiceLanguage[team][member] = character > 25
+                ? 1u : std::min<uint8_t>(roster.voiceLanguage[team][member], 1u);
         }
     }
 }
@@ -503,6 +537,7 @@ void BeginSynchronizedSession()
     }
     LoadOwnedAutoJumpPreference(current);
     NormalizeRoster(current);
+    LoadOwnedVoicePreferences(current);
     if (!ValidateRoster(current)) {
         HookLog("ChrSelImGui: roster normalization failed unexpectedly\n");
         return;
@@ -525,7 +560,10 @@ void BeginSynchronizedSession()
 
 void SendLocalUpdate()
 {
-    if (!g_open || !ValidateRoster(g_roster))
+    if (!g_open)
+        return;
+    LoadOwnedVoicePreferences(g_roster);
+    if (!ValidateRoster(g_roster))
         return;
     ++g_revision;
     SendPacket(MakePacket(CHRSEL_UPDATE));
@@ -541,6 +579,8 @@ void CopyRemoteRoster(const ChrSelPacket& packet)
             g_roster.chars[team][member] = packet.roster.chars[team][member];
             g_roster.colors[team][member] = packet.roster.colors[team][member];
             g_roster.assists[team][member] = packet.roster.assists[team][member];
+            g_roster.voiceLanguage[team][member] =
+                packet.roster.voiceLanguage[team][member];
         }
     }
     if (Netplay_IsActive()) {
@@ -583,7 +623,8 @@ bool RequestRosterArchives(const RosterConfig& roster, bool includeTeamSounds)
                 teamSoundB = remapTeamSound(otherB, language);
             }
             if (!request(characters, roster.chars[team][member],
-                         roster.colors[team][member], 1,
+                         roster.colors[team][member],
+                         roster.voiceLanguage[team][member],
                          teamSoundA, teamSoundB, 0x22))
                 accepted = false;
         }
@@ -634,6 +675,7 @@ void HandlePacket(const ChrSelPacket& packet)
                     haveCurrentTeamOptions = ReadCurrentRoster(current);
                 }
                 LoadOwnedAutoJumpPreference(current);
+                LoadOwnedVoicePreferences(current);
             }
             g_session = packet.session;
             g_revision = packet.revision;
@@ -642,6 +684,10 @@ void HandlePacket(const ChrSelPacket& packet)
             if (haveCurrentTeamOptions) {
                 g_roster.simpleMode[ownedTeam] = current.simpleMode[ownedTeam];
                 g_roster.autoJump[ownedTeam] = current.autoJump[ownedTeam];
+                for (int member = 0; member < 3; ++member) {
+                    g_roster.voiceLanguage[ownedTeam][member] =
+                        current.voiceLanguage[ownedTeam][member];
+                }
             }
             g_open = true;
         } else {
@@ -697,6 +743,7 @@ void CancelSelection()
 
 void CommitSelection()
 {
+    LoadOwnedVoicePreferences(g_roster);
     ChrSelPacket packet = MakePacket(CHRSEL_COMMIT);
     const int32_t currentFrame = Controller_GetNetFrameCount();
     int32_t lead = 45;
@@ -859,6 +906,7 @@ bool DrawTeam(int team, bool editable)
             }
             ImGui::EndCombo();
         }
+
         if (!hasCharacter) ImGui::EndDisabled();
         ImGui::PopID();
     }
@@ -991,6 +1039,10 @@ bool ChrSelImGui_ApplyRestart(int32_t targetFrame)
         config.p2Colors[member] = restartRoster.colors[1][member];
         config.p1Assists[member] = restartRoster.assists[0][member];
         config.p2Assists[member] = restartRoster.assists[1][member];
+        config.voiceLanguage[0][member] =
+            restartRoster.voiceLanguage[0][member];
+        config.voiceLanguage[1][member] =
+            restartRoster.voiceLanguage[1][member];
     }
     config.simpleMode[0] = restartRoster.simpleMode[0] != 0;
     config.simpleMode[1] = restartRoster.simpleMode[1] != 0;
