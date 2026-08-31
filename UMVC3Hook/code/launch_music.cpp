@@ -2,8 +2,6 @@
 
 #include <Windows.h>
 #include <mmsystem.h>
-#include <mmreg.h>
-#include <ksmedia.h>
 #include <algorithm>
 #include <atomic>
 #include <cstdint>
@@ -22,12 +20,12 @@ namespace {
 
 constexpr char kMusicRelativePath[] =
     "nativePCx64\\sound\\bgm\\source\\bgm_gm_015.sngw";
+constexpr int kOutputChannels = 2;
 constexpr int kMaxSourceChannels = 6;
 constexpr size_t kBufferCount = 4;
 constexpr size_t kBufferFrames = 4096;
 constexpr uint32_t kFadeDurationSeconds = 2;
 constexpr DWORD kQueuedAudioDrainMs = 400;
-constexpr float kPlaybackGain = 0.5f;
 
 HANDLE g_musicThread = nullptr;
 HANDLE g_stopEvent = nullptr;
@@ -94,26 +92,7 @@ void ReadLoopPoints(stb_vorbis* decoder, uint32_t& loopStart, uint32_t& loopEnd)
     }
 }
 
-void ConvertToNativePcm(const float* source, int sourceChannels, int frameCount,
-                        short* output)
-{
-    // Vorbis 5.1 order differs from the Windows 5.1 channel-mask order.
-    static constexpr int vorbisToWindows51[] = {0, 2, 1, 5, 3, 4};
-    for (int frame = 0; frame < frameCount; ++frame) {
-        const float* input = source + frame * sourceChannels;
-        for (int channel = 0; channel < sourceChannels; ++channel) {
-            const int sourceChannel = sourceChannels == 6
-                ? vorbisToWindows51[channel] : channel;
-            const float sample = std::clamp(
-                input[sourceChannel] * kPlaybackGain, -1.0f, 1.0f);
-            output[frame * sourceChannels + channel] =
-                static_cast<short>(sample * 32767.0f);
-        }
-    }
-}
-
-bool FillBuffer(stb_vorbis* decoder, short* output, float* sourceBuffer,
-                int sourceChannels, uint32_t& samplePosition,
+bool FillBuffer(stb_vorbis* decoder, short* output, uint32_t& samplePosition,
                 uint32_t loopStart, uint32_t loopEnd)
 {
     size_t written = 0;
@@ -129,24 +108,22 @@ bool FillBuffer(stb_vorbis* decoder, short* output, float* sourceBuffer,
         if (loopEnd)
             requested = std::min(requested, static_cast<size_t>(loopEnd - samplePosition));
 
-        const int decoded = stb_vorbis_get_samples_float_interleaved(
-            decoder, sourceChannels, sourceBuffer,
-            static_cast<int>(requested * sourceChannels));
+        const int decoded = stb_vorbis_get_samples_short_interleaved(
+            decoder, kOutputChannels, output + written * kOutputChannels,
+            static_cast<int>(requested * kOutputChannels));
         if (decoded <= 0) {
             const uint32_t restart = loopEnd ? loopStart : 0;
             if (!stb_vorbis_seek(decoder, restart)) return false;
             samplePosition = restart;
             continue;
         }
-        ConvertToNativePcm(sourceBuffer, sourceChannels, decoded,
-                           output + written * sourceChannels);
         written += static_cast<size_t>(decoded);
         samplePosition += static_cast<uint32_t>(decoded);
     }
     return true;
 }
 
-void ApplyOutputGain(short* samples, size_t frameCount, int channelCount, bool& fading,
+void ApplyOutputGain(short* samples, size_t frameCount, bool& fading,
                      uint64_t& fadeFramesRemaining, uint64_t fadeFrameCount,
                      bool& fadeCompleteSignaled)
 {
@@ -158,9 +135,10 @@ void ApplyOutputGain(short* samples, size_t frameCount, int channelCount, bool& 
     for (size_t frame = 0; frame < frameCount; ++frame) {
         const int64_t fadeGain = static_cast<int64_t>(
             fading ? fadeFramesRemaining : fadeFrameCount);
-        const int64_t fadeDivisor = static_cast<int64_t>(fadeFrameCount);
-        for (int channel = 0; channel < channelCount; ++channel) {
-            const size_t index = frame * channelCount + channel;
+        // The extra factor of two is the fixed 50% lobby playback gain.
+        const int64_t fadeDivisor = static_cast<int64_t>(fadeFrameCount) * 2;
+        for (int channel = 0; channel < kOutputChannels; ++channel) {
+            const size_t index = frame * kOutputChannels + channel;
             samples[index] = static_cast<short>(
                 static_cast<int64_t>(samples[index]) * fadeGain /
                 fadeDivisor);
@@ -202,23 +180,18 @@ DWORD WINAPI MusicThreadProc(LPVOID)
     uint32_t loopEnd = 0;
     ReadLoopPoints(decoder, loopStart, loopEnd);
 
-    WAVEFORMATEXTENSIBLE format = {};
-    format.Format.wFormatTag = WAVE_FORMAT_EXTENSIBLE;
-    format.Format.nChannels = info.channels;
-    format.Format.nSamplesPerSec = info.sample_rate;
-    format.Format.wBitsPerSample = 16;
-    format.Format.nBlockAlign = format.Format.nChannels * format.Format.wBitsPerSample / 8;
-    format.Format.nAvgBytesPerSec = format.Format.nSamplesPerSec * format.Format.nBlockAlign;
-    format.Format.cbSize = sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX);
-    format.Samples.wValidBitsPerSample = 16;
-    format.dwChannelMask = info.channels == 6 ? KSAUDIO_SPEAKER_5POINT1 : 0;
-    format.SubFormat = {WAVE_FORMAT_PCM, 0x0000, 0x0010,
-                        {0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71}};
+    WAVEFORMATEX format = {};
+    format.wFormatTag = WAVE_FORMAT_PCM;
+    format.nChannels = kOutputChannels;
+    format.nSamplesPerSec = info.sample_rate;
+    format.wBitsPerSample = 16;
+    format.nBlockAlign = format.nChannels * format.wBitsPerSample / 8;
+    format.nAvgBytesPerSec = format.nSamplesPerSec * format.nBlockAlign;
 
     HANDLE bufferEvent = CreateEventA(nullptr, FALSE, FALSE, nullptr);
     HWAVEOUT waveOut = nullptr;
     MMRESULT result = bufferEvent
-        ? waveOutOpen(&waveOut, WAVE_MAPPER, &format.Format,
+        ? waveOutOpen(&waveOut, WAVE_MAPPER, &format,
                       reinterpret_cast<DWORD_PTR>(bufferEvent), 0, CALLBACK_EVENT)
         : MMSYSERR_NOMEM;
     if (result != MMSYSERR_NOERROR) {
@@ -234,8 +207,7 @@ DWORD WINAPI MusicThreadProc(LPVOID)
         waveOutPause(waveOut);
     ReleaseSRWLockExclusive(&g_waveOutLock);
 
-    short samples[kBufferCount][kBufferFrames * kMaxSourceChannels] = {};
-    float sourceSamples[kBufferFrames * kMaxSourceChannels] = {};
+    short samples[kBufferCount][kBufferFrames * kOutputChannels] = {};
     WAVEHDR headers[kBufferCount] = {};
     uint32_t samplePosition = 0;
     size_t preparedCount = 0;
@@ -247,15 +219,12 @@ DWORD WINAPI MusicThreadProc(LPVOID)
         static_cast<uint64_t>(info.sample_rate) * kFadeDurationSeconds;
 
     for (size_t i = 0; i < kBufferCount && playing; ++i) {
-        playing = FillBuffer(decoder, samples[i], sourceSamples, info.channels,
-                             samplePosition, loopStart, loopEnd);
+        playing = FillBuffer(decoder, samples[i], samplePosition, loopStart, loopEnd);
         if (!playing) break;
-        ApplyOutputGain(samples[i], kBufferFrames, info.channels, fading,
-                        fadeFramesRemaining,
+        ApplyOutputGain(samples[i], kBufferFrames, fading, fadeFramesRemaining,
                         fadeFrameCount, fadeCompleteSignaled);
         headers[i].lpData = reinterpret_cast<LPSTR>(samples[i]);
-        headers[i].dwBufferLength = static_cast<DWORD>(
-            kBufferFrames * info.channels * sizeof(short));
+        headers[i].dwBufferLength = sizeof(samples[i]);
         result = waveOutPrepareHeader(waveOut, &headers[i], sizeof(headers[i]));
         if (result != MMSYSERR_NOERROR) {
             playing = false;
@@ -282,13 +251,11 @@ DWORD WINAPI MusicThreadProc(LPVOID)
 
         for (size_t i = 0; i < preparedCount; ++i) {
             if ((headers[i].dwFlags & WHDR_DONE) == 0) continue;
-            if (!FillBuffer(decoder, samples[i], sourceSamples, info.channels,
-                            samplePosition, loopStart, loopEnd)) {
+            if (!FillBuffer(decoder, samples[i], samplePosition, loopStart, loopEnd)) {
                 playing = false;
                 break;
             }
-            ApplyOutputGain(samples[i], kBufferFrames, info.channels, fading,
-                            fadeFramesRemaining,
+            ApplyOutputGain(samples[i], kBufferFrames, fading, fadeFramesRemaining,
                             fadeFrameCount, fadeCompleteSignaled);
             result = waveOutWrite(waveOut, &headers[i], sizeof(headers[i]));
             if (result != MMSYSERR_NOERROR) {
