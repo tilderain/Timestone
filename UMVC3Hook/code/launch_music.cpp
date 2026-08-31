@@ -23,7 +23,11 @@ constexpr char kMusicRelativePath[] =
 constexpr int kOutputChannels = 2;
 constexpr size_t kBufferCount = 4;
 constexpr size_t kBufferFrames = 4096;
-constexpr DWORD kPlaybackVolume = 0x80008000; // 50% on both stereo channels.
+constexpr uint32_t kPlaybackChannelVolume = 0x8000; // 50%.
+constexpr DWORD kPlaybackVolume =
+    kPlaybackChannelVolume | (kPlaybackChannelVolume << 16);
+constexpr unsigned kFadeSteps = 20;
+constexpr DWORD kFadeStepMs = 100; // Two-second fade.
 
 HANDLE g_musicThread = nullptr;
 HANDLE g_stopEvent = nullptr;
@@ -258,6 +262,21 @@ void LaunchMusic_Start()
 void LaunchMusic_Stop()
 {
     if (!g_musicThread) return;
+
+    if (g_playing.load(std::memory_order_acquire) &&
+        !g_muted.load(std::memory_order_relaxed)) {
+        for (unsigned step = kFadeSteps; step > 0; --step) {
+            if (!g_playing.load(std::memory_order_acquire)) break;
+            const uint32_t channelVolume =
+                kPlaybackChannelVolume * (step - 1) / kFadeSteps;
+            const DWORD volume = channelVolume | (channelVolume << 16);
+            AcquireSRWLockShared(&g_waveOutLock);
+            if (g_waveOut)
+                waveOutSetVolume(g_waveOut, volume);
+            ReleaseSRWLockShared(&g_waveOutLock);
+            Sleep(kFadeStepMs);
+        }
+    }
 
     SetEvent(g_stopEvent);
     WaitForSingleObject(g_musicThread, INFINITE);
