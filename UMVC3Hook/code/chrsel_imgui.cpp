@@ -8,6 +8,7 @@
 #include "framestepper.h"
 #include "mk10utils.h"
 #include "netplay.h"
+#include "savedata.h"
 #include "trainingboot.h"
 #include <Windows.h>
 #include <algorithm>
@@ -65,6 +66,10 @@ uint32_t g_remoteRevision = 0;
 int32_t g_pendingTargetFrame = -1;
 RosterConfig g_roster = {};
 RosterConfig g_pendingConfig = {};
+SavedRoster g_savedRosters[3] = {};
+size_t g_savedRosterCount = 0;
+bool g_savedRostersLoaded = false;
+int g_selectedSavedRoster[2] = {-1, -1};
 char g_status[160] = {};
 
 constexpr uintptr_t BATTLE_SETTING_GET_INSTANCE = 0x140004700;
@@ -399,6 +404,14 @@ bool CanEditAllTeams()
     return !Netplay_IsActive() || GetLaunchOption() == LAUNCH_DUAL_TRAINING;
 }
 
+void EnsureSavedRostersLoaded()
+{
+    if (g_savedRostersLoaded) return;
+    g_savedRosterCount = Savedata_LoadRosters(
+        g_savedRosters, sizeof(g_savedRosters) / sizeof(g_savedRosters[0]));
+    g_savedRostersLoaded = true;
+}
+
 void RandomizeRoster(bool allTeams)
 {
     constexpr int kPlayableCharacterCount = 50;
@@ -495,6 +508,9 @@ void BeginSynchronizedSession()
         return;
     }
     g_roster = current;
+    EnsureSavedRostersLoaded();
+    g_selectedSavedRoster[0] = -1;
+    g_selectedSavedRoster[1] = -1;
     ++g_session;
     if (g_session == 0) ++g_session;
     g_revision = 1;
@@ -605,6 +621,7 @@ void HandlePacket(const ChrSelPacket& packet)
     if (packet.action == CHRSEL_OPEN) {
         if (!ValidateRoster(packet.roster) || !CanOpenSelector())
             return;
+        EnsureSavedRostersLoaded();
         if (!g_open || packet.session != g_session) {
             const int ownedTeam = Netplay_IsHost() ? 0 : 1;
             RosterConfig current = {};
@@ -724,9 +741,36 @@ bool DrawTeam(int team, bool editable)
     bool changed = false;
     ImGui::PushID(team);
     ImGui::TextColored(team == 0 ? ImVec4(0.35f, 0.75f, 1.0f, 1.0f)
-                                 : ImVec4(1.0f, 0.45f, 0.55f, 1.0f),
+                                  : ImVec4(1.0f, 0.45f, 0.55f, 1.0f),
                        "P%d TEAM", team + 1);
     if (!editable) ImGui::BeginDisabled();
+    char savedRosterPreview[16] = "Select Team";
+    if (g_selectedSavedRoster[team] >= 0) {
+        std::snprintf(savedRosterPreview, sizeof(savedRosterPreview), "Team %c",
+                      static_cast<char>('A' + g_selectedSavedRoster[team]));
+    }
+    if (g_savedRosterCount > 0 &&
+        ImGui::BeginCombo("Reserve Unit", savedRosterPreview)) {
+        for (size_t preset = 0; preset < g_savedRosterCount; ++preset) {
+            char label[16];
+            std::snprintf(label, sizeof(label), "Team %c",
+                          static_cast<char>('A' + preset));
+            if (ImGui::Selectable(label)) {
+                for (int member = 0; member < 3; ++member) {
+                    const int character = g_savedRosters[preset].chars[member];
+                    g_roster.chars[team][member] = character;
+                    g_roster.colors[team][member] = NormalizeColor(
+                        character, std::clamp(g_savedRosters[preset].colors[member],
+                                              0, VariantCount(character) - 1));
+                    g_roster.assists[team][member] = std::clamp(
+                        g_savedRosters[preset].assists[member], 0, 2);
+                }
+                g_selectedSavedRoster[team] = static_cast<int>(preset);
+                changed = true;
+            }
+        }
+        ImGui::EndCombo();
+    }
     bool simpleMode = g_roster.simpleMode[team] != 0;
     if (ImGui::Checkbox("Simple Mode Controls", &simpleMode)) {
         g_roster.simpleMode[team] = simpleMode;
