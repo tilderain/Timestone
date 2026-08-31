@@ -83,7 +83,8 @@ jobs:
       with:
         endpoint: https://eus.codesigning.azure.net/
         signing-account-name: Timestone
-        certificate-profile-name: TimestoneTesting
+        #certificate-profile-name: TimestoneTesting
+        certificate-profile-name: Timestone
         azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
         azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
         azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
