@@ -29,6 +29,9 @@ SRCDIR    := UMVC3Hook
 ENETDIR   := enet-1.3.18
 BUILDDIR  := build
 OBJDIR    := $(BUILDDIR)/obj
+INCLUDE_FIX_DIR := $(BUILDDIR)/include_fix
+INCLUDE_FIX_STAMP := $(INCLUDE_FIX_DIR)/.stamp
+INCLUDE_FIX_HEADERS := $(INCLUDE_FIX_DIR)/Windows.h $(INCLUDE_FIX_DIR)/Psapi.h $(INCLUDE_FIX_DIR)/XInput.h
 
 # Output: .asi is a renamed DLL loaded by Ultimate ASI Loader
 OUTPUT    := Timestone.asi
@@ -125,6 +128,9 @@ DEP_FILES := $(CPP_OBJ:.o=.d) $(C_OBJ:.o=.d) $(ENET_OBJ_FULL:.o=.d)
 # reuse: header layout changes would otherwise be invisible to make.
 MISSING_DEP_FILES := $(filter-out $(wildcard $(DEP_FILES)),$(DEP_FILES))
 MISSING_DEP_OBJS  := $(MISSING_DEP_FILES:.d=.o)
+
+# Parallel builds must not compile until case-correct MinGW header aliases exist.
+$(ALL_OBJ): | $(INCLUDE_FIX_STAMP)
 
 # --- Include paths ---
 
@@ -305,21 +311,26 @@ $(RC_OBJ): $(BUILDDIR)/UMVC3Hook.rc $(SRCDIR)/resource.h | $(INCLUDE_FIX_STAMP)
 # MinGW headers on Linux are lowercase; some source files include Windows.h / Psapi.h
 # We create symlinks so the case-sensitive compiler finds them.
 
-INCLUDE_FIX_DIR := $(BUILDDIR)/include_fix
-INCLUDE_FIX_STAMP := $(INCLUDE_FIX_DIR)/.stamp
-
 MINGW_INCLUDE := $(shell $(CC) -E -x c - -v < /dev/null 2>&1 | \
 	sed -n 's/^ //p' | while read d; do [ -f "$$d/windows.h" ] && { printf '%s' "$$d"; break; }; done)
 
 fix-includes: $(INCLUDE_FIX_STAMP)
 
 ifeq ($(filter MINGW% MSYS% CYGWIN%,$(UNAME_S)),)
-$(INCLUDE_FIX_STAMP):
-	@mkdir -p $(INCLUDE_FIX_DIR)
-	@test -L $(INCLUDE_FIX_DIR)/Windows.h 2>/dev/null || ln -sf "$(MINGW_INCLUDE)/windows.h" $(INCLUDE_FIX_DIR)/Windows.h
-	@test -L $(INCLUDE_FIX_DIR)/Psapi.h   2>/dev/null || ln -sf "$(MINGW_INCLUDE)/psapi.h"    $(INCLUDE_FIX_DIR)/Psapi.h
-	@test -L $(INCLUDE_FIX_DIR)/XInput.h  2>/dev/null || ln -sf "$(MINGW_INCLUDE)/xinput.h"   $(INCLUDE_FIX_DIR)/XInput.h
+$(INCLUDE_FIX_STAMP): $(INCLUDE_FIX_HEADERS)
 	@touch $@
+
+$(INCLUDE_FIX_DIR)/Windows.h:
+	@mkdir -p $(INCLUDE_FIX_DIR)
+	@ln -sf "$(MINGW_INCLUDE)/windows.h" $@
+
+$(INCLUDE_FIX_DIR)/Psapi.h:
+	@mkdir -p $(INCLUDE_FIX_DIR)
+	@ln -sf "$(MINGW_INCLUDE)/psapi.h" $@
+
+$(INCLUDE_FIX_DIR)/XInput.h:
+	@mkdir -p $(INCLUDE_FIX_DIR)
+	@ln -sf "$(MINGW_INCLUDE)/xinput.h" $@
 else
 $(INCLUDE_FIX_STAMP):
 	@mkdir -p $(INCLUDE_FIX_DIR)
