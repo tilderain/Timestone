@@ -28,6 +28,11 @@ void ExitGame()
 
 void EscMenuImGui_Update()
 {
+    if (GetLaunchOption() == LAUNCH_NORMAL) {
+        g_open = false;
+        return;
+    }
+
     if (KeyPressed(VK_ESCAPE)) {
         if (g_open)
             g_open = false;
