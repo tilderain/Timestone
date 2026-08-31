@@ -67,9 +67,13 @@ struct SteamAPI {
 
     const char* (*GetPersonaName)(void*) = nullptr;
     const char* (*GetFriendPersonaName)(void*, uint64_t) = nullptr;
+    int (*GetMediumFriendAvatar)(void*, uint64_t) = nullptr;
     int (*GetFriendCount)(void*, int) = nullptr;
     uint64_t (*GetFriendByIndex)(void*, int, int) = nullptr;
     bool (*GetFriendGamePlayed)(void*, uint64_t, FriendGameInfo_t*) = nullptr;
+
+    bool (*GetImageSize)(void*, int, uint32_t*, uint32_t*) = nullptr;
+    bool (*GetImageRGBA)(void*, int, uint8_t*, int) = nullptr;
 
     bool (*IsCallCompleted)(void*, SteamAPICall_t, bool*) = nullptr;
     bool (*GetCallResult)(void*, SteamAPICall_t, void*, int, int, bool*) = nullptr;
@@ -103,6 +107,7 @@ bool g_pingLocationPublished = false;
 ULONGLONG g_nextPingLocationAttempt = 0;
 ULONGLONG g_nextConnectionAttempt = 0;
 ULONGLONG g_connectionDeadline = 0;
+unsigned g_connectionAttempt = 0;
 ULONGLONG g_nextResultPingRefresh = 0;
 ULONGLONG g_resultPingRefreshDeadline = 0;
 HANDLE g_callbackThread = nullptr;
@@ -302,9 +307,13 @@ bool ResolveExports()
     ResolveOptional(g_api.SetPlayedWith, "SteamAPI_ISteamFriends_SetPlayedWith");
     ok &= Resolve(g_api.GetPersonaName, "SteamAPI_ISteamFriends_GetPersonaName");
     ok &= Resolve(g_api.GetFriendPersonaName, "SteamAPI_ISteamFriends_GetFriendPersonaName");
+    ResolveOptional(g_api.GetMediumFriendAvatar,
+                    "SteamAPI_ISteamFriends_GetMediumFriendAvatar");
     ResolveOptional(g_api.GetFriendCount, "SteamAPI_ISteamFriends_GetFriendCount");
     ResolveOptional(g_api.GetFriendByIndex, "SteamAPI_ISteamFriends_GetFriendByIndex");
     ResolveOptional(g_api.GetFriendGamePlayed, "SteamAPI_ISteamFriends_GetFriendGamePlayed");
+    ResolveOptional(g_api.GetImageSize, "SteamAPI_ISteamUtils_GetImageSize");
+    ResolveOptional(g_api.GetImageRGBA, "SteamAPI_ISteamUtils_GetImageRGBA");
     ok &= Resolve(g_api.IsCallCompleted, "SteamAPI_ISteamUtils_IsAPICallCompleted");
     ok &= Resolve(g_api.GetCallResult, "SteamAPI_ISteamUtils_GetAPICallResult");
     return ok;
@@ -510,13 +519,18 @@ void StartPeerConnection(uint64_t remoteId)
     identity.m_eType = k_ESteamNetworkingIdentityType_SteamID;
     identity.m_cbSize = sizeof(uint64_t);
     identity.data.m_steamID64 = remoteId;
+    ++g_connectionAttempt;
     g_connection = g_sockets->ConnectP2P(identity, 733, 2, options);
     if (g_connection == k_HSteamNetConnection_Invalid) {
         g_nextConnectionAttempt = GetTickCount64() + 1000;
-        SetStatus("Failed to start Steam P2P connection; retrying...");
+        snprintf(g_status, sizeof(g_status),
+                 "Steam failed: ConnectP2P returned no connection. Trying again... (attempt #%u)",
+                 g_connectionAttempt + 1);
+        HookLog("SteamLobby: %s\n", g_status);
         return;
     }
-    SetStatus("Establishing Steam relay connection...");
+    if (g_connectionAttempt == 1)
+        SetStatus("Establishing Steam relay connection...");
 }
 
 void PumpLobbyMembers()
@@ -732,6 +746,7 @@ void PumpConnection()
         g_peerUsername[0] = '\0';
         g_nextConnectionAttempt = 0;
         g_connectionDeadline = 0;
+        g_connectionAttempt = 0;
         SetStatus("Steam peer connection timed out; left lobby");
         return;
     }
@@ -766,13 +781,23 @@ void PumpConnection()
             HookLog("SteamLobby: peer connection failed state=%d reason=%d debug=\"%s\" connection=\"%s\"\n",
                     static_cast<int>(info.m_eState), info.m_eEndReason,
                     info.m_szEndDebug, info.m_szConnectionDescription);
-            snprintf(g_status, sizeof(g_status),
-                     "Steam connection failed (%d): %.160s; retrying...",
-                     info.m_eEndReason, info.m_szEndDebug);
+            if (info.m_szEndDebug[0]) {
+                snprintf(g_status, sizeof(g_status),
+                         "Steam failed (%d): %.32s. Trying again... (attempt #%u)",
+                         info.m_eEndReason, info.m_szEndDebug,
+                         g_connectionAttempt + 1);
+            } else {
+                snprintf(g_status, sizeof(g_status),
+                         "Steam failed (reason %d; no debug text). Trying again... (attempt #%u)",
+                         info.m_eEndReason, g_connectionAttempt + 1);
+            }
         } else {
             HookLog("SteamLobby: peer connection failed state=%d; connection details unavailable\n",
                     static_cast<int>(status.m_eState));
-            SetStatus("Steam peer connection failed; retrying...");
+            snprintf(g_status, sizeof(g_status),
+                     "Steam failed (state %d; details unavailable). Trying again... (attempt #%u)",
+                     static_cast<int>(status.m_eState), g_connectionAttempt + 1);
+            HookLog("SteamLobby: %s\n", g_status);
         }
         g_connection = k_HSteamNetConnection_Invalid;
         g_sockets->CloseConnection(failedConnection, 1001,
@@ -940,6 +965,7 @@ void SteamLobby_Pump()
                 g_rejectedPeerSteamId = 0;
                 g_nextConnectionAttempt = 0;
                 g_connectionDeadline = 0;
+                g_connectionAttempt = 0;
                 g_pingLocationPublished = false;
                 g_nextPingLocationAttempt = 0;
                 g_api.SetLobbyData(g_matchmaking, g_lobbyId, "Timestone", "1");
@@ -986,6 +1012,7 @@ void SteamLobby_Pump()
                 ClearLobbyRichPresence();
                 g_nextConnectionAttempt = 0;
                 g_connectionDeadline = GetTickCount64() + kPeerConnectionTimeoutMs;
+                g_connectionAttempt = 0;
                 SetStatus("Lobby joined; connecting to owner...");
             }
         } else if (g_pendingCall == PendingCall::None) {
@@ -1020,6 +1047,23 @@ uint64_t SteamLobby_GetPeerSteamId()
 const char* SteamLobby_GetPeerUsername()
 {
     return g_peerUsername;
+}
+
+bool SteamLobby_GetPeerAvatarRGBA(uint8_t* rgba, size_t capacity,
+                                  uint32_t* width, uint32_t* height)
+{
+    if (!rgba || !width || !height || !g_peerSteamId || !g_friends || !g_utils ||
+        !g_api.GetMediumFriendAvatar || !g_api.GetImageSize || !g_api.GetImageRGBA)
+        return false;
+
+    const int image = g_api.GetMediumFriendAvatar(g_friends, g_peerSteamId);
+    if (image <= 0 || !g_api.GetImageSize(g_utils, image, width, height) ||
+        *width == 0 || *height == 0 || *width > 64 || *height > 64)
+        return false;
+
+    const size_t bytes = static_cast<size_t>(*width) * *height * 4;
+    return bytes <= capacity &&
+           g_api.GetImageRGBA(g_utils, image, rgba, static_cast<int>(bytes));
 }
 
 bool SteamLobby_OpenPeerProfile()
@@ -1131,6 +1175,7 @@ bool SteamLobby_ResetHostPeer()
     g_bridgeCreated = false;
     g_nextConnectionAttempt = 0;
     g_connectionDeadline = 0;
+    g_connectionAttempt = 0;
     g_api.SetLobbyJoinable(g_matchmaking, g_lobbyId, true);
     g_api.SetLobbyData(g_matchmaking, g_lobbyId, "state", "waiting");
     PublishLobbyRichPresence();
@@ -1192,6 +1237,7 @@ void SteamLobby_Shutdown(bool preserveConnection)
     g_nextPingLocationAttempt = 0;
     g_nextConnectionAttempt = 0;
     g_connectionDeadline = 0;
+    g_connectionAttempt = 0;
     g_nextResultPingRefresh = 0;
     g_resultPingRefreshDeadline = 0;
     if (leftLobby) SetStatus("Left Steam lobby");

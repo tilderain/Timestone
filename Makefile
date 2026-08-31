@@ -86,6 +86,7 @@ CPP_SRC   := \
 	$(SRCDIR)/code/rollback_snapshot.cpp \
 	$(SRCDIR)/code/concrete_snapshot.cpp \
 	$(SRCDIR)/code/netplay.cpp \
+	$(SRCDIR)/code/savedata.cpp \
 	$(SRCDIR)/code/steam_lobby.cpp \
 	$(SRCDIR)/code/steam_transport.cpp \
 	$(SRCDIR)/imgui/imgui.cpp \

@@ -22,6 +22,8 @@ const char* SteamLobby_GetStatus();
 const char* SteamLobby_GetLocalUsername();
 uint64_t SteamLobby_GetPeerSteamId();
 const char* SteamLobby_GetPeerUsername();
+bool SteamLobby_GetPeerAvatarRGBA(uint8_t* rgba, size_t capacity,
+                                  uint32_t* width, uint32_t* height);
 bool SteamLobby_HasPeerProfile();
 bool SteamLobby_OpenPeerProfile();
 bool SteamLobby_HasLobby();

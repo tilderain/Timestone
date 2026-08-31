@@ -6,6 +6,7 @@
 #include "launch_music.h"
 #include "trainingboot.h"
 #include "netplay.h"
+#include "savedata.h"
 #include "steam_lobby.h"
 #include "steam_transport.h"
 #include "updater.h"
@@ -94,10 +95,15 @@ static HFONT     g_hLaunchFont = nullptr;
 static HWND      g_hChatWindow = nullptr;
 static HWND      g_hChatHistory = nullptr;
 static HWND      g_hChatInput = nullptr;
+static HBITMAP   g_hChatAvatar = nullptr;
+static uint64_t  g_chatAvatarSteamId = 0;
 static WNDPROC   g_chatInputWndProc = nullptr;
 static char      g_chatOpponentName[128] = "Opponent";
 static ULONGLONG g_chatRateWindowStart = 0;
 static unsigned  g_chatRateCount = 0;
+static SavedRoster g_savedRosters[3] = {};
+static size_t     g_savedRosterCount = 0;
+static bool       g_savedRostersLoaded = false;
 
 static COLORREF GetPulsingColor(COLORREF low, COLORREF high)
 {
@@ -767,6 +773,8 @@ enum CtrlId {
     ID_P2_LABEL           = 2031,
     ID_PEER_READY         = 2032,
     ID_PING_LABEL         = 2033,
+    ID_P1_SAVED_ROSTER    = 2034,
+    ID_P2_SAVED_ROSTER    = 2035,
     // Stage combo
     ID_STAGE              = 2101,
     // Network controls
@@ -798,6 +806,7 @@ enum CtrlId {
     ID_CHAT_HISTORY       = 2503,
     ID_CHAT_INPUT         = 2504,
     ID_CHAT_SEND          = 2505,
+    ID_CHAT_AVATAR        = 2506,
 };
 
 // ---------------------------------------------------------------------------
@@ -815,10 +824,13 @@ static int FindComboItemByData(HWND hCombo, int data);
 static void UpdateCharFromCombo(HWND hDlg, int comboId, int slotIndex, int team);
 static void UpdateSlotOptionsFromCombos(HWND hDlg);
 static void RandomizeCharacters(HWND hDlg);
+static void CreateSavedRosterCombo(HWND hDlg, int team, int x, int y);
+static void ApplySavedRoster(HWND hDlg, int team, size_t preset);
 static void ConfigureConnectedControls(HWND hDlg);
 static void FocusLaunchMenu(HWND hDlg);
 static void ShowChatWindow(HWND hDlg);
 static void DestroyChatWindow();
+static void UpdateChatAvatar();
 static void ReceiveChatPacket(const LaunchChatPacket& packet);
 static void ResetLaunchMenuButtonState(HWND hDlg);
 static void UpdatePingLabel(HWND hDlg);
@@ -985,6 +997,7 @@ static void ConfigureConnectedControls(HWND hDlg)
         }
         EnableWindow(GetDlgItem(hDlg, ID_STAGE), TRUE);
         EnableWindow(GetDlgItem(hDlg, ID_P1_SIMPLE_MODE), TRUE);
+        EnableWindow(GetDlgItem(hDlg, ID_P1_SAVED_ROSTER), TRUE);
         EnableWindow(GetDlgItem(hDlg, ID_LAUNCH_TRAINING), g_peerReady ? TRUE : FALSE);
         HookLog("UMVC3Hook: Host owns P1; waiting for peer P2 selection\n");
     } else {
@@ -995,6 +1008,7 @@ static void ConfigureConnectedControls(HWND hDlg)
         }
         EnableWindow(GetDlgItem(hDlg, ID_PEER_READY), TRUE);
         EnableWindow(GetDlgItem(hDlg, ID_P2_SIMPLE_MODE), TRUE);
+        EnableWindow(GetDlgItem(hDlg, ID_P2_SAVED_ROSTER), TRUE);
         HookLog("UMVC3Hook: Client controls enabled for P2 selection\n");
     }
     if (g_battleSetupOnly)
@@ -1113,6 +1127,70 @@ static void ReceiveChatPacket(const LaunchChatPacket& packet)
     AppendChatMessage(g_chatOpponentName, packet.message, packet.length);
 }
 
+static void ClearChatAvatar()
+{
+    if (g_hChatWindow) {
+        HWND avatar = GetDlgItem(g_hChatWindow, ID_CHAT_AVATAR);
+        if (avatar) {
+            SendMessageA(avatar, STM_SETIMAGE, IMAGE_BITMAP, 0);
+            ShowWindow(avatar, SW_HIDE);
+        }
+    }
+    if (g_hChatAvatar) {
+        DeleteObject(g_hChatAvatar);
+        g_hChatAvatar = nullptr;
+    }
+    g_chatAvatarSteamId = 0;
+}
+
+static void UpdateChatAvatar()
+{
+    if (!g_hChatWindow) return;
+    const uint64_t steamId = SteamLobby_GetPeerSteamId();
+    if (!steamId) {
+        ClearChatAvatar();
+        return;
+    }
+    if (g_hChatAvatar && g_chatAvatarSteamId == steamId) return;
+    if (g_chatAvatarSteamId != steamId) ClearChatAvatar();
+
+    uint8_t rgba[64 * 64 * 4];
+    uint32_t width = 0;
+    uint32_t height = 0;
+    if (!SteamLobby_GetPeerAvatarRGBA(rgba, sizeof(rgba), &width, &height)) return;
+
+    BITMAPINFO info = {};
+    info.bmiHeader.biSize = sizeof(info.bmiHeader);
+    info.bmiHeader.biWidth = static_cast<LONG>(width);
+    info.bmiHeader.biHeight = -static_cast<LONG>(height);
+    info.bmiHeader.biPlanes = 1;
+    info.bmiHeader.biBitCount = 32;
+    info.bmiHeader.biCompression = BI_RGB;
+    void* pixels = nullptr;
+    HBITMAP bitmap = CreateDIBSection(nullptr, &info, DIB_RGB_COLORS,
+                                      &pixels, nullptr, 0);
+    if (!bitmap || !pixels) {
+        if (bitmap) DeleteObject(bitmap);
+        return;
+    }
+
+    uint8_t* bgra = static_cast<uint8_t*>(pixels);
+    const size_t pixelCount = static_cast<size_t>(width) * height;
+    for (size_t i = 0; i < pixelCount; ++i) {
+        bgra[i * 4] = rgba[i * 4 + 2];
+        bgra[i * 4 + 1] = rgba[i * 4 + 1];
+        bgra[i * 4 + 2] = rgba[i * 4];
+        bgra[i * 4 + 3] = 0xff;
+    }
+
+    g_hChatAvatar = bitmap;
+    g_chatAvatarSteamId = steamId;
+    HWND avatar = GetDlgItem(g_hChatWindow, ID_CHAT_AVATAR);
+    SendMessageA(avatar, STM_SETIMAGE, IMAGE_BITMAP,
+                 reinterpret_cast<LPARAM>(bitmap));
+    ShowWindow(avatar, SW_SHOW);
+}
+
 static void ShowChatWindow(HWND hDlg)
 {
     const char* opponent = SteamLobby_GetPeerSteamId()
@@ -1151,8 +1229,15 @@ static void ShowChatWindow(HWND hDlg)
     snprintf(connection, sizeof(connection), "You are now connected to %s",
              g_chatOpponentName);
     SetWindowTextA(GetDlgItem(g_hChatWindow, ID_CHAT_CONNECTION), connection);
-    EnableWindow(GetDlgItem(g_hChatWindow, ID_CHAT_PROFILE),
-                 SteamLobby_GetPeerSteamId() ? TRUE : FALSE);
+    const bool hasSteamPeer = SteamLobby_GetPeerSteamId() != 0;
+    HWND connectionLabel = GetDlgItem(g_hChatWindow, ID_CHAT_CONNECTION);
+    HWND profileButton = GetDlgItem(g_hChatWindow, ID_CHAT_PROFILE);
+    SetWindowPos(connectionLabel, nullptr, hasSteamPeer ? 84 : 12, 12,
+                 hasSteamPeer ? 264 : 336, 34, SWP_NOZORDER);
+    SetWindowPos(profileButton, nullptr, hasSteamPeer ? 84 : 12, 50,
+                 hasSteamPeer ? 264 : 336, 28, SWP_NOZORDER);
+    EnableWindow(profileButton, hasSteamPeer ? TRUE : FALSE);
+    UpdateChatAvatar();
     char systemLine[sizeof(connection) + 4];
     snprintf(systemLine, sizeof(systemLine), "%s\r\n", connection);
     AppendChatText(systemLine);
@@ -1166,6 +1251,7 @@ static void DestroyChatWindow()
     g_hChatWindow = nullptr;
     g_hChatHistory = nullptr;
     g_hChatInput = nullptr;
+    ClearChatAvatar();
     g_chatRateWindowStart = 0;
     g_chatRateCount = 0;
 }
@@ -1187,6 +1273,9 @@ static LRESULT CALLBACK ChatWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
 {
     switch (msg) {
     case WM_CREATE:
+        CreateWindowA("STATIC", "", WS_CHILD | SS_BITMAP | SS_CENTERIMAGE,
+                      12, 12, 64, 64, hWnd,
+                      reinterpret_cast<HMENU>(ID_CHAT_AVATAR), nullptr, nullptr);
         CreateWindowA("STATIC", "", WS_VISIBLE | WS_CHILD,
                       12, 12, 336, 34, hWnd,
                       reinterpret_cast<HMENU>(ID_CHAT_CONNECTION), nullptr, nullptr);
@@ -1233,6 +1322,7 @@ static LRESULT CALLBACK ChatWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
 
     case WM_DESTROY:
         if (g_hChatWindow == hWnd) {
+            ClearChatAvatar();
             g_hChatWindow = nullptr;
             g_hChatHistory = nullptr;
             g_hChatInput = nullptr;
@@ -1509,6 +1599,11 @@ static LaunchOption ShowLaunchMenuWindow(bool battleSetupOnly, bool compactMode)
     const bool steamLobbyReady = SteamLobby_Initialize();
     HookLog("UMVC3Hook: Steam lobby initialization %s\n",
             steamLobbyReady ? "complete" : "unavailable");
+    if (steamLobbyReady && !g_savedRostersLoaded) {
+        g_savedRosterCount = Savedata_LoadRosters(
+            g_savedRosters, sizeof(g_savedRosters) / sizeof(g_savedRosters[0]));
+        g_savedRostersLoaded = true;
+    }
     uint64_t inviteLobbyId = g_battleSetupOnly ? 0 : GetInviteLobbyId();
     if (inviteLobbyId) {
         HookLog("SteamLobby: received +connect_lobby invite for %llu\n",
@@ -1842,6 +1937,7 @@ static void CreateBattleSetupControls(HWND hDlg)
             (HMENU)(team == 0 ? ID_P1_SIMPLE_MODE : ID_P2_SIMPLE_MODE), NULL, NULL);
         SendMessageA(simple, BM_SETCHECK,
             g_dialogConfig.simpleMode[team] ? BST_CHECKED : BST_UNCHECKED, 0);
+        CreateSavedRosterCombo(hDlg, team, x + 214, 202);
     }
 
     CreateWindowA("STATIC", "Ping: -- ms", WS_CHILD,
@@ -1860,8 +1956,8 @@ static void CreateBattleSetupControls(HWND hDlg)
     CreateWindowA("BUTTON", "Leave Lobby",
         WS_VISIBLE | WS_CHILD | WS_TABSTOP | BS_PUSHBUTTON,
         leftX, 294, 130, 28, hDlg, (HMENU)ID_BATTLE_LEAVE, NULL, NULL);
-    CreateWindowA("STATIC", "Connecting to Steam peer...", WS_VISIBLE | WS_CHILD,
-        leftX + 140, 300, 445, 18, hDlg, (HMENU)ID_NET_STATUS, NULL, NULL);
+    CreateWindowA("STATIC", SteamLobby_GetStatus(), WS_VISIBLE | WS_CHILD,
+        leftX + 140, 294, 445, 34, hDlg, (HMENU)ID_NET_STATUS, NULL, NULL);
     CreateWindowA("BUTTON", "Not Ready",
         WS_CHILD | BS_OWNERDRAW | WS_DISABLED,
         leftX + 610, 294, 190, 28, hDlg, (HMENU)ID_PEER_READY, NULL, NULL);
@@ -1931,7 +2027,7 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
         // ---- Character Select Section ----
         const int characterSectionTop = y;
         CreateWindowA("BUTTON", "Character Select",
-            WS_VISIBLE | WS_CHILD | BS_GROUPBOX, leftX, y, contentW, 200,
+            WS_VISIBLE | WS_CHILD | BS_GROUPBOX, leftX, y, contentW, 160,
             hDlg, NULL, NULL, NULL);
         y += 18;
 
@@ -2012,6 +2108,8 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
             WS_VISIBLE | WS_CHILD | WS_TABSTOP | BS_AUTOCHECKBOX,
             left2X + 34, y, 180, 20,
             hDlg, (HMENU)ID_P2_SIMPLE_MODE, NULL, NULL);
+        CreateSavedRosterCombo(hDlg, 0, leftX + 224, y + 25);
+        CreateSavedRosterCombo(hDlg, 1, left2X + 224, y + 25);
         CreateWindowA("STATIC", "Ping: -- ms",
             WS_CHILD,
             leftX + 220, y + 2, 200, 18,
@@ -2020,7 +2118,7 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
                      g_dialogConfig.simpleMode[0] ? BST_CHECKED : BST_UNCHECKED, 0);
         SendMessageA(p2Simple, BM_SETCHECK,
                      g_dialogConfig.simpleMode[1] ? BST_CHECKED : BST_UNCHECKED, 0);
-        y += 25;
+        y += 50;
 
         // ---- Stage Select ----
         y += 5;
@@ -2238,6 +2336,7 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
                 InvalidateRect(GetDlgItem(hDlg, ID_LAUNCH_TRAINING), NULL, FALSE);
 
             SteamLobby_Pump();
+            UpdateChatAvatar();
             UpdateLobbyMusicCheckbox(hDlg);
             if (g_battleSetupOnly && SteamLobby_GetPeerSteamId() == 0) {
                 ReturnBattleSetupToLobbies(hDlg);
@@ -2254,6 +2353,10 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
                             MB_OK | MB_ICONERROR);
             HWND hSteamStatus = GetDlgItem(hDlg, ID_STEAM_STATUS);
             if (hSteamStatus) SetWindowTextA(hSteamStatus, SteamLobby_GetStatus());
+            if (g_battleSetupOnly && !g_dialogConfig.enetPeer) {
+                HWND hNetStatus = GetDlgItem(hDlg, ID_NET_STATUS);
+                if (hNetStatus) SetWindowTextA(hNetStatus, SteamLobby_GetStatus());
+            }
             UpdateSteamLobbyButton(hDlg);
 
             if (g_compactMode && SteamLobby_GetPeerSteamId() != 0) {
@@ -2577,6 +2680,18 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
                         UpdateReadyButton(hDlg);
                         SendP2Selection(hDlg);
                     }
+                }
+            }
+            return 0;
+
+        case ID_P1_SAVED_ROSTER:
+        case ID_P2_SAVED_ROSTER:
+            if (HIWORD(wParam) == CBN_SELCHANGE) {
+                const int selection = static_cast<int>(SendMessageA(
+                    reinterpret_cast<HWND>(lParam), CB_GETCURSEL, 0, 0));
+                if (selection > 0) {
+                    const int team = LOWORD(wParam) == ID_P1_SAVED_ROSTER ? 0 : 1;
+                    ApplySavedRoster(hDlg, team, static_cast<size_t>(selection - 1));
                 }
             }
             return 0;
@@ -3308,6 +3423,57 @@ static void UpdateSlotOptionsFromCombos(HWND hDlg)
             g_dialogConfig.p2Colors[index - 3] = color;
             g_dialogConfig.p2Assists[index - 3] = assist;
         }
+    }
+}
+
+static void CreateSavedRosterCombo(HWND hDlg, int team, int x, int y)
+{
+    if (g_savedRosterCount == 0) return;
+    CreateWindowA("STATIC", "Preset:", WS_VISIBLE | WS_CHILD,
+                  x, y + 2, 45, 18, hDlg, nullptr, nullptr, nullptr);
+    HWND combo = CreateWindowA(
+        "COMBOBOX", "", WS_VISIBLE | WS_CHILD | WS_TABSTOP | CBS_DROPDOWNLIST,
+        x + 48, y - 2, 115, 100, hDlg,
+        reinterpret_cast<HMENU>(static_cast<INT_PTR>(
+            team == 0 ? ID_P1_SAVED_ROSTER : ID_P2_SAVED_ROSTER)),
+        nullptr, nullptr);
+    SendMessageA(combo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>("Reserve Unit"));
+    for (size_t i = 0; i < g_savedRosterCount; ++i) {
+        char label[24];
+        snprintf(label, sizeof(label), "Team %c", static_cast<char>('A' + i));
+        SendMessageA(combo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label));
+    }
+    SendMessageA(combo, CB_SETCURSEL, 0, 0);
+}
+
+static void ApplySavedRoster(HWND hDlg, int team, size_t preset)
+{
+    if (team < 0 || team > 1 || preset >= g_savedRosterCount) return;
+    const SavedRoster& roster = g_savedRosters[preset];
+    int* chars = team == 0 ? g_dialogConfig.p1Chars : g_dialogConfig.p2Chars;
+    int* colors = team == 0 ? g_dialogConfig.p1Colors : g_dialogConfig.p2Colors;
+    int* assists = team == 0 ? g_dialogConfig.p1Assists : g_dialogConfig.p2Assists;
+    for (int slot = 0; slot < 3; ++slot) {
+        const int index = team * 3 + slot;
+        chars[slot] = roster.chars[slot];
+        colors[slot] = std::clamp(roster.colors[slot], 0,
+            GetCharacterArchiveVariantCount(chars[slot]) - 1);
+        assists[slot] = std::clamp(roster.assists[slot], 0, 2);
+        HWND charCombo = GetDlgItem(hDlg, ID_P1_SLOT1 + index);
+        SendMessageA(charCombo, CB_SETCURSEL,
+                     FindComboItemByData(charCombo, chars[slot]), 0);
+        PopulateColorCombo(GetDlgItem(hDlg, ID_P1_COLOR1 + index),
+                           chars[slot], colors[slot]);
+        PopulateAssistCombo(GetDlgItem(hDlg, ID_P1_ASSIST1 + index),
+                            chars[slot], assists[slot]);
+    }
+
+    if (!g_dialogConfig.enetPeer) return;
+    if (team == 0 && g_isHost) SendP1Selection(hDlg);
+    if (team == 1 && !g_isHost) {
+        g_localReady = false;
+        UpdateReadyButton(hDlg);
+        SendP2Selection(hDlg);
     }
 }
 
