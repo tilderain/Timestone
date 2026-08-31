@@ -113,7 +113,7 @@ void CreateCompactLaunchMenuControls(HWND window,
 LaunchOption ShowLaunchMenu()
 {
     struct MusicStopGuard {
-        ~MusicStopGuard() { LaunchMusic_Stop(); }
+        ~MusicStopGuard() { LaunchMusic_BeginFadeOut(); }
     } musicStopGuard;
 
     HookLog("UMVC3Hook: Checking launch disclaimer\n");

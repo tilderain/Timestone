@@ -125,11 +125,13 @@ bool FillBuffer(stb_vorbis* decoder, short* output, uint32_t& samplePosition,
 
 void ApplyOutputGain(short* samples, size_t frameCount, bool& fading,
                      uint64_t& fadeFramesRemaining, uint64_t fadeFrameCount,
-                     bool& fadeCompleteSignaled)
+                     bool& fadeCompleteSignaled, ULONGLONG& automaticStopDeadline)
 {
     if (!fading && g_fadeRequested.load(std::memory_order_acquire)) {
         fading = true;
         fadeFramesRemaining = fadeFrameCount;
+        automaticStopDeadline = GetTickCount64() +
+            kFadeDurationSeconds * 1000 + kQueuedAudioDrainMs;
     }
 
     for (size_t frame = 0; frame < frameCount; ++frame) {
@@ -215,6 +217,7 @@ DWORD WINAPI MusicThreadProc(LPVOID)
     bool fading = false;
     bool fadeCompleteSignaled = false;
     uint64_t fadeFramesRemaining = 0;
+    ULONGLONG automaticStopDeadline = 0;
     const uint64_t fadeFrameCount =
         static_cast<uint64_t>(info.sample_rate) * kFadeDurationSeconds;
 
@@ -222,7 +225,8 @@ DWORD WINAPI MusicThreadProc(LPVOID)
         playing = FillBuffer(decoder, samples[i], samplePosition, loopStart, loopEnd);
         if (!playing) break;
         ApplyOutputGain(samples[i], kBufferFrames, fading, fadeFramesRemaining,
-                        fadeFrameCount, fadeCompleteSignaled);
+                        fadeFrameCount, fadeCompleteSignaled,
+                        automaticStopDeadline);
         headers[i].lpData = reinterpret_cast<LPSTR>(samples[i]);
         headers[i].dwBufferLength = sizeof(samples[i]);
         result = waveOutPrepareHeader(waveOut, &headers[i], sizeof(headers[i]));
@@ -248,6 +252,8 @@ DWORD WINAPI MusicThreadProc(LPVOID)
     while (playing) {
         const DWORD wait = WaitForMultipleObjects(2, waitHandles, FALSE, INFINITE);
         if (wait != WAIT_OBJECT_0 + 1) break;
+        if (automaticStopDeadline && GetTickCount64() >= automaticStopDeadline)
+            break;
 
         for (size_t i = 0; i < preparedCount; ++i) {
             if ((headers[i].dwFlags & WHDR_DONE) == 0) continue;
@@ -256,7 +262,8 @@ DWORD WINAPI MusicThreadProc(LPVOID)
                 break;
             }
             ApplyOutputGain(samples[i], kBufferFrames, fading, fadeFramesRemaining,
-                            fadeFrameCount, fadeCompleteSignaled);
+                            fadeFrameCount, fadeCompleteSignaled,
+                            automaticStopDeadline);
             result = waveOutWrite(waveOut, &headers[i], sizeof(headers[i]));
             if (result != MMSYSERR_NOERROR) {
                 playing = false;
@@ -328,6 +335,17 @@ void LaunchMusic_Stop()
     g_musicThread = nullptr;
     g_stopEvent = nullptr;
     g_fadeCompleteEvent = nullptr;
+}
+
+void LaunchMusic_BeginFadeOut()
+{
+    if (!g_musicThread) return;
+    if (!g_playing.load(std::memory_order_acquire) ||
+        g_muted.load(std::memory_order_relaxed)) {
+        SetEvent(g_stopEvent);
+        return;
+    }
+    g_fadeRequested.store(true, std::memory_order_release);
 }
 
 bool LaunchMusic_IsPlaying()

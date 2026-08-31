@@ -1923,9 +1923,8 @@ void OnInitializeHook()
 	if (!trainingArg) {
 		HookLog("UMVC3Hook: Opening launch menu\n");
 		opt = ShowLaunchMenu();
-		// This is intentionally redundant with ShowLaunchMenu's scope guard:
-		// gameplay must never inherit the decoder thread or its WinMM handle.
-		LaunchMusic_Stop();
+		// Redundant with ShowLaunchMenu's scope guard and intentionally non-blocking.
+		LaunchMusic_BeginFadeOut();
 		HookLog("UMVC3Hook: Launch menu returned option %d\n", (int)opt);
 		HookLogFlush();
 	}
