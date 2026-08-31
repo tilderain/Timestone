@@ -6,6 +6,7 @@
 #include "mk10utils.h"
 
 #include <algorithm>
+#include <cstdio>
 
 RollbackProfile* g_activeRollbackProfile = nullptr;
 

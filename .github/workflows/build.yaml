@@ -1,0 +1,212 @@
+name: build
+
+on:
+  push:
+    branches: [ "movement" ]
+  pull_request:
+    branches: [ "movement" ]
+
+permissions:
+  contents: write   # softprops/action-gh-release
+  actions: write    # actions/upload-artifact & download-artifact (explicit permissions zero unlisted scopes)
+
+jobs:
+  build:
+    #runs-on: [self-hosted, nixos]
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install Nix
+      uses: DeterminateSystems/nix-installer-action@v22
+
+    # Nix caching to allow faster builds via deps
+    - name: Enable Nix cache (GitHub Actions)
+      uses: DeterminateSystems/magic-nix-cache-action@v14
+      with:
+        use-flakehub: false   # stay in-repo; no third-party cache service
+        use-gha-cache: true   # back /nix/store with the Actions cache
+
+    - name: Extract version
+      id: version
+      run: |
+        VERSION="$(awk '/^VERSION[[:space:]]*:=/ {print $3; exit}' Makefile)"
+        echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+    - name: Compute release tag
+      id: tag
+      run: |
+        if [ "${{ github.event_name }}" = "pull_request" ]; then
+          echo "tag=v${{ steps.version.outputs.version }}-dev-pr${{ github.event.pull_request.number }}" >> "$GITHUB_OUTPUT"
+        else
+          echo "tag=v${{ steps.version.outputs.version }}" >> "$GITHUB_OUTPUT"
+        fi
+
+    - name: Build package
+      run: nix build .#timestone
+
+    - name: Stage release assets
+      run: |
+        mkdir -p dist
+        cp -L result/Timestone.asi result/TimestoneUpdater.exe result/dinput8.dll dist/
+
+    - name: Upload unsigned artifacts
+      uses: actions/upload-artifact@v7
+      with:
+        name: timestone-unsigned
+        path: dist/
+        if-no-files-found: error
+
+  sign:
+    needs: build
+    runs-on: windows-2025
+    steps:
+    - uses: actions/download-artifact@v8
+      with:
+        name: timestone-unsigned
+        path: dist
+
+    - name: Unpack zip and stage Timestone binaries for signing
+      shell: pwsh
+      run: |
+        New-Item -ItemType Directory -Path sign -Force | Out-Null
+        Copy-Item dist\Timestone.asi sign\Timestone.dll -Force   # .asi is a PE DLL; not in ArtifactSigning's type list
+        Copy-Item dist\TimestoneUpdater.exe sign\ -Force   # dinput8.dll (ASI loader) stays unsigned
+
+    - name: Sign with Azure Artifact Signing
+      if: vars.ENABLE_SIGNING == 'true'   # feature flag — set the ENABLE_SIGNING repo variable to 'true' to re-enable
+      uses: azure/artifact-signing-action@v2
+      with:
+        endpoint: https://eus.codesigning.azure.net/
+        signing-account-name: Timestone
+        certificate-profile-name: TimestoneTesting
+        azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+        azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
+        azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+        files-folder: ${{ github.workspace }}\sign
+        files-folder-filter: dll,exe
+        file-digest: SHA256
+        timestamp-rfc3161: http://timestamp.acs.microsoft.com
+        timestamp-digest: SHA256
+
+    - name: Verify signatures
+      if: vars.ENABLE_SIGNING == 'true'
+      shell: pwsh
+      run: |
+        $files = Get-ChildItem sign\*.dll, sign\*.exe
+        foreach ($f in $files) {
+          $sig = Get-AuthenticodeSignature $f.FullName
+          if ($sig.Status -ne 'Valid') {
+            throw "Signature invalid for $($f.Name): $($sig.Status)"
+          }
+          Write-Host "Signed: $($f.Name) status=$($sig.Status) cert=$($sig.SignerCertificate.Subject)"
+        }
+
+    - name: Restore .asi name and rebuild zip
+      shell: pwsh
+      run: |
+        Copy-Item sign\Timestone.dll dist\Timestone.asi -Force
+        Copy-Item sign\TimestoneUpdater.exe dist\ -Force
+        # dinput8  is already here
+        # Copy-Item dist\dinput8.dll dist\ -Force   # unsigned — original from the zip
+        # Remove-Item dist\Timestone.zip -Force
+        New-Item -ItemType Directory -Path out -Force | Out-Null
+        Compress-Archive -Path dist\dinput8.dll, dist\Timestone.asi, dist\TimestoneUpdater.exe -DestinationPath out\Timestone.zip
+
+
+    - name: Upload signed artifacts
+      uses: actions/upload-artifact@v7
+      with:
+        name: Timestone-v${{ needs.build.outputs.version }}
+        path: out/
+        if-no-files-found: error
+
+  release-draft:
+    needs: [build, sign]
+    if: ${{ github.event_name == 'push' || github.event_name == 'pull_request' }}   # PR builds get a -dev-prN prerelease
+    runs-on: ubuntu-latest
+    env:
+      GH_REPO: ${{ github.repository }}   # gh ignores GITHUB_REPOSITORY; needs this or --repo
+    outputs:
+      created: ${{ steps.check.outputs.exists == 'false' }}
+    environment: prerelease   # pauses for manual approval — required reviewers in repo settings
+    steps:
+    - uses: actions/download-artifact@v8
+      with:
+        name: Timestone-v${{ needs.build.outputs.version }}
+        path: dist
+
+    - name: Check for existing release
+      id: check
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        set -e
+        # PR dev prereleases (vX-dev-prN) refresh on every push; only the main
+        # release is guarded against re-creation once a version exists.
+        if [ "${{ github.event_name }}" = "pull_request" ]; then
+          echo "exists=false" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+        TAGS="$(gh release list --json tagName --jq '.[].tagName')"
+        echo "existing release tags: $TAGS"
+        if printf '%s\n' "$TAGS" | grep -qx "${{ needs.build.outputs.tag }}"; then
+          echo "exists=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "exists=false" >> "$GITHUB_OUTPUT"
+        fi
+
+    - name: Create draft release
+      if: steps.check.outputs.exists == 'false'
+      uses: softprops/action-gh-release@v3   # v2 is deprecated (Node 20)
+      with:
+        tag_name: ${{ needs.build.outputs.tag }}
+        name: Timestone ${{ needs.build.outputs.tag }}
+        files: dist/Timestone.zip
+        body: |
+          Please join the discord if you are going to test this!!!
+          https://discord.gg/BvDNwPzwy4
+
+          MAKE SURE YOU HAVE NO MODS INSTALLED WHEN PLAYING THIS
+          There is an issue with BITDEFENDER. Bitdefender WILL crash your game, please add an exclusion for marvel folder / disable it
+
+          Everything is broken, desyncs occassionally, crashes occassionally
+
+          To install, extract the contents of Timestone.zip into your marvel folder
+
+          Primary connection method is Steam Lobby, make a lobby or search for lobbies and join. You can use invite to game in Steam, and you can right click join when someone is hosting a lobby.
+
+          Credits
+
+          Armonte- Many reverse engineering and documentation, Shot snapshot base, inspiration from his repo (exception handler.. etc)
+          Hkhann- Prior reverse engineering, the one who started it all with the OG UMVC3Rollback repo
+          catboy_friender- Help with Hkhann's repo
+          Eternal Yoshi- Prior reverse engineering, playtesting
+          Ryn (wistfulhopes), anotak, Gneiss- Prior reverse engineering
+          Archeroflegend- Framestepper, playtesting and harassment
+          ermaccer- UMVC3Hook
+          Vevota- Playtesting and harassment
+          John2143- "Sponsorship"
+          Those random guys who played with me in an ingame lobby one day
+        generate_release_notes: true   # appends What's Changed commit list after the custom body
+        draft: false  # human gate: devs promote via the environment approvals below
+        prerelease: true
+
+  release:
+    needs: [build, release-draft]
+    if: ${{ github.event_name == 'push' && needs.release-draft.outputs.created == 'true' }}
+    runs-on: ubuntu-latest
+    env:
+      GH_REPO: ${{ github.repository }}   # gh ignores GITHUB_REPOSITORY; needs this or --repo
+    environment: release   # pauses for manual approval — required reviewers in repo settings
+    steps:
+    - name: Promote prerelease to full release
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        TAG="${{ needs.build.outputs.tag }}"
+        gh release edit "$TAG" --prerelease=false

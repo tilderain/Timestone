@@ -3,12 +3,20 @@
 
 .DEFAULT_GOAL := all
 
-CXX       := x86_64-w64-mingw32-g++-win32
-CC        := x86_64-w64-mingw32-gcc-win32
-WINDRES   := x86_64-w64-mingw32-windres
-DLLTOOL   := x86_64-w64-mingw32-dlltool
-AR        := x86_64-w64-mingw32-ar
-STRIP     := x86_64-w64-mingw32-strip
+UNAME_S := $(shell uname -s 2>/dev/null || echo Windows)
+ifeq ($(filter MINGW% MSYS% CYGWIN%,$(UNAME_S)),)
+CROSS ?= x86_64-w64-mingw32-
+else
+CROSS ?=
+endif
+
+CXX      := $(CROSS)g++
+CC       := $(CROSS)gcc
+WINDRES  := $(CROSS)windres
+DLLTOOL  := $(CROSS)dlltool
+AR       := $(CROSS)ar
+STRIP    := $(CROSS)strip
+ZIP      ?= zip
 GIT_COMMIT := $(shell git rev-parse HEAD 2>/dev/null || printf unknown)
 GIT_DIRTY := $(if $(shell git status --porcelain --untracked-files=normal 2>/dev/null),1,0)
 GIT_DIR := $(shell git rev-parse --git-dir 2>/dev/null)
@@ -21,6 +29,9 @@ SRCDIR    := UMVC3Hook
 ENETDIR   := enet-1.3.18
 BUILDDIR  := build
 OBJDIR    := $(BUILDDIR)/obj
+INCLUDE_FIX_DIR := $(BUILDDIR)/include_fix
+INCLUDE_FIX_STAMP := $(INCLUDE_FIX_DIR)/.stamp
+INCLUDE_FIX_HEADERS := $(INCLUDE_FIX_DIR)/Windows.h $(INCLUDE_FIX_DIR)/Psapi.h $(INCLUDE_FIX_DIR)/XInput.h
 
 # Output: .asi is a renamed DLL loaded by Ultimate ASI Loader
 OUTPUT    := Timestone.asi
@@ -118,6 +129,9 @@ DEP_FILES := $(CPP_OBJ:.o=.d) $(C_OBJ:.o=.d) $(ENET_OBJ_FULL:.o=.d)
 MISSING_DEP_FILES := $(filter-out $(wildcard $(DEP_FILES)),$(DEP_FILES))
 MISSING_DEP_OBJS  := $(MISSING_DEP_FILES:.d=.o)
 
+# Parallel builds must not compile until case-correct MinGW header aliases exist.
+$(ALL_OBJ): | $(INCLUDE_FIX_STAMP)
+
 # --- Include paths ---
 
 INCLUDES  := \
@@ -154,7 +168,8 @@ PERF_FLAGS := -O3 -flto=auto -fuse-linker-plugin -fipa-pta \
 CXXFLAGS  := $(PERF_FLAGS) -std=c++20 -fpermissive -MMD -MP $(DEFINES) $(INCLUDES) -DUMVC3HOOK_VERSION=\"$(VERSION)\" -DUMVC3HOOK_GIT_COMMIT=\"$(GIT_COMMIT)\" -DUMVC3HOOK_GIT_DIRTY=$(GIT_DIRTY) -Wall -Wno-unused-variable -Wno-unused-function
 CFLAGS    := $(PERF_FLAGS) -MMD -MP $(DEFINES) $(INCLUDES) -Wall -Wno-unused-variable
 LDFLAGS   := -shared -static-libgcc -static-libstdc++ -flto=auto \
-	-fuse-linker-plugin -Wl,--gc-sections -Wl,-O2 -Wl,-Map,$(MAP_FILE)
+	-fuse-linker-plugin -Wl,--gc-sections -Wl,-O2 -Wl,-Map,$(MAP_FILE) \
+	-static   # -shared -static: the driver's implicit -lmcfgthread then resolves statically (mingw mcf thread model)
 STRIP_ASI := 1
 LIBS      := \
 	-ld3d9 \
@@ -219,14 +234,14 @@ $(UPDATER_OUTPUT): tools/timestone_updater.cpp Makefile
 		-DWIN32_LEAN_AND_MEAN -DNOMINMAX \
 		-D_WIN32_WINNT=0x0601 -DWINVER=0x0601 \
 		-DTIMESTONE_VERSION=\"$(VERSION)\" \
-		-static-libgcc -static-libstdc++ -mwindows \
+		-static -mwindows \
 		-Wl,--gc-sections -Wl,-s -o $@ $< \
 		-lwinhttp -lbcrypt -lcomctl32 -lshell32 -lversion -lole32 -loleaut32 -luuid
 	@echo "=== Built: $(UPDATER_OUTPUT) ==="
 
 $(PACKAGE_OUTPUT): $(LOADER_DLL) $(OUTPUT) $(UPDATER_OUTPUT)
 	rm -f $@
-	zip -j -0 $@ $^
+	$(ZIP) -j -0 $@ $^
 	@echo "=== Built: $(PACKAGE_OUTPUT) ==="
 
 # ---------- Compile C++ ----------
@@ -296,20 +311,31 @@ $(RC_OBJ): $(BUILDDIR)/UMVC3Hook.rc $(SRCDIR)/resource.h | $(INCLUDE_FIX_STAMP)
 # MinGW headers on Linux are lowercase; some source files include Windows.h / Psapi.h
 # We create symlinks so the case-sensitive compiler finds them.
 
-INCLUDE_FIX_DIR := $(BUILDDIR)/include_fix
-INCLUDE_FIX_STAMP := $(INCLUDE_FIX_DIR)/.stamp
+MINGW_INCLUDE := $(shell $(CC) -E -x c - -v < /dev/null 2>&1 | \
+	sed -n 's/^ //p' | while read d; do [ -f "$$d/windows.h" ] && { printf '%s' "$$d"; break; }; done)
 
 fix-includes: $(INCLUDE_FIX_STAMP)
 
+ifeq ($(filter MINGW% MSYS% CYGWIN%,$(UNAME_S)),)
+$(INCLUDE_FIX_STAMP): $(INCLUDE_FIX_HEADERS)
+	@touch $@
+
+$(INCLUDE_FIX_DIR)/Windows.h:
+	@mkdir -p $(INCLUDE_FIX_DIR)
+	@ln -sf "$(MINGW_INCLUDE)/windows.h" $@
+
+$(INCLUDE_FIX_DIR)/Psapi.h:
+	@mkdir -p $(INCLUDE_FIX_DIR)
+	@ln -sf "$(MINGW_INCLUDE)/psapi.h" $@
+
+$(INCLUDE_FIX_DIR)/XInput.h:
+	@mkdir -p $(INCLUDE_FIX_DIR)
+	@ln -sf "$(MINGW_INCLUDE)/xinput.h" $@
+else
 $(INCLUDE_FIX_STAMP):
 	@mkdir -p $(INCLUDE_FIX_DIR)
-	@test -L $(INCLUDE_FIX_DIR)/Windows.h 2>/dev/null || \
-		ln -sf /usr/x86_64-w64-mingw32/include/windows.h $(INCLUDE_FIX_DIR)/Windows.h
-	@test -L $(INCLUDE_FIX_DIR)/Psapi.h 2>/dev/null || \
-		ln -sf /usr/x86_64-w64-mingw32/include/psapi.h $(INCLUDE_FIX_DIR)/Psapi.h
-	@test -L $(INCLUDE_FIX_DIR)/XInput.h 2>/dev/null || \
-		ln -sf /usr/x86_64-w64-mingw32/include/xinput.h $(INCLUDE_FIX_DIR)/XInput.h
 	@touch $@
+endif
 
 $(OBJDIR):
 	mkdir -p $(OBJDIR)
@@ -343,4 +369,4 @@ help:
 	@echo "  INSTALL_DIR - UMVC3 install path (default: ~/.steam/...)"
 	@echo ""
 	@echo "Dependencies:"
-	@echo "  apt install g++-mingw-w64-x86-64 mingw-w64"
+	@echo "  Requires a MinGW-w64 toolchain (gcc, g++, windres, binutils) and zip; see flake.nix"

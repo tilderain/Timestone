@@ -2,7 +2,14 @@ MVC3 Rollback :steamhappy:
 
 # Compilation
 
-Makefile on Linux is supported for now (cross compiling a dll)
+Builds with MinGW-w64: cross-compile from Linux/macOS, or build natively on
+Windows (MSYS2). Prereqs: a MinGW-w64 toolchain (gcc, g++, windres, binutils),
+GNU make, and zip.
+
+    make release     # -> Timestone.asi + TimestoneUpdater.exe (+ Timestone.zip)
+
+NixOS:    nix develop -c make release       (or: nix build .#timestone)
+Windows:  in an MSYS2 MINGW64 shell, first `pacman -S mingw-w64-x86_64-toolchain make zip`, then `make release`.
 
 # Updates
 
