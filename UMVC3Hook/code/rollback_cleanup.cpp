@@ -274,9 +274,9 @@ void Rollback_SyncActiveCharacterUi()
         uint64_t active = *(uint64_t*)(team + 0x48);
         if (!active) continue;
 
-        int playerId = *(int*)(active + 0x2DA0);
+        int teamId = *(int*)(active + 0x2DA0);
         int memberId = *(int*)(active + 0x2DB0);
-        setTeamCharacterId(sGameUi, playerId, memberId);
+        setTeamCharacterId(sGameUi, teamId, memberId);
     }
 }
 

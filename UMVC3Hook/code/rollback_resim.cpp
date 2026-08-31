@@ -222,6 +222,12 @@ void Rollback_ReSimulate(int32_t startFrame, int32_t endFrame)
     g_isResimulating = false;
     Rollback_FlushDeferredModelBounds();
 
+    // sGameUI is neither snapshotted nor advanced during re-simulation. Its
+    // cached active member can therefore describe the discarded timeline,
+    // leaving a dead fighter in the point HUD slot. Re-seed both teams from
+    // cChrTeam::active so the next live UI tick restores point/assist order.
+    Rollback_SyncActiveCharacterUi();
+
     // A rollback can begin after cChrTeam::active changed but before the model
     // callback made the incoming point visible. Normalize both current point
     // characters unless a live cut-in actually owns their render state.
