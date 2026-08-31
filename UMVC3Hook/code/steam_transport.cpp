@@ -16,6 +16,11 @@ static std::atomic<bool> g_bridgeRunning{false};
 static std::atomic<bool> g_bridgeThreadStarted{false};
 static std::atomic_flag g_bridgePumpLock = ATOMIC_FLAG_INIT;
 static std::atomic<uint32_t> g_steamRTT{0};
+static DWORD g_bridgeCreatedTick = 0;
+
+// The loopback hop can go unserviced while launch hooks finish installing.
+// Steam owns real peer liveness, so its local proxy must outlive that handoff.
+static constexpr enet_uint32 kLoopbackHandoffTimeoutMs = 10 * 60 * 1000;
 
 static bool PumpBridgeOnce()
 {
@@ -34,7 +39,10 @@ static bool PumpBridgeOnce()
                 HookLog("SteamTransport: send failed result=%d\n", (int)result);
             enet_packet_destroy(event.packet);
         } else if (event.type == ENET_EVENT_TYPE_DISCONNECT) {
-            HookLog("SteamTransport: local ENet bridge peer disconnected\n");
+            HookLog("SteamTransport: local ENet bridge peer disconnected after %lu ms "
+                    "state=%d data=%u\n",
+                    GetTickCount() - g_bridgeCreatedTick,
+                    event.peer ? (int)event.peer->state : -1, event.data);
             g_bridgeRunning = false;
         }
     }
@@ -140,6 +148,11 @@ bool SteamTransport_CreateBridge(bool isHost, ISteamNetworkingSockets* sockets,
         return false;
     }
 
+    enet_peer_timeout(clientPeer, 0, kLoopbackHandoffTimeoutMs,
+                      kLoopbackHandoffTimeoutMs);
+    enet_peer_timeout(serverPeer, 0, kLoopbackHandoffTimeoutMs,
+                      kLoopbackHandoffTimeoutMs);
+
     if (isHost) {
         *outGameHost = server;
         *outGamePeer = serverPeer;
@@ -155,6 +168,7 @@ bool SteamTransport_CreateBridge(bool isHost, ISteamNetworkingSockets* sockets,
     g_sockets = sockets;
     g_connection = connection;
     g_steamRTT = 0;
+    g_bridgeCreatedTick = GetTickCount();
     g_bridgeThreadStarted = false;
     g_bridgeRunning = true;
     g_bridgeThread = CreateThread(nullptr, 0, BridgeThread, nullptr, 0, nullptr);
