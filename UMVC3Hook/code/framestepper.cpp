@@ -501,6 +501,83 @@ static float GetGameUpdatesPerSecond(int32_t currentFrame)
 static void CaptureNetInput();
 static bool IsTrainingMode();
 static constexpr uintptr_t SGAMEUI_GET_INSTANCE              = 0x140001ac0;
+static constexpr uintptr_t SGAMEUI_REQUEST_PAUSE             = 0x1402bf730;
+static constexpr uintptr_t SGAMEUI_CONSUME_PAUSE_REQUEST     = 0x1402c1600;
+static constexpr uintptr_t SGAMEUI_CREATE_POPUP              = 0x1402bb470;
+static constexpr uintptr_t SGAMEUI_GET_POPUP                 = 0x1402bc890;
+static constexpr uintptr_t SGAMEUI_CLOSE_POPUP               = 0x1402bdb20;
+static constexpr uintptr_t UUI_POPUP_CONFIGURE               = 0x14032abe0;
+static constexpr uintptr_t UUI_POPUP_SET_MESSAGE_RESOURCE    = 0x1402c0120;
+static constexpr int       NETWORK_WAIT_MESSAGE_ID           = 0x75b;
+
+static bool g_predictionWaitPopupActive = false;
+static uint32_t g_predictionWaitPopupHandle = 0;
+
+static void SetPredictionWaitPopup(bool active)
+{
+    if (active == g_predictionWaitPopupActive)
+        return;
+
+    using GetGameUi_t = uint64_t(__fastcall*)();
+    using RequestPause_t = void(__fastcall*)(uint64_t, char, uint8_t);
+    using ConsumePauseRequest_t = void(__fastcall*)(uint64_t);
+    using CreatePopup_t = uint32_t(__fastcall*)(uint64_t, int, uint32_t, int);
+    using GetPopup_t = uint64_t(__fastcall*)(uint64_t, uint32_t*);
+    using ClosePopup_t = void(__fastcall*)(uint64_t, uint32_t*);
+    using ConfigurePopup_t = void(__fastcall*)(uint64_t, int, int, uint32_t);
+    using SetMessageResource_t = void(__fastcall*)(uint64_t, int);
+    auto getGameUi = reinterpret_cast<GetGameUi_t>(_addr(SGAMEUI_GET_INSTANCE));
+    uint64_t gameUi = getGameUi();
+    if (!gameUi)
+        return;
+
+    auto requestPause = reinterpret_cast<RequestPause_t>(
+        _addr(SGAMEUI_REQUEST_PAUSE));
+    auto consumePauseRequest = reinterpret_cast<ConsumePauseRequest_t>(
+        _addr(SGAMEUI_CONSUME_PAUSE_REQUEST));
+    if (active) {
+        requestPause(gameUi, 1, 1);
+        consumePauseRequest(gameUi);
+
+        auto createPopup = reinterpret_cast<CreatePopup_t>(
+            _addr(SGAMEUI_CREATE_POPUP));
+        g_predictionWaitPopupHandle = createPopup(gameUi, 1, 0, 10000);
+
+        auto getPopup = reinterpret_cast<GetPopup_t>(_addr(SGAMEUI_GET_POPUP));
+        uint64_t popup = getPopup(gameUi, &g_predictionWaitPopupHandle);
+        if (!popup) {
+            auto closePopup = reinterpret_cast<ClosePopup_t>(
+                _addr(SGAMEUI_CLOSE_POPUP));
+            closePopup(gameUi, &g_predictionWaitPopupHandle);
+            g_predictionWaitPopupHandle = 0;
+            requestPause(gameUi, 0, 1);
+            consumePauseRequest(gameUi);
+            return;
+        }
+
+        auto configurePopup = reinterpret_cast<ConfigurePopup_t>(
+            _addr(UUI_POPUP_CONFIGURE));
+        configurePopup(popup, 1, NETWORK_WAIT_MESSAGE_ID, 0);
+        auto setMessageResource = reinterpret_cast<SetMessageResource_t>(
+            _addr(UUI_POPUP_SET_MESSAGE_RESOURCE));
+        setMessageResource(popup, 0);
+        g_predictionWaitPopupActive = true;
+        HookLog("Netplay: native waiting popup opened handle=%u\n",
+                g_predictionWaitPopupHandle);
+        return;
+    }
+
+    if (g_predictionWaitPopupHandle) {
+        auto closePopup = reinterpret_cast<ClosePopup_t>(
+            _addr(SGAMEUI_CLOSE_POPUP));
+        closePopup(gameUi, &g_predictionWaitPopupHandle);
+        g_predictionWaitPopupHandle = 0;
+    }
+    requestPause(gameUi, 0, 1);
+    consumePauseRequest(gameUi);
+    g_predictionWaitPopupActive = false;
+    HookLog("Netplay: native waiting popup closed\n");
+}
 
 static void PresentFrozenFrame()
 {
@@ -549,6 +626,9 @@ static void __fastcall HookedMove(void* sMvc3Main)
     }
 
     ChrSelImGui_Update();
+
+    if (!Netplay_IsActive())
+        SetPredictionWaitPopup(false);
 
     if (isPaused)
     {
@@ -922,10 +1002,14 @@ static void __fastcall HookedMove(void* sMvc3Main)
         {
             Controller_OnFrameStart();
             if (Controller_IsPredictionBudgetExhausted()) {
-                if (Controller_ShouldShowPredictionBudgetExhausted())
-                    PresentFrozenFrame();
+                const bool showWait =
+                    Controller_ShouldShowPredictionBudgetExhausted();
+                SetPredictionWaitPopup(showWait);
+                if (showWait)
+                    oMove(sMvc3Main);
                 return;
             }
+            SetPredictionWaitPopup(false);
         }
     }
 
@@ -1760,35 +1844,6 @@ void FrameStepper_Draw()
         ImGui::Text("Your opp disconnected.");
         ImGui::End();
         ImGui::PopStyleColor(2);
-    }
-
-    if (!g_opponentDisconnected &&
-        Controller_ShouldShowPredictionBudgetExhausted())
-    {
-        ImGui::SetNextWindowPos(ImVec2(ImGui::GetIO().DisplaySize.x * 0.5f,
-                                       ImGui::GetIO().DisplaySize.y * 0.18f),
-                                ImGuiCond_Always, ImVec2(0.5f, 0.5f));
-        ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.15f, 0.09f, 0.0f, 0.92f));
-        ImGui::Begin("##PredictionBudgetExhaustedOverlay", nullptr,
-            ImGuiWindowFlags_NoTitleBar |
-            ImGuiWindowFlags_NoResize |
-            ImGuiWindowFlags_NoMove |
-            ImGuiWindowFlags_NoScrollbar |
-            ImGuiWindowFlags_NoSavedSettings |
-            ImGuiWindowFlags_AlwaysAutoResize |
-            ImGuiWindowFlags_NoInputs);
-
-        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.65f, 0.1f, 1.0f));
-        ImGui::SetWindowFontScale(2.5f);
-        ImGui::Text("WAITING FOR OPPONENT");
-        ImGui::SetWindowFontScale(1.0f);
-        ImGui::PopStyleColor();
-        ImGui::Text("You stopped getting input from your opp.");
-        ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.4f, 1.0f),
-            "Either player may have lost connection, or your opponent's game may have froze/crashed");
-
-        ImGui::End();
-        ImGui::PopStyleColor();
     }
 
     if (!IsTrainingMode())
