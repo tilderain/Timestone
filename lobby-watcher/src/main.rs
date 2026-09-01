@@ -3,32 +3,36 @@
 // lobbies every 15 s through the public Steamworks lobby-search API and emits
 // structured tracing events (target "lobby_watcher", event "created"/"updated"/
 // "deleted"/"poll") describing lobby lifecycle changes. Runs as the logged-in
-// Steam user; the account must own UMVC3 (appid 357190). Future Discord-bot and
-// rich-presence integrations will consume these events; for now they are log
-// lines via the default tracing_subscriber fmt layer.
+// Steam user; the account must own UMVC3 (appid 357190).
+// Optional Discord integration (bot.rs): set DISCORD_TOKEN (+ optional
+// DISCORD_GUILD_ID for instant command registration) to enable /mm.
+mod bot;
+
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use parking_lot::Mutex;
 use steamworks::{
     Client, DistanceFilter, LobbyId, LobbyKey, LobbyListFilter, SResult, StringFilter,
     StringFilterKind,
 };
 
-const APP_ID: u32 = 357190; // Ultimate Marvel vs. Capcom 3
+pub(crate) const APP_ID: u32 = 357190; // Ultimate Marvel vs. Capcom 3
 const POLL_INTERVAL: Duration = Duration::from_secs(15);
 const SEARCH_DEADLINE: Duration = Duration::from_secs(20);
 const INIT_RETRY: Duration = Duration::from_secs(5);
 const MAX_RESULTS: u64 = 50;
-const EVENT_TARGET: &str = "lobby_watcher";
+pub(crate) const EVENT_TARGET: &str = "lobby_watcher";
 
 #[derive(Clone, Debug)]
-struct Lobby {
-    id: u64,
-    name: String,
-    host: String,
-    protocol: String,
-    members: usize,
+pub(crate) struct Lobby {
+    pub(crate) id: u64,
+    pub(crate) name: String,
+    pub(crate) host: String,
+    pub(crate) protocol: String,
+    pub(crate) members: usize,
+    pub(crate) owner: u64, // SteamID64 of the lobby owner — join links need it
 }
 
 impl Lobby {
@@ -40,6 +44,7 @@ impl Lobby {
             host: data("username"),
             protocol: data("protocol"),
             members: mm.lobby_member_count(id),
+            owner: mm.lobby_owner(id).raw(),
         }
     }
 
@@ -50,16 +55,18 @@ impl Lobby {
             && self.host == other.host
             && self.protocol == other.protocol
             && self.members == other.members
+            && self.owner == other.owner
     }
 }
 
-struct WatcherState {
-    prev: HashMap<u64, Lobby>,
+pub(crate) struct WatcherState {
+    pub(crate) prev: HashMap<u64, Lobby>,
     absent: Vec<u64>, // ids absent from the immediately previous poll
-    poll_index: u64,
+    pub(crate) poll_index: u64,
     pending: bool, // a lobby-list request is in flight
     request_sent: Instant,
     next_poll: Instant,
+    pub(crate) last_poll: Instant,
 }
 
 fn emit_event(event: &str, lobby: &Lobby) {
@@ -71,6 +78,7 @@ fn emit_event(event: &str, lobby: &Lobby) {
         lobby.host = %lobby.host,
         lobby.protocol = %lobby.protocol,
         lobby.members = lobby.members,
+        lobby.owner = lobby.owner,
         "Timestone lobby {event}",
     );
 }
@@ -119,6 +127,7 @@ fn process_poll(state: &mut WatcherState, current: Vec<Lobby>) {
     );
     state.prev = next_prev;
     state.absent = absent_now;
+    state.last_poll = Instant::now();
 }
 
 fn main() {
@@ -147,7 +156,25 @@ fn main() {
         pending: false,
         request_sent: Instant::now(),
         next_poll: Instant::now(), // first search fires immediately
+        last_poll: Instant::now(),
     }));
+
+    match std::env::var("DISCORD_TOKEN") {
+        Ok(token) => {
+            let state2 = Arc::clone(&state);
+            std::thread::spawn(move || bot::run(&token, state2));
+            tracing::info!(
+                target: EVENT_TARGET,
+                event = "discord_start",
+                "discord bot enabled (token from DISCORD_TOKEN)",
+            );
+        }
+        Err(_) => tracing::warn!(
+            target: EVENT_TARGET,
+            event = "discord_disabled",
+            "DISCORD_TOKEN not set - running watcher only",
+        ),
+    }
 
     tracing::info!(
         target: EVENT_TARGET,
@@ -157,7 +184,7 @@ fn main() {
     loop {
         client.run_callbacks();
 
-        let mut st = state.lock().unwrap();
+        let mut st = state.lock();
         let now = Instant::now();
         if !st.pending && now >= st.next_poll {
             st.pending = true;
@@ -177,7 +204,7 @@ fn main() {
             let state2 = Arc::clone(&state);
             let client2 = client.clone();
             mm.request_lobby_list(move |res: SResult<Vec<LobbyId>>| {
-                let mut st = state2.lock().unwrap();
+                let mut st = state2.lock();
                 st.pending = false;
                 match res {
                     Ok(ids) => {
