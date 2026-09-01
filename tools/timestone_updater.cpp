@@ -1116,9 +1116,9 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int)
         DeleteFileW(extractedAsi.c_str());
         DeleteFileW(pendingUpdater.c_str());
         CloseProgressWindow(progress);
+        ShowError(L"The Timestone update failed validation or did not match its GitHub SHA-256 digest.");
         if (startup)
             RelaunchGame(gameExecutable);
-        ShowError(L"The Timestone update failed validation or did not match its GitHub SHA-256 digest.");
         return 3;
     }
 
@@ -1138,9 +1138,9 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int)
             DeleteFileW(download.c_str());
             DeleteFileW(pendingUpdater.c_str());
             CloseProgressWindow(progress);
+            ShowError(L"TimestoneUpdater.exe failed to download or did not match its GitHub SHA-256 digest.");
             if (startup)
                 RelaunchGame(gameExecutable);
-            ShowError(L"TimestoneUpdater.exe failed to download or did not match its GitHub SHA-256 digest.");
             return 3;
         }
     }
@@ -1165,9 +1165,9 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int)
         DeleteFileW(download.c_str());
         DeleteFileW(pendingUpdater.c_str());
         CloseProgressWindow(progress);
+        ShowFileError(L"Could not create a backup of the installed Timestone.asi.", error);
         if (startup)
             RelaunchGame(gameExecutable);
-        ShowFileError(L"Could not create a backup of the installed Timestone.asi.", error);
         return 4;
     }
     if (!CopyFileW(download.c_str(), target.c_str(), FALSE)) {
@@ -1176,9 +1176,9 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int)
         DeleteFileW(download.c_str());
         DeleteFileW(pendingUpdater.c_str());
         CloseProgressWindow(progress);
+        ShowFileError(L"Could not install the update. The previous ASI was restored.", error);
         if (startup)
             RelaunchGame(gameExecutable);
-        ShowFileError(L"Could not install the update. The previous ASI was restored.", error);
         return 5;
     }
     DeleteFileW(download.c_str());
