@@ -1428,6 +1428,9 @@ int Rollback_BuildRegions(Region* regions, int maxRegions)
 void Rollback_SaveSnapshot(int32_t frame)
 {
     const uint64_t profileStart = Profile_Now();
+#if ROLLBACK_SNAPDUMP_ENABLED
+    const bool captureSnapDump = SnapDump_CaptureEnabled();
+#endif
     int slotIdx = frame % ROLLBACK_WINDOW;
     if (slotIdx < 0) slotIdx += ROLLBACK_WINDOW;
     SnapshotSlot& slot = g_slots[slotIdx];
@@ -1451,8 +1454,10 @@ void Rollback_SaveSnapshot(int32_t frame)
     bool hasSharedStorage = false;
 #if ROLLBACK_SNAPDUMP_ENABLED
     size_t sharedCapacity = 0;
-    if (uint8_t* sharedData = SnapDump_AcquireSnapshotStorage(
-            frame, total, count, &sharedCapacity)) {
+    uint8_t* sharedData = captureSnapDump
+        ? SnapDump_AcquireSnapshotStorage(frame, total, count, &sharedCapacity)
+        : nullptr;
+    if (sharedData) {
         if (slot.ownsData)
             delete[] slot.data;
         slot.data = sharedData;
@@ -1630,7 +1635,8 @@ void Rollback_SaveSnapshot(int32_t frame)
                 slot.remoteInput, slot.size);
     }*/
 #if ROLLBACK_SNAPDUMP_ENABLED
-    SnapDump_CaptureSnapshot(slot);
+    if (captureSnapDump)
+        SnapDump_CaptureSnapshot(slot);
 #endif
     
     //HookLog("Rollback: saved frame %d with %d regions, total size %zu bytes\n", frame, count, offset);
