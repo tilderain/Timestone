@@ -1086,29 +1086,50 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int)
     DeleteFileW(download.c_str());
     DeleteFileW(zipDownload.c_str());
     DeleteFileW(extractedAsi.c_str());
+    const wchar_t* downloadError = nullptr;
     bool downloadValid = Download(url, download, &progress,
         L"Downloading Timestone update from tilderain/Timestone");
+    if (!downloadValid)
+        downloadError = L"The Timestone update could not be downloaded from GitHub.";
     bool updaterFromArchive = false;
     if (downloadValid && IsZipArchive(download)) {
         SetProgressStage(&progress, L"Verifying Timestone ZIP SHA-256 digest...");
         downloadValid = VerifySha256(download, sha256.c_str());
-        if (downloadValid) {
+        if (!downloadValid) {
+            downloadError = L"The downloaded Timestone ZIP did not match its GitHub SHA-256 digest.";
+        } else {
             SetProgressStage(&progress, L"Extracting Timestone update...");
-            downloadValid = MoveFileW(download.c_str(), zipDownload.c_str()) &&
-                ExtractZipPackage(zipDownload, extractedAsi, pendingUpdater,
-                    updaterFromArchive) &&
-                IsPlausibleAsi(extractedAsi) &&
-                (!updaterFromArchive || IsPlausibleAsi(pendingUpdater));
-            if (downloadValid) {
+            downloadValid = MoveFileW(download.c_str(), zipDownload.c_str()) != FALSE;
+            if (!downloadValid) {
+                downloadError = L"The downloaded Timestone ZIP could not be prepared for extraction.";
+            } else if (!ExtractZipPackage(zipDownload, extractedAsi,
+                    pendingUpdater, updaterFromArchive)) {
+                downloadValid = false;
+                downloadError = L"The downloaded Timestone ZIP could not be extracted.";
+            } else if (!IsPlausibleAsi(extractedAsi)) {
+                downloadValid = false;
+                downloadError = L"The downloaded Timestone ZIP did not contain a valid Timestone.asi.";
+            } else if (updaterFromArchive &&
+                !IsPlausibleAsi(pendingUpdater)) {
+                downloadValid = false;
+                downloadError = L"The downloaded Timestone ZIP did not contain a valid TimestoneUpdater.exe.";
+            } else {
                 DeleteFileW(zipDownload.c_str());
                 downloadValid = MoveFileW(extractedAsi.c_str(),
                     download.c_str()) != FALSE;
+                if (!downloadValid)
+                    downloadError = L"The extracted Timestone.asi could not be staged for installation.";
             }
         }
     } else if (downloadValid) {
         SetProgressStage(&progress, L"Verifying GitHub SHA-256 digest...");
-        downloadValid = IsPlausibleAsi(download) &&
-            VerifySha256(download, sha256.c_str());
+        if (!IsPlausibleAsi(download)) {
+            downloadValid = false;
+            downloadError = L"The downloaded update is not a valid Timestone.asi.";
+        } else if (!VerifySha256(download, sha256.c_str())) {
+            downloadValid = false;
+            downloadError = L"The downloaded Timestone.asi did not match its GitHub SHA-256 digest.";
+        }
     }
     if (!downloadValid) {
         DeleteFileW(download.c_str());
@@ -1116,7 +1137,8 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int)
         DeleteFileW(extractedAsi.c_str());
         DeleteFileW(pendingUpdater.c_str());
         CloseProgressWindow(progress);
-        ShowError(L"The Timestone update failed validation or did not match its GitHub SHA-256 digest.");
+        ShowError(downloadError ? downloadError :
+            L"The Timestone update failed for an unknown reason.");
         if (startup)
             RelaunchGame(gameExecutable);
         return 3;
