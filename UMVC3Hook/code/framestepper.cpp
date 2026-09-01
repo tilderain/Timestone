@@ -104,7 +104,7 @@ static int32_t g_trainingLastFrame = -1;
 static uint32_t g_trainingLastGeneration = 0;
 static bool g_trainingFrameCountingActive = false;
 static bool g_trainingFrameLimitExitRequested = false;
-static int g_statusHudMode = 2;
+static int g_statusHudMode = 3;
 static bool g_opponentDisconnected = false;
 
 // Emit one compact diagnostic if a handshake generation remains blocked.
@@ -1107,8 +1107,8 @@ static void LoadConfig()
     KEY_ADVANCE = GetPrivateProfileIntA("FrameStepper", "AdvanceKey", VK_F3, iniPath);
     g_statusHudMode = GetPrivateProfileIntA(
         "FrameStepper", "StatusHudMode", 2, iniPath);
-    if (g_statusHudMode < 0 || g_statusHudMode > 2)
-        g_statusHudMode = 2;
+    if (g_statusHudMode < 0 || g_statusHudMode > 3)
+        g_statusHudMode = 3;
 }
 
 static void SaveStatusHudMode()
@@ -1556,7 +1556,7 @@ void FrameStepper_Process()
     {
         if (KeyPressed(VK_F3))
         {
-            g_statusHudMode = (g_statusHudMode + 2) % 3;
+            g_statusHudMode = (g_statusHudMode + 1) % 4;
             SaveStatusHudMode();
         }
         if (KeyPressed(VK_OEM_4))  // [ = decrease delay
@@ -1846,7 +1846,11 @@ void FrameStepper_Draw()
         AppendButtons(btns2, sizeof(btns2), p2);
 
         ImGui::SetNextWindowPos(ImVec2(12.0f, 12.0f), ImGuiCond_Always);
-        ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.0f, 0.0f, 0.0f, 0.85f));
+        if (g_statusHudMode == 3) {
+            ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.0f, 0.0f, 0.0f, 0.00f));
+        } else {
+            ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.0f, 0.0f, 0.0f, 0.85f));
+        }
         ImGui::Begin("##FrameStepperPad", nullptr,
             ImGuiWindowFlags_NoTitleBar |
             ImGuiWindowFlags_NoResize |
@@ -1914,7 +1918,7 @@ void FrameStepper_Draw()
             }
         }
 
-        if (g_statusHudMode == 2 || !Netplay_IsActive()) {
+        if (g_statusHudMode == 2 || g_statusHudMode == 3 || !Netplay_IsActive()) {
             ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "P1: [%s]  0x%08X", DecodeDirection(p1), p1);
             if (btns1[0])
                 ImGui::SameLine(), ImGui::TextColored(ImVec4(0.7f, 0.9f, 1.0f, 1.0f), "%s", btns1);
