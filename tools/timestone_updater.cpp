@@ -1023,7 +1023,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int)
         }
         wchar_t prompt[384] = {};
         swprintf(prompt, 384,
-            L"A Timestone update is required.\n\nInstalled: %ls\nAvailable: %ls\n\n"
+            L"Timestone update is required.\n\nInstalled: %ls\nAvailable: %ls\n\n"
             L"Update now? UMVC3 will close and restart automatically.",
             currentVersion.c_str(), latestVersion.c_str());
         if (MessageBoxW(nullptr, prompt, L"Timestone Updater",

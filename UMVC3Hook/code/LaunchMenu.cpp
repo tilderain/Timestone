@@ -2798,6 +2798,8 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
                     uint64_t lobbyId = static_cast<uint64_t>(item.lParam);
                     if (SteamLobby_IsHostedLobby(lobbyId))
                         draw->clrText = GetSysColor(COLOR_GRAYTEXT);
+                    else if (!SteamLobby_IsLobbyVersionCompatible(lobbyId))
+                        draw->clrText = RGB(180, 70, 70);
                     else if (SteamLobby_IsFriendLobby(lobbyId))
                         draw->clrText = RGB(0, 128, 0);
                 }
