@@ -1,0 +1,9 @@
+[package]
+name = "lobby-watcher"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+steamworks = "=0.13.1"
+tracing = "0.1"
+tracing-subscriber = "0.3"
