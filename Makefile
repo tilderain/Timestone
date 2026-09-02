@@ -53,6 +53,7 @@ CPP_SRC   := \
 	$(SRCDIR)/code/updater.cpp \
 	$(SRCDIR)/code/LaunchMenu.cpp \
 	$(SRCDIR)/code/LaunchMenu_compact.cpp \
+	$(SRCDIR)/code/launchmenu_dark.cpp \
 	$(SRCDIR)/code/LaunchMenu_settings.cpp \
 	$(SRCDIR)/code/launch_music.cpp \
 	$(SRCDIR)/code/eSettingsManager.cpp \

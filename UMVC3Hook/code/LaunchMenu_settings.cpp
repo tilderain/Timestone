@@ -1,5 +1,6 @@
 #include "LaunchMenu_settings.h"
 
+#include "launchmenu_dark.h"
 #include "mk10utils.h"
 
 #include <cstdio>
@@ -160,6 +161,7 @@ LRESULT CALLBACK SettingsWndProc(HWND window, UINT message,
             310, 104, 82, 28, window,
             reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_CANCEL)), nullptr, nullptr);
         ApplyDpi(window, 96, GetWindowDpi(window));
+        ApplyLaunchMenuDarkTheme(window);
         SendMessageA(checkbox, BM_SETCHECK,
                      g_runSingleThreaded ? BST_CHECKED : BST_UNCHECKED, 0);
         SetFocus(checkbox);
@@ -192,6 +194,14 @@ LRESULT CALLBACK SettingsWndProc(HWND window, UINT message,
     case WM_CLOSE:
         DestroyWindow(window);
         return 0;
+    case WM_CTLCOLORSTATIC:
+    case WM_CTLCOLORBTN:
+    case WM_CTLCOLOREDIT:
+    case WM_CTLCOLORLISTBOX:
+        return HandleLaunchMenuDarkControlColor(message, wParam);
+    case WM_ERASEBKGND:
+        PaintLaunchMenuDarkBackground(window, reinterpret_cast<HDC>(wParam));
+        return TRUE;
     case WM_DESTROY:
     {
         HFONT font = reinterpret_cast<HFONT>(
@@ -214,7 +224,7 @@ void ShowAdvancedConfigModal(HWND owner)
     windowClass.lpfnWndProc = SettingsWndProc;
     windowClass.hInstance = instance;
     windowClass.lpszClassName = SETTINGS_CLASS;
-    windowClass.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+    windowClass.hbrBackground = nullptr;
     windowClass.hCursor = LoadCursorA(nullptr, IDC_ARROW);
     if (!RegisterClassA(&windowClass) &&
         GetLastError() != ERROR_CLASS_ALREADY_EXISTS) {

@@ -4,6 +4,7 @@
 #include "assist_names.h"
 #include "controller.h"
 #include "launch_music.h"
+#include "launchmenu_dark.h"
 #include "trainingboot.h"
 #include "netplay.h"
 #include "savedata.h"
@@ -89,8 +90,7 @@ static bool      g_isHost = false;          // true if we clicked Host, false if
 static bool      g_localReady = false;
 static bool      g_peerReady = false;
 static bool      g_autoTestLaunch = false;
-static COLORREF  g_statusColor = RGB(0, 0, 0); // default black for status text
-static HBRUSH    g_hStatusBrush = nullptr;
+static COLORREF  g_statusColor = RGB(210, 210, 210);
 static HWND      g_hChatWindow = nullptr;
 static HWND      g_hChatHistory = nullptr;
 static HWND      g_hChatInput = nullptr;
@@ -1322,6 +1322,7 @@ static LRESULT CALLBACK ChatWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
                       reinterpret_cast<HMENU>(ID_CHAT_SEND), nullptr, nullptr);
         InitializeDpiLayout(hWnd);
         ApplyLaunchMenuFont(hWnd);
+        ApplyLaunchMenuDarkTheme(hWnd);
         return 0;
 
     case WM_DPICHANGED:
@@ -1347,6 +1348,16 @@ static LRESULT CALLBACK ChatWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
             return 0;
         }
         break;
+
+    case WM_CTLCOLORSTATIC:
+    case WM_CTLCOLORBTN:
+    case WM_CTLCOLOREDIT:
+    case WM_CTLCOLORLISTBOX:
+        return HandleLaunchMenuDarkControlColor(msg, wParam);
+
+    case WM_ERASEBKGND:
+        PaintLaunchMenuDarkBackground(hWnd, reinterpret_cast<HDC>(wParam));
+        return TRUE;
 
     case WM_CLOSE:
         DestroyWindow(hWnd);
@@ -1589,6 +1600,7 @@ static bool ApplyP2Selection(HWND hDlg, const LaunchP2SelectionPacket& packet)
 // ---------------------------------------------------------------------------
 static LaunchOption ShowLaunchMenuWindow(bool battleSetupOnly, bool compactMode)
 {
+    InitializeLaunchMenuDarkMode();
     HookLog("UMVC3Hook: Launch window setup begin compact=%d battleSetup=%d\n",
             compactMode, battleSetupOnly);
     Updater_Init();
@@ -1654,7 +1666,9 @@ static LaunchOption ShowLaunchMenuWindow(bool battleSetupOnly, bool compactMode)
     wc.lpfnWndProc = LaunchDlgProc;
     wc.hInstance = hInst;
     wc.lpszClassName = CLASS_NAME;
-    wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
+    // The launcher class is unregistered between menu transitions. Do not give
+    // it the shared dark brush because Windows deletes class brushes on unregister.
+    wc.hbrBackground = nullptr;
     wc.hCursor = LoadCursor(NULL, IDC_ARROW);
 
     const ATOM windowClass = RegisterClassA(&wc);
@@ -1666,7 +1680,7 @@ static LaunchOption ShowLaunchMenuWindow(bool battleSetupOnly, bool compactMode)
     chatClass.lpfnWndProc = ChatWndProc;
     chatClass.hInstance = hInst;
     chatClass.lpszClassName = kChatWindowClass;
-    chatClass.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+    chatClass.hbrBackground = nullptr;
     chatClass.hCursor = LoadCursor(NULL, IDC_ARROW);
     const ATOM registeredChatClass = RegisterClassA(&chatClass);
     if (!registeredChatClass && GetLastError() != ERROR_CLASS_ALREADY_EXISTS)
@@ -2146,6 +2160,7 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
                                              g_lobbyName);
             InitializeDpiLayout(hDlg);
             ApplyLaunchMenuFont(hDlg);
+            ApplyLaunchMenuDarkTheme(hDlg);
             UpdateLobbyMusicCheckbox(hDlg);
             SetTimer(hDlg, ID_STEAM_POLL_TIMER, 50, NULL);
             SteamLobby_Search();
@@ -2156,6 +2171,7 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
             CreateBattleSetupControls(hDlg);
             InitializeDpiLayout(hDlg);
             ApplyLaunchMenuFont(hDlg);
+            ApplyLaunchMenuDarkTheme(hDlg);
             UpdateLobbyMusicCheckbox(hDlg);
             return msg == WM_INITDIALOG ? TRUE : 0;
         }
@@ -2478,6 +2494,7 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
         }
 
         ApplyLaunchMenuFont(hDlg);
+        ApplyLaunchMenuDarkTheme(hDlg);
         UpdateLobbyMusicCheckbox(hDlg);
         SetTimer(hDlg, ID_STEAM_POLL_TIMER, 50, NULL);
         return msg == WM_INITDIALOG ? TRUE : 0;
@@ -3159,7 +3176,7 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
             g_dialogConfig.enetHost = server;
             g_dialogConfig.enetPeer = nullptr;
             g_isHost = true;
-            g_statusColor = RGB(0, 0, 0); // default color while listening
+            g_statusColor = LaunchMenuDarkTextColor();
 
             if (hStatus) {
                 char msg[128];
@@ -3245,7 +3262,7 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
             // Set connect timeout to 1000ms (default is ~15s)
             enet_peer_timeout(peer, 0, 1000, 1000);
             g_isHost = false;
-            g_statusColor = RGB(0, 0, 0); // default color while connecting
+            g_statusColor = LaunchMenuDarkTextColor();
             if (hStatus) SetWindowTextA(hStatus, "Connecting...");
 
             // Start non-threaded polling timer inside launch window
@@ -3333,9 +3350,14 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
                 UINT state = DFCS_BUTTONPUSH;
                 if (draw->itemState & ODS_SELECTED) state |= DFCS_PUSHED;
                 if (draw->itemState & ODS_DISABLED) state |= DFCS_INACTIVE;
-                DrawFrameControl(draw->hDC, &rect, DFC_BUTTON, state);
+                HBRUSH brush = CreateSolidBrush(LaunchMenuDarkControlColor());
+                FillRect(draw->hDC, &rect, brush);
+                DeleteObject(brush);
+                DrawEdge(draw->hDC, &rect,
+                         (state & DFCS_PUSHED) ? EDGE_SUNKEN : EDGE_RAISED,
+                         BF_RECT);
                 SetTextColor(draw->hDC, (draw->itemState & ODS_DISABLED)
-                    ? GetSysColor(COLOR_GRAYTEXT) : GetSysColor(COLOR_BTNTEXT));
+                    ? RGB(125, 125, 125) : LaunchMenuDarkTextColor());
             }
 
             SetBkMode(draw->hDC, TRANSPARENT);
@@ -3386,20 +3408,27 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
         HWND hCtrl = (HWND)lParam;
         if (hCtrl == GetDlgItem(hDlg, ID_PING_LABEL)) {
             HDC hdc = (HDC)wParam;
-            SetTextColor(hdc, RGB(0, 100, 0));
+            SetTextColor(hdc, RGB(100, 210, 120));
             SetBkMode(hdc, TRANSPARENT);
-            return (INT_PTR)GetSysColorBrush(COLOR_WINDOW);
+            return reinterpret_cast<INT_PTR>(LaunchMenuDarkBackgroundBrush());
         }
         if (hCtrl == GetDlgItem(hDlg, ID_NET_STATUS)) {
             HDC hdc = (HDC)wParam;
             SetTextColor(hdc, g_statusColor);
             SetBkMode(hdc, TRANSPARENT);
-            if (!g_hStatusBrush)
-                g_hStatusBrush = CreateSolidBrush(RGB(255, 255, 255));
-            return (INT_PTR)g_hStatusBrush;
+            return reinterpret_cast<INT_PTR>(LaunchMenuDarkBackgroundBrush());
         }
-        break;
+        return HandleLaunchMenuDarkControlColor(msg, wParam);
     }
+
+    case WM_CTLCOLORBTN:
+    case WM_CTLCOLOREDIT:
+    case WM_CTLCOLORLISTBOX:
+        return HandleLaunchMenuDarkControlColor(msg, wParam);
+
+    case WM_ERASEBKGND:
+        PaintLaunchMenuDarkBackground(hDlg, reinterpret_cast<HDC>(wParam));
+        return TRUE;
 
     case WM_CLOSE:
         if (g_battleSetupOnly) {
@@ -3421,10 +3450,6 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
             CleanupNetwork(hDlg, true);  // user closed/cancelled — full cleanup
         } else {
             CleanupNetwork(hDlg, false); // launching — preserve host for gameplay
-        }
-        if (g_hStatusBrush) {
-            DeleteObject(g_hStatusBrush);
-            g_hStatusBrush = nullptr;
         }
         PostQuitMessage(0);
         return 0;
@@ -3736,7 +3761,7 @@ static void CleanupNetwork(HWND hDlg, bool forceCleanup) {
 
     if (hDlg) {
         HWND hStatus = GetDlgItem(hDlg, ID_NET_STATUS);
-        g_statusColor = RGB(0, 0, 0);
+        g_statusColor = LaunchMenuDarkTextColor();
         if (hStatus) {
             SetWindowTextA(hStatus, "Ready");
             InvalidateRect(hStatus, NULL, TRUE);
