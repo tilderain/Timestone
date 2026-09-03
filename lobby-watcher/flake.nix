@@ -1,5 +1,5 @@
 {
-  description = "lobby-watcher — headless Timestone lobby watcher (Steamworks lobby-search)";
+  description = "lobby-watcher - headless Timestone lobby watcher (Steamworks lobby-search)";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";

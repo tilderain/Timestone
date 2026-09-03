@@ -32,7 +32,7 @@ pub(crate) struct Lobby {
     pub(crate) host: String,
     pub(crate) protocol: String,
     pub(crate) members: usize,
-    pub(crate) owner: u64, // SteamID64 of the lobby owner — join links need it
+    pub(crate) owner: u64, // SteamID64 of the lobby owner - join links need it
 }
 
 impl Lobby {

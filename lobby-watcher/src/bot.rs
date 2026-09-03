@@ -1,7 +1,7 @@
 // lobby-watcher/src/bot.rs
 // Discord integration for the lobby watcher. Runs inside the watcher process
 // (shares its live lobby state) and exposes slash commands:
-//   /mm  — post a complex embed listing every open Timestone lobby with a
+//   /mm  - post a complex embed listing every open Timestone lobby with a
 //          https://mm.b.hero.rehab join link for each.
 // The bot is optional: if DISCORD_TOKEN is unset the watcher runs without it.
 use std::sync::Arc;
@@ -90,7 +90,7 @@ async fn mm(ctx: Context<'_>) -> Result<(), Error> {
 
 const JOIN_BASE_URL: &str = "https://mm.b.hero.rehab/joinlobby";
 
-/// https://mm.b.hero.rehab/joinlobby/<appid>/<lobby_id>/<owner_steamid> —
+/// https://mm.b.hero.rehab/joinlobby/<appid>/<lobby_id>/<owner_steamid> -
 /// join-link landing page for the lobby on the matchmaking service.
 pub fn join_link(l: &Lobby) -> String {
     format!("{JOIN_BASE_URL}/{APP_ID}/{}/{}", l.id, l.owner)
@@ -100,14 +100,14 @@ pub fn join_link(l: &Lobby) -> String {
 /// link; empty-state description when no lobbies are up.
 fn build_mm_embed(lobbies: &[Lobby], poll_index: u64, updated_unix: u64) -> serenity::CreateEmbed {
     let mut e = serenity::CreateEmbed::new()
-        .title(format!("Open Timestone Lobbies — {}", lobbies.len()))
+        .title(format!("Open Timestone Lobbies - {}", lobbies.len()))
         .color(0x9b59b6);
     if lobbies.is_empty() {
         e = e.description("No open lobbies right now. Try again in a bit.");
     } else {
         for l in lobbies.iter().take(25) {
             e = e.field(
-                format!("{} — {}", l.name, l.host),
+                format!("{} - {}", l.name, l.host),
                 format!(
                     "protocol {} • {}/8 players\n[Join lobby]({})",
                     l.protocol,
@@ -155,7 +155,7 @@ fn lobby_snapshot(state: &WatcherState) -> (Vec<Lobby>, u64, u64) {
     (lobbies, state.poll_index, updated_unix)
 }
 
-/// True when an embed title is the one [`build_mm_embed`] produces — used to
+/// True when an embed title is the one [`build_mm_embed`] produces - used to
 /// find the existing card after a restart instead of posting a duplicate.
 fn is_lobby_card_title(title: &str) -> bool {
     title.starts_with("Open Timestone Lobbies")
@@ -367,7 +367,7 @@ mod tests {
         let lobbies = vec![lobby("a", 1, 2), lobby("b", 3, 4)];
         let e = build_mm_embed(&lobbies, 7, 1_700_000_000);
         let json = serde_json::to_value(&e).unwrap();
-        assert_eq!(json["title"], "Open Timestone Lobbies — 2");
+        assert_eq!(json["title"], "Open Timestone Lobbies - 2");
         assert_eq!(json["fields"].as_array().unwrap().len(), 2);
         assert!(json["fields"][0]["value"].as_str().unwrap().contains("https://mm.b.hero.rehab/joinlobby/"));
     }
@@ -393,8 +393,8 @@ mod tests {
 
     #[test]
     fn card_title_marker() {
-        assert!(is_lobby_card_title("Open Timestone Lobbies — 3"));
-        assert!(is_lobby_card_title("Open Timestone Lobbies — 0"));
+        assert!(is_lobby_card_title("Open Timestone Lobbies - 3"));
+        assert!(is_lobby_card_title("Open Timestone Lobbies - 0"));
         assert!(!is_lobby_card_title("Open Timestone"));
         assert!(!is_lobby_card_title(""));
     }
