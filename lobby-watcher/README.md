@@ -44,12 +44,26 @@ used, which can take up to an hour to propagate).
   first): one field per lobby with name, host, protocol, player count, and a
   `https://mm.b.hero.rehab/joinlobby/…` join link for each lobby.
 
+- **Live lobby card** — set `DISCORD_LOBBY_CHANNEL_ID` (a text-channel
+  snowflake, right-click → Copy Channel ID) and the bot keeps a single message
+  in that channel updated with the same embed after every poll (~15 s). On
+  restart it finds and reuses the existing card (no duplicates); if the message
+  was deleted it reposts; if the channel/permissions are bad it logs
+  `event="card_error"` and runs without the card.
+
 ```bash
-DISCORD_TOKEN=... DISCORD_GUILD_ID=... nix run ./lobby-watcher
+DISCORD_TOKEN=... DISCORD_GUILD_ID=... DISCORD_LOBBY_CHANNEL_ID=... nix run ./lobby-watcher
 ```
+
+If the server runs a third-party message-logging bot (YAGPDB, Carl-bot, …),
+add the lobby-card channel (or this bot) to the logger's ignore list — every
+15 s card edit would otherwise be recorded as a log entry (~5,760/day).
 
 The bot fails gracefully: a bad token logs `event="discord_error"` and the
 watcher keeps polling.
+
+Card events use the same target (only emitted when a bot is enabled): the
+events below.
 
 ## Events (wire contract for future integrations)
 
@@ -62,6 +76,9 @@ Target `lobby_watcher`, filter on `event`:
 | `search_failed` | — |
 | `created` / `updated` / `deleted` | `lobby.id`, `lobby.name`, `lobby.host`, `lobby.protocol`, `lobby.members`, `lobby.owner` (host SteamID64 — join links need it) |
 | `poll` | `poll`, `total`, `created`, `deleted`, `updated` |
+| `card_start` / `card_disabled` | `channel` |
+| `card_found` / `card_recreated` | `message` |
+| `card_error` | `reason` + `channel` (when known); `status`/`phase` when applicable |
 
 Diff semantics: `created` = new id; `updated` = name/host/protocol/members/
 owner changed; `deleted` = absent for 2 consecutive polls (blip grace). No ping

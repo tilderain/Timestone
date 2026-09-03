@@ -5,7 +5,7 @@
 //          https://mm.b.hero.rehab join link for each.
 // The bot is optional: if DISCORD_TOKEN is unset the watcher runs without it.
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
 use poise::serenity_prelude as serenity;
@@ -21,6 +21,9 @@ pub type Context<'a> = poise::Context<'a, Data, Error>;
 
 /// Run the bot until the client disconnects. Blocks the calling thread.
 pub fn run(token: &str, state: Arc<Mutex<WatcherState>>) {
+    // setup() below moves `state` into the framework's Data; the live-card
+    // task gets its own handle on the same watcher state.
+    let card_state = Arc::clone(&state);
     let framework = poise::Framework::builder()
         .options(poise::FrameworkOptions {
             commands: vec![mm()],
@@ -57,7 +60,13 @@ pub fn run(token: &str, state: Arc<Mutex<WatcherState>>) {
             .framework(framework)
             .await;
             match client {
-                Ok(mut client) => client.start().await,
+                Ok(mut client) => {
+                    // Live lobby card: a background task renders once per poll
+                    // into a single channel message. Independent of slash
+                    // commands; it just reads the same shared state.
+                    tokio::spawn(run_lobby_card(client.http.clone(), card_state.clone()));
+                    client.start().await
+                }
                 Err(e) => Err(e),
             }
         });
@@ -73,14 +82,7 @@ pub fn run(token: &str, state: Arc<Mutex<WatcherState>>) {
 /// List all open Timestone lobbies as an embed with a join link per lobby.
 #[poise::command(slash_command)]
 async fn mm(ctx: Context<'_>) -> Result<(), Error> {
-    let (lobbies, poll_index, updated_ago) = {
-        let st = ctx.data().state.lock();
-        let mut lobbies: Vec<Lobby> = st.prev.values().cloned().collect();
-        let poll_index = st.poll_index;
-        let updated_ago = st.last_poll.elapsed();
-        lobbies.sort_by(|a, b| b.members.cmp(&a.members));
-        (lobbies, poll_index, updated_ago)
-    };
+    let (lobbies, poll_index, updated_ago) = lobby_snapshot(&ctx.data().state.lock());
     let embed = build_mm_embed(&lobbies, poll_index, updated_ago);
     ctx.send(poise::CreateReply::default().embed(embed)).await?;
     Ok(())
@@ -129,9 +131,207 @@ fn build_mm_embed(lobbies: &[Lobby], poll_index: u64, updated_ago: Duration) -> 
     )))
 }
 
+// ── Live lobby card ─────────────────────────────────────────────────────
+
+const LOBBY_CHANNEL_ENV: &str = "DISCORD_LOBBY_CHANNEL_ID";
+/// After a failed card send/edit, wait this long before trying again.
+const CARD_RETRY: Duration = Duration::from_secs(300);
+
+/// The live card and /mm share one view of the watcher state: every lobby,
+/// busiest first, plus the poll index and time since the last completed poll
+/// (both shown in the embed footer).
+fn lobby_snapshot(state: &WatcherState) -> (Vec<Lobby>, u64, Duration) {
+    let mut lobbies: Vec<Lobby> = state.prev.values().cloned().collect();
+    lobbies.sort_by(|a, b| b.members.cmp(&a.members));
+    (lobbies, state.poll_index, state.last_poll.elapsed())
+}
+
+/// True when an embed title is the one [`build_mm_embed`] produces — used to
+/// find the existing card after a restart instead of posting a duplicate.
+fn is_lobby_card_title(title: &str) -> bool {
+    title.starts_with("Open Timestone Lobbies")
+}
+
+fn is_lobby_card(msg: &serenity::Message) -> bool {
+    msg.embeds
+        .iter()
+        .any(|e| e.title.as_deref().map(is_lobby_card_title).unwrap_or(false))
+}
+
+/// HTTP status of a serenity error when the failure was an unsuccessful
+/// request (404 = the card message was deleted; 403 = permissions revoked).
+fn http_status(e: &serenity::Error) -> Option<u16> {
+    match e {
+        serenity::Error::Http(err) => err.status_code().map(|s| s.as_u16()),
+        _ => None,
+    }
+}
+
+/// Read DISCORD_LOBBY_CHANNEL_ID and verify it names a text channel the bot
+/// can see. Logs and returns None when the card cannot run (the watcher keeps
+/// going either way).
+async fn resolve_lobby_channel(http: &serenity::Http) -> Option<serenity::ChannelId> {
+    let raw = match std::env::var(LOBBY_CHANNEL_ENV) {
+        Ok(v) if !v.is_empty() => v,
+        _ => {
+            tracing::info!(
+                target: crate::EVENT_TARGET,
+                event = "card_disabled",
+                "{LOBBY_CHANNEL_ENV} not set - no live lobby card",
+            );
+            return None;
+        }
+    };
+    let channel = match raw.parse::<u64>() {
+        Ok(id) => serenity::ChannelId::new(id),
+        Err(_) => {
+            tracing::error!(
+                target: crate::EVENT_TARGET,
+                event = "card_error",
+                reason = "bad channel id",
+                "{LOBBY_CHANNEL_ENV}={raw} is not a valid snowflake",
+            );
+            return None;
+        }
+    };
+    match channel.to_channel(http).await {
+        Ok(serenity::Channel::Guild(gc)) if gc.kind == serenity::ChannelType::Text => {
+            tracing::info!(
+                target: crate::EVENT_TARGET,
+                event = "card_start",
+                channel = channel.get(),
+                channel_name = %gc.name,
+                "lobby card will post in the configured channel",
+            );
+            Some(channel)
+        }
+        Ok(serenity::Channel::Guild(gc)) => {
+            tracing::error!(
+                target: crate::EVENT_TARGET,
+                event = "card_error",
+                reason = "not a text channel",
+                channel_kind = ?gc.kind,
+                "{LOBBY_CHANNEL_ENV}={raw} is not a text channel",
+            );
+            None
+        }
+        Ok(_) => {
+            tracing::error!(
+                target: crate::EVENT_TARGET,
+                event = "card_error",
+                reason = "not a guild channel",
+                "{LOBBY_CHANNEL_ENV}={raw} is not in a guild",
+            );
+            None
+        }
+        Err(e) => {
+            tracing::error!(
+                target: crate::EVENT_TARGET,
+                event = "card_error",
+                reason = "channel lookup failed",
+                "cannot resolve {LOBBY_CHANNEL_ENV}={raw}: {e:?}",
+            );
+            None
+        }
+    }
+}
+
+/// Background task (one per process): render the open-lobby embed after every
+/// completed poll and keep a single channel message in sync with it. Failures
+/// are logged and retried after [`CARD_RETRY`]; a deleted message (404) is
+/// recreated on the next attempt. Never exits.
+async fn run_lobby_card(http: Arc<serenity::Http>, state: Arc<Mutex<WatcherState>>) {
+    let Some(channel) = resolve_lobby_channel(&http).await else {
+        return;
+    };
+
+    // Reuse the card from a previous run so restarts don't leave duplicates.
+    let mut message_id: Option<serenity::MessageId> = None;
+    match channel.messages(&http, serenity::GetMessages::new().limit(10)).await {
+        Ok(msgs) => {
+            if let Some(existing) = msgs.iter().find(|m| is_lobby_card(m)) {
+                tracing::info!(
+                    target: crate::EVENT_TARGET,
+                    event = "card_found",
+                    message = existing.id.get(),
+                    "reusing existing lobby card message",
+                );
+                message_id = Some(existing.id);
+            }
+        }
+        Err(e) => tracing::warn!(
+            target: crate::EVENT_TARGET,
+            event = "card_error",
+            phase = "discover",
+            "could not look for an existing card: {e:?}",
+        ),
+    }
+
+    let mut last_rendered: Option<u64> = None;
+    let mut retry_after: Option<Instant> = None;
+    loop {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        let (lobbies, poll_index, updated_ago) = lobby_snapshot(&state.lock());
+        // Render only when a poll completed since the last render. The first
+        // poll lands within seconds of startup.
+        if poll_index == 0 || last_rendered == Some(poll_index) {
+            continue;
+        }
+        if let Some(until) = retry_after {
+            if Instant::now() < until {
+                continue;
+            }
+            retry_after = None;
+        }
+
+        let embed = build_mm_embed(&lobbies, poll_index, updated_ago);
+        let result = match message_id {
+            Some(mid) => channel
+                .edit_message(&http, mid, serenity::EditMessage::new().embed(embed.clone()))
+                .await,
+            None => channel
+                .send_message(&http, serenity::CreateMessage::new().embed(embed))
+                .await,
+        };
+
+        match result {
+            Ok(msg) => {
+                message_id = Some(msg.id);
+                last_rendered = Some(poll_index);
+            }
+            Err(e) => {
+                if http_status(&e) == Some(404) {
+                    // Someone deleted the card (or cleared the channel): post a
+                    // fresh one on the next tick.
+                    message_id = None;
+                    last_rendered = None;
+                    retry_after = None;
+                    tracing::info!(
+                        target: crate::EVENT_TARGET,
+                        event = "card_recreated",
+                        "lobby card message is gone (404) - will repost",
+                    );
+                } else {
+                    tracing::error!(
+                        target: crate::EVENT_TARGET,
+                        event = "card_error",
+                        status = ?http_status(&e),
+                        error = ?e,
+                        "lobby card update failed - retrying in {} s",
+                        CARD_RETRY.as_secs(),
+                    );
+                    retry_after = Some(Instant::now() + CARD_RETRY);
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
 
     fn lobby(name: &str, id: u64, owner: u64) -> Lobby {
         Lobby {
@@ -181,4 +381,44 @@ mod tests {
         assert_eq!(fields.len(), 26); // 25 lobbies + "+5 more"
         assert!(fields[25]["name"].as_str().unwrap().contains("+5 more"));
     }
+
+    #[test]
+    fn card_title_marker() {
+        assert!(is_lobby_card_title("Open Timestone Lobbies — 3"));
+        assert!(is_lobby_card_title("Open Timestone Lobbies — 0"));
+        assert!(!is_lobby_card_title("Open Timestone"));
+        assert!(!is_lobby_card_title(""));
+    }
+
+    #[test]
+    fn lobby_snapshot_sorts_busiest_first() {
+        let mut prev = HashMap::new();
+        for (id, members) in [(3u64, 1usize), (1, 5), (2, 2)] {
+            prev.insert(
+                id,
+                Lobby {
+                    id,
+                    name: format!("l{id}"),
+                    host: "host".into(),
+                    protocol: "0.2.9".into(),
+                    members,
+                    owner: 76561198027378405,
+                },
+            );
+        }
+        let st = WatcherState {
+            prev,
+            absent: Vec::new(),
+            poll_index: 12,
+            pending: false,
+            request_sent: Instant::now(),
+            next_poll: Instant::now(),
+            last_poll: Instant::now(),
+        };
+        let (lobbies, poll_index, _updated_ago) = lobby_snapshot(&st);
+        assert_eq!(poll_index, 12);
+        let members: Vec<usize> = lobbies.iter().map(|l| l.members).collect();
+        assert_eq!(members, vec![5, 2, 1]);
+    }
 }
+
