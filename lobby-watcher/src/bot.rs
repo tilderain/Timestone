@@ -5,7 +5,7 @@
 //          https://mm.b.hero.rehab join link for each.
 // The bot is optional: if DISCORD_TOKEN is unset the watcher runs without it.
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use parking_lot::Mutex;
 use poise::serenity_prelude as serenity;
@@ -82,8 +82,8 @@ pub fn run(token: &str, state: Arc<Mutex<WatcherState>>) {
 /// List all open Timestone lobbies as an embed with a join link per lobby.
 #[poise::command(slash_command)]
 async fn mm(ctx: Context<'_>) -> Result<(), Error> {
-    let (lobbies, poll_index, updated_ago) = lobby_snapshot(&ctx.data().state.lock());
-    let embed = build_mm_embed(&lobbies, poll_index, updated_ago);
+    let (lobbies, poll_index, updated_unix) = lobby_snapshot(&ctx.data().state.lock());
+    let embed = build_mm_embed(&lobbies, poll_index, updated_unix);
     ctx.send(poise::CreateReply::default().embed(embed)).await?;
     Ok(())
 }
@@ -98,7 +98,7 @@ pub fn join_link(l: &Lobby) -> String {
 
 /// The /mm embed: one field per open lobby (busiest first), each with a join
 /// link; empty-state description when no lobbies are up.
-fn build_mm_embed(lobbies: &[Lobby], poll_index: u64, updated_ago: Duration) -> serenity::CreateEmbed {
+fn build_mm_embed(lobbies: &[Lobby], poll_index: u64, updated_unix: u64) -> serenity::CreateEmbed {
     let mut e = serenity::CreateEmbed::new()
         .title(format!("Open Timestone Lobbies — {}", lobbies.len()))
         .color(0x9b59b6);
@@ -126,8 +126,7 @@ fn build_mm_embed(lobbies: &[Lobby], poll_index: u64, updated_ago: Duration) -> 
         }
     }
     e.footer(serenity::CreateEmbedFooter::new(format!(
-        "poll #{poll_index} • updated {:.0} s ago",
-        updated_ago.as_secs_f64()
+        "poll #{poll_index} • updated <t:{updated_unix}:R>"
     )))
 }
 
@@ -137,13 +136,23 @@ const LOBBY_CHANNEL_ENV: &str = "DISCORD_LOBBY_CHANNEL_ID";
 /// After a failed card send/edit, wait this long before trying again.
 const CARD_RETRY: Duration = Duration::from_secs(300);
 
+/// Current unix time in seconds.
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
 /// The live card and /mm share one view of the watcher state: every lobby,
-/// busiest first, plus the poll index and time since the last completed poll
-/// (both shown in the embed footer).
-fn lobby_snapshot(state: &WatcherState) -> (Vec<Lobby>, u64, Duration) {
+/// busiest first, plus the poll index and the unix time of the last completed
+/// poll. The footer renders that time with Discord's native `<t:…:R>` tag so
+/// the client keeps the relative clock fresh without message edits.
+fn lobby_snapshot(state: &WatcherState) -> (Vec<Lobby>, u64, u64) {
     let mut lobbies: Vec<Lobby> = state.prev.values().cloned().collect();
     lobbies.sort_by(|a, b| b.members.cmp(&a.members));
-    (lobbies, state.poll_index, state.last_poll.elapsed())
+    let updated_unix = unix_now().saturating_sub(state.last_poll.elapsed().as_secs());
+    (lobbies, state.poll_index, updated_unix)
 }
 
 /// True when an embed title is the one [`build_mm_embed`] produces — used to
@@ -272,7 +281,7 @@ async fn run_lobby_card(http: Arc<serenity::Http>, state: Arc<Mutex<WatcherState
     loop {
         tokio::time::sleep(Duration::from_millis(500)).await;
 
-        let (lobbies, poll_index, updated_ago) = lobby_snapshot(&state.lock());
+        let (lobbies, poll_index, updated_unix) = lobby_snapshot(&state.lock());
         // Render only when a poll completed since the last render. The first
         // poll lands within seconds of startup.
         if poll_index == 0 || last_rendered == Some(poll_index) {
@@ -285,7 +294,7 @@ async fn run_lobby_card(http: Arc<serenity::Http>, state: Arc<Mutex<WatcherState
             retry_after = None;
         }
 
-        let embed = build_mm_embed(&lobbies, poll_index, updated_ago);
+        let embed = build_mm_embed(&lobbies, poll_index, updated_unix);
         let result = match message_id {
             Some(mid) => channel
                 .edit_message(&http, mid, serenity::EditMessage::new().embed(embed.clone()))
@@ -356,7 +365,7 @@ mod tests {
     #[test]
     fn embed_has_one_field_per_lobby() {
         let lobbies = vec![lobby("a", 1, 2), lobby("b", 3, 4)];
-        let e = build_mm_embed(&lobbies, 7, Duration::from_secs(15));
+        let e = build_mm_embed(&lobbies, 7, 1_700_000_000);
         let json = serde_json::to_value(&e).unwrap();
         assert_eq!(json["title"], "Open Timestone Lobbies — 2");
         assert_eq!(json["fields"].as_array().unwrap().len(), 2);
@@ -365,7 +374,7 @@ mod tests {
 
     #[test]
     fn embed_shows_empty_state() {
-        let e = build_mm_embed(&[], 0, Duration::from_secs(1));
+        let e = build_mm_embed(&[], 0, 1_700_000_000);
         let json = serde_json::to_value(&e).unwrap();
         assert!(json["description"].as_str().unwrap().contains("No open lobbies"));
         let fields = json.get("fields").and_then(|f| f.as_array()).map(|a| a.len()).unwrap_or(0);
@@ -375,7 +384,7 @@ mod tests {
     #[test]
     fn embed_caps_at_25_lobbies() {
         let lobbies: Vec<Lobby> = (0..30).map(|i| lobby(&format!("l{i}"), i, i + 1)).collect();
-        let e = build_mm_embed(&lobbies, 1, Duration::from_secs(5));
+        let e = build_mm_embed(&lobbies, 1, 1_700_000_000);
         let json = serde_json::to_value(&e).unwrap();
         let fields = json["fields"].as_array().unwrap();
         assert_eq!(fields.len(), 26); // 25 lobbies + "+5 more"
@@ -419,6 +428,16 @@ mod tests {
         assert_eq!(poll_index, 12);
         let members: Vec<usize> = lobbies.iter().map(|l| l.members).collect();
         assert_eq!(members, vec![5, 2, 1]);
+    }
+
+    #[test]
+    fn embed_footer_uses_native_timestamp() {
+        let e = build_mm_embed(&[], 3, 1_700_000_000);
+        let json = serde_json::to_value(&e).unwrap();
+        let footer = json["footer"]["text"].as_str().unwrap();
+        assert!(footer.contains("poll #3"), "{footer}");
+        assert!(footer.contains("<t:1700000000:R>"), "{footer}");
+        assert!(!footer.contains(" s ago"), "{footer}");
     }
 }
 
