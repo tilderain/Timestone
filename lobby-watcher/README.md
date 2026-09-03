@@ -42,7 +42,7 @@ used, which can take up to an hour to propagate).
 
 - `/mm` — posts a complex embed listing every open Timestone lobby (busiest
   first): one field per lobby with name, host, protocol, player count, and a
-  `steam://joinlobby/…` link that opens/joins the lobby through Steam.
+  `https://mm.b.hero.rehab/joinlobby/…` join link for each lobby.
 
 ```bash
 DISCORD_TOKEN=... DISCORD_GUILD_ID=... nix run ./lobby-watcher

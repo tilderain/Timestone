@@ -2,7 +2,7 @@
 // Discord integration for the lobby watcher. Runs inside the watcher process
 // (shares its live lobby state) and exposes slash commands:
 //   /mm  — post a complex embed listing every open Timestone lobby with a
-//          steam://joinlobby link for each.
+//          https://mm.b.hero.rehab join link for each.
 // The bot is optional: if DISCORD_TOKEN is unset the watcher runs without it.
 use std::sync::Arc;
 use std::time::Duration;
@@ -86,10 +86,12 @@ async fn mm(ctx: Context<'_>) -> Result<(), Error> {
     Ok(())
 }
 
-/// steam://joinlobby/<appid>/<lobby_id>/<owner_steamid> — opens/joins the lobby
-/// through the Steam client (launching UMVC3 if needed).
+const JOIN_BASE_URL: &str = "https://mm.b.hero.rehab/joinlobby";
+
+/// https://mm.b.hero.rehab/joinlobby/<appid>/<lobby_id>/<owner_steamid> —
+/// join-link landing page for the lobby on the matchmaking service.
 pub fn join_link(l: &Lobby) -> String {
-    format!("steam://joinlobby/{APP_ID}/{}/{}", l.id, l.owner)
+    format!("{JOIN_BASE_URL}/{APP_ID}/{}/{}", l.id, l.owner)
 }
 
 /// The /mm embed: one field per open lobby (busiest first), each with a join
@@ -143,11 +145,11 @@ mod tests {
     }
 
     #[test]
-    fn join_link_uses_steam_protocol_with_owner() {
+    fn join_link_points_at_mm_service() {
         let l = lobby("hi", 109775244078428410, 76561198027378405);
         assert_eq!(
             join_link(&l),
-            "steam://joinlobby/357190/109775244078428410/76561198027378405"
+            "https://mm.b.hero.rehab/joinlobby/357190/109775244078428410/76561198027378405"
         );
     }
 
@@ -158,7 +160,7 @@ mod tests {
         let json = serde_json::to_value(&e).unwrap();
         assert_eq!(json["title"], "Open Timestone Lobbies — 2");
         assert_eq!(json["fields"].as_array().unwrap().len(), 2);
-        assert!(json["fields"][0]["value"].as_str().unwrap().contains("steam://joinlobby/"));
+        assert!(json["fields"][0]["value"].as_str().unwrap().contains("https://mm.b.hero.rehab/joinlobby/"));
     }
 
     #[test]
