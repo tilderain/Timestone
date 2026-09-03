@@ -97,13 +97,19 @@ pub fn join_link(l: &Lobby) -> String {
 }
 
 /// The /mm embed: one field per open lobby (busiest first), each with a join
-/// link; empty-state description when no lobbies are up.
+/// link. The description carries a live "Updated <t:…:R>" line - Discord
+/// renders timestamp tags in descriptions (but not in footers, which are
+/// plain text), so the relative clock ticks without message edits.
 fn build_mm_embed(lobbies: &[Lobby], poll_index: u64, updated_unix: u64) -> serenity::CreateEmbed {
+    let updated = format!("Updated <t:{updated_unix}:R>");
     let mut e = serenity::CreateEmbed::new()
         .title(format!("Open Timestone Lobbies - {}", lobbies.len()))
-        .color(0x9b59b6);
+        .color(0x9b59b6)
+        .description(updated.clone());
     if lobbies.is_empty() {
-        e = e.description("No open lobbies right now. Try again in a bit.");
+        e = e.description(format!(
+            "No open lobbies right now. Try again in a bit.\n{updated}"
+        ));
     } else {
         for l in lobbies.iter().take(25) {
             e = e.field(
@@ -125,9 +131,7 @@ fn build_mm_embed(lobbies: &[Lobby], poll_index: u64, updated_unix: u64) -> sere
             );
         }
     }
-    e.footer(serenity::CreateEmbedFooter::new(format!(
-        "poll #{poll_index} • updated <t:{updated_unix}:R>"
-    )))
+    e.footer(serenity::CreateEmbedFooter::new(format!("poll #{poll_index}")))
 }
 
 // ── Live lobby card ─────────────────────────────────────────────────────
@@ -146,8 +150,8 @@ fn unix_now() -> u64 {
 
 /// The live card and /mm share one view of the watcher state: every lobby,
 /// busiest first, plus the poll index and the unix time of the last completed
-/// poll. The footer renders that time with Discord's native `<t:…:R>` tag so
-/// the client keeps the relative clock fresh without message edits.
+/// poll. The embed description renders that time with Discord's native
+/// `<t:…:R>` tag so the client keeps the relative clock fresh.
 fn lobby_snapshot(state: &WatcherState) -> (Vec<Lobby>, u64, u64) {
     let mut lobbies: Vec<Lobby> = state.prev.values().cloned().collect();
     lobbies.sort_by(|a, b| b.members.cmp(&a.members));
@@ -368,6 +372,7 @@ mod tests {
         let e = build_mm_embed(&lobbies, 7, 1_700_000_000);
         let json = serde_json::to_value(&e).unwrap();
         assert_eq!(json["title"], "Open Timestone Lobbies - 2");
+        assert!(json["description"].as_str().unwrap().contains("<t:1700000000:R>"));
         assert_eq!(json["fields"].as_array().unwrap().len(), 2);
         assert!(json["fields"][0]["value"].as_str().unwrap().contains("https://mm.b.hero.rehab/joinlobby/"));
     }
@@ -431,13 +436,13 @@ mod tests {
     }
 
     #[test]
-    fn embed_footer_uses_native_timestamp() {
+    fn embed_uses_native_timestamp_in_description() {
         let e = build_mm_embed(&[], 3, 1_700_000_000);
         let json = serde_json::to_value(&e).unwrap();
-        let footer = json["footer"]["text"].as_str().unwrap();
-        assert!(footer.contains("poll #3"), "{footer}");
-        assert!(footer.contains("<t:1700000000:R>"), "{footer}");
-        assert!(!footer.contains(" s ago"), "{footer}");
+        assert_eq!(json["footer"]["text"].as_str().unwrap(), "poll #3");
+        let desc = json["description"].as_str().unwrap();
+        assert!(desc.contains("<t:1700000000:R>"), "{desc}");
+        assert!(desc.contains("No open lobbies"), "{desc}");
     }
 }
 
