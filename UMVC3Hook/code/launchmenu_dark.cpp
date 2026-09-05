@@ -7,9 +7,11 @@
 namespace {
 
 constexpr COLORREF DARK_BACKGROUND = RGB(32, 32, 32);
-constexpr COLORREF DARK_CONTROL = RGB(45, 45, 45);
-constexpr COLORREF DARK_TEXT = RGB(235, 235, 235);
-constexpr COLORREF DARK_BORDER = RGB(0, 0, 0);
+constexpr COLORREF DARK_CONTROL = RGB(51, 51, 51);
+constexpr COLORREF DARK_FACE = RGB(56, 56, 56);
+constexpr COLORREF DARK_TEXT = RGB(224, 224, 224);
+constexpr COLORREF DARK_DISABLED = RGB(136, 136, 136);
+constexpr COLORREF DARK_BORDER = RGB(96, 96, 96);
 constexpr char DARK_ORIGINAL_PROC_PROP[] = "TimestoneDarkOriginalProc";
 
 using SetWindowThemeFn = HRESULT (WINAPI*)(HWND, LPCWSTR, LPCWSTR);
@@ -34,7 +36,13 @@ HBRUSH DarkBorderBrush()
     return brush;
 }
 
-void PaintBlackControlBorder(HWND control)
+HBRUSH DarkFaceBrush()
+{
+    static HBRUSH brush = CreateSolidBrush(DARK_FACE);
+    return brush;
+}
+
+void PaintDarkControlBorder(HWND control)
 {
     HDC dc = GetWindowDC(control);
     if (!dc) return;
@@ -42,15 +50,7 @@ void PaintBlackControlBorder(HWND control)
     RECT border = {};
     GetWindowRect(control, &border);
     OffsetRect(&border, -border.left, -border.top);
-    char className[32] = {};
-    GetClassNameA(control, className, sizeof(className));
-    if (_stricmp(className, WC_LISTVIEWA) == 0) {
-        HBRUSH brush = CreateSolidBrush(RGB(85, 85, 85));
-        FrameRect(dc, &border, brush);
-        DeleteObject(brush);
-    } else {
-        FrameRect(dc, &border, DarkBorderBrush());
-    }
+    FrameRect(dc, &border, DarkBorderBrush());
     ReleaseDC(control, dc);
 }
 
@@ -63,6 +63,8 @@ void PaintDarkComboBox(HWND control, HDC dc)
 {
     RECT client = {};
     GetClientRect(control, &client);
+    HFONT font = reinterpret_cast<HFONT>(SendMessageA(control, WM_GETFONT, 0, 0));
+    HGDIOBJ oldFont = font ? SelectObject(dc, font) : nullptr;
     FillRect(dc, &client, DarkControlBrush());
     FrameRect(dc, &client, DarkBorderBrush());
 
@@ -70,7 +72,7 @@ void PaintDarkComboBox(HWND control, HDC dc)
     RECT arrow = client;
     arrow.left = std::max(client.left, client.right - arrowWidth);
     InflateRect(&arrow, -1, -1);
-    FillRect(dc, &arrow, DarkBorderBrush());
+    FillRect(dc, &arrow, DarkFaceBrush());
 
     const int centerX = (arrow.left + arrow.right) / 2;
     const int centerY = (arrow.top + arrow.bottom) / 2;
@@ -93,9 +95,10 @@ void PaintDarkComboBox(HWND control, HDC dc)
     textRect.left += 6;
     textRect.right = arrow.left - 4;
     SetBkMode(dc, TRANSPARENT);
-    SetTextColor(dc, IsWindowEnabled(control) ? DARK_TEXT : RGB(125, 125, 125));
+    SetTextColor(dc, IsWindowEnabled(control) ? DARK_TEXT : DARK_DISABLED);
     DrawTextA(dc, text, -1, &textRect,
               DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    if (oldFont) SelectObject(dc, oldFont);
 }
 
 void SelectControlFont(HWND control, HDC dc, HGDIOBJ* oldFont)
@@ -109,7 +112,7 @@ void DrawButtonText(HWND control, HDC dc, RECT textRect, UINT format)
     char text[256] = {};
     GetWindowTextA(control, text, sizeof(text));
     SetBkMode(dc, TRANSPARENT);
-    SetTextColor(dc, IsWindowEnabled(control) ? DARK_TEXT : RGB(125, 125, 125));
+    SetTextColor(dc, IsWindowEnabled(control) ? DARK_TEXT : DARK_DISABLED);
     DrawTextA(dc, text, -1, &textRect, format);
 }
 
@@ -117,7 +120,11 @@ void PaintDarkPushButton(HWND control, HDC dc, RECT client, DWORD type)
 {
     const LRESULT state = SendMessageA(control, BM_GETSTATE, 0, 0);
     const bool pushed = (state & BST_PUSHED) != 0;
-    HBRUSH face = CreateSolidBrush(pushed ? RGB(36, 36, 36) : DARK_CONTROL);
+    POINT cursor = {};
+    GetCursorPos(&cursor);
+    const bool hovered = IsWindowEnabled(control) && WindowFromPoint(cursor) == control;
+    HBRUSH face = CreateSolidBrush(pushed ? RGB(40, 40, 40)
+        : hovered ? RGB(58, 58, 58) : RGB(48, 48, 48));
     FillRect(dc, &client, face);
     DeleteObject(face);
     FrameRect(dc, &client, DarkBorderBrush());
@@ -135,7 +142,7 @@ void PaintDarkPushButton(HWND control, HDC dc, RECT client, DWORD type)
     if ((state & BST_FOCUS) != 0) {
         RECT focus = client;
         InflateRect(&focus, -4, -4);
-        DrawFocusRect(dc, &focus);
+        FrameRect(dc, &focus, DarkBorderBrush());
     }
 }
 
@@ -152,15 +159,18 @@ void PaintDarkCheckButton(HWND control, HDC dc, RECT client, bool radio)
     HBRUSH face = CreateSolidBrush(DARK_CONTROL);
     if (radio) {
         HGDIOBJ oldBrush = SelectObject(dc, face);
-        HGDIOBJ oldPen = SelectObject(dc, GetStockObject(BLACK_PEN));
+        HPEN pen = CreatePen(PS_SOLID, 1, DARK_BORDER);
+        HGDIOBJ oldPen = SelectObject(dc, pen);
         Ellipse(dc, box.left, box.top, box.right, box.bottom);
         if (SendMessageA(control, BM_GETCHECK, 0, 0) == BST_CHECKED) {
             RECT dot = box;
             InflateRect(&dot, -4, -4);
-            SelectObject(dc, GetStockObject(WHITE_BRUSH));
+            SelectObject(dc, GetStockObject(DC_BRUSH));
+            SetDCBrushColor(dc, DARK_TEXT);
             Ellipse(dc, dot.left, dot.top, dot.right, dot.bottom);
         }
         SelectObject(dc, oldPen);
+        DeleteObject(pen);
         SelectObject(dc, oldBrush);
     } else {
         FillRect(dc, &box, face);
@@ -198,9 +208,11 @@ void PaintDarkGroupBox(HWND control, HDC dc, RECT client)
     RECT frame = client;
     frame.top += metrics.tmHeight / 2;
     HGDIOBJ oldBrush = SelectObject(dc, GetStockObject(NULL_BRUSH));
-    HGDIOBJ oldPen = SelectObject(dc, GetStockObject(BLACK_PEN));
+    HPEN pen = CreatePen(PS_SOLID, 1, DARK_BORDER);
+    HGDIOBJ oldPen = SelectObject(dc, pen);
     Rectangle(dc, frame.left, frame.top, frame.right, frame.bottom);
     SelectObject(dc, oldPen);
+    DeleteObject(pen);
     SelectObject(dc, oldBrush);
 
     RECT label = client;
@@ -259,7 +271,13 @@ LRESULT CALLBACK DarkComboBoxProc(HWND control, UINT message, WPARAM wParam,
     const LRESULT result = CallWindowProcA(original, control, message, wParam, lParam);
     if (message == WM_NCPAINT || message == WM_SETFOCUS ||
         message == WM_KILLFOCUS || message == WM_ENABLE)
-        PaintBlackControlBorder(control);
+        PaintDarkControlBorder(control);
+    if (message == CB_SETCURSEL || message == CB_SHOWDROPDOWN ||
+        message == WM_COMMAND || message == WM_SETFOCUS ||
+        message == WM_KILLFOCUS || message == WM_ENABLE ||
+        message == WM_KEYDOWN || message == WM_LBUTTONDOWN ||
+        message == WM_LBUTTONUP || message == WM_SETTEXT)
+        RedrawWindow(control, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW);
     if (message == WM_NCDESTROY)
         RemovePropA(control, DARK_ORIGINAL_PROC_PROP);
     return result;
@@ -279,7 +297,7 @@ LRESULT CALLBACK DarkHeaderProc(HWND control, UINT message, WPARAM wParam,
         const int savedDC = SaveDC(dc);
         RECT client = {};
         GetClientRect(control, &client);
-        FillRect(dc, &client, DarkControlBrush());
+        FillRect(dc, &client, DarkFaceBrush());
         HGDIOBJ oldFont = nullptr;
         SelectControlFont(control, dc, &oldFont);
         SetBkMode(dc, TRANSPARENT);
@@ -332,7 +350,7 @@ LRESULT CALLBACK DarkBorderControlProc(HWND control, UINT message, WPARAM wParam
     if (message == WM_PAINT || message == WM_NCPAINT ||
         message == WM_SETFOCUS || message == WM_KILLFOCUS ||
         message == WM_ENABLE)
-        PaintBlackControlBorder(control);
+        PaintDarkControlBorder(control);
     if (message == WM_NCDESTROY)
         RemovePropA(control, DARK_ORIGINAL_PROC_PROP);
     return result;
@@ -357,7 +375,7 @@ LRESULT CALLBACK DarkListViewProc(HWND control, UINT message, WPARAM wParam,
     MapWindowPoints(nullptr, control, reinterpret_cast<POINT*>(&headerRect), 2);
     client.top = std::max(client.top, headerRect.bottom);
     IntersectClipRect(dc, client.left, client.top, client.right, client.bottom);
-    HPEN pen = CreatePen(PS_SOLID, 1, RGB(85, 85, 85));
+    HPEN pen = CreatePen(PS_SOLID, 1, DARK_BORDER);
     HGDIOBJ oldPen = SelectObject(dc, pen);
 
     // Native gridlines have no configurable color. Draw separators after the rows.
@@ -406,10 +424,17 @@ LRESULT CALLBACK DarkButtonProc(HWND control, UINT message, WPARAM wParam,
         return TRUE;
 
     const LRESULT result = CallWindowProcA(original, control, message, wParam, lParam);
-    if (message == BM_SETCHECK || message == BM_SETSTATE ||
+    if (message == WM_MOUSEMOVE) {
+        TRACKMOUSEEVENT tracking = {sizeof(tracking), TME_LEAVE, control, 0};
+        TrackMouseEvent(&tracking);
+    }
+    if (message == BM_SETCHECK || message == BM_SETSTATE || message == BM_SETSTYLE ||
         message == WM_SETTEXT || message == WM_ENABLE ||
-        message == WM_SETFOCUS || message == WM_KILLFOCUS)
-        InvalidateRect(control, nullptr, TRUE);
+        message == WM_MOUSEMOVE || message == WM_MOUSELEAVE ||
+        message == WM_SETFOCUS || message == WM_KILLFOCUS ||
+        message == WM_LBUTTONDOWN || message == WM_LBUTTONUP ||
+        message == WM_KEYDOWN || message == WM_KEYUP || message == WM_UPDATEUISTATE)
+        RedrawWindow(control, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW);
     if (message == WM_NCDESTROY)
         RemovePropA(control, DARK_ORIGINAL_PROC_PROP);
     return result;
@@ -437,6 +462,21 @@ BOOL CALLBACK ApplyDarkControlTheme(HWND control, LPARAM setThemeParam)
     const auto setWindowTheme = reinterpret_cast<SetWindowThemeFn>(setThemeParam);
     char className[32] = {};
     GetClassNameA(control, className, sizeof(className));
+    if (_stricmp(className, "EDIT") == 0) {
+        char parentClass[32] = {};
+        GetClassNameA(GetParent(control), parentClass, sizeof(parentClass));
+        // The combo paints its outer border; its editable text field needs none.
+        if (_stricmp(parentClass, "COMBOBOX") == 0) {
+            SetWindowLongPtrA(control, GWL_STYLE,
+                              GetWindowLongPtrA(control, GWL_STYLE) & ~WS_BORDER);
+            SetWindowLongPtrA(control, GWL_EXSTYLE,
+                              GetWindowLongPtrA(control, GWL_EXSTYLE) & ~WS_EX_CLIENTEDGE);
+            SetWindowPos(control, nullptr, 0, 0, 0, 0,
+                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE |
+                         SWP_FRAMECHANGED);
+            return TRUE;
+        }
+    }
     if (setWindowTheme)
         setWindowTheme(control, L"Explorer", nullptr);
     if (g_allowDarkModeForWindow)
@@ -564,19 +604,17 @@ void ApplyLaunchMenuDarkTheme(HWND window)
     }
 
     InitializeLaunchMenuDarkMode();
-    if (g_setWindowTheme) {
-        g_setWindowTheme(window, L"Explorer", nullptr);
-    }
     if (g_allowDarkModeForWindow)
         g_allowDarkModeForWindow(window, TRUE);
     SendMessageW(window, WM_THEMECHANGED, 0, 0);
-    if (g_setWindowTheme) {
-        EnumChildWindows(window, ApplyDarkControlTheme,
-                         reinterpret_cast<LPARAM>(g_setWindowTheme));
-    }
+    EnumChildWindows(window, ApplyDarkControlTheme,
+                     reinterpret_cast<LPARAM>(g_setWindowTheme));
+    SetWindowPos(window, nullptr, 0, 0, 0, 0,
+                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE |
+                 SWP_FRAMECHANGED);
 
     RedrawWindow(window, nullptr, nullptr,
-                 RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
+                 RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN);
 }
 
 void PaintLaunchMenuDarkBackground(HWND window, HDC dc)
