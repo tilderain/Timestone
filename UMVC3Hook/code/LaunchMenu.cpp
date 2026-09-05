@@ -7,6 +7,7 @@
 #include "controller.h"
 #include "launch_music.h"
 #include "launchmenu_dark.h"
+#include "launchmenu_controls.h"
 #include "trainingboot.h"
 #include "netplay.h"
 #include "savedata.h"
@@ -112,6 +113,22 @@ static SavedRoster g_savedRosters[3] = {};
 static size_t     g_savedRosterCount = 0;
 static bool       g_savedRostersLoaded = false;
 
+// A view into the existing config; neither its layout nor the wire packets change.
+struct TeamSelectionView {
+    int32_t (&chars)[3];
+    int32_t (&colors)[3];
+    int32_t (&assists)[3];
+    bool& simpleMode;
+};
+
+static TeamSelectionView GetTeamSelection(int team)
+{
+    return {team == 0 ? g_dialogConfig.p1Chars : g_dialogConfig.p2Chars,
+            team == 0 ? g_dialogConfig.p1Colors : g_dialogConfig.p2Colors,
+            team == 0 ? g_dialogConfig.p1Assists : g_dialogConfig.p2Assists,
+            g_dialogConfig.simpleMode[team]};
+}
+
 static COLORREF GetPulsingColor(COLORREF low, COLORREF high)
 {
     constexpr ULONGLONG periodMs = 2400;
@@ -157,6 +174,19 @@ static int GetCharacterArchiveVariantCount(int characterId)
     return characterId > 0 && characterId < kCharNameCount ? 8 : 1;
 }
 
+static bool IsValidTeamSelection(const int32_t (&chars)[3],
+                                 const int32_t (&colors)[3],
+                                 const int32_t (&assists)[3])
+{
+    for (int i = 0; i < 3; ++i) {
+        if (chars[i] < 0 || chars[i] >= kCharNameCount ||
+            colors[i] < 0 || colors[i] >= GetCharacterArchiveVariantCount(chars[i]) ||
+            assists[i] < 0 || assists[i] > 2)
+            return false;
+    }
+    return true;
+}
+
 static bool IsValidTrainingLaunchPacket(const LaunchTrainingPacket& packet)
 {
     if (packet.type != PACKET_LAUNCH_TRAINING ||
@@ -164,16 +194,11 @@ static bool IsValidTrainingLaunchPacket(const LaunchTrainingPacket& packet)
         packet.autoJump[0] > 1 || packet.autoJump[1] > 1 ||
         packet.autoJumpValidMask > 3 || packet.voiceValidMask > 3)
         return false;
+    if (!IsValidTeamSelection(packet.p1Chars, packet.p1Colors, packet.p1Assists) ||
+        !IsValidTeamSelection(packet.p2Chars, packet.p2Colors, packet.p2Assists))
+        return false;
     for (int i = 0; i < 3; ++i) {
-        if (packet.p1Chars[i] < 0 || packet.p1Chars[i] >= kCharNameCount ||
-            packet.p2Chars[i] < 0 || packet.p2Chars[i] >= kCharNameCount ||
-            packet.p1Colors[i] < 0 ||
-            packet.p1Colors[i] >= GetCharacterArchiveVariantCount(packet.p1Chars[i]) ||
-            packet.p2Colors[i] < 0 ||
-            packet.p2Colors[i] >= GetCharacterArchiveVariantCount(packet.p2Chars[i]) ||
-            packet.p1Assists[i] < 0 || packet.p1Assists[i] > 2 ||
-            packet.p2Assists[i] < 0 || packet.p2Assists[i] > 2 ||
-            packet.voiceLanguage[0][i] > 1 ||
+        if (packet.voiceLanguage[0][i] > 1 ||
             packet.voiceLanguage[1][i] > 1)
             return false;
     }
@@ -909,23 +934,42 @@ static void DestroyDpiLayout(HWND hWnd);
 static void ReturnBattleSetupToLobbies(HWND hDlg);
 static void UpdateLobbyMusicCheckbox(HWND hDlg);
 
+static void RefreshTeamSlot(HWND hDlg, int team, int slot)
+{
+    const auto selection = GetTeamSelection(team);
+    const int index = team * 3 + slot;
+    HWND combo = GetDlgItem(hDlg, ID_P1_SLOT1 + index);
+    SendMessageA(combo, CB_SETCURSEL, FindComboItemByData(combo, selection.chars[slot]), 0);
+    PopulateColorCombo(GetDlgItem(hDlg, ID_P1_COLOR1 + index),
+                       selection.chars[slot], selection.colors[slot]);
+    PopulateAssistCombo(GetDlgItem(hDlg, ID_P1_ASSIST1 + index),
+                        selection.chars[slot], selection.assists[slot]);
+}
+
+static void SetTeamSimpleMode(HWND hDlg, int team, bool simpleMode)
+{
+    GetTeamSelection(team).simpleMode = simpleMode;
+    SendMessageA(GetDlgItem(hDlg, team == 0 ? ID_P1_SIMPLE_MODE : ID_P2_SIMPLE_MODE),
+                 BM_SETCHECK, simpleMode ? BST_CHECKED : BST_UNCHECKED, 0);
+}
+
+static void ReadTeamControls(HWND hDlg, int team)
+{
+    for (int i = 0; i < 3; ++i)
+        UpdateCharFromCombo(hDlg, ID_P1_SLOT1 + team * 3 + i, i, team);
+    // Preserve the existing refresh of both teams' color/assist selections.
+    UpdateSlotOptionsFromCombos(hDlg);
+}
+
 static void RefreshRosterControls(HWND hDlg)
 {
     if (!hDlg) return;
     for (int team = 0; team < 2; ++team) {
-        const int32_t* chars = team == 0 ? g_dialogConfig.p1Chars : g_dialogConfig.p2Chars;
-        const int32_t* colors = team == 0 ? g_dialogConfig.p1Colors : g_dialogConfig.p2Colors;
-        const int32_t* assists = team == 0 ? g_dialogConfig.p1Assists : g_dialogConfig.p2Assists;
         for (int i = 0; i < 3; ++i) {
-            const int index = team * 3 + i;
-            HWND combo = GetDlgItem(hDlg, ID_P1_SLOT1 + index);
-            if (!combo) continue;
-            SendMessageA(combo, CB_SETCURSEL, FindComboItemByData(combo, chars[i]), 0);
-            PopulateColorCombo(GetDlgItem(hDlg, ID_P1_COLOR1 + index), chars[i], colors[i]);
-            PopulateAssistCombo(GetDlgItem(hDlg, ID_P1_ASSIST1 + index), chars[i], assists[i]);
+            if (GetDlgItem(hDlg, ID_P1_SLOT1 + team * 3 + i))
+                RefreshTeamSlot(hDlg, team, i);
         }
-        SendMessageA(GetDlgItem(hDlg, team == 0 ? ID_P1_SIMPLE_MODE : ID_P2_SIMPLE_MODE),
-                     BM_SETCHECK, g_dialogConfig.simpleMode[team] ? BST_CHECKED : BST_UNCHECKED, 0);
+        SetTeamSimpleMode(hDlg, team, g_dialogConfig.simpleMode[team]);
     }
     HWND stage = GetDlgItem(hDlg, ID_STAGE);
     if (stage) SendMessageA(stage, CB_SETCURSEL, FindComboItemByData(stage, g_dialogConfig.stageId), 0);
@@ -977,9 +1021,7 @@ static void SaveLocalConnectSelection(HWND hDlg)
 {
     if (!g_connectSetupActive) return;
     const int team = g_isHost ? 0 : 1;
-    for (int i = 0; i < 3; ++i)
-        UpdateCharFromCombo(hDlg, ID_P1_SLOT1 + team * 3 + i, i, team);
-    UpdateSlotOptionsFromCombos(hDlg);
+    ReadTeamControls(hDlg, team);
     const int32_t chars[2][3] = {
         {g_dialogConfig.p1Chars[0], g_dialogConfig.p1Chars[1], g_dialogConfig.p1Chars[2]},
         {g_dialogConfig.p2Chars[0], g_dialogConfig.p2Chars[1], g_dialogConfig.p2Chars[2]}
@@ -1662,42 +1704,62 @@ static void SetDirectConnectExpanded(HWND hDlg, bool expanded)
                  RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW);
 }
 
-static void SendP2Selection(HWND hDlg)
+template <typename Packet>
+static void FillTeamSelectionPacket(Packet& packet, int team)
 {
-    if (g_isHost || !g_dialogConfig.enetHost || !g_dialogConfig.enetPeer) return;
-
-    for (int i = 0; i < 3; ++i)
-        UpdateCharFromCombo(hDlg, ID_P2_SLOT1 + i, i, 1);
-    UpdateSlotOptionsFromCombos(hDlg);
-
-    LaunchP2SelectionPacket packet = {};
-    packet.type = PACKET_LAUNCH_P2_SELECTION;
+    const auto selection = GetTeamSelection(team);
     snprintf(packet.protocol, sizeof(packet.protocol), "%s", UMVC3HOOK_VERSION);
     for (int i = 0; i < 3; ++i) {
-        packet.chars[i] = g_dialogConfig.p2Chars[i];
-        packet.colors[i] = g_dialogConfig.p2Colors[i];
-        packet.assists[i] = g_dialogConfig.p2Assists[i];
+        packet.chars[i] = selection.chars[i];
+        packet.colors[i] = selection.colors[i];
+        packet.assists[i] = selection.assists[i];
     }
-    packet.ready = g_localReady ? 1 : 0;
-    packet.simpleMode = g_dialogConfig.simpleMode[1];
+    packet.simpleMode = selection.simpleMode;
+}
 
+template <typename Packet>
+static void SendTeamSelectionPacket(const Packet& packet, int team)
+{
     ENetPacket* enetPacket = enet_packet_create(
         &packet, sizeof(packet), ENET_PACKET_FLAG_RELIABLE);
     if (!enetPacket || enet_peer_send(g_dialogConfig.enetPeer, 0, enetPacket) != 0) {
         if (enetPacket) enet_packet_destroy(enetPacket);
-        HookLog("UMVC3Hook: Failed to send P2 launch selection\n");
+        HookLog("UMVC3Hook: Failed to send P%d launch selection\n", team + 1);
         return;
     }
     enet_host_flush(g_dialogConfig.enetHost);
+}
+
+template <typename Packet>
+static void ApplyTeamSelectionRows(HWND hDlg, const Packet& packet, int team)
+{
+    const auto selection = GetTeamSelection(team);
+    for (int i = 0; i < 3; ++i) {
+        selection.chars[i] = packet.chars[i];
+        selection.colors[i] = packet.colors[i];
+        selection.assists[i] = packet.assists[i];
+        RefreshTeamSlot(hDlg, team, i);
+    }
+}
+
+static void SendP2Selection(HWND hDlg)
+{
+    if (g_isHost || !g_dialogConfig.enetHost || !g_dialogConfig.enetPeer) return;
+
+    ReadTeamControls(hDlg, 1);
+
+    LaunchP2SelectionPacket packet = {};
+    packet.type = PACKET_LAUNCH_P2_SELECTION;
+    FillTeamSelectionPacket(packet, 1);
+    packet.ready = g_localReady ? 1 : 0;
+    SendTeamSelectionPacket(packet, 1);
 }
 
 static void SendP1Selection(HWND hDlg)
 {
     if (!g_isHost || !g_dialogConfig.enetHost || !g_dialogConfig.enetPeer) return;
 
-    for (int i = 0; i < 3; ++i)
-        UpdateCharFromCombo(hDlg, ID_P1_SLOT1 + i, i, 0);
-    UpdateSlotOptionsFromCombos(hDlg);
+    ReadTeamControls(hDlg, 0);
     HWND stage = GetDlgItem(hDlg, ID_STAGE);
     int stageSelection = stage
         ? static_cast<int>(SendMessageA(stage, CB_GETCURSEL, 0, 0))
@@ -1708,53 +1770,21 @@ static void SendP1Selection(HWND hDlg)
 
     LaunchP1SelectionPacket packet = {};
     packet.type = PACKET_LAUNCH_P1_SELECTION;
-    snprintf(packet.protocol, sizeof(packet.protocol), "%s", UMVC3HOOK_VERSION);
-    for (int i = 0; i < 3; ++i) {
-        packet.chars[i] = g_dialogConfig.p1Chars[i];
-        packet.colors[i] = g_dialogConfig.p1Colors[i];
-        packet.assists[i] = g_dialogConfig.p1Assists[i];
-    }
-    packet.simpleMode = g_dialogConfig.simpleMode[0];
+    FillTeamSelectionPacket(packet, 0);
     packet.stageId = g_dialogConfig.stageId;
-
-    ENetPacket* enetPacket = enet_packet_create(
-        &packet, sizeof(packet), ENET_PACKET_FLAG_RELIABLE);
-    if (!enetPacket || enet_peer_send(g_dialogConfig.enetPeer, 0, enetPacket) != 0) {
-        if (enetPacket) enet_packet_destroy(enetPacket);
-        HookLog("UMVC3Hook: Failed to send P1 launch selection\n");
-        return;
-    }
-    enet_host_flush(g_dialogConfig.enetHost);
+    SendTeamSelectionPacket(packet, 0);
 }
 
 static bool ApplyP1Selection(HWND hDlg, const LaunchP1SelectionPacket& packet)
 {
     if (g_isHost || packet.type != PACKET_LAUNCH_P1_SELECTION ||
         !IsCompatibleProtocol(packet.protocol) || packet.simpleMode > 1) return false;
-    for (int i = 0; i < 3; ++i) {
-        if (packet.chars[i] < 0 || packet.chars[i] >= kCharNameCount ||
-            packet.colors[i] < 0 ||
-            packet.colors[i] >= GetCharacterArchiveVariantCount(packet.chars[i]) ||
-            packet.assists[i] < 0 || packet.assists[i] > 2)
-            return false;
-    }
+    if (!IsValidTeamSelection(packet.chars, packet.colors, packet.assists)) return false;
     const int stageIndex = FindStageIndex(packet.stageId);
     if (kStages[stageIndex].id != packet.stageId) return false;
 
-    for (int i = 0; i < 3; ++i) {
-        g_dialogConfig.p1Chars[i] = packet.chars[i];
-        g_dialogConfig.p1Colors[i] = packet.colors[i];
-        g_dialogConfig.p1Assists[i] = packet.assists[i];
-        SendMessageA(GetDlgItem(hDlg, ID_P1_SLOT1 + i),
-                     CB_SETCURSEL, packet.chars[i], 0);
-        PopulateColorCombo(GetDlgItem(hDlg, ID_P1_COLOR1 + i),
-                           packet.chars[i], packet.colors[i]);
-        PopulateAssistCombo(GetDlgItem(hDlg, ID_P1_ASSIST1 + i),
-                            packet.chars[i], packet.assists[i]);
-    }
-    g_dialogConfig.simpleMode[0] = packet.simpleMode != 0;
-    SendMessageA(GetDlgItem(hDlg, ID_P1_SIMPLE_MODE), BM_SETCHECK,
-                 g_dialogConfig.simpleMode[0] ? BST_CHECKED : BST_UNCHECKED, 0);
+    ApplyTeamSelectionRows(hDlg, packet, 0);
+    SetTeamSimpleMode(hDlg, 0, packet.simpleMode != 0);
     g_dialogConfig.stageId = packet.stageId;
     SendMessageA(GetDlgItem(hDlg, ID_STAGE), CB_SETCURSEL,
                  FindComboItemByData(GetDlgItem(hDlg, ID_STAGE), packet.stageId), 0);
@@ -1767,28 +1797,9 @@ static bool ApplyP2Selection(HWND hDlg, const LaunchP2SelectionPacket& packet)
         !IsCompatibleProtocol(packet.protocol) ||
         packet.ready > 1 || packet.simpleMode > 1)
         return false;
-    for (int i = 0; i < 3; ++i) {
-        if (packet.chars[i] < 0 || packet.chars[i] >= kCharNameCount ||
-            packet.colors[i] < 0 ||
-            packet.colors[i] >= GetCharacterArchiveVariantCount(packet.chars[i]) ||
-            packet.assists[i] < 0 || packet.assists[i] > 2)
-            return false;
-    }
-    g_dialogConfig.simpleMode[1] = packet.simpleMode != 0;
-    SendMessageA(GetDlgItem(hDlg, ID_P2_SIMPLE_MODE), BM_SETCHECK,
-                 g_dialogConfig.simpleMode[1] ? BST_CHECKED : BST_UNCHECKED, 0);
-
-    for (int i = 0; i < 3; ++i) {
-        g_dialogConfig.p2Chars[i] = packet.chars[i];
-        g_dialogConfig.p2Colors[i] = packet.colors[i];
-        g_dialogConfig.p2Assists[i] = packet.assists[i];
-        SendMessageA(GetDlgItem(hDlg, ID_P2_SLOT1 + i),
-                     CB_SETCURSEL, packet.chars[i], 0);
-        PopulateColorCombo(GetDlgItem(hDlg, ID_P2_COLOR1 + i),
-                           packet.chars[i], packet.colors[i]);
-        PopulateAssistCombo(GetDlgItem(hDlg, ID_P2_ASSIST1 + i),
-                            packet.chars[i], packet.assists[i]);
-    }
+    if (!IsValidTeamSelection(packet.chars, packet.colors, packet.assists)) return false;
+    SetTeamSimpleMode(hDlg, 1, packet.simpleMode != 0);
+    ApplyTeamSelectionRows(hDlg, packet, 1);
     g_peerReady = packet.ready != 0;
     EnableWindow(GetDlgItem(hDlg, ID_LAUNCH_TRAINING), g_peerReady ? TRUE : FALSE);
     UpdateReadyButton(hDlg);
@@ -2230,111 +2241,116 @@ static void ApplyLaunchMenuFont(HWND hDlg)
     if (oldFont) DeleteObject(oldFont);
 }
 
+// Separate headings, rows and checkboxes so each layout keeps its creation/tab order.
+static void CreateTeamHeadings(HWND hDlg, int team, int x, int y)
+{
+    namespace ui = LaunchMenuControls;
+    ui::Label(hDlg, team == 0 ? "P1" : "P2",
+        WS_VISIBLE | WS_CHILD, x, y, 22, 18, team == 0 ? 0 : ID_P2_LABEL);
+    ui::Label(hDlg, "Character", WS_VISIBLE | WS_CHILD, x + 24, y, 130, 18);
+    ui::Label(hDlg, "Color", WS_VISIBLE | WS_CHILD, x + 158, y, 45, 18);
+    ui::Label(hDlg, "Assist", WS_VISIBLE | WS_CHILD, x + 207, y, 170, 18);
+}
+
+static void CreateTeamRows(HWND hDlg, int team, int x, int top)
+{
+    namespace ui = LaunchMenuControls;
+    const auto selection = GetTeamSelection(team);
+    for (int slot = 0; slot < 3; ++slot) {
+        const int index = team * 3 + slot;
+        const int y = top + slot * 30;
+        char slotLabel[4];
+        snprintf(slotLabel, sizeof(slotLabel), "%d", slot + 1);
+        ui::Label(hDlg, slotLabel, WS_VISIBLE | WS_CHILD, x, y + 4, 20, 18);
+
+        const int character = selection.chars[slot];
+        const int color = selection.colors[slot];
+        const int assist = selection.assists[slot];
+        HWND charCombo = ui::Combo(hDlg,
+            WS_VISIBLE | WS_CHILD | WS_TABSTOP | WS_VSCROLL |
+                CBS_DROPDOWN | CBS_HASSTRINGS | CBS_AUTOHSCROLL,
+            x + 24, y, 130, 400, ID_P1_SLOT1 + index);
+        PopulateCharCombo(charCombo, character);
+        SendMessageA(charCombo, CB_SETDROPPEDWIDTH, 180, 0);
+
+        HWND colorCombo = ui::Combo(hDlg,
+            WS_VISIBLE | WS_CHILD | WS_TABSTOP | CBS_DROPDOWNLIST | CBS_HASSTRINGS,
+            x + 158, y, 45, 200, ID_P1_COLOR1 + index);
+        PopulateColorCombo(colorCombo, character, color);
+
+        HWND assistCombo = ui::Combo(hDlg,
+            WS_VISIBLE | WS_CHILD | WS_TABSTOP | CBS_DROPDOWNLIST | CBS_HASSTRINGS,
+            x + 207, y, 170, 200, ID_P1_ASSIST1 + index);
+        PopulateAssistCombo(assistCombo, character, assist);
+        SendMessageA(assistCombo, CB_SETDROPPEDWIDTH, 220, 0);
+    }
+}
+
+static void CreateSimpleModeControl(HWND hDlg, int team, int x, int y)
+{
+    HWND simple = LaunchMenuControls::Button(hDlg, "Simple Mode Controls",
+        WS_VISIBLE | WS_CHILD | WS_TABSTOP | BS_AUTOCHECKBOX,
+        x, y, 180, 20, team == 0 ? ID_P1_SIMPLE_MODE : ID_P2_SIMPLE_MODE);
+    SendMessageA(simple, BM_SETCHECK,
+        g_dialogConfig.simpleMode[team] ? BST_CHECKED : BST_UNCHECKED, 0);
+}
+
+static void CreateStageControls(HWND hDlg, int x, int y, int width)
+{
+    namespace ui = LaunchMenuControls;
+    ui::Button(hDlg, "Stage Select", WS_VISIBLE | WS_CHILD | BS_GROUPBOX,
+        x, y, width, 52);
+    ui::Label(hDlg, "Stage:", WS_VISIBLE | WS_CHILD, x + 10, y + 22, 50, 18);
+    HWND stage = ui::Combo(hDlg,
+        WS_VISIBLE | WS_CHILD | WS_TABSTOP | WS_VSCROLL |
+            CBS_DROPDOWN | CBS_HASSTRINGS | CBS_AUTOHSCROLL,
+        x + 65, y + 18, 600, 200, ID_STAGE);
+    PopulateStageCombo(stage, g_dialogConfig.stageId);
+}
+
 static void CreateBattleSetupControls(HWND hDlg)
 {
+    namespace ui = LaunchMenuControls;
     constexpr int leftX = 20;
     constexpr int rightX = 430;
     constexpr int contentW = 800;
 
-    CreateWindowA("STATIC", "Choose characters and stage for this battle:",
-        WS_VISIBLE | WS_CHILD, leftX, 12, 440, 18, hDlg, NULL, NULL, NULL);
-    CreateWindowA("BUTTON", "Mute Lobby Music",
+    ui::Label(hDlg, "Choose characters and stage for this battle:",
+        WS_VISIBLE | WS_CHILD, leftX, 12, 440, 18);
+    ui::Button(hDlg, "Mute Lobby Music",
         WS_CHILD | WS_TABSTOP | BS_AUTOCHECKBOX,
-        leftX + 470, 8, 140, 26,
-        hDlg, (HMENU)ID_LOBBY_MUSIC_MUTE, NULL, NULL);
-    CreateWindowA("BUTTON", "Randomize Characters",
+        leftX + 470, 8, 140, 26, ID_LOBBY_MUSIC_MUTE);
+    ui::Button(hDlg, "Randomize Characters",
         WS_VISIBLE | WS_CHILD | WS_TABSTOP | BS_PUSHBUTTON,
-        leftX + 620, 8, 180, 26,
-        hDlg, (HMENU)ID_RANDOMIZE_CHARS, NULL, NULL);
+        leftX + 620, 8, 180, 26, ID_RANDOMIZE_CHARS);
 
-    CreateWindowA("BUTTON", "Character Select",
-        WS_VISIBLE | WS_CHILD | BS_GROUPBOX, leftX, 38, contentW, 190,
-        hDlg, NULL, NULL, NULL);
+    ui::Button(hDlg, "Character Select",
+        WS_VISIBLE | WS_CHILD | BS_GROUPBOX, leftX, 38, contentW, 190);
 
     for (int team = 0; team < 2; ++team) {
         const int x = team == 0 ? leftX + 10 : rightX;
-        CreateWindowA("STATIC", team == 0 ? "P1" : "P2",
-            WS_VISIBLE | WS_CHILD, x, 58, 22, 18,
-            hDlg, team == 0 ? NULL : (HMENU)ID_P2_LABEL, NULL, NULL);
-        CreateWindowA("STATIC", "Character", WS_VISIBLE | WS_CHILD,
-            x + 24, 58, 130, 18, hDlg, NULL, NULL, NULL);
-        CreateWindowA("STATIC", "Color", WS_VISIBLE | WS_CHILD,
-            x + 158, 58, 45, 18, hDlg, NULL, NULL, NULL);
-        CreateWindowA("STATIC", "Assist", WS_VISIBLE | WS_CHILD,
-            x + 207, 58, 170, 18, hDlg, NULL, NULL, NULL);
-
-        for (int slot = 0; slot < 3; ++slot) {
-            const int index = team * 3 + slot;
-            const int y = 78 + slot * 30;
-            char slotLabel[4];
-            snprintf(slotLabel, sizeof(slotLabel), "%d", slot + 1);
-            CreateWindowA("STATIC", slotLabel, WS_VISIBLE | WS_CHILD,
-                x, y + 4, 20, 18, hDlg, NULL, NULL, NULL);
-
-            const int character = team == 0 ? g_dialogConfig.p1Chars[slot]
-                                             : g_dialogConfig.p2Chars[slot];
-            const int color = team == 0 ? g_dialogConfig.p1Colors[slot]
-                                         : g_dialogConfig.p2Colors[slot];
-            const int assist = team == 0 ? g_dialogConfig.p1Assists[slot]
-                                          : g_dialogConfig.p2Assists[slot];
-            HWND charCombo = CreateWindowA("COMBOBOX", "",
-                WS_VISIBLE | WS_CHILD | WS_TABSTOP | WS_VSCROLL |
-                    CBS_DROPDOWN | CBS_HASSTRINGS | CBS_AUTOHSCROLL,
-                x + 24, y, 130, 400, hDlg,
-                reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_P1_SLOT1 + index)),
-                NULL, NULL);
-            PopulateCharCombo(charCombo, character);
-            SendMessageA(charCombo, CB_SETDROPPEDWIDTH, 180, 0);
-
-            HWND colorCombo = CreateWindowA("COMBOBOX", "",
-                WS_VISIBLE | WS_CHILD | WS_TABSTOP | CBS_DROPDOWNLIST | CBS_HASSTRINGS,
-                x + 158, y, 45, 200, hDlg,
-                reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_P1_COLOR1 + index)),
-                NULL, NULL);
-            PopulateColorCombo(colorCombo, character, color);
-
-            HWND assistCombo = CreateWindowA("COMBOBOX", "",
-                WS_VISIBLE | WS_CHILD | WS_TABSTOP | CBS_DROPDOWNLIST | CBS_HASSTRINGS,
-                x + 207, y, 170, 200, hDlg,
-                reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_P1_ASSIST1 + index)),
-                NULL, NULL);
-            PopulateAssistCombo(assistCombo, character, assist);
-            SendMessageA(assistCombo, CB_SETDROPPEDWIDTH, 220, 0);
-        }
-
-        HWND simple = CreateWindowA("BUTTON", "Simple Mode Controls",
-            WS_VISIBLE | WS_CHILD | WS_TABSTOP | BS_AUTOCHECKBOX,
-            x + 24, 174, 180, 20, hDlg,
-            (HMENU)(team == 0 ? ID_P1_SIMPLE_MODE : ID_P2_SIMPLE_MODE), NULL, NULL);
-        SendMessageA(simple, BM_SETCHECK,
-            g_dialogConfig.simpleMode[team] ? BST_CHECKED : BST_UNCHECKED, 0);
+        CreateTeamHeadings(hDlg, team, x, 58);
+        CreateTeamRows(hDlg, team, x, 78);
+        CreateSimpleModeControl(hDlg, team, x + 24, 174);
         CreateSavedRosterCombo(hDlg, team, x + 214, 202);
     }
 
-    CreateWindowA("STATIC", "Ping: -- ms", WS_CHILD,
-        leftX + 230, 176, 190, 18, hDlg, (HMENU)ID_PING_LABEL, NULL, NULL);
+    ui::Label(hDlg, "Ping: -- ms", WS_CHILD,
+        leftX + 230, 176, 190, 18, ID_PING_LABEL);
 
-    CreateWindowA("BUTTON", "Stage Select", WS_VISIBLE | WS_CHILD | BS_GROUPBOX,
-        leftX, 236, contentW, 52, hDlg, NULL, NULL, NULL);
-    CreateWindowA("STATIC", "Stage:", WS_VISIBLE | WS_CHILD,
-        leftX + 10, 258, 50, 18, hDlg, NULL, NULL, NULL);
-    HWND stage = CreateWindowA("COMBOBOX", "",
-        WS_VISIBLE | WS_CHILD | WS_TABSTOP | WS_VSCROLL |
-            CBS_DROPDOWN | CBS_HASSTRINGS | CBS_AUTOHSCROLL,
-        leftX + 65, 254, 600, 200, hDlg, (HMENU)ID_STAGE, NULL, NULL);
-    PopulateStageCombo(stage, g_dialogConfig.stageId);
+    CreateStageControls(hDlg, leftX, 236, contentW);
 
-    CreateWindowA("BUTTON", "Leave Lobby",
+    ui::Button(hDlg, "Leave Lobby",
         WS_VISIBLE | WS_CHILD | WS_TABSTOP | BS_PUSHBUTTON,
-        leftX, 294, 130, 28, hDlg, (HMENU)ID_BATTLE_LEAVE, NULL, NULL);
-    CreateWindowA("STATIC", SteamLobby_GetStatus(), WS_VISIBLE | WS_CHILD,
-        leftX + 140, 294, 445, 34, hDlg, (HMENU)ID_NET_STATUS, NULL, NULL);
-    CreateWindowA("BUTTON", "Not Ready",
+        leftX, 294, 130, 28, ID_BATTLE_LEAVE);
+    ui::Label(hDlg, SteamLobby_GetStatus(), WS_VISIBLE | WS_CHILD,
+        leftX + 140, 294, 445, 34, ID_NET_STATUS);
+    ui::Button(hDlg, "Not Ready",
         WS_CHILD | BS_OWNERDRAW | WS_DISABLED,
-        leftX + 610, 294, 190, 28, hDlg, (HMENU)ID_PEER_READY, NULL, NULL);
-    CreateWindowA("BUTTON", "Launch into Battle",
+        leftX + 610, 294, 190, 28, ID_PEER_READY);
+    ui::Button(hDlg, "Launch into Battle",
         WS_VISIBLE | WS_CHILD | BS_OWNERDRAW | WS_DISABLED,
-        leftX, 330, contentW, 36, hDlg, (HMENU)ID_LAUNCH_TRAINING, NULL, NULL);
+        leftX, 330, contentW, 36, ID_LAUNCH_TRAINING);
 
     SetTimer(hDlg, ID_STEAM_POLL_TIMER, 50, NULL);
 }
@@ -2407,113 +2423,28 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
             hDlg, NULL, NULL, NULL);
         y += 18;
 
-        struct CharSlot { int ctrlId; int team; int slot; };
-        CharSlot slots[6] = {
-            {ID_P1_SLOT1, 0, 0},
-            {ID_P1_SLOT2, 0, 1},
-            {ID_P1_SLOT3, 0, 2},
-            {ID_P2_SLOT1, 1, 0},
-            {ID_P2_SLOT2, 1, 1},
-            {ID_P2_SLOT3, 1, 2},
-        };
-
-        for (int col = 0; col < 2; ++col) {
-            int cx = col == 0 ? leftX + 10 : left2X;
-            CreateWindowA("STATIC", col == 0 ? "P1" : "P2",
-                WS_VISIBLE | WS_CHILD, cx, y, 22, 18,
-                hDlg, col == 0 ? NULL : (HMENU)ID_P2_LABEL, NULL, NULL);
-            CreateWindowA("STATIC", "Character",
-                WS_VISIBLE | WS_CHILD, cx + 24, y, 130, 18, hDlg, NULL, NULL, NULL);
-            CreateWindowA("STATIC", "Color",
-                WS_VISIBLE | WS_CHILD, cx + 158, y, 45, 18, hDlg, NULL, NULL, NULL);
-            CreateWindowA("STATIC", "Assist",
-                WS_VISIBLE | WS_CHILD, cx + 207, y, 170, 18, hDlg, NULL, NULL, NULL);
-        }
+        for (int team = 0; team < 2; ++team)
+            CreateTeamHeadings(hDlg, team, team == 0 ? leftX + 10 : left2X, y);
         y += 18;
 
-        for (int i = 0; i < 6; i++) {
-            int col = i < 3 ? 0 : 1;
-            int row = i % 3;
-            int cx = col == 0 ? leftX + 10 : left2X;
-            int cy = y + row * 30;
-
-            char slotLabel[4];
-            snprintf(slotLabel, sizeof(slotLabel), "%d", row + 1);
-            CreateWindowA("STATIC", slotLabel,
-                WS_VISIBLE | WS_CHILD, cx, cy + 4, 20, 18,
-                hDlg, NULL, NULL, NULL);
-
-            HWND hChar = CreateWindowA("COMBOBOX", "",
-                WS_VISIBLE | WS_CHILD | WS_TABSTOP | WS_VSCROLL |
-                CBS_DROPDOWN | CBS_HASSTRINGS | CBS_AUTOHSCROLL,
-                cx + 24, cy, 130, 400,
-                hDlg, (HMENU)slots[i].ctrlId, NULL, NULL);
-
-            int defaultCharId = (slots[i].team == 0)
-                ? g_dialogConfig.p1Chars[slots[i].slot]
-                : g_dialogConfig.p2Chars[slots[i].slot];
-            int defaultColor = (slots[i].team == 0)
-                ? g_dialogConfig.p1Colors[slots[i].slot]
-                : g_dialogConfig.p2Colors[slots[i].slot];
-            int defaultAssist = (slots[i].team == 0)
-                ? g_dialogConfig.p1Assists[slots[i].slot]
-                : g_dialogConfig.p2Assists[slots[i].slot];
-            PopulateCharCombo(hChar, defaultCharId);
-            SendMessageA(hChar, CB_SETDROPPEDWIDTH, 180, 0);
-
-            HWND hColor = CreateWindowA("COMBOBOX", "",
-                WS_VISIBLE | WS_CHILD | WS_TABSTOP | CBS_DROPDOWNLIST | CBS_HASSTRINGS,
-                cx + 158, cy, 45, 200,
-                hDlg, (HMENU)(ID_P1_COLOR1 + i), NULL, NULL);
-            PopulateColorCombo(hColor, defaultCharId, defaultColor);
-
-            HWND hAssist = CreateWindowA("COMBOBOX", "",
-                WS_VISIBLE | WS_CHILD | WS_TABSTOP | CBS_DROPDOWNLIST | CBS_HASSTRINGS,
-                cx + 207, cy, 170, 200,
-                hDlg, (HMENU)(ID_P1_ASSIST1 + i), NULL, NULL);
-            PopulateAssistCombo(hAssist, defaultCharId, defaultAssist);
-            SendMessageA(hAssist, CB_SETDROPPEDWIDTH, 220, 0);
-        }
+        for (int team = 0; team < 2; ++team)
+            CreateTeamRows(hDlg, team, team == 0 ? leftX + 10 : left2X, y);
         y += 90;
 
-        HWND p1Simple = CreateWindowA("BUTTON", "Simple Mode Controls",
-            WS_VISIBLE | WS_CHILD | WS_TABSTOP | BS_AUTOCHECKBOX,
-            leftX + 34, y, 180, 20,
-            hDlg, (HMENU)ID_P1_SIMPLE_MODE, NULL, NULL);
-        HWND p2Simple = CreateWindowA("BUTTON", "Simple Mode Controls",
-            WS_VISIBLE | WS_CHILD | WS_TABSTOP | BS_AUTOCHECKBOX,
-            left2X + 34, y, 180, 20,
-            hDlg, (HMENU)ID_P2_SIMPLE_MODE, NULL, NULL);
+        CreateSimpleModeControl(hDlg, 0, leftX + 34, y);
+        CreateSimpleModeControl(hDlg, 1, left2X + 34, y);
         CreateSavedRosterCombo(hDlg, 0, leftX + 224, y + 25);
         CreateSavedRosterCombo(hDlg, 1, left2X + 224, y + 25);
         CreateWindowA("STATIC", "Ping: -- ms",
             WS_CHILD,
             leftX + 220, y + 2, 200, 18,
             hDlg, (HMENU)ID_PING_LABEL, NULL, NULL);
-        SendMessageA(p1Simple, BM_SETCHECK,
-                     g_dialogConfig.simpleMode[0] ? BST_CHECKED : BST_UNCHECKED, 0);
-        SendMessageA(p2Simple, BM_SETCHECK,
-                     g_dialogConfig.simpleMode[1] ? BST_CHECKED : BST_UNCHECKED, 0);
         y += 50;
 
         // ---- Stage Select ----
         y += 5;
-        CreateWindowA("BUTTON", "Stage Select",
-            WS_VISIBLE | WS_CHILD | BS_GROUPBOX, leftX, y, contentW, 52,
-            hDlg, NULL, NULL, NULL);
-        y += 18;
-
-        CreateWindowA("STATIC", "Stage:",
-            WS_VISIBLE | WS_CHILD, leftX + 10, y + 4, 50, 18,
-            hDlg, NULL, NULL, NULL);
-
-        HWND hStage = CreateWindowA("COMBOBOX", "",
-            WS_VISIBLE | WS_CHILD | WS_TABSTOP | WS_VSCROLL |
-            CBS_DROPDOWN | CBS_HASSTRINGS | CBS_AUTOHSCROLL,
-            leftX + 65, y, 600, 200,
-            hDlg, (HMENU)ID_STAGE, NULL, NULL);
-        PopulateStageCombo(hStage, g_dialogConfig.stageId);
-        y += 35;
+        CreateStageControls(hDlg, leftX, y, contentW);
+        y += 53;
 
         // ---- Steam Lobby Section ----
         y += 5;
@@ -2537,14 +2468,8 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
             leftX + 270, y + 4, 35, 18,
             hDlg, NULL, NULL, NULL);
 
-        HWND hLobbyType = CreateWindowA("COMBOBOX", "",
-            WS_VISIBLE | WS_CHILD | WS_TABSTOP | CBS_DROPDOWNLIST | CBS_HASSTRINGS,
-            leftX + 305, y, 120, 100,
-            hDlg, (HMENU)ID_STEAM_TYPE, NULL, NULL);
-        SendMessageA(hLobbyType, CB_ADDSTRING, 0, (LPARAM)"Public");
-        SendMessageA(hLobbyType, CB_ADDSTRING, 0, (LPARAM)"Friends Only");
-        SendMessageA(hLobbyType, CB_ADDSTRING, 0, (LPARAM)"Private");
-        SendMessageA(hLobbyType, CB_SETCURSEL, g_lobbyTypeSelection, 0);
+        LaunchMenuControls::LobbyType(hDlg, ID_STEAM_TYPE, g_lobbyTypeSelection,
+            leftX + 305, y, 120);
 
         CreateWindowA("BUTTON", "Join Lobby",
             WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON | WS_DISABLED,
@@ -2556,12 +2481,8 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
             leftX + 565, y + 4, 40, 18,
             hDlg, NULL, NULL, NULL);
 
-        HWND hLobbyName = CreateWindowA("EDIT", g_lobbyName,
-            WS_VISIBLE | WS_CHILD | WS_TABSTOP | WS_BORDER | ES_AUTOHSCROLL,
-            leftX + 610, y + 2, 180, 22,
-            hDlg, (HMENU)ID_STEAM_NAME, NULL, NULL);
-        SendMessageA(hLobbyName, EM_SETLIMITTEXT,
-                     (WPARAM)(sizeof(g_lobbyName) - 1), 0);
+        LaunchMenuControls::LobbyName(hDlg, ID_STEAM_NAME, g_lobbyName,
+            sizeof(g_lobbyName) - 1, leftX + 610, y + 2, 180);
 
         y += 30;
 
@@ -2575,22 +2496,11 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
         y += 22;
 
         // Lobby results table
-        HWND hLobbyList = CreateWindowExA(WS_EX_CLIENTEDGE, WC_LISTVIEWA, "",
-            WS_VISIBLE | WS_CHILD | WS_TABSTOP | WS_VSCROLL |
-            LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS,
-            leftX + 10, y, 780, 150,
-            hDlg, (HMENU)ID_STEAM_LIST, NULL, NULL);
-        ListView_SetExtendedListViewStyle(hLobbyList, LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES);
-        const char* columnNames[] = {"Lobby Name", "Username", "Ping"};
-        const int columnWidths[] = {315, 290, 125};
-        for (int i = 0; i < 3; ++i) {
-            LVCOLUMNA column = {};
-            column.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_SUBITEM;
-            column.pszText = const_cast<char*>(columnNames[i]);
-            column.cx = columnWidths[i];
-            column.iSubItem = i;
-            ListView_InsertColumn(hLobbyList, i, &column);
-        }
+        const LaunchMenuControls::LobbyColumn columns[] = {
+            {"Lobby Name", 315}, {"Username", 290}, {"Ping", 125},
+        };
+        LaunchMenuControls::LobbyList(hDlg, ID_STEAM_LIST,
+            leftX + 10, y, 780, 150, columns);
         y += 155;
 
         // ---- Direct Connect Section ----
@@ -3813,15 +3723,12 @@ static void UpdateCharFromCombo(HWND hDlg, int comboId, int slotIndex, int team)
 {
     HWND hCombo = GetDlgItem(hDlg, comboId);
     if (!hCombo) return;
+    int32_t& character = GetTeamSelection(team).chars[slotIndex];
 
     // First try to get the selected item
     int sel = (int)SendMessageA(hCombo, CB_GETCURSEL, 0, 0);
     if (sel != CB_ERR) {
-        int charId = (int)SendMessageA(hCombo, CB_GETITEMDATA, sel, 0);
-        if (team == 0)
-            g_dialogConfig.p1Chars[slotIndex] = charId;
-        else
-            g_dialogConfig.p2Chars[slotIndex] = charId;
+        character = (int)SendMessageA(hCombo, CB_GETITEMDATA, sel, 0);
         return;
     }
 
@@ -3830,19 +3737,13 @@ static void UpdateCharFromCombo(HWND hDlg, int comboId, int slotIndex, int team)
     GetWindowTextA(hCombo, buf, sizeof(buf));
     for (int i = 0; i < kCharNameCount; i++) {
         if (_stricmp(buf, kCharNames[i]) == 0) {
-            if (team == 0)
-                g_dialogConfig.p1Chars[slotIndex] = i;
-            else
-                g_dialogConfig.p2Chars[slotIndex] = i;
+            character = i;
             return;
         }
     }
 
     // No match found — keep default
-    if (team == 0)
-        g_dialogConfig.p1Chars[slotIndex] = 1;
-    else
-        g_dialogConfig.p2Chars[slotIndex] = 1;
+    character = 1;
 }
 
 static void UpdateSlotOptionsFromCombos(HWND hDlg)
@@ -3864,13 +3765,9 @@ static void UpdateSlotOptionsFromCombos(HWND hDlg)
                 assist = (int)SendMessageA(hAssist, CB_GETITEMDATA, selected, 0);
         }
 
-        if (index < 3) {
-            g_dialogConfig.p1Colors[index] = color;
-            g_dialogConfig.p1Assists[index] = assist;
-        } else {
-            g_dialogConfig.p2Colors[index - 3] = color;
-            g_dialogConfig.p2Assists[index - 3] = assist;
-        }
+        const auto selection = GetTeamSelection(index / 3);
+        selection.colors[index % 3] = color;
+        selection.assists[index % 3] = assist;
     }
 }
 
@@ -3898,22 +3795,13 @@ static void ApplySavedRoster(HWND hDlg, int team, size_t preset)
 {
     if (team < 0 || team > 1 || preset >= g_savedRosterCount) return;
     const SavedRoster& roster = g_savedRosters[preset];
-    int* chars = team == 0 ? g_dialogConfig.p1Chars : g_dialogConfig.p2Chars;
-    int* colors = team == 0 ? g_dialogConfig.p1Colors : g_dialogConfig.p2Colors;
-    int* assists = team == 0 ? g_dialogConfig.p1Assists : g_dialogConfig.p2Assists;
+    const auto selection = GetTeamSelection(team);
     for (int slot = 0; slot < 3; ++slot) {
-        const int index = team * 3 + slot;
-        chars[slot] = roster.chars[slot];
-        colors[slot] = std::clamp(roster.colors[slot], 0,
-            GetCharacterArchiveVariantCount(chars[slot]) - 1);
-        assists[slot] = std::clamp(roster.assists[slot], 0, 2);
-        HWND charCombo = GetDlgItem(hDlg, ID_P1_SLOT1 + index);
-        SendMessageA(charCombo, CB_SETCURSEL,
-                     FindComboItemByData(charCombo, chars[slot]), 0);
-        PopulateColorCombo(GetDlgItem(hDlg, ID_P1_COLOR1 + index),
-                           chars[slot], colors[slot]);
-        PopulateAssistCombo(GetDlgItem(hDlg, ID_P1_ASSIST1 + index),
-                            chars[slot], assists[slot]);
+        selection.chars[slot] = roster.chars[slot];
+        selection.colors[slot] = std::clamp(roster.colors[slot], 0,
+            GetCharacterArchiveVariantCount(selection.chars[slot]) - 1);
+        selection.assists[slot] = std::clamp(roster.assists[slot], 0, 2);
+        RefreshTeamSlot(hDlg, team, slot);
     }
 
     if (team == (g_isHost ? 0 : 1)) SaveLocalConnectSelection(hDlg);
@@ -3949,6 +3837,7 @@ static void RandomizeCharacters(HWND hDlg)
     const int firstTeam = g_connectSetupActive ? (g_isHost ? 0 : 1) : 0;
     const int teamCount = g_connectSetupActive ? 1 : 2;
     for (int team = firstTeam; team < firstTeam + teamCount; ++team) {
+        const auto selection = GetTeamSelection(team);
         int characters[kPlayableCharacterCount];
         for (int i = 0; i < kPlayableCharacterCount; ++i)
             characters[i] = i + 1;
@@ -3958,24 +3847,11 @@ static void RandomizeCharacters(HWND hDlg)
                 NextCharacterRandom() % (kPlayableCharacterCount - slot));
             std::swap(characters[slot], characters[selected]);
             int characterId = characters[slot];
-            int index = team * 3 + slot;
-            int* teamCharacters = team == 0
-                ? g_dialogConfig.p1Chars : g_dialogConfig.p2Chars;
-            int* teamColors = team == 0
-                ? g_dialogConfig.p1Colors : g_dialogConfig.p2Colors;
-            int* teamAssists = team == 0
-                ? g_dialogConfig.p1Assists : g_dialogConfig.p2Assists;
-
-            teamCharacters[slot] = characterId;
-            teamColors[slot] = static_cast<int>(NextCharacterRandom() %
+            selection.chars[slot] = characterId;
+            selection.colors[slot] = static_cast<int>(NextCharacterRandom() %
                 GetCharacterArchiveVariantCount(characterId));
-            teamAssists[slot] = static_cast<int>(NextCharacterRandom() % 3);
-            SendMessageA(GetDlgItem(hDlg, ID_P1_SLOT1 + index),
-                         CB_SETCURSEL, characterId, 0);
-            PopulateColorCombo(GetDlgItem(hDlg, ID_P1_COLOR1 + index),
-                               characterId, teamColors[slot]);
-            PopulateAssistCombo(GetDlgItem(hDlg, ID_P1_ASSIST1 + index),
-                                characterId, teamAssists[slot]);
+            selection.assists[slot] = static_cast<int>(NextCharacterRandom() % 3);
+            RefreshTeamSlot(hDlg, team, slot);
         }
     }
 }
