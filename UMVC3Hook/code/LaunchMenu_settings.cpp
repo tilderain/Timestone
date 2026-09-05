@@ -6,6 +6,8 @@
 #include <cstdio>
 #include <cstring>
 #include <cstdint>
+#include <shlobj.h>
+#include <cwchar>
 
 extern void HookLog(const char* fmt, ...);
 
@@ -16,12 +18,27 @@ constexpr int ID_SAVE = 101;
 constexpr int ID_CANCEL = 102;
 constexpr int ID_DARK_MODE = 103;
 constexpr int ID_SINGLE_THREAD_DESCRIPTION = 104;
+constexpr int ID_RESOLUTION = 105;
+constexpr int ID_FULLSCREEN = 106;
 constexpr char SETTINGS_CLASS[] = "TimestoneAdvancedConfig";
 
 bool g_settingsLoaded = false;
 bool g_runSingleThreaded = false;
 bool g_darkMode = true;
 bool g_savedDarkMode = true;
+char g_gameResolution[64] = {};
+bool g_gameFullscreen = false;
+
+bool GetGameConfigPath(wchar_t (&path)[MAX_PATH])
+{
+    if (FAILED(SHGetFolderPathW(nullptr, CSIDL_LOCAL_APPDATA, nullptr,
+                                SHGFP_TYPE_CURRENT, path))) return false;
+    constexpr wchar_t suffix[] = L"\\CAPCOM\\ULTIMATE MARVEL VS. CAPCOM 3\\config.ini";
+    if (wcslen(path) + wcslen(suffix) >= MAX_PATH) return false;
+    wcscat(path, suffix);
+    const DWORD attributes = GetFileAttributesW(path);
+    return attributes != INVALID_FILE_ATTRIBUTES && !(attributes & FILE_ATTRIBUTE_DIRECTORY);
+}
 
 UINT GetWindowDpi(HWND window)
 {
@@ -122,8 +139,42 @@ void LoadSettings()
     g_settingsLoaded = true;
 }
 
-void SaveSettings(HWND window)
+bool SaveSettings(HWND window)
 {
+    if (IsWindowEnabled(GetDlgItem(window, ID_RESOLUTION))) {
+        char resolution[64] = {};
+        GetDlgItemTextA(window, ID_RESOLUTION, resolution, sizeof(resolution));
+        int width = 0, height = 0;
+        char extra = 0;
+        if (sscanf(resolution, " %dx%d %c", &width, &height, &extra) != 2 ||
+            width < 640 || height < 480 || width > 8192 || height > 8192) {
+            MessageBoxA(window, "Enter a resolution such as 1920x1080.\n"
+                        "Width must be 640-8192 and height 480-8192.",
+                        "Invalid resolution", MB_OK | MB_ICONWARNING);
+            SetFocus(GetDlgItem(window, ID_RESOLUTION));
+            return false;
+        }
+        snprintf(resolution, sizeof(resolution), "%dx%d", width, height);
+        const bool fullscreen = SendMessageA(GetDlgItem(window, ID_FULLSCREEN),
+                                             BM_GETCHECK, 0, 0) == BST_CHECKED;
+        if (strcmp(resolution, g_gameResolution) != 0 || fullscreen != g_gameFullscreen) {
+            wchar_t path[MAX_PATH] = {}, value[64] = {};
+            swprintf(value, 64, L"%dx%d", width, height);
+            if (!GetGameConfigPath(path) ||
+                (strcmp(resolution, g_gameResolution) != 0 &&
+                 !WritePrivateProfileStringW(L"DISPLAY", L"Resolution", value, path)) ||
+                (fullscreen != g_gameFullscreen &&
+                 !WritePrivateProfileStringW(L"DISPLAY", L"FullScreen",
+                                              fullscreen ? L"ON" : L"OFF", path))) {
+                MessageBoxA(window, "Could not save MVC3's config.ini. Check that it exists "
+                            "and is writable. Some changes may already have been saved.",
+                            "Game display settings", MB_OK | MB_ICONERROR);
+                return false;
+            }
+            snprintf(g_gameResolution, sizeof(g_gameResolution), "%s", resolution);
+            g_gameFullscreen = fullscreen;
+        }
+    }
     g_runSingleThreaded = SendMessageA(
         GetDlgItem(window, ID_SINGLE_THREADED), BM_GETCHECK, 0, 0) == BST_CHECKED;
 
@@ -144,6 +195,7 @@ void SaveSettings(HWND window)
         HookLog("LaunchMenu: saved entire-game single-thread setting: %s\n",
                 g_runSingleThreaded ? "enabled" : "disabled");
     }
+    return true;
 }
 
 LRESULT CALLBACK SettingsWndProc(HWND window, UINT message,
@@ -161,26 +213,62 @@ LRESULT CALLBACK SettingsWndProc(HWND window, UINT message,
             nullptr, nullptr);
         SendMessageA(darkMode, BM_SETCHECK,
                      g_savedDarkMode ? BST_CHECKED : BST_UNCHECKED, 0);
+        CreateWindowA("STATIC", "Display settings",
+            WS_VISIBLE | WS_CHILD, 18, 48, 374, 20, window, nullptr, nullptr, nullptr);
+        CreateWindowA("STATIC", "Resolution:", WS_VISIBLE | WS_CHILD,
+            18, 78, 80, 20, window, nullptr, nullptr, nullptr);
+        HWND resolution = CreateWindowA("COMBOBOX", "",
+            WS_VISIBLE | WS_CHILD | WS_TABSTOP | CBS_DROPDOWN | CBS_AUTOHSCROLL,
+            100, 74, 170, 180, window,
+            reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_RESOLUTION)), nullptr, nullptr);
+        const char* resolutions[] = {"640x480", "1280x720", "1600x900", "1920x1080",
+                                     "2560x1440", "3840x2160"};
+        for (const char* value : resolutions)
+            SendMessageA(resolution, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(value));
+        SendMessageA(resolution, CB_LIMITTEXT, 63, 0);
+        HWND fullscreen = CreateWindowA("BUTTON", "Fullscreen",
+            WS_VISIBLE | WS_CHILD | WS_TABSTOP | BS_AUTOCHECKBOX,
+            282, 74, 110, 24, window,
+            reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_FULLSCREEN)), nullptr, nullptr);
+        wchar_t gamePath[MAX_PATH] = {}, value[64] = {};
+        const bool hasConfig = GetGameConfigPath(gamePath);
+        if (hasConfig) {
+            GetPrivateProfileStringW(L"DISPLAY", L"Resolution", L"1280x720",
+                                     value, 64, gamePath);
+            WideCharToMultiByte(CP_ACP, 0, value, -1, g_gameResolution,
+                                sizeof(g_gameResolution), nullptr, nullptr);
+            SetWindowTextA(resolution, g_gameResolution);
+            GetPrivateProfileStringW(L"DISPLAY", L"FullScreen", L"OFF", value, 64, gamePath);
+            g_gameFullscreen = _wcsicmp(value, L"ON") == 0 ||
+                               _wcsicmp(value, L"true") == 0 || _wtoi(value) != 0;
+            SendMessageA(fullscreen, BM_SETCHECK,
+                         g_gameFullscreen ? BST_CHECKED : BST_UNCHECKED, 0);
+        }
+        EnableWindow(resolution, hasConfig);
+        EnableWindow(fullscreen, hasConfig);
+        CreateWindowA("STATIC", hasConfig ? ""
+            : "config.ini not found. Run the game once to create it.",
+            WS_VISIBLE | WS_CHILD, 18, 106, 374, 34, window, nullptr, nullptr, nullptr);
         HWND description = CreateWindowA(
             "STATIC",
             "Sets game worker count to 1. May massively improve performance by 100% "
             "on pcs with bad thread work, but may decrease performance by about 10% on higher end pcs.",
-            WS_VISIBLE | WS_CHILD, 18, 48, 374, 50,
+            WS_VISIBLE | WS_CHILD, 18, 150, 374, 50,
             window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_SINGLE_THREAD_DESCRIPTION)),
             nullptr, nullptr);
         HWND checkbox = CreateWindowA(
             "BUTTON", "Run entire game single-threaded",
             WS_VISIBLE | WS_CHILD | WS_TABSTOP | BS_AUTOCHECKBOX,
-            18, 104, 300, 24, window,
+            18, 206, 300, 24, window,
             reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_SINGLE_THREADED)),
             nullptr, nullptr);
         HWND save = CreateWindowA(
             "BUTTON", "Save", WS_VISIBLE | WS_CHILD | WS_TABSTOP | BS_DEFPUSHBUTTON,
-            222, 140, 82, 28, window,
+            222, 242, 82, 28, window,
             reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_SAVE)), nullptr, nullptr);
         HWND cancel = CreateWindowA(
             "BUTTON", "Cancel", WS_VISIBLE | WS_CHILD | WS_TABSTOP | BS_PUSHBUTTON,
-            310, 140, 82, 28, window,
+            310, 242, 82, 28, window,
             reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_CANCEL)), nullptr, nullptr);
         ApplyDpi(window, 96, GetWindowDpi(window));
         ApplyLaunchMenuDarkTheme(window);
@@ -211,7 +299,7 @@ LRESULT CALLBACK SettingsWndProc(HWND window, UINT message,
             return 0;
         }
         if (LOWORD(wParam) == ID_SAVE) {
-            SaveSettings(window);
+            if (!SaveSettings(window)) return 0;
             DestroyWindow(window);
             return 0;
         }
@@ -312,7 +400,7 @@ void ShowAdvancedConfigModal(HWND owner)
     GetWindowRect(owner, &ownerRect);
     const UINT dpi = GetWindowDpi(owner);
     const int width = MulDiv(428, dpi, 96);
-    const int height = MulDiv(214, dpi, 96);
+    const int height = MulDiv(316, dpi, 96);
     const int x = ownerRect.left + ((ownerRect.right - ownerRect.left) - width) / 2;
     const int y = ownerRect.top + ((ownerRect.bottom - ownerRect.top) - height) / 2;
 
