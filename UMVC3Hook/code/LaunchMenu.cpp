@@ -678,7 +678,7 @@ void CleanupNetworkOnExit()
         return;
 
     // If netplay took over the host/peer, let it do the cleanup
-    if (Netplay_IsActive()) {
+    if (Netplay_OwnsHost()) {
         Netplay_Shutdown();
         g_dialogConfig.enetHost = nullptr;
         g_dialogConfig.enetPeer = nullptr;

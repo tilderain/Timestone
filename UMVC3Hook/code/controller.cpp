@@ -396,9 +396,10 @@ static void ResetDesyncDetection()
 }
 
 // ---------------------------------------------------------------------------
-// Frame advantage (GGPO-style) — RTT-based frame-count timesync
+// Frame-offset timesync. Compare both peers' observed input-frame offsets;
+// common input delay/transit lag cancels without using ENet's smoothed RTT.
 // ---------------------------------------------------------------------------
-int32_t      g_localFrameAdvantage  = 0;  // negative = we're ahead of remote
+int32_t      g_localFrameAdvantage  = 0;  // remote input tail minus local frame
 int32_t      g_remoteFrameAdvantage = 0;  // received from peer via packet
 
 // Timesync window averaging (GGPO-style)
@@ -739,52 +740,10 @@ extern "C" void Controller_ResolveRemoteInput(int32_t frame)
     }
     else
     {
-        // Drain any inbound packets that arrived since last check
-        InputPacket pkt;
-        while (Netplay_GetInboundPacket(pkt))
-        {
-            if (pkt.battle_generation != FrameStepper_GetBattleGeneration())
-                continue;
-
-            // Even packets whose input history is entirely stale carry the
-            // next checksum in the sender's confirmed checksum stream.
-            QueueInboundChecksum(pkt);
-
-            int32_t pktMaxFrame = (int32_t)pkt.start_frame + NET_HISTORY_SIZE - 1;
-            if (pktMaxFrame <= g_lastRemoteFrame) {
-                TraceInputPacket("IPRX", "resolve-checksum-only", g_netFrameCount, pkt,
-                                 0, 0, 0, 0);
-                continue;
-            }
-            uint16_t acceptedMask = 0;
-            uint16_t changedMask = 0;
-            uint16_t priorConfirmedMask = 0;
-            for (size_t i = 0; i < NET_HISTORY_SIZE; i++)
-            {
-                int32_t targetFrame = (int32_t)pkt.start_frame + (int32_t)i;
-                if (targetFrame >= 0)
-                {
-                    uint32_t targetIdx = (uint32_t)targetFrame % RING_SIZE;
-                    bool wasConfirmed = IsFrameConfirmed(targetFrame);
-                    uint32_t previous = g_receivedInput[targetIdx];
-                    if (wasConfirmed) priorConfirmedMask |= (uint16_t)(1u << i);
-                    if (!wasConfirmed || previous != pkt.inputs[i])
-                        changedMask |= (uint16_t)(1u << i);
-                    acceptedMask |= (uint16_t)(1u << i);
-                    g_receivedInput[targetIdx] = pkt.inputs[i];
-                    g_confirmedFrame[targetIdx] = targetFrame;
-                    if (targetFrame > g_lastRemoteFrame)
-                    {
-                        g_lastRemoteFrame = targetFrame;
-                        g_lastRemoteInput = pkt.inputs[i];
-                    }
-                }
-            }
-
-            LogReceivedPacket(pkt);
-            TraceInputPacket("IPRX", "resolve", g_netFrameCount, pkt, 0,
-                             acceptedMask, changedMask, priorConfirmedMask);
-        }
+        // Receive directly into the confirmed timeline. During re-simulation
+        // the pump is intentionally disabled so control actions cannot change
+        // live state halfway through a restore/replay.
+        Netplay_Pump();
 
         if (IsFrameConfirmed(frame))
         {
@@ -1409,57 +1368,48 @@ static void __fastcall hkStepResult9_10_11(uint64_t sAction)
 // hkprocessFrameInput scopes the current character; hkbuttonRemap captures
 // local logical input and substitutes the scheduled local or remote timeline.
 // ---------------------------------------------------------------------------
-static void DrainAndProcessPackets()
+void Controller_ReceiveNetplayInput(const InputPacket& inPkt)
 {
-    InputPacket inPkt;
-    while (Netplay_GetInboundPacket(inPkt))
+    if (inPkt.battle_generation != FrameStepper_GetBattleGeneration() ||
+        inPkt.start_frame > INT32_MAX - (NET_HISTORY_SIZE - 1))
+        return;
+
+    QueueInboundChecksum(inPkt);
+
+    uint16_t acceptedMask = 0;
+    uint16_t changedMask = 0;
+    uint16_t priorConfirmedMask = 0;
+    for (size_t i = 0; i < NET_HISTORY_SIZE; i++)
     {
-        if (inPkt.battle_generation != FrameStepper_GetBattleGeneration())
-            continue;
-
-        QueueInboundChecksum(inPkt);
-
-        uint16_t acceptedMask = 0;
-        uint16_t changedMask = 0;
-        uint16_t priorConfirmedMask = 0;
-        // 1. Process inputs from the packet
-        size_t framesToProcess = NET_HISTORY_SIZE;
-        for (size_t i = 0; i < framesToProcess; i++)
+        int32_t targetFrame = (int32_t)inPkt.start_frame + (int32_t)i;
+        bool wasConfirmed = IsFrameConfirmed(targetFrame);
+        if (wasConfirmed) priorConfirmedMask |= (uint16_t)(1u << i);
+        // History packets may revise a future frame during a delay transition.
+        // Accept that newest value until execution; past frames stay immutable.
+        if (!wasConfirmed || targetFrame > g_netFrameCount)
         {
-            int32_t targetFrame = (int32_t)inPkt.start_frame + (int32_t)i;
-            if (targetFrame >= 0)
-            {
-                bool wasConfirmed = IsFrameConfirmed(targetFrame);
-                if (wasConfirmed) priorConfirmedMask |= (uint16_t)(1u << i);
-                // History packets may revise a future frame during a delay
-                // transition. Accept that newest value until the frame has
-                // executed; past frames remain immutable in delay mode.
-                if (!IsFrameConfirmed(targetFrame) || targetFrame > g_netFrameCount)
-                {
-                    uint32_t idx = (uint32_t)targetFrame % RING_SIZE;
-                    uint32_t previous = g_receivedInput[idx];
-                    if (!wasConfirmed || previous != inPkt.inputs[i])
-                        changedMask |= (uint16_t)(1u << i);
-                    acceptedMask |= (uint16_t)(1u << i);
-                    g_receivedInput[idx] = inPkt.inputs[i];
-                    g_confirmedFrame[idx] = targetFrame;
-                    Rollback_UpdateRemoteInput(targetFrame, inPkt.inputs[i]);
-                }
-
-                // Track the absolute furthest remote frame for prediction reference
-                if (targetFrame > g_lastRemoteFrame)
-                {
-                    g_lastRemoteFrame = targetFrame;
-                    g_lastRemoteInput = inPkt.inputs[i];
-                }
-            }
+            uint32_t idx = (uint32_t)targetFrame % RING_SIZE;
+            uint32_t previous = g_receivedInput[idx];
+            if (!wasConfirmed || previous != inPkt.inputs[i])
+                changedMask |= (uint16_t)(1u << i);
+            acceptedMask |= (uint16_t)(1u << i);
+            g_receivedInput[idx] = inPkt.inputs[i];
+            g_confirmedFrame[idx] = targetFrame;
+            Rollback_UpdateRemoteInput(targetFrame, inPkt.inputs[i]);
         }
 
-        g_remoteFrameAdvantage = inPkt.frame_advantage;
-        LogReceivedPacket(inPkt);
-        TraceInputPacket("IPRX", "frame-start", g_netFrameCount, inPkt, 0,
-                         acceptedMask, changedMask, priorConfirmedMask);
+        // Track the absolute furthest remote frame for prediction reference.
+        if (targetFrame > g_lastRemoteFrame)
+        {
+            g_lastRemoteFrame = targetFrame;
+            g_lastRemoteInput = inPkt.inputs[i];
+        }
     }
+
+    g_remoteFrameAdvantage = inPkt.frame_advantage;
+    LogReceivedPacket(inPkt);
+    TraceInputPacket("IPRX", "frame-start", g_netFrameCount, inPkt, 0,
+                     acceptedMask, changedMask, priorConfirmedMask);
 }
 
 static bool WaitForConfirmedFrame(int32_t frame, const char* reason)
@@ -1471,14 +1421,14 @@ static bool WaitForConfirmedFrame(int32_t frame, const char* reason)
     //HookLog("Netplay: waiting for remote input frame %d (%s, local=%d, lastRemote=%d)\n",
     //        frame, reason, g_netFrameCount, g_lastRemoteFrame);
     while (!IsFrameConfirmed(frame) && Netplay_IsActive() &&
-           !Netplay_HasInboundRestartMatch())
+           !FrameStepper_HasPendingRemoteAction())
     {
         SwitchToThread();
-        DrainAndProcessPackets();
+        Netplay_Pump();
     }
-    if (!IsFrameConfirmed(frame) && Netplay_HasInboundRestartMatch()) {
-        Rollback_FreezeWatchdogHeartbeat("restart pending", g_netFrameCount);
-        HookLog("Netplay: interrupted %s wait for pending match restart at frame %d\n",
+    if (FrameStepper_HasPendingRemoteAction()) {
+        Rollback_FreezeWatchdogHeartbeat("remote action pending", g_netFrameCount);
+        HookLog("Netplay: interrupted %s wait for pending remote action at frame %d\n",
                 reason, g_netFrameCount);
         return false;
     }
@@ -1495,20 +1445,24 @@ static bool WaitForPredictionBudgetFrame(int32_t frame)
     Rollback_FreezeWatchdogHeartbeat("prediction budget exhausted",
                                      g_netFrameCount);
     while (!IsFrameConfirmed(frame) && Netplay_IsActive() &&
-           !Netplay_HasInboundRestartMatch() &&
+           !FrameStepper_HasPendingRemoteAction() &&
            !Controller_ShouldShowPredictionBudgetExhausted())
     {
         SwitchToThread();
-        DrainAndProcessPackets();
+        Netplay_Pump();
     }
 
+    if (FrameStepper_HasPendingRemoteAction()) {
+        ClearPredictionBudgetExhausted();
+        return false;
+    }
     if (IsFrameConfirmed(frame)) {
         ClearPredictionBudgetExhausted();
         Rollback_FreezeWatchdogHeartbeat("prediction-budget-wait-complete",
                                          g_netFrameCount);
         return true;
     }
-    if (!Netplay_IsActive() || Netplay_HasInboundRestartMatch())
+    if (!Netplay_IsActive())
         ClearPredictionBudgetExhausted();
     return false;
 }
@@ -1540,7 +1494,9 @@ extern "C" void Controller_OnFrameStart()
     // Use the same ingestion path here and inside waits. Previously each path
     // had different stale-packet handling, so a packet could advance
     // g_lastRemoteFrame without confirming the frame a waiter needed.
-    DrainAndProcessPackets();
+    Netplay_Pump();
+
+    if (FrameStepper_HasPendingRemoteAction()) return;
 
     // Confirm the completed speculative timeline under the old rollback
     // setting before a smaller window can stop checking it. Never wait for the
@@ -1728,15 +1684,15 @@ extern "C" void Controller_OnFrameStart()
             g_netFrameCount, localInput, g_usedRemoteInput[idx]);
     }
 
-    // --- GGPO-style frame advantage timesync.
-    //     Estimate remote frame: last received frame + RTT converted to frames.
-    //     g_localFrameAdvantage = remote_estimate - local_frame
-    //       positive = we're behind, negative = we're ahead
+    // --- Frame-offset timesync.
+    // Compare the raw observations advertised by both peers. Equal transit
+    // lag/input delay adds the same offset to each and cancels in the comparison.
+    // Do NOT add local RTT: loading/frame-paced ACKs can leave the two ENet RTT
+    // estimates hundreds of milliseconds apart even on localhost. That turns
+    // startup latency into a fictitious frame lead and sustained timesync sleeps.
     if (g_netFrameCount >= 0 && g_lastRemoteFrame >= 0)
     {
-        int32_t rttMs = (int32_t)Netplay_GetRTT();
-        int32_t remoteFrameEst = g_lastRemoteFrame + (rttMs * 60 / 1000);
-        g_localFrameAdvantage = remoteFrameEst - g_netFrameCount;
+        g_localFrameAdvantage = g_lastRemoteFrame - g_netFrameCount;
 
         // Advance timesync window
         uint32_t tidx = (uint32_t)g_timesyncFrameCount % TIMESYNC_WINDOW_SIZE;
@@ -1766,7 +1722,18 @@ extern "C" void Controller_OnFrameStart()
                 {
                     if (sleepFrames > TIMESYNC_MAX_FRAME_ADVANTAGE)
                         sleepFrames = TIMESYNC_MAX_FRAME_ADVANTAGE;
-                    Sleep(sleepFrames);
+                    // Distinguish deliberate time-sync waits from receive/pump
+                    // stalls without adding a per-frame log stream.
+                    static DWORD lastTimeSyncLog = 0;
+                    const DWORD now = GetTickCount();
+                    if (now - lastTimeSyncLog >= 1000) {
+                        HookLog("Netplay: timesync frame=%d sleep=%d ms "
+                                "local=%.2f remote=%.2f rtt=%d ms\n",
+                                g_netFrameCount, sleepFrames, avgLocal, avgRemote,
+                                (int32_t)Netplay_GetRTT()); // Diagnostic only, never a pacing input.
+                        lastTimeSyncLog = now;
+                    }
+                    //Sleep(sleepFrames); //temp disabled
                 }
             }
         }
