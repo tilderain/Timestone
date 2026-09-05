@@ -2288,11 +2288,8 @@ static void ReturnBattleSetupToLobbies(HWND hDlg)
     CloseLaunchMenu(hDlg, MenuAction::OpenCompact);
 }
 
-static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
+static INT_PTR InitializeLaunchMenu(HWND hDlg, UINT msg)
 {
-    switch (msg) {
-    case WM_CREATE:
-    case WM_INITDIALOG:
     {
         if (g_compactMode) {
             const CompactLaunchMenuControlIds ids = {
@@ -2543,25 +2540,11 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
         SetTimer(hDlg, ID_STEAM_POLL_TIMER, 50, NULL);
         return msg == WM_INITDIALOG ? TRUE : 0;
     }
+}
 
-    case WM_DPICHANGED:
+static INT_PTR HandleLaunchTimer(HWND hDlg, WPARAM wParam)
+{
     {
-        const UINT dpi = HIWORD(wParam);
-        UpdateDpiLayout(hDlg, dpi);
-        if (g_hChatWindow && GetParent(g_hChatWindow) == hDlg) {
-            UpdateDpiLayout(g_hChatWindow, dpi);
-            LayoutChatControls(g_hChatWindow);
-        }
-        const RECT* suggested = reinterpret_cast<const RECT*>(lParam);
-        SetWindowPos(hDlg, nullptr, suggested->left, suggested->top,
-                     suggested->right - suggested->left,
-                     suggested->bottom - suggested->top,
-                     SWP_NOACTIVATE | SWP_NOZORDER);
-        ApplyLaunchMenuFont(hDlg);
-        return 0;
-    }
-
-    case WM_TIMER:
         if (wParam == ID_STEAM_POLL_TIMER) {
             if (!g_isHost && g_dialogConfig.enetPeer && !g_localReady)
                 InvalidateRect(GetDlgItem(hDlg, ID_PEER_READY), NULL, FALSE);
@@ -2826,11 +2809,15 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
             UpdatePingLabel(hDlg);
         }
         return 0;
+    }
+}
 
-    case WM_NOTIFY:
+static INT_PTR HandleLaunchNotify(HWND hDlg, WPARAM wParam, LPARAM lParam)
+{
     {
         const NMHDR* header = reinterpret_cast<const NMHDR*>(lParam);
-        if (!header || header->idFrom != ID_STEAM_LIST) break;
+        if (!header || header->idFrom != ID_STEAM_LIST)
+            return DefWindowProcA(hDlg, WM_NOTIFY, wParam, lParam);
 
         if (header->code == LVN_ITEMCHANGED) {
             HWND hList = header->hwndFrom;
@@ -2882,10 +2869,13 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
                 }
             }
         }
-        break;
     }
+    return DefWindowProcA(hDlg, WM_NOTIFY, wParam, lParam);
+}
 
-    case WM_COMMAND:
+static INT_PTR HandleLaunchCommand(HWND hDlg, WPARAM wParam, LPARAM lParam)
+{
+    {
         switch (LOWORD(wParam)) {
         case ID_ADVANCED_CONFIG:
             ShowAdvancedConfigModal(hDlg);
@@ -3417,9 +3407,12 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
             return 0;
         }
         }
-        break;
+    }
+    return DefWindowProcA(hDlg, WM_COMMAND, wParam, lParam);
+}
 
-    case WM_DRAWITEM:
+static INT_PTR DrawLaunchMenuControl(HWND hDlg, WPARAM wParam, LPARAM lParam)
+{
     {
         const DRAWITEMSTRUCT* draw = reinterpret_cast<const DRAWITEMSTRUCT*>(lParam);
         if (draw->CtlID == ID_LAUNCH_TRAINING) {
@@ -3460,7 +3453,8 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
             return TRUE;
         }
 
-        if (draw->CtlID != ID_PEER_READY) break;
+        if (draw->CtlID != ID_PEER_READY)
+            return DefWindowProcA(hDlg, WM_DRAWITEM, wParam, lParam);
 
         RECT rect = draw->rcItem;
         const bool ready = g_isHost ? g_peerReady : g_localReady;
@@ -3489,6 +3483,43 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
             DrawFocusRect(draw->hDC, &rect);
         }
         return TRUE;
+    }
+}
+
+static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
+{
+    switch (msg) {
+    case WM_CREATE:
+    case WM_INITDIALOG:
+        return InitializeLaunchMenu(hDlg, msg);
+
+    case WM_TIMER:
+        return HandleLaunchTimer(hDlg, wParam);
+
+    case WM_NOTIFY:
+        return HandleLaunchNotify(hDlg, wParam, lParam);
+
+    case WM_COMMAND:
+        return HandleLaunchCommand(hDlg, wParam, lParam);
+
+    case WM_DRAWITEM:
+        return DrawLaunchMenuControl(hDlg, wParam, lParam);
+
+    case WM_DPICHANGED:
+    {
+        const UINT dpi = HIWORD(wParam);
+        UpdateDpiLayout(hDlg, dpi);
+        if (g_hChatWindow && GetParent(g_hChatWindow) == hDlg) {
+            UpdateDpiLayout(g_hChatWindow, dpi);
+            LayoutChatControls(g_hChatWindow);
+        }
+        const RECT* suggested = reinterpret_cast<const RECT*>(lParam);
+        SetWindowPos(hDlg, nullptr, suggested->left, suggested->top,
+                     suggested->right - suggested->left,
+                     suggested->bottom - suggested->top,
+                     SWP_NOACTIVATE | SWP_NOZORDER);
+        ApplyLaunchMenuFont(hDlg);
+        return 0;
     }
 
     case WM_CTLCOLORSTATIC:
