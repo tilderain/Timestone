@@ -1,9 +1,16 @@
 #include "launchmenu_dark.h"
 #include "LaunchMenu_settings.h"
+#include "../kiero/minhook/include/MinHook.h"
 
 #include <commctrl.h>
+#include <uxtheme.h>
+#include <vssym32.h>
 #include <algorithm>
 #include <cstring>
+#include <cwchar>
+#include <unordered_map>
+
+extern void HookLog(const char* fmt, ...);
 
 namespace {
 
@@ -14,18 +21,165 @@ constexpr COLORREF DARK_TEXT = RGB(224, 224, 224);
 constexpr COLORREF DARK_DISABLED = RGB(136, 136, 136);
 constexpr COLORREF DARK_BORDER = RGB(96, 96, 96);
 constexpr char DARK_ORIGINAL_PROC_PROP[] = "TimestoneDarkOriginalProc";
+constexpr char DARK_SCROLLBAR_PROP[] = "TimestoneDarkScrollbar";
 
 using SetWindowThemeFn = HRESULT (WINAPI*)(HWND, LPCWSTR, LPCWSTR);
 using AllowDarkModeForWindowFn = BOOL (WINAPI*)(HWND, BOOL);
 using SetPreferredAppModeFn = int (WINAPI*)(int);
 using AllowDarkModeForAppFn = BOOL (WINAPI*)(BOOL);
 using RefreshImmersiveColorPolicyStateFn = void (WINAPI*)();
+using OpenNcThemeDataFn = HANDLE (WINAPI*)(HWND, LPCWSTR);
+using OpenThemeDataForDpiFn = HTHEME (WINAPI*)(HWND, LPCWSTR, UINT);
 
 HMODULE g_uxTheme = nullptr;
 AllowDarkModeForWindowFn g_allowDarkModeForWindow = nullptr;
 SetWindowThemeFn g_setWindowTheme = nullptr;
 SetPreferredAppModeFn g_setPreferredAppMode = nullptr;
 AllowDarkModeForAppFn g_allowDarkModeForApp = nullptr;
+OpenNcThemeDataFn g_openNcThemeData = nullptr;
+OpenNcThemeDataFn g_openThemeData = nullptr;
+OpenThemeDataForDpiFn g_openThemeDataForDpi = nullptr;
+decltype(&DrawThemeBackground) g_drawThemeBackground = nullptr;
+decltype(&DrawThemeBackgroundEx) g_drawThemeBackgroundEx = nullptr;
+decltype(&CloseThemeData) g_closeThemeData = nullptr;
+SRWLOCK g_scrollbarThemesLock = SRWLOCK_INIT;
+std::unordered_map<HANDLE, HWND> g_scrollbarThemes;
+
+HANDLE TrackScrollbarTheme(HWND window, LPCWSTR classList, HANDLE theme)
+{
+    if (theme && classList &&
+        _wcsicmp(classList, L"ScrollBar") == 0) {
+        AcquireSRWLockExclusive(&g_scrollbarThemesLock);
+        g_scrollbarThemes[theme] = window;
+        ReleaseSRWLockExclusive(&g_scrollbarThemesLock);
+    }
+    return theme;
+}
+
+HANDLE WINAPI OpenLaunchNcThemeData(HWND window, LPCWSTR classList)
+{
+    return TrackScrollbarTheme(window, classList, g_openNcThemeData(window, classList));
+}
+
+HANDLE WINAPI OpenLaunchThemeData(HWND window, LPCWSTR classList)
+{
+    return TrackScrollbarTheme(window, classList, g_openThemeData(window, classList));
+}
+
+HTHEME WINAPI OpenLaunchThemeDataForDpi(HWND window, LPCWSTR classList, UINT dpi)
+{
+    // Wine's UXTHEME_ScrollBarDraw opens non-client scrollbars through this
+    // entry point with a null HWND, not OpenThemeData/OpenNcThemeData:
+    // https://github.com/wine-mirror/wine/blob/master/dlls/uxtheme/scrollbar.c
+    return TrackScrollbarTheme(window, classList, g_openThemeDataForDpi(window, classList, dpi));
+}
+
+HRESULT WINAPI CloseLaunchThemeData(HTHEME theme)
+{
+    AcquireSRWLockExclusive(&g_scrollbarThemesLock);
+    g_scrollbarThemes.erase(theme);
+    ReleaseSRWLockExclusive(&g_scrollbarThemesLock);
+    return g_closeThemeData(theme);
+}
+
+bool PaintScrollbarTheme(HTHEME theme, HDC dc, int part, int state,
+                         const RECT* rect, const RECT* clip)
+{
+    if (!dc || !rect || !IsLaunchMenuDarkModeEnabled()) return false;
+    AcquireSRWLockShared(&g_scrollbarThemesLock);
+    const auto found = g_scrollbarThemes.find(theme);
+    const bool scrollbar = found != g_scrollbarThemes.end();
+    const HWND owner = scrollbar ? found->second : nullptr;
+    ReleaseSRWLockShared(&g_scrollbarThemesLock);
+    if (!scrollbar || part < SBP_ARROWBTN || part > SBP_SIZEBOX) return false;
+    // Some implementations cache a scrollbar theme opened with a null HWND.
+    // In that case scope the paint using the destination window instead.
+    HWND target = WindowFromDC(dc);
+    if (!target) target = owner;
+    if (!target || !GetPropA(target, DARK_SCROLLBAR_PROP)) return false;
+    const int saved = SaveDC(dc);
+    if (!saved) return false;
+    IntersectClipRect(dc, rect->left, rect->top, rect->right, rect->bottom);
+    if (clip) IntersectClipRect(dc, clip->left, clip->top, clip->right, clip->bottom);
+    const auto fill = [dc](const RECT& area, COLORREF color) {
+        HBRUSH brush = CreateSolidBrush(color);
+        FillRect(dc, &area, brush);
+        DeleteObject(brush);
+    };
+    fill(*rect, DARK_CONTROL);
+    if (part == SBP_ARROWBTN) {
+        // Arrow states are four groups (up/down/left/right), each with
+        // normal/hot/pressed/disabled states. Size from BOTH dimensions.
+        const int direction = state >= ABS_UPHOVER ? state - ABS_UPHOVER : (state - 1) / 4;
+        const int interaction = state >= ABS_UPHOVER ? 1 : (state - 1) % 4;
+        fill(*rect, interaction == 2 ? DARK_BORDER : interaction == 1 ? DARK_FACE : DARK_CONTROL);
+        const int x = (rect->left + rect->right) / 2;
+        const int y = (rect->top + rect->bottom) / 2;
+        const int radius = std::max(1L, std::min(rect->right - rect->left, rect->bottom - rect->top) / 5);
+        POINT points[3];
+        const int sign = (direction == 1 || direction == 3) ? 1 : -1;
+        if (direction < 2) {
+            points[0] = {x, y + sign * radius};
+            points[1] = {x - radius, y - sign * radius};
+            points[2] = {x + radius, y - sign * radius};
+        } else {
+            points[0] = {x + sign * radius, y};
+            points[1] = {x - sign * radius, y - radius};
+            points[2] = {x - sign * radius, y + radius};
+        }
+        HBRUSH brush = CreateSolidBrush(interaction == 3 ? DARK_DISABLED : DARK_TEXT);
+        HGDIOBJ oldBrush = SelectObject(dc, brush);
+        HGDIOBJ oldPen = SelectObject(dc, GetStockObject(NULL_PEN));
+        Polygon(dc, points, 3);
+        SelectObject(dc, oldPen);
+        SelectObject(dc, oldBrush);
+        DeleteObject(brush);
+    } else if (part == SBP_THUMBBTNHORZ || part == SBP_THUMBBTNVERT ||
+               part == SBP_GRIPPERHORZ || part == SBP_GRIPPERVERT) {
+        RECT thumb = *rect;
+        if (part == SBP_THUMBBTNHORZ || part == SBP_THUMBBTNVERT)
+            InflateRect(&thumb, -1, -1);
+        fill(thumb, state == SCRBS_PRESSED ? DARK_TEXT :
+                    state == SCRBS_HOT || state == SCRBS_HOVER ? DARK_DISABLED : DARK_BORDER);
+    }
+    RestoreDC(dc, saved);
+    return true;
+}
+
+HRESULT WINAPI DrawLaunchThemeBackground(HTHEME theme, HDC dc, int part, int state,
+                                         const RECT* rect, const RECT* clip)
+{
+    if (PaintScrollbarTheme(theme, dc, part, state, rect, clip)) return S_OK;
+    return g_drawThemeBackground(theme, dc, part, state, rect, clip);
+}
+
+HRESULT WINAPI DrawLaunchThemeBackgroundEx(HTHEME theme, HDC dc, int part, int state,
+                                           const RECT* rect, const DTBGOPTS* options)
+{
+    const RECT* clip = options && (options->dwFlags & DTBG_CLIPRECT) ? &options->rcClip : nullptr;
+    if (PaintScrollbarTheme(theme, dc, part, state, rect, clip)) return S_OK;
+    return g_drawThemeBackgroundEx(theme, dc, part, state, rect, options);
+}
+
+void InstallScrollbarThemeHook(const char* name, void* replacement, void** original)
+{
+    const char* label = IS_INTRESOURCE(name) ? "OpenNcThemeData (ordinal 49)" : name;
+    void* target = reinterpret_cast<void*>(GetProcAddress(g_uxTheme, name));
+    if (!target) {
+        HookLog("LaunchMenu: Scrollbar theme export unavailable: %s\n", label);
+        return;
+    }
+    MH_STATUS status = MH_CreateHook(target, replacement, original);
+    if (status == MH_OK) {
+        status = MH_EnableHook(target);
+        if (status != MH_OK) {
+            MH_RemoveHook(target);
+            *original = nullptr;
+        }
+    }
+    if (status != MH_OK)
+        HookLog("LaunchMenu: Scrollbar theme hook %s failed (%d)\n", label, status);
+}
 
 HBRUSH DarkControlBrush()
 {
@@ -475,6 +629,17 @@ BOOL CALLBACK ApplyDarkControlTheme(HWND control, LPARAM setThemeParam)
     char className[32] = {};
     GetClassNameA(control, className, sizeof(className));
     const bool dark = IsLaunchMenuDarkModeEnabled();
+    if (dark)
+        SetPropA(control, DARK_SCROLLBAR_PROP, reinterpret_cast<HANDLE>(1));
+    else
+        RemovePropA(control, DARK_SCROLLBAR_PROP);
+    // Dropdown lists are popup windows, so EnumChildWindows misses them.
+    if (_stricmp(className, "COMBOBOX") == 0) {
+        COMBOBOXINFO info = {};
+        info.cbSize = sizeof(info);
+        if (GetComboBoxInfo(control, &info) && info.hwndList)
+            ApplyDarkControlTheme(info.hwndList, setThemeParam);
+    }
     if (!dark) {
         if (g_allowDarkModeForWindow) g_allowDarkModeForWindow(control, FALSE);
         if (setWindowTheme) setWindowTheme(control, nullptr, nullptr);
@@ -576,6 +741,37 @@ void InitializeLaunchMenuDarkMode()
     if (initialized) return;
     initialized = true;
 
+    g_uxTheme = LoadLibraryA("uxtheme.dll");
+    if (!g_uxTheme) return;
+    g_setWindowTheme = reinterpret_cast<SetWindowThemeFn>(
+        GetProcAddress(g_uxTheme, "SetWindowTheme"));
+    // Intercept the actual themed paint operation, including native scrolling
+    // loops, rather than painting over a light scrollbar afterward. Use the
+    // documented entry points on Wine/older Windows too.
+    const MH_STATUS status = MH_Initialize();
+    if (status == MH_OK || status == MH_ERROR_ALREADY_INITIALIZED) {
+        InstallScrollbarThemeHook("DrawThemeBackground",
+            reinterpret_cast<void*>(DrawLaunchThemeBackground),
+            reinterpret_cast<void**>(&g_drawThemeBackground));
+        InstallScrollbarThemeHook("DrawThemeBackgroundEx",
+            reinterpret_cast<void*>(DrawLaunchThemeBackgroundEx),
+            reinterpret_cast<void**>(&g_drawThemeBackgroundEx));
+        InstallScrollbarThemeHook("CloseThemeData",
+            reinterpret_cast<void*>(CloseLaunchThemeData),
+            reinterpret_cast<void**>(&g_closeThemeData));
+        // Do not retain handles if their lifetime cannot be tracked.
+        if (g_closeThemeData) {
+            InstallScrollbarThemeHook("OpenThemeData",
+                reinterpret_cast<void*>(OpenLaunchThemeData),
+                reinterpret_cast<void**>(&g_openThemeData));
+            InstallScrollbarThemeHook("OpenThemeDataForDpi",
+                reinterpret_cast<void*>(OpenLaunchThemeDataForDpi),
+                reinterpret_cast<void**>(&g_openThemeDataForDpi));
+        }
+    } else {
+        HookLog("LaunchMenu: Scrollbar hook initialization failed (%d)\n", status);
+    }
+
     OSVERSIONINFOW version = {};
     version.dwOSVersionInfoSize = sizeof(version);
     HMODULE ntdll = GetModuleHandleA("ntdll.dll");
@@ -589,13 +785,16 @@ void InitializeLaunchMenuDarkMode()
 
     // These dark-mode exports are undocumented, so resolve them only on the
     // Windows builds where their ordinals and signatures are known.
-    g_uxTheme = LoadLibraryA("uxtheme.dll");
-    if (!g_uxTheme) return;
-
     g_allowDarkModeForWindow = reinterpret_cast<AllowDarkModeForWindowFn>(
         GetProcAddress(g_uxTheme, MAKEINTRESOURCEA(133)));
-    g_setWindowTheme = reinterpret_cast<SetWindowThemeFn>(
-        GetProcAddress(g_uxTheme, "SetWindowTheme"));
+
+    // OpenNcThemeData is ordinal 49 on the Windows builds checked above.
+    // Only marked launch-menu controls are redirected; other game windows
+    // continue to use their original theme.
+    if (g_closeThemeData)
+        InstallScrollbarThemeHook(MAKEINTRESOURCEA(49),
+            reinterpret_cast<void*>(OpenLaunchNcThemeData),
+            reinterpret_cast<void**>(&g_openNcThemeData));
 
     if (version.dwBuildNumber >= 18362) {
         g_setPreferredAppMode = reinterpret_cast<SetPreferredAppModeFn>(
