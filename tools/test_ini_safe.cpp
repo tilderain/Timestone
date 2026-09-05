@@ -1,7 +1,9 @@
 // Standalone Win32 integration test; run under Windows or an isolated Wine prefix.
-// Build with MinGW C++20: tools/test_ini_safe.cpp + UMVC3Hook/IniSafe.cpp (-static).
+// Build with MinGW C++20: this file + UMVC3Hook/IniSafe.cpp +
+// UMVC3Hook/code/connect_roster.cpp (-static).
 #include "../UMVC3Hook/IniSafe.h"
 #include "../UMVC3Hook/IniText.h"
+#include "../UMVC3Hook/code/connect_roster.h"
 #include <windows.h>
 #include <cassert>
 #include <cstdio>
@@ -41,9 +43,14 @@ static void Write(const std::string& path, const std::string& bytes)
 int main(int argc, char** argv)
 {
     if (argc == 4) {
-        for (int i = 0; i < 20; ++i)
-            if (!IniSafe_WriteString("Workers", argv[3], std::to_string(i).c_str(), argv[2]))
+        for (int i = 0; i < 20; ++i) {
+            const IniSafe_Entry updates[] = {
+                {"Workers", argv[3], std::to_string(i)},
+                {"Workers", std::string(argv[3]) + "_pair", std::to_string(i)}
+            };
+            if (!IniSafe_WriteBatch(updates, 2, argv[2]))
                 return 1;
+        }
         return 0;
     }
 
@@ -162,11 +169,109 @@ int main(int argc, char** argv)
         assert(GetExitCodeProcess(worker, &status) && status == 0);
         CloseHandle(worker);
     }
-    for (int i = 0; i < 4; ++i)
+    for (int i = 0; i < 4; ++i) {
         assert(GetPrivateProfileIntA("Workers", ("key" + std::to_string(i)).c_str(),
                                     -1, path.c_str()) == 19);
+        assert(GetPrivateProfileIntA("Workers", ("key" + std::to_string(i) + "_pair").c_str(),
+                                    -1, path.c_str()) == 19);
+    }
 
+    // Batches preserve one pre-transaction backup and fail without partial changes.
+    Write(path, "[A]\nx=1\ny=1\n");
+    const IniSafe_Entry batch[] = {{"A", "x", "2"}, {"A", "y", "3"}};
+    assert(IniSafe_WriteBatch(batch, 2, path.c_str()));
+    assert(Read(path) == "[A]\nx=2\ny=3\n");
+    assert(Read(backup) == "[A]\nx=1\ny=1\n");
+    const IniSafe_Entry invalidBatch[] = {{"A", "x", "4"}, {"A", "y", "bad\nvalue"}};
+    assert(!IniSafe_WriteBatch(invalidBatch, 2, path.c_str()));
+    assert(Read(path) == "[A]\nx=2\ny=3\n");
+    blocked = CreateFileA(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
+                          OPEN_EXISTING, 0, nullptr);
+    assert(blocked != INVALID_HANDLE_VALUE);
+    const IniSafe_Entry changedBatch[] = {{"A", "x", "4"}, {"A", "y", "5"}};
+    assert(!IniSafe_WriteBatch(changedBatch, 2, path.c_str()));
+    CloseHandle(blocked);
+    assert(Read(path) == "[A]\nx=2\ny=3\n");
+
+    // Personal defaults never come from legacy or advanced-menu rosters.
+    const std::string legacy = std::string(directory) + "\\rollbacksetting.ini";
+    const std::string legacyBytes = "[P1]\nSlot1=49\n[P2]\nSlot1=48\n";
+    Write(legacy, legacyBytes);
+    const std::string destination = "; keep this\nmalformed line\n[Roster.P1]\nSlot1=42\n"
+        "[Roster.P2]\nSlot1=43\nSimpleMode=1\n[Training]\nStageId=30\n"
+        "[Network]\nHostIp=\nHostPort=5678\n[Other]\nKeep=yes\n";
+    Write(path, destination);
+    ConnectRoster defaults;
+    defaults.stageId = 9;
+    auto personal = ConnectRoster_Load(path.c_str(), defaults);
+    assert(personal.chars[0] == 1 && !personal.simpleMode && personal.stageId == 9);
+    assert(Read(path) == destination); // Reads don't write defaults or migrate anything.
+
+    int32_t chars[2][3] = {{11, 12, 13}, {21, 22, 23}};
+    int32_t colors[2][3] = {{1, 2, 3}, {4, 5, 6}};
+    int32_t assists[2][3] = {{0, 1, 2}, {2, 1, 0}};
+    bool simpleMode[2] = {true, false};
+    ConnectRoster_UpdateLocalTeam(personal, true, chars, colors, assists, simpleMode);
+    assert(ConnectRoster_Save(path.c_str(), personal));
+    assert(Read(backup) == destination); // One pre-batch backup for all 11 preferences.
+    auto saved = ConnectRoster_Load(path.c_str(), defaults);
+    for (int i = 0; i < 3; ++i) {
+        assert(saved.chars[i] == chars[0][i]);
+        assert(saved.colors[i] == colors[0][i]);
+        assert(saved.assists[i] == assists[0][i]);
+    }
+    assert(saved.simpleMode && saved.stageId == 9);
+    assert(Read(path).find(destination) == 0); // Advanced/other sections untouched.
+
+    // The same personal roster follows the player when joining as P2.
+    for (int i = 0; i < 3; ++i) {
+        chars[1][i] = saved.chars[i];
+        colors[1][i] = saved.colors[i];
+        assists[1][i] = saved.assists[i];
+        chars[0][i] = 40 + i; // New host's unrelated team.
+    }
+    simpleMode[0] = false;
+    simpleMode[1] = true;
+    ConnectRoster_UpdateLocalTeam(personal, false, chars, colors, assists, simpleMode);
+    assert(ConnectRoster_Save(path.c_str(), personal));
+    assert(Read(backup) == destination); // Role switch with same team is a no-op.
+
+    // Editing P2 changes only our preferences, never the host's or advanced P2.
+    chars[1][0] = 31;
+    colors[1][1] = 6;
+    assists[1][2] = 1;
+    simpleMode[1] = false;
+    ConnectRoster_UpdateLocalTeam(personal, false, chars, colors, assists, simpleMode);
+    assert(personal.stageId == 9); // No match/host stage is captured by this API.
+    assert(ConnectRoster_Save(path.c_str(), personal));
+    saved = ConnectRoster_Load(path.c_str(), defaults);
+    assert(saved.chars[0] == 31 && saved.colors[1] == 6 && saved.assists[2] == 1);
+    assert(!saved.simpleMode && saved.stageId == 9);
+    assert(GetPrivateProfileIntA("Roster.P1", "Slot1", -1, path.c_str()) == 42);
+    assert(GetPrivateProfileIntA("Roster.P2", "Slot1", -1, path.c_str()) == 43);
+    assert(GetPrivateProfileIntA("Training", "StageId", -1, path.c_str()) == 30);
+    assert(GetPrivateProfileIntA("Network", "HostPort", -1, path.c_str()) == 5678);
+    assert(Read(legacy) == legacyBytes);
+
+    // Preferred stage changes only explicitly, and survives later joining saves.
+    personal.stageId = 17;
+    assert(ConnectRoster_Save(path.c_str(), personal));
+    ConnectRoster_UpdateLocalTeam(personal, false, chars, colors, assists, simpleMode);
+    assert(ConnectRoster_Save(path.c_str(), personal));
+    assert(ConnectRoster_Load(path.c_str(), defaults).stageId == 17);
+
+    const auto beforePersonalFailure = Read(path);
+    blocked = CreateFileA(path.c_str(), GENERIC_READ, 0, nullptr, OPEN_EXISTING, 0, nullptr);
+    assert(blocked != INVALID_HANDLE_VALUE);
+    personal.chars[0] = 32;
+    assert(!ConnectRoster_Save(path.c_str(), personal));
+    CloseHandle(blocked);
+    assert(Read(path) == beforePersonalFailure);
+    assert(ConnectRoster_Save(path.c_str(), personal));
+    assert(ConnectRoster_Load(path.c_str(), defaults).chars[0] == 32);
+    assert(DeleteFileA(legacy.c_str()));
     assert(DeleteFileA(path.c_str()));
+
     assert(DeleteFileA(backup.c_str()));
     assert(RemoveDirectoryA(directory)); // Also checks that temporary files were cleaned up.
     puts("INI safe-write tests passed");

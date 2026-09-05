@@ -86,11 +86,11 @@ void SendTrainingLaunchPacket();
 // dual-training client before its training boot sequence begins.
 bool ApplyTrainingLaunchPacket(const LaunchTrainingPacket& packet);
 
-// Persist an in-match selected roster (chars/colors/assists, P1 = [0],
-// P2 = [1]) to rollbacksetting.ini in the same layout the launch dialog uses.
+// Persist only the local player's online selection to ConnectRoster. Offline
+// advanced/dual-training sessions use Roster.P1/P2 instead. Stage is unchanged.
 void SaveRosterToIni(const int32_t chars[2][3],
                      const int32_t colors[2][3],
-                     const int32_t assists[2][3]);
+                     const int32_t assists[2][3], const bool simpleMode[2]);
 
 // Idempotently notify the peer, leave Steam, and close the active network session.
 void CleanupNetworkOnExit();

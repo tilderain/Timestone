@@ -140,13 +140,26 @@ std::string Update(const std::string& bytes, const char* section,
     return IniText::Update<char>(bytes, section, key, value, bom);
 }
 
-bool Save(const char* section, const char* key, const char* value, const char* filename)
+bool Save(const IniSafe_Entry* entries, size_t count, const char* filename)
 {
-    if (!section || !*section || !key || !*key || !value || !filename || !*filename ||
-        strpbrk(section, "\r\n[]") || strpbrk(key, "\r\n=[]") || strpbrk(value, "\r\n")) {
+    if ((!entries && count) || !filename || !*filename) {
         SetLastError(ERROR_INVALID_PARAMETER);
         return false;
     }
+    for (size_t i = 0; i < count; ++i) {
+        const auto& entry = entries[i];
+        if (entry.section.empty() || entry.key.empty() ||
+            entry.section.find_first_of("\r\n[]") != std::string::npos ||
+            entry.key.find_first_of("\r\n=[]") != std::string::npos ||
+            entry.value.find_first_of("\r\n") != std::string::npos ||
+            entry.section.find('\0') != std::string::npos ||
+            entry.key.find('\0') != std::string::npos ||
+            entry.value.find('\0') != std::string::npos) {
+            SetLastError(ERROR_INVALID_PARAMETER);
+            return false;
+        }
+    }
+    if (!count) return true;
     char path[MAX_PATH] = {};
     char* leaf = nullptr;
     const DWORD length = GetFullPathNameA(filename, MAX_PATH, path, &leaf);
@@ -167,7 +180,16 @@ bool Save(const char* section, const char* key, const char* value, const char* f
     if (!exists && GetLastError() != ERROR_FILE_NOT_FOUND) return false;
     std::string before;
     if (exists && !Read(original.value, before)) return false;
-    const std::string after = Update(before, section, key, value);
+    std::string after = before;
+    for (size_t i = 0; i < count; ++i) {
+        const auto& entry = entries[i];
+        after = Update(after, entry.section.c_str(), entry.key.c_str(),
+                        entry.value.c_str());
+        if (after.size() > kMaxIniBytes) {
+            SetLastError(ERROR_FILE_TOO_LARGE);
+            return false;
+        }
+    }
     if (exists && before == after) return true;
     if (after.empty() || after.size() > kMaxIniBytes) {
         SetLastError(ERROR_FILE_TOO_LARGE);
@@ -194,16 +216,27 @@ bool Save(const char* section, const char* key, const char* value, const char* f
 }
 } // namespace
 
-bool IniSafe_WriteString(const char* section, const char* key,
-                         const char* value, const char* filename)
+bool IniSafe_WriteBatch(const IniSafe_Entry* entries, size_t count, const char* filename)
 {
     try {
-        if (Save(section, key, value, filename)) return true;
+        if (Save(entries, count, filename)) return true;
     } catch (...) {
         // Allocation failures must not escape through a UI callback or hook.
     }
-    HookLog("IniSafe: save failed; live file left untouched: %s [%s] %s (error=%lu)\n",
-            filename ? filename : "(null)", section ? section : "(null)",
-            key ? key : "(null)", static_cast<unsigned long>(GetLastError()));
+    HookLog("IniSafe: batch save failed; live file left untouched: %s (entries=%zu error=%lu)\n",
+            filename ? filename : "(null)", count, static_cast<unsigned long>(GetLastError()));
     return false;
+}
+
+bool IniSafe_WriteString(const char* section, const char* key,
+                         const char* value, const char* filename)
+{
+    if (!section || !key || !value) { SetLastError(ERROR_INVALID_PARAMETER); return false; }
+    try {
+        const IniSafe_Entry entry{section, key, value};
+        return IniSafe_WriteBatch(&entry, 1, filename);
+    } catch (...) {
+        HookLog("IniSafe: could not allocate setting update\n");
+        return false;
+    }
 }

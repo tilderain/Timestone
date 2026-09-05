@@ -1,5 +1,6 @@
 #include "LaunchMenu.h"
 #include "../IniSafe.h"
+#include "connect_roster.h"
 #include "LaunchMenu_compact.h"
 #include "LaunchMenu_settings.h"
 #include "assist_names.h"
@@ -20,6 +21,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <vector>
 
 // HookLog from dllmain.cpp
 extern void HookLog(const char* fmt, ...);
@@ -88,6 +90,11 @@ static LaunchDialogConfig g_dialogConfig = {
     nullptr      // enetPeer
 };
 static bool      g_isHost = false;          // true if we clicked Host, false if Connect
+static ConnectRoster g_connectRoster;
+static bool g_connectSetupActive = false;
+static bool g_connectSetupIsHost = false;
+static bool g_advancedRosterSession = false;
+static LaunchDialogConfig g_advancedRosterConfig = {};
 static bool      g_localReady = false;
 static bool      g_peerReady = false;
 static bool      g_autoTestLaunch = false;
@@ -365,21 +372,27 @@ bool ConfirmLaunchDisclaimer()
     return true;
 }
 
-static void LoadRollbackSettings()
+static void LoadRollbackSettings(bool advancedRoster = true)
 {
-    char rollbackPath[MAX_PATH] = {};
-    GetSettingsPath("rollbacksetting.ini", rollbackPath, sizeof(rollbackPath));
+    char settingsPath[MAX_PATH] = {};
+    GetSettingsPath("Timestone.ini", settingsPath, sizeof(settingsPath));
+    // No legacy migration/fallback. P1/P2 belong only to advanced/offline setup.
+    const auto readInt = [&](const char* section, const char* key, int fallback) {
+        return advancedRoster
+            ? GetPrivateProfileIntA(section, key, fallback, settingsPath)
+            : static_cast<UINT>(fallback);
+    };
     for (int i = 0; i < 3; ++i) {
         char key[16];
         snprintf(key, sizeof(key), "Slot%d", i + 1);
-        g_dialogConfig.p1Chars[i] = GetPrivateProfileIntA("P1", key, g_dialogConfig.p1Chars[i], rollbackPath);
-        g_dialogConfig.p2Chars[i] = GetPrivateProfileIntA("P2", key, g_dialogConfig.p2Chars[i], rollbackPath);
+        g_dialogConfig.p1Chars[i] = readInt("Roster.P1", key, g_dialogConfig.p1Chars[i]);
+        g_dialogConfig.p2Chars[i] = readInt("Roster.P2", key, g_dialogConfig.p2Chars[i]);
         snprintf(key, sizeof(key), "Color%d", i + 1);
-        g_dialogConfig.p1Colors[i] = GetPrivateProfileIntA("P1", key, g_dialogConfig.p1Colors[i], rollbackPath);
-        g_dialogConfig.p2Colors[i] = GetPrivateProfileIntA("P2", key, g_dialogConfig.p2Colors[i], rollbackPath);
+        g_dialogConfig.p1Colors[i] = readInt("Roster.P1", key, g_dialogConfig.p1Colors[i]);
+        g_dialogConfig.p2Colors[i] = readInt("Roster.P2", key, g_dialogConfig.p2Colors[i]);
         snprintf(key, sizeof(key), "Assist%d", i + 1);
-        g_dialogConfig.p1Assists[i] = GetPrivateProfileIntA("P1", key, g_dialogConfig.p1Assists[i], rollbackPath);
-        g_dialogConfig.p2Assists[i] = GetPrivateProfileIntA("P2", key, g_dialogConfig.p2Assists[i], rollbackPath);
+        g_dialogConfig.p1Assists[i] = readInt("Roster.P1", key, g_dialogConfig.p1Assists[i]);
+        g_dialogConfig.p2Assists[i] = readInt("Roster.P2", key, g_dialogConfig.p2Assists[i]);
 
         g_dialogConfig.p1Colors[i] = std::clamp(g_dialogConfig.p1Colors[i], 0,
             GetCharacterArchiveVariantCount(g_dialogConfig.p1Chars[i]) - 1);
@@ -388,29 +401,39 @@ static void LoadRollbackSettings()
         g_dialogConfig.p1Assists[i] = std::clamp(g_dialogConfig.p1Assists[i], 0, 2);
         g_dialogConfig.p2Assists[i] = std::clamp(g_dialogConfig.p2Assists[i], 0, 2);
     }
-    g_dialogConfig.simpleMode[0] = GetPrivateProfileIntA(
-        "P1", "SimpleMode", g_dialogConfig.simpleMode[0], rollbackPath) != 0;
-    g_dialogConfig.simpleMode[1] = GetPrivateProfileIntA(
-        "P2", "SimpleMode", g_dialogConfig.simpleMode[1], rollbackPath) != 0;
-    g_dialogConfig.stageId = GetPrivateProfileIntA(
-        "Training", "StageId", STAGE_BONNE_WONDERLAND, rollbackPath);
+    g_dialogConfig.simpleMode[0] = readInt(
+        "Roster.P1", "SimpleMode", g_dialogConfig.simpleMode[0]) != 0;
+    g_dialogConfig.simpleMode[1] = readInt(
+        "Roster.P2", "SimpleMode", g_dialogConfig.simpleMode[1]) != 0;
+    g_dialogConfig.stageId = readInt(
+        "Training", "StageId", STAGE_BONNE_WONDERLAND);
 
-    char settingsPath[MAX_PATH] = {};
-    GetSettingsPath("Timestone.ini", settingsPath, sizeof(settingsPath));
-    GetPrivateProfileStringA("Network", "HostIp", "",
+    const TrainingBootConfig& defaults = TrainingBoot_GetDefaultConfig();
+    ConnectRoster personalDefaults;
+    for (int i = 0; i < 3; ++i) {
+        personalDefaults.chars[i] = defaults.p1Chars[i];
+        personalDefaults.colors[i] = defaults.p1Colors[i];
+        personalDefaults.assists[i] = defaults.p1Assists[i];
+    }
+    personalDefaults.simpleMode = defaults.simpleMode[0];
+    personalDefaults.stageId = defaults.stageId;
+    g_connectRoster = ConnectRoster_Load(settingsPath, personalDefaults);
+    for (int i = 0; i < 3; ++i) {
+        if (g_connectRoster.chars[i] < 1 || g_connectRoster.chars[i] >= kCharNameCount)
+            g_connectRoster.chars[i] = personalDefaults.chars[i];
+        g_connectRoster.colors[i] = std::clamp(g_connectRoster.colors[i], 0,
+            GetCharacterArchiveVariantCount(g_connectRoster.chars[i]) - 1);
+        g_connectRoster.assists[i] = std::clamp(g_connectRoster.assists[i], 0, 2);
+    }
+    if (!std::any_of(kStages, kStages + kStageCount,
+            [](const StageEntry& stage) { return stage.id == g_connectRoster.stageId; }))
+        g_connectRoster.stageId = defaults.stageId;
+
+    GetPrivateProfileStringA("Network", "HostIp", "127.0.0.1",
                              g_dialogConfig.hostIp,
                              sizeof(g_dialogConfig.hostIp), settingsPath);
-    if (g_dialogConfig.hostIp[0] == '\0') {
-        GetPrivateProfileStringA("Network", "HostIp", "127.0.0.1",
-                                 g_dialogConfig.hostIp,
-                                 sizeof(g_dialogConfig.hostIp), rollbackPath);
-    }
 
-    char port[16] = {};
-    GetPrivateProfileStringA("Network", "HostPort", "", port, sizeof(port), settingsPath);
-    g_dialogConfig.hostPort = port[0] != '\0'
-        ? atoi(port)
-        : GetPrivateProfileIntA("Network", "HostPort", g_dialogConfig.hostPort, rollbackPath);
+    g_dialogConfig.hostPort = GetPrivateProfileIntA("Network", "HostPort", 7777, settingsPath);
     g_directConnectExpanded = GetPrivateProfileIntA(
         "Network", "DirectConnectExpanded", 0, settingsPath) != 0;
     g_lobbyTypeSelection = std::clamp(
@@ -441,48 +464,75 @@ static void SaveLobbyName()
     }
 }
 
-static void SaveRollbackSettings()
+static void SaveNetworkSettings()
 {
-    char rollbackPath[MAX_PATH] = {};
-    GetSettingsPath("rollbacksetting.ini", rollbackPath, sizeof(rollbackPath));
-    for (int i = 0; i < 3; ++i) {
-        char key[16], value[16];
-        snprintf(key, sizeof(key), "Slot%d", i + 1);
-        snprintf(value, sizeof(value), "%d", g_dialogConfig.p1Chars[i]);
-        IniSafe_WriteString("P1", key, value, rollbackPath);
-        snprintf(value, sizeof(value), "%d", g_dialogConfig.p2Chars[i]);
-        IniSafe_WriteString("P2", key, value, rollbackPath);
-        snprintf(key, sizeof(key), "Color%d", i + 1);
-        snprintf(value, sizeof(value), "%d", g_dialogConfig.p1Colors[i]);
-        IniSafe_WriteString("P1", key, value, rollbackPath);
-        snprintf(value, sizeof(value), "%d", g_dialogConfig.p2Colors[i]);
-        IniSafe_WriteString("P2", key, value, rollbackPath);
-        snprintf(key, sizeof(key), "Assist%d", i + 1);
-        snprintf(value, sizeof(value), "%d", g_dialogConfig.p1Assists[i]);
-        IniSafe_WriteString("P1", key, value, rollbackPath);
-        snprintf(value, sizeof(value), "%d", g_dialogConfig.p2Assists[i]);
-        IniSafe_WriteString("P2", key, value, rollbackPath);
-    }
-    IniSafe_WriteString("P1", "SimpleMode",
-                               g_dialogConfig.simpleMode[0] ? "1" : "0", rollbackPath);
-    IniSafe_WriteString("P2", "SimpleMode",
-                               g_dialogConfig.simpleMode[1] ? "1" : "0", rollbackPath);
-    char stageId[16];
-    snprintf(stageId, sizeof(stageId), "%d", g_dialogConfig.stageId);
-    IniSafe_WriteString("Training", "StageId", stageId, rollbackPath);
-
     char settingsPath[MAX_PATH] = {};
     GetSettingsPath("Timestone.ini", settingsPath, sizeof(settingsPath));
-    IniSafe_WriteString("Network", "HostIp", g_dialogConfig.hostIp, settingsPath);
-    char port[16];
-    snprintf(port, sizeof(port), "%d", g_dialogConfig.hostPort);
-    IniSafe_WriteString("Network", "HostPort", port, settingsPath);
+    const IniSafe_Entry entries[] = {
+        {"Network", "HostIp", g_dialogConfig.hostIp},
+        {"Network", "HostPort", std::to_string(g_dialogConfig.hostPort)}
+    };
+    IniSafe_WriteBatch(entries, 2, settingsPath);
+}
+
+static void SaveConnectRosterPreferences()
+{
+    char settingsPath[MAX_PATH] = {};
+    GetSettingsPath("Timestone.ini", settingsPath, sizeof(settingsPath));
+    if (!ConnectRoster_Save(settingsPath, g_connectRoster))
+        HookLog("LaunchMenu: failed to save personal connect roster\n");
+}
+
+static void SaveMenuSettings()
+{
+    if (g_connectSetupActive) {
+        // The personal copy is updated only by local UI edits, never packets.
+        SaveConnectRosterPreferences();
+        SaveNetworkSettings();
+        return;
+    }
+    if (!g_advancedRosterSession) { SaveNetworkSettings(); return; }
+    char settingsPath[MAX_PATH] = {};
+    GetSettingsPath("Timestone.ini", settingsPath, sizeof(settingsPath));
+    std::vector<IniSafe_Entry> entries;
+    entries.reserve(23);
+    const auto addInt = [&](const char* section, const char* key, int value) {
+        entries.push_back({section, key, std::to_string(value)});
+    };
+    for (int i = 0; i < 3; ++i) {
+        char key[16];
+        snprintf(key, sizeof(key), "Slot%d", i + 1);
+        addInt("Roster.P1", key, g_dialogConfig.p1Chars[i]);
+        addInt("Roster.P2", key, g_dialogConfig.p2Chars[i]);
+        snprintf(key, sizeof(key), "Color%d", i + 1);
+        addInt("Roster.P1", key, g_dialogConfig.p1Colors[i]);
+        addInt("Roster.P2", key, g_dialogConfig.p2Colors[i]);
+        snprintf(key, sizeof(key), "Assist%d", i + 1);
+        addInt("Roster.P1", key, g_dialogConfig.p1Assists[i]);
+        addInt("Roster.P2", key, g_dialogConfig.p2Assists[i]);
+    }
+    addInt("Roster.P1", "SimpleMode", g_dialogConfig.simpleMode[0] ? 1 : 0);
+    addInt("Roster.P2", "SimpleMode", g_dialogConfig.simpleMode[1] ? 1 : 0);
+    addInt("Training", "StageId", g_dialogConfig.stageId);
+    entries.push_back({"Network", "HostIp", g_dialogConfig.hostIp});
+    addInt("Network", "HostPort", g_dialogConfig.hostPort);
+    if (!IniSafe_WriteBatch(entries.data(), entries.size(), settingsPath))
+        HookLog("LaunchMenu: failed to save roster/training/network settings\n");
 }
 
 void SaveRosterToIni(const int32_t chars[2][3],
                      const int32_t colors[2][3],
-                     const int32_t assists[2][3])
+                     const int32_t assists[2][3], const bool simpleMode[2])
 {
+    if (Netplay_IsActive() && GetLaunchOption() != LAUNCH_DUAL_TRAINING) {
+        // An in-match commit contains both players. Persist only our own side,
+        // and do not replace our preferred stage with the host's match stage.
+        ConnectRoster_UpdateLocalTeam(g_connectRoster, Netplay_IsHost(),
+                                       chars, colors, assists, simpleMode);
+        SaveConnectRosterPreferences();
+        return;
+    }
+    if (!g_advancedRosterSession) return;
     for (int i = 0; i < 3; ++i) {
         g_dialogConfig.p1Chars[i] = chars[0][i];
         g_dialogConfig.p2Chars[i] = chars[1][i];
@@ -491,7 +541,9 @@ void SaveRosterToIni(const int32_t chars[2][3],
         g_dialogConfig.p1Assists[i] = assists[0][i];
         g_dialogConfig.p2Assists[i] = assists[1][i];
     }
-    SaveRollbackSettings();
+    g_dialogConfig.simpleMode[0] = simpleMode[0];
+    g_dialogConfig.simpleMode[1] = simpleMode[1];
+    SaveMenuSettings();
 }
 
 void SendTrainingLaunchPacket()
@@ -856,6 +908,94 @@ static void UpdateDpiLayout(HWND hWnd, UINT newDpi);
 static void DestroyDpiLayout(HWND hWnd);
 static void ReturnBattleSetupToLobbies(HWND hDlg);
 static void UpdateLobbyMusicCheckbox(HWND hDlg);
+
+static void RefreshRosterControls(HWND hDlg)
+{
+    if (!hDlg) return;
+    for (int team = 0; team < 2; ++team) {
+        const int32_t* chars = team == 0 ? g_dialogConfig.p1Chars : g_dialogConfig.p2Chars;
+        const int32_t* colors = team == 0 ? g_dialogConfig.p1Colors : g_dialogConfig.p2Colors;
+        const int32_t* assists = team == 0 ? g_dialogConfig.p1Assists : g_dialogConfig.p2Assists;
+        for (int i = 0; i < 3; ++i) {
+            const int index = team * 3 + i;
+            HWND combo = GetDlgItem(hDlg, ID_P1_SLOT1 + index);
+            if (!combo) continue;
+            SendMessageA(combo, CB_SETCURSEL, FindComboItemByData(combo, chars[i]), 0);
+            PopulateColorCombo(GetDlgItem(hDlg, ID_P1_COLOR1 + index), chars[i], colors[i]);
+            PopulateAssistCombo(GetDlgItem(hDlg, ID_P1_ASSIST1 + index), chars[i], assists[i]);
+        }
+        SendMessageA(GetDlgItem(hDlg, team == 0 ? ID_P1_SIMPLE_MODE : ID_P2_SIMPLE_MODE),
+                     BM_SETCHECK, g_dialogConfig.simpleMode[team] ? BST_CHECKED : BST_UNCHECKED, 0);
+    }
+    HWND stage = GetDlgItem(hDlg, ID_STAGE);
+    if (stage) SendMessageA(stage, CB_SETCURSEL, FindComboItemByData(stage, g_dialogConfig.stageId), 0);
+}
+
+static void BeginConnectRosterSetup(HWND hDlg)
+{
+    if (g_connectSetupActive && g_connectSetupIsHost == g_isHost) return;
+    if (!g_connectSetupActive) g_advancedRosterConfig = g_dialogConfig;
+    g_connectSetupActive = true;
+    g_connectSetupIsHost = g_isHost;
+    const TrainingBootConfig& defaults = TrainingBoot_GetDefaultConfig();
+    for (int i = 0; i < 3; ++i) {
+        g_dialogConfig.p1Chars[i] = g_isHost ? g_connectRoster.chars[i] : defaults.p1Chars[i];
+        g_dialogConfig.p2Chars[i] = g_isHost ? defaults.p2Chars[i] : g_connectRoster.chars[i];
+        g_dialogConfig.p1Colors[i] = g_isHost ? g_connectRoster.colors[i] : defaults.p1Colors[i];
+        g_dialogConfig.p2Colors[i] = g_isHost ? defaults.p2Colors[i] : g_connectRoster.colors[i];
+        g_dialogConfig.p1Assists[i] = g_isHost ? g_connectRoster.assists[i] : defaults.p1Assists[i];
+        g_dialogConfig.p2Assists[i] = g_isHost ? defaults.p2Assists[i] : g_connectRoster.assists[i];
+    }
+    g_dialogConfig.simpleMode[0] = g_isHost ? g_connectRoster.simpleMode : defaults.simpleMode[0];
+    g_dialogConfig.simpleMode[1] = g_isHost ? defaults.simpleMode[1] : g_connectRoster.simpleMode;
+    g_dialogConfig.stageId = g_connectRoster.stageId;
+    RefreshRosterControls(hDlg);
+    SaveConnectRosterPreferences();
+}
+
+static void EndConnectRosterSetup(HWND hDlg)
+{
+    if (!g_connectSetupActive) return;
+    g_connectSetupActive = false;
+    // Restore the advanced menu's own setup without copying network handles.
+    for (int i = 0; i < 3; ++i) {
+        g_dialogConfig.p1Chars[i] = g_advancedRosterConfig.p1Chars[i];
+        g_dialogConfig.p2Chars[i] = g_advancedRosterConfig.p2Chars[i];
+        g_dialogConfig.p1Colors[i] = g_advancedRosterConfig.p1Colors[i];
+        g_dialogConfig.p2Colors[i] = g_advancedRosterConfig.p2Colors[i];
+        g_dialogConfig.p1Assists[i] = g_advancedRosterConfig.p1Assists[i];
+        g_dialogConfig.p2Assists[i] = g_advancedRosterConfig.p2Assists[i];
+    }
+    g_dialogConfig.simpleMode[0] = g_advancedRosterConfig.simpleMode[0];
+    g_dialogConfig.simpleMode[1] = g_advancedRosterConfig.simpleMode[1];
+    g_dialogConfig.stageId = g_advancedRosterConfig.stageId;
+    RefreshRosterControls(hDlg);
+}
+
+// Call only for local UI actions, not when applying received roster packets.
+static void SaveLocalConnectSelection(HWND hDlg)
+{
+    if (!g_connectSetupActive) return;
+    const int team = g_isHost ? 0 : 1;
+    for (int i = 0; i < 3; ++i)
+        UpdateCharFromCombo(hDlg, ID_P1_SLOT1 + team * 3 + i, i, team);
+    UpdateSlotOptionsFromCombos(hDlg);
+    const int32_t chars[2][3] = {
+        {g_dialogConfig.p1Chars[0], g_dialogConfig.p1Chars[1], g_dialogConfig.p1Chars[2]},
+        {g_dialogConfig.p2Chars[0], g_dialogConfig.p2Chars[1], g_dialogConfig.p2Chars[2]}
+    };
+    const int32_t colors[2][3] = {
+        {g_dialogConfig.p1Colors[0], g_dialogConfig.p1Colors[1], g_dialogConfig.p1Colors[2]},
+        {g_dialogConfig.p2Colors[0], g_dialogConfig.p2Colors[1], g_dialogConfig.p2Colors[2]}
+    };
+    const int32_t assists[2][3] = {
+        {g_dialogConfig.p1Assists[0], g_dialogConfig.p1Assists[1], g_dialogConfig.p1Assists[2]},
+        {g_dialogConfig.p2Assists[0], g_dialogConfig.p2Assists[1], g_dialogConfig.p2Assists[2]}
+    };
+    ConnectRoster_UpdateLocalTeam(g_connectRoster, g_isHost, chars, colors, assists,
+                                   g_dialogConfig.simpleMode);
+    SaveConnectRosterPreferences();
+}
 
 static bool IsCompatibleProtocol(const char (&protocol)[32])
 {
@@ -1649,6 +1789,8 @@ static LaunchOption ShowLaunchMenuWindow(bool battleSetupOnly, bool compactMode)
     g_isLaunching = false;
     g_battleSetupOnly = battleSetupOnly;
     g_compactMode = compactMode;
+    g_connectSetupActive = false;
+    g_advancedRosterSession = !compactMode && !battleSetupOnly;
     if (!g_compactMode && !g_battleSetupOnly)
         g_regularCompactRequest = false;
     if (g_battleSetupOnly)
@@ -1680,7 +1822,7 @@ static LaunchOption ShowLaunchMenuWindow(bool battleSetupOnly, bool compactMode)
     // Default network settings, then restore the last target from disk.
     strcpy(g_dialogConfig.hostIp, "127.0.0.1");
     g_dialogConfig.hostPort = 7777;
-    LoadRollbackSettings();
+    LoadRollbackSettings(g_advancedRosterSession);
     g_dialogConfig.hostEnabled = false;
     g_dialogConfig.enetHost = nullptr;
     g_dialogConfig.enetPeer = nullptr;
@@ -1885,6 +2027,7 @@ bool ConfigureAutoTestDualTraining(int32_t characterId, int32_t hostPort)
         hostPort < 0 || hostPort > 65535)
         return false;
 
+    g_advancedRosterSession = true;
     LoadRollbackSettings();
     if (hostPort != 0)
         g_dialogConfig.hostPort = hostPort;
@@ -1922,6 +2065,7 @@ bool ConfigureAutoTestDualTraining(int32_t characterId, int32_t hostPort)
 
 void ConfigureCommandLineDualTraining()
 {
+    g_advancedRosterSession = true;
     LoadRollbackSettings();
     if (g_dialogConfig.hostIp[0] == '\0')
         strcpy(g_dialogConfig.hostIp, "127.0.0.1");
@@ -2640,6 +2784,7 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
                 g_dialogConfig.enetPeer = steamPeer;
                 g_dialogConfig.hostEnabled = true;
                 g_isHost = steamIsHost;
+                BeginConnectRosterSetup(hDlg);
                 if (steamPeer) steamPeer->data = (void*)"connected";
                 LaunchMusic_Start();
                 SetTimer(hDlg, ID_NET_POLL_TIMER, 10, NULL);
@@ -2800,7 +2945,8 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
                                 enet_packet_destroy(event.packet);
                                 return 0;
                             }
-                            SaveRollbackSettings();
+                            // Received match state must never be persisted as
+                            // this player's preferences (including host stage).
                             g_isLaunching = true;
                             g_launchOption = LAUNCH_TRAINING;
                             HookLog("UMVC3Hook: Received training launch packet\n");
@@ -2892,6 +3038,7 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
 
         case ID_RANDOMIZE_CHARS:
             RandomizeCharacters(hDlg);
+            SaveLocalConnectSelection(hDlg);
             if (g_dialogConfig.enetPeer) {
                 if (g_isHost) {
                     SendP1Selection(hDlg);
@@ -2907,7 +3054,7 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
             if (!g_isHost && g_dialogConfig.enetPeer) {
                 g_localReady = !g_localReady;
                 UpdateReadyButton(hDlg);
-                if (g_localReady) SaveRollbackSettings();
+                if (g_localReady) SaveLocalConnectSelection(hDlg);
                 SendP2Selection(hDlg);
             }
             return 0;
@@ -2918,6 +3065,7 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
                 const int team = LOWORD(wParam) == ID_P1_SIMPLE_MODE ? 0 : 1;
                 g_dialogConfig.simpleMode[team] = SendMessageA(
                     (HWND)lParam, BM_GETCHECK, 0, 0) == BST_CHECKED;
+                if (team == (g_isHost ? 0 : 1)) SaveLocalConnectSelection(hDlg);
                 if (g_dialogConfig.enetPeer) {
                     if (team == 0 && g_isHost)
                         SendP1Selection(hDlg);
@@ -2958,7 +3106,6 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
                 UpdateCharFromCombo(hDlg, ID_P2_SLOT1 + i, i, 1);
             }
             UpdateSlotOptionsFromCombos(hDlg);
-            SaveRollbackSettings();
             // Apply network config before launching
             HWND hIp = GetDlgItem(hDlg, ID_NET_IP);
             HWND hPort = GetDlgItem(hDlg, ID_NET_PORT);
@@ -2968,7 +3115,7 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
                 GetWindowTextA(hPort, buf, sizeof(buf));
                 g_dialogConfig.hostPort = atoi(buf);
             }
-            SaveRollbackSettings();
+            SaveMenuSettings();
 
             g_isLaunching = true;
             g_launchOption = LAUNCH_NORMAL;
@@ -3013,7 +3160,7 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
             }
 
             // Apply config to training boot
-            SaveRollbackSettings();
+            SaveMenuSettings();
             TrainingBoot_SetCpuMode(
                 LOWORD(wParam) == ID_LAUNCH_DUAL_CPUS ? TRAINING_CPU_BOTH :
                 LOWORD(wParam) == ID_LAUNCH_DUAL_P2_CPU ? TRAINING_CPU_P2_ONLY :
@@ -3045,10 +3192,13 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
         // ---- Character combo box selection ----
         case ID_P1_SLOT1: case ID_P1_SLOT2: case ID_P1_SLOT3:
         case ID_P2_SLOT1: case ID_P2_SLOT2: case ID_P2_SLOT3:
+        {
+            bool rosterEdited = false;
             if (HIWORD(wParam) == CBN_SELCHANGE) {
                 HWND hCombo = (HWND)lParam;
                 int sel = (int)SendMessageA(hCombo, CB_GETCURSEL, 0, 0);
                 if (sel != CB_ERR) {
+                    rosterEdited = true;
                     int charId = (int)SendMessageA(hCombo, CB_GETITEMDATA, sel, 0);
                     int ctrlId = LOWORD(wParam);
                     // Determine which slot this is
@@ -3077,6 +3227,7 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
                 // Try to find matching character name
                 for (int i = 0; i < kCharNameCount; i++) {
                     if (_stricmp(buf, kCharNames[i]) == 0) {
+                        rosterEdited = true;
                         int ctrlId = LOWORD(wParam);
                         int idx = ctrlId - ID_P1_SLOT1;
                         if (idx >= 0 && idx < 3) {
@@ -3098,6 +3249,9 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
                     }
                 }
             }
+            const int localFirst = g_isHost ? ID_P1_SLOT1 : ID_P2_SLOT1;
+            if (rosterEdited && LOWORD(wParam) >= localFirst && LOWORD(wParam) < localFirst + 3)
+                SaveLocalConnectSelection(hDlg);
             if (HIWORD(wParam) == CBN_SELCHANGE && !g_isHost &&
                 LOWORD(wParam) >= ID_P2_SLOT1 &&
                 LOWORD(wParam) <= ID_P2_SLOT3 && g_dialogConfig.enetPeer) {
@@ -3110,6 +3264,7 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
                 LOWORD(wParam) <= ID_P1_SLOT3 && g_dialogConfig.enetPeer)
                 SendP1Selection(hDlg);
             return 0;
+        }
 
         case ID_P1_COLOR1: case ID_P1_COLOR2: case ID_P1_COLOR3:
         case ID_P2_COLOR1: case ID_P2_COLOR2: case ID_P2_COLOR3:
@@ -3118,6 +3273,11 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
             if (HIWORD(wParam) == CBN_SELCHANGE) {
                 UpdateSlotOptionsFromCombos(hDlg);
                 int controlId = LOWORD(wParam);
+                const int colorFirst = g_isHost ? ID_P1_COLOR1 : ID_P2_COLOR1;
+                const int assistFirst = g_isHost ? ID_P1_ASSIST1 : ID_P2_ASSIST1;
+                if ((controlId >= colorFirst && controlId < colorFirst + 3) ||
+                    (controlId >= assistFirst && controlId < assistFirst + 3))
+                    SaveLocalConnectSelection(hDlg);
                 if (!g_isHost &&
                     ((controlId >= ID_P2_COLOR1 && controlId <= ID_P2_COLOR3) ||
                      (controlId >= ID_P2_ASSIST1 && controlId <= ID_P2_ASSIST3)) &&
@@ -3142,6 +3302,10 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
                 if (sel != CB_ERR) {
                     g_dialogConfig.stageId = static_cast<int>(
                         SendMessageA(hCombo, CB_GETITEMDATA, sel, 0));
+                    if (g_connectSetupActive && g_isHost) {
+                        g_connectRoster.stageId = g_dialogConfig.stageId;
+                        SaveConnectRosterPreferences();
+                    }
                     if (g_isHost && g_dialogConfig.enetPeer)
                         SendP1Selection(hDlg);
                 }
@@ -3201,7 +3365,7 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
                 GetWindowTextA(hPort, buf, sizeof(buf));
                 g_dialogConfig.hostPort = atoi(buf);
             }
-            SaveRollbackSettings();
+            SaveNetworkSettings();
 
             // Switch log to host-specific file
             HookLogSetFile("Timestone_host.log");
@@ -3235,6 +3399,7 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
             g_dialogConfig.enetHost = server;
             g_dialogConfig.enetPeer = nullptr;
             g_isHost = true;
+            BeginConnectRosterSetup(hDlg);
             g_statusColor = LaunchMenuDarkTextColor();
 
             if (hStatus) {
@@ -3264,7 +3429,7 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
                 GetWindowTextA(hPort, buf, sizeof(buf));
                 g_dialogConfig.hostPort = atoi(buf);
             }
-            SaveRollbackSettings();
+            SaveNetworkSettings();
 
             // Switch log to client-specific file
             HookLogSetFile("Timestone_client.log");
@@ -3321,6 +3486,7 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
             // Set connect timeout to 1000ms (default is ~15s)
             enet_peer_timeout(peer, 0, 1000, 1000);
             g_isHost = false;
+            BeginConnectRosterSetup(hDlg);
             g_statusColor = LaunchMenuDarkTextColor();
             if (hStatus) SetWindowTextA(hStatus, "Connecting...");
 
@@ -3728,6 +3894,7 @@ static void ApplySavedRoster(HWND hDlg, int team, size_t preset)
                             chars[slot], assists[slot]);
     }
 
+    if (team == (g_isHost ? 0 : 1)) SaveLocalConnectSelection(hDlg);
     if (!g_dialogConfig.enetPeer) return;
     if (team == 0 && g_isHost) SendP1Selection(hDlg);
     if (team == 1 && !g_isHost) {
@@ -3757,8 +3924,8 @@ static uint32_t NextCharacterRandom()
 static void RandomizeCharacters(HWND hDlg)
 {
     constexpr int kPlayableCharacterCount = 50;
-    const int firstTeam = g_dialogConfig.enetPeer ? (g_isHost ? 0 : 1) : 0;
-    const int teamCount = g_dialogConfig.enetPeer ? 1 : 2;
+    const int firstTeam = g_connectSetupActive ? (g_isHost ? 0 : 1) : 0;
+    const int teamCount = g_connectSetupActive ? 1 : 2;
     for (int team = firstTeam; team < firstTeam + teamCount; ++team) {
         int characters[kPlayableCharacterCount];
         for (int i = 0; i < kPlayableCharacterCount; ++i)
@@ -3825,6 +3992,7 @@ static void CleanupNetwork(HWND hDlg, bool forceCleanup) {
     g_dialogConfig.hostEnabled = false;
     g_localReady = false;
     g_peerReady = false;
+    EndConnectRosterSetup(hDlg);
     SteamLobby_Shutdown(false);
 
     if (hDlg) {

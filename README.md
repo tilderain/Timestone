@@ -99,7 +99,12 @@ Runner exit codes are `0` for sync/no desync artifacts, `1` for a confirmed
 desync report, `3` for launch/game failure, `4` for timeout, and `6` when the
 snapshot analyzer fails. Argument errors use argparse's standard exit code `2`.
 
-The network address and port come from `rollbacksetting.ini`.
+The network address and port come from `[Network]` in `Timestone.ini`.
+Advanced/offline setup uses `[Roster.P1]`, `[Roster.P2]`, and `[Training] StageId`.
+Online hosting/joining uses a separate `[ConnectRoster]` for your own characters,
+colors, assists, simple-mode controls, and preferred stage, regardless of your side.
+Other players' settings are match state only and never replace your preferences.
+`rollbacksetting.ini` is no longer read or written; there is no automatic migration.
 
 
 # Credits

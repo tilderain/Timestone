@@ -185,6 +185,7 @@
     <ClInclude Include="imgui\imstb_truetype.h" />
     <ClInclude Include="IniReader.h" />
     <ClInclude Include="IniSafe.h" />
+    <ClInclude Include="code\connect_roster.h" />
     <ClInclude Include="IniText.h" />
     <ClInclude Include="kiero\kiero.h" />
     <ClInclude Include="kiero\minhook\src\buffer.h" />
@@ -257,6 +258,7 @@
     <ClCompile Include="imgui\imgui_widgets.cpp" />
     <ClCompile Include="IniReader.cpp" />
     <ClCompile Include="IniSafe.cpp" />
+    <ClCompile Include="code\connect_roster.cpp" />
     <ClCompile Include="kiero\kiero.cpp" />
     <ClCompile Include="kiero\minhook\src\buffer.c" />
     <ClCompile Include="kiero\minhook\src\hde\hde32.c" />
