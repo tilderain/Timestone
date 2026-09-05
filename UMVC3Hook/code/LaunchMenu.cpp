@@ -1,4 +1,5 @@
 #include "LaunchMenu.h"
+#include "launchmenu_navigation.h"
 #include "../IniSafe.h"
 #include "connect_roster.h"
 #include "LaunchMenu_compact.h"
@@ -8,6 +9,7 @@
 #include "launch_music.h"
 #include "launchmenu_dark.h"
 #include "launchmenu_controls.h"
+#include "launchmenu_utils.h"
 #include "trainingboot.h"
 #include "netplay.h"
 #include "savedata.h"
@@ -216,10 +218,7 @@ static HANDLE g_hPollThread = NULL;
 static bool g_isLaunching = false;
 static bool g_battleSetupOnly = false;
 static bool g_compactMode = false;
-static bool g_compactAdvancedRequest = false;
-static bool g_compactBattleSetupRequest = false;
-static bool g_battleLobbyReturnRequest = false;
-static bool g_regularCompactRequest = false;
+static MenuAction g_menuAction = MenuAction::Cancel;
 static bool g_directConnectExpanded = false;
 static int g_lobbyTypeSelection = 0;
 static char g_lobbyName[128] = {};
@@ -299,20 +298,7 @@ static void CollectPingSample(ENetPeer* peer)
     g_nextPingSample = (g_nextPingSample + 1) % kPingSampleCapacity;
 }
 
-static void GetSettingsPath(const char* filename, char* path, size_t pathSize)
-{
-    DWORD length = GetModuleFileNameA(nullptr, path, (DWORD)pathSize);
-    if (length == 0 || length >= pathSize) {
-        path[0] = '\0';
-        return;
-    }
-
-    char* slash = strrchr(path, '\\');
-    char* forwardSlash = strrchr(path, '/');
-    if (!slash || (forwardSlash && forwardSlash > slash)) slash = forwardSlash;
-    char* filenameStart = slash ? slash + 1 : path;
-    snprintf(filenameStart, pathSize - (filenameStart - path), "%s", filename);
-}
+using LaunchMenuUtils::GetSettingsPath;
 
 static void CALLBACK LayoutDisclaimerMessageBox(HWND dialog, UINT, UINT_PTR timerId, DWORD)
 {
@@ -1810,7 +1796,7 @@ static bool ApplyP2Selection(HWND hDlg, const LaunchP2SelectionPacket& packet)
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
-static LaunchOption ShowLaunchMenuWindow(bool battleSetupOnly, bool compactMode)
+static MenuResult ShowLaunchMenuWindow(bool battleSetupOnly, bool compactMode)
 {
     InitializeLaunchMenuDarkMode();
     HookLog("UMVC3Hook: Launch window setup begin compact=%d battleSetup=%d\n",
@@ -1822,14 +1808,7 @@ static LaunchOption ShowLaunchMenuWindow(bool battleSetupOnly, bool compactMode)
     g_compactMode = compactMode;
     g_connectSetupActive = false;
     g_advancedRosterSession = !compactMode && !battleSetupOnly;
-    if (!g_compactMode && !g_battleSetupOnly)
-        g_regularCompactRequest = false;
-    if (g_battleSetupOnly)
-        g_battleLobbyReturnRequest = false;
-    if (g_compactMode) {
-        g_compactAdvancedRequest = false;
-        g_compactBattleSetupRequest = false;
-    }
+    g_menuAction = MenuAction::Cancel;
     g_localReady = false;
     g_peerReady = false;
     HINSTANCE hInst = GetModuleHandle(NULL);
@@ -1953,6 +1932,7 @@ static LaunchOption ShowLaunchMenuWindow(bool battleSetupOnly, bool compactMode)
     if (!hWnd) {
         HookLog("UMVC3Hook: Launch window creation failed error=%lu; continuing normal launch\n",
                 GetLastError());
+        g_menuAction = MenuAction::Launch;
         g_launchOption = LAUNCH_NORMAL;
     } else {
         HookLog("UMVC3Hook: Launch window created successfully\n");
@@ -1965,6 +1945,7 @@ static LaunchOption ShowLaunchMenuWindow(bool battleSetupOnly, bool compactMode)
         if (messageResult < 0) {
             HookLog("UMVC3Hook: Launch window message loop failed error=%lu; continuing normal launch\n",
                     GetLastError());
+            g_menuAction = MenuAction::Launch;
             g_launchOption = LAUNCH_NORMAL;
         }
     }
@@ -2001,45 +1982,17 @@ static LaunchOption ShowLaunchMenuWindow(bool battleSetupOnly, bool compactMode)
         g_dialogConfig.hostEnabled = true;
     }
 
-    return g_launchOption;
+    return {g_menuAction, g_launchOption};
 }
 
-LaunchOption ShowRegularLaunchMenu(bool battleSetupOnly)
+MenuResult ShowRegularLaunchMenu(bool battleSetupOnly)
 {
     return ShowLaunchMenuWindow(battleSetupOnly, false);
 }
 
-LaunchOption ShowCompactLaunchMenu()
+MenuResult ShowCompactLaunchMenu()
 {
     return ShowLaunchMenuWindow(false, true);
-}
-
-bool TakeCompactAdvancedRequest()
-{
-    const bool requested = g_compactAdvancedRequest;
-    g_compactAdvancedRequest = false;
-    return requested;
-}
-
-bool TakeCompactBattleSetupRequest()
-{
-    const bool requested = g_compactBattleSetupRequest;
-    g_compactBattleSetupRequest = false;
-    return requested;
-}
-
-bool TakeBattleLobbyReturnRequest()
-{
-    const bool requested = g_battleLobbyReturnRequest;
-    g_battleLobbyReturnRequest = false;
-    return requested;
-}
-
-bool TakeRegularCompactRequest()
-{
-    const bool requested = g_regularCompactRequest;
-    g_regularCompactRequest = false;
-    return requested;
 }
 
 LaunchOption GetLaunchOption()
@@ -2162,54 +2115,19 @@ static UINT GetLaunchWindowDpi(HWND hWnd)
     return dpi ? dpi : 96;
 }
 
-static void ScaleLaunchMenuChildren(HWND hWnd, UINT oldDpi, UINT newDpi)
-{
-    if (!oldDpi || oldDpi == newDpi) return;
-
-    for (HWND child = GetWindow(hWnd, GW_CHILD); child;
-         child = GetWindow(child, GW_HWNDNEXT)) {
-        RECT rect = {};
-        GetWindowRect(child, &rect);
-        MapWindowPoints(nullptr, hWnd, reinterpret_cast<POINT*>(&rect), 2);
-        SetWindowPos(child, nullptr,
-                     MulDiv(rect.left, newDpi, oldDpi),
-                     MulDiv(rect.top, newDpi, oldDpi),
-                     MulDiv(rect.right - rect.left, newDpi, oldDpi),
-                     MulDiv(rect.bottom - rect.top, newDpi, oldDpi),
-                     SWP_NOACTIVATE | SWP_NOZORDER);
-
-        char className[32] = {};
-        GetClassNameA(child, className, sizeof(className));
-        if (_stricmp(className, WC_LISTVIEWA) == 0) {
-            HWND header = ListView_GetHeader(child);
-            const int columnCount = header ? Header_GetItemCount(header) : 0;
-            for (int column = 0; column < columnCount; ++column) {
-                ListView_SetColumnWidth(child, column, MulDiv(
-                    ListView_GetColumnWidth(child, column), newDpi, oldDpi));
-            }
-        } else if (_stricmp(className, "COMBOBOX") == 0) {
-            const LRESULT width = SendMessageA(child, CB_GETDROPPEDWIDTH, 0, 0);
-            if (width > 0) {
-                SendMessageA(child, CB_SETDROPPEDWIDTH,
-                             MulDiv(static_cast<int>(width), newDpi, oldDpi), 0);
-            }
-        }
-    }
-}
-
 static void InitializeDpiLayout(HWND hWnd)
 {
     const UINT dpi = GetLaunchWindowDpi(hWnd);
     SetPropA(hWnd, "TimestoneLayoutDpi",
              reinterpret_cast<HANDLE>(static_cast<INT_PTR>(dpi)));
-    ScaleLaunchMenuChildren(hWnd, 96, dpi);
+    LaunchMenuUtils::ScaleChildren(hWnd, 96, dpi, true);
 }
 
 static void UpdateDpiLayout(HWND hWnd, UINT newDpi)
 {
     const UINT oldDpi = static_cast<UINT>(reinterpret_cast<INT_PTR>(
         GetPropA(hWnd, "TimestoneLayoutDpi")));
-    ScaleLaunchMenuChildren(hWnd, oldDpi ? oldDpi : 96, newDpi);
+    LaunchMenuUtils::ScaleChildren(hWnd, oldDpi ? oldDpi : 96, newDpi, true);
     SetPropA(hWnd, "TimestoneLayoutDpi",
              reinterpret_cast<HANDLE>(static_cast<INT_PTR>(newDpi)));
 }
@@ -2355,13 +2273,19 @@ static void CreateBattleSetupControls(HWND hDlg)
     SetTimer(hDlg, ID_STEAM_POLL_TIMER, 50, NULL);
 }
 
-static void ReturnBattleSetupToLobbies(HWND hDlg)
+static void CloseLaunchMenu(HWND hDlg, MenuAction action)
 {
-    if (!g_battleSetupOnly || g_battleLobbyReturnRequest) return;
-    g_battleLobbyReturnRequest = true;
-    g_launchOption = LAUNCH_CANCELLED;
+    // Set the outcome before DestroyWindow: WM_DESTROY uses it for Steam cleanup.
+    g_menuAction = action;
     DestroyWindow(hDlg);
     PostQuitMessage(0);
+}
+
+static void ReturnBattleSetupToLobbies(HWND hDlg)
+{
+    if (!g_battleSetupOnly || g_menuAction == MenuAction::OpenCompact) return;
+    g_launchOption = LAUNCH_CANCELLED;
+    CloseLaunchMenu(hDlg, MenuAction::OpenCompact);
 }
 
 static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
@@ -2671,9 +2595,7 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
             UpdateSteamLobbyButton(hDlg);
 
             if (g_compactMode && SteamLobby_GetPeerSteamId() != 0) {
-                g_compactBattleSetupRequest = true;
-                DestroyWindow(hDlg);
-                PostQuitMessage(0);
+                CloseLaunchMenu(hDlg, MenuAction::OpenBattleSetup);
                 return 0;
             }
 
@@ -2880,6 +2802,7 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
                             // Received match state must never be persisted as
                             // this player's preferences (including host stage).
                             g_isLaunching = true;
+                            g_menuAction = MenuAction::Launch;
                             g_launchOption = LAUNCH_TRAINING;
                             HookLog("UMVC3Hook: Received training launch packet\n");
                             enet_packet_destroy(event.packet);
@@ -3027,6 +2950,7 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
         {
             if (g_compactMode) {
                 g_isLaunching = true;
+                g_menuAction = MenuAction::Launch;
                 g_launchOption = LAUNCH_NORMAL;
                 DestroyWindow(hDlg);
                 PostQuitMessage(0);
@@ -3050,6 +2974,7 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
             SaveMenuSettings();
 
             g_isLaunching = true;
+            g_menuAction = MenuAction::Launch;
             g_launchOption = LAUNCH_NORMAL;
             DestroyWindow(hDlg);
             PostQuitMessage(0);
@@ -3114,6 +3039,7 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
             TrainingBoot_SetConfig(cfg);
 
             g_isLaunching = true;
+            g_menuAction = MenuAction::Launch;
             g_launchOption = (LOWORD(wParam) == ID_LAUNCH_TRAINING)
                 ? LAUNCH_TRAINING : LAUNCH_DUAL_TRAINING;
             DestroyWindow(hDlg);
@@ -3266,14 +3192,10 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
                 IniSafe_WriteString("General", "UseRegularLaunchMenu",
                                            enabled ? "1" : "0", settingsPath);
                 if (g_compactMode && enabled) {
-                    g_compactAdvancedRequest = true;
-                    DestroyWindow(hDlg);
-                    PostQuitMessage(0);
+                    CloseLaunchMenu(hDlg, MenuAction::OpenAdvanced);
                 } else if (!g_compactMode && !g_battleSetupOnly && !enabled) {
-                    g_regularCompactRequest = true;
                     g_launchOption = LAUNCH_CANCELLED;
-                    DestroyWindow(hDlg);
-                    PostQuitMessage(0);
+                    CloseLaunchMenu(hDlg, MenuAction::OpenCompact);
                 }
             }
             return 0;
@@ -3602,15 +3524,13 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
             return 0;
         }
         g_launchOption = LAUNCH_CANCELLED;
-        DestroyWindow(hDlg);
-        PostQuitMessage(0);
+        CloseLaunchMenu(hDlg, MenuAction::Cancel);
         return 0;
 
     case WM_DESTROY:
         DestroyDpiLayout(hDlg);
         KillTimer(hDlg, ID_STEAM_POLL_TIMER);
-        if (g_compactMode &&
-            (g_compactAdvancedRequest || g_compactBattleSetupRequest)) {
+        if (PreserveSteamForMenuTransition(g_compactMode, g_menuAction)) {
             // The next launch window continues using this Steam session.
         } else if (!g_isLaunching) {
             CleanupNetwork(hDlg, true);  // user closed/cancelled — full cleanup

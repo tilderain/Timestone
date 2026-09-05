@@ -2,6 +2,7 @@
 #include "../IniSafe.h"
 
 #include "launchmenu_dark.h"
+#include "launchmenu_utils.h"
 #include "mk10utils.h"
 
 #include <cstdio>
@@ -14,6 +15,8 @@
 extern void HookLog(const char* fmt, ...);
 
 namespace {
+
+using LaunchMenuUtils::GetSettingsPath;
 
 constexpr int ID_SINGLE_THREADED = 100;
 constexpr int ID_SAVE = 101;
@@ -61,20 +64,7 @@ UINT GetWindowDpi(HWND window)
 
 void ApplyDpi(HWND window, UINT oldDpi, UINT newDpi)
 {
-    if (oldDpi != newDpi) {
-        for (HWND child = GetWindow(window, GW_CHILD); child;
-             child = GetWindow(child, GW_HWNDNEXT)) {
-            RECT rect = {};
-            GetWindowRect(child, &rect);
-            MapWindowPoints(nullptr, window, reinterpret_cast<POINT*>(&rect), 2);
-            SetWindowPos(child, nullptr,
-                         MulDiv(rect.left, newDpi, oldDpi),
-                         MulDiv(rect.top, newDpi, oldDpi),
-                         MulDiv(rect.right - rect.left, newDpi, oldDpi),
-                         MulDiv(rect.bottom - rect.top, newDpi, oldDpi),
-                         SWP_NOACTIVATE | SWP_NOZORDER);
-        }
-    }
+    LaunchMenuUtils::ScaleChildren(window, oldDpi, newDpi, false);
 
     HFONT oldFont = reinterpret_cast<HFONT>(GetPropA(window, "TimestoneSettingsFont"));
     LOGFONTA description = {};
@@ -126,23 +116,6 @@ bool PatchBytes(uintptr_t address, const uint8_t (&expected)[N],
     DWORD ignored = 0;
     VirtualProtect(target, N, oldProtect, &ignored);
     return true;
-}
-
-void GetSettingsPath(char* path, size_t pathSize)
-{
-    const DWORD length = GetModuleFileNameA(
-        nullptr, path, static_cast<DWORD>(pathSize));
-    if (length == 0 || length >= pathSize) {
-        path[0] = '\0';
-        return;
-    }
-
-    char* slash = strrchr(path, '\\');
-    char* forwardSlash = strrchr(path, '/');
-    if (!slash || (forwardSlash && forwardSlash > slash)) slash = forwardSlash;
-    char* filename = slash ? slash + 1 : path;
-    snprintf(filename, pathSize - static_cast<size_t>(filename - path),
-             "Timestone.ini");
 }
 
 void LoadSettings()

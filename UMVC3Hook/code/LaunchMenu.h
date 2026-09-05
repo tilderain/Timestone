@@ -50,14 +50,6 @@ struct LaunchDialogConfig {
 // Returns LAUNCH_CANCELLED if the user closes the window.
 LaunchOption ShowLaunchMenu();
 
-// Shows the original full launch dialog. Compact startup uses battleSetupOnly
-// after a Steam peer connects so roster and stage selection have their own window.
-LaunchOption ShowRegularLaunchMenu(bool battleSetupOnly = false);
-LaunchOption ShowCompactLaunchMenu();
-bool TakeCompactAdvancedRequest();
-bool TakeCompactBattleSetupRequest();
-bool TakeBattleLobbyReturnRequest();
-bool TakeRegularCompactRequest();
 bool ConfirmLaunchDisclaimer();
 
 // Returns the launch option chosen at startup.

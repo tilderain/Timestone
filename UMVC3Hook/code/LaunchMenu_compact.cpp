@@ -1,6 +1,8 @@
 #include "LaunchMenu.h"
+#include "launchmenu_navigation.h"
 #include "LaunchMenu_compact.h"
 #include "launchmenu_controls.h"
+#include "launchmenu_utils.h"
 #include "launch_music.h"
 
 #include <commctrl.h>
@@ -8,25 +10,6 @@
 #include <cstring>
 
 extern void HookLog(const char* fmt, ...);
-
-namespace {
-
-void GetSettingsPath(char* path, size_t pathSize)
-{
-    const DWORD length = GetModuleFileNameA(nullptr, path, static_cast<DWORD>(pathSize));
-    if (length == 0 || length >= pathSize) {
-        path[0] = '\0';
-        return;
-    }
-    char* slash = strrchr(path, '\\');
-    char* forwardSlash = strrchr(path, '/');
-    if (!slash || (forwardSlash && forwardSlash > slash)) slash = forwardSlash;
-    char* filename = slash ? slash + 1 : path;
-    snprintf(filename, pathSize - static_cast<size_t>(filename - path),
-             "Timestone.ini");
-}
-
-} // namespace
 
 void CreateCompactLaunchMenuControls(HWND window,
                                      const CompactLaunchMenuControlIds& ids,
@@ -95,25 +78,30 @@ LaunchOption ShowLaunchMenu()
     }
 
     char settingsPath[MAX_PATH] = {};
-    GetSettingsPath(settingsPath, sizeof(settingsPath));
-    if (GetPrivateProfileIntA("General", "UseRegularLaunchMenu", 0,
-                              settingsPath) != 0) {
-        HookLog("UMVC3Hook: Opening regular launch menu\n");
-        const LaunchOption result = ShowRegularLaunchMenu(false);
-        if (!TakeRegularCompactRequest()) return result;
-    }
+    LaunchMenuUtils::GetSettingsPath(settingsPath, sizeof(settingsPath));
+    const bool regular = GetPrivateProfileIntA(
+        "General", "UseRegularLaunchMenu", 0, settingsPath) != 0;
+    MenuResult result = {regular ? MenuAction::OpenAdvanced : MenuAction::OpenCompact,
+                         LAUNCH_CANCELLED};
 
     for (;;) {
-        HookLog("UMVC3Hook: Opening compact launch menu\n");
-        LaunchOption result = ShowCompactLaunchMenu();
-        if (TakeCompactAdvancedRequest()) {
+        switch (result.action) {
+        case MenuAction::OpenCompact:
+            HookLog("UMVC3Hook: Opening compact launch menu\n");
+            result = ShowCompactLaunchMenu();
+            break;
+        case MenuAction::OpenAdvanced:
+            HookLog("UMVC3Hook: Opening regular launch menu\n");
             result = ShowRegularLaunchMenu(false);
-            if (TakeRegularCompactRequest()) continue;
-            return result;
+            break;
+        case MenuAction::OpenBattleSetup:
+            HookLog("UMVC3Hook: Opening battle setup\n");
+            result = ShowRegularLaunchMenu(true);
+            break;
+        case MenuAction::Launch:
+            return result.launchOption;
+        case MenuAction::Cancel:
+            return LAUNCH_CANCELLED;
         }
-        if (!TakeCompactBattleSetupRequest()) return result;
-
-        result = ShowRegularLaunchMenu(true);
-        if (!TakeBattleLobbyReturnRequest()) return result;
     }
 }

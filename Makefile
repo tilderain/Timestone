@@ -53,6 +53,7 @@ CPP_SRC   := \
 	$(SRCDIR)/code/umvc3menu.cpp \
 	$(SRCDIR)/code/updater.cpp \
 	$(SRCDIR)/code/LaunchMenu.cpp \
+	$(SRCDIR)/code/launchmenu_utils.cpp \
 	$(SRCDIR)/code/connect_roster.cpp \
 	$(SRCDIR)/code/LaunchMenu_compact.cpp \
 	$(SRCDIR)/code/launchmenu_dark.cpp \
