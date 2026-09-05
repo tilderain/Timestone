@@ -2825,8 +2825,9 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
                     static_cast<int>(draw->nmcd.dwItemSpec), LVIS_SELECTED) &
                     LVIS_SELECTED) != 0;
                 // Keep native selection painting from replacing the dark palette.
-                draw->nmcd.uItemState &= ~(CDIS_SELECTED | CDIS_HOT);
-                draw->clrTextBk = selected ? RGB(53, 75, 99)
+                if (IsLaunchMenuDarkModeEnabled())
+                    draw->nmcd.uItemState &= ~(CDIS_SELECTED | CDIS_HOT);
+                draw->clrTextBk = selected && IsLaunchMenuDarkModeEnabled() ? RGB(53, 75, 99)
                                           : LaunchMenuDarkControlColor();
                 draw->clrText = LaunchMenuDarkTextColor();
                 LVITEMA item = {};
@@ -2835,11 +2836,11 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
                 if (ListView_GetItem(header->hwndFrom, &item)) {
                     uint64_t lobbyId = static_cast<uint64_t>(item.lParam);
                     if (SteamLobby_IsHostedLobby(lobbyId))
-                        draw->clrText = RGB(136, 136, 136);
+                        draw->clrText = IsLaunchMenuDarkModeEnabled() ? RGB(136, 136, 136) : GetSysColor(COLOR_GRAYTEXT);
                     else if (!SteamLobby_IsLobbyVersionCompatible(lobbyId))
-                        draw->clrText = RGB(230, 140, 140);
+                        draw->clrText = IsLaunchMenuDarkModeEnabled() ? RGB(230, 140, 140) : RGB(180, 70, 70);
                     else if (SteamLobby_IsFriendLobby(lobbyId))
-                        draw->clrText = RGB(143, 195, 143);
+                        draw->clrText = IsLaunchMenuDarkModeEnabled() ? RGB(143, 195, 143) : RGB(0, 128, 0);
                 }
             }
         }

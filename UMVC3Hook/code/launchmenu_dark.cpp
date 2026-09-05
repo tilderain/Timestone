@@ -1,4 +1,5 @@
 #include "launchmenu_dark.h"
+#include "LaunchMenu_settings.h"
 
 #include <commctrl.h>
 #include <algorithm>
@@ -23,6 +24,8 @@ using RefreshImmersiveColorPolicyStateFn = void (WINAPI*)();
 HMODULE g_uxTheme = nullptr;
 AllowDarkModeForWindowFn g_allowDarkModeForWindow = nullptr;
 SetWindowThemeFn g_setWindowTheme = nullptr;
+SetPreferredAppModeFn g_setPreferredAppMode = nullptr;
+AllowDarkModeForAppFn g_allowDarkModeForApp = nullptr;
 
 HBRUSH DarkControlBrush()
 {
@@ -253,6 +256,8 @@ LRESULT CALLBACK DarkComboBoxProc(HWND control, UINT message, WPARAM wParam,
     WNDPROC original = GetOriginalControlProc(control);
     if (!original)
         return DefWindowProcA(control, message, wParam, lParam);
+    if (!IsLaunchMenuDarkModeEnabled() && message != WM_NCDESTROY)
+        return CallWindowProcA(original, control, message, wParam, lParam);
 
     if (message == WM_PAINT) {
         PAINTSTRUCT paint = {};
@@ -289,6 +294,8 @@ LRESULT CALLBACK DarkHeaderProc(HWND control, UINT message, WPARAM wParam,
     WNDPROC original = GetOriginalControlProc(control);
     if (!original)
         return DefWindowProcA(control, message, wParam, lParam);
+    if (!IsLaunchMenuDarkModeEnabled() && message != WM_NCDESTROY)
+        return CallWindowProcA(original, control, message, wParam, lParam);
 
     if (message == WM_PAINT || message == WM_PRINTCLIENT) {
         PAINTSTRUCT paint = {};
@@ -345,6 +352,8 @@ LRESULT CALLBACK DarkBorderControlProc(HWND control, UINT message, WPARAM wParam
     WNDPROC original = GetOriginalControlProc(control);
     if (!original)
         return DefWindowProcA(control, message, wParam, lParam);
+    if (!IsLaunchMenuDarkModeEnabled() && message != WM_NCDESTROY)
+        return CallWindowProcA(original, control, message, wParam, lParam);
 
     const LRESULT result = CallWindowProcA(original, control, message, wParam, lParam);
     if (message == WM_PAINT || message == WM_NCPAINT ||
@@ -360,6 +369,7 @@ LRESULT CALLBACK DarkListViewProc(HWND control, UINT message, WPARAM wParam,
                                   LPARAM lParam)
 {
     const LRESULT result = DarkBorderControlProc(control, message, wParam, lParam);
+    if (!IsLaunchMenuDarkModeEnabled()) return result;
     if (message != WM_PAINT && message != WM_PRINTCLIENT)
         return result;
 
@@ -408,6 +418,8 @@ LRESULT CALLBACK DarkButtonProc(HWND control, UINT message, WPARAM wParam,
     WNDPROC original = GetOriginalControlProc(control);
     if (!original)
         return DefWindowProcA(control, message, wParam, lParam);
+    if (!IsLaunchMenuDarkModeEnabled() && message != WM_NCDESTROY)
+        return CallWindowProcA(original, control, message, wParam, lParam);
 
     if (message == WM_PAINT) {
         PAINTSTRUCT paint = {};
@@ -462,6 +474,21 @@ BOOL CALLBACK ApplyDarkControlTheme(HWND control, LPARAM setThemeParam)
     const auto setWindowTheme = reinterpret_cast<SetWindowThemeFn>(setThemeParam);
     char className[32] = {};
     GetClassNameA(control, className, sizeof(className));
+    const bool dark = IsLaunchMenuDarkModeEnabled();
+    if (!dark) {
+        if (g_allowDarkModeForWindow) g_allowDarkModeForWindow(control, FALSE);
+        if (setWindowTheme) setWindowTheme(control, nullptr, nullptr);
+        SendMessageW(control, WM_THEMECHANGED, 0, 0);
+        if (_stricmp(className, WC_LISTVIEWA) == 0) {
+            ListView_SetBkColor(control, GetSysColor(COLOR_WINDOW));
+            ListView_SetTextBkColor(control, GetSysColor(COLOR_WINDOW));
+            ListView_SetTextColor(control, GetSysColor(COLOR_WINDOWTEXT));
+            ListView_SetExtendedListViewStyleEx(control, LVS_EX_GRIDLINES, LVS_EX_GRIDLINES);
+        }
+        RedrawWindow(control, nullptr, nullptr,
+                     RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_UPDATENOW);
+        return TRUE;
+    }
     if (_stricmp(className, "EDIT") == 0) {
         char parentClass[32] = {};
         GetClassNameA(GetParent(control), parentClass, sizeof(parentClass));
@@ -522,27 +549,29 @@ BOOL CALLBACK ApplyDarkControlTheme(HWND control, LPARAM setThemeParam)
 
 COLORREF LaunchMenuDarkBackgroundColor()
 {
-    return DARK_BACKGROUND;
+    return IsLaunchMenuDarkModeEnabled() ? DARK_BACKGROUND : GetSysColor(COLOR_BTNFACE);
 }
 
 COLORREF LaunchMenuDarkControlColor()
 {
-    return DARK_CONTROL;
+    return IsLaunchMenuDarkModeEnabled() ? DARK_CONTROL : GetSysColor(COLOR_WINDOW);
 }
 
 COLORREF LaunchMenuDarkTextColor()
 {
-    return DARK_TEXT;
+    return IsLaunchMenuDarkModeEnabled() ? DARK_TEXT : GetSysColor(COLOR_WINDOWTEXT);
 }
 
 HBRUSH LaunchMenuDarkBackgroundBrush()
 {
+    if (!IsLaunchMenuDarkModeEnabled()) return GetSysColorBrush(COLOR_BTNFACE);
     static HBRUSH brush = CreateSolidBrush(DARK_BACKGROUND);
     return brush;
 }
 
 void InitializeLaunchMenuDarkMode()
 {
+    if (!IsLaunchMenuDarkModeEnabled()) return;
     static bool initialized = false;
     if (initialized) return;
     initialized = true;
@@ -569,15 +598,15 @@ void InitializeLaunchMenuDarkMode()
         GetProcAddress(g_uxTheme, "SetWindowTheme"));
 
     if (version.dwBuildNumber >= 18362) {
-        const auto setPreferredAppMode = reinterpret_cast<SetPreferredAppModeFn>(
+        g_setPreferredAppMode = reinterpret_cast<SetPreferredAppModeFn>(
             GetProcAddress(g_uxTheme, MAKEINTRESOURCEA(135)));
-        if (setPreferredAppMode)
-            setPreferredAppMode(2); // ForceDark
+        if (g_setPreferredAppMode)
+            g_setPreferredAppMode(2); // ForceDark
     } else {
-        const auto allowDarkModeForApp = reinterpret_cast<AllowDarkModeForAppFn>(
+        g_allowDarkModeForApp = reinterpret_cast<AllowDarkModeForAppFn>(
             GetProcAddress(g_uxTheme, MAKEINTRESOURCEA(135)));
-        if (allowDarkModeForApp)
-            allowDarkModeForApp(TRUE);
+        if (g_allowDarkModeForApp)
+            g_allowDarkModeForApp(TRUE);
     }
 
     const auto refreshPolicy =
@@ -589,6 +618,11 @@ void InitializeLaunchMenuDarkMode()
 
 void ApplyLaunchMenuDarkTheme(HWND window)
 {
+    if (!window) return;
+    const bool dark = IsLaunchMenuDarkModeEnabled();
+    InitializeLaunchMenuDarkMode();
+    if (g_setPreferredAppMode) g_setPreferredAppMode(dark ? 2 : 3);
+    if (g_allowDarkModeForApp) g_allowDarkModeForApp(dark);
     using DwmSetWindowAttributeFn = HRESULT (WINAPI*)(HWND, DWORD, LPCVOID, DWORD);
 
     HMODULE dwmapi = LoadLibraryA("dwmapi.dll");
@@ -596,7 +630,7 @@ void ApplyLaunchMenuDarkTheme(HWND window)
         const auto setWindowAttribute = reinterpret_cast<DwmSetWindowAttributeFn>(
             GetProcAddress(dwmapi, "DwmSetWindowAttribute"));
         if (setWindowAttribute) {
-            const BOOL enabled = TRUE;
+            const BOOL enabled = dark;
             if (FAILED(setWindowAttribute(window, 20, &enabled, sizeof(enabled))))
                 setWindowAttribute(window, 19, &enabled, sizeof(enabled));
         }
@@ -605,7 +639,7 @@ void ApplyLaunchMenuDarkTheme(HWND window)
 
     InitializeLaunchMenuDarkMode();
     if (g_allowDarkModeForWindow)
-        g_allowDarkModeForWindow(window, TRUE);
+        g_allowDarkModeForWindow(window, dark);
     SendMessageW(window, WM_THEMECHANGED, 0, 0);
     EnumChildWindows(window, ApplyDarkControlTheme,
                      reinterpret_cast<LPARAM>(g_setWindowTheme));
@@ -627,6 +661,13 @@ void PaintLaunchMenuDarkBackground(HWND window, HDC dc)
 INT_PTR HandleLaunchMenuDarkControlColor(UINT message, WPARAM wParam)
 {
     HDC dc = reinterpret_cast<HDC>(wParam);
+    if (!IsLaunchMenuDarkModeEnabled()) {
+        const bool input = message == WM_CTLCOLOREDIT || message == WM_CTLCOLORLISTBOX;
+        SetTextColor(dc, GetSysColor(COLOR_WINDOWTEXT));
+        SetBkColor(dc, GetSysColor(input ? COLOR_WINDOW : COLOR_BTNFACE));
+        SetBkMode(dc, OPAQUE);
+        return reinterpret_cast<INT_PTR>(GetSysColorBrush(input ? COLOR_WINDOW : COLOR_BTNFACE));
+    }
     SetTextColor(dc, DARK_TEXT);
 
     if (message == WM_CTLCOLOREDIT || message == WM_CTLCOLORLISTBOX) {

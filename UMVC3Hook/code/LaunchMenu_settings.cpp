@@ -14,10 +14,13 @@ namespace {
 constexpr int ID_SINGLE_THREADED = 100;
 constexpr int ID_SAVE = 101;
 constexpr int ID_CANCEL = 102;
+constexpr int ID_DARK_MODE = 103;
 constexpr char SETTINGS_CLASS[] = "TimestoneAdvancedConfig";
 
 bool g_settingsLoaded = false;
 bool g_runSingleThreaded = false;
+bool g_darkMode = true;
+bool g_savedDarkMode = true;
 
 UINT GetWindowDpi(HWND window)
 {
@@ -113,6 +116,8 @@ void LoadSettings()
     GetSettingsPath(path, sizeof(path));
     g_runSingleThreaded = GetPrivateProfileIntA(
         "Advanced", "EntireGameSingleThreaded", 0, path) != 0;
+    g_darkMode = GetPrivateProfileIntA("General", "LaunchMenuDarkMode", 1, path) != 0;
+    g_savedDarkMode = g_darkMode;
     g_settingsLoaded = true;
 }
 
@@ -123,6 +128,13 @@ void SaveSettings(HWND window)
 
     char path[MAX_PATH] = {};
     GetSettingsPath(path, sizeof(path));
+    const bool darkMode = SendMessageA(GetDlgItem(window, ID_DARK_MODE),
+                                       BM_GETCHECK, 0, 0) == BST_CHECKED;
+    if (WritePrivateProfileStringA("General", "LaunchMenuDarkMode",
+                                   darkMode ? "1" : "0", path))
+        g_savedDarkMode = darkMode;
+    else
+        HookLog("LaunchMenu: failed to save dark mode to %s\n", path);
     if (!WritePrivateProfileStringA(
             "Advanced", "EntireGameSingleThreaded",
             g_runSingleThreaded ? "1" : "0", path)) {
@@ -152,13 +164,21 @@ LRESULT CALLBACK SettingsWndProc(HWND window, UINT message,
             18, 72, 300, 24, window,
             reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_SINGLE_THREADED)),
             nullptr, nullptr);
+        HWND darkMode = CreateWindowA(
+            "BUTTON", "Dark mode",
+            WS_VISIBLE | WS_CHILD | WS_TABSTOP | BS_AUTOCHECKBOX,
+            18, 104, 374, 24, window,
+            reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_DARK_MODE)),
+            nullptr, nullptr);
+        SendMessageA(darkMode, BM_SETCHECK,
+                     g_savedDarkMode ? BST_CHECKED : BST_UNCHECKED, 0);
         HWND save = CreateWindowA(
             "BUTTON", "Save", WS_VISIBLE | WS_CHILD | WS_TABSTOP | BS_DEFPUSHBUTTON,
-            222, 104, 82, 28, window,
+            222, 140, 82, 28, window,
             reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_SAVE)), nullptr, nullptr);
         HWND cancel = CreateWindowA(
             "BUTTON", "Cancel", WS_VISIBLE | WS_CHILD | WS_TABSTOP | BS_PUSHBUTTON,
-            310, 104, 82, 28, window,
+            310, 140, 82, 28, window,
             reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_CANCEL)), nullptr, nullptr);
         ApplyDpi(window, 96, GetWindowDpi(window));
         ApplyLaunchMenuDarkTheme(window);
@@ -181,6 +201,13 @@ LRESULT CALLBACK SettingsWndProc(HWND window, UINT message,
         return 0;
     }
     case WM_COMMAND:
+        if (LOWORD(wParam) == ID_DARK_MODE && HIWORD(wParam) == BN_CLICKED) {
+            g_darkMode = SendMessageA(GetDlgItem(window, ID_DARK_MODE),
+                                      BM_GETCHECK, 0, 0) == BST_CHECKED;
+            ApplyLaunchMenuDarkTheme(GetWindow(window, GW_OWNER));
+            ApplyLaunchMenuDarkTheme(window);
+            return 0;
+        }
         if (LOWORD(wParam) == ID_SAVE) {
             SaveSettings(window);
             DestroyWindow(window);
@@ -204,6 +231,10 @@ LRESULT CALLBACK SettingsWndProc(HWND window, UINT message,
         return TRUE;
     case WM_DESTROY:
     {
+        if (g_darkMode != g_savedDarkMode) {
+            g_darkMode = g_savedDarkMode;
+            ApplyLaunchMenuDarkTheme(GetWindow(window, GW_OWNER));
+        }
         HFONT font = reinterpret_cast<HFONT>(
             GetPropA(window, "TimestoneSettingsFont"));
         if (font) DeleteObject(font);
@@ -216,6 +247,12 @@ LRESULT CALLBACK SettingsWndProc(HWND window, UINT message,
 }
 
 } // namespace
+
+bool IsLaunchMenuDarkModeEnabled()
+{
+    LoadSettings();
+    return g_darkMode;
+}
 
 void ShowAdvancedConfigModal(HWND owner)
 {
@@ -237,7 +274,7 @@ void ShowAdvancedConfigModal(HWND owner)
     GetWindowRect(owner, &ownerRect);
     const UINT dpi = GetWindowDpi(owner);
     const int width = MulDiv(428, dpi, 96);
-    const int height = MulDiv(178, dpi, 96);
+    const int height = MulDiv(214, dpi, 96);
     const int x = ownerRect.left + ((ownerRect.right - ownerRect.left) - width) / 2;
     const int y = ownerRect.top + ((ownerRect.bottom - ownerRect.top) - height) / 2;
 
