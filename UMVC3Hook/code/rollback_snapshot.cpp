@@ -455,7 +455,7 @@ static void TraverseAndAddDynamicList(uint64_t listHead, size_t nextOffset,
         }
     };
 
-    int collisionExternalRegions = 0;
+    /*int collisionExternalRegions = 0;
     size_t collisionExternalBytes = 0;
     struct CollisionDiscoveryDiag {
         uint64_t sCollision = 0;
@@ -753,7 +753,7 @@ static void TraverseAndAddDynamicList(uint64_t listHead, size_t nextOffset,
                 addNodeListBuffers(nodeList);
             }
         }
-    };
+    };*/
 
     // ---- 1. sReplay: frame counter only (sReplay+0x54). Full replay buffer
     //     has internal pointers that go stale. ---

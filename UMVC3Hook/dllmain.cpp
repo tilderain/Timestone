@@ -2199,7 +2199,7 @@ void OnInitializeHook()
 		// even if sPadCheckSlotDeviceAlive_maybe somehow returns false.
 		// Original: 75 44 (JNZ +0x44) → EB 44 (JMP +0x44)
 		Memory::VP::Patch<uint8_t>(_addr(0x1402E57EE), 0xEB);
-		HookLog("UMVC3Hook: Patched uBattleUiTrainingCheckP2PadAssigned_maybe JNZ→JMP\n");
+		HookLog("UMVC3Hook: Patched uBattleUiTrainingCheckP2PadAssigned_maybe JNZ->JMP\n");
 
 		TrainingBoot_InitHooks();
 	}
