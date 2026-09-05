@@ -469,7 +469,7 @@ void ShowAdvancedConfigModal(HWND owner)
 
     EnableWindow(owner, FALSE);
     HWND modal = CreateWindowExA(
-        WS_EX_DLGMODALFRAME, SETTINGS_CLASS, "Advanced Config",
+        WS_EX_DLGMODALFRAME, SETTINGS_CLASS, "Settings",
         WS_POPUP | WS_CAPTION | WS_SYSMENU,
         x, y, width, height, owner, nullptr, instance, nullptr);
     if (!modal) {

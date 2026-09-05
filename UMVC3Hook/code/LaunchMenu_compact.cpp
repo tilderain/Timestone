@@ -72,8 +72,12 @@ void CreateCompactLaunchMenuControls(HWND window,
         reinterpret_cast<HMENU>(static_cast<INT_PTR>(ids.join)), NULL, NULL);
 
     CreateWindowA("STATIC", "Steam ready", WS_VISIBLE | WS_CHILD,
-        x + 10, 68, 588, 18, window,
+        x + 10, 68, 452, 18, window,
         reinterpret_cast<HMENU>(static_cast<INT_PTR>(ids.status)), NULL, NULL);
+    CreateWindowA("BUTTON", "Copy Lobby Link",
+        WS_CHILD | WS_TABSTOP | BS_PUSHBUTTON,
+        x + 468, 64, 130, 24, window,
+        reinterpret_cast<HMENU>(static_cast<INT_PTR>(ids.copyLink)), NULL, NULL);
     HWND list = CreateWindowExA(WS_EX_CLIENTEDGE, WC_LISTVIEWA, "",
         WS_VISIBLE | WS_CHILD | WS_TABSTOP | WS_VSCROLL |
             LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS,
@@ -91,11 +95,11 @@ void CreateCompactLaunchMenuControls(HWND window,
         ListView_InsertColumn(list, i, &column);
     }
 
-    CreateWindowA("BUTTON", "Configure Settings In-Game / Normal Launch",
+    CreateWindowA("BUTTON", "Change Controls In-Game / Normal Launch",
         WS_VISIBLE | WS_CHILD | WS_TABSTOP | BS_DEFPUSHBUTTON,
         x + width - 300, 318, 300, 42, window,
         reinterpret_cast<HMENU>(static_cast<INT_PTR>(ids.normal)), NULL, NULL);
-    CreateWindowA("BUTTON", "Advanced Config",
+    CreateWindowA("BUTTON", "Configure settings",
         WS_VISIBLE | WS_CHILD | WS_TABSTOP | BS_PUSHBUTTON,
         x, 318, 180, 42, window,
         reinterpret_cast<HMENU>(static_cast<INT_PTR>(ids.config)), NULL, NULL);

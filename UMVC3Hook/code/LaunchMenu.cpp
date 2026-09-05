@@ -799,6 +799,7 @@ enum CtrlId {
     ID_STEAM_JOIN_BTN     = 2305,
     ID_STEAM_TYPE         = 2306,
     ID_STEAM_NAME         = 2307,
+    ID_STEAM_COPY_LINK    = 2308,
     ID_LAUNCH_PROMPT      = 2401,
     ID_VERSION_LABEL      = 2402,
     ID_ADVANCED_MENU      = 2403,
@@ -952,6 +953,8 @@ static void UpdatePingLabel(HWND hDlg)
     ShowWindow(label, SW_SHOW);
 }
 
+static ULONGLONG g_lobbyLinkCopiedUntil = 0;
+
 static void UpdateSteamLobbyButton(HWND hDlg)
 {
     HWND button = GetDlgItem(hDlg, ID_STEAM_CREATE_BTN);
@@ -963,6 +966,32 @@ static void UpdateSteamLobbyButton(HWND hDlg)
                   !hasLobby && !SteamLobby_IsCreating());
     EnableWindow(GetDlgItem(hDlg, ID_STEAM_NAME),
                  !hasLobby && !SteamLobby_IsCreating());
+    char link[128] = {};
+    ShowWindow(GetDlgItem(hDlg, ID_STEAM_COPY_LINK),
+               SteamLobby_GetHostedJoinLink(link, sizeof(link)) ? SW_SHOW : SW_HIDE);
+}
+
+static bool CopySteamLobbyJoinLink(HWND hDlg)
+{
+    char link[128] = {};
+    if (!SteamLobby_GetHostedJoinLink(link, sizeof(link))) return false;
+    const size_t size = strlen(link) + 1;
+    HGLOBAL memory = GlobalAlloc(GMEM_MOVEABLE, size);
+    if (!memory) return false;
+    void* data = GlobalLock(memory);
+    if (!data) {
+        GlobalFree(memory);
+        return false;
+    }
+    memcpy(data, link, size);
+    GlobalUnlock(memory);
+    bool copied = false;
+    if (OpenClipboard(hDlg)) {
+        copied = EmptyClipboard() && SetClipboardData(CF_TEXT, memory) != NULL;
+        CloseClipboard();
+    }
+    if (!copied) GlobalFree(memory);
+    return copied;
 }
 
 static void JoinSelectedSteamLobby(HWND hDlg)
@@ -2166,6 +2195,7 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
                 ID_STEAM_TYPE, ID_STEAM_NAME, ID_STEAM_STATUS, ID_STEAM_LIST,
                 ID_LAUNCH_NORMAL, ID_ADVANCED_CONFIG, ID_ADVANCED_MENU,
                 ID_LOBBY_MUSIC_MUTE,
+                ID_STEAM_COPY_LINK,
             };
             CreateCompactLaunchMenuControls(hDlg, ids, g_lobbyTypeSelection,
                                              g_lobbyName);
@@ -2371,8 +2401,12 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
         y += 30;
 
         CreateWindowA("STATIC", SteamLobby_GetStatus(),
-            WS_VISIBLE | WS_CHILD, leftX + 10, y + 2, 780, 18,
+            WS_VISIBLE | WS_CHILD, leftX + 10, y + 2, 644, 18,
             hDlg, (HMENU)ID_STEAM_STATUS, NULL, NULL);
+        CreateWindowA("BUTTON", "Copy Lobby Link",
+            WS_CHILD | WS_TABSTOP | BS_PUSHBUTTON,
+            leftX + 660, y, 130, 22,
+            hDlg, (HMENU)ID_STEAM_COPY_LINK, NULL, NULL);
         y += 22;
 
         // Lobby results table
@@ -2493,7 +2527,7 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
                                   settingsPath) != 0
                 ? BST_CHECKED : BST_UNCHECKED,
             0);
-        CreateWindowA("BUTTON", "Advanced Config",
+        CreateWindowA("BUTTON", "Configure settings",
             WS_VISIBLE | WS_CHILD | WS_TABSTOP | BS_PUSHBUTTON,
             leftX + 310, y + 34, 180, 26,
             hDlg, (HMENU)ID_ADVANCED_CONFIG, NULL, NULL);
@@ -2550,7 +2584,9 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
                 MessageBoxA(hDlg, mismatch, "Timestone Version Mismatch",
                             MB_OK | MB_ICONERROR);
             HWND hSteamStatus = GetDlgItem(hDlg, ID_STEAM_STATUS);
-            if (hSteamStatus) SetWindowTextA(hSteamStatus, SteamLobby_GetStatus());
+            if (!SteamLobby_HasLobby()) g_lobbyLinkCopiedUntil = 0;
+            if (hSteamStatus) SetWindowTextA(hSteamStatus,
+                GetTickCount64() < g_lobbyLinkCopiedUntil ? "Copied!" : SteamLobby_GetStatus());
             if (g_battleSetupOnly && !g_dialogConfig.enetPeer) {
                 HWND hNetStatus = GetDlgItem(hDlg, ID_NET_STATUS);
                 if (hNetStatus) SetWindowTextA(hNetStatus, SteamLobby_GetStatus());
@@ -3344,6 +3380,15 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
             UpdateSteamLobbyButton(hDlg);
             return 0;
         }
+
+        case ID_STEAM_COPY_LINK:
+            if (CopySteamLobbyJoinLink(hDlg)) {
+                g_lobbyLinkCopiedUntil = GetTickCount64() + 2000;
+                SetWindowTextA(GetDlgItem(hDlg, ID_STEAM_STATUS), "Copied!");
+            } else
+                MessageBoxA(hDlg, "Could not copy the lobby join link. Please try again.",
+                            "Copy Lobby Link", MB_OK | MB_ICONWARNING);
+            return 0;
 
         case ID_STEAM_JOIN_BTN:
         {

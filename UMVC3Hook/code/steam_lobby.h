@@ -29,6 +29,7 @@ bool SteamLobby_OpenPeerProfile();
 bool SteamLobby_HasLobby();
 bool SteamLobby_IsCreating();
 bool SteamLobby_IsHostedLobby(uint64_t lobbyId);
+bool SteamLobby_GetHostedJoinLink(char* link, size_t capacity);
 bool SteamLobby_IsFriendLobby(uint64_t lobbyId);
 bool SteamLobby_IsLobbyVersionCompatible(uint64_t lobbyId);
 size_t SteamLobby_GetResultCount();

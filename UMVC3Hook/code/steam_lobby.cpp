@@ -1106,6 +1106,19 @@ bool SteamLobby_IsHostedLobby(uint64_t lobbyId)
     return g_isHost && lobbyId != 0 && lobbyId == g_lobbyId;
 }
 
+bool SteamLobby_GetHostedJoinLink(char* link, size_t capacity)
+{
+    if (!link || capacity == 0) return false;
+    link[0] = '\0';
+    if (!g_isHost || !g_lobbyId || !g_matchmaking) return false;
+    const uint64_t owner = g_api.GetLobbyOwner(g_matchmaking, g_lobbyId);
+    if (!owner) return false;
+    const int length = snprintf(link, capacity, "steam://joinlobby/357190/%llu/%llu",
+        static_cast<unsigned long long>(g_lobbyId),
+        static_cast<unsigned long long>(owner));
+    return length > 0 && static_cast<size_t>(length) < capacity;
+}
+
 bool SteamLobby_IsFriendLobby(uint64_t lobbyId)
 {
     for (size_t i = 0; i < g_friendLobbyCandidateCount; ++i) {
