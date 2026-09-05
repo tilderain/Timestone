@@ -42,7 +42,15 @@ void PaintBlackControlBorder(HWND control)
     RECT border = {};
     GetWindowRect(control, &border);
     OffsetRect(&border, -border.left, -border.top);
-    FrameRect(dc, &border, DarkBorderBrush());
+    char className[32] = {};
+    GetClassNameA(control, className, sizeof(className));
+    if (_stricmp(className, WC_LISTVIEWA) == 0) {
+        HBRUSH brush = CreateSolidBrush(RGB(85, 85, 85));
+        FrameRect(dc, &border, brush);
+        DeleteObject(brush);
+    } else {
+        FrameRect(dc, &border, DarkBorderBrush());
+    }
     ReleaseDC(control, dc);
 }
 
@@ -257,6 +265,62 @@ LRESULT CALLBACK DarkComboBoxProc(HWND control, UINT message, WPARAM wParam,
     return result;
 }
 
+LRESULT CALLBACK DarkHeaderProc(HWND control, UINT message, WPARAM wParam,
+                                LPARAM lParam)
+{
+    WNDPROC original = GetOriginalControlProc(control);
+    if (!original)
+        return DefWindowProcA(control, message, wParam, lParam);
+
+    if (message == WM_PAINT || message == WM_PRINTCLIENT) {
+        PAINTSTRUCT paint = {};
+        HDC dc = message == WM_PAINT ? BeginPaint(control, &paint)
+                                    : reinterpret_cast<HDC>(wParam);
+        const int savedDC = SaveDC(dc);
+        RECT client = {};
+        GetClientRect(control, &client);
+        FillRect(dc, &client, DarkControlBrush());
+        HGDIOBJ oldFont = nullptr;
+        SelectControlFont(control, dc, &oldFont);
+        SetBkMode(dc, TRANSPARENT);
+        SetTextColor(dc, DARK_TEXT);
+
+        for (int i = 0; i < Header_GetItemCount(control); ++i) {
+            RECT itemRect = {};
+            if (!Header_GetItemRect(control, i, &itemRect)) continue;
+            wchar_t text[256] = {};
+            HDITEMW item = {};
+            item.mask = HDI_TEXT | HDI_FORMAT;
+            item.pszText = text;
+            item.cchTextMax = static_cast<int>(sizeof(text) / sizeof(text[0]));
+            if (!SendMessageW(control, HDM_GETITEMW, i,
+                              reinterpret_cast<LPARAM>(&item))) continue;
+
+            FrameRect(dc, &itemRect, DarkBorderBrush());
+            itemRect.left += 6;
+            itemRect.right -= 6;
+            const UINT alignment = (item.fmt & HDF_JUSTIFYMASK) == HDF_RIGHT
+                ? DT_RIGHT : (item.fmt & HDF_JUSTIFYMASK) == HDF_CENTER
+                ? DT_CENTER : DT_LEFT;
+            DrawTextW(dc, text, -1, &itemRect,
+                      alignment | DT_VCENTER | DT_SINGLELINE |
+                      DT_END_ELLIPSIS | DT_NOPREFIX);
+        }
+
+        if (oldFont) SelectObject(dc, oldFont);
+        RestoreDC(dc, savedDC);
+        if (message == WM_PAINT) EndPaint(control, &paint);
+        return 0;
+    }
+    if (message == WM_ERASEBKGND)
+        return TRUE;
+
+    const LRESULT result = CallWindowProcA(original, control, message, wParam, lParam);
+    if (message == WM_NCDESTROY)
+        RemovePropA(control, DARK_ORIGINAL_PROC_PROP);
+    return result;
+}
+
 LRESULT CALLBACK DarkBorderControlProc(HWND control, UINT message, WPARAM wParam,
                                        LPARAM lParam)
 {
@@ -271,6 +335,52 @@ LRESULT CALLBACK DarkBorderControlProc(HWND control, UINT message, WPARAM wParam
         PaintBlackControlBorder(control);
     if (message == WM_NCDESTROY)
         RemovePropA(control, DARK_ORIGINAL_PROC_PROP);
+    return result;
+}
+
+LRESULT CALLBACK DarkListViewProc(HWND control, UINT message, WPARAM wParam,
+                                  LPARAM lParam)
+{
+    const LRESULT result = DarkBorderControlProc(control, message, wParam, lParam);
+    if (message != WM_PAINT && message != WM_PRINTCLIENT)
+        return result;
+
+    HDC dc = message == WM_PRINTCLIENT ? reinterpret_cast<HDC>(wParam)
+                                      : GetDC(control);
+    if (!dc) return result;
+    const int savedDC = SaveDC(dc);
+    RECT client = {};
+    GetClientRect(control, &client);
+    HWND header = ListView_GetHeader(control);
+    RECT headerRect = {};
+    GetWindowRect(header, &headerRect);
+    MapWindowPoints(nullptr, control, reinterpret_cast<POINT*>(&headerRect), 2);
+    client.top = std::max(client.top, headerRect.bottom);
+    IntersectClipRect(dc, client.left, client.top, client.right, client.bottom);
+    HPEN pen = CreatePen(PS_SOLID, 1, RGB(85, 85, 85));
+    HGDIOBJ oldPen = SelectObject(dc, pen);
+
+    // Native gridlines have no configurable color. Draw separators after the rows.
+    for (int column = 0; column < Header_GetItemCount(header); ++column) {
+        RECT rect = {};
+        if (!Header_GetItemRect(header, column, &rect)) continue;
+        MapWindowPoints(header, control, reinterpret_cast<POINT*>(&rect), 2);
+        MoveToEx(dc, rect.right - 1, client.top, nullptr);
+        LineTo(dc, rect.right - 1, client.bottom);
+    }
+    const int count = ListView_GetItemCount(control);
+    for (int row = ListView_GetTopIndex(control); row < count; ++row) {
+        RECT rect = {};
+        if (!ListView_GetItemRect(control, row, &rect, LVIR_BOUNDS)) break;
+        if (rect.top >= client.bottom) break;
+        MoveToEx(dc, client.left, rect.bottom - 1, nullptr);
+        LineTo(dc, client.right, rect.bottom - 1);
+    }
+
+    SelectObject(dc, oldPen);
+    DeleteObject(pen);
+    RestoreDC(dc, savedDC);
+    if (message != WM_PRINTCLIENT) ReleaseDC(control, dc);
     return result;
 }
 
@@ -334,9 +444,18 @@ BOOL CALLBACK ApplyDarkControlTheme(HWND control, LPARAM setThemeParam)
     SendMessageW(control, WM_THEMECHANGED, 0, 0);
 
     if (_stricmp(className, WC_LISTVIEWA) == 0) {
+        // Remove the native sunken edge so its light inner rim cannot show through.
+        SetWindowLongPtrA(control, GWL_EXSTYLE,
+                          GetWindowLongPtrA(control, GWL_EXSTYLE) & ~WS_EX_CLIENTEDGE);
+        SetWindowLongPtrA(control, GWL_STYLE,
+                          GetWindowLongPtrA(control, GWL_STYLE) | WS_BORDER);
+        SetWindowPos(control, nullptr, 0, 0, 0, 0,
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE |
+                     SWP_FRAMECHANGED);
         ListView_SetBkColor(control, DARK_CONTROL);
         ListView_SetTextBkColor(control, DARK_CONTROL);
         ListView_SetTextColor(control, DARK_TEXT);
+        ListView_SetExtendedListViewStyleEx(control, LVS_EX_GRIDLINES, 0);
     }
 
     if (_stricmp(className, "COMBOBOX") == 0)
@@ -346,10 +465,12 @@ BOOL CALLBACK ApplyDarkControlTheme(HWND control, LPARAM setThemeParam)
                            BS_TYPEMASK;
         SubclassDarkControl(control, type == BS_OWNERDRAW
             ? DarkBorderControlProc : DarkButtonProc);
-    } else if (_stricmp(className, "EDIT") == 0 ||
-             _stricmp(className, "LISTBOX") == 0 ||
-             _stricmp(className, WC_LISTVIEWA) == 0 ||
-             _stricmp(className, WC_HEADERA) == 0)
+    } else if (_stricmp(className, WC_HEADERA) == 0)
+        SubclassDarkControl(control, DarkHeaderProc);
+    else if (_stricmp(className, WC_LISTVIEWA) == 0)
+        SubclassDarkControl(control, DarkListViewProc);
+    else if (_stricmp(className, "EDIT") == 0 ||
+              _stricmp(className, "LISTBOX") == 0)
         SubclassDarkControl(control, DarkBorderControlProc);
 
     RedrawWindow(control, nullptr, nullptr,
