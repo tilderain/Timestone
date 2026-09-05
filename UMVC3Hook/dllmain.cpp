@@ -1,5 +1,6 @@
 // dllmain.cpp : Defines the entry point for the DLL application.
 #include "pch.h"
+#include "IniSafe.h"
 #include <iostream>
 #include "code/umvc3.h"
 #include "MemoryMgr.h"
@@ -61,7 +62,7 @@ static bool HookLogConsoleEnabledByConfig()
 	char configuredValue[32] = {};
 	if (GetPrivateProfileStringA("Settings", "EnableConsole", "",
 			configuredValue, sizeof(configuredValue), iniPath) == 0) {
-		WritePrivateProfileStringA("Settings", "EnableConsole", "0", iniPath);
+		IniSafe_WriteString("Settings", "EnableConsole", "0", iniPath);
 		return false;
 	}
 	return GetPrivateProfileIntA("Settings", "EnableConsole", 0, iniPath) == 1;

@@ -46,6 +46,7 @@ MAP_FILE  := Timestone.map
 CPP_SRC   := \
 	$(SRCDIR)/dllmain.cpp \
 	$(SRCDIR)/IniReader.cpp \
+	$(SRCDIR)/IniSafe.cpp \
 	$(SRCDIR)/sigscan.cpp \
 	$(SRCDIR)/pch.cpp \
 	$(SRCDIR)/code/umvc3.cpp \

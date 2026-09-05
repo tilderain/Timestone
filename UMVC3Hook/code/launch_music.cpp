@@ -1,4 +1,5 @@
 #include "launch_music.h"
+#include "../IniSafe.h"
 
 #include <Windows.h>
 #include <mmsystem.h>
@@ -385,7 +386,7 @@ void LaunchMusic_SetMuted(bool muted)
 
     char path[MAX_PATH] = {};
     if (GetIniPath(path, sizeof(path)) &&
-        !WritePrivateProfileStringA("Audio", "LobbyMusicMuted", muted ? "1" : "0", path)) {
+        !IniSafe_WriteString("Audio", "LobbyMusicMuted", muted ? "1" : "0", path)) {
         HookLog("LaunchMusic: could not save mute setting to %s\n", path);
     }
 }

@@ -1,4 +1,5 @@
 #include "LaunchMenu.h"
+#include "../IniSafe.h"
 #include "LaunchMenu_compact.h"
 #include "LaunchMenu_settings.h"
 #include "assist_names.h"
@@ -356,7 +357,7 @@ bool ConfirmLaunchDisclaimer()
     if (result != IDYES)
         return false;
 
-    if (!WritePrivateProfileStringA(
+    if (!IniSafe_WriteString(
             "General", "SoulSignedAway", "1", settingsPath)) {
         HookLog("UMVC3Hook: Failed to save disclaimer acceptance to %s\n",
                 settingsPath);
@@ -424,7 +425,7 @@ static void SaveLobbyTypeSelection()
     char settingsPath[MAX_PATH] = {};
     GetSettingsPath("Timestone.ini", settingsPath, sizeof(settingsPath));
     char value[2] = { static_cast<char>('0' + g_lobbyTypeSelection), '\0' };
-    if (!WritePrivateProfileStringA(
+    if (!IniSafe_WriteString(
             "Network", "LobbyType", value, settingsPath)) {
         HookLog("UMVC3Hook: Failed to save lobby type to %s\n", settingsPath);
     }
@@ -434,7 +435,7 @@ static void SaveLobbyName()
 {
     char settingsPath[MAX_PATH] = {};
     GetSettingsPath("Timestone.ini", settingsPath, sizeof(settingsPath));
-    if (!WritePrivateProfileStringA(
+    if (!IniSafe_WriteString(
             "Network", "LobbyName", g_lobbyName, settingsPath)) {
         HookLog("UMVC3Hook: Failed to save lobby name to %s\n", settingsPath);
     }
@@ -448,34 +449,34 @@ static void SaveRollbackSettings()
         char key[16], value[16];
         snprintf(key, sizeof(key), "Slot%d", i + 1);
         snprintf(value, sizeof(value), "%d", g_dialogConfig.p1Chars[i]);
-        WritePrivateProfileStringA("P1", key, value, rollbackPath);
+        IniSafe_WriteString("P1", key, value, rollbackPath);
         snprintf(value, sizeof(value), "%d", g_dialogConfig.p2Chars[i]);
-        WritePrivateProfileStringA("P2", key, value, rollbackPath);
+        IniSafe_WriteString("P2", key, value, rollbackPath);
         snprintf(key, sizeof(key), "Color%d", i + 1);
         snprintf(value, sizeof(value), "%d", g_dialogConfig.p1Colors[i]);
-        WritePrivateProfileStringA("P1", key, value, rollbackPath);
+        IniSafe_WriteString("P1", key, value, rollbackPath);
         snprintf(value, sizeof(value), "%d", g_dialogConfig.p2Colors[i]);
-        WritePrivateProfileStringA("P2", key, value, rollbackPath);
+        IniSafe_WriteString("P2", key, value, rollbackPath);
         snprintf(key, sizeof(key), "Assist%d", i + 1);
         snprintf(value, sizeof(value), "%d", g_dialogConfig.p1Assists[i]);
-        WritePrivateProfileStringA("P1", key, value, rollbackPath);
+        IniSafe_WriteString("P1", key, value, rollbackPath);
         snprintf(value, sizeof(value), "%d", g_dialogConfig.p2Assists[i]);
-        WritePrivateProfileStringA("P2", key, value, rollbackPath);
+        IniSafe_WriteString("P2", key, value, rollbackPath);
     }
-    WritePrivateProfileStringA("P1", "SimpleMode",
+    IniSafe_WriteString("P1", "SimpleMode",
                                g_dialogConfig.simpleMode[0] ? "1" : "0", rollbackPath);
-    WritePrivateProfileStringA("P2", "SimpleMode",
+    IniSafe_WriteString("P2", "SimpleMode",
                                g_dialogConfig.simpleMode[1] ? "1" : "0", rollbackPath);
     char stageId[16];
     snprintf(stageId, sizeof(stageId), "%d", g_dialogConfig.stageId);
-    WritePrivateProfileStringA("Training", "StageId", stageId, rollbackPath);
+    IniSafe_WriteString("Training", "StageId", stageId, rollbackPath);
 
     char settingsPath[MAX_PATH] = {};
     GetSettingsPath("Timestone.ini", settingsPath, sizeof(settingsPath));
-    WritePrivateProfileStringA("Network", "HostIp", g_dialogConfig.hostIp, settingsPath);
+    IniSafe_WriteString("Network", "HostIp", g_dialogConfig.hostIp, settingsPath);
     char port[16];
     snprintf(port, sizeof(port), "%d", g_dialogConfig.hostPort);
-    WritePrivateProfileStringA("Network", "HostPort", port, settingsPath);
+    IniSafe_WriteString("Network", "HostPort", port, settingsPath);
 }
 
 void SaveRosterToIni(const int32_t chars[2][3],
@@ -1494,7 +1495,7 @@ static void SetDirectConnectExpanded(HWND hDlg, bool expanded)
 
     char settingsPath[MAX_PATH] = {};
     GetSettingsPath("Timestone.ini", settingsPath, sizeof(settingsPath));
-    WritePrivateProfileStringA("Network", "DirectConnectExpanded",
+    IniSafe_WriteString("Network", "DirectConnectExpanded",
                                expanded ? "1" : "0", settingsPath);
 
     RedrawWindow(hDlg, NULL, NULL,
@@ -3166,7 +3167,7 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
                 GetSettingsPath("Timestone.ini", settingsPath, sizeof(settingsPath));
                 const bool enabled = SendMessageA(
                     reinterpret_cast<HWND>(lParam), BM_GETCHECK, 0, 0) == BST_CHECKED;
-                WritePrivateProfileStringA("General", "UseRegularLaunchMenu",
+                IniSafe_WriteString("General", "UseRegularLaunchMenu",
                                            enabled ? "1" : "0", settingsPath);
                 if (g_compactMode && enabled) {
                     g_compactAdvancedRequest = true;

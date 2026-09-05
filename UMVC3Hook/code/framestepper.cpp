@@ -2,6 +2,7 @@
 // Frame advance mod for UMvC3 training mode.
 // Ported from umvc3_framestep by Gneiss and EternalYoshi.
 #include "../pch.h"
+#include "../IniSafe.h"
 #include "framestepper.h"
 #include "gameui.h"
 #include "mk10utils.h"       // _addr
@@ -1126,7 +1127,7 @@ static void SaveStatusHudMode()
         return;
 
     char value[2] = { (char)('0' + g_statusHudMode), '\0' };
-    if (!WritePrivateProfileStringA(
+    if (!IniSafe_WriteString(
             "FrameStepper", "StatusHudMode", value, iniPath)) {
         HookLog("FrameStepper: failed to save HUD mode to %s\n", iniPath);
     }

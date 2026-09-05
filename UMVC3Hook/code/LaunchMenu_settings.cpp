@@ -1,4 +1,5 @@
 #include "LaunchMenu_settings.h"
+#include "../IniSafe.h"
 
 #include "launchmenu_dark.h"
 #include "mk10utils.h"
@@ -200,12 +201,12 @@ bool SaveSettings(HWND window)
     GetSettingsPath(path, sizeof(path));
     const bool darkMode = SendMessageA(GetDlgItem(window, ID_DARK_MODE),
                                        BM_GETCHECK, 0, 0) == BST_CHECKED;
-    if (WritePrivateProfileStringA("General", "LaunchMenuDarkMode",
+    if (IniSafe_WriteString("General", "LaunchMenuDarkMode",
                                    darkMode ? "1" : "0", path))
         g_savedDarkMode = darkMode;
     else
         HookLog("LaunchMenu: failed to save dark mode to %s\n", path);
-    if (!WritePrivateProfileStringA(
+    if (!IniSafe_WriteString(
             "Advanced", "EntireGameSingleThreaded",
             g_runSingleThreaded ? "1" : "0", path)) {
         HookLog("LaunchMenu: failed to save advanced config to %s\n", path);

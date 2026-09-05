@@ -1,4 +1,5 @@
 #include "../pch.h"
+#include "../IniSafe.h"
 
 #include "rollback_snapdump.h"
 #include "autotest.h"
@@ -411,7 +412,7 @@ bool SnapDump_CaptureEnabled()
             "Rollback", "EnableSnapDumpWrites", "", value, sizeof(value),
             iniPath);
         if (!value[0]) {
-            if (!WritePrivateProfileStringA(
+            if (!IniSafe_WriteString(
                     "Rollback", "EnableSnapDumpWrites", "0", iniPath)) {
                 HookLog("SnapDump: failed to add EnableSnapDumpWrites=0 to %s\n",
                         iniPath);
