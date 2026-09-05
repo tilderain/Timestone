@@ -4,6 +4,11 @@
 Retail pause UI and the plugin's frame-step/desync stop are separate systems.
 The plugin does not enable native online pause synchronization.
 
+For the 2026-09-04 Ghidra investigation into synchronized gameplay pause with
+owner-local command lists and control remapping, see
+[`netplay_pause_menu.md`](netplay_pause_menu.md). That document is a proposal,
+not implemented pause-menu support.
+
 ## Native Battle-Type Behavior
 
 The relevant predicates are:
