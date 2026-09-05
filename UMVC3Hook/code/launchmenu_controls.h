@@ -2,9 +2,41 @@
 
 #include <Windows.h>
 #include <commctrl.h>
+#include <cstring>
 
 // Keep styles explicit: visibility, tab order and owner drawing vary by control.
 namespace LaunchMenuControls {
+
+template <size_t N>
+inline void SetEnabled(HWND parent, const int (&ids)[N], bool enabled)
+{
+    for (int id : ids)
+        EnableWindow(GetDlgItem(parent, id), enabled ? TRUE : FALSE);
+}
+
+template <size_t N>
+inline void SetVisible(HWND parent, const int (&ids)[N], bool visible)
+{
+    for (int id : ids)
+        ShowWindow(GetDlgItem(parent, id), visible ? SW_SHOW : SW_HIDE);
+}
+
+inline void SetInteractiveControlsEnabled(HWND parent, bool enabled)
+{
+    if (!parent) return;
+    for (HWND child = GetWindow(parent, GW_CHILD); child;
+         child = GetWindow(child, GW_HWNDNEXT)) {
+        char className[32] = {};
+        GetClassNameA(child, className, sizeof(className));
+        // Preserve the original class filter: lobby list views are not reset here.
+        if (_stricmp(className, "BUTTON") == 0 ||
+            _stricmp(className, "COMBOBOX") == 0 ||
+            _stricmp(className, "EDIT") == 0 ||
+            _stricmp(className, "LISTBOX") == 0) {
+            EnableWindow(child, enabled ? TRUE : FALSE);
+        }
+    }
+}
 
 inline HWND Create(HWND parent, const char* className, const char* text,
                    DWORD style, int x, int y, int width, int height, int id)

@@ -903,6 +903,7 @@ static void DestroyChatWindow();
 static void UpdateChatAvatar();
 static void ReceiveChatPacket(const LaunchChatPacket& packet);
 static void ResetLaunchMenuButtonState(HWND hDlg);
+static void UpdateReadyButton(HWND hDlg);
 static void UpdatePingLabel(HWND hDlg);
 static void SetDirectConnectExpanded(HWND hDlg, bool expanded);
 static void SendP1Selection(HWND hDlg);
@@ -1025,6 +1026,26 @@ static void SaveLocalConnectSelection(HWND hDlg)
     SaveConnectRosterPreferences();
 }
 
+// Local edits only: packet application must not save or echo received selections.
+static void SendLocalRosterChange(HWND hDlg, int team)
+{
+    if (team != (g_isHost ? 0 : 1) || !g_dialogConfig.enetPeer) return;
+    if (g_isHost) {
+        SendP1Selection(hDlg);
+    } else {
+        g_localReady = false;
+        UpdateReadyButton(hDlg);
+        SendP2Selection(hDlg);
+    }
+}
+
+static void OnLocalRosterChanged(HWND hDlg, int team)
+{
+    if (team != (g_isHost ? 0 : 1)) return;
+    SaveLocalConnectSelection(hDlg);
+    SendLocalRosterChange(hDlg, team);
+}
+
 static bool IsCompatibleProtocol(const char (&protocol)[32])
 {
     return memchr(protocol, '\0', sizeof(protocol)) != nullptr &&
@@ -1064,8 +1085,7 @@ static void ShowVersionMismatch(HWND hDlg, const char* remoteVersion)
         g_localReady = false;
         g_peerReady = false;
         ResetLaunchMenuButtonState(hDlg);
-        EnableWindow(GetDlgItem(hDlg, ID_NET_HOST_BTN), FALSE);
-        EnableWindow(GetDlgItem(hDlg, ID_NET_CONNECT_BTN), FALSE);
+        LaunchMenuControls::SetEnabled(hDlg, {ID_NET_HOST_BTN, ID_NET_CONNECT_BTN}, false);
         HWND status = GetDlgItem(hDlg, ID_NET_STATUS);
         if (status) SetWindowTextA(status,
             steamHost ? "Rejected incompatible player; waiting in Steam lobby"
@@ -1131,10 +1151,8 @@ static void UpdateSteamLobbyButton(HWND hDlg)
     bool hasLobby = SteamLobby_HasLobby();
     SetWindowTextA(button, hasLobby ? "Leave Lobby" : "Create Lobby");
     EnableWindow(button, hasLobby || !SteamLobby_IsCreating());
-    EnableWindow(GetDlgItem(hDlg, ID_STEAM_TYPE),
-                  !hasLobby && !SteamLobby_IsCreating());
-    EnableWindow(GetDlgItem(hDlg, ID_STEAM_NAME),
-                 !hasLobby && !SteamLobby_IsCreating());
+    LaunchMenuControls::SetEnabled(hDlg, {ID_STEAM_TYPE, ID_STEAM_NAME},
+                                   !hasLobby && !SteamLobby_IsCreating());
     char link[128] = {};
     ShowWindow(GetDlgItem(hDlg, ID_STEAM_COPY_LINK),
                SteamLobby_GetHostedJoinLink(link, sizeof(link)) ? SW_SHOW : SW_HIDE);
@@ -1182,40 +1200,29 @@ static void JoinSelectedSteamLobby(HWND hDlg)
     SteamLobby_Join(lobbyId);
 }
 
+static void SetTeamControlsEnabled(HWND hDlg, int team, bool enabled)
+{
+    for (int slot = 0; slot < 3; ++slot) {
+        const int index = team * 3 + slot;
+        LaunchMenuControls::SetEnabled(hDlg,
+            {ID_P1_SLOT1 + index, ID_P1_COLOR1 + index, ID_P1_ASSIST1 + index}, enabled);
+    }
+    LaunchMenuControls::SetEnabled(hDlg,
+        {team == 0 ? ID_P1_SIMPLE_MODE : ID_P2_SIMPLE_MODE,
+         team == 0 ? ID_P1_SAVED_ROSTER : ID_P2_SAVED_ROSTER}, enabled);
+}
+
 static void ConfigureConnectedControls(HWND hDlg)
 {
-    for (HWND child = GetWindow(hDlg, GW_CHILD); child;
-         child = GetWindow(child, GW_HWNDNEXT)) {
-        char className[32] = {};
-        GetClassNameA(child, className, sizeof(className));
-        if (_stricmp(className, "BUTTON") == 0 ||
-            _stricmp(className, "COMBOBOX") == 0 ||
-            _stricmp(className, "EDIT") == 0 ||
-            _stricmp(className, "LISTBOX") == 0) {
-            EnableWindow(child, FALSE);
-        }
-    }
+    LaunchMenuControls::SetInteractiveControlsEnabled(hDlg, false);
+    SetTeamControlsEnabled(hDlg, g_isHost ? 0 : 1, true);
 
     if (g_isHost) {
-        for (int i = 0; i < 3; ++i) {
-            EnableWindow(GetDlgItem(hDlg, ID_P1_SLOT1 + i), TRUE);
-            EnableWindow(GetDlgItem(hDlg, ID_P1_COLOR1 + i), TRUE);
-            EnableWindow(GetDlgItem(hDlg, ID_P1_ASSIST1 + i), TRUE);
-        }
         EnableWindow(GetDlgItem(hDlg, ID_STAGE), TRUE);
-        EnableWindow(GetDlgItem(hDlg, ID_P1_SIMPLE_MODE), TRUE);
-        EnableWindow(GetDlgItem(hDlg, ID_P1_SAVED_ROSTER), TRUE);
         EnableWindow(GetDlgItem(hDlg, ID_LAUNCH_TRAINING), g_peerReady ? TRUE : FALSE);
         HookLog("UMVC3Hook: Host owns P1; waiting for peer P2 selection\n");
     } else {
-        for (int i = 0; i < 3; ++i) {
-            EnableWindow(GetDlgItem(hDlg, ID_P2_SLOT1 + i), TRUE);
-            EnableWindow(GetDlgItem(hDlg, ID_P2_COLOR1 + i), TRUE);
-            EnableWindow(GetDlgItem(hDlg, ID_P2_ASSIST1 + i), TRUE);
-        }
         EnableWindow(GetDlgItem(hDlg, ID_PEER_READY), TRUE);
-        EnableWindow(GetDlgItem(hDlg, ID_P2_SIMPLE_MODE), TRUE);
-        EnableWindow(GetDlgItem(hDlg, ID_P2_SAVED_ROSTER), TRUE);
         HookLog("UMVC3Hook: Client controls enabled for P2 selection\n");
     }
     if (g_battleSetupOnly)
@@ -1608,19 +1615,8 @@ static LRESULT CALLBACK ChatWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
 static void ResetLaunchMenuButtonState(HWND hDlg)
 {
     if (!hDlg) return;
-    for (HWND child = GetWindow(hDlg, GW_CHILD); child;
-         child = GetWindow(child, GW_HWNDNEXT)) {
-        char className[32] = {};
-        GetClassNameA(child, className, sizeof(className));
-        if (_stricmp(className, "BUTTON") == 0 ||
-            _stricmp(className, "COMBOBOX") == 0 ||
-            _stricmp(className, "EDIT") == 0 ||
-            _stricmp(className, "LISTBOX") == 0) {
-            EnableWindow(child, TRUE);
-        }
-    }
-    ShowWindow(GetDlgItem(hDlg, ID_PEER_READY), SW_HIDE);
-    ShowWindow(GetDlgItem(hDlg, ID_PING_LABEL), SW_HIDE);
+    LaunchMenuControls::SetInteractiveControlsEnabled(hDlg, true);
+    LaunchMenuControls::SetVisible(hDlg, {ID_PEER_READY, ID_PING_LABEL}, false);
 }
 
 static void UpdateLobbyMusicCheckbox(HWND hDlg)
@@ -1649,8 +1645,7 @@ static void SetDirectConnectExpanded(HWND hDlg, bool expanded)
         ID_NET_IP_LABEL, ID_NET_IP, ID_NET_PORT_LABEL, ID_NET_PORT,
         ID_NET_HOST_BTN, ID_NET_CONNECT_BTN, ID_NET_STATUS,
     };
-    for (int id : directControls)
-        ShowWindow(GetDlgItem(hDlg, id), expanded ? SW_SHOW : SW_HIDE);
+    LaunchMenuControls::SetVisible(hDlg, directControls, expanded);
 
     const int launchControls[] = {
         ID_LAUNCH_PROMPT, ID_LAUNCH_NORMAL, ID_LAUNCH_TRAINING,
@@ -2290,6 +2285,7 @@ static void ReturnBattleSetupToLobbies(HWND hDlg)
 
 static INT_PTR InitializeLaunchMenu(HWND hDlg, UINT msg)
 {
+    namespace ui = LaunchMenuControls;
     {
         if (g_compactMode) {
             const CompactLaunchMenuControlIds ids = {
@@ -2325,23 +2321,20 @@ static INT_PTR InitializeLaunchMenu(HWND hDlg, UINT msg)
         const int contentW = 800;
 
         // ---- Title ----
-        CreateWindowA("STATIC", "Configure launch mode and match settings:",
-            WS_VISIBLE | WS_CHILD, leftX, y, 440, 18, hDlg, NULL, NULL, NULL);
-        CreateWindowA("BUTTON", "Mute Lobby Music",
+        ui::Label(hDlg, "Configure launch mode and match settings:",
+            WS_VISIBLE | WS_CHILD, leftX, y, 440, 18);
+        ui::Button(hDlg, "Mute Lobby Music",
             WS_CHILD | WS_TABSTOP | BS_AUTOCHECKBOX,
-            leftX + 470, y - 4, 140, 26,
-            hDlg, (HMENU)ID_LOBBY_MUSIC_MUTE, NULL, NULL);
-        CreateWindowA("BUTTON", "Randomize Characters",
+            leftX + 470, y - 4, 140, 26, ID_LOBBY_MUSIC_MUTE);
+        ui::Button(hDlg, "Randomize Characters",
             WS_VISIBLE | WS_CHILD | WS_TABSTOP | BS_PUSHBUTTON,
-            leftX + 620, y - 4, 180, 26,
-            hDlg, (HMENU)ID_RANDOMIZE_CHARS, NULL, NULL);
+            leftX + 620, y - 4, 180, 26, ID_RANDOMIZE_CHARS);
         y += 28;
 
         // ---- Character Select Section ----
         const int characterSectionTop = y;
-        CreateWindowA("BUTTON", "Character Select",
-            WS_VISIBLE | WS_CHILD | BS_GROUPBOX, leftX, y, contentW, 160,
-            hDlg, NULL, NULL, NULL);
+        ui::Button(hDlg, "Character Select",
+            WS_VISIBLE | WS_CHILD | BS_GROUPBOX, leftX, y, contentW, 160);
         y += 18;
 
         for (int team = 0; team < 2; ++team)
@@ -2356,10 +2349,9 @@ static INT_PTR InitializeLaunchMenu(HWND hDlg, UINT msg)
         CreateSimpleModeControl(hDlg, 1, left2X + 34, y);
         CreateSavedRosterCombo(hDlg, 0, leftX + 224, y + 25);
         CreateSavedRosterCombo(hDlg, 1, left2X + 224, y + 25);
-        CreateWindowA("STATIC", "Ping: -- ms",
+        ui::Label(hDlg, "Ping: -- ms",
             WS_CHILD,
-            leftX + 220, y + 2, 200, 18,
-            hDlg, (HMENU)ID_PING_LABEL, NULL, NULL);
+            leftX + 220, y + 2, 200, 18, ID_PING_LABEL);
         y += 50;
 
         // ---- Stage Select ----
@@ -2369,51 +2361,43 @@ static INT_PTR InitializeLaunchMenu(HWND hDlg, UINT msg)
 
         // ---- Steam Lobby Section ----
         y += 5;
-        CreateWindowA("BUTTON", "Steam Lobby",
-            WS_VISIBLE | WS_CHILD | BS_GROUPBOX, leftX, y, contentW, 235,
-            hDlg, NULL, NULL, NULL);
+        ui::Button(hDlg, "Steam Lobby",
+            WS_VISIBLE | WS_CHILD | BS_GROUPBOX, leftX, y, contentW, 235);
         y += 18;
 
-        CreateWindowA("BUTTON", "Search Lobbies",
+        ui::Button(hDlg, "Search Lobbies",
             WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON,
-            leftX + 10, y, 120, 26,
-            hDlg, (HMENU)ID_STEAM_SEARCH_BTN, NULL, NULL);
+            leftX + 10, y, 120, 26, ID_STEAM_SEARCH_BTN);
 
-        CreateWindowA("BUTTON", "Create Lobby",
+        ui::Button(hDlg, "Create Lobby",
             WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON,
-            leftX + 140, y, 120, 26,
-            hDlg, (HMENU)ID_STEAM_CREATE_BTN, NULL, NULL);
+            leftX + 140, y, 120, 26, ID_STEAM_CREATE_BTN);
 
-        CreateWindowA("STATIC", "Type:",
+        ui::Label(hDlg, "Type:",
             WS_VISIBLE | WS_CHILD,
-            leftX + 270, y + 4, 35, 18,
-            hDlg, NULL, NULL, NULL);
+            leftX + 270, y + 4, 35, 18);
 
         LaunchMenuControls::LobbyType(hDlg, ID_STEAM_TYPE, g_lobbyTypeSelection,
             leftX + 305, y, 120);
 
-        CreateWindowA("BUTTON", "Join Lobby",
+        ui::Button(hDlg, "Join Lobby",
             WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON | WS_DISABLED,
-            leftX + 435, y, 120, 26,
-            hDlg, (HMENU)ID_STEAM_JOIN_BTN, NULL, NULL);
+            leftX + 435, y, 120, 26, ID_STEAM_JOIN_BTN);
 
-        CreateWindowA("STATIC", "Name:",
+        ui::Label(hDlg, "Name:",
             WS_VISIBLE | WS_CHILD,
-            leftX + 565, y + 4, 40, 18,
-            hDlg, NULL, NULL, NULL);
+            leftX + 565, y + 4, 40, 18);
 
         LaunchMenuControls::LobbyName(hDlg, ID_STEAM_NAME, g_lobbyName,
             sizeof(g_lobbyName) - 1, leftX + 610, y + 2, 180);
 
         y += 30;
 
-        CreateWindowA("STATIC", SteamLobby_GetStatus(),
-            WS_VISIBLE | WS_CHILD, leftX + 10, y + 2, 644, 18,
-            hDlg, (HMENU)ID_STEAM_STATUS, NULL, NULL);
-        CreateWindowA("BUTTON", "Copy Lobby Link",
+        ui::Label(hDlg, SteamLobby_GetStatus(),
+            WS_VISIBLE | WS_CHILD, leftX + 10, y + 2, 644, 18, ID_STEAM_STATUS);
+        ui::Button(hDlg, "Copy Lobby Link",
             WS_CHILD | WS_TABSTOP | BS_PUSHBUTTON,
-            leftX + 660, y, 130, 22,
-            hDlg, (HMENU)ID_STEAM_COPY_LINK, NULL, NULL);
+            leftX + 660, y, 130, 22, ID_STEAM_COPY_LINK);
         y += 22;
 
         // Lobby results table
@@ -2426,107 +2410,95 @@ static INT_PTR InitializeLaunchMenu(HWND hDlg, UINT msg)
 
         // ---- Direct Connect Section ----
         y += 8;
-        CreateWindowA("BUTTON", "Advanced: IP Connect",
+        ui::Button(hDlg, "Advanced: IP Connect",
             WS_VISIBLE | WS_CHILD | WS_TABSTOP | BS_PUSHBUTTON,
-            leftX, y, contentW, 26,
-            hDlg, (HMENU)ID_NET_TOGGLE, NULL, NULL);
+            leftX, y, contentW, 26, ID_NET_TOGGLE);
         y += 34;
 
-        CreateWindowA("STATIC", "IP:",
-            WS_CHILD, leftX + 10, y + 4, 25, 18,
-            hDlg, (HMENU)ID_NET_IP_LABEL, NULL, NULL);
+        ui::Label(hDlg, "IP:",
+            WS_CHILD, leftX + 10, y + 4, 25, 18, ID_NET_IP_LABEL);
 
-        HWND hIpEdit = CreateWindowA("EDIT", g_dialogConfig.hostIp,
+        HWND hIpEdit = ui::Edit(hDlg, g_dialogConfig.hostIp,
             WS_CHILD | WS_TABSTOP | WS_BORDER | ES_AUTOHSCROLL | ES_NOHIDESEL,
-            leftX + 35, y, 300, 22,
-            hDlg, (HMENU)ID_NET_IP, NULL, NULL);
+            leftX + 35, y, 300, 22, ID_NET_IP);
         if (hIpEdit) {
             // Keep clipboard pastes bounded and leave native clipboard handling intact.
             SendMessageA(hIpEdit, EM_SETLIMITTEXT,
                          (WPARAM)(sizeof(g_dialogConfig.hostIp) - 1), 0);
         }
 
-        CreateWindowA("STATIC", "Port:",
-            WS_CHILD, leftX + 345, y + 4, 35, 18,
-            hDlg, (HMENU)ID_NET_PORT_LABEL, NULL, NULL);
+        ui::Label(hDlg, "Port:",
+            WS_CHILD, leftX + 345, y + 4, 35, 18, ID_NET_PORT_LABEL);
 
         char portStr[16];
         snprintf(portStr, sizeof(portStr), "%d", g_dialogConfig.hostPort);
-        CreateWindowA("EDIT", portStr,
+        ui::Edit(hDlg, portStr,
             WS_CHILD | WS_TABSTOP | WS_BORDER | ES_AUTOHSCROLL | ES_NUMBER,
-            leftX + 380, y, 60, 22,
-            hDlg, (HMENU)ID_NET_PORT, NULL, NULL);
+            leftX + 380, y, 60, 22, ID_NET_PORT);
 
-        CreateWindowA("BUTTON", "Host Game",
+        ui::Button(hDlg, "Host Game",
             WS_CHILD | BS_PUSHBUTTON,
-            leftX + 500, y - 2, 130, 26,
-            hDlg, (HMENU)ID_NET_HOST_BTN, NULL, NULL);
+            leftX + 500, y - 2, 130, 26, ID_NET_HOST_BTN);
 
-        CreateWindowA("BUTTON", "Connect",
+        ui::Button(hDlg, "Connect",
             WS_CHILD | BS_PUSHBUTTON,
-            leftX + 640, y - 2, 130, 26,
-            hDlg, (HMENU)ID_NET_CONNECT_BTN, NULL, NULL);
+            leftX + 640, y - 2, 130, 26, ID_NET_CONNECT_BTN);
 
-        CreateWindowA("STATIC", "Ready",
-            WS_CHILD, leftX + 10, y + 32, 780, 18,
-            hDlg, (HMENU)ID_NET_STATUS, NULL, NULL);
+        ui::Label(hDlg, "Ready",
+            WS_CHILD, leftX + 10, y + 32, 780, 18, ID_NET_STATUS);
 
         // ---- Launch Buttons ----
-        CreateWindowA("STATIC", "Choose how to launch the game:",
-            WS_VISIBLE | WS_CHILD, leftX, y, 300, 18,
-            hDlg, (HMENU)ID_LAUNCH_PROMPT, NULL, NULL);
-        CreateWindowA("BUTTON", "Not Ready",
+        ui::Label(hDlg, "Choose how to launch the game:",
+            WS_VISIBLE | WS_CHILD, leftX, y, 300, 18, ID_LAUNCH_PROMPT);
+        ui::Button(hDlg, "Not Ready",
             WS_CHILD | BS_OWNERDRAW | WS_DISABLED,
             leftX + contentW - 160, characterSectionTop + 124, 150, 26,
-            hDlg, (HMENU)ID_PEER_READY, NULL, NULL);
+            ID_PEER_READY);
         y += 25;
 
-        CreateWindowA("BUTTON", "Launch Normally",
+        ui::Button(hDlg, "Launch Normally",
             WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON,
-            leftX, y, 395, 32, hDlg, (HMENU)ID_LAUNCH_NORMAL, NULL, NULL);
+            leftX, y, 395, 32, ID_LAUNCH_NORMAL);
 
-        CreateWindowA("BUTTON", "Launch into Battle",
+        ui::Button(hDlg, "Launch into Battle",
             WS_VISIBLE | WS_CHILD | BS_OWNERDRAW,
-            leftX + 405, y, 395, 32, hDlg, (HMENU)ID_LAUNCH_TRAINING, NULL, NULL);
+            leftX + 405, y, 395, 32, ID_LAUNCH_TRAINING);
         y += 38;
 
-        CreateWindowA("BUTTON", "Training Mode + Spawn 2nd Instance",
+        ui::Button(hDlg, "Training Mode + Spawn 2nd Instance",
             WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON,
-            leftX, y, contentW, 32, hDlg, (HMENU)ID_LAUNCH_DUAL, NULL, NULL);
+            leftX, y, contentW, 32, ID_LAUNCH_DUAL);
 
         y += 38;
 
-        CreateWindowA("BUTTON", "Launch Dual Training with CPUs",
+        ui::Button(hDlg, "Launch Dual Training with CPUs",
             WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON,
-            leftX, y, contentW, 32, hDlg, (HMENU)ID_LAUNCH_DUAL_CPUS, NULL, NULL);
+            leftX, y, contentW, 32, ID_LAUNCH_DUAL_CPUS);
         y += 38;
 
-        CreateWindowA("BUTTON", "Launch Dual Training with P2 CPU",
+        ui::Button(hDlg, "Launch Dual Training with P2 CPU",
             WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON,
-            leftX, y, contentW, 32, hDlg, (HMENU)ID_LAUNCH_DUAL_P2_CPU, NULL, NULL);
+            leftX, y, contentW, 32, ID_LAUNCH_DUAL_P2_CPU);
 
         char versionText[64] = {};
         snprintf(versionText, sizeof(versionText), "Timestone v%s", UMVC3HOOK_VERSION);
-        CreateWindowA("STATIC", versionText,
+        ui::Label(hDlg, versionText,
             WS_VISIBLE | WS_CHILD | SS_RIGHT,
-            leftX + 600, y + 40, 200, 18,
-            hDlg, (HMENU)ID_VERSION_LABEL, NULL, NULL);
+            leftX + 600, y + 40, 200, 18, ID_VERSION_LABEL);
 
         char settingsPath[MAX_PATH] = {};
         GetSettingsPath("Timestone.ini", settingsPath, sizeof(settingsPath));
-        HWND advancedMenu = CreateWindowA("BUTTON", "Advanced launch menu",
+        HWND advancedMenu = ui::Button(hDlg, "Advanced launch menu",
             WS_VISIBLE | WS_CHILD | WS_TABSTOP | BS_AUTOCHECKBOX,
-            leftX, y + 36, 300, 22,
-            hDlg, (HMENU)ID_ADVANCED_MENU, NULL, NULL);
+            leftX, y + 36, 300, 22, ID_ADVANCED_MENU);
         SendMessageA(advancedMenu, BM_SETCHECK,
             GetPrivateProfileIntA("General", "UseRegularLaunchMenu", 0,
                                   settingsPath) != 0
                 ? BST_CHECKED : BST_UNCHECKED,
             0);
-        CreateWindowA("BUTTON", "Configure settings",
+        ui::Button(hDlg, "Configure settings",
             WS_VISIBLE | WS_CHILD | WS_TABSTOP | BS_PUSHBUTTON,
-            leftX + 310, y + 34, 180, 26,
-            hDlg, (HMENU)ID_ADVANCED_CONFIG, NULL, NULL);
+            leftX + 310, y + 34, 180, 26, ID_ADVANCED_CONFIG);
 
         InitializeDpiLayout(hDlg);
         if (g_directConnectExpanded) {
@@ -2883,16 +2855,7 @@ static INT_PTR HandleLaunchCommand(HWND hDlg, WPARAM wParam, LPARAM lParam)
 
         case ID_RANDOMIZE_CHARS:
             RandomizeCharacters(hDlg);
-            SaveLocalConnectSelection(hDlg);
-            if (g_dialogConfig.enetPeer) {
-                if (g_isHost) {
-                    SendP1Selection(hDlg);
-                } else {
-                    g_localReady = false;
-                    UpdateReadyButton(hDlg);
-                    SendP2Selection(hDlg);
-                }
-            }
+            OnLocalRosterChanged(hDlg, g_isHost ? 0 : 1);
             return 0;
 
         case ID_PEER_READY:
@@ -2910,16 +2873,7 @@ static INT_PTR HandleLaunchCommand(HWND hDlg, WPARAM wParam, LPARAM lParam)
                 const int team = LOWORD(wParam) == ID_P1_SIMPLE_MODE ? 0 : 1;
                 g_dialogConfig.simpleMode[team] = SendMessageA(
                     (HWND)lParam, BM_GETCHECK, 0, 0) == BST_CHECKED;
-                if (team == (g_isHost ? 0 : 1)) SaveLocalConnectSelection(hDlg);
-                if (g_dialogConfig.enetPeer) {
-                    if (team == 0 && g_isHost)
-                        SendP1Selection(hDlg);
-                    if (team == 1 && !g_isHost) {
-                        g_localReady = false;
-                        UpdateReadyButton(hDlg);
-                        SendP2Selection(hDlg);
-                    }
-                }
+                OnLocalRosterChanged(hDlg, team);
             }
             return 0;
 
@@ -3097,20 +3051,12 @@ static INT_PTR HandleLaunchCommand(HWND hDlg, WPARAM wParam, LPARAM lParam)
                     }
                 }
             }
-            const int localFirst = g_isHost ? ID_P1_SLOT1 : ID_P2_SLOT1;
-            if (rosterEdited && LOWORD(wParam) >= localFirst && LOWORD(wParam) < localFirst + 3)
+            const int team = (LOWORD(wParam) - ID_P1_SLOT1) / 3;
+            // Typed matches save only; dropdown notifications send even if CB_GETCURSEL failed.
+            if (rosterEdited && team == (g_isHost ? 0 : 1))
                 SaveLocalConnectSelection(hDlg);
-            if (HIWORD(wParam) == CBN_SELCHANGE && !g_isHost &&
-                LOWORD(wParam) >= ID_P2_SLOT1 &&
-                LOWORD(wParam) <= ID_P2_SLOT3 && g_dialogConfig.enetPeer) {
-                g_localReady = false;
-                UpdateReadyButton(hDlg);
-                SendP2Selection(hDlg);
-            }
-            if (HIWORD(wParam) == CBN_SELCHANGE && g_isHost &&
-                LOWORD(wParam) >= ID_P1_SLOT1 &&
-                LOWORD(wParam) <= ID_P1_SLOT3 && g_dialogConfig.enetPeer)
-                SendP1Selection(hDlg);
+            if (HIWORD(wParam) == CBN_SELCHANGE)
+                SendLocalRosterChange(hDlg, team);
             return 0;
         }
 
@@ -3120,25 +3066,9 @@ static INT_PTR HandleLaunchCommand(HWND hDlg, WPARAM wParam, LPARAM lParam)
         case ID_P2_ASSIST1: case ID_P2_ASSIST2: case ID_P2_ASSIST3:
             if (HIWORD(wParam) == CBN_SELCHANGE) {
                 UpdateSlotOptionsFromCombos(hDlg);
-                int controlId = LOWORD(wParam);
-                const int colorFirst = g_isHost ? ID_P1_COLOR1 : ID_P2_COLOR1;
-                const int assistFirst = g_isHost ? ID_P1_ASSIST1 : ID_P2_ASSIST1;
-                if ((controlId >= colorFirst && controlId < colorFirst + 3) ||
-                    (controlId >= assistFirst && controlId < assistFirst + 3))
-                    SaveLocalConnectSelection(hDlg);
-                if (!g_isHost &&
-                    ((controlId >= ID_P2_COLOR1 && controlId <= ID_P2_COLOR3) ||
-                     (controlId >= ID_P2_ASSIST1 && controlId <= ID_P2_ASSIST3)) &&
-                     g_dialogConfig.enetPeer) {
-                    g_localReady = false;
-                    UpdateReadyButton(hDlg);
-                    SendP2Selection(hDlg);
-                }
-                if (g_isHost &&
-                    ((controlId >= ID_P1_COLOR1 && controlId <= ID_P1_COLOR3) ||
-                     (controlId >= ID_P1_ASSIST1 && controlId <= ID_P1_ASSIST3)) &&
-                    g_dialogConfig.enetPeer)
-                    SendP1Selection(hDlg);
+                const int controlId = LOWORD(wParam);
+                const int first = controlId >= ID_P1_ASSIST1 ? ID_P1_ASSIST1 : ID_P1_COLOR1;
+                OnLocalRosterChanged(hDlg, (controlId - first) / 3);
             }
             return 0;
 
@@ -3254,8 +3184,7 @@ static INT_PTR HandleLaunchCommand(HWND hDlg, WPARAM wParam, LPARAM lParam)
 
             // Start non-threaded polling timer inside launch window
             SetTimer(hDlg, ID_NET_POLL_TIMER, 10, NULL);
-            EnableWindow(GetDlgItem(hDlg, ID_NET_HOST_BTN), FALSE);
-            EnableWindow(GetDlgItem(hDlg, ID_NET_CONNECT_BTN), FALSE);
+            LaunchMenuControls::SetEnabled(hDlg, {ID_NET_HOST_BTN, ID_NET_CONNECT_BTN}, false);
             g_dialogConfig.hostEnabled = true;
             return 0;
         }
@@ -3336,8 +3265,7 @@ static INT_PTR HandleLaunchCommand(HWND hDlg, WPARAM wParam, LPARAM lParam)
 
             // Start non-threaded polling timer inside launch window
             SetTimer(hDlg, ID_NET_POLL_TIMER, 10, NULL);
-            EnableWindow(GetDlgItem(hDlg, ID_NET_HOST_BTN), FALSE);
-            EnableWindow(GetDlgItem(hDlg, ID_NET_CONNECT_BTN), FALSE);
+            LaunchMenuControls::SetEnabled(hDlg, {ID_NET_HOST_BTN, ID_NET_CONNECT_BTN}, false);
             g_dialogConfig.hostEnabled = true;
             return 0;
         }
@@ -3755,14 +3683,7 @@ static void ApplySavedRoster(HWND hDlg, int team, size_t preset)
         RefreshTeamSlot(hDlg, team, slot);
     }
 
-    if (team == (g_isHost ? 0 : 1)) SaveLocalConnectSelection(hDlg);
-    if (!g_dialogConfig.enetPeer) return;
-    if (team == 0 && g_isHost) SendP1Selection(hDlg);
-    if (team == 1 && !g_isHost) {
-        g_localReady = false;
-        UpdateReadyButton(hDlg);
-        SendP2Selection(hDlg);
-    }
+    OnLocalRosterChanged(hDlg, team);
 }
 
 static uint32_t NextCharacterRandom()
