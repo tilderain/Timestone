@@ -15,6 +15,7 @@ constexpr int ID_SINGLE_THREADED = 100;
 constexpr int ID_SAVE = 101;
 constexpr int ID_CANCEL = 102;
 constexpr int ID_DARK_MODE = 103;
+constexpr int ID_SINGLE_THREAD_DESCRIPTION = 104;
 constexpr char SETTINGS_CLASS[] = "TimestoneAdvancedConfig";
 
 bool g_settingsLoaded = false;
@@ -152,26 +153,27 @@ LRESULT CALLBACK SettingsWndProc(HWND window, UINT message,
     case WM_CREATE:
     {
         LoadSettings();
-        HWND description = CreateWindowA(
-            "STATIC",
-            "Sets game worker count to 1. May massively improve performance by 100% "
-            "on pcs with bad thread work, but may decrease performance by about 10% on higher end pcs.",
-            WS_VISIBLE | WS_CHILD, 18, 16, 374, 50,
-            window, nullptr, nullptr, nullptr);
-        HWND checkbox = CreateWindowA(
-            "BUTTON", "Run entire game single-threaded",
-            WS_VISIBLE | WS_CHILD | WS_TABSTOP | BS_AUTOCHECKBOX,
-            18, 72, 300, 24, window,
-            reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_SINGLE_THREADED)),
-            nullptr, nullptr);
         HWND darkMode = CreateWindowA(
             "BUTTON", "Dark mode",
             WS_VISIBLE | WS_CHILD | WS_TABSTOP | BS_AUTOCHECKBOX,
-            18, 104, 374, 24, window,
+            18, 16, 374, 24, window,
             reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_DARK_MODE)),
             nullptr, nullptr);
         SendMessageA(darkMode, BM_SETCHECK,
                      g_savedDarkMode ? BST_CHECKED : BST_UNCHECKED, 0);
+        HWND description = CreateWindowA(
+            "STATIC",
+            "Sets game worker count to 1. May massively improve performance by 100% "
+            "on pcs with bad thread work, but may decrease performance by about 10% on higher end pcs.",
+            WS_VISIBLE | WS_CHILD, 18, 48, 374, 50,
+            window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_SINGLE_THREAD_DESCRIPTION)),
+            nullptr, nullptr);
+        HWND checkbox = CreateWindowA(
+            "BUTTON", "Run entire game single-threaded",
+            WS_VISIBLE | WS_CHILD | WS_TABSTOP | BS_AUTOCHECKBOX,
+            18, 104, 300, 24, window,
+            reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_SINGLE_THREADED)),
+            nullptr, nullptr);
         HWND save = CreateWindowA(
             "BUTTON", "Save", WS_VISIBLE | WS_CHILD | WS_TABSTOP | BS_DEFPUSHBUTTON,
             222, 140, 82, 28, window,
@@ -184,7 +186,7 @@ LRESULT CALLBACK SettingsWndProc(HWND window, UINT message,
         ApplyLaunchMenuDarkTheme(window);
         SendMessageA(checkbox, BM_SETCHECK,
                      g_runSingleThreaded ? BST_CHECKED : BST_UNCHECKED, 0);
-        SetFocus(checkbox);
+        SetFocus(darkMode);
         return 0;
     }
     case WM_DPICHANGED:
@@ -222,6 +224,18 @@ LRESULT CALLBACK SettingsWndProc(HWND window, UINT message,
         DestroyWindow(window);
         return 0;
     case WM_CTLCOLORSTATIC:
+        if (GetDlgCtrlID(reinterpret_cast<HWND>(lParam)) == ID_SINGLE_THREAD_DESCRIPTION) {
+            const bool dark = IsLaunchMenuDarkModeEnabled();
+            const COLORREF background = dark ? RGB(62, 57, 35) : RGB(255, 249, 219);
+            static HBRUSH darkBrush = CreateSolidBrush(RGB(62, 57, 35));
+            static HBRUSH lightBrush = CreateSolidBrush(RGB(255, 249, 219));
+            HDC dc = reinterpret_cast<HDC>(wParam);
+            SetTextColor(dc, LaunchMenuDarkTextColor());
+            SetBkColor(dc, background);
+            SetBkMode(dc, OPAQUE);
+            return reinterpret_cast<LRESULT>(dark ? darkBrush : lightBrush);
+        }
+        return HandleLaunchMenuDarkControlColor(message, wParam);
     case WM_CTLCOLORBTN:
     case WM_CTLCOLOREDIT:
     case WM_CTLCOLORLISTBOX:
@@ -229,6 +243,30 @@ LRESULT CALLBACK SettingsWndProc(HWND window, UINT message,
     case WM_ERASEBKGND:
         PaintLaunchMenuDarkBackground(window, reinterpret_cast<HDC>(wParam));
         return TRUE;
+    case WM_PAINT:
+    {
+        PAINTSTRUCT paint = {};
+        HDC dc = BeginPaint(window, &paint);
+        RECT description = {}, checkbox = {};
+        GetWindowRect(GetDlgItem(window, ID_SINGLE_THREAD_DESCRIPTION), &description);
+        GetWindowRect(GetDlgItem(window, ID_SINGLE_THREADED), &checkbox);
+        MapWindowPoints(nullptr, window, reinterpret_cast<POINT*>(&description), 2);
+        MapWindowPoints(nullptr, window, reinterpret_cast<POINT*>(&checkbox), 2);
+        const int inset = MulDiv(8, GetWindowDpi(window), 96);
+        const int x = description.left - inset;
+        const int top = (description.top + description.bottom) / 2;
+        const int bottom = (checkbox.top + checkbox.bottom) / 2;
+        HPEN pen = CreatePen(PS_SOLID, 1, IsLaunchMenuDarkModeEnabled()
+                            ? RGB(96, 96, 96) : RGB(160, 160, 160));
+        HGDIOBJ oldPen = SelectObject(dc, pen);
+        POINT line[] = {{description.left, top}, {x, top},
+                        {x, bottom}, {checkbox.left, bottom}};
+        Polyline(dc, line, 4);
+        SelectObject(dc, oldPen);
+        DeleteObject(pen);
+        EndPaint(window, &paint);
+        return 0;
+    }
     case WM_DESTROY:
     {
         if (g_darkMode != g_savedDarkMode) {
