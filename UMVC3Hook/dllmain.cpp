@@ -2056,8 +2056,11 @@ void OnInitializeHook()
 	// Patch 2: Change JNZ (skip real pause if online) to JMP (always skip).
 	//   Original: 75 5C  (JNZ +0x5C)
 	//   Patched:  EB 5C  (JMP +0x5C)
-	Memory::VP::Patch<uint8_t>(_addr(0x1402BA223), 0xEB);
-	HookLog("UMVC3Hook: Patched uBattleUiCreatePauseMenu JNZ→JMP (skip real pause)\n");
+	// Preserve the game's normal pause menu when using Launch Normally.
+	if (opt != LAUNCH_NORMAL) {
+		Memory::VP::Patch<uint8_t>(_addr(0x1402BA223), 0xEB);
+		HookLog("UMVC3Hook: Patched uBattleUiCreatePauseMenu JNZ→JMP (skip real pause)\n");
+	}
 
 	// Patch 3: uBattleUiPauseNetGallery_vfn5 (0x1402e4320) checks
 	// isGameModeOnlineRanked — when false it calls the parent's vfn78 (no-op)
