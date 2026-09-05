@@ -1106,6 +1106,11 @@ bool SteamLobby_IsHostedLobby(uint64_t lobbyId)
     return g_isHost && lobbyId != 0 && lobbyId == g_lobbyId;
 }
 
+bool SteamLobby_IsHost()
+{
+    return g_isHost && g_lobbyId != 0;
+}
+
 bool SteamLobby_GetHostedJoinLink(char* link, size_t capacity)
 {
     if (!link || capacity == 0) return false;

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include "trainingboot.h"
 
 // Personal preferences, never the combined host/client match configuration.
 struct ConnectRoster {
@@ -8,7 +9,7 @@ struct ConnectRoster {
     int32_t colors[3] = {};
     int32_t assists[3] = {};
     bool simpleMode = false;
-    int32_t stageId = 0;
+    int32_t stageId = STAGE_BONNE_WONDERLAND;
 };
 
 ConnectRoster ConnectRoster_Load(const char* path, const ConnectRoster& defaults);

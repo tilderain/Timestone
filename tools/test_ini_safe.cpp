@@ -202,6 +202,15 @@ int main(int argc, char** argv)
         "[Network]\nHostIp=\nHostPort=5678\n[Other]\nKeep=yes\n";
     Write(path, destination);
     ConnectRoster defaults;
+    assert(defaults.stageId == STAGE_BONNE_WONDERLAND);
+    assert(ConnectRoster_Load(path.c_str(), defaults).stageId == STAGE_BONNE_WONDERLAND);
+    // A partial personal roster also defaults to Bonne, but an explicitly saved
+    // Training Room remains a valid preference rather than "uninitialized".
+    Write(path, destination + "[ConnectRoster]\nSlot1=12\n");
+    assert(ConnectRoster_Load(path.c_str(), defaults).stageId == STAGE_BONNE_WONDERLAND);
+    Write(path, destination + "[ConnectRoster]\nStageId=0\n");
+    assert(ConnectRoster_Load(path.c_str(), defaults).stageId == 0);
+    Write(path, destination);
     defaults.stageId = 9;
     auto personal = ConnectRoster_Load(path.c_str(), defaults);
     assert(personal.chars[0] == 1 && !personal.simpleMode && personal.stageId == 9);

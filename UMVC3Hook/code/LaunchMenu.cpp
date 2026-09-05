@@ -96,6 +96,9 @@ static bool      g_isHost = false;          // true if we clicked Host, false if
 static ConnectRoster g_connectRoster;
 static bool g_connectSetupActive = false;
 static bool g_connectSetupIsHost = false;
+// Explicit control-scheme edits may precede choosing Host/Connect.
+// Unlike the host stage, untouched offline team preferences are not migrated.
+static bool g_preConnectSimpleModeEdited[2] = {};
 static bool g_advancedRosterSession = false;
 static LaunchDialogConfig g_advancedRosterConfig = {};
 static bool      g_localReady = false;
@@ -427,7 +430,7 @@ static void LoadRollbackSettings(bool advancedRoster = true)
         personalDefaults.assists[i] = defaults.p1Assists[i];
     }
     personalDefaults.simpleMode = defaults.simpleMode[0];
-    personalDefaults.stageId = defaults.stageId;
+    personalDefaults.stageId = STAGE_BONNE_WONDERLAND;
     g_connectRoster = ConnectRoster_Load(settingsPath, personalDefaults);
     for (int i = 0; i < 3; ++i) {
         if (g_connectRoster.chars[i] < 1 || g_connectRoster.chars[i] >= kCharNameCount)
@@ -438,7 +441,7 @@ static void LoadRollbackSettings(bool advancedRoster = true)
     }
     if (!std::any_of(kStages, kStages + kStageCount,
             [](const StageEntry& stage) { return stage.id == g_connectRoster.stageId; }))
-        g_connectRoster.stageId = defaults.stageId;
+        g_connectRoster.stageId = personalDefaults.stageId;
 
     GetPrivateProfileStringA("Network", "HostIp", "127.0.0.1",
                              g_dialogConfig.hostIp,
@@ -965,7 +968,18 @@ static void RefreshRosterControls(HWND hDlg)
 static void BeginConnectRosterSetup(HWND hDlg)
 {
     if (g_connectSetupActive && g_connectSetupIsHost == g_isHost) return;
-    if (!g_connectSetupActive) g_advancedRosterConfig = g_dialogConfig;
+    if (!g_connectSetupActive) {
+        g_advancedRosterConfig = g_dialogConfig;
+        // Hosting from the advanced menu always uses its selected stage,
+        // including a selection loaded from INI rather than edited this time.
+        // Joining must not replace the client's personal stage preference.
+        if (g_isHost && g_advancedRosterSession)
+            g_connectRoster.stageId = g_dialogConfig.stageId;
+        const int team = g_isHost ? 0 : 1;
+        if (g_preConnectSimpleModeEdited[team])
+            g_connectRoster.simpleMode = g_dialogConfig.simpleMode[team];
+    }
+    g_preConnectSimpleModeEdited[0] = g_preConnectSimpleModeEdited[1] = false;
     g_connectSetupActive = true;
     g_connectSetupIsHost = g_isHost;
     const TrainingBootConfig& defaults = TrainingBoot_GetDefaultConfig();
@@ -1754,6 +1768,8 @@ static void SendP1Selection(HWND hDlg)
     FillTeamSelectionPacket(packet, 0);
     packet.stageId = g_dialogConfig.stageId;
     SendTeamSelectionPacket(packet, 0);
+    HookLog("UMVC3Hook: Sending host P1 selection stage=%d simpleMode=%u\n",
+            packet.stageId, packet.simpleMode);
 }
 
 static bool ApplyP1Selection(HWND hDlg, const LaunchP1SelectionPacket& packet)
@@ -1784,7 +1800,8 @@ static bool ApplyP2Selection(HWND hDlg, const LaunchP2SelectionPacket& packet)
     g_peerReady = packet.ready != 0;
     EnableWindow(GetDlgItem(hDlg, ID_LAUNCH_TRAINING), g_peerReady ? TRUE : FALSE);
     UpdateReadyButton(hDlg);
-    HookLog("UMVC3Hook: Applied peer P2 selection ready=%u\n", packet.ready);
+    HookLog("UMVC3Hook: Applied peer P2 selection ready=%u simpleMode=%u\n",
+            packet.ready, packet.simpleMode);
     return true;
 }
 
@@ -1802,6 +1819,7 @@ static MenuResult ShowLaunchMenuWindow(bool battleSetupOnly, bool compactMode)
     g_battleSetupOnly = battleSetupOnly;
     g_compactMode = compactMode;
     g_connectSetupActive = false;
+    g_preConnectSimpleModeEdited[0] = g_preConnectSimpleModeEdited[1] = false;
     g_advancedRosterSession = !compactMode && !battleSetupOnly;
     g_menuAction = MenuAction::Cancel;
     g_localReady = false;
@@ -2307,7 +2325,12 @@ static INT_PTR InitializeLaunchMenu(HWND hDlg, UINT msg)
         }
 
         if (g_battleSetupOnly) {
+            // The compact menu already has a Steam peer, but the transport
+            // handles may arrive later. Show personal settings from the start.
+            g_isHost = SteamLobby_IsHost();
+            BeginConnectRosterSetup(nullptr);
             CreateBattleSetupControls(hDlg);
+            ConfigureConnectedControls(hDlg);
             InitializeDpiLayout(hDlg);
             ApplyLaunchMenuFont(hDlg);
             ApplyLaunchMenuDarkTheme(hDlg);
@@ -2524,6 +2547,12 @@ static INT_PTR HandleLaunchTimer(HWND hDlg, WPARAM wParam)
                 InvalidateRect(GetDlgItem(hDlg, ID_LAUNCH_TRAINING), NULL, FALSE);
 
             SteamLobby_Pump();
+            // Establish ownership while waiting in the lobby, not only once
+            // transport handles arrive. Repeated calls preserve local edits.
+            if (!g_compactMode && SteamLobby_HasLobby()) {
+                g_isHost = SteamLobby_IsHost();
+                BeginConnectRosterSetup(hDlg);
+            }
             UpdateChatAvatar();
             UpdateLobbyMusicCheckbox(hDlg);
             if (g_battleSetupOnly && SteamLobby_GetPeerSteamId() == 0) {
@@ -2873,6 +2902,8 @@ static INT_PTR HandleLaunchCommand(HWND hDlg, WPARAM wParam, LPARAM lParam)
                 const int team = LOWORD(wParam) == ID_P1_SIMPLE_MODE ? 0 : 1;
                 g_dialogConfig.simpleMode[team] = SendMessageA(
                     (HWND)lParam, BM_GETCHECK, 0, 0) == BST_CHECKED;
+                if (!g_connectSetupActive)
+                    g_preConnectSimpleModeEdited[team] = true;
                 OnLocalRosterChanged(hDlg, team);
             }
             return 0;
@@ -3080,7 +3111,10 @@ static INT_PTR HandleLaunchCommand(HWND hDlg, WPARAM wParam, LPARAM lParam)
                 if (sel != CB_ERR) {
                     g_dialogConfig.stageId = static_cast<int>(
                         SendMessageA(hCombo, CB_GETITEMDATA, sel, 0));
-                    if (g_connectSetupActive && g_isHost) {
+                    // Only local stage edits persist. Packet handlers update
+                    // match state directly and never enter this save path.
+                    if ((!g_connectSetupActive && g_advancedRosterSession) ||
+                        (g_connectSetupActive && g_isHost)) {
                         g_connectRoster.stageId = g_dialogConfig.stageId;
                         SaveConnectRosterPreferences();
                     }

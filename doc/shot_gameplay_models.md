@@ -2,6 +2,14 @@
 
 **Status: Ghidra executable audit, 2026-08-24.**
 
+**2026-09-05 qualification:** The SomersaultGrenade entry below is not sufficient
+evidence of model-to-gameplay feedback. A focused
+[global-RNG/constraint/resource audit](deadpool_grenade_rng.md) found its random
+spin applied to a model-joint uCnsTSR constraint, while the installed grenade
+colliders use mode-0 shot matrices with zero local endpoints. The cited terminal
+callback does not read model completion. Treat that historical inventory entry
+and the counts including it as qualified, not proof of spin-dependent collision.
+
 ## Scope
 
 This inventory covers shot models whose model state is an input to gameplay. A
