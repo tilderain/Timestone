@@ -553,8 +553,8 @@ void BeginSynchronizedSession()
     g_open = true;
     SetStatus(CanEditAllTeams()
         ? "Both clients can edit and commit the full roster"
-        : Netplay_IsHost() ? "Edit P1; the client edits P2"
-                           : "Edit P2; the host edits P1");
+        : Netplay_IsHost() ? ""
+                           : "");
     SendPacket(MakePacket(CHRSEL_OPEN));
 }
 

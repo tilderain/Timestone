@@ -211,7 +211,7 @@ bool SaveSettings(HWND window)
             g_runSingleThreaded ? "1" : "0", path)) {
         HookLog("LaunchMenu: failed to save advanced config to %s\n", path);
     } else {
-        HookLog("LaunchMenu: saved entire-game single-thread setting: %s\n",
+        HookLog("LaunchMenu: saved single-thread setting: %s\n",
                 g_runSingleThreaded ? "enabled" : "disabled");
     }
     return true;

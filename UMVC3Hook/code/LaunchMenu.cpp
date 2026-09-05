@@ -1370,6 +1370,33 @@ static void UpdateChatAvatar()
     ShowWindow(avatar, SW_SHOW);
 }
 
+static void LayoutChatControls(HWND hWnd)
+{
+    RECT client = {};
+    GetClientRect(hWnd, &client);
+    const UINT dpi = GetLaunchWindowDpi(hWnd);
+    const auto scale = [dpi](int value) { return MulDiv(value, dpi, 96); };
+    const bool embedded = (GetWindowLongPtrA(hWnd, GWL_STYLE) & WS_CHILD) != 0;
+    const int left = scale(12);
+    const int right = std::max(left + 1, static_cast<int>(client.right) - scale(12));
+    // Match the bottom of the Battle Setup launch button (y=330, height=36).
+    const int bottom = embedded ? std::min(scale(366), static_cast<int>(client.bottom) - scale(12))
+                                : static_cast<int>(client.bottom) - scale(12);
+    const int inputY = bottom - scale(28);
+    const bool hasSteamPeer = SteamLobby_GetPeerSteamId() != 0;
+    const int headerX = hasSteamPeer ? scale(84) : left;
+    const auto place = [hWnd](int id, int x, int y, int width, int height) {
+        SetWindowPos(GetDlgItem(hWnd, id), nullptr, x, y,
+                     std::max(1, width), std::max(1, height),
+                     SWP_NOACTIVATE | SWP_NOZORDER);
+    };
+    place(ID_CHAT_CONNECTION, headerX, scale(12), right - headerX, scale(34));
+    place(ID_CHAT_PROFILE, headerX, scale(50), right - headerX, scale(28));
+    place(ID_CHAT_HISTORY, left, scale(86), right - left, inputY - scale(94));
+    place(ID_CHAT_INPUT, left, inputY, right - left - scale(80), scale(28));
+    place(ID_CHAT_SEND, right - scale(72), inputY, scale(72), scale(28));
+}
+
 static void ShowChatWindow(HWND hDlg)
 {
     const char* opponent = SteamLobby_GetPeerSteamId()
@@ -1391,7 +1418,7 @@ static void ShowChatWindow(HWND hDlg)
             g_hChatWindow = CreateWindowExA(
                 WS_EX_CONTROLPARENT, kChatWindowClass, "Opp Chat",
                 WS_CHILD | WS_VISIBLE,
-                x, 0, std::max(1L, clientRect.right - x), clientRect.bottom,
+                x, 0, std::max(1L, clientRect.right - x - MulDiv(8, dpi, 96)), clientRect.bottom,
                 hDlg, nullptr, GetModuleHandle(NULL), nullptr);
         } else {
             RECT ownerRect = {};
@@ -1422,19 +1449,8 @@ static void ShowChatWindow(HWND hDlg)
              g_chatOpponentName);
     SetWindowTextA(GetDlgItem(g_hChatWindow, ID_CHAT_CONNECTION), connection);
     const bool hasSteamPeer = SteamLobby_GetPeerSteamId() != 0;
-    HWND connectionLabel = GetDlgItem(g_hChatWindow, ID_CHAT_CONNECTION);
     HWND profileButton = GetDlgItem(g_hChatWindow, ID_CHAT_PROFILE);
-    const UINT chatDpi = GetLaunchWindowDpi(g_hChatWindow);
-    SetWindowPos(connectionLabel, nullptr,
-                 MulDiv(hasSteamPeer ? 84 : 12, chatDpi, 96),
-                 MulDiv(12, chatDpi, 96),
-                 MulDiv(hasSteamPeer ? 264 : 336, chatDpi, 96),
-                 MulDiv(34, chatDpi, 96), SWP_NOZORDER);
-    SetWindowPos(profileButton, nullptr,
-                 MulDiv(hasSteamPeer ? 84 : 12, chatDpi, 96),
-                 MulDiv(50, chatDpi, 96),
-                 MulDiv(hasSteamPeer ? 264 : 336, chatDpi, 96),
-                 MulDiv(28, chatDpi, 96), SWP_NOZORDER);
+    LayoutChatControls(g_hChatWindow);
     EnableWindow(profileButton, hasSteamPeer ? TRUE : FALSE);
     UpdateChatAvatar();
     char systemLine[sizeof(connection) + 4];
@@ -1504,6 +1520,10 @@ static LRESULT CALLBACK ChatWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
         InitializeDpiLayout(hWnd);
         ApplyLaunchMenuFont(hWnd);
         ApplyLaunchMenuDarkTheme(hWnd);
+        return 0;
+
+    case WM_SIZE:
+        LayoutChatControls(hWnd);
         return 0;
 
     case WM_DPICHANGED:
@@ -2694,8 +2714,10 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
     {
         const UINT dpi = HIWORD(wParam);
         UpdateDpiLayout(hDlg, dpi);
-        if (g_hChatWindow && GetParent(g_hChatWindow) == hDlg)
+        if (g_hChatWindow && GetParent(g_hChatWindow) == hDlg) {
             UpdateDpiLayout(g_hChatWindow, dpi);
+            LayoutChatControls(g_hChatWindow);
+        }
         const RECT* suggested = reinterpret_cast<const RECT*>(lParam);
         SetWindowPos(hDlg, nullptr, suggested->left, suggested->top,
                      suggested->right - suggested->left,
