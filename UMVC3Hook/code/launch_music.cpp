@@ -290,6 +290,16 @@ DWORD WINAPI MusicThreadProc(LPVOID)
 
 void LaunchMusic_Start()
 {
+    // A background fade ends playback without closing the thread/event handles.
+    // Reap a finished worker so a later lobby connection can start music again.
+    if (g_musicThread && WaitForSingleObject(g_musicThread, 0) == WAIT_OBJECT_0) {
+        CloseHandle(g_musicThread);
+        CloseHandle(g_stopEvent);
+        CloseHandle(g_fadeCompleteEvent);
+        g_musicThread = nullptr;
+        g_stopEvent = nullptr;
+        g_fadeCompleteEvent = nullptr;
+    }
     if (g_musicThread) return;
     LoadMuteSetting();
     g_fadeRequested.store(false, std::memory_order_relaxed);
