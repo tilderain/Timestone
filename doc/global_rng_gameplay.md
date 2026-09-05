@@ -65,6 +65,163 @@ The inspected movement and terminal callbacks also do not use this random spin
 to choose trajectory or lifetime. These draws are not a demonstrated collision
 change for this resource; see the follow-up for evidence and scope.
 
+## Follow-up: additional combat-looking consumers (2026-09-05)
+
+Continued through global getter and global integer/float-range callers in the
+character, projectile, and script code. **No additional confirmed ordinary
+human-versus-human gameplay dependency was established in this pass.** This is
+a bounded static audit, not an exhaustive proof of absence or permission to
+discard the global state.
+
+### Contact orientation is not knockback
+
+`cAtkCtrl__computeShotDirection_14000cc40` draws a global float at
+`0x14000CE2D` when the attack entry's angle range at +0x170 is nontrivial.
+Despite its name, the checked call chain is:
+
+```text
+0x14000CC40 randomizes an output direction
+  -> uZeroSh__buildShotAimVector @ 0x14000CAA0
+  -> cChr__hitResolveCallback / uShot__processHitCollision
+  -> cChr__resolveAttackContact(contactRotation)
+  -> cChr__commitAttackContactResult
+  -> sGameEffect__stateUpdate_FA0
+```
+
+In that normal-hit chain, contactRotation is forwarded to effect generation,
+not the damage/knockback computations. Also checked the LightWall, mutual-hit
+versus character, and mutual-shot-priority callers: their output likewise goes
+to effect spawning. This does not audit every effect's internal callbacks, but
+it rules out citing the helper name as direct random trajectory evidence.
+
+Corrected `0x14000CAA0`'s receiver type to `cAtkCtrl*` and source argument to
+`uModel*` in Ghidra; verified the applied signature. An attempted RNG callsite
+comment failed, so the evidence is recorded here.
+
+### Other checked consumers
+
+| Function | Observed use of the global random result |
+|---|---|
+| GreatSorcery `0x140159BB0` | Chooses sound variant, randomized sound position around the camera, and the next sound timer. Not a child projectile spawn. |
+| Kobun controller `0x1401B9760` | Chooses voice ID `0x5A/0x5B`. |
+| KobunLauncher setup `0x1401BB540` | Chooses voice ID `0x5E/0x5F`. |
+| ShikiDanKobun move `0x1401BC530` | Chooses voice ID `0x5C/0x5D`. |
+| ShikiDanKobun setup `0x1401BCDA0` | Chooses 0/30/60 timer value; the move routine uses it to gate the voice request, not the model-completion phase transition. |
+| Crystal setup `0x1401631B0` | Chooses an effect resource bit mask `1 << random(0,2)` on a newly created uGameEffect. No trajectory write identified from this result. |
+| Countdown `0x140009670` | Chooses an announcer/voice queue variant modulo 5. |
+
+Crystal's effect-lifetime feedback and other resource-dependent effects are not
+fully proven cosmetic by this table. MolecularShield setup also selects an
+effect variant and remains a resource/callback-dependent boundary, not a new
+verified gameplay result.
+
+### Character streams do not draw their round seed from the advancing global state
+
+Rechecked `sReplay__onRoundStart @ 0x1401CFAD0`: global RNG, sEffect RNG, and
+each character are seeded separately from the same stored replay/round seed.
+It does not call global-next repeatedly to derive character seeds. Therefore
+the shared initialization seed is not evidence that an extra sound draw changes
+the character streams during the round.
+
+The verified positive evidence remains native offline CPU action selection and
+random-wait timing, plus mode-specific campaign/selection behavior. Additional
+work would require auditing remaining owner-dispatch fallbacks, effect callbacks,
+and inlined/aliased state accesses, then runtime traces in two-human matches.
+
+## Owner-aware gameplay callers and conditional global fallback
+
+Further pass on 2026-09-05: enumerated all **22 direct call references** to
+`MtXorShift__randomIntRangeInclusive @ 0x14014EB30` in the current database and
+inspected their RNG-owner arguments. None explicitly passes a literal null owner.
+That is not a guarantee that the dynamically obtained owner is non-null.
+
+Additional concrete gameplay consumers:
+
+| Function | Random output and supplied owner |
+|---|---|
+| AcidRain child spawn `0x140166150` | Draws 0..15, writes a float to child +0x1F5C and enables the associated state through 0x140107960. Supplies shot +0x2030 as RNG owner. |
+| SpreadArrow child spawn `0x1401821C0` | Draws 155..160 for an angle, -350..-100 for a position component, and 0..15 for child state. Supplies shot +0x2030. |
+| IronPipeRolling landing `0x14017E670` | Selects a sign and 30..45 degree Y rotation, multiplies the shot orientation, writes shot quaternion +0x60, and refreshes attack matrices. Supplies shot +0x1308. |
+| AnkihouRolling landing `0x14018CB60` | Similar owner-aware orientation change, not merely the separate model-spin constraint inspected for Deadpool. Supplies shot +0x1308. |
+| ItemThrow landing `0x1401996E0` | Owner-aware randomized landing orientation. Supplies shot +0x1308. |
+| ShockingPinkBomb `0x1401C2780` | Random sign on a near-zero averaged-direction branch. Supplies shot +0x2030. |
+
+The normal character-associated route uses character-local RNG. **However, if
+one of these supplied pointers is null or fails the character DTI check, the
+same gameplay calculation consumes global RNG.** This is a verified conditional
+code dependency, not a reproduced ordinary-match global-RNG dependency.
+
+The condition is worth investigating rather than dismissing: `uShot__preMove`
+checks linked objects for engine alive state and clears invalid references;
+when its request-unit field is zero it explicitly clears shot +0x1308. Whether
+a relevant rolling shot survives that cleanup and subsequently executes a
+randomized landing has not been established. Character KO is not automatically
+equivalent to failing the engine object-alive check.
+
+Disassembly corrections used for this audit:
+
+- The misleadingly named `cChrInput__getInputBuffer3 @ 0x1401CC5D0` returns
+  **shot +0x2030**.
+- `MtObject__getField_4872 @ 0x1400803B0` returns **object +0x1308**.
+- `uShot__setRequestUnit @ 0x140151770` actually writes **+0x2028**. Do not
+  infer that it initializes +0x2030 from its current name or struct member name.
+
+Also checked random recovery, advanced guard, throw escape, and variable-counter
+transition branches at 0x14003EF30, 0x14003F1E0, 0x140040000, 0x1400408A0,
+0x140040E20, and 0x140041790. All supply the character itself as RNG owner;
+the inspected random-setting branches are additionally offline-gated. They are
+not new evidence for global RNG affecting normal fighter reactions.
+
+The database has zero xrefs to the interior global-state words +4/+8/+12
+(0x140D765DC/E0/E4). This narrows obvious direct inlined accesses but does not
+rule out aliases, computed pointers, or missing analysis.
+
+### Owner lifetime follow-up (2026-09-05)
+
+Resolved the initialization ambiguity: `uShot__setOwnerCharacter @ 0x1401CD970`
+mirrors the supplied pointer to both **+0x1308 and +0x2030**. This is distinct
+from `uShot__setRequestUnit @ 0x140151770` (+0x2028) and
+`uShot__setOwner @ 0x140151760` (+0x2000). Existing member/function names are
+inconsistent; use offsets when tracing these relationships.
+
+`uShot__onOwnerChange @ 0x1401C5ED0` replaces +0x2000, updates +0x2008/team
+membership for a character, and resynchronizes collision IDs. It does not
+replace +0x1308/+0x2030. Thus this inspected reflection/owner-change handler is
+not evidence of switching the RNG stream to the reflector or to global RNG.
+
+`MtObject__isAliveState` tests an engine lifecycle tag (low three bits equal to
+1 or 2), not health. The inspected KO processor
+`uCharacterPost__processDefeatTransitions @ 0x14005CF20` works with fighter
+flags at +0x14F0/+0x1500/+0x1504, team state and defeat effects; it does not
+establish that KO clears this engine lifecycle tag. Do not equate KO and object
+retirement.
+
+The generic preMove cleanup can clear +0x2030 and +0x1308, but the explicit
+owner-invalid destruction branch separately tests +0x2000 and
+`shotFlags(+0x1FE8) & 0xA817F`. `uShot__setShotResource` obtains +0x1FE8 from
+SHT common data +0x10. Read-only installed-resource inspection found this value
+is **zero** for:
+
+- `0019_param.arc`: `chr\\Haggar\\shot\\IronPipeRolling`.
+- `0023_param.arc`: all twelve `chr\\Naruhodo\\shot\\ItemThrow*` resources
+  (Photo, Bonsai, Bottle, Clock, Envelope, Glasses, Knife, Kobun, MobilePhone,
+  RubberCup, Tonosaman, Vase).
+
+So that particular generic branch does not itself guarantee these shots are
+destroyed when their combat-owner object becomes invalid. Other cleanup,
+resource-flag changes, active-state checks, or round transitions could still
+remove them first; the installed archives were not clean-depot authenticated.
+
+The inspected IronPipe, AnkihouRolling, and ItemThrow landing bodies have no
+explicit null-owner early return immediately guarding their RNG calls. Their
+landing gates use height, count, and variant/bounds instead. Together these
+findings make the fallback a concrete conditional lifecycle path worth testing,
+but **do not demonstrate that ordinary KO/tag/reflection reaches it**.
+
+The next discriminating runtime observation is the lifecycle tag and actual
+RNG-owner pointer at the landing draw, not just whether the fighter has zero
+health. No runtime probe or patch was installed during this audit.
+
 ## Relevance to pain sounds and current hooks
 
 Both `sGSound__selectRandomVoiceVariant @ 0x1402A9110` and bank-side
