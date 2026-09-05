@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <shlobj.h>
 #include <cwchar>
+#include <d3d9.h>
 
 extern void HookLog(const char* fmt, ...);
 
@@ -20,6 +21,8 @@ constexpr int ID_DARK_MODE = 103;
 constexpr int ID_SINGLE_THREAD_DESCRIPTION = 104;
 constexpr int ID_RESOLUTION = 105;
 constexpr int ID_FULLSCREEN = 106;
+constexpr int ID_DISPLAY_HEADING = 107;
+constexpr int ID_ADVANCED_HEADING = 108;
 constexpr char SETTINGS_CLASS[] = "TimestoneAdvancedConfig";
 
 bool g_settingsLoaded = false;
@@ -84,6 +87,21 @@ void ApplyDpi(HWND window, UINT oldDpi, UINT newDpi)
         for (HWND child = GetWindow(window, GW_CHILD); child;
              child = GetWindow(child, GW_HWNDNEXT)) {
             SendMessageA(child, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+            const int id = GetDlgCtrlID(child);
+            if (id == ID_DISPLAY_HEADING || id == ID_ADVANCED_HEADING) {
+                char text[64] = {};
+                const int length = GetWindowTextA(child, text, sizeof(text));
+                HDC dc = GetDC(child);
+                HGDIOBJ oldFont = SelectObject(dc, font);
+                SIZE size = {};
+                GetTextExtentPoint32A(dc, text, length, &size);
+                SelectObject(dc, oldFont);
+                ReleaseDC(child, dc);
+                RECT rect = {};
+                GetWindowRect(child, &rect);
+                SetWindowPos(child, nullptr, 0, 0, size.cx, rect.bottom - rect.top,
+                             SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+            }
         }
         if (oldFont) DeleteObject(oldFont);
     }
@@ -214,17 +232,34 @@ LRESULT CALLBACK SettingsWndProc(HWND window, UINT message,
         SendMessageA(darkMode, BM_SETCHECK,
                      g_savedDarkMode ? BST_CHECKED : BST_UNCHECKED, 0);
         CreateWindowA("STATIC", "Display settings",
-            WS_VISIBLE | WS_CHILD, 18, 48, 374, 20, window, nullptr, nullptr, nullptr);
+            WS_VISIBLE | WS_CHILD, 34, 48, 110, 20, window,
+            reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_DISPLAY_HEADING)), nullptr, nullptr);
         CreateWindowA("STATIC", "Resolution:", WS_VISIBLE | WS_CHILD,
             18, 78, 80, 20, window, nullptr, nullptr, nullptr);
         HWND resolution = CreateWindowA("COMBOBOX", "",
             WS_VISIBLE | WS_CHILD | WS_TABSTOP | CBS_DROPDOWN | CBS_AUTOHSCROLL,
             100, 74, 170, 180, window,
             reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_RESOLUTION)), nullptr, nullptr);
-        const char* resolutions[] = {"640x480", "1280x720", "1600x900", "1920x1080",
-                                     "2560x1440", "3840x2160"};
-        for (const char* value : resolutions)
-            SendMessageA(resolution, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(value));
+        // Match sRender__enumerateAdapterModes, including its resolution deduplication.
+        IDirect3D9* d3d = Direct3DCreate9(D3D_SDK_VERSION);
+        if (d3d) {
+            const UINT count = d3d->GetAdapterModeCount(D3DADAPTER_DEFAULT, D3DFMT_X8R8G8B8);
+            for (UINT i = 0; i < count; ++i) {
+                D3DDISPLAYMODE mode = {};
+                if (FAILED(d3d->EnumAdapterModes(D3DADAPTER_DEFAULT, D3DFMT_X8R8G8B8,
+                                                 i, &mode)) ||
+                    mode.Width < 640 || mode.Height < 480 || (mode.Width & 7) != 0)
+                    continue;
+                char value[32] = {};
+                snprintf(value, sizeof(value), "%ux%u", mode.Width, mode.Height);
+                if (SendMessageA(resolution, CB_FINDSTRINGEXACT, static_cast<WPARAM>(-1),
+                                 reinterpret_cast<LPARAM>(value)) == CB_ERR)
+                    SendMessageA(resolution, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(value));
+            }
+            d3d->Release();
+        }
+        if (SendMessageA(resolution, CB_GETCOUNT, 0, 0) == 0)
+            HookLog("LaunchMenu: no D3D9 resolution choices available; custom entry remains enabled\n");
         SendMessageA(resolution, CB_LIMITTEXT, 63, 0);
         HWND fullscreen = CreateWindowA("BUTTON", "Fullscreen",
             WS_VISIBLE | WS_CHILD | WS_TABSTOP | BS_AUTOCHECKBOX,
@@ -246,29 +281,34 @@ LRESULT CALLBACK SettingsWndProc(HWND window, UINT message,
         }
         EnableWindow(resolution, hasConfig);
         EnableWindow(fullscreen, hasConfig);
-        CreateWindowA("STATIC", hasConfig ? ""
-            : "config.ini not found. Run the game once to create it.",
-            WS_VISIBLE | WS_CHILD, 18, 106, 374, 34, window, nullptr, nullptr, nullptr);
+        if (!hasConfig)
+            CreateWindowA("STATIC", "config.ini not found. Run the game once to create it.",
+                WS_VISIBLE | WS_CHILD, 18, 106, 374, 34, window, nullptr, nullptr, nullptr);
+        const int headingY = hasConfig ? 118 : 150;
+        CreateWindowA("STATIC", "Advanced",
+            WS_VISIBLE | WS_CHILD, 34, headingY, 80, 20, window,
+            reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_ADVANCED_HEADING)), nullptr, nullptr);
+        const int sectionY = headingY + 28;
         HWND description = CreateWindowA(
             "STATIC",
             "Sets game worker count to 1. May massively improve performance by 100% "
             "on pcs with bad thread work, but may decrease performance by about 10% on higher end pcs.",
-            WS_VISIBLE | WS_CHILD, 18, 150, 374, 50,
+            WS_VISIBLE | WS_CHILD, 18, sectionY, 374, 50,
             window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_SINGLE_THREAD_DESCRIPTION)),
             nullptr, nullptr);
         HWND checkbox = CreateWindowA(
             "BUTTON", "Run entire game single-threaded",
             WS_VISIBLE | WS_CHILD | WS_TABSTOP | BS_AUTOCHECKBOX,
-            18, 206, 300, 24, window,
+            18, sectionY + 56, 374, 24, window,
             reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_SINGLE_THREADED)),
             nullptr, nullptr);
         HWND save = CreateWindowA(
             "BUTTON", "Save", WS_VISIBLE | WS_CHILD | WS_TABSTOP | BS_DEFPUSHBUTTON,
-            222, 242, 82, 28, window,
+            222, sectionY + 92, 82, 28, window,
             reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_SAVE)), nullptr, nullptr);
         HWND cancel = CreateWindowA(
             "BUTTON", "Cancel", WS_VISIBLE | WS_CHILD | WS_TABSTOP | BS_PUSHBUTTON,
-            310, 242, 82, 28, window,
+            310, sectionY + 92, 82, 28, window,
             reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_CANCEL)), nullptr, nullptr);
         ApplyDpi(window, 96, GetWindowDpi(window));
         ApplyLaunchMenuDarkTheme(window);
@@ -350,6 +390,18 @@ LRESULT CALLBACK SettingsWndProc(HWND window, UINT message,
         POINT line[] = {{description.left, top}, {x, top},
                         {x, bottom}, {checkbox.left, bottom}};
         Polyline(dc, line, 4);
+        const int headings[] = {ID_DISPLAY_HEADING, ID_ADVANCED_HEADING};
+        for (int id : headings) {
+            HWND label = GetDlgItem(window, id);
+            RECT heading = {};
+            GetWindowRect(label, &heading);
+            MapWindowPoints(nullptr, window, reinterpret_cast<POINT*>(&heading), 2);
+            const int y = (heading.top + heading.bottom) / 2;
+            MoveToEx(dc, description.left, y, nullptr);
+            LineTo(dc, heading.left - inset, y);
+            MoveToEx(dc, heading.right + inset, y, nullptr);
+            LineTo(dc, description.right, y);
+        }
         SelectObject(dc, oldPen);
         DeleteObject(pen);
         EndPaint(window, &paint);
@@ -399,8 +451,19 @@ void ShowAdvancedConfigModal(HWND owner)
     RECT ownerRect = {};
     GetWindowRect(owner, &ownerRect);
     const UINT dpi = GetWindowDpi(owner);
-    const int width = MulDiv(428, dpi, 96);
-    const int height = MulDiv(316, dpi, 96);
+    wchar_t gamePath[MAX_PATH] = {};
+    RECT bounds = {0, 0, MulDiv(410, dpi, 96),
+                   MulDiv(GetGameConfigPath(gamePath) ? 284 : 316, dpi, 96)};
+    using AdjustWindowRectExForDpiFn = BOOL (WINAPI*)(LPRECT, DWORD, BOOL, DWORD, UINT);
+    const auto adjustForDpi = reinterpret_cast<AdjustWindowRectExForDpiFn>(
+        GetProcAddress(GetModuleHandleA("user32.dll"), "AdjustWindowRectExForDpi"));
+    const DWORD style = WS_POPUP | WS_CAPTION | WS_SYSMENU;
+    if (adjustForDpi)
+        adjustForDpi(&bounds, style, FALSE, WS_EX_DLGMODALFRAME, dpi);
+    else
+        AdjustWindowRectEx(&bounds, style, FALSE, WS_EX_DLGMODALFRAME);
+    const int width = bounds.right - bounds.left;
+    const int height = bounds.bottom - bounds.top;
     const int x = ownerRect.left + ((ownerRect.right - ownerRect.left) - width) / 2;
     const int y = ownerRect.top + ((ownerRect.bottom - ownerRect.top) - height) / 2;
 

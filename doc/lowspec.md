@@ -8,6 +8,12 @@ local-app-data flag; `MtFile__getLocalAppDataFolder` uses CSIDL_LOCAL_APPDATA.
 width to 640-8192 and height to 480-8192. `sRender__createD3D9Device` reads
 `[DISPLAY] FullScreen` through `MtRegistry__getBool`, which accepts ON/OFF.
 These edits target game startup, not a live device reset when returning to the launcher.
+The launch-menu resolution dropdown mirrors `sRender__enumerateAdapterModes`
+(`0x140538050`): enumerate default-adapter D3DFMT_X8R8G8B8 modes through D3D9,
+retain widths >=640 divisible by eight and heights >=480, and deduplicate
+WIDTHxHEIGHT strings across refresh rates. The native menu registers this list
+as its Resolution choices in `sRender__initCore`; it is not a fixed preset table.
+Custom text entry remains available if enumeration fails or a custom size is desired.
 
 The mod currently has no dedicated low-spec graphics menu. The game itself exposes five safe native controls through sMvc3Main__syncGraphicsSettings at 0x140259BC0:
 1. Resolution
