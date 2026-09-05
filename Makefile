@@ -61,6 +61,7 @@ CPP_SRC   := \
 	$(SRCDIR)/code/UMVC3Camera.cpp \
 	$(SRCDIR)/code/mk10utils.cpp \
 	$(SRCDIR)/code/gameui.cpp \
+	$(SRCDIR)/code/d3d9reset.cpp \
 	$(SRCDIR)/code/framestepper.cpp \
 	$(SRCDIR)/code/dtieditor.cpp \
 	$(SRCDIR)/code/trainingboot.cpp \
@@ -235,7 +236,7 @@ $(OUTPUT): $(ALL_OBJ)
 	@echo "=== Built: $(OUTPUT) ==="
 
 $(UPDATER_OUTPUT): tools/timestone_updater.cpp Makefile
-	$(CXX) -Os -flto -ffunction-sections -fdata-sections -std=c++20 \
+	$(CXX) -Os -fno-declone-ctor-dtor -flto -ffunction-sections -fdata-sections -std=c++20 \
 		-DWIN32_LEAN_AND_MEAN -DNOMINMAX \
 		-D_WIN32_WINNT=0x0601 -DWINVER=0x0601 \
 		-DTIMESTONE_VERSION=\"$(VERSION)\" \

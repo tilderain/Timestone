@@ -227,6 +227,11 @@ resolution, fullscreen, and VSync changes consequently do not take effect on a
 healthy device; they require a restart that creates the device with the new
 settings.
 
+If a forwarded Reset nevertheless returns `D3DERR_INVALIDCALL`, the hook logs
+the failure and returns `D3D_OK` to the native UI-thread dispatcher. This keeps
+the dispatcher's fatal `ERR09` path from terminating the process while leaving
+device-loss, out-of-memory, and other failures unchanged.
+
 The whole `sRender__applyWindowAndResize` function must not be skipped. Startup
 dirty mask `0x54` initializes the renderer pointer at `sRender+0x8676E8`;
 `sRender__move` later passes that pointer to `sCamera::vfn27`, which immediately

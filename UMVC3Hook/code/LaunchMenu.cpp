@@ -1213,26 +1213,37 @@ static void ShowChatWindow(HWND hDlg)
     g_chatOpponentName[opponentLength] = '\0';
 
     if (!g_hChatWindow) {
-        RECT ownerRect = {};
-        RECT workArea = {};
-        GetWindowRect(hDlg, &ownerRect);
-        SystemParametersInfoA(SPI_GETWORKAREA, 0, &workArea, 0);
         const UINT dpi = GetLaunchWindowDpi(hDlg);
-        const int width = MulDiv(370, dpi, 96);
-        const int height = MulDiv(440, dpi, 96);
-        const int gap = MulDiv(12, dpi, 96);
-        int x = ownerRect.right + gap;
-        if (x + width > workArea.right)
-            x = ownerRect.left - width - gap;
-        x = std::clamp(x, static_cast<int>(workArea.left),
-                      static_cast<int>(workArea.right) - width);
-        int y = std::clamp(static_cast<int>(ownerRect.top),
-                           static_cast<int>(workArea.top),
-                           static_cast<int>(workArea.bottom) - height);
-        g_hChatWindow = CreateWindowExA(
-            WS_EX_TOOLWINDOW, kChatWindowClass, "Peer Chat",
-            WS_CAPTION | WS_SYSMENU | WS_VISIBLE,
-            x, y, width, height, hDlg, nullptr, GetModuleHandle(NULL), nullptr);
+        if (g_battleSetupOnly) {
+            RECT clientRect = {};
+            GetClientRect(hDlg, &clientRect);
+            const int x = MulDiv(830, dpi, 96);
+            g_hChatWindow = CreateWindowExA(
+                WS_EX_CONTROLPARENT, kChatWindowClass, "Opp Chat",
+                WS_CHILD | WS_VISIBLE,
+                x, 0, std::max(1L, clientRect.right - x), clientRect.bottom,
+                hDlg, nullptr, GetModuleHandle(NULL), nullptr);
+        } else {
+            RECT ownerRect = {};
+            RECT workArea = {};
+            GetWindowRect(hDlg, &ownerRect);
+            SystemParametersInfoA(SPI_GETWORKAREA, 0, &workArea, 0);
+            const int width = MulDiv(370, dpi, 96);
+            const int height = MulDiv(440, dpi, 96);
+            const int gap = MulDiv(12, dpi, 96);
+            int x = ownerRect.right + gap;
+            if (x + width > workArea.right)
+                x = ownerRect.left - width - gap;
+            x = std::clamp(x, static_cast<int>(workArea.left),
+                          static_cast<int>(workArea.right) - width);
+            int y = std::clamp(static_cast<int>(ownerRect.top),
+                               static_cast<int>(workArea.top),
+                               static_cast<int>(workArea.bottom) - height);
+            g_hChatWindow = CreateWindowExA(
+                WS_EX_TOOLWINDOW, kChatWindowClass, "Peer Chat",
+                WS_CAPTION | WS_SYSMENU | WS_VISIBLE,
+                x, y, width, height, hDlg, nullptr, GetModuleHandle(NULL), nullptr);
+        }
     }
 
     if (!g_hChatWindow) return;
@@ -1723,7 +1734,7 @@ static LaunchOption ShowLaunchMenuWindow(bool battleSetupOnly, bool compactMode)
     HDC screenDc = GetDC(nullptr);
     const int dpi = screenDc ? GetDeviceCaps(screenDc, LOGPIXELSX) : 96;
     if (screenDc) ReleaseDC(nullptr, screenDc);
-    int w = MulDiv(g_compactMode ? 656 : 840, dpi, 96);
+    int w = MulDiv(g_compactMode ? 656 : (g_battleSetupOnly ? 1220 : 840), dpi, 96);
     int h = MulDiv(g_compactMode ? 448 : (g_battleSetupOnly ? 430 : 780), dpi, 96);
     int x = (GetSystemMetrics(SM_CXSCREEN) - w) / 2;
     int y = (GetSystemMetrics(SM_CYSCREEN) - h) / 2;
@@ -2504,6 +2515,8 @@ static INT_PTR CALLBACK LaunchDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM
     {
         const UINT dpi = HIWORD(wParam);
         UpdateDpiLayout(hDlg, dpi);
+        if (g_hChatWindow && GetParent(g_hChatWindow) == hDlg)
+            UpdateDpiLayout(g_hChatWindow, dpi);
         const RECT* suggested = reinterpret_cast<const RECT*>(lParam);
         SetWindowPos(hDlg, nullptr, suggested->left, suggested->top,
                      suggested->right - suggested->left,

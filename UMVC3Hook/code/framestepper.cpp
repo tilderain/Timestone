@@ -42,6 +42,7 @@ using namespace Memory::VP;
 // HookLog from dllmain.cpp
 extern void HookLog(const char* fmt, ...);
 extern void HookLogFlush();
+extern void BootTimer_Stamp(const char* label);
 extern void ChrSelImGui_Update();
 extern bool ChrSelImGui_ApplyRestart(int32_t targetFrame);
 extern bool ChrSelImGui_TakeFullTransitionRequested();
@@ -546,6 +547,12 @@ extern "C" void Controller_OnFrameEnd();
 // ---------------------------------------------------------------------------
 static void __fastcall HookedMove(void* sMvc3Main)
 {
+    static bool firstMove = true;
+    if (firstMove) {
+        BootTimer_Stamp("First sMvc3Main move");
+        firstMove = false;
+    }
+
     // Rollback_ReSimulate owns the input boundary while replaying frames.
     // Re-entering the live path here can spin waiting for confirmed input.
     if (g_isResimulating)

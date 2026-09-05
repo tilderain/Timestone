@@ -19,6 +19,7 @@
 #include "code/controller.h"
 #include "code/autotest.h"
 #include "code/diag.h"
+#include "code/d3d9reset.h"
 #include "code/exception.h"
 #include "code/mk10utils.h"
 #include <Windows.h>
@@ -414,27 +415,43 @@ static struct {
 	int           count;
 	int           dumped;
 } g_bootTimer;
+static SRWLOCK g_bootTimerLock = SRWLOCK_INIT;
 
 static void BootTimer_Init()
 {
+	AcquireSRWLockExclusive(&g_bootTimerLock);
 	QueryPerformanceFrequency(&g_bootTimer.freq);
 	QueryPerformanceCounter(&g_bootTimer.start);
 	g_bootTimer.count = 0;
 	g_bootTimer.dumped = 0;
+	ReleaseSRWLockExclusive(&g_bootTimerLock);
 }
 
 void BootTimer_Stamp(const char* label)
 {
+	AcquireSRWLockExclusive(&g_bootTimerLock);
+	if (g_bootTimer.dumped) {
+		ReleaseSRWLockExclusive(&g_bootTimerLock);
+		return;
+	}
 	int idx = g_bootTimer.count;
-	if (idx >= 32) return;
+	if (idx >= 32) {
+		ReleaseSRWLockExclusive(&g_bootTimerLock);
+		return;
+	}
 	QueryPerformanceCounter(&g_bootTimer.stamps[idx]);
 	g_bootTimer.labels[idx] = label;
 	g_bootTimer.count = idx + 1;
+	ReleaseSRWLockExclusive(&g_bootTimerLock);
 }
 
 static void BootTimer_Dump()
 {
-	if (g_bootTimer.dumped) return;
+	AcquireSRWLockExclusive(&g_bootTimerLock);
+	if (g_bootTimer.dumped) {
+		ReleaseSRWLockExclusive(&g_bootTimerLock);
+		return;
+	}
 	g_bootTimer.dumped = 1;
 	HookLog("=== BootTiming ===\n");
 	double prevMs = 0.0;
@@ -445,6 +462,7 @@ static void BootTimer_Dump()
 		prevMs = ms;
 	}
 	HookLog("=================\n");
+	ReleaseSRWLockExclusive(&g_bootTimerLock);
 }
 
 // Auto-connect target (passed via -connect on command line for spawned 2nd instance)
@@ -648,10 +666,13 @@ void PollKeyboardDirectly()
 void InitImGui(LPDIRECT3DDEVICE9 pDevice)
 {
 	ImGui::CreateContext();
+	BootTimer_Stamp("ImGui context created");
 	ImGuiIO& io = ImGui::GetIO();
 	io.ConfigFlags = ImGuiConfigFlags_NoMouseCursorChange;
 	ImGui_ImplWin32_Init(window);
+	BootTimer_Stamp("ImGui Win32 backend initialized");
 	ImGui_ImplDX9_Init(pDevice);
+	BootTimer_Stamp("ImGui DX9 backend initialized");
 
 	ImGuiStyle* style = &ImGui::GetStyle();
 	style->WindowRounding = 6.0f;
@@ -675,13 +696,17 @@ fontConfig.SizePixels     = 12.0f; // use exact integer sizes: 9, 10, 12, 14, 16
 
 		const ImWchar* jpRange = io.Fonts->GetGlyphRangesJapanese();
 
+		BootTimer_Stamp("Loading msgothic.ttc");
 		ImFont* jpFont = io.Fonts->AddFontFromFileTTF(
 			"C:\\Windows\\Fonts\\msgothic.ttc", 12.0f, &fontConfig, jpRange);
+		BootTimer_Stamp("Loaded msgothic.ttc");
 		if (jpFont) {
 			io.Fonts->Build();
+			BootTimer_Stamp("Built Japanese font atlas");
 			HookLog("InitImGui: merged msgothic.ttc Japanese glyphs\n");
 		} else {
 			io.Fonts->Build();
+			BootTimer_Stamp("Built default font atlas");
 			HookLog("InitImGui: WARNING - no Japanese font available\n");
 		}
 	}
@@ -767,6 +792,8 @@ LRESULT __stdcall WndProc(const HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPar
 bool init = false;
 bool first_msg = true;
 static volatile LONG g_endSceneOverlayInFlight = 0;
+static volatile LONG g_firstD3D9CreateSeen = 0;
+static volatile LONG g_firstD3D9EndSceneSeen = 0;
 static volatile LONG g_initialD3D9ResetComplete = 0;
 static SRWLOCK g_d3d9DeviceLock = SRWLOCK_INIT;
 static unsigned int g_overlayInitDeferredFrames = 0;
@@ -983,6 +1010,7 @@ static void LogD3D9ResetResourceState(
 static HRESULT __stdcall hkResetDevice(
 	LPDIRECT3DDEVICE9 pDevice, D3DPRESENT_PARAMETERS* presentationParameters)
 {
+	D3D9ResetDiagnostics_RecordDeviceReset();
 	AcquireSRWLockExclusive(&g_d3d9DeviceLock);
 
 	if (!g_d3d9FocusWindow && presentationParameters)
@@ -1015,12 +1043,15 @@ static HRESULT __stdcall hkResetDevice(
 
 	const bool firstReset =
 		InterlockedCompareExchange(&g_firstD3D9ResetSeen, 1, 0) == 0;
+	if (firstReset)
+		BootTimer_Stamp("Initial D3D9 Reset entered");
 	const HRESULT cooperativeBeforeReset = pDevice->TestCooperativeLevel();
 	const bool parametersMatch = g_haveSuccessfulCreateParameters &&
 		presentationParameters && D3D9PresentationParametersEqual(
 			*presentationParameters, g_successfulCreateParameters);
 	const bool suppressHealthyReset = cooperativeBeforeReset == D3D_OK &&
-		g_haveSuccessfulCreateParameters && pDevice == g_createdD3D9Device;
+		g_haveSuccessfulCreateParameters && pDevice == g_createdD3D9Device &&
+		(!firstReset || parametersMatch);
 	if (suppressHealthyReset) {
 		HookLog("D3D9: suppressed healthy %sReset "
 			"(parametersMatch=%d active=%ux%u requested=%ux%u)\n",
@@ -1032,6 +1063,8 @@ static HRESULT __stdcall hkResetDevice(
 		if (presentationParameters)
 			*presentationParameters = g_successfulCreateParameters;
 		InterlockedExchange(&g_initialD3D9ResetComplete, 1);
+		if (firstReset)
+			BootTimer_Stamp("Initial D3D9 Reset suppressed");
 		ReleaseSRWLockExclusive(&g_d3d9DeviceLock);
 		return D3D_OK;
 	}
@@ -1053,6 +1086,8 @@ static HRESULT __stdcall hkResetDevice(
 			parametersMatch);
 	}
 	HRESULT result = oResetDevice(pDevice, presentationParameters);
+	if (firstReset)
+		BootTimer_Stamp("Initial D3D9 Reset returned");
 	HookLog("D3D9: Reset returned 0x%08X\n", (uint32_t)result);
 	if (result == D3DERR_INVALIDCALL && presentationParameters &&
 		presentationParameters->PresentationInterval !=
@@ -1090,6 +1125,18 @@ static HRESULT __stdcall hkResetDevice(
 			displayMode.RefreshRate,
 			(UINT)displayMode.Format,
 			pDevice->GetNumberOfSwapChains());
+
+		// The native UI-thread dispatcher treats INVALIDCALL as fatal ERR09.
+		// Keep the process alive when a driver or overlay rejects this Reset;
+		// other failures must retain their device-loss/recovery semantics.
+		if (result == D3DERR_INVALIDCALL) {
+			HookLog("D3D9: masking failed Reset INVALIDCALL as success\n");
+			if (presentationParameters && g_haveSuccessfulCreateParameters)
+				*presentationParameters = g_successfulCreateParameters;
+			InterlockedExchange(&g_initialD3D9ResetComplete, 1);
+			ReleaseSRWLockExclusive(&g_d3d9DeviceLock);
+			return D3D_OK;
+		}
 	}
 
 	if (SUCCEEDED(result) && init && ImGui::GetCurrentContext()) {
@@ -1122,12 +1169,14 @@ static uint64_t __fastcall HookAppResetD3DDeviceOnUIThread(
 	const bool redundantHealthyReset = cooperative == D3D_OK &&
 		device == g_createdD3D9Device && g_haveSuccessfulCreateParameters &&
 		parametersMatch;
+	D3D9ResetDiagnostics_BeginAppReset(!redundantHealthyReset);
 	if (redundantHealthyReset) {
 		HookLog("D3D9: suppressed native redundant Reset submission "
 			"(active=%ux%u)\n",
 			g_successfulCreateParameters.BackBufferWidth,
 			g_successfulCreateParameters.BackBufferHeight);
 		InterlockedExchange(&g_initialD3D9ResetComplete, 1);
+		D3D9ResetDiagnostics_EndAppReset(1, 0);
 		return 1;
 	}
 
@@ -1135,13 +1184,20 @@ static uint64_t __fastcall HookAppResetD3DDeviceOnUIThread(
 		"(cooperative=0x%08X deviceMatch=%d parametersMatch=%d)\n",
 		(uint32_t)cooperative, device == g_createdD3D9Device,
 		parametersMatch);
-	return g_originalAppResetD3DDeviceOnUIThread(
+	const ULONGLONG startTick = GetTickCount64();
+	const uint64_t result = g_originalAppResetD3DDeviceOnUIThread(
 		app, device, presentationParameters);
+	D3D9ResetDiagnostics_EndAppReset(result, GetTickCount64() - startTick);
+	return result;
 }
 
 static bool __fastcall HookMvc3MainSyncGraphicsSettings(void* mvc3Main)
 {
-	if (g_createdD3D9Device && g_haveSuccessfulCreateParameters &&
+	D3D9ResetDiagnostics_RecordGraphicsSync();
+	const bool initialResetProcessed =
+		InterlockedCompareExchange(&g_firstD3D9ResetSeen, 0, 0) != 0;
+	if (initialResetProcessed && g_createdD3D9Device &&
+		g_haveSuccessfulCreateParameters &&
 		g_createdD3D9Device->TestCooperativeLevel() == D3D_OK) {
 		if (!g_loggedSuppressedGraphicsSync) {
 			HookLog("D3D9: suppressed delayed graphics settings sync "
@@ -1184,6 +1240,10 @@ static void InstallNativeD3D9ResetSubmissionHook()
 
 long __stdcall hkEndScene(LPDIRECT3DDEVICE9 pDevice)
 {
+	if (InterlockedCompareExchange(&g_firstD3D9EndSceneSeen, 1, 0) == 0) {
+		BootTimer_Stamp("First D3D9 EndScene");
+		D3D9ResetDiagnostics_StartStartupWatchdog();
+	}
 	InterlockedExchange(&g_lastEndSceneThreadId, (LONG)GetCurrentThreadId());
 	// Dear ImGui owns one process-global context and cannot tolerate concurrent
 	// or reentrant EndScene callbacks mutating its current-window stack.
@@ -1232,6 +1292,7 @@ long __stdcall hkEndScene(LPDIRECT3DDEVICE9 pDevice)
 		InitImGui(pDevice);
 		FrameStepper_SetDevice(pDevice);
 		init = true;
+		D3D9ResetDiagnostics_CompleteStartup();
 		BootTimer_Stamp("Initialized ImGui overlay");
 		BootTimer_Dump();
 	}
@@ -1498,6 +1559,10 @@ static HRESULT WINAPI HookD3D9CreateDevice(
 {
 	if (!g_originalD3D9CreateDevice)
 		return D3DERR_DRIVERINTERNALERROR;
+	const bool firstCreate =
+		InterlockedCompareExchange(&g_firstD3D9CreateSeen, 1, 0) == 0;
+	if (firstCreate)
+		BootTimer_Stamp("First D3D9 CreateDevice entered");
 	g_d3d9CreateDeviceThreadId = GetCurrentThreadId();
 	g_d3d9FocusWindow = focusWindow ? focusWindow :
 		(presentationParameters ? presentationParameters->hDeviceWindow : nullptr);
@@ -1532,6 +1597,8 @@ static HRESULT WINAPI HookD3D9CreateDevice(
 		const HRESULT result = g_originalD3D9CreateDevice(
 			d3d9, adapter, deviceType, focusWindow, behaviorFlags,
 			presentationParameters, returnedDevice);
+		if (firstCreate)
+			BootTimer_Stamp("First D3D9 CreateDevice returned");
 		RememberSuccessfulD3D9Create(
 			result, presentationParameters, returnedDevice);
 		HookLog("D3D9: CreateDevice returned 0x%08X device=%p\n",
@@ -1563,6 +1630,8 @@ static HRESULT WINAPI HookD3D9CreateDevice(
 			break;
 		Sleep(25);
 	}
+	if (firstCreate)
+		BootTimer_Stamp("First D3D9 CreateDevice returned");
 
 	if (ownsMutex)
 		ReleaseMutex(mutex);
