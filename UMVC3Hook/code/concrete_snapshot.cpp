@@ -254,6 +254,10 @@ constexpr DtiSnapshotRange kVerifiedCharacterScalarRanges[] = {
     {0x140D45020ull, 0x68F4, 0x08}, // uDormammu: spell stock and flare counter
     {0x140D45020ull, 0x6920, 0x01}, // uDormammu: Stalking Flare lock
     {0x140D45068ull, 0x68F8, 0x04}, // uDrDoom: single-animation action latch
+    // Grace registry state: preserve insertion order and oldest-crystal eviction
+    // after pointer filtering. The three shot references are remapped separately.
+    {0x140D450A8ull, 0x6920, 0x08}, // uDrStrange: next Grace slot and crystal count
+    {0x140D450A8ull, 0x6930, 0x0C}, // uDrStrange: Grace ages
     {0x140D44FE0ull, 0x68F0, 0x08}, // uDeadPool: teleport state
     {0x140D45200ull, 0x6990, 0x30}, // uFrank: Kobun scale, offset, rotation
     {0x140D45200ull, 0x69C4, 0x04}, // uFrank: level

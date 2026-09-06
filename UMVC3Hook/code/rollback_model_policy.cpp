@@ -60,6 +60,7 @@ constexpr uintptr_t DTI_UKOBUN = 0x140D455B0;
 constexpr uintptr_t VTABLE_UARTHUR = 0x140A70CD0;
 constexpr uintptr_t VTABLE_UCAP_AMERICA = 0x140A71430;
 constexpr uintptr_t VTABLE_UDOCTOR_DOOM = 0x140A73A40;
+constexpr uintptr_t VTABLE_UDOCTOR_STRANGE = 0x140A73F70;
 constexpr uintptr_t VTABLE_URROCKET_RACCOON = 0x140A7DF30;
 constexpr uintptr_t VTABLE_UTRISH = 0x140A81A20;
 constexpr uintptr_t PTR_SUNIT = 0x140E17698;
@@ -1329,6 +1330,15 @@ void Rollback_CaptureCharacterShotReferences(RollbackSnapshotSlot& slot)
             capture(UDOCTOR_DOOM_MISSILE_OFFSET,
                     RollbackCharacterShotReferenceRole::MissileEmplacement,
                     DTI_USHOT_VULCAN_MISSILE_EMPLACEMENT, true);
+        } else if (region.expectedVtable ==
+                   (uint64_t)_addr(VTABLE_UDOCTOR_STRANGE)) {
+            // Flames setup and Grace consumption read these ordered shot slots,
+            // not the presentation effects at +0x68F0..+0x6900. Capture empty
+            // slots too so rollback cannot retain a prediction-only crystal.
+            for (uint32_t offset : {0x6908u, 0x6910u, 0x6918u}) {
+                capture(offset, RollbackCharacterShotReferenceRole::GraceOfHoggoth,
+                        0, true);
+            }
         } else if (region.expectedVtable == (uint64_t)_addr(VTABLE_UTRISH)) {
             capture(UTRISH_SPADA_BOOMERANG_OFFSET,
                     RollbackCharacterShotReferenceRole::SpadaBoomerang,

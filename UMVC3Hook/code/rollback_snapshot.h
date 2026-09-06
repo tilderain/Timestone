@@ -144,6 +144,7 @@ enum class RollbackCharacterShotReferenceRole : uint8_t {
     ShieldSlash,
     MissileEmplacement,
     SpadaBoomerang,
+    GraceOfHoggoth,
 };
 
 struct RollbackCharacterShotReference {
