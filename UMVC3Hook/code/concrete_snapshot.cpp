@@ -44,6 +44,7 @@ constexpr uintptr_t kDogMissileDti = 0x140D4B888ull;
 constexpr uintptr_t kFireGrenadeExplodeDti = 0x140D48BB0ull;
 constexpr uintptr_t kItemThrowDti = 0x140D4B980ull;
 constexpr uintptr_t kRocketLauncherExplodeDti = 0x140D4BAC8ull;
+constexpr uintptr_t kElementalSummonShotDti = 0x140D49DF8ull;
 constexpr uintptr_t kVulcanAxeDti = 0x140D48808ull;
 constexpr uintptr_t kShikiDanKobunDti = 0x140D4D3D0ull;
 constexpr uintptr_t kRyuDti = 0x140D45A10ull;
@@ -87,6 +88,10 @@ constexpr DtiSnapshotRange kGeneratedShotTailRanges[] = {
 // in Ghidra but absent from the generated createProperty export. Keep these
 // separate from the generated file and reapply them after ownership filtering.
 constexpr DtiSnapshotRange kVerifiedShotScalarRanges[] = {
+    // Target counts, three gem-slot indices, and selected target (native setup
+    // 0x140173FD0 / move 0x140173870). Packed {0, 1} resembles a pointer;
+    // retaining factory zero loses the gem encounter (frame 2810 -> 2824).
+    {kElementalSummonShotDti, 0x21B0, 0x18},
     {0x140D49A08ull, 0x2140, 0x04}, // uShotMissileDoomsMissile: flight parameter
     {0x140D4CA20ull, 0x2140, 0x03}, // uShotOptionAttackWire: state flags
     {0x140D4CA20ull, 0x2144, 0x08}, // uShotOptionAttackWire: mode/timer
@@ -1184,7 +1189,10 @@ bool ConcreteShotSnapshot_Restore(void* shot,
     // Nemesis's explosion is rebuilt from its remapped parent rocket; its fresh
     // binding carries that parent's attack variant, while the saved client
     // binding can still resolve the factory-default launch parameters.
-    if (!IsDti(snapshot.dti, kRocketLauncherExplodeDti)) {
+    // Elemental Summon likewise rebuilds its powered attack binding natively.
+    // Keep that fresh map instead of a reference from the retired resource graph.
+    if (!IsDti(snapshot.dti, kRocketLauncherExplodeDti) &&
+        !IsDti(snapshot.dti, kElementalSummonShotDti)) {
         CopyRange(overlay.data(), source, liveSize, {0x1490, 0x08});
     }
 

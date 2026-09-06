@@ -43,6 +43,7 @@ constexpr uintptr_t DTI_USHOT_OPTION_SPADA_BOOMERANG = 0x140D4D118;
 constexpr uintptr_t DTI_USHOT_VULCAN_CROSS_SWORD = 0x140D488B8;
 constexpr uintptr_t DTI_USHOT_VULCAN_IRON_PIPE_ROLLING = 0x140D4A4E8;
 constexpr uintptr_t DTI_USHOT_VULCAN_LAND_MINE = 0x140D48D98;
+constexpr uintptr_t DTI_USHOT_VULCAN_ELEMENTAL_SUMMON_SHOT = 0x140D49DF8;
 constexpr uintptr_t DTI_USHOT_SHIELD_KIKOUSYOU = 0x140D48F70;
 constexpr uintptr_t DTI_USHOT_VULCAN_MISSILE_EMPLACEMENT = 0x140D49A60;
 constexpr uintptr_t DTI_USHOT_VULCAN_PRICKLE_BOARD = 0x140D4C528;
@@ -73,6 +74,7 @@ constexpr uintptr_t FN_KING_KOBUN_MOVE = 0x1401BA2D0;
 constexpr uintptr_t FN_MISSILE_EMPLACEMENT_MOVE = 0x14016F220;
 constexpr uintptr_t FN_WEAPON_CART_MOVE = 0x14017A9D0;
 constexpr uintptr_t FN_WEAPON_CART_SPAWN_DEBRIS = 0x14017A200;
+constexpr uintptr_t FN_ELEMENTAL_SUMMON_REFRESH_POWER = 0x140172F00;
 constexpr uintptr_t FN_SSHOT_FLUSH_PENDING_UNITS = 0x1401517A0;
 constexpr uintptr_t FN_MTOBJECT_ADD_REF = 0x14050D100;
 constexpr uintptr_t FN_UMODEL_PROCESS_ACTION_ANMCHR = 0x140529420;
@@ -1156,6 +1158,22 @@ void Rollback_FinishShotFactory(RollbackShotFactoryPolicyState& state)
 void Rollback_RebuildShotStateBeforeRegistration(
     void* shot, const RollbackShotRecipe& saved)
 {
+    if (saved.concrete.dti ==
+            (uint64_t)_addr(DTI_USHOT_VULCAN_ELEMENTAL_SUMMON_SHOT) &&
+        saved.concrete.body.size() >= 0x21EC) {
+        uint32_t power = 0;
+        std::memcpy(&power, saved.concrete.body.data() + 0x21E8, sizeof(power));
+        if (power >= 2 && power <= 4) {
+            // The original recipe binds the base attack. Rebuild Orange/Red
+            // resources and the owned effect before gameplay/collision overlay;
+            // restoring radius alone reverts to base metadata on the next tick.
+            // Power 4 retains the Red resource/effect from power 3 natively.
+            *(uint32_t*)((uint8_t*)shot + 0x21E8) = std::min(power, 3u);
+            ((void(__fastcall*)(void*))_addr(FN_ELEMENTAL_SUMMON_REFRESH_POWER))(shot);
+        }
+        return;
+    }
+
     if (saved.concrete.dti != (uint64_t)_addr(DTI_USHOT_VULCAN_LAND_MINE) ||
         saved.concrete.body.size() <= 0x2214 ||
         saved.concrete.body[0x2214] == 0 ||
