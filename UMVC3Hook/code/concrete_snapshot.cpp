@@ -192,6 +192,9 @@ constexpr DtiSnapshotRange kVerifiedShotScalarRanges[] = {
     {0x140D484D0ull, 0x21D8, 0x04}, // uShotVulcanHyoran: owner angle
     {0x140D4B980ull, 0x2230, 0x04}, // uShotVulcanItemThrow: item type
     {0x140D4D550ull, 0x2140, 0x0C}, // uShotVulcanJigenZan: timer/count/variant
+    // Dormammu f942: horizontal drift diverges before f943 position/rotation.
+    // Reapply after ownership filtering; vfn124 consumes this setup-randomized speed.
+    {0x140D49898ull, 0x2140, 0x04}, // uShotVulcanMagicMagmaSpread: horizontal drift
     {0x140D4BA90ull, 0x2140, 0x01}, // uShotVulcanNemesisRocketLauncher: spawn latch
     {0x140D4BA90ull, 0x2144, 0x04}, // uShotVulcanNemesisRocketLauncher: life limit
     {0x140D4A6B0ull, 0x2140, 0x01}, // uShotVulcanNetArrow: deferred-target flag
