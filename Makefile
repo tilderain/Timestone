@@ -21,7 +21,8 @@ GIT_COMMIT := $(shell git rev-parse HEAD 2>/dev/null || printf unknown)
 GIT_DIRTY := $(if $(shell git status --porcelain --untracked-files=normal 2>/dev/null),1,0)
 GIT_DIR := $(shell git rev-parse --git-dir 2>/dev/null)
 GIT_HEAD_REF := $(shell git symbolic-ref -q HEAD 2>/dev/null)
-GIT_COMMIT_DEPS := $(if $(GIT_DIR),$(GIT_DIR)/HEAD $(if $(GIT_HEAD_REF),$(GIT_DIR)/$(GIT_HEAD_REF)))
+# Git maintenance can move loose branch refs into packed-refs.
+GIT_COMMIT_DEPS := $(if $(GIT_DIR),$(wildcard $(GIT_DIR)/HEAD $(GIT_DIR)/packed-refs $(if $(GIT_HEAD_REF),$(GIT_DIR)/$(GIT_HEAD_REF))))
 VERSION    := 0.3.5
 VERSION_RC := $(shell printf '%s.0' '$(VERSION)' | tr . ,)
 
