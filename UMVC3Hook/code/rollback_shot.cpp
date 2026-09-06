@@ -506,6 +506,7 @@ static char __fastcall hkUnitRemove(void* manager, void* unit)
 void Shot_CaptureRecipes(RollbackSnapshotSlot& slot)
 {
     slot.shotRecipes.clear();
+    slot.shotBodyReferences.clear();
     for (int list = 0; list < SSHOT_SENTINEL_COUNT; ++list) {
         uint64_t sentinel = (uint64_t)_addr(0x140d47f90) + list * 0x28;
         uint64_t sentinelRef = sentinel + 0x08;
@@ -519,6 +520,21 @@ void Shot_CaptureRecipes(RollbackSnapshotSlot& slot)
                 saved.savedPtr = shot;
                 Shot_CaptureFlight(shot, saved.flight);
                 ConcreteShotSnapshot_Capture(shot, saved.concrete);
+                for (uint32_t offset : Rollback_GetShotBodyReferenceOffsets(saved.concrete.dti)) {
+                    if (offset + sizeof(void*) > saved.concrete.body.size()) continue;
+                    void* target = nullptr;
+                    std::memcpy(&target, saved.concrete.body.data() + offset, sizeof(target));
+                    RollbackShotReference reference;
+                    // Only tracked shots are valid here; never dereference a
+                    // stale child or reinterpret it as a stable unit.
+                    auto child = g_liveShotRecipes.find(target);
+                    if (target && child != g_liveShotRecipes.end()) {
+                        reference.savedPtr = target;
+                        reference.kind = RollbackShotReferenceKind::Shot;
+                        reference.shotSpawnSequence = child->second.spawnSequence;
+                    }
+                    slot.shotBodyReferences.push_back({saved.spawnSequence, offset, reference});
+                }
                 slot.shotRecipes.push_back(saved);
             }
             nodeRef = *(uint64_t*)(nodeRef + SSHOT_NODE_NEXT);
@@ -581,6 +597,17 @@ void* Shot_ResolveReference(const RollbackShotReference& reference)
         return nullptr;
     }
     return reference.savedPtr;
+}
+
+void Shot_RestoreBodyReferences(const RollbackSnapshotSlot& slot)
+{
+    // All owners and children must have been reconstructed before this pass.
+    for (const RollbackShotBodyReference& reference : slot.shotBodyReferences) {
+        auto owner = g_liveShotsBySequence.find(reference.ownerSpawnSequence);
+        if (owner == g_liveShotsBySequence.end()) continue;
+        *(void**)((uint8_t*)owner->second + reference.offset) =
+            Shot_ResolveReference(reference.target);
+    }
 }
 
 void* Shot_SpawnOriginal(void* manager, const RollbackShotRecipe& recipe,

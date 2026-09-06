@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <span>
 #include <vector>
 
 struct RollbackShotRecipe;
@@ -16,6 +17,7 @@ struct RollbackShotFactoryPolicyState {
 
 void Rollback_InitShotModelPolicyHooks();
 void Rollback_ResetShotModelPolicy();
+std::span<const uint32_t> Rollback_GetShotBodyReferenceOffsets(uint64_t runtimeDti);
 void Rollback_ForgetShotModelPolicy(void* shot);
 void Rollback_AfterShotSpawn(void* shot, void* parent);
 void Rollback_BeforeShotHitboxUpdate(

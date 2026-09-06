@@ -1032,6 +1032,8 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
     }
     const uint64_t respawnEnd = Profile_Now();
 
+    Shot_RestoreBodyReferences(slot);
+
     // cChr+0x90 is the animation interpreter's generic return-value union. It
     // can hold a created object, but it also holds packed scalar/vector values.
     // Character restore rewinds it to a saved shot address when it is an object,

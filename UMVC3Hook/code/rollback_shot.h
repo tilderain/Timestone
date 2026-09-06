@@ -11,6 +11,7 @@ struct RollbackSnapshotSlot;
 void Shot_InitHooks();
 bool Shot_HooksReady();
 void Shot_CaptureRecipes(RollbackSnapshotSlot& slot);
+void Shot_RestoreBodyReferences(const RollbackSnapshotSlot& slot);
 bool Shot_GetRecipe(void* shot, RollbackShotRecipe& recipe);
 bool Shot_GetSpawnSequence(void* shot, uint64_t& spawnSequence);
 size_t Shot_GetRecipeCount();

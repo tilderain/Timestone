@@ -1155,6 +1155,16 @@ void Rollback_FinishShotFactory(RollbackShotFactoryPolicyState& state)
     }
 }
 
+std::span<const uint32_t> Rollback_GetShotBodyReferenceOffsets(uint64_t runtimeDti)
+{
+    constexpr uintptr_t kSatelliteLaserLockDti = 0x140D48EE8;
+    static constexpr uint32_t kSatelliteLaserLockReferences[] = {0x2220};
+    // mpChildShot blocks reticle movement and refiring while the laser is active.
+    if (runtimeDti == (uint64_t)_addr(kSatelliteLaserLockDti))
+        return kSatelliteLaserLockReferences;
+    return {};
+}
+
 void Rollback_RebuildShotStateBeforeRegistration(
     void* shot, const RollbackShotRecipe& saved)
 {
