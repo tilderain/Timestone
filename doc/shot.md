@@ -287,6 +287,16 @@ ownership filter and leave the reconstructed factory value at zero. Reapplying
 the verified four-byte float after pointer filtering preserves the axe arc and
 the rotating hitbox without importing model pointers.
 
+The axe must also remain in snapshots during cleanup step 3 with hit judgment
+disabled. In `20260906_051613`, filtering it at frame 982 removed the client's
+future native kill callback: the host cleared `uArthur+0x68FA` (`mIsAxe`) and
+`mUsrF` bit 1 at frame 989, while the client retained both restrictions and
+rejected the next throw at frame 1012. `IsTerminalShot` now retains this class;
+`Shot_ApplyFlight` restores its saved cleanup step and collision-enable flags.
+Do not derive axe availability from the filtered shot count or clear it at
+step-3 entry, since that releases the restriction before native kill. This
+retention repair still requires an in-game rerun to verify cleanup timing.
+
 Arthur's Cross Sword availability detector is the boolean `mIsCrossSword` at
 `uArthur+0x68f9`, not a shot pointer. Setup writes one and both the concrete kill
 callback and its target-loss callback write zero. Generic cleanup-step filtering

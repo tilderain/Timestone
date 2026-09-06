@@ -29,6 +29,7 @@ static constexpr uint32_t SUNIT_MAX_CATEGORIES = 64;
 static constexpr uint32_t SUNIT_MULTI_MASK_COUNT_OFFSET = 0x1840;
 static constexpr uint32_t SUNIT_MULTI_MASK_ARRAYS_OFFSET = 0xC50;
 static constexpr uintptr_t VTABLE_USHOT_VULCAN_ZIREITOU = 0x140AC0E20;
+static constexpr uintptr_t DTI_USHOT_VULCAN_AXE = 0x140D48808;
 static constexpr uintptr_t DTI_USHOT_SHIELD_RAID_SWORD = 0x140D4D470;
 static constexpr uintptr_t DTI_USHOT_SHIELD_SPIRAL_SWORD = 0x140D4D4C8;
 static constexpr uintptr_t DTI_USHOT_SHIELD_STORM_SWORD = 0x140D4D508;
@@ -292,10 +293,12 @@ static bool IsTerminalShot(void* shot)
     uint8_t flags = *(uint8_t*)((uint8_t*)shot + 0x1F64);
     if (step == 3 && (flags & 0x02) == 0) {
         uint64_t dti = GetObjectDti((uint64_t)shot);
-        // Vergil's sword remains authoritative during cleanup. Its native
-        // callback advances the local step and clears exactly one availability
-        // bit; filtering it would force restore to guess that timing.
-        if (dti == (uint64_t)_addr(DTI_USHOT_SHIELD_RAID_SWORD) ||
+        // These shots remain authoritative during cleanup: native callbacks
+        // release their owner's weapon restriction. Arthur's axe clears
+        // mIsAxe and mUsrF bit 1 at kill, not when it enters step 3.
+        // Shot_ApplyFlight restores the cleanup step and disabled hit judgment.
+        if (dti == (uint64_t)_addr(DTI_USHOT_VULCAN_AXE) ||
+            dti == (uint64_t)_addr(DTI_USHOT_SHIELD_RAID_SWORD) ||
             dti == (uint64_t)_addr(DTI_USHOT_SHIELD_SPIRAL_SWORD) ||
             dti == (uint64_t)_addr(DTI_USHOT_SHIELD_STORM_SWORD)) {
             return false;
