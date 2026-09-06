@@ -48,6 +48,16 @@ extern void ChrSelImGui_Update();
 extern bool ChrSelImGui_ApplyRestart(int32_t targetFrame);
 extern bool ChrSelImGui_TakeFullTransitionRequested();
 
+// Netplay state queries from netplay.cpp
+extern bool Netplay_HasRemoteInput();
+extern bool Netplay_GetInboundDelay(int32_t& outDelay, int32_t& outEffectiveFrame);
+extern bool Netplay_GetInboundRollback(int32_t& outRollback, int32_t& outEffectiveFrame);
+extern void Netplay_SendDelay(int32_t delay, int32_t effectiveFrame);
+extern void Netplay_SendRollback(int32_t rollbackFrames, int32_t effectiveFrame);
+extern bool Netplay_GetInboundRestartMatch(int32_t& outTargetFrame, uint32_t& outRoundSeed,
+                                           uint32_t& outKind, int32_t& outButtonRestart);
+extern void Netplay_SendRestartMatch(int32_t targetFrame, uint32_t roundSeed);
+
 // Controller setters from controller.cpp
 extern "C" void Controller_SetDelayFrames(int32_t delay);
 extern "C" void Controller_ScheduleDelayFrames(int32_t delay, int32_t effectiveFrame);
@@ -223,7 +233,6 @@ extern "C" bool FrameStepper_ScheduleRosterRestart(int32_t targetFrame,
     g_restartKind = RESTART_FULL_MATCH;
     g_restartButtonMode = 0;
     g_restartTargetFrame = Netplay_IsActive() ? targetFrame : currentFrame;
-    if (Netplay_IsActive()) Netplay_SetTimeout(60000);
     return true;
 }
 
@@ -532,87 +541,6 @@ static void PresentFrozenFrame()
     g_pDevice->Present(nullptr, nullptr, nullptr, nullptr);
 }
 
-// Destructive actions received during an input wait must run at the next live
-// move boundary, not halfway through the controller's frame-start processing.
-static RestartMatchPacket g_remoteRestart = {};
-static DesyncPacket g_remoteDesync = {};
-static DesyncPacket g_remoteDesyncTrigger = {};
-static bool g_remoteDesyncTriggerPending = false;
-static SnapDumpPacket g_remoteDump = {};
-static bool g_remoteRestartPending = false;
-static bool g_remoteDesyncPending = false;
-static bool g_remoteDumpPending = false;
-static bool g_remoteSuiteComplete = false;
-static void ApplyRemoteActions();
-
-bool FrameStepper_HasPendingRemoteAction()
-{
-    return (g_remoteRestartPending && g_remoteRestart.battle_generation == g_battleGeneration) ||
-           g_remoteDesyncPending || g_remoteDumpPending || g_remoteSuiteComplete;
-}
-
-void FrameStepper_ReceiveNetplayControl(uint32_t type, const void* data)
-{
-    switch (type) {
-    case PACKET_DELAY: {
-        const auto& packet = *(const DelayPacket*)data;
-        const int32_t frame = std::max(packet.effective_frame, Controller_GetNetFrameCount());
-        if (packet.delay >= 0 && packet.delay <= 15)
-            Controller_ScheduleDelayFrames(packet.delay, frame);
-        if (packet.rollbackFrames >= 0 && packet.rollbackFrames <= 16)
-            Controller_ScheduleRollbackFrames(packet.rollbackFrames, frame);
-        break;
-    }
-    case PACKET_MULTI_RESIM:
-        Controller_SetMultiResimEnabled(((const MultiResimPacket*)data)->enabled != 0);
-        break;
-    case PACKET_BATTLE_READY: {
-        const auto& packet = *(const BattleReadyPacket*)data;
-        if (packet.generation != g_battleGeneration) break;
-        g_remoteReady |= (packet.flags & BATTLE_SYNC_READY) != 0;
-        g_remoteRelease |= (packet.flags & BATTLE_SYNC_RELEASE) != 0;
-        g_remoteFighting |= (packet.flags & BATTLE_SYNC_FIGHTING) != 0;
-        if ((packet.flags & BATTLE_SYNC_OPENING_READY) && packet.opening_member <= 2) {
-            g_remoteOpeningMember = packet.opening_member;
-            g_remoteOpeningReady = true;
-        }
-        g_remoteOpeningRelease |= (packet.flags & BATTLE_SYNC_OPENING_RELEASE) != 0;
-        if (!Netplay_IsHost() && (packet.flags & BATTLE_SYNC_SEED)) {
-            g_roundSeed = packet.round_seed;
-            g_roundSeedReady = true;
-        }
-        break;
-    }
-    case PACKET_RESTART_MATCH: {
-        const auto& packet = *(const RestartMatchPacket*)data;
-        if (packet.battle_generation != g_battleGeneration) break;
-        g_remoteRestart = packet;
-        g_remoteRestartPending = true;
-        Netplay_SetTimeout(60000);
-        break;
-    }
-    case PACKET_DESYNC:
-        if (((const DesyncPacket*)data)->battle_generation != g_battleGeneration)
-            break;
-        g_remoteDesync = *(const DesyncPacket*)data;
-        // Preserve the first trigger's capture even when an unpause follows in
-        // the same pump. The final packet independently controls the UI state.
-        if (g_remoteDesync.action == DESYNC_TRIGGER && !g_remoteDesyncTriggerPending) {
-            g_remoteDesyncTrigger = g_remoteDesync;
-            g_remoteDesyncTriggerPending = true;
-        }
-        g_remoteDesyncPending = true;
-        break;
-    case PACKET_SNAPDUMP:
-        g_remoteDump = *(const SnapDumpPacket*)data;
-        g_remoteDumpPending = true;
-        break;
-    case PACKET_AUTOTEST_COMPLETE:
-        g_remoteSuiteComplete = true;
-        break;
-    }
-}
-
 extern "C" void Controller_OnFrameStart();
 extern "C" void Controller_OnFrameEnd();
 // ---------------------------------------------------------------------------
@@ -637,10 +565,6 @@ static void __fastcall HookedMove(void* sMvc3Main)
     static bool advancedConfigApplied = false;
     if (!advancedConfigApplied)
         advancedConfigApplied = ApplyAdvancedLaunchConfig();
-
-    Netplay_Pump();
-    AutoTest_Process();
-    ApplyRemoteActions();
 
     // These setters rewrite live sMain timing and subsystem state. Applying
     // them from the initialization thread can race native startup before the
@@ -731,8 +655,7 @@ static void __fastcall HookedMove(void* sMvc3Main)
             g_restartWaitStartTick = 0;
             g_restartWaitPopupBarrier = 0;
             Rollback_ClearPendingReSimulation();
-            g_remoteDesyncPending = false;
-            g_remoteDesyncTriggerPending = false;
+            Netplay_ClearInputQueues();
             Controller_ResetBuffers();
             Rollback_ResetNetplayOutputDirectory();
             if (Profile_Enabled()) {
@@ -799,8 +722,7 @@ static void __fastcall HookedMove(void* sMvc3Main)
             g_delayRestartWaitPopup = true;
             g_restartWaitStartTick = 0;
             g_restartWaitPopupBarrier = 0;
-            g_remoteDesyncPending = false;
-            g_remoteDesyncTriggerPending = false;
+            Netplay_ClearInputQueues();
             Controller_ResetBuffers();
             Controller_ResetFrameEpoch();
             Rollback_ResetNetplayOutputDirectory();
@@ -838,6 +760,62 @@ static void __fastcall HookedMove(void* sMvc3Main)
 
     if (Netplay_IsActive())
     {
+        // Drain any inbound delay/rollback-control packets — keeps both sides
+        // in sync when the user adjusts either value on either machine.
+        int32_t remoteDelay = -1;
+        int32_t remoteDelayFrame = -1;
+        while (Netplay_GetInboundDelay(remoteDelay, remoteDelayFrame))
+        {
+            if (remoteDelay >= 0 && remoteDelay <= 15)
+            {
+                if (remoteDelayFrame < Controller_GetNetFrameCount())
+                    remoteDelayFrame = Controller_GetNetFrameCount();
+                Controller_ScheduleDelayFrames(remoteDelay, remoteDelayFrame);
+            }
+        }
+        int32_t remoteRollback = -1;
+        int32_t remoteRollbackFrame = -1;
+        while (Netplay_GetInboundRollback(remoteRollback, remoteRollbackFrame))
+        {
+            if (remoteRollback >= 0 && remoteRollback <= 16)
+            {
+                if (remoteRollbackFrame < Controller_GetNetFrameCount())
+                    remoteRollbackFrame = Controller_GetNetFrameCount();
+                Controller_ScheduleRollbackFrames(remoteRollback,
+                                                   remoteRollbackFrame);
+            }
+        }
+        bool remoteMultiResim = false;
+        while (Netplay_GetInboundMultiResim(remoteMultiResim))
+            Controller_SetMultiResimEnabled(remoteMultiResim);
+
+        uint32_t remoteGeneration = 0;
+        uint32_t remoteFlags = 0;
+        uint32_t remoteRoundSeed = 0;
+        uint32_t remoteOpeningMember = 0;
+        while (Netplay_GetInboundBattleReady(remoteGeneration, remoteFlags,
+                                              remoteRoundSeed,
+                                              remoteOpeningMember))
+        {
+            if (remoteGeneration == g_battleGeneration)
+            {
+                g_remoteReady |= (remoteFlags & BATTLE_SYNC_READY) != 0;
+                g_remoteRelease |= (remoteFlags & BATTLE_SYNC_RELEASE) != 0;
+                g_remoteFighting |= (remoteFlags & BATTLE_SYNC_FIGHTING) != 0;
+                if ((remoteFlags & BATTLE_SYNC_OPENING_READY) != 0 &&
+                    remoteOpeningMember <= 2) {
+                    g_remoteOpeningMember = remoteOpeningMember;
+                    g_remoteOpeningReady = true;
+                }
+                g_remoteOpeningRelease |=
+                    (remoteFlags & BATTLE_SYNC_OPENING_RELEASE) != 0;
+                if (!Netplay_IsHost() && (remoteFlags & BATTLE_SYNC_SEED) != 0) {
+                    g_roundSeed = remoteRoundSeed;
+                    g_roundSeedReady = true;
+                }
+            }
+        }
+
         typedef uint64_t(__fastcall* GetAction_t)();
         static GetAction_t getAction = (GetAction_t)_addr(0x140001A90);
         uint64_t action = getAction();
@@ -965,8 +943,7 @@ static void __fastcall HookedMove(void* sMvc3Main)
             }
             AutoTest_ApplyMatchStartPositions();
 
-            g_remoteDesyncPending = false;
-            g_remoteDesyncTriggerPending = false;
+            Netplay_ClearInputQueues();
             Controller_ResetBuffers();
             Controller_ResetFrameEpoch();
             // Establish the fight-clock epoch at the same mutual-release
@@ -1013,13 +990,6 @@ static void __fastcall HookedMove(void* sMvc3Main)
         if (g_battleSynchronized)
         {
             Controller_OnFrameStart();
-            // A receive inside an input wait can request a safe-boundary action.
-            // Do not execute or advance this incomplete frame; the next live
-            // move applies the action before entering controller processing.
-            if (FrameStepper_HasPendingRemoteAction()) {
-                PresentFrozenFrame();
-                return;
-            }
             if (Controller_IsPredictionBudgetExhausted()) {
                 const bool showWait =
                     Controller_ShouldShowPredictionBudgetExhausted();
@@ -1065,8 +1035,7 @@ static void __fastcall HookedMove(void* sMvc3Main)
                 static uint32_t s_netplayFrameCounter = 0;
                 s_netplayFrameCounter++;
                 if (s_netplayFrameCounter % 600 == 0) {
-                    uint32_t recvInput = Controller_GetExpectedInput(Netplay_IsHost() ? 1 : 0,
-                                                                   Controller_GetNetFrameCount());
+                    uint32_t recvInput = Netplay_HasRemoteInput() ? Netplay_GetRemoteInput() : 0;
                     HookLog("[Netplay] Frame %u | Recv: 0x%08X | RTT: %u ms\n",
                             s_netplayFrameCounter, recvInput, Netplay_GetRTT());
                 }
@@ -1437,74 +1406,10 @@ static void CloseGame()
     ExitProcess(0);
 }
 
-static void ApplyRemoteActions()
-{
-    if (g_remoteSuiteComplete) {
-        g_remoteSuiteComplete = false;
-        HookLog("AutoTestSuite: remote command-line suite complete; closing game\n");
-        CloseGame();
-        return;
-    }
-    if (g_remoteDumpPending) {
-        g_remoteDumpPending = false;
-#if ROLLBACK_SNAPDUMP_ENABLED
-        if (SnapDump_WritesEnabled() && SnapDump_WriteManualHistory(
-                g_remoteDump.frame, g_remoteDump.timestamp)) {
-            HookLog("FrameStepper: remote F10 wrote snapdump through frame %d\n", g_remoteDump.frame);
-        }
-#endif
-    }
-    if (g_remoteRestartPending && IsPastIntroStep()) {
-        g_remoteRestartPending = false;
-        if (g_remoteRestart.battle_generation == g_battleGeneration) {
-            AutoTest_PrepareForRestart();
-            // Preserve delayed desync captures until the restart executes.
-            Rollback_ClearPendingReSimulation();
-            g_restartTargetFrame = g_remoteRestart.target_frame;
-            g_restartRoundSeed = g_remoteRestart.round_seed;
-            g_restartKind = g_remoteRestart.kind;
-            g_restartButtonMode = g_remoteRestart.button_restart;
-            if (g_desyncDetected || g_desyncSeen) {
-                g_desyncDetected = false;
-                g_desyncSeen = true;
-                UnpauseFrameStepper();
-            }
-            HookLog("FrameStepper: received restart kind=%u target=%d seed=0x%08X\n",
-                    g_restartKind, g_restartTargetFrame, g_restartRoundSeed);
-        }
-    }
-    if (g_remoteDesyncPending) {
-        g_remoteDesyncPending = false;
-        if (g_remoteDesyncTriggerPending) {
-            g_remoteDesyncTriggerPending = false;
-            if (FrameStepper_IsBattleSynchronized() &&
-                (!FrameStepper_IsMatchRestartPending() || AutoTest_IsActive()) &&
-                g_remoteDesyncTrigger.battle_generation == g_battleGeneration) {
-                Rollback_NotifyDesyncTriggered(g_remoteDesyncTrigger.frame);
-            }
-        }
-        const DesyncPacket& packet = g_remoteDesync;
-        const bool autoTestTrigger = packet.action == DESYNC_TRIGGER && AutoTest_IsActive();
-        if (!FrameStepper_IsBattleSynchronized() ||
-            (FrameStepper_IsMatchRestartPending() && !autoTestTrigger) ||
-            packet.battle_generation != g_battleGeneration)
-            return;
-        if (packet.action == DESYNC_TRIGGER) {
-            g_desyncDetected = true;
-            g_desyncSeen = false;
-            g_desyncFrame = packet.frame;
-            g_desyncLocalCS = packet.remoteChecksum;
-            g_desyncRemoteCS = packet.localChecksum;
-        } else if (packet.action == DESYNC_UNPAUSE) {
-            g_desyncDetected = false;
-            g_desyncSeen = true;
-            UnpauseFrameStepper();
-        }
-    }
-}
-
 void FrameStepper_Process()
 {
+    AutoTest_Process();
+
     if (g_trainingFrameLimit > 0 && !g_trainingFrameLimitExitRequested &&
         !g_isResimulating)
     {
@@ -1542,6 +1447,12 @@ void FrameStepper_Process()
 
     if (AutoTest_IsActive() && Netplay_TakePeerDisconnected()) {
         HookLog("AutoTestSuite: remote peer disconnected; closing game\n");
+        CloseGame();
+        return;
+    }
+
+    if (Netplay_GetInboundAutoTestComplete()) {
+        HookLog("AutoTestSuite: remote command-line suite complete; closing game\n");
         CloseGame();
         return;
     }
@@ -1596,6 +1507,20 @@ void FrameStepper_Process()
 #endif
     }
 
+    int32_t remoteDumpFrame = -1;
+    char remoteDumpTimestamp[16] = {};
+    while (Netplay_GetInboundSnapDump(remoteDumpFrame, remoteDumpTimestamp,
+                                      sizeof(remoteDumpTimestamp)))
+    {
+#if ROLLBACK_SNAPDUMP_ENABLED
+        if (SnapDump_WritesEnabled() && SnapDump_WriteManualHistory(
+                remoteDumpFrame, remoteDumpTimestamp)) {
+            HookLog("FrameStepper: remote F10 wrote snapdump through frame %d\n",
+                    remoteDumpFrame);
+        }
+#endif
+    }
+
     if (IsPastIntroStep() && KeyPressed(VK_F11)) {
         const bool desyncWait = isPaused && g_desyncDetected;
         if (RequestMatchRestart() && desyncWait) {
@@ -1606,6 +1531,33 @@ void FrameStepper_Process()
         }
     }
 
+    int32_t remoteRestartFrame = -1;
+    uint32_t remoteRestartSeed = 0;
+    uint32_t remoteRestartKind = RESTART_FULL_MATCH;
+    int32_t remoteRestartButton = 0;
+    if (IsPastIntroStep()) {
+        while (Netplay_GetInboundRestartMatch(remoteRestartFrame, remoteRestartSeed,
+                                               remoteRestartKind, remoteRestartButton)) {
+            AutoTest_PrepareForRestart();
+            // Keep a delayed desync snapdump alive until the synchronized restart
+            // actually executes. Clearing here cancels the client's capture as
+            // soon as it receives the host's restart packet; execution clears the
+            // same state at the target frame below.
+            Rollback_ClearPendingReSimulation();
+            g_restartTargetFrame = remoteRestartFrame;
+            g_restartRoundSeed = remoteRestartSeed;
+            g_restartKind = remoteRestartKind;
+            g_restartButtonMode = remoteRestartButton;
+            if (g_desyncDetected || g_desyncSeen)
+            {
+                g_desyncDetected = false;
+                g_desyncSeen = true;
+                UnpauseFrameStepper();
+            }
+            HookLog("FrameStepper: received restart kind=%u target=%d seed=0x%08X\n",
+                    remoteRestartKind, remoteRestartFrame, remoteRestartSeed);
+        }
+    }
     // Netplay settings hotkeys. These work regardless of training mode so both
     // sides can adjust them mid-match.
     if (Netplay_IsActive())
@@ -1632,6 +1584,40 @@ void FrameStepper_Process()
             ScheduleNetplayRollback(Controller_GetRollbackFrames() + 1);
         }
     }
+    // Apply remote desync-screen actions on the game thread. These actions do
+    // not send a response, preventing trigger/unpause packets from bouncing.
+    DesyncPacket desyncPacket;
+    while (Netplay_GetInboundDesync(desyncPacket))
+    {
+        // Discard stale alerts from the previous generation while the restart
+        // barrier is rebuilding the shared frame and RNG epochs.
+        // Autotest queues that restart immediately after a mismatch; keep the
+        // trigger so the client can write its snapdump before the reset.
+        const bool autoTestTrigger = desyncPacket.action == DESYNC_TRIGGER &&
+                                     AutoTest_IsActive();
+        if (Netplay_IsActive() &&
+            (!FrameStepper_IsBattleSynchronized() ||
+             (FrameStepper_IsMatchRestartPending() && !autoTestTrigger) ||
+             desyncPacket.battle_generation != g_battleGeneration))
+            continue;
+
+        if (desyncPacket.action == DESYNC_TRIGGER)
+        {
+            g_desyncDetected = true;
+            g_desyncSeen = false;
+            g_desyncFrame = desyncPacket.frame;
+            g_desyncLocalCS = desyncPacket.remoteChecksum;
+            g_desyncRemoteCS = desyncPacket.localChecksum;
+            Rollback_NotifyDesyncTriggered(desyncPacket.frame);
+        }
+        else if (desyncPacket.action == DESYNC_UNPAUSE)
+        {
+            g_desyncDetected = false;
+            g_desyncSeen = true;
+            UnpauseFrameStepper();
+        }
+    }
+
     const int32_t desyncProcessFrame = Controller_GetNetFrameCount();
     // A synchronized autotest restart clears the UI desync flag when its
     // packet arrives, but the delayed capture must continue through trigger+15.

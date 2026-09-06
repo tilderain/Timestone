@@ -23,9 +23,8 @@
 //   comparison and automatically restores snapshots + re-simulates with
 //   render disabled.
 //
-//   The live game thread pumps ENet nonblockingly and dispatches directly to
-//   feature-owned state. No application transport queues or mailbox. ENet calls
-//   are serialized with sends from UI/render callbacks; receivers run unlocked.
+//   A dedicated background thread owns ALL ENet I/O. The game thread
+//   communicates via Win32 critical sections for packet exchange.
 //
 //   A desync-check packet is also sent every frame: it carries a simple
 //   XOR checksum of all character position/state.  If the remote side's
@@ -67,7 +66,7 @@ struct InputPacket {
     uint32_t checksum_frame;     // confirmed game frame, UINT32_MAX when absent
     uint32_t checksum;           // corrected state at checksum_frame
     uint32_t inputs[NET_HISTORY_SIZE];
-    int32_t  frame_advantage;    // sender's raw remote-input-tail minus local-frame offset; no RTT
+    int32_t  frame_advantage;    // sender's local frame advantage (negative = sender is ahead)
     uint32_t flags;              // 0 = seed packet, non-zero = real packet
 };
 
@@ -242,22 +241,25 @@ static_assert(sizeof(AutoTestStartPacket) <= NET_MAX_PACKET_SIZE,
 // Restrict ENet's allocation limits to the small payloads used by this protocol.
 void Netplay_ConfigureHostLimits(ENetHost* host);
 
-// Hand over the ENet host/peer. The first live pump binds the game-thread owner.
+// Hand over the ENet host/peer and start the service thread.
 void Netplay_Init(ENetHost* host, ENetPeer* peer);
-// Call from live frame boundaries and input waits, never from render callbacks
-// or during re-simulation. Processes at most 64 events with timeout zero.
-void Netplay_Pump();
 
-// Hand input straight to ENet and flush it without a thread handoff.
+// Send a single raw uint32 input value over the wire (wraps into InputPacket).
+void Netplay_SendInput(uint32_t rawInput);
+
+// Queue a full history packet for the service thread to send.
 void Netplay_SendPacket(const InputPacket& pkt);
+
+// Retrieve the most recently received inbound packet. Returns true if data
+// was available (the packet is consumed / cleared by this call).
+bool Netplay_GetInboundPacket(InputPacket& outPkt);
 
 // Returns true if netplay is active and the peer is still connected.
 bool Netplay_IsActive();
-bool Netplay_OwnsHost(); // Remains true after disconnect until shutdown frees it.
 bool Netplay_TakePeerDisconnected();
 
-// Notify and flush synchronously, without waiting for a peer ACK. The timeout
-// parameter is retained for existing callers but no thread handoff is needed.
+// Notify the peer before a user-requested shutdown. Waits only until the
+// service thread has handed the reliable packet to ENet, not for a peer ACK.
 bool Netplay_SendPlayerDisconnect(uint32_t timeoutMs = 100);
 bool Netplay_TakePlayerDisconnectNotice();
 
@@ -267,10 +269,14 @@ bool Netplay_IsHost();
 // Returns the peer's mean round-trip time (ping) in milliseconds, or 0 if inactive.
 uint32_t Netplay_GetRTT();
 
-// Apply a peer timeout change.
+// Request a peer timeout change on the ENet service thread.
 void Netplay_SetTimeout(uint32_t timeoutMs);
 
-// Stop the diagnostic watchdog, disconnect peer, destroy host.
+// Compatibility queries (return first slot of latest inbound packet)
+bool     Netplay_HasRemoteInput();
+uint32_t Netplay_GetRemoteInput();
+
+// Shut down the service thread, disconnect peer, destroy host.
 void Netplay_Shutdown();
 
 // Send a delay-control value to the remote peer.
@@ -279,45 +285,61 @@ void Netplay_SendDelay(int32_t delay, int32_t effectiveFrame = -1);
 // Send a rollback-frame control value to the remote peer.
 void Netplay_SendRollback(int32_t rollbackFrames, int32_t effectiveFrame = -1);
 
+// Retrieve the last delay value received from the remote peer.  Returns true
+// if a new value was available (it is consumed by this call).
+bool Netplay_GetInboundDelay(int32_t& outDelay, int32_t& outEffectiveFrame);
+
+// Retrieve the last rollback value received from the remote peer.  Returns true
+// if a new value was available (it is consumed by this call).
+bool Netplay_GetInboundRollback(int32_t& outRollback, int32_t& outEffectiveFrame);
+
 // Startup rendezvous for opening-member selection and post-init intro readiness.
 void Netplay_SendBattleReady(uint32_t generation, uint32_t flags, uint32_t roundSeed,
                              uint32_t openingMember);
+bool Netplay_GetInboundBattleReady(uint32_t& outGeneration, uint32_t& outFlags,
+                                   uint32_t& outRoundSeed, uint32_t& outOpeningMember);
 
 // Exchange post-savedata team preferences as part of the launch settings.
 void Netplay_SendLaunchTrainingSettings(const LaunchTrainingPacket& packet);
+bool Netplay_GetInboundLaunchTrainingSettings(LaunchTrainingPacket& outPacket);
 
 // Synchronize the desync warning and its P-key dismissal with the peer.
 void Netplay_SendDesyncTrigger(int32_t frame, uint32_t localChecksum,
                                uint32_t remoteChecksum);
 void Netplay_SendDesyncUnpause();
+bool Netplay_GetInboundDesync(DesyncPacket& outPacket);
 
 void Netplay_SendRestartMatch(int32_t targetFrame, uint32_t roundSeed);
 void Netplay_SendTrainingRestart(int32_t targetFrame, uint32_t roundSeed,
                                  int32_t buttonRestart);
+bool Netplay_GetInboundRestartMatch(int32_t& outTargetFrame, uint32_t& outRoundSeed,
+                                    uint32_t& outKind, int32_t& outButtonRestart);
+bool Netplay_HasInboundRestartMatch();
 
 // Generic reliable control channel for self-contained plugin features. Payloads
 // must begin with PACKET_EXTENSION and are limited to 256 bytes.
 bool Netplay_SendExtensionPacket(const void* data, size_t size);
+bool Netplay_GetExtensionPacket(void* data, size_t capacity, size_t& outSize);
 
 // Synchronize the multi-resimulation mode with the remote peer.
 void Netplay_SendMultiResim(bool enabled);
+bool Netplay_GetInboundMultiResim(bool& outEnabled);
 
 // In dual training only, request that the peer write snapdump history using the
 // requester's timestamp.
 void Netplay_SendSnapDump(int32_t frame, const char* timestamp);
+bool Netplay_GetInboundSnapDump(int32_t& outFrame, char* timestamp,
+                                size_t timestampSize);
 
 // Host starts each suite case; the client reports every post-resim frame.
 void Netplay_SendAutoTestStart(const AutoTestStartPacket& packet);
+bool Netplay_GetInboundAutoTestStart(AutoTestStartPacket& outPacket);
 void Netplay_SendAutoTestFrame(const AutoTestFramePacket& packet);
+bool Netplay_GetInboundAutoTestFrame(AutoTestFramePacket& outPacket);
 void Netplay_SendAutoTestComplete();
+bool Netplay_GetInboundAutoTestComplete();
 
-// Synchronous game-thread receivers. Packet references expire on return.
-void Controller_ReceiveNetplayInput(const InputPacket& packet);
-void FrameStepper_ReceiveNetplayControl(uint32_t type, const void* packet);
-bool FrameStepper_HasPendingRemoteAction();
-void TrainingBoot_ReceiveNetplaySettings(const LaunchTrainingPacket& packet);
-void AutoTest_ReceiveNetplayStart(const AutoTestStartPacket& packet);
-void AutoTest_ReceiveNetplayFrame(const AutoTestFramePacket& packet);
-void ChrSelImGui_ReceiveNetplayPacket(const void* data, size_t size);
+// Discard input packets produced before the synchronized battle boundary.
+void Netplay_ClearInputQueues();
 
 // --- Desync-check: checksum is piggybacked on InputPacket (Slippi-style) ---

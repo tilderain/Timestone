@@ -451,29 +451,6 @@ static uint8_t GetCharacterVoiceLanguage(uint64_t gameConfig, int32_t character)
         gameConfig, static_cast<uint32_t>(character)) ? 1u : 0u;
 }
 
-void TrainingBoot_ReceiveNetplaySettings(const LaunchTrainingPacket& packet)
-{
-    if (g_initialSettingsReceived) return;
-    const int remoteTeam = Netplay_IsHost() ? 1 : 0;
-    const uint32_t remoteMask = 1u << remoteTeam;
-    if ((packet.autoJumpValidMask & remoteMask) == 0 ||
-        (packet.voiceValidMask & remoteMask) == 0)
-        return;
-    g_bootConfig.autoJump[remoteTeam] = packet.autoJump[remoteTeam] != 0;
-    for (int member = 0; member < 3; ++member) {
-        const int32_t character = remoteTeam == 0
-            ? g_bootConfig.p1Chars[member] : g_bootConfig.p2Chars[member];
-        g_bootConfig.voiceLanguage[remoteTeam][member] = character > 25
-            ? 1u : packet.voiceLanguage[remoteTeam][member];
-    }
-    g_initialSettingsReceived = true;
-    HookLog("TrainingBoot: Received initial settings team=%d AutoJump=%u voice=%u/%u/%u\n",
-            remoteTeam, packet.autoJump[remoteTeam],
-            g_bootConfig.voiceLanguage[remoteTeam][0],
-            g_bootConfig.voiceLanguage[remoteTeam][1],
-            g_bootConfig.voiceLanguage[remoteTeam][2]);
-}
-
 static bool SynchronizeInitialPlayerSettings()
 {
     if (g_initialSettingsSynchronized)
@@ -526,6 +503,30 @@ static bool SynchronizeInitialPlayerSettings()
                 packet.voiceLanguage[localTeam][0],
                 packet.voiceLanguage[localTeam][1],
                 packet.voiceLanguage[localTeam][2]);
+    }
+
+    LaunchTrainingPacket packet = {};
+    if (!g_initialSettingsReceived &&
+        Netplay_GetInboundLaunchTrainingSettings(packet)) {
+        const int remoteTeam = Netplay_IsHost() ? 1 : 0;
+        const uint32_t remoteMask = 1u << remoteTeam;
+        if ((packet.autoJumpValidMask & remoteMask) != 0 &&
+            (packet.voiceValidMask & remoteMask) != 0) {
+            g_bootConfig.autoJump[remoteTeam] =
+                packet.autoJump[remoteTeam] != 0;
+            for (int member = 0; member < 3; ++member) {
+                const int32_t character = remoteTeam == 0
+                    ? g_bootConfig.p1Chars[member] : g_bootConfig.p2Chars[member];
+                g_bootConfig.voiceLanguage[remoteTeam][member] = character > 25
+                    ? 1u : packet.voiceLanguage[remoteTeam][member];
+            }
+            g_initialSettingsReceived = true;
+            HookLog("TrainingBoot: Received initial settings team=%d AutoJump=%u voice=%u/%u/%u\n",
+                    remoteTeam, packet.autoJump[remoteTeam],
+                    g_bootConfig.voiceLanguage[remoteTeam][0],
+                    g_bootConfig.voiceLanguage[remoteTeam][1],
+                    g_bootConfig.voiceLanguage[remoteTeam][2]);
+        }
     }
 
     g_initialSettingsSynchronized =

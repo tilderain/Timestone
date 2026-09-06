@@ -179,5 +179,5 @@ extern uint32_t     g_desyncRemoteCS;
 extern "C" void     Controller_ClearDesyncDetection();
 
 // Frame advantage (GGPO-style) — frame-count-based timesync
-extern int32_t      g_localFrameAdvantage;    // raw remote input tail minus local frame (no RTT)
+extern int32_t      g_localFrameAdvantage;    // negative = we're ahead of remote
 extern int32_t      g_remoteFrameAdvantage;   // received from peer (their local advantage)

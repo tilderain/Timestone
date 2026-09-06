@@ -6,56 +6,167 @@
 #include "steam_lobby.h"
 #include "steam_transport.h"
 #include <cstring>
+#include <cstdio>
 #include <atomic>
 #include <Windows.h>
 
 extern void HookLog(const char* fmt, ...);
 extern "C" uint32_t FrameStepper_GetBattleGeneration();
+
+// ---------------------------------------------------------------------------
+// State
+// ---------------------------------------------------------------------------
+static ENetHost*            g_host   = nullptr;
+static ENetPeer*            g_peer   = nullptr;
+static bool                 g_active = false;
+
+// Thread-safe queues protected by Win32 critical sections
+// (MinGW-w64 win32 threading model does not support std::mutex)
+static InputPacket              g_outboundPacket = {};
+static bool                     g_outboundNew    = false;
+static CRITICAL_SECTION         g_outboundCS;
+
+static constexpr size_t         MAX_INBOUND_PACKETS = 256;
+static InputPacket              g_inboundQueue[MAX_INBOUND_PACKETS] = {};
+static size_t                   g_inboundHead = 0;
+static size_t                   g_inboundCount = 0;
+static CRITICAL_SECTION         g_inboundCS;
+
+// Desync-check packet queue (separate from input packets).
+
+
+static HANDLE               g_serviceThread  = nullptr;
+static uint32_t             g_recvCount = 0;
+static uint32_t             g_lastRecv  = 0;
+static bool                 g_readyTxDiagValid = false;
+static uint32_t             g_readyTxDiagGeneration = 0;
+static uint32_t             g_readyTxDiagFlags = 0;
+static uint32_t             g_readyTxDiagSeed = 0;
+static uint32_t             g_readyTxDiagOpeningMember = 0;
+static int                   g_readyTxDiagResult = 0;
+static int                   g_readyTxDiagPeerState = -1;
+static bool                 g_readyRxDiagValid = false;
+static uint32_t             g_readyRxDiagGeneration = 0;
+static uint32_t             g_readyRxDiagFlags = 0;
+static uint32_t             g_readyRxDiagSeed = 0;
+static uint32_t             g_readyRxDiagOpeningMember = 0;
+static std::atomic<bool>    g_running { false };
+static std::atomic<bool>    g_peerDisconnected { false };
+static std::atomic<uint32_t> g_requestedTimeoutMs { 0 };
+static std::atomic<bool>    g_playerDisconnectRequested { false };
+static std::atomic<bool>    g_playerDisconnectSent { false };
+static std::atomic<bool>    g_playerDisconnectSendSucceeded { false };
+static std::atomic<bool>    g_playerDisconnectNotice { false };
+
+// Delay + rollback control channel — small packets to keep both peers in sync.
+static int32_t              g_outboundDelay    = -1;
+static int32_t              g_outboundDelayFrame = -1;
+static bool                 g_outboundDelayNew = false;
+static int32_t              g_outboundRollback = -1;
+static int32_t              g_outboundRollbackFrame = -1;
+static bool                 g_outboundRollbackNew = false;
+static int32_t              g_inboundDelay     = -1;
+static int32_t              g_inboundDelayFrame = -1;
+static bool                 g_inboundDelayNew  = false;
+static int32_t              g_inboundRollback  = -1;
+static int32_t              g_inboundRollbackFrame = -1;
+static bool                 g_inboundRollbackNew = false;
+static CRITICAL_SECTION     g_delayCS;
+
+static BattleReadyPacket    g_outboundBattleReady = {};
+static bool                 g_outboundBattleReadyNew = false;
+static BattleReadyPacket    g_inboundBattleReady = {};
+static bool                 g_inboundBattleReadyNew = false;
+static CRITICAL_SECTION     g_battleReadyCS;
+static LaunchTrainingPacket g_outboundLaunchTraining = {};
+static bool                 g_outboundLaunchTrainingNew = false;
+static LaunchTrainingPacket g_inboundLaunchTraining = {};
+static bool                 g_inboundLaunchTrainingNew = false;
+static CRITICAL_SECTION     g_launchTrainingCS;
+
+static DesyncPacket             g_outboundDesync = {};
+static bool                     g_outboundDesyncNew = false;
+static DesyncPacket             g_inboundDesync = {};
+static bool                     g_inboundDesyncNew = false;
+static CRITICAL_SECTION         g_desyncCS;
+static RestartMatchPacket       g_outboundRestart = {};
+static bool                     g_outboundRestartNew = false;
+static RestartMatchPacket       g_inboundRestart = {};
+static bool                     g_inboundRestartNew = false;
+static CRITICAL_SECTION         g_restartCS;
+static MultiResimPacket         g_outboundMultiResim = {};
+static bool                     g_outboundMultiResimNew = false;
+static MultiResimPacket         g_inboundMultiResim = {};
+static bool                     g_inboundMultiResimNew = false;
+static CRITICAL_SECTION         g_multiResimCS;
+static SnapDumpPacket           g_outboundSnapDump = {};
+static bool                     g_outboundSnapDumpNew = false;
+static SnapDumpPacket           g_inboundSnapDump = {};
+static bool                     g_inboundSnapDumpNew = false;
+static CRITICAL_SECTION         g_snapDumpCS;
+static AutoTestStartPacket      g_outboundAutoTestStart = {};
+static bool                     g_outboundAutoTestStartNew = false;
+static AutoTestStartPacket      g_inboundAutoTestStart = {};
+static bool                     g_inboundAutoTestStartNew = false;
+static CRITICAL_SECTION         g_autoTestStartCS;
+// A client can report one checksum for every forced resimulated frame while
+// the host's game thread is busy comparing or restarting a case. ENet is
+// reliable, but this application queue must not discard the oldest reports.
+static constexpr size_t         MAX_AUTOTEST_FRAME_PACKETS = 4096;
+static AutoTestFramePacket      g_outboundAutoTestFrames[MAX_AUTOTEST_FRAME_PACKETS] = {};
+static size_t                   g_outboundAutoTestFrameHead = 0;
+static size_t                   g_outboundAutoTestFrameCount = 0;
+static AutoTestFramePacket      g_inboundAutoTestFrames[MAX_AUTOTEST_FRAME_PACKETS] = {};
+static size_t                   g_inboundAutoTestFrameHead = 0;
+static size_t                   g_inboundAutoTestFrameCount = 0;
+static CRITICAL_SECTION         g_autoTestFrameCS;
+static bool                     g_outboundAutoTestComplete = false;
+static bool                     g_inboundAutoTestComplete = false;
+static CRITICAL_SECTION         g_autoTestCompleteCS;
+
+static constexpr size_t         MAX_EXTENSION_PACKET_SIZE = 256;
+static constexpr size_t         MAX_EXTENSION_PACKETS = 32;
+struct ExtensionPacket {
+    size_t size;
+    uint8_t data[MAX_EXTENSION_PACKET_SIZE];
+};
+static ExtensionPacket          g_outboundExtension[MAX_EXTENSION_PACKETS] = {};
+static size_t                   g_outboundExtensionHead = 0;
+static size_t                   g_outboundExtensionCount = 0;
+static ExtensionPacket          g_inboundExtension[MAX_EXTENSION_PACKETS] = {};
+static size_t                   g_inboundExtensionHead = 0;
+static size_t                   g_inboundExtensionCount = 0;
+static CRITICAL_SECTION         g_extensionCS;
+
+// One-time critical section initialization flag
+static bool                 g_csInitialized  = false;
+
+// Reset hook defined in controller.cpp
 extern "C" void Controller_ResetBuffers();
 
-// Receivers own their state. ENet payloads are dispatched synchronously, never
-// stored in transport queues. The only background work is the freeze watchdog.
-static ENetHost* g_host = nullptr;
-static ENetPeer* g_peer = nullptr;
-static std::atomic<bool> g_running { false };
-static std::atomic<bool> g_isHost { false };
-static std::atomic<bool> g_peerDisconnected { false };
-static std::atomic<bool> g_playerDisconnectNotice { false };
-static std::atomic<DWORD> g_gameThread { 0 };
-static bool g_pumping = false;
-static uint32_t g_recvCount = 0;
-static uint32_t g_lastRecv = 0;
-static uint32_t g_recvInputs = 0;
-static uint32_t g_lastRecvInputs = 0;
-static uint32_t g_lastStatsTick = 0;
-static bool g_readyTxDiagValid = false;
-static BattleReadyPacket g_readyTxDiag = {};
-static int g_readyTxDiagResult = 0;
-static int g_readyTxDiagPeerState = -1;
-static bool g_readyRxDiagValid = false;
-static BattleReadyPacket g_readyRxDiag = {};
-static constexpr size_t MAX_EXTENSION_PACKET_SIZE = 256;
-
-// Render/UI callbacks can send or request shutdown. Serialize ENet's mutable
-// host/peer state with them, but NEVER hold this lock while invoking receivers.
-static SRWLOCK g_enetLock = SRWLOCK_INIT;
-class EnetLock {
+// ---------------------------------------------------------------------------
+// Scoped critical section helper (lightweight replacement for std::lock_guard)
+// ---------------------------------------------------------------------------
+class ScopedCS {
+    CRITICAL_SECTION* m_cs;
 public:
-    EnetLock() { AcquireSRWLockExclusive(&g_enetLock); }
-    ~EnetLock() { ReleaseSRWLockExclusive(&g_enetLock); }
-    EnetLock(const EnetLock&) = delete;
-    EnetLock& operator=(const EnetLock&) = delete;
+    ScopedCS(CRITICAL_SECTION& cs) : m_cs(&cs) { EnterCriticalSection(m_cs); }
+    ~ScopedCS() { LeaveCriticalSection(m_cs); }
 };
 
-static HANDLE g_watchdogThread = nullptr;
-static std::atomic<bool> g_watchdogRunning { false };
-static DWORD WINAPI FreezeWatchdogThread(LPVOID)
+static void MarkPeerDisconnected(ENetPeer* peer, bool disconnectNow)
 {
-    while (g_watchdogRunning) {
-        Rollback_FreezeWatchdogPoll();
-        Sleep(100);
-    }
-    return 0;
+    g_peerDisconnected = true;
+    g_playerDisconnectNotice = true;
+    // The game thread may not get another tick to consume queued diagnostics.
+    if (disconnectNow && peer)
+        enet_peer_disconnect_now(peer, 0);
+    g_running = false;
+    g_active = false;
+    if (g_peer == peer)
+        g_peer = nullptr;
+    if (peer)
+        peer->data = nullptr;
 }
 
 static bool DualTrainingControlPacketsAllowed()
@@ -63,403 +174,1273 @@ static bool DualTrainingControlPacketsAllowed()
     return GetLaunchOption() == LAUNCH_DUAL_TRAINING;
 }
 
-static void LogBattleReadyTx(const BattleReadyPacket& packet, int result, int peerState)
+// ---------------------------------------------------------------------------
+// Service thread: owns ALL ENet calls
+// ---------------------------------------------------------------------------
+static DWORD WINAPI Netplay_ServiceThread(LPVOID)
 {
-    if (!g_readyTxDiagValid || std::memcmp(&g_readyTxDiag, &packet, sizeof(packet)) != 0 ||
-        g_readyTxDiagResult != result || g_readyTxDiagPeerState != peerState) {
-        HookLog("Netplay: BattleReady TX gen=%u flags=0x%X seed=0x%08X "
-                "opening=%u result=%d peerState=%d\n", packet.generation, packet.flags,
-                packet.round_seed, packet.opening_member, result, peerState);
-    }
-    g_readyTxDiagValid = true;
-    g_readyTxDiag = packet;
-    g_readyTxDiagResult = result;
-    g_readyTxDiagPeerState = peerState;
-}
+    HookLog("Netplay: Service thread started\n");
 
-static bool SendWire(const void* data, size_t size, uint32_t type)
-{
-    if (!g_running)
-        return false;
-    EnetLock lock;
-    if (!g_running || !g_host || !g_peer)
-        return false;
-    const enet_uint32 flags = type == PACKET_INPUT ?
-        ENET_PACKET_FLAG_UNSEQUENCED : ENET_PACKET_FLAG_RELIABLE;
-    ENetPacket* packet = enet_packet_create(data, size, flags);
-    int result = packet ? enet_peer_send(g_peer, 0, packet) : -1;
-    if (type == PACKET_BATTLE_READY)
-        LogBattleReadyTx(*(const BattleReadyPacket*)data, result, (int)g_peer->state);
-    if (result != 0) {
-        if (packet) enet_packet_destroy(packet);
-        return false;
-    }
-    // ENet owns reliable buffering/retries. Flush immediately rather than wait
-    // for the next game tick (particularly important in input-wait barriers).
-    enet_host_flush(g_host);
-    return true;
-}
-
-template<typename T>
-static void SendPacket(uint32_t type, const T& source)
-{
-    T packet = source;
-    packet.type = type;
-    SendWire(&packet, sizeof(packet), type);
-}
-
-template<typename T>
-static bool ReadWire(const ENetPacket& source, T& packet)
-{
-    if (source.dataLength < sizeof(packet))
-        return false;
-    std::memcpy(&packet, source.data, sizeof(packet));
-    return true;
-}
-
-static void MarkPeerDisconnected(ENetPeer* peer, bool disconnectNow)
-{
-    EnetLock lock;
-    if (!g_running || g_peer != peer)
-        return;
-    g_peerDisconnected = true;
-    g_playerDisconnectNotice = true;
-    if (disconnectNow && peer)
-        enet_peer_disconnect_now(peer, 0);
-    if (peer) peer->data = nullptr;
-    g_peer = nullptr;
-    g_running = false;
-}
-
-static void HandleReceivedPacket(const ENetPacket& source, ENetPeer* peer)
-{
-    if (source.dataLength < sizeof(uint32_t) || source.dataLength > NET_MAX_PACKET_SIZE)
-        return;
-    ++g_recvCount;
-    uint32_t type;
-    std::memcpy(&type, source.data, sizeof(type));
-    switch (type) {
-    case PACKET_INPUT: {
-        InputPacket packet;
-        if (ReadWire(source, packet)) {
-            ++g_recvInputs;
-            Controller_ReceiveNetplayInput(packet);
-        }
-        break;
-    }
-    case PACKET_DELAY: {
-        DelayPacket packet;
-        if (ReadWire(source, packet)) FrameStepper_ReceiveNetplayControl(type, &packet);
-        break;
-    }
-    case PACKET_LAUNCH_TRAINING: {
-        LaunchTrainingPacket packet;
-        if (!ReadWire(source, packet) || packet.autoJump[0] > 1 || packet.autoJump[1] > 1 ||
-            packet.autoJumpValidMask > 3 || packet.voiceValidMask > 3)
-            break;
-        for (int team = 0; team < 2; ++team)
-            for (int member = 0; member < 3; ++member)
-                if (packet.voiceLanguage[team][member] > 1) return;
-        TrainingBoot_ReceiveNetplaySettings(packet);
-        break;
-    }
-    case PACKET_BATTLE_READY: {
-        BattleReadyPacket packet;
-        if (!ReadWire(source, packet)) break;
-        if (!g_readyRxDiagValid || std::memcmp(&g_readyRxDiag, &packet, sizeof(packet)) != 0) {
-            HookLog("Netplay: BattleReady RX gen=%u flags=0x%X seed=0x%08X opening=%u\n",
-                    packet.generation, packet.flags, packet.round_seed, packet.opening_member);
-        }
-        g_readyRxDiagValid = true;
-        g_readyRxDiag = packet;
-        FrameStepper_ReceiveNetplayControl(type, &packet);
-        break;
-    }
-    case PACKET_DESYNC: {
-        DesyncPacket packet;
-        if (ReadWire(source, packet) &&
-            (packet.action == DESYNC_TRIGGER || packet.action == DESYNC_UNPAUSE))
-            FrameStepper_ReceiveNetplayControl(type, &packet);
-        break;
-    }
-    case PACKET_RESTART_MATCH: {
-        RestartMatchPacket packet;
-        if (ReadWire(source, packet)) FrameStepper_ReceiveNetplayControl(type, &packet);
-        break;
-    }
-    case PACKET_MULTI_RESIM: {
-        MultiResimPacket packet;
-        if (ReadWire(source, packet) && packet.enabled <= 1)
-            FrameStepper_ReceiveNetplayControl(type, &packet);
-        break;
-    }
-    case PACKET_SNAPDUMP: {
-        SnapDumpPacket packet;
-        if (DualTrainingControlPacketsAllowed() && ReadWire(source, packet)) {
-            packet.timestamp[sizeof(packet.timestamp) - 1] = '\0';
-            FrameStepper_ReceiveNetplayControl(type, &packet);
-        }
-        break;
-    }
-    case PACKET_AUTOTEST_START: {
-        AutoTestStartPacket packet;
-        if (DualTrainingControlPacketsAllowed() && ReadWire(source, packet)) {
-            packet.move_name[sizeof(packet.move_name) - 1] = '\0';
-            AutoTest_ReceiveNetplayStart(packet);
-        }
-        break;
-    }
-    case PACKET_AUTOTEST_FRAME: {
-        AutoTestFramePacket packet;
-        if (DualTrainingControlPacketsAllowed() && ReadWire(source, packet))
-            AutoTest_ReceiveNetplayFrame(packet);
-        break;
-    }
-    case PACKET_AUTOTEST_COMPLETE: {
-        AutoTestCompletePacket packet;
-        if (DualTrainingControlPacketsAllowed() && ReadWire(source, packet))
-            FrameStepper_ReceiveNetplayControl(type, &packet);
-        break;
-    }
-    case PACKET_PLAYER_DISCONNECT:
-        HookLog("Netplay: Remote player sent disconnect notice\n");
-        MarkPeerDisconnected(peer, true);
-        break;
-    case PACKET_EXTENSION:
-        if (source.dataLength <= MAX_EXTENSION_PACKET_SIZE)
-            ChrSelImGui_ReceiveNetplayPacket(source.data, source.dataLength);
-        break;
-    }
-}
-
-void Netplay_Pump()
-{
-    if (!g_running || g_isResimulating)
-        return;
-    // Only the live game-thread entry/wait paths call this function. Init can
-    // happen on the bootstrap thread; bind ownership on the first live pump.
-    const DWORD thread = GetCurrentThreadId();
-    DWORD unbound = 0;
-    if (g_gameThread.load(std::memory_order_relaxed) == 0)
-        g_gameThread.compare_exchange_strong(unbound, thread, std::memory_order_relaxed);
-    if (thread != g_gameThread.load(std::memory_order_relaxed) || g_pumping)
-        return;
-    g_pumping = true;
-    for (size_t serviced = 0; serviced < 64 && g_running; ++serviced) {
-        ENetEvent event;
-        int result;
+    while (g_running)
+    {
+        Rollback_FreezeWatchdogPoll();
+        uint32_t timeoutMs = g_requestedTimeoutMs.exchange(0);
+        if (timeoutMs != 0 && g_peer)
         {
-            EnetLock lock;
-            result = g_running && g_host ? enet_host_service(g_host, &event, 0) : 0;
-            if (result > 0 && event.type == ENET_EVENT_TYPE_CONNECT)
-                event.peer->data = (void*)"connected";
+            enet_peer_timeout(g_peer, 0, timeoutMs, timeoutMs);
+            HookLog("Netplay: Peer timeout set to %u ms\n", timeoutMs);
         }
-        if (result <= 0) break;
-        if (event.type == ENET_EVENT_TYPE_RECEIVE) {
-            HandleReceivedPacket(*event.packet, event.peer);
-            enet_packet_destroy(event.packet);
-        } else if (event.type == ENET_EVENT_TYPE_DISCONNECT) {
-            HookLog("Netplay: Remote peer disconnected\n");
-            MarkPeerDisconnected(event.peer, false);
-        }
-    }
-    g_pumping = false;
-    const uint32_t now = GetTickCount();
-    if (now - g_lastStatsTick >= 5000) {
-        uint32_t rtt = 0, throttle = 0, throttleLimit = 0;
+
+        if (g_playerDisconnectRequested.exchange(false))
         {
-            EnetLock lock;
-            if (g_peer) {
-                rtt = g_peer->roundTripTime;
-                throttle = g_peer->packetThrottle;
-                throttleLimit = g_peer->packetThrottleLimit;
+            bool sent = false;
+            if (g_peer)
+            {
+                const PlayerDisconnectPacket disconnect = {PACKET_PLAYER_DISCONNECT};
+                ENetPacket* packet = enet_packet_create(
+                    &disconnect, sizeof(disconnect), ENET_PACKET_FLAG_RELIABLE);
+                if (enet_peer_send(g_peer, 0, packet) == 0)
+                {
+                    enet_host_flush(g_host);
+                    sent = true;
+                }
+                else
+                {
+                    enet_packet_destroy(packet);
+                }
+            }
+            g_playerDisconnectSendSucceeded = sent;
+            g_playerDisconnectSent = true;
+        }
+
+        // --- Periodic stats (every ~3 seconds) ---
+        static uint32_t lastStatsTick = GetTickCount();
+        uint32_t now = GetTickCount();
+        if (now - lastStatsTick >= 5000)
+        {
+            HookLog("Netplay: received %u packets in last 5s (total %u)\n",
+                    g_recvCount - g_lastRecv, g_recvCount);
+            g_lastRecv = g_recvCount;
+            lastStatsTick = now;
+        }
+
+        // --- Send outbound packet ---
+        bool hasNewOutbound = false;
+        InputPacket outPkt = {};
+        {
+            ScopedCS lock(g_outboundCS);
+            if (g_outboundNew)
+            {
+                outPkt = g_outboundPacket;
+                hasNewOutbound = true;
+                g_outboundNew = false;
             }
         }
-        HookLog("Netplay: received %u packets (%u inputs) in last 5s (total %u), "
-                "rtt=%u ms throttle=%u/%u, game-thread pump\n",
-                g_recvCount - g_lastRecv, g_recvInputs - g_lastRecvInputs,
-                g_recvCount, rtt, throttle, throttleLimit);
-        g_lastRecv = g_recvCount;
-        g_lastRecvInputs = g_recvInputs;
-        g_lastStatsTick = now;
+
+        if (hasNewOutbound && g_peer)
+        {
+            ENetPacket* packet = enet_packet_create(
+                &outPkt, sizeof(InputPacket), ENET_PACKET_FLAG_UNSEQUENCED
+            );
+            if (enet_peer_send(g_peer, 0, packet) != 0) {
+                enet_packet_destroy(packet);
+            }
+            enet_host_flush(g_host);
+        }
+
+        // --- Send delay/rollback control packet (if a new value is pending) ---
+        bool hasNewDelay = false;
+        bool hasNewRollback = false;
+        int32_t delayVal = -1;
+        int32_t delayFrame = -1;
+        int32_t rollbackVal = -1;
+        int32_t rollbackFrame = -1;
+        {
+            ScopedCS lock(g_delayCS);
+            if (g_outboundDelayNew) {
+                delayVal    = g_outboundDelay;
+                delayFrame  = g_outboundDelayFrame;
+                hasNewDelay = true;
+                g_outboundDelayNew = false;
+            }
+            if (g_outboundRollbackNew) {
+                rollbackVal = g_outboundRollback;
+                rollbackFrame = g_outboundRollbackFrame;
+                hasNewRollback = true;
+                g_outboundRollbackNew = false;
+            }
+        }
+
+        if (hasNewDelay && g_peer)
+        {
+            DelayPacket dp;
+            dp.type           = PACKET_DELAY;
+            dp.delay          = delayVal;
+            dp.rollbackFrames = -1;
+            dp.effective_frame = delayFrame;
+            ENetPacket* packet = enet_packet_create(
+                &dp, sizeof(DelayPacket), ENET_PACKET_FLAG_RELIABLE
+            );
+            if (enet_peer_send(g_peer, 0, packet) != 0) {
+                enet_packet_destroy(packet);
+            }
+            enet_host_flush(g_host);
+        }
+
+        if (hasNewRollback && g_peer)
+        {
+            DelayPacket dp;
+            dp.type = PACKET_DELAY;
+            dp.delay = -1;
+            dp.rollbackFrames = rollbackVal;
+            dp.effective_frame = rollbackFrame;
+            ENetPacket* packet = enet_packet_create(
+                &dp, sizeof(DelayPacket), ENET_PACKET_FLAG_RELIABLE
+            );
+            if (enet_peer_send(g_peer, 0, packet) != 0) {
+                enet_packet_destroy(packet);
+            }
+            enet_host_flush(g_host);
+        }
+
+        bool hasLaunchTraining = false;
+        LaunchTrainingPacket launchTraining = {};
+        {
+            ScopedCS lock(g_launchTrainingCS);
+            if (g_outboundLaunchTrainingNew)
+            {
+                launchTraining = g_outboundLaunchTraining;
+                hasLaunchTraining = true;
+                g_outboundLaunchTrainingNew = false;
+            }
+        }
+        if (hasLaunchTraining && g_peer)
+        {
+            ENetPacket* packet = enet_packet_create(
+                &launchTraining, sizeof(launchTraining), ENET_PACKET_FLAG_RELIABLE);
+            if (enet_peer_send(g_peer, 0, packet) != 0)
+                enet_packet_destroy(packet);
+            enet_host_flush(g_host);
+        }
+
+        bool hasBattleReady = false;
+        BattleReadyPacket readyPkt = {};
+        {
+            ScopedCS lock(g_battleReadyCS);
+            if (g_outboundBattleReadyNew)
+            {
+                readyPkt = g_outboundBattleReady;
+                hasBattleReady = true;
+                g_outboundBattleReadyNew = false;
+            }
+        }
+        if (hasBattleReady && g_peer)
+        {
+            ENetPacket* packet = enet_packet_create(
+                &readyPkt, sizeof(BattleReadyPacket), ENET_PACKET_FLAG_RELIABLE
+            );
+            int sendResult = packet ? enet_peer_send(g_peer, 0, packet) : -1;
+            const int peerState = (int)g_peer->state;
+            if (!g_readyTxDiagValid ||
+                g_readyTxDiagGeneration != readyPkt.generation ||
+                g_readyTxDiagFlags != readyPkt.flags ||
+                g_readyTxDiagSeed != readyPkt.round_seed ||
+                g_readyTxDiagOpeningMember != readyPkt.opening_member ||
+                g_readyTxDiagResult != sendResult ||
+                g_readyTxDiagPeerState != peerState) {
+                HookLog("Netplay: BattleReady TX gen=%u flags=0x%X seed=0x%08X "
+                        "opening=%u result=%d peerState=%d\n",
+                        readyPkt.generation, readyPkt.flags, readyPkt.round_seed,
+                        readyPkt.opening_member, sendResult, peerState);
+            }
+            g_readyTxDiagValid = true;
+            g_readyTxDiagGeneration = readyPkt.generation;
+            g_readyTxDiagFlags = readyPkt.flags;
+            g_readyTxDiagSeed = readyPkt.round_seed;
+            g_readyTxDiagOpeningMember = readyPkt.opening_member;
+            g_readyTxDiagResult = sendResult;
+            g_readyTxDiagPeerState = peerState;
+            if (sendResult != 0 && packet) {
+                enet_packet_destroy(packet);
+            }
+            enet_host_flush(g_host);
+        }
+        else if (hasBattleReady)
+        {
+            if (!g_readyTxDiagValid || g_readyTxDiagGeneration != readyPkt.generation ||
+                g_readyTxDiagFlags != readyPkt.flags || g_readyTxDiagPeerState != -1) {
+                HookLog("Netplay: BattleReady TX dropped gen=%u flags=0x%X "
+                        "because peer is null\n",
+                        readyPkt.generation, readyPkt.flags);
+            }
+            g_readyTxDiagValid = true;
+            g_readyTxDiagGeneration = readyPkt.generation;
+            g_readyTxDiagFlags = readyPkt.flags;
+            g_readyTxDiagSeed = readyPkt.round_seed;
+            g_readyTxDiagOpeningMember = readyPkt.opening_member;
+            g_readyTxDiagResult = -1;
+            g_readyTxDiagPeerState = -1;
+        }
+
+        // --- Send desync screen control packet ---
+        bool hasDesync = false;
+        DesyncPacket desyncPkt = {};
+        {
+            ScopedCS lock(g_desyncCS);
+            if (g_outboundDesyncNew)
+            {
+                desyncPkt = g_outboundDesync;
+                hasDesync = true;
+                g_outboundDesyncNew = false;
+            }
+        }
+        if (hasDesync && g_peer)
+        {
+            ENetPacket* packet = enet_packet_create(
+                &desyncPkt, sizeof(DesyncPacket), ENET_PACKET_FLAG_RELIABLE
+            );
+            if (enet_peer_send(g_peer, 0, packet) != 0)
+                enet_packet_destroy(packet);
+            enet_host_flush(g_host);
+        }
+
+        bool hasRestart = false;
+        RestartMatchPacket restartPkt = {};
+        {
+            ScopedCS lock(g_restartCS);
+            if (g_outboundRestartNew)
+            {
+                restartPkt = g_outboundRestart;
+                hasRestart = true;
+                g_outboundRestartNew = false;
+            }
+        }
+        if (hasRestart && g_peer)
+        {
+            ENetPacket* packet = enet_packet_create(
+                &restartPkt, sizeof(RestartMatchPacket), ENET_PACKET_FLAG_RELIABLE
+            );
+            if (enet_peer_send(g_peer, 0, packet) != 0)
+                enet_packet_destroy(packet);
+            enet_host_flush(g_host);
+        }
+
+        bool hasMultiResim = false;
+        MultiResimPacket multiResimPkt = {};
+        {
+            ScopedCS lock(g_multiResimCS);
+            if (g_outboundMultiResimNew)
+            {
+                multiResimPkt = g_outboundMultiResim;
+                hasMultiResim = true;
+                g_outboundMultiResimNew = false;
+            }
+        }
+        if (hasMultiResim && g_peer)
+        {
+            ENetPacket* packet = enet_packet_create(
+                &multiResimPkt, sizeof(MultiResimPacket), ENET_PACKET_FLAG_RELIABLE
+            );
+            if (enet_peer_send(g_peer, 0, packet) != 0)
+                enet_packet_destroy(packet);
+            enet_host_flush(g_host);
+        }
+
+        bool hasSnapDump = false;
+        SnapDumpPacket snapDumpPacket = {};
+        {
+            ScopedCS lock(g_snapDumpCS);
+            if (g_outboundSnapDumpNew)
+            {
+                snapDumpPacket = g_outboundSnapDump;
+                hasSnapDump = true;
+                g_outboundSnapDumpNew = false;
+            }
+        }
+        if (hasSnapDump && g_peer && DualTrainingControlPacketsAllowed())
+        {
+            ENetPacket* packet = enet_packet_create(
+                &snapDumpPacket, sizeof(SnapDumpPacket), ENET_PACKET_FLAG_RELIABLE
+            );
+            if (enet_peer_send(g_peer, 0, packet) != 0)
+                enet_packet_destroy(packet);
+            enet_host_flush(g_host);
+        }
+
+        bool hasAutoTestStart = false;
+        AutoTestStartPacket autoTestStart = {};
+        {
+            ScopedCS lock(g_autoTestStartCS);
+            if (g_outboundAutoTestStartNew)
+            {
+                autoTestStart = g_outboundAutoTestStart;
+                hasAutoTestStart = true;
+                g_outboundAutoTestStartNew = false;
+            }
+        }
+        if (hasAutoTestStart && g_peer)
+        {
+            ENetPacket* packet = enet_packet_create(
+                &autoTestStart, sizeof(autoTestStart), ENET_PACKET_FLAG_RELIABLE);
+            if (enet_peer_send(g_peer, 0, packet) != 0)
+                enet_packet_destroy(packet);
+            enet_host_flush(g_host);
+        }
+
+        bool hasAutoTestComplete = false;
+        {
+            ScopedCS lock(g_autoTestCompleteCS);
+            hasAutoTestComplete = g_outboundAutoTestComplete;
+            g_outboundAutoTestComplete = false;
+        }
+        if (hasAutoTestComplete && g_peer)
+        {
+            AutoTestCompletePacket complete = {PACKET_AUTOTEST_COMPLETE};
+            ENetPacket* packet = enet_packet_create(
+                &complete, sizeof(complete), ENET_PACKET_FLAG_RELIABLE);
+            if (enet_peer_send(g_peer, 0, packet) != 0)
+                enet_packet_destroy(packet);
+            enet_host_flush(g_host);
+        }
+
+        AutoTestFramePacket autoTestFrame = {};
+        bool hasAutoTestFrame = false;
+        {
+            ScopedCS lock(g_autoTestFrameCS);
+            if (g_outboundAutoTestFrameCount != 0)
+            {
+                autoTestFrame = g_outboundAutoTestFrames[g_outboundAutoTestFrameHead];
+                g_outboundAutoTestFrameHead =
+                    (g_outboundAutoTestFrameHead + 1) % MAX_AUTOTEST_FRAME_PACKETS;
+                --g_outboundAutoTestFrameCount;
+                hasAutoTestFrame = true;
+            }
+        }
+        if (hasAutoTestFrame && g_peer)
+        {
+            ENetPacket* packet = enet_packet_create(
+                &autoTestFrame, sizeof(autoTestFrame), ENET_PACKET_FLAG_RELIABLE);
+            if (enet_peer_send(g_peer, 0, packet) != 0)
+                enet_packet_destroy(packet);
+            enet_host_flush(g_host);
+        }
+
+        ExtensionPacket extension = {};
+        bool hasExtension = false;
+        {
+            ScopedCS lock(g_extensionCS);
+            if (g_outboundExtensionCount != 0)
+            {
+                extension = g_outboundExtension[g_outboundExtensionHead];
+                g_outboundExtensionHead =
+                    (g_outboundExtensionHead + 1) % MAX_EXTENSION_PACKETS;
+                --g_outboundExtensionCount;
+                hasExtension = true;
+            }
+        }
+        if (hasExtension && g_peer)
+        {
+            ENetPacket* packet = enet_packet_create(
+                extension.data, extension.size, ENET_PACKET_FLAG_RELIABLE);
+            if (enet_peer_send(g_peer, 0, packet) != 0)
+                enet_packet_destroy(packet);
+            enet_host_flush(g_host);
+        }
+
+        // --- Service the host ---
+        if (g_host)
+        {
+            ENetEvent event;
+            while (enet_host_service(g_host, &event, 1) > 0)
+            {
+                if (event.type == ENET_EVENT_TYPE_RECEIVE)
+                {
+                    if (event.packet->dataLength >= 4)
+                    {
+                        // Count all protocol packets. The old counter only
+                        // counted input packets, making a working startup
+                        // handshake look like a completely idle connection.
+                        g_recvCount++;
+                        uint32_t pktType = *(uint32_t*)event.packet->data;
+                        switch (pktType)
+                        {
+                            case PACKET_LAUNCH_TRAINING:
+                                if (event.packet->dataLength >= sizeof(LaunchTrainingPacket))
+                                {
+                                    const LaunchTrainingPacket* packet =
+                                        (const LaunchTrainingPacket*)event.packet->data;
+                                    if (packet->autoJump[0] <= 1 &&
+                                        packet->autoJump[1] <= 1 &&
+                                        packet->autoJumpValidMask <= 3 &&
+                                        packet->voiceValidMask <= 3)
+                                    {
+                                        bool validVoice = true;
+                                        for (int team = 0; team < 2; ++team) {
+                                            for (int member = 0; member < 3; ++member) {
+                                                if (packet->voiceLanguage[team][member] > 1)
+                                                    validVoice = false;
+                                            }
+                                        }
+                                        if (!validVoice)
+                                            break;
+                                        ScopedCS lock(g_launchTrainingCS);
+                                        g_inboundLaunchTraining = *packet;
+                                        g_inboundLaunchTrainingNew = true;
+                                    }
+                                }
+                                break;
+                            case PACKET_INPUT:
+                                if (event.packet->dataLength >= sizeof(InputPacket))
+                                {
+                                    const InputPacket* inPkt = (const InputPacket*)event.packet->data;
+                                    {
+                                        ScopedCS lock(g_inboundCS);
+                                        if (g_inboundCount == MAX_INBOUND_PACKETS)
+                                        {
+                                            g_inboundHead = (g_inboundHead + 1) % MAX_INBOUND_PACKETS;
+                                            --g_inboundCount;
+                                        }
+                                        size_t tail = (g_inboundHead + g_inboundCount) % MAX_INBOUND_PACKETS;
+                                        g_inboundQueue[tail] = *inPkt;
+                                        ++g_inboundCount;
+                                    }
+                                }
+                                break;
+
+                            case PACKET_DELAY:
+                                if (event.packet->dataLength >= sizeof(DelayPacket))
+                                {
+                                    const DelayPacket* dp = (const DelayPacket*)event.packet->data;
+                                    {
+                                        ScopedCS lock(g_delayCS);
+                                        if (dp->delay >= 0) {
+                                            g_inboundDelay = dp->delay;
+                                            g_inboundDelayFrame = dp->effective_frame;
+                                            g_inboundDelayNew = true;
+                                        }
+                                        if (dp->rollbackFrames >= 0) {
+                                            g_inboundRollback = dp->rollbackFrames;
+                                            g_inboundRollbackFrame = dp->effective_frame;
+                                            g_inboundRollbackNew = true;
+                                        }
+                                    }
+                                }
+                                break;
+
+                            case PACKET_BATTLE_READY:
+                                if (event.packet->dataLength >= sizeof(BattleReadyPacket))
+                                {
+                                    const BattleReadyPacket* brp = (const BattleReadyPacket*)event.packet->data;
+                                    if (!g_readyRxDiagValid ||
+                                        g_readyRxDiagGeneration != brp->generation ||
+                                        g_readyRxDiagFlags != brp->flags ||
+                                        g_readyRxDiagSeed != brp->round_seed ||
+                                        g_readyRxDiagOpeningMember != brp->opening_member) {
+                                        HookLog("Netplay: BattleReady RX gen=%u flags=0x%X "
+                                                "seed=0x%08X opening=%u\n",
+                                                brp->generation, brp->flags,
+                                                brp->round_seed,
+                                                brp->opening_member);
+                                    }
+                                    g_readyRxDiagValid = true;
+                                    g_readyRxDiagGeneration = brp->generation;
+                                    g_readyRxDiagFlags = brp->flags;
+                                    g_readyRxDiagSeed = brp->round_seed;
+                                    g_readyRxDiagOpeningMember = brp->opening_member;
+                                    ScopedCS lock(g_battleReadyCS);
+                                    g_inboundBattleReady = *brp;
+                                    g_inboundBattleReadyNew = true;
+                                }
+                                break;
+
+                            case PACKET_DESYNC:
+                                if (event.packet->dataLength >= sizeof(DesyncPacket))
+                                {
+                                    const DesyncPacket* dp = (const DesyncPacket*)event.packet->data;
+                                    if (dp->action == DESYNC_TRIGGER || dp->action == DESYNC_UNPAUSE)
+                                    {
+                                        ScopedCS lock(g_desyncCS);
+                                        g_inboundDesync = *dp;
+                                        g_inboundDesyncNew = true;
+                                    }
+                                }
+                                break;
+
+                            case PACKET_RESTART_MATCH:
+                                if (event.packet->dataLength >= sizeof(RestartMatchPacket))
+                                {
+                                    const RestartMatchPacket* rp =
+                                        (const RestartMatchPacket*)event.packet->data;
+                                    ScopedCS lock(g_restartCS);
+                                    g_inboundRestart = *rp;
+                                    g_inboundRestartNew = true;
+                                }
+                                break;
+
+                            case PACKET_MULTI_RESIM:
+                                if (event.packet->dataLength >= sizeof(MultiResimPacket))
+                                {
+                                    const MultiResimPacket* mrp =
+                                        (const MultiResimPacket*)event.packet->data;
+                                    if (mrp->enabled <= 1)
+                                    {
+                                        ScopedCS lock(g_multiResimCS);
+                                        g_inboundMultiResim = *mrp;
+                                        g_inboundMultiResimNew = true;
+                                    }
+                                }
+                                break;
+
+                            case PACKET_SNAPDUMP:
+                                if (DualTrainingControlPacketsAllowed() &&
+                                    event.packet->dataLength >= sizeof(SnapDumpPacket))
+                                {
+                                    const SnapDumpPacket* packet =
+                                        (const SnapDumpPacket*)event.packet->data;
+                                    ScopedCS lock(g_snapDumpCS);
+                                    g_inboundSnapDump = *packet;
+                                    g_inboundSnapDump.timestamp[
+                                        sizeof(g_inboundSnapDump.timestamp) - 1] = '\0';
+                                    g_inboundSnapDumpNew = true;
+                                }
+                                break;
+
+                            case PACKET_AUTOTEST_START:
+                                if (DualTrainingControlPacketsAllowed() &&
+                                    event.packet->dataLength >= sizeof(AutoTestStartPacket))
+                                {
+                                    const AutoTestStartPacket* asp =
+                                        (const AutoTestStartPacket*)event.packet->data;
+                                    ScopedCS lock(g_autoTestStartCS);
+                                    g_inboundAutoTestStart = *asp;
+                                    g_inboundAutoTestStart.move_name[
+                                        sizeof(g_inboundAutoTestStart.move_name) - 1] = '\0';
+                                    g_inboundAutoTestStartNew = true;
+                                }
+                                break;
+
+                            case PACKET_AUTOTEST_FRAME:
+                                if (DualTrainingControlPacketsAllowed() &&
+                                    event.packet->dataLength >= sizeof(AutoTestFramePacket))
+                                {
+                                    const AutoTestFramePacket* afp =
+                                        (const AutoTestFramePacket*)event.packet->data;
+                                    ScopedCS lock(g_autoTestFrameCS);
+                                    if (g_inboundAutoTestFrameCount == MAX_AUTOTEST_FRAME_PACKETS)
+                                    {
+                                        g_inboundAutoTestFrameHead =
+                                            (g_inboundAutoTestFrameHead + 1) % MAX_AUTOTEST_FRAME_PACKETS;
+                                        --g_inboundAutoTestFrameCount;
+                                    }
+                                    size_t tail = (g_inboundAutoTestFrameHead +
+                                                   g_inboundAutoTestFrameCount) %
+                                                  MAX_AUTOTEST_FRAME_PACKETS;
+                                    g_inboundAutoTestFrames[tail] = *afp;
+                                    ++g_inboundAutoTestFrameCount;
+                                }
+                                break;
+
+                            case PACKET_AUTOTEST_COMPLETE:
+                                if (DualTrainingControlPacketsAllowed() &&
+                                    event.packet->dataLength >= sizeof(AutoTestCompletePacket))
+                                {
+                                    ScopedCS lock(g_autoTestCompleteCS);
+                                    g_inboundAutoTestComplete = true;
+                                }
+                                break;
+                            case PACKET_PLAYER_DISCONNECT:
+                                if (event.packet->dataLength >= sizeof(PlayerDisconnectPacket))
+                                {
+                                    HookLog("Netplay: Remote player sent disconnect notice\n");
+                                    MarkPeerDisconnected(event.peer, true);
+                                }
+                                break;
+                            case PACKET_EXTENSION:
+                                if (event.packet->dataLength <= MAX_EXTENSION_PACKET_SIZE)
+                                {
+                                    ScopedCS lock(g_extensionCS);
+                                    if (g_inboundExtensionCount == MAX_EXTENSION_PACKETS)
+                                    {
+                                        g_inboundExtensionHead =
+                                            (g_inboundExtensionHead + 1) % MAX_EXTENSION_PACKETS;
+                                        --g_inboundExtensionCount;
+                                    }
+                                    size_t tail = (g_inboundExtensionHead +
+                                                   g_inboundExtensionCount) %
+                                                  MAX_EXTENSION_PACKETS;
+                                    g_inboundExtension[tail].size = event.packet->dataLength;
+                                    std::memcpy(g_inboundExtension[tail].data,
+                                                event.packet->data,
+                                                event.packet->dataLength);
+                                    ++g_inboundExtensionCount;
+                                }
+                                break;
+                        }
+                    }
+                    enet_packet_destroy(event.packet);
+                }
+                else if (event.type == ENET_EVENT_TYPE_DISCONNECT)
+                {
+                    HookLog("Netplay: Remote peer disconnected\n");
+                    MarkPeerDisconnected(event.peer, false);
+                }
+                else if (event.type == ENET_EVENT_TYPE_CONNECT)
+                {
+                    HookLog("Netplay: Late CONNECT event\n");
+                    event.peer->data = (void*)"connected";
+                }
+            }
+        }
     }
+
+    HookLog("Netplay: Service thread exiting\n");
+    return 0;
 }
 
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
 void Netplay_ConfigureHostLimits(ENetHost* host)
 {
-    if (!host) return;
+    if (!host)
+        return;
     host->maximumPacketSize = NET_MAX_PACKET_SIZE;
     host->maximumWaitingData = NET_MAX_WAITING_DATA;
 }
 
 void Netplay_Init(ENetHost* host, ENetPeer* peer)
 {
+    if (g_running || g_serviceThread)
     {
-        EnetLock lock;
-        if (g_host || !host || !peer) return;
-        g_host = host;
-        g_peer = peer;
-        g_isHost.store(host->address.port != 0, std::memory_order_relaxed);
-        // Native loading has no game-thread pump. Allow startup/roster loading
-        // time; the handshake restores the short gameplay timeout.
-        enet_peer_timeout(peer, 0, 60000, 60000);
-        // The launch handshake is polled quickly, but gameplay ACKs are frame
-        // paced. ENet's default RTT throttle mistakes that jump for congestion
-        // and deliberately drops our unsequenced input history. Its baseline
-        // only refreshes every 5 seconds, producing a long startup slowdown.
-        // This small fixed-rate input stream must not be randomly suppressed.
-        // Keep bandwidth limits and reliable retransmission behavior intact.
-        enet_peer_throttle_configure(peer, ENET_PEER_PACKET_THROTTLE_INTERVAL,
-                                     ENET_PEER_PACKET_THROTTLE_SCALE, 0);
-        peer->packetThrottle = peer->packetThrottleLimit;
-        peer->packetThrottleCounter = 0;
+        HookLog("Netplay: Init ignored because service thread is already running\n");
+        return;
     }
-    g_gameThread = 0;
-    g_pumping = false;
-    g_recvCount = g_lastRecv = 0;
-    g_recvInputs = g_lastRecvInputs = 0;
-    g_lastStatsTick = GetTickCount();
-    g_readyTxDiagValid = g_readyRxDiagValid = false;
-    g_peerDisconnected = g_playerDisconnectNotice = false;
-    Controller_ResetBuffers();
-    if constexpr (ROLLBACK_FREEZE_WATCHDOG_ENABLED) {
-        g_watchdogRunning = true;
-        g_watchdogThread = CreateThread(nullptr, 0, FreezeWatchdogThread, nullptr, 0, nullptr);
-        if (!g_watchdogThread) {
-            g_watchdogRunning = false;
-            HookLog("Netplay: could not start freeze watchdog\n");
-        }
+
+    g_host   = host;
+    g_peer   = peer;
+    g_active = (host != nullptr && peer != nullptr);
+
+    if (!g_active)
+    {
+        HookLog("Netplay: Init called but host/peer not ready — disabled\n");
+        return;
     }
+
+    // Initialize critical sections (once)
+    if (!g_csInitialized)
+    {
+        InitializeCriticalSection(&g_outboundCS);
+        InitializeCriticalSection(&g_inboundCS);
+        InitializeCriticalSection(&g_delayCS);
+        InitializeCriticalSection(&g_battleReadyCS);
+        InitializeCriticalSection(&g_launchTrainingCS);
+        InitializeCriticalSection(&g_desyncCS);
+        InitializeCriticalSection(&g_restartCS);
+        InitializeCriticalSection(&g_multiResimCS);
+        InitializeCriticalSection(&g_snapDumpCS);
+        InitializeCriticalSection(&g_autoTestStartCS);
+        InitializeCriticalSection(&g_autoTestFrameCS);
+        InitializeCriticalSection(&g_autoTestCompleteCS);
+        InitializeCriticalSection(&g_extensionCS);
+
+        g_outboundDelayNew = false;
+        g_inboundDelayNew = false;
+        g_outboundBattleReadyNew = false;
+        g_inboundBattleReadyNew = false;
+        g_outboundLaunchTrainingNew = false;
+        g_inboundLaunchTrainingNew = false;
+        g_outboundDesyncNew = false;
+        g_inboundDesyncNew = false;
+        g_outboundRestartNew = false;
+        g_inboundRestartNew = false;
+        g_outboundMultiResimNew = false;
+        g_inboundMultiResimNew = false;
+        g_outboundSnapDumpNew = false;
+        g_inboundSnapDumpNew = false;
+        g_outboundAutoTestStartNew = false;
+        g_inboundAutoTestStartNew = false;
+        g_outboundAutoTestFrameHead = 0;
+        g_outboundAutoTestFrameCount = 0;
+        g_inboundAutoTestFrameHead = 0;
+        g_inboundAutoTestFrameCount = 0;
+        g_outboundAutoTestComplete = false;
+        g_inboundAutoTestComplete = false;
+        g_outboundExtensionHead = 0;
+        g_outboundExtensionCount = 0;
+        g_inboundExtensionHead = 0;
+        g_inboundExtensionCount = 0;
+        std::memset(&g_outboundPacket, 0, sizeof(InputPacket));
+        g_csInitialized = true;
+    }
+
+    {
+        ScopedCS lock(g_inboundCS);
+        g_inboundHead = 0;
+        g_inboundCount = 0;
+    }
+
+    g_recvCount = 0;
+    g_lastRecv = 0;
+    g_readyTxDiagValid = false;
+    g_readyRxDiagValid = false;
+    g_peerDisconnected = false;
+    g_requestedTimeoutMs = 0;
+    g_playerDisconnectRequested = false;
+    g_playerDisconnectSent = false;
+    g_playerDisconnectSendSucceeded = false;
+    g_playerDisconnectNotice = false;
     g_running = true;
-    HookLog("Netplay: Initialized direct game-thread ENet pump (no mailbox)\n");
+
+    // Reset internal player pad ring buffers
+    Controller_ResetBuffers();
+
+    g_serviceThread = CreateThread(nullptr, 0, Netplay_ServiceThread, nullptr, 0, nullptr);
+    if (g_serviceThread)
+    {
+        HookLog("Netplay: Initialized, service thread running\n");
+
+        // Controller sends its forced-zero startup history from normal frame
+        // boundaries. This primes delay-mode confirmation without a synthetic
+        // packet from the pre-battle frame epoch.
+    }
+    else
+    {
+        HookLog("Netplay: Failed to create service thread\n");
+        g_running = false;
+        g_active  = false;
+    }
 }
 
 void Netplay_SetTimeout(uint32_t timeoutMs)
 {
-    if (!g_running || !timeoutMs) return;
-    EnetLock lock;
-    if (g_running && g_peer) enet_peer_timeout(g_peer, 0, timeoutMs, timeoutMs);
+    if (g_active && timeoutMs != 0)
+        g_requestedTimeoutMs = timeoutMs;
 }
 
-void Netplay_SendPacket(const InputPacket& packet) { SendPacket(PACKET_INPUT, packet); }
+void Netplay_SendPacket(const InputPacket& pkt)
+{
+    ScopedCS lock(g_outboundCS);
+    g_outboundPacket = pkt;
+    g_outboundNew = true;
+}
+
+bool Netplay_GetInboundPacket(InputPacket& outPkt)
+{
+    ScopedCS lock(g_inboundCS);
+    if (g_inboundCount != 0)
+    {
+        outPkt = g_inboundQueue[g_inboundHead];
+        g_inboundHead = (g_inboundHead + 1) % MAX_INBOUND_PACKETS;
+        --g_inboundCount;
+        return true;
+    }
+    return false;
+}
+
+// ---------------------------------------------------------------------------
+// Delay + rollback control — sent together to keep both peers in sync.
+// ---------------------------------------------------------------------------
 void Netplay_SendDelay(int32_t delay, int32_t effectiveFrame)
 {
-    const DelayPacket packet = {PACKET_DELAY, delay, -1, effectiveFrame};
-    SendPacket(PACKET_DELAY, packet);
+    ScopedCS lock(g_delayCS);
+    g_outboundDelay = delay;
+    g_outboundDelayFrame = effectiveFrame;
+    g_outboundDelayNew = true;
 }
+
 void Netplay_SendRollback(int32_t rollbackFrames, int32_t effectiveFrame)
 {
-    const DelayPacket packet = {PACKET_DELAY, -1, rollbackFrames, effectiveFrame};
-    SendPacket(PACKET_DELAY, packet);
+    ScopedCS lock(g_delayCS);
+    g_outboundRollback = rollbackFrames;
+    g_outboundRollbackFrame = effectiveFrame;
+    g_outboundRollbackNew = true;
 }
+
+bool Netplay_GetInboundDelay(int32_t& outDelay, int32_t& outEffectiveFrame)
+{
+    ScopedCS lock(g_delayCS);
+    if (g_inboundDelayNew)
+    {
+        outDelay = g_inboundDelay;
+        outEffectiveFrame = g_inboundDelayFrame;
+        g_inboundDelayNew = false;
+        return true;
+    }
+    return false;
+}
+
+bool Netplay_GetInboundRollback(int32_t& outRollback, int32_t& outEffectiveFrame)
+{
+    ScopedCS lock(g_delayCS);
+    if (g_inboundRollbackNew)
+    {
+        outRollback = g_inboundRollback;
+        outEffectiveFrame = g_inboundRollbackFrame;
+        g_inboundRollbackNew = false;
+        return true;
+    }
+    return false;
+}
+
 void Netplay_SendLaunchTrainingSettings(const LaunchTrainingPacket& packet)
 {
-    SendPacket(PACKET_LAUNCH_TRAINING, packet);
+    if (!g_active || !g_csInitialized)
+        return;
+    ScopedCS lock(g_launchTrainingCS);
+    g_outboundLaunchTraining = packet;
+    g_outboundLaunchTraining.type = PACKET_LAUNCH_TRAINING;
+    g_outboundLaunchTrainingNew = true;
 }
+
+bool Netplay_GetInboundLaunchTrainingSettings(LaunchTrainingPacket& outPacket)
+{
+    if (!g_active || !g_csInitialized)
+        return false;
+    ScopedCS lock(g_launchTrainingCS);
+    if (!g_inboundLaunchTrainingNew)
+        return false;
+    outPacket = g_inboundLaunchTraining;
+    g_inboundLaunchTrainingNew = false;
+    return true;
+}
+
 void Netplay_SendMultiResim(bool enabled)
 {
-    const MultiResimPacket packet = {PACKET_MULTI_RESIM, enabled ? 1u : 0u};
-    SendPacket(PACKET_MULTI_RESIM, packet);
+    ScopedCS lock(g_multiResimCS);
+    g_outboundMultiResim.type = PACKET_MULTI_RESIM;
+    g_outboundMultiResim.enabled = enabled ? 1u : 0u;
+    g_outboundMultiResimNew = true;
 }
+
+bool Netplay_GetInboundMultiResim(bool& outEnabled)
+{
+    ScopedCS lock(g_multiResimCS);
+    if (!g_inboundMultiResimNew)
+        return false;
+    outEnabled = g_inboundMultiResim.enabled != 0;
+    g_inboundMultiResimNew = false;
+    return true;
+}
+
 void Netplay_SendSnapDump(int32_t frame, const char* timestamp)
 {
-    if (!DualTrainingControlPacketsAllowed()) return;
-    SnapDumpPacket packet = {};
-    packet.frame = frame;
-    if (timestamp) strncpy(packet.timestamp, timestamp, sizeof(packet.timestamp) - 1);
-    SendPacket(PACKET_SNAPDUMP, packet);
+    if (!DualTrainingControlPacketsAllowed())
+        return;
+
+    ScopedCS lock(g_snapDumpCS);
+    g_outboundSnapDump = {};
+    g_outboundSnapDump.type = PACKET_SNAPDUMP;
+    g_outboundSnapDump.frame = frame;
+    if (timestamp)
+        strncpy(g_outboundSnapDump.timestamp, timestamp,
+                sizeof(g_outboundSnapDump.timestamp) - 1);
+    g_outboundSnapDumpNew = true;
 }
+
+bool Netplay_GetInboundSnapDump(int32_t& outFrame, char* timestamp,
+                                size_t timestampSize)
+{
+    if (!g_active || !g_csInitialized || !timestamp || timestampSize == 0)
+        return false;
+
+    ScopedCS lock(g_snapDumpCS);
+    if (!DualTrainingControlPacketsAllowed())
+    {
+        g_inboundSnapDumpNew = false;
+        return false;
+    }
+    if (!g_inboundSnapDumpNew)
+        return false;
+    outFrame = g_inboundSnapDump.frame;
+    strncpy(timestamp, g_inboundSnapDump.timestamp, timestampSize - 1);
+    timestamp[timestampSize - 1] = '\0';
+    g_inboundSnapDumpNew = false;
+    return true;
+}
+
 void Netplay_SendAutoTestStart(const AutoTestStartPacket& packet)
 {
-    if (DualTrainingControlPacketsAllowed()) SendPacket(PACKET_AUTOTEST_START, packet);
+    if (!DualTrainingControlPacketsAllowed())
+        return;
+    ScopedCS lock(g_autoTestStartCS);
+    g_outboundAutoTestStart = packet;
+    g_outboundAutoTestStart.type = PACKET_AUTOTEST_START;
+    g_outboundAutoTestStartNew = true;
 }
-void Netplay_SendAutoTestFrame(const AutoTestFramePacket& packet)
+
+bool Netplay_GetInboundAutoTestStart(AutoTestStartPacket& outPacket)
 {
-    if (DualTrainingControlPacketsAllowed()) SendPacket(PACKET_AUTOTEST_FRAME, packet);
+    if (!DualTrainingControlPacketsAllowed() || !g_active || !g_csInitialized)
+        return false;
+    ScopedCS lock(g_autoTestStartCS);
+    if (!g_inboundAutoTestStartNew)
+        return false;
+    outPacket = g_inboundAutoTestStart;
+    g_inboundAutoTestStartNew = false;
+    return true;
 }
+
 void Netplay_SendAutoTestComplete()
 {
-    const AutoTestCompletePacket packet = {PACKET_AUTOTEST_COMPLETE};
-    if (DualTrainingControlPacketsAllowed()) SendPacket(PACKET_AUTOTEST_COMPLETE, packet);
+    if (!DualTrainingControlPacketsAllowed() || !g_active || !g_csInitialized)
+        return;
+    ScopedCS lock(g_autoTestCompleteCS);
+    g_outboundAutoTestComplete = true;
 }
+
+bool Netplay_GetInboundAutoTestComplete()
+{
+    if (!DualTrainingControlPacketsAllowed() || !g_active || !g_csInitialized)
+        return false;
+    ScopedCS lock(g_autoTestCompleteCS);
+    bool complete = g_inboundAutoTestComplete;
+    g_inboundAutoTestComplete = false;
+    return complete;
+}
+
+void Netplay_SendAutoTestFrame(const AutoTestFramePacket& packet)
+{
+    if (!DualTrainingControlPacketsAllowed())
+        return;
+    ScopedCS lock(g_autoTestFrameCS);
+    if (g_outboundAutoTestFrameCount == MAX_AUTOTEST_FRAME_PACKETS)
+    {
+        g_outboundAutoTestFrameHead =
+            (g_outboundAutoTestFrameHead + 1) % MAX_AUTOTEST_FRAME_PACKETS;
+        --g_outboundAutoTestFrameCount;
+    }
+    size_t tail = (g_outboundAutoTestFrameHead + g_outboundAutoTestFrameCount) %
+                  MAX_AUTOTEST_FRAME_PACKETS;
+    g_outboundAutoTestFrames[tail] = packet;
+    g_outboundAutoTestFrames[tail].type = PACKET_AUTOTEST_FRAME;
+    ++g_outboundAutoTestFrameCount;
+}
+
+bool Netplay_GetInboundAutoTestFrame(AutoTestFramePacket& outPacket)
+{
+    if (!DualTrainingControlPacketsAllowed() || !g_active || !g_csInitialized)
+        return false;
+    ScopedCS lock(g_autoTestFrameCS);
+    if (g_inboundAutoTestFrameCount == 0)
+        return false;
+    outPacket = g_inboundAutoTestFrames[g_inboundAutoTestFrameHead];
+    g_inboundAutoTestFrameHead =
+        (g_inboundAutoTestFrameHead + 1) % MAX_AUTOTEST_FRAME_PACKETS;
+    --g_inboundAutoTestFrameCount;
+    return true;
+}
+
 void Netplay_SendBattleReady(uint32_t generation, uint32_t flags, uint32_t roundSeed,
                              uint32_t openingMember)
 {
-    const BattleReadyPacket packet = {PACKET_BATTLE_READY, generation, flags, roundSeed, openingMember};
-    SendPacket(PACKET_BATTLE_READY, packet);
+    ScopedCS lock(g_battleReadyCS);
+    g_outboundBattleReady.type = PACKET_BATTLE_READY;
+    g_outboundBattleReady.generation = generation;
+    g_outboundBattleReady.flags = flags;
+    g_outboundBattleReady.round_seed = roundSeed;
+    g_outboundBattleReady.opening_member = openingMember;
+    g_outboundBattleReadyNew = true;
 }
-void Netplay_SendDesyncTrigger(int32_t frame, uint32_t localChecksum, uint32_t remoteChecksum)
+
+bool Netplay_GetInboundBattleReady(uint32_t& outGeneration, uint32_t& outFlags,
+                                   uint32_t& outRoundSeed, uint32_t& outOpeningMember)
 {
-    const DesyncPacket packet = {PACKET_DESYNC, FrameStepper_GetBattleGeneration(),
-                                DESYNC_TRIGGER, frame, localChecksum, remoteChecksum};
-    SendPacket(PACKET_DESYNC, packet);
+    ScopedCS lock(g_battleReadyCS);
+    if (!g_inboundBattleReadyNew)
+        return false;
+    outGeneration = g_inboundBattleReady.generation;
+    outFlags = g_inboundBattleReady.flags;
+    outRoundSeed = g_inboundBattleReady.round_seed;
+    outOpeningMember = g_inboundBattleReady.opening_member;
+    g_inboundBattleReadyNew = false;
+    return true;
 }
+
+void Netplay_SendDesyncTrigger(int32_t frame, uint32_t localChecksum,
+                               uint32_t remoteChecksum)
+{
+    ScopedCS lock(g_desyncCS);
+    g_outboundDesync = {};
+    g_outboundDesync.type = PACKET_DESYNC;
+    g_outboundDesync.battle_generation = FrameStepper_GetBattleGeneration();
+    g_outboundDesync.action = DESYNC_TRIGGER;
+    g_outboundDesync.frame = frame;
+    g_outboundDesync.localChecksum = localChecksum;
+    g_outboundDesync.remoteChecksum = remoteChecksum;
+    g_outboundDesyncNew = true;
+}
+
 void Netplay_SendDesyncUnpause()
 {
-    DesyncPacket packet = {};
-    packet.battle_generation = FrameStepper_GetBattleGeneration();
-    packet.action = DESYNC_UNPAUSE;
-    SendPacket(PACKET_DESYNC, packet);
+    ScopedCS lock(g_desyncCS);
+    g_outboundDesync = {};
+    g_outboundDesync.type = PACKET_DESYNC;
+    g_outboundDesync.battle_generation = FrameStepper_GetBattleGeneration();
+    g_outboundDesync.action = DESYNC_UNPAUSE;
+    g_outboundDesyncNew = true;
 }
+
+bool Netplay_GetInboundDesync(DesyncPacket& outPacket)
+{
+    if (!g_active || !g_csInitialized)
+        return false;
+
+    ScopedCS lock(g_desyncCS);
+    if (!g_inboundDesyncNew)
+        return false;
+    outPacket = g_inboundDesync;
+    g_inboundDesyncNew = false;
+    return true;
+}
+
 void Netplay_SendRestartMatch(int32_t targetFrame, uint32_t roundSeed)
 {
-    Netplay_SetTimeout(60000);
-    const RestartMatchPacket packet = {PACKET_RESTART_MATCH, FrameStepper_GetBattleGeneration(),
-                                      targetFrame, roundSeed, RESTART_FULL_MATCH, 0};
-    SendPacket(PACKET_RESTART_MATCH, packet);
+    ScopedCS lock(g_restartCS);
+    g_outboundRestart.type = PACKET_RESTART_MATCH;
+    g_outboundRestart.battle_generation = FrameStepper_GetBattleGeneration();
+    g_outboundRestart.target_frame = targetFrame;
+    g_outboundRestart.round_seed = roundSeed;
+    g_outboundRestart.kind = RESTART_FULL_MATCH;
+    g_outboundRestart.button_restart = 0;
+    g_outboundRestartNew = true;
 }
-void Netplay_SendTrainingRestart(int32_t targetFrame, uint32_t roundSeed, int32_t buttonRestart)
+
+void Netplay_SendTrainingRestart(int32_t targetFrame, uint32_t roundSeed,
+                                 int32_t buttonRestart)
 {
-    Netplay_SetTimeout(60000);
-    const RestartMatchPacket packet = {PACKET_RESTART_MATCH, FrameStepper_GetBattleGeneration(),
-                                      targetFrame, roundSeed, RESTART_TRAINING, buttonRestart};
-    SendPacket(PACKET_RESTART_MATCH, packet);
+    ScopedCS lock(g_restartCS);
+    g_outboundRestart.type = PACKET_RESTART_MATCH;
+    g_outboundRestart.battle_generation = FrameStepper_GetBattleGeneration();
+    g_outboundRestart.target_frame = targetFrame;
+    g_outboundRestart.round_seed = roundSeed;
+    g_outboundRestart.kind = RESTART_TRAINING;
+    g_outboundRestart.button_restart = buttonRestart;
+    g_outboundRestartNew = true;
 }
+
+bool Netplay_GetInboundRestartMatch(int32_t& outTargetFrame, uint32_t& outRoundSeed,
+                                    uint32_t& outKind, int32_t& outButtonRestart)
+{
+    if (!g_active || !g_csInitialized)
+        return false;
+
+    ScopedCS lock(g_restartCS);
+    if (!g_inboundRestartNew)
+        return false;
+    if (g_inboundRestart.battle_generation != FrameStepper_GetBattleGeneration()) {
+        HookLog("Netplay: discarded stale restart generation=%u current=%u target=%d\n",
+                g_inboundRestart.battle_generation,
+                FrameStepper_GetBattleGeneration(),
+                g_inboundRestart.target_frame);
+        g_inboundRestartNew = false;
+        return false;
+    }
+    outTargetFrame = g_inboundRestart.target_frame;
+    outRoundSeed = g_inboundRestart.round_seed;
+    outKind = g_inboundRestart.kind;
+    outButtonRestart = g_inboundRestart.button_restart;
+    g_inboundRestartNew = false;
+    return true;
+}
+
+bool Netplay_HasInboundRestartMatch()
+{
+    if (!g_active || !g_csInitialized)
+        return false;
+
+    ScopedCS lock(g_restartCS);
+    return g_inboundRestartNew &&
+           g_inboundRestart.battle_generation == FrameStepper_GetBattleGeneration();
+}
+
 bool Netplay_SendExtensionPacket(const void* data, size_t size)
 {
-    if (!data || size < sizeof(uint32_t) || size > MAX_EXTENSION_PACKET_SIZE) return false;
-    uint32_t type;
-    std::memcpy(&type, data, sizeof(type));
-    return type == PACKET_EXTENSION && SendWire(data, size, type);
+    if (!g_active || !g_csInitialized || !data || size < sizeof(uint32_t) ||
+        size > MAX_EXTENSION_PACKET_SIZE ||
+        *(const uint32_t*)data != PACKET_EXTENSION)
+        return false;
+
+    ScopedCS lock(g_extensionCS);
+    if (g_outboundExtensionCount == MAX_EXTENSION_PACKETS)
+        return false;
+    size_t tail = (g_outboundExtensionHead + g_outboundExtensionCount) %
+                  MAX_EXTENSION_PACKETS;
+    g_outboundExtension[tail].size = size;
+    std::memcpy(g_outboundExtension[tail].data, data, size);
+    ++g_outboundExtensionCount;
+    return true;
 }
-bool Netplay_IsActive() { return g_running.load(); }
-bool Netplay_OwnsHost() { EnetLock lock; return g_host != nullptr; }
-bool Netplay_TakePeerDisconnected() { return g_peerDisconnected.exchange(false); }
-bool Netplay_TakePlayerDisconnectNotice() { return g_playerDisconnectNotice.exchange(false); }
-bool Netplay_SendPlayerDisconnect(uint32_t)
+
+bool Netplay_GetExtensionPacket(void* data, size_t capacity, size_t& outSize)
 {
-    const PlayerDisconnectPacket packet = {PACKET_PLAYER_DISCONNECT};
-    return SendWire(&packet, sizeof(packet), PACKET_PLAYER_DISCONNECT);
+    outSize = 0;
+    if (!g_active || !g_csInitialized || !data)
+        return false;
+
+    ScopedCS lock(g_extensionCS);
+    if (g_inboundExtensionCount == 0)
+        return false;
+    const ExtensionPacket& packet = g_inboundExtension[g_inboundExtensionHead];
+    if (capacity < packet.size)
+        return false;
+    outSize = packet.size;
+    std::memcpy(data, packet.data, packet.size);
+    g_inboundExtensionHead = (g_inboundExtensionHead + 1) % MAX_EXTENSION_PACKETS;
+    --g_inboundExtensionCount;
+    return true;
 }
+
+void Netplay_ClearInputQueues()
+{
+    {
+        ScopedCS lock(g_inboundCS);
+        g_inboundHead = 0;
+        g_inboundCount = 0;
+    }
+    {
+        ScopedCS lock(g_outboundCS);
+        g_outboundNew = false;
+        std::memset(&g_outboundPacket, 0, sizeof(g_outboundPacket));
+    }
+    {
+        ScopedCS lock(g_desyncCS);
+        g_inboundDesync = {};
+        g_outboundDesync = {};
+        g_inboundDesyncNew = false;
+        g_outboundDesyncNew = false;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Netplay_SendInput  — convenience wrapper that sends a single uint32 value
+//                      in the first history slot (inputs[0]).
+// ---------------------------------------------------------------------------
+void Netplay_SendInput(uint32_t rawInput)
+{
+    InputPacket pkt = {};
+    pkt.type        = PACKET_INPUT;
+    pkt.battle_generation = FrameStepper_GetBattleGeneration();
+    pkt.start_frame = 0;
+    pkt.inputs[0] = rawInput;
+    // inputs[1..15] remain zero — unused for simple delay-based netplay.
+
+    ScopedCS lock(g_outboundCS);
+    g_outboundPacket = pkt;
+    g_outboundNew = true;
+}
+
+bool Netplay_HasRemoteInput()
+{
+    ScopedCS lock(g_inboundCS);
+    return g_inboundCount != 0;
+}
+
+uint32_t Netplay_GetRemoteInput()
+{
+    ScopedCS lock(g_inboundCS);
+    if (g_inboundCount != 0)
+        return g_inboundQueue[g_inboundHead].inputs[0];
+    return 0;
+}
+
+bool Netplay_IsActive()
+{
+    return g_running.load();
+}
+
+bool Netplay_TakePeerDisconnected()
+{
+    return g_peerDisconnected.exchange(false);
+}
+
+bool Netplay_SendPlayerDisconnect(uint32_t timeoutMs)
+{
+    if (!Netplay_IsActive())
+        return false;
+
+    g_playerDisconnectSent = false;
+    g_playerDisconnectSendSucceeded = false;
+    g_playerDisconnectRequested = true;
+
+    const DWORD start = GetTickCount();
+    while (!g_playerDisconnectSent && GetTickCount() - start < timeoutMs)
+        Sleep(1);
+    return g_playerDisconnectSent && g_playerDisconnectSendSucceeded;
+}
+
+bool Netplay_TakePlayerDisconnectNotice()
+{
+    return g_playerDisconnectNotice.exchange(false);
+}
+
 bool Netplay_IsHost()
 {
-    return g_isHost.load(std::memory_order_relaxed);
+    return g_host && g_host->address.port != 0;
 }
+
 uint32_t Netplay_GetRTT()
 {
-    if (SteamTransport_IsActive()) return SteamTransport_GetRTT();
-    EnetLock lock;
-    return g_peer ? g_peer->roundTripTime : 0;
+    if (SteamTransport_IsActive())
+        return SteamTransport_GetRTT();
+    if (g_peer)
+        return g_peer->roundTripTime;
+    return 0;
 }
+
 void Netplay_Shutdown()
 {
-    Netplay_SendPlayerDisconnect();
+    HookLog("Netplay: Shutting down...\n");
+    if (Netplay_IsActive())
+        Netplay_SendPlayerDisconnect(250);
     g_running = false;
-    g_watchdogRunning = false;
-    if (g_watchdogThread) {
-        if (WaitForSingleObject(g_watchdogThread, 3000) != WAIT_OBJECT_0) {
-            HookLog("Netplay: watchdog still exiting; shutdown deferred\n");
-            return;
-        }
-        CloseHandle(g_watchdogThread);
-        g_watchdogThread = nullptr;
+
+    if (g_serviceThread)
+    {
+        WaitForSingleObject(g_serviceThread, 3000);
+        CloseHandle(g_serviceThread);
+        g_serviceThread = nullptr;
     }
+
     SteamLobby_Shutdown(false);
-    EnetLock lock;
-    if (g_peer) enet_peer_disconnect_now(g_peer, 0);
-    if (g_host) enet_host_destroy(g_host);
-    g_peer = nullptr;
-    g_host = nullptr;
-    g_isHost.store(false, std::memory_order_relaxed);
+
+    if (g_peer)
+    {
+        enet_peer_disconnect(g_peer, 0);
+        g_peer = nullptr;
+    }
+
+    if (g_host)
+    {
+        if (g_host->connectedPeers > 0)
+        {
+            ENetEvent ev;
+            enet_host_service(g_host, &ev, 1000);
+        }
+        enet_host_destroy(g_host);
+        g_host = nullptr;
+    }
+
+    g_active = false;
+
+    if (g_csInitialized)
+    {
+        DeleteCriticalSection(&g_outboundCS);
+
+        DeleteCriticalSection(&g_inboundCS);
+
+        DeleteCriticalSection(&g_delayCS);
+        DeleteCriticalSection(&g_battleReadyCS);
+        DeleteCriticalSection(&g_launchTrainingCS);
+        DeleteCriticalSection(&g_desyncCS);
+        DeleteCriticalSection(&g_restartCS);
+        DeleteCriticalSection(&g_multiResimCS);
+        DeleteCriticalSection(&g_snapDumpCS);
+        DeleteCriticalSection(&g_autoTestStartCS);
+        DeleteCriticalSection(&g_autoTestFrameCS);
+        DeleteCriticalSection(&g_autoTestCompleteCS);
+        DeleteCriticalSection(&g_extensionCS);
+        g_csInitialized = false;
+    }
+
     HookLog("Netplay: Shutdown complete\n");
 }
