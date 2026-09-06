@@ -206,10 +206,10 @@ static constexpr SnapshotRange CCHR_SCALAR_RESTORE_RANGES[] = {
     {0x80, 0x80},
     // Input repeat/transition scalar at the end of the preceding input block.
     {0xA8, 0x04},
-    // mMotionCalcFlag affects deterministic joint/motion calculation. Keep
-    // mModelStatus at +0x550 on the live resource timeline; Motion[8] begins
-    // at +0x560, not +0x550.
-    {0x558, 0x04},
+    // Motion evaluation combines mMotionCalcFlag with the override at +0x55C.
+    // Keep mModelStatus at +0x550 on the live resource timeline; Motion[8]
+    // begins at +0x560, not +0x550.
+    {0x558, 0x08},
     // Animation-state header: delta coefficient and current animation values.
     {0x1300, 0x08},
     // Remaining pointer-free animation timing and transition state.
@@ -1904,8 +1904,7 @@ void Rollback_RestoreSnapshot(int32_t frame)
             // generic pointer guard above would therefore retain prediction-
             // timeline frame, blend and root-motion values. Rewind the known
             // scalar/vector portions while keeping the slot vtable and its
-            // resource/allocation pointers at +0x120..+0x138, +0x160,
-            // +0x170 and +0x178 live.
+            // allocations live. Event bindings are restored separately below.
             for (int motion = 0; motion < CCHR_MOTION_COUNT; ++motion) {
                 size_t motionBase = CCHR_MOTION_BASE + motion * CCHR_MOTION_STRIDE;
                 static constexpr SnapshotRange motionRestoreRanges[] = {
@@ -1919,6 +1918,28 @@ void Rollback_RestoreSnapshot(int32_t frame)
                         std::memcpy((uint8_t*)slot.regions[i].ptr + fieldOffset,
                                     slot.data + offset + fieldOffset,
                                     range.size);
+                    }
+                }
+                // Native processActionAnmchr binds four event tables from the
+                // selected rMotionList entry. Keeping future bindings with the
+                // saved motion number cleared Chris's flamethrower watch bit
+                // at frame 1034. These are borrowed resource pointers, not heap
+                // work buffers; rewind only while their owning resource matches.
+                if (isTeamCharacter((uint64_t)slot.regions[i].ptr) &&
+                    motionBase + 0x140 <= copySize) {
+                    const uint8_t* savedCharacter = slot.data + offset;
+                    uint8_t* character = (uint8_t*)slot.regions[i].ptr;
+                    uint16_t motionNo = *(const uint16_t*)(
+                        savedCharacter + motionBase + 0x08);
+                    size_t resourceOffset = 0x11B8 + ((motionNo >> 8) & 0xF) * 8;
+                    if (motionNo != 0xFFFF && resourceOffset + 8 <= copySize) {
+                        uint64_t savedResource = *(const uint64_t*)(
+                            savedCharacter + resourceOffset);
+                        if (savedResource && savedResource ==
+                            *(const uint64_t*)(character + resourceOffset)) {
+                            std::memcpy(character + motionBase + 0x120,
+                                        savedCharacter + motionBase + 0x120, 0x20);
+                        }
                     }
                 }
             }
