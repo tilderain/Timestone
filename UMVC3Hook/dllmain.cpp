@@ -1543,7 +1543,7 @@ void OnInitializeHook()
 	}
 	if (strstr(cmdLineA, "-five-bars")) {
 		TrainingBoot_SetFiveBarStart(true);
-		HookLog("UMVC3Hook: Five-bar starting meter enabled for both teams\n");
+		HookLog("UMVC3Hook: Five-bar starting meter and level-3 Franks enabled for both teams\n");
 	}
 
 	const int autoTestCharacter = ParseAutoTestCharacter(cmdLineA);

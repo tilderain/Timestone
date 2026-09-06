@@ -28,6 +28,10 @@ static constexpr uintptr_t ACTION_EXECUTE_MATCH_PHASE         = 0x140004b80;
 static constexpr uintptr_t SCHARACTER_GET_INSTANCE            = 0x140001aa0;
 static constexpr uintptr_t SCHARACTER_GET_TEAM                = 0x140001b60;
 static constexpr uintptr_t SCHARACTER_SET_TEAM_METER          = 0x14005a320;
+static constexpr uintptr_t SCHARACTER_COUNT_CHARACTERS        = 0x140058EE0;
+static constexpr uintptr_t SCHARACTER_GET_CHARACTER_BY_INDEX  = 0x140059020;
+static constexpr uintptr_t VTABLE_UFRANK                      = 0x140A75840;
+static constexpr uintptr_t UFRANK_LEVEL_OFFSET                = 0x69C4;
 static constexpr uintptr_t CCHRTEAM_SET_EASY_MODE             = 0x1400203d0;
 static constexpr uintptr_t BATTLE_SETTING_SET_TEAM_AUTO_JUMP  = 0x1402074d0;
 static constexpr uintptr_t ACTION_AUTO_JUMP_P1_RETURN         = 0x140203e44;
@@ -858,7 +862,7 @@ static void __fastcall Hook_executeMatchPhase(uint64_t action, int32_t phase,
                                                uint64_t unit, uint64_t context)
 {
     oExecuteMatchPhase(action, phase, unit, context);
-    if (!g_fiveBarStart || phase != 1)
+    if (!g_fiveBarStart || (phase != 1 && phase != 5))
         return;
 
     typedef uint64_t(__fastcall* GetInstance_t)();
@@ -867,10 +871,31 @@ static void __fastcall Hook_executeMatchPhase(uint64_t action, int32_t phase,
     if (!characters)
         return;
 
-    SetTeamMeter_t setTeamMeter = (SetTeamMeter_t)_addr(SCHARACTER_SET_TEAM_METER);
-    setTeamMeter(characters, 0, 50000.0f);
-    setTeamMeter(characters, 1, 50000.0f);
-    HookLog("TrainingBoot: Applied five-bar meter at round start\n");
+    if (phase == 1) {
+        SetTeamMeter_t setTeamMeter = (SetTeamMeter_t)_addr(SCHARACTER_SET_TEAM_METER);
+        setTeamMeter(characters, 0, 50000.0f);
+        setTeamMeter(characters, 1, 50000.0f);
+        HookLog("TrainingBoot: Applied five-bar meter at round start\n");
+        return;
+    }
+
+    // Phases 2 and 3/4 call uFrankWest::initCharacterWeapons (0x140083760),
+    // which resets level to 1. Apply the override only on fighting entry.
+    typedef int32_t(__fastcall* CountCharacters_t)(uint64_t);
+    typedef uint64_t(__fastcall* GetCharacter_t)(uint64_t, int32_t);
+    const int32_t count = ((CountCharacters_t)_addr(SCHARACTER_COUNT_CHARACTERS))(characters);
+    int32_t frankCount = 0;
+    for (int32_t index = 0; index < count; ++index) {
+        uint64_t character = ((GetCharacter_t)_addr(SCHARACTER_GET_CHARACTER_BY_INDEX))(
+            characters, index);
+        if (character && *(uintptr_t*)character == (uintptr_t)_addr(VTABLE_UFRANK)) {
+            // The global roster includes benched characters on both teams.
+            *(int32_t*)(character + UFRANK_LEVEL_OFFSET) = 3;
+            ++frankCount;
+        }
+    }
+    HookLog("TrainingBoot: Applied level 3 to %d Frank(s) on fighting entry (roster=%d)\n",
+            frankCount, count);
 }
 
 // ---------------------------------------------------------------------------

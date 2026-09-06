@@ -157,7 +157,10 @@ static constexpr SnapshotRange UACTION_CAMERA_SCALAR_RESTORE_RANGES[] = {
     // camera command is replayed during re-simulation.
     {0xB0, 0x04},
     {0xB8, 0x30},
-    {0xF0, 0x40},
+    // Include cAimInfo::mPos.mEnd at +0x130. Leaving this destination live
+    // diverged Frank's throw camera at frame 7290 (20260906_060832), then
+    // camera-relative facing and hit counts at frames 7314/7315.
+    {0xF0, 0x50},
     {0x140, 0x40},
     {0x180, 0x40},
     // Complete the embedded cAimInfo through its initialized tail at +0x224.
