@@ -10,6 +10,12 @@ presentation-only state. However, this audit does **not** establish that changin
 the global stream changes ordinary human-versus-human hitbox overlap results.
 Several prominent combat random choices instead use character-local RNG.
 
+The [focused hitbox follow-up](global_rng_hitbox_followup.md) traces the generic
+cArm spawn-error draws all the way into projectile collision matrices, audits
+regular fighter primitive transforms, and checks additional installed collision
+resources. It establishes an end-to-end **conditional** global-RNG/hitbox
+dependency, but not an ordinary two-human reproduction of the global fallback.
+
 ## Verified routing
 
 - Global state: `0x140D765D8`, four 32-bit words; getter `0x1400046D0`.
