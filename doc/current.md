@@ -9,13 +9,23 @@ uses source symbols instead of line numbers because line numbers change often.
 
 - The plugin uses custom ENet transport. It does not use the retail Steam/CMU
   input transport for gameplay.
-- `Netplay_ServiceThread` is the only owner of ENet calls.
-- The game thread exchanges packets with that thread through bounded queues and
-  Win32 critical sections.
+- `Netplay_Pump` services ENet on the live game thread, with timeout zero and a
+  64-event budget. It runs before live moves (including paused frames), at input
+  boundaries, and inside input waits. It does not run during re-simulation.
+- Packets dispatch directly into controller/autotest history and feature-owned
+  state. There is no network-service thread, mailbox, or application packet
+  queue. Destructive remote actions are deferred to the next live move boundary.
+- A single SRW lock protects ENet API calls against UI/render sends and shutdown;
+  receive callbacks run outside it. Sends hand packets directly to ENet and flush.
+- The independent freeze watchdog still runs on a diagnostic-only thread. Steam's
+  separate loopback bridge is unchanged. See [netplay_direct_pump.md](netplay_direct_pump.md)
+  for experimental validation and loading limitations.
 - `InputPacket` carries 16 absolute-frame input samples, a delayed checksum,
   frame advantage, and flags.
 - Input packets are unsequenced. Control packets that change shared state are
   reliable.
+- Timesync compares the peers' raw input-frame offsets, without adding ENet RTT.
+  This prevents different startup RTT estimates from creating false pacing waits.
 - Current control messages cover delay/rollback settings, resimulation
   diagnostics, ground truth, battle readiness, launch configuration, desync
   pause/unpause, synchronized restart, and multi-resimulation mode.

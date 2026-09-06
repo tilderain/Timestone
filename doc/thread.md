@@ -123,16 +123,21 @@ The plugin has two explicit thread roles:
 | Thread | Creation | Responsibility |
 |---|---|---|
 | Bootstrap `MainThread` | `DllMain` process attach | Installs hooks and initializes integration outside loader-lock work |
-| `Netplay_ServiceThread` | `Netplay_Init` | Sole owner of ENet service/send/receive calls while active |
+| `FreezeWatchdogThread` | `Netplay_Init` | Polls freeze diagnostics every 100 ms; never services ENet or dispatches packets |
 
 There is no permanent `HookUpdate` thread. Frame-stepper, controller, and
 rollback work executes from installed game/render hooks.
 
-The service thread and game thread exchange state through channel-specific
-`CRITICAL_SECTION` objects. Channels cover input, delay control, re-simulation
-diagnostics, ground truth, battle readiness, desync actions, restart, and
-multi-resimulation state. The service thread never invokes simulation or
-mutates native game objects.
+`Netplay_Pump` now runs on the live game thread and dispatches received packets
+directly into feature state. No channel-specific queues or mailbox remain.
+ENet calls use one short SRW lock to serialize sends from render/UI callbacks
+and shutdown. Receiver callbacks run without the lock. The optional Steam
+transport still has its own bridge thread and separate ENet host.
+
+The main netplay host is unserviced during blocking native loading or a long
+re-simulation. Startup and synchronized restarts use a 60-second timeout; the
+battle handshake restores the shorter gameplay timeout. This is an experimental
+tradeoff, not a claim that network progress continues while the game is stalled.
 
 ## Frame and Re-simulation Ownership
 
@@ -146,8 +151,9 @@ hkMvc3Main_move
   Controller_OnFrameEnd
 ```
 
-Missing remote input is predicted; the game thread does not block waiting for
-ENet. Re-simulation also runs on the game thread and calls full native
+Missing remote input is predicted within the rollback budget. Delay-only or
+budget-exhausted waits pump ENet nonblockingly rather than depend on a background
+network thread. Re-simulation also runs on the game thread and calls full native
 `oMvc3Main_move` ticks while temporarily suppressing pacing/presentation call
 sites.
 
