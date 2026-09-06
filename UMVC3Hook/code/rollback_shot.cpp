@@ -46,6 +46,10 @@ static constexpr int DYNAMIC_SAFETY = 128;
 static constexpr int SSHOT_SENTINEL_COUNT = 10;
 static constexpr size_t SSHOT_NODE_OFFSET = 0x1450;
 static constexpr size_t SSHOT_NODE_NEXT = 0x08;
+static constexpr uint32_t SHOT_ATTACK_TARGET_TABLES[] = {0x14C0, 0x17C0, 0x1AC0};
+static constexpr uint32_t SHOT_ATTACK_TARGET_COUNT = 32;
+static constexpr uint32_t SHOT_ATTACK_TARGET_STRIDE = 0x18;
+static constexpr uint32_t SHOT_ATTACK_TARGET_POINTER_OFFSET = 0x08;
 static constexpr uint32_t SUNIT_CHARACTER_CATEGORY = 8;
 static constexpr uintptr_t TEAM0_OFFSET = 0x40;
 static constexpr uintptr_t TEAM1_OFFSET = 0x300;
@@ -537,6 +541,27 @@ void Shot_CaptureRecipes(RollbackSnapshotSlot& slot)
                         reference.shotSpawnSequence = child->second.spawnSequence;
                     }
                     slot.shotBodyReferences.push_back({saved.spawnSequence, offset, reference});
+                }
+                // cAtkCtrl's three TargetInfo tables also hold projectile targets.
+                // RestoreAttackTargets rewinds count/time, but only accepts stable
+                // target pointers. Rebind tracked shots after all reconstruction
+                // so a prior clash is not accepted again as a new contact.
+                for (uint32_t table : SHOT_ATTACK_TARGET_TABLES) {
+                    for (uint32_t index = 0; index < SHOT_ATTACK_TARGET_COUNT; ++index) {
+                        uint32_t entry = table + index * SHOT_ATTACK_TARGET_STRIDE;
+                        if (entry + SHOT_ATTACK_TARGET_STRIDE > saved.concrete.body.size()) break;
+                        uint32_t offset = entry + SHOT_ATTACK_TARGET_POINTER_OFFSET;
+                        void* target = nullptr;
+                        std::memcpy(&target, saved.concrete.body.data() + offset, sizeof(target));
+                        if (!target) continue;
+                        auto tracked = g_liveShotRecipes.find(target);
+                        if (tracked == g_liveShotRecipes.end()) continue;
+                        RollbackShotReference reference;
+                        reference.savedPtr = target;
+                        reference.kind = RollbackShotReferenceKind::Shot;
+                        reference.shotSpawnSequence = tracked->second.spawnSequence;
+                        slot.shotBodyReferences.push_back({saved.spawnSequence, offset, reference});
+                    }
                 }
                 slot.shotRecipes.push_back(saved);
             }

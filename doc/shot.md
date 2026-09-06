@@ -8,6 +8,26 @@ as uniform byte blobs and did not account for polymorphic DTI allocation,
 resource ownership, collision arrays, inline objects, effects, or scalar
 deleting destructors.
 
+## Projectile Clash History
+
+The inline `cAtkCtrl` has three 32-entry `TargetInfo` tables at shot offsets
+`+0x14C0`, `+0x17C0`, and `+0x1AC0`. Each entry is `0x18` bytes: target pointer
+at `+0x08`, hit count at `+0x10`, and hit timer at `+0x14`.
+
+`Shot_CaptureRecipes` captures tracked projectile targets by spawn sequence in
+the reusable `shotBodyReferences` vector. `Shot_RestoreBodyReferences` resolves
+them only after all shot reconstruction, pairing the replacement target with
+the count/time already restored by `RestoreAttackTargets`. Missing replacement
+targets resolve to null; character/stage targets retain stable-target validation.
+The pass never dereferences historical targets or copies retired shot pointers.
+
+Evidence: `20260906_054008_host_f497` / `20260906_054009_client_f498`, Psionic
+Blaster versus Bolts of Balthakk. Both peers record the clash at frame 479;
+client target pointers become null at 480, hit consumption diverges at 481,
+and beam distance diverges at 482. Native `cAtkCtrl__commitTargetHitState`
+(`0x14000D2C0`) uses exact target identity for repeat rules. The remap repair
+requires an in-game rerun to verify synchronized clash and beam-extension timing.
+
 ## Native Manager
 
 | Address | Meaning |

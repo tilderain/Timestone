@@ -832,10 +832,9 @@ void RestoreAttackTargets(uint8_t* shot, const uint8_t* saved,
                  ++target) {
                 validTarget = savedTarget == (uint64_t)validTargets[target];
             }
-            // TargetInfo stores characters and manager-owned stage bodies.
-            // Restrict historical pointers to the caller's current stable
-            // targets instead of accepting an unrelated allocation that happens
-            // to reuse the old address.
+            // Keep historical pointers only for current stable targets.
+            // Projectile targets are captured by spawn sequence and rebound by
+            // Shot_RestoreBodyReferences after all shots have been reconstructed.
             if (validTarget) {
                 *(uint64_t*)(shot + entry + 0x08) = savedTarget;
             }
