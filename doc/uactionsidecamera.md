@@ -177,3 +177,87 @@ existing camera scalars and mode flags. The resources at `+0x290` and `+0x3C0`
 are pinned per snapshot with native reference counting. Parent pointers at
 `+0x298` and `+0x3D0` are restored only when null, unchanged, or still present
 in the live team roster.
+
+## Additional Restore Gaps: Static Audit
+
+The September 6 audit distinguishes a reachable rollback failure from a
+runtime-confirmed desync. No new reproduction was run for the gaps below.
+
+### Position Attachment Joint
+
+Camera `+0xE8` is `cAimInfo::mPosJoint`, a signed 32-bit joint selector.
+`anmchrCmd0_interpreter @ 0x140100DE0`, opcode `0x33`, configures the position
+track, writes its parent at camera `+0xE0`, then writes the joint through
+`MtObject__setField_72 @ 0x1400146E0` (call site `0x14010259D`). The receiver
+is the embedded `cAimInfo` at camera `+0xA0`.
+
+The position-track evaluator `0x14001BB60` consumes that joint on subsequent
+camera moves. A negative index selects the parent's local transform; a
+nonnegative index calls its joint-matrix accessor at vtable `+0xA0`. The joint
+also determines the mirrored axis. The evaluator does not reset this field.
+
+The previous restore copied the parent and track but omitted the joint: the range
+`+0xB8/0x30` ends immediately before `+0xE8`. Rolling back from a later joint
+assignment to an already-active earlier track therefore mixes old track state
+with the future joint. Replaying a command is not sufficient when that command
+preceded the restored frame. The resulting logical camera feeds camera-relative
+facing (`0x140051040`) and gameplay boundary classification. This is a concrete
+static missing-state failure path; no affected move has yet been reproduced.
+Restore now explicitly includes `+0xE8/4`, without copying adjacent padding.
+
+### View Attachments
+
+`uActionSideCamera__getViewMatrix @ 0x14001A700` directly reads position
+attachment `+0x410` / joint `+0x418` and target attachment `+0x420` / joint
+`+0x428` on the non-Maya path. Both joint indices initialize to `-1`, both
+references to null. This entire block is omitted from explicit restore.
+
+Follow-up writer research found no non-constructor writer established as
+operating on this camera block. Direct-displacement instruction searches in the
+unpacked executable were checked against Ghidra: similarly-offset stores in
+`cChrTrace` copying (`0x140039FF0`), finish-screen objects (`0x14031A7A0`,
+`0x14031BFB0`), character-select UI (`0x140375AC0`), vibration
+(`0x1405229E0`), and stack-local resource tables are not camera writes.
+This is not an exhaustive proof against computed-address or generic writes.
+
+The known animation attachment commands do not populate this block. Opcode
+`0x33` writes position parent/joint at `+0xE0/+0xE8`; opcode `0x39` writes
+target parent/joint at `+0xD0/+0xD8`, all inside the embedded `cAimInfo`.
+Those are consumed during track evaluation, whereas `+0x410..+0x42F` is an
+additional transform applied when building the view matrix.
+
+If only `+0x410` is non-null, its selected joint matrix transforms both camera
+position and look-at target. If `+0x420` is also non-null, that second matrix
+transforms the target independently. Maya-motion mode bypasses both. Each
+joint field is four bytes; `+0x41C..+0x41F` and `+0x42C..+0x42F` appear to be
+alignment padding. The reader dispatches directly through the attachment's
+joint accessor with no liveness check. Neither the reader nor the camera
+destructor (`0x140017800`) adds/releases these references, consistent with
+borrowed coordinate/model pointers rather than owned resources. No concrete
+attachment type or active lifetime is established without an activation writer.
+
+Conclusion: apparently dormant in the reviewed battle paths, not a demonstrated
+additional desync source. Omitted indices do not matter while both references
+remain null. Leave restore unchanged unless a reachable activation path is
+identified; do not add speculative pointer restoration for this block.
+
+### Retained Tracking Character
+
+`uActionSideCamera__selectTrackedCharacters @ 0x140019EF0` has another omitted
+reference at `+0x4D0`. Under action flag `0x10000`, a non-null airborne-hitstun
+candidate is stored there. If a later lookup yields no candidate, the retained
+pointer is reused before throw-target and ordinary fallback selection. Thus a
+prediction-only candidate can survive restore and select the wrong character.
+Restore now reads the saved pointer from the camera body and accepts it only
+when present in the current team roster. Null or invalid references clear the
+slot instead of retaining a prediction-only selection. The native candidate
+finder `cChrTeam__findChrInAirborneHitstun` traverses that same roster, so this
+validation covers its candidates without accepting unrelated live units.
+The audit does not establish how often this branch is exercised; this repair
+still needs an in-game rerun.
+
+By contrast, tracked-character output slots `+0x488/+0x490` are assigned on
+each selector call through `0x14001BA50`; their omission alone is not proof of
+a stale-state failure on that update path. `cAimInfo` references `+0xB8`,
+`+0xD0`, and `+0xE0` are already raw-restored, so their outstanding issue is
+reference validity rather than missing capture/restore.

@@ -157,6 +157,8 @@ static constexpr SnapshotRange UACTION_CAMERA_SCALAR_RESTORE_RANGES[] = {
     // camera command is replayed during re-simulation.
     {0xB0, 0x04},
     {0xB8, 0x30},
+    // cAimInfo::mPosJoint, paired with the saved position attachment at +0xE0.
+    {0xE8, 0x04},
     // Include cAimInfo::mPos.mEnd at +0x130. Leaving this destination live
     // diverged Frank's throw camera at frame 7290 (20260906_060832), then
     // camera-relative facing and hit counts at frames 7314/7315.
@@ -1437,6 +1439,11 @@ void Rollback_RestoreSnapshot(int32_t frame)
                          slot.actionSideCamera.motionParent);
         restoreCharacter((void**)(camera + 0x3D0),
                          slot.actionSideCamera.requestParent);
+        // The retained airborne-hitstun target comes from the team roster.
+        // Clear prediction-only selections, including when the saved slot is null.
+        uint64_t target = 0;
+        std::memcpy(&target, saved + 0x4D0, sizeof(target));
+        *(uint64_t*)(camera + 0x4D0) = isTeamCharacter(target) ? target : 0;
     };
 
     auto traceRestoreState = [frame, team0, team1, &teamCharacters, teamCharacterCount](
