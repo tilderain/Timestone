@@ -87,6 +87,34 @@ class AutoTestAiTest(unittest.TestCase):
             before = min(host.stat().st_mtime, client.stat().st_mtime) - 1
             self.assertEqual((host, client), runner.latest_report_pair(root, "Ryu", before))
 
+    def test_latest_pair_searches_nested_rollback_logs(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            host = root / "rollback_logs/session_host/desync_20260906_120000_host_f42.usdp"
+            client = root / "rollback_logs/session_client/desync_20260906_120000_client_f42.usdp"
+            for path in (host, client):
+                path.parent.mkdir(parents=True)
+                path.touch()
+            before = min(host.stat().st_mtime, client.stat().st_mtime) - 1
+            self.assertEqual((host, client), runner.latest_report_pair(root, "Chris", before))
+            os.utime(client, (before - 1, before - 1))
+            self.assertIsNone(runner.latest_report_pair(root, "Chris", before))
+
+    def test_rollback_logs_completion_and_crash_discovery(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            session = root / "rollback_logs/nplive_new_host"
+            session.mkdir(parents=True)
+            log = session / "Timestone_host.log"
+            log.write_text("AutoTestSuite: command-line suite complete\n")
+            before = log.stat().st_mtime - 1
+            self.assertTrue(runner.suite_completed(root, before))
+            snapshot = runner.crash_artifact_snapshot(root)
+            crash = session / "umvc3_crash.log"
+            crash.write_text("=== UMVC3Hook crash new run ===\n")
+            self.assertEqual([str(crash)], runner.recent_crash_artifacts(root, before, snapshot))
+            self.assertIn(str(crash), runner.crash_artifact_snapshot(root))
+
     def test_validate_suite_rows_accepts_manual_cases(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

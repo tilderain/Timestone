@@ -50,14 +50,6 @@ struct LaunchDialogConfig {
 // Returns LAUNCH_CANCELLED if the user closes the window.
 LaunchOption ShowLaunchMenu();
 
-// Shows the original full launch dialog. Compact startup uses battleSetupOnly
-// after a Steam peer connects so roster and stage selection have their own window.
-LaunchOption ShowRegularLaunchMenu(bool battleSetupOnly = false);
-LaunchOption ShowCompactLaunchMenu();
-bool TakeCompactAdvancedRequest();
-bool TakeCompactBattleSetupRequest();
-bool TakeBattleLobbyReturnRequest();
-bool TakeRegularCompactRequest();
 bool ConfirmLaunchDisclaimer();
 
 // Returns the launch option chosen at startup.
@@ -86,11 +78,11 @@ void SendTrainingLaunchPacket();
 // dual-training client before its training boot sequence begins.
 bool ApplyTrainingLaunchPacket(const LaunchTrainingPacket& packet);
 
-// Persist an in-match selected roster (chars/colors/assists, P1 = [0],
-// P2 = [1]) to rollbacksetting.ini in the same layout the launch dialog uses.
+// Persist only the local player's online selection to ConnectRoster. Offline
+// advanced/dual-training sessions use Roster.P1/P2 instead. Stage is unchanged.
 void SaveRosterToIni(const int32_t chars[2][3],
                      const int32_t colors[2][3],
-                     const int32_t assists[2][3]);
+                     const int32_t assists[2][3], const bool simpleMode[2]);
 
 // Idempotently notify the peer, leave Steam, and close the active network session.
 void CleanupNetworkOnExit();

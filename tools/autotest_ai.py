@@ -68,14 +68,14 @@ def artifact_character_name(character):
 
 
 def latest_report_pair(game_dir, character, not_before=None):
-    """Find the newest complete pair in the character's autotest folder.
+    """Find the newest complete pair in autotest or rollback_logs output.
 
     Current autotest output uses ``host_<move-id>.usdp`` and
     ``client_<move-id>.usdp``. Keep support for the older timestamped names so
     existing runs can still be analyzed.
     """
     character_dir = game_dir / "autotest" / character
-    search_dirs = [character_dir]
+    search_dirs = [character_dir, game_dir / "rollback_logs"]
     # Older builds wrote timestamped dumps directly in the game directory.
     if game_dir != character_dir:
         search_dirs.append(game_dir)
@@ -86,7 +86,8 @@ def latest_report_pair(game_dir, character, not_before=None):
     for directory in search_dirs:
         if not directory.is_dir():
             continue
-        for path in directory.glob("*.usdp"):
+        paths = directory.rglob("*.usdp") if directory.name == "rollback_logs" else directory.glob("*.usdp")
+        for path in paths:
             if not_before is not None and path.stat().st_mtime < not_before:
                 continue
             match = current_pattern.fullmatch(path.name)
@@ -103,8 +104,10 @@ def latest_report_pair(game_dir, character, not_before=None):
                        reverse=True):
         clients = [entry for entry in entries
                    if entry[1] == "client" and entry[2] == host[2]
-                   and (host[4] is None or entry[4] is None or
-                        abs(entry[4] - host[4]) <= dt.timedelta(seconds=5))]
+                    and ((host[4] is None and entry[4] is None and
+                          host[3].parent == entry[3].parent) or
+                         (host[4] is not None and entry[4] is not None and
+                          abs(entry[4] - host[4]) <= dt.timedelta(seconds=5)))]
         if clients:
             return host[3], max(clients)[3]
     return None
@@ -112,21 +115,30 @@ def latest_report_pair(game_dir, character, not_before=None):
 
 def suite_completed(game_dir, not_before):
     """Accept Wine's shutdown crash when the autotest itself completed."""
-    log_path = game_dir / "Timestone_host.log"
-    if log_path.is_file() and log_path.stat().st_mtime >= not_before:
+    logs = [game_dir / "Timestone_host.log"]
+    logs.extend((game_dir / "rollback_logs").rglob("Timestone_host.log"))
+    for log_path in logs:
         try:
+            if not log_path.is_file() or log_path.stat().st_mtime < not_before:
+                continue
             log = log_path.read_text(encoding="utf-8", errors="replace")
-            if "AutoTestSuite: Suite complete:" in log:
+            if ("AutoTestSuite: Suite complete:" in log or
+                    "AutoTestSuite: command-line suite complete" in log):
                 return True
         except OSError:
             pass
     return False
 
 
+def crash_log_paths(game_dir):
+    yield from game_dir.glob("nplive_*/umvc3_crash.log")
+    yield from (game_dir / "rollback_logs").rglob("umvc3_crash.log")
+
+
 def crash_artifact_snapshot(game_dir):
     """Capture existing crash logs before launching the game."""
     snapshot = {}
-    for path in game_dir.glob("nplive_*/umvc3_crash.log"):
+    for path in crash_log_paths(game_dir):
         try:
             stat = path.stat()
         except OSError:
@@ -144,7 +156,7 @@ def recent_crash_artifacts(game_dir, not_before, before=None):
     fresh log as authoritative failure evidence.
     """
     artifacts = []
-    for path in game_dir.glob("nplive_*/umvc3_crash.log"):
+    for path in crash_log_paths(game_dir):
         try:
             if not path.is_file():
                 continue

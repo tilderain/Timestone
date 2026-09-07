@@ -315,7 +315,13 @@ bool MoveSelectorMatches(const char* filter, int32_t moveId, const char* name)
         while (*cursor && *cursor != ',' && length + 1 < sizeof(token))
             token[length++] = *cursor++;
         while (length && token[length - 1] == ' ') token[--length] = '\0';
-        if (token[0] && ContainsInsensitive(name, token)) return true;
+        // Numeric IDs and matcher:line selectors must not also match notation
+        // text (for example "8" previously selected every jump command).
+        bool numeric = token[0] != '\0';
+        for (size_t i = 0; i < length; ++i)
+            numeric &= std::isdigit((unsigned char)token[i]) != 0;
+        if (token[0] && !numeric && !strchr(token, ':') &&
+            ContainsInsensitive(name, token)) return true;
         if (*cursor == ',') ++cursor;
     }
     return false;
@@ -340,6 +346,14 @@ bool RuntimeCommandSelectorMatches(const char* filter,
         while (length && token[length - 1] == ' ') token[--length] = '\0';
         if (strcmp(token, selector) == 0) return true;
         if (*cursor == ',') ++cursor;
+    }
+    // Applicable manual IDs take precedence over runtime ordinals. Runtime
+    // commands with a colliding ordinal remain selectable by matcher:line.
+    if (moveId > 0 && moveId <= (int32_t)std::size(SUITE_MANUAL_SCRIPTS)) {
+        const char* requiredCharacter = SUITE_MANUAL_SCRIPT_CHARACTERS[moveId - 1];
+        if (!requiredCharacter ||
+            _stricmp(g_autoTestCharacterName, requiredCharacter) == 0)
+            moveId = -1;
     }
     return MoveSelectorMatches(filter, moveId, name);
 }

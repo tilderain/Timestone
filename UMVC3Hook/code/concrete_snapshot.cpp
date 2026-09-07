@@ -44,6 +44,7 @@ constexpr uintptr_t kDogMissileDti = 0x140D4B888ull;
 constexpr uintptr_t kFireGrenadeExplodeDti = 0x140D48BB0ull;
 constexpr uintptr_t kItemThrowDti = 0x140D4B980ull;
 constexpr uintptr_t kRocketLauncherExplodeDti = 0x140D4BAC8ull;
+constexpr uintptr_t kElementalSummonShotDti = 0x140D49DF8ull;
 constexpr uintptr_t kVulcanAxeDti = 0x140D48808ull;
 constexpr uintptr_t kShikiDanKobunDti = 0x140D4D3D0ull;
 constexpr uintptr_t kRyuDti = 0x140D45A10ull;
@@ -87,6 +88,10 @@ constexpr DtiSnapshotRange kGeneratedShotTailRanges[] = {
 // in Ghidra but absent from the generated createProperty export. Keep these
 // separate from the generated file and reapply them after ownership filtering.
 constexpr DtiSnapshotRange kVerifiedShotScalarRanges[] = {
+    // Target counts, three gem-slot indices, and selected target (native setup
+    // 0x140173FD0 / move 0x140173870). Packed {0, 1} resembles a pointer;
+    // retaining factory zero loses the gem encounter (frame 2810 -> 2824).
+    {kElementalSummonShotDti, 0x21B0, 0x18},
     {0x140D49A08ull, 0x2140, 0x04}, // uShotMissileDoomsMissile: flight parameter
     {0x140D4CA20ull, 0x2140, 0x03}, // uShotOptionAttackWire: state flags
     {0x140D4CA20ull, 0x2144, 0x08}, // uShotOptionAttackWire: mode/timer
@@ -192,6 +197,9 @@ constexpr DtiSnapshotRange kVerifiedShotScalarRanges[] = {
     {0x140D484D0ull, 0x21D8, 0x04}, // uShotVulcanHyoran: owner angle
     {0x140D4B980ull, 0x2230, 0x04}, // uShotVulcanItemThrow: item type
     {0x140D4D550ull, 0x2140, 0x0C}, // uShotVulcanJigenZan: timer/count/variant
+    // Dormammu f942: horizontal drift diverges before f943 position/rotation.
+    // Reapply after ownership filtering; vfn124 consumes this setup-randomized speed.
+    {0x140D49898ull, 0x2140, 0x04}, // uShotVulcanMagicMagmaSpread: horizontal drift
     {0x140D4BA90ull, 0x2140, 0x01}, // uShotVulcanNemesisRocketLauncher: spawn latch
     {0x140D4BA90ull, 0x2144, 0x04}, // uShotVulcanNemesisRocketLauncher: life limit
     {0x140D4A6B0ull, 0x2140, 0x01}, // uShotVulcanNetArrow: deferred-target flag
@@ -251,6 +259,10 @@ constexpr DtiSnapshotRange kVerifiedCharacterScalarRanges[] = {
     {0x140D45020ull, 0x68F4, 0x08}, // uDormammu: spell stock and flare counter
     {0x140D45020ull, 0x6920, 0x01}, // uDormammu: Stalking Flare lock
     {0x140D45068ull, 0x68F8, 0x04}, // uDrDoom: single-animation action latch
+    // Grace registry state: preserve insertion order and oldest-crystal eviction
+    // after pointer filtering. The three shot references are remapped separately.
+    {0x140D450A8ull, 0x6920, 0x08}, // uDrStrange: next Grace slot and crystal count
+    {0x140D450A8ull, 0x6930, 0x0C}, // uDrStrange: Grace ages
     {0x140D44FE0ull, 0x68F0, 0x08}, // uDeadPool: teleport state
     {0x140D45200ull, 0x6990, 0x30}, // uFrank: Kobun scale, offset, rotation
     {0x140D45200ull, 0x69C4, 0x04}, // uFrank: level
@@ -820,10 +832,9 @@ void RestoreAttackTargets(uint8_t* shot, const uint8_t* saved,
                  ++target) {
                 validTarget = savedTarget == (uint64_t)validTargets[target];
             }
-            // TargetInfo stores characters and manager-owned stage bodies.
-            // Restrict historical pointers to the caller's current stable
-            // targets instead of accepting an unrelated allocation that happens
-            // to reuse the old address.
+            // Keep historical pointers only for current stable targets.
+            // Projectile targets are captured by spawn sequence and rebound by
+            // Shot_RestoreBodyReferences after all shots have been reconstructed.
             if (validTarget) {
                 *(uint64_t*)(shot + entry + 0x08) = savedTarget;
             }
@@ -1177,7 +1188,10 @@ bool ConcreteShotSnapshot_Restore(void* shot,
     // Nemesis's explosion is rebuilt from its remapped parent rocket; its fresh
     // binding carries that parent's attack variant, while the saved client
     // binding can still resolve the factory-default launch parameters.
-    if (!IsDti(snapshot.dti, kRocketLauncherExplodeDti)) {
+    // Elemental Summon likewise rebuilds its powered attack binding natively.
+    // Keep that fresh map instead of a reference from the retired resource graph.
+    if (!IsDti(snapshot.dti, kRocketLauncherExplodeDti) &&
+        !IsDti(snapshot.dti, kElementalSummonShotDti)) {
         CopyRange(overlay.data(), source, liveSize, {0x1490, 0x08});
     }
 

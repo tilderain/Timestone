@@ -2,6 +2,7 @@
 // Frame advance mod for UMvC3 training mode.
 // Ported from umvc3_framestep by Gneiss and EternalYoshi.
 #include "../pch.h"
+#include "../IniSafe.h"
 #include "framestepper.h"
 #include "gameui.h"
 #include "mk10utils.h"       // _addr
@@ -42,6 +43,7 @@ using namespace Memory::VP;
 // HookLog from dllmain.cpp
 extern void HookLog(const char* fmt, ...);
 extern void HookLogFlush();
+extern void BootTimer_Stamp(const char* label);
 extern void ChrSelImGui_Update();
 extern bool ChrSelImGui_ApplyRestart(int32_t targetFrame);
 extern bool ChrSelImGui_TakeFullTransitionRequested();
@@ -546,6 +548,12 @@ extern "C" void Controller_OnFrameEnd();
 // ---------------------------------------------------------------------------
 static void __fastcall HookedMove(void* sMvc3Main)
 {
+    static bool firstMove = true;
+    if (firstMove) {
+        BootTimer_Stamp("First sMvc3Main move");
+        firstMove = false;
+    }
+
     // Rollback_ReSimulate owns the input boundary while replaying frames.
     // Re-entering the live path here can spin waiting for confirmed input.
     if (g_isResimulating)
@@ -1119,7 +1127,7 @@ static void SaveStatusHudMode()
         return;
 
     char value[2] = { (char)('0' + g_statusHudMode), '\0' };
-    if (!WritePrivateProfileStringA(
+    if (!IniSafe_WriteString(
             "FrameStepper", "StatusHudMode", value, iniPath)) {
         HookLog("FrameStepper: failed to save HUD mode to %s\n", iniPath);
     }

@@ -67,6 +67,12 @@ struct RollbackShotReference {
     RollbackShotReferenceKind kind = RollbackShotReferenceKind::None;
 };
 
+struct RollbackShotBodyReference {
+    uint64_t ownerSpawnSequence = 0;
+    uint32_t offset = 0;
+    RollbackShotReference target;
+};
+
 struct RollbackShotRecipe {
     void* savedPtr;
     void* restoredPtr;
@@ -144,6 +150,7 @@ enum class RollbackCharacterShotReferenceRole : uint8_t {
     ShieldSlash,
     MissileEmplacement,
     SpadaBoomerang,
+    GraceOfHoggoth,
 };
 
 struct RollbackCharacterShotReference {
@@ -221,6 +228,7 @@ struct RollbackSnapshotSlot {
     uint32_t localInput = 0;
     uint32_t remoteInput = 0;
     std::vector<RollbackShotRecipe> shotRecipes;
+    std::vector<RollbackShotBodyReference> shotBodyReferences;
     std::vector<RollbackEffectRecipe> effectRecipes;
     std::vector<RollbackCharacterEffectState> characterEffectStates;
     std::vector<RollbackCharacterEffectReference> characterEffectReferences;

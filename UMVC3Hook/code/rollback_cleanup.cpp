@@ -20,6 +20,7 @@ static constexpr uintptr_t DTI_DR_STRANGE = 0x140D450A8;
 static constexpr uintptr_t DTI_UCUTIN = 0x140D6BCC8;
 static constexpr uintptr_t TEAM0_OFFSET = 0x40;
 static constexpr uintptr_t TEAM1_OFFSET = 0x300;
+static constexpr uintptr_t SGAMEUI_TEAM_CHARACTER_ID_OFFSET = 0x5960;
 static constexpr uintptr_t NODE_CHR_OFFSET = 0x08;
 static constexpr uintptr_t NODE_NEXT_OFFSET = 0x10;
 static constexpr uintptr_t TEAM_FIRST_NODE_OFFSET = 0x08;
@@ -276,7 +277,10 @@ void Rollback_SyncActiveCharacterUi()
 
         int teamId = *(int*)(active + 0x2DA0);
         int memberId = *(int*)(active + 0x2DB0);
-        setTeamCharacterId(sGameUi, teamId, memberId);
+        int* cachedMemberId = (int*)(sGameUi +
+            SGAMEUI_TEAM_CHARACTER_ID_OFFSET + (uintptr_t)teamId * sizeof(int));
+        if (*cachedMemberId != memberId)
+            setTeamCharacterId(sGameUi, teamId, memberId);
     }
 }
 

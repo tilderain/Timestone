@@ -99,6 +99,9 @@
     <ClInclude Include="code\gameui.h">
       <Filter>Header Files\code</Filter>
     </ClInclude>
+    <ClInclude Include="code\d3d9reset.h">
+      <Filter>Header Files\code</Filter>
+    </ClInclude>
     <ClInclude Include="IniReader.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -252,6 +255,9 @@
       <Filter>Header Files\code</Filter>
     </ClCompile>
     <ClCompile Include="code\gameui.cpp">
+      <Filter>Header Files\code</Filter>
+    </ClCompile>
+    <ClCompile Include="code\d3d9reset.cpp">
       <Filter>Header Files\code</Filter>
     </ClCompile>
     <ClCompile Include="IniReader.cpp">

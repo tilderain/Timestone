@@ -107,7 +107,7 @@ bool UMVC3Menu::GetActiveState()
 char* GetUMVC3HookVersion()
 {
 	static char buffer[512] = {};
-	sprintf(buffer, "UMVC3Hook by ermaccer (%s)", UMVC3HOOK_VERSION);
+	sprintf(buffer, "UMVC3Hook by ermaccer (0.1)");
 	return buffer;
 }
 

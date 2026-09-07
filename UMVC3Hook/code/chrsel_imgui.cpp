@@ -141,7 +141,7 @@ void EnsureArchiveReadyHook()
         HookLog("ChrSelImGui: failed to enable archive readiness hook (%d)\n", status);
         return;
     }
-    HookLog("ChrSelImGui: installed replacement archive readiness gate\n");
+    HookLog("ChrSelImGui: installed replacement archive readiness hook\n");
 }
 
 void LogResetState()
@@ -553,8 +553,8 @@ void BeginSynchronizedSession()
     g_open = true;
     SetStatus(CanEditAllTeams()
         ? "Both clients can edit and commit the full roster"
-        : Netplay_IsHost() ? "Edit P1; the client edits P2"
-                           : "Edit P2; the host edits P1");
+        : Netplay_IsHost() ? ""
+                           : "");
     SendPacket(MakePacket(CHRSEL_OPEN));
 }
 
@@ -719,8 +719,15 @@ void HandlePacket(const ChrSelPacket& packet)
         return;
     }
     if (packet.action == CHRSEL_COMMIT) {
+        const bool saveLocalSelection = g_open && !CanEditAllTeams();
         if (!AcceptCommit(packet))
             SetStatus("Rejected stale or invalid roster commit");
+        else if (saveLocalSelection) {
+            // Keep our locally edited selection, not the peer's copy of it in
+            // the commit packet. The persistence API selects only our side.
+            const bool simpleMode[2] = {g_roster.simpleMode[0] != 0, g_roster.simpleMode[1] != 0};
+            SaveRosterToIni(g_roster.chars, g_roster.colors, g_roster.assists, simpleMode);
+        }
     }
 }
 
@@ -758,7 +765,8 @@ void CommitSelection()
         SetStatus("A restart is already pending");
         return;
     }
-    SaveRosterToIni(g_roster.chars, g_roster.colors, g_roster.assists);
+    const bool simpleMode[2] = {g_roster.simpleMode[0] != 0, g_roster.simpleMode[1] != 0};
+    SaveRosterToIni(g_roster.chars, g_roster.colors, g_roster.assists, simpleMode);
     if (Netplay_IsActive())
         SendPacket(packet);
 }

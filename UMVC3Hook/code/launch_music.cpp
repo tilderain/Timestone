@@ -1,4 +1,5 @@
 #include "launch_music.h"
+#include "../IniSafe.h"
 
 #include <Windows.h>
 #include <mmsystem.h>
@@ -290,6 +291,16 @@ DWORD WINAPI MusicThreadProc(LPVOID)
 
 void LaunchMusic_Start()
 {
+    // A background fade ends playback without closing the thread/event handles.
+    // Reap a finished worker so a later lobby connection can start music again.
+    if (g_musicThread && WaitForSingleObject(g_musicThread, 0) == WAIT_OBJECT_0) {
+        CloseHandle(g_musicThread);
+        CloseHandle(g_stopEvent);
+        CloseHandle(g_fadeCompleteEvent);
+        g_musicThread = nullptr;
+        g_stopEvent = nullptr;
+        g_fadeCompleteEvent = nullptr;
+    }
     if (g_musicThread) return;
     LoadMuteSetting();
     g_fadeRequested.store(false, std::memory_order_relaxed);
@@ -375,7 +386,7 @@ void LaunchMusic_SetMuted(bool muted)
 
     char path[MAX_PATH] = {};
     if (GetIniPath(path, sizeof(path)) &&
-        !WritePrivateProfileStringA("Audio", "LobbyMusicMuted", muted ? "1" : "0", path)) {
+        !IniSafe_WriteString("Audio", "LobbyMusicMuted", muted ? "1" : "0", path)) {
         HookLog("LaunchMusic: could not save mute setting to %s\n", path);
     }
 }

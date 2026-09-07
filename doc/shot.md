@@ -8,6 +8,26 @@ as uniform byte blobs and did not account for polymorphic DTI allocation,
 resource ownership, collision arrays, inline objects, effects, or scalar
 deleting destructors.
 
+## Projectile Clash History
+
+The inline `cAtkCtrl` has three 32-entry `TargetInfo` tables at shot offsets
+`+0x14C0`, `+0x17C0`, and `+0x1AC0`. Each entry is `0x18` bytes: target pointer
+at `+0x08`, hit count at `+0x10`, and hit timer at `+0x14`.
+
+`Shot_CaptureRecipes` captures tracked projectile targets by spawn sequence in
+the reusable `shotBodyReferences` vector. `Shot_RestoreBodyReferences` resolves
+them only after all shot reconstruction, pairing the replacement target with
+the count/time already restored by `RestoreAttackTargets`. Missing replacement
+targets resolve to null; character/stage targets retain stable-target validation.
+The pass never dereferences historical targets or copies retired shot pointers.
+
+Evidence: `20260906_054008_host_f497` / `20260906_054009_client_f498`, Psionic
+Blaster versus Bolts of Balthakk. Both peers record the clash at frame 479;
+client target pointers become null at 480, hit consumption diverges at 481,
+and beam distance diverges at 482. Native `cAtkCtrl__commitTargetHitState`
+(`0x14000D2C0`) uses exact target identity for repeat rules. The remap repair
+requires an in-game rerun to verify synchronized clash and beam-extension timing.
+
 ## Native Manager
 
 | Address | Meaning |
@@ -286,6 +306,16 @@ with the zero padding beside it, which can look like mapped memory to the generi
 ownership filter and leave the reconstructed factory value at zero. Reapplying
 the verified four-byte float after pointer filtering preserves the axe arc and
 the rotating hitbox without importing model pointers.
+
+The axe must also remain in snapshots during cleanup step 3 with hit judgment
+disabled. In `20260906_051613`, filtering it at frame 982 removed the client's
+future native kill callback: the host cleared `uArthur+0x68FA` (`mIsAxe`) and
+`mUsrF` bit 1 at frame 989, while the client retained both restrictions and
+rejected the next throw at frame 1012. `IsTerminalShot` now retains this class;
+`Shot_ApplyFlight` restores its saved cleanup step and collision-enable flags.
+Do not derive axe availability from the filtered shot count or clear it at
+step-3 entry, since that releases the restriction before native kill. This
+retention repair still requires an in-game rerun to verify cleanup timing.
 
 Arthur's Cross Sword availability detector is the boolean `mIsCrossSword` at
 `uArthur+0x68f9`, not a shot pointer. Setup writes one and both the concrete kill

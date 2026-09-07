@@ -1,4 +1,5 @@
 #include "../pch.h"
+#include "../IniSafe.h"
 
 #include "rollback_snapdump.h"
 #include "autotest.h"
@@ -397,24 +398,35 @@ void SnapDump_UpdateInputs(int32_t frame, uint32_t localInput, uint32_t remoteIn
     }
 }
 
+bool SnapDump_CaptureEnabled()
+{
+    static const bool enabled = []() {
+        char iniPath[MAX_PATH] = {};
+        if (Rollback_ResolveDllPath(
+                iniPath, sizeof(iniPath), "Timestone.ini") < 0) {
+            return false;
+        }
+
+        char value[16] = {};
+        GetPrivateProfileStringA(
+            "Rollback", "EnableSnapDumpWrites", "", value, sizeof(value),
+            iniPath);
+        if (!value[0]) {
+            if (!IniSafe_WriteString(
+                    "Rollback", "EnableSnapDumpWrites", "0", iniPath)) {
+                HookLog("SnapDump: failed to add EnableSnapDumpWrites=0 to %s\n",
+                        iniPath);
+            }
+            return false;
+        }
+        return std::strtol(value, nullptr, 10) != 0;
+    }();
+    return enabled;
+}
+
 bool SnapDump_WritesEnabled()
 {
-    char iniPath[MAX_PATH] = {};
-    if (Rollback_ResolveDllPath(iniPath, sizeof(iniPath), "Timestone.ini") < 0)
-        return false;
-
-    char value[16] = {};
-    GetPrivateProfileStringA(
-        "Rollback", "EnableSnapDumpWrites", "", value, sizeof(value), iniPath);
-    if (!value[0]) {
-        if (!WritePrivateProfileStringA(
-                "Rollback", "EnableSnapDumpWrites", "0", iniPath)) {
-            HookLog("SnapDump: failed to add EnableSnapDumpWrites=0 to %s\n",
-                    iniPath);
-        }
-        return false;
-    }
-    return std::strtol(value, nullptr, 10) != 0;
+    return SnapDump_CaptureEnabled();
 }
 
 bool SnapDump_WriteHistory(int32_t triggerFrame, const char* relativePath)

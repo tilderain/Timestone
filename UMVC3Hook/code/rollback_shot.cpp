@@ -29,6 +29,7 @@ static constexpr uint32_t SUNIT_MAX_CATEGORIES = 64;
 static constexpr uint32_t SUNIT_MULTI_MASK_COUNT_OFFSET = 0x1840;
 static constexpr uint32_t SUNIT_MULTI_MASK_ARRAYS_OFFSET = 0xC50;
 static constexpr uintptr_t VTABLE_USHOT_VULCAN_ZIREITOU = 0x140AC0E20;
+static constexpr uintptr_t DTI_USHOT_VULCAN_AXE = 0x140D48808;
 static constexpr uintptr_t DTI_USHOT_SHIELD_RAID_SWORD = 0x140D4D470;
 static constexpr uintptr_t DTI_USHOT_SHIELD_SPIRAL_SWORD = 0x140D4D4C8;
 static constexpr uintptr_t DTI_USHOT_SHIELD_STORM_SWORD = 0x140D4D508;
@@ -45,6 +46,10 @@ static constexpr int DYNAMIC_SAFETY = 128;
 static constexpr int SSHOT_SENTINEL_COUNT = 10;
 static constexpr size_t SSHOT_NODE_OFFSET = 0x1450;
 static constexpr size_t SSHOT_NODE_NEXT = 0x08;
+static constexpr uint32_t SHOT_ATTACK_TARGET_TABLES[] = {0x14C0, 0x17C0, 0x1AC0};
+static constexpr uint32_t SHOT_ATTACK_TARGET_COUNT = 32;
+static constexpr uint32_t SHOT_ATTACK_TARGET_STRIDE = 0x18;
+static constexpr uint32_t SHOT_ATTACK_TARGET_POINTER_OFFSET = 0x08;
 static constexpr uint32_t SUNIT_CHARACTER_CATEGORY = 8;
 static constexpr uintptr_t TEAM0_OFFSET = 0x40;
 static constexpr uintptr_t TEAM1_OFFSET = 0x300;
@@ -292,10 +297,12 @@ static bool IsTerminalShot(void* shot)
     uint8_t flags = *(uint8_t*)((uint8_t*)shot + 0x1F64);
     if (step == 3 && (flags & 0x02) == 0) {
         uint64_t dti = GetObjectDti((uint64_t)shot);
-        // Vergil's sword remains authoritative during cleanup. Its native
-        // callback advances the local step and clears exactly one availability
-        // bit; filtering it would force restore to guess that timing.
-        if (dti == (uint64_t)_addr(DTI_USHOT_SHIELD_RAID_SWORD) ||
+        // These shots remain authoritative during cleanup: native callbacks
+        // release their owner's weapon restriction. Arthur's axe clears
+        // mIsAxe and mUsrF bit 1 at kill, not when it enters step 3.
+        // Shot_ApplyFlight restores the cleanup step and disabled hit judgment.
+        if (dti == (uint64_t)_addr(DTI_USHOT_VULCAN_AXE) ||
+            dti == (uint64_t)_addr(DTI_USHOT_SHIELD_RAID_SWORD) ||
             dti == (uint64_t)_addr(DTI_USHOT_SHIELD_SPIRAL_SWORD) ||
             dti == (uint64_t)_addr(DTI_USHOT_SHIELD_STORM_SWORD)) {
             return false;
@@ -506,6 +513,7 @@ static char __fastcall hkUnitRemove(void* manager, void* unit)
 void Shot_CaptureRecipes(RollbackSnapshotSlot& slot)
 {
     slot.shotRecipes.clear();
+    slot.shotBodyReferences.clear();
     for (int list = 0; list < SSHOT_SENTINEL_COUNT; ++list) {
         uint64_t sentinel = (uint64_t)_addr(0x140d47f90) + list * 0x28;
         uint64_t sentinelRef = sentinel + 0x08;
@@ -519,6 +527,42 @@ void Shot_CaptureRecipes(RollbackSnapshotSlot& slot)
                 saved.savedPtr = shot;
                 Shot_CaptureFlight(shot, saved.flight);
                 ConcreteShotSnapshot_Capture(shot, saved.concrete);
+                for (uint32_t offset : Rollback_GetShotBodyReferenceOffsets(saved.concrete.dti)) {
+                    if (offset + sizeof(void*) > saved.concrete.body.size()) continue;
+                    void* target = nullptr;
+                    std::memcpy(&target, saved.concrete.body.data() + offset, sizeof(target));
+                    RollbackShotReference reference;
+                    // Only tracked shots are valid here; never dereference a
+                    // stale child or reinterpret it as a stable unit.
+                    auto child = g_liveShotRecipes.find(target);
+                    if (target && child != g_liveShotRecipes.end()) {
+                        reference.savedPtr = target;
+                        reference.kind = RollbackShotReferenceKind::Shot;
+                        reference.shotSpawnSequence = child->second.spawnSequence;
+                    }
+                    slot.shotBodyReferences.push_back({saved.spawnSequence, offset, reference});
+                }
+                // cAtkCtrl's three TargetInfo tables also hold projectile targets.
+                // RestoreAttackTargets rewinds count/time, but only accepts stable
+                // target pointers. Rebind tracked shots after all reconstruction
+                // so a prior clash is not accepted again as a new contact.
+                for (uint32_t table : SHOT_ATTACK_TARGET_TABLES) {
+                    for (uint32_t index = 0; index < SHOT_ATTACK_TARGET_COUNT; ++index) {
+                        uint32_t entry = table + index * SHOT_ATTACK_TARGET_STRIDE;
+                        if (entry + SHOT_ATTACK_TARGET_STRIDE > saved.concrete.body.size()) break;
+                        uint32_t offset = entry + SHOT_ATTACK_TARGET_POINTER_OFFSET;
+                        void* target = nullptr;
+                        std::memcpy(&target, saved.concrete.body.data() + offset, sizeof(target));
+                        if (!target) continue;
+                        auto tracked = g_liveShotRecipes.find(target);
+                        if (tracked == g_liveShotRecipes.end()) continue;
+                        RollbackShotReference reference;
+                        reference.savedPtr = target;
+                        reference.kind = RollbackShotReferenceKind::Shot;
+                        reference.shotSpawnSequence = tracked->second.spawnSequence;
+                        slot.shotBodyReferences.push_back({saved.spawnSequence, offset, reference});
+                    }
+                }
                 slot.shotRecipes.push_back(saved);
             }
             nodeRef = *(uint64_t*)(nodeRef + SSHOT_NODE_NEXT);
@@ -581,6 +625,17 @@ void* Shot_ResolveReference(const RollbackShotReference& reference)
         return nullptr;
     }
     return reference.savedPtr;
+}
+
+void Shot_RestoreBodyReferences(const RollbackSnapshotSlot& slot)
+{
+    // All owners and children must have been reconstructed before this pass.
+    for (const RollbackShotBodyReference& reference : slot.shotBodyReferences) {
+        auto owner = g_liveShotsBySequence.find(reference.ownerSpawnSequence);
+        if (owner == g_liveShotsBySequence.end()) continue;
+        *(void**)((uint8_t*)owner->second + reference.offset) =
+            Shot_ResolveReference(reference.target);
+    }
 }
 
 void* Shot_SpawnOriginal(void* manager, const RollbackShotRecipe& recipe,

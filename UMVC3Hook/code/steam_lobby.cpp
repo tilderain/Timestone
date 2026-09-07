@@ -91,6 +91,7 @@ uint64_t g_results[kMaxLobbyResults] = {};
 int g_resultPings[kMaxLobbyResults] = {};
 char g_resultNames[kMaxLobbyResults][128] = {};
 char g_resultUsernames[kMaxLobbyResults][128] = {};
+char g_resultProtocols[kMaxLobbyResults][32] = {};
 size_t g_resultCount = 0;
 uint64_t g_friendLobbyCandidates[kMaxFriendLobbyCandidates] = {};
 size_t g_friendLobbyCandidateCount = 0;
@@ -603,6 +604,8 @@ bool RefreshResultMetadata(size_t index)
     uint64_t lobbyId = g_results[index];
     bool changed = CopyResultText(g_resultNames[index], sizeof(g_resultNames[index]),
                                   g_api.GetLobbyData(g_matchmaking, lobbyId, "name"));
+    changed |= CopyResultText(g_resultProtocols[index], sizeof(g_resultProtocols[index]),
+                              g_api.GetLobbyData(g_matchmaking, lobbyId, "protocol"));
 
     const char* username = g_api.GetLobbyData(g_matchmaking, lobbyId, "username");
     if ((!username || !username[0]) && g_friends) {
@@ -630,6 +633,7 @@ void AddResult(uint64_t lobbyId)
     g_resultPings[index] = EstimateLobbyPing(lobbyId);
     g_resultNames[index][0] = '\0';
     g_resultUsernames[index][0] = '\0';
+    g_resultProtocols[index][0] = '\0';
     RefreshResultMetadata(index);
 }
 
@@ -681,9 +685,7 @@ bool MergeFriendLobbyCandidates()
         if (HasResult(lobbyId)) continue;
 
         const char* marker = g_api.GetLobbyData(g_matchmaking, lobbyId, "Timestone");
-        const char* protocol = g_api.GetLobbyData(g_matchmaking, lobbyId, "protocol");
-        if (marker && strcmp(marker, "1") == 0 && protocol &&
-            strcmp(protocol, kLobbyProtocol) == 0) {
+        if (marker && strcmp(marker, "1") == 0) {
             AddResult(lobbyId);
             changed = true;
             HookLog("SteamLobby: added friend lobby %llu to search results\n",
@@ -879,7 +881,6 @@ void SteamLobby_Search()
 {
     if (!SteamLobby_Initialize() || g_pendingCall != PendingCall::None) return;
     g_api.AddStringFilter(g_matchmaking, "Timestone", "1", 0);
-    g_api.AddStringFilter(g_matchmaking, "protocol", kLobbyProtocol, 0);
     g_api.AddSlotsFilter(g_matchmaking, 1);
     g_api.AddResultCountFilter(g_matchmaking, 50);
     g_api.AddDistanceFilter(g_matchmaking, 3); // k_ELobbyDistanceFilterWorldwide
@@ -910,6 +911,11 @@ void SteamLobby_Create(SteamLobbyType type)
 void SteamLobby_Join(uint64_t lobbyId)
 {
     if (!lobbyId || !SteamLobby_Initialize() || g_pendingCall != PendingCall::None) return;
+    if (HasResult(lobbyId) && !SteamLobby_IsLobbyVersionCompatible(lobbyId)) {
+        const char* protocol = g_api.GetLobbyData(g_matchmaking, lobbyId, "protocol");
+        SetVersionMismatch(protocol);
+        return;
+    }
     if (lobbyId == g_lobbyId) {
         SetStatus("Already in the selected Steam lobby");
         return;
@@ -1100,10 +1106,37 @@ bool SteamLobby_IsHostedLobby(uint64_t lobbyId)
     return g_isHost && lobbyId != 0 && lobbyId == g_lobbyId;
 }
 
+bool SteamLobby_IsHost()
+{
+    return g_isHost && g_lobbyId != 0;
+}
+
+bool SteamLobby_GetHostedJoinLink(char* link, size_t capacity)
+{
+    if (!link || capacity == 0) return false;
+    link[0] = '\0';
+    if (!g_isHost || !g_lobbyId || !g_matchmaking) return false;
+    const uint64_t owner = g_api.GetLobbyOwner(g_matchmaking, g_lobbyId);
+    if (!owner) return false;
+    const int length = snprintf(link, capacity, "steam://joinlobby/357190/%llu/%llu",
+        static_cast<unsigned long long>(g_lobbyId),
+        static_cast<unsigned long long>(owner));
+    return length > 0 && static_cast<size_t>(length) < capacity;
+}
+
 bool SteamLobby_IsFriendLobby(uint64_t lobbyId)
 {
     for (size_t i = 0; i < g_friendLobbyCandidateCount; ++i) {
         if (g_friendLobbyCandidates[i] == lobbyId) return true;
+    }
+    return false;
+}
+
+bool SteamLobby_IsLobbyVersionCompatible(uint64_t lobbyId)
+{
+    for (size_t i = 0; i < g_resultCount; ++i) {
+        if (g_results[i] == lobbyId)
+            return strcmp(g_resultProtocols[i], kLobbyProtocol) == 0;
     }
     return false;
 }

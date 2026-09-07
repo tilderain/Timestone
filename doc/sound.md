@@ -5,6 +5,11 @@ current source on 2026-07-23.** This is resource-format research, not a complete
 sound-runtime layout. Unknown fields remain unnamed rather than assigned inferred
 PCM or trigger semantics.
 
+For the missing character pain voices, see [pain_voice_fix.md](pain_voice_fix.md):
+the queued damage path bypasses variant resolution and submits group IDs rejected
+by the structured allocator. That report includes resource evidence and a scoped
+code-patch design; it is not an installed fix.
+
 ## Current Rollback Boundary
 
 The native `sSound` singleton pointer is stored at `0x140E18520`, and

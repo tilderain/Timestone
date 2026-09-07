@@ -43,6 +43,7 @@ constexpr uintptr_t DTI_USHOT_OPTION_SPADA_BOOMERANG = 0x140D4D118;
 constexpr uintptr_t DTI_USHOT_VULCAN_CROSS_SWORD = 0x140D488B8;
 constexpr uintptr_t DTI_USHOT_VULCAN_IRON_PIPE_ROLLING = 0x140D4A4E8;
 constexpr uintptr_t DTI_USHOT_VULCAN_LAND_MINE = 0x140D48D98;
+constexpr uintptr_t DTI_USHOT_VULCAN_ELEMENTAL_SUMMON_SHOT = 0x140D49DF8;
 constexpr uintptr_t DTI_USHOT_SHIELD_KIKOUSYOU = 0x140D48F70;
 constexpr uintptr_t DTI_USHOT_VULCAN_MISSILE_EMPLACEMENT = 0x140D49A60;
 constexpr uintptr_t DTI_USHOT_VULCAN_PRICKLE_BOARD = 0x140D4C528;
@@ -60,6 +61,7 @@ constexpr uintptr_t DTI_UKOBUN = 0x140D455B0;
 constexpr uintptr_t VTABLE_UARTHUR = 0x140A70CD0;
 constexpr uintptr_t VTABLE_UCAP_AMERICA = 0x140A71430;
 constexpr uintptr_t VTABLE_UDOCTOR_DOOM = 0x140A73A40;
+constexpr uintptr_t VTABLE_UDOCTOR_STRANGE = 0x140A73F70;
 constexpr uintptr_t VTABLE_URROCKET_RACCOON = 0x140A7DF30;
 constexpr uintptr_t VTABLE_UTRISH = 0x140A81A20;
 constexpr uintptr_t PTR_SUNIT = 0x140E17698;
@@ -72,6 +74,7 @@ constexpr uintptr_t FN_KING_KOBUN_MOVE = 0x1401BA2D0;
 constexpr uintptr_t FN_MISSILE_EMPLACEMENT_MOVE = 0x14016F220;
 constexpr uintptr_t FN_WEAPON_CART_MOVE = 0x14017A9D0;
 constexpr uintptr_t FN_WEAPON_CART_SPAWN_DEBRIS = 0x14017A200;
+constexpr uintptr_t FN_ELEMENTAL_SUMMON_REFRESH_POWER = 0x140172F00;
 constexpr uintptr_t FN_SSHOT_FLUSH_PENDING_UNITS = 0x1401517A0;
 constexpr uintptr_t FN_MTOBJECT_ADD_REF = 0x14050D100;
 constexpr uintptr_t FN_UMODEL_PROCESS_ACTION_ANMCHR = 0x140529420;
@@ -1152,9 +1155,35 @@ void Rollback_FinishShotFactory(RollbackShotFactoryPolicyState& state)
     }
 }
 
+std::span<const uint32_t> Rollback_GetShotBodyReferenceOffsets(uint64_t runtimeDti)
+{
+    constexpr uintptr_t kSatelliteLaserLockDti = 0x140D48EE8;
+    static constexpr uint32_t kSatelliteLaserLockReferences[] = {0x2220};
+    // mpChildShot blocks reticle movement and refiring while the laser is active.
+    if (runtimeDti == (uint64_t)_addr(kSatelliteLaserLockDti))
+        return kSatelliteLaserLockReferences;
+    return {};
+}
+
 void Rollback_RebuildShotStateBeforeRegistration(
     void* shot, const RollbackShotRecipe& saved)
 {
+    if (saved.concrete.dti ==
+            (uint64_t)_addr(DTI_USHOT_VULCAN_ELEMENTAL_SUMMON_SHOT) &&
+        saved.concrete.body.size() >= 0x21EC) {
+        uint32_t power = 0;
+        std::memcpy(&power, saved.concrete.body.data() + 0x21E8, sizeof(power));
+        if (power >= 2 && power <= 4) {
+            // The original recipe binds the base attack. Rebuild Orange/Red
+            // resources and the owned effect before gameplay/collision overlay;
+            // restoring radius alone reverts to base metadata on the next tick.
+            // Power 4 retains the Red resource/effect from power 3 natively.
+            *(uint32_t*)((uint8_t*)shot + 0x21E8) = std::min(power, 3u);
+            ((void(__fastcall*)(void*))_addr(FN_ELEMENTAL_SUMMON_REFRESH_POWER))(shot);
+        }
+        return;
+    }
+
     if (saved.concrete.dti != (uint64_t)_addr(DTI_USHOT_VULCAN_LAND_MINE) ||
         saved.concrete.body.size() <= 0x2214 ||
         saved.concrete.body[0x2214] == 0 ||
@@ -1329,6 +1358,15 @@ void Rollback_CaptureCharacterShotReferences(RollbackSnapshotSlot& slot)
             capture(UDOCTOR_DOOM_MISSILE_OFFSET,
                     RollbackCharacterShotReferenceRole::MissileEmplacement,
                     DTI_USHOT_VULCAN_MISSILE_EMPLACEMENT, true);
+        } else if (region.expectedVtable ==
+                   (uint64_t)_addr(VTABLE_UDOCTOR_STRANGE)) {
+            // Flames setup and Grace consumption read these ordered shot slots,
+            // not the presentation effects at +0x68F0..+0x6900. Capture empty
+            // slots too so rollback cannot retain a prediction-only crystal.
+            for (uint32_t offset : {0x6908u, 0x6910u, 0x6918u}) {
+                capture(offset, RollbackCharacterShotReferenceRole::GraceOfHoggoth,
+                        0, true);
+            }
         } else if (region.expectedVtable == (uint64_t)_addr(VTABLE_UTRISH)) {
             capture(UTRISH_SPADA_BOOMERANG_OFFSET,
                     RollbackCharacterShotReferenceRole::SpadaBoomerang,

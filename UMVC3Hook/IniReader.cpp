@@ -1,5 +1,6 @@
 #include "framework.h"
 #include "IniReader.h"
+#include "IniSafe.h"
 #include <iostream>
 #include <Windows.h>
 using namespace std;
@@ -69,21 +70,21 @@ void CIniReader::WriteInteger(char* szSection, char* szKey, int iValue)
 {
 	char szValue[255];
 	_snprintf(szValue, 255, "%d", iValue);
-	WritePrivateProfileString(szSection, szKey, szValue, m_szFileName);
+	IniSafe_WriteString(szSection, szKey, szValue, m_szFileName);
 }
 void CIniReader::WriteFloat(char* szSection, char* szKey, float fltValue)
 {
 	char szValue[255];
 	_snprintf(szValue, 255, "%f", fltValue);
-	WritePrivateProfileString(szSection, szKey, szValue, m_szFileName);
+	IniSafe_WriteString(szSection, szKey, szValue, m_szFileName);
 }
 void CIniReader::WriteBoolean(char* szSection, char* szKey, bool bolValue)
 {
 	char szValue[255];
 	_snprintf(szValue, 255, "%s", bolValue ? "True" : "False");
-	WritePrivateProfileString(szSection, szKey, szValue, m_szFileName);
+	IniSafe_WriteString(szSection, szKey, szValue, m_szFileName);
 }
 void CIniReader::WriteString(char* szSection, char* szKey, char* szValue)
 {
-	WritePrivateProfileString(szSection, szKey, szValue, m_szFileName);
+	IniSafe_WriteString(szSection, szKey, szValue, m_szFileName);
 }

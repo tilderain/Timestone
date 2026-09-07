@@ -116,7 +116,7 @@ jobs:
         # Copy-Item dist\dinput8.dll dist\ -Force   # unsigned — original from the zip
         # Remove-Item dist\Timestone.zip -Force
         New-Item -ItemType Directory -Path out -Force | Out-Null
-        Compress-Archive -Path dist\dinput8.dll, dist\Timestone.asi, dist\TimestoneUpdater.exe -DestinationPath out\Timestone.zip
+        Compress-Archive -Path dist\dinput8.dll, dist\Timestone.asi, dist\TimestoneUpdater.exe -DestinationPath out\Timestone.zip -CompressionLevel NoCompression
 
 
     - name: Upload signed artifacts

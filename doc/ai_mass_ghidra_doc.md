@@ -4,6 +4,14 @@
 **Scope:** Brute-force completion of the UMVC3 Ghidra database after automated naming
 **Primary consumer:** An AI coordinator dispatching multiple Ghidra analysis subagents
 
+**Lightweight reporting:** Keep the analysis, typing, class-reference, and safety
+requirements below. Do not build a JSON reporting framework to execute them.
+Use explicit address assignments and compact per-worker TSV checkpoints. Record
+evidence once, add detail only for actual changes or unresolved dependencies, and
+return counts plus the log path rather than copying every record into chat.
+User-specified scope takes precedence: a rename-only assignment does not authorize
+signature, type, or shared-structure changes.
+
 ## 1. Core Objective
 
 Systematically analyze, name, type, and document the remaining unresolved
@@ -96,7 +104,7 @@ Exactly one coordinator owns campaign state. It must:
 2. Build the unresolved function inventory.
 3. Create non-overlapping shards.
 4. Dispatch shards to workers.
-5. Track assignment leases and completed results.
+5. Track exclusive assignments and completed results.
 6. Detect duplicate or conflicting work.
 7. Schedule dependency and low-confidence passes.
 8. Publish progress and final coverage reports.
@@ -158,17 +166,8 @@ address list.
 
 At campaign start, record:
 
-```json
-{
-  "project": "ichneumon_sub",
-  "program": "umvc3.exe.unpacked.exe",
-  "image_base": "0x140000000",
-  "language": "x86:LE:64:default",
-  "analysis_complete": true,
-  "inventory_timestamp": "<ISO-8601>",
-  "total_functions": 56702
-}
-```
+Record project, program, image base, language, analysis status, inventory time,
+and live function count once in the campaign log. No separate JSON is required.
 
 The function count is a snapshot, not a permanent constant. Creating or fixing
 function boundaries may change it.
@@ -218,20 +217,8 @@ large address interval may contain fewer functions than a much smaller one.
 
 Each shard contains explicit function entry addresses:
 
-```json
-{
-  "shard_id": "pass1-0042",
-  "pass": 1,
-  "addresses": [
-    "0x1402aaec0",
-    "0x1402aaf20",
-    "0x1402aaf80",
-    "0x1402ab0c0"
-  ],
-  "range_hint": "0x1402aaec0-0x1402ab0c0",
-  "status": "pending"
-}
-```
+Use a plain address list in the worker assignment, with a shard identifier and
+pass number when needed. A separate JSON shard file is unnecessary.
 
 The address range is a human-readable hint. The explicit address list is
 authoritative.
@@ -264,23 +251,13 @@ Do not move a function into another worker's shard merely because one of its
 callers belongs there. Workers may read across shard boundaries; only root
 ownership must remain exclusive.
 
-### 6.4 Assignment Lease
+### 6.4 Assignment Ownership
 
-Every active shard requires a lease:
-
-```json
-{
-  "shard_id": "pass1-0042",
-  "worker_id": "ghidra-worker-07",
-  "assigned_at": "<ISO-8601>",
-  "lease_expires_at": "<ISO-8601>",
-  "status": "in_progress"
-}
-```
-
-If a worker fails or times out, the coordinator may requeue the shard only
-after its lease expires or the worker explicitly reports failure. This prevents
-two workers from modifying the same root function simultaneously.
+Track which worker owns each active shard. For a manually coordinated campaign,
+the explicit assignment is sufficient; no lease JSON or expiry framework is
+required. If a worker fails or times out, confirm that it has stopped writing
+before reassigning its roots. Expiration alone does not prevent an old worker
+from continuing to modify the database.
 
 ## 7. Parallelism and Shared Database Rules
 
@@ -365,7 +342,8 @@ one strong source:
 - It is present in the class vtable.
 - A constructor or class method passes its `this` pointer.
 - The first parameter is consistently used with a known structure.
-- Existing automated naming associates the function with one class.
+- Independently verified automated ownership associates it with one class;
+  the generated name alone is not proof, since prior scans crossed table boundaries.
 - The function is referenced only by a confirmed class-specific path.
 
 Apply the appropriate existing structure to the `this` parameter when known.
@@ -412,10 +390,11 @@ generic utility name merely to remove the `FUN_` prefix.
 Names must describe established behavior and its owning class, not merely
 restate an implementation detail. The worker must make a deliberate attempt to
 recover the real class method or subsystem function name before applying any
-rename. At minimum, inspect the function's direct callers, direct callees,
-vtable or constructor relationships, relevant strings or data, and the owning
-class reference when one exists. For a small helper, inspect every meaningful
-caller before deciding that its behavior is truly generic.
+rename. Inspect direct callers, callees, vtable or constructor relationships,
+relevant strings or data, and the owning class reference as needed to establish
+ownership and behavior. This is not a mandatory exhaustive checklist when the
+evidence is already sufficient. For a shared helper, inspect enough distinct
+uses to avoid assigning one caller's class-specific semantics to generic code.
 
 The following are not semantic names and must not be applied:
 
@@ -638,26 +617,11 @@ must ensure that only one worker at a time updates a given
 `doc/ghidra_classes/<Class>.md` file. Later workers must read the updated
 reference and merge evidence rather than replacing it.
 
-The per-function result record must list class-reference updates:
-
-```json
-{
-  "address": "0x140123450",
-  "class_references_read": ["doc/ghidra_classes/cChrInput.md"],
-  "field_findings": [
-    {
-      "class": "cChrInput",
-      "offset": "0x1234",
-      "size": 4,
-      "type": "uint32_t",
-      "proposed_name": "mCommandState",
-      "confidence": "high",
-      "access": "read_write"
-    }
-  ],
-  "class_references_updated": ["doc/ghidra_classes/cChrInput.md"]
-}
-```
+When a function produces class-reference updates, note the affected document
+path in its result. Keep field details and evidence in that document rather than
+duplicating them in a nested JSON record. Pending findings can be recorded briefly
+in the worker log until serialized merging is possible. Reuse class references
+already read within the batch unless another worker has updated them.
 
 ### 8.9 Rollback-Priority Class References
 
@@ -861,69 +825,37 @@ Existing meaningful names must not be replaced by lower-confidence names.
 Every assigned function must produce one result record, including functions
 that required no change:
 
-For any proposed rename, the result must separately record `owner_evidence` and
-`behavior_evidence`. These fields must cite the concrete callers, callees,
+For any proposed rename, the result must support both ownership and behavior.
+A single concise evidence entry can cite the concrete callers, callees,
 vtable or constructor relationship, DTI/class reference, strings, or repeated
 data access that justify the class-qualified name. A statement such as "loads a
 DWORD from offset 0x4028c" is implementation evidence, not owner or behavioral
 evidence for a function name.
 
-```json
-{
-  "shard_id": "pass1-0042",
-  "address": "0x1402aaf20",
-  "starting_name": "FUN_1402aaf20",
-  "final_name": "sGSound__processVoiceEntry_1402AAF20",
-  "starting_signature": "undefined8 FUN_1402aaf20(undefined8 param_1)",
-  "final_signature": "bool sGSound__processVoiceEntry_1402AAF20(sGSound *self, uint32_t index)",
-  "outcome": "documented",
-  "confidence": "medium",
-  "classification": "state_update",
-  "owner": "sGSound",
-  "owner_evidence": [
-    "three callers pass the sGSound singleton as rcx",
-    "the function is reached from the sGSound voice-management path"
-  ],
-  "behavior_evidence": [
-    "reads the active voice entry, validates its owner, and advances or retires it"
-  ],
-  "summary": "Validates a voice table entry and advances or retires its state.",
-  "evidence": [
-    "all inspected callers pass the sGSound singleton as rcx",
-    "param_2 indexes the same voice table in three field accesses",
-    "returns false for inactive entries and true after successful processing"
-  ],
-  "dependencies": [],
-  "changes_applied": [
-    "function_name",
-    "signature",
-    "function_comment"
-  ]
-}
+Use one TSV file per worker with this minimum header:
+
+```text
+address\told_name\tnew_name\toutcome\tevidence
 ```
 
-For an unresolved function:
+Use the outcomes from section 3. Evidence should be brief and concrete, citing
+relevant addresses and explaining the rename or reason for leaving it unchanged.
+Include confidence when a proposed name is intentionally broad or uncertain;
+the confidence policy still governs all mutations. Do not repeat the evidence
+as separate owner, behavior, summary, and classification essays.
 
-```json
-{
-  "address": "0x14070e340",
-  "starting_name": "FUN_14070e340",
-  "final_name": "FUN_14070e340",
-  "outcome": "deferred_dependency",
-  "confidence": "unknown",
-  "classification": "unknown",
-  "owner": null,
-  "summary": "Writes offsets 0x48 and 0x58 through an unresolved object pointer.",
-  "evidence": [
-    "two callers pass objects allocated by FUN_14070d6e0"
-  ],
-  "dependencies": [
-    "analyze allocator/factory FUN_14070d6e0",
-    "identify object layout used by parameter 1"
-  ],
-  "changes_applied": []
-}
-```
+Record old/new signatures only when changed, class-document paths only when
+updated, and dependencies only when applicable. Use additional columns or a
+short companion note for these details; no nested schema is required.
+
+Checkpoint each completed function or small group instead of waiting for the
+entire shard. Preserve the old name and supporting evidence before mutation,
+marking an intended change `pending` until confirmed. A pending proposal is not
+a completed result. After an interruption, reconcile pending or unreported roots
+against live Ghidra state before retrying.
+
+Return counts, unfinished addresses if any, and the log path. Do not paste the
+full records into the conversation or make workers maintain redundant totals.
 
 ## 11. Worker Prompt Contract
 
@@ -936,7 +868,7 @@ Every function worker must receive a prompt containing:
 - Permission boundaries for database changes.
 - Required per-function protocol.
 - Confidence and naming rules.
-- Required result schema.
+- Compact TSV checkpoint format from section 10.
 - A hard instruction to return a result for every root address.
 
 Reference worker prompt:
@@ -1104,21 +1036,10 @@ result record describing what is known and why exact naming failed.
 
 A function worker submits:
 
-```json
-{
-  "request_id": "struct-0172",
-  "requested_by": ["0x14070e340", "0x14070faaa"],
-  "candidate_type": "uCnsChain::UnknownEntry",
-  "minimum_size": "0x60",
-  "observed_fields": [
-    {"offset": "0x08", "width": 8, "usage": "pointer read"},
-    {"offset": "0x48", "width": 4, "usage": "float write"},
-    {"offset": "0x58", "width": 4, "usage": "flags read/write"}
-  ],
-  "blocking": true,
-  "notes": "Objects appear to be allocated by FUN_14070d6e0."
-}
-```
+A short note identifying the requesting functions, candidate type, minimum
+size, observed field offsets/widths/usage, allocation evidence, and whether the
+dependency blocks analysis. Reuse existing class-reference findings rather than
+copying them into a second JSON representation.
 
 ### 14.2 Structure Evidence
 
@@ -1253,14 +1174,9 @@ Workers must inspect disassembly when decompilation shows:
 
 Do not repair boundaries casually in a parallel worker. Record:
 
-```json
-{
-  "address": "0x140123450",
-  "outcome": "bad_function_boundary",
-  "observed_problem": "conditional branch enters 0x14012348c, currently defined as a separate function",
-  "recommended_action": "review both entries in disassembly before merging"
-}
-```
+The root address, `bad_function_boundary` outcome, specific conflicting address
+or control-flow fact, and recommended investigation. Put this in the normal
+result log; a separate JSON record is unnecessary.
 
 Boundary repair is serialized because it may invalidate shard inventories and
 neighboring analysis.
@@ -1337,23 +1253,10 @@ bad function boundaries awaiting repair
 
 ### 18.3 Progress Report
 
-```json
-{
-  "pass": 1,
-  "shards_total": 240,
-  "shards_complete": 96,
-  "candidates_total": 6840,
-  "processed": 2714,
-  "documented": 1510,
-  "classified": 621,
-  "already_complete": 403,
-  "library_or_generated": 118,
-  "deferred_dependency": 42,
-  "ambiguous": 17,
-  "analysis_failed": 3,
-  "remaining": 4126
-}
-```
+Derive applicable counts from worker checkpoints and summarize them in a short
+message. Include actual processed and remaining totals, applied changes, and
+unresolved outcomes. No JSON progress report or manually duplicated worker
+counters are required. Omit metrics outside the explicitly assigned scope.
 
 Do not report only the number of renames. A worker that correctly confirms an
 existing name or classifies library code has still completed useful inventory
@@ -1367,7 +1270,7 @@ can:
 1. Verify the expected Ghidra project, program, architecture, and image base.
 2. Build a complete candidate inventory without erasing existing work.
 3. Produce explicit, non-overlapping function shards.
-4. Maintain leases so each root function has at most one active worker.
+4. Track exclusive assignments so each root function has at most one active worker.
 5. Dispatch multiple workers concurrently.
 6. Require one structured result for every assigned function.
 7. Apply names and signatures only at the permitted confidence level.
@@ -1389,7 +1292,7 @@ can:
 The campaign is complete when:
 
 - Every candidate function has a final result record.
-- No shard remains pending, leased, or partially reported.
+- No shard remains pending, actively assigned, or partially reported.
 - No raw `FUN_` function remains unexplained unless it is explicitly marked
   ambiguous, failed, boundary-invalid, or intentionally unresolved.
 - All `deferred_dependency` entries have been retried after their dependency was
@@ -1487,7 +1390,7 @@ create explicit non-overlapping shards
 while pending shards exist:
     dispatch up to worker limit
     collect per-function results
-    expire failed leases
+    confirm failed workers have stopped before reassignment
     requeue only unfinished addresses
     collect shared dependency requests
 

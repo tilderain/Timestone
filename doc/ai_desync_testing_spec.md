@@ -85,7 +85,15 @@ If the suite does not complete, classify as `incomplete` and retry.
 
 ### 3.2 Artifact Discovery
 
-For autotest runs, search under the dedicated snapdump root:
+Search the game's `rollback_logs/` recursively for desync `.usdp` files,
+including any session subdirectories:
+
+```
+/media/god/tempData/SteamLibrary/steamapps/common/ULTIMATE MARVEL VS. CAPCOM 3/rollback_logs/
+```
+
+Also search the dedicated autotest snapdump root (explicit per-command dumps
+still use this location):
 
 ```
 /media/god/tempData/SteamLibrary/steamapps/common/ULTIMATE MARVEL VS. CAPCOM 3/autotest/
@@ -109,10 +117,11 @@ desync_<TIMESTAMP>_host_f<FRAME>.usdp
 desync_<TIMESTAMP>_client_f<FRAME>.usdp
 ```
 
-The timestamp and trigger frame must match between host and client. If the
-character folder is missing, the run produced no usable autotest artifacts;
-classify the result according to the completion and artifact rules below rather
-than scanning unrelated character folders.
+Match the trigger frame and timestamp (allowing up to five seconds of host/client
+write-time skew). Only consider files modified after launch in either location.
+If the character folder is missing, still check `rollback_logs/`, but do not
+scan unrelated character folders. Completion logs and crash reports may also
+live under `rollback_logs/nplive_*/`.
 
 ### 3.3 Snapdump Comparison
 

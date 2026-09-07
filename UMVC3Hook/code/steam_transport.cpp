@@ -204,7 +204,8 @@ void SteamTransport_Shutdown()
 {
     HookLog("SteamTransport: shutdown requested (running=%d, thread=%p)\n",
             g_bridgeRunning.load() ? 1 : 0, g_bridgeThread);
-    LaunchMusic_Stop();
+    // Let the music fade in the background while returning to the lobby browser.
+    LaunchMusic_BeginFadeOut();
     const DWORD flushDeadline = GetTickCount() + 50;
     while (g_bridgeRunning && !PumpBridgeOnce() &&
            GetTickCount() < flushDeadline)

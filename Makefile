@@ -21,8 +21,9 @@ GIT_COMMIT := $(shell git rev-parse HEAD 2>/dev/null || printf unknown)
 GIT_DIRTY := $(if $(shell git status --porcelain --untracked-files=normal 2>/dev/null),1,0)
 GIT_DIR := $(shell git rev-parse --git-dir 2>/dev/null)
 GIT_HEAD_REF := $(shell git symbolic-ref -q HEAD 2>/dev/null)
-GIT_COMMIT_DEPS := $(if $(GIT_DIR),$(GIT_DIR)/HEAD $(if $(GIT_HEAD_REF),$(GIT_DIR)/$(GIT_HEAD_REF)))
-VERSION    := 0.2.9
+# Git maintenance can move loose branch refs into packed-refs.
+GIT_COMMIT_DEPS := $(if $(GIT_DIR),$(wildcard $(GIT_DIR)/HEAD $(GIT_DIR)/packed-refs $(if $(GIT_HEAD_REF),$(GIT_DIR)/$(GIT_HEAD_REF))))
+VERSION    := 0.3.6
 VERSION_RC := $(shell printf '%s.0' '$(VERSION)' | tr . ,)
 
 SRCDIR    := UMVC3Hook
@@ -46,13 +47,17 @@ MAP_FILE  := Timestone.map
 CPP_SRC   := \
 	$(SRCDIR)/dllmain.cpp \
 	$(SRCDIR)/IniReader.cpp \
+	$(SRCDIR)/IniSafe.cpp \
 	$(SRCDIR)/sigscan.cpp \
 	$(SRCDIR)/pch.cpp \
 	$(SRCDIR)/code/umvc3.cpp \
 	$(SRCDIR)/code/umvc3menu.cpp \
 	$(SRCDIR)/code/updater.cpp \
 	$(SRCDIR)/code/LaunchMenu.cpp \
+	$(SRCDIR)/code/launchmenu_utils.cpp \
+	$(SRCDIR)/code/connect_roster.cpp \
 	$(SRCDIR)/code/LaunchMenu_compact.cpp \
+	$(SRCDIR)/code/launchmenu_dark.cpp \
 	$(SRCDIR)/code/LaunchMenu_settings.cpp \
 	$(SRCDIR)/code/launch_music.cpp \
 	$(SRCDIR)/code/eSettingsManager.cpp \
@@ -60,6 +65,7 @@ CPP_SRC   := \
 	$(SRCDIR)/code/UMVC3Camera.cpp \
 	$(SRCDIR)/code/mk10utils.cpp \
 	$(SRCDIR)/code/gameui.cpp \
+	$(SRCDIR)/code/d3d9reset.cpp \
 	$(SRCDIR)/code/framestepper.cpp \
 	$(SRCDIR)/code/dtieditor.cpp \
 	$(SRCDIR)/code/trainingboot.cpp \
@@ -234,7 +240,7 @@ $(OUTPUT): $(ALL_OBJ)
 	@echo "=== Built: $(OUTPUT) ==="
 
 $(UPDATER_OUTPUT): tools/timestone_updater.cpp Makefile
-	$(CXX) -Os -flto -ffunction-sections -fdata-sections -std=c++20 \
+	$(CXX) -Os -fno-declone-ctor-dtor -flto -ffunction-sections -fdata-sections -std=c++20 \
 		-DWIN32_LEAN_AND_MEAN -DNOMINMAX \
 		-D_WIN32_WINNT=0x0601 -DWINVER=0x0601 \
 		-DTIMESTONE_VERSION=\"$(VERSION)\" \
