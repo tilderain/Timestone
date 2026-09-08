@@ -2,15 +2,20 @@
 // Headless Timestone lobby watcher (private dev tool). Polls all Timestone
 // lobbies every 15 s through the public Steamworks lobby-search API and emits
 // structured tracing events (target "lobby_watcher", event "created"/"updated"/
-// "deleted"/"poll") describing lobby lifecycle changes. Runs as the logged-in
-// Steam user; the account must own UMVC3 (appid 357190).
+// "deleted"/"poll") describing lobby lifecycle changes. Every created or
+// deleted lobby is also appended to a plain-text history log (LOBBY_LOG_FILE,
+// default ./lobby-watcher.log) - the seed of a future database. Runs as the
+// logged-in Steam user; the account must own UMVC3 (appid 357190).
 // Optional Discord integration (bot.rs): set DISCORD_TOKEN (+ optional
 // DISCORD_GUILD_ID for instant command registration) to enable /mm.
 mod bot;
 
 use std::collections::HashMap;
+use std::fs::OpenOptions;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use parking_lot::Mutex;
 use steamworks::{
@@ -24,6 +29,10 @@ const SEARCH_DEADLINE: Duration = Duration::from_secs(20);
 const INIT_RETRY: Duration = Duration::from_secs(5);
 const MAX_RESULTS: u64 = 50;
 pub(crate) const EVENT_TARGET: &str = "lobby_watcher";
+/// Env var for where the lifecycle log file is written.
+const LOBBY_LOG_ENV: &str = "LOBBY_LOG_FILE";
+/// Default lifecycle log path (current working directory).
+const DEFAULT_LOBBY_LOG: &str = "lobby-watcher.log";
 
 #[derive(Clone, Debug)]
 pub(crate) struct Lobby {
@@ -67,6 +76,7 @@ pub(crate) struct WatcherState {
     request_sent: Instant,
     next_poll: Instant,
     pub(crate) last_poll: Instant,
+    lobby_log: PathBuf, // created/deleted events are appended here as text
 }
 
 fn emit_event(event: &str, lobby: &Lobby) {
@@ -83,6 +93,73 @@ fn emit_event(event: &str, lobby: &Lobby) {
     );
 }
 
+/// Append a created/deleted lobby to the lifecycle text log.
+fn append_lobby_event(path: &Path, event: &str, lobby: &Lobby) {
+    let line = format!("{}\n", lobby_log_line(&utc_now(), event, lobby));
+    append_log_line(path, &line);
+}
+
+/// One human-readable log line: UTC timestamp, event, then every lobby field.
+fn lobby_log_line(now: &str, event: &str, lobby: &Lobby) -> String {
+    format!(
+        "{} {} id={} name={:?} host={:?} protocol={:?} members={} owner={}",
+        now, event, lobby.id, lobby.name, lobby.host, lobby.protocol, lobby.members, lobby.owner,
+    )
+}
+
+/// Append a single line to the lifecycle log. The file is opened append-only
+/// per call, so restarts, log rotation, or a mid-run delete are tolerated; an
+/// unwritable path only logs a warning and never stops the watcher.
+fn append_log_line(path: &Path, line: &str) {
+    if let Err(e) = (|| -> std::io::Result<()> {
+        let mut f = OpenOptions::new().create(true).append(true).open(path)?;
+        f.write_all(line.as_bytes())?;
+        f.flush()
+    })() {
+        tracing::warn!(
+            target: EVENT_TARGET,
+            event = "log_failed",
+            path = %path.display(),
+            error = %e,
+            "could not write lobby log",
+        );
+    }
+}
+
+/// Current UTC time as "YYYY-MM-DDTHH:MM:SSZ" (RFC 3339, no sub-seconds).
+fn utc_now() -> String {
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    utc_from_epoch(secs)
+}
+
+/// Format seconds since the Unix epoch as an RFC 3339 UTC timestamp.
+fn utc_from_epoch(secs: u64) -> String {
+    let days = secs / 86_400;
+    let rem = secs % 86_400;
+    let (h, m, s) = (rem / 3600, (rem % 3600) / 60, rem % 60);
+    let (y, mo, d) = civil_from_days(days as i64);
+    format!("{y:04}-{mo:02}-{d:02}T{h:02}:{m:02}:{s:02}Z")
+}
+
+/// Days since 1970-01-01 -> (year, month, day) in the proleptic Gregorian
+/// calendar. Howard Hinnant's civil_from_days algorithm.
+fn civil_from_days(z: i64) -> (i64, u32, u32) {
+    let z = z + 719_468;
+    let era = (if z >= 0 { z } else { z - 146_096 }) / 146_097;
+    let doe = (z - era * 146_097) as u64; // [0, 146096]
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365; // [0, 399]
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11]
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32; // [1, 31]
+    let m = if mp < 10 { mp + 3 } else { mp - 9 }; // [1, 12]
+    let y = if m <= 2 { y + 1 } else { y };
+    (y, m as u32, d)
+}
+
 fn process_poll(state: &mut WatcherState, current: Vec<Lobby>) {
     let mut created = 0u32;
     let mut updated = 0u32;
@@ -95,6 +172,7 @@ fn process_poll(state: &mut WatcherState, current: Vec<Lobby>) {
         match state.prev.get(&lobby.id) {
             None => {
                 emit_event("created", lobby);
+                append_lobby_event(&state.lobby_log, "created", lobby);
                 created += 1;
             }
             Some(prev) if !prev.same(lobby) => {
@@ -111,6 +189,7 @@ fn process_poll(state: &mut WatcherState, current: Vec<Lobby>) {
         absent_now.push(lobby.id);
         if state.absent.contains(&lobby.id) {
             emit_event("deleted", lobby);
+            append_lobby_event(&state.lobby_log, "deleted", lobby);
             deleted += 1;
         }
     }
@@ -149,6 +228,13 @@ fn main() {
     };
     let mm = client.matchmaking();
 
+    // Plain-text history of created/deleted lobbies. Override the location
+    // with LOBBY_LOG_FILE; the watcher never needs the log to keep polling.
+    let lobby_log = PathBuf::from(match std::env::var(LOBBY_LOG_ENV) {
+        Ok(path) if !path.trim().is_empty() => path,
+        _ => DEFAULT_LOBBY_LOG.to_string(),
+    });
+
     let state = Arc::new(Mutex::new(WatcherState {
         prev: HashMap::new(),
         absent: Vec::new(),
@@ -157,6 +243,7 @@ fn main() {
         request_sent: Instant::now(),
         next_poll: Instant::now(), // first search fires immediately
         last_poll: Instant::now(),
+        lobby_log: lobby_log.clone(),
     }));
 
     match std::env::var("DISCORD_TOKEN") {
@@ -180,6 +267,10 @@ fn main() {
         target: EVENT_TARGET,
         event = "start",
         "watching for Timestone lobbies every 15 s",
+    );
+    append_log_line(
+        &lobby_log,
+        &format!("{} start watcher pid={}\n", utc_now(), std::process::id()),
     );
     loop {
         client.run_callbacks();
@@ -230,5 +321,41 @@ fn main() {
         drop(st);
 
         std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{lobby_log_line, utc_from_epoch, Lobby};
+
+    #[test]
+    fn utc_from_epoch_is_rfc3339_utc() {
+        assert_eq!(utc_from_epoch(0), "1970-01-01T00:00:00Z");
+        // 2024 is a leap year.
+        assert_eq!(utc_from_epoch(1_709_210_096), "2024-02-29T12:34:56Z");
+        // 2100 is a leap-century year (divisible by 100, not 400): Feb has 28 days.
+        assert_eq!(utc_from_epoch(4_107_456_000), "2100-02-28T00:00:00Z");
+        assert_eq!(
+            utc_from_epoch(4_107_456_000 + 86_400),
+            "2100-03-01T00:00:00Z"
+        );
+    }
+
+    #[test]
+    fn log_line_is_one_escaped_row() {
+        let lobby = Lobby {
+            id: 109775999888744469,
+            name: "Party \"Up\"".to_string(),
+            host: "John\tDoe".to_string(),
+            protocol: "1".to_string(),
+            members: 2,
+            owner: 76561198000000000,
+        };
+        assert_eq!(
+            lobby_log_line("2026-09-08T19:40:01Z", "created", &lobby),
+            "2026-09-08T19:40:01Z created id=109775999888744469 \
+             name=\"Party \\\"Up\\\"\" host=\"John\\tDoe\" \
+             protocol=\"1\" members=2 owner=76561198000000000"
+        );
     }
 }

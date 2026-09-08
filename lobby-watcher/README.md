@@ -14,8 +14,8 @@ Prerequisites - on the machine running it:
   (appid 357190). The Steamworks API operates as the logged-in Steam user; there
   is no server-side equivalent. Without this, the service logs `event="init_failed"`
   every 5 s and retries.
-- No config, no flags, no `steam_appid.txt`, no files written. One instance per
-  machine. Logs go to stderr; Ctrl+C stops it.
+- No config, no flags, no `steam_appid.txt`. One instance per machine. Logs go
+  to stderr; Ctrl+C stops it.
 
 ```bash
 nix run ./lobby-watcher          # built binary, logs to the terminal
@@ -25,6 +25,27 @@ nix build ./lobby-watcher#default # → ./result/bin/lobby-watcher
 cd lobby-watcher && nix develop  # sets STEAM_SDK_LOCATION + LD_LIBRARY_PATH
 cargo run
 ```
+
+## Lobby lifecycle log
+
+The watcher appends one plain-text line to `./lobby-watcher.log` every time a
+lobby is **created** or **deleted** (the events in the table below, diffed
+against the previous poll) - a persistent history of every lobby seen, ready
+to grow into a database later. Override the path with `LOBBY_LOG_FILE`. The
+file is opened append-only per event, so it survives restarts and can be
+rotated or deleted while the watcher runs; a write failure only logs a warning
+and never stops the watcher. `tail -f lobby-watcher.log` to watch live.
+
+Each line is one event, one row (name/host are `{:?}`-escaped so quotes,
+tabs, or other odd characters in player text never break the line):
+
+```
+2026-09-08T19:40:01Z created id=109775999888744469 name="Party \"Up\"" host="John\tDoe" protocol="1" members=2 owner=76561198000000000
+2026-09-08T19:43:02Z deleted id=109775999888744469 name="Party \"Up\"" host="John\tDoe" protocol="1" members=2 owner=76561198000000000
+```
+
+Columns: UTC timestamp, event (`created` / `deleted`), then the lobby fields
+from the events table. A `start` line bookends each process run.
 
 Running 24/7 (e.g. a NixOS box where Steam stays up):
 

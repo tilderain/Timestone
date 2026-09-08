@@ -428,6 +428,7 @@ mod tests {
             request_sent: Instant::now(),
             next_poll: Instant::now(),
             last_poll: Instant::now(),
+            lobby_log: std::path::PathBuf::new(),
         };
         let (lobbies, poll_index, _updated_ago) = lobby_snapshot(&st);
         assert_eq!(poll_index, 12);
