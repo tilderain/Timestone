@@ -20,6 +20,7 @@ void SteamLobby_Shutdown(bool preserveConnection);
 
 const char* SteamLobby_GetStatus();
 const char* SteamLobby_GetLocalUsername();
+uint64_t SteamLobby_GetLocalSteamId();  // 0 when Steam isn't initialized
 uint64_t SteamLobby_GetPeerSteamId();
 const char* SteamLobby_GetPeerUsername();
 bool SteamLobby_GetPeerAvatarRGBA(uint8_t* rgba, size_t capacity,

@@ -4,11 +4,13 @@
 #include "launchmenu_dark.h"
 #include "launchmenu_utils.h"
 #include "discord_rich_presence.h"
+#include "ranked_account.h"
 #include "mk10utils.h"
 
 #include <cstdio>
 #include <cstring>
 #include <cstdint>
+#include <string>
 #include <shlobj.h>
 #include <cwchar>
 #include <d3d9.h>
@@ -32,6 +34,7 @@ constexpr int ID_DISCORD_HEADING = 130;
 constexpr int ID_DISCORD_OFF = 131;
 constexpr int ID_DISCORD_BASIC = 132;
 constexpr int ID_DISCORD_FULL = 133;
+constexpr int ID_DISCORD_RANKED = 134;
 constexpr char SETTINGS_CLASS[] = "TimestoneAdvancedConfig";
 
 bool g_settingsLoaded = false;
@@ -193,9 +196,10 @@ bool SaveSettings(HWND window)
         HookLog("LaunchMenu: saved single-thread setting: %s\n",
                 g_runSingleThreaded ? "enabled" : "disabled");
     }
-    const int discordModeIds[3] = {ID_DISCORD_OFF, ID_DISCORD_BASIC, ID_DISCORD_FULL};
+    const int discordModeIds[4] = {ID_DISCORD_OFF, ID_DISCORD_BASIC,
+                                   ID_DISCORD_FULL, ID_DISCORD_RANKED};
     int selectedMode = 0;
-    for (int i = 0; i < 3; ++i) {
+    for (int i = 0; i < 4; ++i) {
         if (SendMessageA(GetDlgItem(window, discordModeIds[i]),
                          BM_GETCHECK, 0, 0) == BST_CHECKED) {
             selectedMode = i;
@@ -301,35 +305,41 @@ LRESULT CALLBACK SettingsWndProc(HWND window, UINT message,
             310, sectionY + 92, 82, 28, window,
             reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_CANCEL)), nullptr, nullptr);
         const bool discordAvailable = DiscordRichPresence_IsAvailable();
-        const int discordMode = discordAvailable ? DiscordRichPresence_GetMode() : 0;
+        const int discordMode = DiscordRichPresence_GetMode();
         const int discordHeadingY = sectionY + 128;
-        CreateWindowA("STATIC", "Discord Rich Presence",
+        CreateWindowA("STATIC", "Online / Discord",
             WS_VISIBLE | WS_CHILD, 34, discordHeadingY, 140, 20, window,
             reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_DISCORD_HEADING)),
             nullptr, nullptr);
-        const char* discordLabels[3] = {
-            "Off", "Basic (no login)", "Full (link Discord account)"};
-        const int discordIds[3] = {ID_DISCORD_OFF, ID_DISCORD_BASIC, ID_DISCORD_FULL};
-        for (int i = 0; i < 3; ++i) {
+        const char* discordLabels[4] = {
+            "Off (no Discord)", "Basic rich presence",
+            "Advanced (link Discord account)", "Ranked (link for matchmaking)"};
+        const int discordIds[4] = {ID_DISCORD_OFF, ID_DISCORD_BASIC,
+                                   ID_DISCORD_FULL, ID_DISCORD_RANKED};
+        for (int i = 0; i < 4; ++i) {
+            // Presence tiers need the SDK DLL; the ranked link (tier 4) does
+            // not, so its radio stays enabled when the DLL is missing.
+            const bool unavailable = !discordAvailable && i < 3;
             const DWORD style = WS_VISIBLE | WS_CHILD | WS_TABSTOP | BS_AUTOCHECKBOX |
-                                (discordAvailable ? 0 : WS_DISABLED);
+                                (unavailable ? WS_DISABLED : 0);
+            std::string label = discordLabels[i];
+            if (i == 3 && discordMode == 3 && RankedAccount_IsLinked())
+                label += " (linked)";
             HWND button = CreateWindowA(
-                "BUTTON", discordLabels[i], style,
+                "BUTTON", label.c_str(), style,
                 18, discordHeadingY + 24 + i * 24, 374, 24, window,
                 reinterpret_cast<HMENU>(static_cast<INT_PTR>(discordIds[i])),
                 nullptr, nullptr);
             SendMessageA(button, BM_SETCHECK,
-                         (discordMode == i && discordAvailable)
-                             ? BST_CHECKED
-                             : BST_UNCHECKED,
-                         0);
+                         discordMode == i ? BST_CHECKED : BST_UNCHECKED, 0);
         }
         if (!discordAvailable) {
             CreateWindowA(
                 "STATIC",
-                "discord_partner_sdk.dll not found - rich presence unavailable",
+                "discord_partner_sdk.dll not found - presence unavailable "
+                "(ranked link still works)",
                 WS_VISIBLE | WS_CHILD | WS_DISABLED,
-                18, discordHeadingY + 98, 374, 32, window, nullptr, nullptr, nullptr);
+                18, discordHeadingY + 124, 374, 40, window, nullptr, nullptr, nullptr);
         }
         ApplyDpi(window, 96, GetWindowDpi(window));
         ApplyLaunchMenuDarkTheme(window);
@@ -362,9 +372,10 @@ LRESULT CALLBACK SettingsWndProc(HWND window, UINT message,
         if (HIWORD(wParam) == BN_CLICKED) {
             const int clicked = LOWORD(wParam);
             if (clicked == ID_DISCORD_OFF || clicked == ID_DISCORD_BASIC ||
-                clicked == ID_DISCORD_FULL) {
-                const int discordModeIds[3] = {
-                    ID_DISCORD_OFF, ID_DISCORD_BASIC, ID_DISCORD_FULL};
+                clicked == ID_DISCORD_FULL || clicked == ID_DISCORD_RANKED) {
+                const int discordModeIds[4] = {
+                    ID_DISCORD_OFF, ID_DISCORD_BASIC,
+                    ID_DISCORD_FULL, ID_DISCORD_RANKED};
                 for (int id : discordModeIds)
                     SendMessageA(GetDlgItem(window, id), BM_SETCHECK,
                                  id == clicked ? BST_CHECKED : BST_UNCHECKED, 0);
@@ -487,7 +498,7 @@ void ShowAdvancedConfigModal(HWND owner)
     const UINT dpi = GetWindowDpi(owner);
     wchar_t gamePath[MAX_PATH] = {};
     RECT bounds = {0, 0, MulDiv(410, dpi, 96),
-                   MulDiv(GetGameConfigPath(gamePath) ? 448 : 468, dpi, 96)};
+                   MulDiv(GetGameConfigPath(gamePath) ? 472 : 492, dpi, 96)};
     using AdjustWindowRectExForDpiFn = BOOL (WINAPI*)(LPRECT, DWORD, BOOL, DWORD, UINT);
     const auto adjustForDpi = reinterpret_cast<AdjustWindowRectExForDpiFn>(
         GetProcAddress(GetModuleHandleA("user32.dll"), "AdjustWindowRectExForDpi"));

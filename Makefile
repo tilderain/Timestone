@@ -97,6 +97,7 @@ CPP_SRC   := \
 	$(SRCDIR)/code/steam_lobby.cpp \
 	$(SRCDIR)/code/steam_transport.cpp \
 	$(SRCDIR)/code/discord_rich_presence.cpp \
+	$(SRCDIR)/code/ranked_account.cpp \
 	$(SRCDIR)/imgui/imgui.cpp \
 	$(SRCDIR)/imgui/imgui_demo.cpp \
 	$(SRCDIR)/imgui/imgui_draw.cpp \

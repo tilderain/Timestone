@@ -4,6 +4,7 @@
 #include "steam_lobby.h"
 #include "launchmenu_utils.h"
 #include "mk10utils.h"
+#include "ranked_account.h"
 
 #include <Windows.h>
 
@@ -337,12 +338,21 @@ void EnsureLoaded()
 // Mode persistence
 // ---------------------------------------------------------------------------
 
+bool WriteModeToIni(int mode);
+
 int ReadModeFromIni()
 {
     char path[MAX_PATH] = {};
     LaunchMenuUtils::GetSettingsPath(path, sizeof(path));
-    int mode = GetPrivateProfileIntA("Settings", "DiscordRichPresence", 0, path);
-    return (mode < 0) ? 0 : ((mode > 2) ? 2 : mode);
+    int mode = GetPrivateProfileIntA("Settings", "OnlineMode", -1, path);
+    if (mode < 0) {
+        // Legacy single-feature key migrates to the generic key once; the old
+        // key is left in the file and never read again.
+        mode = GetPrivateProfileIntA("Settings", "DiscordRichPresence", 0, path);
+        if (mode >= 0 && mode <= 2) WriteModeToIni(mode);
+        else mode = 0;
+    }
+    return (mode < 0) ? 0 : ((mode > 3) ? 3 : mode);
 }
 
 bool WriteModeToIni(int mode)
@@ -350,7 +360,7 @@ bool WriteModeToIni(int mode)
     char path[MAX_PATH] = {};
     LaunchMenuUtils::GetSettingsPath(path, sizeof(path));
     char value[2] = { static_cast<char>('0' + mode), '\0' };
-    return IniSafe_WriteString("Settings", "DiscordRichPresence", value, path);
+    return IniSafe_WriteString("Settings", "OnlineMode", value, path);
 }
 
 // ---------------------------------------------------------------------------
@@ -448,7 +458,7 @@ void DropVerifier()
 
 void FallbackToBasic(const char* reason)
 {
-    HookLog("Discord: Full mode unavailable (%s); switching to Basic\n", reason);
+    HookLog("Discord: Full mode unavailable (%s); switching to Basic presence\n", reason);
     DropVerifier();
     g_authPending = false;
     DiscordRichPresence_SetMode(1);
@@ -690,9 +700,14 @@ void PushPresence(const PresenceState& state)
         g_activityDetails = "Hosting a Lobby";
         g_activityState = "Waiting for an opponent";
         g_activityPartyId = std::to_string(state.lobbyId);
-        g_activitySecret = "+connect_lobby " + std::to_string(state.lobbyId);
+        // The join secret rides on a linked Discord account. Hosting while
+        // unlinked (or in a non-join tier) keeps the party visible with no
+        // secret, so Discord does not advertise an unjoinable game.
+        if (g_activeMode == 2 && g_authenticatedFull) {
+            g_activitySecret = "+connect_lobby " + std::to_string(state.lobbyId);
+            showSecret = true;
+        }
         showParty = true;
-        showSecret = true;
     } else if (state.inLobby && state.host) {
         g_activityDetails = "Hosting a Lobby";
         g_activityState = "In the lobby";
@@ -783,26 +798,40 @@ bool DiscordRichPresence_IsAvailable()
 int DiscordRichPresence_GetMode()
 {
     EnsureLoaded();
-    if (!g_available) return 0;
+    // Raw stored 0..3 even when the DLL is missing, so the modal can pre-check
+    // tier 4 (ranked) without discord_partner_sdk.dll.
     return ReadModeFromIni();
 }
 
 void DiscordRichPresence_SetMode(int mode)
 {
     EnsureLoaded();
-    if (!g_available) return;
-    if (mode < 0 || mode > 2) return;
+    if (mode < 0 || mode > 3) return;
+    if ((mode == 1 || mode == 2) && !g_available) {
+        HookLog("Discord: mode %d needs discord_partner_sdk.dll; not enabled\n", mode);
+        return;
+    }
 
     if (mode == 2 && !g_consentAccepted && !ConfirmFullConsent()) {
         HookLog("Discord: Full mode not enabled (consent declined)\n");
         return; // nothing persisted; the mode stays at its previous value
     }
+    if (mode == 3) {
+        // Tier 4 consent + hosted link live in ranked_account; persist only
+        // when the link flow actually starts (false = declined / Steam down).
+        if (!RankedAccount_SetEnabled(true)) {
+            HookLog("Discord: ranked mode not enabled (link declined/unavailable)\n");
+            return; // nothing persisted; the mode stays at its previous value
+        }
+    }
     if (!WriteModeToIni(mode)) {
         HookLog("Discord: failed to save mode %d to Timestone.ini\n", mode);
         return;
     }
+    const bool leavingTier4 = (g_desiredMode == 3 && mode != 3);
     g_desiredMode = mode;
-    HookLog("Discord: rich presence mode set to %d\n", mode);
+    if (leavingTier4) RankedAccount_SetEnabled(false); // stop any in-flight link
+    HookLog("Discord: online mode set to %d\n", mode);
 }
 
 void DiscordRichPresence_Init()
@@ -828,12 +857,17 @@ void DiscordRichPresence_Pump()
         }
     }
 
-    // Drive the client to match g_desiredMode.
-    if (g_activeMode != g_desiredMode) {
+    // Tier 4 (ranked) runs the Discord SDK off: its stored mode maps to an
+    // effective 0 here so the presence client never starts under it. All the
+    // driver logic below uses the effective value, never the stored mode.
+    const int g_sdkMode = (g_desiredMode == 3) ? 0 : g_desiredMode;
+
+    // Drive the client to match the effective SDK mode.
+    if (g_activeMode != g_sdkMode) {
         if (g_clientActive) {
             StopClient();
-        } else if (g_desiredMode != 0) {
-            StartClient(g_desiredMode);
+        } else if (g_sdkMode != 0) {
+            StartClient(g_sdkMode);
         }
     }
     if (!g_clientActive) return;
@@ -858,7 +892,7 @@ void DiscordRichPresence_Pump()
     }
 
     // Full mode: run the OAuth browser flow once per client start.
-    if (g_desiredMode == 2 && g_authPending) AdvanceOAuth();
+    if (g_sdkMode == 2 && g_authPending) AdvanceOAuth();
     if (!g_clientActive || !g_ready) return;
 
     // Evaluate presence state and push on change (rate-limited to 15 s).

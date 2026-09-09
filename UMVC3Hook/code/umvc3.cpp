@@ -5,6 +5,7 @@
 #include "eSettingsManager.h"
 #include "framestepper.h"
 #include "discord_rich_presence.h"
+#include "ranked_account.h"
 #include <Windows.h>
 int64 camera_ptr = 0;
 
@@ -14,6 +15,7 @@ void UMVC3Hooks::HookProcessStuff()
 	Notifications->Update();
 	FrameStepper_Process();
 	DiscordRichPresence_Pump();
+	RankedAccount_Pump();
 
 
 	if (TheMenu->m_bFreeCam)
