@@ -23,6 +23,7 @@
 #include "code/d3d9reset.h"
 #include "code/exception.h"
 #include "code/mk10utils.h"
+#include "code/discord_rich_presence.h"
 #include <Windows.h>
 #include <atomic>
 #include <cstdio>
@@ -923,6 +924,7 @@ long __stdcall hkEndScene(LPDIRECT3DDEVICE9 pDevice)
 		}
 		InitImGui(pDevice);
 		FrameStepper_SetDevice(pDevice);
+		DiscordRichPresence_Init();
 		init = true;
 		D3D9ResetDiagnostics_CompleteStartup();
 		BootTimer_Stamp("Initialized ImGui overlay");

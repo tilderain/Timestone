@@ -4,6 +4,7 @@
 #include "eNotifManager.h"
 #include "eSettingsManager.h"
 #include "framestepper.h"
+#include "discord_rich_presence.h"
 #include <Windows.h>
 int64 camera_ptr = 0;
 
@@ -12,6 +13,7 @@ void UMVC3Hooks::HookProcessStuff()
 	TheMenu->Process();
 	Notifications->Update();
 	FrameStepper_Process();
+	DiscordRichPresence_Pump();
 
 
 	if (TheMenu->m_bFreeCam)

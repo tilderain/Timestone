@@ -96,6 +96,7 @@ CPP_SRC   := \
 	$(SRCDIR)/code/savedata.cpp \
 	$(SRCDIR)/code/steam_lobby.cpp \
 	$(SRCDIR)/code/steam_transport.cpp \
+	$(SRCDIR)/code/discord_rich_presence.cpp \
 	$(SRCDIR)/imgui/imgui.cpp \
 	$(SRCDIR)/imgui/imgui_demo.cpp \
 	$(SRCDIR)/imgui/imgui_draw.cpp \
@@ -249,7 +250,9 @@ $(UPDATER_OUTPUT): tools/timestone_updater.cpp Makefile
 		-lwinhttp -lbcrypt -lcomctl32 -lshell32 -lversion -lole32 -loleaut32 -luuid
 	@echo "=== Built: $(UPDATER_OUTPUT) ==="
 
-$(PACKAGE_OUTPUT): $(LOADER_DLL) $(OUTPUT) $(UPDATER_OUTPUT)
+$(PACKAGE_OUTPUT): $(LOADER_DLL) $(OUTPUT) $(UPDATER_OUTPUT) \
+	$(SRCDIR)/third_party/discord_social_sdk/bin/release/discord_partner_sdk.dll \
+	$(SRCDIR)/third_party/discord_social_sdk/License-Notices.txt
 	rm -f $@
 	$(ZIP) -j -0 $@ $^
 	@echo "=== Built: $(PACKAGE_OUTPUT) ==="
@@ -371,6 +374,8 @@ INSTALL_DIR ?= ../ULTIMATE MARVEL VS. CAPCOM 3
 install: $(OUTPUT) $(UPDATER_OUTPUT)
 	cp "$(OUTPUT)" "$(INSTALL_DIR)/"
 	cp "$(UPDATER_OUTPUT)" "$(INSTALL_DIR)/"
+	cp "$(SRCDIR)/third_party/discord_social_sdk/bin/release/discord_partner_sdk.dll" "$(INSTALL_DIR)/"
+	cp "$(SRCDIR)/third_party/discord_social_sdk/License-Notices.txt" "$(INSTALL_DIR)/"
 
 # ---------- Help ----------
 

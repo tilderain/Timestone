@@ -205,9 +205,7 @@ public:
     {
         if (!param) return;
         auto* request = static_cast<GameRichPresenceJoinRequestedCompat_t*>(param);
-        uint64_t lobbyId = 0;
-        if (ParseLobbyConnectString(request->m_rgchConnect, lobbyId))
-            QueueJoinLobby(lobbyId);
+        SteamLobby_QueueJoinByConnectString(request->m_rgchConnect);
     }
 
     void Run(void* param, bool, SteamAPICall_t) override { Run(param); }
@@ -1109,6 +1107,25 @@ bool SteamLobby_IsHostedLobby(uint64_t lobbyId)
 bool SteamLobby_IsHost()
 {
     return g_isHost && g_lobbyId != 0;
+}
+
+int SteamLobby_GetMemberCount()
+{
+    if (!g_lobbyId || !g_matchmaking || !g_api.GetNumLobbyMembers) return 0;
+    return g_api.GetNumLobbyMembers(g_matchmaking, g_lobbyId);
+}
+
+uint64_t SteamLobby_GetLobbyId()
+{
+    return g_lobbyId;
+}
+
+bool SteamLobby_QueueJoinByConnectString(const char* connect)
+{
+    uint64_t lobbyId = 0;
+    if (!ParseLobbyConnectString(connect, lobbyId)) return false;
+    QueueJoinLobby(lobbyId);
+    return true;
 }
 
 bool SteamLobby_GetHostedJoinLink(char* link, size_t capacity)

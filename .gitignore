@@ -377,3 +377,9 @@ Timestone.zip
 rollback_profile_runs/**
 
 result
+
+# Discord Social SDK: the vendored dll sits under a "bin/" directory that the
+# Visual Studio rules above ignore. Re-include it (and its release subfolder).
+!UMVC3Hook/third_party/discord_social_sdk/bin/
+!UMVC3Hook/third_party/discord_social_sdk/bin/release/
+!UMVC3Hook/third_party/discord_social_sdk/bin/release/discord_partner_sdk.dll

@@ -3,6 +3,7 @@
 
 #include "launchmenu_dark.h"
 #include "launchmenu_utils.h"
+#include "discord_rich_presence.h"
 #include "mk10utils.h"
 
 #include <cstdio>
@@ -27,6 +28,10 @@ constexpr int ID_RESOLUTION = 105;
 constexpr int ID_FULLSCREEN = 106;
 constexpr int ID_DISPLAY_HEADING = 107;
 constexpr int ID_ADVANCED_HEADING = 108;
+constexpr int ID_DISCORD_HEADING = 130;
+constexpr int ID_DISCORD_OFF = 131;
+constexpr int ID_DISCORD_BASIC = 132;
+constexpr int ID_DISCORD_FULL = 133;
 constexpr char SETTINGS_CLASS[] = "TimestoneAdvancedConfig";
 
 bool g_settingsLoaded = false;
@@ -79,7 +84,8 @@ void ApplyDpi(HWND window, UINT oldDpi, UINT newDpi)
              child = GetWindow(child, GW_HWNDNEXT)) {
             SendMessageA(child, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
             const int id = GetDlgCtrlID(child);
-            if (id == ID_DISPLAY_HEADING || id == ID_ADVANCED_HEADING) {
+            if (id == ID_DISPLAY_HEADING || id == ID_ADVANCED_HEADING ||
+                id == ID_DISCORD_HEADING) {
                 char text[64] = {};
                 const int length = GetWindowTextA(child, text, sizeof(text));
                 HDC dc = GetDC(child);
@@ -187,6 +193,16 @@ bool SaveSettings(HWND window)
         HookLog("LaunchMenu: saved single-thread setting: %s\n",
                 g_runSingleThreaded ? "enabled" : "disabled");
     }
+    const int discordModeIds[3] = {ID_DISCORD_OFF, ID_DISCORD_BASIC, ID_DISCORD_FULL};
+    int selectedMode = 0;
+    for (int i = 0; i < 3; ++i) {
+        if (SendMessageA(GetDlgItem(window, discordModeIds[i]),
+                         BM_GETCHECK, 0, 0) == BST_CHECKED) {
+            selectedMode = i;
+            break;
+        }
+    }
+    DiscordRichPresence_SetMode(selectedMode);
     return true;
 }
 
@@ -284,6 +300,37 @@ LRESULT CALLBACK SettingsWndProc(HWND window, UINT message,
             "BUTTON", "Cancel", WS_VISIBLE | WS_CHILD | WS_TABSTOP | BS_PUSHBUTTON,
             310, sectionY + 92, 82, 28, window,
             reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_CANCEL)), nullptr, nullptr);
+        const bool discordAvailable = DiscordRichPresence_IsAvailable();
+        const int discordMode = discordAvailable ? DiscordRichPresence_GetMode() : 0;
+        const int discordHeadingY = sectionY + 128;
+        CreateWindowA("STATIC", "Discord Rich Presence",
+            WS_VISIBLE | WS_CHILD, 34, discordHeadingY, 140, 20, window,
+            reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_DISCORD_HEADING)),
+            nullptr, nullptr);
+        const char* discordLabels[3] = {
+            "Off", "Basic (no login)", "Full (link Discord account)"};
+        const int discordIds[3] = {ID_DISCORD_OFF, ID_DISCORD_BASIC, ID_DISCORD_FULL};
+        for (int i = 0; i < 3; ++i) {
+            const DWORD style = WS_VISIBLE | WS_CHILD | WS_TABSTOP | BS_AUTOCHECKBOX |
+                                (discordAvailable ? 0 : WS_DISABLED);
+            HWND button = CreateWindowA(
+                "BUTTON", discordLabels[i], style,
+                18, discordHeadingY + 24 + i * 24, 374, 24, window,
+                reinterpret_cast<HMENU>(static_cast<INT_PTR>(discordIds[i])),
+                nullptr, nullptr);
+            SendMessageA(button, BM_SETCHECK,
+                         (discordMode == i && discordAvailable)
+                             ? BST_CHECKED
+                             : BST_UNCHECKED,
+                         0);
+        }
+        if (!discordAvailable) {
+            CreateWindowA(
+                "STATIC",
+                "discord_partner_sdk.dll not found - rich presence unavailable",
+                WS_VISIBLE | WS_CHILD | WS_DISABLED,
+                18, discordHeadingY + 98, 374, 32, window, nullptr, nullptr, nullptr);
+        }
         ApplyDpi(window, 96, GetWindowDpi(window));
         ApplyLaunchMenuDarkTheme(window);
         SendMessageA(checkbox, BM_SETCHECK,
@@ -311,6 +358,18 @@ LRESULT CALLBACK SettingsWndProc(HWND window, UINT message,
             ApplyLaunchMenuDarkTheme(GetWindow(window, GW_OWNER));
             ApplyLaunchMenuDarkTheme(window);
             return 0;
+        }
+        if (HIWORD(wParam) == BN_CLICKED) {
+            const int clicked = LOWORD(wParam);
+            if (clicked == ID_DISCORD_OFF || clicked == ID_DISCORD_BASIC ||
+                clicked == ID_DISCORD_FULL) {
+                const int discordModeIds[3] = {
+                    ID_DISCORD_OFF, ID_DISCORD_BASIC, ID_DISCORD_FULL};
+                for (int id : discordModeIds)
+                    SendMessageA(GetDlgItem(window, id), BM_SETCHECK,
+                                 id == clicked ? BST_CHECKED : BST_UNCHECKED, 0);
+                return 0;
+            }
         }
         if (LOWORD(wParam) == ID_SAVE) {
             if (!SaveSettings(window)) return 0;
@@ -364,7 +423,8 @@ LRESULT CALLBACK SettingsWndProc(HWND window, UINT message,
         POINT line[] = {{description.left, top}, {x, top},
                         {x, bottom}, {checkbox.left, bottom}};
         Polyline(dc, line, 4);
-        const int headings[] = {ID_DISPLAY_HEADING, ID_ADVANCED_HEADING};
+        const int headings[] = {ID_DISPLAY_HEADING, ID_ADVANCED_HEADING,
+                                ID_DISCORD_HEADING};
         for (int id : headings) {
             HWND label = GetDlgItem(window, id);
             RECT heading = {};
@@ -427,7 +487,7 @@ void ShowAdvancedConfigModal(HWND owner)
     const UINT dpi = GetWindowDpi(owner);
     wchar_t gamePath[MAX_PATH] = {};
     RECT bounds = {0, 0, MulDiv(410, dpi, 96),
-                   MulDiv(GetGameConfigPath(gamePath) ? 284 : 316, dpi, 96)};
+                   MulDiv(GetGameConfigPath(gamePath) ? 448 : 468, dpi, 96)};
     using AdjustWindowRectExForDpiFn = BOOL (WINAPI*)(LPRECT, DWORD, BOOL, DWORD, UINT);
     const auto adjustForDpi = reinterpret_cast<AdjustWindowRectExForDpiFn>(
         GetProcAddress(GetModuleHandleA("user32.dll"), "AdjustWindowRectExForDpi"));
