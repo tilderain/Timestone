@@ -75,7 +75,7 @@ double Profile_Ms(uint64_t ticks)
 void Profile_BeginRollbackEnabled(RollbackProfile& profile, int32_t startFrame,
                                   int32_t endFrame)
 {
-    profile = {};
+    profile = RollbackProfile();
     profile.startFrame = startFrame;
     profile.endFrame = endFrame;
     g_activeRollbackProfile = &profile;
