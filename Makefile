@@ -175,7 +175,7 @@ DEFINES   := \
 PERF_FLAGS := -O3 -flto=auto -fuse-linker-plugin -fipa-pta \
 	-fdevirtualize-at-ltrans -fomit-frame-pointer \
 	-ffunction-sections -fdata-sections
-CXXFLAGS  := $(PERF_FLAGS) -std=c++20 -fpermissive -MMD -MP $(DEFINES) $(INCLUDES) -DUMVC3HOOK_VERSION=\"$(VERSION)\" -DUMVC3HOOK_GIT_COMMIT=\"$(GIT_COMMIT)\" -DUMVC3HOOK_GIT_DIRTY=$(GIT_DIRTY) -Wall -Wno-unused-variable -Wno-unused-function
+CXXFLAGS  := $(PERF_FLAGS) -std=c++20 -fpermissive -MMD -MP $(DEFINES) $(INCLUDES) -D_GLIBCXX_USE_CXX11_ABI=0 -DUMVC3HOOK_VERSION=\"$(VERSION)\" -DUMVC3HOOK_GIT_COMMIT=\"$(GIT_COMMIT)\" -DUMVC3HOOK_GIT_DIRTY=$(GIT_DIRTY) -Wall -Wno-unused-variable -Wno-unused-function
 CFLAGS    := $(PERF_FLAGS) -MMD -MP $(DEFINES) $(INCLUDES) -Wall -Wno-unused-variable
 LDFLAGS   := -shared -static-libgcc -static-libstdc++ -flto=auto \
 	-fuse-linker-plugin -Wl,--gc-sections -Wl,-O2 -Wl,-Map,$(MAP_FILE) \
@@ -244,6 +244,7 @@ $(UPDATER_OUTPUT): tools/timestone_updater.cpp Makefile
 		-DWIN32_LEAN_AND_MEAN -DNOMINMAX \
 		-D_WIN32_WINNT=0x0601 -DWINVER=0x0601 \
 		-DTIMESTONE_VERSION=\"$(VERSION)\" \
+		-D_GLIBCXX_USE_CXX11_ABI=0 \
 		-static -mwindows \
 		-Wl,--gc-sections -Wl,-s -o $@ $< \
 		-lwinhttp -lbcrypt -lcomctl32 -lshell32 -lversion -lole32 -loleaut32 -luuid
