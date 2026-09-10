@@ -2,7 +2,9 @@
 
 #include <cstdint>
 #include <cstddef>
+#include <memory>
 #include <vector>
+#include "callback_effect_lifetime.h"
 
 // A concrete uShot body captured using the object's runtime DTI size. The
 // snapshotter deliberately restores only subclass storage; the common uShot
@@ -14,6 +16,7 @@ struct ConcreteShotSnapshot {
             uint64_t dti = 0;
             uint64_t resource = 0;
             uint8_t phase = 0;
+            uint32_t lifecycleStatus = 0;
             uint8_t timing78[0x0C] = {};
             uint32_t elapsed = 0;
             uint8_t spawnCounters[0x08] = {};
@@ -22,6 +25,8 @@ struct ConcreteShotSnapshot {
         bool occupied = false;
         bool hasState = false;
         bool hasGeneratorEmissionState = false;
+        CallbackLifetime::State lifetime;
+        void* savedEffect = nullptr;
         uint64_t dti = 0;
         uint64_t resource = 0;
         uint8_t flags100[0x08] = {};
@@ -31,6 +36,11 @@ struct ConcreteShotSnapshot {
         uint8_t state1F8[0x10] = {};
         uint8_t state230[0x12] = {};
         std::vector<GeneratorEmissionState> generatorEmissionStates;
+        // Bounded, family-validated CPU particles + emission + manager state.
+        // Null means keep the complete fresh graph, not partial scalar rewind.
+        // Recipes are copied into tracking maps and snapshot slots: share the
+        // immutable blob instead of copying particle pools on each assignment.
+        std::shared_ptr<const std::vector<uint8_t>> particleGraph;
     };
 
     struct CollisionPrimitive {
@@ -59,7 +69,8 @@ struct ConcreteShotSnapshot {
     CallbackEffectState callbackEffects[13];
 };
 
-bool ConcreteShotSnapshot_Capture(void* shot, ConcreteShotSnapshot& out);
+bool ConcreteShotSnapshot_Capture(void* shot, ConcreteShotSnapshot& out,
+                                  size_t maxParticleBytes = 256 * 1024);
 bool ConcreteShotSnapshot_Restore(void* shot, const ConcreteShotSnapshot& snapshot,
                                    const void* const* validTargets,
                                    size_t validTargetCount);
@@ -68,7 +79,8 @@ void ConcreteShotSnapshot_RestoreCallbackEffects(
 bool ConcreteEffectSnapshot_Capture(
     void* effect, ConcreteShotSnapshot::CallbackEffectState& state);
 bool ConcreteEffectSnapshot_Restore(
-    void* effect, const ConcreteShotSnapshot::CallbackEffectState& state);
+    void* effect, const ConcreteShotSnapshot::CallbackEffectState& state,
+    bool reconstructed = true);
 // Reapply reconstructed capsule sources after the native shot hitbox update.
 // Reconstructed parent transforms can collapse data-derived world endpoints,
 // so this restores them directly at the outer update boundary.
