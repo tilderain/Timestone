@@ -36,7 +36,7 @@ rows:
 | `0` | Off (no Discord) | off | - | - |
 | `1` | Basic rich presence | local client, activity | - | - |
 | `2` | Advanced (link Discord account) | activity + join | loopback OAuth (`127.0.0.1/callback`) | - |
-| `3` | Ranked (link for matchmaking) | **off** | hosted: auth.c.hero.rehab | one POST on link complete |
+| `3` | Ranked (link for matchmaking) | **off** | hosted: mvc3-ranked.hero-rehab.xyz | one POST on link complete |
 
 - `0` Off (default). No client is started; nothing is published.
 - `1` Basic - local presence through the running Discord client, no account
@@ -50,7 +50,7 @@ rows:
   The Discord SDK is off under this mode (no presence published). Consent, the
   browser open, and the link poll are owned by `ranked_account.cpp`; entering
   this tier without a completed link shows a consent box and opens the
-  default browser to `auth.c.hero.rehab/link?...`.
+  default browser to `mvc3-ranked.hero-rehab.xyz/link?...`.
 
 ### Keys
 
@@ -91,7 +91,7 @@ display name; `Discord_Activity_SetName` is never called), large image
 
 ## Tier 4 v1 contract (client side)
 
-The `auth.c.hero.rehab` server code lands later, outside this repo; the client
+The `mvc3-ranked.hero-rehab.xyz` server code lands later, outside this repo; the client
 targets the following contract through `ranked_account.cpp`. If the real
 endpoint contract differs when the server lands, only the constants at the top
 of that file and this section need updating.

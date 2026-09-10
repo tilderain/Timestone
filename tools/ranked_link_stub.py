@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Local stand-in for the future auth.c.hero.rehab link service.
+"""Local stand-in for the future Timestone link service (prod: mvc3-ranked.hero-rehab.xyz).
 
 The client (ranked_account.cpp) is pointed at this stub with
 [Settings] RankedBaseUrl = http://127.0.0.1:8787 in Timestone.ini.
@@ -25,7 +25,7 @@ PAGE = """<!doctype html><html><head><meta charset="utf-8"><title>Timestone link
 <body style="font-family:sans-serif;margin:4em auto;max-width:36em">
 <h1>Linking in progress</h1>
 <p>Complete the Discord step above, then return to the game.</p>
-<p>This is the local test stub for the future auth.c.hero.rehab service.
+<p>This is the local test stub for the future Timestone link service.
 Click below to simulate the real service completing the link:</p>
 <form action="/done" method="get">
   <input type="hidden" name="state" value="{state}">

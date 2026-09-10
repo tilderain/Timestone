@@ -11,7 +11,7 @@
 //   1 = Basic rich presence (no account link)
 //   2 = Advanced (Discord OAuth account link over the 127.0.0.1 loopback;
 //       publishes a lobby join secret while hosting)
-//   3 = Ranked (link for matchmaking through auth.c.hero.rehab; the Discord
+//   3 = Ranked (link for matchmaking through mvc3-ranked.hero-rehab.xyz; Discord
 //       SDK is off under this mode and ranked_account owns the link flow)
 // Presence states: Main Menu / Hosting a Lobby / In a Match (elapsed timer).
 void DiscordRichPresence_Init();            // once, at D3D9 overlay init

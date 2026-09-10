@@ -1,7 +1,7 @@
 #pragma once
 
 // Tier 4 "Ranked" online mode: links the local Steam account to the hosted
-// Timestone ladder service at auth.c.hero.rehab (the server code lands in a
+// Timestone ladder service at mvc3-ranked.hero-rehab.xyz (server code lands in a
 // later change). No Discord SDK involvement: transport is WinHTTP loaded at
 // runtime, and the poll runs on a background thread so the game thread never
 // blocks on network I/O.

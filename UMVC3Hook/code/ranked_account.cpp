@@ -26,7 +26,7 @@ namespace {
 // Constants
 // ---------------------------------------------------------------------------
 
-constexpr const char* kRankedBaseUrl = "https://auth.c.hero.rehab"; // prod
+constexpr const char* kRankedBaseUrl = "https://mvc3-ranked.hero-rehab.xyz"; // prod
 constexpr const char* kRankedLinkPath = "/link";                    // browser page
 constexpr const char* kRankedStatusPath = "/link/status";
 constexpr const char* kRankedCompletePath = "/link/complete";
@@ -177,7 +177,7 @@ struct HttpResponse {
     std::string error;
 };
 
-// base is a full origin ("https://auth.c.hero.rehab" or an override such as
+// base is a full origin ("https://mvc3-ranked.hero-rehab.xyz" or an override
 // "http://127.0.0.1:8787"); pathAndQuery is e.g. "/link/status?state=abc".
 // Every WinHTTP handle is created and destroyed inside this call.
 void HttpSend(const std::string& base, const char* method,
@@ -455,12 +455,15 @@ bool RankedAccount_SetEnabled(bool on)
     }
     if (g_workerActive.load()) return true; // a link attempt is already running
 
+    const std::string base = ReadBaseOverride();
+    char consentText[512];
+    snprintf(consentText, sizeof(consentText),
+             "Ranked matchmaking links your Steam and Discord accounts. This "
+             "will open your browser to %s to finish linking.\n\nContinue?",
+             base.c_str());
     const int consent = MessageBoxA(
-        nullptr,
-        "Ranked matchmaking links your Steam and Discord accounts. This will "
-        "open your browser to auth.c.hero.rehab to finish linking.\n\n"
-        "Continue?",
-        "Timestone", MB_OKCANCEL | MB_ICONQUESTION | MB_SETFOREGROUND | MB_TOPMOST);
+        nullptr, consentText, "Timestone",
+        MB_OKCANCEL | MB_ICONQUESTION | MB_SETFOREGROUND | MB_TOPMOST);
     if (consent != IDOK) {
         HookLog("Ranked: link consent declined\n");
         return false;
@@ -473,7 +476,6 @@ bool RankedAccount_SetEnabled(bool on)
     }
     if (!EnsureHttpLoaded()) return false;
 
-    const std::string base = ReadBaseOverride();
     const std::string state = GenerateStateHex();
 
     char url[512];
@@ -487,7 +489,7 @@ bool RankedAccount_SetEnabled(bool on)
                 static_cast<long long>(result));
         return false;
     }
-    HookLog("Ranked: opened %s for account linking\n", kRankedBaseUrl);
+    HookLog("Ranked: opened %s for account linking\n", base.c_str());
 
     if (!g_stopEvent) {
         g_stopEvent = CreateEventA(nullptr, TRUE, FALSE, nullptr);
