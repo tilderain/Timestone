@@ -36,7 +36,7 @@ rows:
 | `0` | Off (no Discord) | off | - | - |
 | `1` | Basic rich presence | local client, activity | - | - |
 | `2` | Advanced (link Discord account) | activity + join | loopback OAuth (`127.0.0.1/callback`) | - |
-| `3` | Ranked (link for matchmaking) | **off** | hosted: mvc3-ranked.hero-rehab.xyz | one POST on link complete |
+| `3` | Ranked (link for matchmaking) | **off** | hosted: login service | one POST on link complete |
 
 - `0` Off (default). No client is started; nothing is published.
 - `1` Basic - local presence through the running Discord client, no account
@@ -50,16 +50,19 @@ rows:
   The Discord SDK is off under this mode (no presence published). Consent, the
   browser open, and the link poll are owned by `ranked_account.cpp`; entering
   this tier without a completed link shows a consent box and opens the
-  default browser to `mvc3-ranked.hero-rehab.xyz/link?...`.
+  default browser to `login.hero-rehab.xyz/link?...` (the link service).
 
 ### Keys
 
 - `[Settings] OnlineMode` - the single persisted mode key (0-3).
 - `[Settings] RankedLinked` - `1` once the hosted service accepted the link;
   suppresses the whole tier-4 flow on later sessions (silent re-entry).
-- `[Settings] RankedBaseUrl` - optional override of the service origin (used
-  to point at the local stub, e.g. `http://127.0.0.1:8787`); empty means the
-  built-in production URL.
+- `[Settings] RankedBaseUrl` - optional override of the link-service origin
+  (status poll + completion request), e.g. `http://127.0.0.1:8787` for the
+  local stub; empty means the production link service.
+- `[Settings] RankedLinkBaseUrl` - optional override of just the browser page
+  origin. Unset means "use `RankedBaseUrl` when set, else the link service", so
+  a single ini line still points the whole flow at the stub.
 - Legacy `[Settings] DiscordRichPresence` (0-2) is migrated to `OnlineMode`
   once when `OnlineMode` is absent; the legacy key is left in the file and
   never read again.
@@ -91,20 +94,24 @@ display name; `Discord_Activity_SetName` is never called), large image
 
 ## Tier 4 v1 contract (client side)
 
-The `mvc3-ranked.hero-rehab.xyz` server code lands later, outside this repo; the client
-targets the following contract through `ranked_account.cpp`. If the real
-endpoint contract differs when the server lands, only the constants at the top
-of that file and this section need updating.
+The server side lands later, outside this repo; the client targets the
+following contract through `ranked_account.cpp`. Timestone runs several
+separate services on `hero-rehab.xyz`: **login/link** (`login.hero-rehab.xyz`,
+which v1 calls for the whole flow), **ranked** (`mvc3-ranked.hero-rehab.xyz`,
+no v1 endpoints), **mm** (Steam lobby join pages) and **replays**
+(`replays.hero-rehab.xyz`, future). If the real endpoint contract differs when
+the server lands, only the constants at the top of that file and this section
+need updating.
 
-- `GET <base>/link?app=umvc3&steam_id=<steam id>&state=<16 hex>` - browser page
+- `GET <link>/link?app=umvc3&steam_id=<steam id>&state=<16 hex>` - browser page
   the client opens through `ShellExecuteA` after the consent box. `state` is
   generated from `GetTickCount()`/PID entropy.
-- The client then polls `GET <base>/link/status?state=<hex>` from a background
+- The client then polls `GET <link>/link/status?state=<hex>` from a background
   thread every 2 s (never on the game thread) for up to 8 minutes (240
   attempts), with a 3 s timeout per request. Each request opens and closes its
   own WinHTTP handles. A response body containing `"status":"linked"` triggers
   the single completion request; `"pending"` or any error keeps polling.
-- `POST <base>/link/complete`, Content-Type `application/json`, body:
+- `POST <link>/link/complete`, Content-Type `application/json`, body:
   `{"app":"umvc3","build":"0.3.6","steam_id":1234,"state":"<hex>"}` - exactly
   ONE client request, sent only after the status poll observed `linked`. On a
   2xx reply the client writes `[Settings] RankedLinked=1` and stops; a non-2xx

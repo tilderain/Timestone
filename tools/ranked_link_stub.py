@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-"""Local stand-in for the future Timestone link service (prod: mvc3-ranked.hero-rehab.xyz).
+"""Local stand-in for the future Timestone link service (prod: login.hero-rehab.xyz).
 
 The client (ranked_account.cpp) is pointed at this stub with
-[Settings] RankedBaseUrl = http://127.0.0.1:8787 in Timestone.ini.
+[Settings] RankedBaseUrl = http://127.0.0.1:8787 (link flow), or with both
+RankedBaseUrl and RankedLinkBaseUrl if you want the browser page served
+elsewhere. With only RankedBaseUrl set, the page and the API both come here.
 
 Flow the operator drives in a browser:
   1. The game opens  http://127.0.0.1:8787/link?app=umvc3&steam_id=...&state=X

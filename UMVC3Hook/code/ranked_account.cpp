@@ -26,7 +26,13 @@ namespace {
 // Constants
 // ---------------------------------------------------------------------------
 
-constexpr const char* kRankedBaseUrl = "https://mvc3-ranked.hero-rehab.xyz"; // prod
+// Online services are separate deployments (all on hero-rehab.xyz):
+//   login.hero-rehab.xyz       - login + link flow (page and API used below)
+//   mvc3-ranked.hero-rehab.xyz - ranked/matchmaking API; no v1 endpoints yet
+//   mm.hero-rehab.xyz          - Steam lobby join pages (lobby-watcher)
+//   replays.hero-rehab.xyz     - replays (future)
+// The whole v1 link flow (browser page, status poll, completion) is one origin.
+constexpr const char* kLinkServiceBaseUrl = "https://login.hero-rehab.xyz";
 constexpr const char* kRankedLinkPath = "/link";                    // browser page
 constexpr const char* kRankedStatusPath = "/link/status";
 constexpr const char* kRankedCompletePath = "/link/complete";
@@ -157,14 +163,23 @@ std::string GetIniPath()
     return path;
 }
 
-std::string ReadBaseOverride()
+// Link-service origin for the status/completion requests ([Settings]
+// RankedBaseUrl override, else prod) and the browser page origin ([Settings]
+// RankedLinkBaseUrl, else the API override, else prod). One override key drives
+// both so the dev stub keeps working with a single ini line.
+void ReadBaseUrls(std::string& apiBase, std::string& pageBase)
 {
     const std::string path = GetIniPath();
-    char value[512] = {};
-    GetPrivateProfileStringA("Settings", "RankedBaseUrl", "", value,
-                             sizeof(value), path.c_str());
-    if (value[0]) return value;
-    return kRankedBaseUrl;
+    char apiOverride[512] = {};
+    GetPrivateProfileStringA("Settings", "RankedBaseUrl", "", apiOverride,
+                             sizeof(apiOverride), path.c_str());
+    char pageOverride[512] = {};
+    GetPrivateProfileStringA("Settings", "RankedLinkBaseUrl", "", pageOverride,
+                             sizeof(pageOverride), path.c_str());
+    apiBase = apiOverride[0] ? apiOverride : kLinkServiceBaseUrl;
+    if (pageOverride[0]) pageBase = pageOverride;
+    else if (apiOverride[0]) pageBase = apiOverride; // stub serves both
+    else pageBase = kLinkServiceBaseUrl;
 }
 
 // ---------------------------------------------------------------------------
@@ -177,7 +192,7 @@ struct HttpResponse {
     std::string error;
 };
 
-// base is a full origin ("https://mvc3-ranked.hero-rehab.xyz" or an override
+// base is a full origin ("https://login.hero-rehab.xyz" or an override
 // "http://127.0.0.1:8787"); pathAndQuery is e.g. "/link/status?state=abc".
 // Every WinHTTP handle is created and destroyed inside this call.
 void HttpSend(const std::string& base, const char* method,
@@ -455,12 +470,14 @@ bool RankedAccount_SetEnabled(bool on)
     }
     if (g_workerActive.load()) return true; // a link attempt is already running
 
-    const std::string base = ReadBaseOverride();
+    std::string apiBase;
+    std::string pageBase;
+    ReadBaseUrls(apiBase, pageBase);
     char consentText[512];
     snprintf(consentText, sizeof(consentText),
              "Ranked matchmaking links your Steam and Discord accounts. This "
              "will open your browser to %s to finish linking.\n\nContinue?",
-             base.c_str());
+             pageBase.c_str());
     const int consent = MessageBoxA(
         nullptr, consentText, "Timestone",
         MB_OKCANCEL | MB_ICONQUESTION | MB_SETFOREGROUND | MB_TOPMOST);
@@ -480,7 +497,7 @@ bool RankedAccount_SetEnabled(bool on)
 
     char url[512];
     snprintf(url, sizeof(url), "%s%s?app=umvc3&steam_id=%llu&state=%s",
-             base.c_str(), kRankedLinkPath,
+             pageBase.c_str(), kRankedLinkPath,
              static_cast<unsigned long long>(steamId), state.c_str());
     const INT_PTR result = reinterpret_cast<INT_PTR>(
         ShellExecuteA(nullptr, "open", url, nullptr, nullptr, SW_SHOWNORMAL));
@@ -489,7 +506,7 @@ bool RankedAccount_SetEnabled(bool on)
                 static_cast<long long>(result));
         return false;
     }
-    HookLog("Ranked: opened %s for account linking\n", base.c_str());
+    HookLog("Ranked: opened %s for account linking\n", pageBase.c_str());
 
     if (!g_stopEvent) {
         g_stopEvent = CreateEventA(nullptr, TRUE, FALSE, nullptr);
@@ -500,7 +517,7 @@ bool RankedAccount_SetEnabled(bool on)
     }
     ResetEvent(g_stopEvent);
 
-    g_attemptBase = base;
+    g_attemptBase = apiBase;
     g_attemptState = state;
     g_attemptSteamId = steamId;
     g_workerActive.store(true);
