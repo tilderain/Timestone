@@ -6,8 +6,8 @@
 
 **Lightweight reporting:** Keep the analysis, typing, class-reference, and safety
 requirements below. Do not build a JSON reporting framework to execute them.
-Use explicit address assignments and compact per-worker TSV checkpoints. Record
-evidence once, add detail only for actual changes or unresolved dependencies, and
+Use explicit address assignments and compact per-worker TSV checkpoints. Keep
+rename reasoning in the analysis; log detail only for exceptions or type changes, and
 return counts plus the log path rather than copying every record into chat.
 User-specified scope takes precedence: a rename-only assignment does not authorize
 signature, type, or shared-structure changes.
@@ -107,10 +107,29 @@ Exactly one coordinator owns campaign state. It must:
 5. Track exclusive assignments and completed results.
 6. Detect duplicate or conflicting work.
 7. Schedule dependency and low-confidence passes.
-8. Publish progress and final coverage reports.
+8. Personally review worker changes before accepting them as verified.
+9. Publish progress and final coverage reports.
 
 The coordinator must not spend its context deeply decompiling every function.
 Its primary job is work allocation, validation, and recovery.
+
+**Mandatory orchestrator review:** The coordinator must review every worker's
+completed batch itself; a worker's success report or "live-verified" claim is
+not independent validation. Read the actual name and signature deltas, reconcile
+them with live Ghidra state, and check that the changes remain within scope.
+Personally inspect code and relevant callers for ownership changes, newly precise
+semantic names, signature/type changes, and contradictions between workers or
+existing references. Spot-check straightforward remaining changes and expand the
+review when a defect appears. Review effort should follow risk, not require a
+complete second investigation of every trivial function.
+
+Check getters against setters and initialization paths using native offsets;
+existing structure field labels and generated names can be wrong. Verify base,
+derived, embedded, and shared receiver identities rather than trusting a
+decompiler cast. Report unsupported changes and review gaps explicitly; do not
+count unreviewed worker claims as independently verified. Review agents may
+assist, but do not replace the orchestrator's own review. Keep review notes
+compact and focused on findings, without reinstating per-function evidence essays.
 
 ### 4.2 Function Worker
 
@@ -825,34 +844,44 @@ Existing meaningful names must not be replaced by lower-confidence names.
 Every assigned function must produce one result record, including functions
 that required no change:
 
-For any proposed rename, the result must support both ownership and behavior.
-A single concise evidence entry can cite the concrete callers, callees,
-vtable or constructor relationship, DTI/class reference, strings, or repeated
-data access that justify the class-qualified name. A statement such as "loads a
-DWORD from offset 0x4028c" is implementation evidence, not owner or behavioral
-evidence for a function name.
+For any proposed rename, establish ownership and behavior during analysis using
+the evidence rules above. Do not rewrite that reasoning into checkpoint prose.
+The checkpoint tracks progress and actual changes; it is not a research report.
 
 Use one TSV file per worker with this minimum header:
 
 ```text
-address\told_name\tnew_name\toutcome\tevidence
+address\told_name\tnew_name\toutcome
 ```
 
-Use the outcomes from section 3. Evidence should be brief and concrete, citing
-relevant addresses and explaining the rename or reason for leaving it unchanged.
-Include confidence when a proposed name is intentionally broad or uncertain;
-the confidence policy still governs all mutations. Do not repeat the evidence
-as separate owner, behavior, summary, and classification essays.
+Use the outcomes from section 3. Routine completed or already-complete entries
+need only these four columns. Do not append explanations, confidence labels,
+"live rename verified" statements, or typing caveats to every row. The evidence
+and confidence policies still govern analysis and mutations, not mandatory prose.
 
-Record old/new signatures only when changed, class-document paths only when
-updated, and dependencies only when applicable. Use additional columns or a
-short companion note for these details; no nested schema is required.
+Add a short companion note only for unresolved cases, conflicts, failures, or
+signature/type changes. State the specific blocker or record the actual
+before/after signature/type; do not repeat the entire investigation.
 
-Checkpoint each completed function or small group instead of waiting for the
-entire shard. Preserve the old name and supporting evidence before mutation,
-marking an intended change `pending` until confirmed. A pending proposal is not
-a completed result. After an interruption, reconcile pending or unreported roots
-against live Ghidra state before retrying.
+Record class-document updates once per batch, with their paths, rather than
+repeating field findings already stored in those documents. No nested schema or
+per-function list of references read is required.
+
+Work in batches of at most 10 roots. Retain old/new names and outcomes in working
+context, then write one compact checkpoint after the batch. Do not write a
+`pending` row before each mutation and patch it again afterward. Do not repeatedly
+rewrite or display earlier rows. If stopping early or encountering an access
+failure, checkpoint completed work once before returning when possible.
+
+This trades per-function durable checkpoints for fewer tool calls. If a worker
+is interrupted before its checkpoint, some applied changes may be absent from
+the log. Reconcile unreported roots against live Ghidra state before retrying;
+never assume an unlogged mutation did not happen or count a proposal as applied.
+
+Keep the live pre-mutation conflict check. For post-mutation confirmation, a
+successful tool response reporting the updated name/signature is sufficient.
+Retrieve live details again only when the response is unclear, the mutation
+failed, or analysis needs the updated state.
 
 Return counts, unfinished addresses if any, and the log path. Do not paste the
 full records into the conversation or make workers maintain redundant totals.
@@ -1112,8 +1141,8 @@ missed class-owner analysis. Otherwise retain `FUN_<address>` and add a comment.
 
 ### 15.2 Name Quality Gate
 
-Before applying a rename, the worker must answer all of these questions in its
-result record:
+Before applying a rename, the worker must answer these questions during analysis,
+not rewrite the answers into its result record:
 
 1. What class, namespace, or subsystem owns the function, and what evidence
    establishes that ownership?
@@ -1390,6 +1419,7 @@ create explicit non-overlapping shards
 while pending shards exist:
     dispatch up to worker limit
     collect per-function results
+    personally review worker deltas and verify risk-bearing changes in live code
     confirm failed workers have stopped before reassignment
     requeue only unfinished addresses
     collect shared dependency requests
