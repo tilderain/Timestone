@@ -8,10 +8,6 @@ as uniform byte blobs and did not account for polymorphic DTI allocation,
 resource ownership, collision arrays, inline objects, effects, or scalar
 deleting destructors.
 
-For the current native effect/generator lifetime map, pool ownership, completion
-semantics, and differences from older callback-restore policies below, see
-[Effect And Generator Lifetime](effect_generator_lifetime.md).
-
 ## Projectile Clash History
 
 The inline `cAtkCtrl` has three 32-entry `TargetInfo` tables at shot offsets

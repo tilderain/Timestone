@@ -808,59 +808,19 @@ void Effect_RestoreCharacterStates(RollbackSnapshotSlot& slot)
         }
         if (saved.effect &&
             *(uint64_t*)saved.effect == saved.expectedEffectVtable) {
-            ConcreteEffectSnapshot_Restore(saved.effect, saved.state, false);
+            ConcreteEffectSnapshot_Restore(saved.effect, saved.state);
         }
     }
 }
 
 int Effect_RestoreRecipes(RollbackSnapshotSlot& slot)
 {
-    if (slot.effectRecipes.empty()) return 0;
     int restored = 0;
     int failed = 0;
-    // Build one compact lookup per restore, not a shots x effects nested scan.
-    std::vector<std::pair<uint64_t, void*>> callbacks;
-    callbacks.reserve(slot.shotRecipes.size() * SSHOT_CALLBACK_EFFECT_COUNT);
-    for (const auto& shot : slot.shotRecipes) {
-        for (uint32_t index = 0; index < SSHOT_CALLBACK_EFFECT_COUNT; ++index) {
-            void* old = shot.concrete.callbackEffects[index].savedEffect;
-            if (!old) continue;
-            void* live = shot.restoredPtr ? *(void**)((uint8_t*)shot.restoredPtr +
-                SSHOT_CALLBACK_EFFECTS_OFFSET + index * sizeof(void*)) : nullptr;
-            callbacks.emplace_back((uint64_t)old, live);
-        }
-    }
-    std::sort(callbacks.begin(), callbacks.end(), [](const auto& a, const auto& b) {
-        return a.first < b.first;
-    });
     for (RollbackEffectRecipe& saved : slot.effectRecipes)
         saved.restoredPtr = nullptr;
 
     for (RollbackEffectRecipe& saved : slot.effectRecipes) {
-        // Some callback factories also enter the general effect-recipe tracker.
-        // The shot restore already recreated and restored these exact effects.
-        // Spawning the recipe again produces an untracked visual duplicate on
-        // every rollback, with a fresh lifetime unrelated to the callback slot.
-        auto callbackEntry = std::lower_bound(callbacks.begin(), callbacks.end(),
-            (uint64_t)saved.savedPtr, [](const auto& entry, uint64_t pointer) {
-                return entry.first < pointer;
-            });
-        if (callbackEntry != callbacks.end() && callbackEntry->first == (uint64_t)saved.savedPtr) {
-            void* callback = callbackEntry->second;
-            saved.restoredPtr = callback;
-            if (callback && IsActiveUnit(callback)) {
-                RollbackEffectRecipe live = saved;
-                live.savedPtr = callback;
-                auto existing = std::find_if(g_liveEffectRecipes.begin(),
-                    g_liveEffectRecipes.end(), [callback](const RollbackEffectRecipe& recipe) {
-                        return recipe.restoredPtr == callback;
-                    });
-                if (existing != g_liveEffectRecipes.end()) *existing = live;
-                else g_liveEffectRecipes.push_back(live);
-                ++restored;
-            }
-            continue;
-        }
         void* sGameEffect = saved.sGameEffect;
         if (!sGameEffect || !oEffectCreate ||
             (saved.a8 && !IsUsableEffectParent(saved.a8)) ||

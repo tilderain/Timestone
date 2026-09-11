@@ -1,7 +1,6 @@
 #include "../pch.h"
 
 #include "concrete_snapshot.h"
-#include "callback_particle_snapshot.h"
 #include "mk10utils.h"
 #include "rollback_memory.h"
 #include "rollback_model_policy.h"
@@ -29,7 +28,6 @@ constexpr size_t kAttackTargetStride = 0x18;
 constexpr size_t kShotCallbackEffectsOffset = 0x1F78;
 constexpr uint32_t kShotCallbackEffectCount = 13;
 constexpr uint32_t kMaxCallbackGenerators = 64;
-constexpr size_t kMaxShotParticleBytes = 256 * 1024;
 constexpr size_t kAttackTargetTables[kAttackTargetTableCount] = {
     // uShot embeds cAtkCtrl at +0x1470. Its three 0x300-byte TargetInfo
     // tables begin at cAtkCtrl +0x50/+0x350/+0x650.
@@ -65,7 +63,6 @@ uint64_t GetDti(void* object);
 
 constexpr uintptr_t kShotLaserDti = 0x140D482E8ull;
 constexpr uintptr_t kEffectDti = 0x140E18698ull;
-constexpr uintptr_t kEffectModelDti = 0x140D46ED0ull;
 constexpr uintptr_t kDtiIsKindOf = 0x1400039D0ull;
 
 struct SnapshotRange {
@@ -864,17 +861,12 @@ static bool CaptureGeneratorEmissionState(
 
         ConcreteShotSnapshot::CallbackEffectState::GeneratorEmissionState saved{};
         saved.dti = GetObjectDti(generator);
-        // Node/Infinite share only the base prefix; +0xE0/+0x1F4 are
-        // matrices there. Never apply the legacy emission layout to them.
-        if (!saved.dti ||
-            *(uint64_t*)(*(uint64_t*)generator + 0x88) !=
-                (uint64_t)_addr(0x140834F30)) {
+        if (!saved.dti) {
             state.generatorEmissionStates.clear();
             return false;
         }
         saved.resource = *(uint64_t*)(generator + 0x68);
         saved.phase = *(uint8_t*)(generator + 0x77);
-        saved.lifecycleStatus = *(uint32_t*)(generator + 0x20) & 0x80000007u;
         std::memcpy(saved.timing78, (void*)(generator + 0x78),
                     sizeof(saved.timing78));
         saved.elapsed = *(uint32_t*)(generator + 0xB8);
@@ -932,10 +924,6 @@ static bool RestoreGeneratorEmissionState(
         generator = generators[index];
         const auto& saved = state.generatorEmissionStates[index];
         *(uint8_t*)(generator + 0x77) = saved.phase;
-        // The phase-5 completion predicate also needs retiring/activity bits;
-        // preserve fresh sound/GPU ownership flags outside this lifecycle mask.
-        uint32_t* status = (uint32_t*)(generator + 0x20);
-        *status = (*status & ~0x80000007u) | saved.lifecycleStatus;
         std::memcpy((void*)(generator + 0x78), saved.timing78,
                     sizeof(saved.timing78));
         *(uint32_t*)(generator + 0xB8) = saved.elapsed;
@@ -945,121 +933,7 @@ static bool RestoreGeneratorEmissionState(
     return true;
 }
 
-static bool IsSnapshotParticleGenerator(const uint8_t* generator)
-{
-    // Exact DTIs: audited CPU Billboard, LiteBillboard and LitePolyline.
-    // Strip/model/GPU/Node and custom classes have additional ownership.
-    uint64_t dti = GetObjectDti((uint64_t)generator);
-    bool polyline = IsDti(dti, 0x140E1E2D8ull);
-    if (!polyline && !IsDti(dti, 0x140E1E260ull) &&
-        !IsDti(dti, 0x140E1E1B0ull)) return false;
-    if (*(const uint16_t*)(generator + 0x114) != (polyline ? 0xF0 : 0xD0))
-        return false;
-    if (polyline) {
-        // This version supports mode-0 scalar position history only; other
-        // concrete track layouts need separate ownership/size verification.
-        uint64_t resource = *(const uint64_t*)(generator + 0x58);
-        if (!resource || !IsAccessibleRange(resource, 0x178) ||
-            *(const uint8_t*)(resource + 0x170) != 0 ||
-            *(const uint8_t*)(resource + 0x171) == 0) return false;
-    }
-    return true;
-}
-
-static bool AccessibleParticleBytes(const void* memory, size_t bytes)
-{
-    return IsAccessibleRange((uint64_t)memory, bytes);
-}
-
-static void RestoreEffectOuterState(
-    void* effect, const ConcreteShotSnapshot::CallbackEffectState& state)
-{
-    std::memcpy((uint8_t*)effect + 0x100, state.flags100, sizeof(state.flags100));
-    std::memcpy((uint8_t*)effect + 0x110, state.timing110, sizeof(state.timing110));
-    std::memcpy((uint8_t*)effect + 0x1D0, state.state1D0, sizeof(state.state1D0));
-    std::memcpy((uint8_t*)effect + 0x1E0, state.state1E0, sizeof(state.state1E0));
-    std::memcpy((uint8_t*)effect + 0x1F8, state.state1F8, sizeof(state.state1F8));
-    std::memcpy((uint8_t*)effect + 0x230, state.state230, sizeof(state.state230));
-}
-
-static CallbackLifetime::State CaptureCallbackLifetime(void* effect, uint64_t dti)
-{
-    CallbackLifetime::State saved;
-    const bool particleEffect = IsDtiKindOf(dti, kEffectDti);
-    if (!particleEffect && !IsDtiKindOf(dti, kEffectModelDti)) return saved;
-    saved.known = true;
-    saved.unitState = *(uint32_t*)((uint8_t*)effect + 0x10) & 7u;
-    if (!CallbackLifetime::Alive(saved.unitState)) return saved;
-    if (!particleEffect) {
-        // uGameEffectModel::finish sets its packed mStep to 1 after requesting
-        // the finish animation (0x14013c330). A recreated animation must not
-        // reset that finishing model to its looping factory state.
-        saved.emissionFinished =
-            ((*(uint32_t*)((uint8_t*)effect + 0x1CF8) >> 18) & 0x7Fu) == 1;
-        return saved;
-    }
-    // All native effect list families share this polymorphic base prefix,
-    // including Node/Infinite and EffectUnit; do not read their pool offsets.
-    saved.sleeping = (*(uint32_t*)((uint8_t*)effect + 0x100) & 2u) != 0;
-    uint64_t node = *(uint64_t*)((uint8_t*)effect + 0x218);
-    uint32_t count = 0;
-    CallbackLifetime::EmissionSummary emission;
-    while (node && count < kMaxCallbackGenerators) {
-        if (!IsAccessibleRange(node, 0x24)) return saved;
-        const uint32_t status = *(uint32_t*)(node + 0x20);
-        emission.Observe(status);
-        node = *(uint64_t*)(node + 0x18);
-        ++count;
-    }
-    saved.emissionFinished = emission.Finished(!node, count,
-        *(uint16_t*)((uint8_t*)effect + 0x204));
-    return saved;
-}
-
-static void RetireReconstructedCallback(void* effect)
-{
-    if (!effect || !HasCallableDtiVirtual(effect)) return;
-    const uint64_t dti = GetDti(effect);
-    if (!IsDtiKindOf(dti, kEffectDti) && !IsDtiKindOf(dti, kEffectModelDti)) return;
-    uint64_t vtable = *(uint64_t*)effect;
-    auto kill = (void(__fastcall*)(void*))*(uint64_t*)(vtable + 0x78);
-    // Do not replay doFinish: it can emit a follow-up effect already created
-    // in the saved timeline. Native kill retires the queued unit without free.
-    kill(effect);
-}
-
-static bool ShotIsWaitingForCallbacks(const ConcreteShotSnapshot& snapshot)
-{
-    if (snapshot.body.size() <= 0x212C || !snapshot.vtable) return false;
-    uint8_t step = snapshot.body[0x212C];
-    if (step != 2 && step != 3) return false;
-    // State 2 is not universally cleanup for every subclass. Match the actual
-    // native wait handler at +0x3c8, used by Doom missiles and Big Thunder,
-    // rather than invoking their hit/expire handlers (which spawn other work).
-    uint64_t cleanup = *(uint64_t*)(snapshot.vtable + 0x3C8);
-    return cleanup == (uint64_t)_addr(0x1401A0050) ||
-           cleanup == (uint64_t)_addr(0x14015A8D0);
-}
-
-static void FinishRestoredCallbackGenerators(void* effect)
-{
-    // Only called after a supported CPU graph was validated/restored. Keep its
-    // particles and ask emitters to drain. Do not invoke the effect's doFinish
-    // wrapper, which may create a follow-up effect a second time.
-    uint64_t node = *(uint64_t*)((uint8_t*)effect + 0x218);
-    for (uint32_t count = 0; node && count < kMaxCallbackGenerators; ++count) {
-        uint32_t status = *(uint32_t*)(node + 0x20);
-        if ((status & 7u) != 0 && (status & 0x80000000u) == 0) {
-            uint64_t vtable = *(uint64_t*)node;
-            auto finish = (void(__fastcall*)(void*, uint8_t))*(uint64_t*)(vtable + 0x50);
-            finish((void*)node, 1);
-        }
-        node = *(uint64_t*)(node + 0x18);
-    }
-}
-
-bool ConcreteShotSnapshot_Capture(void* shot, ConcreteShotSnapshot& out,
-                                  size_t maxParticleBytes)
+bool ConcreteShotSnapshot_Capture(void* shot, ConcreteShotSnapshot& out)
 {
     out = {};
     if (!shot) return false;
@@ -1076,18 +950,15 @@ bool ConcreteShotSnapshot_Capture(void* shot, ConcreteShotSnapshot& out,
     out.body.resize(size);
     std::memcpy(out.body.data(), shot, size);
     CaptureCollisionPrimitives((const uint8_t*)shot, out);
-    size_t particleBudget = std::min(maxParticleBytes, kMaxShotParticleBytes);
     for (uint32_t index = 0; index < kShotCallbackEffectCount; ++index) {
         void* effect = *(void**)((uint8_t*)shot + kShotCallbackEffectsOffset +
                                 index * sizeof(void*));
         auto& state = out.callbackEffects[index];
         state.occupied = effect != nullptr;
-        state.savedEffect = effect;
         uint64_t effectDti = GetDti(effect);
-        state.lifetime = CaptureCallbackLifetime(effect, effectDti);
-        state.dti = effectDti;
         if (!IsDtiKindOf(effectDti, kEffectDti)) continue;
         state.hasState = true;
+        state.dti = effectDti;
         state.resource = *(uint64_t*)((uint8_t*)effect + 0x108);
         std::memcpy(state.flags100, (uint8_t*)effect + 0x100,
                     sizeof(state.flags100));
@@ -1101,15 +972,8 @@ bool ConcreteShotSnapshot_Capture(void* shot, ConcreteShotSnapshot& out,
                     sizeof(state.state1F8));
         std::memcpy(state.state230, (uint8_t*)effect + 0x230,
                     sizeof(state.state230));
-        if (CallbackLifetime::Alive(state.lifetime.unitState)) {
-            std::vector<uint8_t> particles;
-            if (CallbackParticles::Capture((const uint8_t*)effect, particles,
-                    AccessibleParticleBytes, IsSnapshotParticleGenerator, particleBudget)) {
-                particleBudget -= particles.size();
-                state.particleGraph = std::make_shared<const std::vector<uint8_t>>(
-                    std::move(particles));
-            }
-        }
+        state.hasGeneratorEmissionState =
+            CaptureGeneratorEmissionState(effect, state);
     }
     return true;
 }
@@ -1119,10 +983,8 @@ bool ConcreteEffectSnapshot_Capture(
 {
     state = {};
     state.occupied = effect != nullptr;
-    state.savedEffect = effect;
     if (!effect) return false;
     uint64_t effectDti = GetDti(effect);
-    state.lifetime = CaptureCallbackLifetime(effect, effectDti);
     if (!IsDtiKindOf(effectDti, kEffectDti)) return true;
     state.hasState = true;
     state.dti = effectDti;
@@ -1145,22 +1007,18 @@ bool ConcreteEffectSnapshot_Capture(
 }
 
 bool ConcreteEffectSnapshot_Restore(
-    void* effect, const ConcreteShotSnapshot::CallbackEffectState& state,
-    bool reconstructed)
+    void* effect, const ConcreteShotSnapshot::CallbackEffectState& state)
 {
     if (!effect || !state.hasState ||
         GetObjectDti((uint64_t)effect) != state.dti ||
         *(uint64_t*)((uint8_t*)effect + 0x108) != state.resource)
         return false;
-    // Independent one-shot recipes still use the legacy scalar path. A saved
-    // finished emitter must not become phase 5 with fresh non-retiring status.
-    // Retained character effects keep their actual native particle graph.
-    if (reconstructed && CallbackLifetime::ShouldRetire(state.occupied,
-            state.lifetime, false, false)) {
-        RetireReconstructedCallback(effect);
-        return true;
-    }
-    RestoreEffectOuterState(effect, state);
+    std::memcpy((uint8_t*)effect + 0x100, state.flags100, sizeof(state.flags100));
+    std::memcpy((uint8_t*)effect + 0x110, state.timing110, sizeof(state.timing110));
+    std::memcpy((uint8_t*)effect + 0x1D0, state.state1D0, sizeof(state.state1D0));
+    std::memcpy((uint8_t*)effect + 0x1E0, state.state1E0, sizeof(state.state1E0));
+    std::memcpy((uint8_t*)effect + 0x1F8, state.state1F8, sizeof(state.state1F8));
+    std::memcpy((uint8_t*)effect + 0x230, state.state230, sizeof(state.state230));
     // Laser strips need to generate fresh history from frame zero. Applying an
     // advanced emission cursor to an empty manager graph leaves them invisible.
     if (!IsLaserOwnedEffect(effect))
@@ -1172,7 +1030,37 @@ void ConcreteShotSnapshot_RestoreCallbackEffects(
     void* shot, const ConcreteShotSnapshot& snapshot)
 {
     if (!shot) return;
-    const bool waitingForCallbacks = ShotIsWaitingForCallbacks(snapshot);
+
+    if (IsDti(snapshot.dti, kAttackWireDti) ||
+        IsDti(snapshot.dti, kFireGrenadeExplodeDti) ||
+        IsDti(snapshot.dti, kJamSessionDti) ||
+        IsDti(snapshot.dti, kInfernoDti) ||
+        IsDti(snapshot.dti, kShockingPinkBombDti) ||
+        IsDti(snapshot.dti, kOilBalloonGroundOilDti) ||
+        IsDti(snapshot.dti, kDarkPhoenixFireDti)) {
+        // Attack Wire's factory effect owns track buffers initialized for the
+        // fresh generator graph. Rewinding its presentation timeline can make
+        // a zero-length track active and underflow shiftHistoryBuffer.
+        // Jam Session likewise uses three factory callbacks. Rewinding their
+        // timelines made all three finish during client re-simulation and
+        // marked the still-live shot for removal; shot lifetime is restored
+        // independently by Shot_ApplyFlight.
+        // Dormammu's Inferno uses the same factory callback path in slot 1.
+        // Rewinding it made the client remove the assist shot after seven
+        // re-simulated frames while the host kept it alive.
+        // Shocking Pink rebuilds callback slot 2 with a fresh particle manager
+        // and track table. Its captured timeline can activate a descriptor from
+        // the retired graph, so leave that callback on its native timeline.
+        // Ground Oil's slot-1 effect likewise owns a fresh particle pool. Its
+        // rewound emission state can overrun that pool and corrupt the free-list
+        // tail at cParticleGenerator+0xF8.
+        // Dark Phoenix Fire has the same fresh-pool invariant. Rewinding its
+        // callback emission cursor corrupted the active-list head at +0xE0.
+        // Fire Grenade's callback can contain a generator whose descriptor is
+        // not ready on the reconstructed frame. Restoring an advanced emission
+        // phase makes moveAfter consume that unavailable descriptor immediately.
+        return;
+    }
 
     for (uint32_t index = 0; index < kShotCallbackEffectCount; ++index) {
         const auto& state = snapshot.callbackEffects[index];
@@ -1180,12 +1068,11 @@ void ConcreteShotSnapshot_RestoreCallbackEffects(
                               index * sizeof(void*));
         void* effect = *slot;
 
-        // A finished callback must not be resurrected by every shot factory
-        // restore. Use native deferred retirement (never delete a queued unit).
-        // Keep the slot until preMove clears it, exactly as for native kill.
-        if (!state.occupied || (state.lifetime.known &&
-            !CallbackLifetime::Alive(state.lifetime.unitState))) {
-            RetireReconstructedCallback(effect);
+        // Do not destroy a fresh native callback during reconstruction. The
+        // factory has already established its ownership and category links;
+        // clearing or killing it here leaves a live orphan or makes the shot
+        // lose its callback on the next uShot::preMove.
+        if (!state.occupied) {
             continue;
         }
 
@@ -1193,39 +1080,31 @@ void ConcreteShotSnapshot_RestoreCallbackEffects(
         // and generator graph becomes queryable. Preserve the factory-created
         // replacement in that case; occupancy is authoritative, while scalar
         // rewind is only possible for a fully captured effect.
-        if (!state.hasState) {
-            if (CallbackLifetime::ShouldRetire(state.occupied, state.lifetime,
-                                               false, waitingForCallbacks))
-                RetireReconstructedCallback(effect);
+        if (!state.hasState)
             continue;
-        }
 
         if (!effect || GetDti(effect) != state.dti ||
             *(uint64_t*)((uint8_t*)effect + 0x108) != state.resource) {
-            if (CallbackLifetime::ShouldRetire(state.occupied, state.lifetime,
-                                               false, waitingForCallbacks))
-                RetireReconstructedCallback(effect);
             continue;
         }
 
-        // Restore the complete supported CPU graph first, including existing
-        // particles/history, countdowns, finish bits, and the visitation guard.
-        // Phase 5 then drains historical particles rather than an empty factory
-        // pool; its retirement bit is no longer lost. Rejection writes nothing.
-        bool graphRestored = state.particleGraph &&
-            CallbackParticles::Restore((uint8_t*)effect, *state.particleGraph,
-                                       AccessibleParticleBytes);
-        if (graphRestored) {
-            RestoreEffectOuterState(effect, state);
-            if (CallbackLifetime::NeedsFinish(state.lifetime, true, waitingForCallbacks))
-                FinishRestoredCallbackGenerators(effect);
-        } else if (CallbackLifetime::ShouldRetire(state.occupied, state.lifetime,
-                                                 false, waitingForCallbacks)) {
-            RetireReconstructedCallback(effect);
-        } else {
-            CallbackLifetime::RestoreSleepMode((uint8_t*)effect, state.lifetime.sleeping);
-            CallbackLifetime::RestoreFiniteClock((uint8_t*)effect,
-                                                 state.state1D0, state.timing110);
+        // DTI alone does not identify the EFL resource that defines generator
+        // tracks. Preserve the fresh graph unless it uses the captured resource,
+        // and stop scalar restoration before the live list count at +0x208.
+        std::memcpy((uint8_t*)effect + 0x100, state.flags100,
+                    sizeof(state.flags100));
+        std::memcpy((uint8_t*)effect + 0x110, state.timing110,
+                    sizeof(state.timing110));
+        std::memcpy((uint8_t*)effect + 0x1D0, state.state1D0,
+                    sizeof(state.state1D0));
+        std::memcpy((uint8_t*)effect + 0x1E0, state.state1E0,
+                    sizeof(state.state1E0));
+        std::memcpy((uint8_t*)effect + 0x1F8, state.state1F8,
+                    sizeof(state.state1F8));
+        std::memcpy((uint8_t*)effect + 0x230, state.state230,
+                    sizeof(state.state230));
+        if (!IsDtiKindOf(snapshot.dti, kShotLaserDti)) {
+            RestoreGeneratorEmissionState(effect, state);
         }
     }
 }

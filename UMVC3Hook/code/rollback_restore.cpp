@@ -1027,9 +1027,9 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
         *unitState = (*unitState & ~0x3F8u) | (SSHOT_CATEGORY << 3);
 
         // Restore the fresh callback effects only after the shot's attack,
-        // collision, phase, and transform scalars are in place. Supported CPU
-        // particle graphs restore into fresh allocations; already-completed
-        // callbacks request native deferred retirement instead of restarting.
+        // collision, phase, and transform scalars are in place. Do not kill or
+        // detach a factory-created effect here: native callback ownership and
+        // generator topology belong to the fresh allocation.
         ConcreteShotSnapshot_RestoreCallbackEffects(fresh, saved.concrete);
         const uint64_t overlayEnd = Profile_Now();
         respawnOverlayTicks += overlayEnd - concreteEnd;

@@ -514,10 +514,6 @@ void Shot_CaptureRecipes(RollbackSnapshotSlot& slot)
 {
     slot.shotRecipes.clear();
     slot.shotBodyReferences.clear();
-    // Bound total extra copy/validation work and snapshot memory even in
-    // particle-heavy projectile scenes. Beyond this budget callbacks stay on
-    // their coherent fresh native graph rather than partially rewinding.
-    size_t particleBudget = 2 * 1024 * 1024;
     for (int list = 0; list < SSHOT_SENTINEL_COUNT; ++list) {
         uint64_t sentinel = (uint64_t)_addr(0x140d47f90) + list * 0x28;
         uint64_t sentinelRef = sentinel + 0x08;
@@ -530,11 +526,7 @@ void Shot_CaptureRecipes(RollbackSnapshotSlot& slot)
                 RollbackShotRecipe saved = recipe->second;
                 saved.savedPtr = shot;
                 Shot_CaptureFlight(shot, saved.flight);
-                ConcreteShotSnapshot_Capture(shot, saved.concrete, particleBudget);
-                for (const auto& callback : saved.concrete.callbackEffects) {
-                    if (callback.particleGraph)
-                        particleBudget -= callback.particleGraph->size();
-                }
+                ConcreteShotSnapshot_Capture(shot, saved.concrete);
                 for (uint32_t offset : Rollback_GetShotBodyReferenceOffsets(saved.concrete.dti)) {
                     if (offset + sizeof(void*) > saved.concrete.body.size()) continue;
                     void* target = nullptr;
