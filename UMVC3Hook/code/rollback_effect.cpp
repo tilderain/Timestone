@@ -808,19 +808,57 @@ void Effect_RestoreCharacterStates(RollbackSnapshotSlot& slot)
         }
         if (saved.effect &&
             *(uint64_t*)saved.effect == saved.expectedEffectVtable) {
-            ConcreteEffectSnapshot_Restore(saved.effect, saved.state);
+            ConcreteEffectSnapshot_Restore(saved.effect, saved.state, false);
         }
     }
 }
 
 int Effect_RestoreRecipes(RollbackSnapshotSlot& slot)
 {
+    if (slot.effectRecipes.empty()) return 0;
     int restored = 0;
     int failed = 0;
+    // A shot callback may also be tracked as a general effect. Reuse the shot's
+    // fresh callback instead of creating a second independent copy of its burst.
+    std::vector<std::pair<uint64_t, void*>> callbacks;
+    callbacks.reserve(slot.shotRecipes.size() * SSHOT_CALLBACK_EFFECT_COUNT);
+    for (const auto& shot : slot.shotRecipes) {
+        for (uint32_t index = 0; index < SSHOT_CALLBACK_EFFECT_COUNT; ++index) {
+            void* old = shot.concrete.callbackEffects[index].savedEffect;
+            if (!old) continue;
+            void* live = shot.restoredPtr ? *(void**)((uint8_t*)shot.restoredPtr +
+                SSHOT_CALLBACK_EFFECTS_OFFSET + index * sizeof(void*)) : nullptr;
+            callbacks.emplace_back((uint64_t)old, live);
+        }
+    }
+    std::sort(callbacks.begin(), callbacks.end(), [](const auto& a, const auto& b) {
+        return a.first < b.first;
+    });
     for (RollbackEffectRecipe& saved : slot.effectRecipes)
         saved.restoredPtr = nullptr;
 
     for (RollbackEffectRecipe& saved : slot.effectRecipes) {
+        auto callback = std::lower_bound(callbacks.begin(), callbacks.end(),
+            (uint64_t)saved.savedPtr, [](const auto& entry, uint64_t pointer) {
+                return entry.first < pointer;
+            });
+        if (callback != callbacks.end() && callback->first == (uint64_t)saved.savedPtr) {
+            saved.restoredPtr = callback->second;
+            if (saved.restoredPtr && IsActiveUnit(saved.restoredPtr)) {
+                RollbackEffectRecipe live = saved;
+                live.savedPtr = saved.restoredPtr;
+                auto existing = std::find_if(g_liveEffectRecipes.begin(), g_liveEffectRecipes.end(),
+                    [&](const auto& recipe) { return recipe.restoredPtr == saved.restoredPtr; });
+                if (existing != g_liveEffectRecipes.end()) *existing = std::move(live);
+                else g_liveEffectRecipes.push_back(std::move(live));
+                ++restored;
+            }
+            continue;
+        }
+        // Independent completed bursts (e.g. swap-out flowers) must not return
+        // to their factory's first emission on every rollback. Live shot bodies
+        // were handled above and have a distinct missing-particle repair path.
+        if (saved.state.CompletedIndependent()) continue;
         void* sGameEffect = saved.sGameEffect;
         if (!sGameEffect || !oEffectCreate ||
             (saved.a8 && !IsUsableEffectParent(saved.a8)) ||

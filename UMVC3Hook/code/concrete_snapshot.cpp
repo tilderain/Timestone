@@ -853,8 +853,9 @@ static bool CaptureGeneratorEmissionState(
     if (!IsDtiKindOf(effectDti, kEffectDti)) return false;
 
     uint64_t generator = *(uint64_t*)((uint8_t*)effect + 0x218);
+    bool sawFinish = false, running = false;
     for (uint32_t count = 0; generator; ++count) {
-        if (count >= kMaxCallbackGenerators) {
+        if (count >= kMaxCallbackGenerators || !IsAccessibleRange(generator, 0x28)) {
             state.generatorEmissionStates.clear();
             return false;
         }
@@ -865,21 +866,33 @@ static bool CaptureGeneratorEmissionState(
             state.generatorEmissionStates.clear();
             return false;
         }
-        saved.resource = *(uint64_t*)(generator + 0x68);
-        saved.phase = *(uint8_t*)(generator + 0x77);
-        std::memcpy(saved.timing78, (void*)(generator + 0x78),
-                    sizeof(saved.timing78));
-        saved.elapsed = *(uint32_t*)(generator + 0xB8);
-        std::memcpy(saved.spawnCounters, (void*)(generator + 0x1F4),
-                    sizeof(saved.spawnCounters));
+        const uint32_t status = *(uint32_t*)(generator + 0x20);
+        sawFinish |= (status & 0x80000000u) != 0;
+        running |= (status & 7u) != 0 && !(status & 0x80000000u);
+        saved.ordinary = *(uint64_t*)(*(uint64_t*)generator + 0x88) ==
+            (uint64_t)_addr(0x140834F30);
+        if (saved.ordinary) {
+            if (!IsAccessibleRange(generator, 0x208)) {
+                state.generatorEmissionStates.clear();
+                return false;
+            }
+            saved.resource = *(uint64_t*)(generator + 0x68);
+            EffectGenerator::CaptureOrdinary((void*)generator, saved);
+        }
         state.generatorEmissionStates.push_back(saved);
         generator = *(uint64_t*)(generator + 0x18);
     }
+    if (state.generatorEmissionStates.size() != *(uint16_t*)((uint8_t*)effect + 0x204)) {
+        state.generatorEmissionStates.clear();
+        return false;
+    }
+    state.emissionFinished = sawFinish && !running;
     return true;
 }
 
 static bool RestoreGeneratorEmissionState(
-    void* effect, const ConcreteShotSnapshot::CallbackEffectState& state)
+    void* effect, const ConcreteShotSnapshot::CallbackEffectState& state,
+    bool liveShot = false)
 {
     if (!state.hasGeneratorEmissionState) return false;
 
@@ -888,9 +901,13 @@ static bool RestoreGeneratorEmissionState(
     uint64_t generator = *(uint64_t*)((uint8_t*)effect + 0x218);
     for (size_t index = 0; generator; ++index) {
         if (index >= state.generatorEmissionStates.size() ||
+            !IsAccessibleRange(generator, 0x28) ||
             GetObjectDti(generator) != state.generatorEmissionStates[index].dti ||
-            *(uint64_t*)(generator + 0x68) !=
-                state.generatorEmissionStates[index].resource) {
+            (state.generatorEmissionStates[index].ordinary &&
+             (!IsAccessibleRange(generator, 0x208) ||
+              *(uint64_t*)(*(uint64_t*)generator + 0x88) != (uint64_t)_addr(0x140834F30) ||
+              *(uint64_t*)(generator + 0x68) != state.generatorEmissionStates[index].resource ||
+              *(uint32_t*)(generator + 0x70) != state.generatorEmissionStates[index].modes))) {
             return false;
         }
         generators.push_back(generator);
@@ -904,6 +921,12 @@ static bool RestoreGeneratorEmissionState(
     // phase would move it immediately and underflow the history index.
     for (size_t index = 0; index < generators.size(); ++index) {
         uint64_t current = generators[index];
+        const auto& saved = state.generatorEmissionStates[index];
+        // Only track-capable ordinary particles have history at +0x9C/+0x9D.
+        // Never interpret Node/Infinite matrices as ordinary particle lists.
+        if (!saved.ordinary ||
+            (!IsDti(saved.dti, 0x140E1E2A0ull) && !IsDti(saved.dti, 0x140E1E2D8ull) &&
+             !IsDti(saved.dti, 0x140E1E698ull))) continue;
         if (*(uint8_t*)(current + 0x77) ==
             state.generatorEmissionStates[index].phase) {
             continue;
@@ -911,8 +934,9 @@ static bool RestoreGeneratorEmissionState(
         uint64_t particle = *(uint64_t*)(current + 0xE0);
         uint32_t count = 0;
         while (particle && count++ < 0x10000) {
-            if (*(uint8_t*)(particle + 0x9C) == 0 &&
-                *(uint8_t*)(particle + 0x9D) == 0) {
+            if (!IsAccessibleRange(particle, 0xA0) ||
+                (*(uint8_t*)(particle + 0x9C) == 0 &&
+                 *(uint8_t*)(particle + 0x9D) == 0)) {
                 return false;
             }
             particle = *(uint64_t*)(particle + 0x08);
@@ -921,16 +945,49 @@ static bool RestoreGeneratorEmissionState(
     }
 
     for (size_t index = 0; index < generators.size(); ++index) {
-        generator = generators[index];
-        const auto& saved = state.generatorEmissionStates[index];
-        *(uint8_t*)(generator + 0x77) = saved.phase;
-        std::memcpy((void*)(generator + 0x78), saved.timing78,
-                    sizeof(saved.timing78));
-        *(uint32_t*)(generator + 0xB8) = saved.elapsed;
-        std::memcpy((void*)(generator + 0x1F4), saved.spawnCounters,
-                    sizeof(saved.spawnCounters));
+        EffectGenerator::RestoreOrdinary((void*)generators[index],
+                                         state.generatorEmissionStates[index], liveShot);
     }
     return true;
+}
+
+static void RetireRecreatedEffect(void* effect)
+{
+    if (!effect) return;
+    const uint64_t dti = GetDti(effect);
+    if (!IsDtiKindOf(dti, kEffectDti) && !IsDtiKindOf(dti, 0x140D46ED0ull)) return;
+    auto kill = (void(__fastcall*)(void*))*(uint64_t*)(*(uint64_t*)effect + 0x78);
+    kill(effect); // native deferred retirement; never replay a spawning finish wrapper
+}
+
+static void RestoreEffectTimeline(void* effect,
+    const ConcreteShotSnapshot::CallbackEffectState& state, bool reconstructed)
+{
+    std::memcpy((uint8_t*)effect + 0x100, state.flags100, sizeof(state.flags100));
+    std::memcpy((uint8_t*)effect + 0x110, state.timing110, sizeof(state.timing110));
+    std::memcpy((uint8_t*)effect + 0x1D0, state.state1D0, sizeof(state.state1D0));
+    std::memcpy((uint8_t*)effect + 0x1E0, state.state1E0, sizeof(state.state1E0));
+    // Fresh graphs own their generation token, child census and active counts.
+    // An old zero completion count must not finish a newly recreated visual.
+    if (!reconstructed)
+        std::memcpy((uint8_t*)effect + 0x1F8, state.state1F8, sizeof(state.state1F8));
+    std::memcpy((uint8_t*)effect + 0x230, state.state230, sizeof(state.state230));
+}
+
+static void RestoreEffectFallbackClock(void* effect,
+    const ConcreteShotSnapshot::CallbackEffectState& state)
+{
+    // A pending/mismatched fresh graph must keep its setup and completion flags.
+    // Still preserve an explicit expiry so repeated reconstruction cannot extend it.
+    using EffectGenerator::Read;
+    using EffectGenerator::Write;
+    if (Read<uint16_t>(state.state1D0, 6)) {
+        std::memcpy((uint8_t*)effect + 0x1D4, state.state1D0 + 4, 4);
+        Write<uint32_t>(effect, 0x130, (Read<uint32_t>(effect, 0x130) & ~0xFu) |
+            (Read<uint32_t>(state.timing110, 0x20) & 0xFu));
+    }
+    Write<uint32_t>(effect, 0x100, (Read<uint32_t>(effect, 0x100) & ~2u) |
+        (Read<uint32_t>(state.flags100, 0) & 2u));
 }
 
 bool ConcreteShotSnapshot_Capture(void* shot, ConcreteShotSnapshot& out)
@@ -955,9 +1012,11 @@ bool ConcreteShotSnapshot_Capture(void* shot, ConcreteShotSnapshot& out)
                                 index * sizeof(void*));
         auto& state = out.callbackEffects[index];
         state.occupied = effect != nullptr;
+        state.savedEffect = effect;
         uint64_t effectDti = GetDti(effect);
         if (!IsDtiKindOf(effectDti, kEffectDti)) continue;
         state.hasState = true;
+        state.unitState = *(uint32_t*)((uint8_t*)effect + 0x10) & 7u;
         state.dti = effectDti;
         state.resource = *(uint64_t*)((uint8_t*)effect + 0x108);
         std::memcpy(state.flags100, (uint8_t*)effect + 0x100,
@@ -983,10 +1042,12 @@ bool ConcreteEffectSnapshot_Capture(
 {
     state = {};
     state.occupied = effect != nullptr;
+    state.savedEffect = effect;
     if (!effect) return false;
     uint64_t effectDti = GetDti(effect);
     if (!IsDtiKindOf(effectDti, kEffectDti)) return true;
     state.hasState = true;
+    state.unitState = *(uint32_t*)((uint8_t*)effect + 0x10) & 7u;
     state.dti = effectDti;
     state.resource = *(uint64_t*)((uint8_t*)effect + 0x108);
     std::memcpy(state.flags100, (uint8_t*)effect + 0x100,
@@ -1007,22 +1068,24 @@ bool ConcreteEffectSnapshot_Capture(
 }
 
 bool ConcreteEffectSnapshot_Restore(
-    void* effect, const ConcreteShotSnapshot::CallbackEffectState& state)
+    void* effect, const ConcreteShotSnapshot::CallbackEffectState& state, bool reconstructed)
 {
     if (!effect || !state.hasState ||
         GetObjectDti((uint64_t)effect) != state.dti ||
         *(uint64_t*)((uint8_t*)effect + 0x108) != state.resource)
         return false;
-    std::memcpy((uint8_t*)effect + 0x100, state.flags100, sizeof(state.flags100));
-    std::memcpy((uint8_t*)effect + 0x110, state.timing110, sizeof(state.timing110));
-    std::memcpy((uint8_t*)effect + 0x1D0, state.state1D0, sizeof(state.state1D0));
-    std::memcpy((uint8_t*)effect + 0x1E0, state.state1E0, sizeof(state.state1E0));
-    std::memcpy((uint8_t*)effect + 0x1F8, state.state1F8, sizeof(state.state1F8));
-    std::memcpy((uint8_t*)effect + 0x230, state.state230, sizeof(state.state230));
+    if (reconstructed && state.CompletedIndependent()) {
+        RetireRecreatedEffect(effect);
+        return true;
+    }
     // Laser strips need to generate fresh history from frame zero. Applying an
     // advanced emission cursor to an empty manager graph leaves them invisible.
-    if (!IsLaserOwnedEffect(effect))
+    const bool restored = !IsLaserOwnedEffect(effect) &&
         RestoreGeneratorEmissionState(effect, state);
+    if (restored || !reconstructed)
+        RestoreEffectTimeline(effect, state, reconstructed);
+    else
+        RestoreEffectFallbackClock(effect, state);
     return true;
 }
 
@@ -1030,6 +1093,13 @@ void ConcreteShotSnapshot_RestoreCallbackEffects(
     void* shot, const ConcreteShotSnapshot& snapshot)
 {
     if (!shot) return;
+
+    // Doom's hit/expire handlers already finished callbacks before entering
+    // step 2. Reconstruction must not restart those effects and leave the
+    // native wait handler (vfn121) waiting forever for its slots to empty.
+    const bool waitingForCallbacks = snapshot.body.size() > 0x212C && snapshot.vtable &&
+        (snapshot.body[0x212C] == 2 || snapshot.body[0x212C] == 3) &&
+        *(uint64_t*)(snapshot.vtable + 0x3C8) == (uint64_t)_addr(0x1401A0050);
 
     if (IsDti(snapshot.dti, kAttackWireDti) ||
         IsDti(snapshot.dti, kFireGrenadeExplodeDti) ||
@@ -1068,11 +1138,11 @@ void ConcreteShotSnapshot_RestoreCallbackEffects(
                               index * sizeof(void*));
         void* effect = *slot;
 
-        // Do not destroy a fresh native callback during reconstruction. The
-        // factory has already established its ownership and category links;
-        // clearing or killing it here leaves a live orphan or makes the shot
-        // lose its callback on the next uShot::preMove.
-        if (!state.occupied) {
+        // Saved absence/death and native cleanup are authoritative. Leave the
+        // pointer in its slot until native preMove clears the retired unit.
+        if (!state.occupied || waitingForCallbacks ||
+            (state.hasState && state.unitState != 1 && state.unitState != 2)) {
+            RetireRecreatedEffect(effect);
             continue;
         }
 
@@ -1088,24 +1158,11 @@ void ConcreteShotSnapshot_RestoreCallbackEffects(
             continue;
         }
 
-        // DTI alone does not identify the EFL resource that defines generator
-        // tracks. Preserve the fresh graph unless it uses the captured resource,
-        // and stop scalar restoration before the live list count at +0x208.
-        std::memcpy((uint8_t*)effect + 0x100, state.flags100,
-                    sizeof(state.flags100));
-        std::memcpy((uint8_t*)effect + 0x110, state.timing110,
-                    sizeof(state.timing110));
-        std::memcpy((uint8_t*)effect + 0x1D0, state.state1D0,
-                    sizeof(state.state1D0));
-        std::memcpy((uint8_t*)effect + 0x1E0, state.state1E0,
-                    sizeof(state.state1E0));
-        std::memcpy((uint8_t*)effect + 0x1F8, state.state1F8,
-                    sizeof(state.state1F8));
-        std::memcpy((uint8_t*)effect + 0x230, state.state230,
-                    sizeof(state.state230));
-        if (!IsDtiKindOf(snapshot.dti, kShotLaserDti)) {
-            RestoreGeneratorEmissionState(effect, state);
-        }
+        if (!IsDtiKindOf(snapshot.dti, kShotLaserDti) &&
+            RestoreGeneratorEmissionState(effect, state, true))
+            RestoreEffectTimeline(effect, state, true);
+        else
+            RestoreEffectFallbackClock(effect, state);
     }
 }
 

@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <cstddef>
 #include <vector>
+#include "effect_generator_state.h"
 
 // A concrete uShot body captured using the object's runtime DTI size. The
 // snapshotter deliberately restores only subclass storage; the common uShot
@@ -10,16 +11,12 @@
 // ownership/topology pointers valid.
 struct ConcreteShotSnapshot {
     struct CallbackEffectState {
-        struct GeneratorEmissionState {
-            uint64_t dti = 0;
-            uint64_t resource = 0;
-            uint8_t phase = 0;
-            uint8_t timing78[0x0C] = {};
-            uint32_t elapsed = 0;
-            uint8_t spawnCounters[0x08] = {};
-        };
+        using GeneratorEmissionState = EffectGenerator::State;
 
         bool occupied = false;
+        void* savedEffect = nullptr;
+        uint8_t unitState = 0;
+        bool emissionFinished = false;
         bool hasState = false;
         bool hasGeneratorEmissionState = false;
         uint64_t dti = 0;
@@ -31,6 +28,11 @@ struct ConcreteShotSnapshot {
         uint8_t state1F8[0x10] = {};
         uint8_t state230[0x12] = {};
         std::vector<GeneratorEmissionState> generatorEmissionStates;
+
+        bool CompletedIndependent() const {
+            return hasState && ((unitState != 1 && unitState != 2) ||
+                (emissionFinished && (flags100[0] & 2u) == 0));
+        }
     };
 
     struct CollisionPrimitive {
@@ -68,7 +70,8 @@ void ConcreteShotSnapshot_RestoreCallbackEffects(
 bool ConcreteEffectSnapshot_Capture(
     void* effect, ConcreteShotSnapshot::CallbackEffectState& state);
 bool ConcreteEffectSnapshot_Restore(
-    void* effect, const ConcreteShotSnapshot::CallbackEffectState& state);
+    void* effect, const ConcreteShotSnapshot::CallbackEffectState& state,
+    bool reconstructed = true);
 // Reapply reconstructed capsule sources after the native shot hitbox update.
 // Reconstructed parent transforms can collapse data-derived world endpoints,
 // so this restores them directly at the outer update boundary.
