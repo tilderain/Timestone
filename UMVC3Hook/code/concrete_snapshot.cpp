@@ -6,6 +6,7 @@
 #include "rollback_model_policy.h"
 #include "rollback_profile.h"
 
+#include <array>
 #include <cmath>
 #include <cstring>
 
@@ -852,10 +853,13 @@ static bool CaptureGeneratorEmissionState(
     uint64_t effectDti = GetDti(effect);
     if (!IsDtiKindOf(effectDti, kEffectDti)) return false;
 
+    const size_t expectedCount = *(uint16_t*)((uint8_t*)effect + 0x204);
+    if (expectedCount > kMaxCallbackGenerators) return false;
+    state.generatorEmissionStates.reserve(expectedCount);
     uint64_t generator = *(uint64_t*)((uint8_t*)effect + 0x218);
     bool sawFinish = false, running = false;
     for (uint32_t count = 0; generator; ++count) {
-        if (count >= kMaxCallbackGenerators || !IsAccessibleRange(generator, 0x28)) {
+        if (count >= expectedCount || !IsAccessibleRange(generator, 0x28)) {
             state.generatorEmissionStates.clear();
             return false;
         }
@@ -882,7 +886,7 @@ static bool CaptureGeneratorEmissionState(
         state.generatorEmissionStates.push_back(saved);
         generator = *(uint64_t*)(generator + 0x18);
     }
-    if (state.generatorEmissionStates.size() != *(uint16_t*)((uint8_t*)effect + 0x204)) {
+    if (state.generatorEmissionStates.size() != expectedCount) {
         state.generatorEmissionStates.clear();
         return false;
     }
@@ -896,11 +900,13 @@ static bool RestoreGeneratorEmissionState(
 {
     if (!state.hasGeneratorEmissionState) return false;
 
-    std::vector<uint64_t> generators;
-    generators.reserve(state.generatorEmissionStates.size());
+    const size_t generatorCount = state.generatorEmissionStates.size();
+    if (generatorCount > kMaxCallbackGenerators) return false;
+    std::array<uint64_t, kMaxCallbackGenerators> generators;
+    size_t foundCount = 0;
     uint64_t generator = *(uint64_t*)((uint8_t*)effect + 0x218);
     for (size_t index = 0; generator; ++index) {
-        if (index >= state.generatorEmissionStates.size() ||
+        if (index >= generatorCount ||
             !IsAccessibleRange(generator, 0x28) ||
             GetObjectDti(generator) != state.generatorEmissionStates[index].dti ||
             (state.generatorEmissionStates[index].ordinary &&
@@ -910,16 +916,16 @@ static bool RestoreGeneratorEmissionState(
               *(uint32_t*)(generator + 0x70) != state.generatorEmissionStates[index].modes))) {
             return false;
         }
-        generators.push_back(generator);
+        generators[foundCount++] = generator;
         generator = *(uint64_t*)(generator + 0x18);
     }
-    if (generators.size() != state.generatorEmissionStates.size()) return false;
+    if (foundCount != generatorCount) return false;
 
     // Mode 0 enters cParticleGenerator__shiftHistoryBuffer, whose unsigned
     // loop requires particle+0x9D to be nonzero. A fresh factory graph can
     // contain a not-yet-initialized mode-0 particle; rewinding the generator
     // phase would move it immediately and underflow the history index.
-    for (size_t index = 0; index < generators.size(); ++index) {
+    for (size_t index = 0; index < generatorCount; ++index) {
         uint64_t current = generators[index];
         const auto& saved = state.generatorEmissionStates[index];
         // Only track-capable ordinary particles have history at +0x9C/+0x9D.
@@ -944,7 +950,7 @@ static bool RestoreGeneratorEmissionState(
         if (particle) return false;
     }
 
-    for (size_t index = 0; index < generators.size(); ++index) {
+    for (size_t index = 0; index < generatorCount; ++index) {
         EffectGenerator::RestoreOrdinary((void*)generators[index],
                                          state.generatorEmissionStates[index], liveShot);
     }

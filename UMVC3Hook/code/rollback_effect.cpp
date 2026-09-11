@@ -676,7 +676,7 @@ void Effect_CaptureRecipes(RollbackSnapshotSlot& slot)
 
         saved.savedPtr = recipe.restoredPtr;
         ConcreteEffectSnapshot_Capture(recipe.restoredPtr, saved.state);
-        slot.effectRecipes.push_back(saved);
+        slot.effectRecipes.push_back(std::move(saved));
     }
 
     // Rocket's jetpack effects use the short factory and never enter the
@@ -892,7 +892,7 @@ int Effect_RestoreRecipes(RollbackSnapshotSlot& slot)
         RollbackEffectRecipe live = saved;
         live.savedPtr = effect;
         live.restoredPtr = effect;
-        g_liveEffectRecipes.push_back(live);
+        g_liveEffectRecipes.push_back(std::move(live));
         ++restored;
     }
     if (failed != 0) {

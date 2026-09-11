@@ -563,7 +563,7 @@ void Shot_CaptureRecipes(RollbackSnapshotSlot& slot)
                         slot.shotBodyReferences.push_back({saved.spawnSequence, offset, reference});
                     }
                 }
-                slot.shotRecipes.push_back(saved);
+                slot.shotRecipes.push_back(std::move(saved));
             }
             nodeRef = *(uint64_t*)(nodeRef + SSHOT_NODE_NEXT);
         }
@@ -655,8 +655,9 @@ void Shot_TrackReconstructed(void* shot, const RollbackShotRecipe& recipe)
     live.savedPtr = shot;
     live.restoredPtr = shot;
     live.reconstructed = true;
-    g_liveShotRecipes[shot] = live;
-    g_liveShotsBySequence[live.spawnSequence] = shot;
+    const uint64_t spawnSequence = live.spawnSequence;
+    g_liveShotRecipes[shot] = std::move(live);
+    g_liveShotsBySequence[spawnSequence] = shot;
 }
 
 void Shot_Reset()
