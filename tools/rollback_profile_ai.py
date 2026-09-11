@@ -238,11 +238,19 @@ def combined_summary(sides):
     }
 
 
+def artifact_paths(game_dir, pattern):
+    # Current diagnostics live under rollback_logs; older builds used the
+    # game directory directly. Use the same roots for snapshots and discovery
+    # so unchanged artifacts cannot be mistaken for a new run's output.
+    for root in (game_dir / "rollback_logs", game_dir):
+        yield from root.glob(pattern)
+
+
 def artifact_snapshot(game_dir):
     snapshot = {}
     for pattern in ("nplive_*/rollback_profile.json", "nplive_*/Timestone_*.log",
                     "nplive_*/umvc3_crash.log", "desync_*.usdp"):
-        for path in game_dir.glob(pattern):
+        for path in artifact_paths(game_dir, pattern):
             try:
                 stat = path.stat()
             except OSError:
@@ -267,7 +275,7 @@ def profile_side(path):
 
 def recent_profiles(game_dir, not_before, before):
     profiles = {"host": [], "client": []}
-    for path in game_dir.glob("nplive_*/rollback_profile.json"):
+    for path in artifact_paths(game_dir, "nplive_*/rollback_profile.json"):
         side = profile_side(path)
         if side and changed_since(path, not_before, before):
             profiles[side].append(path)
@@ -278,7 +286,7 @@ def recent_profiles(game_dir, not_before, before):
 
 def recent_logs(game_dir, not_before, before):
     logs = {"host": [], "client": []}
-    for path in game_dir.glob("nplive_*/Timestone_*.log"):
+    for path in artifact_paths(game_dir, "nplive_*/Timestone_*.log"):
         side = profile_side(path)
         if side and changed_since(path, not_before, before):
             logs[side].append(path)
@@ -301,7 +309,7 @@ def completion_sides(game_dir, not_before, before):
 
 def recent_crashes(game_dir, not_before, before):
     crashes = []
-    for path in game_dir.glob("nplive_*/umvc3_crash.log"):
+    for path in artifact_paths(game_dir, "nplive_*/umvc3_crash.log"):
         if not changed_since(path, not_before, before):
             continue
         try:
@@ -314,7 +322,7 @@ def recent_crashes(game_dir, not_before, before):
 
 
 def recent_desyncs(game_dir, not_before, before):
-    return sorted(str(path) for path in game_dir.glob("desync_*.usdp")
+    return sorted(str(path) for path in artifact_paths(game_dir, "desync_*.usdp")
                   if changed_since(path, not_before, before))
 
 

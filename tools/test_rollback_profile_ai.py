@@ -79,6 +79,40 @@ class RollbackProfileAiTest(unittest.TestCase):
             self.assertEqual(
                 [str(fresh)], runner.recent_desyncs(root, time.time() - 1, before))
 
+    def test_current_layout_discovers_profiles_completions_and_failures(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            started = time.time() - 1
+            host = root / "rollback_logs" / "nplive_test_host"
+            client = root / "rollback_logs" / "nplive_test_client_r1"
+            host.mkdir(parents=True)
+            client.mkdir(parents=True)
+            profile = client / "rollback_profile.json"
+            profile.write_text("[]", encoding="utf-8")
+            for side, folder in (("host", host), ("client", client)):
+                (folder / f"Timestone_{side}.log").write_text(
+                    runner.FRAME_LIMIT_MESSAGE, encoding="utf-8")
+            crash = client / "umvc3_crash.log"
+            crash.write_text("=== UMVC3Hook crash", encoding="utf-8")
+            desync = root / "rollback_logs" / "desync_test_client_f1.usdp"
+            desync.touch()
+
+            self.assertEqual({"host": [], "client": [profile]},
+                             runner.recent_profiles(root, started, {}))
+            self.assertEqual({"host", "client"},
+                             runner.completion_sides(root, started, {}))
+            self.assertEqual([str(crash)], runner.recent_crashes(root, started, {}))
+            self.assertEqual([str(desync)], runner.recent_desyncs(root, started, {}))
+
+            # All four artifact kinds must be snapshotted in the new layout.
+            before = runner.artifact_snapshot(root)
+            self.assertEqual(5, len(before))
+            self.assertEqual({"host": [], "client": []},
+                             runner.recent_profiles(root, started, before))
+            self.assertEqual(set(), runner.completion_sides(root, started, before))
+            self.assertEqual([], runner.recent_crashes(root, started, before))
+            self.assertEqual([], runner.recent_desyncs(root, started, before))
+
     def test_build_plan_uses_cpu_and_frame_limit_options(self):
         with tempfile.TemporaryDirectory() as directory:
             args = SimpleNamespace(

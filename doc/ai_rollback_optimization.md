@@ -215,9 +215,13 @@ profiles form a valid pair.
 Each netplay process writes its own diagnostics directory beside the loaded plugin:
 
 ```text
-nplive_<TIMESTAMP>_host/rollback_profile.json
-nplive_<TIMESTAMP>_client/rollback_profile.json
+rollback_logs/nplive_<TIMESTAMP>_host/rollback_profile.json
+rollback_logs/nplive_<TIMESTAMP>_client/rollback_profile.json
 ```
+
+The runner also accepts the legacy layout directly under the game directory.
+Both layouts are included in pre-launch snapshots and fresh-artifact discovery
+for profiles, completion logs, crashes, and desync dumps.
 
 A reset or rematch may create a suffixed directory such as `_r1`. Use only
 directories created after the test launch timestamp. Preserve the raw host and
