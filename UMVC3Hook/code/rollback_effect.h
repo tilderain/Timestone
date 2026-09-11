@@ -13,6 +13,8 @@ void Effect_CaptureRecipes(RollbackSnapshotSlot& slot);
 int Effect_RestoreRecipes(RollbackSnapshotSlot& slot);
 void Effect_RestoreCharacterStates(RollbackSnapshotSlot& slot);
 void Effect_RestoreCharacterReferences(RollbackSnapshotSlot& slot);
+// Requires a validated native unit/vtable (e.g. a live sUnit list entry).
+bool Effect_IsExAtkSpaceUnit(const void* unit);
 void Effect_PrepareUnitRemoval(void* unit);
 void Effect_FinishUnitRemoval(void* unit);
 void Effect_ReleaseOwnedAllocations(void* effect);

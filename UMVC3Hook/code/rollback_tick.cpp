@@ -1,6 +1,7 @@
 #include "../pch.h"
 
 #include "rollback.h"
+#include "rollback_effect.h"
 #include "rollback_profile.h"
 #include "rollback_memory.h"
 #include "rollback_diagnostics.h"
@@ -116,9 +117,14 @@ static bool IsHeadlessGameplaySyncCategory(uint32_t category)
     }
 }
 
-static bool IsHeadlessGameplayUnitObject(uint64_t dti)
+static bool IsHeadlessGameplayUnitObject(uint64_t dti, uint64_t unit, uint32_t category)
 {
-    return dti != (uint64_t)_addr(DTI_UCHRCHAIN);
+    // ExAtkSpace and its category-14 children retain their displayed timeline.
+    // Its +0x50 phase must not send child finish requests against historical
+    // character flags, nor may +0x48 finalize the retained parent during resim.
+    // State 3/4 cleanup and ordinary (non-headless) updates still run normally.
+    return dti != (uint64_t)_addr(DTI_UCHRCHAIN) &&
+        (category != 13 || !Effect_IsExAtkSpaceUnit((void*)unit));
 }
 
 static constexpr uintptr_t SLEEP_CALL_FIXED  = 0x1405220b2;
@@ -317,7 +323,7 @@ static void HeadlessUnitCategoryMove(uint64_t sMain, uint64_t sUnit,
             }
 
             if ((stateFlags & 7u) == 2 && (stateFlags & 0x400u) != 0 &&
-                IsHeadlessGameplayUnitObject(dti)) {
+                IsHeadlessGameplayUnitObject(dti, unit, category)) {
                 Rollback_FreezeWatchdogUnit("headless-unit-move", category,
                                             unit, dti, g_resimulateCurrentFrame);
                 if (!useJobs) {
@@ -433,7 +439,7 @@ static void HeadlessUnitCategoryPostMove(uint64_t sMain, uint64_t sUnit,
             }
 
             if ((stateFlags & 7u) == 2 && (stateFlags & 0x400u) != 0 &&
-                IsHeadlessGameplayUnitObject(dti)) {
+                IsHeadlessGameplayUnitObject(dti, unit, category)) {
                 Rollback_FreezeWatchdogUnit(WatchdogPhaseName(phase), category,
                                             unit, dti, g_resimulateCurrentFrame);
                 if (initialized) {

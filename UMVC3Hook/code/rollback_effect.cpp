@@ -10,6 +10,7 @@
 #include "../kiero/minhook/include/MinHook.h"
 
 #include <algorithm>
+#include <array>
 #include <cstring>
 #include <vector>
 
@@ -34,6 +35,7 @@ static constexpr uintptr_t FN_EFFECT_CREATE_GENERATOR = 0x1405E27C0;
 static constexpr uintptr_t FN_EFFECT_RELEASE_GENERATOR = 0x1405E6890;
 static constexpr uintptr_t FN_PARTICLE_MANAGER_RELEASE_SUBBUFFER = 0x14080C120;
 static constexpr uintptr_t FN_KIRIGAKURE_EFFECT_UPDATE = 0x14013B050;
+static constexpr uintptr_t FN_EXATKSPACE_SYNC_JOB = 0x140138250;
 static constexpr uintptr_t FN_SUNIT_REMOVE_UNIT = 0x14051B9F0;
 static constexpr uintptr_t FN_SUNIT_REMOVE_FROM_MULTI_MASK = 0x14051BAF0;
 static constexpr uintptr_t FN_MTOBJECT_IS_ALIVE = 0x140001B80;
@@ -375,16 +377,44 @@ static void SanitizeEffectForDestruction(void* effect)
     }
 }
 
-static void DetachExAtkSpaceChildren()
+bool Effect_IsExAtkSpaceUnit(const void* unit)
 {
-    uint64_t sMvc3Mgr = *(uint64_t*)_addr(PTR_SMVC3MGR);
-    if (!sMvc3Mgr) return;
-    uint64_t sAction = *(uint64_t*)(sMvc3Mgr + SMVC3MGR_ACTION_OFFSET);
-    if (!sAction) return;
-    uint64_t exAtkSpace = *(uint64_t*)(sAction + 0x148);
-    if (!exAtkSpace) return;
+    // All eight levels and the base class share this +0x50 lifecycle method.
+    // Called with a validated unit; avoid another DTI walk in headless dispatch.
+    return unit && *(const uint64_t*)(*(const uint64_t*)unit + 0x50) ==
+        (uint64_t)_addr(FN_EXATKSPACE_SYNC_JOB);
+}
 
-    std::memset((void*)(exAtkSpace + 0x1D18), 0, 4 * sizeof(uint64_t));
+static std::array<void*, 4> GetRetainedExAtkSpaceChildren(bool detachUnretained = false)
+{
+    std::array<void*, 4> children{};
+    uint64_t sMvc3Mgr = *(uint64_t*)_addr(PTR_SMVC3MGR);
+    if (!sMvc3Mgr) return children;
+    uint64_t sAction = *(uint64_t*)(sMvc3Mgr + SMVC3MGR_ACTION_OFFSET);
+    if (!sAction) return children;
+    uint64_t exAtkSpace = *(uint64_t*)(sAction + 0x148);
+    if (!exAtkSpace || !IsAccessibleRange(exAtkSpace, 0x1D38)) return children;
+    const uint64_t vtable = *(uint64_t*)exAtkSpace;
+    if (!IsAccessibleRange(vtable, 0x58) ||
+        !Effect_IsExAtkSpaceUnit((void*)exAtkSpace)) return children;
+
+    const uint32_t ownerState = *(uint32_t*)(exAtkSpace + 0x10) & 7u;
+    void** slots = (void**)(exAtkSpace + 0x1D18);
+    for (size_t index = 0; index < children.size(); ++index) {
+        void* child = slots[index];
+        if (ownerState - 1u < 2u && child &&
+            IsAccessibleRange((uint64_t)child, 0x14) &&
+            ((*(uint32_t*)((uint8_t*)child + 0x10) & 7u) - 1u < 2u) &&
+            IsActiveUnit(child) && IsEffectObject(child)) {
+            children[index] = child;
+        } else if (detachUnretained) {
+            // Anything retirement may free must be detached first. Retaining
+            // stale/dead child pointers would reintroduce the +0x78 crash in
+            // uExAtkSpace__finalizeOwnedEffects (0x140137A10).
+            slots[index] = nullptr;
+        }
+    }
+    return children;
 }
 
 static void* __fastcall hkEffectCreate(void* manager, int effectId, int a3,
@@ -658,8 +688,11 @@ void Effect_CaptureRecipes(RollbackSnapshotSlot& slot)
     slot.characterEffectStates.clear();
     slot.characterEffectReferences.clear();
     slot.effectRecipes.reserve(g_liveEffectRecipes.size());
+    const auto exAtkChildren = GetRetainedExAtkSpaceChildren();
     for (const RollbackEffectRecipe& recipe : g_liveEffectRecipes) {
         if (!recipe.restoredPtr ||
+            std::find(exAtkChildren.begin(), exAtkChildren.end(), recipe.restoredPtr) !=
+                exAtkChildren.end() ||
             !IsEffectObject(recipe.restoredPtr) ||
             !IsActiveUnit(recipe.restoredPtr) ||
             !IsRollbackEffectCategory(recipe.restoredPtr) ||
@@ -816,6 +849,7 @@ void Effect_RestoreCharacterStates(RollbackSnapshotSlot& slot)
 int Effect_RestoreRecipes(RollbackSnapshotSlot& slot)
 {
     if (slot.effectRecipes.empty()) return 0;
+    const auto exAtkChildren = GetRetainedExAtkSpaceChildren();
     int restored = 0;
     int failed = 0;
     // A shot callback may also be tracked as a general effect. Reuse the shot's
@@ -838,6 +872,14 @@ int Effect_RestoreRecipes(RollbackSnapshotSlot& slot)
         saved.restoredPtr = nullptr;
 
     for (RollbackEffectRecipe& saved : slot.effectRecipes) {
+        if (saved.savedPtr &&
+            std::find(exAtkChildren.begin(), exAtkChildren.end(), saved.savedPtr) !=
+                exAtkChildren.end()) {
+            // The native owner still has this complete presentation graph.
+            // Do not rewind it or create an independently owned duplicate.
+            saved.restoredPtr = saved.savedPtr;
+            continue;
+        }
         auto callback = std::lower_bound(callbacks.begin(), callbacks.end(),
             (uint64_t)saved.savedPtr, [](const auto& entry, uint64_t pointer) {
                 return entry.first < pointer;
@@ -956,7 +998,7 @@ bool Effect_RetireOne(void* sUnit, void* effect)
 int Effect_RetireCurrent(void* sUnit)
 {
     if (!sUnit) return 0;
-    DetachExAtkSpaceChildren();
+    const auto exAtkChildren = GetRetainedExAtkSpaceChildren(true);
     void* stageBodies[2] = {};
     uint64_t sStage = *(uint64_t*)_addr(PTR_SSTAGE);
     if (sStage) {
@@ -973,7 +1015,9 @@ int Effect_RetireCurrent(void* sUnit)
         for (int safety = 4096; effect && safety-- > 0;) {
             if (g_activeRollbackProfile) ++g_activeRollbackProfile->restoreEffectVisits;
             void* next = *(void**)((uint8_t*)effect + 0x18);
-            if (IsEffectObject(effect) && !IsPersistentCharacterEffect(effect) &&
+            if (std::find(exAtkChildren.begin(), exAtkChildren.end(), effect) ==
+                    exAtkChildren.end() &&
+                IsEffectObject(effect) && !IsPersistentCharacterEffect(effect) &&
                 effect != stageBodies[0] && effect != stageBodies[1] &&
                 std::find(abandoned.begin(), abandoned.end(), effect) == abandoned.end())
                 abandoned.push_back(effect);
@@ -1005,7 +1049,10 @@ int Effect_RetireCurrent(void* sUnit)
     // detached object through sUnit, so reclaim tracked detached effects here.
     std::vector<void*> detached;
     for (void* effect : g_resimEffects) {
-        if (!effect || !IsAccessibleRange((uint64_t)effect, 0x14) ||
+        if (!effect ||
+            std::find(exAtkChildren.begin(), exAtkChildren.end(), effect) !=
+                exAtkChildren.end() ||
+            !IsAccessibleRange((uint64_t)effect, 0x14) ||
             (*(uint32_t*)((uint8_t*)effect + 0x10) & 0x3F8u) != 0x3F8u ||
             !IsEffectObject(effect) || IsPersistentCharacterEffect(effect) ||
             effect == stageBodies[0] || effect == stageBodies[1]) {
