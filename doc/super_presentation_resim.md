@@ -3,9 +3,29 @@
 Investigation: 2026-09-11, Ghidra instance 8192,
 `umvc3.exe.unpacked.exe`, image base `0x140000000`.
 
-Status: ExAtkSpace-only retention trial implemented below; live visual testing
-and in-game timing remain outstanding. Cut-in preservation is still a proposed
-design, with no runtime changes in this trial.
+Status: user confirmed the ExAtkSpace backdrop survives resim. The initial
+0102-only tear exclusion did not fix the disappearing tear. A subsequent native
+trace found the earlier tracked-array flush that killed these effects before
+retirement, plus the 0107 variant and 0106 companion. The corrected restore-only
+flush below was confirmed working by the user. In-game timings remain
+unmeasured. Cut-in preservation is still a proposed design.
+
+### Performance follow-up
+
+- Headless category-13 dispatch uses its already-fetched DTI to route ordinary
+  `uGameEffect` directly to the resource-ID predicate, avoiding the ExAtkSpace
+  virtual-slot lookup for those effects in each phase. The resource predicate
+  performs field loads and three constant ID comparisons; this path does not
+  perform memory-accessibility queries or DTI hierarchy walks.
+- Restore's tracked-array pass validates the readable effect fields and tests
+  the resource before calling `IsEffectObject`. Only matching transition
+  candidates pay for that virtual DTI/hierarchy check. Stale-entry and native
+  retirement-target validation remain at the restore boundary.
+- Retention uses the existing tracked-array traversal and in-place compaction,
+  with no additional scan of the world, scratch allocation, resource-path hash,
+  lock, or persistent pointer cache. Capture/retirement resource checks remain
+  inside their existing effect traversals. Normal native ticks do not use the
+  headless filter. These are reductions in work, not measured frame-time claims.
 
 ## Verified ExAtkSpace ownership and loss path
 
@@ -72,6 +92,130 @@ Runtime checks for this trial: repeated resim inside a super, rollback across
 startup, DHC/level replacement, natural expiry, interruption, and repeated
 restore without accumulating effect units. Cut-in disappearance is not addressed
 by this trial.
+
+## Comic tear retention follow-up
+
+This section records the initial, unsuccessful resource-only exclusion. The
+confirmed missing teardown path and corrected implementation follow below.
+
+Read-only audit of `nativePCx64/eft/cmn/0000.arc` identifies a separate common
+effect `eft\cmn\efl\0102` (29,072 bytes, 80 EFL entries). It references
+`CMNexyabure00`, `CMNyaburehahen00`, and page models `eft\cmn\mod\0004`,
+`0005`, `0009` through `0014`. These are the dedicated tearing assets, distinct
+from the blue/aura resource `eft\cmn\efl\0101` (44,496 bytes, 77 entries).
+The texture/model names identify the resource targeted by this follow-up;
+the exact live emitter/trigger for the user's visual has not been traced.
+
+The original four-slot rule did not protect independent effects. An active
+0102 effect would still be destroyed by `Effect_RetireCurrent`, and its
+animation could also advance during headless replay if placed on category 13.
+
+Native resource identity is available without searching particles or adding
+factory hooks: `cResource__getPath @ 0x140203420` returns the inline string at
+`resource+0x0C`; `cResource__createProperty @ 0x14050D110` names it `mPath`.
+`uEffect+0x108` holds the resource. The getter was renamed in Ghidra from the
+misleading `getBitfieldBase`.
+
+For the runtime predicate, Ghidra also confirms a cheaper identity:
+`sResource__hashKey_dtiIdCRCPath @ 0x140519430` constructs
+`(DTI.id << 32) | MtCRC(normalizedPath)`, and
+`sResource__reloadOrLoad @ 0x140519690` stores/compares it at `cResource+0x60`.
+`MtCRC__getCRC` uses the standard reflected CRC32 table, seed `0xFFFFFFFF`, and
+no final XOR. For `rEffectList` and `eft\cmn\efl\0102` the full native ID is
+**`0x6D5AE854FF040E06`**. The type component `0x6D5AE854` also matches the ARC
+entry type. It can be reproduced with:
+
+```python
+import zlib
+type_id = (~zlib.crc32(b"rEffectList")) & 0x7fffffff
+path_crc = (~zlib.crc32(b"eft\\cmn\\efl\\0102")) & 0xffffffff
+assert (type_id << 32) | path_crc == 0x6D5AE854FF040E06
+```
+
+The follow-up:
+
+- Retains active, scheduler-linked 0102 effects using that native resource ID,
+  including when the original ExAtkSpace owner is already gone.
+- Omits them from independent recipe capture so later restores do not recreate
+  another copy or rewind only their generator controls.
+- Excludes plain `uGameEffect` instances with this resource from category-13
+  headless move and both sync phases. Categories 14–16 already skip animation.
+- Leaves state 3/4 destruction and ordinary frame updates intact. The tear's
+  existing particle/model graph and native lifetime are retained together.
+
+The initial draft used a 17-byte path comparison and a cached accessibility
+query on each call. After the user's performance concern, the implemented
+predicate uses a 64-bit ID comparison. Restore/capture retain resource
+accessibility validation at their boundaries; the headless path reads the live
+effect's native-owned resource directly, without another accessibility-cache
+lookup. There are no extra allocations, particle walks, native ticks, creation
+hooks, or pointer registries. Retest repeated resim during the expanding tear
+and verify that the blue clears and the tear finishes normally.
+
+## Confirmed early kill: tracked-array flush
+
+Further Ghidra tracing of `uGameEffect__dispatchSpawn_lowIds @ 0x140121120`
+establishes the native transition creation paths:
+
+- Cases `0x27` and `0x2B` create common EFL `0102` page effects.
+- Cases `0x2F..0x34` create common EFL `0107` circular tears. Asset audit finds
+  `CMNyaburemaru` and `CMNyaburehahen` textures in this 38,864-byte, 102-entry EFL.
+- Both branches also create companion common EFL `0106` (2,224 bytes, four
+  entries), whose graph is part of the same transition.
+- Each created effect is added to `sGameEffect__addToTrackedArray` and registered
+  on `sUnit` category 13. Its DTI is the ordinary `uGameEffect`, shared with many
+  unrelated effects. DTI alone cannot identify the transition.
+
+The tracked array is at `sGameEffect+0x120`, count `+0x128`, data `+0x138`.
+It contains **live, registered effects**, despite the old restore comment
+describing it as only unregistered pending spawns.
+
+`RestoreShotAndEffectRecipes` explicitly called the native flush
+`0x140130D00` before `Effect_RetireCurrent`. The native flush invokes `+0x78` on
+live entries, then `MtArray__deleteAll(true) @ 0x1400112D0` frees the array's
+backing allocation. Consequently, the later retention test already saw dead
+tears, and headless state 3/4 cleanup removed them. Excluding a resource from
+category retirement alone could not protect it.
+
+### Corrected implementation
+
+The explicit restore call now uses `Effect_FlushTrackedForRestore`:
+
+- Retains live transition entries and compacts that same native array in place.
+- Calls each other live entry's native `+0x78`, preserving the original cleanup
+  behavior for non-transition units and validating stale pointers first.
+- Preserves retained entries and the allocation for later normal script-driven
+  cleanup. Merely nulling them out before a native flush would orphan this
+  cleanup ownership.
+- Frees the backing allocation through native `MtArray::deleteAll(true)` when
+  no entries remain.
+- Reads the array header through references, so a native retirement callback
+  that appends/reallocates the queue does not leave a stale local data pointer.
+
+Resource predicates now cover exactly the native transition family:
+
+| Resource | Native ID |
+| --- | --- |
+| `eft\cmn\efl\0102` | `0x6D5AE854FF040E06` |
+| `eft\cmn\efl\0106` | `0x6D5AE854F869CA1F` |
+| `eft\cmn\efl\0107` | `0x6D5AE8548F6EFA89` |
+
+The same predicate controls capture exclusion, category retirement, and
+headless category-13 animation filtering. All three use the existing native
+resource IDs; no runtime string lookup, hash calculation, or allocation registry
+is needed. The restore flush performs one pass over the existing tracked array
+without an additional scratch allocation.
+
+Both restore entry paths originate in `hkMvc3MainMove`, before ordinary/headless
+unit jobs. The helper uses this same quiescent boundary as surrounding shot and
+effect teardown. An initially copied native critical-section wrapper was removed
+after reviewing these call sites; the helper is explicitly restore-only. Normal
+native script flushes keep their original behavior and synchronization.
+
+`tools/test_effect_pending_retention.cpp` exercises mixed queues, null/dead
+entries, repeated restore, subsequent ordinary cleanup, and a callback that
+appends a new tear while reallocating/freeing the old array. The exact native
+dispatch branch for the user's character still requires live verification.
 
 ## Verified cut-in ownership and loss paths
 

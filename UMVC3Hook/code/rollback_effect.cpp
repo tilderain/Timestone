@@ -1,6 +1,7 @@
 #include "../pch.h"
 
 #include "rollback_effect.h"
+#include "effect_pending_retention.h"
 
 #include "mk10utils.h"
 #include "rollback.h"
@@ -36,6 +37,7 @@ static constexpr uintptr_t FN_EFFECT_RELEASE_GENERATOR = 0x1405E6890;
 static constexpr uintptr_t FN_PARTICLE_MANAGER_RELEASE_SUBBUFFER = 0x14080C120;
 static constexpr uintptr_t FN_KIRIGAKURE_EFFECT_UPDATE = 0x14013B050;
 static constexpr uintptr_t FN_EXATKSPACE_SYNC_JOB = 0x140138250;
+static constexpr uintptr_t FN_MTARRAY_DELETE_ALL = 0x1400112D0;
 static constexpr uintptr_t FN_SUNIT_REMOVE_UNIT = 0x14051B9F0;
 static constexpr uintptr_t FN_SUNIT_REMOVE_FROM_MULTI_MASK = 0x14051BAF0;
 static constexpr uintptr_t FN_MTOBJECT_IS_ALIVE = 0x140001B80;
@@ -385,6 +387,73 @@ bool Effect_IsExAtkSpaceUnit(const void* unit)
         (uint64_t)_addr(FN_EXATKSPACE_SYNC_JOB);
 }
 
+bool Effect_IsExAtkSpaceTransitionEffect(const void* effect, bool validateResource)
+{
+    if (!effect) return false;
+    const uint32_t flags = *(const uint32_t*)((const uint8_t*)effect + 0x10);
+    if ((flags & 7u) - 1u >= 2u || (flags & 0x3F8u) == 0x3F8u) return false;
+
+    // Native low-ID effect dispatch creates tear variants 0102/0107 together
+    // with companion 0106, and registers them in sGameEffect's tracked array.
+    // None belongs to the four ExAtkSpace child slots. These are full native
+    // (DTI.id << 32) | MtCRC(path) IDs; see doc/super_presentation_resim.md.
+    const uint64_t resource = *(const uint64_t*)((const uint8_t*)effect + 0x108);
+    // Restore/capture inspect potentially stale tracked objects. Native
+    // headless dispatch already has a live effect owning its resource, so its
+    // per-phase check needs only pointer loads and an integer comparison.
+    if (!resource || (validateResource && !IsAccessibleRange(resource, 0x68)))
+        return false;
+    const uint64_t id = *(const uint64_t*)(resource + 0x60);
+    return id == 0x6D5AE854FF040E06ull || // eft\cmn\efl\0102: page tear
+           id == 0x6D5AE854F869CA1Full || // eft\cmn\efl\0106: transition companion
+           id == 0x6D5AE8548F6EFA89ull;   // eft\cmn\efl\0107: circular tear
+}
+
+void Effect_FlushTrackedForRestore(void* manager)
+{
+    if (!manager) return;
+    // Restore runs at the main-move boundary, before ordinary/headless unit
+    // jobs, just like the surrounding shot and effect teardown. This helper
+    // must not be used as a replacement for concurrent native script flushes.
+    auto* bytes = (uint8_t*)manager;
+    uint32_t& count = *(uint32_t*)(bytes + 0x128);
+    void**& entries = *(void***)(bytes + 0x138);
+    if (count > 4096 || (count && (!entries || !IsAccessibleRange(
+            (uint64_t)entries, (size_t)count * sizeof(void*))))) {
+        // Keep the existing native/hooked fallback for malformed headers.
+        ((void(__fastcall*)(void*))_addr(FN_SGAMEEFFECT_FLUSH_PENDING))(manager);
+        return;
+    }
+
+    // This is a kill-tracking array, not merely a list of unregistered spawns.
+    // The native flush would kill the live tears BEFORE category retirement
+    // could protect them. Keep their entries and allocation for ordinary script
+    // cleanup; retire the rest through the same native virtual +0x78.
+    EffectPending::FlushRetaining(entries, count,
+        [](void* effect) {
+            // Reject unrelated resources before the virtual DTI/hierarchy walk.
+            // Validate the fields read by the resource predicate first, since
+            // the tracking array may contain stale entries at this boundary.
+            return IsAccessibleRange((uint64_t)effect, 0x110) &&
+                Effect_IsExAtkSpaceTransitionEffect(effect) &&
+                IsEffectObject(effect);
+        },
+        [](void* effect) {
+            if (!IsAccessibleRange((uint64_t)effect, 0x14) ||
+                ((*(uint32_t*)((uint8_t*)effect + 0x10) & 7u) - 1u >= 2u))
+                return;
+            const uint64_t vtable = *(uint64_t*)effect;
+            if (IsAccessibleRange(vtable, 0x80) &&
+                IsExecutableAddress(*(uint64_t*)(vtable + 0x78))) {
+                ((void(__fastcall*)(void*))*(uint64_t*)(vtable + 0x78))(effect);
+            }
+        });
+    if (count == 0) {
+        ((void(__fastcall*)(void*, uint8_t))_addr(FN_MTARRAY_DELETE_ALL))(
+            bytes + 0x120, 1);
+    }
+}
+
 static std::array<void*, 4> GetRetainedExAtkSpaceChildren(bool detachUnretained = false)
 {
     std::array<void*, 4> children{};
@@ -696,6 +765,7 @@ void Effect_CaptureRecipes(RollbackSnapshotSlot& slot)
             !IsEffectObject(recipe.restoredPtr) ||
             !IsActiveUnit(recipe.restoredPtr) ||
             !IsRollbackEffectCategory(recipe.restoredPtr) ||
+            Effect_IsExAtkSpaceTransitionEffect(recipe.restoredPtr) ||
             IsPersistentCharacterEffect(recipe.restoredPtr)) {
             continue;
         }
@@ -1017,7 +1087,8 @@ int Effect_RetireCurrent(void* sUnit)
             void* next = *(void**)((uint8_t*)effect + 0x18);
             if (std::find(exAtkChildren.begin(), exAtkChildren.end(), effect) ==
                     exAtkChildren.end() &&
-                IsEffectObject(effect) && !IsPersistentCharacterEffect(effect) &&
+                IsEffectObject(effect) && !Effect_IsExAtkSpaceTransitionEffect(effect) &&
+                !IsPersistentCharacterEffect(effect) &&
                 effect != stageBodies[0] && effect != stageBodies[1] &&
                 std::find(abandoned.begin(), abandoned.end(), effect) == abandoned.end())
                 abandoned.push_back(effect);

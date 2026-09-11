@@ -34,7 +34,6 @@ static constexpr uintptr_t PTR_SCAMERA = 0x140e17930;
 static constexpr uintptr_t PTR_SGAMEEFFECT = 0x140d46470;
 static constexpr uintptr_t FN_SSHOT_ENQUEUE_UNIT = 0x1401512A0;
 static constexpr uintptr_t FN_SSHOT_FLUSH_PENDING_UNITS = 0x1401517A0;
-static constexpr uintptr_t FN_SGAMEEFFECT_FLUSH_PENDING = 0x140130D00;
 static constexpr uintptr_t FN_SUNIT_ADD_UNIT = 0x14051A6B0;
 static constexpr uintptr_t FN_SUNIT_REMOVE_UNIT = 0x14051B9F0;
 static constexpr uintptr_t FN_RESET_HITNODES = 0x140259E90;
@@ -685,12 +684,12 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
     int retiredEffects = 0;
     uint64_t preSanitizeEnd = 0;
     {
-        // Pending effects are not in sUnit yet, so category retirement cannot
-        // see them. Do not let their owning MtArray allocation cross restore.
+        // The tracked array includes live, registered comic-tear effects.
+        // Preserve those before the general category retirement pass; normal
+        // script-driven flushes still perform native cleanup of the full array.
         uint64_t sGameEffect = *(uint64_t*)_addr(PTR_SGAMEEFFECT);
         if (sGameEffect && *(uint32_t*)(sGameEffect + 0x128) != 0) {
-            ((void(__fastcall*)(uint64_t))_addr(
-                FN_SGAMEEFFECT_FLUSH_PENDING))(sGameEffect);
+            Effect_FlushTrackedForRestore((void*)sGameEffect);
             InvalidateMemoryQueryCache();
         }
 

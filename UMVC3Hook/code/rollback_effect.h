@@ -15,6 +15,10 @@ void Effect_RestoreCharacterStates(RollbackSnapshotSlot& slot);
 void Effect_RestoreCharacterReferences(RollbackSnapshotSlot& slot);
 // Requires a validated native unit/vtable (e.g. a live sUnit list entry).
 bool Effect_IsExAtkSpaceUnit(const void* unit);
+// Headless dispatch may omit the boundary check for a live native-owned resource.
+bool Effect_IsExAtkSpaceTransitionEffect(const void* effect, bool validateResource = true);
+// Restore-only: requires the quiescent main-move snapshot boundary.
+void Effect_FlushTrackedForRestore(void* manager);
 void Effect_PrepareUnitRemoval(void* unit);
 void Effect_FinishUnitRemoval(void* unit);
 void Effect_ReleaseOwnedAllocations(void* effect);

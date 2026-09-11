@@ -70,6 +70,7 @@ static constexpr uintptr_t FN_MTOBJECT_IS_ALIVE       = 0x140001b80;
 static constexpr uintptr_t FN_UCHRCPU_RESET_MODE      = 0x140120a50;
 static constexpr uintptr_t DTI_UCHRCHAIN              = 0x140D44920;
 static constexpr uintptr_t DTI_UCHRCPU                = 0x140D463B0;
+static constexpr uintptr_t DTI_UGAME_EFFECT           = 0x140D46E90;
 
 static bool IsHeadlessGameplayUnitCategory(uint32_t category)
 {
@@ -123,8 +124,13 @@ static bool IsHeadlessGameplayUnitObject(uint64_t dti, uint64_t unit, uint32_t c
     // Its +0x50 phase must not send child finish requests against historical
     // character flags, nor may +0x48 finalize the retained parent during resim.
     // State 3/4 cleanup and ordinary (non-headless) updates still run normally.
-    return dti != (uint64_t)_addr(DTI_UCHRCHAIN) &&
-        (category != 13 || !Effect_IsExAtkSpaceUnit((void*)unit));
+    if (dti == (uint64_t)_addr(DTI_UCHRCHAIN)) return false;
+    if (category != 13) return true;
+    // We already have the DTI: ordinary effects cannot be the ExAtkSpace owner,
+    // so avoid its virtual-slot lookup for every ordinary effect in each phase.
+    if (dti == (uint64_t)_addr(DTI_UGAME_EFFECT))
+        return !Effect_IsExAtkSpaceTransitionEffect((void*)unit, false);
+    return !Effect_IsExAtkSpaceUnit((void*)unit);
 }
 
 static constexpr uintptr_t SLEEP_CALL_FIXED  = 0x1405220b2;
