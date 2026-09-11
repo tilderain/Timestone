@@ -13,10 +13,10 @@ inline int64 GetMKXEntryPoint()
 	return static_cast<int64>(g_umvc3Base);
 }
 
-inline int64 _addr(int64_t addr)
+// Supported game executables have a fixed image base and stripped relocations.
+inline constexpr int64 _addr(int64_t addr)
 {
-	return static_cast<int64>(g_umvc3Base +
-		(static_cast<uintptr_t>(addr) - UMVC3_PREFERRED_BASE));
+	return addr;
 }
 
 inline unsigned long long baseaddr(unsigned long long addr)
