@@ -36,7 +36,7 @@ rows:
 | `0` | Off (no Discord) | off | - | - |
 | `1` | Basic rich presence | local client, activity | - | - |
 | `2` | Advanced (link Discord account) | activity + join | loopback OAuth (`127.0.0.1/callback`) | - |
-| `3` | Ranked (link for matchmaking) | **off** | hosted: login service | one POST on link complete |
+| `3` | Ranked (link for matchmaking) | local client, activity + join (hosted token) | hosted: login service | link + presence token |
 
 - `0` Off (default). No client is started; nothing is published.
 - `1` Basic - local presence through the running Discord client, no account
@@ -45,12 +45,14 @@ rows:
 - `2` Advanced - Discord OAuth (PKCE) account link over the loopback redirect;
   one-time consent prompt before the browser flow. On any OAuth error the
   module drops back to Basic. The lobby join secret is published **only** in
-  this tier and only after the account link completed.
-- `3` Ranked - links the Steam + Discord accounts through the hosted service.
-  The Discord SDK is off under this mode (no presence published). Consent, the
-  browser open, and the link poll are owned by `ranked_account.cpp`; entering
-  this tier without a completed link shows a consent box and opens the
-  default browser to `login.hero-rehab.xyz/link?...` (the link service).
+  this tier and for tier 3 once its hosted token is accepted.
+- `3` Ranked - links the Steam + Discord accounts through the hosted service,
+  which also hands back a **Discord access token** for this application; the
+  SDK authenticates with that token, so rich presence (and the join secret)
+  work with no second OAuth round-trip. Consent, the browser open, the link
+  poll and the token refresh are owned by `ranked_account.cpp`; entering this
+  tier without a completed link shows a consent box and opens the default
+  browser to `login.hero-rehab.xyz/link?...` (the link service).
 
 ### Keys
 
@@ -117,11 +119,22 @@ need updating.
   own WinHTTP handles. A response body containing `"status":"linked"` triggers
   the single completion request; `"pending"` or any error keeps polling.
 - `POST <link>/link/complete`, Content-Type `application/json`, body:
-  `{"app":"umvc3","build":"0.3.6","steam_id":1234,"state":"<hex>"}` - exactly
-  ONE client request, sent only after the status poll observed `linked`. On a
-  2xx reply the client writes `[Settings] RankedLinked=1` and stops; a non-2xx
-  or transport error is logged and the flow stops (re-selecting tier 4
-  restarts it).
+  `{"app":"umvc3","build":"0.3.6","steam_id":1234,"state":"<hex>"}` - sent only
+  after the status poll observed `linked`. On a 2xx reply the client writes
+  `[Settings] RankedLinked=1`, and if the body carries
+  `{"access_token":"…","expires_in":3600}` it hands that token to the Discord
+  SDK (presence without a second OAuth). A non-2xx or transport error is
+  logged and the flow stops (re-selecting the tier restarts it).
+- `GET <link>/link/token?app=umvc3&steam_id=<steam id>` - mints a fresh
+  short-lived access token for an already-linked account. The client calls it
+  on demand: when the SDK reports the token expired, when the player selects
+  the hosted tier, and (throttled, ~5 s) while `RankedLinked=1` and the hosted
+  tier is selected. Response: `{"access_token":"…","expires_in":3600}`.
+  The server should mint this from the refresh token **it** holds, so no
+  long-lived Discord credential is stored on the player's machine.
+- Requested Discord scopes: `identify` (server-side Steam↔Discord binding)
+  plus the presence scopes; one authorization covers both the ranked link and
+  the local presence token.
 - Leaving tier 4 (or a second game instance completing the same link first)
   stops the poll thread; `RankedLinked` is never cleared by mode switches.
 - `SteamLobby_GetLocalSteamId()` (`steam_lobby.cpp`) supplies the Steam ID by

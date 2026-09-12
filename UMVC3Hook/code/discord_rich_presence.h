@@ -12,11 +12,18 @@
 //   2 = Advanced Discord Integration (Discord OAuth account link over the
 //       127.0.0.1 loopback; publishes a lobby join secret while hosting)
 //   3 = Connect to Ranked Matchmaking Coordinator (coming soon!; links
-//       through the login service with the Discord SDK off - ranked_account
-//       owns the link flow, which includes the lobby join registration)
+//       through the login service, which then hands back the Discord token
+//       that authorizes presence - ranked_account owns that link flow)
 // Presence states: Main Menu / Hosting a Lobby / In a Match (elapsed timer).
 void DiscordRichPresence_Init();            // once, at D3D9 overlay init
 void DiscordRichPresence_Pump();            // every frame from HookProcessStuff
 bool DiscordRichPresence_IsAvailable();     // dll loaded + required exports resolved
 int  DiscordRichPresence_GetMode();         // raw stored 0..3 from Timestone.ini
 void DiscordRichPresence_SetMode(int mode); // persists; the pump reacts next frame
+
+// Hosted-link presence: ranked_account passes an access token minted by the
+// link service; the SDK authenticates with it so rich presence (and the lobby
+// join secret) work without the loopback OAuth. Tokens are short-lived -
+// NeedsHostedToken() reports when a refresh is required.
+bool DiscordRichPresence_ProvideHostedToken(const char* accessToken, int expiresInSeconds);
+bool DiscordRichPresence_NeedsHostedToken();

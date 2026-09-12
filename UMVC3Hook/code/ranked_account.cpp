@@ -3,6 +3,7 @@
 #include "../IniSafe.h"
 #include "launchmenu_utils.h"
 #include "steam_lobby.h"
+#include "discord_rich_presence.h"
 
 #include <Windows.h>
 #include <shellapi.h>
@@ -12,6 +13,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <string>
 
 extern void HookLog(const char* fmt, ...);
@@ -36,6 +38,8 @@ constexpr const char* kLinkServiceBaseUrl = "https://login.hero-rehab.xyz";
 constexpr const char* kRankedLinkPath = "/link";                    // browser page
 constexpr const char* kRankedStatusPath = "/link/status";
 constexpr const char* kRankedCompletePath = "/link/complete";
+constexpr const char* kRankedTokenPath = "/link/token"; // hosted presence token
+constexpr int kTokenRetrySeconds = 5;                   // refresh throttle
 constexpr int kPollIntervalMs = 2000; // poll cadence on the background thread
 constexpr int kPollMaxAttempts = 240; // 8 minutes (240 x 2 s) then give up
 constexpr const char* kStateHex = "0123456789abcdef";
@@ -64,6 +68,13 @@ uint64_t g_pumpCounter = 0;
 std::string g_attemptBase;
 std::string g_attemptState;
 uint64_t g_attemptSteamId = 0;
+
+// Hosted presence-token refresh: a one-shot background fetch of /link/token.
+std::atomic<bool> g_tokenWorkerActive{false};
+std::string g_tokenBase;
+uint64_t g_tokenSteamId = 0;
+time_t g_nextTokenAttempt = 0;
+uint64_t g_tokenPumpCounter = 0;
 
 // ---------------------------------------------------------------------------
 // Runtime-linked WinHTTP surface (called from the poll thread only)
@@ -354,6 +365,87 @@ bool StatusIsLinked(const std::string& body)
     return strncmp(cursor, "\"linked\"", strlen("\"linked\"")) == 0;
 }
 
+// Minimal JSON field readers for the link-service responses.
+bool ExtractJsonString(const std::string& body, const char* field, std::string& out)
+{
+    const std::string key = std::string("\"") + field + "\"";
+    const size_t at = body.find(key);
+    if (at == std::string::npos) return false;
+    size_t cursor = body.find(':', at + key.size());
+    if (cursor == std::string::npos) return false;
+    ++cursor;
+    while (cursor < body.size() && (body[cursor] == ' ' || body[cursor] == '\t' ||
+                                    body[cursor] == '\n' || body[cursor] == '\r'))
+        ++cursor;
+    if (cursor >= body.size() || body[cursor] != '"') return false;
+    ++cursor;
+    std::string value;
+    while (cursor < body.size() && body[cursor] != '"') {
+        if (body[cursor] == '\\' && cursor + 1 < body.size()) ++cursor;
+        value.push_back(body[cursor++]);
+    }
+    if (value.empty()) return false;
+    out = value;
+    return true;
+}
+
+int ExtractJsonInt(const std::string& body, const char* field, int fallback)
+{
+    const std::string key = std::string("\"") + field + "\"";
+    const size_t at = body.find(key);
+    if (at == std::string::npos) return fallback;
+    const size_t cursor = body.find(':', at + key.size());
+    if (cursor == std::string::npos) return fallback;
+    const int value = atoi(body.c_str() + cursor + 1);
+    return value > 0 ? value : fallback;
+}
+
+// One-shot /link/token fetch: the link service mints a short-lived Discord
+// access token for the linked Steam account, which is what lets the SDK run
+// rich presence without the loopback OAuth round-trip.
+DWORD WINAPI TokenFetchThread(void*)
+{
+    const std::string base = g_tokenBase;
+    const uint64_t steamId = g_tokenSteamId;
+    char path[256];
+    snprintf(path, sizeof(path), "%s?app=umvc3&steam_id=%llu", kRankedTokenPath,
+             static_cast<unsigned long long>(steamId));
+    HttpResponse response;
+    HttpSend(base, "GET", path, "", response);
+    if (!response.status) {
+        HookLog("Ranked: token request failed (%s)\n", response.error.c_str());
+    } else if (response.status >= 300) {
+        HookLog("Ranked: token request rejected (HTTP %d)\n", response.status);
+    } else {
+        std::string token;
+        if (ExtractJsonString(response.body, "access_token", token)) {
+            const int expires = ExtractJsonInt(response.body, "expires_in", 0);
+            DiscordRichPresence_ProvideHostedToken(token.c_str(), expires);
+        } else {
+            HookLog("Ranked: token response had no access_token\n");
+        }
+    }
+    g_tokenWorkerActive.store(false);
+    return 0;
+}
+
+void RequestHostedToken()
+{
+    if (g_tokenWorkerActive.load()) return;
+    const uint64_t steamId = SteamLobby_GetLocalSteamId();
+    if (!steamId) return;
+    std::string apiBase;
+    std::string pageBase;
+    ReadBaseUrls(apiBase, pageBase);
+    g_tokenBase = apiBase;
+    g_tokenSteamId = steamId;
+    g_tokenWorkerActive.store(true);
+    if (!CreateThread(nullptr, 0, TokenFetchThread, nullptr, 0, nullptr)) {
+        HookLog("Ranked: failed to start the token fetch thread (%lu)\n", GetLastError());
+        g_tokenWorkerActive.store(false);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Poll thread
 // ---------------------------------------------------------------------------
@@ -408,6 +500,11 @@ DWORD WINAPI RankedPollThread(void*)
                 HookLog("Ranked: link complete rejected (HTTP %d)\n",
                         complete.status);
                 break;
+            }
+            std::string linkToken;
+            if (ExtractJsonString(complete.body, "access_token", linkToken)) {
+                const int expires = ExtractJsonInt(complete.body, "expires_in", 0);
+                DiscordRichPresence_ProvideHostedToken(linkToken.c_str(), expires);
             }
             completed = true;
             break;
@@ -465,7 +562,9 @@ bool RankedAccount_SetEnabled(bool on)
 
     if (RankedAccount_IsLinked()) {
         g_state.store(RankedState::Linked);
-        return true; // already linked in a past session: silent, no browser
+        // Already linked: no browser needed, but presence needs a fresh token.
+        RequestHostedToken();
+        return true;
     }
     if (g_workerActive.load()) return true; // a link attempt is already running
 
@@ -532,12 +631,22 @@ bool RankedAccount_SetEnabled(bool on)
 
 void RankedAccount_Pump()
 {
-    if (!g_workerActive.load()) return;
-    // Re-check the ini every ~2 s (120 frames): a second game instance
-    // (dual training) shares the file and may have completed the link first.
-    if (++g_pumpCounter % 120 != 0) return;
-    if (RankedAccount_IsLinked()) {
-        if (g_stopEvent) SetEvent(g_stopEvent);
-        g_state.store(RankedState::Linked);
+    if (g_workerActive.load()) {
+        // Re-check the ini every ~2 s (120 frames): a second game instance
+        // (dual training) shares the file and may have completed the link.
+        if (++g_pumpCounter % 120 == 0 && RankedAccount_IsLinked()) {
+            if (g_stopEvent) SetEvent(g_stopEvent);
+            g_state.store(RankedState::Linked);
+        }
+        return;
     }
+
+    // Hosted presence token refresh, throttled (the ini read is not free).
+    if (++g_tokenPumpCounter % 300 != 0) return;
+    const time_t now = time(nullptr);
+    if (now < g_nextTokenAttempt) return;
+    if (!RankedAccount_IsLinked()) return;
+    if (!DiscordRichPresence_NeedsHostedToken()) return;
+    g_nextTokenAttempt = now + kTokenRetrySeconds;
+    RequestHostedToken();
 }

@@ -8,10 +8,12 @@ API-only override; either key alone points everything here.
 
 Flow the operator drives in a browser:
   1. The game opens  http://127.0.0.1:8787/link?app=umvc3&steam_id=...&state=X
-  2. Click "simulate link completion" on that page (hits /done?state=X), or
-     open /done?state=X directly with the same state.
-  3. The game's poll thread sees {"status":"linked"}, POSTs /link/complete,
-     and this stub prints `COMPLETE <json body>`.
+  2. Click "simulate link completion" on that page (hits /done?state=X), or open
+     /done?state=X directly with the same state.
+  3. The game's poll thread sees {"status":"linked"}, POSTs /link/complete - the
+     stub answers with an access_token, which the game hands to the Discord SDK
+     - and the stub prints `COMPLETE <json body>`.
+  4. Later sessions fetch a fresh token from GET /link/token?app=umvc3&steam_id=...
 
 Run:  python3 tools/ranked_link_stub.py [port]     (default 127.0.0.1:8787)
 """
@@ -64,6 +66,13 @@ class Handler(BaseHTTPRequestHandler):
             status = "linked" if LINKED_STATES.get(state) else "pending"
             self._send(200, "application/json",
                        json.dumps({"status": status}, separators=(",", ":")))
+        elif parsed.path == "/link/token":
+            steam_id = (query.get("steam_id") or [""])[0]
+            token = f"stub-access-{steam_id or 'unknown'}"
+            print(f"TOKEN steam_id={steam_id}")
+            self._send(200, "application/json",
+                       json.dumps({"access_token": token, "expires_in": 3600},
+                                  separators=(",", ":")))
         else:
             self._send(404, "text/plain; charset=utf-8", "not found")
 
@@ -75,7 +84,15 @@ class Handler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length") or 0)
         body = self.rfile.read(length).decode("utf-8", "replace")
         print(f"COMPLETE {body}")
-        self._send(200, "application/json", json.dumps({"ok": True}, separators=(",", ":")))
+        try:
+            request_state = (json.loads(body) or {}).get("state", "")
+        except ValueError:
+            request_state = ""
+        token = f"stub-access-{request_state or 'unknown'}"
+        print(f"TOKEN {token}")
+        self._send(200, "application/json",
+                   json.dumps({"ok": True, "access_token": token, "expires_in": 3600},
+                              separators=(",", ":")))
 
     def log_message(self, fmt, *args):  # silence per-request noise
         pass

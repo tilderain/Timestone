@@ -86,6 +86,9 @@ struct DiscordApi {
                               Discord_String,
                               Discord_Client_UpdateTokenCallback,
                               Discord_FreeFn, void*) = nullptr;
+    void (*ClientSetTokenExpirationCallback)(Discord_Client*,
+                                             Discord_Client_TokenExpirationCallback,
+                                             Discord_FreeFn, void*) = nullptr;
     void (*ClientCreateAuthorizationCodeVerifier)(
         Discord_Client*, Discord_AuthorizationCodeVerifier*) = nullptr;
     void (*ClientGetDefaultPresenceScopes)(Discord_String*) = nullptr;
@@ -155,6 +158,16 @@ Discord_Client_Error g_lastError = Discord_Client_Error_None;
 std::string g_lastErrorText; // distinct-error log throttle
 time_t g_nextConnectRetry = 0;
 bool g_authenticatedFull = false; // Full-mode OAuth completed this process
+bool g_hostedAuthenticated = false; // presence authorized by a hosted link token
+std::string g_hostedToken;          // access token delivered by ranked_account
+bool g_hostedTokenExpired = false;  // SDK says it lapsed; a refresh is needed
+
+// Presence works when either authorization path succeeded: the loopback OAuth
+// of the Advanced tier, or a token handed over by the hosted link service.
+bool PresenceAuthorized()
+{
+    return g_authenticatedFull || g_hostedAuthenticated;
+}
 
 Discord_Client g_client{};
 Discord_AuthorizationCodeVerifier g_verifier{};
@@ -300,6 +313,8 @@ bool ResolveRequiredExports()
     ResolveOptional(g_api.ClientAuthorize, "Discord_Client_Authorize");
     ResolveOptional(g_api.ClientGetToken, "Discord_Client_GetToken");
     ResolveOptional(g_api.ClientUpdateToken, "Discord_Client_UpdateToken");
+    ResolveOptional(g_api.ClientSetTokenExpirationCallback,
+                    "Discord_Client_SetTokenExpirationCallback");
     ResolveOptional(g_api.ClientCreateAuthorizationCodeVerifier,
                     "Discord_Client_CreateAuthorizationCodeVerifier");
     ResolveOptional(g_api.ClientGetDefaultPresenceScopes,
@@ -429,6 +444,15 @@ void JoinCb(Discord_String joinSecret, void*)
     g_pendingJoinSecret = secret;
 }
 
+void TokenExpiryCb(void*)
+{
+    // The SDK's access token lapsed and it holds no refresh token of its own
+    // (hosted flow): the ranked module must fetch a new one via /link/token.
+    g_hostedAuthenticated = false;
+    g_hostedTokenExpired = true;
+    HookLog("Discord: hosted presence token expired; refresh requested\n");
+}
+
 void IgnoreResultCb(Discord_ClientResult*, void*) {}
 
 void ConsumePendingJoin()
@@ -464,6 +488,8 @@ void FallbackToBasic(const char* reason)
     DiscordRichPresence_SetMode(1);
 }
 
+void HostedTokenCb(Discord_ClientResult* result, void* userData);
+
 void StartClient(int mode)
 {
     g_client = {};
@@ -490,10 +516,23 @@ void StartClient(int mode)
     g_prevInMatch = false;
     g_matchStartTime = 0;
 
-    if (mode == 1 || (mode == 2 && g_authenticatedFull)) {
+    if (g_api.ClientSetTokenExpirationCallback) {
+        g_api.ClientSetTokenExpirationCallback(&g_client, TokenExpiryCb, nullptr, nullptr);
+    }
+    if (mode == 1) {
         g_api.ClientConnect(&g_client);
-    } else {
-        g_authPending = true;
+    } else if (mode == 2) {
+        // Advanced tier: the loopback OAuth runs once per process.
+        if (g_authenticatedFull) g_api.ClientConnect(&g_client);
+        else g_authPending = true;
+    } else if (mode == 3) {
+        // Hosted tier: presence is authorized by the token the ranked module
+        // fetched from the link service - never the loopback browser flow.
+        if (!g_hostedToken.empty() && !g_hostedTokenExpired) {
+            Discord_String token = DStr(g_hostedToken);
+            g_api.ClientUpdateToken(&g_client, Discord_AuthorizationTokenType_Bearer,
+                                    token, HostedTokenCb, nullptr, nullptr);
+        }
     }
 }
 
@@ -587,6 +626,21 @@ void UpdateTokenCb(Discord_ClientResult* result, void*)
     g_authPending = false;
     HookLog("Discord: Full mode account linked\n");
     g_api.ClientConnect(&g_client);
+}
+
+void HostedTokenCb(Discord_ClientResult* result, void*)
+{
+    if (!result || !g_api.ClientResultSuccessful ||
+        !g_api.ClientResultSuccessful(result)) {
+        const int32_t errorCode = (result && g_api.ClientResultErrorCode)
+                                      ? g_api.ClientResultErrorCode(result) : -1;
+        g_hostedAuthenticated = false;
+        HookLog("Discord: hosted presence token rejected (code %d)\n", errorCode);
+        return;
+    }
+    g_hostedAuthenticated = true;
+    if (!g_ready) g_api.ClientConnect(&g_client);
+    HookLog("Discord: hosted presence token accepted\n");
 }
 
 void AdvanceOAuth()
@@ -703,7 +757,7 @@ void PushPresence(const PresenceState& state)
         // The join secret rides on a linked Discord account. Hosting while
         // unlinked (or in a non-join tier) keeps the party visible with no
         // secret, so Discord does not advertise an unjoinable game.
-        if (g_activeMode == 2 && g_authenticatedFull) {
+        if ((g_activeMode == 2 || g_activeMode == 3) && PresenceAuthorized()) {
             g_activitySecret = "+connect_lobby " + std::to_string(state.lobbyId);
             showSecret = true;
         }
@@ -857,10 +911,10 @@ void DiscordRichPresence_Pump()
         }
     }
 
-    // Tier 4 (ranked) runs the Discord SDK off: its stored mode maps to an
-    // effective 0 here so the presence client never starts under it. All the
-    // driver logic below uses the effective value, never the stored mode.
-    const int g_sdkMode = (g_desiredMode == 3) ? 0 : g_desiredMode;
+    // Every tier drives a real SDK mode now: the hosted (ranked) tier runs the
+    // client too, authorized by a token from the link service instead of the
+    // loopback OAuth.
+    const int g_sdkMode = g_desiredMode;
 
     // Drive the client to match the effective SDK mode.
     if (g_activeMode != g_sdkMode) {
@@ -913,4 +967,37 @@ void DiscordRichPresence_Pump()
     }
 
     ConsumePendingJoin();
+}
+
+// The hosted link service hands the game an access token for this Discord
+// application; authenticating the SDK with it enables rich presence (and the
+// lobby join secret) with no loopback OAuth round-trip. Tokens are
+// short-lived: ranked_account refetches while
+// DiscordRichPresence_NeedsHostedToken() reports they lapsed.
+bool DiscordRichPresence_ProvideHostedToken(const char* accessToken, int expiresInSeconds)
+{
+    if (!accessToken || !*accessToken) return false;
+    EnsureLoaded();
+    if (!g_available) return false;
+    g_hostedToken = accessToken;
+    g_hostedTokenExpired = false;
+    g_hostedAuthenticated = false;
+    if (!g_clientActive) {
+        // Applied when the SDK client starts for the hosted tier.
+        HookLog("Discord: hosted presence token stored (%d s)\n", expiresInSeconds);
+        return true;
+    }
+    if (!g_api.ClientUpdateToken) return false;
+    Discord_String token = DStr(g_hostedToken);
+    g_api.ClientUpdateToken(&g_client, Discord_AuthorizationTokenType_Bearer, token,
+                            HostedTokenCb, nullptr, nullptr);
+    return true;
+}
+
+bool DiscordRichPresence_NeedsHostedToken()
+{
+    EnsureLoaded();
+    if (!g_available) return false;
+    if (g_desiredMode != 3) return false; // only the hosted tier consumes tokens
+    return g_hostedToken.empty() || g_hostedTokenExpired || !g_hostedAuthenticated;
 }
