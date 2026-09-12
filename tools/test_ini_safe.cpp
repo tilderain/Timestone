@@ -278,6 +278,43 @@ int main(int argc, char** argv)
     assert(Read(path) == beforePersonalFailure);
     assert(ConnectRoster_Save(path.c_str(), personal));
     assert(ConnectRoster_Load(path.c_str(), defaults).chars[0] == 32);
+    // EnsureLineComment: user-facing `;` legends above ini values.
+    Write(path, "[Settings]\r\nEnableConsole=0\r\nOnlineMode=0\r\nRankedLinked=1\r\n");
+    const std::string premode = Read(path);
+    assert(IniSafe_EnsureLineComment("Settings", "OnlineMode",
+                                     "mode help", "0", path.c_str()));
+    assert(Read(path) ==
+           "[Settings]\r\nEnableConsole=0\r\n; mode help\r\nOnlineMode=0\r\nRankedLinked=1\r\n");
+    assert(Read(backup) == premode);
+    assert(IniSafe_EnsureLineComment("Settings", "OnlineMode",
+                                     "mode help", "0", path.c_str()));
+    assert(Read(path) ==
+           "[Settings]\r\nEnableConsole=0\r\n; mode help\r\nOnlineMode=0\r\nRankedLinked=1\r\n");
+    // Absent key with a default seeds it beneath a fresh section...
+    Write(path, "");
+    assert(IniSafe_EnsureLineComment("Settings", "RankedBaseUrl",
+                                     "override help", "", path.c_str()));
+    assert(Read(path) == "[Settings]\r\n; override help\r\nRankedBaseUrl=");
+    // ...and with an existing section inserts beneath the header.
+    Write(path, "[Settings]\r\nOnlineMode=3\r\n");
+    assert(IniSafe_EnsureLineComment("Settings", "RankedLinked",
+                                     "linked help", "1", path.c_str()));
+    assert(Read(path) ==
+           "[Settings]\r\n; linked help\r\nRankedLinked=1\r\nOnlineMode=3\r\n");
+    // defaultValue nullptr never creates the key.
+    Write(path, "[Settings]\r\n");
+    assert(IniSafe_EnsureLineComment("Settings", "RankedBaseUrl",
+                                     "override help", nullptr, path.c_str()));
+    assert(Read(path) == "[Settings]\r\n");
+    // UTF-16 files are left untouched.
+    std::string utf16Comment = "\xff\xfe";
+    for (char c : std::string("[Settings]\r\nOnlineMode=1\r\n"))
+        utf16Comment += c, utf16Comment += '\0';
+    Write(path, utf16Comment);
+    assert(IniSafe_EnsureLineComment("Settings", "OnlineMode",
+                                     "mode help", "0", path.c_str()));
+    assert(Read(path) == utf16Comment);
+
     assert(DeleteFileA(legacy.c_str()));
     assert(DeleteFileA(path.c_str()));
 

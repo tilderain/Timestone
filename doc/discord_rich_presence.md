@@ -66,6 +66,9 @@ rows:
 - Legacy `[Settings] DiscordRichPresence` (0-2) is migrated to `OnlineMode`
   once when `OnlineMode` is absent; the legacy key is left in the file and
   never read again.
+- On first clean boot the hook adds user-facing `;` comment lines above each of
+  these keys in the live `Timestone.ini` (via `IniSafe_EnsureLineComment`, in
+  `dllmain.cpp`), so players editing the file see what every value means.
 
 ## Presence state machine
 
