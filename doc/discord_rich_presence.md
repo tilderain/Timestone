@@ -26,7 +26,7 @@ Nothing here is player-facing documentation.
 - Advanced mode (tier 2 OAuth) requires the application to be a **Public
   Client** with the OAuth redirect `http://127.0.0.1/callback`.
 
-## Player modes (`[Settings] OnlineMode`, values 0-3)
+## Player modes (`[Settings] TelemetryMode`, values 0-3)
 
 The settings modal's online section ("Online / Discord") shows four radio
 rows:
@@ -54,17 +54,19 @@ rows:
 
 ### Keys
 
-- `[Settings] OnlineMode` - the single persisted mode key (0-3).
+- `[Settings] TelemetryMode` - the single persisted mode key (0-3).
 - `[Settings] RankedLinked` - `1` once the hosted service accepted the link;
   suppresses the whole tier-4 flow on later sessions (silent re-entry).
 - `[Settings] RankedBaseUrl` - optional override of the link-service origin
   (status poll + completion request), e.g. `http://127.0.0.1:8787` for the
   local stub; empty means the production link service.
-- `[Settings] RankedLinkBaseUrl` - optional override of just the browser page
-  origin. Unset means "use `RankedBaseUrl` when set, else the link service", so
-  a single ini line still points the whole flow at the stub.
-- Legacy `[Settings] DiscordRichPresence` (0-2) is migrated to `OnlineMode`
-  once when `OnlineMode` is absent; the legacy key is left in the file and
+- `[Settings] CustomRankedServer` - optional override of the ranked server for
+  the whole link flow (browser page + API), e.g. `http://127.0.0.1:8787` for
+  the local stub; empty means the production server. `[Settings] RankedBaseUrl`
+  remains as the narrower API-only override; either key alone points the whole
+  flow at a stub.
+- Legacy `[Settings] DiscordRichPresence` (0-2) is migrated to `TelemetryMode`
+  once when `TelemetryMode` is absent; the legacy key is left in the file and
   never read again.
 - On first clean boot the hook adds user-facing `;` comment lines above each of
   these keys in the live `Timestone.ini` (via `IniSafe_EnsureLineComment`, in

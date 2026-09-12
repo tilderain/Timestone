@@ -344,10 +344,10 @@ int ReadModeFromIni()
 {
     char path[MAX_PATH] = {};
     LaunchMenuUtils::GetSettingsPath(path, sizeof(path));
-    int mode = GetPrivateProfileIntA("Settings", "OnlineMode", -1, path);
+    int mode = GetPrivateProfileIntA("Settings", "TelemetryMode", -1, path);
     if (mode < 0) {
-        // Legacy single-feature key migrates to the generic key once; the old
-        // key is left in the file and never read again.
+        // Legacy single-feature key migrates to the TelemetryMode key once;
+        // the old key is left in the file and never read again.
         mode = GetPrivateProfileIntA("Settings", "DiscordRichPresence", 0, path);
         if (mode >= 0 && mode <= 2) WriteModeToIni(mode);
         else mode = 0;
@@ -360,7 +360,7 @@ bool WriteModeToIni(int mode)
     char path[MAX_PATH] = {};
     LaunchMenuUtils::GetSettingsPath(path, sizeof(path));
     char value[2] = { static_cast<char>('0' + mode), '\0' };
-    return IniSafe_WriteString("Settings", "OnlineMode", value, path);
+    return IniSafe_WriteString("Settings", "TelemetryMode", value, path);
 }
 
 // ---------------------------------------------------------------------------

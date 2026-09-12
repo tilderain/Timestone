@@ -86,11 +86,11 @@ static void EnsureOnlineIniLegend()
 	char iniPath[MAX_PATH] = {};
 	if (!GetTimestoneIniPath(iniPath, sizeof(iniPath)))
 		return;
-	// Do not seed OnlineMode while a legacy DiscordRichPresence key is still
-	// present: ReadModeFromIni migrates it to OnlineMode on first use.
+	// Do not seed TelemetryMode while a legacy DiscordRichPresence key is
+	// still present: ReadModeFromIni migrates it on first use.
 	if (GetPrivateProfileIntA("Settings", "DiscordRichPresence", -1, iniPath) < 0)
-		IniSafe_EnsureLineComment("Settings", "OnlineMode",
-			"0 = Off (no Discord) / 1 = Basic presence / 2 = Advanced (links your Discord account) / 3 = Ranked (links your account for online matchmaking)",
+		IniSafe_EnsureLineComment("Settings", "TelemetryMode",
+			"0 = Off (no Discord) / 1 = Basic Discord Integration / 2 = Advanced Discord Integration (requires authorizing the app) / 3 = Connect to Ranked Matchmaking Coordinator (coming soon!)",
 			"0", iniPath);
 	IniSafe_EnsureLineComment("Settings", "RankedLinked",
 		"1 = your Steam and Discord accounts are linked (set automatically after you finish linking)",
@@ -98,8 +98,8 @@ static void EnsureOnlineIniLegend()
 	IniSafe_EnsureLineComment("Settings", "RankedBaseUrl",
 		"Testing only: overrides the account-link service URL. Leave this out (or empty) to use the normal service.",
 		"", iniPath);
-	IniSafe_EnsureLineComment("Settings", "RankedLinkBaseUrl",
-		"Testing only: overrides the browser page opened when linking your account. Leave this out (or empty) by default.",
+	IniSafe_EnsureLineComment("Settings", "CustomRankedServer",
+		"Testing only: overrides the ranked server (link page + API). Leave this out (or empty) for the normal server.",
 		"", iniPath);
 }
 

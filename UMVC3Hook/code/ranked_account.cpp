@@ -163,23 +163,22 @@ std::string GetIniPath()
     return path;
 }
 
-// Link-service origin for the status/completion requests ([Settings]
-// RankedBaseUrl override, else prod) and the browser page origin ([Settings]
-// RankedLinkBaseUrl, else the API override, else prod). One override key drives
-// both so the dev stub keeps working with a single ini line.
+// Link-service origin for the status/completion requests and the browser page
+// origin. [Settings]CustomRankedServer overrides the whole flow (page + API);
+// [Settings]RankedBaseUrl is the narrower API-only override. Either key alone
+// points a dev stub at everything, keeping the single-line test workflow.
 void ReadBaseUrls(std::string& apiBase, std::string& pageBase)
 {
     const std::string path = GetIniPath();
     char apiOverride[512] = {};
     GetPrivateProfileStringA("Settings", "RankedBaseUrl", "", apiOverride,
                              sizeof(apiOverride), path.c_str());
-    char pageOverride[512] = {};
-    GetPrivateProfileStringA("Settings", "RankedLinkBaseUrl", "", pageOverride,
-                             sizeof(pageOverride), path.c_str());
-    apiBase = apiOverride[0] ? apiOverride : kLinkServiceBaseUrl;
-    if (pageOverride[0]) pageBase = pageOverride;
-    else if (apiOverride[0]) pageBase = apiOverride; // stub serves both
-    else pageBase = kLinkServiceBaseUrl;
+    char customServer[512] = {};
+    GetPrivateProfileStringA("Settings", "CustomRankedServer", "", customServer,
+                             sizeof(customServer), path.c_str());
+    apiBase = apiOverride[0] ? apiOverride
+             : (customServer[0] ? customServer : kLinkServiceBaseUrl);
+    pageBase = customServer[0] ? customServer : apiBase;
 }
 
 // ---------------------------------------------------------------------------
@@ -443,7 +442,7 @@ DWORD WINAPI RankedPollThread(void*)
 
 void RankedAccount_Init()
 {
-    // Intentionally a no-op: a boot-time OnlineMode of 3 must never open a
+    // Intentionally a no-op: a boot-time TelemetryMode of 3 must never open a
     // browser or start a poll. The link only begins on an explicit tier-4
     // selection that passes through RankedAccount_SetEnabled(true).
 }
