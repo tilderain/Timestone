@@ -43,6 +43,8 @@ struct SteamAPI {
     void* (*GetMatchmaking)(void*, HSteamUser, HSteamPipe, const char*) = nullptr;
     void* (*GetUtils)(void*, HSteamPipe, const char*) = nullptr;
     void* (*GetGeneric)(void*, HSteamUser, HSteamPipe, const char*) = nullptr;
+    void* (*GetISteamUser)(void*, HSteamUser, HSteamPipe, const char*) = nullptr;
+    uint64_t (*ISteamUser_GetSteamID)(void*) = nullptr;
     void (*RegisterCallback)(void*, int) = nullptr;
     void (*UnregisterCallback)(void*) = nullptr;
 
@@ -118,6 +120,7 @@ bool g_joinCallbacksRegistered = false;
 std::atomic<uint64_t> g_pendingJoinLobby{0};
 std::atomic<uint64_t> g_replacementJoinLobby{0};
 uint64_t g_peerSteamId = 0;
+uint64_t g_localSteamId = 0;
 uint64_t g_gamePeerSteamId = 0;
 uint64_t g_rejectedPeerSteamId = 0;
 char g_peerUsername[128] = {};
@@ -205,9 +208,7 @@ public:
     {
         if (!param) return;
         auto* request = static_cast<GameRichPresenceJoinRequestedCompat_t*>(param);
-        uint64_t lobbyId = 0;
-        if (ParseLobbyConnectString(request->m_rgchConnect, lobbyId))
-            QueueJoinLobby(lobbyId);
+        SteamLobby_QueueJoinByConnectString(request->m_rgchConnect);
     }
 
     void Run(void* param, bool, SteamAPICall_t) override { Run(param); }
@@ -286,6 +287,8 @@ bool ResolveExports()
     ok &= Resolve(g_api.GetMatchmaking, "SteamAPI_ISteamClient_GetISteamMatchmaking");
     ok &= Resolve(g_api.GetUtils, "SteamAPI_ISteamClient_GetISteamUtils");
     ok &= Resolve(g_api.GetGeneric, "SteamAPI_ISteamClient_GetISteamGenericInterface");
+    ok &= Resolve(g_api.GetISteamUser, "SteamAPI_ISteamClient_GetISteamUser");
+    ok &= Resolve(g_api.ISteamUser_GetSteamID, "SteamAPI_ISteamUser_GetSteamID");
     ok &= Resolve(g_api.RegisterCallback, "SteamAPI_RegisterCallback");
     ok &= Resolve(g_api.UnregisterCallback, "SteamAPI_UnregisterCallback");
     ok &= Resolve(g_api.RequestLobbyList, "SteamAPI_ISteamMatchmaking_RequestLobbyList");
@@ -844,6 +847,15 @@ bool SteamLobby_Initialize()
         g_friends = g_api.GetFriends(client, user, pipe, version);
         if (g_friends) break;
     }
+    static const char* userVersions[] = {
+        "SteamUser021", "SteamUser020", "SteamUser019"
+    };
+    for (const char* version : userVersions) {
+        void* steamUser = g_api.GetISteamUser(client, user, pipe, version);
+        if (!steamUser) continue;
+        g_localSteamId = g_api.ISteamUser_GetSteamID(steamUser);
+        break;
+    }
     const char* localUsername = g_friends ? g_api.GetPersonaName(g_friends) : nullptr;
     snprintf(g_localUsername, sizeof(g_localUsername), "%s",
              localUsername && localUsername[0] ? localUsername : "");
@@ -1044,6 +1056,10 @@ const char* SteamLobby_GetLocalUsername()
 {
     return g_localUsername;
 }
+uint64_t SteamLobby_GetLocalSteamId()
+{
+    return g_localSteamId;
+}
 
 uint64_t SteamLobby_GetPeerSteamId()
 {
@@ -1109,6 +1125,25 @@ bool SteamLobby_IsHostedLobby(uint64_t lobbyId)
 bool SteamLobby_IsHost()
 {
     return g_isHost && g_lobbyId != 0;
+}
+
+int SteamLobby_GetMemberCount()
+{
+    if (!g_lobbyId || !g_matchmaking || !g_api.GetNumLobbyMembers) return 0;
+    return g_api.GetNumLobbyMembers(g_matchmaking, g_lobbyId);
+}
+
+uint64_t SteamLobby_GetLobbyId()
+{
+    return g_lobbyId;
+}
+
+bool SteamLobby_QueueJoinByConnectString(const char* connect)
+{
+    uint64_t lobbyId = 0;
+    if (!ParseLobbyConnectString(connect, lobbyId)) return false;
+    QueueJoinLobby(lobbyId);
+    return true;
 }
 
 bool SteamLobby_GetHostedJoinLink(char* link, size_t capacity)

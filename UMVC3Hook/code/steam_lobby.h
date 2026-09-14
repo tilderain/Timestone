@@ -20,6 +20,7 @@ void SteamLobby_Shutdown(bool preserveConnection);
 
 const char* SteamLobby_GetStatus();
 const char* SteamLobby_GetLocalUsername();
+uint64_t SteamLobby_GetLocalSteamId();  // 0 when Steam isn't initialized
 uint64_t SteamLobby_GetPeerSteamId();
 const char* SteamLobby_GetPeerUsername();
 bool SteamLobby_GetPeerAvatarRGBA(uint8_t* rgba, size_t capacity,
@@ -28,6 +29,9 @@ bool SteamLobby_HasPeerProfile();
 bool SteamLobby_OpenPeerProfile();
 bool SteamLobby_HasLobby();
 bool SteamLobby_IsHost();
+int SteamLobby_GetMemberCount();
+uint64_t SteamLobby_GetLobbyId();
+bool SteamLobby_QueueJoinByConnectString(const char* connect);
 bool SteamLobby_IsCreating();
 bool SteamLobby_IsHostedLobby(uint64_t lobbyId);
 bool SteamLobby_GetHostedJoinLink(char* link, size_t capacity);

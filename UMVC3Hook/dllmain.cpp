@@ -23,6 +23,8 @@
 #include "code/d3d9reset.h"
 #include "code/exception.h"
 #include "code/mk10utils.h"
+#include "code/discord_rich_presence.h"
+#include "code/ranked_account.h"
 #include <Windows.h>
 #include <atomic>
 #include <cstdio>
@@ -47,18 +49,25 @@ static constexpr size_t kHookLogRetainedBytes = 3 * 1024 * 1024;
 static constexpr char kHookLogDiscardMarker[] =
 	"=== older log entries discarded ===\n";
 
-static bool HookLogConsoleEnabledByConfig()
+static bool GetTimestoneIniPath(char* iniPath, size_t capacity)
 {
-	char iniPath[MAX_PATH] = {};
-	const DWORD length = GetModuleFileNameA(nullptr, iniPath, sizeof(iniPath));
-	if (!length || length >= sizeof(iniPath))
-		return false;
+	if (!iniPath || capacity < 24) return false;
+	const DWORD length = GetModuleFileNameA(nullptr, iniPath, (DWORD)capacity);
+	if (!length || length >= capacity) return false;
 	char* filename = strrchr(iniPath, '\\');
 	char* forwardSlash = strrchr(iniPath, '/');
 	if (!filename || (forwardSlash && forwardSlash > filename))
 		filename = forwardSlash;
 	filename = filename ? filename + 1 : iniPath;
-	snprintf(filename, sizeof(iniPath) - (filename - iniPath), "Timestone.ini");
+	snprintf(filename, capacity - (size_t)(filename - iniPath), "Timestone.ini");
+	return true;
+}
+
+static bool HookLogConsoleEnabledByConfig()
+{
+	char iniPath[MAX_PATH] = {};
+	if (!GetTimestoneIniPath(iniPath, sizeof(iniPath)))
+		return false;
 	char configuredValue[32] = {};
 	if (GetPrivateProfileStringA("Settings", "EnableConsole", "",
 			configuredValue, sizeof(configuredValue), iniPath) == 0) {
@@ -66,6 +75,32 @@ static bool HookLogConsoleEnabledByConfig()
 		return false;
 	}
 	return GetPrivateProfileIntA("Settings", "EnableConsole", 0, iniPath) == 1;
+}
+
+// Writes the user-facing `;` legends for the online-mode keys straight into
+// Timestone.ini. Idempotent (IniSafe_EnsureLineComment no-ops once the marker
+// is present) and runs at every boot after DiscordRichPresence_Init, so the
+// comments appear even on installs where the keys already exist.
+static void EnsureOnlineIniLegend()
+{
+	char iniPath[MAX_PATH] = {};
+	if (!GetTimestoneIniPath(iniPath, sizeof(iniPath)))
+		return;
+	// Do not seed TelemetryMode while a legacy DiscordRichPresence key is
+	// still present: ReadModeFromIni migrates it on first use.
+	if (GetPrivateProfileIntA("Settings", "DiscordRichPresence", -1, iniPath) < 0)
+		IniSafe_EnsureLineComment("Settings", "TelemetryMode",
+			"0 = Off (no Discord) / 1 = Basic Discord Integration / 2 = Advanced Discord Integration (requires authorizing the app) / 3 = Connect to Ranked Matchmaking Coordinator (coming soon!)",
+			"0", iniPath);
+	IniSafe_EnsureLineComment("Settings", "RankedLinked",
+		"1 = your Steam and Discord accounts are linked (set automatically after you finish linking)",
+		"0", iniPath);
+	IniSafe_EnsureLineComment("Settings", "RankedBaseUrl",
+		"Testing only: overrides the account-link service URL. Leave this out (or empty) to use the normal service.",
+		"", iniPath);
+	IniSafe_EnsureLineComment("Settings", "CustomRankedServer",
+		"Testing only: overrides the ranked server (link page + API). Leave this out (or empty) for the normal server.",
+		"", iniPath);
 }
 
 static void HookLogAppendLocked(const char* data, size_t length)
@@ -923,6 +958,9 @@ long __stdcall hkEndScene(LPDIRECT3DDEVICE9 pDevice)
 		}
 		InitImGui(pDevice);
 		FrameStepper_SetDevice(pDevice);
+		DiscordRichPresence_Init();
+		EnsureOnlineIniLegend();
+		RankedAccount_Init();
 		init = true;
 		D3D9ResetDiagnostics_CompleteStartup();
 		BootTimer_Stamp("Initialized ImGui overlay");

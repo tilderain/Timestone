@@ -5,6 +5,7 @@
 #include <cstring>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 extern void HookLog(const char* fmt, ...);
 
@@ -140,6 +141,120 @@ std::string Update(const std::string& bytes, const char* section,
     return IniText::Update<char>(bytes, section, key, value, bom);
 }
 
+// Commit an already-read/rewritten ini atomically: temp write, backup of the
+// live file, then rename over it. Shared by Save and EnsureLineComment below.
+bool Commit(const std::string& before, const std::string& after,
+            const std::string& directory, const std::string& path,
+            bool exists, Handle& original)
+{
+    if (before == after) return true;
+    if (after.empty() || after.size() > kMaxIniBytes) {
+        SetLastError(ERROR_FILE_TOO_LARGE);
+        return false;
+    }
+    Temporary next;
+    if (!next.Write(directory, after)) return false;
+    if (exists && !before.empty()) {
+        Temporary backup;
+        const std::string backupPath = path + ".bak";
+        if (!backup.Write(directory, before) ||
+            !MoveFileExA(backup.path, backupPath.c_str(),
+                         MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+            return false;
+    }
+    if (!original.Close()) return false;
+    // No delete-then-copy fallback: failure must leave the live INI untouched.
+    return MoveFileExA(next.path, path.c_str(), MOVEFILE_WRITE_THROUGH |
+        (exists ? MOVEFILE_REPLACE_EXISTING : 0)) != FALSE;
+}
+
+std::vector<std::string> SplitLines(const std::string& text)
+{
+    std::vector<std::string> lines;
+    size_t start = 0;
+    for (;;) {
+        const size_t end = text.find('\n', start);
+        if (end == std::string::npos) {
+            lines.push_back(text.substr(start));
+            break;
+        }
+        std::string line = text.substr(start, end - start);
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        lines.push_back(line);
+        start = end + 1;
+    }
+    return lines;
+}
+
+std::string JoinLines(const std::vector<std::string>& lines)
+{
+    std::string result;
+    for (size_t i = 0; i < lines.size(); ++i) {
+        if (i) result += "\r\n";
+        result += lines[i];
+    }
+    return result;
+}
+
+bool HasCommentMarker(const std::vector<std::string>& lines,
+                      const std::string& marker)
+{
+    for (const std::string& line : lines)
+        if (line.compare(0, marker.size(), marker) == 0) return true;
+    return false;
+}
+
+// Insert `; <comment>` directly above `key=`; when the key is absent and
+// defaultValue is non-null, the section and `key=defaultValue` are created
+// beneath the marker. Never touches UTF-16 files. Returns before unchanged
+// when already documented or when there is nothing to add.
+std::string EnsureLineCommentText(const std::string& before, const char* section,
+                                  const char* key, const char* comment,
+                                  const char* defaultValue)
+{
+    if (before.size() >= 2 && ((before[0] == '\xff' && before[1] == '\xfe') ||
+                               (before[0] == '\xfe' && before[1] == '\xff')))
+        return before; // UTF-16 ini; leave untouched
+    std::string bom;
+    size_t offset = 0;
+    if (before.size() >= 3 && before[0] == '\xef' && before[1] == '\xbb' &&
+        before[2] == '\xbf') {
+        bom = "\xef\xbb\xbf";
+        offset = 3;
+    }
+    std::vector<std::string> lines = SplitLines(before.substr(offset));
+    if (lines.size() == 1 && lines[0].empty()) lines.clear();
+    const std::string marker = std::string("; ") + comment;
+    if (HasCommentMarker(lines, marker)) return before;
+
+    const std::string keyLine = std::string(key) + "=";
+    const std::string sectionHeader = std::string("[") + section + "]";
+    int keyIndex = -1;
+    int sectionIndex = -1;
+    for (int i = 0; i < static_cast<int>(lines.size()); ++i) {
+        std::string line = lines[i];
+        const size_t first = line.find_first_not_of(" \t");
+        line = first == std::string::npos ? "" : line.substr(first);
+        if (keyIndex < 0 && line.compare(0, keyLine.size(), keyLine) == 0)
+            keyIndex = i;
+        if (line == sectionHeader) sectionIndex = i;
+    }
+    if (keyIndex >= 0) {
+        lines.insert(lines.begin() + keyIndex, marker);
+        return bom + JoinLines(lines);
+    }
+    if (!defaultValue) return before;
+    const std::string entry = marker + "\r\n" + keyLine + defaultValue;
+    if (sectionIndex >= 0) {
+        lines.insert(lines.begin() + sectionIndex + 1, entry);
+        return bom + JoinLines(lines);
+    }
+    if (!lines.empty() && !lines.back().empty()) lines.push_back("");
+    lines.push_back(sectionHeader);
+    lines.push_back(entry);
+    return bom + JoinLines(lines);
+}
+
 bool Save(const IniSafe_Entry* entries, size_t count, const char* filename)
 {
     if ((!entries && count) || !filename || !*filename) {
@@ -190,31 +305,57 @@ bool Save(const IniSafe_Entry* entries, size_t count, const char* filename)
             return false;
         }
     }
-    if (exists && before == after) return true;
-    if (after.empty() || after.size() > kMaxIniBytes) {
-        SetLastError(ERROR_FILE_TOO_LARGE);
-        return false;
-    }
-
-    Temporary next;
-    if (!next.Write(directory, after)) return false;
-    // Never replace a useful backup with an empty file. Malformed nonempty
-    // inputs are preserved too; they can still contain recoverable settings.
-    if (exists && !before.empty()) {
-        Temporary backup;
-        const std::string backupPath = std::string(path) + ".bak";
-        if (!backup.Write(directory, before) ||
-            !MoveFileExA(backup.path, backupPath.c_str(),
-                         MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) return false;
-    }
-    // Some Wine versions refuse replacement while the destination is open,
-    // even with FILE_SHARE_DELETE. Keep the interprocess mutex through commit.
-    if (!original.Close()) return false;
-    // No delete-then-copy fallback: failure must leave the live INI untouched.
-    return MoveFileExA(next.path, path, MOVEFILE_WRITE_THROUGH |
-        (exists ? MOVEFILE_REPLACE_EXISTING : 0)) != FALSE;
+    return Commit(before, after, directory, path, exists, original);
 }
 } // namespace
+
+// Adds a user-facing `; <comment>` line directly above `[section] key`,
+// creating the section and `key=defaultValue` when the key is absent (pass
+// nullptr for defaultValue to never create keys). Idempotent and safe to call
+// from a one-time boot path; IniSafe's other writers preserve comment lines.
+bool IniSafe_EnsureLineComment(const char* section, const char* key,
+                               const char* comment, const char* defaultValue,
+                               const char* filename)
+{
+    if (!section || !key || !comment || !filename || !*section || !*key ||
+        !*comment || !*filename) {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return false;
+    }
+    if (strpbrk(section, "\r\n=[]") || strpbrk(key, "\r\n=[]") ||
+        strpbrk(comment, "\r\n") ||
+        (defaultValue && strpbrk(defaultValue, "\r\n"))) {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return false;
+    }
+    try {
+        char path[MAX_PATH] = {};
+        char* leaf = nullptr;
+        const DWORD length = GetFullPathNameA(filename, MAX_PATH, path, &leaf);
+        if (!length) return false;
+        if (length >= MAX_PATH - 4 || !leaf || !*leaf) {
+            SetLastError(ERROR_INVALID_NAME);
+            return false;
+        }
+        const std::string directory(path, leaf - path);
+        Lock lock;
+        if (!lock.owned) return false;
+
+        Handle original;
+        original.value = CreateFileA(path, GENERIC_READ,
+                                     FILE_SHARE_READ | FILE_SHARE_DELETE, nullptr,
+                                     OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        const bool exists = original.value != INVALID_HANDLE_VALUE;
+        if (!exists && GetLastError() != ERROR_FILE_NOT_FOUND) return false;
+        std::string before;
+        if (exists && !Read(original.value, before)) return false;
+        const std::string after = EnsureLineCommentText(
+            before, section, key, comment, defaultValue);
+        return Commit(before, after, directory, path, exists, original);
+    } catch (...) {
+        return false;
+    }
+}
 
 bool IniSafe_WriteBatch(const IniSafe_Entry* entries, size_t count, const char* filename)
 {
