@@ -24,6 +24,9 @@ static bool                 g_active = false;
 // (MinGW-w64 win32 threading model does not support std::mutex)
 static InputPacket              g_outboundPacket = {};
 static bool                     g_outboundNew    = false;
+static bool                     g_outboundValid  = false;
+static uint32_t                 g_outboundLastSendTick = 0;
+static constexpr uint32_t       INPUT_RESEND_INTERVAL_MS = 16;
 static CRITICAL_SECTION         g_outboundCS;
 
 static constexpr size_t         MAX_INBOUND_PACKETS = 256;
@@ -225,15 +228,21 @@ static DWORD WINAPI Netplay_ServiceThread(LPVOID)
         }
 
         // --- Send outbound packet ---
+        // Input delivery is unreliable. If both game threads wait for missing
+        // input, neither reaches frame end to publish another history packet.
+        // Resend the exact latest history independently of simulation progress.
         bool hasNewOutbound = false;
         InputPacket outPkt = {};
         {
             ScopedCS lock(g_outboundCS);
-            if (g_outboundNew)
+            if (g_outboundValid &&
+                (g_outboundNew ||
+                 now - g_outboundLastSendTick >= INPUT_RESEND_INTERVAL_MS))
             {
                 outPkt = g_outboundPacket;
                 hasNewOutbound = true;
                 g_outboundNew = false;
+                g_outboundLastSendTick = now;
             }
         }
 
@@ -879,6 +888,14 @@ void Netplay_Init(ENetHost* host, ENetPeer* peer)
         g_inboundCount = 0;
     }
 
+    {
+        ScopedCS lock(g_outboundCS);
+        g_outboundPacket = {};
+        g_outboundNew = false;
+        g_outboundValid = false;
+        g_outboundLastSendTick = 0;
+    }
+
     g_recvCount = 0;
     g_lastRecv = 0;
     g_readyTxDiagValid = false;
@@ -922,6 +939,7 @@ void Netplay_SendPacket(const InputPacket& pkt)
     ScopedCS lock(g_outboundCS);
     g_outboundPacket = pkt;
     g_outboundNew = true;
+    g_outboundValid = true;
 }
 
 bool Netplay_GetInboundPacket(InputPacket& outPkt)
@@ -1300,6 +1318,8 @@ void Netplay_ClearInputQueues()
     {
         ScopedCS lock(g_outboundCS);
         g_outboundNew = false;
+        g_outboundValid = false;
+        g_outboundLastSendTick = 0;
         std::memset(&g_outboundPacket, 0, sizeof(g_outboundPacket));
     }
     {
@@ -1324,9 +1344,7 @@ void Netplay_SendInput(uint32_t rawInput)
     pkt.inputs[0] = rawInput;
     // inputs[1..15] remain zero — unused for simple delay-based netplay.
 
-    ScopedCS lock(g_outboundCS);
-    g_outboundPacket = pkt;
-    g_outboundNew = true;
+    Netplay_SendPacket(pkt);
 }
 
 bool Netplay_HasRemoteInput()
