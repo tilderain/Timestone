@@ -27,7 +27,7 @@ int main()
     saved.ordinary = true;
     CaptureOrdinary(old.data(), saved);
 
-    // Standalone one-shots retain completion, not a new first emission.
+    // Standalone one-shots retain their emission phase, not a new first emission.
     RestoreOrdinary(fresh.data(), saved, false);
     assert(Read<uint8_t>(fresh.data(), 0x77) == 5);
     assert(Read<uint32_t>(fresh.data(), 0x20) & 0x80000000u);
@@ -87,17 +87,43 @@ int main()
     const auto beforeUnknown = fresh;
     RestoreOrdinary(fresh.data(), saved, true);
     assert(fresh == beforeUnknown);
+    // Native single-spawn phase 3 finishes emission and returns one spawn.
+    // The resulting phase-5 particle may remain alive for many more updates.
+    // Capture that combination: it must survive the independent-recipe gate.
     ConcreteShotSnapshot::CallbackEffectState burst;
-    assert(!burst.CompletedIndependent()); // pending capture is not known completion
+    State tail;
+    tail.ordinary = true;
+    CaptureOrdinary(old.data(), tail);
+    assert(tail.phase == 5 && tail.hadParticles);
+    assert((tail.status & 0x80000000u) && (tail.status & 4u));
+    burst.occupied = true;
     burst.hasState = true;
     burst.unitState = 2;
-    assert(!burst.CompletedIndependent()); // first emission still allowed
     burst.emissionFinished = true;
+    burst.hasGeneratorEmissionState = true;
+    burst.generatorEmissionStates.push_back(tail);
     for (int rollback = 0; rollback < 16; ++rollback)
-        assert(burst.CompletedIndependent()); // completed standalone bursts do not replay
-    burst.flags100[0] = 2;
-    assert(!burst.CompletedIndependent()); // intentionally sleeping/reusable effect
+        assert(!burst.CompletedIndependent());
+
+    // Reaching native retirement is authoritative even if the captured
+    // generator still has particle bytes or emission was not marked finished.
     burst.unitState = 3;
-    assert(burst.CompletedIndependent()); // already retired, including sleeping effects
+    assert(burst.CompletedIndependent());
+
+    // Match native isAlive (states 1/2) for both awake and sleeping effects.
+    // A partial/unavailable capture must never establish completion.
+    for (uint8_t state = 0; state < 8; ++state) {
+        for (bool finished : {false, true}) {
+            for (uint8_t sleep : {uint8_t(0), uint8_t(2)}) {
+                burst.unitState = state;
+                burst.emissionFinished = finished;
+                burst.flags100[0] = sleep;
+                burst.hasState = true;
+                assert(burst.CompletedIndependent() == (state != 1 && state != 2));
+                burst.hasState = false;
+                assert(!burst.CompletedIndependent());
+            }
+        }
+    }
     std::printf("compact generator state: %zu bytes; regression tests passed\n", sizeof(State));
 }

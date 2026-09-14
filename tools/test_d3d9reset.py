@@ -314,6 +314,7 @@ PLACEHOLDER(HookFullscreen, g_originalFullscreen)
 PLACEHOLDER(HookVsync, g_originalVsync)
 PLACEHOLDER(HookResize, g_originalResize)
 PLACEHOLDER(HookSyncSettings, g_originalSync)
+PLACEHOLDER(HookWindowRedraw, g_originalWindowRedraw)
 void HookResetDevice() {}
 '''
 
@@ -326,7 +327,7 @@ void ResetTest(Failure next, unsigned at = 1) {
     g_resetTarget = nullptr;
 }
 int main() {
-    for (unsigned i = 1; i <= 11; ++i) {
+    for (unsigned i = 1; i <= 12; ++i) {
         ResetTest(Failure::Create, i);
         assert(!D3D9Reset_InstallNativeHooks() && removed == i - 1);
         assert(created == std::set<void*>{unrelated} && enabled == created);
@@ -335,10 +336,11 @@ int main() {
         assert(created == std::set<void*>{unrelated} && enabled == created);
     }
     ResetTest(Failure::Apply);
-    assert(!D3D9Reset_InstallNativeHooks() && removed == 11);
+    assert(!D3D9Reset_InstallNativeHooks() && removed == 12);
     assert(created == std::set<void*>{unrelated} && enabled == created);
     ResetTest(Failure::None);
-    assert(D3D9Reset_InstallNativeHooks() && created.size() == 12);
+    assert(D3D9Reset_InstallNativeHooks() && created.size() == 13);
+    assert(enabled.count(reinterpret_cast<void*>(0x14053D0F0)) == 1);
 
     void* vtable[17] = {};
     vtable[16] = reinterpret_cast<void*>(0x1234);

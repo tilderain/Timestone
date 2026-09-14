@@ -967,7 +967,7 @@ int Effect_RestoreRecipes(RollbackSnapshotSlot& slot)
             }
             continue;
         }
-        // Independent completed bursts (e.g. swap-out flowers) must not return
+        // Independent effects already inactive at capture must not return
         // to their factory's first emission on every rollback. Live shot bodies
         // were handled above and have a distinct missing-particle repair path.
         if (saved.state.CompletedIndependent()) continue;

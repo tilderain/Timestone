@@ -30,8 +30,10 @@ struct ConcreteShotSnapshot {
         std::vector<GeneratorEmissionState> generatorEmissionStates;
 
         bool CompletedIndependent() const {
-            return hasState && ((unitState != 1 && unitState != 2) ||
-                (emissionFinished && (flags100[0] & 2u) == 0));
+            // Native isAlive accepts states 1/2. Finished emission can still
+            // have live particles/children; only captured inactivity proves
+            // that the independent effect should not be recreated.
+            return hasState && unitState != 1 && unitState != 2;
         }
     };
 

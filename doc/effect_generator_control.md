@@ -53,10 +53,12 @@ Fresh effect generation tokens, child censuses and completion counts at
 fields over their existing graph. Full outer timeline restoration requires a
 matching compact generator graph; otherwise only finite expiry/sleep is restored.
 
-Independent completed non-sleeping bursts are not recreated. This targets the
-reported Amaterasu TAC flower replay through the general effect-recipe lifecycle;
-the exact flower EFL/action event has not yet been identified. Pending effects and
-intentional sleeping effects are not treated as completed bursts. Shot callbacks
+Independent effects with captured native lifecycle outside states 1/2 are not
+recreated. Finished emission alone is not completion: a phase-5 single-spawn
+generator can still own its live particle, so awake and sleeping active effects
+remain eligible for restoration. The previous emission-finished heuristic aimed
+to suppress Amaterasu TAC flower replay, but its exact EFL/action event was never
+identified and the heuristic could discard live tails. Shot callbacks
 also tracked as general recipes reuse the shot's fresh callback, rather than
 spawning a second effect.
 
@@ -69,9 +71,9 @@ The historical shot-specific emission exclusions remain in place.
 ## Verification
 
 `tools/test_effect_generator_state.cpp` exercises countdown/repeat/distribution
-restoration, phase-3 repair versus standalone phase-5 completion, pending emission,
+restoration, phase-3 repair versus standalone phase-5 emission, pending emission,
 existing-particle protection, ownership-byte preservation, opaque-generator
-storage, and completed versus sleeping independent effects. It does not emulate
+storage, and inactive versus still-live independent effects. It does not emulate
 native rendering or prove the exact Amaterasu flower event is covered. In-game
 retests should cover Soul Fist, Hadouken, Amaterasu TAC exit, and hit/expired Doom
 missiles through repeated rollbacks.
@@ -79,3 +81,26 @@ missiles through repeated rollbacks.
 The standalone test passed under ASan/UBSan (72-byte generator record).
 `make -j8` and `git diff --check` passed. Runtime confirmation of the four reported
 symptoms is still pending; no in-game performance improvement has been measured.
+
+## CompletedIndependent correction
+
+The capture at `concrete_snapshot.cpp` sets `emissionFinished` from generator
+finish/status bits. Native `1408426D0` invokes finish before returning one spawn;
+`140834F30` then creates/updates particles and reports continuation until its
+concrete-work/status conditions permit completion. Native `1405E67C0` counts those
+continuation results, and `1405EF2B0` selects sleep or retirement. Generator finish
+is therefore earlier than effect inactivity (`140001B80`: states 1/2 are alive).
+
+The old `CompletedIndependent()` additionally classified an awake active effect
+as complete solely from `emissionFinished`. That caused `Effect_RestoreRecipes`
+to skip its factory, or `ConcreteEffectSnapshot_Restore` to retire its replacement.
+The predicate now uses only captured native inactivity; unavailable capture stays
+inconclusive. No extra snapshot fields, particle scans or native updates are added.
+
+The regression fixture captures phase 5 with finish status and an existing particle,
+then asserts the independent restore gate preserves the active effect. It failed
+at that assertion with the old predicate. Coverage also checks all eight lifecycle
+values with awake/sleeping and unfinished/finished combinations, plus unavailable
+capture. This checks the classification fix, not native rendering or preservation
+of historical particles in a newly constructed graph. Those existing downstream
+restoration limitations remain separate runtime follow-ups.

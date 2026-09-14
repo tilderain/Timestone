@@ -7,10 +7,13 @@ real driver/overlay validation is still required. See
 
 ## Working-tree implementation status
 
-`d3d9reset.cpp` now owns an eleven-hook native controller: property queue,
+`d3d9reset.cpp` now owns a twelve-hook native controller: property queue,
 graphics-option synchronization, native apply/release boundary, cooperative
 checks, UI dispatch, Reset submission and HRESULT handling. Device Reset itself
-is hooked at device creation. The group of native hooks is enabled together;
+is hooked at device creation. The WM_PAINT-only redraw is suppressed to keep
+window repainting out of concurrent overlay presentation; see
+[`steam_overlay_window_drag_crash.md`](steam_overlay_window_drag_crash.md).
+The group of native hooks is enabled together;
 installation failure removes only this controller's hooks and stops startup with
 an explicit error. MinHook initialization or device-hook failure also stops
 startup; these failures disable automatic relaunch instead of silently leaving
