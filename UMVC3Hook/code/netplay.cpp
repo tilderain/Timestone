@@ -141,6 +141,11 @@ static CRITICAL_SECTION         g_extensionCS;
 // One-time critical section initialization flag
 static bool                 g_csInitialized  = false;
 
+static constexpr int AVG_RTT_WINDOW_SIZE = 40;
+// Ping history for calculating average RTT (ping) over a fixed window.
+static int32_t g_rttHistory[AVG_RTT_WINDOW_SIZE] = {};
+static int8_t g_avgRttHistoryIndex = 0;
+
 // Reset hook defined in controller.cpp
 extern "C" void Controller_ResetBuffers();
 
@@ -236,6 +241,9 @@ static DWORD WINAPI Netplay_ServiceThread(LPVOID)
                 g_outboundNew = false;
             }
         }
+
+        // Update RTT history for average calculation
+        Netplay_UpdateRTTHistory();
 
         if (hasNewOutbound && g_peer)
         {
@@ -891,6 +899,9 @@ void Netplay_Init(ENetHost* host, ENetPeer* peer)
     g_playerDisconnectNotice = false;
     g_running = true;
 
+    std::memset(g_rttHistory, -1, sizeof(g_rttHistory));
+    g_avgRttHistoryIndex = 0;
+
     // Reset internal player pad ring buffers
     Controller_ResetBuffers();
 
@@ -1384,6 +1395,48 @@ uint32_t Netplay_GetRTT()
         return SteamTransport_GetRTT();
     if (g_peer)
         return g_peer->roundTripTime;
+    return 0;
+}
+
+void Netplay_UpdateRTTHistory()
+{
+    int realTimeRtt = Netplay_GetRTT();
+
+    if(realTimeRtt > 0)
+    {
+        g_avgRttHistoryIndex++;
+        g_avgRttHistoryIndex = g_avgRttHistoryIndex % AVG_RTT_WINDOW_SIZE;
+        g_rttHistory[g_avgRttHistoryIndex] = realTimeRtt;
+    }
+}
+
+uint32_t Netplay_GetAverageRTT()
+{
+    uint64_t sum = 0;
+    int count = 0;
+
+    for (int i = 0; i < AVG_RTT_WINDOW_SIZE; i++)
+    {
+        if (g_rttHistory[i] > 0)
+        {
+            sum += g_rttHistory[i];
+            count++;
+        }
+    }
+
+    return count > 0 ? (uint32_t)(sum / count) : 0;
+}
+
+uint32_t Netplay_GetJitter()
+{
+    if (SteamTransport_IsActive())
+    {
+        return SteamTransport_GetJitter();
+    }
+    if (g_peer)
+    {
+        // TODO: Implement jitter calculation for ENet peer if needed
+    }
     return 0;
 }
 

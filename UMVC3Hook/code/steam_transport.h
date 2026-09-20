@@ -11,4 +11,5 @@ bool SteamTransport_CreateBridge(bool isHost, ISteamNetworkingSockets* sockets,
 void SteamTransport_Pump();
 bool SteamTransport_IsActive();
 uint32_t SteamTransport_GetRTT();
+uint32_t SteamTransport_GetJitter();
 void SteamTransport_Shutdown();

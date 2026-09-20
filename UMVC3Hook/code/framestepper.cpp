@@ -1871,7 +1871,7 @@ void FrameStepper_Draw()
             int32_t curDelay = Controller_GetDelayFrames();
             int32_t curRollback = Controller_GetRollbackFrames();
             if (g_statusHudMode == 1) {
-                ImGui::TextColored(color, "Ping %u", Netplay_GetRTT() / 2);
+                ImGui::TextColored(color, "Ping %u", Netplay_GetAverageRTT() / 2);
                 ImGui::TextColored(color, "Delay %d", curDelay);
                 ImGui::TextColored(color, "Rollb %d", curRollback);
             } else {
@@ -1884,6 +1884,8 @@ void FrameStepper_Draw()
                 ImGui::SetCursorPosX(roleLabelCenterX - ImGui::CalcTextSize(roleLabel).x * 0.5f);
                 ImGui::TextColored(color, "%s", roleLabel);
                 ImGui::TextColored(color, "Ping: %ums", Netplay_GetRTT() / 2);
+                ImGui::TextColored(color, "PingAvg %u", Netplay_GetAverageRTT() / 2);
+                ImGui::TextColored(color, "Jitter %u", Netplay_GetJitter() / 2);
                 ImGui::TextColored(color, "Frame: %d", currentFrame);
                 ImGui::TextColored(color, "FPS: %.1f",
                                    GetGameUpdatesPerSecond(currentFrame));

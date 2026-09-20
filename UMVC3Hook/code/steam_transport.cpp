@@ -16,6 +16,7 @@ static std::atomic<bool> g_bridgeRunning{false};
 static std::atomic<bool> g_bridgeThreadStarted{false};
 static std::atomic_flag g_bridgePumpLock = ATOMIC_FLAG_INIT;
 static std::atomic<uint32_t> g_steamRTT{0};
+static std::atomic<uint32_t> g_steamJitter{0};
 static DWORD g_bridgeCreatedTick = 0;
 
 // The loopback hop can go unserviced while launch hooks finish installing.
@@ -67,6 +68,7 @@ static bool PumpBridgeOnce()
         g_connection, &status, 0, nullptr);
     if (statusResult == k_EResultOK) {
         if (status.m_nPing > 0) g_steamRTT = static_cast<uint32_t>(status.m_nPing);
+        if (status.m_usecMaxJitter > 0) g_steamJitter = static_cast<uint32_t>(status.m_usecMaxJitter / 1000);
         if (status.m_eState == k_ESteamNetworkingConnectionState_ClosedByPeer ||
             status.m_eState == k_ESteamNetworkingConnectionState_ProblemDetectedLocally) {
             HookLog("SteamTransport: Steam connection ended, state=%d\n",
@@ -168,6 +170,7 @@ bool SteamTransport_CreateBridge(bool isHost, ISteamNetworkingSockets* sockets,
     g_sockets = sockets;
     g_connection = connection;
     g_steamRTT = 0;
+    g_steamJitter = 0;
     g_bridgeCreatedTick = GetTickCount();
     g_bridgeThreadStarted = false;
     g_bridgeRunning = true;
@@ -200,6 +203,11 @@ uint32_t SteamTransport_GetRTT()
     return g_steamRTT.load();
 }
 
+uint32_t SteamTransport_GetJitter()
+{
+    return g_steamJitter.load();
+}
+
 void SteamTransport_Shutdown()
 {
     HookLog("SteamTransport: shutdown requested (running=%d, thread=%p)\n",
@@ -227,4 +235,5 @@ void SteamTransport_Shutdown()
     g_sockets = nullptr;
     g_bridgeThreadStarted = false;
     g_steamRTT = 0;
+    g_steamJitter = 0;
 }

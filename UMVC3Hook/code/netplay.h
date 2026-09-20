@@ -269,6 +269,15 @@ bool Netplay_IsHost();
 // Returns the peer's mean round-trip time (ping) in milliseconds, or 0 if inactive.
 uint32_t Netplay_GetRTT();
 
+// Update the RTT history.
+void Netplay_UpdateRTTHistory();
+
+// Get the peer's average round-trip time (ping) in milliseconds, or 0 if inactive.
+uint32_t Netplay_GetAverageRTT();
+
+// Get the peer's jitter (ping variation).
+uint32_t Netplay_GetJitter();
+
 // Request a peer timeout change on the ENet service thread.
 void Netplay_SetTimeout(uint32_t timeoutMs);
 
