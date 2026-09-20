@@ -403,7 +403,7 @@ int32_t      g_remoteFrameAdvantage = 0;  // received from peer via packet
 
 // Timesync window averaging (GGPO-style)
 static constexpr int TIMESYNC_WINDOW_SIZE       = 40;
-static constexpr int TIMESYNC_MIN_FRAME_ADVANTAGE = 1;
+static constexpr int TIMESYNC_MIN_FRAME_ADVANTAGE = 3; // 3 is a pretty good start. Lower to 2 when you think rift estimation is good.
 static constexpr int TIMESYNC_MAX_FRAME_ADVANTAGE = 14;
 
 static int32_t g_localAdvHistory[TIMESYNC_WINDOW_SIZE] = {};
@@ -1734,8 +1734,8 @@ extern "C" void Controller_OnFrameStart()
     //       positive = we're behind, negative = we're ahead
     if (g_netFrameCount >= 0 && g_lastRemoteFrame >= 0)
     {
-        int32_t rttMs = (int32_t)Netplay_GetRTT();
-        int32_t remoteFrameEst = g_lastRemoteFrame + (rttMs * 60 / 1000);
+        int32_t rttMs = (int32_t)Netplay_GetAverageRTT();
+        int32_t remoteFrameEst = g_lastRemoteFrame + (static_cast<float>(rttMs) * 60 / 1000 + 0.5);
         g_localFrameAdvantage = remoteFrameEst - g_netFrameCount;
 
         // Advance timesync window
