@@ -2,8 +2,10 @@
 
 Native-code research of `umvc3.exe.unpacked.exe`, Ghidra image base `140000000`.
 Addresses below identify verified implementations; names are descriptive research
-labels. Existing decompiler types/comments can be stale because this campaign
-changed function names only.
+labels. Existing decompiler types/comments can be stale: the earlier campaign
+changed function names only. Later rounds 7–12 also corrected selected function
+signatures using existing structs; shared layouts remain independently unverified.
+See [round 12](shot_effect_rename_round12_summary.md) for the latest rename evidence.
 
 ## Main result
 
@@ -63,7 +65,7 @@ generator system.
 
 ## 2. Graph construction and storage
 
-`uEffect__createGenerator @ 1405E27C0` performs:
+`uEffect__createGeneratorGraph @ 1405E27C0` performs:
 
 1. `buildGeneratorObjectList @ 1405E2860`: choose concrete generator/node objects
    from resource descriptors, or construct an aggregate effect-unit generator.
@@ -86,6 +88,21 @@ from later unit retirement and destruction. The effect's
 Ordinary particle pool entries are borrowed by the generator from the effect-owned
 storage. The generator manages their intrusive active/free topology. Separately
 allocated auxiliary/GPU blocks and registered child units have different lifetimes.
+
+Round-ten GPU research distinguishes the separately allocated `0xB10` packed-quad
+context, its `0x30` resource-pair record, resource wrappers, and lazy CPU staging
+buffers. A nonnull factory result does not guarantee all nested allocations
+succeeded. Context cleanup releases those resources and rewires neighboring
+contexts; the manager separately maintains its head/tail/count. These are separate
+ownership contracts, not unit retirement or particle-drain operations. See the
+round-ten G ledger for allocation, failure and cleanup evidence.
+
+`uEffect__spawnResourceConfiguredFollowupEffect @1405E7AA0` creates/registers a
+new effect from the source EFL's configured child resource. Finish, hold-release
+and countdown paths invoke it under different control gates. Its old
+`advanceLifetimeByFrames` name was false: the supplied frame value initializes
+the new effect, rather than advancing the source lifetime. See the round-ten H
+ledger for source-depth checks, placement and binding behavior.
 
 Even missing/empty-resource rejection follows an initial reset dispatch. Manager
 initialization can consume external RNG before later pipeline failures. Successful
@@ -326,17 +343,39 @@ slot alive after retirement begins.
 Terminal `uShot__killAndCleanup @ 1401CCBB0` kills/clears remaining callbacks before
 requesting the shot's own deferred unit retirement.
 
+Round-eleven field correction: the finite vanish countdown tested by
+`uShot__tickVanishState @1401CD490` is at **`+207C`**. The common copy from
+`+2094` to **`+2084`** selects a speed multiplier: `1401CE380` multiplies `+2084`
+by speed `+2080` before range-clamping/interpolation. Older research descriptions
+of that copy as a vanish-timer assignment are superseded. The current shared
+struct field names can misrepresent these offsets; native accesses are the
+evidence. `1401C5EB0` marks terminal phase and applies this multiplier without
+itself dispatching unit retirement.
+
 Its middle helper `uShot__stopSoundCookieSlot @1401CE040` stops an indexed sound
 cookie, not attack commands. The ordinary terminal path supplies index0; GMPulse's
 finish handler supplies index3. The helper's four-iteration tail checks the same
 selected reference repeatedly.
 
+The shot start-delay query `14016BD90` is now `uShot__isStartDelayPending`:
+it compares elapsed timer `+1F58` with the configured start threshold `+1F5C`.
+It does not test remaining life. Active processing and initial sound startup
+consume this gate, while earlier preparation can still advance the timer.
+Separately, `+1FE4 mask 0x400` disables the automatic nonnegative-life countdown
+and its expiry branch (`1401CCB80` getter, `1401BEC70` setter). The negative-life
+sentinel branch precedes that check. Child-shot dispatch enablement is another
+independent flag, bit31 of `+212C`, rather than the low-byte phase at that address.
+Round-nine D/E ledgers establish the writers, consumers and exact flag/float
+semantics; none of these flags proves effect drain or physical destruction.
+
 Concrete secondary predicates do not necessarily gate finite-timer completion.
 SatelliteLaserLock additionally waits for its child pointer only on its secondary
 branch; DrDoomJS tests Motion endpoint only on that branch. Ouroboros and
 SoulFistAbsorb can be marked terminal by the timer without executing the owner-flag
-clear guarded by callback emptiness. EnergySpearSpread can still dispatch its
-one-shot attack after the timer tick returns. These are local ordering findings;
+clear guarded by callback emptiness. EnergySpearSpread can still request its
+one-shot resource sound after the timer tick returns (`14019D430`, slot3,
+offset `0x13`); the old attack-dispatch interpretation was incorrect. These are
+local ordering findings;
 asset timer values and alternative owner-flag cleanup remain unproven.
 
 Ouroboros's concrete kill handler at `140183F80` does supply alternate owner-flag

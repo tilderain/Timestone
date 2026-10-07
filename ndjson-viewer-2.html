@@ -80,7 +80,7 @@ td code { color:#00d4ff; word-break:break-all; }
     <span id="frame" class="frame">No frame</span>
     <button id="next" title="Next frame">▶</button><button id="last" title="Last frame">▶|</button>
     <button id="play" title="Play/Pause">▶ Play</button>
-    <label>Speed: <input id="speed" type="range" min="1" max="60" value="5"><span id="speedValue">5x</span></label>
+    <label>Speed: <input id="speed" type="range" min="1" max="60" value="60"><span id="speedValue">60 fps</span></label>
     <input id="slider" type="range" min="0" max="0" value="0">
     <span class="grow"></span><span id="file" class="file"></span>
   </div>
@@ -110,7 +110,9 @@ td code { color:#00d4ff; word-break:break-all; }
 const MAGIC = 0x50445355, HEADER_SIZE = 96, FRAME_SIZE = 72, REGION_V1_SIZE = 48, REGION_V2_SIZE = 112, SHOT_V3_SIZE = 164, SHOT_V4_SIZE = 180, SHOT_PRIMITIVE_V3_SIZE = 160;
 const ROLE = {0:'offline',1:'host',2:'client'};
 const SHOT_REFERENCE_KIND = {0:'none',1:'stable unit',2:'shot'};
-const state = { dumps:[], frames:[], index:0, current:null, arenaView:null, playing:false, playTimer:null };
+const state = { dumps:[], frames:[], index:0, current:null, arenaView:null, playing:false, playTimer:null, playTime:0, playRemainder:0, detailTime:-Infinity };
+// Keep only the latest decoded frame per dump, rather than retaining a second history.
+const fighterCache=new WeakMap(), shotCache=new WeakMap();
 const $ = id => document.getElementById(id);
 const canvas=$('canvas');
 
@@ -194,7 +196,7 @@ function parseUsdp(file, fileName='snapdump.usdp') {
   }
   return {name:fileName, role:ROLE[role] || `role ${role}`, trigger,imageBase,imageSize,commit,frames,byFrame};
 }
-function valueAt(frame, region, offset, size) { return frame.data.slice(region.offset+offset, region.offset+offset+size); }
+function valueAt(frame, region, offset, size) { return frame.data.subarray(region.offset+offset, region.offset+offset+size); }
 function bytesHex(bytes) { return Array.from(bytes,b=>b.toString(16).padStart(2,'0')).join(' '); }
 function byteDiff(a,b) { if(!a||!b) return true; if(a.length!==b.length) return true; for(let i=0;i<a.length;i++) if(a[i]!==b[i]) return true; return false; }
 function regionView(frame, region) { return new DataView(frame.data.buffer,frame.data.byteOffset+region.offset,region.size); }
@@ -288,6 +290,8 @@ function compareActionCameras(cameraData) {
 function fighterRegions(frame,team) { return frame?.regions.filter(region=>region.name===`uCharacter.team${team}`) || []; }
 function decodeFighters(dump,frame) {
   if(!frame?.regions) return [];
+  const collisionEnabled=$('showCollision').checked, cached=fighterCache.get(dump);
+  if(cached?.frame===frame && cached.collisionEnabled===collisionEnabled) return cached.result;
   const result=[];
   for(let team=0;team<2;team++) {
     const teamRegion=frame.regions.find(region=>region.name===`cChrTeam[${team}]`);
@@ -297,7 +301,7 @@ function decodeFighters(dump,frame) {
     fighterRegions(frame,team).forEach((region,slot)=>{
       const view=regionView(frame,region), pos=[finiteFloat(view,0x50),finiteFloat(view,0x54),finiteFloat(view,0x58)];
       const collision=[];
-      if($('showCollision').checked) {
+      if(collisionEnabled) {
         for(let index=0;index<16;index++) {
           const base=0x4210+index*0xB0;
           if(base+0x44>view.byteLength || !u8(view,base+8)) continue;
@@ -318,16 +322,21 @@ function decodeFighters(dump,frame) {
       result.push({team,slot,role:dump.role,pos,active:activeAddress===region.address,action:u32(view,0x1310),flags:u32(view,0x14F0),mCPrgF,rng,collision});
     });
   }
+  fighterCache.set(dump,{frame,collisionEnabled,result});
   return result;
 }
 function fighterKey(fighter) { return `${fighter.team}:${fighter.slot}`; }
 function decodeShots(dump,frame) {
   if(!frame?.shots || !Array.isArray(frame.shots)) return [];
-  return frame.shots.map(shot=>{
+  const cached=shotCache.get(dump);
+  if(cached?.frame===frame) return cached.result;
+  const result=frame.shots.map(shot=>{
     const bodyView=new DataView(shot.body.buffer,shot.body.byteOffset,shot.body.byteLength);
     const bodyVec=offset=>offset+12<=bodyView.byteLength?vector3(bodyView,offset):[0,0,0];
     return {...shot,role:dump.role,state:bodyView.byteLength>=0x14?u32(bodyView,0x10):0,position:bodyVec(0x50),runtimePosition:bodyVec(0x418),timer:bodyView.byteLength>=0x1F64?finiteFloat(bodyView,0x1F60):0,lifeFrame:bodyView.byteLength>=0x207C?finiteFloat(bodyView,0x2078):0,velocity:bodyVec(0x20C0),speed:bodyView.byteLength>=0x20D4?finiteFloat(bodyView,0x20D0):0,step:bodyView.byteLength>=0x2130?u32(bodyView,0x212C):0};
   });
+  shotCache.set(dump,{frame,result});
+  return result;
 }
 function shotKey(shot) { return String(shot.spawnSequence); }
 function shotPairs(frameNumber) {
@@ -489,7 +498,10 @@ function compareVisualFighters(frameNumber) {
 }
 function drawArena(frameNumber) {
   const context=canvas.getContext('2d'), rect=$('arena').getBoundingClientRect(), dpr=window.devicePixelRatio||1, width=Math.max(1,rect.width), height=Math.max(1,rect.height);
-  canvas.width=Math.round(width*dpr); canvas.height=Math.round(height*dpr); context.setTransform(dpr,0,0,dpr,0,0); context.clearRect(0,0,width,height);
+  const pixelWidth=Math.round(width*dpr),pixelHeight=Math.round(height*dpr);
+  if(canvas.width!==pixelWidth) canvas.width=pixelWidth;
+  if(canvas.height!==pixelHeight) canvas.height=pixelHeight;
+  context.setTransform(dpr,0,0,dpr,0,0); context.clearRect(0,0,width,height);
   const fighters=[];
   state.dumps.slice(0,2).forEach(dump=>fighters.push(...decodeFighters(dump,dump.byFrame.get(frameNumber))));
   const shots=[];
@@ -579,10 +591,15 @@ function currentFrame() {
   }
   return null;
 }
-function update() {
+function update(playbackTick=false) {
   const frame=currentFrame(); state.current=frame; $('frame').textContent=frame ? `Frame ${frame.number} (${state.index+1}/${state.frames.length})` : 'No frame'; $('slider').max=Math.max(0,state.frames.length-1); $('slider').value=state.index;
   if(!frame) { $('summary').textContent=''; $('diffs').innerHTML='<div class="empty">Open a snapdump to begin.</div>'; $('inspector').innerHTML=''; return; }
   drawArena(frame.number);
+  // The arena and frame controls run at playback speed; expensive diagnostic
+  // tables refresh at 10 Hz. Seeking, option changes and pausing refresh immediately.
+  const now=performance.now();
+  if(playbackTick===true && state.playing && now-state.detailTime<100) return;
+  state.detailTime=now;
   const a=state.dumps[0]?.byFrame.get(frame.number), b=state.dumps[1]?.byFrame.get(frame.number);
   const visualMismatches=compareVisualFighters(frame.number);
   const compareEnabled=$('showDifferences').checked;
@@ -598,11 +615,12 @@ function update() {
   } else {
     $('diffs').textContent='';
   }
-  $('inspector').innerHTML=`<div class="section"><h2>Frame ${frame.number}</h2><p class="hint">${state.dumps.map(d=>`${d.role}: ${d.name}`).join('<br>')}</p></div>`;
+  const rawBodies=[];
+  let inspectorHtml=`<div class="section"><h2>Frame ${frame.number}</h2><p class="hint">${state.dumps.map(d=>`${d.role}: ${d.name}`).join('<br>')}${state.playing?'<br>Diagnostics refresh at 10 Hz; pause for the current frame.':''}</p></div>`;
   const globalRng=state.dumps.slice(0,2).map(dump=>({dump,rng:decodeGlobalRng(dump.byFrame.get(frame.number))}));
   if(globalRng.some(entry=>entry.rng)) {
     const a=globalRng[0]?.rng?.[0],b=globalRng[1]?.rng?.[0],same=a!==undefined&&b!==undefined&&a===b;
-    $('inspector').innerHTML+=`<div class="section"><h2>Global RNG</h2><table><tr class="${same?'':'mismatch-bg'}"><th>RNG[0]</th><td>${a===undefined?'—':hex(a)}</td><td>${b===undefined?'—':hex(b)}</td><td class="${same?'ok':'bad'}">${same?'✓':'✗'}</td></tr></table></div>`;
+    inspectorHtml+=`<div class="section"><h2>Global RNG</h2><table><tr class="${same?'':'mismatch-bg'}"><th>RNG[0]</th><td>${a===undefined?'—':hex(a)}</td><td>${b===undefined?'—':hex(b)}</td><td class="${same?'ok':'bad'}">${same?'✓':'✗'}</td></tr></table></div>`;
   }
   for(const pair of fighterPairs(frame.number)) {
     const fighter=pair.host||pair.client, host=pair.host, client=pair.client, team=fighter.team, slot=fighter.slot;
@@ -624,7 +642,7 @@ function update() {
     section+=row('Point',host?String(host.active):'—',client?String(client.active):'—',activeSame);
     const distance=host&&client?Math.hypot(...host.pos.map((value,index)=>value-client.pos[index])):null;
     section+=`<tr class="${posSame?'':'mismatch-bg'}"><th>Δ Mag</th><td colspan="3" class="${posSame?'ok':'bad'}">${distance===null?'—':distance.toFixed(6)}</td></tr></table></div>`;
-    $('inspector').innerHTML+=section;
+    inspectorHtml+=section;
   }
   const shots=shotPairs(frame.number);
   if(shots.length) {
@@ -653,10 +671,11 @@ function update() {
         const ref2Identity=value.objectRef2Kind===null?`active ${value.objectRef2Active}`:`${SHOT_REFERENCE_KIND[value.objectRef2Kind]||'kind '+value.objectRef2Kind}, shot #${value.objectRef2ShotSequence}`;
         shotSection+=`<details><summary>${side.label} complete uShot details</summary><table><tr><th>Address</th><td>${hex(value.address,16)}</td></tr><tr><th>Vtable</th><td>${hex(value.vtable,16)}</td></tr><tr><th>Owner</th><td>${hex(value.owner,16)}</td></tr><tr><th>Element</th><td>${hex(value.element,16)}</td></tr><tr><th>Init param</th><td>${hex(value.initParam,16)}</td></tr><tr><th>Position data</th><td>${hex(value.posData,16)}</td></tr><tr><th>Object ref 1</th><td>${hex(value.objectRef1,16)} DTI ${hex(value.objectRef1Dti,16)} ${ref1Identity}</td></tr><tr><th>Object ref 2</th><td>${hex(value.objectRef2,16)} DTI ${hex(value.objectRef2Dti,16)} ${ref2Identity}</td></tr><tr><th>Extended args</th><td>${value.exA9}, ${hex(value.exA10,16)}, ${value.exA11}, ${hex(value.exA12,16)}</td></tr></table>`;
         if(value.collisions.length) { shotSection+='<table><tr><th>Collision</th><th>Type / kind</th><th>World geometry</th><th>Flags / parents</th></tr>';for(const collision of value.collisions) shotSection+=`<tr><th>${collision.slot}:${collision.index}</th><td>${collision.metadataType===1?'capsule':'sphere'} / ${hex(collision.collisionKind)}</td><td>${fmtVec(collision.position)}${collision.metadataType===1?` → ${fmtVec(collision.endPosition)}`:''}<br>r=${collision.radius.toFixed(4)}</td><td>${hex(collision.flags)}<br>${hex(collision.parent0,16)} / ${hex(collision.parent1,16)}</td></tr>`;shotSection+='</table>'; }
-        shotSection+=`<details><summary>Raw uShot body (${value.body.length} bytes)</summary><pre class="hex">${shotBodyHex(value.body)}</pre></details></details>`;
+        const bodyIndex=rawBodies.push(value.body)-1;
+        shotSection+=`<details data-body="${bodyIndex}"><summary>Raw uShot body (${value.body.length} bytes)</summary><pre class="hex"></pre></details></details>`;
       }
     }
-    $('inspector').innerHTML+=shotSection+'</div>';
+    inspectorHtml+=shotSection+'</div>';
   }
   const fullCharacters=compareMiscCharacterState(frame.number);
   if($('calculateCharacters').checked && fullCharacters.length) {
@@ -670,13 +689,13 @@ function update() {
         misc+='</table>';
       }
     }
-    $('inspector').innerHTML+=misc+'</div>';
+    inspectorHtml+=misc+'</div>';
   }
-  if($('showRegions').checked && frame.regions) $('inspector').innerHTML += '<div class="section"><h2>Regions</h2><table><tr><th>Name</th><th>Size</th><th>Hash</th></tr>'+frame.regions.map(r=>`<tr><td>${r.name||'(unnamed)'}</td><td>${r.size}</td><td><code>${hex(r.hash,16)}</code></td></tr>`).join('')+'</table></div>';
+  if($('showRegions').checked && frame.regions) inspectorHtml += '<div class="section"><h2>Regions</h2><table><tr><th>Name</th><th>Size</th><th>Hash</th></tr>'+frame.regions.map(r=>`<tr><td>${r.name||'(unnamed)'}</td><td>${r.size}</td><td><code>${hex(r.hash,16)}</code></td></tr>`).join('')+'</table></div>';
   for(const cameraEntry of state.arenaView?.cameraData||[]) {
     const camera=cameraEntry.data, fmt=value=>value.toFixed(4), action=camera.actionCamera, game=camera.gameCamera;
-    if(game) $('inspector').innerHTML+=`<div class="section"><h2>${cameraEntry.dump.role} sCamera region</h2><table><tr><th>Position</th><td>${game.position.map(fmt).join(', ')}</td></tr><tr><th>Bounds</th><td>${game.bounds.map(fmt).join(' .. ')}</td></tr></table></div>`;
-    if(action) { const bounds=cameraBounds(action); $('inspector').innerHTML+=`<div class="section"><h2>${cameraEntry.dump.role} uActionSideCamera</h2><table><tr><th>Camera position</th><td>${action.position.map(fmt).join(', ')}</td></tr><tr><th>Target position</th><td>${action.target.map(fmt).join(', ')}</td></tr><tr><th>Aspect ratio</th><td>${fmt(action.aspect)}</td></tr><tr><th>Anchor center</th><td>${action.center.map(fmt).join(', ')}</td></tr><tr><th>Anchor direction</th><td>${action.direction.map(fmt).join(', ')}</td></tr><tr><th>Overlook</th><td>${action.overlook.map(fmt).join(', ')}</td></tr><tr><th>mVarDist</th><td>${fmt(action.varDist)}</td></tr><tr><th>mDistRate</th><td>${fmt(action.distRate)}</td></tr><tr><th>mDistance</th><td>${fmt(action.distance)}</td></tr><tr><th>mCharDist</th><td>${fmt(action.charDist)}</td></tr><tr><th>Camera radii</th><td>${fmt(action.radius)} / ${fmt(action.radius2)}</td></tr><tr><th>Projected bounds</th><td>${bounds?`${fmt(bounds.minX)} .. ${fmt(bounds.maxX)} x ${fmt(bounds.minY)} .. ${fmt(bounds.maxY)}`:'unavailable'}</td></tr></table></div>`; }
+    if(game) inspectorHtml+=`<div class="section"><h2>${cameraEntry.dump.role} sCamera region</h2><table><tr><th>Position</th><td>${game.position.map(fmt).join(', ')}</td></tr><tr><th>Bounds</th><td>${game.bounds.map(fmt).join(' .. ')}</td></tr></table></div>`;
+    if(action) { const bounds=cameraBounds(action); inspectorHtml+=`<div class="section"><h2>${cameraEntry.dump.role} uActionSideCamera</h2><table><tr><th>Camera position</th><td>${action.position.map(fmt).join(', ')}</td></tr><tr><th>Target position</th><td>${action.target.map(fmt).join(', ')}</td></tr><tr><th>Aspect ratio</th><td>${fmt(action.aspect)}</td></tr><tr><th>Anchor center</th><td>${action.center.map(fmt).join(', ')}</td></tr><tr><th>Anchor direction</th><td>${action.direction.map(fmt).join(', ')}</td></tr><tr><th>Overlook</th><td>${action.overlook.map(fmt).join(', ')}</td></tr><tr><th>mVarDist</th><td>${fmt(action.varDist)}</td></tr><tr><th>mDistRate</th><td>${fmt(action.distRate)}</td></tr><tr><th>mDistance</th><td>${fmt(action.distance)}</td></tr><tr><th>mCharDist</th><td>${fmt(action.charDist)}</td></tr><tr><th>Camera radii</th><td>${fmt(action.radius)} / ${fmt(action.radius2)}</td></tr><tr><th>Projected bounds</th><td>${bounds?`${fmt(bounds.minX)} .. ${fmt(bounds.maxX)} x ${fmt(bounds.minY)} .. ${fmt(bounds.maxY)}`:'unavailable'}</td></tr></table></div>`; }
   }
   const actionComparison=compareActionCameras(state.arenaView?.cameraData||[]);
   if(actionComparison) {
@@ -690,8 +709,16 @@ function update() {
       for(const [label,key] of [['Min X','minX'],['Max X','maxX'],['Min Y','minY'],['Max Y','maxY']]) comparison+=row(label,bounds[0][key],bounds[1][key]);
       comparison+='</table>';
     }
-    $('inspector').innerHTML+=comparison+'</div>';
+    inspectorHtml+=comparison+'</div>';
   }
+  $('inspector').innerHTML=inspectorHtml;
+  $('inspector').querySelectorAll('[data-body]').forEach(node=>{
+    node.ontoggle=()=>{
+      if(!node.open || node.dataset.loaded) return;
+      node.querySelector('pre').textContent=shotBodyHex(rawBodies[Number(node.dataset.body)]);
+      node.dataset.loaded='true';
+    };
+  });
 }
 function inspectDiff(diff,a,b) {
   const ra=a?.regions.find(r=>(r.name||'')===diff.region) || a?.regions[Number((diff.region.match(/\[(\d+)\]/)||[])[1])]; const rb=b?.regions.find(r=>(r.name||'')===diff.region) || b?.regions[Number((diff.region.match(/\[(\d+)\]/)||[])[1])];
@@ -700,7 +727,7 @@ function inspectDiff(diff,a,b) {
   $('inspector').innerHTML=html;
 }
 function load(files) {
-  stopPlayback();
+  stopPlayback(false);
   state.dumps=[]; state.frames=[]; state.index=0;
   Promise.resolve().then(async()=>{
     if(files.length<1 || files.length>2) throw Error('Select one or two .usdp snapdumps');
@@ -712,11 +739,32 @@ function load(files) {
   }).catch(error=>alert(`Could not load file: ${error.message}`));
 }
 function move(delta) { state.index=Math.max(0,Math.min(state.frames.length-1,state.index+delta)); update(); }
-function stopPlayback() { state.playing=false; clearInterval(state.playTimer); state.playTimer=null; $('play').textContent='▶ Play'; }
+function stopPlayback(refresh=true) {
+  const wasPlaying=state.playing;
+  state.playing=false; cancelAnimationFrame(state.playTimer); state.playTimer=null; $('play').textContent='▶ Play';
+  if(wasPlaying && refresh) update();
+}
+function playbackTick(timestamp) {
+  if(!state.playing) return;
+  // Drop obsolete renders after a slow frame, without slowing the playback clock.
+  state.playRemainder+=(timestamp-state.playTime)*Number($('speed').value)/1000;
+  state.playTime=timestamp;
+  const steps=Math.floor(state.playRemainder+1e-7);
+  if(steps>0) {
+    state.playRemainder=Math.max(0,state.playRemainder-steps);
+    state.index=Math.min(state.frames.length-1,state.index+steps);
+    if(state.index>=state.frames.length-1) { stopPlayback(); return; }
+    update(true);
+  }
+  state.playTimer=requestAnimationFrame(playbackTick);
+}
 function startPlayback() {
+  if(state.playing || state.frames.length<2) return;
   if(state.index>=state.frames.length-1) state.index=0;
   state.playing=true; $('play').textContent='⏸ Pause';
-  state.playTimer=setInterval(()=>{ if(state.index>=state.frames.length-1) stopPlayback(); else move(1); },1000/Number($('speed').value));
+  update();
+  state.playTime=performance.now(); state.playRemainder=0;
+  state.playTimer=requestAnimationFrame(playbackTick);
 }
 function togglePlayback() { if(state.playing) stopPlayback(); else startPlayback(); }
 function preventDocumentDrop(event) { event.preventDefault(); }
@@ -744,7 +792,8 @@ $('prev').onclick=()=>move(-1);
 $('next').onclick=()=>move(1);
 $('slider').oninput=e=>{state.index=Number(e.target.value);update()};
 $('play').onclick=togglePlayback;
-$('speed').oninput=()=>{ $('speedValue').textContent=`${$('speed').value}x`; if(state.playing) { stopPlayback(); startPlayback(); } };
+$('speed').oninput=()=>{ $('speedValue').textContent=`${$('speed').value} fps`; state.playTime=performance.now(); state.playRemainder=0; };
+document.addEventListener('visibilitychange',()=>{state.playTime=performance.now();state.playRemainder=0;});
 $('showBench').onchange=update;
 $('showCollision').onchange=update;
 $('showRegions').onchange=update;

@@ -9,8 +9,18 @@ requirements below. Do not build a JSON reporting framework to execute them.
 Use explicit address assignments and compact per-worker TSV checkpoints. Keep
 rename reasoning in the analysis; log detail only for exceptions or type changes, and
 return counts plus the log path rather than copying every record into chat.
-User-specified scope takes precedence: a rename-only assignment does not authorize
-signature, type, or shared-structure changes.
+User-specified scope takes precedence: an explicitly function-name-only assignment
+does not authorize signature or type changes. Otherwise, ordinary mass-renaming
+work includes evidence-supported parameter naming and typing, especially when a
+class or debug-symbol reference is available. Do not narrow a general request to
+function-name-only work by default. Shared-structure changes remain serialized.
+
+**Enforcement:** Every dispatch must include the worker contract in section 11,
+not just a link to this document. Every approval must pass the coordinator gate
+in section 4.1.1. Exact original names and complete typing are not prerequisites
+for a supported rename; verified class ownership and honest provenance are.
+The contract is an acceptance standard, not a per-function tool-call checklist.
+Use the fast path in section 4.1.2; do not turn enforcement into duplicate research.
 
 ## 1. Core Objective
 
@@ -81,10 +91,10 @@ renamed only if inspection supports a more useful semantic name.
 | Outcome | Meaning |
 |---|---|
 | `documented` | Function has an evidence-supported semantic name and sufficient signature or comment. |
-| `classified` | Exact semantics remain unknown, but owner and behavioral category are documented. |
+| `classified` | Exact semantics remain unknown, but behavioral category and any proven owner are documented. |
 | `already_complete` | Existing name, signature, and typing are sufficient; no change required. |
 | `deferred_dependency` | Analysis depends on a structure, caller, callee, or subsystem not yet resolved. |
-| `ambiguous` | Multiple plausible interpretations remain after the full per-function budget. |
+| `ambiguous` | Multiple plausible interpretations remain after bounded relevant inspection. |
 | `library_or_generated` | Function is compiler, runtime, library, thunk, or generated support code. |
 | `bad_function_boundary` | Ghidra's function definition or control flow is invalid and requires repair. |
 | `analysis_failed` | Decompilation or Ghidra access failed after retry. |
@@ -123,13 +133,108 @@ existing references. Spot-check straightforward remaining changes and expand the
 review when a defect appears. Review effort should follow risk, not require a
 complete second investigation of every trivial function.
 
-Check getters against setters and initialization paths using native offsets;
+Check getters against the best available property/consumer evidence; inspect
+setters and initialization paths to resolve uncertainty, not as mandatory complete
+reconstruction before naming. Use native offsets;
 existing structure field labels and generated names can be wrong. Verify base,
 derived, embedded, and shared receiver identities rather than trusting a
 decompiler cast. Report unsupported changes and review gaps explicitly; do not
 count unreviewed worker claims as independently verified. Review agents may
 assist, but do not replace the orchestrator's own review. Keep review notes
 compact and focused on findings, without reinstating per-function evidence essays.
+
+Reuse existing proof in one coordinator decision pass. Name-only work requires
+neither a second full investigation, a per-function pointer census, nor manual
+function-code/evidence-file hashes. Preserve target identity, reviewed-cell integrity,
+live state/body-range guards and transactional readback in the application tooling.
+An old naming hold may be reconsidered on existing facts under the relaxed policy
+only with an explicit tracked decision identifying the superseded requirement and
+remaining holds. Stale old-name/amendment paperwork is not a new-research gate;
+preserve history and use existing guarded transitions. Do not automatically reopen
+or approve old holds, and do not treat this policy as resolving factual conflicts.
+
+### 4.1.1 Approval Gate
+
+Before approving each exact destination, the coordinator must be able to answer:
+
+> What proves this class belongs before this method name, and what proves the
+> method describes this function's behavior?
+
+An agent's confidence claim, generated name, decompiler cast, or the class of an
+object merely used by the function does not answer that question.
+
+1. Read every exact proposed name and its evidence. Reject invented owners,
+   generic replacement prefixes, unsupported class assignments and overstated
+   semantics. Personally inspect risk-bearing code/callers as required above;
+   review-agent approval is assistance, not a substitute for this check.
+2. Distinguish emitted MPR matches, declaration/layout-supported descriptions,
+   and native-derived descriptions. Never advertise the latter two as exact
+   original symbols. Preserve overload and target-ABI uncertainties separately.
+3. Resolve withdrawals before approval. A correction buried in notes does not
+   neutralize an incorrect stored request. Use a history-preserving amendment,
+   or explicitly hold that operation. Do not approve the withdrawn payload.
+4. Approve only the reviewed explicit address set, using the existing bulk CLI.
+   Names, signatures, parameter names and shared layouts remain independent
+   decisions; do not wait for unrelated type holds or another identical review.
+5. For heterogeneous shared entries, require an explicit representation decision
+   before any primary-name change. Per-use names are not exclusive declaring
+   identities. Workers must not choose a representative class themselves. If a
+   nonexclusive display name is expressly authorized, preserve the per-class
+   mapping and state the primary-name/decompiler limitations. A comment is not
+   an installed secondary symbol; verify and report each separately.
+6. Reconcile proposal, approval, committed live application and project save as
+   four distinct states. Count applied changes from actual committed readback,
+   not worker totals, selected operations or successful submissions.
+7. Do not silently substitute rollback for correction. First correct ownership
+   while retaining supported behavior. An explicitly authorized restoration must
+   preserve history, identify any unverified old owner, and remain unfinished
+   semantic work. Never report a restored placeholder as a recovered method.
+
+These checks belong in the existing review/ledger evidence, not a new reporting
+framework or a mandatory second full investigation of every trivial function.
+
+### 4.1.2 Throughput Fast Path
+
+Use the smallest evidence set that establishes the claim and resolves any known
+contradiction. More tool calls, longer notes and repeated reviews do not by
+themselves improve confidence. Class-qualified naming, independent approval and
+application safeguards remain required; redundant work does not.
+
+| Case | Sufficient action | Do not require by default |
+|---|---|---|
+| Straightforward getter, setter or wrapper | Body plus a decisive native ownership/behavior anchor, with no known contradictory use; submit immediately | A fresh caller, setter, constructor, DTI and full lifecycle investigation for every root |
+| Coherent class/method family | Establish shared constructor/property/dispatch proof once, then check each body's distinguishing behavior | Rediscover or duplicate the same class evidence for every method |
+| Incomplete type or ABI | Submit the supported name and separately record the exact type blocker | Solve missing arguments, enum definitions, whole-class layouts or pointer census before naming |
+| Ambiguous owner or shared body | Inspect the most promising missing route; if it does not resolve the decision, record the concrete gap and continue | Repeated full passes over unchanged evidence or an exhaustive search for nonexistent symbols |
+| Ready reviewed batch | Coordinator makes one risk-based decision and bulk-approves the accepted explicit addresses | A routine researcher -> reviewer -> second reviewer -> coordinator rediscovery chain |
+
+- A decisive native property callback or constructor-backed receiver route can
+  establish ownership and behavior together. Do not impose a universal minimum
+  number of independent references. Expand inspection when sharing, conflicting
+  evidence, precise claims or ABI risk makes it necessary.
+- Read the specification and workflow once per agent context. Reuse unchanged
+  instructions, class references, donor records and history within that context;
+  revisit them for actual changes or a specific unresolved question, not every
+  checkpoint. Full class-layout recovery rules apply to layout work, not incidental
+  fields encountered during function naming.
+- Self-review is a brief challenge of conclusions already reached, not a second
+  round of the same tool calls. The coordinator still reads every exact proposal
+  and its evidence, but risk-based spot checks cover straightforward family members.
+  A discovered defect expands the relevant review, not automatically the whole wave.
+- Store evidence once in the existing ledger or reference notes and cite it.
+  Routine TSV rows remain four columns. Keep exception/type notes only when needed;
+  do not reproduce full proposal tables in chat when the ledger already contains
+  them. Counts and checkpoint paths are sufficient for routine worker closeout.
+- Successful unambiguous CLI receipts normally establish submission/approval state.
+  Do not add per-address `show` loops to reconfirm them. Actual application still
+  needs its required live preflight and committed readback; ambiguous failures,
+  interruptions and concurrent changes require reconciliation.
+- Mark an unsupported signature operation held and deliver the supported name now.
+  Do not wait for another agent, an entire wave, or unrelated type infrastructure.
+  Never silently truncate a type proposal to make it pass.
+- Every additional investigation step should answer a concrete question that could
+  change the decision. Otherwise checkpoint the uncertainty and move to another
+  assigned root. Prioritize fresh or actionable work over recycling difficult holds.
 
 ### 4.2 Function Worker
 
@@ -140,9 +245,9 @@ fixed list of function entry addresses and must:
 
 1. Analyze only its assigned root functions.
 2. Read neighboring callers and callees when needed for context.
-3. Improve the assigned functions in Ghidra when evidence is sufficient.
-4. Avoid modifying unassigned neighboring functions except for strictly local
-   type propagation that does not rename them.
+3. Submit supported improvements; apply only independently authorized operations.
+4. Treat unassigned neighboring functions as read-only context. Route changes
+   with cross-function propagation or shared-type impact through the coordinator.
 5. Record a result for every assigned address.
 6. Continue after individual ambiguous or failed functions.
 
@@ -292,6 +397,10 @@ Workers may concurrently:
 - Add comments to their exclusively assigned functions.
 - Rename local variables in their exclusively assigned functions.
 
+This is a concurrency boundary, not approval to apply fresh research. Names,
+signatures and parameter edits require their respective authorization. A worker
+must not self-approve a proposal merely because the root is exclusively assigned.
+
 ### 7.2 Serialized Work
 
 The following changes must be routed through the coordinator or structure
@@ -332,12 +441,17 @@ For each assigned function:
 3. Determine whether the existing name is already sufficient.
 4. Identify obvious wrappers, accessors, thunks, allocators, constructors,
    destructors, and library functions.
-5. If the function is trivial, name and type it immediately.
+5. If the function is trivial, submit its supported name and types independently
+   for review; apply only authorized operations.
 6. If behavior is nontrivial, proceed to contextual analysis.
 
 ### 8.2 Contextual Analysis
 
 Inspect only as much context as needed:
+
+Start with the body and best available reference or direct use. Add context only
+when it can resolve the naming decision or a concrete contradiction; the sources
+below are alternatives, not a required per-function checklist.
 
 - Direct callers to determine why the function is invoked.
 - Direct callees to determine what work it delegates.
@@ -365,18 +479,22 @@ one strong source:
   the generated name alone is not proof, since prior scans crossed table boundaries.
 - The function is referenced only by a confirmed class-specific path.
 
+Separate the incoming receiver/declaring class, embedded subobject, explicit
+input/output object, and collaborator singleton or resource. A wrapper's output
+object or queried singleton does not establish its owner. Conversely, an unused
+optimized receiver does not prove a free function: inspect caller-side receiver
+provenance before discarding ownership evidence.
+
 Apply the appropriate existing structure to the `this` parameter when known.
 For example, if analysis establishes that the first parameter is `cChrInput *`,
 use that type instead of leaving `undefined8` or inventing a duplicate
 structure.
 
-**Mandatory parameter typing.** When the function's field accesses are clearly
-supported by an established class structure, the worker must change the first
-parameter to that class's pointer type as part of the same edit, even if the
-semantic rename itself is uncertain. "Clearly supported" means the function
-reads or writes class-relative fields that are already named in the structure,
-or the ownership sources above identify the class and the first parameter is
-used as its `this` pointer. Examples of the required outcome:
+**Independent parameter typing.** Record a supported receiver type during the same
+inspection and submit it independently when its ABI and target mapping are proven.
+Named fields or a generated cast alone do not prove the receiver. A type hold or
+pending type approval must not delay a supported rename. Examples of supported
+name/type combinations, not mandatory same-edit outcomes:
 
 ```text
 void sMvc3Main__setPendingGraphicsOption(sMvc3Main *this, uint index, uint value)
@@ -384,32 +502,25 @@ void cActionTime__startHitSlow(cActionTime *this, ...)
 MtGeomCapsule__getSupportPoint(MtGeomCapsule *this, ...)
 ```
 
-A class-qualified name without a class-typed first parameter is incomplete:
-both changes belong together. If the exact field meaning is unknown but the
-class is established, still type the first parameter as `<Class> *` and record
-the unresolved fields. Only leave `undefined8`/`longlong` as the first
-parameter when no owning class can be established after the bounded context
-pass.
+A class-qualified rename can be complete as a naming operation while receiver
+typing remains held. Record unresolved fields/types separately. Use a proven
+class or base owner when appropriate, without claiming an unproven derived owner.
+For folded/shared code, do not force one caller's class onto the implementation.
 
-Ownership recovery is a prerequisite for a useful semantic rename. A worker
-must not stop at an observed field offset, primitive type, or table access when
-the callers, vtable, constructor, DTI metadata, or sibling methods can identify
-the owning class. If the first parameter is an object pointer, inspect its direct
-callers and callees, constructor or factory paths, vtable references, and the
-existing class reference before choosing a neutral subsystem name. A function
-called with a known singleton or class instance should be named in that class's
-namespace whenever the evidence supports it.
-
-If ownership cannot be established after the bounded context pass, retain the
-raw `FUN_<address>` name and add an evidence-based comment. Do not manufacture a
-generic utility name merely to remove the `FUN_` prefix.
+Attempt ownership recovery with bounded relevant context, not every constructor,
+vtable and caller path. Every new semantic name requires a proven real declaring
+class prefix `Class__method`, with exact supported spelling. If ownership remains
+unknown, preserve the existing name and comment the known behavior and ownership
+hold. Do not use global names or invented effects/stage/networkSession/sound/ui/
+character/math/Helpers/NativeFighter buckets. For heterogeneous folded code, do not
+invent a common base; a base-qualified name requires proven declaring ownership.
 
 ### 8.4 Behavioral Naming
 
-Names must describe established behavior and its owning class, not merely
-restate an implementation detail. The worker must make a deliberate attempt to
-recover the real class method or subsystem function name before applying any
-rename. Inspect direct callers, callees, vtable or constructor relationships,
+Names must describe established behavior and a proven real declaring class, not
+merely restate an implementation detail. Attempt bounded recovery of a useful
+class-qualified behavioral name, without requiring the original method name.
+Inspect direct callers, callees, vtable or constructor relationships,
 relevant strings or data, and the owning class reference as needed to establish
 ownership and behavior. This is not a mandatory exhaustive checklist when the
 evidence is already sufficient. For a shared helper, inspect enough distinct
@@ -430,9 +541,9 @@ function is a method of `sMain`, `uUiAnmSprite`, or another established owner,
 the name must use that class and the operation recovered from its callers, for
 example `sMain__getInputHistoryValue` or `uUiAnmSprite__saveInputState`, only
 when the surrounding evidence actually supports that meaning. If the owner is
-known but the exact operation is not, use an ownership-preserving placeholder
-such as `sMain__method_140003180` and a comment describing the observed behavior;
-do not promote a guessed table role to a semantic name.
+known but the exact operation is not, use a supported broad behavioral category
+and document uncertainty. Use `sMain__method_140003180` only if no meaningful
+category is supported; do not promote a guessed table role to a semantic name.
 
 Preferred examples:
 
@@ -460,15 +571,52 @@ sGSound__playIronManVictoryQuote
 cChr__calculatePerfectHitboxCollision
 ```
 
-An address suffix is acceptable only after the owner and a useful behavioral
-category have been established. It is not a substitute for ownership recovery.
-The category in an address-suffixed name must be supported by more than one
-implementation detail. `lookupTableEntry` is acceptable only when callers and
-data establish that the function selects an entry from a lookup table; a single
-DWORD load at a fixed offset is not sufficient. A primitive operation with no
-recoverable owner should remain `FUN_<address>` with a useful comment.
+Exact MPR correspondence is not required. Explicitly label native-derived names
+as such rather than donor-recovered. A verified owner plus a supported behavior
+category is enough; property metadata or consumer behavior may establish broad
+getter semantics without complete field or lifecycle recovery. Shared functions
+require a proven common declaring class or base; otherwise preserve their existing
+names and comment the ownership hold. `setEnabled` requires known boolean-enable semantics, not just a byte write;
+`writeByteAtOffset` is still an implementation dump, not semantic recovery.
+
+Medium-confidence conservative names need documented uncertainty, not an address
+suffix when unique and free of overload ambiguity. Suffixes are allowed for
+collisions or broad uncertainty; do not strip existing suffixes cosmetically.
+`lookupTableEntry` requires evidence of actual table selection, not a lone DWORD
+load. Hold unsupported precise-method, receiver, type, enum or return claims
+separately instead of blocking a broader supported rename.
 
 ### 8.5 Signature Recovery
+
+**Parameter names and types are part of the normal task.** When the evidence
+supports them, rename generic parameters such as `param_2` to meaningful names
+and submit their supported types during the same inspection as the function
+rename. This applies to all parameters, not just `this`. Do not leave recoverable parameter
+names or types for a separate cosmetic pass, particularly when working from MPR
+or another class/debug-symbol reference.
+
+Naming, parameter naming and type changes are independently reviewed/submitted
+operations, not mandatory same-edit changes. A signature hold must not block a
+supported name. For native functions, target-backed descriptive parameter labels
+are allowed as inferred/native-derived, never donor-recovered; emitted-only donor
+spelling rules apply to claims of recovered donor names, not these native labels.
+
+For reference-backed functions:
+
+- Match the specific method and overload using target behavior and callers
+  before adopting its parameter names or types.
+- Use recovered reference parameter names when their target argument roles agree;
+  otherwise use conservative names supported by target code. Treat inferred
+  reference names as hypotheses, not recovered debug information.
+- Verify target argument count, order, register/stack use, widths, and hidden
+  return parameters. Translate types to the target ABI and reuse established
+  target structures; never copy x86 layouts or signatures blindly into x64.
+- Preserve stronger existing names, types, and storage. Do not add an unused
+  donor-only argument or invent a precise type merely to match the reference.
+- Re-decompile after signature/type edits and check relevant callers for argument
+  and return-value consistency. Record actual signature/type deltas in the short
+  companion notes required by section 10. Record concrete unresolved typing
+  blockers rather than silently treating a function-name-only result as complete.
 
 Set a signature when supported by callers, callee usage, and the function body.
 Check:
@@ -480,20 +628,60 @@ Check:
 - Whether the first parameter is a class instance.
 - Whether an apparent parameter is actually unused compiler residue.
 - Calling convention and hidden return-object parameters.
-- Whether the first parameter must be retyped to an established class pointer
-  per section 8.3. If the function's field accesses match named class fields,
-  the first parameter must be changed to `<Class> *` even when the semantic name
-  stays broad or address-suffixed.
+- Whether a receiver type is independently supported under section 8.3; submit
+  that type separately without making its approval a naming prerequisite.
 
 Do not force exact enum, const, reference, or ownership semantics without
 evidence. A correct `uint32_t` is better than an invented named enum. A correct
-`<Class> *` first parameter is never optional when the class is established.
+`<Class> *` receiver should be submitted when proven, with its own approval.
 
 ### 8.6 Structure Application
 
+For a dedicated declarative class-layout campaign, use
+[AI Mass Ghidra Field Recovery](ai_mass_ghidra_fields.md). That workflow assigns
+exclusive class JSON files to researchers and serializes destructive field
+application through `ApplyClassLayouts.java`; ordinary function workers still
+follow the shared-structure boundaries below.
+
+Class-layout assignments must follow the entire target ancestry root first using
+`/home/god/ghidra_scripts/parents.txt`. Every unfinished ancestor is prerequisite
+work, not an optional follow-up. Release child field mapping after all ancestors
+have reviewed, target-supported layouts with stable boundaries and relevant
+fields; record the accepted versions and reuse unchanged work after drift checks.
+Parent proposals need not be applied live before child research. Apply required
+parent changes and verify them live before dependent child application. Unrelated
+documented unknown regions do not block child research, but unresolved ownership
+or base boundaries do. The file's `resolved` status establishes
+ancestry, not field-recovery completion. Record prerequisite evidence and defer
+children with unfinished parents or unresolved base boundaries as specified in
+the field-recovery protocol.
+
+When a donor class reference exists, field recovery means mapping its declarations
+to target storage. After donor retrieval, check the target class's `createProperty`
+first: when registered names match, use verified direct member registrations as
+the primary offset anchors before broad constructor/accessor searches. Confirm
+helper argument roles and receiver adjustments; follow callbacks, base builders,
+and nested loops. Matching names alone do not prove storage offsets, and computed
+properties must not become invented fields. If no usable builder exists, use
+other native evidence. Field recovery means mapping donor declarations
+to target storage, not inventing replacements for its names. Before proposing
+field names or layout edits, read `query.py class <name> --section all` and follow
+relevant base, embedded/nested, array, typedef, and enum type references with
+`query.py type <ID>` or full class queries. Full class output is not recursive;
+the default summary or fields-only output is insufficient. Record consulted donor
+IDs and unresolved dependencies as required by the field-recovery protocol.
+Preserve verified
+donor member names, declaring owners, nested records, arrays, and target-width
+enum mappings. Use target anchors to validate correspondence across ABI/build
+differences. Duplicate flattened labels require containment research, not offset
+or arbitrary occurrence suffixes to appease an importer. Request shared-type or
+importer support if the verified representation is unavailable; keep unmatched
+regions unresolved rather than forcing a name. Distinguish mapped donor fields
+from verified target-only fields and unresolved mappings.
+
 If a known structure clearly matches an unknown parameter or local variable,
-apply it during analysis. This is required when doing so materially improves
-the decompilation and the match is supported by field accesses.
+submit/apply it within authorized type scope when it materially improves the
+decompilation and the match is supported. Pending typing does not block naming.
 
 If a structure does not yet exist or requires new fields:
 
@@ -524,8 +712,8 @@ Do not add comments that merely repeat the function name or narrate each line.
 
 ### 8.8 Class Reference Documents
 
-Before decompiling a class-owned function, the worker must check the class
-reference directory:
+For a class-owned function, consult the relevant available class reference as
+needed for the naming decision and reuse it within the batch:
 
 ```text
 ./doc/ghidra_classes/
@@ -540,17 +728,17 @@ Each class uses one Markdown file named after the Ghidra class or structure:
 ./doc/ghidra_classes/uCnsChain.md
 ```
 
-If the class reference exists, read it before analyzing the function. Treat it
+If the class reference exists, read the relevant evidence. Treat it
 as accumulated reverse-engineering evidence: use its confirmed inheritance,
 size, fields, methods, ownership rules, and unresolved questions as context.
 The live Ghidra database and current instructions remain authoritative when a
 reference is stale or conflicts with verified code.
 
-If no reference exists, create it when the worker establishes useful class
-information. Do not create an empty file merely because a class name appears in
-a generated function name.
+If no reference exists, retain useful class findings for serialized reference
+creation; this is not a rename prerequisite. Do not create an empty file merely
+because a class name appears in a generated function name.
 
-While decompiling, actively inspect accesses to unnamed class fields. Examples
+While decompiling, note relevant accesses to unnamed class fields. Examples
 include:
 
 ```text
@@ -568,14 +756,14 @@ For each unnamed field whose type or purpose can be responsibly identified:
 3. Inspect constructor initialization, destructor handling, sibling methods,
    callers, and callees as needed.
 4. Propose a conservative field name and confidence level.
-5. Record the discovery in the class reference document before completing the
-   shard.
+5. Record the discovery for serialized class-reference merging; a pending merge
+   does not block the rename or naming shard closeout.
 6. Submit a structure dependency request if applying the field to Ghidra would
    change a shared structure.
 
-Do not ignore an identifiable field merely because the assigned root task is
-function naming. Incremental class-layout recovery is a required output of the
-mass-documentation campaign.
+Preserve incidental field findings, but do not turn naming into mandatory field
+or whole-class reconstruction. Dedicated field/layout assignments retain their
+full donor correspondence, boundary, type and documentation requirements.
 
 The class reference must distinguish confirmed fields from unresolved or
 hypothesized fields. Use this minimum format:
@@ -675,9 +863,8 @@ fields before unrelated engine or presentation classes.
 | `sCharacter` | Owns or coordinates both teams and the live character roster. | Team placement, character-node ownership, traversal order, stable roster identity, and manager fields that affect per-frame dispatch. |
 | `cChrNode` | Intrusive links connect teams, characters, and shots; stale topology cannot be flat-restored. | Previous/next links, contained-object identity, owner/list semantics, and which fields are topology rather than gameplay payload. |
 
-Create or improve class references for these types whenever their functions are
-encountered, even if a worker could name the assigned function without fully
-resolving an accessed field.
+Record incidental findings for these class references when encountered; their
+completion is campaign follow-up, not a prerequisite to a supported rename.
 
 #### Priority 0: Combat, Action, and Projectile State
 
@@ -808,9 +995,9 @@ Decompiler-generated variable names and casts are not independent evidence.
 
 | Confidence | Meaning | Database action |
 |---|---|---|
-| `certain` | Explicit name or behavior confirmed from authoritative metadata and code. | Apply semantic name and signature. |
-| `high` | Multiple independent code facts agree. | Apply semantic name and signature. |
-| `medium` | Broad behavior is clear; exact semantic detail is uncertain. | Apply conservative name, usually with address suffix. |
+| `certain` | Explicit name or behavior confirmed from authoritative metadata and code. | Apply reviewed semantic name; review signature independently. |
+| `high` | Multiple independent code facts agree. | Apply reviewed semantic name; review signature independently. |
+| `medium` | Broad behavior is clear; exact semantic detail is uncertain. | Apply reviewed conservative name with documented uncertainty; suffix only when useful. |
 | `low` | Plausible interpretation based on limited evidence. | Do not apply a precise semantic name; classify and queue for review. |
 | `unknown` | No responsible behavioral conclusion. | Preserve or improve ownership-only placeholder and record unresolved state. |
 
@@ -819,11 +1006,12 @@ be written into the canonical database.
 
 ### 9.3 Minimum Naming Standard
 
-A precise semantic rename requires `high` or `certain` confidence and a
-class-qualified or otherwise evidence-supported owner. `medium` confidence
-permits only a conservative owner-qualified behavioral name, usually with an
-address suffix. `low` confidence permits an ownership/category placeholder or
-comment, but not a guessed operation. `unknown` confidence must retain the raw
+A precise semantic rename requires `high` or `certain` confidence in the claimed
+behavior and any claimed owner. `medium` confidence permits a conservative
+behavioral name with a proven real declaring class prefix. Without that owner,
+preserve the existing name and comment the hold. A unique name without overload ambiguity needs no suffix; record
+uncertainty in evidence/comments. `low` confidence permits an ownership/category
+placeholder or comment, but not a guessed operation. `unknown` confidence must retain the raw
 name unless an existing meaningful owner-only name is already present.
 
 The following are mandatory rejection cases, regardless of confidence claims:
@@ -832,10 +1020,10 @@ The following are mandatory rejection cases, regardless of confidence claims:
   inferred table representation.
 - The name uses `lookup`, `process`, `data`, `value`, `helper`, or `function`
   without an established object and operation.
-- The name omits an owner that is recoverable from callers, vtables,
-  constructors, DTI metadata, or class references.
-- The name is based only on one decompiler-generated variable or one call site
-  when additional direct context is available.
+- The name asserts an unproven owner, including one caller's class on shared code.
+- The name relies only on decompiler-generated labels/casts or contradicts known
+  direct context. Additional context is required to resolve a decision, not merely
+  because more references exist.
 
 Existing meaningful names must not be replaced by lower-confidence names.
 
@@ -844,7 +1032,7 @@ Existing meaningful names must not be replaced by lower-confidence names.
 Every assigned function must produce one result record, including functions
 that required no change:
 
-For any proposed rename, establish ownership and behavior during analysis using
+For any proposed rename, establish behavior and any claimed ownership using
 the evidence rules above. Do not rewrite that reasoning into checkpoint prose.
 The checkpoint tracks progress and actual changes; it is not a research report.
 
@@ -886,6 +1074,47 @@ failed, or analysis needs the updated state.
 Return counts, unfinished addresses if any, and the log path. Do not paste the
 full records into the conversation or make workers maintain redundant totals.
 
+### 10.1 Worker Self-Review
+
+Before submitting each batch, the worker must challenge the correctness of its
+final names and signatures, not merely confirm that the mutations succeeded.
+A successful tool response confirms application, not semantic validity.
+
+1. **Ownership:** Check that target evidence establishes the proposed owner.
+   Generated names, existing parameter types, and decompiler casts are not
+   independent proof.
+2. **Shared implementations:** Inspect relevant references for conflicting
+   receivers or uses, especially for trivial getters and stubs. Do not assign
+   one class's identity to a folded implementation shared by unrelated classes;
+    use a proven common declaring class only when supported; otherwise retain the
+existing name and comment the ownership hold and differing per-use meanings.
+3. **Semantic precision:** Ensure the name describes supported behavior, not a
+   primitive offset or a plausible donor match. Downgrade unsupported precision
+   to a permitted classification or unresolved outcome.
+4. **Types and ABI:** Check argument roles, widths, return usage, and hidden
+   parameters. Resolve conflicting object types through allocation, constructor,
+   vtable, and DTI evidence as available, rather than trusting existing casts.
+5. **Post-edit consistency:** Re-decompile signature/type changes and inspect
+   representative affected callers. Check that the final interpretation agrees
+   with the evidence; do not treat newly propagated types as corroboration.
+6. **Final checkpoint:** Reconcile the TSV and signature notes with the final
+   applied state, including self-review corrections and unresolved dependencies.
+   Clear mutation responses suffice unless state is uncertain or concurrent
+   changes require a fresh read.
+
+Withdrawn or narrowed claims must be identifiable in the final handoff. If the
+worker cannot amend a guarded request, explicitly identify the exact stored
+operation that must not be approved and supply the supported correction. Do not
+leave a known-wrong request presented as ready merely because submission succeeded.
+
+Correct unsupported changes within the assigned roots before submission, using
+the same live conflict checks as any other edit. Do not overwrite another
+actor's changes or expand into unassigned functions or shared types; report
+those dependencies instead. Keep notes limited to actual signature deltas,
+corrections, and unresolved issues, without adding routine per-function essays.
+Worker self-review is mandatory and does not replace the coordinator's
+independent review in section 4.1.
+
 ## 11. Worker Prompt Contract
 
 Every function worker must receive a prompt containing:
@@ -897,70 +1126,109 @@ Every function worker must receive a prompt containing:
 - Permission boundaries for database changes.
 - Required per-function protocol.
 - Confidence and naming rules.
+- Mandatory worker self-review before submission (section 10.1).
 - Compact TSV checkpoint format from section 10.
 - A hard instruction to return a result for every root address.
+
+Include the following contract in the dispatch, with the placeholders filled in.
+It supplements rather than replaces reading the complete specification. If tool
+output truncates the document, continue reading the remaining sections. Do not
+shorten away the ownership, approval, shared-entry or scope restrictions.
+Within the same agent context, reuse the already-read contract and specification;
+subsequent batches need only their assignments, changed instructions and relevant
+exceptions. The numbered rules are not twenty separate evidence reports or tool
+calls for every function.
 
 Reference worker prompt:
 
 ```text
-Analyze the assigned functions in the current Ghidra program
-ichneumon_sub/umvc3.exe.unpacked.exe.
+Research exclusively assigned functions in ichneumon_sub/umvc3.exe.unpacked.exe.
+Discover the live instance and verify its actual program ID, not just its title.
+Assigned roots: <EXPLICIT NON-OVERLAPPING ADDRESS LIST>
+Checkpoint: <UNIQUE WORKER TSV PATH AND SHORT EXCEPTION-NOTES PATH>
+Operation scope / existing approvals: <EXPLICIT AUTHORIZED SCOPE>
 
-Assigned root addresses:
-<EXPLICIT ADDRESS LIST>
+Read the COMPLETE specification:
+/media/god/tempData/SteamLibrary/steamapps/common/UMVC3Rollback/doc/ai_mass_ghidra_doc.md
+Also read AGENTS.md and FUNCTION_STATUS.md under:
+/media/god/tempData/Lostplanet/mpr_reference/
 
-The database has already had vtables, class-local functions, constructors,
-DTI methods, and many properties automatically named. Preserve existing work.
+NAMING
+1. Every new semantic name requires VerifiedClass__supportedMethod. Preserve
+   established flattened nested-class naming and actual native class spelling.
+2. Establish ownership through native constructors, DTI/vtables, properties,
+   caller receiver flow or matched declarations corroborated by target behavior.
+   Existing names, casts, adjacency and argument types alone are not proof.
+3. Distinguish receiver, embedded object, explicit input/output object and
+   collaborator singleton/resource. An unused optimized receiver still requires
+   caller inspection; do not automatically classify it as a free function.
+4. No invented Helpers/NativeFighter/SharedState owners, subsystem replacement
+   prefixes such as effects/sound/ui/networkSession, or global replacement names.
+5. Conservative behavior is acceptable with a proven class. Exact original
+   spelling, complete layouts and complete signatures are not naming prerequisites.
+6. State provenance: exact emitted MPR match, declaration/layout-supported
+   descriptive name, or native-derived description. Do not mislabel inferred names.
+7. For shared code, record actual classes and per-use meanings; never invent a
+   common base or silently pick one exclusive owner. Submit any multi-owner/display
+   representation for coordinator review. Do not install a representative primary
+   name yourself. Documented aliases are not installed secondary symbols.
+8. Do not merely strip a suffix or substitute an offset/type/vague operation.
+   Improve meaning. Use suffixes for ambiguity/collisions, not by default.
 
-For each assigned root:
-1. Identify the owning class and read `doc/ghidra_classes/<Class>.md` when it
-   exists.
-2. Retrieve current details, variables, and decompilation.
-3. Inspect direct callers, callees, strings, structures, sibling methods, vtable
-   references, constructors or factories, and disassembly as needed to recover
-   the owner and real operation. For object-pointer parameters, this context
-   pass is mandatory before naming.
-4. Determine owner and behavior conservatively. Do not name from a single field
-   offset, primitive load/store, or one decompiler-generated variable name.
-5. Identify unnamed class fields encountered in the decompilation and record
-   evidence-supported field findings in the class reference.
-6. Apply a high-confidence class-qualified semantic name when the real operation
-   is established. A medium-confidence address-suffixed name is allowed only
-   when it still contains an evidence-supported owner and behavioral category.
-   Reject generic names such as `lookup_table_*`, `get_dword_at_*`,
-   `process_data_*`, or `helper_*`.
-7. Set a supported signature and apply existing structs to unknown parameters
-   when justified. When field accesses clearly match an established class, retype
-   the first parameter to `<Class> *` (see section 8.3) and do not leave it as
-   `undefined8`/`longlong`.
-8. Add a concise comment for broad, ambiguous, or non-obvious behavior.
-9. Do not rename functions outside the assigned root list.
-10. Do not create or redesign shared structures; report structure dependencies.
-11. Continue after ambiguous functions or decompiler failures.
-12. Return one structured result record for every assigned address, including
-    class references read and any field findings.
+TYPES AND PARAMETERS
+9. Research argument roles/types with the name. Reuse proven target types; check
+   arity/order, registers, widths, returns and hidden buffers before type proposals.
+10. Rename, signature, parameter-name and shared-layout approvals are independent.
+    A type hold does not block a supported name or become authorized by that name.
+11. Do not add donor-only arguments or copy x86 storage/layout into x64. Preserve
+    stronger verified metadata. Re-decompile and inspect affected callers after
+    authorized signature/type changes, not after proposals alone.
+12. A pointer-cell guard must address actual function-pointer storage. A CALL/LEA
+    instruction referencing a function is not that cell; a callee's pointer cell
+    is not the root's. Do not invent or weaken guards to obtain acceptance.
 
-Do not infer exact game semantics from appearance alone. Do not overwrite an
-existing meaningful name with a weaker proposal. Before writing, verify that
-the current function has not materially changed since analysis began.
+WORKFLOW
+13. Read history once; reuse class references and existing evidence. Begin with the
+    body and best ownership reference; expand only to resolve a concrete question.
+    Reuse a proven family anchor across roots. One decisive anchor can suffice;
+    constructors, properties and callers are alternatives, not a mandatory checklist.
+14. Checkpoint at most ten roots at a time. Continue after blockers instead of
+    consuming the shard on one function. No mandatory exhaustive caller checklist.
+15. Submit supported exact requests using the existing ledger CLI. No fresh
+    self-approval or application claim from submission. Preserve historical holds;
+    supply exact corrections/evidence when guarded old requests conflict.
+16. Mutate only assigned roots and authorized operations. Other roots are read-only
+    context. Shared structures, enums, globals, boundaries and class documents need
+    serialized authorization; collect incidental findings without blocking names.
+17. Follow repository access rules: assigned RE documents are allowed, delegated
+    application-source exploration is not. No manual research hashes, reporting
+    frameworks, bookkeeping wrappers or unauthorized database-wide analysis.
+
+SELF-REVIEW AND HANDOFF
+18. Challenge ownership, shared bodies, semantic precision, receiver/collaborator
+    confusion and independent ABI/guard validity. Check fresh live state before edits.
+19. Record an outcome for EVERY root. Keep the four-column TSV and short exception/
+    type notes; explicitly distinguish proposed names from actual live names.
+20. Return processed/proposed/applied/unresolved counts separately and checkpoint
+    paths. Keep exact requests in the ledger; call out risky anchors, withdrawals
+    and corrections in the handoff without repeating every routine row. Do not
+    claim completion from tool success. Apply the throughput fast path in 4.1.2.
+
+Do not overwrite stronger work or silently restore old names as a substitute for
+fixing ownership. Authorized restoration preserves history and is not semantic
+recovery. Unsupported claims remain explicit, not hidden in completion totals.
 ```
 
 ## 12. Time and Depth Budgets
 
 ### 12.1 Per-Function Budget
 
-Default budgets:
-
-| Function type | Initial budget |
-|---|---:|
-| Trivial thunk/accessor/wrapper | 1-3 minutes |
-| Typical function | 5-10 minutes |
-| Large or indirect function | 15-20 minutes |
-| First-pass maximum | 20 minutes |
-
-When the first-pass maximum is reached, the worker must record current facts,
-dependencies, and ambiguity, then continue. One difficult function must not
-consume an entire shard.
+Use decision-bounded effort, not mandatory timeouts or deep-research budgets.
+Start with the body and best available reference/direct use; expand only when
+the additional context can resolve the decision. Stop when a conservative name
+is supported, or record the specific remaining uncertainty and continue. No
+sleep, delay, cooldown or minimum investigation duration is required. One
+difficult function must not consume an entire shard.
 
 ### 12.2 Context Limits
 
@@ -992,20 +1260,26 @@ No broad renaming occurs during Pass 0.
 
 Workers process all candidates with bounded effort:
 
-- Recover the owning class or subsystem before attempting a semantic rename.
+- Attempt bounded real declaring-class recovery; preserve the existing name and
+  comment known behavior and the hold when no class or common base is proven.
 - Resolve obvious wrappers, getters, setters, table lookups, lifecycle helpers,
   and class-owned operations.
-- Improve parameter types using existing structures.
+- Recover meaningful parameter names and improve parameter types using existing
+  structures and matched reference declarations.
 - Apply class-qualified names when the real operation is supported by callers,
   callees, vtables, constructors, DTI metadata, or class references.
 - Preserve `FUN_<address>` with a comment when only an offset, primitive access,
   or guessed table role is known.
 - Defer expensive dependencies.
 
-Pass 1 optimizes for owner-qualified semantic coverage without guessing. Removing
+Pass 1 optimizes for useful conservative semantic coverage without guessing. Removing
 the `FUN_` prefix is not a completion metric by itself.
 
 ### 13.3 Pass 2: Dependency Resolution
+
+These later passes target unresolved claims; they are not additional approval
+rounds for names already independently reviewed. Reuse unchanged evidence and
+track explicit reconsideration of policy-only holds rather than reopening all work.
 
 Group dependency requests by common target:
 
@@ -1024,7 +1298,7 @@ then requeue affected functions.
 Review:
 
 - All `low` and `unknown` results.
-- `medium` names without an address suffix.
+- `medium` names with a concrete unresolved semantic risk, not merely no suffix.
 - Signatures that changed return type or more than two parameters.
 - Functions whose proposed owner conflicts with generated ownership.
 - Functions with indirect calls or questionable boundaries.
@@ -1106,7 +1380,7 @@ Preferred forms:
 ```text
 Class__method
 Class__nestedType__method
-namespace__function
+namespace__Class__method
 Class_vfn27
 Class__local_140123450
 Class__broadBehavior_140123450
@@ -1127,28 +1401,29 @@ this campaign.
 
 ### 15.1 Unknown Ownership
 
-If behavior is known but ownership is not:
-
-```text
-util__binarySearchByHash_140123450
-math__normalizeQuat_140123450
-resource__validateHeader_140123450
-```
-
-Use a neutral subsystem prefix only when the subsystem is supported by multiple
-callers, data, or an established type. Never use a neutral prefix to conceal a
-missed class-owner analysis. Otherwise retain `FUN_<address>` and add a comment.
+If behavior is known but real declaring-class ownership is not, preserve the
+existing name and add a concise comment recording behavior and the ownership hold.
+Do not introduce a global behavioral name or a subsystem bucket. Shared/folded code
+requires proven common declaring-class or base ownership before semantic renaming;
+heterogeneous uses do not establish an invented common base. A genuine emitted
+namespace may qualify a proven class only when supported; a namespace alone does
+not satisfy the class-prefix requirement. Restoring an explicitly authorized prior
+name after a bad rename is a history-preserving correction, not proof that the old
+generated owner was correct; record that uncertainty and retain the original history.
+A queried class argument, destination singleton, or explicit object argument alone
+does not establish a wrapper's declaring owner.
 
 ### 15.2 Name Quality Gate
 
 Before applying a rename, the worker must answer these questions during analysis,
 not rewrite the answers into its result record:
 
-1. What class, namespace, or subsystem owns the function, and what evidence
-   establishes that ownership?
+1. Is the real declaring class/base proven, with exact supported spelling and a
+   Class__method prefix? If not, retain the existing name and comment the hold.
 2. What does the function do for its callers, rather than what instruction or
    field access happens to be visible in the body?
-3. Which independent evidence sources support the proposed verb and object?
+3. What target evidence supports the proposed verb/category and object at the
+   chosen precision, and what uncertainty remains?
 4. Why is the proposed name more informative than the existing generated name?
 
 Reject the rename and preserve `FUN_<address>` when the proposed name would be
@@ -1156,15 +1431,15 @@ unchanged in meaning by replacing the operation with `lookup`, `process`,
 `data`, `value`, `helper`, `function`, or an offset or type description. A raw
 placeholder plus a precise comment is better than a misleading semantic name.
 
-For class-owned functions, the minimum acceptable fallback is:
+For class-owned functions without even a supported broad category, the fallback is:
 
 ```text
 <EstablishedClass>__method_<address>
 ```
 
-with a comment containing the confirmed behavior and unresolved question. This
-fallback is allowed only after the worker has inspected ownership evidence; it
-must not be used as a shortcut before caller, callee, and class analysis.
+with a comment containing the confirmed behavior and unresolved question. Prefer
+a supported broad behavioral name when available; neither exact donor recovery
+nor exhaustive caller, callee and class analysis is a naming prerequisite.
 
 ### 15.3 Local Functions
 
@@ -1210,6 +1485,11 @@ result log; a separate JSON record is unnecessary.
 Boundary repair is serialized because it may invalidate shard inventories and
 neighboring analysis.
 
+Distinguish an actual bad entry from an imperfect body range. When a real entry
+and its behavior are supported, approve its conservative name independently while
+retaining boundary/type holds. This does not authorize boundary repair or disable
+the applicator's live body-range checks; failed guards still block application.
+
 ## 17. Failure Recovery
 
 ### 17.1 Decompiler Timeout
@@ -1240,7 +1520,8 @@ If two analyses propose different names:
 1. Preserve the currently applied name until review.
 2. Compare evidence, not worker confidence claims alone.
 3. Prefer the broader name when both behaviors are possible.
-4. Use an address-suffixed classification if exact semantics remain disputed.
+4. Use a supported broader name if exact semantics remain disputed; add an
+   address suffix for collision or broad uncertainty when useful.
 5. Record the rejected proposal and reason.
 
 ## 18. Progress Tracking
@@ -1269,7 +1550,7 @@ remaining functions
 
 ```text
 precise semantic names applied
-conservative address-suffixed names applied
+conservative behavioral names applied (with suffixes where useful)
 signatures improved
 known structs applied to parameters
 unnamed class fields identified
@@ -1313,8 +1594,8 @@ can:
 13. Produce reproducible progress and final coverage reports.
 14. Leave every residual function explicitly classified, even when exact
     semantics cannot be recovered.
-15. Read the owning class reference before class-function analysis and preserve
-    evidence-supported unnamed-field discoveries in that reference.
+15. Consult relevant class-reference evidence and preserve incidental field
+    discoveries for serialized merging without blocking supported names.
 
 ## 20. Completion Criteria
 
@@ -1328,8 +1609,8 @@ The campaign is complete when:
   resolved or formally accepted as residual unknowns.
 - All `conflict` entries have been reviewed.
 - All applied precise names are `high` or `certain` confidence.
-- All applied medium-confidence names are conservative and address-suffixed
-  where needed.
+- All applied medium-confidence names are conservative with documented uncertainty;
+  suffixes are used for collisions or broad uncertainty where useful.
 - Shared structures changed during the campaign have documented size and field
   evidence.
 - Every identified unnamed class field has been recorded under
@@ -1354,17 +1635,18 @@ database name.
 - **Centralize shared types:** Structure edits and broad type changes are
   serialized.
 - **No unsupported precision:** Exact semantic names require multiple agreeing
-  facts.
+  facts, which can be supplied by one decisive native anchor plus the body; this
+  is not a fixed quota of callers, tools or independent investigations.
 - **Use existing structs:** Apply established types such as `cChrInput`,
   `sAction`, or other suitable known structures when the function evidence
   supports them.
-- **Read and update class references:** Check
-  `doc/ghidra_classes/<Class>.md` before class analysis and record identifiable
-  unnamed fields discovered while decompiling.
-- **Do not erase uncertainty:** Broad names use address suffixes; unresolved
-  offsets remain documented as unknown.
-- **Do not let one function stall a shard:** Respect the first-pass time budget
-  and requeue difficult work.
+- **Use class references:** Consult relevant `doc/ghidra_classes/<Class>.md`
+  evidence and preserve incidental field findings for serialized merging;
+  full class/field recovery does not block naming.
+- **Do not erase uncertainty:** Document broad-name uncertainty; use suffixes for
+  collisions or broad uncertainty, not by default. Unresolved offsets stay unknown.
+- **Do not let one function stall a shard:** Use decision-bounded context and
+  record specific unresolved work rather than imposing a deep-research budget.
 - **No destructive database edits:** Never delete structures, functions, or
   prior analysis merely to simplify a worker's decompilation without serialized
   review.
@@ -1379,7 +1661,7 @@ database name.
 
 ```text
 for each assigned root function:
-    identify owner and read doc/ghidra_classes/<Class>.md if present
+    consult relevant owner/reference evidence, reusing batch context
     read current function and variables
     decompile
     if existing work is complete:
@@ -1387,20 +1669,21 @@ for each assigned root function:
         continue
 
     classify trivial behavior if possible
-    inspect direct callers/callees, vtables, constructors, and class references
-    before choosing an owner or semantic name
+    start with the body and best reference/direct use; expand only to resolve a decision
     inspect disassembly when decompilation is questionable
-    identify owner and apply an existing struct when justified
-    if field accesses match an established class, retype the first parameter
-    to <Class> * even when the semantic name stays broad
-    record evidence-supported unnamed fields in the class reference
+    identify owner; submit an existing receiver type independently when justified
+    recover meaningful parameter names and types from target evidence and matched references
+    validate target ABI and re-decompile after signature/type edits
+    submit proven receiver types independently; typing holds do not block naming
+    preserve incidental field findings for serialized class-reference merging
 
-    if owner and precise behavior are high confidence:
-        apply class-qualified semantic name and supported signature
-    elif owner and a useful broad category are medium confidence:
-        apply conservative owner-qualified address-suffixed name
+    if precise behavior and real declaring class are high confidence:
+        submit semantic name and any separately supported signature request
+    elif a useful broad category is supported at medium confidence and real declaring class is proven:
+        submit conservative Class__method name using the proven class/base
+        document uncertainty; add a suffix only when useful
     else:
-        preserve FUN_<address> and document known facts
+        preserve the existing name and document known facts and ownership hold
 
     reject names based only on offsets, primitive types, table guesses,
     or generic words such as lookup/process/data/value/helper/function
@@ -1420,6 +1703,9 @@ while pending shards exist:
     dispatch up to worker limit
     collect per-function results
     personally review worker deltas and verify risk-bearing changes in live code
+    pass section 4.1.1; amend or hold withdrawn stored claims before approval
+    bulk-approve explicit accepted addresses, names and types independently
+    reconcile committed live readback and project-save status separately
     confirm failed workers have stopped before reassignment
     requeue only unfinished addresses
     collect shared dependency requests

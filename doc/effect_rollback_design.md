@@ -4,6 +4,58 @@ Status: design proposal, not implemented or benchmarked. Based on the current
 source and the lifecycle audits through round six. This document proposes a
 replacement for partial recipe restoration, not another generator-phase repair.
 
+## Current-source qualification (2026-10-01)
+
+The rb10 ten-agent native audit and coordinator source inspection qualify the
+historical gap table below. This is static evidence, not a reproduced desync or
+an implemented replacement snapshot system.
+
+- `concrete_snapshot.h:32-36` now makes `CompletedIndependent()` depend on
+  captured inactivity (states other than 1/2), not emission completion. The
+  historical table's description of this predicate is superseded.
+- `effect_generator_state.h:8-77` still captures selected ordinary controls and
+  `hadParticles`, not pool payload, list order, or history. Its phase-5 to phase-3
+  path creates another particle; it does not recover the historical record.
+- `concrete_snapshot.cpp:897-997` validates graph compatibility but restores only
+  ordinary controls. Reconstructed graphs retain fresh generation/census fields.
+  The class exceptions at `1110-1138` retain fresh timelines to avoid known
+  invalid-history and pool-corruption paths. Removing those exceptions alone is
+  not a safe fix.
+- `rollback_tick.cpp:75-118` still excludes categories 14-16 from headless move
+  and sync. Native cleanup progressing does not prove that skipped live objects
+  perform equivalent finish, owner-validation, or late-phase work.
+- `rollback_snapshot.cpp:782` labels sEffect RNG presentation-only, and
+  `1396-1400` explicitly omits effect-category heap state. These require a
+  dependency-specific correctness argument, not a blanket visual classification.
+
+The native audit established these priority type/ownership gaps:
+
+1. Ordinary particles need pool topology, runtime stride, appended history,
+   separate life/movement storage, and child-reference fixups. Node/Infinite
+   instead use one borrowed 0x80 core record plus mode-selected life storage;
+   their matrix fields must never be interpreted as ordinary pool links.
+2. The plain 0x150 shared record corresponds to MPR `cEffectJoint`, not the
+   polymorphic 0xe0 `cParticleManager`. Effect +0x210 includes auxiliary allocation
+   accounting and is not the copy extent of the contiguous block at +0x220.
+3. Aggregate generator counters are +0x1f4/+0x1f8; generator +0x1fc is a float
+   frame offset. Owner uEffect +0x1fc is a separate two-byte child census.
+4. Live uShot metadata overlaps two native floats at +0x2078/+0x207c with
+   `mpCollisionSlot3`, and does not represent the full 13 callback pointers at
+   +0x1f78. These are target-derived findings: no MPR uShot counterpart was found.
+5. Model playback consumes mutable sampler/keyframe work, not just frame numbers.
+   Motion slots alias one keyframe allocation (12-byte records); per-slot joint
+   work has 0x68 stride. Model particles own inline animation/UV state and refer
+   to separately registered synchronized children.
+6. Live uGameEffectModel still has an opaque 0x8b0 tail after its 0x1450 base.
+   Native evidence includes ten embedded constraints, actor-command/lifecycle
+   state, and parent/resource references. No MPR counterpart was found for this
+   game-specific class; names must not be invented as donor emissions.
+
+The audit submitted 10 actual narrow signature corrections and six corroborating
+no-change contracts under `rb10-` in the separate function ledger. None were
+approved or applied during this audit. Larger record layouts remain proposals;
+this work does not certify complete Ghidra typing or runtime rollback equivalence.
+
 ## 1. Recommendation and correctness contract
 
 Use **identity-preserving, versioned CPU-state rollback for effects and their
