@@ -151,7 +151,9 @@ constexpr ShotModelPolicy SHOT_MODEL_POLICIES[] = {
     // separately-owned model effects still use their dedicated pinning path.
     {0x140D49A60, "Missile Emplacement", {0x100, 0x11B0}, 2, true, false},
     {0x140D4A1A8, "Weapon Cart", {0x100, 0x11B0}, 2, true, false},
-    {0x140D4C4C8, "Pendulum Log", {0x100, 0x11B8}, 2, true, false},
+    // Pending registration does not initialize the model. Complete native setup
+    // before playback restore, as for Prickle Board, even without saved callbacks.
+    {0x140D4C4C8, "Pendulum Log", {0x100, 0x11B8}, 2, true, true},
     {0x140D4D2F0, "Servbot Launcher", {0x100, 0x11B0}, 2, true, false},
     {0x140D4A968, "Ouroboros", {0x100, 0x11B0}, 2, true, false},
     {0x140D4ABB8, "Legion Tiger", {0x100, 0x11B0}, 2, false, true},
@@ -508,6 +510,9 @@ void RepairResimPendulumModel(
         observedDti != (uint64_t)_addr(0x140D4C4C8)) {
         return;
     }
+    // Restored tracks are initialized and sampled after registration. Rebinding
+    // here would request S_SETUP after the native model pass and reset the pose.
+    if (reconstructed && PrimaryMotionBindingsReady(shot)) return;
     ProcessPendulumMotionIfReady(shot);
     if (PrimaryMotionBindingsReady(shot)) {
         EvaluatePendulumPose(shot);
@@ -1044,11 +1049,11 @@ void Rollback_EvaluateRestoredShotModel(void* shot, uint64_t runtimeDti,
     ((void(__fastcall*)(void*))_addr(FN_UMODEL_MOVE))(shot);
 }
 
-void Rollback_EvaluateRestoredDogMissileModel(void* shot,
-                                               uint64_t runtimeDti)
+void Rollback_EvaluateRestoredShotPose(void* shot, uint64_t runtimeDti)
 {
-    if (!shot || runtimeDti !=
-            (uint64_t)_addr(DTI_USHOT_VULCAN_DOG_MISSILE)) {
+    if (!shot || (runtimeDti != (uint64_t)_addr(DTI_USHOT_VULCAN_DOG_MISSILE) &&
+                  runtimeDti != (uint64_t)_addr(DTI_USHOT_VULCAN_PRICKLE_BOARD) &&
+                  runtimeDti != (uint64_t)_addr(0x140D4C4C8))) {
         return;
     }
 

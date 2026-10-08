@@ -41,8 +41,7 @@ void Rollback_PrepareShotModelAfterSpawn(
 void Rollback_EvaluateRestoredShotModel(void* shot, uint64_t runtimeDti,
                                          const uint8_t* savedBody,
                                          size_t savedBodySize);
-void Rollback_EvaluateRestoredDogMissileModel(void* shot,
-                                               uint64_t runtimeDti);
+void Rollback_EvaluateRestoredShotPose(void* shot, uint64_t runtimeDti);
 bool Rollback_RemapShotSpawnParent(
     const RollbackShotRecipe& saved,
     const std::vector<RollbackShotRecipe>& recipes,

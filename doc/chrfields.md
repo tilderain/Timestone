@@ -119,6 +119,21 @@ This rewinds the short effects' expiry cadence without unsupported destruction
 or recreation. The general effect recipe and persistence policies remain
 unchanged for other effects.
 
+The `20261008_072951` and `20261008_073147` pairs reproduce the same cleanup
+split at frames 958 and 6123 with opposite peers affected: float gravity
+`-0.30`, `mUsrF=2`, phase `+0x6950=1` versus normal fall gravity `-0.75`,
+`mUsrF=0`, cleanup latch `+0x695C=1`. Timing-only restoration of retained
+allocations cannot recover a retired effect's native lifecycle. Rocket's
+short-factory effects (`100/0x17` and `100/0x29`) now enter the normal stable
+spawn-sequence recipe tracker. Restore recreates them through `spawn_Short`,
+reapplies native attachment/control configuration, registers fresh allocations,
+and rebinds owner slots `+0x68F8`, `+0x6900`, and `+0x6930`. A captured dead
+effect still referenced by Rocket is recreated and natively finalized rather
+than omitted: the non-null dead owner is consumed by Rocket's cleanup callback,
+which changes gravity and latches. Particle allocation/list topology remains
+fresh. The old in-place timing policy remains only as a short-hook failure
+fallback. This correction requires new runtime verification.
+
 `uFrank` also has three `0x30`-byte constructor-initialized tables at
 `+0x68F8`, `+0x6928`, and `+0x6958`. They are pointer-free by the current
 evidence but have only medium confidence as gameplay state, so they are not

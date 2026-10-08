@@ -116,6 +116,9 @@ struct RollbackEffectRecipe {
     void* a13;
     uint64_t spawnSequence = 0;
     ConcreteShotSnapshot::CallbackEffectState state;
+    bool rocketShort = false;
+    uint32_t shortParentNo = 0;
+    uint64_t shortControlState = 0;
 };
 
 struct RollbackCharacterEffectState {

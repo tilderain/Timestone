@@ -567,6 +567,41 @@ no-ops and have been removed. The final repair consists only of opening
 Motion[0] command reconstruction during class restore and pointer-only motion
 binding repair when a reconstructed model lacks derived bindings.
 
+Static follow-up on the `20261008_075739` Pendulum capture identifies a shared
+track-initialization gap with Prickle Board. The client reallocates Log at frame
+1147 with matching playback but null Motion[0] sequence bindings. At frame 1148
+its repaired motion has `S_SETUP` pending and the capsule samples the reset pose;
+frame 1149 matches again after native setup. Ghidra confirms `setMotionEx`
+(`0x140529420`) binds motion metadata and requests `S_SETUP`, but does not call
+`setupMotion`. Native `moveMotion` (`0x1405290D0`) runs setup before pose sampling
+and frame advancement. Repairing metadata after that pass is too late to
+initialize fresh per-joint tracks for the current frame. Prickle's command and
+metadata repair likewise preserves playback without initializing/sampling the
+fresh tracks after restore.
+
+Both reconstructed types now share Dog Missile's post-registration pose restore:
+request `S_SETUP`, call `setupMotion`, retain the captured pointer-free playback,
+sample saved `mNowFrame` without `updateFrame`, and update world/child transforms
+while preserving the saved root pose. Ready reconstructed Logs bypass their
+hitbox-time rebinding so it cannot restart the restored motion. This adds one
+setup/sample per reconstructed object, not a second per-frame model tick. Native
+resim-time spawning and the existing asynchronous collision-reset policy are
+unchanged. New runtime captures are still required to verify the correction.
+
+The `20261008_083708` follow-up exposes a prerequisite that the pose-only repair
+missed: at frame 4729 the reconstructed client Log has no model resource, no
+motion resource, and zero joints. Pending-shot flush only registers units
+(`sShot__flushPendingUnits`, `0x1401517A0`); it does not run model setup. The
+client capsule collapses at frame 4730, then the hitbox fallback derives pose
+12 from frozen shot time 13 and leaves it one frame behind. Enable Log's native
+model-setup readiness policy before the saved overlay, as already enabled for
+Prickle Board. This runs independently of captured callback occupancy and keeps
+late subclass setup from overwriting restored playback. Retain the existing
+bounded first-model wait and cached-model fast path. The regression now covers
+both types starting with null model/joint allocations, delayed model readiness,
+cached subsequent instances, and frozen evaluated pose 13. Runtime confirmation
+is still pending.
+
 Rocket Raccoon's Pendulum Log has a one-frame collision transition when its
 uncached motion resource first binds. In the `20260822_170619` pair, both peers'
 capsule geometry matched through Pendulum time 14 and again from time 16, but at
