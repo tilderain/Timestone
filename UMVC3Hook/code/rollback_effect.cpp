@@ -810,6 +810,9 @@ void Effect_CaptureRecipes(RollbackSnapshotSlot& slot)
     const auto exAtkChildren = GetRetainedExAtkSpaceChildren();
     for (const RollbackEffectRecipe& recipe : g_liveEffectRecipes) {
         const bool rocketOwner = IsRocketShortEffectReferenced(recipe);
+        // Native cleanup finishes emission and clears the owner before the unit
+        // dies. Recreating that unowned tail can restart a looping jetpack graph.
+        if (recipe.rocketShort && !rocketOwner) continue;
         if (!recipe.restoredPtr ||
             std::find(exAtkChildren.begin(), exAtkChildren.end(), recipe.restoredPtr) !=
                 exAtkChildren.end() ||

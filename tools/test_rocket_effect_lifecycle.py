@@ -22,6 +22,7 @@ class RocketEffectLifecycleTest(unittest.TestCase):
         root = Path(__file__).resolve().parents[1] / "UMVC3Hook/code"
         source = (root / "rollback_effect.cpp").read_text()
         snapshot = (root / "rollback_snapshot.h").read_text()
+        capture = source[source.index("void Effect_CaptureRecipes("):]
         restore = source[source.index("int Effect_RestoreRecipes("):]
         harness = r'''
 #include <algorithm>
@@ -59,6 +60,7 @@ void* Factory(void*, int, int, void*, int, int, int, void*) {
     if (failFactory) return nullptr;
     std::memset(effect, 0, sizeof(effect));
     *(uint64_t*)effect = (uint64_t)vtable;
+    *(uint32_t*)(effect + 0x10) = 1;
     return effect;
 }
 void* (*oEffectCreateShort)(void*, int, int, void*, int, int, int, void*) = Factory;
@@ -71,7 +73,10 @@ void Attach(void* object, void* parent, uint32_t joint) {
     assert(object == effect && parent == owner && joint == 0x17);
     ++attached;
 }
-void Retire(void* object) { assert(object == effect); ++retired; }
+void Retire(void* object) {
+    assert(object == effect); ++retired;
+    *(uint32_t*)(effect + 0x10) = 3;
+}
 uintptr_t FN_SUNIT_GET_INSTANCE = (uintptr_t)GetUnit;
 uintptr_t FN_SUNIT_ADD_BOTTOM = (uintptr_t)AddBottom;
 void InvalidateMemoryQueryCache() {}
@@ -80,9 +85,25 @@ bool ConcreteEffectSnapshot_Restore(void* object,
     const ConcreteShotSnapshot::CallbackEffectState&, bool = true) {
     assert(object == effect); ++timelines; return true;
 }
+bool ConcreteEffectSnapshot_Capture(void* object,
+    ConcreteShotSnapshot::CallbackEffectState& state) {
+    state.hasState = true;
+    state.unitState = *(uint32_t*)((uint8_t*)object + 0x10) & 7;
+    return true;
+}
+bool IsEffectObject(void* object) { return object == effect; }
+bool IsActiveUnit(void* object) { return (*(uint32_t*)((uint8_t*)object + 0x10) & 7) < 3; }
+bool IsRollbackEffectCategory(void*) { return true; }
+bool Effect_IsExAtkSpaceTransitionEffect(void*) { return false; }
+bool IsPersistentCharacterEffect(void*) { return false; }
 ''' + block(source, "static bool IsRocketShortEffectReferenced(") + "\n" + block(
             source, "static void* __fastcall hkEffectCreateShort(") + "\n" + block(
             source, "void Effect_RestoreCharacterReferences(") + r'''
+void Capture(RollbackSnapshotSlot& slot) {
+    slot.effectRecipes.clear();
+    const std::vector<void*> exAtkChildren;
+''' + block(capture, "for (const RollbackEffectRecipe& recipe : g_liveEffectRecipes)") + r'''
+}
 int Restore(RollbackSnapshotSlot& slot) {
     int restored = 0, failed = 0;
     for (auto& saved : slot.effectRecipes) {
@@ -153,6 +174,39 @@ int main() {
     failFactory = false;
     failUnit = true;
     assert(Restore(slot) == -1 && registered == 2);
+
+    // Native doFinish clears ownership while particle tails can still be alive.
+    // Repeated rollback must not reconstruct those unowned looping emitters.
+    failUnit = false;
+    g_liveEffectRecipes = {recipe};
+    *(void**)(effect + 0x288) = owner;
+    *(uint32_t*)(effect + 0x10) = 2;
+    for (uint32_t offset : ROCKET_JETPACK_OWNER_OFFSETS) {
+        *(void**)(owner + offset) = effect;
+        Capture(slot);
+        assert(slot.effectRecipes.size() == 1);
+        *(void**)(owner + offset) = nullptr;
+        for (unsigned rollback = 0; rollback < 10; ++rollback) {
+            Capture(slot);
+            assert(slot.effectRecipes.empty());
+            assert(Restore(slot) == 0);
+        }
+    }
+    // Dead-but-occupied owners still drive Rocket's gravity/latch cleanup.
+    *(uint32_t*)(effect + 0x10) = 3;
+    *(void**)(owner + 0x6900) = effect;
+    Capture(slot);
+    assert(slot.effectRecipes.size() == 1);
+    assert(slot.effectRecipes[0].state.CompletedIndependent());
+    *(void**)(owner + 0x6900) = nullptr;
+    Capture(slot);
+    assert(slot.effectRecipes.empty());
+
+    // General independent effects are not subject to Rocket's owner policy.
+    g_liveEffectRecipes[0].rocketShort = false;
+    *(uint32_t*)(effect + 0x10) = 2;
+    Capture(slot);
+    assert(slot.effectRecipes.size() == 1);
 }
 '''
         with tempfile.TemporaryDirectory() as directory:
