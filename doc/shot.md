@@ -399,6 +399,19 @@ writes the actor request; the skipped model-category pass normally performs the
 evaluation to resim-created Dog Missile. Recipe restoration uses `0xCB` as a
 recovery value only when an older captured recipe is already invalid.
 
+The real `20261008_065133` f2844 pair identifies a later reconstruction restart:
+Missile matches through frame 2778, then the client's allocation changes at
+2779. Actor animation, command key, and model cursor still match, but
+Motion[0].mStartFrame is 8 instead of the host's 0 and the client position
+snaps from the native animated path. Subsequent reconstructions also move the
+model cursor ahead despite matching actor time. Do not rebind from actor time
+and call `uModel::move`. Mark Motion[0] with `S_SETUP` (`0x2`) and initialize
+fresh tracks directly with `setupMotion`, avoiding the redundant `setMotionEx`
+initialization. Reapply saved pointer-free motion state, and sample the saved
+`mNowFrame` with `updateMotionParam` without `updateFrame`. Keep the captured
+root transform and playback scalars around this sampling pass. This correction
+still requires a new runtime capture to verify.
+
 Phoenix Wright's discarded evidence projectile is `uShotVulcanItemThrow`
 (`0x140d4b980`, size `0x2240`). Setup at `0x140199b00` reads evidence variant
 state at `+0x2210`, asynchronously loads one of twelve variant MOD resources

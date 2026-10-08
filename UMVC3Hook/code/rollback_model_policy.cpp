@@ -79,12 +79,14 @@ constexpr uintptr_t FN_SSHOT_FLUSH_PENDING_UNITS = 0x1401517A0;
 constexpr uintptr_t FN_MTOBJECT_ADD_REF = 0x14050D100;
 constexpr uintptr_t FN_UMODEL_PROCESS_ACTION_ANMCHR = 0x140529420;
 constexpr uintptr_t FN_UMODEL_MOVE = 0x140566580;
+constexpr uintptr_t FN_UMODEL_SETUP_MOTION = 0x140529820;
 constexpr uintptr_t FN_UMODEL_UPDATE_MOTION_EVALUATION = 0x140531A00;
 constexpr uintptr_t FN_UGAMEEFFECT_RESET_EFFECT_STATE = 0x14017BD90;
 constexpr uintptr_t FN_CRESOURCE_ASSIGN_SLOT = 0x140529730;
 constexpr uintptr_t FN_CRESOURCE_RELEASE_REF = 0x14050D5A0;
 constexpr uintptr_t FN_SRESOURCE_GET_INSTANCE = 0x140001B10;
 constexpr uintptr_t FN_SRESOURCE_LOAD_SYNC = 0x140518BF0;
+constexpr uintptr_t FN_CACTOR_GAME_MODEL_ANM_RESOLVE_ENTRIES = 0x140013540;
 constexpr uintptr_t FN_CACTOR_GAME_MODEL_ANM_BIND_COMMAND = 0x140013680;
 constexpr uintptr_t FN_CACTOR_GAME_MODEL_ANM_ADVANCE_COMMAND = 0x140013040;
 constexpr uint32_t SUNIT_CATEGORY_COUNT_OFFSET = 0xC38;
@@ -1050,22 +1052,42 @@ void Rollback_EvaluateRestoredDogMissileModel(void* shot,
         return;
     }
 
-    // Match Legion Tiger's reconstruction path, but pass the saved uModel
-    // motion-list entry rather than mAnmNo. Dog setup requests actor animation
-    // 0/1, which native actor processing maps to motion 0xCB. Passing 0 directly
-    // makes processActionAnmchr invalidate Motion[0] as an unresolved entry.
     uint16_t motionNo = *(uint16_t*)((uint8_t*)shot + 0x568);
-    if (motionNo == UINT16_MAX)
-        motionNo = DOG_MISSILE_MOTION_NO;
-    float animationTime = *(float*)((uint8_t*)shot + 0x1328);
-    if (animationTime > 0.0f) {
-        ((uint64_t(__fastcall*)(void*, uint32_t, uint32_t, float, float,
-                               float, uint32_t))
-            _addr(FN_UMODEL_PROCESS_ACTION_ANMCHR))(
-                shot, 0, motionNo, 0.0f,
-                std::max(0.0f, animationTime - 1.0f), 1.0f, 0x40);
-    }
-    ((void(__fastcall*)(void*))_addr(FN_UMODEL_MOVE))(shot);
+    if (motionNo == UINT16_MAX) return;
+
+    uint8_t savedMotion[0x180];
+    uint8_t savedRootPose[0x70];
+    uint8_t savedModelState[0x10];
+    std::memcpy(savedMotion, (uint8_t*)shot + 0x560, sizeof(savedMotion));
+    std::memcpy(savedRootPose, (uint8_t*)shot + 0x1B0, sizeof(savedRootPose));
+    std::memcpy(savedModelState, (uint8_t*)shot + 0x550, sizeof(savedModelState));
+    // setupMotion resolves the saved motion and binds its tracks directly.
+    *(uint16_t*)((uint8_t*)shot + 0x56A) |= 0x2; // S_SETUP
+    ((void(__fastcall*)(void*))_addr(FN_UMODEL_SETUP_MOTION))(shot);
+
+    // Rebinding initializes fresh joint tracks but restarts playback. The
+    // f2844 pair first diverges at 2779 when mStartFrame changes from 0 to 8.
+    static constexpr size_t scalarRanges[][2] = {
+        {0x08, 0xD8}, {0xE8, 0x18}, {0x108, 0x18},
+        {0x140, 0x20}, {0x168, 0x08},
+    };
+    for (const auto& range : scalarRanges)
+        std::memcpy((uint8_t*)shot + 0x560 + range[0],
+                    savedMotion + range[0], range[1]);
+    std::memcpy((uint8_t*)shot + 0x550, savedModelState, sizeof(savedModelState));
+    if (!PrimaryMotionBindingsReady(shot)) return;
+
+    // mFrame already points to the next tick; mNowFrame is the saved evaluated
+    // pose. Sample it without updateFrame, then retain exact captured scalars.
+    *(float*)((uint8_t*)shot + 0x5AC) = *(float*)(savedMotion + 0x64);
+    ((void(__fastcall*)(void*))_addr(FN_UMODEL_UPDATE_MOTION_EVALUATION))(shot);
+    for (const auto& range : scalarRanges)
+        std::memcpy((uint8_t*)shot + 0x560 + range[0],
+                    savedMotion + range[0], range[1]);
+    std::memcpy((uint8_t*)shot + 0x1B0, savedRootPose, sizeof(savedRootPose));
+    uint64_t vtable = *(uint64_t*)shot;
+    ((void(__fastcall*)(void*))(*(uint64_t*)(vtable + 0x90)))(shot);
+    ((void(__fastcall*)(void*))(*(uint64_t*)(vtable + 0x98)))(shot);
 }
 
 bool Rollback_RemapShotSpawnParent(
@@ -1201,6 +1223,60 @@ void Rollback_RebuildShotStateBeforeRegistration(
 void Rollback_RestoreShotClassState(
     void* shot, const RollbackShotRecipe& saved)
 {
+    if (shot && saved.concrete.dti ==
+            (uint64_t)_addr(DTI_USHOT_VULCAN_DOG_MISSILE) &&
+        saved.concrete.body.size() >= 0x13E8) {
+        uint8_t* command = (uint8_t*)shot + 0x1348;
+        const uint8_t* savedCommand = saved.concrete.body.data() + 0x1348;
+        const uint64_t savedEntry = *(const uint64_t*)(savedCommand + 0x48);
+        const uint64_t savedDescriptor = *(const uint64_t*)(savedCommand + 0x60);
+        const int32_t savedKey = *(const int32_t*)(savedCommand + 0x44);
+
+        // Resolve fresh resource pointers without executing commands or sampling
+        // motion. The native resolver resets mKeyIdx, so restore it afterward.
+        std::memcpy(command + 0x08, savedCommand + 0x08, 0x10);
+        std::memcpy(command + 0x40, savedCommand + 0x40, 0x08);
+        std::memcpy(command + 0x78, savedCommand + 0x78, 0x18);
+        std::memcpy(command + 0x98, savedCommand + 0x98, 0x08);
+        std::memset(command + 0x48, 0, 0x30);
+        bool resolved = false;
+        if (savedEntry && *(int32_t*)(command + 0x08) >= 0 &&
+            *(uint32_t*)(command + 0x40) < 4 &&
+            *(void**)(command + 0x18)) {
+            resolved = ((bool(__fastcall*)(void*))_addr(
+                FN_CACTOR_GAME_MODEL_ANM_RESOLVE_ENTRIES))(command);
+        }
+        *(int32_t*)(command + 0x44) = savedKey;
+        if (resolved) {
+            uint8_t* entry = *(uint8_t**)(command + 0x48);
+            const uint32_t keyCount = *(uint32_t*)entry;
+            const uint64_t descriptorOffset = savedDescriptor - savedEntry;
+            bool validDescriptor = savedDescriptor && savedKey >= 0 &&
+                (uint32_t)savedKey <= keyCount && descriptorOffset >= 0x18 &&
+                (descriptorOffset - 0x18) % 8 == 0 &&
+                (descriptorOffset - 0x18) / 8 < keyCount &&
+                IsAccessibleRange((uint64_t)entry + descriptorOffset, 8);
+            *(uint8_t**)(command + 0x60) = validDescriptor
+                ? entry + descriptorOffset : nullptr;
+            // A null saved block is a completed/stopped stream, not a request
+            // to restart command zero. Read block offsets from the fresh table.
+            *(uint8_t**)(command + 0x68) =
+                validDescriptor && *(const uint64_t*)(savedCommand + 0x68)
+                    ? entry + *(uint32_t*)(entry + descriptorOffset + 4)
+                    : nullptr;
+            if (!*(const uint64_t*)(savedCommand + 0x50))
+                *(void**)(command + 0x50) = nullptr;
+            if (!*(const uint64_t*)(savedCommand + 0x58))
+                *(void**)(command + 0x58) = nullptr;
+            if (savedDescriptor && !validDescriptor)
+                HookLog("Rollback: Dog Missile command cursor is invalid (key=%d count=%u)\n",
+                        savedKey, keyCount);
+        } else if (savedEntry) {
+            std::memset(command + 0x48, 0, 0x30);
+            HookLog("Rollback: Dog Missile command resource could not be resolved\n");
+        }
+    }
+
     if (saved.flight.step == 3 &&
         (saved.concrete.dti ==
              (uint64_t)_addr(DTI_USHOT_SHIELD_SPIRAL_SWORD) ||
