@@ -134,6 +134,15 @@ which changes gravity and latches. Particle allocation/list topology remains
 fresh. The old in-place timing policy remains only as a short-hook failure
 fallback. This correction requires new runtime verification.
 
+Rocket's native cleanup calls `uEffect__doFinish` (`0x1405E4D10`) on its
+particle managers and clears the owner slots before the effect unit necessarily
+dies. Capturing every still-active short effect recreated these unowned tails
+after rollback, allowing fresh looping jetpack emission to persist visually even
+without a checksum mismatch. Short recipes are now captured only while referenced
+by Rocket's jetpack/tumble owner slots. Live owned effects and dead-but-occupied
+owners still rewind; cleared owners no longer revive their finished visuals.
+This is Rocket-only and does not change general independent-effect lifetimes.
+
 `uFrank` also has three `0x30`-byte constructor-initialized tables at
 `+0x68F8`, `+0x6928`, and `+0x6958`. They are pointer-free by the current
 evidence but have only medium confidence as gameplay state, so they are not
