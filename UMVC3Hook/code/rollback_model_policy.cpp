@@ -73,6 +73,8 @@ constexpr uintptr_t FN_MTDTI_IS_KIND_OF = 0x1400039D0;
 constexpr uintptr_t FN_KING_KOBUN_MOVE = 0x1401BA2D0;
 constexpr uintptr_t FN_MISSILE_EMPLACEMENT_MOVE = 0x14016F220;
 constexpr uintptr_t FN_WEAPON_CART_MOVE = 0x14017A9D0;
+constexpr uintptr_t FN_UCHRCHAIN_MOVE = 0x140035F90;
+constexpr uintptr_t FN_UCHRCHAIN_MOVE_AFTER = 0x140036130;
 constexpr uintptr_t FN_WEAPON_CART_SPAWN_DEBRIS = 0x14017A200;
 constexpr uintptr_t FN_ELEMENTAL_SUMMON_REFRESH_POWER = 0x140172F00;
 constexpr uintptr_t FN_SSHOT_FLUSH_PENDING_UNITS = 0x1401517A0;
@@ -112,6 +114,9 @@ using ShotMoveFn = void(__fastcall*)(void*);
 ShotMoveFn oKingKobunMove = nullptr;
 ShotMoveFn oMissileEmplacementMove = nullptr;
 ShotMoveFn oWeaponCartMove = nullptr;
+ShotMoveFn oChrChainMove = nullptr;
+ShotMoveFn oChrChainMoveAfter = nullptr;
+bool g_disableRocketTail = false;
 std::unordered_set<void*> g_resimSpawnedPendulums;
 std::unordered_map<void*, bool> g_pendulumNativeMotionReady;
 int g_kingKobunTraceCount = 0;
@@ -796,16 +801,39 @@ void __fastcall hkWeaponCartMove(void* shot)
     }
 }
 
-void InstallPolicyHook(uintptr_t address, void* replacement, void** original,
+bool ShouldSkipRocketTail(void* chain)
+{
+    if (!g_disableRocketTail || !chain) return false;
+    void* owner = *(void**)((uint8_t*)chain + 0x1320);
+    // Roster allocations are stable. Preserve native dead-owner teardown.
+    return owner && *(uint64_t*)owner == (uint64_t)_addr(VTABLE_URROCKET_RACCOON) &&
+        ((*(uint32_t*)((uint8_t*)owner + 0x10) & 7u) - 1u < 2u);
+}
+
+void __fastcall hkChrChainMove(void* chain)
+{
+    if (!ShouldSkipRocketTail(chain)) oChrChainMove(chain);
+}
+
+void __fastcall hkChrChainMoveAfter(void* chain)
+{
+    // Do not let chain work/history overwrite animation-driven collision joints
+    // on live frames while the same chain is skipped during resimulation.
+    if (!ShouldSkipRocketTail(chain)) oChrChainMoveAfter(chain);
+}
+
+bool InstallPolicyHook(uintptr_t address, void* replacement, void** original,
                        const char* success, const char* failure)
 {
     MH_STATUS status = MH_CreateHook((LPVOID)_addr(address), replacement, original);
+    if (status == MH_OK)
+        status = MH_EnableHook((LPVOID)_addr(address));
     if (status == MH_OK) {
-        MH_EnableHook((LPVOID)_addr(address));
         HookLog("%s\n", success);
     } else {
         HookLog(failure, status);
     }
+    return status == MH_OK;
 }
 
 }
@@ -898,6 +926,19 @@ bool Rollback_ShouldReapplyShotCapsules(uint64_t runtimeDti)
 
 void Rollback_InitShotModelPolicyHooks()
 {
+    const bool chainMoveHook = InstallPolicyHook(
+        FN_UCHRCHAIN_MOVE, (LPVOID)&hkChrChainMove, (void**)&oChrChainMove,
+        "Rollback: hooked character-chain move",
+        "Rollback: failed to hook character-chain move (%d)\n");
+    const bool chainAfterHook = InstallPolicyHook(
+        FN_UCHRCHAIN_MOVE_AFTER, (LPVOID)&hkChrChainMoveAfter,
+        (void**)&oChrChainMoveAfter,
+        "Rollback: hooked character-chain post-move",
+        "Rollback: failed to hook character-chain post-move (%d)\n");
+    // Both phases must agree; a partially installed policy stays pass-through.
+    g_disableRocketTail = chainMoveHook && chainAfterHook;
+    HookLog("Rollback: Rocket animation-only tail %s\n",
+            g_disableRocketTail ? "enabled" : "unavailable");
     /*InstallPolicyHook(FN_KING_KOBUN_MOVE, (LPVOID)&hkKingKobunMove,
                       (void**)&oKingKobunMove,
                       "Rollback: hooked uShotVulcanKingKobun::move trace",
