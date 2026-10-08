@@ -678,6 +678,16 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
             pinnedCallbackEffectResources.push_back(resource);
         }
     }
+    for (const RollbackEffectRecipe& saved : slot.effectRecipes) {
+        void* resource = (void*)saved.state.resource;
+        if (!saved.rocketShort || !resource || !HasCallableDtiVirtual(resource) ||
+            std::find(pinnedCallbackEffectResources.begin(),
+                      pinnedCallbackEffectResources.end(), resource) !=
+                pinnedCallbackEffectResources.end())
+            continue;
+        addRef(resource);
+        pinnedCallbackEffectResources.push_back(resource);
+    }
     const uint64_t pinResourcesEnd = Profile_Now();
 
     int removedInvalidUnits = 0;
@@ -1129,7 +1139,7 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
     // looped: its frame-192 model tick ran while the shot was still pending.
     for (const RollbackShotRecipe& saved : slot.shotRecipes) {
         if (!saved.restoredPtr) continue;
-        Rollback_EvaluateRestoredDogMissileModel(
+        Rollback_EvaluateRestoredShotPose(
             saved.restoredPtr, saved.concrete.dti);
     }
 
