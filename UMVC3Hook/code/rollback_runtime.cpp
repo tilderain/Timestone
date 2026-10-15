@@ -16,6 +16,7 @@ static constexpr uintptr_t FN_IS_ONLINE_BATTLE = 0x140006AF0;
 static constexpr uintptr_t FN_NDRAW_MATERIAL_RELEASE = 0x14076F760;
 static constexpr uintptr_t FN_UMODEL_MOTION_DTOR = 0x140526000;
 static constexpr uintptr_t VTABLE_MTOBJECT = 0x140A6A510;
+static constexpr uintptr_t FN_PARTICLE_FILTER_UPDATE = 0x1408D61C0;
 static constexpr uintptr_t PTR_SCHARACTER = 0x140D44A70;
 static constexpr uintptr_t TEAM_OFFSETS[] = {0x40, 0x300};
 static constexpr uintptr_t TEAM_FIRST_NODE_OFFSET = 0x08;
@@ -51,8 +52,9 @@ using BaseModelRenderSetupFn = void(__fastcall*)(uint64_t, uint64_t);
 static BaseModelRenderSetupFn g_originalBaseModelRenderSetup = nullptr;
 using ToonMaterialUpdateFn = void(__fastcall*)(uint64_t);
 static ToonMaterialUpdateFn g_originalToonMaterialUpdate = nullptr;
-using ParticleGeneratorModelUpdateFn = void(__fastcall*)(uint64_t);
-static ParticleGeneratorModelUpdateFn g_originalParticleGeneratorModelUpdate = nullptr;
+using ParticleGeneratorUpdateFn = void(__fastcall*)(uint64_t);
+static ParticleGeneratorUpdateFn g_originalParticleGeneratorModelUpdate = nullptr;
+static ParticleGeneratorUpdateFn g_originalParticleGeneratorFilterUpdate = nullptr;
 using GetJointPosFn = void*(__fastcall*)(uint64_t, void*);
 static GetJointPosFn g_originalGetJointPos = nullptr;
 using CharacterModelPostMoveFn = void(__fastcall*)(uint64_t);
@@ -642,6 +644,16 @@ static void __fastcall hkParticleGeneratorModelUpdate(uint64_t generator)
         g_originalParticleGeneratorModelUpdate(generator);
 }
 
+
+static void __fastcall hkParticleGeneratorFilterUpdate(uint64_t generator)
+{
+    //Skip submission of cParticleGenerator's filter primitives (bloom, godray, etc)
+    //Allegedly saves 3ms per 7 frame resim for affected generators
+    if (g_isResimulating)
+        return;
+    g_originalParticleGeneratorFilterUpdate(generator);
+}
+
 static void* WriteDefaultJointPosition(void* output)
 {
     if (output)
@@ -1014,6 +1026,19 @@ void Rollback_InitNativeNullGuards()
     if (particleModelStatus == MH_OK &&
         MH_EnableHook((LPVOID)_addr(0x140898730)) == MH_OK) {
         HookLog("Rollback: installed headless particle-model update filter\n");
+    }
+
+    MH_STATUS particleFilterStatus = MH_CreateHook(
+        (LPVOID)_addr(FN_PARTICLE_FILTER_UPDATE),
+        (LPVOID)&hkParticleGeneratorFilterUpdate,
+        (LPVOID*)&g_originalParticleGeneratorFilterUpdate);
+    if (particleFilterStatus == MH_OK)
+        particleFilterStatus = MH_EnableHook((LPVOID)_addr(FN_PARTICLE_FILTER_UPDATE));
+    if (particleFilterStatus == MH_OK) {
+        HookLog("Rollback: installed headless Filter submission skip\n");
+    } else {
+        HookLog("Rollback: failed to install effect Filter submission skip (%d)\n",
+                particleFilterStatus);
     }
 
     const MH_STATUS jointPosStatus = MH_CreateHook(
