@@ -728,19 +728,10 @@ LONG HandleException(PEXCEPTION_POINTERS info, bool catastrophicOnly)
         std::fclose(preamble);
     }
 
-    if (!IsAutoTestProcess()) {
-        char message[MAX_PATH + 96] = {};
-        std::snprintf(message, sizeof(message),
-            "The game just freaking crashed! Crash log available at %s", crashLogPath);
-        MessageBoxA(nullptr, message, "UMVC3Hook Crash",
-                    MB_OK | MB_ICONERROR | MB_SYSTEMMODAL);
-    } else {
-        HookLog("UMVC3Hook: automated crash recorded at %s; message box suppressed\n",
-                crashLogPath);
-    }
-
     FILE* file = std::fopen(crashLogPath, "a");
     if (file) {
+        // Preserve completed writes if a later diagnostic faults before fclose.
+        std::setvbuf(file, nullptr, _IONBF, 0);
         SYSTEMTIME time{};
         GetLocalTime(&time);
         std::fprintf(file,
@@ -825,6 +816,17 @@ LONG HandleException(PEXCEPTION_POINTERS info, bool catastrophicOnly)
 
     HookLogAppendFile(crashLogPath, crashLogStart);
     HookLogTryFlush();
+
+    if (!IsAutoTestProcess()) {
+        char message[MAX_PATH + 96] = {};
+        std::snprintf(message, sizeof(message),
+            "The game just freaking crashed! Crash log available at %s", crashLogPath);
+        MessageBoxA(nullptr, message, "UMVC3Hook Crash",
+                    MB_OK | MB_ICONERROR | MB_SYSTEMMODAL);
+    } else {
+        HookLog("UMVC3Hook: automated crash recorded at %s; message box suppressed\n",
+                crashLogPath);
+    }
 
     return EXCEPTION_CONTINUE_SEARCH;
 }
