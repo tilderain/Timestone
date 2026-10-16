@@ -1,5 +1,9 @@
 # Determinism-preserving character movement optimization investigation
 
+For the subsequent headless presentation audit, including a still-reachable
+shader-attribute texture upload and weapon/helper material-post coverage gaps,
+see `character_headless_render_audit_20261015.md`.
+
 ## Result
 
 Investigated shared character movement using the supplied

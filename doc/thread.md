@@ -116,6 +116,10 @@ would leave callers waiting forever for unconsumed jobs.
 The same option sets the regular-job count to one on the first game tick. It
 does not disable the dedicated rendering thread or plugin-owned threads.
 
+It also leaves independent `sResource` loading workers active. See
+[`critical_section_elision.md`](critical_section_elision.md) for the remaining
+thread ownership, native lock fast paths, and lock-removal safety assessment.
+
 ## Plugin Threads
 
 The plugin has two explicit thread roles:
