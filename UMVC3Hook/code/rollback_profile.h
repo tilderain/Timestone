@@ -45,7 +45,7 @@ enum class RollbackHookProfileId : uint8_t {
     UnitRemoveEffectSubBuffers,
     UnitRemoveNative,
     UnitRemoveRecipeCleanup,
-    KirigakureEffectUpdate,
+    GameEffectAttachmentUpdate,
     RenderEndFrame,
     SoundMove,
     GameUiMove,
