@@ -252,7 +252,7 @@ void Profile_DumpEnabled(const RollbackProfile& profile, bool multiResimEnabled)
         "unit_remove_effect_check", "unit_remove_effect_sanitize",
         "unit_remove_effect_resource", "unit_remove_effect_generator",
         "unit_remove_effect_sub_buffers", "unit_remove_native", "unit_remove_recipe_cleanup",
-        "kirigakure_effect_update", "render_end_frame", "sound_move",
+        "game_effect_attachment_update", "render_end_frame", "sound_move",
         "game_ui_move", "chr_cpu_class_func", "main_move",
         "model_bounds_from_joints", "collision_move", "hit_solver_move"
     };

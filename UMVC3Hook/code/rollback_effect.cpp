@@ -38,7 +38,7 @@ static constexpr uintptr_t FN_EFFECT_VDTOR = 0x1405E08C0;
 static constexpr uintptr_t FN_EFFECT_CREATE_GENERATOR = 0x1405E27C0;
 static constexpr uintptr_t FN_EFFECT_RELEASE_GENERATOR = 0x1405E6890;
 static constexpr uintptr_t FN_PARTICLE_MANAGER_RELEASE_SUBBUFFER = 0x14080C120;
-static constexpr uintptr_t FN_KIRIGAKURE_EFFECT_UPDATE = 0x14013B050;
+static constexpr uintptr_t FN_GAME_EFFECT_ATTACHMENT_UPDATE = 0x14013B050;
 static constexpr uintptr_t FN_EXATKSPACE_SYNC_JOB = 0x140138250;
 static constexpr uintptr_t FN_MTARRAY_DELETE_ALL = 0x1400112D0;
 static constexpr uintptr_t FN_SUNIT_REMOVE_UNIT = 0x14051B9F0;
@@ -86,7 +86,7 @@ static void(__fastcall* oGameEffectFlushHitMarks)(void*) = nullptr;
 static uint8_t(__fastcall* oMtObjectIsKindOf)(void*, void*) = nullptr;
 static void(__fastcall* oMtObjectReplaceIndexedSlot)(void*, uint32_t, void*) =
     nullptr;
-static void(__fastcall* oKirigakureEffectUpdate)(void*) = nullptr;
+static void(__fastcall* oGameEffectAttachmentUpdate)(void*) = nullptr;
 static std::vector<RollbackEffectRecipe> g_liveEffectRecipes;
 static uint64_t g_effectSpawnSequence = 0;
 
@@ -792,13 +792,21 @@ static void __fastcall hkMtObjectReplaceIndexedSlot(
     oMtObjectReplaceIndexedSlot(owner, index, replacement);
 }
 
-static void __fastcall hkKirigakureEffectUpdate(void* effect)
+static void __fastcall hkGameEffectAttachmentUpdate(void* effect)
 {
-    RollbackHookProfileScope profile(RollbackHookProfileId::KirigakureEffectUpdate);
+    RollbackHookProfileScope profile(RollbackHookProfileId::GameEffectAttachmentUpdate);
     uint64_t* attachment = (uint64_t*)((uint8_t*)effect + 0x40);
-    if (*attachment && !HasCallableDtiVirtual((void*)*attachment))
-        *attachment = 0;
-    oKirigakureEffectUpdate(effect);
+    const bool hadAttachment = *attachment != 0;
+
+        //Removed dumb crash guard check if needed:
+    //if (*attachment && !HasCallableDtiVirtual((void*)*attachment))
+    //    *attachment = 0;
+    
+    // Attached trails need current transforms before recording resim history.
+    // Keep the native update after sanitizing a stale parent as well.
+    if (g_isResimulating && !hadAttachment)
+        return;
+    oGameEffectAttachmentUpdate(effect);
 }
 
 void Effect_CaptureRecipes(RollbackSnapshotSlot& slot)
@@ -1434,13 +1442,13 @@ void Effect_InitHooks()
                 status);
     }
 
-    status = MH_CreateHook((LPVOID)_addr(FN_KIRIGAKURE_EFFECT_UPDATE),
-                           (LPVOID)&hkKirigakureEffectUpdate,
-                           (LPVOID*)&oKirigakureEffectUpdate);
+    status = MH_CreateHook((LPVOID)_addr(FN_GAME_EFFECT_ATTACHMENT_UPDATE),
+                           (LPVOID)&hkGameEffectAttachmentUpdate,
+                           (LPVOID*)&oGameEffectAttachmentUpdate);
     if (status == MH_OK) {
-        MH_EnableHook((LPVOID)_addr(FN_KIRIGAKURE_EFFECT_UPDATE));
-        HookLog("Rollback: guarded uKirigakureEffect weak attachment\n");
+        MH_EnableHook((LPVOID)_addr(FN_GAME_EFFECT_ATTACHMENT_UPDATE));
+        HookLog("Rollback: hooked uGameEffect attachment update\n");
     } else {
-        HookLog("Rollback: failed to guard uKirigakureEffect attachment (%d)\n", status);
+        HookLog("Rollback: failed to hook uGameEffect attachment (%d)\n", status);
     }
 }
