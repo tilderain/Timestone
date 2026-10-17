@@ -180,8 +180,8 @@ void WriteRawThreadState(FILE* file, const CONTEXT* context)
     }
 
     // Keep invalid return targets and non-pointer data that the named scans omit.
-    std::fprintf(file, "raw stack (64 unfiltered 8-byte words):\n");
-    for (size_t i = 0; i < 64; ++i) {
+    std::fprintf(file, "raw stack (128 unfiltered 8-byte words):\n");
+    for (size_t i = 0; i < 128; ++i) {
         const uintptr_t offset = i * sizeof(uint64_t);
         std::fprintf(file, "  RSP+0x%03llX%s: ",
                      static_cast<unsigned long long>(offset), i == 0 ? " [RSP]" : "");
