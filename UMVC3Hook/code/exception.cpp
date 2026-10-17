@@ -6,6 +6,7 @@
 #include "rollback.h"
 #include "rollback_diagnostics.h"
 #include "rollback_effect.h"
+#include "umvc3.h"
 
 #include <cstdint>
 #include <cstdio>
@@ -128,6 +129,82 @@ bool IsReadableRange(uintptr_t address, size_t size)
 
     const uintptr_t regionEnd = reinterpret_cast<uintptr_t>(memory.BaseAddress) + memory.RegionSize;
     return size <= regionEnd - address;
+}
+
+void WriteRawThreadState(FILE* file, const CONTEXT* context)
+{
+#if defined(_M_X64) || defined(__x86_64__)
+    std::fprintf(file, "EFlags=0x%08lX\n",
+                 static_cast<unsigned long>(context->EFlags));
+    if ((context->ContextFlags & CONTEXT_FLOATING_POINT) == CONTEXT_FLOATING_POINT) {
+        std::fprintf(file, "MXCSR=0x%08lX\n",
+                     static_cast<unsigned long>(context->MxCsr));
+        const M128A* xmm[] = {
+            &context->Xmm0, &context->Xmm1, &context->Xmm2, &context->Xmm3,
+            &context->Xmm4, &context->Xmm5, &context->Xmm6, &context->Xmm7,
+            &context->Xmm8, &context->Xmm9, &context->Xmm10, &context->Xmm11,
+            &context->Xmm12, &context->Xmm13, &context->Xmm14, &context->Xmm15,
+        };
+        std::fprintf(file, "XMM registers (128-bit hex, high half first):\n");
+        for (size_t i = 0; i < sizeof(xmm) / sizeof(xmm[0]); ++i) {
+            std::fprintf(file, "  XMM%02u=0x%016llX%016llX\n",
+                         static_cast<unsigned>(i),
+                         static_cast<unsigned long long>(xmm[i]->High),
+                         static_cast<unsigned long long>(xmm[i]->Low));
+        }
+    } else {
+        std::fprintf(file, "MXCSR/XMM: <not present in exception context>\n");
+    }
+
+    const void* teb = NtCurrentTeb();
+    NT_TIB tib{};
+    SIZE_T bytesRead = 0;
+    std::fprintf(file, "thread stack: TEB=0x%016llX",
+                 static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(teb)));
+    if (ReadProcessMemory(GetCurrentProcess(), teb, &tib, sizeof(tib), &bytesRead) &&
+        bytesRead == sizeof(tib)) {
+        const uintptr_t base = reinterpret_cast<uintptr_t>(tib.StackBase);
+        const uintptr_t limit = reinterpret_cast<uintptr_t>(tib.StackLimit);
+        std::fprintf(file, " StackBase=0x%016llX StackLimit=0x%016llX",
+                     static_cast<unsigned long long>(base),
+                     static_cast<unsigned long long>(limit));
+        if (limit < base) {
+            std::fprintf(file, " RSP_in_stack=%d RBP_in_stack=%d\n",
+                         context->Rsp >= limit && context->Rsp < base,
+                         context->Rbp >= limit && context->Rbp < base);
+        } else {
+            std::fprintf(file, " <invalid stack bounds>\n");
+        }
+    } else {
+        std::fprintf(file, " <stack bounds unreadable>\n");
+    }
+
+    // Keep invalid return targets and non-pointer data that the named scans omit.
+    std::fprintf(file, "raw stack (64 unfiltered 8-byte words):\n");
+    for (size_t i = 0; i < 64; ++i) {
+        const uintptr_t offset = i * sizeof(uint64_t);
+        std::fprintf(file, "  RSP+0x%03llX%s: ",
+                     static_cast<unsigned long long>(offset), i == 0 ? " [RSP]" : "");
+        if (context->Rsp > UINTPTR_MAX - offset) {
+            std::fprintf(file, "<address overflow>\n");
+            continue;
+        }
+        const uintptr_t address = context->Rsp + offset;
+        uint64_t value = 0;
+        bytesRead = 0;
+        if (IsReadableRange(address, sizeof(value)) &&
+            ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<LPCVOID>(address),
+                              &value, sizeof(value), &bytesRead) &&
+            bytesRead == sizeof(value)) {
+            std::fprintf(file, "0x%016llX\n", static_cast<unsigned long long>(value));
+        } else {
+            std::fprintf(file, "<unreadable>\n");
+        }
+    }
+#else
+    (void)context;
+    std::fprintf(file, "raw thread state: <unsupported architecture>\n");
+#endif
 }
 
 bool IsExecutableAddress(uintptr_t address)
@@ -716,8 +793,10 @@ LONG HandleException(PEXCEPTION_POINTERS info, bool catastrophicOnly)
             crashLogStart = std::ftell(preamble);
         std::fprintf(preamble,
             "\n=== UMVC3Hook crash capture started ===\n"
+            "TIMESTONE_VERSION=%s\n"
             "commit=%s%s code=0x%08lX exception=%p thread=%lu "
             "rip=0x%016llX rsp=0x%016llX\n",
+            UMVC3HOOK_VERSION,
             UMVC3HOOK_GIT_COMMIT, UMVC3HOOK_GIT_DIRTY ? " (dirty)" : "",
             static_cast<unsigned long>(code),
             info->ExceptionRecord->ExceptionAddress,
@@ -736,10 +815,11 @@ LONG HandleException(PEXCEPTION_POINTERS info, bool catastrophicOnly)
         GetLocalTime(&time);
         std::fprintf(file,
             "\n=== UMVC3Hook crash %04u-%02u-%02u %02u:%02u:%02u.%03u ===\n"
+            "TIMESTONE_VERSION=%s\n"
             "commit=%s%s\n"
             "code=0x%08lX exception=%p thread=%lu\n",
             time.wYear, time.wMonth, time.wDay, time.wHour, time.wMinute,
-            time.wSecond, time.wMilliseconds, UMVC3HOOK_GIT_COMMIT,
+            time.wSecond, time.wMilliseconds, UMVC3HOOK_VERSION, UMVC3HOOK_GIT_COMMIT,
             UMVC3HOOK_GIT_DIRTY ? " (dirty)" : "",
             static_cast<unsigned long>(code),
             exception->ExceptionAddress, static_cast<unsigned long>(GetCurrentThreadId()));
@@ -763,6 +843,7 @@ LONG HandleException(PEXCEPTION_POINTERS info, bool catastrophicOnly)
                 static_cast<unsigned long long>(exception->ExceptionInformation[1]));
         }
 
+        WriteRawThreadState(file, context);
         ResolveAddress(file, "fault: ", context->Rip);
         WriteNameEqualsFaultDetails(file, context);
         CrashCharacter loadedCharacters[kMaxLoadedCharacters] = {};
