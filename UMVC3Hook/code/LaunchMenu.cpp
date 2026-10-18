@@ -2643,8 +2643,8 @@ static INT_PTR HandleLaunchTimer(HWND hDlg, WPARAM wParam)
                 if (hStatus) {
                     char peerStatus[256];
                     snprintf(peerStatus, sizeof(peerStatus),
-                             "Steam connected: %s. Make your selection, NOW",
-                             SteamLobby_GetPeerUsername());
+                             "%s connected (%s)",
+                             SteamLobby_GetPeerUsername(), SteamLobby_GetConnectionType());
                     LaunchMenuUtils::SetText(hStatus, peerStatus);
                     g_statusColor = steamIsHost ? RGB(0, 120, 215) : RGB(200, 180, 0);
                     InvalidateRect(hStatus, NULL, TRUE);

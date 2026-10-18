@@ -20,6 +20,7 @@ void SteamLobby_Join(uint64_t lobbyId);
 void SteamLobby_Shutdown(bool preserveConnection);
 
 const char* SteamLobby_GetStatus();
+const char* SteamLobby_GetConnectionType();
 const char* SteamLobby_GetLocalUsername();
 uint64_t SteamLobby_GetPeerSteamId();
 const char* SteamLobby_GetPeerUsername();

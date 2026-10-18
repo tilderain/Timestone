@@ -739,18 +739,11 @@ void RefreshResultPings()
 void RefreshConnectedStatus()
 {
     SteamNetConnectionInfo_t info = {};
-    const char* transport = "Unknown";
     if (g_sockets->GetConnectionInfo(g_connection, &info)) {
         if (info.m_eState != k_ESteamNetworkingConnectionState_Connected) return;
-        if (info.m_nFlags & k_nSteamNetworkConnectionInfoFlags_LoopbackBuffers)
-            transport = "Loopback";
-        else if (info.m_nFlags & k_nSteamNetworkConnectionInfoFlags_Relayed)
-            transport = info.m_idPOPRelay ? "Relay (SDR)" : "Relay";
-        else
-            transport = "Direct";
     }
     snprintf(g_status, sizeof(g_status), "Connected to %s [%s] (SteamID %llu)",
-             g_peerUsername, transport,
+             g_peerUsername, SteamLobby_GetConnectionType(),
              static_cast<unsigned long long>(g_peerSteamId));
 }
 
@@ -1073,6 +1066,20 @@ void SteamLobby_Pump()
 const char* SteamLobby_GetStatus()
 {
     return g_status;
+}
+
+const char* SteamLobby_GetConnectionType()
+{
+    SteamNetConnectionInfo_t info = {};
+    if (!g_sockets || g_connection == k_HSteamNetConnection_Invalid ||
+        !g_sockets->GetConnectionInfo(g_connection, &info) ||
+        info.m_eState != k_ESteamNetworkingConnectionState_Connected)
+        return "Unknown";
+    if (info.m_nFlags & k_nSteamNetworkConnectionInfoFlags_LoopbackBuffers)
+        return "Loopback";
+    if (info.m_nFlags & k_nSteamNetworkConnectionInfoFlags_Relayed)
+        return info.m_idPOPRelay ? "Relay (SDR)" : "Relay";
+    return "Direct";
 }
 
 const char* SteamLobby_GetLocalUsername()
