@@ -843,7 +843,6 @@ LONG HandleException(PEXCEPTION_POINTERS info, bool catastrophicOnly)
                 static_cast<unsigned long long>(exception->ExceptionInformation[1]));
         }
 
-        WriteRawThreadState(file, context);
         ResolveAddress(file, "fault: ", context->Rip);
         WriteNameEqualsFaultDetails(file, context);
         CrashCharacter loadedCharacters[kMaxLoadedCharacters] = {};
@@ -888,6 +887,7 @@ LONG HandleException(PEXCEPTION_POINTERS info, bool catastrophicOnly)
         } else {
             std::fprintf(file, "  <stack unreadable>\n");
         }
+        WriteRawThreadState(file, context);
         HookLogWriteRecent(file);
         WriteLoadedModules(file);
         std::fprintf(file, "=== end crash ===\n");
