@@ -1,3 +1,4 @@
+#include "steam_lobby.h"
 #include "LaunchMenu_settings.h"
 #include "../IniSafe.h"
 
@@ -29,6 +30,7 @@ constexpr int ID_FULLSCREEN = 106;
 constexpr int ID_DISPLAY_HEADING = 107;
 constexpr int ID_ADVANCED_HEADING = 108;
 constexpr int ID_RENDERING_THREAD = 109;
+constexpr int ID_STEAM_ROUTING = 110;
 constexpr char SETTINGS_CLASS[] = "TimestoneAdvancedConfig";
 
 bool g_settingsLoaded = false;
@@ -183,6 +185,16 @@ bool SaveSettings(HWND window)
     GetSettingsPath(path, sizeof(path));
     const bool darkMode = SendMessageA(GetDlgItem(window, ID_DARK_MODE),
                                        BM_GETCHECK, 0, 0) == BST_CHECKED;
+    if (IsWindowEnabled(GetDlgItem(window, ID_STEAM_ROUTING))) {
+        const bool relayOnly = SendMessageA(GetDlgItem(window, ID_STEAM_ROUTING),
+                                            CB_GETCURSEL, 0, 0) != 0;
+        if (!IniSafe_WriteString("Network", "SteamRelayOnly",
+                                 relayOnly ? "1" : "0", path)) {
+            MessageBoxA(window, "Could not save the Steam routing setting.",
+                        "Settings", MB_OK | MB_ICONERROR);
+            return false;
+        }
+    }
     if (IniSafe_WriteString("General", "LaunchMenuDarkMode",
                                    darkMode ? "1" : "0", path))
         g_savedDarkMode = darkMode;
@@ -298,13 +310,29 @@ LRESULT CALLBACK SettingsWndProc(HWND window, UINT message,
         CreateWindowA("STATIC", "ON adds one tick of latency. OFF may decrease performance or other various issues.",
             WS_VISIBLE | WS_CHILD, 18, sectionY + 120, 374, 34,
             window, nullptr, nullptr, nullptr);
+        CreateWindowA("STATIC", "Steam routing:", WS_VISIBLE | WS_CHILD,
+            18, sectionY + 164, 130, 20, window, nullptr, nullptr, nullptr);
+        HWND steamRouting = CreateWindowA("COMBOBOX", "",
+            WS_VISIBLE | WS_CHILD | WS_TABSTOP | CBS_DROPDOWNLIST,
+            154, sectionY + 160, 238, 100, window,
+            reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_STEAM_ROUTING)), nullptr, nullptr);
+        for (const char* option : {"Automatic", "Relay Only"})
+            SendMessageA(steamRouting, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(option));
+        SendMessageA(steamRouting, CB_SETCURSEL, SteamLobby_IsRelayOnly() ? 1 : 0, 0);
+        EnableWindow(steamRouting, !SteamLobby_HasLobby() && !SteamLobby_IsCreating());
+        CreateWindowA("STATIC",
+            "Automatic may share your IP with your opponent. "
+            "When in doubt, leave it to automatic, as it can provide "
+            "fastest routing regardless of steam server or direct p2p connection.",
+            WS_VISIBLE | WS_CHILD, 18, sectionY + 194, 374, 84,
+            window, nullptr, nullptr, nullptr);
         HWND save = CreateWindowA(
             "BUTTON", "Save", WS_VISIBLE | WS_CHILD | WS_TABSTOP | BS_DEFPUSHBUTTON,
-            222, sectionY + 160, 82, 28, window,
+            222, sectionY + 284, 82, 28, window,
             reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_SAVE)), nullptr, nullptr);
         HWND cancel = CreateWindowA(
             "BUTTON", "Cancel", WS_VISIBLE | WS_CHILD | WS_TABSTOP | BS_PUSHBUTTON,
-            310, sectionY + 160, 82, 28, window,
+            310, sectionY + 284, 82, 28, window,
             reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_CANCEL)), nullptr, nullptr);
         ApplyDpi(window, 96, GetWindowDpi(window));
         ApplyLaunchMenuDarkTheme(window);
@@ -449,7 +477,7 @@ void ShowAdvancedConfigModal(HWND owner)
     const UINT dpi = GetWindowDpi(owner);
     wchar_t gamePath[MAX_PATH] = {};
     RECT bounds = {0, 0, MulDiv(410, dpi, 96),
-                   MulDiv(GetGameConfigPath(gamePath) ? 352 : 384, dpi, 96)};
+                   MulDiv(GetGameConfigPath(gamePath) ? 476 : 508, dpi, 96)};
     using AdjustWindowRectExForDpiFn = BOOL (WINAPI*)(LPRECT, DWORD, BOOL, DWORD, UINT);
     const auto adjustForDpi = reinterpret_cast<AdjustWindowRectExForDpiFn>(
         GetProcAddress(GetModuleHandleA("user32.dll"), "AdjustWindowRectExForDpi"));

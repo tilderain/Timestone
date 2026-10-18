@@ -51,6 +51,10 @@ enum ESteamNetworkingConfigDataType : int32_t {
 constexpr int k_nSteamNetworkingSend_UnreliableNoNagle = 1;
 constexpr int k_nSteamNetworkingSend_Reliable = 8;
 
+constexpr int k_nSteamNetworkingConfig_P2P_Transport_ICE_Enable_Relay = 1;
+constexpr int k_nSteamNetworkingConfig_P2P_Transport_ICE_Enable_Private = 2;
+constexpr int k_nSteamNetworkingConfig_P2P_Transport_ICE_Enable_Public = 4;
+
 #pragma pack(push, 1)
 struct SteamNetworkingIPAddr {
     uint8_t m_ipv6[16];
@@ -83,6 +87,9 @@ struct SteamNetConnectionRealTimeLaneStatus_t;
 
 constexpr int k_cchSteamNetworkingMaxConnectionCloseReason = 128;
 constexpr int k_cchSteamNetworkingMaxConnectionDescription = 128;
+
+constexpr int k_nSteamNetworkConnectionInfoFlags_LoopbackBuffers = 4;
+constexpr int k_nSteamNetworkConnectionInfoFlags_Relayed = 16;
 
 struct SteamNetConnectionInfo_t {
     SteamNetworkingIdentity m_identityRemote;

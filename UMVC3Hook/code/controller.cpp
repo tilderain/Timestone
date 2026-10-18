@@ -27,6 +27,7 @@
 #include <cstdio>
 #include <cstdint>
 #include <cstring>
+#include "LaunchMenu.h"
 
 extern void HookLog(const char* fmt, ...);
 

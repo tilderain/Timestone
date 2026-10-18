@@ -11,6 +11,7 @@ enum class SteamLobbyType : int {
 };
 
 bool SteamLobby_Initialize();
+bool SteamLobby_IsRelayOnly();
 void SteamLobby_Pump();
 void SteamLobby_Search();
 void SteamLobby_SetName(const char* name);

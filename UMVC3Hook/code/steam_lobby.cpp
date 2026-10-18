@@ -2,6 +2,7 @@
 
 #include "steam_api_compat.h"
 #include "steam_transport.h"
+#include "launchmenu_utils.h"
 #include "umvc3.h"
 #include <Windows.h>
 #include <shellapi.h>
@@ -473,7 +474,11 @@ void ConnectionOptions(SteamNetworkingConfigValue_t (&options)[2])
     options[1] = {};
     options[1].m_eValue = k_ESteamNetworkingConfig_P2P_Transport_ICE_Enable;
     options[1].m_eDataType = k_ESteamNetworkingConfig_Int32;
-    options[1].m_val.m_int32 = 0; // Never exchange peer IP candidates; force relay transport.
+    // SDR remains available independently of ICE. TURN requires configured servers.
+    options[1].m_val.m_int32 = SteamLobby_IsRelayOnly() ? 0 :
+        k_nSteamNetworkingConfig_P2P_Transport_ICE_Enable_Relay |
+        k_nSteamNetworkingConfig_P2P_Transport_ICE_Enable_Private |
+        k_nSteamNetworkingConfig_P2P_Transport_ICE_Enable_Public;
 }
 
 void RefreshPeerUsername()
@@ -509,6 +514,9 @@ void StartPeerConnection(uint64_t remoteId)
     SteamNetworkingConfigValue_t options[2];
     ConnectionOptions(options);
     if (g_listenSocket == k_HSteamListenSocket_Invalid) {
+        HookLog("SteamLobby: routing policy=%s ICE candidates=%d\n",
+                options[1].m_val.m_int32 ? "Automatic" : "Relay Only",
+                options[1].m_val.m_int32);
         g_listenSocket = g_sockets->CreateListenSocketP2P(733, 2, options);
         if (g_listenSocket == k_HSteamListenSocket_Invalid) {
             SetStatus("Failed to create Steam P2P listen socket");
@@ -531,7 +539,8 @@ void StartPeerConnection(uint64_t remoteId)
         return;
     }
     if (g_connectionAttempt == 1)
-        SetStatus("Establishing Steam relay connection...");
+        SetStatus(options[1].m_val.m_int32 ? "Establishing Steam connection (automatic routing)..."
+                                         : "Establishing Steam relay connection...");
 }
 
 void PumpLobbyMembers()
@@ -727,9 +736,30 @@ void RefreshResultPings()
     if (!pending) g_resultPingRefreshDeadline = 0;
 }
 
+void RefreshConnectedStatus()
+{
+    SteamNetConnectionInfo_t info = {};
+    const char* transport = "Unknown";
+    if (g_sockets->GetConnectionInfo(g_connection, &info)) {
+        if (info.m_eState != k_ESteamNetworkingConnectionState_Connected) return;
+        if (info.m_nFlags & k_nSteamNetworkConnectionInfoFlags_LoopbackBuffers)
+            transport = "Loopback";
+        else if (info.m_nFlags & k_nSteamNetworkConnectionInfoFlags_Relayed)
+            transport = info.m_idPOPRelay ? "Relay (SDR)" : "Relay";
+        else
+            transport = "Direct";
+    }
+    snprintf(g_status, sizeof(g_status), "Connected to %s [%s] (SteamID %llu)",
+             g_peerUsername, transport,
+             static_cast<unsigned long long>(g_peerSteamId));
+}
+
 void PumpConnection()
 {
-    if (g_bridgeCreated) return;
+    if (g_bridgeCreated) {
+        RefreshConnectedStatus();
+        return;
+    }
     if (g_connectionDeadline && GetTickCount64() >= g_connectionDeadline) {
         if (g_connection != k_HSteamNetConnection_Invalid) {
             g_sockets->CloseConnection(g_connection, 1002,
@@ -768,9 +798,7 @@ void PumpConnection()
         g_api.SetLobbyJoinable(g_matchmaking, g_lobbyId, false);
         ClearLobbyRichPresence();
         RefreshPeerUsername();
-        snprintf(g_status, sizeof(g_status), "Connected to %s (SteamID %llu)",
-                 g_peerUsername,
-                 static_cast<unsigned long long>(g_peerSteamId));
+        RefreshConnectedStatus();
         HookLog("SteamLobby: peer connected username=\"%s\" steamid=%llu\n",
                 g_peerUsername,
                 static_cast<unsigned long long>(g_peerSteamId));
@@ -809,6 +837,13 @@ void PumpConnection()
 }
 
 } // namespace
+
+bool SteamLobby_IsRelayOnly()
+{
+    char path[MAX_PATH] = {};
+    LaunchMenuUtils::GetSettingsPath(path, sizeof(path));
+    return GetPrivateProfileIntA("Network", "SteamRelayOnly", 0, path) != 0;
+}
 
 bool SteamLobby_Initialize()
 {
