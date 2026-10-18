@@ -16,7 +16,11 @@ static std::atomic<bool> g_bridgeRunning{false};
 static std::atomic<bool> g_bridgeThreadStarted{false};
 static std::atomic_flag g_bridgePumpLock = ATOMIC_FLAG_INIT;
 static std::atomic<uint32_t> g_steamRTT{0};
-static std::atomic<uint32_t> g_steamJitter{0};
+static std::atomic<float> g_steamPacketLoss{-1.0f};
+static std::atomic<int32_t> g_steamJitter{-1};
+static constexpr DWORD JITTER_WINDOW_MS = 500;
+static int32_t g_jitterWindowPeakUsec = -1;
+static DWORD g_jitterWindowStartTick = 0;
 static DWORD g_bridgeCreatedTick = 0;
 
 // The loopback hop can go unserviced while launch hooks finish installing.
@@ -68,7 +72,20 @@ static bool PumpBridgeOnce()
         g_connection, &status, 0, nullptr);
     if (statusResult == k_EResultOK) {
         if (status.m_nPing > 0) g_steamRTT = static_cast<uint32_t>(status.m_nPing);
-        if (status.m_usecMaxJitter > 0) g_steamJitter = static_cast<uint32_t>(status.m_usecMaxJitter / 1000);
+        // Steam measures packets delivered in order, so this includes reordering.
+        const float quality = status.m_flConnectionQualityLocal;
+        g_steamPacketLoss = quality >= 0.0f && quality <= 1.0f
+            ? (1.0f - quality) * 100.0f : -1.0f;
+        // Steam clears its jitter peak on each poll. Aggregate for a readable HUD.
+        if (status.m_usecMaxJitter > g_jitterWindowPeakUsec)
+            g_jitterWindowPeakUsec = status.m_usecMaxJitter;
+        const DWORD now = GetTickCount();
+        if (now - g_jitterWindowStartTick >= JITTER_WINDOW_MS) {
+            g_steamJitter = g_jitterWindowPeakUsec < 0
+                ? -1 : g_jitterWindowPeakUsec / 1000;
+            g_jitterWindowPeakUsec = -1;
+            g_jitterWindowStartTick = now;
+        }
         if (status.m_eState == k_ESteamNetworkingConnectionState_ClosedByPeer ||
             status.m_eState == k_ESteamNetworkingConnectionState_ProblemDetectedLocally) {
             HookLog("SteamTransport: Steam connection ended, state=%d\n",
@@ -76,6 +93,9 @@ static bool PumpBridgeOnce()
             if (g_bridgePeer) enet_peer_disconnect_now(g_bridgePeer, 0);
             g_bridgeRunning = false;
         }
+    }
+    else {
+        g_steamPacketLoss = -1.0f;
     }
     g_bridgePumpLock.clear();
     return true;
@@ -170,7 +190,10 @@ bool SteamTransport_CreateBridge(bool isHost, ISteamNetworkingSockets* sockets,
     g_sockets = sockets;
     g_connection = connection;
     g_steamRTT = 0;
-    g_steamJitter = 0;
+    g_steamPacketLoss = -1.0f;
+    g_steamJitter = -1;
+    g_jitterWindowPeakUsec = -1;
+    g_jitterWindowStartTick = GetTickCount();
     g_bridgeCreatedTick = GetTickCount();
     g_bridgeThreadStarted = false;
     g_bridgeRunning = true;
@@ -203,7 +226,12 @@ uint32_t SteamTransport_GetRTT()
     return g_steamRTT.load();
 }
 
-uint32_t SteamTransport_GetJitter()
+float SteamTransport_GetPacketLoss()
+{
+    return g_steamPacketLoss.load();
+}
+
+int32_t SteamTransport_GetJitter()
 {
     return g_steamJitter.load();
 }
@@ -235,5 +263,6 @@ void SteamTransport_Shutdown()
     g_sockets = nullptr;
     g_bridgeThreadStarted = false;
     g_steamRTT = 0;
-    g_steamJitter = 0;
+    g_steamPacketLoss = -1.0f;
+    g_steamJitter = -1;
 }

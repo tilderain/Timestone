@@ -242,6 +242,7 @@ static int32_t GetNetplaySettingsEffectiveFrame()
     // lead by the unrelated 15-frame input-delay limit.
     int32_t leadFrames = (int32_t)(Netplay_GetRTT() * 60 / 1000) + 3;
     if (leadFrames < 3) leadFrames = 3;
+    leadFrames = (leadFrames + 1) / 2;
     return Controller_GetNetFrameCount() + leadFrames;
 }
 
@@ -1567,19 +1568,21 @@ void FrameStepper_Process()
             g_statusHudMode = (g_statusHudMode + 2) % 3;
             SaveStatusHudMode();
         }
-        if (KeyPressed(VK_OEM_4))  // [ = decrease delay
+        const bool settingsHotkeysEnabled = g_hWnd &&
+            GetForegroundWindow() == g_hWnd && !IsIconic(g_hWnd);
+        if (KeyPressed(VK_OEM_4) && settingsHotkeysEnabled)  // [ = decrease delay
         {
             AdjustNetplayDelay(-1);
         }
-        if (KeyPressed(VK_OEM_6))  // ] = increase delay
+        if (KeyPressed(VK_OEM_6) && settingsHotkeysEnabled)  // ] = increase delay
         {
             AdjustNetplayDelay(1);
         }
-        if (KeyPressed(VK_OEM_1))  // ; = decrease rollback
+        if (KeyPressed(VK_OEM_1) && settingsHotkeysEnabled)  // ; = decrease rollback
         {
             ScheduleNetplayRollback(Controller_GetRollbackFrames() - 1);
         }
-        if (KeyPressed(VK_OEM_7))  // ' = increase rollback
+        if (KeyPressed(VK_OEM_7) && settingsHotkeysEnabled)  // ' = increase rollback
         {
             ScheduleNetplayRollback(Controller_GetRollbackFrames() + 1);
         }
@@ -1837,9 +1840,9 @@ void FrameStepper_Draw()
         }
     }
 
-    // --- Always-visible P1/P2 pad input window (top-left) ---
-    if (Controller_GetNetFrameCount() >= 0 &&
-        (!Netplay_IsActive() || g_statusHudMode != 0))
+    // --- Netplay status and optional P1/P2 input window (top-left) ---
+    if (Netplay_IsActive() && Controller_GetNetFrameCount() >= 0 &&
+        g_statusHudMode != 0)
     {
         // sReplay advances during oMove, but processFrameInput records under the
         // frame value from the start of that tick. Display the input that made
@@ -1854,7 +1857,7 @@ void FrameStepper_Draw()
         AppendButtons(btns2, sizeof(btns2), p2);
 
         ImGui::SetNextWindowPos(ImVec2(12.0f, 12.0f), ImGuiCond_Always);
-        ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.0f, 0.0f, 0.0f, 0.85f));
+        ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.0f, 0.0f, 0.0f, 0.55f));
         ImGui::Begin("##FrameStepperPad", nullptr,
             ImGuiWindowFlags_NoTitleBar |
             ImGuiWindowFlags_NoResize |
@@ -1872,8 +1875,8 @@ void FrameStepper_Draw()
             int32_t curRollback = Controller_GetRollbackFrames();
             if (g_statusHudMode == 1) {
                 ImGui::TextColored(color, "Ping %u", Netplay_GetAverageRTT() / 2);
-                ImGui::TextColored(color, "Delay %d", curDelay);
-                ImGui::TextColored(color, "Rollb %d", curRollback);
+                ImGui::TextColored(color, "FPS %.0f", GetGameUpdatesPerSecond(currentFrame));
+                ImGui::TextColored(color, "D%d R%d", curDelay, curRollback);
             } else {
                 const char* role = Netplay_IsHost() ? "HOST" : "CLIENT";
                 char roleLabel[32];
@@ -1883,15 +1886,36 @@ void FrameStepper_Draw()
                     roleLabelCenterX = ImGui::GetCursorPosX() + 75.f;
                 ImGui::SetCursorPosX(roleLabelCenterX - ImGui::CalcTextSize(roleLabel).x * 0.5f);
                 ImGui::TextColored(color, "%s", roleLabel);
+                const float lossPercent = Netplay_GetPacketLoss();
                 ImGui::TextColored(color, "Ping: %ums", Netplay_GetRTT() / 2);
-                ImGui::TextColored(color, "PingAvg %u", Netplay_GetAverageRTT() / 2);
-                ImGui::TextColored(color, "Jitter %u", Netplay_GetJitter() / 2);
-                ImGui::TextColored(color, "Frame: %d", currentFrame);
                 ImGui::TextColored(color, "FPS: %.1f",
                                    GetGameUpdatesPerSecond(currentFrame));
+                if (lossPercent >= 0.0f)
+                    ImGui::TextColored(color, "Loss: %.1f%%", lossPercent);
+                else
+                    ImGui::TextColored(color, "Loss: N/A");
+                const int32_t jitterMs = Netplay_GetJitter();
+                if (jitterMs >= 0)
+                    ImGui::TextColored(color, "Jitter: %dms", jitterMs);
+                else
+                    ImGui::TextColored(color, "Jitter: N/A");
+                if(GetLaunchOption() == LAUNCH_DUAL_TRAINING)
+                    ImGui::TextColored(color, "Frame: %d", currentFrame);
                 ImGui::TextColored(color, "Delay: %d  Rollback: %d", curDelay, curRollback);
 
-                // Keep each control row vertical so the overlay stays compact in width.
+                const ImGuiStyle& style = ImGui::GetStyle();
+                const float controlsWidth = ImGui::CalcTextSize("D-").x +
+                    ImGui::CalcTextSize("D+").x + ImGui::CalcTextSize("R-").x +
+                    ImGui::CalcTextSize("R+").x + style.FramePadding.x * 8.0f +
+                    style.ItemSpacing.x * 3.0f;
+                const float controlsOffset = (ImGui::GetContentRegionAvail().x - controlsWidth) * 0.5f;
+                if (controlsOffset > 0.0f)
+                    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + controlsOffset);
+                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0, 0, 0, 0));
+                ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0, 0, 0, 0));
+                ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.26f, 0.59f, 0.98f, 1.0f));
+                ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.0f);
                 const bool delayPending = Controller_IsDelayChangePending();
                 if (delayPending) ImGui::BeginDisabled();
                 if (ImGui::SmallButton("D-"))
@@ -1905,26 +1929,29 @@ void FrameStepper_Draw()
                 }
                 if (delayPending) ImGui::EndDisabled();
 
+                ImGui::SameLine();
                 const bool rollbackPending = Controller_IsRollbackChangePending();
                 if (rollbackPending) ImGui::BeginDisabled();
-                if (ImGui::SmallButton("RB-"))
+                if (ImGui::SmallButton("R-"))
                 {
                     curRollback = Controller_GetRollbackFrames() - 1;
                     if (curRollback < 0) curRollback = 0;
                     ScheduleNetplayRollback(curRollback);
                 }
                 ImGui::SameLine();
-                if (ImGui::SmallButton("RB+"))
+                if (ImGui::SmallButton("R+"))
                 {
                     curRollback = Controller_GetRollbackFrames() + 1;
                     if (curRollback > 16) curRollback = 16;
                     ScheduleNetplayRollback(curRollback);
                 }
                 if (rollbackPending) ImGui::EndDisabled();
+                ImGui::PopStyleVar();
+                ImGui::PopStyleColor(4);
             }
         }
 
-        if (g_statusHudMode == 2 || !Netplay_IsActive()) {
+        if (g_statusHudMode == 2 && GetLaunchOption() == LAUNCH_DUAL_TRAINING) {
             ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "P1: [%s]  0x%08X", DecodeDirection(p1), p1);
             if (btns1[0])
                 ImGui::SameLine(), ImGui::TextColored(ImVec4(0.7f, 0.9f, 1.0f, 1.0f), "%s", btns1);

@@ -145,9 +145,18 @@ static CRITICAL_SECTION         g_extensionCS;
 static bool                 g_csInitialized  = false;
 
 static constexpr int AVG_RTT_WINDOW_SIZE = 40;
-// Ping history for calculating average RTT (ping) over a fixed window.
-static int32_t g_rttHistory[AVG_RTT_WINDOW_SIZE] = {};
-static int8_t g_avgRttHistoryIndex = 0;
+static constexpr uint32_t RTT_SAMPLE_INTERVAL_MS = 16;
+// Only the service thread accesses the history; other threads read snapshots.
+static uint32_t g_rttHistory[AVG_RTT_WINDOW_SIZE] = {};
+static size_t g_avgRttHistoryIndex = 0;
+static size_t g_rttHistoryCount = 0;
+static uint64_t g_rttHistorySum = 0;
+static uint32_t g_lastRttSampleTick = 0;
+static std::atomic<uint32_t> g_rtt{0};
+static std::atomic<uint32_t> g_averageRtt{0};
+static std::atomic<float> g_packetLoss{-1.0f};
+
+static void Netplay_UpdateRTTHistory(uint32_t now);
 
 // Reset hook defined in controller.cpp
 extern "C" void Controller_ResetBuffers();
@@ -252,7 +261,7 @@ static DWORD WINAPI Netplay_ServiceThread(LPVOID)
         }
 
         // Update RTT history for average calculation
-        Netplay_UpdateRTTHistory();
+        Netplay_UpdateRTTHistory(now);
 
         if (hasNewOutbound && g_peer)
         {
@@ -914,14 +923,20 @@ void Netplay_Init(ENetHost* host, ENetPeer* peer)
     g_playerDisconnectSent = false;
     g_playerDisconnectSendSucceeded = false;
     g_playerDisconnectNotice = false;
-    g_running = true;
 
-    std::memset(g_rttHistory, -1, sizeof(g_rttHistory));
+    std::memset(g_rttHistory, 0, sizeof(g_rttHistory));
     g_avgRttHistoryIndex = 0;
+    g_rttHistoryCount = 0;
+    g_rttHistorySum = 0;
+    g_lastRttSampleTick = 0;
+    g_rtt = 0;
+    g_averageRtt = 0;
+    g_packetLoss = -1.0f;
 
     // Reset internal player pad ring buffers
     Controller_ResetBuffers();
 
+    g_running = true;
     g_serviceThread = CreateThread(nullptr, 0, Netplay_ServiceThread, nullptr, 0, nullptr);
     if (g_serviceThread)
     {
@@ -1409,53 +1424,49 @@ bool Netplay_IsHost()
 
 uint32_t Netplay_GetRTT()
 {
-    if (SteamTransport_IsActive())
-        return SteamTransport_GetRTT();
-    if (g_peer)
-        return g_peer->roundTripTime;
-    return 0;
+    return g_running ? g_rtt.load() : 0;
 }
 
-void Netplay_UpdateRTTHistory()
+static void Netplay_UpdateRTTHistory(uint32_t now)
 {
-    int realTimeRtt = Netplay_GetRTT();
+    const bool steamActive = SteamTransport_IsActive();
+    g_packetLoss = steamActive ? SteamTransport_GetPacketLoss()
+        : (g_peer ? 100.0f * g_peer->packetLoss / ENET_PEER_PACKET_LOSS_SCALE : -1.0f);
+    const uint32_t realTimeRtt = steamActive
+        ? SteamTransport_GetRTT() : (g_peer ? g_peer->roundTripTime : 0);
+    g_rtt = realTimeRtt;
+    if (realTimeRtt == 0 || (g_rttHistoryCount != 0 &&
+        now - g_lastRttSampleTick < RTT_SAMPLE_INTERVAL_MS))
+        return;
 
-    if(realTimeRtt > 0)
-    {
-        g_avgRttHistoryIndex++;
-        g_avgRttHistoryIndex = g_avgRttHistoryIndex % AVG_RTT_WINDOW_SIZE;
-        g_rttHistory[g_avgRttHistoryIndex] = realTimeRtt;
-    }
+    // Time-sample the transport's already-smoothed RTT, not service-loop speed.
+    g_lastRttSampleTick = now;
+    g_rttHistorySum -= g_rttHistory[g_avgRttHistoryIndex];
+    g_rttHistory[g_avgRttHistoryIndex] = realTimeRtt;
+    g_rttHistorySum += realTimeRtt;
+    g_avgRttHistoryIndex = (g_avgRttHistoryIndex + 1) % AVG_RTT_WINDOW_SIZE;
+    if (g_rttHistoryCount < AVG_RTT_WINDOW_SIZE)
+        ++g_rttHistoryCount;
+    g_averageRtt = static_cast<uint32_t>(g_rttHistorySum / g_rttHistoryCount);
 }
 
 uint32_t Netplay_GetAverageRTT()
 {
-    uint64_t sum = 0;
-    int count = 0;
-
-    for (int i = 0; i < AVG_RTT_WINDOW_SIZE; i++)
-    {
-        if (g_rttHistory[i] > 0)
-        {
-            sum += g_rttHistory[i];
-            count++;
-        }
-    }
-
-    return count > 0 ? (uint32_t)(sum / count) : 0;
+    return g_running ? g_averageRtt.load() : 0;
 }
 
-uint32_t Netplay_GetJitter()
+float Netplay_GetPacketLoss()
 {
-    if (SteamTransport_IsActive())
+    return g_running ? g_packetLoss.load() : -1.0f;
+}
+
+int32_t Netplay_GetJitter()
+{
+    if (g_running && SteamTransport_IsActive())
     {
         return SteamTransport_GetJitter();
     }
-    if (g_peer)
-    {
-        // TODO: Implement jitter calculation for ENet peer if needed
-    }
-    return 0;
+    return -1;
 }
 
 void Netplay_Shutdown()
