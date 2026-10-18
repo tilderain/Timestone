@@ -1884,17 +1884,22 @@ void FrameStepper_Draw()
                     roleLabelCenterX = ImGui::GetCursorPosX() + 75.f;
                 ImGui::SetCursorPosX(roleLabelCenterX - ImGui::CalcTextSize(roleLabel).x * 0.5f);
                 ImGui::TextColored(color, "%s", roleLabel);
+                constexpr float lossWarningPercent = 2.5f;
+                constexpr int32_t jitterWarningMs = 40;
+                const ImVec4 warningColor(1.0f, 0.2f, 0.2f, 1.0f);
                 const float lossPercent = Netplay_GetPacketLoss();
                 ImGui::TextColored(color, "Ping: %ums", Netplay_GetRTT() / 2);
                 ImGui::TextColored(color, "FPS: %.1f",
                                    GetGameUpdatesPerSecond(currentFrame));
                 if (lossPercent >= 0.0f)
-                    ImGui::TextColored(color, "Loss: %.1f%%", lossPercent);
+                    ImGui::TextColored(lossPercent >= lossWarningPercent ? warningColor : color,
+                                       "Loss: %.1f%%", lossPercent);
                 else
                     ImGui::TextColored(color, "Loss: N/A");
                 const int32_t jitterMs = Netplay_GetJitter();
                 if (jitterMs >= 0)
-                    ImGui::TextColored(color, "Jitter: %dms", jitterMs);
+                    ImGui::TextColored(jitterMs >= jitterWarningMs ? warningColor : color,
+                                       "Jitter: %dms", jitterMs);
                 else
                     ImGui::TextColored(color, "Jitter: N/A");
                 if(GetLaunchOption() == LAUNCH_DUAL_TRAINING)
