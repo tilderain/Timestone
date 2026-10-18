@@ -25,7 +25,6 @@
 #include "framestepper.h"
 #include "../kiero/minhook/include/MinHook.h"
 #include <cstdio>
-#include <atomic>
 #include <cstdint>
 #include <cstring>
 
@@ -37,33 +36,34 @@ extern "C" void Rollback_NotifyDesyncTriggered(int32_t frame);
 extern "C" uint32_t FrameStepper_GetBattleGeneration();
 
 static constexpr bool INPUT_PROVENANCE_TRACE = false;
-static std::atomic<bool> g_predictionBudgetExhausted{false};
-static std::atomic<uint64_t> g_predictionBudgetExhaustedSince{0};
+// Prediction waits and their popup checks all run on the game thread.
+static bool g_predictionBudgetExhausted = false;
+static uint64_t g_predictionBudgetExhaustedSince = 0;
 
 static void ClearPredictionBudgetExhausted()
 {
-    g_predictionBudgetExhausted.store(false, std::memory_order_release);
-    g_predictionBudgetExhaustedSince.store(0, std::memory_order_release);
+    g_predictionBudgetExhausted = false;
+    g_predictionBudgetExhaustedSince = 0;
 }
 
 static void SetPredictionBudgetExhausted()
 {
-    if (!g_predictionBudgetExhausted.exchange(true, std::memory_order_acq_rel))
-        g_predictionBudgetExhaustedSince.store(GetTickCount64(),
-                                                std::memory_order_release);
+    if (!g_predictionBudgetExhausted) {
+        g_predictionBudgetExhausted = true;
+        g_predictionBudgetExhaustedSince = GetTickCount64();
+    }
 }
 
 extern "C" bool Controller_IsPredictionBudgetExhausted()
 {
-    return g_predictionBudgetExhausted.load(std::memory_order_acquire);
+    return g_predictionBudgetExhausted;
 }
 
 extern "C" bool Controller_ShouldShowPredictionBudgetExhausted()
 {
     if (!Controller_IsPredictionBudgetExhausted())
         return false;
-    const uint64_t since =
-        g_predictionBudgetExhaustedSince.load(std::memory_order_acquire);
+    const uint64_t since = g_predictionBudgetExhaustedSince;
     return since != 0 && GetTickCount64() - since >= 4000;
 }
 

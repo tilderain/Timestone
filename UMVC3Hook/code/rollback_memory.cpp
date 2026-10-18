@@ -3,6 +3,7 @@
 #include "rollback_memory.h"
 #include "mk10utils.h"
 
+#include <atomic>
 #include <vector>
 
 namespace {
@@ -34,7 +35,7 @@ thread_local std::vector<CachedMemoryRegion> g_memoryRegions;
 thread_local LONG g_memoryCacheEpochSeen = 0;
 thread_local size_t g_lastMemoryRegion = SIZE_MAX;
 thread_local size_t g_nextMemoryRegionReplacement = 0;
-volatile LONG g_memoryCacheEpoch = 1;
+std::atomic<LONG> g_memoryCacheEpoch{1};
 
 bool IsGameImageRange(uint64_t address, size_t size)
 {
@@ -95,7 +96,7 @@ bool IsGameDti(uint64_t dti)
 
 void SynchronizeMemoryCacheEpoch()
 {
-    LONG epoch = InterlockedCompareExchange(&g_memoryCacheEpoch, 0, 0);
+    const LONG epoch = g_memoryCacheEpoch.load(std::memory_order_acquire);
     if (g_memoryCacheEpochSeen == epoch) return;
     g_memoryRegions.clear();
     g_lastMemoryRegion = SIZE_MAX;
@@ -265,7 +266,7 @@ bool IsBaseModelObject(const void* object)
 
 void InvalidateMemoryQueryCache()
 {
-    InterlockedIncrement(&g_memoryCacheEpoch);
+    g_memoryCacheEpoch.fetch_add(1, std::memory_order_acq_rel);
 }
 
 ScopedMemoryQueryCache::ScopedMemoryQueryCache()
