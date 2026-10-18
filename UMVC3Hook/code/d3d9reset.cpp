@@ -4,6 +4,8 @@
 #include "mk10utils.h"
 #include "framestepper.h"
 #include "LaunchMenu.h"
+#include "launchmenu_utils.h"
+#include "../IniSafe.h"
 #include "../imgui/imgui.h"
 #include "../imgui/imgui_impl_dx9.h"
 #include "../kiero/minhook/include/MinHook.h"
@@ -43,6 +45,9 @@ ApplyGraphics g_originalApplyGraphics = nullptr;
 ResultHandler g_originalResultHandler = nullptr;
 RenderMethod g_originalUIUpdate = nullptr;
 RenderMethod g_originalRelease = nullptr;
+RenderMethod g_originalBeginFrame = nullptr;
+std::atomic<int> g_renderingThreadOverride { 0 };
+std::atomic<bool> g_renderingThreadEnabled { false };
 TestCooperative g_originalCooperative = nullptr;
 SetChoice g_originalResolution = nullptr;
 SetBool g_originalFullscreen = nullptr;
@@ -141,6 +146,28 @@ T& Field(void* object, size_t offset)
 void* NativeRenderer()
 {
     return *reinterpret_cast<void**>(_addr(0x140E179A8));
+}
+
+void __fastcall HookBeginFrame(void* render)
+{
+    // EndFrame uses +0x3D as well as the latched +0x3E. Never change either
+    // during a live frame (including a frame retained by native frame skipping).
+    static void* nativeRenderer = nullptr;
+    static uint8_t nativeMode = 0;
+    if (!Field<uint8_t>(render, 0x38)) {
+        if (nativeRenderer != render) {
+            nativeRenderer = render;
+            nativeMode = Field<uint8_t>(render, 0x3D);
+        }
+        const int mode = g_renderingThreadOverride.load();
+        const uint8_t enabled = mode < 0 ? nativeMode : static_cast<uint8_t>(mode);
+        if (Field<uint8_t>(render, 0x3D) != enabled) {
+            Field<uint8_t>(render, 0x3D) = enabled;
+            HookLog("D3D9: RenderingThread %s (override=%d)\n", enabled ? "ON" : "OFF", mode);
+        }
+    }
+    g_renderingThreadEnabled.store(Field<uint8_t>(render, 0x3D) != 0, std::memory_order_relaxed);
+    g_originalBeginFrame(render);
 }
 
 bool IsRendererDevice(IDirect3DDevice9* device)
@@ -889,10 +916,12 @@ DWORD WINAPI StartupWatchdogThread(LPVOID)
 
 bool D3D9Reset_InstallNativeHooks()
 {
+    D3D9Reset_GetRenderingThreadOverride();
     struct Hook { uintptr_t address; void* detour; void** original; };
 #define RESET_HOOK(address, name, original) \
     { address, reinterpret_cast<void*>(&name), reinterpret_cast<void**>(&original) }
     const Hook hooks[] = {
+        RESET_HOOK(0x140537080, HookBeginFrame, g_originalBeginFrame),
         RESET_HOOK(0x1405371F0, HookResultHandler, g_originalResultHandler),
         RESET_HOOK(0x14053D690, HookApplyGraphics, g_originalApplyGraphics),
         RESET_HOOK(0x140540DB0, HookRelease, g_originalRelease),
@@ -934,6 +963,38 @@ bool D3D9Reset_InstallNativeHooks()
     } else {
         HookLog("D3D9: installed presentation controller (%zu native hooks)\n", created);
     }
+    return true;
+}
+
+int D3D9Reset_GetRenderingThreadOverride()
+{
+    static const bool loaded = [] {
+        char path[MAX_PATH] = {};
+        LaunchMenuUtils::GetSettingsPath(path, sizeof(path));
+        const int mode = static_cast<int>(GetPrivateProfileIntA(
+            "Advanced", "RenderingThreadOverride", 0, path));
+        g_renderingThreadOverride.store(mode >= -1 && mode <= 1 ? mode : 0);
+        return true;
+    }();
+    (void)loaded;
+    return g_renderingThreadOverride.load();
+}
+
+bool D3D9Reset_IsRenderingThreadEnabled()
+{
+    return g_renderingThreadEnabled.load(std::memory_order_relaxed);
+}
+
+bool D3D9Reset_SetRenderingThreadOverride(int mode)
+{
+    if (mode < -1 || mode > 1) return false;
+    D3D9Reset_GetRenderingThreadOverride();
+    char path[MAX_PATH] = {};
+    LaunchMenuUtils::GetSettingsPath(path, sizeof(path));
+    if (!IniSafe_WriteString("Advanced", "RenderingThreadOverride",
+                             mode < 0 ? "-1" : mode ? "1" : "0", path))
+        return false;
+    g_renderingThreadOverride.store(mode);
     return true;
 }
 

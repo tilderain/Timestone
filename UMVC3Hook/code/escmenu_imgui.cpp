@@ -6,6 +6,7 @@
 #include "netplay.h"
 #include "steam_lobby.h"
 #include "umvc3menu.h"
+#include "d3d9reset.h"
 #include <Windows.h>
 
 extern bool ChrSelImGui_IsOpen();
@@ -53,6 +54,27 @@ void EscMenuImGui_Draw()
     ImGui::Begin("##EscMenuBackdrop", nullptr,
                  ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
                  ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoInputs);
+    ImGui::End();
+
+    ImGui::SetNextWindowPos(ImVec2(16.0f, 16.0f), ImGuiCond_Always);
+    ImGui::Begin("Settings##EscMenu", nullptr,
+                 ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoMove |
+                 ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoSavedSettings |
+                 ImGuiWindowFlags_AlwaysAutoResize);
+    const int renderingOverride = D3D9Reset_GetRenderingThreadOverride();
+    bool renderingThread = renderingOverride < 0
+        ? D3D9Reset_IsRenderingThreadEnabled() : renderingOverride != 0;
+    static bool saveFailed = false;
+    if (ImGui::Checkbox("Rendering thread override", &renderingThread))
+        saveFailed = !D3D9Reset_SetRenderingThreadOverride(renderingThread ? 1 : 0);
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("ON adds one tick of display latency.\n"
+                          "OFF may decrease performance or other various issues.");
+    }
+    if (renderingOverride < 0)
+        ImGui::TextDisabled("Using game default until changed.");
+    if (saveFailed)
+        ImGui::TextUnformatted("Could not save; previous setting retained.");
     ImGui::End();
 
     ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f),

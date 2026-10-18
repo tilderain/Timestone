@@ -9,6 +9,7 @@
 #include <vector>
 #include "dtieditor.h"      
 #include "framestepper.h"
+#include "d3d9reset.h"
 #include <intrin.h>
 
 bool runAheadEnabled = false;
@@ -83,6 +84,17 @@ void UMVC3Menu::Draw()
 		if (ImGui::BeginTabItem("Auto Test"))
 		{
 			FrameStepper_DrawAutoTest();
+			ImGui::EndTabItem();
+		}
+		if (ImGui::BeginTabItem("Settings"))
+		{
+			int mode = D3D9Reset_GetRenderingThreadOverride() + 1;
+			static bool saveFailed = false;
+			if (ImGui::Combo("Rendering thread", &mode, "Game default\0Force OFF\0Force ON\0"))
+				saveFailed = !D3D9Reset_SetRenderingThreadOverride(mode - 1);
+			ImGui::TextWrapped("Applies between frames without restarting. OFF renders inline; "
+				"ON uses the render worker and adds one tick of display latency.");
+			if (saveFailed) ImGui::TextUnformatted("Could not save setting; previous selection retained.");
 			ImGui::EndTabItem();
 		}
 		ImGui::EndTabBar();

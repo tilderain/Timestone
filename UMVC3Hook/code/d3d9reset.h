@@ -8,6 +8,10 @@
 // UI creation job, never from arbitrary CreateDevice calls. A pending transition keeps the
 // native game stack suspended; the UI and network threads remain independent.
 bool D3D9Reset_InstallNativeHooks();
+// -1: native startup setting, 0: force inline, 1: force render worker.
+int D3D9Reset_GetRenderingThreadOverride();
+bool D3D9Reset_IsRenderingThreadEnabled();
+bool D3D9Reset_SetRenderingThreadOverride(int mode);
 [[noreturn]] void D3D9Reset_AbortStartup(const char* reason);
 
 // A successful Begin holds the plugin device lock until End. Never hold this

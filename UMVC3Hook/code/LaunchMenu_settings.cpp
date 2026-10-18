@@ -4,6 +4,7 @@
 #include "launchmenu_dark.h"
 #include "launchmenu_utils.h"
 #include "mk10utils.h"
+#include "d3d9reset.h"
 
 #include <cstdio>
 #include <cstring>
@@ -27,6 +28,7 @@ constexpr int ID_RESOLUTION = 105;
 constexpr int ID_FULLSCREEN = 106;
 constexpr int ID_DISPLAY_HEADING = 107;
 constexpr int ID_ADVANCED_HEADING = 108;
+constexpr int ID_RENDERING_THREAD = 109;
 constexpr char SETTINGS_CLASS[] = "TimestoneAdvancedConfig";
 
 bool g_settingsLoaded = false;
@@ -133,6 +135,13 @@ void LoadSettings()
 
 bool SaveSettings(HWND window)
 {
+    const int renderMode = static_cast<int>(SendMessageA(
+        GetDlgItem(window, ID_RENDERING_THREAD), CB_GETCURSEL, 0, 0)) - 1;
+    if (!D3D9Reset_SetRenderingThreadOverride(renderMode)) {
+        MessageBoxA(window, "Could not save the rendering thread setting.",
+                    "Settings", MB_OK | MB_ICONERROR);
+        return false;
+    }
     if (IsWindowEnabled(GetDlgItem(window, ID_RESOLUTION))) {
         char resolution[64] = {};
         GetDlgItemTextA(window, ID_RESOLUTION, resolution, sizeof(resolution));
@@ -276,13 +285,26 @@ LRESULT CALLBACK SettingsWndProc(HWND window, UINT message,
             18, sectionY + 56, 374, 24, window,
             reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_SINGLE_THREADED)),
             nullptr, nullptr);
+        CreateWindowA("STATIC", "Rendering thread:", WS_VISIBLE | WS_CHILD,
+            18, sectionY + 92, 130, 20, window, nullptr, nullptr, nullptr);
+        HWND renderingThread = CreateWindowA("COMBOBOX", "",
+            WS_VISIBLE | WS_CHILD | WS_TABSTOP | CBS_DROPDOWNLIST,
+            154, sectionY + 88, 238, 120, window,
+            reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_RENDERING_THREAD)), nullptr, nullptr);
+        for (const char* option : {"Game default", "Force OFF", "Force ON"})
+            SendMessageA(renderingThread, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(option));
+        SendMessageA(renderingThread, CB_SETCURSEL,
+                     D3D9Reset_GetRenderingThreadOverride() + 1, 0);
+        CreateWindowA("STATIC", "ON adds one tick of latency. OFF may decrease performance or other various issues.",
+            WS_VISIBLE | WS_CHILD, 18, sectionY + 120, 374, 34,
+            window, nullptr, nullptr, nullptr);
         HWND save = CreateWindowA(
             "BUTTON", "Save", WS_VISIBLE | WS_CHILD | WS_TABSTOP | BS_DEFPUSHBUTTON,
-            222, sectionY + 92, 82, 28, window,
+            222, sectionY + 160, 82, 28, window,
             reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_SAVE)), nullptr, nullptr);
         HWND cancel = CreateWindowA(
             "BUTTON", "Cancel", WS_VISIBLE | WS_CHILD | WS_TABSTOP | BS_PUSHBUTTON,
-            310, sectionY + 92, 82, 28, window,
+            310, sectionY + 160, 82, 28, window,
             reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_CANCEL)), nullptr, nullptr);
         ApplyDpi(window, 96, GetWindowDpi(window));
         ApplyLaunchMenuDarkTheme(window);
@@ -427,7 +449,7 @@ void ShowAdvancedConfigModal(HWND owner)
     const UINT dpi = GetWindowDpi(owner);
     wchar_t gamePath[MAX_PATH] = {};
     RECT bounds = {0, 0, MulDiv(410, dpi, 96),
-                   MulDiv(GetGameConfigPath(gamePath) ? 284 : 316, dpi, 96)};
+                   MulDiv(GetGameConfigPath(gamePath) ? 352 : 384, dpi, 96)};
     using AdjustWindowRectExForDpiFn = BOOL (WINAPI*)(LPRECT, DWORD, BOOL, DWORD, UINT);
     const auto adjustForDpi = reinterpret_cast<AdjustWindowRectExForDpiFn>(
         GetProcAddress(GetModuleHandleA("user32.dll"), "AdjustWindowRectExForDpi"));
