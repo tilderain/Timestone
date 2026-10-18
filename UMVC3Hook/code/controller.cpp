@@ -1767,7 +1767,7 @@ extern "C" void Controller_OnFrameStart()
                 {
                     if (sleepFrames > TIMESYNC_MAX_FRAME_ADVANTAGE)
                         sleepFrames = TIMESYNC_MAX_FRAME_ADVANTAGE;
-                    Sleep(sleepFrames);
+                    //Sleep(sleepFrames);
                 }
             }
         }
