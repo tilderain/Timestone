@@ -97,6 +97,22 @@ requests one backbuffer. Draw playback also calls
 for GPU completion before `Present`, preventing an unbounded native GPU queue.
 The OS compositor or driver may still contribute latency outside this code.
 
+## Runtime RenderingThread Override
+
+Timestone exposes **Rendering thread** in launcher Settings and in the live
+**F1 > Settings** tab. Choices are Game default (the renderer's startup value),
+Force OFF (inline playback), and Force ON (worker playback). The selection is
+persisted in `Timestone.ini`, `[Advanced] RenderingThreadOverride`, as -1/0/1.
+The default for a missing or invalid setting is 0 (Force OFF).
+
+The `sRender__beginFrame` hook changes only `+0x3D`, and only when `+0x38` is
+clear. An active or frame-skipped frame defers the change. The native code still
+owns the `+0x3E` latch, worker events, draw-buffer rotation, and presentation.
+The worker is created unconditionally by `sRender__initCore` and stays asleep
+when OFF; the toggle does not suspend or terminate a thread. No device reset is
+requested. Switching modes can repeat or skip a displayed tick as list age
+changes; gameplay continues normally.
+
 ## VSYNC
 
 The presentation-interval table at `0x140BA84F8` begins with:

@@ -303,6 +303,8 @@ int MH_RemoveHook(void* target) {
     assert(target != unrelated); created.erase(target); enabled.erase(target); ++removed; return MH_OK;
 }
 #define PLACEHOLDER(name, original) void name() {} void* original = nullptr;
+PLACEHOLDER(HookBeginFrame, g_originalBeginFrame)
+int D3D9Reset_GetRenderingThreadOverride() { return -1; }
 PLACEHOLDER(HookResultHandler, g_originalResultHandler)
 PLACEHOLDER(HookApplyGraphics, g_originalApplyGraphics)
 PLACEHOLDER(HookRelease, g_originalRelease)
@@ -340,7 +342,7 @@ int main() {
     assert(created == std::set<void*>{unrelated} && enabled == created);
     ResetTest(Failure::None);
     assert(D3D9Reset_InstallNativeHooks() && created.size() == 13);
-    assert(enabled.count(reinterpret_cast<void*>(0x14053D0F0)) == 1);
+    assert(enabled.count(reinterpret_cast<void*>(0x140537080)) == 1);
 
     void* vtable[17] = {};
     vtable[16] = reinterpret_cast<void*>(0x1234);
@@ -718,6 +720,49 @@ int main() {
 
 
 class D3D9ResetTests(unittest.TestCase):
+    def test_rendering_thread_changes_only_between_frames(self):
+        source = (ROOT / "UMVC3Hook/code/d3d9reset.cpp").read_text()
+        unit = MOCKS + r'''
+std::atomic<int> g_renderingThreadOverride {-1};
+std::atomic<bool> g_renderingThreadEnabled {false};
+int beginCalls = 0;
+void Begin(void*) { ++beginCalls; }
+auto g_originalBeginFrame = Begin;
+'''
+        unit += function(source, "Field") + function(source, "HookBeginFrame")
+        unit += r'''
+int main() {
+    uint8_t render[0x40] = {};
+    render[0x3D] = 1;
+    render[0x3E] = 7; // Only native beginFrame may latch this byte.
+    HookBeginFrame(render);
+    assert(render[0x3D] == 1);
+    render[0x38] = 1;
+    g_renderingThreadOverride = 0;
+    HookBeginFrame(render);
+    assert(render[0x3D] == 1); // Defer while a frame is in progress.
+    render[0x38] = 0;
+    HookBeginFrame(render);
+    assert(render[0x3D] == 0 && !g_renderingThreadEnabled.load());
+    g_renderingThreadOverride = 1;
+    HookBeginFrame(render);
+    assert(render[0x3D] == 1 && g_renderingThreadEnabled.load());
+    g_renderingThreadOverride = 0;
+    HookBeginFrame(render);
+    g_renderingThreadOverride = -1;
+    HookBeginFrame(render);
+    assert(render[0x3D] == 1 && render[0x3E] == 7 && beginCalls == 6);
+    uint8_t other[0x40] = {};
+    g_renderingThreadOverride = 1;
+    HookBeginFrame(other);
+    assert(other[0x3D] == 1);
+    g_renderingThreadOverride = -1;
+    HookBeginFrame(other);
+    assert(other[0x3D] == 0); // Restore this renderer's own native setting.
+}
+'''
+        self.run_cpp(unit)
+
     def run_cpp(self, unit):
         with tempfile.TemporaryDirectory(prefix="d3d9reset-", dir="/tmp/opencode") as tmp:
             cpp = Path(tmp) / "test.cpp"
