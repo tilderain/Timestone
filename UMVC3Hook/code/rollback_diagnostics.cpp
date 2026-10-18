@@ -155,7 +155,8 @@ void Rollback_FreezeWatchdogPollImpl()
     static uint64_t reportedHeartbeat = 0;
     const uint64_t heartbeat = g_freezeHeartbeat.load(std::memory_order_acquire);
     const uint64_t now = GetTickCount64();
-    if (!heartbeat || now - heartbeat < 5000 || heartbeat == reportedHeartbeat)
+    // Capture prediction waits before the waiting popup opens at 4000 ms.
+    if (!heartbeat || now - heartbeat < 3500 || heartbeat == reportedHeartbeat)
         return;
     reportedHeartbeat = heartbeat;
 
