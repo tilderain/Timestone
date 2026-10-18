@@ -2202,11 +2202,9 @@ static uint64_t __fastcall hkpadSlotReadDevice(uint64_t slotBase)
 static void __fastcall hkxinputToGameMask(uint64_t sPad, uint64_t slotBase, const XInputState* pState)
 {
     RollbackHookProfileScope profile(RollbackHookProfileId::XInputToMask);
-    // Multiple game instances can poll the same XInput device. Only the
-    // foreground instance should receive controller input; keyboard routing
-    // remains independent so the inactive instance can still be controlled
-    // with its own keyboard if desired.
-    if (!IsGameProcessForeground()) {
+    // Dual-training instances share XInput devices; only the foreground one
+    // should receive controller input. Other launch modes retain native routing.
+    if (GetLaunchOption() == LAUNCH_DUAL_TRAINING && !IsGameProcessForeground()) {
         static const XInputState kEmptyState = {};
         oxinputToGameMask(sPad, slotBase, &kEmptyState);
         return;
