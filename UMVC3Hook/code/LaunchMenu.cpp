@@ -225,14 +225,10 @@ static MenuAction g_menuAction = MenuAction::Cancel;
 static bool g_directConnectExpanded = false;
 static int g_lobbyTypeSelection = 0;
 static char g_lobbyName[128] = {};
-static constexpr size_t kPingSampleCapacity = 120;
-static constexpr size_t kMinPingSamples = 60;
+static constexpr size_t kMinPingSamples = 30;
 static constexpr ULONGLONG kPingSampleIntervalMs = 50;
 static ENetPeer* g_pingSamplePeer = nullptr;
-static enet_uint32 g_pingSamples[kPingSampleCapacity] = {};
 static size_t g_pingSampleCount = 0;
-static size_t g_nextPingSample = 0;
-static uint64_t g_pingSampleSum = 0;
 static ULONGLONG g_lastPingSampleTime = 0;
 
 struct AutomaticNetplaySettings {
@@ -266,8 +262,6 @@ static void ResetPingSamples(ENetPeer* peer = nullptr)
 {
     g_pingSamplePeer = peer;
     g_pingSampleCount = 0;
-    g_nextPingSample = 0;
-    g_pingSampleSum = 0;
     g_lastPingSampleTime = 0;
 }
 
@@ -292,14 +286,8 @@ static void CollectPingSample(ENetPeer* peer)
 
     const enet_uint32 pingMs = GetLaunchPingMs(peer);
     if (pingMs == 0) return;
-    if (g_pingSampleCount == kPingSampleCapacity)
-        g_pingSampleSum -= g_pingSamples[g_nextPingSample];
-    else
+    if (g_pingSampleCount < kMinPingSamples)
         ++g_pingSampleCount;
-
-    g_pingSamples[g_nextPingSample] = pingMs;
-    g_pingSampleSum += pingMs;
-    g_nextPingSample = (g_nextPingSample + 1) % kPingSampleCapacity;
 }
 
 using LaunchMenuUtils::GetSettingsPath;
@@ -1146,12 +1134,10 @@ static void UpdatePingLabel(HWND hDlg)
         snprintf(text, sizeof(text), "Ping: %u ms (Sampling %zu/%zu)",
                  currentPingMs, g_pingSampleCount, kMinPingSamples);
     } else {
-        const enet_uint32 pingMs = static_cast<enet_uint32>(
-            (g_pingSampleSum + g_pingSampleCount / 2) / g_pingSampleCount);
         const AutomaticNetplaySettings settings =
-            ApplyAutomaticNetplaySettings(pingMs);
+            ApplyAutomaticNetplaySettings(currentPingMs);
         snprintf(text, sizeof(text), "Ping: %u ms (Auto %dD/%dR)",
-                 pingMs, settings.delay, settings.rollback);
+                 currentPingMs, settings.delay, settings.rollback);
     }
     SetWindowTextA(label, text);
     ShowWindow(label, SW_SHOW);

@@ -6,6 +6,7 @@
 #include "LaunchMenu_settings.h"
 #include "netplay.h"
 #include "steam_lobby.h"
+#include "steam_transport.h"
 #include "umvc3menu.h"
 #include "d3d9reset.h"
 #include <Windows.h>
@@ -57,7 +58,36 @@ void EscMenuImGui_Draw()
                  ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoInputs);
     ImGui::End();
 
+    if (SteamTransport_IsActive()) {
+        ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x - 16.0f, 16.0f),
+                                ImGuiCond_Always, ImVec2(1.0f, 0.0f));
+        ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.08f, 0.08f, 0.07f, 0.96f));
+        ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.58f, 0.54f, 0.39f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.90f, 0.87f, 0.73f, 1.0f));
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 1.0f);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
+        ImGui::Begin("##EscMenuConnection", nullptr,
+                     ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
+                     ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoInputs |
+                     ImGuiWindowFlags_AlwaysAutoResize);
+        ImGui::Text("Steam connection: %s", SteamLobby_GetConnectionType());
+        ImGui::End();
+        ImGui::PopStyleVar(2);
+        ImGui::PopStyleColor(3);
+    }
+
     ImGui::SetNextWindowPos(ImVec2(16.0f, 16.0f), ImGuiCond_Always);
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.08f, 0.08f, 0.07f, 0.96f));
+    ImGui::PushStyleColor(ImGuiCol_TitleBg, ImVec4(0.16f, 0.16f, 0.14f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_TitleBgActive, ImVec4(0.22f, 0.22f, 0.18f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.58f, 0.54f, 0.39f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_CheckMark, ImVec4(0.90f, 0.81f, 0.48f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.90f, 0.87f, 0.73f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.22f, 0.22f, 0.19f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, ImVec4(0.40f, 0.37f, 0.25f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_FrameBgActive, ImVec4(0.55f, 0.49f, 0.30f, 1.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 1.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
     ImGui::Begin("Settings##EscMenu", nullptr,
                  ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoMove |
                  ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoSavedSettings |
@@ -66,10 +96,10 @@ void EscMenuImGui_Draw()
     bool renderingThread = renderingOverride < 0
         ? D3D9Reset_IsRenderingThreadEnabled() : renderingOverride != 0;
     static bool saveFailed = false;
-    if (ImGui::Checkbox("Rendering thread override", &renderingThread))
+    if (ImGui::Checkbox("RenderingThread", &renderingThread))
         saveFailed = !D3D9Reset_SetRenderingThreadOverride(renderingThread ? 1 : 0);
     if (ImGui::IsItemHovered()) {
-        ImGui::SetTooltip("ON adds one tick of display latency.\n"
+        ImGui::SetTooltip("ON adds one frame of display latency.\n"
                           "OFF may decrease performance or other various issues.");
     }
     if (renderingOverride < 0)
@@ -78,15 +108,17 @@ void EscMenuImGui_Draw()
     if (ImGui::Checkbox("Run entire game single-threaded", &singleThreaded))
         saveFailed = !SetGameSingleThreaded(singleThreaded);
     if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("Applies live without restarting. Rendering and resource-loading threads are separate.");
+        ImGui::SetTooltip("Sets game worker count to 1. May massively improve performance by 100%% on pcs with bad thread work, but may decrease performance by about 10% on higher end pcs");
     if (saveFailed)
         ImGui::TextUnformatted("Could not save; previous setting retained.");
     ImGui::End();
+    ImGui::PopStyleVar(2);
+    ImGui::PopStyleColor(9);
 
     ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f),
                             ImGuiCond_Always, ImVec2(0.5f, 0.5f));
     ImGui::SetNextWindowSize(ImVec2(300.0f, 0.0f));
-    ImGui::Begin("Pause Menu", nullptr,
+    ImGui::Begin("PAUSE MENU", nullptr,
                  ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize |
                  ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_AlwaysAutoResize);
 
