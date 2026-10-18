@@ -3,6 +3,7 @@
 #include "escmenu_imgui.h"
 #include "framestepper.h"
 #include "LaunchMenu.h"
+#include "LaunchMenu_settings.h"
 #include "netplay.h"
 #include "steam_lobby.h"
 #include "umvc3menu.h"
@@ -73,6 +74,11 @@ void EscMenuImGui_Draw()
     }
     if (renderingOverride < 0)
         ImGui::TextDisabled("Using game default until changed.");
+    bool singleThreaded = IsGameSingleThreaded();
+    if (ImGui::Checkbox("Run entire game single-threaded", &singleThreaded))
+        saveFailed = !SetGameSingleThreaded(singleThreaded);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Applies live without restarting. Rendering and resource-loading threads are separate.");
     if (saveFailed)
         ImGui::TextUnformatted("Could not save; previous setting retained.");
     ImGui::End();

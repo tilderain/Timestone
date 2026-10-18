@@ -10,6 +10,7 @@
 #include "dtieditor.h"      
 #include "framestepper.h"
 #include "d3d9reset.h"
+#include "LaunchMenu_settings.h"
 #include <intrin.h>
 
 bool runAheadEnabled = false;
@@ -94,6 +95,10 @@ void UMVC3Menu::Draw()
 				saveFailed = !D3D9Reset_SetRenderingThreadOverride(mode - 1);
 			ImGui::TextWrapped("Applies between frames without restarting. OFF renders inline; "
 				"ON uses the render worker and adds one tick of display latency.");
+			bool singleThreaded = IsGameSingleThreaded();
+			if (ImGui::Checkbox("Run entire game single-threaded", &singleThreaded))
+				saveFailed = !SetGameSingleThreaded(singleThreaded);
+			ImGui::TextWrapped("Sets game worker count to 1. May massively improve performance by 100% on pcs with bad thread work, but may decrease performance by about 10% on higher end pcs.");
 			if (saveFailed) ImGui::TextUnformatted("Could not save setting; previous selection retained.");
 			ImGui::EndTabItem();
 		}

@@ -563,9 +563,7 @@ static void __fastcall HookedMove(void* sMvc3Main)
         return;
     }
 
-    static bool advancedConfigApplied = false;
-    if (!advancedConfigApplied)
-        advancedConfigApplied = ApplyAdvancedLaunchConfig();
+    ApplyAdvancedLaunchConfig();
 
     // These setters rewrite live sMain timing and subsystem state. Applying
     // them from the initialization thread can race native startup before the

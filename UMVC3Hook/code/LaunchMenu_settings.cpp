@@ -6,7 +6,9 @@
 #include "launchmenu_utils.h"
 #include "mk10utils.h"
 #include "d3d9reset.h"
+#include "../kiero/minhook/include/MinHook.h"
 
+#include <atomic>
 #include <cstdio>
 #include <cstring>
 #include <cstdint>
@@ -34,7 +36,10 @@ constexpr int ID_STEAM_ROUTING = 110;
 constexpr char SETTINGS_CLASS[] = "TimestoneAdvancedConfig";
 
 bool g_settingsLoaded = false;
-bool g_runSingleThreaded = false;
+std::atomic<bool> g_runSingleThreaded{false};
+using GeometryGroupMoveFn = void(__fastcall*)(void*);
+GeometryGroupMoveFn g_geometryGroupMove = nullptr;
+bool g_threadingHooksReady = false;
 bool g_darkMode = true;
 bool g_savedDarkMode = true;
 char g_gameResolution[64] = {};
@@ -104,22 +109,19 @@ void ApplyDpi(HWND window, UINT oldDpi, UINT newDpi)
              reinterpret_cast<HANDLE>(static_cast<INT_PTR>(newDpi)));
 }
 
-template <size_t N>
-bool PatchBytes(uintptr_t address, const uint8_t (&expected)[N],
-                const uint8_t (&replacement)[N])
+void __fastcall HookGeometryGroupMove(void* group)
 {
-    uint8_t* target = reinterpret_cast<uint8_t*>(_addr(address));
-    if (memcmp(target, replacement, N) == 0) return true;
-    if (memcmp(target, expected, N) != 0) return false;
-
-    DWORD oldProtect = 0;
-    if (!VirtualProtect(target, N, PAGE_EXECUTE_READWRITE, &oldProtect))
-        return false;
-    memcpy(target, replacement, N);
-    FlushInstructionCache(GetCurrentProcess(), target, N);
-    DWORD ignored = 0;
-    VirtualProtect(target, N, oldProtect, &ignored);
-    return true;
+    if (!g_runSingleThreaded.load()) {
+        g_geometryGroupMove(group);
+        return;
+    }
+    // uGeometry2Group::mFlgMultiThread selects its native synchronous inline path.
+    // Preserve each group's preference so disabling the override restores it.
+    auto& multiThread = *(reinterpret_cast<uint8_t*>(group) + 0xB0);
+    const uint8_t saved = multiThread;
+    multiThread = 0;
+    g_geometryGroupMove(group);
+    multiThread = saved;
 }
 
 void LoadSettings()
@@ -178,7 +180,7 @@ bool SaveSettings(HWND window)
             g_gameFullscreen = fullscreen;
         }
     }
-    g_runSingleThreaded = SendMessageA(
+    const bool singleThreaded = SendMessageA(
         GetDlgItem(window, ID_SINGLE_THREADED), BM_GETCHECK, 0, 0) == BST_CHECKED;
 
     char path[MAX_PATH] = {};
@@ -200,13 +202,10 @@ bool SaveSettings(HWND window)
         g_savedDarkMode = darkMode;
     else
         HookLog("LaunchMenu: failed to save dark mode to %s\n", path);
-    if (!IniSafe_WriteString(
-            "Advanced", "EntireGameSingleThreaded",
-            g_runSingleThreaded ? "1" : "0", path)) {
-        HookLog("LaunchMenu: failed to save advanced config to %s\n", path);
-    } else {
-        HookLog("LaunchMenu: saved single-thread setting: %s\n",
-                g_runSingleThreaded ? "enabled" : "disabled");
+    if (!SetGameSingleThreaded(singleThreaded)) {
+        MessageBoxA(window, "Could not save the single-thread setting.",
+                    "Settings", MB_OK | MB_ICONERROR);
+        return false;
     }
     return true;
 }
@@ -520,50 +519,65 @@ void ShowAdvancedConfigModal(HWND owner)
 bool PrepareAdvancedLaunchConfig()
 {
     LoadSettings();
-    if (!g_runSingleThreaded) return true;
-
-    // sMain__dispatchAndWaitJobs normally queues work to the delay-job ring and
-    // waits for workers. Use its native inline branch before suppressing worker
-    // creation, otherwise an asynchronous batch would wait forever.
-    static constexpr uint8_t DELAY_DISPATCH[] = {
-        0x0F, 0x84, 0xBB, 0x00, 0x00, 0x00,
-    };
-    static constexpr uint8_t DELAY_INLINE[] = {
-        0xE9, 0xBC, 0x00, 0x00, 0x00, 0x90,
-    };
-    if (!PatchBytes(0x14095ECD9, DELAY_DISPATCH, DELAY_INLINE)) {
-        HookLog("Advanced Config: failed to force delay jobs inline\n");
+    if (g_threadingHooksReady) return true;
+    const MH_STATUS init = MH_Initialize();
+    if (init != MH_OK && init != MH_ERROR_ALREADY_INITIALIZED) {
+        HookLog("Advanced Config: MinHook initialization failed status=%d\n", (int)init);
         return false;
     }
-
-    // sMain's constructor passes the detected logical CPU count in EDX. Zero
-    // is a supported input and makes createDelayJobThread skip every worker.
-    static constexpr uint8_t LOAD_DELAY_THREAD_COUNT[] = {
-        0x8B, 0x97, 0x88, 0x00, 0x04, 0x00,
-    };
-    static constexpr uint8_t ZERO_DELAY_THREAD_COUNT[] = {
-        0x33, 0xD2, 0x90, 0x90, 0x90, 0x90,
-    };
-    if (!PatchBytes(0x14051FC6D, LOAD_DELAY_THREAD_COUNT,
-                    ZERO_DELAY_THREAD_COUNT)) {
-        HookLog("Advanced Config: failed to disable delay-job workers\n");
-        return false;
+    void* target = reinterpret_cast<void*>(_addr(0x14095EC90));
+    MH_STATUS status = MH_CreateHook(target,
+        reinterpret_cast<void*>(&HookGeometryGroupMove),
+        reinterpret_cast<void**>(&g_geometryGroupMove));
+    if (status == MH_OK) {
+        status = MH_EnableHook(target);
+        if (status != MH_OK) MH_RemoveHook(target);
     }
-
-    HookLog("Advanced Config: delay jobs forced inline; workers disabled\n");
-    return true;
+    g_threadingHooksReady = status == MH_OK;
+    HookLog("Advanced Config: live threading hook status=%d\n", (int)status);
+    return g_threadingHooksReady;
 }
 
 bool ApplyAdvancedLaunchConfig()
 {
     LoadSettings();
-    if (!g_runSingleThreaded) return true;
-
     uint64_t sMain = *(uint64_t*)_addr(0x140e177e8);
-    if (!sMain) return false;
+    if (!sMain || !g_threadingHooksReady) return false;
 
+    static bool initialized = false;
+    static bool applied = false;
+    static uint32_t savedThreadCount = 1;
+    const bool enabled = g_runSingleThreaded.load();
+    if (initialized && enabled == applied) return true;
+
+    auto& requested = *reinterpret_cast<uint32_t*>(sMain + 0xA8);
+    if (enabled) savedThreadCount = requested;
     using SetJobThreadNumFn = void(__fastcall*)(uint64_t, uint32_t);
-    ((SetJobThreadNumFn)_addr(0x140522450))(sMain, 1);
-    HookLog("Advanced Config: regular jobs forced inline\n");
+    if (enabled || initialized) {
+        ((SetJobThreadNumFn)_addr(0x140522450))(sMain, enabled ? 1 : savedThreadCount);
+        // sMain::move has already copied the count this tick. No batch is active
+        // at this game-thread boundary, so update the current count as well.
+        *reinterpret_cast<uint32_t*>(sMain + 0xA4) = requested;
+    }
+    applied = enabled;
+    initialized = true;
+    HookLog("Advanced Config: single-thread override %s\n", enabled ? "enabled" : "disabled");
+    return true;
+}
+
+bool IsGameSingleThreaded()
+{
+    LoadSettings();
+    return g_runSingleThreaded.load();
+}
+
+bool SetGameSingleThreaded(bool enabled)
+{
+    LoadSettings();
+    char path[MAX_PATH] = {};
+    GetSettingsPath(path, sizeof(path));
+    if (!IniSafe_WriteString("Advanced", "EntireGameSingleThreaded",
+                             enabled ? "1" : "0", path)) return false;
+    g_runSingleThreaded.store(enabled);
     return true;
 }
