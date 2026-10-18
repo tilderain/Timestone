@@ -17,9 +17,16 @@
 
 namespace {
 
+int ShowUpdaterMessage(const wchar_t* message, UINT flags)
+{
+    // The launch menu starts independently and can take focus after this dialog opens.
+    return MessageBoxW(nullptr, message, L"Timestone Updater",
+        flags | MB_TOPMOST | MB_SETFOREGROUND);
+}
+
 void ShowError(const wchar_t* message)
 {
-    MessageBoxW(nullptr, message, L"Timestone Updater", MB_OK | MB_ICONERROR);
+    ShowUpdaterMessage(message, MB_OK | MB_ICONERROR);
 }
 
 void ShowFileError(const wchar_t* message, DWORD error)
@@ -1016,8 +1023,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int)
                 wchar_t message[256] = {};
                 swprintf(message, 256, L"Timestone.asi %ls is already up to date.",
                     currentVersion.c_str());
-                MessageBoxW(nullptr, message, L"Timestone Updater",
-                    MB_OK | MB_ICONINFORMATION);
+                ShowUpdaterMessage(message, MB_OK | MB_ICONINFORMATION);
             }
             return 0;
         }
@@ -1026,7 +1032,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int)
             L"Timestone update is required.\n\nInstalled: %ls\nAvailable: %ls\n\n"
             L"Update now? UMVC3 will close and restart automatically.",
             currentVersion.c_str(), latestVersion.c_str());
-        if (MessageBoxW(nullptr, prompt, L"Timestone Updater",
+        if (ShowUpdaterMessage(prompt,
                 MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON1) != IDYES) {
             LocalFree(argv);
             return 0;
@@ -1172,9 +1178,9 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int)
         if (process) {
             if (localCheck) {
                 SetProgressStage(&progress, L"Waiting for UMVC3 to close...");
-                MessageBoxW(nullptr,
+                ShowUpdaterMessage(
                     L"The update is downloaded. Close UMVC3 to finish installing it.",
-                    L"Timestone Updater", MB_OK | MB_ICONINFORMATION);
+                    MB_OK | MB_ICONINFORMATION);
             }
             WaitForSingleObject(process, INFINITE);
             CloseHandle(process);
@@ -1218,8 +1224,8 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int)
         CloseProgressWindow(progress);
     } else if (localCheck) {
         CloseProgressWindow(progress);
-        MessageBoxW(nullptr, L"Timestone was updated successfully.",
-            L"Timestone Updater", MB_OK | MB_ICONINFORMATION);
+        ShowUpdaterMessage(L"Timestone was updated successfully.",
+            MB_OK | MB_ICONINFORMATION);
     } else {
         CloseProgressWindow(progress);
     }
