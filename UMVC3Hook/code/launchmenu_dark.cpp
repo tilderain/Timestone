@@ -246,14 +246,14 @@ void PaintDarkComboBox(HWND control, HDC dc)
     SelectObject(dc, oldBrush);
     DeleteObject(arrowBrush);
 
-    char text[256] = {};
-    GetWindowTextA(control, text, sizeof(text));
+    wchar_t text[256] = {};
+    GetWindowTextW(control, text, 256);
     RECT textRect = client;
     textRect.left += 6;
     textRect.right = arrow.left - 4;
     SetBkMode(dc, TRANSPARENT);
     SetTextColor(dc, IsWindowEnabled(control) ? DARK_TEXT : DARK_DISABLED);
-    DrawTextA(dc, text, -1, &textRect,
+    DrawTextW(dc, text, -1, &textRect,
               DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
     if (oldFont) SelectObject(dc, oldFont);
 }
@@ -266,11 +266,11 @@ void SelectControlFont(HWND control, HDC dc, HGDIOBJ* oldFont)
 
 void DrawButtonText(HWND control, HDC dc, RECT textRect, UINT format)
 {
-    char text[256] = {};
-    GetWindowTextA(control, text, sizeof(text));
+    wchar_t text[256] = {};
+    GetWindowTextW(control, text, 256);
     SetBkMode(dc, TRANSPARENT);
     SetTextColor(dc, IsWindowEnabled(control) ? DARK_TEXT : DARK_DISABLED);
-    DrawTextA(dc, text, -1, &textRect, format);
+    DrawTextW(dc, text, -1, &textRect, format);
 }
 
 void PaintDarkPushButton(HWND control, HDC dc, RECT client, DWORD type)
@@ -357,8 +357,8 @@ void PaintDarkCheckButton(HWND control, HDC dc, RECT client, bool radio)
 
 void PaintDarkGroupBox(HWND control, HDC dc, RECT client)
 {
-    char text[256] = {};
-    GetWindowTextA(control, text, sizeof(text));
+    wchar_t text[256] = {};
+    GetWindowTextW(control, text, 256);
     TEXTMETRICA metrics = {};
     GetTextMetricsA(dc, &metrics);
 
@@ -379,7 +379,7 @@ void PaintDarkGroupBox(HWND control, HDC dc, RECT client)
     SetBkColor(dc, DARK_BACKGROUND);
     SetBkMode(dc, OPAQUE);
     SetTextColor(dc, DARK_TEXT);
-    DrawTextA(dc, text, -1, &label, DT_LEFT | DT_SINGLELINE);
+    DrawTextW(dc, text, -1, &label, DT_LEFT | DT_SINGLELINE);
 }
 
 void PaintDarkButton(HWND control, HDC dc)
@@ -409,9 +409,9 @@ LRESULT CALLBACK DarkComboBoxProc(HWND control, UINT message, WPARAM wParam,
 {
     WNDPROC original = GetOriginalControlProc(control);
     if (!original)
-        return DefWindowProcA(control, message, wParam, lParam);
+        return DefWindowProcW(control, message, wParam, lParam);
     if (!IsLaunchMenuDarkModeEnabled() && message != WM_NCDESTROY)
-        return CallWindowProcA(original, control, message, wParam, lParam);
+        return CallWindowProcW(original, control, message, wParam, lParam);
 
     if (message == WM_PAINT) {
         PAINTSTRUCT paint = {};
@@ -427,7 +427,7 @@ LRESULT CALLBACK DarkComboBoxProc(HWND control, UINT message, WPARAM wParam,
     if (message == WM_ERASEBKGND)
         return TRUE;
 
-    const LRESULT result = CallWindowProcA(original, control, message, wParam, lParam);
+    const LRESULT result = CallWindowProcW(original, control, message, wParam, lParam);
     if (message == WM_NCPAINT || message == WM_SETFOCUS ||
         message == WM_KILLFOCUS || message == WM_ENABLE)
         PaintDarkControlBorder(control);
@@ -447,9 +447,9 @@ LRESULT CALLBACK DarkHeaderProc(HWND control, UINT message, WPARAM wParam,
 {
     WNDPROC original = GetOriginalControlProc(control);
     if (!original)
-        return DefWindowProcA(control, message, wParam, lParam);
+        return DefWindowProcW(control, message, wParam, lParam);
     if (!IsLaunchMenuDarkModeEnabled() && message != WM_NCDESTROY)
-        return CallWindowProcA(original, control, message, wParam, lParam);
+        return CallWindowProcW(original, control, message, wParam, lParam);
 
     if (message == WM_PAINT || message == WM_PRINTCLIENT) {
         PAINTSTRUCT paint = {};
@@ -494,7 +494,7 @@ LRESULT CALLBACK DarkHeaderProc(HWND control, UINT message, WPARAM wParam,
     if (message == WM_ERASEBKGND)
         return TRUE;
 
-    const LRESULT result = CallWindowProcA(original, control, message, wParam, lParam);
+    const LRESULT result = CallWindowProcW(original, control, message, wParam, lParam);
     if (message == WM_NCDESTROY)
         RemovePropA(control, DARK_ORIGINAL_PROC_PROP);
     return result;
@@ -505,11 +505,11 @@ LRESULT CALLBACK DarkBorderControlProc(HWND control, UINT message, WPARAM wParam
 {
     WNDPROC original = GetOriginalControlProc(control);
     if (!original)
-        return DefWindowProcA(control, message, wParam, lParam);
+        return DefWindowProcW(control, message, wParam, lParam);
     if (!IsLaunchMenuDarkModeEnabled() && message != WM_NCDESTROY)
-        return CallWindowProcA(original, control, message, wParam, lParam);
+        return CallWindowProcW(original, control, message, wParam, lParam);
 
-    const LRESULT result = CallWindowProcA(original, control, message, wParam, lParam);
+    const LRESULT result = CallWindowProcW(original, control, message, wParam, lParam);
     if (message == WM_PAINT || message == WM_NCPAINT ||
         message == WM_SETFOCUS || message == WM_KILLFOCUS ||
         message == WM_ENABLE)
@@ -571,9 +571,9 @@ LRESULT CALLBACK DarkButtonProc(HWND control, UINT message, WPARAM wParam,
 {
     WNDPROC original = GetOriginalControlProc(control);
     if (!original)
-        return DefWindowProcA(control, message, wParam, lParam);
+        return DefWindowProcW(control, message, wParam, lParam);
     if (!IsLaunchMenuDarkModeEnabled() && message != WM_NCDESTROY)
-        return CallWindowProcA(original, control, message, wParam, lParam);
+        return CallWindowProcW(original, control, message, wParam, lParam);
 
     if (message == WM_PAINT) {
         PAINTSTRUCT paint = {};
@@ -589,7 +589,7 @@ LRESULT CALLBACK DarkButtonProc(HWND control, UINT message, WPARAM wParam,
     if (message == WM_ERASEBKGND)
         return TRUE;
 
-    const LRESULT result = CallWindowProcA(original, control, message, wParam, lParam);
+    const LRESULT result = CallWindowProcW(original, control, message, wParam, lParam);
     if (message == WM_MOUSEMOVE) {
         TRACKMOUSEEVENT tracking = {sizeof(tracking), TME_LEAVE, control, 0};
         TrackMouseEvent(&tracking);
@@ -610,10 +610,10 @@ void SubclassDarkControl(HWND control, WNDPROC darkProc)
 {
     if (GetPropA(control, DARK_ORIGINAL_PROC_PROP)) return;
 
-    WNDPROC original = reinterpret_cast<WNDPROC>(GetWindowLongPtrA(control, GWLP_WNDPROC));
+    WNDPROC original = reinterpret_cast<WNDPROC>(GetWindowLongPtrW(control, GWLP_WNDPROC));
     if (!original) return;
     SetPropA(control, DARK_ORIGINAL_PROC_PROP, reinterpret_cast<HANDLE>(original));
-    if (!SetWindowLongPtrA(control, GWLP_WNDPROC,
+    if (!SetWindowLongPtrW(control, GWLP_WNDPROC,
                            reinterpret_cast<LONG_PTR>(darkProc))) {
         const DWORD error = GetLastError();
         if (error != 0) {

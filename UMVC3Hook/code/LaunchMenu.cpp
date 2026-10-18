@@ -1266,6 +1266,9 @@ static bool IsValidChatText(const char* text, size_t length)
 {
     if (!text || length == 0 || length > LAUNCH_CHAT_MAX_MESSAGE)
         return false;
+    if (!MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, text,
+                             static_cast<int>(length), nullptr, 0))
+        return false;
     for (size_t i = 0; i < length; ++i) {
         const unsigned char value = static_cast<unsigned char>(text[i]);
         if (value < 0x20 || value == 0x7f)
@@ -1278,17 +1281,18 @@ static void AppendChatText(const char* text)
 {
     if (!g_hChatHistory || !text) return;
 
-    const int currentLength = GetWindowTextLengthA(g_hChatHistory);
-    const int addedLength = static_cast<int>(strlen(text));
+    const std::wstring wide = LaunchMenuUtils::Utf8ToWide(text);
+    const int currentLength = GetWindowTextLengthW(g_hChatHistory);
+    const int addedLength = static_cast<int>(wide.size());
     const int excess = currentLength + addedLength - kChatTranscriptLimit;
     if (excess > 0) {
         SendMessageA(g_hChatHistory, EM_SETSEL, 0, excess);
-        SendMessageA(g_hChatHistory, EM_REPLACESEL, FALSE,
-                     reinterpret_cast<LPARAM>(""));
+        SendMessageW(g_hChatHistory, EM_REPLACESEL, FALSE,
+                     reinterpret_cast<LPARAM>(L""));
     }
     SendMessageA(g_hChatHistory, EM_SETSEL, -1, -1);
-    SendMessageA(g_hChatHistory, EM_REPLACESEL, FALSE,
-                 reinterpret_cast<LPARAM>(text));
+    SendMessageW(g_hChatHistory, EM_REPLACESEL, FALSE,
+                 reinterpret_cast<LPARAM>(wide.c_str()));
 }
 
 static void AppendChatMessage(const char* sender, const char* message, size_t length)
@@ -1305,7 +1309,7 @@ static void SendChatMessage()
         return;
 
     char message[LAUNCH_CHAT_MAX_MESSAGE + 1] = {};
-    const int length = GetWindowTextA(g_hChatInput, message, sizeof(message));
+    const int length = LaunchMenuUtils::GetText(g_hChatInput, message, sizeof(message));
     if (!IsValidChatText(message, length))
         return;
 
@@ -1497,7 +1501,7 @@ static void ShowChatWindow(HWND hDlg)
     char connection[sizeof(g_chatOpponentName) + 40];
     snprintf(connection, sizeof(connection), "You are now connected to %s",
              g_chatOpponentName);
-    SetWindowTextA(GetDlgItem(g_hChatWindow, ID_CHAT_CONNECTION), connection);
+    LaunchMenuUtils::SetText(GetDlgItem(g_hChatWindow, ID_CHAT_CONNECTION), connection);
     const bool hasSteamPeer = SteamLobby_GetPeerSteamId() != 0;
     HWND profileButton = GetDlgItem(g_hChatWindow, ID_CHAT_PROFILE);
     LayoutChatControls(g_hChatWindow);
@@ -1530,8 +1534,8 @@ static LRESULT CALLBACK ChatInputWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPA
     if (wParam == VK_RETURN && msg == WM_CHAR)
         return 0;
     return g_chatInputWndProc
-        ? CallWindowProcA(g_chatInputWndProc, hWnd, msg, wParam, lParam)
-        : DefWindowProcA(hWnd, msg, wParam, lParam);
+        ? CallWindowProcW(g_chatInputWndProc, hWnd, msg, wParam, lParam)
+        : DefWindowProcW(hWnd, msg, wParam, lParam);
 }
 
 static LRESULT CALLBACK ChatWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
@@ -1541,26 +1545,26 @@ static LRESULT CALLBACK ChatWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
         CreateWindowA("STATIC", "", WS_CHILD | SS_BITMAP | SS_CENTERIMAGE,
                       12, 12, 64, 64, hWnd,
                       reinterpret_cast<HMENU>(ID_CHAT_AVATAR), nullptr, nullptr);
-        CreateWindowA("STATIC", "", WS_VISIBLE | WS_CHILD,
+        CreateWindowW(L"STATIC", L"", WS_VISIBLE | WS_CHILD,
                       12, 12, 336, 34, hWnd,
                       reinterpret_cast<HMENU>(ID_CHAT_CONNECTION), nullptr, nullptr);
         CreateWindowA("BUTTON", "Open Opponent Steam Profile",
                       WS_VISIBLE | WS_CHILD | WS_TABSTOP | BS_PUSHBUTTON,
                       12, 50, 336, 28, hWnd,
                       reinterpret_cast<HMENU>(ID_CHAT_PROFILE), nullptr, nullptr);
-        g_hChatHistory = CreateWindowExA(
-            WS_EX_CLIENTEDGE, "EDIT", "",
+        g_hChatHistory = CreateWindowExW(
+            WS_EX_CLIENTEDGE, L"EDIT", L"",
             WS_VISIBLE | WS_CHILD | WS_VSCROLL | ES_LEFT | ES_MULTILINE |
                 ES_AUTOVSCROLL | ES_READONLY,
             12, 86, 336, 260, hWnd,
             reinterpret_cast<HMENU>(ID_CHAT_HISTORY), nullptr, nullptr);
-        g_hChatInput = CreateWindowExA(
-            WS_EX_CLIENTEDGE, "EDIT", "",
+        g_hChatInput = CreateWindowExW(
+            WS_EX_CLIENTEDGE, L"EDIT", L"",
             WS_VISIBLE | WS_CHILD | WS_TABSTOP | ES_AUTOHSCROLL,
             12, 354, 256, 26, hWnd,
             reinterpret_cast<HMENU>(ID_CHAT_INPUT), nullptr, nullptr);
         SendMessageA(g_hChatInput, EM_SETLIMITTEXT, LAUNCH_CHAT_MAX_MESSAGE, 0);
-        g_chatInputWndProc = reinterpret_cast<WNDPROC>(SetWindowLongPtrA(
+        g_chatInputWndProc = reinterpret_cast<WNDPROC>(SetWindowLongPtrW(
             g_hChatInput, GWLP_WNDPROC,
             reinterpret_cast<LONG_PTR>(ChatInputWndProc)));
         CreateWindowA("BUTTON", "Send",
@@ -1952,9 +1956,9 @@ static MenuResult ShowLaunchMenuWindow(bool battleSetupOnly, bool compactMode)
         HookLog("UMVC3Hook: Launch window created successfully\n");
         MSG msg = {};
         BOOL messageResult = 0;
-        while ((messageResult = GetMessage(&msg, NULL, 0, 0)) > 0) {
+        while ((messageResult = GetMessageW(&msg, NULL, 0, 0)) > 0) {
             TranslateMessage(&msg);
-            DispatchMessage(&msg);
+            DispatchMessageW(&msg);
         }
         if (messageResult < 0) {
             HookLog("UMVC3Hook: Launch window message loop failed error=%lu; continuing normal launch\n",
@@ -2571,11 +2575,11 @@ static INT_PTR HandleLaunchTimer(HWND hDlg, WPARAM wParam)
                             MB_OK | MB_ICONERROR);
             HWND hSteamStatus = GetDlgItem(hDlg, ID_STEAM_STATUS);
             if (!SteamLobby_HasLobby()) g_lobbyLinkCopiedUntil = 0;
-            if (hSteamStatus) SetWindowTextA(hSteamStatus,
+            if (hSteamStatus) LaunchMenuUtils::SetText(hSteamStatus,
                 GetTickCount64() < g_lobbyLinkCopiedUntil ? "Copied!" : SteamLobby_GetStatus());
             if (g_battleSetupOnly && !g_dialogConfig.enetPeer) {
                 HWND hNetStatus = GetDlgItem(hDlg, ID_NET_STATUS);
-                if (hNetStatus) SetWindowTextA(hNetStatus, SteamLobby_GetStatus());
+                if (hNetStatus) LaunchMenuUtils::SetText(hNetStatus, SteamLobby_GetStatus());
             }
             UpdateSteamLobbyButton(hDlg);
 
@@ -2600,16 +2604,23 @@ static INT_PTR HandleLaunchTimer(HWND hDlg, WPARAM wParam)
                             snprintf(pingText, sizeof(pingText), "Unavailable");
                         }
 
-                        LVITEMA item = {};
+                        std::wstring name = LaunchMenuUtils::Utf8ToWide(SteamLobby_GetResultName(i));
+                        std::wstring username = LaunchMenuUtils::Utf8ToWide(SteamLobby_GetResultUsername(i));
+                        std::wstring pingLabel = LaunchMenuUtils::Utf8ToWide(pingText);
+                        LVITEMW item = {};
                         item.mask = LVIF_TEXT | LVIF_PARAM;
                         item.iItem = static_cast<int>(i);
-                        item.pszText = const_cast<char*>(SteamLobby_GetResultName(i));
+                        item.pszText = name.data();
                         item.lParam = static_cast<LPARAM>(lobbyId);
-                        int row = ListView_InsertItem(hList, &item);
+                        int row = static_cast<int>(SendMessageW(hList, LVM_INSERTITEMW, 0,
+                            reinterpret_cast<LPARAM>(&item)));
                         if (row >= 0) {
-                            ListView_SetItemText(hList, row, 1,
-                                const_cast<char*>(SteamLobby_GetResultUsername(i)));
-                            ListView_SetItemText(hList, row, 2, pingText);
+                            item.iSubItem = 1;
+                            item.pszText = username.data();
+                            SendMessageW(hList, LVM_SETITEMTEXTW, row, reinterpret_cast<LPARAM>(&item));
+                            item.iSubItem = 2;
+                            item.pszText = pingLabel.data();
+                            SendMessageW(hList, LVM_SETITEMTEXTW, row, reinterpret_cast<LPARAM>(&item));
                         }
                     }
                 }
@@ -2634,7 +2645,7 @@ static INT_PTR HandleLaunchTimer(HWND hDlg, WPARAM wParam)
                     snprintf(peerStatus, sizeof(peerStatus),
                              "Steam connected: %s. Make your selection, NOW",
                              SteamLobby_GetPeerUsername());
-                    SetWindowTextA(hStatus, peerStatus);
+                    LaunchMenuUtils::SetText(hStatus, peerStatus);
                     g_statusColor = steamIsHost ? RGB(0, 120, 215) : RGB(200, 180, 0);
                     InvalidateRect(hStatus, NULL, TRUE);
                 }
@@ -3319,8 +3330,9 @@ static INT_PTR HandleLaunchCommand(HWND hDlg, WPARAM wParam, LPARAM lParam)
 
         case ID_STEAM_NAME:
             if (HIWORD(wParam) == EN_KILLFOCUS) {
-                GetWindowTextA(reinterpret_cast<HWND>(lParam), g_lobbyName,
-                               sizeof(g_lobbyName));
+                if (LaunchMenuUtils::GetText(reinterpret_cast<HWND>(lParam), g_lobbyName,
+                                            sizeof(g_lobbyName)) < 0)
+                    return 0;
                 SaveLobbyName();
                 SteamLobby_SetName(g_lobbyName);
             }
@@ -3339,8 +3351,12 @@ static INT_PTR HandleLaunchCommand(HWND hDlg, WPARAM wParam, LPARAM lParam)
             if (SteamLobby_HasLobby())
                 CleanupNetwork(hDlg, true);
             else {
-                GetWindowTextA(GetDlgItem(hDlg, ID_STEAM_NAME), g_lobbyName,
-                               sizeof(g_lobbyName));
+                if (LaunchMenuUtils::GetText(GetDlgItem(hDlg, ID_STEAM_NAME), g_lobbyName,
+                                            sizeof(g_lobbyName)) < 0) {
+                    MessageBoxW(hDlg, L"Lobby names must fit within 127 UTF-8 bytes.",
+                                L"Lobby Name Too Long", MB_OK | MB_ICONWARNING);
+                    return 0;
+                }
                 SaveLobbyName();
                 SteamLobby_SetName(g_lobbyName);
                 int selection = static_cast<int>(SendMessageA(

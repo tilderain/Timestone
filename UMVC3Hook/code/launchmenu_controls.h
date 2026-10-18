@@ -3,6 +3,7 @@
 #include <Windows.h>
 #include <commctrl.h>
 #include <cstring>
+#include "launchmenu_utils.h"
 
 // Keep styles explicit: visibility, tab order and owner drawing vary by control.
 namespace LaunchMenuControls {
@@ -41,7 +42,9 @@ inline void SetInteractiveControlsEnabled(HWND parent, bool enabled)
 inline HWND Create(HWND parent, const char* className, const char* text,
                    DWORD style, int x, int y, int width, int height, int id)
 {
-    return CreateWindowA(className, text, style, x, y, width, height, parent,
+    return CreateWindowW(LaunchMenuUtils::Utf8ToWide(className).c_str(),
+                        LaunchMenuUtils::Utf8ToWide(text).c_str(),
+                        style, x, y, width, height, parent,
                         reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)),
                         nullptr, nullptr);
 }
@@ -100,7 +103,7 @@ struct LobbyColumn {
 inline HWND LobbyList(HWND parent, int id, int x, int y, int width, int height,
                       const LobbyColumn (&columns)[3])
 {
-    HWND list = CreateWindowExA(WS_EX_CLIENTEDGE, WC_LISTVIEWA, "",
+    HWND list = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"",
         WS_VISIBLE | WS_CHILD | WS_TABSTOP | WS_VSCROLL |
             LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS,
         x, y, width, height, parent,

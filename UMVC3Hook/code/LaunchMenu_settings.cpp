@@ -506,10 +506,10 @@ void ShowAdvancedConfigModal(HWND owner)
     ShowWindow(modal, SW_SHOW);
     UpdateWindow(modal);
     MSG message = {};
-    while (IsWindow(modal) && GetMessageA(&message, nullptr, 0, 0) > 0) {
+    while (IsWindow(modal) && GetMessageW(&message, nullptr, 0, 0) > 0) {
         if (!IsDialogMessageA(modal, &message)) {
             TranslateMessage(&message);
-            DispatchMessageA(&message);
+            DispatchMessageW(&message);
         }
     }
     EnableWindow(owner, TRUE);
