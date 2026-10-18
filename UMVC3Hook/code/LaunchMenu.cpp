@@ -247,10 +247,11 @@ static AutomaticNetplaySettings GetAutomaticNetplaySettings(enet_uint32 pingMs)
     if (pingMs < 48)  return {3, 2};
     if (pingMs < 60)  return {3, 3};
     if (pingMs < 100) return {3, 7};
-    if (pingMs < 140) return {3, 7};
-    if (pingMs < 190) return {4, 7};
-    if (pingMs < 250) return {5, 7};
-    return {6, 7};
+    if (pingMs < 130) return {3, 7};
+    if (pingMs < 150) return {4, 7};
+    if (pingMs < 175) return {5, 7};
+    if (pingMs < 200) return {6, 7};
+    return {7, 7};
 }
 
 static AutomaticNetplaySettings ApplyAutomaticNetplaySettings(enet_uint32 pingMs)

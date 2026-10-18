@@ -1876,7 +1876,7 @@ void FrameStepper_Draw()
             if (g_statusHudMode == 1) {
                 ImGui::TextColored(color, "Ping %u", Netplay_GetAverageRTT() / 2);
                 ImGui::TextColored(color, "FPS %.0f", GetGameUpdatesPerSecond(currentFrame));
-                ImGui::TextColored(color, "D%d R%d", curDelay, curRollback);
+                ImGui::TextColored(color, "%dD %dR", curDelay, curRollback);
             } else {
                 const char* role = Netplay_IsHost() ? "HOST" : "CLIENT";
                 char roleLabel[32];
