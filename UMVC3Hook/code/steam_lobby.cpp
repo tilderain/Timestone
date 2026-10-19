@@ -465,7 +465,7 @@ bool TakeCallResult(T& result, int callbackId)
     return true;
 }
 
-void ConnectionOptions(SteamNetworkingConfigValue_t (&options)[3])
+void ConnectionOptions(SteamNetworkingConfigValue_t (&options)[4])
 {
     options[0] = {};
     options[0].m_eValue = k_ESteamNetworkingConfig_SymmetricConnect;
@@ -484,6 +484,11 @@ void ConnectionOptions(SteamNetworkingConfigValue_t (&options)[3])
     options[2].m_eValue = k_ESteamNetworkingConfig_SendTimeSincePreviousPacket;
     options[2].m_eDataType = k_ESteamNetworkingConfig_Int32;
     options[2].m_val.m_int32 = 1;
+    // Prefer SDR unless ICE's route score is better by at least 34 ms.
+    options[3] = {};
+    options[3].m_eValue = k_ESteamNetworkingConfig_P2P_Transport_ICE_Penalty;
+    options[3].m_eDataType = k_ESteamNetworkingConfig_Int32;
+    options[3].m_val.m_int32 = 42;
 }
 
 void RefreshPeerUsername()
@@ -516,13 +521,13 @@ void StartPeerConnection(uint64_t remoteId)
     }
     RefreshPeerUsername();
 
-    SteamNetworkingConfigValue_t options[3];
+    SteamNetworkingConfigValue_t options[4];
     ConnectionOptions(options);
     if (g_listenSocket == k_HSteamListenSocket_Invalid) {
         HookLog("SteamLobby: routing policy=%s ICE candidates=%d\n",
                 options[1].m_val.m_int32 ? "Automatic" : "Relay Only",
                 options[1].m_val.m_int32);
-        g_listenSocket = g_sockets->CreateListenSocketP2P(733, 3, options);
+        g_listenSocket = g_sockets->CreateListenSocketP2P(733, 4, options);
         if (g_listenSocket == k_HSteamListenSocket_Invalid) {
             SetStatus("Failed to create Steam P2P listen socket");
             return;
@@ -534,7 +539,7 @@ void StartPeerConnection(uint64_t remoteId)
     identity.m_cbSize = sizeof(uint64_t);
     identity.data.m_steamID64 = remoteId;
     ++g_connectionAttempt;
-    g_connection = g_sockets->ConnectP2P(identity, 733, 3, options);
+    g_connection = g_sockets->ConnectP2P(identity, 733, 4, options);
     if (g_connection == k_HSteamNetConnection_Invalid) {
         g_nextConnectionAttempt = GetTickCount64() + 1000;
         snprintf(g_status, sizeof(g_status),
