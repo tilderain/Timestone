@@ -1871,10 +1871,30 @@ void FrameStepper_Draw()
                 : ImVec4(0.3f, 0.7f, 1.0f, 1.0f);   // blue for client
             int32_t curDelay = Controller_GetDelayFrames();
             int32_t curRollback = Controller_GetRollbackFrames();
+            constexpr float lossWarningPercent = 2.5f;
+            constexpr int32_t jitterWarningMs = 80;
+            const ImVec4 warningColor(1.0f, 0.2f, 0.2f, 1.0f);
+            const float lossPercent = Netplay_GetPacketLoss();
+            const int32_t jitterMs = Netplay_GetJitter();
             if (g_statusHudMode == 1) {
                 ImGui::TextColored(color, "Ping %u", Netplay_GetAverageRTT() / 2);
                 ImGui::TextColored(color, "FPS %.0f", GetGameUpdatesPerSecond(currentFrame));
                 ImGui::TextColored(color, "%dD %dR", curDelay, curRollback);
+                if (lossPercent >= lossWarningPercent || jitterMs > jitterWarningMs) {
+                    char warning[96];
+                    if (lossPercent >= lossWarningPercent && jitterMs > jitterWarningMs)
+                        snprintf(warning, sizeof(warning), "%.1f%% packet loss, %dms jitter",
+                                 lossPercent, jitterMs);
+                    else if (lossPercent >= lossWarningPercent)
+                        snprintf(warning, sizeof(warning), "%.1f%% packet loss", lossPercent);
+                    else
+                        snprintf(warning, sizeof(warning), "%dms jitter", jitterMs);
+                    const ImVec2 pos = ImGui::GetWindowPos();
+                    ImGui::GetForegroundDrawList()->AddText(
+                        ImVec2(pos.x, pos.y + ImGui::GetWindowSize().y + 4.0f),
+                        ImGui::ColorConvertFloat4ToU32(warningColor),
+                        warning);
+                }
             } else {
                 const char* role = Netplay_IsHost() ? "HOST" : "CLIENT";
                 char roleLabel[32];
@@ -1884,10 +1904,6 @@ void FrameStepper_Draw()
                     roleLabelCenterX = ImGui::GetCursorPosX() + 75.f;
                 ImGui::SetCursorPosX(roleLabelCenterX - ImGui::CalcTextSize(roleLabel).x * 0.5f);
                 ImGui::TextColored(color, "%s", roleLabel);
-                constexpr float lossWarningPercent = 2.5f;
-                constexpr int32_t jitterWarningMs = 100;
-                const ImVec4 warningColor(1.0f, 0.2f, 0.2f, 1.0f);
-                const float lossPercent = Netplay_GetPacketLoss();
                 ImGui::TextColored(color, "Ping: %ums", Netplay_GetRTT() / 2);
                 ImGui::TextColored(color, "FPS: %.1f",
                                    GetGameUpdatesPerSecond(currentFrame));
@@ -1896,7 +1912,6 @@ void FrameStepper_Draw()
                                        "Loss: %.1f%%", lossPercent);
                 else
                     ImGui::TextColored(color, "Loss: N/A");
-                const int32_t jitterMs = Netplay_GetJitter();
                 if (jitterMs >= 0)
                     ImGui::TextColored(jitterMs > jitterWarningMs ? warningColor : color,
                                        "Jitter: %dms", jitterMs);
