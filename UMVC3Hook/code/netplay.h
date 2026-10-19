@@ -275,6 +275,9 @@ uint32_t Netplay_GetAverageRTT();
 // Transport loss estimate in percent, or -1 if unavailable. Steam includes reordering.
 float Netplay_GetPacketLoss();
 
+// Steam peer-reported loss/reordering in percent, or -1 if unavailable.
+float Netplay_GetRemotePacketLoss();
+
 // Peak packet jitter over a 500 ms window, in milliseconds, or -1 if unavailable.
 int32_t Netplay_GetJitter();
 

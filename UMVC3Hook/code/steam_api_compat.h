@@ -37,6 +37,7 @@ enum ESteamNetworkingIdentityType : int32_t {
 enum ESteamNetworkingConfigValue : int32_t {
     k_ESteamNetworkingConfig_Invalid = 0,
     k_ESteamNetworkingConfig_SymmetricConnect = 37,
+    k_ESteamNetworkingConfig_SendTimeSincePreviousPacket = 59,
     k_ESteamNetworkingConfig_P2P_Transport_ICE_Enable = 104,
 };
 

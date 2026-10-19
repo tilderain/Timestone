@@ -1460,6 +1460,12 @@ float Netplay_GetPacketLoss()
     return g_running ? g_packetLoss.load() : -1.0f;
 }
 
+float Netplay_GetRemotePacketLoss()
+{
+    return g_running && SteamTransport_IsActive()
+        ? SteamTransport_GetRemotePacketLoss() : -1.0f;
+}
+
 int32_t Netplay_GetJitter()
 {
     if (g_running && SteamTransport_IsActive())

@@ -12,5 +12,6 @@ void SteamTransport_Pump();
 bool SteamTransport_IsActive();
 uint32_t SteamTransport_GetRTT();
 float SteamTransport_GetPacketLoss();
+float SteamTransport_GetRemotePacketLoss();
 int32_t SteamTransport_GetJitter();
 void SteamTransport_Shutdown();

@@ -17,6 +17,7 @@ static std::atomic<bool> g_bridgeThreadStarted{false};
 static std::atomic_flag g_bridgePumpLock = ATOMIC_FLAG_INIT;
 static std::atomic<uint32_t> g_steamRTT{0};
 static std::atomic<float> g_steamPacketLoss{-1.0f};
+static std::atomic<float> g_steamRemotePacketLoss{-1.0f};
 static std::atomic<int32_t> g_steamJitter{-1};
 static constexpr DWORD JITTER_WINDOW_MS = 500;
 static int32_t g_jitterWindowPeakUsec = -1;
@@ -76,6 +77,9 @@ static bool PumpBridgeOnce()
         const float quality = status.m_flConnectionQualityLocal;
         g_steamPacketLoss = quality >= 0.0f && quality <= 1.0f
             ? (1.0f - quality) * 100.0f : -1.0f;
+        const float remoteQuality = status.m_flConnectionQualityRemote;
+        g_steamRemotePacketLoss = remoteQuality >= 0.0f && remoteQuality <= 1.0f
+            ? (1.0f - remoteQuality) * 100.0f : -1.0f;
         // Steam clears its jitter peak on each poll. Aggregate for a readable HUD.
         if (status.m_usecMaxJitter > g_jitterWindowPeakUsec)
             g_jitterWindowPeakUsec = status.m_usecMaxJitter;
@@ -96,6 +100,7 @@ static bool PumpBridgeOnce()
     }
     else {
         g_steamPacketLoss = -1.0f;
+        g_steamRemotePacketLoss = -1.0f;
     }
     g_bridgePumpLock.clear();
     return true;
@@ -191,6 +196,7 @@ bool SteamTransport_CreateBridge(bool isHost, ISteamNetworkingSockets* sockets,
     g_connection = connection;
     g_steamRTT = 0;
     g_steamPacketLoss = -1.0f;
+    g_steamRemotePacketLoss = -1.0f;
     g_steamJitter = -1;
     g_jitterWindowPeakUsec = -1;
     g_jitterWindowStartTick = GetTickCount();
@@ -231,6 +237,11 @@ float SteamTransport_GetPacketLoss()
     return g_steamPacketLoss.load();
 }
 
+float SteamTransport_GetRemotePacketLoss()
+{
+    return g_steamRemotePacketLoss.load();
+}
+
 int32_t SteamTransport_GetJitter()
 {
     return g_steamJitter.load();
@@ -264,5 +275,6 @@ void SteamTransport_Shutdown()
     g_bridgeThreadStarted = false;
     g_steamRTT = 0;
     g_steamPacketLoss = -1.0f;
+    g_steamRemotePacketLoss = -1.0f;
     g_steamJitter = -1;
 }

@@ -1839,6 +1839,24 @@ void FrameStepper_Draw()
     }
 
     // --- Netplay status and optional P1/P2 input window (top-left) ---
+    constexpr float lossWarningPercent = 2.5f;
+    constexpr int32_t jitterWarningMs = 80;
+    const ImVec4 warningColor(1.0f, 0.2f, 0.2f, 1.0f);
+    const float lossPercent = Netplay_GetPacketLoss();
+    const float remoteLossPercent = Netplay_GetRemotePacketLoss();
+    const bool lossWarning = lossPercent >= lossWarningPercent ||
+        remoteLossPercent >= lossWarningPercent;
+    char localLoss[24], remoteLoss[24], lossText[56];
+    if (lossPercent >= 0.0f)
+        snprintf(localLoss, sizeof(localLoss), "%.1f%%", lossPercent);
+    else
+        snprintf(localLoss, sizeof(localLoss), "N/A");
+    if (remoteLossPercent >= 0.0f)
+        snprintf(remoteLoss, sizeof(remoteLoss), "%.1f%%", remoteLossPercent);
+    else
+        snprintf(remoteLoss, sizeof(remoteLoss), "N/A");
+    snprintf(lossText, sizeof(lossText), "%s / %s", localLoss, remoteLoss);
+    ImVec2 warningPos(12.0f, 12.0f);
     if (Netplay_IsActive() && Controller_GetNetFrameCount() >= 0 &&
         g_statusHudMode != 0)
     {
@@ -1871,30 +1889,13 @@ void FrameStepper_Draw()
                 : ImVec4(0.3f, 0.7f, 1.0f, 1.0f);   // blue for client
             int32_t curDelay = Controller_GetDelayFrames();
             int32_t curRollback = Controller_GetRollbackFrames();
-            constexpr float lossWarningPercent = 2.5f;
-            constexpr int32_t jitterWarningMs = 80;
-            const ImVec4 warningColor(1.0f, 0.2f, 0.2f, 1.0f);
-            const float lossPercent = Netplay_GetPacketLoss();
             const int32_t jitterMs = Netplay_GetJitter();
             if (g_statusHudMode == 1) {
                 ImGui::TextColored(color, "Ping %u", Netplay_GetAverageRTT() / 2);
                 ImGui::TextColored(color, "FPS %.0f", GetGameUpdatesPerSecond(currentFrame));
                 ImGui::TextColored(color, "%dD %dR", curDelay, curRollback);
-                if (lossPercent >= lossWarningPercent || jitterMs > jitterWarningMs) {
-                    char warning[96];
-                    if (lossPercent >= lossWarningPercent && jitterMs > jitterWarningMs)
-                        snprintf(warning, sizeof(warning), "%.1f%% packet loss, %dms jitter",
-                                 lossPercent, jitterMs);
-                    else if (lossPercent >= lossWarningPercent)
-                        snprintf(warning, sizeof(warning), "%.1f%% packet loss", lossPercent);
-                    else
-                        snprintf(warning, sizeof(warning), "%dms jitter", jitterMs);
-                    const ImVec2 pos = ImGui::GetWindowPos();
-                    ImGui::GetForegroundDrawList()->AddText(
-                        ImVec2(pos.x, pos.y + ImGui::GetWindowSize().y + 4.0f),
-                        ImGui::ColorConvertFloat4ToU32(warningColor),
-                        warning);
-                }
+                const ImVec2 pos = ImGui::GetWindowPos();
+                warningPos = ImVec2(pos.x, pos.y + ImGui::GetWindowSize().y + 4.0f);
             } else {
                 const char* role = Netplay_IsHost() ? "HOST" : "CLIENT";
                 char roleLabel[32];
@@ -1907,11 +1908,8 @@ void FrameStepper_Draw()
                 ImGui::TextColored(color, "Ping: %ums", Netplay_GetRTT() / 2);
                 ImGui::TextColored(color, "FPS: %.1f",
                                    GetGameUpdatesPerSecond(currentFrame));
-                if (lossPercent >= 0.0f)
-                    ImGui::TextColored(lossPercent >= lossWarningPercent ? warningColor : color,
-                                       "Loss: %.1f%%", lossPercent);
-                else
-                    ImGui::TextColored(color, "Loss: N/A");
+                ImGui::TextColored(lossWarning ? warningColor : color,
+                                   "Loss: %s", lossText);
                 if (jitterMs >= 0)
                     ImGui::TextColored(jitterMs > jitterWarningMs ? warningColor : color,
                                        "Jitter: %dms", jitterMs);
@@ -1981,6 +1979,24 @@ void FrameStepper_Draw()
 
         ImGui::PopStyleColor();
         ImGui::End();
+    }
+
+    if (Netplay_IsActive() && Controller_GetNetFrameCount() >= 0 &&
+        g_statusHudMode != 2) {
+        const int32_t jitterMs = Netplay_GetJitter();
+        if (lossWarning || jitterMs > jitterWarningMs) {
+            char warning[96];
+            if (lossWarning && jitterMs > jitterWarningMs)
+                snprintf(warning, sizeof(warning), "%s in / %s out packet loss, %dms jitter",
+                         localLoss, remoteLoss, jitterMs);
+            else if (lossWarning)
+                snprintf(warning, sizeof(warning), "%s in / %s out packet loss",
+                         localLoss, remoteLoss);
+            else
+                snprintf(warning, sizeof(warning), "%dms jitter", jitterMs);
+            ImGui::GetForegroundDrawList()->AddText(warningPos,
+                ImGui::ColorConvertFloat4ToU32(warningColor), warning);
+        }
     }
 
     // --- Desync detected overlay (visible in all modes) ---
