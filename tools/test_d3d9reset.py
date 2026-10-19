@@ -720,11 +720,29 @@ int main() {
 
 
 class D3D9ResetTests(unittest.TestCase):
+    def test_rendering_thread_override_temporarily_disabled(self):
+        code = ROOT / "UMVC3Hook/code"
+        header = (code / "d3d9reset.h").read_text()
+        self.assertIn("D3D9Reset_RenderingThreadOverrideAvailable = false", header)
+        source = (code / "d3d9reset.cpp").read_text()
+        self.assertIn("if (!D3D9Reset_RenderingThreadOverrideAvailable) return -1;",
+                      function(source, "D3D9Reset_GetRenderingThreadOverride"))
+        self.assertIn("if (!D3D9Reset_RenderingThreadOverrideAvailable) return false;",
+                      function(source, "D3D9Reset_SetRenderingThreadOverride"))
+        for name in ("escmenu_imgui.cpp", "umvc3menu.cpp"):
+            self.assertIn("ImGui::BeginDisabled(!D3D9Reset_RenderingThreadOverrideAvailable)",
+                          (code / name).read_text())
+        settings = (code / "LaunchMenu_settings.cpp").read_text()
+        self.assertIn("EnableWindow(renderingThread, D3D9Reset_RenderingThreadOverrideAvailable)",
+                      settings)
+        self.assertIn("if (D3D9Reset_RenderingThreadOverrideAvailable &&", settings)
+
     def test_rendering_thread_changes_only_between_frames(self):
         source = (ROOT / "UMVC3Hook/code/d3d9reset.cpp").read_text()
         unit = MOCKS + r'''
 std::atomic<int> g_renderingThreadOverride {-1};
 std::atomic<bool> g_renderingThreadEnabled {false};
+bool D3D9Reset_RenderingThreadOverrideAvailable = true;
 int beginCalls = 0;
 void Begin(void*) { ++beginCalls; }
 auto g_originalBeginFrame = Begin;
@@ -759,6 +777,15 @@ int main() {
     g_renderingThreadOverride = -1;
     HookBeginFrame(other);
     assert(other[0x3D] == 0); // Restore this renderer's own native setting.
+    D3D9Reset_RenderingThreadOverrideAvailable = false;
+    g_renderingThreadOverride = 1;
+    HookBeginFrame(other);
+    assert(other[0x3D] == 0 && !g_renderingThreadEnabled.load());
+    other[0x3D] = 1;
+    g_renderingThreadOverride = 0;
+    HookBeginFrame(other);
+    assert(other[0x3D] == 1 && g_renderingThreadEnabled.load());
+    assert(beginCalls == 10); // Disabled overrides still call native beginFrame.
 }
 '''
         self.run_cpp(unit)

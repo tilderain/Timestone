@@ -154,7 +154,7 @@ void __fastcall HookBeginFrame(void* render)
     // during a live frame (including a frame retained by native frame skipping).
     static void* nativeRenderer = nullptr;
     static uint8_t nativeMode = 0;
-    if (!Field<uint8_t>(render, 0x38)) {
+    if (D3D9Reset_RenderingThreadOverrideAvailable && !Field<uint8_t>(render, 0x38)) {
         if (nativeRenderer != render) {
             nativeRenderer = render;
             nativeMode = Field<uint8_t>(render, 0x3D);
@@ -968,6 +968,7 @@ bool D3D9Reset_InstallNativeHooks()
 
 int D3D9Reset_GetRenderingThreadOverride()
 {
+    if (!D3D9Reset_RenderingThreadOverrideAvailable) return -1;
     static const bool loaded = [] {
         char path[MAX_PATH] = {};
         LaunchMenuUtils::GetSettingsPath(path, sizeof(path));
@@ -987,6 +988,7 @@ bool D3D9Reset_IsRenderingThreadEnabled()
 
 bool D3D9Reset_SetRenderingThreadOverride(int mode)
 {
+    if (!D3D9Reset_RenderingThreadOverrideAvailable) return false;
     if (mode < -1 || mode > 1) return false;
     D3D9Reset_GetRenderingThreadOverride();
     char path[MAX_PATH] = {};

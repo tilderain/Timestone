@@ -77,14 +77,16 @@ void EscMenuImGui_Draw()
     bool renderingThread = renderingOverride < 0
         ? D3D9Reset_IsRenderingThreadEnabled() : renderingOverride != 0;
     static bool saveFailed = false;
+    ImGui::BeginDisabled(!D3D9Reset_RenderingThreadOverrideAvailable);
     if (ImGui::Checkbox("RenderingThread", &renderingThread))
         saveFailed = !D3D9Reset_SetRenderingThreadOverride(renderingThread ? 1 : 0);
     if (ImGui::IsItemHovered()) {
         ImGui::SetTooltip("ON adds one frame of display latency.\n"
                           "OFF may decrease performance or other various issues.");
     }
-    if (renderingOverride < 0)
+    if (renderingOverride < 0 && D3D9Reset_RenderingThreadOverrideAvailable)
         ImGui::TextDisabled("Using game default until changed.");
+    ImGui::EndDisabled();
     bool singleThreaded = IsGameSingleThreaded();
     if (ImGui::Checkbox("Run game single-threaded", &singleThreaded))
         saveFailed = !SetGameSingleThreaded(singleThreaded);

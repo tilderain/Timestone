@@ -91,10 +91,12 @@ void UMVC3Menu::Draw()
 		{
 			int mode = D3D9Reset_GetRenderingThreadOverride() + 1;
 			static bool saveFailed = false;
+			ImGui::BeginDisabled(!D3D9Reset_RenderingThreadOverrideAvailable);
 			if (ImGui::Combo("Rendering thread", &mode, "Game default\0Force OFF\0Force ON\0"))
 				saveFailed = !D3D9Reset_SetRenderingThreadOverride(mode - 1);
 			ImGui::TextWrapped("Applies between frames without restarting. OFF renders inline; "
 				"ON uses the render worker and adds one tick of display latency.");
+			ImGui::EndDisabled();
 			bool singleThreaded = IsGameSingleThreaded();
 			if (ImGui::Checkbox("Run game single-threaded", &singleThreaded))
 				saveFailed = !SetGameSingleThreaded(singleThreaded);

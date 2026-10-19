@@ -141,7 +141,8 @@ bool SaveSettings(HWND window)
 {
     const int renderMode = static_cast<int>(SendMessageA(
         GetDlgItem(window, ID_RENDERING_THREAD), CB_GETCURSEL, 0, 0)) - 1;
-    if (!D3D9Reset_SetRenderingThreadOverride(renderMode)) {
+    if (D3D9Reset_RenderingThreadOverrideAvailable &&
+        !D3D9Reset_SetRenderingThreadOverride(renderMode)) {
         MessageBoxA(window, "Could not save the rendering thread setting.",
                     "Settings", MB_OK | MB_ICONERROR);
         return false;
@@ -306,6 +307,7 @@ LRESULT CALLBACK SettingsWndProc(HWND window, UINT message,
             SendMessageA(renderingThread, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(option));
         SendMessageA(renderingThread, CB_SETCURSEL,
                      D3D9Reset_GetRenderingThreadOverride() + 1, 0);
+        EnableWindow(renderingThread, D3D9Reset_RenderingThreadOverrideAvailable);
         CreateWindowA("STATIC", "ON adds one frame of latency. OFF may decrease performance or other various issues.",
             WS_VISIBLE | WS_CHILD, 18, sectionY + 120, 374, 34,
             window, nullptr, nullptr, nullptr);

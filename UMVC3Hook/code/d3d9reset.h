@@ -8,6 +8,8 @@
 // UI creation job, never from arbitrary CreateDevice calls. A pending transition keeps the
 // native game stack suspended; the UI and network threads remain independent.
 bool D3D9Reset_InstallNativeHooks();
+// Temporarily keep the game's native rendering-thread behavior.
+inline constexpr bool D3D9Reset_RenderingThreadOverrideAvailable = false;
 // -1: native startup setting, 0: force inline, 1: force render worker.
 int D3D9Reset_GetRenderingThreadOverride();
 bool D3D9Reset_IsRenderingThreadEnabled();
