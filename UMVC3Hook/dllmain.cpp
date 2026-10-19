@@ -961,6 +961,7 @@ long __stdcall hkEndScene(LPDIRECT3DDEVICE9 pDevice)
 		FrameStepper_ShowOpponentDisconnected();
 	}
 	extern void ChrSelImGui_Draw();
+	FrameStepper_Draw();
 	ChrSelImGui_Draw();
 	EscMenuImGui_Draw();
 	LiveBenchmark_Draw();
@@ -970,7 +971,6 @@ long __stdcall hkEndScene(LPDIRECT3DDEVICE9 pDevice)
 		TheMenu->Draw();
 	}
 
-	FrameStepper_Draw();
 	Notifications->Draw();
 
 	ImGui::EndFrame();

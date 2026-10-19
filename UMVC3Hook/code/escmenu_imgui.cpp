@@ -49,15 +49,12 @@ void EscMenuImGui_Draw()
         return;
 
     ImGuiIO& io = ImGui::GetIO();
-    ImGui::SetNextWindowPos(ImVec2(0.0f, 0.0f));
-    ImGui::SetNextWindowSize(io.DisplaySize);
-    ImGui::SetNextWindowBgAlpha(0.55f);
-    ImGui::Begin("##EscMenuBackdrop", nullptr,
-                 ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
-                 ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoInputs);
-    ImGui::End();
+    ImGui::GetBackgroundDrawList()->AddRectFilled(ImVec2(0.0f, 0.0f), io.DisplaySize,
+                                                 IM_COL32(0, 0, 0, 140));
 
-    ImGui::SetNextWindowPos(ImVec2(16.0f, 16.0f), ImGuiCond_Always);
+    const float statusHudBottom = FrameStepper_GetStatusHudBottom();
+    ImGui::SetNextWindowPos(ImVec2(12.0f, statusHudBottom > 0.0f ? statusHudBottom + 8.0f : 16.0f),
+                            ImGuiCond_Always);
     ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.08f, 0.08f, 0.07f, 0.96f));
     ImGui::PushStyleColor(ImGuiCol_TitleBg, ImVec4(0.16f, 0.16f, 0.14f, 1.0f));
     ImGui::PushStyleColor(ImGuiCol_TitleBgActive, ImVec4(0.22f, 0.22f, 0.18f, 1.0f));

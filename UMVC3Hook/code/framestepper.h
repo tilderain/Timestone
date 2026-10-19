@@ -9,6 +9,7 @@ void FrameStepper_Init();
 void FrameStepper_InitNetplay();
 void FrameStepper_Process();
 void FrameStepper_Draw();
+float FrameStepper_GetStatusHudBottom();
 void FrameStepper_DrawAutoTest();
 void FrameStepper_ShowOpponentDisconnected();
 void FrameStepper_SetDevice(LPDIRECT3DDEVICE9 device);

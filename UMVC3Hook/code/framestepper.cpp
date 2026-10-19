@@ -4,6 +4,7 @@
 #include "../pch.h"
 #include "../IniSafe.h"
 #include "framestepper.h"
+#include "escmenu_imgui.h"
 #include "gameui.h"
 #include "mk10utils.h"       // _addr
 #include "../MemoryMgr.h"
@@ -108,6 +109,7 @@ static uint32_t g_trainingLastGeneration = 0;
 static bool g_trainingFrameCountingActive = false;
 static bool g_trainingFrameLimitExitRequested = false;
 static int g_statusHudMode = 2;
+static float g_statusHudBottom = 0.0f;
 static bool g_opponentDisconnected = false;
 
 // Emit one compact diagnostic if a handshake generation remains blocked.
@@ -1817,8 +1819,15 @@ static void DrawAllocatorMemory()
     ImGui::PopStyleColor();
 }
 
+float FrameStepper_GetStatusHudBottom()
+{
+    return g_statusHudBottom;
+}
+
 void FrameStepper_Draw()
 {
+    g_statusHudBottom = 0.0f;
+    const int statusHudMode = EscMenuImGui_IsOpen() ? 2 : g_statusHudMode;
     GameUI_DrawOpponentDisconnectedFallback(g_opponentDisconnected);
 
     if (!IsTrainingMode())
@@ -1860,7 +1869,7 @@ void FrameStepper_Draw()
     snprintf(lossText, sizeof(lossText), "%s / %s", localLoss, remoteLoss);
     ImVec2 warningPos(12.0f, 12.0f);
     if (Netplay_IsActive() && Controller_GetNetFrameCount() >= 0 &&
-        g_statusHudMode != 0)
+        statusHudMode != 0)
     {
         // sReplay advances during oMove, but processFrameInput records under the
         // frame value from the start of that tick. Display the input that made
@@ -1892,7 +1901,7 @@ void FrameStepper_Draw()
             int32_t curDelay = Controller_GetDelayFrames();
             int32_t curRollback = Controller_GetRollbackFrames();
             const int32_t jitterMs = Netplay_GetJitter();
-            if (g_statusHudMode == 1) {
+            if (statusHudMode == 1) {
                 ImGui::TextColored(color, "Ping %u", Netplay_GetAverageRTT() / 2);
                 ImGui::TextColored(color, "FPS %.0f", GetGameUpdatesPerSecond(currentFrame));
                 ImGui::TextColored(color, "%dD %dR", curDelay, curRollback);
@@ -1969,7 +1978,7 @@ void FrameStepper_Draw()
             }
         }
 
-        if (g_statusHudMode == 2 && GetLaunchOption() == LAUNCH_DUAL_TRAINING) {
+        if (statusHudMode == 2 && GetLaunchOption() == LAUNCH_DUAL_TRAINING) {
             ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "P1: [%s]  0x%08X", DecodeDirection(p1), p1);
             if (btns1[0])
                 ImGui::SameLine(), ImGui::TextColored(ImVec4(0.7f, 0.9f, 1.0f, 1.0f), "%s", btns1);
@@ -1979,12 +1988,15 @@ void FrameStepper_Draw()
                 ImGui::SameLine(), ImGui::TextColored(ImVec4(0.7f, 1.0f, 0.8f, 1.0f), "%s", btns2);
         }
 
+        // Auto-resize uses last frame's size; include this frame's expanded content too.
+        g_statusHudBottom = std::max(ImGui::GetWindowPos().y + ImGui::GetWindowSize().y,
+            ImGui::GetCursorScreenPos().y + ImGui::GetStyle().WindowPadding.y);
         ImGui::PopStyleColor();
         ImGui::End();
     }
 
     if (Netplay_IsActive() && Controller_GetNetFrameCount() >= 0 &&
-        g_statusHudMode != 2) {
+        statusHudMode != 2) {
         const int32_t jitterMs = Netplay_GetJitter();
         if (lossWarning || jitterMs > jitterWarningMs) {
             char warning[96];
