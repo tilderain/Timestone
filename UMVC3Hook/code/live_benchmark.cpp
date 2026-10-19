@@ -161,10 +161,13 @@ void Clear()
     g_pendingShowUntil = 0;
     g_summaryRequestedUntil = 0;
     g_nextRequestedSend = 0;
-    g_local = {};
-    g_local.generation = g_generation;
-    g_peer = {};
-    g_localTime = g_peerTime = 0;
+    // Keep the final reports offline, but never carry them into a new connection.
+    if (g_connected) {
+        g_local = {};
+        g_local.generation = g_generation;
+        g_peer = {};
+        g_localTime = g_peerTime = 0;
+    }
     Publish();
 }
 
@@ -536,9 +539,11 @@ void LiveBenchmark_Draw()
     if (ImGui::BeginTable("##Costs", 3, ImGuiTableFlags_BordersInnerV, ImVec2(width, 0))) {
         ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, 100.0f);
         const char* localName = SteamLobby_GetLocalUsername();
-        const char* peerName = SteamTransport_IsActive() ? SteamLobby_GetPeerUsername() : nullptr;
+        const char* peerName = snapshot.connected && SteamTransport_IsActive()
+            ? SteamLobby_GetPeerUsername() : nullptr;
         ImGui::TableSetupColumn(localName && localName[0] ? localName : "You");
-        ImGui::TableSetupColumn(peerName && peerName[0] ? peerName : "Opp.");
+        ImGui::TableSetupColumn(peerName && peerName[0] ? peerName :
+            !snapshot.connected && peerTime ? "Opp. (left)" : "Opp.");
         ImGui::TableHeadersRow();
         ImGui::TableNextRow();
         ImGui::TableNextColumn();
@@ -546,17 +551,18 @@ void LiveBenchmark_Draw()
         ImGui::TableNextColumn();
         Assessment(local, localFresh);
         ImGui::TableNextColumn();
-        Assessment(peer, peerFresh);
+        if (!snapshot.connected && peerTime) ImGui::TextDisabled("Disconnected");
+        else Assessment(peer, peerFresh);
         for (const auto metric : {LiveBenchmarkMetric::Live, LiveBenchmarkMetric::Headless}) {
             ImGui::TableNextRow();
             ImGui::TableNextColumn();
             const bool live = metric == LiveBenchmarkMetric::Live;
-            ImGui::TextUnformatted(live ? "Game+Draw" : "Resim");
+            ImGui::TextUnformatted(live ? "Game+Draw" : "Rollback");
             if (live && expanded) ImGui::TextDisabled("16.7 ms limit");
             for (int side = 0; side < 2; ++side) {
                 ImGui::TableNextColumn();
                 const auto& packet = side ? peer : local;
-                const bool available = !side || snapshot.connected;
+                const bool available = !side || peerTime != 0;
                 const bool fresh = side ? peerFresh : localFresh;
                 if (live) DrawRate(Cost(packet, metric), available, fresh, packet.recentLive, expanded);
                 else DrawResim(packet, available, fresh, expanded);
@@ -571,7 +577,7 @@ void LiveBenchmark_Draw()
             for (int side = 0; side < 2; ++side) {
                 ImGui::TableNextColumn();
                 const auto& cost = Cost(side ? peer : local, metric);
-                if ((side && !snapshot.connected) || !cost.count)
+                if ((side && !peerTime) || !cost.count)
                     ImGui::TextDisabled("N/A");
                 else
                     ImGui::TextDisabled("%.2f ms", cost.median / 1000.0);

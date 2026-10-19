@@ -97,7 +97,13 @@ and display; `live_benchmark.h` is its small timing integration API.
   Steam every rendered frame. Existing transport queue locks and the renderer's
   pre-existing overlay/device synchronization are not removed by this feature.
 - Non-advancing frames discard their staged samples, retaining prior results.
-  Connection, generation, execution-mode, or frame-timeline changes reset it.
+  Connection, generation, execution-mode, or frame-timeline changes reset the
+  collector. While offline, the last displayed reports survive those resets;
+  the opponent column remains readable as "Opp. (left)" / "Disconnected", with
+  stale neutral coloring rather than a current performance assessment. A new
+  connected session clears both reports before new data arrives, so a previous
+  opponent's results cannot be presented as the next opponent's performance.
+  Retention is in memory, not across process restarts.
   Local results older than 2.5 seconds and peer reports older than 12 seconds
   remain readable but are labeled old and receive no current assessment. The
   longer peer timeout accommodates the background report interval. Only locally

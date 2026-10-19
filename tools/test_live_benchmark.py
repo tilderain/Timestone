@@ -405,8 +405,35 @@ int main() {
         Packet packet; std::memcpy(&packet, bytes.data(), sizeof(packet));
         assert(packet.kind != Show); // Expired request never reappears later.
     }
-    ++generation; LiveBenchmark_Update();
+    Packet departing = peer;
+    departing.sequence = 2;
+    for (auto& cost : departing.costs) cost = {2, 1000, 1000, 1000, 1000};
+    departing.costs[(size_t)LiveBenchmarkMetric::Live] = {120, 3000, 4000, 5000, 6000};
+    Receive(departing); LiveBenchmark_Update();
+    const uint64_t lastPeerTime = g_peerTime, lastLocalTime = g_localTime;
+    assert(lastPeerTime != 0 && lastLocalTime != 0);
+    connected = false; LiveBenchmark_Update();
+    assert(g_peerTime == lastPeerTime && g_localTime == lastLocalTime);
+    assert(g_peer.sequence == departing.sequence);
+    menu = true; ImGui::text.clear(); LiveBenchmark_Draw();
+    assert(HasText("Opp. (left)") && HasText("Disconnected"));
+    assert(HasText("200 FPS") && HasText("1.00 ms"));
+    assert(!ReadPublished().connected);
+    // Offline resets/settings changes must not erase the departed player's report.
+    clockMs += 20000;
+    ++generation;
+    g_multiResimEnabled = !g_multiResimEnabled;
+    LiveBenchmark_Update();
+    assert(g_peerTime == lastPeerTime && g_peer.sequence == departing.sequence);
+    ImGui::text.clear(); LiveBenchmark_Draw();
+    assert(HasText("Disconnected") && HasText("200 FPS"));
+    g_multiResimEnabled = !g_multiResimEnabled;
+    connected = true; LiveBenchmark_Update();
     assert(g_peerTime == 0 && g_localTime == 0);
+    assert(ReadPublished().peerTime == 0 && ReadPublished().connected);
+    ImGui::text.clear(); LiveBenchmark_Draw();
+    assert(!HasText("Disconnected") && !HasText("200 FPS"));
+    menu = false;
     Receive(peer); LiveBenchmark_Update(); assert(g_peerTime == 0);
     connected = false; LiveBenchmark_Update();
     assert(g_peerTime == 0);
