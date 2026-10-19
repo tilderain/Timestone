@@ -3,6 +3,7 @@
 #include "rollback.h"
 #include "rollback_effect.h"
 #include "rollback_profile.h"
+#include "live_benchmark.h"
 #include "rollback_memory.h"
 #include "rollback_diagnostics.h"
 #include "rollback_tick.h"
@@ -654,6 +655,7 @@ void Rollback_PatchDrawCalls(bool enable)
 // re-simulation, with rendering, pacing, and non-deterministic services removed.
 void Rollback_HeadlessTick(uint64_t sMain)
 {
+    const uint64_t benchmarkStart = LiveBenchmark_Now();
     RollbackHeadlessProfileTimer profile;
     Rollback_FreezeWatchdogHeartbeat("headless-begin", g_resimulateCurrentFrame);
 
@@ -863,4 +865,5 @@ void Rollback_HeadlessTick(uint64_t sMain)
         &RollbackProfile::headlessAltF4Max);
         Rollback_FreezeWatchdogHeartbeat("headless-complete", g_resimulateCurrentFrame);
         profile.Finish();
+    LiveBenchmark_Record(LiveBenchmarkMetric::Headless, benchmarkStart);
 }

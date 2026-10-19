@@ -942,13 +942,15 @@ void ChrSelImGui_Update()
 
     if (KeyPressed(VK_F9))
         BeginRandomizeAndRestart();
+}
 
-    ChrSelPacket packet = {};
-    size_t packetSize = 0;
-    while (Netplay_GetExtensionPacket(&packet, sizeof(packet), packetSize)) {
-        if (packetSize == sizeof(packet))
-            HandlePacket(packet);
-    }
+void ChrSelImGui_HandleExtension(const void* data, size_t size)
+{
+    if (size != sizeof(ChrSelPacket)) return;
+    ChrSelPacket packet;
+    std::memcpy(&packet, data, sizeof(packet));
+    if (packet.type == PACKET_EXTENSION)
+        HandlePacket(packet);
 }
 
 void ChrSelImGui_Draw()

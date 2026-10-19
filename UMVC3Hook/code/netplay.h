@@ -52,6 +52,7 @@ enum PacketType : uint32_t {
     PACKET_EXTENSION = 16, // Plugin feature packet routed through generic reliable queue
     PACKET_PLAYER_DISCONNECT = 17, // PlayerDisconnectPacket
     PACKET_LAUNCH_CHAT = 18, // LaunchChatPacket
+    PACKET_BENCHMARK = 19, // Opaque benchmark feature packet; older peers ignore it
 };
 
 #pragma pack(push, 1)
@@ -328,9 +329,9 @@ bool Netplay_GetInboundRestartMatch(int32_t& outTargetFrame, uint32_t& outRoundS
                                     uint32_t& outKind, int32_t& outButtonRestart);
 bool Netplay_HasInboundRestartMatch();
 
-// Generic reliable control channel for self-contained plugin features. Payloads
-// must begin with PACKET_EXTENSION and are limited to 256 bytes.
-bool Netplay_SendExtensionPacket(const void* data, size_t size);
+// Generic control channel (reliable by default) for self-contained plugin features. Payloads
+// must begin with PACKET_EXTENSION or PACKET_BENCHMARK and are limited to 256 bytes.
+bool Netplay_SendExtensionPacket(const void* data, size_t size, bool reliable = true);
 bool Netplay_GetExtensionPacket(void* data, size_t capacity, size_t& outSize);
 
 // Synchronize the multi-resimulation mode with the remote peer.

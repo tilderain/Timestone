@@ -10,6 +10,7 @@
 #include "rollback_memory.h"
 #include "rollback_diagnostics.h"
 #include "rollback_profile.h"
+#include "live_benchmark.h"
 #include "steam_lobby.h"
 #include "../kiero/minhook/include/MinHook.h"
 
@@ -192,6 +193,8 @@ static void __fastcall hkCChrSetPos(uint64_t character, const float* position)
 
 static void __fastcall hkMvc3MainMove(uint64_t main)
 {
+    const uint64_t benchmarkStart = g_isResimulating ? 0 :
+        LiveBenchmark_BeginFrame(Controller_GetNetFrameCount());
     // Heap-backed native objects can be retired or remapped between frames.
     // Every accessibility helper remains cached within this frame generation.
     InvalidateMemoryQueryCache();
@@ -304,6 +307,7 @@ static void __fastcall hkMvc3MainMove(uint64_t main)
                 curFrame, replayFrame, main);
     }
 
+    LiveBenchmark_EndFrame(benchmarkStart, Controller_GetNetFrameCount());
 }
 
 static void __fastcall hkCallSRender(uint64_t render)
@@ -444,7 +448,9 @@ static void __fastcall hkMainMove(uint64_t main)
         *(float*)(main + 0x80) = 1.0f;
         return;
     }
+    const uint64_t benchmarkStart = LiveBenchmark_Now();
     oMainMove(main);
+    LiveBenchmark_EndPacing(benchmarkStart);
     if (Netplay_IsActive()) {
         int32_t frame = Controller_GetNetFrameCount();
         if (frame >= 0 && FrameStepper_IsBattleSynchronized())

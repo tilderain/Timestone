@@ -4,6 +4,7 @@
 #include "rollback_cleanup.h"
 #include "rollback_hooks.h"
 #include "rollback_profile.h"
+#include "live_benchmark.h"
 #include "rollback_resim.h"
 #include "rollback_snapshot.h"
 #include "rollback_tick.h"
@@ -151,6 +152,7 @@ void Rollback_ReSimulate(int32_t startFrame, int32_t endFrame)
     }
     g_resimReentranceDepth = 0;
 
+    const uint64_t benchmarkStart = LiveBenchmark_BeginResim();
     RollbackProfile profile;
     Profile_BeginRollback(profile, startFrame, endFrame);
     const uint64_t profileStart = Profile_Now();
@@ -243,4 +245,5 @@ void Rollback_ReSimulate(int32_t startFrame, int32_t endFrame)
     Profile_AddElapsed(&RollbackProfile::patchDisable, phaseStart);
     Profile_EndRollback(profile, profileStart);
     Profile_Dump(profile, g_multiResimEnabled);
+    LiveBenchmark_EndResim(benchmarkStart);
 }

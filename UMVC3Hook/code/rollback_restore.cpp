@@ -6,6 +6,7 @@
 #include "rollback_memory.h"
 #include "rollback_model_policy.h"
 #include "rollback_profile.h"
+#include "live_benchmark.h"
 #include "rollback_shot.h"
 #include "rollback_snapshot.h"
 #include "concrete_snapshot.h"
@@ -1225,6 +1226,7 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
 
 void Rollback_RestoreSnapshot(int32_t frame)
 {
+    const uint64_t benchmarkStart = LiveBenchmark_Now();
     Rollback_RequireCurrentSnapshotLayout();
 
     const uint64_t profileStart = Profile_Now();
@@ -2300,5 +2302,5 @@ void Rollback_RestoreSnapshot(int32_t frame)
         g_activeRollbackProfile->restoreShots += shotsEnd - effectSlotsEnd;
         g_activeRollbackProfile->restoreUi += restoreEnd - shotsEnd;
     }
-
+    LiveBenchmark_Record(LiveBenchmarkMetric::Restore, benchmarkStart);
 }

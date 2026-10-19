@@ -6,7 +6,6 @@
 #include "LaunchMenu_settings.h"
 #include "netplay.h"
 #include "steam_lobby.h"
-#include "steam_transport.h"
 #include "umvc3menu.h"
 #include "d3d9reset.h"
 #include <Windows.h>
@@ -58,24 +57,6 @@ void EscMenuImGui_Draw()
                  ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoInputs);
     ImGui::End();
 
-    if (SteamTransport_IsActive()) {
-        ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x - 16.0f, 16.0f),
-                                ImGuiCond_Always, ImVec2(1.0f, 0.0f));
-        ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.08f, 0.08f, 0.07f, 0.96f));
-        ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.58f, 0.54f, 0.39f, 1.0f));
-        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.90f, 0.87f, 0.73f, 1.0f));
-        ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 1.0f);
-        ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
-        ImGui::Begin("##EscMenuConnection", nullptr,
-                     ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
-                     ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoInputs |
-                     ImGuiWindowFlags_AlwaysAutoResize);
-        ImGui::Text("Steam connection: %s", SteamLobby_GetConnectionType());
-        ImGui::End();
-        ImGui::PopStyleVar(2);
-        ImGui::PopStyleColor(3);
-    }
-
     ImGui::SetNextWindowPos(ImVec2(16.0f, 16.0f), ImGuiCond_Always);
     ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.08f, 0.08f, 0.07f, 0.96f));
     ImGui::PushStyleColor(ImGuiCol_TitleBg, ImVec4(0.16f, 0.16f, 0.14f, 1.0f));
@@ -105,7 +86,7 @@ void EscMenuImGui_Draw()
     if (renderingOverride < 0)
         ImGui::TextDisabled("Using game default until changed.");
     bool singleThreaded = IsGameSingleThreaded();
-    if (ImGui::Checkbox("Run entire game single-threaded", &singleThreaded))
+    if (ImGui::Checkbox("Run game single-threaded", &singleThreaded))
         saveFailed = !SetGameSingleThreaded(singleThreaded);
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Sets game worker count to 1. May massively improve performance by 100%% on pcs with bad thread work, but may decrease performance by about 10%% on higher end pcs");

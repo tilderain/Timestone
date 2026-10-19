@@ -131,6 +131,7 @@ static constexpr size_t         MAX_EXTENSION_PACKET_SIZE = 256;
 static constexpr size_t         MAX_EXTENSION_PACKETS = 32;
 struct ExtensionPacket {
     size_t size;
+    bool reliable;
     uint8_t data[MAX_EXTENSION_PACKET_SIZE];
 };
 static ExtensionPacket          g_outboundExtension[MAX_EXTENSION_PACKETS] = {};
@@ -567,7 +568,7 @@ static DWORD WINAPI Netplay_ServiceThread(LPVOID)
         if (hasExtension && g_peer)
         {
             ENetPacket* packet = enet_packet_create(
-                extension.data, extension.size, ENET_PACKET_FLAG_RELIABLE);
+                extension.data, extension.size, extension.reliable ? ENET_PACKET_FLAG_RELIABLE : 0);
             if (enet_peer_send(g_peer, 0, packet) != 0)
                 enet_packet_destroy(packet);
             enet_host_flush(g_host);
@@ -782,6 +783,7 @@ static DWORD WINAPI Netplay_ServiceThread(LPVOID)
                                 }
                                 break;
                             case PACKET_EXTENSION:
+                            case PACKET_BENCHMARK:
                                 if (event.packet->dataLength <= MAX_EXTENSION_PACKET_SIZE)
                                 {
                                     ScopedCS lock(g_extensionCS);
@@ -1297,11 +1299,12 @@ bool Netplay_HasInboundRestartMatch()
            g_inboundRestart.battle_generation == FrameStepper_GetBattleGeneration();
 }
 
-bool Netplay_SendExtensionPacket(const void* data, size_t size)
+bool Netplay_SendExtensionPacket(const void* data, size_t size, bool reliable)
 {
     if (!g_active || !g_csInitialized || !data || size < sizeof(uint32_t) ||
         size > MAX_EXTENSION_PACKET_SIZE ||
-        *(const uint32_t*)data != PACKET_EXTENSION)
+        (*(const uint32_t*)data != PACKET_EXTENSION &&
+         *(const uint32_t*)data != PACKET_BENCHMARK))
         return false;
 
     ScopedCS lock(g_extensionCS);
@@ -1310,6 +1313,7 @@ bool Netplay_SendExtensionPacket(const void* data, size_t size)
     size_t tail = (g_outboundExtensionHead + g_outboundExtensionCount) %
                   MAX_EXTENSION_PACKETS;
     g_outboundExtension[tail].size = size;
+    g_outboundExtension[tail].reliable = reliable;
     std::memcpy(g_outboundExtension[tail].data, data, size);
     ++g_outboundExtensionCount;
     return true;

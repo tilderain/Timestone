@@ -22,6 +22,7 @@
 #include "rollback_cleanup.h"
 #include "rollback_diagnostics.h"
 #include "rollback_profile.h"
+#include "live_benchmark.h"
 #include "trainingboot.h"
 
 // Netplay debug info from controller.cpp
@@ -584,6 +585,7 @@ static void __fastcall HookedMove(void* sMvc3Main)
     }
 
     ChrSelImGui_Update();
+    LiveBenchmark_Update();
 
     if (!Netplay_IsActive()) {
         GameUI_SetWaitingForOpponent(false);

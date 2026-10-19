@@ -15,6 +15,7 @@
 #include "code/launch_music.h"
 #include "code/framestepper.h"
 #include "code/escmenu_imgui.h"
+#include "code/live_benchmark.h"
 #include "code/trainingboot.h"
 #include "code/netplay.h"
 #include "code/controller.h"
@@ -962,6 +963,7 @@ long __stdcall hkEndScene(LPDIRECT3DDEVICE9 pDevice)
 	extern void ChrSelImGui_Draw();
 	ChrSelImGui_Draw();
 	EscMenuImGui_Draw();
+	LiveBenchmark_Draw();
 
 	if (TheMenu->GetActiveState())
 	{

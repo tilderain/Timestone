@@ -9,6 +9,7 @@
 #include "rollback_memory.h"
 #include "rollback_model_policy.h"
 #include "rollback_profile.h"
+#include "live_benchmark.h"
 #include "rollback_restore.h"
 #include "rollback_resim.h"
 #include "rollback_shot.h"
@@ -1427,6 +1428,7 @@ int Rollback_BuildRegions(Region* regions, int maxRegions)
 
 void Rollback_SaveSnapshot(int32_t frame)
 {
+    const uint64_t benchmarkStart = LiveBenchmark_Now();
     const uint64_t profileStart = Profile_Now();
 #if ROLLBACK_SNAPDUMP_ENABLED
     const bool captureSnapDump = SnapDump_CaptureEnabled();
@@ -1640,6 +1642,7 @@ void Rollback_SaveSnapshot(int32_t frame)
 #endif
     
     //HookLog("Rollback: saved frame %d with %d regions, total size %zu bytes\n", frame, count, offset);
+    LiveBenchmark_Record(LiveBenchmarkMetric::Save, benchmarkStart);
 }
 
 void Rollback_UpdateRemoteInput(int32_t frame, uint32_t input)

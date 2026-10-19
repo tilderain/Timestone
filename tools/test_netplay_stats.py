@@ -37,7 +37,8 @@ class NetplayStatsTest(unittest.TestCase):
         functions = "\n".join(block(source, marker) for marker in (
             "static void Netplay_UpdateRTTHistory(uint32_t now)\n{",
             "uint32_t Netplay_GetRTT()", "uint32_t Netplay_GetAverageRTT()",
-            "int32_t Netplay_GetJitter()", "float Netplay_GetPacketLoss()"))
+            "int32_t Netplay_GetJitter()", "float Netplay_GetPacketLoss()",
+            "float Netplay_GetRemotePacketLoss()"))
         self.run_cpp(r'''
 #include <atomic>
 #include <cassert>
@@ -52,12 +53,14 @@ bool SteamTransport_IsActive() { return steamActive; }
 uint32_t SteamTransport_GetRTT() { return 80; }
 int32_t SteamTransport_GetJitter() { return 10; }
 float SteamTransport_GetPacketLoss() { return 12.5f; }
+float SteamTransport_GetRemotePacketLoss() { return 6.25f; }
 ''' + state + functions + r'''
 int main() {
     assert(Netplay_GetAverageRTT() == 0);
     Netplay_UpdateRTTHistory(0);
     assert(Netplay_GetRTT() == 20 && Netplay_GetAverageRTT() == 20);
     assert(Netplay_GetPacketLoss() == 0.0f);
+    assert(Netplay_GetRemotePacketLoss() == -1.0f);
     peer.packetLoss = ENET_PEER_PACKET_LOSS_SCALE / 4;
     peer.roundTripTime = 60;
     for (uint32_t tick = 1; tick < 16; ++tick)
@@ -78,6 +81,7 @@ int main() {
     assert(Netplay_GetRTT() == 80 && Netplay_GetAverageRTT() == 60);
     assert(Netplay_GetJitter() == 10);
     assert(Netplay_GetPacketLoss() == 12.5f);
+    assert(Netplay_GetRemotePacketLoss() == 6.25f);
     g_lastRttSampleTick = UINT32_MAX - 7;
     Netplay_UpdateRTTHistory(8);
     assert(g_lastRttSampleTick == 8);
@@ -85,6 +89,7 @@ int main() {
     assert(Netplay_GetRTT() == 0 && Netplay_GetAverageRTT() == 0);
     assert(Netplay_GetJitter() == -1);
     assert(Netplay_GetPacketLoss() == -1.0f);
+    assert(Netplay_GetRemotePacketLoss() == -1.0f);
     g_running = true;
     steamActive = false;
     assert(Netplay_GetJitter() == -1);
@@ -103,8 +108,10 @@ int main() {
 #include <cassert>
 #include <limits>
 std::atomic<float> g_steamPacketLoss{-1.0f};
-void update(float deliveryQuality) {
-    struct { float m_flConnectionQualityLocal; } status{deliveryQuality};
+std::atomic<float> g_steamRemotePacketLoss{-1.0f};
+void update(float deliveryQuality, float remoteDeliveryQuality = 1.0f) {
+    struct { float m_flConnectionQualityLocal; float m_flConnectionQualityRemote; }
+        status{deliveryQuality, remoteDeliveryQuality};
 ''' + update + r'''
 }
 int main() {
@@ -120,6 +127,16 @@ int main() {
     assert(g_steamPacketLoss == -1.0f);
     update(std::numeric_limits<float>::quiet_NaN());
     assert(g_steamPacketLoss == -1.0f);
+    update(1.0f, 0.875f);
+    assert(g_steamPacketLoss == 0.0f && g_steamRemotePacketLoss == 12.5f);
+    update(0.875f, 1.0f);
+    assert(g_steamPacketLoss == 12.5f && g_steamRemotePacketLoss == 0.0f);
+    update(1.0f, 0.0f);
+    assert(g_steamRemotePacketLoss == 100.0f);
+    for (float invalid : {-1.0f, 2.0f, std::numeric_limits<float>::quiet_NaN()}) {
+        update(1.0f, invalid);
+        assert(g_steamRemotePacketLoss == -1.0f);
+    }
 }
 ''')
 
@@ -167,8 +184,32 @@ int main() {
         self.assertIn('"Jitter: N/A"', source)
         self.assertNotIn("Netplay_GetJitter() / 2", source)
         self.assertIn('"Ping: %ums", Netplay_GetRTT() / 2', source)
-        self.assertIn('"Loss: %.1f%%", lossPercent', source)
-        self.assertIn('"Loss: N/A"', source)
+        self.assertIn('"Loss: %s", lossText', source)
+        self.assertIn('"%s in / %s out packet loss",', source)
+
+    def test_loss_pair_format_and_warning(self):
+        source = (ROOT / "UMVC3Hook/code/framestepper.cpp").read_text()
+        formatting = source[source.index("    const bool lossWarning ="):
+                            source.index("    ImVec2 warningPos")]
+        self.run_cpp(r'''
+#include <cassert>
+#include <cstdio>
+#include <cstring>
+void check(float lossPercent, float remoteLossPercent, const char* expected, bool warn) {
+    constexpr float lossWarningPercent = 2.5f;
+''' + formatting + r'''
+    assert(std::strcmp(lossText, expected) == 0);
+    assert(lossWarning == warn);
+}
+int main() {
+    check(0.0f, 0.0f, "0.0% / 0.0%", false);
+    check(0.0f, 6.0f, "0.0% / 6.0%", true);
+    check(2.5f, 0.0f, "2.5% / 0.0%", true);
+    check(-1.0f, 3.0f, "N/A / 3.0%", true);
+    check(0.0f, -1.0f, "0.0% / N/A", false);
+    check(-1.0f, -1.0f, "N/A / N/A", false);
+}
+''')
 
     def test_corner_panel_requires_active_netplay(self):
         source = (ROOT / "UMVC3Hook/code/framestepper.cpp").read_text()
