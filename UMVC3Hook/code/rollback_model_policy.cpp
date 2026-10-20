@@ -1417,9 +1417,11 @@ void Rollback_CaptureCharacterShotReferences(RollbackSnapshotSlot& slot)
             uint64_t sequence = 0;
             bool tracked = savedPointer &&
                 Shot_GetSpawnSequence(savedPointer, sequence);
-            if (!tracked && fallbackDti) {
+            // Saved null is authoritative absence, even if another owned shot
+            // of this class exists in the recipe set. Never infer an owner for it.
+            if (!tracked && fallbackDti && savedPointer) {
                 sequence = findUniqueOwnedShot(
-                    region.ptr, fallbackDti, captureEmpty || savedPointer);
+                    region.ptr, fallbackDti, true);
             }
             if (!tracked && !sequence && !captureEmpty) return;
             slot.characterShotReferences.push_back({
@@ -1445,7 +1447,7 @@ void Rollback_CaptureCharacterShotReferences(RollbackSnapshotSlot& slot)
                    (uint64_t)_addr(VTABLE_UCAP_AMERICA)) {
             capture(UCAP_AMERICA_SHIELD_SLASH_OFFSET,
                     RollbackCharacterShotReferenceRole::ShieldSlash,
-                    DTI_USHOT_OPTION_SHIELD_SLASH);
+                    DTI_USHOT_OPTION_SHIELD_SLASH, true);
         } else if (region.expectedVtable ==
                    (uint64_t)_addr(VTABLE_UDOCTOR_DOOM)) {
             capture(UDOCTOR_DOOM_MISSILE_OFFSET,
@@ -1462,7 +1464,7 @@ void Rollback_CaptureCharacterShotReferences(RollbackSnapshotSlot& slot)
         } else if (region.expectedVtable == (uint64_t)_addr(VTABLE_UTRISH)) {
             capture(UTRISH_SPADA_BOOMERANG_OFFSET,
                     RollbackCharacterShotReferenceRole::SpadaBoomerang,
-                    DTI_USHOT_OPTION_SPADA_BOOMERANG);
+                    DTI_USHOT_OPTION_SPADA_BOOMERANG, true);
         }
         dataOffset += region.size;
     }

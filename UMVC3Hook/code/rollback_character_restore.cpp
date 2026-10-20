@@ -40,11 +40,16 @@ void CommonEarly(uint8_t* live, const uint8_t* saved, bool roster)
     Copy<0x12F0, 0x10>(live, saved); // cut-in factor
     Copy<0x1300, 0x08>(live, saved); // delta coefficients; +1308 mpOwner live
     Copy<0x1310, 0x34>(live, saved); // animation requests, time/rate/wait/serial
-    // cActorGameModelAnm: vtable +1348, resources +1360..1380,
+    // cActorGameModelAnm: vtable +1348, permanent resources +1360..1377,
     // owner +1380 and borrowed command cursors +1390..13B0 are not scalars.
     Copy<0x1350, 0x10>(live, saved); // animation numbers and execution flags
+    // Throw setup (140040754 -> 140042460) borrows the thrower's script in
+    // slot 3, without refcount changes. Rewind this mutable binding, including
+    // null, before its cursors; leaving it live suppressed cursor restoration
+    // across throws. Permanent resource replacements still reject cursors.
+    Copy<0x1378, 0x08>(live, saved);
     bool sameResources = true;
-    for (size_t offset = 0x1360; offset < 0x1380; offset += 8)
+    for (size_t offset = 0x1360; offset < 0x1378; offset += 8)
         sameResources &= Load<uint64_t>(live, offset) == Load<uint64_t>(saved, offset);
     if (sameResources) {
         Copy<0x1388, 0x30>(live, saved); // type/key and borrowed resource cursors
@@ -296,6 +301,22 @@ static_assert([] {
 }());
 
 } // namespace
+
+void Rollback_RestoreModelMotions(void* destination, const uint8_t* saved)
+{
+    auto* live = static_cast<uint8_t*>(destination);
+    for (size_t base = 0x560; base < 0x1160; base += 0x180) {
+        Copy<0x08, 0xD8>(live + base, saved + base); // playback and root-motion history
+        // initVectorTrackSampler 14079F7E0/sample 14079F5D0: each sampler owns
+        // no storage, but borrows track +00 and segment +10 from rMotionList.
+        Copy<0xE0, 0x40>(live + base, saved + base); // two samplers: bindings AND cursors
+        Copy<0x120, 0x40>(live + base, saved + base); // four event bindings and sequence history
+        // setupMotionParam 14052A880 binds count and descriptor together;
+        // calcKeyFrame 1405260B0 consumes both with the retained work slice.
+        Copy<0x168, 0x10>(live + base, saved + base); // count/padding and borrowed mpKeyFrameInfo
+        // +000 vtable, +160 mJoint and +178 mpKeyFrameData remain live.
+    }
+}
 
 CharacterRestoreStatus Rollback_RestoreCharacterFields(
     void* destination, size_t destinationSize, const uint8_t* saved,

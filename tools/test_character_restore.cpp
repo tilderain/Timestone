@@ -4,6 +4,7 @@
 #include <cassert>
 #include <cstdio>
 #include <cstring>
+#include <utility>
 
 namespace {
 constexpr uint64_t ironMan = 0x140D45518;
@@ -263,7 +264,28 @@ int main()
     ExpectBytes(live, 0x68F0, 0x20, 0xA5); // scalar tail despite pointer patterns
     ExpectBytes(live, 0x6910, 8, 0x5A); // drone owner, not tail POD
 
-    // Counts and borrowed command/interpreter references require exact owners.
+    // Throw slot 3 is mutable: entering, leaving, or changing the thrower
+    // must rewind the binding and execution state together.
+    for (auto bindings : {std::pair<uint64_t, uint64_t>{0, 0x140100000},
+                          {0x140100000, 0}, {0x140100000, 0x140200000}}) {
+        live.fill(0x5A);
+        for (size_t field : {0x1360, 0x1368, 0x1370})
+            std::memcpy(live.data() + field, saved.data() + field, 8);
+        Store(saved, 0x1378, bindings.first);
+        Store(live, 0x1378, bindings.second);
+        Restore(live, saved, ironMan, true, CharacterRestorePhase::Early);
+        assert(std::memcmp(live.data() + 0x1378, saved.data() + 0x1378, 8) == 0);
+        ExpectBytes(live, 0x1350, 0x10, 0xA5);
+        ExpectBytes(live, 0x1388, 0x30, 0xA5);
+        ExpectBytes(live, 0x1380, 8, 0x5A); // interpreter owner stays live
+
+        Store(live, 0x1368, 1); // unrelated permanent resource replacement
+        std::memset(live.data() + 0x1388, 0xCC, 0x30);
+        Restore(live, saved, ironMan, true, CharacterRestorePhase::Early);
+        ExpectBytes(live, 0x1388, 0x30, 0xCC);
+    }
+
+    // Counts and other borrowed references require exact owners.
     live.fill(0x5A);
     for (size_t field : {0x1360, 0x1368, 0x1370, 0x1378, 0x3F40,
                          0x2738 + 0x168, 0x2738 + 0x178})
@@ -301,5 +323,37 @@ int main()
         }
     }
 
-    std::puts("character restore ownership, bounds, scalar and phase tests passed");
+    // Exercise the same unchecked Motion routine used by fighters and weapons.
+    // Animation A's descriptors/samplers must replace prediction B's bindings,
+    // but neither the joint allocation nor the channel-work slice may change.
+    live.fill(0x5A);
+    saved.fill(0xA5);
+    Rollback_RestoreModelMotions(live.data(), saved.data());
+    for (size_t byte = 0; byte < live.size(); ++byte) {
+        bool restored = false;
+        if (byte >= 0x560 && byte < 0x1160) {
+            const size_t field = (byte - 0x560) % 0x180;
+            restored = (field >= 8 && field < 0x160) ||
+                       (field >= 0x168 && field < 0x178);
+        }
+        assert(live[byte] == (restored ? 0xA5 : 0x5A));
+    }
+    // A second restore must also rewind the descriptor/count pair, not just time.
+    for (size_t base = 0x560; base < 0x1160; base += 0x180) {
+        Store(saved, base + 0x168, 3);
+        Store(saved, base + 0x170, 0x12345678);
+        Store(saved, base + 0xE0, 0x23456780);
+        Store(saved, base + 0xF0, 0x34567890);
+        Store(saved, base + 0x100, 0x456789A0);
+        Store(saved, base + 0x110, 0x56789AB0);
+    }
+    Rollback_RestoreModelMotions(live.data(), saved.data());
+    for (size_t base = 0x560; base < 0x1160; base += 0x180) {
+        assert(std::memcmp(live.data() + base + 0x168, saved.data() + base + 0x168, 0x10) == 0);
+        assert(std::memcmp(live.data() + base + 0xE0, saved.data() + base + 0xE0, 0x40) == 0);
+        ExpectBytes(live, base, 8, 0x5A);
+        ExpectBytes(live, base + 0x160, 8, 0x5A);
+        ExpectBytes(live, base + 0x178, 8, 0x5A);
+    }
+    std::puts("character restore ownership, bounds, scalar, phase and Motion binding tests passed");
 }
