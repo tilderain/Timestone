@@ -69,10 +69,13 @@ All offsets are relative to the character; endpoint ranges are inclusive.
    Native writer `140030AB0` queues speed/acceleration/direction at +24/+28/+2C;
    dispatcher `1400303C0` applies these to recipient movement. The old +18/0C
    copy omitted them. Vtables, owners, type repair and unknown +15..17 stay separate.
-3. Both constraint helpers now call `14010CBE0` after restoring scalar state.
-   It sets both mSelfState and mpUpdateCallback: state zero selects
-   updateFromReference, nonzero selects updateLockAngle. Merely rewinding the
-   state while retaining a future callback mixes algorithms across timelines.
+3. Both constraint helpers restore the saved callback at relative `+128`,
+   restricted to `14010BB40` (updateFromReference) and `14010BC20`
+   (updateLockAngle), early and late. The previous setter-based repair was
+   incorrect: constructor `14010B3B0` sets state zero with updateLockAngle,
+   whereas setter `14010CBE0` sets state zero with updateFromReference.
+   Thus mSelfState does not uniquely identify the historical callback.
+   Native `14010B670` invokes the selected callback when applying constraints.
 4. Native `1401079F0` writes interpreter-relative +90, or character +13D8.
    Shot capture and effect recipe capture now handle this actual object-result
    slot. Character +90 is inside uCoord::mLmat and is no longer inspected or

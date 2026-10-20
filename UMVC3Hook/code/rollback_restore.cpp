@@ -1086,15 +1086,9 @@ void Rollback_RestoreSnapshot(int32_t frame)
             }
         }
 
-        // 14010CBE0 selects updateFromReference for mSelfState==0 and
-        // updateLockAngle otherwise. Rewind the discriminator AND derived
-        // callback coherently without copying a historical function pointer.
-        if ((size_t)helperOffset + 0x130 <= copySize) {
-            using SetSelfState = void(__fastcall*)(void*, uint32_t);
-            ((SetSelfState)_addr(0x14010CBE0))(
-                character + helperOffset,
-                *(const uint32_t*)(savedCharacter + helperOffset + 0x120));
-        }
+        // The common kernel restores the validated native callback early/late.
+        // Do not derive it from mSelfState: the constructor and setter select
+        // different callbacks for state zero.
 
         auto restorePointer = [&](uint32_t relativeOffset, uint64_t value) {
             size_t fieldOffset = (size_t)helperOffset + relativeOffset;

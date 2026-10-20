@@ -348,6 +348,14 @@ CharacterRestoreStatus Rollback_RestoreCharacterFields(
     auto* live = static_cast<uint8_t*>(destination);
     if (phase == CharacterRestorePhase::Early) CommonEarly(live, saved, roster);
     else CommonLate(live, saved);
+    for (size_t helper : {size_t(0x3BF0), size_t(0x3D60)}) {
+        // Constructor 14010B3B0 uses state 0 + updateLockAngle; setter
+        // 14010CBE0 uses state 0 + updateFromReference. State alone cannot
+        // reconstruct the callback. Only accept the two native implementations.
+        const uint64_t callback = Load<uint64_t>(saved, helper + 0x128);
+        if (callback == 0x14010BB40 || callback == 0x14010BC20)
+            Copy<0x128, 8>(live + helper, saved + helper);
+    }
     // Preserve the existing phase contract: tails were early-only except for
     // the old universal +68F0 dword. Reapply only its reviewed scalar portion,
     // never the reference at that offset in a different concrete layout.
