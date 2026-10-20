@@ -16,6 +16,9 @@ WINDRES  := $(CROSS)windres
 DLLTOOL  := $(CROSS)dlltool
 AR       := $(CROSS)ar
 STRIP    := $(CROSS)strip
+HOST_CXX ?= c++
+# Optional native sanitizer harness; this does not gate the production restore.
+ROLLBACK_CHARACTER_RESTORE_TEST ?= 0
 ZIP      ?= zip
 GIT_COMMIT := $(shell git rev-parse HEAD 2>/dev/null || printf unknown)
 GIT_DIRTY := $(if $(shell git status --porcelain --untracked-files=normal 2>/dev/null),1,0)
@@ -80,6 +83,7 @@ CPP_SRC   := \
 	$(SRCDIR)/code/exception.cpp \
 	$(SRCDIR)/code/rollback.cpp \
 	$(SRCDIR)/code/rollback_cleanup.cpp \
+	$(SRCDIR)/code/rollback_character_restore.cpp \
 	$(SRCDIR)/code/rollback_diagnostics.cpp \
 	$(SRCDIR)/code/rollback_effect.cpp \
 	$(SRCDIR)/code/rollback_hooks.cpp \
@@ -219,6 +223,22 @@ all:
 	else \
 		$(MAKE) --no-print-directory release; \
 	fi
+
+ifeq ($(ROLLBACK_CHARACTER_RESTORE_TEST),1)
+.PHONY: character-restore-test
+all: character-restore-test
+character-restore-test: $(BUILDDIR)/test_character_restore
+	./$(BUILDDIR)/test_character_restore
+
+$(BUILDDIR)/test_character_restore: tools/test_character_restore.cpp \
+	$(SRCDIR)/code/rollback_character_restore.cpp \
+	$(SRCDIR)/code/rollback_character_restore.h \
+	$(SRCDIR)/code/generated_character_tail_fields.inc Makefile
+	@mkdir -p $(@D)
+	$(HOST_CXX) -std=c++20 -O2 -Wall -Wextra -Werror \
+		-fsanitize=address,undefined -fno-omit-frame-pointer -fno-pie -no-pie \
+		tools/test_character_restore.cpp $(SRCDIR)/code/rollback_character_restore.cpp -o $@
+endif
 
 # ---------- Release build ----------
 

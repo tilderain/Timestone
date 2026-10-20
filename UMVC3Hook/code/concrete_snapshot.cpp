@@ -20,7 +20,6 @@ namespace {
 constexpr uintptr_t kMinGameAddress = 0x140000000ull;
 constexpr size_t kShotBodyStart = 0x2140;
 constexpr size_t kShotRestoreStart = 0x50;
-constexpr size_t kCharacterConcreteTailStart = 0x68F0;
 constexpr size_t kMaxObjectSize = 0x40000;
 constexpr size_t kMaxEmbeddedObjectSize = 0x1000;
 constexpr size_t kShotCollisionSlotsOffset = 0x2058;
@@ -51,9 +50,6 @@ constexpr uintptr_t kRocketLauncherExplodeDti = 0x140D4BAC8ull;
 constexpr uintptr_t kElementalSummonShotDti = 0x140D49DF8ull;
 constexpr uintptr_t kVulcanAxeDti = 0x140D48808ull;
 constexpr uintptr_t kShikiDanKobunDti = 0x140D4D3D0ull;
-constexpr uintptr_t kRyuDti = 0x140D45A10ull;
-constexpr uintptr_t kHsienKoDti = 0x140D455F8ull;
-constexpr uintptr_t kSpencerDti = 0x140D45D40ull;
 constexpr uintptr_t kAttackWireDti = 0x140D4CA20ull;
 constexpr uintptr_t kJamSessionDti = 0x140D49288ull;
 constexpr uintptr_t kInfernoDti = 0x140D49790ull;
@@ -78,10 +74,6 @@ struct DtiSnapshotRange {
     uintptr_t dti;
     size_t offset;
     size_t size;
-};
-
-constexpr DtiSnapshotRange kGeneratedCharacterTailRanges[] = {
-#include "generated_character_tail_fields.inc"
 };
 
 constexpr DtiSnapshotRange kGeneratedShotTailRanges[] = {
@@ -255,64 +247,6 @@ constexpr DtiSnapshotRange kVerifiedShotScalarRanges[] = {
     {0x140D4B0D0ull, 0x2200, 0x20}, // uShotVulcanZireitou: gameplay tail state
 };
 
-// Concrete character-tail scalar/POD fields verified in Ghidra but absent from
-// the generated createProperty export. These are applied after reference
-// filtering so nearby live helper/effect ownership is never flattened.
-constexpr DtiSnapshotRange kVerifiedCharacterScalarRanges[] = {
-    {0x140D44F18ull, 0x6900, 0x08}, // uChunli: charge-ready and voice timer
-    {0x140D45020ull, 0x68F4, 0x08}, // uDormammu: spell stock and flare counter
-    {0x140D45020ull, 0x6920, 0x01}, // uDormammu: Stalking Flare lock
-    {0x140D45068ull, 0x68F8, 0x04}, // uDrDoom: single-animation action latch
-    // Grace registry state: preserve insertion order and oldest-crystal eviction
-    // after pointer filtering. The three shot references are remapped separately.
-    {0x140D450A8ull, 0x6920, 0x08}, // uDrStrange: next Grace slot and crystal count
-    {0x140D450A8ull, 0x6930, 0x0C}, // uDrStrange: Grace ages
-    {0x140D44FE0ull, 0x68F0, 0x08}, // uDeadPool: teleport state
-    {0x140D45200ull, 0x6990, 0x30}, // uFrank: Kobun scale, offset, rotation
-    {0x140D45200ull, 0x69C4, 0x04}, // uFrank: level
-    {0x140D45200ull, 0x69DC, 0x04}, // uFrank: experience
-    {0x140D45200ull, 0x69EC, 0x08}, // uFrank: weapon speed and throw ID
-    {0x140D45200ull, 0x6A48, 0x08}, // uFrank: throw and action wait timers
-    {0x140D45200ull, 0x6A50, 0x01}, // uFrank: summon latch
-    {0x140D45248ull, 0x6930, 0x20}, // uGalactus: concrete vector state
-    {0x140D45408ull, 0x68FC, 0x18}, // uHawkEye: standing-S motion tuning
-    {0x140D45408ull, 0x6918, 0x04}, // uHawkEye: standing-S charge counter
-    {0x140D44F60ull, 0x6908, 0x04}, // uCViper: Optic Laser charge timer
-    {0x140D45450ull, 0x6900, 0x01}, // uHiryu: team-state transition latch
-    {0x140D45450ull, 0x6920, 0x05}, // uHiryu: Ouroboros state/latch
-    {0x140D45450ull, 0x6928, 0x04}, // uHiryu: Ouroboros state scalar
-    {0x140D45488ull, 0x6900, 0x01}, // uHulk: Gamma Wave fired latch
-    {0x140D45518ull, 0x68F8, 0x02}, // uIronMan: effect-state latches
-    {0x140D45578ull, 0x68F8, 0x01}, // uJill: Feral install latch
-    {0x140D45680ull, 0x68F0, 0x20}, // uMagneto: complete scalar tail
-    {0x140D456C0ull, 0x68F4, 0x04}, // uMayoi: initial-life cache
-    {0x140D45700ull, 0x68F4, 0x1C}, // uModok: Psionic and flight state
-    {0x140D458D0ull, 0x6908, 0x09}, // uNova: Nova Force and Centurion state
-    {0x140D45C58ull, 0x6909, 0x01}, // uSentinel: drone active lock
-    {0x140D45C58ull, 0x690C, 0x09}, // uSentinel: drone phase, timer, latch
-    {0x140D45D80ull, 0x68FC, 0x04}, // uSpiderMan: web-throw target ID
-    {0x140D45E18ull, 0x690C, 0x08}, // uSuperSkrull: Rolling Skrull height/state
-    {0x140D45E58ull, 0x68F0, 0x10}, // uTaskMaster: arrow velocity/action state
-    {0x140D45E58ull, 0x6900, 0x10}, // uTaskMaster: arrow/action state
-    {0x140D45EA0ull, 0x6900, 0x01}, // uThor: tornado-active latch
-    {0x140D45EA0ull, 0x6908, 0x04}, // uThor: speech stage
-    {0x140D45EA0ull, 0x6910, 0x08}, // uThor: speech variant/latch
-    {0x140D45F68ull, 0x691C, 0x04}, // uVergil: action state
-    {0x140D45F68ull, 0x6930, 0x0C}, // uVergil: concrete vector state
-    {0x140D45958ull, 0x68F4, 0x01}, // uRedArremer: active-ability latch
-    {0x140D45958ull, 0x68FC, 0x02}, // uRedArremer: sync and Chaos Tide latches
-    {0x140D45958ull, 0x6928, 0x04}, // uRedArremer: flight idle timer
-    {0x140D459D8ull, 0x6950, 0x02}, // uRRaccoon: airborne movement phase flags
-    {0x140D459D8ull, 0x6954, 0x09}, // uRRaccoon: weapon action and movement state
-    {0x140D459D8ull, 0x6960, 0x04}, // uRRaccoon: voice timer
-    {0x140D45FB0ull, 0x6900, 0x0C}, // uVJoe: concrete vector state
-    {0x140D45FF8ull, 0x690C, 0x04}, // uWesker: life-change tracker
-    {0x140D46038ull, 0x68F8, 0x01}, // uWolverine: Berserker install latch
-    {0x140D460C0ull, 0x6910, 0x01}, // uZero: Sogenmu installed latch
-    {0x140D46118ull, 0x7090, 0x04}, // uZeroSh: trace status/dispatch latch
-    {0x140D46158ull, 0x68F4, 0x08}, // uZombie: action timer and voice toggle
-};
-
 using GetPrimitiveFn = uint64_t(__fastcall*)(uint64_t, uint32_t);
 using GetMetadataFn = uint64_t(__fastcall*)(uint64_t, uint32_t);
 
@@ -434,47 +368,6 @@ void RestoreGeneratedRanges(void* destination, const uint8_t* source,
     }
 }
 
-bool RangeOverlapsCharacterReference(const uint8_t* live,
-                                     const uint8_t* saved, size_t objectSize,
-                                     SnapshotRange range)
-{
-    if (!live || !saved || range.offset >= objectSize) return false;
-    size_t rangeEnd = std::min(range.offset + range.size, objectSize);
-    size_t wordStart = range.offset & ~(size_t)(alignof(uint32_t) - 1);
-    for (size_t offset = wordStart;
-         offset + sizeof(uint64_t) <= objectSize && offset < rangeEnd;
-         offset += alignof(uint32_t)) {
-        if (offset + sizeof(uint64_t) <= range.offset) continue;
-
-        uint64_t liveValue = 0;
-        uint64_t savedValue = 0;
-        std::memcpy(&liveValue, live + offset, sizeof(liveValue));
-        std::memcpy(&savedValue, saved + offset, sizeof(savedValue));
-        if (IsMappedPointer(liveValue) || IsMappedPointer(savedValue)) {
-            return true;
-        }
-    }
-    return false;
-}
-
-void RestoreCharacterGeneratedRanges(void* destination, const uint8_t* source,
-                                     size_t objectSize, uint64_t dti)
-{
-    const uint8_t* live = (const uint8_t*)destination;
-    for (const DtiSnapshotRange& range : kGeneratedCharacterTailRanges) {
-        if (!IsDti(dti, range.dti)) continue;
-
-        // Generated fields can be inferred from a subclass schema even when
-        // this build uses the same bytes as a helper/effect pointer. Preserve
-        // the whole live reference instead of copying only its low scalar word.
-        if (RangeOverlapsCharacterReference(
-                live, source, objectSize, {range.offset, range.size})) {
-            continue;
-        }
-        CopyRange(destination, source, objectSize, {range.offset, range.size});
-    }
-}
-
 void PreserveLivePointers(uint8_t* overlay, const uint8_t* live,
                           size_t objectSize)
 {
@@ -529,70 +422,6 @@ void PreserveEmbeddedObjectsFromBoth(uint8_t* overlay, const uint8_t* live,
 
         preserveCandidate(live, liveRangeEnd);
         preserveCandidate(saved, savedRangeEnd);
-    }
-}
-
-void RestoreDetectedCharacterTailScalars(void* character,
-                                         const uint8_t* savedBody,
-                                         size_t bodySize)
-{
-    if (bodySize <= kCharacterConcreteTailStart) return;
-
-    uint8_t* live = (uint8_t*)character;
-    std::vector<uint8_t> preserve(bodySize - kCharacterConcreteTailStart, 0);
-    auto preserveRange = [&](size_t start, size_t end) {
-        start = std::max(start, kCharacterConcreteTailStart);
-        end = std::min(end, bodySize);
-        if (start >= end) return;
-        std::memset(preserve.data() + start - kCharacterConcreteTailStart, 1,
-                    end - start);
-    };
-
-    // Inline MtObjects own vtables, references, and destructor state. Their
-    // complete native ranges remain on the live timeline.
-    for (const SnapshotRange& range : FindEmbeddedObjects(
-             live, bodySize, kCharacterConcreteTailStart)) {
-        preserveRange(range.offset, range.offset + range.size);
-    }
-
-    // Character subclasses use both 8-byte and 4-byte packing. Scan each
-    // four-byte boundary so an unaligned helper pointer is not split into two
-    // apparent scalar words. Preserve the neighboring selector fields with the
-    // pointer: attachment records commonly store parent/joint modes immediately
-    // before or after the reference, and mixing saved selectors with a live
-    // object can dispatch a virtual method that object does not implement.
-    for (size_t offset = kCharacterConcreteTailStart;
-         offset + sizeof(uint64_t) <= bodySize;
-         offset += alignof(uint32_t)) {
-        uint64_t liveValue = 0;
-        uint64_t savedValue = 0;
-        std::memcpy(&liveValue, live + offset, sizeof(liveValue));
-        std::memcpy(&savedValue, savedBody + offset, sizeof(savedValue));
-        bool staleTransition =
-            (liveValue == 0 && IsLikelyPointer(savedValue)) ||
-            (savedValue == 0 && IsLikelyPointer(liveValue));
-        if (IsMappedPointer(liveValue) || IsMappedPointer(savedValue) ||
-            staleTransition) {
-            size_t recordStart = offset >= 8 ? offset - 8 : 0;
-            preserveRange(recordStart, offset + sizeof(uint64_t) + 16);
-        }
-    }
-
-    size_t offset = kCharacterConcreteTailStart;
-    while (offset < bodySize) {
-        while (offset < bodySize &&
-               preserve[offset - kCharacterConcreteTailStart] != 0) {
-            ++offset;
-        }
-        size_t scalarStart = offset;
-        while (offset < bodySize &&
-               preserve[offset - kCharacterConcreteTailStart] == 0) {
-            ++offset;
-        }
-        if (scalarStart < offset) {
-            std::memcpy(live + scalarStart, savedBody + scalarStart,
-                        offset - scalarStart);
-        }
     }
 }
 
@@ -1437,44 +1266,4 @@ void ConcreteShotSnapshot_RebuildLiveCapsuleWorld(
         for (size_t axis = 0; axis < 3; ++axis)
             worldStart[axis] = worldEnd[axis] = shotPosition[axis];
     }
-}
-
-void ConcreteCharacterSnapshot_RestoreFields(void* character,
-                                             const uint8_t* savedBody,
-                                             size_t bodySize,
-                                             uint64_t dti)
-{
-    if (!character || !savedBody) return;
-
-    // Preserve unknown character-tail scalars while retaining detected live
-    // helper/resource ownership. Known createProperty fields are then applied
-    // explicitly so packed values cannot be mistaken for pointers.
-    RestoreDetectedCharacterTailScalars(character, savedBody, bodySize);
-
-    RestoreCharacterGeneratedRanges(character, savedBody, bodySize, dti);
-    RestoreGeneratedRanges(character, savedBody, bodySize, dti,
-                            kVerifiedCharacterScalarRanges);
-
-    if (IsDti(dti, kRyuDti)) {
-        // Restore retires every live effect without reconstructing or remapping
-        // this weak reference. Do not let uRyu::tick release the retired object.
-        CopyRange(character, savedBody, bodySize, {0x68F0, 0x28});
-        if (bodySize >= 0x6920)
-            *(uint64_t*)((uint8_t*)character + 0x6918) = 0;
-        CopyRange(character, savedBody, bodySize, {0x6920, 0x20});
-    }
-
-    if (IsDti(dti, kHsienKoDti)) {
-        // +0x68F0/+0x68F8 are helper units. Restore the intervening scalar
-        // state, base position, and pendulum state without overwriting either.
-        CopyRange(character, savedBody, bodySize, {0x6900, 0x20});
-    }
-
-    if (IsDti(dti, kSpencerDti)) {
-        // uSpencer's complete 16-byte concrete tail is pointer-free. It holds
-        // the wire-active latch, wire animation number and mUsrF consumed when
-        // the grapple branches to its facing-specific action.
-        CopyRange(character, savedBody, bodySize, {0x68F0, 0x10});
-    }
-
 }

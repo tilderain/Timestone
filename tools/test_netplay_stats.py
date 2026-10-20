@@ -257,8 +257,92 @@ int main() {
         source = (ROOT / "UMVC3Hook/code/framestepper.cpp").read_text()
         self.assertIn(
             "if (Netplay_IsActive() && Controller_GetNetFrameCount() >= 0 &&\n"
-            "        g_statusHudMode != 0)", source)
+            "        statusHudMode != 0)", source)
         self.assertNotIn("!Netplay_IsActive() || g_statusHudMode != 0", source)
+
+    def test_escape_forces_expanded_hud_without_changing_preference(self):
+        source = (ROOT / "UMVC3Hook/code/framestepper.cpp").read_text()
+        draw = block(source, "void FrameStepper_Draw()")
+        mode = next(line for line in draw.splitlines()
+                    if "const int statusHudMode =" in line)
+        self.run_cpp(r'''
+#include <cassert>
+int g_statusHudMode = 0;
+bool menu = false;
+bool EscMenuImGui_IsOpen() { return menu; }
+int mode() {
+''' + mode + r'''
+    return statusHudMode;
+}
+int main() {
+    for (int saved = 0; saved <= 2; ++saved) {
+        g_statusHudMode = saved;
+        menu = false; assert(mode() == saved);
+        menu = true; assert(mode() == 2);
+        assert(g_statusHudMode == saved);
+        menu = false; assert(mode() == saved);
+    }
+}
+''')
+        self.assertNotIn("g_statusHudMode =", draw)
+        self.assertIn("if (statusHudMode == 1)", draw)
+        self.assertIn("if (statusHudMode == 2 &&", draw)
+
+    def test_escape_settings_follow_current_hud_content(self):
+        source = (ROOT / "UMVC3Hook/code/framestepper.cpp").read_text()
+        draw = block(source, "void FrameStepper_Draw()")
+        start = draw.index("    g_statusHudBottom = std::max(")
+        measure = draw[start:draw.index(";", start) + 1]
+        getter = block(source, "float FrameStepper_GetStatusHudBottom()")
+        escape = (ROOT / "UMVC3Hook/code/escmenu_imgui.cpp").read_text()
+        start = escape.index("    const float statusHudBottom =")
+        position = escape[start:escape.index("    ImGui::PushStyleColor", start)]
+        self.run_cpp(r'''
+#include <algorithm>
+#include <cassert>
+struct ImVec2 {
+    float x, y;
+    ImVec2(float x, float y) : x(x), y(y) {}
+};
+constexpr int ImGuiCond_Always = 1;
+float g_statusHudBottom = 0;
+namespace ImGui {
+ImVec2 windowPos{12, 12}, windowSize{200, 60}, cursor{12, 240}, settings{0, 0};
+struct Style { ImVec2 WindowPadding{8, 8}; } style;
+ImVec2 GetWindowPos() { return windowPos; }
+ImVec2 GetWindowSize() { return windowSize; }
+ImVec2 GetCursorScreenPos() { return cursor; }
+Style& GetStyle() { return style; }
+void SetNextWindowPos(ImVec2 value, int) { settings = value; }
+}
+''' + getter + "\nvoid measure() {\n" + measure + "\n}\nvoid position() {\n" + position + r'''
+}
+int main() {
+    // First expanded frame still has last frame's compact window size.
+    measure(); position();
+    assert(g_statusHudBottom == 248 && ImGui::settings.y == 256);
+    assert(ImGui::settings.x == ImGui::windowPos.x);
+    // Never place settings inside an outer window taller than its content.
+    ImGui::windowSize.y = 300;
+    ImGui::cursor.y = 100;
+    measure(); position();
+    assert(g_statusHudBottom == 312 && ImGui::settings.y == 320);
+    g_statusHudBottom = 0;
+    position(); assert(ImGui::settings.y == 16);
+}
+''')
+        self.assertLess(draw.index("g_statusHudBottom = 0.0f"),
+                        draw.index("if (!IsTrainingMode())"))
+
+    def test_escape_hud_draw_order_and_backdrop(self):
+        hooks = (ROOT / "UMVC3Hook/dllmain.cpp").read_text()
+        end_scene = block(hooks, "long __stdcall hkEndScene(")
+        self.assertEqual(end_scene.count("FrameStepper_Draw();"), 1)
+        self.assertLess(end_scene.index("FrameStepper_Draw();"),
+                        end_scene.index("EscMenuImGui_Draw();"))
+        escape = (ROOT / "UMVC3Hook/code/escmenu_imgui.cpp").read_text()
+        self.assertIn("GetBackgroundDrawList()->AddRectFilled", escape)
+        self.assertNotIn('"##EscMenuBackdrop"', escape)
 
     def test_settings_change_lead_is_halved(self):
         source = (ROOT / "UMVC3Hook/code/framestepper.cpp").read_text()

@@ -1402,7 +1402,7 @@ void Rollback_CaptureCharacterShotReferences(RollbackSnapshotSlot& slot)
     for (int regionIndex = 0; regionIndex < slot.regionCount; ++regionIndex) {
         const RollbackRegion& region = slot.regions[regionIndex];
         if (dataOffset + region.size > slot.size) break;
-        if (characters.find(region.ptr) == characters.end()) {
+        if (region.size < 0x68F0 || characters.find(region.ptr) == characters.end()) {
             dataOffset += region.size;
             continue;
         }
@@ -1427,8 +1427,12 @@ void Rollback_CaptureCharacterShotReferences(RollbackSnapshotSlot& slot)
             });
         };
 
-        capture(0x90, RollbackCharacterShotReferenceRole::AnimationReturn);
-        capture(0x6428, RollbackCharacterShotReferenceRole::ObjectReturn);
+        // cActorGameModelAnm is embedded at +1348; its borrowed object-return
+        // slot is +90 relative to that object (native writer 1401079F0).
+        capture(0x13D8, RollbackCharacterShotReferenceRole::AnimationReturn);
+        // The explicit character kernel never copies this pointer. Include
+        // empty saved slots so prediction-only last-shot references are cleared.
+        capture(0x6428, RollbackCharacterShotReferenceRole::ObjectReturn, 0, true);
 
         if (region.expectedVtable == (uint64_t)_addr(VTABLE_URROCKET_RACCOON)) {
             for (uint32_t offset : {

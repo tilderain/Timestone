@@ -207,6 +207,7 @@
     <ClInclude Include="utils\Trampoline.h" />
     <ClInclude Include="code\concrete_snapshot.h" />
     <ClInclude Include="code\rollback_cleanup.h" />
+    <ClInclude Include="code\rollback_character_restore.h" />
     <ClInclude Include="code\rollback_diagnostics.h" />
     <ClInclude Include="code\rollback_hooks.h" />
     <ClInclude Include="code\rollback_memory.h" />
@@ -239,6 +240,9 @@
     <ClCompile Include="code\umvc3menu.cpp" />
     <ClCompile Include="code\rollback.cpp" />
     <ClCompile Include="code\rollback_cleanup.cpp" />
+    <ClCompile Include="code\rollback_character_restore.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
     <ClCompile Include="code\rollback_diagnostics.cpp" />
     <ClCompile Include="code\rollback_hooks.cpp" />
     <ClCompile Include="code\rollback_memory.cpp" />
