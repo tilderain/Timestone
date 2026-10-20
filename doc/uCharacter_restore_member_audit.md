@@ -34,9 +34,10 @@ All offsets are relative to the character; endpoint ranges are inclusive.
 | 1344..1347 | _pad_1344 | Retain; no demonstrated consumer |
 | 1348..134F | mActorGameModelAnm.MtObject | Keep vtable |
 | 1350..135F | mNowAnmNo, mOldAnmNo, mNextAnmNo, mCmdStop, mPause, mLoop, mbBypassAdvanceGateOnce | Restore |
-| 1360..137F | mpCommandResources[4] | Keep resource owners |
+| 1360..1377 | mpCommandResources[0..2] | Keep permanent resource bindings |
+| 1378..137F | mpCommandResources[3] | Restore borrowed throw script binding, including null, before checking cursor compatibility. Native throw setup 140040754 calls pointer-only setter 140042460; the old 1350/98 copy restored this binding. |
 | 1380..1387 | interpreter mpOwner | Keep live owner |
-| 1388..138F | mAnmType, mKeyIdx | Restore with matching command resources; replacement unresolved |
+| 1388..138F | mAnmType, mKeyIdx | Restore with matching permanent command resources after rewinding throw slot 3; permanent resource replacement unresolved |
 | 1390..13B7 | mpAnimationEntry, mpSimpleCommandDescriptor, mpSimpleCommandBlock, mpFrameKeyDescriptor, mpTimedCommandBlock | Borrowed cursors, restore only with matching command resources |
 | 13B8..13BF | unnamed interpreter +70 | Retain unresolved; ctor clear alone is insufficient |
 | 13C0 | mCngKey | Restore |
@@ -92,6 +93,29 @@ All offsets are relative to the character; endpoint ranges are inclusive.
    `140451410` / `140451210`. This is not claimed as a gameplay desync cause.
 
 ## Validation And Limits
+
+### Motion Follow-Up
+
+Fighters and weapons now call the same `Rollback_RestoreModelMotions` kernel.
+It restores playback, both vector-track samplers (including their borrowed track
+and segment pointers), event bindings/cursors, channel count, and the channel
+descriptor at Motion +170 together. The +000 vtable, +160 joint-work owner and
++178 channel-work slice remain live. The weapon path no longer overwrites the
+joint/blend allocation counts or model resource status as scalar playback state.
+
+At the user's explicit request this is an unchecked copy routine: resource
+lifetime, allocation compatibility and valid bodies are caller preconditions.
+It does not validate or reconstruct changed resources. Consequently it fixes the
+missing descriptor rewind but does not establish safety for resource replacement.
+External buffer restoration retains its existing owner checks.
+
+Captain America and Trish now capture empty shot-owner slots. A saved-null slot
+cannot use the unique-owned-shot fallback; it must restore absence, even if a
+different shot of the same class exists in the snapshot.
+
+Tests exercise all eight Motion records through the actual shared kernel,
+including repeated binding/count restoration and preservation of both live work
+pointers. Native animation evaluation and resource replacement are not emulated.
 
 The portable kernel test covers both command fields, all six message records,
 toon ownership gaps, all 32 eye controller payloads, matching/replaced bindings,

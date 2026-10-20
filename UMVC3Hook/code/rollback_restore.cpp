@@ -1376,14 +1376,15 @@ void Rollback_RestoreSnapshot(int32_t frame)
                        (uint64_t)_addr(DTI_UCHRWEAPON)) {
             uint8_t* weapon = (uint8_t*)slot.regions[i].ptr;
             const uint8_t* savedWeapon = slot.data + offset;
+            Rollback_RestoreModelMotions(weapon, savedWeapon);
 
             // Restore selected weapon model/attachment state, leaving lifecycle and owners live.
             static constexpr SnapshotRange weaponScalarRanges[] = {
                 // Coordinate selectors, transform, and matrices.
                 {0x48, 0xB8},
-                // Model flags, joint count, and playback controls; exclude joint pointers.
-                {0x510, 0x28}, {0x550, 0x10},
-                // Selected model-tail state, excluding the owner at +0x1178.
+                // uModel flags and motion evaluation state around joint pointers.
+                {0x510, 0x20}, {0x558, 0x08}, // keep joint/blend counts and resource status live
+                // uModel motion/envelope state before its live owner pointer.
                 {0x1160, 0x18}, {0x1180, 0x30},
                 // Aim translation/rotation/scale payloads, excluding their inline vtables.
                 {0x1458, 0x48}, {0x14A8, 0x48}, {0x14F8, 0x48},
@@ -1395,21 +1396,6 @@ void Rollback_RestoreSnapshot(int32_t frame)
                     std::memcpy(weapon + range.offset,
                                 savedWeapon + range.offset,
                                 range.size);
-                }
-            }
-            for (int motion = 0; motion < CCHR_MOTION_COUNT; ++motion) {
-                size_t motionBase = CCHR_MOTION_BASE +
-                    motion * CCHR_MOTION_STRIDE;
-                static constexpr SnapshotRange motionRestoreRanges[] = {
-                    {0x08, 0x118}, {0x140, 0x20}, {0x168, 0x08},
-                };
-                for (const SnapshotRange& range : motionRestoreRanges) {
-                    size_t fieldOffset = motionBase + range.offset;
-                    if (fieldOffset + range.size <= copySize) {
-                        std::memcpy(weapon + fieldOffset,
-                                    savedWeapon + fieldOffset,
-                                    range.size);
-                    }
                 }
             }
         } else if (slot.regions[i].skipVtable &&
@@ -1583,43 +1569,7 @@ void Rollback_RestoreSnapshot(int32_t frame)
                             savedCharacter + CCHR_PAUSE_OFFSET + 0x08, 0x08);
             }
 
-            // Motion playback/root-motion payload excludes the live vtable,
-            // blend allocation and event bindings. Bindings follow separately.
-            for (int motion = 0; motion < CCHR_MOTION_COUNT; ++motion) {
-                size_t motionBase = CCHR_MOTION_BASE + motion * CCHR_MOTION_STRIDE;
-                static constexpr SnapshotRange motionRestoreRanges[] = {
-                    {0x08, 0x118},
-                    {0x140, 0x20},
-                    {0x168, 0x08},
-                };
-                for (const SnapshotRange& range : motionRestoreRanges) {
-                    size_t fieldOffset = motionBase + range.offset;
-                    if (fieldOffset + range.size <= copySize) {
-                        std::memcpy((uint8_t*)slot.regions[i].ptr + fieldOffset,
-                                    slot.data + offset + fieldOffset,
-                                    range.size);
-                    }
-                }
-                // setMotionEx binds four borrowed sequence pointers from the motion resource.
-                // Restore them only while that resource still matches the snapshot.
-                if (isTeamCharacter((uint64_t)slot.regions[i].ptr) &&
-                    motionBase + 0x140 <= copySize) {
-                    const uint8_t* savedCharacter = slot.data + offset;
-                    uint8_t* character = (uint8_t*)slot.regions[i].ptr;
-                    uint16_t motionNo = *(const uint16_t*)(
-                        savedCharacter + motionBase + 0x08);
-                    size_t resourceOffset = 0x11B8 + ((motionNo >> 8) & 0xF) * 8;
-                    if (motionNo != 0xFFFF && resourceOffset + 8 <= copySize) {
-                        uint64_t savedResource = *(const uint64_t*)(
-                            savedCharacter + resourceOffset);
-                        if (savedResource && savedResource ==
-                            *(const uint64_t*)(character + resourceOffset)) {
-                            std::memcpy(character + motionBase + 0x120,
-                                        savedCharacter + motionBase + 0x120, 0x20);
-                        }
-                    }
-                }
-            }
+            Rollback_RestoreModelMotions(character, savedCharacter);
 
             // Restore five target-info payloads when their reference is null, unchanged, or roster-owned.
             static constexpr uint32_t targetInfoBase = 0x6490;

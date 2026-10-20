@@ -16,6 +16,11 @@ enum class CharacterRestorePhase { Early, Late };
 
 constexpr size_t ROLLBACK_CHARACTER_COMMON_SIZE = 0x68F0;
 
+// Shared by fighter and weapon integration. Caller guarantees valid model
+// bodies, resource lifetimes and compatible work allocations. No validation.
+// External work bytes are restored separately; allocation pointers stay live.
+void Rollback_RestoreModelMotions(void* destination, const uint8_t* saved);
+
 // Caller validates allocation/vtable identity and passes the actual destination
 // capacity, independently of the available snapshot bytes. Pass the runtime DTI;
 // policy constants use the same fixed-address convention as mk10utils.h::_addr.
