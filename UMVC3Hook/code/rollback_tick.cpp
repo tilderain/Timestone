@@ -453,6 +453,13 @@ static void HeadlessUnitCategoryPostMove(uint64_t sMain, uint64_t sUnit,
                     VTableCall(unit, 0x40);
                     if (phase == RollbackUnitProfilePhase::SyncSave)
                         VTableCall(unit, 0x50);
+                    // Native late passes recheck after the initial callbacks:
+                    // either callback can retire the unit or disable movement.
+                    stateFlags = *(uint32_t*)(unit + 0x10);
+                    if ((stateFlags & 7u) != 2 || (stateFlags & 0x400u) == 0) {
+                        unit = next;
+                        continue;
+                    }
                 }
 
                 ObjectFn callback;
