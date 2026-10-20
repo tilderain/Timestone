@@ -285,6 +285,27 @@ int main()
         ExpectBytes(live, 0x1388, 0x30, 0xCC);
     }
 
+    // Both callbacks are valid with self-state zero. Preserve the snapshot's
+    // actual selection in both phases; never import an arbitrary code pointer.
+    for (auto phase : {CharacterRestorePhase::Early, CharacterRestorePhase::Late}) {
+        for (uint64_t callback : {uint64_t(0x14010BB40), uint64_t(0x14010BC20),
+                                  uint64_t(0), UINT64_MAX}) {
+            live.fill(0x5A);
+            for (size_t helper : {0x3BF0, 0x3D60}) {
+                Store(saved, helper + 0x120, 0);
+                Store(saved, helper + 0x128, callback);
+            }
+            Restore(live, saved, ironMan, true, phase);
+            for (size_t helper : {0x3BF0, 0x3D60}) {
+                if (callback == 0x14010BB40 || callback == 0x14010BC20)
+                    assert(std::memcmp(live.data() + helper + 0x128,
+                                       saved.data() + helper + 0x128, 8) == 0);
+                else
+                    ExpectBytes(live, helper + 0x128, 8, 0x5A);
+            }
+        }
+    }
+
     // Counts and other borrowed references require exact owners.
     live.fill(0x5A);
     for (size_t field : {0x1360, 0x1368, 0x1370, 0x1378, 0x3F40,
