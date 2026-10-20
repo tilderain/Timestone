@@ -81,10 +81,3 @@ void ConcreteShotSnapshot_ReapplyCapsules(void* shot,
                                            const ConcreteShotSnapshot& snapshot);
 void ConcreteShotSnapshot_RebuildLiveCapsuleWorld(
     void* shot, const ConcreteShotSnapshot& snapshot);
-
-// Restore detected scalar spans from concrete character tails while retaining
-// live pointer/embedded-object ownership records, then apply verified overrides.
-void ConcreteCharacterSnapshot_RestoreFields(void* character,
-                                             const uint8_t* savedBody,
-                                             size_t bodySize,
-                                             uint64_t dti);

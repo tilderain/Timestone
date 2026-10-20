@@ -2,6 +2,7 @@
 
 #include "rollback_restore.h"
 #include "rollback_cleanup.h"
+#include "rollback_character_restore.h"
 #include "rollback_effect.h"
 #include "rollback_memory.h"
 #include "rollback_model_policy.h"
@@ -54,9 +55,6 @@ static constexpr uintptr_t TEAM1_OFFSET = 0x300;
 static constexpr uintptr_t NODE_CHR_OFFSET = 0x08;
 static constexpr uintptr_t NODE_NEXT_OFFSET = 0x10;
 static constexpr uintptr_t TEAM_FIRST_NODE_OFFSET = 0x08;
-static constexpr uintptr_t UCHRCPU_VTABLE = 0x140A87B08;
-static constexpr uint32_t UCHRCPU_VM_STATE_OFFSET = 0xD0;
-static constexpr uint32_t UCHRCPU_VM_STATE_SIZE = 0x1580;
 static constexpr uint32_t CCHR_MOTION_BASE = 0x560;
 static constexpr uint32_t CCHR_MOTION_STRIDE = 0x180;
 static constexpr int CCHR_MOTION_COUNT = 8;
@@ -110,6 +108,14 @@ static constexpr size_t SHITSOLVER_SIZE = 0x3808C;
 static constexpr uint64_t MT_DTI_VTABLE = 0x140A69ED8;
 static constexpr uintptr_t DTI_UACTION_SIDE_CAMERA = 0x140D44268;
 static constexpr size_t SHITSOLVER_DATA_OFF = 0x58;
+
+static bool IsCharacterBody(const void* object)
+{
+    const uint64_t dti = GetObjectDti((uint64_t)object);
+    // uCharacter::getDTI at 0x14005FF40; category 8 also contains smaller units.
+    return dti && ((bool(__fastcall*)(void*, void*))_addr(0x1400039D0))(
+        (void*)dti, (void*)_addr(0x140D44A30));
+}
 
 static void RestoreCharacterCollisionParentReferences(RollbackSnapshotSlot& slot)
 {
@@ -183,113 +189,6 @@ using ShotEnqueueFn = char(__fastcall*)(void*, void*, int);
 using UnitAddFn = char(__fastcall*)(void*, int, void*, void*);
 using UnitRemoveFn = char(__fastcall*)(void*, void*);
 #define g_slots g_rollbackSnapshotSlots
-
-static constexpr SnapshotRange CCHR_SCALAR_RESTORE_RANGES[] = {
-    // Explicit restore overrides; not every legacy range below is pointer-free.
-    // Unit timing state.
-    {0x28, 0x08},
-    // Selected model and character-state fields.
-    {0x1190, 0x04}, {0x1198, 0x04},
-    {0x1529, 0x02}, {0x2892, 0x02}, {0x2AAA, 0x02}, {0x3D38, 0x04},
-    // Coordinate selectors, position, rotation, and scale.
-    {0x48, 0x38},
-    // Local/world matrices; leave the model resource/material block live.
-    {0x80, 0x80},
-    // Local-matrix component, already included in the preceding range.
-    {0xA8, 0x04},
-    // Motion calculation/interpolation flags; leave model status at +0x550 live.
-    {0x558, 0x08},
-    // Actor animation playback header.
-    {0x1300, 0x08},
-    // Actor animation timing and transitions.
-    {0x1308, 0x40},
-    // Legacy command-interpreter restore: includes resource, owner, and command pointers.
-    {0x1350, 0x98},
-    // Hip-placement scaling; packed floats can be mistaken for pointers.
-    {0x1480, 0x08},
-    // Character/program flags.
-    {0x14F0, 0x28},
-    // Adjacent packed action flags.
-    {0x1518, 0x18},
-    // Status mode and life-related scalars, excluding status ownership pointers.
-    {0x1548, 0x18},
-    // Input has a dedicated restore below, not through this disabled range.
-    //{0x21D8, 0x560},
-    // Attack-controller scalar header.
-    {0x18A0, 0x28},
-    // Player/team/roster identity and appearance/assist selection.
-    {0x2D9C, 0x24},
-    // Character RNG and move counter; exclude setup state at +0x2D90.
-    {0x2D80, 0x10},
-    {0x2D94, 0x04},
-    // Character body/assist configuration state.
-    {0x28B8, 0x20},
-    // Character state byte; exact meaning is unresolved.
-    {0x28DC, 0x01},
-    // Special/combo matcher flag predicates, overriding false pointer matches.
-    {0x27B0, 0x0C}, {0x29C8, 0x0C},
-    // Combo-command matcher tail, excluding the reference at +0x2AD0.
-    {0x2AD8, 0x18},
-    // Weapon-slot count.
-    {0x3F38, 0x04},
-    // Animation requests, extra-part state, and related playback parameters.
-    {0x3F48, 0x18C},
-    // Movement vectors, speed, and acceleration, overriding false pointer matches.
-    {0x40B0, 0x70},
-    // Movement, collision, and guard/charge-related state.
-    {0x4120, 0xD8},
-    // Overlapping movement/collision state.
-    {0x4168, 0x90},
-    // Sixteen capsule-position cache entries, each a 16-byte vector slot.
-    {0x4D10, 0x100},
-    // Damage-state header and counters.
-    {0x6340, 0x10},
-    // Damage/gauge multipliers.
-    {0x6350, 0x10},
-    // Damage, air-state, combo, stun, and knockdown counters.
-    {0x6360, 0xC8},
-    // Object-return reference (remapped later), followed by hit/animation state.
-    {0x6428, 0x08}, {0x6430, 0x2C},
-    // Projectile repeat limits and defense/muteki selectors.
-    {0x67F8, 0x10},
-    // Throw-reaction reuse state and cached attack transforms.
-    {0x680D, 0x01}, {0x6810, 0x24}, {0x6828, 0x04}, {0x6840, 0x80},
-    // Combat/link finalization state, including the +0x68C4 latch.
-    {0x68C0, 0x10},
-    // Late character parameters and material-effect vector, not attack transforms.
-    {0x68D0, 0x20},
-    // Subclass extension: interpretation at +0x68F0 depends on the concrete character.
-    {0x68F0, 0x04},
-};
-
-// Reapply selected character fields after recipe/model reconstruction.
-static constexpr SnapshotRange CCHR_POST_RESTORE_TAIL_RANGES[] = {
-    // Hip scaling and damage/gauge multipliers.
-    {0x1480, 0x08},
-    {0x6350, 0x10},
-    // Active collision-bank selectors.
-    {0x6360, 0x10},
-    {0x6430, 0x2C},
-    {0x67F8, 0x10}, {0x68C0, 0x10},
-    // Throw-reaction state and cached attack transforms.
-    {0x680D, 0x01}, {0x6810, 0x24}, {0x6828, 0x04}, {0x6840, 0x80},
-    // Late character parameters and material-effect vector.
-    {0x68D0, 0x20},
-    // Subclass-specific first tail field.
-    {0x68F0, 0x04},
-    // Five target-info payloads; exclude each vtable and character reference.
-    {0x64A0, 0x70}, {0x6520, 0x70}, {0x65A0, 0x70},
-    {0x6620, 0x70}, {0x66A0, 0x70},
-    // Animation extra-part counters.
-    {0x3F84, 0x18},
-    // Animation-related scalar at +0x3EA8.
-    {0x3EA8, 0x04},
-    // Capsule-position cache.
-    {0x4D10, 0x100},
-    // Packed action flags and command-matcher tail.
-    {0x1518, 0x18},
-    {0x2AD8, 0x18},
-};
 
 static constexpr SnapshotRange SMAIN_RESTORE_RANGES[] = {
     // Main frame/pause controls.
@@ -926,8 +825,9 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
 
     Shot_RestoreBodyReferences(slot);
 
-    // Restore typed shot links first, then clear remaining invalid object references.
-    // +0x90 can also hold packed non-pointer values; +0x6428 is an object reference.
+    // Interpreter +90 is character +13D8 (native result writer 1401079F0).
+    // Character +90 belongs to uCoord::mLmat and must never be pointer-filtered.
+    // Repair tracked objects and validate the two explicit object-reference slots.
     std::vector<void*> characters;
     uint64_t sCharacter = *(uint64_t*)_addr(PTR_SCHARACTER);
     for (int teamIndex = 0; sCharacter && teamIndex < 2; ++teamIndex) {
@@ -956,7 +856,9 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
     Rollback_RestoreCharacterShotReferences(slot);
     const uint64_t characterReferencesEarlyEnd = Profile_Now();
     for (void* character : characters) {
-        for (uint32_t referenceOffset : {0x90u, 0x6428u}) {
+        // Category 8 also contains uChrCpu; it has no +0x6428 shot slot.
+        if (!IsCharacterBody(character)) continue;
+        for (uint32_t referenceOffset : {0x13D8u, 0x6428u}) {
             bool typedShotReference = std::any_of(
                 slot.characterShotReferences.begin(),
                 slot.characterShotReferences.end(),
@@ -972,8 +874,6 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
                 std::find(currentShots.begin(), currentShots.end(), savedReference) !=
                 currentShots.end();
             const bool invalidObject = savedReference &&
-                (referenceOffset == 0x6428u ||
-                 IsLikelyPointer((uint64_t)savedReference)) &&
                 !HasCallableDtiVirtual(savedReference);
             if (abandonedShot || invalidObject) {
                 *objectReturn = nullptr;
@@ -1176,7 +1076,7 @@ void Rollback_RestoreSnapshot(int32_t frame)
             {0xE0, 0x20}, // second inline cLimitParam payload; skip its vtable
             {0x108, 0x10}, // interpolation duration, length, debug flag, and angle
             {0x120, 0x08}, // mSelfState and mState
-            {0x130, 0x48}, // angle/interpolation tail and adjacent bytes
+            {0x130, 0x40}, // angles/directions/easing; helper ends at +0x170
         };
         for (const SnapshotRange& range : scalarRanges) {
             size_t fieldOffset = (size_t)helperOffset + range.offset;
@@ -1184,6 +1084,16 @@ void Rollback_RestoreSnapshot(int32_t frame)
                 std::memcpy(character + fieldOffset,
                             savedCharacter + fieldOffset, range.size);
             }
+        }
+
+        // 14010CBE0 selects updateFromReference for mSelfState==0 and
+        // updateLockAngle otherwise. Rewind the discriminator AND derived
+        // callback coherently without copying a historical function pointer.
+        if ((size_t)helperOffset + 0x130 <= copySize) {
+            using SetSelfState = void(__fastcall*)(void*, uint32_t);
+            ((SetSelfState)_addr(0x14010CBE0))(
+                character + helperOffset,
+                *(const uint32_t*)(savedCharacter + helperOffset + 0x120));
         }
 
         auto restorePointer = [&](uint32_t relativeOffset, uint64_t value) {
@@ -1359,6 +1269,7 @@ void Rollback_RestoreSnapshot(int32_t frame)
 
     size_t offset = 0;
     for (int i = 0; i < slot.regionCount; ++i) {
+        if (offset >= slot.size) break;
         size_t copySize = slot.regions[i].size;
         if (offset + copySize > slot.size) {
             copySize = slot.size - offset;
@@ -1501,7 +1412,9 @@ void Rollback_RestoreSnapshot(int32_t frame)
                     }
                 }
             }
-        } else if (slot.regions[i].skipVtable && copySize > sizeof(uint64_t)) {
+        } else if (slot.regions[i].skipVtable &&
+                   copySize >= ROLLBACK_CHARACTER_COMMON_SIZE &&
+                   IsCharacterBody(slot.regions[i].ptr)) {
             static constexpr uint32_t targetTableOffsets[] = {
                 0x1408, 0x1410, 0x1418, 0x1420,
                 0x1428, 0x1430, 0x1438,
@@ -1517,77 +1430,27 @@ void Rollback_RestoreSnapshot(int32_t frame)
                 liveTargetCounts = *(uint32_t*)((uint8_t*)slot.regions[i].ptr + 0x1440);
             }
 
-            uint64_t liveUnitState[sizeof(CUNIT_LIVE_STATE_OFFSETS) / sizeof(CUNIT_LIVE_STATE_OFFSETS[0])];
-            for (size_t field = 0;
-                 field < sizeof(CUNIT_LIVE_STATE_OFFSETS) / sizeof(CUNIT_LIVE_STATE_OFFSETS[0]);
-                 ++field) {
-                liveUnitState[field] =
-                    *(uint64_t*)((uint8_t*)slot.regions[i].ptr + CUNIT_LIVE_STATE_OFFSETS[field]);
+            const uint64_t concreteDti = GetObjectDti((uint64_t)slot.regions[i].ptr);
+            const auto status = Rollback_RestoreCharacterFields(
+                slot.regions[i].ptr, slot.regions[i].size, slot.data + offset,
+                copySize, concreteDti, isTeamCharacter((uint64_t)slot.regions[i].ptr),
+                CharacterRestorePhase::Early);
+            // No dynamic scratch or heuristic fallback. Report incomplete
+            // coverage once per DTI, rather than implying full support.
+            static uint64_t reportedDtis[128] = {};
+            static size_t reportedCount = 0;
+            bool reported = false;
+            for (size_t n = 0; n < reportedCount; ++n)
+                reported |= reportedDtis[n] == concreteDti;
+            if (!reported || status == CharacterRestoreStatus::InvalidBuffer) {
+                HookLog("Rollback: explicit character restore INCOMPLETE dti=0x%llX "
+                        "status=%d (unreviewed bytes remain live)\n", concreteDti, (int)status);
+                if (reportedCount < std::size(reportedDtis))
+                    reportedDtis[reportedCount++] = concreteDti;
             }
-            uint8_t liveDrawState[CCHR_DRAW_STATE_END - CCHR_DRAW_STATE_START];
-            std::memcpy(liveDrawState,
-                        (uint8_t*)slot.regions[i].ptr + CCHR_DRAW_STATE_START,
-                        sizeof(liveDrawState));
-            uint8_t liveModelTail[CCHR_MODEL_TAIL_END - CCHR_MODEL_TAIL_START];
-            std::memcpy(liveModelTail,
-                        (uint8_t*)slot.regions[i].ptr + CCHR_MODEL_TAIL_START,
-                        sizeof(liveModelTail));
-
-            struct LivePointerField { uint32_t offset; uint64_t value; };
-            LivePointerField livePointers[512];
-            size_t livePointerCount = 0;
-            for (size_t fieldOffset = sizeof(uint64_t);
-                 fieldOffset + sizeof(uint64_t) <= copySize && livePointerCount < 512;
-                 fieldOffset += sizeof(uint64_t)) {
-                if (fieldOffset == CUNIT_FLAGS_OFFSET &&
-                    isTeamCharacter((uint64_t)slot.regions[i].ptr)) {
-                    continue;
-                }
-                uint64_t liveValue = *(uint64_t*)((uint8_t*)slot.regions[i].ptr + fieldOffset);
-                uint64_t savedValue = *(uint64_t*)(slot.data + offset + fieldOffset);
-                if (IsLikelyPointer(liveValue) || IsLikelyPointer(savedValue)) {
-                    livePointers[livePointerCount++] = {
-                        (uint32_t)fieldOffset, liveValue
-                    };
-                }
-            }
-            std::memcpy((uint8_t*)slot.regions[i].ptr + sizeof(uint64_t),
-                        slot.data + offset + sizeof(uint64_t),
-                        copySize - sizeof(uint64_t));
-            // Rewind roster lifecycle flags but keep helper flags live.
-            // Pointer-like scheduler links are preserved by the pointer pass below.
-            for (size_t field = 0;
-                 field < sizeof(CUNIT_LIVE_STATE_OFFSETS) / sizeof(CUNIT_LIVE_STATE_OFFSETS[0]);
-                 ++field) {
-                uint32_t fieldOffset = CUNIT_LIVE_STATE_OFFSETS[field];
-                if (fieldOffset == 0x18 || fieldOffset == 0x20 || fieldOffset == 0x38)
-                    continue;
-                if (fieldOffset == CUNIT_FLAGS_OFFSET &&
-                    isTeamCharacter((uint64_t)slot.regions[i].ptr)) {
-                    continue;
-                }
-                *(uint64_t*)((uint8_t*)slot.regions[i].ptr + fieldOffset) = liveUnitState[field];
-            }
-            // Keep draw/resource blocks live; restore motion slots separately below.
-            std::memcpy((uint8_t*)slot.regions[i].ptr + CCHR_DRAW_STATE_START,
-                        liveDrawState,
-                        sizeof(liveDrawState));
-            std::memcpy((uint8_t*)slot.regions[i].ptr + CCHR_MODEL_TAIL_START,
-                        liveModelTail,
-                        sizeof(liveModelTail));
-            // Restore cached live words wherever either timeline looked pointer-like.
-            for (size_t pointer = 0; pointer < livePointerCount; ++pointer) {
-                *(uint64_t*)((uint8_t*)slot.regions[i].ptr + livePointers[pointer].offset) =
-                    livePointers[pointer].value;
-            }
-            // Apply explicit restore ranges after the pointer heuristic.
-            // Packed scalars can look like addresses; some legacy overrides also contain pointers.
-            for (const SnapshotRange& range : CCHR_SCALAR_RESTORE_RANGES) {
-                if ((size_t)range.offset + range.size <= copySize) {
-                    std::memcpy((uint8_t*)slot.regions[i].ptr + range.offset,
-                                slot.data + offset + range.offset,
-                                range.size);
-                }
+            if (status != CharacterRestoreStatus::ReviewedSubset) {
+                offset += slot.regions[i].size;
+                continue;
             }
 
             // Keep each packed helper-array count paired with its current allocation.
@@ -1604,15 +1467,31 @@ void Rollback_RestoreSnapshot(int32_t frame)
                 *(uint32_t*)((uint8_t*)slot.regions[i].ptr + 0x1440) = targetCounts;
             }
 
-            uint64_t concreteDti = GetObjectDti((uint64_t)slot.regions[i].ptr);
-            ConcreteCharacterSnapshot_RestoreFields(
-                slot.regions[i].ptr,
-                slot.data + offset,
-                copySize,
-                concreteDti);
-
             uint8_t* character = (uint8_t*)slot.regions[i].ptr;
             const uint8_t* savedCharacter = slot.data + offset;
+
+            // Interpreter return selector 7 can hold its roster owner, a shot
+            // or an effect. Native +90 is relative to the interpreter at +1348.
+            // Shots/effects are repaired by their stable-identity recipes.
+            const uint64_t savedReturn = *(const uint64_t*)(savedCharacter + 0x13D8);
+            if (!savedReturn || isTeamCharacter(savedReturn))
+                *(uint64_t*)(character + 0x13D8) = savedReturn;
+
+            if (concreteDti == (uint64_t)_addr(0x140D45788) ||
+                concreteDti == (uint64_t)_addr(0x140D46118)) {
+                // cChrTrace's source is a roster character, not a heap buffer.
+                // Rewind a saved null/roster identity; never revive an unknown helper.
+                const uint64_t traceSource = *(const uint64_t*)(savedCharacter + 0x68F8);
+                if (!traceSource || isTeamCharacter(traceSource))
+                    *(uint64_t*)(character + 0x68F8) = traceSource;
+            }
+
+            if (concreteDti == (uint64_t)_addr(0x140D45A10) && copySize >= 0x6920) {
+                // Preserve the previous Ryu retirement policy: this beam/effect
+                // owner has no reconstruction recipe and must not be released
+                // again by uRyu::tick after the current effects are retired.
+                *(uint64_t*)(character + 0x6918) = 0;
+            }
 
             if (concreteDti == (uint64_t)_addr(DTI_UIRONMAN) &&
                 copySize >= 0x6928) {
@@ -1631,7 +1510,19 @@ void Rollback_RestoreSnapshot(int32_t frame)
             restoreCnsHelper(character, savedCharacter, copySize, 0x3BF0);
             restoreCnsHelper(character, savedCharacter, copySize, 0x3D60);
 
-            // Restore six inline ability payloads, keeping their vtables and +0x78 sound cookies live.
+            // Reconstruction may consult these links before the late repair.
+            // Historical non-roster identities still require lifecycle support.
+            for (uint32_t field : {0x6710u, 0x6718u, 0x6720u, 0x6728u, 0x6730u}) {
+                const uint64_t savedTarget = *(const uint64_t*)(savedCharacter + field);
+                uint64_t& liveTarget = *(uint64_t*)(character + field);
+                liveTarget = (savedTarget == liveTarget || isTeamCharacter(savedTarget))
+                    ? savedTarget : 0;
+            }
+
+            // cChrAbility owns six inline Prim objects (not an MtArray).
+            // Keep the owner and Prim vtables live and rewind their mutable
+            // gameplay payload. Prim+0x78 is a sound cookie consumed by reset;
+            // replaying a historical cookie could stop an unrelated live sound.
             constexpr uint32_t abilityPrimOffset = 0x1570;
             constexpr uint32_t abilityPrimStride = 0x80;
             if (abilityPrimOffset + 6 * abilityPrimStride <= copySize) {
@@ -1652,24 +1543,8 @@ void Rollback_RestoreSnapshot(int32_t frame)
                             0x28);
             }
 
-            // Restore selected special/combo matcher state and callbacks; rebind character owners.
-            // Leave command resources and allocated line storage outside these copies.
-            for (uint32_t commandOffset : CCHR_COMMAND_OFFSETS) {
-                if (commandOffset + CCHR_COMMAND_SIZE > copySize) continue;
-                std::memcpy(character + commandOffset + 0x18,
-                            savedCharacter + commandOffset + 0x18, 0x120);
-                std::memcpy(character + commandOffset + 0x148,
-                            savedCharacter + commandOffset + 0x148, 0x18);
-                *(uint64_t*)(character + commandOffset + 0x140) =
-                    (uint64_t)character;
-                *(uint64_t*)(character + commandOffset + 0x160) =
-                    (uint64_t)character;
-                std::memcpy(character + commandOffset + 0x170,
-                            savedCharacter + commandOffset + 0x170, 0x08);
-                std::memcpy(character + commandOffset + 0x180,
-                            savedCharacter + commandOffset + 0x180,
-                            CCHR_COMMAND_SIZE - 0x180);
-            }
+            // Command scalars and resource-gated successful-entry references
+            // were restored by the dedicated common kernel. Callbacks stay live.
 
             // Restore joint-hold selectors/matrices and rebind the owner.
             // Accept a saved target only if unchanged or present in the roster.
@@ -1698,8 +1573,8 @@ void Rollback_RestoreSnapshot(int32_t frame)
                 *(uint64_t*)(character + messageOffset + 0x08) =
                     (uint64_t)character;
                 *(uint32_t*)(character + messageOffset + 0x10) = message + 1;
-                std::memcpy(character + messageOffset + 0x18,
-                            savedCharacter + messageOffset + 0x18, 0x0C);
+                // Stop/flags/IDs and queued impulse were restored together by
+                // the common kernel; only native type/owner repair belongs here.
             }
 
             // Restore pause mode/disable bytes, excluding the inline vtable.
@@ -1708,31 +1583,8 @@ void Rollback_RestoreSnapshot(int32_t frame)
                             savedCharacter + CCHR_PAUSE_OFFSET + 0x08, 0x08);
             }
 
-            // Restore the embedded CPU's VM work region as one block after pointer filtering.
-            // Its internal layout is not fully resolved; do not assume it is pointer-free.
-            const uint64_t cpuVtable = _addr(UCHRCPU_VTABLE);
-            if (cpuVtable != 0) {
-                for (size_t cpuOffset = 0;
-                     cpuOffset + sizeof(uint64_t) <= copySize;
-                     cpuOffset += sizeof(uint64_t)) {
-                    uint64_t liveVtable = *(uint64_t*)((uint8_t*)slot.regions[i].ptr +
-                                                       cpuOffset);
-                    if (liveVtable != cpuVtable) continue;
-                    if (cpuOffset + UCHRCPU_VM_STATE_OFFSET +
-                            UCHRCPU_VM_STATE_SIZE > copySize)
-                        break;
-
-                    std::memcpy((uint8_t*)slot.regions[i].ptr + cpuOffset +
-                                    UCHRCPU_VM_STATE_OFFSET,
-                                slot.data + offset + cpuOffset +
-                                    UCHRCPU_VM_STATE_OFFSET,
-                                UCHRCPU_VM_STATE_SIZE);
-                    break;
-                }
-            }
-
-            // Reapply motion playback, vectors, and event masks after pointer filtering.
-            // Keep slot vtables and work buffers; handle borrowed event pointers below.
+            // Motion playback/root-motion payload excludes the live vtable,
+            // blend allocation and event bindings. Bindings follow separately.
             for (int motion = 0; motion < CCHR_MOTION_COUNT; ++motion) {
                 size_t motionBase = CCHR_MOTION_BASE + motion * CCHR_MOTION_STRIDE;
                 static constexpr SnapshotRange motionRestoreRanges[] = {
@@ -1788,14 +1640,15 @@ void Rollback_RestoreSnapshot(int32_t frame)
                 }
             }
 
-            // Restore capsule geometry and flags after pointer filtering; parents are remapped separately.
+            // Primitive payloads rewind independently of their bit patterns;
+            // character/weapon parent identities are restored separately.
             static constexpr uint32_t capsuleBase = 0x4210;
             static constexpr uint32_t capsuleStride = 0xB0;
             for (uint32_t primitive = 0; primitive < 16; ++primitive) {
                 uint32_t entry = capsuleBase + primitive * capsuleStride;
                 static constexpr SnapshotRange fields[] = {
-                    {0x08, 0x01}, // geometry type
-                    {0x10, 0x04}, // primitive kind
+                    {0x08, 0x04}, // MtGeometry::mType (32-bit; ctor 14000DA80)
+                    {0x10, 0x04}, // MtGeomConvex::mMargin
                     {0x20, 0x24}, // capsule endpoints and radius
                     {0x50, 0x04}, // hit-primitive flags
                     {0x68, 0x0C}, // parent indices and size rate
@@ -1816,8 +1669,8 @@ void Rollback_RestoreSnapshot(int32_t frame)
                 for (uint32_t primitive = 0; primitive < 16; ++primitive) {
                     uint32_t entry = base + primitive * sphereStride;
                     static constexpr SnapshotRange fields[] = {
-                        {0x08, 0x01}, // geometry type
-                        {0x10, 0x04}, // primitive kind
+                        {0x08, 0x04}, // MtGeometry::mType
+                        {0x10, 0x04}, // MtGeomConvex::mMargin
                         {0x20, 0x10}, // sphere center and radius
                         {0x30, 0x04}, // hit-primitive flags
                         {0x40, 0x08}, // parent index and size rate
@@ -1856,13 +1709,12 @@ void Rollback_RestoreSnapshot(int32_t frame)
                 }
             }
 
-            // Restore embedded input through +0x56F verbatim, bypassing pointer false positives.
-            if (CCHR_INPUT_OFFSET + CCHR_INPUT_SIZE <= copySize) {
-                std::memcpy((uint8_t*)slot.regions[i].ptr + CCHR_INPUT_OFFSET,
-                            slot.data + offset + CCHR_INPUT_OFFSET,
-                            CCHR_INPUT_SIZE);
-            }
+            // Input history was restored once by the common kernel. None of
+            // these embedded-record repairs touches its owner or payload.
 
+        } else if (slot.regions[i].skipVtable) {
+            HookLog("Rollback: unsupported object restore size=0x%zX vtable=0x%llX\n",
+                    copySize, slot.regions[i].expectedVtable);
         } else if (copySize > 0) {
             std::memcpy(slot.regions[i].ptr, slot.data + offset, copySize);
         }
@@ -1942,17 +1794,22 @@ void Rollback_RestoreSnapshot(int32_t frame)
     // Reapply selected character state after recipe/model repair.
     offset = 0;
     for (int i = 0; i < slot.regionCount; ++i) {
+        if (offset >= slot.size) break;
         size_t copySize = slot.regions[i].size;
         if (offset + copySize > slot.size)
             copySize = slot.size - offset;
         if (slot.regions[i].skipVtable &&
-            isTeamCharacter((uint64_t)slot.regions[i].ptr)) {
-            for (const SnapshotRange& range : CCHR_POST_RESTORE_TAIL_RANGES) {
-                if ((size_t)range.offset + range.size <= copySize) {
-                    std::memcpy((uint8_t*)slot.regions[i].ptr + range.offset,
-                                slot.data + offset + range.offset,
-                                range.size);
-                }
+            copySize >= ROLLBACK_CHARACTER_COMMON_SIZE &&
+            isTeamCharacter((uint64_t)slot.regions[i].ptr) &&
+            ownerStillMatches[i] &&
+            *(uint64_t*)slot.regions[i].ptr == slot.regions[i].expectedVtable) {
+            const auto status = Rollback_RestoreCharacterFields(
+                slot.regions[i].ptr, slot.regions[i].size, slot.data + offset,
+                copySize, GetObjectDti((uint64_t)slot.regions[i].ptr), true,
+                CharacterRestorePhase::Late);
+            if (status != CharacterRestoreStatus::ReviewedSubset) {
+                offset += slot.regions[i].size;
+                continue;
             }
 
             uint8_t* character = (uint8_t*)slot.regions[i].ptr;
@@ -1966,7 +1823,7 @@ void Rollback_RestoreSnapshot(int32_t frame)
             for (uint32_t primitive = 0; primitive < 16; ++primitive) {
                 uint32_t entry = capsuleBase + primitive * capsuleStride;
                 static constexpr SnapshotRange fields[] = {
-                    {0x08, 0x01},
+                    {0x08, 0x04}, // MtGeometry::mType, same width as early restore
                     {0x10, 0x04},
                     {0x20, 0x24},
                     {0x50, 0x04},
@@ -1993,7 +1850,7 @@ void Rollback_RestoreSnapshot(int32_t frame)
 
             // Keep saved character relationships only when unchanged or roster-owned.
             constexpr uint32_t RELATIONSHIP_OFFSETS[] = {
-                0x6718, 0x6720, 0x6728, 0x6730,
+                0x6710, 0x6718, 0x6720, 0x6728, 0x6730,
             };
             for (uint32_t relationshipOffset : RELATIONSHIP_OFFSETS) {
                 if ((size_t)relationshipOffset + sizeof(uint64_t) > copySize)

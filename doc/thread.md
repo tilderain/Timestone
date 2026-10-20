@@ -116,21 +116,20 @@ stored prototype omits that context, which survives as `in_RDX` in decompilation
 This machinery is generic. Describing it specifically as graphics loading,
 texture streaming, or cleanup requires tracing individual producers.
 
-The current advanced `EntireGameSingleThreaded` option hooks
-`uGeometry2Group__move` at `0x14095EC90`, also re-decompiled in this review.
-Its native branch selects inline child moves or delay-pool submission/wait.
-`HookGeometryGroupMove` temporarily clears that
-group's byte `+0xB0`, calls the original, and restores its preference. The
-descriptive `sMain__dispatchAndWaitJobs` label formerly used here must not be
-treated as proof that this is the generic delay-ring dispatcher.
+The advanced `EntireGameSingleThreaded` option is a persistent live override,
+available in the launch Settings dialog, F1 Settings tab, and Escape Settings
+panel. A startup hook on `uGeometry2Group::move @ 0x14095EC90` temporarily clears
+the group's `mFlgMultiThread` byte at `+0xB0` while calling the original method,
+selecting its native inline callback branch. The original flag is restored
+afterward. This function was previously mislabeled `sMain__dispatchAndWaitJobs`.
 
-`ApplyAdvancedLaunchConfig` saves the regular requested count, requests one
-participant when enabled, and updates the active count at the game-thread
-boundary; disabling restores the saved count. The inspected implementation is
-live-switchable and **does not currently patch constructor delay-worker counts**.
-The older startup-patch description is superseded. Serial execution is not an
-absence of existing workers, resource threads, the rendering worker or plugin
-threads.
+Delay workers are still created normally, allowing the native dispatch path to
+resume when the override is disabled. The game-thread frame boundary applies
+regular-job count changes: enabling saves the requested count and sets requested
+and active counts to one; disabling restores the saved count using the native
+setter. UI threads only persist and publish the requested toggle atomically.
+No executable bytes are rewritten during live toggles. Rendering, resource
+loading, and plugin-owned threads remain independent.
 
 It also leaves independent `sResource` loading workers active. See
 [`critical_section_elision.md`](critical_section_elision.md) for the remaining

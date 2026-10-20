@@ -870,6 +870,32 @@ void Effect_CaptureRecipes(RollbackSnapshotSlot& slot)
             node = *(uint64_t*)(node + 0x10);
         }
     }
+    // The action interpreter's borrowed effect-result slot is +1348+90, not
+    // the coordinate matrix at character +90. Identify recipes by saved pointer
+    // equality without probing unknown snapshot values or copying retired owners.
+    size_t bodyOffset = 0;
+    for (int regionIndex = 0; regionIndex < slot.regionCount; ++regionIndex) {
+        const auto& region = slot.regions[regionIndex];
+        if (bodyOffset > slot.size || region.size > slot.size - bodyOffset) break;
+        if (region.skipVtable && region.size >= 0x68F0) {
+            void* savedResult = nullptr;
+            std::memcpy(&savedResult, slot.data + bodyOffset + 0x13D8, sizeof(savedResult));
+            const auto recipe = std::find_if(slot.effectRecipes.begin(), slot.effectRecipes.end(),
+                [savedResult](const RollbackEffectRecipe& saved) {
+                    return savedResult && saved.savedPtr == savedResult;
+                });
+            if (recipe != slot.effectRecipes.end()) {
+                RollbackCharacterEffectReference reference{};
+                reference.character = region.ptr;
+                reference.expectedCharacterVtable = region.expectedVtable;
+                reference.offset = 0x13D8;
+                reference.kind = RollbackCharacterEffectReferenceKind::Reconstructed;
+                reference.effectSpawnSequence = recipe->spawnSequence;
+                slot.characterEffectReferences.push_back(reference);
+            }
+        }
+        bodyOffset += region.size;
+    }
     if constexpr (ROLLBACK_PROFILING_ENABLED) {
         if (g_activeRollbackProfile) {
             g_activeRollbackProfile->snapshotCharacterEffectReferenceCount +=

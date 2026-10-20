@@ -1248,9 +1248,14 @@ static void TraverseAndAddDynamicList(uint64_t listHead, size_t nextOffset,
                     }
                 }
                 if (!isTeamCharacter) {
+                    bool alreadyCaptured = false;
+                    for (int region = 0; region < r; ++region)
+                        alreadyCaptured |= regions[region].ptr == (void*)helper;
                     read.operator()<uint64_t>(helper);
                     uint32_t helperSize = DecodeDtiSize(GetObjectDti(helper));
-                    if (helperSize >= 8 && helperSize <= CCHR_MAX_SIZE) {
+                    // Only character-sized helpers belong in this path. Smaller
+                    // controllers such as uChrCpu are intentionally not captured.
+                    if (!alreadyCaptured && helperSize >= CCHR_MIN_SIZE && helperSize <= CCHR_MAX_SIZE) {
                         add((void*)helper, helperSize, 0, *(uint64_t*)helper, true
 #if ROLLBACK_SNAPDUMP_ENABLED
                             , "uCharacter.helper"
