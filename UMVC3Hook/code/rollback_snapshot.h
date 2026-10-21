@@ -6,6 +6,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <vector>
 
 static constexpr int ROLLBACK_MAX_REGIONS = 2048;
@@ -96,6 +97,31 @@ struct RollbackShotRecipe {
     uint8_t preSpawnOwnerRng[16] = {};
     bool hasPreSpawnRng = false;
     bool reconstructed = false;
+
+    // Capture replaces concrete state; do not copy or move its retained buffers.
+    void AssignCaptureMetadata(const RollbackShotRecipe& source) {
+        savedPtr = source.savedPtr;
+        restoredPtr = source.restoredPtr;
+        shotElement = source.shotElement;
+        initParam = source.initParam;
+        posData = source.posData;
+        ownerChr = source.ownerChr;
+        objectRef1 = source.objectRef1;
+        slotId = source.slotId;
+        objectRef2 = source.objectRef2;
+        kind = source.kind;
+        exA9 = source.exA9;
+        exA10 = source.exA10;
+        exA11 = source.exA11;
+        exA12 = source.exA12;
+        flight = source.flight;
+        spawnSequence = source.spawnSequence;
+        std::memcpy(preSpawnGlobalRng, source.preSpawnGlobalRng, sizeof(preSpawnGlobalRng));
+        std::memcpy(preSpawnEffectRng, source.preSpawnEffectRng, sizeof(preSpawnEffectRng));
+        std::memcpy(preSpawnOwnerRng, source.preSpawnOwnerRng, sizeof(preSpawnOwnerRng));
+        hasPreSpawnRng = source.hasPreSpawnRng;
+        reconstructed = source.reconstructed;
+    }
 };
 
 struct RollbackEffectRecipe {
@@ -119,6 +145,28 @@ struct RollbackEffectRecipe {
     bool rocketShort = false;
     uint32_t shortParentNo = 0;
     uint64_t shortControlState = 0;
+
+    void AssignCaptureMetadata(const RollbackEffectRecipe& source) {
+        savedPtr = source.savedPtr;
+        restoredPtr = source.restoredPtr;
+        sGameEffect = source.sGameEffect;
+        effectId = source.effectId;
+        a3 = source.a3;
+        attachTo = source.attachTo;
+        a5 = source.a5;
+        a6 = source.a6;
+        a7 = source.a7;
+        a8 = source.a8;
+        a9 = source.a9;
+        a10 = source.a10;
+        a11 = source.a11;
+        a12 = source.a12;
+        a13 = source.a13;
+        spawnSequence = source.spawnSequence;
+        rocketShort = source.rocketShort;
+        shortParentNo = source.shortParentNo;
+        shortControlState = source.shortControlState;
+    }
 };
 
 struct RollbackCharacterEffectState {

@@ -503,7 +503,7 @@ static char __fastcall hkUnitRemove(void* manager, void* unit)
 
 void Shot_CaptureRecipes(RollbackSnapshotSlot& slot)
 {
-    slot.shotRecipes.clear();
+    size_t capturedCount = 0;
     slot.shotBodyReferences.clear();
     for (int list = 0; list < SSHOT_SENTINEL_COUNT; ++list) {
         uint64_t sentinel = (uint64_t)_addr(0x140d47f90) + list * 0x28;
@@ -514,7 +514,10 @@ void Shot_CaptureRecipes(RollbackSnapshotSlot& slot)
             void* shot = (void*)(nodeRef - SSHOT_NODE_OFFSET);
             auto recipe = g_liveShotRecipes.find(shot);
             if (recipe != g_liveShotRecipes.end() && !IsTerminalShot(shot)) {
-                RollbackShotRecipe saved = recipe->second;
+                if (capturedCount == slot.shotRecipes.size())
+                    slot.shotRecipes.emplace_back();
+                auto& saved = slot.shotRecipes[capturedCount++];
+                saved.AssignCaptureMetadata(recipe->second);
                 saved.savedPtr = shot;
                 Shot_CaptureFlight(shot, saved.flight);
                 ConcreteShotSnapshot_Capture(shot, saved.concrete);
@@ -551,11 +554,11 @@ void Shot_CaptureRecipes(RollbackSnapshotSlot& slot)
                         slot.shotBodyReferences.push_back({saved.spawnSequence, offset, reference});
                     }
                 }
-                slot.shotRecipes.push_back(std::move(saved));
             }
             nodeRef = *(uint64_t*)(nodeRef + SSHOT_NODE_NEXT);
         }
     }
+    slot.shotRecipes.resize(capturedCount);
     std::sort(slot.shotRecipes.begin(), slot.shotRecipes.end(),
               [](const RollbackShotRecipe& a, const RollbackShotRecipe& b) {
                   return a.spawnSequence < b.spawnSequence;

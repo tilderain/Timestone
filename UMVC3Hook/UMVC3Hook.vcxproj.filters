@@ -177,6 +177,9 @@
     <ClInclude Include="code\rollback_snapshot.h">
       <Filter>Header Files\code</Filter>
     </ClInclude>
+    <ClInclude Include="code\rollback_capture_set.h">
+      <Filter>Header Files\code</Filter>
+    </ClInclude>
     <ClInclude Include="code\rollback_tick.h">
       <Filter>Header Files\code</Filter>
     </ClInclude>

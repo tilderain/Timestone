@@ -215,6 +215,7 @@
     <ClInclude Include="code\rollback_restore.h" />
     <ClInclude Include="code\rollback_resim.h" />
     <ClInclude Include="code\rollback_snapshot.h" />
+    <ClInclude Include="code\rollback_capture_set.h" />
     <ClInclude Include="code\rollback_tick.h" />
     <ClInclude Include="code\rollback_ndjson.h" />
     <ClInclude Include="code\autotest.h" />

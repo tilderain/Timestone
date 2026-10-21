@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <cstddef>
 #include <vector>
+#include <utility>
 #include "effect_generator_state.h"
 
 // A concrete uShot body captured using the object's runtime DTI size. The
@@ -28,6 +29,13 @@ struct ConcreteShotSnapshot {
         uint8_t state1F8[0x10] = {};
         uint8_t state230[0x12] = {};
         std::vector<GeneratorEmissionState> generatorEmissionStates;
+
+        void ResetForCapture() {
+            auto storage = std::move(generatorEmissionStates);
+            *this = {};
+            generatorEmissionStates = std::move(storage);
+            generatorEmissionStates.clear();
+        }
 
         bool CompletedIndependent() const {
             // Native isAlive accepts states 1/2. Finished emission can still
@@ -61,6 +69,15 @@ struct ConcreteShotSnapshot {
     std::vector<uint8_t> body;
     std::vector<CollisionPrimitive> collisionPrimitives;
     CallbackEffectState callbackEffects[13];
+
+    void ResetForCapture() {
+        savedObject = nullptr;
+        dti = vtable = 0;
+        body.clear();
+        collisionPrimitives.clear();
+        for (auto& callback : callbackEffects)
+            callback.ResetForCapture();
+    }
 };
 
 bool ConcreteShotSnapshot_Capture(void* shot, ConcreteShotSnapshot& out);

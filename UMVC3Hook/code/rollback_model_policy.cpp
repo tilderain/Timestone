@@ -7,6 +7,7 @@
 #include "rollback_profile.h"
 #include "rollback_shot.h"
 #include "rollback_snapshot.h"
+#include "rollback_capture_set.h"
 #include "concrete_snapshot.h"
 #include "mk10utils.h"
 #include "gameplay_hooks.h"
@@ -1363,7 +1364,7 @@ void Rollback_CaptureCharacterShotReferences(RollbackSnapshotSlot& slot)
 {
     slot.characterShotReferences.clear();
 
-    std::unordered_set<void*> characters;
+    RollbackCaptureSet<void*, 2 * 16 + 64> characters;
     uint64_t sCharacter = *(uint64_t*)_addr(PTR_SCHARACTER);
     for (int team = 0; sCharacter && team < 2; ++team) {
         uint64_t node = sCharacter + (team == 0 ? TEAM0_OFFSET : TEAM1_OFFSET) +
@@ -1402,7 +1403,7 @@ void Rollback_CaptureCharacterShotReferences(RollbackSnapshotSlot& slot)
     for (int regionIndex = 0; regionIndex < slot.regionCount; ++regionIndex) {
         const RollbackRegion& region = slot.regions[regionIndex];
         if (dataOffset + region.size > slot.size) break;
-        if (region.size < 0x68F0 || characters.find(region.ptr) == characters.end()) {
+        if (region.size < 0x68F0 || !characters.count(region.ptr)) {
             dataOffset += region.size;
             continue;
         }

@@ -1,6 +1,7 @@
 #include "../pch.h"
 
 #include "rollback_snapshot.h"
+#include "rollback_capture_set.h"
 
 #include "controller.h"
 #include "rollback_snapdump.h"
@@ -232,7 +233,7 @@ static void CaptureCharacterCollisionParentReferences(RollbackSnapshotSlot& slot
     uint64_t sCharacter = *(uint64_t*)_addr(PTR_SCHARACTER);
     if (!sCharacter) return;
 
-    std::unordered_set<uint64_t> capturedCharacters;
+    RollbackCaptureSet<uint64_t, 2 * 16> capturedCharacters;
     auto captureCharacter = [&](uint64_t character) {
         if (!character || !capturedCharacters.insert(character).second) return;
 

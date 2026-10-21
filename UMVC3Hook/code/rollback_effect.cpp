@@ -771,7 +771,7 @@ static void __fastcall hkGameEffectAttachmentUpdate(void* effect)
 
 void Effect_CaptureRecipes(RollbackSnapshotSlot& slot)
 {
-    slot.effectRecipes.clear();
+    size_t capturedCount = 0;
     slot.characterEffectStates.clear();
     slot.characterEffectReferences.clear();
     slot.effectRecipes.reserve(g_liveEffectRecipes.size());
@@ -792,7 +792,10 @@ void Effect_CaptureRecipes(RollbackSnapshotSlot& slot)
         }
 
         // Capture current parent/request-unit links; native code may have changed them.
-        RollbackEffectRecipe saved = recipe;
+        if (capturedCount == slot.effectRecipes.size())
+            slot.effectRecipes.emplace_back();
+        auto& saved = slot.effectRecipes[capturedCount++];
+        saved.AssignCaptureMetadata(recipe);
         saved.a8 = *(void**)((uint8_t*)recipe.restoredPtr + 0x40);
         saved.attachTo = *(void**)((uint8_t*)recipe.restoredPtr + 0x288);
 
@@ -802,8 +805,8 @@ void Effect_CaptureRecipes(RollbackSnapshotSlot& slot)
             saved.shortParentNo = *(uint32_t*)((uint8_t*)recipe.restoredPtr + 0x48);
             saved.shortControlState = *(uint64_t*)((uint8_t*)recipe.restoredPtr + 0x290);
         }
-        slot.effectRecipes.push_back(std::move(saved));
     }
+    slot.effectRecipes.resize(capturedCount);
 
     // Without the short-factory hook, capture Rocket's jetpack state in place.
     uint64_t sCharacter = *(uint64_t*)_addr(PTR_SCHARACTER);
