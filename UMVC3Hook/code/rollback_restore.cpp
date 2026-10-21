@@ -8,6 +8,7 @@
 #include "rollback_model_policy.h"
 #include "rollback_profile.h"
 #include "live_benchmark.h"
+#include "lag_diagnostics.h"
 #include "rollback_shot.h"
 #include "rollback_snapshot.h"
 #include "concrete_snapshot.h"
@@ -468,6 +469,7 @@ static void RestorePreSpawnRng(const ShotRecipe& recipe)
 
 static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
 {
+    LagDiagnosticScope diagnosticStage(LagMetric::RebuildPin);
     if (!Shot_HooksReady()) {
         HookLog("Rollback: shot restore skipped because lifecycle hooks are unavailable\n");
         return;
@@ -524,6 +526,7 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
         pinnedCallbackEffectResources.push_back(resource);
     }
     const uint64_t pinResourcesEnd = Profile_Now();
+    diagnosticStage.Next(LagMetric::RebuildRetire);
 
     int removedInvalidUnits = 0;
     int retiredEffects = 0;
@@ -563,6 +566,7 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
         retiredEffects += Effect_RetireCurrent(sUnit);
     }
     const uint64_t retireEffectsEnd = Profile_Now();
+    diagnosticStage.Next(LagMetric::RebuildDestroy);
 
     // Unlink and destroy current shots before reconstruction, rather than awaiting deferred cleanup.
     int retiredShots = 0;
@@ -683,6 +687,7 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
         restoredCharacterRngs.push_back(characterRng);
     }
     const uint64_t respawnSetupEnd = Profile_Now();
+    diagnosticStage.Next(LagMetric::RebuildSpawn);
 
     uint64_t respawnPrepareTicks = 0;
     uint64_t respawnFactoryTicks = 0;
@@ -822,6 +827,7 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
         respawnedShots++;
     }
     const uint64_t respawnEnd = Profile_Now();
+    diagnosticStage.Next(LagMetric::RebuildFinalize);
 
     Shot_RestoreBodyReferences(slot);
 
@@ -987,6 +993,8 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
 
 void Rollback_RestoreSnapshot(int32_t frame)
 {
+    LagDiagnosticScope diagnostic(LagMetric::Restore);
+    LagDiagnosticScope diagnosticStage(LagMetric::RestoreSetup);
     const uint64_t benchmarkStart = LiveBenchmark_Now();
     Rollback_RequireCurrentSnapshotLayout();
 
@@ -1260,6 +1268,7 @@ void Rollback_RestoreSnapshot(int32_t frame)
             liveCommandLineCounts[i] = *(uint32_t*)(ownerSlot - 0x08);
     }
     const uint64_t setupEnd = Profile_Now();
+    diagnosticStage.Next(LagMetric::RestoreRegions);
 
     size_t offset = 0;
     for (int i = 0; i < slot.regionCount; ++i) {
@@ -1671,8 +1680,10 @@ void Rollback_RestoreSnapshot(int32_t frame)
     HookLog("RNGRESTORE frame=%d stage=regions live=%08X,%08X,%08X,%08X\n",
             frame, liveGlobalRng[0], liveGlobalRng[1], liveGlobalRng[2], liveGlobalRng[3]);*/
 
+    diagnosticStage.Next(LagMetric::RestoreClones);
     Rollback_RestoreCollisionNodeClones(slot);
     const uint64_t collisionClonesEnd = Profile_Now();
+    diagnosticStage.Next(LagMetric::RestoreFixups);
 
     // Restore current owner pointers (and line counts) for allocations skipped as replaced.
     for (int i = 0; i < slot.regionCount; ++i) {
@@ -1703,8 +1714,10 @@ void Rollback_RestoreSnapshot(int32_t frame)
     // Clear game-effect slot caches before factories create replacements.
     Rollback_ClearGameEffectSlots();
     const uint64_t effectSlotsEnd = Profile_Now();
+    diagnosticStage.Next(LagMetric::RestoreReconstruct);
     RestoreShotAndEffectRecipes(slot);
     const uint64_t shotsEnd = Profile_Now();
+    diagnosticStage.Next(LagMetric::RestoreLate);
 
     /*std::memcpy(liveGlobalRng, (void*)_addr(0x140D765D8), sizeof(liveGlobalRng));
     HookLog("RNGRESTORE frame=%d stage=recipes live=%08X,%08X,%08X,%08X\n",

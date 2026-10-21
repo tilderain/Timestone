@@ -100,6 +100,11 @@ int main() {
 #include <thread>
 #include <vector>
 #include "live_benchmark.h"
+#include "lag_diagnostics.h"
+std::atomic<bool> g_lagDiagnosticsMayBeEnabled{false};
+uint64_t LagDiagnostics_BeginSlow(LagMetric, int32_t) { return 0; }
+void LagDiagnostics_End(LagMetric, uint64_t) {}
+void LagDiagnostics_EventSlow(LagEvent) {}
 #define __fastcall
 int numericFormats = 0;
 int CountedSnprintf(char* output, size_t size, const char* format, ...) {
@@ -1016,10 +1021,9 @@ int main() {
         self.assertEqual(main_hook.count("LiveBenchmark_BeginFrame("), 1)
         self.assertLess(main_hook.rindex("Rollback_SaveSnapshot("),
                         main_hook.index("LiveBenchmark_BeginFrame("))
-        self.assertIn("const uint64_t benchmarkStart = LiveBenchmark_BeginFrame(curFrame);\n"
-                      "    original(main);\n"
-                      "    LiveBenchmark_EndFrame(benchmarkStart, Controller_GetNetFrameCount());",
-                      main_hook)
+        timing = main_hook[main_hook.index("const uint64_t benchmarkStart = LiveBenchmark_BeginFrame(curFrame);"):]
+        self.assertLess(timing.index("LagMetric::Native"), timing.index("original(main);"))
+        self.assertLess(timing.index("original(main);"), timing.index("LiveBenchmark_EndFrame("))
         self.assertLess(hooks.index("oMainMove(main);"), hooks.index("LiveBenchmark_EndPacing"))
         save = (CODE / "rollback_snapshot.cpp").read_text()
         self.assertLess(save.index("SnapDump_CaptureSnapshot(slot)"),

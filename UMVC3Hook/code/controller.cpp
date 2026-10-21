@@ -3,6 +3,7 @@
 // predict missing remote input and replay frames when confirmation differs.
 #include "../pch.h"
 #include "controller.h"
+#include "lag_diagnostics.h"
 #include "mk10utils.h"
 #include "netplay.h"
 #include "rollback.h"
@@ -1338,6 +1339,7 @@ static bool WaitForConfirmedFrame(int32_t frame, const char* reason)
     if (IsFrameConfirmed(frame) || !Netplay_IsActive())
         return true;
 
+    LagDiagnosticScope diagnostic(LagMetric::InputWait);
     Rollback_FreezeWatchdogHeartbeat(reason, g_netFrameCount);
     //HookLog("Netplay: waiting for remote input frame %d (%s, local=%d, lastRemote=%d)\n",
     //        frame, reason, g_netFrameCount, g_lastRemoteFrame);
@@ -1362,6 +1364,7 @@ static bool WaitForConfirmedFrame(int32_t frame, const char* reason)
 
 static bool WaitForPredictionBudgetFrame(int32_t frame)
 {
+    LagDiagnosticScope diagnostic(LagMetric::PredictionWait);
     SetPredictionBudgetExhausted();
     Rollback_FreezeWatchdogHeartbeat("prediction budget exhausted",
                                      g_netFrameCount);
@@ -1387,7 +1390,7 @@ static bool WaitForPredictionBudgetFrame(int32_t frame)
 // ---------------------------------------------------------------------------
 extern "C" void Controller_OnFrameStart()
 {
-    g_preRenderInputReady = false;
+    LagDiagnosticScope diagnostic(LagMetric::ControllerStart);
     if (!Netplay_IsActive()) {
         ClearPredictionBudgetExhausted();
         return;
@@ -1409,7 +1412,10 @@ extern "C" void Controller_OnFrameStart()
     g_localPending = 0;
 
     // Use the same packet acceptance rules here and inside waits.
-    DrainAndProcessPackets();
+    {
+        LagDiagnosticScope packetDiagnostic(LagMetric::PacketDrain);
+        DrainAndProcessPackets();
+    }
 
     // Confirm completed frames before changing the rollback window.
     // Do not wait for current-frame input: zero-delay peers have not sent it yet.
@@ -1675,6 +1681,7 @@ static uint32_t ComputeChecksum()
 
 extern "C" void Controller_RecordFrameChecksum(int32_t frame)
 {
+    LagDiagnosticScope diagnostic(LagMetric::Checksum);
     if (!FrameStepper_IsDesyncCheckReady() ||
         FrameStepper_IsMatchRestartPending() ||
         frame < DESYNC_SKIP_FRAMES)
@@ -1745,7 +1752,8 @@ static void UpdateConfirmedChecksums()
 
 static void PublishFrameInput(bool frameComplete)
 {
-    if (!Netplay_IsActive() || g_isResimulating || g_netFrameCount < 0)
+    LagDiagnosticScope diagnostic(LagMetric::ControllerEnd);
+    if (!Netplay_IsActive())
         return;
 
     // Send history even during neutral startup so delay-only peers can progress.

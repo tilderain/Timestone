@@ -4,6 +4,7 @@
 #include "../pch.h"
 #include "../IniSafe.h"
 #include "framestepper.h"
+#include "lag_diagnostics.h"
 #include "escmenu_imgui.h"
 #include "gameui.h"
 #include "mk10utils.h"       // _addr
@@ -571,6 +572,7 @@ static void __fastcall HookedMove(void* sMvc3Main)
         return;
     }
 
+    LagDiagnosticScope diagnostic(LagMetric::Frame, Controller_GetNetFrameCount());
     ApplyAdvancedLaunchConfig();
 
     // These setters rewrite live sMain timing and subsystem state. Applying
@@ -1003,6 +1005,7 @@ static void __fastcall HookedMove(void* sMvc3Main)
 
     oMove(sMvc3Main);
 
+    LagDiagnosticScope tailDiagnostic(LagMetric::FrameTail);
     if (Netplay_IsActive() && g_battleSynchronized)
     {
         Controller_OnFrameEnd();

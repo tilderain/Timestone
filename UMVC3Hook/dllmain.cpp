@@ -17,6 +17,7 @@
 #include "code/escmenu_imgui.h"
 #include "code/live_benchmark.h"
 #include "code/keyboard_input.h"
+#include "code/lag_diagnostics.h"
 #include "code/trainingboot.h"
 #include "code/netplay.h"
 #include "code/controller.h"
@@ -243,6 +244,7 @@ static void HookLogWriteConsoleLocked(const char* data, size_t length)
 
 void HookLog(const char* fmt, ...)
 {
+	LagDiagnosticScope diagnostic(LagMetric::HookLog);
 	AcquireSRWLockExclusive(&g_hookLogLock);
 	char stackBuffer[2048] = {};
 	va_list args;
@@ -938,6 +940,8 @@ long __stdcall hkEndScene(LPDIRECT3DDEVICE9 pDevice)
 		InterlockedExchange(&g_endSceneOverlayInFlight, 0);
 		return oEndScene(pDevice);
 	}
+	LagDiagnosticScope sceneDiagnostic(LagMetric::EndScene);
+	LagDiagnosticScope overlayDiagnostic(LagMetric::OverlaySetup);
 	if (!D3D9Reset_BeginOverlay(pDevice)) {
 		InterlockedExchange(&g_endSceneOverlayInFlight, 0);
 		return oEndScene(pDevice);
@@ -1005,6 +1009,7 @@ long __stdcall hkEndScene(LPDIRECT3DDEVICE9 pDevice)
 
 	ImGui::NewFrame();
 	ImGui::GetIO().MouseDrawCursor = false;
+	overlayDiagnostic.Next(LagMetric::OverlayLogic);
 
 	// Process menu logic, notifications, frame stepper, and freecam
 	// (formerly in a separate HookUpdate thread with Sleep(1))
@@ -1023,9 +1028,19 @@ long __stdcall hkEndScene(LPDIRECT3DDEVICE9 pDevice)
 		FrameStepper_ShowOpponentDisconnected();
 	}
 	extern void ChrSelImGui_Draw();
-	FrameStepper_Draw();
-	ChrSelImGui_Draw();
-	EscMenuImGui_Draw();
+	overlayDiagnostic.Finish();
+	{
+		LagDiagnosticScope diagnostic(LagMetric::StatusHud);
+		FrameStepper_Draw();
+	}
+	{
+		LagDiagnosticScope diagnostic(LagMetric::CharacterHud);
+		ChrSelImGui_Draw();
+	}
+	{
+		LagDiagnosticScope diagnostic(LagMetric::EscapeHud);
+		EscMenuImGui_Draw();
+	}
 	LiveBenchmark_Draw();
 
 	if (TheMenu->GetActiveState())
@@ -1036,8 +1051,15 @@ long __stdcall hkEndScene(LPDIRECT3DDEVICE9 pDevice)
 	Notifications->Draw();
 
 	ImGui::EndFrame();
-	ImGui::Render();
-	ImGui_ImplDX9_RenderDrawData(ImGui::GetDrawData());
+
+	{
+		LagDiagnosticScope diagnostic(LagMetric::ImGuiFinalize);
+		ImGui::Render();
+	}
+	{
+		LagDiagnosticScope diagnostic(LagMetric::ImGuiSubmit);
+		ImGui_ImplDX9_RenderDrawData(ImGui::GetDrawData());
+	}
 
 	D3D9Reset_EndOverlay();
 	const long result = oEndScene(pDevice);
@@ -1503,6 +1525,7 @@ DWORD WINAPI MainThread(LPVOID lpReserved)
 		}
 	} while (!attached || !setupComplete);
 	WaitForDualTrainingClient();
+	LagDiagnostics_RunWriter();
 	return TRUE;
 }
 
@@ -2167,7 +2190,7 @@ BOOL WINAPI DllMain(HMODULE hMod, DWORD dwReason, LPVOID lpReserved)
 		// A rejected process attach must not clean up uninitialized mod systems.
 		if (!g_asiModule)
 			break;
-		XInputDiscovery_Stop();
+		LagDiagnostics_StopWriter();
 		Exception_RemoveHandler();
 		CleanupNetworkOnExit();
 		enet_deinitialize();

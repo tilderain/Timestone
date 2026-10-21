@@ -22,7 +22,8 @@ def replace_once(text, old, new):
 
 
 def generate(src):
-    snapshot = clean(src["rollback_snapshot.cpp"])
+    snapshot = clean(src["rollback_snapshot.cpp"]).replace(
+        "diagnosticStage.Next(LagMetric::SaveShots);", "")
     policy = clean(src["rollback_model_policy.cpp"])
     concrete = clean(src["concrete_snapshot.cpp"])
     declarations = src["rollback_snapshot.h"].split("struct RollbackSnapshotSlot {")[0]

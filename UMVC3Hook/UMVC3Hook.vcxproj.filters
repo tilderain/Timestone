@@ -180,6 +180,9 @@
     <ClInclude Include="code\rollback_capture_set.h">
       <Filter>Header Files\code</Filter>
     </ClInclude>
+    <ClInclude Include="code\lag_diagnostics.h">
+      <Filter>Header Files\code</Filter>
+    </ClInclude>
     <ClInclude Include="code\rollback_tick.h">
       <Filter>Header Files\code</Filter>
     </ClInclude>
@@ -204,6 +207,9 @@
       <Filter>Header Files\code</Filter>
     </ClCompile>
     <ClCompile Include="code\rollback_snapshot.cpp">
+      <Filter>Header Files\code</Filter>
+    </ClCompile>
+    <ClCompile Include="code\lag_diagnostics.cpp">
       <Filter>Header Files\code</Filter>
     </ClCompile>
     <ClCompile Include="code\rollback_ndjson.cpp">
