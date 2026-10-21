@@ -11,6 +11,7 @@
 #include "rollback_model_policy.h"
 #include "rollback_profile.h"
 #include "live_benchmark.h"
+#include "lag_diagnostics.h"
 #include "rollback_restore.h"
 #include "rollback_resim.h"
 #include "rollback_shot.h"
@@ -1302,6 +1303,8 @@ int Rollback_BuildRegions(Region* regions, int maxRegions)
 
 void Rollback_SaveSnapshot(int32_t frame)
 {
+    LagDiagnosticScope diagnostic(g_isResimulating ? LagMetric::SaveResim : LagMetric::SaveLive);
+    LagDiagnosticScope diagnosticStage(LagMetric::SaveRegions);
     const uint64_t benchmarkStart = LiveBenchmark_Now();
     const uint64_t profileStart = Profile_Now();
 #if ROLLBACK_SNAPDUMP_ENABLED
@@ -1314,6 +1317,7 @@ void Rollback_SaveSnapshot(int32_t frame)
     int count = Rollback_BuildRegions(slot.regions, MAX_REGIONS);
     if (count == 0) return;
     const uint64_t buildRegionsEnd = Profile_Now();
+    diagnosticStage.Next(LagMetric::SaveAllocate);
 
     size_t total = 0;
     for (int i = 0; i < count; ++i) {
@@ -1366,6 +1370,7 @@ void Rollback_SaveSnapshot(int32_t frame)
         slot.capacity = newCapacity;
     }
     const uint64_t allocationEnd = Profile_Now();
+    diagnosticStage.Next(LagMetric::SaveCopy);
 
     // Copy region payloads; keep this frame's region metadata alongside the bytes.
     size_t offset = 0;
@@ -1380,6 +1385,7 @@ void Rollback_SaveSnapshot(int32_t frame)
     CaptureActionSideCameraState(slot);
     CaptureCharacterPostState(slot);
     const uint64_t copyRegionsEnd = Profile_Now();
+    diagnosticStage.Finish();
 
     // Disabled RNG snapshot logging.
     uint32_t globalRng[4] = {};
@@ -1406,9 +1412,12 @@ void Rollback_SaveSnapshot(int32_t frame)
     const uint64_t snapshotMetadataEnd = Profile_Now();
 
     // Capture collision children through native copyFrom, plus remappable parent identities.
+    diagnosticStage.Next(LagMetric::SaveClones);
     Rollback_CaptureCollisionNodeClones(slot);
+    diagnosticStage.Next(LagMetric::SaveParents);
     CaptureCharacterCollisionParentReferences(slot);
     const uint64_t collisionClonesEnd = Profile_Now();
+    diagnosticStage.Next(LagMetric::SaveRenderState);
 
     // Save visibility, draw layers, and transparency separately from live model ownership.
     slot.modelRenderStates.clear();
@@ -1463,12 +1472,16 @@ void Rollback_SaveSnapshot(int32_t frame)
             captureCharacterRenderState(character);
         }
     }
+    diagnosticStage.Next(LagMetric::SaveShots);
     Shot_CaptureRecipes(slot);
     const uint64_t shotRecipesCapturedEnd = Profile_Now();
+    diagnosticStage.Next(LagMetric::SaveShotRefs);
     Rollback_CaptureCharacterShotReferences(slot);
     const uint64_t characterShotReferencesEnd = Profile_Now();
+    diagnosticStage.Next(LagMetric::SaveEffects);
     Effect_CaptureRecipes(slot);
     const uint64_t shotRecipesEnd = Profile_Now();
+    diagnosticStage.Finish();
 
     if constexpr (ROLLBACK_PROFILING_ENABLED) {
         if (g_activeRollbackProfile)
@@ -1503,8 +1516,10 @@ void Rollback_SaveSnapshot(int32_t frame)
                 slot.remoteInput, slot.size);
     }*/
 #if ROLLBACK_SNAPDUMP_ENABLED
-    if (captureSnapDump)
+    if (captureSnapDump) {
+        LagDiagnosticScope dumpDiagnostic(LagMetric::SnapDump);
         SnapDump_CaptureSnapshot(slot);
+    }
 #endif
     
     //HookLog("Rollback: saved frame %d with %d regions, total size %zu bytes\n", frame, count, offset);

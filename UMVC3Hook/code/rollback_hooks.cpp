@@ -11,6 +11,7 @@
 #include "rollback_diagnostics.h"
 #include "rollback_profile.h"
 #include "live_benchmark.h"
+#include "lag_diagnostics.h"
 #include "steam_lobby.h"
 #include "gameplay_hooks.h"
 
@@ -198,6 +199,7 @@ static void __fastcall hkMvc3MainMove(uint64_t main)
         (*g_originalMvc3MainMove)(main);
         return;
     }
+    LagDiagnosticScope diagnostic(LagMetric::MainHook);
     const uint64_t benchmarkStart = g_isResimulating ? 0 :
         LiveBenchmark_BeginFrame(Controller_GetNetFrameCount());
     // Discard previous memory checks; native allocations may have changed.
@@ -298,7 +300,10 @@ static void __fastcall hkMvc3MainMove(uint64_t main)
     curFrame = Controller_GetNetFrameCount();
 
     Rollback_FreezeWatchdogHeartbeat("native-main-move", curFrame);
-    original(main);
+    {
+        LagDiagnosticScope diagnostic(LagMetric::Native);
+        original(main);
+    }
     Rollback_FreezeWatchdogHeartbeat("native-main-complete", curFrame);
 
     if (TraceLifecycleFrame(curFrame)) {
@@ -441,7 +446,10 @@ static void __fastcall hkMainMove(uint64_t main)
         return;
     }
     const uint64_t benchmarkStart = LiveBenchmark_Now();
-    oMainMove(main);
+    {
+        LagDiagnosticScope diagnostic(LagMetric::Pacing);
+        oMainMove(main);
+    }
     LiveBenchmark_EndPacing(benchmarkStart);
     if (Netplay_IsActive()) {
         int32_t frame = Controller_GetNetFrameCount();

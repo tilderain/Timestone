@@ -5,6 +5,7 @@
 #include "rollback_hooks.h"
 #include "rollback_profile.h"
 #include "live_benchmark.h"
+#include "lag_diagnostics.h"
 #include "rollback_resim.h"
 #include "rollback_snapshot.h"
 #include "rollback_tick.h"
@@ -152,6 +153,7 @@ void Rollback_ReSimulate(int32_t startFrame, int32_t endFrame)
     }
     g_resimReentranceDepth = 0;
 
+    LagDiagnosticScope diagnostic(LagMetric::Correction);
     const uint64_t benchmarkStart = LiveBenchmark_BeginResim();
     RollbackProfile profile;
     Profile_BeginRollback(profile, startFrame, endFrame);
@@ -174,6 +176,7 @@ void Rollback_ReSimulate(int32_t startFrame, int32_t endFrame)
     const bool reuseStartSnapshot = CanReuseRestoredSnapshot(startFrame);
 
     for (int32_t frame = startFrame; frame < endFrame; ++frame) {
+        LagDiagnosticScope frameDiagnostic(LagMetric::ResimFrame);
         RollbackProfileTimer timer;
         g_resimulateCurrentFrame = frame;
         int slotIndex = frame % ROLLBACK_WINDOW;
@@ -197,7 +200,10 @@ void Rollback_ReSimulate(int32_t startFrame, int32_t endFrame)
         }
         timer.Add(&RollbackProfile::frameSnapshot);
         //g_originalMainMove(g_mainInstance);
-        Rollback_HeadlessTick(g_mainInstance);
+        {
+            LagDiagnosticScope tickDiagnostic(LagMetric::ResimTick);
+            Rollback_HeadlessTick(g_mainInstance);
+        }
         timer.Add(&RollbackProfile::frameNativeTick,
                   &RollbackProfile::frameNativeTickMax);
         Controller_SilentFrameEnd();

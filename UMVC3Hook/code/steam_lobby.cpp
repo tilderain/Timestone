@@ -2,6 +2,7 @@
 
 #include "steam_api_compat.h"
 #include "steam_transport.h"
+#include "lag_diagnostics.h"
 #include "launchmenu_utils.h"
 #include "umvc3.h"
 #include <Windows.h>
@@ -1080,6 +1081,7 @@ const char* SteamLobby_GetStatus()
 
 const char* SteamLobby_GetConnectionType()
 {
+    LagDiagnosticScope diagnostic(LagMetric::SteamRoute);
     SteamNetConnectionInfo_t info = {};
     if (!g_sockets || g_connection == k_HSteamNetConnection_Invalid ||
         !g_sockets->GetConnectionInfo(g_connection, &info) ||

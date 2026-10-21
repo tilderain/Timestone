@@ -1,6 +1,7 @@
 #include "../pch.h"
 #include "../imgui/imgui.h"
 #include "live_benchmark.h"
+#include "lag_diagnostics.h"
 #include "escmenu_imgui.h"
 #include "framestepper.h"
 #include "netplay.h"
@@ -58,6 +59,7 @@ struct Samples {
 
 uint64_t Counter()
 {
+    LagDiagnostics_Event(LagEvent::BenchmarkClock);
     LARGE_INTEGER value;
     QueryPerformanceCounter(&value);
     return (uint64_t)value.QuadPart;
@@ -174,6 +176,7 @@ uint64_t NextReportDelay()
 
 void Clear()
 {
+    LagDiagnostics_Event(LagEvent::BenchmarkReset);
     for (auto& samples : g_samples) samples = {};
     g_active = false;
     g_resimSampling = false;
@@ -366,6 +369,7 @@ void Assessment(const Packet& packet, bool fresh)
 
 uint64_t LiveBenchmark_BeginFrame(int32_t frame)
 {
+    LagDiagnosticScope diagnostic(LagMetric::BenchmarkBegin);
     g_active = false;
     if (!HasSamplingRequest()) return 0;
     if (g_lastFrame >= 0 && frame != g_lastFrame) Clear();
@@ -383,6 +387,7 @@ uint64_t LiveBenchmark_BeginFrame(int32_t frame)
     g_pacing = 0;
     for (auto& samples : g_pending) samples.count = samples.next = 0;
     g_active = true;
+    LagDiagnostics_Event(LagEvent::LiveSample);
     return Counter();
 }
 
@@ -400,6 +405,7 @@ uint64_t LiveBenchmark_BeginResim()
     g_resimSampling = SamplingRequested(now) && now >= g_nextResimSample;
     if (!g_resimSampling) return 0;
     g_nextResimSample = now + SampleIntervalMs;
+    LagDiagnostics_Event(LagEvent::CorrectionSample);
     return Counter();
 }
 
@@ -427,6 +433,7 @@ void LiveBenchmark_EndPacing(uint64_t start)
 
 void LiveBenchmark_EndFrame(uint64_t start, int32_t frame)
 {
+    LagDiagnosticScope diagnostic(LagMetric::BenchmarkEnd);
     if (!start) {
         g_lastFrame = frame;
         return;
@@ -469,6 +476,7 @@ void LiveBenchmark_EndFrame(uint64_t start, int32_t frame)
 
 void LiveBenchmark_Update()
 {
+    LagDiagnosticScope diagnostic(LagMetric::BenchmarkUpdate);
     const bool connected = Netplay_IsActive();
     const uint32_t generation = FrameStepper_GetBattleGeneration();
     const uint32_t flags = (g_multiResimEnabled ? 1u : 0u) |
@@ -542,6 +550,7 @@ void LiveBenchmark_Update()
 
 void LiveBenchmark_Draw()
 {
+    LagDiagnosticScope diagnostic(LagMetric::BenchmarkDraw);
     const bool requested = !ImGui::GetIO().WantTextInput && KeyPressed('0');
     const bool menu = EscMenuImGui_IsOpen();
     // Esc-menu state belongs to the render thread; sampling runs on the game thread.
