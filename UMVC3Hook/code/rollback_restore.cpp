@@ -517,7 +517,7 @@ static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
     }
     for (const RollbackEffectRecipe& saved : slot.effectRecipes) {
         void* resource = (void*)saved.state.resource;
-        if (!saved.rocketShort || !resource || !HasCallableDtiVirtual(resource) ||
+        if (!saved.shortFactory || !resource || !HasCallableDtiVirtual(resource) ||
             std::find(pinnedCallbackEffectResources.begin(),
                       pinnedCallbackEffectResources.end(), resource) !=
                 pinnedCallbackEffectResources.end())
@@ -1258,17 +1258,51 @@ void Rollback_RestoreSnapshot(int32_t frame)
     uint32_t liveCommandLineCounts[MAX_REGIONS];
     for (int i = 0; i < slot.regionCount; ++i) {
         uint64_t ownerSlot = slot.regions[i].ownerSlot;
+        const int dependency = slot.regions[i].dependentRegion;
+        if (dependency >= 0 && (dependency >= i || !ownerStillMatches[dependency])) {
+            ownerStillMatches[i] = false;
+            continue;
+        }
         if (ownerSlot == 0) {
             ownerStillMatches[i] = true;
             continue;
         }
         liveOwnerPointers[i] = *(uint64_t*)ownerSlot;
         ownerStillMatches[i] = liveOwnerPointers[i] == (uint64_t)slot.regions[i].ptr;
+        if (ownerStillMatches[i] && slot.regions[i].expectedVtable)
+            ownerStillMatches[i] = *(uint64_t*)slot.regions[i].ptr ==
+                slot.regions[i].expectedVtable;
         if (slot.regions[i].commandLine)
             liveCommandLineCounts[i] = *(uint32_t*)(ownerSlot - 0x08);
     }
     const uint64_t setupEnd = Profile_Now();
     diagnosticStage.Next(LagMetric::RestoreRegions);
+
+    auto restoreHelperLinks = [&](uint8_t* character, const uint8_t* saved, size_t size) {
+        for (uint32_t field : Rollback_CharacterHelperTailOffsets(GetObjectDti((uint64_t)character))) {
+            if (field + sizeof(void*) > size) continue;
+            void* target = nullptr;
+            std::memcpy(&target, saved + field, sizeof(target));
+            bool valid = target == nullptr;
+            // Never probe an arbitrary historical address. A surviving current
+            // team node or validated owner-managed actor must also be captured.
+            for (int j = 0; target && j < slot.regionCount; ++j) {
+                const auto& candidate = slot.regions[j];
+                if (candidate.ptr != target || !candidate.skipVtable) continue;
+                if (isTeamCharacter((uint64_t)target) ||
+                    (candidate.ownerSlot && ownerStillMatches[j])) {
+                    valid = *(uint64_t*)target == candidate.expectedVtable;
+                }
+                break;
+            }
+            if (!valid) {
+                HookLog("Rollback: helper identity unavailable owner=%p offset=0x%X target=%p\n",
+                        character, field, target);
+                target = nullptr;
+            }
+            std::memcpy(character + field, &target, sizeof(target));
+        }
+    };
 
     size_t offset = 0;
     for (int i = 0; i < slot.regionCount; ++i) {
@@ -1276,6 +1310,16 @@ void Rollback_RestoreSnapshot(int32_t frame)
         size_t copySize = slot.regions[i].size;
         if (offset + copySize > slot.size) {
             copySize = slot.size - offset;
+        }
+        if (!ownerStillMatches[i] && slot.regions[i].dependentRegion >= 0) {
+            offset += slot.regions[i].size;
+            continue;
+        }
+        // An owner-managed auxiliary may have been retired. Do not even read
+        // its old vtable when the owning slot no longer identifies it.
+        if (slot.regions[i].skipVtable && slot.regions[i].ownerSlot && !ownerStillMatches[i]) {
+            offset += slot.regions[i].size;
+            continue;
         }
         bool objectStillMatches = slot.regions[i].expectedVtable == 0 ||
             *(uint64_t*)slot.regions[i].ptr == slot.regions[i].expectedVtable;
@@ -1303,6 +1347,7 @@ void Rollback_RestoreSnapshot(int32_t frame)
         } else if (!ownerStillMatches[i] || !objectStillMatches) {
             // Skip regions whose owner pointer or vtable no longer matches.
         } else if (slot.regions[i].ownerSlot != 0 &&
+                   slot.regions[i].dependentRegion < 0 &&
                    slot.regions[i].size == CCHR_EXTERNAL_ANIM_SIZE) {
             Rollback_RestoreExternalAnimBlock(slot.regions[i].ptr,
                                      slot.data + offset,
@@ -1373,6 +1418,11 @@ void Rollback_RestoreSnapshot(int32_t frame)
             // Restore camera state and handle its retained resources/references separately.
             restoreActionSideCamera((uint64_t)slot.regions[i].ptr,
                                     slot.data + offset, copySize);
+        } else if (slot.regions[i].skipVtable && copySize == 0x14D0 &&
+                   (GetObjectDti((uint64_t)slot.regions[i].ptr) == _addr(0x140D455B0) ||
+                    GetObjectDti((uint64_t)slot.regions[i].ptr) == _addr(0x140D45638))) {
+            Rollback_RestoreAuxiliaryActor(slot.regions[i].ptr, slot.regions[i].size,
+                slot.data + offset, copySize, GetObjectDti((uint64_t)slot.regions[i].ptr));
         } else if (slot.regions[i].skipVtable &&
                    copySize >= CCHR_MODEL_TAIL_END &&
                    GetObjectDti((uint64_t)slot.regions[i].ptr) ==
@@ -1424,20 +1474,11 @@ void Rollback_RestoreSnapshot(int32_t frame)
                 slot.regions[i].ptr, slot.regions[i].size, slot.data + offset,
                 copySize, concreteDti, isTeamCharacter((uint64_t)slot.regions[i].ptr),
                 CharacterRestorePhase::Early);
-            // No dynamic scratch or heuristic fallback. Report incomplete
-            // coverage once per DTI, rather than implying full support.
-            static uint64_t reportedDtis[128] = {};
-            static size_t reportedCount = 0;
-            bool reported = false;
-            for (size_t n = 0; n < reportedCount; ++n)
-                reported |= reportedDtis[n] == concreteDti;
-            if (!reported || status == CharacterRestoreStatus::InvalidBuffer) {
-                HookLog("Rollback: explicit character restore INCOMPLETE dti=0x%llX "
-                        "status=%d (unreviewed bytes remain live)\n", concreteDti, (int)status);
-                if (reportedCount < std::size(reportedDtis))
-                    reportedDtis[reportedCount++] = concreteDti;
-            }
             if (status != CharacterRestoreStatus::ReviewedSubset) {
+                HookLog("Rollback: character restore rejected dti=0x%llX: %s\n",
+                        concreteDti,
+                        status == CharacterRestoreStatus::InvalidBuffer
+                            ? "invalid buffer" : "unsupported layout");
                 offset += slot.regions[i].size;
                 continue;
             }
@@ -1459,6 +1500,20 @@ void Rollback_RestoreSnapshot(int32_t frame)
             uint8_t* character = (uint8_t*)slot.regions[i].ptr;
             const uint8_t* savedCharacter = slot.data + offset;
 
+            // Throw setup and ZeroSh sync replace motion-list slot 2. Its saved
+            // resource is pinned by the snapshot. Native assignment manages
+            // refcounts and marks layers S_SETUP, so do this before restoring
+            // motion playback and the following external work-buffer regions.
+            for (const auto& binding : slot.characterMotionResources) {
+                if (binding.regionIndex != i) continue;
+                if (*(void**)(character + 0x11C8) != binding.resource) {
+                    using SetMotionList = void(__fastcall*)(void*, void*, uint32_t);
+                    ((SetMotionList)_addr(0x140529730))(character, binding.resource, 2);
+                }
+                break;
+            }
+            restoreHelperLinks(character, savedCharacter, copySize);
+
             // Interpreter return selector 7 can hold its roster owner, a shot
             // or an effect. Native +90 is relative to the interpreter at +1348.
             // Shots/effects are repaired by their stable-identity recipes.
@@ -1475,12 +1530,7 @@ void Rollback_RestoreSnapshot(int32_t frame)
                     *(uint64_t*)(character + 0x68F8) = traceSource;
             }
 
-            if (concreteDti == (uint64_t)_addr(0x140D45A10) && copySize >= 0x6920) {
-                // Preserve the previous Ryu retirement policy: this beam/effect
-                // owner has no reconstruction recipe and must not be released
-                // again by uRyu::tick after the current effects are retired.
-                *(uint64_t*)(character + 0x6918) = 0;
-            }
+            // Ryu's +6918 effect now follows the character effect recipes.
 
             if (concreteDti == (uint64_t)_addr(DTI_UIRONMAN) &&
                 copySize >= 0x6928) {
@@ -1687,6 +1737,8 @@ void Rollback_RestoreSnapshot(int32_t frame)
 
     // Restore current owner pointers (and line counts) for allocations skipped as replaced.
     for (int i = 0; i < slot.regionCount; ++i) {
+        const int dependency = slot.regions[i].dependentRegion;
+        if (dependency >= 0 && (dependency >= i || !ownerStillMatches[dependency])) continue;
         if (slot.regions[i].ownerSlot != 0 && !ownerStillMatches[i]) {
             *(uint64_t*)slot.regions[i].ownerSlot = liveOwnerPointers[i];
             if (slot.regions[i].commandLine) {
@@ -1755,6 +1807,14 @@ void Rollback_RestoreSnapshot(int32_t frame)
         size_t copySize = slot.regions[i].size;
         if (offset + copySize > slot.size)
             copySize = slot.size - offset;
+        if (slot.regions[i].skipVtable && slot.regions[i].ownerSlot &&
+            copySize == 0x14D0 && ownerStillMatches[i] &&
+            *(uint64_t*)slot.regions[i].ownerSlot == (uint64_t)slot.regions[i].ptr &&
+            *(uint64_t*)slot.regions[i].ptr == slot.regions[i].expectedVtable) {
+            Rollback_RestoreAuxiliaryActor(slot.regions[i].ptr, slot.regions[i].size,
+                slot.data + offset, copySize, GetObjectDti((uint64_t)slot.regions[i].ptr),
+                CharacterRestorePhase::Late);
+        }
         if (slot.regions[i].skipVtable &&
             copySize >= ROLLBACK_CHARACTER_COMMON_SIZE &&
             isTeamCharacter((uint64_t)slot.regions[i].ptr) &&
@@ -1773,6 +1833,7 @@ void Rollback_RestoreSnapshot(int32_t frame)
             const uint8_t* savedCharacter = slot.data + offset;
             restoreCnsHelper(character, savedCharacter, copySize, 0x3BF0);
             restoreCnsHelper(character, savedCharacter, copySize, 0x3D60);
+            restoreHelperLinks(character, savedCharacter, copySize);
 
             // Reapply capsule geometry/flags late; parent references are restored below.
             constexpr uint32_t capsuleBase = 0x4210;

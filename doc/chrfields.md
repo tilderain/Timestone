@@ -1,5 +1,9 @@
 # Concrete Character Field Audit
 
+**Current corrections:** [three-pass implementation ledger](character_tail_regression_fixes.md)
+supersedes conflicting classifications below, including cached vectors formerly
+called MtArrays, Hsien-Ko's Linlin pointer, and newly restored tail latches.
+
 ## Explicit Restore Migration (2026-10-20)
 
 The subsequent [member-by-member regression audit](uCharacter_restore_member_audit.md)
@@ -19,7 +23,7 @@ DTI has an explicit layout policy (including reference-only concrete tails).
 Unknown DTIs return `UnsupportedLayout` **before any common or tail write**;
 the integration also skips their embedded-record fixups. `InvalidBuffer`
 likewise rejects before mutation. Reviewed layouts retain
-unreviewed bytes and log incomplete coverage once per DTI. Continuing from a
+unreviewed bytes. Successful restores are silent; actual rejections log errors. Continuing from a
 partial restore can still desync. There is no legacy fallback or compile-time
 gate selecting a different production character restore.
 

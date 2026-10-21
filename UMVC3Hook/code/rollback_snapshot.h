@@ -23,6 +23,7 @@ struct RollbackRegion {
     uint64_t expectedVtable;
     bool skipVtable;
     bool commandLine;
+    int dependentRegion = -1; // auxiliary work buffer: validate its actor before dereferencing ownerSlot
 #if ROLLBACK_SNAPDUMP_ENABLED
     const char* snapDumpName;
 #endif
@@ -142,9 +143,10 @@ struct RollbackEffectRecipe {
     void* a13;
     uint64_t spawnSequence = 0;
     ConcreteShotSnapshot::CallbackEffectState state;
-    bool rocketShort = false;
+    bool shortFactory = false;
     uint32_t shortParentNo = 0;
     uint64_t shortControlState = 0;
+    uint32_t shortFlags = 0;
 
     void AssignCaptureMetadata(const RollbackEffectRecipe& source) {
         savedPtr = source.savedPtr;
@@ -163,9 +165,10 @@ struct RollbackEffectRecipe {
         a12 = source.a12;
         a13 = source.a13;
         spawnSequence = source.spawnSequence;
-        rocketShort = source.rocketShort;
+        shortFactory = source.shortFactory;
         shortParentNo = source.shortParentNo;
         shortControlState = source.shortControlState;
+        shortFlags = source.shortFlags;
     }
 };
 
@@ -202,6 +205,7 @@ enum class RollbackCharacterShotReferenceRole : uint8_t {
     MissileEmplacement,
     SpadaBoomerang,
     GraceOfHoggoth,
+    ConcreteTail,
 };
 
 struct RollbackCharacterShotReference {
@@ -268,6 +272,11 @@ struct RollbackCharacterPostState {
     bool valid = false;
 };
 
+struct RollbackCharacterMotionResource {
+    int regionIndex;
+    void* resource; // retained mpMotionList[2], including saved null
+};
+
 struct RollbackSnapshotSlot {
     int32_t frame = -1;
     uint8_t* data = nullptr;
@@ -281,6 +290,7 @@ struct RollbackSnapshotSlot {
     std::vector<RollbackShotRecipe> shotRecipes;
     std::vector<RollbackShotBodyReference> shotBodyReferences;
     std::vector<RollbackEffectRecipe> effectRecipes;
+    std::vector<void*> retainedEffectResources;
     std::vector<RollbackCharacterEffectState> characterEffectStates;
     std::vector<RollbackCharacterEffectReference> characterEffectReferences;
     std::vector<RollbackCharacterShotReference> characterShotReferences;
@@ -290,6 +300,7 @@ struct RollbackSnapshotSlot {
     std::vector<RollbackModelRenderState> modelRenderStates;
     RollbackActionSideCameraState actionSideCamera;
     RollbackCharacterPostState characterPost;
+    std::vector<RollbackCharacterMotionResource> characterMotionResources;
 };
 
 // Encode the slot ABI into a required linker symbol. Translation units built

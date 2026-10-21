@@ -97,6 +97,28 @@ All offsets are relative to the character; endpoint ranges are inclusive.
 
 ## Validation And Limits
 
+### Zero State And Mutable Motion Binding
+
+- Playable Zero now restores byte `68F8` (pending charge reset: writer
+  `1400F8089`, consumer `1400F7AA0`) and byte `6928` (command predicate latch:
+  updater `1400F80A0`, reader `140099E20`). Neither range includes its padding.
+- Zero's effects are at `6900/8` and `6908/8`; `6920/8` is its shadow character
+  identity. The `6930/78` bank contains fifteen owned texture pointers, not
+  teleport scalar state. These identities/resources remain live.
+- Character snapshots retain motion-list slot 2 (`11C8`) with native addRef,
+  release it when the slot is reused or freed, and restore changes through
+  native `uModel::setMotionList` (`140529730`). Rebinding precedes saved motion
+  and external-work restoration, which replaces the setter's S_SETUP writes.
+  This covers the binding changed by throw setup and `uZeroSh::sync` at
+  `1400FA690`; it is not a claim to reconstruct arbitrary resource replacements
+  or retired helper allocations. Saved null also restores absence.
+- The portable tests cover both values of the new latches and preservation of
+  adjacent ownership/padding. Native refcount/rebinding and in-game teleport,
+  shadow, and throw determinism still require runtime validation.
+- Wright's six ability payloads and update latch are already restored. No
+  additional ability range was justified by the native audit. The two Zero
+  latch fixes have not yet been tied conclusively to Hienkyaku script commands.
+
 ### Motion Follow-Up
 
 Fighters and weapons now call the same `Rollback_RestoreModelMotions` kernel.

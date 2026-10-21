@@ -8,6 +8,7 @@
 #include "rollback_memory.h"
 #include "rollback_profile.h"
 #include "rollback_snapshot.h"
+#include "rollback_character_restore.h"
 #include "gameplay_hooks.h"
 
 #include <algorithm>
@@ -197,12 +198,24 @@ static bool IsPersistentCharacterEffect(void* effect)
     uint64_t sCharacter = *(uint64_t*)_addr(PTR_SCHARACTER);
     if (!sCharacter || !effect) return false;
 
+    // Only effects with a recorded factory can be safely retired/recreated.
+    // Unknown/custom native owners retain the conservative live policy.
+    const bool reconstructable = std::any_of(g_liveEffectRecipes.begin(),
+        g_liveEffectRecipes.end(), [effect](const RollbackEffectRecipe& recipe) {
+            return recipe.shortFactory && recipe.restoredPtr == effect;
+        });
+
     for (uint32_t teamOffset : TEAM_OFFSETS) {
         uint64_t node = sCharacter + teamOffset + 0x08;
         for (int safety = 8; node && safety-- > 0;) {
             uint64_t character = *(uint64_t*)(node + 0x08);
             if (character) {
-                // Retain direct character references, not their child effects.
+                for (uint32_t field : Rollback_CharacterEffectTailOffsets(GetObjectDti(character))) {
+                    if (*(void**)(character + field) == effect)
+                        return !reconstructable;
+                }
+                // Only a live character slot establishes retention. Child
+                // effects still need native retirement to release their units.
                 for (uint32_t slotOffset : CHARACTER_EFFECT_SLOT_OFFSETS) {
                     if (oEffectCreateShort && *(uint64_t*)character ==
                             (uint64_t)_addr(VTABLE_URROCKET_RACCOON) &&
@@ -500,12 +513,11 @@ static void* __fastcall hkEffectCreate(void* manager, int effectId, int a3,
     return effect;
 }
 
-static bool IsRocketShortEffectReferenced(const RollbackEffectRecipe& recipe)
+static bool IsCharacterShortEffectReferenced(const RollbackEffectRecipe& recipe)
 {
-    if (!recipe.rocketShort || !recipe.attachTo ||
-        *(uint64_t*)recipe.attachTo != (uint64_t)_addr(VTABLE_URROCKET_RACCOON))
+    if (!recipe.shortFactory || !recipe.attachTo || !HasCallableDtiVirtual(recipe.attachTo))
         return false;
-    for (uint32_t offset : ROCKET_JETPACK_OWNER_OFFSETS)
+    for (uint32_t offset : Rollback_CharacterEffectTailOffsets(GetObjectDti((uint64_t)recipe.attachTo)))
         if (*(void**)((uint8_t*)recipe.attachTo + offset) == recipe.restoredPtr)
             return true;
     return false;
@@ -517,8 +529,10 @@ static void* __fastcall hkEffectCreateShort(void* manager, int effectId, int res
 {
     void* effect = oEffectCreateShort(manager, effectId, resourceId, owner,
                                      flags, index, volume, type);
-    if (!effect || effectId != 100 || (resourceId != 0x17 && resourceId != 0x29) ||
-        !owner || *(uint64_t*)owner != (uint64_t)_addr(VTABLE_URROCKET_RACCOON))
+    // Generic short effects have the reviewed base timeline. Custom subclasses
+    // need their own tail policy; do not broaden this to arbitrary factory types.
+    if (!effect || type || !owner || !HasCallableDtiVirtual(owner) ||
+        Rollback_CharacterEffectTailOffsets(GetObjectDti((uint64_t)owner)).empty())
         return effect;
 
     RollbackEffectRecipe recipe{};
@@ -531,9 +545,12 @@ static void* __fastcall hkEffectCreateShort(void* manager, int effectId, int res
     recipe.a6 = index;
     recipe.a9 = volume;
     recipe.a13 = type;
-    recipe.rocketShort = true;
+    recipe.shortFactory = true;
     recipe.spawnSequence = ++g_effectSpawnSequence;
-    g_liveEffectRecipes.push_back(std::move(recipe));
+    auto existing = std::find_if(g_liveEffectRecipes.begin(), g_liveEffectRecipes.end(),
+        [effect](const auto& live) { return live.restoredPtr == effect; });
+    if (existing != g_liveEffectRecipes.end()) *existing = std::move(recipe);
+    else g_liveEffectRecipes.push_back(std::move(recipe));
     return effect;
 }
 
@@ -769,22 +786,31 @@ static void __fastcall hkGameEffectAttachmentUpdate(void* effect)
     oGameEffectAttachmentUpdate(effect);
 }
 
+void Effect_ReleaseSnapshotResources(RollbackSnapshotSlot& slot)
+{
+    auto release = (void(__fastcall*)(void*))_addr(0x14050D5A0);
+    for (void* resource : slot.retainedEffectResources) release(resource);
+    slot.retainedEffectResources.clear();
+}
+
 void Effect_CaptureRecipes(RollbackSnapshotSlot& slot)
 {
+    Effect_ReleaseSnapshotResources(slot);
     size_t capturedCount = 0;
     slot.characterEffectStates.clear();
     slot.characterEffectReferences.clear();
     slot.effectRecipes.reserve(g_liveEffectRecipes.size());
     const auto exAtkChildren = GetRetainedExAtkSpaceChildren();
     for (const RollbackEffectRecipe& recipe : g_liveEffectRecipes) {
-        const bool rocketOwner = IsRocketShortEffectReferenced(recipe);
-        // Do not recreate Rocket's jetpack tail after its owner reference is cleared.
-        if (recipe.rocketShort && !rocketOwner) continue;
+        const bool shortOwner = IsCharacterShortEffectReferenced(recipe);
+        // Native cleanup finishes emission and clears the owner before the unit
+        // dies. Recreating that unowned tail can restart a looping jetpack graph.
+        if (recipe.shortFactory && !shortOwner) continue;
         if (!recipe.restoredPtr ||
             std::find(exAtkChildren.begin(), exAtkChildren.end(), recipe.restoredPtr) !=
                 exAtkChildren.end() ||
             !IsEffectObject(recipe.restoredPtr) ||
-            (!IsActiveUnit(recipe.restoredPtr) && !rocketOwner) ||
+            (!IsActiveUnit(recipe.restoredPtr) && !shortOwner) ||
             !IsRollbackEffectCategory(recipe.restoredPtr) ||
             Effect_IsExAtkSpaceTransitionEffect(recipe.restoredPtr) ||
             IsPersistentCharacterEffect(recipe.restoredPtr)) {
@@ -797,13 +823,21 @@ void Effect_CaptureRecipes(RollbackSnapshotSlot& slot)
         auto& saved = slot.effectRecipes[capturedCount++];
         saved.AssignCaptureMetadata(recipe);
         saved.a8 = *(void**)((uint8_t*)recipe.restoredPtr + 0x40);
-        saved.attachTo = *(void**)((uint8_t*)recipe.restoredPtr + 0x288);
+        if (!saved.shortFactory)
+            saved.attachTo = *(void**)((uint8_t*)recipe.restoredPtr + 0x288);
 
         saved.savedPtr = recipe.restoredPtr;
         ConcreteEffectSnapshot_Capture(recipe.restoredPtr, saved.state);
-        if (saved.rocketShort) {
+        if (saved.shortFactory) {
             saved.shortParentNo = *(uint32_t*)((uint8_t*)recipe.restoredPtr + 0x48);
             saved.shortControlState = *(uint64_t*)((uint8_t*)recipe.restoredPtr + 0x290);
+            saved.shortFlags = *(uint32_t*)((uint8_t*)recipe.restoredPtr + 0x298);
+            void* resource = (void*)saved.state.resource;
+            if (resource && std::find(slot.retainedEffectResources.begin(),
+                    slot.retainedEffectResources.end(), resource) == slot.retainedEffectResources.end()) {
+                ((void(__fastcall*)(void*))_addr(0x14050D100))(resource);
+                slot.retainedEffectResources.push_back(resource);
+            }
         }
     }
     slot.effectRecipes.resize(capturedCount);
@@ -814,9 +848,7 @@ void Effect_CaptureRecipes(RollbackSnapshotSlot& slot)
         uint64_t node = sCharacter ? sCharacter + teamOffset + 0x08 : 0;
         for (int safety = 8; node && safety-- > 0;) {
             void* character = *(void**)(node + 0x08);
-            if (character &&
-                *(uint64_t*)character ==
-                    (uint64_t)_addr(VTABLE_URROCKET_RACCOON)) {
+            if (character && *(uint64_t*)character == (uint64_t)_addr(VTABLE_URROCKET_RACCOON)) {
                 for (uint32_t offset : {0x68F8u, 0x6900u}) {
                     if (oEffectCreateShort) continue;
                     void* effect = *(void**)((uint8_t*)character + offset);
@@ -830,8 +862,10 @@ void Effect_CaptureRecipes(RollbackSnapshotSlot& slot)
                     slot.characterEffectStates.push_back(std::move(saved));
                 }
 
+            }
+            if (character) {
                 const uint64_t referenceCaptureStart = Profile_Now();
-                for (uint32_t offset : {0x68F0u, 0x68F8u, 0x6900u, 0x6930u}) {
+                for (uint32_t offset : Rollback_CharacterEffectTailOffsets(GetObjectDti((uint64_t)character))) {
                     void* effect = *(void**)((uint8_t*)character + offset);
                     RollbackCharacterEffectReference reference{};
                     reference.character = character;
@@ -862,6 +896,12 @@ void Effect_CaptureRecipes(RollbackSnapshotSlot& slot)
                             reference.retainedEffect = retained->effect;
                             reference.expectedEffectVtable =
                                 retained->expectedEffectVtable;
+                        } else if (effect && IsEffectObject(effect) && IsPersistentCharacterEffect(effect)) {
+                            // Unknown/custom retained graph: preserve only this
+                            // validated live identity, never resurrect a freed one.
+                            reference.kind = RollbackCharacterEffectReferenceKind::Retained;
+                            reference.retainedEffect = effect;
+                            reference.expectedEffectVtable = *(uint64_t*)effect;
                         }
                     }
                     slot.characterEffectReferences.push_back(reference);
@@ -942,7 +982,10 @@ void Effect_RestoreCharacterReferences(RollbackSnapshotSlot& slot)
             if (recipe != slot.effectRecipes.end()) effect = recipe->restoredPtr;
         } else if (saved.kind ==
                    RollbackCharacterEffectReferenceKind::Retained) {
+            if (*(void**)((uint8_t*)saved.character + saved.offset) != saved.retainedEffect)
+                continue; // no recipe/generation proof for a replaced custom owner
             if (saved.retainedEffect &&
+                HasCallableDtiVirtual(saved.retainedEffect) &&
                 *(uint64_t*)saved.retainedEffect == saved.expectedEffectVtable) {
                 effect = saved.retainedEffect;
             }
@@ -1016,10 +1059,12 @@ int Effect_RestoreRecipes(RollbackSnapshotSlot& slot)
             }
             continue;
         }
-        // Do not restart completed independent effects; Rocket's owner cleanup is handled below.
-        if (saved.state.CompletedIndependent() && !saved.rocketShort) continue;
+        // Independent effects already inactive at capture must not return
+        // to their factory's first emission on every rollback. Live shot bodies
+        // were handled above and have a distinct missing-particle repair path.
+        if (saved.state.CompletedIndependent() && !saved.shortFactory) continue;
         void* sGameEffect = saved.sGameEffect;
-        if (!sGameEffect || (saved.rocketShort ? !oEffectCreateShort : !oEffectCreate) ||
+        if (!sGameEffect || (saved.shortFactory ? !oEffectCreateShort : !oEffectCreate) ||
             (saved.a8 && !IsUsableEffectParent(saved.a8)) ||
             (saved.attachTo && IsLikelyPointer((uint64_t)saved.attachTo) &&
              !HasCallableDtiVirtual(saved.attachTo))) {
@@ -1028,7 +1073,7 @@ int Effect_RestoreRecipes(RollbackSnapshotSlot& slot)
         }
 
         void* attachTo = saved.attachTo;
-        if (saved.rocketShort) {
+        if (saved.shortFactory) {
             void* sUnit = ((void*(__fastcall*)())_addr(FN_SUNIT_GET_INSTANCE))();
             if (!sUnit) { ++failed; continue; }
             void* effect = oEffectCreateShort(sGameEffect, saved.effectId, saved.a3,
@@ -1043,6 +1088,7 @@ int Effect_RestoreRecipes(RollbackSnapshotSlot& slot)
                     *(uint64_t*)(vtable + 0x88))(effect, saved.a8, saved.shortParentNo);
             }
             *(uint64_t*)((uint8_t*)effect + 0x290) = saved.shortControlState;
+            *(uint32_t*)((uint8_t*)effect + 0x298) = saved.shortFlags;
             ((void(__fastcall*)(void*, uint32_t, void*, void*))_addr(
                 FN_SUNIT_ADD_BOTTOM))(sUnit, 13, effect, nullptr);
             if (saved.state.CompletedIndependent()) {
@@ -1050,7 +1096,7 @@ int Effect_RestoreRecipes(RollbackSnapshotSlot& slot)
                 uint64_t vtable = *(uint64_t*)effect;
                 ((void(__fastcall*)(void*))*(uint64_t*)(vtable + 0x78))(effect);
             } else if (!ConcreteEffectSnapshot_Restore(effect, saved.state)) {
-                HookLog("Rollback: Rocket short effect timeline restore failed (id=%d)\n",
+                HookLog("Rollback: character short effect timeline restore failed (id=%d)\n",
                         saved.a3);
             }
             saved.restoredPtr = effect;

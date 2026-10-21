@@ -125,6 +125,35 @@ template struct RollbackSnapshotLayoutGuard<
     offsetof(RollbackSnapshotSlot, localInput),
     offsetof(RollbackSnapshotSlot, remoteInput)>;
 
+static void ReleaseCharacterMotionResources(RollbackSnapshotSlot& slot)
+{
+    auto releaseRef = (void(__fastcall*)(void*))_addr(FN_CRESOURCE_RELEASE_REF);
+    for (const auto& binding : slot.characterMotionResources)
+        if (binding.resource) releaseRef(binding.resource);
+    slot.characterMotionResources.clear();
+}
+
+static void CaptureCharacterMotionResources(RollbackSnapshotSlot& slot)
+{
+    ReleaseCharacterMotionResources(slot);
+    auto addRef = (void(__fastcall*)(void*))_addr(FN_MTOBJECT_ADD_REF);
+    size_t offset = 0;
+    for (int i = 0; i < slot.regionCount; ++i) {
+        const auto& region = slot.regions[i];
+        if (region.skipVtable && region.size >= CCHR_MIN_SIZE) {
+            const uint64_t dti = GetObjectDti((uint64_t)region.ptr);
+            if (dti && ((bool(__fastcall*)(void*, void*))_addr(0x1400039D0))(
+                    (void*)dti, (void*)_addr(0x140D44A30))) {
+                void* resource = nullptr;
+                std::memcpy(&resource, slot.data + offset + 0x11C8, sizeof(resource));
+                if (resource) addRef(resource);
+                slot.characterMotionResources.push_back({i, resource});
+            }
+        }
+        offset += region.size;
+    }
+}
+
 static void ReleaseActionSideCameraState(RollbackSnapshotSlot& slot)
 {
     auto releaseRef = (void(__fastcall*)(void*))_addr(FN_CRESOURCE_RELEASE_REF);
@@ -401,6 +430,7 @@ static void TraverseAndAddDynamicList(uint64_t listHead, size_t nextOffset,
         regions[r].ownerSlot = 0;
         regions[r].expectedVtable = 0;
         regions[r].skipVtable = false;
+        regions[r].dependentRegion = -1;
 #if ROLLBACK_SNAPDUMP_ENABLED
         regions[r].snapDumpName = "dynamic_list_object";
 #endif
@@ -433,6 +463,7 @@ static void TraverseAndAddDynamicList(uint64_t listHead, size_t nextOffset,
             regions[r].expectedVtable = expectedVtable;
             regions[r].skipVtable = skipVtable;
             regions[r].commandLine = false;
+            regions[r].dependentRegion = -1;
 #if ROLLBACK_SNAPDUMP_ENABLED
             regions[r].snapDumpName = snapDumpName;
 #endif
@@ -999,8 +1030,58 @@ static void TraverseAndAddDynamicList(uint64_t listHead, size_t nextOffset,
 #endif
                     );
 
-                    // Capture seven material-helper arrays using their packed counts at +0x1440.
-                    // Owner slots keep restored lengths paired with the corresponding allocations.
+                    // Tron/Linlin auxiliaries are category-9 actor models, not
+                    // uCharacters. Capture through their actual owner slot.
+                    uint32_t auxiliaryOffset = dtiPtr == _addr(0x140D45F20) ? 0x68F0 :
+                        dtiPtr == _addr(0x140D455F8) ? 0x6918 : 0;
+                    if (auxiliaryOffset) {
+                        const uint64_t ownerSlot = character + auxiliaryOffset;
+                        const uint64_t actor = read.operator()<uint64_t>(ownerSlot);
+                        const uint64_t expectedDti = _addr(
+                            auxiliaryOffset == 0x68F0 ? 0x140D455B0 : 0x140D45638);
+                        if (actor && GetObjectDti(actor) == expectedDti &&
+                            read.operator()<uint64_t>(actor + 0x1488) == character) {
+                            const int actorRegion = r;
+                            add((void*)actor, 0x14D0, ownerSlot,
+                                read.operator()<uint64_t>(actor), true
+#if ROLLBACK_SNAPDUMP_ENABLED
+                                , "uCharacter.auxiliaryActor"
+#endif
+                            );
+                            if (r > actorRegion) {
+                                auto addActorBuffer = [&](uint32_t field, size_t bytes) {
+                                    const uint64_t bufferOwner = actor + field;
+                                    const uint64_t buffer = read.operator()<uint64_t>(bufferOwner);
+                                    const int before = r;
+                                    if (buffer && bytes) add((void*)buffer, bytes, bufferOwner, 0, false
+#if ROLLBACK_SNAPDUMP_ENABLED
+                                        , "uCharacter.auxiliaryWork"
+#endif
+                                    );
+                                    if (r > before) regions[r - 1].dependentRegion = actorRegion;
+                                };
+                                const uint32_t joints = read.operator()<uint32_t>(actor + 0x530);
+                                if (joints && joints <= 256) {
+                                    for (int motion = 0; motion < CCHR_MOTION_COUNT; ++motion)
+                                        addActorBuffer(CCHR_MOTION_BASE + motion * CCHR_MOTION_STRIDE +
+                                            CCHR_BLEND_PTR_OFFSET, CCHR_BLEND_BYTES_PER_JOINT * joints);
+                                    addActorBuffer(0x538, CCHR_JOINT_STATE_STRIDE * joints);
+                                    addActorBuffer(0x548, joints);
+                                    addActorBuffer(0x11B0, CCHR_BLENDED_JOINT_STRIDE * joints);
+                                }
+                                const uint32_t channels = read.operator()<uint32_t>(actor + 0x1238);
+                                const uint32_t motions = read.operator()<uint32_t>(actor + 0x554);
+                                if (channels <= 4096 && motions <= CCHR_MOTION_COUNT)
+                                    addActorBuffer(0x6D8, CCHR_MOTION_CHANNEL_STRIDE * channels * motions);
+                            }
+                        }
+                    }
+
+                    // processTarget1 indexes these seven heap-backed tables
+                    // using the packed counts at +0x1440 and immediately calls
+                    // virtual +0x40 on each entry. Rewind each active table
+                    // with its owning slot so its entries stay synchronized
+                    // with the restored count.
                     static constexpr uint32_t targetOffsets[] = {
                         0x1408, 0x1410, 0x1418, 0x1420,
                         0x1428, 0x1430, 0x1438,
@@ -1382,6 +1463,7 @@ void Rollback_SaveSnapshot(int32_t frame)
         offset += region.size;
     }
     slot.size = offset;
+    CaptureCharacterMotionResources(slot);
     CaptureActionSideCameraState(slot);
     CaptureCharacterPostState(slot);
     const uint64_t copyRegionsEnd = Profile_Now();
@@ -1603,6 +1685,8 @@ void Rollback_FreeSnapshots()
     for (int i = 0; i < ROLLBACK_WINDOW; ++i) {
         Rollback_DestroyCollisionNodeClones(g_slots[i]);
         ReleaseActionSideCameraState(g_slots[i]);
+        ReleaseCharacterMotionResources(g_slots[i]);
+        Effect_ReleaseSnapshotResources(g_slots[i]);
         if (g_slots[i].ownsData)
             delete[] g_slots[i].data;
         g_slots[i].data        = nullptr;

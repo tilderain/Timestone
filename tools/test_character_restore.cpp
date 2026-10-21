@@ -23,17 +23,18 @@ constexpr Range owners[] = {
     {0x140D44E90, 0x68F0, 8}, {0x140D44F18, 0x68F8, 8},
     {0x140D44F60, 0x68F0, 8}, {0x140D44F60, 0x6900, 8},
     {0x140D44FA0, 0x68F0, 8}, {0x140D44FA0, 0x6908, 0x18},
-    {0x140D44FA0, 0x6928, 0x10}, {0x140D44FE0, 0x6900, 0x30},
+    {0x140D44FA0, 0x6928, 0x10},
     {0x140D45020, 0x6900, 0x20}, {0x140D45068, 0x68F0, 8},
     {0x140D450A8, 0x68F0, 0x30}, {0x140D450F0, 0x68F0, 0x30},
-    {0x140D45138, 0x68F0, 8}, {0x140D45200, 0x6A00, 0x10},
+    {0x140D45138, 0x68F1, 7}, {0x140D45200, 0x6A0C, 4},
     {0x140D45200, 0x6A28, 0x18}, {0x140D452B0, 0x68F0, 0x20},
-    {0x140D45450, 0x68F8, 8}, {0x140D45450, 0x6910, 0x10},
-    {0x140D454D0, 0x68F0, 0x10}, {0x140D454D0, 0x6910, 0x10},
+    {0x140D45450, 0x68F8, 8}, {0x140D45450, 0x691C, 4},
+    {0x140D454D0, 0x68F0, 0x10}, {0x140D454D0, 0x691C, 4},
     {0x140D45518, 0x68F0, 8}, {0x140D45518, 0x6900, 8},
-    {0x140D45518, 0x6910, 0x10}, {0x140D45518, 0x6920, 8},
-    {0x140D45578, 0x68F0, 8}, {0x140D45578, 0x6900, 0x18},
-    {0x140D455F8, 0x68F0, 0x10}, {0x140D455F8, 0x6928, 8},
+    {0x140D45518, 0x691C, 4}, {0x140D45518, 0x6920, 8},
+    {0x140D45578, 0x68F0, 8}, {0x140D45578, 0x6900, 8},
+    {0x140D45578, 0x6910, 0x10},
+    {0x140D455F8, 0x68F0, 0x0C}, {0x140D455F8, 0x6918, 0x18},
     {0x140D45700, 0x6910, 0x18}, {0x140D45748, 0x68F0, 8},
     {0x140D457C0, 0x68F0, 0x28}, {0x140D457C0, 0x6928, 0x10},
     {0x140D458D0, 0x68F0, 0x18}, {0x140D45910, 0x68F8, 0x20},
@@ -41,20 +42,46 @@ constexpr Range owners[] = {
     {0x140D45998, 0x6910, 8}, {0x140D459D8, 0x68F0, 0x60},
     {0x140D45A10, 0x6918, 8}, {0x140D45A10, 0x6928, 0x10},
     {0x140D45C58, 0x68F0, 8}, {0x140D45C58, 0x6900, 8},
-    {0x140D45CF8, 0x68F8, 0x30}, {0x140D45CF8, 0x6930, 0xB58},
+    {0x140D45CF8, 0x68F8, 0x30}, {0x140D45CF8, 0x6930, 0x48},
     {0x140D45D80, 0x6900, 8}, {0x140D45DD8, 0x68F0, 0x18},
     {0x140D45E58, 0x6910, 8}, {0x140D45EA0, 0x68F0, 0x10},
     {0x140D45ED8, 0x68F0, 0x18}, {0x140D45F20, 0x68F0, 8},
     {0x140D45F68, 0x6920, 8}, {0x140D45F68, 0x6940, 0x10},
-    {0x140D45FF8, 0x68F0, 0x10}, {0x140D45FF8, 0x6900, 8},
+    {0x140D45FF8, 0x68FC, 4}, {0x140D45FF8, 0x6900, 8},
     {0x140D45FF8, 0x6910, 0x10}, {0x140D46038, 0x68F0, 8},
-    {0x140D46038, 0x6900, 0x28}, {0x140D46080, 0x68F0, 8},
-    {0x140D460C0, 0x68F8, 0x18}, {0x140D460C0, 0x6920, 8},
+    {0x140D46038, 0x6910, 0x18}, {0x140D46080, 0x68F0, 8},
+    {0x140D460C0, 0x6900, 0x10}, {0x140D460C0, 0x6920, 8},
+    {0x140D460C0, 0x6930, 0x78},
     {0x140D460C0, 0x69A8, 0x20}, {0x140D46118, 0x68F0, 0x10},
     {0x140D45788, 0x68F0, 0x10},
 };
 
 constexpr Range verified[] = {
+    // Independent writer/consumer ledger from the three native tail audits.
+    {0x140D44F60, 0x68F8, 1}, {0x140D44FA0, 0x68F8, 1},
+    {0x140D44FA0, 0x6920, 2}, {0x140D44FE0, 0x68F8, 4},
+    {0x140D44FE0, 0x6900, 0x30}, {0x140D44FE0, 0x6930, 1},
+    {0x140D450A8, 0x6928, 6}, {0x140D450F0, 0x692C, 2},
+    {0x140D450A8, 0x6948, 4},
+    {0x140D45138, 0x68F0, 1}, {0x140D45180, 0x68F8, 1},
+    {0x140D45200, 0x69E0, 6}, {0x140D45200, 0x6A00, 0x0C},
+    {0x140D45408, 0x68F4, 4}, {0x140D45450, 0x6910, 0x0C},
+    {0x140D45488, 0x6904, 4}, {0x140D454D0, 0x6910, 0x0C},
+    {0x140D45518, 0x6910, 0x0C}, {0x140D45518, 0x6928, 1},
+    {0x140D45578, 0x6908, 1}, {0x140D455F8, 0x68FC, 4},
+    {0x140D455F8, 0x6914, 4}, {0x140D45748, 0x68F8, 1},
+    {0x140D45788, 0x6E90, 1}, {0x140D457C0, 0x6940, 2},
+    {0x140D45910, 0x6930, 1}, {0x140D45958, 0x68F8, 4},
+    {0x140D45A10, 0x6914, 4}, {0x140D45C58, 0x6908, 1},
+    {0x140D45DD8, 0x6908, 2}, {0x140D45DD8, 0x690C, 0x11},
+    {0x140D45DD8, 0x6920, 0x0E}, {0x140D45E18, 0x68F0, 0x0C},
+    {0x140D45EA0, 0x690C, 1}, {0x140D45F68, 0x6910, 1},
+    {0x140D45FF8, 0x68F0, 0x0C}, {0x140D46038, 0x6900, 0x0C},
+    {0x140D46080, 0x68F8, 1}, {0x140D46158, 0x6900, 0x0C},
+    {0x140D46158, 0x6910, 4},
+    {0x140D45CF8, 0x6928, 4}, {0x140D45CF8, 0x7494, 0x10},
+    {0x140D45CF8, 0x74A8, 1},
+    {0x140D460C0, 0x68F8, 1}, {0x140D460C0, 0x6928, 1},
     {0x140D44F18, 0x6900, 8}, {0x140D44F60, 0x6908, 4},
     {0x140D45020, 0x68F4, 8}, {0x140D45020, 0x6920, 1},
     {0x140D45068, 0x68F8, 4}, {0x140D450A8, 0x6920, 8},
@@ -68,7 +95,7 @@ constexpr Range verified[] = {
     {0x140D45450, 0x6900, 1}, {0x140D45450, 0x6920, 5},
     {0x140D45450, 0x6928, 4}, {0x140D45488, 0x6900, 1},
     {0x140D45518, 0x68F8, 2}, {0x140D45578, 0x68F8, 1},
-    {0x140D455F8, 0x6918, 8}, {0x140D45680, 0x68F0, 0x20},
+    {0x140D45680, 0x68F0, 0x20},
     {0x140D456C0, 0x68F4, 4}, {0x140D45700, 0x68F4, 0x1C},
     {0x140D45890, 0x68F0, 0x60}, {0x140D458D0, 0x6908, 9},
     {0x140D45958, 0x68F4, 1}, {0x140D45958, 0x68FC, 2},
@@ -91,7 +118,12 @@ constexpr Range verified[] = {
 
 void ExpectBytes(const Body& body, size_t offset, size_t size, uint8_t value)
 {
-    for (size_t i = offset; i < offset + size; ++i) assert(body[i] == value);
+    for (size_t i = offset; i < offset + size; ++i) {
+        if (body[i] != value)
+            std::fprintf(stderr, "byte %zX: expected %02X got %02X (range %zX/%zX)\n",
+                         i, value, body[i], offset, size);
+        assert(body[i] == value);
+    }
 }
 
 void Store(Body& body, size_t offset, uint64_t value)
@@ -111,6 +143,54 @@ void Restore(Body& live, const Body& saved, uint64_t dti, bool roster,
 int main()
 {
     Body live, saved;
+    // Indexed shot relationships preserve slot identity; none may be a raw copy.
+    const std::pair<uint64_t, size_t> shotCounts[] = {
+        {0x140D44E10, 1}, {0x140D45020, 1}, {0x140D45700, 2},
+        {0x140D45910, 3}, {0x140D45CF8, 6}, {0x140D45D80, 1}, {0x140D45ED8, 2}};
+    for (const auto& [dti, count] : shotCounts) {
+        auto fields = Rollback_CharacterShotTailOffsets(dti);
+        assert(fields.size() == count);
+        live.fill(0x5A);
+        saved.fill(0xA5);
+        Restore(live, saved, dti, true, CharacterRestorePhase::Early);
+        for (uint32_t field : fields) ExpectBytes(live, field, 8, 0x5A);
+    }
+    assert(Rollback_CharacterShotTailOffsets(0).empty());
+    for (uint64_t dti : {uint64_t(0x140D455B0), uint64_t(0x140D45638)}) {
+        live.fill(0x5A);
+        saved.fill(0xA5);
+        assert(Rollback_RestoreAuxiliaryActor(live.data(), 0x14CF, saved.data(),
+            0x14D0, dti) == CharacterRestoreStatus::InvalidBuffer);
+        ExpectBytes(live, 0, live.size(), 0x5A);
+        assert(Rollback_RestoreAuxiliaryActor(live.data(), 0x14D0, saved.data(),
+            0x14D0, dti) == CharacterRestoreStatus::ReviewedSubset);
+        ExpectBytes(live, 0x1470, 9, 0xA5);
+        ExpectBytes(live, 0x1479, 3, 0x5A);
+        ExpectBytes(live, 0x147C, 9, 0xA5);
+        ExpectBytes(live, 0x1485, 3, 0x5A);
+        ExpectBytes(live, 0x1450, 0x20, 0x5A); // model and motion resource owners
+        ExpectBytes(live, 0x1488, 8, 0x5A); // parent identity
+        ExpectBytes(live, 0x1490, 0x3C, 0xA5);
+        ExpectBytes(live, 0x14CC, 1, 0x5A);
+        ExpectBytes(live, 0x14CD, 1, 0xA5);
+        ExpectBytes(live, 0x14D0, live.size() - 0x14D0, 0x5A);
+        std::memset(live.data() + 0x50, 0xCC, 0x10);
+        std::memset(live.data() + 0x1470, 0xCC, 9);
+        assert(Rollback_RestoreAuxiliaryActor(live.data(), 0x14D0, saved.data(),
+            0x14D0, dti, CharacterRestorePhase::Late) == CharacterRestoreStatus::ReviewedSubset);
+        ExpectBytes(live, 0x50, 0x10, 0xA5);
+        ExpectBytes(live, 0x1470, 9, 0xCC); // no blanket late motion-history rewind
+    }
+    // Shuma's controllers restore payload only while both parent/handle match.
+    live.fill(0x5A);
+    saved.fill(0xA5);
+    for (size_t field : {0x6970, 0x6988, 0x6998})
+        std::memcpy(live.data() + field, saved.data() + field, 8);
+    Restore(live, saved, 0x140D45CF8, true, CharacterRestorePhase::Early);
+    ExpectBytes(live, 0x6990, 4, 0xA5);
+    ExpectBytes(live, 0x69A0, 8, 0xA5);
+    ExpectBytes(live, 0x6980, 8, 0x5A);
+    ExpectBytes(live, 0x69B8, 4, 0x5A); // next controller has a different binding
     // Test every generated entry, including false inferred wall timers. A
     // constructor-refined narrow bool is not permission to copy its padding.
     size_t scalarBytesChecked = 0;
@@ -145,10 +225,23 @@ int main()
         }
     }
     for (const auto& range : verified) {
-        live.fill(0x5A);
+        for (uint8_t value : {uint8_t(0), uint8_t(1), uint8_t(0xA5)}) {
+            live.fill(0x5A);
+            saved.fill(value);
+            Restore(live, saved, range.dti, true, CharacterRestorePhase::Early);
+            ExpectBytes(live, range.offset, range.size, value);
+        }
+    }
+    for (uint8_t latch : {uint8_t(0), uint8_t(1)}) {
         saved.fill(0xA5);
-        Restore(live, saved, range.dti, true, CharacterRestorePhase::Early);
-        ExpectBytes(live, range.offset, range.size, 0xA5);
+        live.fill(0x5A);
+        saved[0x68F8] = saved[0x6928] = latch;
+        Restore(live, saved, 0x140D460C0, true, CharacterRestorePhase::Early);
+        assert(live[0x68F8] == latch && live[0x6928] == latch);
+        ExpectBytes(live, 0x68F9, 7, 0x5A);
+        ExpectBytes(live, 0x6929, 7, 0x5A);
+        ExpectBytes(live, 0x6900, 0x10, 0x5A); // charge/install effects
+        ExpectBytes(live, 0x6920, 8, 0x5A); // shadow identity, not an effect
     }
     // Check entire owner spans, not just the low words that happened to look
     // mapped in one frame. Also exercise null/non-null ownership transitions.
@@ -229,7 +322,7 @@ int main()
                              0x68F0, 0x6900, 0x6920})
             ExpectBytes(live, field, 8, 0x5A);
         ExpectBytes(live, 0x6460, 0x28, 0x5A);
-        ExpectBytes(live, 0x6910, 0x10, 0x5A); // Iron Man MtArray
+        ExpectBytes(live, 0x691C, 4, 0x5A); // unconsumed fourth vector lane
         ExpectBytes(live, 0x40A0, 0x10, 0x5A); // unresolved, not scalar by default
         ExpectBytes(live, 0x68F8, 2,
                     phase == CharacterRestorePhase::Early ? 0xA5 : 0x5A);
