@@ -830,7 +830,7 @@ static void RestoreEffectFallbackClock(void* effect,
 
 bool ConcreteShotSnapshot_Capture(void* shot, ConcreteShotSnapshot& out)
 {
-    out = {};
+    out.ResetForCapture();
     if (!shot) return false;
 
     uint64_t dti = GetDti(shot);
@@ -878,7 +878,7 @@ bool ConcreteShotSnapshot_Capture(void* shot, ConcreteShotSnapshot& out)
 bool ConcreteEffectSnapshot_Capture(
     void* effect, ConcreteShotSnapshot::CallbackEffectState& state)
 {
-    state = {};
+    state.ResetForCapture();
     state.occupied = effect != nullptr;
     state.savedEffect = effect;
     if (!effect) return false;
