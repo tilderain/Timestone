@@ -152,7 +152,7 @@ void Rollback_ReSimulate(int32_t startFrame, int32_t endFrame)
     }
     g_resimReentranceDepth = 0;
 
-    const uint64_t benchmarkStart = LiveBenchmark_BeginResim(endFrame - startFrame, endFrame);
+    const uint64_t benchmarkStart = LiveBenchmark_BeginResim();
     RollbackProfile profile;
     Profile_BeginRollback(profile, startFrame, endFrame);
     const uint64_t profileStart = Profile_Now();

@@ -193,6 +193,8 @@ static void __fastcall hkCChrSetPos(uint64_t character, const float* position)
 
 static void __fastcall hkMvc3MainMove(uint64_t main)
 {
+    const uint64_t benchmarkStart = g_isResimulating ? 0 :
+        LiveBenchmark_BeginFrame(Controller_GetNetFrameCount());
     // Heap-backed native objects can be retired or remapped between frames.
     // Every accessibility helper remains cached within this frame generation.
     InvalidateMemoryQueryCache();
@@ -295,10 +297,7 @@ static void __fastcall hkMvc3MainMove(uint64_t main)
     curFrame = Controller_GetNetFrameCount();
 
     Rollback_FreezeWatchdogHeartbeat("native-main-move", curFrame);
-    // Measure only the normal tick/render call, not correction or snapshot work above.
-    const uint64_t benchmarkStart = LiveBenchmark_BeginFrame(curFrame);
     original(main);
-    LiveBenchmark_EndFrame(benchmarkStart, Controller_GetNetFrameCount());
     Rollback_FreezeWatchdogHeartbeat("native-main-complete", curFrame);
 
     if (TraceLifecycleFrame(curFrame)) {
@@ -308,6 +307,7 @@ static void __fastcall hkMvc3MainMove(uint64_t main)
                 curFrame, replayFrame, main);
     }
 
+    LiveBenchmark_EndFrame(benchmarkStart, Controller_GetNetFrameCount());
 }
 
 static void __fastcall hkCallSRender(uint64_t render)
