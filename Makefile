@@ -23,7 +23,7 @@ GIT_DIR := $(shell git rev-parse --git-dir 2>/dev/null)
 GIT_HEAD_REF := $(shell git symbolic-ref -q HEAD 2>/dev/null)
 # Git maintenance can move loose branch refs into packed-refs.
 GIT_COMMIT_DEPS := $(if $(GIT_DIR),$(wildcard $(GIT_DIR)/HEAD $(GIT_DIR)/packed-refs $(if $(GIT_HEAD_REF),$(GIT_DIR)/$(GIT_HEAD_REF))))
-VERSION    := 0.3.14
+VERSION    := 0.3.15
 VERSION_RC := $(shell printf '%s.0' '$(VERSION)' | tr . ,)
 
 SRCDIR    := UMVC3Hook
