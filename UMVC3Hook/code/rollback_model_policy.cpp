@@ -8,6 +8,7 @@
 #include "rollback_shot.h"
 #include "rollback_snapshot.h"
 #include "rollback_capture_set.h"
+#include "rollback_character_restore.h"
 #include "concrete_snapshot.h"
 #include "mk10utils.h"
 #include "gameplay_hooks.h"
@@ -235,21 +236,27 @@ void RestoreKingKobunHelper(void* shot, const RollbackShotRecipe& saved)
 
     void* helper = nullptr;
     void* savedHelper = *(void**)(saved.concrete.body.data() + HELPER_OFFSET);
+    *(void**)((uint8_t*)shot + HELPER_OFFSET) = nullptr;
+    if (!savedHelper) {
+        return;
+    }
     if (savedHelper && HasCallableDtiVirtual(savedHelper) &&
         GetObjectDti((uint64_t)savedHelper) == (uint64_t)_addr(DTI_UKOBUN) &&
-        IsActiveUnit(savedHelper)) {
+        IsActiveUnit(savedHelper) &&
+        *(void**)((uint8_t*)savedHelper + 0x1488) == saved.ownerChr) {
         helper = savedHelper;
     }
     if (!helper) {
         uint64_t sUnit = *(uint64_t*)_addr(PTR_SUNIT);
         if (sUnit && *(uint32_t*)(sUnit + SUNIT_CATEGORY_COUNT_OFFSET) >
-                         SUNIT_CHARACTER_CATEGORY) {
+                         9) {
             uint64_t node = *(uint64_t*)(sUnit + SUNIT_CATEGORY_LISTS_OFFSET +
-                SUNIT_CATEGORY_LIST_STRIDE * SUNIT_CHARACTER_CATEGORY);
+                SUNIT_CATEGORY_LIST_STRIDE * 9);
             for (int safety = 64; node && safety-- > 0;
                  node = *(uint64_t*)(node + 0x18)) {
                 if (GetObjectDti(node) == (uint64_t)_addr(DTI_UKOBUN) &&
-                    IsActiveUnit((void*)node)) {
+                    IsActiveUnit((void*)node) &&
+                    *(void**)(node + 0x1488) == saved.ownerChr) {
                     if (helper) return;
                     helper = (void*)node;
                 }
@@ -1436,6 +1443,12 @@ void Rollback_CaptureCharacterShotReferences(RollbackSnapshotSlot& slot)
         // The explicit character kernel never copies this pointer. Include
         // empty saved slots so prediction-only last-shot references are cleared.
         capture(0x6428, RollbackCharacterShotReferenceRole::ObjectReturn, 0, true);
+
+        // These native slots are indexed gameplay identities, not effects or
+        // interchangeable shots of the same class. Preserve authoritative null.
+        for (uint32_t field : Rollback_CharacterShotTailOffsets(
+                 GetObjectDti((uint64_t)region.ptr)))
+            capture(field, RollbackCharacterShotReferenceRole::ConcreteTail, 0, true);
 
         if (region.expectedVtable == (uint64_t)_addr(VTABLE_URROCKET_RACCOON)) {
             for (uint32_t offset : {

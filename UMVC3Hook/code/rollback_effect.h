@@ -10,6 +10,7 @@ inline constexpr bool EFFECT_LIFECYCLE_TRACE_ENABLED = false;
 void Effect_InitHooks();
 bool Effect_DumpCrashTrace(FILE* file, uint64_t object);
 void Effect_CaptureRecipes(RollbackSnapshotSlot& slot);
+void Effect_ReleaseSnapshotResources(RollbackSnapshotSlot& slot);
 int Effect_RestoreRecipes(RollbackSnapshotSlot& slot);
 void Effect_RestoreCharacterStates(RollbackSnapshotSlot& slot);
 void Effect_RestoreCharacterReferences(RollbackSnapshotSlot& slot);
