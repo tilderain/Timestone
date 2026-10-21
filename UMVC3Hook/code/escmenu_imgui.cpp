@@ -8,6 +8,7 @@
 #include "steam_lobby.h"
 #include "umvc3menu.h"
 #include "d3d9reset.h"
+#include "lag_diagnostics.h"
 #include <Windows.h>
 
 extern bool ChrSelImGui_IsOpen();
@@ -91,6 +92,38 @@ void EscMenuImGui_Draw()
         ImGui::SetTooltip("Sets game worker count to 1. May massively improve performance by 100%% on pcs with bad thread work, but may decrease performance by about 10%% on higher end pcs");
     if (saveFailed)
         ImGui::TextUnformatted("Could not save; previous setting retained.");
+    ImGui::Separator();
+    const auto capture = LagDiagnostics_GetCaptureStatus();
+    const bool capturing = capture == LagCaptureStatus::Starting ||
+        capture == LagCaptureStatus::Recording || capture == LagCaptureStatus::Finishing ||
+        capture == LagCaptureStatus::Continuous;
+    static bool captureStartFailed = false;
+    ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_FrameBg));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImGui::GetStyleColorVec4(ImGuiCol_FrameBgHovered));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImGui::GetStyleColorVec4(ImGuiCol_FrameBgActive));
+    ImGui::BeginDisabled(capturing);
+    if (ImGui::Button("Start lag diagnostic")) {
+        captureStartFailed = !LagDiagnostics_StartCapture();
+        if (!captureStartFailed) g_open = false;
+    }
+    ImGui::EndDisabled();
+    ImGui::PopStyleColor(3);
+    if (capture == LagCaptureStatus::Recording)
+        ImGui::TextDisabled("Recording: %u seconds remaining", LagDiagnostics_GetCaptureSecondsRemaining());
+    else if (capture == LagCaptureStatus::Starting)
+        ImGui::TextDisabled("Starting capture...");
+    else if (capture == LagCaptureStatus::Finishing)
+        ImGui::TextDisabled("Finishing log...");
+    else if (capture == LagCaptureStatus::Continuous)
+        ImGui::TextDisabled("Continuous diagnostics enabled in Timestone.ini.");
+    else if (captureStartFailed || capture == LagCaptureStatus::Failed)
+        ImGui::TextUnformatted("Could not capture log. Check folder write access.");
+    else if (capture == LagCaptureStatus::OpenFailed)
+        ImGui::TextUnformatted("Log saved beside the game, but could not open it.");
+    else if (capture == LagCaptureStatus::Complete)
+        ImGui::TextDisabled("Capture complete. Log opened.");
+    else
+        ImGui::TextDisabled("Records for 15 seconds, then opens the log.");
     ImGui::End();
     ImGui::PopStyleVar(2);
     ImGui::PopStyleColor(9);

@@ -20,10 +20,17 @@ enum class LagEvent : unsigned {
     NativeOutsideFrame, FrameReentry, OverlayOrder, ScopeOverflow, Count
 };
 
-// Initially true to allow lazy configuration; immutable after configuration loads.
+// Initially true for lazy configuration; false between opt-in captures.
 extern std::atomic<bool> g_lagDiagnosticsMayBeEnabled;
 uint64_t LagDiagnostics_BeginSlow(LagMetric metric, int32_t frame);
 void LagDiagnostics_EventSlow(LagEvent event);
+void LagDiagnostics_RecordWaitSlow(LagMetric metric, int32_t required, int32_t remoteBefore,
+                                  int32_t remoteAfter, int32_t delay, int32_t rollback);
+inline void LagDiagnostics_RecordWait(LagMetric metric, int32_t required, int32_t remoteBefore,
+                                     int32_t remoteAfter, int32_t delay, int32_t rollback) {
+    if (g_lagDiagnosticsMayBeEnabled.load(std::memory_order_relaxed))
+        LagDiagnostics_RecordWaitSlow(metric, required, remoteBefore, remoteAfter, delay, rollback);
+}
 inline uint64_t LagDiagnostics_Begin(LagMetric metric, int32_t frame = -1) {
     if (!g_lagDiagnosticsMayBeEnabled.load(std::memory_order_relaxed)) return 0;
     return LagDiagnostics_BeginSlow(metric, frame);
@@ -36,6 +43,12 @@ inline void LagDiagnostics_Event(LagEvent event) {
 // Run on the existing initialization thread after its startup work completes.
 void LagDiagnostics_RunWriter();
 void LagDiagnostics_StopWriter();
+enum class LagCaptureStatus : unsigned {
+    Idle, Starting, Recording, Finishing, Complete, Failed, OpenFailed, Continuous
+};
+bool LagDiagnostics_StartCapture();
+LagCaptureStatus LagDiagnostics_GetCaptureStatus();
+unsigned LagDiagnostics_GetCaptureSecondsRemaining();
 
 class LagDiagnosticScope {
     LagMetric metric;

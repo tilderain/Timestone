@@ -1338,6 +1338,7 @@ static bool WaitForConfirmedFrame(int32_t frame, const char* reason)
         return true;
 
     LagDiagnosticScope diagnostic(LagMetric::InputWait);
+    const int32_t remoteBefore = g_lastRemoteFrame;
     Rollback_FreezeWatchdogHeartbeat(reason, g_netFrameCount);
     //HookLog("Netplay: waiting for remote input frame %d (%s, local=%d, lastRemote=%d)\n",
     //        frame, reason, g_netFrameCount, g_lastRemoteFrame);
@@ -1347,6 +1348,8 @@ static bool WaitForConfirmedFrame(int32_t frame, const char* reason)
         SwitchToThread();
         DrainAndProcessPackets();
     }
+    LagDiagnostics_RecordWait(LagMetric::InputWait, frame, remoteBefore, g_lastRemoteFrame,
+                              g_delayFrames, g_rollbackFrames);
     if (!IsFrameConfirmed(frame) && Netplay_HasInboundRestartMatch()) {
         Rollback_FreezeWatchdogHeartbeat("restart pending", g_netFrameCount);
         HookLog("Netplay: interrupted %s wait for pending match restart at frame %d\n",
@@ -1363,6 +1366,7 @@ static bool WaitForConfirmedFrame(int32_t frame, const char* reason)
 static bool WaitForPredictionBudgetFrame(int32_t frame)
 {
     LagDiagnosticScope diagnostic(LagMetric::PredictionWait);
+    const int32_t remoteBefore = g_lastRemoteFrame;
     SetPredictionBudgetExhausted();
     Rollback_FreezeWatchdogHeartbeat("prediction budget exhausted",
                                      g_netFrameCount);
@@ -1374,6 +1378,8 @@ static bool WaitForPredictionBudgetFrame(int32_t frame)
         DrainAndProcessPackets();
     }
 
+    LagDiagnostics_RecordWait(LagMetric::PredictionWait, frame, remoteBefore, g_lastRemoteFrame,
+                              g_delayFrames, g_rollbackFrames);
     if (IsFrameConfirmed(frame)) {
         ClearPredictionBudgetExhausted();
         Rollback_FreezeWatchdogHeartbeat("prediction-budget-wait-complete",
