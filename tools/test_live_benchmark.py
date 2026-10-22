@@ -11,6 +11,77 @@ CODE = ROOT / "UMVC3Hook/code"
 
 @unittest.skipUnless(shutil.which("g++"), "native g++ required")
 class LiveBenchmarkTest(unittest.TestCase):
+    def test_extension_empty_poll(self):
+        source = (CODE / "netplay.cpp").read_text()
+        dequeue = source.split("bool Netplay_GetExtensionPacket(", 1)[1].split(
+            "\nvoid Netplay_ClearInputQueues", 1)[0]
+        enqueue = source.split("case PACKET_BENCHMARK:", 1)[1].split("break;", 1)[0]
+        harness = r'''
+#include <atomic>
+#include <cassert>
+#include <cstdint>
+#include <cstring>
+#include <mutex>
+#include <thread>
+constexpr size_t MAX_EXTENSION_PACKETS = 64, MAX_EXTENSION_PACKET_SIZE = 256;
+struct ExtensionPacket { size_t size; uint8_t data[MAX_EXTENSION_PACKET_SIZE]; };
+ExtensionPacket g_inboundExtension[MAX_EXTENSION_PACKETS];
+size_t g_inboundExtensionHead = 0, g_inboundExtensionCount = 0;
+bool g_active = true, g_csInitialized = true;
+std::atomic<bool> g_inboundExtensionPending{false};
+std::mutex g_extensionCS;
+std::atomic<unsigned> locks{0};
+struct ScopedCS {
+    std::unique_lock<std::mutex> lock;
+    explicit ScopedCS(std::mutex& cs) : lock(cs) { ++locks; }
+};
+struct Packet { size_t dataLength; const uint8_t* data; };
+struct Event { Packet* packet; };
+void Enqueue(uint32_t value) {
+    Packet packet{sizeof(value), reinterpret_cast<const uint8_t*>(&value)};
+    Event event{&packet};
+''' + enqueue + '\n}\nbool Netplay_GetExtensionPacket(' + dequeue + r'''
+int main() {
+    uint32_t value = 0;
+    size_t size = 99;
+    for (int i = 0; i < 10000; ++i)
+        assert(!Netplay_GetExtensionPacket(&value, sizeof(value), size));
+    assert(locks == 0 && size == 0);
+    Enqueue(1); Enqueue(2);
+    assert(!Netplay_GetExtensionPacket(&value, 1, size));
+    assert(g_inboundExtensionPending && g_inboundExtensionCount == 2);
+    assert(Netplay_GetExtensionPacket(&value, sizeof(value), size) && value == 1);
+    assert(g_inboundExtensionPending);
+    assert(Netplay_GetExtensionPacket(&value, sizeof(value), size) && value == 2);
+    assert(!g_inboundExtensionPending);
+    for (uint32_t i = 0; i < MAX_EXTENSION_PACKETS + 3; ++i) Enqueue(i);
+    for (uint32_t i = 3; i < MAX_EXTENSION_PACKETS + 3; ++i)
+        assert(Netplay_GetExtensionPacket(&value, sizeof(value), size) && value == i);
+    assert(!g_inboundExtensionPending);
+    // Exercise empty-to-nonempty publication across threads without overflow.
+    std::thread producer([] {
+        for (uint32_t i = 0; i < 10000; ++i) {
+            while (g_inboundExtensionPending.load()) std::this_thread::yield();
+            Enqueue(i);
+        }
+    });
+    for (uint32_t i = 0; i < 10000; ++i) {
+        while (!Netplay_GetExtensionPacket(&value, sizeof(value), size))
+            std::this_thread::yield();
+        assert(value == i && size == sizeof(value));
+    }
+    producer.join();
+    assert(!g_inboundExtensionPending);
+}
+'''
+        with tempfile.TemporaryDirectory(prefix="benchmark-queue-", dir="/tmp/opencode") as temporary:
+            cpp = Path(temporary) / "test.cpp"
+            binary = Path(temporary) / "test"
+            cpp.write_text(harness)
+            subprocess.run(["g++", "-std=c++20", "-O2", "-pthread", "-Wall", "-Wextra", "-Werror",
+                            str(cpp), "-o", str(binary)], check=True)
+            subprocess.run([str(binary)], check=True, timeout=30)
+
     def test_collector_protocol_and_display(self):
         source = (CODE / "live_benchmark.cpp").read_text()
         source = "\n".join(line for line in source.splitlines()
@@ -186,7 +257,7 @@ int main() {
     LiveBenchmark_Update();
     assert(g_generation == 7);
     assert((g_flags >> 8) == 7);
-    assert(g_nextSend >= clockMs + 5000 && g_nextSend <= clockMs + 10000);
+    assert(g_nextSend == 0); // No report scheduling while disabled.
     assert(outbound.empty());
     bool varied = false;
     const auto firstDelay = NextReportDelay();
@@ -196,6 +267,45 @@ int main() {
         varied |= delay != firstDelay;
     }
     assert(varied);
+    // Neither live frames nor independent corrections collect without a request.
+    for (bool online : {false, true}) {
+        connected = online;
+        LiveBenchmark_Update();
+        for (bool open : {false, true}) {
+            menu = open;
+            LiveBenchmark_Draw();
+            if (online && open) continue;
+            const int idleReads = reads;
+            assert(LiveBenchmark_BeginFrame(0) == 0);
+            assert(LiveBenchmark_BeginResim() == 0);
+            assert(LiveBenchmark_Now() == 0);
+            LiveBenchmark_EndResim(0);
+            assert(reads == idleReads);
+        }
+    }
+    // Offline 0 enables both samplers, then expires even with Esc open.
+    connected = false;
+    LiveBenchmark_Update();
+    key = true;
+    LiveBenchmark_Draw();
+    auto requestedFrame = LiveBenchmark_BeginFrame(0);
+    assert(requestedFrame);
+    LiveBenchmark_EndFrame(requestedFrame, 1);
+    auto requestedResim = LiveBenchmark_BeginResim();
+    assert(requestedResim);
+    LiveBenchmark_EndResim(requestedResim);
+    clockMs += 8000;
+    const int expiredReads = reads;
+    assert(LiveBenchmark_BeginFrame(1) == 0);
+    assert(LiveBenchmark_BeginResim() == 0);
+    assert(reads == expiredReads);
+    LiveBenchmark_Draw();
+    g_showRequested.store(false);
+    connected = true;
+    LiveBenchmark_Update();
+    // Netplay Esc enables collection without pressing 0.
+    menu = true;
+    LiveBenchmark_Draw();
     Samples samples;
     assert(Summarize(samples).count == 0);
     for (uint64_t i = 1; i <= 150; ++i) samples.Add(i);
@@ -205,6 +315,11 @@ int main() {
     assert(RecentCost(samples) == 150);
     samples.Add(1); samples.Add(2);
     assert(RecentCost(samples) == 2); // Old spikes no longer hold the bar down.
+    Samples recentEdges;
+    assert(RecentCost(recentEdges) == 0);
+    recentEdges.Add(0); assert(RecentCost(recentEdges) == 1);
+    recentEdges.Add(UINT64_MAX); assert(RecentCost(recentEdges) == UINT32_MAX);
+    recentEdges.Add(4); recentEdges.Add(3); assert(RecentCost(recentEdges) == 4);
     const Costs slowHistory{120, 2000, 20000, 30000, 40000};
     DrawRate(slowHistory, true, true, 16667);
     assert(ImGui::bars.back() > 0.499f && ImGui::bars.back() < 0.501f);
@@ -272,6 +387,8 @@ int main() {
     inbound.push_back({16, 0, 0, 0, 0x43, 0x4c, 0x53, 0x31});
     LiveBenchmark_Update(); assert(rosterPackets == 1);
 
+    menu = false;
+    LiveBenchmark_Draw();
     ImGui::windows = 0;
     const int beforeHiddenDraw = clockReads;
     LiveBenchmark_Draw(); assert(ImGui::windows == 0);
@@ -466,6 +583,8 @@ int main() {
     // Between sampled frames, even rollback scopes must not read QPC.
     Clear();
     clockMs += 1000;
+    key = true;
+    LiveBenchmark_Draw();
     const auto sampled = LiveBenchmark_BeginFrame(0);
     assert(sampled);
     qpc += 2000;
@@ -487,8 +606,12 @@ int main() {
     Frame(60);
     assert(Cost(g_local, LiveBenchmarkMetric::Live).count == 2);
 
-    // Background reports are jittered, rather than sent each second.
+    // Menu-only reports are jittered, rather than sent each second.
     connected = true;
+    g_showUntil.store(0);
+    g_showRequested.store(false);
+    menu = true;
+    LiveBenchmark_Draw();
     LiveBenchmark_Update(); // Connection transition clears the old session.
     clockMs += 1000;
     Frame(0);
@@ -505,6 +628,18 @@ int main() {
     assert(g_nextSend >= clockMs + 5000 && g_nextSend <= clockMs + 10000);
     outbound.clear(); clockMs += 1000;
     LiveBenchmark_Update(); assert(outbound.empty());
+
+    // Closing the menu disables sampling and reports, even when a report is due.
+    menu = false;
+    LiveBenchmark_Draw();
+    clockMs = g_nextSend;
+    g_localTime = clockMs;
+    LiveBenchmark_Update();
+    assert(outbound.empty());
+    const int closedReads = reads;
+    assert(LiveBenchmark_BeginFrame(1) == 0);
+    assert(LiveBenchmark_BeginResim() == 0);
+    assert(reads == closedReads);
 
     peer.generation = generation;
     peer.sequence = 2;
@@ -624,6 +759,34 @@ int main() {
     });
     writer.join(); reader.join();
     assert(observed != 0);
+
+    // Isolate collector bookkeeping; clocks/network/ImGui remain stubbed here.
+    connected = true; menu = false;
+    g_menuOpen.store(false); g_showUntil.store(0); g_showRequested.store(false);
+    LiveBenchmark_Update();
+    const int idleClocks = clockReads, idleCounters = reads;
+    for (int i = 0; i < 10000; ++i) {
+        auto start = LiveBenchmark_BeginFrame(i);
+        auto correction = LiveBenchmark_BeginResim();
+        LiveBenchmark_EndResim(correction);
+        LiveBenchmark_EndFrame(start, i + 1);
+        LiveBenchmark_Update();
+    }
+    printf("Idle 10000 frames: %d clock reads, %d QPC reads (stubbed APIs).\n",
+        clockReads - idleClocks, reads - idleCounters);
+    assert(clockReads == idleClocks && reads == idleCounters);
+    Samples recentBench;
+    volatile uint32_t recentSink = 0;
+    const auto recentStart = std::chrono::steady_clock::now();
+    for (uint32_t i = 0; i < 1000000; ++i) {
+        recentBench.Add(i);
+        recentSink = RecentCost(recentBench);
+    }
+    const auto recentNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now() - recentStart).count();
+    assert(recentSink == 999999);
+    printf("Recent-cost bookkeeping: %.1f ns/update (native harness).\n",
+        (double)recentNs / 1000000);
 
     // Native microbenchmark of the handoff only, not Windows/game-frame overhead.
     constexpr uint32_t iterations = 1000000;

@@ -88,10 +88,12 @@ Costs Summarize(const Samples& samples)
 
 uint32_t RecentCost(const Samples& samples)
 {
-    Samples recent;
+    if (!samples.count) return 0;
+    uint64_t maximum = 0;
     for (size_t i = 0; i < std::min(samples.count, size_t{2}); ++i)
-        recent.Add(samples.ticks[(samples.next + Window - 1 - i) % Window]);
-    return Summarize(recent).maximum;
+        maximum = std::max(maximum, samples.ticks[(samples.next + Window - 1 - i) % Window]);
+    return (uint32_t)std::min(4294967295.0,
+        std::max(1.0, (double)maximum * 1000000.0 / (double)Frequency()));
 }
 
 Samples g_samples[Metrics]; // Owned solely by the game thread.
@@ -120,9 +122,23 @@ static_assert(std::atomic<uint32_t>::is_always_lock_free &&
               std::atomic<bool>::is_always_lock_free);
 std::atomic<uint64_t> g_showUntil{0};
 std::atomic<bool> g_showRequested{false};
+std::atomic<bool> g_menuOpen{false};
 uint64_t g_pendingShowUntil = 0;
 uint64_t g_summaryRequestedUntil = 0;
 uint64_t g_nextRequestedSend = 0;
+
+bool SamplingRequested(uint64_t now)
+{
+    return now < g_showUntil.load(std::memory_order_relaxed) ||
+        (Netplay_IsActive() && g_menuOpen.load(std::memory_order_relaxed));
+}
+
+bool HasSamplingRequest()
+{
+    // No clock or game-state queries on the usual disabled path.
+    return g_showUntil.load(std::memory_order_relaxed) != 0 ||
+        (g_menuOpen.load(std::memory_order_relaxed) && Netplay_IsActive());
+}
 
 void Publish()
 {
@@ -315,8 +331,10 @@ void Assessment(const Packet& packet, bool fresh)
 uint64_t LiveBenchmark_BeginFrame(int32_t frame)
 {
     g_active = false;
+    if (!HasSamplingRequest()) return 0;
     if (g_lastFrame >= 0 && frame != g_lastFrame) Clear();
     const uint64_t now = GetTickCount64();
+    if (!SamplingRequested(now)) return 0;
     if (now < g_nextSample) return 0;
     if (frame < 0 || FrameStepper_IsMatchRestartPending() ||
         (Netplay_IsActive() && !FrameStepper_IsDesyncCheckReady())) return 0;
@@ -340,8 +358,10 @@ uint64_t LiveBenchmark_Now()
 uint64_t LiveBenchmark_BeginResim()
 {
     g_corrected = true;
+    g_resimSampling = false;
+    if (!HasSamplingRequest()) return 0;
     const uint64_t now = GetTickCount64();
-    g_resimSampling = now >= g_nextResimSample;
+    g_resimSampling = SamplingRequested(now) && now >= g_nextResimSample;
     if (!g_resimSampling) return 0;
     g_nextResimSample = now + SampleIntervalMs;
     return Counter();
@@ -425,8 +445,7 @@ void LiveBenchmark_Update()
         g_flags = flags;
         Clear();
     }
-    const uint64_t now = GetTickCount64();
-    if (!g_nextSend) g_nextSend = now + NextReportDelay();
+    uint64_t now = HasSamplingRequest() ? GetTickCount64() : 0;
     uint8_t bytes[256];
     size_t size;
     bool peerChanged = false;
@@ -441,6 +460,7 @@ void LiveBenchmark_Update()
         Packet packet;
         std::memcpy(&packet, bytes, sizeof(packet));
         if (!Valid(packet)) continue;
+        if (!now) now = GetTickCount64();
         uint32_t& sequence = packet.kind == Show ? g_peerShowSequence : g_peerSequence;
         if ((int32_t)(packet.sequence - sequence) <= 0) continue;
         sequence = packet.sequence;
@@ -457,12 +477,14 @@ void LiveBenchmark_Update()
     if (peerChanged) Publish();
     if (g_showRequested.load(std::memory_order_relaxed) &&
         g_showRequested.exchange(false, std::memory_order_relaxed)) {
+        if (!now) now = GetTickCount64();
         ++g_showSequence;
         g_pendingShowUntil = now + 5000;
         g_summaryRequestedUntil = now + 8000;
         g_nextRequestedSend = 0;
     }
-    if (!connected) return;
+    if (!connected || !now || !SamplingRequested(now)) return;
+    if (!g_nextSend) g_nextSend = now + NextReportDelay();
     if (g_pendingShowUntil > now) {
         Packet packet;
         packet.kind = Show;
@@ -486,6 +508,9 @@ void LiveBenchmark_Draw()
 {
     const bool requested = !ImGui::GetIO().WantTextInput && KeyPressed('0');
     const bool menu = EscMenuImGui_IsOpen();
+    // Esc-menu state belongs to the render thread; sampling runs on the game thread.
+    if (g_menuOpen.load(std::memory_order_relaxed) != menu)
+        g_menuOpen.store(menu, std::memory_order_relaxed);
     const uint64_t until = g_showUntil.load(std::memory_order_relaxed);
     if (!requested && !menu && !until) return;
     const uint64_t now = GetTickCount64();

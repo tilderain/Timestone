@@ -140,6 +140,7 @@ static size_t                   g_outboundExtensionCount = 0;
 static ExtensionPacket          g_inboundExtension[MAX_EXTENSION_PACKETS] = {};
 static size_t                   g_inboundExtensionHead = 0;
 static size_t                   g_inboundExtensionCount = 0;
+static std::atomic<bool>        g_inboundExtensionPending{false};
 static CRITICAL_SECTION         g_extensionCS;
 
 // One-time critical section initialization flag
@@ -801,6 +802,7 @@ static DWORD WINAPI Netplay_ServiceThread(LPVOID)
                                                 event.packet->data,
                                                 event.packet->dataLength);
                                     ++g_inboundExtensionCount;
+                                    g_inboundExtensionPending.store(true, std::memory_order_relaxed);
                                 }
                                 break;
                         }
@@ -897,6 +899,7 @@ void Netplay_Init(ENetHost* host, ENetPeer* peer)
         g_outboundExtensionCount = 0;
         g_inboundExtensionHead = 0;
         g_inboundExtensionCount = 0;
+        g_inboundExtensionPending.store(false, std::memory_order_relaxed);
         std::memset(&g_outboundPacket, 0, sizeof(InputPacket));
         g_csInitialized = true;
     }
@@ -1325,6 +1328,9 @@ bool Netplay_GetExtensionPacket(void* data, size_t capacity, size_t& outSize)
     if (!g_active || !g_csInitialized || !data)
         return false;
 
+    // Only an empty-queue hint. The lock still protects every payload/count access.
+    if (!g_inboundExtensionPending.load(std::memory_order_relaxed))
+        return false;
     ScopedCS lock(g_extensionCS);
     if (g_inboundExtensionCount == 0)
         return false;
@@ -1335,6 +1341,7 @@ bool Netplay_GetExtensionPacket(void* data, size_t capacity, size_t& outSize)
     std::memcpy(data, packet.data, packet.size);
     g_inboundExtensionHead = (g_inboundExtensionHead + 1) % MAX_EXTENSION_PACKETS;
     --g_inboundExtensionCount;
+    g_inboundExtensionPending.store(g_inboundExtensionCount != 0, std::memory_order_relaxed);
     return true;
 }
 

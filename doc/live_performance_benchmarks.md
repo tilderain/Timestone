@@ -6,6 +6,41 @@ Checked against current source and Ghidra's `umvc3.exe.unpacked.exe` instance.
 
 ## Implemented Behavior
 
+### On-demand collection and overhead follow-up
+
+Collection is now disabled unless `0` has requested the existing eight-second
+display window (including a peer request), or the custom Escape menu is open
+during netplay. Opening Escape offline does not enable collection. Both live and
+independent resimulation samplers use this gate; outgoing reports are gated too.
+The older investigation below includes historical behavior, not this policy.
+
+The disabled collector returns before reading clocks. Update still maintains
+session metadata and dispatches extension packets, including character-select
+traffic and peer display requests. Empty extension-queue polls use an atomic
+pending hint instead of entering the critical section. Enqueue, dequeue, overflow,
+and payload access remain protected by the existing lock. Render-side menu state
+is published only when it changes, avoiding an atomic store every draw.
+
+Recent-cost calculation now reads at most two ring entries and converts their
+maximum directly; it no longer zeroes a 120-entry temporary ring and sorts it.
+Full-history percentile calculation and the sampling interval are unchanged.
+
+Native harness observations (`python3 tools/test_live_benchmark.py`):
+
+- 10,000 disabled frame/update/resimulation cycles: 30,000 clock calls before,
+  zero afterward; QPC calls remain zero.
+- Recent-cost bookkeeping: approximately 153 ns/update before, 12-16 ns afterward
+  in the observed runs. This microbenchmark is not total benchmark overhead.
+- Queue tests cover empty polls without locking, short destination buffers,
+  overflow ordering, draining, and 10,000 producer/consumer handoffs.
+
+The harness stubs Windows clocks, networking, and ImGui. These results establish
+removed work, not a measured reduction in game-frame milliseconds or proof that
+the benchmark caused the reported stutter. Visible overlay rendering and actual
+Windows/Steam costs still require live profiling.
+
+### Original implementation notes
+
 `UMVC3Hook/code/live_benchmark.cpp` owns collection, protocol/dispatch, assessment,
 and display; `live_benchmark.h` is its small timing integration API.
 
