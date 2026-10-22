@@ -39,6 +39,31 @@ removed work, not a measured reduction in game-frame milliseconds or proof that
 the benchmark caused the reported stutter. Visible overlay rendering and actual
 Windows/Steam costs still require live profiling.
 
+### Active-path caching
+
+Each sample history now caches its exact summary until `Add` changes the ring.
+Unchanged rollback histories are not copied and sorted again when a new live
+report is published. Resetting the history also resets its cache.
+
+The overlay caches numerical capacity text separately for each player and each
+of the live/rollback rows. New numerical inputs rebuild that cell's strings;
+ordinary display frames reuse them. Freshness/color evaluation, layout, bars,
+and Expand/Collapse remain per-frame. Sampling frequency and percentile
+definitions are unchanged.
+
+Observed native harness before/after measurements:
+
+| Workload | Before | After |
+| --- | ---: | ---: |
+| Six populated histories, only live/clean histories changing | 12.6 us/report | 2.8 us/report |
+| Four expanded capacity cells, unchanged values | 11.9 us/draw | 2.0 us/draw |
+
+These are local microbenchmark observations, not Windows/game-frame measurements.
+The cell benchmark includes text formatting and stub bookkeeping, but excludes
+real ImGui layout, draw-list construction and GPU work. Tests verify exact cached
+percentiles through ring wrap/reset, zero numerical reformatting of unchanged
+cells, invalidation on value/depth changes, and immediate stale-data colors.
+
 ### Original implementation notes
 
 `UMVC3Hook/code/live_benchmark.cpp` owns collection, protocol/dispatch, assessment,

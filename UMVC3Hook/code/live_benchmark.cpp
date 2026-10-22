@@ -12,6 +12,7 @@
 #include "controller.h"
 #include <algorithm>
 #include <atomic>
+#include <cstdio>
 #include <cstring>
 
 extern void ChrSelImGui_HandleExtension(const void* data, size_t size);
@@ -45,10 +46,13 @@ static_assert(sizeof(Packet) == 156 && sizeof(Packet) <= 256);
 struct Samples {
     uint64_t ticks[Window] = {};
     size_t count = 0, next = 0;
+    mutable Costs summary{};
+    mutable bool summaryDirty = true;
     void Add(uint64_t value) {
         ticks[next] = value;
         next = (next + 1) % Window;
         count = std::min(count + 1, Window);
+        summaryDirty = true;
     }
 };
 
@@ -71,6 +75,7 @@ uint64_t Frequency()
 
 Costs Summarize(const Samples& samples)
 {
+    if (!samples.summaryDirty) return samples.summary;
     const size_t count = std::min(samples.count, Window);
     if (!count) return {};
     uint64_t sorted[Window];
@@ -80,10 +85,12 @@ Costs Summarize(const Samples& samples)
         return (uint32_t)std::min(4294967295.0,
             std::max(1.0, (double)ticks * 1000000.0 / (double)Frequency()));
     };
-    return {(uint32_t)count, us(sorted[0]),
+    samples.summary = {(uint32_t)count, us(sorted[0]),
         us(sorted[(count - 1) / 2]),
         us(sorted[(count * 95 + 99) / 100 - 1]),
         us(sorted[count - 1])};
+    samples.summaryDirty = false;
+    return samples.summary;
 }
 
 uint32_t RecentCost(const Samples& samples)
@@ -260,7 +267,50 @@ void DrawCapacityBar(double percent, const ImVec4& color)
         ImVec2(targetX, end.y + 1), ImGui::GetColorU32(ImGuiCol_Text));
 }
 
-void DrawResim(const Packet& packet, bool available, bool fresh, bool expanded = true)
+void DrawCapacityValues(uint64_t cost, uint64_t detail, uint64_t minimum, uint64_t maximum,
+                        uint32_t depth, bool resim, bool fresh, bool expanded, size_t side)
+{
+    // Render-thread cache: numerical text changes with samples, not display frames.
+    struct Display {
+        uint64_t cost = 0, detail = 0, minimum = 0, maximum = 0;
+        uint32_t depth = 0;
+        double percent = 0;
+        char headline[64]{}, timing[64]{}, range[64]{};
+    };
+    static Display cached[2][2];
+    auto& display = cached[resim][side];
+    if (display.cost != cost || display.detail != detail || display.minimum != minimum ||
+        display.maximum != maximum || display.depth != depth) {
+        display.cost = cost;
+        display.detail = detail;
+        display.minimum = minimum;
+        display.maximum = maximum;
+        display.depth = depth;
+        display.percent = resim ? 1666700.0 / cost : (1000000.0 / cost) / 60.0 * 100.0;
+        const double fps = resim ? display.percent * 60.0 / 100.0 : 1000000.0 / cost;
+        std::snprintf(display.headline, sizeof(display.headline), "%.0f%% (%.0f FPS)",
+                      display.percent, fps);
+        if (resim) {
+            std::snprintf(display.timing, sizeof(display.timing), "%uf: %.1f ms est.",
+                          depth, detail / 1000.0);
+            std::snprintf(display.range, sizeof(display.range), "Low:%.0f%%  High:%.0f%%",
+                          1666700.0 / maximum, 1666700.0 / minimum);
+        } else {
+            std::snprintf(display.timing, sizeof(display.timing), "Slow: %.1f ms", detail / 1000.0);
+            std::snprintf(display.range, sizeof(display.range), "Low:%.0f  High:%.0f",
+                          1000000.0 / maximum, 1000000.0 / minimum);
+        }
+    }
+    const ImVec4 color = CapacityColor(display.percent, fresh);
+    ImGui::TextColored(color, "%s", display.headline);
+    DrawCapacityBar(display.percent, color);
+    if (!expanded) return;
+    ImGui::TextDisabled("%s", display.timing);
+    ImGui::TextDisabled("%s", display.range);
+}
+
+void DrawResim(const Packet& packet, bool available, bool fresh, bool expanded = true,
+               size_t side = 0)
 {
     if (!available || !Cost(packet, LiveBenchmarkMetric::Live).count) {
         ImGui::TextDisabled("N/A");
@@ -277,33 +327,19 @@ void DrawResim(const Packet& packet, bool available, bool fresh, bool expanded =
         ImGui::TextDisabled("Waiting resim");
         return;
     }
-    const double percent = 16667.0 * 100.0 / cost;
-    const ImVec4 color = CapacityColor(percent, fresh);
-    ImGui::TextColored(color, "%.0f%% (%.0f FPS)", percent, percent * 60.0 / 100.0);
-    DrawCapacityBar(percent, color);
-    if (!expanded) return;
-    ImGui::TextDisabled("%uf: %.1f ms est.", depth, cost / 1000.0);
-    ImGui::TextDisabled("Low:%.0f%%  High:%.0f%%",
-        1666700.0 / RollbackCost(packet, &Costs::maximum),
-        1666700.0 / RollbackCost(packet, &Costs::minimum));
+    DrawCapacityValues(cost, cost, RollbackCost(packet, &Costs::minimum),
+        RollbackCost(packet, &Costs::maximum), depth, true, fresh, expanded, side);
 }
 
 void DrawRate(const Costs& cost, bool available, bool fresh, uint32_t recent = 0,
-              bool expanded = true)
+               bool expanded = true, size_t side = 0)
 {
     if (!available || !cost.count) {
         ImGui::TextDisabled("N/A");
         return;
     }
-    const double fps = 1000000.0 / (recent ? recent : cost.p95);
-    const double percent = fps / 60.0 * 100.0;
-    const ImVec4 color = CapacityColor(percent, fresh);
-    ImGui::TextColored(color, "%.0f%% (%.0f FPS)", percent, fps);
-    DrawCapacityBar(percent, color);
-    if (!expanded) return;
-    ImGui::TextDisabled("Slow: %.1f ms", cost.p95 / 1000.0);
-    ImGui::TextDisabled("Low:%.0f  High:%.0f", 1000000.0 / cost.maximum,
-                        1000000.0 / cost.minimum);
+    DrawCapacityValues(recent ? recent : cost.p95, cost.p95, cost.minimum, cost.maximum,
+                       0, false, fresh, expanded, side);
 }
 
 void Assessment(const Packet& packet, bool fresh)
@@ -589,8 +625,8 @@ void LiveBenchmark_Draw()
                 const auto& packet = side ? peer : local;
                 const bool available = !side || peerTime != 0;
                 const bool fresh = side ? peerFresh : localFresh;
-                if (live) DrawRate(Cost(packet, metric), available, fresh, packet.recentLive, expanded);
-                else DrawResim(packet, available, fresh, expanded);
+                if (live) DrawRate(Cost(packet, metric), available, fresh, packet.recentLive, expanded, side);
+                else DrawResim(packet, available, fresh, expanded, side);
             }
         }
         if (expanded) for (const auto metric : {LiveBenchmarkMetric::Save, LiveBenchmarkMetric::Restore,

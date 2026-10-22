@@ -86,6 +86,7 @@ int main() {
         source = (CODE / "live_benchmark.cpp").read_text()
         source = "\n".join(line for line in source.splitlines()
                            if not line.startswith("#include"))
+        source = source.replace("std::snprintf", "CountedSnprintf")
         harness = r'''
 #include <algorithm>
 #include <atomic>
@@ -100,6 +101,13 @@ int main() {
 #include <vector>
 #include "live_benchmark.h"
 #define __fastcall
+int numericFormats = 0;
+int CountedSnprintf(char* output, size_t size, const char* format, ...) {
+    ++numericFormats;
+    va_list args; va_start(args, format);
+    const int result = vsnprintf(output, size, format, args);
+    va_end(args); return result;
+}
 struct LARGE_INTEGER { long long QuadPart; };
 uint64_t qpc = 1000, clockMs = 1000;
 int reads = 0, clockReads = 0;
@@ -200,7 +208,7 @@ void TextColored(ImVec4 color, const char* fmt, ...) {
     char buffer[512]; va_list args; va_start(args, fmt);
     vsnprintf(buffer, sizeof(buffer), fmt, args); va_end(args); text.emplace_back(buffer);
 }
-void TextUnformatted(const char*) {}
+void TextUnformatted(const char* value) { text.emplace_back(value); }
 void SetNextWindowPos(ImVec2, int, ImVec2) {}
 void SetNextWindowBgAlpha(float) {}
 void PushStyleColor(int index, ImVec4 color) {
@@ -787,6 +795,77 @@ int main() {
     assert(recentSink == 999999);
     printf("Recent-cost bookkeeping: %.1f ns/update (native harness).\n",
         (double)recentNs / 1000000);
+
+    // Cache must preserve exact percentile results through wraparound and reset.
+    Samples checked;
+    for (uint64_t i = 0; i < 400; ++i) {
+        checked.Add((i * 7919) % 10000);
+        assert(checked.summaryDirty);
+        std::vector<uint64_t> sorted(checked.ticks, checked.ticks + checked.count);
+        std::sort(sorted.begin(), sorted.end());
+        const auto result = Summarize(checked);
+        const auto count = sorted.size();
+        auto us = [](uint64_t value) { return (uint32_t)std::max(uint64_t{1}, value); };
+        assert(result.count == count && result.minimum == us(sorted.front()) &&
+            result.median == us(sorted[(count - 1) / 2]) &&
+            result.p95 == us(sorted[(count * 95 + 99) / 100 - 1]) &&
+            result.maximum == us(sorted.back()));
+        assert(!checked.summaryDirty);
+        const auto cached = Summarize(checked);
+        assert(std::memcmp(&result, &cached, sizeof(result)) == 0);
+    }
+    checked = {};
+    assert(Summarize(checked).count == 0);
+
+    Samples activeSamples[Metrics];
+    for (size_t metric = 0; metric < Metrics; ++metric)
+        for (uint64_t i = 0; i < Window; ++i)
+            activeSamples[metric].Add(1000 + (i * 7919 + metric * 31) % 10000);
+    volatile uint32_t summarySink = 0;
+    const auto summaryStart = std::chrono::steady_clock::now();
+    for (uint32_t i = 0; i < 20000; ++i) {
+        // Live/clean frames change every report; rollback history may be unchanged.
+        activeSamples[(size_t)LiveBenchmarkMetric::Live].Add(1000 + i % 10000);
+        activeSamples[(size_t)LiveBenchmarkMetric::CleanLive].Add(1000 + i % 10000);
+        for (const auto& history : activeSamples) summarySink = Summarize(history).p95;
+    }
+    const auto summaryNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now() - summaryStart).count();
+    assert(summarySink != 0);
+    printf("Active six-metric summary (two histories changing): %.1f ns/report.\n",
+        (double)summaryNs / 20000);
+
+    Packet displayPackets[2];
+    for (size_t side = 0; side < 2; ++side) {
+        displayPackets[side].flags = 1u | (7u << 8);
+        for (auto& cost : displayPackets[side].costs)
+            cost = {120, 1000, 2000, 3000 + (uint32_t)side * 1000, 5000};
+        DrawRate(Cost(displayPackets[side], LiveBenchmarkMetric::Live), true, true, 0, true, side);
+        DrawResim(displayPackets[side], true, true, true, side);
+    }
+    numericFormats = 0;
+    const auto displayStart = std::chrono::steady_clock::now();
+    for (uint32_t i = 0; i < 20000; ++i) {
+        ImGui::text.clear(); ImGui::bars.clear(); ImGui::barColors.clear();
+        for (size_t side = 0; side < 2; ++side) {
+            const auto& packet = displayPackets[side];
+            DrawRate(Cost(packet, LiveBenchmarkMetric::Live), true, true, 0, true, side);
+            DrawResim(packet, true, true, true, side);
+        }
+    }
+    const auto displayNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now() - displayStart).count();
+    printf("Four expanded capacity cells: %.1f ns/frame (stubbed ImGui, includes formatting).\n",
+        (double)displayNs / 20000);
+    assert(numericFormats == 0); // No float formatting for unchanged samples.
+    DrawRate(Cost(displayPackets[0], LiveBenchmarkMetric::Live), true, false, 0, false, 0);
+    assert(numericFormats == 0 && ImGui::barColors.back().x == HealthColor(FrameHealth::NoData).x);
+    displayPackets[0].recentLive = 12345;
+    DrawRate(Cost(displayPackets[0], LiveBenchmarkMetric::Live), true, true, 12345, true, 0);
+    assert(numericFormats == 3);
+    displayPackets[1].flags = 5u << 8;
+    DrawResim(displayPackets[1], true, true, true, 1);
+    assert(numericFormats == 6 && HasText("5f:"));
 
     // Native microbenchmark of the handoff only, not Windows/game-frame overhead.
     constexpr uint32_t iterations = 1000000;
