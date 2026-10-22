@@ -8,7 +8,7 @@ on:
 
 permissions:
   contents: write   # softprops/action-gh-release
-  actions: write    # actions/upload-artifact & download-artifact (explicit permissions zero unlisted scopes)
+  actions: write    # delete workflow artifacts after publishing
 
 jobs:
   build:
@@ -196,6 +196,16 @@ jobs:
         generate_release_notes: true   # appends What's Changed commit list after the custom body
         draft: false  # human gate: devs promote via the environment approvals below
         prerelease: true
+
+    - name: Delete published workflow artifacts
+      if: steps.check.outputs.exists == 'false'
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        ARTIFACT_IDS="$(gh api --paginate "repos/$GH_REPO/actions/runs/$GITHUB_RUN_ID/artifacts" --jq '.artifacts[].id')"
+        for artifact_id in $ARTIFACT_IDS; do
+          gh api --method DELETE "repos/$GH_REPO/actions/artifacts/$artifact_id"
+        done
 
   release:
     needs: [build, release-draft]
