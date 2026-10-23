@@ -742,9 +742,14 @@ class D3D9ResetTests(unittest.TestCase):
         unit = MOCKS + r'''
 std::atomic<int> g_renderingThreadOverride {-1};
 std::atomic<bool> g_renderingThreadEnabled {false};
-bool D3D9Reset_RenderingThreadOverrideAvailable = true;
+bool D3D9Reset_RenderingThreadOverrideAvailable = false;
 int beginCalls = 0;
-void Begin(void*) { ++beginCalls; }
+int parallelismCalls = 0;
+void Rollback_DisableGameplayParallelism() { ++parallelismCalls; }
+void Begin(void*) {
+    assert(parallelismCalls == 1);
+    ++beginCalls;
+}
 auto g_originalBeginFrame = Begin;
 '''
         unit += function(source, "Field") + function(source, "HookBeginFrame")
@@ -755,6 +760,8 @@ int main() {
     render[0x3E] = 7; // Only native beginFrame may latch this byte.
     HookBeginFrame(render);
     assert(render[0x3D] == 1);
+    assert(parallelismCalls == 1); // Independent of the rendering override and netplay.
+    D3D9Reset_RenderingThreadOverrideAvailable = true;
     render[0x38] = 1;
     g_renderingThreadOverride = 0;
     HookBeginFrame(render);
@@ -786,6 +793,7 @@ int main() {
     HookBeginFrame(other);
     assert(other[0x3D] == 1 && g_renderingThreadEnabled.load());
     assert(beginCalls == 10); // Disabled overrides still call native beginFrame.
+    assert(parallelismCalls == 1); // Do not repeat the native setters every frame.
 }
 '''
         self.run_cpp(unit)

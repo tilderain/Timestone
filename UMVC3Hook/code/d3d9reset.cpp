@@ -3,6 +3,7 @@
 
 #include "mk10utils.h"
 #include "framestepper.h"
+#include "rollback.h"
 #include "LaunchMenu.h"
 #include "launchmenu_utils.h"
 #include "../IniSafe.h"
@@ -150,6 +151,13 @@ void* NativeRenderer()
 
 void __fastcall HookBeginFrame(void* render)
 {
+    // BeginFrame runs on the game thread in every launch mode, after startup.
+    static bool gameplayExecutionSettingsApplied = false;
+    if (!gameplayExecutionSettingsApplied) {
+        Rollback_DisableGameplayParallelism();
+        gameplayExecutionSettingsApplied = true;
+    }
+
     // EndFrame uses +0x3D as well as the latched +0x3E. Never change either
     // during a live frame (including a frame retained by native frame skipping).
     static void* nativeRenderer = nullptr;

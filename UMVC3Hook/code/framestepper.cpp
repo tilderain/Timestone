@@ -571,17 +571,8 @@ static void __fastcall HookedMove(void* sMvc3Main)
     // These setters rewrite live sMain timing and subsystem state. Applying
     // them from the initialization thread can race native startup before the
     // first game tick, so perform them here on the game thread instead.
-    static bool gameplayExecutionSettingsApplied = false;
     static bool netplayDeterminismApplied = false;
-    if (!gameplayExecutionSettingsApplied) {
-        if (Netplay_IsActive()) {
-            Rollback_ApplyNetplayDeterminism();
-            netplayDeterminismApplied = true;
-        } else {
-            Rollback_DisableGameplayParallelism();
-        }
-        gameplayExecutionSettingsApplied = true;
-    } else if (Netplay_IsActive() && !netplayDeterminismApplied) {
+    if (Netplay_IsActive() && !netplayDeterminismApplied) {
         Rollback_ApplyNetplayDeterminism();
         netplayDeterminismApplied = true;
     }
