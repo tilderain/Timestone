@@ -18,6 +18,8 @@ static std::atomic_flag g_bridgePumpLock = ATOMIC_FLAG_INIT;
 static std::atomic<uint32_t> g_steamRTT{0};
 static std::atomic<float> g_steamPacketLoss{-1.0f};
 static std::atomic<float> g_steamRemotePacketLoss{-1.0f};
+static constexpr DWORD STATUS_POLL_INTERVAL_MS = 500;
+static DWORD g_lastStatusPollTick = 0;
 static std::atomic<int32_t> g_steamJitter{-1};
 static constexpr DWORD JITTER_WINDOW_MS = 500;
 static int32_t g_jitterWindowPeakUsec = -1;
@@ -67,6 +69,14 @@ static bool PumpBridgeOnce()
         message->Release();
     }
     if (g_bridgeHost) enet_host_flush(g_bridgeHost);
+
+    // Keep telemetry polling out of the low-latency packet forwarding cadence.
+    const DWORD statusTick = GetTickCount();
+    if (statusTick - g_lastStatusPollTick < STATUS_POLL_INTERVAL_MS) {
+        g_bridgePumpLock.clear();
+        return true;
+    }
+    g_lastStatusPollTick = statusTick;
 
     SteamNetConnectionRealTimeStatus_t status = {};
     EResult statusResult = g_sockets->GetConnectionRealTimeStatus(
@@ -201,6 +211,7 @@ bool SteamTransport_CreateBridge(bool isHost, ISteamNetworkingSockets* sockets,
     g_jitterWindowPeakUsec = -1;
     g_jitterWindowStartTick = GetTickCount();
     g_bridgeCreatedTick = GetTickCount();
+    g_lastStatusPollTick = g_bridgeCreatedTick - STATUS_POLL_INTERVAL_MS;
     g_bridgeThreadStarted = false;
     g_bridgeRunning = true;
     g_bridgeThread = CreateThread(nullptr, 0, BridgeThread, nullptr, 0, nullptr);

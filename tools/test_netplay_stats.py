@@ -99,6 +99,48 @@ int main() {
 }
 ''')
 
+    def test_steam_status_poll_cadence(self):
+        source = (ROOT / "UMVC3Hook/code/steam_transport.cpp").read_text()
+        state = source[source.index("static constexpr DWORD STATUS_POLL_INTERVAL_MS"):
+                       source.index("static std::atomic<int32_t> g_steamJitter")]
+        gate = source[source.index("    const DWORD statusTick ="):
+                      source.index("    SteamNetConnectionRealTimeStatus_t status =")]
+        self.assertLess(source.index("if (g_bridgeHost) enet_host_flush"),
+                        source.index("    const DWORD statusTick ="))
+        self.assertIn("g_lastStatusPollTick = g_bridgeCreatedTick - STATUS_POLL_INTERVAL_MS;",
+                      source)
+        self.run_cpp(r'''
+#include <atomic>
+#include <cassert>
+#include <cstdint>
+using DWORD = uint32_t;
+DWORD tick;
+DWORD GetTickCount() { return tick; }
+std::atomic_flag g_bridgePumpLock = ATOMIC_FLAG_INIT;
+int polls = 0;
+''' + state + '''
+bool pump() {
+''' + gate + r'''
+    ++polls;
+    g_bridgePumpLock.clear();
+    return true;
+}
+int main() {
+    for (DWORD start : {DWORD{0}, UINT32_MAX - 200}) {
+        polls = 0;
+        g_lastStatusPollTick = start - STATUS_POLL_INTERVAL_MS;
+        for (DWORD elapsed = 0; elapsed <= 1200; ++elapsed) {
+            tick = start + elapsed;
+            assert(!g_bridgePumpLock.test_and_set());
+            assert(pump());
+            assert(polls == int(elapsed / 500 + 1));
+        }
+        assert(!g_bridgePumpLock.test_and_set());
+        g_bridgePumpLock.clear();
+    }
+}
+''')
+
     def test_steam_loss_percentage(self):
         source = (ROOT / "UMVC3Hook/code/steam_transport.cpp").read_text()
         update = source[source.index("        const float quality ="):
