@@ -17,6 +17,7 @@ void FrameStepper_InvalidateDeviceObjects();
 void FrameStepper_Capture(LPDIRECT3DDEVICE9 pDevice);
 void FrameStepper_SetTrainingFrameLimit(int32_t frames);
 void UpdateKeyboardState();
+bool CopyKeyboardSnapshot(uint8_t (&state)[256], bool (&pressed)[256]);
 bool KeyDown(int vk);
 bool KeyPressed(int vk);
 extern "C" void FrameStepper_ScheduleAutoTestRestart(uint32_t roundSeed);

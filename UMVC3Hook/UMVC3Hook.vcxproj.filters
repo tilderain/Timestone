@@ -33,6 +33,9 @@
     <ClInclude Include="framework.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="code\keyboard_input.h">
+      <Filter>Header Files\code</Filter>
+    </ClInclude>
     <ClInclude Include="pch.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -309,6 +312,9 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="code\rollback.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="code\keyboard_input.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="code\LaunchMenu_settings.cpp">

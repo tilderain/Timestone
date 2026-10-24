@@ -24,6 +24,7 @@
 #include "rollback_diagnostics.h"
 #include "rollback_profile.h"
 #include "live_benchmark.h"
+#include "keyboard_input.h"
 #include "trainingboot.h"
 
 // Netplay debug info from controller.cpp
@@ -1299,45 +1300,22 @@ void FrameStepper_Init()
     Rollback_InitHooks();
 }
 
-// Shared render-frame keyboard snapshot avoids repeated per-key Win32 calls.
+// All overlay consumers use one keyboard snapshot per render frame.
 static BYTE g_processKeyboardState[256] = {};
 static bool g_processKeyboardPressed[256] = {};
-static bool g_processKeyboardArmed[256] = {};
-static DWORD g_processKeyboardReleaseTick[256] = {};
 static bool g_processKeyboardStateValid = false;
-static bool g_processKeyboardStateInitialized = false;
 
 void UpdateKeyboardState()
 {
-    BYTE currentState[256] = {};
-    if (GetKeyboardState(currentState) == FALSE) {
-        memset(g_processKeyboardPressed, 0, sizeof(g_processKeyboardPressed));
-        g_processKeyboardStateValid = false;
-        return;
-    }
+    g_processKeyboardStateValid = KeyboardInput_Read(g_processKeyboardState, g_processKeyboardPressed,
+                                                    isPaused);
+}
 
-    const DWORD now = GetTickCount();
-    for (int vk = 0; vk < 256; ++vk) {
-        const bool isDown = (currentState[vk] & 0x80) != 0;
-        g_processKeyboardPressed[vk] = false;
-
-        if (!g_processKeyboardStateInitialized) {
-            g_processKeyboardArmed[vk] = !isDown;
-        } else if (isDown) {
-            g_processKeyboardPressed[vk] = g_processKeyboardArmed[vk];
-            g_processKeyboardArmed[vk] = false;
-            g_processKeyboardReleaseTick[vk] = 0;
-        } else if (!g_processKeyboardArmed[vk]) {
-            if (g_processKeyboardReleaseTick[vk] == 0) {
-                g_processKeyboardReleaseTick[vk] = now;
-            } else if (now - g_processKeyboardReleaseTick[vk] >= 30) {
-                g_processKeyboardArmed[vk] = true;
-            }
-        }
-    }
-    memcpy(g_processKeyboardState, currentState, sizeof(g_processKeyboardState));
-    g_processKeyboardStateValid = true;
-    g_processKeyboardStateInitialized = true;
+bool CopyKeyboardSnapshot(uint8_t (&state)[256], bool (&pressed)[256])
+{
+    memcpy(state, g_processKeyboardState, sizeof(state));
+    memcpy(pressed, g_processKeyboardPressed, sizeof(pressed));
+    return g_processKeyboardStateValid;
 }
 
 bool KeyDown(int vk)

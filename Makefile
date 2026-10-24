@@ -72,6 +72,7 @@ CPP_SRC   := \
 	$(SRCDIR)/code/chrsel_imgui.cpp \
 	$(SRCDIR)/code/escmenu_imgui.cpp \
 	$(SRCDIR)/code/live_benchmark.cpp \
+	$(SRCDIR)/code/keyboard_input.cpp \
 	$(SRCDIR)/code/controller.cpp \
 	$(SRCDIR)/code/autotest.cpp \
 	$(SRCDIR)/code/diag.cpp \

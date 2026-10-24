@@ -219,6 +219,7 @@
     <ClInclude Include="code\rollback_ndjson.h" />
     <ClInclude Include="code\autotest.h" />
     <ClInclude Include="code\live_benchmark.h" />
+    <ClInclude Include="code\keyboard_input.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="code\eNotifManager.cpp" />
@@ -229,6 +230,7 @@
     <ClCompile Include="code\LaunchMenu_settings.cpp" />
     <ClCompile Include="code\escmenu_imgui.cpp" />
     <ClCompile Include="code\live_benchmark.cpp" />
+    <ClCompile Include="code\keyboard_input.cpp" />
     <ClCompile Include="code\autotest.cpp" />
     <ClCompile Include="code\diag.cpp" />
     <ClCompile Include="code\exception.cpp" />

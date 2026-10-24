@@ -85,7 +85,7 @@ static constexpr uintptr_t SLOT_CPU_CONTROL_OFFSET             = 0x18;
 //   sMvc3Main__keyboardToGameMask_maybe: 0x1402B3390 (VK→game bitmask mapping)
 //   sMvc3Manager__isPadAssigned:         0x14025AD10 (checks slot != -1)
 //   sMvc3Manager__getPlayerCharIdx:      0x14025AC40 (reads manager+0x140[slot])
-//   sKeyboard__sKeyboard:    0x1406A96C0  (DirectInput keyboard state buffer at +0x138)
+//   sKeyboard__sKeyboard:    0x1406A96C0  (256-bit virtual-key held bitmap at +0x138)
 //   FUN_1402950e0:           0x1402950E0  (returns keyboard state provider at 0x140E1A198)
 //   sPad__instance:          0x140E174B8  (global, written at sPad__sPad_ctor+0x43)
 //   sMvc3Manager pointer:    0x140D510A0  (global, deref to get manager instance)

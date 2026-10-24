@@ -16,6 +16,7 @@
 #include "code/framestepper.h"
 #include "code/escmenu_imgui.h"
 #include "code/live_benchmark.h"
+#include "code/keyboard_input.h"
 #include "code/trainingboot.h"
 #include "code/netplay.h"
 #include "code/controller.h"
@@ -571,9 +572,7 @@ WNDPROC oWndProc;
 static HWND window = NULL;
 extern bool ChrSelImGui_IsOpen();
 
-// The game uses Raw Input and may suppress legacy WM_KEYDOWN messages. Mirror
-// physical keyboard state into ImGui every render frame, as a platform backend
-// normally would, and let ImGui own key-repeat timing.
+// Share the render-frame keyboard snapshot with hotkeys and ImGui.
 void PollKeyboardDirectly()
 {
     if (!window || ImGui::GetCurrentContext() == nullptr)
@@ -584,7 +583,10 @@ void PollKeyboardDirectly()
     const bool menuOpen = TheMenu->GetActiveState();
     const bool rosterOpen = ChrSelImGui_IsOpen();
     const bool escMenuOpen = EscMenuImGui_IsOpen();
-    if (!menuOpen && !rosterOpen && !escMenuOpen) {
+    BYTE keyboardState[256] = {};
+    bool pressed[256] = {};
+    if ((!menuOpen && !rosterOpen && !escMenuOpen) ||
+        !CopyKeyboardSnapshot(keyboardState, pressed)) {
         io.ConfigFlags &= ~ImGuiConfigFlags_NavEnableKeyboard;
         memset(io.KeysDown, 0, sizeof(io.KeysDown));
         memset(prevKeys, 0, sizeof(prevKeys));
@@ -596,24 +598,20 @@ void PollKeyboardDirectly()
     static const int navigationKeys[] = {
         VK_TAB, VK_LEFT, VK_RIGHT, VK_UP, VK_DOWN, VK_PRIOR, VK_NEXT,
         VK_HOME, VK_END, VK_INSERT, VK_DELETE, VK_BACK, VK_SPACE,
-        VK_RETURN, VK_ESCAPE
+        VK_RETURN, VK_ESCAPE, VK_CONTROL, VK_SHIFT, VK_MENU
     };
     if (!menuOpen)
         memset(io.KeysDown, 0, sizeof(io.KeysDown));
-    BYTE keyboardState[256] = { 0 };
-    const bool haveKeyboardState = menuOpen && GetKeyboardState(keyboardState);
     const int lastKey = menuOpen ? 256 : (int)IM_ARRAYSIZE(navigationKeys);
     for (int keyIndex = 0; keyIndex < lastKey; ++keyIndex)
     {
         const int vk = menuOpen ? keyIndex : navigationKeys[keyIndex];
-        const bool isDown = haveKeyboardState
-            ? (keyboardState[vk] & 0x80) != 0
-            : KeyDown(vk);
+        const bool isDown = (keyboardState[vk] & 0x80) != 0 || pressed[vk];
         const bool wasDown = prevKeys[vk];
         prevKeys[vk] = isDown;
         io.KeysDown[vk] = isDown;
 
-        if (menuOpen && isDown && !wasDown)
+        if (menuOpen && (pressed[vk] || (isDown && !wasDown)))
         {
             WCHAR wchar[4] = { 0 };
             if (ToUnicode(vk, MapVirtualKey(vk, MAPVK_VK_TO_VSC),
@@ -737,18 +735,14 @@ LRESULT __stdcall WndProc(const HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPar
     if (TheMenu->GetActiveState() || EscMenuImGui_IsOpen())
     {
         // Intercept keyboard Raw Input while menu is open so key presses do not trigger game actions
-        if (uMsg == WM_INPUT)
-        {
-            alignas(RAWINPUT) BYTE buffer[256];
-            UINT dwSize = sizeof(buffer);
-            if (GetRawInputData((HRAWINPUT)lParam, RID_INPUT, buffer, &dwSize, sizeof(RAWINPUTHEADER)) != (UINT)-1)
-            {
-                RAWINPUT* raw = (RAWINPUT*)buffer;
-                if (raw->header.dwType == RIM_TYPEKEYBOARD)
-                {
-                    return 0; // Swallow event
-                }
-            }
+        if (uMsg == WM_INPUT) {
+            RAWINPUT raw = {};
+            UINT size = sizeof(raw);
+            const UINT received = GetRawInputData((HRAWINPUT)lParam, RID_INPUT,
+                &raw, &size, sizeof(RAWINPUTHEADER));
+            if (received != (UINT)-1 && received >= sizeof(RAWINPUTHEADER) &&
+                raw.header.dwType == RIM_TYPEKEYBOARD)
+                return DefWindowProcW(hWnd, uMsg, wParam, lParam);
         }
 
         // Suppress legacy keyboard events to ensure menu typing doesn't bleed into game operations
@@ -869,6 +863,21 @@ void ApplyD3D9BorderlessWindow()
 		x, y, width, height);
 }
 
+static bool OverlayFrameDue()
+{
+	// Called under g_endSceneOverlayInFlight, including during frozen-frame renders.
+	static ULONGLONG nextFrame = 0;
+	// Scaled milliseconds preserve 60 Hz instead of rounding the period to 16 or 17 ms.
+	const ULONGLONG now = GetTickCount64() * 60;
+	if (now < nextFrame)
+		return false;
+	// Carry one frame of timing jitter; discard long stalls rather than accumulating work.
+	if (!nextFrame || now - nextFrame >= 2000)
+		nextFrame = now;
+	nextFrame += 1000;
+	return true;
+}
+
 long __stdcall hkEndScene(LPDIRECT3DDEVICE9 pDevice)
 {
 	if (InterlockedCompareExchange(&g_firstD3D9EndSceneSeen, 1, 0) == 0) {
@@ -879,6 +888,20 @@ long __stdcall hkEndScene(LPDIRECT3DDEVICE9 pDevice)
 	// or reentrant EndScene callbacks mutating its current-window stack.
 	if (InterlockedCompareExchange(&g_endSceneOverlayInFlight, 1, 0) != 0)
 		return oEndScene(pDevice);
+	if (!OverlayFrameDue()) {
+		// Each back buffer needs the overlay, even when its UI/input state is unchanged.
+		if (init && D3D9Reset_BeginOverlay(pDevice)) {
+			if (ImGui::GetCurrentContext() && ImGui::GetIO().Fonts->TexID) {
+				ImDrawData* drawData = ImGui::GetDrawData();
+				if (drawData && drawData->Valid) {
+					ImGui_ImplDX9_RenderDrawData(drawData);
+				}
+			}
+			D3D9Reset_EndOverlay();
+		}
+		InterlockedExchange(&g_endSceneOverlayInFlight, 0);
+		return oEndScene(pDevice);
+	}
 	if (!D3D9Reset_BeginOverlay(pDevice)) {
 		InterlockedExchange(&g_endSceneOverlayInFlight, 0);
 		return oEndScene(pDevice);
@@ -938,15 +961,15 @@ long __stdcall hkEndScene(LPDIRECT3DDEVICE9 pDevice)
 	ImGui_ImplWin32_NewFrame();
 	MatchImGuiToRenderTarget(pDevice);
 
-	// Inject inputs directly from hardware, bypassing the Windows message queue
+	// Publish the shared keyboard snapshot before ImGui consumes this frame's input.
 	PollKeyboardDirectly();
 
 	ImGui::NewFrame();
 	ImGui::GetIO().MouseDrawCursor = false;
-	EscMenuImGui_Update();
 
 	// Process menu logic, notifications, frame stepper, and freecam
 	// (formerly in a separate HookUpdate thread with Sleep(1))
+	EscMenuImGui_Update();
 	UMVC3Hooks::HookProcessStuff();
 
 	if (first_msg)
@@ -974,7 +997,6 @@ long __stdcall hkEndScene(LPDIRECT3DDEVICE9 pDevice)
 	Notifications->Draw();
 
 	ImGui::EndFrame();
-
 	ImGui::Render();
 	ImGui_ImplDX9_RenderDrawData(ImGui::GetDrawData());
 
@@ -1635,6 +1657,7 @@ void OnInitializeHook()
 	if (mhStatus != MH_OK && mhStatus != MH_ERROR_ALREADY_INITIALIZED)
 		D3D9Reset_AbortStartup("Could not initialize MinHook for graphics recovery");
 	if (mhStatus == MH_OK || mhStatus == MH_ERROR_ALREADY_INITIALIZED) {
+		KeyboardInput_Initialize();
 		if (!D3D9Reset_InstallNativeHooks())
 			D3D9Reset_AbortStartup("Could not install the graphics recovery controller; see Timestone.log");
 		if (MH_CreateHook(
