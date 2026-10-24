@@ -52,6 +52,10 @@ void __fastcall CaptureKeyboardMove(void* keyboard)
         if (device) {
             // The capture hook and device reference live until process exit.
             device->AddRef();
+            // Correct the native punctuation lookup without adding keyboard polls.
+            auto* vkTable = static_cast<BYTE*>(keyboard) + 0x38;
+            vkTable[DIK_SEMICOLON] = VK_OEM_1;
+            vkTable[DIK_APOSTROPHE] = VK_OEM_7;
             std::memcpy(g_vkTable, static_cast<BYTE*>(keyboard) + 0x38, sizeof(g_vkTable));
             g_device.store(device, std::memory_order_release);
         }
