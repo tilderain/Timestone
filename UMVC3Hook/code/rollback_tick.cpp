@@ -7,6 +7,7 @@
 #include "rollback_memory.h"
 #include "rollback_diagnostics.h"
 #include "rollback_tick.h"
+#include "controller.h"
 #include "mk10utils.h"
 
 #include <cstring>
@@ -557,17 +558,11 @@ void Rollback_ResyncMainTiming(uint64_t sMain)
 {
     if (!sMain) return;
 
-    LARGE_INTEGER qpc;
-    QueryPerformanceCounter(&qpc);
-    *(uint64_t*)(sMain + 0x40) = qpc.QuadPart;
-    *(uint64_t*)(sMain + 0x40048) = qpc.QuadPart;
-    *(uint64_t*)(sMain + 0x40078) = qpc.QuadPart;
-    *(uint64_t*)(sMain + 0x70) = qpc.QuadPart;
-    *(uint32_t*)(sMain + 0x38) = 16;
+    // Headless ticks do not advance native pacing. Preserve its live counters
+    // so correction work counts toward the next tick's wait, not in addition
+    // to a fresh frame interval. Only restore the logical simulation timing.
     *(float*)(sMain + 0x80) = 1.0f;
-    *(uint64_t*)(sMain + 0x60) = 0;
-    *(uint64_t*)(sMain + 0x68) = 0;
-    *(uint32_t*)(sMain + 0x48) = 1;
+    *(uint32_t*)(sMain + 0x48) = (uint32_t)Controller_GetNetFrameCount();
 }
 
 void Rollback_PatchSleep(bool enable)
