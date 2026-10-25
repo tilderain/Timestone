@@ -1943,10 +1943,15 @@ BOOL WINAPI DllMain(HMODULE hMod, DWORD dwReason, LPVOID lpReserved)
 	switch (dwReason)
 	{
 	case DLL_PROCESS_ATTACH:
+		if (GetModuleHandleW(L"BK4RB.exe"))
+			return FALSE;
 		g_asiModule = hMod;
 		DisableThreadLibraryCalls(hMod);
 		break;
 	case DLL_PROCESS_DETACH:
+		// A rejected process attach must not clean up uninitialized mod systems.
+		if (!g_asiModule)
+			break;
 		Exception_RemoveHandler();
 		CleanupNetworkOnExit();
 		enet_deinitialize();
