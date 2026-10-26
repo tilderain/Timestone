@@ -1,6 +1,6 @@
 # Intro Skip Mechanism
 
-**Status: Native reference with current-plugin notes. Reviewed 2026-07-23.**
+**Status: Native reference with current-plugin notes. Reviewed 2026-10-26.**
 The plugin hooks `sAction__stepIntro` at `0x140007D90`. Native intro behavior is
 described separately from the custom netplay override below.
 
@@ -15,7 +15,7 @@ void sAction__stepIntro(sAction *action)
     bool finished;
 
     if (sAction__testGameFlag(action, 0x10000)) {
-        finished = uActionSideCamera__func_7DF0(action);
+        finished = sAction__advanceBattleIntroAndHandleSkip(action);
     } else if (g__isMissionMode(sBattleSetting__getInstance())) {
         finished = true;
     } else {
@@ -67,7 +67,8 @@ flag `0x8000` and returns true.
 ### Local input path
 
 The function reads player 1 through `sPad__getRawStickInput_noSOCD`. It may OR
-in player 2's raw input if `sAction__queryGameModeUnlockState_6980` permits it
+in player 2's raw input if `sAction__allowsSecondPlayerSkipInput` (historically
+`sAction__queryGameModeUnlockState_6980`) permits it
 and player 2 has an assigned pad. Mode 2 explicitly clears the combined local
 input. A nonzero `combinedInput & 0xF000` dismisses the prompt and completes the
 intro.
@@ -90,7 +91,8 @@ skipping. This is a replay-driven path, not ranked-mode behavior.
 
 ## Alternate Handler (`0x140007DF0`)
 
-`uActionSideCamera__func_7DF0` runs when action flag `0x10000` is already set.
+`sAction__advanceBattleIntroAndHandleSkip` (historically
+`uActionSideCamera__func_7DF0`) runs when action flag `0x10000` is already set.
 It has two animation branches selected by a battle-setting byte currently
 exposed as `sBattleSetting__getByte_at_885`. The function updates character
 intro actions, reads local raw pad input with the same `0xF000` mask, and may:
@@ -115,8 +117,11 @@ if (Netplay_IsActive() && FrameStepper_IsBattleSynchronized()) {
 }
 ```
 
-Before the battle-ready barrier, it calls the original intro function. The
-shared readiness gate is established when phase 2 has been entered and no next
+Before the battle-ready barrier, it calls the original intro function **and
+clears any nonnegative queued step back to -1** through `setNextStep`. This
+prevents held native skip input from escaping phase 2 before mutual release.
+The pseudocode above shows only the post-release fast path, not the whole hook.
+The shared readiness gate is established when phase 2 has been entered and no next
 phase is queued; `mSubStep` may still be zero if the first intro tick was
 gated by a native pause. The override therefore does not skip merely because
 netplay became active, nor does it depend on intro button input.
@@ -134,3 +139,14 @@ netplay became active, nor does it depend on intro button input.
 | `0x14000B570` | Select and initialize mode/intro sound state |
 | `0x14000B840` | Test an action game-flag mask |
 | `0x14024D560` | `g__isMissionMode`, true when `gameMode == 6` |
+
+## Review scope and evidence
+
+The dispatcher body at `0x140007D90` was checked on 2026-10-26 in live Ghidra
+8193 (`umvc3.exe.unpacked.exe`, preferred base `0x140000000`).
+It confirms the flagged handler's current name, Mission bypass, and step-3
+request. `controller.cpp::hkStepIntro` and `framestepper.cpp::HookedMove`
+confirm the queued-step cancellation and separate opening/intro barriers.
+Detailed normal/alternate timeline offsets above retain historical static
+evidence and were not exhaustively rechecked. This was a read-only review,
+not a runtime intro/skip test.

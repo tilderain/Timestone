@@ -1,18 +1,26 @@
 # Threading Architecture
 
-**Status: Native and plugin reference. Reviewed 2026-07-23.** Native worker
-behavior is verified from thread creation, events, semaphores, and job loops.
-Imported thunk names should not be promoted to ConcRT APIs without symbol proof.
+**Status: Native and plugin reference, reviewed 2026-10-26.** Native worker
+creation, `executeJob`, delay-job consumption and main timing were rechecked
+read-only on Marvel Ghidra **8193**, using existing `sMain` types. Plugin claims
+were checked against `LaunchMenu_settings.cpp`, `rollback_runtime.cpp`,
+`rollback_hooks.cpp`, `rollback_resim.cpp`, `rollback_tick.cpp`, `netplay.cpp`
+and `steam_transport.cpp`. Other native layout/callback details retain their
+earlier evidence scope. No database edits, build or runtime concurrency test was
+performed. Imported thunk names are not proof of ConcRT APIs.
 
 ## Native Thread Roles
 
-The game has three relevant execution roles:
+The game has several relevant execution roles; the regular and delay pools are
+not the complete process thread census:
 
 | Role | Count | Verified behavior |
 |---|---:|---|
-| Main/game thread | 1 | Runs frame pacing, game update, input integration, and rendering |
+| Main/game thread | 1 | Runs pacing, simulation, input integration and render orchestration |
 | Regular `sMain` workers | 15 | Synchronously share short job arrays with the calling thread |
 | Delay-job workers | Up to 8 | Consume a separate semaphore-driven 4096-slot ring |
+| UI/device and optional rendering work | Separate roles | Window/device jobs and render playback must not be conflated with simulation workers |
+| Resource-loading workers | Separate pool | Not suppressed merely by serial gameplay dispatch |
 
 The executable imports ordinary Win32 thread and synchronization APIs. Native
 creation functions call thunks with `CreateThread`-compatible arguments,
@@ -101,20 +109,28 @@ stride = 0x20
 Write/read cursors are at `+0xB0/+0xB8`. Recognized types 0 and 2 both clear the
 stored function, invoke it with the stored argument when non-null, and clear the
 argument. Type 2 is not proven to mean a persistent or repeating job.
+The shutdown byte is read from the worker-context argument `+0x30`; singleton
+`sMain+0x30` is the separate `cSystem::mThreadSafe` locking flag. The current
+stored prototype omits that context, which survives as `in_RDX` in decompilation.
 
 This machinery is generic. Describing it specifically as graphics loading,
 texture streaming, or cleanup requires tracing individual producers.
 
-The advanced `EntireGameSingleThreaded` option forces
-`sMain__dispatchAndWaitJobs @ 0x14095EC90` through its existing inline callback
-branch before native startup. It also changes the logical-processor argument at
-the `sMain` constructor's `sMain__createDelayJobThread` call to zero, which the
-native creation function handles by creating no delay workers. The inline patch
-must be installed first: suppressing workers while retaining ring submission
-would leave callers waiting forever for unconsumed jobs.
+The current advanced `EntireGameSingleThreaded` option hooks
+`uGeometry2Group__move` at `0x14095EC90`, also re-decompiled in this review.
+Its native branch selects inline child moves or delay-pool submission/wait.
+`HookGeometryGroupMove` temporarily clears that
+group's byte `+0xB0`, calls the original, and restores its preference. The
+descriptive `sMain__dispatchAndWaitJobs` label formerly used here must not be
+treated as proof that this is the generic delay-ring dispatcher.
 
-The same option sets the regular-job count to one on the first game tick. It
-does not disable the dedicated rendering thread or plugin-owned threads.
+`ApplyAdvancedLaunchConfig` saves the regular requested count, requests one
+participant when enabled, and updates the active count at the game-thread
+boundary; disabling restores the saved count. The inspected implementation is
+live-switchable and **does not currently patch constructor delay-worker counts**.
+The older startup-patch description is superseded. Serial execution is not an
+absence of existing workers, resource threads, the rendering worker or plugin
+threads.
 
 It also leaves independent `sResource` loading workers active. See
 [`critical_section_elision.md`](critical_section_elision.md) for the remaining
@@ -122,12 +138,13 @@ thread ownership, native lock fast paths, and lock-removal safety assessment.
 
 ## Plugin Threads
 
-The plugin has two explicit thread roles:
+Principal plugin-owned thread roles are:
 
 | Thread | Creation | Responsibility |
 |---|---|---|
 | Bootstrap `MainThread` | `DllMain` process attach | Installs hooks and initializes integration outside loader-lock work |
-| `Netplay_ServiceThread` | `Netplay_Init` | Sole owner of ENet service/send/receive calls while active |
+| `Netplay_ServiceThread` | `Netplay_Init` | Owns gameplay ENet host/peer service/send/receive |
+| Steam `BridgeThread` | `SteamTransport_CreateBridge` | Services separate loopback ENet endpoints and forwards Steam Networking Sockets traffic |
 
 There is no permanent `HookUpdate` thread. Frame-stepper, controller, and
 rollback work executes from installed game/render hooks.
@@ -143,17 +160,20 @@ mutates native game objects.
 The game-thread boundary is:
 
 ```text
-hkMvc3Main_move
-  process deferred restore/re-simulation requests
-  Controller_OnFrameStart
-  oMvc3Main_move
-  Controller_OnFrameEnd
+HookedMove / controller frame boundary
+  service input, readiness and timeline state as allowed by current mode
+  hkMvc3MainMove
+    consume deferred restore/correction and save the forward snapshot
+    original native main tick
+  complete controller frame bookkeeping
 ```
 
-Missing remote input is predicted; the game thread does not block waiting for
-ENet. Re-simulation also runs on the game thread and calls full native
-`oMvc3Main_move` ticks while temporarily suppressing pacing/presentation call
-sites.
+Missing remote input can be predicted within the configured budget; readiness
+and opponent-wait policy can stop advancement without invoking simulation on the
+network thread. Replay runs on the game thread through the implemented
+`Rollback_HeadlessTick`, not full native rendered main ticks, with additional
+pacing/presentation call-site suppression. The exact source functions, rather
+than this ownership sketch, define pause/wait/step behavior.
 
 Current custom netplay applies the native gameplay serialization settings. It
 does not alter `sMain+0xA4/+0xA8`, so the regular job executor remains at the
@@ -163,10 +183,11 @@ deterministic.
 
 ## Snapshot Ownership
 
-Native worker descriptors, event/semaphore handles, critical sections, and
-pending callback queues belong to the live process timeline. Rollback captures
-the full `sMain` allocation for diagnostics/packing but restores selected timing
-ranges rather than rewinding synchronization objects or queued work.
+Native worker descriptors, event/semaphore handles, critical sections and pending
+queues belong to the live process timeline. Broad `sMain` capture is currently
+disabled. Retained handler ranges are historical code, not evidence that the
+current system snapshots the entire allocation or safely rewinds pending jobs.
+See [main.md](main.md) before re-enabling that path.
 
 ## Key Addresses
 

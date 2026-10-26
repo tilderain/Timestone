@@ -2,6 +2,53 @@
 
 **Status: Ghidra research, 2026-08-28. No implementation yet.**
 
+## 2026-10-26 scoped recheck (research only)
+
+The implementation status and estimates below are historical research, not a
+fresh implementation audit or runtime result. This update directly inspected
+the known snapshot source and a bounded set of native card methods. No code,
+database layout/name/signature, build, game, deck setup, or dump comparison was
+changed/run. Existing useful types were used read-only; misleading decompiler
+casts were recorded, not propagated into shared types.
+
+Live Marvel target: **port 8193**, display program
+`umvc3.exe.unpacked.exe`, project file `/umvc3xmario5.exe`, Windows
+x64, base `0x140000000`. Verify identity again
+and explicitly specify the verified port before future research.
+
+| Native anchor | Rechecked body/metadata | Evidence boundary |
+|---|---|---|
+| `0x1400049F0` | Returns `sGameConfig+0x1E30`; existing receiver/return labels identify `cSPCData`. | Not an alias for standalone `sBattleSetting`, disk INI preferences or the retail serialized payload. |
+| `0x140228930` | Constructor initializes large inline ranges and clears two bytes starting at `+0x48A6C`; current `cSPCData` type size is `0x48A70`. | The body suggests inline storage, not a complete ownership/pointer-free proof of every byte or an independent DTI-size audit. Some current field labels/decompiler pointer arithmetic are awkward. |
+| `0x140243E90` | ORs flags starting at `+0x3BE8C + (index&15)*0xC`; slots 0–2 select one DWORD, slot >2 updates all three. | The arithmetic does not by itself prove every parameter's high-level team/card meaning. |
+| `0x140246940` | Stores a float at `+0x3BCCC + ((index&15)*3 + slot%3)*4`, clamping to `[0,3]`. | This is mutable card-runtime storage, not immutable settings; all callers were not reconstructed here. |
+| `0x140244300` | After a successful predicate, writes explicit record argument DWORDs `+0x18/+0x1C`, clears byte `+0x49`, returns success. | The current cast of `this` to `sBattleSetting *` for `0x140242320` is not reliable ownership/alias evidence. This small body alone does not establish table base/count/stride. |
+
+The other `sEarthAtk`, scoring, campaign, life/gauge and attack-path entries below
+remain dated 2026-08-28 findings, **not newly reverified exhaustively**. Existing
+names/comments are supporting evidence; no donor declaration or exact emitted
+symbol retrieval was performed, and no donor provenance is claimed for the
+descriptive native method names in this note.
+
+The current inspected `rollback_snapshot.cpp` explicitly adds ten bytes named
+`sGameConfig.shotSlotFlags` at `+0x4A89C` (equivalently `cSPCData+0x48A6C`).
+**Boundary question:** a ten-byte extent from `+0x48A6C` ends at exclusive
+`+0x48A76`, six bytes beyond the current nominal `0x48A70` `cSPCData` type.
+The constructor's two-byte clear is not evidence validating all ten flags.
+Resolve concrete storage/containing-object extent and native slot writers before
+using this capture as proof of the `cSPCData` boundary or copying it to another
+layout. This note neither changes the capture nor certifies it unsafe/safe.
+
+Consequently the proposed `[+0x3BC00,+0x48A70)` runtime-tail region remains an
+**investigation candidate**, not a shipping-safe restore contract. Audit writes
+on both sides of the proposed cut (the constructor clears `0x3BC00` bytes from
+`+0x8`, reaching `+0x3BC08`), ownership, resources, callbacks, mode transitions,
+and excluded state. Byte agreement over tested snapshots cannot prove all cards,
+setup/restart transitions or unobserved allocations correct. Any implementation,
+new hook, transport change or shared-layout application needs separate scope and
+review; no blanket cosmetic classification or native-online predicate change is
+authorized by this research.
+
 ## Conclusion
 
 Implementing rollback for Heroes and Heralds combat is feasible, but the main
@@ -103,9 +150,10 @@ full native re-simulation path should then reapply the card logic correctly.
 
 ## Snapshot Strategy
 
-The safest prototype is to capture `cSPCData+0x3BC00..+0x48A70`, about 53 KiB,
-as one explicit region while H&H/card mode is active. This avoids copying the
-roughly 245 KiB static parameter prefix on every snapshot.
+The proposed prototype candidate is to capture `[cSPCData+0x3BC00,+0x48A70)`, about 53 KiB,
+as one explicit region while H&H/card mode is active, only after the safety
+checks below. This would avoid copying the roughly 245 KiB parameter prefix;
+its immutability during all relevant transitions remains to be established.
 
 Before shipping that range:
 
@@ -118,10 +166,12 @@ Before shipping that range:
 5. Verify restore across hits that activate, expire, stack, copy, or reverse a
    card condition.
 
-Capturing the complete `0x48A70` object (skipping the vtable) is a useful debug
-experiment, but it adds about 291 KiB per frame and copies a large immutable
-database. It should not be the final design unless the write audit proves that
-selective coverage is unreliable.
+Capturing the complete `0x48A70` object for **read-only diagnostics** (skipping
+the vtable) could add about 291 KiB per frame. Capture is not permission to
+flat-restore it: unknown ownership, pointers and UI state still require audit.
+The large parameter prefix may be setup-stable, but that is not a complete
+immutability proof. A final design requires evidence for both coverage and safe
+restoration, not merely failure of selective coverage.
 
 ## Match Setup And Transport
 
@@ -194,6 +244,7 @@ prerequisite for rollback card battles.
 Implement a developer-only fixed-deck H&H launch using `BattleType == 8`, capture
 the tentative `cSPCData` runtime tail, and run two-peer forced rollbacks across
 one immediate damage card, one timer card, one life/gauge card, and one
-projectile/card-effect card. Snapdump agreement from that matrix will determine
-whether the generic runtime-tail strategy is sound before investing in launch
-UI or campaign behavior.
+projectile/card-effect card. Snapdump agreement from that matrix can support a
+bounded prototype result, not prove the entire runtime-tail strategy sound.
+Require executed-case and nonempty comparison coverage, crash/detector checks,
+and targeted ownership/write audits before broader launch UI or campaign work.

@@ -1,11 +1,64 @@
 # Concrete Shot Field Audit
 
-**Status: Working evidence ledger, 2026-08-14.**
+**Status: Working evidence ledger, originally collated 2026-08-14; bounded
+native/source reconciliation checked 2026-10-26.**
 
 This document collates the Ghidra evidence returned by the three shot-audit
 workers. It deliberately distinguishes completed function-by-function audits,
 exact DTI-size proofs, preliminary constructor findings, and work that remains
 incomplete. It is not a claim that the expanded audit is finished.
+
+## Recheck And Ledger Semantics — 2026-10-26
+
+The 299-DTI inventory, completed-batch labels, and confidence judgments below
+are preserved from the earlier workers. **They were not all reverified today.**
+“Complete” means complete in the cited historical batch, not every helper,
+external attack resource, or current restore rule proven safe. Constructor-only
+and inferred-size observations remain preliminary even when current code has
+since added a range for the class.
+
+The live native recheck used **8193 / `umvc3.exe.unpacked.exe`** and covered the
+common factory/list/destructor/callback/model-order anchors documented in
+[shot.md](shot.md#verification-boundary--2026-10-26). It did not re-audit the
+per-DTI tail functions listed in this ledger. No shared types or names were
+changed. In particular:
+
+- `0x14029F7F0` consumes an `rShot`-derived class hash and dispatches DTI factory
+  virtual `+0x08`; the recovered `sShot*` / void prototype is not authoritative.
+- `0x140150AD0` / `0x140151420` separately index global list heads
+  `0x140D47F90` and slot locks `0x140D48120`, both with stride `0x28`.
+- `0x1401C9FD0` releases base-shot owners; it does not certify the tail of any
+  concrete class. `0x1401C9AB0` clears dead pointers from 13 common callbacks,
+  rather than deleting those effects at that point.
+- `0x140150D00`, recovered as `sShot__move`, is a property registrar, not an
+  update callback. Property evidence can establish field identity/offset but
+  does not alone prove an owned object's gameplay use or teardown safety.
+- Existing common `uShot` type labels place vanish time at `+0x207C`, not the
+  speed-related `+0x2084`. Those existing labels were inspected, not newly
+  established by a concrete lifecycle audit today.
+
+### Current Implementation Reconciliation (Source Evidence Only)
+
+Direct reads of `concrete_snapshot.cpp`, `rollback_shot.cpp`,
+`rollback_restore.cpp`, `rollback_snapshot.h`, and `rollback_model_policy.cpp`
+establish the following differences from the older collation. This records
+implementation, **not retrospective elevation of native confidence**:
+
+| Ledger subject | Current implementation / qualification |
+|---|---|
+| “Not yet all present” expanded ranges | `kVerifiedShotScalarRanges` now contains numerous expanded Option, Shield, Vulcan A-H, N-P, R-S, S-T, and W-Z ranges. The older phrase describes integration at collation time, not the current array. A complete generated-versus-verified coverage diff was not performed. |
+| Fast-pass D-H | Current explicit ranges include FinishingShower `+0x2140/0x18`, `+0x2160/0x10`; GMPulse `+0x2140/4`; GammaSlam `+0x2140/0x14`; HandGrenadeBomb `+0x21D0/4`, `+0x2214/4`; HenkyouKi `+0x2140/4`; HyperGravitation `+0x2140/1`; HyperMysticSmash `+0x2140/9`, `+0x21E4/4`; HyperTrap `+0x2140/0x0C`; Hyoran `+0x21D8/4`. These do not close the historical destructor/helper gaps. |
+| Item Throw (`0x140D4B980`) | Current code treats `+0x2230/4` as item type and separately reapplies pointer-free `+0x2210/0x20` for variant/rotation/bounce/height/scale. Thus the older fast-pass wording must not imply all bytes through `+0x222F` are resource ownership. [shot.md](shot.md) retains the runtime packed-scalar failure evidence. |
+| Weapon Cart (`0x140D4A1A8`) | Earlier constructor-inferred `0x22F0` and broad “POD” regions below are not restore authority. Later evidence in [shot.md](shot.md) reports runtime size `0x2300`; current policy explicitly handles 13 model-effect pointers `+0x2288..+0x22E8`. The old broad POD inference overlaps these owners and must not be promoted. Neither that DTI registration nor the concrete cart methods were reverified today. |
+| Satellite Laser Lock (`0x140D48EE8`) | `Rollback_GetShotBodyReferenceOffsets` returns `+0x2220`; capture records a tracked child spawn sequence and the post-reconstruction pass resolves it. This is implemented child-shot identity remapping, unlike the proposed concrete effect identities below. |
+| Spada Boomerang owner | Current policy identifies `+0x68F0` on **Trish**, via `UTRISH_SPADA_BOOMERANG_OFFSET`; the earlier Option batch's Dante attribution below is disputed, not a current source fact. Native character-side verification remains needed. |
+
+The concrete managed-effect identity follow-up below remains a proposal: this
+source read shows no general per-DTI effect-spawn-sequence rebinder for those
+five tail fields. Common factory-created callbacks are restored by slot and
+fresh graph compatibility, with explicit class exclusions and fallback clocks;
+they are not a blanket full-timeline rewind. See
+[the current callback qualification](shot.md#current-callback-restore-qualification--2026-10-26).
 
 ## Scope
 
@@ -124,8 +177,10 @@ Representative methods that establish the gameplay use of these fields:
 
 ## Expanded Completed Findings
 
-The ranges below come from completed expanded audits and are not yet all present
-in `kVerifiedShotScalarRanges`.
+The ranges below come from completed expanded audits. At the original collation
+they were not yet all present in `kVerifiedShotScalarRanges`; many now are (see
+the dated source reconciliation above). This section remains an evidence ledger,
+not an up-to-date inventory of every implemented range.
 
 ### Missile
 
@@ -161,8 +216,10 @@ All 10 Option classes are complete.
 Important owner-side references were also found outside the shot bodies:
 
 - Captain stores `uShotOptionShieldSlash*` at character `+0x68F0`.
-- The corresponding Dante path stores `uShotOptionSpadaBoomerang*` at character
-  `+0x68F0`.
+- The original batch attributed `uShotOptionSpadaBoomerang*` at character
+  `+0x68F0` to Dante. **Disputed attribution:** current source repairs Trish's
+  slot instead; preserve the offset/identity finding, but do not use the older
+  character attribution without native verification.
 
 These references require saved-to-restored shot remapping.
 
@@ -470,7 +527,7 @@ High-confidence size proofs establish no concrete tail for: `IceArrow`,
 | Shot | DTI size | Fast-pass tail evidence | Confidence |
 |---|---:|---|---|
 | `uShotVulcanIronPipeRolling` | `0x2230` | Embedded pointer-bearing model/effect owner from `+0x2140`; constructor initializes scalar floats through `+0x2227` | High |
-| `uShotVulcanItemThrow` | `0x2240` | Embedded resource/model state through `+0x222F`; item-type scalar `+0x2230` selects one of twelve resources and landing sign | High |
+| `uShotVulcanItemThrow` | `0x2240` | Historical pass: embedded resource/model region through `+0x222F`; item-type scalar `+0x2230` selects one of twelve resources and landing sign. Qualification: current implementation explicitly restores scalar `+0x2210/0x20`; the whole preceding region is not uniformly ownership. | High (historical pass; ownership wording qualified) |
 | `uShotVulcanJammingBomb` | `0x2150` | Embedded `cRef +0x2140/0x10`; no POD tail | High |
 | `uShotVulcanJigenZan` | `0x2150` | Timer `+0x2140`; spawn state `+0x2144`; variant `+0x2148` | High |
 | `uShotVulcanKaiserPhoenix` | `0x2210` | Untyped class POD/resource state `+0x2140..+0x220F`; no named gameplay method recovered | Low |
@@ -487,7 +544,7 @@ High-confidence no-tail proofs: `uShotVulcanWeskerHandGun`,
 | `uShotVulcanWebBall` | Inferred extent `0x2150`; POD/flags `+0x2140..+0x2144`; likely pointer `+0x2148` | Medium |
 | `uShotVulcanWebMove` | Inferred extent `0x2150`; phase/float POD `+0x2140..+0x2148` | Medium |
 | `uShotVulcanWebThrow` | Inferred extent `0x2148`; local step `+0x2140`, float `+0x2144`; no gameplay-tail function inspected under cap | Medium-low |
-| `uShotVulcanWeaponCart` | Inferred extent `0x22F0`; owner-managed/array region `+0x2140..+0x21FF`; POD `+0x2210..+0x228F` and `+0x2290..+0x22EF`; resource/reference pointers `+0x2280`, `+0x22A0`; model pointers `+0x2190..+0x21E8` | Medium |
+| `uShotVulcanWeaponCart` | Historical inference: extent `0x22F0`; owner-managed/array region `+0x2140..+0x21FF`; candidate POD `+0x2210..+0x228F` and `+0x2290..+0x22EF`; candidate pointers `+0x2280`, `+0x22A0`, `+0x2190..+0x21E8`. **Superseded as a restore plan:** later `0x2300` runtime evidence and 13 owned models `+0x2288..+0x22E8` contradict that broad POD classification. | Medium historical inference; unsafe for promotion |
 | `uShotVulcanWeaponCartSpread` | Inferred extent `0x2280`; owner-managed region `+0x2140..+0x21FF`; POD `+0x2210`, `+0x2268/4` | Medium |
 | `uShotVulcanWildPitch` | Inferred extent `0x2220`; owner-managed region `+0x2140..+0x21FF`; spawn latch `+0x2200`, variant `+0x2204` | Medium |
 | `uShotVulcanZireitou` | Inferred extent `0x2220`; owner-managed region `+0x2140..+0x21FF`; POD `+0x2200..+0x221F`, including float `+0x2218` and state `+0x221C` | Medium |

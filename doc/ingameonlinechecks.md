@@ -1,15 +1,35 @@
 # Native Online Battle Checks
 
-**Status: Native reference.** `g__isOnlineBattle @ 0x140006AF0` returns true
+**Status: Native reference. Reviewed 2026-10-26.** `g__isOnlineBattle @ 0x140006AF0` returns true
 for:
 
 - `BattleType == 3`: live standard online
 - `BattleType == 4`: online spectator/watch
 - `BattleType == 9`: live online Heroes & Heralds
 
-Ghidra reports 92 xrefs: one internal conditional jump inside
-`g__isOnlineBattle` itself and 91 external call sites. All 91 calls are
-documented below.
+The current Ghidra xref query reports **91 external `UNCONDITIONAL_CALL`
+references**. The older total of 92 included an internal branch and is not the
+current tool result. All 91 external call-site addresses are retained below.
+
+## Evidence and coverage
+
+Read-only review used port **8193**, `umvc3.exe.unpacked.exe`.
+Bodies at `0x140006A60`, `0x140006AB0`, and
+`0x140006AF0` confirm live types 3/9 plus spectator type 4; an old plate comment
+saying "ordinary or ranked" is misleading. The settings predicates read
+`BattleType` under the object's critical section. The 91-address inventory was
+re-queried; missing containing-function names in that result do not invalidate
+a call address. Function names below are analyst labels, not original symbols.
+
+Table purposes retain earlier static interpretations, **not 91 newly
+re-decompiled bodies**. Time behavior was independently checked in
+`0x1402895C0` (including assembly), advancement at `0x14028BC10`; other
+gameplay/UI/reward claims need per-body revalidation before use as patch
+specifications. No predicates were modified and no runtime online test ran.
+Plugin source checks (`controller.cpp`, `framestepper.cpp`, `netplay.h`,
+`steam_transport.cpp`) show a narrow custom time hook and separate transport:
+direct ENet or custom payloads bridged through SteamNetworkingSockets, **not
+retail CMU**.
 
 ## Battle Simulation
 
@@ -67,10 +87,10 @@ documented below.
 |---:|---|---|---|
 | 36 | `0x140208CAB` | `aChrSelect__init` | Captures native session player-slot IDs online; offline resets the slot-match state. |
 | 37 | `0x140208D74` | `aChrSelect__init` | Selects online character-select menu modes, including separate live and spectator/watch setup. |
-| 38 | `0x14020978C` | `uUiModelBase__classFunc` | Runs one-time online license/profile readiness handling when CSS input is not locked. |
-| 39 | `0x1402097F0` | `uUiModelBase__classFunc` | Maintains online CSS menu ownership/presentation according to local network-player index. |
+| 38 | `0x14020978C` | `aChrSelect__update` | Runs one-time online license/profile readiness handling when CSS input is not locked. |
+| 39 | `0x1402097F0` | `aChrSelect__update` | Maintains online CSS menu ownership/presentation according to local network-player index. |
 | 40 | `0x140209DD5` | `aChrSelectBlank__move` | Disables parallel effect processing before entering the battle area online. |
-| 41 | `0x1402144EC` | `aChrSelect__func_42B0` | Selects the complete native-online CSS readiness/state machine instead of immediately returning to the offline CSS scene. |
+| 41 | `0x1402144EC` | `aNewChallenger__updateReadyAndSceneTransition` | Selects the native-online readiness/state machine instead of the offline scene path (historically labeled `aChrSelect__func_42B0`). |
 | 42 | `0x14024B545` | `sBattleSetting__requestEnter` | Forces pending stage ID `2` for online entry before queuing `aChrSelectBlank`. |
 | 43 | `0x14024CBC6` | `sBattleSetting__resolveCharSlotForPlayerSide` | For requested player side 0, detects whether local network ownership requires preserving/remapping the selected color/variant. |
 | 44 | `0x14024CBF2` | `sBattleSetting__resolveCharSlotForPlayerSide` | Performs the complementary ownership test for requested player side 1. |
@@ -98,11 +118,11 @@ documented below.
 |---:|---|---|---|
 | 57 | `0x1403614E9` | `aChrSelect__playSelectionPromptForSlot` | Restricts prompts to the locally controlled slot online and suppresses prompts completely for spectators. |
 | 58 | `0x140362411` | unnamed CSS readiness helper | Gates network-session synchronization/ready handling for this CSS action; offline bypasses the network branch. |
-| 59 | `0x140362F5D` | `aChrSelect__slotState357_processCharSelectConfirm` | Restricts confirm/cancel processing to the locally owned live-online slot; spectator does not use the offline cancellation path. |
-| 60 | `0x1403633A3` | `character_team_loader` | Selects online team-loader ownership rules, including the live local-side test and spectator fallback. |
-| 61 | `0x140363797` | `character_team_loader` | When cursor control mode is zero, decides whether reserve/control-mode UI may be created locally or must follow online ownership. |
-| 62 | `0x1403638EA` | `character_team_loader` | Separates online-owned team setup from ordinary offline CPU/control-mode setup. |
-| 63 | `0x140363C51` | `aChrSelect__slotState9_bootNextScene` | Prevents the offline title/Earth-attack scene transition; online remains in synchronized CSS progression. |
+| 59 | `0x140362F5D` | `uMenuChrSel__slotState357_processCharSelectConfirm` | Restricts confirm/cancel processing to the locally owned live-online slot; spectator does not use the offline cancellation path. |
+| 60 | `0x1403633A3` | `uMenuChrSel__slotState1_loadTeam` | Selects online team-loader ownership rules, including the live local-side test and spectator fallback. |
+| 61 | `0x140363797` | `uMenuChrSel__slotState1_loadTeam` | When cursor control mode is zero, decides whether reserve/control-mode UI may be created locally or must follow online ownership. |
+| 62 | `0x1403638EA` | `uMenuChrSel__slotState1_loadTeam` | Separates online-owned team setup from ordinary offline CPU/control-mode setup. |
+| 63 | `0x140363C51` | `uMenuChrSel__slotState9_bootNextScene` | Prevents the offline title/Earth-attack scene transition; online remains in synchronized CSS progression. |
 | 64 | `0x14036457B` | `aChrSelect__processStageSelect` | Applies online stage-select authority gates: input lock, local-player role, network-library readiness, and synchronized state. |
 | 65 | `0x1403646F0` | `aChrSelect__processStageSelect` | After a locally selected stage is committed, marks stage-related network sync fields dirty. |
 | 66 | `0x1403648C6` | `aChrSelect__processStageSelect` | Performs the same stage sync-dirty notification on the live-online local-slot-1 path. |
@@ -119,7 +139,7 @@ documented below.
 | 77 | `0x140367130` | `aChrSelect__enterStageSelection` | Creates the online loading/status banner for live players but not spectators. |
 | 78 | `0x14036715F` | `aChrSelect__enterStageSelection` | Requires broad online plus live-online before constructing local/remote network-player information cards. |
 | 79 | `0x140367FF9` | `aChrSelect__postSelectCommitAndEnter_367C40` | Creates the online transition/status UI after CSS objects and stage-select resources are committed. |
-| 80 | `0x14036846D` | `aChrSelect__tickSlotStateMachine` | Gates each slot-state update on online profile/license readiness; offline dispatches the state immediately. |
+| 80 | `0x14036846D` | `uMenuChrSel__tickSlotStateMachine` | Gates each slot-state update on online profile/license readiness; offline dispatches the state immediately. |
 
 ## Character-Select Presentation
 
@@ -133,8 +153,8 @@ documented below.
 | 86 | `0x1403699FB` | `uMenuChrSel__setup` | Selects spectator-specific room-watch banners and status handling. |
 | 87 | `0x140369DBD` | `uMenuChrSel__updateSelectionPresentation` | Selects online presentation: neutral spectator view or the locally owned player's synchronized CSS state. |
 | 88 | `0x14036EAD3` | `uMenuChrSelBgMain__setup` | Hides/disables the non-owned side of the CSS background online; spectator hides both interactive sides. |
-| 89 | `0x140370C3B` | `uMenuChrSelCardPlayer_vfn17` | Hides the remote player card online and both interactive player cards in spectator mode. |
-| 90 | `0x140371F79` | `FUN_140371CC0` | Suppresses local cancel/back navigation from the control-mode selector online, preventing unilateral CSS rollback. |
+| 89 | `0x140370C3B` | `uMenuChrSelCardPlayer__initializePlayerCardDisplay` | Hides the remote player card online and both interactive player cards in spectator mode. |
+| 90 | `0x140371F79` | `uMenuChrSelCtrlMode__processControlModeInput` | Suppresses local cancel/back navigation from the control-mode selector online, preventing unilateral CSS rollback. |
 
 ## Rendering
 

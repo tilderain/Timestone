@@ -1,4 +1,15 @@
-What It Is
+# Character Constraint Helper (`cCnsHelper` / `uCnsLockChr`)
+
+**Checked 2026-10-26:** read-only native verification on Ghidra **8193**,
+`umvc3.exe.unpacked.exe`. Fresh bodies: the algorithm selector at
+`0x14010CBE0`, fighter push preparation at `0x14004B9D0`, and its registered
+callback at `0x14004AD20`. The constructor/property layout, full angle algorithm,
+and historical captures below retain earlier evidence; they were not all
+re-derived or reproduced. Direct source review: `rollback_restore.cpp`, especially
+the `restoreCnsHelper` lambda and both application sites. No game test was run.
+
+## What it is
+
 cCnsHelper is the project’s recovered name for an embedded character constraint helper. Its actual runtime class appears to be uCnsLockChr, derived from uCnsShare.
 Evidence:
 - cCnsHelper__ctor @ 0x14010B3B0 first calls uCnsShare__ctor.
@@ -10,7 +21,8 @@ Evidence:
   - cChr+0x3D60: mCnsNeck
 They are constructed consecutively by cChr__cChr @ 0x140054400.
 Despite the names, these are not collision primitives themselves. They evaluate a constrained character joint orientation. The resulting joint/model transforms are subsequently used to place hit, hurt, and push spheres.
-Purpose
+## Purpose
+
 The helper rotates a selected character joint so one axis points toward a target joint or target unit, subject to configurable angular limits.
 Its reflected configuration includes:
 - mEnable
@@ -40,8 +52,10 @@ Its reflected configuration includes:
 - mTgtAngle
 - mPerceptionAngle
 This strongly suggests the class was designed for joint-facing behavior such as torso/head tracking, with separate standing and lowered-state angular limits.
-Recovered Layout
+## Recovered layout
+
 The most useful recovered portion is:
+```text
 Helper offset	Character offsets	Meaning
 +0x00..+0x8F	+0x3BF0, +0x3D60	Inherited uCnsShare state and ownership
 +0x90	+0x3C80, +0x3DF0	mEnable
@@ -69,8 +83,10 @@ Helper offset	Character offsets	Meaning
 +0x15C	+0x3D4C, +0x3EBC	Target angle
 +0x160	+0x3D50, +0x3EC0	Perception/threshold angle
 +0x168	+0x3D58, +0x3EC8	mInterCurve, easing data
+```
 Some names in the latter part are inferred by combining the reflected property order with native reads and writes. The particularly important fields, mSelfState at +0x120 and mState at +0x124, are directly confirmed by code.
-Limit Parameters
+## Limit parameters
+
 Each helper contains two uCnsLockChr::cLimitParam objects:
 helper+0xB0  mLimStand
 helper+0xD8  mLimDown
@@ -82,7 +98,8 @@ Constructor defaults include angular ranges corresponding approximately to:
 - One range: -10 to 10
 - mQuitLength = 1000.0
 The exact semantic axis represented by each range depends on mLockAxis and mUpAxis.
-Two Update Modes
+## Two update modes
+
 mSelfState at helper +0x120 selects the update callback.
 cCnsHelper__mSelfState__setter @ 0x14010CBE0 does:
 helper->mSelfState = value;
@@ -92,7 +109,8 @@ Therefore mSelfState is not the interpolation phase. It selects the algorithm:
 - mSelfState == 0: follow another uCnsLockChr through mpRefCnsLock.
 - mSelfState != 0: independently calculate a target angle and interpolate it.
 The callback pointer at +0x128 must remain a live native code pointer. That is why rollback does not blindly restore the entire helper.
-Independent Update
+## Independent update
+
 cCnsHelper__updateLockAngle @ 0x14010BC20 is the main stateful algorithm.
 At a high level, it:
 1. Saves the previous output angle.
@@ -114,13 +132,15 @@ The target calculation uses:
 - Character state.
 - Time scale.
 - Interpolation speed and curve.
-The mState Machine
+### The `mState` machine
+
 The divergent field at helper +0x124 is reflected as mState.
 The native function treats values 0, 1, and 2 distinctly:
 - State 0: evaluates the standing-limit condition.
 - State 1: actively interpolates between limit regimes.
 - State 2: evaluates the alternate/down-limit condition and can begin transition back.
 A simplified representation is:
+```cpp
 switch (mState) {
 case 0:
     if (targetOutsideStandingLimits)
@@ -141,8 +161,10 @@ case 2:
         setState(1);
     break;
 }
+```
 The labels “standing” and “down” come directly from the reflected mLimStand and mLimDown fields. Exact gameplay interpretation can vary with character configuration.
-Reference-Follow Update
+## Reference-follow update
+
 The alternate callback at 0x14010BB40 uses mpRefCnsLock.
 It:
 1. Reads the referenced helper’s angle at referencedHelper+0x114.
@@ -150,7 +172,8 @@ It:
 3. Uses the referenced transform/direction.
 4. Rebuilds this helper’s constrained joint matrix.
 This lets one constraint mirror or inherit another rather than calculating an independent target.
-Matrix Output
+## Matrix output
+
 The final helper routine at 0x14010C920 constructs and writes a joint transform.
 It combines:
 - The calculated angle.
@@ -160,8 +183,10 @@ It combines:
 - A rotation matrix.
 That output feeds the character’s model/joint evaluation. Collision primitives parented to those joints then obtain their world-space positions from the resulting matrices.
 This is how a constraint-helper mismatch can become a gameplay collision mismatch even though cCnsHelper is not itself a collision object.
-Connection To Pushboxes
+## Connection to fighter push collision
+
 The frame-866 desync exposed this chain for mCnsNeck:
+```text
 cChr+0x3E84
   = mCnsNeck.mState
         |
@@ -185,6 +210,7 @@ different correction vector
         v
 different character root position
   cChr+0x50
+```
 At frame 783:
 Host cChr+0x3E84 = 2
 Client cChr+0x3E84 = 1
@@ -216,7 +242,16 @@ pushbox-specific mismatch remains `mCnsNeck.mState` at frame 6501. This dump was
 already divergent at its first common frame 6342, including different shot
 topology, so an earlier dependency outside the available history may also have
 driven that state transition.
-Rollback Requirements
+The refreshed native bodies establish the fighter side of this dependency:
+`0x14004B9D0` operates the `+0x5C30` push node and 16 `+0x5C40` sphere records,
+then registers category-2 callback `0x14004AD20`. The latter keeps the largest
+phase-0 contact correction at `+0x6340`; phase 1 marks the node moved. This
+is not `uCollisionNode_processCharacterPush @ 0x140725B70`, a generic chain
+solver label. Historical correlated dumps support the helper-to-joint causal
+model, but this limited refresh did not trace every intervening joint evaluation.
+
+## Rollback requirements
+
 The helper cannot safely be restored with one raw memcpy because it contains:
 - A vtable.
 - Owner/self references inherited from uCnsShare.
@@ -237,7 +272,8 @@ The scalar and inline state that must rewind includes:
 - Easing state.
 The current restore policy therefore uses explicit pointer-free ranges and
 validated pointer remapping while preserving callback and vtable fields.
-The Restore Bug
+## Historical restore bug and current policy
+
 Before the fix, these ranges restored only helper +0x120:
 {0x3D10, 0x04} // mCnsHelper+0x120
 {0x3E80, 0x04} // mCnsNeck+0x120
@@ -260,7 +296,8 @@ character restore retained prediction-timeline values. The old `+0x3CF0` and
 `+0x3E60` four-byte copies were particularly unsafe because those offsets are
 the low halves of each helper's `mpLimCurrent` pointer.
 
-Restore now handles both embedded helpers as complete ownership-aware units:
+Restore now handles both embedded helpers with explicit ownership-aware policies
+(subject to the implementation limits below):
 
 - Explicitly restore pointer-free configuration, limit, interpolation, angle,
   direction, and easing ranges.
@@ -268,15 +305,40 @@ Restore now handles both embedded helpers as complete ownership-aware units:
 - Remap `mpLimCurrent` only to one of the helper's two inline limit records.
 - Restore `mpRefCnsLock` only when it is null or points to one of the two
   helpers embedded in the same character.
-- Preserve helper/limit vtables, the update callback at `+0x128`, and unknown
-  pointer identities.
+- Intentionally exclude each helper/limit vtable and the update callback at
+  `+0x128` from its own scalar policy, and retain unknown pointer identities.
+  The cross-boundary scalar range noted below complicates the first claim for
+  adjacent embedded objects.
 
 The ownership-aware helper restore is reapplied after reconstruction because
 model/effect repair can evaluate constraints and overwrite mutable state.
 Relevant code is in:
-- UMVC3Hook/code/rollback_restore.cpp:195
-- UMVC3Hook/code/rollback_restore.cpp:248
-Important Distinctions
+- [`rollback_restore.cpp`](../UMVC3Hook/code/rollback_restore.cpp),
+  `Rollback_RestoreSnapshot::restoreCnsHelper` (checked at lines 1310–1366),
+  initially applied at 1808–1809 and reapplied at 2185–2186. Prefer these symbols
+  over older line numbers.
+
+### Current implementation limits
+
+The explicit scalar ranges, relative to each helper, are `+0x90/0x18`,
+`+0xB8/0x20`, `+0xE0/0x20`, `+0x108/0x10`, `+0x120/0x08`, and
+`+0x130/0x48`. The last ends at **`+0x177`**, eight bytes beyond the documented
+`0x170` object boundary. This source/layout discrepancy needs follow-up; it is
+not proof of an additional helper field or a certified safe complete-object
+overlay. For the first embedded helper it reaches the next helper's first qword.
+The current code remains unchanged by this documentation check.
+
+The setter body confirms that `mSelfState` selects and writes the callback. The
+restore lambda rewinds `mSelfState` but leaves the callback live; callback/mode
+coherence across a timeline that changes algorithms is therefore an explicit
+remaining validation question, not something pointer preservation alone proves.
+Invalid/unrecognized target, limit and reference pointers are left live by this
+lambda rather than universally cleared. The allowed target identities are current
+team-list characters, not arbitrary live units. The restored scalar subset and
+these identity checks should not be described as a heap/lifecycle checkpoint.
+
+## Important distinctions
+
 - cCnsHelper is not the generic chain-collision solver.
 - It is not a hitbox or pushbox object.
 - It is a joint-orientation constraint whose output can move joint-parented collision primitives.
@@ -284,3 +346,7 @@ Important Distinctions
 - mState is the internal standing/down interpolation phase.
 - The callback pointer is process-local code identity and should not be restored from arbitrary snapshot bytes.
 - The limit/current/reference pointers require ownership-aware handling rather than broad copying.
+
+See [collision snapshot policy](scollision_rollback_snapshot.md) for current
+wrapper/primitive restore and [chain audit](gameplay_chain_audit.md) for the
+separate resource-driven chain classes.

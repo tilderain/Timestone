@@ -1,7 +1,46 @@
 # Projectile Ownership And Rollback
 
-**Status: Current focused reference. Verified against Ghidra and source on
-2026-07-23.**
+**Status: Focused reference with historical runtime evidence. Bounded native/source
+recheck: 2026-10-26; original focused verification: 2026-07-23.**
+
+## Verification Boundary — 2026-10-26
+
+The current recheck used **port 8193, `umvc3.exe.unpacked.exe`**.
+The following native bodies were decompiled live; list
+insertion and motion ordering also received an instruction-level check. This is
+not a new audit of every concrete class or a rerun of the captures below.
+
+| Native anchor | Body evidence checked today |
+|---|---|
+| `0x140150AD0`, `0x140151420` | Insert/remove obtain a slot lock from `0x140D48120 + slot*0x28` and independently address the head at `0x140D47F90 + slot*0x28`; neither array is addressed through the singleton object. |
+| `0x14029F7F0` | Receives the shot resource, reads `rShot__getData(resource)+8`, resolves the hash, and tail-dispatches DTI virtual `+0x08`. Its recovered `sShot*` parameter and void result are misleading. Xrefs are the standard and extended spawn calls at `0x140150E35` / `0x140150F75`. |
+| `0x140150E00` | Null resource / failed construction returns null; successful standard spawn sets owner, request unit, team, target, binds resource/data, inserts the shot, and sets the slot-active flag. Pending `sUnit` registration is a separate caller/restore responsibility. |
+| `0x1401C9FD0` | Base destructor unlinks the team-list node, clears the ID entry, releases attack info and resource `+0x1F68`, destroys inline references/attack/arm state, and releases actor-model ownership. This is not evidence that every concrete destructor is interchangeable. |
+| `0x1401C9AB0` | Iterates exactly 13 callback pointers beginning at `+0x1F78`, clearing pointers whose object fails the native alive-state test; it does not free them here. |
+| `0x1401CCBE0` | Validates weak references, clears dead callbacks, dispatches the low-byte shot step, runs actor/model work, and reaches hitbox processing only on eligible branches. The non-delay path calls model move before hitboxes. |
+| `0x1405290D0` | With a model and nonzero blend count, tests motion `S_SETUP` (`+0x56A + slot*0x180`, bit `2`), calls `setupMotion @ 0x140529820` if needed, then `updateMotionParam @ 0x140531A00`, then `updateFrame @ 0x14052BBD0`. |
+
+An additional name-trap check at **`0x140150D00`** shows a property registrar,
+despite the recovered name `sShot__move`: it adds `mDeltaTimeCoef` (`+0x444`),
+`mMaxSpreadHierarchy` (`+0x440`), `mKillOrder` (`+0x43C`), and global `mShotList`.
+It is **not** the native per-frame manager update.
+
+Existing `uShot` types were consulted without mutation. They already expose
+`mLifeFrame +0x2078`, `mVanishFrame +0x207C`, and speed-related state beginning
+at `+0x2080` (`mSpeedMultiplier +0x2084`). Keep the previously recovered vanish
+timer at `+0x207C` separate from speed `+0x2084`; no new lifecycle-body proof of
+those individual field names is claimed by this pass. The same type database
+still incorrectly renders inline `cAtkCtrl +0x1470` as a pointer and contains
+opaque/misidentified node bytes. Typed decompilation is supporting context, not
+authority over observed accesses.
+
+Implementation statements were compared directly with `rollback_shot.cpp`,
+`concrete_snapshot.cpp`, `rollback_restore.cpp`, `rollback_snapshot.h`, and
+`rollback_model_policy.cpp`. These describe the plugin, not native guarantees.
+Older dated captures remain historical evidence; pending runtime confirmations
+remain pending. Per-DTI confidence and unresolved ownership are retained in
+[the field ledger](shotfields.md); model feedback and its resource-data boundary
+are separated in [the model inventory](shot_gameplay_models.md).
 
 This replaces the former fixed-array proposal. That proposal treated projectiles
 as uniform byte blobs and did not account for polymorphic DTI allocation,
@@ -45,15 +84,19 @@ Verified manager fields used by current source include:
 
 | `sShot` offset | Meaning |
 |---|---|
-| `+0x38` | Shot-ID/manager state included in the current `0x50`-byte manager snapshot |
-| `+0x438` | Kill-order/state scalar region |
+| `+0x38..+0x437` | 256-entry ID pool; captured separately with its cursor in the current restore implementation |
+| `+0x438` | Next-ID cursor; the pool-plus-cursor restore span is `0x404` bytes from `+0x38` |
+| `+0x43C` | `mKillOrder` (property registrar) |
+| `+0x440` | `mMaxSpreadHierarchy` (property registrar) |
 | `+0x444` | Delta-time coefficient |
 | `+0x448` | Pending-unit array, 512 entries of `0x10` bytes |
 | `+0x2448` | Pending-unit count |
 | `+0x2450` | Activity records |
 
-The exact semantics of every manager-header word are not fully recovered. Do not
-infer a 1024-object capacity from the size of the ID state.
+The exact semantics of every manager-header word are not fully recovered. The
+older `0x50`-byte capture was insufficient (see the ID-pool history below); it is
+not the complete current ID-state capture. Do not infer a 1024-object capacity
+from the size of the ID state. Pending capacity and list population are separate.
 
 ## Intrusive List Layout
 
@@ -139,8 +182,9 @@ Hooks on `sShot__spawnShot` and `sShot__spawnShotEx` record a `ShotRecipe`:
 - Slot ID and spawn order.
 - Pre-spawn RNG states.
 - Verified common flight/gameplay ranges.
-- The pointer-free `uEffect` timing scalars at `+0x110..+0x11F`, including
-  `mBaseFps`, `mDeltaTimeRate`, and `mTimeInterpolationRate`.
+- Common shot time-scale bytes at `+0x28..+0x2F`. Callback `uEffect` timing at
+  effect-relative `+0x110` is captured separately by `ConcreteShotSnapshot`;
+  these are not the same address range in the shot body.
 - The four common shot matrices at `+0x1E50..+0x1F4F` (`mBaseMatrix`,
   `mOldWorldMatrix`, `mAtkMatrix`, and `mAtkBaseMatrix`).
 - A runtime-DTI-sized `ConcreteShotSnapshot` used for an ownership-filtered
@@ -151,8 +195,10 @@ Hooks on `sShot__spawnShot` and `sShot__spawnShotEx` record a `ShotRecipe`:
   fresh shot address.
 
 Only recipes for shots still linked in `sShot` are copied into a frame snapshot.
-Terminal/deferred-cleanup cases are filtered so rollback does not resurrect a
-shot that was already dying.
+The current `IsTerminalShot` filter specifically omits active shots at step 3
+with hit judgment disabled, except Arthur's Axe and Vergil's Raid/Spiral/Storm
+swords. It is not a universal proof that every linked dying shot can be omitted:
+those exceptions retain authoritative owner-release callbacks.
 
 Reconstructed shots also validate character hit callbacks against the current
 category-8 `sUnit` character list. The `20260805_233025` Dante mirror dump had
@@ -651,11 +697,15 @@ of them. Generic pre-move collision and pose code can consume the saved attack
 and prior-world matrices first. Leaving the factory matrices in a reconstructed
 Ryu Hadouken delayed its step transition and changed its lifetime after rollback.
 
-The timing scalars receive an explicit restore after the ownership-filtered body
-overlay. Their packed float values can resemble readable addresses when viewed
-as a qword, causing the generic pointer-preservation heuristic to retain factory
-timing. In the 2026-07-24 Ryu capture, `mTimeInterpolationRate` remained at `1`
-instead of the saved `4`, delaying the Hadouken phase transition by three ticks.
+Historical timing repair evidence: in the 2026-07-24 Ryu capture,
+`mTimeInterpolationRate` was reported as `1` instead of saved `4`, delaying the
+Hadouken phase transition by three ticks. Packed float qwords can defeat the
+pointer heuristic. Do not read that older account as proof that today's
+`Shot_ApplyFlight` explicitly writes shot-relative `+0x110..+0x11F`: it writes
+`+0x28..+0x2F`, whereas the concrete overlay explicitly preserves
+`+0x110..+0x11F` as fresh model-cache ownership. Callback-effect timing is a
+separate effect-relative range. Reconciling the historical timing field labels
+with the inherited shot/model layout still needs a focused offset audit.
 
 Collision capsule parents require explicit identity remapping. Ghidra's
 `cHitPrimCapsule_vfn58` reads parent references at `+0x58/+0x60`, parent/joint
@@ -751,10 +801,13 @@ RNG advance through setup. Ghidra shows that the standard AnmChr case obtains
 the `rShot*` by name from the owner's resource table at `cChr+0x34F0` before
 calling `sShot__spawnShot`. Inside the spawn function, the only failures before
 setup are a null `rShot*` or failure to instantiate its DTI. The successful host
-recipe cannot record the failed client's call arguments, so the existing spawn
-hooks emit `SHOTSPAWNTRACE` during rollback with the element pointer and DTI,
-return value, caller, and owner RNG transition. This distinguishes missing
-resource-table state from a native factory failure on the next reproduction.
+recipe cannot record the failed client's call arguments, so the spawn hooks at
+that time emitted `SHOTSPAWNTRACE` during rollback with the element pointer and
+DTI, return value, caller, and owner RNG transition. This distinguishes missing
+resource-table state from a native factory failure on reproduction. The
+2026-10-26 source read does not find that diagnostic in the current spawn hook
+bodies; this paragraph records the older investigation, not an enabled current
+trace guarantee.
 
 The `20260802_220647` capture isolated the remaining Kikosho ID failure. Both
 peers spawned IDs `16/17` at frame 4701 with allocator cursor `18`. Restoring
@@ -897,18 +950,44 @@ not replace the metadata pointer at collision entry
 reconstructed swarm capsules disappear on the next resim tick, even though the
 primitive arrays and shots remained present.
 
-This is reconstruction, not heap rewind. A restored shot may have a different
-address from the shot captured in the snapshot. Code or state
-during later effect-generator allocation in the `20260724_220644` crash. It must
-not replace the metadata pointer at collision entry
-`+0x48`: the `20260724_212647` capture showed that doing so made all four
-reconstructed swarm capsules disappear on the next resim tick, even though the
-primitive arrays and shots remained present.
+The two preceding metadata failures concern different ownership mistakes:
+mutating shared resource vectors corrupted later allocation, while substituting
+the collision-entry metadata pointer discarded native primitive continuity.
+Neither result supports rewinding the allocator or transplanting resource owners.
 
 This is reconstruction, not heap rewind. A restored shot may have a different
 address from the shot captured in the snapshot. Code that stores historical
 shot pointers must therefore use an explicit saved-to-restored mapping or retain
 fresh native references.
+
+## Current Callback Restore Qualification — 2026-10-26
+
+The Kikosho paragraphs above retain the chronology of earlier repairs. Current
+`ConcreteShotSnapshot_RestoreCallbackEffects` is narrower than an unconditional
+timeline rewind:
+
+- Occupancy is captured separately from successful DTI/state capture.
+- Saved absence/death, or the recognized native callback-wait state, retires a
+  fresh callback through virtual `+0x78` **without immediately clearing its
+  slot**. Native `uShot__clearDeadCallbackEffectSlots @ 0x1401C9AB0` subsequently
+  clears non-alive pointers. The older “keep the slot null” wording describes
+  the desired completed lifecycle, not the current immediate write behavior.
+- Occupied but unqueryable saved callbacks retain fresh state. Captured DTI and
+  resource must match before scalar repair. Generator restoration also checks
+  compatible count/order, DTI, resource/modes, ordinary-generator dispatch, and
+  relevant history safety. A failed compatibility check uses the bounded
+  expiry/flag fallback clock rather than overwriting fresh graph topology.
+- Shot-owned lasers do not receive the ordinary generator rewind. Reconstructed
+  full-timeline restore also leaves `effect+0x1F8` fresh to preserve the new
+  generation token, child census, and active counts.
+- Attack Wire, Fire Grenade Bomb (`0x140D48BB0`, despite the misleading source
+  constant name `kFireGrenadeExplodeDti`), Jam Session, Inferno, Shocking Pink
+  Bomb, Ground Oil, and Dark Phoenix Fire explicitly skip this callback rewind.
+
+These are source facts from the dated read, not new runtime verification of the
+effect allocator, every generator subtype, or every concrete callback. The
+native alive-slot helper confirms the deferred clearing mechanism, not the
+safety of copying arbitrary effect state.
 
 ## Why A Flat Array Is Not The Current Solution
 

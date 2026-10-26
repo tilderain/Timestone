@@ -5,7 +5,53 @@ Addresses below identify verified implementations; names are descriptive researc
 labels. Existing decompiler types/comments can be stale: the earlier campaign
 changed function names only. Later rounds 7–12 also corrected selected function
 signatures using existing structs; shared layouts remain independently unverified.
-See [round 12](shot_effect_rename_round12_summary.md) for the latest rename evidence.
+The historical `shot_effect_rename_round12_summary.md` reference is retained as an
+evidence identifier, but that file was not present at this path on 2026-10-26.
+Use the [current recheck ledger](#2026-10-26-read-only-recheck) for the bodies
+actually inspected in this refresh; the older campaign is not re-certified here.
+
+## 2026-10-26 read-only recheck
+
+Target: **port 8193**, `umvc3.exe.unpacked.exe`, image base
+`0x140000000`. Eight native
+bodies were decompiled read-only; no shared names, signatures, types or comments
+were changed. Existing recovered struct fields and method names are aids, not
+independent proof of semantics. In particular the current ordinary
+`cParticleGenerator` layout is **`0x240`**, not a size inferred from the compact
+snapshot's shorter readable prefix.
+
+| Address | Current live symbol | Rechecked body-level contract |
+|---|---|---|
+| `0x1405E27C0` | `uEffect__createGenerator` | Dispatches `+F8` before resource checks; nonempty-resource construction is a short-circuit pipeline and dispatches `+1A0` cleanup on failure. Missing/empty resource sets status `0x04000000` and returns false without that cleanup dispatch. |
+| `0x1405E4DB0` | `uEffect__doRestart` | Resets existing plain records, dispatches node `+48`, restores continuation counts from totals, applies unit parameters and tail-dispatches `+F8`; no direct graph allocation/free. |
+| `0x1405E4D10` | `uEffect__doFinish` | May first invoke `uEffect__setSerialEffect(this, 1)` for serial-control mode `0x1000`, then dispatches every node's `+50(this, 1)`. It is not necessarily side-effect-free emission suppression. |
+| `0x1405E6890` | `uEffect__releaseGenerator` | Deletes linked nodes via slot zero, frees each plain-record subbuffer and the shared allocation, clears ready/count/draw state; does not itself release the retained EFL or reset `+210` accounting. |
+| `0x1405E67C0` | `uEffect__moveParticleManager` | Clears `+206`, invokes `+88` only on nodes with status bit0 set, and counts true results. **Mutating dispatch**, never a pure census probe. |
+| `0x140834F30` | `cParticleGenerator__move` | Selects single/loop spawn work, opens and initializes records, closes rejected initializations, calls concrete `+B8`, then tests transient `+112` and status. False also performs stop/active-state writes. |
+| `0x140827720` | `cParticleGenerator__closeParticleAll` | Calls `ParticleRecord__requestChildRetirement` per active particle, unlinks it and appends it to the existing free list. No pool allocation. The child helper's own body was not re-decompiled this round. |
+| `0x1405EF2B0` | `uBaseEffect__finish` | Clears outer status `0x20`; status `0x4` chooses `+B8(this, 1)` sleep and false, otherwise `+78` retirement and true. Neither branch directly frees a graph. |
+
+The older descriptive aliases below remain useful address-based evidence. The
+pipeline callees currently appear as `createParticleManager`, `allocGeneratorBuff`,
+`initJoint`, `initParticleManager`, and `updateConstUpdateFlag`, respectively;
+those names do not turn the heterogeneous list at `+218` into the plain record
+array at `+220`. The serial-effect callee currently appears as `setSerialEffect`,
+not the older `spawnResourceConfiguredFollowupEffect` label. Its full body and
+the single-spawn phase machine were not part of these eight rechecks.
+
+Current-source reading was limited to the known `rollback_effect.cpp`,
+`rollback_shot.cpp`, `concrete_snapshot.cpp`, `rollback_restore.cpp`, and
+`rollback_hooks.cpp`. It confirms recipe reconstruction and selected control
+overlays, not full historical particle snapshots. `Effect_RetireCurrent` actually
+unlinks and deleting-destructs abandoned effects synchronously; its name and a
+nearby restore comment must not be mistaken for native deferred `+78` semantics.
+ExAtkSpace children, linked transition effects, persistent character effects and
+stage bodies have explicit retention exceptions. These are partial policies, not
+the [proposed exact rollback architecture](effect_rollback_design.md).
+
+No build, standalone test, asset decompression, gameplay run or timing measurement
+was performed for this documentation refresh. Detailed earlier asset, child,
+visibility and shot findings below retain their original evidence scope.
 
 ## Main result
 
@@ -65,7 +111,8 @@ generator system.
 
 ## 2. Graph construction and storage
 
-`uEffect__createGeneratorGraph @ 1405E27C0` performs:
+`uEffect__createGenerator @ 1405E27C0` (older descriptive alias
+`createGeneratorGraph`) performs, after its initial virtual `+F8` reset:
 
 1. `buildGeneratorObjectList @ 1405E2860`: choose concrete generator/node objects
    from resource descriptors, or construct an aggregate effect-unit generator.
@@ -116,12 +163,14 @@ prepares manager records, invokes generator updates, finalizes manager activity 
 runs generator post-update callbacks. Zero-substep transform/render refreshes do
 not necessarily rebuild the continuation census.
 
-`uEffect__updateGeneratorsAndCountActive @ 1405E67C0` is **mutating**, not a count
+`uEffect__moveParticleManager @ 1405E67C0` (formerly
+`updateGeneratorsAndCountActive`) is **mutating**, not a count
 query. It clears `uEffect+206`, invokes virtual `+88` on eligible graph nodes, and
 counts nonzero continuation results. These calls can spawn/recycle particles and
 consume RNG.
 
-Ordinary generator `+88`, `cParticleGenerator__updateAndSpawnParticles @ 140834F30`:
+Ordinary generator `+88`, current `cParticleGenerator__move @ 140834F30`
+(older alias `updateAndSpawnParticles`):
 
 1. Selects a spawn count through the multi-spawn (`140841A10`) or single-spawn
    (`1408426D0`) state machine.
@@ -213,11 +262,11 @@ possibility, not an observed runtime defect.
 
 | Operation | Entry | Effect |
 |---|---|---|
-| Request finish | `1405E4D10` | Calls generator virtual `+50(1)`. Suppresses the immediate repeat path and enters finishing state; does not drain pools or prohibit later explicit restart. |
+| Request finish | `1405E4D10` | Current `doFinish`: may request a serial follow-up before generator virtual `+50(1)`. Generator finishing suppresses immediate repeat; does not drain pools or prohibit later explicit restart. |
 | Request hold release | `1405E4D60` | Clears sustained-hold mode bit28 and sets transient status bit30 on graph nodes; the verified track consumer can advance toward fall/end. Universal emission suppression is not established. |
 | Restart graph | `1405E4DB0` | Reuses allocated nodes/records, resets their runtime state and active counts. |
 | Clear graph/resource | `1405E4CD0` | Releases the graph, then retained effect-list resource. |
-| Sleep or kill | `1405EF2B0` | Completion disposition: sleep preserves object/graph; kill requests deferred retirement. |
+| Sleep or kill | `1405EF2B0` | Current `uBaseEffect__finish`: completion disposition, not generator emission finish. Sleep preserves object/graph; kill requests deferred retirement. |
 | Unit kill request | `140016F20` | Shared implementation changes active states 1/2 to 3 unless fixed. |
 | Graph release | `1405E6890` | Deleting-destructs graph nodes, releases plain-record sub-buffers and shared storage, and clears graph readiness/counts. |
 

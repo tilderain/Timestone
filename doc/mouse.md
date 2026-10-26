@@ -4,6 +4,40 @@
 `umvc3.exe.unpacked.exe` build. Function names describing behavior are inferred
 unless they are supported by DTI property names or resource names.
 
+## Live Review and Implementation Status (2026-10-26)
+
+Target: Ghidra **8193**, `umvc3.exe.unpacked.exe`. Re-read
+`0x14025CD00`, `0x14025CD40`, and `0x14025C860`. Current database names are
+respectively **`sId__move`**, **`sId__updateMouseMaps`**, and
+**`sId__testMouseEvent`**. Older names in the explanation below are retained
+as historical aliases, not descriptions of networking.
+
+- `move` transitions `+0xA68` from 0 to 1 when `+0xA60` becomes non-null;
+  state 1 calls the updater while the resource exists, and drops to 0 when it
+  disappears. Other states return. This is resource gating, not ID allocation.
+- The updater clears four `0x70`-stride contexts, reads `sMouse`, converts
+  coordinates, and searches map rectangles. The hit test includes each
+  context's X/Y offset; the simplified test below omits that translation.
+  Bounds are left/top inclusive and right/bottom exclusive. The search breaks
+  after a matching region, so overlapping entries are not a "last hit wins"
+  mechanism in the reviewed path.
+- The event query dispatches selectors **0, 1, 2, 3, 4, 7** and rejects a
+  returned ID of `-1` before equality comparison. Passing expected ID `-1`
+  first derives another ID (helper result minus 2); it is not a wildcard.
+
+Existing `sId` typing was used for interpretation. Helper casts to
+`sMvc3Manager*` in the event-query decompilation remain unresolved/misleading;
+they do not establish a manager or network dependency. No types were changed.
+Resource registration and every approximate layout field were not revalidated.
+
+**Native facts versus proposal:** the packet formats, query hooks, prediction,
+and UI synchronization policy in this note are design proposals, not evidence
+of a currently implemented mouse protocol. The permitted plugin-source review
+of `rollback_hooks.cpp` confirms native main movement is called during resim,
+while render-end and `sGameUI` movement are suppressed. It does not prove that
+`sId` itself is suppressed. The old headless-sequence snippet below is
+historical; its location and runtime reachability were not checked this time.
+
 ## Summary
 
 `sId` is not a unique object-ID allocator. It is a mouse/UI hit-map service that
@@ -183,7 +217,8 @@ uses the returned ID to change the current menu selection.
 
 ### Mouse Event Test
 
-`sId__processNetworkSync` at `0x14025C860` is misnamed. It does not perform
+The historical name `sId__processNetworkSync` at `0x14025C860` was misleading;
+the current name is `sId__testMouseEvent`. It does not perform
 network synchronization. Its behavior is closer to:
 
 ```cpp
@@ -208,7 +243,7 @@ bool sId::testMouseEvent(int expectedId, EventType event, int context)
     default: return false;
     }
 
-    return actualId == expectedId;
+    return actualId != -1 && actualId == expectedId;
 }
 ```
 
@@ -238,14 +273,15 @@ Verified conclusions are:
 - The object contains dynamic arrays and a resource pointer, so a flat snapshot
   would not be an appropriate restore policy.
 
-The call currently present in the unused headless sequence at
-`UMVC3Hook/code/rollback.cpp`:
+Coordinator source reconciliation on 2026-10-26: the implemented headless
+sequence is in `UMVC3Hook/code/rollback_tick.cpp`, not the old monolithic
+`rollback.cpp`. Its `sId` call is currently **commented out**:
 
 ```cpp
-VTableCall(sMain, 0x40228, 0x30);  // sId
+// VTableCall(MainMember(sMain, 0x40228), 0x30); // mpId::move
 ```
 
-should not be considered a required deterministic combat step. It samples the
+The old proposed invocation should not be considered a required deterministic combat step. It samples the
 current physical mouse and advances UI timers. A headless combat re-simulation
 should normally omit it unless a specific in-match gameplay system is proven to
 consume these mapped mouse IDs.

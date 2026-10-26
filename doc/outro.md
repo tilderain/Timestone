@@ -1,6 +1,6 @@
 # Match Outro Continue and Restart
 
-**Status: Native reference with custom-netplay override. Reviewed 2026-08-15.**
+**Status: Native reference with custom-netplay override. Reviewed 2026-10-26.**
 
 ## Native Flow
 
@@ -30,7 +30,16 @@ phase on the next update.
 `controller.cpp` hooks `sAction__stepResult8`. During custom netplay it performs
 the native confirmation-mask test on both teams' mapped pads. Either player's
 confirmation calls `FrameStepper_RequestMatchRestart`, which sends the existing
-reliable synchronized restart request and schedules native phase-12 cleanup.
+restart request at the current logical frame (no future lead). The receiving
+peer executes it once its frame reaches that target; this is not a proof of a
+settled two-peer pause barrier.
+
+The current full-match path first calls `ChrSelImGui_ApplyRestart`, which queues
+`aChrSelectBlank` and rebuilds the roster after old battle teardown. When that
+reports a full-roster transition, `HookedMove` does **not** also queue phase 12.
+The native phase-12 cleanup path remains the fallback when no full-roster
+transition was requested, and the separate training-button restart is another
+path again. Do not treat every current restart request as a phase-12 rematch.
 
 The same override hooks `sAction__stepResult9_10_11` at `0x14000A3B0`. If the
 outro reaches the actual result screen without an earlier confirmation, either
@@ -38,7 +47,7 @@ player's confirmation there requests the direct restart as well.
 
 While that restart is pending, the hook does not call the original phase-8
 handler. This prevents phase 9 and its result-screen objects from being created
-during the synchronization lead time. Offline and native game flows retain the
+during the pending restart interval. Offline and native game flows retain the
 original phase-8 behavior.
 
 Phase-7 fade ownership can differ because rollback retains the live `mpFade`
@@ -57,3 +66,15 @@ unchanged while local fade allocation cannot suppress one peer's input.
 | `0x140001A70` | Return the pad menu-confirmation mask at `sPad+0xBD8` |
 | `0x14025AC40` | Resolve a team's mapped pad index |
 | `0x1402B3B80` | Read raw pad input without SOCD processing |
+
+## Review scope and evidence
+
+2026-10-26 source anchors: `controller.cpp::IsEitherPlayerResultContinuePressed`,
+`hkStepResult8`, `hkStepResult9_10_11`; `framestepper.cpp::RequestMatchRestart`
+and `HookedMove`; `chrsel_imgui.cpp::ChrSelImGui_ApplyRestart`; and
+`trainingboot.cpp::TrainingBoot_UpdateRestart`. These establish current
+restart ownership and the area-transition correction. Native addresses in the
+table and the fade-mask note retain earlier evidence; the result bodies and
+fade hook were not re-decompiled/re-audited in this pass. Live native review
+used Ghidra 8193, `umvc3.exe.unpacked.exe`; no runtime results
+are claimed.

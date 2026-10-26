@@ -1,5 +1,12 @@
 # Render Crash Bandaid
 
+**Status reconciled 2026-10-26.** This file preserves the sequence of historical
+workarounds; it is not a single current-commit changelog. Current checks were
+limited to the permitted runtime/controller/model/snapshot sources and read-only
+Ghidra 8193 (`umvc3.exe.unpacked.exe`, base `0x140000000`). No game, build or
+tests were run. Sections explicitly labelled historical must not be used as
+instructions to reintroduce their workarounds.
+
 The render and restart handling in `rollback_runtime.cpp` is defensive bandaid
 code, not a root-cause fix. Repeated character autotests exposed stale material,
 animation, UI, and effect state after synchronized match restarts. Several
@@ -43,10 +50,12 @@ objects, omit state that would otherwise be restored, alter native control
 flow, or leak resources. The original render-command patch is no longer
 invoked by the current code.
 
-## Current Commit
+## Historical restart-workaround series
 
-This commit contains the following additional restart, rollback, and autotest
-changes.
+The original note recorded the following additional restart, rollback, and
+autotest changes. Effect cleanup, launch flow and test-runner sources were not
+re-audited in this source-limited pass; their retained descriptions are historical
+evidence, not independently renewed installation claims.
 
 ### Persistent Character Effects
 
@@ -96,7 +105,9 @@ fully synchronized or is transitioning through a restart:
 
 The scheduler rebuild hook and hand-written scheduler allocator were removed.
 Native scheduler allocation and rebuild behavior is left intact instead of
-reconstructing entry arrays or forcing scheduler state to retired.
+reconstructing entry arrays or forcing scheduler state to retired. There is,
+however, a current exception-recovery handler for native scheduler allocation
+failure; "left intact" does not mean no failure interception (see below).
 
 ### Native Null And Stale-Object Guards
 
@@ -112,9 +123,10 @@ reconstructing entry arrays or forcing scheduler state to retired.
   their loops without passing null units to animation or position code.
 - `MtObject__isAliveState` rejects null, unmapped, or recycled vtables before
   native callers use the result to dispatch another virtual method.
-- `MtAnim__setFrameIndex` rejects an absent animation object or inaccessible
-  frame-index field.
-- `MtObject__setFlag0x800` rejects absent or invalid objects.
+- `MtAnim__setFrameIndex` rejects an absent animation object; the current
+  `hkMtAnimSetFrameIndex` does not check a non-null object's frame-index range.
+- `MtObject__setFlag0x800` rejects a null object or absent original function;
+  it does not validate every non-null object.
 - `uCutIn__addCharacter` and
   `uCutIn__setVariantPropagateToCam` reject failed optional cut-in objects.
 - The character position helper at `0x1400E3020` preserves its stiff-damage
@@ -128,8 +140,9 @@ reconstructing entry arrays or forcing scheduler state to retired.
   model's virtual `+0xA0` matrix lookup; the observed implementation forwarded
   it to `MtVector3__op_assign` as address `0xFFFFFFFF`.
 - `uBaseModel__resetMaterials` validates and clears stale material-cache
-  entries before native teardown, allowing valid material entries to follow the
-  native release path.
+  entries before native teardown. Current behavior discards the complete pointer
+  array when any non-null entry is invalid, including apparently valid aliases;
+  it does not guarantee their native release and may leak ownership.
 - `sStage__replaceActiveStage` removes an existing active-array entry when its
   required virtual `+0xD8` callback is not executable. This covers a stale
   stage-body entry observed during resimulation without changing valid stage
@@ -145,9 +158,11 @@ reconstructing entry arrays or forcing scheduler state to retired.
   `uEffect__getGeneratorSubParentWorldMatrix` dispatches while creating the
   effect. A destructed object can retain the generic `MtObject` vtable and pass
   a DTI-only check even though that matrix callback is null.
-- A version-checked vectored exception handler handles the null model result at
+- An address/register-checked vectored exception handler handles the null model result at
   `nDraw_Material__clone+0x1F` (`0x1405DCA7F`) and resumes at the native clone
-  epilogue so the caller can use its existing fallback path.
+  epilogue so the caller can use its existing fallback path. Unlike the command
+  page and result-cursor handlers below, installation has no explicit expected-
+  instruction-byte check in the inspected source.
 - A version-checked vectored exception handler handles render-command page
   exhaustion at `0x140640011`. It restores the interrupted model helper's
   nonvolatile registers, leaves the model command state dirty for a later retry,
@@ -158,6 +173,11 @@ reconstructing entry arrays or forcing scheduler state to retired.
   code dereferences `uBtResultScoreVersus+0x248` despite the preceding lookup
   accepting null; recovery skips that cursor dispatch and resumes at the native
   epilogue (`0x14030A741`).
+- `SchedulerAllocationRecoveryHandler` currently catches null writes at
+  `0x14050F0B5` and `0x14050F169`. The first publishes an empty scheduler and
+  resumes at `0x14050F13A`; the second clears only the failed optional type-2
+  index and resumes at `0x14050F176`. Installation is address/register based,
+  not an expected-byte-verified replacement allocator.
 
 The autotest-only hook that skipped `uScheduler__rebuildEntriesFromResource`
 was tested and removed. It avoided the immediate scheduler crash, but made the
@@ -200,7 +220,12 @@ under Wine or Proton:
 This changes startup ordering and adds process-wide synchronization, but does
 not make D3D9 or the native game initialization thread-safe in general.
 
-### Fullscreen Adapter Mode Overflow
+### Fullscreen Adapter Mode Overflow and historical Reset workaround
+
+The table-capacity evidence and historical workaround are retained here. The
+interface-hook clamp lives outside the permitted controller source and was not
+independently reverified on 2026-10-26. **The healthy-device suppression and
+INVALIDCALL masking described below are obsolete, not the current policy.**
 
 `sRender__enumerateAdapterModes` at `0x140538050` asks D3D9 for the adapter mode
 count and writes every qualifying mode into 92-byte records beginning at
@@ -217,20 +242,22 @@ game's exclusive-fullscreen path and its normal mode validation. Unlike the
 comparable RE HD workaround, it does not force borderless windowed mode or
 override the selected presentation interval.
 
-Some injected overlays retain unbound default-pool resources, which makes any
-otherwise valid `IDirect3DDevice9::Reset` fail and leaves the device in
-`D3DERR_DEVICENOTRESET`. The Reset hook therefore suppresses presentation
-changes while the tracked device is healthy and writes the active presentation
-parameters back to the caller. A real Reset is still allowed when
-`TestCooperativeLevel` reports that device-loss recovery is required. Runtime
-resolution, fullscreen, and VSync changes consequently do not take effect on a
-healthy device; they require a restart that creates the device with the new
+Unreleased reset-sensitive default-pool resources can make an otherwise valid
+`IDirect3DDevice9::Reset` fail. An overlay owning such a resource is a possible
+cause, not proven ownership for the reported incidents. The historical Reset
+hook suppressed presentation changes while the tracked device was healthy and
+wrote the active presentation parameters back to the caller. A real Reset was
+still allowed when `TestCooperativeLevel` reported that device-loss recovery
+was required. Runtime resolution, fullscreen, and VSync changes consequently
+did not take effect on a healthy device; they required a restart creating it with the new
 settings.
 
-If a forwarded Reset nevertheless returns `D3DERR_INVALIDCALL`, the hook logs
-the failure and returns `D3D_OK` to the native UI-thread dispatcher. This keeps
+If a forwarded Reset returned `D3DERR_INVALIDCALL`, that historical hook logged
+the failure and returned `D3D_OK` to the native UI-thread dispatcher. This kept
 the dispatcher's fatal `ERR09` path from terminating the process while leaving
-device-loss, out-of-memory, and other failures unchanged.
+device-loss, out-of-memory, and other failures unchanged. It did **not** recover
+the device and could allow native resource rebuild on a failed device. The
+current managed controller does not mask this failure.
 
 The whole `sRender__applyWindowAndResize` function must not be skipped. Startup
 dirty mask `0x54` initializes the renderer pointer at `sRender+0x8676E8`;
@@ -244,18 +271,57 @@ a redundant startup rebuild. A native hook at
 UI-thread Reset submission before an overlay can bypass the D3D9 vtable hook.
 Ghidra confirms that this function stores the device and presentation pointer
 at `sApp+0x2AD8` and `sApp+0x2AE8`, submits job type `4`, waits for completion,
-and returns `1` on success. The hook returns that native success value when the
-tracked device is healthy and the complete request matches the successful
-`CreateDevice` parameters. Device-loss recovery and real changes continue
+and uses the HRESULT field for successful completion; its returned value also
+includes retry-acknowledgement bookkeeping. The historical hook returned `1`
+when the tracked device was healthy and the complete request matched successful
+`CreateDevice` parameters. Device-loss recovery and real changes continued
 through the original function.
 
-The inconsistent startup Reset originates in
+One historical proposed trigger for inconsistent startup Reset was
 `sMvc3Main__updateGraphicsSettings`: after device creation it consumes pending
 graphics options through `sMvc3Main__syncGraphicsSettings` (`0x140259BC0`),
 applying Resolution and FullScreen through property callbacks over multiple
-frames. A hook returns `false` from that synchronization once the correctly
-sized tracked device is healthy, clearing the pending state before it can
-mutate renderer presentation state or submit another Reset.
+frames. A historical hook returned `false` from that synchronization once the
+correctly sized tracked device was healthy, clearing the pending state before it could
+mutate renderer presentation state or submit another Reset. This is not a
+universal startup path: the main constructor clears the pending flag, so its
+actual value needs observation. Current `HookSyncSettings` instead owns a copy
+of all five selections and applies queued native property steps at the managed
+boundary; it does not discard all healthy-device graphics edits.
+
+### Current D3D9 controller (2026-10-26)
+
+[`d3d9_lifecycle_repair.md`](d3d9_lifecycle_repair.md) is the current lifecycle
+description; [`d3d9_57d463b_regression.md`](d3d9_57d463b_regression.md) retains
+the historical commit comparison. Checked `d3d9reset.cpp:311-388,437-628,794-865`
+uses immutable UI requests, renderer-owned device tracking, one teardown,
+real Reset retries, and native rebuilding before readiness publication. An
+exactly matching healthy request may omit the COM Reset, but healthy changed
+settings are not globally restart-only. Unmanaged tracked-device Reset is
+rejected; unrelated devices pass through. INVALIDCALL offers Retry/Cancel,
+not synthetic success. Native apply remains on its suspended call stack while
+waiting; gameplay does not continue against released resources.
+
+Fresh Ghidra checks reconfirmed apply `0x14053D690`, Present `0x14053A250`,
+and dispatcher `0x14051F930` using existing types. Reset call `0x14051F98D`
+and HRESULT store `0x14051F9B5` confirm why fake success was unsafe. This is
+static/native evidence, not successful recovery on a real driver or overlay.
+
+### Current material-boundary correction
+
+`rollback_runtime.cpp:536-704,995-1049` retains reset sanitization, lazy repair,
+character-only post filtering and particle-model filtering. These are install
+attempts rather than proof of successful hooks in a live process. The source's
+`hkGetJointPos` name at `0x140549F50` is historical/misleading: retained material
+research identifies a material-control value getter, not a proven joint lookup.
+
+Instruction check: `0x14055FAC0` jumps to `0x140564110`; the existing repair
+hook covers that thunk's material loop too. It calls material `+0x38` and
+updates model cache flags `+0x4FC`. `0x1405E0530` samples animation/setters
+before advancing active clocks in four slots, and sampler setter `0x1405DEDB0` can change
+resource references. None of this is a proof that the loop is disposable pure
+rendering. The earlier exact-class material-post skip and MATCOST timing trial
+are not present in the inspected runtime installation path.
 
 ### Autotest Changes
 

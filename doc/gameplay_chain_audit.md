@@ -1,7 +1,23 @@
 # Gameplay Chain Resource Audit
 
-Read-only installed-resource and Ghidra audit, 2026-10-08. No gameplay policy
-changes were made. Installed assets were not authenticated against a clean depot.
+Original read-only installed-resource and Ghidra audit: 2026-10-08. No gameplay
+policy changes were made by that audit. Installed assets were not authenticated
+against a clean depot.
+
+**Checked 2026-10-26:** selected native bodies on Ghidra **8193**,
+`umvc3.exe.unpacked.exe`, and direct reads of the permitted rollback source files.
+The archive counts, script inventories, capture results and timings below are
+retained historical evidence, not rerun measurements or a new asset scan.
+
+## Current policy versus dependency evidence
+
+`rollback_tick.cpp::IsHeadlessGameplayUnitObject` rejects exact `uChrChain` DTI
+`0x140D44920` in headless move and late phases, even though category 13 is enabled.
+`rollback_model_policy.cpp` additionally hooks `0x140035F90`/`0x140036130` to skip
+active Rocket-owner chains on **live and resim** paths, provided both hooks install.
+That is a deliberate animation-only geometry policy, not a solver snapshot or
+proof that every chain is cosmetic. See [Rocket cost and trial](rocket_tail_chain_performance.md)
+and [Felicia/Shuma gating](felicia_shuma_chain_gating.md).
 
 ## Collision Dependencies
 
@@ -36,6 +52,20 @@ slot. Their apparent character-body joint overlaps were false positives.
 
 ## Evidence And Limits
 
+- Freshly checked `uChrChain__move`, `0x140035F90`: owner/alive and virtual
+  activity gates, stop/init-related flag updates, owner time scale and blend
+  advancement, followed by `uChain__move` and current-move bit 8. This confirms
+  that skipping the move loses preparation/state transitions, not only a solve.
+- Separately checked `uCnsChain__move`, `0x14070D830`: resource version/flag
+  checks can call chain/collision-resource setters; dead model bindings are
+  cleared; changed model/collider bindings trigger reset; it refreshes AABB and
+  can queue collision work. This is a resource/binding lifecycle entry point,
+  **not just a generic solver**. `uCnsChain`, `uChrChain`, and `uCnsTinyChain`
+  must not be treated as interchangeable classes.
+- Fighter push is independently established by `0x14004B9D0` registering
+  category-2 callback `0x14004AD20`; its pending correction is `cChr+0x6340`.
+  Similar generic-chain collision names do not establish fighter push provenance.
+  See [collision snapshot boundary](scollision_rollback_snapshot.md).
 - `rChrColList__convert`, `0x14005B710`: CLI header, 8-byte index entries,
   32-byte primitive records. Owner at record +0, logical joint at +8.
 - `uCharacter__loadCollisionSet`, `0x14004B260`: bank 0 constructs attack capsules;
@@ -56,7 +86,10 @@ slot. Their apparent character-body joint overlaps were false positives.
   exhaustively covered.
 
 Reproduce the candidate inventory with `tools/audit_gameplay_chains.py ARCHIVE_DIR`.
-Full generated inventory is `/tmp/opencode/gameplay_chain_audit.json`.
+The original generated inventory was `/tmp/opencode/gameplay_chain_audit.json`
+(temporary artifact; availability not rechecked). CLI/CST conversion, ordering,
+joint commit and RNG claims below/above remain prior research unless explicitly
+identified as freshly checked. No in-game lifecycle or determinism test was run.
 
 ## Rocket Timing
 

@@ -1,6 +1,6 @@
 # Native Area and Scene Management
 
-**Status: Native reference. Reviewed 2026-07-25.** Addresses refer to the
+**Status: Native reference with source-reviewed plugin notes. Reviewed 2026-10-26.** Addresses refer to the
 unpacked executable at preferred image base `0x140000000`. This document
 describes native MT Framework area management, not a plugin-owned state
 machine.
@@ -186,7 +186,7 @@ The confirmed training branch (`uVar5 == 6`) does the following:
 5. Creates/ensures the loading unit.
 6. Queues `aChrSelectBlank__DTI` through `sArea`.
 
-`sBattleSetting__requestEnter` at `0x14024B540` follows the same intermediary
+`sBattleSetting__requestEnter` at `0x14024B530` follows the same intermediary
 model: it stores the pending stage ID in `sGameUI` and queues
 `aChrSelectBlank`. Native online forces pending stage ID 2.
 
@@ -246,6 +246,18 @@ new areas.
 
 ## Plugin Implications
 
+Despite its name, the current `BootIntoTraining` writes native `BattleType = 0`,
+not Training's value 5. Its comments and log text still call this training.
+The function waits for native configuration load completion and the initial
+AutoJump/voice exchange, normalizes colors, populates backup slots, restores
+them, and queues the loading intermediary. Its explicit loading-screen creation
+call is commented out; do not infer that it runs from the native sequence above.
+
+Full-roster restart now queues `aChrSelectBlank` first and waits until
+`sArea+0x7040` is clear before replacing the descriptor. It calls
+`BootIntoTraining(false)` to reuse that intermediary after old battle teardown.
+This is distinct from a native phase-12 rematch that retains the roster.
+
 The training boot implementation correctly invokes virtual slot `+0x50` on
 `sArea`, but its argument is `aChrSelectBlank__DTI` (`0x140D500F0`). It does
 not directly pass `aNextBattle__DTI` (`0x140D50618`). The native sequence is:
@@ -279,3 +291,15 @@ objects. Runtime code should continue relocating all preferred addresses with
 | `0x140D500F0` | `aChrSelectBlank__DTI` |
 | `0x140D50618` | `aNextBattle__DTI` |
 | `0x140D506E8` | `aTitle__DTI` |
+
+## Review scope and evidence
+
+On 2026-10-26, the body of `sBattleSetting__requestEnter` at `0x14024B530`
+was checked in live Ghidra **8193**, program
+`umvc3.exe.unpacked.exe`. `0x14024B540` was an interior address, not its entry.
+The plugin notes were checked directly against `trainingboot.cpp`, especially
+`BootIntoTraining`, `TrainingBoot_RestartWithConfig`, and
+`TrainingBoot_UpdateRestart`. Other native layouts, lifecycle tables, and
+addresses retain the earlier investigation's evidence; they were not all
+re-decompiled in this review. No game/runtime validation or Ghidra edits were
+performed.

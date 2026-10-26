@@ -1,9 +1,19 @@
 # Frame Timing and Job Execution (`sMain`)
 
-**Status: Native reference with rollback caveats. Reviewed 2026-07-23.** Current
-rollback captures `0x40080` bytes from `sMain`, but restores only selected timing
-ranges. Worker handles, callback queues, ring buffers, and thread descriptors
-remain owned by the live timeline.
+**Status: Native reference with current-source boundary, reviewed 2026-10-26.**
+The broad `0x40080` `sMain` capture is **disabled** in the current region builder.
+Its constants and selective restore handler remain in source; they do not mean
+worker queues or synchronization state are being snapshotted. Worker handles,
+callback queues, ring buffers and descriptors belong to the live process.
+
+Read-only live checks on Marvel Ghidra **8193** covered `sMain__move`
+(`0x140521DF0`), `executeJob` (`0x140521230`), `setJobThreadNum`
+(`0x140522450`), regular-worker creation (`0x140520FC0`) and the delay-worker
+loop (`0x1405210E0`), using existing `sMain` types. The July layout table is
+retained with these scoped corroborations, not a new audit of every field.
+Propagated prototypes omit real parameters in several functions; instruction
+arguments and native accesses take precedence. No database edits or runtime
+timing/thread measurements were performed.
 
 ## Scope
 
@@ -23,7 +33,7 @@ from the generic job machinery.
 
 | Offset | Type | Verified role |
 |---:|---|---|
-| `+0x30` | byte | Shutdown/finalization flag consulted by delay workers |
+| `+0x30` | byte | Inherited `cSystem::mThreadSafe` conditional-locking flag |
 | `+0x38` | `uint64_t` | Millisecond timer derived from QPC |
 | `+0x40` | `uint64_t` | Timer QPC origin |
 | `+0x48` | `uint32_t` | Frame timer derived from FPS and the millisecond timer |
@@ -75,7 +85,7 @@ When `+0x58` is false, the target fraction is `mFps / mMaxFps`. The function:
    least two milliseconds.
 3. Re-samples QPC in a tight loop until the target fraction is reached.
 4. Clamps a negative delta to zero.
-5. Converts a delta at or above `mDeltaTimeBorder` to `1.0f` and accumulates the
+5. Converts a delta strictly above `mDeltaTimeBorder` to `1.0f` and accumulates the
    excess in `mDelayFrame`.
 6. Applies `mDeltaTimeLimite` and advances the ideal counter by the accepted
    delta in QPC units.
@@ -103,9 +113,12 @@ on each tick.
 
 ### Submission and completion
 
-`sMain__executeJob` at `0x140521230` is a synchronous submit-and-wait operation:
+`sMain__executeJob` at `0x140521230` is a synchronous submit-and-wait operation.
+Its live stored prototype omits the mode carried in EDX; do not infer a true
+one-argument ABI from that decompilation:
 
-1. Lazily creates regular worker threads.
+1. Returns immediately for no jobs; otherwise lazily creates regular workers,
+   before choosing inline versus parallel execution.
 2. Resets claim cursor `+0x9C` and stores the requested mode at `+0xA0`.
 3. If there is one job or one active thread, drains the array inline.
 4. Otherwise wakes active workers, lets the calling thread drain jobs too, and
@@ -131,12 +144,14 @@ then resumes them. This pool is separate from regular jobs.
 Each `sMain__delayJobloop` worker:
 
 1. Waits on the shared semaphore at `+0xC0`.
-2. Conditionally enters the critical section at `sMain+0x08`.
+2. Conditionally enters the critical section at `sMain+0x08`, based on
+   `cSystem::mThreadSafe` at `+0x30` or the global parallel-region flag.
 3. Claims the next slot using cursors `+0xB8` and `+0xB0`.
 4. Resolves the slot at `+0x1FA08 + ((readCursor & 0xFFF) * 0x20)`.
 5. Clears the slot function before invoking it, invokes recognized types 0 and
    2, and clears the argument afterward.
-6. Sleeps for one millisecond when awakened without a claimable job.
+6. Sleeps for one millisecond when awakened without a claimable job. Its exit
+   byte is at the **worker context** `+0x30`, not singleton `sMain+0x30`.
 
 Both currently decompiled recognized types call the stored function with the
 stored argument. Calling one type "repeating" is unsupported: the loop clears
@@ -144,8 +159,10 @@ the function and argument for both.
 
 ## Rollback Implications
 
-The plugin's `SMAIN_SIZE` is `0x40080`, large enough to capture the timing tail,
-job arrays, and descriptors. Restore deliberately applies only these ranges:
+The retained `SMAIN_SIZE` constant is `0x40080`, covering a large timing/job
+prefix rather than proving the full native allocation extent. The region-builder
+`add(sMain, SMAIN_SIZE)` is commented out. If such a region is present, the
+retained restore handler applies these ranges:
 
 ```text
 +0x0030 size 0x64
@@ -155,11 +172,26 @@ job arrays, and descriptors. Restore deliberately applies only these ranges:
 +0x40048 size 0x14
 ```
 
-This preserves live synchronization objects and pending-work ownership. During
-custom netplay, current code also forces requested and active regular-job counts
-to one around relevant ticks. That is plugin policy, not native `sMain`
-behavior; native online additionally disables selected gameplay parallel paths
-at battle setup, as documented in `native_online_saction_time_sync.md`.
+These historical ranges must not be described as a complete ownership proof:
+`+0xA4/0x1C` also covers thread counts and delay-ring cursors. Re-enabling the
+broad region would require a fresh queue/ownership audit, not just copying its
+old selective handler.
+
+Current netplay calls `Rollback_ApplyNetplayDeterminism`: it enables native
+frame-wait mode and disables unit-line, collision/hit-solver and selected battle
+parallel paths. It does not itself force regular worker-count fields to one.
+The separate advanced `EntireGameSingleThreaded` setting changes requested and
+active counts through `ApplyAdvancedLaunchConfig` and temporarily clears a
+geometry group's multithread preference. It does not currently patch delay-job
+worker creation. Native setup and plugin policy remain distinct; see
+[thread.md](thread.md) and
+[native_online_saction_time_sync.md](native_online_saction_time_sync.md).
+
+`hkMainMove` executes native pacing on live frames, then forces netplay delta
+to `1.0` and uses the synchronized frame stamp when battle-ready. Its resim branch
+avoids native pacing. `Rollback_HeadlessTick` independently sets the historical
+stamp before gameplay; `Rollback_ResyncMainTiming` reconciles pacing after replay.
+This is not an independent wall-clock-driven gameplay timeline.
 
 ## Key Addresses
 

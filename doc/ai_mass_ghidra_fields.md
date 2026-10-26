@@ -1,7 +1,7 @@
 # AI Mass Ghidra Field Recovery
 
 **Status:** Initial implementation; isolated SDK tests, live pilot still required.
-**Target:** `ichneumon_sub/umvc3.exe.unpacked.exe`, canonical types under
+**Target:** `umvc3.exe.unpacked.exe`, canonical types under
 `/UMVC3/Auto`.
 
 This is the class-layout counterpart to [AI Mass Ghidra Documentation](ai_mass_ghidra_doc.md).
@@ -79,10 +79,10 @@ not authorize unrelated renames.
 
 ## Files And Authority
 
-The implementation is `/home/god/ghidra_scripts/ApplyClassLayouts.java`.
+The implementation is `<ghidra-scripts>/ApplyClassLayouts.java`.
 Its sibling `ApplyClassLayouts.md` specifies commands, JSON syntax, supported
 types, destructive semantics, and limitations. Layout files live in per-wave
-directories under `/home/god/ghidra_scripts/layouts/`.
+directories under `<ghidra-scripts>/layouts/`.
 
 Live target code and metadata establish facts. Existing Ghidra types and donor
 declarations are evidence to investigate, not automatic truth. The accepted
@@ -134,7 +134,7 @@ target locations, proposed record/array boundaries, anchors, and exceptions.
 The coordinator reviews that correspondence before scaling it across classes.
 
 **Parent-first is mandatory, not conditional on whether a base looks uncertain.**
-Before assigning a class, consult `/home/god/ghidra_scripts/parents.txt` and walk
+Before assigning a class, consult `<ghidra-scripts>/parents.txt` and walk
 its entire target ancestry to the root. Schedule every unfinished ancestor in
 root-to-leaf order before starting the child's field-mapping work. For example,
 the recorded `uAmaterasu` chain requires this order:
@@ -374,14 +374,14 @@ are not semantic coverage metrics.
 ## Worker Prompt
 
 ```text
-Research the assigned class layouts for ichneumon_sub/umvc3.exe.unpacked.exe.
+Research the assigned class layouts for umvc3.exe.unpacked.exe.
 Read ai_mass_ghidra_fields.md, ai_mass_ghidra_doc.md section 10.1, and
-/home/god/ghidra_scripts/ApplyClassLayouts.md.
+<ghidra-scripts>/ApplyClassLayouts.md.
 
 Exclusive datatype paths and JSON files:
 <EXPLICIT LIST>
 
-Before starting child field mapping, consult /home/god/ghidra_scripts/parents.txt
+Before starting child field mapping, consult <ghidra-scripts>/parents.txt
 and check every ancestor, root first. Record the exact accepted parent layout
 versions and supporting target evidence. The file's resolved status means
 ancestry resolved, not fields recovered. Every unfinished parent must first have

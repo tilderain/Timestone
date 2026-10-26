@@ -4,6 +4,14 @@ Ghidra and read-only installed-resource investigation, 2026-10-08. This refines
 the static overlap audit: a shared joint is not proof that physics reaches a hit.
 No gameplay code or chain-enable policy was changed.
 
+**Checked 2026-10-26:** Ghidra **8193**, `umvc3.exe.unpacked.exe`;
+fresh native check here covers `uChrChain__move @ 0x140035F90` (owner/activity
+gates, time scale, blend/preparation and current-move flags), not a rerun of
+the script parser, resource audit, late solver, or hit-acceptance investigation.
+Those detailed findings below retain their original 2026-10-08 provenance.
+Direct source checks cover `rollback_tick.cpp` and `rollback_model_policy.cpp`.
+No in-game trace was collected.
+
 ## Findings
 
 | Case | Native behavior | Resim-only skip assessment |
@@ -111,6 +119,11 @@ structurally possible, but no runtime trace has demonstrated the complete path.
 
 ## Recommendation
 
+The checked source's current exclusion is explicit: headless dispatch rejects
+exact `uChrChain` DTI `0x140D44920` in move and late passes. Category 13 being
+enabled does not mean these solvers run. Rocket has an additional live/resim
+animation-only hook policy; it does not extend to Felicia or Shuma.
+
 Keep the current exclusion while collecting targeted evidence rather than adding
 all six Shuma solvers. Test Shuma down actions 300-303 and 311-313 against eligible
 follow-up/OTG attacks, including frozen frames. Record current blend, stop/init
@@ -123,5 +136,13 @@ a resim-only skip or claim that either character will desync. Solver/history and
 blend state remain outside a dedicated chain snapshot policy.
 
 Parser: `tools/audit_chain_gating.py`. Full extracted command inventory:
-`/tmp/opencode/felicia_shuma_chain_gating.json`. Parser tests exercise the recovered
+`/tmp/opencode/felicia_shuma_chain_gating.json` (original temporary artifact,
+not revalidated on October 26). Parser tests exercise the recovered
 relative offsets and packed operands; they are not gameplay determinism tests.
+
+Related boundaries: [resource/owner overlap audit](gameplay_chain_audit.md),
+[Rocket trial and timings](rocket_tail_chain_performance.md), and
+[fighter push versus generic chain collision](scollision_rollback_snapshot.md).
+In particular, `uCnsChain__move @ 0x14070D830` has resource/binding reset and
+collision-queue duties; it is not evidence that skipping a differently owned
+`uChrChain` only removes solver arithmetic.

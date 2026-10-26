@@ -2,6 +2,8 @@
 
 **Investigation: 2026-09-04. Static Ghidra analysis + current plugin source review.**
 **Status: proposed implementation, not implemented or runtime-validated.**
+**Reviewed 2026-10-26:** the proposal remains a proposal; current wait-popup
+ticks are not owner-local full native menu support.
 
 ## Recommendation
 
@@ -187,7 +189,25 @@ actions require explicit existing or new synchronized session transitions;
 - Close command list/controls repeatedly; test pause-reason overlap, scene
   teardown, snapshot ownership and object lifetimes.
 
-Ghidra updates from this investigation: named/typed the four pause open/poll
+Historical Ghidra updates from the 2026-09-04 investigation: named/typed the four pause open/poll
 helpers above, applied `sGameUi*` to pause consumption, and corrected the
 move-line helper's missing pause argument. No executable bytes or plugin source
 were patched.
+
+## 2026-10-26 evidence boundary
+
+Read-only live review used **8193**, `umvc3.exe.unpacked.exe`.
+The body at `0x1402C1600` still calls
+`sUnit__updateMoveLineVariantA` with the queued pause Boolean for the listed
+line ranges. Disassembly at `0x1402C0210` computes `sUnit+0x38+line*0x30`
+and forwards R8B, supporting the three-argument interpretation. Existing
+`sGameUi`/`sUnit` types were used without editing the database.
+
+Direct source review of `gameui.cpp`, `framestepper.cpp`, and `controller.cpp`
+confirms immediate request/consume for waits, UI-only wait ticks, logical-input
+capture, and client-keyboard merge at gameplay remapping. Full restart now can
+replace the action/stage area chain through `aChrSelectBlank`; any future pause
+arbiter must retire its menu ownership during that path too, not only phase 12.
+The other menu/control helpers and field offsets above retain their historical
+evidence and were not all re-decompiled. No Ghidra mutation, game test, or
+implementation of this proposal was performed in this review.

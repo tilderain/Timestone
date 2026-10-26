@@ -1,7 +1,9 @@
 # D3D9 lifecycle repair: common boundary for ERR09 triggers
 
-Research date: 2026-09-05. Native executable inspected through Ghidra:
-`umvc3.exe.unpacked.exe`. The working-tree implementation is described below;
+Research begun 2026-09-05; reconciled with permitted source and native evidence
+on **2026-10-26**. Native executable: Ghidra **8193**,
+`umvc3.exe.unpacked.exe`, image base `0x140000000`.
+The working-tree implementation is described below;
 real driver/overlay validation is still required. See
 `d3d9_57d463b_regression.md` for the commit comparison.
 
@@ -10,9 +12,11 @@ real driver/overlay validation is still required. See
 `d3d9reset.cpp` now owns a twelve-hook native controller: property queue,
 graphics-option synchronization, native apply/release boundary, cooperative
 checks, UI dispatch, Reset submission and HRESULT handling. Device Reset itself
-is hooked at device creation. The WM_PAINT-only redraw is suppressed to keep
-window repainting out of concurrent overlay presentation; see
-[`steam_overlay_window_drag_crash.md`](steam_overlay_window_drag_crash.md).
+is hooked at device creation. Earlier integration notes report suppression of
+WM_PAINT-only redraw to keep window repainting out of concurrent overlay
+presentation. The older companion
+note named `steam_overlay_window_drag_crash.md` is absent from this checkout;
+its claimed WM_PAINT integration was not rechecked in this source-limited review.
 The group of native hooks is enabled together;
 installation failure removes only this controller's hooks and stops startup with
 an explicit error. MinHook initialization or device-hook failure also stops
@@ -80,10 +84,13 @@ settings are sent to the peer. No abstract controller interface, additional
 rendering thread, automatic VSync fallback, or forced release of third-party
 resources is introduced.
 
-Tests in `tools/test_d3d9reset.py` execute production functions against mocks:
+The earlier test notes report mock-based coverage in `tools/test_d3d9reset.py` of
 reset/admission, immutable UI jobs and bounded retries, native release-only
 ordering, property queue ownership/coalescing, native creation ownership and
-startup failure, and hook-installation failure/rollback. These do not prove actual
+startup failure, and hook-installation failure/rollback. Its current compatibility
+with production source was not verified and no tests were run in this review.
+Do not interpret historical test results as a current passing run. Mocks do not
+prove actual
 driver, overlay, allocation-failure, or native worker behavior. Native healthy
 GPU fences/worker waits are retained and can still stall if their implementation
 or driver stops responding; the UI-job timeout cannot interrupt those waits.
@@ -91,11 +98,14 @@ or driver stops responding; the UI-job timeout cannot interrupt those waits.
 ### Lost-device release adapter evidence
 
 `ReleaseLostResources` follows `0x140540DB0`'s lifetime operations in order:
-three virtual `+0x28` deferred-release flushes; wrappers at `+0x8676E8`,
-`+0x8676F8`, `+0x8676F0`; native array cleanup `0x14053D230` preserving
-`+0x867718`; display wrappers/swapchains at `+0x8897C8/+0x8897C0` with stride
-`0x28`; and the texture-type `+0x30` callback/`+0x29` recreate flag over the
-resource list at `+0x8817B0` (count `+0x8897B0`).
+three virtual `+0x28` deferred-release flushes. The actual source order is:
+first flush; wrappers `+0x8676E8`, `+0x8676F8`; native array cleanup
+`0x14053D230` preserving `+0x867718`; display wrappers/swapchains at
+`+0x8897C8/+0x8897C0` with stride `0x28`; wrapper `+0x8676F0`; second flush;
+then the texture-type `+0x30` callback/`+0x29` recreate flag over the resource
+list at `+0x8817B0` (count `+0x8897B0`); final flush. This transcription is
+present in `d3d9reset.cpp:564-605`; its complete native teardown equivalence
+was historical research, not a new full teardown audit on 2026-10-26.
 
 It omits gamma, Clear, SetRenderTarget, Present and GPU query calls. Both base
 and derived renderer virtual `+0x28` resolve to `0x14053D5A0`, which does not
@@ -158,7 +168,11 @@ without a recoverable-failure branch around that rebuild. Merely returning a
 different value from the submission hook is therefore not sufficient to defer
 rebuilding. A coordinated outer transition boundary is required.
 
-## Recommended replacement architecture
+## Design contract and optional follow-up architecture
+
+The managed boundary above already implements much of this contract. The list
+is not a claim that every item below remains unimplemented, nor that optional
+last-known-good fallback or resource-owner tracing is installed.
 
 One presentation controller owns desired, pending and active configurations,
 plus a monotonically increasing successful device/resource generation.
@@ -225,9 +239,44 @@ no rebuilding after failed Reset, no render access during recovery, no duplicate
 startup Reset for an already-effective request, no peer overwriting local display
 settings, and explicit failure rather than fake recovery when compatibility fails.
 
-Ghidra changes: applied existing sRender/sApp types and named the VSync acceptor,
+Historical Ghidra changes: applied existing sRender/sApp types and named the VSync acceptor,
 Resolution acceptor, and UI-thread cooperative-level helper. Existing historical
 comments claiming installed experimental guards are not evidence those guards
 are present in the current plugin. Use the implementation-status section above
 for the current controller; the remaining design notes include optional follow-up
 work such as resource-owner tracing and last-known-good fallback.
+
+## 2026-10-26 verification ledger
+
+Read-only decompilation rechecked apply `0x14053D690`, Present
+`0x14053A250`, and UI dispatcher `0x14051F930` with the existing renderer/app
+types. Dispatcher instructions independently show Reset at `0x14051F98D`
+through vtable `+0x80`, HRESULT publication at `0x14051F9B5` to `+0x2AF0`,
+and job clearing at `0x14051FA40` to `+0x2AC4`. Apply still reaches rebuilding
+after its Reset submissions; Present still sets dirty `0x10` on DEVICELOST.
+Stale Ghidra plate comments about presentation-mask rejection and Ex prototypes
+are not evidence of current plugin behavior. No shared Ghidra changes were made.
+
+Current source anchors in `../UMVC3Hook/code/d3d9reset.cpp`:
+
+- `CreateRendererDevice` (`200-227`): renderer-owned creation request and
+  hook installation before native completion.
+- `ServiceUIJob` / `RunUIJob` (`311-388`): immutable input, actual hook-chain
+  result, and bounded waiting. The timeout cannot interrupt a synchronous driver
+  call serviced on the submitting device thread itself.
+- `HookResetDevice` / `HookAppReset` (`437-544`): no failed-Reset success
+  masking; retain failure and suspend the apply stack until success or exit.
+- `HookApplyGraphics` (`794-865`): dirty-state/rebuild checks then generation
+  publication; `D3D9Reset_BeginOverlay` (`1070-1097`) separately retries ImGui
+  recreation without declaring the native renderer unusable.
+- `D3D9Reset_InstallNativeHooks` (`925-975`): twelve-hook queued installation
+  and rollback; installation attempts are not runtime proof of success.
+- `HookBeginFrame` and rendering-thread override (`152-179`, `977-1009`):
+  only change native rendering mode outside a frame-in-flight. The settings
+  loader uses default `0` when the override is available; `-1` preserves the
+  observed native mode and `1` enables the worker. This is not an added thread.
+
+No game, real driver, Wine/Proton, overlay or allocation-failure experiment was
+run. External integration/startup callers outside the permitted source remain
+unrechecked. Controller correctness and actual driver recovery remain separate
+validation claims.

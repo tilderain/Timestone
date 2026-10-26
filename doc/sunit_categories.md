@@ -1,8 +1,17 @@
 # sUnit Categories and Synchronization Phases
 
-**Status: Native reference. Investigated in Ghidra on 2026-07-27.** Addresses
-refer to `ichneumon_sub/umvc3.exe.unpacked.exe` with preferred image base
-`0x140000000`.
+**Status: Native scheduling reference with current headless policy. Original
+capture analysis: 2026-07-27; live/source reconciliation: 2026-10-26.**
+Addresses refer to Marvel `umvc3.exe.unpacked.exe`, base `0x140000000`.
+Read-only checks on Ghidra 8193 covered `sUnit__moveLine` (`0x14051B4C0`),
+`syncLine` (`0x14051BF10`), `moveAfterLine` (`0x14051B6F0`), wrapper names,
+and current `sUnit`/`sUnit__MoveLine` layouts. Source policy was checked against
+`rollback_tick.cpp` and `rollback_runtime.cpp`. The historical category/DTI
+population and per-concrete callback table were not exhaustively recaptured or
+re-decompiled; their names are address-based earlier research labels.
+
+No Ghidra changes, game run or new timing measurement was performed. Serial
+dispatch and a matching checksum are not universal proofs about omitted units.
 
 ## Summary
 
@@ -22,22 +31,31 @@ the active lines in the supplied rollback profile.
 
 ## Native Traversal
 
-`sUnit` stores 64 primary lists beginning at `sUnit + 0x50`, with a stride of
-`0x30` bytes. The active primary-category count is at `+0xC38`.
+`sUnit` embeds 64 `0x30`-byte move-line **records** beginning at `+0x38`.
+Each record's head is at `+0x18`, so the head array is addressed from singleton
+`+0x50` with the same stride. The active line count is at `+0xC38`. Do not use
+the head pointer as the record origin; the previous table mixed those two bases.
 
 Each move-line entry contains at least:
 
-| Offset in entry | Meaning |
+| Offset From Record `+0x38 + line*0x30` | Meaning |
 |---|---|
-| `+0x00` | Primary-list head |
-| `+0x08` | Primary-list tail |
+| `+0x00` | Embedded `MtObject` vtable |
+| `+0x08` | Native line-name pointer |
 | `+0x10` | Line flags; bit 0 enables job dispatch, bit 1 disables the line |
-| `+0x18` | Delta-time coefficient |
+| `+0x18` | Primary-list head (`sUnit+0x50 + line*0x30`) |
+| `+0x20` | Primary-list tail |
+| `+0x28` | Delta-time coefficient |
+
+Equivalently, relative to the head address, flags are at `-0x08` and delta
+coefficient at `+0x10`, as used by current headless code. This distinction
+changes actual field interpretation, not just table formatting.
 
 `sUnit__addUnit @ 0x14051A6B0` appends a node to the requested line and writes
 the category into bits 3-9 of `cUnit + 0x10`. It then registers the unit in any
-applicable multi-mask arrays. There are 1,082 static calls/references to this
-function, and many pass a variable category, proving that the default line name
+applicable multi-mask arrays. The earlier inventory recorded 1,082 static
+calls/references; that count was not recomputed for the current database. Many
+pass a variable category, showing that the default line name
 is not an exhaustive description of its occupants.
 
 ## Per-Frame Phases
@@ -47,15 +65,24 @@ passes one category at a time:
 
 | Profile label | Fence | sUnit category function | Per-active-node virtual | Meaning |
 |---|---:|---|---|---|
-| `move` | 1 | `sUnit__moveCategory @ 0x14051B4C0` | `+0x40` | Main unit update; also performs two-stage unit initialization/destruction |
-| `sync phase 2` / `sync_job` | 2 | `sUnit__load @ 0x14051BF10` | `+0x50` | First late pass after collision/hit solving |
-| `sync phase 3` / `sync_save` | 3 | `sUnit__loadCategory @ 0x14051B6F0` | `+0x48` | Final late pass before manager/tail work |
+| `move` | 1 | `sUnit__moveLine @ 0x14051B4C0` | `+0x40` | Main update, initialization and staged destruction |
+| `sync phase 2` / `sync_job` | 2 | `sUnit__syncLine @ 0x14051BF10` | `+0x50` | First late pass after collision/hit solving |
+| `sync phase 3` / `sync_save` | 3 | `sUnit__moveAfterLine @ 0x14051B6F0` | `+0x48` | Final late pass before manager/tail work |
 
-The Ghidra names `load`, `loadCategory`, `save`, and `save_jobwrap` are historical
-misnomers. These functions do not serialize rollback snapshots. Native
-`sUnit__save_jobwrap @ 0x14051BFF0` opens fence 2 and dispatches vtable slot 12
-(`0x60`, `sUnit__load`) for every category. Native `sUnit__save @ 0x14051B850`
-opens fence 3 and dispatches slot 10 (`0x50`, `sUnit__loadCategory`).
+The old names `load`, `loadCategory`, `save`, and `save_jobwrap` are historical
+aliases. These functions do not serialize rollback snapshots. Current
+`sUnit__sync @ 0x14051BFF0` opens fence 2 and dispatches manager vtable slot 12
+(`0x60`, `syncLine`) for every category. `sUnit__moveAfter @ 0x14051B850`
+opens fence 3 and dispatches manager slot 10 (`0x50`, `moveAfterLine`). Manager
+vtable offsets must not be confused with the per-unit offsets in the table.
+
+Fresh bodies also show late-pass initialization. A state-1 unit is set active
+and receives setup `+0x28`; eligible units can receive an initial move `+0x40`
+inside `syncLine`. `moveAfterLine` can additionally run initial `+0x50` before
+its ordinary `+0x48`. Liveness/move flags are rechecked; a callback can retire
+the unit. These extra calls matter at spawn/reconstruction boundaries. State-3
+and state-4 teardown are scheduler visits, not a guaranteed two wall-clock-frame
+delay independent of pause, group masks or traversal.
 
 The node virtuals do not have one universal semantic name. Ghidra names such as
 `moveAfter`, `sync`, and `getBoundary` describe individual class implementations,
@@ -99,9 +126,11 @@ effect/model and attack-space lifecycle callbacks. Likewise, category 18 is a
 single coordinator callback that loops over both complete teams and commits
 authoritative combat state.
 
-### Rollback omission policy
+### Native Safety Boundaries
 
-Static analysis supports these policies for the current headless replay:
+The earlier analysis identified these conservative dependencies. They are not
+an exact description of every current filter or a proof that a whole line is
+safe to drop:
 
 - **Retain categories 8, 10-13, and 18.** Their late callbacks mutate combat,
   collision-facing, team, projectile, attack-space, target-link, or lifecycle
@@ -125,9 +154,31 @@ proven no-ops/presentation work. A category-only sync filter is useful for
 experiments, but categories 7 and 13 are mixed lanes and cannot be classified
 correctly by category alone.
 
-The profiler invokes category functions directly with line job mode disabled by
-rollback setup. Therefore the measured category duration is the serial cost of
-that lane, not a worker-thread CPU total.
+In the historical capture, gameplay line job mode was disabled, so category
+durations were serial lane wall time, not sums of worker CPU durations. Current
+headless code has distinct profiled/unprofiled dispatch and optional native job
+branches; do not assume the instrumentation is merely the unmodified native
+category function plus a stopwatch.
+
+### Current Headless Policy — 2026-10-26
+
+Both move and late-pass allowlists currently retain lines **3, 7, 8, 9, 10, 11,
+12, 13, 18 and 21**. Other lines receive move-phase state-3/4 cleanup rather
+than normal active callbacks. That cleanup preserves lifecycle work while
+omitting active simulation; it is not equivalent to deleting every skipped unit.
+
+Exact-object filtering further excludes `uChrChain` and selected ExAtkSpace
+parents/linked transition effects. Thus retaining line 13 does not mean all its
+objects are replayed. Category-14 retained presentation and Rocket's separate
+chain policy have their own contracts; see [super presentation](super_presentation_resim.md)
+and [chain gating](felicia_shuma_chain_gating.md).
+
+The exact mode-zero `uChrCpu` post path can retain binding cleanup/mode reset
+while omitting threat work, falling back to native when core references are
+invalid. This is not removal of CPU/input processing in general. The generic
+`sAI` service is separate and its two explicit headless callbacks are commented
+out. The active policy still needs matchup/mode/lifecycle tests; the historical
+table below is evidence for reasoning, not a current exhaustive runtime census.
 
 ## Categories 0-31
 

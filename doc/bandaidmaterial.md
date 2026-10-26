@@ -2,6 +2,12 @@
 
 ## Status
 
+Reconciled **2026-10-26** with `rollback_runtime.cpp`, permitted model/snapshot
+source, and read-only Ghidra **8193** (`umvc3.exe.unpacked.exe`, base
+`0x140000000`). Existing crash observations and the overlap example below are
+historical evidence, not a newly reproduced failure. No runtime changes, builds,
+tests or shared Ghidra mutations were made.
+
 This document describes a suspected rollback snapshot corruption path and a
 plan for removing the runtime material-cache guards after the root cause is
 verified. The snapshot overlap is currently a hypothesis, not a confirmed
@@ -33,7 +39,7 @@ Relevant native paths include:
 | `0x14055FDC0` | `uBaseModel_vfn22` | Iterates cached entries for render-binding refresh |
 | `0x140564110` | `uToonModel__method_140564110` | Calls material virtual `+0x38` |
 | `0x1405DCCA0` | cached render-binding refresh | Assumes its material/model argument is non-null |
-| `0x140549F50` | `uModel__getJointPosOrZeroByMaskedId` | Assumes nested model entries are non-null |
+| `0x140549F50` | Material-control value getter (historically misnamed joint-position lookup) | Traverses the target's material entries; its output is not established as a joint position |
 
 Material objects and their reference counts are process-local renderer state.
 They must not be restored from a gameplay snapshot or released repeatedly while
@@ -48,12 +54,34 @@ headless resimulation is replaying historical action transitions.
 - Suppressed resets mark the model for one deferred live validation.
 - `uBaseModel_vfn22` and `uToonModel__method_140564110` repair a marked cache
   before entering native unchecked traversals.
-- `uModel__getJointPosOrZeroByMaskedId` returns the native default vector when a
-  nested entry is missing during resimulation.
+- The historically named `hkGetJointPos` guard at `0x140549F50` returns the
+  native default vector when target material entries fail validation during
+  resimulation; do not infer joint-lookup semantics from its source/log name.
 - Character model post-move and particle-generator model presentation updates
   are omitted during headless replay.
 - `uBaseModel__resetMaterials` clears recycled entries before native code can
-  invoke their unrelated virtual methods.
+  invoke their unrelated virtual methods. If any non-null entry is invalid,
+  the current sanitizer zeros the **entire array**, including apparently valid
+  aliases, before native reset. This deliberately avoids uncertain releases;
+  it is containment with possible leaks, not ownership recovery.
+
+Checked source anchors: `rollback_runtime.cpp:134-223` (roster/weapon matching,
+release-slot validity, fixed 64-entry pending list), `536-636` (reset/repair),
+`664-704` (misnamed getter guard and character-only post filter), and
+`995-1049` (hook installation attempts). Pending-list overflow is silently
+unrecorded; pointer identity and a callable vtable do not prove allocation
+generation or semantic ownership. A count of zero is considered cache-ready.
+The hooks attempt installation individually, so source presence is not proof
+that every guard succeeded in a running process.
+
+Native instruction correction: `0x14055FAC0` is `JMP 0x140564110`.
+The latter calls material virtual `+0x38` at `0x140564158`, then ORs the
+`isCBuffer` predicate into model `+0x4FC` at `0x140564172`. Thus the existing
+repair hook at `0x140564110` also covers callers through that thunk; it does
+not make the loop a pure-rendering no-op. `0x1405E0530` gates on animation
+`+0x98`, samples/setters through the evaluator at `0x1405DA590`, **then**
+advances active clocks within the four slots. Sampler setter `0x1405DEDB0` can release/incRef
+resources. The proposed omission/removal policy must preserve those contracts.
 
 These measures are useful crash containment, but the material reset suppression,
 pending repair list, and render-time validation are bandaids. They react to a
@@ -79,10 +107,21 @@ region includes Hulk's material pointer array. Restoring that region can
 resurrect historical material pointers after their reference-counted objects
 have been destroyed.
 
-The current snapshot code uses the reported DTI size when it is at least the
-verified shared `cChr` boundary `0x68F0`; `0x6A60` is now only a fallback for an
-invalid size. This is a plausible root-level correction, but it must be verified
-against runtime allocation boundaries.
+The earlier snapshot correction used the reported DTI size when it was at least the
+verified shared `cChr` boundary `0x68F0`; `0x6A60` became only a fallback for an
+invalid size. This remains a plausible root-level correction, not a freshly
+verified current `BuildRegionsUncached` contract: that implementation was outside
+this pass's permitted reads. It must be verified against runtime allocation
+boundaries rather than inferred from this retained note.
+
+Current, narrower ownership evidence is visible in
+`concrete_snapshot.cpp:1210-1236`: concrete **shot** restore preserves the
+material cache pointer/count together (`+0x110..+0x120`), joint ownership header,
+and actor resource/helper block (`+0x13E8..+0x1440`). Its class-specific shot
+playback exceptions are not a universal character/material isolation proof.
+`ConcreteCharacterSnapshot_RestoreFields` (`1513-1551`) still combines detected
+tail scalars with verified/generated ranges; the explicit-range proposal below
+must not be represented as fully implemented for the entire character body.
 
 ## Verification Plan
 
@@ -236,11 +275,12 @@ fixed, remove the reset detour entirely.
 
 ### Phase 5: Reassess Adjacent Guards
 
-The null guard for `uModel__getJointPosOrZeroByMaskedId` and the particle-model
+The misnamed material-value getter guard at `0x140549F50` and the particle-model
 filter were introduced from related headless presentation crashes, but they are
 not strictly material-cache repairs. Remove them only after independently
-proving that effect model tables are initialized and owned correctly during
-resimulation.
+proving that their respective target material tables and effect-model resources
+are initialized and owned correctly during resimulation. They are separate
+proof obligations, not two joint-table fixes.
 
 ## Stress-Test Matrix
 
@@ -269,5 +309,8 @@ The material bandaids can be removed when all of the following hold:
 - Both peers retain deterministic gameplay checksums.
 
 Until these criteria are met, the runtime guards should be treated as temporary
-containment with explicit compile-time switches, not as the final rollback
-architecture.
+containment, not as the final rollback architecture. Explicit per-guard switches
+are a removal/testing recommendation, not a verified current implementation.
+No source evidence in the inspected runtime establishes the older experimental
+global material-post timing or exact-class skip as currently installed; see
+[`material_post_scope_20261016.md`](material_post_scope_20261016.md).

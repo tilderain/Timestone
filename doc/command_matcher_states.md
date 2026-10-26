@@ -1,8 +1,33 @@
 # Command Matcher State Requirements
 
 **Status:** Native behavior confirmed against `umvc3.exe.unpacked.exe` in
-Ghidra on 2026-07-28. Field meanings that remain uncertain are described by
-their behavior rather than given speculative names.
+Ghidra on 2026-07-28, with targeted live verification on 2026-10-26. Field
+meanings that remain uncertain are described by their behavior rather than
+given speculative names.
+
+## Live verification scope (2026-10-26)
+
+Target: **port 8193**, `umvc3.exe.unpacked.exe`. Re-read
+`cChrCmdSpatk__passesLineRestrictions @ 0x14002CDE0` and both ends of
+`cChrCmd__Line__evaluateCommandSteps @ 0x140028240`. The Spatk function tests
+the static record's **dword at `+0x18` (`in_RDX[6]`)**, not the
+mutable line's identically numbered offset. Values 0/1 implement the ground/air
+rules below when an owner exists. The entry has additional gates and precedence
+checks, so satisfying ground/air alone does not imply acceptance.
+
+The evaluator fetches a static command from `matcher+0x168` and uses the
+mutable line's step index to fetch its next opcode. A missing step resets the
+line; complete traversal resets progress and invokes matcher vtable `+0x48`.
+The common evaluation exit conditionally ages line `+0x1C` when it is greater
+than `-0.0001` and character time is not stopped. This exit is also reached on
+an incomplete/rejected step; it is **not only a successful-match timer update**.
+
+Existing `cChrCmd`, `cChrCmd__Line`, and `cChrInput` types were consulted, not
+modified. Receiver casts in opcode helpers remain imperfect; no helper name
+or inferred type was accepted as behavioral proof. The wide matcher-limit
+table, Combo restriction body, individual opcode helpers, and current autotest
+implementation were not fully revalidated in this pass. Their entries below
+are retained prior findings rather than a new exhaustive audit.
 
 ## Matcher instances
 

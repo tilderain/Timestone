@@ -1,6 +1,6 @@
 # Native Pause and Plugin Frame Stop
 
-**Status: Native reference with current-plugin override. Reviewed 2026-07-23.**
+**Status: Native reference with current-plugin override. Reviewed 2026-10-26.**
 Retail pause UI and the plugin's frame-step/desync stop are separate systems.
 The plugin does not enable native online pause synchronization.
 
@@ -99,7 +99,12 @@ to one layer safely converts retail online play into synchronized pause.
 The plugin's `framestepper.cpp` stops execution by intercepting the game move
 boundary. This is independent of native `uBattleUiPause` construction:
 
-- Manual frame-step pause is available only in Training mode.
+- Manual frame-step pause is gated by the helper named `IsTrainingMode`, but
+  its `BattleType != 5` rejection is currently commented out. It checks manager,
+  battle-setting, character-manager, and P1 node availability instead. Starting
+  a manual pause is additionally disabled in ordinary custom netplay, but
+  allowed in `LAUNCH_DUAL_TRAINING`. It is therefore not accurately described
+  as a strict native Training-mode gate.
 - A checksum desync can auto-pause in any mode by setting the plugin's
   `isPaused` state.
 - While plugin-paused, the hooked move is skipped unless one-frame advance is
@@ -111,9 +116,11 @@ boundary. This is independent of native `uBattleUiPause` construction:
   a desync alert is active, it also dismisses the alert locally and sends
   `DESYNC_UNPAUSE` during netplay.
 - Pressing `F11`, choosing Restart Match, or confirming a result requests a full
-  restart at the current frame without a scheduled frame lead. A restart packet
-  received during a desync wait also releases the pause so phase-12 cleanup can
-  run.
+  restart at the current frame without a scheduled frame lead. Full-match
+  restart currently uses the character-select-blank area teardown/rebuild when
+  `ChrSelImGui_ApplyRestart` succeeds, rather than unconditionally phase 12.
+  A restart packet received during a desync wait also releases the pause so
+  phase-12 cleanup or area teardown can run.
 - Restart packets carry the battle generation in which they were requested.
   Packets delivered after that generation has already restarted are discarded,
   preventing an old immediate request from firing again at the same frame in
@@ -124,6 +131,20 @@ does not synchronize arbitrary native pause-menu opening, navigation, or quit
 operations.
 
 ## Safety Boundary
+
+### Native UI pause is a third mechanism
+
+Besides `sMain` pause and the plugin's outer-move stop, the native UI queues
+pause requests through `sGameUI__requestPause` (`0x1402BF730`) and commits them
+through `sGameUI__consumePauseRequest` (`0x1402C1600`). Consumption gates move
+lines `0x00..0x16` and `0x1C..0x1F`, leaving `0x17..0x1B` alone. The root
+pause UI (`0x19`) and submenus (`0x18`) can therefore keep running while those
+gameplay lines are paused. `0x1402C0210` passes the requested state from R8B
+to the line flag helper; it is not a two-argument unconditional pause setter.
+
+`GameUI_SetWaitingForOpponent` already requests and immediately consumes this
+UI pause for startup/prediction waits. Closing its popup unconditionally
+requests unpause, so it is not an independent, composable menu-pause owner.
 
 Creating `uBattleUiPause` in native online mode is not sufficient for safe
 rollback pause. Any full-menu experiment must account for:
@@ -150,3 +171,12 @@ it does not claim these general native-menu guarantees.
 | `0x1401EC900` | Stage object move-pause flag writer |
 | `0x1402BA150` | Construct battle pause/gallery objects by mode |
 | `0x140521DF0` | Update `sMain` pause and timing state |
+
+## Review scope and evidence
+
+2026-10-26: checked `sGameUI__consumePauseRequest`'s body and the R8B/`0x30`
+line-stride disassembly of `0x1402C0210` in Ghidra 8193,
+`umvc3.exe.unpacked.exe`. Current-plugin statements were checked
+against `framestepper.cpp` and `gameui.cpp`; packet-generation filtering in
+the transport and the older full-pause/`sMain`/stage addresses were not fully
+re-audited. No runtime pause invariance or network synchronization test was run.

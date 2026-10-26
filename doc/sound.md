@@ -5,6 +5,35 @@ current source on 2026-07-23.** This is resource-format research, not a complete
 sound-runtime layout. Unknown fields remain unnamed rather than assigned inferred
 PCM or trigger semantics.
 
+## Focused verification — 2026-10-26
+
+Fresh read-only native bodies on **Ghidra 8193**,
+`umvc3.exe.unpacked.exe`: structured allocator `0x1402A21F0`,
+queue processor `0x1402B0E00`, persistent wrapper `0x1402A2A10`, and variant
+selector `0x1402A9110`. Preferred VAs here assume image base `0x140000000`.
+No Ghidra mutations or game/runtime tests were performed.
+
+| Boundary | Fresh observation |
+|---|---|
+| Structured allocator | Voice-data virtual `+0x1A0 == 2` selects the SRQR lookup path. Missing/disabled entries fail; signed **SRQR entry `+0x1E >= 1000`** additionally returns disabled `cRef` through `0x1400239C0`. This is not a blanket check on every resource/source type. |
+| Type distinction | The voice-data discriminator above is not the SRQR entry's own dword `+0x04`. Entry types 0..5 are subsequently mapped to request source types 1..6. Do not read "type 2" as rejecting every concrete clip with entry type 2. |
+| Queue submission | Six slots at `sGSound+0xA38`, stride `0x438`; delay, object-alive, UI, and time-scale gates precede submission. At `0x1402B0FE3`, queued ID `+0x18` loads into R9D; `0x1402B1019` calls `0x1402A2A10`, returning to `0x1402B101E`. No direct variant-resolver call in that body. |
+| Wrapper | `0x1402A2A10` writes that cue into a new request, marks it persistent, calls the shared allocator, and resets the consumed input ref, including failure paths. No direct call to `0x1402A9110` here either. |
+| Variant resolver | `0x1402A9110` draws from global RNG after finding the voice ref, then uses resource identity/labels to select mappings. Normal pain groups map to silence or concrete cues; merely queueing a group does not invoke this resolver. |
+
+Disassembly anchors: signed threshold `CMP word [RBX+0x1E],AX` at
+`0x1402A22F5`, `JL 0x1402A2363` at `0x1402A22F9`; original queue call bytes
+`E8 F2 19 FF FF` at `0x1402B1019`. Static signatures remain partially inferred
+(the wrapper's decompilation omits stack arguments); use callsite instructions
+rather than copying its four-argument pseudocode as a complete ABI.
+
+Current source was read directly in `rollback_hooks.cpp` and `rollback_rng.cpp`.
+The region-builder portion of `rollback_snapshot.cpp` still registers the global
+RNG's 16 bytes, independently of audio presentation. The bank/source-format
+sections below remain earlier research, **not freshly re-read archive evidence**.
+Installed-bank values in [pain_voice_fix.md](pain_voice_fix.md) are unauthenticated
+against a clean depot. Proposed pain fixes remain uninstalled and untested.
+
 For the missing character pain voices, see [pain_voice_fix.md](pain_voice_fix.md):
 the queued damage path bypasses variant resolution and submits group IDs rejected
 by the structured allocator. That report includes resource evidence and a scoped
@@ -16,15 +45,20 @@ The native `sSound` singleton pointer is stored at `0x140E18520`, and
 `sSound__move` is at `0x1405CC040`. Sound state is presentation state and is not
 included in rollback snapshots.
 
-Current `hkSound_move` behavior is:
+Current `rollback_hooks.cpp::hkSoundMove` behavior is:
 
 - During re-simulation, return without calling native `sSound__move`.
-- During normal frames, inspect at most 40 inline sound scenes beginning at
-  `sSound+0x70`, using stride `0xB50` and count `sSound+0x1CF50`.
-- Clear a scene's model attachment at scene `+0x80` unless its DTI derives from
-  `uBaseModel` and it can safely dispatch the model matrix virtual at vtable
-  `+0xA0`.
-- Call native `sSound__move` after that cosmetic attachment validation.
+- During normal frames, call native `sSound__move` directly.
+
+**Source correction (2026-10-26):** the earlier 40-scene inline sweep
+(`sSound+0x70`, stride `0xB50`, count `+0x1CF50`) is historical, not the current
+`hkSoundMove` implementation. Validation now lives in
+`hkSceneUpdateSoundEnv @ native target 0x1405D6CD0`: it reads the scene's model
+at `+0x80`, joint index `+0x88`, and position mode `+0xC0`. It clears the model
+slot when `IsBaseModelObject` fails, the matrix virtual at vtable `+0xA0` is
+inaccessible/non-executable, or mode 2 has a negative joint index, then calls the
+original environment update. This is current plugin policy, not a freshly
+decompiled native layout proof or a guarantee against all object-lifetime races.
 
 Sound starts are also guarded at `sGSound__callVoicePlayOrStopVt` at
 `0x1402A3380`. Re-simulation drops play dispatches (`flag == 0`) because the
@@ -47,6 +81,15 @@ is safe to stop and cannot orphan a backend loop when the shot is reconstructed
 repeatedly. The separate raw start wrapper `sSound__playSoundWithDb` at
 `0x1405D28B0` is also suppressed during re-simulation; cookie-based stop paths
 remain enabled.
+
+The variable name `isLooping` in `hkGSoundCreateVoice` tests request flag `0x80`;
+it does not prove every flagged request audibly loops. The character queue uses
+the persistent wrapper too. Source inspection confirms this guard and the native
+disabled-cookie return, but not successful hook installation in a live process.
+`rollback_rng.cpp::hkSoundRandomVariant` saves/restores global state only while
+`Netplay_IsActive()`. Its selected low-level presentation callsites are not a
+universal bank-picker isolation guarantee. See the pain report for offline/replay
+RNG requirements and the corrected normal heavy-pain probability table.
 
 This prevents headless ticks and stale post-rollback model references from
 advancing or dereferencing audio-scene presentation state. Type validation is

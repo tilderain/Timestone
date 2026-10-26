@@ -1,3 +1,0 @@
-⚙ ghidra_functions_rename [old_name=MtHeap__alloc, address=, new_name=cParticleGenerator__selectTrackFrameIndex, port=8192]
-⚙ ghidra_functions_set_comment [address=0x14080C1D0, comment=Selects a particle keyframe/sample index from the track descriptor mode at descriptor+3. Called during active generator motion; descriptor must match the generator resource at generator+0x68. Rollback must not copy mode/timeline state between same-DTI generators backed by different resources., port=8192]
-⚙ ghidra_functions_set_signature [name=, address=0x14080C1D0, signature=uint32_t cParticleGenerator__selectTrackFrameIndex(cParticleGenerator *generator, void *trackDescriptor, void *particle), port=8192]

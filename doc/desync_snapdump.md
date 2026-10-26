@@ -1,6 +1,25 @@
 # Desync Snapshot Dumps
 
-Enable the code-only diagnostic switch before building:
+## Current recorder contract — source checked 2026-10-26
+
+Direct checks used `rollback_snapshot.cpp`, `rollback_restore.cpp`,
+`rollback_resim.cpp`, `rollback_tick.cpp`, `rollback_snapdump.cpp/.h`,
+`concrete_snapshot.cpp` and `rollback_memory.cpp`. No build/game/test or new
+memory measurement was performed. The recorder stores **selected manifest
+regions plus explicit diagnostic shot records/counts, not a heap checkpoint**.
+It does not serialize every auxiliary restore contract or all effect graphs,
+clone graphs, allocator state, resource contents or scheduling state. A matching
+dump therefore cannot establish complete simulation equivalence.
+
+Read-only Ghidra **8193 / `umvc3.exe.unpacked.exe`** checked
+native `sAction` (0x250), `cChrInput` (0x570),
+`sAction__subStepHelper @ 0x14014F410`,
+`uActorGameModel__updateMaterialVjobs @ 0x140200F50` and
+`sHitSolver__resetActiveNodes_thunk @ 0x140259E90`. Types were read, not mutated.
+Other field interpretations below are preserved historical analysis, not all
+reverified here.
+
+The compile-time diagnostic switch is:
 
 ```cpp
 // UMVC3Hook/code/rollback_snapdump.h
@@ -12,7 +31,13 @@ implementation and all integration calls during preprocessing. Such a build
 performs no snapdump hashing, allocation, copying, branching, or desync file
 work and has no snapdump history memory allocation.
 
-The rollback plugin retains the last 255 packed rollback snapshots. At the
+**There is also a runtime gate.** In `Timestone.ini`, set
+`[Rollback] EnableSnapDumpWrites=1` before launch. `SnapDump_CaptureEnabled`
+caches this setting on first use; missing values are written as `0` and capture
+is disabled. `SnapDump_WritesEnabled` uses the same gate. Compiled-in does not
+mean actively retaining history by default. Restart to change this cached value.
+
+When capture is enabled, the plugin retains up to 255 packed snapshots. At the
 normal confirmed-checksum desync trigger, both
 peers write a `desync_*_host_fN.usdp` or `desync_*_client_fN.usdp` file beside the
 plugin DLL.
@@ -24,24 +49,39 @@ Each frame contains:
   hashes, sizes, and restore flags.
 - Local and remote inputs assigned to the snapshot.
 - Shot, effect, collision-clone, and model-render-state counts.
+- Version-4 shot records with spawn/reference metadata, flight/concrete body and
+  collision primitive information; counts alone are not the entire shot payload.
 - Whole-snapshot and manifest hashes.
-- Stable construction-time names such as `globalRng`, `sAction.full`,
+- Stable construction-time names such as `globalRng`, `sAction.compact`,
   `uCharacter.team0`, and `uCharacter.motionChannels`.
 
-Re-simulation replaces the same absolute frame in the 128-slot history, so the
+Re-simulation replaces the same absolute frame in the **255-slot** history, so the
 dump represents the corrected canonical timeline rather than stale prediction.
 The on-disk payload uses XOR run-length encoding against the preceding frame.
-At the expected 2-3 MiB per snapshot without projectiles, the in-process history
-uses approximately 256-384 MiB plus dynamic shot/collision data. Each slot is
-released when its absolute frame is overwritten or rollback state is reset.
+The old 256–384-MiB estimate assumed a stale 128-slot history and a guessed
+2–3-MiB payload. It is not a measured current memory footprint and must not be
+used for sizing. Storage depends on actual manifests, occupied slots, aligned
+metadata, retained capacity and copied shot vectors. Overwriting a frame reuses
+its slot capacity (growing when required); reset releases owned history storage.
 
 The packed snapshot bytes are shared with the live 16-frame rollback ring, so
-the per-frame capture path performs only the original live-region copy and one
-compact region-metadata pass. Slot storage is reused and grows in 1 MiB increments.
+the successful shared-storage path avoids a second full region-byte copy. It
+still performs the metadata pass **and copies `slot.shotRecipes` into history**,
+including owned vectors. The fallback capture path can copy region bytes if
+backing is not shared. History backing grows in 1-MiB increments; ordinary
+independently owned snapshot storage uses 256-KiB rounding.
 Snapshot hashes, per-region hashes, name expansion, manifest construction, and
 XOR/RLE compression are deferred until the desync trigger has paused the match.
 
 ## Compare Peers
+
+The commands and normalization policy below are retained usage and historical
+investigation evidence. Their implementation was outside this refresh's scoped
+source reads and was not rerun. The writer now emits **USDP version 4**; the
+older v1/v2 descriptions below are format history, not current writer limits.
+Verify reader/export compatibility against the dump version. Semantic exclusions
+can hide mismatches and do not prove buffers safe to omit from rollback; use
+conservative comparison as well.
 
 Run:
 
@@ -83,8 +123,10 @@ process those slots conservatively.
 
 The same default-on override excludes complete
 `uCharacter.externalAnimation` and `uCharacter.jointStates` regions. These
-captured animation-wrapper and joint-work buffers are derived visual state and
-may reflect process-local render timing. `--no-skip-frame0-pointers` restores
+captured animation-wrapper and joint-work buffers were treated as derived visual
+state by this comparator policy and may reflect local render timing. That policy
+does not prove gameplay irrelevance: capture retains them to keep motion and
+collision history coherent. `--no-skip-frame0-pointers` restores
 their conservative comparison along with the other default overrides.
 
 Two `sAction`-labelled cases are also explicitly excluded. The real `sAction`
@@ -98,9 +140,9 @@ and compact duplicate regions skip this complete `cRef`. The broad
 the peers' allocation displacement. No actual `sAction` gameplay scalar is
 covered by either rule.
 
-The comparator also excludes complete `uCharacter.motionBlend` regions by
-default. These per-joint interpolation work buffers are treated as visual-only
-derived state rather than authoritative rollback state. Like the external
+The documented comparator also excludes complete `uCharacter.motionBlend`
+regions by default. This diagnostic semantic override is not native proof of
+visual-only state or permission to omit capture. Like the external
 animation and joint-work exclusions, this semantic override applies to every
 byte in each buffer even when no difference was present at frame 0.
 
@@ -179,12 +221,15 @@ The final pointer-shaped offsets in this capture are also normalized at
 `+0x6740`, and `+0x67f0`. Their changed bytes form peer-local heap addresses;
 adjacent four-byte values remain compared.
 
-`sAction.full+0x3634` is also excluded. The full region is a deliberate 0x20000
-broad capture for defeat replacement, while current Ghidra gives the real
-`sAction` size as 0x250. The byte is outside both that object and the separate
-0x300 `sAction.compact` restore region. `Rollback_RestoreSnapshot` restores only
-the documented compact ranges for the latter, so this broad-capture spill is
-diagnostic-only and cannot alter rollback simulation through the snapshot path.
+`sAction.full+0x3634` was also excluded in the historical comparison. That
+0x20000 capture included adjacent memory beyond the real 0x250-byte `sAction`.
+It was **not inherently diagnostic-only**: the historical unmatched broad
+region could fall through to generic restore, so exclusion from comparison did
+not prevent simulation writes. Current source comments out `sAction.full`
+(its commented size is now 0x250) and retains the 0x300 `sAction.compact`
+region plus its auxiliary allocation contract. That active region has 0xB0 of
+spill but a dedicated range restore ending at +0x21C, keeping the fade pointer
+at +0x168 live. Current absence does not retroactively make old spill harmless.
 
 The `uCharacter+0x133c` differences remain compared. Ghidra identifies the full
 32-bit field as `uActorGameModel::mAnmSerial`, but executable behavior overturns
@@ -326,11 +371,11 @@ The first frame-0 `sAction` differences illustrate the distinction:
 Therefore the `sAction` report is not fabricated: offsets below `0x250` are
 bytes from the real object. However, byte-level output must be interpreted with
 pointer alignment and inheritance in mind. Only offsets beyond `0x250` are
-  guaranteed to be adjacent captured objects rather than `sAction` fields.
+  outside the established `sAction` type, not automatically named adjacent objects.
 
-After removing those non-gameplay fields, the current pair leaves only two
+After applying those diagnostic exclusions, the historical pair left only two
 pointer slots: `sAction+0x120` (`mpActionParam`) and `sAction+0x1d0`
-(`mpCamList`). The dump values confirm that only allocation addresses differ:
+(`mpCamList`). The differing bytes are consistent with allocation-address noise:
 the pointers have the same low-level resource role and stable peer-local
 displacement across the timeline. Ghidra confirms that `sAction::classFunc`
 loads `boot\\actionparam` and `boot\\actioncam`, while
@@ -384,9 +429,10 @@ meter and recoverable-life calculations, DHC commands, action-joint movement,
 team transitions, mission flight logic, and life-gauge display. The resource is
 therefore immutable but gameplay-authoritative. Existing dumps capture only the
 raw `rActionParam *`, not its resource key or payload, so they cannot prove that
-host and client pointers refer to identical content. `mpActionParam` must remain
-a meaningful difference until a stable resource identity or payload hash is
-captured and validated.
+host and client pointers refer to identical content. `mpActionParam` content
+equivalence remains unproved until stable resource identity and payload hashes
+are validated. The historical aligned-address normalization described above
+only suppresses raw address noise; it does not validate resource bytes.
 
 `sResource::hashKey_dtiIdCRCPath` establishes the native logical identity used
 by the resource cache. It removes one leading backslash, collapses repeated
@@ -401,6 +447,11 @@ identity should include the native key and a hash of the immutable converted
 bytes (plus byte length), and normalization should require all values to match.
 
 ## Verification
+
+These are existing verification commands, **not tests run by this refresh**.
+Root-cause analysis must also consider inputs, capture phase, lifecycle/dispatch,
+resource readiness, RNG and post-restore mutation; fields/recipes alone do not
+exhaust the possible causes.
 
 ```sh
 python3 -m unittest tools/test_compare_desync_dumps.py

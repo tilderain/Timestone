@@ -42,8 +42,9 @@ be reported as successful optimization runs.
 1. Enable rollback profiling at compile time before building. The operator may
    set the profiling switch manually; this specification does not prescribe a
    compiler flag.
-2. Perform a clean release build after changing the profiling setting. Do not
-   compare objects compiled with different profiling settings.
+2. Ensure release objects consistently use the selected profiling setting.
+   Use `make -j8`; an exceptional clean rebuild needs a concrete dependency-
+   tracking reason and authorization. Do not compare mixed profiling settings.
 3. Do not deploy, copy, or inspect the installed ASI location. The project is
    already deployed through its existing setup.
 4. Use a release build. Debug timings are not representative.
@@ -66,10 +67,10 @@ be reported as successful optimization runs.
 
 ### 4.1 Build
 
-Manually enable rollback profiling (if it is not already enabled), then rebuild from clean objects:
+When authorized, enable rollback profiling (if needed), then build consistently
+with the project's normal command:
 
 ```bash
-make clean
 make -j8
 ```
 
@@ -683,7 +684,8 @@ After the final accepted optimization:
 
 1. Run the relevant desync suite with profiling still enabled once.
 2. Disable rollback profiling for production.
-3. Perform a clean release build.
+3. Perform a consistent release build with `make -j8`; justify any exceptional
+   clean rebuild as described above.
 4. Run a final smoke test of battle startup, rollback, match end, and restart.
 5. Keep raw profiles and the report as evidence; do not commit generated profile
    JSON unless explicitly requested.

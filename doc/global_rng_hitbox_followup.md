@@ -3,6 +3,30 @@
 Ghidra PC audit, 2026-09-05. Native executable behavior, not a runtime
 reproduction. Game archives were inspected read-only, in memory.
 
+## Verification status — 2026-10-26
+
+Fresh read-only Ghidra check: `umvc3.exe.unpacked.exe`, **port
+8193** only. Re-decompiled `0x14014EB80` and `0x14014EAB0`: non-null owners
+are tested against character DTI `0x140D44A30`, choosing owner `+0x2D80` or
+global state; both non-null routes enter/leave the critical section. Null owners
+use global state without that wrapper lock. This reconfirms the **conditional**
+global fallback premise, not an ordinary-match instance of it.
+
+The initializer-to-collider traces, primitive inventory, and installed SHT counts
+below remain the **2026-09-05 evidence**. They were not re-decompiled/re-read in
+this bounded pass, and the archives were not clean-depot authenticated. The
+fresh grenade move check at `0x1401688D0` is documented separately in
+[deadpool_grenade_rng.md](deadpool_grenade_rng.md); it must not be substituted
+for evidence about generic spawn-error matrices.
+
+Current source `rollback_snapshot.cpp::BuildRegionsUncached` still registers
+16 bytes at `0x140D765D8`. `rollback_rng.cpp` isolates selected presentation
+callers during netplay, not all possible global consumers. These are source
+policies, not proof that the native paths below always use character RNG or that
+an arbitrary audio change is desync-safe. Remaining discriminating work is a
+runtime owner/DTI trace at the actual draw and collision comparison with identical
+inputs. No instrumentation, build, game changes, or Ghidra mutations here.
+
 ## Result
 
 There is an **end-to-end conditional global-RNG-to-projectile-hitbox path** in

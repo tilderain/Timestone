@@ -1,12 +1,44 @@
 # Missing pain voices: native cause and code-patch design
 
 **Research date:** 2026-09-04. Ghidra program:
-`ichneumon_sub/umvc3.exe.unpacked.exe`, image base `0x140000000`.
+`umvc3.exe.unpacked.exe`, image base `0x140000000`.
 
 **Status:** Failure mechanism verified in native code and locally installed
 character voice resources. Patch design below is not installed or runtime-tested.
 The installed archives have not been authenticated against a clean Steam depot;
 the audit emits resource SHA-256 values to make comparisons reproducible.
+
+## Focused recheck — 2026-10-26
+
+Fresh read-only Ghidra **8193**, `umvc3.exe.unpacked.exe`:
+`0x1402A21F0`, `0x1402B0E00`, `0x1402A2A10`, and `0x1402A9110` were
+re-decompiled. Queue-call and allocator-threshold instructions were also read,
+as were the heavy selector instructions at `0x1402A9605..0x1402A9620`.
+The previously recorded **heavy selector 20/30/10/40 is incorrect**; this
+executable uses **20/30/30/20** (silence / `0x1E` / `0x1F` / `0x20`). The
+proposal below now uses the verified threshold 80, not 60. This removes the
+previously claimed probability mismatch with the recorded Ryu heavy bank group.
+
+Fresh native scope: the allocator threshold is on signed SRQR entry `+0x1E`
+in the **voice-data virtual `+0x1A0 == 2` path**, not on all source types and not
+on the entry's own type-2 discriminator. At `0x1402B0FE3`, the queue loads
+record `+0x18` directly into R9D before the call at `0x1402B1019`. Neither the
+queue processor nor its `0x1402A2A10` wrapper directly invokes the variant
+resolver. The wrapper stores the cue, sets persistence, calls the allocator,
+and consumes/resets the ref; failure must retain those ownership semantics.
+
+Current-source checks: `rollback_hooks.cpp` still suppresses persistent-flag
+`0x80` allocations during resimulation and returns a native disabled cookie;
+`rollback_rng.cpp` still isolates the high-level variant resolver only during
+netplay. `rollback_snapshot.cpp` still adds the 16-byte global RNG region.
+These are source facts, not a successful live-hook or desync test.
+
+All archive counts, hashes, sample formats, and bank weights below are retained
+**older installed-resource evidence**. They were not re-read in this pass and
+remain unauthenticated against a clean Steam depot. Other character/rank producer
+bodies in the native-chain table were not freshly rechecked. No patch, build,
+Ghidra mutation, or in-game playback/checksum test was performed. Both candidate
+fixes remain proposals, not established default-safe behavior.
 
 ## Conclusion
 
@@ -40,7 +72,7 @@ that introduced the mismatch remains unverified.
 | `0x1402B0E00` | `sGSound__processCharacterSoundQueues`: six voice records at `sGSound+0xA38`, stride `0x438`; waits for delay/time-scale gates. |
 | **`0x1402B1019`** | Calls `0x1402A2A10` with **unresolved queued ID**. No call to the variant resolver. Return address `0x1402B101E`. |
 | `0x1402A2A10` | `sGSound__createPersistentVoiceRequest`: builds request, sets flag `0x80`, calls shared allocator. This flag is also used for these queued voices; do not infer that every such voice audibly loops. |
-| `0x1402A21F0` | `sGSound__createStructuredVoice`: looks up the SRQR entry and rejects it when signed `entry+0x1E >= 1000`. |
+| `0x1402A21F0` | `sGSound__createStructuredVoice`: in the voice-data discriminator-2 route, looks up the SRQR entry and rejects it when signed `entry+0x1E >= 1000`. This discriminator is distinct from the entry's own type field. |
 
 The damage rank is obtained before resolving the damage animation, not inferred
 from a ground/air animation number. A fix at the queue's allocation boundary can
@@ -140,9 +172,14 @@ the higher-level allocator imposes an additional restriction that blocks them.
 Why that restriction exists in the port remains unresolved.
 
 This also qualifies the proposed hardcoded selector below: it reproduces the
-**PC executable's** selector, not necessarily the bank's authored probabilities.
-For Ryu heavy pain the bank is 20/30/30/20, while the executable selector is
-20/30/10/40. A validated, pain-only admission to the existing bank resolver could
+**PC executable's** selector, not necessarily every bank's authored probabilities.
+**Corrected 2026-10-26:** the recorded Ryu heavy bank and the freshly checked
+executable selector both use 20/30/30/20. At `0x1402A9605` the roll is compared
+with `0x32` (50), then at `0x1402A9616` with `0x50` (80); `SETGE DIL` and
+`ADD EDI,0x1F` choose `0x1F` for 50..79 and `0x20` for 80..99. The old
+20/30/10/40 claim incorrectly treated the second threshold as 60. There is no
+demonstrated Ryu-heavy probability advantage for the bank route on this evidence.
+A validated, pain-only admission to the existing bank resolver could still
 preserve bank-specific probabilities and mods better than hardcoded remapping.
 That alternative requires checking the later backend path, global RNG use and
 cookie/resimulation behavior in game before recommending it over remapping.
@@ -204,7 +241,7 @@ uint32_t ResolveNormalPainCue(uint32_t cue, uint32_t roll)
     case 0x17:
         if (roll < 20) return 0;
         if (roll < 50) return 0x1E;
-        return roll < 60 ? 0x1F : 0x20;
+        return roll < 80 ? 0x1F : 0x20;
     default:
         return cue;
     }

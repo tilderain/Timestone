@@ -2,6 +2,27 @@
 
 Ghidra recheck, 2026-09-05, PC `umvc3.exe.unpacked.exe`.
 
+## Verification status — 2026-10-26
+
+Read-only native recheck on **Ghidra port 8193**,
+program `umvc3.exe.unpacked.exe` (preferred image base `0x140000000`). Existing September
+consumer/resource evidence below is retained, not represented as a fresh full
+consumer census or archive audit.
+
+Fresh bodies: owner dispatchers `0x14014EB80` / `0x14014EAB0`, plus audio
+allocator `0x1402A21F0`, queue processor `0x1402B0E00`, request wrapper
+`0x1402A2A10`, and variant selector `0x1402A9110`. The key distinction is
+**stream selection versus synchronization**: a non-null non-character owner
+still selects global RNG, but under the wrapper's critical section; a null owner
+selects global RNG without entering that wrapper lock. Neither wrapper proves
+the entire global stream cosmetic or all its downstream users synchronized.
+
+Current-source checks are limited to `rollback_rng.cpp`, `rollback_hooks.cpp`,
+and the relevant region-builder portion of `rollback_snapshot.cpp`. The latter
+actively adds the 16-byte global state at `0x140D765D8`; its nearby broad comment
+about hit rolls/damage variance is not independent native evidence for those
+uses. No runtime test, patch, build, or Ghidra layout/name mutation was performed.
+
 ## Conclusion and limits
 
 The global stream is **not exclusively cosmetic**: native offline CPU action
@@ -23,6 +44,11 @@ dependency, but not an ordinary two-human reproduction of the global fallback.
   `MtXorShift__lockedAdvanceForCharOrGlobal @ 0x14014EAB0` select the supplied
   object's `+0x2D80` state if it is kind-of the character DTI at `0x140D44A30`.
   Null or non-character objects fall back to the global stream.
+- Both wrappers enter/leave the critical section only when the owner is non-null,
+  including the non-character/global fallback. The null/global route has no
+  wrapper-level lock. `0x14014EB80` returns an integer next value;
+  `0x14014EAB0` calls nextFloat01. Existing function comments that simply say
+  "CS-protected" omit this null-route distinction.
 - Inclusive integer helper `0x14014EB30` calls that owner-aware float dispatcher.
 - `MtXorShift__floatInRange @ 0x140455550` and
   `MtXorShift__intInRange @ 0x140455590` use the global stream directly.

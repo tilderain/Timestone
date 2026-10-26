@@ -5,6 +5,36 @@ retail executable, not plugin-owned types. Packed DTI size is decoded by current
 code as `(flagsAndSize & 0x7FFFFF) << 2`; names and addresses remain
 reverse-engineering evidence rather than a stable API.
 
+## Constructor recheck — 2026-10-26
+
+Fresh read-only decompilation of `MtDTI__MtDTI @ 0x14045D860` on Ghidra
+**8193**, `umvc3.exe.unpacked.exe`, confirms the size packing:
+
+```c
+sizeBits = (uint32_t)(byteSize >> 2) & 0x007FFFFF;
+decodedByteSize = (flagsAndSize & 0x007FFFFF) << 2;
+```
+
+The inverse is exact only for four-byte-aligned sizes representable in the
+23-bit field (maximum decoded size `0x01FFFFFC`). The constructor discards low
+two bits and masks excess high bits; it does **not** round a byte size up.
+Bits 23..28 receive `(param_7 & 0x3F)` and bits 29..31 receive the shifted
+`param_6` flags. Do not interpret the complete `+0x30` dword as a byte count.
+
+The constructor also qualifies the hash description below: if `param_5 == 0`,
+it computes CRC with seed `0xFFFFFFFF` and masks `0x7FFFFFFF`; otherwise it
+stores the supplied `param_5` directly at `+0x34`. Thus "always masked CRC"
+describes the computed-name path, not every constructor invocation.
+
+Current `rollback_snapshot.cpp` calls `DecodeDtiSize` in dynamic-list,
+character, and camera sizing and applies caller-specific bounds/fallbacks. Its
+helper definition was outside this pass's permitted reads, so this constructor
+check establishes the native encoding rather than freshly auditing every plugin
+decoder. DTI size alone does not validate an address, ownership, external buffers,
+or the safety of copying an entire object. Other tables/debug-tool claims below
+remain the earlier reference evidence; no full registration census, runtime
+enumeration, build, or Ghidra datatype/signature mutation was performed.
+
 ## Overview
 
 UMVC3 uses Capcom's MT Framework engine which includes a runtime type
@@ -31,7 +61,7 @@ From `MtDTI__MtDTI` constructor (`0x14045d860`):
 | +0x20  | 8    | parent      | Parent DTI (superclass)                    |
 | +0x28  | 8    | hashNext    | Next entry in global hash table bucket     |
 | +0x30  | 4    | flags/size  | Packed: type flags + instance size         |
-| +0x34  | 4    | hash        | CRC32 name hash (`& 0x7FFFFFFF`)           |
+| +0x34  | 4    | hash        | Supplied ID, or computed CRC32 name hash (`& 0x7FFFFFFF`) |
 
 ### DTI Initialization
 
@@ -40,7 +70,8 @@ From `MtDTI__MtDTI` constructor (`0x14045d860`):
 2. Stores `className` at `+0x08`
 3. Stores `parent` at `+0x20` (or `&PTR_PTR_140d22a28` if null — the root)
 4. Inserts itself into the parent's child list (sibling chain via `+0x10`)
-5. Computes hash: `MtCRC__getCRC(className, 0xFFFFFFFF) & 0x7FFFFFFF` → `+0x34`
+5. Stores supplied nonzero hash, or computes
+   `MtCRC__getCRC(className, 0xFFFFFFFF) & 0x7FFFFFFF` → `+0x34`
 6. Inserts itself into the global hash table at `bucket[hash & 0xFF]` (chain via `+0x28`)
 
 ### Type Hierarchy
@@ -244,7 +275,7 @@ struct MtDTI {
     MtDTI* parent;          // +0x20
     MtDTI* hashNext;        // +0x28
     uint32_t flagsAndSize;  // +0x30; low 23 bits store size / 4
-    uint32_t hash;          // +0x34 — CRC32 & 0x7FFFFFFF
+    uint32_t hash;          // +0x34 — supplied ID, or CRC32 & 0x7FFFFFFF
 };
 
 // Walk all registered types:

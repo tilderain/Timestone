@@ -26,7 +26,7 @@ Use the fast path in section 4.1.2; do not turn enforcement into duplicate resea
 
 Systematically analyze, name, type, and document the remaining unresolved
 functions in the current Ghidra database for
-`ichneumon_sub/umvc3.exe.unpacked.exe`.
+`umvc3.exe.unpacked.exe`.
 
 The database has already received broad automated processing. Existing work
 includes vtable method naming, class ownership inference, and naming of local
@@ -644,7 +644,8 @@ application through `ApplyClassLayouts.java`; ordinary function workers still
 follow the shared-structure boundaries below.
 
 Class-layout assignments must follow the entire target ancestry root first using
-`/home/god/ghidra_scripts/parents.txt`. Every unfinished ancestor is prerequisite
+`<ghidra-scripts>/parents.txt`, where `<ghidra-scripts>` is the configured
+external Ghidra script directory. Every unfinished ancestor is prerequisite
 work, not an optional follow-up. Release child field mapping after all ancestors
 have reviewed, target-supported layouts with stable boundaries and relevant
 fields; record the accepted versions and reuse unchanged work after drift checks.
@@ -978,9 +979,10 @@ the writer to its `Relevant Methods` table.
 
 ### 9.1 Evidence Sources
 
-Evidence strength, from strongest to weakest:
+Evidence sources (a heuristic ordering, not a rule that metadata overrides instructions):
 
-1. Explicit DTI, property, resource, or format string names.
+1. Explicit DTI, property, resource, or format string names, with their precise
+   scope recorded (class/property identity does not establish every method symbol).
 2. Confirmed vtable and constructor association.
 3. Multiple typed callers and callees agreeing on behavior.
 4. Stable field access patterns using established structures.
@@ -1142,7 +1144,7 @@ calls for every function.
 Reference worker prompt:
 
 ```text
-Research exclusively assigned functions in ichneumon_sub/umvc3.exe.unpacked.exe.
+Research exclusively assigned functions in umvc3.exe.unpacked.exe.
 Discover the live instance and verify its actual program ID, not just its title.
 Assigned roots: <EXPLICIT NON-OVERLAPPING ADDRESS LIST>
 Checkpoint: <UNIQUE WORKER TSV PATH AND SHORT EXCEPTION-NOTES PATH>

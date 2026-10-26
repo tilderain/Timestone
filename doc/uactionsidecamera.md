@@ -1,5 +1,12 @@
 # uActionSideCamera
 
+**Checked 2026-10-26:** native bodies `0x14001A700` (logical view and attachment
+transforms) and `0x14004ECA0` (fighter boundary classification), Ghidra **8193**,
+`umvc3.exe.unpacked.exe`. Direct source checks: `rollback_snapshot.cpp`,
+`rollback_restore.cpp`, `rollback_hooks.cpp`, and `rollback_tick.cpp`. Other
+native addresses/layouts and historical desync captures below retain earlier
+research; no new reproduction or exhaustive writer search was performed.
+
 `uActionSideCamera` is the slot-0 battle camera unit used for ordinary side
 tracking, throw tracking, scripted camera commands, and Maya-motion cinematic
 cameras. The object has DTI size `0x590` and is referenced by
@@ -38,7 +45,7 @@ the logical `uActionSideCamera` position and target. Their producer chain is:
 ```text
 sCamera__move @ 0x140532D80
   -> uActionSideCamera__getViewMatrix @ 0x14001A700
-  -> when sVibration+0x840 is active:
+  -> presentation shake stage, when sVibration+0x840 is active:
        sVibration__applyCameraShakeToView @ 0x140524220
        reads slot-0 offsets at sVibration+0x820..+0x838
   -> caches the resulting view matrix at viewport+0xA0
@@ -67,11 +74,35 @@ headless tick intentionally skips `sVibration::move`. Replacing the headless
 tick with the original native main tick also reproduces the desync because it
 starts from unrestored prediction-timeline vibration state.
 
-The deterministic correction point is the boundary refresh, not gameplay RNG:
-build its slot-0 frustum from `uActionSideCamera__getViewMatrix` without the
-vibration transform. The later normal `sCamera__move` can still apply vibration
-to the render view, preserving presentation while preventing camera shake from
-affecting gameplay classification.
+The deterministic correction point is the boundary refresh, not gameplay RNG.
+**This isolation already exists** in
+[`rollback_hooks.cpp`](../UMVC3Hook/code/rollback_hooks.cpp):
+`hkRebuildFrustumPlanes` hooks `0x1405351D0`. For active netplay and viewport 0
+only, it saves the cached render view, invokes the current camera virtual `+0x90`
+to obtain a logical view, temporarily substitutes that matrix while calling the
+original plane builder, then restores the render view. Non-netplay, other
+viewports, or missing camera/getter cases pass through. Hook installation success
+and runtime behavior still require runtime evidence; source presence is not a
+fresh successful-install test.
+
+The refreshed `0x14001A700` body itself contains **no vibration application**:
+it uses Maya work or logical position/target plus optional attachment transforms.
+The shake stage shown above belongs to the historical surrounding render-view
+producer investigation, not a call inside this getter. The original native
+producer/frustum bodies were not re-decompiled in this limited refresh. The
+temporary matrix substitution preserves shaken presentation while isolating the
+gameplay planes; it is not a request to disable all camera movement or shake.
+
+### Why the camera remains gameplay-bound
+
+The checked classifier `0x14004ECA0` resolves slot-0 bounds, tests the fighter
+position/radius against four planes in order `3,1,0,2`, and returns side bits.
+This is a gameplay consumer, not just a renderer. Camera-relative facing
+(`0x140051040`) and placement consumers remain prior evidence in this note,
+not freshly rechecked bodies. `rollback_tick.cpp` keeps category 3 in move/sync
+passes and calls `sCamera` movement after those passes, while omitting vibration
+movement. The source comment about jitter is not the sole reason for retaining
+the camera: its logical state and derived bounds have gameplay dependencies.
 
 ## Cinematic dispatcher
 
@@ -205,6 +236,13 @@ facing (`0x140051040`) and gameplay boundary classification. This is a concrete
 static missing-state failure path; no affected move has yet been reproduced.
 Restore now explicitly includes `+0xE8/4`, without copying adjacent padding.
 
+The checked scalar table also includes **`+0xF0/0x50`**, through `+0x13F`,
+including position-track destination `+0x130`. Its source comment records Frank's
+throw-camera split in `20260906_060832` at frame 7290 and later facing/hit-count
+differences at 7314/7315. This is retained diagnostic evidence, not a reproduction
+performed on October 26. Do not infer the old shorter destination range from the
+earlier missing-joint discussion.
+
 ### View Attachments
 
 `uActionSideCamera__getViewMatrix @ 0x14001A700` directly reads position
@@ -261,3 +299,17 @@ each selector call through `0x14001BA50`; their omission alone is not proof of
 a stale-state failure on that update path. `cAimInfo` references `+0xB8`,
 `+0xD0`, and `+0xE0` are already raw-restored, so their outstanding issue is
 reference validity rather than missing capture/restore.
+
+## Checked source boundary and remaining gaps
+
+The camera body and `sCamera` are separate active snapshot regions. Motion/request
+resources are pinned/released per slot; restore uses native add-ref/release on
+replacement. The camera scalar/reference policy is applied both initially and
+again after shot/model repair. Retained `+0x4D0` is roster-validated separately.
+The additional view attachments `+0x410..+0x42F` remain omitted, with activation
+and lifetime still unresolved. Raw restoration of the embedded `cAimInfo`
+references does not establish general reference safety. Shake isolation does not
+repair incorrect logical camera history or missing motion/request state.
+
+Related ownership boundaries: [model state](umodel.md),
+[constraint helpers](ccnshelper.md), and [collision snapshot](scollision_rollback_snapshot.md).

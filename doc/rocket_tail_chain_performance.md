@@ -1,7 +1,15 @@
 # Rocket Tail Chain Cost Investigation
 
-Static Ghidra investigation, 2026-10-08. This identifies work and scaling, not
-measured timings for an enabled Rocket tail during resimulation.
+Original static Ghidra investigation: 2026-10-08. The native-work table identifies
+work and scaling, not a solver-only timing measurement. Enabled callback timings
+from a later October 8 profile are linked below; they do not invalidate the older
+zero-call profiles or establish a worst-case budget.
+
+**Checked 2026-10-26:** Ghidra **8193**, `umvc3.exe.unpacked.exe`;
+freshly re-read `uChrChain__move @ 0x140035F90` and the permitted
+`rollback_model_policy.cpp`/`rollback_tick.cpp` source. Other table entries,
+resource dimensions and profiling captures retain prior provenance; no resource
+scan, timing rerun or in-game validation was performed.
 
 ## Resource Scope
 
@@ -40,6 +48,12 @@ Collision work is gated by +0x1D1 (collected collider geometry), +0x220
 values are not available in the desync dump; do not claim these queries dominate
 Rocket's cost without measuring the flags and their timings.
 
+The refreshed move body confirms owner/alive and virtual activity gates, stop/init
+flag preparation, owner time-scale propagation, blend advancement and delegation
+to `uChain__move`. Bypassing it is broader than bypassing solver arithmetic.
+Do not confuse it with `uCnsChain__move @ 0x14070D830`, whose checked body handles
+resource refresh, model/collider rebinding/reset and collision queue preparation.
+
 ## Determinism Boundaries
 
 The repeated sweeps use evolving positions/velocities and divide integration
@@ -60,6 +74,13 @@ Eight existing client profiles checked from 2026-08-29 and 2026-09-11 all record
 `uChrChain` visits with **zero calls and zero measured time** in move, sync-job,
 and sync-save phases. Those profiles were collected with chains skipped. They
 cannot establish how many milliseconds an enabled Rocket tail costs.
+
+The subsequent `nplive_20261008_103624` enabled-hook evidence is preserved in
+[Gameplay Chain Resource Audit — Rocket Timing](gameplay_chain_audit.md#rocket-timing):
+combined move/post-move averages were **15.02 us per tail** on host and
+**18.30 us per tail** on client, or **30.03/36.60 us per replay frame** for two
+tails. These are historical elapsed callback timings (nested in object timing),
+not new measurements, solver-only costs, or timings of today's skipped-tail path.
 
 ## Optimization Targets
 
@@ -88,6 +109,13 @@ history, force a reset pose, or enable chains during headless replay. Other
 characters and native dead-owner teardown remain unchanged. The two hooks must
 both install successfully before the policy becomes active; partial installation
 is pass-through and logs the policy as unavailable.
+
+More precisely, the source predicate selects the Rocket vtable at owner
+`chain+0x1320` and lifecycle state 1 or 2; it does **not** inspect the CHN resource
+name. Its scope is all matching Rocket-owner `uChrChain` callbacks, not a proved
+resource-specific `chain_sippo` filter. The dead-owner path passes through these
+hooks. Independently, headless dispatch excludes exact `uChrChain` DTI for every
+owner, so live-hook pass-through does not imply headless execution.
 
 This intentionally changes native tail-driven collision geometry and must run
 on both peers with the same build. It avoids the chain solver and its collider

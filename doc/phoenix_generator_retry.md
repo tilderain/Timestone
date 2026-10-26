@@ -1,5 +1,38 @@
 # Phoenix generator-construction retry — static trace, 2026-09-13
 
+## Refresh boundary — 2026-10-26
+
+This preserves the original asset counts, hashes and Phoenix call trace; **the
+archives and Phoenix-specific native bodies were not re-read** in this refresh.
+The static asset mismatch is not a new live measurement or a claim about pristine
+retail assets. Current read-only Ghidra work used port **8193**,
+`umvc3.exe.unpacked.exe`.
+
+The [eight-body lifecycle recheck](effect_lifecycle.md#2026-10-26-read-only-recheck)
+includes `uEffect__createGenerator @ 0x1405E27C0`,
+`uEffect__releaseGenerator @ 0x1405E6890`, and the current completion symbol
+`uBaseEffect__finish @ 0x1405EF2B0`. The first dispatches reset `+0xF8` even
+before rejecting a missing/empty resource. For a nonempty resource it attempts
+list creation, allocation, plain-record initialization and node initialization
+in order, dispatching graph release `+0x1A0` on a failed stage. Thus false is a
+**construction failure**, not proof of a failed allocator call. Missing-resource,
+zero-source-entry, zero-selected-node, resource-resolution, initialization and
+allocation failures must not be collapsed into one diagnosis. The exact
+zero-selected-node branch below remains the earlier `0x1405E2860` evidence.
+
+Current names of pipeline helpers are `uEffect__createParticleManager @
+0x1405E2860`, `allocGeneratorBuff @ 0x1405E0950`, `initJoint @ 0x1405E54C0`,
+and `initParticleManager @ 0x1405E55F0`; the older descriptive names below refer
+to these same addresses. These recovered names do not imply one homogeneous
+manager layout. Ordinary `cParticleGenerator` is currently `0x240` bytes.
+
+Direct source reading reconfirms `hkEffectCreateGenerator` in
+`rollback_effect.cpp` still logs `EFFECTALLOCFAIL` for a false low return byte.
+Its `expected` field is loaded from resource `+0x90`, not recomputed from passing
+runtime masks. A nonnull effect factory result and that log field do not prove
+graph readiness, particle existence or successful nested resource setup. No
+runtime retry frequency, heap pressure or slowdown contribution was measured.
+
 ## Finding
 
 Dark Phoenix's persistent slot `0xF` requests character EFL `0023` with group
@@ -15,7 +48,7 @@ all later resource-resolution, initialization, or allocation stages succeed.
 
 ## Inputs and reproducibility
 
-Ghidra: `ichneumon_sub / umvc3.exe.unpacked.exe`, image base `0x140000000`.
+Ghidra: `umvc3.exe.unpacked.exe`, image base `0x140000000`.
 Resource inspected read-only:
 `../ULTIMATE MARVEL VS. CAPCOM 3/nativePCx64/chr/archive/0036_cmn.arc`.
 These are installed assets; no pristine-distribution comparison was performed.
@@ -93,7 +126,8 @@ Decompressed EFL SHA-256:
 8. The factory still returns the effect object. Phoenix sets owner/control
    flags, adds it to category 13, and stores it in slot F.
 9. `uEffect__move` (`0x1405E5720`) sees the unset ready bit, tries construction
-   again, and takes `uBaseEffect__sleepOrKillOnCompletion` (`0x1405EF2B0`)
+   again, and takes current `uBaseEffect__finish` (older descriptive alias
+   `sleepOrKillOnCompletion`, `0x1405EF2B0`)
    on failure. Ordinary non-keep, non-fixed effects enter retiring state 3
    through `uEffect__kill` (`0x140016F20`).
 10. On the next base-character move,

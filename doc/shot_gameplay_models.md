@@ -1,6 +1,7 @@
 # Shot Models That Affect Gameplay
 
-**Status: Ghidra executable audit, 2026-08-24.**
+**Status: Historical Ghidra executable audit, 2026-08-24; bounded native timing
+and current implementation reconciliation, 2026-10-26.**
 
 **2026-09-05 qualification:** The SomersaultGrenade entry below is not sufficient
 evidence of model-to-gameplay feedback. A focused
@@ -11,6 +12,53 @@ callback does not read model completion. Treat that historical inventory entry
 and the counts including it as qualified, not proof of spin-dependent collision.
 
 ## Scope
+
+### What Was Rechecked On 2026-10-26
+
+The live target was **port 8193, `umvc3.exe.unpacked.exe`**. No per-class model
+inventory sweep was repeated, and no runtime test was run. The historical
+function addresses and class-specific evidence below remain useful anchors, but
+the checked date does not newly certify all of them. The common lifecycle
+recheck is itemized in [shot.md](shot.md#verification-boundary--2026-10-26).
+
+Two native bodies directly constrain model repair timing:
+
+| Anchor | Current native body evidence |
+|---|---|
+| `uShot__preMove @ 0x1401CCBE0` | After reference/callback validation and eligible step dispatch, native actor/model work calls the model move thunk before hitbox generation. This is branch-dependent: start delay and early-return conditions do not execute the entire sequence. Do not add a second unconditional per-frame model tick. |
+| `uModel__moveMotion @ 0x1405290D0` | Decompiled and instruction-checked: with a model and nonzero blend count, a motion `S_SETUP` bit invokes `setupMotion @ 0x140529820`, followed by `updateMotionParam @ 0x140531A00`, then `updateFrame @ 0x14052BBD0`. The test is bit `2` at `+0x56A + motion*0x180`. Sampling and frame advancement are distinct operations. |
+
+The inspected types support `Motion[0]` at `+0x560` with stride `0x180`; they
+are not a blanket proof of every recovered field name. No type or name was
+mutated. In particular, unrelated recovered `sShot__move @ 0x140150D00` was
+checked and is a **property registrar**, not the per-frame shot/model driver.
+
+### Current Source Policy, Not Native Inventory Proof
+
+A direct read of `rollback_model_policy.cpp` finds **14** entries in
+`SHOT_MODEL_POLICIES`: King Kobun, Fire Grenade, Hand Grenade, Iron Pipe,
+Somersault Grenade, Dog Missile, Prickle Board, Item Throw, Missile Emplacement,
+Weapon Cart, Pendulum Log, Kobun Launcher, Ouroboros, and Legion Tiger. Thirteen
+set `restorePlayback=true`; Legion Tiger uses `false` with setup retry and its
+separate evaluation path. Repulsor Blast SP remains outside that table with
+dedicated resimulation binding / reconstructed evaluation logic.
+
+Policy membership is an implementation choice, **not** evidence that all 14
+are proven model-to-gameplay consumers. Somersault Grenade remains qualified
+as stated above; Ouroboros's policy does not by itself add a new confirmed row.
+Conversely, a class outside this policy can still consume model completion.
+
+For reconstructed Dog Missile, Prickle Board, and Pendulum Log, current source
+uses `Rollback_EvaluateRestoredShotPose`: request `S_SETUP`, initialize fresh
+tracks, reapply captured pointer-free motion fields, sample saved `mNowFrame`
+without `updateFrame`, and update world/child transforms while preserving saved
+root pose and playback. This is a post-registration reconstruction operation,
+not a second per-frame native move. Dog's resim-created spawn repair still binds
+motion `0xCB` and evaluates once; it is a different path. Pendulum's policy now
+enables setup retry independently of callback occupancy and pins motion at
+`+0x11B8`, unlike the usual `+0x11B0`. These source changes address the October
+captures preserved in [shot.md](shot.md); new runtime confirmation of those
+corrections remains outstanding.
 
 This inventory covers shot models whose model state is an input to gameplay. A
 model qualifies when its motion completion, evaluated joint pose, or attached
@@ -39,14 +87,16 @@ model state for gameplay. The executable exposes four relevant paths.
 | `0x14004BC40` | `uModelMotion__getCompletionFlags` | Completion bit 4 gates concrete gameplay transitions. |
 
 `uShot__preMove @ 0x1401CCBE0` evaluates model state before
-`uShot__updateHitboxes`, so model-driven primitives consume the current pose in
-the same shot tick.
+`uShot__updateHitboxes` on the eligible non-delay path, so model-driven
+primitives consume the current pose in that same shot tick. This does not make
+every pre-move invocation an unconditional model evaluation.
 
 ## Confirmed Inventory
 
 The following classes have an executable-confirmed model-to-gameplay path or a
 previously reproduced model-dependent collision/phase failure whose native path
-is visible in Ghidra.
+is visible in Ghidra, **except the explicitly qualified Somersault Grenade row**
+retained for historical evidence.
 
 | DTI | Shot | Model-to-gameplay edge | Principal evidence |
 |---:|---|---|---|
@@ -66,12 +116,14 @@ is visible in Ghidra.
 | `0x140D4A4E8` | `uShotVulcanIronPipeRolling` | Rotating model pose and shot transform feed collision and ground-bounce behavior. | movement `0x14017E670`; setup `0x14017EAA0` |
 | `0x140D48BB0` | `uShotVulcanFireGrenadeBomb` | Model playback/pose participates in the rotating grenade collision lifecycle. | `vfn118 @ 0x14015D3F0`; setup `0x14015D530` |
 | `0x140D48CD0` | `uShotVulcanHandGrenadeBomb` | Model playback/pose participates in the rotating grenade collision lifecycle. | `vfn118 @ 0x14015E720`; setup `0x14015E860` |
-| `0x140D49520` | `uShotVulcanSomersaultGrenade` | Model playback/pose participates in the thrown grenade's collision and terminal transition. | `vfn110 @ 0x1401687F0`; setup `0x140168A30` |
+| `0x140D49520` | `uShotVulcanSomersaultGrenade` | **Qualified historical candidate, not confirmed feedback:** earlier inventory attributed collision/terminal behavior to model playback; the later RNG/constraint audit found spin on a visual joint constraint and mode-0 colliders, with no terminal model-completion read. | Historical anchors `vfn110 @ 0x1401687F0`; setup `0x140168A30`; qualification above |
 
-The inventory contains 17 confirmed model consumers. Thirteen are represented
-by `SHOT_MODEL_POLICIES` in `rollback_model_policy.cpp`, while Repulsor Blast
-uses a separate resimulation-time binding repair. Three direct consumers do not
-have an explicit model policy:
+The historical table has **17 entries, of which 16 retain their earlier
+confirmed classification and one (Somersault Grenade) is qualified**. This is
+not 17 presently proven consumers. Twelve of the 16 are represented by the
+current 14-entry `SHOT_MODEL_POLICIES` table; the other two policies are the
+qualified grenade and Ouroboros. Repulsor Blast uses separate repair logic.
+Three historically confirmed direct consumers do not have an explicit policy:
 
 - `uShotLaserDrDoomJS`
 - `uShotLaserPlasmaBeam`
@@ -107,7 +159,7 @@ a proven model-to-gameplay edge in the executable.
 
 ## Independent Ghidra Audit
 
-An independent Ghidra-only audit reviewed all 18 callers of
+The historical independent Ghidra-only audit reported reviewing all 18 callers of
 `uModelMotion__getCompletionFlags @ 0x14004BC40`, concrete attachment-model
 users, likely model-bearing shot families, and specialized `uGameEffectModel`
 callbacks. It found no additional executable-explicit model-to-gameplay shot.
@@ -115,7 +167,8 @@ callbacks. It found no additional executable-explicit model-to-gameplay shot.
 The shot-specific completion-flag callers are limited to the already inventoried
 DrDoomJS, Plasma Beam, King Kobun, Kobun Launcher, and Shiki Dan Kobun classes.
 The remaining callers belong to characters, stage objects, or generic model
-infrastructure.
+infrastructure. This caller count and exhaustive search were not repeated in
+the bounded 2026-10-26 recheck.
 
 ### Resource-Dependent Candidates
 
@@ -190,8 +243,10 @@ model-joint collision users. `uShot__dispatchCapsuleCollision` and
 external `rShot/rAtkInfo` resources. Those values are not encoded in each
 concrete setup function and therefore have no class-specific Ghidra xref.
 
-This audit is exhaustive for explicit executable code paths and incorporates all
-currently reproduced model-driven collision cases. Certifying that no additional
+The earlier audit reported exhaustive coverage of explicit executable paths and
+incorporated the model-driven collision cases reproduced at that time. Today's
+bounded timing recheck neither repeats nor expands that completeness claim.
+Certifying that no additional
 resource-only class uses transform mode 1 or 3 requires either:
 
 1. Extracting and enumerating every `rShot/rAtkInfo` resource, or
@@ -199,6 +254,8 @@ resource-only class uses transform mode 1 or 3 requires either:
    shot DTI, transform mode, attachment index, and joint IDs while executing a
    complete move corpus.
 
-Until that resource pass is performed, the 17-class table is the complete
-confirmed inventory, not proof that the external attack resources contain no
-additional model-driven shots.
+Until that resource pass is performed, the table is a historical inventory of
+17 entries with one explicitly qualified candidate, not proof that the external
+attack resources contain no additional model-driven shots. The 16 remaining
+confirmed classifications retain their original evidence scope; the current
+policy count and current pose-restore implementation are separate source facts.

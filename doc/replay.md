@@ -1,8 +1,11 @@
 # Native Replay State
 
-**Status: Native reference with current-plugin boundary. Reviewed 2026-07-23.**
-The plugin snapshots only `sReplay+0x54`, using it as the live absolute-frame
-source. It does not use native replay input arrays as rollback history.
+**Status: Native reference with current-plugin boundary. Reviewed 2026-10-26.**
+The documented rollback snapshot region is only `sReplay+0x54`; current
+controller source uses that counter as its logical-frame source and resets it
+at mutual battle release. Native replay input arrays are not the plugin's
+canonical logical-input timeline. Snapshot registration itself was not
+re-audited in this source-limited review.
 
 ## Objects
 
@@ -81,6 +84,13 @@ selected high bits from a caller-supplied mask via:
 return (callerInput & 0x000F8000) | recordedInput;
 ```
 
+This expression is not unconditional: with a negative frame index, if
+`flags & 0xC2` is zero the current body returns zero early, before preserving
+caller bits. Otherwise a negative index uses the selected team's cursor;
+flag `0x80` can replace that team with the `+0x50` selector. A nonnegative
+index is an explicit stream read. Those distinctions matter when interpreting
+native spectator versus training reads; neither means "read plugin history".
+
 ## Flags
 
 The helper predicates establish these masks without requiring every bit to be
@@ -105,6 +115,11 @@ were too simplistic; they are common bits combined with team-specific masks.
 then processes both teams, tracks button edges at `+0x2341C`, handles native
 training record/playback controls, writes input where state permits, and
 advances playback cursors.
+
+An increment per call is not a wall-clock guarantee: skipping the relevant
+gameplay move line, stopping the outer move, or resetting the counter changes
+its relationship to rendered frames. Current custom netplay explicitly sets
+`+0x54 = 0` at its mutual-release epoch and bases gameplay frame labels on it.
 
 `sReplay__move` at `0x1401CEED0` handles higher-level transitions. In Training
 mode it checks each team record and stops playback after a record exceeds 599
@@ -155,13 +170,31 @@ and the base/state fields before `+0x58`.
 
 ## Plugin Boundary
 
-Current rollback registers exactly four bytes at `sReplay+0x54` in snapshot
-state. The full native replay payload is intentionally not restored:
+The earlier snapshot audit records exactly four bytes at `sReplay+0x54` in
+snapshot state. That registration is retained here as historical evidence,
+not a fresh audit of `rollback.cpp`. The native payload is not the input
+history used by the reviewed controller path:
 
 - Native playback/recording state has its own ownership and cursors.
 - Plugin input history is indexed separately by custom frame number.
 - Re-simulation injects historical local/remote input at the character-input
   boundary.
+
+### Keep the streams distinct
+
+| Stream/state | Owner and purpose |
+|---|---|
+| Native `sReplay` team records | Bounded input capture/playback, training controls, and native spectator/watch consumption. |
+| Native `rReplay` payload | Serializable native setup/seed/input block; excludes live `+0x54`. Static dormant-file-path conclusion above remains historical. |
+| Custom controller timeline | Logical, button-remapped input before facing conversion; scheduled local and received remote entries are keyed by custom execution frame. |
+| Custom offline resimulation inputs | Reviewed raw-pad history is separate from netplay's canonical logical masks; offline and netplay injection are not interchangeable. |
+| Shared frame/RNG epoch | `Controller_ResetFrameEpoch` resets `+0x54`; `SynchronizeRoundRng` writes `+0x58/+0x23424` and invokes native round-start initialization. These are explicit setup writes, not evidence that the entire native replay payload is snapshotted. |
+
+In `controller.cpp`, `hkbuttonRemap` is the usual netplay injection boundary,
+while `hkswapLRIfFaceLeft` covers native CPU/action paths that bypass remapping.
+The `g_recordedGameInput` array is diagnostic processed input, not a substitute
+for the canonical pre-facing timeline. A replay of input records alone is not
+a complete rollback state restore or proof of deterministic playback.
 
 ## Key Addresses
 
@@ -176,3 +209,16 @@ state. The full native replay payload is intentionally not restored:
 | `0x1401CF680` | Capture/restore match configuration |
 | `0x1401CFA90` | Round-start RNG initialization |
 | `0x14029C430` | Copy in-memory replay payload to `rReplay` |
+
+## Review scope and checked anchors
+
+On 2026-10-26 the full `sReplay__readInput` body at `0x1401CECB0` was checked
+in live Ghidra **8193**, `umvc3.exe.unpacked.exe`, preferred base
+`0x140000000`. It confirms stride `0x11944`, team swap/selector behavior,
+explicit versus cursor reads, the early-zero branch, and caller mask `0xF8000`.
+Current source anchors are `controller.cpp::GetGameFrameCount`,
+`Controller_ResetFrameEpoch`, `ResolveTimelineInput`, `hkbuttonRemap`,
+`hkswapLRIfFaceLeft`, and `framestepper.cpp::SynchronizeRoundRng`/`HookedMove`.
+Constructor/reset/round/file bodies, capacity writes, and the dormant-path xref
+claim retain their earlier evidence and were not fully re-audited. No Ghidra
+edits, file replay tests, game execution, or build was performed.

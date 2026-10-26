@@ -1,6 +1,6 @@
 # Native `sBattleSetting`
 
-**Status: Native reference. Investigated 2026-07-25.** This document describes
+**Status: Native reference. Investigated 2026-07-25; reviewed 2026-10-26.** This document describes
 the retail game's `sBattleSetting` singleton. It is not the plugin's custom
 netplay configuration.
 
@@ -45,23 +45,45 @@ pipeline's `MgrSubsysCall(FN_GETBATTLESET, 0x30)` does not advance any
 
 ## Important Type Distinction
 
-`sGameConfig__getBattleSetting @ 0x1400049F0` is currently misnamed and
-mistyped in Ghidra. It returns `sGameConfig + 0x1E30`, whose constructor is
-`cSPCData__cSPCData @ 0x140228930`. That embedded object is about `0x49080`
-bytes and contains character/rule tables used heavily by combat calculations.
+`0x1400049F0` is currently named and typed
+`cSPCData *sGameConfig__getSPCData(sGameConfig *)` in live Ghidra. Older notes
+called it `sGameConfig__getBattleSetting`; that was a misidentification.
+It returns `sGameConfig + 0x1E30`, whose constructor is
+`cSPCData__cSPCData @ 0x140228930`. The current Ghidra datatype is `0x48A70`
+bytes (297,584), not the older approximate `0x49080` stated here. This is a
+type-model extent, not a fresh independent allocation-size proof; see the
+[H&H extent caveat](earthatk_rollback.md) for source accesses extending beyond
+its nominal tail. It contains character/rule tables used heavily by combat calculations.
 It is not the standalone 0x930-byte `sBattleSetting` singleton.
 
-Consequently, calls of the following form usually refer to the SPC gameplay
-database, despite their decompiler types:
+Consequently, calls of the following form refer to the SPC gameplay database;
+older decompilations may still show the incorrect battle-setting name/type:
 
 ```cpp
-sGameConfig__getBattleSetting(sGameConfig__getInstance());
+sGameConfig__getSPCData(sGameConfig__getInstance());
 ```
 
 Calls through `sBattleSetting__getInstance()` or `sMvc3Manager+0x40` refer to
 the actual match descriptor documented here. This distinction prevents large
 SPC-table routines such as `sBattleSetting__getAttackDamageModifier` from
 being incorrectly attributed to the 0x930-byte singleton.
+
+### Descriptor slots are not live fighters
+
+The six `cMainChr` records below are small **construction/configuration
+records**, not six embedded `uCharacter` instances. Their `mType` at `+0x0C`
+is a character ID; their array index is a setting-slot index. A live fighter is
+constructed through `sCharacter__createCharacterFromDTI` and is represented as
+`uCharacter *` in the reviewed spawn body. Its mutable team member ID is a
+different identity again (historically documented at fighter `+0x2DB0`).
+
+The existing `cChrTeam` type has `mpCurrentChr` at `+0x48`, flags at `+0x58`,
+and gauge at `+0x78`; these are live team fields, not slot offsets. Its current
+Ghidra active-pointer field is still `undefined8`, and a standalone struct named
+`cChr` was not present in this review. Treat old `cChr` terminology as a live
+fighter reference, not evidence that a complete same-named datatype exists.
+See [match-start selection](match_start_assist_sync.md) for why mutable member
+IDs must not be confused with character IDs or descriptor slot indices.
 
 ## Confirmed Top-Level Layout
 
@@ -100,7 +122,7 @@ native reflection properties where available.
 | `0x5E4` | `0x2D0` | input-history rings | Six rings of 30 `uint32_t` entries. |
 | `0x8B4` | `0x18` | ring cursors | Six `uint32_t` cursors, one per team/member combination. |
 | `0x8CC` | `1` | one-play threshold flag | Set when a `cOnePlay` progression value exceeds 5. |
-| `0x924` | `8` | team history values | Two `uint32_t` values used by native network/selection code. |
+| `0x924` | `8` | opening current-member values | Two `uint32_t` values, one per team, consumed by native online phase-2 selection; historical getters call these team history entries. |
 
 There are additional fields between the listed ranges. Their semantics are not
 established strongly enough to name yet.
@@ -262,8 +284,14 @@ old cursor entry, advances the slot cursor, stores a masked current input at a
 delay-dependent position, and returns selected old bits combined with selected
 current bits. This appears to support native lag/input-history behavior.
 
-The two values at `+0x924` are separately read and written by native network or
-selection code. Their exact protocol meaning is not yet confirmed.
+The two values at `+0x924/+0x928` are opening **current-member IDs**, one per
+team, in the native online phase-2 path. The reviewed
+`sAction__stepFightingCore` reads them, validates each by member lookup, and
+requests the opening swap. The earlier investigation traced their writer to
+`cNetChrSel::MsgCurrentMember`; see
+[match-start selection](match_start_assist_sync.md) for the message evidence.
+The historical getter name `getTeamHistoryEntry` does not make these general
+frame-input histories.
 
 ## `cOnePlay`
 
@@ -315,14 +343,39 @@ form.
 - Do not confuse it with `sGameConfig+0x1E30` (`cSPCData`). The latter owns the
   large per-character combat-rule database.
 - The plugin source comments that label BattleType 4 as ranked are incorrect;
-  Ghidra confirms it is spectator/watch mode.
+  Ghidra confirms it is spectator/watch mode. The reviewed `trainingboot.cpp`
+  and `framestepper.cpp` comments already use spectator/watch; the ranked label
+  is a historical warning, not a claim that those current comments still do so.
+- `BootIntoTraining` currently calls the native battle-type setter with **0**,
+  despite comments/logs calling it training. A launch-option label is not a
+  native `BattleType == 5` guarantee.
 
 ## Remaining Unknowns
 
 - The public label and full behavior of BattleType 7.
-- The exact meanings of Booleans `+0x375`, `+0x591`, `+0x592`, and `+0x594`.
+- The exact meanings of Booleans `+0x375` and `+0x594`. The reviewed plugin
+  reads/writes `+0x591/+0x592` as team AutoJump, as recorded in the layout table.
 - Complete names for inherited/non-reflected fields in each `0x58` character
   record.
-- The exact protocol role of `+0x924/+0x928`.
+- Additional uses, if any, of `+0x924/+0x928` beyond opening current-member IDs.
 - A cleaned, fully typed layout for `cOnePlay`'s tail and all fields after
   `+0x8CC`.
+
+## Review scope and checked anchors
+
+Read-only review on 2026-10-26 used Ghidra **8193**,
+`umvc3.exe.unpacked.exe`, preferred base `0x140000000`:
+
+| Anchor | Checked evidence |
+|---|---|
+| `0x1400049F0` | Current `getSPCData` signature and `LEA RAX,[RCX+0x1E30]`. |
+| `0x14024B530` | `requestEnter` body; queue `aChrSelectBlank`, online stage override. |
+| `0x14024B7E0` | Spawn body uses six descriptor slots, factory-created `uCharacter *`, voice values, and pairwise same-team audio. Its old comment claiming a sub-character/Nemesis/Doctor Strange rebuild is not reliable. |
+| `0x140006370` | Typed `sAction`/`cChrTeam` phase-2 body; offline assist selection versus online member values. |
+| `0x14024C9F0` | Assist-source helper disassembly confirms `+0x38 + slot*0x58`, plus a conditional fallback at `+0x5C8+slot*4`; its `getCharLifeMaxOrOverride` name is not a trustworthy description of the value passed to `cChr__setAssistType`. |
+
+Source checks: `trainingboot.cpp::WriteSlotEntry`, `BootIntoTraining`, and
+`chrsel_imgui.cpp::ReadCurrentRoster`. Other allocation sizes, reflection names,
+offsets and native routines retain the prior investigation's evidence; they
+were not all revalidated. Existing types informed interpretation only: no
+datatype, symbol, or comment edits were made, and no runtime test was run.

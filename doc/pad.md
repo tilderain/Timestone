@@ -1,6 +1,6 @@
 # Native Pad Input
 
-**Status: Native reference with current-plugin notes. Reviewed 2026-07-23.**
+**Status: Native reference with current-plugin notes. Live spot-check 2026-10-26.**
 `sPad` performs hardware polling and produces game input masks. The rollback
 timeline is applied later by `controller.cpp` at
 `cChrInput__processFrameInput`; live `sPad` state is not authoritative history.
@@ -207,10 +207,16 @@ hooks run only inside the native function after this gate, they cannot
 repopulate an assist after its early return. The explicit predicate retained by
 the outer hook protects the separate offline post-native autotest path.
 
-Snapshot restore explicitly rewinds the embedded `cChrInput` scalar payload at
-`cChr+0x21D8..+0x2737`. Its rings and final input masks are pointer-free, but
+The documented snapshot restore policy explicitly rewinds the embedded
+`cChrInput` scalar payload at `cChr+0x21D8..+0x2737`. Its timer/counter arrays
+and final input masks are pointer-free, but
 packed pairs such as a zero previous mask followed by direction `2` can resemble
 an aligned address to the generic character pointer guard.
+
+"Rings" in older notes is legacy diagnostic terminology: the reviewed native
+`0x14002E5A0` indexes hold/trigger ages and rapid-press counts by button bit.
+Do not interpret packed diagnostic qwords as native pointer fields or as
+16-entry `uint64_t` histories. See [the dash investigation](dash_resim_root_cause.md).
 
 ## Key Addresses
 
