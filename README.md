@@ -2,13 +2,13 @@ Timestone (MVC3 Rollback) :steamhappy:
 
 # About
 
-This is a work in progress rollback mod for UMVC3. The current code right now is a huge prototype with many outdated assumptions and duct taped hacks to keep this shit still running somehow. It was made under the goal of "Get this shit working as fast as possible" while many parts of the umvc3 engine were still unknown. It currently uses a traditional object save restore approach rather than tracking modified Windows memory pages with the windows api. The goal is to restore only the minimal game state that is needed for rollback, keeping snapshot and resimulation costs small and predictable. Whether or not that performs better than a heavily optimized dirty page approach remains to be seen ... but I have hopes that it will
+This is a work in progress rollback mod for UMVC3. The current code right now is a huge prototype with many outdated assumptions and duct taped hacks to keep this shit still running somehow. It was made under the goal of "Get this shit working as fast as possible" while many parts of the umvc3 engine were still unknown. It currently uses a traditional object save restore approach rather than tracking modified Windows memory pages with the windows api. The goal is to restore only the minimal game state that is needed for rollback, keeping snapshot and resim costs small and predictable. Whether or not that performs better than a heavily optimized dirty page approach remains to be seen ... but I have hopes that it will
 
-Timestone currently has semi functional rollback/netplay but is not considered finished or tournament-ready at all. Areas that need work include rollback-state coverage, projectile/effect lifetime handling, presentation correctness, performance, and general stability. Don't forget about the UI and lobby system.
+Timestone currently has semi functional rollback/netplay but is not considered finished or tournament-ready at all. I would like to finish the rollback system (with a delayed shot / effect free system and state restore), and preferably transfer the netplay prototype code to something like GekkoNet. Don't forget about the UI and lobbies.
 
 The current research of MVC3 (in a Ghidra DB) made throughout this project is available here: [put a link here buddy]
 
-This db was brought to you in part by Mario Party Challenge World, a japan exclusive mario party gambling arcade game, which has been invaluable to understanding MVC3's engine accurately. Mario Party for some reason, has the most similar version of MT Framework that MVC3 runs on, and just so happens to have a PDB with function names, enums, and struct member information included.
+This db was brought to you in part by [Mario Party Challenge World](https://www.youtube.com/watch?v=VIZWiDssOmA), a Capcom made japan exclusive mario party gambling arcade game with a real roulette table and real balls, which has been invaluable to understanding MVC3's engine accurately. Mario Party for some reason, has the most similar version of MT Framework that MVC3 runs on, and so happens to have a PDB with function names, enums, and struct member information included.
 
 [Thanks to Aeyth8 for dumping the arcade cabinet.](https://www.reddit.com/r/lostmedia/comments/1jvlauo/found_mario_party_mystery_challenge/)
 
