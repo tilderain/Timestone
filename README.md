@@ -1,72 +1,41 @@
-MVC3 Rollback :steamhappy:
+Timestone (MVC3 Rollback) :steamhappy:
+
+# About
+
+This is a work in progress rollback mod for UMVC3. The current code right now is a huge prototype with many outdated assumptions and duct taped hacks to keep this shit still running somehow. It was made under the goal of "Get this shit working as fast as possible" while many parts of the umvc3 engine were still unknown. It currently uses a traditional object save restore approach rather than tracking modified Windows memory pages with the windows api. The goal is to restore only the minimal game state that is needed for rollback, keeping snapshot and resimulation costs small and predictable. Whether or not that performs better than a heavily optimized dirty page approach remains to be seen ... but I have hopes that it will
+
+Timestone currently has semi functional rollback/netplay but is not considered finished or tournament-ready at all. Areas that need work include rollback-state coverage, projectile/effect lifetime handling, presentation correctness, performance, and general stability. Don't forget about the UI and lobby system.
+
+The current research of MVC3 (in a Ghidra DB) made throughout this project is available here: [put a link here buddy]
+
+This db was brought to you in part by Mario Party Challenge World, a japan exclusive mario party gambling arcade game, which has been invaluable to understanding MVC3's engine accurately. Mario Party for some reason, has the most similar version of MT Framework that MVC3 runs on, and just so happens to have a PDB with function names, enums, and struct member information included.
+
+[Thanks to Aeyth8 for dumping the arcade cabinet.](https://www.reddit.com/r/lostmedia/comments/1jvlauo/found_mario_party_mystery_challenge/)
+
+AI has been used extensively throughout this project for reverse engineering, code generation, debugging, investigation, and repetitive work. Generated output is tested, modified, or discarded as needed.
 
 # Compilation
 
-Builds with MinGW-w64: cross-compile from Linux/macOS, or build natively on
-Windows (MSYS2). Prereqs: a MinGW-w64 toolchain (gcc, g++, windres, binutils),
-GNU make, and zip.
+Primary development is done on linux, with MinGW-w64. 
+You need a MinGW-w64 toolchain (gcc, g++, windres, binutils) make and zip. Try WSL first on windows, or use MSYS2 with the MinGW64 shell.
 
     make release     # -> Timestone.asi + TimestoneUpdater.exe (+ Timestone.zip)
 
 NixOS:    nix develop -c make release       (or: nix build .#timestone)
 Windows:  in an MSYS2 MINGW64 shell, first `pacman -S mingw-w64-x86_64-toolchain make zip`, then `make release`.
 
-# Updates
-
-`make` builds both `Timestone.asi` and `TimestoneUpdater.exe`. Install both files
-beside the game executable. When the launch menu opens, the ASI asks the updater
-to check the latest public release at `github.com/tilderain/Timestone`.
-
-Each GitHub release must use a numeric tag such as `0.1.1` or `v0.1.1` and
-contain assets named exactly `Timestone.asi` and `TimestoneUpdater.exe`. Both assets
-are verified against their GitHub SHA-256 digests. The updater stores its own
-replacement as `TimestoneUpdater.exe.new`; the updated ASI installs it before the
-next launch-menu update check. The updater retains the previous ASI as
-`Timestone.asi.old` and never modifies configuration files. Update the `VERSION`
-value in the `Makefile` before publishing a release.
-
-Launching `TimestoneUpdater.exe` directly checks the version resource of the
-adjacent `Timestone.asi` and offers to install a newer release. The ASI launches
-the same check quietly at startup; it displays a prompt only when an update is
-available. Accepting the launch-menu prompt downloads and verifies the update,
-closes UMVC3, replaces the ASI, and relaunches the game.
-
-# Automated dual training
+# Command line options
 
 Use `-five-bars` with a training launch to start both teams with five hyper bars
 (and every Frank at level 3).
 
-Launch the game with `-autotest=<character>` to start a dual-training pair,
-place the selected character in all P1 and P2 slots, and run the unique-command
-autotest suite after both instances reach the synchronized battle boundary.
-Character names are case-insensitive and may omit spaces and punctuation.
-Both game processes close automatically after the suite completes.
-
-For AI-assisted desync investigation, restrict the run to selected moves and
-repeat each selected move independently:
+For AI-assisted desync investigation, there is a semi reliable autotester for moves from the attack command matcher. It supports move names, and move numbers (from the command matcher)
 
 ```text
 umvc3.exe -autotest=Ryu -autotest-moves="12,Hadoken" -autotest-repeat=5
-```
+``
 
-`-autotest-moves` accepts comma-separated case-insensitive name fragments or
-numeric runtime move ordinals. Numeric ordinals refer to the character's
-runtime command list before duplicate removal. `-autotest-repeat` defaults to
-three for focused move runs and is limited to 100. Each repetition performs a synchronized training
-reset and receives its own move ID, so the TSV result and host/client
-snapdumps can be correlated. The existing date, character, move, checksum,
-and mismatch-frame metadata remains in the result TSV.
-
-Examples:
-
-```text
-umvc3.exe -autotest=Ryu
-umvc3.exe "-autotest=Phoenix Wright"
-umvc3.exe -autotest=27
-```
-
-The host-side AI helper can derive a focused run from a prior result file and
-launch the game pair:
+Typically you would use it with the autotest_ai.py in the tools folder.
 
 ```text
 python tools/autotest_ai.py --character Hawkeye \
@@ -74,47 +43,13 @@ python tools/autotest_ai.py --character Hawkeye \
   --repeat 5 --launch
 ```
 
-Without `--launch`, it only prints the command so an external test runner can
-start it. With `--launch`, it changes into the game directory, starts the game
-through Wine, waits for completion, finds the newest matching host/client
-`.usdp` pair, and writes `autotest/latest_ai_report.json` using
-`tools/compare_desync_dumps.py`. The Wine executable defaults to `wine` and can
-be overridden with `--wine`; a specific prefix can be set with `--wine-prefix`.
-
-External automation should request JSON instead of parsing the human-readable
-command:
-
-```text
-python tools/autotest_ai.py --character Ryu --moves "12,Hadoken" \
-  --repeat 5 --json --manifest autotest/plan.json
-```
-
-The JSON contains an absolute executable path, working directory, argument
-array, selected moves, repetition count, and run ID. For a managed launch, add
-`--launch --timeout 1800`; the final manifest also includes the outcome,
-artifact paths, comparator diagnosis, and first-divergence data. Only artifacts
-created after launch are considered, preventing stale dumps from an earlier
-run from being analyzed.
-
-Runner exit codes are `0` for sync/no desync artifacts, `1` for a confirmed
-desync report, `3` for launch/game failure, `4` for timeout, and `6` when the
-snapshot analyzer fails. Argument errors use argparse's standard exit code `2`.
-
-The network address and port come from `[Network]` in `Timestone.ini`.
-Advanced/offline setup uses `[Roster.P1]`, `[Roster.P2]`, and `[Training] StageId`.
-Online hosting/joining uses a separate `[ConnectRoster]` for your own characters,
-colors, assists, simple-mode controls, and preferred stage, regardless of your side.
-Other players' settings are match state only and never replace your preferences.
-`rollbacksetting.ini` is no longer read or written; there is no automatic migration.
-
-
 # Credits
 
 Armonte- Many reverse engineering and documentation, Shot snapshot base, inspiration from his repo (exception handler.. etc)
 
-Hkhann- Prior reverse engineering, the one who started it all with the OG UMVC3Rollback repo
+HkHaan- Prior reverse engineering, the one who started it all with the OG UMVC3Rollback repo
 
-catboy_friender (Sheep)- Help with Hkhann's repo, prior reverse engineering
+catboy_friender (Sheep)- Help with HkHaan's repo, prior reverse engineering
 
 Eternal Yoshi- Prior reverse engineering, ThreeWorkTool, playtesting
 
@@ -141,8 +76,8 @@ Those random guys who played with me in an ingame lobby one day
 
 # Third-Party Licenses
 
-Licenses for code used in this project are collected in [THIRDPARTYNOTICES](THIRDPARTYNOTICES).
-These licenses cover their respective projects, not all of Timestone. Timestone licensing is undecided.
+Licenses for code used in this project are available in [THIRDPARTYNOTICES](THIRDPARTYNOTICES).
+These licenses cover only their projects, not all of Timestone. Timestone licensing is undecided.
 
 | Component | License / notices |
 | --- | --- |
@@ -167,5 +102,4 @@ These licenses cover their respective projects, not all of Timestone. Timestone 
 No license was found for [rdbo's ImGui/DirectX 9/kiero hook example](https://github.com/rdbo/ImGui-DirectX-9-Kiero-Hook).
 
 `THIRDPARTYNOTICES` should be included in the release zip, but is not yet
-
 
