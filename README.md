@@ -114,16 +114,58 @@ Armonte- Many reverse engineering and documentation, Shot snapshot base, inspira
 
 Hkhann- Prior reverse engineering, the one who started it all with the OG UMVC3Rollback repo
 
-Eternal Yoshi- Prior reverse engineering
+catboy_friender (Sheep)- Help with Hkhann's repo, prior reverse engineering
 
-Ryn (wistfulhopes), anotak, Gneiss- Prior reverse engineering
+Eternal Yoshi- Prior reverse engineering, ThreeWorkTool, playtesting
 
-Archeroflegend- Framestepper, playtesting
+Ryn (wistfulhopes), anotak, Gneiss, tabsmvc, EddieLopes, dantarion, tge-was-taken - Prior reverse engineering
+
+Archeroflegend- Framestepper, playtesting and harassment
+
+Vevota- Playtesting and harassment
+
+Jasongamedev- Playtesting
+
+//FIXMESTEVE: : Standby support
+
+John2143- "Sponsorship", build help and signing, discord bot
 
 ermaccer- UMVC3Hook
 
-Vevota- Playtesting
+ThirteenAG- Ultimate ASI Loader
 
-John2143- "Sponsorship"
 
-Those random guys who played with me in a steam lobby one day
+
+Those random guys who played with me in an ingame lobby one day
+
+
+# Third-Party Licenses
+
+Licenses for code used in this project are collected in [THIRDPARTYNOTICES](THIRDPARTYNOTICES).
+These licenses cover their respective projects, not all of Timestone. Timestone licensing is undecided.
+
+| Component | License / notices |
+| --- | --- |
+| [ermaccer/UMVC3Hook](https://github.com/ermaccer/UMVC3Hook) | Permission granted by ermaccer: "just keep any edits of my work open source." |
+| [4423Q/UMVC3Rollback](https://github.com/4423Q/UMVC3Rollback) | HkHaan's work with catboy_fucker, used with permission |
+| [ENet 1.3.18](https://github.com/lsalzman/enet) | MIT, Lee Salzman |
+| [Dear ImGui, including backends](https://github.com/ocornut/imgui) | MIT, Omar Cornut, v1.85 WIP |
+| [kiero 1.2.6](https://github.com/Rebzzel/kiero) | MIT, Rebzzel |
+| [MinHook](https://github.com/TsudaKageyu/minhook) | BSD-2-Clause, Tsuda Kageyu |
+| Hacker Disassembler Engine inside MinHook | BSD-2-Clause, Vyacheslav Patkov; full HDE32/HDE64 notices included |
+| [stb_vorbis and ImGui's three imstb headers](https://github.com/nothings/stb) | MIT OR Unlicense, Sean Barrett, MIT used |
+| [ProggyClean embedded font](https://github.com/bluescan/proggyfonts) | MIT, Tristan Grimmer, separate from ImGui's notice |
+| [ModUtils helpers](https://github.com/CookiePLMonster/ModUtils) | MIT, Adrian Zdanowicz (Silent), (CitizenFX scanner needs a license check) |
+| Archer's framestepper | MIT, Archer; see [LICENSEframestepper](LICENSEframestepper) |
+| [Ultimate ASI Loader 9.7.2 x64](https://github.com/ThirteenAG/Ultimate-ASI-Loader) | MIT, ThirteenAG; bundled as dinput8.dll |
+| miniz inside Ultimate ASI Loader | MIT, RAD Game Tools/Valve and Rich Geldreich/Tenacious Software |
+| [FunctionHookMinHook wrapper inside the loader](https://github.com/ThirteenAG/injector) | MIT, praydog, injector zlib and exception-tracer public-domain notices also included |
+| ImGui Japanese glyph-range dataset | CC BY-SA 2.1 Japan per the vendored notice; IPA Japan attribution and license URI preserved |
+| [Statically linked MinGW-w64 runtime](https://github.com/mingw-w64/mingw-w64) | Mixed runtime licenses; complete 8.0.0 notice bundle included for the local toolchain; other release toolchains need their matching notices |
+| [MCF Gthread](https://github.com/lhmouse/mcfgthread), if linked by the release toolchain | LGPL-3.0-or-later with additional permissions including GCC Runtime Library Exception 3.1; conditional notice included |
+
+No license was found for [rdbo's ImGui/DirectX 9/kiero hook example](https://github.com/rdbo/ImGui-DirectX-9-Kiero-Hook).
+
+`THIRDPARTYNOTICES` should be included in the release zip, but is not yet
+
+
