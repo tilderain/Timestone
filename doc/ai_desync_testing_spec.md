@@ -89,14 +89,14 @@ Search the game's `rollback_logs/` recursively for desync `.usdp` files,
 including any session subdirectories:
 
 ```
-/media/god/tempData/SteamLibrary/steamapps/common/ULTIMATE MARVEL VS. CAPCOM 3/rollback_logs/
+../ULTIMATE MARVEL VS. CAPCOM 3/rollback_logs/
 ```
 
 Also search the dedicated autotest snapdump root (explicit per-command dumps
 still use this location):
 
 ```
-/media/god/tempData/SteamLibrary/steamapps/common/ULTIMATE MARVEL VS. CAPCOM 3/autotest/
+../ULTIMATE MARVEL VS. CAPCOM 3/autotest/
 ```
 
 Autotest snapdumps are sorted into character-named folders below this root. The
@@ -104,7 +104,7 @@ character name comes from `-autotest=<character>`, so a Tron run is expected
 under:
 
 ```
-/media/god/tempData/SteamLibrary/steamapps/common/ULTIMATE MARVEL VS. CAPCOM 3/autotest/Tron/
+../ULTIMATE MARVEL VS. CAPCOM 3/autotest/Tron/
 ```
 
 Search the selected character folder first, and only consider artifacts created

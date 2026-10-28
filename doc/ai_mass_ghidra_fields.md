@@ -336,7 +336,7 @@ actual differences. Never refresh fingerprints blindly to force application.
 
 ## Lightweight Reporting
 
-Maintain the single shared-class status source at
+If available, maintain the single shared-class status source at
 `/media/god/tempData/Lostplanet/mpr_reference/mvc3/class_status.json` using
 `class_status.py` in the reference directory. See `CLASS_STATUS.md` there for
 query/update commands, ancestry gates, and reviewed byte-coverage records.

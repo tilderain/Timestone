@@ -3,7 +3,7 @@
   "permission": {
     "read": {
       "*": "allow",
-      "/media/god/tempData/SteamLibrary/steamapps/common/ULTIMATE MARVEL VS. CAPCOM 3/**": "allow"
+      "../ULTIMATE MARVEL VS. CAPCOM 3/**": "allow"
     },
     "edit": "allow",
     "glob": "allow",
@@ -37,7 +37,7 @@
     },
     "external_directory": {
       "*": "ask",
-      "/media/god/tempData/SteamLibrary/steamapps/common/ULTIMATE MARVEL VS. CAPCOM 3/**": "allow"
+      "../ULTIMATE MARVEL VS. CAPCOM 3/**": "allow"
     }
   }
 }
