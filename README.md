@@ -6,9 +6,9 @@ This is a work in progress rollback mod for UMVC3. The current code right now is
 
 Timestone currently has semi functional rollback/netplay but is not considered finished or tournament-ready at all. I would like to finish the rollback system (with a delayed shot / effect free system and state restore), and preferably transfer the netplay prototype code to something like GekkoNet. Don't forget about the UI and lobbies.
 
-The current research of MVC3 (in a Ghidra DB) made throughout this project is available here: [put a link here buddy]
+The current research of MVC3 (in a Ghidra DB) made throughout this project will be made publically available later, but please contact me on Discord if you are going to contribute and want a copy.
 
-This db was brought to you in part by [Mario Party Challenge World](https://www.youtube.com/watch?v=VIZWiDssOmA), a Capcom made japan exclusive mario party gambling arcade game with a real roulette table and real balls, which has been invaluable to understanding MVC3's engine accurately. Mario Party for some reason, has the most similar version of MT Framework that MVC3 runs on, and so happens to have a PDB with function names, enums, and struct member information included.
+The db was brought to you in part by [Mario Party Challenge World](https://www.youtube.com/watch?v=VIZWiDssOmA), a Capcom made japan exclusive mario party gambling arcade game with a real roulette table and real balls, which has been invaluable to understanding MVC3's engine accurately. Mario Party for some reason, has the most similar version of MT Framework that MVC3 runs on, and so happens to have a PDB with function names, enums, and struct member information included.
 
 [Thanks to Aeyth8 for dumping the arcade cabinet.](https://www.reddit.com/r/lostmedia/comments/1jvlauo/found_mario_party_mystery_challenge/)
 
