@@ -1,3 +1,6 @@
+
+// "Concrete" just means the bytes past the base class of uCharacter / uShot
+
 #include "../pch.h"
 
 #include "concrete_snapshot.h"
@@ -1114,27 +1117,7 @@ void ConcreteShotSnapshot_RestoreCallbackEffects(
         IsDti(snapshot.dti, kShockingPinkBombDti) ||
         IsDti(snapshot.dti, kOilBalloonGroundOilDti) ||
         IsDti(snapshot.dti, kDarkPhoenixFireDti)) {
-        // Attack Wire's factory effect owns track buffers initialized for the
-        // fresh generator graph. Rewinding its presentation timeline can make
-        // a zero-length track active and underflow shiftHistoryBuffer.
-        // Jam Session likewise uses three factory callbacks. Rewinding their
-        // timelines made all three finish during client re-simulation and
-        // marked the still-live shot for removal; shot lifetime is restored
-        // independently by Shot_ApplyFlight.
-        // Dormammu's Inferno uses the same factory callback path in slot 1.
-        // Rewinding it made the client remove the assist shot after seven
-        // re-simulated frames while the host kept it alive.
-        // Shocking Pink rebuilds callback slot 2 with a fresh particle manager
-        // and track table. Its captured timeline can activate a descriptor from
-        // the retired graph, so leave that callback on its native timeline.
-        // Ground Oil's slot-1 effect likewise owns a fresh particle pool. Its
-        // rewound emission state can overrun that pool and corrupt the free-list
-        // tail at cParticleGenerator+0xF8.
-        // Dark Phoenix Fire has the same fresh-pool invariant. Rewinding its
-        // callback emission cursor corrupted the active-list head at +0xE0.
-        // Fire Grenade's callback can contain a generator whose descriptor is
-        // not ready on the reconstructed frame. Restoring an advanced emission
-        // phase makes moveAfter consume that unavailable descriptor immediately.
+        //Hacks for all of these to prevent desyncs.
         return;
     }
 
@@ -1193,75 +1176,45 @@ bool ConcreteShotSnapshot_Restore(void* shot,
     std::vector<uint8_t> overlay(source, source + snapshot.body.size());
     const uint64_t copyBodyEnd = Profile_Now();
 
-    // The vtable and common unit state remain owned by the freshly-created
-    // object. ShotFlightState restores the gameplay lifecycle bits safely.
+    // Keep the fresh vtable and unit state; Shot_ApplyFlight restores lifecycle bits.
     PreserveRange(overlay.data(), live, liveSize, {0, sizeof(uint64_t)});
     PreserveRange(overlay.data(), live, liveSize, {0x10, 0x08});
 
-    // Restore the complete common uShot gameplay body rather than the sparse
-    // ShotFlightState ranges alone. Keep allocations, resources and external
-    // references from the freshly-created object wherever either timeline has
-    // a pointer-shaped qword. This also lets a fresh null clear a stale saved
-    // pointer. Confirmed scalar flight ranges are applied after this overlay by
-    // the caller.
+    // Keep fresh bytes wherever either copy looks like a pointer.
+    // Restore known scalar fields below to override false pointer matches.
     PreserveLivePointers(overlay.data(), live, liveSize);
     const uint64_t pointerScanEnd = Profile_Now();
 
-    // uBaseModel's material-cache pointer and count form one native-owned
-    // header. Preserve both from the fresh object so a null fresh allocation
-    // cannot be paired with the saved object's nonzero count during teardown.
+    // Keep the material table and count together, including the adjacent light group.
     PreserveRange(overlay.data(), live, liveSize, {0x110, 0x10});
 
-    // uModel's joint count and allocation pointers describe the freshly-built
-    // native model. A saved count with a null live index array makes rendering
-    // call through a null pointer during joint-order traversal.
+    // Keep joint counts/tables and motion controls consistent with the fresh model.
     PreserveRange(overlay.data(), live, liveSize, {0x530, 0x30});
 
     if (IsDti(snapshot.dti, kLegionTigerDti) ||
         IsDti(snapshot.dti, kRepulsorBlastSpDti)) {
-        // These shots drive collision from asynchronously loaded models. Once
-        // setup succeeds, do not overwrite the fresh model and Motion graph.
-        // Restore only uActorGameModel's pointer-free animation playback state;
-        // native move evaluation rebuilds the matching joint pose from it.
+        // Preserve the loaded model and motion setup; rewind actor playback only.
         PreserveRange(overlay.data(), live, liveSize, {0x100, 0x1200});
         PreserveRange(overlay.data(), live, liveSize, {0x1348, 0x128});
         CopyRange(overlay.data(), source, liveSize, {0x1300, 0x48});
     }
 
-    // uActorGameModel owns four resource references followed by seven helper
-    // allocations in +0x13E8..+0x143F. Its destructor releases this complete
-    // block. Preserve it atomically; mixing saved adjacent ownership state with
-    // fresh pointers can make two fields release the same helper or dispatch
-    // through an object whose vtable was already cleared.
+    // Keep the actor's four resource references and seven owned material-helper arrays.
     PreserveRange(overlay.data(), live, liveSize, {0x13E8, 0x58});
 
-    // cAtkCtrl and cArm are inline native owners. Their scalar fields include
-    // vtable-backed collision slots and target-info storage, so preserving only
-    // the pointer-looking words is insufficient: a saved destructor state can
-    // leave a live slot non-null with a zeroed vtable. Keep the complete fresh
-    // owner region; the explicitly restored target/collision gameplay state is
-    // applied below through native accessors.
+    // Keep embedded cAtkCtrl/cArm and the following shot data fresh as a block.
+    // Restore selected gameplay fields, targets, and collision state separately.
     PreserveRange(overlay.data(), live, liveSize, {0x1470, 0xC08});
 
-    // cAtkCtrl+0x20 is its attack-resource map. Kikosho phase 5 resolves the
-    // current attack-info entry through this binding before it creates its
-    // expanded explosion primitive. The factory's fresh map can describe a
-    // later resource state even when the restored mAtkInfoId matches, so keep
-    // the saved binding while leaving the surrounding inline owner fresh.
-    // Nemesis's explosion is rebuilt from its remapped parent rocket; its fresh
-    // binding carries that parent's attack variant, while the saved client
-    // binding can still resolve the factory-default launch parameters.
-    // Elemental Summon likewise rebuilds its powered attack binding natively.
-    // Keep that fresh map instead of a reference from the retired resource graph.
+    // Restore the saved attack-resource binding, needed by Kikosho's phase-5 hitboxes.
+    // Keep the rebuilt binding for Nemesis's explosion and Elemental Summon instead.
     if (!IsDti(snapshot.dti, kRocketLauncherExplodeDti) &&
         !IsDti(snapshot.dti, kElementalSummonShotDti)) {
         CopyRange(overlay.data(), source, liveSize, {0x1490, 0x08});
     }
 
-    // Restore all known pointer-free cAtkCtrl scalars: mAtkInfoId, mFlag,
-    // mTotalCombo, mDelayTime, mLifeTime, mCountTime, mEndTime, and mAnmNo.
-    // The target-table MtArray headers immediately follow this range and stay
-    // owned by the fresh object; their validated entries are restored below.
+    // Restore attack selection, flags, combo, timers, and animation number.
+    // The pending attack ID is restored with the full scalar header below.
     CopyRange(overlay.data(), source, liveSize, {0x1498, 0x24});
 
     // Soul Fist stores a live uGameEffect pointer after its mode field.
@@ -1269,66 +1222,49 @@ bool ConcreteShotSnapshot_Restore(void* shot,
         PreserveRange(overlay.data(), live, liveSize, {0x2148, 0x08});
     }
 
-    // Scan the common body and concrete tail once, preserving inline MtObjects
-    // found in either timeline. Saved-only owners still retain fresh bytes so
-    // historical generator and particle ownership cannot enter the live heap.
+    // Keep fresh bytes for embedded MtObjects detected in either copy.
     PreserveEmbeddedObjectsFromBoth(overlay.data(), live, source, liveSize,
                                     kShotRestoreStart);
     const uint64_t embeddedLiveEnd = Profile_Now();
     const uint64_t embeddedSavedEnd = embeddedLiveEnd;
 
-    // createProperty value fields exported from properties_static.json are
-    // ownership-free gameplay state. Reapply them after the pointer and
-    // embedded-object filters so a packed scalar cannot be retained merely
-    // because it resembles an address.
+    // Reapply property-exported and verified scalars after ownership filtering.
     RestoreGeneratedRanges(overlay.data(), source, liveSize, snapshot.dti,
                            kGeneratedShotTailRanges);
     RestoreGeneratedRanges(overlay.data(), source, liveSize, snapshot.dti,
                            kVerifiedShotScalarRanges);
 
     if (IsDti(snapshot.dti, kVulcanAxeDti)) {
-        // Arthur's axe rotates its model and collision geometry from this
-        // accumulator. Values such as 18.0f resemble mapped addresses when
-        // read as a qword, so the generic ownership filter keeps factory zero.
+        // Restore the axe's rotation angle even if its bits resemble a pointer.
         CopyRange(overlay.data(), source, liveSize, {0x21D0, 0x04});
     }
 
     if (IsDti(snapshot.dti, kItemThrowDti)) {
-        // Item Throw's angle speed and landing count pack into values near the
-        // image address range after its first bounce. Reapply the verified
-        // pointer-free variant, rotation, bounce, height, and scale tail.
+        // Restore item variant, spin, and landing/bounce state after filtering.
         CopyRange(overlay.data(), source, liveSize, {0x2210, 0x20});
     }
 
     if (IsDti(snapshot.dti, kShikiDanKobunDti)) {
-        // Beacon Bomb's Servbot state machine keeps its random-selection phase
-        // and timer immediately after reflected mAttachOfs. Factory zero here
-        // reaches intInRange on a different tick and advances global RNG.
+        // Restore the Servbot's voice threshold/latch and periodic sound timer.
         CopyRange(overlay.data(), source, liveSize, {0x2170, 0x10});
     }
 
     if (IsDti(snapshot.dti, kVulcanBoomerangDti)) {
-        // The embedded uCnsTSR ends at +0x2210. The remaining concrete tail is
-        // pointer-free homing direction, variant, return mode and phase state.
+        // Restore boomerang trajectory/phase and effect/lifetime latches after uCnsTSR.
         CopyRange(overlay.data(), source, liveSize, {0x2210, 0x30});
     }
 
-    // mId is scalar allocator state inside the otherwise fresh-owned cArm
-    // block. A reconstructed Kikosho kept its factory ID here while the ID
-    // pool was rewound, changing per-target hit consumption on the next tick.
+    // Restore the shot ID to match the rewound ID pool and target-hit records.
     CopyRange(overlay.data(), source, liveSize, {0x1F50, 0x04});
 
     if (IsDti(snapshot.dti, kDogMissileDti)) {
-        // Repeated setup selects the dog animation again. Restore the complete
-        // pointer-free actor playback header so mAnmTime does not restart while
-        // mAnmTimePass and the uModel Motion cursor continue from the snapshot.
+        // Undo setup's animation restart by restoring the actor playback header.
         CopyRange(overlay.data(), source, liveSize, {0x1300, 0x48});
     }
 
     if (Rollback_ShouldRestoreShotModelPlayback(snapshot.dti)) {
-        // These shots consume model animation state in gameplay. Reconstruction
-        // keeps fresh motion owners and resources, but must rewind pointer-free
-        // playback state or joint-driven phases and launch positions restart.
+        // Rewind model playback controls, motion state, and event masks.
+        // Keep fresh motion resources and work buffers.
         CopyRange(overlay.data(), source, liveSize, {0x550, 0x10});
         static constexpr SnapshotRange motionRestoreRanges[] = {
             {0x08, 0x118},
@@ -1345,30 +1281,23 @@ bool ConcreteShotSnapshot_Restore(void* shot,
     }
 
     if (IsDti(snapshot.dti, kAttackWireDti)) {
-        // Attack Wire's hit/attached latches, mode, and retract timer. Leaving
-        // these at factory values makes one peer signal Spencer to retract.
-        // The owned effect resource starts at +0x2150 and remains live-owned.
+        // Restore attachment/control flags, mode, and return countdown.
+        // Leave the effect resource at +0x2150 fresh.
         CopyRange(overlay.data(), source, liveSize, {0x2140, 0x10});
     }
 
     if (IsDti(snapshot.dti, kVulcanSwingWireDti)) {
-        // Swing Wire's activation latch, variant and travel-start timer. Forced
-        // reconstruction otherwise resets the timer before its 10-frame branch
-        // can signal Spencer through cChr+0x1510. Effect ownership starts at
-        // +0x2150 and remains native to the fresh shot.
+        // Restore activation latch, mode, and timer used to signal Spencer.
+        // Leave the effect resource at +0x2150 fresh.
         CopyRange(overlay.data(), source, liveSize, {0x2140, 0x10});
     }
 
-    // Copy the complete gameplay tail. The prefix contains cUnit ownership and
-    // intrusive links and remains owned by the freshly-created object.
+    // Apply the filtered body, leaving the unit prefix and intrusive links fresh.
     CopyRange(live, overlay.data(), liveSize,
               {kShotRestoreStart, liveSize - kShotRestoreStart});
     const uint64_t applyBodyEnd = Profile_Now();
-    // A fresh shot has empty cAtkCtrl target tables. Restore the saved
-    // per-target hit count/time so reconstructing an already-consumed attack
-    // cannot apply the same projectile to the same character a second time.
-    // Keep the fresh vtable, mpUnit and mpResource ownership at +0x00..+0x27,
-    // but rewind mAtkInfoId, flags, combo and timing state through mAnmNo.
+    // Reapply the full attack scalar header, including the pending attack ID.
+    // Restore target-hit records so reconstruction does not allow duplicate hits.
     CopyRange(live, source, liveSize, {0x1498, 0x28});
     RestoreAttackTargets(live, source, liveSize, validTargets, validTargetCount);
     const uint64_t targetsEnd = Profile_Now();

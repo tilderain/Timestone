@@ -1,18 +1,6 @@
-// controller.cpp
-// Decompiled pad/input functions from umvc3.exe, hooked via MinHook.
-//
-// Rollback netplay architecture:
-//   Local input accumulates per-character in hkprocessFrameInput (identical to
-//   original behavior).  At frame end the raw accumulated value is written into
-//   a delay ring buffer at (currentFrame + delayFrames) and also sent over the
-//   wire immediately.
-//
-//   On receipt, inbound inputs are stored at the sender's absolute frame index
-//   (using inPkt.start_frame), binding both games to the same timeline.
-//   Instead of blocking (spin-wait) when remote input hasn't arrived, we
-//   predict using the last known remote value.  Late-arriving packets are
-//   detected via g_usedRemoteInput vs g_receivedInput comparison, triggering
-//   a rollback + re-simulation with corrected inputs.
+// Native input hooks and frame-indexed netplay input scheduling.
+// Exchange button-remapped input before character-specific processing;
+// predict missing remote input and replay frames when confirmation differs.
 #include "../pch.h"
 #include "controller.h"
 #include "mk10utils.h"
@@ -20,7 +8,6 @@
 #include "rollback.h"
 #include "rollback_diagnostics.h"
 #include "rollback_profile.h"
-#include "diag.h"
 #include "autotest.h"
 #include "framestepper.h"
 #include "../kiero/minhook/include/MinHook.h"
@@ -110,23 +97,22 @@ static constexpr uintptr_t ADDR_MVC3_MGR_GET_INSTANCE    = 0x140001AF0;
 static constexpr uintptr_t ADGR_MGR_GET_PLAYER_CHAR      = 0x14025AC40;
 static constexpr uintptr_t ADDR_METHOD_3D00              = 0x1402B3D00;
 
-// cChrInput__processFrameInput — the per-character input processor.
+// Native character-input processing and remapping.
 static constexpr uintptr_t ADDR_PROCESS_FRAME_INPUT       = 0x14002DD60;
 static constexpr uintptr_t ADDR_IS_GAMEPLAY_ACTIVE        = 0x14002DCE0;
 static constexpr uintptr_t ADDR_BUTTON_REMAP              = 0x14002DA30;
 static constexpr uintptr_t ADDR_OPENING_REMAP_RETURN      = 0x14000650C;
 static constexpr uintptr_t ADDR_SWAP_LR_IF_FACE_LEFT      = 0x14002E560;
 static constexpr uintptr_t ADDR_CPU_INPUT_SWAP_RETURN     = 0x14002DE57;
-// uAmaterasu__getter_4AC0 — returns the team index (0=P1, 1=P2) from a character object.
+// Character team index: 0 = P1, 1 = P2.
 static constexpr uintptr_t ADDR_GET_TEAM_INDEX            = 0x140004AC0;
 
-// sAction__stepIntro — auto-skip intro during netplay
+// Hold the intro until the netplay battle barrier releases.
 static constexpr uintptr_t ADDR_STEP_INTRO                 = 0x140007D90;
-// sAction__stepFighting — replace offline local-delta fight clocks during netplay.
+// Derive fight clocks from the shared netplay frame.
 static constexpr uintptr_t ADDR_STEP_FIGHTING              = 0x140007080;
-// sAction__stepResult8 — winner outro and continue-to-results input.
+// Winner outro and result-screen flow.
 static constexpr uintptr_t ADDR_STEP_RESULT8               = 0x14000A990;
-// sAction__stepResult9_10_11 — active result-screen flow.
 static constexpr uintptr_t ADDR_STEP_RESULT9_10_11         = 0x14000A3B0;
 static constexpr uintptr_t ADDR_PAD_RAW_INPUT              = 0x1402B3B80;
 static constexpr uintptr_t ADDR_PAD_UNIT_FLAGS             = 0x140001A70;
@@ -145,7 +131,6 @@ static xinputToGameMask_t          oxinputToGameMask          = nullptr;
 static padSlotPostReadProcess_t    opadSlotPostReadProcess    = nullptr;
 static inputAutoRepeatTimerProcess_t oinputAutoRepeatTimerProcess = nullptr;
 
-// processFrameInput trampoline
 static void(__fastcall* oprocessFrameInput)(uint64_t cChrInput) = nullptr;
 static uint32_t(__fastcall* obuttonRemap)(uint64_t playerIndex, uint32_t input,
                                           uint8_t alternateMap) = nullptr;
@@ -155,7 +140,7 @@ static uint32_t g_openingMembers[2] = {};
 static bool g_openingMembersValid = false;
 
 // ===========================================================================
-// Decompiled helper functions (inlined from game)
+// Native-style input helpers
 // ===========================================================================
 namespace ControllerDecomp {
 
@@ -166,41 +151,40 @@ static uint32_t keyboardToGameMask(uint64_t sPad)
 
     uint32_t r = 0;
 
-    // Movement/Directions
+    // Arrow keys.
     if (fn3D00(sPad, 0x28, 0)) r |= IN_DOWN;
     if (fn3D00(sPad, 0x26, 0)) r |= IN_UP;
     if (fn3D00(sPad, 0x25, 0)) r |= IN_LEFT;
     if (fn3D00(sPad, 0x27, 0)) r |= IN_RIGHT;
 
-    // Standard keyboard mappings for UMVC3 gameplay actions (Default layout)
-    if (fn3D00(sPad, 0x41, 0)) r |= IN_X;       // Key 'A' -> Light Punch (IN_X)
-    if (fn3D00(sPad, 0x53, 0)) r |= IN_Y;       // Key 'S' -> Medium Punch (IN_Y)
-    if (fn3D00(sPad, 0x44, 0)) r |= IN_B;       // Key 'D' -> Heavy Punch (IN_B / Heavy)
-    if (fn3D00(sPad, 0x5A, 0)) r |= IN_X;       // Key 'Z' -> Light Kick (IN_X)
-    if (fn3D00(sPad, 0x58, 0)) r |= IN_Y;       // Key 'X' -> Medium Kick (IN_Y)
-    if (fn3D00(sPad, 0x43, 0)) r |= IN_B;       // Key 'C' -> Heavy Kick (IN_B / Heavy)
-    if (fn3D00(sPad, 0x46, 0)) r |= IN_A;       // Key 'F' -> Special Launcher (IN_A / Special)
-    if (fn3D00(sPad, 0x51, 0)) r |= IN_LB;      // Key 'Q' -> Assist 1 (IN_LB)
-    if (fn3D00(sPad, 0x57, 0)) r |= IN_RB;      // Key 'W' -> Assist 2 (IN_RB)
+    // Keyboard action bindings.
+    if (fn3D00(sPad, 0x41, 0)) r |= IN_X;       // A: Light
+    if (fn3D00(sPad, 0x53, 0)) r |= IN_Y;       // S: Medium
+    if (fn3D00(sPad, 0x44, 0)) r |= IN_B;       // D: Heavy
+    if (fn3D00(sPad, 0x5A, 0)) r |= IN_X;       // Z: Light
+    if (fn3D00(sPad, 0x58, 0)) r |= IN_Y;       // X: Medium
+    if (fn3D00(sPad, 0x43, 0)) r |= IN_B;       // C: Heavy
+    if (fn3D00(sPad, 0x46, 0)) r |= IN_A;       // F: Special
+    if (fn3D00(sPad, 0x51, 0)) r |= IN_LB;      // Q: Assist 1
+    if (fn3D00(sPad, 0x57, 0)) r |= IN_RB;      // W: Assist 2
 
-    // VK_RETURN and VK_A → unit flags (Start/Select in menus)
+    // Enter/A and Backspace/B use the native menu masks.
     if (fn3D00(sPad, 0x0D, 0))
         r |= (uint32_t)((uint64_t(__fastcall*)(uint64_t))_addr(0x140001A70))(sPad);
     if (fn3D00(sPad, 0x41, 0))
         r |= (uint32_t)((uint64_t(__fastcall*)(uint64_t))_addr(0x140001A70))(sPad);
 
-    // VK_BACK and VK_B → UI anm flags
     if (fn3D00(sPad, 0x08, 0))
         r |= (uint32_t)((uint64_t(__fastcall*)(uint64_t))_addr(0x140001A50))(sPad);
     if (fn3D00(sPad, 0x42, 0))
         r |= (uint32_t)((uint64_t(__fastcall*)(uint64_t))_addr(0x140001A50))(sPad);
 
-    // Modifiers / Menus
-    if (fn3D00(sPad, 0xA2, 0)) r |= IN_LB;      // L-Shift
-    if (fn3D00(sPad, 0xA0, 0)) r |= IN_LT;      // L-Ctrl
+    // Modifiers and menu keys.
+    if (fn3D00(sPad, 0xA2, 0)) r |= IN_LB;      // L-Ctrl
+    if (fn3D00(sPad, 0xA0, 0)) r |= IN_LT;      // L-Shift
     if (fn3D00(sPad, 0xA4, 0)) r |= IN_L3;      // L-Alt
-    if (fn3D00(sPad, 0xA3, 0)) r |= IN_RB;      // R-Shift
-    if (fn3D00(sPad, 0xA1, 0)) r |= IN_RT;      // R-Ctrl
+    if (fn3D00(sPad, 0xA3, 0)) r |= IN_RB;      // R-Ctrl
+    if (fn3D00(sPad, 0xA1, 0)) r |= IN_RT;      // R-Shift
     if (fn3D00(sPad, 0xA5, 0)) r |= IN_R3;      // R-Alt
     if (fn3D00(sPad, 0x09, 0)) r |= IN_BACK;    // Tab
     if (fn3D00(sPad, 0x1B, 0)) r |= IN_START;   // Esc
@@ -211,8 +195,7 @@ static uint32_t keyboardToGameMask(uint64_t sPad)
 } // namespace ControllerDecomp
 
 // ---------------------------------------------------------------------------
-// ApplySOCD
-// SOCD cleaning helper function.
+// Resolve simultaneous opposing direction bits.
 // ---------------------------------------------------------------------------
 static uint32_t ApplySOCD(uint32_t input)
 {
@@ -239,54 +222,34 @@ static bool IsGameProcessForeground()
 }
 
 // ===========================================================================
-// Netplay Input Buffers  (nifi.cpp-style shift buffer + frame-indexed array)
-//
-// g_oldInputs[] — shift buffer holding the last MAX_HISTORY frames of raw
-//   accumulated local input.  Each frame everything shifts down by one and the
-//   current accumulator is appended at the end.  Delayed local input is read
-//   from g_oldInputs[MAX_HISTORY - g_delayFrames] BEFORE the shift.
-//
-// g_receivedInput[] — indexed by sender's absolute frame number (% RING_SIZE).
-//   Inbound packets carry MAX_HISTORY slots.  Each slot is stored at
-//   (inPkt.start_frame + slot_index) % RING_SIZE, binding both games to a
-//   shared timeline and preventing drift.
+// Netplay input history and absolute-frame schedules.
+// Ring slots use frame % RING_SIZE; frame tags distinguish reused slots.
 // ===========================================================================
 static constexpr int RING_SIZE      = 256;
-static constexpr int MAX_HISTORY    = NET_HISTORY_SIZE;  // 16 — matches wire format
+static constexpr int MAX_HISTORY    = NET_HISTORY_SIZE;
 
-static uint32_t  g_oldInputs[MAX_HISTORY];     // local history (shift buffer)
+static uint32_t  g_oldInputs[MAX_HISTORY];     // Legacy capture history, not the delay schedule.
 
-// Local inputs keyed by their absolute execution frame. Unlike g_oldInputs,
-// this schedule is not reinterpreted when delay changes: already queued inputs
-// keep their original frame, while newly captured input uses the new delay.
+// Delay changes affect new captures, not the frame labels of queued input.
 static uint32_t  g_scheduledLocalInput[RING_SIZE];
 static int32_t   g_scheduledLocalFrame[RING_SIZE];
 
-// Remote inputs indexed by local frame number (mod RING_SIZE).
-// All offsets are relative to the receiver's own frame counter.
+// Remote input on the shared frame timeline, tagged by g_confirmedFrame.
 static uint32_t  g_receivedInput[RING_SIZE];
 
-// Tracks the exact absolute frame number currently occupying each slot in the ring buffer.
-// Prevents reading stale inputs from frame - 256.
+// Absolute frame tags prevent stale ring-slot reads.
 static int32_t   g_confirmedFrame[RING_SIZE];
 
-// Tracks the exact absolute frame number of predicted inputs to avoid duplicate logs.
+// Prediction frame tags, also used to suppress duplicate logs.
 static int32_t   g_predictedFrame[RING_SIZE];
 
-// Raw GetsCurrentInput_withSOCD result per frame x player (before delay).
-// Used during resim to return the correct historical input from
-// hkGetsCurrentInput_withSOCD so cChrInput__processFrameInput
-// populates the history rings correctly.
-// [playerIndex][frame % RING_SIZE]
+// Raw physical input for offline replay: [player][frame % RING_SIZE].
 static uint32_t  g_rawLocalInput[2][RING_SIZE];
 
-// Final character-processed input history per team. This remains diagnostic;
-// the netplay timeline carries button-remapped input before character-specific
-// facing, ability, and suppression processing.
+// Final character input for diagnostics and offline replay, not the netplay wire format.
 static uint32_t  g_recordedGameInput[2][RING_SIZE];
 
-// Delay/rollback settings — defined here (above IsFrameConfirmed) because the
-// startup-window confirmation check reads them.
+// Input delay, prediction window, and scheduled setting changes.
 static int32_t   g_delayFrames     = 3;
 static int32_t   g_pendingDelayFrames = -1;
 static int32_t   g_pendingDelayEffectiveFrame = -1;
@@ -297,11 +260,7 @@ static int32_t   g_pendingRollbackEffectiveFrame = -1;
 static bool IsFrameConfirmed(int32_t frame)
 {
     if (frame < 0) return false;
-    // Startup window: frames 0..(delay+rollback) are forced to zero input on
-    // BOTH sides by the guards in hkprocessFrameInput / Controller_OnFrameEnd,
-    // so the remote input for these frames is zero by construction.  Treat
-    // them as confirmed locally — no seed packet needed, and no risk of a
-    // stale seed packet falsely confirming frames beyond this window.
+    // Both peers use neutral startup input; no packet is needed to confirm it.
     if (frame <= g_delayFrames + g_rollbackFrames) return true;
     return g_confirmedFrame[frame % RING_SIZE] == frame;
 }
@@ -311,39 +270,24 @@ extern "C" bool Controller_IsFrameConfirmed(int32_t frame)
     return IsFrameConfirmed(frame);
 }
 
-// Tracks whether a frame's remote input was predicted (vs confirmed).
+// Whether the selected remote input was predicted.
 static bool      g_predictedInput[RING_SIZE];
 
-// Tracks what input we actually USED during simulation for each frame.
-// Compared against g_receivedInput after each packet drain to detect
-// late-arriving corrections that require a rollback + re-sim.
+// Selected remote input, compared with received input to find rollback conflicts.
 static uint32_t  g_usedRemoteInput[RING_SIZE];
 
-// Immutable provenance for the most recent simulation of each absolute frame.
-// g_usedRemoteInput may be updated when a late packet arrives, so it cannot by
-// itself prove which input produced an already-recorded checksum.
+// Input used by the last simulation of each frame, independent of later selection changes.
 static uint32_t  g_processedRemoteInput[RING_SIZE];
 static int32_t   g_processedRemoteFrame[RING_SIZE];
 
-// Records the exact delayed local input executed on each live frame.
-// Read directly during re-simulation to replay the original local input
-// instead of reading the real-time physical device, preventing input
-// pollution that causes cyclic rollback conflicts.
+// Executed local input for diagnostics and resimulation fallback.
 static uint32_t  g_recordedLocalInput[RING_SIZE];
 
-// Live frame reference record: captures post-override state during the original
-// live tick so we can compare it against re-simulation of the same frame.
-
-
-// Frame counter — read from the game's own sReplay singleton each frame.
-// g_psReplay pointer   = *(uint64_t*)_addr(0x140d4d9d8)  (Ghidra confirmation)
-// Frame counter uint32 = *(sReplay + 0x54)                (INC dword [RCX+0x54] at 0x1401cefdd)
+// Shared logical frame, read from the native sReplay cursor.
 static int32_t   g_netFrameCount   = -1;
-// g_delayFrames / g_rollbackFrames are defined above IsFrameConfirmed.
 static uint32_t  g_localPending    = 0;   // accumulator, ORed across team chars
 
-// Tracks the latest frame for which remote input has been received.
-// Used to hold-last-value when no new input has arrived for the current frame.
+// Newest received remote input; fallback when prediction finds no earlier confirmation.
 static int32_t   g_lastRemoteFrame = -1;
 static uint32_t  g_lastRemoteInput = 0;
 static int32_t   g_lastNonMultiCheckedFrame = -1;
@@ -351,7 +295,7 @@ static int32_t   g_lastNonMultiCheckedFrame = -1;
 bool g_multiResimEnabled = true; // Multi-resimulation toggle
 
 // ---------------------------------------------------------------------------
-// Desync detection — per-frame XOR checksums of all character state.
+// Per-frame character/gameplay-RNG checksums and desync status.
 // ---------------------------------------------------------------------------
 bool     g_desyncDetected     = false;
 bool     g_desyncSeen         = false;
@@ -370,9 +314,7 @@ static int32_t   g_desyncChecked[RING_SIZE];   // frame number when checksum was
 static bool      g_desyncMismatch[RING_SIZE];  // true if that frame exceeded threshold
 
 static constexpr uint32_t DESYNC_THRESHOLD         = 0;
-// Restart setup can remain transient briefly after both peers report fighting.
-// Start each checksum epoch after that state has settled instead of treating
-// fresh startup differences as persistent match desyncs.
+// Skip transient startup state before comparing checksums.
 static constexpr int32_t  DESYNC_SKIP_FRAMES       = 50;
 static constexpr int32_t  DESYNC_CONSECUTIVE_MIN   = 1;
 
@@ -397,14 +339,14 @@ static void ResetDesyncDetection()
 }
 
 // ---------------------------------------------------------------------------
-// Frame advantage (GGPO-style) — RTT-based frame-count timesync
+// RTT-based frame-advantage estimates.
 // ---------------------------------------------------------------------------
 int32_t      g_localFrameAdvantage  = 0;  // negative = we're ahead of remote
 int32_t      g_remoteFrameAdvantage = 0;  // received from peer via packet
 
-// Timesync window averaging (GGPO-style)
+// Averaging window and wait-recommendation limits; sleeping is currently disabled.
 static constexpr int TIMESYNC_WINDOW_SIZE       = 40;
-static constexpr int TIMESYNC_MIN_FRAME_ADVANTAGE = 3; // 3 is a pretty good start. Lower to 2 when you think rift estimation is good.
+static constexpr int TIMESYNC_MIN_FRAME_ADVANTAGE = 3;
 static constexpr int TIMESYNC_MAX_FRAME_ADVANTAGE = 14;
 
 static int32_t g_localAdvHistory[TIMESYNC_WINDOW_SIZE] = {};
@@ -424,7 +366,7 @@ static void LogReceivedPacket(const InputPacket& pkt)
     HookLog("\n");
 }
 
-// Team + node traversal constants (mirrors rollback.cpp BuildRegions)
+// Native character-team list layout.
 static constexpr uintptr_t TEAM0_OFFSET          = 0x40;
 static constexpr uintptr_t TEAM1_OFFSET          = 0x300;
 static constexpr uintptr_t TEAM_FIRST_NODE_OFFSET = 0x08;
@@ -432,9 +374,7 @@ static constexpr uintptr_t NODE_CHR_OFFSET       = 0x08;
 static constexpr uintptr_t NODE_NEXT_OFFSET      = 0x10;
 
 // ---------------------------------------------------------------------------
-// Helper: read the game's authoritative frame counter from sReplay + 0x54.
-// g_psReplay global at 0x140d4d9d8 (confirmed via Ghidra disassembly).
-// Returns -1 if the replay system isn't initialized yet.
+// Read sReplay+0x54 relative to the frame epoch; return -1 before initialization.
 // ---------------------------------------------------------------------------
 static constexpr uintptr_t G_PSREPLAY_PTR = 0x140d4d9d8;
 static int32_t g_gameFrameBase = 0;
@@ -450,10 +390,7 @@ static int32_t GetGameFrameCount()
 extern "C" void Controller_ResetFrameEpoch()
 {
     uint64_t sReplay = *(uint64_t*)_addr(G_PSREPLAY_PTR);
-    // This runs at the mutual battle-release barrier. Using each process's
-    // current native counter as a base gives the peers different logical frame
-    // labels when they reach the barrier on different native ticks. Establish
-    // the same explicit epoch on both peers instead.
+    // Reset both native cursors at the battle barrier so frame labels match.
     if (sReplay)
         *(int32_t*)(sReplay + 0x54) = 0;
     g_gameFrameBase = 0;
@@ -489,10 +426,8 @@ extern "C" void Controller_ResetBuffers()
     std::memset(g_processedRemoteInput, 0, sizeof(g_processedRemoteInput));
     std::memset(g_processedRemoteFrame, -1, sizeof(g_processedRemoteFrame));
     std::memset(g_recordedLocalInput, 0, sizeof(g_recordedLocalInput));
-    std::memset(g_rawLocalInput,      0, sizeof(g_rawLocalInput));  // 2D [2][RING_SIZE]
+    std::memset(g_rawLocalInput,      0, sizeof(g_rawLocalInput));
     std::memset(g_recordedGameInput,  0, sizeof(g_recordedGameInput));
-    std::memset(g_liveRef,            0, sizeof(g_liveRef));
-    Diag_ResetBuffers();
     // g_netFrameCount is read from sReplay each frame; no reset needed.
     g_localPending    = 0;
     g_pendingDelayFrames = -1;
@@ -556,8 +491,7 @@ extern "C" void Controller_SetMultiResimEnabled(bool enabled)
 
     g_multiResimEnabled = enabled;
 
-    // Frames handled under the previous mode must not be reconsidered by the
-    // non-multi frontier. Their snapshots may already have rolled out.
+    // Do not revisit pre-transition frames whose snapshots may have expired.
     int32_t transitionFrame = GetGameFrameCount();
     if (transitionFrame >= 0)
         g_lastNonMultiCheckedFrame = transitionFrame;
@@ -583,8 +517,7 @@ extern "C" void Controller_SetRollbackFrames(int32_t n)
         Rollback_ClearPendingReSimulation();
     }
 
-    // A rollback-mode transition changes which frames are authoritative. Do not
-    // compare checksum records produced under the previous mode.
+    // Discard checksums produced under the previous rollback setting.
     Controller_ClearDesyncDetection();
 }
 
@@ -618,10 +551,7 @@ extern "C" void Controller_RestoreRollbackState()
     g_localPending = g_savedLocalPending;
 }
 
-// Return the delayed local input that will be used for the current frame.
-// At snapshot-save time (start of frame, before game tick), this value is
-// g_oldInputs[MAX_HISTORY - g_delayFrames] — the input from g_delayFrames
-// frames ago that hkprocessFrameInput will apply during the imminent tick.
+// Return scheduled input for the current frame, or neutral if none is queued.
 extern "C" uint32_t Controller_GetCurrentFrameInput()
 {
     int32_t frame = GetGameFrameCount();
@@ -630,8 +560,7 @@ extern "C" uint32_t Controller_GetCurrentFrameInput()
     return g_scheduledLocalFrame[idx] == frame ? g_scheduledLocalInput[idx] : 0;
 }
 
-// Override offline resimulation's recorded input for |frame|. Netplay
-// resimulation reads canonical pre-facing input directly from the snapshot.
+// Override offline input history; netplay replay reads pre-facing snapshot input.
 extern "C" void Controller_InjectLocalInput(int32_t frame, uint32_t input)
 {
     uint32_t idx = (uint32_t)(frame >= 0 ? frame : 0) % RING_SIZE;
@@ -639,23 +568,14 @@ extern "C" void Controller_InjectLocalInput(int32_t frame, uint32_t input)
     g_recordedGameInput[localTeam][idx] = input;
 }
 
-// Override the remote side's input for |frame| to |input|.
-// Called during re-simulation after InjectLocalInput, using the value
-// saved in that frame's snapshot slot.
-// hkprocessFrameInput reads g_usedRemoteInput[idx] during re-sim for
-// the remote team, so pre-populating it from the snapshot makes the
-// hook replay the correct remote input.
+// Set the remote input slot used by resimulation fallback.
 extern "C" void Controller_InjectRemoteInput(int32_t frame, uint32_t input)
 {
     uint32_t idx = (uint32_t)(frame >= 0 ? frame : 0) % RING_SIZE;
     g_usedRemoteInput[idx] = input;
 }
 
-// Save/restore the local input shift buffer around re-sim.  The re-sim loop
-// calls SilentFrameEnd which shifts g_oldInputs with accumulated re-sim local
-// input (which is 0 during re-sim since we bypass with g_recordedLocalInput).
-// Restoring it prevents the next outbound packet from carrying a corrupted
-// timeline that would cause spurious conflicts on the remote side.
+// Preserve live capture history and pending input across resimulation.
 static uint32_t g_savedInputHistory[MAX_HISTORY];
 static uint32_t g_savedLocalPendingReSim;
 static int64_t g_saveRestorePairId = 0; // pairs Save/Restore calls for log analysis
@@ -719,12 +639,7 @@ static void QueueInboundChecksum(const InputPacket& packet)
     g_remoteChecksumFrame[idx] = frame;
 }
 
-// Centrally resolve the remote input for a given game frame into
-// g_usedRemoteInput.  Called once per frame in Controller_OnFrameStart
-// (for the current live frame) and once per re-simmed frame in the
-// Rollback_ReSimulate loop.  g_lastRemoteFrame is never rolled back
-// (excluded from snapshot save/restore), so the resolution stays
-// accurate across rollback boundaries.
+// Select confirmed or predicted remote input for a live or resimulated frame.
 extern "C" void Controller_ResolveRemoteInput(int32_t frame)
 {
     uint32_t idx = (uint32_t)frame % RING_SIZE;
@@ -747,8 +662,7 @@ extern "C" void Controller_ResolveRemoteInput(int32_t frame)
             if (pkt.battle_generation != FrameStepper_GetBattleGeneration())
                 continue;
 
-            // Even packets whose input history is entirely stale carry the
-            // next checksum in the sender's confirmed checksum stream.
+            // Stale input packets may still carry a new checksum.
             QueueInboundChecksum(pkt);
 
             int32_t pktMaxFrame = (int32_t)pkt.start_frame + NET_HISTORY_SIZE - 1;
@@ -799,9 +713,7 @@ extern "C" void Controller_ResolveRemoteInput(int32_t frame)
             return;
         }
 
-        // Delay-only netcode must never manufacture remote input. Its frame
-        // start path blocks until confirmation; other callers may inspect a
-        // future frame, but they must leave it unresolved rather than predict.
+        // Delay-only mode waits for confirmation; never predict for other callers.
         if (g_rollbackFrames == 0)
         {
             g_predictedInput[idx] = false;
@@ -881,8 +793,7 @@ extern "C" void Controller_LogReSimFrame(int32_t frame)
             IsFrameConfirmed(frame) ? g_receivedInput[idx] : 0);
 }
 
-// Silent frame-boundary helpers for re-simulation — maintain the local input
-// shift buffer without draining inbound packets or sending outbound data.
+// Update capture history during resimulation without exchanging packets.
 extern "C" void Controller_SilentFrameStart()
 {
     g_localPending = 0;
@@ -928,10 +839,8 @@ static void ApplyScheduledDelayIfReady()
 
     const int32_t newDelay = g_pendingDelayFrames;
 
-    // Increasing delay inserts execution frames. Repeat the newest queued
-    // logical input through that gap instead of manufacturing releases. These
-    // frames have not been advertised yet: before this transition the sender's
-    // packet history ended at currentFrame + oldDelay - 1.
+    // Fill the gap from a delay increase with the newest queued input.
+    // These frames have not been sent yet.
     if (newDelay > g_delayFrames)
     {
         const int32_t sourceFrame = g_netFrameCount + g_delayFrames - 1;
@@ -984,8 +893,7 @@ extern "C" bool Controller_RemapSyntheticInput(uint32_t rawInput,
     if (!obuttonRemap || !outInput)
         return false;
 
-    // Index 1 bypasses the native index-0 focus/menu shortcut. Team ownership
-    // is resolved separately by the cChrInput instance receiving the result.
+    // Index 1 remaps the supplied mask without P1's focus/menu shortcut.
     *outInput = obuttonRemap(1, rawInput, 0);
     return true;
 }
@@ -1058,16 +966,12 @@ static uint32_t __fastcall hkbuttonRemap(uint64_t playerIndex, uint32_t rawInput
     uint32_t rawTestInput = 0;
     if (!g_isResimulating &&
         AutoTest_GetInput(context->frame, inputTeam, &rawTestInput)) {
-        // Player index 0 has a native focus/menu shortcut that can ignore the
-        // supplied mask. Index 1 always performs ordinary gameplay remapping.
+        // Remap test input without P1's focus/menu shortcut.
         currentInput = obuttonRemap(1, rawTestInput, alternateMap);
     } else {
         currentInput = obuttonRemap(playerIndex, rawInput, alternateMap);
 
-        // Training boot assigns the keyboard to P1, while a netplay client
-        // owns P2. Poll P1's native keyboard remap here so its internal
-        // focus/device gate remains authoritative, then merge the resulting
-        // logical actions with P2's remapped controller input.
+        // Merge P1's native keyboard input into the client's P2 controller input.
         if (!Netplay_IsHost() && context->ownerTeam == 1 &&
             playerIndex == 1 && IsGameProcessForeground()) {
             currentInput |= obuttonRemap(0, 0, alternateMap);
@@ -1087,21 +991,12 @@ static uint32_t __fastcall hkswapLRIfFaceLeft(uint64_t cChrInput,
     if (!context || !Netplay_IsActive())
         return oswapLRIfFaceLeft(cChrInput, input);
 
-    // The ordinary path already received canonical timeline input from
-    // hkbuttonRemap. Preserve native ability/team transformations applied
-    // between button remapping and facing conversion.
+    // Do not replace native transformations made after timeline injection.
     if (context->injectedAtButtonRemap)
         return oswapLRIfFaceLeft(cChrInput, input);
 
-    // Every native source path that produces gameplay input converges on this
-    // helper, including action/CPU paths that bypass buttonRemap. The early
-    // action path leaves mHeld untouched after this call, so update it here as
-    // well as substituting the value passed through native facing conversion.
-    // The first swap call in the attached uChrCpu-controller path receives the
-    // CPU's freshly generated logical mask. If this peer owns that team, treat
-    // it exactly like freshly remapped physical input and schedule it onto the
-    // authoritative timeline. Other bypass callsites are replay/special paths
-    // and must not become new input authorities.
+    // Inject bypass paths before facing conversion and update mHeld explicitly.
+    // Only the CPU-generation callsite may capture new local input here.
     uintptr_t caller = (uintptr_t)__builtin_return_address(0);
     bool captureCpuInput = caller == (uintptr_t)_addr(ADDR_CPU_INPUT_SWAP_RETURN);
     uint32_t resolved = ResolveTimelineInput(
@@ -1111,17 +1006,15 @@ static uint32_t __fastcall hkswapLRIfFaceLeft(uint64_t cChrInput,
 }
 
 // ---------------------------------------------------------------------------
-// hkGetsCurrentInput_withSOCD
-// Hook on GetsCurrentInput_withSOCD at 0x1402B3700.
+// Route physical input locally; replay raw masks only in offline resimulation.
 // ---------------------------------------------------------------------------
 static uint64_t __fastcall hkGetsCurrentInput_withSOCD(uint64_t pad, uint32_t playerIndex)
 {
     RollbackHookProfileScope profile(RollbackHookProfileId::GetCurrentInput);
 
-    ///Note here this was changed in the commit after da18134e, it may be wrong
     bool is_active = Netplay_IsActive();
 
-    // --- Determine raw input via the original function ---
+    // Suppress the remote slot during live netplay.
     uint64_t raw;
     if (is_active && !g_isResimulating)
     {
@@ -1144,8 +1037,7 @@ static uint64_t __fastcall hkGetsCurrentInput_withSOCD(uint64_t pad, uint32_t pl
             }
             else if (playerIndex == 1)
             {
-                // Read the physical slot directly. Client keyboard input is
-                // merged after native remapping in hkbuttonRemap.
+                // Client keyboard input is merged later in hkbuttonRemap.
                 raw = ApplySOCD(*(uint32_t*)(pad + PAD_SLOT_INPUT));
             }
             else
@@ -1172,25 +1064,18 @@ static uint64_t __fastcall hkGetsCurrentInput_withSOCD(uint64_t pad, uint32_t pl
         }
     }
 
-    // During offline resimulation, replay the historical physical mask.
-    // Netplay instead injects its canonical logical value in hkbuttonRemap.
+    // Offline replay uses raw history; netplay injects logical input after remapping.
     if (g_isResimulating)
     {
         uint32_t idx = (uint32_t)g_resimulateCurrentFrame % RING_SIZE;
         if (is_active)
         {
-            // Netplay resimulation injects canonical logical input after the
-            // native raw-to-logical remap. Do not reinterpret that value as a
-            // physical pad mask here.
+            // Netplay input is injected later, not interpreted as a physical mask.
             return 0;
         }
         else
         {
-            // Singleplayer offline resim: return per-player raw input recorded
-            // during the live frames.  g_rawLocalInput is populated on every
-            // non-resim frame regardless of netplay state (unlike
-            // g_recordedLocalInput which is only written by
-            // Controller_OnFrameEnd for netplay).
+            // Raw history is recorded even when netplay is inactive.
             if (playerIndex < 2)
                 return g_rawLocalInput[playerIndex][idx];
             else
@@ -1255,10 +1140,7 @@ extern "C" void Controller_ClearOpeningMembers()
 }
 
 // ---------------------------------------------------------------------------
-// hkStepIntro
-// Hook on sAction__stepIntro at 0x140007D90.
-// During netplay, lets native phase 2 initialize but blocks its transition
-// until both peers have completed the battle-ready handshake.
+// Allow native intro setup, but hold the countdown until both peers are ready.
 // ---------------------------------------------------------------------------
 static void(__fastcall* oStepIntro)(uint64_t param_1) = nullptr;
 static void(__fastcall* oStepFighting)(uint64_t param_1) = nullptr;
@@ -1286,19 +1168,12 @@ static void __fastcall hkStepIntro(uint64_t param_1)
 
     oStepIntro(param_1);
 
-    // A held confirmation button can make the native intro queue countdown in
-    // its first tick. Keep phase 2 active until both peers release the barrier.
+    // Cancel any native transition queued before the battle barrier releases.
     if (*(int32_t*)(param_1 + 0xDC) >= 0)
         setNextStep(param_1, -1);
 }
 
-// Native online play derives these clocks from the synchronized netpad cursor
-// instead of accumulating each machine's local sMain delta.  The mod runs the
-// game in an offline BattleType, so reproduce that invariant from our shared
-// frame timeline.  Apply both before and after the original function: the
-// pre-write makes timeout/action threshold checks see synchronized time, while
-// the post-write removes the one local-delta increment performed by the
-// offline branch.
+// Use shared-frame time for native checks, then undo the offline delta increment.
 static void ApplySynchronizedFightTime(uint64_t sAction)
 {
     if (!sAction || !Netplay_IsActive() || !FrameStepper_IsBattleSynchronized())
@@ -1318,8 +1193,7 @@ static void ApplySynchronizedFightTime(uint64_t sAction)
     if (elapsedFrames < 0)
         elapsedFrames = 0;
 
-    // Native sMvc3SyncPad divides its cursor delta by 60 as an integer before
-    // converting to float, so sAction receives whole elapsed seconds.
+    // Match native online timing: integer frame division yields whole seconds.
     float elapsedSeconds = (float)(elapsedFrames / 60);
     float remainingSeconds = 180.0f - elapsedSeconds;
     if (remainingSeconds < 0.0f)
@@ -1394,21 +1268,7 @@ static void __fastcall hkStepResult9_10_11(uint64_t sAction)
 }
 
 // ---------------------------------------------------------------------------
-// Frame Boundary Synchronization  (nifi.cpp-style)
-//
-// Controller_OnFrameStart (called before oMove):
-//   - Increment frame counter, reset accumulator
-//   - Drain inbound packets: store each history slot at (frame % RING_SIZE)
-//
-// Controller_OnFrameEnd (called after oMove):
-//   - Read delayed local input from oldInputs (BEFORE shifting), then shift
-//     the buffer and write the current accumulator at the end
-//   - Send outbound packet: MAX_HISTORY slots, starting from
-//     (currentFrame + g_delayFrames - MAX_HISTORY + 1)
-//     → newest slot maps to (currentFrame + g_delayFrames) on the wire
-//
-// hkprocessFrameInput scopes the current character; hkbuttonRemap captures
-// local logical input and substitutes the scheduled local or remote timeline.
+// Frame boundaries: receive/resolve input before the tick; schedule/send captures after it.
 // ---------------------------------------------------------------------------
 static void DrainAndProcessPackets()
 {
@@ -1423,7 +1283,7 @@ static void DrainAndProcessPackets()
         uint16_t acceptedMask = 0;
         uint16_t changedMask = 0;
         uint16_t priorConfirmedMask = 0;
-        // 1. Process inputs from the packet
+        // Packet slots map to consecutive absolute execution frames.
         size_t framesToProcess = NET_HISTORY_SIZE;
         for (size_t i = 0; i < framesToProcess; i++)
         {
@@ -1432,9 +1292,7 @@ static void DrainAndProcessPackets()
             {
                 bool wasConfirmed = IsFrameConfirmed(targetFrame);
                 if (wasConfirmed) priorConfirmedMask |= (uint16_t)(1u << i);
-                // History packets may revise a future frame during a delay
-                // transition. Accept that newest value until the frame has
-                // executed; past frames remain immutable in delay mode.
+                // Accept revisions to future input, but keep confirmed past input fixed.
                 if (!IsFrameConfirmed(targetFrame) || targetFrame > g_netFrameCount)
                 {
                     uint32_t idx = (uint32_t)targetFrame % RING_SIZE;
@@ -1447,7 +1305,7 @@ static void DrainAndProcessPackets()
                     Rollback_UpdateRemoteInput(targetFrame, inPkt.inputs[i]);
                 }
 
-                // Track the absolute furthest remote frame for prediction reference
+                // Track the newest remote frame for prediction.
                 if (targetFrame > g_lastRemoteFrame)
                 {
                     g_lastRemoteFrame = targetFrame;
@@ -1526,8 +1384,7 @@ extern "C" void Controller_OnFrameStart()
     // If sReplay isn't ready yet, skip packet processing this frame.
     if (g_netFrameCount < 0) return;
 
-    // Keep the native replay cursor on the shared logical epoch established at
-    // the mutual battle-release barrier.
+    // Keep the native replay cursor on the shared frame epoch.
     uint64_t sReplay = *(uint64_t*)_addr(G_PSREPLAY_PTR);
     if (sReplay) {
         *(int32_t*)(sReplay + 0x54) = g_netFrameCount;
@@ -1538,15 +1395,11 @@ extern "C" void Controller_OnFrameStart()
 
     g_localPending = 0;
 
-    // Use the same ingestion path here and inside waits. Previously each path
-    // had different stale-packet handling, so a packet could advance
-    // g_lastRemoteFrame without confirming the frame a waiter needed.
+    // Use the same packet acceptance rules here and inside waits.
     DrainAndProcessPackets();
 
-    // Confirm the completed speculative timeline under the old rollback
-    // setting before a smaller window can stop checking it. Never wait for the
-    // current frame: at zero delay both peers produce that input during this
-    // tick, so waiting here would deadlock them before either can send it.
+    // Confirm completed frames before changing the rollback window.
+    // Do not wait for current-frame input: zero-delay peers have not sent it yet.
     if (IsRollbackChangeDue())
     {
         const int32_t lastCompletedFrame = g_netFrameCount - 1;
@@ -1559,15 +1412,14 @@ extern "C" void Controller_OnFrameStart()
 
     if (g_rollbackFrames > 0)
     {
-        // Only do rollback logic once the sAction battle step has started.
+        // Check rollback only after the intro step begins.
         typedef uint64_t(__fastcall* GetAction_t)();
         static GetAction_t getAction = (GetAction_t)_addr(0x140001A90);
         uint64_t action = getAction();
         int step = action ? *(int*)(action + 0xD8) : 0;
         if (step >= 2)
         {
-            // Input delay shifts when inputs execute; it does not increase how
-            // far the simulation may roll back.
+            // Input delay does not extend the prediction window.
             int32_t predictionBudget = g_rollbackFrames;
             if (g_netFrameCount > predictionBudget)
             {
@@ -1578,15 +1430,12 @@ extern "C" void Controller_OnFrameStart()
                 }
             }
 
-        // Multi-resim checks the rolling window continuously. Non-multi only
-        // inspects the newly confirmed frontier; if it finds a conflict, it
-        // waits for a definitive batch before replaying that range once.
+        // Multi-resim scans the rolling window; non-multi checks new confirmations only.
         bool shouldCheckRollback = g_netFrameCount > 0 &&
             (g_multiResimEnabled || g_lastRemoteFrame > g_lastNonMultiCheckedFrame);
         if (shouldCheckRollback)
         {
-            // Match the prediction budget above. A frame confirmed by the
-            // budget wait must still be included in this conflict scan.
+            // Include the oldest frame covered by the prediction-budget wait.
             int32_t checkStart;
             if (g_multiResimEnabled)
             {
@@ -1627,16 +1476,14 @@ extern "C" void Controller_OnFrameStart()
             {
                 if (!g_multiResimEnabled)
                 {
-                    // Non-multi does not replace snapshots inside the replay.
-                    // Confirm the whole batch first so no frame in it can need
-                    // correction a second time.
+                    // Confirm the whole batch before replaying it once.
                     if (!WaitForConfirmedFrame(g_netFrameCount,
                                                "non-multi definitive batch"))
                         return;
                     checkEnd = g_netFrameCount;
                 }
 
-                // Commit any pending correct frames BEFORE the earliest conflict
+                // Placeholder for committing confirmed frames before the conflict.
                 for (int32_t f = checkStart; f < earliestConflict; f++)
                 {
                     if (IsFrameConfirmed(f))
@@ -1644,7 +1491,7 @@ extern "C" void Controller_OnFrameStart()
                     }
                 }
 
-                // Update all snapshots in the range with definitive confirmed inputs
+                // Patch snapshots with confirmed remote input where available.
                 for (int32_t f = earliestConflict; f < g_netFrameCount; f++)
                 {
                     uint32_t idx = (uint32_t)f % RING_SIZE;
@@ -1660,7 +1507,7 @@ extern "C" void Controller_OnFrameStart()
             }
             else
             {
-                // No conflict in the entire window! All confirmed frames are correct.
+                // Clear prediction flags for confirmed inputs that matched.
                 int32_t correctPredictions = 0;
                 for (int32_t f = checkStart; f < g_netFrameCount; f++)
                 {
@@ -1690,8 +1537,7 @@ extern "C" void Controller_OnFrameStart()
 
             if (!g_multiResimEnabled)
             {
-                // Never advance past a hole. A frame that was not confirmed in
-                // this pass still needs comparison when a later packet fills it.
+                // Stop at the first unconfirmed frame so it is checked later.
                 while (g_lastNonMultiCheckedFrame + 1 < checkEnd &&
                        IsFrameConfirmed(g_lastNonMultiCheckedFrame + 1))
                 {
@@ -1705,21 +1551,17 @@ extern "C" void Controller_OnFrameStart()
     else
     {
         ClearPredictionBudgetExhausted();
-        // --- Legacy delay-based fallback: spin-wait for current frame's input.
+        // Delay-only mode must confirm the current frame before simulation.
         int32_t neededFrame = g_netFrameCount;
         if (!WaitForConfirmedFrame(neededFrame, "delay mode"))
             return;
     }
 
-    // --- Centrally resolve this frame's remote input so hkprocessFrameInput
-    //     just reads from g_usedRemoteInput (no per-character resolution logic).
-    //     Must run for both rollback and delay-based paths.
+    // Resolve remote input once for all characters in this tick.
     Controller_ResolveRemoteInput(g_netFrameCount);
     Controller_MarkFrameInputProcessed(g_netFrameCount);
 
-    // Rollback_SaveSnapshot runs outside this hook, before current-frame input
-    // resolution. Attach the exact inputs this live tick will execute so a later
-    // cascading resim does not read stale ring-slot data from the snapshot.
+    // Attach resolved input to the snapshot saved before this hook.
     if (g_rollbackFrames > 0)
     {
         uint32_t idx = (uint32_t)g_netFrameCount % RING_SIZE;
@@ -1729,10 +1571,7 @@ extern "C" void Controller_OnFrameStart()
             g_netFrameCount, localInput, g_usedRemoteInput[idx]);
     }
 
-    // --- GGPO-style frame advantage timesync.
-    //     Estimate remote frame: last received frame + RTT converted to frames.
-    //     g_localFrameAdvantage = remote_estimate - local_frame
-    //       positive = we're behind, negative = we're ahead
+    // Estimate remote frame from received input and RTT; negative advantage means ahead.
     if (g_netFrameCount >= 0 && g_lastRemoteFrame >= 0)
     {
         int32_t rttMs = (int32_t)Netplay_GetAverageRTT();
@@ -1745,7 +1584,7 @@ extern "C" void Controller_OnFrameStart()
         g_remoteAdvHistory[tidx] = g_remoteFrameAdvantage;
         g_timesyncFrameCount++;
 
-        // Recommend wait duration — only if both peers agree we're ahead
+        // Compute a wait recommendation from both peers' averaged estimates.
         int count = g_timesyncFrameCount < TIMESYNC_WINDOW_SIZE
                     ? g_timesyncFrameCount : TIMESYNC_WINDOW_SIZE;
         if (count > 0)
@@ -1759,7 +1598,7 @@ extern "C" void Controller_OnFrameStart()
             avgLocal  /= count;
             avgRemote /= count;
 
-            // Both must agree: only sleep if local < remote (they agree we're ahead)
+            // Sleeping is disabled; retain the recommendation calculation.
             if (avgLocal < avgRemote)
             {
                 int sleepFrames = (int)(((avgRemote - avgLocal) / 2.0f) + 0.5f);
@@ -1775,11 +1614,8 @@ extern "C" void Controller_OnFrameStart()
 }
 
 // ---------------------------------------------------------------------------
-// Desync checksum — sum of quantized positions, HP, actionId, and independently
-// hashed RNG state across all characters, then mix in the global gameplay RNG
-// state. Character state uses order-independent addition and integer
-// quantization to tolerate tiny frame-timing float differences that are not
-// visible desyncs.
+// Sum integer-truncated positions/HP, action IDs, and per-character RNG hashes.
+// Character order does not affect the sum; mix in global gameplay RNG last.
 // ---------------------------------------------------------------------------
 static uint32_t ComputeChecksum()
 {
@@ -1804,8 +1640,7 @@ static uint32_t ComputeChecksum()
                 cs += (uint32_t)(hp < 0 ? -hp : hp);
                 cs += *(uint32_t*)(character + 0x1310); // actionId
 
-                // Hash the complete MtXorShift state independently, then add it
-                // so team and linked-list traversal order cannot change cs.
+                // Hash each character's RNG separately to keep the sum order-independent.
                 const uint32_t* characterRng =
                     (const uint32_t*)(character + 0x2D80);
                 uint32_t rngHash = 2166136261u;
@@ -1839,9 +1674,7 @@ extern "C" void Controller_RecordFrameChecksum(int32_t frame)
         g_processedRemoteFrame[idx] == frame && IsFrameConfirmed(frame) &&
         g_localChecksumRemoteInput[idx] == g_receivedInput[idx];
 
-    // A corrected frame invalidates any earlier comparison for that frame.
-    // Confirmed-only comparison normally prevents this, but clearing the tags
-    // also makes explicit/manual re-simulation safe.
+    // Re-recording a frame invalidates its previous checksum comparison.
     if (g_desyncChecked[idx] == frame)
     {
         g_desyncChecked[idx] = -1;
@@ -1865,9 +1698,7 @@ static void UpdateConfirmedChecksums()
     if (!FrameStepper_IsDesyncCheckReady() || FrameStepper_IsMatchRestartPending())
         return;
 
-    // Confirm each recorded frame independently. A checksum can be absent when
-    // detection is reset at a frame boundary; a contiguous frontier would then
-    // block publication and comparison for the rest of the round.
+    // Confirm records independently so missing checksums do not block later frames.
     int32_t first = g_netFrameCount - RING_SIZE + 1;
     if (first < DESYNC_SKIP_FRAMES) first = DESYNC_SKIP_FRAMES;
     for (int32_t frame = first; frame <= g_netFrameCount; ++frame)
@@ -1876,9 +1707,7 @@ static void UpdateConfirmedChecksums()
         if (g_localChecksumFrame[idx] != frame || !IsFrameConfirmed(frame))
             continue;
 
-        // Correct predictions become authoritative when their input arrives.
-        // Compare against the immutable input captured when this checksum's
-        // simulation ran, never g_usedRemoteInput (late packets overwrite it).
+        // Confirm against the input that produced this checksum, not a later selection.
         if (!g_localChecksumConfirmed[idx] &&
             g_processedRemoteFrame[idx] == frame &&
             g_localChecksumRemoteInput[idx] == g_receivedInput[idx])
@@ -1905,15 +1734,9 @@ extern "C" void Controller_OnFrameEnd()
     if (!Netplay_IsActive())
         return;
 
-    // Input hooks force this startup window to zero, but we must still send its
-    // history. In delay mode both peers otherwise reach frame delay+1 and wait
-    // before either has ever queued a packet, producing a symmetric deadlock.
+    // Send history even during neutral startup so delay-only peers can progress.
 
-    // --- 1. Record the local input assigned to this absolute frame.
-    //         Done at the frame boundary rather than inside hkprocessFrameInput
-    //         because per-character processFrameInput is not called during
-    //         cinematic freezes, hitstun, or transition screens, which would
-    //         leave gaps in g_recordedLocalInput and cause input display flicker.
+    // Record every live frame, even when no character-input hook ran.
     {
         uint32_t idx = (uint32_t)g_netFrameCount % RING_SIZE;
         g_recordedLocalInput[idx] =
@@ -1921,17 +1744,14 @@ extern "C" void Controller_OnFrameEnd()
                 ? g_scheduledLocalInput[idx]
                 : (g_delayFrames == 0 ? g_localPending : 0);
 
-        // With zero delay the local input becomes known during this tick, after
-        // its pre-tick snapshot was saved. Attach it now so a later correction
-        // replays the same input rather than the snapshot's initial neutral.
+        // Zero-delay input is captured after snapshot save; attach it now for replay.
         if (g_delayFrames == 0 && g_rollbackFrames > 0)
             Rollback_UpdateSnapshotInputs(g_netFrameCount,
                                           g_recordedLocalInput[idx],
                                           g_usedRemoteInput[idx]);
     }
 
-    // --- 2. Assign newly captured input to its absolute execution frame.
-    // Existing scheduled frames are never relabeled by a delay change.
+    // Schedule captured input without moving or replacing existing queued values.
     int32_t scheduledFrame = g_netFrameCount + g_delayFrames;
     uint32_t scheduledIdx = (uint32_t)scheduledFrame % RING_SIZE;
     if (g_scheduledLocalFrame[scheduledIdx] != scheduledFrame)
@@ -1939,20 +1759,15 @@ extern "C" void Controller_OnFrameEnd()
         g_scheduledLocalInput[scheduledIdx] = g_localPending;
         g_scheduledLocalFrame[scheduledIdx] = scheduledFrame;
     }
-    // A delay decrease can target frames already queued under the old delay.
-    // Keep those advertised values authoritative; replacing or ORing them would
-    // make the local execution differ from a peer that already confirmed them.
+    // After a delay decrease, already-advertised input takes precedence over new captures.
 
     // Keep the legacy history populated for rollback save/restore diagnostics.
     memmove(&g_oldInputs[0], &g_oldInputs[1],
             (MAX_HISTORY - 1) * sizeof(uint32_t));
     g_oldInputs[MAX_HISTORY - 1] = g_localPending;
 
-    // --- 3. Build outbound packet — inputs[] are absolute-frame-indexed.
-    //     start_frame = (currentFrame + delay) - MAX_HISTORY + 1
-    //     inputs[0]                    → frame start_frame          (oldest)
-    //     inputs[MAX_HISTORY-1]        → frame start_frame+MAX_HISTORY-1 (newest)
-    //     checksum is piggybacked (Slippi-style) for desync detection.
+    // Send consecutive input history ending at the newest queued frame.
+    // Each slot maps to start_frame + index; optionally include a confirmed checksum.
     InputPacket outPkt = {};
     outPkt.battle_generation = FrameStepper_GetBattleGeneration();
     outPkt.checksum_frame = 0xFFFFFFFFu;
@@ -1987,9 +1802,7 @@ extern "C" void Controller_OnFrameEnd()
             AutoTest_OnLiveFrame(g_netFrameCount, liveChecksum);
         UpdateConfirmedChecksums();
 
-        // Publish the oldest confirmed record that has not been sent. Missing
-        // records do not strand the checksum stream for the remainder of the
-        // round, and a corrected re-simulation can republish its frame.
+        // Send the oldest unsent confirmed checksum; corrected frames can be sent again.
         int32_t first = g_netFrameCount - RING_SIZE + 1;
         if (first < DESYNC_SKIP_FRAMES) first = DESYNC_SKIP_FRAMES;
         for (int32_t checksumFrame = first;
@@ -2008,7 +1821,7 @@ extern "C" void Controller_OnFrameEnd()
         }
     }
 
-    // Fill frame advantage (GGPO-style) — tell the remote peer our local estimate.
+    // Include our frame-advantage estimate for the peer.
     outPkt.frame_advantage = g_localFrameAdvantage;
     outPkt.flags           = 1;  // non-zero = real packet (seed packet has flags=0)
 
@@ -2027,7 +1840,7 @@ extern "C" void Controller_OnFrameEnd()
 
     ApplyScheduledRollbackIfReady();
 
-    // --- Desync comparison: scan backward from newest remote checksum. ---
+    // Count consecutive mismatches backward from the newest compared frame.
     if (!g_isResimulating && FrameStepper_IsDesyncCheckReady() &&
         !FrameStepper_IsMatchRestartPending() &&
         g_netFrameCount >= DESYNC_SKIP_FRAMES)
@@ -2050,11 +1863,7 @@ extern "C" void Controller_OnFrameEnd()
                     break;
                 consecutive++;
             }
-            // Autotest performs its own move-scoped comparison between the
-            // host's confirmed live frame and the client's forced resim frame.
-            // The session-wide detector can still contain startup/setup
-            // mismatches (often before the move's start frame), so it must not
-            // publish a verdict while a suite move is active.
+            // Autotest uses move-scoped checks; suppress session-wide verdicts during tests.
             if (consecutive >= DESYNC_CONSECUTIVE_MIN && !AutoTest_IsActive())
             {
                 if (!g_desyncSeen && !g_desyncDetected)
@@ -2084,12 +1893,7 @@ extern "C" void Controller_OnFrameEnd()
 }
 
 // ---------------------------------------------------------------------------
-// hkprocessFrameInput
-// Hook on processFrameInput at 0x14002DD60.
-//
-// Netplay timeline input is substituted by hkbuttonRemap while the original
-// function is running. Native eligibility, facing, ability, pause, and team
-// masks therefore remain authoritative.
+// Scope timeline injection to this character, leaving native input processing intact.
 // ---------------------------------------------------------------------------
 static void __fastcall hkprocessFrameInput(uint64_t cChrInput)
 {
@@ -2113,8 +1917,7 @@ static void __fastcall hkprocessFrameInput(uint64_t cChrInput)
     if (!character || lookupFrame < 0)
         return;
 
-    // Native processing clears reserve input, then returns here for ordinary
-    // assists. Preserve the same gate for offline post-native test injection.
+    // Respect native gameplay eligibility before offline injection or diagnostics.
     typedef bool(__fastcall* isGameplayActive_t)(uint64_t);
     static isGameplayActive_t fnIsGameplayActive =
         (isGameplayActive_t)_addr(ADDR_IS_GAMEPLAY_ACTIVE);
@@ -2125,17 +1928,9 @@ static void __fastcall hkprocessFrameInput(uint64_t cChrInput)
 
     if (Netplay_IsActive())
     {
-        // The original function has already applied the injected canonical
-        // timeline value and all character-specific transformations.
+        // Record the final native result, after timeline injection and character processing.
         g_recordedGameInput[teamIdx & 1][idx] =
             *(uint32_t*)(cChrInput + 0x14);
-
-        DiagCaptureLiveRef(cChrInput, teamIdx, g_netFrameCount);
-
-        if (g_postResimFrame >= 0 && !g_isResimulating)
-            DiagLogPostResim(cChrInput, teamIdx, g_netFrameCount);
-
-        DiagLogActDbg(cChrInput, teamIdx, g_isResimulating ? g_resimulateCurrentFrame : g_netFrameCount, g_isResimulating);
     }
     else // Offline / Singleplayer / F7 test
     {
@@ -2167,7 +1962,7 @@ static void __fastcall hkprocessFrameInput(uint64_t cChrInput)
             }
             else
             {
-                // Read from our unified Game Native Format history ring
+                // Fall back to recorded character input if no snapshot is available.
                 inputVal = g_recordedGameInput[teamIdx & 1][idx];
             }
             *(uint32_t*)(cChrInput + 0x14)  = inputVal; // mHeld
@@ -2177,7 +1972,7 @@ static void __fastcall hkprocessFrameInput(uint64_t cChrInput)
         }
         else
         {
-            // Live run: capture the game native input translated by oprocessFrameInput
+            // Record native character input for offline replay.
             inputVal = *(uint32_t*)(cChrInput + 0x14);
             g_recordedGameInput[teamIdx & 1][idx] = inputVal;
         }
@@ -2186,7 +1981,7 @@ static void __fastcall hkprocessFrameInput(uint64_t cChrInput)
 
 
 // ---------------------------------------------------------------------------
-// Offline Mirroring & Standard Hook Implementations
+// Device hooks
 // ---------------------------------------------------------------------------
 static void __fastcall hkpadPollAllSlots(uint64_t sPad)
 {
@@ -2203,8 +1998,7 @@ static uint64_t __fastcall hkpadSlotReadDevice(uint64_t slotBase)
 static void __fastcall hkxinputToGameMask(uint64_t sPad, uint64_t slotBase, const XInputState* pState)
 {
     RollbackHookProfileScope profile(RollbackHookProfileId::XInputToMask);
-    // Dual-training instances share XInput devices; only the foreground one
-    // should receive controller input. Other launch modes retain native routing.
+    // Dual-training instances share devices; only the foreground instance receives XInput.
     if (GetLaunchOption() == LAUNCH_DUAL_TRAINING && !IsGameProcessForeground()) {
         static const XInputState kEmptyState = {};
         oxinputToGameMask(sPad, slotBase, &kEmptyState);
@@ -2233,7 +2027,7 @@ void Controller_InitHooks()
 {
     MH_STATUS s;
 
-    // GetsCurrentInput_withSOCD — primary hook for netplay P2 injection
+    // Route physical input to the local player.
     s = MH_CreateHook(
         (LPVOID)_addr(ADDR_GET_CURRENT_INPUT),
         (LPVOID)&hkGetsCurrentInput_withSOCD,
@@ -2244,7 +2038,7 @@ void Controller_InitHooks()
     else
         HookLog("Controller: Failed to hook GetsCurrentInput_withSOCD (%d)\n", s);
 
-    // sAction__stepIntro — auto-skip intro during netplay
+    // Hold the intro at the netplay battle barrier.
     s = MH_CreateHook(
         (LPVOID)_addr(ADDR_STEP_INTRO),
         (LPVOID)&hkStepIntro,
@@ -2255,7 +2049,7 @@ void Controller_InitHooks()
     else
         HookLog("Controller: Failed to hook stepIntro (%d)\n", s);
 
-    // sAction__stepFighting — derive fight clocks from the synchronized frame.
+    // Synchronize fight clocks.
     s = MH_CreateHook(
         (LPVOID)_addr(ADDR_STEP_FIGHTING),
         (LPVOID)&hkStepFighting,
@@ -2266,8 +2060,7 @@ void Controller_InitHooks()
     else
         HookLog("Controller: Failed to hook stepFighting (%d)\n", s);
 
-    // Replace the native winner-only result confirmation with a synchronized
-    // restart request from either player's mapped pad during custom netplay.
+    // Either player's result confirmation requests a synchronized rematch.
     s = MH_CreateHook(
         (LPVOID)_addr(ADDR_STEP_RESULT8),
         (LPVOID)&hkStepResult8,
@@ -2278,8 +2071,7 @@ void Controller_InitHooks()
     else
         HookLog("Controller: Failed to hook stepResult8 (%d)\n", s);
 
-    // Any mapped player's confirmation on the result screen requests the same
-    // direct synchronized rematch instead of following the native result menu.
+    // Apply the same rematch handling to the result menu.
     s = MH_CreateHook(
         (LPVOID)_addr(ADDR_STEP_RESULT9_10_11),
         (LPVOID)&hkStepResult9_10_11,
@@ -2290,8 +2082,7 @@ void Controller_InitHooks()
     else
         HookLog("Controller: Failed to hook stepResult9_10_11 (%d)\n", s);
 
-    // Enforce timeline ownership at the common native facing-conversion seam.
-    // This also covers action/CPU sources that bypass buttonRemap.
+    // Cover input sources that bypass button remapping.
     s = MH_CreateHook(
         (LPVOID)_addr(ADDR_SWAP_LR_IF_FACE_LEFT),
         (LPVOID)&hkswapLRIfFaceLeft,
@@ -2302,7 +2093,7 @@ void Controller_InitHooks()
     if (s != MH_OK)
         HookLog("Controller: Failed to hook swapLRIfFaceLeft (%d)\n", s);
 
-    // Capture canonical local input after physical button bindings resolve.
+    // Capture/inject logical input after button remapping.
     s = MH_CreateHook(
         (LPVOID)_addr(ADDR_BUTTON_REMAP),
         (LPVOID)&hkbuttonRemap,
@@ -2313,7 +2104,7 @@ void Controller_InitHooks()
     if (s != MH_OK)
         HookLog("Controller: Failed to hook buttonRemap (%d)\n", s);
 
-    // cChrInput__processFrameInput — netplay client/host synchronization
+    // Scope timeline injection to native character-input processing.
     s = MH_CreateHook(
         (LPVOID)_addr(ADDR_PROCESS_FRAME_INPUT),
         (LPVOID)&hkprocessFrameInput,

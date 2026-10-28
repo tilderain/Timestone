@@ -1,3 +1,6 @@
+//Hacked up implementation to prevent ERR09 in this mod. I heard it was a base game issue, but it's probably something to do with
+//the myriad of overlays being injected into the game, like Discord/ Steam/ and especially imgui
+
 #include "netplay.h" // ENet includes winsock2 before the Windows/D3D headers.
 #include "d3d9reset.h"
 
