@@ -55,9 +55,7 @@ static constexpr uintptr_t NODE_CHR_OFFSET = 0x08;
 static constexpr uintptr_t NODE_NEXT_OFFSET = 0x10;
 static constexpr uintptr_t TEAM_FIRST_NODE_OFFSET = 0x08;
 static constexpr size_t MAX_CHAR_SIZE = 0x40000;
-// cChr's shared body ends where concrete character tails begin. Some helper
-// subclasses, including uFeliciaF, are smaller than the historical 0x6A60
-// fallback; expanding them overwrites unrelated allocations placed after them.
+// Shared character base size; the nominal fallback is not valid for every helper subclass.
 static constexpr size_t CCHR_MIN_SIZE = 0x68F0;
 static constexpr size_t CCHR_NOMINAL_SIZE = 0x6A60;
 static constexpr size_t CCHR_MAX_SIZE = 30000;
@@ -180,12 +178,7 @@ static void CaptureCharacterPostState(RollbackSnapshotSlot& slot)
         return;
     }
 
-    // createProperty reflects mRno, mUnitParam, mDeltaTime, and mUnitGroup from
-    // cUnit. Preserve the two generic gameplay values, callback enablement, and
-    // unit-group dispatch mask. Do not copy the complete cUnit flags dword:
-    // lifecycle/category, Draw/Fix, and view bits share it with Move. List links
-    // at +0x18/+0x20 remain owned by the current sUnit allocation, while
-    // mDeltaTime at +0x28 is derived by sUnit immediately before every move.
+    // Capture dispatch values and the Move bit, not shared lifecycle flags or list links.
     slot.characterPost.rno = *(int32_t*)(characterPost + CUNIT_RNO_OFFSET);
     slot.characterPost.unitParam =
         *(int32_t*)(characterPost + CUNIT_UNIT_PARAM_OFFSET);
@@ -195,9 +188,7 @@ static void CaptureCharacterPostState(RollbackSnapshotSlot& slot)
     slot.characterPost.unitGroup =
         *(uint64_t*)(characterPost + CUNIT_GROUP_OFFSET);
 
-    // Ghidra constructor and access audit: +0x40..+0x4f is the complete
-    // class-specific scalar state. The only remaining class fields are the two
-    // cached character pointers at +0x50/+0x58.
+    // Fighter-center vector; cached character references at +0x50/+0x58 are encoded below.
     static_assert(sizeof(slot.characterPost.scalarState) ==
                   UCHARACTER_POST_SCALAR_STATE_SIZE);
     std::memcpy(slot.characterPost.scalarState,
@@ -220,8 +211,7 @@ static void CaptureCharacterPostState(RollbackSnapshotSlot& slot)
         }
     }
 
-    // The cache is defined as one point character per team. Avoid carrying an
-    // unresolved prediction-timeline address into a future live allocation.
+    // Reject non-null cached characters that could not be mapped to team-member indices.
     for (int team = 0; team < 2; ++team) {
         if (cachedCharacters[team] != 0 &&
             slot.characterPost.cachedCharacterMembers[team] == UINT8_MAX) {
@@ -386,13 +376,7 @@ static bool RegionDependenciesValid(const RegionDependencies& dependencies)
     return true;
 }
 
-// ===========================================================================
-// Safe Dynamic List Traversal
-//
-// Walks an intrusive linked list starting at |listHead|, reading each node's
-// DTI to determine object size.  Bounded by DYNAMIC_SAFETY to prevent
-// infinite loops on corrupted lists.
-// ===========================================================================
+// Bounded list capture using DTI sizes; the traversal limit does not validate pointers.
 static void TraverseAndAddDynamicList(uint64_t listHead, size_t nextOffset,
                                       int& r, Region* regions, int maxRegions)
 {
@@ -400,14 +384,14 @@ static void TraverseAndAddDynamicList(uint64_t listHead, size_t nextOffset,
     int safety = DYNAMIC_SAFETY;
 
     while (current && r < maxRegions && safety-- > 0) {
-        // Reject obviously-bogus pointers
+        // Reject low addresses before DTI dispatch.
         if (current < 0x10000) break;
 
-        // Read object size from DTI (accessed via vtable[4], not object+0x08)
+        // Resolve size through the object's DTI getter.
         uint64_t dtiPtr = GetObjectDti(current);
         uint32_t objSize = DecodeDtiSize(dtiPtr);
         if (objSize == 0 || objSize > MAX_CHAR_SIZE) {
-            objSize = 0x400; // conservative fallback for typical nodes
+            objSize = 0x400; // Legacy fallback; actual allocation size is unverified.
         }
 
         regions[r].ptr  = (void*)current;
@@ -424,9 +408,7 @@ static void TraverseAndAddDynamicList(uint64_t listHead, size_t nextOffset,
     }
 }
 
-// ===========================================================================
-// Region List Builder — enumerates all snapshot-worthy memory
-// ===========================================================================
+// Build configured capture regions and record the fields that invalidate their cache.
 [[gnu::noinline, gnu::cold]] static int BuildRegionsUncached(
     Region* regions, int maxRegions, RegionDependencies& dependencies)
 {
@@ -533,10 +515,7 @@ static void TraverseAndAddDynamicList(uint64_t listHead, size_t nextOffset,
             return;
         }
 
-        // resizeNodePool allocates a 0x10-byte allocator header followed by
-        // 0x40-byte nodes and stores the first node in +0x18. Do not rewind
-        // allocator metadata; capture the node payload itself. The +0x20
-        // array contains pointers into that pool and defines free-list order.
+        // Disabled discovery: capture pool payload and free-node pointers, excluding the header.
         uint64_t pool = *(uint64_t*)(bvh + 0x18);
         //if (pool) ++collisionDiag.bvhPoolPresent;
         uint32_t poolCapacity = 0;
@@ -565,8 +544,7 @@ static void TraverseAndAddDynamicList(uint64_t listHead, size_t nextOffset,
         //            bank, freeNodes, freeCount, freeCapacity);
         }
 
-        // A second MtArray at +0x30 tracks nodes not currently assigned to
-        // the reserved pool. It has its own external pointer array at +0x48.
+        // Additional node-pointer array at +0x48.
         uint32_t noUseCount = *(uint32_t*)(bvh + 0x38);
         uint32_t noUseCapacity = *(uint32_t*)(bvh + 0x3C);
         uint64_t noUseNodes = *(uint64_t*)(bvh + 0x48);
@@ -575,11 +553,7 @@ static void TraverseAndAddDynamicList(uint64_t listHead, size_t nextOffset,
                            (size_t)noUseCapacity * 8);
         }
 
-        // popNodeOrAlloc falls back to individually allocated 0x40-byte nodes
-        // after both pointer arrays are exhausted. Walk the live tree and
-        // capture every reachable node outside this BVH's fixed pool. The
-        // parent/root field is the owner slot, so restore is skipped if the
-        // live topology no longer references the saved allocation.
+        // Capture reachable nodes outside the pool, keyed by their parent/root owner slot.
         struct PendingBvhNode { uint64_t ownerSlot; uint64_t node; };
         std::vector<PendingBvhNode> pending;
         uint64_t root = *(uint64_t*)(bvh + 0x08);
@@ -613,9 +587,7 @@ static void TraverseAndAddDynamicList(uint64_t listHead, size_t nextOffset,
     auto addNodeListBuffers = [&](uint64_t nodeList) {
         if (!nodeList || !IsAccessiblePointer(nodeList)) return;
 
-        // NodeList contains seven 41-entry MtArray groups, four singleton
-        // MtArrays, and two embedded dynamic BVHs. The object itself is
-        // captured separately; these are its heap-backed pointer arrays.
+        // Discover external arrays and BVH storage for each NodeList.
         static constexpr uint32_t arrayBases[] = {
             0x18, 0x538, 0xA58, 0x1028, 0x1548, 0x1A68, 0x1F88
         };
@@ -652,7 +624,7 @@ static void TraverseAndAddDynamicList(uint64_t listHead, size_t nextOffset,
             return;
         }
 
-        // Active registration array: MtArray header at +0x40, data at +0x58.
+        // Registration array: header +0x40, data pointer +0x58.
         uint32_t activeCount = *(uint32_t*)(sbc + 0x48);
         uint32_t activeCapacity = *(uint32_t*)(sbc + 0x4C);
         uint64_t activeData = *(uint64_t*)(sbc + 0x58);
@@ -670,9 +642,7 @@ static void TraverseAndAddDynamicList(uint64_t listHead, size_t nextOffset,
                     activeCount, activeCapacity, activeData);
         }
 
-        // Dirty and merge queues are 41 MtArray-derived NodeList headers with
-        // a 0x20-byte stride. These offsets start at the count field: capacity
-        // is +0x04, ownership is +0x08, and data is +0x10.
+        // Dirty/merge queues: offsets start at count, with capacity +0x04 and data +0x10.
         for (uint32_t base : {0x70u, 0x590u}) {
             for (uint32_t category = 0; category < 0x29; ++category) {
                 uint64_t header = sbc + base + category * 0x20;
@@ -727,8 +697,7 @@ static void TraverseAndAddDynamicList(uint64_t listHead, size_t nextOffset,
         addOwnedBuffer(moveMatrix + 0x20, categoryArray,
                        (size_t)categoryCapacity * 8);
 
-        // Each category points to an MtArray<NodeList*>. Its backing array
-        // selects one full 0x2550-byte NodeList per frame/thread slot.
+        // Each category queue contains NodeList pointers indexed by frame/thread slot.
         for (uint32_t category = 0; category < categoryCount; ++category) {
             uint64_t categorySlot = categoryArray + (size_t)category * 8;
             uint64_t queue = *(uint64_t*)categorySlot;
@@ -756,8 +725,7 @@ static void TraverseAndAddDynamicList(uint64_t listHead, size_t nextOffset,
         }
     };*/
 
-    // ---- 1. sReplay: frame counter only (sReplay+0x54). Full replay buffer
-    //     has internal pointers that go stale. ---
+    // Capture only the replay frame counter, not its internal buffers.
     uint64_t sReplay = read.operator()<uint64_t>(_addr(PTR_SREPLAY));
     if (sReplay) {
         add((void*)(sReplay + 0x54), 4, 0, 0, false
@@ -767,26 +735,17 @@ static void TraverseAndAddDynamicList(uint64_t listHead, size_t nextOffset,
         );
     }
 
-    // ---- 1a. Global XorShift RNG state (16 bytes, 4 × uint32) ----
-    //     Used by 64/73 call sites across gameplay (hit roll, damage variance,
-    //     AI decisions, projectile patterns).  Without restoring this, re-simulation
-    //     with different inputs consumes RNG differently, causing desyncs in all
-    //     RNG-derived behavior between the original and re-simulated timelines.
-    //     Address confirmed from LEA RAX,[0x140d765d8] in MtXorShift__getGlobalState.
+    // Global gameplay RNG: four 32-bit XorShift state words.
     add((void*)_addr(0x140d765d8), 16, 0, 0, false
 #if ROLLBACK_SNAPDUMP_ENABLED
         , "globalRng"
 #endif
     );
 
-    // sEffect+0x3C is peer-local presentation RNG. Shot recipes capture the
-    // exact pre-spawn value they need; it is not authoritative frame state.
+    // Effect RNG is captured per spawn recipe, not as a frame-wide region here.
 
-    // ---- 2. sShot manager header and shot ID pool ----
-    // Keep intrusive sentinel topology live; recipes reconcile shot lifetime.
-    // The 256-entry ID pool starts at +0x38 and its allocation cursor is at
-    // +0x438. Capture it separately from the manager header so repeated recipe
-    // construction cannot move the client's projectile-ID namespace forward.
+    // Shot manager header, 256-entry ID pool, and next-ID cursor at +0x438.
+    // Shot-list topology is not included; recipes reconstruct shot lifetime.
     uint64_t sShot = read.operator()<uint64_t>(_addr(PTR_SSHOT));
     if (sShot) {
         add((void*)sShot, 0x38, 0, 0, false
@@ -801,12 +760,7 @@ static void TraverseAndAddDynamicList(uint64_t listHead, size_t nextOffset,
         );
     }
 
-    // ---- 2a. Slot active flags (NOT in sShot — stored in sGameConfig+0x4A89C) ---
-    //     sShot__setSlotActiveFlag writes to uHaggar__getter_49F0(sGameConfig) + 0x48A6c.
-    //     uHaggar__getter_49F0 returns sGameConfig + 0x1E30, so the flags live at
-    //     sGameConfig + 0x1E30 + 0x48A6c = sGameConfig + 0x4A89C.  10 slots × 1 byte.
-    //     Without restoring these the game sees no active projectiles and frees them,
-    //     causing stale-address corruption on the next restore.
+    // Ten shot-slot active flags live in sGameConfig, not sShot.
     {
         uint64_t sGameConfig = read.operator()<uint64_t>(_addr(0x140D50F88));
         if (sGameConfig) {
@@ -818,32 +772,15 @@ static void TraverseAndAddDynamicList(uint64_t listHead, size_t nextOffset,
         }
     }
 
-    // uShot heap bodies are not copied. Their intrusive links and owned effect
-    // pointers cannot safely survive object destruction; native spawn recipes
-    // below reconstruct missing shots and their dependent objects.
+    // Shots use separate recipes and concrete-state capture, not raw regions here.
 
-    // ---- 3. sHitSolver — collision pairs + result buffer (static array) ----
-    //     Full body is 0x3808C (sHitSolver_field_map.md §2): 192KB cHitNode pool,
-    //     counters at +0x30060, SortBucketA @+0x30070, SortBucketB @+0x34078,
-    //     mWorkCnt/B/Final tail @+0x38080.  The previous 0x34080 size truncated
-    //     mid-SortBucketB, dropping ~16KB of bucket B and the work counters.
+    // Hit solver snapshot is not needed, rebuilds hit solver data after each frame ...
     {
-
-        ///Disabled sHitsolver
-        /*- sHitSolver__dispatchResolvedContacts at 0x140011EA0 invokes every resolver callback and then resets the active-node list.
-- sHitSolver__resetActiveNodes at 0x140011320 clears the active array and resets the embedded node-pool cursor at +0x30060.
-- New contacts are recreated through sHitSolver__addNode at 0x140010F20.
-- Project snapshots occur before the next native tick in rollback_hooks.cpp:177 and before each replay tick in rollback_resim.cpp:225. Therefore snapshots are taken after the previous frame's hit nodes were consumed and reset.
-- The current restore already discards restored hit work in rollback_restore.cpp:2159, making the bulk solver copy redundant.*/
-
     //    uint64_t sHitSolver = *(uint64_t*)_addr(PTR_SHITSOLVER);
     //    add((void*)sHitSolver, SHITSOLVER_SIZE);
     }
 
-    // ---- 4. sAction — battle state machine (static manager) ----
-    // Defeat replacement uses state outside the compact ranges restored below.
-    // Removing this region caused peers to select the next point character on
-    // different frames after a rollback crossed a character defeat.
+    // Legacy direct-sAction capture is disabled; use the manager-linked region below.
     /*{
         uint64_t sAction = read.operator()<uint64_t>(_addr(PTR_SACTION));
         add((void*)sAction, 0x250, 0, 0, false
@@ -853,54 +790,44 @@ static void TraverseAndAddDynamicList(uint64_t listHead, size_t nextOffset,
         );
     }*/
 
-    // ---- 5. sGameUI — SKIPPED: has internal ptrs (ui elements, text buffers) ---
+    // UI objects and their internal allocations are not captured as raw regions.
     // {
     //     uint64_t sGameUI = *(uint64_t*)_addr(PTR_SGAMEUI);
     //     add((void*)sGameUI, 0x6000);
     // }
 
-    // ---- 6. sMain — physics, timing, frame pacing (needed for re-sim consistency) ----
+    // Main timing/pacing capture is disabled.
     {
     //    uint64_t sMain = *(uint64_t*)_addr(PTR_SMAIN);
      //   add((void*)sMain, SMAIN_SIZE);
     }
 
-    // ---- 6a. sCollision — inline broadphase, move-matrix and geometry state ----
-    // Restore has a dedicated path that retains cSystem synchronization,
-    // mPrivateAllocator, and live pointers to externally owned allocations.
+    // Collision-manager and external-buffer discovery is disabled.
     //{
     /*    uint64_t sCollision = *(uint64_t*)_addr(PTR_SCOLLISION);
         collisionDiag.sCollision = sCollision;
         add((void*)sCollision, SCOLLISION_SIZE);
         if (sCollision) {
-            // Ghidra's sCollision methods address these subsystems directly
-            // from the complete singleton. The documented offsets already
-            // include the 0x38-byte cSystem base.
+            // Subsystem offsets are relative to the complete singleton.
             uint64_t sbc = sCollision + 0x43B8;
             uint64_t moveMatrix = sCollision + 0x7368;
 
             addSbcObjectBuffers(sbc);
             addMoveMatrixBuffers(moveMatrix);
 
-            // cSbcArrayBP has five independent banks of 31 dynamic BVHs.
-            // Their headers are inline in sCollision, but their node pools and
-            // free-node arrays are allocated externally.
+            // Discover external storage for five inline BVH banks.
             for (uint32_t bank : {0x2B8u, 0xFB8u, 0x1CB8u, 0x29B8u, 0x36B8u}) {
                 for (uint32_t index = 0; index < SCOLLISION_BVH_COUNT; ++index)
                     addDynamicBvhBuffers(sCollision + bank + index * 0x68, bank, index);
             }
 
-            // cSbcObject owns two banks of 31 dynamic BVHs. The same helper
-            // captures their node pools and free-node pointer arrays.
+            // Discover the two SbcObject BVH banks.
             for (uint32_t bank : {0xAA8u, 0x17A8u}) {
                 for (uint32_t index = 0; index < SCOLLISION_BVH_COUNT; ++index)
                     addDynamicBvhBuffers(sbc + bank + index * 0x68, bank, index);
             }
 
-            // Character collision attachment wrappers own dynamic BVHs and
-            // NodeList-backed child state outside the singleton. Their child
-            // graph is already cloned; capture the allocation's scalar image
-            // as well when the live owner still points to it.
+            // Legacy wrapper discovery; active wrapper capture is in the character pass.
             uint64_t character = *(uint64_t*)_addr(PTR_SCHARACTER);
             if (character) {
                 for (uint32_t teamOffset : {TEAM0_OFFSET, TEAM1_OFFSET}) {
@@ -911,9 +838,7 @@ static void TraverseAndAddDynamicList(uint64_t listHead, size_t nextOffset,
                             for (uint32_t offset : CCHR_EXTERNAL_ANIM_OFFSETS) {
                                 uint64_t wrapper = *(uint64_t*)(chr + offset);
                                 if (wrapper) {
-                                    // Wrapper scalar state is already covered
-                                    // by the 0xE0 region. Its child arrays are
-                                    // intentionally left to the deep clone.
+                                    // Wrapper fields use a region; children use native clones.
                                 }
                             }
                         }
@@ -954,10 +879,7 @@ static void TraverseAndAddDynamicList(uint64_t listHead, size_t nextOffset,
     //    }
     //}
 
-    // ---- 7. sCamera — view matrices, 8-slot camera stack, cutin state ----
-    //     3456 B total; skip vtable @+0 .. +7 on restore (handled via flat
-    //     memcpy — the vtable pointer is the same at save and restore time
-    //     for a singleton, so restoring it is safe here).
+    // Capture the camera manager as a raw region; no vtable exclusion is requested.
     uint64_t camUnit = 0;
     {
         uint64_t sCamera = read.operator()<uint64_t>(_addr(PTR_SCAMERA));
@@ -967,19 +889,12 @@ static void TraverseAndAddDynamicList(uint64_t listHead, size_t nextOffset,
                 , "sCamera"
 #endif
             );
-            // First viewport slot at +0x50, stride 0x1A0, camera unit ptr at slot+8.
-            // This is the uActionSideCamera gameplay anchor unit.
+            // Viewport 0 starts at +0x50 and stores its camera-unit pointer at +0x08.
             camUnit = read.operator()<uint64_t>(sCamera + 0x58);
         }
     }
 
-    // ---- 7a. uActionSideCamera — gameplay camera anchor/smoothing unit ----
-    //     cUnit-derived object (DTI 0x140d44268, size 0x590) that computes
-    //     camera anchor position, smoothing trajectory, and screen-edge
-    //     clamps each frame.  During host-only resim its internal state
-    //     drifts from the live client, causing permanent character position
-    //     drift (desync) that never self-corrects.  sCamera viewport[0]+8
-    //     holds the pointer (confirmed via sCamera__refreshViewsForBoundary).
+    // Capture the uActionSideCamera separately; restore uses its field-specific policy.
     {
         if (camUnit &&
             GetObjectDti(camUnit) == (uint64_t)_addr(DTI_UACTION_SIDE_CAMERA)) {
@@ -997,11 +912,7 @@ static void TraverseAndAddDynamicList(uint64_t listHead, size_t nextOffset,
         }
     }
 
-    // ---- 8. sGameEffect — SKIPPED: individual effect nodes are captured ---
-    //     via the sUnit category traversal (categories 13-16) below.  Flat-
-    //     restoring sGameEffect would crash due to stale effect pointers.
-
-    // ---- 10. sAction (fighting phase state machine) ----
+    // Capture the manager-linked action state; restore selects its gameplay fields.
     uint64_t sMvc3Mgr = read.operator()<uint64_t>(_addr(PTR_SMVC3MGR));
     if (sMvc3Mgr) {
         uint64_t sAction = read.operator()<uint64_t>(
@@ -1022,9 +933,7 @@ static void TraverseAndAddDynamicList(uint64_t listHead, size_t nextOffset,
                 uint64_t allocation = read.operator()<uint64_t>(allocationSlot);
                 if (allocation && IsAccessibleAddress(
                         allocation + SACTION_MODEL_JOINT_ALLOCATION_SIZE - 1)) {
-                    // sAction__getModelJoint returns allocation+0x10. Capture
-                    // the allocation for ownership validation; restore skips
-                    // its header and applies only the scalar payload.
+                    // Record the allocation's owner slot; restore applies payload after the header.
                     add((void*)allocation,
                         SACTION_MODEL_JOINT_ALLOCATION_SIZE,
                         allocationSlot, 0, false
@@ -1037,13 +946,10 @@ static void TraverseAndAddDynamicList(uint64_t listHead, size_t nextOffset,
         }
     }
 
-    // ---- 11-16. Per-character uCharacter + 17-18. cChrTeam ----
+    // Team state and character bodies with their owned capture buffers.
     uint64_t sCharacter = read.operator()<uint64_t>(_addr(PTR_SCHARACTER));
     if (sCharacter) {
-        // Two 0x20-byte transition records drive tag/assist entry and eventually
-        // populate cChrTeam's pending swap IDs. They sit outside cChrTeam, so
-        // restoring only the team and character bodies leaves prediction-time
-        // transition progress active after a rollback.
+        // Tag/assist transition records sit outside the two team bodies.
         add((void*)(sCharacter + SCHARACTER_CHANGE_ORDER_OFFSET),
             SCHARACTER_CHANGE_ORDER_SIZE, 0, 0, false
 #if ROLLBACK_SNAPDUMP_ENABLED
@@ -1085,24 +991,14 @@ static void TraverseAndAddDynamicList(uint64_t listHead, size_t nextOffset,
                         finalSize = CCHR_NOMINAL_SIZE;
                     }
                     uint32_t* animFields = (uint32_t*)(character + 0x1300);
-                   // HookLog("DIAG Character[team %d]: addr=0x%llX vtable=0x%llX dtiFunc=0x%llX dtiPtr=0x%llX rawSize=%u finalSize=%u\n"
-                 //           "DIAG   anim[+0x1300]: %08X %08X %08X %08X  %08X %08X %08X %08X  %08X %08X %08X %08X  %08X %08X %08X %08X\n",
-                 //           ti, character, vtable, dtiFunc, dtiPtr, (unsigned)charSize, (unsigned)finalSize,
-                 //           animFields[0], animFields[1], animFields[2], animFields[3],
-                //            animFields[4], animFields[5], animFields[6], animFields[7],
-                 //           animFields[8], animFields[9], animFields[10], animFields[11],
-                 //           animFields[12], animFields[13], animFields[14], animFields[15]);
                     add((void*)character, finalSize, 0, vtable, true
 #if ROLLBACK_SNAPDUMP_ENABLED
                         , ti == 0 ? "uCharacter.team0" : "uCharacter.team1"
 #endif
                     );
 
-                    // processTarget1 indexes these seven heap-backed tables
-                    // using the packed counts at +0x1440 and immediately calls
-                    // virtual +0x40 on each entry. Rewind each active table
-                    // with its owning slot so its entries stay synchronized
-                    // with the restored count.
+                    // Capture seven material-helper arrays using their packed counts at +0x1440.
+                    // Owner slots keep restored lengths paired with the corresponding allocations.
                     static constexpr uint32_t targetOffsets[] = {
                         0x1408, 0x1410, 0x1418, 0x1420,
                         0x1428, 0x1430, 0x1438,
@@ -1130,9 +1026,7 @@ static void TraverseAndAddDynamicList(uint64_t listHead, size_t nextOffset,
                         }
                     }
 
-                    // Restore motion state and its external interpolation data
-                    // together. Keeping one live while rewinding the other
-                    // leaves animation/root-motion state split across frames.
+                    // Capture each motion slot's external per-joint work buffer.
                     uint32_t numJoints = read.operator()<uint32_t>(
                         character + CCHR_NUM_JOINTS_OFFSET);
                     if (numJoints <= 256) {
@@ -1151,9 +1045,7 @@ static void TraverseAndAddDynamicList(uint64_t listHead, size_t nextOffset,
                         }
                     }
 
-                    // Motion+0x178 fields are slices into one allocation owned
-                    // by uModel+0x6D8, not independent allocations. Rewind the
-                    // complete allocation through its actual owner slot.
+                    // Motion+0x178 pointers share one keyframe-work allocation rooted at +0x6D8.
                     uint32_t channelCount = read.operator()<uint32_t>(character +
                         CCHR_MOTION_CHANNEL_COUNT_OFFSET);
                     uint32_t motionCount = read.operator()<uint32_t>(character +
@@ -1172,10 +1064,7 @@ static void TraverseAndAddDynamicList(uint64_t listHead, size_t nextOffset,
                         }
                     }
 
-                    // These heap buffers are outputs and working state of the
-                    // same motion evaluation pass. Leaving them ahead while
-                    // rewinding Motion/channel state splits root and joint
-                    // transforms across timelines.
+                    // Capture joint state, joint-order bytes, and blended matrices with their owners.
                     if (numJoints <= 256 && numJoints > 0) {
                         uint64_t jointStateOwner = character + CCHR_JOINT_STATE_PTR_OFFSET;
                         uint64_t jointStates = read.operator()<uint64_t>(jointStateOwner);
@@ -1225,10 +1114,7 @@ static void TraverseAndAddDynamicList(uint64_t listHead, size_t nextOffset,
                         }
                     }
 
-                    // Character collision chains can use a uChrWeapon as their
-                    // parent model. Capture each weapon's motion and joint
-                    // outputs so rollback does not build sword hitboxes from
-                    // prediction-timeline weapon transforms.
+                    // Collision parents can be weapon models; capture their bodies and motion buffers too.
                     uint32_t weaponCount = read.operator()<uint32_t>(
                         character + CCHR_WEAPON_COUNT_OFFSET);
                     uint64_t weaponArray = read.operator()<uint64_t>(
@@ -1321,14 +1207,8 @@ static void TraverseAndAddDynamicList(uint64_t listHead, size_t nextOffset,
                         }
                     }
 
-                    // ---- cChrCmd line buffers (heap-allocated per-command match state) ----
-                    // Two embedded cChrCmd objects at uCharacter+0x2738 and +0x2950.
-                    // Each has a heap-allocated line array at cmd+0x178 of n×0x20 B entries
-                    // (where n = cmd+0x170). The eight bytes before the payload
-                    // are allocator metadata and remain owned by the live allocation.
-                    // Without this, double-tap dash / back-dash / charge / combo command
-                    // matching progress is lost on snapshot restore → resim eats different
-                    // action transitions.  Verified via Ghidra cross-refs from cChrCmd__setOwner.
+                    // Special/combo matcher lines: count +0x170, pointer +0x178, stride 0x20.
+                    // Capture the payload, not the preceding allocator header.
                     for (uint64_t cmdOff : {0x2738ull, 0x2950ull}) {
                         uint64_t cmd   = character + cmdOff;
                         uint64_t lines = read.operator()<uint64_t>(cmd + 0x178);
@@ -1349,9 +1229,8 @@ static void TraverseAndAddDynamicList(uint64_t listHead, size_t nextOffset,
             }
         }
 
-        // Spawned helper uCharacters live in sUnit category 8 but are not in
-        // either team roster. Capture their DTI-sized bodies at saved addresses;
-        // blend and external animation buffers remain team-fighter-only.
+        // Capture category-8 bodies not recorded in the team-character set.
+        // This pass does not discover their external model/command buffers.
         uint64_t sUnit = read.operator()<uint64_t>(_addr(PTR_SUNIT));
         uint32_t categoryCount = sUnit ? read.operator()<uint32_t>(
             sUnit + SUNIT_CATEGORY_COUNT_OFFSET) : 0;
@@ -1383,22 +1262,11 @@ static void TraverseAndAddDynamicList(uint64_t listHead, size_t nextOffset,
             }
         }
 
-        // Do not snapshot uCharacterPost's camera state. It is an unowned
-        // dynamic object and has no owner slot in the snapshot. Restoring its
-        // saved address after native list teardown can write into a replaced
-        // object and corrupt the model/joint graph.
-
-        // uCharacterPost is captured separately in the snapshot slot. Its
-        // scalar payload is copied into the current category-18 object and its
-        // two character references are remapped by roster member index.
+        // uCharacterPost uses separate slot state, restored into the current coordinator.
+        // Do not add its historical allocation as a raw region.
     }
 
-    // ---- 19-22. sUnit effect categories — SKIPPED (heap corruption) ---
-    //     Walking effect categories 13-16 and restoring individual nodes at
-    //     their heap addresses corrupts the pool allocator's free-list metadata
-    //     when nodes were freed between save and restore (MtHeapAllocator crash).
-    //     Instead, we zero the sGameEffect slot tables post-restore to allow
-    //     fresh effect allocations without conflicting with old slots.
+    // Dynamic effects are handled by Effect_CaptureRecipes, not raw scheduler-node regions.
 
     return r;
 }
@@ -1493,7 +1361,7 @@ void Rollback_SaveSnapshot(int32_t frame)
     }
     const uint64_t allocationEnd = Profile_Now();
 
-    // Copy data AND save per-region metadata for safe restore
+    // Copy region payloads; keep this frame's region metadata alongside the bytes.
     size_t offset = 0;
     slot.regionCount = count;
     slot.frame = frame;
@@ -1507,8 +1375,7 @@ void Rollback_SaveSnapshot(int32_t frame)
     CaptureCharacterPostState(slot);
     const uint64_t copyRegionsEnd = Profile_Now();
 
-    // Record the exact state captured at the rollback boundary. RNG hooks only
-    // observe advances; this also exposes direct writes and snapshot timing.
+    // Disabled RNG snapshot logging.
     uint32_t globalRng[4] = {};
     //std::memcpy(globalRng, (void*)_addr(0x140D765D8), sizeof(globalRng));
     /*HookLog("RNGSNAP frame=%d resim=%d state=%08X,%08X,%08X,%08X\n",
@@ -1532,15 +1399,12 @@ void Rollback_SaveSnapshot(int32_t frame)
     }
     const uint64_t snapshotMetadataEnd = Profile_Now();
 
-    // Native clones keep reference-managed geometry alive after attack-end
-    // clears the live node's child array.
+    // Capture collision children through native copyFrom, plus remappable parent identities.
     Rollback_CaptureCollisionNodeClones(slot);
     CaptureCharacterCollisionParentReferences(slot);
     const uint64_t collisionClonesEnd = Profile_Now();
 
-    // Cut-ins independently change character visibility, model draw routing,
-    // and material mode. The raw character restore deliberately preserves some
-    // live model ownership state, so keep the small render contract explicitly.
+    // Save visibility, draw layers, and transparency separately from live model ownership.
     slot.modelRenderStates.clear();
     auto captureModelRenderState = [&slot](void* model, bool character) {
         if (!model) return;
@@ -1616,20 +1480,16 @@ void Rollback_SaveSnapshot(int32_t frame)
                            snapshotMetadataEnd, collisionClonesEnd, shotRecipesEnd,
                            offset, (uint32_t)count);
 
-    // [EXPERIMENTAL] QPC capture — see mvc3/rollback W3-C2
+    // Disabled performance-counter trace.
     // LARGE_INTEGER qpc_cap;
     // if (QueryPerformanceCounter(&qpc_cap)) {
     //     g_qpc_history[slotIdx] = qpc_cap.QuadPart;
     // }
     
-    // Save the local player's input for this frame in the snapshot slot.
-    // At this point g_oldInputs[MAX_HISTORY - g_delayFrames] holds the
-    // delayed input that the imminent game tick will use.
+    // Capture local input from the absolute-frame schedule, not the legacy shift buffer.
     slot.localInput = Controller_GetCurrentFrameInput();
 
-    // Controller_OnFrameStart resolves and republishes the exact input before
-    // the tick. Initialize with the prior prediction rather than stale received
-    // ring data in case this frame is not confirmed yet.
+    // Seed remote input from the selected slot; controller updates it when input is resolved.
     slot.remoteInput = Controller_GetUsedRemoteInput(frame);
     /*if (frame >= 14 && frame <= 20) {
         HookLog("SNAPTRACE phase=end frame=%d resim=%d local=0x%08X remote=0x%08X bytes=%zu\n",
@@ -1712,12 +1572,12 @@ extern "C" bool Rollback_GetSnapshotInputs(int32_t frame, uint32_t* outLocal, ui
 
 void Rollback_FreeSnapshots()
 {
-    // Make sure patched calls are restored before tearing down
+    // Restore native calls before releasing snapshot storage.
     Rollback_PatchSleep(false);
     Rollback_PatchPresent(false);
     Rollback_PatchSwapchain(false);
     Rollback_PatchDrawCalls(false);
-    Rollback_PatchDrawCalls(false); // restore draw calls (no-op if unpatched)
+    Rollback_PatchDrawCalls(false); // Redundant restoration; no-op if already unpatched.
 
     for (int i = 0; i < ROLLBACK_WINDOW; ++i) {
         Rollback_DestroyCollisionNodeClones(g_slots[i]);
@@ -1741,7 +1601,5 @@ void Rollback_FreeSnapshots()
     Effect_Reset();
     Rollback_ResetReSimulation();
     g_regionCache.valid = false;
-    // Keep snapdump history independent of the live rollback slots. New captures
-    // replace entries modulo its own 255-frame ring instead of losing pre-reset
-    // diagnostic context when the live snapshot storage is recreated.
+    // Keep snapdump history intact when freeing live rollback slots.
 }

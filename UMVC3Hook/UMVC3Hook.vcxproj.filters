@@ -153,9 +153,6 @@
     <ClInclude Include="code\exception.h">
       <Filter>Header Files\code</Filter>
     </ClInclude>
-    <ClInclude Include="code\rollback_internal.h">
-      <Filter>Header Files\code</Filter>
-    </ClInclude>
     <ClInclude Include="code\rollback_cleanup.h">
       <Filter>Header Files\code</Filter>
     </ClInclude>

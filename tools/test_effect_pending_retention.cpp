@@ -1,4 +1,4 @@
-#include "../UMVC3Hook/code/effect_pending_retention.h"
+#include "../UMVC3Hook/code/effect_pending_queue.h"
 
 #include <cassert>
 #include <cstdio>

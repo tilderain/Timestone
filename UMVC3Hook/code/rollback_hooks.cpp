@@ -115,6 +115,7 @@ static void CopySafeUtf8Name(char (&out)[32], const char* name)
     out[written] = '\0';
 }
 
+//Shows the opponent names underneath the HUD
 static void SetFightingName(uint64_t widget, const char* name)
 {
     if (!widget || !name || !name[0]) return;
@@ -195,15 +196,11 @@ static void __fastcall hkMvc3MainMove(uint64_t main)
 {
     const uint64_t benchmarkStart = g_isResimulating ? 0 :
         LiveBenchmark_BeginFrame(Controller_GetNetFrameCount());
-    // Heap-backed native objects can be retired or remapped between frames.
-    // Every accessibility helper remains cached within this frame generation.
+    // Discard previous memory checks; native allocations may have changed.
     InvalidateMemoryQueryCache();
     Rollback_SetMainInstance(main);
 
-    // A late packet can queue a correction just before the synchronized
-    // restart packet arrives. Never carry that pre-reset request into the new
-    // match, where restoring the old snapshot graph would retire fresh UI and
-    // render resources.
+    // Discard pending corrections during restart or battle synchronization.
     if (Netplay_IsActive() &&
         (FrameStepper_IsMatchRestartPending() ||
          !FrameStepper_IsBattleSynchronized()))
@@ -328,8 +325,7 @@ static void __fastcall hkSoundMove(uint64_t sound)
 static void __fastcall hkGSoundVoiceDispatch(void* dispatcher, void* voice,
                                               char stop)
 {
-    // Sound state is not rewound. Replaying a start stacks another audible
-    // voice, while stops still need to retire voices started on the live path.
+    // Sound is not rewound: suppress replayed starts, but allow stops for live voices.
     if (g_isResimulating && stop == 0)
         return;
     oGSoundVoiceDispatch(dispatcher, voice, stop);
@@ -346,8 +342,7 @@ static uint64_t* __fastcall hkGSoundCreateVoice(void* dispatcher,
                             GSOUND_VOICE_REQUEST_FLAGS_OFFSET) &
          GSOUND_VOICE_REQUEST_LOOP) != 0;
     if (g_isResimulating && isLooping) {
-        // Shot destructors may stop this cookie later. Return the engine's
-        // ordinary disabled cRef instead of leaving an uninitialized handle.
+        // Return a disabled handle that later shot cleanup can safely stop.
         return ((uint64_t*(__fastcall*)(uint64_t*, uint64_t))
             _addr(FN_CREF_INIT_DISABLED))(cookie, UINT64_MAX);
     }
@@ -394,10 +389,7 @@ static void __fastcall hkSceneUpdateSoundEnv(uint64_t scene)
 static void __fastcall hkGameUiMove(uint64_t gameUi)
 {
     RollbackHookProfileScope profile(RollbackHookProfileId::GameUiMove);
-    // UI owns live menu/effect objects that are not part of rollback
-    // snapshots. Mutating that graph during headless resimulation leaks or
-    // retires presentation resources on every correction; let the next live
-    // frame advance the native lifecycle instead.
+    // Advance unsnapshotted UI objects only on live frames.
     if (g_isResimulating)
         return;
     oGameUiMove(gameUi);
@@ -405,17 +397,14 @@ static void __fastcall hkGameUiMove(uint64_t gameUi)
 
 static void __fastcall hkFadeMove(uint64_t fade)
 {
-    // uFade is presentation state owned by the live sUnit graph. Advancing it
-    // during a correction consumes its timer twice and can leave the screen
-    // black after the result transition retires the live UI hierarchy.
+    // Do not advance live fade timers again during replay.
     if (!g_isResimulating)
         oFadeMove(fade);
 }
 
 static void __fastcall hkBtGaugeLifeMove(uint64_t gauge)
 {
-    // sGameUI is suppressed during re-simulation, so its gauge dependencies
-    // are not guaranteed to be initialized for the accompanying sUnit pass.
+    // Keep gauge updates live-only and skip a missing backing object.
     if (g_isResimulating)
         return;
     if (!*(uint64_t*)(gauge + 0x58))
@@ -427,8 +416,7 @@ static void __fastcall hkBtGaugeHcMove(uint64_t gauge)
 {
     if (g_isResimulating)
         return;
-    // These embedded material jobs are constructed with the gauge and lose
-    // their vtables during teardown. Do not move a partially destroyed gauge.
+    // Skip partially torn-down gauges whose embedded material jobs lost their vtables.
     if (!*(uint64_t*)(gauge + 0xC0) || !*(uint64_t*)(gauge + 0xC40))
         return;
     oBtGaugeHcMove(gauge);
@@ -501,8 +489,7 @@ static void __fastcall hkRebuildFrustumPlanes(uint64_t viewport)
         return;
     }
 
-    // Gameplay bounds must use the logical camera, not peer-local screen shake.
-    // Restore the shaken matrix immediately so presentation remains unchanged.
+    // Build gameplay bounds without screen shake, then restore the render matrix.
     alignas(16) float renderView[16];
     alignas(16) float gameplayView[16];
     void* viewMatrix = (void*)(viewport + VIEWPORT_VIEW_MATRIX_OFFSET);

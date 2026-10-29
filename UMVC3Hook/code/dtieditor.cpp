@@ -1,7 +1,4 @@
-// dtieditor.cpp
-// MtDTI type hierarchy inspector and editor — ImGui-based.
-// Also captures and displays MtProperty entries via a hook on
-// cAtkCtrl__TargetInfo__createProperty_BF60 (0x14000bf60).
+// In game class editor using reflected properties. Mostly unused and non functional
 #include "../pch.h"
 #include "dtieditor.h"
 #include "umvc3menu.h"

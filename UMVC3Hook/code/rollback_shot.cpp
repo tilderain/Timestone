@@ -82,9 +82,8 @@ static uint32_t g_staleHitTargetLogCount = 0;
 
 static bool HasValidUnitLink(void* unit)
 {
-    // Link validation must not dispatch a DTI virtual. Some scheduler-owned
-    // units use a base layout where vtable+0x20 is a deleting destructor, not
-    // cUnit::getDTI. Reciprocal list checks below establish link identity.
+    // Check link storage without virtual calls; reciprocal links are checked below.
+    // Readability alone does not prove unit type or lifetime.
     return !unit || IsAccessibleRange((uint64_t)unit, 0x28);
 }
 
@@ -147,9 +146,7 @@ static void RepairUnitLinksBeforeRemoval(void* manager, void* unit)
             SUNIT_CATEGORY_LIST_STRIDE * foundCategory);
         auto* foundTail = foundHead + 1;
         if (!HasValidUnitLink(foundNext)) {
-            // The forward link is already allocator debris. Truncate the
-            // damaged suffix at this node so native unlink can safely repair
-            // the reachable prefix and category tail.
+            // Drop the unreadable suffix so native unlink avoids the bad next link.
             foundNext = nullptr;
             *foundTail = unit;
         }
@@ -158,8 +155,7 @@ static void RepairUnitLinksBeforeRemoval(void* manager, void* unit)
         *(uint32_t*)((uint8_t*)unit + 0x10) =
             (state & ~0x3F8u) | (foundCategory << 3);
     } else {
-        // The caller may immediately re-add a scheduler-created unit in a new
-        // category. Mark an orphan as detached so native removeUnit is a no-op.
+        // Not found within the scan limits: mark detached so native unlink skips it.
         *(void**)((uint8_t*)unit + 0x18) = nullptr;
         *(void**)((uint8_t*)unit + 0x20) = nullptr;
         *(uint32_t*)((uint8_t*)unit + 0x10) = state | 0x3F8u;
@@ -196,9 +192,8 @@ static RollbackShotReference CaptureShotReference(void* reference)
         captured.kind = RollbackShotReferenceKind::Shot;
         captured.shotSpawnSequence = shot->second.spawnSequence;
     } else {
-        // The native factory stores these arguments as request-unit and target
-        // references. Non-shot identities must therefore resolve through a
-        // live unit registry rather than through their historical address.
+        // Non-shot request/target references require current registry membership
+        // and a matching DTI on restore; neither proves allocation identity.
         captured.kind = RollbackShotReferenceKind::StableUnit;
     }
     return captured;
@@ -297,10 +292,8 @@ static bool IsTerminalShot(void* shot)
     uint8_t flags = *(uint8_t*)((uint8_t*)shot + 0x1F64);
     if (step == 3 && (flags & 0x02) == 0) {
         uint64_t dti = GetObjectDti((uint64_t)shot);
-        // These shots remain authoritative during cleanup: native callbacks
-        // release their owner's weapon restriction. Arthur's axe clears
-        // mIsAxe and mUsrF bit 1 at kill, not when it enters step 3.
-        // Shot_ApplyFlight restores the cleanup step and disabled hit judgment.
+        // Retain Arthur's axe and Vergil's swords through cleanup so native
+        // callbacks can clear their owner's weapon-availability flags.
         if (dti == (uint64_t)_addr(DTI_USHOT_VULCAN_AXE) ||
             dti == (uint64_t)_addr(DTI_USHOT_SHIELD_RAID_SWORD) ||
             dti == (uint64_t)_addr(DTI_USHOT_SHIELD_SPIRAL_SWORD) ||
@@ -308,8 +301,7 @@ static bool IsTerminalShot(void* shot)
             return false;
         }
     }
-    // Step 3 is uShot's cleanup branch. Once native hit judgment is disabled,
-    // reconstructing the still-linked object can resurrect stale collisions.
+    // Otherwise omit cleanup-step shots with hit judgment disabled.
     return step == 3 && (flags & 0x02) == 0;
 }
 
@@ -402,9 +394,8 @@ static bool ValidAttachMatrixSource(uint64_t object, int32_t jointIndex)
     if (!object) return true;
     if (jointIndex < 0) return HasCallableDtiVirtual((void*)object);
 
-    // Indexed attachment dispatch expects a model/unit matrix callback. A
-    // recycled particle generator can have an executable +0xA0 slot, but that
-    // slot consumes RDX as a model pointer rather than a joint index.
+    // Indexed attachment calls virtual +0xA0 with a joint index.
+    // Require a recognized type, not just an executable slot with an unknown ABI.
     return IsBaseModelObject((void*)object) || IsUnitObject((void*)object) ||
            IsEffectObject((void*)object);
 }
@@ -532,8 +523,7 @@ void Shot_CaptureRecipes(RollbackSnapshotSlot& slot)
                     void* target = nullptr;
                     std::memcpy(&target, saved.concrete.body.data() + offset, sizeof(target));
                     RollbackShotReference reference;
-                    // Only tracked shots are valid here; never dereference a
-                    // stale child or reinterpret it as a stable unit.
+                    // Capture tracked children by sequence without dereferencing them.
                     auto child = g_liveShotRecipes.find(target);
                     if (target && child != g_liveShotRecipes.end()) {
                         reference.savedPtr = target;
@@ -542,10 +532,8 @@ void Shot_CaptureRecipes(RollbackSnapshotSlot& slot)
                     }
                     slot.shotBodyReferences.push_back({saved.spawnSequence, offset, reference});
                 }
-                // cAtkCtrl's three TargetInfo tables also hold projectile targets.
-                // RestoreAttackTargets rewinds count/time, but only accepts stable
-                // target pointers. Rebind tracked shots after all reconstruction
-                // so a prior clash is not accepted again as a new contact.
+                // Rebind projectile targets after reconstruction, preserving their
+                // restored hit count/timer instead of treating prior clashes as new.
                 for (uint32_t table : SHOT_ATTACK_TARGET_TABLES) {
                     for (uint32_t index = 0; index < SHOT_ATTACK_TARGET_COUNT; ++index) {
                         uint32_t entry = table + index * SHOT_ATTACK_TARGET_STRIDE;
@@ -629,7 +617,7 @@ void* Shot_ResolveReference(const RollbackShotReference& reference)
 
 void Shot_RestoreBodyReferences(const RollbackSnapshotSlot& slot)
 {
-    // All owners and children must have been reconstructed before this pass.
+    // Run after reconstructing all shots so cross-shot references can resolve.
     for (const RollbackShotBodyReference& reference : slot.shotBodyReferences) {
         auto owner = g_liveShotsBySequence.find(reference.ownerSpawnSequence);
         if (owner == g_liveShotsBySequence.end()) continue;
@@ -758,9 +746,8 @@ void Shot_ApplyFlight(void* shot, const RollbackShotFlightState& in)
     std::memcpy(bytes + 0x1F5C, &in.delayTime, sizeof(in.delayTime));
     std::memcpy(bytes + 0x1F64, &in.autoAddDivStartTime,
                 sizeof(in.autoAddDivStartTime));
-    // +0x1F78..+0x1FDF holds 13 uEffect pointers owned by the fresh shot.
-    // Rewind only the scalar fields around that array; restoring the retired
-    // shot's entries makes native cleanup dispatch through stale sentinels.
+    // Preserve the fresh shot's 13 callback-effect pointers at +0x1F78..+0x1FDF.
+    // Restore surrounding scalars without importing retired effect addresses.
     std::memcpy(bytes + 0x1F70, in.resourceScalars, 0x08);
     std::memcpy(bytes + 0x1FE0, in.resourceScalars + 0x70, 0x20);
     std::memcpy(bytes + 0x2038, in.attackScalars, sizeof(in.attackScalars));
@@ -798,9 +785,8 @@ void Shot_DetachEmbeddedEffect(void* shot)
         return;
     uint8_t* effect = (uint8_t*)shot + EFFECT_OFFSET;
     if (!IsEffectObject(effect)) return;
-    // The generator chain at +0x218 and particle-manager array at +0x220 are
-    // owned allocations. Release them before detaching the stale embedded graph;
-    // clearing these pointers first leaks every allocation on each reconstruction.
+    // Release owned generators/managers before clearing embedded effect links.
+    // Losing their allocation pointers would prevent native cleanup.
     Effect_ReleaseOwnedAllocations(effect);
     *(uint64_t*)(effect + 0x50) = 0;
     *(uint64_t*)(effect + 0x58) = 0;

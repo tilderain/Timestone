@@ -1,3 +1,4 @@
+//Print thread and current address information when game is frozen for 3.5 seconds
 #include "../pch.h"
 
 #include "rollback_diagnostics.h"

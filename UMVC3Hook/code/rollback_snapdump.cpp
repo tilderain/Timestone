@@ -1,3 +1,4 @@
+//Snapshut dumping for inspection with ai or visually in the ndjson-viewer-2.html
 #include "../pch.h"
 #include "../IniSafe.h"
 

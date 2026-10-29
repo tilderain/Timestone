@@ -76,23 +76,23 @@ static constexpr uintptr_t DTI_UGAME_EFFECT           = 0x140D46E90;
 
 static bool IsHeadlessGameplayUnitCategory(uint32_t category)
 {
-    //Check doc/sunit_categories.md for info
+    // Categories are ordered scheduling lanes, not exclusive types; see doc/sunit_categories.md.
 
     switch (category) {
-        case 3:  //Camera, needed to prevent screen jitter
+        case 3:  // Camera, cut-in, and view units.
     
-        //case 4:  //SystemEffect, uCutIn::uCutInCam, unsure if needed
+        //case 4:  // Omitted stage/effect lane, including uCutIn::uCutInCam.
     
-        case 7:  // Character, shot, and game-effect preprocessing.
+        case 7:  // Character, shot, effect, and sound preprocessing.
         case 8:  // Fighters and character-owned helpers.
         case 9:  // Character auxiliary units such as Morrigan shadows.
         case 10: // Projectiles.
-        case 11: // Projectiles?
-        case 12: // Projectiles?
+        case 11: // Resource-selected shot/effect lane; membership varies.
+        case 12: // Resource-selected shot/effect lane; membership varies.
 
         case 13: // Character chains and attack spaces; also contains some effects.
-        case 18: // Character post-processing.
-        case 21: // Character CPU state.
+        case 18: // Character/team post-simulation coordinator.
+        case 21: // Character control/CPU lane.
             return true;
         default:
             return false;
@@ -101,19 +101,18 @@ static bool IsHeadlessGameplayUnitCategory(uint32_t category)
 
 static bool IsHeadlessGameplaySyncCategory(uint32_t category)
 {
-    // Keep sync filtering independent from move filtering so categories can be
-    // omitted experimentally without suppressing their main gameplay update.
+    // Late-pass selection is independent of the move allowlist.
     switch (category) {
-        case 3:  // Camera, needed to prevent screen jitter.
-        case 7:  // Character, shot, and game-effect preprocessing.
+        case 3:  // Camera, cut-in, and view units.
+        case 7:  // Character, shot, effect, and sound preprocessing.
         case 8:  // Fighters and character-owned helpers.
         case 9:  // Character auxiliary units such as Morrigan shadows.
         case 10: // Projectiles.
-        case 11: // Data-selected projectile/gameplay lane.
-        case 12: // Data-selected projectile/gameplay lane.
+        case 11: // Resource-selected shot/effect lane; membership varies.
+        case 12: // Resource-selected shot/effect lane; membership varies.
         case 13: // Character chains and attack spaces; also contains some effects.
-        case 18: // Character post-processing.
-        case 21: // Character CPU state.
+        case 18: // Character/team post-simulation coordinator.
+        case 21: // Character control/CPU lane.
             return true;
         default:
             return false;
@@ -122,14 +121,11 @@ static bool IsHeadlessGameplaySyncCategory(uint32_t category)
 
 static bool IsHeadlessGameplayUnitObject(uint64_t dti, uint64_t unit, uint32_t category)
 {
-    // ExAtkSpace and its category-14 children retain their displayed timeline.
-    // Its +0x50 phase must not send child finish requests against historical
-    // character flags, nor may +0x48 finalize the retained parent during resim.
-    // State 3/4 cleanup and ordinary (non-headless) updates still run normally.
+    // Skip active callbacks for exact uChrChain objects; lifecycle cleanup is separate.
     if (dti == (uint64_t)_addr(DTI_UCHRCHAIN)) return false;
     if (category != 13) return true;
-    // We already have the DTI: ordinary effects cannot be the ExAtkSpace owner,
-    // so avoid its virtual-slot lookup for every ordinary effect in each phase.
+    // Retained ExAtkSpace parents and linked transition effects do not replay callbacks.
+    // Exact uGameEffect objects need only the transition-effect check.
     if (dti == (uint64_t)_addr(DTI_UGAME_EFFECT))
         return !Effect_IsExAtkSpaceTransitionEffect((void*)unit, false);
     return !Effect_IsExAtkSpaceUnit((void*)unit);
@@ -175,14 +171,13 @@ static bool RunDisabledCpuPostMove(uint64_t unit)
         if (reference && !isAlive(reference)) reference = 0;
     }
 
-    // Invalid core bindings take the native teardown path at vtable +0x78.
+    // Fall back to native +0x48 for missing bindings; it requests retirement via +0x78.
     if (!*(uint64_t*)(unit + 0x40) || !*(uint64_t*)(unit + 0x48) ||
         !*(uint64_t*)(unit + 0x58) || !*(uint64_t*)(unit + 0x60)) {
         return false;
     }
 
-    // Preserve the mode-transition reset, but omit busy-state and nearest-
-    // threat work that only feeds the disabled CPU script path.
+    // Mode zero: keep mode-change reset, omitting defeat/threat checks and CPU script work.
     ((ObjectFn)_addr(FN_UCHRCPU_RESET_MODE))(unit);
     return true;
 }
@@ -272,6 +267,7 @@ static constexpr auto PROFILED_UNIT_OBJECT_SYNC_JOBS = MakeProfiledUnitObjectSyn
 static constexpr auto PROFILED_UNIT_OBJECT_SYNC_SAVES = MakeProfiledUnitObjectSyncSaves(
     std::make_index_sequence<ROLLBACK_UNIT_CATEGORY_COUNT>{});
 
+// Filtered sUnit__moveLine (0x14051B4C0): setup, +0x40 callbacks, and staged teardown.
 template <bool ProfilingEnabled>
 static void HeadlessUnitCategoryMove(uint64_t sMain, uint64_t sUnit,
                                      uint32_t category)
@@ -358,6 +354,7 @@ static void HeadlessUnitCategoryMove(uint64_t sMain, uint64_t sUnit,
     }
 }
 
+// Omitted lanes still receive eligible state-3/4 unlink and destruction work.
 template <bool ProfilingEnabled>
 static void HeadlessUnitCategoryCleanup(uint64_t sMain, uint64_t sUnit,
                                         uint32_t category)
@@ -411,8 +408,8 @@ static void HeadlessUnitCategoryCleanup(uint64_t sMain, uint64_t sUnit,
 }
 
 
-// Replicates the per-category late-pass body used by sUnit__load
-// (0x14051BF10, phase 2) and sUnit__loadCategory (0x14051B6F0, phase 3).
+// Filtered late passes: sUnit__syncLine (0x14051BF10, +0x50) and
+// sUnit__moveAfterLine (0x14051B6F0, +0x48, optional jobs). Not snapshot serialization.
 template <bool ProfilingEnabled>
 static void HeadlessUnitCategoryPostMove(uint64_t sMain, uint64_t sUnit,
                                          RollbackUnitProfilePhase phase,
@@ -454,8 +451,7 @@ static void HeadlessUnitCategoryPostMove(uint64_t sMain, uint64_t sUnit,
                     VTableCall(unit, 0x40);
                     if (phase == RollbackUnitProfilePhase::SyncSave)
                         VTableCall(unit, 0x50);
-                    // Native late passes recheck after the initial callbacks:
-                    // either callback can retire the unit or disable movement.
+                    // Recheck active/Move flags after the initial callbacks, as native does.
                     stateFlags = *(uint32_t*)(unit + 0x10);
                     if ((stateFlags & 7u) != 2 || (stateFlags & 0x400u) == 0) {
                         unit = next;
@@ -494,8 +490,7 @@ static void HeadlessUnitCategoryPostMove(uint64_t sMain, uint64_t sUnit,
         ((void(__fastcall*)(uint64_t, int))_addr(FN_SMAIN_EXECUTE_JOB))(sMain, 0);
 }
 
-// Replicates the native sUnit phase wrapper: sUnit__save_jobwrap
-// (0x14051BFF0, fence 2) and sUnit__save (0x14051B850, fence 3).
+// Keep native fences and pause gating while filtering lanes in move, sync, and moveAfter.
 template <bool ProfilingEnabled>
 static void HeadlessUnitPass(uint64_t sMain, uint64_t sUnit,
                              RollbackUnitProfilePhase phase, int fenceState,
@@ -558,15 +553,14 @@ void Rollback_ResyncMainTiming(uint64_t sMain)
 {
     if (!sMain) return;
 
-    // Headless ticks do not advance native pacing. Preserve its live counters
-    // so correction work counts toward the next tick's wait, not in addition
-    // to a fresh frame interval. Only restore the logical simulation timing.
+    // Reset simulation delta/frame stamp after replay; leave native QPC pacing counters live.
     *(float*)(sMain + 0x80) = 1.0f;
     *(uint32_t*)(sMain + 0x48) = (uint32_t)Controller_GetNetFrameCount();
 }
 
 void Rollback_PatchSleep(bool enable)
 {
+    // Disabled: headless ticks bypass native pacing without patching Sleep calls.
     return;
     static constexpr uintptr_t sites[] = {SLEEP_CALL_FIXED, SLEEP_CALL_VAR};
     if (enable == g_sleepPatched) return;
@@ -587,6 +581,7 @@ void Rollback_PatchSleep(bool enable)
 
 void Rollback_PatchPresent(bool enable)
 {
+    // Disabled: no code patches are applied here.
     return;
     if (enable == g_presentPatched) return;
 
@@ -604,6 +599,7 @@ void Rollback_PatchPresent(bool enable)
 
 void Rollback_PatchSwapchain(bool enable)
 {
+    // Disabled: no code patches are applied here.
     return;
     static constexpr uintptr_t sites[] = {
         SWAPCHAIN_CALL_A, SWAPCHAIN_CALL_B, SWAPCHAIN_CALL_C,
@@ -626,6 +622,7 @@ void Rollback_PatchSwapchain(bool enable)
 
 void Rollback_PatchDrawCalls(bool enable)
 {
+    // Disabled: no code patches are applied here.
     return;
     static constexpr struct Site { uintptr_t address; int size; } sites[] = {
         {0x1402594d9, 3}, {0x1402594e6, 3}, {0x1402594f3, 3},
@@ -653,16 +650,15 @@ void Rollback_PatchDrawCalls(bool enable)
 }
 
 
-// Replicates the gameplay portion of sMain__move (0x140521DF0) for rollback
-// re-simulation, with rendering, pacing, and non-deterministic services removed.
+// Replay selected work in sMvc3Main__move (0x1402594A0) order, omitting native
+// pacing, rendering, device polling, and external services. Disabled calls document omissions.
 void Rollback_HeadlessTick(uint64_t sMain)
 {
     const uint64_t benchmarkStart = LiveBenchmark_Now();
     RollbackHeadlessProfileTimer profile;
     Rollback_FreezeWatchdogHeartbeat("headless-begin", g_resimulateCurrentFrame);
 
-    // Characters cache this value as the identity of shots spawned this frame.
-    // Native sMain derives it from local wall time, which is not peer-stable.
+    // Use the replay frame as the gameplay stamp instead of sMain's QPC-derived frame timer.
     *(uint32_t*)(sMain + 0x48) = (uint32_t)g_resimulateCurrentFrame;
 
     //((ObjectFn)_addr(FN_SMAIN_MOVE))(sMain); // Advance base timing, pause, and frame pacing state.
@@ -681,7 +677,7 @@ void Rollback_HeadlessTick(uint64_t sMain)
         profile.Add(&RollbackProfile::headlessEarlyDrawCollision,
         &RollbackProfile::headlessEarlyDrawCollisionMax);
 
-    // Copy the current render viewport dimensions into the primitive renderer.
+    // Omitted viewport/aspect setup for the primitive renderer.
     //uint64_t render = ((uint64_t(__fastcall*)())_addr(FN_RENDER_GETINSTANCE))();
     //((void(__fastcall*)(uint64_t, uint32_t))_addr(FN_RENDER_SET_ASPECT))(render, 2); // Select aspect mode 2.
     //uint32_t viewport[2];
@@ -704,14 +700,11 @@ void Rollback_HeadlessTick(uint64_t sMain)
         profile.Add(&RollbackProfile::headlessRenderBeginArea,
         &RollbackProfile::headlessRenderBeginAreaMax);
 
-    // sAction is registered as a gameplay unit and is dispatched by the
-    // headless sUnit pass above. This helper is only the native action cleanup
-    // pass; calling the fighting dispatcher here would advance action timers
-    // twice.
+    // Clean up sAction's attack-space links; this is not the fighting-state dispatcher.
     uint64_t manager = ((uint64_t(__fastcall*)())_addr(FN_MVC3MGR_GETINSTANCE))();
     uint64_t action = ((GetterFn)_addr(FN_MVC3MGR_GETACTION))(manager); // Resolve the active sAction.
     Rollback_FreezeWatchdogHeartbeat("headless-action", g_resimulateCurrentFrame);
-    ((ObjectFn)_addr(FN_ACTION_SUBSTEP))(action); // Run the action substep and character moves.
+    ((ObjectFn)_addr(FN_ACTION_SUBSTEP))(action); // Clear dead links and retire superseded attack spaces.
 
         profile.Add(&RollbackProfile::headlessAction,
         &RollbackProfile::headlessActionMax);
@@ -772,25 +765,20 @@ void Rollback_HeadlessTick(uint64_t sMain)
         profile.Add(&RollbackProfile::headlessCollisionHit,
         &RollbackProfile::headlessCollisionHitMax);
 
-    // sUnit vtable slot 13 (0x68): sUnit__save_jobwrap. Begins sync phase 2,
-    // iterates every active category, and dispatches that category through
-    // sUnit vtable slot 12. The category/node pass performs the per-node
-    // save/load transition work and synchronizes any queued unit jobs.
+    // Fence 2: filtered sUnit__sync (0x14051BFF0); per-unit late callback +0x50.
 
-    //VTableCall(MainMember(sMain, 0x401a0), 0x68); //REQUIRED
+    //VTableCall(MainMember(sMain, 0x401a0), 0x68); // Unfiltered native sync wrapper.
     Rollback_FreezeWatchdogHeartbeat("headless-sync-job-pass", g_resimulateCurrentFrame);
     HeadlessUnitPass<ROLLBACK_PROFILING_ENABLED>(
         sMain, sUnit, RollbackUnitProfilePhase::SyncJob, 2,
-        SUNIT_SYNC_JOB_VTABLE); // REQUIRED
-    // sUnit vtable slot 11 (0x58): sUnit__save. Begins sync phase 3 and
-    // iterates every active category through sUnit vtable slot 10. This is
-    // the normal non-job-wrapper category synchronization pass.
+        SUNIT_SYNC_JOB_VTABLE);
+    // Fence 3: filtered sUnit__moveAfter (0x14051B850); per-unit +0x48, optionally job-dispatched.
     
-    //VTableCall(MainMember(sMain, 0x401a0), 0x58); //REQUIRED
+    //VTableCall(MainMember(sMain, 0x401a0), 0x58); // Unfiltered native moveAfter wrapper.
     Rollback_FreezeWatchdogHeartbeat("headless-sync-save-pass", g_resimulateCurrentFrame);
     HeadlessUnitPass<ROLLBACK_PROFILING_ENABLED>(
         sMain, sUnit, RollbackUnitProfilePhase::SyncSave, 3,
-        SUNIT_SYNC_SAVE_VTABLE); // REQUIRED
+        SUNIT_SYNC_SAVE_VTABLE);
 
         profile.Add(&RollbackProfile::headlessUnitSync,
         &RollbackProfile::headlessUnitSyncMax);
@@ -798,7 +786,7 @@ void Rollback_HeadlessTick(uint64_t sMain)
     //((ObjectFn)_addr(FN_AI_SUBSTEP))(MainMember(sMain, 0x40240)); // Run the AI substep helper.
     //VTableCall(MainMember(sMain, 0x401d8), 0x30); // mpEffect::move.
     //VTableCall(MainMember(sMain, 0x40208), 0x30); // mpGpuParticle::move.
-    VTableCall(MainMember(sMain, 0x401b0), 0x30); // mpCamera::move.     ////Check if this is needed and the perf cost
+    VTableCall(MainMember(sMain, 0x401b0), 0x30); // Refresh camera viewport matrices and frusta.
     //VTableCall(MainMember(sMain, 0x401f0), 0x30); // mpSound::move.
     //VTableCall(MainMember(sMain, 0x40248), 0x30); // mpScene::move.
     //VTableCall(MainMember(sMain, 0x40258), 0x30); // mpShadow::move.
@@ -812,8 +800,8 @@ void Rollback_HeadlessTick(uint64_t sMain)
     VTableCall(ManagerSubsystem(FN_GET_CHARACTER), 0x30); // sCharacter::move.
     //VTableCall(ManagerSubsystem(FN_GET_STAGE), 0x30); // sStage::move.
     VTableCall(ManagerSubsystem(FN_GET_SHOT), 0x30); // sShot::move.
-    VTableCall(ManagerSubsystem(FN_GET_GAME_EFFECT), 0x30); // sGameEffect::move. sGameEffect__tickAndPruneDead at 0x140130EA0??
-    ((ObjectFn)_addr(FN_RESET_HIT_NODES))(ManagerSubsystem(FN_GET_HIT_SOLVER)); // Clear active hit-solver nodes.
+    VTableCall(ManagerSubsystem(FN_GET_GAME_EFFECT), 0x30); // Prune dead tracked effect references (0x140130EA0).
+    ((ObjectFn)_addr(FN_RESET_HIT_NODES))(ManagerSubsystem(FN_GET_HIT_SOLVER)); // Clear/free active-node array and reset pool cursor.
     //VTableCall(ManagerSubsystem(FN_GET_REPLAY), 0x30); // sReplay::move.
     //VTableCall(ManagerSubsystem(FN_GET_GSOUND), 0x30); // sGSound::move.
     //VTableCall(ManagerSubsystem(FN_GET_BATTLE_SETTING), 0x30); // sBattleSetting::move.
@@ -837,7 +825,7 @@ void Rollback_HeadlessTick(uint64_t sMain)
 
     //VTableCall(MainMember(sMain, 0x40270), 0x30); // mpPrimitive::move.
     //VTableCall(MainMember(sMain, 0x401e0), 0x48); // mpCollision base cSystem::draw.
-    //((ObjectFn)_addr(FN_UPDATE_RENDER_STATE))(sMain); // Update sMvc3Main render options:- Resolution- FullScreen- AltAntiAlias- TextureDetail- EffectVolume
+    //((ObjectFn)_addr(FN_UPDATE_RENDER_STATE))(sMain); // Apply pending graphics settings.
     //VTableCall(MainMember(sMain, 0x40190), 0x30); // mpRender::move.
     //((ObjectFn)_addr(FN_RENDER_END_FRAME))(MainMember(sMain, 0x40190)); // End and present the render frame.
 
@@ -851,7 +839,7 @@ void Rollback_HeadlessTick(uint64_t sMain)
         profile.Add(&RollbackProfile::headlessPostFrame,
         &RollbackProfile::headlessPostFrameMax);
 
-    // Alt+F4 bypasses the ordinary sPad keyboard-input suppression gates.
+    // Omitted native Alt+F4 handling; input queries pass the suppression-bypass flag.
     //using KeyQueryFn = bool(__fastcall*)(uint64_t, uint32_t, bool);
     //auto getPad = (uint64_t(__fastcall*)())_addr(FN_PAD_GETINSTANCE);
     //bool leftAlt = ((KeyQueryFn)_addr(FN_PAD_KEY_HELD))(getPad(), 0xa4, true); // Query VK_LMENU held.

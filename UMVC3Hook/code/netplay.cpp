@@ -1,3 +1,6 @@
+//Hacked up implementation of a packet sender. For some reason it spams critical sections for "thread safety"
+//instead of using a single queue. :(
+
 #include "netplay.h"
 #include "rollback.h"
 #include "rollback_diagnostics.h"

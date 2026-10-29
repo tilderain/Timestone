@@ -1,5 +1,4 @@
-// trainingboot.cpp
-// Boot directly into a training match, bypassing title/menu/charsel.
+// Boot directly into a configured battle, bypassing title/menu/character select.
 #include "../pch.h"
 #include "trainingboot.h"
 #include "mk10utils.h"
@@ -12,7 +11,7 @@
 using namespace Memory::VP;
 
 // ---------------------------------------------------------------------------
-// Addresses (all VA, converted via _addr at runtime)
+// Preferred executable addresses relocated with _addr; field offsets stay relative.
 // ---------------------------------------------------------------------------
 
 // sBattleSetting API
@@ -40,7 +39,7 @@ static constexpr uintptr_t ACTION_AUTO_JUMP_P2_RETURN         = 0x140203e6a;
 // sArea scene-chain manager
 static constexpr uintptr_t SAREA_INSTANCE_PTR                = 0x140e17a80;
 
-// aChrSelectBlank DTI (loading screen before battle)
+// aChrSelectBlank transition-area DTI
 static constexpr uintptr_t ACHRSELBLANK_DTI                  = 0x140d500f0;
 
 // sGameUI
@@ -61,40 +60,19 @@ static constexpr uintptr_t BATTLE_SETTING_RESTORE_BACKUP     = 0x14024de40;
 // Access pattern: bs + 0x3bc0c + ((slot % 3) + (team & 0xf) * 3) * 4
 static constexpr uintptr_t CHAR_ID_ARRAY_OFFSET              = 0x3bc0c;
 
-// Training/versus options in sBattleSetting. These are consumed by the native
-// training UI setup after the battle descriptor has been restored.
+// Battle descriptor, meter, and CPU-control offsets.
 static constexpr uintptr_t BS_BACKUP_STAGE_ID_OFFSET             = 0x588;
 static constexpr uintptr_t BS_P2_METER_DEFAULT_OFFSET         = 0x29c;
 static constexpr uintptr_t BS_P1_METER_DEFAULT_OFFSET         = 0x2d4;
 static constexpr uintptr_t BS_HP_DRAIN_MODE_OFFSET            = 0x2d8;
 static constexpr uintptr_t SLOT_CPU_CONTROL_OFFSET             = 0x18;
 
-// --- Pad / Keyboard input routing ---
-// sPad singleton instance pointer (written by sPad__sPad_ctor @ 0x14050fbe3).
-// The pad object has 4 slots at stride 0x2E0 starting at +0x62.
-// sMvc3Manager stores the pad-to-player assignment at +0x140 (int32_t per slot).
-// keyboardToGameMask_maybe (0x1402B3390) and GetsCurrentInput_withSOCD (0x1402B3700)
-// check manager+0x140[0] to decide if keyboard maps to P1 (0) or another player.
-// pad+0xc20 and pad+0xc30 are keyboard-disable flags — when non-zero, keyboard
-// is blocked regardless of assignment.
-//
-// REFS:
-//   sPad__sPad_ctor:          0x14050FBA0
-//   sPad__initSlotInner:      0x1405142A0  (writes keyboard scan-to-button map)
-//   GetsCurrentInput_withSOCD:0x1402B3700  (routes keyboard-vs-pad per player)
-//   sMvc3Main__keyboardToGameMask_maybe: 0x1402B3390 (VK→game bitmask mapping)
-//   sMvc3Manager__isPadAssigned:         0x14025AD10 (checks slot != -1)
-//   sMvc3Manager__getPlayerCharIdx:      0x14025AC40 (reads manager+0x140[slot])
-//   sKeyboard__sKeyboard:    0x1406A96C0  (256-bit virtual-key held bitmap at +0x138)
-//   FUN_1402950e0:           0x1402950E0  (returns keyboard state provider at 0x140E1A198)
-//   sPad__instance:          0x140E174B8  (global, written at sPad__sPad_ctor+0x43)
-//   sMvc3Manager pointer:    0x140D510A0  (global, deref to get manager instance)
+// Input routing uses manager+0x140 for pad assignments and the keyboard player.
+// sPad+0xC20/+0xC30 gate keyboard input independently of that assignment.
 static constexpr uintptr_t SPAD_INSTANCE_PTR                 = 0x140E174B8;
 static constexpr uintptr_t SMVC3MANAGER_INSTANCE_PTR         = 0x140D510A0;
 
-// sGameConfig owns the two gameplay button-binding tables consumed by
-// cChrInput__buttonRemap. Netplay's client controls team P2, but should use
-// that machine's P1 bindings before transmitting the remapped logical input.
+// Copy the client's local P1 bindings to P2 for both gameplay mapping variants.
 static constexpr uintptr_t SGAMECONFIG_GET_INSTANCE           = 0x140001AB0;
 static constexpr uintptr_t SGAMECONFIG_START_NATIVE_LOAD      = 0x140253620;
 static constexpr uintptr_t SGAMECONFIG_GET_BUTTON_MAPPING     = 0x1402522A0;
@@ -111,7 +89,7 @@ static constexpr uint32_t STORAGE_UNIT_CATEGORY                = 0x19;
 static constexpr uintptr_t STORAGE_RESULT_OFFSET               = 0x4C;
 
 // Offsets within sMvc3Manager:
-static constexpr uintptr_t MANAGER_PAD_ASSIGN_OFFSET         = 0x140;   // int32_t[4] pad-slot→player index (-1=unassigned, 0=P1, 1=P2)
+static constexpr uintptr_t MANAGER_PAD_ASSIGN_OFFSET         = 0x140;   // int32_t[4]: -1 unassigned, 0 P1, 1 P2
 
 // Offsets within sPad:
 static constexpr uintptr_t PAD_KEYBOARD_BLOCKED_1            = 0xc20;   // byte: non-zero blocks keyboard
@@ -121,8 +99,8 @@ static constexpr uintptr_t PAD_KEYBOARD_BLOCKED_2            = 0xc30;   // byte:
 // Global state
 // ---------------------------------------------------------------------------
 static TrainingBootConfig g_bootConfig = {
-    { CHR_MORRIGAN, CHR_MORRIGAN, CHR_MORRIGAN },   // P1 (all 3 slots = Wolverine)
-    { CHR_MORRIGAN, CHR_MORRIGAN, CHR_MORRIGAN },   // P2 (all 3 slots = Wolverine)
+    { CHR_MORRIGAN, CHR_MORRIGAN, CHR_MORRIGAN },   // P1 roster
+    { CHR_MORRIGAN, CHR_MORRIGAN, CHR_MORRIGAN },   // P2 roster
     { 0, 0, 0 }, // P1 colors
     { 0, 0, 0 }, // P2 colors
     { 0, 0, 0 }, // P1 assists (Alpha)
@@ -130,8 +108,8 @@ static TrainingBootConfig g_bootConfig = {
     { false, false }, // Normal controls
     { false, false }, // Automatic super jump disabled
     { { 0, 0, 0 }, { 0, 0, 0 } }, // Character voice language
-    0,    // stage 
-    99   // timer (99 = infinite in training)
+    0,    // Stage ID
+    99   // Timer value; battle mode determines countdown behavior.
 };
 static bool g_hasBooted = false;
 static bool g_hooksInitialized = false;
@@ -197,10 +175,8 @@ static void WriteCharacterId(uint64_t battleSetting, int team, int slot, int32_t
 }
 
 // ---------------------------------------------------------------------------
-// Write the fields used by the native slot lookup into the backup source.
-// restoreBackupAndInit copies six 0x58-byte records from bs+0x378 to bs+0x38.
-// Native lookup scans slot+0x08 for team and treats a positive character ID at
-// slot+0x0c as an active entry.
+// Populate a backup slot; restore copies six 0x58-byte records to bs+0x38.
+// Lookup matches team at +0x08 and requires a positive character ID at +0x0C.
 // ---------------------------------------------------------------------------
 static void WriteSlotEntry(uint64_t bs, int index, int teamId, int32_t charId,
                            int32_t color, int32_t assist, uint8_t voiceLanguage)
@@ -220,13 +196,11 @@ static void WriteSlotEntry(uint64_t bs, int index, int teamId, int32_t charId,
 
 static void ConfigureTrainingMatchDefaults(uint64_t bs)
 {
-    // 0xff is the native "Very Hard" CPU level (the final entry in the
-    // versus CPU-level table: 0x20, 0x60, 0xa0, 0xc0, 0xff).
+    // Native Very Hard CPU setting.
     typedef void(__fastcall* SetCpuLevel_t)(uint64_t, int32_t);
     ((SetCpuLevel_t)_addr(0x140146430))(bs, 0xff);
 
-    // Native training setup multiplies these values by 10000 when initializing
-    // the two team meters.
+    // Native training meter defaults are in bars (10000 units each).
     const int32_t startingMeter = g_fiveBarStart ? 5 : 1;
     *(int32_t*)(bs + BS_P1_METER_DEFAULT_OFFSET) = startingMeter;
     *(int32_t*)(bs + BS_P2_METER_DEFAULT_OFFSET) = startingMeter;
@@ -289,45 +263,8 @@ static void ApplyTeamAutoJump()
             g_bootConfig.autoJump[0], g_bootConfig.autoJump[1]);
 }
 
-// ---------------------------------------------------------------------------
-// Save data & pad-to-player mapping notes
-// ---------------------------------------------------------------------------
-// PROBLEM: In the normal "Press Start" flow, save data is loaded from
-// savedata.bin ("savedata/umvc3/savedata.bin"). This does several things
-// that our training boot bypasses:
-//   1. Writes manager+0x140[0..3] — assigns pad slots 0-3 to player indices
-//      (0=P1, 1=P2, -1=unassigned). Slot 0 also controls which player index
-//      the keyboard feeds into (checked by GetsCurrentInput_withSOCD @ 0x1402B3700).
-//   2. Clears pad+0xc20/pad+0xc30 keyboard-disable flags (set during license
-//      check when no save data exists yet).
-//   3. Initializes keyboard scan→button mapping per slot via initSlotInner
-//      (0x1405142A0) — writes the 0x20-byte translation table at slot+0x118.
-//   4. Loads controller config (button assignments, stick zones).
-//
-// The save data loading itself is orchestrated by sLicense (0x140279AE0)
-// and uSaveDataAccess (0x14031CBC0), but we bypass it completely.
-// SetupPadToPlayerMapping() below writes the bare minimum to get keyboard
-// input routing working for Escape/pause and Start/skip-intro.
-// ---------------------------------------------------------------------------
-
-// ---------------------------------------------------------------------------
-// SetupPadToPlayerMapping: Directly writes the pad-to-player assignment and
-// clears keyboard-disable flags, bypassing the need for savedata.bin loading.
-//
-// In the normal flow (title screen → "Press Start" → menu), the license/
-// save-data init does this. We replicate the essential state here since our
-// boot bypasses the entire menu flow.
-//
-// GetsCurrentInput_withSOCD (0x1402B3700) routing logic:
-//   keyboardPlayerIdx = manager+0x140[0]
-//   if (keyboardPlayerIdx == requestedPlayerIdx && pad+0xc30 == 0)
-//       return keyboardInput(requestedPlayerIdx)
-//   else
-//       return padSlotInput[requestedPlayerIdx]  // pad + playerIdx*0x2E0 + 0x1BC
-//
-// sMvc3Main__method_3D00 (called from keyboard reader) also checks:
-//   if (pad+0xc20 != 0 || pad+0xc30 != 0) → return 0 (blocked)
-// ---------------------------------------------------------------------------
+// Start/poll native asynchronous config loading without the menu parent unit.
+// Returns true on terminal completion, including failure, not just successful load.
 static bool LoadNativeGameConfig()
 {
     typedef uint64_t(__fastcall* GetInstance_t)();
@@ -360,16 +297,13 @@ static bool LoadNativeGameConfig()
     if (result == 0 || result == 1)
         return false;
 
-    // uStoragePC result 2 is success; 5 and 9 are native load errors. The
-    // success path has already invoked the sGameConfig apply callback before
-    // publishing the result.
+    // Result 2 reports success; other terminal results are logged as failures.
     if (result == 2)
         HookLog("TrainingBoot: native sGameConfig loaded and applied\n");
     else
         HookLog("TrainingBoot: native sGameConfig load failed (result=%d)\n", result);
 
-    // The regular menu's parent unit clears this after consuming its child.
-    // Training boot owns the child directly, so release the busy gate here.
+    // We own the storage child here; clear the config busy gate and retire it.
     *(uint8_t*)(config + SGAMECONFIG_STORAGE_BUSY_OFFSET) = 0;
 
     typedef void(__fastcall* KillUnit_t)(uint64_t);
@@ -540,53 +474,35 @@ static bool SynchronizeInitialPlayerSettings()
 
 static void SetupPadToPlayerMapping()
 {
-    // --- sMvc3Manager: pad-slot→player assignment ---
-    // manager + 0x140 is an int32_t[4]; write slot→player mapping.
-    // Slot 0 = P1 (also keyboard → P1). Slot 1 = P2.
+    // Route slots 0/1 to P1/P2, leave 2/3 unassigned, and route keyboard to P1.
     uint64_t sMvc3Manager = *(uint64_t*)_addr(SMVC3MANAGER_INSTANCE_PTR);
     if (sMvc3Manager) {
-        *(int32_t*)(sMvc3Manager + MANAGER_PAD_ASSIGN_OFFSET + 0 * 4) = 0;  // slot 0 → player 0 (P1, also keyboard)
-        *(int32_t*)(sMvc3Manager + MANAGER_PAD_ASSIGN_OFFSET + 1 * 4) = 1;  // slot 1 → player 1 (P2)
-        *(int32_t*)(sMvc3Manager + MANAGER_PAD_ASSIGN_OFFSET + 2 * 4) = -1; // slot 2 → unassigned
-        *(int32_t*)(sMvc3Manager + MANAGER_PAD_ASSIGN_OFFSET + 3 * 4) = -1; // slot 3 → unassigned
+        *(int32_t*)(sMvc3Manager + MANAGER_PAD_ASSIGN_OFFSET + 0 * 4) = 0;
+        *(int32_t*)(sMvc3Manager + MANAGER_PAD_ASSIGN_OFFSET + 1 * 4) = 1;
+        *(int32_t*)(sMvc3Manager + MANAGER_PAD_ASSIGN_OFFSET + 2 * 4) = -1;
+        *(int32_t*)(sMvc3Manager + MANAGER_PAD_ASSIGN_OFFSET + 3 * 4) = -1;
         HookLog("TrainingBoot: Pad-to-player mapping set (slots 0→P1, 1→P2)\n");
     } else {
         HookLog("TrainingBoot: WARNING - sMvc3Manager not available for pad mapping\n");
     }
 
-    // --- sPad: clear keyboard-disable flags ---
+    // Enable keyboard input without reinitializing loaded device mappings.
     uint64_t sPad = *(uint64_t*)_addr(SPAD_INSTANCE_PTR);
     if (sPad) {
         *(uint8_t*)(sPad + PAD_KEYBOARD_BLOCKED_1) = 0;
         *(uint8_t*)(sPad + PAD_KEYBOARD_BLOCKED_2) = 0;
 
-        // Preserve the live per-device map. Its constructor default initializer
-        // would overwrite controller assignments loaded earlier in startup.
         HookLog("TrainingBoot: Keyboard-disable flags cleared (pad+0x%x, pad+0x%x)\n",
                 PAD_KEYBOARD_BLOCKED_1, PAD_KEYBOARD_BLOCKED_2);
 
-        // Force slot 1 (P2) device-active flags to non-zero so the game thinks
-        // a physical controller is plugged in for P2. This prevents the
-        // "Press Start" / wait-for-P2 state when only one pad is connected.
-        // Slot layout (from sPadCheckSlotDeviceAlive_maybe disasm):
-        //   slot_base = sPad + slotIndex * 0x2E0
-        //   device_active at slot_base + 0x60
-        //   ready_counter at slot_base + 0x63
-    //    uint64_t slot1 = sPad + 1 * 0x2E0;
-    //    *(uint8_t*)(slot1 + 0x60) = 1;  // device active flag
-    //    *(uint8_t*)(slot1 + 0x63) = 1;  // ready counter
-    //    HookLog("TrainingBoot: Forced slot 1 device flags to alive (sPad+0x%llx)\n",
-    //            (unsigned long long)(slot1));
     } else {
         HookLog("TrainingBoot: WARNING - sPad not available for keyboard flag clear\n");
     }
 }
 
 // ---------------------------------------------------------------------------
-// BootIntoTraining: configures sBattleSetting and transitions to battle.
-// Follows the same flow as aChrSelect__onSelectionComplete for training mode (uVar3 == 6).
-// Sequence: set up chars/stage → set battle type → agent reset → restore backup →
-//           UI flags → create loading screen → area transition → pad mapping
+// Load preferences, synchronize settings, configure the roster, and enter battle.
+// Restarts reuse the active transition area instead of queueing it again.
 // ---------------------------------------------------------------------------
 void BootIntoTraining(bool queueAreaTransition)
 {
@@ -596,17 +512,14 @@ void BootIntoTraining(bool queueAreaTransition)
         return;
     }
 
-    // Savedata loading is asynchronous. Keep the title move hook active until
-    // the native uStoragePC has loaded and applied the complete sGameConfig.
+    // Wait for native config loading to finish; terminal errors also allow boot.
     if (!g_skipNativeConfigLoad && !g_nativeGameConfigLoaded) {
         if (!LoadNativeGameConfig())
             return;
         g_nativeGameConfigLoaded = true;
     }
 
-    // Savedata owns each process's AutoJump and character-voice preferences.
-    // Exchange them before the first aAction is constructed so both peers
-    // enter the initial battle with host=P1 and client=P2 settings resolved.
+    // Resolve AutoJump/voice preferences before battle setup: host=P1, client=P2.
     if (!SynchronizeInitialPlayerSettings())
         return;
 
@@ -641,10 +554,7 @@ void BootIntoTraining(bool queueAreaTransition)
         WriteCharacterId(bs, 1, slot, g_bootConfig.p2Chars[slot]);
     }
 
-    // Populate backup records through the native character setter. In addition
-    // to the ID at +0x0c, it resolves the character DTI into +0x10. Character
-    // creation otherwise depends on asynchronous archive completion order.
-    // P1 = entries 0-2 (team 0), P2 = entries 3-5 (team 1).
+    // Native setters populate ID/DTI fields: P1 uses slots 0-2, P2 uses 3-5.
     for (int slot = 0; slot < 3; slot++) {
         WriteSlotEntry(bs, slot, 0, g_bootConfig.p1Chars[slot],
                        g_bootConfig.p1Colors[slot], g_bootConfig.p1Assists[slot],
@@ -653,18 +563,14 @@ void BootIntoTraining(bool queueAreaTransition)
                        g_bootConfig.p2Colors[slot], g_bootConfig.p2Assists[slot],
                        g_bootConfig.voiceLanguage[1][slot]);
     }
-    // restoreBackupAndInit restores the stage from the backup descriptor,
-    // not from the live mStageArea field set above.
+    // Restore reads the backup stage, so update it as well as the live field.
     *(int32_t*)(bs + BS_BACKUP_STAGE_ID_OFFSET) = g_bootConfig.stageId;
-    // Set the backup flag so restoreBackupAndInit performs the restore
+    // Enable backup restoration.
     *(char*)(bs + 0x590) = 1;
     HookLog("TrainingBoot: Backup flag set\n");
 
-    // Set battle type to training BEFORE restoreBackupAndInit so its
-    // training-specific init path (isTrainingMode check) executes.
-    // In the original aChrSelect flow, the battle type was already set
-    // by the mode selection before onSelectionComplete is reached.
-    //
+    // Use offline versus/default BattleType 0. Despite the boot API/log name,
+    // this does not enable native training mode, whose predicate requires 5.
     // Battle type values at sBattleSetting+0x34C (confirmed via Ghidra):
     //   1 = Arcade
     //   2 = Attract mode
@@ -682,17 +588,14 @@ void BootIntoTraining(bool queueAreaTransition)
     typedef void(__fastcall* CommitOnePlay_t)(uint64_t, uint8_t);
     ((CommitOnePlay_t)_addr(BATTLE_SETTING_COMMIT_ONE_PLAY))(bs, 1);
 
-    // --- Follow training mode init flow (aChrSelect__onSelectionComplete, uVar3==6) ---
-
-    // 1. sAgentSession::method_5560(agent, 0) — reset agent/session state
+    // Call the session helper used by the character-select exit path.
     GetInstance_t getAgentSession = (GetInstance_t)_addr(AGENTSESSION_GET_INSTANCE);
     uint64_t agent = getAgentSession();
     typedef void(__fastcall* AgentMethod_t)(uint64_t, uint32_t);
     ((AgentMethod_t)_addr(UUIBASE_METHOD_5560))(agent, 0);
     HookLog("TrainingBoot: Agent session reset\n");
 
-    // 2. Restore backup — copies slot data from bs+0x378 to bs+0x38,
-    //    sets up game UI with character selections, runs training init.
+    // Restore backup roster/settings, then apply team control preferences.
     typedef void(__fastcall* RestoreBackup_t)(uint64_t);
      ((RestoreBackup_t)_addr(BATTLE_SETTING_RESTORE_BACKUP))(bs);
      HookLog("TrainingBoot: Backup restored\n");
@@ -719,7 +622,7 @@ void BootIntoTraining(bool queueAreaTransition)
         }
     }
 
-    // 3. aChrSelect__util_4AC0(ui, 0) — write 0 to ui+0x5b74 (training flag)
+    // Clear the UI field at +0x5B74 through its native helper.
     GetInstance_t getGameUI = (GetInstance_t)_addr(SGAMEUI_GET_INSTANCE);
     uint64_t ui = getGameUI();
     typedef void(__fastcall* ChrSelectUtil_t)(uint64_t, uint32_t);
@@ -729,19 +632,10 @@ void BootIntoTraining(bool queueAreaTransition)
     // Match the native training token used when leaving a training battle.
     ((SetInt_t)_addr(SGAMEUI_SET_BOOT_STATE))(ui, 13);
 
-    // 4. sGameUI__createLoadingScreen(ui, 0, 0) — create loading screen object
-   //typedef void(__fastcall* CreateLoading_t)(uint64_t, uint8_t, uint32_t);
-   // ((CreateLoading_t)_addr(SGAMEUI_CREATE_LOADING_SCREEN))(ui, 0, 0);
-    //HookLog("TrainingBoot: Loading screen created\n");
-
-    // 5. Set pad-to-player mapping before entering the battle area. setArea can
-    //    synchronously initialize battle input, so doing this afterward is too
-    //    late for the first controller-assignment check.
+    // Set input routing before queueing the battle transition.
     SetupPadToPlayerMapping();
 
-    // Initial boot still needs the native transition intermediary. A roster
-    // restart is already inside aChrSelectBlank after retiring the old battle;
-    // queueing it again would destroy and recreate the same loading area.
+    // Initial boot queues aChrSelectBlank; restarts reuse that intermediary.
     if (queueAreaTransition) {
         uint64_t sArea = *(uint64_t*)_addr(SAREA_INSTANCE_PTR);
         if (!sArea) {
@@ -786,8 +680,7 @@ void TrainingBoot_UpdateRestart()
         return;
 
     if (g_restartConfigPending) {
-        // sArea clears its pending target only after finalizing the divergent
-        // old action/stage branch and constructing the loading intermediary.
+        // Wait for sArea to consume the pending transition before applying settings.
         if (*(uint64_t*)(sArea + 0x7040) != 0)
             return;
 
@@ -822,7 +715,7 @@ bool TrainingBoot_IsRestartPending()
 }
 
 // ---------------------------------------------------------------------------
-// Hook on aTitle__update: fires BootIntoTraining once on first call.
+// Retry boot from title updates until loading/settings synchronization completes.
 // ---------------------------------------------------------------------------
 typedef void(__fastcall* TitleUpdate_t)(uint64_t);
 static TitleUpdate_t oTitleUpdate = nullptr;
@@ -835,7 +728,7 @@ void __fastcall Hook_titleUpdate(uint64_t param_1)
 {
     if (!g_hasBooted) {
         BootIntoTraining();
-        return; // Skip original — we're already transitioning areas.
+        return; // Suppress title updates while boot is pending or starting.
     }
 
     if (oTitleUpdate) {
@@ -879,8 +772,7 @@ static void __fastcall Hook_executeMatchPhase(uint64_t action, int32_t phase,
         return;
     }
 
-    // Phases 2 and 3/4 call uFrankWest::initCharacterWeapons (0x140083760),
-    // which resets level to 1. Apply the override only on fighting entry.
+    // Apply Frank's level override at phase 5, after native initialization.
     typedef int32_t(__fastcall* CountCharacters_t)(uint64_t);
     typedef uint64_t(__fastcall* GetCharacter_t)(uint64_t, int32_t);
     const int32_t count = ((CountCharacters_t)_addr(SCHARACTER_COUNT_CHARACTERS))(characters);
@@ -899,7 +791,7 @@ static void __fastcall Hook_executeMatchPhase(uint64_t action, int32_t phase,
 }
 
 // ---------------------------------------------------------------------------
-// Init: hooks aTitle__update.
+// Install title-boot, battle-construction AutoJump, and match-phase hooks.
 // ---------------------------------------------------------------------------
 void TrainingBoot_InitHooks()
 {

@@ -138,8 +138,7 @@ struct DeferredWeaponCartDebris {
 std::unordered_map<void*, DeferredWeaponCartDebris> g_deferredWeaponCartDebris;
 
 constexpr ShotModelPolicy SHOT_MODEL_POLICIES[] = {
-    // King Kobun and Hand Grenade consume model playback in gameplay.
-    // Their non-model helper/contact repairs deliberately remain class-specific.
+    // Per-class resource pins, playback restoration, and setup-retry policy.
     {0x140D4D2B0, "King Kobun", {0x100, 0x11B0}, 2, true, true},
     {0x140D48BB0, "Fire Grenade", {0x100, 0x11B0}, 2, true, true},
     {0x140D48CD0, "Hand Grenade", {0x100, 0x11B0}, 2, true, true},
@@ -151,13 +150,9 @@ constexpr ShotModelPolicy SHOT_MODEL_POLICIES[] = {
     {DTI_USHOT_VULCAN_ITEM_THROW, "Evidence Item Throw",
      {0x100, 0x11B0}, 2, true, true},
 
-    // Existing model-driven shots using the shared playback overlay or setup
-    // readiness check. Pin their primary model and motion resources; Cart's
-    // separately-owned model effects still use their dedicated pinning path.
     {0x140D49A60, "Missile Emplacement", {0x100, 0x11B0}, 2, true, false},
     {0x140D4A1A8, "Weapon Cart", {0x100, 0x11B0}, 2, true, false},
-    // Pending registration does not initialize the model. Complete native setup
-    // before playback restore, as for Prickle Board, even without saved callbacks.
+    // Pendulum uses motion-list slot +0x11B8; retry setup independently of callbacks.
     {0x140D4C4C8, "Pendulum Log", {0x100, 0x11B8}, 2, true, true},
     {0x140D4D2F0, "Servbot Launcher", {0x100, 0x11B0}, 2, true, false},
     {0x140D4A968, "Ouroboros", {0x100, 0x11B0}, 2, true, false},
@@ -210,9 +205,7 @@ bool RetryShotModelSetup(void* shot, const ShotModelPolicy& policy,
 
 void PinUnique(void* resource, std::vector<void*>& pinnedResources)
 {
-    // sResource::addRef deliberately DebugBreaks when the current count is not
-    // positive. Shot fields can retain a retired resource after native teardown;
-    // require a resource object before reading that count or changing ownership.
+    // Pin each resource once; native cResource::addRef requires a positive refcount.
     if (!resource || !HasCallableDtiVirtual(resource) ||
         *(int32_t*)((uint8_t*)resource + 0x4C) <= 0 ||
         std::find(pinnedResources.begin(), pinnedResources.end(), resource) !=
@@ -293,9 +286,7 @@ void RepairResimDogMissileMotion(void* shot)
         return;
     }
 
-    // Dog setup only writes actor request 0/1. The normal model-category pass
-    // maps it to NHweapon_l0 entry 0xCB, but a resim-spawned shot misses that
-    // pass and otherwise remains at MotionNo 0xFFFF with no resource bindings.
+    // Resim-spawn repair: bind motion 0xCB explicitly instead of waiting on actor requests.
     ((uint64_t(__fastcall*)(void*, uint32_t, uint32_t, float, float, float,
                            uint32_t))
         _addr(FN_UMODEL_PROCESS_ACTION_ANMCHR))(
@@ -356,10 +347,8 @@ void RepairPrickleBoardMotionBindings(
         _addr(FN_UMODEL_PROCESS_ACTION_ANMCHR))(
             shot, 0, motionNo, 0.0f, motionFrame, 1.0f, motionFlags);
 
-    // processActionAnmchr rebuilds the resource-owned bindings but also resets
-    // playback. Keep the exact saved cursor and completion edge while retaining
-    // the newly bound pointer slots. The native shot tick remains responsible
-    // for advancing and evaluating the model pose.
+    // setMotionEx resets playback while rebinding metadata. Keep the saved scalars;
+    // the native model pass still handles track setup, evaluation, and advancement.
     static constexpr size_t scalarRanges[][2] = {
         {0x08, 0xD8}, {0xE8, 0x18}, {0x108, 0x18},
         {0x140, 0x20}, {0x168, 0x08},
@@ -403,9 +392,8 @@ void RestoreReconstructedPrickleBoardCommandState(
         FN_CACTOR_GAME_MODEL_ANM_ADVANCE_COMMAND))(
             (uint8_t*)shot + 0x1348);
 
-    // Binding rebuilds resource-owned pointers but can also restart playback.
-    // If command catch-up selected the same motion as the snapshot, retain its
-    // exact cursor and pose while keeping the newly derived command/bindings.
+    // If command catch-up kept the same motion, preserve playback and root pose.
+    // Keep the newly resolved command and motion pointers.
     if (*(uint16_t*)((uint8_t*)shot + 0x568) == savedMotionNo) {
         static constexpr size_t scalarRanges[][2] = {
             {0x08, 0xD8}, {0xE8, 0x18}, {0x108, 0x18},
@@ -515,8 +503,7 @@ void RepairResimPendulumModel(
         observedDti != (uint64_t)_addr(0x140D4C4C8)) {
         return;
     }
-    // Restored tracks are initialized and sampled after registration. Rebinding
-    // here would request S_SETUP after the native model pass and reset the pose.
+    // Keep initialized reconstruction bindings; setMotionEx would request setup again.
     if (reconstructed && PrimaryMotionBindingsReady(shot)) return;
     ProcessPendulumMotionIfReady(shot);
     if (PrimaryMotionBindingsReady(shot)) {
@@ -630,9 +617,7 @@ void RetryMissileEmplacementSetup(void* shot)
     if (!setup) return;
     ((void(__fastcall*)(void*))setup)(shot);
     InvalidateMemoryQueryCache();
-    // Setup mirrors Z and replaces orientation from Doom's side flag. The
-    // snapshot already contains that transform, so a readiness retry must not
-    // apply the side conversion a second time.
+    // Preserve restored state: setup can negate Z again and replace orientation/playback.
     std::memcpy((uint8_t*)shot + TRANSFORM_STATE_OFFSET, transformState,
                 sizeof(transformState));
     std::memcpy((uint8_t*)shot + CONCRETE_STATE_OFFSET, concreteState,
@@ -805,7 +790,6 @@ bool ShouldSkipRocketTail(void* chain)
 {
     if (!g_disableRocketTail || !chain) return false;
     void* owner = *(void**)((uint8_t*)chain + 0x1320);
-    // Roster allocations are stable. Preserve native dead-owner teardown.
     return owner && *(uint64_t*)owner == (uint64_t)_addr(VTABLE_URROCKET_RACCOON) &&
         ((*(uint32_t*)((uint8_t*)owner + 0x10) & 7u) - 1u < 2u);
 }
@@ -817,8 +801,6 @@ void __fastcall hkChrChainMove(void* chain)
 
 void __fastcall hkChrChainMoveAfter(void* chain)
 {
-    // Do not let chain work/history overwrite animation-driven collision joints
-    // on live frames while the same chain is skipped during resimulation.
     if (!ShouldSkipRocketTail(chain)) oChrChainMoveAfter(chain);
 }
 
@@ -935,7 +917,7 @@ void Rollback_InitShotModelPolicyHooks()
         (void**)&oChrChainMoveAfter,
         "Rollback: hooked character-chain post-move",
         "Rollback: failed to hook character-chain post-move (%d)\n");
-    // Both phases must agree; a partially installed policy stays pass-through.
+    // Suppress Rocket's chain only if both phase hooks are enabled.
     g_disableRocketTail = chainMoveHook && chainAfterHook;
     HookLog("Rollback: Rocket animation-only tail %s\n",
             g_disableRocketTail ? "enabled" : "unavailable");
@@ -1054,8 +1036,7 @@ void Rollback_PrepareShotModelAfterSpawn(
                          waitedForModelDtis.end();
     if (!alreadyWaited)
         waitedForModelDtis.push_back(policy->dtiAddress);
-    // Wait only for the first shared model of each DTI. Later factories should
-    // resolve the resource from the cache populated by that setup.
+    // Allow a long setup retry once per DTI; later instances get one attempt.
     RetryShotModelSetup(shot, *policy, alreadyWaited ? 1 : 500);
 }
 
@@ -1086,7 +1067,7 @@ void Rollback_EvaluateRestoredShotModel(void* shot, uint64_t runtimeDti,
                 std::max(0.0f, animationTime - 1.0f), 1.0f,
                 legionTiger ? 0x40 : 0);
     }
-    // Reconstructed shots missed the model-category pass for this tick.
+    // Evaluate the reconstructed model once after selecting its motion.
     ((void(__fastcall*)(void*))_addr(FN_UMODEL_MOVE))(shot);
 }
 
@@ -1107,12 +1088,11 @@ void Rollback_EvaluateRestoredShotPose(void* shot, uint64_t runtimeDti)
     std::memcpy(savedMotion, (uint8_t*)shot + 0x560, sizeof(savedMotion));
     std::memcpy(savedRootPose, (uint8_t*)shot + 0x1B0, sizeof(savedRootPose));
     std::memcpy(savedModelState, (uint8_t*)shot + 0x550, sizeof(savedModelState));
-    // setupMotion resolves the saved motion and binds its tracks directly.
+    // Request native track setup for the restored motion.
     *(uint16_t*)((uint8_t*)shot + 0x56A) |= 0x2; // S_SETUP
     ((void(__fastcall*)(void*))_addr(FN_UMODEL_SETUP_MOTION))(shot);
 
-    // Rebinding initializes fresh joint tracks but restarts playback. The
-    // f2844 pair first diverges at 2779 when mStartFrame changes from 0 to 8.
+    // Preserve saved playback and event masks, retaining the fresh track pointers.
     static constexpr size_t scalarRanges[][2] = {
         {0x08, 0xD8}, {0xE8, 0x18}, {0x108, 0x18},
         {0x140, 0x20}, {0x168, 0x08},
@@ -1123,8 +1103,7 @@ void Rollback_EvaluateRestoredShotPose(void* shot, uint64_t runtimeDti)
     std::memcpy((uint8_t*)shot + 0x550, savedModelState, sizeof(savedModelState));
     if (!PrimaryMotionBindingsReady(shot)) return;
 
-    // mFrame already points to the next tick; mNowFrame is the saved evaluated
-    // pose. Sample it without updateFrame, then retain exact captured scalars.
+    // Sample saved mNowFrame without advancing playback, then restore scalars and root pose.
     *(float*)((uint8_t*)shot + 0x5AC) = *(float*)(savedMotion + 0x64);
     ((void(__fastcall*)(void*))_addr(FN_UMODEL_UPDATE_MOTION_EVALUATION))(shot);
     for (const auto& range : scalarRanges)
@@ -1161,10 +1140,8 @@ bool Rollback_RemapShotSpawnParent(
             return true;
         }
     }
-    // A child can survive in the snapshot after its terminal parent recipe was
-    // intentionally omitted. Never pass that retired allocation to cArm. The
-    // factory supports a null attachment, and restore reapplies the child's
-    // captured position, quaternion, flight state, and attack matrices.
+    // No restored parent: pass null rather than the old allocation.
+    // The child's saved transform and flight state are restored separately.
     remapped.initParam = 0;
     return true;
 }
@@ -1227,7 +1204,7 @@ std::span<const uint32_t> Rollback_GetShotBodyReferenceOffsets(uint64_t runtimeD
 {
     constexpr uintptr_t kSatelliteLaserLockDti = 0x140D48EE8;
     static constexpr uint32_t kSatelliteLaserLockReferences[] = {0x2220};
-    // mpChildShot blocks reticle movement and refiring while the laser is active.
+    // Remap mpChildShot; native code blocks reticle movement/refiring while it is set.
     if (runtimeDti == (uint64_t)_addr(kSatelliteLaserLockDti))
         return kSatelliteLaserLockReferences;
     return {};
@@ -1242,10 +1219,8 @@ void Rollback_RebuildShotStateBeforeRegistration(
         uint32_t power = 0;
         std::memcpy(&power, saved.concrete.body.data() + 0x21E8, sizeof(power));
         if (power >= 2 && power <= 4) {
-            // The original recipe binds the base attack. Rebuild Orange/Red
-            // resources and the owned effect before gameplay/collision overlay;
-            // restoring radius alone reverts to base metadata on the next tick.
-            // Power 4 retains the Red resource/effect from power 3 natively.
+            // Rebuild Orange/Red attack resources and the owned effect before overlay.
+            // Native power 4 skips refresh, so reconstruct its retained Red state at power 3.
             *(uint32_t*)((uint8_t*)shot + 0x21E8) = std::min(power, 3u);
             ((void(__fastcall*)(void*))_addr(FN_ELEMENTAL_SUMMON_REFRESH_POWER))(shot);
         }
@@ -1278,8 +1253,7 @@ void Rollback_RestoreShotClassState(
         const uint64_t savedDescriptor = *(const uint64_t*)(savedCommand + 0x60);
         const int32_t savedKey = *(const int32_t*)(savedCommand + 0x44);
 
-        // Resolve fresh resource pointers without executing commands or sampling
-        // motion. The native resolver resets mKeyIdx, so restore it afterward.
+        // Resolve command pointers without executing commands; restore the reset key index.
         std::memcpy(command + 0x08, savedCommand + 0x08, 0x10);
         std::memcpy(command + 0x40, savedCommand + 0x40, 0x08);
         std::memcpy(command + 0x78, savedCommand + 0x78, 0x18);
@@ -1304,8 +1278,7 @@ void Rollback_RestoreShotClassState(
                 IsAccessibleRange((uint64_t)entry + descriptorOffset, 8);
             *(uint8_t**)(command + 0x60) = validDescriptor
                 ? entry + descriptorOffset : nullptr;
-            // A null saved block is a completed/stopped stream, not a request
-            // to restart command zero. Read block offsets from the fresh table.
+            // Rebase the saved cursor into the fresh entry; keep null blocks stopped.
             *(uint8_t**)(command + 0x68) =
                 validDescriptor && *(const uint64_t*)(savedCommand + 0x68)
                     ? entry + *(uint32_t*)(entry + descriptorOffset + 4)
@@ -1330,9 +1303,7 @@ void Rollback_RestoreShotClassState(
              (uint64_t)_addr(DTI_USHOT_SHIELD_RAID_SWORD) ||
          saved.concrete.dti ==
              (uint64_t)_addr(DTI_USHOT_SHIELD_STORM_SWORD))) {
-        // The factory creates an active callback effect. Re-enter native
-        // cleanup before callback timing is restored, otherwise a step-3 sword
-        // can remain attached to Vergil and be recreated on every rollback.
+        // For saved step-3 swords, finish factory callbacks via native step-2 cleanup.
         ((void(__fastcall*)(void*))_addr(FN_UGAMEEFFECT_RESET_EFFECT_STATE))(
             shot);
     }
@@ -1370,12 +1341,8 @@ void Rollback_RemapCharacterShotLinks(
     if (expectedVtable == (uint64_t)_addr(VTABLE_UARTHUR)) {
         if (savedCharacterSize <= UARTHUR_CROSS_SWORD_FLAG_OFFSET) return;
 
-        // Native clears t (savedCharacterSize <= UARTHUR_CROSS_SWORD_FLAG_OFFSET) return;
-
-        // Native clears this detector from Cross Sword's kill callbacks. A shot
-        // already in cleanup step 3 is intentionally omitted from the snapshot,
-        // so restoring the saved byte can otherwise leave Arthur locked out with
-        // no surviving shot to clear it. Derive it from the reconstructed set.
+        // Native Cross Sword kill clears Arthur's lockout byte at +0x68F9.
+        // Derive it from restored swords so an omitted shot cannot leave it set.
         bool hasCrossSword = false;
         for (const RollbackShotRecipe& saved : recipes) {
             if (saved.ownerChr == character && saved.restoredPtr &&
@@ -1482,9 +1449,8 @@ void Rollback_CaptureCharacterShotReferences(RollbackSnapshotSlot& slot)
                     DTI_USHOT_VULCAN_MISSILE_EMPLACEMENT, true);
         } else if (region.expectedVtable ==
                    (uint64_t)_addr(VTABLE_UDOCTOR_STRANGE)) {
-            // Flames setup and Grace consumption read these ordered shot slots,
-            // not the presentation effects at +0x68F0..+0x6900. Capture empty
-            // slots too so rollback cannot retain a prediction-only crystal.
+            // Capture all three crystal-shot slots, including nulls, to clear predicted crystals.
+            // Native targeting uses these indices, not the presentation-effect slots.
             for (uint32_t offset : {0x6908u, 0x6910u, 0x6918u}) {
                 capture(offset, RollbackCharacterShotReferenceRole::GraceOfHoggoth,
                         0, true);

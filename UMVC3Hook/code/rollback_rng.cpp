@@ -1,3 +1,6 @@
+//Disable rng for objects we don't restore, stage objects
+//Disable character sound rng (for now)
+
 #include "../pch.h"
 
 #include "rollback.h"

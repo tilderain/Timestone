@@ -206,7 +206,6 @@
     <ClInclude Include="utils\Patterns.h" />
     <ClInclude Include="utils\Trampoline.h" />
     <ClInclude Include="code\concrete_snapshot.h" />
-    <ClInclude Include="code\rollback_internal.h" />
     <ClInclude Include="code\rollback_cleanup.h" />
     <ClInclude Include="code\rollback_diagnostics.h" />
     <ClInclude Include="code\rollback_hooks.h" />

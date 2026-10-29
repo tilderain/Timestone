@@ -3,38 +3,13 @@
 #include <cstdint>
 #include <enet/enet.h>
 
-// ---------------------------------------------------------------------------
-// Netplay: rollback netcode input transport over ENet.
-//
-// Architecture:
-//   Local physical input is accumulated per-character in hkprocessFrameInput.
-//   Each frame's raw accumulated input is written into a delay ring buffer at
-//   (currentFrame + delayFrames), and sent as a sliding-history window
-//   (NET_HISTORY_SIZE entries) over the wire.
-//
-//   On receipt, every history slot is written into the OTHER player's delay
-//   buffer at a relative offset from the receiver's current frame, providing
-//   resilience against packet loss.  Both sides read at currentFrame during
-//   hkprocessFrameInput — symmetric input delay for both players.
-//
-//   If remote input for the current frame hasn't arrived, we predict using
-//   the last known value.  The rollback engine (rollback.cpp) detects
-//   late-arriving corrections via g_usedRemoteInput vs g_receivedInput
-//   comparison and automatically restores snapshots + re-simulates with
-//   render disabled.
-//
-//   A dedicated background thread owns ALL ENet I/O. The game thread
-//   communicates via Win32 critical sections for packet exchange.
-//
-//   A desync-check packet is also sent every frame: it carries a simple
-//   XOR checksum of all character position/state.  If the remote side's
-//   checksum for a frame doesn't match the local checksum, desync is
-//   declared and the game pauses with an on-screen warning.
-// ---------------------------------------------------------------------------
+// Netplay packet formats and the game-thread/service-thread interface.
+// Input history carries button-remapped masks on a shared absolute-frame timeline.
+// controller.cpp schedules delayed input, predicts missing input, and requests rollback.
+// Confirmed state checksums ride on input packets; control packets synchronize alerts.
+// The service thread handles ENet I/O through lock-protected packet exchange.
 
-// ---------------------------------------------------------------------------
-// Packet type identifiers (first uint32_t of every ENet payload).
-// ---------------------------------------------------------------------------
+// First uint32_t of each protocol packet.
 enum PacketType : uint32_t {
     PACKET_INPUT = 0,  // InputPacket
     PACKET_DELAY = 1,  // DelayPacket
@@ -49,10 +24,10 @@ enum PacketType : uint32_t {
     PACKET_AUTOTEST_COMPLETE = 13, // AutoTestCompletePacket
     PACKET_LAUNCH_P2_SELECTION = 14, // LaunchP2SelectionPacket
     PACKET_LAUNCH_P1_SELECTION = 15, // LaunchP1SelectionPacket
-    PACKET_EXTENSION = 16, // Plugin feature packet routed through generic reliable queue
+    PACKET_EXTENSION = 16, // Generic plugin feature payload
     PACKET_PLAYER_DISCONNECT = 17, // PlayerDisconnectPacket
     PACKET_LAUNCH_CHAT = 18, // LaunchChatPacket
-    PACKET_BENCHMARK = 19, // Opaque benchmark feature packet; older peers ignore it
+    PACKET_BENCHMARK = 19, // Benchmark payload on the extension channel
 };
 
 #pragma pack(push, 1)
@@ -62,28 +37,28 @@ constexpr size_t NET_MAX_WAITING_DATA = 256 * 1024;
 
 struct InputPacket {
     uint32_t type;               // PACKET_INPUT
-    uint32_t battle_generation;  // rejects in-flight packets from prior matches
-    uint32_t start_frame;        // inputs[0] corresponds to this frame
-    uint32_t checksum_frame;     // confirmed game frame, UINT32_MAX when absent
-    uint32_t checksum;           // corrected state at checksum_frame
+    uint32_t battle_generation;  // match epoch; reject stale packets
+    uint32_t start_frame;        // inputs[i] executes at start_frame + i
+    uint32_t checksum_frame;     // confirmed frame, UINT32_MAX if absent
+    uint32_t checksum;           // character/gameplay-RNG checksum for checksum_frame
     uint32_t inputs[NET_HISTORY_SIZE];
-    int32_t  frame_advantage;    // sender's local frame advantage (negative = sender is ahead)
+    int32_t  frame_advantage;    // sender's estimate; negative means ahead
     uint32_t flags;              // 0 = seed packet, non-zero = real packet
 };
 
 struct DelayPacket {
     uint32_t type;               // PACKET_DELAY
-    int32_t  delay;              // delay frame count
-    int32_t  rollbackFrames;     // rollback frame count (both sides stay in sync)
-    int32_t  effective_frame;    // absolute frame for the included setting change
+    int32_t  delay;              // input delay in frames, -1 if unchanged
+    int32_t  rollbackFrames;     // prediction window in frames, -1 if unchanged
+    int32_t  effective_frame;    // absolute change frame, -1 if unspecified
 };
 
 struct BattleReadyPacket {
     uint32_t type;               // PACKET_BATTLE_READY
-    uint32_t generation;         // distinguishes later rounds/rematches
-    uint32_t flags;              // BattleSyncFlags advertised by the sender
+    uint32_t generation;         // battle synchronization epoch
+    uint32_t flags;              // BattleSyncFlags
     uint32_t round_seed;         // host-authoritative gameplay RNG seed
-    uint32_t opening_member;     // owned team's synchronized opening member (0..2)
+    uint32_t opening_member;     // sender's starting team member (0..2)
 };
 
 struct LaunchTrainingPacket {
@@ -96,9 +71,9 @@ struct LaunchTrainingPacket {
     int32_t  p2Assists[3];
     uint32_t simpleMode[2];
     uint32_t autoJump[2];
-    uint32_t autoJumpValidMask;   // bit 0=P1 value valid, bit 1=P2 value valid
+    uint32_t autoJumpValidMask;   // valid teams: bit 0=P1, bit 1=P2
     uint8_t  voiceLanguage[2][3]; // 0=Japanese, 1=English
-    uint8_t  voiceValidMask;      // bit 0=P1 values valid, bit 1=P2 values valid
+    uint8_t  voiceValidMask;      // valid teams: bit 0=P1, bit 1=P2
     int32_t  stageId;
     uint32_t flags;              // LaunchTrainingFlags
 };
@@ -146,7 +121,7 @@ enum DesyncAction : uint32_t {
 
 struct DesyncPacket {
     uint32_t type;               // PACKET_DESYNC
-    uint32_t battle_generation;  // match epoch that produced this alert
+    uint32_t battle_generation;  // match epoch; reject stale alerts
     uint32_t action;             // DesyncAction
     int32_t  frame;
     uint32_t localChecksum;
@@ -155,7 +130,7 @@ struct DesyncPacket {
 
 struct RestartMatchPacket {
     uint32_t type;               // PACKET_RESTART_MATCH
-    uint32_t battle_generation;  // match epoch that requested this restart
+    uint32_t battle_generation;  // match epoch; reject stale restart requests
     int32_t  target_frame;       // synchronized net frame to restart on
     uint32_t round_seed;         // deterministic gameplay RNG seed
     uint32_t kind;               // RestartMatchKind
@@ -189,7 +164,7 @@ enum AutoTestFrameFlags : uint32_t {
 
 struct AutoTestStartPacket {
     uint32_t type;               // PACKET_AUTOTEST_START
-    uint32_t move_id;            // monotonically increasing suite case id
+    uint32_t move_id;            // increasing suite case ID
     uint32_t case_type;          // AutoTestCaseType
     int32_t  player_index;
     int32_t  matcher_index;
@@ -239,38 +214,38 @@ static_assert(sizeof(BattleReadyPacket) == 20);
 static_assert(sizeof(AutoTestStartPacket) <= NET_MAX_PACKET_SIZE,
               "largest netplay packet exceeds ENet packet limit");
 
-// Restrict ENet's allocation limits to the small payloads used by this protocol.
+// Cap ENet packet size and queued receive data for this protocol.
 void Netplay_ConfigureHostLimits(ENetHost* host);
 
-// Hand over the ENet host/peer and start the service thread.
+// Take ownership of the ENet host/peer and start the service thread.
 void Netplay_Init(ENetHost* host, ENetPeer* peer);
 
-// Send a single raw uint32 input value over the wire (wraps into InputPacket).
+// Legacy wrapper: queue a packet with rawInput in inputs[0] at frame 0.
 void Netplay_SendInput(uint32_t rawInput);
 
-// Queue a full history packet for the service thread to send.
+// Replace the pending outbound history; the service thread sends and resends it.
 void Netplay_SendPacket(const InputPacket& pkt);
 
-// Retrieve the most recently received inbound packet. Returns true if data
-// was available (the packet is consumed / cleared by this call).
+// Consume the oldest queued input packet; return false if the queue is empty.
 bool Netplay_GetInboundPacket(InputPacket& outPkt);
 
-// Returns true if netplay is active and the peer is still connected.
+// Whether the netplay service loop is running.
 bool Netplay_IsActive();
+// Consume a transport-disconnect notification.
 bool Netplay_TakePeerDisconnected();
 
-// Notify the peer before a user-requested shutdown. Waits only until the
-// service thread has handed the reliable packet to ENet, not for a peer ACK.
+// Queue a reliable disconnect notice; wait for the send attempt, not a peer ACK.
 bool Netplay_SendPlayerDisconnect(uint32_t timeoutMs = 100);
+// Consume a user-requested disconnect notice from the peer.
 bool Netplay_TakePlayerDisconnectNotice();
 
-// Returns true if this instance is the netplay host (server), false if client.
+// Whether this instance is the host rather than the client.
 bool Netplay_IsHost();
 
-// Returns the peer's mean round-trip time (ping) in milliseconds, or 0 if inactive.
+// Transport RTT estimate in milliseconds, or 0 if inactive.
 uint32_t Netplay_GetRTT();
 
-// Average of up to 40 RTT estimates sampled at 16 ms intervals, or 0 if inactive.
+// Mean of up to 40 RTT samples taken at least 16 ms apart, or 0 if inactive.
 uint32_t Netplay_GetAverageRTT();
 
 // Transport loss estimate in percent, or -1 if unavailable. Steam includes reordering.
@@ -285,38 +260,36 @@ int32_t Netplay_GetJitter();
 // Request a peer timeout change on the ENet service thread.
 void Netplay_SetTimeout(uint32_t timeoutMs);
 
-// Compatibility queries (return first slot of latest inbound packet)
+// Legacy accessors: test for queued input and peek at its oldest packet's inputs[0].
 bool     Netplay_HasRemoteInput();
 uint32_t Netplay_GetRemoteInput();
 
-// Shut down the service thread, disconnect peer, destroy host.
+// Stop the service thread, disconnect the peer, and destroy the host.
 void Netplay_Shutdown();
 
-// Send a delay-control value to the remote peer.
+// Queue an input-delay change for the peer, optionally at a shared frame.
 void Netplay_SendDelay(int32_t delay, int32_t effectiveFrame = -1);
 
-// Send a rollback-frame control value to the remote peer.
+// Queue a prediction-window change for the peer, optionally at a shared frame.
 void Netplay_SendRollback(int32_t rollbackFrames, int32_t effectiveFrame = -1);
 
-// Retrieve the last delay value received from the remote peer.  Returns true
-// if a new value was available (it is consumed by this call).
+// Consume the latest received delay change; return false if none is pending.
 bool Netplay_GetInboundDelay(int32_t& outDelay, int32_t& outEffectiveFrame);
 
-// Retrieve the last rollback value received from the remote peer.  Returns true
-// if a new value was available (it is consumed by this call).
+// Consume the latest received rollback change; return false if none is pending.
 bool Netplay_GetInboundRollback(int32_t& outRollback, int32_t& outEffectiveFrame);
 
-// Startup rendezvous for opening-member selection and post-init intro readiness.
+// Exchange battle readiness, RNG seed, and opening-member selection.
 void Netplay_SendBattleReady(uint32_t generation, uint32_t flags, uint32_t roundSeed,
                              uint32_t openingMember);
 bool Netplay_GetInboundBattleReady(uint32_t& outGeneration, uint32_t& outFlags,
                                    uint32_t& outRoundSeed, uint32_t& outOpeningMember);
 
-// Exchange post-savedata team preferences as part of the launch settings.
+// Exchange launch settings and saved team preferences.
 void Netplay_SendLaunchTrainingSettings(const LaunchTrainingPacket& packet);
 bool Netplay_GetInboundLaunchTrainingSettings(LaunchTrainingPacket& outPacket);
 
-// Synchronize the desync warning and its P-key dismissal with the peer.
+// Synchronize desync alerts and their dismissal.
 void Netplay_SendDesyncTrigger(int32_t frame, uint32_t localChecksum,
                                uint32_t remoteChecksum);
 void Netplay_SendDesyncUnpause();
@@ -329,8 +302,8 @@ bool Netplay_GetInboundRestartMatch(int32_t& outTargetFrame, uint32_t& outRoundS
                                     uint32_t& outKind, int32_t& outButtonRestart);
 bool Netplay_HasInboundRestartMatch();
 
-// Generic control channel (reliable by default) for self-contained plugin features. Payloads
-// must begin with PACKET_EXTENSION or PACKET_BENCHMARK and are limited to 256 bytes.
+// Queue feature payloads up to 256 bytes, reliable by default.
+// The first uint32_t must be PACKET_EXTENSION or PACKET_BENCHMARK.
 bool Netplay_SendExtensionPacket(const void* data, size_t size, bool reliable = true);
 bool Netplay_GetExtensionPacket(void* data, size_t capacity, size_t& outSize);
 
@@ -338,8 +311,7 @@ bool Netplay_GetExtensionPacket(void* data, size_t capacity, size_t& outSize);
 void Netplay_SendMultiResim(bool enabled);
 bool Netplay_GetInboundMultiResim(bool& outEnabled);
 
-// In dual training only, request that the peer write snapdump history using the
-// requester's timestamp.
+// Request a dual-training history dump using the requester's timestamp.
 void Netplay_SendSnapDump(int32_t frame, const char* timestamp);
 bool Netplay_GetInboundSnapDump(int32_t& outFrame, char* timestamp,
                                 size_t timestampSize);
@@ -352,7 +324,5 @@ bool Netplay_GetInboundAutoTestFrame(AutoTestFramePacket& outPacket);
 void Netplay_SendAutoTestComplete();
 bool Netplay_GetInboundAutoTestComplete();
 
-// Discard input packets produced before the synchronized battle boundary.
+// Clear inbound/outbound input and desync messages at a battle boundary.
 void Netplay_ClearInputQueues();
-
-// --- Desync-check: checksum is piggybacked on InputPacket (Slippi-style) ---

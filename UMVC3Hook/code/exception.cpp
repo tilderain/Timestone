@@ -1,3 +1,5 @@
+// Crash log fit for mvc3's reflected classes.
+
 #include "../pch.h"
 #include "exception.h"
 #include "framestepper.h"

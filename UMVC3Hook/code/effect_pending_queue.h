@@ -4,9 +4,8 @@
 
 namespace EffectPending {
 
-// Compact the native queue in place. Both header fields are references because
-// a retirement callback may append entries and reallocate the native array.
-// Retained entries stay owned by the queue for later ordinary native cleanup.
+// Retire rejected entries and compact non-null kept entries in place.
+// Read the live pointer/count so entries appended by retirement callbacks are processed too.
 template <typename Keep, typename Retire>
 void FlushRetaining(void**& entries, uint32_t& count, Keep keep, Retire retire)
 {

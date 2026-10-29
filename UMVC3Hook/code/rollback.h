@@ -2,33 +2,19 @@
 #include <cstddef>
 #include <cstdint>
 
-// ---------------------------------------------------------------------------
-// Rollback Snapshot / Restore
-//
-// The snapshot ring buffer (ROLLBACK_WINDOW = 16) is the storage capacity.
-// The active rollback window (g_rollbackFrames, default 4 in controller.cpp)
-// controls how many frames we actually re-simulate on a late-packet conflict.
-// ---------------------------------------------------------------------------
-
-// Snapshot ring-buffer capacity.  Must be >= rollback frames so old
-// snapshots survive long enough for any pending re-sim to complete.
-// Keep in sync with NET_HISTORY_SIZE (16).
+// Snapshot ring capacity, not the configured rollback depth.
+// Keep aligned with NET_HISTORY_SIZE and large enough for retained corrections.
 static constexpr int ROLLBACK_WINDOW = 16;
 
-// Global indicators for input override during re-simulation.
-// External input hooks (e.g. controller.cpp) check these to decide whether
-// to inject historical buffer inputs instead of live controller reads.
+// Resimulation state used by input overrides, hooks, and diagnostics.
 extern bool    g_isResimulating;
 extern int32_t g_resimulateCurrentFrame;
 extern int32_t g_resimReentranceDepth;
 
-// Non-negative after Rollback_ReSimulate completes, holding the frame number
-// of the first post-resim live tick.  hkprocessFrameInput checks this to log
-// diagnostic info at the resim→live boundary.  Cleared after first use.
+// Post-resimulation live-frame marker set by the main move hook; -1 when inactive.
 extern int32_t g_postResimFrame;
 
-// Snapshot restore is deferred to the main game thread to avoid mid-frame
-// mutation from the frame-stepper hook.
+// Requested snapshot frame, consumed by the main move hook; -1 when idle.
 extern int32_t g_restoreRequestedFrame;
 
 // F7 rollback diagnostic state machine.
@@ -36,84 +22,71 @@ extern int g_f7State;
 extern int32_t g_f7StartFrame;
 extern int g_f7Remaining;
 
-// Begin a delayed snapdump capture when a desync is triggered.
+// Schedule desync capture through frame + 15; ignore an already pending trigger.
 extern "C" void Rollback_NotifyDesyncTriggered(int32_t frame);
 
-// Cancel a delayed desync capture when its battle generation is reset.
+// Cancel the pending desync capture.
 extern "C" void Rollback_ClearPendingDesyncCapture();
 
-// Advance the delayed desync capture state from the game thread. Returns true
-// while the two-frame post-trigger capture window is still active.
+// Process capture on the game thread. Returns true while waiting or retrying.
 extern "C" bool Rollback_ProcessDesyncDelay(int32_t currentFrame);
 
-// Reproduce the native online battle's gameplay serialization switches.
+// Force native online/replay fixed-timing and job-control setup.
 bool Rollback_PatchNativeNetplayDeterminism();
+// Apply native job-control settings; HitSolver also needs the inline patch.
 void Rollback_DisableGameplayParallelism();
+// Apply fixed timing and job controls at the game-thread netplay boundary.
 void Rollback_ApplyNetplayDeterminism();
 
-// Enable selected deterministic and combat online branches during custom ENet
-// netplay without enabling native session, netpad, or lifecycle behavior.
+// Override the online predicate only for selected callers during custom netplay.
 void Rollback_InitOnlineBattleHook();
 
-// Coalesce presentation-only model bounds scans across replayed frames.
+// Clear or flush model-bounds work deferred during resimulation.
 void Rollback_ClearDeferredModelBounds();
 void Rollback_FlushDeferredModelBounds();
 
-// Request a re-simulate from the controller layer — consumed by hkMvc3Main_move.
-// Called when late-arriving remote input differs from what was predicted.
+// Queue, consume, or cancel resimulation requests for the main game thread.
 void Rollback_RequestReSimulate(int32_t startFrame, int32_t endFrame);
 bool Rollback_ConsumeReSimRequest(int32_t& startFrame, int32_t& endFrame);
 void Rollback_ClearPendingReSimulation();
 void Rollback_SetMainInstance(uint64_t main);
 
-// Hook setup — installs the sMvc3Main__move hook for re-simulation stepping.
+// Install rollback movement hooks.
 void Rollback_InitHooks();
+// Force HitSolver's in-place coalesce/sort path instead of worker buckets.
 bool Rollback_PatchHitSolverAlwaysInline();
+// Skip native UI initialization blocks when their allocations fail.
 void Rollback_PatchBattleUiAllocationFailure();
+// Install native-object guards, resimulation filters, and exception recovery.
 void Rollback_InitNativeNullGuards();
 
-// Save a full snapshot of all MUST regions, keyed by |frame|.
+// Capture the configured regions and subsystem state for this frame.
 void Rollback_SaveSnapshot(int32_t frame);
 
-// Update the remote input stored in an existing snapshot slot.
-// Called from the packet-drain loop when a late-arriving input packet
-// provides the remote input for a frame that was already snapshotted.
+// Replace a saved frame's remote input when a late packet arrives.
 void Rollback_UpdateRemoteInput(int32_t frame, uint32_t input);
 
-// Restore the snapshot previously saved for |frame|.
+// Restore the snapshot saved for this frame.
 void Rollback_RestoreSnapshot(int32_t frame);
 
-// Re-simulate frames [startFrame, endFrame):
-//   1. Restore snapshot at startFrame
-//   2. Call the full sMvc3Main__move pipeline for each frame
-//   3. In multi-resim mode, replace each frame snapshot with its corrected
-//      state while retaining the inputs used for that frame
+// Restore startFrame, then run headless ticks for [startFrame, endFrame).
+// Multi-resim refreshes corrected snapshots, reusing the start snapshot when valid.
 void Rollback_ReSimulate(int32_t startFrame, int32_t endFrame);
 
-// Free all snapshot memory. Call on netplay disconnect / match end.
+// Release rollback slot storage and reset tracking; preserve snapdump history.
 void Rollback_FreeSnapshots();
 
-// Full C++ replication of sMvc3Main__move at 0x1402594A0. It preserves the
-// native call order, repeated singleton lookups, render calls, and Alt+F4 path.
+// Run the selected gameplay pipeline without native rendering or frame pacing.
 void Rollback_HeadlessTick(uint64_t sMvc3Main);
 
-// Patch/unpatch the Sleep() calls inside sMain__move (0x140521df0).
-// enable=true → overwrites both call sites with NOPs for fast re-simulation.
-// enable=false → restores original bytes.
+// Currently a no-op; the Sleep call-site patching body is disabled.
 void Rollback_PatchSleep(bool enable);
 
-// Patch/unpatch the Present() call inside the post-render sync function
-// sRender__beginFrame (call site 0x14053709c). During re-sim Present blocks for ~16ms
-// under DXVK; NOPping it lets the function run normally without the wait.
+// Currently a no-op; the Present call-site patching body is disabled.
 void Rollback_PatchPresent(bool enable);
 
-// Patch/unpatch the vtable+0x50 swapchain calls in sMvc3Main__move's tail
-// and inside sRender__beginFrame (3 sites total). These expect a Present to
-// have been submitted; with the Present NOP'd they may do unnecessary
-// D3D9/Vulkan work during re-sim.
+// Currently a no-op; the swapchain call-site patching body is disabled.
 void Rollback_PatchSwapchain(bool enable);
 
-// Patch/unpatch every remaining render/draw call site inside
-// sMvc3Main__move.  Comment out entries in the sites[] array inside
-// the function body to test which ones are safe to skip during re-sim.
+// Currently a no-op; the draw call-site patching body is disabled.
 void Rollback_PatchDrawCalls(bool enable);

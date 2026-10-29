@@ -35,8 +35,9 @@ static constexpr uint32_t SUNIT_CATEGORY_COUNT_OFFSET = 0xC38;
 static constexpr uint32_t SUNIT_CATEGORY_LISTS_OFFSET = 0x50;
 static constexpr uint32_t SUNIT_CATEGORY_LIST_STRIDE = 0x30;
 static constexpr uintptr_t MT_DTI_VTABLE = 0x140A69ED8;
-// uActorGameModel::releaseOwnedResources walks these cResource slots.
-// They are embedded in cChr's model tail at +0x1408..+0x1438.
+
+
+// A performant hack to prevent crashes while reading invalid memory. Should remove this all together eventually ...
 class MemoryRegionCache {
 public:
     bool IsAccessible(uint64_t address)
@@ -158,9 +159,7 @@ static void ClearDrStrangeEffectPointers(uint64_t character)
     if (GetObjectDti(character) != (uint64_t)_addr(DTI_DR_STRANGE))
         return;
 
-    // Follow the same native shutdown path used by Dr. Strange before
-    // discarding these non-snapshotted presentation handles. This marks the
-    // units for normal deferred sUnit removal instead of orphaning them.
+    // Request native effect retirement before clearing Strange's three handles.
     const uint32_t offsets[] = {0x68F0, 0x68F8, 0x6900};
     for (uint32_t offset : offsets) {
         uint64_t effect = *(uint64_t*)(character + offset);
@@ -197,10 +196,7 @@ void Rollback_DetachDrStrangeEffects()
 
 void Rollback_RemoveStaleUiUnits()
 {
-    // Restart tears down live UI children while sUnit can still retain their
-    // nodes. Remove only the generic MtDTI headers; gameplay cleanup belongs
-    // to the normal restore path below.
-    // The restart path owns scheduler teardown. Do not mutate sUnit lists here.
+    // No-op: restart owns scheduler teardown; do not modify sUnit lists here.
 }
 
 void Rollback_ClearStalePointers()
@@ -211,8 +207,7 @@ void Rollback_ClearStalePointers()
     static constexpr uintptr_t SLOT_ARRAY_OFFSET = 0x6748;
     static constexpr uint32_t SLOT_COUNT = 21;
     static_assert(SLOT_ARRAY_OFFSET + SLOT_COUNT * sizeof(uint64_t) <= 0x67F0);
-    // Slots 14/15 commonly own persistent presentation effects. Preserve valid
-    // live owners and let the all-slot validation below clear only stale ones.
+    // Always clear slot 1; validate the rest so persistent effects in 14/15 survive.
     static constexpr uint32_t STALE_SLOT_INDICES[] = {1};
     MemoryRegionCache memory;
 
@@ -240,10 +235,7 @@ void Rollback_ClearStalePointers()
                         *(uint64_t*)slot = 0;
                 }
 
-                // Character status-effect commands call getDTI through every
-                // non-null indexed slot without validating its vtable. Rollback
-                // effect teardown can leave a destroyed allocation in a slot
-                // that is not one of the historically known stale indices.
+                // Clear invalid effect references before native code calls getDTI on them.
                 for (uint32_t index = 0; index < SLOT_COUNT; ++index) {
                     uint64_t slot = character + SLOT_ARRAY_OFFSET +
                         (uint64_t)index * sizeof(uint64_t);
@@ -320,9 +312,7 @@ void Rollback_SyncActiveCharacterVisibility()
         drawLayer = (drawLayer & ~CUTIN_DRAW_LAYER_BITS) | NORMAL_DRAW_LAYER_BIT;
         if (restoreVisibility) {
             *(uint32_t*)(model + 0x10) |= MTOBJECT_VISIBLE_FLAG;
-            // uModel::submitForRender has a separate hard gate on
-            // mTransparency. A restored bench/cutin value of zero bypasses
-            // rendering even when the MtObject draw flag is set.
+            // Zero transparency hides the model even when its visible flag is set.
             *(float*)(model + 0x180) = 1.0f;
         }
         setChildMaterialMode((void*)model, -1, 3);
@@ -335,8 +325,7 @@ void Rollback_SyncActiveCharacterVisibility()
         uint64_t character = *(uint64_t*)(team + 0x48);
         if (!character) continue;
 
-        // Draw-layer bits can themselves be stale, so only a live uCutIn that
-        // actually lists this character may keep the active point hidden.
+        // Preserve active cut-in participants; draw-layer bits alone may be stale.
         if (isCutinParticipant(character)) continue;
 
         restoreNormalModel(character, true);
@@ -388,9 +377,7 @@ void Rollback_RepairOrphanedCutinRenderState()
              node = *(uint64_t*)(node + NODE_NEXT_OFFSET)) {
             uint64_t character = *(uint64_t*)(node + NODE_CHR_OFFSET);
             if (!character) continue;
-            // Native cut-in entry routes the character and all its weapons in
-            // one operation. Checking the trusted roster character first keeps
-            // the ordinary post-rollback path free of RTTI and VirtualQuery.
+            // Skip the character and its weapons when no cut-in layer bits remain.
             if ((*(uint32_t*)(character + CUNIT_DRAW_LAYER_MASK_OFFSET) &
                  CUTIN_DRAW_LAYER_BITS) == 0) {
                 continue;

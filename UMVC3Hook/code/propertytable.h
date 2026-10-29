@@ -1,5 +1,4 @@
-// Auto-generated from Ghidra RAW_LINES + createproperty.txt.
-// Maps function addresses to DTI class names for property association.
+// A very incomplete list of createProperty addresses and their classes. Should probably be removed
 #pragma once
 #include <cstdint>
 

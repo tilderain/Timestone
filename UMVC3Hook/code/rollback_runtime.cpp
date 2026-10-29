@@ -30,7 +30,7 @@ static constexpr uintptr_t ONLINE_CALLER_RETURNS[] = {
     0x140040F41, // cChr__tryStartVariableCounterTransition
     0x1400417BF, // cChr__resolveDamageReactionAction
     0x140048CBD, // cChr__populateHitReactionResult
-    0x140203869, // aAction__init deterministic setup
+    0x140203869, // aAction__init online/replay timing and job setup
 };
 using IsOnlineBattleFn = bool(__fastcall*)(uint64_t battleSetting);
 static IsOnlineBattleFn g_originalIsOnlineBattle = nullptr;
@@ -126,8 +126,7 @@ static void __fastcall hkUModelMotionDtor(uint64_t motion)
     }
 
     g_originalUModelMotionDtor(motion);
-    // Native leaves this dead pointer behind; clear it so repeated retirement
-    // of a stale model cannot free the same allocation again.
+    // Native does not clear +0x160 after freeing it. Avoid a repeated free.
     *allocationSlot = 0;
 }
 
@@ -224,8 +223,7 @@ static void ClearPendingMaterialRepair(size_t index)
 
 static void __fastcall hkMtObjectSetFlag(uint64_t object, uint8_t enabled)
 {
-    // Some restart-time UI units pass a null MtAnim frame here after their
-    // resource lookup fails. There is no object state to update in that case.
+    // UI setup can reach this flag setter with a missing object.
     if (!object || !g_originalMtObjectSetFlag) {
         return;
     }
@@ -238,10 +236,8 @@ static bool __fastcall hkMtObjectIsAlive(uint64_t object)
         (uint64_t)_addr(0x14005629E)) {
         return g_originalMtObjectIsAlive(object);
     }
-    // Native callers use this predicate as a vtable validity proof and then
-    // dispatch another virtual method. A recycled pointer can still be mapped
-    // and contain an alive-looking state word after its derived destructor has
-    // replaced the vtable with the shorter MtObject base table.
+    // Native only tests lifecycle state 1/2, not the vtable. Reject the base
+    // table and invalid DTI callbacks; this still does not prove ownership.
     if (!object || !g_originalMtObjectIsAlive ||
         !IsAccessibleRange(object, sizeof(uint64_t))) {
         return false;
@@ -264,9 +260,8 @@ static bool __fastcall hkMtObjectIsAlive(uint64_t object)
 
 static void __fastcall hkRocketRaccoonPlaySfx(uint64_t character)
 {
-    // Native code treats isAlive as proof that these objects implement virtual
-    // +0xD8. A retired child effect can retain state 1/2 after its derived
-    // destructor has replaced the vtable with the shorter MtObject base table.
+    // Native checks isAlive before calling +0xD8 on these effect slots.
+    // Clear readable slots whose required callback is not executable.
     static constexpr uint32_t effectOffsets[] = {0x68F8, 0x6900, 0x6930};
     for (uint32_t offset : effectOffsets) {
         uint64_t* slot = (uint64_t*)(character + offset);
@@ -283,9 +278,7 @@ static void __fastcall hkRocketRaccoonPlaySfx(uint64_t character)
 
 static void __fastcall hkMtAnimSetFrameIndex(uint64_t animation, uint32_t frame)
 {
-    // Several native UI setup routines call this after an allocation/constructor
-    // failure. Keep the failed unit out of the animation helper without
-    // changing valid frame-index writes.
+    // UI setup can pass null after allocation failure; native dereferences it.
     if (!animation)
         return;
     g_originalMtAnimSetFrameIndex(animation, frame);
@@ -293,9 +286,7 @@ static void __fastcall hkMtAnimSetFrameIndex(uint64_t animation, uint32_t frame)
 
 static void __fastcall hkCutInAddCharacter(uint64_t cutIn, uint64_t character)
 {
-    // The animation command creates a cut-in conditionally but calls this
-    // helper unconditionally. A failed cut-in allocation has no participant
-    // list to update.
+    // Skip participant setup when the optional cut-in or character is absent.
     if (!cutIn || !character || !g_originalCutInAddCharacter) {
         return;
     }
@@ -304,8 +295,7 @@ static void __fastcall hkCutInAddCharacter(uint64_t cutIn, uint64_t character)
 
 static void __fastcall hkCutInSetVariant(uint64_t cutIn, uint32_t variant)
 {
-    // The same failed cut-in path reaches the camera propagation call after
-    // addCharacter. Leave the absent presentation object absent.
+    // Skip camera propagation when the optional cut-in is absent.
     if (!cutIn || !g_originalCutInSetVariant) {
         return;
     }
@@ -325,8 +315,7 @@ static uint64_t __fastcall hkCopyCharacterPosition(uint64_t character,
 
         if (!source || source > UINT64_MAX - 0x5C ||
             !IsAccessibleRange(source + 0x50, sizeof(float) * 3)) {
-            // FUN_1400E3020 has a separate stiff-damage side effect. Preserve
-            // that scalar even when its optional position source was retired.
+            // Native also adds stiff damage. Preserve it when position copy fails.
             if (damageCharacter && stiffDamage > 0.0f &&
                 damageCharacter <= UINT64_MAX - 0x4154) {
                 using GetStiffDamageFn = float(__fastcall*)(uint64_t);
@@ -365,16 +354,14 @@ static LONG CALLBACK MaterialCloneRecoveryHandler(EXCEPTION_POINTERS* info)
         return EXCEPTION_CONTINUE_SEARCH;
     }
 
-    // nDraw_Material__clone dereferences the result of its model clone before
-    // returning. Its caller, uBaseModel__resetMaterials, already handles a
-    // null clone through a fallback allocator. Resume at the clone epilogue so
-    // that caller-side recovery can run instead of fabricating a model here.
+    // Return null from the duplicate epilogue, bypassing initialization.
+    // This performs no cleanup; resetMaterials still uses the result unchecked.
     context->Rax = 0;
     context->Rdi = 0;
     context->Rip = (DWORD64)_addr(0x1405DCC8E);
     return EXCEPTION_CONTINUE_EXECUTION;
 }
-/// please check if this is necessary ////
+// I honestly have no idea what this is meant to do or if it even runs
 static LONG CALLBACK ModelCommandAllocationRecoveryHandler(EXCEPTION_POINTERS* info)
 {
     if (!info || !info->ExceptionRecord || !info->ContextRecord) {
@@ -403,10 +390,8 @@ static LONG CALLBACK ModelCommandAllocationRecoveryHandler(EXCEPTION_POINTERS* i
         return EXCEPTION_CONTINUE_SEARCH;
     }
 
-    // The render page allocator returned null while uModel__method_56C0 was
-    // copying dirty command state. Restore FUN_14063f9b0's nonvolatile
-    // registers and unwind it, then skip the caller's primitive submission.
-    // Keep the model dirty so a later frame can retry after the page pool resets.
+    // Intended recovery: discard the failed command page, re-mark it dirty,
+    // restore setupDraw's saved registers, and skip primitive submission.
     *(uint64_t*)(context->Rbx + 0x28) = 0;
     *(uint64_t*)(context->Rbx + 0x30) = 0;
     *(uint64_t*)(context->Rbx + 0x258) = 0;
@@ -443,8 +428,7 @@ static LONG CALLBACK SchedulerAllocationRecoveryHandler(EXCEPTION_POINTERS* info
     const DWORD64 firstEntriesWrite = (DWORD64)_addr(0x14050F0B5);
     const DWORD64 typeEntriesWrite = (DWORD64)_addr(0x14050F169);
     if (context->Rip == firstEntriesWrite && context->Rdx == 0) {
-        // The native allocator returned null for count * 0x68 bytes. Publish an
-        // empty scheduler and resume where RDI is restored before the epilogue.
+        // Failed count * 0x68 work allocation: clear counts/pointers and exit.
         *(uint32_t*)(context->Rbx + 0x40) = 0;
         *(uint64_t*)(context->Rbx + 0x58) = 0;
         *(uint64_t*)(context->Rbx + 0x60) = 0;
@@ -453,7 +437,7 @@ static LONG CALLBACK SchedulerAllocationRecoveryHandler(EXCEPTION_POINTERS* info
         return EXCEPTION_CONTINUE_EXECUTION;
     }
     if (context->Rip == typeEntriesWrite && context->Rax == 0) {
-        // The main entries remain valid; only the optional type-2 index failed.
+        // Keep the work array; clear the failed index of type-2 work entries.
         *(uint64_t*)(context->Rbx + 0x60) = 0;
         *(uint32_t*)(context->Rbx + 0x68) = 0;
         context->Rip = (DWORD64)_addr(0x14050F176);
@@ -478,9 +462,8 @@ static LONG CALLBACK ResultScoreCursorRecoveryHandler(EXCEPTION_POINTERS* info)
         return EXCEPTION_CONTINUE_SEARCH;
     }
 
-    // uBtResultScoreVersus setup stores a failed optional primitive lookup at
-    // +0x248, then dispatches through it without a null check. Skip only that
-    // cursor setup call and continue through the native epilogue.
+    // Result setup dispatches +0x88 through a missing unit at +0x248.
+    // Skip that call and resume at the epilogue.
     context->Rip = (DWORD64)_addr(0x14030A741);
     return EXCEPTION_CONTINUE_EXECUTION;
 }
@@ -540,9 +523,8 @@ static void __fastcall hkResetMaterials(uint64_t model)
     }
 
     if (g_isResimulating && IsLiveCharacterModel(model)) {
-        // Material instances and their reference counts belong to the live
-        // renderer. Replaying or batching action-change resets outside their
-        // native order can release entries still referenced by another model.
+        // Defer live fighter/weapon material validation instead of replaying
+        // renderer releases and clones during resimulation.
         MarkMaterialRepairPending(model);
         return;
     }
@@ -563,10 +545,8 @@ static void __fastcall hkResetMaterials(uint64_t model)
                                       (size_t)index * sizeof(uint64_t));
         const bool validMaterial = IsValidCachedMaterial(*entry);
         if (*entry && !validMaterial) {
-            // The cached object has already been recycled into another MT
-            // class. Native reset treats a null slot as missing and rebuilds
-            // it from the current model resource without dispatching release
-            // through the stale object's unrelated vtable.
+            // A failed release-slot check does not prove recycling. Clear the
+            // suspect pointer so native reset rebuilds it without calling release.
             *entry = 0;
             ++invalid;
         }
@@ -574,10 +554,8 @@ static void __fastcall hkResetMaterials(uint64_t model)
     Rollback_FreezeWatchdogMaterial(model, count, invalid,
                                     g_isResimulating ? g_resimulateCurrentFrame : -1);
     if (invalid != 0) {
-        // A callable material vtable does not prove that another entry has not
-        // already released the same allocation. Once any recycled member is
-        // present, discard the complete derived cache and let native rebuild
-        // it from the current resource without releasing stale aliases.
+        // Other slots may alias stale objects. Discard all entries before
+        // native rebuild; avoiding uncertain releases can leak valid materials.
         memset((void*)entries, 0, (size_t)count * sizeof(uint64_t));
     }
     g_originalResetMaterials(model);
@@ -637,9 +615,8 @@ static void __fastcall hkToonMaterialUpdate(uint64_t model)
 
 static void __fastcall hkParticleGeneratorModelUpdate(uint64_t generator)
 {
-    // This virtual updates particle-model transforms and material bindings.
-    // Its resources remain on the live presentation timeline and can have null
-    // slots while a corrected effect timeline is replayed headlessly.
+    // Keep particle-model updates on the live timeline. Native also changes
+    // flags and can close a particle, so this skip is not side-effect-free.
     if (!g_isResimulating && g_originalParticleGeneratorModelUpdate)
         g_originalParticleGeneratorModelUpdate(generator);
 }
@@ -647,8 +624,7 @@ static void __fastcall hkParticleGeneratorModelUpdate(uint64_t generator)
 
 static void __fastcall hkParticleGeneratorFilterUpdate(uint64_t generator)
 {
-    //Skip submission of cParticleGenerator's filter primitives (bloom, godray, etc)
-    //Allegedly saves 3ms per 7 frame resim for affected generators
+    // Skip the native filter-mode dispatch during headless resimulation.
     if (g_isResimulating)
         return;
     g_originalParticleGeneratorFilterUpdate(generator);
@@ -663,6 +639,8 @@ static void* WriteDefaultJointPosition(void* output)
 
 static void* __fastcall hkGetJointPos(uint64_t object, void* output)
 {
+    // Historical name: 0x140549F50 reads a material base-map factor, not a joint.
+    // Invalid resimulation entries use the native default (1, 1, 1, 1).
     if (!g_isResimulating)
         return g_originalGetJointPos
             ? g_originalGetJointPos(object, output)
@@ -696,9 +674,8 @@ static void* __fastcall hkGetJointPos(uint64_t object, void* output)
 
 static void __fastcall hkCharacterModelPostMove(uint64_t character)
 {
-    // uCharacter__moveAfter has completed its combat/status work before this
-    // character-only thunk runs uToonModel material updates and cut-in light
-    // propagation. Presentation resources stay on the live timeline.
+    // The thunk runs uToonModel material updates, then virtual +0x230.
+    // Keep both on the live timeline; the indirect call is not proven lighting-only.
     if (!g_isResimulating && g_originalCharacterModelPostMove)
         g_originalCharacterModelPostMove(character);
 }
@@ -773,9 +750,8 @@ static uint32_t __fastcall hkMtAnimUpdateFrame(uint64_t animation,
                                                 uint64_t resource,
                                                 uint64_t name)
 {
-    // Native returns UINT_MAX when no matching frame exists. Preserve that
-    // result for a table containing a recycled/null animation entry instead of
-    // dereferencing its invalid vtable.
+    // Native resolves a named unit index, returning UINT_MAX on a miss.
+    // Use that sentinel for missing inputs or a malformed scheduler work array.
     if (!resource || !name || HasInvalidMtAnimTable(animation)) {
         return 0xffffffffu;
     }
@@ -835,10 +811,8 @@ static bool PatchBytes(uintptr_t address, const uint8_t (&expected)[N],
 
 bool Rollback_PatchHitSolverAlwaysInline()
 {
-    // sHitSolver__move can send ordinary batches through two worker jobs.
-    // Jump directly to its native in-place coalesce/sort path for every batch
-    // so forward simulation and rollback use the same algorithm.
-    // This changes spike performance of hitsolver from upwards of 3ms per frame, to 0.03ms per frame
+    // Force native in-place coalesce/sort instead of the two-bucket worker path.
+    // This selects the same path in forward simulation and resimulation.
     static constexpr uint8_t SELECT_WORKER_OR_INLINE[] = {
         0x0F, 0x84, 0xB5, 0x01, 0x00, 0x00, // JZ 0x140011BFD
     };
@@ -855,10 +829,8 @@ bool Rollback_PatchHitSolverAlwaysInline()
 
 void Rollback_PatchBattleUiAllocationFailure()
 {
-    // uBattleUi__setup has the same allocation contract as uBattleUiHit: its
-    // operator_new failure branches initialize a null unit and then continue
-    // into sUnit/MtAnim/MtArray calls. Redirect each failed unit to the native
-    // loop or block exit before those calls execute.
+    // Native failure branches still reach unit setup with null allocations.
+    // Redirect each to its loop increment or block exit.
     static constexpr uint8_t NULL_GAUGE_LIFE[] = {0x74, 0x0F};
     static constexpr uint8_t SKIP_GAUGE_LIFE[] = {0x74, 0x4B};
     static constexpr uint8_t NULL_GAUGE_HC[] = {0x74, 0x0F};
@@ -889,9 +861,7 @@ void Rollback_PatchBattleUiAllocationFailure()
     HookLog("Rollback: %s null uBattleUi allocation guards\n",
             battleUi ? "installed" : "partially installed");
 
-    // uBattleUiHit__setup checks model allocation, but its null branches still
-    // add and initialize the null unit. Skip each failed iteration at its loop
-    // increment instead of reaching MtAnim__setFrameIndex(NULL).
+    // Skip failed hit-model allocations before native adds/initializes the unit.
     static constexpr uint8_t NULL_HIT_MODEL_FIRST[] = {0x74, 0x0F};
     static constexpr uint8_t SKIP_NULL_HIT_MODEL_FIRST[] = {0x74, 0x59};
     static constexpr uint8_t NULL_HIT_MODEL_SECOND[] = {0x74, 0x12};
@@ -1158,10 +1128,8 @@ void Rollback_InitNativeNullGuards()
 
 bool Rollback_PatchNativeNetplayDeterminism()
 {
-    // aAction__init normally reaches its serialization setup only when replay
-    // playback or g__isOnlineBattle is true. Custom ENet play intentionally
-    // keeps an offline BattleType, so force only this branch rather than the
-    // global online predicate, whose other callers expect native netplay state.
+    // Force aAction's online/replay fixed-timing and job-control setup.
+    // Leave the global online predicate unchanged for unrelated native callers.
     static constexpr uintptr_t DETERMINISM_BRANCH = 0x14020385f;
     uint8_t* branch = (uint8_t*)_addr(DETERMINISM_BRANCH);
     if (branch[0] == 0xeb && branch[1] == 0x12)
@@ -1188,9 +1156,9 @@ bool Rollback_PatchNativeNetplayDeterminism()
 
 void Rollback_DisableGameplayParallelism()
 {
-    // Wine and some Windows schedulers spend more time dispatching and waiting
-    // for these small gameplay jobs than executing them. Native online already
-    // serializes the same categories for determinism.
+    // Apply the native online/replay job-control settings to all 64 unit lanes,
+    // collision, HitSolver, and battle runtime. HitSolver still needs its inline
+    // patch: setting its control byte to false does not disable worker dispatch.
     using SetMoveLineParallelFn = void(__fastcall*)(uint64_t, int, bool);
     using GetCollisionMoveMatrixFn = uint64_t(__fastcall*)(uint64_t);
     using GetInstanceFn = uint64_t(__fastcall*)();
@@ -1221,8 +1189,7 @@ void Rollback_DisableGameplayParallelism()
 
 void Rollback_ApplyNetplayDeterminism()
 {
-    // Called from HookedMove on the game thread. The native timing setter is
-    // unsafe during parallel startup and is intentionally netplay-only.
+    // Apply fixed timing at the game-thread netplay boundary, not during startup.
     using SetFrameWaitFn = void(__fastcall*)(uint64_t, bool);
     uint64_t sMain = *(uint64_t*)_addr(0x140e177e8);
     if (sMain)

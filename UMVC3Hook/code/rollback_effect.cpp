@@ -1,7 +1,7 @@
 #include "../pch.h"
 
 #include "rollback_effect.h"
-#include "effect_pending_retention.h"
+#include "effect_pending_queue.h"
 
 #include "mk10utils.h"
 #include "rollback.h"
@@ -202,8 +202,7 @@ static bool IsPersistentCharacterEffect(void* effect)
         for (int safety = 8; node && safety-- > 0;) {
             uint64_t character = *(uint64_t*)(node + 0x08);
             if (character) {
-                // Only a live character slot establishes retention. Child
-                // effects still need native retirement to release their units.
+                // Retain direct character references, not their child effects.
                 for (uint32_t slotOffset : CHARACTER_EFFECT_SLOT_OFFSETS) {
                     if (oEffectCreateShort && *(uint64_t*)character ==
                             (uint64_t)_addr(VTABLE_URROCKET_RACCOON) &&
@@ -238,12 +237,8 @@ static bool IsShotUnitReference(uint64_t object)
 
 static void DetachRetiringEffectFromShot(void* effect)
 {
-    // uShot setup binds owned uGameEffects through uEffect::mParent (+0x40),
-    // uGameEffect::mpOwner (+0x280), and sometimes mpRequestUnit (+0x288).
-    // Clear both sides before freeing the effect. Otherwise the later shot
-    // destructor can release the same allocation through its callback array.
-    // If the shot allocator reuses that address, delayed cleanup must also not
-    // clear the fresh shot's newly-created callback slots.
+    // Clear parent/owner/request-unit shot references and matching callback slots.
+    // Neither destructor should retain a reference to the other's freed allocation.
     for (uint32_t offset : {0x40u, 0x280u, 0x288u}) {
         uint64_t* reference = (uint64_t*)((uint8_t*)effect + offset);
         if (!IsShotUnitReference(*reference)) continue;
@@ -272,9 +267,7 @@ static void SanitizeEffectOwnedParticleState(void* effect)
             uint64_t buffer = *(uint64_t*)(
                 manager + PARTICLE_MANAGER_BUFFER_OFFSET);
             if (buffer && !IsAccessiblePointer(buffer)) {
-                // Suppress only the invalid free. uEffect__releaseGenerator
-                // must retain the valid buffers, count, and manager array so
-                // native teardown can return their allocations.
+                // Suppress the invalid buffer free; keep valid allocations for native teardown.
                 std::memset(manager + PARTICLE_MANAGER_BUFFER_OFFSET, 0, 0x18);
             }
         }
@@ -282,9 +275,7 @@ static void SanitizeEffectOwnedParticleState(void* effect)
     }
 
     *(uint16_t*)((uint8_t*)effect + 0x208) = 0;
-    // Even when manager records are malformed, preserve a readable array
-    // pointer. Native teardown skips the zero-count loop and still frees the
-    // containing allocation.
+    // Skip malformed records, but keep a readable array pointer for native release.
     if (!managers || !IsAccessibleRange(managers, 1))
         *(uint64_t*)((uint8_t*)effect + 0x220) = 0;
 }
@@ -345,10 +336,7 @@ static void SanitizeEffectForDestruction(void* effect)
                 break;
             }
             uint64_t vtable = *(uint64_t*)node;
-            // uEffect__releaseGenerator reads only node+0x18 and invokes the
-            // deleting destructor in vtable slot 0. Requiring unrelated move
-            // callbacks here rejected valid generators and detached the whole
-            // chain, leaking every generator allocation on each restore.
+            // Teardown needs the next link and deleting destructor, not move callbacks.
             if (!IsAccessibleRange(vtable, sizeof(uint64_t)) ||
                 !IsExecutableAddress(*(uint64_t*)vtable)) {
                 validGeneratorChain = false;
@@ -371,10 +359,7 @@ static void SanitizeEffectForDestruction(void* effect)
                 validGeneratorChain = false;
         }
         if (!validGeneratorChain) {
-            // Keep every validated prefix reclaimable. If the first node is
-            // already corrupt there is no safe native object to destroy;
-            // otherwise terminate the chain before the bad suffix and let the
-            // normal uEffect destructor release all validated generators.
+            // Truncate the invalid chain so native teardown can reclaim its valid prefix.
             if (previous)
                 *(uint64_t*)(previous + 0x18) = 0;
             else
@@ -392,8 +377,7 @@ static void SanitizeEffectForDestruction(void* effect)
 
 bool Effect_IsExAtkSpaceUnit(const void* unit)
 {
-    // All eight levels and the base class share this +0x50 lifecycle method.
-    // Called with a validated unit; avoid another DTI walk in headless dispatch.
+    // Identify ExAtkSpace variants by their shared method; caller validates the unit.
     return unit && *(const uint64_t*)(*(const uint64_t*)unit + 0x50) ==
         (uint64_t)_addr(FN_EXATKSPACE_SYNC_JOB);
 }
@@ -404,14 +388,10 @@ bool Effect_IsExAtkSpaceTransitionEffect(const void* effect, bool validateResour
     const uint32_t flags = *(const uint32_t*)((const uint8_t*)effect + 0x10);
     if ((flags & 7u) - 1u >= 2u || (flags & 0x3F8u) == 0x3F8u) return false;
 
-    // Native low-ID effect dispatch creates tear variants 0102/0107 together
-    // with companion 0106, and registers them in sGameEffect's tracked array.
-    // None belongs to the four ExAtkSpace child slots. These are full native
-    // (DTI.id << 32) | MtCRC(path) IDs; see doc/super_presentation_resim.md.
+    // Match tracked transition effects, separate from ExAtkSpace's four child slots.
+    // Resource IDs combine the DTI ID and path CRC; see doc/super_presentation_resim.md.
     const uint64_t resource = *(const uint64_t*)((const uint8_t*)effect + 0x108);
-    // Restore/capture inspect potentially stale tracked objects. Native
-    // headless dispatch already has a live effect owning its resource, so its
-    // per-phase check needs only pointer loads and an integer comparison.
+    // Only skip resource validation when the caller already has a live effect graph.
     if (!resource || (validateResource && !IsAccessibleRange(resource, 0x68)))
         return false;
     const uint64_t id = *(const uint64_t*)(resource + 0x60);
@@ -423,28 +403,22 @@ bool Effect_IsExAtkSpaceTransitionEffect(const void* effect, bool validateResour
 void Effect_FlushTrackedForRestore(void* manager)
 {
     if (!manager) return;
-    // Restore runs at the main-move boundary, before ordinary/headless unit
-    // jobs, just like the surrounding shot and effect teardown. This helper
-    // must not be used as a replacement for concurrent native script flushes.
+    // Restore-only: call at the main-move boundary, not during concurrent unit jobs.
     auto* bytes = (uint8_t*)manager;
     uint32_t& count = *(uint32_t*)(bytes + 0x128);
     void**& entries = *(void***)(bytes + 0x138);
     if (count > 4096 || (count && (!entries || !IsAccessibleRange(
             (uint64_t)entries, (size_t)count * sizeof(void*))))) {
-        // Keep the existing native/hooked fallback for malformed headers.
+        // Fall back to the hooked native flush for malformed headers.
         ((void(__fastcall*)(void*))_addr(FN_SGAMEEFFECT_FLUSH_PENDING))(manager);
         return;
     }
 
-    // This is a kill-tracking array, not merely a list of unregistered spawns.
-    // The native flush would kill the live tears BEFORE category retirement
-    // could protect them. Keep their entries and allocation for ordinary script
-    // cleanup; retire the rest through the same native virtual +0x78.
+    // This queue kills effects. Retain transition effects for native cleanup;
+    // retire the rest through virtual +0x78.
     EffectPending::FlushRetaining(entries, count,
         [](void* effect) {
-            // Reject unrelated resources before the virtual DTI/hierarchy walk.
-            // Validate the fields read by the resource predicate first, since
-            // the tracking array may contain stale entries at this boundary.
+            // Validate stale entries and match resources before the DTI check.
             return IsAccessibleRange((uint64_t)effect, 0x110) &&
                 Effect_IsExAtkSpaceTransitionEffect(effect) &&
                 IsEffectObject(effect);
@@ -488,9 +462,7 @@ static std::array<void*, 4> GetRetainedExAtkSpaceChildren(bool detachUnretained 
             IsActiveUnit(child) && IsEffectObject(child)) {
             children[index] = child;
         } else if (detachUnretained) {
-            // Anything retirement may free must be detached first. Retaining
-            // stale/dead child pointers would reintroduce the +0x78 crash in
-            // uExAtkSpace__finalizeOwnedEffects (0x140137A10).
+            // Clear unretained children before retirement can free them.
             slots[index] = nullptr;
         }
     }
@@ -508,9 +480,7 @@ static void* __fastcall hkEffectCreate(void* manager, int effectId, int a3,
     if constexpr (EFFECT_LIFECYCLE_TRACE_ENABLED)
         TraceEffect("factory", effect, (uint64_t)a8, (uint64_t)attachTo);
     InvalidateMemoryQueryCache();
-    // Rollback retirement owns only gameplay effect categories 13-16. Tracking
-    // HUD effects from categories 29-31 would recreate them without retiring
-    // their originals, splitting UI model and particle ownership on restart.
+    // Track only categories 13-16, which rollback retires; leave HUD effects native.
     if (effect && IsRollbackEffectCategory(effect)) {
         RollbackEffectRecipe recipe = {
             effect, effect, manager, effectId, a3, attachTo, a5, a6, a7, a8,
@@ -583,8 +553,7 @@ static void* __fastcall hkGameEffectOperatorNew(uint64_t size, uint32_t alignmen
 
 static void __fastcall hkDrStrangeUpdateSummons(void* character)
 {
-    // These summons are presentation-only and their allocations are not part
-    // of rollback snapshots. Do not create or destroy them on a replayed frame.
+    // Keep unsnapshotted presentation summons off the resimulation timeline.
     if (!g_isResimulating)
         oDrStrangeUpdateSummons(character);
 }
@@ -658,10 +627,7 @@ static void __fastcall hkParticleManagerReleaseSubBuffer(void* manager)
         uint64_t buffer = *(uint64_t*)((uint8_t*)manager +
                                       PARTICLE_MANAGER_BUFFER_OFFSET);
         if (buffer && !IsAccessiblePointer(buffer)) {
-            // Native assumes this is an allocator-owned particle buffer. A
-            // stale rollback graph can retain a readable manager with a dead
-            // buffer pointer; skip only that invalid free and let the effect
-            // destructor release the manager array itself.
+            // Skip the invalid buffer free; the effect still owns the manager array.
             std::memset((uint8_t*)manager + PARTICLE_MANAGER_BUFFER_OFFSET,
                         0, 0x18);
             return;
@@ -672,8 +638,7 @@ static void __fastcall hkParticleManagerReleaseSubBuffer(void* manager)
 
 static void __fastcall hkGameEffectFlushPending(void* manager)
 {
-    // Native isAlive checks only state flags. A retired effect can therefore
-    // survive in this queue with a zeroed vtable and crash at virtual +0x78.
+    // Native alive-state checks do not validate the virtual +0x78 call target.
     uint32_t count = *(uint32_t*)((uint8_t*)manager + 0x128);
     void** entries = *(void***)((uint8_t*)manager + 0x138);
     if (count <= 4096 && (!count || IsAccessibleRange(
@@ -735,14 +700,10 @@ static void ClearInvalidCharacterIndexedEffects()
 
 static void __fastcall hkGameEffectFlushHitMarks(void* manager)
 {
-    // A replayed effect can be destroyed during resimulation while its
-    // character slot is consumed by the outer live tick immediately afterward.
+    // Clear references to effects destroyed during replay before native hit-mark dispatch.
     if (g_isResimulating || g_postResimFrame >= 0) {
         ClearInvalidCharacterIndexedEffects();
-        // Hit-mark commands can target assist/proxy characters not reachable
-        // through the short team-list scan above. Native command dispatch reads
-        // their indexed effect slots and calls isKindOf without validating the
-        // stored object's vtable.
+        // Also validate command targets outside the scanned team lists.
         if (manager) {
             uint32_t count = *(uint32_t*)((uint8_t*)manager + 0x1940);
             if (count <= 128) {
@@ -798,12 +759,11 @@ static void __fastcall hkGameEffectAttachmentUpdate(void* effect)
     uint64_t* attachment = (uint64_t*)((uint8_t*)effect + 0x40);
     const bool hadAttachment = *attachment != 0;
 
-        //Removed dumb crash guard check if needed:
+    // Parent validation is disabled.
     //if (*attachment && !HasCallableDtiVirtual((void*)*attachment))
     //    *attachment = 0;
     
-    // Attached trails need current transforms before recording resim history.
-    // Keep the native update after sanitizing a stale parent as well.
+    // Replay attachment transforms for trails; skip unattached effects during resimulation.
     if (g_isResimulating && !hadAttachment)
         return;
     oGameEffectAttachmentUpdate(effect);
@@ -818,8 +778,7 @@ void Effect_CaptureRecipes(RollbackSnapshotSlot& slot)
     const auto exAtkChildren = GetRetainedExAtkSpaceChildren();
     for (const RollbackEffectRecipe& recipe : g_liveEffectRecipes) {
         const bool rocketOwner = IsRocketShortEffectReferenced(recipe);
-        // Native cleanup finishes emission and clears the owner before the unit
-        // dies. Recreating that unowned tail can restart a looping jetpack graph.
+        // Do not recreate Rocket's jetpack tail after its owner reference is cleared.
         if (recipe.rocketShort && !rocketOwner) continue;
         if (!recipe.restoredPtr ||
             std::find(exAtkChildren.begin(), exAtkChildren.end(), recipe.restoredPtr) !=
@@ -832,9 +791,7 @@ void Effect_CaptureRecipes(RollbackSnapshotSlot& slot)
             continue;
         }
 
-        // sGameEffect__spawn_Ex passes a8 to uEffect__setEffectParent. The
-        // original spawn argument can become stale when native code reparents
-        // the live effect, so capture the authoritative current mParent.
+        // Capture current parent/request-unit links; native code may have changed them.
         RollbackEffectRecipe saved = recipe;
         saved.a8 = *(void**)((uint8_t*)recipe.restoredPtr + 0x40);
         saved.attachTo = *(void**)((uint8_t*)recipe.restoredPtr + 0x288);
@@ -848,8 +805,7 @@ void Effect_CaptureRecipes(RollbackSnapshotSlot& slot)
         slot.effectRecipes.push_back(std::move(saved));
     }
 
-    // If the short hook is unavailable, retain the previous in-place timing
-    // policy. Otherwise these owners resolve through stable short recipes.
+    // Without the short-factory hook, capture Rocket's jetpack state in place.
     uint64_t sCharacter = *(uint64_t*)_addr(PTR_SCHARACTER);
     for (uint32_t teamOffset : TEAM_OFFSETS) {
         uint64_t node = sCharacter ? sCharacter + teamOffset + 0x08 : 0;
@@ -988,8 +944,7 @@ int Effect_RestoreRecipes(RollbackSnapshotSlot& slot)
     const auto exAtkChildren = GetRetainedExAtkSpaceChildren();
     int restored = 0;
     int failed = 0;
-    // A shot callback may also be tracked as a general effect. Reuse the shot's
-    // fresh callback instead of creating a second independent copy of its burst.
+    // Map saved shot callbacks to fresh ones so general recipes do not duplicate them.
     std::vector<std::pair<uint64_t, void*>> callbacks;
     callbacks.reserve(slot.shotRecipes.size() * SSHOT_CALLBACK_EFFECT_COUNT);
     for (const auto& shot : slot.shotRecipes) {
@@ -1011,8 +966,7 @@ int Effect_RestoreRecipes(RollbackSnapshotSlot& slot)
         if (saved.savedPtr &&
             std::find(exAtkChildren.begin(), exAtkChildren.end(), saved.savedPtr) !=
                 exAtkChildren.end()) {
-            // The native owner still has this complete presentation graph.
-            // Do not rewind it or create an independently owned duplicate.
+            // Reuse the retained ExAtkSpace child without rewinding its graph.
             saved.restoredPtr = saved.savedPtr;
             continue;
         }
@@ -1033,9 +987,7 @@ int Effect_RestoreRecipes(RollbackSnapshotSlot& slot)
             }
             continue;
         }
-        // Independent effects already inactive at capture must not return
-        // to their factory's first emission on every rollback. Live shot bodies
-        // were handled above and have a distinct missing-particle repair path.
+        // Do not restart completed independent effects; Rocket's owner cleanup is handled below.
         if (saved.state.CompletedIndependent() && !saved.rocketShort) continue;
         void* sGameEffect = saved.sGameEffect;
         if (!sGameEffect || (saved.rocketShort ? !oEffectCreateShort : !oEffectCreate) ||
@@ -1065,8 +1017,7 @@ int Effect_RestoreRecipes(RollbackSnapshotSlot& slot)
             ((void(__fastcall*)(void*, uint32_t, void*, void*))_addr(
                 FN_SUNIT_ADD_BOTTOM))(sUnit, 13, effect, nullptr);
             if (saved.state.CompletedIndependent()) {
-                // Keep a dead-but-occupied owner until Rocket's native cleanup
-                // consumes it. Clearing it early skips gravity/latch changes.
+                // Preserve an occupied, retired effect for Rocket's native gravity/latch cleanup.
                 uint64_t vtable = *(uint64_t*)effect;
                 ((void(__fastcall*)(void*))*(uint64_t*)(vtable + 0x78))(effect);
             } else if (!ConcreteEffectSnapshot_Restore(effect, saved.state)) {
@@ -1201,10 +1152,7 @@ int Effect_RetireCurrent(void* sUnit)
         (char(__fastcall*)(void*, void*))_addr(FN_SUNIT_REMOVE_UNIT);
     int destroyed = 0;
     for (void* effect : abandoned) {
-        // State 3/4 effects from an earlier restore are still allocations and
-        // must not be skipped. Native deferred retirement needs two category
-        // ticks; repeated resims can otherwise allocate replacements faster
-        // than those ticks run and exhaust the effect heap.
+        // Destroy retiring state-3/4 allocations too; deferred cleanup can lag repeated restores.
         SanitizeEffectForDestruction(effect);
         removeFromMultiMask(sUnit, effect);
         removeUnit(sUnit, effect);
@@ -1214,9 +1162,7 @@ int Effect_RetireCurrent(void* sUnit)
         ++destroyed;
     }
 
-    // Native finalization can unlink a resimulation-created effect before its
-    // deferred scalar destruction. A subsequent restore cannot discover that
-    // detached object through sUnit, so reclaim tracked detached effects here.
+    // Reclaim tracked resim effects already unlinked from sUnit but not yet destroyed.
     std::vector<void*> detached;
     for (void* effect : g_resimEffects) {
         if (!effect ||
@@ -1247,8 +1193,7 @@ bool Effect_RetireGameEffectModel(void* sUnit, void* effect)
         return false;
     }
 
-    // uGameEffectModel is scheduler-owned but is not a uEffect, so the generic
-    // retirement pass never reaches it. Mirror sGameEffect's native teardown.
+    // uGameEffectModel is not a uEffect; mirror its native scheduler teardown separately.
     if (((uint8_t(__fastcall*)(void*))_addr(FN_MTOBJECT_IS_ALIVE))(effect)) {
         uint64_t vtable = *(uint64_t*)effect;
         uint64_t finalize = *(uint64_t*)(vtable + 0x78);
@@ -1257,8 +1202,7 @@ bool Effect_RetireGameEffectModel(void* sUnit, void* effect)
     }
 
     uint32_t* stateFlags = (uint32_t*)((uint8_t*)effect + 0x10);
-    // Native retirement moves category state 3 -> 4 while unlinking secondary
-    // masks, then 4 -> 0 before removing the primary sUnit link.
+    // Match native retirement: state 3 -> 4 removes secondary masks, then 4 -> 0 unlinks sUnit.
     if ((*stateFlags & 7u) == 3) {
         *stateFlags = (*stateFlags & 0xFFFFFFFCu) | 4u;
         ((void(__fastcall*)(void*, void*))_addr(
@@ -1269,8 +1213,7 @@ bool Effect_RetireGameEffectModel(void* sUnit, void* effect)
     *stateFlags &= 0xFFFFFFF8u;
     ((char(__fastcall*)(void*, void*))_addr(FN_SUNIT_REMOVE_UNIT))(
         sUnit, effect);
-    // List removal does not free the object; virtual slot zero is the scalar
-    // deleting destructor and flag 1 requests storage release.
+    // Unlinking does not free storage; invoke the deleting destructor with flag 1.
     uint64_t vtable = *(uint64_t*)effect;
     ((void(__fastcall*)(void*, uint32_t))*(uint64_t*)vtable)(effect, 1);
     return true;

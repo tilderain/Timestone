@@ -1,3 +1,5 @@
+// A performant hack to prevent crashes while reading invalid memory. Should remove this all together eventually ..
+// Really bad file
 #include "../pch.h"
 
 #include "rollback_memory.h"
