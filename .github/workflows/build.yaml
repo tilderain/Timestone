@@ -212,8 +212,15 @@ jobs:
 
           Those random guys who played with me in an ingame lobby one day
         generate_release_notes: false
-        draft: false  # human gate: devs promote via the environment approvals below
+        draft: true  # upload assets before publishing locks an immutable release
         prerelease: true
+
+    - name: Publish prerelease
+      if: steps.check.outputs.exists == 'false'
+      env:
+        GH_TOKEN: ${{ github.token }}
+        TAG: ${{ needs.build.outputs.tag }}
+      run: gh release edit "$TAG" --draft=false
 
     - name: Delete published workflow artifacts
       if: steps.check.outputs.exists == 'false'
