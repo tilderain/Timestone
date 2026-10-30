@@ -119,6 +119,11 @@ const TrainingBootConfig& TrainingBoot_GetDefaultConfig();
 // Set a custom config (e.g. from command-line parsing).
 void TrainingBoot_SetConfig(const TrainingBootConfig& cfg);
 
+// Latch launch intent before connecting; losing netplay must not select offline boot.
+void TrainingBoot_SetNetworkRequired(bool required);
+void TrainingBoot_NotifyNetworkConnected();
+void TrainingBoot_FailNetwork(const char* reason);
+
 enum TrainingBootCpuMode {
     TRAINING_CPU_NONE = 0,
     TRAINING_CPU_P2_ONLY = 1,

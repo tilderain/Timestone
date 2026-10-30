@@ -2034,7 +2034,7 @@ void Controller_InitHooks()
         (LPVOID*)&oGetsCurrentInput_withSOCD
     );
     if (s == MH_OK)
-        MH_EnableHook((LPVOID)_addr(ADDR_GET_CURRENT_INPUT));
+        GameplayHooks_QueueEnable((LPVOID)_addr(ADDR_GET_CURRENT_INPUT));
     else
         HookLog("Controller: Failed to hook GetsCurrentInput_withSOCD (%d)\n", s);
 
@@ -2045,7 +2045,7 @@ void Controller_InitHooks()
         (LPVOID*)&oStepIntro
     );
     if (s == MH_OK)
-        MH_EnableHook((LPVOID)_addr(ADDR_STEP_INTRO));
+        GameplayHooks_QueueEnable((LPVOID)_addr(ADDR_STEP_INTRO));
     else
         HookLog("Controller: Failed to hook stepIntro (%d)\n", s);
 
@@ -2056,7 +2056,7 @@ void Controller_InitHooks()
         (LPVOID*)&oStepFighting
     );
     if (s == MH_OK)
-        MH_EnableHook((LPVOID)_addr(ADDR_STEP_FIGHTING));
+        GameplayHooks_QueueEnable((LPVOID)_addr(ADDR_STEP_FIGHTING));
     else
         HookLog("Controller: Failed to hook stepFighting (%d)\n", s);
 
@@ -2067,7 +2067,7 @@ void Controller_InitHooks()
         (LPVOID*)&oStepResult8
     );
     if (s == MH_OK)
-        MH_EnableHook((LPVOID)_addr(ADDR_STEP_RESULT8));
+        GameplayHooks_QueueEnable((LPVOID)_addr(ADDR_STEP_RESULT8));
     else
         HookLog("Controller: Failed to hook stepResult8 (%d)\n", s);
 
@@ -2078,7 +2078,7 @@ void Controller_InitHooks()
         (LPVOID*)&oStepResult9_10_11
     );
     if (s == MH_OK)
-        MH_EnableHook((LPVOID)_addr(ADDR_STEP_RESULT9_10_11));
+        GameplayHooks_QueueEnable((LPVOID)_addr(ADDR_STEP_RESULT9_10_11));
     else
         HookLog("Controller: Failed to hook stepResult9_10_11 (%d)\n", s);
 
@@ -2089,7 +2089,7 @@ void Controller_InitHooks()
         (LPVOID*)&oswapLRIfFaceLeft
     );
     if (s == MH_OK)
-        s = MH_EnableHook((LPVOID)_addr(ADDR_SWAP_LR_IF_FACE_LEFT));
+        s = GameplayHooks_QueueEnable((LPVOID)_addr(ADDR_SWAP_LR_IF_FACE_LEFT));
     if (s != MH_OK)
         HookLog("Controller: Failed to hook swapLRIfFaceLeft (%d)\n", s);
 
@@ -2100,7 +2100,7 @@ void Controller_InitHooks()
         (LPVOID*)&obuttonRemap
     );
     if (s == MH_OK)
-        s = MH_EnableHook((LPVOID)_addr(ADDR_BUTTON_REMAP));
+        s = GameplayHooks_QueueEnable((LPVOID)_addr(ADDR_BUTTON_REMAP));
     if (s != MH_OK)
         HookLog("Controller: Failed to hook buttonRemap (%d)\n", s);
 
@@ -2111,7 +2111,7 @@ void Controller_InitHooks()
         (LPVOID*)&oprocessFrameInput
     );
     if (s == MH_OK)
-        MH_EnableHook((LPVOID)_addr(ADDR_PROCESS_FRAME_INPUT));
+        GameplayHooks_QueueEnable((LPVOID)_addr(ADDR_PROCESS_FRAME_INPUT));
     else
         HookLog("Controller: Failed to hook processFrameInput (%d)\n", s);
 
@@ -2122,7 +2122,7 @@ void Controller_InitHooks()
         (LPVOID*)&opadSlotReadDevice
     );
     if (s == MH_OK)
-        MH_EnableHook((LPVOID)_addr(ADDR_PAD_SLOT_READ_DEVICE));
+        GameplayHooks_QueueEnable((LPVOID)_addr(ADDR_PAD_SLOT_READ_DEVICE));
     else
         HookLog("Controller: Failed to hook padSlotReadDevice (%d)\n", s);
 
@@ -2133,7 +2133,7 @@ void Controller_InitHooks()
         (LPVOID*)&opadPollAllSlots
     );
     if (s == MH_OK)
-        MH_EnableHook((LPVOID)_addr(ADDR_PAD_POLL_ALL_SLOTS));
+        GameplayHooks_QueueEnable((LPVOID)_addr(ADDR_PAD_POLL_ALL_SLOTS));
     else
         HookLog("Controller: Failed to hook padPollAllSlots (%d)\n", s);
 
@@ -2144,7 +2144,7 @@ void Controller_InitHooks()
         (LPVOID*)&oxinputToGameMask
     );
     if (s == MH_OK)
-        MH_EnableHook((LPVOID)_addr(ADDR_XINPUT_TO_GAME_MASK));
+        GameplayHooks_QueueEnable((LPVOID)_addr(ADDR_XINPUT_TO_GAME_MASK));
     else
         HookLog("Controller: Failed to hook xinputToGameMask (%d)\n", s);
 
@@ -2155,7 +2155,7 @@ void Controller_InitHooks()
         (LPVOID*)&opadSlotPostReadProcess
     );
     if (s == MH_OK)
-        MH_EnableHook((LPVOID)_addr(ADDR_PAD_SLOT_POST_READ));
+        GameplayHooks_QueueEnable((LPVOID)_addr(ADDR_PAD_SLOT_POST_READ));
     else
         HookLog("Controller: Failed to hook padSlotPostReadProcess (%d)\n", s);
 
@@ -2166,7 +2166,7 @@ void Controller_InitHooks()
         (LPVOID*)&oinputAutoRepeatTimerProcess
     );
     if (s == MH_OK)
-        MH_EnableHook((LPVOID)_addr(ADDR_INPUT_AUTOREPEAT));
+        GameplayHooks_QueueEnable((LPVOID)_addr(ADDR_INPUT_AUTOREPEAT));
     else
         HookLog("Controller: Failed to hook inputAutoRepeatTimerProcess (%d)\n", s);
 

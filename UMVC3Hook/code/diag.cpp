@@ -44,7 +44,7 @@ void Diag_InitHooks()
     );
     if (s == MH_OK)
     {
-        MH_EnableHook((LPVOID)_addr(ADDR_INPUT_MASK_POST_PROCESS));
+        GameplayHooks_QueueEnable((LPVOID)_addr(ADDR_INPUT_MASK_POST_PROCESS));
     }
     else
         HookLog("Diag: Failed to hook inputMaskPostProcess (%d)\n", s);

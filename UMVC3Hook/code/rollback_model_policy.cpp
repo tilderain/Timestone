@@ -809,7 +809,7 @@ bool InstallPolicyHook(uintptr_t address, void* replacement, void** original,
 {
     MH_STATUS status = GameplayHooks_Create((LPVOID)_addr(address), replacement, original);
     if (status == MH_OK)
-        status = MH_EnableHook((LPVOID)_addr(address));
+        status = GameplayHooks_QueueEnable((LPVOID)_addr(address));
     if (status == MH_OK) {
         HookLog("%s\n", success);
     } else {

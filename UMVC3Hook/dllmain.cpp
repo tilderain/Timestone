@@ -492,6 +492,8 @@ static constexpr UINT kRevealGameWindow = WM_APP + 0x371;
 static void CompleteLaunchInitialization(LaunchOption opt);
 static std::atomic<bool> g_dualSpawnPending { false };
 static std::atomic<bool> g_dualClientSpawned { false };
+static std::atomic<ENetPeer*> g_dualConnectedPeer { nullptr };
+static std::atomic<bool> g_dualConnectionFailed { false };
 static std::atomic<bool> g_d3d9CreateDeviceHookReady { false };
 static HANDLE g_dualHostDeviceReadyEvent = nullptr;
 
@@ -1042,6 +1044,7 @@ static bool SpawnDualTrainingClient()
 	ENetHost* server = dlgCfg.enetHost;
 	if (!server) {
 		HookLog("UMVC3Hook: Dual training - host disappeared before client spawn\n");
+		g_dualConnectionFailed.store(true, std::memory_order_release);
 		return false;
 	}
 
@@ -1107,6 +1110,7 @@ static bool SpawnDualTrainingClient()
 	}
 	else {
 		HookLog("UMVC3Hook: Failed to spawn second instance (error %lu)\n", GetLastError());
+		g_dualConnectionFailed.store(true, std::memory_order_release);
 		return false;
 	}
 	g_dualClientSpawned.store(true, std::memory_order_release);
@@ -1120,34 +1124,56 @@ static void WaitForDualTrainingClient()
 
 	const LaunchDialogConfig& dlgCfg = GetLaunchDialogConfig();
 	ENetHost* server = dlgCfg.enetHost;
-	if (!server)
+	if (!server) {
+		g_dualConnectionFailed.store(true, std::memory_order_release);
 		return;
+	}
 
 	// Keep the existing launch handshake, but run it after the graphics race
 	// has been eliminated and outside DllMain.
 	ENetEvent event;
-	int timeoutMs = 15000;
-	int waited = 0;
-	while (waited < timeoutMs) {
+	const ULONGLONG started = GetTickCount64();
+	while (GetTickCount64() - started < 15000) {
 		int result = enet_host_service(server, &event, 100);
 		if (result > 0) {
 			if (event.type == ENET_EVENT_TYPE_CONNECT) {
 				event.peer->data = (void*)"connected";
-				SetNetworkHandles(server, event.peer);
-				SendTrainingLaunchPacket();
-				FrameStepper_InitNetplay();
-				HookLog("UMVC3Hook: Dual training - 2nd instance connected!\n");
-				break;
+				// Stop touching ENet before publishing ownership to the game thread.
+				g_dualConnectedPeer.store(event.peer, std::memory_order_release);
+				return;
 			}
 			else if (event.type == ENET_EVENT_TYPE_RECEIVE) {
 				enet_packet_destroy(event.packet);
 			}
+			else if (event.type == ENET_EVENT_TYPE_DISCONNECT) {
+				break;
+			}
 		}
-		waited += 100;
+		else if (result < 0) {
+			break;
+		}
 	}
-	if (!GetLaunchDialogConfig().enetPeer) {
-		HookLog("UMVC3Hook: Dual training - TIMEOUT waiting for 2nd instance (15s)\n");
+	HookLog("UMVC3Hook: Dual training - connection failed or timed out (15s)\n");
+	g_dualConnectionFailed.store(true, std::memory_order_release);
+}
+
+void UpdateLaunchNetworkConnection()
+{
+	if (g_dualConnectionFailed.load(std::memory_order_acquire)) {
+		TrainingBoot_FailNetwork("dual-training client could not connect");
+		return;
 	}
+	ENetPeer* peer = g_dualConnectedPeer.exchange(nullptr, std::memory_order_acquire);
+	if (!peer)
+		return;
+	SetNetworkHandles(GetLaunchDialogConfig().enetHost, peer);
+	SendTrainingLaunchPacket();
+	FrameStepper_InitNetplay();
+	if (!Netplay_IsActive()) {
+		TrainingBoot_FailNetwork("could not start dual-training netplay");
+		return;
+	}
+	HookLog("UMVC3Hook: Dual training - 2nd instance connected; game-thread netplay handoff complete\n");
 }
 
 // Native D3D9 device creation is a process-wide driver operation under
@@ -1545,12 +1571,15 @@ void LaunchMenu_NotifyWindowShown()
 
 static void InitializeGameplayHooks()
 {
+	BootTimer_Stamp("Gameplay/rollback hook setup start");
 	TheMenu->Initialize();
 	TheMenu->tramp = Trampoline::MakeTrampoline(GetModuleHandle(nullptr));
 	TheMenu->PostInit();
 	FrameStepper_Init();
 	Controller_InitHooks();
 	Diag_InitHooks();
+	if (!GameplayHooks_Apply())
+		D3D9Reset_AbortStartup("Could not apply gameplay/rollback startup hooks");
 	BootTimer_Stamp("Gameplay/rollback hooks initialized");
 }
 
@@ -1843,6 +1872,8 @@ static void CompleteLaunchInitialization(LaunchOption opt)
 		ExitProcess(0);
 	}
 	BootTimer_Stamp("Launch selection received");
+	TrainingBoot_SetNetworkRequired(opt == LAUNCH_DUAL_TRAINING ||
+		g_autoConnectPort != 0 || GetLaunchDialogConfig().hostEnabled);
 	if (opt == LAUNCH_NORMAL && !GameplayHooks_Disable())
 		D3D9Reset_AbortStartup("Could not restore native gameplay hooks for Normal Launch");
 	PrepareAdvancedLaunchConfig();
@@ -1900,6 +1931,7 @@ static void CompleteLaunchInitialization(LaunchOption opt)
 		if (!server) {
 			HookLog("UMVC3Hook: Dual training - FAILED to create enet host on port %d\n",
 				dlgCfg.hostPort);
+			TrainingBoot_FailNetwork("could not create dual-training host");
 		} else {
 			Netplay_ConfigureHostLimits(server);
 			SetNetworkHandles(server, nullptr);
@@ -1937,10 +1969,9 @@ static void CompleteLaunchInitialization(LaunchOption opt)
 			ENetPeer* peer = enet_host_connect(client, &targetAddr, 2, 0);
 			if (peer) {
 				ENetEvent event;
-				int timeoutMs = 15000;
-				int waited = 0;
+				const ULONGLONG started = GetTickCount64();
 				bool receivedLaunchConfig = false;
-				while (waited < timeoutMs) {
+				while (GetTickCount64() - started < 15000) {
 					int result = enet_host_service(client, &event, 100);
 					if (result > 0) {
 						if (event.type == ENET_EVENT_TYPE_CONNECT) {
@@ -1964,11 +1995,14 @@ static void CompleteLaunchInitialization(LaunchOption opt)
 							break;
 						}
 					}
+					else if (result < 0) {
+						HookLog("UMVC3Hook: Auto-connect service failed before launch sync\n");
+						break;
+					}
 					if (receivedLaunchConfig) break;
-					waited += 100;
 				}
 				if (!GetLaunchDialogConfig().enetPeer || !receivedLaunchConfig) {
-					HookLog("UMVC3Hook: Auto-connect TIMEOUT waiting for launch sync - destroying client\n");
+					HookLog("UMVC3Hook: Auto-connect failed or timed out waiting for launch sync - destroying client\n");
 					SetNetworkHandles(nullptr, nullptr);
 					enet_host_destroy(client);
 				}
@@ -2019,6 +2053,11 @@ static void CompleteLaunchInitialization(LaunchOption opt)
 	// may be handed to netplay; Normal Launch has restored native gameplay above.
 	if (opt != LAUNCH_NORMAL) {
 		FrameStepper_InitNetplay();
+		const bool dualHostPending = opt == LAUNCH_DUAL_TRAINING && g_autoConnectPort == 0;
+		if (!dualHostPending &&
+			(g_autoConnectPort != 0 || GetLaunchDialogConfig().hostEnabled) &&
+			!Netplay_IsActive())
+			TrainingBoot_FailNetwork("launch connection was not ready for netplay");
 	} else {
 		HookLog("UMVC3Hook: Normal launch - controller, frame-stepper/rollback, and input diagnostic hooks disabled\n");
 	}

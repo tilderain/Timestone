@@ -3,6 +3,8 @@
 #include "trainingboot.h"
 #include "mk10utils.h"
 #include "netplay.h"
+#include "LaunchMenu.h"
+#include "framestepper.h"
 #include "../MemoryMgr.h"
 #include "../utils/Trampoline.h"
 #include <Windows.h>
@@ -124,6 +126,10 @@ static bool g_fiveBarStart = false;
 static bool g_initialSettingsSent = false;
 static bool g_initialSettingsReceived = false;
 static bool g_initialSettingsSynchronized = false;
+static bool g_networkRequired = false;
+static bool g_networkConnected = false;
+static bool g_networkFailed = false;
+static ULONGLONG g_initialSettingsStartTick = 0;
 
 // ---------------------------------------------------------------------------
 // Extern from dllmain.cpp
@@ -142,6 +148,42 @@ const TrainingBootConfig& TrainingBoot_GetDefaultConfig()
 void TrainingBoot_SetConfig(const TrainingBootConfig& cfg)
 {
     g_bootConfig = cfg;
+}
+
+void TrainingBoot_SetNetworkRequired(bool required)
+{
+    g_networkRequired = required;
+}
+
+void TrainingBoot_NotifyNetworkConnected()
+{
+    g_networkConnected = true;
+}
+
+void TrainingBoot_FailNetwork(const char* reason)
+{
+    if (g_networkFailed)
+        return;
+    g_networkFailed = true;
+    HookLog("TrainingBoot: Online boot stopped: %s\n", reason);
+    if (Netplay_IsActive())
+        Netplay_SendPlayerDisconnect(100);
+    FrameStepper_ShowOpponentDisconnected();
+}
+
+static bool IsBootNetworkReady()
+{
+    if (!g_networkRequired)
+        return true;
+    if (g_networkFailed)
+        return false;
+    if (Netplay_IsActive()) {
+        g_networkConnected = true;
+        return true;
+    }
+    if (g_networkConnected)
+        TrainingBoot_FailNetwork("opponent disconnected before battle boot");
+    return false;
 }
 
 void TrainingBoot_SetCpuMode(TrainingBootCpuMode mode)
@@ -391,20 +433,24 @@ static uint8_t GetCharacterVoiceLanguage(uint64_t gameConfig, int32_t character)
 
 static bool SynchronizeInitialPlayerSettings()
 {
+    if (!IsBootNetworkReady())
+        return false;
     if (g_initialSettingsSynchronized)
         return true;
 
-    typedef uint64_t(__fastcall* GetInstance_t)();
-    const uint64_t gameConfig =
-        ((GetInstance_t)_addr(SGAMECONFIG_GET_INSTANCE))();
-    if (!gameConfig)
-        return false;
+    const int localTeam = Netplay_IsHost() ? 0 : 1;
+    if (!g_initialSettingsSent) {
+        using GetInstance_t = uint64_t(__fastcall*)();
+        const uint64_t gameConfig =
+            ((GetInstance_t)_addr(SGAMECONFIG_GET_INSTANCE))();
+        if (!gameConfig)
+            return false;
 
-    const bool localEnabled = *(uint8_t*)(gameConfig + 0x192) != 0;
-    if (!Netplay_IsActive()) {
-        g_bootConfig.autoJump[0] = localEnabled;
-        g_bootConfig.autoJump[1] = localEnabled;
-        for (int team = 0; team < 2; ++team) {
+        const bool localEnabled = *(uint8_t*)(gameConfig + 0x192) != 0;
+        const int firstTeam = g_networkRequired ? localTeam : 0;
+        const int lastTeam = g_networkRequired ? localTeam : 1;
+        for (int team = firstTeam; team <= lastTeam; ++team) {
+            g_bootConfig.autoJump[team] = localEnabled;
             for (int member = 0; member < 3; ++member) {
                 const int32_t character = team == 0
                     ? g_bootConfig.p1Chars[member] : g_bootConfig.p2Chars[member];
@@ -412,19 +458,11 @@ static bool SynchronizeInitialPlayerSettings()
                     GetCharacterVoiceLanguage(gameConfig, character);
             }
         }
-        g_initialSettingsSynchronized = true;
-        return true;
-    }
+        if (!g_networkRequired) {
+            g_initialSettingsSynchronized = true;
+            return true;
+        }
 
-    const int localTeam = Netplay_IsHost() ? 0 : 1;
-    g_bootConfig.autoJump[localTeam] = localEnabled;
-    for (int member = 0; member < 3; ++member) {
-        const int32_t character = localTeam == 0
-            ? g_bootConfig.p1Chars[member] : g_bootConfig.p2Chars[member];
-        g_bootConfig.voiceLanguage[localTeam][member] =
-            GetCharacterVoiceLanguage(gameConfig, character);
-    }
-    if (!g_initialSettingsSent) {
         LaunchTrainingPacket packet = {};
         packet.type = PACKET_LAUNCH_TRAINING;
         packet.autoJump[localTeam] = localEnabled ? 1u : 0u;
@@ -436,6 +474,7 @@ static bool SynchronizeInitialPlayerSettings()
         packet.voiceValidMask = 1u << localTeam;
         Netplay_SendLaunchTrainingSettings(packet);
         g_initialSettingsSent = true;
+        g_initialSettingsStartTick = GetTickCount64();
         HookLog("TrainingBoot: Sent initial settings team=%d AutoJump=%d voice=%u/%u/%u\n",
                 localTeam, localEnabled,
                 packet.voiceLanguage[localTeam][0],
@@ -443,10 +482,15 @@ static bool SynchronizeInitialPlayerSettings()
                 packet.voiceLanguage[localTeam][2]);
     }
 
+    if (GetTickCount64() - g_initialSettingsStartTick >= 30000) {
+        TrainingBoot_FailNetwork("timed out exchanging initial player settings");
+        return false;
+    }
+
     LaunchTrainingPacket packet = {};
     if (!g_initialSettingsReceived &&
         Netplay_GetInboundLaunchTrainingSettings(packet)) {
-        const int remoteTeam = Netplay_IsHost() ? 1 : 0;
+        const int remoteTeam = 1 - localTeam;
         const uint32_t remoteMask = 1u << remoteTeam;
         if ((packet.autoJumpValidMask & remoteMask) != 0 &&
             (packet.voiceValidMask & remoteMask) != 0) {
@@ -512,6 +556,10 @@ void BootIntoTraining(bool queueAreaTransition)
         return;
     }
 
+    UpdateLaunchNetworkConnection();
+    if (g_networkFailed)
+        return;
+
     // Wait for native config loading to finish; terminal errors also allow boot.
     if (!g_skipNativeConfigLoad && !g_nativeGameConfigLoaded) {
         if (!LoadNativeGameConfig())
@@ -521,6 +569,8 @@ void BootIntoTraining(bool queueAreaTransition)
 
     // Resolve AutoJump/voice preferences before battle setup: host=P1, client=P2.
     if (!SynchronizeInitialPlayerSettings())
+        return;
+    if (!IsBootNetworkReady())
         return;
 
     NormalizeBootColors();

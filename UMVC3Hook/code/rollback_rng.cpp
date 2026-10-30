@@ -422,7 +422,7 @@ void Rollback_InitRngHooks()
                                      (LPVOID)&hkEffectNextRandom,
                                      (LPVOID*)&oEffectNextRandom);
     if (status == MH_OK) {
-        status = MH_EnableHook((LPVOID)_addr(FN_EFFECT_NEXT_RANDOM));
+        status = GameplayHooks_QueueEnable((LPVOID)_addr(FN_EFFECT_NEXT_RANDOM));
         if (status == MH_OK)
             HookLog("Rollback: forced effects onto local RNG at 0x%llX\n",
                     (uint64_t)_addr(FN_EFFECT_NEXT_RANDOM));
@@ -436,7 +436,7 @@ void Rollback_InitRngHooks()
                            (LPVOID)&hkSoundRandomVariant,
                            (LPVOID*)&oSoundRandomVariant);
     if (status == MH_OK) {
-        status = MH_EnableHook((LPVOID)_addr(FN_SOUND_RANDOM_VARIANT));
+        status = GameplayHooks_QueueEnable((LPVOID)_addr(FN_SOUND_RANDOM_VARIANT));
         if (status == MH_OK)
             HookLog("Rollback: isolated sound variant RNG at 0x%llX\n",
                     (uint64_t)_addr(FN_SOUND_RANDOM_VARIANT));
@@ -450,7 +450,7 @@ void Rollback_InitRngHooks()
                                       (LPVOID)&hkRngNext,
                                       (LPVOID*)&oRngNext);
     if (status == MH_OK) {
-        status = MH_EnableHook((LPVOID)_addr(FN_RNG_NEXT));
+        status = GameplayHooks_QueueEnable((LPVOID)_addr(FN_RNG_NEXT));
         if (status == MH_OK)
             HookLog("Rollback: hooked MtXorShift next-state trace at 0x%llX\n",
                     (uint64_t)_addr(FN_RNG_NEXT));
@@ -464,7 +464,7 @@ void Rollback_InitRngHooks()
                            (LPVOID)&hkRngNextImpl,
                            (LPVOID*)&oRngNextImpl);
     if (status == MH_OK) {
-        status = MH_EnableHook((LPVOID)_addr(FN_RNG_NEXT_IMPL));
+        status = GameplayHooks_QueueEnable((LPVOID)_addr(FN_RNG_NEXT_IMPL));
         if (status == MH_OK)
             HookLog("Rollback: hooked MtXorShift implementation trace at 0x%llX\n",
                     (uint64_t)_addr(FN_RNG_NEXT_IMPL));
@@ -478,7 +478,7 @@ void Rollback_InitRngHooks()
                            (LPVOID)&hkRngNextFloat,
                            (LPVOID*)&oRngNextFloat);
     if (status == MH_OK) {
-        status = MH_EnableHook((LPVOID)_addr(FN_RNG_NEXT_FLOAT));
+        status = GameplayHooks_QueueEnable((LPVOID)_addr(FN_RNG_NEXT_FLOAT));
         if (status == MH_OK)
             HookLog("Rollback: isolated stage RNG float consumers\n");
         else
@@ -491,7 +491,7 @@ void Rollback_InitRngHooks()
                            (LPVOID)&hkRngFloatInRange,
                            (LPVOID*)&oRngFloatInRange);
     if (status == MH_OK) {
-        status = MH_EnableHook((LPVOID)_addr(FN_RNG_FLOAT_IN_RANGE));
+        status = GameplayHooks_QueueEnable((LPVOID)_addr(FN_RNG_FLOAT_IN_RANGE));
         if (status == MH_OK)
             HookLog("Rollback: isolated stage float ranges\n");
         else
@@ -504,7 +504,7 @@ void Rollback_InitRngHooks()
                            (LPVOID)&hkRngIntInRange,
                            (LPVOID*)&oRngIntInRange);
     if (status == MH_OK) {
-        status = MH_EnableHook((LPVOID)_addr(FN_RNG_INT_IN_RANGE));
+        status = GameplayHooks_QueueEnable((LPVOID)_addr(FN_RNG_INT_IN_RANGE));
         if (status == MH_OK)
             HookLog("Rollback: isolated stage integer ranges\n");
         else
@@ -517,7 +517,7 @@ void Rollback_InitRngHooks()
                                      (LPVOID)&hkRngAdvance,
                                      (LPVOID*)&oRngAdvance);
     if (status == MH_OK) {
-        status = MH_EnableHook((LPVOID)_addr(FN_RNG_ADVANCE));
+        status = GameplayHooks_QueueEnable((LPVOID)_addr(FN_RNG_ADVANCE));
         if (status == MH_OK)
             HookLog("Rollback: hooked shared MtXorShift advancement trace at 0x%llX\n",
                     (uint64_t)_addr(FN_RNG_ADVANCE));
@@ -531,7 +531,7 @@ void Rollback_InitRngHooks()
                            (LPVOID)&hkRngLerpRandom,
                            (LPVOID*)&oRngLerpRandom);
     if (status == MH_OK) {
-        status = MH_EnableHook((LPVOID)_addr(FN_RNG_LERP_RANDOM));
+        status = GameplayHooks_QueueEnable((LPVOID)_addr(FN_RNG_LERP_RANDOM));
         if (status == MH_OK)
             HookLog("Rollback: isolated presentation lerp RNG at 0x%llX\n",
                     (uint64_t)_addr(FN_RNG_LERP_RANDOM));
@@ -545,7 +545,7 @@ void Rollback_InitRngHooks()
                                       (LPVOID)&hkRChrCpuRngModN,
                                       (LPVOID*)&oRChrCpuRngModN);
     if (status == MH_OK) {
-        status = MH_EnableHook((LPVOID)_addr(FN_RCHRCPU_RNG_MOD_N));
+        status = GameplayHooks_QueueEnable((LPVOID)_addr(FN_RCHRCPU_RNG_MOD_N));
         if (status == MH_OK)
             HookLog("Rollback: disabled CPU global RNG advancement during netplay\n");
         else

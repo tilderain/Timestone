@@ -73,6 +73,9 @@ const LaunchDialogConfig& GetLaunchDialogConfig();
 // Set enet handles from outside (used by auto-host/connect in dual training mode)
 void SetNetworkHandles(ENetHost* host, ENetPeer* peer);
 
+// Game-thread handoff of a dual-training peer accepted by the startup worker.
+void UpdateLaunchNetworkConnection();
+
 // Send the host's selected training configuration after the peer connects.
 void SendTrainingLaunchPacket();
 

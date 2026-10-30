@@ -1858,7 +1858,7 @@ void AutoTest_InitHooks()
         (LPVOID)&hkUpdateCommandMatcher,
         (LPVOID*)&oUpdateCommandMatcher);
     if (status == MH_OK)
-        status = MH_EnableHook((LPVOID)_addr(ADDR_UPDATE_COMMAND_MATCHER));
+        status = GameplayHooks_QueueEnable((LPVOID)_addr(ADDR_UPDATE_COMMAND_MATCHER));
 
     if (status != MH_OK)
         HookLog("AutoTest: failed to hook command matcher (%d)\n", status);

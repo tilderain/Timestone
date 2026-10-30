@@ -26,6 +26,7 @@ std::vector<LPVOID> g_gameplayTargets;
 std::vector<GameplayPatch> g_gameplayPatches;
 std::atomic<bool> g_gameplayActive{false};
 bool g_gameplayDisabled = false;
+bool g_gameplayEnableFailed = false;
 }
 
 MH_STATUS GameplayHooks_Create(LPVOID target, LPVOID detour, LPVOID* original)
@@ -45,6 +46,31 @@ void GameplayHooks_RecordPatch(void* target, size_t size)
             return;
     const auto* bytes = static_cast<const uint8_t*>(target);
     g_gameplayPatches.push_back({target, {bytes, bytes + size}});
+}
+
+MH_STATUS GameplayHooks_QueueEnable(LPVOID target)
+{
+    if (g_gameplayDisabled)
+        return MH_ERROR_DISABLED;
+    const MH_STATUS status = MH_QueueEnableHook(target);
+    if (status != MH_OK) {
+        g_gameplayEnableFailed = true;
+        HookLog("GameplayHooks: could not queue enable target=%p status=%d\n", target, status);
+    }
+    return status;
+}
+
+bool GameplayHooks_Apply()
+{
+    if (g_gameplayDisabled || g_gameplayEnableFailed)
+        return false;
+    const MH_STATUS status = MH_ApplyQueued();
+    if (status != MH_OK) {
+        HookLog("GameplayHooks: could not apply startup detours status=%d\n", status);
+        return false;
+    }
+    HookLog("GameplayHooks: applied queued startup detours\n");
+    return true;
 }
 
 bool GameplayHooks_Disable()

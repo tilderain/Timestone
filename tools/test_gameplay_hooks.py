@@ -20,25 +20,29 @@ using MH_STATUS = int;
 constexpr int MH_OK = 0, MH_ERROR_DISABLED = 1, MH_ERROR_ALREADY_CREATED = 2;
 constexpr int PAGE_EXECUTE_READWRITE = 64;
 std::map<void*, bool> hooks;
-std::vector<void*> queued;
-bool failApply = false, failProtect = false, failFlush = false;
+std::map<void*, bool> queued;
+bool failApply = false, failProtect = false, failFlush = false, failQueueEnable = false;
 int applyCount = 0;
 void HookLog(const char*, ...) {}
 MH_STATUS MH_CreateHook(void* target, void*, void**) {
     if (hooks.count(target)) return MH_ERROR_ALREADY_CREATED;
-    hooks[target] = true;
+    hooks[target] = false;
     return MH_OK;
 }
 MH_STATUS MH_QueueDisableHook(void* target) {
     assert(hooks.count(target));
-    if (!hooks[target]) return MH_ERROR_DISABLED;
-    queued.push_back(target);
+    queued[target] = false;
+    return MH_OK;
+}
+MH_STATUS MH_QueueEnableHook(void* target) {
+    if (failQueueEnable || !hooks.count(target)) return 99;
+    queued[target] = true;
     return MH_OK;
 }
 MH_STATUS MH_ApplyQueued() {
     ++applyCount;
     if (failApply) return 99;
-    for (void* target : queued) hooks[target] = false;
+    for (const auto& [target, enabled] : queued) hooks[target] = enabled;
     queued.clear();
     return MH_OK;
 }
@@ -53,9 +57,9 @@ bool FlushInstructionCache(void*, void*, size_t) { return !failFlush; }
 CHECKS = r'''
 void reset() {
     g_gameplayTargets.clear(); g_gameplayPatches.clear();
-    g_gameplayActive = false; g_gameplayDisabled = false;
+    g_gameplayActive = false; g_gameplayDisabled = g_gameplayEnableFailed = false;
     hooks.clear(); queued.clear(); applyCount = 0;
-    failApply = failProtect = failFlush = false;
+    failApply = failProtect = failFlush = failQueueEnable = false;
 }
 int main() {
     int gameplay = 0, graphics = 0, diagnostic = 0;
@@ -66,8 +70,13 @@ int main() {
     assert(GameplayHooks_Create(&gameplay, nullptr, nullptr) == MH_ERROR_ALREADY_CREATED);
     assert(g_gameplayTargets.size() == 1);
     assert(MH_CreateHook(&graphics, nullptr, nullptr) == MH_OK);
+    hooks[&graphics] = true; // Graphics hooks use their own installation path.
     assert(GameplayHooks_Create(&diagnostic, nullptr, nullptr) == MH_OK);
-    hooks[&diagnostic] = false; // Diagnostic detours can be intentionally disabled.
+    assert(GameplayHooks_QueueEnable(&gameplay) == MH_OK);
+    assert(!hooks[&gameplay] && !hooks[&diagnostic]);
+    assert(applyCount == 0);
+    assert(GameplayHooks_Apply());
+    assert(applyCount == 1 && hooks[&gameplay] && !hooks[&diagnostic]);
     GameplayHooks_RecordPatch(patch, 2);
     patch[1] = 0x4b;
     GameplayHooks_RecordPatch(patch, 2); // Never replace the original capture.
@@ -80,11 +89,28 @@ int main() {
     assert(!hooks[&gameplay] && !hooks[&diagnostic] && hooks[&graphics]);
     assert(patch[0] == 0x74 && patch[1] == 0x0f && patch[2] == 0xcc);
     assert(vtable == 123);
-    assert(applyCount == 1);
-    assert(GameplayHooks_Disable() && applyCount == 1);
+    assert(applyCount == 2);
+    assert(GameplayHooks_Disable() && applyCount == 2);
     GameplayHooks_Activate();
     assert(!GameplayHooks_IsActive());
     assert(GameplayHooks_Create(patch, nullptr, nullptr) == MH_ERROR_DISABLED);
+    assert(GameplayHooks_QueueEnable(&gameplay) == MH_ERROR_DISABLED);
+    assert(!GameplayHooks_Apply() && applyCount == 2);
+
+    reset();
+    GameplayHooks_Create(&gameplay, nullptr, nullptr);
+    GameplayHooks_Create(&diagnostic, nullptr, nullptr);
+    GameplayHooks_QueueEnable(&gameplay);
+    failQueueEnable = true;
+    assert(GameplayHooks_QueueEnable(&diagnostic) != MH_OK);
+    assert(!GameplayHooks_Apply() && applyCount == 0);
+    assert(!hooks[&gameplay] && !hooks[&diagnostic]);
+
+    reset();
+    GameplayHooks_Create(&gameplay, nullptr, nullptr);
+    GameplayHooks_QueueEnable(&gameplay);
+    failApply = true;
+    assert(!GameplayHooks_Apply() && !hooks[&gameplay]);
 
     reset();
     GameplayHooks_Create(&gameplay, nullptr, nullptr);
@@ -131,12 +157,19 @@ class GameplayHooksTests(unittest.TestCase):
                 source = (ROOT / f"UMVC3Hook/code/{name}.cpp").read_text()
                 self.assertNotIn("MH_CreateHook(", source)
                 self.assertIn("GameplayHooks_Create(", source)
+                self.assertNotIn("MH_EnableHook(", source)
+                self.assertIn("GameplayHooks_QueueEnable(", source)
 
     def test_launch_order_and_network_handoff(self):
         source = (ROOT / "UMVC3Hook/dllmain.cpp").read_text()
         installers = source[source.index("static void InitializeGameplayHooks()\n{"):source.index("void __fastcall Hook_titleLogoUpdate")]
         for installer in ["FrameStepper_Init();", "Controller_InitHooks();", "Diag_InitHooks();"]:
             self.assertIn(installer, installers)
+            self.assertLess(installers.index(installer), installers.index("GameplayHooks_Apply()"))
+        self.assertEqual(installers.count("GameplayHooks_Apply()"), 1)
+        rng = (ROOT / "UMVC3Hook/code/rollback_rng.cpp").read_text()
+        for diagnostic in ["FN_RNG_RANDOM_INT", "FN_HSIENKO_SELECT_ANKI", "FN_SET_RESERVED_ANKI"]:
+            self.assertNotIn(f"GameplayHooks_QueueEnable((LPVOID)_addr({diagnostic}))", rng)
         startup = source[source.index("void OnInitializeHook()"):source.index("static void CompleteLaunchInitialization(LaunchOption opt)\n{")]
         self.assertLess(startup.index("CreateThread(nullptr, 0, LaunchMenuThread"), startup.index("WaitForSingleObject(g_launchWindowShownEvent, INFINITE)"))
         self.assertLess(startup.index("WaitForSingleObject(g_launchWindowShownEvent, INFINITE)"), startup.index("InitializeGameplayHooks();"))

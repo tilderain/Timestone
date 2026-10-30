@@ -1247,7 +1247,7 @@ void Effect_InitHooks()
                                      (LPVOID)&hkEffectCreateShort,
                                      (LPVOID*)&oEffectCreateShort);
     if (status == MH_OK)
-        status = MH_EnableHook((LPVOID)_addr(FN_SGAMEEFFECT_SPAWN_SHORT));
+        status = GameplayHooks_QueueEnable((LPVOID)_addr(FN_SGAMEEFFECT_SPAWN_SHORT));
     if (status == MH_OK) {
         HookLog("Rollback: tracking Rocket jetpack short effects\n");
     } else {
@@ -1259,7 +1259,7 @@ void Effect_InitHooks()
                                      (LPVOID)&hkGameEffectFlushPending,
                                      (LPVOID*)&oGameEffectFlushPending);
     if (status == MH_OK) {
-        MH_EnableHook((LPVOID)_addr(FN_SGAMEEFFECT_FLUSH_PENDING));
+        GameplayHooks_QueueEnable((LPVOID)_addr(FN_SGAMEEFFECT_FLUSH_PENDING));
         HookLog("Rollback: guarded sGameEffect pending-effect flush\n");
     } else {
         HookLog("Rollback: failed to guard sGameEffect pending-effect flush (%d)\n",
@@ -1270,7 +1270,7 @@ void Effect_InitHooks()
                            (LPVOID)&hkGameEffectFlushHitMarks,
                            (LPVOID*)&oGameEffectFlushHitMarks);
     if (status == MH_OK) {
-        MH_EnableHook((LPVOID)_addr(FN_SGAMEEFFECT_FLUSH_HIT_MARKS));
+        GameplayHooks_QueueEnable((LPVOID)_addr(FN_SGAMEEFFECT_FLUSH_HIT_MARKS));
         HookLog("Rollback: guarded sGameEffect hit-mark effect slots\n");
     } else {
         HookLog("Rollback: failed to guard hit-mark effect slots (%d)\n",
@@ -1281,7 +1281,7 @@ void Effect_InitHooks()
                            (LPVOID)&hkMtObjectIsKindOf,
                            (LPVOID*)&oMtObjectIsKindOf);
     if (status == MH_OK) {
-        MH_EnableHook((LPVOID)_addr(FN_MTOBJECT_IS_KIND_OF));
+        GameplayHooks_QueueEnable((LPVOID)_addr(FN_MTOBJECT_IS_KIND_OF));
         HookLog("Rollback: guarded stale MtObject type checks\n");
     } else {
         HookLog("Rollback: failed to guard MtObject type checks (%d)\n", status);
@@ -1291,7 +1291,7 @@ void Effect_InitHooks()
                            (LPVOID)&hkMtObjectReplaceIndexedSlot,
                            (LPVOID*)&oMtObjectReplaceIndexedSlot);
     if (status == MH_OK) {
-        MH_EnableHook((LPVOID)_addr(FN_MTOBJECT_REPLACE_INDEXED_SLOT));
+        GameplayHooks_QueueEnable((LPVOID)_addr(FN_MTOBJECT_REPLACE_INDEXED_SLOT));
         HookLog("Rollback: guarded stale indexed effect replacement\n");
     } else {
         HookLog("Rollback: failed to guard indexed effect replacement (%d)\n",
@@ -1302,7 +1302,7 @@ void Effect_InitHooks()
                                      (LPVOID)&hkEffectCreate,
                                      (LPVOID*)&oEffectCreate);
     if (status == MH_OK) {
-        MH_EnableHook((LPVOID)_addr(FN_UGAMEEFFECT_CREATE));
+        GameplayHooks_QueueEnable((LPVOID)_addr(FN_UGAMEEFFECT_CREATE));
         HookLog("Rollback: hooked uGameEffect factory\n");
     } else {
         HookLog("Rollback: failed to hook uGameEffect factory (%d)\n", status);
@@ -1312,7 +1312,7 @@ void Effect_InitHooks()
                            (LPVOID)&hkGameEffectOperatorNew,
                            (LPVOID*)&oGameEffectOperatorNew);
     if (status == MH_OK) {
-        MH_EnableHook((LPVOID)_addr(FN_UGAMEEFFECT_OPERATOR_NEW));
+        GameplayHooks_QueueEnable((LPVOID)_addr(FN_UGAMEEFFECT_OPERATOR_NEW));
         HookLog("Rollback: tracing direct uGameEffect allocation failures\n");
     } else {
         HookLog("Rollback: failed to trace direct uGameEffect allocation (%d)\n",
@@ -1323,7 +1323,7 @@ void Effect_InitHooks()
                            (LPVOID)&hkDrStrangeUpdateSummons,
                            (LPVOID*)&oDrStrangeUpdateSummons);
     if (status == MH_OK) {
-        MH_EnableHook((LPVOID)_addr(FN_DRSTRANGE_UPDATE_SUMMONS));
+        GameplayHooks_QueueEnable((LPVOID)_addr(FN_DRSTRANGE_UPDATE_SUMMONS));
         HookLog("Rollback: guarded Dr Strange headless summon lifecycle\n");
     } else {
         HookLog("Rollback: failed to guard Dr Strange summon lifecycle (%d)\n",
@@ -1334,7 +1334,7 @@ void Effect_InitHooks()
                            (LPVOID)&hkEffectDraw,
                            (LPVOID*)&oEffectDraw);
     if (status == MH_OK) {
-        MH_EnableHook((LPVOID)_addr(FN_EFFECT_DRAW));
+        GameplayHooks_QueueEnable((LPVOID)_addr(FN_EFFECT_DRAW));
         HookLog("Rollback: guarded stale effect draw resources\n");
     } else {
         HookLog("Rollback: failed to guard stale effect draw resources (%d)\n",
@@ -1345,7 +1345,7 @@ void Effect_InitHooks()
                            (LPVOID)&hkEffectDtorRelease,
                            (LPVOID*)&oEffectDtorRelease);
     if (status == MH_OK) {
-        MH_EnableHook((LPVOID)_addr(FN_EFFECT_DTOR_RELEASE));
+        GameplayHooks_QueueEnable((LPVOID)_addr(FN_EFFECT_DTOR_RELEASE));
         HookLog("Rollback: guarded effect destructor allocator release\n");
     } else {
         HookLog("Rollback: failed to guard effect destructor allocator release (%d)\n",
@@ -1356,7 +1356,7 @@ void Effect_InitHooks()
                            (LPVOID)&hkEffectVdtor,
                            (LPVOID*)&oEffectVdtor);
     if (status == MH_OK) {
-        MH_EnableHook((LPVOID)_addr(FN_EFFECT_VDTOR));
+        GameplayHooks_QueueEnable((LPVOID)_addr(FN_EFFECT_VDTOR));
         HookLog("Rollback: guarded direct uEffect virtual destructor\n");
     } else {
         HookLog("Rollback: failed to guard direct uEffect virtual destructor (%d)\n",
@@ -1367,7 +1367,7 @@ void Effect_InitHooks()
                             (LPVOID)&hkEffectCreateGenerator,
                             (LPVOID*)&oEffectCreateGenerator);
     if (status == MH_OK) {
-        MH_EnableHook((LPVOID)_addr(FN_EFFECT_CREATE_GENERATOR));
+        GameplayHooks_QueueEnable((LPVOID)_addr(FN_EFFECT_CREATE_GENERATOR));
         HookLog("Rollback: tracking resimulation-created effects\n");
     } else {
         HookLog("Rollback: failed to track resimulation-created effects (%d)\n",
@@ -1378,7 +1378,7 @@ void Effect_InitHooks()
                            (LPVOID)&hkParticleManagerReleaseSubBuffer,
                            (LPVOID*)&oParticleManagerReleaseSubBuffer);
     if (status == MH_OK) {
-        MH_EnableHook((LPVOID)_addr(FN_PARTICLE_MANAGER_RELEASE_SUBBUFFER));
+        GameplayHooks_QueueEnable((LPVOID)_addr(FN_PARTICLE_MANAGER_RELEASE_SUBBUFFER));
         HookLog("Rollback: guarded invalid particle sub-buffer release\n");
     } else {
         HookLog("Rollback: failed to guard particle sub-buffer release (%d)\n",
@@ -1389,7 +1389,7 @@ void Effect_InitHooks()
                            (LPVOID)&hkGameEffectAttachmentUpdate,
                            (LPVOID*)&oGameEffectAttachmentUpdate);
     if (status == MH_OK) {
-        MH_EnableHook((LPVOID)_addr(FN_GAME_EFFECT_ATTACHMENT_UPDATE));
+        GameplayHooks_QueueEnable((LPVOID)_addr(FN_GAME_EFFECT_ATTACHMENT_UPDATE));
         HookLog("Rollback: hooked uGameEffect attachment update\n");
     } else {
         HookLog("Rollback: failed to hook uGameEffect attachment (%d)\n", status);

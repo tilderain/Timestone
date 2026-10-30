@@ -1264,6 +1264,7 @@ void FrameStepper_InitNetplay()
         Netplay_Init(cfg.enetHost, cfg.enetPeer);
     }
     if (Netplay_IsActive()) {
+        TrainingBoot_NotifyNetworkConnected();
         HookLog("FrameStepper: Netplay initialized from launch config (role=%s)\n",
                 Netplay_IsHost() ? "host" : "client");
         g_autoTestLaunchPending = IsAutoTestLaunchEnabled() && Netplay_IsHost();
@@ -1297,7 +1298,7 @@ void FrameStepper_Init()
     static bool inputBufHooked = false;
     if (!inputBufHooked) {
         GameplayHooks_Create((LPVOID)_addr(0x1401cc5d0), (LPVOID)&HookedGetInputBuf, (LPVOID*)&oGetInputBuf);
-        MH_EnableHook((LPVOID)_addr(0x1401cc5d0));
+        GameplayHooks_QueueEnable((LPVOID)_addr(0x1401cc5d0));
         inputBufHooked = true;
     }
 

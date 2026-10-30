@@ -168,7 +168,7 @@ static void EnableHook(uintptr_t address, void* replacement, void** original,
 {
     MH_STATUS status = GameplayHooks_Create((LPVOID)_addr(address), replacement, original);
     if (status == MH_OK) {
-        MH_EnableHook((LPVOID)_addr(address));
+        GameplayHooks_QueueEnable((LPVOID)_addr(address));
         HookLog("%s\n", success);
     } else {
         HookLog(failure, status);
