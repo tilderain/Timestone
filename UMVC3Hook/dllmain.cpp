@@ -22,6 +22,7 @@
 #include "code/controller.h"
 #include "code/autotest.h"
 #include "code/diag.h"
+#include "code/gameplay_hooks.h"
 #include "code/d3d9reset.h"
 #include "code/exception.h"
 #include "code/mk10utils.h"
@@ -475,13 +476,20 @@ static int  g_trainingFrameLimit = 0;
 
 // Window corner positioning for dual training
 // 0=none, 1=top-right (host), 2=bottom-left (client)
-static int g_windowCorner = 0;
+static std::atomic<int> g_windowCorner { 0 };
 
 // D3D9 device creation is not safe to race across the host and spawned client
 // under Wine/Proton.  Keep the child launch behind the host's real device and
 // behind the rest of the startup patches.
 static std::atomic<bool> g_launchSetupComplete { false };
-static HANDLE g_launchSetupCompleteEvent = nullptr;
+static std::atomic<bool> g_backgroundBootActive { false };
+static std::atomic<bool> g_launchSelectionReady { false };
+static HANDLE g_launchWindowShownEvent = nullptr;
+static LaunchOption g_backgroundLaunchOption = LAUNCH_CANCELLED;
+static bool g_savedBackgroundMove = false;
+static bool g_backgroundMoveOverridden = false;
+static constexpr UINT kRevealGameWindow = WM_APP + 0x371;
+static void CompleteLaunchInitialization(LaunchOption opt);
 static std::atomic<bool> g_dualSpawnPending { false };
 static std::atomic<bool> g_dualClientSpawned { false };
 static std::atomic<bool> g_d3d9CreateDeviceHookReady { false };
@@ -760,11 +768,27 @@ bool first_msg = true;
 static volatile LONG g_endSceneOverlayInFlight = 0;
 static volatile LONG g_firstD3D9CreateSeen = 0;
 static volatile LONG g_firstD3D9EndSceneSeen = 0;
-static bool g_serializeD3D9CreateDevice = false;
+static std::atomic<bool> g_serializeD3D9CreateDevice { false };
 static bool g_borderlessPresentationRequested = false;
 static HWND g_d3d9FocusWindow = nullptr;
 static UINT g_borderlessBackBufferWidth = 0;
 static UINT g_borderlessBackBufferHeight = 0;
+static void PositionDualTrainingWindow(HWND hwnd)
+{
+	const int corner = g_windowCorner.exchange(0);
+	if (!corner)
+		return;
+	RECT rect;
+	if (!GetWindowRect(hwnd, &rect))
+		return;
+	const int w = rect.right - rect.left;
+	const int h = rect.bottom - rect.top;
+	const int x = corner == 1 ? GetSystemMetrics(SM_CXSCREEN) - w : 0;
+	const int y = corner == 1 ? 0 : GetSystemMetrics(SM_CYSCREEN) - h;
+	SetWindowPos(hwnd, nullptr, x, y, 0, 0,
+		SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+}
+
 static void MatchImGuiToRenderTarget(LPDIRECT3DDEVICE9 device)
 {
 	IDirect3DSurface9* renderTarget = nullptr;
@@ -926,18 +950,7 @@ long __stdcall hkEndScene(LPDIRECT3DDEVICE9 pDevice)
 		D3D9Reset_EndOverlay();
 		ApplyD3D9BorderlessWindow();
 
-		if (g_windowCorner) {
-			RECT rect;
-			GetWindowRect(window, &rect);
-			int w = rect.right - rect.left;
-			int h = rect.bottom - rect.top;
-			int scrW = GetSystemMetrics(SM_CXSCREEN);
-			int scrH = GetSystemMetrics(SM_CYSCREEN);
-			int x = (g_windowCorner == 1) ? (scrW - w) : 0;
-			int y = (g_windowCorner == 1) ? 0 : (scrH - h);
-			SetWindowPos(window, NULL, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER);
-			g_windowCorner = 0;
-		}
+		PositionDualTrainingWindow(window);
 
 		if (!oWndProc)
 			oWndProc = (WNDPROC)SetWindowLongPtr(window, GWLP_WNDPROC, (LONG_PTR)WndProc);
@@ -946,11 +959,25 @@ long __stdcall hkEndScene(LPDIRECT3DDEVICE9 pDevice)
 			return oEndScene(pDevice);
 		}
 		InitImGui(pDevice);
+		if (ImGui_ImplDX9_CreateDeviceObjects())
+			BootTimer_Stamp("Created ImGui font/device resources");
 		FrameStepper_SetDevice(pDevice);
 		init = true;
 		D3D9ResetDiagnostics_CompleteStartup();
 		BootTimer_Stamp("Initialized ImGui overlay");
+	}
+	// Build the font/device resources behind the launcher, but do not let the
+	// overlay consume launcher-owned settings or uninitialized gameplay hooks.
+	if (!g_launchSetupComplete.load(std::memory_order_acquire)) {
+		D3D9Reset_EndOverlay();
+		const long result = oEndScene(pDevice);
+		InterlockedExchange(&g_endSceneOverlayInFlight, 0);
+		return result;
+	}
+	static bool bootTimingComplete = false;
+	if (!bootTimingComplete) {
 		BootTimer_Dump();
+		bootTimingComplete = true;
 	}
 
 	// Capture the current back buffer if a snapshot was requested (pause / advance)
@@ -1400,12 +1427,7 @@ DWORD WINAPI MainThread(LPVOID lpReserved)
 
 	bool attached = false;
 	bool clientSpawned = false;
-	if (g_launchSetupCompleteEvent) {
-		WaitForSingleObject(g_launchSetupCompleteEvent, INFINITE);
-	} else {
-		while (!g_launchSetupComplete.load(std::memory_order_acquire))
-			Sleep(1);
-	}
+	bool setupComplete = false;
 
 	do
 	{
@@ -1413,19 +1435,19 @@ DWORD WINAPI MainThread(LPVOID lpReserved)
 		// creates a second device, which serializes with native driver startup.
 		uint64_t render = *(uint64_t*)_addr(0x140E179A8);
 		void* device = render ? *(void**)(render + 0xB0) : nullptr;
-		if (device && GetLaunchOption() == LAUNCH_DUAL_TRAINING) {
+		setupComplete = g_launchSetupComplete.load(std::memory_order_acquire);
+		if (setupComplete && device && GetLaunchOption() == LAUNCH_DUAL_TRAINING) {
 			HANDLE hostReady = GetDualHostDeviceReadyEvent();
 			if (hostReady)
 				SetEvent(hostReady);
 		}
-		if (!clientSpawned &&
+		if (setupComplete && !clientSpawned &&
 			g_dualSpawnPending.load(std::memory_order_acquire) &&
 			(g_d3d9CreateDeviceHookReady.load(std::memory_order_acquire) || device)) {
 			clientSpawned = SpawnDualTrainingClient();
 		}
 		if (device) {
-			// EndScene may call into TheMenu and FrameStepper, so keep the hook
-			// itself behind the normal startup initialization barrier.
+			// EndScene only warms the overlay until the gameplay barrier opens.
 			if (!attached && kiero::initFromD3D9Device(device) == kiero::Status::Success)
 			{
 				const kiero::Status::Enum endSceneStatus =
@@ -1439,11 +1461,11 @@ DWORD WINAPI MainThread(LPVOID lpReserved)
 				attached = true;
 			}
 		}
-		if (!attached)
+		if (!attached || !setupComplete)
 		{
 			Sleep(1);
 		}
-	} while (!attached);
+	} while (!attached || !setupComplete);
 	WaitForDualTrainingClient();
 	return TRUE;
 }
@@ -1452,12 +1474,122 @@ DWORD WINAPI MainThread(LPVOID lpReserved)
 typedef void(__fastcall* TitleLogoUpdate_t)(uintptr_t param_1);
 static TitleLogoUpdate_t oTitleLogoUpdate = nullptr;
 
+using AppSaveItems_t = void(__fastcall*)(uintptr_t);
+static AppSaveItems_t oAppSaveItems = nullptr;
+static WNDPROC oNativeWndProc = nullptr;
+
+// Toggle sApp::mBackgroundMove (+0x38) so the game keeps processing in the background, without saving the override.
+static void __fastcall Hook_appSaveItems(uintptr_t app)
+{
+	if (g_backgroundMoveOverridden)
+		*(bool*)(app + 0x38) = g_savedBackgroundMove;
+	oAppSaveItems(app);
+	if (g_backgroundBootActive.load(std::memory_order_acquire)) {
+		// mainThreadEntry loads and saves options before its first tick. Override
+		// BackgroundMove AFTER that save, without persisting the temporary value.
+		g_savedBackgroundMove = *(bool*)(app + 0x38);
+		*(bool*)(app + 0x38) = true;
+		g_backgroundMoveOverridden = true;
+	}
+}
+
+static LRESULT CALLBACK Hook_nativeWndProc(HWND hwnd, UINT message,
+	WPARAM wParam, LPARAM lParam)
+{
+	if (message == kRevealGameWindow) {
+		ApplyD3D9BorderlessWindow();
+		PositionDualTrainingWindow(hwnd);
+		ShowWindow(hwnd, SW_SHOW);
+		SetForegroundWindow(hwnd);
+		return 0;
+	}
+	if (g_backgroundBootActive.load(std::memory_order_acquire)) {
+		if (message == WM_WINDOWPOSCHANGING && lParam) {
+			auto* position = reinterpret_cast<WINDOWPOS*>(lParam);
+			position->flags &= ~SWP_SHOWWINDOW;
+			position->flags |= SWP_NOACTIVATE | SWP_NOZORDER;
+		}
+		if (message == WM_MOUSEACTIVATE)
+			return MA_NOACTIVATE;
+	}
+	return oNativeWndProc(hwnd, message, wParam, lParam);
+}
+
+static DWORD WINAPI LaunchMenuThread(LPVOID)
+{
+	const LaunchOption opt = ShowLaunchMenu();
+	LaunchMusic_BeginFadeOut();
+	HookLog("UMVC3Hook: Background launch menu returned option %d\n", (int)opt);
+	if (opt == LAUNCH_CANCELLED) {
+		CleanupNetworkOnExit();
+		HookLogFlush();
+		ExitProcess(0);
+	}
+	g_backgroundLaunchOption = opt;
+	// Publish the final roster and network handles only after the menu has
+	// stopped using them. Native gameplay never reads a live UI configuration.
+	g_launchSelectionReady.store(true, std::memory_order_release);
+	// Also release startup when window creation failed and the menu fell back
+	// to Normal Launch without ever showing a window.
+	if (g_launchWindowShownEvent)
+		SetEvent(g_launchWindowShownEvent);
+	return 0;
+}
+
+void LaunchMenu_NotifyWindowShown()
+{
+	BootTimer_Stamp("Launch window shown");
+	if (g_launchWindowShownEvent)
+		SetEvent(g_launchWindowShownEvent);
+}
+
+static void InitializeGameplayHooks()
+{
+	TheMenu->Initialize();
+	TheMenu->tramp = Trampoline::MakeTrampoline(GetModuleHandle(nullptr));
+	TheMenu->PostInit();
+	FrameStepper_Init();
+	Controller_InitHooks();
+	Diag_InitHooks();
+	BootTimer_Stamp("Gameplay/rollback hooks initialized");
+}
+
 void __fastcall Hook_titleLogoUpdate(uintptr_t param_1)
 {
 	static bool firstCall = true;
 	if (firstCall) {
 		BootTimer_Stamp("aTitleLogo__update first call");
 		firstCall = false;
+	}
+	if (g_backgroundBootActive.load(std::memory_order_acquire)) {
+		if (!g_launchSelectionReady.load(std::memory_order_acquire)) {
+			// Phase 0 requests common boot archives. Never run phase 1's logo
+			// scheduler or transition to title while the launcher owns settings.
+			if (*(int*)(param_1 + 0x78) == 0)
+				oTitleLogoUpdate(param_1);
+			static bool commonReady = false;
+			if (!commonReady && *(int*)(param_1 + 0x78) == 1) {
+				using GetManager = uintptr_t(__fastcall*)();
+				using ArchivesReady = bool(__fastcall*)(uintptr_t, int32_t);
+				const uintptr_t manager = ((GetManager)_addr(0x140001AF0))();
+				if (manager && ((ArchivesReady)_addr(0x14025AC60))(manager, -1)) {
+					commonReady = true;
+					BootTimer_Stamp("Background common archives ready");
+					HookLog("UMVC3Hook: Background common archives ready; waiting for Launch\n");
+				}
+			}
+			return;
+		}
+		CompleteLaunchInitialization(g_backgroundLaunchOption);
+		if (g_backgroundMoveOverridden) {
+			const uintptr_t app = *(uintptr_t*)_addr(0x140E17758);
+			if (app)
+				*(bool*)(app + 0x38) = g_savedBackgroundMove;
+			g_backgroundMoveOverridden = false;
+		}
+		g_backgroundBootActive.store(false, std::memory_order_release);
+		if (g_d3d9FocusWindow)
+			PostMessageW(g_d3d9FocusWindow, kRevealGameWindow, 0, 0);
 	}
 
 	const bool trainingBoot =
@@ -1621,25 +1753,7 @@ void OnInitializeHook()
 			SetLaunchOption(LAUNCH_DUAL_TRAINING);
 	}
 
-	// Show launch menu on first instance only
-	LaunchOption opt = GetLaunchOption();
-	if (!trainingArg) {
-		HookLog("UMVC3Hook: Opening launch menu\n");
-		opt = ShowLaunchMenu();
-		// Redundant with ShowLaunchMenu's scope guard and intentionally non-blocking.
-		LaunchMusic_BeginFadeOut();
-		HookLog("UMVC3Hook: Launch menu returned option %d\n", (int)opt);
-		HookLogFlush();
-	}
-	if (opt == LAUNCH_CANCELLED) {
-		HookLog("UMVC3Hook: Launch menu closed; exiting game\n");
-		CleanupNetworkOnExit();
-		HookLogFlush();
-		ExitProcess(0);
-		return;
-	}
 	PrepareAdvancedLaunchConfig();
-	EnableReturnToLaunchMenuOnExit();
 
 	//if (opt == LAUNCH_TRAINING || opt == LAUNCH_DUAL_TRAINING) {
 		// Patch aTitleLogo__processBootSequence @ 0x1402179ab: change JZ (0x74) to JMP (0xEB).
@@ -1664,19 +1778,77 @@ void OnInitializeHook()
 			(LPVOID)_addr(0x140217700),
 			(LPVOID)Hook_titleLogoUpdate,
 			(LPVOID*)&oTitleLogoUpdate
-		) == MH_OK) {
-			MH_EnableHook((LPVOID)_addr(0x140217700));
+		) == MH_OK && MH_EnableHook((LPVOID)_addr(0x140217700)) == MH_OK) {
 			HookLog("UMVC3Hook: Hooked aTitleLogo__update\n");
 		} else {
-			HookLog("UMVC3Hook: FAILED to hook aTitleLogo__update\n");
+			D3D9Reset_AbortStartup("Could not install the title/launcher readiness gate");
 		}
 	}
 	// Install before sRender enumerates display modes. The mode-count hook protects
 	// its fixed 256-entry array. Keep CreateDevice serialization scoped to the two
 	// processes launched for local dual training.
 	g_serializeD3D9CreateDevice =
-		opt == LAUNCH_DUAL_TRAINING || g_autoConnectPort != 0;
+		GetLaunchOption() == LAUNCH_DUAL_TRAINING || g_autoConnectPort != 0;
 	InstallD3D9Hooks();
+
+	LaunchOption opt = GetLaunchOption();
+	if (!trainingArg) {
+		// Keep a command-line escape hatch for driver/overlay testing.
+		const bool backgroundLoading = !strstr(cmdLineA, "-no-background-loading");
+		if (backgroundLoading) {
+			if (MH_CreateHook((LPVOID)_addr(0x14051EDF0),
+				(LPVOID)&Hook_appSaveItems, (LPVOID*)&oAppSaveItems) != MH_OK ||
+				MH_EnableHook((LPVOID)_addr(0x14051EDF0)) != MH_OK ||
+				MH_CreateHook((LPVOID)_addr(0x14051C490),
+				(LPVOID)&Hook_nativeWndProc, (LPVOID*)&oNativeWndProc) != MH_OK ||
+				MH_EnableHook((LPVOID)_addr(0x14051C490)) != MH_OK)
+				D3D9Reset_AbortStartup("Could not install background startup hooks");
+		}
+		g_launchWindowShownEvent = CreateEventA(nullptr, TRUE, FALSE, nullptr);
+		if (g_launchWindowShownEvent) {
+			g_backgroundBootActive.store(backgroundLoading, std::memory_order_release);
+			HANDLE thread = CreateThread(nullptr, 0, LaunchMenuThread, nullptr, 0, nullptr);
+			if (thread) {
+				if (WaitForSingleObject(g_launchWindowShownEvent, INFINITE) != WAIT_OBJECT_0)
+					D3D9Reset_AbortStartup("Could not wait for the launch window");
+				InitializeGameplayHooks();
+				if (!backgroundLoading) {
+					WaitForSingleObject(thread, INFINITE);
+					if (!g_launchSelectionReady.load(std::memory_order_acquire))
+						D3D9Reset_AbortStartup("Launch menu ended without a selection");
+					CloseHandle(thread);
+					CompleteLaunchInitialization(g_backgroundLaunchOption);
+					return;
+				}
+				CloseHandle(thread);
+				BootTimer_Stamp("Background engine boot released");
+				HookLog("UMVC3Hook: Loading engine/common archives behind launch menu\n");
+				return;
+			}
+		}
+		g_backgroundBootActive.store(false, std::memory_order_release);
+		HookLog("UMVC3Hook: Launch thread/event creation failed; using blocking launch menu\n");
+		opt = ShowLaunchMenu();
+		LaunchMusic_BeginFadeOut();
+	}
+	InitializeGameplayHooks();
+	CompleteLaunchInitialization(opt);
+}
+
+static void CompleteLaunchInitialization(LaunchOption opt)
+{
+	if (opt == LAUNCH_CANCELLED) {
+		CleanupNetworkOnExit();
+		HookLogFlush();
+		ExitProcess(0);
+	}
+	BootTimer_Stamp("Launch selection received");
+	if (opt == LAUNCH_NORMAL && !GameplayHooks_Disable())
+		D3D9Reset_AbortStartup("Could not restore native gameplay hooks for Normal Launch");
+	PrepareAdvancedLaunchConfig();
+	EnableReturnToLaunchMenuOnExit();
+	g_serializeD3D9CreateDevice =
+		opt == LAUNCH_DUAL_TRAINING || g_autoConnectPort != 0;
 
 	// ---- Netplay pause patches ----
 	// Force uBattleUiCreatePauseMenu_maybe (0x1402ba150) to always create the
@@ -1811,11 +1983,6 @@ void OnInitializeHook()
 		}
 	}
 
-	TheMenu->Initialize();
-
-
-	Trampoline* tramp = Trampoline::MakeTrampoline(GetModuleHandle(nullptr));
-	TheMenu->tramp = tramp;
 	//InjectHook(_addr(0x14001B451), tramp->Jump(&UMVC3Camera::HookedSetRotation), PATCH_CALL);
 	//InjectHook(_addr(0x14001B471), tramp->Jump(&UMVC3Camera::HookedSetPosition), PATCH_CALL);
 	//InjectHook(_addr(0x14001A490), tramp->Jump(UMVC3Hooks::HookCamera), PATCH_JUMP);
@@ -1848,14 +2015,10 @@ void OnInitializeHook()
 		TrainingBoot_InitHooks();
 	}
 
-	TheMenu->PostInit();
-
-	// Normal launches retain the game's native controller and input pipeline.
+	// Hooks are already installed. Only the finalized launcher/network state
+	// may be handed to netplay; Normal Launch has restored native gameplay above.
 	if (opt != LAUNCH_NORMAL) {
-		// Frame stepper and rollback also install character input hooks.
-		FrameStepper_Init();
-		Controller_InitHooks();
-		Diag_InitHooks();
+		FrameStepper_InitNetplay();
 	} else {
 		HookLog("UMVC3Hook: Normal launch - controller, frame-stepper/rollback, and input diagnostic hooks disabled\n");
 	}
@@ -1876,9 +2039,10 @@ void OnInitializeHook()
 	//InjectHook(_addr(0x14004b9d0), tramp->Jump(InitMainLoop), PATCH_JUMP);//parts pyshics
 	//InjectHook(_addr(0x14004bd30), tramp->Jump(InitMainLoop), PATCH_JUMP);//parts fighter freeze
 	HookLog("UMVC3Hook: Startup patch and hook initialization complete\n");
+	ApplyLaunchDisplayConfig();
+	if (opt != LAUNCH_NORMAL)
+		GameplayHooks_Activate();
 	g_launchSetupComplete.store(true, std::memory_order_release);
-	if (g_launchSetupCompleteEvent)
-		SetEvent(g_launchSetupCompleteEvent);
 }
 
 bool CheckGame()
@@ -1956,10 +2120,8 @@ BOOL WINAPI DllMain(HMODULE hMod, DWORD dwReason, LPVOID lpReserved)
 		CleanupNetworkOnExit();
 		enet_deinitialize();
 		kiero::shutdown();
-		if (g_launchSetupCompleteEvent) {
-			CloseHandle(g_launchSetupCompleteEvent);
-			g_launchSetupCompleteEvent = nullptr;
-		}
+		if (g_launchWindowShownEvent)
+			CloseHandle(g_launchWindowShownEvent);
 		break;
 	}
 	return TRUE;
@@ -1992,7 +2154,6 @@ extern "C" __declspec(dllexport) void InitializeASI()
 	BootTimer_Init();
 	BootTimer_Stamp("InitializeASI entry");
 	SettingsMgr->Init();
-	g_launchSetupCompleteEvent = CreateEventA(nullptr, TRUE, FALSE, nullptr);
 
 	if (enet_initialize() != 0) {
 		HookLog("UMVC3Hook: Failed to initialize enet!\n");

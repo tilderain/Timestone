@@ -5,7 +5,7 @@
 #include "rollback.h"
 #include "netplay.h"
 #include "framestepper.h"
-#include "../kiero/minhook/include/MinHook.h"
+#include "gameplay_hooks.h"
 
 #include <cstddef>
 #include <cstdio>
@@ -1853,7 +1853,7 @@ void __fastcall hkUpdateCommandMatcher(uint64_t commandMatcher)
 
 void AutoTest_InitHooks()
 {
-    MH_STATUS status = MH_CreateHook(
+    MH_STATUS status = GameplayHooks_Create(
         (LPVOID)_addr(ADDR_UPDATE_COMMAND_MATCHER),
         (LPVOID)&hkUpdateCommandMatcher,
         (LPVOID*)&oUpdateCommandMatcher);

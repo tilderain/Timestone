@@ -45,10 +45,12 @@ struct LaunchDialogConfig {
     ENetPeer* enetPeer;
 };
 
-// Shows a Win32 dialog before the game initializes.
+// Shows a Win32 dialog while native startup is held at the boot-logo boundary.
 // Blocks until the user makes a selection.
 // Returns LAUNCH_CANCELLED if the user closes the window.
 LaunchOption ShowLaunchMenu();
+// Publish the first visible/painted launch window before gameplay hook setup.
+void LaunchMenu_NotifyWindowShown();
 
 bool ConfirmLaunchDisclaimer();
 

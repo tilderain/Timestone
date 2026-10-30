@@ -9,7 +9,7 @@
 #include "rollback_snapshot.h"
 #include "concrete_snapshot.h"
 #include "mk10utils.h"
-#include "../kiero/minhook/include/MinHook.h"
+#include "gameplay_hooks.h"
 
 #include <algorithm>
 #include <cmath>
@@ -807,7 +807,7 @@ void __fastcall hkChrChainMoveAfter(void* chain)
 bool InstallPolicyHook(uintptr_t address, void* replacement, void** original,
                        const char* success, const char* failure)
 {
-    MH_STATUS status = MH_CreateHook((LPVOID)_addr(address), replacement, original);
+    MH_STATUS status = GameplayHooks_Create((LPVOID)_addr(address), replacement, original);
     if (status == MH_OK)
         status = MH_EnableHook((LPVOID)_addr(address));
     if (status == MH_OK) {

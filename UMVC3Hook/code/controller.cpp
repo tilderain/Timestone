@@ -10,7 +10,7 @@
 #include "rollback_profile.h"
 #include "autotest.h"
 #include "framestepper.h"
-#include "../kiero/minhook/include/MinHook.h"
+#include "gameplay_hooks.h"
 #include <cstdio>
 #include <cstdint>
 #include <cstring>
@@ -1999,7 +1999,7 @@ static void __fastcall hkxinputToGameMask(uint64_t sPad, uint64_t slotBase, cons
 {
     RollbackHookProfileScope profile(RollbackHookProfileId::XInputToMask);
     // Dual-training instances share devices; only the foreground instance receives XInput.
-    if (GetLaunchOption() == LAUNCH_DUAL_TRAINING && !IsGameProcessForeground()) {
+    if (GameplayHooks_IsActive() && GetLaunchOption() == LAUNCH_DUAL_TRAINING && !IsGameProcessForeground()) {
         static const XInputState kEmptyState = {};
         oxinputToGameMask(sPad, slotBase, &kEmptyState);
         return;
@@ -2028,7 +2028,7 @@ void Controller_InitHooks()
     MH_STATUS s;
 
     // Route physical input to the local player.
-    s = MH_CreateHook(
+    s = GameplayHooks_Create(
         (LPVOID)_addr(ADDR_GET_CURRENT_INPUT),
         (LPVOID)&hkGetsCurrentInput_withSOCD,
         (LPVOID*)&oGetsCurrentInput_withSOCD
@@ -2039,7 +2039,7 @@ void Controller_InitHooks()
         HookLog("Controller: Failed to hook GetsCurrentInput_withSOCD (%d)\n", s);
 
     // Hold the intro at the netplay battle barrier.
-    s = MH_CreateHook(
+    s = GameplayHooks_Create(
         (LPVOID)_addr(ADDR_STEP_INTRO),
         (LPVOID)&hkStepIntro,
         (LPVOID*)&oStepIntro
@@ -2050,7 +2050,7 @@ void Controller_InitHooks()
         HookLog("Controller: Failed to hook stepIntro (%d)\n", s);
 
     // Synchronize fight clocks.
-    s = MH_CreateHook(
+    s = GameplayHooks_Create(
         (LPVOID)_addr(ADDR_STEP_FIGHTING),
         (LPVOID)&hkStepFighting,
         (LPVOID*)&oStepFighting
@@ -2061,7 +2061,7 @@ void Controller_InitHooks()
         HookLog("Controller: Failed to hook stepFighting (%d)\n", s);
 
     // Either player's result confirmation requests a synchronized rematch.
-    s = MH_CreateHook(
+    s = GameplayHooks_Create(
         (LPVOID)_addr(ADDR_STEP_RESULT8),
         (LPVOID)&hkStepResult8,
         (LPVOID*)&oStepResult8
@@ -2072,7 +2072,7 @@ void Controller_InitHooks()
         HookLog("Controller: Failed to hook stepResult8 (%d)\n", s);
 
     // Apply the same rematch handling to the result menu.
-    s = MH_CreateHook(
+    s = GameplayHooks_Create(
         (LPVOID)_addr(ADDR_STEP_RESULT9_10_11),
         (LPVOID)&hkStepResult9_10_11,
         (LPVOID*)&oStepResult9_10_11
@@ -2083,7 +2083,7 @@ void Controller_InitHooks()
         HookLog("Controller: Failed to hook stepResult9_10_11 (%d)\n", s);
 
     // Cover input sources that bypass button remapping.
-    s = MH_CreateHook(
+    s = GameplayHooks_Create(
         (LPVOID)_addr(ADDR_SWAP_LR_IF_FACE_LEFT),
         (LPVOID)&hkswapLRIfFaceLeft,
         (LPVOID*)&oswapLRIfFaceLeft
@@ -2094,7 +2094,7 @@ void Controller_InitHooks()
         HookLog("Controller: Failed to hook swapLRIfFaceLeft (%d)\n", s);
 
     // Capture/inject logical input after button remapping.
-    s = MH_CreateHook(
+    s = GameplayHooks_Create(
         (LPVOID)_addr(ADDR_BUTTON_REMAP),
         (LPVOID)&hkbuttonRemap,
         (LPVOID*)&obuttonRemap
@@ -2105,7 +2105,7 @@ void Controller_InitHooks()
         HookLog("Controller: Failed to hook buttonRemap (%d)\n", s);
 
     // Scope timeline injection to native character-input processing.
-    s = MH_CreateHook(
+    s = GameplayHooks_Create(
         (LPVOID)_addr(ADDR_PROCESS_FRAME_INPUT),
         (LPVOID)&hkprocessFrameInput,
         (LPVOID*)&oprocessFrameInput
@@ -2116,7 +2116,7 @@ void Controller_InitHooks()
         HookLog("Controller: Failed to hook processFrameInput (%d)\n", s);
 
     // padSlotReadDevice
-    s = MH_CreateHook(
+    s = GameplayHooks_Create(
         (LPVOID)_addr(ADDR_PAD_SLOT_READ_DEVICE),
         (LPVOID)&hkpadSlotReadDevice,
         (LPVOID*)&opadSlotReadDevice
@@ -2127,7 +2127,7 @@ void Controller_InitHooks()
         HookLog("Controller: Failed to hook padSlotReadDevice (%d)\n", s);
 
     // padPollAllSlots
-    s = MH_CreateHook(
+    s = GameplayHooks_Create(
         (LPVOID)_addr(ADDR_PAD_POLL_ALL_SLOTS),
         (LPVOID)&hkpadPollAllSlots,
         (LPVOID*)&opadPollAllSlots
@@ -2138,7 +2138,7 @@ void Controller_InitHooks()
         HookLog("Controller: Failed to hook padPollAllSlots (%d)\n", s);
 
     // xinputToGameMask
-    s = MH_CreateHook(
+    s = GameplayHooks_Create(
         (LPVOID)_addr(ADDR_XINPUT_TO_GAME_MASK),
         (LPVOID)&hkxinputToGameMask,
         (LPVOID*)&oxinputToGameMask
@@ -2149,7 +2149,7 @@ void Controller_InitHooks()
         HookLog("Controller: Failed to hook xinputToGameMask (%d)\n", s);
 
     // padSlotPostReadProcess
-    s = MH_CreateHook(
+    s = GameplayHooks_Create(
         (LPVOID)_addr(ADDR_PAD_SLOT_POST_READ),
         (LPVOID)&hkpadSlotPostReadProcess,
         (LPVOID*)&opadSlotPostReadProcess
@@ -2160,7 +2160,7 @@ void Controller_InitHooks()
         HookLog("Controller: Failed to hook padSlotPostReadProcess (%d)\n", s);
 
     // inputAutoRepeatTimerProcess
-    s = MH_CreateHook(
+    s = GameplayHooks_Create(
         (LPVOID)_addr(ADDR_INPUT_AUTOREPEAT),
         (LPVOID)&hkinputAutoRepeatTimerProcess,
         (LPVOID*)&oinputAutoRepeatTimerProcess

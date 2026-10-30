@@ -9,7 +9,7 @@
 #include "rollback_profile.h"
 #include "rollback_snapshot.h"
 #include "mk10utils.h"
-#include "../kiero/minhook/include/MinHook.h"
+#include "gameplay_hooks.h"
 
 #include <algorithm>
 #include <cmath>
@@ -662,7 +662,7 @@ void Shot_Reset()
 static void InstallHook(uintptr_t address, void* replacement, void** original,
                         const char* success, const char* failure)
 {
-    MH_STATUS status = MH_CreateHook((LPVOID)_addr(address), replacement, original);
+    MH_STATUS status = GameplayHooks_Create((LPVOID)_addr(address), replacement, original);
     if (status == MH_OK) {
         MH_EnableHook((LPVOID)_addr(address));
         HookLog("%s\n", success);

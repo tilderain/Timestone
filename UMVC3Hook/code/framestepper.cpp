@@ -12,7 +12,7 @@
 #include <Windows.h>
 #include <d3d9.h>
 #include "../imgui/imgui.h"
-#include "../kiero/minhook/include/MinHook.h"
+#include "gameplay_hooks.h"
 #include "netplay.h"
 #include "LaunchMenu.h"
 #include "LaunchMenu_settings.h"
@@ -553,6 +553,10 @@ extern "C" void Controller_OnFrameEnd();
 // ---------------------------------------------------------------------------
 static void __fastcall HookedMove(void* sMvc3Main)
 {
+    if (!GameplayHooks_IsActive()) {
+        oMove(sMvc3Main);
+        return;
+    }
     static bool firstMove = true;
     if (firstMove) {
         BootTimer_Stamp("First sMvc3Main move");
@@ -1246,6 +1250,11 @@ static uint64_t __fastcall HookedGetInputBuf(uint64_t obj)
 // ---------------------------------------------------------------------------
 void FrameStepper_InitNetplay()
 {
+    static bool configLoaded = false;
+    if (!configLoaded) {
+        LoadConfig();
+        configLoaded = true;
+    }
     g_opponentDisconnected = false;
     GameUI_ResetOpponentDisconnectedPopup();
     const LaunchDialogConfig& cfg = GetLaunchDialogConfig();
@@ -1274,27 +1283,25 @@ void FrameStepper_ShowOpponentDisconnected()
 
 void FrameStepper_Init()
 {
-    LoadConfig();
-
     // Hook sMvc3Main::move via vtable patch
     oMove = (Move_t)(*(uintptr_t*)_addr(MOVE_VTABLE_ENTRY));
+    GameplayHooks_RecordPatch((void*)_addr(MOVE_VTABLE_ENTRY), sizeof(uintptr_t));
     Patch((void*)_addr(MOVE_VTABLE_ENTRY), (uintptr_t)&HookedMove);
 
     // Hook SetText call site (CALL instruction override)
     Trampoline* tramp = Trampoline::MakeTrampoline(GetModuleHandleW(nullptr));
+    GameplayHooks_RecordPatch((void*)_addr(HOOK_CALL_SITE), 5);
     InjectHook(_addr(HOOK_CALL_SITE), tramp->Jump(&HookedSetText), PATCH_CALL);
 
     // Hook cChrInput__getInputBuffer (0x1401cc5d0) to capture the input buffer pointer
     static bool inputBufHooked = false;
     if (!inputBufHooked) {
-        MH_CreateHook((LPVOID)_addr(0x1401cc5d0), (LPVOID)&HookedGetInputBuf, (LPVOID*)&oGetInputBuf);
+        GameplayHooks_Create((LPVOID)_addr(0x1401cc5d0), (LPVOID)&HookedGetInputBuf, (LPVOID*)&oGetInputBuf);
         MH_EnableHook((LPVOID)_addr(0x1401cc5d0));
         inputBufHooked = true;
     }
 
-    // Initialize immediately for normal launches and auto-connect clients.
-    // A dual-training host starts this after its deferred peer handshake.
-    FrameStepper_InitNetplay();
+    // Network handles belong to the launcher until the launch selection is final.
 
     // Initialize rollback snapshot engine (hooks sMvc3Main__move)
     Rollback_InitHooks();
@@ -1380,6 +1387,8 @@ static void CloseGame()
 
 void FrameStepper_Process()
 {
+    if (!GameplayHooks_IsActive())
+        return;
     AutoTest_Process();
 
     if (g_trainingFrameLimit > 0 && !g_trainingFrameLimitExitRequested &&
@@ -1796,6 +1805,8 @@ float FrameStepper_GetStatusHudBottom()
 void FrameStepper_Draw()
 {
     g_statusHudBottom = 0.0f;
+    if (!GameplayHooks_IsActive())
+        return;
     const int statusHudMode = EscMenuImGui_IsOpen() ? 2 : g_statusHudMode;
     GameUI_DrawOpponentDisconnectedFallback(g_opponentDisconnected);
 
@@ -2060,6 +2071,10 @@ void FrameStepper_Draw()
 
 void FrameStepper_DrawAutoTest()
 {
+    if (!GameplayHooks_IsActive()) {
+        ImGui::TextUnformatted("Rollback tools are disabled for Normal Launch.");
+        return;
+    }
     static int scriptIndex = 0;
     static int playerIndex = 0;
     static bool facingLeft = false;

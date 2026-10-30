@@ -1940,6 +1940,8 @@ static MenuResult ShowLaunchMenuWindow(bool battleSetupOnly, bool compactMode)
         g_launchOption = LAUNCH_NORMAL;
     } else {
         HookLog("UMVC3Hook: Launch window created successfully\n");
+        UpdateWindow(hWnd);
+        LaunchMenu_NotifyWindowShown();
         MSG msg = {};
         BOOL messageResult = 0;
         while ((messageResult = GetMessageW(&msg, NULL, 0, 0)) > 0) {

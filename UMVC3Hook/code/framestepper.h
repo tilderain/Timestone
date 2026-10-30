@@ -5,6 +5,7 @@
 
 // Frame stepper for training mode.
 // Pause game execution and advance one frame at a time with keyboard controls.
+// Install hooks before opening the launcher; do not start networking here.
 void FrameStepper_Init();
 void FrameStepper_InitNetplay();
 void FrameStepper_Process();

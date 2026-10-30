@@ -12,7 +12,7 @@
 #include "rollback_profile.h"
 #include "live_benchmark.h"
 #include "steam_lobby.h"
-#include "../kiero/minhook/include/MinHook.h"
+#include "gameplay_hooks.h"
 
 #include <cmath>
 #include <cstring>
@@ -166,7 +166,7 @@ extern bool g_multiResimEnabled;
 static void EnableHook(uintptr_t address, void* replacement, void** original,
                        const char* success, const char* failure)
 {
-    MH_STATUS status = MH_CreateHook((LPVOID)_addr(address), replacement, original);
+    MH_STATUS status = GameplayHooks_Create((LPVOID)_addr(address), replacement, original);
     if (status == MH_OK) {
         MH_EnableHook((LPVOID)_addr(address));
         HookLog("%s\n", success);
@@ -194,6 +194,10 @@ static void __fastcall hkCChrSetPos(uint64_t character, const float* position)
 
 static void __fastcall hkMvc3MainMove(uint64_t main)
 {
+    if (!GameplayHooks_IsActive()) {
+        (*g_originalMvc3MainMove)(main);
+        return;
+    }
     const uint64_t benchmarkStart = g_isResimulating ? 0 :
         LiveBenchmark_BeginFrame(Controller_GetNetFrameCount());
     // Discard previous memory checks; native allocations may have changed.
@@ -507,7 +511,7 @@ void Rollback_InitMainHooks(RollbackMainMoveFn* originalMove)
                "Rollback: hooked sMvc3Main__move",
                "Rollback: failed to hook sMvc3Main__move (%d)\n");
 
-    MH_STATUS status = MH_CreateHook((LPVOID)_addr(FN_CCHR_SET_POS),
+    MH_STATUS status = GameplayHooks_Create((LPVOID)_addr(FN_CCHR_SET_POS),
                                      (LPVOID)&hkCChrSetPos, (LPVOID*)&oCChrSetPos);
     if (status == MH_OK)
         HookLog("Rollback: hooked cChr__setPos for resim diagnostics\n");

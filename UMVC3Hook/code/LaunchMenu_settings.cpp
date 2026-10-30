@@ -44,6 +44,7 @@ bool g_darkMode = true;
 bool g_savedDarkMode = true;
 char g_gameResolution[64] = {};
 bool g_gameFullscreen = false;
+bool g_displayChanged = false;
 
 bool GetGameConfigPath(wchar_t (&path)[MAX_PATH])
 {
@@ -179,6 +180,7 @@ bool SaveSettings(HWND window)
             }
             snprintf(g_gameResolution, sizeof(g_gameResolution), "%s", resolution);
             g_gameFullscreen = fullscreen;
+            g_displayChanged = true;
         }
     }
     const bool singleThreaded = SendMessageA(
@@ -565,6 +567,31 @@ bool ApplyAdvancedLaunchConfig()
     initialized = true;
     HookLog("Advanced Config: single-thread override %s\n", enabled ? "enabled" : "disabled");
     return true;
+}
+
+void ApplyLaunchDisplayConfig()
+{
+    if (!g_displayChanged)
+        return;
+    g_displayChanged = false;
+    void* render = *reinterpret_cast<void**>(_addr(0x140E179A8));
+    if (!render)
+        return; // Blocking launches have not created their renderer yet.
+    uint32_t dimensions[2] = {};
+    int width = 0, height = 0;
+    if (sscanf(g_gameResolution, "%dx%d", &width, &height) != 2)
+        return;
+    dimensions[0] = static_cast<uint32_t>(width);
+    dimensions[1] = static_cast<uint32_t>(height);
+    // The existing recovery hook copies this request and applies it at the next
+    // native render boundary, rather than resetting the device from the menu.
+    using ResizeFn = void(__fastcall*)(void*, bool, const uint64_t*, uint64_t);
+    uint64_t size = 0;
+    memcpy(&size, dimensions, sizeof(size));
+    reinterpret_cast<ResizeFn>(_addr(0x14053EDE0))(
+        render, g_gameFullscreen, &size, 0);
+    HookLog("LaunchMenu: queued display change for preloaded renderer (%s fullscreen=%d)\n",
+            g_gameResolution, g_gameFullscreen);
 }
 
 bool IsGameSingleThreaded()

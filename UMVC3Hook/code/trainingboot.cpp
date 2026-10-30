@@ -541,6 +541,13 @@ void BootIntoTraining(bool queueAreaTransition)
     }
     HookLog("TrainingBoot: sBattleSetting = 0x%llx\n", bs);
 
+    if (queueAreaTransition) {
+        // A preloaded host initializes before its dialog-free client. Seed at
+        // the same native boot boundary on both, not at plugin initialization.
+        using SeedGlobal_t = void(__fastcall*)();
+        ((SeedGlobal_t)_addr(0x140A3D120))();
+    }
+
     // --- Setup battle settings ---
     typedef void(__fastcall* SetInt_t)(uint64_t, int32_t);
 

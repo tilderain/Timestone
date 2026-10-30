@@ -6,7 +6,7 @@
 #include "rollback_profile.h"
 #include "mk10utils.h"
 #include "netplay.h"
-#include "../kiero/minhook/include/MinHook.h"
+#include "gameplay_hooks.h"
 
 #include <atomic>
 
@@ -773,7 +773,7 @@ static bool __fastcall hkIsOnlineBattle(uint64_t battleSetting)
 
 void Rollback_InitOnlineBattleHook()
 {
-    MH_STATUS status = MH_CreateHook(
+    MH_STATUS status = GameplayHooks_Create(
         (LPVOID)_addr(FN_IS_ONLINE_BATTLE),
         (LPVOID)&hkIsOnlineBattle,
         (LPVOID*)&g_originalIsOnlineBattle);
@@ -802,6 +802,7 @@ static bool PatchBytes(uintptr_t address, const uint8_t (&expected)[N],
     DWORD oldProtect = 0;
     if (!VirtualProtect(target, N, PAGE_EXECUTE_READWRITE, &oldProtect))
         return false;
+    GameplayHooks_RecordPatch(target, N);
     memcpy(target, replacement, N);
     FlushInstructionCache(GetCurrentProcess(), target, N);
     DWORD ignored = 0;
@@ -880,7 +881,7 @@ void Rollback_PatchBattleUiAllocationFailure()
 
 void Rollback_InitNativeNullGuards()
 {
-    const MH_STATUS motionDtorStatus = MH_CreateHook(
+    const MH_STATUS motionDtorStatus = GameplayHooks_Create(
         (LPVOID)_addr(FN_UMODEL_MOTION_DTOR), (LPVOID)&hkUModelMotionDtor,
         (LPVOID*)&g_originalUModelMotionDtor);
     if (motionDtorStatus == MH_OK) {
@@ -893,7 +894,7 @@ void Rollback_InitNativeNullGuards()
                 motionDtorStatus);
     }
 
-    const MH_STATUS modelBoundsStatus = MH_CreateHook(
+    const MH_STATUS modelBoundsStatus = GameplayHooks_Create(
         (LPVOID)_addr(0x140568F30), (LPVOID)&hkModelBoundsFromJoints,
         (LPVOID*)&g_originalModelBoundsFromJoints);
     if (modelBoundsStatus == MH_OK) {
@@ -906,7 +907,7 @@ void Rollback_InitNativeNullGuards()
                 modelBoundsStatus);
     }
 
-    const MH_STATUS characterModelStatus = MH_CreateHook(
+    const MH_STATUS characterModelStatus = GameplayHooks_Create(
         (LPVOID)_addr(0x1402021E0), (LPVOID)&hkCharacterModelPostMove,
         (LPVOID*)&g_originalCharacterModelPostMove);
     if (characterModelStatus == MH_OK &&
@@ -914,7 +915,7 @@ void Rollback_InitNativeNullGuards()
         HookLog("Rollback: installed headless character model post-move filter\n");
     }
 
-    const MH_STATUS aliveStatus = MH_CreateHook(
+    const MH_STATUS aliveStatus = GameplayHooks_Create(
         (LPVOID)_addr(0x140001B80), (LPVOID)&hkMtObjectIsAlive,
         (LPVOID*)&g_originalMtObjectIsAlive);
     if (aliveStatus == MH_OK) {
@@ -926,7 +927,7 @@ void Rollback_InitNativeNullGuards()
                 aliveStatus);
     }
 
-    const MH_STATUS rocketEffectStatus = MH_CreateHook(
+    const MH_STATUS rocketEffectStatus = GameplayHooks_Create(
         (LPVOID)_addr(0x1400C56B0), (LPVOID)&hkRocketRaccoonPlaySfx,
         (LPVOID*)&g_originalRocketRaccoonPlaySfx);
     if (rocketEffectStatus == MH_OK) {
@@ -938,7 +939,7 @@ void Rollback_InitNativeNullGuards()
                 rocketEffectStatus);
     }
 
-    const MH_STATUS frameIndexStatus = MH_CreateHook(
+    const MH_STATUS frameIndexStatus = GameplayHooks_Create(
         (LPVOID)_addr(0x1400F3150), (LPVOID)&hkMtAnimSetFrameIndex,
         (LPVOID*)&g_originalMtAnimSetFrameIndex);
     if (frameIndexStatus == MH_OK) {
@@ -950,7 +951,7 @@ void Rollback_InitNativeNullGuards()
                 frameIndexStatus);
     }
 
-    const MH_STATUS flagStatus = MH_CreateHook(
+    const MH_STATUS flagStatus = GameplayHooks_Create(
         (LPVOID)_addr(0x140002A70), (LPVOID)&hkMtObjectSetFlag,
         (LPVOID*)&g_originalMtObjectSetFlag);
     if (flagStatus != MH_OK) {
@@ -962,7 +963,7 @@ void Rollback_InitNativeNullGuards()
                 enableStatus == MH_OK ? "installed" : "failed to install");
     }
 
-    const MH_STATUS resetMaterialsStatus = MH_CreateHook(
+    const MH_STATUS resetMaterialsStatus = GameplayHooks_Create(
         (LPVOID)_addr(0x14055FBC0), (LPVOID)&hkResetMaterials,
         (LPVOID*)&g_originalResetMaterials);
     if (resetMaterialsStatus == MH_OK) {
@@ -974,7 +975,7 @@ void Rollback_InitNativeNullGuards()
                 resetMaterialsStatus);
     }
 
-    const MH_STATUS renderSetupStatus = MH_CreateHook(
+    const MH_STATUS renderSetupStatus = GameplayHooks_Create(
         (LPVOID)_addr(0x14055FDC0), (LPVOID)&hkBaseModelRenderSetup,
         (LPVOID*)&g_originalBaseModelRenderSetup);
     if (renderSetupStatus == MH_OK &&
@@ -982,7 +983,7 @@ void Rollback_InitNativeNullGuards()
         HookLog("Rollback: installed live material cache repair\n");
     }
 
-    const MH_STATUS toonMaterialStatus = MH_CreateHook(
+    const MH_STATUS toonMaterialStatus = GameplayHooks_Create(
         (LPVOID)_addr(0x140564110), (LPVOID)&hkToonMaterialUpdate,
         (LPVOID*)&g_originalToonMaterialUpdate);
     if (toonMaterialStatus == MH_OK &&
@@ -990,7 +991,7 @@ void Rollback_InitNativeNullGuards()
         HookLog("Rollback: installed toon material cache repair\n");
     }
 
-    const MH_STATUS particleModelStatus = MH_CreateHook(
+    const MH_STATUS particleModelStatus = GameplayHooks_Create(
         (LPVOID)_addr(0x140898730), (LPVOID)&hkParticleGeneratorModelUpdate,
         (LPVOID*)&g_originalParticleGeneratorModelUpdate);
     if (particleModelStatus == MH_OK &&
@@ -998,7 +999,7 @@ void Rollback_InitNativeNullGuards()
         HookLog("Rollback: installed headless particle-model update filter\n");
     }
 
-    MH_STATUS particleFilterStatus = MH_CreateHook(
+    MH_STATUS particleFilterStatus = GameplayHooks_Create(
         (LPVOID)_addr(FN_PARTICLE_FILTER_UPDATE),
         (LPVOID)&hkParticleGeneratorFilterUpdate,
         (LPVOID*)&g_originalParticleGeneratorFilterUpdate);
@@ -1011,7 +1012,7 @@ void Rollback_InitNativeNullGuards()
                 particleFilterStatus);
     }
 
-    const MH_STATUS jointPosStatus = MH_CreateHook(
+    const MH_STATUS jointPosStatus = GameplayHooks_Create(
         (LPVOID)_addr(0x140549F50), (LPVOID)&hkGetJointPos,
         (LPVOID*)&g_originalGetJointPos);
     if (jointPosStatus == MH_OK &&
@@ -1019,7 +1020,7 @@ void Rollback_InitNativeNullGuards()
         HookLog("Rollback: installed null model-joint entry guard\n");
     }
 
-    const MH_STATUS animStatus = MH_CreateHook(
+    const MH_STATUS animStatus = GameplayHooks_Create(
         (LPVOID)_addr(0x14050EE60), (LPVOID)&hkMtAnimUpdateFrame,
         (LPVOID*)&g_originalMtAnimUpdateFrame);
     if (animStatus != MH_OK) {
@@ -1031,7 +1032,7 @@ void Rollback_InitNativeNullGuards()
                 animEnableStatus == MH_OK ? "installed" : "failed to install");
     }
 
-    const MH_STATUS cutInAddStatus = MH_CreateHook(
+    const MH_STATUS cutInAddStatus = GameplayHooks_Create(
         (LPVOID)_addr(0x1404490C0), (LPVOID)&hkCutInAddCharacter,
         (LPVOID*)&g_originalCutInAddCharacter);
     if (cutInAddStatus == MH_OK) {
@@ -1043,7 +1044,7 @@ void Rollback_InitNativeNullGuards()
                 cutInAddStatus);
     }
 
-    const MH_STATUS cutInVariantStatus = MH_CreateHook(
+    const MH_STATUS cutInVariantStatus = GameplayHooks_Create(
         (LPVOID)_addr(0x14044B2D0), (LPVOID)&hkCutInSetVariant,
         (LPVOID*)&g_originalCutInSetVariant);
     if (cutInVariantStatus == MH_OK) {
@@ -1055,7 +1056,7 @@ void Rollback_InitNativeNullGuards()
                 cutInVariantStatus);
     }
 
-    const MH_STATUS copyPositionStatus = MH_CreateHook(
+    const MH_STATUS copyPositionStatus = GameplayHooks_Create(
         (LPVOID)_addr(0x1400E3020), (LPVOID)&hkCopyCharacterPosition,
         (LPVOID*)&g_originalCopyCharacterPosition);
     if (copyPositionStatus == MH_OK) {
@@ -1067,7 +1068,7 @@ void Rollback_InitNativeNullGuards()
                 copyPositionStatus);
     }
 
-    const MH_STATUS replaceStageStatus = MH_CreateHook(
+    const MH_STATUS replaceStageStatus = GameplayHooks_Create(
         (LPVOID)_addr(0x1401F02D0), (LPVOID)&hkReplaceActiveStage,
         (LPVOID*)&g_originalReplaceActiveStage);
     if (replaceStageStatus == MH_OK) {

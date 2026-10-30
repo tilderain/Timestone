@@ -8,7 +8,7 @@
 #include "rollback_rng.h"
 #include "mk10utils.h"
 #include "netplay.h"
-#include "../kiero/minhook/include/MinHook.h"
+#include "gameplay_hooks.h"
 
 #include <cstring>
 
@@ -135,7 +135,7 @@ static uint64_t __fastcall hkEffectNextRandom(void* effect, int useEffectRng)
 {
     // The native zero path advances the shared gameplay stream. Effects have
     // their own state at sEffect+0x3C, so always draw from that local stream.
-    return oEffectNextRandom(effect, 1);
+    return oEffectNextRandom(effect, GameplayHooks_IsActive() ? 1 : useEffectRng);
 }
 
 static int __fastcall hkSoundRandomVariant(uint64_t soundContext, void* soundRef,
@@ -418,7 +418,7 @@ static void __fastcall hkSetReservedAnki(void* character, int value)
 
 void Rollback_InitRngHooks()
 {
-    MH_STATUS status = MH_CreateHook((LPVOID)_addr(FN_EFFECT_NEXT_RANDOM),
+    MH_STATUS status = GameplayHooks_Create((LPVOID)_addr(FN_EFFECT_NEXT_RANDOM),
                                      (LPVOID)&hkEffectNextRandom,
                                      (LPVOID*)&oEffectNextRandom);
     if (status == MH_OK) {
@@ -432,7 +432,7 @@ void Rollback_InitRngHooks()
         HookLog("Rollback: failed to hook effect RNG isolation (%d)\n", status);
     }
 
-    status = MH_CreateHook((LPVOID)_addr(FN_SOUND_RANDOM_VARIANT),
+    status = GameplayHooks_Create((LPVOID)_addr(FN_SOUND_RANDOM_VARIANT),
                            (LPVOID)&hkSoundRandomVariant,
                            (LPVOID*)&oSoundRandomVariant);
     if (status == MH_OK) {
@@ -446,7 +446,7 @@ void Rollback_InitRngHooks()
         HookLog("Rollback: failed to hook sound variant RNG (%d)\n", status);
     }
 
-    status = MH_CreateHook((LPVOID)_addr(FN_RNG_NEXT),
+    status = GameplayHooks_Create((LPVOID)_addr(FN_RNG_NEXT),
                                       (LPVOID)&hkRngNext,
                                       (LPVOID*)&oRngNext);
     if (status == MH_OK) {
@@ -460,7 +460,7 @@ void Rollback_InitRngHooks()
         HookLog("Rollback: failed to hook next-state RNG trace (%d)\n", status);
     }
 
-    status = MH_CreateHook((LPVOID)_addr(FN_RNG_NEXT_IMPL),
+    status = GameplayHooks_Create((LPVOID)_addr(FN_RNG_NEXT_IMPL),
                            (LPVOID)&hkRngNextImpl,
                            (LPVOID*)&oRngNextImpl);
     if (status == MH_OK) {
@@ -474,7 +474,7 @@ void Rollback_InitRngHooks()
         HookLog("Rollback: failed to hook implementation RNG trace (%d)\n", status);
     }
 
-    status = MH_CreateHook((LPVOID)_addr(FN_RNG_NEXT_FLOAT),
+    status = GameplayHooks_Create((LPVOID)_addr(FN_RNG_NEXT_FLOAT),
                            (LPVOID)&hkRngNextFloat,
                            (LPVOID*)&oRngNextFloat);
     if (status == MH_OK) {
@@ -487,7 +487,7 @@ void Rollback_InitRngHooks()
         HookLog("Rollback: failed to hook stage RNG float consumers (%d)\n", status);
     }
 
-    status = MH_CreateHook((LPVOID)_addr(FN_RNG_FLOAT_IN_RANGE),
+    status = GameplayHooks_Create((LPVOID)_addr(FN_RNG_FLOAT_IN_RANGE),
                            (LPVOID)&hkRngFloatInRange,
                            (LPVOID*)&oRngFloatInRange);
     if (status == MH_OK) {
@@ -500,7 +500,7 @@ void Rollback_InitRngHooks()
         HookLog("Rollback: failed to hook stage float ranges (%d)\n", status);
     }
 
-    status = MH_CreateHook((LPVOID)_addr(FN_RNG_INT_IN_RANGE),
+    status = GameplayHooks_Create((LPVOID)_addr(FN_RNG_INT_IN_RANGE),
                            (LPVOID)&hkRngIntInRange,
                            (LPVOID*)&oRngIntInRange);
     if (status == MH_OK) {
@@ -513,7 +513,7 @@ void Rollback_InitRngHooks()
         HookLog("Rollback: failed to hook stage integer ranges (%d)\n", status);
     }
 
-    status = MH_CreateHook((LPVOID)_addr(FN_RNG_ADVANCE),
+    status = GameplayHooks_Create((LPVOID)_addr(FN_RNG_ADVANCE),
                                      (LPVOID)&hkRngAdvance,
                                      (LPVOID*)&oRngAdvance);
     if (status == MH_OK) {
@@ -527,7 +527,7 @@ void Rollback_InitRngHooks()
         HookLog("Rollback: failed to hook shared RNG trace (%d)\n", status);
     }
 
-    status = MH_CreateHook((LPVOID)_addr(FN_RNG_LERP_RANDOM),
+    status = GameplayHooks_Create((LPVOID)_addr(FN_RNG_LERP_RANDOM),
                            (LPVOID)&hkRngLerpRandom,
                            (LPVOID*)&oRngLerpRandom);
     if (status == MH_OK) {
@@ -541,7 +541,7 @@ void Rollback_InitRngHooks()
         HookLog("Rollback: failed to hook lerp RNG isolation (%d)\n", status);
     }
 
-    status = MH_CreateHook((LPVOID)_addr(FN_RCHRCPU_RNG_MOD_N),
+    status = GameplayHooks_Create((LPVOID)_addr(FN_RCHRCPU_RNG_MOD_N),
                                       (LPVOID)&hkRChrCpuRngModN,
                                       (LPVOID*)&oRChrCpuRngModN);
     if (status == MH_OK) {
@@ -554,7 +554,7 @@ void Rollback_InitRngHooks()
         HookLog("Rollback: failed to hook CPU RNG dispatch (%d)\n", status);
     }
 
-    status = MH_CreateHook((LPVOID)_addr(FN_RNG_RANDOM_INT),
+    status = GameplayHooks_Create((LPVOID)_addr(FN_RNG_RANDOM_INT),
                                      (LPVOID)&hkRandomIntRange,
                                      (LPVOID*)&oRandomIntRange);
     if (status == MH_OK) {
@@ -565,7 +565,7 @@ void Rollback_InitRngHooks()
         HookLog("Rollback: failed to hook Ankihou RNG trace (%d)\n", status);
     }
 
-    status = MH_CreateHook((LPVOID)_addr(FN_HSIENKO_SELECT_ANKI),
+    status = GameplayHooks_Create((LPVOID)_addr(FN_HSIENKO_SELECT_ANKI),
                            (LPVOID)&hkHsienKoSelectAnki,
                            (LPVOID*)&oHsienKoSelectAnki);
     if (status == MH_OK) {
@@ -576,7 +576,7 @@ void Rollback_InitRngHooks()
         HookLog("Rollback: failed to hook Hsien-Ko Anki selector trace (%d)\n", status);
     }
 
-    status = MH_CreateHook((LPVOID)_addr(FN_SET_RESERVED_ANKI),
+    status = GameplayHooks_Create((LPVOID)_addr(FN_SET_RESERVED_ANKI),
                            (LPVOID)&hkSetReservedAnki,
                            (LPVOID*)&oSetReservedAnki);
     if (status == MH_OK) {

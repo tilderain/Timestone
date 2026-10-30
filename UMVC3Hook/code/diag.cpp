@@ -2,7 +2,7 @@
 #include "diag.h"
 #include "mk10utils.h"
 #include "netplay.h"
-#include "../kiero/minhook/include/MinHook.h"
+#include "gameplay_hooks.h"
 
 extern void HookLog(const char* fmt, ...);
 
@@ -37,7 +37,7 @@ void Diag_InitHooks()
 {
     MH_STATUS s;
 
-    s = MH_CreateHook(
+    s = GameplayHooks_Create(
         (LPVOID)_addr(ADDR_INPUT_MASK_POST_PROCESS),
         (LPVOID)&hkInputMaskPostProcess,
         (LPVOID*)&oInputMaskPostProcess

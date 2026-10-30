@@ -8,7 +8,7 @@
 #include "rollback_memory.h"
 #include "rollback_profile.h"
 #include "rollback_snapshot.h"
-#include "../kiero/minhook/include/MinHook.h"
+#include "gameplay_hooks.h"
 
 #include <algorithm>
 #include <array>
@@ -1243,7 +1243,7 @@ void Effect_Reset()
 
 void Effect_InitHooks()
 {
-    MH_STATUS status = MH_CreateHook((LPVOID)_addr(FN_SGAMEEFFECT_SPAWN_SHORT),
+    MH_STATUS status = GameplayHooks_Create((LPVOID)_addr(FN_SGAMEEFFECT_SPAWN_SHORT),
                                      (LPVOID)&hkEffectCreateShort,
                                      (LPVOID*)&oEffectCreateShort);
     if (status == MH_OK)
@@ -1255,7 +1255,7 @@ void Effect_InitHooks()
         HookLog("Rollback: failed to track Rocket short effects (%d)\n", status);
     }
 
-    status = MH_CreateHook((LPVOID)_addr(FN_SGAMEEFFECT_FLUSH_PENDING),
+    status = GameplayHooks_Create((LPVOID)_addr(FN_SGAMEEFFECT_FLUSH_PENDING),
                                      (LPVOID)&hkGameEffectFlushPending,
                                      (LPVOID*)&oGameEffectFlushPending);
     if (status == MH_OK) {
@@ -1266,7 +1266,7 @@ void Effect_InitHooks()
                 status);
     }
 
-    status = MH_CreateHook((LPVOID)_addr(FN_SGAMEEFFECT_FLUSH_HIT_MARKS),
+    status = GameplayHooks_Create((LPVOID)_addr(FN_SGAMEEFFECT_FLUSH_HIT_MARKS),
                            (LPVOID)&hkGameEffectFlushHitMarks,
                            (LPVOID*)&oGameEffectFlushHitMarks);
     if (status == MH_OK) {
@@ -1277,7 +1277,7 @@ void Effect_InitHooks()
                 status);
     }
 
-    status = MH_CreateHook((LPVOID)_addr(FN_MTOBJECT_IS_KIND_OF),
+    status = GameplayHooks_Create((LPVOID)_addr(FN_MTOBJECT_IS_KIND_OF),
                            (LPVOID)&hkMtObjectIsKindOf,
                            (LPVOID*)&oMtObjectIsKindOf);
     if (status == MH_OK) {
@@ -1287,7 +1287,7 @@ void Effect_InitHooks()
         HookLog("Rollback: failed to guard MtObject type checks (%d)\n", status);
     }
 
-    status = MH_CreateHook((LPVOID)_addr(FN_MTOBJECT_REPLACE_INDEXED_SLOT),
+    status = GameplayHooks_Create((LPVOID)_addr(FN_MTOBJECT_REPLACE_INDEXED_SLOT),
                            (LPVOID)&hkMtObjectReplaceIndexedSlot,
                            (LPVOID*)&oMtObjectReplaceIndexedSlot);
     if (status == MH_OK) {
@@ -1298,7 +1298,7 @@ void Effect_InitHooks()
                 status);
     }
 
-    status = MH_CreateHook((LPVOID)_addr(FN_UGAMEEFFECT_CREATE),
+    status = GameplayHooks_Create((LPVOID)_addr(FN_UGAMEEFFECT_CREATE),
                                      (LPVOID)&hkEffectCreate,
                                      (LPVOID*)&oEffectCreate);
     if (status == MH_OK) {
@@ -1308,7 +1308,7 @@ void Effect_InitHooks()
         HookLog("Rollback: failed to hook uGameEffect factory (%d)\n", status);
     }
 
-    /*status = MH_CreateHook((LPVOID)_addr(FN_UGAMEEFFECT_OPERATOR_NEW),
+    /*status = GameplayHooks_Create((LPVOID)_addr(FN_UGAMEEFFECT_OPERATOR_NEW),
                            (LPVOID)&hkGameEffectOperatorNew,
                            (LPVOID*)&oGameEffectOperatorNew);
     if (status == MH_OK) {
@@ -1319,7 +1319,7 @@ void Effect_InitHooks()
                 status);
     }*/
 
-    status = MH_CreateHook((LPVOID)_addr(FN_DRSTRANGE_UPDATE_SUMMONS),
+    status = GameplayHooks_Create((LPVOID)_addr(FN_DRSTRANGE_UPDATE_SUMMONS),
                            (LPVOID)&hkDrStrangeUpdateSummons,
                            (LPVOID*)&oDrStrangeUpdateSummons);
     if (status == MH_OK) {
@@ -1330,7 +1330,7 @@ void Effect_InitHooks()
                 status);
     }
 
-    status = MH_CreateHook((LPVOID)_addr(FN_EFFECT_DRAW),
+    status = GameplayHooks_Create((LPVOID)_addr(FN_EFFECT_DRAW),
                            (LPVOID)&hkEffectDraw,
                            (LPVOID*)&oEffectDraw);
     if (status == MH_OK) {
@@ -1341,7 +1341,7 @@ void Effect_InitHooks()
                 status);
     }
 
-    status = MH_CreateHook((LPVOID)_addr(FN_EFFECT_DTOR_RELEASE),
+    status = GameplayHooks_Create((LPVOID)_addr(FN_EFFECT_DTOR_RELEASE),
                            (LPVOID)&hkEffectDtorRelease,
                            (LPVOID*)&oEffectDtorRelease);
     if (status == MH_OK) {
@@ -1352,7 +1352,7 @@ void Effect_InitHooks()
                 status);
     }
 
-    status = MH_CreateHook((LPVOID)_addr(FN_EFFECT_VDTOR),
+    status = GameplayHooks_Create((LPVOID)_addr(FN_EFFECT_VDTOR),
                            (LPVOID)&hkEffectVdtor,
                            (LPVOID*)&oEffectVdtor);
     if (status == MH_OK) {
@@ -1363,7 +1363,7 @@ void Effect_InitHooks()
                 status);
     }
 
-    status = MH_CreateHook((LPVOID)_addr(FN_EFFECT_CREATE_GENERATOR),
+    status = GameplayHooks_Create((LPVOID)_addr(FN_EFFECT_CREATE_GENERATOR),
                             (LPVOID)&hkEffectCreateGenerator,
                             (LPVOID*)&oEffectCreateGenerator);
     if (status == MH_OK) {
@@ -1374,7 +1374,7 @@ void Effect_InitHooks()
                 status);
     }
 
-    status = MH_CreateHook((LPVOID)_addr(FN_PARTICLE_MANAGER_RELEASE_SUBBUFFER),
+    status = GameplayHooks_Create((LPVOID)_addr(FN_PARTICLE_MANAGER_RELEASE_SUBBUFFER),
                            (LPVOID)&hkParticleManagerReleaseSubBuffer,
                            (LPVOID*)&oParticleManagerReleaseSubBuffer);
     if (status == MH_OK) {
@@ -1385,7 +1385,7 @@ void Effect_InitHooks()
                 status);
     }
 
-    status = MH_CreateHook((LPVOID)_addr(FN_GAME_EFFECT_ATTACHMENT_UPDATE),
+    status = GameplayHooks_Create((LPVOID)_addr(FN_GAME_EFFECT_ATTACHMENT_UPDATE),
                            (LPVOID)&hkGameEffectAttachmentUpdate,
                            (LPVOID*)&oGameEffectAttachmentUpdate);
     if (status == MH_OK) {
