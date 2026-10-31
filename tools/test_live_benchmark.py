@@ -214,10 +214,6 @@ void TextColored(ImVec4 color, const char* fmt, ...) {
     vsnprintf(buffer, sizeof(buffer), fmt, args); va_end(args); text.emplace_back(buffer);
 }
 void TextUnformatted(const char* value) { text.emplace_back(value); }
-bool hoverHelp = false;
-bool IsItemHovered() { return hoverHelp; }
-void BeginTooltip() {}
-void EndTooltip() {}
 void SetNextWindowPos(ImVec2, int, ImVec2) {}
 void SetNextWindowBgAlpha(float) {}
 void PushStyleColor(int index, ImVec4 color) {
@@ -270,7 +266,6 @@ void Frame(int frame) {
     clockMs += 1000;
 }
 int main() {
-    static_assert(Metrics == 5 && sizeof(Packet) == 160);
     action[0xD8 / 4] = 3;
     LiveBenchmark_Update();
     assert(g_generation == 7);
@@ -352,29 +347,26 @@ int main() {
     Frame(120);
     auto live = Cost(g_local, LiveBenchmarkMetric::Live);
     assert(live.count == 120 && live.minimum == 2000 && live.maximum == 2000);
+    assert(Cost(g_local, LiveBenchmarkMetric::CleanLive).count == 120);
     assert(Cost(g_local, LiveBenchmarkMetric::Restore).count == 0);
 
-    // Corrections are collected independently, before the normal tick/render timer.
-    const auto correction = LiveBenchmark_BeginResim(1, 121);
+    const auto start = LiveBenchmark_BeginFrame(121);
+    const auto correction = LiveBenchmark_Now();
     auto phase = LiveBenchmark_Now(); qpc += 200;
     LiveBenchmark_Record(LiveBenchmarkMetric::Save, phase);
     phase = LiveBenchmark_Now(); qpc += 300;
     LiveBenchmark_Record(LiveBenchmarkMetric::Restore, phase);
     phase = LiveBenchmark_Now(); qpc += 100;
     LiveBenchmark_Record(LiveBenchmarkMetric::Headless, phase);
-    LiveBenchmark_EndResim(correction);
-    qpc += 20000; // Forward snapshot and other pre-tick work are excluded too.
-    const auto start = LiveBenchmark_BeginFrame(121);
+    LiveBenchmark_Record(LiveBenchmarkMetric::Correction, correction);
     phase = LiveBenchmark_Now(); qpc += 10000;
     LiveBenchmark_EndPacing(phase);
     qpc += 500;
     LiveBenchmark_EndFrame(start, 122);
-    assert(g_samples[(size_t)LiveBenchmarkMetric::Live].ticks[1] == 500);
+    assert(g_samples[(size_t)LiveBenchmarkMetric::Live].ticks[1] == 1100);
+    assert(g_samples[(size_t)LiveBenchmarkMetric::CleanLive].next == 1);
     assert(g_samples[(size_t)LiveBenchmarkMetric::Correction].ticks[0] == 600);
     assert(g_samples[(size_t)LiveBenchmarkMetric::Restore].ticks[0] == 300);
-    assert(g_local.recentRollback == 600 && g_local.rollbackGame == 500);
-    assert(g_local.paired.count == 1 && g_local.paired.maximum == 1100);
-    assert(Valid(g_local));
     clockMs += 1000;
     const auto invalid = LiveBenchmark_BeginFrame(122);
     phase = LiveBenchmark_Now(); qpc += 500;
@@ -392,8 +384,7 @@ int main() {
     Packet malformed = peer;
     malformed.costs[0].minimum = 1;
     assert(!Valid(malformed)); // Empty metrics cannot carry costs.
-    malformed = peer; malformed.type = PACKET_EXTENSION; assert(!Valid(malformed));
-    malformed = peer; malformed.rollbackGame = 1; assert(!Valid(malformed));
+    malformed = peer; malformed.version = 1; assert(!Valid(malformed));
     malformed = peer; malformed.flags = 8; assert(!Valid(malformed));
     malformed = peer; malformed.flags = 17u << 8; assert(!Valid(malformed));
     malformed = peer; ++malformed.generation; assert(!Valid(malformed));
@@ -460,21 +451,12 @@ int main() {
     clockMs = expiry;
     ImGui::windows = 0; LiveBenchmark_Draw(); assert(ImGui::windows == 0);
     menu = true; ImGui::text.clear(); LiveBenchmark_Draw(); assert(ImGui::windows == 1);
-    assert(HasText("Expand") && !HasText("p95:") && !HasText("Low:"));
-    assert(!HasText("Samples") && !HasText("16.7 ms") && !HasText("ms est."));
-    assert(HasText("1 frames"));
-    assert(HasText("(?)") && !HasText("What are you doing??"));
-    ImGui::hoverHelp = true;
-    LiveBenchmark_Draw();
-    assert(HasText("What are you doing??") && HasText("crank up the input delay"));
-    assert(HasText("Please check back later"));
-    ImGui::hoverHelp = false;
-    ImGui::text.clear();
+    assert(HasText("Expand") && !HasText("Slow:") && !HasText("Low:"));
+    assert(!HasText("Samples") && !HasText("16.7 ms limit") && !HasText("ms est."));
     ImGui::clickExpand = true;
     LiveBenchmark_Draw();
-    assert(HasText("1 frames"));
-    assert(HasText("p95:") && HasText("Samples") && HasText("16.7 ms"));
-    assert(HasText("333 FPS") && HasText("Low:1.0 ms  High:4.0 ms"));
+    assert(HasText("Slow:") && HasText("Samples") && HasText("16.7 ms limit"));
+    assert(HasText("333 FPS") && HasText("Low:250  High:1000"));
     assert(ImGui::colors == 0 && ImGui::styles == 0);
     assert(HasText("You") && HasText("Opp."));
     steam = true;
@@ -501,33 +483,21 @@ int main() {
     const Costs spikes{62, 6500, 8403, 20000, 32258};
     assert(Health(spikes, true) == FrameHealth::Spikes);
     DrawRate(spikes, true, true);
-    assert(HasText("83% (50 FPS)") && HasText("p95: 20.0 ms"));
+    assert(HasText("83% (50 FPS)") && HasText("Slow: 20.0 ms"));
     assert(ImGui::bars.back() > 0.41f && ImGui::bars.back() < 0.42f);
     const auto warning = CapacityColor(83.0, true);
     assert(ImGui::barColors.back().x == warning.x && ImGui::barColors.back().y == warning.y);
     assert(ImGui::textColor.y == ImGui::barColors.back().y);
     Packet resim;
     resim.flags = 7u << 8;
-    resim.corrections = 1;
-    resim.replayedFrames = 7;
     for (auto& cost : resim.costs) cost = {2, 1000, 1000, 1000, 1000};
     resim.costs[(size_t)LiveBenchmarkMetric::Restore] = {2, 2000, 2000, 2000, 2000};
-    resim.recentRollback = 9000;
-    resim.rollbackGame = 1000;
-    resim.paired = {1, 10000, 10000, 10000, 10000};
+    assert(RollbackCost(resim, &Costs::p95) == 9000);
     const int markersBefore = ImGui::drawList.markers;
     DrawResim(resim, true, true);
-    assert(HasText("167% (100 FPS)") && HasText("Total: 10.0 ms"));
-    assert(HasText("Low:10.0 ms  High:10.0 ms"));
-    assert(ImGui::bars.back() > 0.83f && ImGui::bars.back() < 0.84f);
+    assert(HasText("185% (111 FPS)") && HasText("7f: 9.0 ms est."));
+    assert(ImGui::bars.back() > 0.92f && ImGui::bars.back() < 0.93f);
     assert(ImGui::drawList.markers == markersBefore + 1);
-    resim.recentLive = 50000; // Unrelated Game samples must not change the paired result.
-    ImGui::text.clear(); DrawResim(resim, true, true);
-    assert(HasText("167% (100 FPS)"));
-    resim.corrections = 2;
-    resim.replayedFrames = 10; // Average depth is descriptive, not used to extrapolate cost.
-    ImGui::text.clear(); DrawResim(resim, true, true);
-    assert(HasText("167% (100 FPS)"));
     resim.recentRollback = 27779; // Just below 60%.
     DrawResim(resim, true, true);
     assert(ImGui::barColors.back().y == HealthColor(FrameHealth::Slow).y);
@@ -535,42 +505,19 @@ int main() {
     DrawResim(resim, true, true);
     assert(ImGui::barColors.back().y == 0.65f);
     assert(ImGui::textColor.y == ImGui::barColors.back().y);
-    assert(HasText("79% (48 FPS)"));
-    resim.recentRollback = 21223; // Just below 75%.
-    DrawResim(resim, true, true);
-    assert(ImGui::barColors.back().y == HealthColor(FrameHealth::Slow).y);
-    resim.recentRollback = 21222; // Just above 75%.
-    DrawResim(resim, true, true);
-    assert(ImGui::barColors.back().y == 0.65f);
-    resim.recentRollback = 16544; // Just below 95%.
-    DrawResim(resim, true, true);
-    assert(ImGui::barColors.back().y == 0.65f);
-    resim.recentRollback = 16543; // Just above 95%.
-    DrawResim(resim, true, true);
-    assert(ImGui::barColors.back().y == HealthColor(FrameHealth::Smooth).y);
-    resim.recentRollback = 15666; // Just within the remaining 15.667 ms budget.
-    DrawResim(resim, true, true);
-    assert(HasText("100% (60 FPS)"));
-    assert(ImGui::barColors.back().y == HealthColor(FrameHealth::Smooth).y);
-    resim.rollbackGame = 10000;
-    resim.recentRollback = 10000;
-    DrawResim(resim, true, true);
     assert(HasText("83% (50 FPS)"));
-    assert(ImGui::barColors.back().y == 0.65f);
-    resim.rollbackGame = 20000;
+    resim.recentRollback = 16667; // Exactly 100%.
     DrawResim(resim, true, true);
-    assert(HasText("56% (33 FPS)") && ImGui::bars.back() > 0);
-    resim.recentRollback = 30000;
+    assert(ImGui::barColors.back().y == HealthColor(FrameHealth::Smooth).y);
+    resim.recentRollback = 0;
+    resim.flags |= 1;
+    assert(RollbackCost(resim, &Costs::p95) == 16000); // Seven corrected saves too.
+    resim.flags = 5u << 8;
+    assert(RollbackCost(resim, &Costs::p95) == 7000); // Use the reporting peer's depth.
+    resim.flags = 7u << 8;
+    resim.costs[(size_t)LiveBenchmarkMetric::Headless] = {2, 9000, 9000, 9000, 9000};
     DrawResim(resim, true, true);
-    assert(HasText("33% (20 FPS)"));
-    resim.recentRollback = 13333;
-    DrawResim(resim, true, true);
-    assert(HasText("50% (30 FPS)"));
-    DrawResim(resim, true, false);
-    assert(ImGui::barColors.back().y == HealthColor(FrameHealth::NoData).y);
-    resim.paired = {};
-    ImGui::text.clear(); DrawResim(resim, true, true);
-    assert(HasText("Waiting resim"));
+    assert(HasText("26% (") && HasText("FPS)"));
     resim.flags = 0;
     ImGui::text.clear(); DrawResim(resim, true, true);
     assert(HasText("Off"));
@@ -623,11 +570,6 @@ int main() {
 
     Packet assessment;
     assessment.flags = 1u | (7u << 8);
-    assessment.corrections = 1;
-    assessment.replayedFrames = 7;
-    assessment.recentRollback = 1000;
-    assessment.rollbackGame = 2000;
-    assessment.paired = {1, 3000, 3000, 3000, 3000};
     for (auto& cost : assessment.costs) cost = {120, 100, 200, 300, 400};
     for (auto& cost : assessment.costs) cost.count = 2;
     ImGui::text.clear(); Assessment(assessment, true);
@@ -636,10 +578,10 @@ int main() {
     ImGui::text.clear(); Assessment(assessment, true);
     assert(HasText("CHECKING"));
     assessment.costs[(size_t)LiveBenchmarkMetric::Live].count = 2;
-    assessment.recentRollback = 20000;
+    assessment.costs[(size_t)LiveBenchmarkMetric::Headless].p95 = 5000;
     ImGui::text.clear(); Assessment(assessment, true);
     assert(HasText("Rollback: may lag"));
-    assessment.paired = {};
+    assessment.costs[(size_t)LiveBenchmarkMetric::Restore].count = 0;
     ImGui::text.clear(); Assessment(assessment, true);
     assert(HasText("Good") && HasText("Rollback: untested"));
     assessment.costs[(size_t)LiveBenchmarkMetric::Live].p95 = 20000;
@@ -675,7 +617,6 @@ int main() {
     assert(Cost(g_local, LiveBenchmarkMetric::Live).count == 1);
     clockMs += 56;
     Frame(60);
-    assert(g_local.replayedFrames == 0);
     assert(Cost(g_local, LiveBenchmarkMetric::Live).count == 2);
 
     // Menu-only reports are jittered, rather than sent each second.
@@ -744,7 +685,7 @@ int main() {
     Frame(0);
     clockMs -= 900;
     assert(LiveBenchmark_BeginFrame(1) == 0);
-    const auto resimStart = LiveBenchmark_BeginResim(7, 1);
+    const auto resimStart = LiveBenchmark_BeginResim();
     assert(resimStart);
     phase = LiveBenchmark_Now(); qpc += 200;
     LiveBenchmark_Record(LiveBenchmarkMetric::Restore, phase);
@@ -754,81 +695,27 @@ int main() {
     LiveBenchmark_Record(LiveBenchmarkMetric::Save, phase);
     LiveBenchmark_EndResim(resimStart);
     assert(LiveBenchmark_Now() == 0);
-    const auto pairedStart = LiveBenchmark_BeginFrame(1);
-    assert(pairedStart); // A correction forces its own following Game sample, not a later one.
-    qpc += 2000;
-    LiveBenchmark_EndFrame(pairedStart, 2);
-    assert(g_local.recentRollback == 350 && g_local.rollbackGame == 2000);
-    assert(g_local.paired.count == 1 && g_local.paired.maximum == 2350);
-    clockMs += 1000;
+    LiveBenchmark_EndFrame(0, 2);
+    clockMs += 900;
     Frame(2);
     assert(Cost(g_local, LiveBenchmarkMetric::Restore).count == 1);
     assert(Cost(g_local, LiveBenchmarkMetric::Correction).median == 350);
-    assert(g_local.corrections == 1 && g_local.replayedFrames == 7);
-    assert(g_local.recentRollback == 350 && g_local.rollbackGame == 2000);
+    assert(RollbackCost(g_local, &Costs::p95) == 200 + 7 * 150);
     ImGui::text.clear();
     DrawResim(g_local, true, true);
     assert(!HasText("Awaiting resim") && HasText("FPS)") && !HasText("capacity"));
     // A resim that is not yet due does not collect; the next due one does.
     const auto nextResim = g_nextResimSample;
     clockMs = nextResim - 1;
-    const int skippedResimReads = reads;
-    assert(LiveBenchmark_BeginResim(2, 3) == 0);
+    assert(LiveBenchmark_BeginResim() == 0);
     assert(LiveBenchmark_Now() == 0);
     LiveBenchmark_EndResim(0);
-    assert(reads == skippedResimReads && g_corrections == 1 && g_replayedFrames == 2);
     clockMs = nextResim;
-    const auto secondResim = LiveBenchmark_BeginResim(3, 3);
+    const auto secondResim = LiveBenchmark_BeginResim();
     assert(secondResim);
     qpc += 500;
     LiveBenchmark_EndResim(secondResim);
     assert(g_samples[(size_t)LiveBenchmarkMetric::Correction].count == 2);
-    assert(g_corrections == 2 && g_replayedFrames == 5);
-    clockMs += 1000;
-    Frame(3);
-    assert(g_local.corrections == 2 && g_local.replayedFrames == 5);
-    assert(g_local.recentRollback == 500 && g_local.rollbackGame == 2000);
-    assert(g_local.paired.count == 2 && g_local.paired.maximum == 2500);
-    // Quiet intervals retain the last resim report while Game keeps updating.
-    const Packet lastResim = g_local;
-    Frame(4);
-    Frame(5);
-    assert(g_local.sequence > lastResim.sequence);
-    assert(g_local.corrections == lastResim.corrections);
-    assert(g_local.replayedFrames == lastResim.replayedFrames);
-    assert(g_local.recentRollback == lastResim.recentRollback);
-    assert(g_local.rollbackGame == lastResim.rollbackGame);
-    assert(std::memcmp(&g_local.paired, &lastResim.paired, sizeof(Costs)) == 0);
-    for (size_t i = 0; i < (size_t)LiveBenchmarkMetric::Live; ++i)
-        assert(std::memcmp(&g_local.costs[i], &lastResim.costs[i], sizeof(Costs)) == 0);
-    ImGui::text.clear(); DrawResim(g_local, true, true);
-    assert(!HasText("Waiting resim") && HasText("FPS)"));
-    const auto resumed = LiveBenchmark_BeginResim(4, 6);
-    assert(resumed);
-    qpc += 800;
-    LiveBenchmark_EndResim(resumed);
-    Frame(6);
-    assert(g_local.corrections == 1 && g_local.replayedFrames == 4);
-    assert(g_local.recentRollback == 800 && g_local.rollbackGame == 2000);
-    const auto lastPair = g_local.paired;
-    // A frozen tick discards its pending pair, not the last published result.
-    const auto frozenResim = LiveBenchmark_BeginResim(2, 7);
-    qpc += 900;
-    LiveBenchmark_EndResim(frozenResim);
-    const auto frozenGame = LiveBenchmark_BeginFrame(7);
-    qpc += 1000;
-    LiveBenchmark_EndFrame(frozenGame, 7);
-    assert(g_pairCorrection == 0 && g_local.paired.count == lastPair.count);
-    clockMs += 1000;
-    Frame(7);
-    assert(g_local.paired.count == lastPair.count && g_local.recentRollback == 800);
-    // A correction with a different target frame cannot be paired with this Game tick.
-    const auto wrongFrame = LiveBenchmark_BeginResim(2, 99);
-    qpc += 1200;
-    LiveBenchmark_EndResim(wrongFrame);
-    Frame(8);
-    assert(g_pairCorrection == 0 && g_local.paired.count == lastPair.count);
-    assert(g_local.recentRollback == 800 && Valid(g_local));
 
     // A slow renderer owns its slot; repeated publications cannot overwrite it.
     const auto& held = ReadPublished();
@@ -1016,14 +903,7 @@ int main() {
         self.assertNotIn("Netplay_GetExtensionPacket(", roster)
         self.assertIn("packet.magic != CHRSEL_MAGIC", roster)
         hooks = (CODE / "rollback_hooks.cpp").read_text()
-        main_hook = hooks[hooks.index("static void __fastcall hkMvc3MainMove"):
-                          hooks.index("static void __fastcall hkCallSRender")]
-        self.assertEqual(main_hook.count("LiveBenchmark_BeginFrame("), 1)
-        self.assertLess(main_hook.rindex("Rollback_SaveSnapshot("),
-                        main_hook.index("LiveBenchmark_BeginFrame("))
-        timing = main_hook[main_hook.index("const uint64_t benchmarkStart = LiveBenchmark_BeginFrame(curFrame);"):]
-        self.assertLess(timing.index("LagMetric::Native"), timing.index("original(main);"))
-        self.assertLess(timing.index("original(main);"), timing.index("LiveBenchmark_EndFrame("))
+        self.assertIn("g_isResimulating ? 0 :", hooks)
         self.assertLess(hooks.index("oMainMove(main);"), hooks.index("LiveBenchmark_EndPacing"))
         save = (CODE / "rollback_snapshot.cpp").read_text()
         self.assertLess(save.index("SnapDump_CaptureSnapshot(slot)"),
