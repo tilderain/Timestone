@@ -127,8 +127,13 @@ repeat state.
    `sPad + slotIndex * 0x2E0 + 0x1BC` and applies SOCD cleaning.
 
 The keyboard and pad sources are alternatives in this native getter, not an
-automatic OR. On a netplay client, the plugin reads the physical pad here, then
-uses player 0's native keyboard remap from the scoped `buttonRemap` hook. Their
+automatic OR. On a netplay client, the plugin combines decoded buttons from all
+four hardware slots whose active and device-kind fields are nonzero, then applies
+SOCD once to the combined mask. It reads existing native poll results; it does
+not poll or reacquire devices itself. This avoids assuming the local controller
+is in hardware slot 0. Unused connected controllers can contribute input too.
+Normal/offline routing and the netplay host's routing are unchanged. The client
+then uses player 0's native keyboard remap from the scoped `buttonRemap` hook. Their
 logical masks are combined for local P2. This preserves the native keyboard
 focus/device gate and suppresses keyboard input while the process is not
 foreground.

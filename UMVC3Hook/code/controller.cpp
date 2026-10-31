@@ -14,6 +14,7 @@
 #include <cstdio>
 #include <cstdint>
 #include <cstring>
+#include <dinput.h>
 #include "LaunchMenu.h"
 
 extern void HookLog(const char* fmt, ...);
@@ -1037,8 +1038,17 @@ static uint64_t __fastcall hkGetsCurrentInput_withSOCD(uint64_t pad, uint32_t pl
             }
             else if (playerIndex == 1)
             {
-                // Client keyboard input is merged later in hkbuttonRemap.
-                raw = ApplySOCD(*(uint32_t*)(pad + PAD_SLOT_INPUT));
+                // A client owns one player, regardless of which hardware slot
+                // contains its controller. Keyboard input is merged later.
+                uint32_t mergedInput = 0;
+                for (uint32_t slot = 0; slot < PAD_MAX_SLOTS; ++slot) {
+                    const uint64_t slotBase = pad + slot * PAD_SLOT_STRIDE;
+                    if (*(const uint8_t*)(slotBase + PAD_SLOT_ACTIVE) &&
+                        *(const uint8_t*)(slotBase + PAD_SLOT_DEVICE_KIND)) {
+                        mergedInput |= *(const uint32_t*)(slotBase + PAD_SLOT_INPUT);
+                    }
+                }
+                raw = ApplySOCD(mergedInput);
             }
             else
             {

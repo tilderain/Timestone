@@ -29,8 +29,13 @@ static constexpr uint32_t IN_STICK_RIGHT = 0x20000;
 // Pad structure constants
 // ---------------------------------------------------------------------------
 static constexpr uint32_t PAD_SLOT_STRIDE = 0x2E0;
+static constexpr uint32_t PAD_SLOT_ACTIVE = 0x60;
+static constexpr uint32_t PAD_SLOT_DEVICE_KIND = 0x63;
+static constexpr uint32_t PAD_SLOT_DEVICE_TYPE = 0x6C;
+static constexpr uint32_t PAD_SLOT_DEVICE_INDEX = 0x70;
 static constexpr uint32_t PAD_SLOT_INPUT  = 0x1BC;
 static constexpr uint32_t PAD_MAX_SLOTS   = 4;
+static constexpr uint32_t PAD_DIRECTINPUT_DEVICES = 0xBF0;
 
 // Pad global offsets
 static constexpr uint32_t PAD_GLOBAL_VIB_RATE    = 0x48;
