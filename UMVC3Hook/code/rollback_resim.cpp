@@ -41,8 +41,7 @@ static bool CanReuseRestoredSnapshot(int32_t frame)
     int slotIndex = frame % ROLLBACK_WINDOW;
     if (slotIndex < 0) slotIndex += ROLLBACK_WINDOW;
     const RollbackSnapshotSlot& slot = g_rollbackSnapshotSlots[slotIndex];
-    if (slot.frame != frame || !slot.data || slot.size == 0 ||
-        !slot.shotRecipes.empty() || !slot.effectRecipes.empty()) {
+    if (slot.frame != frame || !slot.data || slot.size == 0) {
         return false;
     }
 

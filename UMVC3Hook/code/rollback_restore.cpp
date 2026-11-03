@@ -3,15 +3,11 @@
 #include "rollback_restore.h"
 #include "rollback_cleanup.h"
 #include "rollback_character_restore.h"
-#include "rollback_effect.h"
 #include "rollback_memory.h"
-#include "rollback_model_policy.h"
 #include "rollback_profile.h"
 #include "live_benchmark.h"
 #include "lag_diagnostics.h"
-#include "rollback_shot.h"
 #include "rollback_snapshot.h"
-#include "concrete_snapshot.h"
 #include "mk10utils.h"
 
 #include <algorithm>
@@ -26,7 +22,6 @@ static_assert(sizeof(RollbackRegion) <= 64);
 
 static constexpr uintptr_t PTR_SCHARACTER = 0x140d44a70;
 static constexpr uintptr_t PTR_SSTAGE = 0x140d4f718;
-static constexpr uintptr_t PTR_SSHOT = 0x140d47f40;
 static constexpr uintptr_t PTR_SHITSOLVER = 0x140d44060;
 static constexpr uintptr_t PTR_SMAIN = 0x140e177e8;
 static constexpr uintptr_t PTR_SMVC3MGR = 0x140d510a0;
@@ -34,11 +29,6 @@ static constexpr uintptr_t PTR_SUNIT = 0x140e17698;
 static constexpr uintptr_t DTI_UIRONMAN = 0x140D45518;
 static constexpr uintptr_t PTR_SCOLLISION = 0x140e18250;
 static constexpr uintptr_t PTR_SCAMERA = 0x140e17930;
-static constexpr uintptr_t PTR_SGAMEEFFECT = 0x140d46470;
-static constexpr uintptr_t FN_SSHOT_ENQUEUE_UNIT = 0x1401512A0;
-static constexpr uintptr_t FN_SSHOT_FLUSH_PENDING_UNITS = 0x1401517A0;
-static constexpr uintptr_t FN_SUNIT_ADD_UNIT = 0x14051A6B0;
-static constexpr uintptr_t FN_SUNIT_REMOVE_UNIT = 0x14051B9F0;
 static constexpr uintptr_t FN_RESET_HITNODES = 0x140259E90;
 static constexpr uintptr_t FN_MODEL_SET_CHILD_MATERIAL_MODE = 0x140200DB0;
 static constexpr uintptr_t FN_MTOBJECT_ADD_REF = 0x14050D100;
@@ -95,15 +85,6 @@ static constexpr uint32_t CUNIT_LIVE_STATE_OFFSETS[] = {0x10, 0x18, 0x20, 0x38};
 static constexpr uint32_t CUTIN_DRAW_LAYER_BITS = 0x00700000;
 static constexpr uint32_t MTOBJECT_VISIBLE_FLAG = 0x00004000;
 static constexpr size_t SMAIN_SIZE = 0x40080;
-static constexpr int SSHOT_CATEGORY = 10;
-static constexpr uint32_t SSHOT_ID_POOL_OFFSET = 0x38;
-static constexpr size_t SSHOT_ID_POOL_SIZE = 0x404;
-static constexpr uintptr_t PTR_SGAMECONFIG = 0x140D50F88;
-static constexpr uint32_t SGAMECONFIG_SHOT_SLOT_FLAGS_OFFSET = 0x4A89C;
-static constexpr size_t SGAMECONFIG_SHOT_SLOT_FLAGS_SIZE = 10;
-static constexpr uint32_t SAUX_FIRST_CATEGORY = 9;
-static constexpr uint32_t SSHOT_FIRST_CATEGORY = 10;
-static constexpr uint32_t SEFFECT_LAST_CATEGORY = 16;
 static constexpr int MAX_REGIONS = ROLLBACK_MAX_REGIONS;
 static constexpr size_t SHITSOLVER_SIZE = 0x3808C;
 static constexpr uint64_t MT_DTI_VTABLE = 0x140A69ED8;
@@ -152,7 +133,6 @@ static void RestoreCharacterCollisionParentReferences(RollbackSnapshotSlot& slot
 }
 
 using SnapshotRange = RollbackSnapshotRange;
-using ShotRecipe = RollbackShotRecipe;
 using SnapshotSlot = RollbackSnapshotSlot;
 static constexpr SnapshotRange UACTION_CAMERA_SCALAR_RESTORE_RANGES[] = {
     // Camera transform/view state; retain the unit header and ownership links.
@@ -186,9 +166,6 @@ static constexpr SnapshotRange UACTION_CAMERA_SCALAR_RESTORE_RANGES[] = {
     // Camera option flags and Maya active/request flags at +0x588/+0x589.
     {0x57C, 0x0E},
 };
-using ShotEnqueueFn = char(__fastcall*)(void*, void*, int);
-using UnitAddFn = char(__fastcall*)(void*, int, void*, void*);
-using UnitRemoveFn = char(__fastcall*)(void*, void*);
 #define g_slots g_rollbackSnapshotSlots
 
 static constexpr SnapshotRange SMAIN_RESTORE_RANGES[] = {
@@ -252,7 +229,7 @@ void Rollback_RestoreCollisionBody(void* destination, const uint8_t* source, siz
          offset += sizeof(uint64_t)) {
         uint64_t liveValue = *(uint64_t*)((uint8_t*)destination + offset);
         uint64_t savedValue = *(const uint64_t*)(source + offset);
-        if (IsAccessiblePointer(liveValue) || IsAccessiblePointer(savedValue))
+        if (IsLikelyPointer(liveValue) || IsLikelyPointer(savedValue))
             livePointers.push_back({offset, liveValue});
     }
 
@@ -278,17 +255,14 @@ void Rollback_RestoreExternalAnimBlock(void* destination, const uint8_t* source,
 
 void Rollback_DestroyCollisionNodeClones(RollbackSnapshotSlot& slot)
 {
-    bool destroyedClone = false;
     for (const RollbackCollisionNodeClone& entry : slot.collisionNodeClones) {
         if (!entry.clone) continue;
         uint64_t vtable = *(uint64_t*)entry.clone;
         auto destroy = (void(__fastcall*)(void*, uint32_t))*(uint64_t*)vtable;
         if (destroy) {
             destroy(entry.clone, 1);
-            destroyedClone = true;
         }
     }
-    if (destroyedClone) InvalidateMemoryQueryCache();
     slot.collisionNodeClones.clear();
 }
 
@@ -300,7 +274,6 @@ void Rollback_CaptureCollisionNodeClones(RollbackSnapshotSlot& slot)
         (void(__fastcall*)(void*, void*, bool, bool))_addr(FN_COLLISION_NODE_COPY);
 
     size_t capturedCount = 0;
-    bool mutatedClones = false;
     uint32_t capturedChildren = 0;
     uint32_t cloneCopies = 0;
     uint32_t emptyCloneCopies = 0;
@@ -352,7 +325,6 @@ void Rollback_CaptureCollisionNodeClones(RollbackSnapshotSlot& slot)
         if (childCount == 0) {
             if (entry.clone) {
                 copyNode(entry.clone, region.ptr, false, true);
-                mutatedClones = true;
                 ++cloneCopies;
                 ++emptyCloneCopies;
             }
@@ -367,7 +339,6 @@ void Rollback_CaptureCollisionNodeClones(RollbackSnapshotSlot& slot)
         }
         // false copies the source factory; true copies children through virtual +0x40.
         copyNode(entry.clone, region.ptr, false, true);
-        mutatedClones = true;
         ++cloneCopies;
         ++capturedCount;
     }
@@ -380,12 +351,10 @@ void Rollback_CaptureCollisionNodeClones(RollbackSnapshotSlot& slot)
         auto destroy = (void(__fastcall*)(void*, uint32_t))*(uint64_t*)vtable;
         if (destroy) {
             destroy(entry.clone, 1);
-            mutatedClones = true;
             ++cloneDestroys;
         }
     }
     slot.collisionNodeClones.resize(capturedCount);
-    if (mutatedClones) InvalidateMemoryQueryCache();
     if constexpr (ROLLBACK_PROFILING_ENABLED) {
         if (g_activeRollbackProfile) {
             g_activeRollbackProfile->snapshotCloneWrappers += capturedCount;
@@ -404,7 +373,6 @@ void Rollback_RestoreCollisionNodeClones(RollbackSnapshotSlot& slot)
         (void(__fastcall*)(void*, void*, bool, bool))_addr(FN_COLLISION_NODE_COPY);
     auto pruneChild =
         (void(__fastcall*)(void*, uint32_t))_addr(FN_COLLISION_NODE_PRUNE_CHILD);
-    bool mutatedChildren = false;
     for (const RollbackCollisionNodeClone& entry : slot.collisionNodeClones) {
         void* destination = *(void**)entry.ownerSlot;
         if (!destination ||
@@ -423,12 +391,10 @@ void Rollback_RestoreCollisionNodeClones(RollbackSnapshotSlot& slot)
         if (entry.childCount == 0) {
             auto* childArray = (uint8_t*)destination + 0x18;
             uint32_t liveCount = *(uint32_t*)((uint8_t*)destination + 0x20);
-            mutatedChildren |= liveCount != 0;
             while (liveCount > 0)
                 pruneChild(childArray, --liveCount);
         } else if (entry.clone) {
             copyNode(destination, entry.clone, false, true);
-            mutatedChildren = true;
         }
 
         uint32_t restoredCount = *(uint32_t*)((uint8_t*)destination + 0x20);
@@ -449,547 +415,10 @@ void Rollback_RestoreCollisionNodeClones(RollbackSnapshotSlot& slot)
                     entry.childCount, restoredCount);
         }
     }
-    if (mutatedChildren) InvalidateMemoryQueryCache();
 }
 
 
 // Restore the RNG streams captured immediately before this shot's original spawn.
-static void RestorePreSpawnRng(const ShotRecipe& recipe)
-{
-    if (!recipe.hasPreSpawnRng) return;
-    std::memcpy((void*)_addr(0x140D765D8), recipe.preSpawnGlobalRng, 16);
-    uint64_t sEffect = *(uint64_t*)_addr(0x140E17A38);
-    if (sEffect)
-        std::memcpy((uint8_t*)sEffect + 0x3C, recipe.preSpawnEffectRng, 16);
-    if (recipe.ownerChr)
-        std::memcpy((uint8_t*)recipe.ownerChr + 0x2D80,
-                    recipe.preSpawnOwnerRng, 16);
-}
-
-
-static void RestoreShotAndEffectRecipes(SnapshotSlot& slot)
-{
-    LagDiagnosticScope diagnosticStage(LagMetric::RebuildPin);
-    if (!Shot_HooksReady()) {
-        HookLog("Rollback: shot restore skipped because lifecycle hooks are unavailable\n");
-        return;
-    }
-
-    void* sUnit = *(void**)_addr(PTR_SUNIT);
-    auto removeUnit = (UnitRemoveFn)_addr(FN_SUNIT_REMOVE_UNIT);
-    const uint64_t profileStart = Profile_Now();
-    if (g_activeRollbackProfile)
-        g_activeRollbackProfile->restoreSavedShots += (uint32_t)slot.shotRecipes.size();
-
-    // Hold recipe rShot resources across teardown; native shot destructors release them.
-    auto addRef = (void(__fastcall*)(void*))_addr(0x14050D100);
-    auto releaseRef = (void(__fastcall*)(void*))_addr(0x14050D5A0);
-    std::vector<void*> pinnedShotResources;
-    std::vector<void*> pinnedCallbackEffectResources;
-    pinnedShotResources.reserve(slot.shotRecipes.size());
-    for (const ShotRecipe& saved : slot.shotRecipes) {
-        if (!saved.shotElement || !HasCallableDtiVirtual(saved.shotElement))
-            continue;
-        addRef(saved.shotElement);
-        pinnedShotResources.push_back(saved.shotElement);
-    }
-
-
-    // Keep model and callback resources loaded while their owning shots are replaced.
-    std::vector<void*> currentShots;
-    Shot_CollectCurrent(currentShots);
-    for (void* shot : currentShots) {
-        Rollback_PinShotModelResources(
-            shot, pinnedShotResources, pinnedCallbackEffectResources);
-        for (uint32_t index = 0; index < 13; ++index) {
-            void* effect = *(void**)((uint8_t*)shot + 0x1F78 + index * 8);
-            if (!effect || !IsEffectObject(effect)) continue;
-            void* resource = *(void**)((uint8_t*)effect + 0x108);
-            if (!resource || !HasCallableDtiVirtual(resource) ||
-                std::find(pinnedCallbackEffectResources.begin(),
-                          pinnedCallbackEffectResources.end(), resource) !=
-                    pinnedCallbackEffectResources.end()) {
-                continue;
-            }
-            addRef(resource);
-            pinnedCallbackEffectResources.push_back(resource);
-        }
-    }
-    for (const RollbackEffectRecipe& saved : slot.effectRecipes) {
-        void* resource = (void*)saved.state.resource;
-        if (!saved.shortFactory || !resource || !HasCallableDtiVirtual(resource) ||
-            std::find(pinnedCallbackEffectResources.begin(),
-                      pinnedCallbackEffectResources.end(), resource) !=
-                pinnedCallbackEffectResources.end())
-            continue;
-        addRef(resource);
-        pinnedCallbackEffectResources.push_back(resource);
-    }
-    const uint64_t pinResourcesEnd = Profile_Now();
-    diagnosticStage.Next(LagMetric::RebuildRetire);
-
-    int removedInvalidUnits = 0;
-    int retiredEffects = 0;
-    uint64_t preSanitizeEnd = 0;
-    {
-        // Retain transition tears before flushing the tracked kill queue.
-        uint64_t sGameEffect = *(uint64_t*)_addr(PTR_SGAMEEFFECT);
-        if (sGameEffect && *(uint32_t*)(sGameEffect + 0x128) != 0) {
-            Effect_FlushTrackedForRestore((void*)sGameEffect);
-            InvalidateMemoryQueryCache();
-        }
-
-        ScopedMemoryQueryCache memoryCache;
-        removedInvalidUnits = Shot_SanitizeUnitCategoryLists(
-            sUnit, SAUX_FIRST_CATEGORY, SEFFECT_LAST_CATEGORY);
-        if (removedInvalidUnits != 0) {
-            HookLog("Rollback: removed %d invalid sUnit category entries before restore\n",
-                     removedInvalidUnits);
-        }
-        preSanitizeEnd = Profile_Now();
-
-        // Invoke virtual kill only for laser shots; other classes may tear down needed parents.
-        for (void* shot : currentShots) {
-            uint64_t dti = GetObjectDti((uint64_t)shot);
-            if (!Rollback_ShouldFinalizeShotBeforeRetirement(dti)) {
-                continue;
-            }
-            uint64_t vtable = *(uint64_t*)shot;
-            uint64_t kill = *(uint64_t*)(vtable + 0x78);
-            if (kill)
-                ((void(__fastcall*)(void*))kill)(shot);
-        }
-
-        // Retire replaceable effects, preserving the effect policy's retained owners.
-        // Weapon Cart's model effects need a separate retirement path.
-        retiredEffects += Rollback_RetireShotModelEffects(sUnit, currentShots);
-        retiredEffects += Effect_RetireCurrent(sUnit);
-    }
-    const uint64_t retireEffectsEnd = Profile_Now();
-    diagnosticStage.Next(LagMetric::RebuildDestroy);
-
-    // Unlink and destroy current shots before reconstruction, rather than awaiting deferred cleanup.
-    int retiredShots = 0;
-    if (g_activeRollbackProfile)
-        g_activeRollbackProfile->restoreCurrentShots += (uint32_t)currentShots.size();
-    const uint64_t collectShotsEnd = Profile_Now();
-    for (void* shot : currentShots) {
-        // Release the embedded uEffect graph and detach its links before shot destruction.
-        Shot_DetachEmbeddedEffect(shot);
-        int malformedCollisionSlots =
-            Shot_SanitizeCollisionSlotsForDestruction(shot);
-        if (malformedCollisionSlots != 0) {
-            HookLog("Rollback: detached %d malformed collision arrays before destroying shot 0x%llX\n",
-                    malformedCollisionSlots, (uint64_t)shot);
-        }
-        uint32_t* state = (uint32_t*)((uint8_t*)shot + 0x10);
-        Shot_RemoveFromAllMultiMaskArrays(sUnit, shot);
-        removeUnit(sUnit, shot);
-        *state &= ~7u;
-        uint64_t vtable = *(uint64_t*)shot;
-        auto destroy = (void(__fastcall*)(void*, uint32_t))*(uint64_t*)vtable;
-        destroy(shot, 1);
-        ++retiredShots;
-    }
-    const uint64_t destroyShotsEnd = Profile_Now();
-
-    // Recheck scheduler entries after shot destructors may have released attached effects.
-    // Skip this second list scan when there were no shots to destroy.
-    int removedShotOwnedEffects = 0;
-    uint64_t postSanitizeEnd = 0;
-    {
-        ScopedMemoryQueryCache memoryCache;
-        removedShotOwnedEffects = currentShots.empty()
-            ? 0
-            : Shot_SanitizeUnitCategoryLists(
-                sUnit, SSHOT_FIRST_CATEGORY, SEFFECT_LAST_CATEGORY);
-        if (removedShotOwnedEffects != 0) {
-            HookLog("Rollback: removed %d dead sUnit entries after shot destruction\n",
-                     removedShotOwnedEffects);
-        }
-        postSanitizeEnd = Profile_Now();
-        Effect_SanitizeRetired(sUnit);
-    }
-    const uint64_t sanitizeEffectsEnd = Profile_Now();
-
-    void* sShot = *(void**)_addr(PTR_SSHOT);
-    void* sGameConfig = *(void**)_addr(PTR_SGAMECONFIG);
-    const uint8_t* savedShotIdPool = nullptr;
-    const uint8_t* savedShotSlotFlags = nullptr;
-    size_t regionOffset = 0;
-    for (int i = 0; i < slot.regionCount; ++i) {
-        if (slot.regions[i].ptr == (uint8_t*)sShot + SSHOT_ID_POOL_OFFSET &&
-            slot.regions[i].size >= SSHOT_ID_POOL_SIZE &&
-            regionOffset + SSHOT_ID_POOL_SIZE <= slot.size) {
-            savedShotIdPool = slot.data + regionOffset;
-        }
-        if (sGameConfig &&
-            slot.regions[i].ptr == (uint8_t*)sGameConfig +
-                SGAMECONFIG_SHOT_SLOT_FLAGS_OFFSET &&
-            slot.regions[i].size >= SGAMECONFIG_SHOT_SLOT_FLAGS_SIZE &&
-            regionOffset + SGAMECONFIG_SHOT_SLOT_FLAGS_SIZE <= slot.size) {
-            savedShotSlotFlags = slot.data + regionOffset;
-        }
-        regionOffset += slot.regions[i].size;
-        if (savedShotIdPool && savedShotSlotFlags) break;
-    }
-    // Restore the ID pool/cursor after destruction and before factories allocate IDs.
-    if (savedShotIdPool) {
-        std::memcpy((uint8_t*)sShot + SSHOT_ID_POOL_OFFSET,
-                    savedShotIdPool, SSHOT_ID_POOL_SIZE);
-    }
-    // Restore slot-active flags changed by shot teardown.
-    if (savedShotSlotFlags) {
-        std::memcpy((uint8_t*)sGameConfig + SGAMECONFIG_SHOT_SLOT_FLAGS_OFFSET,
-                    savedShotSlotFlags, SGAMECONFIG_SHOT_SLOT_FLAGS_SIZE);
-    }
-    auto enqueueUnit = (ShotEnqueueFn)_addr(FN_SSHOT_ENQUEUE_UNIT);
-    auto addUnit = (UnitAddFn)_addr(FN_SUNIT_ADD_UNIT);
-    auto flushPendingUnits =
-        (void(__fastcall*)(void*))_addr(FN_SSHOT_FLUSH_PENDING_UNITS);
-    uint32_t* pendingCountPtr = (uint32_t*)((uint8_t*)sShot + 0x2448);
-    if (*pendingCountPtr != 0) {
-        HookLog("Rollback: discarding %u pre-restore pending-shot entries\n",
-                *pendingCountPtr);
-        *pendingCountPtr = 0;
-    }
-    int respawnedShots = 0;
-    int failedShots = 0;
-
-    // Save restored RNG state so reconstruction does not consume gameplay randomness.
-    uint8_t restoredGlobalRng[16] = {};
-    uint8_t restoredEffectRng[16] = {};
-    struct SavedCharacterRng {
-        void* character;
-        uint8_t state[16];
-    };
-    std::vector<SavedCharacterRng> restoredCharacterRngs;
-    uint64_t sEffect = *(uint64_t*)_addr(0x140E17A38);
-    std::memcpy(restoredGlobalRng, (void*)_addr(0x140d765d8), sizeof(restoredGlobalRng));
-    if (sEffect) std::memcpy(restoredEffectRng, (void*)(sEffect + 0x3C), sizeof(restoredEffectRng));
-
-    // Preserve each distinct shot owner's RNG as well as the global/effect streams.
-    for (const ShotRecipe& saved : slot.shotRecipes) {
-        if (!saved.ownerChr) continue;
-        bool alreadySaved = false;
-        for (const SavedCharacterRng& characterRng : restoredCharacterRngs) {
-            if (characterRng.character == saved.ownerChr) {
-                alreadySaved = true;
-                break;
-            }
-        }
-        if (alreadySaved) continue;
-
-        SavedCharacterRng characterRng{};
-        characterRng.character = saved.ownerChr;
-        std::memcpy(characterRng.state, (uint8_t*)saved.ownerChr + 0x2D80,
-                    sizeof(characterRng.state));
-        restoredCharacterRngs.push_back(characterRng);
-    }
-    const uint64_t respawnSetupEnd = Profile_Now();
-    diagnosticStage.Next(LagMetric::RebuildSpawn);
-
-    uint64_t respawnPrepareTicks = 0;
-    uint64_t respawnFactoryTicks = 0;
-    uint64_t respawnRegisterTicks = 0;
-    uint64_t respawnConcreteTicks = 0;
-    uint64_t respawnOverlayTicks = 0;
-    std::vector<uintptr_t> waitedForModelDtis;
-    const uint64_t referenceCacheStart = Profile_Now();
-    Shot_PrepareReferenceResolution(slot.shotRecipes);
-    const uint64_t referenceCacheEnd = Profile_Now();
-    for (ShotRecipe& saved : slot.shotRecipes) {
-        const uint64_t prepareStart = Profile_Now();
-        saved.restoredPtr = nullptr;
-        RestorePreSpawnRng(saved);
-        void* objectRef1 = Shot_ResolveReference(saved.objectRef1);
-        void* objectRef2 = Shot_ResolveReference(saved.objectRef2);
-        ShotRecipe remappedRecipe;
-        const ShotRecipe* spawnRecipe = &saved;
-        if (Rollback_RemapShotSpawnParent(
-                saved, slot.shotRecipes, remappedRecipe))
-            spawnRecipe = &remappedRecipe;
-        const uint64_t factoryStart = Profile_Now();
-        respawnPrepareTicks += factoryStart - prepareStart;
-
-        RollbackShotFactoryPolicyState factoryPolicy;
-        Rollback_PrepareShotFactory(saved, factoryPolicy);
-        void* fresh = Shot_SpawnOriginal(
-            sShot, *spawnRecipe, objectRef1, objectRef2);
-        Rollback_FinishShotFactory(factoryPolicy);
-        const uint64_t factoryEnd = Profile_Now();
-        respawnFactoryTicks += factoryEnd - factoryStart;
-        if (!fresh) {
-            failedShots++;
-            continue;
-        }
-
-        // Associate the fresh shot with the saved spawn sequence before class-specific repair.
-        Shot_TrackReconstructed(fresh, *spawnRecipe);
-        saved.restoredPtr = fresh;
-
-        Rollback_PrepareShotModelAfterSpawn(
-            fresh, saved.concrete.dti, waitedForModelDtis);
-
-        // Retry missing callback setup only if all fresh slots are empty.
-        // Repeating setup over existing callbacks can orphan registered effects.
-        bool savedHasCallbacks = false;
-        bool freshHasCallbacks = false;
-        for (uint32_t index = 0; index < 13; ++index) {
-            savedHasCallbacks |=
-                saved.concrete.callbackEffects[index].occupied;
-            freshHasCallbacks |=
-                *(void**)((uint8_t*)fresh + 0x1F78 + index * sizeof(void*)) !=
-                nullptr;
-        }
-        if (savedHasCallbacks && !freshHasCallbacks) {
-            uint64_t vtable = *(uint64_t*)fresh;
-            uint64_t setupAddress = *(uint64_t*)(vtable + 0x28);
-            if (setupAddress) {
-                auto setup = (void(__fastcall*)(void*))setupAddress;
-                setup(fresh);
-            }
-        }
-        Rollback_RebuildShotStateBeforeRegistration(fresh, saved);
-        // Queue native registration, falling back to direct insertion at capacity.
-        // Enqueue increments even on overflow; never call it on a full 512-entry queue.
-        uint32_t pendingCount = *pendingCountPtr;
-        if (pendingCount >= 0x200 || !enqueueUnit(sShot, fresh, SSHOT_CATEGORY)) {
-            addUnit(sUnit, SSHOT_CATEGORY, fresh, nullptr);
-        }
-        const uint64_t registerEnd = Profile_Now();
-        respawnRegisterTicks += registerEnd - factoryEnd;
-        // Target-hit records use object identity; include assist/proxy nodes from both team lists.
-        std::vector<const void*> validTargets;
-        validTargets.reserve(16);
-        uint64_t sCharacter = *(uint64_t*)_addr(PTR_SCHARACTER);
-        for (int teamIndex = 0; sCharacter && teamIndex < 2; ++teamIndex) {
-            uint64_t node = sCharacter +
-                (teamIndex == 0 ? TEAM0_OFFSET : TEAM1_OFFSET) +
-                TEAM_FIRST_NODE_OFFSET;
-            for (int safety = 16; node && safety-- > 0;) {
-                void* character = *(void**)(node + NODE_CHR_OFFSET);
-                if (character &&
-                    std::find(validTargets.begin(), validTargets.end(), character) ==
-                        validTargets.end()) {
-                    validTargets.push_back(character);
-                }
-                node = *(uint64_t*)(node + NODE_NEXT_OFFSET);
-            }
-        }
-        // Also accept the stage manager's two body references as stable hit targets.
-        uint64_t sStage = *(uint64_t*)_addr(PTR_SSTAGE);
-        if (sStage) {
-            for (uint32_t offset : {0x2050u, 0x2058u}) {
-                void* stageBody = *(void**)(sStage + offset);
-                if (stageBody &&
-                    std::find(validTargets.begin(), validTargets.end(), stageBody) ==
-                        validTargets.end()) {
-                    validTargets.push_back(stageBody);
-                }
-            }
-        }
-        if (!ConcreteShotSnapshot_Restore(fresh, saved.concrete,
-                                           validTargets.data(),
-                                           validTargets.size())) {
-            HookLog("Rollback: restored shot 0x%llX has incomplete collision topology\n",
-                     (uint64_t)fresh);
-        }
-        if (saved.concrete.body.size() >= 0x1F54) {
-            // Replace the factory-assigned ID with the snapshot ID.
-            std::memcpy((uint8_t*)fresh + 0x1F50,
-                        saved.concrete.body.data() + 0x1F50,
-                        sizeof(uint32_t));
-        }
-        const uint64_t concreteEnd = Profile_Now();
-        respawnConcreteTicks += concreteEnd - registerEnd;
-        // Reapply explicit arm/flight/class state after the filtered body overlay.
-        Shot_RestoreArmState(fresh, saved);
-        Shot_ApplyFlight(fresh, saved.flight);
-        Rollback_RestoreShotClassState(fresh, saved);
-
-        // Remap +0x1F70 when the captured value was a shot self-reference.
-        void* savedSlot0 = nullptr;
-        std::memcpy(&savedSlot0, saved.flight.resourceScalars,
-                    sizeof(savedSlot0));
-        if (savedSlot0 == saved.savedPtr)
-            *(void**)((uint8_t*)fresh + 0x1F70) = fresh;
-
-        // Keep restored lifecycle flags, but explicitly assign the shot category.
-        uint32_t* unitState = (uint32_t*)((uint8_t*)fresh + 0x10);
-        *unitState = (*unitState & ~0x3F8u) | (SSHOT_CATEGORY << 3);
-
-        // Reconcile callback occupancy and compatible state after restoring shot gameplay fields.
-        // Callback allocations and generator topology remain factory-owned.
-        ConcreteShotSnapshot_RestoreCallbackEffects(fresh, saved.concrete);
-        const uint64_t overlayEnd = Profile_Now();
-        respawnOverlayTicks += overlayEnd - concreteEnd;
-        respawnedShots++;
-    }
-    const uint64_t respawnEnd = Profile_Now();
-    diagnosticStage.Next(LagMetric::RebuildFinalize);
-
-    Shot_RestoreBodyReferences(slot);
-
-    // Interpreter +90 is character +13D8 (native result writer 1401079F0).
-    // Character +90 belongs to uCoord::mLmat and must never be pointer-filtered.
-    // Repair tracked objects and validate the two explicit object-reference slots.
-    std::vector<void*> characters;
-    uint64_t sCharacter = *(uint64_t*)_addr(PTR_SCHARACTER);
-    for (int teamIndex = 0; sCharacter && teamIndex < 2; ++teamIndex) {
-        uint64_t node = sCharacter +
-            (teamIndex == 0 ? TEAM0_OFFSET : TEAM1_OFFSET) +
-            TEAM_FIRST_NODE_OFFSET;
-        for (int member = 0; node && member < 8; ++member) {
-            void* character = *(void**)(node + NODE_CHR_OFFSET);
-            if (character) characters.push_back(character);
-            node = *(uint64_t*)(node + NODE_NEXT_OFFSET);
-        }
-    }
-    uint32_t categoryCount = sUnit
-        ? *(uint32_t*)((uint8_t*)sUnit + SUNIT_CATEGORY_COUNT_OFFSET)
-        : 0;
-    if (categoryCount > SUNIT_CHARACTER_CATEGORY) {
-        void* character = *(void**)((uint8_t*)sUnit + SUNIT_CATEGORY_LISTS_OFFSET +
-            SUNIT_CATEGORY_LIST_STRIDE * SUNIT_CHARACTER_CATEGORY);
-        for (int safety = 64; character && safety-- > 0;
-             character = *(void**)((uint8_t*)character + 0x18)) {
-            if (std::find(characters.begin(), characters.end(), character) == characters.end())
-                characters.push_back(character);
-        }
-    }
-    const uint64_t characterReferencesEarlyStart = Profile_Now();
-    Rollback_RestoreCharacterShotReferences(slot);
-    const uint64_t characterReferencesEarlyEnd = Profile_Now();
-    for (void* character : characters) {
-        // Category 8 also contains uChrCpu; it has no +0x6428 shot slot.
-        if (!IsCharacterBody(character)) continue;
-        for (uint32_t referenceOffset : {0x13D8u, 0x6428u}) {
-            bool typedShotReference = std::any_of(
-                slot.characterShotReferences.begin(),
-                slot.characterShotReferences.end(),
-                [=](const RollbackCharacterShotReference& saved) {
-                    return saved.character == character &&
-                           saved.offset == referenceOffset;
-                });
-            if (typedShotReference) continue;
-
-            void** objectReturn = (void**)((uint8_t*)character + referenceOffset);
-            void* savedReference = *objectReturn;
-            const bool abandonedShot =
-                std::find(currentShots.begin(), currentShots.end(), savedReference) !=
-                currentShots.end();
-            const bool invalidObject = savedReference &&
-                !HasCallableDtiVirtual(savedReference);
-            if (abandonedShot || invalidObject) {
-                *objectReturn = nullptr;
-            }
-        }
-    }
-
-    // Recompute character-specific shot latches from the reconstructed recipe set.
-    size_t regionDataOffset = 0;
-    for (int region = 0; region < slot.regionCount; ++region) {
-        const RollbackRegion& savedRegion = slot.regions[region];
-        if (regionDataOffset + savedRegion.size <= slot.size) {
-            Rollback_RemapCharacterShotLinks(
-                savedRegion.ptr, savedRegion.expectedVtable,
-                slot.data + regionDataOffset, savedRegion.size,
-                slot.shotRecipes);
-        }
-        regionDataOffset += savedRegion.size;
-    }
-
-    // Clamp before native flush, which trusts the count rather than the 512-entry capacity.
-    if (*pendingCountPtr > 0x200) {
-        HookLog("Rollback: clamping pending-shot count %u to 512 before flush\n",
-                *pendingCountPtr);
-        *pendingCountPtr = 0x200;
-    }
-    flushPendingUnits(sShot);
-
-    // Evaluate saved poses after pending registration has completed.
-    for (const RollbackShotRecipe& saved : slot.shotRecipes) {
-        if (!saved.restoredPtr) continue;
-        Rollback_EvaluateRestoredShotPose(
-            saved.restoredPtr, saved.concrete.dti);
-    }
-
-    // Remap shot-valued factory arguments before reconstructing independent effects.
-    for (RollbackEffectRecipe& effect : slot.effectRecipes) {
-        for (const ShotRecipe& shot : slot.shotRecipes) {
-            auto remap = [&](void*& reference) {
-                if (reference == shot.savedPtr) reference = shot.restoredPtr;
-            };
-            remap(effect.attachTo);
-            remap(effect.a7);
-            remap(effect.a8);
-            remap(effect.a10);
-            remap(effect.a13);
-        }
-    }
-    Effect_RestoreRecipes(slot);
-    const uint64_t characterEffectReferencesEarlyStart = Profile_Now();
-    Effect_RestoreCharacterReferences(slot);
-    const uint64_t characterEffectReferencesEarlyEnd = Profile_Now();
-    Effect_RestoreCharacterStates(slot);
-
-    // Undo reconstruction's ID/slot allocations now that saved shot IDs are restored.
-    if (savedShotIdPool) {
-        std::memcpy((uint8_t*)sShot + SSHOT_ID_POOL_OFFSET,
-                    savedShotIdPool, SSHOT_ID_POOL_SIZE);
-    }
-    if (savedShotSlotFlags) {
-        std::memcpy((uint8_t*)sGameConfig + SGAMECONFIG_SHOT_SLOT_FLAGS_OFFSET,
-                    savedShotSlotFlags, SGAMECONFIG_SHOT_SLOT_FLAGS_SIZE);
-    }
-
-    std::memcpy((void*)_addr(0x140d765d8), restoredGlobalRng, sizeof(restoredGlobalRng));
-    if (sEffect) std::memcpy((void*)(sEffect + 0x3C), restoredEffectRng, sizeof(restoredEffectRng));
-    for (const SavedCharacterRng& characterRng : restoredCharacterRngs) {
-        std::memcpy((uint8_t*)characterRng.character + 0x2D80, characterRng.state,
-                    sizeof(characterRng.state));
-    }
-    for (void* resource : pinnedShotResources)
-        releaseRef(resource);
-    for (void* resource : pinnedCallbackEffectResources)
-        releaseRef(resource);
-    const uint64_t finalizeEnd = Profile_Now();
-
-    if (g_activeRollbackProfile) {
-        g_activeRollbackProfile->restoreShotPinResources += pinResourcesEnd - profileStart;
-        g_activeRollbackProfile->restoreShotPreSanitize += preSanitizeEnd - pinResourcesEnd;
-        g_activeRollbackProfile->restoreShotRetireEffects += retireEffectsEnd - preSanitizeEnd;
-        g_activeRollbackProfile->restoreShotCollect += collectShotsEnd - retireEffectsEnd;
-        g_activeRollbackProfile->restoreShotDestroy += destroyShotsEnd - collectShotsEnd;
-        g_activeRollbackProfile->restoreShotPostSanitize += postSanitizeEnd - destroyShotsEnd;
-        g_activeRollbackProfile->restoreShotSanitizeEffects += sanitizeEffectsEnd - postSanitizeEnd;
-        g_activeRollbackProfile->restoreShotRespawnSetup += respawnSetupEnd - sanitizeEffectsEnd;
-        g_activeRollbackProfile->restoreShotReferenceCache +=
-            referenceCacheEnd - referenceCacheStart;
-        g_activeRollbackProfile->restoreShotRespawn += respawnEnd - respawnSetupEnd;
-        g_activeRollbackProfile->restoreShotRespawnPrepare += respawnPrepareTicks;
-        g_activeRollbackProfile->restoreShotRespawnFactory += respawnFactoryTicks;
-        g_activeRollbackProfile->restoreShotRespawnRegister += respawnRegisterTicks;
-        g_activeRollbackProfile->restoreShotRespawnConcrete += respawnConcreteTicks;
-        g_activeRollbackProfile->restoreShotRespawnOverlay += respawnOverlayTicks;
-        g_activeRollbackProfile->restoreShotFinalize += finalizeEnd - respawnEnd;
-        g_activeRollbackProfile->restoreCharacterShotReferencesEarly +=
-            characterReferencesEarlyEnd - characterReferencesEarlyStart;
-        g_activeRollbackProfile->restoreCharacterShotReferenceCount +=
-            (uint32_t)slot.characterShotReferences.size();
-        g_activeRollbackProfile->restoreCharacterEffectReferencesEarly +=
-            characterEffectReferencesEarlyEnd -
-            characterEffectReferencesEarlyStart;
-        g_activeRollbackProfile->restoreCharacterEffectReferenceCount +=
-            (uint32_t)slot.characterEffectReferences.size();
-    }
-
-    if (failedShots != 0) {
-        HookLog("Rollback: retired shots=%d effects=%d; shot recipes respawned=%d failed=%d\n",
-                retiredShots, retiredEffects, respawnedShots, failedShots);
-    }
-}
 
 void Rollback_RestoreSnapshot(int32_t frame)
 {
@@ -1039,12 +468,10 @@ void Rollback_RestoreSnapshot(int32_t frame)
     uint64_t sAction = sMvc3Mgr ? *(uint64_t*)(sMvc3Mgr + SMVC3MGR_ACTION_OFFSET) : 0;
     uint64_t modelJointAllocationSlot = 0;
     uint64_t liveModelJointAllocation = 0;
-    if (sAction && IsAccessibleAddress(
-            sAction + SACTION_MODEL_JOINT_WRAPPER_OFFSET)) {
+    if (sAction) {
         uint64_t modelJointWrapper = *(uint64_t*)(
             sAction + SACTION_MODEL_JOINT_WRAPPER_OFFSET);
-        if (modelJointWrapper && IsAccessibleAddress(
-                modelJointWrapper + SACTION_MODEL_JOINT_ALLOCATION_OFFSET)) {
+        if (modelJointWrapper) {
             modelJointAllocationSlot = modelJointWrapper +
                 SACTION_MODEL_JOINT_ALLOCATION_OFFSET;
             liveModelJointAllocation = *(uint64_t*)modelJointAllocationSlot;
@@ -1335,8 +762,6 @@ void Rollback_RestoreSnapshot(int32_t frame)
         if (slot.regions[i].ownerSlot == modelJointAllocationSlot &&
             slot.regions[i].size == SACTION_MODEL_JOINT_ALLOCATION_SIZE &&
             liveModelJointAllocation &&
-            IsAccessibleAddress(liveModelJointAllocation +
-                SACTION_MODEL_JOINT_ALLOCATION_SIZE - 1) &&
             copySize > SACTION_MODEL_JOINT_DATA_OFFSET) {
             // Restore the action-joint payload into the current allocation, excluding its header.
             size_t payloadSize = copySize - SACTION_MODEL_JOINT_DATA_OFFSET;
@@ -1514,13 +939,6 @@ void Rollback_RestoreSnapshot(int32_t frame)
             }
             restoreHelperLinks(character, savedCharacter, copySize);
 
-            // Interpreter return selector 7 can hold its roster owner, a shot
-            // or an effect. Native +90 is relative to the interpreter at +1348.
-            // Shots/effects are repaired by their stable-identity recipes.
-            const uint64_t savedReturn = *(const uint64_t*)(savedCharacter + 0x13D8);
-            if (!savedReturn || isTeamCharacter(savedReturn))
-                *(uint64_t*)(character + 0x13D8) = savedReturn;
-
             if (concreteDti == (uint64_t)_addr(0x140D45788) ||
                 concreteDti == (uint64_t)_addr(0x140D46118)) {
                 // cChrTrace's source is a roster character, not a heap buffer.
@@ -1528,22 +946,6 @@ void Rollback_RestoreSnapshot(int32_t frame)
                 const uint64_t traceSource = *(const uint64_t*)(savedCharacter + 0x68F8);
                 if (!traceSource || isTeamCharacter(traceSource))
                     *(uint64_t*)(character + 0x68F8) = traceSource;
-            }
-
-            // Ryu's +6918 effect now follows the character effect recipes.
-
-            if (concreteDti == (uint64_t)_addr(DTI_UIRONMAN) &&
-                copySize >= 0x6928) {
-                // Clear Iron Man's weak references when they no longer identify effects.
-                for (uint32_t effectOffset : {0x68F0u, 0x6900u, 0x6920u}) {
-                    void** effectSlot = (void**)(character + effectOffset);
-                    if (*effectSlot && !IsEffectObject(*effectSlot)) {
-                        HookLog("Rollback: cleared stale Iron Man effect slot "
-                                "+0x%X object=0x%llX\n", effectOffset,
-                                (uint64_t)*effectSlot);
-                        *effectSlot = nullptr;
-                    }
-                }
             }
 
             restoreCnsHelper(character, savedCharacter, copySize, 0x3BF0);
@@ -1759,16 +1161,9 @@ void Rollback_RestoreSnapshot(int32_t frame)
     }
     const uint64_t hitSolverEnd = Profile_Now();
 
-    // Clear invalid character/material references before native code consumes them.
-    Rollback_ClearStalePointers();
+    // Reconcile character material caches without touching native effect ownership.
+    Rollback_ClearStaleMaterialPointers();
     const uint64_t stalePointersEnd = Profile_Now();
-
-    // Clear game-effect slot caches before factories create replacements.
-    Rollback_ClearGameEffectSlots();
-    const uint64_t effectSlotsEnd = Profile_Now();
-    diagnosticStage.Next(LagMetric::RestoreReconstruct);
-    RestoreShotAndEffectRecipes(slot);
-    const uint64_t shotsEnd = Profile_Now();
     diagnosticStage.Next(LagMetric::RestoreLate);
 
     /*std::memcpy(liveGlobalRng, (void*)_addr(0x140D765D8), sizeof(liveGlobalRng));
@@ -1800,7 +1195,7 @@ void Rollback_RestoreSnapshot(int32_t frame)
         }
     }
 
-    // Reapply selected character state after recipe/model repair.
+    // Reapply selected character state after material/render reconciliation.
     offset = 0;
     for (int i = 0; i < slot.regionCount; ++i) {
         if (offset >= slot.size) break;
@@ -1883,25 +1278,12 @@ void Rollback_RestoreSnapshot(int32_t frame)
                         ? savedRelationship : 0;
             }
 
-            Rollback_RemapCharacterShotLinks(
-                (void*)character, slot.regions[i].expectedVtable,
-                savedCharacter, copySize, slot.shotRecipes);
         }
         offset += slot.regions[i].size;
     }
     RestoreCharacterCollisionParentReferences(slot);
-    const uint64_t characterReferencesLateStart = Profile_Now();
-    Rollback_RestoreCharacterShotReferences(slot);
-    const uint64_t characterShotReferencesLateEnd = Profile_Now();
-    Effect_RestoreCharacterReferences(slot);
-    if (g_activeRollbackProfile) {
-        g_activeRollbackProfile->restoreCharacterShotReferencesLate +=
-            characterShotReferencesLateEnd - characterReferencesLateStart;
-        g_activeRollbackProfile->restoreCharacterEffectReferencesLate +=
-            Profile_Now() - characterShotReferencesLateEnd;
-    }
 
-    // Reapply camera state after recipe/model repair, including retained references.
+    // Reapply camera state after material/render reconciliation, including retained references.
     uint64_t liveCamera = *(uint64_t*)_addr(PTR_SCAMERA);
     uint64_t liveCameraUnit = liveCamera
         ? *(uint64_t*)(liveCamera + 0x58) : 0;
@@ -1938,9 +1320,7 @@ void Rollback_RestoreSnapshot(int32_t frame)
         g_activeRollbackProfile->restoreOwnerPointers += ownerPointersEnd - collisionClonesEnd;
         g_activeRollbackProfile->restoreHitSolver += hitSolverEnd - ownerPointersEnd;
         g_activeRollbackProfile->restoreStalePointers += stalePointersEnd - hitSolverEnd;
-        g_activeRollbackProfile->restoreEffectSlots += effectSlotsEnd - stalePointersEnd;
-        g_activeRollbackProfile->restoreShots += shotsEnd - effectSlotsEnd;
-        g_activeRollbackProfile->restoreUi += restoreEnd - shotsEnd;
+        g_activeRollbackProfile->restoreUi += restoreEnd - stalePointersEnd;
     }
     LiveBenchmark_Record(LiveBenchmarkMetric::Restore, benchmarkStart);
 }

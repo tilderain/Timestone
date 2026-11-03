@@ -6,26 +6,11 @@
 uint64_t GetObjectDti(uint64_t object);
 uint32_t DecodeDtiSize(uint64_t dti);
 
+// Snapshot word classification only; this does not validate memory or lifetime.
 bool IsLikelyPointer(uint64_t value);
-bool IsAccessiblePointer(uint64_t value);
-bool IsAccessibleAddress(uint64_t value);
-bool IsExecutableAddress(uint64_t value);
-bool IsAccessibleRange(uint64_t value, size_t size);
-bool HasCallableDtiVirtual(const void* object);
+// Tests callback presence only. The caller owns the object's lifetime.
+bool HasDtiVirtual(const void* object);
 
 bool IsUnitObject(const void* object);
 bool IsEffectObject(const void* object);
 bool IsBaseModelObject(const void* object);
-
-// Invalidates cached VirtualQuery results on every thread at its next lookup.
-// Call before or after native work that can release or remap allocations.
-void InvalidateMemoryQueryCache();
-
-class ScopedMemoryQueryCache {
-public:
-    ScopedMemoryQueryCache();
-    ~ScopedMemoryQueryCache();
-
-    ScopedMemoryQueryCache(const ScopedMemoryQueryCache&) = delete;
-    ScopedMemoryQueryCache& operator=(const ScopedMemoryQueryCache&) = delete;
-};

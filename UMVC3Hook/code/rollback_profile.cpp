@@ -221,17 +221,16 @@ void Profile_RecordUnitObject(RollbackUnitProfilePhase phase, uint32_t category,
 void Profile_RecordSnapshotEnabled(uint64_t profileStart, uint64_t buildRegionsEnd,
                                     uint64_t allocationEnd, uint64_t copyRegionsEnd,
                                     uint64_t snapshotMetadataEnd, uint64_t collisionClonesEnd,
-                                    uint64_t shotRecipesEnd, size_t bytes, uint32_t regions)
+                                    uint64_t snapshotEnd, size_t bytes, uint32_t regions)
 {
     if (!g_activeRollbackProfile) return;
 
-    g_activeRollbackProfile->saveTotal += shotRecipesEnd - profileStart;
+    g_activeRollbackProfile->saveTotal += snapshotEnd - profileStart;
     g_activeRollbackProfile->saveBuildRegions += buildRegionsEnd - profileStart;
     g_activeRollbackProfile->saveRecycleAndAllocate += allocationEnd - buildRegionsEnd;
     g_activeRollbackProfile->saveCopyRegions += copyRegionsEnd - allocationEnd;
     g_activeRollbackProfile->saveMetadata += snapshotMetadataEnd - copyRegionsEnd;
     g_activeRollbackProfile->saveCollisionClones += collisionClonesEnd - snapshotMetadataEnd;
-    g_activeRollbackProfile->saveShotRecipes += shotRecipesEnd - collisionClonesEnd;
     g_activeRollbackProfile->snapshotBytes += bytes;
     g_activeRollbackProfile->snapshotRegions += regions;
     ++g_activeRollbackProfile->snapshotCount;

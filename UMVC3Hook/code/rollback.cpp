@@ -2,10 +2,8 @@
 #include "../pch.h"
 
 #include "rollback.h"
-#include "rollback_effect.h"
 #include "rollback_resim.h"
 #include "rollback_rng.h"
-#include "rollback_shot.h"
 #include "gameplay_hooks.h"
 
 #include <atomic>
@@ -128,6 +126,5 @@ void Rollback_InitHooks()
     Rollback_InitOnlineBattleHook();
     Rollback_InitReSimulationHooks();
     Rollback_InitRngHooks();
-    Effect_InitHooks();
-    Shot_InitHooks();
+    HookLog("Rollback: shot/effect rewind is unavailable; native dynamic objects are not restored\n");
 }

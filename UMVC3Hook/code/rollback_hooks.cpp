@@ -203,7 +203,6 @@ static void __fastcall hkMvc3MainMove(uint64_t main)
     const uint64_t benchmarkStart = g_isResimulating ? 0 :
         LiveBenchmark_BeginFrame(Controller_GetNetFrameCount());
     // Discard previous memory checks; native allocations may have changed.
-    InvalidateMemoryQueryCache();
     Rollback_SetMainInstance(main);
 
     // Discard pending corrections during restart or battle synchronization.
@@ -380,11 +379,10 @@ static void __fastcall hkSceneUpdateSoundEnv(uint64_t scene)
     if (model) {
         bool valid = IsBaseModelObject((void*)model);
         uint64_t vtable = valid ? *(uint64_t*)model : 0;
-        valid = valid && IsAccessibleRange(vtable + 0xA0, sizeof(uint64_t));
         uint64_t getMatrix = valid ? *(uint64_t*)(vtable + 0xA0) : 0;
         int32_t jointIndex = *(int32_t*)(scene + JOINT_INDEX_OFFSET);
         uint32_t positionMode = *(uint32_t*)(scene + POSITION_MODE_OFFSET);
-        if (!valid || !IsExecutableAddress(getMatrix) ||
+        if (!valid || !getMatrix ||
             (positionMode == 2 && jointIndex < 0)) {
             HookLog("Rollback: detached stale sound scene model=0x%llX "
                     "vtable=0x%llX mode=%u joint=%d\n",
@@ -464,7 +462,7 @@ static uint64_t(__fastcall* oMaterialResourceState)(uint64_t) = nullptr;
 
 static void __fastcall hkMenuOptionKbdMove(uint64_t object)
 {
-    uint64_t vtable = IsAccessiblePointer(object) ? *(uint64_t*)object : 0;
+    uint64_t vtable = object ? *(uint64_t*)object : 0;
     if (vtable == (uint64_t)_addr(MT_DTI_VTABLE_ADDR)) {
         return;
     }
@@ -473,11 +471,11 @@ static void __fastcall hkMenuOptionKbdMove(uint64_t object)
 
 static uint64_t __fastcall hkMaterialResourceState(uint64_t material)
 {
-    if (!IsAccessibleRange(material, 0xA8))
+    if (!material)
         return 0;
 
     uint64_t resource = *(uint64_t*)(material + 0xA0);
-    if (!resource || !IsAccessibleRange(resource, 0x28))
+    if (!resource)
         return 0;
 
     return oMaterialResourceState(material);

@@ -35,8 +35,6 @@ void Profile_RecordUnitCategory(RollbackUnitProfilePhase, uint32_t, uint64_t) {}
 void Rollback_FreezeWatchdogUnit(const char*, uint32_t, uint64_t, uint64_t, int) {}
 const char* WatchdogPhaseName(RollbackUnitProfilePhase) { return "test"; }
 uint64_t GetObjectDti(uint64_t unit) { return *(uint64_t*)(unit + 8); }
-bool Effect_IsExAtkSpaceTransitionEffect(void*, bool) { return false; }
-bool Effect_IsExAtkSpaceUnit(void*) { return false; }
 bool RunDisabledCpuPostMove(uint64_t unit) {
     ++cpuShortcuts;
     calls.push_back(unit == firstUnit ? 99 : 199);

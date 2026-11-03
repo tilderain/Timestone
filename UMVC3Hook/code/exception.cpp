@@ -7,7 +7,6 @@
 #include "netplay.h"
 #include "rollback.h"
 #include "rollback_diagnostics.h"
-#include "rollback_effect.h"
 #include "umvc3.h"
 
 #include <cstdint>
@@ -853,22 +852,6 @@ LONG HandleException(PEXCEPTION_POINTERS info, bool catastrophicOnly)
         WriteLoadedCharacters(file, loadedCharacters, loadedCharacterCount);
         WriteCrashObjectCandidates(file, context, loadedCharacters,
                                     loadedCharacterCount);
-        if constexpr (EFFECT_LIFECYCLE_TRACE_ENABLED) {
-            const uint64_t effectCandidates[] = {
-                context->Rdi, context->Rcx, context->Rdx,
-                context->Rbx, context->R14,
-            };
-            constexpr size_t effectCandidateCount =
-                sizeof(effectCandidates) / sizeof(effectCandidates[0]);
-            for (size_t i = 0; i < effectCandidateCount; ++i) {
-                bool duplicate = false;
-                for (size_t previous = 0; previous < i; ++previous) {
-                    duplicate |= effectCandidates[i] == effectCandidates[previous];
-                }
-                if (!duplicate)
-                    Effect_DumpCrashTrace(file, effectCandidates[i]);
-            }
-        }
         WriteUnwindBacktrace(file, context);
         WriteStackObjectCandidates(file, context, loadedCharacters,
                                    loadedCharacterCount);

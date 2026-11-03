@@ -6,15 +6,12 @@
 #include "controller.h"
 #include "rollback_snapdump.h"
 #include "mk10utils.h"
-#include "rollback_effect.h"
 #include "rollback_memory.h"
-#include "rollback_model_policy.h"
 #include "rollback_profile.h"
 #include "live_benchmark.h"
 #include "lag_diagnostics.h"
 #include "rollback_restore.h"
 #include "rollback_resim.h"
-#include "rollback_shot.h"
 
 #include <cstdio>
 #include <cstring>
@@ -31,7 +28,6 @@ static_assert(sizeof(RollbackRegion) <= 64);
 
 static constexpr uintptr_t PTR_SREPLAY = 0x140d4d9d8;
 static constexpr uintptr_t PTR_SCHARACTER = 0x140d44a70;
-static constexpr uintptr_t PTR_SSHOT = 0x140d47f40;
 static constexpr uintptr_t PTR_SHITSOLVER = 0x140d44060;
 static constexpr uintptr_t PTR_SACTION = 0x140d47e68;
 static constexpr uintptr_t PTR_SMAIN = 0x140e177e8;
@@ -415,9 +411,6 @@ static void TraverseAndAddDynamicList(uint64_t listHead, size_t nextOffset,
     int safety = DYNAMIC_SAFETY;
 
     while (current && r < maxRegions && safety-- > 0) {
-        // Reject low addresses before DTI dispatch.
-        if (current < 0x10000) break;
-
         // Resolve size through the object's DTI getter.
         uint64_t dtiPtr = GetObjectDti(current);
         uint32_t objSize = DecodeDtiSize(dtiPtr);
@@ -471,293 +464,6 @@ static void TraverseAndAddDynamicList(uint64_t listHead, size_t nextOffset,
         }
     };
 
-    /*int collisionExternalRegions = 0;
-    size_t collisionExternalBytes = 0;
-    struct CollisionDiscoveryDiag {
-        uint64_t sCollision = 0;
-        uint64_t sbc = 0;
-        uint64_t moveMatrix = 0;
-        uint64_t activeData = 0;
-        uint32_t activeCount = 0;
-        uint32_t activeCapacity = 0;
-        uint64_t moveCategoryArray = 0;
-        uint32_t moveCategoryCount = 0;
-        uint32_t bvhVisited = 0;
-        uint32_t bvhPoolPresent = 0;
-        uint32_t bvhPoolHeaderAccessible = 0;
-        uint32_t bvhPoolCapacityValid = 0;
-        uint32_t bvhFreePresent = 0;
-        uint32_t bvhFreeHeaderValid = 0;
-        uint32_t bvhReachableNodes = 0;
-        uint32_t bvhStandaloneNodes = 0;
-        uint32_t sbcQueueHeadersValid = 0;
-        uint32_t sbcQueueDataPresent = 0;
-        uint32_t moveQueuesPresent = 0;
-        uint32_t moveThreadHeadersValid = 0;
-    } collisionDiag;
-
-    auto logOwnedBufferRejection = [&](const char* label, uint64_t ownerSlot,
-                                       uint64_t ptr, size_t size) {
-        return;
-        static std::unordered_map<std::string, std::string> lastReasons;
-        const char* reason = nullptr;
-        if (!ownerSlot) reason = "null owner slot";
-        else if (!ptr) reason = "null data pointer";
-        else if (!size) reason = "zero size";
-        else if (size > 0x1000000) reason = "size exceeds limit";
-        else if (!IsAccessibleRange(ptr, size)) reason = "range inaccessible";
-        if (!reason) return;
-
-        char state[192];
-        std::snprintf(state, sizeof(state),
-                      "%s owner=0x%llX ptr=0x%llX size=%zu",
-                      reason, ownerSlot, ptr, size);
-        std::string& previous = lastReasons[label];
-        if (previous != state) {
-            HookLog("Rollback: sCollision discovery reject %s: %s\n", label, state);
-            previous = state;
-        }
-    };
-
-    auto addOwnedBuffer = [&](uint64_t ownerSlot, uint64_t ptr, size_t size
-#if ROLLBACK_SNAPDUMP_ENABLED
-                              , const char* snapDumpName = "owned_buffer"
-#endif
-                              ) {
-        if (!ownerSlot || !ptr || !size || size > 0x1000000 ||
-            !IsAccessibleRange(ptr, size)) {
-            return;
-        }
-        if (r >= maxRegions) return;
-        add((void*)ptr, size, ownerSlot, 0, false
-#if ROLLBACK_SNAPDUMP_ENABLED
-            , snapDumpName
-#endif
-        );
-        //++collisionExternalRegions;
-        //collisionExternalBytes += size;
-    };
-
-    std::unordered_set<uint64_t> capturedStandaloneBvhNodes;
-    auto addDynamicBvhBuffers = [&](uint64_t bvh, uint32_t bank, uint32_t index) {
-        //++collisionDiag.bvhVisited;
-        if (!bvh || !IsAccessiblePointer(bvh)) {
-            if (index == 0)
-                HookLog("Rollback: sCollision discovery BVH bank=0x%X base=0x%llX inaccessible\n",
-                        bank, bvh);
-            return;
-        }
-
-        // Disabled discovery: capture pool payload and free-node pointers, excluding the header.
-        uint64_t pool = *(uint64_t*)(bvh + 0x18);
-        //if (pool) ++collisionDiag.bvhPoolPresent;
-        uint32_t poolCapacity = 0;
-        if (pool && IsAccessiblePointer(pool - 0x10)) {
-            //++collisionDiag.bvhPoolHeaderAccessible;
-            poolCapacity = *(uint32_t*)(pool - 0x10);
-        }
-        if (poolCapacity > 0 && poolCapacity <= 0x10000) {
-            //++collisionDiag.bvhPoolCapacityValid;
-            addOwnedBuffer(bvh + 0x18, pool,
-                           (size_t)poolCapacity * SCOLLISION_NODE_SIZE);
-        } else if (pool && index == 0) {
-        //    HookLog("Rollback: sCollision discovery BVH bank=0x%X pool=0x%llX capacity=%u headerAccessible=%d\n",
-        //            bank, pool, poolCapacity, IsAccessiblePointer(pool - 0x10));
-        }
-
-        uint32_t freeCount = *(uint32_t*)(bvh + 0x28);
-        uint32_t freeCapacity = *(uint32_t*)(bvh + 0x2C);
-        uint64_t freeNodes = *(uint64_t*)(bvh + 0x20);
-        //if (freeNodes) ++collisionDiag.bvhFreePresent;
-        if (freeCount <= freeCapacity && freeCapacity <= 0x10000) {
-        //    ++collisionDiag.bvhFreeHeaderValid;
-            addOwnedBuffer(bvh + 0x20, freeNodes, (size_t)freeCapacity * 8);
-        } else if (index == 0) {
-        //    HookLog("Rollback: sCollision discovery BVH bank=0x%X freeNodes=0x%llX count=%u capacity=%u\n",
-        //            bank, freeNodes, freeCount, freeCapacity);
-        }
-
-        // Additional node-pointer array at +0x48.
-        uint32_t noUseCount = *(uint32_t*)(bvh + 0x38);
-        uint32_t noUseCapacity = *(uint32_t*)(bvh + 0x3C);
-        uint64_t noUseNodes = *(uint64_t*)(bvh + 0x48);
-        if (noUseCount <= noUseCapacity && noUseCapacity <= 0x10000) {
-            addOwnedBuffer(bvh + 0x48, noUseNodes,
-                           (size_t)noUseCapacity * 8);
-        }
-
-        // Capture reachable nodes outside the pool, keyed by their parent/root owner slot.
-        struct PendingBvhNode { uint64_t ownerSlot; uint64_t node; };
-        std::vector<PendingBvhNode> pending;
-        uint64_t root = *(uint64_t*)(bvh + 0x08);
-        if (root) pending.push_back({bvh + 0x08, root});
-        std::unordered_set<uint64_t> visited;
-        while (!pending.empty() && visited.size() < 0x10000) {
-            PendingBvhNode current = pending.back();
-            pending.pop_back();
-            if (!current.node || !IsAccessiblePointer(current.node) ||
-                !visited.insert(current.node).second) {
-                continue;
-            }
-            //++collisionDiag.bvhReachableNodes;
-
-            bool inFixedPool = pool && poolCapacity > 0 &&
-                current.node >= pool &&
-                current.node < pool + (size_t)poolCapacity * SCOLLISION_NODE_SIZE &&
-                ((current.node - pool) % SCOLLISION_NODE_SIZE) == 0;
-            if (!inFixedPool && capturedStandaloneBvhNodes.insert(current.node).second) {
-                addOwnedBuffer(current.ownerSlot, current.node, SCOLLISION_NODE_SIZE);
-            //    ++collisionDiag.bvhStandaloneNodes;
-            }
-
-            uint64_t child0 = *(uint64_t*)(current.node + 0x10);
-            uint64_t child1 = *(uint64_t*)(current.node + 0x18);
-            if (child0) pending.push_back({current.node + 0x10, child0});
-            if (child1) pending.push_back({current.node + 0x18, child1});
-        }
-    };
-
-    auto addNodeListBuffers = [&](uint64_t nodeList) {
-        if (!nodeList || !IsAccessiblePointer(nodeList)) return;
-
-        // Discover external arrays and BVH storage for each NodeList.
-        static constexpr uint32_t arrayBases[] = {
-            0x18, 0x538, 0xA58, 0x1028, 0x1548, 0x1A68, 0x1F88
-        };
-        for (uint32_t base : arrayBases) {
-            for (uint32_t category = 0; category < 0x29; ++category) {
-                uint64_t header = nodeList + base + category * 0x20;
-                uint32_t count = *(uint32_t*)(header + 0x08);
-                uint32_t capacity = *(uint32_t*)(header + 0x0C);
-                uint64_t data = *(uint64_t*)(header + 0x18);
-                if (count <= capacity && capacity <= 0x10000) {
-                    addOwnedBuffer(header + 0x18, data, (size_t)capacity * 8);
-                }
-            }
-        }
-
-        for (uint32_t headerOffset : {0xF78u, 0xF98u, 0x24A8u, 0x24C8u}) {
-            uint64_t header = nodeList + headerOffset;
-            uint32_t count = *(uint32_t*)(header + 0x08);
-            uint32_t capacity = *(uint32_t*)(header + 0x0C);
-            uint64_t data = *(uint64_t*)(header + 0x18);
-            if (count <= capacity && capacity <= 0x10000) {
-                addOwnedBuffer(header + 0x18, data, (size_t)capacity * 8);
-            }
-        }
-
-        addDynamicBvhBuffers(nodeList + 0xFC0, 0xFC0, 0);
-        addDynamicBvhBuffers(nodeList + 0x24E8, 0x24E8, 0);
-    };
-
-    auto addSbcObjectBuffers = [&](uint64_t sbc) {
-        //collisionDiag.sbc = sbc;
-        if (!sbc || !IsAccessiblePointer(sbc)) {
-            HookLog("Rollback: sCollision discovery SbcObject=0x%llX inaccessible\n", sbc);
-            return;
-        }
-
-        // Registration array: header +0x40, data pointer +0x58.
-        uint32_t activeCount = *(uint32_t*)(sbc + 0x48);
-        uint32_t activeCapacity = *(uint32_t*)(sbc + 0x4C);
-        uint64_t activeData = *(uint64_t*)(sbc + 0x58);
-        //collisionDiag.activeCount = activeCount;
-        //collisionDiag.activeCapacity = activeCapacity;
-        //collisionDiag.activeData = activeData;
-        if (activeCount <= activeCapacity && activeCapacity <= 0x10000) {
-            addOwnedBuffer(sbc + 0x58, activeData,
-                           (size_t)activeCapacity * 8);
-            if (activeCapacity > 0)
-                logOwnedBufferRejection("SbcObject.active", sbc + 0x58, activeData,
-                                        (size_t)activeCapacity * 8);
-        } else {
-            HookLog("Rollback: sCollision discovery active invalid count=%u capacity=%u data=0x%llX\n",
-                    activeCount, activeCapacity, activeData);
-        }
-
-        // Dirty/merge queues: offsets start at count, with capacity +0x04 and data +0x10.
-        for (uint32_t base : {0x70u, 0x590u}) {
-            for (uint32_t category = 0; category < 0x29; ++category) {
-                uint64_t header = sbc + base + category * 0x20;
-                uint32_t count = *(uint32_t*)(header + 0x00);
-                uint32_t capacity = *(uint32_t*)(header + 0x04);
-                uint64_t data = *(uint64_t*)(header + 0x10);
-                if (count <= capacity && capacity <= 0x10000) {
-                    //++collisionDiag.sbcQueueHeadersValid;
-                    //if (data) ++collisionDiag.sbcQueueDataPresent;
-                    addOwnedBuffer(header + 0x10, data, (size_t)capacity * 8);
-                    if (capacity > 0 && category == 0)
-                        logOwnedBufferRejection(base == 0x70 ? "SbcObject.dirty[0]" :
-                                                 "SbcObject.merge[0]",
-                                                 header + 0x10, data,
-                                                 (size_t)capacity * 8);
-                } else if (category == 0) {
-                   //HookLog("Rollback: sCollision discovery queue base=0x%X count=%u capacity=%u data=0x%llX\n",
-                            //base, count, capacity, data);
-                }
-                if (data && count <= capacity && capacity <= 0x10000) {
-                    for (uint32_t entry = 0; entry < count; ++entry) {
-                        uint64_t recordSlot = data + (size_t)entry * 8;
-                        uint64_t record = *(uint64_t*)recordSlot;
-                        addOwnedBuffer(recordSlot, record, 0x28);
-                    }
-                }
-            }
-        }
-    };
-
-    auto addMoveMatrixBuffers = [&](uint64_t moveMatrix) {
-        //collisionDiag.moveMatrix = moveMatrix;
-        if (!moveMatrix || !IsAccessiblePointer(moveMatrix)) {
-            //HookLog("Rollback: sCollision discovery moveMatrix=0x%llX inaccessible\n",
-            //        moveMatrix);
-            return;
-        }
-        uint32_t categoryCount = *(uint32_t*)(moveMatrix + 0x10);
-        uint32_t categoryCapacity = *(uint32_t*)(moveMatrix + 0x14);
-        uint64_t categoryArray = *(uint64_t*)(moveMatrix + 0x20);
-        //collisionDiag.moveCategoryCount = categoryCount;
-        //collisionDiag.moveCategoryArray = categoryArray;
-        if (categoryCount > categoryCapacity || categoryCapacity > 0x40 ||
-            !categoryArray ||
-            !IsAccessiblePointer(categoryArray)) {
-            //HookLog("Rollback: sCollision discovery move categories count=%u capacity=%u array=0x%llX accessible=%d\n",
-            //        categoryCount, categoryCapacity, categoryArray,
-            //        IsAccessiblePointer(categoryArray));
-            return;
-        }
-
-        addOwnedBuffer(moveMatrix + 0x20, categoryArray,
-                       (size_t)categoryCapacity * 8);
-
-        // Each category queue contains NodeList pointers indexed by frame/thread slot.
-        for (uint32_t category = 0; category < categoryCount; ++category) {
-            uint64_t categorySlot = categoryArray + (size_t)category * 8;
-            uint64_t queue = *(uint64_t*)categorySlot;
-            if (!queue || !IsAccessiblePointer(queue)) continue;
-            //++collisionDiag.moveQueuesPresent;
-            uint32_t threadCount = *(uint32_t*)(queue + 8);
-            uint32_t threadCapacity = *(uint32_t*)(queue + 0xC);
-            uint64_t threadData = *(uint64_t*)(queue + 0x18);
-            if (threadCount > threadCapacity || threadCapacity > 0x40) {
-                if (category == 0)
-                    //HookLog("Rollback: sCollision discovery move queue=0x%llX threadCount=%u capacity=%u\n",
-                    //        queue, threadCount, threadCapacity);
-                continue;
-            }
-            addOwnedBuffer(queue + 0x18, threadData,
-                           (size_t)threadCapacity * 8);
-            for (uint32_t thread = 0; thread < threadCount; ++thread) {
-                uint64_t nodeListSlot = threadData + (size_t)thread * 8;
-                uint64_t nodeList = *(uint64_t*)nodeListSlot;
-                if (!nodeList || !IsAccessiblePointer(nodeList)) continue;
-                //++collisionDiag.moveThreadHeadersValid;
-                addOwnedBuffer(nodeListSlot, nodeList, 0x2550);
-                addNodeListBuffers(nodeList);
-            }
-        }
-    };*/
-
     // Capture only the replay frame counter, not its internal buffers.
     uint64_t sReplay = read.operator()<uint64_t>(_addr(PTR_SREPLAY));
     if (sReplay) {
@@ -775,37 +481,7 @@ static void TraverseAndAddDynamicList(uint64_t listHead, size_t nextOffset,
 #endif
     );
 
-    // Effect RNG is captured per spawn recipe, not as a frame-wide region here.
-
-    // Shot manager header, 256-entry ID pool, and next-ID cursor at +0x438.
-    // Shot-list topology is not included; recipes reconstruct shot lifetime.
-    uint64_t sShot = read.operator()<uint64_t>(_addr(PTR_SSHOT));
-    if (sShot) {
-        add((void*)sShot, 0x38, 0, 0, false
-#if ROLLBACK_SNAPDUMP_ENABLED
-            , "sShot"
-#endif
-        );
-        add((void*)(sShot + 0x38), 0x404, 0, 0, false
-#if ROLLBACK_SNAPDUMP_ENABLED
-            , "sShot.idPool"
-#endif
-        );
-    }
-
-    // Ten shot-slot active flags live in sGameConfig, not sShot.
-    {
-        uint64_t sGameConfig = read.operator()<uint64_t>(_addr(0x140D50F88));
-        if (sGameConfig) {
-            add((void*)(sGameConfig + 0x4A89C), 10, 0, 0, false
-#if ROLLBACK_SNAPDUMP_ENABLED
-                , "sGameConfig.shotSlotFlags"
-#endif
-            );
-        }
-    }
-
-    // Shots use separate recipes and concrete-state capture, not raw regions here.
+    // Shot/effect rewind is unavailable. Keep their manager ownership and IDs live.
 
     // Hit solver snapshot is not needed, rebuilds hit solver data after each frame ...
     {
@@ -955,17 +631,14 @@ static void TraverseAndAddDynamicList(uint64_t listHead, size_t nextOffset,
             , "sAction.compact"
 #endif
         );
-        if (sAction && IsAccessibleAddress(
-                sAction + SACTION_MODEL_JOINT_WRAPPER_OFFSET)) {
+        if (sAction) {
             uint64_t modelJointWrapper = read.operator()<uint64_t>(
                 sAction + SACTION_MODEL_JOINT_WRAPPER_OFFSET);
-            if (modelJointWrapper && IsAccessibleAddress(
-                    modelJointWrapper + SACTION_MODEL_JOINT_ALLOCATION_OFFSET)) {
+            if (modelJointWrapper) {
                 uint64_t allocationSlot = modelJointWrapper +
                     SACTION_MODEL_JOINT_ALLOCATION_OFFSET;
                 uint64_t allocation = read.operator()<uint64_t>(allocationSlot);
-                if (allocation && IsAccessibleAddress(
-                        allocation + SACTION_MODEL_JOINT_ALLOCATION_SIZE - 1)) {
+                if (allocation) {
                     // Record the allocation's owner slot; restore applies payload after the header.
                     add((void*)allocation,
                         SACTION_MODEL_JOINT_ALLOCATION_SIZE,
@@ -1354,7 +1027,7 @@ static void TraverseAndAddDynamicList(uint64_t listHead, size_t nextOffset,
         // Do not add its historical allocation as a raw region.
     }
 
-    // Dynamic effects are handled by Effect_CaptureRecipes, not raw scheduler-node regions.
+    // Dynamic shots/effects are not captured until the lifetime-aware replacement exists.
 
     return r;
 }
@@ -1554,31 +1227,11 @@ void Rollback_SaveSnapshot(int32_t frame)
             captureCharacterRenderState(character);
         }
     }
-    diagnosticStage.Next(LagMetric::SaveShots);
-    Shot_CaptureRecipes(slot);
-    const uint64_t shotRecipesCapturedEnd = Profile_Now();
-    diagnosticStage.Next(LagMetric::SaveShotRefs);
-    Rollback_CaptureCharacterShotReferences(slot);
-    const uint64_t characterShotReferencesEnd = Profile_Now();
-    diagnosticStage.Next(LagMetric::SaveEffects);
-    Effect_CaptureRecipes(slot);
-    const uint64_t shotRecipesEnd = Profile_Now();
+    const uint64_t snapshotEnd = Profile_Now();
     diagnosticStage.Finish();
 
-    if constexpr (ROLLBACK_PROFILING_ENABLED) {
-        if (g_activeRollbackProfile)
-            g_activeRollbackProfile->snapshotShotRecipeCount +=
-                (uint32_t)slot.shotRecipes.size();
-        if (g_activeRollbackProfile) {
-            g_activeRollbackProfile->saveCharacterShotReferences +=
-                characterShotReferencesEnd - shotRecipesCapturedEnd;
-            g_activeRollbackProfile->snapshotCharacterShotReferenceCount +=
-                (uint32_t)slot.characterShotReferences.size();
-        }
-    }
-
     Profile_RecordSnapshot(profileStart, buildRegionsEnd, allocationEnd, copyRegionsEnd,
-                           snapshotMetadataEnd, collisionClonesEnd, shotRecipesEnd,
+                           snapshotMetadataEnd, collisionClonesEnd, snapshotEnd,
                            offset, (uint32_t)count);
 
     // Disabled performance-counter trace.
@@ -1686,7 +1339,6 @@ void Rollback_FreeSnapshots()
         Rollback_DestroyCollisionNodeClones(g_slots[i]);
         ReleaseActionSideCameraState(g_slots[i]);
         ReleaseCharacterMotionResources(g_slots[i]);
-        Effect_ReleaseSnapshotResources(g_slots[i]);
         if (g_slots[i].ownsData)
             delete[] g_slots[i].data;
         g_slots[i].data        = nullptr;
@@ -1695,15 +1347,9 @@ void Rollback_FreeSnapshots()
         g_slots[i].ownsData    = true;
         g_slots[i].regionCount = 0;
         g_slots[i].frame       = -1;
-        g_slots[i].shotRecipes.clear();
-        g_slots[i].effectRecipes.clear();
-        g_slots[i].characterEffectStates.clear();
-        g_slots[i].characterEffectReferences.clear();
         g_slots[i].characterCollisionParentReferences.clear();
         g_slots[i].modelRenderStates.clear();
     }
-    Shot_Reset();
-    Effect_Reset();
     Rollback_ResetReSimulation();
     g_regionCache.valid = false;
     // Keep snapdump history intact when freeing live rollback slots.

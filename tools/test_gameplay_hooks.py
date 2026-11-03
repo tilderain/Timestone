@@ -150,8 +150,7 @@ class GameplayHooksTests(unittest.TestCase):
 
     def test_gameplay_installers_are_owned(self):
         files = ["controller", "diag", "autotest", "framestepper", "rollback_hooks",
-                 "rollback_runtime", "rollback_rng", "rollback_effect", "rollback_shot",
-                 "rollback_model_policy"]
+                 "rollback_runtime", "rollback_rng"]
         for name in files:
             with self.subTest(file=name):
                 source = (ROOT / f"UMVC3Hook/code/{name}.cpp").read_text()

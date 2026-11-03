@@ -8,14 +8,11 @@
 #include "netplay.h"
 #include "gameplay_hooks.h"
 
-#include <atomic>
-
 extern void HookLog(const char* fmt, ...);
 
 static constexpr uintptr_t FN_IS_ONLINE_BATTLE = 0x140006AF0;
 static constexpr uintptr_t FN_NDRAW_MATERIAL_RELEASE = 0x14076F760;
 static constexpr uintptr_t FN_UMODEL_MOTION_DTOR = 0x140526000;
-static constexpr uintptr_t VTABLE_MTOBJECT = 0x140A6A510;
 static constexpr uintptr_t FN_PARTICLE_FILTER_UPDATE = 0x1408D61C0;
 static constexpr uintptr_t PTR_SCHARACTER = 0x140D44A70;
 static constexpr uintptr_t TEAM_OFFSETS[] = {0x40, 0x300};
@@ -37,11 +34,6 @@ static IsOnlineBattleFn g_originalIsOnlineBattle = nullptr;
 
 using MtObjectSetFlagFn = void(__fastcall*)(uint64_t, uint8_t);
 static MtObjectSetFlagFn g_originalMtObjectSetFlag = nullptr;
-using MtObjectIsAliveFn = bool(__fastcall*)(uint64_t);
-static MtObjectIsAliveFn g_originalMtObjectIsAlive = nullptr;
-static std::atomic<uint64_t> g_validatedMtObjectVtables[256] = {};
-using RocketRaccoonPlaySfxFn = void(__fastcall*)(uint64_t);
-static RocketRaccoonPlaySfxFn g_originalRocketRaccoonPlaySfx = nullptr;
 using MtAnimSetFrameIndexFn = void(__fastcall*)(uint64_t, uint32_t);
 static MtAnimSetFrameIndexFn g_originalMtAnimSetFrameIndex = nullptr;
 using MtAnimUpdateFrameFn = uint32_t(__fastcall*)(uint64_t, uint64_t, uint64_t);
@@ -80,14 +72,10 @@ static ReplaceActiveStageFn g_originalReplaceActiveStage = nullptr;
 using UModelMotionDtorFn = void(__fastcall*)(uint64_t);
 static UModelMotionDtorFn g_originalUModelMotionDtor = nullptr;
 static LONG g_invalidMotionFreeCount = 0;
-static PVOID g_materialCloneRecoveryHandler = nullptr;
-static PVOID g_modelCommandAllocationRecoveryHandler = nullptr;
-static PVOID g_schedulerAllocationRecoveryHandler = nullptr;
-static PVOID g_resultScoreCursorRecoveryHandler = nullptr;
 static uint64_t g_pendingMaterialRepairs[64] = {};
 static size_t g_pendingMaterialRepairCount = 0;
 
-static bool HasCallableVirtualMethod(uint64_t object, size_t offset);
+static bool HasVirtualMethod(uint64_t object, size_t offset);
 
 static bool HasMotionAllocationOwner(uint64_t allocation,
                                      uint64_t& block,
@@ -164,7 +152,7 @@ static bool IsLiveCharacterModel(uint64_t model)
 
 static bool IsValidCachedMaterial(uint64_t material)
 {
-    if (!material || !HasCallableVirtualMethod(material, 0x28))
+    if (!material || !HasVirtualMethod(material, 0x28))
         return false;
     const uint64_t vtable = *(uint64_t*)material;
     return *(uint64_t*)(vtable + 0x28) ==
@@ -173,14 +161,13 @@ static bool IsValidCachedMaterial(uint64_t material)
 
 static bool IsMaterialCacheReady(uint64_t model)
 {
-    if (!model || !IsAccessibleRange(model + 0x100, 0x20))
+    if (!model)
         return false;
     const uint32_t count = *(uint32_t*)(model + 0x118);
     const uint64_t entries = *(uint64_t*)(model + 0x110);
     if (count == 0)
         return true;
-    if (count > 4096 || !entries ||
-        !IsAccessibleRange(entries, (size_t)count * sizeof(uint64_t))) {
+    if (count > 4096 || !entries) {
         return false;
     }
     for (uint32_t index = 0; index < count; ++index) {
@@ -230,52 +217,6 @@ static void __fastcall hkMtObjectSetFlag(uint64_t object, uint8_t enabled)
     g_originalMtObjectSetFlag(object, enabled);
 }
 
-static bool __fastcall hkMtObjectIsAlive(uint64_t object)
-{
-    if ((uint64_t)__builtin_return_address(0) ==
-        (uint64_t)_addr(0x14005629E)) {
-        return g_originalMtObjectIsAlive(object);
-    }
-    // Native only tests lifecycle state 1/2, not the vtable. Reject the base
-    // table and invalid DTI callbacks; this still does not prove ownership.
-    if (!object || !g_originalMtObjectIsAlive ||
-        !IsAccessibleRange(object, sizeof(uint64_t))) {
-        return false;
-    }
-    const uint64_t vtable = *(uint64_t*)object;
-    if (!vtable) return false;
-    if (vtable == (uint64_t)_addr(VTABLE_MTOBJECT)) {
-        return false;
-    }
-    std::atomic<uint64_t>& cached =
-        g_validatedMtObjectVtables[(vtable >> 3) & 0xFF];
-    if (cached.load(std::memory_order_relaxed) != vtable) {
-        if (!IsAccessibleRange(vtable, 0x28)) return false;
-        const uint64_t getDti = *(uint64_t*)(vtable + 0x20);
-        if (!getDti || !IsExecutableAddress(getDti)) return false;
-        cached.store(vtable, std::memory_order_relaxed);
-    }
-    return g_originalMtObjectIsAlive(object);
-}
-
-static void __fastcall hkRocketRaccoonPlaySfx(uint64_t character)
-{
-    // Native checks isAlive before calling +0xD8 on these effect slots.
-    // Clear readable slots whose required callback is not executable.
-    static constexpr uint32_t effectOffsets[] = {0x68F8, 0x6900, 0x6930};
-    for (uint32_t offset : effectOffsets) {
-        uint64_t* slot = (uint64_t*)(character + offset);
-        uint64_t object = *slot;
-        if (!object || !IsAccessibleRange(object, sizeof(uint64_t))) continue;
-
-        uint64_t vtable = *(uint64_t*)object;
-        uint64_t callback = IsAccessibleRange(vtable + 0xD8, sizeof(uint64_t))
-            ? *(uint64_t*)(vtable + 0xD8) : 0;
-        if (!callback || !IsExecutableAddress(callback)) *slot = 0;
-    }
-    g_originalRocketRaccoonPlaySfx(character);
-}
-
 static void __fastcall hkMtAnimSetFrameIndex(uint64_t animation, uint32_t frame)
 {
     // UI setup can pass null after allocation failure; native dereferences it.
@@ -308,16 +249,11 @@ static uint64_t __fastcall hkCopyCharacterPosition(uint64_t character,
                                                     uint64_t damageCharacter)
 {
     if (mode == 0) {
-        uint64_t source = 0;
-        if (character <= UINT64_MAX - 0x6428) {
-            source = *(uint64_t*)(character + 0x6428);
-        }
+        uint64_t source = character ? *(uint64_t*)(character + 0x6428) : 0;
 
-        if (!source || source > UINT64_MAX - 0x5C ||
-            !IsAccessibleRange(source + 0x50, sizeof(float) * 3)) {
+        if (!source) {
             // Native also adds stiff damage. Preserve it when position copy fails.
-            if (damageCharacter && stiffDamage > 0.0f &&
-                damageCharacter <= UINT64_MAX - 0x4154) {
+            if (damageCharacter && stiffDamage > 0.0f) {
                 using GetStiffDamageFn = float(__fastcall*)(uint64_t);
                 using SetStiffDamageFn = void(__fastcall*)(uint64_t, float);
                 auto getStiffDamage = (GetStiffDamageFn)_addr(0x140032F50);
@@ -341,142 +277,11 @@ static uint64_t __fastcall hkCopyCharacterPosition(uint64_t character,
         : 0;
 }
 
-static LONG CALLBACK MaterialCloneRecoveryHandler(EXCEPTION_POINTERS* info)
+static bool HasVirtualMethod(uint64_t object, size_t offset)
 {
-    if (!info || !info->ExceptionRecord || !info->ContextRecord ||
-        info->ExceptionRecord->ExceptionCode != EXCEPTION_ACCESS_VIOLATION) {
-        return EXCEPTION_CONTINUE_SEARCH;
-    }
-
-    CONTEXT* context = info->ContextRecord;
-    if (context->Rip != (DWORD64)_addr(0x1405DCA7F) || context->Rax != 0 ||
-        !IsAccessibleRange(context->Rsp + 0x48, sizeof(uint64_t))) {
-        return EXCEPTION_CONTINUE_SEARCH;
-    }
-
-    // Return null from the duplicate epilogue, bypassing initialization.
-    // This performs no cleanup; resetMaterials still uses the result unchecked.
-    context->Rax = 0;
-    context->Rdi = 0;
-    context->Rip = (DWORD64)_addr(0x1405DCC8E);
-    return EXCEPTION_CONTINUE_EXECUTION;
-}
-// I honestly have no idea what this is meant to do or if it even runs
-static LONG CALLBACK ModelCommandAllocationRecoveryHandler(EXCEPTION_POINTERS* info)
-{
-    if (!info || !info->ExceptionRecord || !info->ContextRecord) {
-        return EXCEPTION_CONTINUE_SEARCH;
-    }
-
-    const EXCEPTION_RECORD* exception = info->ExceptionRecord;
-    CONTEXT* context = info->ContextRecord;
-    if (exception->ExceptionCode != EXCEPTION_ACCESS_VIOLATION ||
-        exception->NumberParameters < 2 ||
-        exception->ExceptionInformation[0] != 1 ||
-        exception->ExceptionInformation[1] != 0 ||
-        context->Rbx > UINT64_MAX - 0x260 ||
-        context->Rsp > UINT64_MAX - 0xB0 ||
-        !IsAccessibleRange(context->Rbx + 0x28, 0x238) ||
-        !IsAccessibleRange(context->Rsp + 0x60, 0x50)) {
-        return EXCEPTION_CONTINUE_SEARCH;
-    }
-
-    if (context->Rip != (DWORD64)_addr(0x140640011) || context->Rcx != 0) {
-        return EXCEPTION_CONTINUE_SEARCH;
-    }
-
-    const DWORD64 callerReturn = *(DWORD64*)(context->Rsp + 0x88);
-    if (callerReturn != (DWORD64)_addr(0x140650A05)) {
-        return EXCEPTION_CONTINUE_SEARCH;
-    }
-
-    // Intended recovery: discard the failed command page, re-mark it dirty,
-    // restore setupDraw's saved registers, and skip primitive submission.
-    *(uint64_t*)(context->Rbx + 0x28) = 0;
-    *(uint64_t*)(context->Rbx + 0x30) = 0;
-    *(uint64_t*)(context->Rbx + 0x258) = 0;
-    *(uint32_t*)(context->Rbx + 0x130) |= 8;
-
-    context->R14 = *(DWORD64*)(context->Rsp + 0x60);
-    context->R15 = *(DWORD64*)(context->Rsp + 0x78);
-    context->Rbx = *(DWORD64*)(context->Rsp + 0x80);
-    context->Rsi = *(DWORD64*)(context->Rsp + 0xA0);
-    context->Rdi = *(DWORD64*)(context->Rsp + 0xA8);
-    context->Rsp += 0x90;
-    context->Rax = 0;
-    context->Rip = (DWORD64)_addr(0x140650BC5);
-    return EXCEPTION_CONTINUE_EXECUTION;
-}
-
-static LONG CALLBACK SchedulerAllocationRecoveryHandler(EXCEPTION_POINTERS* info)
-{
-    if (!info || !info->ExceptionRecord || !info->ContextRecord) {
-        return EXCEPTION_CONTINUE_SEARCH;
-    }
-
-    const EXCEPTION_RECORD* exception = info->ExceptionRecord;
-    CONTEXT* context = info->ContextRecord;
-    if (exception->ExceptionCode != EXCEPTION_ACCESS_VIOLATION ||
-        exception->NumberParameters < 2 ||
-        exception->ExceptionInformation[0] != 1 ||
-        exception->ExceptionInformation[1] != 0 ||
-        context->Rbx > UINT64_MAX - 0x70 ||
-        !IsAccessibleRange(context->Rbx + 0x40, 0x30)) {
-        return EXCEPTION_CONTINUE_SEARCH;
-    }
-
-    const DWORD64 firstEntriesWrite = (DWORD64)_addr(0x14050F0B5);
-    const DWORD64 typeEntriesWrite = (DWORD64)_addr(0x14050F169);
-    if (context->Rip == firstEntriesWrite && context->Rdx == 0) {
-        // Failed count * 0x68 work allocation: clear counts/pointers and exit.
-        *(uint32_t*)(context->Rbx + 0x40) = 0;
-        *(uint64_t*)(context->Rbx + 0x58) = 0;
-        *(uint64_t*)(context->Rbx + 0x60) = 0;
-        *(uint32_t*)(context->Rbx + 0x68) = 0;
-        context->Rip = (DWORD64)_addr(0x14050F13A);
-        return EXCEPTION_CONTINUE_EXECUTION;
-    }
-    if (context->Rip == typeEntriesWrite && context->Rax == 0) {
-        // Keep the work array; clear the failed index of type-2 work entries.
-        *(uint64_t*)(context->Rbx + 0x60) = 0;
-        *(uint32_t*)(context->Rbx + 0x68) = 0;
-        context->Rip = (DWORD64)_addr(0x14050F176);
-        return EXCEPTION_CONTINUE_EXECUTION;
-    }
-    return EXCEPTION_CONTINUE_SEARCH;
-}
-
-static LONG CALLBACK ResultScoreCursorRecoveryHandler(EXCEPTION_POINTERS* info)
-{
-    if (!info || !info->ExceptionRecord || !info->ContextRecord) {
-        return EXCEPTION_CONTINUE_SEARCH;
-    }
-
-    const EXCEPTION_RECORD* exception = info->ExceptionRecord;
-    CONTEXT* context = info->ContextRecord;
-    if (exception->ExceptionCode != EXCEPTION_ACCESS_VIOLATION ||
-        exception->NumberParameters < 2 ||
-        exception->ExceptionInformation[0] != 0 ||
-        exception->ExceptionInformation[1] != 0 ||
-        context->Rip != (DWORD64)_addr(0x14030A734) || context->Rcx != 0) {
-        return EXCEPTION_CONTINUE_SEARCH;
-    }
-
-    // Result setup dispatches +0x88 through a missing unit at +0x248.
-    // Skip that call and resume at the epilogue.
-    context->Rip = (DWORD64)_addr(0x14030A741);
-    return EXCEPTION_CONTINUE_EXECUTION;
-}
-
-static bool HasCallableVirtualMethod(uint64_t object, size_t offset)
-{
-    if (!object || !IsAccessibleRange(object, sizeof(uint64_t))) return false;
+    if (!object) return false;
     const uint64_t vtable = *(uint64_t*)object;
-    if (vtable > UINT64_MAX - offset ||
-        !IsAccessibleRange(vtable + offset, sizeof(uint64_t))) {
-        return false;
-    }
-    return IsExecutableAddress(*(uint64_t*)(vtable + offset));
+    return vtable && *(uint64_t*)(vtable + offset) != 0;
 }
 
 static void __fastcall hkReplaceActiveStage(uint64_t stageManager,
@@ -500,12 +305,11 @@ static void __fastcall hkReplaceActiveStage(uint64_t stageManager,
         if (getSize(activeStages) > 0) {
             uint64_t* first = getElement(activeStages, 0);
             uint64_t oldStage = first ? *first : 0;
-            if (oldStage && !HasCallableVirtualMethod(oldStage, 0xD8)) {
+            if (oldStage && !HasVirtualMethod(oldStage, 0xD8)) {
                 HookLog("Rollback: removed invalid active stage entry "
                         "stage=0x%llX vtable=0x%llX\n",
                         oldStage,
-                        IsAccessibleRange(oldStage, sizeof(uint64_t))
-                            ? *(uint64_t*)oldStage : 0);
+                        *(uint64_t*)oldStage);
                 removePointer(activeStages, oldStage);
             }
         }
@@ -529,12 +333,9 @@ static void __fastcall hkResetMaterials(uint64_t model)
         return;
     }
 
-    InvalidateMemoryQueryCache();
     const uint32_t count = *(uint32_t*)(model + 0x118);
     const uint64_t entries = *(uint64_t*)(model + 0x110);
-    if (count != 0 && (count > 4096 || !entries ||
-                       !IsAccessibleRange(entries,
-                                           (size_t)count * sizeof(uint64_t)))) {
+    if (count != 0 && (count > 4096 || !entries)) {
         *(uint32_t*)(model + 0x118) = 0;
         return;
     }
@@ -561,7 +362,6 @@ static void __fastcall hkResetMaterials(uint64_t model)
     g_originalResetMaterials(model);
     Rollback_FreezeWatchdogHeartbeat("material-reset-complete",
                                      g_isResimulating ? g_resimulateCurrentFrame : -1);
-    InvalidateMemoryQueryCache();
 
     if (!g_isResimulating) {
         const size_t pending = FindPendingMaterialRepair(model);
@@ -576,10 +376,8 @@ static bool RepairPendingMaterialCache(uint64_t model)
     if (pending == SIZE_MAX)
         return true;
 
-    InvalidateMemoryQueryCache();
     if (!IsMaterialCacheReady(model)) {
         hkResetMaterials(model);
-        InvalidateMemoryQueryCache();
     }
     if (!IsMaterialCacheReady(model))
         return false;
@@ -621,7 +419,6 @@ static void __fastcall hkParticleGeneratorModelUpdate(uint64_t generator)
         g_originalParticleGeneratorModelUpdate(generator);
 }
 
-
 static void __fastcall hkParticleGeneratorFilterUpdate(uint64_t generator)
 {
     // Skip the native filter-mode dispatch during headless resimulation.
@@ -659,14 +456,13 @@ static void* __fastcall hkGetJointPos(uint64_t object, void* output)
 
     const uint32_t count = *(uint32_t*)(model + 0x118);
     const uint64_t entries = *(uint64_t*)(model + 0x110);
-    if (count > 4096 || (count && (!entries ||
-        !IsAccessibleRange(entries, (size_t)count * sizeof(uint64_t))))) {
+    if (count > 4096 || (count && !entries)) {
         return WriteDefaultJointPosition(output);
     }
     for (uint32_t i = 0; i < count; ++i) {
         const uint64_t entry =
             *(uint64_t*)(entries + (size_t)i * sizeof(uint64_t));
-        if (!entry || !HasCallableVirtualMethod(entry, 0x48))
+        if (!entry || !HasVirtualMethod(entry, 0x48))
             return WriteDefaultJointPosition(output);
     }
     return g_originalGetJointPos(object, output);
@@ -715,7 +511,6 @@ void Rollback_FlushDeferredModelBounds()
     for (size_t i = 0; i < count; ++i) {
         const DeferredModelBounds& entry = g_deferredModelBounds[i];
         if (!entry.model || !entry.vtable ||
-            !IsAccessibleRange(entry.model, 0x220) ||
             *(uint64_t*)entry.model != entry.vtable ||
             ((*(uint32_t*)(entry.model + 0x10) & 7u) - 1u) >= 2u) {
             continue;
@@ -726,22 +521,21 @@ void Rollback_FlushDeferredModelBounds()
 
 static bool HasInvalidMtAnimTable(uint64_t animation)
 {
-    if (!IsAccessibleRange(animation, 0x70)) return true;
+    if (!animation) return true;
 
     const uint32_t count = *(uint32_t*)(animation + 0x68);
     const uint64_t entries = *(uint64_t*)(animation + 0x60);
     if (count == 0) return false;
-    if (count > 4096 || !entries ||
-        !IsAccessibleRange(entries, (size_t)count * sizeof(uint64_t))) {
+    if (count > 4096 || !entries) {
         return true;
     }
 
     for (uint32_t index = 0; index < count; ++index) {
         const uint64_t entry = *(uint64_t*)(entries +
                                             (size_t)index * sizeof(uint64_t));
-        if (!entry || !IsAccessibleRange(entry, sizeof(uint64_t))) return true;
+        if (!entry) return true;
         const uint64_t vtable = *(uint64_t*)entry;
-        if (!vtable || !IsAccessibleAddress(vtable + 0x10)) return true;
+        if (!vtable) return true;
     }
     return false;
 }
@@ -915,30 +709,6 @@ void Rollback_InitNativeNullGuards()
         HookLog("Rollback: installed headless character model post-move filter\n");
     }
 
-    const MH_STATUS aliveStatus = GameplayHooks_Create(
-        (LPVOID)_addr(0x140001B80), (LPVOID)&hkMtObjectIsAlive,
-        (LPVOID*)&g_originalMtObjectIsAlive);
-    if (aliveStatus == MH_OK) {
-        const MH_STATUS enableStatus = GameplayHooks_QueueEnable((LPVOID)_addr(0x140001B80));
-        HookLog("Rollback: %s stale MtObject alive-state guard\n",
-                enableStatus == MH_OK ? "installed" : "failed to install");
-    } else {
-        HookLog("Rollback: failed to guard stale MtObject alive state (%d)\n",
-                aliveStatus);
-    }
-
-    const MH_STATUS rocketEffectStatus = GameplayHooks_Create(
-        (LPVOID)_addr(0x1400C56B0), (LPVOID)&hkRocketRaccoonPlaySfx,
-        (LPVOID*)&g_originalRocketRaccoonPlaySfx);
-    if (rocketEffectStatus == MH_OK) {
-        const MH_STATUS enableStatus = GameplayHooks_QueueEnable((LPVOID)_addr(0x1400C56B0));
-        HookLog("Rollback: %s stale Rocket Raccoon effect guard\n",
-                enableStatus == MH_OK ? "installed" : "failed to install");
-    } else {
-        HookLog("Rollback: failed to guard stale Rocket Raccoon effects (%d)\n",
-                rocketEffectStatus);
-    }
-
     const MH_STATUS frameIndexStatus = GameplayHooks_Create(
         (LPVOID)_addr(0x1400F3150), (LPVOID)&hkMtAnimSetFrameIndex,
         (LPVOID*)&g_originalMtAnimSetFrameIndex);
@@ -1078,51 +848,6 @@ void Rollback_InitNativeNullGuards()
     } else {
         HookLog("Rollback: failed to guard active-stage replacement (%d)\n",
                 replaceStageStatus);
-    }
-
-    if (!g_materialCloneRecoveryHandler) {
-        g_materialCloneRecoveryHandler = AddVectoredExceptionHandler(
-            1, &MaterialCloneRecoveryHandler);
-        HookLog("Rollback: material clone recovery %s\n",
-                 g_materialCloneRecoveryHandler ? "installed" : "failed to install");
-    }
-
-    if (!g_modelCommandAllocationRecoveryHandler) {
-        static constexpr uint8_t EXPECTED_NULL_COMMAND_WRITE[] = {
-            0x48, 0x89, 0x01,
-        };
-        const void* fault = (const void*)_addr(0x140640011);
-        if (memcmp(fault, EXPECTED_NULL_COMMAND_WRITE,
-                   sizeof(EXPECTED_NULL_COMMAND_WRITE)) == 0) {
-            g_modelCommandAllocationRecoveryHandler = AddVectoredExceptionHandler(
-                1, &ModelCommandAllocationRecoveryHandler);
-        }
-        HookLog("Rollback: model command allocation recovery %s\n",
-                g_modelCommandAllocationRecoveryHandler
-                    ? "installed" : "failed to install");
-    }
-
-    if (!g_schedulerAllocationRecoveryHandler) {
-        g_schedulerAllocationRecoveryHandler = AddVectoredExceptionHandler(
-            1, &SchedulerAllocationRecoveryHandler);
-        HookLog("Rollback: scheduler allocation recovery %s\n",
-                g_schedulerAllocationRecoveryHandler
-                     ? "installed" : "failed to install");
-    }
-
-    if (!g_resultScoreCursorRecoveryHandler) {
-        static constexpr uint8_t EXPECTED_CURSOR_DEREFERENCE[] = {
-            0x48, 0x8B, 0x01,
-        };
-        const void* fault = (const void*)_addr(0x14030A734);
-        if (memcmp(fault, EXPECTED_CURSOR_DEREFERENCE,
-                   sizeof(EXPECTED_CURSOR_DEREFERENCE)) == 0) {
-            g_resultScoreCursorRecoveryHandler = AddVectoredExceptionHandler(
-                1, &ResultScoreCursorRecoveryHandler);
-        }
-        HookLog("Rollback: result score cursor recovery %s\n",
-                 g_resultScoreCursorRecoveryHandler
-                     ? "installed" : "failed to install");
     }
 
 }
