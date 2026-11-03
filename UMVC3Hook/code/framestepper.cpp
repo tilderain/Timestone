@@ -500,7 +500,7 @@ static float GetGameUpdatesPerSecond(int32_t currentFrame)
     }
 
     const ULONGLONG elapsedMs = now - sampleStart;
-    if (elapsedMs >= 1000) {
+    if (elapsedMs >= 500) {
         updatesPerSecond = static_cast<float>(currentFrame - sampleFrame) *
                            (1000.0f / static_cast<float>(elapsedMs));
         sampleStart = now;
