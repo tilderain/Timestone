@@ -105,7 +105,11 @@ constexpr const char* names[] = {
     "snapdump", "restore", "restore_setup", "restore_regions", "restore_clones", "restore_fixups",
     "restore_reconstruct", "restore_late", "correction", "resim_frame", "resim_tick",
     "rebuild_pin", "rebuild_retire", "rebuild_destroy", "rebuild_spawn", "rebuild_finalize",
-    "overlay_setup", "overlay_logic", "imgui_finalize", "hooklog"
+    "overlay_setup", "overlay_logic", "imgui_finalize", "hooklog", "profile_dump", "render_end", "render_begin", "window_focus",
+    "render_move", "unit_move", "native_input", "sound_move",
+    "draw_cache", "camera_draw", "unit_draw", "draw_frame_cache", "jobs", "job_dispatch", "unit_sync", "unit_after",
+    "scene_sort", "effect_move", "particle_pre", "particle_post", "camera_move", "graphics_update", "ai_after",
+    "pad_poll", "pad_read"
 };
 static_assert(sizeof(names) / sizeof(*names) == (unsigned)LagMetric::Count);
 
@@ -147,6 +151,11 @@ bool WriteReport(const ReportData& report, HANDLE file, double previousWriteMs) 
         (unsigned long long)window.events[(unsigned)LagEvent::ScopeOverflow],
         (unsigned long long)now,
         (unsigned long long)droppedReports.load(std::memory_order_relaxed), previousWriteMs);
+    append(" render_batches=%llu render_jobs=%llu render_worker_sum=%llu scene_drawable_sum=%llu",
+        (unsigned long long)window.events[(unsigned)LagEvent::RenderBatches],
+        (unsigned long long)window.events[(unsigned)LagEvent::RenderJobs],
+        (unsigned long long)window.events[(unsigned)LagEvent::RenderWorkers],
+        (unsigned long long)window.events[(unsigned)LagEvent::SceneDrawables]);
     append("%s", " self_avg_ms{");
     for (unsigned i = 0; i < (unsigned)LagMetric::Count; ++i)
         if (window.costs[i].count && window.selfTicks[i])
@@ -385,6 +394,13 @@ void LagDiagnostics_EventSlow(LagEvent event) {
     if (g_lagDiagnosticsMayBeEnabled.load(std::memory_order_relaxed) &&
         !captureFinishing.load(std::memory_order_relaxed) && PrepareWindow())
         ++window.events[(unsigned)event];
+}
+
+void LagDiagnostics_CountSlow(LagEvent event, uint64_t count) {
+    Config();
+    if (g_lagDiagnosticsMayBeEnabled.load(std::memory_order_relaxed) &&
+        !captureFinishing.load(std::memory_order_relaxed) && PrepareWindow())
+        window.events[(unsigned)event] += count;
 }
 
 void LagDiagnostics_RecordWaitSlow(LagMetric metric, int32_t required, int32_t remoteBefore,

@@ -779,6 +779,9 @@ int main() {
     def test_rendering_thread_changes_only_between_frames(self):
         source = (ROOT / "UMVC3Hook/code/d3d9reset.cpp").read_text()
         unit = MOCKS + r'''
+std::atomic<int> g_renderingThreadOverride {-1};
+enum class LagMetric { RenderBegin };
+struct LagDiagnosticScope { explicit LagDiagnosticScope(LagMetric) {} };
 std::atomic<bool> g_renderingThreadEnabled {false};
 int beginCalls = 0;
 int parallelismCalls = 0;

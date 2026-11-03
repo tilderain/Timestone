@@ -59,6 +59,10 @@ static constexpr uint32_t CAMERA_GET_VIEW_MATRIX_VTABLE_OFFSET = 0x90;
 
 static RollbackMainMoveFn* g_originalMvc3MainMove = nullptr;
 static void(__fastcall* oCallSRender)(uint64_t) = nullptr;
+static void(__fastcall* oWindowFocus)(uint64_t) = nullptr;
+static void(__fastcall* oRenderMove)(uint64_t) = nullptr;
+static void(__fastcall* oUnitMove)(uint64_t) = nullptr;
+static void(__fastcall* oNativeInput)(uint64_t) = nullptr;
 static void(__fastcall* oMainMove)(uint64_t) = nullptr;
 static void(__fastcall* oSoundMove)(uint64_t) = nullptr;
 static void(__fastcall* oDisabledMouseMove)(uint64_t) = nullptr;
@@ -323,17 +327,89 @@ static void __fastcall hkMvc3MainMove(uint64_t main)
 
 static void __fastcall hkCallSRender(uint64_t render)
 {
+    LagDiagnosticScope diagnostic(LagMetric::RenderEnd);
     RollbackHookProfileScope profile(RollbackHookProfileId::RenderEndFrame);
     if (!g_isResimulating)
         oCallSRender(render);
 }
 
+static void __fastcall hkWindowFocus(uint64_t main)
+{
+    LagDiagnosticScope diagnostic(LagMetric::WindowFocus);
+    oWindowFocus(main);
+}
+
 static void __fastcall hkSoundMove(uint64_t sound)
 {
+    LagDiagnosticScope diagnostic(LagMetric::SoundMove);
     RollbackHookProfileScope profile(RollbackHookProfileId::SoundMove);
     if (g_isResimulating)
         return;
     oSoundMove(sound);
+}
+
+static thread_local bool g_timingRender = false;
+static void __fastcall hkRenderMove(uint64_t object)
+{
+    LagDiagnosticScope diagnostic(LagMetric::RenderMove);
+    const bool previousRender = g_timingRender;
+    g_timingRender = true;
+    oRenderMove(object);
+    g_timingRender = previousRender;
+}
+
+static void __fastcall hkUnitMove(uint64_t object)
+{
+    LagDiagnosticScope diagnostic(LagMetric::UnitMove);
+    oUnitMove(object);
+}
+
+static void __fastcall hkNativeInput(uint64_t object)
+{
+    LagDiagnosticScope diagnostic(LagMetric::NativeInput);
+    oNativeInput(object);
+}
+
+template<LagMetric Metric, typename... Args>
+struct TimedNativeCall {
+    static inline void(__fastcall* original)(Args...) = nullptr;
+    static void __fastcall Invoke(Args... args) {
+        LagDiagnosticScope diagnostic(Metric);
+        original(args...);
+    }
+};
+
+using DrawCacheTiming = TimedNativeCall<LagMetric::DrawCache, uint64_t>;
+using CameraDrawTiming = TimedNativeCall<LagMetric::CameraDraw, uint64_t, uint64_t, uint64_t, uint32_t>;
+using UnitDrawTiming = TimedNativeCall<LagMetric::UnitDraw, uint64_t, uint64_t>;
+using DrawFrameCacheTiming = TimedNativeCall<LagMetric::DrawFrameCache, uint64_t, uint64_t>;
+using JobsTiming = TimedNativeCall<LagMetric::Jobs, uint64_t, uint32_t>;
+using JobDispatchTiming = TimedNativeCall<LagMetric::JobDispatch, uint64_t>;
+using UnitSyncTiming = TimedNativeCall<LagMetric::UnitSync, uint64_t>;
+using UnitAfterTiming = TimedNativeCall<LagMetric::UnitAfter, uint64_t>;
+using SceneSortTiming = TimedNativeCall<LagMetric::SceneSort, uint64_t>;
+using EffectMoveTiming = TimedNativeCall<LagMetric::EffectMove, uint64_t>;
+using ParticlePreTiming = TimedNativeCall<LagMetric::ParticlePre, uint64_t>;
+using ParticlePostTiming = TimedNativeCall<LagMetric::ParticlePost, uint64_t>;
+using CameraMoveTiming = TimedNativeCall<LagMetric::CameraMove, uint64_t>;
+using GraphicsUpdateTiming = TimedNativeCall<LagMetric::GraphicsUpdate, uint64_t>;
+using AiAfterTiming = TimedNativeCall<LagMetric::AiAfter, uint64_t>;
+
+static void __fastcall hkTimedJobs(uint64_t main, uint32_t mode)
+{
+    if (g_timingRender && g_lagDiagnosticsMayBeEnabled.load(std::memory_order_relaxed)) {
+        LagDiagnostics_Count(LagEvent::RenderBatches, 1);
+        LagDiagnostics_Count(LagEvent::RenderJobs, *(uint32_t*)(main + 0x98));
+        LagDiagnostics_Count(LagEvent::RenderWorkers, *(uint32_t*)(main + 0xA4));
+    }
+    JobsTiming::Invoke(main, mode);
+}
+
+static void __fastcall hkTimedSceneSort(uint64_t scene)
+{
+    if (g_lagDiagnosticsMayBeEnabled.load(std::memory_order_relaxed))
+        LagDiagnostics_Count(LagEvent::SceneDrawables, *(uint32_t*)(scene + 0x40));
+    SceneSortTiming::Invoke(scene);
 }
 
 static void __fastcall hkGSoundVoiceDispatch(void* dispatcher, void* voice,
@@ -593,6 +669,48 @@ void Rollback_InitMainHooks(RollbackMainMoveFn* originalMove)
     else
         HookLog("Rollback: failed to hook cChr__setPos (%d)\n", status);
 
+    EnableHook(0x140258540, (void*)&hkWindowFocus, (void**)&oWindowFocus,
+               "Rollback: hooked window focus timing",
+               "Rollback: failed to hook window focus timing (%d)\n");
+    EnableHook(0x14053caf0, (void*)&hkRenderMove, (void**)&oRenderMove,
+               "Rollback: hooked render move timing",
+               "Rollback: failed to hook render move timing (%d)\n");
+    EnableHook(0x14051c070, (void*)&DrawCacheTiming::Invoke, (void**)&DrawCacheTiming::original,
+               "Timing: draw cache", "Timing: draw cache hook failed (%d)\n");
+    EnableHook(0x140532830, (void*)&CameraDrawTiming::Invoke, (void**)&CameraDrawTiming::original,
+               "Timing: camera draw", "Timing: camera draw hook failed (%d)\n");
+    EnableHook(0x14051ad90, (void*)&UnitDrawTiming::Invoke, (void**)&UnitDrawTiming::original,
+               "Timing: unit draw", "Timing: unit draw hook failed (%d)\n");
+    EnableHook(0x140541150, (void*)&DrawFrameCacheTiming::Invoke, (void**)&DrawFrameCacheTiming::original,
+               "Timing: frame cache", "Timing: frame cache hook failed (%d)\n");
+    EnableHook(0x140521230, (void*)&hkTimedJobs, (void**)&JobsTiming::original,
+               "Timing: jobs", "Timing: jobs hook failed (%d)\n");
+    EnableHook(0x140521a40, (void*)&JobDispatchTiming::Invoke, (void**)&JobDispatchTiming::original,
+               "Timing: dispatch", "Timing: dispatch hook failed (%d)\n");
+    EnableHook(0x14051bff0, (void*)&UnitSyncTiming::Invoke, (void**)&UnitSyncTiming::original,
+               "Timing: unit sync", "Timing: unit sync hook failed (%d)\n");
+    EnableHook(0x14051b850, (void*)&UnitAfterTiming::Invoke, (void**)&UnitAfterTiming::original,
+               "Timing: unit after", "Timing: unit after hook failed (%d)\n");
+    EnableHook(0x14077ced0, (void*)&hkTimedSceneSort, (void**)&SceneSortTiming::original,
+               "Timing: scene sort", "Timing: scene sort hook failed (%d)\n");
+    EnableHook(0x140543d30, (void*)&EffectMoveTiming::Invoke, (void**)&EffectMoveTiming::original,
+               "Timing: effects", "Timing: effects hook failed (%d)\n");
+    EnableHook(0x1406a03b0, (void*)&ParticlePreTiming::Invoke, (void**)&ParticlePreTiming::original,
+               "Timing: particles pre", "Timing: particles pre hook failed (%d)\n");
+    EnableHook(0x1406a83d0, (void*)&ParticlePostTiming::Invoke, (void**)&ParticlePostTiming::original,
+               "Timing: particles post", "Timing: particles post hook failed (%d)\n");
+    EnableHook(0x140532d80, (void*)&CameraMoveTiming::Invoke, (void**)&CameraMoveTiming::original,
+               "Timing: camera move", "Timing: camera move hook failed (%d)\n");
+    EnableHook(0x140259ea0, (void*)&GraphicsUpdateTiming::Invoke, (void**)&GraphicsUpdateTiming::original,
+               "Timing: graphics update", "Timing: graphics update hook failed (%d)\n");
+    EnableHook(0x140647910, (void*)&AiAfterTiming::Invoke, (void**)&AiAfterTiming::original,
+               "Timing: AI after", "Timing: AI after hook failed (%d)\n");
+    EnableHook(0x14051b670, (void*)&hkUnitMove, (void**)&oUnitMove,
+               "Rollback: hooked unit move timing",
+               "Rollback: failed to hook unit move timing (%d)\n");
+    EnableHook(0x140289c30, (void*)&hkNativeInput, (void**)&oNativeInput,
+               "Rollback: hooked native input timing",
+               "Rollback: failed to hook native input timing (%d)\n");
     EnableHook(FN_RENDER_END_FRAME, (void*)&hkCallSRender, (void**)&oCallSRender,
                "Rollback: hooked sRender call",
                "Rollback: failed to hook sRender call (%d)\n");

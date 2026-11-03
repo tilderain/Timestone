@@ -2,6 +2,7 @@
 #include "rollback_profile.h"
 #include "rollback.h"
 #include "rollback_diagnostics.h"
+#include "lag_diagnostics.h"
 #include "netplay.h"
 #include "mk10utils.h"
 
@@ -238,6 +239,7 @@ void Profile_RecordSnapshotEnabled(uint64_t profileStart, uint64_t buildRegionsE
 
 void Profile_DumpEnabled(const RollbackProfile& profile, bool multiResimEnabled)
 {
+    LagDiagnosticScope diagnostic(LagMetric::ProfileDump);
     const int frameCount = profile.endFrame - profile.startFrame;
     const double frameDivisor = frameCount > 0 ? (double)frameCount : 1.0;
     const double snapshotDivisor = profile.snapshotCount > 0 ?
@@ -496,6 +498,7 @@ void Profile_DumpPostResimEnabled(int32_t frame, uint64_t resolveTicks,
                                   uint64_t saveSnapshotTicks,
                                   uint64_t totalTicks)
 {
+    LagDiagnosticScope diagnostic(LagMetric::ProfileDump);
     FILE* json = Profile_OpenJson();
     if (!json) return;
 

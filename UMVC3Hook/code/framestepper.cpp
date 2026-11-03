@@ -1395,6 +1395,28 @@ void FrameStepper_Process()
         return;
     AutoTest_Process();
 
+    static constexpr bool lagTest = false;
+    static ULONGLONG lagTestStarted = 0;
+    if (lagTest && !g_isResimulating &&
+        (lagTestStarted || (g_battleSynchronized && g_localFighting))) {
+        if (!lagTestStarted) {
+            lagTestStarted = GetTickCount64();
+            HookLog("LagTest: starting automatic 15-second capture\n");
+            if (!LagDiagnostics_StartCapture()) {
+                HookLog("LagTest: capture could not start; closing\n");
+                CloseGame();
+                return;
+            }
+        }
+        const auto status = LagDiagnostics_GetCaptureStatus();
+        if (status == LagCaptureStatus::Complete || status == LagCaptureStatus::Failed ||
+            status == LagCaptureStatus::OpenFailed || GetTickCount64() - lagTestStarted > 18000) {
+            HookLog("LagTest: capture finished status=%u; closing\n", (unsigned)status);
+            CloseGame();
+            return;
+        }
+    }
+
     if (g_trainingFrameLimit > 0 && !g_trainingFrameLimitExitRequested &&
         !g_isResimulating)
     {
@@ -1606,6 +1628,13 @@ void FrameStepper_Process()
     }
 
     const int32_t desyncProcessFrame = Controller_GetNetFrameCount();
+    if (lagTest && g_desyncDetected) {
+        HookLog("LagTest: desync at frame %d; skipping dump/pause for performance capture only\n",
+                g_desyncFrame);
+        Rollback_ClearPendingDesyncCapture();
+        g_desyncDetected = false;
+        g_desyncSeen = true;
+    }
     // A synchronized autotest restart clears the UI desync flag when its
     // packet arrives, but the delayed capture must continue through trigger+15.
     const bool desyncCapturePending =
