@@ -288,7 +288,7 @@ int main()
     ExpectBytes(live, 0x12F0, 0x10, 0xA5);
     Store(saved, 0x13D8, 0);
     Restore(live, saved, ironMan, true, CharacterRestorePhase::Early);
-    ExpectBytes(live, 0x13D8, 8, 0); // saved-null result must clear future object
+    ExpectBytes(live, 0x13D8, 8, 0x5A); // EFT result remains on the native timeline
     saved.fill(0xA5);
     for (size_t binding : {size_t(0x100), size_t(0x110), size_t(0x36E0)})
         std::memcpy(live.data() + binding, saved.data() + binding, 8);

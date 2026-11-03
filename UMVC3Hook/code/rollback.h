@@ -58,7 +58,7 @@ bool Rollback_PatchHitSolverAlwaysInline();
 bool Rollback_PatchGameConfigRefresh();
 // Skip native UI initialization blocks when their allocations fail.
 void Rollback_PatchBattleUiAllocationFailure();
-// Install native-object guards, resimulation filters, and exception recovery.
+// Install native-object null/type checks and resimulation filters.
 void Rollback_InitNativeNullGuards();
 
 // Capture the configured regions and subsystem state for this frame.

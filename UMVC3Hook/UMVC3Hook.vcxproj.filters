@@ -147,9 +147,6 @@
     <ClInclude Include="code\LaunchMenu_settings.h">
       <Filter>Header Files\code</Filter>
     </ClInclude>
-    <ClInclude Include="code\concrete_snapshot.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
     <ClInclude Include="code\exception.h">
       <Filter>Header Files\code</Filter>
     </ClInclude>
@@ -163,9 +160,6 @@
       <Filter>Header Files\code</Filter>
     </ClInclude>
     <ClInclude Include="code\rollback_memory.h">
-      <Filter>Header Files\code</Filter>
-    </ClInclude>
-    <ClInclude Include="code\rollback_model_policy.h">
       <Filter>Header Files\code</Filter>
     </ClInclude>
     <ClInclude Include="code\rollback_restore.h">
@@ -198,9 +192,6 @@
       <Filter>Header Files\code</Filter>
     </ClCompile>
     <ClCompile Include="code\rollback_memory.cpp">
-      <Filter>Header Files\code</Filter>
-    </ClCompile>
-    <ClCompile Include="code\rollback_model_policy.cpp">
       <Filter>Header Files\code</Filter>
     </ClCompile>
     <ClCompile Include="code\rollback_restore.cpp">
@@ -354,9 +345,6 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="code\rollback_tick.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="code\concrete_snapshot.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>

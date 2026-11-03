@@ -59,8 +59,8 @@ class CharacterTailAuditTest(unittest.TestCase):
 
     def test_cviper_charge_timer_is_verified(self):
         verified = audit.parse_cpp_ranges(
-            self.root / "UMVC3Hook/code/concrete_snapshot.cpp",
-            "kVerifiedCharacterScalarRanges",
+            self.root / "UMVC3Hook/code/rollback_character_restore.cpp",
+            "tails",
         )
         self.assertTrue(audit.covers(verified, 0x6908, 4))
         self.assertTrue(audit.covers(

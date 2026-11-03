@@ -241,7 +241,7 @@ void Profile_RecordUnitObject(RollbackUnitProfilePhase phase, uint32_t category,
 void Profile_RecordSnapshotEnabled(uint64_t profileStart, uint64_t buildRegionsEnd,
                                    uint64_t allocationEnd, uint64_t copyRegionsEnd,
                                    uint64_t snapshotMetadataEnd, uint64_t collisionClonesEnd,
-                                   uint64_t shotRecipesEnd, size_t bytes, uint32_t regions);
+                                   uint64_t snapshotEnd, size_t bytes, uint32_t regions);
 void Profile_DumpEnabled(const RollbackProfile& profile, bool multiResimEnabled);
 void Profile_DumpPostResimEnabled(int32_t frame, uint64_t resolveTicks,
                                    uint64_t saveSnapshotTicks,
@@ -287,12 +287,12 @@ inline void Profile_AddElapsed(uint64_t RollbackProfile::*field, uint64_t start)
 inline void Profile_RecordSnapshot(uint64_t profileStart, uint64_t buildRegionsEnd,
                                    uint64_t allocationEnd, uint64_t copyRegionsEnd,
                                    uint64_t snapshotMetadataEnd, uint64_t collisionClonesEnd,
-                                   uint64_t shotRecipesEnd, size_t bytes, uint32_t regions)
+                                   uint64_t snapshotEnd, size_t bytes, uint32_t regions)
 {
     if constexpr (ROLLBACK_PROFILING_ENABLED) {
         Profile_RecordSnapshotEnabled(profileStart, buildRegionsEnd, allocationEnd,
                                       copyRegionsEnd, snapshotMetadataEnd,
-                                      collisionClonesEnd, shotRecipesEnd, bytes, regions);
+                                      collisionClonesEnd, snapshotEnd, bytes, regions);
     }
 }
 

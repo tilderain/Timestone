@@ -13,7 +13,7 @@ IMAGE_BASE = 0x140000000
 TAIL_START = 0x68F0
 RANGE_RE = re.compile(
     r"\{\s*(0x[0-9a-fA-F]+)(?:ull)?\s*,\s*(0x[0-9a-fA-F]+)\s*,"
-    r"\s*(0x[0-9a-fA-F]+)\s*\}"
+    r"\s*(0x[0-9a-fA-F]+|\d+)\s*\}"
 )
 GENERATED_RE = re.compile(
     r"\{\s*(0x[0-9a-fA-F]+)(?:ull)?\s*,\s*(0x[0-9a-fA-F]+)\s*,"
@@ -36,12 +36,7 @@ class TailRange:
         return self.offset + self.size
 
 
-SPECIAL_RESTORE_RANGES = [
-    TailRange(0x140D45A10, 0x68F0, 0x28, "concrete_snapshot.cpp:Ryu recipe"),
-    TailRange(0x140D45A10, 0x6920, 0x20, "concrete_snapshot.cpp:Ryu recipe"),
-    TailRange(0x140D455F8, 0x6900, 0x20, "concrete_snapshot.cpp:Hsien-Ko recipe"),
-    TailRange(0x140D45D40, 0x68F0, 0x10, "concrete_snapshot.cpp:Spencer recipe"),
-]
+SPECIAL_RESTORE_RANGES = []
 KNOWN_UNRESOLVED_RANGES = [
     # Constructor-zeroed state whose gameplay semantics remain unproven.
     TailRange(0x140D450A8, 0x68F0, 0x5C, "chrfields.md:Doctor Strange unresolved"),
@@ -123,7 +118,7 @@ def parse_generated(path):
 
 def parse_cpp_ranges(path, array_name):
     text = path.read_text(encoding="utf-8")
-    marker = f"constexpr DtiSnapshotRange {array_name}[] = {{"
+    marker = f"constexpr TailRange {array_name}[] = {{"
     start = text.find(marker)
     if start < 0:
         raise ValueError(f"missing {array_name} in {path}")
@@ -220,12 +215,12 @@ def covered_bytes(ranges, object_size):
 
 def build_audit(root):
     generated_path = root / "UMVC3Hook/code/generated_character_tail_fields.inc"
-    concrete_path = root / "UMVC3Hook/code/concrete_snapshot.cpp"
+    concrete_path = root / "UMVC3Hook/code/rollback_character_restore.cpp"
     docs_path = root / "doc/chrfields.md"
     structs_path = root / "ghidra_export/snapdump_structs.json"
 
     generated, generated_names = parse_generated(generated_path)
-    verified = parse_cpp_ranges(concrete_path, "kVerifiedCharacterScalarRanges")
+    verified = parse_cpp_ranges(concrete_path, "tails")
     documented = parse_doc_table(
         docs_path, "## Verified Scalar/POD Fields", "## Unsafe References And Owners",
         docs_path.name,

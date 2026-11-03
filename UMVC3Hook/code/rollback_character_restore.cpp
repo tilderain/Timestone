@@ -54,9 +54,8 @@ void ActorEarly(uint8_t* live, const uint8_t* saved, bool roster)
     if (sameResources) {
         Copy<0x1388, 0x30>(live, saved); // type/key and borrowed resource cursors
     }
-    // +13B8..13BF remains unresolved. Interpreter +90 is character +13D8.
-    // Restore saved null without guessing whether a nonzero value is a pointer.
-    if (Load<uint64_t>(saved, 0x13D8) == 0) Copy<0x13D8, 8>(live, saved);
+    // +13B8..13BF remains unresolved. Keep EFT return +13D8 live until
+    // dynamic-object lifetimes and return identities can be restored together.
     Copy<0x13C0, 0x01>(live, saved); // mCngKey
     Copy<0x13C4, 0x10>(live, saved); // compare registers, jump count, return flags
     Copy<0x13E0, 0x08>(live, saved); // loop count/start frame
@@ -113,7 +112,7 @@ void CommonEarly(uint8_t* live, const uint8_t* saved, bool roster)
     Copy<0x41FC, 0x04>(live, saved); // team material-effect state
     Copy<0x4D10, 0x100>(live, saved); // capsule position history
     Copy<0x6340, 0xE8>(live, saved); // push vectors, collision sets, damage state
-    // +6428 mpLastCreateShot is remapped after reconstruction.
+    // +6428 mpLastCreateShot stays live while shot rewind is unavailable.
     Copy<0x6430, 0x2C>(live, saved); // shot group/serial/hit latches
     // +6460 critical section, +6488 unknown, target references +6490 onward,
     // callbacks +6738/+6740, auxiliary owners +6748 and CPU +67F0 stay live.

@@ -1,7 +1,6 @@
 #include "../pch.h"
 
 #include "rollback.h"
-#include "rollback_effect.h"
 #include "rollback_profile.h"
 #include "live_benchmark.h"
 #include "rollback_memory.h"
@@ -119,16 +118,11 @@ static bool IsHeadlessGameplaySyncCategory(uint32_t category)
     }
 }
 
-static bool IsHeadlessGameplayUnitObject(uint64_t dti, uint64_t unit, uint32_t category)
+static bool IsHeadlessGameplayUnitObject(uint64_t dti)
 {
     // Skip active callbacks for exact uChrChain objects; lifecycle cleanup is separate.
     if (dti == (uint64_t)_addr(DTI_UCHRCHAIN)) return false;
-    if (category != 13) return true;
-    // Retained ExAtkSpace parents and linked transition effects do not replay callbacks.
-    // Exact uGameEffect objects need only the transition-effect check.
-    if (dti == (uint64_t)_addr(DTI_UGAME_EFFECT))
-        return !Effect_IsExAtkSpaceTransitionEffect((void*)unit, false);
-    return !Effect_IsExAtkSpaceUnit((void*)unit);
+    return true;
 }
 
 static constexpr uintptr_t SLEEP_CALL_FIXED  = 0x1405220b2;
@@ -327,7 +321,7 @@ static void HeadlessUnitCategoryMove(uint64_t sMain, uint64_t sUnit,
             }
 
             if ((stateFlags & 7u) == 2 && (stateFlags & 0x400u) != 0 &&
-                IsHeadlessGameplayUnitObject(dti, unit, category)) {
+                IsHeadlessGameplayUnitObject(dti)) {
                 Rollback_FreezeWatchdogUnit("headless-unit-move", category,
                                             unit, dti, g_resimulateCurrentFrame);
                 if (!useJobs) {
@@ -444,7 +438,7 @@ static void HeadlessUnitCategoryPostMove(uint64_t sMain, uint64_t sUnit,
             }
 
             if ((stateFlags & 7u) == 2 && (stateFlags & 0x400u) != 0 &&
-                IsHeadlessGameplayUnitObject(dti, unit, category)) {
+                IsHeadlessGameplayUnitObject(dti)) {
                 Rollback_FreezeWatchdogUnit(WatchdogPhaseName(phase), category,
                                             unit, dti, g_resimulateCurrentFrame);
                 if (initialized) {

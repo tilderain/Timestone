@@ -2,7 +2,6 @@
 #include "../pch.h"
 
 #include "rollback_diagnostics.h"
-#include "rollback_memory.h"
 #include "netplay.h"
 
 #include <cstdio>
@@ -25,6 +24,16 @@ static std::atomic<uint64_t> g_freezeDti{0};
 static std::atomic<uint64_t> g_freezeMaterialModel{0};
 static std::atomic<uint32_t> g_freezeMaterialCount{0};
 static std::atomic<uint32_t> g_freezeMaterialInvalid{0};
+
+static bool IsExecutableAddress(uint64_t address)
+{
+    MEMORY_BASIC_INFORMATION memory{};
+    if (!VirtualQuery((LPCVOID)address, &memory, sizeof(memory)) ||
+        memory.State != MEM_COMMIT || (memory.Protect & (PAGE_GUARD | PAGE_NOACCESS)))
+        return false;
+    return (memory.Protect & (PAGE_EXECUTE | PAGE_EXECUTE_READ |
+        PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY)) != 0;
+}
 
 int Rollback_ResolveDllPath(char* destination, size_t destinationLength,
                             const char* relativePath)
