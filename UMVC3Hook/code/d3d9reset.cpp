@@ -7,6 +7,7 @@
 #include "mk10utils.h"
 #include "framestepper.h"
 #include "rollback.h"
+#include "lag_diagnostics.h"
 #include "LaunchMenu.h"
 #include "launchmenu_utils.h"
 #include "../IniSafe.h"
@@ -154,6 +155,7 @@ void* NativeRenderer()
 
 void __fastcall HookBeginFrame(void* render)
 {
+    LagDiagnosticScope diagnostic(LagMetric::RenderBegin);
     // BeginFrame runs on the game thread in every launch mode, after startup.
     static bool gameplayExecutionSettingsApplied = false;
     if (!gameplayExecutionSettingsApplied) {

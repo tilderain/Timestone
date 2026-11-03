@@ -741,6 +741,8 @@ class D3D9ResetTests(unittest.TestCase):
         source = (ROOT / "UMVC3Hook/code/d3d9reset.cpp").read_text()
         unit = MOCKS + r'''
 std::atomic<int> g_renderingThreadOverride {-1};
+enum class LagMetric { RenderBegin };
+struct LagDiagnosticScope { explicit LagDiagnosticScope(LagMetric) {} };
 std::atomic<bool> g_renderingThreadEnabled {false};
 bool D3D9Reset_RenderingThreadOverrideAvailable = false;
 int beginCalls = 0;

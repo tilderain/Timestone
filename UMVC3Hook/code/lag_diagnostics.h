@@ -13,17 +13,27 @@ enum class LagMetric : unsigned {
     SnapDump, Restore, RestoreSetup, RestoreRegions, RestoreClones, RestoreFixups,
     RestoreReconstruct, RestoreLate, Correction, ResimFrame, ResimTick,
     RebuildPin, RebuildRetire, RebuildDestroy, RebuildSpawn, RebuildFinalize,
-    OverlaySetup, OverlayLogic, ImGuiFinalize, HookLog, Count
+    OverlaySetup, OverlayLogic, ImGuiFinalize, HookLog, ProfileDump, RenderEnd, RenderBegin, WindowFocus,
+    RenderMove, UnitMove, NativeInput, SoundMove,
+    DrawCache, CameraDraw, UnitDraw, DrawFrameCache, Jobs, JobDispatch, UnitSync, UnitAfter,
+    SceneSort, EffectMove, ParticlePre, ParticlePost, CameraMove, GraphicsUpdate, AiAfter,
+    PadPoll, PadRead, Count
 };
 enum class LagEvent : unsigned {
     BenchmarkReset, LiveSample, CorrectionSample, BenchmarkClock,
-    NativeOutsideFrame, FrameReentry, OverlayOrder, ScopeOverflow, Count
+    NativeOutsideFrame, FrameReentry, OverlayOrder, ScopeOverflow,
+    RenderBatches, RenderJobs, RenderWorkers, SceneDrawables, Count
 };
 
 // Initially true for lazy configuration; false between opt-in captures.
 extern std::atomic<bool> g_lagDiagnosticsMayBeEnabled;
 uint64_t LagDiagnostics_BeginSlow(LagMetric metric, int32_t frame);
 void LagDiagnostics_EventSlow(LagEvent event);
+void LagDiagnostics_CountSlow(LagEvent event, uint64_t count);
+inline void LagDiagnostics_Count(LagEvent event, uint64_t count) {
+    if (g_lagDiagnosticsMayBeEnabled.load(std::memory_order_relaxed))
+        LagDiagnostics_CountSlow(event, count);
+}
 void LagDiagnostics_RecordWaitSlow(LagMetric metric, int32_t required, int32_t remoteBefore,
                                   int32_t remoteAfter, int32_t delay, int32_t rollback);
 inline void LagDiagnostics_RecordWait(LagMetric metric, int32_t required, int32_t remoteBefore,

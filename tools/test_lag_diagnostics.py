@@ -17,6 +17,7 @@ class LagDiagnosticsTest(unittest.TestCase):
 std::atomic<bool> g_lagDiagnosticsMayBeEnabled{false};
 uint64_t LagDiagnostics_BeginSlow(LagMetric, int32_t) { std::abort(); }
 void LagDiagnostics_EventSlow(LagEvent) { std::abort(); }
+void LagDiagnostics_CountSlow(LagEvent, uint64_t) { std::abort(); }
 void LagDiagnostics_RecordWaitSlow(LagMetric, int32_t, int32_t, int32_t, int32_t, int32_t) { std::abort(); }
 void LagDiagnostics_End(LagMetric, uint64_t) { std::abort(); }
 int main() {
@@ -24,6 +25,7 @@ int main() {
     scope.Next(LagMetric::Native);
     scope.Finish();
     LagDiagnostics_Event(LagEvent::BenchmarkClock);
+    LagDiagnostics_Count(LagEvent::RenderJobs, 123);
     LagDiagnostics_RecordWait(LagMetric::PredictionWait, 10, 9, 10, 2, 7);
     return LagDiagnostics_Begin(LagMetric::Pacing) != 0;
 }
@@ -88,6 +90,13 @@ std::vector<std::string> logs;
 int fileOpens = 0;
 std::atomic<uint64_t> wallMs{1000};
 bool failThread = false, failShell = false;
+bool lagTest = false;
+unsigned GetEnvironmentVariableA(const char* name, char* value, unsigned size) {
+    assert(!strcmp(name, "TIMESTONE_LAG_TEST") && size >= 2);
+    if (!lagTest) return 0;
+    value[0] = '1'; value[1] = 0;
+    return 1;
+}
 bool fileClosed = false, fileFlushed = false;
 int shellOpens = 0;
 std::string openedPath, createdPath;
@@ -216,7 +225,10 @@ int main(int argc, char** argv) {
         WaitStatus(LagCaptureStatus::Recording);
         assert(LagDiagnostics_GetCaptureSecondsRemaining() == 15);
         assert(!LagDiagnostics_StartCapture()); // No concurrent capture writers.
-        { LagDiagnosticScope frame(LagMetric::Frame, 42); ticks += 1000; }
+        { LagDiagnosticScope frame(LagMetric::Frame, 42);
+          LagDiagnostics_Count(LagEvent::RenderJobs, 100);
+          LagDiagnostics_Count(LagEvent::RenderJobs, 23);
+          ticks += 1000; }
         wallMs += 14900;
         assert(LagDiagnostics_GetCaptureSecondsRemaining() == 1);
         assert(shellOpens == 0);
@@ -225,6 +237,7 @@ int main(int argc, char** argv) {
         assert(!writerRunning && !writerReady && !g_lagDiagnosticsMayBeEnabled);
         assert(shellOpens == 1 && openedPath == createdPath);
         assert(logs.size() == 3 && logs[1].find("net_frame=42") != std::string::npos);
+        assert(logs[1].find("render_jobs=123") != std::string::npos);
         assert(logs.front().find("duration_ms=15000") != std::string::npos);
         assert(logs.back().find("LAGCAPTURE stopped") != std::string::npos);
         const auto firstPath = openedPath;
@@ -253,6 +266,12 @@ int main(int argc, char** argv) {
         assert(logs[6].find("frame_gap=") == std::string::npos);
         assert(!g_lagDiagnosticsMayBeEnabled && shellOpens == 3);
         assert(settingsReads == 1);
+        lagTest = true;
+        assert(LagDiagnostics_StartCapture());
+        WaitStatus(LagCaptureStatus::Recording);
+        FinishCapture();
+        assert(LagDiagnostics_GetCaptureStatus() == LagCaptureStatus::Complete);
+        assert(fileClosed && fileFlushed && shellOpens == 3);
         return 0;
     }
     if (!enabled) {

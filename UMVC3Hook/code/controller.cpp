@@ -2010,12 +2010,14 @@ static void __fastcall hkprocessFrameInput(uint64_t cChrInput)
 // ---------------------------------------------------------------------------
 static void __fastcall hkpadPollAllSlots(uint64_t sPad)
 {
+    LagDiagnosticScope diagnostic(LagMetric::PadPoll);
     RollbackHookProfileScope profile(RollbackHookProfileId::PadPollAll);
     opadPollAllSlots(sPad);
 }
 
 static uint64_t __fastcall hkpadSlotReadDevice(uint64_t slotBase)
 {
+    LagDiagnosticScope diagnostic(LagMetric::PadRead);
     RollbackHookProfileScope profile(RollbackHookProfileId::PadSlotRead);
     return opadSlotReadDevice(slotBase);
 }
