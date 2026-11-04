@@ -14,6 +14,7 @@
 #include "lag_diagnostics.h"
 #include "steam_lobby.h"
 #include "gameplay_hooks.h"
+#include "xinput_discovery.h"
 
 #include <cmath>
 #include <cstring>
@@ -398,8 +399,6 @@ struct TimedBackendCall {
         return original(args...);
     }
 };
-using DetectTiming = TimedBackendCall<LagMetric::PadDetect, uint8_t, uint64_t, int32_t, uint32_t>;
-using XStateTiming = TimedBackendCall<LagMetric::XInputState, uint32_t, uint32_t, void*>;
 using XCapsTiming = TimedBackendCall<LagMetric::XInputCaps, uint64_t, uint64_t, uint64_t>;
 using DInputFindTiming = TimedBackendCall<LagMetric::DirectInputFind, uint8_t, uint64_t, uint64_t>;
 using WmiTiming = TimedBackendCall<LagMetric::InputWmi, int, void*>;
@@ -767,6 +766,7 @@ static bool DisableNativeNetworkFrameUpdates()
 
 void Rollback_InitMainHooks(RollbackMainMoveFn* originalMove)
 {
+    XInputDiscovery_Init();
     HookLog("Native network: component/agent/ranking/room frame updates %s\n",
             DisableNativeNetworkFrameUpdates() ? "disabled (12-byte patch)" : "patch failed");
     g_originalMvc3MainMove = originalMove;
@@ -859,10 +859,6 @@ void Rollback_InitMainHooks(RollbackMainMoveFn* originalMove)
                    "Timing: capture move", "Timing: capture move failed (%d)\n");
         EnableHook(0x1401f0aa0, (void*)&StageMoveTiming::Invoke, (void**)&StageMoveTiming::original,
                    "Timing: stage move", "Timing: stage move failed (%d)\n");
-        EnableHook(0x140514950, (void*)&DetectTiming::Invoke, (void**)&DetectTiming::original,
-                   "Timing: redetect", "Timing: redetect failed (%d)\n");
-        EnableHook(0x1409981c1, (void*)&XStateTiming::Invoke, (void**)&XStateTiming::original,
-                   "Timing: XInputGetState", "Timing: XInputGetState failed (%d)\n");
         EnableHook(0x140514450, (void*)&XCapsTiming::Invoke, (void**)&XCapsTiming::original,
                    "Timing: XInput capabilities", "Timing: XInput capabilities failed (%d)\n");
         EnableHook(0x140513f10, (void*)&DInputFindTiming::Invoke, (void**)&DInputFindTiming::original,

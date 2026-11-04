@@ -4,19 +4,25 @@
 
 Set `LAG_BACKEND_TIMING_ENABLED` in `lag_diagnostics.h` to true and build with
 `make -j8`. Use the existing manual lag-capture button on the setup exhibiting
-the issue. For unattended CPU tests, also enable the local `lagTest` constexpr
-in `FrameStepper_Process`, then run `wine umvc3.exe -training-cpus`.
+the issue. For unattended CPU tests, also enable `lagTest` in
+`lag_diagnostics.h`, then run `wine umvc3.exe -training-cpus`.
 
-Both flags default to false. The backend Present detour is installed only in
-the backend-timing build, not in the normal build. No native polling, input
-results, GPU fence, rendering, or wait behavior is skipped or replaced.
+Check the current header for development flag values. The backend Present
+detour is installed only in the backend-timing build. Timing instrumentation
+itself does not change API results. Separate runtime policies include native
+SLI forcing and asynchronous XInput discovery; see `xinput_discovery.md` for
+the latter's scope and limitations.
 
 Metrics:
 
-- `pad_detect`: native rate-limited slot rediscovery, 0x140514950.
-- `xinput_state`: game's XInputGetState import thunk, 0x1409981C1. Includes
-  both active polling and rediscovery probes.
+- `pad_detect`: native rate-limited slot rediscovery, 0x140514950, invoked with
+  an asynchronous discovery snapshot during ordinary mod gameplay.
+- `xinput_state`: non-cached calls through the game's XInputGetState import
+  thunk, 0x1409981C1. Active polling stays synchronous; discovery snapshot
+  reads are excluded. Native startup/explicit occupied-slot rescans are included.
 - `xinput_caps`: native XInput capability query wrapper, 0x140514450.
+- `xinput_discovery_state`, `xinput_discovery_caps`: actual discovery API calls
+  on the background worker, not frame-thread stall costs.
 - `dinput_find`: native DirectInput enumeration/setup, 0x140513F10.
 - `input_wmi`: WMI-based XInput exclusion during DirectInput enumeration,
   0x140510220. The native routine scans Win32_PNPEntity; it is not cached.

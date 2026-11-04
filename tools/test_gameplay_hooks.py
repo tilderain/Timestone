@@ -24,6 +24,7 @@ std::map<void*, bool> queued;
 bool failApply = false, failProtect = false, failFlush = false, failQueueEnable = false;
 int applyCount = 0;
 void HookLog(const char*, ...) {}
+void XInputDiscovery_Stop() {}
 MH_STATUS MH_CreateHook(void* target, void*, void**) {
     if (hooks.count(target)) return MH_ERROR_ALREADY_CREATED;
     hooks[target] = false;
@@ -208,7 +209,7 @@ int main() {
             subprocess.run([str(exe)], check=True)
 
     def test_gameplay_installers_are_owned(self):
-        files = ["controller", "diag", "autotest", "framestepper", "rollback_hooks",
+        files = ["controller", "diag", "autotest", "framestepper", "rollback_hooks", "xinput_discovery",
                  "rollback_runtime", "rollback_rng"]
         for name in files:
             with self.subTest(file=name):

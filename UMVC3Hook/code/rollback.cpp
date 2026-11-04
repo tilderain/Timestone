@@ -5,6 +5,7 @@
 #include "rollback_resim.h"
 #include "rollback_rng.h"
 #include "gameplay_hooks.h"
+#include "xinput_discovery.h"
 
 #include <atomic>
 #include <cstring>
@@ -73,6 +74,7 @@ bool GameplayHooks_Apply()
 
 bool GameplayHooks_Disable()
 {
+    XInputDiscovery_Stop();
     g_gameplayActive.store(false, std::memory_order_release);
     if (g_gameplayDisabled)
         return true;

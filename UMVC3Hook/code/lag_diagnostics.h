@@ -4,9 +4,9 @@
 #include <atomic>
 
 // Development-only backend detours; keep disabled in release builds.
-inline constexpr bool LAG_BACKEND_TIMING_ENABLED = true;
+inline constexpr bool LAG_BACKEND_TIMING_ENABLED = false;
 // Automatic battle-start capture and exit; suppresses desync handling during the test.
-inline constexpr bool lagTest = true;
+inline constexpr bool lagTest = false;
 // Experimental: force the native SLI setting on; false respects game configuration.
 inline constexpr bool FORCE_NATIVE_SLI_ON = true;
 
@@ -24,7 +24,8 @@ enum class LagMetric : unsigned {
     RenderMove, UnitMove, NativeInput, SoundMove,
     DrawCache, CameraDraw, UnitDraw, DrawFrameCache, Jobs, JobDispatch, UnitSync, UnitAfter,
     SceneSort, EffectMove, ParticlePre, ParticlePost, CameraMove, GraphicsUpdate, AiAfter,
-    PadPoll, PadRead, PadDetect, XInputState, XInputCaps, DirectInputFind,
+    PadPoll, PadRead, PadDetect, XInputState, XInputCaps,
+    XInputDiscoveryState, XInputDiscoveryCaps, DirectInputFind,
     DirectInputRead, InputWmi, RenderWorkerWait, RenderInlinePlayback,
     RenderPlayback, RenderGpuFence, BackendPresent, RenderRetire, RenderCapture,
     KeyboardMove, KeyboardState, MouseMove, MouseState,
