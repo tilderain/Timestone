@@ -15,6 +15,7 @@
 #include "steam_lobby.h"
 #include "gameplay_hooks.h"
 #include "xinput_discovery.h"
+#include "mouse_disable.h"
 
 #include <cmath>
 #include <cstring>
@@ -425,7 +426,7 @@ static void __fastcall hkRenderSetSli(uint64_t render, uint8_t enabled)
 using RetireTiming = TimedNativeCall<LagMetric::RenderRetire, uint64_t>;
 using CaptureTiming = TimedNativeCall<LagMetric::RenderCapture, uint64_t>;
 using KeyboardStateTiming = TimedNativeCall<LagMetric::KeyboardState, uint64_t, uint32_t*>;
-using MouseMoveTiming = TimedNativeCall<LagMetric::MouseMove, uint64_t>;
+static void(__fastcall* oDisabledMouseMove)(uint64_t) = nullptr;
 using MouseStateTiming = TimedNativeCall<LagMetric::MouseState, uint64_t, int32_t*>;
 using NetComponentTiming = TimedNativeCall<LagMetric::NetComponent, uint64_t>;
 using NativeNetworkTiming = TimedNativeCall<LagMetric::NativeNetwork, uint64_t>;
@@ -465,8 +466,7 @@ static BOOL WINAPI TraceMouseApi(Args... args)
 
 static void InstallInputCallTiming()
 {
-    // Replace only verified call sequences. The native retry loop and decoding
-    // remain untouched; each wrapper resolves the device's current vtable.
+    // Timing-only callsites; native mouse move is separately disabled.
     struct Site { uintptr_t address; const char* bytes; size_t size; void* replacement; };
     const Site sites[] = {
         {0x1406aa1e4, "\xff\x90\xc8\x00\x00\x00", 6, (void*)&TraceInputDevice<LagMetric::KeyboardPoll, 25>},
@@ -503,6 +503,13 @@ static void InstallInputCallTiming()
         HookLog("Input timing: could not allocate nearby call targets\n");
         return;
     }
+    // Obtain write permission for all callsites before changing any instruction.
+    constexpr size_t span = 0x1406aaec0 - 0x1406aa1e4;
+    DWORD previous;
+    if (!VirtualProtect((void*)origin, span, PAGE_EXECUTE_READWRITE, &previous)) {
+        HookLog("Input calls: could not make call sites writable\n");
+        return;
+    }
     for (size_t i = 0; i < std::size(sites); ++i) {
         const auto& site = sites[i];
         auto* address = (uint8_t*)_addr(site.address);
@@ -510,18 +517,15 @@ static void InstallInputCallTiming()
         const int32_t displacement = (int32_t)((intptr_t)&targets[i] - (intptr_t)(address + 6));
         uint8_t patch[8] = {0xff, 0x15, 0, 0, 0, 0, 0x90, 0x90};
         std::memcpy(patch + 2, &displacement, sizeof(displacement));
-        DWORD previous;
-        if (!VirtualProtect(address, site.size, PAGE_EXECUTE_READWRITE, &previous)) {
-            HookLog("Input timing: protection failed at 0x%llX\n", (unsigned long long)site.address);
-            continue;
-        }
         GameplayHooks_RecordPatch(address, site.size);
         std::memcpy(address, patch, site.size);
-        DWORD ignored;
-        VirtualProtect(address, site.size, previous, &ignored);
-        FlushInstructionCache(GetCurrentProcess(), address, site.size);
         HookLog("Input timing: patched call at 0x%llX\n", (unsigned long long)site.address);
     }
+    DWORD ignored;
+    const bool restored = VirtualProtect((void*)origin, span, previous, &ignored);
+    const bool flushed = FlushInstructionCache(GetCurrentProcess(), (void*)origin, span);
+    if (!restored || !flushed)
+        HookLog("Input calls: protection/cache finalization failed\n");
 }
 static void(__fastcall* oRenderSyncTiming)(uint64_t) = nullptr;
 static void __fastcall hkRenderSyncTiming(uint64_t render)
@@ -823,12 +827,12 @@ void Rollback_InitMainHooks(RollbackMainMoveFn* originalMove)
     EnableHook(0x140289c30, (void*)&hkNativeInput, (void**)&oNativeInput,
                "Rollback: hooked native input timing",
                "Rollback: failed to hook native input timing (%d)\n");
+    EnableHook(0x1406aa990, (void*)&MouseDisable_Move, (void**)&oDisabledMouseMove,
+               "Mouse: native movement/polling disabled", "Mouse: disable hook failed (%d)\n");
     if constexpr (LAG_BACKEND_TIMING_ENABLED) {
         InstallInputCallTiming();
         EnableHook(0x1406aa1b0, (void*)&KeyboardStateTiming::Invoke, (void**)&KeyboardStateTiming::original,
                    "Timing: keyboard state", "Timing: keyboard state failed (%d)\n");
-        EnableHook(0x1406aa990, (void*)&MouseMoveTiming::Invoke, (void**)&MouseMoveTiming::original,
-                   "Timing: mouse move", "Timing: mouse move failed (%d)\n");
         EnableHook(0x1406aad00, (void*)&MouseStateTiming::Invoke, (void**)&MouseStateTiming::original,
                    "Timing: mouse state", "Timing: mouse state failed (%d)\n");
         EnableHook(0x140458320, (void*)&NetComponentTiming::Invoke, (void**)&NetComponentTiming::original,

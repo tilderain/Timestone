@@ -13,6 +13,10 @@ itself does not change API results. Separate runtime policies include native
 SLI forcing and asynchronous XInput discovery; see `xinput_discovery.md` for
 the latter's scope and limitations.
 
+Native mouse movement/polling is disabled independently of timing; see
+`mouse_disable.md`. The conditional Poll bypass has been removed. Native mouse
+timing scopes normally receive no samples; overlay Win32 mouse handling remains.
+
 Metrics:
 
 - `pad_detect`: native rate-limited slot rediscovery, 0x140514950, invoked with

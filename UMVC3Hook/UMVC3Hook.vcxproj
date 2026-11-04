@@ -220,6 +220,7 @@
     <ClInclude Include="code\live_benchmark.h" />
     <ClInclude Include="code\keyboard_input.h" />
     <ClInclude Include="code\xinput_discovery.h" />
+    <ClInclude Include="code\mouse_disable.h" />
     <ClInclude Include="code\lag_diagnostics.h" />
   </ItemGroup>
   <ItemGroup>
@@ -233,6 +234,7 @@
     <ClCompile Include="code\live_benchmark.cpp" />
     <ClCompile Include="code\keyboard_input.cpp" />
     <ClCompile Include="code\xinput_discovery.cpp" />
+    <ClCompile Include="code\mouse_disable.cpp" />
     <ClCompile Include="code\lag_diagnostics.cpp" />
     <ClCompile Include="code\autotest.cpp" />
     <ClCompile Include="code\diag.cpp" />

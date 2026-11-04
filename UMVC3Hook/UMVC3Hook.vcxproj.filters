@@ -317,6 +317,12 @@
     <ClCompile Include="code\xinput_discovery.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="code\mouse_disable.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClInclude Include="code\mouse_disable.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="code\xinput_discovery.h">
       <Filter>Header Files</Filter>
     </ClInclude>
