@@ -22,11 +22,9 @@ namespace {
 
 using LaunchMenuUtils::GetSettingsPath;
 
-constexpr int ID_SINGLE_THREADED = 100;
 constexpr int ID_SAVE = 101;
 constexpr int ID_CANCEL = 102;
 constexpr int ID_DARK_MODE = 103;
-constexpr int ID_SINGLE_THREAD_DESCRIPTION = 104;
 constexpr int ID_RESOLUTION = 105;
 constexpr int ID_FULLSCREEN = 106;
 constexpr int ID_DISPLAY_HEADING = 107;
@@ -36,7 +34,6 @@ constexpr int ID_STEAM_ROUTING = 110;
 constexpr char SETTINGS_CLASS[] = "TimestoneAdvancedConfig";
 
 bool g_settingsLoaded = false;
-std::atomic<bool> g_runSingleThreaded{false};
 using GeometryGroupMoveFn = void(__fastcall*)(void*);
 GeometryGroupMoveFn g_geometryGroupMove = nullptr;
 bool g_threadingHooksReady = false;
@@ -112,12 +109,8 @@ void ApplyDpi(HWND window, UINT oldDpi, UINT newDpi)
 
 void __fastcall HookGeometryGroupMove(void* group)
 {
-    if (!g_runSingleThreaded.load()) {
-        g_geometryGroupMove(group);
-        return;
-    }
     // uGeometry2Group::mFlgMultiThread selects its native synchronous inline path.
-    // Preserve each group's preference so disabling the override restores it.
+    // Leave the object's stored flags unchanged outside this synchronous call.
     auto& multiThread = *(reinterpret_cast<uint8_t*>(group) + 0xB0);
     const uint8_t saved = multiThread;
     multiThread = 0;
@@ -131,8 +124,6 @@ void LoadSettings()
 
     char path[MAX_PATH] = {};
     GetSettingsPath(path, sizeof(path));
-    g_runSingleThreaded = GetPrivateProfileIntA(
-        "Advanced", "EntireGameSingleThreaded", 0, path) != 0;
     g_darkMode = GetPrivateProfileIntA("General", "LaunchMenuDarkMode", 1, path) != 0;
     g_savedDarkMode = g_darkMode;
     g_settingsLoaded = true;
@@ -183,9 +174,6 @@ bool SaveSettings(HWND window)
             g_displayChanged = true;
         }
     }
-    const bool singleThreaded = SendMessageA(
-        GetDlgItem(window, ID_SINGLE_THREADED), BM_GETCHECK, 0, 0) == BST_CHECKED;
-
     char path[MAX_PATH] = {};
     GetSettingsPath(path, sizeof(path));
     const bool darkMode = SendMessageA(GetDlgItem(window, ID_DARK_MODE),
@@ -205,11 +193,6 @@ bool SaveSettings(HWND window)
         g_savedDarkMode = darkMode;
     else
         HookLog("LaunchMenu: failed to save dark mode to %s\n", path);
-    if (!SetGameSingleThreaded(singleThreaded)) {
-        MessageBoxA(window, "Could not save the single-thread setting.",
-                    "Settings", MB_OK | MB_ICONERROR);
-        return false;
-    }
     return true;
 }
 
@@ -286,24 +269,11 @@ LRESULT CALLBACK SettingsWndProc(HWND window, UINT message,
             WS_VISIBLE | WS_CHILD, 34, headingY, 80, 20, window,
             reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_ADVANCED_HEADING)), nullptr, nullptr);
         const int sectionY = headingY + 28;
-        HWND description = CreateWindowA(
-            "STATIC",
-            "Sets game worker count to 1. May massively improve performance by 100% "
-            "on pcs with bad thread work, but may decrease performance by about 10% on higher end pcs.",
-            WS_VISIBLE | WS_CHILD, 18, sectionY, 374, 50,
-            window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_SINGLE_THREAD_DESCRIPTION)),
-            nullptr, nullptr);
-        HWND checkbox = CreateWindowA(
-            "BUTTON", "Run entire game single-threaded",
-            WS_VISIBLE | WS_CHILD | WS_TABSTOP | BS_AUTOCHECKBOX,
-            18, sectionY + 56, 374, 24, window,
-            reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_SINGLE_THREADED)),
-            nullptr, nullptr);
         CreateWindowA("STATIC", "Rendering thread:", WS_VISIBLE | WS_CHILD,
-            18, sectionY + 92, 130, 20, window, nullptr, nullptr, nullptr);
+            18, sectionY + 4, 130, 20, window, nullptr, nullptr, nullptr);
         HWND renderingThread = CreateWindowA("COMBOBOX", "",
             WS_VISIBLE | WS_CHILD | WS_TABSTOP | CBS_DROPDOWNLIST,
-            154, sectionY + 88, 238, 120, window,
+            154, sectionY, 238, 120, window,
             reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_RENDERING_THREAD)), nullptr, nullptr);
         for (const char* option : {"Game default", "Force OFF", "Force ON"})
             SendMessageA(renderingThread, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(option));
@@ -311,13 +281,13 @@ LRESULT CALLBACK SettingsWndProc(HWND window, UINT message,
                      D3D9Reset_GetRenderingThreadOverride() + 1, 0);
         EnableWindow(renderingThread, D3D9Reset_RenderingThreadOverrideAvailable);
         CreateWindowA("STATIC", "ON adds one frame of latency. OFF may decrease performance or other various issues.",
-            WS_VISIBLE | WS_CHILD, 18, sectionY + 120, 374, 34,
+            WS_VISIBLE | WS_CHILD, 18, sectionY + 32, 374, 34,
             window, nullptr, nullptr, nullptr);
         CreateWindowA("STATIC", "Steam routing:", WS_VISIBLE | WS_CHILD,
-            18, sectionY + 164, 130, 20, window, nullptr, nullptr, nullptr);
+            18, sectionY + 76, 130, 20, window, nullptr, nullptr, nullptr);
         HWND steamRouting = CreateWindowA("COMBOBOX", "",
             WS_VISIBLE | WS_CHILD | WS_TABSTOP | CBS_DROPDOWNLIST,
-            154, sectionY + 160, 238, 100, window,
+            154, sectionY + 72, 238, 100, window,
             reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_STEAM_ROUTING)), nullptr, nullptr);
         for (const char* option : {"Automatic", "Relay Only"})
             SendMessageA(steamRouting, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(option));
@@ -327,20 +297,18 @@ LRESULT CALLBACK SettingsWndProc(HWND window, UINT message,
             "Automatic may share your IP with your opponent. "
             "When in doubt, leave it to automatic, as it can provide "
             "fastest routing regardless of steam server or direct p2p connection.",
-            WS_VISIBLE | WS_CHILD, 18, sectionY + 194, 374, 84,
+            WS_VISIBLE | WS_CHILD, 18, sectionY + 106, 374, 84,
             window, nullptr, nullptr, nullptr);
         HWND save = CreateWindowA(
             "BUTTON", "Save", WS_VISIBLE | WS_CHILD | WS_TABSTOP | BS_DEFPUSHBUTTON,
-            222, sectionY + 284, 82, 28, window,
+            222, sectionY + 196, 82, 28, window,
             reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_SAVE)), nullptr, nullptr);
         HWND cancel = CreateWindowA(
             "BUTTON", "Cancel", WS_VISIBLE | WS_CHILD | WS_TABSTOP | BS_PUSHBUTTON,
-            310, sectionY + 284, 82, 28, window,
+            310, sectionY + 196, 82, 28, window,
             reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_CANCEL)), nullptr, nullptr);
         ApplyDpi(window, 96, GetWindowDpi(window));
         ApplyLaunchMenuDarkTheme(window);
-        SendMessageA(checkbox, BM_SETCHECK,
-                     g_runSingleThreaded ? BST_CHECKED : BST_UNCHECKED, 0);
         SetFocus(darkMode);
         return 0;
     }
@@ -379,17 +347,6 @@ LRESULT CALLBACK SettingsWndProc(HWND window, UINT message,
         DestroyWindow(window);
         return 0;
     case WM_CTLCOLORSTATIC:
-        if (GetDlgCtrlID(reinterpret_cast<HWND>(lParam)) == ID_SINGLE_THREAD_DESCRIPTION) {
-            const bool dark = IsLaunchMenuDarkModeEnabled();
-            const COLORREF background = dark ? RGB(62, 57, 35) : RGB(255, 249, 219);
-            static HBRUSH darkBrush = CreateSolidBrush(RGB(62, 57, 35));
-            static HBRUSH lightBrush = CreateSolidBrush(RGB(255, 249, 219));
-            HDC dc = reinterpret_cast<HDC>(wParam);
-            SetTextColor(dc, LaunchMenuDarkTextColor());
-            SetBkColor(dc, background);
-            SetBkMode(dc, OPAQUE);
-            return reinterpret_cast<LRESULT>(dark ? darkBrush : lightBrush);
-        }
         return HandleLaunchMenuDarkControlColor(message, wParam);
     case WM_CTLCOLORBTN:
     case WM_CTLCOLOREDIT:
@@ -402,21 +359,14 @@ LRESULT CALLBACK SettingsWndProc(HWND window, UINT message,
     {
         PAINTSTRUCT paint = {};
         HDC dc = BeginPaint(window, &paint);
-        RECT description = {}, checkbox = {};
-        GetWindowRect(GetDlgItem(window, ID_SINGLE_THREAD_DESCRIPTION), &description);
-        GetWindowRect(GetDlgItem(window, ID_SINGLE_THREADED), &checkbox);
-        MapWindowPoints(nullptr, window, reinterpret_cast<POINT*>(&description), 2);
-        MapWindowPoints(nullptr, window, reinterpret_cast<POINT*>(&checkbox), 2);
-        const int inset = MulDiv(8, GetWindowDpi(window), 96);
-        const int x = description.left - inset;
-        const int top = (description.top + description.bottom) / 2;
-        const int bottom = (checkbox.top + checkbox.bottom) / 2;
+        RECT client = {};
+        GetClientRect(window, &client);
+        const UINT dpi = GetWindowDpi(window);
+        const int inset = MulDiv(8, dpi, 96);
+        const int margin = MulDiv(18, dpi, 96);
         HPEN pen = CreatePen(PS_SOLID, 1, IsLaunchMenuDarkModeEnabled()
                             ? RGB(96, 96, 96) : RGB(160, 160, 160));
         HGDIOBJ oldPen = SelectObject(dc, pen);
-        POINT line[] = {{description.left, top}, {x, top},
-                        {x, bottom}, {checkbox.left, bottom}};
-        Polyline(dc, line, 4);
         const int headings[] = {ID_DISPLAY_HEADING, ID_ADVANCED_HEADING};
         for (int id : headings) {
             HWND label = GetDlgItem(window, id);
@@ -424,10 +374,10 @@ LRESULT CALLBACK SettingsWndProc(HWND window, UINT message,
             GetWindowRect(label, &heading);
             MapWindowPoints(nullptr, window, reinterpret_cast<POINT*>(&heading), 2);
             const int y = (heading.top + heading.bottom) / 2;
-            MoveToEx(dc, description.left, y, nullptr);
+            MoveToEx(dc, margin, y, nullptr);
             LineTo(dc, heading.left - inset, y);
             MoveToEx(dc, heading.right + inset, y, nullptr);
-            LineTo(dc, description.right, y);
+            LineTo(dc, client.right - margin, y);
         }
         SelectObject(dc, oldPen);
         DeleteObject(pen);
@@ -480,7 +430,7 @@ void ShowAdvancedConfigModal(HWND owner)
     const UINT dpi = GetWindowDpi(owner);
     wchar_t gamePath[MAX_PATH] = {};
     RECT bounds = {0, 0, MulDiv(410, dpi, 96),
-                   MulDiv(GetGameConfigPath(gamePath) ? 476 : 508, dpi, 96)};
+                   MulDiv(GetGameConfigPath(gamePath) ? 388 : 420, dpi, 96)};
     using AdjustWindowRectExForDpiFn = BOOL (WINAPI*)(LPRECT, DWORD, BOOL, DWORD, UINT);
     const auto adjustForDpi = reinterpret_cast<AdjustWindowRectExForDpiFn>(
         GetProcAddress(GetModuleHandleA("user32.dll"), "AdjustWindowRectExForDpi"));
@@ -544,28 +494,16 @@ bool PrepareAdvancedLaunchConfig()
 
 bool ApplyAdvancedLaunchConfig()
 {
-    LoadSettings();
     uint64_t sMain = *(uint64_t*)_addr(0x140e177e8);
     if (!sMain || !g_threadingHooksReady) return false;
-
-    static bool initialized = false;
-    static bool applied = false;
-    static uint32_t savedThreadCount = 1;
-    const bool enabled = g_runSingleThreaded.load();
-    if (initialized && enabled == applied) return true;
-
     auto& requested = *reinterpret_cast<uint32_t*>(sMain + 0xA8);
-    if (enabled) savedThreadCount = requested;
+    auto& active = *reinterpret_cast<uint32_t*>(sMain + 0xA4);
+    if (requested == 1 && active == 1) return true;
     using SetJobThreadNumFn = void(__fastcall*)(uint64_t, uint32_t);
-    if (enabled || initialized) {
-        ((SetJobThreadNumFn)_addr(0x140522450))(sMain, enabled ? 1 : savedThreadCount);
-        // sMain::move has already copied the count this tick. No batch is active
-        // at this game-thread boundary, so update the current count as well.
-        *reinterpret_cast<uint32_t*>(sMain + 0xA4) = requested;
-    }
-    applied = enabled;
-    initialized = true;
-    HookLog("Advanced Config: single-thread override %s\n", enabled ? "enabled" : "disabled");
+    ((SetJobThreadNumFn)_addr(0x140522450))(sMain, 1);
+    // No batch is active at this game-thread boundary. Override this tick too.
+    active = requested;
+    HookLog("Threading: game jobs forced single-threaded\n");
     return true;
 }
 
@@ -596,17 +534,5 @@ void ApplyLaunchDisplayConfig()
 
 bool IsGameSingleThreaded()
 {
-    LoadSettings();
-    return g_runSingleThreaded.load();
-}
-
-bool SetGameSingleThreaded(bool enabled)
-{
-    LoadSettings();
-    char path[MAX_PATH] = {};
-    GetSettingsPath(path, sizeof(path));
-    if (!IniSafe_WriteString("Advanced", "EntireGameSingleThreaded",
-                             enabled ? "1" : "0", path)) return false;
-    g_runSingleThreaded.store(enabled);
     return true;
 }

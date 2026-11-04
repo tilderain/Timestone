@@ -31,7 +31,6 @@ MOCKS = r'''
 constexpr int MAX_PATH = 260;
 alignas(8) uint8_t mainState[0x40090] = {};
 uint64_t singleton = reinterpret_cast<uint64_t>(mainState);
-std::atomic<bool> g_runSingleThreaded{false};
 bool g_threadingHooksReady = true;
 bool writable = true;
 int setterCalls = 0, groupCalls = 0;
@@ -60,20 +59,18 @@ GeometryGroupMoveFn g_geometryGroupMove = OriginalMove;
 '''
 
 CASES = r'''
-int main(int argc, char**) {
-    const bool startEnabled = argc > 1;
+int main() {
     auto& requested = *reinterpret_cast<uint32_t*>(mainState + 0xA8);
     auto& active = *reinterpret_cast<uint32_t*>(mainState + 0xA4);
     requested = active = 8;
-    g_runSingleThreaded = startEnabled;
     assert(ApplyAdvancedLaunchConfig());
-    assert(requested == (startEnabled ? 1u : 8u));
+    assert(requested == 1);
     assert(active == requested);
-    for (bool enabled : {true, false, true, false}) {
-        assert(SetGameSingleThreaded(enabled));
-        assert(IsGameSingleThreaded() == enabled);
+    for (uint32_t count : {4u, 16u, 8u, 2u}) {
+        requested = count;
+        assert(IsGameSingleThreaded());
         assert(ApplyAdvancedLaunchConfig());
-        assert(requested == (enabled ? 1u : 8u));
+        assert(requested == 1);
         assert(active == requested);
         int previousCalls = setterCalls;
         assert(ApplyAdvancedLaunchConfig());
@@ -81,15 +78,15 @@ int main(int argc, char**) {
         for (uint8_t flag : {0, 1}) {
             uint8_t group[0xB8] = {};
             group[0xB0] = flag;
-            expectedFlag = enabled ? 0 : flag;
+            expectedFlag = 0;
             HookGeometryGroupMove(group);
             assert(group[0xB0] == flag);
         }
     }
     assert(groupCalls == 8);
-    writable = false;
-    assert(!SetGameSingleThreaded(true));
-    assert(!IsGameSingleThreaded());
+    active = 8;
+    assert(ApplyAdvancedLaunchConfig());
+    assert(requested == 1 && active == 1);
     singleton = 0;
     assert(!ApplyAdvancedLaunchConfig());
     singleton = reinterpret_cast<uint64_t>(mainState);
@@ -106,7 +103,6 @@ class LiveSingleThreadTests(unittest.TestCase):
             "void __fastcall HookGeometryGroupMove(",
             "bool ApplyAdvancedLaunchConfig(",
             "bool IsGameSingleThreaded(",
-            "bool SetGameSingleThreaded(",
         ]
         code = MOCKS + "\n".join(function(source, s) for s in signatures) + CASES
         with tempfile.TemporaryDirectory() as directory:
@@ -117,7 +113,6 @@ class LiveSingleThreadTests(unittest.TestCase):
             subprocess.run(["g++", "-std=c++17", "-Wall", "-Wextra", "-Werror",
                             str(cpp), "-o", str(executable)], check=True)
             subprocess.run([str(executable)], check=True)
-            subprocess.run([str(executable), "enabled-at-startup"], check=True)
 
     def test_workers_and_frame_polling(self):
         source = SOURCE.read_text()
@@ -126,6 +121,11 @@ class LiveSingleThreadTests(unittest.TestCase):
         frame = (ROOT / "UMVC3Hook/code/framestepper.cpp").read_text()
         self.assertIn("    ApplyAdvancedLaunchConfig();", frame)
         self.assertNotIn("advancedConfigApplied", frame)
+        for name in ("LaunchMenu_settings.cpp", "LaunchMenu_settings.h", "umvc3menu.cpp", "escmenu_imgui.cpp"):
+            text = (ROOT / "UMVC3Hook/code" / name).read_text()
+            self.assertNotIn("SetGameSingleThreaded", text)
+            self.assertNotIn("EntireGameSingleThreaded", text)
+            self.assertNotIn("ID_SINGLE_THREAD", text)
 
 
 if __name__ == "__main__":
