@@ -14,6 +14,7 @@
 #include "steam_lobby.h"
 #include "gameplay_hooks.h"
 #include "xinput_discovery.h"
+#include "mouse_disable.h"
 
 #include <cmath>
 #include <cstring>
@@ -59,6 +60,7 @@ static RollbackMainMoveFn* g_originalMvc3MainMove = nullptr;
 static void(__fastcall* oCallSRender)(uint64_t) = nullptr;
 static void(__fastcall* oMainMove)(uint64_t) = nullptr;
 static void(__fastcall* oSoundMove)(uint64_t) = nullptr;
+static void(__fastcall* oDisabledMouseMove)(uint64_t) = nullptr;
 static void(__fastcall* oGSoundVoiceDispatch)(void*, void*, char) = nullptr;
 static uint64_t*(__fastcall* oGSoundCreateVoice)(void*, uint64_t*, void*, void*,
                                                  char) = nullptr;
@@ -560,6 +562,8 @@ static bool DisableNativeNetworkFrameUpdates()
 void Rollback_InitMainHooks(RollbackMainMoveFn* originalMove)
 {
     XInputDiscovery_Init();
+    EnableHook(0x1406aa990, (void*)&MouseDisable_Move, (void**)&oDisabledMouseMove,
+               "Mouse: native movement/polling disabled", "Mouse: disable hook failed (%d)\n");
     HookLog("Native network: component/agent/ranking/room frame updates %s\n",
             DisableNativeNetworkFrameUpdates() ? "disabled (12-byte patch)" : "patch failed");
     g_originalMvc3MainMove = originalMove;

@@ -74,6 +74,7 @@ CPP_SRC   := \
 	$(SRCDIR)/code/live_benchmark.cpp \
 	$(SRCDIR)/code/keyboard_input.cpp \
 	$(SRCDIR)/code/xinput_discovery.cpp \
+	$(SRCDIR)/code/mouse_disable.cpp \
 	$(SRCDIR)/code/controller.cpp \
 	$(SRCDIR)/code/autotest.cpp \
 	$(SRCDIR)/code/diag.cpp \
