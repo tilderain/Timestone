@@ -23,6 +23,39 @@ No executable file on disk or Ghidra memory bytes are patched.
 
 ## Component Coverage
 
+### GameConfig Maintenance
+
+`Rollback_PatchGameConfigRefresh` also suppresses the two platform-refresh
+blocks in `sGameConfig::move` (`0x140253490`), independent of timing flags:
+
+| Patch | Original bytes | Replacement | Destination |
+| --- | --- | --- | --- |
+| `0x1402534BD` | `83 BB 44 04 00 00 00` | `E9 26 00 00 00 90 90` | `0x1402534E8` |
+| `0x140253508` | `48 8D B3 38 03 00 00` | `E9 97 00 00 00 90 90` | `0x1402535A4` |
+
+The first skips unresolved-slot tests, platform readiness, and
+`refreshNetworkSlotState`. The second skips the 60-update Steam persona-name
+refresh, including its counter. Dead-object checks for pointers at `+0x4ADF0`
+and `+0x514A0` remain unchanged. The second jump lands at the original epilogue,
+without entering the skipped RDI save/restore region.
+
+The refresh helper (`0x140255160`) is NOT globally disabled: it resolves native
+session fields and calls the player-name helper (`0x1402557D0`), which fetches
+the Steam name under a critical section. Session resolution also reaches
+`0x1402542B0`, updating native license/session-derived state. Explicit callers
+at title-menu `0x1403F81EA` and Guide `0x140283A9B` are preserved, as are
+construction and other configuration methods. Names will no longer refresh
+automatically each second through move; fields can remain at their last values
+between explicit refreshes. This is intended for mod gameplay, not native online.
+
+Original bytes are verified and registered for Normal Launch restoration using
+the existing patch helper. `game_config_move` timing now covers the retained
+cleanup rather than periodic platform work. Runtime menu/name validation remains
+necessary; removing this work does not prove the previously correlated
+cross-instance stall was caused by Steam.
+
+### Network Children
+
 Component ctor `0x140457FB0` and concrete vtable `0x140B80FB0` establish these
 children. Component movement calls every child's `+0x30` phase:
 
