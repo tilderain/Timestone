@@ -341,6 +341,13 @@ static void __fastcall hkGSoundVoiceDispatch(void* dispatcher, void* voice,
     oGSoundVoiceDispatch(dispatcher, voice, stop);
 }
 
+static void(__fastcall* oRenderMove)(uint64_t) = nullptr;
+static void __fastcall hkRenderMove(uint64_t object)
+{
+    Controller_PublishInputBeforeRender();
+    oRenderMove(object);
+}
+
 static void(__fastcall* oRenderCreateDevice)(uint64_t, uint64_t, uint64_t, uint64_t) = nullptr;
 static void __fastcall hkRenderCreateDevice(uint64_t render, uint64_t a2, uint64_t a3, uint64_t a4)
 {
@@ -562,6 +569,8 @@ static bool DisableNativeNetworkFrameUpdates()
 void Rollback_InitMainHooks(RollbackMainMoveFn* originalMove)
 {
     XInputDiscovery_Init();
+    EnableHook(0x14053caf0, (void*)&hkRenderMove, (void**)&oRenderMove,
+               "Input: hooked pre-render publication", "Input: pre-render hook failed (%d)\n");
     EnableHook(0x1406aa990, (void*)&MouseDisable_Move, (void**)&oDisabledMouseMove,
                "Mouse: native movement/polling disabled", "Mouse: disable hook failed (%d)\n");
     HookLog("Native network: component/agent/ranking/room frame updates %s\n",

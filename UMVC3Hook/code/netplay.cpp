@@ -42,6 +42,10 @@ static CRITICAL_SECTION         g_inboundCS;
 
 
 static HANDLE               g_serviceThread  = nullptr;
+// Process-lifetime wake handles, reused across sessions after the service exits.
+static HANDLE               g_outboundWake = nullptr;
+static WSAEVENT             g_socketWake = WSA_INVALID_EVENT;
+static bool                g_eventDrivenService = false;
 static uint32_t             g_recvCount = 0;
 static uint32_t             g_lastRecv  = 0;
 static bool                 g_readyTxDiagValid = false;
@@ -581,8 +585,12 @@ static DWORD WINAPI Netplay_ServiceThread(LPVOID)
         // --- Service the host ---
         if (g_host)
         {
+            if (g_eventDrivenService) {
+                WSANETWORKEVENTS events{};
+                WSAEnumNetworkEvents(g_host->socket, g_socketWake, &events);
+            }
             ENetEvent event;
-            while (enet_host_service(g_host, &event, 1) > 0)
+            while (enet_host_service(g_host, &event, g_eventDrivenService ? 0 : 1) > 0)
             {
                 if (event.type == ENET_EVENT_TYPE_RECEIVE)
                 {
@@ -824,6 +832,12 @@ static DWORD WINAPI Netplay_ServiceThread(LPVOID)
                 }
             }
         }
+        if (g_running && g_eventDrivenService) {
+            HANDLE events[] = {g_outboundWake, g_socketWake};
+            // Wake on fresh local input OR incoming traffic; timeout retains
+            // ENet maintenance and the existing independent history retransmit.
+            WaitForMultipleObjects(2, events, FALSE, 1);
+        }
     }
 
     HookLog("Netplay: Service thread exiting\n");
@@ -944,6 +958,16 @@ void Netplay_Init(ENetHost* host, ENetPeer* peer)
     // Reset internal player pad ring buffers
     Controller_ResetBuffers();
 
+    if (!g_outboundWake)
+        g_outboundWake = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    if (g_socketWake == WSA_INVALID_EVENT)
+        g_socketWake = WSACreateEvent();
+    if (g_outboundWake)
+        ResetEvent(g_outboundWake);
+    g_eventDrivenService = g_outboundWake && g_socketWake != WSA_INVALID_EVENT &&
+        WSAEventSelect(g_host->socket, g_socketWake, FD_READ) == 0;
+    HookLog("Netplay: input/socket wakeups %s\n", g_eventDrivenService ? "enabled" : "unavailable; using service polling");
+
     g_running = true;
     g_serviceThread = CreateThread(nullptr, 0, Netplay_ServiceThread, nullptr, 0, nullptr);
     if (g_serviceThread)
@@ -970,10 +994,21 @@ void Netplay_SetTimeout(uint32_t timeoutMs)
 
 void Netplay_SendPacket(const InputPacket& pkt)
 {
-    ScopedCS lock(g_outboundCS);
-    g_outboundPacket = pkt;
-    g_outboundNew = true;
-    g_outboundValid = true;
+    {
+        ScopedCS lock(g_outboundCS);
+        InputPacket next = pkt;
+        // An early history publication must not discard a pending frame-end checksum.
+        if (g_outboundNew && g_outboundValid && next.checksum_frame == 0xFFFFFFFFu &&
+            next.battle_generation == g_outboundPacket.battle_generation) {
+            next.checksum_frame = g_outboundPacket.checksum_frame;
+            next.checksum = g_outboundPacket.checksum;
+        }
+        g_outboundPacket = next;
+        g_outboundNew = true;
+        g_outboundValid = true;
+    }
+    if (g_outboundWake)
+        SetEvent(g_outboundWake);
 }
 
 bool Netplay_GetInboundPacket(InputPacket& outPkt)
@@ -1498,6 +1533,8 @@ void Netplay_Shutdown()
 
     if (g_serviceThread)
     {
+        if (g_outboundWake)
+            SetEvent(g_outboundWake);
         WaitForSingleObject(g_serviceThread, 3000);
         CloseHandle(g_serviceThread);
         g_serviceThread = nullptr;
