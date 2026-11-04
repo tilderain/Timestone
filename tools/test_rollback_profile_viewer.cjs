@@ -114,3 +114,30 @@ test('escapes untrusted metadata and preserves JSON import after a capture', () 
   assert.equal(run('rollbacks.length'), 1);
   assert.equal(elements.get('#fileName').textContent, 'test.json');
 });
+
+test('documents every metric in the current diagnostic emitter', () => {
+  const { run } = viewer();
+  const source = fs.readFileSync(path.join(__dirname, '../UMVC3Hook/code/lag_diagnostics.cpp'), 'utf8');
+  const names = [...source.match(/constexpr const char\* names\[\] = \{([\s\S]*?)\};/)[1].matchAll(/"(\w+)"/g)].map((m) => m[1]);
+  const descriptions = run('lagDescriptions');
+  for (const name of names) assert.ok(descriptions[name], `Missing description: ${name}`);
+  for (const name of ['frame_gap', 'scene_gap', 'tid', 'net_frame', 'window_ms', 'build', 'dirty',
+    'units', 'resets', 'samples', 'corrections', 'bench_qpc', 'native_outside', 'reentry',
+    'overlay_order', 'scope_overflow', 'report_qpc', 'dropped', 'writer_prev_ms', 'render_batches',
+    'render_jobs', 'render_worker_sum', 'scene_drawable_sum', 'duration_ms', 'start_qpc',
+    'end_qpc', 'qpc_hz', 'metric', 'self_avg_ms', 'dropped_reports_total']) {
+    assert.ok(descriptions[name], `Missing field description: ${name}`);
+  }
+});
+
+test('renders new overlay metrics, descriptions, metadata and unknown fields safely', () => {
+  const { context, elements, run } = viewer();
+  context.text = `LAGDIAG tid=832 net_frame=-1 window_ms=5001 build=<img> dirty=1 scene_gap=300/16.667/25.370/1 overlay_win32_mouse=301/0.004/0.025/0 overlay_mouse_child=301/0.001/0.022/0 future_metric=1/1/1/0 render_worker_sum=905 self_avg_ms{ overlay_win32_mouse=0.001 overlay_mouse_child=0.001 }`;
+  run('loadText(text)');
+  assert.match(elements.get('#lagMetrics').innerHTML, /Checking the child-window relationship/);
+  assert.match(elements.get('#lagBreakdown').innerHTML, /Updating the overlay mouse/);
+  assert.match(elements.get('#lagMetadata').innerHTML, /not a unique thread count/);
+  assert.match(elements.get('#lagMetadata').innerHTML, /&lt;img&gt;/);
+  assert.match(elements.get('#lagFieldGuide').innerHTML, /overlay_win32_mouse/);
+  assert.match(elements.get('#lagMetrics').innerHTML, /Unrecognized metric/);
+});

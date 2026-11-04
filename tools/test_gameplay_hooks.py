@@ -159,6 +159,49 @@ class GameplayHooksTests(unittest.TestCase):
                 self.assertNotIn("MH_EnableHook(", source)
                 self.assertIn("GameplayHooks_QueueEnable(", source)
 
+    def test_native_sli_toggle(self):
+        source = (ROOT / "UMVC3Hook/code/rollback_hooks.cpp").read_text()
+        hook = source[source.index("static void(__fastcall* oRenderGpuFence)"):
+                      source.index("using RetireTiming")]
+        for enabled in (False, True):
+            with self.subTest(enabled=enabled), tempfile.TemporaryDirectory() as tmp:
+                cpp = Path(tmp) / "fence.cpp"
+                exe = Path(tmp) / "fence"
+                cpp.write_text(r'''
+#include <cassert>
+#include <cstdint>
+#define __fastcall
+enum class LagMetric { RenderGpuFence };
+struct LagDiagnosticScope { explicit LagDiagnosticScope(LagMetric) {} };
+constexpr bool FORCE_NATIVE_SLI_ON = ''' + str(enabled).lower() + ";\n" + hook + r'''
+int calls = 0;
+void original(uint64_t render) { assert(render == 123); ++calls; }
+uint8_t renderer[0x867731]{};
+void create(uint64_t render, uint64_t a2, uint64_t a3, uint64_t a4) {
+    assert(render == (uint64_t)renderer && a2 == 2 && a3 == 3 && a4 == 4);
+    renderer[0x867730] = 0;
+}
+void setSli(uint64_t render, uint8_t enabled) {
+    assert(render == (uint64_t)renderer);
+    renderer[0x867730] = enabled;
+}
+int main() {
+    oRenderGpuFence = original;
+    hkRenderGpuFence(123);
+    assert(calls == 1); // Never bypass the original fence function directly.
+    oRenderCreateDevice = create;
+    oRenderSetSli = setSli;
+    hkRenderCreateDevice((uint64_t)renderer, 2, 3, 4);
+    assert(renderer[0x867730] == (FORCE_NATIVE_SLI_ON ? 1 : 0));
+    hkRenderSetSli((uint64_t)renderer, 0);
+    assert(renderer[0x867730] == (FORCE_NATIVE_SLI_ON ? 1 : 0));
+    hkRenderSetSli((uint64_t)renderer, 1);
+    assert(renderer[0x867730] == 1);
+}
+''')
+                subprocess.run(["g++", "-std=c++17", str(cpp), "-o", str(exe)], check=True)
+                subprocess.run([str(exe)], check=True)
+
     def test_launch_order_and_network_handoff(self):
         source = (ROOT / "UMVC3Hook/dllmain.cpp").read_text()
         installers = source[source.index("static void InitializeGameplayHooks()\n{"):source.index("void __fastcall Hook_titleLogoUpdate")]

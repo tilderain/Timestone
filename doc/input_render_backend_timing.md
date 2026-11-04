@@ -52,6 +52,55 @@ existing hooks. New detours are installed only with the backend flag enabled.
 No parent timer bypasses work or changes a native result. In particular,
 `adapter_query` preserves its 32-bit native status return.
 
+Overlay setup retains its parent timer and adds nested operations:
+`overlay_admission` (reset/device-lock admission), `overlay_init` (one-time
+initialization), `overlay_capture` (requested back-buffer snapshot),
+`overlay_keyboard_update`, `overlay_dx9_frame`, `overlay_win32_frame`,
+`overlay_render_target`, `overlay_keyboard_poll`, and `overlay_imgui_frame`.
+These operations, `overlay_setup`, `endscene`, and `render_end` emit the same
+timestamped window-maximum records at 5 ms or more. Match their intervals to
+playback/wait intervals rather than assuming window maxima are the same call.
+The cached-overlay redraw path when no new UI frame is due remains outside
+these setup timers. Initialization includes its own admission retry.
+
+Inside `overlay_win32_frame`, nested timers split window-size queries
+(`overlay_win32_size`), clock update (`overlay_win32_clock`), mouse-position
+queries (`overlay_win32_mouse`), conditional cursor changes
+(`overlay_win32_cursor`), and gamepad update (`overlay_win32_gamepad`). These
+also emit timestamped window maxima at 5 ms or more. Cursor and gamepad timers
+include their condition checks; a sample does not imply an OS cursor change
+or an XInput call occurred.
+
+Native DirectInput call-site instrumentation (backend flag only):
+
+- `keyboard_poll`, `mouse_poll`: device Poll.
+- `keyboard_acquire`, `mouse_acquire`: first Acquire after a failed Poll.
+- `keyboard_acquire_retry`, `mouse_acquire_retry`: subsequent Acquire attempts
+  in the native INPUTLOST loop. Their call counts are the actual retry counts.
+- `keyboard_get_state`, `mouse_get_state`: GetDeviceState with the original
+  output buffer and native 256-byte / 20-byte state size.
+
+`LAGAPI` reports per-window call counts, negative-HRESULT counts, INPUTLOST
+counts, the last HRESULT, and the HRESULT of the maximum-duration call
+(`max_hr`, matching the same metric's maximum and LAGSLOW interval). Counts
+are window totals, not retry counts attached to a particular worst frame.
+No retry is capped and every native HRESULT is returned unchanged. These
+timers measure wall time, including any descheduling, and add overhead to
+each retry. No formatting or file I/O happens inside the retry loop.
+
+The mouse update also performs Win32 calls before DirectInput: `native_mouse_rect`
+is GetClientRect, `native_mouse_cursor` is GetCursorPos, and
+`native_mouse_client` is ScreenToClient. They have separate timers because
+the parent mouse-state timing includes them too. Installation checks all 11
+original instruction sequences before patching; patches are registered for
+normal-launch restoration. Device COM vtables are not modified.
+
+The overlay mouse helper separately times `overlay_mouse_foreground`
+(GetForegroundWindow), `overlay_mouse_child` (IsChild),
+`overlay_mouse_cursor_pos` (GetCursorPos), `overlay_mouse_client`
+(ScreenToClient), and the optional `overlay_mouse_to_screen` / `overlay_mouse_warp`
+(ClientToScreen / SetCursorPos). Its original short-circuit conditions remain.
+
 Timings nest. In particular, a worker wait and the render-thread GPU fence can
 overlap on separate threads; do not add their durations. `LAGSLOW` records give
 the start/end QPC values of the slowest selected backend call in each reporting

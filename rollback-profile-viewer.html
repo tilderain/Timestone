@@ -84,6 +84,7 @@
       .lag-breakdown .hook-name { font: inherit; white-space: normal; }
       .lag-breakdown .track { height: 12px; }
       #lagContent summary { cursor: pointer; color: var(--muted); margin: 14px 0; }
+      .lag-description { display: block; margin-top: 4px; color: var(--muted); font: 12px/1.45 system-ui, sans-serif; min-width: 200px; max-width: 460px; }
       .mark {
         font:
           700 13px/1 ui-monospace,
@@ -525,7 +526,12 @@
           <p class="sub">Inclusive timings overlap and must not be summed. Self timings exclude nested scopes but still include waits. Reports are separate per thread; frozen or inactive thread tails may be incomplete.</p>
           <p id="lagSummary"></p>
           <label>Report <select id="lagReport"></select></label>
-          <details open><summary>Technical details: report metadata</summary><p id="lagMetadata" class="sub"></p></details>
+          <details open><summary>Technical details: report metadata</summary><div id="lagMetadata" class="table-wrap"></div></details>
+          <details open><summary>Capture format and field reference</summary>
+            <p class="sub">LAGCAPTURE marks the requested capture duration and stop status. LAGDIAG summarizes one thread's reporting window. LAGWORST contains accumulated scope times within that window's longest measured frame, not necessarily one invocation per metric. LAGSLOW records a metric's slowest invocation when it reached 5 ms; it need not occur in the worst frame.</p>
+            <p class="sub">Metric tuples in LAGDIAG are count / average milliseconds / maximum milliseconds / invocations over 25 ms. LAGWORST tuples are inclusive milliseconds / self milliseconds. self_avg_ms contains per-invocation self averages: elapsed time excluding measured nested scopes, not CPU usage. A missing self value is unavailable, not assumed zero. Rounded 0.000 values can still represent small costs.</p>
+            <div id="lagFieldGuide" class="table-wrap"></div>
+          </details>
         </section>
         <section class="panel">
           <div class="panel-head"><h2>What takes time each frame?</h2>
@@ -543,6 +549,7 @@
           <h2>Worst frame</h2><p id="lagWorstMeta" class="sub"></p>
           <div id="lagWorstBreakdown" class="lag-breakdown"></div>
           <details open><summary>Technical details: all worst-frame metrics</summary>
+          <div id="lagWorstFields" class="table-wrap"></div>
           <div class="table-wrap"><table><thead><tr><th>Metric</th><th>Inclusive ms</th><th>Self ms</th><th>Inclusive % of frame</th><th>Self % of frame</th></tr></thead><tbody id="lagWorst"></tbody></table></div>
           </details>
         </section>
@@ -839,14 +846,190 @@
         return String(value).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
       }
       let lagCapture = null;
+      // Keys match the diagnostic emitter; unknown future fields remain visible.
+      const lagDescriptions = Object.fromEntries(`
+frame|Complete measured game frame, including pacing and plugin work.
+native|Native game-frame work, including its nested measured scopes.
+pacing|Waiting to maintain the game's frame cadence; elapsed waiting time, not CPU work.
+input_wait|Waiting for required remote input to become available.
+prediction_wait|Waiting because the allowed prediction lead has been reached.
+bench_update|Updating the live benchmark's state.
+bench_begin|Beginning a benchmark frame sample.
+bench_end|Ending a benchmark frame sample.
+bench_draw|Drawing benchmark information.
+steam_route|Steam networking route work.
+endscene|Overlay EndScene hook work, including nested overlay scopes.
+status_hud|Drawing the connection/status HUD.
+chrsel_hud|Drawing character-selection HUD information.
+esc_hud|Drawing the escape-menu HUD.
+imgui_submit|Submitting ImGui draw data to the graphics backend.
+diag_enqueue|Queuing a diagnostic report for the writer thread.
+controller_start|Rollback controller work at frame start.
+controller_end|Rollback controller work at frame end.
+packet_drain|Processing queued incoming network packets.
+checksum|Computing or processing state checksums.
+main_hook|Main frame hook, including the native frame and rollback work it wraps.
+frame_tail|Measured work at the end of the frame hook.
+save_live|Saving a snapshot of the current live game state.
+save_resim|Saving a snapshot during rollback re-simulation.
+save_regions|Building snapshot memory-region information.
+save_alloc|Recycling or allocating snapshot storage.
+save_copy|Copying memory into snapshot storage.
+save_clones|Saving cloned state objects.
+save_parents|Saving parent/owner relationships for restoration.
+save_render|Saving render-related state.
+save_shots|Saving shot reconstruction state.
+save_shot_refs|Saving references associated with shots.
+save_effects|Saving effect-related state.
+snapdump|Snapshot diagnostic dump work.
+restore|Restoring a saved game state, including nested restore steps.
+restore_setup|Preparing the snapshot restore.
+restore_regions|Restoring saved memory regions.
+restore_clones|Restoring cloned state objects.
+restore_fixups|Repairing pointers and relationships after restoration.
+restore_reconstruct|Reconstructing objects during restoration.
+restore_late|Late restore work after the main restoration steps.
+correction|Rollback correction work, including restoration and re-simulation.
+resim_frame|One rollback re-simulation frame and its surrounding work.
+resim_tick|Executing the game tick during re-simulation.
+rebuild_pin|Retaining resources needed for reconstruction.
+rebuild_retire|Retiring objects during reconstruction.
+rebuild_destroy|Destroying objects during reconstruction.
+rebuild_spawn|Spawning reconstructed objects.
+rebuild_finalize|Finalizing reconstruction.
+overlay_setup|Preparing the overlay frame, including nested setup operations.
+overlay_logic|Running overlay UI logic.
+imgui_finalize|Finalizing the ImGui frame before submission.
+hooklog|Writing hook log messages.
+profile_dump|Writing rollback profiling output.
+render_end|Completing native render-frame work.
+render_begin|Beginning native render-frame work.
+window_focus|Native window-focus handling.
+render_move|Updating native rendering state, including nested draw preparation.
+unit_move|Updating game objects in the native unit movement pass.
+native_input|Native input update, including nested controller operations.
+sound_move|Native sound-system update.
+draw_cache|Updating the native draw cache.
+camera_draw|Camera-related drawing and nested draw work.
+unit_draw|Drawing game objects; may run multiple times per frame.
+draw_frame_cache|Updating the per-frame draw cache.
+jobs|Native job-system work, including nested dispatch.
+job_dispatch|Dispatching native jobs.
+unit_sync|Synchronizing game objects.
+unit_after|Game-object post-update work.
+scene_sort|Sorting scene objects for rendering.
+effect_move|Updating effects.
+particle_pre|Particle work before the main particle update.
+particle_post|Particle work after the main particle update.
+camera_move|Updating cameras.
+graphics_update|Updating the graphics manager.
+ai_after|AI post-update work.
+pad_poll|Polling native controller input.
+pad_read|Reading a controller slot; may run multiple times per frame.
+pad_detect|Detecting controllers, including nested device/API calls.
+xinput_state|Reading controller state through XInput; repeated calls can accumulate in one frame.
+xinput_caps|Querying controller capabilities through XInput.
+dinput_find|Finding DirectInput devices.
+dinput_read|Reading DirectInput device data.
+input_wmi|Input-related Windows Management Instrumentation queries.
+render_worker_wait|Waiting for render workers to finish.
+render_inline|Playing back render work inline.
+render_playback|Playing back native rendering commands, including nested overlay work.
+render_gpu_fence|Measured GPU-fence path. Near-zero time does not prove the GPU is idle; the path may be bypassed by the build.
+backend_present|Presenting the rendered picture through the graphics backend.
+render_retire|Retiring completed rendering work/resources.
+render_capture|Render-backend capture work.
+keyboard_move|Native keyboard update.
+keyboard_state|Native keyboard-state read path.
+mouse_move|Native mouse update.
+mouse_state|Native mouse-state read path.
+net_component|Network-component update, including nested native networking.
+native_network|Native network update.
+adapter_query|Querying network adapters.
+net_context_destruct|Destroying a native network context.
+shader_move|Updating shader-system state.
+shader_table|Shader table work.
+game_config_move|Updating game configuration state.
+game_ui_move|Updating native game UI.
+ui_screen_capture|Screen-capture work within the game UI.
+collision_begin|Beginning collision processing.
+collision_move|Updating collision processing.
+game_sound_move|Updating game-level audio logic.
+shadow_move|Updating shadows.
+capture_move|Updating the native capture subsystem.
+stage_move|Updating the stage.
+overlay_admission|Checking whether overlay work should run for this call.
+overlay_init|Initializing overlay resources.
+overlay_capture|Updating overlay input-capture state.
+overlay_keyboard_update|Updating the overlay keyboard handler.
+overlay_dx9_frame|Starting the ImGui DirectX 9 backend frame.
+overlay_win32_frame|Starting the ImGui Win32 backend frame, including nested window/input operations.
+overlay_render_target|Preparing the overlay render target.
+overlay_keyboard_poll|Polling keyboard input for the overlay.
+overlay_imgui_frame|Starting the core ImGui frame.
+overlay_win32_size|Querying the window client size for ImGui.
+overlay_win32_clock|Updating ImGui's high-resolution frame clock.
+overlay_win32_mouse|Updating mouse data in the ImGui Win32 backend.
+overlay_win32_cursor|Updating the OS cursor shape for ImGui.
+overlay_win32_gamepad|Updating gamepad data in the ImGui Win32 backend.
+keyboard_poll|Polling the keyboard device.
+keyboard_acquire|Acquiring the keyboard device.
+keyboard_acquire_retry|Retrying keyboard acquisition.
+keyboard_get_state|Fetching keyboard device state.
+mouse_poll|Polling the mouse device.
+mouse_acquire|Acquiring the mouse device.
+mouse_acquire_retry|Retrying mouse acquisition.
+mouse_get_state|Fetching mouse device state.
+native_mouse_rect|Querying the window rectangle for native mouse handling.
+native_mouse_cursor|Querying cursor position for native mouse handling.
+native_mouse_client|Converting native mouse coordinates to client coordinates.
+overlay_mouse_warp|Moving the OS cursor to an ImGui-requested position.
+overlay_mouse_foreground|Querying the foreground window during ImGui mouse handling.
+overlay_mouse_child|Checking the child-window relationship during ImGui mouse handling.
+overlay_mouse_cursor_pos|Reading OS cursor position for ImGui.
+overlay_mouse_client|Converting screen coordinates to client coordinates for ImGui.
+overlay_mouse_to_screen|Converting client coordinates to screen coordinates before moving the cursor.
+frame_gap|Elapsed time between consecutive measured game-frame starts; not a nested work scope.
+scene_gap|Elapsed time between consecutive measured scene starts; render cadence, not rendering CPU time.
+tid|Windows thread ID. Reports from different threads have separate windows and may overlap in time.
+net_frame|Network frame number associated with the record; -1 means no frame number was associated.
+window_ms|Elapsed duration of this thread's reporting window in milliseconds; not the sum of its scope times.
+build|Git commit identifying the plugin build.
+dirty|1 means the build was made with local changes; 0 means a clean worktree.
+units|Meaning and order of slash-separated metric values in this record.
+resets|Number of benchmark reset events in this window.
+samples|Number of live benchmark sample events, not the number of diagnostic frame samples.
+corrections|Number of benchmark correction-sample events, not a general count of every rollback.
+bench_qpc|Number of benchmark clock events; this is a count, not a timestamp or duration.
+native_outside|Native-frame work observed outside a measured frame scope.
+reentry|Frame-scope reentry events.
+overlay_order|Unexpected overlay-stage ordering events detected by instrumentation.
+scope_overflow|Instrumentation nesting exceeded the scope stack capacity; self timing may be incomplete.
+report_qpc|High-resolution counter timestamp for the report; matches related records together with tid.
+dropped|Cumulative dropped diagnostic reports observed when this report was written; do not sum across windows.
+writer_prev_ms|Elapsed time of the preceding report write, not the current frame's writing cost.
+render_batches|Count of observed render batches in this reporting window.
+render_jobs|Accumulated number of render jobs across observed batches.
+render_worker_sum|Sum of observed worker counts across render batches, not a unique thread count.
+scene_drawable_sum|Sum of observed scene drawable counts, not a unique object count.
+duration_ms|Requested capture length on LAGCAPTURE; measured frame/event duration on LAGWORST or LAGSLOW.
+start_qpc|High-resolution counter value at the start of the measured frame or event.
+end_qpc|High-resolution counter value at the end of the measured frame or event.
+qpc_hz|Counter ticks per second. Elapsed ms = (end_qpc - start_qpc) x 1000 / qpc_hz.
+metric|Name of the timing scope responsible for a LAGSLOW record.
+dropped_reports_total|Capture stop summary of dropped reports. Nonzero means the capture is missing reports.
+self_avg_ms|Per-invocation elapsed self time, excluding measured nested scopes. Missing values are not assumed zero.
+`.trim().split("\n").map((line) => line.split("|")));
+      function lagFieldTable(fields) {
+        return `<table><thead><tr><th>Field</th><th>Value / meaning</th></tr></thead><tbody>${Object.entries(fields).map(([key, value]) => `<tr><td>${escapeHtml(key)}</td><td style="text-align:left">${escapeHtml(value)}<span class="lag-description">${escapeHtml(lagDescriptions[key] || "Unrecognized field from this build; shown as recorded.")}</span></td></tr>`).join("")}</tbody></table>`;
+      }
       function renderLagReport() {
         const report = lagCapture.reports[Number($("#lagReport").value)];
-        const metadata = (fields) => Object.entries(fields).filter(([k]) => k !== "units").map(([k, v]) => `${k}=${v}`).join(" | ");
         const percentage = (time, total) => ({ percent: total > 0 ? time / total * 100 : NaN });
         const rows = (id, values, columns) => {
           $(id).innerHTML = values.length
-            ? values.map((row) => `<tr>${row.map((v) => {
-              if (typeof v !== "object") return `<td>${escapeHtml(v)}</td>`;
+            ? values.map((row) => `<tr>${row.map((v, column) => {
+              if (typeof v !== "object") return `<td>${escapeHtml(v)}${column === 0 ? `<span class="lag-description">${escapeHtml(lagDescriptions[v] || "Unrecognized metric from this build; shown as recorded.")}</span>` : ""}</td>`;
               const p = v.percent;
               return Number.isFinite(p)
                 ? `<td class="lag-percent">${fmt(p, 2)}%<div class="track"><div class="fill" style="width:${Math.max(0, Math.min(100, p))}%"></div></div></td>`
@@ -855,7 +1038,7 @@
             : `<tr><td colspan="${columns}">No samples in this report.</td></tr>`;
         };
         const matches = (r) => report.fields.report_qpc !== undefined && r.fields.tid === report.fields.tid && r.fields.report_qpc === report.fields.report_qpc;
-        $("#lagMetadata").textContent = metadata(report.fields);
+        $("#lagMetadata").innerHTML = lagFieldTable(report.fields);
         const frame = ["frame", "scene_gap", "frame_gap"].map((name) => report.metrics.find((m) => m.name === name && m.values[0] * m.values[1] > 0)).find(Boolean);
         const frameTotal = frame ? frame.values[0] * frame.values[1] : 0;
         $("#lagPercentMeta").textContent = frame
@@ -863,6 +1046,7 @@
           : "Frame percentages unavailable: this thread report has no frame or frame-gap timing samples.";
         rows("#lagMetrics", [...report.metrics].sort((a, b) => b.values[2] - a.values[2]).map((m) => [m.name, m.values[0], fmt(m.values[1], 3), fmt(m.self, 3), fmt(m.values[2], 3), m.values[3], percentage(m.values[0] * m.values[1], frameTotal), percentage(m.values[0] * m.self, frameTotal)]), 8);
         const worst = lagCapture.worst.find(matches);
+        $("#lagWorstFields").innerHTML = worst ? lagFieldTable(worst.fields) : "";
         $("#lagWorstMeta").textContent = worst ? `Frame ${worst.fields.net_frame ?? "unknown"} took ${fmt(Number(worst.fields.duration_ms), 2)} ms. The bars below show where that time went.` : "No worst-frame sample in this report.";
         rows("#lagWorst", [...(worst?.metrics || [])].sort((a, b) => b.values[0] - a.values[0]).map((m) => [m.name, ...m.values.map((v) => fmt(v, 3)), ...m.values.map((v) => percentage(v, Number(worst.fields.duration_ms)))]), 5);
         rows("#lagSlow", lagCapture.slow.filter(matches).map(({ fields: f }) => [f.metric || "-", fmt(Number(f.duration_ms), 3), f.start_qpc || "-", f.end_qpc || "-", f.qpc_hz || "-"]), 5);
@@ -891,6 +1075,22 @@
           mouse_state: "Reading the mouse",
           game_sound_move: "Updating game audio",
           hooklog: "Writing diagnostic logs",
+          overlay_admission: "Checking whether to draw the overlay",
+          overlay_init: "Initializing the overlay",
+          overlay_capture: "Updating overlay input capture",
+          overlay_keyboard_update: "Updating overlay keyboard input",
+          overlay_dx9_frame: "Preparing the overlay graphics backend",
+          overlay_win32_frame: "Preparing overlay window and input data",
+          overlay_render_target: "Preparing the overlay render target",
+          overlay_keyboard_poll: "Polling the overlay keyboard",
+          overlay_imgui_frame: "Starting the overlay UI frame",
+          overlay_win32_size: "Reading the overlay window size",
+          overlay_win32_clock: "Updating the overlay frame clock",
+          overlay_win32_mouse: "Updating the overlay mouse",
+          overlay_win32_cursor: "Updating the overlay cursor shape",
+          overlay_win32_gamepad: "Updating the overlay gamepad",
+          overlay_mouse_foreground: "Checking the foreground window",
+          overlay_mouse_child: "Checking the overlay window relationship",
         };
         const breakdown = (id, metrics, total, samples, isWorst) => {
           const entries = metrics
@@ -901,7 +1101,7 @@
           $(id).innerHTML = total > 0 && entries.length ? entries.map((m) => {
             const percent = m.time / total * 100;
             const label = (!ownTime && ["native", "frame", "main_hook"].includes(m.name)) ? m.name.replaceAll("_", " ") : names[m.name] || m.name.replaceAll("_", " ");
-            return `<div class="hook-row"><div class="hook-head"><span class="hook-name" title="${escapeHtml(m.name)}">${escapeHtml(label)}</span><span class="hook-total">${fmt(m.time / samples, 2)} ms ${isWorst ? "" : "/ frame"} &middot; ${fmt(percent, 1)}%</span></div><div class="track"><div class="fill" style="width:${Math.min(100, percent)}%"></div></div></div>`;
+            return `<div class="hook-row"><div class="hook-head"><span class="hook-name" title="${escapeHtml(m.name)}">${escapeHtml(label)}</span><span class="hook-total">${fmt(m.time / samples, 2)} ms ${isWorst ? "" : "/ frame"} &middot; ${fmt(percent, 1)}%</span></div><div class="track"><div class="fill" style="width:${Math.min(100, percent)}%"></div></div><span class="lag-description">${escapeHtml(lagDescriptions[m.name] || "Unrecognized metric from this build; shown as recorded.")}</span></div>`;
           }).join("") : '<p class="sub">Not enough timing data for a frame breakdown.</p>';
         };
         $("#lagBreakdownMeta").textContent = frame
@@ -929,6 +1129,12 @@
         $("#app").classList.remove("hidden");
         $("#fileName").textContent = name;
         $("#lagSummary").textContent = `${capture.reports.length} reports | ${new Set(capture.reports.map((r) => r.fields.tid)).size} threads | ${capture.worst.length} worst frames | ${capture.slow.length} slow events. ${capture.headers.join(" | ")}`;
+        const fields = new Set(["duration_ms", "dropped_reports_total", "self_avg_ms"]);
+        for (const record of [...capture.reports, ...capture.worst, ...capture.slow]) {
+          Object.keys(record.fields).forEach((key) => fields.add(key));
+          record.metrics.forEach((m) => fields.add(m.name));
+        }
+        $("#lagFieldGuide").innerHTML = lagFieldTable(Object.fromEntries([...fields].sort().map((key) => [key, ""])));
         $("#lagReport").innerHTML = capture.reports.map((r, i) => `<option value="${i}">${escapeHtml(`#${i + 1} | thread ${r.fields.tid} | frame ${r.fields.net_frame ?? "-"} | ${r.fields.window_ms ?? "-"} ms window`)}</option>`).join("");
         $("#lagReport").value = "0";
         renderLagReport();

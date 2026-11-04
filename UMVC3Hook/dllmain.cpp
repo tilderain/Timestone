@@ -940,7 +940,12 @@ long __stdcall hkEndScene(LPDIRECT3DDEVICE9 pDevice)
 	}
 	LagDiagnosticScope sceneDiagnostic(LagMetric::EndScene);
 	LagDiagnosticScope overlayDiagnostic(LagMetric::OverlaySetup);
-	if (!D3D9Reset_BeginOverlay(pDevice)) {
+	bool overlayReady;
+	{
+		LagDiagnosticScope diagnostic(LagMetric::OverlayAdmission);
+		overlayReady = D3D9Reset_BeginOverlay(pDevice);
+	}
+	if (!overlayReady) {
 		InterlockedExchange(&g_endSceneOverlayInFlight, 0);
 		return oEndScene(pDevice);
 	}
@@ -949,6 +954,7 @@ long __stdcall hkEndScene(LPDIRECT3DDEVICE9 pDevice)
 
 	if (!init)
 	{
+		LagDiagnosticScope diagnostic(LagMetric::OverlayInit);
 		HookLog("D3D9: initializing overlay after native renderer readiness\n");
 
 		D3DDEVICE_CREATION_PARAMETERS params = {};
@@ -995,17 +1001,23 @@ long __stdcall hkEndScene(LPDIRECT3DDEVICE9 pDevice)
 	}
 
 	// Capture the current back buffer if a snapshot was requested (pause / advance)
-	FrameStepper_Capture(pDevice);
-	UpdateKeyboardState();
-
-	ImGui_ImplDX9_NewFrame();
-	ImGui_ImplWin32_NewFrame();
-	MatchImGuiToRenderTarget(pDevice);
-
-	// Publish the shared keyboard snapshot before ImGui consumes this frame's input.
-	PollKeyboardDirectly();
-
-	ImGui::NewFrame();
+	{
+		LagDiagnosticScope diagnostic(LagMetric::OverlayCapture);
+		FrameStepper_Capture(pDevice);
+		diagnostic.Next(LagMetric::OverlayKeyboardUpdate);
+		UpdateKeyboardState();
+		diagnostic.Next(LagMetric::OverlayDx9Frame);
+		ImGui_ImplDX9_NewFrame();
+		diagnostic.Next(LagMetric::OverlayWin32Frame);
+		ImGui_ImplWin32_NewFrame();
+		diagnostic.Next(LagMetric::OverlayRenderTarget);
+		MatchImGuiToRenderTarget(pDevice);
+		// Publish the shared keyboard snapshot before ImGui consumes this frame's input.
+		diagnostic.Next(LagMetric::OverlayKeyboardPoll);
+		PollKeyboardDirectly();
+		diagnostic.Next(LagMetric::OverlayImGuiFrame);
+		ImGui::NewFrame();
+	}
 	ImGui::GetIO().MouseDrawCursor = false;
 	overlayDiagnostic.Next(LagMetric::OverlayLogic);
 

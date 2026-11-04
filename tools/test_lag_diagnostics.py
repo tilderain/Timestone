@@ -421,6 +421,84 @@ int main(int argc, char** argv) {
     assert(logs.back().find("metric=keyboard_move duration_ms=6.000") != std::string::npos);
     assert(logs.back().find("metric=adapter_query duration_ms=9.000") != std::string::npos);
 
+    const auto overlayStart = ticks;
+    {
+        LagDiagnosticScope frame(LagMetric::Frame, 890);
+        LagDiagnosticScope scene(LagMetric::EndScene);
+        LagDiagnosticScope setup(LagMetric::OverlaySetup);
+        for (unsigned i = (unsigned)LagMetric::OverlayAdmission;
+             i <= (unsigned)LagMetric::OverlayImGuiFrame; ++i) {
+            LagDiagnosticScope operation((LagMetric)i);
+            ticks += 6000;
+        }
+    }
+    ticks += 5000000;
+    { LagDiagnosticScope frame(LagMetric::Frame, 891); ++ticks; }
+    Drain();
+    assert(logs.back().find("overlay_setup=54.000/0.000") != std::string::npos);
+    assert(logs.back().find("metric=endscene duration_ms=54.000") != std::string::npos);
+    assert(logs.back().find("metric=overlay_setup duration_ms=54.000") != std::string::npos);
+    for (unsigned i = (unsigned)LagMetric::OverlayAdmission;
+         i <= (unsigned)LagMetric::OverlayImGuiFrame; ++i) {
+        const auto start = overlayStart + (i - (unsigned)LagMetric::OverlayAdmission) * 6000;
+        const auto expected = std::string("metric=") + names[i] +
+            " duration_ms=6.000 start_qpc=" + std::to_string(start) +
+            " end_qpc=" + std::to_string(start + 6000) + " qpc_hz=1000000";
+        assert(logs.back().find(expected) != std::string::npos);
+    }
+
+    const auto win32Start = ticks;
+    {
+        LagDiagnosticScope frame(LagMetric::Frame, 892);
+        LagDiagnosticScope setup(LagMetric::OverlaySetup);
+        LagDiagnosticScope backend(LagMetric::OverlayWin32Frame);
+        LagDiagnosticScope operation(LagMetric::OverlayWin32Size);
+        ticks += 6000;
+        operation.Next(LagMetric::OverlayWin32Clock);
+        ticks += 6000;
+        operation.Next(LagMetric::OverlayWin32Mouse);
+        ticks += 6000;
+        operation.Next(LagMetric::OverlayWin32Cursor);
+        ticks += 6000;
+        operation.Next(LagMetric::OverlayWin32Gamepad);
+        ticks += 6000;
+    }
+    ticks += 5000000;
+    { LagDiagnosticScope frame(LagMetric::Frame, 893); ++ticks; }
+    Drain();
+    assert(logs.back().find("overlay_win32_frame=30.000/0.000") != std::string::npos);
+    assert(logs.back().find("overlay_setup=30.000/0.000") != std::string::npos);
+    for (unsigned i = (unsigned)LagMetric::OverlayWin32Size;
+         i <= (unsigned)LagMetric::OverlayWin32Gamepad; ++i) {
+        const auto start = win32Start + (i - (unsigned)LagMetric::OverlayWin32Size) * 6000;
+        const auto expected = std::string("metric=") + names[i] +
+            " duration_ms=6.000 start_qpc=" + std::to_string(start) +
+            " end_qpc=" + std::to_string(start + 6000) + " qpc_hz=1000000";
+        assert(logs.back().find(expected) != std::string::npos);
+    }
+
+    {
+        LagDiagnosticScope frame(LagMetric::Frame, 894);
+        LagDiagnosticScope mouse(LagMetric::MouseState);
+        auto start = LagDiagnostics_Begin(LagMetric::MouseAcquire);
+        ticks += 1000;
+        LagDiagnostics_EndResult(LagMetric::MouseAcquire, start, (int32_t)0x8007001e);
+        start = LagDiagnostics_Begin(LagMetric::MouseAcquireRetry);
+        ticks += 7000;
+        LagDiagnostics_EndResult(LagMetric::MouseAcquireRetry, start, (int32_t)0x8007001e);
+        start = LagDiagnostics_Begin(LagMetric::MouseAcquireRetry);
+        ticks += 1000;
+        LagDiagnostics_EndResult(LagMetric::MouseAcquireRetry, start, 0);
+        LagDiagnostics_EndResult(LagMetric::MouseAcquireRetry, 0, -1);
+    }
+    ticks += 5000000;
+    { LagDiagnosticScope frame(LagMetric::Frame, 895); ++ticks; }
+    Drain();
+    assert(logs.back().find("mouse_state=9.000/0.000") != std::string::npos);
+    assert(logs.back().find("metric=mouse_acquire_retry duration_ms=7.000") != std::string::npos);
+    assert(logs.back().find("metric=mouse_acquire calls=1 failures=1 input_lost=1 last_hr=0x8007001E max_hr=0x8007001E") != std::string::npos);
+    assert(logs.back().find("metric=mouse_acquire_retry calls=2 failures=1 input_lost=1 last_hr=0x00000000 max_hr=0x8007001E") != std::string::npos);
+
     const size_t beforeConcurrent = logs.size();
     std::vector<std::thread> producers;
     for (unsigned i = 0; i < 8; ++i) producers.emplace_back([i] {
