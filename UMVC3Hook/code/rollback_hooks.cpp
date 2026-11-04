@@ -19,6 +19,7 @@
 
 #include <cmath>
 #include <cstring>
+#include <iterator>
 
 extern void HookLog(const char* fmt, ...);
 
@@ -409,7 +410,25 @@ using XCapsTiming = TimedBackendCall<LagMetric::XInputCaps, uint64_t, uint64_t, 
 using DInputFindTiming = TimedBackendCall<LagMetric::DirectInputFind, uint8_t, uint64_t, uint64_t>;
 using WmiTiming = TimedBackendCall<LagMetric::InputWmi, int, void*>;
 using PlaybackTiming = TimedNativeCall<LagMetric::RenderPlayback, uint64_t>;
-using GpuFenceTiming = TimedNativeCall<LagMetric::RenderGpuFence, uint64_t>;
+static void(__fastcall* oRenderGpuFence)(uint64_t) = nullptr;
+static void __fastcall hkRenderGpuFence(uint64_t render)
+{
+    LagDiagnosticScope diagnostic(LagMetric::RenderGpuFence);
+    oRenderGpuFence(render);
+}
+static void(__fastcall* oRenderCreateDevice)(uint64_t, uint64_t, uint64_t, uint64_t) = nullptr;
+static void __fastcall hkRenderCreateDevice(uint64_t render, uint64_t a2, uint64_t a3, uint64_t a4)
+{
+    oRenderCreateDevice(render, a2, a3, a4);
+    // Initialization reads GRAPHICS/SLI directly, before the setter is involved.
+    if constexpr (FORCE_NATIVE_SLI_ON)
+        *(uint8_t*)(render + 0x867730) = 1;
+}
+static void(__fastcall* oRenderSetSli)(uint64_t, uint8_t) = nullptr;
+static void __fastcall hkRenderSetSli(uint64_t render, uint8_t enabled)
+{
+    oRenderSetSli(render, FORCE_NATIVE_SLI_ON ? 1 : enabled);
+}
 using RetireTiming = TimedNativeCall<LagMetric::RenderRetire, uint64_t>;
 using CaptureTiming = TimedNativeCall<LagMetric::RenderCapture, uint64_t>;
 using KeyboardStateTiming = TimedNativeCall<LagMetric::KeyboardState, uint64_t, uint32_t*>;
@@ -429,6 +448,88 @@ using GameSoundMoveTiming = TimedNativeCall<LagMetric::GameSoundMove, uint64_t>;
 using ShadowMoveTiming = TimedNativeCall<LagMetric::ShadowMove, uint64_t>;
 using CaptureMoveTiming = TimedNativeCall<LagMetric::CaptureMove, uint64_t>;
 using StageMoveTiming = TimedNativeCall<LagMetric::StageMove, uint64_t>;
+
+template<LagMetric Metric, unsigned Slot, unsigned StateSize = 0>
+static int32_t __fastcall TraceInputDevice(void* device, uint32_t, void* state)
+{
+    const uint64_t start = LagDiagnostics_Begin(Metric);
+    void* target = (*(void***)device)[Slot];
+    int32_t result;
+    if constexpr (StateSize)
+        result = ((int32_t(__fastcall*)(void*, uint32_t, void*))target)(device, StateSize, state);
+    else
+        result = ((int32_t(__fastcall*)(void*))target)(device);
+    LagDiagnostics_EndResult(Metric, start, result);
+    return result;
+}
+
+template<LagMetric Metric, uintptr_t Import, typename... Args>
+static BOOL WINAPI TraceMouseApi(Args... args)
+{
+    LagDiagnosticScope diagnostic(Metric);
+    return ((BOOL(WINAPI*)(Args...))*(void**)_addr(Import))(args...);
+}
+
+static void InstallInputCallTiming()
+{
+    // Replace only verified call sequences. The native retry loop and decoding
+    // remain untouched; each wrapper resolves the device's current vtable.
+    struct Site { uintptr_t address; const char* bytes; size_t size; void* replacement; };
+    const Site sites[] = {
+        {0x1406aa1e4, "\xff\x90\xc8\x00\x00\x00", 6, (void*)&TraceInputDevice<LagMetric::KeyboardPoll, 25>},
+        {0x1406aa1f5, "\x48\x8b\x01\xff\x50\x38", 6, (void*)&TraceInputDevice<LagMetric::KeyboardAcquire, 7>},
+        {0x1406aa209, "\x48\x8b\x01\xff\x50\x38", 6, (void*)&TraceInputDevice<LagMetric::KeyboardAcquireRetry, 7>},
+        // Includes mov edx,esi; the wrapper supplies the verified 256-byte size.
+        {0x1406aa24a, "\x48\x8b\x01\x8b\xd6\xff\x50\x48", 8, (void*)&TraceInputDevice<LagMetric::KeyboardGetState, 9, 256>},
+        {0x1406aae64, "\xff\x90\xc8\x00\x00\x00", 6, (void*)&TraceInputDevice<LagMetric::MousePoll, 25>},
+        {0x1406aae75, "\x48\x8b\x01\xff\x50\x38", 6, (void*)&TraceInputDevice<LagMetric::MouseAcquire, 7>},
+        {0x1406aae89, "\x48\x8b\x01\xff\x50\x38", 6, (void*)&TraceInputDevice<LagMetric::MouseAcquireRetry, 7>},
+        {0x1406aaeba, "\x48\x8b\x01\xff\x50\x48", 6, (void*)&TraceInputDevice<LagMetric::MouseGetState, 9, 20>},
+        {0x1406aadce, "\xff\x15\xec\x07\x3b\x00", 6, (void*)&TraceMouseApi<LagMetric::NativeMouseRect, 0x140a5b5c0, HWND, RECT*>},
+        {0x1406aade5, "\xff\x15\xad\x07\x3b\x00", 6, (void*)&TraceMouseApi<LagMetric::NativeMouseCursor, 0x140a5b598, POINT*>},
+        {0x1406aadfd, "\xff\x15\x85\x07\x3b\x00", 6, (void*)&TraceMouseApi<LagMetric::NativeMouseClient, 0x140a5b588, HWND, POINT*>},
+    };
+    for (const auto& site : sites) {
+        if (std::memcmp((void*)_addr(site.address), site.bytes, site.size)) {
+            HookLog("Input timing: instruction mismatch at 0x%llX; no call sites patched\n", (unsigned long long)site.address);
+            return;
+        }
+    }
+    // RIP-relative indirect calls need nearby pointer storage, not executable stubs.
+    // Keep this page for the process lifetime so in-flight calls remain valid.
+    SYSTEM_INFO info;
+    GetSystemInfo(&info);
+    const uintptr_t origin = _addr(sites[0].address);
+    const uintptr_t aligned = origin - origin % info.dwAllocationGranularity;
+    void** targets = nullptr;
+    for (uintptr_t distance = info.dwAllocationGranularity; distance < 0x70000000; distance += info.dwAllocationGranularity) {
+        targets = (void**)VirtualAlloc((void*)(aligned + distance), 4096, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+        if (targets) break;
+    }
+    if (!targets) {
+        HookLog("Input timing: could not allocate nearby call targets\n");
+        return;
+    }
+    for (size_t i = 0; i < std::size(sites); ++i) {
+        const auto& site = sites[i];
+        auto* address = (uint8_t*)_addr(site.address);
+        targets[i] = site.replacement;
+        const int32_t displacement = (int32_t)((intptr_t)&targets[i] - (intptr_t)(address + 6));
+        uint8_t patch[8] = {0xff, 0x15, 0, 0, 0, 0, 0x90, 0x90};
+        std::memcpy(patch + 2, &displacement, sizeof(displacement));
+        DWORD previous;
+        if (!VirtualProtect(address, site.size, PAGE_EXECUTE_READWRITE, &previous)) {
+            HookLog("Input timing: protection failed at 0x%llX\n", (unsigned long long)site.address);
+            continue;
+        }
+        GameplayHooks_RecordPatch(address, site.size);
+        std::memcpy(address, patch, site.size);
+        DWORD ignored;
+        VirtualProtect(address, site.size, previous, &ignored);
+        FlushInstructionCache(GetCurrentProcess(), address, site.size);
+        HookLog("Input timing: patched call at 0x%llX\n", (unsigned long long)site.address);
+    }
+}
 static void(__fastcall* oRenderSyncTiming)(uint64_t) = nullptr;
 static void __fastcall hkRenderSyncTiming(uint64_t render)
 {
@@ -755,6 +856,7 @@ void Rollback_InitMainHooks(RollbackMainMoveFn* originalMove)
                "Rollback: hooked native input timing",
                "Rollback: failed to hook native input timing (%d)\n");
     if constexpr (LAG_BACKEND_TIMING_ENABLED) {
+        InstallInputCallTiming();
         EnableHook(0x1406aa1b0, (void*)&KeyboardStateTiming::Invoke, (void**)&KeyboardStateTiming::original,
                    "Timing: keyboard state", "Timing: keyboard state failed (%d)\n");
         EnableHook(0x1406aa990, (void*)&MouseMoveTiming::Invoke, (void**)&MouseMoveTiming::original,
@@ -803,12 +905,21 @@ void Rollback_InitMainHooks(RollbackMainMoveFn* originalMove)
                    "Timing: render sync", "Timing: render sync failed (%d)\n");
         EnableHook(0x14053a660, (void*)&PlaybackTiming::Invoke, (void**)&PlaybackTiming::original,
                    "Timing: playback", "Timing: playback failed (%d)\n");
-        EnableHook(0x14053b650, (void*)&GpuFenceTiming::Invoke, (void**)&GpuFenceTiming::original,
-                   "Timing: GPU fence", "Timing: GPU fence failed (%d)\n");
         EnableHook(0x14053a570, (void*)&RetireTiming::Invoke, (void**)&RetireTiming::original,
                    "Timing: render retire", "Timing: render retire failed (%d)\n");
         EnableHook(0x14053b5a0, (void*)&CaptureTiming::Invoke, (void**)&CaptureTiming::original,
                    "Timing: render capture", "Timing: render capture failed (%d)\n");
+    }
+    if constexpr (FORCE_NATIVE_SLI_ON) {
+        EnableHook(0x14053bc50, (void*)&hkRenderCreateDevice, (void**)&oRenderCreateDevice,
+                   "Renderer: forcing native SLI on", "Renderer: SLI initialization hook failed (%d)\n");
+        EnableHook(0x14053f9d0, (void*)&hkRenderSetSli, (void**)&oRenderSetSli,
+                   "Renderer: native SLI setter forced on", "Renderer: SLI setter hook failed (%d)\n");
+    }
+    if constexpr (LAG_BACKEND_TIMING_ENABLED) {
+        EnableHook(0x14053b650, (void*)&hkRenderGpuFence, (void**)&oRenderGpuFence,
+                   "Timing: native GPU fence (obeys SLI)",
+                   "GPU fence: hook failed (%d)\n");
     }
     EnableHook(FN_RENDER_END_FRAME, (void*)&hkCallSRender, (void**)&oCallSRender,
                "Rollback: hooked sRender call",

@@ -483,7 +483,7 @@ void ShowAdvancedConfigModal(HWND owner)
     const UINT dpi = GetWindowDpi(owner);
     wchar_t gamePath[MAX_PATH] = {};
     RECT bounds = {0, 0, MulDiv(410, dpi, 96),
-                   MulDiv(GetGameConfigPath(gamePath) ? 420 : 452, dpi, 96)};
+                   MulDiv(GetGameConfigPath(gamePath) ? 388 : 420, dpi, 96)};
     using AdjustWindowRectExForDpiFn = BOOL (WINAPI*)(LPRECT, DWORD, BOOL, DWORD, UINT);
     const auto adjustForDpi = reinterpret_cast<AdjustWindowRectExForDpiFn>(
         GetProcAddress(GetModuleHandleA("user32.dll"), "AdjustWindowRectExForDpi"));

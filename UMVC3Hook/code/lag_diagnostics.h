@@ -5,6 +5,10 @@
 
 // Development-only backend detours; keep disabled in release builds.
 inline constexpr bool LAG_BACKEND_TIMING_ENABLED = false;
+// Automatic battle-start capture and exit; suppresses desync handling during the test.
+inline constexpr bool lagTest = false;
+// Experimental: force the native SLI setting on; false respects game configuration.
+inline constexpr bool FORCE_NATIVE_SLI_ON = true;
 
 enum class LagMetric : unsigned {
     Frame, Native, Pacing, InputWait, BenchmarkUpdate, BenchmarkBegin,
@@ -26,7 +30,16 @@ enum class LagMetric : unsigned {
     KeyboardMove, KeyboardState, MouseMove, MouseState,
     NetComponent, NativeNetwork, AdapterQuery, NetContextDestruct,
     ShaderMove, ShaderTable, GameConfigMove, GameUiMove, UiScreenCapture,
-    CollisionBegin, CollisionMove, GameSoundMove, ShadowMove, CaptureMove, StageMove, Count
+    CollisionBegin, CollisionMove, GameSoundMove, ShadowMove, CaptureMove, StageMove,
+    OverlayAdmission, OverlayInit, OverlayCapture, OverlayKeyboardUpdate,
+    OverlayDx9Frame, OverlayWin32Frame, OverlayRenderTarget, OverlayKeyboardPoll,
+    OverlayImGuiFrame, OverlayWin32Size, OverlayWin32Clock, OverlayWin32Mouse,
+    OverlayWin32Cursor, OverlayWin32Gamepad,
+    KeyboardPoll, KeyboardAcquire, KeyboardAcquireRetry, KeyboardGetState,
+    MousePoll, MouseAcquire, MouseAcquireRetry, MouseGetState,
+    NativeMouseRect, NativeMouseCursor, NativeMouseClient,
+    OverlayMouseWarp, OverlayMouseForeground, OverlayMouseChild, OverlayMouseCursorPos, OverlayMouseClient,
+    OverlayMouseToScreen, Count
 };
 enum class LagEvent : unsigned {
     BenchmarkReset, LiveSample, CorrectionSample, BenchmarkClock,
@@ -55,6 +68,7 @@ inline uint64_t LagDiagnostics_Begin(LagMetric metric, int32_t frame = -1) {
     return LagDiagnostics_BeginSlow(metric, frame);
 }
 void LagDiagnostics_End(LagMetric metric, uint64_t start);
+void LagDiagnostics_EndResult(LagMetric metric, uint64_t start, int32_t result);
 inline void LagDiagnostics_Event(LagEvent event) {
     if (g_lagDiagnosticsMayBeEnabled.load(std::memory_order_relaxed))
         LagDiagnostics_EventSlow(event);

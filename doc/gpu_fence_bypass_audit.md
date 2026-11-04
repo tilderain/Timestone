@@ -10,8 +10,7 @@ were changed for this audit. Database persistence was not attempted.
 Current experiment implementation: `FORCE_NATIVE_SLI_ON = true` replaces the
 old `RENDER_GPU_FENCE_ENABLED = false` direct bypass. The device-initialization
 hook forces +0x867730 after the native config read; the native SLI setter hook
-forces incoming values to on. On movement, gpuEventSync is not hooked; lag
-diagnostic instrumentation is omitted.
+forces incoming values to on. The timing hook always calls gpuEventSync.
 Setting the new constexpr false respects native configuration, rather than
 forcing SLI off. No config file is rewritten. Gameplay-hook disabling removes
 these detours; an already initialized SLI value is not retroactively restored.

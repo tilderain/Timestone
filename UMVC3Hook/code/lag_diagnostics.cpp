@@ -42,10 +42,12 @@ uint64_t Counter() {
 struct Cost {
     uint64_t count = 0, ticks = 0, maximum = 0, over25 = 0;
     uint64_t maximumEnd = 0;
+    uint64_t resultCalls = 0, failures = 0, inputLost = 0;
+    int32_t lastResult = 0, maximumResult = 0;
     void Add(uint64_t elapsed, uint64_t frequency, uint64_t end = 0) {
         ++count;
         ticks += elapsed;
-        if (elapsed > maximum) maximumEnd = end;
+        if (elapsed > maximum) { maximumEnd = end; maximumResult = lastResult; }
         maximum = std::max(maximum, elapsed);
         over25 += (double)elapsed * 1000.0 / frequency > 25.0;
     }
@@ -117,7 +119,16 @@ constexpr const char* names[] = {
     "keyboard_move", "keyboard_state", "mouse_move", "mouse_state",
     "net_component", "native_network", "adapter_query", "net_context_destruct",
     "shader_move", "shader_table", "game_config_move", "game_ui_move", "ui_screen_capture",
-    "collision_begin", "collision_move", "game_sound_move", "shadow_move", "capture_move", "stage_move"
+    "collision_begin", "collision_move", "game_sound_move", "shadow_move", "capture_move", "stage_move",
+    "overlay_admission", "overlay_init", "overlay_capture", "overlay_keyboard_update",
+    "overlay_dx9_frame", "overlay_win32_frame", "overlay_render_target", "overlay_keyboard_poll",
+    "overlay_imgui_frame", "overlay_win32_size", "overlay_win32_clock", "overlay_win32_mouse",
+    "overlay_win32_cursor", "overlay_win32_gamepad",
+    "keyboard_poll", "keyboard_acquire", "keyboard_acquire_retry", "keyboard_get_state",
+    "mouse_poll", "mouse_acquire", "mouse_acquire_retry", "mouse_get_state",
+    "native_mouse_rect", "native_mouse_cursor", "native_mouse_client",
+    "overlay_mouse_warp", "overlay_mouse_foreground", "overlay_mouse_child", "overlay_mouse_cursor_pos", "overlay_mouse_client",
+    "overlay_mouse_to_screen"
 };
 static_assert(sizeof(names) / sizeof(*names) == (unsigned)LagMetric::Count);
 
@@ -200,7 +211,19 @@ bool WriteReport(const ReportData& report, HANDLE file, double previousWriteMs) 
              LagMetric::ShaderMove, LagMetric::ShaderTable,
              LagMetric::GameConfigMove, LagMetric::GameUiMove, LagMetric::UiScreenCapture,
              LagMetric::CollisionBegin, LagMetric::CollisionMove, LagMetric::GameSoundMove,
-             LagMetric::ShadowMove, LagMetric::CaptureMove, LagMetric::StageMove}) {
+             LagMetric::ShadowMove, LagMetric::CaptureMove, LagMetric::StageMove,
+             LagMetric::RenderEnd, LagMetric::EndScene, LagMetric::OverlaySetup,
+             LagMetric::OverlayAdmission, LagMetric::OverlayInit, LagMetric::OverlayCapture,
+             LagMetric::OverlayKeyboardUpdate, LagMetric::OverlayDx9Frame,
+             LagMetric::OverlayWin32Frame, LagMetric::OverlayRenderTarget,
+             LagMetric::OverlayKeyboardPoll, LagMetric::OverlayImGuiFrame,
+             LagMetric::OverlayWin32Size, LagMetric::OverlayWin32Clock, LagMetric::OverlayWin32Mouse,
+             LagMetric::OverlayWin32Cursor, LagMetric::OverlayWin32Gamepad,
+             LagMetric::KeyboardPoll, LagMetric::KeyboardAcquire, LagMetric::KeyboardAcquireRetry, LagMetric::KeyboardGetState,
+             LagMetric::MousePoll, LagMetric::MouseAcquire, LagMetric::MouseAcquireRetry, LagMetric::MouseGetState,
+             LagMetric::NativeMouseRect, LagMetric::NativeMouseCursor, LagMetric::NativeMouseClient,
+             LagMetric::OverlayMouseWarp, LagMetric::OverlayMouseForeground, LagMetric::OverlayMouseChild,
+             LagMetric::OverlayMouseCursorPos, LagMetric::OverlayMouseClient, LagMetric::OverlayMouseToScreen}) {
         const auto& cost = window.costs[(unsigned)metric];
         if (cost.maximumEnd && cost.maximum * ms >= 5.0)
             append("LAGSLOW tid=%lu metric=%s duration_ms=%.3f start_qpc=%llu end_qpc=%llu qpc_hz=%llu report_qpc=%llu\n",
@@ -208,6 +231,14 @@ bool WriteReport(const ReportData& report, HANDLE file, double previousWriteMs) 
                 (unsigned long long)(cost.maximumEnd - cost.maximum),
                 (unsigned long long)cost.maximumEnd, (unsigned long long)frequency,
                 (unsigned long long)now);
+    }
+    for (unsigned i = 0; i < (unsigned)LagMetric::Count; ++i) {
+        const auto& cost = window.costs[i];
+        if (cost.resultCalls)
+            append("LAGAPI tid=%lu metric=%s calls=%llu failures=%llu input_lost=%llu last_hr=0x%08X max_hr=0x%08X report_qpc=%llu\n",
+                (unsigned long)report.threadId, names[i], (unsigned long long)cost.resultCalls,
+                (unsigned long long)cost.failures, (unsigned long long)cost.inputLost,
+                (unsigned)cost.lastResult, (unsigned)cost.maximumResult, (unsigned long long)now);
     }
     return WriteFile(file, text, (DWORD)used, &written, nullptr) && written == used;
 }
@@ -494,6 +525,17 @@ uint64_t LagDiagnostics_BeginSlow(LagMetric metric, int32_t frame) {
         previous = now;
     }
     return now;
+}
+
+void LagDiagnostics_EndResult(LagMetric metric, uint64_t start, int32_t result) {
+    if (start && windowGeneration == captureGeneration.load(std::memory_order_acquire)) {
+        auto& cost = window.costs[(unsigned)metric];
+        ++cost.resultCalls;
+        cost.failures += result < 0;
+        cost.inputLost += (uint32_t)result == 0x8007001e;
+        cost.lastResult = result;
+    }
+    LagDiagnostics_End(metric, start);
 }
 
 void LagDiagnostics_End(LagMetric metric, uint64_t start) {

@@ -9,6 +9,7 @@
 
 #include "imgui.h"
 #include "imgui_impl_win32.h"
+#include "../code/lag_diagnostics.h"
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -164,17 +165,39 @@ static void ImGui_ImplWin32_UpdateMousePos()
     if (io.WantSetMousePos)
     {
         POINT pos = { (int)io.MousePos.x, (int)io.MousePos.y };
+        LagDiagnosticScope diagnostic(LagMetric::OverlayMouseToScreen);
         ::ClientToScreen(g_hWnd, &pos);
+        diagnostic.Next(LagMetric::OverlayMouseWarp);
         ::SetCursorPos(pos.x, pos.y);
     }
 
     // Set mouse position
     io.MousePos = ImVec2(-FLT_MAX, -FLT_MAX);
     POINT pos;
-    if (HWND active_window = ::GetForegroundWindow())
-        if (active_window == g_hWnd || ::IsChild(active_window, g_hWnd))
-            if (::GetCursorPos(&pos) && ::ScreenToClient(g_hWnd, &pos))
-                io.MousePos = ImVec2((float)pos.x, (float)pos.y);
+    HWND active_window;
+    {
+        LagDiagnosticScope diagnostic(LagMetric::OverlayMouseForeground);
+        active_window = ::GetForegroundWindow();
+    }
+    if (!active_window)
+        return;
+    if (active_window != g_hWnd)
+    {
+        LagDiagnosticScope diagnostic(LagMetric::OverlayMouseChild);
+        if (!::IsChild(active_window, g_hWnd))
+            return;
+    }
+    {
+        LagDiagnosticScope diagnostic(LagMetric::OverlayMouseCursorPos);
+        if (!::GetCursorPos(&pos))
+            return;
+    }
+    {
+        LagDiagnosticScope diagnostic(LagMetric::OverlayMouseClient);
+        if (!::ScreenToClient(g_hWnd, &pos))
+            return;
+    }
+    io.MousePos = ImVec2((float)pos.x, (float)pos.y);
 }
 
 #ifdef _MSC_VER
@@ -239,11 +262,13 @@ void    ImGui_ImplWin32_NewFrame()
     IM_ASSERT(io.Fonts->IsBuilt() && "Font atlas not built! It is generally built by the renderer back-end. Missing call to renderer _NewFrame() function? e.g. ImGui_ImplOpenGL3_NewFrame().");
 
     // Setup display size (every frame to accommodate for window resizing)
+    LagDiagnosticScope diagnostic(LagMetric::OverlayWin32Size);
     RECT rect = {};
     ::GetClientRect(g_hWnd, &rect);
     io.DisplaySize = ImVec2((float)(rect.right - rect.left), (float)(rect.bottom - rect.top));
 
     // Setup time step
+    diagnostic.Next(LagMetric::OverlayWin32Clock);
     INT64 current_time;
     ::QueryPerformanceCounter((LARGE_INTEGER *)&current_time);
     io.DeltaTime = (float)(current_time - g_Time) / g_TicksPerSecond;
@@ -255,9 +280,11 @@ void    ImGui_ImplWin32_NewFrame()
     // io.KeysDown[], io.MousePos, io.MouseDown[], io.MouseWheel: filled by the WndProc handler below.
 
     // Update OS mouse position
+    diagnostic.Next(LagMetric::OverlayWin32Mouse);
     ImGui_ImplWin32_UpdateMousePos();
 
     // Update OS mouse cursor with the cursor requested by imgui
+    diagnostic.Next(LagMetric::OverlayWin32Cursor);
     ImGuiMouseCursor mouse_cursor = io.MouseDrawCursor ? ImGuiMouseCursor_None : ImGui::GetMouseCursor();
     if (g_LastMouseCursor != mouse_cursor)
     {
@@ -266,6 +293,7 @@ void    ImGui_ImplWin32_NewFrame()
     }
 
     // Update game controllers (if enabled and available)
+    diagnostic.Next(LagMetric::OverlayWin32Gamepad);
     ImGui_ImplWin32_UpdateGamepads();
 }
 
