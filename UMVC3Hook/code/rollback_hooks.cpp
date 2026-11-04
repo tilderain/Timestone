@@ -19,6 +19,9 @@
 
 extern void HookLog(const char* fmt, ...);
 
+// Experimental: false respects the native GRAPHICS/SLI configuration.
+static constexpr bool FORCE_NATIVE_SLI_ON = true;
+
 static constexpr uintptr_t FN_SMVC3MAIN_MOVE = 0x1402594A0;
 static constexpr uintptr_t FN_CCHR_SET_POS = 0x140002AF0;
 static constexpr uintptr_t FN_RENDER_END_FRAME = 0x14053A250;
@@ -335,6 +338,20 @@ static void __fastcall hkGSoundVoiceDispatch(void* dispatcher, void* voice,
     oGSoundVoiceDispatch(dispatcher, voice, stop);
 }
 
+static void(__fastcall* oRenderCreateDevice)(uint64_t, uint64_t, uint64_t, uint64_t) = nullptr;
+static void __fastcall hkRenderCreateDevice(uint64_t render, uint64_t a2, uint64_t a3, uint64_t a4)
+{
+    oRenderCreateDevice(render, a2, a3, a4);
+    // Initialization reads GRAPHICS/SLI directly, before the setter is involved.
+    if constexpr (FORCE_NATIVE_SLI_ON)
+        *(uint8_t*)(render + 0x867730) = 1;
+}
+static void(__fastcall* oRenderSetSli)(uint64_t, uint8_t) = nullptr;
+static void __fastcall hkRenderSetSli(uint64_t render, uint8_t enabled)
+{
+    oRenderSetSli(render, FORCE_NATIVE_SLI_ON ? 1 : enabled);
+}
+
 static uint64_t* __fastcall hkGSoundCreateVoice(void* dispatcher,
                                                 uint64_t* cookie,
                                                 void* voiceData,
@@ -521,6 +538,12 @@ void Rollback_InitMainHooks(RollbackMainMoveFn* originalMove)
     EnableHook(FN_RENDER_END_FRAME, (void*)&hkCallSRender, (void**)&oCallSRender,
                "Rollback: hooked sRender call",
                "Rollback: failed to hook sRender call (%d)\n");
+    if constexpr (FORCE_NATIVE_SLI_ON) {
+        EnableHook(0x14053bc50, (void*)&hkRenderCreateDevice, (void**)&oRenderCreateDevice,
+                   "Renderer: forcing native SLI on", "Renderer: SLI initialization hook failed (%d)\n");
+        EnableHook(0x14053f9d0, (void*)&hkRenderSetSli, (void**)&oRenderSetSli,
+                   "Renderer: native SLI setter forced on", "Renderer: SLI setter hook failed (%d)\n");
+    }
     EnableHook(FN_SSOUND_MOVE, (void*)&hkSoundMove, (void**)&oSoundMove,
                "Rollback: hooked sSound__move for headless re-simulation",
                "Rollback: failed to hook sSound__move (%d)\n");
