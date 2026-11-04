@@ -2018,6 +2018,12 @@ static void __fastcall hkpadPollAllSlots(uint64_t sPad)
 static uint64_t __fastcall hkpadSlotReadDevice(uint64_t slotBase)
 {
     LagDiagnosticScope diagnostic(LagMetric::PadRead);
+    if constexpr (LAG_BACKEND_TIMING_ENABLED) {
+        if (*(uint8_t*)(slotBase + 0x0B) == 2) {
+            LagDiagnosticScope backend(LagMetric::DirectInputRead);
+            return opadSlotReadDevice(slotBase);
+        }
+    }
     RollbackHookProfileScope profile(RollbackHookProfileId::PadSlotRead);
     return opadSlotReadDevice(slotBase);
 }

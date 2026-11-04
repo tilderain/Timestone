@@ -580,6 +580,14 @@ static int ParseTrainingFrameLimit(const char* cmdLine)
 extern LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
 EndScene oEndScene = NULL;
+using BackendPresentFn = HRESULT (WINAPI*)(IDirect3DDevice9*, const RECT*, const RECT*, HWND, const RGNDATA*);
+static BackendPresentFn oBackendPresent = nullptr;
+static HRESULT WINAPI hkBackendPresent(IDirect3DDevice9* device, const RECT* source,
+    const RECT* destination, HWND window, const RGNDATA* dirty)
+{
+    LagDiagnosticScope diagnostic(LagMetric::BackendPresent);
+    return oBackendPresent(device, source, destination, window, dirty);
+}
 WNDPROC oWndProc;
 static HWND window = NULL;
 extern bool ChrSelImGui_IsOpen();
@@ -1506,6 +1514,11 @@ DWORD WINAPI MainThread(LPVOID lpReserved)
 					return FALSE;
 				}
 				BootTimer_Stamp("Hooked engine D3D9 device");
+				if constexpr (LAG_BACKEND_TIMING_ENABLED) {
+					const auto status = kiero::bind(17, (void**)&oBackendPresent, (void*)hkBackendPresent);
+					if (status != kiero::Status::Success)
+						HookLog("Timing: backend Present hook failed (%d)\n", (int)status);
+				}
 				attached = true;
 			}
 		}

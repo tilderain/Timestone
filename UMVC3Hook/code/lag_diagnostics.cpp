@@ -41,9 +41,11 @@ uint64_t Counter() {
 }
 struct Cost {
     uint64_t count = 0, ticks = 0, maximum = 0, over25 = 0;
-    void Add(uint64_t elapsed, uint64_t frequency) {
+    uint64_t maximumEnd = 0;
+    void Add(uint64_t elapsed, uint64_t frequency, uint64_t end = 0) {
         ++count;
         ticks += elapsed;
+        if (elapsed > maximum) maximumEnd = end;
         maximum = std::max(maximum, elapsed);
         over25 += (double)elapsed * 1000.0 / frequency > 25.0;
     }
@@ -109,14 +111,20 @@ constexpr const char* names[] = {
     "render_move", "unit_move", "native_input", "sound_move",
     "draw_cache", "camera_draw", "unit_draw", "draw_frame_cache", "jobs", "job_dispatch", "unit_sync", "unit_after",
     "scene_sort", "effect_move", "particle_pre", "particle_post", "camera_move", "graphics_update", "ai_after",
-    "pad_poll", "pad_read"
+    "pad_poll", "pad_read", "pad_detect", "xinput_state", "xinput_caps", "dinput_find",
+    "dinput_read", "input_wmi", "render_worker_wait", "render_inline",
+    "render_playback", "render_gpu_fence", "backend_present", "render_retire", "render_capture",
+    "keyboard_move", "keyboard_state", "mouse_move", "mouse_state",
+    "net_component", "native_network", "adapter_query", "net_context_destruct",
+    "shader_move", "shader_table", "game_config_move", "game_ui_move", "ui_screen_capture",
+    "collision_begin", "collision_move", "game_sound_move", "shadow_move", "capture_move", "stage_move"
 };
 static_assert(sizeof(names) / sizeof(*names) == (unsigned)LagMetric::Count);
 
 bool WriteReport(const ReportData& report, HANDLE file, double previousWriteMs) {
     const auto& window = report.snapshot;
     const uint64_t now = report.now, frequency = report.frequency;
-    char text[16384] = {};
+    char text[32768] = {};
     size_t used = 0;
     auto append = [&](const char* format, auto... args) {
         if (used >= sizeof(text) - 1) return;
@@ -181,6 +189,26 @@ bool WriteReport(const ReportData& report, HANDLE file, double previousWriteMs) 
         append("%s", "\n");
     }
     DWORD written = 0;
+    for (LagMetric metric : {LagMetric::PadDetect, LagMetric::XInputState,
+             LagMetric::XInputCaps, LagMetric::DirectInputFind, LagMetric::DirectInputRead,
+             LagMetric::InputWmi, LagMetric::RenderWorkerWait, LagMetric::RenderPlayback,
+             LagMetric::RenderGpuFence, LagMetric::BackendPresent,
+             LagMetric::KeyboardMove, LagMetric::KeyboardState,
+             LagMetric::MouseMove, LagMetric::MouseState,
+             LagMetric::NetComponent, LagMetric::NativeNetwork,
+             LagMetric::AdapterQuery, LagMetric::NetContextDestruct,
+             LagMetric::ShaderMove, LagMetric::ShaderTable,
+             LagMetric::GameConfigMove, LagMetric::GameUiMove, LagMetric::UiScreenCapture,
+             LagMetric::CollisionBegin, LagMetric::CollisionMove, LagMetric::GameSoundMove,
+             LagMetric::ShadowMove, LagMetric::CaptureMove, LagMetric::StageMove}) {
+        const auto& cost = window.costs[(unsigned)metric];
+        if (cost.maximumEnd && cost.maximum * ms >= 5.0)
+            append("LAGSLOW tid=%lu metric=%s duration_ms=%.3f start_qpc=%llu end_qpc=%llu qpc_hz=%llu report_qpc=%llu\n",
+                (unsigned long)report.threadId, names[(unsigned)metric], cost.maximum * ms,
+                (unsigned long long)(cost.maximumEnd - cost.maximum),
+                (unsigned long long)cost.maximumEnd, (unsigned long long)frequency,
+                (unsigned long long)now);
+    }
     return WriteFile(file, text, (DWORD)used, &written, nullptr) && written == used;
 }
 
@@ -478,7 +506,7 @@ void LagDiagnostics_End(LagMetric metric, uint64_t start) {
     const uint64_t elapsed = now >= start ? now - start : 0;
     const uint64_t children = activeScopes[window.depth - 1].children;
     const uint64_t self = elapsed - std::min(elapsed, children);
-    window.costs[(unsigned)metric].Add(elapsed, Config().frequency);
+    window.costs[(unsigned)metric].Add(elapsed, Config().frequency, now);
     window.selfTicks[(unsigned)metric] += self;
     if (window.depth > 1) activeScopes[window.depth - 2].children += elapsed;
     if (window.frameDepth) {
