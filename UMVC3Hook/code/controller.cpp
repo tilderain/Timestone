@@ -288,6 +288,7 @@ static uint32_t  g_recordedLocalInput[RING_SIZE];
 // Shared logical frame, read from the native sReplay cursor.
 static int32_t   g_netFrameCount   = -1;
 static uint32_t  g_localPending    = 0;   // accumulator, ORed across team chars
+static bool g_preRenderInputReady = false;
 
 // Newest received remote input; fallback when prediction finds no earlier confirmation.
 static int32_t   g_lastRemoteFrame = -1;
@@ -417,6 +418,7 @@ extern "C" void Controller_ResetFightTimer(uint64_t sAction)
 // ---------------------------------------------------------------------------
 extern "C" void Controller_ResetBuffers()
 {
+    g_preRenderInputReady = false;
     std::memset(g_oldInputs,          0, sizeof(g_oldInputs));
     std::memset(g_scheduledLocalInput, 0, sizeof(g_scheduledLocalInput));
     std::memset(g_scheduledLocalFrame, -1, sizeof(g_scheduledLocalFrame));
@@ -1394,6 +1396,7 @@ static bool WaitForPredictionBudgetFrame(int32_t frame)
 // ---------------------------------------------------------------------------
 extern "C" void Controller_OnFrameStart()
 {
+    g_preRenderInputReady = false;
     LagDiagnosticScope diagnostic(LagMetric::ControllerStart);
     if (!Netplay_IsActive()) {
         ClearPredictionBudgetExhausted();
@@ -1634,6 +1637,7 @@ extern "C" void Controller_OnFrameStart()
             }
         }
     }
+    g_preRenderInputReady = true;
 }
 
 // ---------------------------------------------------------------------------
@@ -1753,16 +1757,15 @@ static void UpdateConfirmedChecksums()
     }
 }
 
-extern "C" void Controller_OnFrameEnd()
+static void PublishFrameInput(bool frameComplete)
 {
-    LagDiagnosticScope diagnostic(LagMetric::ControllerEnd);
-    if (!Netplay_IsActive())
+    if (!Netplay_IsActive() || g_isResimulating || g_netFrameCount < 0)
         return;
 
     // Send history even during neutral startup so delay-only peers can progress.
 
     // Record every live frame, even when no character-input hook ran.
-    {
+    if (frameComplete) {
         uint32_t idx = (uint32_t)g_netFrameCount % RING_SIZE;
         g_recordedLocalInput[idx] =
             g_scheduledLocalFrame[idx] == g_netFrameCount
@@ -1787,9 +1790,11 @@ extern "C" void Controller_OnFrameEnd()
     // After a delay decrease, already-advertised input takes precedence over new captures.
 
     // Keep the legacy history populated for rollback save/restore diagnostics.
-    memmove(&g_oldInputs[0], &g_oldInputs[1],
-            (MAX_HISTORY - 1) * sizeof(uint32_t));
-    g_oldInputs[MAX_HISTORY - 1] = g_localPending;
+    if (frameComplete) {
+        memmove(&g_oldInputs[0], &g_oldInputs[1],
+                (MAX_HISTORY - 1) * sizeof(uint32_t));
+        g_oldInputs[MAX_HISTORY - 1] = g_localPending;
+    }
 
     // Send consecutive input history ending at the newest queued frame.
     // Each slot maps to start_frame + index; optionally include a confirmed checksum.
@@ -1817,7 +1822,7 @@ extern "C" void Controller_OnFrameEnd()
         }
     }
 
-    if (!g_isResimulating && FrameStepper_IsDesyncCheckReady() &&
+    if (frameComplete && FrameStepper_IsDesyncCheckReady() &&
         !FrameStepper_IsMatchRestartPending() &&
         g_netFrameCount >= DESYNC_SKIP_FRAMES)
     {
@@ -1857,11 +1862,30 @@ extern "C" void Controller_OnFrameEnd()
                 g_netFrameCount, g_delayFrames, g_localPending, scheduledFrame,
                 g_scheduledLocalInput[scheduledIdx],
                 g_recordedLocalInput[executedIdx]);
-        TraceInputPacket("IPTX", "frame-end", g_netFrameCount, outPkt,
+        TraceInputPacket("IPTX", frameComplete ? "frame-end" : "pre-render", g_netFrameCount, outPkt,
                          validMask, 0, 0, 0);
     }
 
     Netplay_SendPacket(outPkt);
+}
+
+extern "C" void Controller_PublishInputBeforeRender()
+{
+    if (!g_preRenderInputReady || g_isResimulating || !Netplay_IsActive() ||
+        !FrameStepper_IsBattleSynchronized() || FrameStepper_IsMatchRestartPending())
+        return;
+    g_preRenderInputReady = false;
+    PublishFrameInput(false);
+}
+
+extern "C" void Controller_OnFrameEnd()
+{
+    LagDiagnosticScope diagnostic(LagMetric::ControllerEnd);
+    g_preRenderInputReady = false;
+    if (!Netplay_IsActive() || g_isResimulating || g_netFrameCount < 0)
+        return;
+    // Also serves as the fallback for frames that never entered rendering.
+    PublishFrameInput(true);
 
     ApplyScheduledRollbackIfReady();
 

@@ -348,6 +348,7 @@ static void __fastcall hkSoundMove(uint64_t sound)
 static thread_local bool g_timingRender = false;
 static void __fastcall hkRenderMove(uint64_t object)
 {
+    Controller_PublishInputBeforeRender();
     LagDiagnosticScope diagnostic(LagMetric::RenderMove);
     const bool previousRender = g_timingRender;
     g_timingRender = true;

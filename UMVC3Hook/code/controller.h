@@ -88,6 +88,7 @@ extern "C" void Controller_ClearDesyncDetection();
 extern "C" void Controller_ResetFrameEpoch();
 extern "C" void Controller_OnFrameStart();
 extern "C" void Controller_OnFrameEnd();
+extern "C" void Controller_PublishInputBeforeRender();
 
 // Resolve and install the synchronized assist-button opening team order.
 extern "C" uint32_t Controller_CaptureOpeningMember();
