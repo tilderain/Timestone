@@ -521,8 +521,45 @@ static void __fastcall hkRebuildFrustumPlanes(uint64_t viewport)
     std::memcpy(viewMatrix, renderView, sizeof(renderView));
 }
 
+static bool DisableNativeNetworkFrameUpdates()
+{
+    // Cut only the four frame roots, not shared request pumps used by teardown.
+    // Component includes session move/receive/send; its after/sync slots are no-ops.
+    // See doc/native_network_disable.md for the Guide/input/Steam exclusions.
+    static constexpr struct { uintptr_t address; uint8_t modrm; } sites[] = {
+        {0x140259813, 0x50}, // nNet::sComponent
+        {0x140259820, 0x50}, // sAgentSession
+        {0x140259843, 0x52}, // sMvc3Ranking
+        {0x140259859, 0x52}, // sNetworkRoom
+    };
+    for (const auto& site : sites) {
+        const uint8_t expected[] = {0xFF, site.modrm, 0x30};
+        if (std::memcmp((void*)_addr(site.address), expected, sizeof(expected)) != 0) {
+            HookLog("Native network: frame patch rejected at 0x%llX\n",
+                    (unsigned long long)site.address);
+            return false;
+        }
+    }
+    auto* first = (uint8_t*)_addr(sites[0].address);
+    constexpr size_t span = 0x14025985C - 0x140259813;
+    DWORD protection = 0;
+    if (!VirtualProtect(first, span, PAGE_EXECUTE_READWRITE, &protection))
+        return false;
+    for (const auto& site : sites) {
+        void* target = (void*)_addr(site.address);
+        GameplayHooks_RecordPatch(target, 3);
+        std::memset(target, 0x90, 3);
+    }
+    const bool flushed = FlushInstructionCache(GetCurrentProcess(), first, span);
+    DWORD ignored = 0;
+    const bool restored = VirtualProtect(first, span, protection, &ignored);
+    return flushed && restored;
+}
+
 void Rollback_InitMainHooks(RollbackMainMoveFn* originalMove)
 {
+    HookLog("Native network: component/agent/ranking/room frame updates %s\n",
+            DisableNativeNetworkFrameUpdates() ? "disabled (12-byte patch)" : "patch failed");
     g_originalMvc3MainMove = originalMove;
     EnableHook(FN_SMVC3MAIN_MOVE, (void*)&hkMvc3MainMove, (void**)originalMove,
                "Rollback: hooked sMvc3Main__move",
