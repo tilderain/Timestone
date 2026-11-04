@@ -604,6 +604,22 @@ static bool PatchBytes(uintptr_t address, const uint8_t (&expected)[N],
     return true;
 }
 
+bool Rollback_PatchGameConfigRefresh()
+{
+    // Skip per-frame native session/name maintenance, retaining both dead-object
+    // checks and the original epilogue. Explicit title/Guide refreshes stay intact.
+    static constexpr uint8_t CHECK_SESSION[] = {0x83, 0xBB, 0x44, 0x04, 0, 0, 0};
+    static constexpr uint8_t SKIP_SESSION[] = {0xE9, 0x26, 0, 0, 0, 0x90, 0x90};
+    static constexpr uint8_t LOAD_NAME[] = {0x48, 0x8D, 0xB3, 0x38, 0x03, 0, 0};
+    static constexpr uint8_t SKIP_NAME[] = {0xE9, 0x97, 0, 0, 0, 0x90, 0x90};
+    const bool patched =
+        PatchBytes(0x1402534BD, CHECK_SESSION, SKIP_SESSION) &&
+        PatchBytes(0x140253508, LOAD_NAME, SKIP_NAME);
+    HookLog("GameConfig: per-frame session/Steam name refresh %s\n",
+            patched ? "disabled" : "patch failed");
+    return patched;
+}
+
 bool Rollback_PatchHitSolverAlwaysInline()
 {
     // Force native in-place coalesce/sort instead of the two-bucket worker path.

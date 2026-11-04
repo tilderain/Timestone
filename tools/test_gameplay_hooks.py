@@ -139,6 +139,50 @@ int main() {
 
 
 class GameplayHooksTests(unittest.TestCase):
+    def test_game_config_refresh_patch(self):
+        runtime = (ROOT / "UMVC3Hook/code/rollback_runtime.cpp").read_text()
+        patch = runtime[runtime.index("template <size_t N>\nstatic bool PatchBytes"):
+                        runtime.index("bool Rollback_PatchHitSolverAlwaysInline()")]
+        source = (ROOT / "UMVC3Hook/code/rollback.cpp").read_text()
+        lifecycle = source[source.index("namespace {"):source.index("void Rollback_InitHooks()")]
+        unit = MOCKS + lifecycle + r'''
+uint8_t image[0x120];
+uintptr_t _addr(uintptr_t address) { return (uintptr_t)image + address - 0x140253490; }
+''' + patch + r'''
+int main() {
+    memset(image, 0xCC, sizeof(image));
+    const uint8_t session[] = {0x83, 0xBB, 0x44, 0x04, 0, 0, 0};
+    const uint8_t name[] = {0x48, 0x8D, 0xB3, 0x38, 0x03, 0, 0};
+    memcpy(image + 0x2D, session, 7);
+    memcpy(image + 0x78, name, 7);
+    uint8_t original[sizeof(image)];
+    memcpy(original, image, sizeof(image));
+    image[0x2D] = 0;
+    assert(!Rollback_PatchGameConfigRefresh() && g_gameplayPatches.empty());
+    image[0x2D] = 0x83;
+    failProtect = true;
+    assert(!Rollback_PatchGameConfigRefresh() && g_gameplayPatches.empty());
+    failProtect = false;
+    assert(Rollback_PatchGameConfigRefresh() && g_gameplayPatches.size() == 2);
+    for (unsigned i = 0; i < sizeof(image); ++i)
+        if (!(i >= 0x2D && i < 0x34) && !(i >= 0x78 && i < 0x7F))
+            assert(image[i] == original[i]);
+    int32_t displacement;
+    memcpy(&displacement, image + 0x2E, 4);
+    assert(image[0x2D] == 0xE9 && 0x1402534BD + 5 + displacement == 0x1402534E8);
+    memcpy(&displacement, image + 0x79, 4);
+    assert(image[0x78] == 0xE9 && 0x140253508 + 5 + displacement == 0x1402535A4);
+    assert(Rollback_PatchGameConfigRefresh() && g_gameplayPatches.size() == 2);
+    assert(GameplayHooks_Disable());
+    assert(!memcmp(image, original, sizeof(image)));
+}
+'''
+        with tempfile.TemporaryDirectory(dir="/tmp/opencode") as tmp:
+            cpp, exe = Path(tmp) / "test.cpp", Path(tmp) / "test"
+            cpp.write_text(unit)
+            subprocess.run(["g++", "-std=c++20", "-Wall", "-Wextra", str(cpp), "-o", str(exe)], check=True)
+            subprocess.run([str(exe)], check=True)
+
     def test_native_network_frame_patch(self):
         source = (ROOT / "UMVC3Hook/code/rollback_hooks.cpp").read_text()
         patch = source[source.index("static bool DisableNativeNetworkFrameUpdates()"):

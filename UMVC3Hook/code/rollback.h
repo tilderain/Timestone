@@ -55,6 +55,7 @@ void Rollback_SetMainInstance(uint64_t main);
 void Rollback_InitHooks();
 // Force HitSolver's in-place coalesce/sort path instead of worker buckets.
 bool Rollback_PatchHitSolverAlwaysInline();
+bool Rollback_PatchGameConfigRefresh();
 // Skip native UI initialization blocks when their allocations fail.
 void Rollback_PatchBattleUiAllocationFailure();
 // Install native-object null/type checks and resimulation filters.
