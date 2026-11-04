@@ -720,14 +720,14 @@ int main() {
 
 
 class D3D9ResetTests(unittest.TestCase):
-    def test_rendering_thread_override_temporarily_disabled(self):
+    def test_rendering_thread_forced_off(self):
         code = ROOT / "UMVC3Hook/code"
         header = (code / "d3d9reset.h").read_text()
         self.assertIn("D3D9Reset_RenderingThreadOverrideAvailable = false", header)
         source = (code / "d3d9reset.cpp").read_text()
-        self.assertIn("if (!D3D9Reset_RenderingThreadOverrideAvailable) return -1;",
+        self.assertIn("return 0;",
                       function(source, "D3D9Reset_GetRenderingThreadOverride"))
-        self.assertIn("if (!D3D9Reset_RenderingThreadOverrideAvailable) return false;",
+        self.assertIn("return mode == 0;",
                       function(source, "D3D9Reset_SetRenderingThreadOverride"))
         for name in ("escmenu_imgui.cpp", "umvc3menu.cpp"):
             self.assertIn("ImGui::BeginDisabled(!D3D9Reset_RenderingThreadOverrideAvailable)",
@@ -740,11 +740,9 @@ class D3D9ResetTests(unittest.TestCase):
     def test_rendering_thread_changes_only_between_frames(self):
         source = (ROOT / "UMVC3Hook/code/d3d9reset.cpp").read_text()
         unit = MOCKS + r'''
-std::atomic<int> g_renderingThreadOverride {-1};
 enum class LagMetric { RenderBegin };
 struct LagDiagnosticScope { explicit LagDiagnosticScope(LagMetric) {} };
 std::atomic<bool> g_renderingThreadEnabled {false};
-bool D3D9Reset_RenderingThreadOverrideAvailable = false;
 int beginCalls = 0;
 int parallelismCalls = 0;
 void Rollback_DisableGameplayParallelism() { ++parallelismCalls; }
@@ -760,41 +758,20 @@ int main() {
     uint8_t render[0x40] = {};
     render[0x3D] = 1;
     render[0x3E] = 7; // Only native beginFrame may latch this byte.
-    HookBeginFrame(render);
-    assert(render[0x3D] == 1);
-    assert(parallelismCalls == 1); // Independent of the rendering override and netplay.
-    D3D9Reset_RenderingThreadOverrideAvailable = true;
     render[0x38] = 1;
-    g_renderingThreadOverride = 0;
     HookBeginFrame(render);
     assert(render[0x3D] == 1); // Defer while a frame is in progress.
     render[0x38] = 0;
     HookBeginFrame(render);
     assert(render[0x3D] == 0 && !g_renderingThreadEnabled.load());
-    g_renderingThreadOverride = 1;
+    render[0x3D] = 1; // Enforce again if native settings change.
     HookBeginFrame(render);
-    assert(render[0x3D] == 1 && g_renderingThreadEnabled.load());
-    g_renderingThreadOverride = 0;
-    HookBeginFrame(render);
-    g_renderingThreadOverride = -1;
-    HookBeginFrame(render);
-    assert(render[0x3D] == 1 && render[0x3E] == 7 && beginCalls == 6);
+    assert(render[0x3D] == 0 && render[0x3E] == 7 && beginCalls == 3);
     uint8_t other[0x40] = {};
-    g_renderingThreadOverride = 1;
-    HookBeginFrame(other);
-    assert(other[0x3D] == 1);
-    g_renderingThreadOverride = -1;
-    HookBeginFrame(other);
-    assert(other[0x3D] == 0); // Restore this renderer's own native setting.
-    D3D9Reset_RenderingThreadOverrideAvailable = false;
-    g_renderingThreadOverride = 1;
+    other[0x3D] = 1;
     HookBeginFrame(other);
     assert(other[0x3D] == 0 && !g_renderingThreadEnabled.load());
-    other[0x3D] = 1;
-    g_renderingThreadOverride = 0;
-    HookBeginFrame(other);
-    assert(other[0x3D] == 1 && g_renderingThreadEnabled.load());
-    assert(beginCalls == 10); // Disabled overrides still call native beginFrame.
+    assert(beginCalls == 4);
     assert(parallelismCalls == 1); // Do not repeat the native setters every frame.
 }
 '''

@@ -51,7 +51,6 @@ ResultHandler g_originalResultHandler = nullptr;
 RenderMethod g_originalUIUpdate = nullptr;
 RenderMethod g_originalRelease = nullptr;
 RenderMethod g_originalBeginFrame = nullptr;
-std::atomic<int> g_renderingThreadOverride { 0 };
 std::atomic<bool> g_renderingThreadEnabled { false };
 TestCooperative g_originalCooperative = nullptr;
 SetChoice g_originalResolution = nullptr;
@@ -165,19 +164,9 @@ void __fastcall HookBeginFrame(void* render)
 
     // EndFrame uses +0x3D as well as the latched +0x3E. Never change either
     // during a live frame (including a frame retained by native frame skipping).
-    static void* nativeRenderer = nullptr;
-    static uint8_t nativeMode = 0;
-    if (D3D9Reset_RenderingThreadOverrideAvailable && !Field<uint8_t>(render, 0x38)) {
-        if (nativeRenderer != render) {
-            nativeRenderer = render;
-            nativeMode = Field<uint8_t>(render, 0x3D);
-        }
-        const int mode = g_renderingThreadOverride.load();
-        const uint8_t enabled = mode < 0 ? nativeMode : static_cast<uint8_t>(mode);
-        if (Field<uint8_t>(render, 0x3D) != enabled) {
-            Field<uint8_t>(render, 0x3D) = enabled;
-            HookLog("D3D9: RenderingThread %s (override=%d)\n", enabled ? "ON" : "OFF", mode);
-        }
+    if (!Field<uint8_t>(render, 0x38) && Field<uint8_t>(render, 0x3D)) {
+        Field<uint8_t>(render, 0x3D) = 0;
+        HookLog("D3D9: RenderingThread forced OFF\n");
     }
     g_renderingThreadEnabled.store(Field<uint8_t>(render, 0x3D) != 0, std::memory_order_relaxed);
     g_originalBeginFrame(render);
@@ -981,17 +970,7 @@ bool D3D9Reset_InstallNativeHooks()
 
 int D3D9Reset_GetRenderingThreadOverride()
 {
-    if (!D3D9Reset_RenderingThreadOverrideAvailable) return -1;
-    static const bool loaded = [] {
-        char path[MAX_PATH] = {};
-        LaunchMenuUtils::GetSettingsPath(path, sizeof(path));
-        const int mode = static_cast<int>(GetPrivateProfileIntA(
-            "Advanced", "RenderingThreadOverride", 0, path));
-        g_renderingThreadOverride.store(mode >= -1 && mode <= 1 ? mode : 0);
-        return true;
-    }();
-    (void)loaded;
-    return g_renderingThreadOverride.load();
+    return 0;
 }
 
 bool D3D9Reset_IsRenderingThreadEnabled()
@@ -1001,16 +980,7 @@ bool D3D9Reset_IsRenderingThreadEnabled()
 
 bool D3D9Reset_SetRenderingThreadOverride(int mode)
 {
-    if (!D3D9Reset_RenderingThreadOverrideAvailable) return false;
-    if (mode < -1 || mode > 1) return false;
-    D3D9Reset_GetRenderingThreadOverride();
-    char path[MAX_PATH] = {};
-    LaunchMenuUtils::GetSettingsPath(path, sizeof(path));
-    if (!IniSafe_WriteString("Advanced", "RenderingThreadOverride",
-                             mode < 0 ? "-1" : mode ? "1" : "0", path))
-        return false;
-    g_renderingThreadOverride.store(mode);
-    return true;
+    return mode == 0;
 }
 
 [[noreturn]] void D3D9Reset_AbortStartup(const char* reason)
