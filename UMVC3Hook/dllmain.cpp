@@ -834,6 +834,14 @@ void PrepareD3D9PresentationParameters(
 	if (!parameters)
 		return;
 
+	if constexpr (FORCE_VSYNC_OFF) {
+		if (parameters->PresentationInterval != D3DPRESENT_INTERVAL_IMMEDIATE) {
+			HookLog("D3D9: forcing VSync OFF for %s (interval=0x%08X -> 0x%08X)\n",
+				operation, parameters->PresentationInterval, D3DPRESENT_INTERVAL_IMMEDIATE);
+			parameters->PresentationInterval = D3DPRESENT_INTERVAL_IMMEDIATE;
+		}
+	}
+
 	// This is the requested logical mode, not a sticky "ever fullscreen" flag.
 	// Native windowed transitions restore their own window style after Reset.
 	g_borderlessPresentationRequested = !parameters->Windowed;

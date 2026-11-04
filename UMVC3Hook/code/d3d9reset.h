@@ -8,6 +8,8 @@
 // UI creation job, never from arbitrary CreateDevice calls. A pending transition keeps the
 // native game stack suspended; the UI and network threads remain independent.
 bool D3D9Reset_InstallNativeHooks();
+// False respects native VSync settings; true requests immediate presentation.
+inline constexpr bool FORCE_VSYNC_OFF = true;
 // Rendering is forced inline; runtime selection is disabled.
 inline constexpr bool D3D9Reset_RenderingThreadOverrideAvailable = false;
 // Always returns 0 (force inline); the setter rejects other modes.

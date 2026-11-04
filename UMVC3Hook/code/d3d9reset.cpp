@@ -689,6 +689,7 @@ void __fastcall HookFullscreen(void* render, bool enabled)
 
 void __fastcall HookVsync(void* render, bool enabled)
 {
+    if constexpr (FORCE_VSYNC_OFF) enabled = false;
     if (ApplyPropertyNow()) {
         g_originalVsync(render, enabled);
         return;

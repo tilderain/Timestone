@@ -120,6 +120,7 @@ D3DCAPS9 g_caps;
 DWORD GetCurrentThreadId() { return currentThread; }
 ULONGLONG GetTickCount64() { return tick; }
 void HookLog(const char*, ...) {}
+constexpr bool FORCE_VSYNC_OFF = true;
 void D3D9ResetDiagnostics_RecordDeviceReset() {}
 void FrameStepper_InvalidateDeviceObjects() { ++releasePause; }
 void FrameStepper_SetDevice(IDirect3DDevice9*) {}
@@ -720,6 +721,44 @@ int main() {
 
 
 class D3D9ResetTests(unittest.TestCase):
+    def test_force_vsync_off_presentation_policy(self):
+        source = (ROOT / "UMVC3Hook/dllmain.cpp").read_text()
+        for forced in (False, True):
+            with self.subTest(forced=forced):
+                unit = r'''
+#include <cassert>
+#include <cstdint>
+constexpr bool FORCE_VSYNC_OFF = FORCE_VALUE;
+constexpr uint32_t D3DPRESENT_INTERVAL_IMMEDIATE = 0x80000000;
+constexpr int TRUE = 1;
+struct D3DPRESENT_PARAMETERS {
+    uint32_t PresentationInterval, BackBufferWidth, BackBufferHeight;
+    int Windowed;
+    uint32_t FullScreen_RefreshRateInHz;
+};
+bool g_borderlessPresentationRequested;
+uint32_t g_borderlessBackBufferWidth, g_borderlessBackBufferHeight;
+void HookLog(const char*, ...) {}
+'''.replace("FORCE_VALUE", str(forced).lower())
+                unit += function(source, "PrepareD3D9PresentationParameters")
+                unit += r'''
+int main() {
+    PrepareD3D9PresentationParameters(nullptr, "null");
+    for (int windowed = 0; windowed <= 1; ++windowed) {
+        for (uint32_t interval : {0u, 1u, 0x80000000u}) {
+            D3DPRESENT_PARAMETERS p{interval, 1280, 720, windowed, 60};
+            PrepareD3D9PresentationParameters(&p, "CreateDevice");
+            assert(p.PresentationInterval == (FORCE_VSYNC_OFF ? D3DPRESENT_INTERVAL_IMMEDIATE : interval));
+            assert(p.Windowed && p.BackBufferWidth == 1280 && p.BackBufferHeight == 720);
+            p.PresentationInterval = 1;
+            PrepareD3D9PresentationParameters(&p, "native Reset request");
+            assert(p.PresentationInterval == (FORCE_VSYNC_OFF ? D3DPRESENT_INTERVAL_IMMEDIATE : 1u));
+        }
+    }
+}
+'''
+                self.run_cpp("#include <initializer_list>\n" + unit)
+
     def test_rendering_thread_forced_off(self):
         code = ROOT / "UMVC3Hook/code"
         header = (code / "d3d9reset.h").read_text()
