@@ -4,9 +4,9 @@
 #include <atomic>
 
 // Development-only backend detours; keep disabled in release builds.
-inline constexpr bool LAG_BACKEND_TIMING_ENABLED = false;
+inline constexpr bool LAG_BACKEND_TIMING_ENABLED = true;
 // Automatic battle-start capture and exit; suppresses desync handling during the test.
-inline constexpr bool lagTest = false;
+inline constexpr bool lagTest = true;
 // Experimental: force the native SLI setting on; false respects game configuration.
 inline constexpr bool FORCE_NATIVE_SLI_ON = true;
 

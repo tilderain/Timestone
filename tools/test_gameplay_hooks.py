@@ -138,6 +138,65 @@ int main() {
 
 
 class GameplayHooksTests(unittest.TestCase):
+    def test_native_network_frame_patch(self):
+        source = (ROOT / "UMVC3Hook/code/rollback_hooks.cpp").read_text()
+        patch = source[source.index("static bool DisableNativeNetworkFrameUpdates()"):
+                       source.index("void Rollback_InitMainHooks(")]
+        lifecycle_source = (ROOT / "UMVC3Hook/code/rollback.cpp").read_text()
+        lifecycle = lifecycle_source[lifecycle_source.index("namespace {"):
+                                     lifecycle_source.index("void Rollback_InitHooks()")]
+        unit = MOCKS + lifecycle + r'''
+uint8_t image[0x80];
+uintptr_t _addr(uintptr_t va) {
+    assert(va >= 0x140259800 && va < 0x140259880);
+    return reinterpret_cast<uintptr_t>(image + (va - 0x140259800));
+}
+''' + patch + r'''
+int main() {
+    constexpr size_t offsets[] = {0x13, 0x20, 0x43, 0x59};
+    std::memset(image, 0xCC, sizeof(image));
+    for (size_t offset : offsets) {
+        image[offset] = 0xFF;
+        image[offset + 1] = offset < 0x43 ? 0x50 : 0x52;
+        image[offset + 2] = 0x30;
+    }
+    uint8_t original[sizeof(image)];
+    std::memcpy(original, image, sizeof(image));
+    // Even a mismatch at the final site must reject before the first write.
+    image[0x5B] = 0x31;
+    assert(!DisableNativeNetworkFrameUpdates());
+    assert(image[0x13] == 0xFF && g_gameplayPatches.empty());
+    image[0x5B] = 0x30;
+    failProtect = true;
+    assert(!DisableNativeNetworkFrameUpdates());
+    assert(std::memcmp(image, original, sizeof(image)) == 0);
+    assert(g_gameplayPatches.empty());
+    failProtect = false;
+    assert(DisableNativeNetworkFrameUpdates());
+    assert(g_gameplayPatches.size() == 4);
+    for (size_t i = 0; i < sizeof(image); ++i) {
+        bool patched = false;
+        for (size_t offset : offsets) patched |= i >= offset && i < offset + 3;
+        assert(image[i] == (patched ? 0x90 : original[i]));
+    }
+    // Duplicate installation must not capture NOPs as the original bytes.
+    assert(!DisableNativeNetworkFrameUpdates());
+    assert(g_gameplayPatches.size() == 4);
+    GameplayHooks_Activate();
+    assert(GameplayHooks_Disable());
+    assert(std::memcmp(image, original, sizeof(image)) == 0);
+}
+'''
+        with tempfile.TemporaryDirectory(dir="/tmp/opencode", prefix="native-net-") as tmp:
+            cpp = Path(tmp) / "test.cpp"
+            exe = Path(tmp) / "test"
+            cpp.write_text(unit)
+            subprocess.run(["g++", "-std=c++20", "-Wall", "-Wextra", str(cpp), "-o", str(exe)], check=True)
+            subprocess.run([str(exe)], check=True)
+        installer = source[source.index("void Rollback_InitMainHooks("):]
+        self.assertLess(installer.index("DisableNativeNetworkFrameUpdates()"),
+                        installer.index("if constexpr (LAG_BACKEND_TIMING_ENABLED)"))
+
     def test_production_lifecycle(self):
         source = (ROOT / "UMVC3Hook/code/rollback.cpp").read_text()
         lifecycle = source[source.index("namespace {"):source.index("void Rollback_InitHooks()")]
