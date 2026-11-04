@@ -1395,7 +1395,6 @@ void FrameStepper_Process()
         return;
     AutoTest_Process();
 
-    static constexpr bool lagTest = false;
     static ULONGLONG lagTestStarted = 0;
     if (lagTest && !g_isResimulating &&
         (lagTestStarted || (g_battleSynchronized && g_localFighting))) {
