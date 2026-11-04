@@ -85,11 +85,6 @@ void EscMenuImGui_Draw()
     if (renderingOverride < 0 && D3D9Reset_RenderingThreadOverrideAvailable)
         ImGui::TextDisabled("Using game default until changed.");
     ImGui::EndDisabled();
-    bool singleThreaded = IsGameSingleThreaded();
-    if (ImGui::Checkbox("Run game single-threaded", &singleThreaded))
-        saveFailed = !SetGameSingleThreaded(singleThreaded);
-    if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("Sets game worker count to 1. May massively improve performance by 100%% on pcs with bad thread work, but may decrease performance by about 10%% on higher end pcs");
     if (saveFailed)
         ImGui::TextUnformatted("Could not save; previous setting retained.");
     ImGui::Separator();
