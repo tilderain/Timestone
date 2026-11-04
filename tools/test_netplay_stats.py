@@ -257,8 +257,8 @@ int main() {
         source = (ROOT / "UMVC3Hook/code/framestepper.cpp").read_text()
         self.assertIn(
             "if (Netplay_IsActive() && Controller_GetNetFrameCount() >= 0 &&\n"
-            "        g_statusHudMode != 0)", source)
-        self.assertNotIn("!Netplay_IsActive() || g_statusHudMode != 0", source)
+            "        statusHudMode != 0)", source)
+        self.assertNotIn("!Netplay_IsActive() || statusHudMode != 0", source)
 
     def test_settings_change_lead_is_halved(self):
         source = (ROOT / "UMVC3Hook/code/framestepper.cpp").read_text()

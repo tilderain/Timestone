@@ -139,6 +139,56 @@ int main() {
 
 
 class GameplayHooksTests(unittest.TestCase):
+    def test_sli_policy_without_timing(self):
+        source = (ROOT / "UMVC3Hook/code/rollback_hooks.cpp").read_text()
+        self.assertIn("FORCE_NATIVE_SLI_ON = true", source)
+        self.assertIn("EnableHook(0x14053bc50", source)
+        self.assertIn("EnableHook(0x14053f9d0", source)
+        self.assertNotIn("EnableHook(0x14053b650", source)
+        hooks = source[source.index("static void(__fastcall* oRenderCreateDevice)"):
+                       source.index("static uint64_t* __fastcall hkGSoundCreateVoice")]
+        for enabled in (False, True):
+            unit = r'''
+#include <cassert>
+#include <cstdint>
+#include <vector>
+#define __fastcall
+constexpr bool FORCE_NATIVE_SLI_ON = ''' + str(enabled).lower() + r''';
+''' + hooks + r'''
+uint8_t selected;
+void Create(uint64_t render, uint64_t a2, uint64_t a3, uint64_t a4) {
+    assert(a2 == 2 && a3 == 3 && a4 == 4);
+    *(uint8_t*)(render + 0x867730) = 0;
+}
+void Set(uint64_t, uint8_t enabled) { selected = enabled; }
+int main() {
+    std::vector<uint8_t> render(0x867731, 0xAB);
+    oRenderCreateDevice = Create; oRenderSetSli = Set;
+    hkRenderCreateDevice((uint64_t)render.data(), 2, 3, 4);
+    assert(render.back() == (FORCE_NATIVE_SLI_ON ? 1 : 0));
+    assert(render[0x86772F] == 0xAB);
+    hkRenderSetSli((uint64_t)render.data(), 0);
+    assert(selected == (FORCE_NATIVE_SLI_ON ? 1 : 0));
+    hkRenderSetSli((uint64_t)render.data(), 1); assert(selected == 1);
+}
+'''
+            with self.subTest(enabled=enabled), tempfile.TemporaryDirectory(dir="/tmp/opencode") as tmp:
+                cpp, exe = Path(tmp) / "test.cpp", Path(tmp) / "test"
+                cpp.write_text(unit)
+                subprocess.run(["g++", "-std=c++20", "-Wall", "-Wextra", str(cpp), "-o", str(exe)], check=True)
+                subprocess.run([str(exe)], check=True)
+
+    def test_no_lag_instrumentation(self):
+        files = list((ROOT / "UMVC3Hook/code").glob("*.cpp"))
+        files += list((ROOT / "UMVC3Hook/code").glob("*.h"))
+        files += [ROOT / name for name in (
+            "Makefile", "UMVC3Hook/dllmain.cpp", "UMVC3Hook/imgui/imgui_impl_win32.cpp",
+            "UMVC3Hook/UMVC3Hook.vcxproj", "UMVC3Hook/UMVC3Hook.vcxproj.filters")]
+        for path in files:
+            with self.subTest(file=path.name):
+                self.assertNotRegex(path.read_text(),
+                                    r"LagDiagnostic|LagMetric|LAG_BACKEND_TIMING|lag_diagnostics")
+
     def test_game_config_refresh_patch(self):
         runtime = (ROOT / "UMVC3Hook/code/rollback_runtime.cpp").read_text()
         patch = runtime[runtime.index("template <size_t N>\nstatic bool PatchBytes"):
@@ -240,7 +290,7 @@ int main() {
             subprocess.run([str(exe)], check=True)
         installer = source[source.index("void Rollback_InitMainHooks("):]
         self.assertLess(installer.index("DisableNativeNetworkFrameUpdates()"),
-                        installer.index("if constexpr (LAG_BACKEND_TIMING_ENABLED)"))
+                        installer.index("EnableHook(FN_SMVC3MAIN_MOVE"))
 
     def test_production_lifecycle(self):
         source = (ROOT / "UMVC3Hook/code/rollback.cpp").read_text()
