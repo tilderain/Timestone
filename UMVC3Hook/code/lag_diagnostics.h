@@ -3,6 +3,9 @@
 #include <cstdint>
 #include <atomic>
 
+// Development-only backend detours; keep disabled in release builds.
+inline constexpr bool LAG_BACKEND_TIMING_ENABLED = false;
+
 enum class LagMetric : unsigned {
     Frame, Native, Pacing, InputWait, BenchmarkUpdate, BenchmarkBegin,
     BenchmarkEnd, BenchmarkDraw, SteamRoute, EndScene, StatusHud, CharacterHud,
@@ -17,7 +20,13 @@ enum class LagMetric : unsigned {
     RenderMove, UnitMove, NativeInput, SoundMove,
     DrawCache, CameraDraw, UnitDraw, DrawFrameCache, Jobs, JobDispatch, UnitSync, UnitAfter,
     SceneSort, EffectMove, ParticlePre, ParticlePost, CameraMove, GraphicsUpdate, AiAfter,
-    PadPoll, PadRead, Count
+    PadPoll, PadRead, PadDetect, XInputState, XInputCaps, DirectInputFind,
+    DirectInputRead, InputWmi, RenderWorkerWait, RenderInlinePlayback,
+    RenderPlayback, RenderGpuFence, BackendPresent, RenderRetire, RenderCapture,
+    KeyboardMove, KeyboardState, MouseMove, MouseState,
+    NetComponent, NativeNetwork, AdapterQuery, NetContextDestruct,
+    ShaderMove, ShaderTable, GameConfigMove, GameUiMove, UiScreenCapture,
+    CollisionBegin, CollisionMove, GameSoundMove, ShadowMove, CaptureMove, StageMove, Count
 };
 enum class LagEvent : unsigned {
     BenchmarkReset, LiveSample, CorrectionSample, BenchmarkClock,

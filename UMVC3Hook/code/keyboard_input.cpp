@@ -1,4 +1,5 @@
 #include "keyboard_input.h"
+#include "lag_diagnostics.h"
 #include "mk10utils.h"
 #include "../kiero/minhook/include/MinHook.h"
 #include <dinput.h>
@@ -42,6 +43,7 @@ void PublishKeyboard(const uint32_t (&held)[8])
 
 void __fastcall CaptureKeyboardMove(void* keyboard)
 {
+    LagDiagnosticScope diagnostic(LagMetric::KeyboardMove);
     g_originalMove(keyboard);
     uint32_t held[8];
     // Native move owns these fields. Capture here, not from the render thread.

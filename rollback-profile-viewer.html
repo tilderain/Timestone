@@ -57,12 +57,33 @@
         border-radius: 18px;
         background: #101821d9;
         box-shadow: var(--shadow);
-        cursor: pointer;
       }
       .drop-card.drag {
         border-color: var(--cyan);
         background: #12252a;
       }
+      #pasteText {
+        display: block;
+        width: 100%;
+        min-height: 160px;
+        margin: 16px 0 10px;
+        padding: 12px;
+        resize: vertical;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--bg);
+        color: var(--text);
+        font: 12px/1.5 ui-monospace, monospace;
+      }
+      #lagReport { max-width: 100%; }
+      #lagContent .panel { margin-top: 14px; }
+      #lagMetadata { overflow-wrap: anywhere; }
+      .lag-percent { min-width: 130px; }
+      .lag-percent .track { margin-top: 5px; }
+      .lag-breakdown { display: grid; gap: 16px; margin: 18px 0; }
+      .lag-breakdown .hook-name { font: inherit; white-space: normal; }
+      .lag-breakdown .track { height: 12px; }
+      #lagContent summary { cursor: pointer; color: var(--muted); margin: 14px 0; }
       .mark {
         font:
           700 13px/1 ui-monospace,
@@ -481,21 +502,58 @@
         <div class="mark">UMVC3 rollback telemetry</div>
         <h1>Profile Viewer</h1>
         <p>
-          Drop <code>rollback_profile.json</code> here or choose a file.
+          Drop a rollback JSON or lag diagnostic text file, or paste a capture below.
           Everything stays in your browser.
         </p>
         <button id="browse" class="button">Open profile</button>
-        <div id="error" class="error"></div>
+        <textarea id="pasteText" aria-label="Profile or lag diagnostic text" placeholder="Paste LAGCAPTURE / LAGDIAG / LAGWORST / LAGSLOW text here"></textarea>
+        <button id="loadText" class="button">Load pasted text</button>
+        <div id="error" class="error" role="alert"></div>
       </div>
     </section>
-    <input id="fileInput" type="file" accept=".json,application/json" hidden />
+    <input id="fileInput" type="file" accept=".json,.txt,.log,application/json,text/plain" hidden />
     <main id="app" class="app hidden">
       <header class="topbar">
         <span class="mark">RB</span><span class="brand">Rollback Profile</span
         ><span id="fileName" class="file"></span><span class="spacer"></span
         ><button id="open" class="button">Open another</button>
       </header>
-      <div class="content">
+      <div id="lagContent" class="content hidden">
+        <section class="panel">
+          <span class="eyebrow">Lag diagnostics</span>
+          <h2>Elapsed wall time, not CPU time</h2>
+          <p class="sub">Inclusive timings overlap and must not be summed. Self timings exclude nested scopes but still include waits. Reports are separate per thread; frozen or inactive thread tails may be incomplete.</p>
+          <p id="lagSummary"></p>
+          <label>Report <select id="lagReport"></select></label>
+          <details open><summary>Technical details: report metadata</summary><p id="lagMetadata" class="sub"></p></details>
+        </section>
+        <section class="panel">
+          <div class="panel-head"><h2>What takes time each frame?</h2>
+            <div class="controls"><label>Show <select id="lagTimingMode"><option value="self">Own time (no nested work)</option><option value="inclusive">Time including nested work</option></select></label></div>
+          </div>
+          <p id="lagBreakdownMeta" class="sub"></p>
+          <div id="lagBreakdown" class="lag-breakdown"></div>
+          <details open><summary>Technical details: all report metrics</summary>
+          <p class="sub">Averages are per invocation, not per frame. Sorted by maximum inclusive time. Missing self timings are shown as a dash.</p>
+          <p id="lagPercentMeta" class="sub"></p>
+          <div class="table-wrap"><table><thead><tr><th>Metric</th><th>Count</th><th>Avg ms</th><th>Self avg ms</th><th>Max ms</th><th>Over 25 ms</th><th>Inclusive % of frames</th><th>Self % of frames</th></tr></thead><tbody id="lagMetrics"></tbody></table></div>
+          </details>
+        </section>
+        <section class="panel">
+          <h2>Worst frame</h2><p id="lagWorstMeta" class="sub"></p>
+          <div id="lagWorstBreakdown" class="lag-breakdown"></div>
+          <details open><summary>Technical details: all worst-frame metrics</summary>
+          <div class="table-wrap"><table><thead><tr><th>Metric</th><th>Inclusive ms</th><th>Self ms</th><th>Inclusive % of frame</th><th>Self % of frame</th></tr></thead><tbody id="lagWorst"></tbody></table></div>
+          </details>
+        </section>
+        <section class="panel">
+          <details open><summary>Technical details: slow events</summary>
+          <p class="sub">Events matched by thread and report QPC, not by adjacency in the capture.</p>
+          <div class="table-wrap"><table><thead><tr><th>Metric</th><th>Duration ms</th><th>Start QPC</th><th>End QPC</th><th>QPC Hz</th></tr></thead><tbody id="lagSlow"></tbody></table></div>
+          </details>
+        </section>
+      </div>
+      <div id="profileContent" class="content">
         <section id="metrics" class="metrics"></section>
         <section class="grid">
           <article class="panel">
@@ -730,15 +788,150 @@
         r.onload = () => {
           try {
             debug("File read complete", { characters: r.result.length });
-            load(JSON.parse(r.result));
+            loadText(r.result, file.name);
           } catch (e) {
             console.error("[rollback-profile-viewer] File load failed", e);
-            $("#error").textContent = "Could not parse JSON: " + e.message;
+            showImportError(e);
           }
         };
-        r.onerror = () =>
-          console.error("[rollback-profile-viewer] FileReader failed", r.error);
+        r.onerror = () => showImportError(r.error || Error("Could not read file"));
         r.readAsText(file);
+      }
+      function showImportError(e) {
+        $("#drop").classList.remove("hidden");
+        $("#app").classList.add("hidden");
+        $("#error").textContent = "Could not load capture: " + e.message;
+      }
+      function parseLagCapture(text) {
+        const capture = { reports: [], worst: [], slow: [], headers: [] };
+        // Keep metadata as strings: QPC values are identifiers and may exceed JS integer precision.
+        for (const line of text.split(/\r?\n/)) {
+          const match = line.match(/\b(LAGCAPTURE|LAGDIAG|LAGWORST|LAGSLOW)\b(.*)/);
+          if (!match) continue;
+          const [, kind, body] = match;
+          if (kind === "LAGCAPTURE") {
+            capture.headers.push(body.trim());
+            continue;
+          }
+          const self = body.match(/self_avg_ms\s*\{([^}]*)\}/);
+          const fields = Object.fromEntries([...body.split(/self_avg_ms\s*\{/)[0].matchAll(/\b(\w+)=([^\s;]+)/g)].map((m) => [m[1], m[2]]));
+          const metrics = [];
+          const selfFields = Object.fromEntries([...(self?.[1] || "").matchAll(/\b(\w+)=([\d.]+)/g)].map((m) => [m[1], Number(m[2])]));
+          for (const [name, value] of Object.entries(fields)) {
+            if (!value.includes("/") || name === "units") continue;
+            const parts = value.split("/").map(Number);
+            const expected = kind === "LAGDIAG" ? 4 : 2;
+            if (parts.length !== expected || parts.some((v) => !Number.isFinite(v) || v < 0))
+              throw Error(`Invalid ${kind} metric: ${name}`);
+            metrics.push({ name, values: parts, self: selfFields[name] });
+            delete fields[name];
+          }
+          if (!/^\d+$/.test(fields.tid || "")) throw Error(`${kind} is missing a valid thread ID`);
+          const record = { fields, metrics };
+          if (kind === "LAGDIAG") capture.reports.push(record);
+          else if (kind === "LAGWORST") capture.worst.push(record);
+          else capture.slow.push(record);
+        }
+        if (!capture.reports.length) throw Error("No LAGDIAG reports found");
+        return capture;
+      }
+      function escapeHtml(value) {
+        return String(value).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+      }
+      let lagCapture = null;
+      function renderLagReport() {
+        const report = lagCapture.reports[Number($("#lagReport").value)];
+        const metadata = (fields) => Object.entries(fields).filter(([k]) => k !== "units").map(([k, v]) => `${k}=${v}`).join(" | ");
+        const percentage = (time, total) => ({ percent: total > 0 ? time / total * 100 : NaN });
+        const rows = (id, values, columns) => {
+          $(id).innerHTML = values.length
+            ? values.map((row) => `<tr>${row.map((v) => {
+              if (typeof v !== "object") return `<td>${escapeHtml(v)}</td>`;
+              const p = v.percent;
+              return Number.isFinite(p)
+                ? `<td class="lag-percent">${fmt(p, 2)}%<div class="track"><div class="fill" style="width:${Math.max(0, Math.min(100, p))}%"></div></div></td>`
+                : '<td class="lag-percent">-</td>';
+            }).join("")}</tr>`).join("")
+            : `<tr><td colspan="${columns}">No samples in this report.</td></tr>`;
+        };
+        const matches = (r) => report.fields.report_qpc !== undefined && r.fields.tid === report.fields.tid && r.fields.report_qpc === report.fields.report_qpc;
+        $("#lagMetadata").textContent = metadata(report.fields);
+        const frame = ["frame", "scene_gap", "frame_gap"].map((name) => report.metrics.find((m) => m.name === name && m.values[0] * m.values[1] > 0)).find(Boolean);
+        const frameTotal = frame ? frame.values[0] * frame.values[1] : 0;
+        $("#lagPercentMeta").textContent = frame
+          ? `Percentages = count x average time / ${frame.name} total (${fmt(frameTotal, 3)} ms across ${frame.values[0]} samples). Inclusive scopes overlap; percentages are not additive. Bars cap at 100%; labels show the full value.`
+          : "Frame percentages unavailable: this thread report has no frame or frame-gap timing samples.";
+        rows("#lagMetrics", [...report.metrics].sort((a, b) => b.values[2] - a.values[2]).map((m) => [m.name, m.values[0], fmt(m.values[1], 3), fmt(m.self, 3), fmt(m.values[2], 3), m.values[3], percentage(m.values[0] * m.values[1], frameTotal), percentage(m.values[0] * m.self, frameTotal)]), 8);
+        const worst = lagCapture.worst.find(matches);
+        $("#lagWorstMeta").textContent = worst ? `Frame ${worst.fields.net_frame ?? "unknown"} took ${fmt(Number(worst.fields.duration_ms), 2)} ms. The bars below show where that time went.` : "No worst-frame sample in this report.";
+        rows("#lagWorst", [...(worst?.metrics || [])].sort((a, b) => b.values[0] - a.values[0]).map((m) => [m.name, ...m.values.map((v) => fmt(v, 3)), ...m.values.map((v) => percentage(v, Number(worst.fields.duration_ms)))]), 5);
+        rows("#lagSlow", lagCapture.slow.filter(matches).map(({ fields: f }) => [f.metric || "-", fmt(Number(f.duration_ms), 3), f.start_qpc || "-", f.end_qpc || "-", f.qpc_hz || "-"]), 5);
+        const ownTime = $("#lagTimingMode").value !== "inclusive";
+        const names = {
+          pacing: "Waiting for the next frame",
+          native: "Other native game work",
+          frame: "Other frame work",
+          main_hook: "Other main-hook work",
+          unit_move: "Moving game objects",
+          unit_draw: "Drawing game objects",
+          unit_after: "Game object post-update",
+          save_live: "Saving rollback state",
+          save_copy: "Copying rollback state",
+          restore: "Restoring rollback state",
+          correction: "Rollback correction",
+          resim_tick: "Re-simulating gameplay",
+          pad_detect: "Detecting controllers",
+          xinput_state: "Reading Xbox controllers",
+          native_input: "Game input processing",
+          render_gpu_fence: "Waiting for the GPU",
+          render_worker_wait: "Waiting for render workers",
+          render_playback: "Processing render commands",
+          backend_present: "Presenting the picture",
+          keyboard_state: "Reading the keyboard",
+          mouse_state: "Reading the mouse",
+          game_sound_move: "Updating game audio",
+          hooklog: "Writing diagnostic logs",
+        };
+        const breakdown = (id, metrics, total, samples, isWorst) => {
+          const entries = metrics
+            .filter((m) => !["frame_gap", "scene_gap"].includes(m.name))
+            .map((m) => ({ name: m.name, time: isWorst ? m.values[ownTime ? 1 : 0] : m.values[0] * (ownTime ? m.self : m.values[1]) }))
+            .filter((m) => Number.isFinite(m.time) && m.time > 0)
+            .sort((a, b) => b.time - a.time).slice(0, 12);
+          $(id).innerHTML = total > 0 && entries.length ? entries.map((m) => {
+            const percent = m.time / total * 100;
+            const label = (!ownTime && ["native", "frame", "main_hook"].includes(m.name)) ? m.name.replaceAll("_", " ") : names[m.name] || m.name.replaceAll("_", " ");
+            return `<div class="hook-row"><div class="hook-head"><span class="hook-name" title="${escapeHtml(m.name)}">${escapeHtml(label)}</span><span class="hook-total">${fmt(m.time / samples, 2)} ms ${isWorst ? "" : "/ frame"} &middot; ${fmt(percent, 1)}%</span></div><div class="track"><div class="fill" style="width:${Math.min(100, percent)}%"></div></div></div>`;
+          }).join("") : '<p class="sub">Not enough timing data for a frame breakdown.</p>';
+        };
+        $("#lagBreakdownMeta").textContent = frame
+          ? `An average ${frame.name === "scene_gap" ? "render " : ""}frame took ${fmt(frame.values[1], 2)} ms. Showing the 12 largest costs. ${ownTime ? "Each bar excludes work counted inside another measured scope. Waiting still counts as elapsed time." : "These bars include nested work, so they overlap. Do not add them together."}`
+          : "This thread has no measured frames. Choose a game or render-thread report to see its breakdown.";
+        breakdown("#lagBreakdown", report.metrics, frameTotal, frame?.values[0] || 1, false);
+        breakdown("#lagWorstBreakdown", worst?.metrics || [], Number(worst?.fields.duration_ms), 1, true);
+      }
+      function loadText(text, name = "Pasted capture") {
+        fileLabel = name;
+        $("#error").textContent = "";
+        if (!/\bLAGDIAG\b/.test(text)) {
+          load(JSON.parse(text));
+          return;
+        }
+        const capture = parseLagCapture(text);
+        lagCapture = capture;
+        rollbacks = [];
+        clearTimeout(chartTimer);
+        cancelAnimationFrame(chartAnimationFrame);
+        $("#tooltip").classList.add("hidden");
+        $("#profileContent").classList.add("hidden");
+        $("#lagContent").classList.remove("hidden");
+        $("#drop").classList.add("hidden");
+        $("#app").classList.remove("hidden");
+        $("#fileName").textContent = name;
+        $("#lagSummary").textContent = `${capture.reports.length} reports | ${new Set(capture.reports.map((r) => r.fields.tid)).size} threads | ${capture.worst.length} worst frames | ${capture.slow.length} slow events. ${capture.headers.join(" | ")}`;
+        $("#lagReport").innerHTML = capture.reports.map((r, i) => `<option value="${i}">${escapeHtml(`#${i + 1} | thread ${r.fields.tid} | frame ${r.fields.net_frame ?? "-"} | ${r.fields.window_ms ?? "-"} ms window`)}</option>`).join("");
+        $("#lagReport").value = "0";
+        renderLagReport();
       }
       function load(data) {
         if (!Array.isArray(data)) throw Error("Expected a JSON array");
@@ -754,6 +947,8 @@
           postResim: postByFrame.size,
         });
         if (!rollbacks.length) throw Error("No rollback records found");
+        $("#profileContent").classList.remove("hidden");
+        $("#lagContent").classList.add("hidden");
         $("#drop").classList.add("hidden");
         $("#app").classList.remove("hidden");
         $("#fileName").textContent = fileLabel;
@@ -1882,8 +2077,17 @@
         e.stopPropagation();
         input.click();
       };
-      $("#open").onclick = () => input.click();
-      $("#dropCard").onclick = () => input.click();
+      $("#open").onclick = () => {
+        $("#drop").classList.remove("hidden");
+        $("#app").classList.add("hidden");
+        $("#error").textContent = "";
+      };
+      $("#loadText").onclick = () => {
+        try { loadText($("#pasteText").value); }
+        catch (e) { showImportError(e); }
+      };
+      $("#lagReport").onchange = renderLagReport;
+      $("#lagTimingMode").onchange = renderLagReport;
       input.onchange = () => input.files[0] && loadFile(input.files[0]);
       ["dragenter", "dragover"].forEach((n) =>
         document.addEventListener(n, (e) => {

@@ -395,6 +395,48 @@ using CameraMoveTiming = TimedNativeCall<LagMetric::CameraMove, uint64_t>;
 using GraphicsUpdateTiming = TimedNativeCall<LagMetric::GraphicsUpdate, uint64_t>;
 using AiAfterTiming = TimedNativeCall<LagMetric::AiAfter, uint64_t>;
 
+template<LagMetric Metric, typename Result, typename... Args>
+struct TimedBackendCall {
+    static inline Result(__fastcall* original)(Args...) = nullptr;
+    static Result __fastcall Invoke(Args... args) {
+        LagDiagnosticScope diagnostic(Metric);
+        return original(args...);
+    }
+};
+using DetectTiming = TimedBackendCall<LagMetric::PadDetect, uint8_t, uint64_t, int32_t, uint32_t>;
+using XStateTiming = TimedBackendCall<LagMetric::XInputState, uint32_t, uint32_t, void*>;
+using XCapsTiming = TimedBackendCall<LagMetric::XInputCaps, uint64_t, uint64_t, uint64_t>;
+using DInputFindTiming = TimedBackendCall<LagMetric::DirectInputFind, uint8_t, uint64_t, uint64_t>;
+using WmiTiming = TimedBackendCall<LagMetric::InputWmi, int, void*>;
+using PlaybackTiming = TimedNativeCall<LagMetric::RenderPlayback, uint64_t>;
+using GpuFenceTiming = TimedNativeCall<LagMetric::RenderGpuFence, uint64_t>;
+using RetireTiming = TimedNativeCall<LagMetric::RenderRetire, uint64_t>;
+using CaptureTiming = TimedNativeCall<LagMetric::RenderCapture, uint64_t>;
+using KeyboardStateTiming = TimedNativeCall<LagMetric::KeyboardState, uint64_t, uint32_t*>;
+using MouseMoveTiming = TimedNativeCall<LagMetric::MouseMove, uint64_t>;
+using MouseStateTiming = TimedNativeCall<LagMetric::MouseState, uint64_t, int32_t*>;
+using NetComponentTiming = TimedNativeCall<LagMetric::NetComponent, uint64_t>;
+using NativeNetworkTiming = TimedNativeCall<LagMetric::NativeNetwork, uint64_t>;
+using AdapterQueryTiming = TimedBackendCall<LagMetric::AdapterQuery, uint32_t, uint64_t>;
+using NetContextDestructTiming = TimedNativeCall<LagMetric::NetContextDestruct, uint64_t>;
+using ShaderMoveTiming = TimedNativeCall<LagMetric::ShaderMove, uint64_t>;
+using ShaderTableTiming = TimedNativeCall<LagMetric::ShaderTable, uint64_t>;
+using GameConfigMoveTiming = TimedNativeCall<LagMetric::GameConfigMove, uint64_t>;
+using UiScreenCaptureTiming = TimedNativeCall<LagMetric::UiScreenCapture, uint64_t>;
+using CollisionBeginTiming = TimedNativeCall<LagMetric::CollisionBegin, uint64_t>;
+using CollisionMoveTiming = TimedNativeCall<LagMetric::CollisionMove, uint64_t>;
+using GameSoundMoveTiming = TimedNativeCall<LagMetric::GameSoundMove, uint64_t>;
+using ShadowMoveTiming = TimedNativeCall<LagMetric::ShadowMove, uint64_t>;
+using CaptureMoveTiming = TimedNativeCall<LagMetric::CaptureMove, uint64_t>;
+using StageMoveTiming = TimedNativeCall<LagMetric::StageMove, uint64_t>;
+static void(__fastcall* oRenderSyncTiming)(uint64_t) = nullptr;
+static void __fastcall hkRenderSyncTiming(uint64_t render)
+{
+    LagDiagnosticScope diagnostic(*(uint8_t*)(render + 0x3E)
+        ? LagMetric::RenderWorkerWait : LagMetric::RenderInlinePlayback);
+    oRenderSyncTiming(render);
+}
+
 static void __fastcall hkTimedJobs(uint64_t main, uint32_t mode)
 {
     if (g_timingRender && g_lagDiagnosticsMayBeEnabled.load(std::memory_order_relaxed)) {
@@ -498,6 +540,7 @@ static void __fastcall hkSceneUpdateSoundEnv(uint64_t scene)
 
 static void __fastcall hkGameUiMove(uint64_t gameUi)
 {
+    LagDiagnosticScope diagnostic(LagMetric::GameUiMove);
     RollbackHookProfileScope profile(RollbackHookProfileId::GameUiMove);
     // Advance unsnapshotted UI objects only on live frames.
     if (g_isResimulating)
@@ -711,6 +754,62 @@ void Rollback_InitMainHooks(RollbackMainMoveFn* originalMove)
     EnableHook(0x140289c30, (void*)&hkNativeInput, (void**)&oNativeInput,
                "Rollback: hooked native input timing",
                "Rollback: failed to hook native input timing (%d)\n");
+    if constexpr (LAG_BACKEND_TIMING_ENABLED) {
+        EnableHook(0x1406aa1b0, (void*)&KeyboardStateTiming::Invoke, (void**)&KeyboardStateTiming::original,
+                   "Timing: keyboard state", "Timing: keyboard state failed (%d)\n");
+        EnableHook(0x1406aa990, (void*)&MouseMoveTiming::Invoke, (void**)&MouseMoveTiming::original,
+                   "Timing: mouse move", "Timing: mouse move failed (%d)\n");
+        EnableHook(0x1406aad00, (void*)&MouseStateTiming::Invoke, (void**)&MouseStateTiming::original,
+                   "Timing: mouse state", "Timing: mouse state failed (%d)\n");
+        EnableHook(0x140458320, (void*)&NetComponentTiming::Invoke, (void**)&NetComponentTiming::original,
+                   "Timing: network component", "Timing: network component failed (%d)\n");
+        EnableHook(0x1406864d0, (void*)&NativeNetworkTiming::Invoke, (void**)&NativeNetworkTiming::original,
+                   "Timing: native network", "Timing: native network failed (%d)\n");
+        EnableHook(0x1404da610, (void*)&AdapterQueryTiming::Invoke, (void**)&AdapterQueryTiming::original,
+                   "Timing: adapter query", "Timing: adapter query failed (%d)\n");
+        EnableHook(0x1404faf70, (void*)&NetContextDestructTiming::Invoke, (void**)&NetContextDestructTiming::original,
+                   "Timing: network context destruction", "Timing: network context destruction failed (%d)\n");
+        EnableHook(0x14065cb20, (void*)&ShaderMoveTiming::Invoke, (void**)&ShaderMoveTiming::original,
+                   "Timing: shader move", "Timing: shader move failed (%d)\n");
+        EnableHook(0x14065be60, (void*)&ShaderTableTiming::Invoke, (void**)&ShaderTableTiming::original,
+                   "Timing: shader table", "Timing: shader table failed (%d)\n");
+        EnableHook(0x140253490, (void*)&GameConfigMoveTiming::Invoke, (void**)&GameConfigMoveTiming::original,
+                   "Timing: game config", "Timing: game config failed (%d)\n");
+        EnableHook(0x1402b9670, (void*)&UiScreenCaptureTiming::Invoke, (void**)&UiScreenCaptureTiming::original,
+                   "Timing: UI screen capture", "Timing: UI screen capture failed (%d)\n");
+        EnableHook(0x1405bb710, (void*)&CollisionBeginTiming::Invoke, (void**)&CollisionBeginTiming::original,
+                   "Timing: collision begin", "Timing: collision begin failed (%d)\n");
+        EnableHook(0x1405baf60, (void*)&CollisionMoveTiming::Invoke, (void**)&CollisionMoveTiming::original,
+                   "Timing: collision move", "Timing: collision move failed (%d)\n");
+        EnableHook(0x1402aa6c0, (void*)&GameSoundMoveTiming::Invoke, (void**)&GameSoundMoveTiming::original,
+                   "Timing: game sound", "Timing: game sound failed (%d)\n");
+        EnableHook(0x1406d3100, (void*)&ShadowMoveTiming::Invoke, (void**)&ShadowMoveTiming::original,
+                   "Timing: shadow move", "Timing: shadow move failed (%d)\n");
+        EnableHook(0x14069cb50, (void*)&CaptureMoveTiming::Invoke, (void**)&CaptureMoveTiming::original,
+                   "Timing: capture move", "Timing: capture move failed (%d)\n");
+        EnableHook(0x1401f0aa0, (void*)&StageMoveTiming::Invoke, (void**)&StageMoveTiming::original,
+                   "Timing: stage move", "Timing: stage move failed (%d)\n");
+        EnableHook(0x140514950, (void*)&DetectTiming::Invoke, (void**)&DetectTiming::original,
+                   "Timing: redetect", "Timing: redetect failed (%d)\n");
+        EnableHook(0x1409981c1, (void*)&XStateTiming::Invoke, (void**)&XStateTiming::original,
+                   "Timing: XInputGetState", "Timing: XInputGetState failed (%d)\n");
+        EnableHook(0x140514450, (void*)&XCapsTiming::Invoke, (void**)&XCapsTiming::original,
+                   "Timing: XInput capabilities", "Timing: XInput capabilities failed (%d)\n");
+        EnableHook(0x140513f10, (void*)&DInputFindTiming::Invoke, (void**)&DInputFindTiming::original,
+                   "Timing: DirectInput discovery", "Timing: DirectInput discovery failed (%d)\n");
+        EnableHook(0x140510220, (void*)&WmiTiming::Invoke, (void**)&WmiTiming::original,
+                   "Timing: input WMI", "Timing: input WMI failed (%d)\n");
+        EnableHook(0x140541030, (void*)&hkRenderSyncTiming, (void**)&oRenderSyncTiming,
+                   "Timing: render sync", "Timing: render sync failed (%d)\n");
+        EnableHook(0x14053a660, (void*)&PlaybackTiming::Invoke, (void**)&PlaybackTiming::original,
+                   "Timing: playback", "Timing: playback failed (%d)\n");
+        EnableHook(0x14053b650, (void*)&GpuFenceTiming::Invoke, (void**)&GpuFenceTiming::original,
+                   "Timing: GPU fence", "Timing: GPU fence failed (%d)\n");
+        EnableHook(0x14053a570, (void*)&RetireTiming::Invoke, (void**)&RetireTiming::original,
+                   "Timing: render retire", "Timing: render retire failed (%d)\n");
+        EnableHook(0x14053b5a0, (void*)&CaptureTiming::Invoke, (void**)&CaptureTiming::original,
+                   "Timing: render capture", "Timing: render capture failed (%d)\n");
+    }
     EnableHook(FN_RENDER_END_FRAME, (void*)&hkCallSRender, (void**)&oCallSRender,
                "Rollback: hooked sRender call",
                "Rollback: failed to hook sRender call (%d)\n");

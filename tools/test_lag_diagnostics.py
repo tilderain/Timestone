@@ -90,13 +90,6 @@ std::vector<std::string> logs;
 int fileOpens = 0;
 std::atomic<uint64_t> wallMs{1000};
 bool failThread = false, failShell = false;
-bool lagTest = false;
-unsigned GetEnvironmentVariableA(const char* name, char* value, unsigned size) {
-    assert(!strcmp(name, "TIMESTONE_LAG_TEST") && size >= 2);
-    if (!lagTest) return 0;
-    value[0] = '1'; value[1] = 0;
-    return 1;
-}
 bool fileClosed = false, fileFlushed = false;
 int shellOpens = 0;
 std::string openedPath, createdPath;
@@ -226,6 +219,7 @@ int main(int argc, char** argv) {
         assert(LagDiagnostics_GetCaptureSecondsRemaining() == 15);
         assert(!LagDiagnostics_StartCapture()); // No concurrent capture writers.
         { LagDiagnosticScope frame(LagMetric::Frame, 42);
+          { LagDiagnosticScope wait(LagMetric::RenderWorkerWait); ticks += 6000; }
           LagDiagnostics_Count(LagEvent::RenderJobs, 100);
           LagDiagnostics_Count(LagEvent::RenderJobs, 23);
           ticks += 1000; }
@@ -237,6 +231,8 @@ int main(int argc, char** argv) {
         assert(!writerRunning && !writerReady && !g_lagDiagnosticsMayBeEnabled);
         assert(shellOpens == 1 && openedPath == createdPath);
         assert(logs.size() == 3 && logs[1].find("net_frame=42") != std::string::npos);
+        assert(logs[1].find("metric=render_worker_wait duration_ms=6.000") != std::string::npos);
+        assert(logs[1].find("start_qpc=") != std::string::npos);
         assert(logs[1].find("render_jobs=123") != std::string::npos);
         assert(logs.front().find("duration_ms=15000") != std::string::npos);
         assert(logs.back().find("LAGCAPTURE stopped") != std::string::npos);
@@ -266,12 +262,12 @@ int main(int argc, char** argv) {
         assert(logs[6].find("frame_gap=") == std::string::npos);
         assert(!g_lagDiagnosticsMayBeEnabled && shellOpens == 3);
         assert(settingsReads == 1);
-        lagTest = true;
+        failShell = false;
         assert(LagDiagnostics_StartCapture());
         WaitStatus(LagCaptureStatus::Recording);
         FinishCapture();
         assert(LagDiagnostics_GetCaptureStatus() == LagCaptureStatus::Complete);
-        assert(fileClosed && fileFlushed && shellOpens == 3);
+        assert(fileClosed && fileFlushed && shellOpens == 4);
         return 0;
     }
     if (!enabled) {
@@ -407,6 +403,23 @@ int main(int argc, char** argv) {
     assert(logs.back().find("qpc_hz=1000000") != std::string::npos);
     assert(logs.back().find("input_wait_context{required=775 remote_before=774 remote_after=775 delay=2 rollback=7}") != std::string::npos);
     assert(frameWaits[0].required == -1); // The following frame did not inherit the wait.
+
+    // New native boundaries must retain nested attribution and slow-call stamps.
+    {
+        LagDiagnosticScope frame(LagMetric::Frame, 888);
+        LagDiagnosticScope native(LagMetric::Native);
+        { LagDiagnosticScope keyboard(LagMetric::KeyboardMove); ticks += 6000; }
+        { LagDiagnosticScope network(LagMetric::NetComponent);
+          ticks += 7000;
+          { LagDiagnosticScope adapters(LagMetric::AdapterQuery); ticks += 9000; } }
+    }
+    ticks += 5000000;
+    { LagDiagnosticScope frame(LagMetric::Frame, 889); ++ticks; }
+    Drain();
+    assert(logs.back().find("net_frame=888 duration_ms=22.000") != std::string::npos);
+    assert(logs.back().find("net_component=16.000/7.000") != std::string::npos);
+    assert(logs.back().find("metric=keyboard_move duration_ms=6.000") != std::string::npos);
+    assert(logs.back().find("metric=adapter_query duration_ms=9.000") != std::string::npos);
 
     const size_t beforeConcurrent = logs.size();
     std::vector<std::thread> producers;
