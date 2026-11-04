@@ -13,6 +13,7 @@
 #include "live_benchmark.h"
 #include "steam_lobby.h"
 #include "gameplay_hooks.h"
+#include "xinput_discovery.h"
 
 #include <cmath>
 #include <cstring>
@@ -558,6 +559,7 @@ static bool DisableNativeNetworkFrameUpdates()
 
 void Rollback_InitMainHooks(RollbackMainMoveFn* originalMove)
 {
+    XInputDiscovery_Init();
     HookLog("Native network: component/agent/ranking/room frame updates %s\n",
             DisableNativeNetworkFrameUpdates() ? "disabled (12-byte patch)" : "patch failed");
     g_originalMvc3MainMove = originalMove;

@@ -23,6 +23,7 @@
 #include "code/autotest.h"
 #include "code/diag.h"
 #include "code/gameplay_hooks.h"
+#include "code/xinput_discovery.h"
 #include "code/d3d9reset.h"
 #include "code/exception.h"
 #include "code/mk10utils.h"
@@ -2163,6 +2164,7 @@ BOOL WINAPI DllMain(HMODULE hMod, DWORD dwReason, LPVOID lpReserved)
 		// A rejected process attach must not clean up uninitialized mod systems.
 		if (!g_asiModule)
 			break;
+		XInputDiscovery_Stop();
 		Exception_RemoveHandler();
 		CleanupNetworkOnExit();
 		enet_deinitialize();

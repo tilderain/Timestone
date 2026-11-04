@@ -314,6 +314,12 @@
     <ClCompile Include="code\keyboard_input.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="code\xinput_discovery.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClInclude Include="code\xinput_discovery.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClCompile Include="code\LaunchMenu_settings.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>

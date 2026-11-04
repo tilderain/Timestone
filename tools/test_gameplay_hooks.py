@@ -24,6 +24,7 @@ std::map<void*, bool> queued;
 bool failApply = false, failProtect = false, failFlush = false, failQueueEnable = false;
 int applyCount = 0;
 void HookLog(const char*, ...) {}
+void XInputDiscovery_Stop() {}
 MH_STATUS MH_CreateHook(void* target, void*, void**) {
     if (hooks.count(target)) return MH_ERROR_ALREADY_CREATED;
     hooks[target] = false;
@@ -210,7 +211,7 @@ int main() {
     def test_gameplay_installers_are_owned(self):
         files = ["controller", "diag", "autotest", "framestepper", "rollback_hooks",
                  "rollback_runtime", "rollback_rng", "rollback_effect", "rollback_shot",
-                 "rollback_model_policy"]
+                 "rollback_model_policy", "xinput_discovery"]
         for name in files:
             with self.subTest(file=name):
                 source = (ROOT / f"UMVC3Hook/code/{name}.cpp").read_text()
