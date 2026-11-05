@@ -1,0 +1,15 @@
+[package]
+name = "lobby-watcher"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+parking_lot = "0.12"
+poise = "0.6.2"
+steamworks = "=0.13.1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"
+
+[dev-dependencies]
+serde_json = "1"
