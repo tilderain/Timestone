@@ -6,7 +6,7 @@
 // Only gameplay detours use this registration path. Graphics/launcher hooks
 // remain installed when the user chooses Normal Launch.
 MH_STATUS GameplayHooks_Create(LPVOID target, LPVOID detour, LPVOID* original);
-// Queue only intended enables, then commit once after all gameplay installers.
+// Commit once after startup installers, or when lazily registering a new class.
 MH_STATUS GameplayHooks_QueueEnable(LPVOID target);
 bool GameplayHooks_Apply();
 void GameplayHooks_RecordPatch(void* target, size_t size);

@@ -7,6 +7,7 @@
 #include "netplay.h"
 #include "rollback.h"
 #include "rollback_diagnostics.h"
+#include "lifetime_trace.h"
 #include "umvc3.h"
 
 #include <cstdint>
@@ -874,6 +875,7 @@ LONG HandleException(PEXCEPTION_POINTERS info, bool catastrophicOnly)
         }
         WriteRawThreadState(file, context);
         HookLogWriteRecent(file);
+        LifetimeTrace_WritePending(file);
         WriteLoadedModules(file);
         std::fprintf(file, "=== end crash ===\n");
         std::fflush(file);

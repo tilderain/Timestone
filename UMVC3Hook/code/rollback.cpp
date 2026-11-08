@@ -20,8 +20,8 @@ struct GameplayPatch {
     std::vector<uint8_t> original;
 };
 
-// Registration finishes before native startup. Disabling happens once, on the
-// game thread at the launcher hold, and leaves trampolines alive for stack unwind.
+// Installers and lazy concrete-destructor registration run on the game thread.
+// Disabling leaves trampolines alive for stack unwind.
 std::vector<LPVOID> g_gameplayTargets;
 std::vector<GameplayPatch> g_gameplayPatches;
 std::atomic<bool> g_gameplayActive{false};
@@ -66,10 +66,10 @@ bool GameplayHooks_Apply()
         return false;
     const MH_STATUS status = MH_ApplyQueued();
     if (status != MH_OK) {
-        HookLog("GameplayHooks: could not apply startup detours status=%d\n", status);
+        HookLog("GameplayHooks: could not apply queued detours status=%d\n", status);
         return false;
     }
-    HookLog("GameplayHooks: applied queued startup detours\n");
+    HookLog("GameplayHooks: applied queued detours\n");
     return true;
 }
 
@@ -131,5 +131,5 @@ void Rollback_InitHooks()
     Rollback_InitOnlineBattleHook();
     Rollback_InitReSimulationHooks();
     Rollback_InitRngHooks();
-    HookLog("Rollback: full shot/effect rewind is unavailable; experimental effect restoration is retiring-only\n");
+    HookLog("Rollback: experimental effect graph restoration enabled; full shot/effect rewind remains unavailable\n");
 }
