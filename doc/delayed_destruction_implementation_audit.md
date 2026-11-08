@@ -123,7 +123,8 @@ replacement mutate the same wrappers.
 
 | Allocation / field | Verified size or offset |
 | --- | --- |
-| Collision object node | `0xD0`, factory `0x1405AD2A0` |
+| Collision object base | `0xD0`, factory `0x1405AD2A0` |
+| Actual shot collision root (`sCollision::Node`) | `0xE0`, factory `0x1405BBE20`, ctor `0x1405BBC60` |
 | Geometry wrapper | `0x60`, factory `0x1405AD3A0` |
 | Shot sphere / capsule | `0x70` / `0xB0` |
 | Root array length / capacity / data | `+0x20 / +0x24 / +0x30` |
@@ -135,6 +136,19 @@ free those primitives. Final disposal must reproduce the shot's explicit
 primitive-deletion contract. Null-primitive wrappers survive partial release;
 exclude or separately version that exceptional case instead of assuming all
 postimage entries are null.
+
+2026-11-08 native recheck: shot ctor `0x1401C9B00` allocates four `0xE0`
+roots. The derived root ctor writes at `+0xD0`; capturing only the `0xD0`
+base would omit part of the actual allocation. Wrappers are `0x60`, sphere
+primitives `0x70`, and capsule primitives `0xB0`. Shot ID/team are dwords at
+`+0x1F50/+0x1F54`. Base destruction calls team unlink `0x140151420` and ID
+clear `0x140151490` before collision/resource release. These helpers can be
+detoured instead of patching the base-destructor instruction range, but ID-clear
+suppression must be scoped to the exact currently collecting shot's base
+destructor, including nested destruction. `lifetime_trace.cpp` now implements
+this scoped suppression for terminal shot/model retention, with concrete
+deleting-target detours registered after factory return. This does not implement
+the collision/model replacement adapters described elsewhere in this audit.
 
 Pin the old `rShot` before `setShotResource` releases its reference: that release
 precedes the collision-release call. Wrapper hit metadata borrows resource bytes.
@@ -380,6 +394,45 @@ Remaining release gates:
 - Collision persistent closure and consistently defined pre/post-begin snapshots.
 - Logical capacity, child-unit, external-request and scene-palette accounting.
 - Packed-content epoch capture for graph types that use persistent GPU geometry.
+
+### Model Ownership Recheck, 2026-11-08
+
+`uModel::setModel` (`0x140568670`) and `setBlendNum` (`0x1405291E0`)
+were rechecked after Ghidra access was restored. The following are actual shot
+inherited-model allocations, not a complete shot capture descriptor:
+
+| Pointer | Extent / ownership |
+| --- | --- |
+| `+538` | Joint payload, `N*0xC0`, with `0x10`-byte allocation cookie before the pointer |
+| `+548` | Joint-depth table, `N` bytes |
+| `+6C0+i*180` | Per-motion joint work buffer, `N*0x68` |
+| `+6D8` | Shared slot-zero keyframe allocation, `K*B*0xC`; later slots hold interior slices |
+| `+11B0` | Joint interpolation buffer, `N*0x40` |
+
+Use the allocation-cookie count for `N`: `setModel` allocates using the full
+resource joint count, but stores a truncated count at `+530`. Although
+`setBlendNum` clamps to 16, constructor/destructor evidence establishes eight
+inline motion records; the clamp is not permission to traverse sixteen records.
+The joint vector destructor at `0x140564900` rewrites joint vptrs and clears model
+backpointers before freeing. Retention at allocator free alone is too late.
+
+Animation raw buffers use allocator selector `0x14045D4F0` with descriptor
+`0x140E17D88`, allocation virtual `+40` and free virtual `+60`. Joint allocation
+uses `0x14056AB90`; freeing its allocation base uses `0x14056AAD0`.
+
+Model replacement also releases/rebuilds materials, command caches and auxiliary
+textures through base setter `0x140561CE0` and `initRCN` `0x140566380`. Actor
+material-job arrays at `+1408..+1438` contain resource/string references and
+self-pointers, and are replaced by `0x1401FFCA0`, not only destroyed at teardown.
+Joint constraints retain direct aliases into the joint array. Consequently a raw
+DTI-sized shot body copy plus collision bytes is not a safe general restore, and
+blindly cloning model buffers is not a valid ownership adapter.
+
+The palette handle at `+116C` represents a scene reservation, not plain scalar
+state. It cannot be restored after releasing/reusing that reservation. Native
+reserve/release/acquire functions are `0x140779FF0`, `0x14077D210`, and
+`0x14077CDD0`; renderer-cycle synchronization and material ownership still need
+implementation evidence before enabling generic shot restoration.
 
 Validate capture A -> advance -> restore A byte/topology equality, then identical
 input replay. Stress ID reuse before GC, repeated correction branches, partial

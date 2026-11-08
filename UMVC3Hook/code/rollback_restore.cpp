@@ -1308,7 +1308,7 @@ void Rollback_RestoreSnapshot(int32_t frame)
     // Restore the current uCharacterPost's center and fighter cache used for position correction.
     restoreCharacterPostState();
 
-    LifetimeTrace_RestoreRetiringEffects(frame);
+    LifetimeTrace_RestoreEffects(frame);
 
     traceRestoreState("after");
 

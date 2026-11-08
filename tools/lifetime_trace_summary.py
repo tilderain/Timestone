@@ -13,10 +13,13 @@ def summarize(path):
     held = set()
     collected = set()
     ever_held = set()
+    held_by_kind = Counter()
+    collected_by_kind = Counter()
     teardown = Counter()
     errors = []
     skips = Counter()
     peak = populated_holds = restored_held = 0
+    active_restores = active_resurrections = 0
     first_sequence = last_sequence = None
     gaps = 0
     completed = False
@@ -39,10 +42,15 @@ def summarize(path):
             gaps += 1
         last_sequence = sequence
         counts[event] += 1
+        if event == "retiring_state_restored" and int(fields.get("d", "0"), 0) == 2:
+            active_restores += 1
+            active_resurrections += bool(int(fields["b"], 0))
         if event == "quarantine_hold":
             if identity in held or identity in collected:
                 errors.append(f"invalid hold for identity {identity}")
             held.add(identity)
+            if identity not in ever_held:
+                held_by_kind[fields.get("kind", "effect")] += 1
             ever_held.add(identity)
             populated_holds += int(fields["c"], 0) > 0
             peak = max(peak, len(held))
@@ -55,9 +63,10 @@ def summarize(path):
                 if identity in collected:
                     errors.append(f"duplicate collection for identity {identity}")
                 collected.add(identity)
+                collected_by_kind[fields.get("kind", "effect")] += 1
             else:
                 restored_held += 1
-        elif event == "game_effect_base_begin":
+        elif event in ("game_effect_base_begin", "shot_base_begin", "unit_dispose_begin"):
             teardown[identity] += 1
         elif event == "retiring_restore_skip":
             skips[int(fields["b"], 0)] += 1
@@ -70,6 +79,8 @@ def summarize(path):
         "sequence_gaps": gaps, "events": dict(counts),
         "unique_held": len(ever_held), "populated_holds": populated_holds,
         "restored_from_hold": restored_held, "unique_collected": len(collected),
+        "held_by_kind": dict(held_by_kind), "collected_by_kind": dict(collected_by_kind),
+        "active_restores": active_restores, "active_resurrections": active_resurrections,
         "remaining_held": sorted(held), "peak_held": peak,
         "restore_skip_reasons": dict(skips), "last_stats": stats,
         "accounting_errors": errors,

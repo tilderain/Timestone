@@ -10,12 +10,258 @@ Normal Launch disables them with the other gameplay hooks.
 
 `EMPTY_EFFECT_QUARANTINE_ENABLED = true` now enables the first narrow physical
 retention experiment described below. Set it false to return to trace-only
-behavior. `RETIRING_EMPTY_EFFECT_RESTORE_ENABLED = true` additionally enables the
-guarded retiring-only restore described below. `RETIRING_CPU_BILLBOARD_ENABLED`
-extends it to populated CPU billboard graphs. Active effect simulation and shots
-are not rewound; rollback is still incomplete.
+behavior. `EFFECT_RESTORE_ENABLED = true` enables the shared restoration transaction.
+`ORDINARY_CPU_EFFECT_GRAPHS_ENABLED` enables the audited owned-allocation descriptor;
+`EFFECT_SIMULATION_SNAPSHOTS_ENABLED` adds active graph payload snapshots. These
+remain partial effect coverage, not complete world or shot rewind.
+
+## Snapshot Ownership
+
+### Current Integration
+
+#### Borrowed Owner Lifetime And 0x14004F0BC
+
+The supplied `nplive_20261108_015137_client` crash reaches
+`uGameEffect::updateDeltaTimeCoefficient` (`0x14013AC40`) and then
+`MtObject::isKindOf` (`0x14004F0B0`). At `0x14013AC4F`, native code loads the
+effect's owner from `+280`. The crash owner is `0xFA29230`; its first qword is
+`0x1728`, so the virtual `+20` call at `0x14004F0BC` reads `0x1748`.
+The preceding native alive test only checks lifecycle bits, not the vptr.
+This establishes an invalid owner reference, not the owner's original class or
+whether freeing versus an unrelated overwrite damaged it.
+
+Captured root pointers at `+40/+138/+1F0/+278/+280/+288` now lease their
+referenced `cUnit` allocations. Already tracked identities reuse their slot
+leases. Newly discovered live units are classified by native DTI ancestry and
+registered with the same most-derived deletion interception as shots. This
+includes model-backed effects and other unit owners outside the old shot/effect
+census, without a character/type whitelist. Adopted shots recover actual native
+team-list membership instead of trusting stale own links. Non-cUnit borrowed
+allocations still need their owning-allocation adapter.
+
+Dependency leases follow snapshot-slot replacement/drop/clear, including saved
+references to quarantined owners. They preserve original allocations and native
+resource ownership; they do not add snapshot resource refs or copy a model to
+another address. Eligible effects are physically collected before borrowed outer
+owners at the same collection fence. Generic-owner immediate disposal also
+tombstones its identity, since it has no shot/effect base hook to do that.
+Snapshots publish only after dependency acquisition completes. This is lifetime
+closure for these direct typed links, not full saved-state restoration of all
+borrowed owners or their recursive external dependencies.
+
+One detail in the supplied trace remains unexplained: effect 76 (`0xFAE04C0`)
+was quarantined at frame 320, yet the crash stack reaches its native move path
+at main frame 324. The inspected native factories, restart, weak-slot pruning,
+and `addBottom` do not demonstrate constructor-free resurrection. The last
+printed restore is frame 312. Do not claim the dependency fix identifies the
+writer that made this object active/reachable again.
+
+Cold-path diagnostics now report registration of quarantined units and owner
+rebinding on quarantined effects, without changing native behavior or skipping
+restoration. The crash report also snapshots the last 64 pending trace records as
+`LIFE_PENDING`, because this crash's new Mystic Blast shot appears on the stack
+but its birth/resource events had not reached the normal log flush. This crash
+snapshot uses a nonblocking trace-lock attempt, leaves the queue intact, never
+runs collection, and never dereferences historical object pointers.
+
+Regression tests cover generic borrowed-owner retirement, old/new owner rebinding,
+multiple snapshot leases and aliased links, saved-pointer restoration, effect-first
+disposal, generic identity tombstoning, adopted-shot list/ID cleanup, and crash
+queue output after object storage has been freed or while the trace lock is busy.
+These tests do not establish that the supplied native crash is fully resolved.
+
+Validation: `make -j8`, all 38 tests, and `git diff --check` pass. Run
+`20261108T092958.058808Z_effect_borrowed_owner_complete_trace` completed both
+900-frame peers without crash artifacts. Both lifetime traces are complete from
+sequence 1, with zero sequence gaps, dropped events, registry misses, remaining
+holds, accounting errors, or restore skips. Host/client collected all 331/325
+distinct held allocations: 316/311 effects, 14/13 shots, and one borrowed unit
+each. That borrowed unit was a `uGameEffectModel` (vtable `0x140A8E510`), retired
+at frame 2 and collected at frame 19. Payload restores totalled 1337/1187.
+Dependency diagnostics log new dependency periods, not every slot lease; the
+complete run emitted only 36/37 such events.
+
+The preceding 900-frame run `20261108T092716.488648Z_effect_borrowed_owner_retention`
+also completed without crashes, but repetitive lease logging had discarded its
+early log prefix. Run `20261108T093248.337084Z_effect_borrowed_owner_mystic_long`
+completed both 2000-frame peers without crash artifacts; its log prefixes were
+also discarded, so missing-hold warnings in its suffix summary do not establish
+complete-run lifetime accounting. No retired-unit registration/owner-rebind
+diagnostic was observed in the retained logs. The complete 900-frame trace does
+not show a Mystic Blast birth, and coverage of that exact attack in the longer
+run is unconfirmed. The original post-quarantine move remains unproven, not
+declared fixed merely because these smoke tests survived.
+
+Desync artifacts remain in all three runs, and no timing-profile windows were
+produced. The runner's `correctness_regression` classification reflects detected
+desync dumps, not a comparison proving this patch introduced a new regression.
+These runs establish exercised retention/collection, not complete determinism or
+a measured performance improvement. Summaries are saved in each run directory.
+
+#### Shot And Model Terminal Retention
+
+The concrete shot factory now records each completed object's deleting target.
+The first instance of a concrete deleting target installs one gameplay detour;
+shared targets are deduplicated, with 256 distinct target slots. The detour
+intercepts before any most-derived destructor body runs. A snapshot-leased shot
+is quarantined intact, including its inherited model, joint/animation buffers,
+materials, model resources, collision allocations, and concrete owned members.
+There is no per-character/type whitelist, surrogate model, byte-pointer scan,
+per-buffer destructor patch, or snapshot resource `addRef` in this terminal path.
+
+Logical retirement removes primary/group membership if still present, unlinks
+the native shot list once, and releases its ID once. It does not replay kill.
+Physical collection waits for the final snapshot lease, then calls the saved
+most-derived deleting trampoline exactly once. Scoped base-destructor context
+suppresses only the already-retired shot's duplicate list/ID releases. An
+unrelated shot destroyed by that destructor still performs its own releases.
+The model's scene-palette reservation remains owned until physical teardown;
+this trades retained native capacity for same-address lifetime safety.
+
+Static helper hooks are `sShot::removeShotFromList` (`0x140151420`) and
+`clearShotIdEntry` (`0x140151490`). A direct `sUnit::reset` (`0x14051BBB0`)
+closes snapshot history before its destructor dispatches, complementing the
+existing earlier main/action/manager epoch barriers. There are now 24 static
+lifetime hooks, plus one lazy hook per distinct shot/adopted-unit deleting target. Normal and
+headless virtual deleting calls use the same concrete detour. Unleased objects
+retain native destruction. A leased in-place/non-deleting destructor invocation
+is an ownership invariant failure, not permission to destroy retained state.
+
+This implements **terminal shot/model lifetime retention**, not shot-state
+restoration. Active `setModel`, blend-count changes, actor material-array rebuilds,
+shot-resource/collision replacement, full shot membership/ID rewind, and saved
+model CPU payloads still require integration. Terminal retention alone does not
+claim those mutations are safe to rewind. It also does not establish complete
+logical-capacity/dependency closure for every concrete shot's derived teardown.
+
+ASan/UBSan tests exercise intact joints and backpointers, animation/material and
+concrete-owned allocations, unchanged native resource ownership, multiple slot
+leases, trace exhaustion, reused IDs/list slots before GC, direct-delete
+scheduler detachment, shared deleting targets, nested unrelated destruction,
+immediate unleased deletion, and reset draining. The summary tool accounts for
+both effect and shot base teardowns and reports held/collected totals by kind.
+
+Validation: `make -j8`, the 36-test suite, and `git diff --check` pass. Game run
+`20261108T083942.434874Z_shot_model_terminal_retention` exited with
+`game_exit_code=-31` (SIGSYS) before either peer completed, with no captured
+profiling windows. This is not in-game lifetime or performance validation.
+
+#### Effect State And Membership
+
+Active and retiring effects now use the same ordinary-generator allocation
+descriptor. Concrete classes are discovered through native DTI ancestry under
+`cParticleGenerator` (`0x140E1E120`), excluding the separate child-unit-generator
+ownership family (`0x140E1E168`). Object extent is decoded from DTI `+30`; pool
+stride comes from generator `+116`. The fixed billboard vtable/size/stride test is
+gone. This includes ordinary subclasses with a `0x250` object extent.
+
+Numeric movement/life-mode filters and per-character dependency admission were
+removed. The captured root and its retained allocations are copied directly.
+Typed borrowed unit targets are now leased as described above. Shot-state rewind,
+non-unit borrowed allocations, GPU contexts, aggregate child units, and full manager/observer restoration
+remain incomplete. The ownership descriptor still rejects external branches it
+cannot yet retain. This is not complete-world rollback.
+
+Primary lists and group arrays are captured in native order. Restoration rebuilds
+the retained effect cohort in that order, including category changes and
+resurrection. It does not dereference saved foreign neighbours: only foreign
+entries still present in the live lists survive reconciliation. Newly registered
+foreign entries follow the saved cohort in their current relative order.
+Captured group masks and ordering are restored into the native `sUnit` group
+arrays instead of requiring unchanged masks. Group arrays
+are at manager `+C40`, stride `30`, with length/capacity/data at `+18/+1C/+28`.
+The implementation preserves current storage and non-participating entries;
+native `MtArray::extendBuffer` (`0x140011660`) grows capacity outside the recorder
+lock if necessary. Registration callbacks are not replayed.
+
+The saved-neighbour admission algorithm, `effectsValid`, and
+`retiring_restore_skip` production paths have been removed. Snapshot storage or
+ownership invariant failures terminate explicitly; they do not silently continue
+with an unrestored effect batch. This does not eliminate the ownership
+descriptor's unsupported graph families.
+
+Empty owners, setup-state owners, and unregistered callback owners use the same
+generation/root payload path as populated active/retiring owners. Future-only
+effects in this ownership domain are removed from primary and group membership,
+and quarantined without replaying kill callbacks. Other history slots can still
+lease and restore them. The empty-target snapshot case also performs this
+reconciliation. Non-effect managers, GPU context membership, and shot ownership
+are not restored by the effect transaction.
+
+The membership change passes the 34-test suite, including ASan/UBSan production
+extraction tests for reordered lists, category relocation, missing foreign
+neighbours, future-only removal, empty targets, newer-frame resurrection, and
+unregistered owners. `make -j8` passes. Runtime attempts
+`20261108T075119.123944Z_ordered_effect_membership` and
+`20261108T075416.922977Z_ordered_effect_membership_retry` both exited with
+`game_exit_code=-31` (SIGSYS), without completed peers. They are not runtime
+validation or performance measurements of this change. A third attempt with
+`WINEESYNC=0 WINEFSYNC=0`,
+`20261108T081454.671475Z_ordered_effect_membership_no_esync`, also completed
+neither peer. Ghidra port 8192 became unresponsive during the shot ownership
+audit and was subsequently restored. Shot collision/model ownership adapters
+remain unimplemented; restored tool access does not change that status.
+
+Before this membership change, run
+`20261108T070531.755669Z_ordinary_generator_world_restore` completed both peers
+without reported crash artifacts. Host/client recorded 1,259/977 active-state
+restores, including 46/61 restorations from quarantine back to active state.
+All 332/313 distinct quarantined effects were physically collected, with zero
+remaining holds, accounting errors, sequence gaps, or trace drops. There were
+still 12/15 rejected transactions, all primary-topology reason 4. Desync artifacts
+remain; these counts establish exercised restoration/lifetime paths, not full
+determinism or universal generator support.
+
+Supported snapshots lease graph generations, rather than hashing current state or
+hoping its allocation addresses survive. The same `EffectState`, payload arena,
+and `LifetimeTrace_RestoreEffects` transaction serve linked and quarantined units.
+Each snapshot slot holds a generation-reference bit. Graph release detaches its
+owned allocations, retaining the original owner address; replacement creates a
+different generation. Restore selects the saved generation and copies its saved
+bytes, without comparing current contents or rejecting an ordinary restart.
+
+Snapshot capture and restore do **not** increment resource reference counts. The
+native object already owns a reference. The base resource setter at `0x1405F0980`
+is intercepted only to transfer an existing old reference into retention when its
+graph has been detached. Native acquisition of the new resource remains unchanged.
+Restore transfers reference ownership back to the object without addRef/release.
+Graph rebuilds that do not rebind the resource share the existing reference record;
+disposing one generation cannot release the reference needed by another. The last
+detached generation releases that reference once. If it is still on the native
+object, its normal destructor performs the release instead.
+
+Collection invokes original graph teardown outside the recorder lock, using a
+temporary root view at the original retained owner's address. It restores the
+owner's current view afterward. An owner cannot be freed while any retained graph
+still needs that address. Trace budget exhaustion stops logging, not ownership:
+leases remain until snapshot-slot expiry or explicit history/session close.
+
+The fixed limits are 512 retained generation records, 128 captured effects per
+snapshot, 2048 payload spans and a 1 MiB payload arena per history slot. Capacity
+failure refuses a new capture; it never frees an already-leased generation.
+Identity/generation violations are fatal ownership invariants, not normal content
+mismatches. Whole-world membership outside the retained effect domain, shot
+ownership, and unsupported generator dependencies remain incomplete.
+
+`graph_owned`, `graph_detached`, `graph_collect`, and `graph_resource_transfer`
+describe ownership transitions. `effect_payload_restored` records frame, copied
+byte count, whether the object was quarantined, and completion (a/b/c/d).
+The older `retiring_*` transaction event names remain, with state 2 now possible in
+`retiring_state_restored.d`. `effect_capture` records active candidates, admitted
+candidates, admission-reason bitmask, and payload bytes.
+
+The production-extraction tests cover live/quarantined restoration, resource
+replacement, switching between retained generations, multiple snapshot leases,
+same-resource rebuilds, exact reference-release counts, and logger exhaustion.
+The attempted ownership capture
+`20261108T055724.880768Z_effect_generation_ownership` failed before launch with
+Wine `SIGSYS` (`-31`); the runtime results below are historical retirement-path
+results, not validation of these new generation transitions.
 
 ## Populated CPU Billboard Retention
+
+This section records the earlier retirement-only experiment. The shared ownership
+and payload transaction above supersedes its retirement-only and trace-stop limits.
 
 The empty-graph baseline below is now supplemented by intact retention of exact
 `uGameEffect` objects containing only exact `cParticleGeneratorBillboard` nodes
