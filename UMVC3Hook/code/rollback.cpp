@@ -5,6 +5,7 @@
 #include "rollback_resim.h"
 #include "rollback_rng.h"
 #include "gameplay_hooks.h"
+#include "lifetime_trace.h"
 #include "xinput_discovery.h"
 
 #include <atomic>
@@ -74,6 +75,7 @@ bool GameplayHooks_Apply()
 
 bool GameplayHooks_Disable()
 {
+    LifetimeTrace_ClearSnapshots(); // Drain the bounded experiment while native trampolines are enabled.
     XInputDiscovery_Stop();
     g_gameplayActive.store(false, std::memory_order_release);
     if (g_gameplayDisabled)
@@ -129,5 +131,5 @@ void Rollback_InitHooks()
     Rollback_InitOnlineBattleHook();
     Rollback_InitReSimulationHooks();
     Rollback_InitRngHooks();
-    HookLog("Rollback: shot/effect rewind is unavailable; native dynamic objects are not restored\n");
+    HookLog("Rollback: full shot/effect rewind is unavailable; experimental effect restoration is retiring-only\n");
 }

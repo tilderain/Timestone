@@ -4,6 +4,7 @@
 #include "../pch.h"
 #include "../IniSafe.h"
 #include "framestepper.h"
+#include "lifetime_trace.h"
 #include "lag_diagnostics.h"
 #include "escmenu_imgui.h"
 #include "gameui.h"
@@ -1439,6 +1440,9 @@ void FrameStepper_Process()
             }
 
             if (g_trainingFramesElapsed >= g_trainingFrameLimit) {
+                // End retention at the next main-tick fence, not inside rendering.
+                if (!LifetimeTrace_FinishCapture())
+                    return;
                 g_trainingFrameLimitExitRequested = true;
                 HookLog("FrameStepper: training frame limit reached "
                         "(limit=%d elapsed=%d generation=%u frame=%d); closing\n",

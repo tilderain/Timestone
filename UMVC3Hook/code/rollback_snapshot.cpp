@@ -1,4 +1,5 @@
 #include "../pch.h"
+#include "lifetime_trace.h"
 
 #include "rollback_snapshot.h"
 #include "rollback_capture_set.h"
@@ -1057,6 +1058,8 @@ int Rollback_BuildRegions(Region* regions, int maxRegions)
 
 void Rollback_SaveSnapshot(int32_t frame)
 {
+    LifetimeTrace_DropSnapshot(frame); // Invalidate observation before any slot mutation/failure.
+    LifetimeTrace_Marker("snapshot_request", frame);
     LagDiagnosticScope diagnostic(g_isResimulating ? LagMetric::SaveResim : LagMetric::SaveLive);
     LagDiagnosticScope diagnosticStage(LagMetric::SaveRegions);
     const uint64_t benchmarkStart = LiveBenchmark_Now();
@@ -1258,6 +1261,7 @@ void Rollback_SaveSnapshot(int32_t frame)
 #endif
     
     //HookLog("Rollback: saved frame %d with %d regions, total size %zu bytes\n", frame, count, offset);
+    LifetimeTrace_SaveSnapshot(frame);
     LiveBenchmark_Record(LiveBenchmarkMetric::Save, benchmarkStart);
 }
 
@@ -1328,6 +1332,7 @@ extern "C" bool Rollback_GetSnapshotInputs(int32_t frame, uint32_t* outLocal, ui
 
 void Rollback_FreeSnapshots()
 {
+    LifetimeTrace_ClearSnapshots();
     // Restore native calls before releasing snapshot storage.
     Rollback_PatchSleep(false);
     Rollback_PatchPresent(false);
