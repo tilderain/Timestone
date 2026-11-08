@@ -7,7 +7,7 @@ Examples:
       --compare-to rollback_profile_runs/20260822T120000_baseline
   python tools/rollback_profile_ai.py compare BASELINE_RUN CANDIDATE_RUN
 
-Each run launches ``wine umvc3.exe -training-cpus`` with an in-game fighting
+Each run launches ``wine umvc3.exe -training-cpus -no-desync-pause`` with an in-game fighting
 frame limit. Profiles created after the launch timestamp are copied and merged
 into a labeled run directory. Comparisons always use explicit run directories;
 they never guess that arbitrary pre-existing profiles form a valid A/B pair.
@@ -347,7 +347,7 @@ def build_run_plan(args):
     if not game.is_absolute():
         game = game_dir / game
     game = game.resolve()
-    command = [args.wine, str(game), "-training-cpus",
+    command = [args.wine, str(game), "-training-cpus", "-no-desync-pause",
                f"-training-frame-limit={args.frames}"]
     run_id = utc_now().strftime("%Y%m%dT%H%M%S.%fZ")
     output_root = resolve_path(args.output_root)

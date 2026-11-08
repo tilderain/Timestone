@@ -177,9 +177,12 @@ than applying an automatic three-baseline/three-candidate rule.
 ### 4.5 Automated Runner
 
 Use `tools/rollback_profile_ai.py` to launch, capture, qualify, and compare
-profiling runs. The runner supplies `-training-cpus` and
+profiling runs. The runner supplies `-training-cpus`, `-no-desync-pause`, and
 `-training-frame-limit`, waits for both completion logs, and merges profile
-segments produced across rematches.
+segments produced across rematches. `-no-desync-pause` is forwarded to the spawned
+client and suppresses only automatic desync pausing, not detection or dumps.
+Manual pause controls remain available. Runs with desync artifacts still report
+`correctness_regression`; completing the frame limit does not imply correctness.
 
 Capture an explicit baseline:
 

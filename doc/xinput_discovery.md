@@ -28,7 +28,8 @@ Ghidra, `umvc3.exe.unpacked.exe`, port 8192, preferred base `0x140000000`:
 ## Behavior
 
 Three gameplay-owned detours wrap redetection and the two game import thunks.
-The movement port omits backend timing hooks and lag diagnostics.
+The existing redetection/state timing hooks moved into this module to avoid
+duplicate MinHook ownership. The existing capability-wrapper timing remains.
 
 1. When an empty slot needs discovery, the game thread requests samples for
    unassigned XInput users. Repeated requests coalesce while pending.
@@ -67,9 +68,18 @@ fallback and active XInput reads are still synchronous and can independently
 stall. A hotplug can wait for cache expiry, worker completion, and native
 redetection eligibility; this is not an instantaneous device-change mechanism.
 
-## Validation
+## Diagnostics And Validation
 
-Mock tests compile the production module without lag instrumentation. They
+With `LAG_BACKEND_TIMING_ENABLED`:
+
+- `xinput_state`: non-cached state reads through the game thunk, normally active
+  controller reads; also includes native startup/explicit synchronous rescans.
+- `pad_detect`: original discovery invoked using a ready snapshot.
+- `xinput_caps`: native capability-wrapper work, usually consuming the snapshot.
+- `xinput_discovery_state` / `xinput_discovery_caps`: actual background API call
+  time, reported on the worker thread. These are not main-frame stall costs.
+
+Mock tests compile the production module with timing enabled and disabled. They
 cover pending/expiry/coalescing, assigned-user exclusion, live-read forwarding,
 failure-output preservation, disconnect generations, lock contention, worker
 publication, backend/thread failures, and Normal Launch/stop passthrough.

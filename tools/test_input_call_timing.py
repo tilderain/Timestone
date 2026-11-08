@@ -36,12 +36,13 @@ struct SYSTEM_INFO { uintptr_t dwAllocationGranularity; };
 constexpr int MEM_RESERVE=1, MEM_COMMIT=2, PAGE_READWRITE=4, PAGE_EXECUTE_READWRITE=8;
 uint8_t image[0x2000]{};
 void* targetPage[32]{};
+bool failProtect=false;
 struct Patch { void* address; std::vector<uint8_t> before; };
 std::vector<Patch> patches;
 uintptr_t _addr(uintptr_t address) { return (uintptr_t)image + address - 0x1406aa000; }
 void GetSystemInfo(SYSTEM_INFO* info) { info->dwAllocationGranularity=65536; }
 void* VirtualAlloc(void*, size_t, int, int) { return targetPage; }
-bool VirtualProtect(void*, size_t, DWORD, DWORD* old) { *old=PAGE_READWRITE; return true; }
+bool VirtualProtect(void*, size_t, DWORD, DWORD* old) { *old=PAGE_READWRITE; return !failProtect; }
 void* GetCurrentProcess() { return nullptr; }
 bool FlushInstructionCache(void*, void*, size_t) { return true; }
 void HookLog(const char*, ...) {}
@@ -73,13 +74,20 @@ int main() {
     struct Fixture { uintptr_t address; const char* bytes; size_t size; };
     const Fixture fixtures[] = { FIXTURES };
     for (const auto& f : fixtures) std::memcpy((void*)_addr(f.address), f.bytes, f.size);
+    failProtect=true;
+    InstallInputCallTiming();
+    assert(patches.empty());
+    for (const auto& f : fixtures) assert(!std::memcmp((void*)_addr(f.address), f.bytes, f.size));
+    failProtect=false;
     InstallInputCallTiming();
     assert(patches.size()==11);
+    size_t patchIndex=0;
     for (size_t i=0; i<std::size(fixtures); ++i) {
         const auto& f=fixtures[i];
         const auto* bytes=(uint8_t*)_addr(f.address);
-        assert(patches[i].address==bytes && patches[i].before.size()==f.size);
-        assert(!std::memcmp(patches[i].before.data(), f.bytes, f.size));
+        assert(patches[patchIndex].address==bytes && patches[patchIndex].before.size()==f.size);
+        assert(!std::memcmp(patches[patchIndex].before.data(), f.bytes, f.size));
+        ++patchIndex;
         assert(bytes[0]==0xff && bytes[1]==0x15);
         int32_t displacement;
         std::memcpy(&displacement, bytes+2, 4);

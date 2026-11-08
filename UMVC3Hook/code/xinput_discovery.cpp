@@ -1,6 +1,7 @@
 #include "../pch.h"
 #include "xinput_discovery.h"
 #include "gameplay_hooks.h"
+#include "lag_diagnostics.h"
 #include "mk10utils.h"
 #include <XInput.h>
 #include <atomic>
@@ -62,9 +63,17 @@ DWORD WINAPI Worker(void*)
                 continue;
             Sample result;
             result.generation = generations[user].load();
-            result.stateResult = getState(user, &result.state);
+            {
+                const uint64_t start = LAG_BACKEND_TIMING_ENABLED
+                    ? LagDiagnostics_Begin(LagMetric::XInputDiscoveryState) : 0;
+                result.stateResult = getState(user, &result.state);
+                LagDiagnostics_End(LagMetric::XInputDiscoveryState, start);
+            }
             if (result.stateResult == ERROR_SUCCESS && workerStatus.load() == WorkerStatus::Ready) {
+                const uint64_t start = LAG_BACKEND_TIMING_ENABLED
+                    ? LagDiagnostics_Begin(LagMetric::XInputDiscoveryCaps) : 0;
                 result.capsResult = getCaps(user, XINPUT_FLAG_GAMEPAD, &result.caps);
+                LagDiagnostics_End(LagMetric::XInputDiscoveryCaps, start);
             }
             result.completed = GetTickCount64();
             result.valid = true;
@@ -129,7 +138,13 @@ DWORD WINAPI ReadState(DWORD user, XINPUT_STATE* state)
             *state = sample.state;
         return sample.stateResult;
     }
-    const DWORD result = originalState(user, state);
+    DWORD result;
+    if constexpr (LAG_BACKEND_TIMING_ENABLED) {
+        LagDiagnosticScope timing(LagMetric::XInputState);
+        result = originalState(user, state);
+    } else {
+        result = originalState(user, state);
+    }
     if (result != ERROR_SUCCESS && user < XUSER_MAX_COUNT)
         ++generations[user];
     return result;
@@ -163,6 +178,10 @@ uint8_t __fastcall Redetect(uintptr_t pad, uint32_t slot, uint32_t flags)
             Scope() { inDiscovery = true; }
             ~Scope() { inDiscovery = previous; }
         } scope;
+        if constexpr (LAG_BACKEND_TIMING_ENABLED) {
+            LagDiagnosticScope timing(LagMetric::PadDetect);
+            return originalDetect(pad, slot, flags);
+        }
         return originalDetect(pad, slot, flags);
     }
     return originalDetect(pad, slot, flags);

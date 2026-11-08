@@ -29,6 +29,11 @@ constexpr int FALSE = 0, MH_OK = 0;
 constexpr int GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS = 4, GET_MODULE_HANDLE_EX_FLAG_PIN = 1;
 struct XINPUT_STATE { DWORD dwPacketNumber; uint8_t Gamepad[12]; };
 struct XINPUT_CAPABILITIES { uint8_t Type, SubType; uint16_t Flags; uint8_t rest[16]; };
+enum class LagMetric { XInputState, PadDetect, XInputDiscoveryState, XInputDiscoveryCaps };
+constexpr bool LAG_BACKEND_TIMING_ENABLED = TIMING_VALUE;
+struct LagDiagnosticScope { explicit LagDiagnosticScope(LagMetric) {} };
+uint64_t LagDiagnostics_Begin(LagMetric) { return 1; }
+void LagDiagnostics_End(LagMetric, uint64_t) {}
 bool active = true, failLibrary = false;
 uint64_t now = 100;
 int wakes = 0, waits = 0, nativeReads = 0, nativeCaps = 0, nativeDetects = 0;
@@ -184,12 +189,13 @@ class XInputDiscoveryTests(unittest.TestCase):
     def test_production_discovery(self):
         source = (ROOT / "UMVC3Hook/code/xinput_discovery.cpp").read_text()
         source = '\n'.join(line for line in source.splitlines() if not line.startswith('#include'))
-        with tempfile.TemporaryDirectory(dir="/tmp/opencode") as tmp:
-            cpp = Path(tmp) / "test.cpp"
-            exe = Path(tmp) / "test"
-            cpp.write_text(MOCKS + source + CHECKS)
-            subprocess.run(["g++", "-std=c++20", "-Wall", "-Wextra", str(cpp), "-o", str(exe)], check=True)
-            subprocess.run([str(exe)], check=True)
+        for timing in (False, True):
+            with self.subTest(timing=timing), tempfile.TemporaryDirectory(dir="/tmp/opencode") as tmp:
+                cpp = Path(tmp) / "test.cpp"
+                exe = Path(tmp) / "test"
+                cpp.write_text(MOCKS.replace("TIMING_VALUE", str(timing).lower()) + source + CHECKS)
+                subprocess.run(["g++", "-std=c++20", "-Wall", "-Wextra", str(cpp), "-o", str(exe)], check=True)
+                subprocess.run([str(exe)], check=True)
 
     def test_single_hook_owner(self):
         hooks = (ROOT / "UMVC3Hook/code/rollback_hooks.cpp").read_text()

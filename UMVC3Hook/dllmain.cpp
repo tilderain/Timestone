@@ -1146,8 +1146,9 @@ static bool SpawnDualTrainingClient()
 	}
 	wchar_t spawnCmd[MAX_PATH + 896];
 	swprintf(spawnCmd, std::size(spawnCmd),
-		L"\"%ls\" -training%ls%ls%ls -connect=%ls:%d",
-		exePath, cpuArg, frameLimitArg, autoTestArgs, wIp, dlgCfg.hostPort);
+		L"\"%ls\" -training%ls%ls%ls%ls -connect=%ls:%d",
+		exePath, cpuArg, frameLimitArg, autoTestArgs,
+		g_disableDesyncPause ? L" -no-desync-pause" : L"", wIp, dlgCfg.hostPort);
 
 	STARTUPINFOW si = { sizeof(si) };
 	PROCESS_INFORMATION pi;
@@ -1756,6 +1757,9 @@ void OnInitializeHook()
 	// between Linux/GCC (32-bit) and Windows/MSVC (16-bit) under Wine/Proton)
 	const char* cmdLineA = GetCommandLineA();
 	HookLog("UMVC3Hook: Raw Command Line: %s\n", cmdLineA);
+	g_disableDesyncPause = strstr(cmdLineA, "-no-desync-pause") != nullptr;
+	if (g_disableDesyncPause)
+		HookLog("UMVC3Hook: Desync auto-pause disabled; detection and dumps remain enabled\n");
 
 	bool trainingArg = false;
 	if (strstr(cmdLineA, "-training")) {
@@ -2216,6 +2220,7 @@ BOOL WINAPI DllMain(HMODULE hMod, DWORD dwReason, LPVOID lpReserved)
 		if (!g_asiModule)
 			break;
 		LagDiagnostics_StopWriter();
+		XInputDiscovery_Stop();
 		Exception_RemoveHandler();
 		CleanupNetworkOnExit();
 		enet_deinitialize();

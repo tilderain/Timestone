@@ -69,6 +69,6 @@ event behavior under Wine or actual controller-to-wire latency.
 For runtime verification, run both peers with this build and check startup for
 `Netplay: input/socket wakeups enabled`. Existing `INPUT_PROVENANCE_TRACE` can
 show `IPTX` phases `pre-render` and `frame-end`, but enabling it adds logging
-overhead. The movement port does not include lag diagnostics; use external
-profiling to compare latency and frame pacing. Test restart, disconnect, delay changes and zero-delay
+overhead. Compare prediction-wait frequency/duration and correction costs in
+normal lag captures. Test restart, disconnect, delay changes and zero-delay
 play; do not infer a measured latency improvement from successful compilation.

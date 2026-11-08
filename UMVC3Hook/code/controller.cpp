@@ -1396,6 +1396,7 @@ static bool WaitForPredictionBudgetFrame(int32_t frame)
 // ---------------------------------------------------------------------------
 extern "C" void Controller_OnFrameStart()
 {
+    g_preRenderInputReady = false;
     LagDiagnosticScope diagnostic(LagMetric::ControllerStart);
     if (!Netplay_IsActive()) {
         ClearPredictionBudgetExhausted();
@@ -1758,8 +1759,7 @@ static void UpdateConfirmedChecksums()
 
 static void PublishFrameInput(bool frameComplete)
 {
-    LagDiagnosticScope diagnostic(LagMetric::ControllerEnd);
-    if (!Netplay_IsActive())
+    if (!Netplay_IsActive() || g_isResimulating || g_netFrameCount < 0)
         return;
 
     // Send history even during neutral startup so delay-only peers can progress.
@@ -1880,6 +1880,7 @@ extern "C" void Controller_PublishInputBeforeRender()
 
 extern "C" void Controller_OnFrameEnd()
 {
+    LagDiagnosticScope diagnostic(LagMetric::ControllerEnd);
     g_preRenderInputReady = false;
     if (!Netplay_IsActive() || g_isResimulating || g_netFrameCount < 0)
         return;

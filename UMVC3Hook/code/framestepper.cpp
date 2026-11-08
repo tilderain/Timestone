@@ -105,6 +105,7 @@ static bool g_autoTestLaunchPending = false;
 static bool g_autoTestLaunchRunning = false;
 static DWORD g_autoTestExitTick = 0;
 static int32_t g_trainingFrameLimit = 0;
+bool g_disableDesyncPause = false;
 static int32_t g_trainingFramesElapsed = 0;
 static int32_t g_trainingLastFrame = -1;
 static uint32_t g_trainingLastGeneration = 0;
@@ -1657,7 +1658,8 @@ void FrameStepper_Process()
     }
     if (desyncActive)
     {
-        if (!pPressed && g_desyncDetected && !desyncCapturePending && !AutoTest_IsActive())
+        if (!pPressed && g_desyncDetected && !desyncCapturePending &&
+            !AutoTest_IsActive() && !g_disableDesyncPause)
         {
             isPaused = true;
         }

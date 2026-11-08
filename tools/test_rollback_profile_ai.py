@@ -126,6 +126,7 @@ class RollbackProfileAiTest(unittest.TestCase):
             )
             plan = runner.build_run_plan(args)
             self.assertIn("-training-cpus", plan["argv"])
+            self.assertIn("-no-desync-pause", plan["argv"])
             self.assertIn("-training-frame-limit=2000", plan["argv"])
             self.assertTrue(plan["run_dir"].endswith("_candidate_one"))
 

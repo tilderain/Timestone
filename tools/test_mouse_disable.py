@@ -43,8 +43,8 @@ int main() {
         source = (ROOT / "UMVC3Hook/code/rollback_hooks.cpp").read_text()
         main = source[source.index("void Rollback_InitMainHooks("):]
         self.assertEqual(source.count("EnableHook(0x1406aa990"), 1)
-        self.assertIn("(void*)&MouseDisable_Move", main)
-        self.assertNotIn("LAG_BACKEND_TIMING_ENABLED", source)
+        self.assertLess(main.index("(void*)&MouseDisable_Move"),
+                        main.index("if constexpr (LAG_BACKEND_TIMING_ENABLED)"))
         self.assertNotIn("MousePoll_", source)
 
 

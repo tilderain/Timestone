@@ -113,7 +113,8 @@ constexpr const char* names[] = {
     "render_move", "unit_move", "native_input", "sound_move",
     "draw_cache", "camera_draw", "unit_draw", "draw_frame_cache", "jobs", "job_dispatch", "unit_sync", "unit_after",
     "scene_sort", "effect_move", "particle_pre", "particle_post", "camera_move", "graphics_update", "ai_after",
-    "pad_poll", "pad_read", "pad_detect", "xinput_state", "xinput_caps", "dinput_find",
+    "pad_poll", "pad_read", "pad_detect", "xinput_state", "xinput_caps",
+    "xinput_discovery_state", "xinput_discovery_caps", "dinput_find",
     "dinput_read", "input_wmi", "render_worker_wait", "render_inline",
     "render_playback", "render_gpu_fence", "backend_present", "render_retire", "render_capture",
     "keyboard_move", "keyboard_state", "mouse_move", "mouse_state",
@@ -201,7 +202,8 @@ bool WriteReport(const ReportData& report, HANDLE file, double previousWriteMs) 
     }
     DWORD written = 0;
     for (LagMetric metric : {LagMetric::PadDetect, LagMetric::XInputState,
-             LagMetric::XInputCaps, LagMetric::DirectInputFind, LagMetric::DirectInputRead,
+             LagMetric::XInputCaps, LagMetric::XInputDiscoveryState, LagMetric::XInputDiscoveryCaps,
+             LagMetric::DirectInputFind, LagMetric::DirectInputRead,
              LagMetric::InputWmi, LagMetric::RenderWorkerWait, LagMetric::RenderPlayback,
              LagMetric::RenderGpuFence, LagMetric::BackendPresent,
              LagMetric::KeyboardMove, LagMetric::KeyboardState,
