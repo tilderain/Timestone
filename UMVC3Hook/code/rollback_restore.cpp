@@ -1,4 +1,5 @@
 #include "../pch.h"
+#include "lifetime_trace.h"
 
 #include "rollback_restore.h"
 #include "rollback_cleanup.h"
@@ -422,6 +423,7 @@ void Rollback_RestoreCollisionNodeClones(RollbackSnapshotSlot& slot)
 
 void Rollback_RestoreSnapshot(int32_t frame)
 {
+    LifetimeTrace_Marker("restore_request", frame);
     LagDiagnosticScope diagnostic(LagMetric::Restore);
     LagDiagnosticScope diagnosticStage(LagMetric::RestoreSetup);
     const uint64_t benchmarkStart = LiveBenchmark_Now();
@@ -439,6 +441,7 @@ void Rollback_RestoreSnapshot(int32_t frame)
         return;
     }
 
+    LifetimeTrace_CheckSnapshot(frame);
     uint32_t savedGlobalRng[4] = {};
     bool foundGlobalRng = false;
     size_t globalRngOffset = 0;
@@ -1304,6 +1307,8 @@ void Rollback_RestoreSnapshot(int32_t frame)
 
     // Restore the current uCharacterPost's center and fighter cache used for position correction.
     restoreCharacterPostState();
+
+    LifetimeTrace_RestoreRetiringEffects(frame);
 
     traceRestoreState("after");
 

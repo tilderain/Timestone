@@ -25,6 +25,7 @@ bool failApply = false, failProtect = false, failFlush = false, failQueueEnable 
 int applyCount = 0;
 void HookLog(const char*, ...) {}
 void XInputDiscovery_Stop() {}
+void LifetimeTrace_ClearSnapshots() {}
 MH_STATUS MH_CreateHook(void* target, void*, void**) {
     if (hooks.count(target)) return MH_ERROR_ALREADY_CREATED;
     hooks[target] = false;

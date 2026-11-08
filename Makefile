@@ -79,6 +79,7 @@ CPP_SRC   := \
 	$(SRCDIR)/code/xinput_discovery.cpp \
 	$(SRCDIR)/code/mouse_disable.cpp \
 	$(SRCDIR)/code/lag_diagnostics.cpp \
+	$(SRCDIR)/code/lifetime_trace.cpp \
 	$(SRCDIR)/code/controller.cpp \
 	$(SRCDIR)/code/autotest.cpp \
 	$(SRCDIR)/code/diag.cpp \

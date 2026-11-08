@@ -100,6 +100,12 @@ from the size of the ID state. Pending capacity and list population are separate
 
 ## Intrusive List Layout
 
+**2026-11-04 correction:** fresh getter/setter disassembly establishes a node vptr
+at shot `+0x1450`, next at `+0x1458`, and previous at `+0x1460`. The last field is
+not an owning-shot pointer. The historical layout below is superseded by
+`delayed_destruction_implementation_audit.md`; traversal through node `+8` remains
+valid. Unlink leaves the removed node's own links stale.
+
 Each concrete `uShot` contains a list node at `shot+0x1450`:
 
 ```text
