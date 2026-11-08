@@ -17,6 +17,8 @@ void FrameStepper_SetDevice(LPDIRECT3DDEVICE9 device);
 void FrameStepper_InvalidateDeviceObjects();
 void FrameStepper_Capture(LPDIRECT3DDEVICE9 pDevice);
 void FrameStepper_SetTrainingFrameLimit(int32_t frames);
+// Launch-only option: retain desync diagnostics without automatically pausing.
+extern bool g_disableDesyncPause;
 void UpdateKeyboardState();
 bool CopyKeyboardSnapshot(uint8_t (&state)[256], bool (&pressed)[256]);
 bool KeyDown(int vk);
