@@ -15,7 +15,7 @@ SPEC.loader.exec_module(compare)
 
 
 def write_dump(path, role, image_base, frames, version=1, region_name="",
-               region_names=None):
+                region_names=None, shot_count=0, effect_count=0):
     commit = b"0123456789abcdef0123456789abcdef01234567\0"
     header = compare.HEADER.pack(
         compare.MAGIC, version, compare.HEADER.size, len(frames),
@@ -36,7 +36,7 @@ def write_dump(path, role, image_base, frames, version=1, region_name="",
                     address, len(data), 0, image_base + 0x1234, 0, 0, b"\0" * 7,
                 )
             frame = compare.FRAME.pack(
-                number, local_input, remote_input, 1, 0, 0, 0, 0,
+                number, local_input, remote_input, 1, shot_count, effect_count, 0, 0,
                 0, 0, len(data), len(data), 0, b"\0" * 7,
             )
             file.write(frame)
@@ -52,6 +52,26 @@ class CompareSnapDumpsTest(unittest.TestCase):
 
     def tearDown(self):
         self.tempdir.cleanup()
+
+    def test_version5_lifetime_counts_have_no_trailing_recipe_records(self):
+        base = 0x140000000
+        write_dump(self.path_a, 1, base, [(10, 0, 0, base + 0x1000, b"root")],
+                   version=5, region_name="lifetime.effect.7.root", shot_count=1, effect_count=1)
+        dump = compare.load_dump(self.path_a)
+        self.assertEqual(1, dump.frames[10].counts["shots"])
+        self.assertEqual([], dump.frames[10].shots)
+        self.assertEqual("lifetime.effect.7.root", dump.frames[10].regions[0].name)
+
+    def test_dump_time_observations_do_not_affect_historical_verdict(self):
+        base = 0x140000000
+        write_dump(self.path_a, 1, base, [(10, 0, 0, 0x20001000, b"a")],
+                   version=5, region_name="observed.shot.7.body")
+        write_dump(self.path_b, 2, base, [(10, 0, 0, 0x30002000, b"different")],
+                   version=5, region_name="observed.shot.9.model.joints")
+        a, b = compare.load_dump(self.path_a), compare.load_dump(self.path_b)
+        self.assertEqual(b"a", a.frames[10].data)
+        self.assertIsNone(compare.PointerResolver(a, a.frames[10]).resolve(0x20001000))
+        self.assertEqual("match", compare.build_report(a, b, 32, 16)["verdict"])
 
     def test_identical_state_with_aslr_and_crossed_inputs_matches(self):
         base_a, base_b = 0x140000000, 0x150000000

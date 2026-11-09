@@ -2,6 +2,8 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <cstddef>
+#include <memory>
 
 // Development diagnostics. Native lifetime changes are controlled separately below.
 inline constexpr bool LIFETIME_TRACE_ENABLED = true;
@@ -26,7 +28,21 @@ void LifetimeTrace_WritePending(FILE* file);
 bool LifetimeTrace_FinishCapture();
 // Snapshot census, generation leases, and shared graph/scheduler restoration.
 void LifetimeTrace_DropSnapshot(int32_t frame);
-void LifetimeTrace_SaveSnapshot(int32_t frame);
+struct LifetimeSnapshot;
+// Owned by RollbackSnapshotSlot; snapdump shares the same capture, not its leases.
+void LifetimeTrace_SaveSnapshot(int32_t frame, std::shared_ptr<LifetimeSnapshot>& storage);
 void LifetimeTrace_CheckSnapshot(int32_t frame);
 void LifetimeTrace_ClearSnapshots();
 void LifetimeTrace_RestoreEffects(int32_t frame);
+
+struct LifetimeSnapshotCounts {
+    uint32_t shots = 0, effects = 0, shotModels = 0;
+};
+using LifetimeSnapshotVisitor = void (*)(void* context, const char* name,
+    const void* address, uint64_t ownerSlot, uint64_t vtable,
+    const void* bytes, size_t size);
+// Dump-time only, at a quiescent fence. Reads snapshot-owned bytes without
+// dereferencing historical native pointers. Optional shot/model observations
+// describe the dump-time world, not the requested snapshot frame.
+LifetimeSnapshotCounts LifetimeTrace_VisitSnapshot(int32_t frame, const LifetimeSnapshot* snapshot,
+    bool observeShots, LifetimeSnapshotVisitor visitor, void* context);

@@ -93,6 +93,8 @@ td code { color:#00d4ff; word-break:break-all; }
     <span class="spacer"></span>
     <label><input id="showBench" type="checkbox" checked> Show assists</label>
     <label><input id="showCollision" type="checkbox"> Show hitboxes</label>
+    <label title="Saved effect world origins, not individual particles"><input id="showEffects" type="checkbox" checked> Show effects</label>
+    <span id="effectLegend" class="legend-item">Effect origins: green host / pink client</span>
     <label><input id="showRegions" type="checkbox"> Show regions</label>
     <label><input id="calculateCharacters" type="checkbox"> Calculate full characters</label>
     <label><input id="showCharacters" type="checkbox" disabled> Show full characters</label>
@@ -112,7 +114,7 @@ const ROLE = {0:'offline',1:'host',2:'client'};
 const SHOT_REFERENCE_KIND = {0:'none',1:'stable unit',2:'shot'};
 const state = { dumps:[], frames:[], index:0, current:null, arenaView:null, playing:false, playTimer:null, playTime:0, playRemainder:0, detailTime:-Infinity };
 // Keep only the latest decoded frame per dump, rather than retaining a second history.
-const fighterCache=new WeakMap(), shotCache=new WeakMap();
+const fighterCache=new WeakMap(), shotCache=new WeakMap(), effectCache=new WeakMap();
 const $ = id => document.getElementById(id);
 const canvas=$('canvas');
 
@@ -146,7 +148,7 @@ function decodeXorRle(encoded, previous, size) {
 function parseUsdp(file, fileName='snapdump.usdp') {
   const view=new DataView(file), magic=u32(view,0), version=u32(view,4), headerSize=u32(view,8);
   if (magic !== MAGIC) throw Error('Not a UMVC3 snapdump');
-  if (version !== 1 && version !== 2 && version !== 3 && version !== 4) throw Error('Unsupported snapdump version '+version);
+  if (![1,2,3,4,5].includes(version)) throw Error('Unsupported snapdump version '+version);
   if (headerSize < HEADER_SIZE) throw Error('Invalid snapdump header size');
   const frameCount=u32(view,12), trigger=i32(view,16), role=u32(view,20), imageBase=u64(view,24), imageSize=u64(view,32);
   const commit=text(readBytes(view,48,41)), frames=[], byFrame=new Map(); let at=headerSize, previous=null;
@@ -166,7 +168,7 @@ function parseUsdp(file, fileName='snapdump.usdp') {
     if(encoding===0) data=copyBytes(payload); else if(encoding===1) data=decodeXorRle(new DataView(payload.buffer,payload.byteOffset,payload.byteLength),previous,rawSize); else throw Error('Unknown snapshot encoding '+encoding);
     if(data.length !== rawSize) throw Error('Decoded snapshot size mismatch');
     const shotRecords=[];
-    if(version>=3) for(let shotIndex=0;shotIndex<shots;shotIndex++) {
+    if(version===3 || version===4) for(let shotIndex=0;shotIndex<shots;shotIndex++) {
       const shotHeaderSize=version>=4?SHOT_V4_SIZE:SHOT_V3_SIZE;
       if(at+shotHeaderSize>view.byteLength) throw Error(`Truncated frame ${number} shot header`);
       const start=at, recordSize=u32(view,at), slotId=u32(view,at+4), kind=u8(view,at+8), hasRng=!!u8(view,at+9), hasZireitou=!!u8(view,at+10), spawnSequence=u64(view,at+12), address=u64(view,at+20), dti=u64(view,at+28), vtable=u64(view,at+36), initParam=u64(view,at+44), posData=u64(view,at+52), owner=u64(view,at+60), element=u64(view,at+68), objectRef1=u64(view,at+76), objectRef1Dti=u64(view,at+84);
@@ -194,7 +196,58 @@ function parseUsdp(file, fileName='snapdump.usdp') {
     }
     const frame={number,local,remote,regions,data,shots:shotRecords,shotCount:shots,effects,clones,models,snapshotHash,manifestHash}; frames.push(frame); byFrame.set(number,frame); previous=data;
   }
-  return {name:fileName, role:ROLE[role] || `role ${role}`, trigger,imageBase,imageSize,commit,frames,byFrame};
+  if(at!==view.byteLength) throw Error('Trailing bytes after final frame');
+  return {name:fileName, version, role:ROLE[role] || `role ${role}`, trigger,imageBase,imageSize,commit,frames,byFrame};
+}
+function lifetimeRegions(frame) {
+  return (frame?.regions||[]).filter(region=>/^(lifetime|observed)\.(shot|effect)\./.test(region.name));
+}
+function historicalRegions(frame) {
+  return frame.regions.filter(region=>!region.name.startsWith('observed.') && !region.name.startsWith('diagnostic.'));
+}
+function lifetimeInspector(frameNumber, rawBodies) {
+  let html='';
+  const escape=value=>String(value).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  for(const dump of state.dumps) {
+    const frame=dump.byFrame.get(frameNumber);
+    if(!frame || dump.version<5) continue;
+    const marker=frame.regions.find(region=>region.name==='diagnostic.lifetime');
+    const meta=marker && marker.size>=24 ? regionView(frame,marker) : null;
+    const available=meta && u64(meta,8)===1, observationFrame=meta ? Number(meta.getBigInt64(16,true)) : -1;
+    html+=`<div class="section"><h2>${escape(dump.role)} Lifetime Data</h2><p class="hint">${available?`${frame.shotCount} saved shot identities; ${frame.effects} saved effects. Roots/CPU graphs come from shared snapshot history.`:'Historical lifetime data unavailable: no lifetime capture was stored for this frame.'} Shot bodies and model buffers are dump-time observations only, not historical snapshots and not used for snapshot comparison.</p>`;
+    if(observationFrame>=0) html+=`<p class="warn">Dump-time observation context: frame ${observationFrame}. Not the selected frame's shot/model state.</p>`;
+    const groups=new Map();
+    for(const region of lifetimeRegions(frame)) {
+      const match=region.name.match(/^(lifetime|observed)\.(shot|effect)\.(\d+)\.(.+)$/);
+      if(!match) continue;
+      const key=match.slice(1,4).join('.');
+      if(!groups.has(key)) groups.set(key,{kind:match[2],id:match[3],observed:match[1]==='observed',regions:[]});
+      groups.get(key).regions.push({region,label:match[4]});
+    }
+    for(const group of groups.values()) {
+      html+=`<details><summary>${group.observed?'Dump-time ':'Saved '}${group.kind} #${group.id} (${group.regions.length} regions)</summary>`;
+      const identity=group.regions.find(entry=>entry.label==='identity')?.region;
+      if(identity && identity.size>=(group.observed?40:32)) {
+        const view=regionView(frame,identity), occupancy=['empty','live','tombstone','quarantined','collecting'][u64(view,16)]||'unknown';
+        html+=`<table><tr><th>Revision / occupancy</th><td>${u64(view,8)} / ${occupancy}</td></tr><tr><th>${group.observed?'DTI':'Birth vtable'}</th><td>${hex(u64(view,24),16)}</td></tr>${group.observed?`<tr><th>Declared body size</th><td>${u64(view,32)} bytes</td></tr>`:''}</table>`;
+      }
+      const body=group.regions.find(entry=>entry.label==='body' || entry.label==='root')?.region;
+      if(body && body.size>=0x60) {
+        const view=regionView(frame,body);
+        html+=`<table><tr><th>Address / vtable</th><td>${hex(body.address,16)} / ${hex(body.vtable,16)}</td></tr><tr><th>Lifecycle / flags</th><td>${u32(view,0x10)&7} / ${hex(u32(view,0x10))}</td></tr>`;
+        if(group.kind==='shot') html+=`<tr><th>Position</th><td>${vector3(view,0x50).map(value=>value.toFixed(4)).join(', ')}</td></tr>`;
+        if(group.kind==='effect' && body.size>=0x128) html+=`<tr><th>World origin</th><td>${vector3(view,0xF0).map(value=>value.toFixed(4)).join(', ')}</td></tr><tr><th>Local position</th><td>${vector3(view,0x50).map(value=>value.toFixed(4)).join(', ')}</td></tr><tr><th>Timer</th><td>${u32(view,0x124)}</td></tr>`;
+        html+='</table>';
+      }
+      for(const {region,label} of group.regions) {
+        const index=rawBodies.push(valueAt(frame,region,0,region.size))-1;
+        html+=`<details data-body="${index}"><summary>${escape(label)}: ${region.size} bytes</summary><p class="hint">Address ${hex(region.address,16)}; owner slot ${hex(region.owner,16)}</p><pre class="hex"></pre></details>`;
+      }
+      html+='</details>';
+    }
+    html+='</div>';
+  }
+  return html;
 }
 function valueAt(frame, region, offset, size) { return frame.data.subarray(region.offset+offset, region.offset+offset+size); }
 function bytesHex(bytes) { return Array.from(bytes,b=>b.toString(16).padStart(2,'0')).join(' '); }
@@ -339,6 +392,25 @@ function decodeShots(dump,frame) {
   return result;
 }
 function shotKey(shot) { return String(shot.spawnSequence); }
+function decodeEffects(dump,frame) {
+  if(!frame?.regions) return [];
+  const cached=effectCache.get(dump);
+  if(cached?.frame===frame) return cached.result;
+  const result=[];
+  for(const region of frame.regions) {
+    const match=region.name.match(/^lifetime\.effect\.(\d+)\.root$/);
+    if(!match || region.size<0x100) continue;
+    const view=regionView(frame,region);
+    // uCoord::mWmat at +C0, translation in row 3. mPos at +50 is
+    // attachment-local and would put parented effects at the wrong origin.
+    const position=[0xF0,0xF4,0xF8].map(offset=>view.getFloat32(offset,true));
+    if(!position.every(Number.isFinite)) continue;
+    const flags=u32(view,0x10);
+    result.push({id:match[1],role:dump.role,position,flags,active:(flags&7)===2});
+  }
+  effectCache.set(dump,{frame,result});
+  return result;
+}
 function shotPairs(frameNumber) {
   const hostDump=state.dumps.find(dump=>dump.role==='host')||state.dumps[0],clientDump=state.dumps.find(dump=>dump.role==='client')||state.dumps[1];
   const host=hostDump?decodeShots(hostDump,hostDump.byFrame.get(frameNumber)):[],client=clientDump?decodeShots(clientDump,clientDump.byFrame.get(frameNumber)):[];
@@ -506,11 +578,18 @@ function drawArena(frameNumber) {
   state.dumps.slice(0,2).forEach(dump=>fighters.push(...decodeFighters(dump,dump.byFrame.get(frameNumber))));
   const shots=[];
   state.dumps.slice(0,2).forEach(dump=>shots.push(...decodeShots(dump,dump.byFrame.get(frameNumber))));
+  const effects=[];
+  if($('showEffects').checked) state.dumps.slice(0,2).forEach(dump=>effects.push(...decodeEffects(dump,dump.byFrame.get(frameNumber))));
+  $('effectLegend').textContent=$('showEffects').checked
+    ? `Effect origins: ${effects.length} saved (green host / pink client; filled / outline)` : 'Effect origins hidden';
   const cameraData=state.dumps.slice(0,2).map(dump=>({dump,data:describeCamera(dump.byFrame.get(frameNumber))}));
   const visualMismatches=compareVisualFighters(frameNumber), mismatchByKey=new Map(visualMismatches.map(item=>[item.key,item]));
   const visible=fighters.filter(fighter=>$('showBench').checked||fighter.active);
-  if(!visible.length&&!shots.length) { state.arenaView={cameraData}; context.fillStyle='#8b949e';context.font='16px system-ui';context.textAlign='center';context.fillText('No decoded characters or shots for this frame',width/2,height/2);return; }
+  if(!visible.length&&!shots.length&&!effects.length) { state.arenaView={cameraData}; context.fillStyle='#8b949e';context.font='16px system-ui';context.textAlign='center';context.fillText('No decoded characters, shots or effect origins for this frame',width/2,height/2);return; }
+  // Effects are overlays, not camera framing targets. Keep an effects-only
+  // frame anchored at the origin rather than following distant effect owners.
   const positions=[...visible.map(f=>f.pos),...shots.map(shot=>shot.position)];
+  if(!positions.length) positions.push([0,0,0]);
   let minX=Math.min(...positions.map(pos=>pos[0])),maxX=Math.max(...positions.map(pos=>pos[0])),minY=Math.min(0,...positions.map(pos=>pos[1])),maxY=Math.max(100,...positions.map(pos=>pos[1]));
   for(const fighter of visible) for(const shape of fighter.collision) {
     if(shape.shape==='capsule') {
@@ -570,11 +649,19 @@ function drawArena(frameNumber) {
     }
     const point=screen(shot.position[0],shot.position[1]);context.save();context.fillStyle=color;context.strokeStyle=color;context.setLineDash(shot.role==='client'?[4,2]:[]);context.beginPath();context.rect(point[0]-5,point[1]-5,10,10);shot.role==='client'?context.stroke():context.fill();context.setLineDash([]);context.font='bold 10px ui-monospace';context.textAlign='center';context.fillText(`${shot.role[0].toUpperCase()} shot #${shot.spawnSequence}`,point[0],point[1]-10);context.restore();
   }
+  for(const effect of effects) {
+    const [x,y]=screen(effect.position[0],effect.position[1]), color=effect.role==='client'?'#e879f9':'#34d399';
+    if(x < -7 || x > width+7 || y < -7 || y > height+7) continue;
+    context.save();context.strokeStyle=color;context.fillStyle=color;context.globalAlpha=effect.active?.85:.35;context.lineWidth=2;
+    context.beginPath();context.moveTo(x,y-7);context.lineTo(x+7,y);context.lineTo(x,y+7);context.lineTo(x-7,y);context.closePath();
+    if(effect.role==='client') context.stroke(); else context.fill();
+    context.font='10px ui-monospace';context.textAlign='center';context.fillText(`${effect.role[0].toUpperCase()} effect #${effect.id}${effect.active?'':' (inactive)'}`,x,y+20);context.restore();
+  }
 }
 function compareFrames(a,b) {
   if(!a || !b) return [{region:'frame',offset:0,size:0,kind:'missing peer'}];
-  const diffs=[]; const count=Math.max(a.regions.length,b.regions.length);
-  for(let i=0;i<count;i++) { const ra=a.regions[i], rb=b.regions[i]; if(!ra||!rb) { diffs.push({region:`manifest[${i}]`,offset:0,size:0,kind:'structure'}); continue; }
+  const diffs=[], ar=historicalRegions(a), br=historicalRegions(b), count=Math.max(ar.length,br.length);
+  for(let i=0;i<count;i++) { const ra=ar[i], rb=br[i]; if(!ra||!rb) { diffs.push({region:ra?.name||rb?.name||`manifest[${i}]`,offset:0,size:0,kind:'structure'}); continue; }
     if(ra.size!==rb.size || ra.owner!==rb.owner || ra.vtable!==rb.vtable || ra.name!==rb.name) { diffs.push({region:ra.name||rb.name||`region[${i}]`,offset:0,size:0,kind:'manifest'}); continue; }
     const size=Math.min(ra.size,rb.size), aa=valueAt(a,ra,0,size), bb=valueAt(b,rb,0,size); let start=-1;
     for(let p=0;p<size;p++) { if(aa[p]!==bb[p] && start<0) start=p; if((aa[p]===bb[p] || p===size-1) && start>=0) { const end=aa[p]===bb[p]?p:p+1; diffs.push({region:ra.name||`region[${i}]`,offset:start,size:end-start,kind:'bytes'}); start=-1; } }
@@ -678,6 +765,7 @@ function update(playbackTick=false) {
     inspectorHtml+=shotSection+'</div>';
   }
   const fullCharacters=compareMiscCharacterState(frame.number);
+  inspectorHtml+=lifetimeInspector(frame.number,rawBodies);
   if($('calculateCharacters').checked && fullCharacters.length) {
     const totalDifferences=fullCharacters.reduce((total,character)=>total+character.differingWords,0);
     let misc=`<div class="section"><h2 class="${totalDifferences?'bad':'ok'}">Full character comparison: ${totalDifferences} differing dword${totalDifferences===1?'':'s'}</h2>`;
@@ -796,6 +884,7 @@ $('speed').oninput=()=>{ $('speedValue').textContent=`${$('speed').value} fps`; 
 document.addEventListener('visibilitychange',()=>{state.playTime=performance.now();state.playRemainder=0;});
 $('showBench').onchange=update;
 $('showCollision').onchange=update;
+$('showEffects').onchange=update;
 $('showRegions').onchange=update;
 $('calculateCharacters').onchange=()=>{
   $('showCharacters').disabled=!$('calculateCharacters').checked;

@@ -111,12 +111,8 @@ void reset() {
     resourceAdds = resourceReleases = 0;
     groupExpansions = 0;
     for (auto& entry : g_registry) entry = {};
-    for (auto& manifest : g_manifests) {
-        manifest.valid = false; manifest.count = 0;
-        manifest.effectCount = 0;
-        for (auto& entries : manifest.primary) entries.clear();
-        for (auto& entries : manifest.groups) entries.clear();
-    }
+    for (auto& storage : testSnapshots) storage.reset();
+    std::fill(std::begin(g_liveSnapshots), std::end(g_liveSnapshots), nullptr);
     unitManager = nullptr;
     g_read = g_count = 0;
     g_nextId = g_sequence = g_epoch = 0;
@@ -338,9 +334,23 @@ class LifetimeTraceTests(unittest.TestCase):
         source = (ROOT / "UMVC3Hook/code/lifetime_trace.cpp").read_text()
         source = "\n".join(line for line in source.splitlines() if not line.startswith('#include "'))
         rollback_header = (ROOT / "UMVC3Hook/code/rollback.h").read_text().replace("#pragma once", "")
+        bridge = r'''
+std::shared_ptr<LifetimeSnapshot> testSnapshots[ROLLBACK_WINDOW];
+SnapshotManifest& TestManifest(size_t slot) {
+    if (!testSnapshots[slot]) testSnapshots[slot] = std::make_shared<LifetimeSnapshot>();
+    return *testSnapshots[slot];
+}
+void SaveTestSnapshot(int32_t frame) {
+    LifetimeTrace_SaveSnapshot(frame, testSnapshots[(frame % ROLLBACK_WINDOW + ROLLBACK_WINDOW) % ROLLBACK_WINDOW]);
+}
+void SaveTestSnapshot(int32_t frame, std::shared_ptr<LifetimeSnapshot>& storage) {
+    LifetimeTrace_SaveSnapshot(frame, storage);
+}
+'''
+        checks = checks.replace("LifetimeTrace_SaveSnapshot(", "SaveTestSnapshot(")
         with tempfile.TemporaryDirectory(dir="/tmp/opencode", prefix="lifetime-trace-") as tmp:
             cpp, exe = Path(tmp) / "test.cpp", Path(tmp) / "test"
-            cpp.write_text(MOCKS + rollback_header + header + source + checks)
+            cpp.write_text(MOCKS + rollback_header + header + source + bridge + checks)
             subprocess.run(["g++", "-std=c++20", "-Wall", "-Wextra", "-pthread",
                             "-fsanitize=address,undefined", "-fno-omit-frame-pointer", "-no-pie", "-g",
                             str(cpp), "-o", str(exe)], check=True)
@@ -371,7 +381,7 @@ int main() {
     reset();
     Birth(object, Kind::Effect);
     LifetimeTrace_SaveSnapshot(0);
-    assert(g_manifests[0].valid && g_manifests[0].count == 1);
+    assert(TestManifest(0).valid && TestManifest(0).count == 1);
     assert(Find(object, false)->snapshots == 1);
     LifetimeTrace_SaveSnapshot(1);
     assert(Find(object, false)->snapshots == 3);
@@ -384,7 +394,7 @@ int main() {
     // Same-frame rewritten predictions replace their observation, not another slot's.
     LifetimeTrace_SaveSnapshot(0);
     LifetimeTrace_CheckSnapshot(0);
-    assert(last().c == 0 && last().d == 0 && g_manifests[0].count == 1);
+    assert(last().c == 0 && last().d == 0 && TestManifest(0).count == 1);
     LifetimeTrace_CheckSnapshot(1);
     assert(last().c == 0 && last().d == 1);
     LifetimeTrace_DropSnapshot(1);
@@ -405,10 +415,11 @@ int main() {
     LifetimeTrace_CheckSnapshot(ROLLBACK_WINDOW);
     assert(last().c == 0 && last().d == 0);
     LifetimeTrace_SaveSnapshot(-1);
-    assert(g_manifests[ROLLBACK_WINDOW - 1].valid);
+    assert(TestManifest(ROLLBACK_WINDOW - 1).valid);
     LifetimeTrace_ClearSnapshots();
     assert(Find(object, false)->snapshots == 0);
-    for (const auto& manifest : g_manifests) assert(!manifest.valid && manifest.count == 0);
+    for (const auto* manifest : g_liveSnapshots) assert(!manifest);
+    assert(TestManifest(0).valid); // Clearing leases does not erase diagnostic bytes.
 
     reset();
     auto* allocation = std::calloc(1, 0x2200);
@@ -423,7 +434,7 @@ int main() {
     for (size_t i = 0; i < RegistrySize; ++i)
         g_registry[i] = {(void*)(i + 1), i + 1, 0, Kind::Shot, Occupancy::Live};
     LifetimeTrace_SaveSnapshot(2); // Bounded manifest, no dereference even for invalid addresses.
-    assert(g_manifests[2].count == RegistrySize);
+    assert(TestManifest(2).count == RegistrySize);
     LifetimeTrace_ClearSnapshots();
 
     reset();
@@ -437,7 +448,7 @@ int main() {
     assert(g_count == before + 17); // 16 detail samples plus full aggregate.
     g_recording = false;
     LifetimeTrace_ClearSnapshots();
-    assert(!g_manifests[3].valid);
+    assert(!g_liveSnapshots[3]);
 }
 ''')
 
@@ -467,6 +478,7 @@ int main() {
     const uint64_t id = Find(p, false)->id;
     LifetimeTrace_SaveSnapshot(0);
     LifetimeTrace_SaveSnapshot(1);
+    auto diagnosticHistory = testSnapshots[0];
     assert(DeleteEffect(p, 1) == p && deletes == 0 && bodies == 0);
     assert(g_quarantined == 1 && Find(p, false)->occupancy == Occupancy::Quarantined);
     assert(Find(p, false)->id == id);
@@ -476,13 +488,14 @@ int main() {
     assert(!std::strcmp(last().name, "quarantine_restore_pending") && last().b == 1);
     // Retired objects are not admitted into new manifests or reactivated by checks.
     LifetimeTrace_SaveSnapshot(2);
-    assert(g_manifests[2].count == 0 && Find(p, false)->snapshots == 3);
+    assert(TestManifest(2).count == 0 && Find(p, false)->snapshots == 3);
     LifetimeTrace_DropSnapshot(0);
     CollectQuarantine();
     assert(deletes == 0 && Find(p, false)->snapshots == 2);
     LifetimeTrace_DropSnapshot(1);
     CollectQuarantine();
     assert(deletes == 1 && bodies == 1 && g_quarantined == 0 && !Find(p, false));
+    assert(diagnosticHistory->valid && diagnosticHistory->count == 1);
     CollectQuarantine();
     assert(deletes == 1);
 
@@ -698,7 +711,7 @@ int main() {
     assert(Read<void*>(head, 8) == head && Read<void*>(head, 0x10) == head);
     assertIntact(p);
     dispatch(p, 1); assert(unlinks == 1 && idReleases == 1 && g_quarantined == 1);
-    LifetimeTrace_SaveSnapshot(2); assert(g_manifests[2].count == 0);
+    LifetimeTrace_SaveSnapshot(2); assert(TestManifest(2).count == 0);
     g_recording = false; LifetimeTrace_Flush(); assertIntact(p);
     LifetimeTrace_DropSnapshot(0); CollectQuarantine(); assertIntact(p);
 
@@ -818,7 +831,7 @@ int main() {
     Write(b, 8, uint32_t(42)); Write(c, 0xC, uint32_t(7)); Write(b, 0x28, 0.5f);
     chain({a, b, c, d});
     LifetimeTrace_SaveSnapshot(0);
-    assert(g_manifests[0].effectCount == 4);
+    assert(TestManifest(0).effectCount == 4);
     detachAndDelete(b); detachAndDelete(c);
     assert(g_quarantined == 2 && deleted == 0 && Read<void*>(a, 0x18) == d);
     Write(b, 8, uint32_t(99)); Write(b, 0x28, 3.0f);
@@ -869,7 +882,7 @@ int main() {
     // Unknown anchors cannot be trusted by address alone, even when currently readable.
     a = makeUnit(2, false); p = makeUnit(3); chain({a, p});
     LifetimeTrace_SaveSnapshot(2);
-    assert(g_manifests[2].effectCount == 1);
+    assert(TestManifest(2).effectCount == 1);
     chain({p}); std::free(a);
     LifetimeTrace_RestoreEffects(2);
     assert(!std::strcmp(last().name, "retiring_restore_applied"));
@@ -892,7 +905,7 @@ int main() {
 
     // Active-at-save empty owners restore through the same retained graph path.
     p = makeUnit(2); chain({p}); LifetimeTrace_SaveSnapshot(4);
-    assert(g_manifests[4].effectCount == 1);
+    assert(TestManifest(4).effectCount == 1);
     detachAndDelete(p);
     LifetimeTrace_RestoreEffects(4);
     assert(g_quarantined == 0 && (Read<uint32_t>(p, 0x10) & 7) == 2);
@@ -964,7 +977,7 @@ int main() {
     Write(node, 0x18, (void*)node); assert(!OwnedEffectGraph(p)); Write(node, 0x18, (void*)nullptr);
     Write(node, 0x34, uint32_t(0x40001)); assert(!OwnedEffectGraph(p)); Write(node, 0x34, uint32_t(0x120));
     chain({p}); LifetimeTrace_SaveSnapshot(5);
-    assert(g_manifests[5].effectCount == 1);
+    assert(TestManifest(5).effectCount == 1);
     int before = deleted;
     detachAndDelete(p);
     assert(g_quarantined == 1 && deleted == before && last().c == 1);
@@ -1032,7 +1045,7 @@ int main() {
     LifetimeTrace_SaveSnapshot(0); LifetimeTrace_SaveSnapshot(1);
     Identity* owner = Find(first, false);
     assert(owner && owner->kind == Kind::Unit && owner->dependencies == 3 && owner->snapshots == 3);
-    assert(g_manifests[0].count == 2 && creates == 1 && applies == 1);
+    assert(TestManifest(0).count == 2 && creates == 1 && applies == 1);
     deleteOwner(first);
     assert(ownersDestroyed == 0 && g_quarantined == 1 && !nativeOwnerCheck(effect));
     assert(Read<uintptr_t>(first, 0) == uintptr_t(ownerVtable));
@@ -1165,8 +1178,8 @@ int main() {
     Graph a, b;
     chain({a.owner, b.owner});
     LifetimeTrace_SaveSnapshot(0);
-    assert(g_manifests[0].effectCount == 2);
-    assert(g_manifests[0].effects[0].simulation && g_manifests[0].payloadBytes > 0);
+    assert(TestManifest(0).effectCount == 2);
+    assert(TestManifest(0).effects[0].simulation && TestManifest(0).payloadBytes > 0);
     a.tick(); b.tick();
     const uint32_t expected = Read<uint32_t>(a.pool(), 0x20);
     LifetimeTrace_RestoreEffects(0);
@@ -1197,7 +1210,7 @@ int main() {
     assert(Read<uint32_t>(a.pool(), 0x20) == 0 && Read<uint32_t>(b.node, 0x78) == 0);
     LifetimeTrace_SaveSnapshot(1);
     LifetimeTrace_DropSnapshot(1);
-    assert(!g_manifests[1].valid);
+    assert(!g_liveSnapshots[1]);
 
     // Restore actual ordered group membership, including native buffer growth.
     Write(manager, 0x1840, uint32_t(2));
@@ -1320,7 +1333,7 @@ int main() {
         const uint32_t types = (mode << 20) | 0x20000 | ((mode % 9) << 12) | 0x200;
         Write(attached.node, 0x70, types);
         LifetimeTrace_SaveSnapshot(8);
-        assert(g_manifests[8].effectCount == 1);
+        assert(TestManifest(8).effectCount == 1);
         attached.tick(); Write(attached.owner, 0x280, (void*)nullptr);
         Write(attached.node, 0x70, uint32_t(0));
         LifetimeTrace_RestoreEffects(8);
@@ -1361,6 +1374,114 @@ int main() {
 }
 ''')
 
+    def test_shared_snapshot_history_outlives_rollback_window(self):
+        self.compile_run(True, CHECKS[:CHECKS.index("int main() {")] + r'''
+int main() {
+    reset();
+    alignas(16) uint8_t manager[0x2000]{};
+    auto* owner = static_cast<uint8_t*>(std::calloc(1, 0x2C0));
+    unitManager = manager;
+    Write(manager, 0xC38, uint32_t(1)); Write(manager, 0x50, owner);
+    Write(owner, 0, uintptr_t(_addr(0x140A8E180))); Write(owner, 0x10, uint32_t(2));
+    Birth(owner, Kind::Effect);
+    std::shared_ptr<LifetimeSnapshot> history[255];
+    const LifetimeSnapshot* firstBank = nullptr;
+    for (int frame = 0; frame < 300; ++frame) {
+        LifetimeTrace_DropSnapshot(frame);
+        auto& slot = testSnapshots[frame % ROLLBACK_WINDOW];
+        slot = history[frame % 255]; // Same bank handoff as SnapDump_AcquireSnapshotStorage.
+        Write(owner, 0x124, uint32_t(frame));
+        LifetimeTrace_SaveSnapshot(frame, slot);
+        history[frame % 255] = slot;
+        assert(history[frame % 255].get() == g_liveSnapshots[frame % ROLLBACK_WINDOW]);
+        if (frame == 0) firstBank = slot.get();
+        if (frame == 255) assert(slot.get() == firstBank); // Reuses history-owned capacity.
+    }
+    // The live rollback lease index has only the last sixteen frames, but all
+    // 255 diagnostic captures retain their own roots, graph bytes, and identities.
+    for (const auto* saved : g_liveSnapshots) assert(saved && saved->frame >= 284);
+    for (int frame = 45; frame < 300; ++frame) {
+        const auto& saved = history[frame % 255];
+        assert(saved->frame == frame && saved->effectCount == 1);
+        assert(Read<uint32_t>(saved->effects[0].root, 0x124) == uint32_t(frame));
+    }
+    LifetimeTrace_ClearSnapshots();
+    for (const auto* saved : g_liveSnapshots) assert(!saved);
+    Write(manager, 0x50, static_cast<void*>(nullptr));
+    Destroyed("gone", owner, Find(owner, false)->id);
+    std::free(owner);
+    size_t roots = 0;
+    auto counts = LifetimeTrace_VisitSnapshot(45, history[45].get(), false,
+        [](void* context, const char* name, const void*, uint64_t, uint64_t,
+           const void* bytes, size_t) {
+            if (!std::strstr(name, ".root")) return;
+            ++*static_cast<size_t*>(context);
+            assert(Read<uint32_t>(bytes, 0x124) == 45);
+        }, &roots);
+    assert(counts.effects == 1 && roots == 1); // ASan: no native memory access after free.
+}
+''')
+
+    def test_dump_time_export_never_reads_historical_native_memory(self):
+        self.compile_run(True, CHECKS[:CHECKS.index("int main() {")] + r'''
+#include <string>
+struct DumpRegion { std::string name; std::vector<uint8_t> bytes; };
+void capture(void* context, const char* name, const void*, uint64_t, uint64_t,
+             const void* bytes, size_t size) {
+    auto& regions = *static_cast<std::vector<DumpRegion>*>(context);
+    const auto* data = static_cast<const uint8_t*>(bytes);
+    regions.push_back({name, {data, data + size}});
+}
+int main() {
+    reset();
+    auto& manifest = TestManifest(3);
+    manifest.valid = true; manifest.frame = 3;
+    manifest.effectCount = 1;
+    manifest.effects.resize(1);
+    auto& effect = manifest.effects[0]; effect = {};
+    effect.object = (void*)0xDEAD; effect.id = 7;
+    effect.spanBegin = 0; effect.spanCount = 1;
+    Write(effect.root, 0, uint64_t(0x1234)); effect.root[0x40] = 42;
+    manifest.spans.push_back({(void*)0xBEEF, 4, 0});
+    manifest.payload.assign({'s', 'a', 'v', 'e'});
+    manifest.count = 1;
+    manifest.members.push_back({(void*)0xBAD, 8, 0x555, Kind::Shot, Occupancy::Live});
+    std::vector<DumpRegion> regions;
+    auto counts = LifetimeTrace_VisitSnapshot(3, testSnapshots[3].get(), false, capture, &regions);
+    assert(counts.effects == 1 && counts.shots == 1 && counts.shotModels == 0);
+    assert(regions.size() == 4);
+    assert(regions[1].name == "lifetime.effect.7.root" && regions[1].bytes[0x40] == 42);
+    assert(regions[2].name == "lifetime.effect.7.graph.0");
+    assert(!std::memcmp(regions[2].bytes.data(), "save", 4));
+    assert(regions[3].name == "lifetime.shot.8.identity");
+    regions.clear();
+    counts = LifetimeTrace_VisitSnapshot(3 + ROLLBACK_WINDOW, testSnapshots[3].get(), false, capture, &regions);
+    assert(!counts.effects && !counts.shots && regions.size() == 1);
+    assert(Read<int64_t>(regions[0].bytes.data(), 8) == 0); // unavailable, not empty
+
+    alignas(16) uint8_t body[0x2200]{}, dti[0x40]{}, joints[0x10 + 2*0xC0]{};
+    uint8_t depths[2]{}, work[2*0x68]{}, interpolation[2*0x40]{}, keys[2*0xC]{};
+    Write(dti, 0x30, uint32_t(sizeof(body) >> 2)); testDti = uintptr_t(dti);
+    Write(joints, 0, uint32_t(2));
+    Write(body, 0x538, joints + 0x10); Write(body, 0x548, depths);
+    Write(body, 0x530, uint32_t(2)); Write(body, 0x554, uint32_t(1));
+    Write(body, 0x6C0, work); Write(body, 0x6D8, keys);
+    Write(body, 0x11B0, interpolation); Write(body, 0x1238, uint32_t(2));
+    g_registry[0] = {body, 9, 0x777, Kind::Shot, Occupancy::Quarantined};
+    LifetimeTrace_SetFrame(50, false);
+    regions.clear();
+    counts = LifetimeTrace_VisitSnapshot(3 + ROLLBACK_WINDOW, testSnapshots[3].get(), true, capture, &regions);
+    assert(!counts.effects && !counts.shots && counts.shotModels == 1);
+    assert(Read<int64_t>(regions[0].bytes.data(), 16) == 50);
+    assert(regions.size() == 8);
+    assert(regions[1].name == "observed.shot.9.identity");
+    assert(regions[2].name == "observed.shot.9.body" && regions[2].bytes.size() == sizeof(body));
+    assert(regions[3].name == "observed.shot.9.model.joints" && regions[3].bytes.size() == 2*0xC0);
+    assert(regions[6].name == "observed.shot.9.model.motion.0.joints" && regions[6].bytes.size() == sizeof(work));
+    assert(regions[7].name == "observed.shot.9.model.keyframes" && regions[7].bytes.size() == sizeof(keys));
+}
+''')
+
     def test_integrations(self):
         tracer = (ROOT / "UMVC3Hook/code/lifetime_trace.cpp").read_text()
         self.assertNotIn("HashBytes", tracer)
@@ -1382,7 +1503,19 @@ int main() {
         snapshot = (ROOT / "UMVC3Hook/code/rollback_snapshot.cpp").read_text()
         save = snapshot[snapshot.index("void Rollback_SaveSnapshot("):snapshot.index("void Rollback_UpdateRemoteInput(")]
         self.assertLess(save.index("LifetimeTrace_DropSnapshot(frame)"), save.index("Rollback_BuildRegions("))
-        self.assertGreater(save.index("LifetimeTrace_SaveSnapshot(frame)"), save.index("slot.remoteInput ="))
+        self.assertGreater(save.index("LifetimeTrace_SaveSnapshot(frame, slot.lifetime)"), save.index("slot.remoteInput ="))
+        self.assertLess(save.index("LifetimeTrace_SaveSnapshot(frame, slot.lifetime)"), save.index("SnapDump_CaptureSnapshot(slot)"))
+        self.assertIn("&sharedCapacity, &slot.lifetime", save)
+        self.assertIn("std::shared_ptr<LifetimeSnapshot> lifetime;",
+                      (ROOT / "UMVC3Hook/code/rollback_snapshot.h").read_text())
+        dump = (ROOT / "UMVC3Hook/code/rollback_snapdump.cpp").read_text()
+        per_frame = dump[dump.index("void SnapDump_CaptureSnapshot("):dump.index("void SnapDump_UpdateInputs(")]
+        self.assertNotIn("LifetimeTrace_VisitSnapshot", per_frame)
+        self.assertNotIn("LifetimeTrace_VisitSnapshot", save)
+        self.assertIn("LifetimeTrace_VisitSnapshot", dump[dump.index("bool SnapDump_WriteHistory("):])
+        self.assertIn("destination.lifetime = slot.lifetime;", per_frame)
+        self.assertIn("frame->lifetime.get()", dump)
+        self.assertNotIn("SnapshotManifest g_manifests[", tracer)
         self.assertIn("LifetimeTrace_ClearSnapshots();", snapshot[snapshot.index("void Rollback_FreeSnapshots("):])
         restore = (ROOT / "UMVC3Hook/code/rollback_restore.cpp").read_text()
         restore = restore[restore.index("void Rollback_RestoreSnapshot("):]

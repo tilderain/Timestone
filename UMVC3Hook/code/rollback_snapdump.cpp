@@ -20,6 +20,7 @@ int32_t g_pendingDesyncCaptureFrame = -1;
 #include "netplay.h"
 #include "rollback_diagnostics.h"
 #include "rollback_snapshot.h"
+#include "lifetime_trace.h"
 
 #include <algorithm>
 #include <cerrno>
@@ -33,7 +34,7 @@ int32_t g_pendingDesyncCaptureFrame = -1;
 namespace {
 
 constexpr uint32_t DUMP_MAGIC = 0x50445355; // USDP
-constexpr uint32_t DUMP_VERSION = 4;
+constexpr uint32_t DUMP_VERSION = 5;
 constexpr int HISTORY_SIZE = 255;
 constexpr uint8_t ENCODING_RAW = 0;
 constexpr uint8_t ENCODING_XOR_RLE = 1;
@@ -85,7 +86,7 @@ struct RegionHeader {
 
 #pragma pack(pop)
 
-static_assert(DUMP_VERSION == 4);
+static_assert(DUMP_VERSION == 5);
 static_assert(sizeof(RegionHeader::name) == 64);
 
 struct HistoryFrame {
@@ -101,6 +102,7 @@ struct HistoryFrame {
     size_t regionOffset = 0;
     size_t capacity = 0;
     uint8_t* storage = nullptr;
+    std::shared_ptr<LifetimeSnapshot> lifetime;
 };
 
 struct CapturedRegion {
@@ -184,7 +186,7 @@ bool CreateParentDirectories(char* path)
 } // namespace
 
 uint8_t* SnapDump_AcquireSnapshotStorage(int32_t frame, size_t byteSize,
-                                         int regionCount, size_t* capacity)
+    int regionCount, size_t* capacity, std::shared_ptr<LifetimeSnapshot>* lifetime)
 {
     if (capacity) *capacity = 0;
     if (frame < 0 || byteSize == 0 || regionCount <= 0) return nullptr;
@@ -209,6 +211,7 @@ uint8_t* SnapDump_AcquireSnapshotStorage(int32_t frame, size_t byteSize,
     }
 
     if (capacity) *capacity = destination.capacity;
+    if (lifetime) *lifetime = destination.lifetime;
     return destination.storage;
 }
 
@@ -243,8 +246,9 @@ void SnapDump_CaptureSnapshot(const RollbackSnapshotSlot& slot)
     destination.frame = slot.frame;
     destination.localInput = slot.localInput;
     destination.remoteInput = slot.remoteInput;
-    // Keep the version-4 dump header readable by existing tools. These counts
-    // describe captured records, not the population of native objects.
+    // Share the same lifetime capture used for rollback, without a second copy
+    // or extending any native-object/graph leases beyond the rollback window.
+    destination.lifetime = slot.lifetime;
     destination.shotCount = 0;
     destination.effectCount = 0;
     destination.collisionCloneCount = (uint32_t)slot.collisionNodeClones.size();
@@ -382,14 +386,17 @@ bool SnapDump_WriteHistory(int32_t triggerFrame, const char* relativePath)
 #endif
 
     bool success = WriteAll(file, &header, sizeof(header));
-    const HistoryFrame* previous = nullptr;
+    std::vector<uint8_t> previous, data;
     std::vector<RegionHeader> regions;
     for (const HistoryFrame* frame : frames) {
         const CapturedRegion* captured = reinterpret_cast<const CapturedRegion*>(
             frame->storage + frame->regionOffset);
+        // Assemble diagnostics only on write. Never move shared history backing
+        // or extend leases just to keep diagnostic history alive.
+        data.assign(frame->storage, frame->storage + frame->byteSize);
         regions.resize(frame->regionCount);
         size_t regionDataOffset = 0;
-        for (uint32_t i = 0; i < frame->regionCount; ++i) {
+        for (size_t i = 0; i < regions.size(); ++i) {
             const CapturedRegion& source = captured[i];
             RegionHeader& region = regions[i];
             region = {};
@@ -397,39 +404,57 @@ bool SnapDump_WriteHistory(int32_t triggerFrame, const char* relativePath)
             region.size = source.size;
             region.ownerSlot = source.ownerSlot;
             region.expectedVtable = source.expectedVtable;
-            region.hash = regionDataOffset + source.size <= frame->byteSize
-                ? Rollback_Fnv1a64(frame->storage + regionDataOffset, source.size) : 0;
+            region.hash = regionDataOffset + source.size <= data.size()
+                ? Rollback_Fnv1a64(data.data() + regionDataOffset, source.size) : 0;
             region.skipVtable = source.skipVtable ? 1 : 0;
             if (source.name)
                 strncpy(region.name, source.name, sizeof(region.name) - 1);
             regionDataOffset += source.size;
         }
 
+        struct Output {
+            std::vector<uint8_t>& data;
+            std::vector<RegionHeader>& regions;
+        } output{data, regions};
+        const auto counts = LifetimeTrace_VisitSnapshot(frame->frame, frame->lifetime.get(), frame == frames.back(),
+            [](void* context, const char* name, const void* address, uint64_t ownerSlot,
+               uint64_t vtable, const void* bytes, size_t size) {
+                auto& out = *static_cast<Output*>(context);
+                RegionHeader region{};
+                region.address = uint64_t(address);
+                region.size = size;
+                region.ownerSlot = ownerSlot;
+                region.expectedVtable = vtable;
+                region.hash = Rollback_Fnv1a64(static_cast<const uint8_t*>(bytes), size);
+                std::strncpy(region.name, name, sizeof(region.name) - 1);
+                out.regions.push_back(region);
+                const auto* data = static_cast<const uint8_t*>(bytes);
+                out.data.insert(out.data.end(), data, data + size);
+            }, &output);
+
         std::vector<uint8_t> encoded = EncodeXorRle(
-            frame->storage, frame->byteSize,
-            previous ? previous->storage : nullptr,
-            previous ? previous->byteSize : 0);
-        const bool useEncoded = !encoded.empty() && encoded.size() < frame->byteSize;
+            data.data(), data.size(), previous.empty() ? nullptr : previous.data(), previous.size());
+        const bool useEncoded = !encoded.empty() && encoded.size() < data.size();
         FrameHeader frameHeader = {};
         frameHeader.frame = frame->frame;
         frameHeader.localInput = frame->localInput;
         frameHeader.remoteInput = frame->remoteInput;
-        frameHeader.regionCount = frame->regionCount;
-        frameHeader.shotCount = frame->shotCount;
-        frameHeader.effectCount = frame->effectCount;
+        frameHeader.regionCount = (uint32_t)regions.size();
+        frameHeader.shotCount = counts.shots;
+        frameHeader.effectCount = counts.effects;
         frameHeader.collisionCloneCount = frame->collisionCloneCount;
         frameHeader.modelRenderStateCount = frame->modelRenderStateCount;
-        frameHeader.snapshotHash = Rollback_Fnv1a64(frame->storage, frame->byteSize);
+        frameHeader.snapshotHash = Rollback_Fnv1a64(data.data(), data.size());
         frameHeader.manifestHash = HashManifest(regions.data(), regions.size());
-        frameHeader.uncompressedSize = frame->byteSize;
-        frameHeader.encodedSize = useEncoded ? encoded.size() : frame->byteSize;
+        frameHeader.uncompressedSize = data.size();
+        frameHeader.encodedSize = useEncoded ? encoded.size() : data.size();
         frameHeader.encoding = useEncoded ? ENCODING_XOR_RLE : ENCODING_RAW;
         success = success && WriteAll(file, &frameHeader, sizeof(frameHeader));
         success = success && WriteAll(file, regions.data(),
                                       regions.size() * sizeof(RegionHeader));
-        success = success && WriteAll(file, useEncoded ? encoded.data() : frame->storage,
+        success = success && WriteAll(file, useEncoded ? encoded.data() : data.data(),
                                       (size_t)frameHeader.encodedSize);
-        previous = frame;
+        previous.swap(data);
         if (!success) break;
     }
     success = success && fflush(file) == 0;

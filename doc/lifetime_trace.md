@@ -19,6 +19,24 @@ remain partial effect coverage, not complete world or shot rewind.
 
 ### Current Integration
 
+#### Shared Snapshot Storage
+
+Lifetime captures are owned by `RollbackSnapshotSlot::lifetime`, not a separate
+tracer history ring. Each capture contains the saved identity census, ordered
+primary/group membership, effect roots, graph descriptors, and CPU graph bytes.
+Snapdump shares that exact capture alongside the frame's regular region backing,
+so effect history covers all 255 recorded frames without another native capture
+or a second diagnostic byte copy. Storage vectors retain their capacity for bank
+reuse; memory usage depends on actual captured high-water sizes.
+
+`g_liveSnapshots` is only a non-owning index for the current 16 rollback leases.
+Drop/clear removes those index entries and registry/generation lease bits but
+does not modify history-owned snapshot bytes. Shared snapshot destruction releases
+CPU storage only; it never destroys native owners, releases resources, or extends
+their leases. The dump exporter reads the frame-owned capture even after native
+GC has run. See [desync_snapdump.md](desync_snapdump.md) for the v5 region layout
+and the separate, non-historical dump-time shot/model observations.
+
 #### Borrowed Owner Lifetime And 0x14004F0BC
 
 The supplied `nplive_20261108_015137_client` crash reaches
