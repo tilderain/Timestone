@@ -191,10 +191,10 @@ void checkOriginal(void* p) { assert(!locked && p == object); ++originalCalls; }
 int main() {
     reset();
     LifetimeTrace_Install();
-    assert(creates == 32 && queues == 32 && g_recording);
+    assert(creates == 34 && queues == 34 && g_recording);
     reset(); failCreate = 3; g_recording = false;
     LifetimeTrace_Install();
-    assert(creates == 32 && queues == 0 && !g_recording);
+    assert(creates == 34 && queues == 0 && !g_recording);
     reset(); failQueue = 3;
     LifetimeTrace_Install();
     assert(!g_recording);
@@ -379,6 +379,8 @@ class LifetimeTraceTests(unittest.TestCase):
         source = (ROOT / "UMVC3Hook/code/lifetime_trace.cpp").read_text()
         source = source.replace('#include "lifetime_shot_generations.inl"',
             (ROOT / "UMVC3Hook/code/lifetime_shot_generations.inl").read_text())
+        source = source.replace('#include "lifetime_shot_cpu.inl"',
+            (ROOT / "UMVC3Hook/code/lifetime_shot_cpu.inl").read_text())
         source = source.replace('#include "lifetime_shot_world.inl"',
             (ROOT / "UMVC3Hook/code/lifetime_shot_world.inl").read_text())
         source = "\n".join(line for line in source.splitlines() if not line.startswith('#include "'))
@@ -672,7 +674,7 @@ int main() {
 
     def test_shot_model_delayed_destruction(self):
         self.compile_run(True, CHECKS[:CHECKS.index("int main() {")] + r'''
-alignas(16) uint8_t units[0x1860]{}, shots[0x440]{};
+alignas(16) uint8_t units[0x1860]{}, shots[0x3450]{};
 auto& sentinel = shotHeads[0];
 bool palettes[64]{};
 unsigned nextPalette = 0;
@@ -1922,6 +1924,362 @@ int main() {
 }
 ''')
 
+    def test_shot_cpu_kernel_byte_coverage_and_bounds(self):
+        self.compile_run(True, CHECKS[:CHECKS.index("int main() {")] + r'''
+int main() {
+    reset();
+    constexpr size_t size = 0x2300;
+    uint8_t live[size], saved[size], original[size], masks[size]{};
+    for (size_t i = 0; i < size; ++i) {
+        live[i] = uint8_t(i*13 + 0x80); saved[i] = uint8_t(i*37 + 0x11);
+    }
+    std::memcpy(original, live, size);
+    const struct { size_t begin, end; } expected[] = {
+        {0x08, 0x10}, {0x28, 0x2C}, {0x48, 0x100}, {0x55C, 0x560},
+        {0x1180, 0x11B0}, {0x1240, 0x1250}, {0x1260, 0x129F},
+        {0x1300, 0x1308}, {0x1310, 0x1344}, {0x1350, 0x1360},
+        {0x13C0, 0x13C1}, {0x13C4, 0x13D0}, {0x13E0, 0x13E8},
+        {0x1488, 0x148C}, {0x1498, 0x149C}, {0x14A0, 0x14C0},
+        {0x1DD0, 0x1E30}, {0x1E48, 0x1F50}, {0x1F58, 0x1F68},
+        {0x1FE4, 0x2000}, {0x2038, 0x2058}, {0x2078, 0x20B8},
+        {0x20C0, 0x20CC}, {0x20D0, 0x20D4}, {0x2118, 0x2133},
+    };
+    for (const auto& range : expected) std::memset(masks + range.begin, 0xFF, range.end - range.begin);
+    for (size_t i = 0; i < 8; ++i) {
+        const size_t base = 0x560 + i*0x180;
+        std::memset(masks + base + 8, 0xFF, 6);
+        std::memset(masks + base + 0x10, 0xFF, 0x64);
+        std::memset(masks + base + 0x80, 0xFF, 0x60);
+    }
+    std::memset(masks + 0x149C, 0xFF, 4); masks[0x149C] = 0xBF;
+    std::memset(masks + 0x1FE0, 0xFF, 4); masks[0x1FE3] = 0xEF;
+    assert(RestoreShotCpuFields(live, size, saved, size) == ShotCpuRestoreStatus::ReviewedSubset);
+    for (size_t i = 0; i < size; ++i)
+        assert(live[i] == uint8_t((saved[i] & masks[i]) | (original[i] & ~masks[i])));
+    // This includes every pointer/topology/vtable hole, target record, audio
+    // cRef, allocation bound, presentation field and unreviewed derived suffix.
+    std::memcpy(original, live, size);
+    assert(RestoreShotCpuFields(nullptr, size, saved, size) == ShotCpuRestoreStatus::InvalidBuffer);
+    assert(RestoreShotCpuFields(live, size, nullptr, size) == ShotCpuRestoreStatus::InvalidBuffer);
+    assert(RestoreShotCpuFields(live, 0x213F, saved, size) == ShotCpuRestoreStatus::InvalidBuffer);
+    assert(RestoreShotCpuFields(live, size, saved, 0x213F) == ShotCpuRestoreStatus::InvalidBuffer);
+    assert(!std::memcmp(live, original, size));
+    assert(RestoreShotCpuFields(live, size, live, size) == ShotCpuRestoreStatus::ReviewedSubset);
+    assert(!std::memcmp(live, original, size) && !creates && !resourceAdds && !resourceReleases);
+}
+''')
+
+    def test_shot_cpu_existing_timer_rewind(self):
+        self.compile_run(True, CHECKS[:CHECKS.index("int main() {")] + r'''
+int main() {
+    reset(); alignas(16) uint8_t units[0x1860]{}; unitManager = units;
+    auto* shot = static_cast<uint8_t*>(std::calloc(1, 0x21A0));
+    Write(shot, 0, uintptr_t(0xCAFE)); Write(shot, 0x10, uint32_t(0x3FA));
+    Write(shot, 0x116C, UINT32_MAX); Write(shot, 0x1F50, uint32_t(11));
+    Write(shot, 0x1F58, 3.0f); Write(shot, 0x2078, 97.0f); Write(shot, 0x50, 6.0f);
+    Write(shot, 0x14AC, 3.0f); Write(shot, 0x212C, uint32_t(0x80000001));
+    void* model = std::calloc(1, 0x100); Write(model, 0x4C, uint32_t(1)); Write(model, 0x78, uint32_t(1));
+    auto* jointHeader = static_cast<uint8_t*>(std::calloc(1, 0x10 + 0xC0));
+    Write(jointHeader, 0, uint32_t(1)); void* joint = jointHeader + 0x10;
+    Write(joint, 0, uintptr_t(mockJointVtable)); Write(joint, 0xA8, static_cast<void*>(shot)); Write(joint, 0x20, 6.0f);
+    void* depth = std::calloc(1, 1), *interpolation = std::calloc(1, 0x40);
+    Write(shot, 0x100, model); Write(shot, 0x530, uint32_t(1)); Write(shot, 0x538, joint);
+    Write(shot, 0x548, depth); Write(shot, 0x11B0, interpolation);
+    Birth(shot, Kind::Shot); auto* identity = Find(shot, false);
+    identity->extent = 0x21A0; identity->dti = 0x1234;
+    LifetimeTrace_SaveSnapshot(280);
+    const uint32_t bit = uint32_t(1) << (280 % ROLLBACK_WINDOW);
+    const auto& saved = TestManifest(280 % ROLLBACK_WINDOW).shots[0];
+    int attackSounds = 0, loopSounds = 0;
+    const auto advance = [&] {
+        Write(shot, 0x1F58, Read<float>(shot, 0x1F58) + 1);
+        Write(shot, 0x14AC, Read<float>(shot, 0x14AC) + 1);
+        Write(shot, 0x2078, Read<float>(shot, 0x2078) - 1);
+        Write(shot, 0x50, Read<float>(shot, 0x50) + 2);
+        Write(joint, 0x20, Read<float>(joint, 0x20) + 2);
+        if (Read<float>(shot, 0x1F58) >= 8) Write(shot, 0x212C, uint32_t(0x80000003));
+        if (!(Read<uint32_t>(shot, 0x149C) & 0x40)) {
+            ++attackSounds; Write(shot, 0x149C, Read<uint32_t>(shot, 0x149C) | 0x40u);
+        }
+        if (!(Read<uint32_t>(shot, 0x1FE0) & 0x10000000)) {
+            ++loopSounds; Write(shot, 0x1FE0, Read<uint32_t>(shot, 0x1FE0) | 0x10000000u);
+        }
+    };
+    for (int i = 0; i < 8; ++i) advance();
+    assert(Read<float>(shot, 0x1F58) == 11 && (Read<uint32_t>(shot, 0x212C) & 0xFF) == 3);
+    Write(shot, 0x20E0, uint64_t(0xABCDEF)); // Live external sound-cookie identity.
+    Write(shot, 0x2160, uint64_t(0x123456)); // Unreviewed derived callback remains live.
+    for (int i = 0; i < 2; ++i) {
+        { UnitGuard fence;
+          StageShotGenerationStorage(*identity, saved, bit);
+          assert(StageShotCpuFields(*identity, saved, bit) == ShotCpuRestoreStatus::ReviewedSubset); }
+        assert(Read<float>(shot, 0x1F58) == 3 && Read<float>(shot, 0x14AC) == 3);
+        assert(Read<float>(shot, 0x2078) == 97 && Read<float>(shot, 0x50) == 6);
+        assert(Read<float>(joint, 0x20) == 6 && Read<void*>(joint, 0xA8) == shot);
+        assert(Read<uint32_t>(shot, 0x212C) == 0x80000001);
+        advance();
+        assert(Read<float>(shot, 0x1F58) == 4 && Read<float>(shot, 0x14AC) == 4);
+        assert(Read<float>(shot, 0x2078) == 96 && Read<float>(shot, 0x50) == 8);
+        assert(Read<float>(joint, 0x20) == 8);
+    }
+    assert(attackSounds == 1 && loopSounds == 1);
+    assert(Read<uint64_t>(shot, 0x20E0) == 0xABCDEF && Read<uint64_t>(shot, 0x2160) == 0x123456);
+    identity->occupancy = Occupancy::Quarantined; ++g_quarantined;
+    Write(shot, 0x10, uint32_t(0x3F8)); Write(shot, 0x1F50, uint32_t(99));
+    { UnitGuard fence; StageShotGenerationStorage(*identity, saved, bit); StageShotCpuFields(*identity, saved, bit); }
+    assert(Read<float>(shot, 0x1F58) == 3 && identity->occupancy == Occupancy::Quarantined && g_quarantined == 1);
+    assert(Read<uint32_t>(shot, 0x10) == 0x3F8 && Read<uint32_t>(shot, 0x1F50) == 99);
+    assert(Read<float>(saved.payload.data() + saved.spans[0].memory.offset, 0x1F58) == 3);
+    // The stage did not publish a resurrection or restore reference graphs.
+    identity->occupancy = Occupancy::Live; --g_quarantined;
+    const uint64_t id = identity->id;
+    LifetimeTrace_ClearSnapshots(); ForgetCurrentShotGenerations(id, shot);
+    MockJointDelete(joint, 3); std::free(depth); std::free(interpolation);
+    ResourceRelease(model); std::free(model); std::free(shot);
+}
+''')
+
+    def test_shot_cpu_stage_rejects_invalid_contract_before_writing(self):
+        harness = CHECKS[:CHECKS.index("int main() {")] + r'''
+alignas(16) uint8_t units[0x1860]{};
+void* shot;
+void reject(int) { std::_Exit(Read<float>(shot, 0x1F58) == 11.0f && Read<float>(shot, 0x50) == 22.0f ? 17 : 18); }
+int main() {
+    reset(); unitManager = units; shot = std::calloc(1, 0x2140);
+    Write(shot, 0, uintptr_t(0xCAFE)); Write(shot, 0x116C, UINT32_MAX); Write(shot, 0x1F58, 3.0f);
+    Birth(shot, Kind::Shot); auto* identity = Find(shot, false); identity->extent = 0x2140; identity->dti = 0x1234;
+    LifetimeTrace_SaveSnapshot(0); auto& saved = TestManifest(0).shots[0];
+    Write(shot, 0x1F58, 11.0f); Write(shot, 0x50, 22.0f); std::signal(SIGABRT, reject);
+'''
+        for invalid in (
+            "identity->snapshots = 0;",
+            "saved.spans[0].memory.offset = UINT32_MAX;",
+            "saved.spans.push_back(saved.spans[0]);",
+        ):
+            with self.subTest(invalid=invalid):
+                self.compile_run(True, harness + invalid + "\nStageShotCpuFields(*identity, saved, 1);\n}\n",
+                                 expected_returncode=17)
+
+    def test_shot_storage_leaves_materials_and_vjobs_live(self):
+        self.compile_run(True, CHECKS[:CHECKS.index("int main() {")] + r'''
+int main() {
+    reset(); alignas(16) uint8_t units[0x1860]{}; unitManager = units;
+    auto* shot = static_cast<uint8_t*>(std::calloc(1, 0x2140));
+    Write(shot, 0, uintptr_t(0xCAFE)); Write(shot, 0x116C, UINT32_MAX);
+    // Poison presentation pointers: capture must not inspect their pointees or
+    // reject a snapshot based on material/vjob configuration.
+    for (size_t field : {size_t(0x108), size_t(0x110), size_t(0x170), size_t(0x198),
+                         size_t(0x1250), size_t(0x1258), size_t(0x12A0)}) Write(shot, field, uintptr_t(1));
+    for (size_t field = 0x1408; field < 0x1440; field += 8) Write(shot, field, uintptr_t(1));
+    Write(shot, 0x118, UINT32_MAX); Write(shot, 0x1440, UINT32_MAX);
+    Birth(shot, Kind::Shot); auto* identity = Find(shot, false);
+    identity->extent = 0x2140; identity->dti = 0x1234;
+    LifetimeTrace_SaveSnapshot(0);
+    const auto& saved = TestManifest(0).shots[0];
+    assert(saved.spans.size() == 1 && !std::strcmp(saved.spans[0].name, "body"));
+    assert(saved.payload.size() == 0x2140 && saved.generations.size() == ShotDomainCount);
+    struct Range { size_t offset, size; } ranges[] = {
+        {0x108, 0x408}, {0x1250, 0x10}, {0x12A0, 0x20}, {0x1408, 0x48}
+    };
+    for (const auto& range : ranges) std::memset(shot + range.offset, 0xA5, range.size);
+    StageShotGenerationStorage(*identity, saved, 1);
+    for (const auto& range : ranges)
+        for (size_t i = 0; i < range.size; ++i) assert(shot[range.offset + i] == 0xA5);
+    assert(!resourceAdds && !resourceReleases && !creates && !ownedFrees);
+    const uint64_t id = identity->id;
+    LifetimeTrace_ClearSnapshots(); ForgetCurrentShotGenerations(id, shot); std::free(shot);
+}
+''')
+
+    def test_shot_command_and_motion_resource_borrowers(self):
+        self.compile_run(True, CHECKS[:CHECKS.index("int main() {")] + r'''
+alignas(16) uint8_t units[0x1860]{};
+void* a; void* b; void* c;
+int nativeDeletes = 0;
+void nativeCommand(void* owner, void* incoming, uint32_t slot) {
+    assert(!locked && unitLocked);
+    const size_t field = 0x13E8 + slot*8;
+    if (void* old = Read<void*>(owner, field)) GenerationResourceRelease(old);
+    Write(owner, field, incoming);
+    if (incoming) { Write(owner, 0x1360 + slot*8, incoming); ResourceAdd(incoming); }
+}
+void nativeMotion(void* owner, void* incoming, uint32_t slot) {
+    assert(!locked && unitLocked);
+    const size_t field = 0x11B8 + slot*8;
+    if (void* old = Read<void*>(owner, field)) GenerationResourceRelease(old);
+    Write(owner, field, incoming); if (incoming) ResourceAdd(incoming);
+}
+void* resource() {
+    void* object = std::calloc(1, 0x100); Write(object, 0x4C, uint32_t(1)); return object;
+}
+void* dispose(void* owner, uint32_t flags) {
+    assert(!locked && unitLocked && flags == 1); ++nativeDeletes;
+    // A concrete destructor can still consume the old resource after every
+    // owned slot and interpreter mirror has changed. Do not drain it early.
+    assert(Read<uint32_t>(a, 0x4C) >= 1 && Read<uint32_t>(b, 0x4C) >= 1);
+    for (size_t field = 0x11B8; field < 0x1238; field += 8)
+        if (void* resource = Read<void*>(owner, field)) ResourceRelease(resource);
+    for (size_t field = 0x13E8; field < 0x1408; field += 8)
+        if (void* resource = Read<void*>(owner, field)) ResourceRelease(resource);
+    const uint64_t id = Find(owner, false)->id;
+    Destroyed("gone", owner, id); std::free(owner); return owner;
+}
+int main() {
+    reset(); unitManager = units;
+    oSetShotCommandResource = nativeCommand; oSetShotMotionList = nativeMotion;
+    oGenerationResourceRelease = ResourceRelease;
+    a = resource(); b = resource(); c = resource();
+    void* shot = std::calloc(1, 0x2140); Write(shot, 0, uintptr_t(0xCAFE));
+    Write(shot, 0x10, uint32_t(0x3FA)); Write(shot, 0x116C, UINT32_MAX);
+    Birth(shot, Kind::Shot); auto* identity = Find(shot, false);
+    identity->extent = 0x2140; identity->dti = 0x1234; identity->deleting = dispose;
+    Write(shot, 0x13E8, a); Write(shot, 0x1360, a); // Transfer a's initial native reference.
+    LifetimeTrace_SaveSnapshot(0);
+    GenerationCommandResource(shot, b, 0); assert(Read<uint32_t>(a, 0x4C) == 1);
+    // The B acquisition below has no intervening snapshot, but the live
+    // interpreter may resolve it. Retention must not depend on capture frequency.
+    GenerationCommandResource(shot, c, 0); assert(Read<uint32_t>(b, 0x4C) == 2);
+    GenerationCommandResource(shot, nullptr, 0);
+    assert(Read<void*>(shot, 0x1360) == c && !Read<void*>(shot, 0x13E8));
+    LifetimeTrace_SaveSnapshot(1);
+    StageShotGenerationStorage(*identity, TestManifest(0).shots[0], 1);
+    assert(Read<void*>(shot, 0x13E8) == a && Read<uint32_t>(a, 0x4C) == 1);
+    GenerationCommandResource(shot, a, 0); // Same pointer is two native ownership occurrences.
+    assert(Read<uint32_t>(a, 0x4C) == 2);
+    for (uint32_t slot = 0; slot < 16; ++slot) GenerationMotionList(shot, b, slot);
+    assert(Read<uint32_t>(b, 0x4C) == 18); // Caller + retired command + sixteen motion refs.
+    for (uint32_t slot = 0; slot < 16; ++slot) GenerationMotionList(shot, nullptr, slot);
+    LifetimeTrace_ClearSnapshots();
+    assert(Read<uint32_t>(a, 0x4C) == 2 && Read<uint32_t>(b, 0x4C) == 18 && Read<uint32_t>(c, 0x4C) == 2);
+    assert(!HasRetiredShotGenerations(identity->id)); // Terminal-only pins must not deadlock owner GC.
+    DeleteUnit(shot, 1, dispose, 0);
+    assert(nativeDeletes == 1 && Read<uint32_t>(a, 0x4C) == 0);
+    assert(Read<uint32_t>(b, 0x4C) == 1 && Read<uint32_t>(c, 0x4C) == 1);
+    for (const auto& generation : g_shotGenerations) assert(!generation.id);
+    ResourceRelease(b); ResourceRelease(c); std::free(a); std::free(b); std::free(c);
+}
+''')
+
+    def test_shot_manager_restore_stage(self):
+        harness = CHECKS[:CHECKS.index("int main() {")] + r'''
+alignas(16) uint8_t units[0x1860]{}, manager[0x3450]{}, config[0x4A8A0]{};
+alignas(16) uint8_t oldForeign[0x40]{}, newForeign[0x40]{};
+void *a, *b;
+void* head(unsigned team) { return shotHeads[team] + 8; }
+void* node(void* shot) { return static_cast<uint8_t*>(shot) + 0x1450; }
+void link(unsigned team, std::initializer_list<void*> shots) {
+    void* previous = head(team);
+    for (void* shot : shots) {
+        Write(previous, 8, node(shot)); Write(node(shot), 0x10, previous); previous = node(shot);
+    }
+    Write(previous, 8, head(team)); Write(head(team), 0x10, previous);
+}
+void* make(unsigned id) {
+    void* shot = std::calloc(1, 0x2140);
+    Write(shot, 0, uintptr_t(0xCAFE)); Write(shot, 0x10, uint32_t(0x3FA));
+    Write(shot, 0x116C, UINT32_MAX); Write(shot, 0x1F50, id);
+    Write(shot, 0x1F58, 3.0f);
+    Write(shot, 0x1450, uintptr_t(0xBEEF)); Write(shot, 0x1468, shot);
+    Birth(shot, Kind::Shot);
+    auto* identity = Find(shot, false); identity->extent = 0x2140; identity->dti = 0x1234;
+    identity->shotLinked = true;
+    Write(manager, 0x38 + id*4, id);
+    return shot;
+}
+void setup() {
+    reset(); unitManager = units; shotManager = manager; gameConfig = config;
+    Write(units, 0xC38, uint32_t(20));
+    for (unsigned team = 0; team < 10; ++team) link(team, {});
+    a = make(1); b = make(2); link(0, {b, a});
+    Write(manager, 0x438, uint32_t(3)); Write(manager, 0x43C, uint32_t(7));
+    Write(manager, 0x440, uint32_t(8)); Write(manager, 0x444, 0.5f);
+    Write(manager, 0x448, b); Write(manager, 0x450, uint64_t(0xABCDEF120000000D));
+    Write(manager, 0x458, static_cast<void*>(oldForeign)); Write(manager, 0x460, uint64_t(8));
+    Write(manager, 0x2448, uint32_t(2)); Write(config, 0x4A89C, uint32_t(0x01000100));
+    LifetimeTrace_SaveSnapshot(0);
+    assert(TestManifest(0).shotLists[0].size() == 2);
+    assert(TestManifest(0).shotLists[0][0].id == Find(b, false)->id);
+    assert(TestManifest(0).shotPending[0].id == Find(b, false)->id);
+    assert(!TestManifest(0).shotPending[1].id);
+    // A reflected live shot and a terminally retained shot take the same stage.
+    link(0, {}); link(2, {a});
+    Find(b, false)->occupancy = Occupancy::Quarantined; ++g_quarantined;
+    Find(b, false)->shotLinked = false; Find(b, false)->shotRegistrationReleased = true;
+    Write(b, 0x1458, uintptr_t(0)); Write(b, 0x1460, uintptr_t(0));
+    Write(b, 0x10, uint32_t(0x3F8)); Write(manager, 0x40, uint32_t(0));
+    Write(a, 0x1F58, 19.0f); Write(b, 0x1F58, 19.0f);
+    Write(manager, 0x438, uint32_t(91)); Write(manager, 0x43C, uint64_t(0));
+    Write(manager, 0x444, 2.0f); Write(manager, 0x2450, uint64_t(0xCAFE));
+    Write(config, 0x4A89C, uint32_t(0));
+    Write(manager, 0x448, a); Write(manager, 0x450, uint64_t(13));
+    Write(manager, 0x458, static_cast<void*>(newForeign)); Write(manager, 0x460, uint64_t(9));
+    // Registration must not touch foreign execution lists or the shot bodies.
+    Write(units, 0x50, static_cast<void*>(newForeign)); Write(units, 0x58, static_cast<void*>(newForeign));
+}
+void reject(int) {
+    const bool untouched = Read<uint32_t>(manager, 0x438) == 91 &&
+        Read<void*>(head(2), 8) == node(a) && !Read<uint32_t>(manager, 0x40) &&
+        Find(b, false)->occupancy == Occupancy::Quarantined && g_quarantined == 1;
+    std::_Exit(untouched ? 17 : 18);
+}
+'''
+        scenarios = [
+            (r'''
+    StageShotManagerState(TestManifest(0), 1);
+    assert(Read<void*>(head(0), 8) == node(b) && Read<void*>(node(b), 8) == node(a));
+    assert(Read<void*>(node(a), 8) == head(0) && Read<void*>(head(0), 0x10) == node(a));
+    assert(Read<void*>(node(b), 0x10) == head(0) && Read<void*>(node(a), 0x10) == node(b));
+    assert(Read<void*>(head(2), 8) == head(2) && Read<void*>(head(2), 0x10) == head(2));
+    assert(Read<uintptr_t>(a, 0x1450) == 0xBEEF && Read<void*>(a, 0x1468) == a);
+    assert(Read<uint32_t>(manager, 0x3C) == 1 && Read<uint32_t>(manager, 0x40) == 2);
+    assert(Read<uint32_t>(manager, 0x438) == 3 && Read<uint32_t>(manager, 0x43C) == 7);
+    assert(Read<uint32_t>(manager, 0x440) == 8 && Read<float>(manager, 0x444) == 0.5f);
+    assert(Read<uint64_t>(manager, 0x2450) == 0xCAFE); // Scratch is not ownership/registration state.
+    assert(Read<uint32_t>(config, 0x4A89C) == 0x01000100);
+    assert(Read<uint32_t>(manager, 0x2448) == 2 && Read<void*>(manager, 0x448) == b);
+    assert(Read<uint64_t>(manager, 0x450) == 0xABCDEF120000000D);
+    assert(Read<void*>(manager, 0x458) == newForeign && Read<uint64_t>(manager, 0x460) == 9);
+    assert(Find(b, false)->shotLinked && !Find(b, false)->shotRegistrationReleased);
+    assert(Find(b, false)->occupancy == Occupancy::Quarantined && g_quarantined == 1);
+    assert(Read<float>(a, 0x1F58) == 19.0f && Read<float>(b, 0x1F58) == 19.0f);
+    assert(Read<uint32_t>(b, 0x10) == 0x3F8 && Read<void*>(units, 0x50) == newForeign);
+    StageShotManagerState(TestManifest(0), 1); // No list/count duplication.
+    assert(Read<uint32_t>(manager, 0x2448) == 2 && g_quarantined == 1 && !unitLocked);
+    std::free(a); std::free(b);
+''', 0),
+            (r'''
+    Find(b, false)->snapshots = 0;
+    StageShotManagerState(TestManifest(0), 1);
+''', 17),
+            (r'''
+    // Even a future shot absent from both list and queue must be retired first.
+    make(3);
+    StageShotManagerState(TestManifest(0), 1);
+''', 17),
+            (r'''
+    // Both saved bodies claiming native ID 1 must fail before any list write.
+    for (auto& saved : TestManifest(0).shots) {
+        const auto& span = saved.spans[0];
+        Write(saved.payload.data() + span.memory.offset, 0x1F50, uint32_t(1));
+    }
+    Write(b, 0x1F50, uint32_t(1));
+    StageShotManagerState(TestManifest(0), 1);
+''', 17),
+            (r'''
+    // A foreign pending record may not be dropped just to fit restored shots.
+    Write(manager, 0x2448, uint32_t(512));
+    for (size_t i = 0; i < 512; ++i) {
+        Write(manager, 0x448 + i*0x10, static_cast<void*>(newForeign));
+        Write(manager, 0x450 + i*0x10, uint64_t(9));
+    }
+    StageShotManagerState(TestManifest(0), 1);
+''', 17),
+        ]
+        for scenario, expected in scenarios:
+            with self.subTest(expected=expected, scenario=scenario):
+                self.compile_run(True, harness + "\nint main() { setup(); std::signal(SIGABRT, reject);\n" +
+                                 scenario + "\n}\n", expected_returncode=expected)
+
     def test_future_shot_rejects_continuous_collision_registration(self):
         self.compile_run(True, CHECKS[:CHECKS.index("int main() {")] + r'''
 int main() {
@@ -2062,10 +2420,13 @@ int main() {
         self.assertNotIn("GameplayHooks_Create", generations)  # No leaf-delete or allocator-free detours.
         self.assertNotIn("RegisterDeleting(", generations)
         self.assertIn("StageShotGenerationStorage", generations)
+        self.assertIn('#include "lifetime_shot_cpu.inl"', tracer)
         restore = (ROOT / "UMVC3Hook/code/rollback_restore.cpp").read_text()
         self.assertLess(restore.index("LifetimeTrace_RetireFutureShots(frame)"),
                         restore.index("LifetimeTrace_RestoreEffects(frame)"))
         self.assertNotIn("StageShotGenerationStorage", restore)
+        self.assertNotIn("StageShotManagerState", restore)
+        self.assertNotIn("StageShotCpuFields", restore)
         self.assertNotIn("HashBytes", tracer)
         self.assertNotIn("RootBindings", tracer)
         self.assertNotIn("DescribeSimulationGraph", tracer)

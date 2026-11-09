@@ -14,6 +14,8 @@ Snapshots hold generation IDs and one rollback-slot mask per ownership domain:
 - Motion work: eight native motion-work pointers.
 - Keyframes: the slot-zero slab and its non-owning aliases.
 - The existing model-resource and shot-resource reference, each separately owned.
+- Sixteen motion-list and four command-resource reference occurrences, with
+  displaced bindings retained through native owner teardown for live borrowers.
 - Four attack-info cohorts, one for each native shot collision root.
 
 There are no allocator-free detours or leaf-deleting hooks. Stable allocations
@@ -49,9 +51,11 @@ array growth and full root retirement. Keyframe allocation extent is tracked
 separately from the mutable blend count to cover the native null-model early branch.
 
 **This is a storage stage, not a published whole-shot/world restore.** It remains
-unwired from frame restoration. Material/controller ownership, standalone geometry
-replacement/removal, shot registration/IDs, external constraint graphs and collider
-queues still need coherent adapters before simulation can resume after this stage.
+unwired from frame restoration. Shot CPU/dependency rewind, standalone geometry
+replacement/removal, coherent registration publication, external constraint graphs
+and collider queues still need adapters before simulation can resume after this
+stage. Material internals and vjob ownership are deliberately left live, not
+treated as prerequisites for shot simulation rollback.
 Unsupported attack ownership changes fail their ownership invariant before copying
 historical pointers; there is no silent restore skip or character whitelist.
 Palette reservations remain held until physical pose collection, so logical
@@ -65,9 +69,76 @@ and fences transient collision references before withdrawal/collection. Native
 continuous registrations are preserved and explicitly checked for unsupported
 future-root membership. Known native borrowers can continue to retain withdrawn
 storage after its snapshot leases expire. See `lifetime_trace.md` for the precise
-coverage and `20261109_hyper_mystic_blast_desync.md` for the original reproduction.
+coverage. The original reproduction was the abandoned Hyper Mystic Blast beam.
 This does not install historical saved-shot bodies, restore a saved quarantined
 shot's dependency graph, or make the storage stage safe to publish on its own.
+
+2026-11-09 saved-shot follow-up: snapshots now capture the full native ID table,
+manager controls, all ten ordered shot-list identities and complete pending
+records under the unit/manager/list fences. `StageShotManagerState` validates and
+installs that registration state in isolation, including retained shot addresses
+and team/list changes. It is not invoked by frame restore: it neither restores
+the body/dependencies nor publishes sUnit execution or changes quarantine counts.
+Tests explicitly retain that distinction rather than treating restored list links
+as a completed resurrection. Native list locks are the separate global array at
+`140D48120`, not fields in the shot-manager object.
+
+2026-11-09 presentation-policy correction: the speculative deep material/vjob
+adapters and per-part draw-mode snapshots have been removed. The character CPU
+restore explicitly preserves `uBaseModel+100..510` ownership; its separate vjob
+controller capture does not rewind `nDraw::Material` objects or their buffers.
+Shots follow that live-presentation baseline. Native temporal mutation is not
+evidence that deep material restore is required for gameplay determinism.
+
+The live fields include source/table `+108/+110/+118`, inline materials `+198`,
+per-part draw modes `+170`, render caches and shader owners, and vjob roots/counts
+`+1408..1440`. Capture keeps their opaque values only inside the existing diagnostic
+body, without following them. The storage stage does not copy those fields back.
+Existing native material reset/repair behavior remains unchanged. The regression
+poisons presentation pointers and verifies no pointee access or presentation
+rewind. The native allocation/ownership research below is retained as research,
+not a requirement to implement deep visual rollback.
+
+Command and motion resource retention is separate: their setters can leave live
+interpreter cursors borrowing displaced bindings. Retired references are released
+only after the owner's most-derived native deletion completes. This avoids
+premature release and does not keep material presentation histories.
+
+The following newly verified ownership details remain **research, not implemented
+restore adapters**:
+
+- `Material::setStateBuffer` (`1405DF570`) owns three allocations through the
+  allocator for base Material DTI `140E185F0`. State bytes at `+50` include appended
+  constant payload, not just `18 * rowCount`; allocator virtual `+68` supplies the
+  actual existing allocation size (native duplicate calls it at `1405DCB69`).
+- The native material duplicate (`1405DCA60`) is not an exact rollback clone. It
+  resets playback, shares generated textures, and does not copy arbitrary subtype
+  ownership. SSS materials demonstrate this concretely: their inherited duplicate
+  does not preserve nine owned textures at `+E0..+120`. Dynamic DTI size does not
+  describe those ownership rules. Neither full-object memcpy nor native duplicate
+  closes this dependency.
+- Common constraints are `90` bytes; TSR is `D0`. Constraint `+48` is its complete
+  owner, `+50/+58` are previous/next complete constraints, and `+60` is the attached
+  joint. Joint `+8` stores the *interface* address (`constraint+40`), not the complete
+  constraint. Common base destruction (`140109240`) does not itself unlink.
+- Native link (`1405EC230`) unlinks first and sorts by unsigned priority; sorting
+  (`1405ECEC0`) handles at most 32 entries and does not guarantee stable equal
+  priorities. A reciprocal graph restore must detach outgoing constraints before
+  pose replacement and preserve complete saved chain order, including foreign
+  constraints. Joint replacement itself does not perform this detachment.
+- Publishing a joint constraint head (`14056F900`) sets evaluation/preupdate flags
+  only for active model states. Dependency rebuild (`140569870`) must be requested
+  separately after coherent reattachment. Do not refresh by calling model move:
+  that advances motion, and may apply constraints twice to saved matrices.
+
+The new `lifetime_shot_cpu.inl` component restores reviewed common scalar fields
+without presentation ownership or pointer heuristics. Its retained-pose/native-mock
+regression verifies timer `11 -> 3 -> 4` across restore/replay, along with position,
+life, attack clocks and phase. `shot_cpu_restore.md` records the exact schema and
+deferred reference/topology fields. The timer divergence at frames 280/281 is
+still unresolved by the **live** restore path: the scalar, storage and registration
+stages remain unpublished until the callback/reference and execution graphs are
+restored coherently. The kernel test is not an in-game repair claim.
 
 Generation-layer verification: 66 Python regression tests, including the native
 ASan/UBSan generation scenarios, eight viewer tests, `make -j8` and

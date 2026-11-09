@@ -1,8 +1,32 @@
 // Included in lifetime_trace's private namespace. A snapshot leases ownership
 // domains, not individual allocations. Unchanged children inherit their native
 // owner's lifetime; shared_ptr below only joins cohorts across COW transitions.
-enum class ShotDomain : uint8_t { Pose, Work, Keys, ModelResource, ShotResource, Attack0, Attack1, Attack2, Attack3, Count };
+enum class ShotDomain : uint8_t {
+    Pose, Work, Keys, ModelResource, ShotResource,
+    Motion0, Motion1, Motion2, Motion3, Motion4, Motion5, Motion6, Motion7,
+    Motion8, Motion9, Motion10, Motion11, Motion12, Motion13, Motion14, Motion15,
+    Command0, Command1, Command2, Command3, Attack0, Attack1, Attack2, Attack3, Count
+};
 constexpr size_t ShotDomainCount = size_t(ShotDomain::Count);
+bool BorrowedShotResourceDomain(ShotDomain domain)
+{
+    return domain >= ShotDomain::Motion0 && domain <= ShotDomain::Command3;
+}
+bool ShotResourceDomain(ShotDomain domain)
+{
+    return domain == ShotDomain::ModelResource || domain == ShotDomain::ShotResource ||
+        BorrowedShotResourceDomain(domain);
+}
+size_t ShotResourceField(ShotDomain domain)
+{
+    if (domain == ShotDomain::ModelResource) return 0x100;
+    if (domain == ShotDomain::ShotResource) return 0x1F68;
+    if (domain >= ShotDomain::Motion0 && domain <= ShotDomain::Motion15)
+        return 0x11B8 + (size_t(domain) - size_t(ShotDomain::Motion0)) * 8;
+    if (domain >= ShotDomain::Command0 && domain <= ShotDomain::Command3)
+        return 0x13E8 + (size_t(domain) - size_t(ShotDomain::Command0)) * 8;
+    std::abort();
+}
 struct NativeAttackObject {
     void* object = nullptr;
     Deleting deleting = nullptr;
@@ -48,6 +72,8 @@ thread_local bool g_collectingShotGeneration = false;
 thread_local void* g_transferredShotResource = nullptr;
 void (__fastcall* oGenerationModel)(void*, void*) = nullptr;
 void (__fastcall* oGenerationBlend)(void*, uint32_t) = nullptr;
+void (__fastcall* oSetShotMotionList)(void*, void*, uint32_t) = nullptr;
+void (__fastcall* oSetShotCommandResource)(void*, void*, uint32_t) = nullptr;
 void (__fastcall* oGenerationBaseModel)(void*, void*) = nullptr;
 void (__fastcall* oGenerationResourceRelease)(void*) = nullptr;
 void (__fastcall* oGenerationExtendArray)(void*, uint32_t) = nullptr;
@@ -113,8 +139,8 @@ int NewShotGeneration(const Identity& owner, ShotDomain domain)
     generation.ownerId = owner.id; generation.owner = owner.object;
     generation.domain = domain; generation.snapshots = 0; generation.attached = true;
     if (domain <= ShotDomain::Keys) std::memcpy(generation.image, owner.object, sizeof(generation.image));
-    else if (domain == ShotDomain::ModelResource || domain == ShotDomain::ShotResource)
-        generation.resource = Read<uintptr_t>(owner.object, domain == ShotDomain::ModelResource ? 0x100 : 0x1F68);
+    else if (ShotResourceDomain(domain))
+        generation.resource = Read<uintptr_t>(owner.object, ShotResourceField(domain));
     auto& domains = g_shotDomains[owner.id];
     domains.owner = owner.object;
     domains.current[size_t(domain)] = int(index);
@@ -342,12 +368,15 @@ struct GenerationResourceMove {
             auto at = g_shotDomains.find(identity->id);
             if (at != g_shotDomains.end()) {
                 int& current = at->second.current[size_t(domain)];
+                // A live interpreter can still borrow an earlier binding even
+                // after the owned slot changes. Track intermediate acquisitions
+                // too, including setters called twice between snapshots.
+                if (current < 0 && BorrowedShotResourceDomain(domain)) EnsureShotGeneration(*identity, domain);
                 if (current >= 0) {
                     auto& generation = g_shotGenerations[current];
-                    if (generation.resource != Read<uintptr_t>(owner,
-                        domain == ShotDomain::ModelResource ? 0x100 : 0x1F68)) std::abort();
+                    if (generation.resource != Read<uintptr_t>(owner, ShotResourceField(domain))) std::abort();
                     current = -1;
-                    if (generation.snapshots) {
+                    if (generation.snapshots || (generation.resource && BorrowedShotResourceDomain(domain))) {
                         generation.attached = false;
                         g_transferredShotResource = (void*)generation.resource;
                     } else generation.id = 0;
@@ -373,6 +402,22 @@ void __fastcall GenerationBaseModel(void* owner, void* resource)
     // release. Clearing it early would skip the null-input reset branch.
     GenerationResourceMove transfer(owner, ShotDomain::ModelResource, Read<void*>(owner, 0x100) != resource);
     oGenerationBaseModel(owner, resource);
+}
+
+void __fastcall GenerationMotionList(void* owner, void* resource, uint32_t slot)
+{
+    UnitGuard fence;
+    if (slot >= 16) std::abort();
+    GenerationResourceMove transfer(owner, ShotDomain(unsigned(ShotDomain::Motion0) + slot), true);
+    oSetShotMotionList(owner, resource, slot);
+}
+
+void __fastcall GenerationCommandResource(void* owner, void* resource, uint32_t slot)
+{
+    UnitGuard fence;
+    if (slot >= 4) std::abort();
+    GenerationResourceMove transfer(owner, ShotDomain(unsigned(ShotDomain::Command0) + slot), true);
+    oSetShotCommandResource(owner, resource, slot);
 }
 
 void* AllocateAttackArray(size_t capacity)
@@ -548,9 +593,15 @@ void CollectShotGenerations()
     for (bool resources : {false, true}) for (size_t i = 0; i < g_shotGenerations.size(); ++i) {
         AcquireSRWLockExclusive(&g_lock);
         auto& stored = g_shotGenerations[i];
-        const bool reference = stored.domain == ShotDomain::ModelResource || stored.domain == ShotDomain::ShotResource;
+        const bool reference = ShotResourceDomain(stored.domain);
         if (!stored.id || stored.attached || stored.snapshots || reference != resources) {
             ReleaseSRWLockExclusive(&g_lock); continue;
+        }
+        if (BorrowedShotResourceDomain(stored.domain)) {
+            const auto* owner = Find(stored.owner, false);
+            if (owner && owner->id == stored.ownerId && owner->occupancy != Occupancy::Tombstone) {
+                ReleaseSRWLockExclusive(&g_lock); continue;
+            }
         }
         // Move ownership out before dropping the lock. Native disposal is
         // explicit; C++ metadata destruction never invokes game code.
@@ -583,8 +634,31 @@ void CollectShotGenerations()
 bool HasRetiredShotGenerations(uint64_t owner)
 {
     return std::any_of(g_shotGenerations.begin(), g_shotGenerations.end(), [&](const auto& generation) {
-        return generation.id && generation.ownerId == owner && !generation.attached;
+        return generation.id && generation.ownerId == owner && !generation.attached &&
+            (!BorrowedShotResourceDomain(generation.domain) || generation.snapshots);
     });
+}
+
+void ReleaseTerminalShotReferences(uint64_t owner)
+{
+    // Called after the most-derived native deleting dispatch returns. Concrete
+    // and base cleanup can read old command/motion borrowers until then. The
+    // resource references do not require the now-disposed owner address.
+    for (size_t i = 0; i < g_shotGenerations.size(); ++i) {
+        AcquireSRWLockExclusive(&g_lock);
+        auto& generation = g_shotGenerations[i];
+        if (!generation.id || generation.ownerId != owner || !BorrowedShotResourceDomain(generation.domain)) {
+            ReleaseSRWLockExclusive(&g_lock); continue;
+        }
+        if (generation.attached || generation.snapshots) std::abort();
+        void* resource = (void*)generation.resource;
+        generation.id = 0;
+        ReleaseSRWLockExclusive(&g_lock);
+        const bool previous = g_collectingShotGeneration;
+        g_collectingShotGeneration = true;
+        if (resource) releaseResourceRef(resource);
+        g_collectingShotGeneration = previous;
+    }
 }
 void ForgetCurrentShotGenerations(uint64_t owner, void* address)
 {
@@ -635,9 +709,8 @@ void CaptureShotGenerations(const Identity& owner, uint32_t bit, ShotState& save
             const uint64_t actual = size == 4 ? Read<uint32_t>(owner.object, field) : Read<uint64_t>(owner.object, field);
             if (expected != actual) std::abort();
         });
-        if (domain == size_t(ShotDomain::ModelResource) || domain == size_t(ShotDomain::ShotResource))
-            if (generation.resource != Read<uintptr_t>(owner.object,
-                domain == size_t(ShotDomain::ModelResource) ? 0x100 : 0x1F68)) std::abort();
+        if (ShotResourceDomain(ShotDomain(domain)))
+            if (generation.resource != Read<uintptr_t>(owner.object, ShotResourceField(ShotDomain(domain)))) std::abort();
         if (domain >= size_t(ShotDomain::Attack0) && generation.attack) {
             // Appends can create children without growing the array. Refresh only
             // an unleased live cohort; leased membership changes use the add hook.
@@ -668,7 +741,8 @@ void CaptureShotGenerations(const Identity& owner, uint32_t bit, ShotState& save
 }
 
 // Storage stage for a future coherent shot/world transaction. It does not
-// publish shot IDs, scheduler membership, material bindings or collider queues.
+// publish shot IDs, scheduler membership or collider queues. Presentation owners
+// and material/vjob payloads stay live; the saved body is not a memcpy contract.
 // Callers must not resume simulation after this stage alone.
 [[maybe_unused]] void StageShotGenerationStorage(const Identity& owner, const ShotState& saved, uint32_t bit)
 {
@@ -698,7 +772,7 @@ void CaptureShotGenerations(const Identity& owner, uint32_t bit, ShotState& save
         int current = g_shotDomains[owner.id].current[size_t(domain)];
         if (current != int(ref.index)) {
             if (domain <= ShotDomain::Keys) RetireModelDomain(owner, domain, true);
-            else if (domain == ShotDomain::ModelResource || domain == ShotDomain::ShotResource) {
+            else if (ShotResourceDomain(domain)) {
                 current = EnsureShotGeneration(owner, domain);
                 g_shotGenerations[current].attached = false;
                 g_shotDomains[owner.id].current[size_t(domain)] = -1;
@@ -714,8 +788,8 @@ void CaptureShotGenerations(const Identity& owner, uint32_t bit, ShotState& save
             VisitDomainFields(domain, [&](size_t field, size_t size) {
                 std::memcpy(static_cast<uint8_t*>(owner.object) + field, generation.image + field, size);
             });
-        } else if (domain == ShotDomain::ModelResource || domain == ShotDomain::ShotResource)
-            Write(owner.object, domain == ShotDomain::ModelResource ? 0x100 : 0x1F68, generation.resource);
+        } else if (ShotResourceDomain(domain))
+            Write(owner.object, ShotResourceField(domain), generation.resource);
         else {
             const auto slot = unsigned(domain) - unsigned(ShotDomain::Attack0);
             auto cohort = generation.attack;

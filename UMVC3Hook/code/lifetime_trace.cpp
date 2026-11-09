@@ -126,6 +126,14 @@ struct ShotState {
     struct GenerationRef { size_t index; uint64_t id; };
     std::vector<GenerationRef> generations;
 };
+struct ShotListEntry {
+    void* object = nullptr;
+    uint64_t id = 0;
+};
+struct ShotPendingEntry {
+    void* object = nullptr;
+    uint64_t category = 0, id = 0;
+};
 } // namespace
 
 struct LifetimeSnapshot {
@@ -148,6 +156,10 @@ struct LifetimeSnapshot {
     uint32_t shotCursor = 0;
     void* shotConfig = nullptr;
     uint32_t shotSlotFlags = 0;
+    std::array<uint32_t, 256> shotOccupancy{};
+    std::array<uint32_t, 3> shotControls{};
+    std::vector<ShotListEntry> shotLists[10];
+    std::vector<ShotPendingEntry> shotPending;
 };
 
 namespace {
@@ -212,6 +224,7 @@ void DropShotGenerations(const LifetimeSnapshot* saved, uint32_t bit);
 size_t ShotKeyframeBytes(const Identity& shot);
 void FenceFutureShotCollection();
 void FenceRetiredShotCollisions();
+void ReleaseTerminalShotReferences(uint64_t owner);
 
 template<class T> T Read(const void* object, size_t offset)
 {
@@ -477,6 +490,7 @@ void* DeleteUnit(void* shot, uint32_t flags, Deleting original, uintptr_t native
     }
     const uint64_t id = identity ? identity->id : 0;
     const bool generic = identity && identity->kind == Kind::Unit;
+    const bool shotOwner = identity && identity->kind == Kind::Shot;
     if (generic) Push("unit_dispose_begin", identity, shot, flags, 0, 0, 0, false);
     ReleaseSRWLockExclusive(&g_lock);
     if (identity && identity->kind == Kind::Shot) {
@@ -484,6 +498,7 @@ void* DeleteUnit(void* shot, uint32_t flags, Deleting original, uintptr_t native
         ForgetCurrentShotGenerations(id, shot);
     }
     void* result = original(shot, flags);
+    if (shotOwner) ReleaseTerminalShotReferences(id);
     if (generic) Destroyed("unit_dispose_end", shot, id);
     return result;
 }
@@ -533,6 +548,7 @@ void RegisterUnit(void* shot)
 }
 
 #include "lifetime_shot_generations.inl"
+#include "lifetime_shot_cpu.inl"
 #include "lifetime_shot_world.inl"
 
 bool __fastcall AddUnit(void* manager, uint32_t line, void* unit, uint64_t groups)
@@ -1083,6 +1099,7 @@ void CollectQuarantine()
         }
         const uint64_t id = entry.id;
         void* object = entry.object;
+        const bool shotOwner = entry.kind == Kind::Shot;
         if (entry.futureShot) {
             ReleaseSRWLockExclusive(&g_lock);
             const bool borrowed = HasCharacterShotReference(unitGuard.manager, object);
@@ -1100,6 +1117,7 @@ void CollectQuarantine()
             void* previous = g_collectingShot;
             g_collectingShot = entry.shotRegistrationReleased ? object : nullptr;
             entry.deleting(object, 1);
+            if (shotOwner) ReleaseTerminalShotReferences(id);
             g_collectingShot = previous;
         } else oDeleteEffect(object, 1);
         AcquireSRWLockExclusive(&g_lock);
@@ -1330,6 +1348,7 @@ void LifetimeTrace_SaveSnapshot(int32_t frame, std::shared_ptr<LifetimeSnapshot>
     if (!g_lifetimeEnabled.load(std::memory_order_relaxed)) return;
     const unsigned slot = unsigned((frame % ROLLBACK_WINDOW + ROLLBACK_WINDOW) % ROLLBACK_WINDOW);
     UnitGuard unitGuard;
+    ShotWorldGuard shotGuard;
     // Allocation/capacity is reused by the owning snapshot/history bank. A
     // frame jump must not overwrite a capture still indexed by another lease.
     if (!storage || std::any_of(std::begin(g_liveSnapshots), std::end(g_liveSnapshots),
@@ -1359,10 +1378,7 @@ void LifetimeTrace_SaveSnapshot(int32_t frame, std::shared_ptr<LifetimeSnapshot>
         ++manifest.count;
     }
     CaptureEffects(manifest, unitGuard.manager);
-    manifest.shotManager = Read<void*>((void*)_addr(0x140D47F40), 0);
-    manifest.shotCursor = manifest.shotManager ? Read<uint32_t>(manifest.shotManager, 0x438) : 0;
-    manifest.shotConfig = Read<void*>((void*)_addr(0x140D50F88), 0);
-    manifest.shotSlotFlags = manifest.shotConfig ? Read<uint32_t>(manifest.shotConfig, 0x4A89C) : 0;
+    CaptureShotWorld(manifest, shotGuard.manager);
     const size_t shotCount = unitGuard.manager ? std::count_if(manifest.members.begin(), manifest.members.end(),
         [](const auto& saved) { return saved.kind == Kind::Shot; }) : 0;
     manifest.shots.resize(shotCount);
@@ -1885,6 +1901,8 @@ void LifetimeTrace_Install()
             {0x1400604E0, (void*)&EffectOwner, (void**)&oEffectOwner},
             {0x1401091C0, (void*)&ConstructConstraint, (void**)&oConstructConstraint},
             {0x140109240, (void*)&DestroyConstraint, (void**)&oDestroyConstraint},
+            {0x140529730, (void*)&GenerationMotionList, (void**)&oSetShotMotionList},
+            {0x140200D10, (void*)&GenerationCommandResource, (void**)&oSetShotCommandResource},
         };
         // Deleting-hook enable is deferred until ALL trace/epoch hooks exist below.
         for (const auto& hook : retentionHooks) {
@@ -1909,7 +1927,8 @@ void LifetimeTrace_Install()
                                   uintptr_t(0x140257D80), uintptr_t(0x14025A070),
                                   uintptr_t(0x140151420), uintptr_t(0x140151490), uintptr_t(0x14051BBB0),
                                   uintptr_t(0x14051A6B0), uintptr_t(0x1400604E0),
-                                  uintptr_t(0x1401091C0), uintptr_t(0x140109240)})
+                                  uintptr_t(0x1401091C0), uintptr_t(0x140109240),
+                                  uintptr_t(0x140529730), uintptr_t(0x140200D10)})
             complete &= GameplayHooks_QueueEnable((void*)_addr(address)) == MH_OK;
     }
     for (const auto& hook : hooks)
@@ -1920,7 +1939,7 @@ void LifetimeTrace_Install()
     oRemoveGroups = (void (__fastcall*)(void*, void*))_addr(0x14051BAF0);
     g_lifetimeEnabled.store(complete, std::memory_order_relaxed);
     g_recording.store(complete, std::memory_order_relaxed);
-    HookLog("LifetimeTrace: queued=%d image_base=0x%llX limit=%llu ring=%zu registry=%zu empty_effect_quarantine=%d quarantine_limit=%zu effect_restore=%d ordinary_cpu_graphs=%d simulation_snapshots=%d shot_model_retention=%d future_shot_withdrawal=%d; partial graph coverage\n",
+    HookLog("LifetimeTrace: queued=%d image_base=0x%llX limit=%llu ring=%zu registry=%zu empty_effect_quarantine=%d quarantine_limit=%zu effect_restore=%d ordinary_cpu_graphs=%d simulation_snapshots=%d shot_model_retention=%d future_shot_withdrawal=%d shot_presentation_live=1; partial graph coverage\n",
             complete, uint64_t(_addr(0x140000000)), CaptureLimit, EventCapacity, RegistrySize,
             EMPTY_EFFECT_QUARANTINE_ENABLED, QuarantineLimit, EFFECT_RESTORE_ENABLED,
             ORDINARY_CPU_EFFECT_GRAPHS_ENABLED, EFFECT_SIMULATION_SNAPSHOTS_ENABLED,
