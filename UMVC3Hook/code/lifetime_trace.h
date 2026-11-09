@@ -34,6 +34,9 @@ void LifetimeTrace_SaveSnapshot(int32_t frame, std::shared_ptr<LifetimeSnapshot>
 void LifetimeTrace_CheckSnapshot(int32_t frame);
 void LifetimeTrace_ClearSnapshots();
 void LifetimeTrace_RestoreEffects(int32_t frame);
+// Withdraw abandoned future shots without kill callbacks or physical destruction.
+// This does not yet restore the bodies/dependencies of shots in the target frame.
+void LifetimeTrace_RetireFutureShots(int32_t frame);
 
 struct LifetimeSnapshotCounts {
     uint32_t shots = 0, effects = 0, shotModels = 0;

@@ -131,5 +131,5 @@ void Rollback_InitHooks()
     Rollback_InitOnlineBattleHook();
     Rollback_InitReSimulationHooks();
     Rollback_InitRngHooks();
-    HookLog("Rollback: experimental effect graph restoration enabled; full shot/effect rewind remains unavailable\n");
+    HookLog("Rollback: experimental effect restore and future-shot withdrawal enabled; saved-shot rewind remains unavailable\n");
 }

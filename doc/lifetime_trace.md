@@ -139,18 +139,59 @@ this trades retained native capacity for same-address lifetime safety.
 Static helper hooks are `sShot::removeShotFromList` (`0x140151420`) and
 `clearShotIdEntry` (`0x140151490`). A direct `sUnit::reset` (`0x14051BBB0`)
 closes snapshot history before its destructor dispatches, complementing the
-existing earlier main/action/manager epoch barriers. There are now 24 static
+existing earlier main/action/manager epoch barriers. There are now 32 static
 lifetime hooks, plus one lazy hook per distinct shot/adopted-unit deleting target. Normal and
 headless virtual deleting calls use the same concrete detour. Unleased objects
 retain native destruction. A leased in-place/non-deleting destructor invocation
 is an ownership invariant failure, not permission to destroy retained state.
 
 This implements **terminal shot/model lifetime retention**, not shot-state
-restoration. Active `setModel`, blend-count changes, actor material-array rebuilds,
-shot-resource/collision replacement, full shot membership/ID rewind, and saved
-model CPU payloads still require integration. Terminal retention alone does not
+restoration. Concrete shot body and audited joint/depth/motion/interpolation/key
+bytes are now captured into the snapshot-owned history. Completed-construction
+DTI/size is cached at registration; the same typed span walker serves historical
+capture and dump-time observations. Historical export never dereferences their
+saved native addresses, including after an active buffer replacement or native GC.
+Active model pose/work/key retirement and normal attack-info release now use
+coarse ownership generations, described in `shot_restore_ownership_audit.md`.
+Only generation IDs/slot masks are attached to snapshots, not per-leaf leases.
+Generation storage staging is tested but not connected to frame restoration.
+Actor material/controller rebuilds, standalone geometry replacement, full shot
+membership/ID rewind and the complete world restore transaction still require
+integration. Terminal retention alone does not
 claim those mutations are safe to rewind. It also does not establish complete
 logical-capacity/dependency closure for every concrete shot's derived teardown.
+
+### Future-Shot Withdrawal
+
+`LifetimeTrace_RetireFutureShots` now runs immediately before effect restoration.
+Shots born after the target manifest's birth watermark are withdrawn from native
+execution without kill callbacks: sUnit groups/primary membership, sShot list and
+ID occupancy, and pending `{unit, category}` queue entries. The saved ID cursor
+and four cSPCData shot-spawn flag bytes are restored. Occupancy is released per
+exact abandoned allocation, not overwritten with a historical occupancy table.
+Already-quarantined future shots are not logically retired twice.
+
+The collision boundary uses native transient-record recycling (`1405B7F20`),
+passive-group/BVH clearing (`1405B5B60`), and pooled-group reset (`1405A45C0`) for
+every allocated category/pass, including unused passes. Continuous world
+registrations/configuration remain intact; a future root in a live or pending
+continuous registration fails preflight before the transient reset. Native
+postMove rebuilds the transient registrations before collision testing.
+
+Base constraint construction/destruction hooks (`1401091C0/140109240`) identify
+embedded constraints without a shot-class whitelist. Future-shot withdrawal
+unlinks those constraints non-destructively and removes their execution membership.
+Physical disposal remains deferred behind snapshot leases and known effect,
+common-shot and character shot-reference obligations. Collection repeats the
+collision fence; it does not assume one elapsed tick cleared unused passes.
+
+The native ASan/UBSan regression verifies one replayed shot, native ID reuse,
+pending-record preservation, unused-pass cleanup, constraint detachment, no kill,
+and no duplicate ID release at physical GC. Continuous registration rejection is
+tested separately. This fixes the demonstrated abandoned-future duplicate-spawn
+path, **not** saved-shot body/dependency resurrection. `StageShotGenerationStorage`
+remains unwired; full shot rewind and unsupported effect-graph closure are still
+unfinished. There is no claim of live gameplay validation for this patch.
 
 ASan/UBSan tests exercise intact joints and backpointers, animation/material and
 concrete-owned allocations, unchanged native resource ownership, multiple slot
