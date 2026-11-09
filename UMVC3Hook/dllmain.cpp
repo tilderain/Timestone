@@ -835,12 +835,13 @@ void PrepareD3D9PresentationParameters(
 	if (!parameters)
 		return;
 
-	if constexpr (FORCE_VSYNC_OFF) {
-		if (parameters->PresentationInterval != D3DPRESENT_INTERVAL_IMMEDIATE) {
-			HookLog("D3D9: forcing VSync OFF for %s (interval=0x%08X -> 0x%08X)\n",
-				operation, parameters->PresentationInterval, D3DPRESENT_INTERVAL_IMMEDIATE);
-			parameters->PresentationInterval = D3DPRESENT_INTERVAL_IMMEDIATE;
-		}
+	const UINT interval = IsLaunchVsyncEnabled()
+		? D3DPRESENT_INTERVAL_ONE : D3DPRESENT_INTERVAL_IMMEDIATE;
+	if (parameters->PresentationInterval != interval) {
+		HookLog("D3D9: applying launcher VSync %s for %s (interval=0x%08X -> 0x%08X)\n",
+			IsLaunchVsyncEnabled() ? "ON" : "OFF", operation,
+			parameters->PresentationInterval, interval);
+		parameters->PresentationInterval = interval;
 	}
 
 	// This is the requested logical mode, not a sticky "ever fullscreen" flag.

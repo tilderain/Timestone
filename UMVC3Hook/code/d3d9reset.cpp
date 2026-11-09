@@ -9,6 +9,7 @@
 #include "rollback.h"
 #include "lag_diagnostics.h"
 #include "LaunchMenu.h"
+#include "LaunchMenu_settings.h"
 #include "launchmenu_utils.h"
 #include "../IniSafe.h"
 #include "../imgui/imgui.h"
@@ -689,7 +690,7 @@ void __fastcall HookFullscreen(void* render, bool enabled)
 
 void __fastcall HookVsync(void* render, bool enabled)
 {
-    if constexpr (FORCE_VSYNC_OFF) enabled = false;
+    enabled = IsLaunchVsyncEnabled();
     if (ApplyPropertyNow()) {
         g_originalVsync(render, enabled);
         return;
@@ -1075,6 +1076,65 @@ bool D3D9Reset_BeginOverlay(IDirect3DDevice9* device)
 void D3D9Reset_EndOverlay()
 {
     ReleaseSRWLockExclusive(&g_deviceLock);
+}
+
+bool D3D9Reset_GetResolution(UINT& width, UINT& height)
+{
+    if (!g_haveActive)
+        return false;
+    width = g_active.BackBufferWidth;
+    height = g_active.BackBufferHeight;
+    return true;
+}
+
+bool D3D9Reset_SetResolution(UINT width, UINT height)
+{
+    void* render = *reinterpret_cast<void**>(_addr(0x140E179A8));
+    if (!render || !g_haveActive || width < 640 || width > 8192 ||
+        height < 480 || height > 8192 ||
+        (g_caps.MaxTextureWidth && width > g_caps.MaxTextureWidth) ||
+        (g_caps.MaxTextureHeight && height > g_caps.MaxTextureHeight) ||
+        !SaveGameResolution(static_cast<int>(width), static_cast<int>(height)))
+        return false;
+    Change change;
+    change.kind = ChangeKind::Resize;
+    change.object = render;
+    change.fullscreen = Field<uint8_t>(render, 0x3A) != 0;
+    change.dimensions = width | (static_cast<uint64_t>(height) << 32);
+    QueueChange(change);
+    return true;
+}
+
+bool D3D9Reset_IsFullscreen()
+{
+    void* render = *reinterpret_cast<void**>(_addr(0x140E179A8));
+    return render && Field<uint8_t>(render, 0x3A) != 0;
+}
+
+bool D3D9Reset_SetFullscreen(bool enabled)
+{
+    void* render = *reinterpret_cast<void**>(_addr(0x140E179A8));
+    if (!render || !g_haveActive || !SaveGameFullscreen(enabled))
+        return false;
+    Change change;
+    change.kind = ChangeKind::Fullscreen;
+    change.object = render;
+    change.fullscreen = enabled;
+    QueueChange(change);
+    return true;
+}
+
+bool D3D9Reset_SetVsync(bool enabled)
+{
+    void* render = *reinterpret_cast<void**>(_addr(0x140E179A8));
+    if (!render || !g_haveActive || !SetLaunchVsyncEnabled(enabled))
+        return false;
+    Change change;
+    change.kind = ChangeKind::Vsync;
+    change.object = render;
+    change.value = enabled;
+    QueueChange(change);
+    return true;
 }
 
 void D3D9ResetDiagnostics_RecordGraphicsSync()

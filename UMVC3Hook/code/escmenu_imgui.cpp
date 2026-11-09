@@ -10,6 +10,9 @@
 #include "d3d9reset.h"
 #include "lag_diagnostics.h"
 #include <Windows.h>
+#include <algorithm>
+#include <cstdio>
+#include <vector>
 
 extern bool ChrSelImGui_IsOpen();
 extern bool ChrSelImGui_Open();
@@ -87,6 +90,7 @@ void EscMenuImGui_Draw()
     ImGui::EndDisabled();
     if (saveFailed)
         ImGui::TextUnformatted("Could not save; previous setting retained.");
+    EscMenuImGui_DrawDisplaySettings();
     ImGui::Separator();
     const auto capture = LagDiagnostics_GetCaptureStatus();
     const bool capturing = capture == LagCaptureStatus::Starting ||
@@ -147,6 +151,71 @@ void EscMenuImGui_Draw()
         ExitGame();
 
     ImGui::End();
+}
+
+void EscMenuImGui_DrawDisplaySettings()
+{
+    UINT width = 0, height = 0;
+    if (!D3D9Reset_GetResolution(width, height))
+        return;
+
+    static std::vector<D3DDISPLAYMODE> resolutions;
+    static bool modesLoaded = false;
+    if (!modesLoaded) {
+        IDirect3D9* d3d = Direct3DCreate9(D3D_SDK_VERSION);
+        if (d3d) {
+            const UINT count = d3d->GetAdapterModeCount(D3DADAPTER_DEFAULT, D3DFMT_X8R8G8B8);
+            for (UINT i = 0; i < count; ++i) {
+                D3DDISPLAYMODE mode = {};
+                if (FAILED(d3d->EnumAdapterModes(D3DADAPTER_DEFAULT, D3DFMT_X8R8G8B8, i, &mode)) ||
+                    mode.Width < 640 || mode.Height < 480 || (mode.Width & 7) != 0)
+                    continue;
+                if (std::none_of(resolutions.begin(), resolutions.end(),
+                    [&](const D3DDISPLAYMODE& entry) {
+                        return entry.Width == mode.Width && entry.Height == mode.Height;
+                    }))
+                    resolutions.push_back(mode);
+            }
+            d3d->Release();
+            modesLoaded = true;
+        }
+    }
+
+    ImGui::Separator();
+    char current[32] = {};
+    snprintf(current, sizeof(current), "%ux%u", width, height);
+    static bool resolutionSaveFailed = false;
+    ImGui::SetNextItemWidth(180.0f);
+    if (ImGui::BeginCombo("Resolution", current)) {
+        for (const D3DDISPLAYMODE& mode : resolutions) {
+            char label[32] = {};
+            snprintf(label, sizeof(label), "%ux%u", mode.Width, mode.Height);
+            const bool selected = width == mode.Width && height == mode.Height;
+            if (ImGui::Selectable(label, selected))
+                resolutionSaveFailed = !D3D9Reset_SetResolution(mode.Width, mode.Height);
+            if (selected)
+                ImGui::SetItemDefaultFocus();
+        }
+        ImGui::EndCombo();
+    }
+    if (resolutionSaveFailed)
+        ImGui::TextUnformatted("Could not save/apply resolution");
+
+    bool fullscreen = D3D9Reset_IsFullscreen();
+    static bool fullscreenSaveFailed = false;
+    if (ImGui::Checkbox("Fullscreen", &fullscreen))
+        fullscreenSaveFailed = !D3D9Reset_SetFullscreen(fullscreen);
+    if (fullscreenSaveFailed)
+        ImGui::TextUnformatted("Could not save/apply fullscreen.");
+
+    bool vsync = IsLaunchVsyncEnabled();
+    static bool vsyncSaveFailed = false;
+    if (ImGui::Checkbox("VSync", &vsync))
+        vsyncSaveFailed = !D3D9Reset_SetVsync(vsync);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("ON makes frame pacing consistent in exchange for adding input lag");
+    if (vsyncSaveFailed)
+        ImGui::TextUnformatted("Could not save VSync.");
 }
 
 bool EscMenuImGui_IsOpen()

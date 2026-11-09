@@ -31,6 +31,7 @@ constexpr int ID_DISPLAY_HEADING = 107;
 constexpr int ID_ADVANCED_HEADING = 108;
 constexpr int ID_RENDERING_THREAD = 109;
 constexpr int ID_STEAM_ROUTING = 110;
+constexpr int ID_VSYNC = 111;
 constexpr char SETTINGS_CLASS[] = "TimestoneAdvancedConfig";
 
 bool g_settingsLoaded = false;
@@ -42,6 +43,8 @@ bool g_savedDarkMode = true;
 char g_gameResolution[64] = {};
 bool g_gameFullscreen = false;
 bool g_displayChanged = false;
+std::atomic<bool> g_vsyncEnabled { false };
+bool g_vsyncChanged = false;
 
 bool GetGameConfigPath(wchar_t (&path)[MAX_PATH])
 {
@@ -126,6 +129,7 @@ void LoadSettings()
     GetSettingsPath(path, sizeof(path));
     g_darkMode = GetPrivateProfileIntA("General", "LaunchMenuDarkMode", 1, path) != 0;
     g_savedDarkMode = g_darkMode;
+    g_vsyncEnabled.store(GetPrivateProfileIntA("Display", "VSync", 0, path) != 0);
     g_settingsLoaded = true;
 }
 
@@ -178,6 +182,16 @@ bool SaveSettings(HWND window)
     GetSettingsPath(path, sizeof(path));
     const bool darkMode = SendMessageA(GetDlgItem(window, ID_DARK_MODE),
                                        BM_GETCHECK, 0, 0) == BST_CHECKED;
+    const bool vsync = SendMessageA(GetDlgItem(window, ID_VSYNC),
+                                   BM_GETCHECK, 0, 0) == BST_CHECKED;
+    if (vsync != IsLaunchVsyncEnabled()) {
+        if (!SetLaunchVsyncEnabled(vsync)) {
+            MessageBoxA(window, "Could not save the VSync setting.",
+                        "Settings", MB_OK | MB_ICONERROR);
+            return false;
+        }
+        g_vsyncChanged = true;
+    }
     if (IsWindowEnabled(GetDlgItem(window, ID_STEAM_ROUTING))) {
         const bool relayOnly = SendMessageA(GetDlgItem(window, ID_STEAM_ROUTING),
                                             CB_GETCURSEL, 0, 0) != 0;
@@ -261,10 +275,16 @@ LRESULT CALLBACK SettingsWndProc(HWND window, UINT message,
         }
         EnableWindow(resolution, hasConfig);
         EnableWindow(fullscreen, hasConfig);
+        HWND vsync = CreateWindowA("BUTTON", "VSync (may add input latency)",
+            WS_VISIBLE | WS_CHILD | WS_TABSTOP | BS_AUTOCHECKBOX,
+            18, 106, 374, 24, window,
+            reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_VSYNC)), nullptr, nullptr);
+        SendMessageA(vsync, BM_SETCHECK,
+                     IsLaunchVsyncEnabled() ? BST_CHECKED : BST_UNCHECKED, 0);
         if (!hasConfig)
             CreateWindowA("STATIC", "config.ini not found. Run the game once to create it.",
-                WS_VISIBLE | WS_CHILD, 18, 106, 374, 34, window, nullptr, nullptr, nullptr);
-        const int headingY = hasConfig ? 118 : 150;
+                WS_VISIBLE | WS_CHILD, 18, 138, 374, 34, window, nullptr, nullptr, nullptr);
+        const int headingY = hasConfig ? 150 : 182;
         CreateWindowA("STATIC", "Advanced",
             WS_VISIBLE | WS_CHILD, 34, headingY, 80, 20, window,
             reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_ADVANCED_HEADING)), nullptr, nullptr);
@@ -409,6 +429,39 @@ bool IsLaunchMenuDarkModeEnabled()
     return g_darkMode;
 }
 
+bool IsLaunchVsyncEnabled()
+{
+    return g_vsyncEnabled.load();
+}
+
+bool SetLaunchVsyncEnabled(bool enabled)
+{
+    char path[MAX_PATH] = {};
+    GetSettingsPath(path, sizeof(path));
+    if (!IniSafe_WriteString("Display", "VSync", enabled ? "1" : "0", path))
+        return false;
+    g_vsyncEnabled.store(enabled);
+    return true;
+}
+
+bool SaveGameResolution(int width, int height)
+{
+    if (width < 640 || width > 8192 || height < 480 || height > 8192)
+        return false;
+    wchar_t path[MAX_PATH] = {}, value[64] = {};
+    if (!GetGameConfigPath(path))
+        return false;
+    swprintf(value, 64, L"%dx%d", width, height);
+    return WritePrivateProfileStringW(L"DISPLAY", L"Resolution", value, path) != FALSE;
+}
+
+bool SaveGameFullscreen(bool enabled)
+{
+    wchar_t path[MAX_PATH] = {};
+    return GetGameConfigPath(path) &&
+        WritePrivateProfileStringW(L"DISPLAY", L"FullScreen", enabled ? L"ON" : L"OFF", path);
+}
+
 void ShowAdvancedConfigModal(HWND owner)
 {
     HINSTANCE instance = GetModuleHandleA(nullptr);
@@ -430,7 +483,7 @@ void ShowAdvancedConfigModal(HWND owner)
     const UINT dpi = GetWindowDpi(owner);
     wchar_t gamePath[MAX_PATH] = {};
     RECT bounds = {0, 0, MulDiv(410, dpi, 96),
-                   MulDiv(GetGameConfigPath(gamePath) ? 388 : 420, dpi, 96)};
+                   MulDiv(GetGameConfigPath(gamePath) ? 420 : 452, dpi, 96)};
     using AdjustWindowRectExForDpiFn = BOOL (WINAPI*)(LPRECT, DWORD, BOOL, DWORD, UINT);
     const auto adjustForDpi = reinterpret_cast<AdjustWindowRectExForDpiFn>(
         GetProcAddress(GetModuleHandleA("user32.dll"), "AdjustWindowRectExForDpi"));
@@ -509,10 +562,18 @@ bool ApplyAdvancedLaunchConfig()
 
 void ApplyLaunchDisplayConfig()
 {
+    void* render = *reinterpret_cast<void**>(_addr(0x140E179A8));
+    if (g_vsyncChanged) {
+        g_vsyncChanged = false;
+        if (render) {
+            // Queue on the native apply boundary, just like resolution changes.
+            using SetVsyncFn = void(__fastcall*)(void*, bool);
+            reinterpret_cast<SetVsyncFn>(_addr(0x140540D80))(render, IsLaunchVsyncEnabled());
+        }
+    }
     if (!g_displayChanged)
         return;
     g_displayChanged = false;
-    void* render = *reinterpret_cast<void**>(_addr(0x140E179A8));
     if (!render)
         return; // Blocking launches have not created their renderer yet.
     uint32_t dimensions[2] = {};

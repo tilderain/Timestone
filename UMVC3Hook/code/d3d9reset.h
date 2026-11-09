@@ -8,8 +8,6 @@
 // UI creation job, never from arbitrary CreateDevice calls. A pending transition keeps the
 // native game stack suspended; the UI and network threads remain independent.
 bool D3D9Reset_InstallNativeHooks();
-// False respects native VSync settings; true requests immediate presentation.
-inline constexpr bool FORCE_VSYNC_OFF = true;
 // Rendering is forced inline; runtime selection is disabled.
 inline constexpr bool D3D9Reset_RenderingThreadOverrideAvailable = false;
 // Always returns 0 (force inline); the setter rejects other modes.
@@ -22,6 +20,13 @@ bool D3D9Reset_SetRenderingThreadOverride(int mode);
 // lease across the original EndScene, Reset, or a native UI-thread submission.
 bool D3D9Reset_BeginOverlay(IDirect3DDevice9* device);
 void D3D9Reset_EndOverlay();
+// Call while holding the overlay lease. Setters persist and queue changes;
+// native properties and device resets are applied only at the safe boundary.
+bool D3D9Reset_GetResolution(UINT& width, UINT& height);
+bool D3D9Reset_SetResolution(UINT width, UINT height);
+bool D3D9Reset_IsFullscreen();
+bool D3D9Reset_SetFullscreen(bool enabled);
+bool D3D9Reset_SetVsync(bool enabled);
 
 void D3D9ResetDiagnostics_RecordGraphicsSync();
 void D3D9ResetDiagnostics_BeginAppReset(bool forwarded);
