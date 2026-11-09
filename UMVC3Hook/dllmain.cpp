@@ -1616,6 +1616,8 @@ void __fastcall Hook_titleLogoUpdate(uintptr_t param_1)
 					HookLog("UMVC3Hook: Background common archives ready; waiting for Launch\n");
 				}
 			}
+			// Frame pacer is not set yet, just sleep
+			Sleep(commonReady ? 100 : 34);
 			return;
 		}
 		CompleteLaunchInitialization(g_backgroundLaunchOption);
