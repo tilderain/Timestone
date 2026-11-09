@@ -1,4 +1,203 @@
 // Included in the lifetime recorder's private namespace.
+// The unit fence precedes the manager and global list locks. These list locks
+// are separate globals, not fields in the sShot singleton.
+struct ShotWorldGuard {
+    void* manager = nullptr;
+    ShotWorldGuard() {
+        manager = Read<void*>((void*)_addr(0x140D47F40), 0);
+        if (!manager) return;
+        EnterCriticalSection((LPCRITICAL_SECTION)(static_cast<uint8_t*>(manager) + 8));
+        for (size_t team = 0; team < 10; ++team)
+            EnterCriticalSection((LPCRITICAL_SECTION)(_addr(0x140D48120) + team * 0x28));
+    }
+    ~ShotWorldGuard() {
+        if (!manager) return;
+        for (size_t team = 10; team; --team)
+            LeaveCriticalSection((LPCRITICAL_SECTION)(_addr(0x140D48120) + (team - 1) * 0x28));
+        LeaveCriticalSection((LPCRITICAL_SECTION)(static_cast<uint8_t*>(manager) + 8));
+    }
+};
+
+// Caller owns both native fences and the recorder lock. No historical address
+// is dereferenced by the eventual registration stage; list entries carry IDs.
+void CaptureShotWorld(SnapshotManifest& saved, void* manager)
+{
+    saved.shotManager = manager;
+    saved.shotCursor = manager ? Read<uint32_t>(manager, 0x438) : 0;
+    saved.shotConfig = Read<void*>((void*)_addr(0x140D50F88), 0);
+    saved.shotSlotFlags = saved.shotConfig ? Read<uint32_t>(saved.shotConfig, 0x4A89C) : 0;
+    saved.shotOccupancy.fill(0); saved.shotControls.fill(0);
+    saved.shotPending.clear();
+    for (auto& list : saved.shotLists) list.clear();
+    if (!manager) return;
+    std::memcpy(saved.shotOccupancy.data(), static_cast<uint8_t*>(manager) + 0x38, 0x400);
+    std::memcpy(saved.shotControls.data(), static_cast<uint8_t*>(manager) + 0x43C, 0xC);
+    const auto id = [](void* object) {
+        const auto* entry = Find(object, false);
+        return entry && entry->kind == Kind::Shot ? entry->id : uint64_t(0);
+    };
+    for (size_t team = 0; team < 10; ++team) {
+        void* sentinel = (void*)(_addr(0x140D47F90) + team * 0x28 + 8);
+        void* previous = sentinel;
+        for (void* node = Read<void*>(sentinel, 8); node && node != sentinel; node = Read<void*>(node, 8)) {
+            if (saved.shotLists[team].size() == RegistrySize || Read<void*>(node, 0x10) != previous) std::abort();
+            void* object = static_cast<uint8_t*>(node) - 0x1450;
+            saved.shotLists[team].push_back({object, id(object)});
+            previous = node;
+        }
+        // Zeroed, not-yet-initialized heads are empty too; native initialized
+        // heads must have the matching tail even when the list is empty.
+        if (Read<void*>(sentinel, 8) && Read<void*>(sentinel, 0x10) != previous) std::abort();
+    }
+    const uint32_t count = Read<uint32_t>(manager, 0x2448);
+    if (count > 512) std::abort();
+    for (uint32_t i = 0; i < count; ++i) {
+        void* object = Read<void*>(manager, 0x448 + size_t(i) * 0x10);
+        saved.shotPending.push_back({object, Read<uint64_t>(manager, 0x450 + size_t(i) * 0x10), id(object)});
+    }
+}
+
+// Registration stage of the unpublished whole-shot transaction. The caller must
+// first restore every participating body/dependency, then reconcile sUnit and
+// constraints before any native execution resumes. Never call this by itself
+// from Rollback_RestoreSnapshot.
+[[maybe_unused]] void StageShotManagerState(const SnapshotManifest& saved, uint32_t bit)
+{
+    UnitGuard unitFence;
+    ShotWorldGuard shotFence;
+    if (!saved.valid || !unitFence.manager || saved.unitManager != unitFence.manager ||
+        saved.thread != GetCurrentThreadId() || !shotFence.manager || saved.shotManager != shotFence.manager ||
+        saved.shotConfig != Read<void*>((void*)_addr(0x140D50F88), 0) || !bit || (bit & (bit - 1))) std::abort();
+    std::vector<const Identity*> members;
+    std::vector<Identity*> identities;
+    std::vector<uint8_t> linked;
+    AcquireSRWLockExclusive(&g_lock);
+    const auto slot = unsigned((saved.frame % ROLLBACK_WINDOW + ROLLBACK_WINDOW) % ROLLBACK_WINDOW);
+    if (bit != (uint32_t(1) << slot) || g_liveSnapshots[slot] != &saved) std::abort();
+    for (const auto& member : saved.members) {
+        if (member.kind != Kind::Shot || member.occupancy != Occupancy::Live) continue;
+        auto* current = Find(member.object, false);
+        if (!current || current->id != member.id || !(current->snapshots & bit) ||
+            (current->occupancy != Occupancy::Live && current->occupancy != Occupancy::Quarantined)) std::abort();
+        members.push_back(&member); identities.push_back(current);
+    }
+    for (const auto& current : g_registry)
+        if (current.kind == Kind::Shot && current.occupancy == Occupancy::Live &&
+            std::none_of(members.begin(), members.end(), [&](auto* member) {
+                return member->object == current.object && member->id == current.id;
+            })) std::abort();
+    ReleaseSRWLockExclusive(&g_lock);
+    linked.resize(members.size());
+    const auto index = [&](const ShotListEntry& entry) {
+        for (size_t i = 0; i < members.size(); ++i)
+            if (members[i]->object == entry.object && members[i]->id == entry.id) return i;
+        std::abort();
+    };
+    const auto contains = [&](void* object) {
+        return std::any_of(members.begin(), members.end(), [&](auto* member) { return member->object == object; });
+    };
+    bool occupied[256]{};
+    if (!saved.shotCursor || saved.shotCursor > 256 || saved.shotPending.size() > 512) std::abort();
+    for (const auto* member : members) {
+        const auto at = std::find_if(saved.shots.begin(), saved.shots.end(),
+            [&](const auto& shot) { return shot.id == member->id; });
+        if (at == saved.shots.end()) std::abort();
+        const auto body = std::find_if(at->spans.begin(), at->spans.end(),
+            [](const auto& span) { return !std::strcmp(span.name, "body"); });
+        if (body == at->spans.end() || body->memory.address != member->object || body->memory.size < 0x2140 ||
+            body->memory.offset > at->payload.size() || body->memory.size > at->payload.size() - body->memory.offset)
+            std::abort();
+        const void* image = at->payload.data() + body->memory.offset;
+        const uint32_t nativeId = Read<uint32_t>(image, 0x1F50), team = Read<uint32_t>(image, 0x1F54);
+        // Body ownership is deliberately not installed here. In particular an
+        // old list address is not permission to copy a shot or revive its ID.
+        if (nativeId > 255 || team >= 10 || Read<uint32_t>(member->object, 0x1F50) != nativeId ||
+            Read<uint32_t>(member->object, 0x1F54) != team) std::abort();
+        if (!member->shotRegistrationReleased && nativeId) {
+            if (occupied[nativeId] || !saved.shotOccupancy[nativeId]) std::abort();
+            occupied[nativeId] = true;
+        }
+    }
+    for (size_t team = 0; team < 10; ++team) {
+        for (const auto& entry : saved.shotLists[team]) {
+            const size_t i = index(entry);
+            if (linked[i] || !members[i]->shotLinked ||
+                Read<uint32_t>(entry.object, 0x1F54) != team) std::abort();
+            linked[i] = true;
+        }
+        // All future-only shots must already be detached. A surviving foreign
+        // node must not be silently lost by replacing a list header.
+        void* sentinel = (void*)(_addr(0x140D47F90) + team * 0x28 + 8);
+        size_t count = 0;
+        void* previous = sentinel;
+        for (void* node = Read<void*>(sentinel, 8); node && node != sentinel; node = Read<void*>(node, 8)) {
+            if (++count > RegistrySize || Read<void*>(node, 0x10) != previous ||
+                !contains(static_cast<uint8_t*>(node) - 0x1450)) std::abort();
+            previous = node;
+        }
+        if (Read<void*>(sentinel, 8) && Read<void*>(sentinel, 0x10) != previous) std::abort();
+    }
+    for (size_t i = 0; i < members.size(); ++i)
+        if (bool(linked[i]) != members[i]->shotLinked) std::abort();
+    std::vector<ShotPendingEntry> foreign, pending;
+    void* manager = shotFence.manager;
+    const uint32_t count = Read<uint32_t>(manager, 0x2448);
+    if (count > 512) std::abort();
+    AcquireSRWLockExclusive(&g_lock);
+    for (uint32_t i = 0; i < count; ++i) {
+        void* object = Read<void*>(manager, 0x448 + size_t(i) * 0x10);
+        const auto* current = Find(object, false);
+        if (current && current->kind == Kind::Shot) {
+            if (!contains(object)) std::abort();
+        } else foreign.push_back({object, Read<uint64_t>(manager, 0x450 + size_t(i) * 0x10), 0});
+    }
+    ReleaseSRWLockExclusive(&g_lock);
+    // Historical non-shot queue pointers confer no lease. Only use a matching
+    // *current* foreign record, never dereference or resurrect an old address.
+    std::vector<bool> used(foreign.size());
+    for (const auto& entry : saved.shotPending) {
+        if (entry.id) {
+            index({entry.object, entry.id});
+            pending.push_back(entry);
+        } else for (size_t i = 0; i < foreign.size(); ++i) {
+            if (used[i] || foreign[i].object != entry.object || foreign[i].category != entry.category) continue;
+            used[i] = true; pending.push_back(foreign[i]); break;
+        }
+    }
+    for (size_t i = 0; i < foreign.size(); ++i) if (!used[i]) pending.push_back(foreign[i]);
+    if (pending.size() > 512) std::abort();
+    // Preflight above performs no native state mutation. Commit contains no
+    // native callback or allocation and preserves node vtables/self pointers.
+    for (const auto* member : members) {
+        Write(member->object, 0x1458, uintptr_t(0)); Write(member->object, 0x1460, uintptr_t(0));
+    }
+    for (size_t team = 0; team < 10; ++team) {
+        void* sentinel = (void*)(_addr(0x140D47F90) + team * 0x28 + 8);
+        void* previous = sentinel;
+        for (const auto& entry : saved.shotLists[team]) {
+            void* node = static_cast<uint8_t*>(entry.object) + 0x1450;
+            Write(previous, 8, node); Write(node, 0x10, previous); previous = node;
+        }
+        Write(previous, 8, sentinel); Write(sentinel, 0x10, previous);
+    }
+    std::memcpy(static_cast<uint8_t*>(manager) + 0x38, saved.shotOccupancy.data(), 0x400);
+    Write(manager, 0x438, saved.shotCursor);
+    std::memcpy(static_cast<uint8_t*>(manager) + 0x43C, saved.shotControls.data(), 0xC);
+    for (size_t i = 0; i < pending.size(); ++i) {
+        Write(manager, 0x448 + i * 0x10, pending[i].object);
+        Write(manager, 0x450 + i * 0x10, pending[i].category);
+    }
+    Write(manager, 0x2448, uint32_t(pending.size()));
+    if (saved.shotConfig) Write(saved.shotConfig, 0x4A89C, saved.shotSlotFlags);
+    AcquireSRWLockExclusive(&g_lock);
+    for (size_t i = 0; i < members.size(); ++i) {
+        identities[i]->shotLinked = linked[i];
+        identities[i]->shotRegistrationReleased = members[i]->shotRegistrationReleased;
+    }
+    Push("shot_manager_staged", nullptr, nullptr, uint32_t(saved.frame), members.size(), pending.size(), 0, false);
+    ReleaseSRWLockExclusive(&g_lock);
+}
+
 // Constraint construction identifies embedded constraints without a shot whitelist.
 std::unordered_map<void*, bool> g_constructedConstraints;
 void* (__fastcall* oConstructConstraint)(void*) = nullptr;

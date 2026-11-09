@@ -139,7 +139,7 @@ this trades retained native capacity for same-address lifetime safety.
 Static helper hooks are `sShot::removeShotFromList` (`0x140151420`) and
 `clearShotIdEntry` (`0x140151490`). A direct `sUnit::reset` (`0x14051BBB0`)
 closes snapshot history before its destructor dispatches, complementing the
-existing earlier main/action/manager epoch barriers. There are now 32 static
+existing earlier main/action/manager epoch barriers. There are now 34 static
 lifetime hooks, plus one lazy hook per distinct shot/adopted-unit deleting target. Normal and
 headless virtual deleting calls use the same concrete detour. Unleased objects
 retain native destruction. A leased in-place/non-deleting destructor invocation
@@ -192,6 +192,63 @@ tested separately. This fixes the demonstrated abandoned-future duplicate-spawn
 path, **not** saved-shot body/dependency resurrection. `StageShotGenerationStorage`
 remains unwired; full shot rewind and unsupported effect-graph closure are still
 unfinished. There is no claim of live gameplay validation for this patch.
+
+### Saved-Shot Restore Stages
+
+`lifetime_shot_cpu.inl` now supplies the common typed CPU-field stage. Its native
+mock regression restores timer `11` to the saved `3`, then replays once to `4`,
+together with pose/position/life/attack clock/phase. It preserves live materials,
+sound references, topology and unreviewed concrete fields. The stage returns
+`ReviewedSubset` and remains unwired pending reference/lifecycle publication;
+see `shot_cpu_restore.md` for exact ranges, native evidence and exclusions.
+
+Snapshot capture now also retains the complete shot ID table, manager controls,
+ordered identities in all ten global shot lists, and pending `{unit, category}`
+records. Capture holds the native unit fence, shot-manager critical section and
+global shot-list locks in that order, before the recorder lock.
+
+`StageShotManagerState` is an isolated registration stage, **not called by frame
+restore**. It validates snapshot leases and restored body IDs/teams, rejects
+duplicate ID claims or surviving foreign shot-list nodes, then installs the saved
+ordered lists, occupancy/cursor, controls and spawn flags without native spawn or
+kill callbacks. Saved pending shots are restored with the entire category word;
+historical foreign queue addresses are never revived. Only current foreign queue
+records are retained, and queue overflow fails before commit. The stage does not
+restore bodies, constraints or scheduler membership, or mark retained shots live.
+
+### Live Presentation Policy
+
+Shot storage staging leaves material sources/tables, material objects and their
+state/playback/access buffers, per-part draw modes, and the seven material-vjob
+arrays live. It neither follows these pointers during capture nor reinstalls them
+from a saved body. The raw shot-body diagnostic still contains their opaque root
+values; it is not permission to restore presentation ownership. There are no deep
+material/vjob generations, draw-resource/string hooks, or speculative render/cache
+preparation for this removed restore path. The existing character material repair
+and controller restore behavior is unchanged. Startup reports
+`shot_presentation_live=1`.
+
+Native UV/color/pattern and material animation paths have temporal state, but the
+audit established presentation consumers, not a demonstrated shot-gameplay
+dependency requiring deep material rewind. Native mutability alone does not
+justify snapshotting the graph. A future controller-state adapter needs concrete
+consumer evidence and should preserve live ownership, as the character path does.
+
+The sixteen motion-list and four actor command-resource occurrences remain
+simulation ownership domains. Their live interpreters can borrow old bindings
+after owned-slot replacement; displaced references are retained through native
+owner destruction, without snapshot addRefs. Their setter hooks and collection
+policy are independent of material presentation.
+
+ASan/UBSan regressions cover registration staging for both live and retained
+shots, reflection/list ordering, pending-record preservation, expired leases,
+duplicate ID claims, queue overflow, and command/motion resource borrowers.
+They explicitly verify that registration staging alone does **not** rewind a
+shot timer or revive its execution state. Full saved-shot rollback remains
+disabled pending coherent shot CPU/dependency and reciprocal constraint closure,
+not deep material rewind. A poisoned-pointer regression verifies that shot capture
+does not inspect material/vjob pointees and storage staging preserves the live
+presentation fields byte-for-byte.
 
 ASan/UBSan tests exercise intact joints and backpointers, animation/material and
 concrete-owned allocations, unchanged native resource ownership, multiple slot
