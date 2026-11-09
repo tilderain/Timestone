@@ -12,13 +12,20 @@ regular packed regions and other auxiliary snapshot state. Snapdump shares that
 same capture with its 255-frame history. The former separate 16-slot lifetime
 data store is gone; the tracer keeps only a non-owning 16-slot lease index.
 Effect roots/CPU graph bytes are captured once, used by rollback, and retained
-by diagnostic history without a second capture or byte copy. Identity, effect,
+by diagnostic history without a second capture or byte copy. Shot bodies and
+audited model CPU spans are now also captured once into the shared snapshot.
+They are historical data, **not yet enabled for restoration**: active ownership
+replacement, collision closure and shot registration rewind remain unfinished.
+Identity, effect,
 span, and payload vectors grow with actual captured contents and reuse their
 capacity when the owning snapshot/history bank is overwritten.
 
 Names, export payload assembly, hashes, and compression still run **only in
 `SnapDump_WriteHistory`**. The per-frame integration adds shared-storage ownership
-bookkeeping, not a second native-object scan, effect capture, or model capture.
+bookkeeping, not a second effect/model byte copy for diagnostic history. Historical
+shot/model capture necessarily adds per-frame byte copying for state that was
+previously only observed at dump time. Completed-construction DTI and extent are
+cached when installing the deleting hook, rather than rediscovered every frame.
 The longer history retains more CPU snapshot memory; it does not retain native
 objects/resources longer or add native resource references.
 
@@ -30,6 +37,16 @@ no trailing v3/v4 shot-recipe records:
 - `lifetime.shot.ID.identity`: four little-endian qwords: allocation ID,
   revision, saved occupancy, and birth vtable. This is a lifetime census, not
   shot-body rewind state.
+- `lifetime.shot.ID.body` and `lifetime.shot.ID.model.*`: historical copies of
+  the concrete shot body and the same typed model spans described below. Stored
+  in the snapshot-owned capture, independently of the native buffers' later
+  contents or lifetime. These do not yet include collision closure, material
+  graphs, or all derived owned allocations, and are not used for shot restoration.
+- `lifetime.shot.ID.collision.*`: saved root, pointer-array, wrapper and primitive
+  bytes for the normal shot attack cohorts. Names carry root-slot and child-index
+  suffixes to keep regions distinct. Their allocations are held by coarse
+  ownership generations, not individual snapshot allocation leases. Storage
+  staging is not yet a coherent shot/manager/collider restore transaction.
 - `observed.shot.ID.identity`: dump-time ID, revision, occupancy, native DTI,
   and DTI size, each as a little-endian qword.
 - `observed.shot.ID.body`: dump-time concrete shot body, including inline model

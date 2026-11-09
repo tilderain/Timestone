@@ -214,7 +214,7 @@ function lifetimeInspector(frameNumber, rawBodies) {
     const marker=frame.regions.find(region=>region.name==='diagnostic.lifetime');
     const meta=marker && marker.size>=24 ? regionView(frame,marker) : null;
     const available=meta && u64(meta,8)===1, observationFrame=meta ? Number(meta.getBigInt64(16,true)) : -1;
-    html+=`<div class="section"><h2>${escape(dump.role)} Lifetime Data</h2><p class="hint">${available?`${frame.shotCount} saved shot identities; ${frame.effects} saved effects. Roots/CPU graphs come from shared snapshot history.`:'Historical lifetime data unavailable: no lifetime capture was stored for this frame.'} Shot bodies and model buffers are dump-time observations only, not historical snapshots and not used for snapshot comparison.</p>`;
+    html+=`<div class="section"><h2>${escape(dump.role)} Lifetime Data</h2><p class="hint">${available?`${frame.shotCount} saved shot identities; ${frame.effects} saved effects. Saved bodies/CPU spans come from shared snapshot history; captured shot/model bytes are not yet a supported restore contract.`:'Historical lifetime data unavailable: no lifetime capture was stored for this frame.'} Dump-time observations are not historical snapshots and are not used for snapshot comparison.</p>`;
     if(observationFrame>=0) html+=`<p class="warn">Dump-time observation context: frame ${observationFrame}. Not the selected frame's shot/model state.</p>`;
     const groups=new Map();
     for(const region of lifetimeRegions(frame)) {
