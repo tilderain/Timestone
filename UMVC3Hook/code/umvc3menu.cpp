@@ -11,6 +11,7 @@
 #include "framestepper.h"
 #include "d3d9reset.h"
 #include "LaunchMenu_settings.h"
+#include "escmenu_imgui.h"
 #include <intrin.h>
 
 bool runAheadEnabled = false;
@@ -98,6 +99,7 @@ void UMVC3Menu::Draw()
 				"ON uses the render worker and adds one tick of display latency.");
 			ImGui::EndDisabled();
 			if (saveFailed) ImGui::TextUnformatted("Could not save setting; previous selection retained.");
+			EscMenuImGui_DrawDisplaySettings();
 			ImGui::EndTabItem();
 		}
 		ImGui::EndTabBar();
