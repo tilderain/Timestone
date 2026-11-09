@@ -90,6 +90,7 @@ void EscMenuImGui_Draw()
     ImGui::EndDisabled();
     if (saveFailed)
         ImGui::TextUnformatted("Could not save; previous setting retained.");
+    EscMenuImGui_DrawDisplaySettings();
     ImGui::Separator();
     const auto capture = LagDiagnostics_GetCaptureStatus();
     const bool capturing = capture == LagCaptureStatus::Starting ||

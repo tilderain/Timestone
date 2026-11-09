@@ -1,6 +1,84 @@
 # Desync Snapshot Dumps
 
-## Current recorder contract — source checked 2026-10-26
+## Lifetime Diagnostics, 2026-11-08
+
+The writer now emits **USDP version 5**. `ndjson-viewer-2.html` and
+`tools/compare_desync_dumps.py` read v5 as well as existing v1-v4 dumps.
+The older audit below describes the removed reconstruction-era shot records,
+not the current lifetime implementation.
+
+`RollbackSnapshotSlot::lifetime` now owns the lifetime capture alongside the
+regular packed regions and other auxiliary snapshot state. Snapdump shares that
+same capture with its 255-frame history. The former separate 16-slot lifetime
+data store is gone; the tracer keeps only a non-owning 16-slot lease index.
+Effect roots/CPU graph bytes are captured once, used by rollback, and retained
+by diagnostic history without a second capture or byte copy. Identity, effect,
+span, and payload vectors grow with actual captured contents and reuse their
+capacity when the owning snapshot/history bank is overwritten.
+
+Names, export payload assembly, hashes, and compression still run **only in
+`SnapDump_WriteHistory`**. The per-frame integration adds shared-storage ownership
+bookkeeping, not a second native-object scan, effect capture, or model capture.
+The longer history retains more CPU snapshot memory; it does not retain native
+objects/resources longer or add native resource references.
+
+Version 5 uses the existing named-region manifest and compressed payload, with
+no trailing v3/v4 shot-recipe records:
+
+- `lifetime.effect.ID.root`: saved `0x2C0` effect root from the lifetime manifest.
+- `lifetime.effect.ID.graph.N`: the corresponding saved CPU graph span bytes.
+- `lifetime.shot.ID.identity`: four little-endian qwords: allocation ID,
+  revision, saved occupancy, and birth vtable. This is a lifetime census, not
+  shot-body rewind state.
+- `observed.shot.ID.identity`: dump-time ID, revision, occupancy, native DTI,
+  and DTI size, each as a little-endian qword.
+- `observed.shot.ID.body`: dump-time concrete shot body, including inline model
+  and motion state. Sizes outside `0x2140..0x100000` leave only the identity record.
+- `observed.shot.ID.model.*`: dump-time joint payload, joint-depth table,
+  interpolation buffer, up to eight motion joint-work buffers, and the shared
+  slot-zero keyframe allocation. Null/zero-size buffers are omitted. Joint count
+  comes from the native allocation cookie; motion-work capture uses the smaller
+  stored joint count to stay within buffers potentially resized by `setBlendNum`.
+  Joint/key counts above 65536 are not traversed. This is not a complete model
+  ownership graph: resource contents, material/cache graphs, constraints, and GPU
+  allocations are not recursively captured.
+- `diagnostic.lifetime`: three signed little-endian qwords: requested snapshot
+  frame, retained-manifest availability (`0` or `1`), and dump-time observation
+  context frame (`-1` when no observation is attached).
+
+Historical effect data and shot identities now cover the full **255-frame
+snapdump history** when recording is enabled. Dropping a live rollback slot releases
+its native-object and graph lease bits without invalidating or erasing the saved
+bytes in history. Clearing live rollback snapshots also preserves dump history;
+resetting snapdump releases its storage references. History bank overwrite and
+same-frame resimulation reuse/replace the corresponding capture, just as they do
+the regular region backing. Capture availability is reported explicitly if none
+was recorded (including older v5 dumps produced by the earlier 16-frame exporter).
+Historical export reads saved bytes only, never dereferencing saved native addresses.
+
+Shot/model observations are taken once per dump for live and quarantined registered
+shots and attached only to its newest included frame. They describe the world at
+**write time**, which may differ from that frame. The viewer labels them accordingly
+and does not plot them as historical shots. Both comparison tools exclude
+`observed.*` and `diagnostic.*` from historical comparisons. Raw bytes are available
+through lazy inspector expanders. IDs are peer-local lifetime allocation IDs, not
+a guarantee of matching gameplay identities across diverged peers.
+
+The viewer's default-on **Show effects** toggle plots saved effect world origins
+as green filled host diamonds and pink outlined client diamonds. Inactive owners
+are dimmed. These are owner origins, not reconstructed particles or effect bounds.
+Effects do not influence camera auto-fit; offscreen markers are culled.
+Position comes from `uCoord::mWmat` row 3 at root `+0xF0`, not attachment-local
+`mPos` at `+0x50` (Ghidra `uCoord`, `uBaseEffect`, and
+`uCoord__translateWorldPosition` at `0x140547490`, checked 2026-11-08). The
+inspector shows both positions and the saved effect timer. No game-side capture
+or per-frame export processing is added by this display.
+
+Frame shot/effect counts describe exported retained-manifest records (zero when
+unavailable). Collision-clone and model-render-state counts keep their previous
+meaning; observed model buffers are not added to historical render-state counts.
+
+## Previous Recorder Audit, 2026-10-26
 
 Direct checks used `rollback_snapshot.cpp`, `rollback_restore.cpp`,
 `rollback_resim.cpp`, `rollback_tick.cpp`, `rollback_snapdump.cpp/.h`,

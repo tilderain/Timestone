@@ -13,7 +13,7 @@ from pathlib import Path
 
 
 MAGIC = 0x50445355
-VERSIONS = {1, 2, 3, 4}
+VERSIONS = {1, 2, 3, 4, 5}
 HEADER = struct.Struct("<IIIIiIQQQ41sB6s")
 FRAME = struct.Struct("<i7I4QB7s")
 REGION_V1 = struct.Struct("<5QB7s")
@@ -278,6 +278,7 @@ class PointerResolver:
         intervals = sorted(
             (region.address, region.address + region.size, index)
             for index, region in enumerate(frame.regions)
+            if region.address and not region.name.startswith(("observed.", "diagnostic."))
         )
         self.starts = [item[0] for item in intervals]
         self.intervals = intervals
@@ -397,7 +398,7 @@ def load_dump(path):
                  "collision_clones": clone_count, "model_render_states": model_count},
                 snapshot_hash, manifest_hash, data, [],
             )
-            if version >= 3:
+            if version in (3, 4):
                 for shot_index in range(shot_count):
                     start = file.tell()
                     shot_struct = SHOT_V4 if version >= 4 else SHOT_V3
@@ -857,6 +858,12 @@ def compare_frame(dump_a, dump_b, frame_a, frame_b, max_regions, max_diffs,
                     structs=None, pointer_overrides=None, details=True):
     resolver_a = PointerResolver(dump_a, frame_a)
     resolver_b = PointerResolver(dump_b, frame_b)
+    # Dump-time observations do not describe the historical frame and cannot
+    # participate in its determinism verdict. Keep them available in the reader.
+    regions_a = [r for r in frame_a.regions
+                 if not r.name.startswith(("observed.", "diagnostic."))]
+    regions_b = [r for r in frame_b.regions
+                 if not r.name.startswith(("observed.", "diagnostic."))]
     result = {
         "frame": frame_a.frame,
         "inputs": {
@@ -870,17 +877,17 @@ def compare_frame(dump_a, dump_b, frame_a, frame_b, max_regions, max_diffs,
             ),
         },
         "structure": {
-            "a_region_count": len(frame_a.regions),
-            "b_region_count": len(frame_b.regions),
+            "a_region_count": len(regions_a),
+            "b_region_count": len(regions_b),
             "a_counts": frame_a.counts,
             "b_counts": frame_b.counts,
         },
         "regions": [],
         "shots": [],
     }
-    region_count = min(len(frame_a.regions), len(frame_b.regions))
+    region_count = min(len(regions_a), len(regions_b))
     for index in range(region_count):
-        region_a, region_b = frame_a.regions[index], frame_b.regions[index]
+        region_a, region_b = regions_a[index], regions_b[index]
         address_a = resolver_a.resolve(region_a.address)
         address_b = resolver_b.resolve(region_b.address)
         owner_a = resolver_a.resolve(region_a.owner_slot)
@@ -956,7 +963,7 @@ def compare_frame(dump_a, dump_b, frame_a, frame_b, max_regions, max_diffs,
         shot.get("body_different_bytes", 1) or 1 for shot in result["shots"]
     )
     result["structure_matches"] = (
-        len(frame_a.regions) == len(frame_b.regions) and
+        len(regions_a) == len(regions_b) and
         # Effect recipes describe peer-local presentation objects. Their
         # counts can legitimately differ while authoritative regions match.
         all(
@@ -969,7 +976,7 @@ def compare_frame(dump_a, dump_b, frame_a, frame_b, max_regions, max_diffs,
             resolver_a.resolve(a.address) == resolver_b.resolve(b.address) and
             resolver_a.resolve(a.owner_slot) == resolver_b.resolve(b.owner_slot) and
             resolver_a.resolve(a.expected_vtable) == resolver_b.resolve(b.expected_vtable)
-            for a, b in zip(frame_a.regions, frame_b.regions)
+            for a, b in zip(regions_a, regions_b)
         )
     )
     return result

@@ -107,23 +107,29 @@ struct EffectState {
     uint64_t generation = 0;
     uint8_t root[0x2C0]{};
 };
-struct SnapshotManifest {
+} // namespace
+
+struct LifetimeSnapshot {
     bool valid = false;
     int32_t frame = -1;
     size_t count = 0;
-    Identity members[RegistrySize];
+    std::vector<Identity> members;
     void* unitManager = nullptr;
     uint32_t thread = 0;
     uint64_t birthWatermark = 0;
     std::vector<void*> primary[64];
     std::vector<void*> groups[64];
     size_t effectCount = 0;
-    EffectState effects[QuarantineLimit];
+    std::vector<EffectState> effects;
     size_t spanCount = 0, payloadBytes = 0;
-    GraphSpan spans[SpanCapacity];
-    uint8_t payload[PayloadCapacity];
+    std::vector<GraphSpan> spans;
+    std::vector<uint8_t> payload;
 };
-SnapshotManifest g_manifests[ROLLBACK_WINDOW];
+
+namespace {
+using SnapshotManifest = LifetimeSnapshot;
+// Non-owning lease index only. Captured state belongs to the snapshot storage.
+SnapshotManifest* g_liveSnapshots[ROLLBACK_WINDOW]{};
 std::vector<void*> g_groupScratch[64];
 std::vector<void*> g_primaryScratch[64];
 std::vector<void*> g_membershipLive, g_membershipSaved, g_membershipOrder;
@@ -800,7 +806,8 @@ void LeaseEffectDependencies(SnapshotManifest& manifest, const EffectState& effe
         if (!(identity->snapshots & bit)) {
             identity->snapshots |= bit;
             if (manifest.count == RegistrySize) std::abort();
-            manifest.members[manifest.count++] = *identity;
+            manifest.members.push_back(*identity);
+            ++manifest.count;
         }
         if (first) Push("snapshot_dependency", identity, object,
                         effect.id, offset, bit, identity->occupancy == Occupancy::Quarantined, false);
@@ -812,7 +819,12 @@ void CaptureEffects(SnapshotManifest& manifest, void* manager)
     manifest.unitManager = manager;
     manifest.thread = GetCurrentThreadId();
     manifest.effectCount = 0;
+    manifest.effects.clear();
     manifest.spanCount = manifest.payloadBytes = 0;
+    manifest.spans.clear();
+    manifest.payload.clear();
+    for (auto& entries : manifest.primary) entries.clear();
+    for (auto& entries : manifest.groups) entries.clear();
     if (!manager) return;
     const uint32_t categories = Read<uint32_t>(manager, 0xC38);
     if (categories > 64) std::abort();
@@ -881,13 +893,16 @@ void CaptureEffects(SnapshotManifest& manifest, void* manager)
             std::memcpy(saved.root, object, sizeof(saved.root));
             for (size_t i = 0; i < spanCount; ++i) {
                 spans[i].offset = uint32_t(manifest.payloadBytes);
-                std::memcpy(manifest.payload + manifest.payloadBytes, spans[i].address, spans[i].size);
+                const auto* data = static_cast<const uint8_t*>(spans[i].address);
+                manifest.payload.insert(manifest.payload.end(), data, data + spans[i].size);
                 manifest.payloadBytes += spans[i].size;
-                manifest.spans[manifest.spanCount++] = spans[i];
+                manifest.spans.push_back(spans[i]);
+                ++manifest.spanCount;
             }
             activeSaved += simulation;
         }
-        manifest.effects[manifest.effectCount++] = saved;
+        manifest.effects.push_back(saved);
+        ++manifest.effectCount;
     }
     const uint32_t bit = uint32_t(1) << unsigned((manifest.frame % ROLLBACK_WINDOW + ROLLBACK_WINDOW) % ROLLBACK_WINDOW);
     for (size_t i = 0; i < manifest.effectCount; ++i)
@@ -1184,12 +1199,10 @@ void LifetimeTrace_DropSnapshot(int32_t frame)
     if constexpr (!LIFETIME_TRACE_ENABLED) return;
     const unsigned slot = unsigned((frame % ROLLBACK_WINDOW + ROLLBACK_WINDOW) % ROLLBACK_WINDOW);
     AcquireSRWLockExclusive(&g_lock);
-    auto& manifest = g_manifests[slot];
-    if (manifest.valid)
-        Push("snapshot_drop", nullptr, nullptr, uint32_t(manifest.frame), slot, manifest.count, 0, false);
-    manifest.valid = false;
-    manifest.count = 0;
-    manifest.effectCount = 0;
+    const auto* manifest = g_liveSnapshots[slot];
+    if (manifest && manifest->valid)
+        Push("snapshot_drop", nullptr, nullptr, uint32_t(manifest->frame), slot, manifest->count, 0, false);
+    g_liveSnapshots[slot] = nullptr;
     for (auto& identity : g_registry) {
         identity.snapshots &= ~(uint32_t(1) << slot);
         identity.dependencies &= ~(uint32_t(1) << slot);
@@ -1198,21 +1211,29 @@ void LifetimeTrace_DropSnapshot(int32_t frame)
     ReleaseSRWLockExclusive(&g_lock);
 }
 
-void LifetimeTrace_SaveSnapshot(int32_t frame)
+void LifetimeTrace_SaveSnapshot(int32_t frame, std::shared_ptr<LifetimeSnapshot>& storage)
 {
     if constexpr (!LIFETIME_TRACE_ENABLED) return;
     if (!g_lifetimeEnabled.load(std::memory_order_relaxed)) return;
     const unsigned slot = unsigned((frame % ROLLBACK_WINDOW + ROLLBACK_WINDOW) % ROLLBACK_WINDOW);
     UnitGuard unitGuard;
+    // Allocation/capacity is reused by the owning snapshot/history bank. A
+    // frame jump must not overwrite a capture still indexed by another lease.
+    if (!storage || std::any_of(std::begin(g_liveSnapshots), std::end(g_liveSnapshots),
+        [&](auto* saved) { return saved == storage.get() && saved != g_liveSnapshots[slot]; }))
+        storage = std::make_shared<LifetimeSnapshot>();
     AcquireSRWLockExclusive(&g_lock);
-    auto& manifest = g_manifests[slot];
+    const auto* previous = g_liveSnapshots[slot];
+    auto& manifest = *storage;
     // Also supports replacing an already-saved same-frame observation atomically.
-    if (manifest.valid)
-        Push("snapshot_drop", nullptr, nullptr, uint32_t(manifest.frame), slot, manifest.count, 0, false);
+    if (previous && previous->valid)
+        Push("snapshot_drop", nullptr, nullptr, uint32_t(previous->frame), slot, previous->count, 0, false);
+    g_liveSnapshots[slot] = storage.get();
     manifest.valid = false;
     manifest.frame = frame;
     manifest.birthWatermark = g_nextId;
     manifest.count = 0;
+    manifest.members.clear();
     g_retentionOpen = true;
     for (auto& graph : g_generations) graph.snapshots &= ~(uint32_t(1) << slot);
     for (auto& identity : g_registry) {
@@ -1220,7 +1241,8 @@ void LifetimeTrace_SaveSnapshot(int32_t frame)
         identity.dependencies &= ~(uint32_t(1) << slot);
         if (identity.occupancy != Occupancy::Live) continue;
         identity.snapshots |= uint32_t(1) << slot;
-        manifest.members[manifest.count++] = identity;
+        manifest.members.push_back(identity);
+        ++manifest.count;
     }
     CaptureEffects(manifest, unitGuard.manager);
     manifest.birthWatermark = g_nextId; // Include pre-existing owners adopted during capture.
@@ -1230,16 +1252,109 @@ void LifetimeTrace_SaveSnapshot(int32_t frame)
     ReleaseSRWLockExclusive(&g_lock);
 }
 
+LifetimeSnapshotCounts LifetimeTrace_VisitSnapshot(int32_t frame, const LifetimeSnapshot* snapshot,
+    bool observeShots, LifetimeSnapshotVisitor visitor, void* context)
+{
+    LifetimeSnapshotCounts counts;
+    if (!visitor || frame < 0) return counts;
+    UnitGuard unitGuard;
+    std::vector<Identity> shots;
+    AcquireSRWLockExclusive(&g_lock);
+    const bool available = snapshot && snapshot->valid && snapshot->frame == frame;
+    const int64_t capture[] = {frame, available ? 1 : 0,
+        observeShots ? int64_t(int32_t(g_context.load(std::memory_order_relaxed) >> 1)) : -1};
+    visitor(context, "diagnostic.lifetime", nullptr, 0, 0, capture, sizeof(capture));
+    std::vector<const EffectState*> effects;
+    for (size_t i = 0; available && i < snapshot->effectCount; ++i) effects.push_back(&snapshot->effects[i]);
+    std::sort(effects.begin(), effects.end(), [](auto a, auto b) { return a->id < b->id; });
+    for (const auto* saved : effects) {
+        char name[64];
+        std::snprintf(name, sizeof(name), "lifetime.effect.%llu.root", (unsigned long long)saved->id);
+        visitor(context, name, saved->object, 0, Read<uint64_t>(saved->root, 0),
+                saved->root, sizeof(saved->root));
+        for (size_t i = 0; i < saved->spanCount; ++i) {
+            const auto& span = snapshot->spans[saved->spanBegin + i];
+            std::snprintf(name, sizeof(name), "lifetime.effect.%llu.graph.%zu",
+                          (unsigned long long)saved->id, i);
+            visitor(context, name, span.address, 0, 0,
+                    snapshot->payload.data() + span.offset, span.size);
+        }
+        ++counts.effects;
+    }
+    for (size_t i = 0; available && i < snapshot->count; ++i) {
+        const auto& saved = snapshot->members[i];
+        if (saved.kind != Kind::Shot) continue;
+        char name[64];
+        std::snprintf(name, sizeof(name), "lifetime.shot.%llu.identity", (unsigned long long)saved.id);
+        const uint64_t metadata[] = {saved.id, saved.revision, uint64_t(saved.occupancy), saved.birthVtable};
+        visitor(context, name, nullptr, 0, saved.birthVtable, metadata, sizeof(metadata));
+        ++counts.shots;
+    }
+    if (observeShots)
+        for (const auto& saved : g_registry)
+            if (saved.kind == Kind::Shot && (saved.occupancy == Occupancy::Live ||
+                saved.occupancy == Occupancy::Quarantined)) shots.push_back(saved);
+    ReleaseSRWLockExclusive(&g_lock);
+
+    // Native DTI virtual dispatch must be outside the recorder lock. The unit
+    // fence keeps the observed owners intact during this dump-time copy.
+    std::sort(shots.begin(), shots.end(), [](const auto& a, const auto& b) { return a.id < b.id; });
+    for (const auto& shot : shots) {
+        const auto dti = GetObjectDti(uint64_t(shot.object));
+        const size_t size = DecodeDtiSize(dti);
+        auto emit = [&](const char* suffix, const void* address, size_t bytes,
+                        uint64_t ownerSlot = 0, uint64_t vtable = 0) {
+            if (!address || !bytes) return;
+            char name[64];
+            std::snprintf(name, sizeof(name), "observed.shot.%llu.%s",
+                          (unsigned long long)shot.id, suffix);
+            visitor(context, name, address, ownerSlot, vtable, address, bytes);
+        };
+        const uint64_t metadata[] = {shot.id, shot.revision, uint64_t(shot.occupancy), dti, size};
+        char name[64];
+        std::snprintf(name, sizeof(name), "observed.shot.%llu.identity", (unsigned long long)shot.id);
+        visitor(context, name, nullptr, 0, shot.birthVtable, metadata, sizeof(metadata));
+        if (size < 0x2140 || size > 1024 * 1024) continue;
+        emit("body", shot.object, size, 0, shot.birthVtable);
+        ++counts.shotModels;
+        auto buffer = [&](const char* suffix, size_t offset, size_t bytes) {
+            emit(suffix, Read<void*>(shot.object, offset), bytes, uint64_t(shot.object) + offset);
+        };
+        const auto* joints = Read<uint8_t*>(shot.object, 0x538);
+        // The native joint vector's cookie holds the full allocation count;
+        // +530 can be truncated and blend replacement uses that shorter count.
+        const size_t jointCount = joints ? Read<uint32_t>(joints - 0x10, 0) : 0;
+        if (jointCount && jointCount <= 65536) {
+            buffer("model.joints", 0x538, jointCount * 0xC0);
+            buffer("model.depths", 0x548, jointCount);
+            buffer("model.interpolation", 0x11B0, jointCount * 0x40);
+            const size_t workCount = std::min(jointCount, size_t(Read<uint32_t>(shot.object, 0x530)));
+            const size_t blends = Read<uint32_t>(shot.object, 0x554);
+            for (size_t i = 0; i < std::min(blends, size_t(8)); ++i) {
+                char suffix[40];
+                std::snprintf(suffix, sizeof(suffix), "model.motion.%zu.joints", i);
+                buffer(suffix, 0x6C0 + i * 0x180, workCount * 0x68);
+            }
+        }
+        const uint64_t blends = Read<uint32_t>(shot.object, 0x554);
+        const uint64_t keys = Read<uint32_t>(shot.object, 0x1238);
+        if (blends <= 8 && keys <= 65536)
+            buffer("model.keyframes", 0x6D8, size_t(keys * blends * 0xC));
+    }
+    return counts;
+}
+
 void LifetimeTrace_CheckSnapshot(int32_t frame)
 {
     if constexpr (!LIFETIME_TRACE_ENABLED) return;
     if (!g_recording.load(std::memory_order_relaxed)) return;
     const unsigned slot = unsigned((frame % ROLLBACK_WINDOW + ROLLBACK_WINDOW) % ROLLBACK_WINDOW);
     AcquireSRWLockExclusive(&g_lock);
-    const auto& manifest = g_manifests[slot];
-    if (!manifest.valid || manifest.frame != frame) {
+    const auto* snapshot = g_liveSnapshots[slot];
+    if (!snapshot || !snapshot->valid || snapshot->frame != frame) {
         Push("snapshot_manifest_absent", nullptr, nullptr, uint32_t(frame), slot, 0, 0, false);
     } else {
+        const auto& manifest = *snapshot;
         size_t missing = 0, changed = 0, held = 0, samples = 0;
         for (size_t i = 0; i < manifest.count; ++i) {
             const Identity& saved = manifest.members[i];
@@ -1269,7 +1384,9 @@ void LifetimeTrace_RestoreEffects(int32_t frame)
     UnitGuard unitGuard;
     AcquireSRWLockExclusive(&g_lock);
     const unsigned slot = unsigned((frame % ROLLBACK_WINDOW + ROLLBACK_WINDOW) % ROLLBACK_WINDOW);
-    const auto& manifest = g_manifests[slot];
+    const auto* snapshot = g_liveSnapshots[slot];
+    if (!snapshot) std::abort();
+    const auto& manifest = *snapshot;
     // A published snapshot is a restore contract, not a best-effort batch.
     if (!manifest.valid || manifest.frame != frame || !manifest.unitManager ||
         unitGuard.manager != manifest.unitManager || manifest.thread != GetCurrentThreadId()) std::abort();
@@ -1426,7 +1543,7 @@ void LifetimeTrace_RestoreEffects(int32_t frame)
             // The same payload commit runs for linked and quarantined identities.
             for (size_t j = 0; j < saved.spanCount; ++j) {
                 const auto& span = manifest.spans[saved.spanBegin + j];
-                std::memcpy(span.address, manifest.payload + span.offset, span.size);
+                std::memcpy(span.address, manifest.payload.data() + span.offset, span.size);
             }
             std::memcpy(static_cast<uint8_t*>(saved.object) + 0x40, saved.root + 0x40, 0x280);
         }
@@ -1479,10 +1596,7 @@ void LifetimeTrace_ClearSnapshots()
     if constexpr (!LIFETIME_TRACE_ENABLED) return;
     AcquireSRWLockExclusive(&g_lock);
     g_retentionOpen = false;
-    for (auto& manifest : g_manifests) {
-        manifest.valid = false; manifest.count = 0;
-        manifest.effectCount = 0;
-    }
+    std::fill(std::begin(g_liveSnapshots), std::end(g_liveSnapshots), nullptr);
     for (auto& identity : g_registry) identity.snapshots = identity.dependencies = 0;
     for (auto& graph : g_generations) graph.snapshots = 0;
     Push("snapshot_manifests_clear", nullptr, nullptr, 0, 0, 0, 0, false);

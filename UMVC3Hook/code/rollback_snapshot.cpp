@@ -1092,7 +1092,7 @@ void Rollback_SaveSnapshot(int32_t frame)
 #if ROLLBACK_SNAPDUMP_ENABLED
     size_t sharedCapacity = 0;
     uint8_t* sharedData = captureSnapDump
-        ? SnapDump_AcquireSnapshotStorage(frame, total, count, &sharedCapacity)
+        ? SnapDump_AcquireSnapshotStorage(frame, total, count, &sharedCapacity, &slot.lifetime)
         : nullptr;
     if (sharedData) {
         if (slot.ownsData)
@@ -1103,6 +1103,8 @@ void Rollback_SaveSnapshot(int32_t frame)
         hasSharedStorage = true;
     }
 #endif
+    if (!hasSharedStorage && slot.lifetime.use_count() > 1)
+        slot.lifetime.reset();
     if (!hasSharedStorage && !slot.ownsData) {
         slot.data = nullptr;
         slot.capacity = 0;
@@ -1253,6 +1255,7 @@ void Rollback_SaveSnapshot(int32_t frame)
                 frame, g_isResimulating ? 1 : 0, slot.localInput,
                 slot.remoteInput, slot.size);
     }*/
+    LifetimeTrace_SaveSnapshot(frame, slot.lifetime);
 #if ROLLBACK_SNAPDUMP_ENABLED
     if (captureSnapDump) {
         LagDiagnosticScope dumpDiagnostic(LagMetric::SnapDump);
@@ -1261,7 +1264,6 @@ void Rollback_SaveSnapshot(int32_t frame)
 #endif
     
     //HookLog("Rollback: saved frame %d with %d regions, total size %zu bytes\n", frame, count, offset);
-    LifetimeTrace_SaveSnapshot(frame);
     LiveBenchmark_Record(LiveBenchmarkMetric::Save, benchmarkStart);
 }
 
@@ -1344,6 +1346,7 @@ void Rollback_FreeSnapshots()
         Rollback_DestroyCollisionNodeClones(g_slots[i]);
         ReleaseActionSideCameraState(g_slots[i]);
         ReleaseCharacterMotionResources(g_slots[i]);
+        g_slots[i].lifetime.reset();
         if (g_slots[i].ownsData)
             delete[] g_slots[i].data;
         g_slots[i].data        = nullptr;
