@@ -48,6 +48,24 @@ void GameplayHooks_RecordPatch(void* target, size_t size)
     g_gameplayPatches.push_back({target, {bytes, bytes + size}});
 }
 
+// Replaces one pointer-sized slot (a vtable entry). One aligned store, so no
+// thread is suspended and no code is rewritten; Disable puts the slot back.
+bool GameplayHooks_PatchPointer(void** slot, void* value)
+{
+    if (g_gameplayDisabled)
+        return false;
+    DWORD protection = 0;
+    if (!VirtualProtect(slot, sizeof(void*), PAGE_READWRITE, &protection)) {
+        HookLog("GameplayHooks: could not unprotect slot=%p error=%lu\n", slot, GetLastError());
+        return false;
+    }
+    GameplayHooks_RecordPatch(slot, sizeof(void*));
+    InterlockedExchangePointer(slot, value);
+    DWORD ignored = 0;
+    VirtualProtect(slot, sizeof(void*), protection, &ignored);
+    return true;
+}
+
 MH_STATUS GameplayHooks_QueueEnable(LPVOID target)
 {
     if (g_gameplayDisabled)

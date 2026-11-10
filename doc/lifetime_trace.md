@@ -8,6 +8,12 @@ installation. It is independent of `lagTest` and backend timing; neither needs
 to be enabled. All hooks belong to the existing gameplay-hook lifecycle, so
 Normal Launch disables them with the other gameplay hooks.
 
+`LIFETIME_TRACE_LOG_ENABLED` in the same header (currently `false`), when true, writes the per-event
+`LIFE` and `LIFESTATS` lines to the hook log. Set it false and rebuild to
+silence only that output: events are still recorded and drained, so retention,
+restore, failure reports and the crash report's pending events keep working.
+The startup `LifetimeTrace:` line reports the setting as `trace_log=`.
+
 `EMPTY_EFFECT_QUARANTINE_ENABLED = true` now enables the first narrow physical
 retention experiment described below. Set it false to return to trace-only
 behavior. `EFFECT_RESTORE_ENABLED = true` enables the shared restoration transaction.
@@ -119,8 +125,13 @@ a measured performance improvement. Summaries are saved in each run directory.
 #### Shot And Model Terminal Retention
 
 The concrete shot factory now records each completed object's deleting target.
-The first instance of a concrete deleting target installs one gameplay detour;
-shared targets are deduplicated, with 256 distinct target slots. The detour
+The first instance of each vtable redirects that vtable's slot 0 to a detour
+(`GameplayHooks_PatchPointer`); vtables sharing a deleting target share one of
+the 256 target entries. This is a single pointer store, restored by the
+gameplay-hook disable path. It replaced an inline MinHook detour, whose
+installation suspends every thread and stalled the match for about 60 ms the
+first time each class appeared. Only virtual dispatch through a registered
+vtable is intercepted. The detour
 intercepts before any most-derived destructor body runs. A snapshot-leased shot
 is quarantined intact, including its inherited model, joint/animation buffers,
 materials, model resources, collision allocations, and concrete owned members.
@@ -139,8 +150,8 @@ this trades retained native capacity for same-address lifetime safety.
 Static helper hooks are `sShot::removeShotFromList` (`0x140151420`) and
 `clearShotIdEntry` (`0x140151490`). A direct `sUnit::reset` (`0x14051BBB0`)
 closes snapshot history before its destructor dispatches, complementing the
-existing earlier main/action/manager epoch barriers. There are now 34 static
-lifetime hooks, plus one lazy hook per distinct shot/adopted-unit deleting target. Normal and
+existing earlier main/action/manager epoch barriers. There are now 36 static
+lifetime hooks, plus one lazy vtable-slot redirect per shot/adopted-unit vtable. Normal and
 headless virtual deleting calls use the same concrete detour. Unleased objects
 retain native destruction. A leased in-place/non-deleting destructor invocation
 is an ownership invariant failure, not permission to destroy retained state.

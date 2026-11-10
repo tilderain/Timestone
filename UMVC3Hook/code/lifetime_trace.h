@@ -7,6 +7,10 @@
 
 // Development diagnostics. Native lifetime changes are controlled separately below.
 inline constexpr bool LIFETIME_TRACE_ENABLED = true;
+// Writes the per-event LIFE and LIFESTATS lines to the hook log. Off silences
+// only that output: events are still recorded and drained, so restoration,
+// failure reports and the crash report's pending events are unaffected.
+inline constexpr bool LIFETIME_TRACE_LOG_ENABLED = false;
 // Master retention switch (historical name), including intact shot/model owners.
 // Snapshot ownership outlives trace recording.
 inline constexpr bool EMPTY_EFFECT_QUARANTINE_ENABLED = true;
