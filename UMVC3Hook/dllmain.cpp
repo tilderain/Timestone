@@ -52,6 +52,29 @@ static constexpr size_t kHookLogRetainedBytes = 3 * 1024 * 1024;
 static constexpr char kHookLogDiscardMarker[] =
 	"=== older log entries discarded ===\n";
 
+// Tail of what has already been flushed to disk. Flushing empties
+// g_hookLogBuffer, so the crash report reads its recent lines from here too.
+static char g_hookLogFlushedTail[32 * 1024] = {};
+static size_t g_hookLogFlushedTailLength = 0;
+
+static void HookLogRememberFlushedLocked(const char* data, size_t length)
+{
+	const size_t capacity = sizeof(g_hookLogFlushedTail);
+	if (length >= capacity) {
+		memcpy(g_hookLogFlushedTail, data + length - capacity, capacity);
+		g_hookLogFlushedTailLength = capacity;
+		return;
+	}
+	if (g_hookLogFlushedTailLength + length > capacity) {
+		const size_t keep = capacity - length;
+		memmove(g_hookLogFlushedTail,
+			g_hookLogFlushedTail + g_hookLogFlushedTailLength - keep, keep);
+		g_hookLogFlushedTailLength = keep;
+	}
+	memcpy(g_hookLogFlushedTail + g_hookLogFlushedTailLength, data, length);
+	g_hookLogFlushedTailLength += length;
+}
+
 static bool HookLogConsoleEnabledByConfig()
 {
 	char iniPath[MAX_PATH] = {};
@@ -156,6 +179,7 @@ static bool HookLogFlushLocked()
 		HookLogAppendToFile(g_hookLogSnapshotFilename.c_str(),
 			g_hookLogBuffer.data(), g_hookLogBuffer.size());
 
+	HookLogRememberFlushedLocked(g_hookLogBuffer.data(), g_hookLogBuffer.size());
 	g_hookLogBuffer.clear();
 	return true;
 }
@@ -358,27 +382,47 @@ void HookLogWriteRecent(FILE* file)
 		fprintf(file, "  <unavailable>\n");
 		return;
 	}
-	if (g_hookLogBuffer.empty()) {
+	// Recent lines span the flushed tail followed by the unflushed buffer.
+	const size_t tailLength = g_hookLogFlushedTailLength;
+	const size_t total = tailLength + g_hookLogBuffer.size();
+	if (!total) {
 		ReleaseSRWLockExclusive(&g_hookLogLock);
 		fprintf(file, "  <none>\n");
 		fprintf(file, "---- end recent HookLog lines ----\n");
 		return;
 	}
+	const auto at = [tailLength](size_t index) {
+		return index < tailLength ? g_hookLogFlushedTail[index]
+			: g_hookLogBuffer[index - tailLength];
+	};
 
 	size_t start = 0;
 	int lineCount = 0;
-	for (size_t i = g_hookLogBuffer.size(); i > 0; --i) {
-		if (g_hookLogBuffer[i - 1] == '\n' && i < g_hookLogBuffer.size()) {
+	bool reachedLimit = false;
+	for (size_t i = total; i > 0; --i) {
+		if (at(i - 1) == '\n' && i < total) {
 			++lineCount;
 			if (lineCount == 50) {
 				start = i;
+				reachedLimit = true;
 				break;
 			}
 		}
 	}
-	fwrite(g_hookLogBuffer.data() + start, 1,
-		g_hookLogBuffer.size() - start, file);
-	if (g_hookLogBuffer.back() != '\n')
+	// A full tail usually begins mid-line; skip that partial line.
+	if (!reachedLimit && tailLength == sizeof(g_hookLogFlushedTail)) {
+		while (start < tailLength && g_hookLogFlushedTail[start] != '\n')
+			++start;
+		if (start < tailLength)
+			++start;
+	}
+	if (start < tailLength)
+		fwrite(g_hookLogFlushedTail + start, 1, tailLength - start, file);
+	const size_t bufferStart = start > tailLength ? start - tailLength : 0;
+	if (bufferStart < g_hookLogBuffer.size())
+		fwrite(g_hookLogBuffer.data() + bufferStart, 1,
+			g_hookLogBuffer.size() - bufferStart, file);
+	if (at(total - 1) != '\n')
 		fputc('\n', file);
 	ReleaseSRWLockExclusive(&g_hookLogLock);
 	fprintf(file, "---- end recent HookLog lines ----\n");
