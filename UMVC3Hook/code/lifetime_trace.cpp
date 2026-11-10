@@ -8,6 +8,8 @@
 #include "rollback_diagnostics.h"
 
 #include <atomic>
+#include <bit>
+#include <immintrin.h>
 #include <cstring>
 #include <cstdlib>
 #include <initializer_list>
@@ -17,6 +19,7 @@
 #include <array>
 #include <utility>
 #include <unordered_map>
+#include <unordered_set>
 #include <type_traits>
 
 #if defined(_MSC_VER)
@@ -115,13 +118,22 @@ struct EffectState {
     uint64_t generation = 0;
     uint8_t root[0x2C0]{};
 };
+enum class ShotSpanKind : uint8_t { Other, Body, ModelJoints, ModelDepths };
 struct ShotSpan {
-    const char* name = nullptr;
+    const char* name = nullptr; // Dump/diagnostic label only; lookups use kind.
     GraphSpan memory;
     uint64_t ownerSlot = 0, vtable = 0;
     uint16_t group = UINT16_MAX;
     uint32_t element = UINT32_MAX;
+    ShotSpanKind kind = ShotSpanKind::Other;
 };
+ShotSpanKind ShotSpanKindOf(const char* name)
+{
+    if (!std::strcmp(name, "body")) return ShotSpanKind::Body;
+    if (!std::strcmp(name, "model.joints")) return ShotSpanKind::ModelJoints;
+    if (!std::strcmp(name, "model.depths")) return ShotSpanKind::ModelDepths;
+    return ShotSpanKind::Other;
+}
 struct ShotState {
     uint64_t id = 0;
     // Omit: spans/payload are absent, not empty history. Generations are always set.
@@ -150,18 +162,19 @@ struct LifetimeSnapshot {
     bool valid = false;
     uint64_t captureId = 0;
     int32_t frame = -1;
-    size_t count = 0;
     std::vector<Identity> members;
+    size_t count() const { return members.size(); }
     void* unitManager = nullptr;
     uint32_t thread = 0;
     uint64_t birthWatermark = 0;
     std::vector<void*> primary[64];
     std::vector<void*> groups[64];
-    size_t effectCount = 0;
     std::vector<EffectState> effects;
-    size_t spanCount = 0, payloadBytes = 0;
+    size_t effectCount() const { return effects.size(); }
     std::vector<GraphSpan> spans;
     std::vector<uint8_t> payload;
+    size_t spanCount() const { return spans.size(); }
+    size_t payloadBytes() const { return payload.size(); }
     // Shot bodies/spans and constraint images. Omit leaves constraints incomplete.
     LifetimeShotPayload shotPayload = LifetimeShotPayload::Omit;
     std::vector<ShotState> shots;
@@ -203,6 +216,51 @@ struct Event {
 };
 SRWLOCK g_lock = SRWLOCK_INIT;
 Identity g_registry[RegistrySize];
+// Slots whose occupancy is Live, Quarantined or Collecting: the only entries any
+// registry loop accepts. Birth is the only way in and TombstoneIdentity the only
+// way out; moves among those three states need no update. Iteration visits set
+// bits in ascending slot order and re-reads the mask at each step, so it matches
+// a full index loop over the entries it accepts, including mid-loop transitions.
+uint64_t g_activeSlots[RegistrySize / 64]{};
+constexpr bool ActiveOccupancy(Occupancy occupancy)
+{
+    return occupancy == Occupancy::Live || occupancy == Occupancy::Quarantined ||
+        occupancy == Occupancy::Collecting;
+}
+void ActivateIdentity(const Identity& entry)
+{
+    const size_t slot = size_t(&entry - g_registry);
+    g_activeSlots[slot / 64] |= uint64_t(1) << (slot % 64);
+}
+// Leaving the active set also drops its lease bits; nothing reads a tombstone's.
+void TombstoneIdentity(Identity& entry)
+{
+    const size_t slot = size_t(&entry - g_registry);
+    entry.occupancy = Occupancy::Tombstone;
+    entry.snapshots = entry.dependencies = 0;
+    g_activeSlots[slot / 64] &= ~(uint64_t(1) << (slot % 64));
+}
+// Caller holds g_lock. First active slot at or after `from`, or RegistrySize.
+size_t NextActiveSlot(size_t from)
+{
+    for (size_t word = from / 64; word < std::size(g_activeSlots); ++word) {
+        uint64_t bits = g_activeSlots[word];
+        if (word == from / 64) bits &= ~uint64_t(0) << (from % 64);
+        if (bits) return word * 64 + size_t(std::countr_zero(bits));
+    }
+    return RegistrySize;
+}
+// Range-for view over active identities, a drop-in for iterating g_registry.
+struct ActiveIdentities {
+    struct Iterator {
+        size_t slot;
+        Identity& operator*() const { return g_registry[slot]; }
+        Iterator& operator++() { slot = NextActiveSlot(slot + 1); return *this; }
+        bool operator!=(const Iterator& other) const { return slot != other.slot; }
+    };
+    Iterator begin() const { return {NextActiveSlot(0)}; }
+    Iterator end() const { return {RegistrySize}; }
+};
 Event g_events[EventCapacity];
 size_t g_read = 0, g_count = 0;
 uint64_t g_nextId = 0, g_sequence = 0, g_epoch = 0;
@@ -243,7 +301,36 @@ void CaptureShotGenerations(const Identity& shot, uint32_t bit, ShotState& saved
 void DropShotGenerations(const LifetimeSnapshot* saved, uint32_t bit);
 size_t ShotKeyframeBytes(const Identity& shot);
 #include "lifetime_failure.inl"
-void FenceFutureShotCollection();
+// The capture's single body span: at the owner's address, at least the common
+// uShot prefix (0x2140), and inside the payload. Shared by every staging stage.
+const ShotSpan& ShotBodySpan(const ShotState& saved, const void* owner)
+{
+    const ShotSpan* body = nullptr;
+    for (const auto& span : saved.spans) if (span.kind == ShotSpanKind::Body) {
+        LIFE_REQUIRE(!body);
+        body = &span;
+    }
+    LIFE_REQUIRE(body && body->memory.address == owner && body->memory.size >= 0x2140 &&
+        body->memory.offset <= saved.payload.size() && body->memory.size <= saved.payload.size() - body->memory.offset);
+    return *body;
+}
+void ValidateShotGenerationIndex();
+// Test builds check the registry mask and generation index at lifetime entry points.
+void ValidateActiveSlots()
+{
+#if defined(LIFETIME_VALIDATE_INDEXES)
+    ValidateShotGenerationIndex();
+    for (size_t slot = 0; slot < RegistrySize; ++slot) {
+        const Identity& entry = g_registry[slot];
+        const bool marked = (g_activeSlots[slot / 64] >> (slot % 64)) & 1;
+        if (marked != ActiveOccupancy(entry.occupancy) || (!marked && (entry.snapshots || entry.dependencies)))
+            LIFE_FAIL("active registry mask disagrees with registry occupancy", LIFE_VALUE(slot),
+                LIFE_VALUE(entry.object), LIFE_VALUE(entry.id), LIFE_VALUE(entry.occupancy),
+                LIFE_VALUE(marked), LIFE_VALUE(entry.snapshots), LIFE_VALUE(entry.dependencies));
+    }
+#endif
+}
+std::vector<uint64_t> FenceFutureShotCollection();
 void FenceRetiredShotCollisions();
 void ReleaseTerminalShotReferences(uint64_t owner);
 
@@ -375,6 +462,7 @@ void Birth(void* object, Kind kind)
                 LIFE_VALUE(entry->snapshots), LIFE_VALUE(entry->dependencies));
             if (entry->occupancy == Occupancy::Live) ++g_reusedLive;
             *entry = {object, ++g_nextId, Read<uintptr_t>(object, 0), kind, Occupancy::Live};
+            ActivateIdentity(*entry);
         } else {
             ++g_registryMisses;
         }
@@ -423,7 +511,7 @@ void Destroyed(const char* name, void* object, uint64_t id)
     if (entry && entry->id == id) {
         // Never read object storage after native teardown or attribute a reused address.
         Push(name, entry, object, 0, 0, 0, 0, false);
-        entry->occupancy = Occupancy::Tombstone;
+        TombstoneIdentity(*entry);
     }
     ReleaseSRWLockExclusive(&g_lock);
 }
@@ -593,6 +681,7 @@ void RegisterUnit(void* shot)
 #include "lifetime_shot_cpu.inl"
 #include "lifetime_shot_constraints.inl"
 #include "lifetime_shot_world.inl"
+#include "lifetime_shot_restore.inl"
 
 bool __fastcall AddUnit(void* manager, uint32_t line, void* unit, uint64_t groups)
 {
@@ -785,6 +874,12 @@ uint32_t EmptyEffectRejections(void* effect)
         (Read<uint64_t>(effect, 0x30) ? 64u : 0u);
 }
 
+// Slots at or above the high-water mark are unused ({}) and hold no lease bits.
+void ClearGraphLeases(uint32_t bits)
+{
+    for (size_t i = 0; i < g_generationHighWater; ++i) g_generations[i].snapshots &= ~bits;
+}
+
 bool HasGraphGenerations(const Identity& owner)
 {
     for (size_t i = 0; i < g_generationHighWater; ++i)
@@ -965,9 +1060,8 @@ void LeaseUnitDependency(SnapshotManifest& manifest, void* object, void* owner,
     identity->dependencies |= bit;
     if (!(identity->snapshots & bit)) {
         identity->snapshots |= bit;
-        LIFE_REQUIRE(manifest.count != RegistrySize);
+        LIFE_REQUIRE(manifest.count() != RegistrySize);
         manifest.members.push_back(*identity);
-        ++manifest.count;
     }
     if (first) Push("snapshot_dependency", identity, object,
                     ownerId, offset, bit, identity->occupancy == Occupancy::Quarantined, false);
@@ -986,9 +1080,7 @@ void CaptureEffects(SnapshotManifest& manifest, void* manager)
     LifetimeFailureScope failureScope("effects.capture", manager, 0, manifest.frame);
     manifest.unitManager = manager;
     manifest.thread = GetCurrentThreadId();
-    manifest.effectCount = 0;
     manifest.effects.clear();
-    manifest.spanCount = manifest.payloadBytes = 0;
     manifest.spans.clear();
     manifest.payload.clear();
     for (auto& entries : manifest.primary) entries.clear();
@@ -1016,7 +1108,7 @@ void CaptureEffects(SnapshotManifest& manifest, void* manager)
     }
     size_t activeSeen = 0, activeSaved = 0;
     uint32_t rejectionMask = 0;
-    for (auto& identity : g_registry) {
+    for (auto& identity : ActiveIdentities()) {
         if (identity.occupancy != Occupancy::Live || identity.kind != Kind::Effect) continue;
         void* object = identity.object;
         LifetimeFailureScope effectScope("effect.capture", object, identity.id, manifest.frame);
@@ -1034,7 +1126,7 @@ void CaptureEffects(SnapshotManifest& manifest, void* manager)
         } else if (!OwnedEffectGraph(object)) continue;
         if (Read<void*>(object, 0x218)) spanCount = DescribeOwnedGraph(object, spans);
         const uint32_t category = (flags >> 3) & 0x7F;
-        LIFE_REQUIRE(!(category >= categories && category != 0x7F) && manifest.effectCount != QuarantineLimit);
+        LIFE_REQUIRE(!(category >= categories && category != 0x7F) && manifest.effectCount() != QuarantineLimit);
         EffectState saved{};
         saved.object = object; saved.id = identity.id; saved.revision = identity.revision;
         saved.resource = Read<void*>(object, 0x108);
@@ -1046,40 +1138,37 @@ void CaptureEffects(SnapshotManifest& manifest, void* manager)
         {
             size_t bytes = 0;
             for (size_t i = 0; i < spanCount; ++i) bytes += spans[i].size;
-            if (spanCount > SpanCapacity - manifest.spanCount ||
-                bytes > PayloadCapacity - manifest.payloadBytes) {
-                Push("effect_capture_overflow", nullptr, nullptr, manifest.effectCount,
-                     manifest.payloadBytes, spanCount, bytes, false);
+            if (spanCount > SpanCapacity - manifest.spanCount() ||
+                bytes > PayloadCapacity - manifest.payloadBytes()) {
+                Push("effect_capture_overflow", nullptr, nullptr, manifest.effectCount(),
+                     manifest.payloadBytes(), spanCount, bytes, false);
                 LIFE_FAIL("effect snapshot graph exceeds capture capacity", LIFE_VALUE(spanCount), LIFE_VALUE(bytes),
-                    LIFE_VALUE(manifest.spanCount), LIFE_VALUE(manifest.payloadBytes), LIFE_VALUE(manifest.effectCount));
+                    LIFE_VALUE(manifest.spanCount()), LIFE_VALUE(manifest.payloadBytes()), LIFE_VALUE(manifest.effectCount()));
             }
             saved.graph = OwnCurrentGraph(identity, spans, spanCount);
             LIFE_REQUIRE(saved.graph >= 0);
             auto& graph = g_generations[saved.graph];
             saved.generation = graph.id;
             graph.snapshots |= uint32_t(1) << unsigned((manifest.frame % ROLLBACK_WINDOW + ROLLBACK_WINDOW) % ROLLBACK_WINDOW);
-            saved.spanBegin = uint32_t(manifest.spanCount);
+            saved.spanBegin = uint32_t(manifest.spanCount());
             saved.spanCount = uint32_t(spanCount);
             std::memcpy(saved.root, object, sizeof(saved.root));
             for (size_t i = 0; i < spanCount; ++i) {
-                spans[i].offset = uint32_t(manifest.payloadBytes);
+                spans[i].offset = uint32_t(manifest.payloadBytes());
                 const auto* data = static_cast<const uint8_t*>(spans[i].address);
                 manifest.payload.insert(manifest.payload.end(), data, data + spans[i].size);
-                manifest.payloadBytes += spans[i].size;
                 manifest.spans.push_back(spans[i]);
-                ++manifest.spanCount;
             }
             activeSaved += simulation;
         }
         manifest.effects.push_back(saved);
-        ++manifest.effectCount;
     }
     const uint32_t bit = uint32_t(1) << unsigned((manifest.frame % ROLLBACK_WINDOW + ROLLBACK_WINDOW) % ROLLBACK_WINDOW);
-    for (size_t i = 0; i < manifest.effectCount; ++i)
+    for (size_t i = 0; i < manifest.effectCount(); ++i)
         LeaseEffectDependencies(manifest, manifest.effects[i], bit);
     if (activeSeen)
         Push("effect_capture", nullptr, nullptr, activeSeen, activeSaved, rejectionMask,
-             manifest.payloadBytes, false);
+             manifest.payloadBytes(), false);
 }
 
 void* __fastcall DeleteEffect(void* effect, uint32_t flags)
@@ -1147,17 +1236,21 @@ void CollectQuarantine()
     ReleaseSRWLockExclusive(&g_lock);
     if (empty) return;
     UnitGuard unitGuard;
-    FenceFutureShotCollection();
+    // Only future shots fenced here may be collected this tick: their collision
+    // roots were detached and no unit or character referenced them at the fence.
+    const auto fenced = FenceFutureShotCollection();
     // Only called at main-tick entry or an explicit history/epoch-close boundary.
     // Originals run outside the trace lock; base teardown re-enters the tracer.
     // Effect teardown may still consult its borrowed model/shot owner. Dispose
     // eligible effects before those outer owners at the same collection fence.
-    for (bool effects : {true, false}) for (size_t i = 0; i < RegistrySize; ++i) {
+    for (bool effects : {true, false}) for (size_t i = 0;; ++i) {
         AcquireSRWLockExclusive(&g_lock);
+        i = NextActiveSlot(i); // Under the lock; skipped slots fail the predicate below.
+        if (i == RegistrySize) { ReleaseSRWLockExclusive(&g_lock); break; }
         Identity& entry = g_registry[i];
         if ((entry.kind == Kind::Effect) != effects ||
             entry.occupancy != Occupancy::Quarantined || entry.snapshots ||
-            (entry.futureShot && HasLiveUnitReference(entry.object)) ||
+            (entry.futureShot && std::find(fenced.begin(), fenced.end(), entry.id) == fenced.end()) ||
             (entry.kind == Kind::Shot && HasRetiredShotGenerations(entry.id)) ||
             (entry.kind == Kind::Effect && HasGraphGenerations(entry))) {
             ReleaseSRWLockExclusive(&g_lock);
@@ -1166,13 +1259,6 @@ void CollectQuarantine()
         const uint64_t id = entry.id;
         void* object = entry.object;
         const bool shotOwner = entry.kind == Kind::Shot;
-        if (entry.futureShot) {
-            ReleaseSRWLockExclusive(&g_lock);
-            const bool borrowed = HasCharacterShotReference(unitGuard.manager, object);
-            AcquireSRWLockExclusive(&g_lock);
-            if (borrowed) { ReleaseSRWLockExclusive(&g_lock); continue; }
-            LIFE_REQUIRE(entry.id == id && entry.occupancy == Occupancy::Quarantined);
-        }
         entry.occupancy = Occupancy::Collecting;
         --g_quarantined;
         Push("quarantine_collect", &entry, object, 0, 0, 0, 0, false);
@@ -1188,9 +1274,12 @@ void CollectQuarantine()
         } else oDeleteEffect(object, 1);
         AcquireSRWLockExclusive(&g_lock);
         if (entry.id == id && entry.occupancy == Occupancy::Collecting)
-            entry.occupancy = Occupancy::Tombstone; // Also works after trace capture stops.
+            TombstoneIdentity(entry); // Also works after trace capture stops.
         ReleaseSRWLockExclusive(&g_lock);
     }
+    AcquireSRWLockExclusive(&g_lock);
+    ValidateActiveSlots();
+    ReleaseSRWLockExclusive(&g_lock);
 }
 
 void (__fastcall* oActionFinal)(void*) = nullptr;
@@ -1402,14 +1491,15 @@ void LifetimeTrace_DropSnapshot(int32_t frame)
     const auto* manifest = g_liveSnapshots[slot];
     DropShotGenerations(manifest, uint32_t(1) << slot);
     if (manifest && manifest->valid)
-        Push("snapshot_drop", nullptr, nullptr, uint32_t(manifest->frame), slot, manifest->count, 0, false);
+        Push("snapshot_drop", nullptr, nullptr, uint32_t(manifest->frame), slot, manifest->count(), 0, false);
     g_liveSnapshots[slot] = nullptr;
-    for (auto& identity : g_registry) {
+    for (auto& identity : ActiveIdentities()) {
         identity.snapshots &= ~(uint32_t(1) << slot);
         identity.dependencies &= ~(uint32_t(1) << slot);
     }
-    for (auto& graph : g_generations) graph.snapshots &= ~(uint32_t(1) << slot);
+    ClearGraphLeases(uint32_t(1) << slot);
     g_clearedSlots |= uint32_t(1) << slot;
+    ValidateActiveSlots();
     ReleaseSRWLockExclusive(&g_lock);
 }
 
@@ -1433,13 +1523,12 @@ void LifetimeTrace_SaveSnapshot(int32_t frame, std::shared_ptr<LifetimeSnapshot>
     auto& manifest = *storage;
     // Also supports replacing an already-saved same-frame observation atomically.
     if (previous && previous->valid)
-        Push("snapshot_drop", nullptr, nullptr, uint32_t(previous->frame), slot, previous->count, 0, false);
+        Push("snapshot_drop", nullptr, nullptr, uint32_t(previous->frame), slot, previous->count(), 0, false);
     g_liveSnapshots[slot] = storage.get();
     manifest.valid = false;
     manifest.captureId = ++g_nextSnapshotCapture;
     manifest.frame = frame;
     manifest.birthWatermark = g_nextId;
-    manifest.count = 0;
     manifest.members.clear();
     manifest.shotPayload = shotPayload;
     g_retentionOpen = true;
@@ -1448,8 +1537,8 @@ void LifetimeTrace_SaveSnapshot(int32_t frame, std::shared_ptr<LifetimeSnapshot>
     // reuse still have a previous capture or uncleared bits, so they clear here.
     const bool cleared = !previous && (g_clearedSlots & (uint32_t(1) << slot));
     g_clearedSlots &= ~(uint32_t(1) << slot);
-    if (!cleared) for (auto& graph : g_generations) graph.snapshots &= ~(uint32_t(1) << slot);
-    for (auto& identity : g_registry) {
+    if (!cleared) ClearGraphLeases(uint32_t(1) << slot);
+    for (auto& identity : ActiveIdentities()) {
         if (!cleared) {
             identity.snapshots &= ~(uint32_t(1) << slot);
             identity.dependencies &= ~(uint32_t(1) << slot);
@@ -1457,19 +1546,29 @@ void LifetimeTrace_SaveSnapshot(int32_t frame, std::shared_ptr<LifetimeSnapshot>
         if (identity.occupancy != Occupancy::Live) continue;
         identity.snapshots |= uint32_t(1) << slot;
         manifest.members.push_back(identity);
-        ++manifest.count;
     }
     CaptureEffects(manifest, unitGuard.manager);
     // Index iteration tolerates adoption appending members. Copy the identity
     // before leasing; native DTI/deleting dispatch runs outside the recorder lock.
+    // Constraint addresses are sorted once so each shot finds its inline ones by range.
+    std::vector<void*> constraintAddresses;
+    if (unitGuard.manager) {
+        constraintAddresses.reserve(g_constructedConstraints.size());
+        for (const auto& entry : g_constructedConstraints) constraintAddresses.push_back(entry.first);
+        std::sort(constraintAddresses.begin(), constraintAddresses.end(), std::less<void*>{});
+    }
     for (size_t i = 0; unitGuard.manager && i < manifest.members.size(); ++i) {
         const Identity owner = manifest.members[i];
         if (owner.kind != Kind::Shot || owner.extent < ShotCpuCommonSize) continue;
         VisitShotUnitReferences(owner.object, [&](size_t field, void* object) {
             LeaseUnitDependency(manifest, object, owner.object, owner.id, field, uint32_t(1) << slot, true);
         });
-        VisitShotConstraintModels(owner, [&](void* model) {
+        VisitShotConstraintModels(owner, constraintAddresses, [&](void* model) {
             LeaseUnitDependency(manifest, model, owner.object, owner.id, 0x78, uint32_t(1) << slot, true);
+        });
+        // The concrete tail is restored as bytes; retain every unit it names.
+        if constexpr (SAVED_SHOT_RESTORE_ENABLED) VisitShotTailUnits(owner, [&](size_t field, void* object) {
+            LeaseUnitDependency(manifest, object, owner.object, owner.id, field, uint32_t(1) << slot, true);
         });
     }
     CaptureShotWorld(manifest, shotGuard.manager);
@@ -1497,6 +1596,7 @@ void LifetimeTrace_SaveSnapshot(int32_t frame, std::shared_ptr<LifetimeSnapshot>
                 LIFE_REQUIRE(size <= UINT32_MAX && saved.payload.size() <= UINT32_MAX - size);
                 saved.spans.push_back({name,
                     {const_cast<void*>(address), uint32_t(size), uint32_t(saved.payload.size())}, ownerSlot, vtable});
+                saved.spans.back().kind = ShotSpanKindOf(name);
                 const auto* data = static_cast<const uint8_t*>(bytes);
                 saved.payload.insert(saved.payload.end(), data, data + size);
             }, &saved) : ShotBodyExtent(identity) != 0;
@@ -1513,7 +1613,8 @@ void LifetimeTrace_SaveSnapshot(int32_t frame, std::shared_ptr<LifetimeSnapshot>
     AcquireSRWLockExclusive(&g_lock);
     manifest.birthWatermark = g_nextId; // Include pre-existing owners adopted during capture.
     manifest.valid = true;
-    Push("snapshot_manifest", nullptr, nullptr, uint32_t(frame), slot, manifest.count,
+    ValidateActiveSlots();
+    Push("snapshot_manifest", nullptr, nullptr, uint32_t(frame), slot, manifest.count(),
          g_registryMisses || g_untracked || g_reusedLive || g_dropped, false);
     ReleaseSRWLockExclusive(&g_lock);
 }
@@ -1537,7 +1638,7 @@ LifetimeSnapshotCounts LifetimeTrace_VisitSnapshot(int32_t frame, const Lifetime
         visitor(context, "diagnostic.lifetime.shot_payload_omitted", nullptr, 0, 0, omitted, sizeof(omitted));
     }
     std::vector<const EffectState*> effects;
-    for (size_t i = 0; available && i < snapshot->effectCount; ++i) effects.push_back(&snapshot->effects[i]);
+    for (size_t i = 0; available && i < snapshot->effectCount(); ++i) effects.push_back(&snapshot->effects[i]);
     std::sort(effects.begin(), effects.end(), [](auto a, auto b) { return a->id < b->id; });
     for (const auto* saved : effects) {
         char name[64];
@@ -1553,7 +1654,7 @@ LifetimeSnapshotCounts LifetimeTrace_VisitSnapshot(int32_t frame, const Lifetime
         }
         ++counts.effects;
     }
-    for (size_t i = 0; available && i < snapshot->count; ++i) {
+    for (size_t i = 0; available && i < snapshot->count(); ++i) {
         const auto& saved = snapshot->members[i];
         if (saved.kind != Kind::Shot) continue;
         char name[64];
@@ -1587,7 +1688,7 @@ LifetimeSnapshotCounts LifetimeTrace_VisitSnapshot(int32_t frame, const Lifetime
         visitor(context, name, node.object, 0, Read<uintptr_t>(node.image, 0), node.image, sizeof(node.image));
     }
     if (observeShots)
-        for (const auto& saved : g_registry)
+        for (const auto& saved : ActiveIdentities())
             if (saved.kind == Kind::Shot && (saved.occupancy == Occupancy::Live ||
                 saved.occupancy == Occupancy::Quarantined)) shots.push_back(saved);
     ReleaseSRWLockExclusive(&g_lock);
@@ -1641,7 +1742,7 @@ void LifetimeTrace_CheckSnapshot(int32_t frame)
     } else {
         const auto& manifest = *snapshot;
         size_t missing = 0, changed = 0, held = 0, samples = 0;
-        for (size_t i = 0; i < manifest.count; ++i) {
+        for (size_t i = 0; i < manifest.count(); ++i) {
             const Identity& saved = manifest.members[i];
             const Identity* current = Find(saved.object, false);
             const bool gone = !current || current->id != saved.id;
@@ -1654,7 +1755,7 @@ void LifetimeTrace_CheckSnapshot(int32_t frame)
                      saved.object, uint32_t(frame), current ? current->id : 0,
                      saved.revision, current ? current->revision : 0, false);
         }
-        Push("snapshot_manifest_check", nullptr, nullptr, uint32_t(frame), manifest.count, missing, changed, false);
+        Push("snapshot_manifest_check", nullptr, nullptr, uint32_t(frame), manifest.count(), missing, changed, false);
         if (held)
             Push("quarantine_restore_pending", nullptr, nullptr, uint32_t(frame), held, 0, 0, false);
     }
@@ -1676,7 +1777,7 @@ void LifetimeTrace_RestoreEffects(int32_t frame)
     // A published snapshot is a restore contract, not a best-effort batch.
     LIFE_REQUIRE(manifest.valid && manifest.frame == frame && manifest.unitManager &&
         unitGuard.manager == manifest.unitManager && manifest.thread == GetCurrentThreadId());
-    const size_t count = manifest.effectCount;
+    const size_t count = manifest.effectCount();
     Identity* identities[QuarantineLimit]{};
     bool wasHeld[QuarantineLimit]{};
     void* releasedResources[QuarantineLimit]{};
@@ -1698,12 +1799,12 @@ void LifetimeTrace_RestoreEffects(int32_t frame)
             const auto& graph = g_generations[saved.graph];
             LIFE_REQUIRE(graph.id == saved.generation && graph.ownerId == saved.id &&
                 (graph.snapshots & (uint32_t(1) << slot)) &&
-                graph.spanCount == saved.spanCount && saved.spanBegin <= manifest.spanCount &&
-                saved.spanCount <= manifest.spanCount - saved.spanBegin);
+                graph.spanCount == saved.spanCount && saved.spanBegin <= manifest.spanCount() &&
+                saved.spanCount <= manifest.spanCount() - saved.spanBegin);
             for (size_t j = 0; j < saved.spanCount; ++j) {
                 const auto& span = manifest.spans[saved.spanBegin + j];
                 LIFE_REQUIRE(graph.spans[j].address == span.address && graph.spans[j].size == span.size &&
-                    span.offset <= manifest.payloadBytes && span.size <= manifest.payloadBytes - span.offset);
+                    span.offset <= manifest.payloadBytes() && span.size <= manifest.payloadBytes() - span.offset);
             }
             if (current->graph < 0 && (Read<void*>(saved.object, 0x218) ||
                 Read<void*>(saved.object, 0x220) || Read<void*>(saved.object, 0x228))) {
@@ -1731,7 +1832,7 @@ void LifetimeTrace_RestoreEffects(int32_t frame)
     };
     // Remove the abandoned branch without running kill callbacks against the
     // restored characters. Other snapshots may still own these exact objects.
-    for (auto& identity : g_registry) {
+    for (auto& identity : ActiveIdentities()) {
         if (identity.occupancy != Occupancy::Live || identity.kind != Kind::Effect ||
             identity.restoreTag == tag ||
             (!identity.restoreOwned &&
@@ -1871,6 +1972,7 @@ void LifetimeTrace_RestoreEffects(int32_t frame)
         Write(descriptor, 0x18, uint32_t(entries.size()));
     }
     Push("retiring_restore_applied", nullptr, nullptr, uint32_t(frame), count, held, 0, false);
+    ValidateActiveSlots();
     ReleaseSRWLockExclusive(&g_lock);
     for (size_t i = 0; i < count; ++i)
         if (releasedResources[i]) releaseResourceRef(releasedResources[i]);
@@ -1883,9 +1985,10 @@ void LifetimeTrace_ClearSnapshots()
     g_retentionOpen = false;
     for (const auto* saved : g_liveSnapshots) DropShotGenerations(saved, UINT32_MAX);
     std::fill(std::begin(g_liveSnapshots), std::end(g_liveSnapshots), nullptr);
-    for (auto& identity : g_registry) identity.snapshots = identity.dependencies = 0;
-    for (auto& graph : g_generations) graph.snapshots = 0;
+    for (auto& identity : ActiveIdentities()) identity.snapshots = identity.dependencies = 0;
+    ClearGraphLeases(UINT32_MAX);
     g_clearedSlots = UINT32_MAX >> (32 - ROLLBACK_WINDOW);
+    ValidateActiveSlots();
     Push("snapshot_manifests_clear", nullptr, nullptr, 0, 0, 0, 0, false);
     ReleaseSRWLockExclusive(&g_lock);
     CollectGraphGenerations();
@@ -1974,6 +2077,7 @@ void LifetimeTrace_Flush()
     const auto samples = g_unknownSamples;
     const auto quarantined = g_quarantined;
     const bool stopped = !g_recording.load(std::memory_order_relaxed) && g_sequence >= CaptureLimit;
+    ValidateActiveSlots();
     ReleaseSRWLockExclusive(&g_lock);
     for (size_t i = 0; i < count; ++i) {
         const Event& e = batch[i];
@@ -2066,9 +2170,10 @@ void LifetimeTrace_Install()
     oRemoveGroups = (void (__fastcall*)(void*, void*))_addr(0x14051BAF0);
     g_lifetimeEnabled.store(complete, std::memory_order_relaxed);
     g_recording.store(complete, std::memory_order_relaxed);
-    HookLog("LifetimeTrace: queued=%d image_base=0x%llX limit=%llu ring=%zu registry=%zu empty_effect_quarantine=%d quarantine_limit=%zu effect_restore=%d ordinary_cpu_graphs=%d simulation_snapshots=%d shot_model_retention=%d future_shot_withdrawal=%d shot_presentation_live=1 shot_reference_leases=1 restore_render_drain=1 constraint_init_registry=1 constraint_graph_capture=1 lifetime_failure_log=1 saved_shot_restore=0; partial graph coverage\n",
+    HookLog("LifetimeTrace: queued=%d image_base=0x%llX limit=%llu ring=%zu registry=%zu empty_effect_quarantine=%d quarantine_limit=%zu effect_restore=%d ordinary_cpu_graphs=%d simulation_snapshots=%d shot_model_retention=%d future_shot_withdrawal=%d shot_presentation_live=1 shot_reference_leases=1 restore_render_drain=1 constraint_init_registry=1 constraint_graph_capture=1 lifetime_failure_log=1 saved_shot_restore=%d; partial graph coverage\n",
             complete, uint64_t(_addr(0x140000000)), CaptureLimit, EventCapacity, RegistrySize,
             EMPTY_EFFECT_QUARANTINE_ENABLED, QuarantineLimit, EFFECT_RESTORE_ENABLED,
             ORDINARY_CPU_EFFECT_GRAPHS_ENABLED, EFFECT_SIMULATION_SNAPSHOTS_ENABLED,
-            EMPTY_EFFECT_QUARANTINE_ENABLED, EMPTY_EFFECT_QUARANTINE_ENABLED && EFFECT_RESTORE_ENABLED);
+            EMPTY_EFFECT_QUARANTINE_ENABLED, EMPTY_EFFECT_QUARANTINE_ENABLED && EFFECT_RESTORE_ENABLED,
+            SAVED_SHOT_RESTORE_ENABLED);
 }

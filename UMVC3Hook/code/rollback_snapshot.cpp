@@ -1255,12 +1255,13 @@ void Rollback_SaveSnapshot(int32_t frame)
                 frame, g_isResimulating ? 1 : 0, slot.localInput,
                 slot.remoteInput, slot.size);
     }*/
-    // Saved-shot restore is unpublished, so whole-shot bytes only serve the
-    // historical snapdump recorder. Retention leases are captured either way.
+    // Saved-shot restore and the historical snapdump recorder read whole-shot
+    // bytes. Retention leases are captured either way.
 #if ROLLBACK_SNAPDUMP_ENABLED
-    const auto shotPayload = captureSnapDump ? LifetimeShotPayload::Capture : LifetimeShotPayload::Omit;
+    const auto shotPayload = SAVED_SHOT_RESTORE_ENABLED || captureSnapDump
+        ? LifetimeShotPayload::Capture : LifetimeShotPayload::Omit;
 #else
-    const auto shotPayload = LifetimeShotPayload::Omit;
+    const auto shotPayload = SAVED_SHOT_RESTORE_ENABLED ? LifetimeShotPayload::Capture : LifetimeShotPayload::Omit;
 #endif
     LifetimeTrace_SaveSnapshot(frame, slot.lifetime, shotPayload);
 #if ROLLBACK_SNAPDUMP_ENABLED

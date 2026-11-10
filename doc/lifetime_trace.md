@@ -189,6 +189,24 @@ Regressions save one fixture in both modes, run withdrawal, delayed shot/model
 destruction, effect restore and the shared graph transaction under both, and
 check that all five stages reject an omitted payload with that reason.
 
+### Registry And Generation Indexes
+
+Registry loops visit only active slots (Live, Quarantined, Collecting) through the
+`g_activeSlots` bitmap, in ascending slot order with the mask re-read at each step,
+so they match a full index loop over the entries they accept. `Birth` is the only
+way into the set and `TombstoneIdentity` the only way out; tombstoning also clears
+the slot's lease bits, which nothing reads afterwards.
+
+Shot generations are indexed per owner in `g_ownerGenerations` as `{slot, id}`,
+appended in `NewShotGeneration` (the only place `ownerId` is set). An entry counts
+only while the slot still holds that id, so collected or reused slots need no
+bookkeeping; pruning only bounds list length. Model images are heap buffers held
+by Pose/Work/Keys generations only.
+
+Test builds define `LIFETIME_VALIDATE_INDEXES`, which checks both indexes against a
+full scan at every lifetime entry point. Any transition that bypasses them fails
+there instead of silently dropping an object from a snapshot.
+
 ### Future-Shot Withdrawal
 
 `LifetimeTrace_RetireFutureShots` now runs immediately before effect restoration.
@@ -300,6 +318,51 @@ kill callbacks. Saved pending shots are restored with the entire category word;
 historical foreign queue addresses are never revived. Only current foreign queue
 records are retained, and queue overflow fails before commit. The stage does not
 restore bodies, constraints or scheduler membership, or mark retained shots live.
+
+### Saved-Shot Restore Transaction
+
+2026-11-10. `LifetimeTrace_RestoreShots` (`lifetime_shot_restore.inl`) is called by
+`Rollback_RestoreSnapshot` after future-shot withdrawal and effect restore, and
+startup reports `saved_shot_restore=1`. Production saves now use
+`LifetimeShotPayload::Capture` whenever `SAVED_SHOT_RESTORE_ENABLED` is set. A
+target frame that held no shots returns before any work.
+
+For each shot in the target snapshot it runs, in order: the storage stage, the
+common CPU kernel, a raw copy of the class-specific tail (`2140..extent`), and the
+joint-dependency byte `123D`. It then copies every saved constraint's common
+fields, clears the links of inline constraints initialized after the snapshot,
+and publishes the manager and execution stages. Any failed requirement is a fatal
+lifetime failure; there is no skip path.
+
+The tail copy rests on a census of all 306 `uShot` classes in the unpacked
+executable (destructors and methods disassembled, shared helpers decompiled on
+Ghidra port 8192):
+
+- 146 classes have no tail. In the rest, destructors release only inline TSR
+  constraints (`140447F50`, 54 classes), resource references (`14050D5A0`, 9
+  classes) and sound cRefs (`1402A8C60`/`1402AA590`, 10 classes).
+- Shot methods allocate only effects (`140139E00`) and effect models
+  (`14013B4E0`), both units. No tail owns a raw allocation.
+- The tail is therefore data, unit pointers and inline constraints. The copy
+  leaves live the resource and sound fields listed in `ShotTailLiveFields`, and
+  the unit header (`10..28`, `30..38`) of each saved inline constraint, which the
+  execution stage owns. Capture leases every registered unit a tail word names.
+
+The prepared constraint-graph stage is not used. Constraint links are bytes among
+retained objects, and the saved nodes, the shots' joints (pose spans) and
+character joints (`uCharacter.jointStates`/`jointIndices` regions) all return to
+the same frame. A chain with a member that is not captured is left inconsistent.
+
+Collision layout changes mid-life only in Kikosho, Body Beam, Super Burning Skull
+and Elemental Summon Shot; `releaseAtkInfo` (`1401C6870`) is otherwise reached
+only from spawn and the deferred destructor. Model rebinding outside setup occurs
+in about 25 classes. The generation layer covers both.
+
+Not covered: effect models are not registry units unless adopted, so a tail
+pointer to one is not retained; unsupported effect graphs are retained but not
+rewound. The regression exercises rewind, replay, resurrection of a shot that
+died after the snapshot, a later inline constraint and pre-write rejection. It is
+a native-mock test, not live-game validation.
 
 ### Live Presentation Policy
 

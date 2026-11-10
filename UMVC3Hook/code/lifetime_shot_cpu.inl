@@ -100,15 +100,8 @@ ShotCpuRestoreStatus RestoreShotCpuFields(void* destination, size_t destinationS
     LIFE_REQUIRE(saved.payloadState == LifetimeShotPayload::Capture);
     LIFE_REQUIRE(owner.kind == Kind::Shot && saved.id == owner.id && bit && !(bit & (bit - 1)) &&
         (owner.snapshots & bit) && !(owner.occupancy != Occupancy::Live && owner.occupancy != Occupancy::Quarantined));
-    const ShotSpan* body = nullptr;
-    for (const auto& span : saved.spans) {
-        if (std::strcmp(span.name, "body")) continue;
-        LIFE_REQUIRE(!body && span.memory.address == owner.object && span.memory.size <= owner.extent &&
-            span.memory.size >= ShotCpuCommonSize && span.memory.offset <= saved.payload.size() &&
-            span.memory.size <= saved.payload.size() - span.memory.offset);
-        body = &span;
-    }
-    LIFE_REQUIRE(body);
+    const ShotSpan* body = &ShotBodySpan(saved, owner.object);
+    LIFE_REQUIRE(body->memory.size >= ShotCpuCommonSize && body->memory.size <= owner.extent);
     unsigned slot = 0;
     while ((uint32_t(1) << slot) != bit) ++slot;
     LIFE_REQUIRE(slot < ROLLBACK_WINDOW);

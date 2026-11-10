@@ -25,19 +25,22 @@ void __fastcall ForgetConstraintObject(void* object)
 
 // Caller owns the capture fences and recorder lock. The callback may adopt a
 // model owner, so no registry iterator survives across it.
-template<class Visit> void VisitShotConstraintModels(const Identity& owner, Visit visit)
+// sortedConstraints: g_constructedConstraints addresses in ascending order.
+template<class Visit> void VisitShotConstraintModels(const Identity& owner,
+    const std::vector<void*>& sortedConstraints, Visit visit)
 {
     LifetimeFailureScope failureScope("shot.constraint_dependencies.capture", owner.object, owner.id);
     std::vector<void*> nodes;
+    std::unordered_set<void*> appended;
     const auto append = [&](void* object) {
-        if (object && g_constructedConstraints.contains(object) &&
-            std::find(nodes.begin(), nodes.end(), object) == nodes.end()) nodes.push_back(object);
+        if (object && g_constructedConstraints.contains(object) && appended.insert(object).second)
+            nodes.push_back(object);
     };
-    for (const auto& [object, construction] : g_constructedConstraints) {
-        (void)construction;
-        const uintptr_t relative = uintptr_t(object) - uintptr_t(owner.object);
-        if (owner.extent >= 0x90 && relative <= owner.extent - 0x90) append(object);
-    }
+    // Inline constraints lie within [owner, owner + extent - 0x90].
+    if (owner.extent >= 0x90)
+        for (auto at = std::lower_bound(sortedConstraints.begin(), sortedConstraints.end(), owner.object, std::less<void*>{});
+             at != sortedConstraints.end() && uintptr_t(*at) - uintptr_t(owner.object) <= owner.extent - 0x90; ++at)
+            append(*at);
     auto* joints = Read<uint8_t*>(owner.object, 0x538);
     const uint32_t count = joints ? Read<uint32_t>(joints - 0x10, 0) : 0;
     if (count > 65536) LIFE_FAIL("constraint dependency scan found an invalid joint allocation count",
@@ -61,9 +64,9 @@ void CaptureShotConstraints(SnapshotManifest& saved)
     saved.constraints.clear();
     saved.constraintsComplete = true;
     AcquireSRWLockExclusive(&g_lock);
+    std::unordered_set<void*> captured;
     const auto append = [&](void* object) {
-        if (!object || std::any_of(saved.constraints.begin(), saved.constraints.end(),
-            [&](const ShotConstraintState& node) { return node.object == object; })) return;
+        if (!object || captured.count(object)) return;
         const auto at = g_constructedConstraints.find(object);
         if (at == g_constructedConstraints.end()) {
             saved.constraintsComplete = false;
@@ -78,21 +81,32 @@ void CaptureShotConstraints(SnapshotManifest& saved)
             LIFE_VALUE(object), LIFE_VALUE(self), LIFE_VALUE(node.construction), LIFE_VALUE(saved.frame),
             LIFE_VALUE(saved.constraints.size()));
         saved.constraints.push_back(node);
+        captured.insert(object);
     };
     // Completed shot allocations prove containment of their inline children.
     // Include detached constraints as well as the complete neighboring chains.
+    // Bodies sorted by address; allocations are disjoint, so at most one contains
+    // a given constraint: the last body starting at or below it.
+    std::vector<GraphSpan> bodies;
+    if (!g_constructedConstraints.empty()) for (const auto& shot : saved.shots) {
+        const auto body = std::find_if(shot.spans.begin(), shot.spans.end(),
+            [](const ShotSpan& span) { return span.kind == ShotSpanKind::Body; });
+        LIFE_REQUIRE(body != shot.spans.end());
+        bodies.push_back(body->memory);
+    }
+    std::sort(bodies.begin(), bodies.end(),
+        [](const GraphSpan& a, const GraphSpan& b) { return std::less<void*>{}(a.address, b.address); });
     for (const auto& [object, construction] : g_constructedConstraints) {
         (void)construction;
-        for (const auto& shot : saved.shots) {
-            const auto body = std::find_if(shot.spans.begin(), shot.spans.end(),
-                [](const ShotSpan& span) { return !std::strcmp(span.name, "body"); });
-            LIFE_REQUIRE(body != shot.spans.end());
-            const uintptr_t relative = uintptr_t(object) - uintptr_t(body->memory.address);
-            if (body->memory.size >= 0x90 && relative <= body->memory.size - 0x90) { append(object); break; }
-        }
+        auto at = std::upper_bound(bodies.begin(), bodies.end(), object,
+            [](void* address, const GraphSpan& body) { return std::less<void*>{}(address, body.address); });
+        if (at == bodies.begin()) continue;
+        --at;
+        const uintptr_t relative = uintptr_t(object) - uintptr_t(at->address);
+        if (at->size >= 0x90 && relative <= at->size - 0x90) append(object);
     }
     for (const auto& shot : saved.shots) for (const auto& span : shot.spans) {
-        if (std::strcmp(span.name, "model.joints")) continue;
+        if (span.kind != ShotSpanKind::ModelJoints) continue;
         LIFE_REQUIRE(span.memory.offset <= shot.payload.size() && span.memory.size <= shot.payload.size() - span.memory.offset &&
             !(span.memory.size % 0xC0));
         const uint8_t* bytes = shot.payload.data() + span.memory.offset;
@@ -147,13 +161,14 @@ struct ShotConstraintPlan {
     const unsigned slot = unsigned((saved.frame % ROLLBACK_WINDOW + ROLLBACK_WINDOW) % ROLLBACK_WINDOW);
     AcquireSRWLockExclusive(&g_lock);
     LIFE_REQUIRE(bit == (uint32_t(1) << slot) && g_liveSnapshots[slot] == &saved && saved.constraintsComplete);
+    std::unordered_set<void*> seenJoints, currentObjects;
     for (const auto& shot : saved.shots) {
         const ShotSpan *body = nullptr, *joints = nullptr, *depths = nullptr;
         for (const auto& span : shot.spans) {
             LIFE_REQUIRE(span.memory.offset <= shot.payload.size() && span.memory.size <= shot.payload.size() - span.memory.offset);
-            const ShotSpan** destination = !std::strcmp(span.name, "body") ? &body :
-                (!std::strcmp(span.name, "model.joints") ? &joints :
-                (!std::strcmp(span.name, "model.depths") ? &depths : nullptr));
+            const ShotSpan** destination = span.kind == ShotSpanKind::Body ? &body :
+                (span.kind == ShotSpanKind::ModelJoints ? &joints :
+                (span.kind == ShotSpanKind::ModelDepths ? &depths : nullptr));
             if (destination) { LIFE_REQUIRE(!*destination); *destination = &span; }
         }
         LIFE_REQUIRE(body && body->memory.size >= 0x2140);
@@ -187,23 +202,21 @@ struct ShotConstraintPlan {
             Read<void*>(livePose.image, 0x538) == liveJoints);
         // Detached pose generations are still native-owned here. A constraint
         // can remain attached to their old joints until this transaction repairs it.
-        for (size_t index = 0; index < g_shotGenerations.size(); ++index) {
+        for (size_t index : OwnerGenerationSlots(shot.id)) {
             const auto& generation = g_shotGenerations[index];
-            if (!generation.id || generation.ownerId != shot.id || generation.domain != ShotDomain::Pose) continue;
+            if (generation.domain != ShotDomain::Pose) continue;
             plan.poses.push_back({index, generation.id});
             auto* root = Read<uint8_t*>(generation.image, 0x538);
             const uint32_t count = root ? Read<uint32_t>(root - 0x10, 0) : 0;
             LIFE_REQUIRE(count <= 65536);
             for (uint32_t i = 0; i < count; ++i) {
                 void* joint = root + i*0xC0;
-                if (std::find(plan.currentJoints.begin(), plan.currentJoints.end(), joint) == plan.currentJoints.end())
-                    plan.currentJoints.push_back(joint);
+                if (seenJoints.insert(joint).second) plan.currentJoints.push_back(joint);
             }
         }
     }
     const auto append = [&](void* object) {
-        if (!object || std::any_of(plan.currentNodes.begin(), plan.currentNodes.end(),
-            [&](const ShotConstraintState& node) { return node.object == object; })) return;
+        if (!object || !currentObjects.insert(object).second) return;
         const auto at = g_constructedConstraints.find(object);
         LIFE_REQUIRE(at != g_constructedConstraints.end());
         ShotConstraintState node; node.object = object; node.construction = at->second;
@@ -227,9 +240,12 @@ struct ShotConstraintPlan {
         void* next = Read<void*>(plan.currentNodes[i].image, 0x58);
         append(previous); append(next);
     }
+    std::unordered_set<void*> historicalObjects;
+    for (const auto& node : saved.constraints) historicalObjects.insert(node.object);
+    std::unordered_set<void*> modelObjects;
+    for (const auto& model : plan.models) modelObjects.insert(model.object);
     for (const auto& node : plan.currentNodes) {
-        if (std::any_of(saved.constraints.begin(), saved.constraints.end(),
-            [&](const ShotConstraintState& historical) { return historical.object == node.object; })) continue;
+        if (historicalObjects.count(node.object)) continue;
         // A previously existing foreign node has missing historical state, not
         // permission to erase it. Only proven future inline children withdraw.
         LIFE_REQUIRE(node.construction > saved.constraintWatermark &&
@@ -240,17 +256,20 @@ struct ShotConstraintPlan {
             }));
     }
     const auto validate = [&](const std::vector<ShotConstraintState>& nodes, bool historical) {
-        std::vector<void*> visited;
+        // Each object exactly once; chain heads address the node's +0x40 link.
+        std::unordered_map<uintptr_t, const ShotConstraintState*> byHead;
+        for (const auto& node : nodes) LIFE_REQUIRE(byHead.emplace(uintptr_t(node.object) + 0x40, &node).second);
+        std::unordered_set<void*> visited;
         const auto chain = [&](void* joint, void* head) {
             void* previous = nullptr;
             while (head) {
-                const auto node = std::find_if(nodes.begin(), nodes.end(), [&](const ShotConstraintState& node) {
-                    return uintptr_t(node.object) + 0x40 == uintptr_t(head);
-                });
-                LIFE_REQUIRE(node != nodes.end() && std::find(visited.begin(), visited.end(), node->object) == visited.end() &&
+                const auto at = byHead.find(uintptr_t(head));
+                LIFE_REQUIRE(at != byHead.end());
+                const ShotConstraintState* node = at->second;
+                LIFE_REQUIRE(visited.insert(node->object).second &&
                     Read<void*>(node->image, 0x48) == node->object && Read<void*>(node->image, 0x50) == previous &&
                     Read<void*>(node->image, 0x60) == joint);
-                visited.push_back(node->object); previous = node->object;
+                previous = node->object;
                 void* next = Read<void*>(node->image, 0x58);
                 head = next ? (void*)(uintptr_t(next) + 0x40) : nullptr;
             }
@@ -264,15 +283,11 @@ struct ShotConstraintPlan {
         } else for (void* joint : plan.currentJoints) chain(joint, Read<void*>(joint, 8));
         for (const auto& node : nodes) {
             LIFE_REQUIRE(Read<void*>(node.image, 0x48) == node.object);
-            LIFE_REQUIRE(std::count_if(nodes.begin(), nodes.end(), [&](const ShotConstraintState& other) {
-                return other.object == node.object;
-            }) == 1);
             if (Read<void*>(node.image, 0x60)) {
-                LIFE_REQUIRE(std::find(visited.begin(), visited.end(), node.object) != visited.end());
+                LIFE_REQUIRE(visited.count(node.object));
             } else LIFE_REQUIRE(!Read<void*>(node.image, 0x50) && !Read<void*>(node.image, 0x58));
             void* model = Read<void*>(node.image, 0x78);
-            LIFE_REQUIRE(!(model && std::none_of(plan.models.begin(), plan.models.end(),
-                [&](const ShotConstraintPlan::Model& owner) { return owner.object == model; })));
+            LIFE_REQUIRE(!model || modelObjects.count(model));
         }
     };
     validate(saved.constraints, true); validate(plan.currentNodes, false);

@@ -1311,6 +1311,7 @@ void Rollback_RestoreSnapshot(int32_t frame)
 
     LifetimeTrace_RetireFutureShots(frame);
     LifetimeTrace_RestoreEffects(frame);
+    LifetimeTrace_RestoreShots(frame);
 
     traceRestoreState("after");
 

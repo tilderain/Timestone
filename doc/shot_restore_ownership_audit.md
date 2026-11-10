@@ -260,24 +260,29 @@ Active partial rebuilds also occur at `0x140161B30` and `0x1401B48E0`.
 Pointer-array growth at `0x140011660` frees old backing. Neither a resource-setter
 hook nor root-pointer equality establishes ownership closure.
 
-### Open Correctness Issue: Unsynchronized Attack-Owner Lookup
+### Attack-Owner Lookup From Engine-Wide Hooks
 
-Open as of 2026-11-09; correctness, not only performance. `GenerationExtendArray`
-detours the engine-wide `MtArray` growth routine `0x140011660`, and
-`GenerationAddChild` detours `nCollision::cCollisionNodeObject::addChild`
-(`0x1405A4420`). Both call `ManagedAttack`, which runs `g_attackOwners.find` and
-`g_shotDomains.find` without the recorder lock. Ghidra lists 57 call sites of
-`0x140011660`, including `sUnit::setUnitGroupBit`, collision
+`GenerationExtendArray` detours the engine-wide `MtArray` growth routine
+`0x140011660`, and `GenerationAddChild` detours
+`nCollision::cCollisionNodeObject::addChild` (`0x1405A4420`). Ghidra lists 57 call
+sites of `0x140011660`, including `sUnit::setUnitGroupBit`, collision
 `queueNodeForPostMove`/`enqueueContactNode`, BVH growth, `sShadow`, `rMetaSet`
-loading, `uMetaSet::createAllObject` and `sRemoteProcedure::addTemporary`.
+loading, `uMetaSet::createAllObject` and `sRemoteProcedure::addTemporary`. Which
+threads reach them has not been established, so the design does not depend on it.
 
-The main thread inserts into and erases from these maps under the unit fence
-(`ReadAttackCohort`, `ReleaseRetiredAttack`, `ForgetCurrentShotGenerations`).
-Any of those callers that runs on another thread during that window is a data race
-on an `std::unordered_map`, which is undefined behaviour. It has not been
-established which threads reach either routine. Do not add a thread-ID fast path
-until the owning thread of these maps is proven. Either establish that, or
-serialize the lookup with the mutations.
+Both detours call `ManagedAttack`, whose first step is a lookup in `g_attackOwners`.
+That map now has its own leaf lock (`AttackOwnersGuard`), taken by every insert
+(`ReadAttackCohort`), erase (`ReleaseRetiredAttack`, `ForgetCurrentShotGenerations`)
+and lookup. Nothing else is locked, called natively or hooked while it is held, so
+it nests safely inside the recorder lock. Unmanaged roots, the common case on every
+thread, return after that lookup without touching shot domains or the registry.
+
+Each entry records the thread that registered it. A hit from any other thread is a
+fatal invariant failure, not a lookup: shot domains and the registry belong to the
+fence-owning thread, and growing a managed root elsewhere would already bypass COW.
+A ThreadSanitizer regression drives both detours from a second thread while the
+main thread registers and erases the cohort (it reports the race when the lookup
+lock is removed); another checks the cross-thread hit diagnostic.
 
 External collision queues hold roots/owners and contact records. Historical
 cursor restoration with future queue/NodeList contents is invalid. Persistent
