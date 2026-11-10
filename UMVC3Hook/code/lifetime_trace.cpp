@@ -2308,6 +2308,8 @@ void LifetimeTrace_Install()
         {0x1409BFE90, (void*)&ForgetConstraintObject, (void**)&oConstraintObjectDtor},
         {0x140529730, (void*)&GenerationMotionList, (void**)&oSetShotMotionList},
         {0x140200D10, (void*)&GenerationCommandResource, (void**)&oSetShotCommandResource},
+        {0x14013B330, (void*)&ConstructModel, (void**)&oConstructModel},
+        {0x14013B480, (void*)&DestroyModel, (void**)&oDestroyModel},
     };
     if constexpr (EMPTY_EFFECT_QUARANTINE_ENABLED) {
         // Deleting-hook enable is deferred until ALL trace/epoch hooks exist below.

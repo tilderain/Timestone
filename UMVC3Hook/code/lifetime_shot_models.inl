@@ -146,10 +146,35 @@ bool RestoreDrivenModel(const ModelUnitState& saved, uint32_t bit)
     return storage;
 }
 
+// Construction order of every uGameEffectModel, on the identity clock. A model
+// is adopted (and numbered) only when something first leases it, which says
+// nothing about when it was made.
+std::unordered_map<void*, uint64_t> g_modelBirths;
+void* (__fastcall* oConstructModel)(void*) = nullptr;
+void (__fastcall* oDestroyModel)(void*) = nullptr;
+
+void* __fastcall ConstructModel(void* model)
+{
+    void* result = oConstructModel(model);
+    AcquireSRWLockExclusive(&g_lock);
+    g_modelBirths[model] = ++g_nextId;
+    ReleaseSRWLockExclusive(&g_lock);
+    return result;
+}
+
+void __fastcall DestroyModel(void* model)
+{
+    AcquireSRWLockExclusive(&g_lock);
+    g_modelBirths.erase(model);
+    ReleaseSRWLockExclusive(&g_lock);
+    oDestroyModel(model);
+}
+
 // Models of the branch being abandoned. A shot born after the restored frame
 // is withdrawn; the model it created would stay on screen and keep animating.
-// The typed references of every current shot are examined, so a model that an
-// older shot created since the frame is found too. Runs before the effect
+// Only a model constructed after that frame qualifies: a shot can also name a
+// model that an effect or character owns, and that one existed all along even
+// if no shot named it when the frame was captured. Runs before the effect
 // transaction, which removes the marked models from the scheduler.
 void MarkAbandonedModels(int32_t frame)
 {
@@ -158,36 +183,29 @@ void MarkAbandonedModels(int32_t frame)
     AcquireSRWLockExclusive(&g_lock);
     const auto* saved = g_liveSnapshots[slot];
     if (!saved || !saved->valid || saved->frame != frame || !saved->unitManager) { ReleaseSRWLockExclusive(&g_lock); return; }
+    const uint64_t watermark = saved->birthWatermark;
     for (const auto& shot : ActiveIdentities()) {
         if (shot.kind != Kind::Shot || shot.occupancy != Occupancy::Live || shot.extent < ShotCpuCommonSize) continue;
         VisitShotUnitReferences(shot.object, [&](size_t, void* object) {
-            if (object && object != shot.object &&
+            if (!object || object == shot.object) return;
+            const auto born = g_modelBirths.find(object);
+            if (born != g_modelBirths.end() && born->second > watermark &&
                 std::find(candidates.begin(), candidates.end(), object) == candidates.end())
                 candidates.push_back(object);
         });
     }
-    // A model created since the last capture has no identity yet. Native DTI
-    // dispatch and hook registration stay outside the recorder lock.
-    for (size_t i = 0; i < candidates.size(); ++i) {
-        void* object = candidates[i];
+    // One made since the last capture has no identity yet. Native DTI dispatch
+    // and hook registration stay outside the recorder lock.
+    for (void* object : candidates) {
         if (Find(object, false)) continue;
         ReleaseSRWLockExclusive(&g_lock);
-        bool model = false;
-        uint64_t parent = GetObjectDti(uintptr_t(object));
-        for (unsigned depth = 0; parent && depth < 128; ++depth) {
-            if (parent == uintptr_t(_addr(GameEffectModelDti))) { model = true; break; }
-            parent = Read<uint64_t>((void*)parent, 0x20);
-        }
-        if (model) { Birth(object, Kind::Unit); RegisterUnit(object); }
+        Birth(object, Kind::Unit); RegisterUnit(object);
         AcquireSRWLockExclusive(&g_lock);
     }
-    saved = g_liveSnapshots[slot];
-    LIFE_REQUIRE(saved && saved->valid && saved->frame == frame);
     for (void* object : candidates) {
         Identity* identity = Find(object, false);
-        if (!identity || identity->occupancy != Occupancy::Live || !IsDrivenModel(*identity)) continue;
-        identity->abandonedModel = std::none_of(saved->models.begin(), saved->models.end(),
-            [&](const ModelUnitState& model) { return model.object == object && model.id == identity->id; });
+        if (identity && identity->occupancy == Occupancy::Live && IsDrivenModel(*identity))
+            identity->abandonedModel = true;
     }
     ReleaseSRWLockExclusive(&g_lock);
 }

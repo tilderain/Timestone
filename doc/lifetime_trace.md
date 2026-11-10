@@ -389,8 +389,12 @@ dead pointer, and the cart stayed in phase 0 on the peer that had rolled back.
   (`model_restored c=0`).
 - A restored unit link is kept only if the snapshot retained its target.
 - `MarkAbandonedModels` runs at the start of future-shot withdrawal: a model that
-  a current shot names through a typed reference and that the restored frame did
-  not capture is withdrawn with the abandoned branch.
+  a current shot names through a typed reference and that was constructed after
+  the restored frame is withdrawn with the abandoned branch. Construction order
+  comes from hooks on `uGameEffectModel::ctor @ 0x14013B330` and its base
+  destructor `0x14013B480`, stamped on the identity clock. Adoption order is not
+  used: a shot can name a model that an effect or character owns and that
+  existed all along; withdrawing that one frees a model its owner still drives.
 
 Not covered: models named only by concrete tail words that have never been in a
 snapshot (the cart's twelve debris links at `+2290`), and
