@@ -1,9 +1,12 @@
 """Compile the production lifetime tracer against native-call and Windows mocks."""
 
+import concurrent.futures
+import fcntl
+import hashlib
 from pathlib import Path
 import platform
+import shutil
 import subprocess
-import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -454,27 +457,7 @@ void releasePayloadFixture(const PayloadFixture& fixture) {
 '''
 
 class LifetimeTraceTests(unittest.TestCase):
-    def compile_run(self, enabled, checks, quarantine=True, expected_returncode=0, arguments=None,
-                    sanitizers="address,undefined"):
-        header = (ROOT / "UMVC3Hook/code/lifetime_trace.h").read_text()
-        header = header.replace("#pragma once", "").replace(
-            "LIFETIME_TRACE_ENABLED = true", f"LIFETIME_TRACE_ENABLED = {str(enabled).lower()}")
-        header = header.replace("EMPTY_EFFECT_QUARANTINE_ENABLED = true",
-                                f"EMPTY_EFFECT_QUARANTINE_ENABLED = {str(quarantine).lower()}")
-        source = (ROOT / "UMVC3Hook/code/lifetime_trace.cpp").read_text()
-        original_source = source
-        for name in ("lifetime_failure.inl", "lifetime_shot_generations.inl", "lifetime_shot_cpu.inl",
-                     "lifetime_shot_constraints.inl", "lifetime_shot_world.inl", "lifetime_shot_restore.inl",
-                     "lifetime_shot_models.inl"):
-            include = f'#include "{name}"'
-            next_line = original_source[:original_source.index(include)].count("\n") + 2
-            contents = (ROOT / "UMVC3Hook/code" / name).read_text()
-            source = source.replace(include, f'#line 1 "UMVC3Hook/code/{name}"\n{contents}\n'
-                                    f'#line {next_line} "UMVC3Hook/code/lifetime_trace.cpp"')
-        source = "\n".join(line for line in source.splitlines() if not line.startswith('#include "'))
-        rollback_header = (ROOT / "UMVC3Hook/code/rollback.h").read_text().replace("#pragma once", "")
-        character_header = (ROOT / "UMVC3Hook/code/rollback_character_restore.h").read_text().replace("#pragma once", "")
-        bridge = r'''
+    BRIDGE = r'''
 std::span<const uint32_t> Rollback_CharacterShotTailOffsets(uint64_t) { return {}; }
 int collisionRecycles = 0, collisionGroupClears = 0, constraintUnlinks = 0;
 void MockRecycleCollision(void* collider) {
@@ -538,25 +521,147 @@ void SaveTestSnapshot(int32_t frame, LifetimeShotPayload payload = g_testShotPay
     SaveTestSnapshot(frame, testSnapshots[(frame % ROLLBACK_WINDOW + ROLLBACK_WINDOW) % ROLLBACK_WINDOW], payload);
 }
 '''
+
+    # One sanitizer build per configuration, shared by every test: each check
+    # program is a namespace in a single translation unit and the binary picks
+    # one by index. Compiling the tracer once instead of once per test is the
+    # whole cost of the suite. Binaries are cached by source hash, so an
+    # unchanged tree reruns without compiling and parallel test processes share
+    # one build.
+    CACHE = Path("/tmp/opencode/lifetime-trace-cache")
+    _cases = None      # {config: [checks, ...]} from the collection pass.
+    _binaries = {}     # {(config, checks tuple): executable path}
+
+    @classmethod
+    def _collect_cases(cls):
+        """Run every test method with compilation stubbed out to learn all check programs."""
+        cls._cases = {}
+        for name in unittest.defaultTestLoader.getTestCaseNames(cls):
+            probe = cls(name)
+            probe._collecting = True
+            for attribute in dir(probe):
+                if attribute.startswith("assert") or attribute == "fail":
+                    setattr(probe, attribute, lambda *args, **kwargs: None)
+            try:
+                getattr(probe, name)()
+            except Exception:
+                pass  # A method that needs real output; its later checks build on demand.
+
+    @classmethod
+    def _unit(cls, config, cases):
+        enabled, quarantine, _ = config
+        header = (ROOT / "UMVC3Hook/code/lifetime_trace.h").read_text()
+        header = header.replace("#pragma once", "").replace(
+            "LIFETIME_TRACE_ENABLED = true", f"LIFETIME_TRACE_ENABLED = {str(enabled).lower()}")
+        header = header.replace("EMPTY_EFFECT_QUARANTINE_ENABLED = true",
+                                f"EMPTY_EFFECT_QUARANTINE_ENABLED = {str(quarantine).lower()}")
+        source = (ROOT / "UMVC3Hook/code/lifetime_trace.cpp").read_text()
+        original_source = source
+        for name in ("lifetime_failure.inl", "lifetime_shot_generations.inl", "lifetime_shot_cpu.inl",
+                     "lifetime_shot_constraints.inl", "lifetime_shot_world.inl", "lifetime_shot_restore.inl",
+                     "lifetime_shot_models.inl"):
+            include = f'#include "{name}"'
+            next_line = original_source[:original_source.index(include)].count("\n") + 2
+            contents = (ROOT / "UMVC3Hook/code" / name).read_text()
+            source = source.replace(include, f'#line 1 "UMVC3Hook/code/{name}"\n{contents}\n'
+                                    f'#line {next_line} "UMVC3Hook/code/lifetime_trace.cpp"')
+        source = "\n".join(line for line in source.splitlines() if not line.startswith('#include "'))
+        rollback_header = (ROOT / "UMVC3Hook/code/rollback.h").read_text().replace("#pragma once", "")
+        character_header = (ROOT / "UMVC3Hook/code/rollback_character_restore.h").read_text().replace("#pragma once", "")
+        includes, bodies, dispatch = [], [], []
+        for index, checks in enumerate(cases):
+            lines = checks.splitlines()
+            includes += [line for line in lines if line.lstrip().startswith("#include")]
+            body = "\n".join(line for line in lines if not line.lstrip().startswith("#include"))
+            # A check's main becomes an ordinary function in its own namespace.
+            body = body.replace("int main(", "int CheckMain(")
+            bodies.append(f'namespace check_{index} {{\n#line 1 "check_{index}"\n{body}\n}}')
+            dispatch.append(f"        case {index}: RunCheck(&check_{index}::CheckMain, argc, argv); break;")
+        runner = r"""
+template<class Main> void RunCheck(Main run, int argc, char** argv) {
+    if constexpr (std::is_invocable_v<Main, int, char**>) run(argc, argv); else run();
+}
+int main(int argc, char** argv) {
+    // argv[1] selects the check; it then sees the arguments it was written for.
+    assert(argc >= 2);
+    const int check = std::atoi(argv[1]);
+    argv[1] = argv[0]; --argc; ++argv;
+    switch (check) {
+""" + "\n".join(dispatch) + "\n        default: assert(false);\n    }\n    return 0;\n}\n"
+        return (MOCKS + rollback_header + character_header + header + source + cls.BRIDGE +
+                "\n".join(sorted(set(includes))) + "\n" + "\n".join(bodies) + runner)
+
+    @classmethod
+    def _build(cls, config, cases):
+        """Path of the binary holding `cases`, compiling it unless a cached build exists."""
+        key = (config, tuple(cases))
+        if key in cls._binaries:
+            return cls._binaries[key]
+        sanitizers = config[2]
+        # ThreadSanitizer needs a position-independent executable. A check's main
+        # is no longer `main`, so flowing off its end must not trap.
+        flags = ["-std=c++20", "-Wall", "-Wextra", "-pthread", "-DLIFETIME_VALIDATE_INDEXES",
+                 f"-fsanitize={sanitizers}", "-fno-sanitize=return", "-fno-omit-frame-pointer",
+                 *([] if "thread" in sanitizers else ["-no-pie"]), "-g1"]
+        unit = cls._unit(config, cases)
+        digest = hashlib.sha256((unit + "\0" + " ".join(flags)).encode()).hexdigest()[:24]
+        directory = cls.CACHE / digest
+        exe = directory / "test"
+        cls.CACHE.mkdir(parents=True, exist_ok=True)
+        with open(cls.CACHE / f"{digest}.lock", "w") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)  # Another test process may be building it.
+            if not exe.exists():
+                directory.mkdir(exist_ok=True)
+                cpp = directory / "test.cpp"
+                cpp.write_text(unit)
+                partial = directory / "test.partial"
+                result = subprocess.run(["g++", *flags, str(cpp), "-o", str(partial)], capture_output=True, text=True)
+                if result.returncode:
+                    raise AssertionError("lifetime test build failed:\n" + result.stderr[-20000:])
+                partial.rename(exe)
+                # Keep the few most recent builds; each source edit makes new ones.
+                builds = sorted((path for path in cls.CACHE.iterdir() if path.is_dir()),
+                                key=lambda path: path.stat().st_mtime, reverse=True)
+                for stale in builds[12:]:
+                    shutil.rmtree(stale, ignore_errors=True)
+                    (cls.CACHE / f"{stale.name}.lock").unlink(missing_ok=True)
+        cls._binaries[key] = exe
+        return exe
+
+    def compile_run(self, enabled, checks, quarantine=True, expected_returncode=0, arguments=None,
+                    sanitizers="address,undefined"):
+        cls = LifetimeTraceTests
+        config = (enabled, quarantine, sanitizers)
         checks = checks.replace("LifetimeTrace_SaveSnapshot(", "SaveTestSnapshot(")
-        with tempfile.TemporaryDirectory(dir="/tmp/opencode", prefix="lifetime-trace-") as tmp:
-            cpp, exe = Path(tmp) / "test.cpp", Path(tmp) / "test"
-            cpp.write_text(MOCKS + rollback_header + character_header + header + source + bridge + checks)
-            # ThreadSanitizer needs a position-independent executable.
-            pie = [] if "thread" in sanitizers else ["-no-pie"]
-            subprocess.run(["g++", "-std=c++20", "-Wall", "-Wextra", "-pthread", "-DLIFETIME_VALIDATE_INDEXES",
-                            f"-fsanitize={sanitizers}", "-fno-omit-frame-pointer", *pie, "-g",
-                            str(cpp), "-o", str(exe)], check=True)
-            self.last_results = []
-            for args in arguments if arguments is not None else [()]:
-                with self.subTest(native_arguments=args):
-                    # TSan rejects, and this GCC's ASan intermittently faults at
-                    # startup under, high-entropy ASLR mappings on current kernels.
-                    launcher = ["setarch", platform.machine(), "-R"]
-                    result = subprocess.run([*launcher, str(exe), *args], check=False, capture_output=True, text=True)
-                    self.last_results.append(result)
-                    self.assertEqual(result.returncode, expected_returncode, result.stdout + result.stderr)
+        runs = arguments if arguments is not None else [()]
+        if getattr(self, "_collecting", False):
+            cases = cls._cases.setdefault(config, [])
+            if checks not in cases:
+                cases.append(checks)
+            result = subprocess.CompletedProcess([], expected_returncode, "", "")
+            self.last_results = [result for _ in runs]
             return result
+        if cls._cases is None:
+            cls._collect_cases()
+            # Build every configuration at once; the first test would otherwise
+            # wait for its own and each later configuration would wait again.
+            with concurrent.futures.ThreadPoolExecutor(max_workers=len(cls._cases) or 1) as pool:
+                list(pool.map(lambda item: cls._build(item[0], item[1]), cls._cases.items()))
+        cases = cls._cases.get(config, [])
+        if checks not in cases:
+            cases = [checks]  # Not seen by the collection pass: its own build.
+        exe, index = cls._build(config, cases), cases.index(checks)
+        self.last_results = []
+        for args in runs:
+            with self.subTest(native_arguments=args):
+                # TSan rejects, and this GCC's ASan intermittently faults at
+                # startup under, high-entropy ASLR mappings on current kernels.
+                launcher = ["setarch", platform.machine(), "-R"]
+                result = subprocess.run([*launcher, str(exe), str(index), *args], check=False,
+                                        capture_output=True, text=True)
+                self.last_results.append(result)
+                self.assertEqual(result.returncode, expected_returncode, result.stdout + result.stderr)
+        return result
 
     def test_trace_and_native_passthrough(self):
         self.compile_run(True, CHECKS)
