@@ -73,10 +73,12 @@ void CaptureShotWorld(SnapshotManifest& saved, void* manager)
     LIFE_REQUIRE(saved.valid && unitFence.manager && saved.unitManager == unitFence.manager &&
         saved.thread == GetCurrentThreadId() && shotFence.manager && saved.shotManager == shotFence.manager &&
         saved.shotConfig == Read<void*>((void*)_addr(0x140D50F88), 0) && bit && !(bit & (bit - 1)));
-    std::vector<const Identity*> members;
-    std::vector<Identity*> identities;
-    std::vector<uint8_t> linked;
-    std::vector<std::array<uint32_t, 2>> ids;
+    // Restore-fence scratch, reused across restores.
+    static std::vector<const Identity*> members;
+    static std::vector<Identity*> identities;
+    static std::vector<uint8_t> linked;
+    static std::vector<std::array<uint32_t, 2>> ids;
+    members.clear(); identities.clear(); ids.clear();
     AcquireSRWLockExclusive(&g_lock);
     const auto slot = unsigned((saved.frame % ROLLBACK_WINDOW + ROLLBACK_WINDOW) % ROLLBACK_WINDOW);
     LIFE_REQUIRE(bit == (uint32_t(1) << slot) && g_liveSnapshots[slot] == &saved);
@@ -88,24 +90,25 @@ void CaptureShotWorld(SnapshotManifest& saved, void* manager)
         members.push_back(&member); identities.push_back(current);
     }
     // Saved members have distinct addresses (one registry identity per address).
-    std::unordered_map<void*, size_t> memberIndex;
-    for (size_t i = 0; i < members.size(); ++i) memberIndex.emplace(members[i]->object, i);
+    static ScratchMap<size_t> memberIndex;
+    memberIndex.clear();
+    for (size_t i = 0; i < members.size(); ++i) *memberIndex.insert(members[i]->object).first = i;
     const auto memberAt = [&](void* object, uint64_t id) {
-        const auto at = memberIndex.find(object);
-        return at != memberIndex.end() && members[at->second]->id == id ? at->second : SIZE_MAX;
+        const size_t* at = memberIndex.find(object);
+        return at && members[*at]->id == id ? *at : SIZE_MAX;
     };
     for (const auto& current : ActiveIdentities())
         LIFE_REQUIRE(!(current.kind == Kind::Shot && current.occupancy == Occupancy::Live &&
             memberAt(current.object, current.id) == SIZE_MAX));
     ReleaseSRWLockExclusive(&g_lock);
-    linked.resize(members.size());
+    linked.assign(members.size(), 0);
     const auto index = [&](const ShotListEntry& entry) {
         const size_t i = memberAt(entry.object, entry.id);
         if (i != SIZE_MAX) return i;
         LIFE_FAIL("saved shot-list entry has no matching retained identity", LIFE_VALUE(entry.object),
             LIFE_VALUE(entry.id), LIFE_VALUE(saved.frame), LIFE_VALUE(bit), LIFE_VALUE(members.size()));
     };
-    const auto contains = [&](void* object) { return memberIndex.count(object) != 0; };
+    const auto contains = [&](void* object) { return memberIndex.contains(object); };
     bool occupied[256]{};
     LIFE_REQUIRE(saved.shotCursor && saved.shotCursor <= 256 && saved.shotPending.size() <= 512);
     for (const auto* member : members) {
@@ -145,7 +148,8 @@ void CaptureShotWorld(SnapshotManifest& saved, void* manager)
     }
     for (size_t i = 0; i < members.size(); ++i)
         LIFE_REQUIRE(bool(linked[i]) == members[i]->shotLinked);
-    std::vector<ShotPendingEntry> foreign, pending;
+    static std::vector<ShotPendingEntry> foreign, pending;
+    foreign.clear(); pending.clear();
     void* manager = shotFence.manager;
     const uint32_t count = Read<uint32_t>(manager, 0x2448);
     LIFE_REQUIRE(count <= 512);
@@ -160,7 +164,8 @@ void CaptureShotWorld(SnapshotManifest& saved, void* manager)
     ReleaseSRWLockExclusive(&g_lock);
     // Historical non-shot queue pointers confer no lease. Only use a matching
     // *current* foreign record, never dereference or resurrect an old address.
-    std::vector<bool> used(foreign.size());
+    static std::vector<uint8_t> used;
+    used.assign(foreign.size(), 0);
     for (const auto& entry : saved.shotPending) {
         if (entry.id) {
             index({entry.object, entry.id});
@@ -227,15 +232,19 @@ void CaptureShotWorld(SnapshotManifest& saved, void* manager)
         uint64_t groups;
         uint64_t construction = 0;
     };
-    std::vector<Member> members;
-    std::unordered_set<void*> memberObjects;
-    std::unordered_set<const Identity*> memberIdentities;
+    // Restore-fence scratch: every container below keeps its storage between
+    // restores, so the stage allocates nothing once warm.
+    static std::vector<Member> members;
+    static ScratchSet memberObjects, memberIdentities;
+    members.clear(); memberObjects.clear(); memberIdentities.clear();
     const auto addMember = [&](const Member& member) {
         members.push_back(member);
         memberObjects.insert(member.object);
         if (member.identity) memberIdentities.insert(member.identity);
     };
-    std::vector<void*> primary[64], groups[64];
+    static std::vector<void*> primary[64], groups[64];
+    for (auto& entries : primary) entries.clear();
+    for (auto& entries : groups) entries.clear();
     AcquireSRWLockExclusive(&g_lock);
     LIFE_REQUIRE(g_liveSnapshots[slot] == &saved);
     for (const auto& member : saved.members) {
@@ -244,7 +253,7 @@ void CaptureShotWorld(SnapshotManifest& saved, void* manager)
         auto* current = Find(member.object, false);
         LIFE_REQUIRE(current && current->id == member.id && (current->snapshots & bit) &&
             !(current->occupancy != Occupancy::Live && current->occupancy != Occupancy::Quarantined) &&
-            !memberIdentities.count(current));
+            !memberIdentities.contains(current));
         const auto shot = std::find_if(saved.shots.begin(), saved.shots.end(),
             [&](const ShotState& shot) { return shot.id == member.id; });
         LIFE_REQUIRE(shot != saved.shots.end());
@@ -257,7 +266,8 @@ void CaptureShotWorld(SnapshotManifest& saved, void* manager)
         addMember({current->object, current, &member, flags, mask});
     }
     // Shot body ranges, sorted for containment lookups of their inline constraints.
-    std::vector<std::pair<uintptr_t, uintptr_t>> shotRanges;
+    static std::vector<std::pair<uintptr_t, uintptr_t>> shotRanges;
+    shotRanges.clear();
     for (const auto& member : members)
         if (member.identity->extent >= 0x90)
             shotRanges.push_back({uintptr_t(member.object), uintptr_t(member.object) + member.identity->extent - 0x90});
@@ -268,7 +278,7 @@ void CaptureShotWorld(SnapshotManifest& saved, void* manager)
         LIFE_REQUIRE(current != g_constructedConstraints.end() && current->second == node.construction &&
             Read<uintptr_t>(node.object, 0) == Read<uintptr_t>(node.image, 0) &&
             Read<uintptr_t>(node.object, 0x40) == Read<uintptr_t>(node.image, 0x40) &&
-            Read<void*>(node.object, 0x48) == node.object && !memberObjects.count(node.object));
+            Read<void*>(node.object, 0x48) == node.object && !memberObjects.contains(node.object));
         auto* identity = Find(node.object, false);
         const Identity* historical = nullptr;
         if (identity) {
@@ -283,43 +293,52 @@ void CaptureShotWorld(SnapshotManifest& saved, void* manager)
         addMember({node.object, identity, historical, Read<uint32_t>(node.image, 0x10),
                    Read<uint64_t>(node.image, 0x30), node.construction});
     }
-    for (const auto& [object, construction] : g_constructedConstraints) {
-        if (construction <= saved.constraintWatermark || memberObjects.count(object)) continue;
-        // Shot allocations are disjoint: only the last range starting at or below can contain it.
-        const auto at = std::upper_bound(shotRanges.begin(), shotRanges.end(),
-            std::pair<uintptr_t, uintptr_t>{uintptr_t(object), UINTPTR_MAX});
-        if (at == shotRanges.begin() || uintptr_t(object) > std::prev(at)->second) continue;
-        LIFE_REQUIRE(!Find(object, false)); // Requires the standalone unit's lifetime adapter.
-        addMember({object, nullptr, nullptr, (Read<uint32_t>(object, 0x10) & ~0x3FFu) | 0x3F8u,
-                   0, construction});
+    // Constraints initialized after the snapshot inside a member shot. Shot
+    // allocations are disjoint, so each shot's inline constraints are one run of
+    // the sorted address list: no pass over every constraint in the game.
+    if (!shotRanges.empty() && !g_constructedConstraints.empty()) {
+        const std::vector<void*>& sorted = SortedConstraints();
+        for (const auto& range : shotRanges)
+            for (auto at = std::lower_bound(sorted.begin(), sorted.end(), (void*)range.first, std::less<void*>{});
+                 at != sorted.end() && uintptr_t(*at) <= range.second; ++at) {
+                void* object = *at;
+                const uint64_t construction = g_constructedConstraints.at(object);
+                if (construction <= saved.constraintWatermark || memberObjects.contains(object)) continue;
+                LIFE_REQUIRE(!Find(object, false)); // Requires the standalone unit's lifetime adapter.
+                addMember({object, nullptr, nullptr, (Read<uint32_t>(object, 0x10) & ~0x3FFu) | 0x3F8u,
+                           0, construction});
+            }
     }
-    const auto captured = [&](void* object) { return memberObjects.count(object) != 0; };
+    const auto captured = [&](void* object) { return memberObjects.contains(object); };
     // Future-only live shots must be withdrawn before any publication.
     for (const auto& current : ActiveIdentities())
         LIFE_REQUIRE(!(current.kind == Kind::Shot && current.occupancy == Occupancy::Live && !captured(current.object)));
     const auto reconcile = [&](const std::vector<void*>& historical, const std::vector<void*>& foreign,
                                std::vector<void*>& output) {
-        const std::unordered_set<void*> foreignSet(foreign.begin(), foreign.end());
-        std::unordered_set<void*> emitted;
+        static ScratchSet foreignSet, emitted;
+        foreignSet.clear(); emitted.clear();
+        for (void* object : foreign) foreignSet.insert(object);
         for (void* object : historical) {
-            if (!captured(object) && !foreignSet.count(object)) continue;
-            LIFE_REQUIRE(emitted.insert(object).second);
+            if (!captured(object) && !foreignSet.contains(object)) continue;
+            LIFE_REQUIRE(emitted.insert(object));
             output.push_back(object);
         }
         for (void* object : foreign)
-            if (emitted.insert(object).second) output.push_back(object);
+            if (emitted.insert(object)) output.push_back(object);
     };
-    std::unordered_set<void*> seen;
+    static ScratchSet seen;
+    seen.clear();
+    static std::vector<void*> foreign;
     for (uint32_t category = 0; category < 64; ++category) {
         if (category >= categories) {
             LIFE_REQUIRE(saved.primary[category].empty());
             continue;
         }
-        std::vector<void*> foreign;
+        foreign.clear();
         void* previous = nullptr;
         void* line = static_cast<uint8_t*>(fence.manager) + 0x50 + category * 0x30;
         for (void* unit = Read<void*>(line, 0); unit; unit = Read<void*>(unit, 0x18)) {
-            if (seen.size() == RegistrySize || seen.count(unit) ||
+            if (seen.size() == RegistrySize || seen.contains(unit) ||
                 Read<void*>(unit, 0x20) != previous || ((Read<uint32_t>(unit, 0x10) >> 3) & 0x7F) != category)
                 LIFE_FAIL("current unit primary list is inconsistent or cyclic", LIFE_VALUE(category),
                     LIFE_VALUE(unit), LIFE_VALUE(previous), LIFE_VALUE(seen.size()));
@@ -342,12 +361,12 @@ void CaptureShotWorld(SnapshotManifest& saved, void* manager)
         if (Read<uint8_t>(descriptor, 0x20) || size > capacity || (capacity && !data))
             LIFE_FAIL("unit group backing storage violates the non-owning array contract", LIFE_VALUE(group),
                 LIFE_VALUE(descriptor), LIFE_VALUE(size), LIFE_VALUE(capacity), LIFE_VALUE(data));
-        std::vector<void*> foreign;
-        std::unordered_set<void*> foreignSeen;
+        static ScratchSet foreignSeen;
+        foreign.clear(); foreignSeen.clear();
         for (uint32_t i = 0; i < size; ++i) {
             void* unit = Read<void*>(data, size_t(i) * 8);
             LIFE_REQUIRE(unit && (Read<uint64_t>(unit, 0x30) & (uint64_t(1) << group)) &&
-                (captured(unit) || !foreignSeen.count(unit)));
+                (captured(unit) || !foreignSeen.contains(unit)));
             const auto* identity = Find(unit, false);
             LIFE_REQUIRE(!(!captured(unit) && identity && identity->occupancy == Occupancy::Quarantined));
             if (!captured(unit)) { foreign.push_back(unit); foreignSeen.insert(unit); }
@@ -358,16 +377,17 @@ void CaptureShotWorld(SnapshotManifest& saved, void* manager)
     // One pass records where each object occurs: its primary-list count and the
     // single category holding it, and its group mask (a repeat within a group fails).
     struct Placement { size_t primary = 0; uint32_t category = UINT32_MAX; uint64_t groups = 0; bool repeated = false; };
-    std::unordered_map<void*, Placement> placements;
+    static ScratchMap<Placement> placements;
+    placements.clear();
     for (uint32_t i = 0; i < categories; ++i)
         for (void* object : primary[i]) {
-            auto& placement = placements[object];
+            Placement& placement = *placements.insert(object).first;
             if (placement.primary++ && placement.category != i) placement.repeated = true;
             placement.category = i;
         }
     for (uint32_t i = 0; i < groupCount; ++i)
         for (void* object : groups[i]) {
-            auto& placement = placements[object];
+            Placement& placement = *placements.insert(object).first;
             if (placement.groups & (uint64_t(1) << i)) placement.repeated = true;
             placement.groups |= uint64_t(1) << i;
         }
@@ -379,8 +399,8 @@ void CaptureShotWorld(SnapshotManifest& saved, void* manager)
         const uint32_t category = (member.flags >> 3) & 0x7F;
         LIFE_REQUIRE(!(category >= categories && category != 0x7F) && (member.flags & 7) <= 4 &&
             !(groupCount < 64 && (member.groups >> groupCount)));
-        const auto at = placements.find(object);
-        const Placement placement = at == placements.end() ? Placement{} : at->second;
+        const Placement* at = placements.find(object);
+        const Placement placement = at ? *at : Placement{};
         LIFE_REQUIRE(!placement.repeated && placement.primary == size_t(category != 0x7F) &&
             (!placement.primary || placement.category == category));
         LIFE_REQUIRE(placement.groups == member.groups);

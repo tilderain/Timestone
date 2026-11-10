@@ -74,9 +74,10 @@ void LifetimeTrace_RestoreShots(int32_t frame)
     const unsigned slot = unsigned((frame % ROLLBACK_WINDOW + ROLLBACK_WINDOW) % ROLLBACK_WINDOW);
     const uint32_t bit = uint32_t(1) << slot;
     struct Work { Identity* owner; const ShotState* shot; const uint8_t* image; };
-    std::vector<Work> work;
-    std::vector<void*> constraints; // Ascending: each shot finds its inline ones by range.
-    std::unordered_map<void*, const ShotConstraintState*> savedConstraints;
+    // Restore-fence scratch, reused across restores.
+    static std::vector<Work> work;
+    static ScratchSet savedConstraints;
+    work.clear(); savedConstraints.clear();
     AcquireSRWLockExclusive(&g_lock);
     const auto* saved = g_liveSnapshots[slot];
     if (!saved || !saved->valid || saved->frame != frame || !unitFence.manager ||
@@ -99,21 +100,24 @@ void LifetimeTrace_RestoreShots(int32_t frame)
         LIFE_REQUIRE(body.memory.size == owner->extent);
         work.push_back({owner, &shot, shot.payload.data() + body.memory.offset});
     }
-    constraints.reserve(g_constructedConstraints.size());
-    for (const auto& entry : g_constructedConstraints) constraints.push_back(entry.first);
-    std::sort(constraints.begin(), constraints.end(), std::less<void*>{});
+    // Ascending: each shot finds its inline ones by range. Used under this lock only.
+    const std::vector<void*>& constraints = SortedConstraints();
     for (const auto& node : saved->constraints) {
         // The same provenance the execution stage requires, checked before any write.
         const auto current = g_constructedConstraints.find(node.object);
         LIFE_REQUIRE(current != g_constructedConstraints.end() && current->second == node.construction &&
             Read<uintptr_t>(node.object, 0) == Read<uintptr_t>(node.image, 0) &&
             Read<uintptr_t>(node.object, 0x40) == Read<uintptr_t>(node.image, 0x40) &&
-            savedConstraints.emplace(node.object, &node).second);
+            savedConstraints.insert(node.object));
     }
     // Per shot: unit-header holes for saved inline constraints, whole-object holes
     // for ones initialized after the snapshot (the execution stage withdraws them).
-    std::vector<ShotTailHoles> holes(work.size());
-    std::vector<void*> future;
+    // Inner hole lists keep their storage too: clear, never shrink the outer.
+    static std::vector<ShotTailHoles> holes;
+    static std::vector<void*> future;
+    if (holes.size() < work.size()) holes.resize(work.size());
+    for (size_t i = 0; i < work.size(); ++i) holes[i].clear();
+    future.clear();
     for (size_t i = 0; i < work.size(); ++i) {
         const Identity& owner = *work[i].owner;
         if (owner.extent >= 0x90)
@@ -121,7 +125,7 @@ void LifetimeTrace_RestoreShots(int32_t frame)
                  at != constraints.end() && uintptr_t(*at) - uintptr_t(owner.object) <= owner.extent - 0x90; ++at) {
                 const size_t relative = uintptr_t(*at) - uintptr_t(owner.object);
                 if (relative < ShotCpuCommonSize) continue; // Not tail bytes; the kernel leaves it live.
-                if (savedConstraints.count(*at)) {
+                if (savedConstraints.contains(*at)) {
                     // Lifecycle/category flags, scheduler links and group mask.
                     holes[i].push_back({relative + 0x10, 0x18});
                     holes[i].push_back({relative + 0x30, 0x08});
