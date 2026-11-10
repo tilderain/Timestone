@@ -1644,6 +1644,12 @@ extern "C" void Controller_OnFrameStart()
 // Sum integer-truncated positions/HP, action IDs, and per-character RNG hashes.
 // Character order does not affect the sum; mix in global gameplay RNG last.
 // ---------------------------------------------------------------------------
+// cChr::mChrF bit 0 closes cChr::isMoveActive (0x14F0); mParentChrInfo's
+// character pointer is at 0x6690 + 8.
+static constexpr uint64_t CHR_FLAGS_OFFSET = 0x14F0;
+static constexpr uint32_t CHR_FLAG_MOVE_STOPPED = 1;
+static constexpr uint64_t CHR_PARENT_OFFSET = 0x6698;
+
 static uint32_t ComputeChecksum()
 {
     uint64_t sCharacter = *(uint64_t*)_addr(PTR_SCHARACTER);
@@ -1657,7 +1663,15 @@ static uint32_t ComputeChecksum()
         while (node)
         {
             uint64_t character = *(uint64_t*)(node + NODE_CHR_OFFSET);
-            if (character)
+            // A helper character (Frank West's zombies) sits in the team list
+            // with its move gate closed until its parent uses it. The game
+            // parks it while the match loads, before the peers synchronize, so
+            // its frozen action and clock depend on local load timing. Nothing
+            // simulates it in that state; it rejoins the sum when it wakes.
+            const bool dormantHelper = character &&
+                (*(uint32_t*)(character + CHR_FLAGS_OFFSET) & CHR_FLAG_MOVE_STOPPED) &&
+                *(uint64_t*)(character + CHR_PARENT_OFFSET);
+            if (character && !dormantHelper)
             {
                 int32_t qx = (int32_t)*(float*)(character + 0x50);
                 int32_t qy = (int32_t)*(float*)(character + 0x54);

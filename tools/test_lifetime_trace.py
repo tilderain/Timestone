@@ -449,7 +449,8 @@ class LifetimeTraceTests(unittest.TestCase):
         source = (ROOT / "UMVC3Hook/code/lifetime_trace.cpp").read_text()
         original_source = source
         for name in ("lifetime_failure.inl", "lifetime_shot_generations.inl", "lifetime_shot_cpu.inl",
-                     "lifetime_shot_constraints.inl", "lifetime_shot_world.inl", "lifetime_shot_restore.inl"):
+                     "lifetime_shot_constraints.inl", "lifetime_shot_world.inl", "lifetime_shot_restore.inl",
+                     "lifetime_shot_models.inl"):
             include = f'#include "{name}"'
             next_line = original_source[:original_source.index(include)].count("\n") + 2
             contents = (ROOT / "UMVC3Hook/code" / name).read_text()
@@ -572,7 +573,8 @@ int main() {
 
     def test_all_lifetime_abort_sites_emit_diagnostics(self):
         for name in ("lifetime_trace.cpp", "lifetime_shot_cpu.inl", "lifetime_shot_generations.inl",
-                     "lifetime_shot_world.inl", "lifetime_shot_constraints.inl", "lifetime_shot_restore.inl"):
+                     "lifetime_shot_world.inl", "lifetime_shot_constraints.inl", "lifetime_shot_restore.inl",
+                     "lifetime_shot_models.inl"):
             with self.subTest(source=name):
                 source = (ROOT / "UMVC3Hook/code" / name).read_text()
                 self.assertNotIn("std::abort()", source)
@@ -862,6 +864,94 @@ int main() {
     LifetimeTrace_ClearSnapshots();
     assert(disposals == 1 && !g_quarantined && Find(space, false)->occupancy == Occupancy::Live);
     std::free(space);
+}
+""")
+
+    def test_shot_driven_model_rewinds_with_its_shot(self):
+        self.compile_run(True, CHECKS[:CHECKS.index("int main() {")] + r"""
+alignas(16) uint8_t units[0x1860]{}, modelDti[0x40]{};
+int deletes = 0;
+void* destroy(void* object, uint32_t flags) { assert(!locked && flags == 1); ++deletes; return object; }
+uintptr_t modelVtable[] = {uintptr_t(&destroy)};
+uint8_t* makeModel() {
+    auto* model = static_cast<uint8_t*>(std::calloc(1, 0x1D00));
+    Write(model, 0, uintptr_t(modelVtable));
+    Write(model, 0x10, uint32_t(2 | (1 << 3)));
+    return model;
+}
+void line(std::initializer_list<void*> entries) {
+    void* descriptor = units + 0x50 + 0x30; void* previous = nullptr;
+    Write(descriptor, 0, entries.size() ? *entries.begin() : nullptr);
+    for (void* object : entries) {
+        Write(object, 0x20, previous); Write(object, 0x18, (void*)nullptr);
+        if (previous) Write(previous, 0x18, object);
+        previous = object;
+    }
+    Write(descriptor, 8, previous);
+}
+int main() {
+    reset(); unitManager = units; Write(units, 0xC38, uint32_t(2));
+    Write(modelDti, 0x20, uint64_t(_addr(0x140D46ED0))); Write(modelDti, 0x30, uint32_t(0x1D00 >> 2));
+    testDti = uintptr_t(modelDti);
+    uint8_t shot[0x2140]{};
+    Write(shot, 0, uintptr_t(0xCAFE)); Write(shot, 0x116C, UINT32_MAX);
+    Birth(shot, Kind::Shot); auto* owner = Find(shot, false);
+    owner->extent = sizeof(shot); owner->dti = 0x1234;
+
+    // The cart's model: animating, with its own joint storage.
+    auto* model = makeModel();
+    Birth(model, Kind::Unit);
+    Find(model, false)->deleting = destroy; Find(model, false)->dti = uintptr_t(modelDti);
+    Find(model, false)->extent = 0x1D00;
+    alignas(16) uint8_t joints[0x10 + 2 * 0xC0]{};
+    Write(joints, 0, uint32_t(2));
+    Write(model, 0x538, static_cast<void*>(joints + 0x10)); Write(model, 0x530, uint32_t(2));
+    Write(joints, 0x10 + 0xC0, 1.5f);
+    Write(model, 0x1328, 20.0f);                                   // Animation time.
+    Write(model, 0x1CD4, 30.0f); Write(model, 0x1CF8, uint32_t(0x40000)); // Remaining life, step flags.
+    Write(shot, 0x1F78, static_cast<void*>(model)); line({model});
+    assert(IsDrivenModel(*Find(model, false)) && !IsDrivenModel(*owner));
+    LifetimeTrace_SaveSnapshot(0);
+    assert(TestManifest(0).models.size() == 1 && TestManifest(0).models[0].object == model);
+    assert(TestManifest(0).models[0].spans.size() == 2 && Find(model, false)->dependencies == 1);
+
+    // The replayed frames advanced it on top of where it already was.
+    Write(model, 0x1328, 26.0f); Write(model, 0x1CD4, 24.0f); Write(joints, 0x10 + 0xC0, 9.0f);
+    LifetimeTrace_RetireFutureShots(0); LifetimeTrace_RestoreEffects(0);
+    assert(Read<float>(model, 0x1328) == 20.0f && Read<float>(model, 0x1CD4) == 30.0f);
+    assert(Read<float>(joints, 0x10 + 0xC0) == 1.5f && Find(model, false)->occupancy == Occupancy::Live);
+
+    // Its animation ended and it retired: held, unlinked, and forgotten by the
+    // cart. The abandoned branch's cart then made a model of its own.
+    Write(model, 0x1328, 66.0f); Write(model, 0x1CF8, uint32_t(0x80000));
+    Write(model, 0x10, uint32_t(0x3F8)); line({}); Write(model, 0x18, (void*)nullptr);
+    Find(model, false)->occupancy = Occupancy::Quarantined; ++g_quarantined;
+    auto* later = makeModel(); Write(shot, 0x1F78, static_cast<void*>(later)); line({later});
+    assert(!Find(later, false));
+    LifetimeTrace_RetireFutureShots(0);
+    assert(Find(later, false) && Find(later, false)->abandonedModel && !Find(model, false)->abandonedModel);
+    LifetimeTrace_RestoreEffects(0);
+    assert(Find(model, false)->occupancy == Occupancy::Live && Read<float>(model, 0x1328) == 20.0f);
+    assert(Read<uint32_t>(model, 0x1CF8) == 0x40000 && (Read<uint32_t>(model, 0x10) & 0x3FF) == (2 | (1 << 3)));
+    assert(Read<void*>(units, 0x80) == model && Read<void*>(units, 0x88) == model && !Read<void*>(model, 0x18));
+    assert(Find(later, false)->occupancy == Occupancy::Quarantined && g_quarantined == 1 && !deletes);
+    assert((Read<uint32_t>(later, 0x10) & 0x3FF) == 0x3F8 && !Find(later, false)->abandonedModel);
+
+    // A model set up again has other buffers: its animation stays live, the
+    // lifecycle still rewinds, and a link to a unit the snapshot never held is dropped.
+    alignas(16) uint8_t other[0x10 + 2 * 0xC0]{};
+    Write(other, 0, uint32_t(2));
+    Write(model, 0x538, static_cast<void*>(other + 0x10));
+    Write(model, 0x1328, 40.0f); Write(model, 0x1CF8, uint32_t(0x80000)); Write(joints, 0x10 + 0xC0, 3.0f);
+    Write(shot, 0x1F78, static_cast<void*>(model));
+    LifetimeTrace_RetireFutureShots(0); LifetimeTrace_RestoreEffects(0);
+    assert(Read<float>(model, 0x1328) == 40.0f && Read<float>(joints, 0x10 + 0xC0) == 3.0f);
+    assert(Read<uint32_t>(model, 0x1CF8) == 0x40000 && Read<void*>(model, 0x538) == other + 0x10);
+
+    LifetimeTrace_ClearSnapshots();
+    assert(deletes == 1 && !g_quarantined && Find(model, false)->occupancy == Occupancy::Live);
+    ForgetCurrentShotGenerations(owner->id, shot);
+    std::free(model); std::free(later);
 }
 """)
 
