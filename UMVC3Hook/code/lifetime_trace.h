@@ -54,6 +54,13 @@ void LifetimeTrace_RetireFutureShots(int32_t frame);
 // An unsupported or inconsistent case is a fatal lifetime failure, not a skip.
 void LifetimeTrace_RestoreShots(int32_t frame);
 
+// A weak unit reference held outside the tracked objects (a character's shot or
+// effect slot) across a restore to `frame`. Returns the value to store:
+// `saved` when it names a unit of that frame's snapshot that is live again,
+// null when `live` names a unit that is now withdrawn or held, otherwise `live`.
+// Identity comes from the registry; no address is ever dereferenced.
+void* LifetimeTrace_ResolveUnitReference(int32_t frame, void* saved, void* live);
+
 struct LifetimeSnapshotCounts {
     uint32_t shots = 0, effects = 0, shotModels = 0;
 };

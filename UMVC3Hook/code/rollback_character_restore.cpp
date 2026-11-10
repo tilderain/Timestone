@@ -54,8 +54,8 @@ void ActorEarly(uint8_t* live, const uint8_t* saved, bool roster)
     if (sameResources) {
         Copy<0x1388, 0x30>(live, saved); // type/key and borrowed resource cursors
     }
-    // +13B8..13BF remains unresolved. Keep EFT return +13D8 live until
-    // dynamic-object lifetimes and return identities can be restored together.
+    // +13B8..13BF remains unresolved. The return unit at +13D8 is resolved by
+    // identity after shot restore, with the other weak unit references.
     Copy<0x13C0, 0x01>(live, saved); // mCngKey
     Copy<0x13C4, 0x10>(live, saved); // compare registers, jump count, return flags
     Copy<0x13E0, 0x08>(live, saved); // loop count/start frame
@@ -112,7 +112,8 @@ void CommonEarly(uint8_t* live, const uint8_t* saved, bool roster)
     Copy<0x41FC, 0x04>(live, saved); // team material-effect state
     Copy<0x4D10, 0x100>(live, saved); // capsule position history
     Copy<0x6340, 0xE8>(live, saved); // push vectors, collision sets, damage state
-    // +6428 mpLastCreateShot stays live while shot rewind is unavailable.
+    // +6428 mpLastCreateShot is a weak unit reference: resolved by identity after
+    // shot restore (LifetimeTrace_ResolveUnitReference), never copied here.
     Copy<0x6430, 0x2C>(live, saved); // shot group/serial/hit latches
     // +6460 critical section, +6488 unknown, target references +6490 onward,
     // callbacks +6738/+6740, auxiliary owners +6748 and CPU +67F0 stay live.
@@ -351,8 +352,15 @@ std::span<const uint32_t> Rollback_CharacterShotTailOffsets(uint64_t dti)
     static constexpr uint32_t phoenix[] = {0x68F8, 0x6900, 0x6908};
     static constexpr uint32_t modok[] = {0x6910, 0x6918};
     static constexpr uint32_t eyes[] = {0x68F8, 0x6900, 0x6908, 0x6910, 0x6918, 0x6920};
+    // uDoctorDoom__tick (140079EB0) alive-checks its missile emplacement here;
+    // Captain America keeps his Shield Slash option shot in the same slot.
+    static constexpr uint32_t emplacement[] = {0x68F0};
+    // uRocketRaccoon__retireFixedShotSlot (1400C49C0): four tracked trap shots.
+    static constexpr uint32_t traps[] = {0x6908, 0x6910, 0x6918, 0x6920};
     switch (dti) {
     case 0x140D44E10: return oneSpark;
+    case 0x140D44E90: case 0x140D45068: return emplacement;
+    case 0x140D459D8: return traps;
     case 0x140D45020: case 0x140D45D80: return webOrCarpet;
     case 0x140D45700: return modok;
     case 0x140D45910: return phoenix;
@@ -404,15 +412,30 @@ std::span<const uint32_t> Rollback_CharacterEffectTailOffsets(uint64_t dti)
     static constexpr uint32_t wright[] = {0x6928};
     static constexpr uint32_t modok[] = {0x6920};
     static constexpr uint32_t phoenix[] = {0x6910};
-    static constexpr uint32_t rocket[] = {0x68F0, 0x68F8, 0x6900, 0x6930};
+    // Twelve unit slots at +68F0..+6948; +6908..+6920 are the trap shots.
+    static constexpr uint32_t rocket[] = {0x68F0, 0x68F8, 0x6900, 0x6928, 0x6930, 0x6938, 0x6940, 0x6948};
     static constexpr uint32_t ryu[] = {0x6918};
     static constexpr uint32_t storm[] = {0x68F0, 0x68F8, 0x6900};
     static constexpr uint32_t thor[] = {0x68F0, 0x68F8};
     static constexpr uint32_t vergil[] = {0x6908, 0x6920};
-    static constexpr uint32_t zero[] = {0x6900, 0x6908};
+    static constexpr uint32_t zero[] = {0x68F8, 0x6900, 0x6908};
+    // Found by scanning character code for tail fields passed to the native
+    // alive test or assigned from sGameEffect spawn (140131660):
+    // uDrStrange__updatePersistentSpellEffects (14007B9E0), uIronFist__tick
+    // (140097740), uNova__updateActionEffects (1400B91E0), uSentinel__tick
+    // (1400CA240), uWesker__tick (1400EDF80). Nova's three effects, Trish's
+    // Low Voltage effect, Zero's +68F8 and Rocket's remaining slots come from
+    // the constructor audit in the removed doc/chrfields.md (git 7c19da4^).
+    static constexpr uint32_t strange[] = {0x68F0, 0x68F8, 0x6900};
+    static constexpr uint32_t ironFist[] = {0x68F0, 0x68F8};
+    static constexpr uint32_t sentinel[] = {0x68F0, 0x6900};
     switch (dti) {
+    case 0x140D450A8: case 0x140D458D0: return strange; // Doctor Strange, Nova
+    case 0x140D454D0: return ironFist;
+    case 0x140D45FF8: return third; // Wesker
+    case 0x140D45C58: return sentinel;
     case 0x140D44E10: case 0x140D44F18: case 0x140D45450: return second;
-    case 0x140D44E48: case 0x140D46038: case 0x140D46080: return first;
+    case 0x140D44E48: case 0x140D45ED8: case 0x140D46038: case 0x140D46080: return first;
     case 0x140D44F60: case 0x140D45578: return viper;
     case 0x140D44FA0: return dante;
     case 0x140D45020: return dormammu;

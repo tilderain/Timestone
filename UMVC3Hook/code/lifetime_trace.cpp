@@ -2072,6 +2072,32 @@ void LifetimeTrace_RestoreEffects(int32_t frame)
         if (releasedResources[i]) releaseResourceRef(releasedResources[i]);
 }
 
+void* LifetimeTrace_ResolveUnitReference(int32_t frame, void* saved, void* live)
+{
+    if constexpr (!LIFETIME_TRACE_ENABLED) return live;
+    if (saved == live || !g_lifetimeEnabled.load(std::memory_order_relaxed)) return live;
+    const unsigned slot = unsigned((frame % ROLLBACK_WINDOW + ROLLBACK_WINDOW) % ROLLBACK_WINDOW);
+    void* result = live;
+    AcquireSRWLockExclusive(&g_lock);
+    const auto* manifest = g_liveSnapshots[slot];
+    bool restored = false;
+    if (saved && manifest && manifest->valid && manifest->frame == frame) {
+        const Identity* current = Find(saved, false);
+        restored = current && current->occupancy == Occupancy::Live &&
+            std::any_of(manifest->members.begin(), manifest->members.end(), [&](const Identity& member) {
+                return member.object == saved && member.id == current->id;
+            });
+    }
+    if (restored) result = saved;
+    else if (live) {
+        // The abandoned branch's unit: withdrawn or held, no longer simulating.
+        const Identity* current = Find(live, false);
+        if (current && current->occupancy != Occupancy::Live) result = nullptr;
+    }
+    ReleaseSRWLockExclusive(&g_lock);
+    return result;
+}
+
 void LifetimeTrace_ClearSnapshots()
 {
     if constexpr (!LIFETIME_TRACE_ENABLED) return;
