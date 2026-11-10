@@ -17,6 +17,11 @@ inline constexpr bool EFFECT_SIMULATION_SNAPSHOTS_ENABLED = true;
 // Common ordinary-generator ownership, using native DTI sizes and pool strides.
 inline constexpr bool ORDINARY_CPU_EFFECT_GRAPHS_ENABLED = true;
 
+// Rewinds shots that exist in the restore target, in place: retained storage,
+// common and class-specific bytes, constraint links, registration and scheduling.
+// Requires shot payload capture on every gameplay snapshot.
+inline constexpr bool SAVED_SHOT_RESTORE_ENABLED = true;
+
 void LifetimeTrace_Install();
 void LifetimeTrace_SetFrame(int32_t frame, bool resimulating);
 // Event names must have static storage (the bounded queue retains the pointer).
@@ -30,8 +35,8 @@ bool LifetimeTrace_FinishCapture();
 void LifetimeTrace_DropSnapshot(int32_t frame);
 struct LifetimeSnapshot;
 // Whole-shot payload bytes: bodies, model/collision spans and constraint images.
-// Only the unpublished saved-shot restore stages and historical snapdump read
-// them, so Omit skips the copies. Identity/generation leases, ownership/COW
+// Saved-shot restore and historical snapdump read them; Omit skips the copies
+// and is only valid while SAVED_SHOT_RESTORE_ENABLED is off. Identity/generation leases, ownership/COW
 // bookkeeping, dependency leases, effect payloads and future-shot withdrawal
 // metadata are captured either way. An omitted payload is recorded as such; the
 // restore stages reject it rather than treating it as an empty historical state.
@@ -44,8 +49,10 @@ void LifetimeTrace_ClearSnapshots();
 void LifetimeTrace_RestoreEffects(int32_t frame);
 void LifetimeTrace_WaitForRenderWorker();
 // Withdraw abandoned future shots without kill callbacks or physical destruction.
-// This does not yet restore the bodies/dependencies of shots in the target frame.
 void LifetimeTrace_RetireFutureShots(int32_t frame);
+// Rewind every shot in the target frame, after withdrawal and effect restore.
+// An unsupported or inconsistent case is a fatal lifetime failure, not a skip.
+void LifetimeTrace_RestoreShots(int32_t frame);
 
 struct LifetimeSnapshotCounts {
     uint32_t shots = 0, effects = 0, shotModels = 0;

@@ -284,8 +284,10 @@ $(OBJDIR)/%.o: $(SRCDIR)/%.cpp
 	@mkdir -p $(@D)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
-# Recompile when HEAD or the current branch advances.
-$(OBJDIR)/code/exception.o: $(GIT_COMMIT_DEPS)
+# Recompile every object embedding UMVC3HOOK_GIT_COMMIT when HEAD or the
+# current branch advances; otherwise snapdumps and diagnostics keep a stale stamp.
+GIT_STAMPED_OBJS := $(addprefix $(OBJDIR)/code/,exception.o rollback_snapdump.o steam_lobby.o lag_diagnostics.o)
+$(GIT_STAMPED_OBJS): $(GIT_COMMIT_DEPS)
 
 # ---------- Compile C ----------
 

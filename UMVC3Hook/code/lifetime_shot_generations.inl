@@ -44,13 +44,21 @@ struct AttackCohort {
     std::shared_ptr<NativeAttackArray> array;
     std::vector<AttackEntry> entries;
 };
+constexpr size_t ShotModelImageSize = 0x1450;
+// Shot-prefix copy kept only by model (Pose/Work/Keys) generations; resource and
+// attack domains own a reference or cohort instead. Converts to the byte pointer
+// the field accessors take.
+struct ShotModelImage {
+    std::unique_ptr<uint8_t[]> bytes;
+    operator uint8_t*() const { return bytes.get(); }
+};
 struct ShotGeneration {
     uint64_t id = 0, ownerId = 0;
     void* owner = nullptr;
     ShotDomain domain = ShotDomain::Pose;
     uint32_t snapshots = 0;
     bool attached = false;
-    uint8_t image[0x1450]{};
+    ShotModelImage image;
     uintptr_t resource = 0;
     size_t keyframeBytes = 0;
     uintptr_t jointVtable = 0;
@@ -63,8 +71,45 @@ struct ShotDomains {
     ShotDomains() { current.fill(-1); }
 };
 std::vector<ShotGeneration> g_shotGenerations;
+// Each owner's generations as {slot, generation id}, appended at creation, the
+// only place ownerId is set. An entry is live only while its slot still holds
+// that id. Ids are never reused, so collected or reused slots are skipped
+// without bookkeeping at every id = 0 site; pruning just bounds the lists.
+struct OwnedGeneration { size_t index; uint64_t id; };
+std::unordered_map<uint64_t, std::vector<OwnedGeneration>> g_ownerGenerations;
+void PruneOwnerGenerations(uint64_t owner)
+{
+    const auto at = g_ownerGenerations.find(owner);
+    if (at == g_ownerGenerations.end()) return;
+    std::erase_if(at->second, [](const OwnedGeneration& ref) { return g_shotGenerations[ref.index].id != ref.id; });
+    if (at->second.empty()) g_ownerGenerations.erase(at);
+}
+// Live generation slots of one owner, ascending as a full scan would visit them.
+std::vector<size_t> OwnerGenerationSlots(uint64_t owner)
+{
+    std::vector<size_t> slots;
+    const auto at = g_ownerGenerations.find(owner);
+    if (at != g_ownerGenerations.end())
+        for (const auto& ref : at->second)
+            if (g_shotGenerations[ref.index].id == ref.id) slots.push_back(ref.index);
+    std::sort(slots.begin(), slots.end());
+    return slots;
+}
 std::unordered_map<uint64_t, ShotDomains> g_shotDomains;
-std::unordered_map<void*, std::pair<uint64_t, unsigned>> g_attackOwners;
+// The MtArray-grow and addChild detours run for every caller of two engine-wide
+// routines, on any thread. This map is all they read before a root is proven to
+// be a managed attack root, so it has its own leaf lock. Nothing else is locked,
+// called natively or hooked while it is held. Hits must be on the registering
+// thread: managed roots belong to that thread's unit fence.
+struct AttackOwner { uint64_t owner = 0; unsigned slot = 0; uint32_t thread = 0; };
+std::unordered_map<void*, AttackOwner> g_attackOwners;
+std::atomic_flag g_attackOwnersLock = ATOMIC_FLAG_INIT;
+struct AttackOwnersGuard {
+    AttackOwnersGuard() { while (g_attackOwnersLock.test_and_set(std::memory_order_acquire)) _mm_pause(); }
+    ~AttackOwnersGuard() { g_attackOwnersLock.clear(std::memory_order_release); }
+    AttackOwnersGuard(const AttackOwnersGuard&) = delete;
+    AttackOwnersGuard& operator=(const AttackOwnersGuard&) = delete;
+};
 struct KeyframeExtent { void* data; size_t bytes; };
 std::unordered_map<void*, KeyframeExtent> g_keyframeExtents;
 uint64_t g_nextShotGeneration = 0;
@@ -137,10 +182,17 @@ int NewShotGeneration(const Identity& owner, ShotDomain domain)
     auto& generation = g_shotGenerations[index];
     generation.id = ++g_nextShotGeneration;
     generation.ownerId = owner.id; generation.owner = owner.object;
+    PruneOwnerGenerations(owner.id);
+    g_ownerGenerations[owner.id].push_back({index, generation.id});
     generation.domain = domain; generation.snapshots = 0; generation.attached = true;
-    if (domain <= ShotDomain::Keys) std::memcpy(generation.image, owner.object, sizeof(generation.image));
-    else if (ShotResourceDomain(domain))
-        generation.resource = Read<uintptr_t>(owner.object, ShotResourceField(domain));
+    if (domain <= ShotDomain::Keys) {
+        if (!generation.image) generation.image.bytes = std::make_unique<uint8_t[]>(ShotModelImageSize);
+        std::memcpy(generation.image, owner.object, ShotModelImageSize);
+    } else {
+        generation.image.bytes.reset();
+        if (ShotResourceDomain(domain))
+            generation.resource = Read<uintptr_t>(owner.object, ShotResourceField(domain));
+    }
     auto& domains = g_shotDomains[owner.id];
     domains.owner = owner.object;
     domains.current[size_t(domain)] = int(index);
@@ -169,7 +221,7 @@ std::shared_ptr<AttackCohort> ReadAttackCohort(const Identity& owner, unsigned s
     LIFE_REQUIRE(!Read<uint8_t>(root, 0xC0)); // Normal shot nodes borrow their callback owner.
     auto& domains = g_shotDomains[owner.id];
     if (!domains.roots[slot] || domains.roots[slot]->object != root) domains.roots[slot] = AttackObject(root);
-    g_attackOwners[root] = {owner.id, slot};
+    { AttackOwnersGuard guard; g_attackOwners[root] = {owner.id, slot, GetCurrentThreadId()}; }
     auto cohort = std::make_shared<AttackCohort>();
     cohort->root = domains.roots[slot];
     const size_t count = Read<uint32_t>(root, 0x20), capacity = Read<uint32_t>(root, 0x24);
@@ -436,13 +488,23 @@ void* AllocateAttackArray(size_t capacity)
 Identity* ManagedAttack(void* root, unsigned& slot)
 {
     if (!g_lifetimeEnabled.load(std::memory_order_relaxed)) return nullptr;
-    const auto at = g_attackOwners.find(root);
-    if (at == g_attackOwners.end()) return nullptr;
-    slot = at->second.second;
-    const auto owner = g_shotDomains.find(at->second.first);
+    AttackOwner attack;
+    {
+        AttackOwnersGuard guard;
+        const auto at = g_attackOwners.find(root);
+        if (at == g_attackOwners.end()) return nullptr;
+        attack = at->second;
+    }
+    // Shot domains and the registry are only valid on the fence-owning thread.
+    if (attack.thread != GetCurrentThreadId())
+        LIFE_FAIL("managed attack root reached from a thread other than its owner",
+            LIFE_VALUE(root), LIFE_VALUE(attack.owner), LIFE_VALUE(attack.slot),
+            LIFE_VALUE(attack.thread), LIFE_VALUE(GetCurrentThreadId()));
+    slot = attack.slot;
+    const auto owner = g_shotDomains.find(attack.owner);
     if (owner == g_shotDomains.end()) return nullptr;
     auto* identity = Find(owner->second.owner, false);
-    if (identity && identity->id == at->second.first && identity->occupancy == Occupancy::Live &&
+    if (identity && identity->id == attack.owner && identity->occupancy == Occupancy::Live &&
         Read<void*>(identity->object, 0x2058 + slot * 8) == root) return identity;
     return nullptr;
 }
@@ -582,12 +644,21 @@ void ReleaseRetiredAttack(std::shared_ptr<AttackCohort>& cohort)
     }
     array.reset();
     cohort.reset();
-    if (root && !root->nativeOwner && root.use_count() == 1) g_attackOwners.erase(root->object);
+    if (root && !root->nativeOwner && root.use_count() == 1) {
+        AttackOwnersGuard guard; g_attackOwners.erase(root->object);
+    }
     ReleaseRetiredAttackObject(root);
 }
 
 void CollectShotGenerations()
 {
+    // A superset of the collection predicate below: nothing detached and unleased
+    // means nothing to collect or fence this tick.
+    AcquireSRWLockExclusive(&g_lock);
+    const bool pending = std::any_of(g_shotGenerations.begin(), g_shotGenerations.end(),
+        [](const ShotGeneration& generation) { return generation.id && !generation.attached && !generation.snapshots; });
+    ReleaseSRWLockExclusive(&g_lock);
+    if (!pending) return;
     UnitGuard fence;
     FenceRetiredShotCollisions();
     // Native child teardown completes before the resource references it borrows.
@@ -608,13 +679,14 @@ void CollectShotGenerations()
         // explicit; C++ metadata destruction never invokes game code.
         ShotGeneration generation = std::move(stored);
         stored.id = 0;
+        PruneOwnerGenerations(generation.ownerId);
         ReleaseSRWLockExclusive(&g_lock);
         const bool previous = g_collectingShotGeneration;
         g_collectingShotGeneration = true;
         if (generation.domain <= ShotDomain::Keys) {
-            uint8_t live[0x1450];
+            uint8_t live[ShotModelImageSize];
             std::memcpy(live, generation.owner, sizeof(live));
-            std::memcpy(generation.owner, generation.image, sizeof(generation.image));
+            std::memcpy(generation.owner, generation.image, ShotModelImageSize);
             MaskModelOwnership(generation.owner);
             VisitDomainFields(generation.domain, [&](size_t field, size_t size) {
                 std::memcpy(static_cast<uint8_t*>(generation.owner) + field, generation.image + field, size);
@@ -634,8 +706,11 @@ void CollectShotGenerations()
 
 bool HasRetiredShotGenerations(uint64_t owner)
 {
-    return std::any_of(g_shotGenerations.begin(), g_shotGenerations.end(), [&](const auto& generation) {
-        return generation.id && generation.ownerId == owner && !generation.attached &&
+    const auto at = g_ownerGenerations.find(owner);
+    if (at == g_ownerGenerations.end()) return false;
+    return std::any_of(at->second.begin(), at->second.end(), [](const OwnedGeneration& ref) {
+        const auto& generation = g_shotGenerations[ref.index];
+        return generation.id == ref.id && !generation.attached &&
             (!BorrowedShotResourceDomain(generation.domain) || generation.snapshots);
     });
 }
@@ -646,7 +721,10 @@ void ReleaseTerminalShotReferences(uint64_t owner)
     // Called after the most-derived native deleting dispatch returns. Concrete
     // and base cleanup can read old command/motion borrowers until then. The
     // resource references do not require the now-disposed owner address.
-    for (size_t i = 0; i < g_shotGenerations.size(); ++i) {
+    AcquireSRWLockExclusive(&g_lock);
+    const auto slots = OwnerGenerationSlots(owner);
+    ReleaseSRWLockExclusive(&g_lock);
+    for (size_t i : slots) {
         AcquireSRWLockExclusive(&g_lock);
         auto& generation = g_shotGenerations[i];
         if (!generation.id || generation.ownerId != owner || !BorrowedShotResourceDomain(generation.domain)) {
@@ -663,6 +741,9 @@ void ReleaseTerminalShotReferences(uint64_t owner)
         if (resource) releaseResourceRef(resource);
         g_collectingShotGeneration = previous;
     }
+    AcquireSRWLockExclusive(&g_lock);
+    PruneOwnerGenerations(owner);
+    ReleaseSRWLockExclusive(&g_lock);
 }
 void ForgetCurrentShotGenerations(uint64_t owner, void* address)
 {
@@ -684,8 +765,9 @@ void ForgetCurrentShotGenerations(uint64_t owner, void* address)
             cohorts.push_back(std::move(generation.attack));
         }
         domains = std::move(at->second);
-        for (const auto& root : domains.roots) if (root) g_attackOwners.erase(root->object);
+        for (const auto& root : domains.roots) if (root) { AttackOwnersGuard guard; g_attackOwners.erase(root->object); }
         g_shotDomains.erase(at);
+        PruneOwnerGenerations(owner);
     }
     ReleaseSRWLockExclusive(&g_lock);
 }
@@ -780,15 +862,9 @@ void CaptureShotGenerations(const Identity& owner, uint32_t bit, ShotState& save
             (generation.snapshots & bit) && domain < ShotDomainCount && !domains[domain]);
         domains[domain] = true;
     }
-    bool bodyFound = false;
-    for (const auto& span : saved.spans) {
+    for (const auto& span : saved.spans)
         LIFE_REQUIRE(span.memory.offset <= saved.payload.size() && span.memory.size <= saved.payload.size() - span.memory.offset);
-        if (!std::strcmp(span.name, "body")) {
-            LIFE_REQUIRE(!bodyFound && span.memory.address == owner.object && span.memory.size >= 0x2140);
-            bodyFound = true;
-        }
-    }
-    LIFE_REQUIRE(bodyFound);
+    ShotBodySpan(saved, owner.object);
     for (const auto& ref : saved.generations) {
         const auto domain = g_shotGenerations[ref.index].domain;
         int current = g_shotDomains[owner.id].current[size_t(domain)];
@@ -827,7 +903,7 @@ void CaptureShotGenerations(const Identity& owner, uint32_t bit, ShotState& save
         }
     }
     for (const auto& span : saved.spans) {
-        if (!std::strcmp(span.name, "body")) {
+        if (span.kind == ShotSpanKind::Body) {
             const auto* body = saved.payload.data() + span.memory.offset;
             // These counts/control fields describe the restored owned CPU buffers.
             for (size_t field : {size_t(0x530), size_t(0x550), size_t(0x554), size_t(0x558), size_t(0x1238)})
@@ -838,4 +914,20 @@ void CaptureShotGenerations(const Identity& owner, uint32_t bit, ShotState& save
             std::memcpy(span.memory.address, saved.payload.data() + span.memory.offset, span.memory.size);
         }
     }
+}
+
+// Test builds: every live generation is reachable from its owner's index.
+void ValidateShotGenerationIndex()
+{
+#if defined(LIFETIME_VALIDATE_INDEXES)
+    for (size_t index = 0; index < g_shotGenerations.size(); ++index) {
+        const auto& generation = g_shotGenerations[index];
+        if (!generation.id) continue;
+        const auto at = g_ownerGenerations.find(generation.ownerId);
+        const bool indexed = at != g_ownerGenerations.end() && std::any_of(at->second.begin(), at->second.end(),
+            [&](const OwnedGeneration& ref) { return ref.index == index && ref.id == generation.id; });
+        if (!indexed) LIFE_FAIL("live shot generation is missing from its owner's index", LIFE_VALUE(index),
+            LIFE_VALUE(generation.id), LIFE_VALUE(generation.ownerId), LIFE_VALUE(generation.domain));
+    }
+#endif
 }

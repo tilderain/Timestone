@@ -1,6 +1,7 @@
 """Compile the production lifetime tracer against native-call and Windows mocks."""
 
 from pathlib import Path
+import platform
 import subprocess
 import tempfile
 import unittest
@@ -52,7 +53,9 @@ bool TryAcquireSRWLockExclusive(SRWLOCK* lock) {
     if (locked || !lock->try_lock()) return false;
     locked = true; return true;
 }
-uint32_t GetCurrentThreadId() { return 7; }
+// The process's first thread is 7, as before; any other test thread is 8.
+const std::thread::id g_mainThreadId = std::this_thread::get_id();
+uint32_t GetCurrentThreadId() { return std::this_thread::get_id() == g_mainThreadId ? 7 : 8; }
 uint32_t GetCurrentProcessId() { return 123; }
 uint64_t GetTickCount64() { return 100; }
 uint64_t testDti = 0;
@@ -163,7 +166,7 @@ void reset() {
     g_nextConstraintConstruction = 0;
     g_nextSnapshotCapture = 0;
     g_clearedSlots = 0;
-    g_shotGenerations.clear(); g_shotDomains.clear(); g_attackOwners.clear(); g_keyframeExtents.clear(); g_nextShotGeneration = 0;
+    g_shotGenerations.clear(); g_ownerGenerations.clear(); g_shotDomains.clear(); g_attackOwners.clear(); g_keyframeExtents.clear(); g_nextShotGeneration = 0;
     g_collectingShotGeneration = false; g_transferredShotResource = nullptr; ownedFrees = 0;
     collectModelGeneration = MockCollectModel;
     logicallyRetireJoints = MockJointDelete;
@@ -178,6 +181,7 @@ void reset() {
     resourceAdds = resourceReleases = 0;
     groupExpansions = 0;
     for (auto& entry : g_registry) entry = {};
+    std::fill(std::begin(g_activeSlots), std::end(g_activeSlots), uint64_t(0));
     for (auto& storage : testSnapshots) storage.reset();
     std::fill(std::begin(g_liveSnapshots), std::end(g_liveSnapshots), nullptr);
     unitManager = nullptr;
@@ -431,7 +435,8 @@ void releasePayloadFixture(const PayloadFixture& fixture) {
 '''
 
 class LifetimeTraceTests(unittest.TestCase):
-    def compile_run(self, enabled, checks, quarantine=True, expected_returncode=0, arguments=None):
+    def compile_run(self, enabled, checks, quarantine=True, expected_returncode=0, arguments=None,
+                    sanitizers="address,undefined"):
         header = (ROOT / "UMVC3Hook/code/lifetime_trace.h").read_text()
         header = header.replace("#pragma once", "").replace(
             "LIFETIME_TRACE_ENABLED = true", f"LIFETIME_TRACE_ENABLED = {str(enabled).lower()}")
@@ -440,7 +445,7 @@ class LifetimeTraceTests(unittest.TestCase):
         source = (ROOT / "UMVC3Hook/code/lifetime_trace.cpp").read_text()
         original_source = source
         for name in ("lifetime_failure.inl", "lifetime_shot_generations.inl", "lifetime_shot_cpu.inl",
-                     "lifetime_shot_constraints.inl", "lifetime_shot_world.inl"):
+                     "lifetime_shot_constraints.inl", "lifetime_shot_world.inl", "lifetime_shot_restore.inl"):
             include = f'#include "{name}"'
             next_line = original_source[:original_source.index(include)].count("\n") + 2
             contents = (ROOT / "UMVC3Hook/code" / name).read_text()
@@ -489,6 +494,11 @@ void MockCollectModel(void* owner) {
     }
     Write(owner, 0, uintptr_t(0xDEAD)); // Native base destruction resets vtables.
 }
+// For checks that write registry entries directly instead of through Birth.
+void SyncActiveSlotsForTest() {
+    std::fill(std::begin(g_activeSlots), std::end(g_activeSlots), uint64_t(0));
+    for (const auto& entry : g_registry) if (ActiveOccupancy(entry.occupancy)) ActivateIdentity(entry);
+}
 std::shared_ptr<LifetimeSnapshot> testSnapshots[ROLLBACK_WINDOW];
 SnapshotManifest& TestManifest(size_t slot) {
     if (!testSnapshots[slot]) testSnapshots[slot] = std::make_shared<LifetimeSnapshot>();
@@ -512,13 +522,18 @@ void SaveTestSnapshot(int32_t frame, LifetimeShotPayload payload = g_testShotPay
         with tempfile.TemporaryDirectory(dir="/tmp/opencode", prefix="lifetime-trace-") as tmp:
             cpp, exe = Path(tmp) / "test.cpp", Path(tmp) / "test"
             cpp.write_text(MOCKS + rollback_header + character_header + header + source + bridge + checks)
-            subprocess.run(["g++", "-std=c++20", "-Wall", "-Wextra", "-pthread",
-                            "-fsanitize=address,undefined", "-fno-omit-frame-pointer", "-no-pie", "-g",
+            # ThreadSanitizer needs a position-independent executable.
+            pie = [] if "thread" in sanitizers else ["-no-pie"]
+            subprocess.run(["g++", "-std=c++20", "-Wall", "-Wextra", "-pthread", "-DLIFETIME_VALIDATE_INDEXES",
+                            f"-fsanitize={sanitizers}", "-fno-omit-frame-pointer", *pie, "-g",
                             str(cpp), "-o", str(exe)], check=True)
             self.last_results = []
             for args in arguments if arguments is not None else [()]:
                 with self.subTest(native_arguments=args):
-                    result = subprocess.run([str(exe), *args], check=False, capture_output=True, text=True)
+                    # TSan rejects, and this GCC's ASan intermittently faults at
+                    # startup under, high-entropy ASLR mappings on current kernels.
+                    launcher = ["setarch", platform.machine(), "-R"]
+                    result = subprocess.run([*launcher, str(exe), *args], check=False, capture_output=True, text=True)
                     self.last_results.append(result)
                     self.assertEqual(result.returncode, expected_returncode, result.stdout + result.stderr)
             return result
@@ -553,7 +568,7 @@ int main() {
 
     def test_all_lifetime_abort_sites_emit_diagnostics(self):
         for name in ("lifetime_trace.cpp", "lifetime_shot_cpu.inl", "lifetime_shot_generations.inl",
-                     "lifetime_shot_world.inl", "lifetime_shot_constraints.inl"):
+                     "lifetime_shot_world.inl", "lifetime_shot_constraints.inl", "lifetime_shot_restore.inl"):
             with self.subTest(source=name):
                 source = (ROOT / "UMVC3Hook/code" / name).read_text()
                 self.assertNotIn("std::abort()", source)
@@ -584,7 +599,7 @@ int main() {
     reset();
     Birth(object, Kind::Effect);
     LifetimeTrace_SaveSnapshot(0);
-    assert(TestManifest(0).valid && TestManifest(0).count == 1);
+    assert(TestManifest(0).valid && TestManifest(0).count() == 1);
     assert(Find(object, false)->snapshots == 1);
     LifetimeTrace_SaveSnapshot(1);
     assert(Find(object, false)->snapshots == 3);
@@ -597,7 +612,7 @@ int main() {
     // Same-frame rewritten predictions replace their observation, not another slot's.
     LifetimeTrace_SaveSnapshot(0);
     LifetimeTrace_CheckSnapshot(0);
-    assert(last().c == 0 && last().d == 0 && TestManifest(0).count == 1);
+    assert(last().c == 0 && last().d == 0 && TestManifest(0).count() == 1);
     LifetimeTrace_CheckSnapshot(1);
     assert(last().c == 0 && last().d == 1);
     LifetimeTrace_DropSnapshot(1);
@@ -636,8 +651,9 @@ int main() {
     reset();
     for (size_t i = 0; i < RegistrySize; ++i)
         g_registry[i] = {(void*)(i + 1), i + 1, 0, Kind::Shot, Occupancy::Live};
+    SyncActiveSlotsForTest();
     LifetimeTrace_SaveSnapshot(2); // Bounded manifest, no dereference even for invalid addresses.
-    assert(TestManifest(2).count == RegistrySize);
+    assert(TestManifest(2).count() == RegistrySize);
     LifetimeTrace_ClearSnapshots();
 
     reset();
@@ -691,14 +707,14 @@ int main() {
     assert(!std::strcmp(last().name, "quarantine_restore_pending") && last().b == 1);
     // Retired objects are not admitted into new manifests or reactivated by checks.
     LifetimeTrace_SaveSnapshot(2);
-    assert(TestManifest(2).count == 0 && Find(p, false)->snapshots == 3);
+    assert(TestManifest(2).count() == 0 && Find(p, false)->snapshots == 3);
     LifetimeTrace_DropSnapshot(0);
     CollectQuarantine();
     assert(deletes == 0 && Find(p, false)->snapshots == 2);
     LifetimeTrace_DropSnapshot(1);
     CollectQuarantine();
     assert(deletes == 1 && bodies == 1 && g_quarantined == 0 && !Find(p, false));
-    assert(diagnosticHistory->valid && diagnosticHistory->count == 1);
+    assert(diagnosticHistory->valid && diagnosticHistory->count() == 1);
     CollectQuarantine();
     assert(deletes == 1);
 
@@ -878,7 +894,8 @@ int main(int argc, char** argv) {
         void* head = sentinel + 8; void* next = Read<void*>(head, 8);
         void* node = (uint8_t*)p + 0x1450;
         Write(node, 8, next); Write(node, 0x10, head);
-        Write(next, 0x10, node); Write(head, 8, node);
+        if (next != head) Write(next, 0x10, node); // Native empty-list insert leaves head prev stale.
+        Write(head, 8, node);
     };
     oUnlinkShot = [](void* manager, uint32_t team, void* p) {
         assert(!locked && manager == shots && team == 0); ++unlinks;
@@ -915,7 +932,7 @@ int main(int argc, char** argv) {
     assert(Read<void*>(head, 8) == head && Read<void*>(head, 0x10) == head);
     assertIntact(p);
     dispatch(p, 1); assert(unlinks == 1 && idReleases == 1 && g_quarantined == 1);
-    LifetimeTrace_SaveSnapshot(2); assert(TestManifest(2).count == 0);
+    LifetimeTrace_SaveSnapshot(2); assert(TestManifest(2).count() == 0);
     g_recording = false; LifetimeTrace_Flush(); assertIntact(p);
     LifetimeTrace_DropSnapshot(0); CollectQuarantine(); assertIntact(p);
 
@@ -1036,7 +1053,7 @@ int main(int argc, char** argv) {
     Write(b, 8, uint32_t(42)); Write(c, 0xC, uint32_t(7)); Write(b, 0x28, 0.5f);
     chain({a, b, c, d});
     LifetimeTrace_SaveSnapshot(0);
-    assert(TestManifest(0).effectCount == 4);
+    assert(TestManifest(0).effectCount() == 4);
     detachAndDelete(b); detachAndDelete(c);
     assert(g_quarantined == 2 && deleted == 0 && Read<void*>(a, 0x18) == d);
     Write(b, 8, uint32_t(99)); Write(b, 0x28, 3.0f);
@@ -1087,7 +1104,7 @@ int main(int argc, char** argv) {
     // Unknown anchors cannot be trusted by address alone, even when currently readable.
     a = makeUnit(2, false); p = makeUnit(3); chain({a, p});
     LifetimeTrace_SaveSnapshot(2);
-    assert(TestManifest(2).effectCount == 1);
+    assert(TestManifest(2).effectCount() == 1);
     chain({p}); std::free(a);
     LifetimeTrace_RestoreEffects(2);
     assert(!std::strcmp(last().name, "retiring_restore_applied"));
@@ -1110,7 +1127,7 @@ int main(int argc, char** argv) {
 
     // Active-at-save empty owners restore through the same retained graph path.
     p = makeUnit(2); chain({p}); LifetimeTrace_SaveSnapshot(4);
-    assert(TestManifest(4).effectCount == 1);
+    assert(TestManifest(4).effectCount() == 1);
     detachAndDelete(p);
     LifetimeTrace_RestoreEffects(4);
     assert(g_quarantined == 0 && (Read<uint32_t>(p, 0x10) & 7) == 2);
@@ -1182,7 +1199,7 @@ int main(int argc, char** argv) {
     Write(node, 0x18, (void*)node); assert(!OwnedEffectGraph(p)); Write(node, 0x18, (void*)nullptr);
     Write(node, 0x34, uint32_t(0x40001)); assert(!OwnedEffectGraph(p)); Write(node, 0x34, uint32_t(0x120));
     chain({p}); LifetimeTrace_SaveSnapshot(5);
-    assert(TestManifest(5).effectCount == 1);
+    assert(TestManifest(5).effectCount() == 1);
     int before = deleted;
     detachAndDelete(p);
     assert(g_quarantined == 1 && deleted == before && last().c == 1);
@@ -1250,7 +1267,7 @@ int main() {
     LifetimeTrace_SaveSnapshot(0); LifetimeTrace_SaveSnapshot(1);
     Identity* owner = Find(first, false);
     assert(owner && owner->kind == Kind::Unit && owner->dependencies == 3 && owner->snapshots == 3);
-    assert(TestManifest(0).count == 2 && creates == 1 && applies == 1);
+    assert(TestManifest(0).count() == 2 && creates == 1 && applies == 1);
     deleteOwner(first);
     assert(ownersDestroyed == 0 && g_quarantined == 1 && !nativeOwnerCheck(effect));
     assert(Read<uintptr_t>(first, 0) == uintptr_t(ownerVtable));
@@ -1384,8 +1401,8 @@ int main(int argc, char** argv) {
     Graph a, b;
     chain({a.owner, b.owner});
     LifetimeTrace_SaveSnapshot(0);
-    assert(TestManifest(0).effectCount == 2);
-    assert(TestManifest(0).effects[0].simulation && TestManifest(0).payloadBytes > 0);
+    assert(TestManifest(0).effectCount() == 2);
+    assert(TestManifest(0).effects[0].simulation && TestManifest(0).payloadBytes() > 0);
     a.tick(); b.tick();
     const uint32_t expected = Read<uint32_t>(a.pool(), 0x20);
     LifetimeTrace_RestoreEffects(0);
@@ -1539,7 +1556,7 @@ int main(int argc, char** argv) {
         const uint32_t types = (mode << 20) | 0x20000 | ((mode % 9) << 12) | 0x200;
         Write(attached.node, 0x70, types);
         LifetimeTrace_SaveSnapshot(8);
-        assert(TestManifest(8).effectCount == 1);
+        assert(TestManifest(8).effectCount() == 1);
         attached.tick(); Write(attached.owner, 0x280, (void*)nullptr);
         Write(attached.node, 0x70, uint32_t(0));
         LifetimeTrace_RestoreEffects(8);
@@ -1608,7 +1625,7 @@ int main() {
     for (const auto* saved : g_liveSnapshots) assert(saved && saved->frame >= 284);
     for (int frame = 45; frame < 300; ++frame) {
         const auto& saved = history[frame % 255];
-        assert(saved->frame == frame && saved->effectCount == 1);
+        assert(saved->frame == frame && saved->effectCount() == 1);
         assert(Read<uint32_t>(saved->effects[0].root, 0x124) == uint32_t(frame));
     }
     LifetimeTrace_ClearSnapshots();
@@ -1934,7 +1951,8 @@ void* spawn() {
     auto* node = static_cast<uint8_t*>(shot) + 0x1450;
     void* first = Read<void*>(sentinel, 8);
     Write(node, 8, first); Write(node, 0x10, static_cast<void*>(sentinel));
-    Write(first, 0x10, static_cast<void*>(node)); Write(sentinel, 8, static_cast<void*>(node));
+    if (first != sentinel) Write(first, 0x10, static_cast<void*>(node)); // Native: header prev stays stale.
+    Write(sentinel, 8, static_cast<void*>(node));
     identity->shotLinked = true;
     return shot;
 }
@@ -2215,7 +2233,7 @@ int main() {
     LifetimeTrace_SaveSnapshot(0);
     auto* adopted = Find(target, false);
     assert(adopted && adopted->kind == Kind::Unit && adopted->snapshots == 1 && adopted->dependencies == 1);
-    assert(TestManifest(0).count == 2 && TestManifest(0).shots.size() == 1 && creates == 1);
+    assert(TestManifest(0).count() == 2 && TestManifest(0).shots.size() == 1 && creates == 1);
     DeleteUnit(target, 1, destroy, 0);
     assert(!deletes && adopted->occupancy == Occupancy::Quarantined);
     Write(shot, 0x13D8, (void*)nullptr);
@@ -2966,7 +2984,8 @@ void link(unsigned team, std::initializer_list<void*> shots) {
     for (void* shot : shots) {
         Write(previous, 8, node(shot)); Write(node(shot), 0x10, previous); previous = node(shot);
     }
-    Write(previous, 8, head(team)); Write(head(team), 0x10, previous);
+    // Native insertAfter never updates the header's previous link: leave it stale.
+    Write(previous, 8, head(team)); Write(head(team), 0x10, head(team));
 }
 void* make(unsigned id) {
     void* shot = std::calloc(1, 0x2140);
@@ -3048,6 +3067,11 @@ void reject(int) {
     StageShotManagerState(TestManifest(0), 1);
 ''', 17),
             (r'''
+    // A nonempty list must be circular through its sentinel, not null-terminated.
+    Write(node(a), 8, static_cast<void*>(nullptr));
+    StageShotManagerState(TestManifest(0), 1);
+''', 17),
+            (r'''
     // Even a future shot absent from both list and queue must be retired first.
     make(3);
     StageShotManagerState(TestManifest(0), 1);
@@ -3075,6 +3099,163 @@ void reject(int) {
             with self.subTest(expected=expected, scenario=scenario):
                 self.compile_run(True, harness + "\nint main() { setup(); std::signal(SIGABRT, reject);\n" +
                                  scenario + "\n}\n", expected_returncode=expected)
+
+    def test_saved_shot_restore_transaction(self):
+        harness = CHECKS[:CHECKS.index("int main() {")] + r"""
+alignas(16) uint8_t units[0x1860]{}, manager[0x3450]{}, config[0x4A8A0]{}, effect[0x40]{}, other[0x40]{};
+uint8_t *a, *b, *constraint, *later, *joint;
+void* head(unsigned team) { return shotHeads[team] + 8; }
+void* node(void* shot) { return static_cast<uint8_t*>(shot) + 0x1450; }
+void link(std::initializer_list<void*> shots) {
+    void* previous = head(0);
+    for (void* shot : shots) {
+        Write(previous, 8, node(shot)); Write(node(shot), 0x10, previous); previous = node(shot);
+    }
+    // Native insertAfter never updates the header's previous link: leave it stale.
+    Write(previous, 8, head(0)); Write(head(0), 0x10, head(0));
+}
+void line(unsigned category, std::initializer_list<void*> entries) {
+    void* descriptor = units + 0x50 + category*0x30;
+    Write(descriptor, 0, entries.size() ? *entries.begin() : nullptr);
+    void* previous = nullptr;
+    for (void* object : entries) {
+        Write(object, 0x20, previous); Write(object, 0x18, (void*)nullptr);
+        if (previous) Write(previous, 0x18, object);
+        Write(object, 0x10, (Read<uint32_t>(object, 0x10) & ~0x3F8u) | (category << 3));
+        previous = object;
+    }
+    Write(descriptor, 8, previous);
+}
+uint8_t* make(unsigned id, size_t size, uintptr_t dti) {
+    auto* shot = static_cast<uint8_t*>(std::calloc(1, size));
+    Write(shot, 0, uintptr_t(0xCAFE)); Write(shot, 0x10, uint32_t(2)); Write(shot, 0x116C, UINT32_MAX);
+    Write(shot, 0x1450, uintptr_t(0xBEEF)); Write(shot, 0x1468, static_cast<void*>(shot));
+    Write(shot, 0x1F50, id); Write(shot, 0x1F58, 3.0f); Write(shot, 0x2078, 97.0f);
+    Birth(shot, Kind::Shot); auto* identity = Find(shot, false);
+    identity->extent = uint32_t(size); identity->dti = dti; identity->shotLinked = true;
+    Write(manager, 0x38 + id*4, id);
+    return shot;
+}
+void advance(uint8_t* shot) {
+    Write(shot, 0x1F58, Read<float>(shot, 0x1F58) + 1); Write(shot, 0x2078, Read<float>(shot, 0x2078) - 1);
+    if (shot == a) {
+        Write(a, 0x2140, Read<float>(a, 0x2140) + 100); Write(a, 0x2190, Read<float>(a, 0x2190) + 0.5f);
+        Write(joint, 0x20, Read<float>(joint, 0x20) + 2);
+    }
+}
+void setup() {
+    reset(); unitManager = units; shotManager = manager; gameConfig = config;
+    Write(units, 0xC38, uint32_t(2)); Write(units, 0x1840, uint32_t(0));
+    oInitializeConstraint = +[](void* object) {
+        Write(object, 0, uintptr_t(0xC0A5)); Write(object, 0x40, uintptr_t(0xFACE));
+        Write(object, 0x48, object); Write(object, 0x10, uint32_t(2)); Write(object, 0x70, int32_t(-1));
+    };
+    oConstraintObjectDtor = +[](void*) {};
+    Birth(effect, Kind::Unit); Birth(other, Kind::Unit);
+    // uShotVulcanAxe: the class owns one resource reference at +0x2218.
+    a = make(5, 0x2400, 0x140D48808); b = make(6, 0x2140, 0x1234);
+    void* model = std::calloc(1, 0x100); Write(model, 0x4C, uint32_t(1)); Write(model, 0x78, uint32_t(1));
+    auto* jointHeader = static_cast<uint8_t*>(std::calloc(1, 0x10 + 0xC0));
+    Write(jointHeader, 0, uint32_t(1)); joint = jointHeader + 0x10;
+    Write(joint, 0, uintptr_t(mockJointVtable)); Write(joint, 0xA8, static_cast<void*>(a)); Write(joint, 0x20, 6.0f);
+    Write(a, 0x100, model); Write(a, 0x530, uint32_t(1)); Write(a, 0x538, joint);
+    Write(a, 0x548, std::calloc(1, 1)); Write(a, 0x11B0, std::calloc(1, 0x40));
+    Write(a, 0x2140, 150.0f); Write(a, 0x2190, 0.125f);                  // Laser-style tail scalars.
+    Write(a, 0x2160, static_cast<void*>(effect));                          // Borrowed unit in the tail.
+    Write(a, 0x2218, uintptr_t(0x51AB));                                   // Owned resource reference.
+    constraint = a + 0x2240; InitializeConstraint(constraint);
+    Write(constraint, 0x60, static_cast<void*>(joint)); Write(constraint, 0x70, int32_t(2));
+    Write(constraint, 0x78, static_cast<void*>(a)); Write(constraint, 0x68, 0.25f);
+    Write(constraint, 0xA0, 7.0f);                                         // Derived TSR payload past +0x90.
+    Write(joint, 8, static_cast<void*>(constraint + 0x40));
+    line(0, {a, b}); line(1, {constraint}); link({b, a});
+    Write(manager, 0x438, uint32_t(7)); Write(config, 0x4A89C, uint32_t(1));
+}
+void future() {
+    for (int i = 0; i < 8; ++i) { advance(a); advance(b); }
+    Write(a, 0x2160, static_cast<void*>(other)); Write(a, 0x2218, uintptr_t(0x51AC));
+    // The constraint detached and stopped executing; its payload moved on.
+    Write(joint, 8, (void*)nullptr); Write(constraint, 0x60, (void*)nullptr); Write(constraint, 0x70, int32_t(-1));
+    Write(constraint, 0x68, 0.9f); Write(constraint, 0xA0, 9.0f);
+    Write(constraint, 0x10, uint32_t(0x3F8));
+    // A second inline constraint was initialized after the snapshot and took the joint.
+    later = a + 0x2300; InitializeConstraint(later);
+    Write(later, 0x60, static_cast<void*>(joint)); Write(later, 0x70, int32_t(2));
+    Write(joint, 8, static_cast<void*>(later + 0x40)); line(1, {later});
+    // b died: detached, unregistered and held, exactly as the deleting hook leaves it.
+    line(0, {a}); link({a}); Write(b, 0x10, uint32_t(0x3F8));
+    Write(b, 0x18, (void*)nullptr); Write(b, 0x20, (void*)nullptr);
+    Write(b, 0x1458, (void*)nullptr); Write(b, 0x1460, (void*)nullptr); Write(manager, 0x38 + 6*4, uint32_t(0));
+    auto* identity = Find(b, false); identity->occupancy = Occupancy::Quarantined; ++g_quarantined;
+    identity->shotLinked = false; identity->shotRegistrationReleased = true;
+    Write(manager, 0x438, uint32_t(40));
+}
+void check() {
+    assert(Read<float>(a, 0x1F58) == 3 && Read<float>(a, 0x2078) == 97 && Read<float>(b, 0x1F58) == 3);
+    assert(Read<float>(a, 0x2140) == 150 && Read<float>(a, 0x2190) == 0.125f && Read<float>(joint, 0x20) == 6);
+    assert(Read<void*>(a, 0x2160) == effect);
+    assert(Read<uintptr_t>(a, 0x2218) == 0x51AC);                          // Ownership stays live.
+    assert(Read<void*>(joint, 8) == constraint + 0x40 && Read<void*>(constraint, 0x60) == joint);
+    assert(Read<int32_t>(constraint, 0x70) == 2 && Read<float>(constraint, 0x68) == 0.25f);
+    assert(Read<float>(constraint, 0xA0) == 7 && Read<uintptr_t>(constraint, 0) == 0xC0A5);
+    assert(Read<void*>(units, 0x50) == a && Read<void*>(a, 0x18) == b && Read<void*>(units, 0x58) == b);
+    assert(Read<void*>(units, 0x80) == constraint && (Read<uint32_t>(constraint, 0x10) & 0x3FF) == (2 | (1 << 3)));
+    // The later constraint keeps its constructed bytes but no longer executes or links anywhere.
+    assert(Read<void*>(units, 0x88) == constraint && !Read<void*>(constraint, 0x18));
+    assert(Read<uintptr_t>(later, 0) == 0xC0A5 && Read<void*>(later, 0x48) == later && !Read<void*>(later, 0x60));
+    assert(Read<int32_t>(later, 0x70) == -1 && (Read<uint32_t>(later, 0x10) & 0x3FF) == 0x3F8);
+    assert(Read<void*>(head(0), 8) == node(b) && Read<void*>(node(b), 8) == node(a) && Read<void*>(node(a), 8) == head(0));
+    assert(Read<uint32_t>(manager, 0x38 + 6*4) == 6 && Read<uint32_t>(manager, 0x438) == 7);
+    assert(Find(b, false)->occupancy == Occupancy::Live && Find(b, false)->shotLinked && !g_quarantined);
+    assert((Read<uint32_t>(b, 0x10) & 0x3FF) == 2 && !unitLocked && !locked);
+}
+void release() {
+    LifetimeTrace_ClearSnapshots();
+    for (uint8_t* shot : {a, b}) ForgetCurrentShotGenerations(Find(shot, false)->id, shot);
+    MockJointDelete(joint, 3); std::free(Read<void*>(a, 0x548)); std::free(Read<void*>(a, 0x11B0));
+    ResourceRelease(Read<void*>(a, 0x100)); std::free(Read<void*>(a, 0x100)); std::free(a); std::free(b);
+}
+void reject(int) { std::_Exit(Read<float>(a, 0x1F58) == 11.0f && Read<float>(a, 0x2140) == 950.0f ? 17 : 18); }
+"""
+        self.compile_run(True, harness + r"""
+int main() {
+    // Tail copy: everything past the common prefix except the holes, in any order.
+    std::vector<uint8_t> live(0x2200, 0xAA), saved(0x2200, 0x55);
+    ShotTailHoles holes{{0x21F0, 0x40}, {0x2150, 0x10}, {0x2158, 0x10}};
+    RestoreShotTail(live.data(), saved.data(), live.size(), holes);
+    for (size_t i = 0; i < live.size(); ++i)
+        assert(live[i] == (i < 0x2140 || (i >= 0x2150 && i < 0x2168) || i >= 0x21F0 ? 0xAA : 0x55));
+
+    setup(); LifetimeTrace_SaveSnapshot(0);
+    // Capture retains the unit the tail names, without a per-class field list.
+    assert(Find(effect, false)->dependencies == 1 && !Find(other, false)->dependencies);
+    future();
+    assert(Read<float>(a, 0x1F58) == 11 && Read<float>(a, 0x2140) == 950);
+    for (int i = 0; i < 2; ++i) {
+        LifetimeTrace_RestoreShots(0); check();
+        advance(a);                                                        // One replayed tick, not nine.
+        assert(Read<float>(a, 0x1F58) == 4 && Read<float>(a, 0x2140) == 250 && Read<float>(joint, 0x20) == 8);
+    }
+    assert(!creates && !resourceAdds && !resourceReleases && !constraintUnlinks);
+    // A frame with no saved manifest, or one that held no shots, is left alone.
+    LifetimeTrace_RestoreShots(1);
+    assert(Read<float>(a, 0x1F58) == 4);
+    release();
+}
+""")
+        # Unsupported or inconsistent cases stop the transaction before any shot byte moves.
+        invalid_cases = (
+            "LifetimeTrace_SaveSnapshot(0, LifetimeShotPayload::Omit); future();",
+            "LifetimeTrace_SaveSnapshot(0); future(); Find(a, false)->snapshots = 0;",
+            "LifetimeTrace_SaveSnapshot(0); future(); InitializeConstraint(constraint);",
+            "LifetimeTrace_SaveSnapshot(0); future(); Write(constraint, 0x40, uintptr_t(0xBAD));",
+            "LifetimeTrace_SaveSnapshot(0); future(); Find(a, false)->extent = 0x2500;",
+        )
+        cases = "\n".join(f"case {i}: {{ {invalid} break; }}" for i, invalid in enumerate(invalid_cases))
+        self.compile_run(True, harness + "\nint main(int argc, char** argv) { assert(argc == 2); setup(); "
+                         "std::signal(SIGABRT, reject); switch (std::atoi(argv[1])) {\n" + cases +
+                         "\n}\nLifetimeTrace_RestoreShots(0);\n}\n",
+                         expected_returncode=17, arguments=[[str(i)] for i in range(len(invalid_cases))])
 
     def test_future_shot_rejects_continuous_collision_registration(self):
         self.compile_run(True, CHECKS[:CHECKS.index("int main() {")] + r'''
@@ -3164,7 +3345,6 @@ int main() {
     auto& manifest = TestManifest(3);
     manifest.valid = true; manifest.frame = 3;
     manifest.shotPayload = LifetimeShotPayload::Capture;
-    manifest.effectCount = 1;
     manifest.effects.resize(1);
     auto& effect = manifest.effects[0]; effect = {};
     effect.object = (void*)0xDEAD; effect.id = 7;
@@ -3172,7 +3352,6 @@ int main() {
     Write(effect.root, 0, uint64_t(0x1234)); effect.root[0x40] = 42;
     manifest.spans.push_back({(void*)0xBEEF, 4, 0});
     manifest.payload.assign({'s', 'a', 'v', 'e'});
-    manifest.count = 1;
     manifest.members.push_back({(void*)0xBAD, 8, 0x555, Kind::Shot, Occupancy::Live});
     std::vector<DumpRegion> regions;
     auto counts = LifetimeTrace_VisitSnapshot(3, testSnapshots[3].get(), false, capture, &regions);
@@ -3196,6 +3375,7 @@ int main() {
     Write(body, 0x6C0, work); Write(body, 0x6D8, keys);
     Write(body, 0x11B0, interpolation); Write(body, 0x1238, uint32_t(2));
     g_registry[0] = {body, 9, 0x777, Kind::Shot, Occupancy::Quarantined};
+    SyncActiveSlotsForTest();
     LifetimeTrace_SetFrame(50, false);
     regions.clear();
     counts = LifetimeTrace_VisitSnapshot(3 + ROLLBACK_WINDOW, testSnapshots[3].get(), true, capture, &regions);
@@ -3308,7 +3488,10 @@ int main() {
     Identity* borrowed = Find(fixture.other, false);
     const auto setLive = [&](bool live) { held->occupancy = live ? Occupancy::Live : Occupancy::Quarantined; };
     const auto setBorrowed = [&](bool on) { Write(fixture.shot, 0x2000, on ? fixture.other : nullptr); };
-    const auto leaseGraph = [] { g_generations[0] = {}; g_generations[0].id = 99; g_generations[0].snapshots = 1; };
+    const auto leaseGraph = [] {
+        g_generations[0] = {}; g_generations[0].id = 99; g_generations[0].snapshots = 1;
+        g_generationHighWater = 1;
+    };
 
     // Direct save, then same-frame replacement: no drop, so save clears in full.
     LifetimeTrace_SaveSnapshot(0);
@@ -3341,6 +3524,7 @@ int main() {
     assert(!held->snapshots && borrowed->snapshots == 3 && !borrowed->dependencies);
 
     // Clearing every lease marks every slot cleared; the next save is still exact.
+    g_generations[0] = {}; g_generationHighWater = 0; // The injected graph has no owner to collect.
     LifetimeTrace_ClearSnapshots();
     assert(g_clearedSlots == UINT32_MAX >> (32 - ROLLBACK_WINDOW));
     assert(!held->snapshots && !borrowed->snapshots && !borrowed->dependencies);
@@ -3349,6 +3533,120 @@ int main() {
     assert(held->snapshots == (1u << 5) && borrowed->dependencies == (1u << 5));
     assert(g_clearedSlots == ((UINT32_MAX >> (32 - ROLLBACK_WINDOW)) & ~(1u << 5)));
     releasePayloadFixture(fixture);
+}
+''')
+
+    def test_attack_owner_lookup_from_other_threads_is_race_free(self):
+        # Engine-wide grow/addChild callers can run on any thread. Unmanaged roots
+        # must be rejected without racing main-thread cohort registration/erase.
+        self.compile_run(True, CHECKS[:CHECKS.index("int main() {")] + SHOT_PAYLOAD_FIXTURE + r'''
+int foreignGrows = 0, foreignAdds = 0;
+int main() {
+    const auto fixture = makePayloadFixture();
+    oGenerationExtendArray = [](void*, uint32_t) { ++foreignGrows; };
+    oGenerationAddChild = [](void*, void*, uint8_t) -> uint32_t { ++foreignAdds; return 0; };
+    alignas(16) static uint8_t unmanaged[0x40]{};
+    std::atomic<bool> stop{false};
+    std::thread caller([&] {
+        for (int i = 0; i < 20000 && !stop; ++i) {
+            GenerationExtendArray(unmanaged + 0x18, 8);
+            GenerationAddChild(unmanaged, nullptr, 0);
+        }
+    });
+    for (int frame = 0; frame < 200; ++frame) {
+        LifetimeTrace_SaveSnapshot(0);                   // Registers the attack root.
+        assert(g_attackOwners.size() == 1);
+        LifetimeTrace_DropSnapshot(0);
+        ForgetCurrentShotGenerations(fixture.id, fixture.shot); // Erases it again.
+    }
+    stop = true; caller.join();
+    assert(foreignGrows && foreignAdds && foreignGrows == foreignAdds);
+    releasePayloadFixture(fixture);
+}
+''', sanitizers="thread")
+
+    def test_managed_attack_root_from_foreign_thread_fails_loudly(self):
+        result = self.compile_run(True, CHECKS[:CHECKS.index("int main() {")] + SHOT_PAYLOAD_FIXTURE + r'''
+void reject(int) { std::_Exit(17); }
+int main() {
+    const auto fixture = makePayloadFixture();
+    LifetimeTrace_SaveSnapshot(0);
+    oGenerationExtendArray = [](void*, uint32_t) { std::_Exit(18); };
+    std::signal(SIGABRT, reject);
+    std::thread([&] { GenerationExtendArray(static_cast<uint8_t*>(fixture.root) + 0x18, 8); }).join();
+    return 0;
+}
+''', expected_returncode=17)
+        self.assertIn("reason=managed attack root reached from a thread other than its owner", result.stderr)
+        self.assertIn("attack.thread=0x7", result.stderr)
+        self.assertIn("GetCurrentThreadId()=0x8", result.stderr)
+
+    def test_active_registry_tracks_every_lifetime_transition(self):
+        # Every other check also validates the mask at lifetime entry points; this
+        # one drives each boundary crossing directly and checks it immediately.
+        self.compile_run(True, CHECKS[:CHECKS.index("int main() {")] + r'''
+bool active(void* object) {
+    const Identity* entry = Find(object, false);
+    if (!entry) return false;
+    const size_t slot = size_t(entry - g_registry);
+    return (g_activeSlots[slot / 64] >> (slot % 64)) & 1;
+}
+size_t activeCount() {
+    size_t count = 0;
+    for (const auto& entry : ActiveIdentities()) { (void)entry; ++count; }
+    return count;
+}
+int collected = 0;
+int main() {
+    reset();
+    oDeleteEffect = [](void*, uint32_t) -> void* { ++collected; return nullptr; };
+    oMainReset = [](void*) {};
+    alignas(16) static uint8_t a[0x40]{}, b[0x40]{}, effect[0x40]{};
+    // Birth, then a second birth at a live address (native reuse without teardown).
+    Birth(a, Kind::Unit); assert(active(a) && activeCount() == 1);
+    const uint64_t first = Find(a, false)->id;
+    Birth(a, Kind::Unit); assert(active(a) && activeCount() == 1 && Find(a, false)->id != first);
+    { AcquireSRWLockExclusive(&g_lock); ValidateActiveSlots(); ReleaseSRWLockExclusive(&g_lock); }
+    // Tombstone drops the slot and its lease bits; rebirth at the address reuses it.
+    LifetimeTrace_SaveSnapshot(0);
+    Identity* slot = Find(a, false); assert(slot->snapshots == 1);
+    Destroyed("gone", a, slot->id);
+    assert(!Find(a, false) && slot->occupancy == Occupancy::Tombstone && !slot->snapshots);
+    assert(activeCount() == 0);
+    Birth(a, Kind::Unit); assert(Find(a, false) == slot && active(a) && !slot->snapshots);
+    // Probe chains: a tombstone between live entries keeps later entries reachable.
+    for (size_t i = 0; i < 3; ++i) Birth(b + i * 0x10, Kind::Unit);
+    Destroyed("gone", b + 0x10, Find(b + 0x10, false)->id);
+    assert(active(b) && !active(b + 0x10) && active(b + 0x20) && activeCount() == 3);
+    // Quarantine stays active; collection waits for the last lease, then tombstones.
+    Birth(effect, Kind::Effect);
+    LifetimeTrace_SaveSnapshot(1);
+    Find(effect, false)->occupancy = Occupancy::Quarantined; ++g_quarantined;
+    CollectQuarantine();
+    assert(active(effect) && !collected); // Still leased by slot 1: no premature collection.
+    LifetimeTrace_DropSnapshot(1);
+    CollectQuarantine();
+    assert(collected == 1 && !Find(effect, false) && activeCount() == 3);
+    // Resurrection: quarantined back to live never leaves the active set.
+    Birth(effect, Kind::Effect);
+    Find(effect, false)->occupancy = Occupancy::Quarantined;
+    assert(active(effect));
+    Find(effect, false)->occupancy = Occupancy::Live;
+    assert(active(effect) && activeCount() == 4);
+    // Epoch reset clears every lease and keeps the mask exact.
+    LifetimeTrace_SaveSnapshot(2);
+    MainReset(nullptr);
+    for (const auto& entry : ActiveIdentities()) assert(!entry.snapshots && !entry.dependencies);
+    assert(activeCount() == 4);
+    { AcquireSRWLockExclusive(&g_lock); ValidateActiveSlots(); ReleaseSRWLockExclusive(&g_lock); }
+    // A full registry has no slot for a miss, and the mask is unchanged by it.
+    reset();
+    for (size_t i = 0; i < RegistrySize; ++i) g_registry[i] = {(void*)(0x1000 + i * 0x10), i + 1, 0, Kind::Unit, Occupancy::Live};
+    SyncActiveSlotsForTest();
+    alignas(16) static uint8_t extra[0x40]{};
+    Birth(extra, Kind::Unit);
+    assert(!Find(extra, false) && g_registryMisses == 1 && activeCount() == RegistrySize);
+    { AcquireSRWLockExclusive(&g_lock); ValidateActiveSlots(); ReleaseSRWLockExclusive(&g_lock); }
 }
 ''')
 
@@ -3399,7 +3697,9 @@ int main() {
         self.assertLess(save.index(call), save.index("SnapDump_CaptureSnapshot(slot)"))
         # Historical capture, not a later dump request, selects whole-shot payload.
         self.assertIn("const bool captureSnapDump = SnapDump_CaptureEnabled();", save)
-        self.assertIn("captureSnapDump ? LifetimeShotPayload::Capture : LifetimeShotPayload::Omit", save)
+        # Saved-shot restore reads the payload, so production captures it on every save.
+        self.assertIn("SAVED_SHOT_RESTORE_ENABLED || captureSnapDump", save)
+        self.assertIn("SAVED_SHOT_RESTORE_ENABLED ? LifetimeShotPayload::Capture : LifetimeShotPayload::Omit", save)
         self.assertLess(save.index("LifetimeTrace_DropSnapshot(frame)"), save.index("if (count == 0) return;"))
         self.assertIn("&sharedCapacity, &slot.lifetime", save)
         self.assertIn("std::shared_ptr<LifetimeSnapshot> lifetime;",
@@ -3418,6 +3718,12 @@ int main() {
         self.assertGreater(restore.index("LifetimeTrace_CheckSnapshot(frame)"), restore.index("return;"))
         self.assertGreater(restore.index("LifetimeTrace_RestoreEffects(frame)"),
                             restore.index("restoreCharacterPostState();"))
+        # Withdraw later shots, restore effects, then rewind the shots that remain.
+        self.assertLess(restore.index("LifetimeTrace_RetireFutureShots(frame)"),
+                        restore.index("LifetimeTrace_RestoreEffects(frame)"))
+        self.assertLess(restore.index("LifetimeTrace_RestoreEffects(frame)"),
+                        restore.index("LifetimeTrace_RestoreShots(frame)"))
+        self.assertIn('#include "lifetime_shot_restore.inl"', tracer)
 
 
 if __name__ == "__main__":

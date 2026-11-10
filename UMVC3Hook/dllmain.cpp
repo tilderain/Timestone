@@ -97,34 +97,16 @@ static void HookLogAppendLocked(const char* data, size_t length)
 	g_hookLogBuffer.resize(markerLength + keepLength);
 }
 
-static bool HookLogWriteSnapshotLocked(const char* filename)
+static bool HookLogAppendToFile(const char* filename, const char* data,
+	size_t length)
 {
-	char temporaryFilename[MAX_PATH + 32] = {};
-	if (snprintf(temporaryFilename, sizeof(temporaryFilename), "%s.tmp.%lu",
-			filename, static_cast<unsigned long>(GetCurrentProcessId())) >=
-			static_cast<int>(sizeof(temporaryFilename)))
-		return false;
-	DeleteFileA(temporaryFilename);
-	FILE* output = fopen(temporaryFilename, "wb");
+	FILE* output = fopen(filename, "ab");
 	if (!output)
 		return false;
-	bool success = g_hookLogBuffer.empty() ||
-		fwrite(g_hookLogBuffer.data(), 1, g_hookLogBuffer.size(), output) ==
-			g_hookLogBuffer.size();
+	bool success = !length || fwrite(data, 1, length, output) == length;
 	success = success && fflush(output) == 0;
 	success = fclose(output) == 0 && success;
-	if (!success || !MoveFileExA(temporaryFilename, filename,
-			MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
-		DeleteFileA(temporaryFilename);
-		return false;
-	}
-	return true;
-}
-
-static bool HookLogWriteSnapshotLocked()
-{
-	return g_hookLogSnapshotFilename.empty() ||
-		HookLogWriteSnapshotLocked(g_hookLogSnapshotFilename.c_str());
+	return success;
 }
 
 static void HookLogRotatePreviousSessionLocked(const char* filename)
@@ -164,19 +146,15 @@ static bool HookLogFlushLocked()
 		return false;
 	if (g_hookLogBuffer.empty())
 		return true;
-	if (!HookLogWriteSnapshotLocked())
+	if (!HookLogAppendToFile(g_hookLogFilename, g_hookLogBuffer.data(),
+			g_hookLogBuffer.size()))
 		return false;
-
-	const size_t newBytes = g_hookLogBuffer.size();
-	FILE* output = fopen(g_hookLogFilename, "ab");
-	if (!output)
-		return false;
-
-	bool success = fwrite(g_hookLogBuffer.data(), 1, newBytes, output) == newBytes;
-	success = success && fflush(output) == 0;
-	success = fclose(output) == 0 && success;
-	if (!success)
-		return false;
+	// The run log is append-only like the main log: each flush adds only the
+	// lines since the previous flush, so it must never be rewritten from the
+	// buffer. Best effort; retrying would duplicate lines in the main log.
+	if (!g_hookLogSnapshotFilename.empty())
+		HookLogAppendToFile(g_hookLogSnapshotFilename.c_str(),
+			g_hookLogBuffer.data(), g_hookLogBuffer.size());
 
 	g_hookLogBuffer.clear();
 	return true;
@@ -208,12 +186,23 @@ void HookLogSetFile(const char* filename)
 	ReleaseSRWLockExclusive(&g_hookLogLock);
 }
 
+// Seeds the run log with everything this session has logged so far, then
+// keeps it in step with the main log by appending each later flush.
 bool HookLogSetSnapshotFile(const char* filename)
 {
+	if (!filename || !filename[0])
+		return false;
 	AcquireSRWLockExclusive(&g_hookLogLock);
-	const bool created = g_hookLogFilename[0] && filename && filename[0];
-	if (created)
-		g_hookLogSnapshotFilename = filename;
+	bool created = g_hookLogSnapshotFilename == filename;
+	if (!created && g_hookLogFilename[0]) {
+		g_hookLogSnapshotFilename.clear();
+		HookLogFlushLocked();
+		created = GetFileAttributesA(g_hookLogFilename) != INVALID_FILE_ATTRIBUTES
+			? CopyFileA(g_hookLogFilename, filename, TRUE) != FALSE
+			: HookLogAppendToFile(filename, nullptr, 0);
+		if (created)
+			g_hookLogSnapshotFilename = filename;
+	}
 	ReleaseSRWLockExclusive(&g_hookLogLock);
 	return created;
 }
