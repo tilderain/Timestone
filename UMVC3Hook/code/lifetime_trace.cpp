@@ -603,9 +603,14 @@ void __fastcall ReleaseShotId(void* manager, uint32_t id)
     oReleaseShotId(manager, id);
 }
 
+// One entry per distinct deleting destructor; `original` is that native
+// function. It is intercepted at slot 0 of each vtable that names it, never by
+// rewriting its code: installing an inline detour suspends every thread, which
+// cost a 60 ms stall the first time each class appeared in a match.
 struct UnitDeleteHook { void* target = nullptr; Deleting original = nullptr; };
 std::array<UnitDeleteHook, 256> g_unitDeleteHooks;
 size_t g_unitDeleteHookCount = 0;
+std::unordered_map<void*, size_t> g_unitDeleteVtables; // Patched vtable -> hook index.
 
 void* DeleteUnit(void* shot, uint32_t flags, Deleting original, uintptr_t nativeCaller)
 {
@@ -683,24 +688,26 @@ Deleting RegisterDeleting(void* shot)
 {
     LifetimeFailureScope failureScope("unit.deleting_hook", shot);
     // The live allocation has its final vtable. Share the factory/adoption path
-    // and register once per deleting target, not per allocation or whitelist.
-    void* target = Read<void*>(Read<void*>(shot, 0), 0);
+    // and register once per vtable, not per allocation or whitelist.
+    void* vtable = Read<void*>(shot, 0);
+    const auto known = g_unitDeleteVtables.find(vtable);
+    if (known != g_unitDeleteVtables.end()) return g_unitDeleteHooks[known->second].original;
+    void* target = Read<void*>(vtable, 0);
+    // An unknown vtable still holds its native entry, never one of ours.
+    for (const Deleting detour : g_unitDeleteDetours)
+        if (target == (void*)detour) LIFE_FAIL("unregistered vtable already dispatches to a unit deleting detour",
+            LIFE_VALUE(shot), LIFE_VALUE(vtable), LIFE_VALUE(target));
     size_t index = 0;
     while (index < g_unitDeleteHookCount && g_unitDeleteHooks[index].target != target) ++index;
     if (index == g_unitDeleteHookCount) {
         LIFE_REQUIRE(index != g_unitDeleteHooks.size());
-        auto& hook = g_unitDeleteHooks[index];
-        hook.target = target;
-        const auto status = GameplayHooks_Create(target, (void*)g_unitDeleteDetours[index], (void**)&hook.original);
-        if (status != MH_OK) LIFE_FAIL("could not create native unit deleting hook",
-            LIFE_VALUE(shot), LIFE_VALUE(target), LIFE_VALUE(index), LIFE_VALUE(status));
+        g_unitDeleteHooks[index] = {target, (Deleting)target};
         ++g_unitDeleteHookCount;
-        const auto enableStatus = GameplayHooks_QueueEnable(target);
-        if (enableStatus != MH_OK) LIFE_FAIL("could not queue native unit deleting hook",
-            LIFE_VALUE(shot), LIFE_VALUE(target), LIFE_VALUE(index), LIFE_VALUE(enableStatus));
-        if (!GameplayHooks_Apply()) LIFE_FAIL("could not apply native unit deleting hook",
-            LIFE_VALUE(shot), LIFE_VALUE(target), LIFE_VALUE(index));
     }
+    if (!GameplayHooks_PatchPointer(static_cast<void**>(vtable), (void*)g_unitDeleteDetours[index]))
+        LIFE_FAIL("could not patch native unit deleting slot",
+            LIFE_VALUE(shot), LIFE_VALUE(vtable), LIFE_VALUE(target), LIFE_VALUE(index));
+    g_unitDeleteVtables.emplace(vtable, index);
     return g_unitDeleteHooks[index].original;
 }
 
@@ -2249,6 +2256,7 @@ void LifetimeTrace_Flush()
     const bool stopped = !g_recording.load(std::memory_order_relaxed) && g_sequence >= CaptureLimit;
     ValidateActiveSlots();
     ReleaseSRWLockExclusive(&g_lock);
+    if constexpr (!LIFETIME_TRACE_LOG_ENABLED) return;
     for (size_t i = 0; i < count; ++i) {
         const Event& e = batch[i];
         HookLog("LIFE seq=%llu ms=%llu thread=%u frame=%d resim=%u epoch=%llu event=%s id=%llu kind=%s obj=0x%llX birthvt=0x%llX vt=0x%llX flags=0x%X a=0x%llX b=0x%llX c=0x%llX d=0x%llX untracked=%u caller=0x%llX snapshots=0x%X revision=%llu\n",
@@ -2342,10 +2350,10 @@ void LifetimeTrace_Install()
     oRemoveGroups = (void (__fastcall*)(void*, void*))_addr(0x14051BAF0);
     g_lifetimeEnabled.store(complete, std::memory_order_relaxed);
     g_recording.store(complete, std::memory_order_relaxed);
-    HookLog("LifetimeTrace: queued=%d image_base=0x%llX limit=%llu ring=%zu registry=%zu empty_effect_quarantine=%d quarantine_limit=%zu effect_restore=%d ordinary_cpu_graphs=%d simulation_snapshots=%d shot_model_retention=%d future_shot_withdrawal=%d shot_presentation_live=1 shot_reference_leases=1 restore_render_drain=1 constraint_init_registry=1 constraint_graph_capture=1 lifetime_failure_log=1 saved_shot_restore=%d; partial graph coverage\n",
+    HookLog("LifetimeTrace: queued=%d image_base=0x%llX limit=%llu ring=%zu registry=%zu empty_effect_quarantine=%d quarantine_limit=%zu effect_restore=%d ordinary_cpu_graphs=%d simulation_snapshots=%d shot_model_retention=%d future_shot_withdrawal=%d shot_presentation_live=1 shot_reference_leases=1 restore_render_drain=1 constraint_init_registry=1 constraint_graph_capture=1 lifetime_failure_log=1 saved_shot_restore=%d trace_log=%d; partial graph coverage\n",
             complete, uint64_t(_addr(0x140000000)), CaptureLimit, EventCapacity, RegistrySize,
             EMPTY_EFFECT_QUARANTINE_ENABLED, QuarantineLimit, EFFECT_RESTORE_ENABLED,
             ORDINARY_CPU_EFFECT_GRAPHS_ENABLED, EFFECT_SIMULATION_SNAPSHOTS_ENABLED,
             EMPTY_EFFECT_QUARANTINE_ENABLED, EMPTY_EFFECT_QUARANTINE_ENABLED && EFFECT_RESTORE_ENABLED,
-            SAVED_SHOT_RESTORE_ENABLED);
+            SAVED_SHOT_RESTORE_ENABLED, LIFETIME_TRACE_LOG_ENABLED);
 }

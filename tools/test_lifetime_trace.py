@@ -140,6 +140,15 @@ int GameplayHooks_QueueEnable(void* target) {
     return index == failQueue ? 9 : MH_OK;
 }
 bool GameplayHooks_Apply() { assert(!locked); ++applies; return !failApply; }
+// Vtable slots are static test data: remember and put back, as Disable does.
+int patches = 0; bool failPatch = false;
+std::vector<std::pair<void**, void*>> mockPatches;
+bool GameplayHooks_PatchPointer(void** slot, void* value) {
+    assert(!locked);
+    if (failPatch) return false;
+    ++patches; mockPatches.emplace_back(slot, *slot); *slot = value;
+    return true;
+}
 uintptr_t _addr(uintptr_t address) {
     if (address == 0x140E17698) return uintptr_t(&unitManager);
     if (address == 0x140D47F40) return uintptr_t(&shotManager);
@@ -206,6 +215,9 @@ void reset() {
     g_retentionOpen = false;
     g_unitDeleteHookCount = 0;
     for (auto& hook : g_unitDeleteHooks) hook = {};
+    g_unitDeleteVtables.clear();
+    for (auto it = mockPatches.rbegin(); it != mockPatches.rend(); ++it) *it->first = it->second;
+    mockPatches.clear(); patches = 0; failPatch = false;
     g_collectingShot = g_shotBase = nullptr;
     shotManager = nullptr;
     collisionManager = nullptr;
@@ -380,7 +392,7 @@ int main() {
     for (size_t i = 0; i < EventCapacity + 3; ++i) LifetimeTrace_Marker("fill", int(i));
     assert(g_count == EventCapacity && g_dropped == 3);
     LifetimeTrace_Flush();
-    assert(g_count == EventCapacity - 256 && logs == 257);
+    assert(g_count == EventCapacity - 256 && logs == (LIFETIME_TRACE_LOG_ENABLED ? 257 : 0));
     g_sequence = CaptureLimit - 1;
     LifetimeTrace_Marker("last", 0);
     assert(!g_recording && g_sequence == CaptureLimit);
@@ -990,10 +1002,7 @@ void* nestedParent = nullptr;
 void* nestedChild = nullptr;
 
 void* dispatch(void* p, uint32_t flags) {
-    void* target = Read<void*>(Read<void*>(p, 0), 0);
-    for (const auto& hook : mockHooks)
-        if (hook.first == target) return ((Deleting)hook.second)(p, flags);
-    return ((Deleting)target)(p, flags);
+    return ((Deleting)Read<void*>(Read<void*>(p, 0), 0))(p, flags); // Virtual dispatch.
 }
 void nativeBase(void* p) {
     assert(!locked && g_shotBase == p);
@@ -1102,7 +1111,7 @@ int main(int argc, char** argv) {
     oShotDtor = nativeBase;
 
     void* p = makeShot(7);
-    assert(creates == 1 && queues == 1 && applies == 1);
+    assert(patches == 1 && g_unitDeleteHookCount == 1 && !creates && !queues && !applies);
     assert(Find(p, false)->deleting == nativeDerived && Find(p, false)->shotLinked);
     LifetimeTrace_SaveSnapshot(0); LifetimeTrace_SaveSnapshot(1);
     dispatch(p, 1);
@@ -1116,10 +1125,12 @@ int main(int argc, char** argv) {
     g_recording = false; LifetimeTrace_Flush(); assertIntact(p);
     LifetimeTrace_DropSnapshot(0); CollectQuarantine(); assertIntact(p);
 
-    // The concrete deleting target is shared by another vtable and hooked once.
+    // The concrete deleting target is shared by another vtable: one entry, and
+    // each vtable's slot is redirected to the same detour.
     // Both the native ID and list slot are reused before old model GC.
     void* q = makeShot(7, vtableAlias);
-    assert(creates == 1 && applies == 1);
+    assert(patches == 2 && g_unitDeleteHookCount == 1 && !applies);
+    assert(Read<void*>(vtableAlias, 0) == Read<void*>(Read<void*>(p, 0), 0));
     const uint32_t qPalette = Read<uint32_t>(q, 0x116C);
     LifetimeTrace_DropSnapshot(1); CollectQuarantine();
     assert(!g_quarantined && derivedBodies == 1 && modelBodies == 1);
@@ -1143,7 +1154,7 @@ int main(int argc, char** argv) {
     // Nested unleased shot destruction must still release its own ID/list/model.
     p = makeShot(9); LifetimeTrace_SaveSnapshot(4);
     q = makeShot(10, vtableB);
-    assert(creates == 2 && applies == 2);
+    assert(patches == 3 && g_unitDeleteHookCount == 2 && !applies);
     nestedParent = p; nestedChild = q;
     dispatch(p, 1);
     const int beforeIds = idReleases, beforeUnlinks = unlinks;
@@ -1418,11 +1429,8 @@ void* makeOwner() {
     return p; // No shot/effect factory birth: adoption must come from the edge.
 }
 void deleteOwner(void* p) {
-    void* target = Read<void*>(Read<void*>(p, 0), 0);
-    for (const auto& hook : mockHooks) if (hook.first == target) {
-        ((Deleting)hook.second)(p, 1); return;
-    }
-    assert(false);
+    assert(g_unitDeleteVtables.count(ownerVtable));
+    ((Deleting)Read<void*>(Read<void*>(p, 0), 0))(p, 1); // Virtual dispatch.
 }
 bool nativeOwnerCheck(void* effect) {
     void* owner = Read<void*>(effect, 0x280);
@@ -1447,7 +1455,7 @@ int main() {
     LifetimeTrace_SaveSnapshot(0); LifetimeTrace_SaveSnapshot(1);
     Identity* owner = Find(first, false);
     assert(owner && owner->kind == Kind::Unit && owner->dependencies == 3 && owner->snapshots == 3);
-    assert(TestManifest(0).count() == 2 && creates == 1 && applies == 1);
+    assert(TestManifest(0).count() == 2 && patches == 1 && !creates && !applies);
     deleteOwner(first);
     assert(ownersDestroyed == 0 && g_quarantined == 1 && !nativeOwnerCheck(effect));
     assert(Read<uintptr_t>(first, 0) == uintptr_t(ownerVtable));
@@ -1457,7 +1465,7 @@ int main() {
     for (size_t offset : {size_t(0x40), size_t(0x138), size_t(0x278), size_t(0x280), size_t(0x288)})
         Write(effect, offset, second);
     LifetimeTrace_SaveSnapshot(2);
-    assert(creates == 1 && applies == 1 && nativeOwnerCheck(effect));
+    assert(patches == 1 && !applies && nativeOwnerCheck(effect));
     assert(Find(second, false)->dependencies == 4);
     LifetimeTrace_RestoreEffects(0);
     assert(Read<void*>(effect, 0x280) == first && !nativeOwnerCheck(effect));
@@ -2413,7 +2421,7 @@ int main() {
     LifetimeTrace_SaveSnapshot(0);
     auto* adopted = Find(target, false);
     assert(adopted && adopted->kind == Kind::Unit && adopted->snapshots == 1 && adopted->dependencies == 1);
-    assert(TestManifest(0).count() == 2 && TestManifest(0).shots.size() == 1 && creates == 1);
+    assert(TestManifest(0).count() == 2 && TestManifest(0).shots.size() == 1 && patches == 1 && !creates);
     DeleteUnit(target, 1, destroy, 0);
     assert(!deletes && adopted->occupancy == Occupancy::Quarantined);
     Write(shot, 0x13D8, (void*)nullptr);

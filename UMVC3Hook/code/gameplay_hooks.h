@@ -10,6 +10,7 @@ MH_STATUS GameplayHooks_Create(LPVOID target, LPVOID detour, LPVOID* original);
 MH_STATUS GameplayHooks_QueueEnable(LPVOID target);
 bool GameplayHooks_Apply();
 void GameplayHooks_RecordPatch(void* target, size_t size);
+bool GameplayHooks_PatchPointer(void** slot, void* value);
 bool GameplayHooks_Disable();
 bool GameplayHooks_IsActive();
 void GameplayHooks_Activate();
