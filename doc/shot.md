@@ -93,6 +93,26 @@ Verified manager fields used by current source include:
 | `+0x2448` | Pending-unit count |
 | `+0x2450` | Activity records |
 
+### Deferred Kill Order
+
+A cinematic clears the screen in two steps. An action command
+(`anmchrParser`, call sites `0x140106A3B` and `0x140104D95`) queues a mode in
+`sShot+0x43C` (`sShot::queueDeferredKillModeOnce`, `0x140151260`) and in bits
+15..29 of `sGameEffect+0x1D48` (`sGameEffect::setKillOrderIfUnset`,
+`0x140130F50`). At the start of the next frame, before any unit lane moves, the
+systems' vtable `+0x48` slots apply it: `sShot::processDeferredKillMode`
+(`0x140150B50`) kills every shot in unit lanes 10-11 except
+`uShotShieldOuroboros`, and `sGameEffect::purgeIfPending` (`0x140130680`) kills
+effects by cleanup mode. Both then clear the order.
+
+Those `+0x48` slots are simulation, not drawing, and the headless tick must run
+them. When it skipped them, a replayed order stayed pending until the next live
+frame; with rollbacks arriving every few frames each one revived the shot, so a
+land mine outlived the cinematic on one peer, later exploded and drew from its
+owner's RNG (desync at frame 3811, 2026-11-10). The order is pending across a
+frame boundary, so both words are saved with the snapshot: the shot word in
+`shotControls`, the effect bits in `effectKillOrder`.
+
 The exact semantics of every manager-header word are not fully recovered. The
 older `0x50`-byte capture was insufficient (see the ID-pool history below); it is
 not the complete current ID-state capture. Do not infer a 1024-object capacity

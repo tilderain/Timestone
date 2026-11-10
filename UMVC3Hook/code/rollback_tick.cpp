@@ -731,8 +731,14 @@ void Rollback_HeadlessTick(uint64_t sMain)
     //VTableCall(MainMember(sMain, 0x40240), 0x30); // mpAI::move.
     //VTableCall(ManagerSubsystem(FN_GET_GAME_CONFIG), 0x30); // sGameConfig::move.
     //VTableCall(ManagerSubsystem(FN_GET_GAME_UI), 0x30); // sGameUi::move.
-    //VTableCall(ManagerSubsystem(FN_GET_SHOT), 0x48); // sShot::draw.
-    //VTableCall(ManagerSubsystem(FN_GET_GAME_EFFECT), 0x48); // sGameEffect::draw.
+    // Not drawing: these apply the kill order an action command queued on the
+    // previous frame (anmchrParser 0x140106A3B / 0x140104D95), which is how a
+    // cinematic clears the screen. sShot::processDeferredKillMode (0x140150B50)
+    // kills every shot in lanes 10-11; sGameEffect::purgeIfPending (0x140130680)
+    // kills effects by cleanup mode. Skipping them left a replayed order pending
+    // until the next live frame, and every rollback revived the shot again.
+    VTableCall(ManagerSubsystem(FN_GET_SHOT), 0x48);
+    VTableCall(ManagerSubsystem(FN_GET_GAME_EFFECT), 0x48);
 
         profile.Add(&RollbackProfile::headlessGameplaySetup,
         &RollbackProfile::headlessGameplaySetupMax);
