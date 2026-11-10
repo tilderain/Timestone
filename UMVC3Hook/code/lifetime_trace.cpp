@@ -197,6 +197,13 @@ struct ModelUnitState {
 };
 } // namespace
 
+// sGameEffect instance pointer; bits 15..29 of +0x1D48 hold the cleanup mode
+// queued by sGameEffect::setKillOrderIfUnset (0x140130F50) and applied on the
+// next frame by purgeIfPending (0x140130680).
+constexpr uintptr_t EffectManagerGlobal = 0x140D46470;
+constexpr size_t EffectKillOrderOffset = 0x1D48;
+constexpr uint32_t EffectKillOrderMask = 0x3FFF8000;
+
 struct LifetimeSnapshot {
     bool valid = false;
     uint64_t captureId = 0;
@@ -223,6 +230,9 @@ struct LifetimeSnapshot {
     uint32_t shotSlotFlags = 0;
     std::array<uint32_t, 256> shotOccupancy{};
     std::array<uint32_t, 3> shotControls{};
+    // sGameEffect's queued kill order, the effect counterpart of shotControls[0].
+    void* effectManager = nullptr;
+    uint32_t effectKillOrder = 0;
     std::vector<ShotListEntry> shotLists[10];
     std::vector<ShotPendingEntry> shotPending;
     std::vector<ShotConstraintState> constraints;
@@ -1130,6 +1140,9 @@ void CaptureEffects(SnapshotManifest& manifest, void* manager)
     LifetimeFailureScope failureScope("effects.capture", manager, 0, manifest.frame);
     manifest.unitManager = manager;
     manifest.thread = GetCurrentThreadId();
+    manifest.effectManager = Read<void*>((void*)_addr(EffectManagerGlobal), 0);
+    manifest.effectKillOrder = manifest.effectManager
+        ? Read<uint32_t>(manifest.effectManager, EffectKillOrderOffset) & EffectKillOrderMask : 0;
     manifest.effects.clear();
     manifest.spans.clear();
     manifest.payload.clear();
@@ -2069,6 +2082,12 @@ void LifetimeTrace_RestoreEffects(int32_t frame)
         if (wasHeld[i]) {
             --g_quarantined; identities[i]->occupancy = Occupancy::Live;
         }
+    }
+    // A kill order queued on the abandoned branch must not fire on this one,
+    // and one pending at the snapshot must still fire. The other bits are live.
+    if (manifest.effectManager && Read<void*>((void*)_addr(EffectManagerGlobal), 0) == manifest.effectManager) {
+        const uint32_t live = Read<uint32_t>(manifest.effectManager, EffectKillOrderOffset);
+        Write(manifest.effectManager, EffectKillOrderOffset, (live & ~EffectKillOrderMask) | manifest.effectKillOrder);
     }
     for (size_t i = 0; i < spaces.size(); ++i) {
         const auto& saved = manifest.attackSpaces[i];

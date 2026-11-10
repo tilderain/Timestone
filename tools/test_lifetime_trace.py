@@ -32,6 +32,7 @@ void* collisionManager = nullptr;
 void* gameConfig = nullptr;
 void* renderManager = nullptr;
 void* actionManager = nullptr;
+void* effectManager = nullptr; // sGameEffect; null leaves its kill order alone.
 int renderWaits = 0;
 void MockRenderSync(void* render) {
     assert(!locked && !unitLocked);
@@ -156,6 +157,7 @@ uintptr_t _addr(uintptr_t address) {
     if (address == 0x140D50F88) return uintptr_t(&gameConfig);
     if (address == 0x140E179A8) return uintptr_t(&renderManager);
     if (address == 0x140D47E68) return uintptr_t(&actionManager);
+    if (address == 0x140D46470) return uintptr_t(&effectManager);
     if (address == 0x140541030) return uintptr_t(&MockRenderSync);
     if (address == 0x1405B7F20) return uintptr_t(&MockRecycleCollision);
     if (address == 0x1405B5B60) return uintptr_t(&MockClearCollisionGroups);
@@ -222,7 +224,7 @@ void reset() {
     shotManager = nullptr;
     collisionManager = nullptr;
     gameConfig = nullptr;
-    renderManager = nullptr; renderWaits = 0; actionManager = nullptr;
+    renderManager = nullptr; renderWaits = 0; actionManager = nullptr; effectManager = nullptr;
     std::memset(shotHeads, 0, sizeof(shotHeads)); std::memset(shotDti, 0, sizeof(shotDti));
     unitLockDepth = 0; unitLocked = false;
     creates = queues = logs = fatalLogAttempts = 0;
@@ -848,12 +850,19 @@ int main() {
     Write(space, 0x1D18, static_cast<void*>(child));               // One live child effect.
     Write(space, 0x1CF8, uint32_t(0x40000));                       // Effect-model lifecycle word.
     Write(action, 0x148, static_cast<void*>(space)); line({space});
+    // A cinematic queued "kill effects, mode 2" on this frame; the low bits are live settings.
+    alignas(8) static uint8_t effects[0x1D50]{}; effectManager = effects;
+    Write(effects, 0x1D48, uint32_t((2u << 15) | 5));
     LifetimeTrace_SaveSnapshot(0);
     assert(TestManifest(0).attackSpaces.size() == 1 && Find(space, false)->dependencies == 1);
+    assert(TestManifest(0).effectKillOrder == (2u << 15));
 
     // The super ended: children were told to finish and the space waits on them.
     Write(space, 0x1D0C, uint32_t(1)); Write(space, 0x1CF8, uint32_t(0x80000));
+    // The order was applied and cleared, and a live setting changed since.
+    Write(effects, 0x1D48, uint32_t(0x80000007));
     LifetimeTrace_RestoreEffects(0);
+    assert(Read<uint32_t>(effects, 0x1D48) == (0x80000007 | (2u << 15))); // Pending again; live bits kept.
     assert(Read<uint32_t>(space, 0x1D0C) == 0 && Read<void*>(space, 0x1D18) == child);
     assert(Read<uint32_t>(space, 0x1CF8) == 0x40000 && Read<void*>(action, 0x148) == space);
 
@@ -864,7 +873,9 @@ int main() {
     Write(action, 0x148, (void*)nullptr);
     // The abandoned branch then started another super with its own space.
     auto* later = makeSpace(); Write(action, 0x148, static_cast<void*>(later)); line({later});
+    Write(effects, 0x1D48, uint32_t((1u << 15) | 7)); // ...and queued a different order.
     LifetimeTrace_RestoreEffects(0);
+    assert(Read<uint32_t>(effects, 0x1D48) == ((2u << 15) | 7));
     assert(Find(space, false)->occupancy == Occupancy::Live && Read<uint32_t>(space, 0x1D0C) == 0);
     assert(Read<void*>(space, 0x1D18) == child && (Read<uint32_t>(space, 0x10) & 0x3FF) == (2 | (1 << 3)));
     assert(Read<void*>(units, 0x80) == space && Read<void*>(units, 0x88) == space && !Read<void*>(space, 0x18));
