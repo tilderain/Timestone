@@ -1,6 +1,24 @@
 // Native construction provenance, not ownership inferred from pointer values.
 std::unordered_map<void*, uint64_t> g_constructedConstraints;
 uint64_t g_nextConstraintConstruction = 0;
+// Registered addresses in ascending order, rebuilt only after the set changed.
+// The version counts every insert and erase and is never reset; the size check
+// also catches the map being emptied directly.
+uint64_t g_constraintSetVersion = 0, g_sortedConstraintVersion = UINT64_MAX;
+std::vector<void*> g_sortedConstraints;
+// Caller holds g_lock. The reference is valid until the lock is released.
+const std::vector<void*>& SortedConstraints()
+{
+    if (g_sortedConstraintVersion != g_constraintSetVersion ||
+        g_sortedConstraints.size() != g_constructedConstraints.size()) {
+        g_sortedConstraints.clear();
+        g_sortedConstraints.reserve(g_constructedConstraints.size());
+        for (const auto& entry : g_constructedConstraints) g_sortedConstraints.push_back(entry.first);
+        std::sort(g_sortedConstraints.begin(), g_sortedConstraints.end(), std::less<void*>{});
+        g_sortedConstraintVersion = g_constraintSetVersion;
+    }
+    return g_sortedConstraints;
+}
 void (__fastcall* oInitializeConstraint)(void*) = nullptr;
 void (__fastcall* oConstraintObjectDtor)(void*) = nullptr;
 
@@ -21,7 +39,10 @@ void RegisterConstraint(void* object)
 {
     const auto [at, inserted] = g_constructedConstraints.try_emplace(object);
     at->second = ++g_nextConstraintConstruction;
-    if (inserted) ConstraintBucket(object).fetch_add(1, std::memory_order_relaxed);
+    if (inserted) {
+        ++g_constraintSetVersion;
+        ConstraintBucket(object).fetch_add(1, std::memory_order_relaxed);
+    }
 }
 
 void __fastcall InitializeConstraint(void* object)
@@ -39,8 +60,10 @@ void __fastcall ForgetConstraintObject(void* object)
     // storage is never inspected, including calls for unrelated MtObjects.
     if (ConstraintBucket(object).load(std::memory_order_relaxed)) {
         AcquireSRWLockExclusive(&g_lock);
-        if (g_constructedConstraints.erase(object))
+        if (g_constructedConstraints.erase(object)) {
+            ++g_constraintSetVersion;
             ConstraintBucket(object).fetch_sub(1, std::memory_order_relaxed);
+        }
         ReleaseSRWLockExclusive(&g_lock);
     }
     oConstraintObjectDtor(object);
@@ -52,11 +75,22 @@ void __fastcall ForgetConstraintObject(void* object)
 template<class Visit> void VisitShotConstraintModels(const Identity& owner,
     const std::vector<void*>& sortedConstraints, Visit visit)
 {
+    auto* joints = Read<uint8_t*>(owner.object, 0x538);
+    const uint32_t count = joints ? Read<uint32_t>(joints - 0x10, 0) : 0;
+    if (count > 65536) {
+        LifetimeFailureScope failureScope("shot.constraint_dependencies.capture", owner.object, owner.id);
+        LIFE_FAIL("constraint dependency scan found an invalid joint allocation count",
+            LIFE_VALUE(owner.object), LIFE_VALUE(owner.id), LIFE_VALUE(owner.extent), LIFE_VALUE(joints), LIFE_VALUE(count));
+    }
+    // Every node below must be a registered constraint: with none, nothing to visit.
+    if (sortedConstraints.empty()) return;
     LifetimeFailureScope failureScope("shot.constraint_dependencies.capture", owner.object, owner.id);
-    std::vector<void*> nodes;
-    std::unordered_set<void*> appended;
+    // Capture-fence scratch, reused across shots and frames.
+    static std::vector<void*> nodes;
+    static ScratchSet appended;
+    nodes.clear(); appended.clear();
     const auto append = [&](void* object) {
-        if (object && g_constructedConstraints.contains(object) && appended.insert(object).second)
+        if (object && g_constructedConstraints.contains(object) && appended.insert(object))
             nodes.push_back(object);
     };
     // Inline constraints lie within [owner, owner + extent - 0x90].
@@ -64,10 +98,6 @@ template<class Visit> void VisitShotConstraintModels(const Identity& owner,
         for (auto at = std::lower_bound(sortedConstraints.begin(), sortedConstraints.end(), owner.object, std::less<void*>{});
              at != sortedConstraints.end() && uintptr_t(*at) - uintptr_t(owner.object) <= owner.extent - 0x90; ++at)
             append(*at);
-    auto* joints = Read<uint8_t*>(owner.object, 0x538);
-    const uint32_t count = joints ? Read<uint32_t>(joints - 0x10, 0) : 0;
-    if (count > 65536) LIFE_FAIL("constraint dependency scan found an invalid joint allocation count",
-        LIFE_VALUE(owner.object), LIFE_VALUE(owner.id), LIFE_VALUE(owner.extent), LIFE_VALUE(joints), LIFE_VALUE(count));
     for (uint32_t i = 0; i < count; ++i) {
         void* head = Read<void*>(joints + i*0xC0, 8);
         if (head) append((void*)(uintptr_t(head) - 0x40));
@@ -94,9 +124,10 @@ void CaptureShotConstraints(SnapshotManifest& saved)
         ReleaseSRWLockExclusive(&g_lock);
         return;
     }
-    std::unordered_set<void*> captured;
+    static ScratchSet captured; // Capture-fence scratch, reused across frames.
+    captured.clear();
     const auto append = [&](void* object) {
-        if (!object || captured.count(object)) return;
+        if (!object || captured.contains(object)) return;
         const auto at = g_constructedConstraints.find(object);
         if (at == g_constructedConstraints.end()) {
             saved.constraintsComplete = false;
@@ -115,25 +146,19 @@ void CaptureShotConstraints(SnapshotManifest& saved)
     };
     // Completed shot allocations prove containment of their inline children.
     // Include detached constraints as well as the complete neighboring chains.
-    // Bodies sorted by address; allocations are disjoint, so at most one contains
-    // a given constraint: the last body starting at or below it.
-    std::vector<GraphSpan> bodies;
-    if (!g_constructedConstraints.empty()) for (const auto& shot : saved.shots) {
-        const auto body = std::find_if(shot.spans.begin(), shot.spans.end(),
-            [](const ShotSpan& span) { return span.kind == ShotSpanKind::Body; });
-        LIFE_REQUIRE(body != shot.spans.end());
-        bodies.push_back(body->memory);
-    }
-    std::sort(bodies.begin(), bodies.end(),
-        [](const GraphSpan& a, const GraphSpan& b) { return std::less<void*>{}(a.address, b.address); });
-    for (const auto& [object, construction] : g_constructedConstraints) {
-        (void)construction;
-        auto at = std::upper_bound(bodies.begin(), bodies.end(), object,
-            [](void* address, const GraphSpan& body) { return std::less<void*>{}(address, body.address); });
-        if (at == bodies.begin()) continue;
-        --at;
-        const uintptr_t relative = uintptr_t(object) - uintptr_t(at->address);
-        if (at->size >= 0x90 && relative <= at->size - 0x90) append(object);
+    // Allocations are disjoint, so each body's constraints are one run of the
+    // sorted address list: no pass over every constraint in the game.
+    if (!g_constructedConstraints.empty()) {
+        const std::vector<void*>& sorted = SortedConstraints();
+        for (const auto& shot : saved.shots) {
+            const auto body = std::find_if(shot.spans.begin(), shot.spans.end(),
+                [](const ShotSpan& span) { return span.kind == ShotSpanKind::Body; });
+            LIFE_REQUIRE(body != shot.spans.end());
+            if (body->memory.size < 0x90) continue;
+            for (auto at = std::lower_bound(sorted.begin(), sorted.end(), body->memory.address, std::less<void*>{});
+                 at != sorted.end() && uintptr_t(*at) - uintptr_t(body->memory.address) <= body->memory.size - 0x90; ++at)
+                append(*at);
+        }
     }
     for (const auto& shot : saved.shots) for (const auto& span : shot.spans) {
         if (span.kind != ShotSpanKind::ModelJoints) continue;

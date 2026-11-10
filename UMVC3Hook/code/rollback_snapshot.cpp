@@ -1058,9 +1058,12 @@ int Rollback_BuildRegions(Region* regions, int maxRegions)
 
 void Rollback_SaveSnapshot(int32_t frame)
 {
-    LifetimeTrace_DropSnapshot(frame); // Invalidate observation before any slot mutation/failure.
-    LifetimeTrace_Marker("snapshot_request", frame);
     LagDiagnosticScope diagnostic(g_isResimulating ? LagMetric::SaveResim : LagMetric::SaveLive);
+    {
+        LagDiagnosticScope dropDiagnostic(LagMetric::SaveLifetimeDrop);
+        LifetimeTrace_DropSnapshot(frame); // Invalidate observation before any slot mutation/failure.
+        LifetimeTrace_Marker("snapshot_request", frame);
+    }
     LagDiagnosticScope diagnosticStage(LagMetric::SaveRegions);
     const uint64_t benchmarkStart = LiveBenchmark_Now();
     const uint64_t profileStart = Profile_Now();
@@ -1263,7 +1266,10 @@ void Rollback_SaveSnapshot(int32_t frame)
 #else
     const auto shotPayload = SAVED_SHOT_RESTORE_ENABLED ? LifetimeShotPayload::Capture : LifetimeShotPayload::Omit;
 #endif
-    LifetimeTrace_SaveSnapshot(frame, slot.lifetime, shotPayload);
+    {
+        LagDiagnosticScope lifetimeDiagnostic(LagMetric::SaveLifetime);
+        LifetimeTrace_SaveSnapshot(frame, slot.lifetime, shotPayload);
+    }
 #if ROLLBACK_SNAPDUMP_ENABLED
     if (captureSnapDump) {
         LagDiagnosticScope dumpDiagnostic(LagMetric::SnapDump);

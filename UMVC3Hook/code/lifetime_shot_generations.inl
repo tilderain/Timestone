@@ -821,8 +821,15 @@ void CaptureShotGenerations(const Identity& owner, uint32_t bit, ShotState& save
                             LifetimeShotPayload payload)
 {
     LifetimeFailureScope failureScope("shot.generations.capture", owner.object, owner.id);
+    // One lookup for all domains: element references survive later insertions.
+    const auto& domains = g_shotDomains[owner.id];
+    saved.generations.reserve(ShotDomainCount);
     for (size_t domain = 0; domain < ShotDomainCount; ++domain) {
-        const int index = EnsureShotGeneration(owner, ShotDomain(domain));
+        // A current model or resource generation is used as is; a missing one,
+        // and every attack domain (whose root can appear later), goes through
+        // the general path.
+        int index = domains.current[domain];
+        if (index < 0 || domain >= size_t(ShotDomain::Attack0)) index = EnsureShotGeneration(owner, ShotDomain(domain));
         auto& generation = g_shotGenerations[index];
         if (domain <= size_t(ShotDomain::Keys)) VisitDomainFields(ShotDomain(domain), [&](size_t field, size_t size) {
             const uint64_t expected = size == 4 ? Read<uint32_t>(generation.image, field) : Read<uint64_t>(generation.image, field);
@@ -843,7 +850,7 @@ void CaptureShotGenerations(const Identity& owner, uint32_t bit, ShotState& save
             // an unleased live cohort; leased membership changes use the add hook.
             if (!generation.snapshots) generation.attack = ReadAttackCohort(owner,
                 unsigned(domain) - unsigned(ShotDomain::Attack0), generation.attack);
-            auto cohort = generation.attack;
+            const AttackCohort* cohort = generation.attack.get();
             ValidateAttackCohort(*cohort);
             void* root = cohort->root->object;
             const auto slot = uint16_t(domain - size_t(ShotDomain::Attack0));
@@ -892,15 +899,18 @@ void CaptureShotGenerations(const Identity& owner, uint32_t bit, ShotState& save
     for (const auto& span : saved.spans)
         LIFE_REQUIRE(span.memory.offset <= saved.payload.size() && span.memory.size <= saved.payload.size() - span.memory.offset);
     ShotBodySpan(saved, owner.object);
+    // One lookup for all domains: the element reference survives the insertions
+    // the slow paths below can make, and nothing here erases this owner.
+    auto& ownerDomains = g_shotDomains[owner.id];
     for (const auto& ref : saved.generations) {
         const auto domain = g_shotGenerations[ref.index].domain;
-        int current = g_shotDomains[owner.id].current[size_t(domain)];
+        int current = ownerDomains.current[size_t(domain)];
         if (current != int(ref.index)) {
             if (domain <= ShotDomain::Keys) RetireModelDomain(owner, domain, true);
             else if (ShotResourceDomain(domain)) {
                 current = EnsureShotGeneration(owner, domain);
                 g_shotGenerations[current].attached = false;
-                g_shotDomains[owner.id].current[size_t(domain)] = -1;
+                ownerDomains.current[size_t(domain)] = -1;
             } else {
                 const auto slot = unsigned(domain) - unsigned(ShotDomain::Attack0);
                 RetireAttack(owner, slot, true);
@@ -908,7 +918,7 @@ void CaptureShotGenerations(const Identity& owner, uint32_t bit, ShotState& save
         }
         auto& generation = g_shotGenerations[ref.index];
         generation.attached = true;
-        g_shotDomains[owner.id].current[size_t(domain)] = int(ref.index);
+        ownerDomains.current[size_t(domain)] = int(ref.index);
         if (domain <= ShotDomain::Keys) {
             VisitDomainFields(domain, [&](size_t field, size_t size) {
                 std::memcpy(static_cast<uint8_t*>(owner.object) + field, generation.image + field, size);
@@ -917,9 +927,9 @@ void CaptureShotGenerations(const Identity& owner, uint32_t bit, ShotState& save
             Write(owner.object, ShotResourceField(domain), generation.resource);
         else {
             const auto slot = unsigned(domain) - unsigned(ShotDomain::Attack0);
-            auto cohort = generation.attack;
+            const auto& cohort = generation.attack;
             Write(owner.object, 0x2058 + slot * 8, cohort ? cohort->root->object : nullptr);
-            g_shotDomains[owner.id].roots[slot] = cohort ? cohort->root : nullptr;
+            ownerDomains.roots[slot] = cohort ? cohort->root : nullptr;
             if (cohort) {
                 cohort->root->nativeOwner = cohort->array->nativeOwner = true;
                 for (auto& entry : cohort->entries) {

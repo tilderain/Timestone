@@ -1309,9 +1309,15 @@ void Rollback_RestoreSnapshot(int32_t frame)
     // Restore the current uCharacterPost's center and fighter cache used for position correction.
     restoreCharacterPostState();
 
-    LifetimeTrace_RetireFutureShots(frame);
-    LifetimeTrace_RestoreEffects(frame);
-    LifetimeTrace_RestoreShots(frame);
+    {
+        // Nested inside restore_late, which reports only its own remainder as self time.
+        LagDiagnosticScope lifetimeStage(LagMetric::RestoreWithdraw);
+        LifetimeTrace_RetireFutureShots(frame);
+        lifetimeStage.Next(LagMetric::RestoreEffects);
+        LifetimeTrace_RestoreEffects(frame);
+        lifetimeStage.Next(LagMetric::RestoreShots);
+        LifetimeTrace_RestoreShots(frame);
+    }
 
     // Characters hold weak references to their shots and effects (Amaterasu's
     // tracked paper at +6908, mpLastCreateShot, the animation-command return
@@ -1319,6 +1325,7 @@ void Rollback_RestoreSnapshot(int32_t frame)
     // too: left live, a slot the abandoned branch had already cleared stays null
     // and the replayed command that ends the shot finds nothing to end.
     {
+        LagDiagnosticScope referenceStage(LagMetric::RestoreUnitRefs);
         size_t referenceOffset = 0;
         for (int i = 0; i < slot.regionCount; ++i) {
             const size_t regionSize = slot.regions[i].size;

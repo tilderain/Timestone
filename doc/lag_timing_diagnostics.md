@@ -111,15 +111,16 @@ source commit and dirty-build flag.
 | `save_live`, `save_resim` | Complete snapshot save, distinguished by whether it runs during resimulation |
 | `save_regions`, `save_alloc`, `save_copy` | Region-plan validation/build, storage preparation, raw region/camera/post-state capture |
 | `save_clones`, `save_parents`, `save_render` | Native collision clones, parent references and render-state collection |
-| `save_shots`, `save_shot_refs`, `save_effects` | Shot recipes, character shot references and effect recipes/references |
+| `save_lifetime_drop`, `save_lifetime` | Releasing the slot's previous shot/effect/model leases, then the lifetime capture (identities, effect graphs, shots, driven models, constraints). Both are inside `save_live`/`save_resim` |
+| `save_effects` | Unused |
 | `snapdump` | Extra snapshot-history capture when enabled |
 | `restore` | Complete restore, including validation and late fixups |
 | `restore_setup`, `restore_regions`, `restore_clones` | Restore preparation, region restoration and native collision-clone restoration |
 | `restore_fixups` | Allocation-owner repair, hit-solver reset, stale-pointer and effect-slot cleanup |
-| `restore_reconstruct`, `restore_late` | Shot/effect reconstruction and subsequent character/render/reference reapplication |
-| `rebuild_pin`, `rebuild_retire` | Resource pinning, category sanitation and effect retirement |
-| `rebuild_destroy` | Shot destruction, post-destruction sanitation and respawn preparation |
-| `rebuild_spawn`, `rebuild_finalize` | All shot factories/registration/concrete restoration, then references/poses/effects/finalization |
+| `restore_late` | Camera, character-post and render reapplication after the regions, plus the four lifetime stages below (its self time excludes them) |
+| `restore_withdraw`, `restore_effects`, `restore_shots` | Withdrawing shots born after the target frame, the effect/attack-space/model transaction, and the saved-shot rewind |
+| `restore_unit_refs` | Resolving the characters' weak shot/effect references against the restored units |
+| `rebuild_spawn`, `rebuild_finalize` | Unused |
 | `correction` | Complete accepted rollback correction, including restore, replay and final repairs |
 | `resim_frame`, `resim_tick` | One replayed frame including its bookkeeping/save, and its headless tick respectively |
 | `overlay_setup`, `overlay_logic`, `imgui_finalize` | Overlay preparation, pre-HUD menu/hotkey logic, and ImGui draw-list finalization |

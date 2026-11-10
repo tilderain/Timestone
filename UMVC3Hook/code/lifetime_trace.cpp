@@ -399,6 +399,59 @@ template<class T> void Write(void* object, size_t offset, T value)
     std::memcpy(static_cast<uint8_t*>(object) + offset, &value, sizeof(value));
 }
 
+// Pointer-keyed scratch for one capture or restore pass. Storage is kept between
+// passes and clear() is an epoch bump, so a pass allocates nothing once warm;
+// the node-based standard containers cost a heap round trip per element. Not
+// thread-safe: used only by the fence-owning thread, as function-local statics.
+template<class Value> class ScratchMap {
+    struct Slot { const void* key = nullptr; uint32_t epoch = 0; Value value{}; };
+    std::vector<Slot> slots;
+    uint32_t epoch = 0;
+    size_t used = 0;
+    static size_t Hash(const void* key) { return size_t((uintptr_t(key) >> 3) * 11400714819323198485ull >> 20); }
+    Slot* Probe(const void* key) {
+        for (size_t at = Hash(key) & (slots.size() - 1);; at = (at + 1) & (slots.size() - 1)) {
+            Slot& slot = slots[at];
+            if (slot.epoch != epoch || slot.key == key) return &slot;
+        }
+    }
+    void Grow() {
+        std::vector<Slot> previous(slots.size() * 2);
+        previous.swap(slots);
+        for (auto& old : previous) if (old.epoch == epoch) *Probe(old.key) = std::move(old);
+    }
+public:
+    void clear() {
+        if (slots.empty()) slots.resize(256);
+        if (++epoch == 0) { for (auto& slot : slots) slot.epoch = 0; epoch = 1; }
+        used = 0;
+    }
+    size_t size() const { return used; }
+    Value* find(const void* key) {
+        if (slots.empty()) return nullptr;
+        Slot* slot = Probe(key);
+        return slot->epoch == epoch ? &slot->value : nullptr;
+    }
+    bool contains(const void* key) { return find(key) != nullptr; }
+    // The value, and whether this call created it (value-initialized).
+    std::pair<Value*, bool> insert(const void* key) {
+        if (slots.empty()) clear();
+        Slot* slot = Probe(key);
+        if (slot->epoch == epoch) return {&slot->value, false};
+        if ((used + 1) * 2 > slots.size()) { Grow(); slot = Probe(key); }
+        slot->key = key; slot->epoch = epoch; slot->value = Value{};
+        ++used;
+        return {&slot->value, true};
+    }
+};
+struct ScratchSet {
+    ScratchMap<char> map;
+    void clear() { map.clear(); }
+    size_t size() const { return map.size(); }
+    bool contains(const void* key) { return map.contains(key); }
+    bool insert(const void* key) { return map.insert(key).second; } // True when newly added.
+};
+
 // Typed CPU allocation census only. This is capture, not permission to restore
 // ownership-bearing pointers: replacement-generation adapters must precede restore.
 // Completed-construction extent, or 0 when it is not a supported uShot body.
@@ -1071,11 +1124,10 @@ void CollectGraphGenerations()
 
 // Caller holds g_lock at the quiescent capture fence. These are typed borrowed
 // cUnit links, not ownership inferred by scanning address-looking byte values.
-void LeaseUnitDependency(SnapshotManifest& manifest, void* object, void* owner,
-                         uint64_t ownerId, size_t offset, uint32_t bit, bool requireUnit)
+void LeaseLinkedUnit(SnapshotManifest& manifest, void* object, void* owner,
+                     uint64_t ownerId, size_t offset, uint32_t bit, bool requireUnit)
 {
     LifetimeFailureScope failureScope("snapshot.unit_dependency", owner, ownerId, manifest.frame);
-    if (!object || object == owner) return;
     Identity* identity = Find(object, false);
     if (!identity) {
         ReleaseSRWLockExclusive(&g_lock);
@@ -1125,6 +1177,14 @@ void LeaseUnitDependency(SnapshotManifest& manifest, void* object, void* owner,
     }
     if (first) Push("snapshot_dependency", identity, object,
                     ownerId, offset, bit, identity->occupancy == Occupancy::Quarantined, false);
+}
+
+// Most typed link fields are null: reject those inline, before the call and its
+// failure scope (thread-local state is an emulated-TLS call in this toolchain).
+inline void LeaseUnitDependency(SnapshotManifest& manifest, void* object, void* owner,
+                                uint64_t ownerId, size_t offset, uint32_t bit, bool requireUnit)
+{
+    if (object && object != owner) LeaseLinkedUnit(manifest, object, owner, ownerId, offset, bit, requireUnit);
 }
 
 void LeaseEffectDependencies(SnapshotManifest& manifest, const EffectState& effect, uint32_t bit)
@@ -1177,7 +1237,7 @@ void CaptureEffects(SnapshotManifest& manifest, void* manager)
         LifetimeFailureScope effectScope("effect.capture", object, identity.id, manifest.frame);
         const uint32_t flags = Read<uint32_t>(object, 0x10);
         const uint32_t state = flags & 7;
-        GraphSpan spans[GraphSpanLimit]{};
+        GraphSpan spans[GraphSpanLimit]; // Only the first spanCount entries are read.
         size_t spanCount = 0;
         const bool simulation = state == 2 && EFFECT_SIMULATION_SNAPSHOTS_ENABLED;
         if (simulation) {
@@ -1190,7 +1250,8 @@ void CaptureEffects(SnapshotManifest& manifest, void* manager)
         if (Read<void*>(object, 0x218)) spanCount = DescribeOwnedGraph(object, spans);
         const uint32_t category = (flags >> 3) & 0x7F;
         LIFE_REQUIRE(!(category >= categories && category != 0x7F));
-        EffectState saved{};
+        // Filled in place; every field is assigned below (root is copied whole).
+        EffectState& saved = manifest.effects.emplace_back();
         saved.object = object; saved.id = identity.id; saved.revision = identity.revision;
         saved.resource = Read<void*>(object, 0x108);
         saved.category = category;
@@ -1224,7 +1285,6 @@ void CaptureEffects(SnapshotManifest& manifest, void* manager)
             }
             activeSaved += simulation;
         }
-        manifest.effects.push_back(saved);
     }
     const uint32_t bit = uint32_t(1) << unsigned((manifest.frame % ROLLBACK_WINDOW + ROLLBACK_WINDOW) % ROLLBACK_WINDOW);
     for (size_t i = 0; i < manifest.effectCount(); ++i)
@@ -1651,25 +1711,19 @@ void LifetimeTrace_SaveSnapshot(int32_t frame, std::shared_ptr<LifetimeSnapshot>
     CaptureAttackSpaces(manifest, uint32_t(1) << slot);
     // Index iteration tolerates adoption appending members. Copy the identity
     // before leasing; native DTI/deleting dispatch runs outside the recorder lock.
-    // Constraint addresses are sorted once so each shot finds its inline ones by range.
-    // Built at the first shot (including one adopted during this loop): most
+    // Each shot finds its inline constraints by range in the sorted address list,
+    // fetched at the first shot (including one adopted during this loop): most
     // frames have none, and the list covers every constraint in the game.
-    std::vector<void*> constraintAddresses;
-    bool constraintsSorted = false;
+    const std::vector<void*>* constraintAddresses = nullptr;
     std::vector<Identity> drivenModels;
     for (size_t i = 0; unitGuard.manager && i < manifest.members.size(); ++i) {
         const Identity owner = manifest.members[i];
         if (owner.kind != Kind::Shot || owner.extent < ShotCpuCommonSize) continue;
-        if (!constraintsSorted) {
-            constraintsSorted = true;
-            constraintAddresses.reserve(g_constructedConstraints.size());
-            for (const auto& entry : g_constructedConstraints) constraintAddresses.push_back(entry.first);
-            std::sort(constraintAddresses.begin(), constraintAddresses.end(), std::less<void*>{});
-        }
+        if (!constraintAddresses) constraintAddresses = &SortedConstraints();
         VisitShotUnitReferences(owner.object, [&](size_t field, void* object) {
             LeaseUnitDependency(manifest, object, owner.object, owner.id, field, uint32_t(1) << slot, true);
         });
-        VisitShotConstraintModels(owner, constraintAddresses, [&](void* model) {
+        VisitShotConstraintModels(owner, *constraintAddresses, [&](void* model) {
             LeaseUnitDependency(manifest, model, owner.object, owner.id, 0x78, uint32_t(1) << slot, true);
         });
         // The concrete tail is restored as bytes; retain every unit it names.
@@ -1888,9 +1942,11 @@ void LifetimeTrace_RestoreEffects(int32_t frame)
         unitGuard.manager == manifest.unitManager && manifest.thread == GetCurrentThreadId());
     const size_t count = manifest.effectCount();
     // Sized by the snapshot: the effect count is whatever the frame held.
-    std::vector<Identity*> identities(count);
-    std::vector<uint8_t> wasHeld(count);
-    std::vector<void*> releasedResources(count);
+    // Restore-fence scratch, reused across restores.
+    static std::vector<Identity*> identities, spaces, models;
+    static std::vector<uint8_t> wasHeld;
+    static std::vector<void*> releasedResources;
+    identities.assign(count, nullptr); wasHeld.assign(count, 0); releasedResources.assign(count, nullptr);
     size_t held = 0;
     const uint64_t tag = ++g_restoreTag;
     const uint32_t categories = Read<uint32_t>(unitGuard.manager, 0xC38);
@@ -1932,7 +1988,7 @@ void LifetimeTrace_RestoreEffects(int32_t frame)
     }
     // Attack spaces join the same transaction: tagged as captured, they regain
     // their saved scheduler position below, including one that died since.
-    std::vector<Identity*> spaces(manifest.attackSpaces.size());
+    spaces.assign(manifest.attackSpaces.size(), nullptr);
     for (size_t i = 0; i < spaces.size(); ++i) {
         const auto& saved = manifest.attackSpaces[i];
         Identity* current = Find(saved.object, false);
@@ -1943,7 +1999,7 @@ void LifetimeTrace_RestoreEffects(int32_t frame)
         spaces[i] = current;
         current->restoreTag = tag;
     }
-    std::vector<Identity*> models(manifest.models.size());
+    models.assign(manifest.models.size(), nullptr);
     for (size_t i = 0; i < models.size(); ++i) {
         const auto& saved = manifest.models[i];
         Identity* current = Find(saved.object, false);
@@ -1994,6 +2050,9 @@ void LifetimeTrace_RestoreEffects(int32_t frame)
     };
     const auto reconcile = [&](const std::vector<void*>& saved, std::vector<void*>& entries) {
         entries.clear();
+        // Unchanged list (every foreign-only category and group): each saved
+        // entry is still live and nothing else is, so the result is that list.
+        if (saved == g_membershipLive) { entries = saved; return; }
         g_membershipOrder = g_membershipLive;
         std::sort(g_membershipLive.begin(), g_membershipLive.end(), std::less<void*>{});
         for (void* unit : saved) {
