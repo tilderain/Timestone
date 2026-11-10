@@ -25,7 +25,7 @@ size_t ShotResourceField(ShotDomain domain)
         return 0x11B8 + (size_t(domain) - size_t(ShotDomain::Motion0)) * 8;
     if (domain >= ShotDomain::Command0 && domain <= ShotDomain::Command3)
         return 0x13E8 + (size_t(domain) - size_t(ShotDomain::Command0)) * 8;
-    std::abort();
+    LIFE_FAIL("unsupported ownership domain for a native resource slot", LIFE_VALUE(domain));
 }
 struct NativeAttackObject {
     void* object = nullptr;
@@ -166,7 +166,7 @@ std::shared_ptr<AttackCohort> ReadAttackCohort(const Identity& owner, unsigned s
 {
     void* root = Read<void*>(owner.object, 0x2058 + slot * 8);
     if (!root) return {};
-    if (Read<uint8_t>(root, 0xC0)) std::abort(); // Normal shot nodes borrow their callback owner.
+    LIFE_REQUIRE(!Read<uint8_t>(root, 0xC0)); // Normal shot nodes borrow their callback owner.
     auto& domains = g_shotDomains[owner.id];
     if (!domains.roots[slot] || domains.roots[slot]->object != root) domains.roots[slot] = AttackObject(root);
     g_attackOwners[root] = {owner.id, slot};
@@ -174,14 +174,14 @@ std::shared_ptr<AttackCohort> ReadAttackCohort(const Identity& owner, unsigned s
     cohort->root = domains.roots[slot];
     const size_t count = Read<uint32_t>(root, 0x20), capacity = Read<uint32_t>(root, 0x24);
     void* array = Read<void*>(root, 0x30);
-    if (count > capacity || capacity > 65536 || (capacity && !array)) std::abort();
+    LIFE_REQUIRE(count <= capacity && capacity <= 65536 && !(capacity && !array));
     cohort->array = previous && previous->array->data == array ? previous->array : std::make_shared<NativeAttackArray>();
     cohort->array->data = array;
     for (size_t i = 0; i < count; ++i) {
         void* wrapper = Read<void*>(array, i * 8);
         if (!wrapper) { cohort->entries.emplace_back(); continue; }
         // These are the native shot graph's ownership rules, not a type whitelist.
-        if (Read<uint8_t>(wrapper, 0x18) || Read<uint8_t>(wrapper, 0x50)) std::abort();
+        LIFE_REQUIRE(!Read<uint8_t>(wrapper, 0x18) && !Read<uint8_t>(wrapper, 0x50));
         void* primitive = Read<void*>(wrapper, 0x10);
         AttackEntry entry;
         if (previous && i < previous->entries.size()) {
@@ -204,15 +204,13 @@ std::shared_ptr<AttackCohort> ReadAttackCohort(const Identity& owner, unsigned s
 void ValidateAttackCohort(const AttackCohort& cohort)
 {
     void* root = cohort.root->object;
-    if (Read<void*>(root, 0x30) != cohort.array->data || Read<uint32_t>(root, 0x20) != cohort.entries.size())
-        std::abort();
+    LIFE_REQUIRE(Read<void*>(root, 0x30) == cohort.array->data && Read<uint32_t>(root, 0x20) == cohort.entries.size());
     for (size_t i = 0; i < cohort.entries.size(); ++i) {
         const auto& entry = cohort.entries[i];
         void* wrapper = Read<void*>(cohort.array->data, i * 8);
-        if (wrapper != (entry.wrapper ? entry.wrapper->object : nullptr)) std::abort();
-        if (wrapper && (Read<uint8_t>(wrapper, 0x18) || Read<uint8_t>(wrapper, 0x50))) std::abort();
-        if (wrapper && Read<void*>(wrapper, 0x10) != (entry.primitive ? entry.primitive->object : nullptr))
-            std::abort(); // An unsupported ownership-changing entry point bypassed COW.
+        LIFE_REQUIRE(wrapper == (entry.wrapper ? entry.wrapper->object : nullptr));
+        LIFE_REQUIRE(!(wrapper && (Read<uint8_t>(wrapper, 0x18) || Read<uint8_t>(wrapper, 0x50))));
+        LIFE_REQUIRE(!(wrapper && Read<void*>(wrapper, 0x10) != (entry.primitive ? entry.primitive->object : nullptr))); // An unsupported ownership-changing entry point bypassed COW.
     }
 }
 
@@ -224,7 +222,7 @@ int EnsureShotGeneration(const Identity& owner, ShotDomain domain)
     if (index >= 0 && domain >= ShotDomain::Attack0) {
         void* root = Read<void*>(owner.object, 0x2058 + (unsigned(domain) - unsigned(ShotDomain::Attack0)) * 8);
         auto& old = g_shotGenerations[index];
-        if (old.attack && old.attack->root->object != root) std::abort();
+        LIFE_REQUIRE(!(old.attack && old.attack->root->object != root));
         if (!old.attack && root) {
             old.attached = false;
             if (!old.snapshots) old.id = 0;
@@ -244,6 +242,7 @@ int EnsureShotGeneration(const Identity& owner, ShotDomain domain)
 // domains, including same-count joints, remain on the live owner unchanged.
 void RetireModelDomain(const Identity& owner, ShotDomain domain, bool force = false)
 {
+    LifetimeFailureScope failureScope("shot.domain.retire", owner.object, owner.id);
     auto at = g_shotDomains.find(owner.id);
     if (at == g_shotDomains.end()) return;
     int& current = at->second.current[size_t(domain)];
@@ -257,7 +256,9 @@ void RetireModelDomain(const Identity& owner, ShotDomain domain, bool force = fa
     VisitDomainFields(domain, [&](size_t field, size_t size) {
         const uint64_t expected = size == 4 ? Read<uint32_t>(generation.image, field) : Read<uint64_t>(generation.image, field);
         const uint64_t actual = size == 4 ? Read<uint32_t>(owner.object, field) : Read<uint64_t>(owner.object, field);
-        if (actual != expected) std::abort(); // A destructive ownership boundary was missed.
+        if (actual != expected) LIFE_FAIL("model ownership changed outside a retained mutation boundary",
+            LIFE_VALUE(domain), LIFE_VALUE(field), LIFE_VALUE(size), LIFE_VALUE(expected), LIFE_VALUE(actual),
+            LIFE_VALUE(generation.id), LIFE_VALUE(generation.snapshots));
         if (size == 4) Write(owner.object, field, UINT32_MAX);
         else Write(owner.object, field, uintptr_t(0));
     });
@@ -296,7 +297,7 @@ void TrackModelAcquisitions(void* owner)
                 empty &= size == 4 ? old == UINT32_MAX : old == 0;
             });
             if (!changed) continue;
-            if (!empty) std::abort(); // Nonempty replacement must retire at its destructive entry.
+            LIFE_REQUIRE(empty); // Nonempty replacement must retire at its destructive entry.
             generation.attached = false;
             if (!generation.snapshots) generation.id = 0;
             index = -1;
@@ -344,7 +345,7 @@ void __fastcall GenerationBlend(void* owner, uint32_t count)
     if (!g_collectingShotGeneration) if (auto* identity = ShotIdentity(owner)) {
         if (Read<void*>(owner, 0x100) && Read<uint32_t>(owner, 0x530) &&
             Read<uint32_t>(owner, 0x554) != std::min(count, uint32_t(16))) {
-            if (Read<uint32_t>(owner, 0x554) > 8 || count > 8) std::abort();
+            LIFE_REQUIRE(Read<uint32_t>(owner, 0x554) <= 8 && count <= 8);
             RetireModelDomain(*identity, ShotDomain::Work);
             RetireModelDomain(*identity, ShotDomain::Keys);
         }
@@ -374,7 +375,7 @@ struct GenerationResourceMove {
                 if (current < 0 && BorrowedShotResourceDomain(domain)) EnsureShotGeneration(*identity, domain);
                 if (current >= 0) {
                     auto& generation = g_shotGenerations[current];
-                    if (generation.resource != Read<uintptr_t>(owner, ShotResourceField(domain))) std::abort();
+                    LIFE_REQUIRE(generation.resource == Read<uintptr_t>(owner, ShotResourceField(domain)));
                     current = -1;
                     if (generation.snapshots || (generation.resource && BorrowedShotResourceDomain(domain))) {
                         generation.attached = false;
@@ -407,7 +408,7 @@ void __fastcall GenerationBaseModel(void* owner, void* resource)
 void __fastcall GenerationMotionList(void* owner, void* resource, uint32_t slot)
 {
     UnitGuard fence;
-    if (slot >= 16) std::abort();
+    LIFE_REQUIRE(slot < 16);
     GenerationResourceMove transfer(owner, ShotDomain(unsigned(ShotDomain::Motion0) + slot), true);
     oSetShotMotionList(owner, resource, slot);
 }
@@ -415,7 +416,7 @@ void __fastcall GenerationMotionList(void* owner, void* resource, uint32_t slot)
 void __fastcall GenerationCommandResource(void* owner, void* resource, uint32_t slot)
 {
     UnitGuard fence;
-    if (slot >= 4) std::abort();
+    LIFE_REQUIRE(slot < 4);
     GenerationResourceMove transfer(owner, ShotDomain(unsigned(ShotDomain::Command0) + slot), true);
     oSetShotCommandResource(owner, resource, slot);
 }
@@ -427,7 +428,7 @@ void* AllocateAttackArray(size_t capacity)
     using Allocate = void* (__fastcall*)(void*, size_t, uint32_t);
     void* allocator = ((Get)_addr(0x14045D4F0))((void*)_addr(0x140E16870));
     void* array = ((Allocate)Read<void*>(Read<void*>(allocator, 0), 0x40))(allocator, capacity * 8, 0x10);
-    if (!array) std::abort();
+    LIFE_REQUIRE(array);
     std::memset(array, 0, capacity * 8);
     return array;
 }
@@ -451,11 +452,11 @@ void ReplaceAttackArray(const Identity& owner, unsigned slot, uint32_t capacity,
     const auto domain = ShotDomain(unsigned(ShotDomain::Attack0) + slot);
     const int oldIndex = EnsureShotGeneration(owner, domain);
     auto old = g_shotGenerations[oldIndex].attack;
-    if (!old) std::abort();
+    LIFE_REQUIRE(old);
     ValidateAttackCohort(*old);
     void* root = old->root->object;
     const size_t count = Read<uint32_t>(root, 0x20);
-    if (capacity < count) std::abort();
+    LIFE_REQUIRE(capacity >= count);
     void* array = AllocateAttackArray(capacity);
     if (count) std::memcpy(array, Read<void*>(root, 0x30), count * 8);
     old->array->nativeOwner = false;
@@ -519,7 +520,7 @@ uint32_t __fastcall GenerationAddChild(void* root, void* geometry, uint8_t clone
     unsigned slot = 0;
     auto* owner = g_collectingShotGeneration ? nullptr : ManagedAttack(root, slot);
     if (!owner) return oGenerationAddChild(root, geometry, clone);
-    if (clone) std::abort(); // The normal rShot graph borrows its explicitly owned primitives.
+    LIFE_REQUIRE(!clone); // The normal rShot graph borrows its explicitly owned primitives.
     UnitGuard fence;
     const auto domain = ShotDomain(unsigned(ShotDomain::Attack0) + slot);
     const int index = EnsureShotGeneration(*owner, domain);
@@ -641,6 +642,7 @@ bool HasRetiredShotGenerations(uint64_t owner)
 
 void ReleaseTerminalShotReferences(uint64_t owner)
 {
+    LifetimeFailureScope failureScope("shot.references.terminal", nullptr, owner);
     // Called after the most-derived native deleting dispatch returns. Concrete
     // and base cleanup can read old command/motion borrowers until then. The
     // resource references do not require the now-disposed owner address.
@@ -650,7 +652,9 @@ void ReleaseTerminalShotReferences(uint64_t owner)
         if (!generation.id || generation.ownerId != owner || !BorrowedShotResourceDomain(generation.domain)) {
             ReleaseSRWLockExclusive(&g_lock); continue;
         }
-        if (generation.attached || generation.snapshots) std::abort();
+        if (generation.attached || generation.snapshots) LIFE_FAIL("terminal shot reference is still attached or leased",
+            LIFE_VALUE(owner), LIFE_VALUE(generation.id), LIFE_VALUE(generation.domain),
+            LIFE_VALUE(generation.resource), LIFE_VALUE(generation.attached), LIFE_VALUE(generation.snapshots));
         void* resource = (void*)generation.resource;
         generation.id = 0;
         ReleaseSRWLockExclusive(&g_lock);
@@ -662,6 +666,7 @@ void ReleaseTerminalShotReferences(uint64_t owner)
 }
 void ForgetCurrentShotGenerations(uint64_t owner, void* address)
 {
+    LifetimeFailureScope failureScope("shot.generations.forget", address, owner);
     // Called only after retired generations drain, before intact native teardown.
     // Current storage remains native-owned, so forgetting metadata frees no leaves.
     std::vector<std::shared_ptr<AttackCohort>> cohorts;
@@ -672,7 +677,9 @@ void ForgetCurrentShotGenerations(uint64_t owner, void* address)
     if (at != g_shotDomains.end()) {
         for (int index : at->second.current) if (index >= 0) {
             auto& generation = g_shotGenerations[index];
-            if (generation.snapshots) std::abort();
+            if (generation.snapshots) LIFE_FAIL("native shot teardown would forget a snapshot-leased generation",
+                LIFE_VALUE(owner), LIFE_VALUE(address), LIFE_VALUE(generation.id), LIFE_VALUE(generation.domain),
+                LIFE_VALUE(generation.snapshots), LIFE_VALUE(generation.attached));
             generation.id = 0;
             cohorts.push_back(std::move(generation.attack));
         }
@@ -694,23 +701,34 @@ void AppendGenerationSpan(ShotState& saved, const char* name, void* address, siz
                           void* cell = nullptr, uint16_t group = UINT16_MAX, uint32_t element = UINT32_MAX)
 {
     if (!address || !size) return;
-    if (size > UINT32_MAX || saved.payload.size() > UINT32_MAX - size) std::abort();
+    LIFE_REQUIRE(size <= UINT32_MAX && saved.payload.size() <= UINT32_MAX - size);
     saved.spans.push_back({name, {address, uint32_t(size), uint32_t(saved.payload.size())}, uint64_t(cell), 0, group, element});
     const auto* bytes = static_cast<const uint8_t*>(address);
     saved.payload.insert(saved.payload.end(), bytes, bytes + size);
 }
-void CaptureShotGenerations(const Identity& owner, uint32_t bit, ShotState& saved)
+// Leases every ownership domain for this snapshot. Collision span bytes are
+// copied only with LifetimeShotPayload::Capture; validation runs either way.
+void CaptureShotGenerations(const Identity& owner, uint32_t bit, ShotState& saved,
+                            LifetimeShotPayload payload)
 {
+    LifetimeFailureScope failureScope("shot.generations.capture", owner.object, owner.id);
     for (size_t domain = 0; domain < ShotDomainCount; ++domain) {
         const int index = EnsureShotGeneration(owner, ShotDomain(domain));
         auto& generation = g_shotGenerations[index];
         if (domain <= size_t(ShotDomain::Keys)) VisitDomainFields(ShotDomain(domain), [&](size_t field, size_t size) {
             const uint64_t expected = size == 4 ? Read<uint32_t>(generation.image, field) : Read<uint64_t>(generation.image, field);
             const uint64_t actual = size == 4 ? Read<uint32_t>(owner.object, field) : Read<uint64_t>(owner.object, field);
-            if (expected != actual) std::abort();
+            if (expected != actual) LIFE_FAIL("snapshot ownership fields no longer match the retained generation",
+                LIFE_VALUE(domain), LIFE_VALUE(field), LIFE_VALUE(expected), LIFE_VALUE(actual),
+                LIFE_VALUE(generation.id), LIFE_VALUE(generation.snapshots), LIFE_VALUE(bit));
         });
-        if (ShotResourceDomain(ShotDomain(domain)))
-            if (generation.resource != Read<uintptr_t>(owner.object, ShotResourceField(ShotDomain(domain)))) std::abort();
+        if (ShotResourceDomain(ShotDomain(domain))) {
+            const size_t field = ShotResourceField(ShotDomain(domain));
+            const uintptr_t actual = Read<uintptr_t>(owner.object, field);
+            if (generation.resource != actual) LIFE_FAIL("snapshot resource binding no longer matches its generation",
+                LIFE_VALUE(domain), LIFE_VALUE(field), LIFE_VALUE(generation.resource), LIFE_VALUE(actual),
+                LIFE_VALUE(generation.id), LIFE_VALUE(generation.snapshots), LIFE_VALUE(bit));
+        }
         if (domain >= size_t(ShotDomain::Attack0) && generation.attack) {
             // Appends can create children without growing the array. Refresh only
             // an unleased live cohort; leased membership changes use the add hook.
@@ -720,17 +738,20 @@ void CaptureShotGenerations(const Identity& owner, uint32_t bit, ShotState& save
             ValidateAttackCohort(*cohort);
             void* root = cohort->root->object;
             const auto slot = uint16_t(domain - size_t(ShotDomain::Attack0));
-            AppendGenerationSpan(saved, "collision.root", root, 0xE0, nullptr, slot);
-            AppendGenerationSpan(saved, "collision.entries", cohort->array->data,
-                size_t(Read<uint32_t>(root, 0x24)) * 8, static_cast<uint8_t*>(root) + 0x30, slot);
+            const bool copy = payload == LifetimeShotPayload::Capture;
+            if (copy) {
+                AppendGenerationSpan(saved, "collision.root", root, 0xE0, nullptr, slot);
+                AppendGenerationSpan(saved, "collision.entries", cohort->array->data,
+                    size_t(Read<uint32_t>(root, 0x24)) * 8, static_cast<uint8_t*>(root) + 0x30, slot);
+            }
             for (size_t element = 0; element < cohort->entries.size(); ++element) {
                 const auto& entry = cohort->entries[element];
-                if (entry.wrapper) AppendGenerationSpan(saved, "collision.wrapper", entry.wrapper->object,
+                if (copy && entry.wrapper) AppendGenerationSpan(saved, "collision.wrapper", entry.wrapper->object,
                     0x60, nullptr, slot, uint32_t(element));
                 if (entry.primitive) {
                     const uint32_t type = Read<uint32_t>(entry.primitive->object, 8);
-                    if (type != 5 && type != 6) std::abort();
-                    AppendGenerationSpan(saved, "collision.primitive", entry.primitive->object,
+                    LIFE_REQUIRE(type == 5 || type == 6);
+                    if (copy) AppendGenerationSpan(saved, "collision.primitive", entry.primitive->object,
                         type == 5 ? 0x70 : 0xB0, nullptr, slot, uint32_t(element));
                 }
             }
@@ -746,27 +767,28 @@ void CaptureShotGenerations(const Identity& owner, uint32_t bit, ShotState& save
 // Callers must not resume simulation after this stage alone.
 [[maybe_unused]] void StageShotGenerationStorage(const Identity& owner, const ShotState& saved, uint32_t bit)
 {
+    LifetimeFailureScope failureScope("shot.storage.stage", owner.object, owner.id);
     UnitGuard fence;
-    if (saved.id != owner.id || !(owner.snapshots & bit) || saved.generations.size() != ShotDomainCount) std::abort();
+    LIFE_REQUIRE(saved.payloadState == LifetimeShotPayload::Capture);
+    LIFE_REQUIRE(saved.id == owner.id && (owner.snapshots & bit) && saved.generations.size() == ShotDomainCount);
     bool domains[ShotDomainCount]{};
     for (const auto& ref : saved.generations) {
-        if (ref.index >= g_shotGenerations.size()) std::abort();
+        LIFE_REQUIRE(ref.index < g_shotGenerations.size());
         const auto& generation = g_shotGenerations[ref.index];
         const size_t domain = size_t(generation.domain);
-        if (generation.id != ref.id || generation.ownerId != owner.id || generation.owner != owner.object ||
-            !(generation.snapshots & bit) || domain >= ShotDomainCount || domains[domain]) std::abort();
+        LIFE_REQUIRE(generation.id == ref.id && generation.ownerId == owner.id && generation.owner == owner.object &&
+            (generation.snapshots & bit) && domain < ShotDomainCount && !domains[domain]);
         domains[domain] = true;
     }
     bool bodyFound = false;
     for (const auto& span : saved.spans) {
-        if (span.memory.offset > saved.payload.size() || span.memory.size > saved.payload.size() - span.memory.offset)
-            std::abort();
+        LIFE_REQUIRE(span.memory.offset <= saved.payload.size() && span.memory.size <= saved.payload.size() - span.memory.offset);
         if (!std::strcmp(span.name, "body")) {
-            if (bodyFound || span.memory.address != owner.object || span.memory.size < 0x2140) std::abort();
+            LIFE_REQUIRE(!bodyFound && span.memory.address == owner.object && span.memory.size >= 0x2140);
             bodyFound = true;
         }
     }
-    if (!bodyFound) std::abort();
+    LIFE_REQUIRE(bodyFound);
     for (const auto& ref : saved.generations) {
         const auto domain = g_shotGenerations[ref.index].domain;
         int current = g_shotDomains[owner.id].current[size_t(domain)];
@@ -812,8 +834,7 @@ void CaptureShotGenerations(const Identity& owner, uint32_t bit, ShotState& save
                 Write(owner.object, field, Read<uint32_t>(body, field));
             Write(owner.object, 0x540, Read<uintptr_t>(body, 0x540));
         } else {
-            if (span.memory.offset > saved.payload.size() || span.memory.size > saved.payload.size() - span.memory.offset)
-                std::abort();
+            LIFE_REQUIRE(span.memory.offset <= saved.payload.size() && span.memory.size <= saved.payload.size() - span.memory.offset);
             std::memcpy(span.memory.address, saved.payload.data() + span.memory.offset, span.memory.size);
         }
     }

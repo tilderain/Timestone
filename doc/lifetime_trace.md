@@ -147,7 +147,8 @@ is an ownership invariant failure, not permission to destroy retained state.
 
 This implements **terminal shot/model lifetime retention**, not shot-state
 restoration. Concrete shot body and audited joint/depth/motion/interpolation/key
-bytes are now captured into the snapshot-owned history. Completed-construction
+bytes can be captured into the snapshot-owned history (see Shot Payload Capture
+below). Completed-construction
 DTI/size is cached at registration; the same typed span walker serves historical
 capture and dump-time observations. Historical export never dereferences their
 saved native addresses, including after an active buffer replacement or native GC.
@@ -160,6 +161,33 @@ membership/ID rewind and the complete world restore transaction still require
 integration. Terminal retention alone does not
 claim those mutations are safe to rewind. It also does not establish complete
 logical-capacity/dependency closure for every concrete shot's derived teardown.
+
+### Shot Payload Capture
+
+`LifetimeTrace_SaveSnapshot` takes `LifetimeShotPayload::{Omit, Capture}`.
+The payload is the whole-shot bytes: body, model joint/depth/interpolation/motion
+work/keyframe spans, collision root/entry/wrapper/primitive spans, and constraint
+node images. Its only readers are the unpublished saved-shot stages and historical
+snapdump, so `Rollback_SaveSnapshot` passes `Capture` exactly when
+`SnapDump_CaptureEnabled()` (`EnableSnapDumpWrites`) is on for the session, not
+only once a dump is requested. Every other save omits it.
+
+Omission never changes retention. Identity leases, every ownership generation and
+its slot mask, attack-cohort/COW bookkeeping, borrowed-unit and constraint-model
+dependency leases, the shot-world metadata used by future-shot withdrawal, and all
+effect state and payloads are captured in both modes.
+
+Omitted is recorded explicitly, not as empty history: `LifetimeSnapshot::shotPayload`
+and each `ShotState::payloadState` say `Omit`, constraints are marked incomplete,
+and dump export emits `diagnostic.lifetime.shot_payload_omitted` (count of shots)
+without shot span or constraint records. Each staging stage requires `Capture`
+first and fails with `requirement failed: ... == LifetimeShotPayload::Capture`.
+Wiring saved-shot restore into production therefore requires saving with
+`Capture`. Production snapdumps are unchanged, since writes require capture.
+
+Regressions save one fixture in both modes, run withdrawal, delayed shot/model
+destruction, effect restore and the shared graph transaction under both, and
+check that all five stages reject an omitted payload with that reason.
 
 ### Future-Shot Withdrawal
 
@@ -193,6 +221,35 @@ path, **not** saved-shot body/dependency resurrection. `StageShotGenerationStora
 remains unwired; full shot rewind and unsupported effect-graph closure are still
 unfinished. There is no claim of live gameplay validation for this patch.
 
+### Fatal Invariant Diagnostics
+
+Lifetime invariant failures now produce an immediate `lifetime_failure.log` beside
+the ASI before calling abort. The record includes source file/line/function, the
+failed requirement or a specific reason, process/thread/tick, current
+frame/resimulation state, target snapshot frame, operation phase, object/birth ID
+and native caller. Ownership checks also include existing local values such as
+field offset, expected/actual pointer, generation ID, lease mask or hook status.
+
+Plain guards use `LIFE_REQUIRE(condition)`, which evaluates the condition once and
+reports `requirement failed: <condition>` from the stringified source, so the
+message cannot drift from the check. `LIFE_FAIL(reason, LIFE_VALUE(...)...)` is
+kept where a human-readable reason or expected/actual dump adds information. Both
+use the same sink. The conversion found no pasted predicate that had drifted.
+
+The independent file uses append/write-through and `FlushFileBuffers` before
+termination. Normal HookLog output is attempted with its nonblocking lock only.
+The failure path does not acquire the recorder lock, query object DTIs, inspect
+arbitrary pointees, resume simulation or run rollback teardown. The SIGABRT bridge
+then attempts the full crash report separately. Startup advertises
+`lifetime_failure_log=1`; this instrumentation does not imply live shot rewind.
+
+The regression checks failure output while the recorder lock is already held,
+including a real expected/actual ownership mismatch. Windows I/O mocks verify
+partial-write handling and that independent flush/close precedes normal logging,
+even when that logger is busy. Source checks prohibit bare aborts outside the
+single reporting sink. Fifteen focused tests, `make -j8` and whitespace checks
+passed for this diagnostic change.
+
 ### Saved-Shot Restore Stages
 
 `lifetime_shot_cpu.inl` now supplies the common typed CPU-field stage. Its native
@@ -201,6 +258,34 @@ together with pose/position/life/attack clock/phase. It preserves live materials
 sound references, topology and unreviewed concrete fields. The stage returns
 `ReviewedSubset` and remains unwired pending reference/lifecycle publication;
 see `shot_cpu_restore.md` for exact ranges, native evidence and exclusions.
+
+The common kernel also directly restores audited borrowed unit references,
+callback slots, complete target/count/time history payloads and command bindings
+and cursors. Capture leases the referenced unit identities using the existing
+dependency mechanism; staging rejects expired/reused identities before writing.
+There is no pointer remapping, snapshot addRef or liveness-based omission.
+See `shot_reference_restore.md` for assignment/destruction evidence and the
+distinction between retaining callback storage and restoring its simulation state.
+
+Motion staging now restores retained sampler bindings/cursors, sequence history
+and key descriptors alongside the already-captured external work/key bytes.
+`StageShotExecutionState` supplies tested ordered sUnit membership and lifecycle
+publication, including resurrection and re-quarantine. Shot-manager staging owns
+historical ID/team restoration as well as list/occupancy state. These stages are
+still unpublished pending concrete suffix, constraint and dependent-state closure.
+The verified conditional render-worker wait is active at restore entry; see
+`shot_execution_restore.md` for native call ordering and what that wait does not
+guarantee. Startup explicitly reports `saved_shot_restore=0`.
+
+Common constraint initialization/destruction provenance now covers the observed
+base-ctor/dtor bypasses, and snapshots capture complete discovered neighboring
+chains. The tested graph stage restores exact reciprocal links, joint heads and
+saved dependency caches rather than relinking or evaluating. Unknown interfaces
+are reported without dereferencing them and invalidate the entire graph restore.
+Common constraint execution state now joins the same scheduler publication loop,
+including logical withdrawal of proven future inline children. Foreign-model pose
+retention and derived constraint payloads remain unfinished. These stages still
+require enclosing-transaction integration. See `shot_constraint_restore.md`.
 
 Snapshot capture now also retains the complete shot ID table, manager controls,
 ordered identities in all ten global shot lists, and pending `{unit, category}`

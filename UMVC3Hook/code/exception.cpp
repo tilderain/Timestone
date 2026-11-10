@@ -11,6 +11,7 @@
 #include "umvc3.h"
 
 #include <cstdint>
+#include <csignal>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -35,6 +36,9 @@ namespace {
 PVOID g_exceptionHandler = nullptr;
 LPTOP_LEVEL_EXCEPTION_FILTER g_previousUnhandledExceptionFilter = nullptr;
 bool g_unhandledExceptionFilterInstalled = false;
+using SignalHandler = void (*)(int);
+SignalHandler g_previousAbortHandler = SIG_DFL;
+bool g_abortHandlerInstalled = false;
 volatile LONG g_crashInFlight = 0;
 
 constexpr uintptr_t kPreferredImageBase = 0x140000000;
@@ -758,7 +762,7 @@ void WriteUnwindBacktrace(FILE* file, const CONTEXT* exceptionContext)
 #endif
 }
 
-LONG HandleException(PEXCEPTION_POINTERS info, bool catastrophicOnly)
+LONG HandleException(PEXCEPTION_POINTERS info, bool catastrophicOnly, const char* reason = nullptr)
 {
     if (!info || !info->ExceptionRecord || !info->ContextRecord)
         return EXCEPTION_CONTINUE_SEARCH;
@@ -796,9 +800,11 @@ LONG HandleException(PEXCEPTION_POINTERS info, bool catastrophicOnly)
         std::fprintf(preamble,
             "\n=== UMVC3Hook crash capture started ===\n"
             "TIMESTONE_VERSION=%s\n"
+            "reason=%s\n"
             "commit=%s%s code=0x%08lX exception=%p thread=%lu "
             "rip=0x%016llX rsp=0x%016llX\n",
             UMVC3HOOK_VERSION,
+            reason ? reason : "Windows exception",
             UMVC3HOOK_GIT_COMMIT, UMVC3HOOK_GIT_DIRTY ? " (dirty)" : "",
             static_cast<unsigned long>(code),
             info->ExceptionRecord->ExceptionAddress,
@@ -819,10 +825,12 @@ LONG HandleException(PEXCEPTION_POINTERS info, bool catastrophicOnly)
             "\n=== UMVC3Hook crash %04u-%02u-%02u %02u:%02u:%02u.%03u ===\n"
             "TIMESTONE_VERSION=%s\n"
             "commit=%s%s\n"
+            "reason=%s\n"
             "code=0x%08lX exception=%p thread=%lu\n",
             time.wYear, time.wMonth, time.wDay, time.wHour, time.wMinute,
             time.wSecond, time.wMilliseconds, UMVC3HOOK_VERSION, UMVC3HOOK_GIT_COMMIT,
             UMVC3HOOK_GIT_DIRTY ? " (dirty)" : "",
+            reason ? reason : "Windows exception",
             static_cast<unsigned long>(code),
             exception->ExceptionAddress, static_cast<unsigned long>(GetCurrentThreadId()));
         std::fprintf(file,
@@ -891,12 +899,30 @@ LONG HandleException(PEXCEPTION_POINTERS info, bool catastrophicOnly)
             "The game just freaking crashed! Crash log available at %s", crashLogPath);
         MessageBoxA(nullptr, message, "UMVC3Hook Crash",
                     MB_OK | MB_ICONERROR | MB_SYSTEMMODAL);
-    } else {
+    } else if (!reason) {
+        // An abort may originate while HookLog owns its lock. The report has
+        // already been written and appended using the nonblocking path above.
         HookLog("UMVC3Hook: automated crash recorded at %s; message box suppressed\n",
                 crashLogPath);
     }
 
     return EXCEPTION_CONTINUE_SEARCH;
+}
+
+void AbortSignalHandler(int signal)
+{
+    CONTEXT context{};
+    RtlCaptureContext(&context);
+    EXCEPTION_RECORD exception{};
+    exception.ExceptionCode = 0x40000015; // STATUS_FATAL_APP_EXIT
+    exception.ExceptionFlags = EXCEPTION_NONCONTINUABLE;
+    exception.ExceptionAddress = reinterpret_cast<void*>(context.Rip);
+    exception.NumberParameters = 1;
+    exception.ExceptionInformation[0] = static_cast<ULONG_PTR>(signal);
+    EXCEPTION_POINTERS info{&exception, &context};
+    HandleException(&info, false, "SIGABRT (std::abort/CRT termination)");
+    // Returning to abort still terminates. Do not run game/rollback teardown:
+    // the failed invariant can hold locks or leave an incomplete transaction.
 }
 
 LONG CALLBACK VectoredExceptionHandler(PEXCEPTION_POINTERS info)
@@ -917,7 +943,7 @@ LONG WINAPI UnhandledExceptionHandler(PEXCEPTION_POINTERS info)
 
 void Exception_InstallHandler()
 {
-    if (g_exceptionHandler || g_unhandledExceptionFilterInstalled)
+    if (g_exceptionHandler || g_unhandledExceptionFilterInstalled || g_abortHandlerInstalled)
         return;
 
     g_crashInFlight = 0;
@@ -925,12 +951,19 @@ void Exception_InstallHandler()
     g_previousUnhandledExceptionFilter =
         SetUnhandledExceptionFilter(UnhandledExceptionHandler);
     g_unhandledExceptionFilterInstalled = true;
-    HookLog("UMVC3Hook: crash handlers vectored=%s unhandled=installed\n",
-        g_exceptionHandler ? "installed" : "FAILED");
+    g_previousAbortHandler = std::signal(SIGABRT, AbortSignalHandler);
+    g_abortHandlerInstalled = g_previousAbortHandler != SIG_ERR;
+    HookLog("UMVC3Hook: crash handlers vectored=%s unhandled=installed abort=%s\n",
+        g_exceptionHandler ? "installed" : "FAILED", g_abortHandlerInstalled ? "installed" : "FAILED");
 }
 
 void Exception_RemoveHandler()
 {
+    if (g_abortHandlerInstalled) {
+        std::signal(SIGABRT, g_previousAbortHandler);
+        g_previousAbortHandler = SIG_DFL;
+        g_abortHandlerInstalled = false;
+    }
     if (g_exceptionHandler) {
         RemoveVectoredExceptionHandler(g_exceptionHandler);
         g_exceptionHandler = nullptr;
