@@ -167,6 +167,7 @@ void reset() {
     g_constructedConstraints.clear();
     for (auto& bucket : g_constraintBuckets) bucket = 0;
     g_attackOwnerCount = 0; g_armedResourceTransfers = 0;
+    g_modelBirths.clear();
     g_nextConstraintConstruction = 0;
     g_nextSnapshotCapture = 0;
     g_clearedSlots = 0;
@@ -224,7 +225,7 @@ void checkOriginal(void* p) { assert(!locked && p == object); ++originalCalls; }
 int main() {
     reset();
     LifetimeTrace_Install();
-    assert(creates == 34 && queues == 34 && g_recording);
+    assert(creates == 36 && queues == 36 && g_recording);
     assert(g_lifetimeEnabled && mockHooks.size() == mockQueuedTargets.size());
     for (const auto& hook : mockHooks)
         assert(std::count(mockQueuedTargets.begin(), mockQueuedTargets.end(), hook.first) == 1);
@@ -232,7 +233,7 @@ int main() {
     assert(std::count(mockQueuedTargets.begin(), mockQueuedTargets.end(), (void*)_addr(0x1409BFE90)) == 1);
     reset(); failCreate = 3; g_recording = false;
     LifetimeTrace_Install();
-    assert(creates == 34 && queues == 0 && !g_recording);
+    assert(creates == 36 && queues == 0 && !g_recording);
     reset(); failQueue = 3;
     LifetimeTrace_Install();
     assert(!g_recording);
@@ -927,7 +928,13 @@ int main() {
     Write(model, 0x10, uint32_t(0x3F8)); line({}); Write(model, 0x18, (void*)nullptr);
     Find(model, false)->occupancy = Occupancy::Quarantined; ++g_quarantined;
     auto* later = makeModel(); Write(shot, 0x1F78, static_cast<void*>(later)); line({later});
+    // Made before the frame (or before the hook): it may be an effect's or a
+    // character's model that this shot only came to name afterwards. Left alone.
+    g_modelBirths[later] = TestManifest(0).birthWatermark;
+    LifetimeTrace_RetireFutureShots(0);
     assert(!Find(later, false));
+    oConstructModel = +[](void* object) { return object; };
+    assert(ConstructModel(later) == later && g_modelBirths[later] > TestManifest(0).birthWatermark);
     LifetimeTrace_RetireFutureShots(0);
     assert(Find(later, false) && Find(later, false)->abandonedModel && !Find(model, false)->abandonedModel);
     LifetimeTrace_RestoreEffects(0);
@@ -951,6 +958,8 @@ int main() {
     LifetimeTrace_ClearSnapshots();
     assert(deletes == 1 && !g_quarantined && Find(model, false)->occupancy == Occupancy::Live);
     ForgetCurrentShotGenerations(owner->id, shot);
+    oDestroyModel = +[](void*) {};
+    DestroyModel(later); assert(!g_modelBirths.count(later));
     std::free(model); std::free(later);
 }
 """)
