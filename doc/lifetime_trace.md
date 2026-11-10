@@ -364,6 +364,38 @@ rewound. The regression exercises rewind, replay, resurrection of a shot that
 died after the snapshot, a later inline constraint and pre-write rejection. It is
 a native-mock test, not live-game validation.
 
+### Shot-Driven Models
+
+2026-11-10. A shot can drive a separate `uGameEffectModel` unit (DTI
+`0x140D46ED0`): Frank West's cart is `uShotVulcanWeaponCart` plus a cart model at
+shot `+1F78` / `+2288`. The model is a full actor in scheduler lane 13. Its
+animation gates the shot (`updateState @ 0x14017A440` leaves phase 0 only while the
+model pointer is non-null) and `uGameEffectModel::moveAfter @ 0x14013C510` retires
+it when that animation ends. A lease kept it allocated but not rewound, so every
+replay advanced it again; it ended early, `uShotVulcanWeaponCart::move` cleared the
+dead pointer, and the cart stayed in phase 0 on the peer that had rolled back.
+
+`lifetime_shot_models.inl` rewinds these models inside the effect transaction:
+
+- Capture: every live model named by a shot's typed references or tail. Body
+  image, joint / depth / interpolation / motion-work / keyframe buffers, control
+  words, delta time and scheduler groups.
+- Restore: the actor prefix through `RestoreActorModelFields` (the same reviewed
+  ranges the shot kernel uses below `+1450`), buffer contents, and the lifecycle
+  words `+1CC0..+1D00`. Scheduler membership and revival of a model that retired
+  since the frame follow the attack-space path.
+- A model whose buffer pointers or counts changed since the snapshot keeps its
+  animation live; only lifecycle, control and membership rewind
+  (`model_restored c=0`).
+- A restored unit link is kept only if the snapshot retained its target.
+- `MarkAbandonedModels` runs at the start of future-shot withdrawal: a model that
+  a current shot names through a typed reference and that the restored frame did
+  not capture is withdrawn with the abandoned branch.
+
+Not covered: models named only by concrete tail words that have never been in a
+snapshot (the cart's twelve debris links at `+2290`), and
+`uGameEffectModel` bytes `+1450..+1CC0`, which stay live.
+
 ### Live Presentation Policy
 
 Shot storage staging leaves material sources/tables, material objects and their

@@ -18,16 +18,10 @@ template<class Visitor> void VisitShotUnitReferences(const void* body, Visitor v
         visit(record + 8, Read<void*>(body, record + 8));
 }
 
-ShotCpuRestoreStatus RestoreShotCpuFields(void* destination, size_t destinationSize,
-    const uint8_t* saved, size_t savedSize)
+// The uActorGameModel prefix every model-driven unit shares (uShot and
+// uGameEffectModel both end it at +1450). Same contract as the shot kernel below.
+void RestoreActorModelFields(uint8_t* live, const uint8_t* saved)
 {
-    if (!destination || !saved || destinationSize < ShotCpuCommonSize || savedSize < ShotCpuCommonSize)
-        return ShotCpuRestoreStatus::InvalidBuffer;
-    auto* live = static_cast<uint8_t*>(destination);
-    if (live == saved) return ShotCpuRestoreStatus::ReviewedSubset;
-
-    // Caller must establish compatible retained resources/pose storage and repair
-    // references/topology before publishing execution. No native calls run here.
     static constexpr struct { size_t offset, size; } ranges[] = {
         {0x08, 0x08},     // Rno/unit parameter; lifecycle/category/draw mode stay live.
         {0x28, 0x04},     // Unit delta; no list links or group mask.
@@ -43,20 +37,6 @@ ShotCpuRestoreStatus RestoreShotCpuFields(void* destination, size_t destinationS
         {0x13C0, 0x01},   // Command key-change latch.
         {0x13C4, 0x10},   // Compare/jump registers and return flags; no alignment gap.
         {0x13D8, 0x10},   // Borrowed unit return value and command loop state.
-        {0x1480, 0x0C},   // cAtkCtrl borrowed owner and reset-state dword.
-        {0x1490, 0x0C},   // Borrowed rAtkInfo from retained rShot and attack index.
-        {0x14A0, 0x20},   // Combo count, attack clocks, animation/pending attack IDs.
-        {0x1DD0, 0x60},   // Inline cArm orientation/offset/position/error vectors.
-        {0x1E30, 0x120},  // cArm self/parents, joint selectors and four shot matrices.
-        {0x1F58, 0x10},   // Timer/delay/division start/active-watch flags; not ID/team/resource.
-        {0x1F70, 0x70},   // Fourteen borrowed callbacks, including self slot 0.
-        {0x1FE4, 0x1C},   // Common gameplay/contact/end flags; borrowed units start at +2000.
-        {0x2000, 0x38},   // Seven borrowed units, including the actor-owner mirror.
-        {0x2038, 0x20},   // Division/durability/hit clock/priority; not collision-root pointers.
-        {0x2078, 0x40},   // Life/vanish and movement/homing parameters/accumulators.
-        {0x20C0, 0x0C},   // Contact-displacement XYZ; do not infer the fourth word.
-        {0x20D0, 0x04},   // Contact-displacement scale; sound cRefs begin at +20D8.
-        {0x2118, 0x1B},   // Animation watch controls, phase/dispatch word and three child latches.
     };
     for (const auto& range : ranges) std::memcpy(live + range.offset, saved + range.offset, range.size);
 
@@ -76,6 +56,36 @@ ShotCpuRestoreStatus RestoreShotCpuFields(void* destination, size_t destinationS
         std::memcpy(live + base + 0x168, saved + base + 0x168, 4);
         std::memcpy(live + base + 0x170, saved + base + 0x170, 8);
     }
+}
+
+ShotCpuRestoreStatus RestoreShotCpuFields(void* destination, size_t destinationSize,
+    const uint8_t* saved, size_t savedSize)
+{
+    if (!destination || !saved || destinationSize < ShotCpuCommonSize || savedSize < ShotCpuCommonSize)
+        return ShotCpuRestoreStatus::InvalidBuffer;
+    auto* live = static_cast<uint8_t*>(destination);
+    if (live == saved) return ShotCpuRestoreStatus::ReviewedSubset;
+
+    // Caller must establish compatible retained resources/pose storage and repair
+    // references/topology before publishing execution. No native calls run here.
+    RestoreActorModelFields(live, saved);
+    static constexpr struct { size_t offset, size; } ranges[] = {
+        {0x1480, 0x0C},   // cAtkCtrl borrowed owner and reset-state dword.
+        {0x1490, 0x0C},   // Borrowed rAtkInfo from retained rShot and attack index.
+        {0x14A0, 0x20},   // Combo count, attack clocks, animation/pending attack IDs.
+        {0x1DD0, 0x60},   // Inline cArm orientation/offset/position/error vectors.
+        {0x1E30, 0x120},  // cArm self/parents, joint selectors and four shot matrices.
+        {0x1F58, 0x10},   // Timer/delay/division start/active-watch flags; not ID/team/resource.
+        {0x1F70, 0x70},   // Fourteen borrowed callbacks, including self slot 0.
+        {0x1FE4, 0x1C},   // Common gameplay/contact/end flags; borrowed units start at +2000.
+        {0x2000, 0x38},   // Seven borrowed units, including the actor-owner mirror.
+        {0x2038, 0x20},   // Division/durability/hit clock/priority; not collision-root pointers.
+        {0x2078, 0x40},   // Life/vanish and movement/homing parameters/accumulators.
+        {0x20C0, 0x0C},   // Contact-displacement XYZ; do not infer the fourth word.
+        {0x20D0, 0x04},   // Contact-displacement scale; sound cRefs begin at +20D8.
+        {0x2118, 0x1B},   // Animation watch controls, phase/dispatch word and three child latches.
+    };
+    for (const auto& range : ranges) std::memcpy(live + range.offset, saved + range.offset, range.size);
 
     // cAtkCtrl::update emits attack sound behind bit 40. uShot's initial sound
     // creation/stop uses bit 10000000 and the four live sound cRefs. Do not rewind

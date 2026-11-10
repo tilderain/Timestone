@@ -628,6 +628,8 @@ void LifetimeTrace_RetireFutureShots(int32_t frame)
     if constexpr (!LIFETIME_TRACE_ENABLED || !EMPTY_EFFECT_QUARANTINE_ENABLED || !EFFECT_RESTORE_ENABLED) return;
     if (!g_lifetimeEnabled.load(std::memory_order_relaxed)) return;
     UnitGuard fence;
+    // While the abandoned shots still name them.
+    if constexpr (SAVED_SHOT_RESTORE_ENABLED) MarkAbandonedModels(frame);
     const unsigned slot = unsigned((frame % ROLLBACK_WINDOW + ROLLBACK_WINDOW) % ROLLBACK_WINDOW);
     std::vector<Identity> future;
     std::vector<void*> roots;

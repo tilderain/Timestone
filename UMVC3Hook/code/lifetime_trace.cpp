@@ -78,6 +78,7 @@ struct Identity {
     Deleting deleting = nullptr;
     bool shotLinked = false, shotRegistrationReleased = false;
     bool futureShot = false;
+    bool abandonedModel = false; // Driven model the restored frame does not contain.
     uint64_t dti = 0;
     uint32_t extent = 0;
 };
@@ -175,6 +176,25 @@ struct AttackSpaceState {
     uint64_t groups = 0;
     uint8_t state[AttackSpaceStateSize]{};
 };
+// A uGameEffectModel that a shot drives (Frank West's cart is a shot plus a
+// separate cart model) is a full actor: its animation gates the shot's phases
+// and it retires itself when that animation ends. It is rewound with its shot.
+struct ModelSpan {
+    size_t field = 0;    // Owning pointer field in the body; 0 for the body itself.
+    void* address = nullptr;
+    uint32_t size = 0, offset = 0;
+};
+struct ModelUnitState {
+    void* object = nullptr;
+    uint64_t id = 0;
+    uintptr_t vtable = 0;
+    uint32_t extent = 0;
+    uint8_t control[0x10]{}; // cUnit +08..+17, as for effects.
+    float deltaTime = 0;
+    uint64_t groups = 0;
+    std::vector<ModelSpan> spans;
+    std::vector<uint8_t> payload;
+};
 } // namespace
 
 struct LifetimeSnapshot {
@@ -210,6 +230,7 @@ struct LifetimeSnapshot {
     uint64_t constraintWatermark = 0;
     void* action = nullptr;
     std::vector<AttackSpaceState> attackSpaces;
+    std::vector<ModelUnitState> models;
 };
 
 namespace {
@@ -321,6 +342,7 @@ void ForgetCurrentShotGenerations(uint64_t owner, void* address);
 void CaptureShotGenerations(const Identity& shot, uint32_t bit, ShotState& saved, LifetimeShotPayload payload);
 void DropShotGenerations(const LifetimeSnapshot* saved, uint32_t bit);
 size_t ShotKeyframeBytes(const Identity& shot);
+void MarkAbandonedModels(int32_t frame);
 #include "lifetime_failure.inl"
 // The capture's single body span: at the owner's address, at least the common
 // uShot prefix (0x2140), and inside the payload. Shared by every staging stage.
@@ -1227,6 +1249,8 @@ void CaptureAttackSpaces(SnapshotManifest& manifest, uint32_t bit)
     }
 }
 
+#include "lifetime_shot_models.inl"
+
 void* __fastcall DeleteEffect(void* effect, uint32_t flags)
 {
     const CallerScope caller(LIFE_CALLER());
@@ -1612,6 +1636,7 @@ void LifetimeTrace_SaveSnapshot(int32_t frame, std::shared_ptr<LifetimeSnapshot>
     // frames have none, and the list covers every constraint in the game.
     std::vector<void*> constraintAddresses;
     bool constraintsSorted = false;
+    std::vector<Identity> drivenModels;
     for (size_t i = 0; unitGuard.manager && i < manifest.members.size(); ++i) {
         const Identity owner = manifest.members[i];
         if (owner.kind != Kind::Shot || owner.extent < ShotCpuCommonSize) continue;
@@ -1631,12 +1656,15 @@ void LifetimeTrace_SaveSnapshot(int32_t frame, std::shared_ptr<LifetimeSnapshot>
         if constexpr (SAVED_SHOT_RESTORE_ENABLED) VisitShotTailUnits(owner, [&](size_t field, void* object) {
             LeaseUnitDependency(manifest, object, owner.object, owner.id, field, uint32_t(1) << slot, true);
         });
+        if constexpr (SAVED_SHOT_RESTORE_ENABLED) CollectDrivenModels(manifest, owner, uint32_t(1) << slot, drivenModels);
     }
     CaptureShotWorld(manifest, shotGuard.manager);
     const size_t shotCount = unitGuard.manager ? std::count_if(manifest.members.begin(), manifest.members.end(),
         [](const auto& saved) { return saved.kind == Kind::Shot; }) : 0;
     manifest.shots.resize(shotCount);
+    manifest.models.resize(drivenModels.size()); // Keeps each kept element's storage.
     ReleaseSRWLockExclusive(&g_lock);
+    for (size_t i = 0; i < drivenModels.size(); ++i) CaptureDrivenModel(drivenModels[i], manifest.models[i]);
     // Reuse the snapshot-owned storage and copy each native CPU span once.
     // Dynamic DTI dispatch, when needed, stays outside the recorder lock.
     // Generation leases are taken whether or not the payload bytes are copied.
@@ -1895,6 +1923,17 @@ void LifetimeTrace_RestoreEffects(int32_t frame)
         spaces[i] = current;
         current->restoreTag = tag;
     }
+    std::vector<Identity*> models(manifest.models.size());
+    for (size_t i = 0; i < models.size(); ++i) {
+        const auto& saved = manifest.models[i];
+        Identity* current = Find(saved.object, false);
+        LIFE_REQUIRE(current && current->id == saved.id && (current->snapshots & (uint32_t(1) << slot)) &&
+            !(current->occupancy != Occupancy::Live && current->occupancy != Occupancy::Quarantined) &&
+            Read<uintptr_t>(saved.object, 0) == saved.vtable && current->extent == saved.extent);
+        models[i] = current;
+        current->restoreTag = tag;
+        current->abandonedModel = false;
+    }
     // Membership is state to restore, not a requirement that live masks match.
     // Keep native array storage, retain non-participating units, and restore the
     // captured members in their saved group order without registration callbacks.
@@ -1902,6 +1941,8 @@ void LifetimeTrace_RestoreEffects(int32_t frame)
     for (size_t i = 0; i < count; ++i)
         affectedGroups |= manifest.effects[i].groups | Read<uint64_t>(manifest.effects[i].object, 0x30);
     for (const auto& saved : manifest.attackSpaces)
+        affectedGroups |= saved.groups | Read<uint64_t>(saved.object, 0x30);
+    for (const auto& saved : manifest.models)
         affectedGroups |= saved.groups | Read<uint64_t>(saved.object, 0x30);
     const auto isCaptured = [&](void* object) {
         const Identity* identity = Find(object, false);
@@ -1913,8 +1954,9 @@ void LifetimeTrace_RestoreEffects(int32_t frame)
         if (identity.occupancy != Occupancy::Live || identity.restoreTag == tag) continue;
         // An attack space first seen after this snapshot belongs to the abandoned
         // branch too; the replay creates its own. Its children are retired here.
-        const bool futureSpace = identity.kind == Kind::Unit && identity.id > manifest.birthWatermark &&
-            IsAttackSpace(identity.object);
+        const bool futureSpace = identity.kind == Kind::Unit && (identity.abandonedModel ||
+            (identity.id > manifest.birthWatermark && IsAttackSpace(identity.object)));
+        identity.abandonedModel = false;
         if (!futureSpace && (identity.kind != Kind::Effect ||
             (!identity.restoreOwned &&
              (identity.id <= manifest.birthWatermark || !OwnedEffectGraph(identity.object))))) continue;
@@ -2033,6 +2075,14 @@ void LifetimeTrace_RestoreEffects(int32_t frame)
         if (revived) { --g_quarantined; spaces[i]->occupancy = Occupancy::Live; }
         Push("attack_space_restored", spaces[i], saved.object, uint32_t(frame), revived,
              Read<uint32_t>(saved.state, 0x1D0C - AttackSpaceStateOffset), 0, false);
+    }
+    for (size_t i = 0; i < models.size(); ++i) {
+        const auto& saved = manifest.models[i];
+        const bool revived = models[i]->occupancy == Occupancy::Quarantined;
+        const bool animation = RestoreDrivenModel(saved, uint32_t(1) << slot);
+        if (revived) { --g_quarantined; models[i]->occupancy = Occupancy::Live; }
+        Push("model_restored", models[i], saved.object, uint32_t(frame), revived, animation,
+             Read<uint32_t>(saved.object, 0x1CF8), false);
     }
     for (size_t i = 0; i < count; ++i) {
         const auto& saved = manifest.effects[i];
