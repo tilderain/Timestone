@@ -184,6 +184,13 @@ int main() {
             assert(a == b && a.first.empty());
             a = Run<false>(phase, 8, jobs, 0x402, 0, 0);
             assert(a.first == std::vector<int>{1008});
+            // Effect lanes 14-16 are replayed too: restore rewinds their effects.
+            for (uint32_t lane : {14u, 15u, 16u}) {
+                a = Run<false>(phase, lane, jobs, 0x402, 0, 0);
+                assert(a.first == std::vector<int>{int(1000 + lane)});
+            }
+            a = Run<false>(phase, 17, jobs, 0x402, 0, 0);
+            assert(a.first.empty());
         }
     }
 }
