@@ -31,6 +31,7 @@ void* shotManager = nullptr;
 void* collisionManager = nullptr;
 void* gameConfig = nullptr;
 void* renderManager = nullptr;
+void* actionManager = nullptr;
 int renderWaits = 0;
 void MockRenderSync(void* render) {
     assert(!locked && !unitLocked);
@@ -145,6 +146,7 @@ uintptr_t _addr(uintptr_t address) {
     if (address == 0x140E18250) return uintptr_t(&collisionManager);
     if (address == 0x140D50F88) return uintptr_t(&gameConfig);
     if (address == 0x140E179A8) return uintptr_t(&renderManager);
+    if (address == 0x140D47E68) return uintptr_t(&actionManager);
     if (address == 0x140541030) return uintptr_t(&MockRenderSync);
     if (address == 0x1405B7F20) return uintptr_t(&MockRecycleCollision);
     if (address == 0x1405B5B60) return uintptr_t(&MockClearCollisionGroups);
@@ -207,7 +209,7 @@ void reset() {
     shotManager = nullptr;
     collisionManager = nullptr;
     gameConfig = nullptr;
-    renderManager = nullptr; renderWaits = 0;
+    renderManager = nullptr; renderWaits = 0; actionManager = nullptr;
     std::memset(shotHeads, 0, sizeof(shotHeads)); std::memset(shotDti, 0, sizeof(shotDti));
     unitLockDepth = 0; unitLocked = false;
     creates = queues = logs = fatalLogAttempts = 0;
@@ -800,6 +802,68 @@ int main() {
     assert(deletes == before + int(burst.size()));
 }
 ''')
+
+    def test_attack_space_rewinds_with_its_effects(self):
+        self.compile_run(True, CHECKS[:CHECKS.index("int main() {")] + r"""
+alignas(16) uint8_t units[0x1860]{}, action[0x250]{}, child[0x40]{};
+int disposals = 0;
+uint8_t* makeSpace() {
+    auto* space = static_cast<uint8_t*>(std::calloc(1, 0x1D40));
+    Write(space, 0, uintptr_t(_addr(0x140A8B400)) + 0x270);       // uExAtkSpaceLv1.
+    Write(space, 0x10, uint32_t(2 | (1 << 3)));
+    Birth(space, Kind::Unit);
+    Find(space, false)->deleting = +[](void* object, uint32_t) -> void* { ++disposals; std::free(object); return object; };
+    return space;
+}
+void line(std::initializer_list<void*> entries) {
+    void* descriptor = units + 0x50 + 0x30; void* previous = nullptr;
+    Write(descriptor, 0, entries.size() ? *entries.begin() : nullptr);
+    for (void* object : entries) {
+        Write(object, 0x20, previous); Write(object, 0x18, (void*)nullptr);
+        if (previous) Write(previous, 0x18, object);
+        previous = object;
+    }
+    Write(descriptor, 8, previous);
+}
+int main() {
+    reset(); unitManager = units; actionManager = action; Write(units, 0xC38, uint32_t(2));
+    assert(!IsAttackSpace(child));
+    auto* space = makeSpace();
+    Write(space, 0x1D0C, uint32_t(0));                             // mLocalStep: super still running.
+    Write(space, 0x1D18, static_cast<void*>(child));               // One live child effect.
+    Write(space, 0x1CF8, uint32_t(0x40000));                       // Effect-model lifecycle word.
+    Write(action, 0x148, static_cast<void*>(space)); line({space});
+    LifetimeTrace_SaveSnapshot(0);
+    assert(TestManifest(0).attackSpaces.size() == 1 && Find(space, false)->dependencies == 1);
+
+    // The super ended: children were told to finish and the space waits on them.
+    Write(space, 0x1D0C, uint32_t(1)); Write(space, 0x1CF8, uint32_t(0x80000));
+    LifetimeTrace_RestoreEffects(0);
+    assert(Read<uint32_t>(space, 0x1D0C) == 0 && Read<void*>(space, 0x1D18) == child);
+    assert(Read<uint32_t>(space, 0x1CF8) == 0x40000 && Read<void*>(action, 0x148) == space);
+
+    // It finished, killed its children and was deleted: held, unlinked, forgotten by sAction.
+    Write(space, 0x1D0C, uint32_t(3)); Write(space, 0x1D18, (void*)nullptr);
+    Write(space, 0x10, uint32_t(0x3F8)); line({}); Write(space, 0x18, (void*)nullptr);
+    Find(space, false)->occupancy = Occupancy::Quarantined; ++g_quarantined;
+    Write(action, 0x148, (void*)nullptr);
+    // The abandoned branch then started another super with its own space.
+    auto* later = makeSpace(); Write(action, 0x148, static_cast<void*>(later)); line({later});
+    LifetimeTrace_RestoreEffects(0);
+    assert(Find(space, false)->occupancy == Occupancy::Live && Read<uint32_t>(space, 0x1D0C) == 0);
+    assert(Read<void*>(space, 0x1D18) == child && (Read<uint32_t>(space, 0x10) & 0x3FF) == (2 | (1 << 3)));
+    assert(Read<void*>(units, 0x80) == space && Read<void*>(units, 0x88) == space && !Read<void*>(space, 0x18));
+    assert(Read<void*>(action, 0x148) == space);
+    assert(Find(later, false)->occupancy == Occupancy::Quarantined && g_quarantined == 1);
+    assert((Read<uint32_t>(later, 0x10) & 0x3FF) == 0x3F8 && !disposals);
+    // Repeating the restore changes nothing; the later space is disposed once unleased.
+    LifetimeTrace_RestoreEffects(0);
+    assert(g_quarantined == 1 && Find(space, false)->occupancy == Occupancy::Live);
+    LifetimeTrace_ClearSnapshots();
+    assert(disposals == 1 && !g_quarantined && Find(space, false)->occupancy == Occupancy::Live);
+    std::free(space);
+}
+""")
 
     def test_quarantine_disabled(self):
         self.compile_run(True, r'''

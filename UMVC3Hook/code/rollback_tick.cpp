@@ -90,6 +90,13 @@ static bool IsHeadlessGameplayUnitCategory(uint32_t category)
         case 12: // Resource-selected shot/effect lane; membership varies.
 
         case 13: // Character chains and attack spaces; also contains some effects.
+        // Gameplay-effect lanes. Restore rewinds every captured effect, so the
+        // replay must advance them too: a rewound effect that is not replayed
+        // loses the rollback depth on each restore, lingering and flickering as
+        // it is revived and killed again (attack-space children sit in lane 14).
+        case 14:
+        case 15:
+        case 16:
         case 18: // Character/team post-simulation coordinator.
         case 21: // Character control/CPU lane.
             return true;
@@ -110,6 +117,13 @@ static bool IsHeadlessGameplaySyncCategory(uint32_t category)
         case 11: // Resource-selected shot/effect lane; membership varies.
         case 12: // Resource-selected shot/effect lane; membership varies.
         case 13: // Character chains and attack spaces; also contains some effects.
+        // Gameplay-effect lanes. Restore rewinds every captured effect, so the
+        // replay must advance them too: a rewound effect that is not replayed
+        // loses the rollback depth on each restore, lingering and flickering as
+        // it is revived and killed again (attack-space children sit in lane 14).
+        case 14:
+        case 15:
+        case 16:
         case 18: // Character/team post-simulation coordinator.
         case 21: // Character control/CPU lane.
             return true;

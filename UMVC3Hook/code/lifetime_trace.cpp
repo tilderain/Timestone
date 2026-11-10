@@ -159,6 +159,22 @@ struct ShotConstraintState {
     uint64_t construction = 0;
     uint8_t image[0x90]{};
 };
+// uExAtkSpace (the hyper attack space) drives its four child effects through a
+// small phase machine: mLocalStep, the child and owner pointers, and the
+// uGameEffectModel lifecycle words before them. Its children and the characters
+// it watches are rewound; without this state it waits forever for children that
+// were restored to "not finishing", or is gone while they were resurrected.
+constexpr size_t AttackSpaceStateOffset = 0x1CC0, AttackSpaceStateSize = 0x80;
+struct AttackSpaceState {
+    void* object = nullptr;
+    uint64_t id = 0;
+    uintptr_t vtable = 0;
+    size_t actionSlot = 0;
+    uint8_t control[0x10]{}; // cUnit +08..+17, as for effects.
+    float deltaTime = 0;
+    uint64_t groups = 0;
+    uint8_t state[AttackSpaceStateSize]{};
+};
 } // namespace
 
 struct LifetimeSnapshot {
@@ -192,6 +208,8 @@ struct LifetimeSnapshot {
     std::vector<ShotConstraintState> constraints;
     bool constraintsComplete = true;
     uint64_t constraintWatermark = 0;
+    void* action = nullptr;
+    std::vector<AttackSpaceState> attackSpaces;
 };
 
 namespace {
@@ -1174,6 +1192,41 @@ void CaptureEffects(SnapshotManifest& manifest, void* manager)
              manifest.payloadBytes(), false);
 }
 
+// sAction's current, pending and superseded attack-space references.
+constexpr size_t ActionAttackSpaceFields[] = {0x148, 0x158, 0x160};
+// The nine concrete attack-space vtables share one layout and phase machine.
+bool IsAttackSpace(void* object)
+{
+    const uintptr_t vtable = Read<uintptr_t>(object, 0), first = uintptr_t(_addr(0x140A8B400));
+    return vtable >= first && vtable - first < 9 * 0x270 && !((vtable - first) % 0x270);
+}
+
+// Caller holds g_lock at the capture fence. Leasing keeps the allocation through
+// native deletion, so a later restore can bring the same object back.
+void CaptureAttackSpaces(SnapshotManifest& manifest, uint32_t bit)
+{
+    manifest.attackSpaces.clear();
+    manifest.action = manifest.unitManager ? Read<void*>((void*)_addr(0x140D47E68), 0) : nullptr;
+    if (!manifest.action) return;
+    for (size_t slot = 0; slot < std::size(ActionAttackSpaceFields); ++slot) {
+        void* object = Read<void*>(manifest.action, ActionAttackSpaceFields[slot]);
+        if (!object || !IsAttackSpace(object)) continue;
+        LifetimeFailureScope failureScope("attack_space.capture", object, 0, manifest.frame);
+        LeaseUnitDependency(manifest, object, manifest.action, 0, ActionAttackSpaceFields[slot], bit, true);
+        const Identity* identity = Find(object, false);
+        LIFE_REQUIRE(identity);
+        if (identity->occupancy != Occupancy::Live) continue; // Already dead and merely held.
+        AttackSpaceState saved;
+        saved.object = object; saved.id = identity->id; saved.vtable = Read<uintptr_t>(object, 0);
+        saved.actionSlot = slot;
+        std::memcpy(saved.control, static_cast<uint8_t*>(object) + 8, sizeof(saved.control));
+        saved.deltaTime = Read<float>(object, 0x28);
+        saved.groups = Read<uint64_t>(object, 0x30);
+        std::memcpy(saved.state, static_cast<uint8_t*>(object) + AttackSpaceStateOffset, sizeof(saved.state));
+        manifest.attackSpaces.push_back(saved);
+    }
+}
+
 void* __fastcall DeleteEffect(void* effect, uint32_t flags)
 {
     const CallerScope caller(LIFE_CALLER());
@@ -1551,6 +1604,7 @@ void LifetimeTrace_SaveSnapshot(int32_t frame, std::shared_ptr<LifetimeSnapshot>
         manifest.members.push_back(identity);
     }
     CaptureEffects(manifest, unitGuard.manager);
+    CaptureAttackSpaces(manifest, uint32_t(1) << slot);
     // Index iteration tolerates adoption appending members. Copy the identity
     // before leasing; native DTI/deleting dispatch runs outside the recorder lock.
     // Constraint addresses are sorted once so each shot finds its inline ones by range.
@@ -1828,12 +1882,27 @@ void LifetimeTrace_RestoreEffects(int32_t frame)
         wasHeld[i] = current->occupancy == Occupancy::Quarantined;
         held += wasHeld[i];
     }
+    // Attack spaces join the same transaction: tagged as captured, they regain
+    // their saved scheduler position below, including one that died since.
+    std::vector<Identity*> spaces(manifest.attackSpaces.size());
+    for (size_t i = 0; i < spaces.size(); ++i) {
+        const auto& saved = manifest.attackSpaces[i];
+        Identity* current = Find(saved.object, false);
+        LIFE_REQUIRE(current && current->id == saved.id && (current->snapshots & (uint32_t(1) << slot)) &&
+            !(current->occupancy != Occupancy::Live && current->occupancy != Occupancy::Quarantined) &&
+            Read<uintptr_t>(saved.object, 0) == saved.vtable && manifest.action &&
+            Read<void*>((void*)_addr(0x140D47E68), 0) == manifest.action);
+        spaces[i] = current;
+        current->restoreTag = tag;
+    }
     // Membership is state to restore, not a requirement that live masks match.
     // Keep native array storage, retain non-participating units, and restore the
     // captured members in their saved group order without registration callbacks.
     uint64_t affectedGroups = 0;
     for (size_t i = 0; i < count; ++i)
         affectedGroups |= manifest.effects[i].groups | Read<uint64_t>(manifest.effects[i].object, 0x30);
+    for (const auto& saved : manifest.attackSpaces)
+        affectedGroups |= saved.groups | Read<uint64_t>(saved.object, 0x30);
     const auto isCaptured = [&](void* object) {
         const Identity* identity = Find(object, false);
         return identity && identity->restoreTag == tag;
@@ -1841,10 +1910,14 @@ void LifetimeTrace_RestoreEffects(int32_t frame)
     // Remove the abandoned branch without running kill callbacks against the
     // restored characters. Other snapshots may still own these exact objects.
     for (auto& identity : ActiveIdentities()) {
-        if (identity.occupancy != Occupancy::Live || identity.kind != Kind::Effect ||
-            identity.restoreTag == tag ||
+        if (identity.occupancy != Occupancy::Live || identity.restoreTag == tag) continue;
+        // An attack space first seen after this snapshot belongs to the abandoned
+        // branch too; the replay creates its own. Its children are retired here.
+        const bool futureSpace = identity.kind == Kind::Unit && identity.id > manifest.birthWatermark &&
+            IsAttackSpace(identity.object);
+        if (!futureSpace && (identity.kind != Kind::Effect ||
             (!identity.restoreOwned &&
-             (identity.id <= manifest.birthWatermark || !OwnedEffectGraph(identity.object)))) continue;
+             (identity.id <= manifest.birthWatermark || !OwnedEffectGraph(identity.object))))) continue;
         affectedGroups |= Read<uint64_t>(identity.object, 0x30);
         identity.occupancy = Occupancy::Quarantined;
         ++g_quarantined;
@@ -1947,6 +2020,19 @@ void LifetimeTrace_RestoreEffects(int32_t frame)
         if (wasHeld[i]) {
             --g_quarantined; identities[i]->occupancy = Occupancy::Live;
         }
+    }
+    for (size_t i = 0; i < spaces.size(); ++i) {
+        const auto& saved = manifest.attackSpaces[i];
+        const bool revived = spaces[i]->occupancy == Occupancy::Quarantined;
+        std::memcpy(static_cast<uint8_t*>(saved.object) + 8, saved.control, sizeof(saved.control));
+        Write(saved.object, 0x28, saved.deltaTime);
+        Write(saved.object, 0x30, saved.groups);
+        std::memcpy(static_cast<uint8_t*>(saved.object) + AttackSpaceStateOffset, saved.state, sizeof(saved.state));
+        // sAction's phase flags came back with its region; give it the same object.
+        Write(manifest.action, ActionAttackSpaceFields[saved.actionSlot], saved.object);
+        if (revived) { --g_quarantined; spaces[i]->occupancy = Occupancy::Live; }
+        Push("attack_space_restored", spaces[i], saved.object, uint32_t(frame), revived,
+             Read<uint32_t>(saved.state, 0x1D0C - AttackSpaceStateOffset), 0, false);
     }
     for (size_t i = 0; i < count; ++i) {
         const auto& saved = manifest.effects[i];
