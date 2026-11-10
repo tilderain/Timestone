@@ -1313,6 +1313,42 @@ void Rollback_RestoreSnapshot(int32_t frame)
     LifetimeTrace_RestoreEffects(frame);
     LifetimeTrace_RestoreShots(frame);
 
+    // Characters hold weak references to their shots and effects (Amaterasu's
+    // tracked paper at +6908, mpLastCreateShot, the animation-command return
+    // unit). Those objects are rewound in place now, so the references must be
+    // too: left live, a slot the abandoned branch had already cleared stays null
+    // and the replayed command that ends the shot finds nothing to end.
+    {
+        size_t referenceOffset = 0;
+        for (int i = 0; i < slot.regionCount; ++i) {
+            const size_t regionSize = slot.regions[i].size;
+            const size_t available = referenceOffset + regionSize > slot.size
+                ? slot.size - referenceOffset : regionSize;
+            if (slot.regions[i].skipVtable && available >= ROLLBACK_CHARACTER_COMMON_SIZE &&
+                IsCharacterBody(slot.regions[i].ptr)) {
+                uint8_t* character = (uint8_t*)slot.regions[i].ptr;
+                const uint8_t* saved = slot.data + referenceOffset;
+                const uint64_t dti = GetObjectDti((uint64_t)character);
+                const auto resolve = [&](uint32_t field) {
+                    if (field + sizeof(void*) > available) return;
+                    void* savedUnit = nullptr;
+                    void* liveUnit = nullptr;
+                    std::memcpy(&savedUnit, saved + field, sizeof(savedUnit));
+                    std::memcpy(&liveUnit, character + field, sizeof(liveUnit));
+                    void* unit = LifetimeTrace_ResolveUnitReference(frame, savedUnit, liveUnit);
+                    std::memcpy(character + field, &unit, sizeof(unit));
+                };
+                resolve(0x13D8); // Animation-command return unit.
+                resolve(0x6428); // mpLastCreateShot.
+                // Indexed auxiliary effect slots (Soul Fist, weapon and aura effects).
+                for (uint32_t field = 0x6748; field < 0x67F0; field += 8) resolve(field);
+                for (uint32_t field : Rollback_CharacterShotTailOffsets(dti)) resolve(field);
+                for (uint32_t field : Rollback_CharacterEffectTailOffsets(dti)) resolve(field);
+            }
+            referenceOffset += regionSize;
+        }
+    }
+
     traceRestoreState("after");
 
     /*std::memcpy(liveGlobalRng, (void*)_addr(0x140D765D8), sizeof(liveGlobalRng));

@@ -3335,12 +3335,30 @@ int main() {
     assert(Find(effect, false)->dependencies == 1 && !Find(other, false)->dependencies);
     future();
     assert(Read<float>(a, 0x1F58) == 11 && Read<float>(a, 0x2140) == 950);
+    // A character's weak reference to b: cleared by the abandoned branch. Until b
+    // is live again the saved address is not put back.
+    assert(LifetimeTrace_ResolveUnitReference(0, b, nullptr) == nullptr);
+    assert(LifetimeTrace_ResolveUnitReference(0, nullptr, b) == nullptr); // Held unit: drop the reference.
     for (int i = 0; i < 2; ++i) {
         LifetimeTrace_RestoreShots(0); check();
         advance(a);                                                        // One replayed tick, not nine.
         assert(Read<float>(a, 0x1F58) == 4 && Read<float>(a, 0x2140) == 250 && Read<float>(joint, 0x20) == 8);
     }
     assert(!creates && !resourceAdds && !resourceReleases && !constraintUnlinks);
+    // Restored: the saved reference names the same live identity again.
+    assert(LifetimeTrace_ResolveUnitReference(0, b, nullptr) == b);
+    assert(LifetimeTrace_ResolveUnitReference(0, b, a) == b);
+    // Not a unit of that snapshot (unknown address, later birth, other frame): keep the live value.
+    assert(LifetimeTrace_ResolveUnitReference(0, (void*)0x1234, a) == a);
+    assert(LifetimeTrace_ResolveUnitReference(0, nullptr, a) == a);
+    assert(LifetimeTrace_ResolveUnitReference(1, b, nullptr) == nullptr);
+    alignas(16) static uint8_t newer[0x40]{}; Birth(newer, Kind::Unit);
+    assert(LifetimeTrace_ResolveUnitReference(0, newer, a) == a);
+    // A reused address is a different identity, even though it is live.
+    const uint64_t savedId = TestManifest(0).members[0].id;
+    for (auto& member : TestManifest(0).members) if (member.object == b) member.id = savedId + 1000;
+    assert(LifetimeTrace_ResolveUnitReference(0, b, a) == a);
+    for (auto& member : TestManifest(0).members) if (member.object == b) member.id = Find(b, false)->id;
     // A frame with no saved manifest, or one that held no shots, is left alone.
     LifetimeTrace_RestoreShots(1);
     assert(Read<float>(a, 0x1F58) == 4);
@@ -3838,6 +3856,14 @@ int main() {
         self.assertLess(restore.index("LifetimeTrace_RestoreEffects(frame)"),
                         restore.index("LifetimeTrace_RestoreShots(frame)"))
         self.assertIn('#include "lifetime_shot_restore.inl"', tracer)
+        # Character weak references are resolved by identity once shots are back.
+        self.assertLess(restore.index("LifetimeTrace_RestoreShots(frame)"),
+                        restore.index("LifetimeTrace_ResolveUnitReference(frame, savedUnit, liveUnit)"))
+        for field in ("resolve(0x13D8)", "resolve(0x6428)", "Rollback_CharacterShotTailOffsets(dti)) resolve(field)",
+                      "Rollback_CharacterEffectTailOffsets(dti)) resolve(field)"):
+            self.assertIn(field, restore)
+        character = (ROOT / "UMVC3Hook/code/rollback_character_restore.cpp").read_text()
+        self.assertIn("static constexpr uint32_t oneSpark[] = {0x6908};", character)
 
 
 if __name__ == "__main__":
