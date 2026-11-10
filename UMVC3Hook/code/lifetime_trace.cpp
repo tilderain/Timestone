@@ -38,11 +38,14 @@ constexpr size_t ProbeLimit = 32;
 constexpr size_t EventCapacity = 8192;
 constexpr uint64_t CaptureLimit = 65536;
 constexpr uint64_t UnknownSampleLimit = 256;
-constexpr size_t QuarantineLimit = 128;
-constexpr size_t PayloadCapacity = 1024 * 1024;
-constexpr size_t SpanCapacity = 2048;
+// Bounds on retained storage, not on what a frame may contain: a multi-shot
+// hyper puts well over a hundred effects on screen at once (35 Hyoran shards and
+// their effects reached 127 live effects and 575 KB of graph payload).
+constexpr size_t QuarantineLimit = 1024; // Detached effects held without an owned graph.
+constexpr size_t PayloadCapacity = 16 * 1024 * 1024;
+constexpr size_t SpanCapacity = 16384;
 constexpr size_t GraphSpanLimit = 97; // Combined block, 32 nodes, and 64 auxiliaries.
-constexpr size_t GenerationCapacity = 512;
+constexpr size_t GenerationCapacity = 1024;
 struct GeneratorLayout {
     uintptr_t vtable = 0;
     uint32_t size = 0;
@@ -1126,7 +1129,7 @@ void CaptureEffects(SnapshotManifest& manifest, void* manager)
         } else if (!OwnedEffectGraph(object)) continue;
         if (Read<void*>(object, 0x218)) spanCount = DescribeOwnedGraph(object, spans);
         const uint32_t category = (flags >> 3) & 0x7F;
-        LIFE_REQUIRE(!(category >= categories && category != 0x7F) && manifest.effectCount() != QuarantineLimit);
+        LIFE_REQUIRE(!(category >= categories && category != 0x7F));
         EffectState saved{};
         saved.object = object; saved.id = identity.id; saved.revision = identity.revision;
         saved.resource = Read<void*>(object, 0x108);
@@ -1551,15 +1554,19 @@ void LifetimeTrace_SaveSnapshot(int32_t frame, std::shared_ptr<LifetimeSnapshot>
     // Index iteration tolerates adoption appending members. Copy the identity
     // before leasing; native DTI/deleting dispatch runs outside the recorder lock.
     // Constraint addresses are sorted once so each shot finds its inline ones by range.
+    // Built at the first shot (including one adopted during this loop): most
+    // frames have none, and the list covers every constraint in the game.
     std::vector<void*> constraintAddresses;
-    if (unitGuard.manager) {
-        constraintAddresses.reserve(g_constructedConstraints.size());
-        for (const auto& entry : g_constructedConstraints) constraintAddresses.push_back(entry.first);
-        std::sort(constraintAddresses.begin(), constraintAddresses.end(), std::less<void*>{});
-    }
+    bool constraintsSorted = false;
     for (size_t i = 0; unitGuard.manager && i < manifest.members.size(); ++i) {
         const Identity owner = manifest.members[i];
         if (owner.kind != Kind::Shot || owner.extent < ShotCpuCommonSize) continue;
+        if (!constraintsSorted) {
+            constraintsSorted = true;
+            constraintAddresses.reserve(g_constructedConstraints.size());
+            for (const auto& entry : g_constructedConstraints) constraintAddresses.push_back(entry.first);
+            std::sort(constraintAddresses.begin(), constraintAddresses.end(), std::less<void*>{});
+        }
         VisitShotUnitReferences(owner.object, [&](size_t field, void* object) {
             LeaseUnitDependency(manifest, object, owner.object, owner.id, field, uint32_t(1) << slot, true);
         });
@@ -1778,9 +1785,10 @@ void LifetimeTrace_RestoreEffects(int32_t frame)
     LIFE_REQUIRE(manifest.valid && manifest.frame == frame && manifest.unitManager &&
         unitGuard.manager == manifest.unitManager && manifest.thread == GetCurrentThreadId());
     const size_t count = manifest.effectCount();
-    Identity* identities[QuarantineLimit]{};
-    bool wasHeld[QuarantineLimit]{};
-    void* releasedResources[QuarantineLimit]{};
+    // Sized by the snapshot: the effect count is whatever the frame held.
+    std::vector<Identity*> identities(count);
+    std::vector<uint8_t> wasHeld(count);
+    std::vector<void*> releasedResources(count);
     size_t held = 0;
     const uint64_t tag = ++g_restoreTag;
     const uint32_t categories = Read<uint32_t>(unitGuard.manager, 0xC38);

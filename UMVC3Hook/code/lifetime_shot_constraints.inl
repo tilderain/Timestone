@@ -4,12 +4,32 @@ uint64_t g_nextConstraintConstruction = 0;
 void (__fastcall* oInitializeConstraint)(void*) = nullptr;
 void (__fastcall* oConstraintObjectDtor)(void*) = nullptr;
 
+// The teardown hook below sits on MtObject's base destructor: every MtObject in
+// the engine, on every thread, including per-frame stack temporaries. Each bucket
+// counts the registered constraints hashing to it, so an unregistered object is
+// rejected with one atomic load and no lock. Counts change only under g_lock with
+// the map. A registered object keeps its own bucket nonzero until its own
+// teardown erases it, so the unlocked check has no false negatives.
+constexpr size_t ConstraintBucketCount = size_t(1) << 14;
+std::atomic<uint16_t> g_constraintBuckets[ConstraintBucketCount];
+std::atomic<uint16_t>& ConstraintBucket(void* object)
+{
+    return g_constraintBuckets[((uintptr_t(object) >> 4) * 11400714819323198485ull) >> (64 - 14)];
+}
+// Caller holds g_lock. Re-initialization renews the construction identity.
+void RegisterConstraint(void* object)
+{
+    const auto [at, inserted] = g_constructedConstraints.try_emplace(object);
+    at->second = ++g_nextConstraintConstruction;
+    if (inserted) ConstraintBucket(object).fetch_add(1, std::memory_order_relaxed);
+}
+
 void __fastcall InitializeConstraint(void* object)
 {
     oInitializeConstraint(object);
     if (!g_lifetimeEnabled.load(std::memory_order_relaxed)) return;
     AcquireSRWLockExclusive(&g_lock);
-    g_constructedConstraints[object] = ++g_nextConstraintConstruction;
+    RegisterConstraint(object);
     ReleaseSRWLockExclusive(&g_lock);
 }
 
@@ -17,9 +37,12 @@ void __fastcall ForgetConstraintObject(void* object)
 {
     // Observed in-place and owner-inline teardown paths converge here. Dying
     // storage is never inspected, including calls for unrelated MtObjects.
-    AcquireSRWLockExclusive(&g_lock);
-    g_constructedConstraints.erase(object);
-    ReleaseSRWLockExclusive(&g_lock);
+    if (ConstraintBucket(object).load(std::memory_order_relaxed)) {
+        AcquireSRWLockExclusive(&g_lock);
+        if (g_constructedConstraints.erase(object))
+            ConstraintBucket(object).fetch_sub(1, std::memory_order_relaxed);
+        ReleaseSRWLockExclusive(&g_lock);
+    }
     oConstraintObjectDtor(object);
 }
 
@@ -64,6 +87,13 @@ void CaptureShotConstraints(SnapshotManifest& saved)
     saved.constraints.clear();
     saved.constraintsComplete = true;
     AcquireSRWLockExclusive(&g_lock);
+    if (saved.shots.empty()) {
+        // Chains are discovered only through shot bodies and joints: with no
+        // shot there is nothing to capture, and no reason to walk every constraint.
+        saved.constraintWatermark = g_nextConstraintConstruction;
+        ReleaseSRWLockExclusive(&g_lock);
+        return;
+    }
     std::unordered_set<void*> captured;
     const auto append = [&](void* object) {
         if (!object || captured.count(object)) return;

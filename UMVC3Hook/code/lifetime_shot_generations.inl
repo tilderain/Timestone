@@ -110,6 +110,25 @@ struct AttackOwnersGuard {
     AttackOwnersGuard(const AttackOwnersGuard&) = delete;
     AttackOwnersGuard& operator=(const AttackOwnersGuard&) = delete;
 };
+// Map size, readable without the lock: with no shot alive the detours skip the
+// lookup entirely. Every insert and erase goes through these two.
+std::atomic<size_t> g_attackOwnerCount{0};
+void SetAttackOwner(void* root, const AttackOwner& owner)
+{
+    AttackOwnersGuard guard;
+    g_attackOwners[root] = owner;
+    g_attackOwnerCount.store(g_attackOwners.size(), std::memory_order_relaxed);
+}
+void EraseAttackOwner(void* root)
+{
+    AttackOwnersGuard guard;
+    g_attackOwners.erase(root);
+    g_attackOwnerCount.store(g_attackOwners.size(), std::memory_order_relaxed);
+}
+// Scopes that armed g_transferredShotResource on any thread. The resource-release
+// detour is engine-wide and thread_local access is an emulated-TLS call in this
+// toolchain, so it reads this first.
+std::atomic<int> g_armedResourceTransfers{0};
 struct KeyframeExtent { void* data; size_t bytes; };
 std::unordered_map<void*, KeyframeExtent> g_keyframeExtents;
 uint64_t g_nextShotGeneration = 0;
@@ -221,7 +240,7 @@ std::shared_ptr<AttackCohort> ReadAttackCohort(const Identity& owner, unsigned s
     LIFE_REQUIRE(!Read<uint8_t>(root, 0xC0)); // Normal shot nodes borrow their callback owner.
     auto& domains = g_shotDomains[owner.id];
     if (!domains.roots[slot] || domains.roots[slot]->object != root) domains.roots[slot] = AttackObject(root);
-    { AttackOwnersGuard guard; g_attackOwners[root] = {owner.id, slot, GetCurrentThreadId()}; }
+    SetAttackOwner(root, {owner.id, slot, GetCurrentThreadId()});
     auto cohort = std::make_shared<AttackCohort>();
     cohort->root = domains.roots[slot];
     const size_t count = Read<uint32_t>(root, 0x20), capacity = Read<uint32_t>(root, 0x24);
@@ -414,6 +433,7 @@ void __fastcall GenerationBlend(void* owner, uint32_t count)
 
 struct GenerationResourceMove {
     void* previous = g_transferredShotResource;
+    bool armed = false;
     GenerationResourceMove(void* owner, ShotDomain domain, bool changes) {
         g_transferredShotResource = nullptr;
         AcquireSRWLockExclusive(&g_lock);
@@ -432,18 +452,26 @@ struct GenerationResourceMove {
                     if (generation.snapshots || (generation.resource && BorrowedShotResourceDomain(domain))) {
                         generation.attached = false;
                         g_transferredShotResource = (void*)generation.resource;
+                        armed = true;
+                        g_armedResourceTransfers.fetch_add(1, std::memory_order_relaxed);
                     } else generation.id = 0;
                 }
             }
         }
         ReleaseSRWLockExclusive(&g_lock);
     }
-    ~GenerationResourceMove() { g_transferredShotResource = previous; }
+    ~GenerationResourceMove() {
+        g_transferredShotResource = previous;
+        if (armed) g_armedResourceTransfers.fetch_sub(1, std::memory_order_relaxed);
+    }
 };
 
 void __fastcall GenerationResourceRelease(void* resource)
 {
-    if (!g_collectingShotGeneration && resource && resource == g_transferredShotResource) {
+    // An armed scope stays counted until it ends, including nested outer scopes
+    // whose pointer is restored by an inner destructor.
+    if (g_armedResourceTransfers.load(std::memory_order_relaxed) &&
+        !g_collectingShotGeneration && resource && resource == g_transferredShotResource) {
         g_transferredShotResource = nullptr;
         return; // Transfer this existing reference, not a new snapshot addRef.
     }
@@ -487,7 +515,8 @@ void* AllocateAttackArray(size_t capacity)
 
 Identity* ManagedAttack(void* root, unsigned& slot)
 {
-    if (!g_lifetimeEnabled.load(std::memory_order_relaxed)) return nullptr;
+    if (!g_attackOwnerCount.load(std::memory_order_relaxed)) return nullptr; // No shot root exists.
+    if (!g_lifetimeEnabled.load(std::memory_order_relaxed) || g_collectingShotGeneration) return nullptr;
     AttackOwner attack;
     {
         AttackOwnersGuard guard;
@@ -571,7 +600,7 @@ void __fastcall GenerationExtendArray(void* array, uint32_t capacity)
 {
     unsigned slot = 0;
     auto* root = static_cast<uint8_t*>(array) - 0x18;
-    auto* owner = g_collectingShotGeneration ? nullptr : ManagedAttack(root, slot);
+    auto* owner = ManagedAttack(root, slot);
     if (!owner) { oGenerationExtendArray(array, capacity); return; }
     UnitGuard fence;
     ReplaceAttackArray(*owner, slot, capacity, false);
@@ -580,7 +609,7 @@ void __fastcall GenerationExtendArray(void* array, uint32_t capacity)
 uint32_t __fastcall GenerationAddChild(void* root, void* geometry, uint8_t clone)
 {
     unsigned slot = 0;
-    auto* owner = g_collectingShotGeneration ? nullptr : ManagedAttack(root, slot);
+    auto* owner = ManagedAttack(root, slot);
     if (!owner) return oGenerationAddChild(root, geometry, clone);
     LIFE_REQUIRE(!clone); // The normal rShot graph borrows its explicitly owned primitives.
     UnitGuard fence;
@@ -644,9 +673,7 @@ void ReleaseRetiredAttack(std::shared_ptr<AttackCohort>& cohort)
     }
     array.reset();
     cohort.reset();
-    if (root && !root->nativeOwner && root.use_count() == 1) {
-        AttackOwnersGuard guard; g_attackOwners.erase(root->object);
-    }
+    if (root && !root->nativeOwner && root.use_count() == 1) EraseAttackOwner(root->object);
     ReleaseRetiredAttackObject(root);
 }
 
@@ -765,7 +792,7 @@ void ForgetCurrentShotGenerations(uint64_t owner, void* address)
             cohorts.push_back(std::move(generation.attack));
         }
         domains = std::move(at->second);
-        for (const auto& root : domains.roots) if (root) { AttackOwnersGuard guard; g_attackOwners.erase(root->object); }
+        for (const auto& root : domains.roots) if (root) EraseAttackOwner(root->object);
         g_shotDomains.erase(at);
         PruneOwnerGenerations(owner);
     }

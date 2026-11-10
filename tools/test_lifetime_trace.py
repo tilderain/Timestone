@@ -163,6 +163,8 @@ uintptr_t _addr(uintptr_t address) {
 CHECKS = r'''
 void reset() {
     g_constructedConstraints.clear();
+    for (auto& bucket : g_constraintBuckets) bucket = 0;
+    g_attackOwnerCount = 0; g_armedResourceTransfers = 0;
     g_nextConstraintConstruction = 0;
     g_nextSnapshotCapture = 0;
     g_clearedSlots = 0;
@@ -420,7 +422,7 @@ PayloadFixture makePayloadFixture() {
     void* root = std::calloc(1, 0xE0); Write(root, 0, uintptr_t(rootVT));
     Write(shot, 0x2058, root);
     void* constraint = shot + 0x1000;
-    g_constructedConstraints[constraint] = ++g_nextConstraintConstruction;
+    RegisterConstraint(constraint);
     Write(constraint, 0x48, constraint);
     Birth(shot, Kind::Shot);
     auto* identity = Find(shot, false);
@@ -781,6 +783,21 @@ int main() {
     DeleteEffect(p, 1);
     oManagerDtor = [](void*) { assert(!locked && g_quarantined == 0); };
     ManagerDtor(nullptr);
+
+    // A multi-shot hyper holds far more effects than any fixed per-frame bound:
+    // capture and restore are sized by the frame, not by a retention limit.
+    reset(); alignas(16) static uint8_t units[0x1860]{}; unitManager = units;
+    Write(units, 0xC38, uint32_t(1));
+    std::vector<void*> burst;
+    for (int i = 0; i < 300; ++i) burst.push_back(makeEffect());
+    LifetimeTrace_SaveSnapshot(0);
+    assert(TestManifest(0).effects.size() == burst.size());
+    LifetimeTrace_RestoreEffects(0);
+    assert(!g_quarantined && TestManifest(0).effects.size() == burst.size());
+    LifetimeTrace_ClearSnapshots();
+    before = deletes;
+    for (void* effect : burst) DeleteEffect(effect, 1);
+    assert(deletes == before + int(burst.size()));
 }
 ''')
 
@@ -2525,11 +2542,34 @@ int main() {
     const uint64_t first = g_constructedConstraints.at(constraint);
     InitializeConstraint(constraint); ++initializations;
     assert(g_constructedConstraints.at(constraint) > first && Read<void*>(constraint, 0x48) == constraint);
+    // Re-initialization renews the identity without counting the address twice.
+    assert(ConstraintBucket(constraint) == 1);
+    // With no shot there is no chain to discover: nothing is captured or walked.
+    LifetimeTrace_SaveSnapshot(0);
+    assert(TestManifest(0).constraints.empty() && TestManifest(0).constraintsComplete &&
+        TestManifest(0).constraintWatermark == g_nextConstraintConstruction);
+    LifetimeTrace_ClearSnapshots();
+    // The hook is MtObject's base destructor. An object that was never a
+    // constraint must pass without the recorder lock, even while it is held.
+    static int unlockedTeardowns = 0;
+    oConstraintObjectDtor = +[](void*) { ++unlockedTeardowns; };
+    uint8_t unrelated[0x90]{};
+    AcquireSRWLockExclusive(&g_lock);
+    ForgetConstraintObject(unrelated); ForgetConstraintObject((void*)1);
+    ReleaseSRWLockExclusive(&g_lock);
+    assert(unlockedTeardowns == 2 && g_constructedConstraints.size() == 1);
+    oConstraintObjectDtor = +[](void*) { assert(!locked); };
     // No DTI/vptr reads, even for unrelated objects or already-freed addresses.
     ForgetConstraintObject((void*)1); ++destructions;
     ForgetConstraintObject(constraint); ++destructions;
+    assert(!ConstraintBucket(constraint));
     ForgetConstraintObject(constraint); ++destructions;
     assert(g_constructedConstraints.empty() && initializations == 2 && destructions == 3 && !creates);
+    // Every registration is balanced: no bucket is left counting a dead address.
+    uint8_t many[64][0x90]{};
+    for (auto& object : many) InitializeConstraint(object);
+    for (auto& object : many) ForgetConstraintObject(object);
+    for (const auto& bucket : g_constraintBuckets) assert(!bucket);
 }
 ''')
 
@@ -3545,22 +3585,32 @@ int main() {
     const auto fixture = makePayloadFixture();
     oGenerationExtendArray = [](void*, uint32_t) { ++foreignGrows; };
     oGenerationAddChild = [](void*, void*, uint8_t) -> uint32_t { ++foreignAdds; return 0; };
-    alignas(16) static uint8_t unmanaged[0x40]{};
+    alignas(16) static uint8_t unmanaged[0x40]{}, foreignObject[0x90]{}, constraint[0x90]{};
+    // The MtObject-teardown and resource-release detours are engine-wide too.
+    static std::atomic<int> foreignTeardowns{0}, foreignReleases{0};
+    oInitializeConstraint = +[](void*) {};
+    oConstraintObjectDtor = +[](void*) { ++foreignTeardowns; };
+    oGenerationResourceRelease = +[](void*) { ++foreignReleases; };
     std::atomic<bool> stop{false};
     std::thread caller([&] {
         for (int i = 0; i < 20000 && !stop; ++i) {
             GenerationExtendArray(unmanaged + 0x18, 8);
             GenerationAddChild(unmanaged, nullptr, 0);
+            ForgetConstraintObject(foreignObject);
+            GenerationResourceRelease(foreignObject);
         }
     });
     for (int frame = 0; frame < 200; ++frame) {
         LifetimeTrace_SaveSnapshot(0);                   // Registers the attack root.
-        assert(g_attackOwners.size() == 1);
+        assert(g_attackOwners.size() == 1 && g_attackOwnerCount == 1);
         LifetimeTrace_DropSnapshot(0);
         ForgetCurrentShotGenerations(fixture.id, fixture.shot); // Erases it again.
+        assert(!g_attackOwnerCount);
+        InitializeConstraint(constraint); ForgetConstraintObject(constraint);
     }
     stop = true; caller.join();
     assert(foreignGrows && foreignAdds && foreignGrows == foreignAdds);
+    assert(foreignTeardowns && foreignReleases && !g_constructedConstraints.count(constraint));
     releasePayloadFixture(fixture);
 }
 ''', sanitizers="thread")
