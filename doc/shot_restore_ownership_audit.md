@@ -137,8 +137,16 @@ regression verifies timer `11 -> 3 -> 4` across restore/replay, along with posit
 life, attack clocks and phase. `shot_cpu_restore.md` records the exact schema and
 deferred reference/topology fields. The timer divergence at frames 280/281 is
 still unresolved by the **live** restore path: the scalar, storage and registration
-stages remain unpublished until the callback/reference and execution graphs are
+stages remain unpublished until the complete dependency and execution graphs are
 restored coherently. The kernel test is not an in-game repair claim.
+
+The deeper common-reference audit and implementation now restore borrowed
+owner/target/attachment/callback addresses directly, all hit-history payloads and
+resource-backed command bindings/cursors. Snapshot unit-dependency leases protect
+their addresses, and staging checks retained birth identities before writing.
+No reference remapping or native setters are required. Pointee simulation-state
+restoration, derived references and reciprocal topology remain distinct work;
+see `shot_reference_restore.md` for native addresses and exact limits.
 
 Generation-layer verification: 66 Python regression tests, including the native
 ASan/UBSan generation scenarios, eight viewer tests, `make -j8` and
@@ -252,6 +260,25 @@ Active partial rebuilds also occur at `0x140161B30` and `0x1401B48E0`.
 Pointer-array growth at `0x140011660` frees old backing. Neither a resource-setter
 hook nor root-pointer equality establishes ownership closure.
 
+### Open Correctness Issue: Unsynchronized Attack-Owner Lookup
+
+Open as of 2026-11-09; correctness, not only performance. `GenerationExtendArray`
+detours the engine-wide `MtArray` growth routine `0x140011660`, and
+`GenerationAddChild` detours `nCollision::cCollisionNodeObject::addChild`
+(`0x1405A4420`). Both call `ManagedAttack`, which runs `g_attackOwners.find` and
+`g_shotDomains.find` without the recorder lock. Ghidra lists 57 call sites of
+`0x140011660`, including `sUnit::setUnitGroupBit`, collision
+`queueNodeForPostMove`/`enqueueContactNode`, BVH growth, `sShadow`, `rMetaSet`
+loading, `uMetaSet::createAllObject` and `sRemoteProcedure::addTemporary`.
+
+The main thread inserts into and erases from these maps under the unit fence
+(`ReadAttackCohort`, `ReleaseRetiredAttack`, `ForgetCurrentShotGenerations`).
+Any of those callers that runs on another thread during that window is a data race
+on an `std::unordered_map`, which is undefined behaviour. It has not been
+established which threads reach either routine. Do not add a thread-ID fast path
+until the owning thread of these maps is proven. Either establish that, or
+serialize the lookup with the mutations.
+
 External collision queues hold roots/owners and contact records. Historical
 cursor restoration with future queue/NodeList contents is invalid. Persistent
 collision closure or a verified drained/rebuild boundary is required.
@@ -277,3 +304,45 @@ Examples include ElementalSummonShot `+21E0`, MolecularShield `+2140`,
 MysticStareBomb constraint `+2190`, and WeaponCart constraint `+2140` plus twelve
 debris links at `+2290`. Raw suffix copying cannot substitute for dependency and
 constraint topology restoration.
+
+## Derived Reflection Coverage
+
+2026-11-09 follow-up: native reflection is not a universal suffix map. DTI
+`+30` gives instance extent, but property functions selectively emit descriptors.
+Hyper Mystic Blast vtable `140AD7680+18` uses inherited laser properties
+`140151980`, which expose head position and distance but omit its `2160` effect,
+`2168` activation, `216C` word and embedded `cAimF32` at `2170`.
+
+Property descriptors also do not establish ownership: constraint properties
+`1405EADD0` describe prev/next/joint references using the same class-reference
+attributes. Callback properties supply functions rather than a direct offset.
+Absence from reflection cannot justify copying a suffix as scalar-only state.
+
+Mystic Blast's exact `2140..21A0` suffix contains inherited laser head/distance,
+the borrowed secondary effect, activation state and inline cAimF32 values. No
+owning allocation or constraint was found in this particular suffix, so retained
+same-object copying is not intrinsically invalid. This is research, not a
+concrete-type restore whitelist. Other suffixes have different ownership.
+
+Setup `1401AB6D0` gives the secondary effect the actor owner, unlike the base
+callbacks owned by the shot. A search for effect owner==shot would miss it.
+Advance `1401AB510` changes that effect's Z scale and delta-time coefficient;
+pointer retention without effect-state rewind is insufficient. Move `1401AB5E0`
+also advances the inline controller. These are demonstrated remaining gameplay
+dependencies, not a requirement to rewind deep material internals.
+
+Constraint discovery can improve by observing common initializer `1405EC000`:
+RotateLimit constructor `1406F95A0` reaches it while bypassing base constructor
+`1401091C0`. Array constructions such as Spada Boomerang `1401B6D50` use
+`MtArray::initElements` with TSR stride `D0`. The current base-ctor registry is
+therefore not exhaustive; this evidence must inform the graph adapter before
+whole-shot publication is enabled.
+
+The follow-up implementation now hooks that initializer and observed primary
+`MtObject` teardown (`1409BFE90`), rather than only the base ctor/dtor. Immutable
+common-chain capture and a tested exact graph/cache stage are implemented in
+`lifetime_shot_constraints.inl`; see `shot_constraint_restore.md`. It preserves
+native order (including non-contiguous indices), performs no relink/sort/evaluation,
+and rejects missing lifetime or external-pose proof before writes. This closes
+the audited common graph component, not foreign physical-owner retention, derived
+constraint state or whole-shot publication.

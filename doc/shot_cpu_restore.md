@@ -11,13 +11,15 @@ live/quarantined code split. Buffer validation precedes every write; the return
 value is explicitly `ReviewedSubset`, not complete layout coverage.
 
 `StageShotCpuFields` selects the snapshot-owned body, validates its bounds, owner
-identity and rollback-slot lease, then calls the kernel. It neither reads saved
+identity and rollback-slot lease, then calls the kernel. Borrowed unit references
+must also match a retained identity in that slot's manifest, including its birth
+ID; an expired lease or reused address fails before writing. It neither reads saved
 pointees nor runs native callbacks, constructors, motion sampling, or simulation.
 It is not called by `Rollback_RestoreSnapshot` yet.
 
 The parent transaction must establish compatible retained model/work storage and
 resource bindings, restore reference and constraint graphs, and publish native
-registration/lifecycle coherently. Copying these scalar fields by itself does not
+registration/lifecycle coherently. Copying these fields by itself does not
 meet those requirements.
 
 ## Restored Fields
@@ -28,24 +30,37 @@ live. The schema is deliberately non-contiguous.
 | Range | CPU state |
 | --- | --- |
 | `08..10`, `28..2C` | Unit Rno/parameter and delta time, not lifecycle or membership |
-| `48..100` | Coordinate selectors, position/quaternion/scale and local/world matrices |
+| `40..100` | Borrowed coordinate parent, selectors, position/quaternion/scale and local/world matrices |
 | `55C..560`, `1180..11B0` | Motion interpolation attributes and root-motion scale/deltas |
 | `1240..1250`, `1260..129F` | Inline morph/plane/waist/foot/IK parameters; no shader/map owners |
-| `1300..1308`, `1310..1344` | Actor time coefficients and animation request/playback state |
-| `1350..1360`, `13C0`, `13C4..13D0`, `13E0..13E8` | Interpreter control bytes, compare/jump registers and loop state |
-| `1488..148C`, `1498..149C`, `14A0..14C0` | Attack reset/index, combo count, clocks and pending attack state |
-| `1DD0..1E30`, `1E48..1F50` | Inline cArm attachment parameters/joint selectors and four inline matrices |
+| `1300..1310`, `1310..1344` | Actor time coefficients, borrowed owner and animation request/playback state |
+| `1350..1380`, `1388..13B8`, `13C0`, `13C4..13D4`, `13D8..13E8` | Interpreter controls, resource mirrors and cursors, compare/jump/return state and loop state |
+| `1480..148C`, `1490..149C`, `14A0..14C0` | Borrowed attack owner/resource, reset/index, combo count, clocks and pending attack state |
+| Each `TargetInfo+08..18`, 96 records at `14C0`, stride `18` | Target pointer, hit count and hit time together; vtables preserved |
+| `1DD0..1F50` | Inline cArm parameters, borrowed self/attachment parents, joint selectors and four matrices |
 | `1F58..1F68` | Shot timer, delay, division-start time and active/watch flags |
+| `1F70..1FE0`, `2000..2038` | Fourteen callback references and seven borrowed unit references |
 | `1FE4..2000`, `2038..2058` | Gameplay/contact/end flags, division/durability/hit-clock/priority state |
 | `2078..20B8`, `20C0..20CC`, `20D0..20D4` | Life/vanish, movement/homing and contact-displacement state |
 | `2118..2133` | Animation-watch controls, phase/dispatch word and three child latches |
 
-For each of the eight motion slots (`560 + 180*i`), only `08..0E`, `10..74` and
-`80..E0` are copied. The checked `EaseCurve` is two floats, not a callback or
-pointer. Unknown padding, samplers, sequence bindings/history, work pointers and
-key counts/descriptor pointers are outside this scalar kernel. The existing
-character model-motion adapter demonstrates why sampler bindings and cursors need
-a separate resource-backed operation, not classification as arbitrary scalars.
+For each of the eight motion slots (`560 + 180*i`), playback/root history ranges
+`08..0E`, `10..74`, `80..E0` are copied. The checked `EaseCurve` is two floats.
+The two samplers at `E0` and `100` each restore `00..0C` and `10..1C`: track,
+frame cursor, segment pointer and metadata, not their unknown alignment words.
+`120..160` restores four sequence bindings and current/previous masks. `168..16C`
+restores channel count and `170..178` the descriptor binding. Owned work at `160`
+and key-data aliases at `178` remain the storage stage's responsibility.
+
+`setBlendNum` (`1405291E0`) proves the slot-zero key slab ownership and per-slot
+alias stride `modelKeyCount * 0C`. `setupMotionParam` (`14052A880`) binds sequence
+and key descriptors from motion resources. `updateFrame` (`14052BBD0`) moves
+current masks into previous masks and copies each key-work value `+4` into `+8`
+before `calcKeyFrame` (`1405260B0`) updates cursor/value. All three key-work words
+therefore rewind in the retained slab. `calcSequence` (`140526460`) reads resource
+sequence entries without publishing ownership. Sampler init/sample
+(`14079F7E0`/`14079F5D0`) likewise own no allocations. Motion-resource retention
+must precede these direct binding/cursor copies; no setup/move/update is invoked.
 
 Two flag words use masks: attack flag `149C` preserves the live `40` sound-emitted
 bit, and system flag `1FE0` preserves the live `10000000` sound-cookie bit. Sound
@@ -68,25 +83,26 @@ general audio event-deduplication implementation.
   (`1401CE040`) couple system flag `10000000` to the live sound references.
 - The checked `uCoord`, `uActorGameModel`, `cActorGameModelAnm`, `cAtkCtrl`,
   `uModel::Motion`, and `EaseCurve` layouts support the common scalar partition.
-  Resource-backed interpreter type/key/cursors and return flags/value are left
-  together for the reference adapter rather than partly restoring them here.
+  Resource-backed interpreter type/key/cursors now restore together with their
+  mirrors after retained resource staging. The return value is a borrowed unit
+  pointer, not a scalar-only result. See `shot_reference_restore.md` for the deeper
+  assignment/cleanup/destruction audit and dependency retention.
 
 ## Publication Boundary
 
 These are deliberately **not** restored by the CPU kernel:
 
 - Unit lifecycle/category flags, intrusive links, group membership and shot ID/team.
-- Parent/owner/target/attachment references and all fourteen callback slots.
-- All 96 attack-history records. Each target pointer must rewind with its hit
-  count and time; copying counters while leaving the target live is incorrect.
-- Resource owners, command bindings/cursors, allocation bounds and work pointers.
+- Owned resource references, allocation bounds and work pointers (storage stage).
+- Interpreter self-owner, opaque words at `13B8`, `1478`, `1DC8` and padding.
 - Material/vjob/render ownership and payloads, sound cRefs, constraint links and
   the unreviewed concrete suffix after `2140`.
 
 The native common vanish path (`1401A0050`, emptiness test `1401C99F0`) can finish
-a shot when callback slots 1..13 are empty. Thus correct timer bytes alone cannot
-establish correct lifetime when the callback state belongs to the future. The
-registration stage also does not yet reconcile `sUnit` execution or constraints.
+a shot when callback slots 1..13 are empty. The callback pointers now rewind, but
+their pointees must also have their historical simulation state restored. The
+registration stage is separate from the tested `sUnit` execution/lifecycle stage;
+neither is published from production yet. Constraint repair is still unfinished.
 Those are remaining transaction work, not reasons to restore deep materials.
 
 ## Verification

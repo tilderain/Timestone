@@ -1255,7 +1255,14 @@ void Rollback_SaveSnapshot(int32_t frame)
                 frame, g_isResimulating ? 1 : 0, slot.localInput,
                 slot.remoteInput, slot.size);
     }*/
-    LifetimeTrace_SaveSnapshot(frame, slot.lifetime);
+    // Saved-shot restore is unpublished, so whole-shot bytes only serve the
+    // historical snapdump recorder. Retention leases are captured either way.
+#if ROLLBACK_SNAPDUMP_ENABLED
+    const auto shotPayload = captureSnapDump ? LifetimeShotPayload::Capture : LifetimeShotPayload::Omit;
+#else
+    const auto shotPayload = LifetimeShotPayload::Omit;
+#endif
+    LifetimeTrace_SaveSnapshot(frame, slot.lifetime, shotPayload);
 #if ROLLBACK_SNAPDUMP_ENABLED
     if (captureSnapDump) {
         LagDiagnosticScope dumpDiagnostic(LagMetric::SnapDump);

@@ -233,6 +233,15 @@ void HookLogTryFlush()
 	ReleaseSRWLockExclusive(&g_hookLogLock);
 }
 
+void HookLogTryWriteFatal(const char* text)
+{
+	if (!text || !TryAcquireSRWLockExclusive(&g_hookLogLock))
+		return;
+	HookLogAppendLocked(text, strlen(text));
+	HookLogFlushLocked();
+	ReleaseSRWLockExclusive(&g_hookLogLock);
+}
+
 static void HookLogWriteConsoleLocked(const char* data, size_t length)
 {
 	if (!g_hookConsoleOutputEnabled)

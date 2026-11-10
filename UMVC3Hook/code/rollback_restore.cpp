@@ -441,6 +441,7 @@ void Rollback_RestoreSnapshot(int32_t frame)
         return;
     }
 
+    LifetimeTrace_WaitForRenderWorker();
     LifetimeTrace_CheckSnapshot(frame);
     uint32_t savedGlobalRng[4] = {};
     bool foundGlobalRng = false;
