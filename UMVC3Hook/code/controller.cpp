@@ -1968,16 +1968,30 @@ static void __fastcall hkprocessFrameInput(uint64_t cChrInput)
     int32_t lookupFrame = g_isResimulating ? g_resimulateCurrentFrame
                                             : GetGameFrameCount();
 
+    // A helper or clone (mChrF bit 0x1000: Felicia's Kitty Helper, shadows) has
+    // no pad. The game builds its input from its parent through virtual +0x328
+    // and then runs the shared facing swap. Injecting the player's timeline
+    // input there handed the helper the player's own buttons: it jumped and
+    // could X-Factor on any press, and lost the forward input it leaves with.
+    static constexpr uint32_t CCHR_FLAGS_OFFSET = 0x14F0;
+    static constexpr uint32_t CHR_FLAG_PARENT_DRIVEN_INPUT = 0x1000;
+    const bool parentDrivenInput = character &&
+        (*(uint32_t*)(character + CCHR_FLAGS_OFFSET) & CHR_FLAG_PARENT_DRIVEN_INPUT);
+
     FrameInputRemapContext context = {
         teamIdx, teamIdx, lookupFrame, 0, false, false
     };
     FrameInputRemapContext* previousContext = g_frameInputRemapContext;
-    if (Netplay_IsActive() && character && lookupFrame >= 0)
-        g_frameInputRemapContext = &context;
+    // Cleared, not inherited, for a parent-driven object: no outer context may
+    // inject into it either.
+    g_frameInputRemapContext =
+        Netplay_IsActive() && character && lookupFrame >= 0 && !parentDrivenInput
+            ? &context : (parentDrivenInput ? nullptr : previousContext);
     oprocessFrameInput(cChrInput);
     g_frameInputRemapContext = previousContext;
 
-    if (!character || lookupFrame < 0)
+    // Its input is derived state, not a player's: nothing to record or replay.
+    if (!character || lookupFrame < 0 || parentDrivenInput)
         return;
 
     // Respect native gameplay eligibility before offline injection or diagnostics.
