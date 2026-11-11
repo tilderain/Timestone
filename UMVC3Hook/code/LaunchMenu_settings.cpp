@@ -43,7 +43,7 @@ bool g_savedDarkMode = true;
 char g_gameResolution[64] = {};
 bool g_gameFullscreen = false;
 bool g_displayChanged = false;
-std::atomic<bool> g_vsyncEnabled { false };
+std::atomic<bool> g_vsyncEnabled { true };
 bool g_vsyncChanged = false;
 
 bool GetGameConfigPath(wchar_t (&path)[MAX_PATH])
@@ -129,7 +129,7 @@ void LoadSettings()
     GetSettingsPath(path, sizeof(path));
     g_darkMode = GetPrivateProfileIntA("General", "LaunchMenuDarkMode", 1, path) != 0;
     g_savedDarkMode = g_darkMode;
-    g_vsyncEnabled.store(GetPrivateProfileIntA("Display", "VSync", 0, path) != 0);
+    g_vsyncEnabled.store(GetPrivateProfileIntA("Display", "VSYNC_", 1, path) != 0);
     g_settingsLoaded = true;
 }
 
@@ -438,7 +438,7 @@ bool SetLaunchVsyncEnabled(bool enabled)
 {
     char path[MAX_PATH] = {};
     GetSettingsPath(path, sizeof(path));
-    if (!IniSafe_WriteString("Display", "VSync", enabled ? "1" : "0", path))
+    if (!IniSafe_WriteString("Display", "VSYNC_", enabled ? "1" : "0", path))
         return false;
     g_vsyncEnabled.store(enabled);
     return true;
