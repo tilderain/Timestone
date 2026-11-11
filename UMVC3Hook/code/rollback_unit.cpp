@@ -150,7 +150,6 @@ ShotSpanKind ShotSpanKindOf(const char* name)
 struct ShotState {
     uint64_t id = 0;
     // Omit: spans/payload are absent, not empty history. Generations are always set.
-    RollbackUnitShotPayload payloadState = RollbackUnitShotPayload::Omit;
     std::vector<ShotSpan> spans;
     std::vector<uint8_t> payload;
     struct GenerationRef { size_t index; uint64_t id; };
@@ -231,7 +230,6 @@ struct RollbackUnitSnapshot {
     size_t spanCount() const { return spans.size(); }
     size_t payloadBytes() const { return payload.size(); }
     // Shot bodies/spans and constraint images. Omit leaves constraints incomplete.
-    RollbackUnitShotPayload shotPayload = RollbackUnitShotPayload::Omit;
     std::vector<ShotState> shots;
     // Shot records not in use this frame. Kept, never destroyed, so their
     // buffers survive a volley ending and the next one starting.
@@ -403,7 +401,7 @@ Deleting RegisterDeleting(void* object);
 void CollectShotGenerations();
 bool HasRetiredShotGenerations(uint64_t owner);
 void ForgetCurrentShotGenerations(uint64_t owner, void* address);
-void CaptureShotGenerations(const Identity& shot, uint32_t bit, ShotState& saved, RollbackUnitShotPayload payload);
+void CaptureShotGenerations(const Identity& shot, uint32_t bit, ShotState& saved);
 void DropShotGenerations(const RollbackUnitSnapshot* saved, uint32_t bit);
 size_t ShotKeyframeBytes(const Identity& shot);
 void MarkAbandonedModels(int32_t frame);
@@ -1775,8 +1773,7 @@ void RollbackUnit_DropSnapshot(int32_t frame)
     ReleaseSRWLockExclusive(&g_lock);
 }
 
-void RollbackUnit_SaveSnapshot(int32_t frame, std::shared_ptr<RollbackUnitSnapshot>& storage,
-                                RollbackUnitShotPayload shotPayload)
+void RollbackUnit_SaveSnapshot(int32_t frame, std::shared_ptr<RollbackUnitSnapshot>& storage)
 {
     RollbackUnitFailureScope failureScope("snapshot.capture", nullptr, 0, frame);
     if constexpr (!ROLLBACK_UNIT_ENABLED) return;
@@ -1810,7 +1807,6 @@ void RollbackUnit_SaveSnapshot(int32_t frame, std::shared_ptr<RollbackUnitSnapsh
     manifest.frame = frame;
     manifest.birthWatermark = g_nextId;
     manifest.members.clear();
-    manifest.shotPayload = shotPayload;
     g_retentionOpen = true;
     // Production drops the slot first; then no lease bit for it remains, because
     // only this function sets them. Direct saves, same-frame replacement and ring
@@ -1877,24 +1873,22 @@ void RollbackUnit_SaveSnapshot(int32_t frame, std::shared_ptr<RollbackUnitSnapsh
     // Reuse the snapshot-owned storage and copy each native CPU span once.
     // Dynamic DTI dispatch, when needed, stays outside the recorder lock.
     // Generation leases are taken whether or not the payload bytes are copied.
-    const bool capturePayload = shotPayload == RollbackUnitShotPayload::Capture;
     size_t shotIndex = 0;
     for (const auto& identity : manifest.members) {
         if (!unitGuard.manager || identity.kind != Kind::Shot) continue;
         RollbackUnitFailureScope shotScope("shot.capture", identity.object, identity.id, frame);
         auto& saved = manifest.shots[shotIndex++];
         saved.id = identity.id;
-        saved.payloadState = shotPayload;
         saved.spans.clear(); saved.payload.clear();
         saved.generations.clear();
         stage.Next(LagMetric::SaveUnitShotCopy); // One sample per shot from here.
         // A new record: one allocation for the body and its model buffers
         // instead of regrowing through every append.
-        if (capturePayload && !saved.payload.capacity()) {
+        if (!saved.payload.capacity()) {
             saved.payload.reserve(size_t(identity.extent) * 3 + 0x4000);
             saved.spans.reserve(32);
         }
-        const bool body = capturePayload ? VisitShotMemory(identity,
+        const bool body = VisitShotMemory(identity,
             [](void* context, const char* name, const void* address, uint64_t ownerSlot,
                uint64_t vtable, const void* bytes, size_t size) {
                 auto& saved = *static_cast<ShotState*>(context);
@@ -1903,19 +1897,12 @@ void RollbackUnit_SaveSnapshot(int32_t frame, std::shared_ptr<RollbackUnitSnapsh
                 saved.spans.back().kind = ShotSpanKindOf(name);
                 const auto* data = static_cast<const uint8_t*>(bytes);
                 saved.payload.insert(saved.payload.end(), data, data + size);
-            }, &saved) : ShotBodyExtent(identity) != 0;
+            }, &saved);
         stage.Next(LagMetric::SaveUnitGenerations);
-        if (body) CaptureShotGenerations(identity, uint32_t(1) << slot, saved, shotPayload);
+        if (body) CaptureShotGenerations(identity, uint32_t(1) << slot, saved);
     }
     stage.Next(LagMetric::SaveUnitConstraints);
-    if (capturePayload) CaptureShotConstraints(manifest);
-    else {
-        // Not captured, which is distinct from a captured empty graph. Stages
-        // check shotPayload first; incomplete also rejects any unguarded reader.
-        manifest.constraints.clear();
-        manifest.constraintsComplete = false;
-        manifest.constraintWatermark = 0;
-    }
+    CaptureShotConstraints(manifest);
     stage.Finish();
     AcquireSRWLockExclusive(&g_lock);
     manifest.birthWatermark = g_nextId; // Include pre-existing owners adopted during capture.
@@ -1938,12 +1925,6 @@ RollbackUnitSnapshotCounts RollbackUnit_VisitSnapshot(int32_t frame, const Rollb
     const int64_t capture[] = {frame, available ? 1 : 0,
         observeShots ? int64_t(int32_t(g_context.load(std::memory_order_relaxed) >> 1)) : -1};
     visitor(context, "diagnostic.lifetime", nullptr, 0, 0, capture, sizeof(capture));
-    const bool shotPayloadCaptured = available && snapshot->shotPayload == RollbackUnitShotPayload::Capture;
-    if (available && !shotPayloadCaptured) {
-        // Distinguish "not captured" from a captured frame without shot spans.
-        const uint64_t omitted[] = {snapshot->shots.size()};
-        visitor(context, "diagnostic.lifetime.shot_payload_omitted", nullptr, 0, 0, omitted, sizeof(omitted));
-    }
     std::vector<const EffectState*> effects;
     for (size_t i = 0; available && i < snapshot->effectCount(); ++i) effects.push_back(&snapshot->effects[i]);
     std::sort(effects.begin(), effects.end(), [](auto a, auto b) { return a->id < b->id; });
@@ -1970,7 +1951,7 @@ RollbackUnitSnapshotCounts RollbackUnit_VisitSnapshot(int32_t frame, const Rollb
         visitor(context, name, nullptr, 0, saved.birthVtable, metadata, sizeof(metadata));
         ++counts.shots;
     }
-    if (shotPayloadCaptured) for (const auto& shot : snapshot->shots) {
+    if (available) for (const auto& shot : snapshot->shots) {
         for (const auto& span : shot.spans) {
             char name[64];
             if (span.element != UINT32_MAX)
@@ -1985,11 +1966,11 @@ RollbackUnitSnapshotCounts RollbackUnit_VisitSnapshot(int32_t frame, const Rollb
                     shot.payload.data() + span.memory.offset, span.memory.size);
         }
     }
-    if (shotPayloadCaptured && (!snapshot->constraints.empty() || !snapshot->constraintsComplete)) {
+    if (available && (!snapshot->constraints.empty() || !snapshot->constraintsComplete)) {
         const uint64_t metadata[] = {uint64_t(snapshot->constraintsComplete), snapshot->constraints.size()};
         visitor(context, "diagnostic.lifetime.constraints", nullptr, 0, 0, metadata, sizeof(metadata));
     }
-    if (shotPayloadCaptured) for (const auto& node : snapshot->constraints) {
+    if (available) for (const auto& node : snapshot->constraints) {
         char name[64];
         std::snprintf(name, sizeof(name), "lifetime.constraint.%llu.common", (unsigned long long)node.construction);
         visitor(context, name, node.object, 0, Read<uintptr_t>(node.image, 0), node.image, sizeof(node.image));

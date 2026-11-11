@@ -530,18 +530,12 @@ SnapshotManifest& TestManifest(size_t slot) {
     if (!testSnapshots[slot]) testSnapshots[slot] = std::make_shared<RollbackUnitSnapshot>();
     return *testSnapshots[slot];
 }
-// Staging/dump checks need full capture. Retention tests also run with the
-// production default (payload omitted) through the "omit" native argument.
-RollbackUnitShotPayload g_testShotPayload = RollbackUnitShotPayload::Capture;
-void UseTestPayloadArgument(int argc, char** argv) {
-    if (argc > 1 && !std::strcmp(argv[1], "omit")) g_testShotPayload = RollbackUnitShotPayload::Omit;
+void UseTestPayloadArgument(int, char**) {} // Formerly selected the omit-payload mode.
+void SaveTestSnapshot(int32_t frame, std::shared_ptr<RollbackUnitSnapshot>& storage) {
+    RollbackUnit_SaveSnapshot(frame, storage);
 }
-void SaveTestSnapshot(int32_t frame, std::shared_ptr<RollbackUnitSnapshot>& storage,
-                      RollbackUnitShotPayload payload = g_testShotPayload) {
-    RollbackUnit_SaveSnapshot(frame, storage, payload);
-}
-void SaveTestSnapshot(int32_t frame, RollbackUnitShotPayload payload = g_testShotPayload) {
-    SaveTestSnapshot(frame, testSnapshots[(frame % ROLLBACK_WINDOW + ROLLBACK_WINDOW) % ROLLBACK_WINDOW], payload);
+void SaveTestSnapshot(int32_t frame) {
+    SaveTestSnapshot(frame, testSnapshots[(frame % ROLLBACK_WINDOW + ROLLBACK_WINDOW) % ROLLBACK_WINDOW]);
 }
 '''
 
@@ -1334,7 +1328,7 @@ int main(int argc, char** argv) {
     assert(resourceAdds == 0 && resourceReleases == 7);
     Destroyed("fixture_dispose", effect, Find(effect, false)->id); std::free(effect);
 }
-''', arguments=[(), ("omit",)])
+''')
 
     def test_retiring_effect_restore(self):
         self.compile_run(True, CHECKS[:CHECKS.index("int main() {")] + r'''
@@ -1544,7 +1538,7 @@ int main(int argc, char** argv) {
     assert(deleted == before + 1 && g_quarantined == 0);
     assert(!g_recording && !g_count);
 }
-''', arguments=[(), ("omit",)])
+''')
 
     def test_borrowed_effect_owner_lifetime(self):
         self.compile_run(True, CHECKS[:CHECKS.index("int main() {")] + r'''
@@ -1934,7 +1928,7 @@ int main(int argc, char** argv) {
     assert(disposedGraphs.size() == 1);
     (void)destroyed;
 }
-''', arguments=[(), ("omit",)])
+''')
 
     def test_shared_snapshot_history_outlives_rollback_window(self):
         self.compile_run(True, CHECKS[:CHECKS.index("int main() {")] + r'''
@@ -2407,7 +2401,7 @@ int main(int argc, char** argv) {
     { UnitGuard fence; nativeDelete(replayed, 1); }
     assert(deletes == 2 && releases == 2 && !g_quarantined && !kills && effectDeletes == 1);
 }
-''', arguments=[(), ("omit",)])
+''')
 
     def test_shot_cpu_kernel_byte_coverage_and_bounds(self):
         self.compile_run(True, CHECKS[:CHECKS.index("int main() {")] + r'''
@@ -3323,7 +3317,6 @@ int main() {
 """)
         # Unsupported or inconsistent cases stop the transaction before any shot byte moves.
         invalid_cases = (
-            "RollbackUnit_SaveSnapshot(0, RollbackUnitShotPayload::Omit); future();",
             "RollbackUnit_SaveSnapshot(0); future(); Find(a, false)->snapshots = 0;",
             "RollbackUnit_SaveSnapshot(0); future(); InitializeConstraint(constraint);",
             "RollbackUnit_SaveSnapshot(0); future(); Write(constraint, 0x40, uintptr_t(0xBAD));",
@@ -3422,7 +3415,6 @@ int main() {
     reset();
     auto& manifest = TestManifest(3);
     manifest.valid = true; manifest.frame = 3;
-    manifest.shotPayload = RollbackUnitShotPayload::Capture;
     manifest.effects.resize(1);
     auto& effect = manifest.effects[0]; effect = {};
     effect.object = (void*)0xDEAD; effect.id = 7;
@@ -3467,88 +3459,6 @@ int main() {
     assert(regions[7].name == "observed.shot.9.model.keyframes" && regions[7].bytes.size() == sizeof(keys));
 }
 ''')
-
-    def test_shot_payload_omit_and_capture_share_retention(self):
-        self.compile_run(True, CHECKS[:CHECKS.index("int main() {")] + SHOT_PAYLOAD_FIXTURE + r'''
-void record(void* context, const char* name, const void*, uint64_t, uint64_t, const void* bytes, size_t size) {
-    static_cast<std::vector<std::string>*>(context)->push_back(name);
-    if (!std::strcmp(name, "diagnostic.lifetime.shot_payload_omitted"))
-        assert(size == 8 && Read<uint64_t>(bytes, 0) == 1); // Shots whose payload is absent.
-}
-bool has(const std::vector<std::string>& names, const std::string& prefix) {
-    return std::any_of(names.begin(), names.end(), [&](const std::string& name) { return !name.rfind(prefix, 0); });
-}
-int main() {
-    for (const auto mode : {RollbackUnitShotPayload::Omit, RollbackUnitShotPayload::Capture}) {
-        const bool capture = mode == RollbackUnitShotPayload::Capture;
-        const auto fixture = makePayloadFixture();
-        RollbackUnit_SaveSnapshot(0, mode);
-        const auto& manifest = TestManifest(0);
-        assert(manifest.valid && manifest.shotPayload == mode);
-        // Identity, dependency and generation leases plus withdrawal metadata are payload-independent.
-        assert(Find(fixture.shot, false)->snapshots == 1);
-        assert(Find(fixture.other, false)->snapshots == 1 && Find(fixture.other, false)->dependencies == 1);
-        assert(manifest.shotManager == shots && manifest.shotCursor == 5 && manifest.birthWatermark == g_nextId);
-        assert(manifest.shots.size() == 1 && manifest.shots[0].id == fixture.id);
-        assert(manifest.shots[0].payloadState == mode);
-        assert(manifest.shots[0].generations.size() == ShotDomainCount);
-        for (const auto& ref : manifest.shots[0].generations)
-            assert(g_shotGenerations[ref.index].id == ref.id && (g_shotGenerations[ref.index].snapshots & 1));
-        assert(g_attackOwners.count(fixture.root)); // Attack cohort ownership bookkeeping.
-        // Only the whole-shot bytes and constraint images follow the mode.
-        const auto& spans = manifest.shots[0].spans;
-        assert(spans.empty() == !capture && manifest.shots[0].payload.empty() == !capture);
-        if (capture) {
-            assert(!std::strcmp(spans[0].name, "body") && spans[0].memory.size == 0x2200);
-            assert(std::any_of(spans.begin(), spans.end(),
-                [](const ShotSpan& span) { return !std::strcmp(span.name, "collision.root"); }));
-            assert(manifest.constraints.size() == 1 && manifest.constraintsComplete);
-        } else {
-            assert(manifest.constraints.empty() && !manifest.constraintsComplete);
-        }
-        std::vector<std::string> names;
-        const auto counts = RollbackUnit_VisitSnapshot(0, &manifest, false, record, &names);
-        const std::string shot = "lifetime.shot." + std::to_string(fixture.id) + ".";
-        assert(counts.shots == 1 && has(names, shot + "identity"));
-        assert(has(names, "diagnostic.lifetime.shot_payload_omitted") == !capture);
-        assert(has(names, shot + "body") == capture && has(names, shot + "collision.root") == capture);
-        assert(has(names, "lifetime.constraint.") == capture);
-        // Replacing the same frame reports the new mode, never stale bytes from the old one.
-        RollbackUnit_SaveSnapshot(0, capture ? RollbackUnitShotPayload::Omit : RollbackUnitShotPayload::Capture);
-        assert(TestManifest(0).shotPayload != mode && TestManifest(0).shots[0].payloadState != mode);
-        assert(TestManifest(0).shots[0].spans.empty() == capture);
-        assert(Find(fixture.other, false)->dependencies == 1);
-        releasePayloadFixture(fixture);
-    }
-}
-''')
-
-    def test_shot_stages_reject_omitted_payload(self):
-        stages = [
-            ("StageShotGenerationStorage(*owner, manifest.shots[0], 1);", "shot.storage.stage",
-             "saved.payloadState == RollbackUnitShotPayload::Capture"),
-            ("{ UnitGuard fence; StageShotCpuFields(*owner, manifest.shots[0], 1); }", "shot.cpu.stage",
-             "saved.payloadState == RollbackUnitShotPayload::Capture"),
-        ]
-        cases = "\n".join(f"    if (stage == {i}) {call}" for i, (call, _, _) in enumerate(stages))
-        self.compile_run(True, CHECKS[:CHECKS.index("int main() {")] + SHOT_PAYLOAD_FIXTURE + r'''
-void reject(int) { std::_Exit(17); }
-int main(int, char** argv) {
-    const auto fixture = makePayloadFixture();
-    RollbackUnit_SaveSnapshot(0, RollbackUnitShotPayload::Omit);
-    const auto& manifest = TestManifest(0);
-    auto* owner = Find(fixture.shot, false);
-    const int stage = std::atoi(argv[1]);
-    std::signal(SIGABRT, reject);
-''' + cases + r'''
-    return 0; // Reaching here means an omitted payload was accepted.
-}
-''', expected_returncode=17, arguments=[[str(i)] for i in range(len(stages))])
-        for result, (_, phase, condition) in zip(self.last_results, stages):
-            with self.subTest(phase=phase):
-                self.assertIn("=== LIFETIME INVARIANT FAILURE ===", result.stderr)
-                self.assertIn(f"phase={phase}", result.stderr)
-                self.assertIn(f"reason=requirement failed: {condition}\n", result.stderr)
 
     def test_save_skips_clearing_only_after_drop(self):
         self.compile_run(True, CHECKS[:CHECKS.index("int main() {")] + SHOT_PAYLOAD_FIXTURE + r'''
@@ -3774,14 +3684,11 @@ int main() {
         snapshot = (ROOT / "UMVC3Hook/code/rollback_snapshot.cpp").read_text()
         save = snapshot[snapshot.index("void Rollback_SaveSnapshot("):snapshot.index("void Rollback_UpdateRemoteInput(")]
         self.assertLess(save.index("RollbackUnit_DropSnapshot(frame)"), save.index("Rollback_BuildRegions("))
-        call = "RollbackUnit_SaveSnapshot(frame, slot.lifetime, shotPayload)"
+        call = "RollbackUnit_SaveSnapshot(frame, slot.lifetime)"
         self.assertGreater(save.index(call), save.index("slot.remoteInput ="))
         self.assertLess(save.index(call), save.index("SnapDump_CaptureSnapshot(slot)"))
         # Historical capture, not a later dump request, selects whole-shot payload.
         self.assertIn("const bool captureSnapDump = SnapDump_CaptureEnabled();", save)
-        # Saved-shot restore reads the payload, so production captures it on every save.
-        self.assertIn("SAVED_SHOT_RESTORE_ENABLED || captureSnapDump", save)
-        self.assertIn("SAVED_SHOT_RESTORE_ENABLED ? RollbackUnitShotPayload::Capture : RollbackUnitShotPayload::Omit", save)
         self.assertLess(save.index("RollbackUnit_DropSnapshot(frame)"), save.index("if (count == 0) return;"))
         self.assertIn("&sharedCapacity, &slot.lifetime", save)
         self.assertIn("std::shared_ptr<RollbackUnitSnapshot> lifetime;",

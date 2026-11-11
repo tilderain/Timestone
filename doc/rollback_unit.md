@@ -175,30 +175,14 @@ logical-capacity/dependency closure for every concrete shot's derived teardown.
 
 ### Shot Payload Capture
 
-`RollbackUnit_SaveSnapshot` takes `RollbackUnitShotPayload::{Omit, Capture}`.
-The payload is the whole-shot bytes: body, model joint/depth/interpolation/motion
-work/keyframe spans, collision root/entry/wrapper/primitive spans, and constraint
-node images. Its only readers are the unpublished saved-shot stages and historical
-snapdump, so `Rollback_SaveSnapshot` passes `Capture` exactly when
-`SnapDump_CaptureEnabled()` (`EnableSnapDumpWrites`) is on for the session, not
-only once a dump is requested. Every other save omits it.
+Every save captures the whole-shot bytes: body, model joint/depth/interpolation/
+motion work/keyframe spans, collision root/entry/wrapper/primitive spans, and
+constraint node images. Saved-shot restore and the snapdump recorder read them.
 
-Omission never changes retention. Identity leases, every ownership generation and
-its slot mask, attack-cohort/COW bookkeeping, borrowed-unit and constraint-model
-dependency leases, the shot-world metadata used by future-shot withdrawal, and all
-effect state and payloads are captured in both modes.
-
-Omitted is recorded explicitly, not as empty history: `RollbackUnitSnapshot::shotPayload`
-and each `ShotState::payloadState` say `Omit`, constraints are marked incomplete,
-and dump export emits `diagnostic.lifetime.shot_payload_omitted` (count of shots)
-without shot span or constraint records. Each staging stage requires `Capture`
-first and fails with `requirement failed: ... == RollbackUnitShotPayload::Capture`.
-Wiring saved-shot restore into production therefore requires saving with
-`Capture`. Production snapdumps are unchanged, since writes require capture.
-
-Regressions save one fixture in both modes, run withdrawal, delayed shot/model
-destruction, effect restore and the shared graph transaction under both, and
-check that all five stages reject an omitted payload with that reason.
+An earlier `RollbackUnitShotPayload::Omit` mode skipped those copies while shots
+were only withdrawn on rollback, never restored. It became unreachable once
+saved-shot restore shipped and was removed, with the per-stage checks and the
+`diagnostic.lifetime.shot_payload_omitted` dump record that existed for it.
 
 ### Registry And Generation Indexes
 
@@ -334,8 +318,7 @@ restore bodies, constraints or scheduler membership, or mark retained shots live
 
 2026-11-10. `RollbackUnit_RestoreShots` (`rollback_unit_shot_restore.inl`) is called by
 `Rollback_RestoreSnapshot` after future-shot withdrawal and effect restore, and
-startup reports `saved_shot_restore=1`. Production saves now use
-`RollbackUnitShotPayload::Capture` whenever `SAVED_SHOT_RESTORE_ENABLED` is set. A
+startup reports `saved_shot_restore=1`. Production saves always capture the shot payload. A
 target frame that held no shots returns before any work.
 
 For each shot in the target snapshot it runs, in order: the storage stage, the

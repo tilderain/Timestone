@@ -107,7 +107,6 @@ ShotCpuRestoreStatus RestoreShotCpuFields(void* destination, size_t destinationS
 [[maybe_unused]] ShotCpuRestoreStatus StageShotCpuFields(const Identity& owner, const ShotState& saved, uint32_t bit)
 {
     RollbackUnitFailureScope failureScope("shot.cpu.stage", owner.object, owner.id);
-    LIFE_REQUIRE(saved.payloadState == RollbackUnitShotPayload::Capture);
     // The owner's identity and lease were checked by RollbackUnit_RestoreShots.
     const ShotSpan* body = &ShotBodySpan(saved, owner.object);
     LIFE_REQUIRE(body->memory.size >= ShotCpuCommonSize && body->memory.size <= owner.extent);

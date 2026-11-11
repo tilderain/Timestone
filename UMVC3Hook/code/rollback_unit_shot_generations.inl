@@ -825,10 +825,8 @@ void AppendGenerationSpan(ShotState& saved, const char* name, void* address, siz
     const auto* bytes = static_cast<const uint8_t*>(address);
     saved.payload.insert(saved.payload.end(), bytes, bytes + size);
 }
-// Leases every ownership domain for this snapshot. Collision span bytes are
-// copied only with RollbackUnitShotPayload::Capture; validation runs either way.
-void CaptureShotGenerations(const Identity& owner, uint32_t bit, ShotState& saved,
-                            RollbackUnitShotPayload payload)
+// Leases every ownership domain for this snapshot and copies its collision spans.
+void CaptureShotGenerations(const Identity& owner, uint32_t bit, ShotState& saved)
 {
     RollbackUnitFailureScope failureScope("shot.generations.capture", owner.object, owner.id);
     // One lookup for all domains: element references survive later insertions.
@@ -863,19 +861,18 @@ void CaptureShotGenerations(const Identity& owner, uint32_t bit, ShotState& save
             const AttackCohort* cohort = generation.attack.get();
             void* root = cohort->root->object;
             const auto slot = uint16_t(domain - size_t(ShotDomain::Attack0));
-            const bool copy = payload == RollbackUnitShotPayload::Capture;
-            if (copy) {
+            {
                 AppendGenerationSpan(saved, "collision.root", root, 0xE0, nullptr, slot);
                 AppendGenerationSpan(saved, "collision.entries", cohort->array->data,
                     size_t(Read<uint32_t>(root, 0x24)) * 8, static_cast<uint8_t*>(root) + 0x30, slot);
             }
             for (size_t element = 0; element < cohort->entries.size(); ++element) {
                 const auto& entry = cohort->entries[element];
-                if (copy && entry.wrapper) AppendGenerationSpan(saved, "collision.wrapper", entry.wrapper->object,
+                if (entry.wrapper) AppendGenerationSpan(saved, "collision.wrapper", entry.wrapper->object,
                     0x60, nullptr, slot, uint32_t(element));
                 if (entry.primitive) {
                     const uint32_t type = Read<uint32_t>(entry.primitive->object, 8);
-                    if (copy) AppendGenerationSpan(saved, "collision.primitive", entry.primitive->object,
+                    AppendGenerationSpan(saved, "collision.primitive", entry.primitive->object,
                         type == 5 ? 0x70 : 0xB0, nullptr, slot, uint32_t(element));
                 }
             }
@@ -893,7 +890,6 @@ void CaptureShotGenerations(const Identity& owner, uint32_t bit, ShotState& save
 {
     RollbackUnitFailureScope failureScope("shot.storage.stage", owner.object, owner.id);
     UnitGuard fence;
-    LIFE_REQUIRE(saved.payloadState == RollbackUnitShotPayload::Capture);
     LIFE_REQUIRE(saved.id == owner.id && (owner.snapshots & bit) && saved.generations.size() == ShotDomainCount);
     bool domains[ShotDomainCount]{};
     for (const auto& ref : saved.generations) {

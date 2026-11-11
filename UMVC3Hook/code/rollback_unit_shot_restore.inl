@@ -87,7 +87,7 @@ void RollbackUnit_RestoreShots(int32_t frame)
         ReleaseSRWLockExclusive(&g_lock);
         return;
     }
-    LIFE_REQUIRE(saved->shotPayload == RollbackUnitShotPayload::Capture && saved->thread == GetCurrentThreadId() &&
+    LIFE_REQUIRE(saved->thread == GetCurrentThreadId() &&
         shotFence.manager && saved->shotManager == shotFence.manager);
     for (const auto& shot : saved->shots) {
         const auto member = std::find_if(saved->members.begin(), saved->members.end(),

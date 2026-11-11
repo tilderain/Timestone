@@ -38,16 +38,8 @@ bool RollbackUnit_FinishCapture();
 // Snapshot census, generation leases, and shared graph/scheduler restoration.
 void RollbackUnit_DropSnapshot(int32_t frame);
 struct RollbackUnitSnapshot;
-// Whole-shot payload bytes: bodies, model/collision spans and constraint images.
-// Saved-shot restore and historical snapdump read them; Omit skips the copies
-// and is only valid while SAVED_SHOT_RESTORE_ENABLED is off. Identity/generation leases, ownership/COW
-// bookkeeping, dependency leases, effect payloads and future-shot withdrawal
-// metadata are captured either way. An omitted payload is recorded as such; the
-// restore stages reject it rather than treating it as an empty historical state.
-enum class RollbackUnitShotPayload : uint8_t { Omit, Capture };
 // Owned by RollbackSnapshotSlot; snapdump shares the same capture, not its leases.
-void RollbackUnit_SaveSnapshot(int32_t frame, std::shared_ptr<RollbackUnitSnapshot>& storage,
-                                RollbackUnitShotPayload shotPayload);
+void RollbackUnit_SaveSnapshot(int32_t frame, std::shared_ptr<RollbackUnitSnapshot>& storage);
 void RollbackUnit_CheckSnapshot(int32_t frame);
 void RollbackUnit_ClearSnapshots();
 void RollbackUnit_RestoreEffects(int32_t frame);
@@ -73,8 +65,6 @@ using RollbackUnitSnapshotVisitor = void (*)(void* context, const char* name,
     const void* bytes, size_t size);
 // Dump-time only, at a quiescent fence. Reads snapshot-owned bytes without
 // dereferencing historical native pointers. Optional shot/model observations
-// describe the dump-time world, not the requested snapshot frame. A snapshot
-// saved with RollbackUnitShotPayload::Omit emits "diagnostic.lifetime.shot_payload_omitted"
-// and no shot span or constraint records.
+// describe the dump-time world, not the requested snapshot frame.
 RollbackUnitSnapshotCounts RollbackUnit_VisitSnapshot(int32_t frame, const RollbackUnitSnapshot* snapshot,
     bool observeShots, RollbackUnitSnapshotVisitor visitor, void* context);

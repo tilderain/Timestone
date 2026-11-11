@@ -1306,17 +1306,9 @@ void Rollback_SaveSnapshot(int32_t frame)
                 frame, g_isResimulating ? 1 : 0, slot.localInput,
                 slot.remoteInput, slot.size);
     }*/
-    // Saved-shot restore and the historical snapdump recorder read whole-shot
-    // bytes. Retention leases are captured either way.
-#if ROLLBACK_SNAPDUMP_ENABLED
-    const auto shotPayload = SAVED_SHOT_RESTORE_ENABLED || captureSnapDump
-        ? RollbackUnitShotPayload::Capture : RollbackUnitShotPayload::Omit;
-#else
-    const auto shotPayload = SAVED_SHOT_RESTORE_ENABLED ? RollbackUnitShotPayload::Capture : RollbackUnitShotPayload::Omit;
-#endif
     {
         LagDiagnosticScope lifetimeDiagnostic(LagMetric::SaveLifetime);
-        RollbackUnit_SaveSnapshot(frame, slot.lifetime, shotPayload);
+        RollbackUnit_SaveSnapshot(frame, slot.lifetime);
     }
 #if ROLLBACK_SNAPDUMP_ENABLED
     if (captureSnapDump) {
