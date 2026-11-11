@@ -320,7 +320,7 @@ int main() {
         self.assertLess(body.index("SnapshotReuse_BeginRestore()"), body.index("std::memcpy("))
         self.assertIn("if (copySize == slot.regions[i].size) SnapshotReuse_RegionRestored(i);", body)
         self.assertGreater(body.index("SnapshotReuse_EndRestore(slot.data)"),
-                           body.index("LifetimeTrace_RestoreShots(frame)"))
+                           body.index("RollbackUnit_RestoreShots(frame)"))
         build = snapshot[snapshot.index("int Rollback_BuildRegions("):snapshot.index("void Rollback_SaveSnapshot(")]
         self.assertEqual(build.count("PublishReusePlan();"), 1)
         self.assertIn("$(SRCDIR)/code/snapshot_reuse.cpp", (ROOT / "Makefile").read_text())

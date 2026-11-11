@@ -1,5 +1,5 @@
 #include "../pch.h"
-#include "lifetime_trace.h"
+#include "rollback_unit.h"
 
 #include "rollback.h"
 #include "rollback_cleanup.h"
@@ -172,7 +172,7 @@ void Rollback_ReSimulate(int32_t startFrame, int32_t endFrame)
     Controller_SaveInputHistory();
     Profile_AddElapsed(&RollbackProfile::inputHistorySave, phaseStart);
 
-    LifetimeTrace_SetFrame(startFrame, true);
+    RollbackUnit_SetFrame(startFrame, true);
     Rollback_RestoreSnapshot(startFrame);
     const bool reuseStartSnapshot = CanReuseRestoredSnapshot(startFrame);
 
@@ -180,7 +180,7 @@ void Rollback_ReSimulate(int32_t startFrame, int32_t endFrame)
         LagDiagnosticScope frameDiagnostic(LagMetric::ResimFrame);
         RollbackProfileTimer timer;
         g_resimulateCurrentFrame = frame;
-        LifetimeTrace_SetFrame(frame, true);
+        RollbackUnit_SetFrame(frame, true);
         int slotIndex = frame % ROLLBACK_WINDOW;
         if (slotIndex < 0) slotIndex += ROLLBACK_WINDOW;
         uint32_t localInput = g_rollbackSnapshotSlots[slotIndex].localInput;
@@ -230,7 +230,7 @@ void Rollback_ReSimulate(int32_t startFrame, int32_t endFrame)
     if (main) Rollback_ResyncMainTiming(main);
     Profile_AddElapsed(&RollbackProfile::timingResync, phaseStart);
     g_isResimulating = false;
-    LifetimeTrace_SetFrame(endFrame, false);
+    RollbackUnit_SetFrame(endFrame, false);
     Rollback_FlushDeferredModelBounds();
 
     // Fix the swapped in character position on the hud after a resim

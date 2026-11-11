@@ -10,7 +10,7 @@
 #include <vector>
 #include <memory>
 
-struct LifetimeSnapshot;
+struct RollbackUnitSnapshot;
 
 static constexpr int ROLLBACK_MAX_REGIONS = 2048;
 
@@ -117,7 +117,7 @@ struct RollbackSnapshotSlot {
     RollbackActionSideCameraState actionSideCamera;
     RollbackCharacterPostState characterPost;
     std::vector<RollbackCharacterMotionResource> characterMotionResources;
-    std::shared_ptr<LifetimeSnapshot> lifetime;
+    std::shared_ptr<RollbackUnitSnapshot> lifetime;
 };
 
 // Encode the slot ABI into a required linker symbol. Translation units built

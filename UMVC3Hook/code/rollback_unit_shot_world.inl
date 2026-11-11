@@ -66,10 +66,10 @@ void CaptureShotWorld(SnapshotManifest& saved, void* manager)
 // from Rollback_RestoreSnapshot.
 [[maybe_unused]] void StageShotManagerState(const SnapshotManifest& saved, uint32_t bit)
 {
-    LifetimeFailureScope failureScope("shot.manager.stage", saved.shotManager, 0, saved.frame);
+    RollbackUnitFailureScope failureScope("shot.manager.stage", saved.shotManager, 0, saved.frame);
     UnitGuard unitFence;
     ShotWorldGuard shotFence;
-    LIFE_REQUIRE(saved.shotPayload == LifetimeShotPayload::Capture);
+    LIFE_REQUIRE(saved.shotPayload == RollbackUnitShotPayload::Capture);
     LIFE_REQUIRE(saved.valid && unitFence.manager && saved.unitManager == unitFence.manager &&
         saved.thread == GetCurrentThreadId() && shotFence.manager && saved.shotManager == shotFence.manager &&
         saved.shotConfig == Read<void*>((void*)_addr(0x140D50F88), 0) && bit && !(bit & (bit - 1)));
@@ -215,9 +215,9 @@ void CaptureShotWorld(SnapshotManifest& saved, void* manager)
 // boundary. This publishes scheduler state only, not constraints or shot lists.
 [[maybe_unused]] void StageShotExecutionState(const SnapshotManifest& saved, uint32_t bit)
 {
-    LifetimeFailureScope failureScope("shot.execution.stage", saved.unitManager, 0, saved.frame);
+    RollbackUnitFailureScope failureScope("shot.execution.stage", saved.unitManager, 0, saved.frame);
     UnitGuard fence;
-    LIFE_REQUIRE(saved.shotPayload == LifetimeShotPayload::Capture);
+    LIFE_REQUIRE(saved.shotPayload == RollbackUnitShotPayload::Capture);
     LIFE_REQUIRE(saved.valid && fence.manager && saved.unitManager == fence.manager &&
         saved.thread == GetCurrentThreadId() && bit && !(bit & (bit - 1)));
     const unsigned slot = unsigned((saved.frame % ROLLBACK_WINDOW + ROLLBACK_WINDOW) % ROLLBACK_WINDOW);
@@ -605,7 +605,7 @@ std::vector<uint64_t> FenceFutureShotCollection()
 
 void WithdrawFutureShot(const Identity& shot, void* manager, void* units)
 {
-    LifetimeFailureScope failureScope("shot.withdraw_future", shot.object, shot.id);
+    RollbackUnitFailureScope failureScope("shot.withdraw_future", shot.object, shot.id);
     // Do not run native kill: it can dispatch children, stop restored sound, or
     // mutate the restored character. Detach registration while storage is intact.
     std::vector<void*> constraints;
@@ -642,11 +642,11 @@ void WithdrawFutureShot(const Identity& shot, void* manager, void* units)
 
 } // namespace
 
-void LifetimeTrace_RetireFutureShots(int32_t frame)
+void RollbackUnit_RetireFutureShots(int32_t frame)
 {
-    LifetimeFailureScope failureScope("shots.withdraw_future", nullptr, 0, frame);
-    if constexpr (!LIFETIME_TRACE_ENABLED || !EMPTY_EFFECT_QUARANTINE_ENABLED || !EFFECT_RESTORE_ENABLED) return;
-    if (!g_lifetimeEnabled.load(std::memory_order_relaxed)) return;
+    RollbackUnitFailureScope failureScope("shots.withdraw_future", nullptr, 0, frame);
+    if constexpr (!ROLLBACK_UNIT_ENABLED || !EMPTY_EFFECT_QUARANTINE_ENABLED || !EFFECT_RESTORE_ENABLED) return;
+    if (!g_rollbackUnitEnabled.load(std::memory_order_relaxed)) return;
     UnitGuard fence;
     // While the abandoned shots still name them.
     if constexpr (SAVED_SHOT_RESTORE_ENABLED) MarkAbandonedModels(frame);

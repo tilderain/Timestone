@@ -1,4 +1,4 @@
-"""Compile the production lifetime tracer against native-call and Windows mocks."""
+"""Compile the production unit rollback system against native-call and Windows mocks."""
 
 import concurrent.futures
 import fcntl
@@ -217,7 +217,7 @@ void reset() {
     g_reportedDropped = g_reportedMisses = g_reportedUntracked = g_reportedReused = 0;
     g_reportedStopped = false;
     g_recording = true;
-    g_lifetimeEnabled = true;
+    g_rollbackUnitEnabled = true;
     g_finishRequested = false;
     g_quarantined = 0;
     g_reportedQuarantined = 0;
@@ -245,25 +245,25 @@ void checkOriginal(void* p) { assert(!locked && p == object); ++originalCalls; }
 
 int main() {
     reset();
-    LifetimeTrace_Install();
+    RollbackUnit_Install();
     assert(creates == 36 && queues == 36 && g_recording);
-    assert(g_lifetimeEnabled && mockHooks.size() == mockQueuedTargets.size());
+    assert(g_rollbackUnitEnabled && mockHooks.size() == mockQueuedTargets.size());
     for (const auto& hook : mockHooks)
         assert(std::count(mockQueuedTargets.begin(), mockQueuedTargets.end(), hook.first) == 1);
     assert(std::count(mockQueuedTargets.begin(), mockQueuedTargets.end(), (void*)_addr(0x1405EC000)) == 1);
     assert(std::count(mockQueuedTargets.begin(), mockQueuedTargets.end(), (void*)_addr(0x1409BFE90)) == 1);
     reset(); failCreate = 3; g_recording = false;
-    LifetimeTrace_Install();
+    RollbackUnit_Install();
     assert(creates == 36 && queues == 0 && !g_recording);
     reset(); failQueue = 3;
-    LifetimeTrace_Install();
+    RollbackUnit_Install();
     assert(!g_recording);
     reset();
 
     uintptr_t shotVtable[] = {uintptr_t(+[](void* p, uint32_t) -> void* { return p; })};
     uintptr_t vtable = uintptr_t(shotVtable);
     std::memcpy(object, &vtable, sizeof(vtable));
-    LifetimeTrace_SetFrame(-5, true);
+    RollbackUnit_SetFrame(-5, true);
     oCreateShot = [](void* resource) -> void* {
         assert(!locked && resource == (void*)99); ++originalCalls; return object;
     };
@@ -355,7 +355,7 @@ int main() {
     oShotDtor = [](void* p) { assert(!locked); std::free(p); };
     ShotDtor(dying);
     assert(last().vtable == 0 && !std::strcmp(last().name, "shot_base_end"));
-    LifetimeTrace_Marker("snapshot_request", 123);
+    RollbackUnit_Marker("snapshot_request", 123);
     assert(last().id == 0 && last().a == 123);
     oMainReset = [](void* p) { checkOriginal(p); };
     MainReset(object);
@@ -398,14 +398,14 @@ int main() {
     assert(Find((void*)0x1000, false)->id == 1);
 
     reset();
-    for (size_t i = 0; i < EventCapacity + 3; ++i) LifetimeTrace_Marker("fill", int(i));
+    for (size_t i = 0; i < EventCapacity + 3; ++i) RollbackUnit_Marker("fill", int(i));
     assert(g_count == EventCapacity && g_dropped == 3);
-    LifetimeTrace_Flush();
-    assert(g_count == EventCapacity - 256 && logs == (LIFETIME_TRACE_LOG_ENABLED ? 257 : 0));
+    RollbackUnit_Flush();
+    assert(g_count == EventCapacity - 256 && logs == (ROLLBACK_UNIT_LOG_ENABLED ? 257 : 0));
     g_sequence = CaptureLimit - 1;
-    LifetimeTrace_Marker("last", 0);
+    RollbackUnit_Marker("last", 0);
     assert(!g_recording && g_sequence == CaptureLimit);
-    LifetimeTrace_Marker("ignored", 0);
+    RollbackUnit_Marker("ignored", 0);
     assert(g_sequence == CaptureLimit);
     const int before = originalCalls;
     Kill(object); // Original still runs after capture stops.
@@ -454,13 +454,13 @@ PayloadFixture makePayloadFixture() {
     return {shot, other, root, identity->id};
 }
 void releasePayloadFixture(const PayloadFixture& fixture) {
-    LifetimeTrace_ClearSnapshots();
+    RollbackUnit_ClearSnapshots();
     reset(); // Drops C++ metadata only; no native callback reaches the storage below.
     std::free(fixture.shot); std::free(fixture.other); std::free(fixture.root);
 }
 '''
 
-class LifetimeTraceTests(unittest.TestCase):
+class RollbackUnitTests(unittest.TestCase):
     BRIDGE = r'''
 std::span<const uint32_t> Rollback_CharacterShotTailOffsets(uint64_t) { return {}; }
 int collisionRecycles = 0, collisionGroupClears = 0, constraintUnlinks = 0;
@@ -506,22 +506,22 @@ void SyncActiveSlotsForTest() {
     std::fill(std::begin(g_activeSlots), std::end(g_activeSlots), uint64_t(0));
     for (const auto& entry : g_registry) if (ActiveOccupancy(entry.occupancy)) ActivateIdentity(entry);
 }
-std::shared_ptr<LifetimeSnapshot> testSnapshots[ROLLBACK_WINDOW];
+std::shared_ptr<RollbackUnitSnapshot> testSnapshots[ROLLBACK_WINDOW];
 SnapshotManifest& TestManifest(size_t slot) {
-    if (!testSnapshots[slot]) testSnapshots[slot] = std::make_shared<LifetimeSnapshot>();
+    if (!testSnapshots[slot]) testSnapshots[slot] = std::make_shared<RollbackUnitSnapshot>();
     return *testSnapshots[slot];
 }
 // Staging/dump checks need full capture. Retention tests also run with the
 // production default (payload omitted) through the "omit" native argument.
-LifetimeShotPayload g_testShotPayload = LifetimeShotPayload::Capture;
+RollbackUnitShotPayload g_testShotPayload = RollbackUnitShotPayload::Capture;
 void UseTestPayloadArgument(int argc, char** argv) {
-    if (argc > 1 && !std::strcmp(argv[1], "omit")) g_testShotPayload = LifetimeShotPayload::Omit;
+    if (argc > 1 && !std::strcmp(argv[1], "omit")) g_testShotPayload = RollbackUnitShotPayload::Omit;
 }
-void SaveTestSnapshot(int32_t frame, std::shared_ptr<LifetimeSnapshot>& storage,
-                      LifetimeShotPayload payload = g_testShotPayload) {
-    LifetimeTrace_SaveSnapshot(frame, storage, payload);
+void SaveTestSnapshot(int32_t frame, std::shared_ptr<RollbackUnitSnapshot>& storage,
+                      RollbackUnitShotPayload payload = g_testShotPayload) {
+    RollbackUnit_SaveSnapshot(frame, storage, payload);
 }
-void SaveTestSnapshot(int32_t frame, LifetimeShotPayload payload = g_testShotPayload) {
+void SaveTestSnapshot(int32_t frame, RollbackUnitShotPayload payload = g_testShotPayload) {
     SaveTestSnapshot(frame, testSnapshots[(frame % ROLLBACK_WINDOW + ROLLBACK_WINDOW) % ROLLBACK_WINDOW], payload);
 }
 '''
@@ -554,21 +554,21 @@ void SaveTestSnapshot(int32_t frame, LifetimeShotPayload payload = g_testShotPay
     @classmethod
     def _unit(cls, config, cases):
         enabled, quarantine, _ = config
-        header = (ROOT / "UMVC3Hook/code/lifetime_trace.h").read_text()
+        header = (ROOT / "UMVC3Hook/code/rollback_unit.h").read_text()
         header = header.replace("#pragma once", "").replace(
-            "LIFETIME_TRACE_ENABLED = true", f"LIFETIME_TRACE_ENABLED = {str(enabled).lower()}")
+            "ROLLBACK_UNIT_ENABLED = true", f"ROLLBACK_UNIT_ENABLED = {str(enabled).lower()}")
         header = header.replace("EMPTY_EFFECT_QUARANTINE_ENABLED = true",
                                 f"EMPTY_EFFECT_QUARANTINE_ENABLED = {str(quarantine).lower()}")
-        source = (ROOT / "UMVC3Hook/code/lifetime_trace.cpp").read_text()
+        source = (ROOT / "UMVC3Hook/code/rollback_unit.cpp").read_text()
         original_source = source
-        for name in ("lifetime_failure.inl", "lifetime_shot_generations.inl", "lifetime_shot_cpu.inl",
-                     "lifetime_shot_constraints.inl", "lifetime_shot_world.inl", "lifetime_shot_restore.inl",
-                     "lifetime_shot_models.inl"):
+        for name in ("rollback_unit_failure.inl", "rollback_unit_shot_generations.inl", "rollback_unit_shot_cpu.inl",
+                     "rollback_unit_shot_constraints.inl", "rollback_unit_shot_world.inl", "rollback_unit_shot_restore.inl",
+                     "rollback_unit_shot_models.inl"):
             include = f'#include "{name}"'
             next_line = original_source[:original_source.index(include)].count("\n") + 2
             contents = (ROOT / "UMVC3Hook/code" / name).read_text()
             source = source.replace(include, f'#line 1 "UMVC3Hook/code/{name}"\n{contents}\n'
-                                    f'#line {next_line} "UMVC3Hook/code/lifetime_trace.cpp"')
+                                    f'#line {next_line} "UMVC3Hook/code/rollback_unit.cpp"')
         source = "\n".join(line for line in source.splitlines() if not line.startswith('#include "'))
         rollback_header = (ROOT / "UMVC3Hook/code/rollback.h").read_text().replace("#pragma once", "")
         character_header = (ROOT / "UMVC3Hook/code/rollback_character_restore.h").read_text().replace("#pragma once", "")
@@ -634,9 +634,9 @@ int main(int argc, char** argv) {
 
     def compile_run(self, enabled, checks, quarantine=True, expected_returncode=0, arguments=None,
                     sanitizers="address,undefined"):
-        cls = LifetimeTraceTests
+        cls = RollbackUnitTests
         config = (enabled, quarantine, sanitizers)
-        checks = checks.replace("LifetimeTrace_SaveSnapshot(", "SaveTestSnapshot(")
+        checks = checks.replace("RollbackUnit_SaveSnapshot(", "SaveTestSnapshot(")
         runs = arguments if arguments is not None else [()]
         if getattr(self, "_collecting", False):
             cases = cls._cases.setdefault(config, [])
@@ -679,14 +679,14 @@ int main() {
     Birth(shot, Kind::Shot); auto* owner = Find(shot, false);
     EnsureShotGeneration(*owner, ShotDomain::Pose);
     Write(shot, 0x538, uintptr_t(0x1234));
-    LifetimeTrace_SetFrame(281, true); g_caller = 0x140056789;
-    LifetimeFailureScope operation("test", shot, owner->id, 280);
+    RollbackUnit_SetFrame(281, true); g_caller = 0x140056789;
+    RollbackUnitFailureScope operation("test", shot, owner->id, 280);
     std::signal(SIGABRT, reject); AcquireSRWLockExclusive(&g_lock);
     RetireModelDomain(*owner, ShotDomain::Pose, true);
 }
 ''', expected_returncode=17)
         self.assertIn("=== LIFETIME INVARIANT FAILURE ===", result.stderr)
-        self.assertRegex(result.stderr, r"source=.*lifetime_shot_generations.inl:\d+")
+        self.assertRegex(result.stderr, r"source=.*rollback_unit_shot_generations.inl:\d+")
         self.assertIn("RetireModelDomain", result.stderr)
         self.assertIn("model ownership changed outside a retained mutation boundary", result.stderr)
         self.assertIn("pid=123 thread=7", result.stderr)
@@ -696,9 +696,9 @@ int main() {
             self.assertIn(value, result.stderr)
 
     def test_all_lifetime_abort_sites_emit_diagnostics(self):
-        for name in ("lifetime_trace.cpp", "lifetime_shot_cpu.inl", "lifetime_shot_generations.inl",
-                     "lifetime_shot_world.inl", "lifetime_shot_constraints.inl", "lifetime_shot_restore.inl",
-                     "lifetime_shot_models.inl"):
+        for name in ("rollback_unit.cpp", "rollback_unit_shot_cpu.inl", "rollback_unit_shot_generations.inl",
+                     "rollback_unit_shot_world.inl", "rollback_unit_shot_constraints.inl", "rollback_unit_shot_restore.inl",
+                     "rollback_unit_shot_models.inl"):
             with self.subTest(source=name):
                 source = (ROOT / "UMVC3Hook/code" / name).read_text()
                 self.assertNotIn("std::abort()", source)
@@ -709,16 +709,16 @@ int main() {
     def test_disabled(self):
         self.compile_run(False, r'''
 int main() {
-    LifetimeTrace_Install();
-    LifetimeTrace_SetFrame(123, true);
-    LifetimeTrace_Marker("ignored", 123);
-    LifetimeTrace_Flush();
-    LifetimeTrace_SaveSnapshot(123);
-    LifetimeTrace_CheckSnapshot(123);
-    LifetimeTrace_DropSnapshot(123);
-    LifetimeTrace_ClearSnapshots();
-    LifetimeTrace_RestoreEffects(123);
-    LifetimeTrace_RetireFutureShots(123);
+    RollbackUnit_Install();
+    RollbackUnit_SetFrame(123, true);
+    RollbackUnit_Marker("ignored", 123);
+    RollbackUnit_Flush();
+    RollbackUnit_SaveSnapshot(123);
+    RollbackUnit_CheckSnapshot(123);
+    RollbackUnit_DropSnapshot(123);
+    RollbackUnit_ClearSnapshots();
+    RollbackUnit_RestoreEffects(123);
+    RollbackUnit_RetireFutureShots(123);
     assert(!creates && !queues && !logs && !g_sequence && !g_recording);
 }
 ''')
@@ -728,43 +728,43 @@ int main() {
 int main() {
     reset();
     Birth(object, Kind::Effect);
-    LifetimeTrace_SaveSnapshot(0);
+    RollbackUnit_SaveSnapshot(0);
     assert(TestManifest(0).valid && TestManifest(0).count() == 1);
     assert(Find(object, false)->snapshots == 1);
-    LifetimeTrace_SaveSnapshot(1);
+    RollbackUnit_SaveSnapshot(1);
     assert(Find(object, false)->snapshots == 3);
     Mutation(object, 2);
     assert(!std::strcmp(last().name, "snapshot_hazard"));
     assert(last().a == 2 && last().b == 3 && last().revision == 0);
-    LifetimeTrace_CheckSnapshot(0);
+    RollbackUnit_CheckSnapshot(0);
     assert(!std::strcmp(last().name, "snapshot_manifest_check"));
     assert(last().b == 1 && last().c == 0 && last().d == 1);
     // Same-frame rewritten predictions replace their observation, not another slot's.
-    LifetimeTrace_SaveSnapshot(0);
-    LifetimeTrace_CheckSnapshot(0);
+    RollbackUnit_SaveSnapshot(0);
+    RollbackUnit_CheckSnapshot(0);
     assert(last().c == 0 && last().d == 0 && TestManifest(0).count() == 1);
-    LifetimeTrace_CheckSnapshot(1);
+    RollbackUnit_CheckSnapshot(1);
     assert(last().c == 0 && last().d == 1);
-    LifetimeTrace_DropSnapshot(1);
+    RollbackUnit_DropSnapshot(1);
     assert(Find(object, false)->snapshots == 1);
-    LifetimeTrace_CheckSnapshot(1);
+    RollbackUnit_CheckSnapshot(1);
     assert(!std::strcmp(last().name, "snapshot_manifest_absent"));
     const uint64_t oldId = Find(object, false)->id;
     Destroyed("gone", object, oldId);
     Birth(object, Kind::Effect);
     assert(Find(object, false)->id != oldId && Find(object, false)->snapshots == 0);
-    LifetimeTrace_CheckSnapshot(0);
+    RollbackUnit_CheckSnapshot(0);
     assert(last().b == 1 && last().c == 1 && last().d == 0);
     const Event& detail = g_events[(g_read + g_count - 2) % EventCapacity];
     assert(detail.id == oldId && detail.b == Find(object, false)->id && detail.vtable == 0);
-    LifetimeTrace_SaveSnapshot(ROLLBACK_WINDOW);
-    LifetimeTrace_CheckSnapshot(0);
+    RollbackUnit_SaveSnapshot(ROLLBACK_WINDOW);
+    RollbackUnit_CheckSnapshot(0);
     assert(!std::strcmp(last().name, "snapshot_manifest_absent"));
-    LifetimeTrace_CheckSnapshot(ROLLBACK_WINDOW);
+    RollbackUnit_CheckSnapshot(ROLLBACK_WINDOW);
     assert(last().c == 0 && last().d == 0);
-    LifetimeTrace_SaveSnapshot(-1);
+    RollbackUnit_SaveSnapshot(-1);
     assert(TestManifest(ROLLBACK_WINDOW - 1).valid);
-    LifetimeTrace_ClearSnapshots();
+    RollbackUnit_ClearSnapshots();
     assert(Find(object, false)->snapshots == 0);
     for (const auto* manifest : g_liveSnapshots) assert(!manifest);
     assert(TestManifest(0).valid); // Clearing leases does not erase diagnostic bytes.
@@ -772,31 +772,31 @@ int main() {
     reset();
     auto* allocation = std::calloc(1, 0x2200);
     Birth(allocation, Kind::Shot);
-    LifetimeTrace_SaveSnapshot(5);
+    RollbackUnit_SaveSnapshot(5);
     oShotDtor = [](void* p) { assert(!locked); std::free(p); };
     ShotDtor(allocation); // A direct base call is not the intact most-derived deletion boundary.
-    LifetimeTrace_CheckSnapshot(5); // ASan: never reads historical/freed storage.
+    RollbackUnit_CheckSnapshot(5); // ASan: never reads historical/freed storage.
     assert(last().b == 1 && last().c == 1 && last().d == 0);
 
     reset();
     for (size_t i = 0; i < RegistrySize; ++i)
         g_registry[i] = {(void*)(i + 1), i + 1, 0, Kind::Shot, Occupancy::Live};
     SyncActiveSlotsForTest();
-    LifetimeTrace_SaveSnapshot(2); // Bounded manifest, no dereference even for invalid addresses.
+    RollbackUnit_SaveSnapshot(2); // Bounded manifest, no dereference even for invalid addresses.
     assert(TestManifest(2).count() == RegistrySize);
-    LifetimeTrace_ClearSnapshots();
+    RollbackUnit_ClearSnapshots();
 
     reset();
     alignas(16) uint8_t objects[20][32]{};
     for (auto& p : objects) Birth(p, Kind::Effect);
-    LifetimeTrace_SaveSnapshot(3);
+    RollbackUnit_SaveSnapshot(3);
     for (auto& p : objects) Destroyed("gone", p, Find(p, false)->id);
     const size_t before = g_count;
-    LifetimeTrace_CheckSnapshot(3);
+    RollbackUnit_CheckSnapshot(3);
     assert(last().b == 20 && last().c == 20 && last().d == 0);
     assert(g_count == before + 17); // 16 detail samples plus full aggregate.
     g_recording = false;
-    LifetimeTrace_ClearSnapshots();
+    RollbackUnit_ClearSnapshots();
     assert(!g_liveSnapshots[3]);
 }
 ''')
@@ -825,23 +825,23 @@ int main() {
     void* p = makeEffect();
     assert(RetainableDetachedEffect(p));
     const uint64_t id = Find(p, false)->id;
-    LifetimeTrace_SaveSnapshot(0);
-    LifetimeTrace_SaveSnapshot(1);
+    RollbackUnit_SaveSnapshot(0);
+    RollbackUnit_SaveSnapshot(1);
     auto diagnosticHistory = testSnapshots[0];
     assert(DeleteEffect(p, 1) == p && deletes == 0 && bodies == 0);
     assert(g_quarantined == 1 && Find(p, false)->occupancy == Occupancy::Quarantined);
     assert(Find(p, false)->id == id);
     assert(Read<uintptr_t>(p, 0) == _addr(0x140A8E180));
     assert(DeleteEffect(p, 1) == p && deletes == 0 && g_quarantined == 1);
-    LifetimeTrace_CheckSnapshot(0);
+    RollbackUnit_CheckSnapshot(0);
     assert(!std::strcmp(last().name, "quarantine_restore_pending") && last().b == 1);
     // Retired objects are not admitted into new manifests or reactivated by checks.
-    LifetimeTrace_SaveSnapshot(2);
+    RollbackUnit_SaveSnapshot(2);
     assert(TestManifest(2).count() == 0 && Find(p, false)->snapshots == 3);
-    LifetimeTrace_DropSnapshot(0);
+    RollbackUnit_DropSnapshot(0);
     CollectQuarantine();
     assert(deletes == 0 && Find(p, false)->snapshots == 2);
-    LifetimeTrace_DropSnapshot(1);
+    RollbackUnit_DropSnapshot(1);
     CollectQuarantine();
     assert(deletes == 1 && bodies == 1 && g_quarantined == 0 && !Find(p, false));
     assert(diagnosticHistory->valid && diagnosticHistory->count() == 1);
@@ -855,7 +855,7 @@ int main() {
         p = makeEffect();
         uint64_t value = offset == 0x218 ? uintptr_t(nativeNode) : 1;
         std::memcpy(static_cast<uint8_t*>(p) + offset, &value, sizeof(value));
-        LifetimeTrace_SaveSnapshot(0);
+        RollbackUnit_SaveSnapshot(0);
         int before = deletes;
         DeleteEffect(p, 1);
         assert(deletes == before + 1 && g_quarantined == 0);
@@ -865,33 +865,33 @@ int main() {
         if (mode == 0) { uint32_t active = 2; std::memcpy(static_cast<uint8_t*>(p)+0x10, &active, 4); }
         if (mode == 1) { uintptr_t derived = 0x140A8D330; std::memcpy(p, &derived, 8); }
         if (mode == 2) { uint32_t ready = 0x01000000; std::memcpy(static_cast<uint8_t*>(p)+0x130, &ready, 4); }
-        LifetimeTrace_SaveSnapshot(0);
+        RollbackUnit_SaveSnapshot(0);
         int before = deletes;
         DeleteEffect(p, 1);
         assert(deletes == before + 1 && g_quarantined == 0);
     }
     p = makeEffect();
-    LifetimeTrace_SaveSnapshot(0);
+    RollbackUnit_SaveSnapshot(0);
     int before = deletes;
     DeleteEffect(p, 0); // Non-deleting in-place invocation remains native.
     assert(deletes == before + 1 && !Find(p, false));
     std::free(p);
 
     p = makeEffect();
-    LifetimeTrace_SaveSnapshot(0);
+    RollbackUnit_SaveSnapshot(0);
     DeleteEffect(p, 1);
     before = deletes;
     g_recording = false;
-    LifetimeTrace_Flush(); // Trace exhaustion cannot revoke snapshot ownership.
+    RollbackUnit_Flush(); // Trace exhaustion cannot revoke snapshot ownership.
     assert(deletes == before && g_quarantined == 1 && Find(p, false));
-    LifetimeTrace_DropSnapshot(0);
-    LifetimeTrace_Flush();
+    RollbackUnit_DropSnapshot(0);
+    RollbackUnit_Flush();
     assert(deletes == before + 1 && g_quarantined == 0 && !Find(p, false));
 
     reset();
     std::vector<void*> pool;
     for (size_t i = 0; i <= QuarantineLimit; ++i) pool.push_back(makeEffect());
-    LifetimeTrace_SaveSnapshot(0);
+    RollbackUnit_SaveSnapshot(0);
     before = deletes;
     for (void* effect : pool) DeleteEffect(effect, 1);
     assert(g_quarantined == QuarantineLimit && deletes == before + 1);
@@ -901,13 +901,13 @@ int main() {
     for (void* effect : pool) assert(!Find(effect, false));
 
     p = makeEffect();
-    LifetimeTrace_SaveSnapshot(0); // A later saved world reopens the experiment.
+    RollbackUnit_SaveSnapshot(0); // A later saved world reopens the experiment.
     assert(g_retentionOpen);
     DeleteEffect(p, 1);
     oMainDtor = [](void*) { assert(!locked && g_quarantined == 0); };
     MainDtor(nullptr);
     p = makeEffect();
-    LifetimeTrace_SaveSnapshot(0);
+    RollbackUnit_SaveSnapshot(0);
     DeleteEffect(p, 1);
     oManagerDtor = [](void*) { assert(!locked && g_quarantined == 0); };
     ManagerDtor(nullptr);
@@ -918,11 +918,11 @@ int main() {
     Write(units, 0xC38, uint32_t(1));
     std::vector<void*> burst;
     for (int i = 0; i < 300; ++i) burst.push_back(makeEffect());
-    LifetimeTrace_SaveSnapshot(0);
+    RollbackUnit_SaveSnapshot(0);
     assert(TestManifest(0).effects.size() == burst.size());
-    LifetimeTrace_RestoreEffects(0);
+    RollbackUnit_RestoreEffects(0);
     assert(!g_quarantined && TestManifest(0).effects.size() == burst.size());
-    LifetimeTrace_ClearSnapshots();
+    RollbackUnit_ClearSnapshots();
     before = deletes;
     for (void* effect : burst) DeleteEffect(effect, 1);
     assert(deletes == before + int(burst.size()));
@@ -962,7 +962,7 @@ int main() {
     // A cinematic queued "kill effects, mode 2" on this frame; the low bits are live settings.
     alignas(8) static uint8_t effects[0x1D50]{}; effectManager = effects;
     Write(effects, 0x1D48, uint32_t((2u << 15) | 5));
-    LifetimeTrace_SaveSnapshot(0);
+    RollbackUnit_SaveSnapshot(0);
     assert(TestManifest(0).attackSpaces.size() == 1 && Find(space, false)->dependencies == 1);
     assert(TestManifest(0).effectKillOrder == (2u << 15));
 
@@ -970,7 +970,7 @@ int main() {
     Write(space, 0x1D0C, uint32_t(1)); Write(space, 0x1CF8, uint32_t(0x80000));
     // The order was applied and cleared, and a live setting changed since.
     Write(effects, 0x1D48, uint32_t(0x80000007));
-    LifetimeTrace_RestoreEffects(0);
+    RollbackUnit_RestoreEffects(0);
     assert(Read<uint32_t>(effects, 0x1D48) == (0x80000007 | (2u << 15))); // Pending again; live bits kept.
     assert(Read<uint32_t>(space, 0x1D0C) == 0 && Read<void*>(space, 0x1D18) == child);
     assert(Read<uint32_t>(space, 0x1CF8) == 0x40000 && Read<void*>(action, 0x148) == space);
@@ -983,7 +983,7 @@ int main() {
     // The abandoned branch then started another super with its own space.
     auto* later = makeSpace(); Write(action, 0x148, static_cast<void*>(later)); line({later});
     Write(effects, 0x1D48, uint32_t((1u << 15) | 7)); // ...and queued a different order.
-    LifetimeTrace_RestoreEffects(0);
+    RollbackUnit_RestoreEffects(0);
     assert(Read<uint32_t>(effects, 0x1D48) == ((2u << 15) | 7));
     assert(Find(space, false)->occupancy == Occupancy::Live && Read<uint32_t>(space, 0x1D0C) == 0);
     assert(Read<void*>(space, 0x1D18) == child && (Read<uint32_t>(space, 0x10) & 0x3FF) == (2 | (1 << 3)));
@@ -992,9 +992,9 @@ int main() {
     assert(Find(later, false)->occupancy == Occupancy::Quarantined && g_quarantined == 1);
     assert((Read<uint32_t>(later, 0x10) & 0x3FF) == 0x3F8 && !disposals);
     // Repeating the restore changes nothing; the later space is disposed once unleased.
-    LifetimeTrace_RestoreEffects(0);
+    RollbackUnit_RestoreEffects(0);
     assert(g_quarantined == 1 && Find(space, false)->occupancy == Occupancy::Live);
-    LifetimeTrace_ClearSnapshots();
+    RollbackUnit_ClearSnapshots();
     assert(disposals == 1 && !g_quarantined && Find(space, false)->occupancy == Occupancy::Live);
     std::free(space);
 }
@@ -1044,13 +1044,13 @@ int main() {
     Write(model, 0x1CD4, 30.0f); Write(model, 0x1CF8, uint32_t(0x40000)); // Remaining life, step flags.
     Write(shot, 0x1F78, static_cast<void*>(model)); line({model});
     assert(IsDrivenModel(*Find(model, false)) && !IsDrivenModel(*owner));
-    LifetimeTrace_SaveSnapshot(0);
+    RollbackUnit_SaveSnapshot(0);
     assert(TestManifest(0).models.size() == 1 && TestManifest(0).models[0].object == model);
     assert(TestManifest(0).models[0].spans.size() == 2 && Find(model, false)->dependencies == 1);
 
     // The replayed frames advanced it on top of where it already was.
     Write(model, 0x1328, 26.0f); Write(model, 0x1CD4, 24.0f); Write(joints, 0x10 + 0xC0, 9.0f);
-    LifetimeTrace_RetireFutureShots(0); LifetimeTrace_RestoreEffects(0);
+    RollbackUnit_RetireFutureShots(0); RollbackUnit_RestoreEffects(0);
     assert(Read<float>(model, 0x1328) == 20.0f && Read<float>(model, 0x1CD4) == 30.0f);
     assert(Read<float>(joints, 0x10 + 0xC0) == 1.5f && Find(model, false)->occupancy == Occupancy::Live);
 
@@ -1063,13 +1063,13 @@ int main() {
     // Made before the frame (or before the hook): it may be an effect's or a
     // character's model that this shot only came to name afterwards. Left alone.
     g_modelBirths[later] = TestManifest(0).birthWatermark;
-    LifetimeTrace_RetireFutureShots(0);
+    RollbackUnit_RetireFutureShots(0);
     assert(!Find(later, false));
     oConstructModel = +[](void* object) { return object; };
     assert(ConstructModel(later) == later && g_modelBirths[later] > TestManifest(0).birthWatermark);
-    LifetimeTrace_RetireFutureShots(0);
+    RollbackUnit_RetireFutureShots(0);
     assert(Find(later, false) && Find(later, false)->abandonedModel && !Find(model, false)->abandonedModel);
-    LifetimeTrace_RestoreEffects(0);
+    RollbackUnit_RestoreEffects(0);
     assert(Find(model, false)->occupancy == Occupancy::Live && Read<float>(model, 0x1328) == 20.0f);
     assert(Read<uint32_t>(model, 0x1CF8) == 0x40000 && (Read<uint32_t>(model, 0x10) & 0x3FF) == (2 | (1 << 3)));
     assert(Read<void*>(units, 0x80) == model && Read<void*>(units, 0x88) == model && !Read<void*>(model, 0x18));
@@ -1083,11 +1083,11 @@ int main() {
     Write(model, 0x538, static_cast<void*>(other + 0x10));
     Write(model, 0x1328, 40.0f); Write(model, 0x1CF8, uint32_t(0x80000)); Write(joints, 0x10 + 0xC0, 3.0f);
     Write(shot, 0x1F78, static_cast<void*>(model));
-    LifetimeTrace_RetireFutureShots(0); LifetimeTrace_RestoreEffects(0);
+    RollbackUnit_RetireFutureShots(0); RollbackUnit_RestoreEffects(0);
     assert(Read<float>(model, 0x1328) == 40.0f && Read<float>(joints, 0x10 + 0xC0) == 3.0f);
     assert(Read<uint32_t>(model, 0x1CF8) == 0x40000 && Read<void*>(model, 0x538) == other + 0x10);
 
-    LifetimeTrace_ClearSnapshots();
+    RollbackUnit_ClearSnapshots();
     assert(deletes == 1 && !g_quarantined && Find(model, false)->occupancy == Occupancy::Live);
     ForgetCurrentShotGenerations(owner->id, shot);
     oDestroyModel = +[](void*) {};
@@ -1099,7 +1099,7 @@ int main() {
     def test_quarantine_disabled(self):
         self.compile_run(True, r'''
 int main() {
-    LifetimeTrace_Install();
+    RollbackUnit_Install();
     assert(creates == 21 && queues == 21);
     oDeleteEffect = [](void* p, uint32_t flags) -> void* {
         assert(p == (void*)123 && flags == 7 && !locked);
@@ -1233,7 +1233,7 @@ int main(int argc, char** argv) {
     void* p = makeShot(7);
     assert(patches == 1 && g_unitDeleteHookCount == 1 && !creates && !queues && !applies);
     assert(Find(p, false)->deleting == nativeDerived && Find(p, false)->shotLinked);
-    LifetimeTrace_SaveSnapshot(0); LifetimeTrace_SaveSnapshot(1);
+    RollbackUnit_SaveSnapshot(0); RollbackUnit_SaveSnapshot(1);
     dispatch(p, 1);
     assert(g_quarantined == 1 && !derivedBodies && !modelBodies);
     assert(last().kind == Kind::Shot && !std::strcmp(last().name, "quarantine_hold"));
@@ -1241,9 +1241,9 @@ int main(int argc, char** argv) {
     assert(Read<void*>(head, 8) == head && Read<void*>(head, 0x10) == head);
     assertIntact(p);
     dispatch(p, 1); assert(unlinks == 1 && idReleases == 1 && g_quarantined == 1);
-    LifetimeTrace_SaveSnapshot(2); assert(TestManifest(2).count() == 0);
-    g_recording = false; LifetimeTrace_Flush(); assertIntact(p);
-    LifetimeTrace_DropSnapshot(0); CollectQuarantine(); assertIntact(p);
+    RollbackUnit_SaveSnapshot(2); assert(TestManifest(2).count() == 0);
+    g_recording = false; RollbackUnit_Flush(); assertIntact(p);
+    RollbackUnit_DropSnapshot(0); CollectQuarantine(); assertIntact(p);
 
     // The concrete deleting target is shared by another vtable: one entry, and
     // each vtable's slot is redirected to the same detour.
@@ -1252,7 +1252,7 @@ int main(int argc, char** argv) {
     assert(patches == 2 && g_unitDeleteHookCount == 1 && !applies);
     assert(Read<void*>(vtableAlias, 0) == Read<void*>(Read<void*>(p, 0), 0));
     const uint32_t qPalette = Read<uint32_t>(q, 0x116C);
-    LifetimeTrace_DropSnapshot(1); CollectQuarantine();
+    RollbackUnit_DropSnapshot(1); CollectQuarantine();
     assert(!g_quarantined && derivedBodies == 1 && modelBodies == 1);
     assert(Read<uint32_t>(shots, 0x38 + 4 * 7) == 1 && unlinks == 1 && idReleases == 1);
     assert(Read<void*>(head, 8) == (uint8_t*)q + 0x1450 && palettes[qPalette]);
@@ -1264,15 +1264,15 @@ int main(int argc, char** argv) {
     p = makeShot(8); Write(p, 0x10, uint32_t(2 | (12 << 3)));
     Write(p, 0x30, uint64_t(2));
     Write(units, 0x50 + 12 * 0x30, p); Write(units, 0x58 + 12 * 0x30, p);
-    LifetimeTrace_SaveSnapshot(3); dispatch(p, 1);
+    RollbackUnit_SaveSnapshot(3); dispatch(p, 1);
     assert(primaryRemovals == 1 && groupRemovals == 1 && g_quarantined == 1);
     assert(Read<uint32_t>(p, 0x10) == 0x3F8 && !Read<uint64_t>(p, 0x30));
     assert(!Read<void*>(units, 0x50 + 12 * 0x30)); assertIntact(p);
-    LifetimeTrace_ClearSnapshots();
+    RollbackUnit_ClearSnapshots();
     assert(!g_quarantined && derivedBodies == 3 && modelBodies == 3);
 
     // Nested unleased shot destruction must still release its own ID/list/model.
-    p = makeShot(9); LifetimeTrace_SaveSnapshot(4);
+    p = makeShot(9); RollbackUnit_SaveSnapshot(4);
     q = makeShot(10, vtableB);
     assert(patches == 3 && g_unitDeleteHookCount == 2 && !applies);
     nestedParent = p; nestedChild = q;
@@ -1304,13 +1304,13 @@ int main(int argc, char** argv) {
     Write(effect, 0, uintptr_t(_addr(0x140A8E180)));
     Write(effect, 0x10, uint32_t(2 | (13 << 3))); Write(effect, 0x280, p);
     Write(units, 0x50 + 13 * 0x30, effect); Write(units, 0x58 + 13 * 0x30, effect);
-    Birth(effect, Kind::Effect); LifetimeTrace_SaveSnapshot(5);
+    Birth(effect, Kind::Effect); RollbackUnit_SaveSnapshot(5);
     assert(Find(p, false)->kind == Kind::Shot && Find(p, false)->shotLinked);
     const int beforeAdoptedUnlink = unlinks;
     dispatch(p, 1);
     assert(unlinks == beforeAdoptedUnlink + 1 && Read<void*>(head, 8) == head);
     Write(effect, 0x280, (void*)nullptr); // Native weak-owner pruning.
-    LifetimeTrace_ClearSnapshots();
+    RollbackUnit_ClearSnapshots();
     assert(!g_quarantined && derivedBodies == 7 && modelBodies == 7);
     assert(resourceAdds == 0 && resourceReleases == 7);
     Destroyed("fixture_dispose", effect, Find(effect, false)->id); std::free(effect);
@@ -1363,12 +1363,12 @@ int main(int argc, char** argv) {
     void* c = makeUnit(4); void* d = makeUnit(2);
     Write(b, 8, uint32_t(42)); Write(c, 0xC, uint32_t(7)); Write(b, 0x28, 0.5f);
     chain({a, b, c, d});
-    LifetimeTrace_SaveSnapshot(0);
+    RollbackUnit_SaveSnapshot(0);
     assert(TestManifest(0).effectCount() == 4);
     detachAndDelete(b); detachAndDelete(c);
     assert(g_quarantined == 2 && deleted == 0 && Read<void*>(a, 0x18) == d);
     Write(b, 8, uint32_t(99)); Write(b, 0x28, 3.0f);
-    LifetimeTrace_RestoreEffects(0);
+    RollbackUnit_RestoreEffects(0);
     assert(!std::strcmp(last().name, "retiring_restore_applied") && last().b == 4 && last().c == 2);
     assert(g_quarantined == 0 && deleted == 0 && !unitLocked);
     assert(Read<void*>(a, 0x18) == b && Read<void*>(b, 0x20) == a);
@@ -1377,22 +1377,22 @@ int main(int argc, char** argv) {
     assert(Read<uint32_t>(b, 8) == 42 && Read<uint32_t>(c, 0xC) == 7);
     assert(Read<float>(b, 0x28) == 0.5f && (Read<uint32_t>(b, 0x10) & 7) == 3);
     assert((Read<uint32_t>(c, 0x10) & 7) == 4 && Read<void*>(line(), 0) == a);
-    LifetimeTrace_RestoreEffects(0); // Already linked: no duplicate membership.
+    RollbackUnit_RestoreEffects(0); // Already linked: no duplicate membership.
     assert(last().b == 4 && last().c == 0 && g_quarantined == 0);
     detachAndDelete(b); detachAndDelete(c); // Same identities can retire again.
     assert(g_quarantined == 2 && deleted == 0);
     void* extra = makeUnit(2);
     chain({a, extra, d});
-    LifetimeTrace_RestoreEffects(0);
+    RollbackUnit_RestoreEffects(0);
     assert(!std::strcmp(last().name, "retiring_restore_applied"));
     assert(g_quarantined == 1 && Read<void*>(a, 0x18) == b && RetainableDetachedEffect(extra));
     assert(Read<void*>(b, 0x18) == c && Read<void*>(c, 0x18) == d);
     Mutation(c, 2); // Revisions are expected state changes, not restore rejection.
     chain({d, c, b, a});
-    LifetimeTrace_RestoreEffects(0);
+    RollbackUnit_RestoreEffects(0);
     assert(g_quarantined == 1 && Read<void*>(line(), 0) == a && Read<void*>(line(), 8) == d);
     assert(Read<void*>(a, 0x18) == b && Read<void*>(b, 0x18) == c);
-    LifetimeTrace_ClearSnapshots();
+    RollbackUnit_ClearSnapshots();
     assert(g_quarantined == 0 && deleted == 1);
     chain({}); DeleteEffect(a, 1); DeleteEffect(b, 1); DeleteEffect(c, 1); DeleteEffect(d, 1);
 
@@ -1400,49 +1400,49 @@ int main(int argc, char** argv) {
     void* p = makeUnit(4);
     alignas(16) uint8_t resource[0x60]{};
     Write(p, 0x108, (void*)resource);
-    chain({p}); LifetimeTrace_SaveSnapshot(1); detachAndDelete(p);
-    LifetimeTrace_RestoreEffects(1);
+    chain({p}); RollbackUnit_SaveSnapshot(1); detachAndDelete(p);
+    RollbackUnit_RestoreEffects(1);
     assert(last().c == 1 && Read<void*>(line(), 0) == p && Read<void*>(line(), 8) == p);
     assert(Read<void*>(p, 0x18) == nullptr && Read<void*>(p, 0x20) == nullptr);
     detachAndDelete(p);
     Write(p, 0x120, uint32_t(999));
-    LifetimeTrace_RestoreEffects(1);
+    RollbackUnit_RestoreEffects(1);
     assert(g_quarantined == 0 && Read<uint32_t>(p, 0x120) == 0);
     assert(Read<void*>(p, 0x108) == resource);
-    LifetimeTrace_ClearSnapshots();
+    RollbackUnit_ClearSnapshots();
     chain({}); DeleteEffect(p, 1);
 
     // Unknown anchors cannot be trusted by address alone, even when currently readable.
     a = makeUnit(2, false); p = makeUnit(3); chain({a, p});
-    LifetimeTrace_SaveSnapshot(2);
+    RollbackUnit_SaveSnapshot(2);
     assert(TestManifest(2).effectCount() == 1);
     chain({p}); std::free(a);
-    LifetimeTrace_RestoreEffects(2);
+    RollbackUnit_RestoreEffects(2);
     assert(!std::strcmp(last().name, "retiring_restore_applied"));
     assert(Read<void*>(p, 0x20) == nullptr && Read<void*>(line(), 0) == p);
     detachAndDelete(p);
-    LifetimeTrace_RestoreEffects(2);
+    RollbackUnit_RestoreEffects(2);
     assert(!std::strcmp(last().name, "retiring_restore_applied") && g_quarantined == 0);
     assert(Read<void*>(line(), 0) == p && Read<void*>(p, 0x20) == nullptr);
-    LifetimeTrace_ClearSnapshots(); chain({}); DeleteEffect(p, 1);
+    RollbackUnit_ClearSnapshots(); chain({}); DeleteEffect(p, 1);
 
     // A newly registered foreign unit cannot displace the saved retained cohort.
     a = makeUnit(2, false); p = makeUnit(4); chain({a, p});
-    LifetimeTrace_SaveSnapshot(3); detachAndDelete(p);
+    RollbackUnit_SaveSnapshot(3); detachAndDelete(p);
     void* foreign = makeUnit(2, false);
     chain({foreign, a});
-    LifetimeTrace_RestoreEffects(3);
+    RollbackUnit_RestoreEffects(3);
     assert(g_quarantined == 0 && Read<void*>(a, 0x18) == p && Read<void*>(p, 0x18) == foreign);
     assert(Read<void*>(foreign, 0x20) == p && Read<void*>(line(), 8) == foreign);
-    LifetimeTrace_ClearSnapshots(); chain({}); DeleteEffect(p, 1); std::free(a); std::free(foreign);
+    RollbackUnit_ClearSnapshots(); chain({}); DeleteEffect(p, 1); std::free(a); std::free(foreign);
 
     // Active-at-save empty owners restore through the same retained graph path.
-    p = makeUnit(2); chain({p}); LifetimeTrace_SaveSnapshot(4);
+    p = makeUnit(2); chain({p}); RollbackUnit_SaveSnapshot(4);
     assert(TestManifest(4).effectCount() == 1);
     detachAndDelete(p);
-    LifetimeTrace_RestoreEffects(4);
+    RollbackUnit_RestoreEffects(4);
     assert(g_quarantined == 0 && (Read<uint32_t>(p, 0x10) & 7) == 2);
-    LifetimeTrace_ClearSnapshots();
+    RollbackUnit_ClearSnapshots();
     chain({}); DeleteEffect(p, 1);
     assert(g_quarantined == 0 && !unitLocked && !locked);
 
@@ -1453,38 +1453,38 @@ int main(int argc, char** argv) {
     void* futureGroupData[1]{};
     Write(futureGroup, 0x28, (void*)futureGroupData);
     Write(futureGroup, 0x1C, uint32_t(1));
-    chain({}); LifetimeTrace_SaveSnapshot(5);
+    chain({}); RollbackUnit_SaveSnapshot(5);
     p = makeUnit(2); chain({p});
     futureGroupData[0] = p; Write(futureGroup, 0x18, uint32_t(1));
     Write(p, 0x30, uint64_t(2));
-    Write(p, 0x120, uint32_t(73)); LifetimeTrace_SaveSnapshot(6);
+    Write(p, 0x120, uint32_t(73)); RollbackUnit_SaveSnapshot(6);
     Write(p, 0x120, uint32_t(99));
     void* otherLine = manager + 0x50 + 0x30 * (category + 1);
     chain({}); Write(otherLine, 0, p); Write(otherLine, 8, p);
     Write(p, 0x10, uint32_t(2 | ((category + 1) << 3)));
     int beforeDiscard = deleted;
-    LifetimeTrace_RestoreEffects(5);
+    RollbackUnit_RestoreEffects(5);
     assert(deleted == beforeDiscard && g_quarantined == 1);
     assert(Read<void*>(line(), 0) == nullptr && Read<void*>(otherLine, 0) == nullptr);
     assert(Read<uint32_t>(futureGroup, 0x18) == 0 && Read<uint64_t>(p, 0x30) == 0);
-    LifetimeTrace_RestoreEffects(6);
+    RollbackUnit_RestoreEffects(6);
     assert(g_quarantined == 0 && Read<void*>(line(), 0) == p);
     assert(Read<void*>(otherLine, 0) == nullptr && Read<uint32_t>(p, 0x120) == 73);
     assert(((Read<uint32_t>(p, 0x10) >> 3) & 0x7F) == category);
     assert(Read<uint32_t>(futureGroup, 0x18) == 1 && futureGroupData[0] == p);
     assert(Read<uint64_t>(p, 0x30) == 2);
-    LifetimeTrace_RestoreEffects(5);
-    LifetimeTrace_ClearSnapshots();
+    RollbackUnit_RestoreEffects(5);
+    RollbackUnit_ClearSnapshots();
     assert(deleted == beforeDiscard + 1 && g_quarantined == 0);
 
     // Unregistered callback owners have state but no primary-list membership.
     p = makeUnit(1); Write(p, 0x10, uint32_t(1 | (0x7F << 3)));
-    Write(p, 0x120, uint32_t(17)); LifetimeTrace_SaveSnapshot(7);
+    Write(p, 0x120, uint32_t(17)); RollbackUnit_SaveSnapshot(7);
     Write(p, 0x120, uint32_t(88)); Write(p, 0x10, uint32_t(0x3F8));
-    DeleteEffect(p, 1); LifetimeTrace_RestoreEffects(7);
+    DeleteEffect(p, 1); RollbackUnit_RestoreEffects(7);
     assert(g_quarantined == 0 && Read<uint32_t>(p, 0x120) == 17);
     assert(Read<uint32_t>(p, 0x10) == (1 | (0x7F << 3)) && Read<void*>(line(), 0) == nullptr);
-    LifetimeTrace_ClearSnapshots(); DeleteEffect(p, 1);
+    RollbackUnit_ClearSnapshots(); DeleteEffect(p, 1);
 
     // Retain a real populated CPU billboard layout, not just an empty owner.
     p = makeUnit(3);
@@ -1509,19 +1509,19 @@ int main(int argc, char** argv) {
     Write(pool, 8, pool); assert(!OwnedEffectGraph(p)); Write(pool, 8, (void*)nullptr);
     Write(node, 0x18, (void*)node); assert(!OwnedEffectGraph(p)); Write(node, 0x18, (void*)nullptr);
     Write(node, 0x34, uint32_t(0x40001)); assert(!OwnedEffectGraph(p)); Write(node, 0x34, uint32_t(0x120));
-    chain({p}); LifetimeTrace_SaveSnapshot(5);
+    chain({p}); RollbackUnit_SaveSnapshot(5);
     assert(TestManifest(5).effectCount() == 1);
     int before = deleted;
     detachAndDelete(p);
     assert(g_quarantined == 1 && deleted == before && last().c == 1);
-    LifetimeTrace_RestoreEffects(5);
+    RollbackUnit_RestoreEffects(5);
     assert(!std::strcmp(last().name, "retiring_restore_applied") && last().c == 1);
     assert(g_quarantined == 0 && Read<void*>(p, 0x218) == node);
     assert(Read<uint32_t>(pool, 0x20) == 0x12345678 && Read<void*>(line(), 0) == p);
     detachAndDelete(p);
-    assert(!LifetimeTrace_FinishCapture() && g_quarantined == 1 && deleted == before);
-    LifetimeTrace_Flush();
-    while (!LifetimeTrace_FinishCapture()) LifetimeTrace_Flush();
+    assert(!RollbackUnit_FinishCapture() && g_quarantined == 1 && deleted == before);
+    RollbackUnit_Flush();
+    while (!RollbackUnit_FinishCapture()) RollbackUnit_Flush();
     assert(deleted == before + 1 && g_quarantined == 0);
     assert(!g_recording && !g_count);
 }
@@ -1572,7 +1572,7 @@ int main() {
     for (size_t offset : {size_t(0x40), size_t(0x138), size_t(0x278), size_t(0x280), size_t(0x288)})
         Write(effect, offset, first);
     assert(nativeOwnerCheck(effect));
-    LifetimeTrace_SaveSnapshot(0); LifetimeTrace_SaveSnapshot(1);
+    RollbackUnit_SaveSnapshot(0); RollbackUnit_SaveSnapshot(1);
     Identity* owner = Find(first, false);
     assert(owner && owner->kind == Kind::Unit && owner->dependencies == 3 && owner->snapshots == 3);
     assert(TestManifest(0).count() == 2 && patches == 1 && !creates && !applies);
@@ -1584,17 +1584,17 @@ int main() {
     void* second = makeOwner();
     for (size_t offset : {size_t(0x40), size_t(0x138), size_t(0x278), size_t(0x280), size_t(0x288)})
         Write(effect, offset, second);
-    LifetimeTrace_SaveSnapshot(2);
+    RollbackUnit_SaveSnapshot(2);
     assert(patches == 1 && !applies && nativeOwnerCheck(effect));
     assert(Find(second, false)->dependencies == 4);
-    LifetimeTrace_RestoreEffects(0);
+    RollbackUnit_RestoreEffects(0);
     assert(Read<void*>(effect, 0x280) == first && !nativeOwnerCheck(effect));
     assert(ownersDestroyed == 0 && Read<uintptr_t>(first, 0) == uintptr_t(ownerVtable));
-    LifetimeTrace_RestoreEffects(2);
+    RollbackUnit_RestoreEffects(2);
     assert(Read<void*>(effect, 0x280) == second && nativeOwnerCheck(effect));
-    LifetimeTrace_DropSnapshot(0); CollectQuarantine();
+    RollbackUnit_DropSnapshot(0); CollectQuarantine();
     assert(!ownersDestroyed && Find(first, false)->dependencies == 2);
-    LifetimeTrace_DropSnapshot(1); CollectQuarantine();
+    RollbackUnit_DropSnapshot(1); CollectQuarantine();
     assert(ownersDestroyed == 1 && !Find(first, false) && nativeOwnerCheck(effect));
 
     // Generic unleased deletion must tombstone its identity as well: unlike a
@@ -1607,7 +1607,7 @@ int main() {
     Write(manager, 0x58 + 13 * 0x30, (void*)nullptr);
     Write(effect, 0x10, uint32_t(0x3F8)); DeleteEffect(effect, 1);
     assert(g_quarantined == 2);
-    LifetimeTrace_ClearSnapshots();
+    RollbackUnit_ClearSnapshots();
     assert(effectDisposed && ownersDestroyed == 2 && !Find(second, false));
     void* third = makeOwner(); Birth(third, Kind::Unit); RegisterUnit(third);
     deleteOwner(third);
@@ -1629,10 +1629,10 @@ int main() {
     assert(last().id == id);
     const size_t count = g_count, read = g_read;
     FILE* file = std::tmpfile(); assert(file);
-    LifetimeTrace_WritePending(file); // ASan: no native/historical pointer reads.
+    RollbackUnit_WritePending(file); // ASan: no native/historical pointer reads.
     assert(g_count == count && g_read == read);
     AcquireSRWLockExclusive(&g_lock);
-    LifetimeTrace_WritePending(file); // A crash holding g_lock must not deadlock.
+    RollbackUnit_WritePending(file); // A crash holding g_lock must not deadlock.
     ReleaseSRWLockExclusive(&g_lock);
     char text[8192]{};
     std::rewind(file); std::fread(text, 1, sizeof(text) - 1, file); std::fclose(file);
@@ -1708,12 +1708,12 @@ int main(int argc, char** argv) {
     reset(); unitManager = manager; Write(manager, 0xC38, uint32_t(32));
     Graph a, b;
     chain({a.owner, b.owner});
-    LifetimeTrace_SaveSnapshot(0);
+    RollbackUnit_SaveSnapshot(0);
     assert(TestManifest(0).effectCount() == 2);
     assert(TestManifest(0).effects[0].simulation && TestManifest(0).payloadBytes() > 0);
     a.tick(); b.tick();
     const uint32_t expected = Read<uint32_t>(a.pool(), 0x20);
-    LifetimeTrace_RestoreEffects(0);
+    RollbackUnit_RestoreEffects(0);
     assert(!std::strcmp(last().name, "retiring_restore_applied"));
     assert(Read<uint32_t>(a.owner, 0x120) == 0 && Read<uint32_t>(a.pool(), 0x20) == 0);
     assert(a.jointExtra[0] == 0 && Read<void*>(a.owner, 0x18) == b.owner);
@@ -1726,7 +1726,7 @@ int main(int argc, char** argv) {
     oEffectDtor = [](void*) { assert(!locked); };
     oDeleteEffect = [](void* p, uint32_t) -> void* { assert(!locked); EffectDtor(p); return p; };
     DeleteEffect(a.owner, 1); assert(g_quarantined == 1);
-    LifetimeTrace_RestoreEffects(0);
+    RollbackUnit_RestoreEffects(0);
     assert(!std::strcmp(last().name, "retiring_restore_applied") && last().c == 1);
     assert(g_quarantined == 0 && (Read<uint32_t>(a.owner, 0x10) & 7) == 2);
     assert(Read<void*>(line(), 0) == a.owner && Read<void*>(a.owner, 0x18) == b.owner);
@@ -1742,17 +1742,17 @@ int main(int argc, char** argv) {
     DeleteEffect(a.owner, 1);
     assert(g_quarantined == 1 && retiredChildren == std::vector<void*>{a.pool()});
     assert(!Read<void*>(a.pool(), 0x60));
-    LifetimeTrace_RestoreEffects(0);
+    RollbackUnit_RestoreEffects(0);
     assert(g_quarantined == 0 && Read<void*>(line(), 0) == a.owner && !Read<void*>(a.pool(), 0x60));
 
     // Arbitrary mutable state and restart do not invalidate owned allocations.
     Write(b.node, 0x78, uint32_t(0xDEADBEEF));
     oRestartGraph = [](void*) { assert(!locked); };
-    RestartGraph(b.owner); LifetimeTrace_RestoreEffects(0);
+    RestartGraph(b.owner); RollbackUnit_RestoreEffects(0);
     assert(!std::strcmp(last().name, "retiring_restore_applied"));
     assert(Read<uint32_t>(a.pool(), 0x20) == 0 && Read<uint32_t>(b.node, 0x78) == 0);
-    LifetimeTrace_SaveSnapshot(1);
-    LifetimeTrace_DropSnapshot(1);
+    RollbackUnit_SaveSnapshot(1);
+    RollbackUnit_DropSnapshot(1);
     assert(!g_liveSnapshots[1]);
 
     // Restore actual ordered group membership, including native buffer growth.
@@ -1761,21 +1761,21 @@ int main(int argc, char** argv) {
     void* groupData = std::calloc(1, sizeof(void*));
     Write(groupData, 0, (void*)a.owner);
     Write(group, 0x18, uint32_t(1)); Write(group, 0x1C, uint32_t(1)); Write(group, 0x28, groupData);
-    Write(a.owner, 0x30, uint64_t(2)); LifetimeTrace_SaveSnapshot(2);
-    a.tick(); LifetimeTrace_RestoreEffects(2);
+    Write(a.owner, 0x30, uint64_t(2)); RollbackUnit_SaveSnapshot(2);
+    a.tick(); RollbackUnit_RestoreEffects(2);
     assert(!std::strcmp(last().name, "retiring_restore_applied") && Read<uint64_t>(a.owner, 0x30) == 2);
     // Native retirement removed A from the group; a new unrelated unit joined.
     alignas(16) uint8_t foreign[0x40]{};
     Write(groupData, 0, (void*)foreign);
     chain({b.owner}); Write(a.owner, 0x18, (void*)nullptr); Write(a.owner, 0x20, (void*)nullptr);
     Write(a.owner, 0x30, uint64_t(0)); Write(a.owner, 0x10, uint32_t(0x3F8));
-    DeleteEffect(a.owner, 1); LifetimeTrace_RestoreEffects(2);
+    DeleteEffect(a.owner, 1); RollbackUnit_RestoreEffects(2);
     assert(!std::strcmp(last().name, "retiring_restore_applied") && g_quarantined == 0);
     assert(Read<uint64_t>(a.owner, 0x30) == 2 && Read<uint32_t>(group, 0x18) == 2);
     groupData = Read<void*>(group, 0x28);
     assert(Read<void*>(groupData, 0) == a.owner && Read<void*>(groupData, 8) == foreign);
     assert(groupExpansions == 1);
-    LifetimeTrace_ClearSnapshots(); assert(g_quarantined == 0);
+    RollbackUnit_ClearSnapshots(); assert(g_quarantined == 0);
     std::free(groupData); Write(group, 0x28, (void*)nullptr); Write(group, 0x18, uint32_t(0));
 
     // Resource replacement keeps both graphs alive at their original addresses.
@@ -1798,35 +1798,35 @@ int main(int argc, char** argv) {
         std::memcpy(static_cast<uint8_t*>(owner) + 0x40, replacement->owner + 0x40, 0x280);
         Write(replacement->node, 0x10, owner); Write(replacement->storage, 0x100, owner);
     };
-    LifetimeTrace_SaveSnapshot(2); LifetimeTrace_SaveSnapshot(3);
+    RollbackUnit_SaveSnapshot(2); RollbackUnit_SaveSnapshot(3);
     assert(Read<uint32_t>(c.resource, 0x4C) == 1 && resourceAdds == 0 && resourceReleases == 0);
     const int oldGraph = Find(c.owner, false)->graph;
     EffectResource(c.owner, d.resource);
     assert(disposedGraphs.empty() && Read<uint32_t>(c.resource, 0x4C) == 1);
     assert(!g_generations[oldGraph].attached && g_generations[oldGraph].snapshots == 12);
     Write(c.owner, 0x120, uint32_t(9)); Write(d.pool(), 0x20, uint32_t(999));
-    LifetimeTrace_SaveSnapshot(4);
+    RollbackUnit_SaveSnapshot(4);
     const int newGraph = Find(c.owner, false)->graph;
     assert(newGraph != oldGraph && Read<uint32_t>(d.resource, 0x4C) == 2);
-    LifetimeTrace_RestoreEffects(3);
+    RollbackUnit_RestoreEffects(3);
     assert(Find(c.owner, false)->graph == oldGraph && Read<void*>(c.owner, 0x218) == c.node);
     assert(Read<uint32_t>(c.owner, 0x120) == 0 && Read<uint32_t>(c.pool(), 0x20) == 0);
     assert(Read<uint32_t>(c.resource, 0x4C) == 1 && Read<uint32_t>(d.resource, 0x4C) == 2);
-    LifetimeTrace_RestoreEffects(4);
+    RollbackUnit_RestoreEffects(4);
     assert(Find(c.owner, false)->graph == newGraph && Read<void*>(c.owner, 0x218) == d.node);
     assert(Read<uint32_t>(c.owner, 0x120) == 9 && Read<uint32_t>(d.pool(), 0x20) == 999);
     assert(disposedGraphs.empty());
 
     // Neither logging shutdown nor expiry of just one lease may destroy A.
-    g_recording = false; LifetimeTrace_Flush();
-    assert(disposedGraphs.empty() && g_lifetimeEnabled);
-    LifetimeTrace_DropSnapshot(3); LifetimeTrace_Flush();
+    g_recording = false; RollbackUnit_Flush();
+    assert(disposedGraphs.empty() && g_rollbackUnitEnabled);
+    RollbackUnit_DropSnapshot(3); RollbackUnit_Flush();
     assert(disposedGraphs.empty());
-    LifetimeTrace_DropSnapshot(2); LifetimeTrace_Flush();
+    RollbackUnit_DropSnapshot(2); RollbackUnit_Flush();
     assert(disposedGraphs.size() == 1 && disposedGraphs[0] == c.node);
     assert(Read<void*>(c.owner, 0x218) == d.node && Read<uint32_t>(d.pool(), 0x20) == 999);
     assert(Read<uint32_t>(c.resource, 0x4C) == 0);
-    LifetimeTrace_DropSnapshot(4); LifetimeTrace_Flush();
+    RollbackUnit_DropSnapshot(4); RollbackUnit_Flush();
     assert(disposedGraphs.size() == 1); // Attached B still belongs to the native owner.
     oEffectDtor = [](void* owner) { ReleaseGraph(owner); releaseResourceRef(Read<void*>(owner, 0x108)); };
     chain({}); Write(c.owner, 0x10, uint32_t(0x3F8));
@@ -1840,23 +1840,23 @@ int main(int argc, char** argv) {
     Graph e, f, g;
     Destroyed("fixture_storage", f.owner, Find(f.owner, false)->id);
     Destroyed("fixture_storage", g.owner, Find(g.owner, false)->id);
-    chain({e.owner}); LifetimeTrace_SaveSnapshot(5);
+    chain({e.owner}); RollbackUnit_SaveSnapshot(5);
     ReleaseGraph(e.owner);
     std::memcpy(e.owner + 0x40, f.owner + 0x40, 0x280);
     Write(e.owner, 0x108, (void*)e.resource);
     Write(f.node, 0x10, (void*)e.owner); Write(f.storage, 0x100, (void*)e.owner);
-    LifetimeTrace_SaveSnapshot(6);
+    RollbackUnit_SaveSnapshot(6);
     const int reference = Find(e.owner, false)->resourceReference;
     assert(g_resourceReferences[reference].generations == 2);
     assert(Read<uint32_t>(e.resource, 0x4C) == 1 && resourceAdds == 0);
     replacement = &g; EffectResource(e.owner, g.resource);
-    LifetimeTrace_SaveSnapshot(7);
+    RollbackUnit_SaveSnapshot(7);
     assert(!g_resourceReferences[reference].onOwner && resourceAdds == 1);
-    LifetimeTrace_DropSnapshot(5); LifetimeTrace_Flush();
+    RollbackUnit_DropSnapshot(5); RollbackUnit_Flush();
     assert(disposedGraphs.size() == 1 && Read<uint32_t>(e.resource, 0x4C) == 1);
-    LifetimeTrace_DropSnapshot(6); LifetimeTrace_Flush();
+    RollbackUnit_DropSnapshot(6); RollbackUnit_Flush();
     assert(disposedGraphs.size() == 2 && Read<uint32_t>(e.resource, 0x4C) == 0);
-    LifetimeTrace_ClearSnapshots(); chain({}); Write(e.owner, 0x10, uint32_t(0x3F8));
+    RollbackUnit_ClearSnapshots(); chain({}); Write(e.owner, 0x10, uint32_t(0x3F8));
     DeleteEffect(e.owner, 1);
     assert(disposedGraphs.size() == 3 && Read<uint32_t>(g.resource, 0x4C) == 1);
     assert(resourceAdds == 1 && resourceReleases == 2);
@@ -1875,11 +1875,11 @@ int main(int argc, char** argv) {
     for (uint32_t mode = 0; mode < 12; ++mode) {
         const uint32_t types = (mode << 20) | 0x20000 | ((mode % 9) << 12) | 0x200;
         Write(attached.node, 0x70, types);
-        LifetimeTrace_SaveSnapshot(8);
+        RollbackUnit_SaveSnapshot(8);
         assert(TestManifest(8).effectCount() == 1);
         attached.tick(); Write(attached.owner, 0x280, (void*)nullptr);
         Write(attached.node, 0x70, uint32_t(0));
-        LifetimeTrace_RestoreEffects(8);
+        RollbackUnit_RestoreEffects(8);
         assert(!std::strcmp(last().name, "retiring_restore_applied"));
         assert(Read<uint32_t>(attached.node, 0x70) == types);
         assert(Read<uint32_t>(attached.pool(), 0x20) == 0);
@@ -1887,10 +1887,10 @@ int main(int argc, char** argv) {
     }
     chain({}); Write(attached.owner, 0x10, uint32_t(0x3F8));
     DeleteEffect(attached.owner, 1); assert(g_quarantined == 1);
-    LifetimeTrace_RestoreEffects(8);
+    RollbackUnit_RestoreEffects(8);
     assert(g_quarantined == 0 && (Read<uint32_t>(attached.owner, 0x10) & 7) == 2);
     assert(Read<void*>(attached.owner, 0x40) == character);
-    LifetimeTrace_ClearSnapshots(); chain({}); Write(attached.owner, 0x10, uint32_t(0x3F8));
+    RollbackUnit_ClearSnapshots(); chain({}); Write(attached.owner, 0x10, uint32_t(0x3F8));
     DeleteEffect(attached.owner, 1);
     assert(disposedGraphs.size() == 1 && Read<uint32_t>(attached.resource, 0x4C) == 0);
 
@@ -1906,11 +1906,11 @@ int main(int argc, char** argv) {
     Write(generic.node, 0x240, uint64_t(0xCAFEBABE));
     RegisterGeneratorLayouts(generic.owner);
     assert(OwnedEffectGraph(generic.owner));
-    chain({generic.owner}); LifetimeTrace_SaveSnapshot(10);
+    chain({generic.owner}); RollbackUnit_SaveSnapshot(10);
     Write(generic.node, 0x240, uint64_t(0));
-    LifetimeTrace_RestoreEffects(10);
+    RollbackUnit_RestoreEffects(10);
     assert(Read<uint64_t>(generic.node, 0x240) == 0xCAFEBABE);
-    LifetimeTrace_ClearSnapshots(); chain({}); Write(generic.owner, 0x10, uint32_t(0x3F8));
+    RollbackUnit_ClearSnapshots(); chain({}); Write(generic.owner, 0x10, uint32_t(0x3F8));
     DeleteEffect(generic.owner, 1);
     assert(disposedGraphs.size() == 1);
     (void)destroyed;
@@ -1927,14 +1927,14 @@ int main() {
     Write(manager, 0xC38, uint32_t(1)); Write(manager, 0x50, owner);
     Write(owner, 0, uintptr_t(_addr(0x140A8E180))); Write(owner, 0x10, uint32_t(2));
     Birth(owner, Kind::Effect);
-    std::shared_ptr<LifetimeSnapshot> history[255];
-    const LifetimeSnapshot* firstBank = nullptr;
+    std::shared_ptr<RollbackUnitSnapshot> history[255];
+    const RollbackUnitSnapshot* firstBank = nullptr;
     for (int frame = 0; frame < 300; ++frame) {
-        LifetimeTrace_DropSnapshot(frame);
+        RollbackUnit_DropSnapshot(frame);
         auto& slot = testSnapshots[frame % ROLLBACK_WINDOW];
         slot = history[frame % 255]; // Same bank handoff as SnapDump_AcquireSnapshotStorage.
         Write(owner, 0x124, uint32_t(frame));
-        LifetimeTrace_SaveSnapshot(frame, slot);
+        RollbackUnit_SaveSnapshot(frame, slot);
         history[frame % 255] = slot;
         assert(history[frame % 255].get() == g_liveSnapshots[frame % ROLLBACK_WINDOW]);
         if (frame == 0) firstBank = slot.get();
@@ -1948,13 +1948,13 @@ int main() {
         assert(saved->frame == frame && saved->effectCount() == 1);
         assert(Read<uint32_t>(saved->effects[0].root, 0x124) == uint32_t(frame));
     }
-    LifetimeTrace_ClearSnapshots();
+    RollbackUnit_ClearSnapshots();
     for (const auto* saved : g_liveSnapshots) assert(!saved);
     Write(manager, 0x50, static_cast<void*>(nullptr));
     Destroyed("gone", owner, Find(owner, false)->id);
     std::free(owner);
     size_t roots = 0;
-    auto counts = LifetimeTrace_VisitSnapshot(45, history[45].get(), false,
+    auto counts = RollbackUnit_VisitSnapshot(45, history[45].get(), false,
         [](void* context, const char* name, const void*, uint64_t, uint64_t,
            const void* bytes, size_t) {
             if (!std::strstr(name, ".root")) return;
@@ -2093,38 +2093,38 @@ int main() {
     auto* originalPose = Read<void*>(shot, 0x538);
     auto* originalWork = Read<void*>(shot, 0x6C0);
     auto* originalKeys = Read<void*>(shot, 0x6D8);
-    LifetimeTrace_SaveSnapshot(0);
+    RollbackUnit_SaveSnapshot(0);
     GenerationBlend(shot, 2);
     assert(Read<void*>(shot, 0x538) == originalPose && Read<void*>(shot, 0x6C0) != originalWork);
     assert(Read<uint32_t>(originalWork, 0) == 0xAB01 && ownedFrees == 0);
     auto* replacementWork = Read<void*>(shot, 0x6C0);
-    LifetimeTrace_SaveSnapshot(1);
+    RollbackUnit_SaveSnapshot(1);
     StageShotGenerationStorage(*Find(shot, false), TestManifest(0).shots[0], 1);
     assert(Read<void*>(shot, 0x6C0) == originalWork && Read<void*>(shot, 0x6D8) == originalKeys);
     assert(Read<uint32_t>(shot, 0x554) == 1 && Read<uint32_t>(originalWork, 0) == 0xAB01);
     StageShotGenerationStorage(*Find(shot, false), TestManifest(1).shots[0], 2);
     assert(Read<void*>(shot, 0x6C0) == replacementWork && Read<uint32_t>(shot, 0x554) == 2);
-    LifetimeTrace_DropSnapshot(0); CollectShotGenerations();
+    RollbackUnit_DropSnapshot(0); CollectShotGenerations();
     assert(ownedFrees == 2 && Read<void*>(shot, 0x538) == originalPose);
     assert(Read<uintptr_t>(shot, 0) == 0xCAFE && Read<uintptr_t>(shot, 0x1250) == 0xBAD);
-    LifetimeTrace_ClearSnapshots(); disposeModel(shot); std::free(model);
+    RollbackUnit_ClearSnapshots(); disposeModel(shot); std::free(model);
 
     reset(); unitManager = manager;
     oGenerationBlend = nativeBlend; oGenerationModel = nativeModel;
     oGenerationBaseModel = nativeBase; oGenerationResourceRelease = ResourceRelease;
     model = resource(2); auto* nextModel = resource(2); shot = owner(model);
     pose(shot, 2); work(shot, 1); keys(shot, 1);
-    LifetimeTrace_SaveSnapshot(0); originalPose = Read<void*>(shot, 0x538);
+    RollbackUnit_SaveSnapshot(0); originalPose = Read<void*>(shot, 0x538);
     GenerationModel(shot, nextModel);
     assert(Read<void*>(shot, 0x538) == originalPose && Read<uint32_t>(model, 0x4C) == 1);
     assert(Read<uint32_t>(nextModel, 0x4C) == 2 && resourceAdds == 1);
-    LifetimeTrace_SaveSnapshot(1);
+    RollbackUnit_SaveSnapshot(1);
     auto* thirdModel = resource(3);
     originalKeys = Read<void*>(shot, 0x6D8);
     GenerationModel(shot, thirdModel);
     assert(Read<uint32_t>(shot, 0x530) == 3 && Read<void*>(shot, 0x538) != originalPose);
     assert(Read<void*>(shot, 0x6D8) == originalKeys); // setModel does not replace the key slab.
-    LifetimeTrace_SaveSnapshot(2);
+    RollbackUnit_SaveSnapshot(2);
     StageShotGenerationStorage(*Find(shot, false), TestManifest(1).shots[0], 2);
     assert(Read<void*>(shot, 0x538) == originalPose && Read<void*>(shot, 0x100) == nextModel);
     assert(Read<void*>(originalPose, 0xA8) == shot && Read<uint32_t>(shot, 0x530) == 2);
@@ -2132,10 +2132,10 @@ int main() {
     assert(Read<void*>(shot, 0x100) == thirdModel && Read<uint32_t>(shot, 0x530) == 3);
     GenerationModel(shot, nullptr);
     assert(!Read<void*>(shot, 0x100) && !Read<void*>(shot, 0x538));
-    LifetimeTrace_DropSnapshot(0); CollectShotGenerations();
+    RollbackUnit_DropSnapshot(0); CollectShotGenerations();
     assert(Read<uint32_t>(model, 0x4C) == 0 && Read<uint32_t>(nextModel, 0x4C) == 2);
     assert(!Read<void*>(originalPose, 0xA8)); // Logical retirement happened, vector storage is retained.
-    LifetimeTrace_ClearSnapshots();
+    RollbackUnit_ClearSnapshots();
     assert(Read<uint32_t>(nextModel, 0x4C) == 1 && Read<uint32_t>(thirdModel, 0x4C) == 1 && resourceAdds == 2);
     disposeModel(shot); ResourceRelease(nextModel); std::free(nextModel); std::free(model);
     ResourceRelease(thirdModel); std::free(thirdModel);
@@ -2144,34 +2144,34 @@ int main() {
     oGenerationBlend = nativeBlend; oGenerationModel = nativeModel;
     oGenerationBaseModel = nativeBase; oGenerationResourceRelease = ResourceRelease;
     model = resource(2); shot = owner();
-    LifetimeTrace_SaveSnapshot(0); // Empty owned domains can later acquire native storage.
+    RollbackUnit_SaveSnapshot(0); // Empty owned domains can later acquire native storage.
     GenerationModel(shot, model);
     assert(Read<void*>(shot, 0x538) && Read<void*>(shot, 0x6D8));
-    LifetimeTrace_SaveSnapshot(1);
+    RollbackUnit_SaveSnapshot(1);
     StageShotGenerationStorage(*Find(shot, false), TestManifest(0).shots[0], 1);
     assert(!Read<void*>(shot, 0x538) && !Read<void*>(shot, 0x6D8));
     StageShotGenerationStorage(*Find(shot, false), TestManifest(1).shots[0], 2);
     assert(Read<void*>(shot, 0x538) && Read<void*>(shot, 0x6D8));
     assert(Read<void*>(Read<void*>(shot, 0x538), 0xA8) == shot);
-    LifetimeTrace_DropSnapshot(0); CollectShotGenerations();
-    LifetimeTrace_ClearSnapshots(); disposeModel(shot);
+    RollbackUnit_DropSnapshot(0); CollectShotGenerations();
+    RollbackUnit_ClearSnapshots(); disposeModel(shot);
     ResourceRelease(model); assert(Read<uint32_t>(model, 0x4C) == 0); std::free(model);
 
     reset(); unitManager = manager;
     oGenerationBlend = nativeBlend;
     shot = owner(); keys(shot, 1);
-    LifetimeTrace_SaveSnapshot(0);
+    RollbackUnit_SaveSnapshot(0);
     originalKeys = Read<void*>(shot, 0x6D8);
     GenerationBlend(shot, 2); // Native early branch changes count, not allocation.
     assert(Read<void*>(shot, 0x6D8) == originalKeys);
-    LifetimeTrace_SaveSnapshot(1);
+    RollbackUnit_SaveSnapshot(1);
     const auto& keySpans = TestManifest(1).shots[0].spans;
     bool keySpan = false;
     for (const auto& span : keySpans) if (!std::strcmp(span.name, "model.keyframes")) {
         assert(span.memory.size == 2*0xC); keySpan = true;
     }
     assert(keySpan); // ASan: never read the new count's larger, nonexistent slab.
-    LifetimeTrace_ClearSnapshots(); disposeModel(shot);
+    RollbackUnit_ClearSnapshots(); disposeModel(shot);
 
     reset(); unitManager = manager;
     shot = owner();
@@ -2183,20 +2183,20 @@ int main() {
     Write(array, 0, populated); Write(array, 16, empty);
     Write(root, 0x20, uint32_t(3)); Write(root, 0x24, uint32_t(4)); Write(root, 0x30, array);
     Write(shot, 0x2058, root);
-    LifetimeTrace_SaveSnapshot(0);
+    RollbackUnit_SaveSnapshot(0);
     ReleaseCollision(shot, 0, 0);
     assert(Read<uint32_t>(root, 0x20) == 3 && Read<uint32_t>(root, 0x24) == 4);
     auto* postimage = Read<void*>(root, 0x30);
     assert(!Read<void*>(postimage, 0) && !Read<void*>(postimage, 8) && Read<void*>(postimage, 16) == empty);
     assert(!wrapperDeletes && !primitiveDeletes && !rootDeletes);
-    LifetimeTrace_SaveSnapshot(1);
+    RollbackUnit_SaveSnapshot(1);
     GenerationExtendArray(static_cast<uint8_t*>(root) + 0x18, 8);
     assert(Read<uint32_t>(root, 0x24) == 8 && Read<void*>(Read<void*>(root, 0x30), 16) == empty);
     StageShotGenerationStorage(*Find(shot, false), TestManifest(0).shots[0], 1);
     assert(Read<void*>(shot, 0x2058) == root && Read<void*>(root, 0x30) == array);
     assert(Read<void*>(array, 0) == populated && Read<float>(primitive, 0x20) == 222);
     StageShotGenerationStorage(*Find(shot, false), TestManifest(1).shots[0], 2);
-    LifetimeTrace_DropSnapshot(0); CollectShotGenerations();
+    RollbackUnit_DropSnapshot(0); CollectShotGenerations();
     assert(wrapperDeletes == 1 && primitiveDeletes == 1 && rootDeletes == 0);
     assert(Read<void*>(Read<void*>(root, 0x30), 16) == empty);
     ReleaseCollision(shot, 0, 1);
@@ -2205,7 +2205,7 @@ int main() {
     assert(Read<void*>(shot, 0x2058) == root && Read<void*>(Read<void*>(root, 0x30), 16) == empty);
     assert(rootDeletes == 0); // Full-release resurrection uses the retained root, not a factory.
     ReleaseCollision(shot, 0, 1);
-    LifetimeTrace_ClearSnapshots();
+    RollbackUnit_ClearSnapshots();
     assert(wrapperDeletes == 2 && primitiveDeletes == 1 && rootDeletes == 1);
     disposeModel(shot);
 
@@ -2214,17 +2214,17 @@ int main() {
     oGenerationAddChild = nativeAddChild;
     shot = owner(); root = std::calloc(1, 0xE0); Write(root, 0, uintptr_t(rootVT));
     Write(shot, 0x2058, root);
-    LifetimeTrace_SaveSnapshot(0);
+    RollbackUnit_SaveSnapshot(0);
     primitive = std::calloc(1, 0x70);
     Write(primitive, 0, uintptr_t(primitiveVT)); Write(primitive, 8, uint32_t(5));
     assert(GenerationAddChild(root, primitive, 0) == 0);
     assert(Read<uint32_t>(root, 0x20) == 1 && Read<uint32_t>(root, 0x24) == 32);
-    LifetimeTrace_SaveSnapshot(1);
+    RollbackUnit_SaveSnapshot(1);
     StageShotGenerationStorage(*Find(shot, false), TestManifest(0).shots[0], 1);
     assert(Read<uint32_t>(root, 0x20) == 0 && !Read<void*>(root, 0x30));
-    LifetimeTrace_DropSnapshot(1); CollectShotGenerations();
+    RollbackUnit_DropSnapshot(1); CollectShotGenerations();
     assert(wrapperDeletes == 1 && primitiveDeletes == 1 && rootDeletes == 0);
-    ReleaseCollision(shot, 0, 1); LifetimeTrace_ClearSnapshots();
+    ReleaseCollision(shot, 0, 1); RollbackUnit_ClearSnapshots();
     assert(rootDeletes == 1);
     disposeModel(shot);
 }
@@ -2317,9 +2317,9 @@ int main(int argc, char** argv) {
     oShotDtor = [](void* p) {
         UnlinkShot(shots, 0, p); ReleaseShotId(shots, Read<uint32_t>(p, 0x1F50));
     };
-    LifetimeTrace_SaveSnapshot(775);
+    RollbackUnit_SaveSnapshot(775);
     Write(shots, 0x438, uint32_t(19)); Write(config, 0x4A89C, uint32_t(1));
-    LifetimeTrace_RetireFutureShots(775); // Also rewind allocation state when a future shot already expired.
+    RollbackUnit_RetireFutureShots(775); // Also rewind allocation state when a future shot already expired.
     assert(Read<uint32_t>(shots, 0x438) == 11 && !Read<uint32_t>(config, 0x4A89C));
     assert(!collisionRecycles && !unlinks && !releases);
     void* abandoned = spawn(); const uint64_t abandonedId = Find(abandoned, false)->id;
@@ -2338,10 +2338,10 @@ int main(int argc, char** argv) {
     static int effectDeletes = 0;
     oEffectDtor = [](void*) { assert(!locked); };
     oDeleteEffect = [](void* p, uint32_t) -> void* { assert(!locked); ++effectDeletes; EffectDtor(p); return p; };
-    LifetimeTrace_SaveSnapshot(776); // A newer snapshot leases the abandoned allocation.
+    RollbackUnit_SaveSnapshot(776); // A newer snapshot leases the abandoned allocation.
     Write(lists[0], 0x20, uint32_t(1)); Write(lists[0], 0x540, uint32_t(1));
     Write(lists[1], 0xF80, uint32_t(1));
-    LifetimeTrace_RetireFutureShots(775);
+    RollbackUnit_RetireFutureShots(775);
     assert(Find(abandoned, false)->occupancy == Occupancy::Quarantined && !deletes && !kills);
     assert((Read<uint32_t>(abandoned, 0x10)&0x3FF) == 0x3F8 && !Read<uint8_t>(root, 8));
     assert(!Read<void*>(static_cast<uint8_t*>(abandoned) + 0x2140, 0x60) && constraintUnlinks == 1);
@@ -2355,22 +2355,22 @@ int main(int argc, char** argv) {
     assert(!Read<uint32_t>(lists[0], 0x540) && !Read<uint32_t>(lists[1], 0xF80));
     assert(collisionGroupClears == 2 && !Read<uint32_t>(group, 0x20));
     assert(Find(debris, false)->occupancy == Occupancy::Live);
-    LifetimeTrace_RestoreEffects(775);
+    RollbackUnit_RestoreEffects(775);
     assert(Find(debris, false)->occupancy == Occupancy::Quarantined && !effectDeletes);
     assert((Read<uint32_t>(debris, 0x10) & 0x3FF) == 0x3F8);
-    LifetimeTrace_RetireFutureShots(775); // No duplicate logical retirement.
+    RollbackUnit_RetireFutureShots(775); // No duplicate logical retirement.
     assert(unlinks == 1 && releases == 1 && constraintUnlinks == 1);
     void* replayed = spawn();
     assert(Read<uint32_t>(replayed, 0x1F50) == 11 && replayed != abandoned);
     assert(Read<void*>(replayed, 0x18) == foreign);
-    LifetimeTrace_SaveSnapshot(777);
+    RollbackUnit_SaveSnapshot(777);
     assert(TestManifest(777 % ROLLBACK_WINDOW).shots.size() == 1);
     assert(TestManifest(777 % ROLLBACK_WINDOW).shots[0].id == Find(replayed, false)->id);
     CollectQuarantine(); assert(!deletes); // Snapshot 776 still owns abandoned storage.
     auto* borrower = std::calloc(1, 0x2C0);
     Write(borrower, 0x280, abandoned); Birth(borrower, Kind::Effect);
     const uint64_t borrowerId = Find(borrower, false)->id;
-    LifetimeTrace_DropSnapshot(776); CollectShotGenerations(); CollectQuarantine();
+    RollbackUnit_DropSnapshot(776); CollectShotGenerations(); CollectQuarantine();
     assert(!deletes && Find(abandoned, false)->id == abandonedId); // A live unsupported effect is also an obligation.
     Destroyed("gone", borrower, borrowerId); std::free(borrower);
     Write(replayed, 0x2000, abandoned);
@@ -2384,7 +2384,7 @@ int main(int argc, char** argv) {
     CollectQuarantine(); assert(deletes == 1 && !Find(abandoned, false));
     Write(units, 0x50 + 8*0x30, uintptr_t(0)); std::free(character); testDti = 0;
     assert(unlinks == 1 && releases == 1 && Read<uint32_t>(shots, 0x38 + 11*4) == 11);
-    LifetimeTrace_ClearSnapshots();
+    RollbackUnit_ClearSnapshots();
     { UnitGuard fence; nativeDelete(replayed, 1); }
     assert(deletes == 2 && releases == 2 && !g_quarantined && !kills && effectDeletes == 1);
 }
@@ -2448,12 +2448,12 @@ int main() {
         self.compile_run(True, CHECKS[:CHECKS.index("int main() {")] + r'''
 int main() {
     reset(); uint8_t render[0x108]{};
-    LifetimeTrace_WaitForRenderWorker(); assert(!renderWaits);
+    RollbackUnit_WaitForRenderWorker(); assert(!renderWaits);
     renderManager = render;
     for (int active : {0, 1}) for (int configured : {0, 1}) for (int latched : {0, 1}) {
         render[0x38] = uint8_t(active); render[0x3D] = uint8_t(configured); render[0x3E] = uint8_t(latched);
         const int before = renderWaits;
-        LifetimeTrace_WaitForRenderWorker();
+        RollbackUnit_WaitForRenderWorker();
         assert(renderWaits == before + (active && latched));
         assert(render[0x38] == uint8_t(active && !latched));
         assert(render[0x3D] == configured && render[0x3E] == latched);
@@ -2505,7 +2505,7 @@ int main() {
     }
     Birth(shot, Kind::Shot); auto* identity = Find(shot, false);
     identity->extent = sizeof(shot); identity->dti = 0x1234;
-    LifetimeTrace_SaveSnapshot(0); GenerationMotionList(shot, b, 0);
+    RollbackUnit_SaveSnapshot(0); GenerationMotionList(shot, b, 0);
     assert(Read<uint32_t>(a, 0x4C) == 1);
     const int adds = resourceAdds, releases = resourceReleases;
     for (int repeat = 0; repeat < 2; ++repeat) {
@@ -2542,7 +2542,7 @@ int main() {
                    Read<uint32_t>(keys, key*0xC + 8) == 9);
     }
     const uint64_t id = identity->id;
-    LifetimeTrace_ClearSnapshots(); ForgetCurrentShotGenerations(id, shot);
+    RollbackUnit_ClearSnapshots(); ForgetCurrentShotGenerations(id, shot);
     ResourceRelease(a); ReleaseTerminalShotReferences(id); ResourceRelease(b); ResourceRelease(model);
     assert(!Read<uint32_t>(a, 0x4C) && !Read<uint32_t>(b, 0x4C));
     for (size_t i = 0; i < 2; ++i) std::free(Read<void*>(shot, 0x6C0 + i*0x180));
@@ -2564,7 +2564,7 @@ int main() {
     Write(shot, 0x13D8, static_cast<void*>(target));
     Birth(shot, Kind::Shot); auto* owner = Find(shot, false);
     owner->extent = sizeof(shot); owner->dti = 0x1234;
-    LifetimeTrace_SaveSnapshot(0);
+    RollbackUnit_SaveSnapshot(0);
     auto* adopted = Find(target, false);
     assert(adopted && adopted->kind == Kind::Unit && adopted->snapshots == 1 && adopted->dependencies == 1);
     assert(TestManifest(0).count() == 2 && TestManifest(0).shots.size() == 1 && patches == 1 && !creates);
@@ -2574,7 +2574,7 @@ int main() {
     { UnitGuard fence; StageShotCpuFields(*owner, TestManifest(0).shots[0], 1); }
     assert(Read<void*>(shot, 0x13D8) == target && !deletes);
     Write(shot, 0x13D8, (void*)nullptr);
-    LifetimeTrace_DropSnapshot(0); CollectQuarantine();
+    RollbackUnit_DropSnapshot(0); CollectQuarantine();
     assert(deletes == 1 && !g_quarantined);
     ForgetCurrentShotGenerations(owner->id, shot);
 }
@@ -2605,7 +2605,7 @@ int main() {
         Write(shot, record + 8, static_cast<void*>(target));
         Write(shot, record + 0x10, uint32_t(record)); Write(shot, record + 0x14, 3.0f);
     }
-    LifetimeTrace_SaveSnapshot(0); LifetimeTrace_SaveSnapshot(1);
+    RollbackUnit_SaveSnapshot(0); RollbackUnit_SaveSnapshot(1);
     assert(Find(callback, false)->dependencies == 3 && Find(target, false)->dependencies == 3);
     assert(Find(owner, false)->dependencies == 3 && !identity->dependencies);
     assert(TestManifest(0).effects.empty());
@@ -2634,10 +2634,10 @@ int main() {
         assert(HasLiveUnitReference(callback) && HasLiveUnitReference(target));
     }
     VisitShotUnitReferences(shot, [&](size_t field, void*) { Write(shot, field, (void*)nullptr); });
-    LifetimeTrace_DropSnapshot(0); CollectQuarantine();
+    RollbackUnit_DropSnapshot(0); CollectQuarantine();
     assert(g_quarantined == 1 && Find(callback, false)->dependencies == 2);
     oDeleteEffect = +[](void* p, uint32_t) -> void* { assert(!locked); return p; };
-    LifetimeTrace_DropSnapshot(1); CollectQuarantine();
+    RollbackUnit_DropSnapshot(1); CollectQuarantine();
     assert(!g_quarantined && !resourceAdds && !resourceReleases && !creates);
     ForgetCurrentShotGenerations(identity->id, shot);
 }
@@ -2661,7 +2661,7 @@ int main() {
     Write(shot, 0x548, depth); Write(shot, 0x11B0, interpolation);
     Birth(shot, Kind::Shot); auto* identity = Find(shot, false);
     identity->extent = 0x21A0; identity->dti = 0x1234;
-    LifetimeTrace_SaveSnapshot(280);
+    RollbackUnit_SaveSnapshot(280);
     const uint32_t bit = uint32_t(1) << (280 % ROLLBACK_WINDOW);
     const auto& saved = TestManifest(280 % ROLLBACK_WINDOW).shots[0];
     int attackSounds = 0, loopSounds = 0;
@@ -2707,7 +2707,7 @@ int main() {
     // The stage did not publish a resurrection or restore reciprocal graphs.
     identity->occupancy = Occupancy::Live; --g_quarantined;
     const uint64_t id = identity->id;
-    LifetimeTrace_ClearSnapshots(); ForgetCurrentShotGenerations(id, shot);
+    RollbackUnit_ClearSnapshots(); ForgetCurrentShotGenerations(id, shot);
     MockJointDelete(joint, 3); std::free(depth); std::free(interpolation);
     ResourceRelease(model); std::free(model); std::free(shot);
 }
@@ -2724,7 +2724,7 @@ int main(int argc, char** argv) {
     Write(shot, 0, uintptr_t(0xCAFE)); Write(shot, 0x116C, UINT32_MAX); Write(shot, 0x1F58, 3.0f);
     Birth(shot, Kind::Shot); auto* identity = Find(shot, false); identity->extent = 0x2140; identity->dti = 0x1234;
     Birth(target, Kind::Unit); Write(shot, 0x2008, static_cast<void*>(target));
-    LifetimeTrace_SaveSnapshot(0); auto& saved = TestManifest(0).shots[0];
+    RollbackUnit_SaveSnapshot(0); auto& saved = TestManifest(0).shots[0];
     Write(shot, 0x1F58, 11.0f); Write(shot, 0x50, 22.0f); std::signal(SIGABRT, reject);
 '''
         invalid_cases = (
@@ -2754,7 +2754,7 @@ int main() {
     Write(shot, 0x118, UINT32_MAX); Write(shot, 0x1440, UINT32_MAX);
     Birth(shot, Kind::Shot); auto* identity = Find(shot, false);
     identity->extent = 0x2140; identity->dti = 0x1234;
-    LifetimeTrace_SaveSnapshot(0);
+    RollbackUnit_SaveSnapshot(0);
     const auto& saved = TestManifest(0).shots[0];
     assert(saved.spans.size() == 1 && !std::strcmp(saved.spans[0].name, "body"));
     assert(saved.payload.size() == 0x2140 && saved.generations.size() == ShotDomainCount);
@@ -2767,7 +2767,7 @@ int main() {
         for (size_t i = 0; i < range.size; ++i) assert(shot[range.offset + i] == 0xA5);
     assert(!resourceAdds && !resourceReleases && !creates && !ownedFrees);
     const uint64_t id = identity->id;
-    LifetimeTrace_ClearSnapshots(); ForgetCurrentShotGenerations(id, shot); std::free(shot);
+    RollbackUnit_ClearSnapshots(); ForgetCurrentShotGenerations(id, shot); std::free(shot);
 }
 ''')
 
@@ -2817,7 +2817,7 @@ int main() {
     for (size_t field = 0x1390; field < 0x13B8; field += 8)
         Write(shot, field, static_cast<uint8_t*>(a) + 0x80 + (field - 0x1390));
     Write(shot, 0x1388, uint32_t(2)); Write(shot, 0x138C, uint32_t(7));
-    LifetimeTrace_SaveSnapshot(0);
+    RollbackUnit_SaveSnapshot(0);
     GenerationCommandResource(shot, b, 0); assert(Read<uint32_t>(a, 0x4C) == 1);
     // The B acquisition below has no intervening snapshot, but the live
     // interpreter may resolve it. Retention must not depend on capture frequency.
@@ -2826,7 +2826,7 @@ int main() {
     assert(Read<void*>(shot, 0x1360) == c && !Read<void*>(shot, 0x13E8));
     for (size_t field = 0x1390; field < 0x13B8; field += 8) Write(shot, field, static_cast<void*>(c));
     Write(shot, 0x138C, uint32_t(19));
-    LifetimeTrace_SaveSnapshot(1);
+    RollbackUnit_SaveSnapshot(1);
     StageShotGenerationStorage(*identity, TestManifest(0).shots[0], 1);
     { UnitGuard fence; StageShotCpuFields(*identity, TestManifest(0).shots[0], 1); }
     assert(Read<void*>(shot, 0x1360) == a && Read<uint32_t>(shot, 0x138C) == 7);
@@ -2838,7 +2838,7 @@ int main() {
     for (uint32_t slot = 0; slot < 16; ++slot) GenerationMotionList(shot, b, slot);
     assert(Read<uint32_t>(b, 0x4C) == 18); // Caller + retired command + sixteen motion refs.
     for (uint32_t slot = 0; slot < 16; ++slot) GenerationMotionList(shot, nullptr, slot);
-    LifetimeTrace_ClearSnapshots();
+    RollbackUnit_ClearSnapshots();
     assert(Read<uint32_t>(a, 0x4C) == 2 && Read<uint32_t>(b, 0x4C) == 18 && Read<uint32_t>(c, 0x4C) == 2);
     assert(!HasRetiredShotGenerations(identity->id)); // Terminal-only pins must not deadlock owner GC.
     DeleteUnit(shot, 1, dispose, 0);
@@ -2862,10 +2862,10 @@ int main() {
     // Re-initialization renews the identity without counting the address twice.
     assert(ConstraintBucket(constraint) == 1);
     // With no shot there is no chain to discover: nothing is captured or walked.
-    LifetimeTrace_SaveSnapshot(0);
+    RollbackUnit_SaveSnapshot(0);
     assert(TestManifest(0).constraints.empty() && TestManifest(0).constraintsComplete &&
         TestManifest(0).constraintWatermark == g_nextConstraintConstruction);
-    LifetimeTrace_ClearSnapshots();
+    RollbackUnit_ClearSnapshots();
     // The hook is MtObject's base destructor. An object that was never a
     // constraint must pass without the recorder lock, even while it is held.
     static int unlockedTeardowns = 0;
@@ -2970,7 +2970,7 @@ void setup() {
         Write(units, 0x80, n0); Write(units, 0x88, n2);
         Write(units, 0xC58, uint32_t(3)); Write(units, 0xC5C, uint32_t(3)); Write(units, 0xC68, group);
     }
-    LifetimeTrace_SaveSnapshot(0);
+    RollbackUnit_SaveSnapshot(0);
     assert(TestManifest(0).constraints.size() == 3);
     InitializeConstraint(n3); future();
 }
@@ -2997,7 +2997,7 @@ void reject(int) {
     std::_Exit(unchanged ? 17 : 18);
 }
 void clean() {
-    LifetimeTrace_ClearSnapshots();
+    RollbackUnit_ClearSnapshots();
     for (void* node : {n0, n1, n2, n3}) ForgetConstraintObject(node);
     for (void* owner : {a, b}) {
         const uint64_t id = Find(owner, false)->id;
@@ -3043,7 +3043,7 @@ int main() {
     assert(!creates && !constraintUnlinks && !resourceAdds && !resourceReleases);
     clean();
     size_t exported = 0;
-    LifetimeTrace_VisitSnapshot(0, history.get(), false,
+    RollbackUnit_VisitSnapshot(0, history.get(), false,
         [](void* context, const char* name, const void*, uint64_t, uint64_t, const void* bytes, size_t size) {
             if (!std::strstr(name, "lifetime.constraint.")) return;
             ++*static_cast<size_t*>(context); assert(size == 0x90 && Read<uint32_t>(bytes, 0x74) == 1000);
@@ -3071,9 +3071,9 @@ int main() {
     setup();
     // Constraint model links can be the only edge retaining a detached owner.
     Find(b, false)->occupancy = Occupancy::Quarantined; ++g_quarantined;
-    Write(b, 0x10, uint32_t(0x3F8)); LifetimeTrace_SaveSnapshot(1);
+    Write(b, 0x10, uint32_t(0x3F8)); RollbackUnit_SaveSnapshot(1);
     assert(Find(b, false)->dependencies == 2 && TestManifest(1).shots.size() == 2);
-    LifetimeTrace_DropSnapshot(0); CollectShotGenerations(); CollectQuarantine();
+    RollbackUnit_DropSnapshot(0); CollectShotGenerations(); CollectQuarantine();
     assert(g_quarantined == 1 && Find(b, false)->occupancy == Occupancy::Quarantined);
     auto plan = PrepareShotConstraintGraph(TestManifest(1), 2); StageShotConstraintGraph(plan);
     assert(Read<void*>(n0, 0x78) == b && !creates && !resourceAdds && !resourceReleases);
@@ -3124,10 +3124,10 @@ int main() {
             "TestManifest(0).constraints.push_back(TestManifest(0).constraints[0]);",
             "Write(TestManifest(0).constraints[0].image, 0x78, uintptr_t(1));",
             "TestManifest(0).constraintsComplete = false;",
-            "auto* foreign = std::calloc(1, 0x90); InitializeConstraint(foreign); LifetimeTrace_SaveSnapshot(0); chain(b, 1, {n2, n0, n3, n1, foreign});",
+            "auto* foreign = std::calloc(1, 0x90); InitializeConstraint(foreign); RollbackUnit_SaveSnapshot(0); chain(b, 1, {n2, n0, n3, n1, foreign});",
             "auto* foreign = std::calloc(1, 0x90); InitializeConstraint(foreign); chain(b, 1, {n2, n0, n3, n1, foreign});",
             "auto plan = PrepareShotConstraintGraph(TestManifest(0), 1); InitializeConstraint(n0); remember(); StageShotConstraintGraph(plan);",
-            "auto plan = PrepareShotConstraintGraph(TestManifest(0), 1); LifetimeTrace_SaveSnapshot(0); remember(); StageShotConstraintGraph(plan);",
+            "auto plan = PrepareShotConstraintGraph(TestManifest(0), 1); RollbackUnit_SaveSnapshot(0); remember(); StageShotConstraintGraph(plan);",
             "swapPose(); auto plan = PrepareShotConstraintGraph(TestManifest(0), 1); for (const auto& shot : TestManifest(0).shots) StageShotGenerationStorage(*Find(shot.spans[0].memory.address, false), shot, 1); StageShotConstraintGraph(plan); CollectShotGenerations(); remember(); StageShotConstraintGraph(plan);",
         )
         cases = "\n".join(f"case {i}: {{ {invalid} break; }}" for i, invalid in enumerate(invalid_cases))
@@ -3148,10 +3148,10 @@ int main() {
     Write(owner, 0x538, header + 0x10); Write(owner, 0x548, static_cast<void*>(depths));
     Write(owner, 0x530, uint32_t(1)); Birth(owner, Kind::Shot);
     Find(owner, false)->extent = sizeof(owner); Find(owner, false)->dti = 0x1234;
-    LifetimeTrace_SaveSnapshot(0);
+    RollbackUnit_SaveSnapshot(0);
     assert(!TestManifest(0).constraintsComplete && TestManifest(0).constraints.empty());
     bool diagnostic = false;
-    LifetimeTrace_VisitSnapshot(0, testSnapshots[0].get(), false,
+    RollbackUnit_VisitSnapshot(0, testSnapshots[0].get(), false,
         [](void* context, const char* name, const void*, uint64_t, uint64_t, const void* bytes, size_t) {
             if (std::strcmp(name, "diagnostic.lifetime.constraints")) return;
             *static_cast<bool*>(context) = true; assert(!Read<uint64_t>(bytes, 0));
@@ -3183,7 +3183,7 @@ int main() {
         Write(node, 0x60, static_cast<void*>(joint)); Write(node, 0x78, static_cast<void*>(owner));
         Write(node, 0x70, int32_t(i*3)); Write(node, 0x74, uint32_t(1000));
     }
-    Write(joint, 8, owner + 0x2140 + 0x40); LifetimeTrace_SaveSnapshot(0);
+    Write(joint, 8, owner + 0x2140 + 0x40); RollbackUnit_SaveSnapshot(0);
     assert(TestManifest(0).constraints.size() == 40 && TestManifest(0).constraintsComplete);
     // Reverse the current chain, preserving equal priorities.
     for (size_t i = 0; i < 40; ++i) {
@@ -3199,7 +3199,7 @@ int main() {
         node = Read<void*>(node, 0x58);
     }
     assert(!node && !constraintUnlinks && !creates);
-    LifetimeTrace_ClearSnapshots();
+    RollbackUnit_ClearSnapshots();
     for (size_t i = 0; i < 40; ++i) ForgetConstraintObject(owner + 0x2140 + i*0x90);
     ForgetCurrentShotGenerations(identity->id, owner); { UnitGuard fence; MockCollectModel(owner); }
     std::free(owner);
@@ -3244,7 +3244,7 @@ void setup() {
     Write(newForeign, 0x10, uint32_t(2)); Write(newForeign, 0x30, uint64_t(1));
     line(0, {oldForeign, a, b}); line(1, {c});
     group(0, {b, oldForeign, a}); group(1, {c});
-    LifetimeTrace_SaveSnapshot(0);
+    RollbackUnit_SaveSnapshot(0);
     // Preserve native category descriptor controls, not invented counters/cursors.
     Write(units, 0x48, uint32_t(0xABCDEF)); Write(units, 0x60, 0.5f);
     line(0, {newForeign, c, oldForeign}); line(1, {a});
@@ -3283,7 +3283,7 @@ int main() {
     assert(!g_quarantined && Find(b, false)->occupancy == Occupancy::Live && !Find(b, false)->futureShot);
     StageShotExecutionState(TestManifest(0), 1);
     assert(!g_quarantined && groupExpansions == 1 && !creates && !unitLocked);
-    LifetimeTrace_ClearSnapshots();
+    RollbackUnit_ClearSnapshots();
     for (void* object : {a, b, c, detached}) {
         ForgetCurrentShotGenerations(Find(object, false)->id, object); std::free(object);
     }
@@ -3295,7 +3295,7 @@ int main() {
     setup();
     // A later snapshot can retain a dead shot through a borrowed reference.
     // Rewinding earlier revives it; restoring the later slot must detach it again.
-    Write(a, 0x2008, b); LifetimeTrace_SaveSnapshot(1);
+    Write(a, 0x2008, b); RollbackUnit_SaveSnapshot(1);
     assert(Find(b, false)->dependencies == 2);
     StageShotExecutionState(TestManifest(0), 1);
     assert(!g_quarantined && Find(b, false)->occupancy == Occupancy::Live);
@@ -3307,7 +3307,7 @@ int main() {
     assert(Read<void*>(c, 0x18) == oldForeign && Read<void*>(units, 0x80) == a);
     StageShotExecutionState(TestManifest(1), 2); assert(g_quarantined == 1);
     Find(b, false)->occupancy = Occupancy::Live; --g_quarantined;
-    LifetimeTrace_ClearSnapshots();
+    RollbackUnit_ClearSnapshots();
     for (void* object : {a, b, c, detached}) {
         ForgetCurrentShotGenerations(Find(object, false)->id, object); std::free(object);
     }
@@ -3366,7 +3366,7 @@ void setup() {
     Write(manager, 0x448, b); Write(manager, 0x450, uint64_t(0xABCDEF120000000D));
     Write(manager, 0x458, static_cast<void*>(oldForeign)); Write(manager, 0x460, uint64_t(8));
     Write(manager, 0x2448, uint32_t(2)); Write(config, 0x4A89C, uint32_t(0x01000100));
-    LifetimeTrace_SaveSnapshot(0);
+    RollbackUnit_SaveSnapshot(0);
     assert(TestManifest(0).shotLists[0].size() == 2);
     assert(TestManifest(0).shotLists[0][0].id == Find(b, false)->id);
     assert(TestManifest(0).shotPending[0].id == Find(b, false)->id);
@@ -3567,7 +3567,7 @@ void check() {
     assert((Read<uint32_t>(b, 0x10) & 0x3FF) == 2 && !unitLocked && !locked);
 }
 void release() {
-    LifetimeTrace_ClearSnapshots();
+    RollbackUnit_ClearSnapshots();
     for (uint8_t* shot : {a, b}) ForgetCurrentShotGenerations(Find(shot, false)->id, shot);
     MockJointDelete(joint, 3); std::free(Read<void*>(a, 0x548)); std::free(Read<void*>(a, 0x11B0));
     ResourceRelease(Read<void*>(a, 0x100)); std::free(Read<void*>(a, 0x100)); std::free(a); std::free(b);
@@ -3583,53 +3583,53 @@ int main() {
     for (size_t i = 0; i < live.size(); ++i)
         assert(live[i] == (i < 0x2140 || (i >= 0x2150 && i < 0x2168) || i >= 0x21F0 ? 0xAA : 0x55));
 
-    setup(); LifetimeTrace_SaveSnapshot(0);
+    setup(); RollbackUnit_SaveSnapshot(0);
     // Capture retains the unit the tail names, without a per-class field list.
     assert(Find(effect, false)->dependencies == 1 && !Find(other, false)->dependencies);
     future();
     assert(Read<float>(a, 0x1F58) == 11 && Read<float>(a, 0x2140) == 950);
     // A character's weak reference to b: cleared by the abandoned branch. Until b
     // is live again the saved address is not put back.
-    assert(LifetimeTrace_ResolveUnitReference(0, b, nullptr) == nullptr);
-    assert(LifetimeTrace_ResolveUnitReference(0, nullptr, b) == nullptr); // Held unit: drop the reference.
+    assert(RollbackUnit_ResolveUnitReference(0, b, nullptr) == nullptr);
+    assert(RollbackUnit_ResolveUnitReference(0, nullptr, b) == nullptr); // Held unit: drop the reference.
     for (int i = 0; i < 2; ++i) {
-        LifetimeTrace_RestoreShots(0); check();
+        RollbackUnit_RestoreShots(0); check();
         advance(a);                                                        // One replayed tick, not nine.
         assert(Read<float>(a, 0x1F58) == 4 && Read<float>(a, 0x2140) == 250 && Read<float>(joint, 0x20) == 8);
     }
     assert(!creates && !resourceAdds && !resourceReleases && !constraintUnlinks);
     // Restored: the saved reference names the same live identity again.
-    assert(LifetimeTrace_ResolveUnitReference(0, b, nullptr) == b);
-    assert(LifetimeTrace_ResolveUnitReference(0, b, a) == b);
+    assert(RollbackUnit_ResolveUnitReference(0, b, nullptr) == b);
+    assert(RollbackUnit_ResolveUnitReference(0, b, a) == b);
     // Not a unit of that snapshot (unknown address, later birth, other frame): keep the live value.
-    assert(LifetimeTrace_ResolveUnitReference(0, (void*)0x1234, a) == a);
-    assert(LifetimeTrace_ResolveUnitReference(0, nullptr, a) == a);
-    assert(LifetimeTrace_ResolveUnitReference(1, b, nullptr) == nullptr);
+    assert(RollbackUnit_ResolveUnitReference(0, (void*)0x1234, a) == a);
+    assert(RollbackUnit_ResolveUnitReference(0, nullptr, a) == a);
+    assert(RollbackUnit_ResolveUnitReference(1, b, nullptr) == nullptr);
     alignas(16) static uint8_t newer[0x40]{}; Birth(newer, Kind::Unit);
-    assert(LifetimeTrace_ResolveUnitReference(0, newer, a) == a);
+    assert(RollbackUnit_ResolveUnitReference(0, newer, a) == a);
     // A reused address is a different identity, even though it is live.
     const uint64_t savedId = TestManifest(0).members[0].id;
     for (auto& member : TestManifest(0).members) if (member.object == b) member.id = savedId + 1000;
-    assert(LifetimeTrace_ResolveUnitReference(0, b, a) == a);
+    assert(RollbackUnit_ResolveUnitReference(0, b, a) == a);
     for (auto& member : TestManifest(0).members) if (member.object == b) member.id = Find(b, false)->id;
     // A frame with no saved manifest, or one that held no shots, is left alone.
-    LifetimeTrace_RestoreShots(1);
+    RollbackUnit_RestoreShots(1);
     assert(Read<float>(a, 0x1F58) == 4);
     release();
 }
 """)
         # Unsupported or inconsistent cases stop the transaction before any shot byte moves.
         invalid_cases = (
-            "LifetimeTrace_SaveSnapshot(0, LifetimeShotPayload::Omit); future();",
-            "LifetimeTrace_SaveSnapshot(0); future(); Find(a, false)->snapshots = 0;",
-            "LifetimeTrace_SaveSnapshot(0); future(); InitializeConstraint(constraint);",
-            "LifetimeTrace_SaveSnapshot(0); future(); Write(constraint, 0x40, uintptr_t(0xBAD));",
-            "LifetimeTrace_SaveSnapshot(0); future(); Find(a, false)->extent = 0x2500;",
+            "RollbackUnit_SaveSnapshot(0, RollbackUnitShotPayload::Omit); future();",
+            "RollbackUnit_SaveSnapshot(0); future(); Find(a, false)->snapshots = 0;",
+            "RollbackUnit_SaveSnapshot(0); future(); InitializeConstraint(constraint);",
+            "RollbackUnit_SaveSnapshot(0); future(); Write(constraint, 0x40, uintptr_t(0xBAD));",
+            "RollbackUnit_SaveSnapshot(0); future(); Find(a, false)->extent = 0x2500;",
         )
         cases = "\n".join(f"case {i}: {{ {invalid} break; }}" for i, invalid in enumerate(invalid_cases))
         self.compile_run(True, harness + "\nint main(int argc, char** argv) { assert(argc == 2); setup(); "
                          "std::signal(SIGABRT, reject); switch (std::atoi(argv[1])) {\n" + cases +
-                         "\n}\nLifetimeTrace_RestoreShots(0);\n}\n",
+                         "\n}\nRollbackUnit_RestoreShots(0);\n}\n",
                          expected_returncode=17, arguments=[[str(i)] for i in range(len(invalid_cases))])
 
     def test_future_shot_rejects_continuous_collision_registration(self):
@@ -3675,21 +3675,21 @@ int main() {
     auto* identity = Find(shot, false);
     identity->extent = 0x2200; identity->dti = 0x12345; // Cached at completed construction.
     const uint64_t id = identity->id;
-    LifetimeTrace_SaveSnapshot(1);
+    RollbackUnit_SaveSnapshot(1);
     auto history = testSnapshots[1];
     assert(history->shots.size() == 1 && history->shots[0].spans.size() == 6);
     const auto* backing = history->shots[0].payload.data();
     Write(shot, 0x50, float(999)); Write(joints + 0x10, 0x20, uint32_t(0));
-    LifetimeTrace_DropSnapshot(1);
+    RollbackUnit_DropSnapshot(1);
     testSnapshots[1].reset();
-    LifetimeTrace_SaveSnapshot(17);
+    RollbackUnit_SaveSnapshot(17);
     assert(history.get() != testSnapshots[1].get());
     assert(history->shots[0].payload.data() == backing); // No second history copy.
-    LifetimeTrace_ClearSnapshots();
+    RollbackUnit_ClearSnapshots();
     Destroyed("gone", shot, id);
     std::free(joints); std::free(shot);
     size_t seen = 0;
-    const auto counts = LifetimeTrace_VisitSnapshot(1, history.get(), false,
+    const auto counts = RollbackUnit_VisitSnapshot(1, history.get(), false,
         [](void* context, const char* name, const void*, uint64_t, uint64_t,
            const void* bytes, size_t size) {
             if (std::strstr(name, ".body")) {
@@ -3719,7 +3719,7 @@ int main() {
     reset();
     auto& manifest = TestManifest(3);
     manifest.valid = true; manifest.frame = 3;
-    manifest.shotPayload = LifetimeShotPayload::Capture;
+    manifest.shotPayload = RollbackUnitShotPayload::Capture;
     manifest.effects.resize(1);
     auto& effect = manifest.effects[0]; effect = {};
     effect.object = (void*)0xDEAD; effect.id = 7;
@@ -3729,7 +3729,7 @@ int main() {
     manifest.payload.assign({'s', 'a', 'v', 'e'});
     manifest.members.push_back({(void*)0xBAD, 8, 0x555, Kind::Shot, Occupancy::Live});
     std::vector<DumpRegion> regions;
-    auto counts = LifetimeTrace_VisitSnapshot(3, testSnapshots[3].get(), false, capture, &regions);
+    auto counts = RollbackUnit_VisitSnapshot(3, testSnapshots[3].get(), false, capture, &regions);
     assert(counts.effects == 1 && counts.shots == 1 && counts.shotModels == 0);
     assert(regions.size() == 4);
     assert(regions[1].name == "lifetime.effect.7.root" && regions[1].bytes[0x40] == 42);
@@ -3737,7 +3737,7 @@ int main() {
     assert(!std::memcmp(regions[2].bytes.data(), "save", 4));
     assert(regions[3].name == "lifetime.shot.8.identity");
     regions.clear();
-    counts = LifetimeTrace_VisitSnapshot(3 + ROLLBACK_WINDOW, testSnapshots[3].get(), false, capture, &regions);
+    counts = RollbackUnit_VisitSnapshot(3 + ROLLBACK_WINDOW, testSnapshots[3].get(), false, capture, &regions);
     assert(!counts.effects && !counts.shots && regions.size() == 1);
     assert(Read<int64_t>(regions[0].bytes.data(), 8) == 0); // unavailable, not empty
 
@@ -3751,9 +3751,9 @@ int main() {
     Write(body, 0x11B0, interpolation); Write(body, 0x1238, uint32_t(2));
     g_registry[0] = {body, 9, 0x777, Kind::Shot, Occupancy::Quarantined};
     SyncActiveSlotsForTest();
-    LifetimeTrace_SetFrame(50, false);
+    RollbackUnit_SetFrame(50, false);
     regions.clear();
-    counts = LifetimeTrace_VisitSnapshot(3 + ROLLBACK_WINDOW, testSnapshots[3].get(), true, capture, &regions);
+    counts = RollbackUnit_VisitSnapshot(3 + ROLLBACK_WINDOW, testSnapshots[3].get(), true, capture, &regions);
     assert(!counts.effects && !counts.shots && counts.shotModels == 1);
     assert(Read<int64_t>(regions[0].bytes.data(), 16) == 50);
     assert(regions.size() == 8);
@@ -3776,10 +3776,10 @@ bool has(const std::vector<std::string>& names, const std::string& prefix) {
     return std::any_of(names.begin(), names.end(), [&](const std::string& name) { return !name.rfind(prefix, 0); });
 }
 int main() {
-    for (const auto mode : {LifetimeShotPayload::Omit, LifetimeShotPayload::Capture}) {
-        const bool capture = mode == LifetimeShotPayload::Capture;
+    for (const auto mode : {RollbackUnitShotPayload::Omit, RollbackUnitShotPayload::Capture}) {
+        const bool capture = mode == RollbackUnitShotPayload::Capture;
         const auto fixture = makePayloadFixture();
-        LifetimeTrace_SaveSnapshot(0, mode);
+        RollbackUnit_SaveSnapshot(0, mode);
         const auto& manifest = TestManifest(0);
         assert(manifest.valid && manifest.shotPayload == mode);
         // Identity, dependency and generation leases plus withdrawal metadata are payload-independent.
@@ -3804,14 +3804,14 @@ int main() {
             assert(manifest.constraints.empty() && !manifest.constraintsComplete);
         }
         std::vector<std::string> names;
-        const auto counts = LifetimeTrace_VisitSnapshot(0, &manifest, false, record, &names);
+        const auto counts = RollbackUnit_VisitSnapshot(0, &manifest, false, record, &names);
         const std::string shot = "lifetime.shot." + std::to_string(fixture.id) + ".";
         assert(counts.shots == 1 && has(names, shot + "identity"));
         assert(has(names, "diagnostic.lifetime.shot_payload_omitted") == !capture);
         assert(has(names, shot + "body") == capture && has(names, shot + "collision.root") == capture);
         assert(has(names, "lifetime.constraint.") == capture);
         // Replacing the same frame reports the new mode, never stale bytes from the old one.
-        LifetimeTrace_SaveSnapshot(0, capture ? LifetimeShotPayload::Omit : LifetimeShotPayload::Capture);
+        RollbackUnit_SaveSnapshot(0, capture ? RollbackUnitShotPayload::Omit : RollbackUnitShotPayload::Capture);
         assert(TestManifest(0).shotPayload != mode && TestManifest(0).shots[0].payloadState != mode);
         assert(TestManifest(0).shots[0].spans.empty() == capture);
         assert(Find(fixture.other, false)->dependencies == 1);
@@ -3823,22 +3823,22 @@ int main() {
     def test_shot_stages_reject_omitted_payload(self):
         stages = [
             ("StageShotGenerationStorage(*owner, manifest.shots[0], 1);", "shot.storage.stage",
-             "saved.payloadState == LifetimeShotPayload::Capture"),
+             "saved.payloadState == RollbackUnitShotPayload::Capture"),
             ("{ UnitGuard fence; StageShotCpuFields(*owner, manifest.shots[0], 1); }", "shot.cpu.stage",
-             "saved.payloadState == LifetimeShotPayload::Capture"),
+             "saved.payloadState == RollbackUnitShotPayload::Capture"),
             ("StageShotManagerState(manifest, 1);", "shot.manager.stage",
-             "saved.shotPayload == LifetimeShotPayload::Capture"),
+             "saved.shotPayload == RollbackUnitShotPayload::Capture"),
             ("StageShotExecutionState(manifest, 1);", "shot.execution.stage",
-             "saved.shotPayload == LifetimeShotPayload::Capture"),
+             "saved.shotPayload == RollbackUnitShotPayload::Capture"),
             ("PrepareShotConstraintGraph(manifest, 1);", "shot.constraints.prepare",
-             "saved.shotPayload == LifetimeShotPayload::Capture"),
+             "saved.shotPayload == RollbackUnitShotPayload::Capture"),
         ]
         cases = "\n".join(f"    if (stage == {i}) {call}" for i, (call, _, _) in enumerate(stages))
         self.compile_run(True, CHECKS[:CHECKS.index("int main() {")] + SHOT_PAYLOAD_FIXTURE + r'''
 void reject(int) { std::_Exit(17); }
 int main(int, char** argv) {
     const auto fixture = makePayloadFixture();
-    LifetimeTrace_SaveSnapshot(0, LifetimeShotPayload::Omit);
+    RollbackUnit_SaveSnapshot(0, RollbackUnitShotPayload::Omit);
     const auto& manifest = TestManifest(0);
     auto* owner = Find(fixture.shot, false);
     const int stage = std::atoi(argv[1]);
@@ -3869,42 +3869,42 @@ int main() {
     };
 
     // Direct save, then same-frame replacement: no drop, so save clears in full.
-    LifetimeTrace_SaveSnapshot(0);
+    RollbackUnit_SaveSnapshot(0);
     assert(held->snapshots == 1 && borrowed->dependencies == 1 && !(g_clearedSlots & 1));
     setLive(false); setBorrowed(false); leaseGraph();
-    LifetimeTrace_SaveSnapshot(0);
+    RollbackUnit_SaveSnapshot(0);
     assert(!held->snapshots && !borrowed->dependencies && !g_generations[0].snapshots);
     // Ring-slot reuse by a later frame, still without a drop.
-    setLive(true); setBorrowed(true); LifetimeTrace_SaveSnapshot(0);
+    setLive(true); setBorrowed(true); RollbackUnit_SaveSnapshot(0);
     setLive(false); setBorrowed(false); leaseGraph();
-    LifetimeTrace_SaveSnapshot(ROLLBACK_WINDOW);
+    RollbackUnit_SaveSnapshot(ROLLBACK_WINDOW);
     assert(TestManifest(0).frame == ROLLBACK_WINDOW);
     assert(!held->snapshots && !borrowed->dependencies && !g_generations[0].snapshots);
 
     // Production order: drop releases the slot's leases and marks it cleared.
-    setLive(true); setBorrowed(true); LifetimeTrace_SaveSnapshot(ROLLBACK_WINDOW); leaseGraph();
-    LifetimeTrace_DropSnapshot(2 * ROLLBACK_WINDOW);
+    setLive(true); setBorrowed(true); RollbackUnit_SaveSnapshot(ROLLBACK_WINDOW); leaseGraph();
+    RollbackUnit_DropSnapshot(2 * ROLLBACK_WINDOW);
     assert(!g_liveSnapshots[0] && (g_clearedSlots & 1));
     assert(!held->snapshots && !borrowed->dependencies && !g_generations[0].snapshots);
-    LifetimeTrace_SaveSnapshot(2 * ROLLBACK_WINDOW);
+    RollbackUnit_SaveSnapshot(2 * ROLLBACK_WINDOW);
     assert(held->snapshots == 1 && borrowed->dependencies == 1 && !(g_clearedSlots & 1));
 
     // Drop followed by an early return: no capture, yet the leases are already gone.
-    LifetimeTrace_DropSnapshot(3 * ROLLBACK_WINDOW);
+    RollbackUnit_DropSnapshot(3 * ROLLBACK_WINDOW);
     assert(!held->snapshots && !borrowed->dependencies && (g_clearedSlots & 1));
     setLive(false); setBorrowed(false);
-    LifetimeTrace_SaveSnapshot(1); // Another slot does not disturb slot 0's cleared state.
+    RollbackUnit_SaveSnapshot(1); // Another slot does not disturb slot 0's cleared state.
     assert((g_clearedSlots & 1) && !(g_clearedSlots & 2) && borrowed->snapshots == 2);
-    LifetimeTrace_SaveSnapshot(4 * ROLLBACK_WINDOW); // Skips clearing, still exact.
+    RollbackUnit_SaveSnapshot(4 * ROLLBACK_WINDOW); // Skips clearing, still exact.
     assert(!held->snapshots && borrowed->snapshots == 3 && !borrowed->dependencies);
 
     // Clearing every lease marks every slot cleared; the next save is still exact.
     g_generations[0] = {}; g_generationHighWater = 0; // The injected graph has no owner to collect.
-    LifetimeTrace_ClearSnapshots();
+    RollbackUnit_ClearSnapshots();
     assert(g_clearedSlots == UINT32_MAX >> (32 - ROLLBACK_WINDOW));
     assert(!held->snapshots && !borrowed->snapshots && !borrowed->dependencies);
     setLive(true); setBorrowed(true);
-    LifetimeTrace_SaveSnapshot(5);
+    RollbackUnit_SaveSnapshot(5);
     assert(held->snapshots == (1u << 5) && borrowed->dependencies == (1u << 5));
     assert(g_clearedSlots == ((UINT32_MAX >> (32 - ROLLBACK_WINDOW)) & ~(1u << 5)));
     releasePayloadFixture(fixture);
@@ -3936,9 +3936,9 @@ int main() {
         }
     });
     for (int frame = 0; frame < 200; ++frame) {
-        LifetimeTrace_SaveSnapshot(0);                   // Registers the attack root.
+        RollbackUnit_SaveSnapshot(0);                   // Registers the attack root.
         assert(g_attackOwners.size() == 1 && g_attackOwnerCount == 1);
-        LifetimeTrace_DropSnapshot(0);
+        RollbackUnit_DropSnapshot(0);
         ForgetCurrentShotGenerations(fixture.id, fixture.shot); // Erases it again.
         assert(!g_attackOwnerCount);
         InitializeConstraint(constraint); ForgetConstraintObject(constraint);
@@ -3955,7 +3955,7 @@ int main() {
 void reject(int) { std::_Exit(17); }
 int main() {
     const auto fixture = makePayloadFixture();
-    LifetimeTrace_SaveSnapshot(0);
+    RollbackUnit_SaveSnapshot(0);
     oGenerationExtendArray = [](void*, uint32_t) { std::_Exit(18); };
     std::signal(SIGABRT, reject);
     std::thread([&] { GenerationExtendArray(static_cast<uint8_t*>(fixture.root) + 0x18, 8); }).join();
@@ -3993,7 +3993,7 @@ int main() {
     Birth(a, Kind::Unit); assert(active(a) && activeCount() == 1 && Find(a, false)->id != first);
     { AcquireSRWLockExclusive(&g_lock); ValidateActiveSlots(); ReleaseSRWLockExclusive(&g_lock); }
     // Tombstone drops the slot and its lease bits; rebirth at the address reuses it.
-    LifetimeTrace_SaveSnapshot(0);
+    RollbackUnit_SaveSnapshot(0);
     Identity* slot = Find(a, false); assert(slot->snapshots == 1);
     Destroyed("gone", a, slot->id);
     assert(!Find(a, false) && slot->occupancy == Occupancy::Tombstone && !slot->snapshots);
@@ -4005,11 +4005,11 @@ int main() {
     assert(active(b) && !active(b + 0x10) && active(b + 0x20) && activeCount() == 3);
     // Quarantine stays active; collection waits for the last lease, then tombstones.
     Birth(effect, Kind::Effect);
-    LifetimeTrace_SaveSnapshot(1);
+    RollbackUnit_SaveSnapshot(1);
     Find(effect, false)->occupancy = Occupancy::Quarantined; ++g_quarantined;
     CollectQuarantine();
     assert(active(effect) && !collected); // Still leased by slot 1: no premature collection.
-    LifetimeTrace_DropSnapshot(1);
+    RollbackUnit_DropSnapshot(1);
     CollectQuarantine();
     assert(collected == 1 && !Find(effect, false) && activeCount() == 3);
     // Resurrection: quarantined back to live never leaves the active set.
@@ -4019,7 +4019,7 @@ int main() {
     Find(effect, false)->occupancy = Occupancy::Live;
     assert(active(effect) && activeCount() == 4);
     // Epoch reset clears every lease and keeps the mask exact.
-    LifetimeTrace_SaveSnapshot(2);
+    RollbackUnit_SaveSnapshot(2);
     MainReset(nullptr);
     for (const auto& entry : ActiveIdentities()) assert(!entry.snapshots && !entry.dependencies);
     assert(activeCount() == 4);
@@ -4036,28 +4036,28 @@ int main() {
 ''')
 
     def test_integrations(self):
-        tracer = (ROOT / "UMVC3Hook/code/lifetime_trace.cpp").read_text()
-        generations = (ROOT / "UMVC3Hook/code/lifetime_shot_generations.inl").read_text()
+        tracer = (ROOT / "UMVC3Hook/code/rollback_unit.cpp").read_text()
+        generations = (ROOT / "UMVC3Hook/code/rollback_unit_shot_generations.inl").read_text()
         self.assertNotIn("OwnedAllocatorFree", generations)
         self.assertNotIn("GameplayHooks_Create", generations)  # No leaf-delete or allocator-free detours.
         self.assertNotIn("RegisterDeleting(", generations)
         self.assertIn("StageShotGenerationStorage", generations)
-        self.assertIn('#include "lifetime_shot_cpu.inl"', tracer)
-        self.assertIn('#include "lifetime_shot_constraints.inl"', tracer)
+        self.assertIn('#include "rollback_unit_shot_cpu.inl"', tracer)
+        self.assertIn('#include "rollback_unit_shot_constraints.inl"', tracer)
         self.assertIn('{0x1405EC000, (void*)&InitializeConstraint', tracer)
         self.assertIn('{0x1409BFE90, (void*)&ForgetConstraintObject', tracer)
         self.assertNotIn('0x1401091C0', tracer)
         self.assertNotIn('0x140109240', tracer)
         restore = (ROOT / "UMVC3Hook/code/rollback_restore.cpp").read_text()
-        self.assertLess(restore.index("LifetimeTrace_RetireFutureShots(frame)"),
-                        restore.index("LifetimeTrace_RestoreEffects(frame)"))
+        self.assertLess(restore.index("RollbackUnit_RetireFutureShots(frame)"),
+                        restore.index("RollbackUnit_RestoreEffects(frame)"))
         self.assertNotIn("StageShotGenerationStorage", restore)
         self.assertNotIn("StageShotManagerState", restore)
         self.assertNotIn("StageShotExecutionState", restore)
         self.assertNotIn("StageShotCpuFields", restore)
         self.assertNotIn("StageShotConstraintGraph", restore)
-        self.assertLess(restore.index("LifetimeTrace_WaitForRenderWorker()"),
-                        restore.index("LifetimeTrace_CheckSnapshot(frame)"))
+        self.assertLess(restore.index("RollbackUnit_WaitForRenderWorker()"),
+                        restore.index("RollbackUnit_CheckSnapshot(frame)"))
         self.assertNotIn("HashBytes", tracer)
         self.assertNotIn("RootBindings", tracer)
         self.assertNotIn("DescribeSimulationGraph", tracer)
@@ -4068,50 +4068,50 @@ int main() {
         self.assertIn("{0x140139D30, (void*)&ConstructEffect", tracer)
         self.assertNotIn("0x14013AB60", tracer)
         hooks = (ROOT / "UMVC3Hook/code/rollback_hooks.cpp").read_text()
-        self.assertIn("LifetimeTrace_Install();", hooks)
-        self.assertIn("LifetimeTrace_Flush();", hooks)
+        self.assertIn("RollbackUnit_Install();", hooks)
+        self.assertIn("RollbackUnit_Flush();", hooks)
         resim = (ROOT / "UMVC3Hook/code/rollback_resim.cpp").read_text()
-        self.assertIn("LifetimeTrace_SetFrame(frame, true);", resim)
-        self.assertIn("LifetimeTrace_SetFrame(endFrame, false);", resim)
-        self.assertNotIn("MH_EnableHook", (ROOT / "UMVC3Hook/code/lifetime_trace.cpp").read_text())
+        self.assertIn("RollbackUnit_SetFrame(frame, true);", resim)
+        self.assertIn("RollbackUnit_SetFrame(endFrame, false);", resim)
+        self.assertNotIn("MH_EnableHook", (ROOT / "UMVC3Hook/code/rollback_unit.cpp").read_text())
         snapshot = (ROOT / "UMVC3Hook/code/rollback_snapshot.cpp").read_text()
         save = snapshot[snapshot.index("void Rollback_SaveSnapshot("):snapshot.index("void Rollback_UpdateRemoteInput(")]
-        self.assertLess(save.index("LifetimeTrace_DropSnapshot(frame)"), save.index("Rollback_BuildRegions("))
-        call = "LifetimeTrace_SaveSnapshot(frame, slot.lifetime, shotPayload)"
+        self.assertLess(save.index("RollbackUnit_DropSnapshot(frame)"), save.index("Rollback_BuildRegions("))
+        call = "RollbackUnit_SaveSnapshot(frame, slot.lifetime, shotPayload)"
         self.assertGreater(save.index(call), save.index("slot.remoteInput ="))
         self.assertLess(save.index(call), save.index("SnapDump_CaptureSnapshot(slot)"))
         # Historical capture, not a later dump request, selects whole-shot payload.
         self.assertIn("const bool captureSnapDump = SnapDump_CaptureEnabled();", save)
         # Saved-shot restore reads the payload, so production captures it on every save.
         self.assertIn("SAVED_SHOT_RESTORE_ENABLED || captureSnapDump", save)
-        self.assertIn("SAVED_SHOT_RESTORE_ENABLED ? LifetimeShotPayload::Capture : LifetimeShotPayload::Omit", save)
-        self.assertLess(save.index("LifetimeTrace_DropSnapshot(frame)"), save.index("if (count == 0) return;"))
+        self.assertIn("SAVED_SHOT_RESTORE_ENABLED ? RollbackUnitShotPayload::Capture : RollbackUnitShotPayload::Omit", save)
+        self.assertLess(save.index("RollbackUnit_DropSnapshot(frame)"), save.index("if (count == 0) return;"))
         self.assertIn("&sharedCapacity, &slot.lifetime", save)
-        self.assertIn("std::shared_ptr<LifetimeSnapshot> lifetime;",
+        self.assertIn("std::shared_ptr<RollbackUnitSnapshot> lifetime;",
                       (ROOT / "UMVC3Hook/code/rollback_snapshot.h").read_text())
         dump = (ROOT / "UMVC3Hook/code/rollback_snapdump.cpp").read_text()
         per_frame = dump[dump.index("void SnapDump_CaptureSnapshot("):dump.index("void SnapDump_UpdateInputs(")]
-        self.assertNotIn("LifetimeTrace_VisitSnapshot", per_frame)
-        self.assertNotIn("LifetimeTrace_VisitSnapshot", save)
-        self.assertIn("LifetimeTrace_VisitSnapshot", dump[dump.index("bool SnapDump_WriteHistory("):])
+        self.assertNotIn("RollbackUnit_VisitSnapshot", per_frame)
+        self.assertNotIn("RollbackUnit_VisitSnapshot", save)
+        self.assertIn("RollbackUnit_VisitSnapshot", dump[dump.index("bool SnapDump_WriteHistory("):])
         self.assertIn("destination.lifetime = slot.lifetime;", per_frame)
         self.assertIn("frame->lifetime.get()", dump)
         self.assertNotIn("SnapshotManifest g_manifests[", tracer)
-        self.assertIn("LifetimeTrace_ClearSnapshots();", snapshot[snapshot.index("void Rollback_FreeSnapshots("):])
+        self.assertIn("RollbackUnit_ClearSnapshots();", snapshot[snapshot.index("void Rollback_FreeSnapshots("):])
         restore = (ROOT / "UMVC3Hook/code/rollback_restore.cpp").read_text()
         restore = restore[restore.index("void Rollback_RestoreSnapshot("):]
-        self.assertGreater(restore.index("LifetimeTrace_CheckSnapshot(frame)"), restore.index("return;"))
-        self.assertGreater(restore.index("LifetimeTrace_RestoreEffects(frame)"),
+        self.assertGreater(restore.index("RollbackUnit_CheckSnapshot(frame)"), restore.index("return;"))
+        self.assertGreater(restore.index("RollbackUnit_RestoreEffects(frame)"),
                             restore.index("restoreCharacterPostState();"))
         # Withdraw later shots, restore effects, then rewind the shots that remain.
-        self.assertLess(restore.index("LifetimeTrace_RetireFutureShots(frame)"),
-                        restore.index("LifetimeTrace_RestoreEffects(frame)"))
-        self.assertLess(restore.index("LifetimeTrace_RestoreEffects(frame)"),
-                        restore.index("LifetimeTrace_RestoreShots(frame)"))
-        self.assertIn('#include "lifetime_shot_restore.inl"', tracer)
+        self.assertLess(restore.index("RollbackUnit_RetireFutureShots(frame)"),
+                        restore.index("RollbackUnit_RestoreEffects(frame)"))
+        self.assertLess(restore.index("RollbackUnit_RestoreEffects(frame)"),
+                        restore.index("RollbackUnit_RestoreShots(frame)"))
+        self.assertIn('#include "rollback_unit_shot_restore.inl"', tracer)
         # Character weak references are resolved by identity once shots are back.
-        self.assertLess(restore.index("LifetimeTrace_RestoreShots(frame)"),
-                        restore.index("LifetimeTrace_ResolveUnitReference(frame, savedUnit, liveUnit)"))
+        self.assertLess(restore.index("RollbackUnit_RestoreShots(frame)"),
+                        restore.index("RollbackUnit_ResolveUnitReference(frame, savedUnit, liveUnit)"))
         for field in ("resolve(0x13D8)", "resolve(0x6428)", "Rollback_CharacterShotTailOffsets(dti)) resolve(field)",
                       "Rollback_CharacterEffectTailOffsets(dti)) resolve(field)"):
             self.assertIn(field, restore)

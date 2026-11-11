@@ -5,7 +5,7 @@
 
 ## Implementation
 
-`lifetime_shot_cpu.inl` implements one common `uShot` CPU kernel for the inherited
+`rollback_unit_shot_cpu.inl` implements one common `uShot` CPU kernel for the inherited
 `2140`-byte prefix. It has no concrete-DTI whitelist, pointer-value heuristic, or
 live/quarantined code split. Buffer validation precedes every write; the return
 value is explicitly `ReviewedSubset`, not complete layout coverage.

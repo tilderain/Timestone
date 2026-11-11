@@ -10,13 +10,13 @@ retirement adapter. This remains research, not an implemented replacement.
 
 ## Implementation Status: 2026-11-03
 
-Follow-up implementation: `lifetime_trace.cpp` now has an enabled, bounded
+Follow-up implementation: `rollback_unit.cpp` now has an enabled, bounded
 exact-uGameEffect quarantine experiment for empty and supported populated CPU
 billboard graphs. It postpones physical deletion
 while observational snapshot references exist and drains at epoch close. It does
 not restore active shot/effect simulation. A guarded
 follow-up restores audited cUnit lifecycle fields and list positions for already-
-retiring supported effects only. See `lifetime_trace.md`; the full replacement below remains
+retiring supported effects only. See `rollback_unit.md`; the full replacement below remains
 unimplemented.
 
 The old shot/effect recipe reconstruction subsystem has been removed, including

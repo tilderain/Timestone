@@ -35,7 +35,7 @@ Saved chain indices can legitimately be non-contiguous after native unlink.
 
 ## Construction Provenance
 
-`lifetime_shot_constraints.inl` records an increasing construction identity after
+`rollback_unit_shot_constraints.inl` records an increasing construction identity after
 the common initializer returns. The snapshot boundary, not that hook, observes
 the completed derived object. No DTI whitelist or pointer-value classification is
 used to discover the common nodes.

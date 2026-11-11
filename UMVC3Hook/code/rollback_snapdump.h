@@ -11,11 +11,11 @@
 #if ROLLBACK_SNAPDUMP_ENABLED
 
 struct RollbackSnapshotSlot;
-struct LifetimeSnapshot;
+struct RollbackUnitSnapshot;
 
 uint8_t* SnapDump_AcquireSnapshotStorage(int32_t frame, size_t byteSize,
     int regionCount, size_t* capacity,
-    std::shared_ptr<LifetimeSnapshot>* lifetime = nullptr);
+    std::shared_ptr<RollbackUnitSnapshot>* lifetime = nullptr);
 void SnapDump_CaptureSnapshot(const RollbackSnapshotSlot& slot);
 void SnapDump_UpdateInputs(int32_t frame, uint32_t localInput, uint32_t remoteInput);
 bool SnapDump_CaptureEnabled();

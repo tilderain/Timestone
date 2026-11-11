@@ -11,8 +11,8 @@ ROOT = Path(__file__).resolve().parents[1]
 
 class ExceptionTests(unittest.TestCase):
     def test_lifetime_failure_persists_before_trying_normal_logger(self):
-        source = (ROOT / "UMVC3Hook/code/lifetime_failure.inl").read_text()
-        begin = source.index("void WriteLifetimeFailureRecord(")
+        source = (ROOT / "UMVC3Hook/code/rollback_unit_failure.inl").read_text()
+        begin = source.index("void WriteRollbackUnitFailureRecord(")
         end = source.index("\ntemplate<class T>", begin)
         writer = source[begin:end]
         harness = r'''
@@ -57,13 +57,13 @@ void HookLogTryWriteFatal(const char* text) {
         main = r'''
 int main() {
     const char* message = "reason=ownership mismatch\nexpected=0x0 actual=0x1234\n";
-    WriteLifetimeFailureRecord(message);
+    WriteRollbackUnitFailureRecord(message);
     assert(persisted == message && debugger == message && normalLog.empty());
     assert(operations.back() == "normal-log");
     assert(std::find(operations.begin(), operations.end(), "flush") <
            std::find(operations.begin(), operations.end(), "normal-log"));
     fileUnavailable = true; loggerBusy = false;
-    WriteLifetimeFailureRecord(message); assert(normalLog == message);
+    WriteRollbackUnitFailureRecord(message); assert(normalLog == message);
 }
 '''
         with tempfile.TemporaryDirectory(dir="/tmp/opencode", prefix="fatal-writer-") as temporary:

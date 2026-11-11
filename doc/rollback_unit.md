@@ -1,18 +1,18 @@
-# Shot And Effect Lifetime Trace
+# Shot And Effect Rollback (RollbackUnit)
 
 ## Status And Control
 
-`LIFETIME_TRACE_ENABLED = true` in `UMVC3Hook/code/lifetime_trace.h` enables the
+`ROLLBACK_UNIT_ENABLED = true` in `UMVC3Hook/code/rollback_unit.h` enables the
 development instrumentation. Set it false and rebuild to remove trace hook
 installation. It is independent of `lagTest` and backend timing; neither needs
 to be enabled. All hooks belong to the existing gameplay-hook lifecycle, so
 Normal Launch disables them with the other gameplay hooks.
 
-`LIFETIME_TRACE_LOG_ENABLED` in the same header (currently `false`), when true, writes the per-event
+`ROLLBACK_UNIT_LOG_ENABLED` in the same header (currently `false`), when true, writes the per-event
 `LIFE` and `LIFESTATS` lines to the hook log. Set it false and rebuild to
 silence only that output: events are still recorded and drained, so retention,
 restore, failure reports and the crash report's pending events keep working.
-The startup `LifetimeTrace:` line reports the setting as `trace_log=`.
+The startup `RollbackUnit:` line reports the setting as `trace_log=`.
 
 `EMPTY_EFFECT_QUARANTINE_ENABLED = true` now enables the first narrow physical
 retention experiment described below. Set it false to return to trace-only
@@ -96,7 +96,7 @@ These tests do not establish that the supplied native crash is fully resolved.
 
 Validation: `make -j8`, all 38 tests, and `git diff --check` pass. Run
 `20261108T092958.058808Z_effect_borrowed_owner_complete_trace` completed both
-900-frame peers without crash artifacts. Both lifetime traces are complete from
+900-frame peers without crash artifacts. Both unit rollback traces are complete from
 sequence 1, with zero sequence gaps, dropped events, registry misses, remaining
 holds, accounting errors, or restore skips. Host/client collected all 331/325
 distinct held allocations: 316/311 effects, 14/13 shots, and one borrowed unit
@@ -175,7 +175,7 @@ logical-capacity/dependency closure for every concrete shot's derived teardown.
 
 ### Shot Payload Capture
 
-`LifetimeTrace_SaveSnapshot` takes `LifetimeShotPayload::{Omit, Capture}`.
+`RollbackUnit_SaveSnapshot` takes `RollbackUnitShotPayload::{Omit, Capture}`.
 The payload is the whole-shot bytes: body, model joint/depth/interpolation/motion
 work/keyframe spans, collision root/entry/wrapper/primitive spans, and constraint
 node images. Its only readers are the unpublished saved-shot stages and historical
@@ -188,11 +188,11 @@ its slot mask, attack-cohort/COW bookkeeping, borrowed-unit and constraint-model
 dependency leases, the shot-world metadata used by future-shot withdrawal, and all
 effect state and payloads are captured in both modes.
 
-Omitted is recorded explicitly, not as empty history: `LifetimeSnapshot::shotPayload`
+Omitted is recorded explicitly, not as empty history: `RollbackUnitSnapshot::shotPayload`
 and each `ShotState::payloadState` say `Omit`, constraints are marked incomplete,
 and dump export emits `diagnostic.lifetime.shot_payload_omitted` (count of shots)
 without shot span or constraint records. Each staging stage requires `Capture`
-first and fails with `requirement failed: ... == LifetimeShotPayload::Capture`.
+first and fails with `requirement failed: ... == RollbackUnitShotPayload::Capture`.
 Wiring saved-shot restore into production therefore requires saving with
 `Capture`. Production snapdumps are unchanged, since writes require capture.
 
@@ -220,7 +220,7 @@ there instead of silently dropping an object from a snapshot.
 
 ### Future-Shot Withdrawal
 
-`LifetimeTrace_RetireFutureShots` now runs immediately before effect restoration.
+`RollbackUnit_RetireFutureShots` now runs immediately before effect restoration.
 Shots born after the target manifest's birth watermark are withdrawn from native
 execution without kill callbacks: sUnit groups/primary membership, sShot list and
 ID occupancy, and pending `{unit, category}` queue entries. The saved ID cursor
@@ -281,7 +281,7 @@ passed for this diagnostic change.
 
 ### Saved-Shot Restore Stages
 
-`lifetime_shot_cpu.inl` now supplies the common typed CPU-field stage. Its native
+`rollback_unit_shot_cpu.inl` now supplies the common typed CPU-field stage. Its native
 mock regression restores timer `11` to the saved `3`, then replays once to `4`,
 together with pose/position/life/attack clock/phase. It preserves live materials,
 sound references, topology and unreviewed concrete fields. The stage returns
@@ -332,10 +332,10 @@ restore bodies, constraints or scheduler membership, or mark retained shots live
 
 ### Saved-Shot Restore Transaction
 
-2026-11-10. `LifetimeTrace_RestoreShots` (`lifetime_shot_restore.inl`) is called by
+2026-11-10. `RollbackUnit_RestoreShots` (`rollback_unit_shot_restore.inl`) is called by
 `Rollback_RestoreSnapshot` after future-shot withdrawal and effect restore, and
 startup reports `saved_shot_restore=1`. Production saves now use
-`LifetimeShotPayload::Capture` whenever `SAVED_SHOT_RESTORE_ENABLED` is set. A
+`RollbackUnitShotPayload::Capture` whenever `SAVED_SHOT_RESTORE_ENABLED` is set. A
 target frame that held no shots returns before any work.
 
 For each shot in the target snapshot it runs, in order: the storage stage, the
@@ -386,7 +386,7 @@ it when that animation ends. A lease kept it allocated but not rewound, so every
 replay advanced it again; it ended early, `uShotVulcanWeaponCart::move` cleared the
 dead pointer, and the cart stayed in phase 0 on the peer that had rolled back.
 
-`lifetime_shot_models.inl` rewinds these models inside the effect transaction:
+`rollback_unit_shot_models.inl` rewinds these models inside the effect transaction:
 
 - Capture: every live model named by a shot's typed references or tail. Body
   image, joint / depth / interpolation / motion-work / keyframe buffers, control
@@ -525,7 +525,7 @@ determinism or universal generator support.
 
 Supported snapshots lease graph generations, rather than hashing current state or
 hoping its allocation addresses survive. The same `EffectState`, payload arena,
-and `LifetimeTrace_RestoreEffects` transaction serve linked and quarantined units.
+and `RollbackUnit_RestoreEffects` transaction serve linked and quarantined units.
 Each snapshot slot holds a generation-reference bit. Graph release detaches its
 owned allocations, retaining the original owner address; replacement creates a
 different generation. Restore selects the saved generation and copies its saved
@@ -608,11 +608,11 @@ This mask does not individually identify the populated-billboard admission failu
 Up to 64 `quarantine_graph` node samples report a=node vtable, b=GPU context,
 c=node status, d=node address. They are read before native destruction only.
 
-Use `python3 -B tools/lifetime_trace_summary.py <host-log> <client-log>` to check
+Use `python3 -B tools/rollback_unit_summary.py <host-log> <client-log>` to check
 hold/restore/re-retire/collect accounting, sequence gaps, and base teardown counts.
 Results from truncated logs are explicitly marked incomplete.
 
-The automated frame-limit close now requests `LifetimeTrace_FinishCapture()`.
+The automated frame-limit close now requests `RollbackUnit_FinishCapture()`.
 Actual draining happens at the next main-tick flush, outside rendering and the
 recorder lock; recording then stops. Close waits for queued trace output to drain,
 so the run can exceed its requested frame minimum by a few ticks. This terminal
@@ -645,7 +645,7 @@ results. Desync artifacts remain expected; the runner reports them as
 `correctness_regression`. Timing profiles were not produced, so no performance
 improvement is claimed.
 
-Startup logs `LifetimeTrace: queued=1 ...` after successful creation and enable
+Startup logs `RollbackUnit: queued=1 ...` after successful creation and enable
 queueing of all 13 trace detours plus four retention/epoch detours when enabled.
 Actual application uses the existing queued-hook
 commit. If any creation fails, none of these trace hooks is queued. Enable-queue
@@ -993,7 +993,7 @@ why this trace precedes retention rather than silently acting as a lifetime mana
 
 ## Tests
 
-`tools.test_lifetime_trace` compiles production recorder/wrappers against mocked
+`tools.test_rollback_unit` compiles production recorder/wrappers against mocked
 Windows/native APIs with AddressSanitizer and UndefinedBehaviorSanitizer. It
 checks passthrough, nested teardown, no post-free reads, address generations,
 bounded overflow/probes, concurrent producers, capture stop, installation failure,

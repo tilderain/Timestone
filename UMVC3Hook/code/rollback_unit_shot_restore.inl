@@ -63,12 +63,12 @@ template<class Visit> void VisitShotTailUnits(const Identity& owner, Visit visit
 
 } // namespace
 
-void LifetimeTrace_RestoreShots(int32_t frame)
+void RollbackUnit_RestoreShots(int32_t frame)
 {
-    LifetimeFailureScope failureScope("shots.restore", nullptr, 0, frame);
-    if constexpr (!LIFETIME_TRACE_ENABLED || !EMPTY_EFFECT_QUARANTINE_ENABLED || !EFFECT_RESTORE_ENABLED ||
+    RollbackUnitFailureScope failureScope("shots.restore", nullptr, 0, frame);
+    if constexpr (!ROLLBACK_UNIT_ENABLED || !EMPTY_EFFECT_QUARANTINE_ENABLED || !EFFECT_RESTORE_ENABLED ||
                   !SAVED_SHOT_RESTORE_ENABLED) return;
-    if (!g_lifetimeEnabled.load(std::memory_order_relaxed)) return;
+    if (!g_rollbackUnitEnabled.load(std::memory_order_relaxed)) return;
     UnitGuard unitFence;
     ShotWorldGuard shotFence;
     const unsigned slot = unsigned((frame % ROLLBACK_WINDOW + ROLLBACK_WINDOW) % ROLLBACK_WINDOW);
@@ -87,7 +87,7 @@ void LifetimeTrace_RestoreShots(int32_t frame)
         ReleaseSRWLockExclusive(&g_lock);
         return;
     }
-    LIFE_REQUIRE(saved->shotPayload == LifetimeShotPayload::Capture && saved->thread == GetCurrentThreadId() &&
+    LIFE_REQUIRE(saved->shotPayload == RollbackUnitShotPayload::Capture && saved->thread == GetCurrentThreadId() &&
         shotFence.manager && saved->shotManager == shotFence.manager);
     for (const auto& shot : saved->shots) {
         const auto member = std::find_if(saved->members.begin(), saved->members.end(),
@@ -144,7 +144,7 @@ void LifetimeTrace_RestoreShots(int32_t frame)
 
     for (size_t i = 0; i < work.size(); ++i) {
         const Identity& owner = *work[i].owner;
-        LifetimeFailureScope shotScope("shot.restore", owner.object, owner.id, frame);
+        RollbackUnitFailureScope shotScope("shot.restore", owner.object, owner.id, frame);
         StageShotGenerationStorage(owner, *work[i].shot, bit);
         LIFE_REQUIRE(StageShotCpuFields(owner, *work[i].shot, bit) == ShotCpuRestoreStatus::ReviewedSubset);
         RestoreShotTail(static_cast<uint8_t*>(owner.object), work[i].image, owner.extent, holes[i]);

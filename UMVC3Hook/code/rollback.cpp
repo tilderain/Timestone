@@ -5,7 +5,7 @@
 #include "rollback_resim.h"
 #include "rollback_rng.h"
 #include "gameplay_hooks.h"
-#include "lifetime_trace.h"
+#include "rollback_unit.h"
 #include "xinput_discovery.h"
 
 #include <atomic>
@@ -93,7 +93,7 @@ bool GameplayHooks_Apply()
 
 bool GameplayHooks_Disable()
 {
-    LifetimeTrace_ClearSnapshots(); // Drain the bounded experiment while native trampolines are enabled.
+    RollbackUnit_ClearSnapshots(); // Drain the bounded experiment while native trampolines are enabled.
     XInputDiscovery_Stop();
     g_gameplayActive.store(false, std::memory_order_release);
     if (g_gameplayDisabled)

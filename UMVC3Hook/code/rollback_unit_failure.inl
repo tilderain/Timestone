@@ -1,21 +1,21 @@
 // Independent fatal output: no recorder lock, object probing or game callbacks.
-struct LifetimeFailureContext {
+struct RollbackUnitFailureContext {
     const char* phase = "none";
     const void* object = nullptr;
     uint64_t id = 0;
     int32_t targetFrame = -1;
 };
-thread_local LifetimeFailureContext g_failureContext;
-struct LifetimeFailureScope {
-    LifetimeFailureContext previous = g_failureContext;
-    LifetimeFailureScope(const char* phase, const void* object = nullptr, uint64_t id = 0,
+thread_local RollbackUnitFailureContext g_failureContext;
+struct RollbackUnitFailureScope {
+    RollbackUnitFailureContext previous = g_failureContext;
+    RollbackUnitFailureScope(const char* phase, const void* object = nullptr, uint64_t id = 0,
                          int32_t frame = INT32_MIN) {
         g_failureContext = {phase, object, id, frame == INT32_MIN ? previous.targetFrame : frame};
     }
-    ~LifetimeFailureScope() { g_failureContext = previous; }
+    ~RollbackUnitFailureScope() { g_failureContext = previous; }
 };
 
-void WriteLifetimeFailureRecord(const char* text)
+void WriteRollbackUnitFailureRecord(const char* text)
 {
 #if defined(_WIN32)
     char path[MAX_PATH]{};
@@ -43,13 +43,13 @@ void WriteLifetimeFailureRecord(const char* text)
     HookLogTryWriteFatal(text);
 }
 
-template<class T> uint64_t LifetimeFailureValue(T value)
+template<class T> uint64_t RollbackUnitFailureValue(T value)
 {
     if constexpr (std::is_pointer_v<T>) return uint64_t(reinterpret_cast<uintptr_t>(value));
     else return uint64_t(value);
 }
 
-[[noreturn]] void LifetimeFailure(const char* file, int line, const char* function, const char* reason,
+[[noreturn]] void RollbackUnitFailure(const char* file, int line, const char* function, const char* reason,
     std::initializer_list<std::pair<const char*, uint64_t>> details)
 {
     char text[8192]{};
@@ -62,7 +62,7 @@ template<class T> uint64_t LifetimeFailureValue(T value)
         static_cast<unsigned long>(GetCurrentThreadId()), static_cast<unsigned long long>(GetTickCount64()),
         int32_t(context >> 1), unsigned(context & 1), g_failureContext.targetFrame, g_failureContext.phase,
         g_failureContext.object, static_cast<unsigned long long>(g_failureContext.id),
-        static_cast<unsigned long long>(g_caller), unsigned(g_lifetimeEnabled.load(std::memory_order_relaxed)),
+        static_cast<unsigned long long>(g_caller), unsigned(g_rollbackUnitEnabled.load(std::memory_order_relaxed)),
         unsigned(g_recording.load(std::memory_order_relaxed)));
     size_t used = size > 0 ? std::min(size_t(size), sizeof(text) - 1) : 0;
     for (const auto& [name, value] : details) {
@@ -70,7 +70,7 @@ template<class T> uint64_t LifetimeFailureValue(T value)
             static_cast<unsigned long long>(value));
         if (size > 0) used += std::min(size_t(size), sizeof(text) - used - 1);
     }
-    WriteLifetimeFailureRecord(text);
+    WriteRollbackUnitFailureRecord(text);
     std::abort(); // SIGABRT also produces the full crash report, after this record is flushed.
 }
 
@@ -79,12 +79,12 @@ template<class T> uint64_t LifetimeFailureValue(T value)
 #else
 #define LIFE_FUNCTION __PRETTY_FUNCTION__
 #endif
-#define LIFE_VALUE(value) std::pair<const char*, uint64_t>{#value, LifetimeFailureValue(value)}
-#define LIFE_FAIL(reason, ...) LifetimeFailure(__FILE__, __LINE__, LIFE_FUNCTION, reason, {__VA_ARGS__})
+#define LIFE_VALUE(value) std::pair<const char*, uint64_t>{#value, RollbackUnitFailureValue(value)}
+#define LIFE_FAIL(reason, ...) RollbackUnitFailure(__FILE__, __LINE__, LIFE_FUNCTION, reason, {__VA_ARGS__})
 // Invariant guard. The condition is evaluated once and stringified once as the
 // failure reason; use LIFE_FAIL when a specific message or value dump adds detail.
 // Variadic so that template-argument and lambda commas need no extra parentheses.
 #define LIFE_REQUIRE(...) do { \
-        if (!(__VA_ARGS__)) LifetimeFailure(__FILE__, __LINE__, LIFE_FUNCTION, \
+        if (!(__VA_ARGS__)) RollbackUnitFailure(__FILE__, __LINE__, LIFE_FUNCTION, \
             "requirement failed: " #__VA_ARGS__, {}); \
     } while (false)

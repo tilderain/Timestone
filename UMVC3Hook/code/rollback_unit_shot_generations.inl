@@ -1,4 +1,4 @@
-// Included in lifetime_trace's private namespace. A snapshot leases ownership
+// Included in rollback_unit's private namespace. A snapshot leases ownership
 // domains, not individual allocations. Unchanged children inherit their native
 // owner's lifetime; shared_ptr below only joins cohorts across COW transitions.
 enum class ShotDomain : uint8_t {
@@ -313,7 +313,7 @@ int EnsureShotGeneration(const Identity& owner, ShotDomain domain)
 // domains, including same-count joints, remain on the live owner unchanged.
 void RetireModelDomain(const Identity& owner, ShotDomain domain, bool force = false)
 {
-    LifetimeFailureScope failureScope("shot.domain.retire", owner.object, owner.id);
+    RollbackUnitFailureScope failureScope("shot.domain.retire", owner.object, owner.id);
     auto at = g_shotDomains.find(owner.id);
     if (at == g_shotDomains.end()) return;
     int& current = at->second.current[size_t(domain)];
@@ -346,7 +346,7 @@ void RetireModelDomain(const Identity& owner, ShotDomain domain, bool force = fa
 Identity* ShotIdentity(void* owner)
 {
     if constexpr (!EMPTY_EFFECT_QUARANTINE_ENABLED) return nullptr;
-    if (!g_lifetimeEnabled.load(std::memory_order_relaxed)) return nullptr;
+    if (!g_rollbackUnitEnabled.load(std::memory_order_relaxed)) return nullptr;
     auto* identity = Find(owner, false);
     return identity && identity->kind == Kind::Shot && identity->occupancy == Occupancy::Live ? identity : nullptr;
 }
@@ -516,7 +516,7 @@ void* AllocateAttackArray(size_t capacity)
 Identity* ManagedAttack(void* root, unsigned& slot)
 {
     if (!g_attackOwnerCount.load(std::memory_order_relaxed)) return nullptr; // No shot root exists.
-    if (!g_lifetimeEnabled.load(std::memory_order_relaxed) || g_collectingShotGeneration) return nullptr;
+    if (!g_rollbackUnitEnabled.load(std::memory_order_relaxed) || g_collectingShotGeneration) return nullptr;
     AttackOwner attack;
     {
         AttackOwnersGuard guard;
@@ -567,7 +567,7 @@ void ReplaceAttackArray(const Identity& owner, unsigned slot, uint32_t capacity,
 
 bool RetireAttack(const Identity& owner, uint32_t requested, bool full)
 {
-    if (g_collectingShotGeneration || !g_lifetimeEnabled.load(std::memory_order_relaxed) ||
+    if (g_collectingShotGeneration || !g_rollbackUnitEnabled.load(std::memory_order_relaxed) ||
         !g_shotDomains.count(owner.id)) return false;
     for (unsigned slot = 0; slot < 4; ++slot) {
         if (int32_t(requested) >= 0 && requested != slot) continue;
@@ -744,7 +744,7 @@ bool HasRetiredShotGenerations(uint64_t owner)
 
 void ReleaseTerminalShotReferences(uint64_t owner)
 {
-    LifetimeFailureScope failureScope("shot.references.terminal", nullptr, owner);
+    RollbackUnitFailureScope failureScope("shot.references.terminal", nullptr, owner);
     // Called after the most-derived native deleting dispatch returns. Concrete
     // and base cleanup can read old command/motion borrowers until then. The
     // resource references do not require the now-disposed owner address.
@@ -774,7 +774,7 @@ void ReleaseTerminalShotReferences(uint64_t owner)
 }
 void ForgetCurrentShotGenerations(uint64_t owner, void* address)
 {
-    LifetimeFailureScope failureScope("shot.generations.forget", address, owner);
+    RollbackUnitFailureScope failureScope("shot.generations.forget", address, owner);
     // Called only after retired generations drain, before intact native teardown.
     // Current storage remains native-owned, so forgetting metadata frees no leaves.
     std::vector<std::shared_ptr<AttackCohort>> cohorts;
@@ -798,7 +798,7 @@ void ForgetCurrentShotGenerations(uint64_t owner, void* address)
     }
     ReleaseSRWLockExclusive(&g_lock);
 }
-void DropShotGenerations(const LifetimeSnapshot* saved, uint32_t bit)
+void DropShotGenerations(const RollbackUnitSnapshot* saved, uint32_t bit)
 {
     if (!saved) return;
     for (const auto& shot : saved->shots) for (const auto& ref : shot.generations)
@@ -816,11 +816,11 @@ void AppendGenerationSpan(ShotState& saved, const char* name, void* address, siz
     saved.payload.insert(saved.payload.end(), bytes, bytes + size);
 }
 // Leases every ownership domain for this snapshot. Collision span bytes are
-// copied only with LifetimeShotPayload::Capture; validation runs either way.
+// copied only with RollbackUnitShotPayload::Capture; validation runs either way.
 void CaptureShotGenerations(const Identity& owner, uint32_t bit, ShotState& saved,
-                            LifetimeShotPayload payload)
+                            RollbackUnitShotPayload payload)
 {
-    LifetimeFailureScope failureScope("shot.generations.capture", owner.object, owner.id);
+    RollbackUnitFailureScope failureScope("shot.generations.capture", owner.object, owner.id);
     // One lookup for all domains: element references survive later insertions.
     const auto& domains = g_shotDomains[owner.id];
     saved.generations.reserve(ShotDomainCount);
@@ -854,7 +854,7 @@ void CaptureShotGenerations(const Identity& owner, uint32_t bit, ShotState& save
             ValidateAttackCohort(*cohort);
             void* root = cohort->root->object;
             const auto slot = uint16_t(domain - size_t(ShotDomain::Attack0));
-            const bool copy = payload == LifetimeShotPayload::Capture;
+            const bool copy = payload == RollbackUnitShotPayload::Capture;
             if (copy) {
                 AppendGenerationSpan(saved, "collision.root", root, 0xE0, nullptr, slot);
                 AppendGenerationSpan(saved, "collision.entries", cohort->array->data,
@@ -883,9 +883,9 @@ void CaptureShotGenerations(const Identity& owner, uint32_t bit, ShotState& save
 // Callers must not resume simulation after this stage alone.
 [[maybe_unused]] void StageShotGenerationStorage(const Identity& owner, const ShotState& saved, uint32_t bit)
 {
-    LifetimeFailureScope failureScope("shot.storage.stage", owner.object, owner.id);
+    RollbackUnitFailureScope failureScope("shot.storage.stage", owner.object, owner.id);
     UnitGuard fence;
-    LIFE_REQUIRE(saved.payloadState == LifetimeShotPayload::Capture);
+    LIFE_REQUIRE(saved.payloadState == RollbackUnitShotPayload::Capture);
     LIFE_REQUIRE(saved.id == owner.id && (owner.snapshots & bit) && saved.generations.size() == ShotDomainCount);
     bool domains[ShotDomainCount]{};
     for (const auto& ref : saved.generations) {

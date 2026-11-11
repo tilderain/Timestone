@@ -1,14 +1,14 @@
-"""Benchmark the lifetime tracer's snapshot save and restore against the test mocks.
+"""Benchmark the unit rollback system's snapshot save and restore against the test mocks.
 
-Builds the production lifetime_trace.cpp with the mocks from test_lifetime_trace.py
+Builds the production rollback_unit.cpp with the mocks from test_rollback_unit.py
 at -O2, without sanitizers, and times save and restore over synthetic scenes of
 effects (two-node graphs) and shots (24 joints, one attack root). Each figure is
 the best batch average, so background load only ever raises it.
 
-    python3 tools/bench_lifetime_trace.py                  # working tree
-    python3 tools/bench_lifetime_trace.py --compare HEAD   # alternate with a revision
-    python3 tools/bench_lifetime_trace.py --scene 30 4     # one scene: effects shots
-    python3 tools/bench_lifetime_trace.py --keep bench.exe # keep the binary, e.g. for
+    python3 tools/bench_rollback_unit.py                  # working tree
+    python3 tools/bench_rollback_unit.py --compare HEAD   # alternate with a revision
+    python3 tools/bench_rollback_unit.py --scene 30 4     # one scene: effects shots
+    python3 tools/bench_rollback_unit.py --keep bench.exe # keep the binary, e.g. for
         valgrind --tool=callgrind --toggle-collect='RestoreAll*' ./bench.exe 0 2 30 4
         (0 selects the benchmark; then 1 times saves only, 2 restores only)
 
@@ -25,7 +25,7 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
-import test_lifetime_trace as harness  # noqa: E402
+import test_rollback_unit as harness  # noqa: E402
 
 BENCH = r'''
 #include <chrono>
@@ -146,17 +146,17 @@ void tick() {
 }
 double now() { return std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
 int g_mode = 0;
-[[gnu::noinline]] void SaveAll(int32_t frame) { LifetimeTrace_DropSnapshot(frame); LifetimeTrace_SaveSnapshot(frame); }
+[[gnu::noinline]] void SaveAll(int32_t frame) { RollbackUnit_DropSnapshot(frame); RollbackUnit_SaveSnapshot(frame); }
 [[gnu::noinline]] void RestoreAll(int32_t target) {
-    LifetimeTrace_CheckSnapshot(target);
-    LifetimeTrace_RetireFutureShots(target); LifetimeTrace_RestoreEffects(target); LifetimeTrace_RestoreShots(target);
+    RollbackUnit_CheckSnapshot(target);
+    RollbackUnit_RetireFutureShots(target); RollbackUnit_RestoreEffects(target); RollbackUnit_RestoreShots(target);
 }
 void run(const char* name, int effects, int shotCount) {
     fx.clear(); shots.clear(); foreign.clear();
     build(effects, shotCount, 60, 300);
     g_recording = false; // As in a match after the first 65536 events.
     int32_t frame = 0;
-    for (; frame < 64; ++frame) { tick(); LifetimeTrace_DropSnapshot(frame); LifetimeTrace_SaveSnapshot(frame); LifetimeTrace_Flush(); }
+    for (; frame < 64; ++frame) { tick(); RollbackUnit_DropSnapshot(frame); RollbackUnit_SaveSnapshot(frame); RollbackUnit_Flush(); }
     // Each figure is the best batch average: scheduling noise only ever adds time.
     const int batches = g_mode ? 2 : 20, saves = 200, restores = 40;
     double save = 1e30, flush = 1e30, restore = 1e30, resave = 1e30;
@@ -165,7 +165,7 @@ void run(const char* name, int effects, int shotCount) {
         for (int i = 0; i < saves; ++i, ++frame) {
             tick();
             double t = now(); SaveAll(frame); s += now() - t;
-            t = now(); LifetimeTrace_Flush(); fl += now() - t;
+            t = now(); RollbackUnit_Flush(); fl += now() - t;
         }
         save = std::min(save, s / saves); flush = std::min(flush, fl / saves);
     }
@@ -177,7 +177,7 @@ void run(const char* name, int effects, int shotCount) {
             t = now();
             for (int32_t f = target + 1; f < frame; ++f) { tick(); SaveAll(f); }
             rs += now() - t;
-            tick(); SaveAll(frame); LifetimeTrace_Flush(); ++frame;
+            tick(); SaveAll(frame); RollbackUnit_Flush(); ++frame;
         }
         restore = std::min(restore, r / restores); resave = std::min(resave, rs / (restores * 6));
     }
@@ -200,7 +200,7 @@ void run(const char* name, int effects, int shotCount) {
     }
     std::printf("%-8s effects=%3d shots=%2d payload=%7zu B  save=%7.2f us  flush=%5.2f us  restore=%7.2f us  resim_save=%7.2f us\n",
         name, effects, shotCount, bytes, save, flush, restore, resave);
-    LifetimeTrace_ClearSnapshots();
+    RollbackUnit_ClearSnapshots();
 }
 int main(int argc, char** argv) {
     if (argc > 1) { g_mode = std::atoi(argv[1]); run("prof", argc > 2 ? std::atoi(argv[2]) : 30, argc > 3 ? std::atoi(argv[3]) : 4); return 0; }
@@ -214,8 +214,8 @@ def build(root, exe):
     """Compile the tracer found under `root` with the benchmark as its only check."""
     harness.ROOT = root
     checks = harness.CHECKS[:harness.CHECKS.index("int main() {")] + BENCH
-    checks = checks.replace("LifetimeTrace_SaveSnapshot(", "SaveTestSnapshot(")
-    unit = harness.LifetimeTraceTests._unit((True, True, ""), [checks])
+    checks = checks.replace("RollbackUnit_SaveSnapshot(", "SaveTestSnapshot(")
+    unit = harness.RollbackUnitTests._unit((True, True, ""), [checks])
     with tempfile.TemporaryDirectory(prefix="lifetime-bench-") as directory:
         cpp = Path(directory) / "bench.cpp"
         cpp.write_text(unit)
