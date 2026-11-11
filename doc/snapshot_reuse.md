@@ -32,7 +32,7 @@ Owners are character and weapon bodies; the "prefix" is the first 0x1450 bytes
 |---|---|
 | Motion blend buffer of slot *m* | that slot's record (`+0x560 + m*0x180`, 0x180 bytes) changed |
 | Joint states, joint indices, blended joints, motion channels | any byte of the owner's prefix changed, or, for a weapon, of its character's prefix |
-| Material job table (`+0x1408..+0x1438`) | a job is active now (bit 0 of `+0xB64`), was active at the previous save, or a job's control block (`+0xB40` to the end of the entry) changed. This signal is incomplete, so a skip is always confirmed by comparing the bytes, in every mode |
+| Material job table (`+0x1408..+0x1438`) | a job is active now (bit 0 of `+0xB64`), was active at the previous save, or a job's unit header (`+0x00..+0x50`, which holds `uMaterialControl::mpTarget` at `+0x40`) or control block (`+0xB40` to the end of the entry) changed. This signal is incomplete, so a skip is always confirmed by comparing the bytes, in every mode |
 | Everything else (bodies, command lines, collision, camera, ...) | always |
 
 ## Evidence and limits
@@ -48,7 +48,20 @@ the reason for the two qualifications in the table above:
 - A 13-joint weapon's joint states changed (joint 1, `+0x20`) with its own
   prefix unchanged: the weapon follows the character's hand.
 - Material job tables changed at entry `+0x40` with no job active and the
-  control block unchanged. What writes it has not been identified.
+  control block unchanged. `+0x40` is `uMaterialControl::mpTarget`: the base
+  `uMaterialVjob::move` (`0x14013F6A0`) clears it for an inactive job whose
+  target died, and job setup rebinds it. The header is now part of the signal.
+  The controller arrays (`+0x50..+0xB40`) are still unwatched, so the
+  always-compare stays until validate runs show no table mismatches.
+
+- A character's joint states changed (161 joints, first difference in joint 47)
+  with its prefix unchanged, twice in 28,000 saves and on the client only. Cause
+  unknown; the joint rule is not changed for it.
+
+Status: `Off`. Three rules failed in three long sessions, so `Trust` is not a
+safe target as designed, and `Validate` cost more than plain copying in a lag
+capture with the dump recorder on (`save_copy` about 0.31-0.35 ms against
+0.19-0.21 ms): the saved copy being compared is cold in the 255-frame history.
 
 Known gaps:
 
@@ -62,8 +75,8 @@ Known gaps:
 
 `SNAPSHOT_REUSE_MODE` in `snapshot_reuse.h`:
 
-- `Off`: copy everything.
-- `Validate` (default): compare every region a signal calls unchanged; on a
+- `Off` (current setting): copy everything.
+- `Validate`: compare every region a signal calls unchanged; on a
   difference log `SnapshotReuse: MISMATCH` and copy it. Saved bytes are always
   correct in this mode; it only saves the write.
 - `Trust`: skip without comparing. Switch to this once `Validate` has stayed

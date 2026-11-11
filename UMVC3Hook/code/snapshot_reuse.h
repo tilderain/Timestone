@@ -9,8 +9,10 @@
 // holds the same region at the same version moves no bytes. The buffer layout
 // is unchanged: restore and the dump recorder read complete snapshots as before.
 //
-// The signals are observed correlations (see doc/snapshot_reuse.md), not proofs.
-// Validate mode still compares every skipped region and repairs a mismatch.
+// The signals are observed correlations (see doc/snapshot_reuse.md), not proofs,
+// and play has disproved three of them so far. Validate mode compares every
+// skipped region and repairs a mismatch, but measured slower than copying.
+// Off until a skip can be both confirmed and cheaper than the copy.
 
 #include <cstddef>
 #include <cstdint>
@@ -20,7 +22,7 @@ enum class SnapshotReuseMode {
     Validate,  // Compare each region a signal calls unchanged; log and copy on a mismatch.
     Trust,     // Skip without comparing (material job tables are still compared).
 };
-inline constexpr SnapshotReuseMode SNAPSHOT_REUSE_MODE = SnapshotReuseMode::Validate;
+inline constexpr SnapshotReuseMode SNAPSHOT_REUSE_MODE = SnapshotReuseMode::Off;
 
 enum class SnapshotReuseKind : uint8_t {
     None,           // Always copied.
