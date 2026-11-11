@@ -2,6 +2,7 @@
 
 #include "rollback.h"
 #include "rollback_snapdump.h"
+#include "snapshot_reuse.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -25,6 +26,8 @@ struct RollbackRegion {
     uint64_t expectedVtable;
     bool skipVtable;
     bool commandLine;
+    SnapshotReuseKind reuseKind; // how the save decides this region is unchanged
+    uint8_t reuseIndex;          // motion slot or material table index for that kind
     int dependentRegion = -1; // auxiliary work buffer: validate its actor before dereferencing ownerSlot
 #if ROLLBACK_SNAPDUMP_ENABLED
     const char* snapDumpName;

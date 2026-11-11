@@ -205,6 +205,7 @@ uint8_t* SnapDump_AcquireSnapshotStorage(int32_t frame, size_t byteSize,
                     newCapacity, frame);
             return nullptr;
         }
+        SnapshotReuse_ForgetBuffer(destination.storage);
         delete[] destination.storage;
         destination.storage = storage;
         destination.capacity = newCapacity;
@@ -227,8 +228,10 @@ void SnapDump_CaptureSnapshot(const RollbackSnapshotSlot& slot)
         return;
     }
 
-    if (destination.storage != slot.data)
+    if (destination.storage != slot.data) {
+        SnapshotReuse_ForgetBuffer(destination.storage); // Not written by the save.
         std::memcpy(destination.storage, slot.data, slot.size);
+    }
     CapturedRegion* captured = reinterpret_cast<CapturedRegion*>(
         destination.storage + regionOffset);
     for (int i = 0; i < slot.regionCount; ++i) {
@@ -501,6 +504,7 @@ bool SnapDump_WriteManualHistory(int32_t frame, const char* timestamp)
 void SnapDump_Reset()
 {
     for (HistoryFrame& frame : g_history) {
+        SnapshotReuse_ForgetBuffer(frame.storage);
         delete[] frame.storage;
         frame = {};
     }

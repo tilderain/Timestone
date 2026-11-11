@@ -425,6 +425,8 @@ static void TraverseAndAddDynamicList(uint64_t listHead, size_t nextOffset,
         regions[r].expectedVtable = 0;
         regions[r].skipVtable = false;
         regions[r].dependentRegion = -1;
+        regions[r].reuseKind = SnapshotReuseKind::None;
+        regions[r].reuseIndex = 0;
 #if ROLLBACK_SNAPDUMP_ENABLED
         regions[r].snapDumpName = "dynamic_list_object";
 #endif
@@ -441,6 +443,7 @@ static void TraverseAndAddDynamicList(uint64_t listHead, size_t nextOffset,
     if (!regions || maxRegions < 1) return 0;
 
     int r = 0;
+    int reuseBefore = 0;
     auto read = [&]<typename T>(uintptr_t address) {
         return dependencies.read<T>(address);
     };
@@ -458,10 +461,19 @@ static void TraverseAndAddDynamicList(uint64_t listHead, size_t nextOffset,
             regions[r].skipVtable = skipVtable;
             regions[r].commandLine = false;
             regions[r].dependentRegion = -1;
+            regions[r].reuseKind = SnapshotReuseKind::None;
+            regions[r].reuseIndex = 0;
 #if ROLLBACK_SNAPDUMP_ENABLED
             regions[r].snapDumpName = snapDumpName;
 #endif
             ++r;
+        }
+    };
+    // Classify the region just appended; a rejected add() appended nothing.
+    auto reuse = [&](int before, SnapshotReuseKind kind, uint8_t index = 0) {
+        if (r > before) {
+            regions[r - 1].reuseKind = kind;
+            regions[r - 1].reuseIndex = index;
         }
     };
 
@@ -698,11 +710,13 @@ static void TraverseAndAddDynamicList(uint64_t listHead, size_t nextOffset,
                         finalSize = CCHR_NOMINAL_SIZE;
                     }
                     uint32_t* animFields = (uint32_t*)(character + 0x1300);
+                    reuseBefore = r;
                     add((void*)character, finalSize, 0, vtable, true
 #if ROLLBACK_SNAPDUMP_ENABLED
                         , ti == 0 ? "uCharacter.team0" : "uCharacter.team1"
 #endif
                     );
+                    reuse(reuseBefore, SnapshotReuseKind::ActorBody);
 
                     // Tron/Linlin auxiliaries are category-9 actor models, not
                     // uCharacters. Capture through their actual owner slot.
@@ -773,6 +787,7 @@ static void TraverseAndAddDynamicList(uint64_t listHead, size_t nextOffset,
                         uint64_t ownerSlot = character + targetOffsets[target];
                         uint64_t table = read.operator()<uint64_t>(ownerSlot);
                         if (table && count > 0 && count <= 10) {
+                            reuseBefore = r;
                             add((void*)table,
                                 (size_t)count * targetStrides[target],
                                 ownerSlot, 0, false
@@ -780,6 +795,7 @@ static void TraverseAndAddDynamicList(uint64_t listHead, size_t nextOffset,
                                 , "uCharacter.targetTable"
 #endif
                             );
+                            reuse(reuseBefore, SnapshotReuseKind::MaterialTable, uint8_t(target));
                         }
                     }
 
@@ -793,11 +809,13 @@ static void TraverseAndAddDynamicList(uint64_t listHead, size_t nextOffset,
                                 motion * CCHR_MOTION_STRIDE + CCHR_BLEND_PTR_OFFSET;
                             uint64_t blend = read.operator()<uint64_t>(ownerSlot);
                             if (blend && blendSize > 0) {
+                                reuseBefore = r;
                                 add((void*)blend, blendSize, ownerSlot, 0, false
 #if ROLLBACK_SNAPDUMP_ENABLED
                                     , "uCharacter.motionBlend"
 #endif
                                 );
+                                reuse(reuseBefore, SnapshotReuseKind::MotionBlend, uint8_t(motion));
                             }
                         }
                     }
@@ -813,11 +831,13 @@ static void TraverseAndAddDynamicList(uint64_t listHead, size_t nextOffset,
                         uint64_t ownerSlot = character + CCHR_MOTION_CHANNELS_PTR_OFFSET;
                         uint64_t channels = read.operator()<uint64_t>(ownerSlot);
                         if (channels && channelBytes > 0) {
+                            reuseBefore = r;
                             add((void*)channels, channelBytes, ownerSlot, 0, false
 #if ROLLBACK_SNAPDUMP_ENABLED
                                 , "uCharacter.motionChannels"
 #endif
                             );
+                            reuse(reuseBefore, SnapshotReuseKind::Prefix);
                         }
                     }
 
@@ -826,6 +846,7 @@ static void TraverseAndAddDynamicList(uint64_t listHead, size_t nextOffset,
                         uint64_t jointStateOwner = character + CCHR_JOINT_STATE_PTR_OFFSET;
                         uint64_t jointStates = read.operator()<uint64_t>(jointStateOwner);
                         if (jointStates) {
+                            reuseBefore = r;
                             add((void*)jointStates,
                                 CCHR_JOINT_STATE_STRIDE * numJoints,
                                 jointStateOwner, 0, false
@@ -833,21 +854,25 @@ static void TraverseAndAddDynamicList(uint64_t listHead, size_t nextOffset,
                                 , "uCharacter.jointStates"
 #endif
                             );
+                            reuse(reuseBefore, SnapshotReuseKind::Prefix);
                         }
 
                         uint64_t jointIndexOwner = character + CCHR_JOINT_INDEX_PTR_OFFSET;
                         uint64_t jointIndices = read.operator()<uint64_t>(jointIndexOwner);
                         if (jointIndices) {
+                            reuseBefore = r;
                             add((void*)jointIndices, numJoints, jointIndexOwner, 0, false
 #if ROLLBACK_SNAPDUMP_ENABLED
                                 , "uCharacter.jointIndices"
 #endif
                             );
+                            reuse(reuseBefore, SnapshotReuseKind::Prefix);
                         }
 
                         uint64_t blendedOwner = character + CCHR_BLENDED_JOINT_PTR_OFFSET;
                         uint64_t blendedJoints = read.operator()<uint64_t>(blendedOwner);
                         if (blendedJoints) {
+                            reuseBefore = r;
                             add((void*)blendedJoints,
                                 CCHR_BLENDED_JOINT_STRIDE * numJoints,
                                 blendedOwner, 0, false
@@ -855,6 +880,7 @@ static void TraverseAndAddDynamicList(uint64_t listHead, size_t nextOffset,
                                 , "uCharacter.blendedJoints"
 #endif
                             );
+                            reuse(reuseBefore, SnapshotReuseKind::Prefix);
                         }
                     }
 
@@ -891,11 +917,13 @@ static void TraverseAndAddDynamicList(uint64_t listHead, size_t nextOffset,
                             uint32_t weaponSize = DecodeDtiSize(GetObjectDti(weapon));
                             if (weaponSize < 0x1300 || weaponSize > CCHR_MAX_SIZE)
                                 continue;
+                            reuseBefore = r;
                             add((void*)weapon, weaponSize, 0, weaponVtable, true
 #if ROLLBACK_SNAPDUMP_ENABLED
                                 , "uChrWeapon"
 #endif
                             );
+                            reuse(reuseBefore, SnapshotReuseKind::ActorBody);
 
                             uint32_t weaponJoints = read.operator()<uint32_t>(
                                 weapon + CCHR_NUM_JOINTS_OFFSET);
@@ -909,11 +937,13 @@ static void TraverseAndAddDynamicList(uint64_t listHead, size_t nextOffset,
                                     motion * CCHR_MOTION_STRIDE + CCHR_BLEND_PTR_OFFSET;
                                 uint64_t blend = read.operator()<uint64_t>(ownerSlot);
                                 if (blend) {
+                                    reuseBefore = r;
                                     add((void*)blend, weaponBlendSize, ownerSlot, 0, false
 #if ROLLBACK_SNAPDUMP_ENABLED
                                         , "uChrWeapon.motionBlend"
 #endif
                                     );
+                                    reuse(reuseBefore, SnapshotReuseKind::MotionBlend, uint8_t(motion));
                                 }
                             }
 
@@ -928,11 +958,13 @@ static void TraverseAndAddDynamicList(uint64_t listHead, size_t nextOffset,
                                 size_t channelBytes = CCHR_MOTION_CHANNEL_STRIDE *
                                     channelCount * motionCount;
                                 if (channels && channelBytes > 0) {
+                                    reuseBefore = r;
                                     add((void*)channels, channelBytes, ownerSlot, 0, false
 #if ROLLBACK_SNAPDUMP_ENABLED
                                         , "uChrWeapon.motionChannels"
 #endif
                                     );
+                                    reuse(reuseBefore, SnapshotReuseKind::Prefix);
                                 }
                             }
 
@@ -953,12 +985,14 @@ static void TraverseAndAddDynamicList(uint64_t listHead, size_t nextOffset,
                                 uint64_t ownerSlot = weapon + buffer.ownerOffset;
                                 uint64_t data = read.operator()<uint64_t>(ownerSlot);
                                 if (data) {
+                                    reuseBefore = r;
                                     add((void*)data, buffer.stride * weaponJoints,
                                         ownerSlot, 0, false
 #if ROLLBACK_SNAPDUMP_ENABLED
                                         , buffer.name
 #endif
                                     );
+                                    reuse(reuseBefore, SnapshotReuseKind::Prefix);
                                 }
                             }
                         }
@@ -1033,6 +1067,19 @@ static void TraverseAndAddDynamicList(uint64_t listHead, size_t nextOffset,
     return r;
 }
 
+// The save copies the cached list; tell it how each region may be reused.
+[[gnu::cold]] static void PublishReusePlan()
+{
+    static std::vector<SnapshotReuseRegion> plan;
+    plan.clear();
+    for (int i = 0; i < g_regionCache.count; ++i) {
+        const Region& region = g_regionCache.regions[i];
+        plan.push_back({(const uint8_t*)region.ptr, region.size, region.ownerSlot,
+                        region.reuseKind, region.reuseIndex});
+    }
+    SnapshotReuse_SetPlan(plan.data(), (int)plan.size());
+}
+
 int Rollback_BuildRegions(Region* regions, int maxRegions)
 {
     if (!regions || maxRegions < 1) return 0;
@@ -1050,6 +1097,7 @@ int Rollback_BuildRegions(Region* regions, int maxRegions)
                                      g_regionCache.dependencies);
     g_regionCache.count = count;
     g_regionCache.valid = count > 0 && !g_regionCache.dependencies.overflow;
+    PublishReusePlan();
 
     int copyCount = count < maxRegions ? count : maxRegions;
     std::memcpy(regions, g_regionCache.regions, copyCount * sizeof(Region));
@@ -1098,8 +1146,10 @@ void Rollback_SaveSnapshot(int32_t frame)
         ? SnapDump_AcquireSnapshotStorage(frame, total, count, &sharedCapacity, &slot.lifetime)
         : nullptr;
     if (sharedData) {
-        if (slot.ownsData)
+        if (slot.ownsData) {
+            SnapshotReuse_ForgetBuffer(slot.data);
             delete[] slot.data;
+        }
         slot.data = sharedData;
         slot.capacity = sharedCapacity;
         slot.ownsData = false;
@@ -1119,6 +1169,7 @@ void Rollback_SaveSnapshot(int32_t frame)
             newCapacity = (total + SNAPSHOT_CAPACITY_GRANULARITY - 1) &
                 ~(SNAPSHOT_CAPACITY_GRANULARITY - 1);
         }
+        SnapshotReuse_ForgetBuffer(slot.data);
         delete[] slot.data;
         slot.data = new (std::nothrow) uint8_t[newCapacity];
         if (!slot.data) {
@@ -1135,14 +1186,11 @@ void Rollback_SaveSnapshot(int32_t frame)
     diagnosticStage.Next(LagMetric::SaveCopy);
 
     // Copy region payloads; keep this frame's region metadata alongside the bytes.
-    size_t offset = 0;
+    // The region list is the cached one just built, which is the reuse plan:
+    // regions already in this buffer at their current version are not recopied.
     slot.regionCount = count;
     slot.frame = frame;
-    for (int i = 0; i < count; ++i) {
-        const Region& region = slot.regions[i];
-        std::memcpy(slot.data + offset, region.ptr, region.size);
-        offset += region.size;
-    }
+    const size_t offset = SnapshotReuse_Save(slot.data);
     slot.size = offset;
     CaptureCharacterMotionResources(slot);
     CaptureActionSideCameraState(slot);
@@ -1361,8 +1409,10 @@ void Rollback_FreeSnapshots()
         ReleaseActionSideCameraState(g_slots[i]);
         ReleaseCharacterMotionResources(g_slots[i]);
         g_slots[i].lifetime.reset();
-        if (g_slots[i].ownsData)
+        if (g_slots[i].ownsData) {
+            SnapshotReuse_ForgetBuffer(g_slots[i].data);
             delete[] g_slots[i].data;
+        }
         g_slots[i].data        = nullptr;
         g_slots[i].size        = 0;
         g_slots[i].capacity    = 0;
