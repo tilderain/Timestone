@@ -620,6 +620,11 @@ static void __fastcall hkSoundPlayWithDb(void* sound, void* resource,
     }
 }
 
+// TODO: this hook should not be needed and has to be fixed at the source. It
+// runs on every sound environment update only to drop a model pointer that a
+// rollback left dangling in the scene. Find what leaves the scene pointing at
+// a dead model (the scene is not rewound with the model it follows) and clear
+// or restore the slot there, then remove this hook.
 static void __fastcall hkSceneUpdateSoundEnv(uint64_t scene)
 {
     constexpr uint32_t MODEL_OFFSET = 0x80;
@@ -636,9 +641,11 @@ static void __fastcall hkSceneUpdateSoundEnv(uint64_t scene)
         uint32_t positionMode = *(uint32_t*)(scene + POSITION_MODE_OFFSET);
         if (!valid || !getMatrix ||
             (positionMode == 2 && jointIndex < 0)) {
-            HookLog("Rollback: detached stale sound scene model=0x%llX "
+            // No log here: the write stalled the sound update for 11.5 ms in a
+            // lag capture.
+            /*HookLog("Rollback: detached stale sound scene model=0x%llX "
                     "vtable=0x%llX mode=%u joint=%d\n",
-                    model, vtable, positionMode, jointIndex);
+                    model, vtable, positionMode, jointIndex);*/
             *modelSlot = 0;
         }
     }
