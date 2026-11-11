@@ -6,6 +6,7 @@
 #include "rollback_memory.h"
 #include "rollback_character_restore.h"
 #include "rollback_diagnostics.h"
+#include "lag_diagnostics.h"
 
 #include <atomic>
 #include <bit>
@@ -95,10 +96,18 @@ struct GraphGeneration {
     bool attached = false, collecting = false;
     int reference = -1;
     size_t spanCount = 0;
-    GraphSpan spans[GraphSpanLimit];
-    uint8_t root[0x2C0]{};
 };
 GraphGeneration g_generations[GenerationCapacity];
+// The span list and saved header of each generation, kept apart from the small
+// record above. Free-slot searches, lease clears and owner lookups walk the
+// records on every save and every effect birth; with 2.3 KB of payload inline
+// each step was a cache miss.
+struct GraphGenerationBody {
+    GraphSpan spans[GraphSpanLimit];
+    uint8_t root[0x2C0];
+};
+GraphGenerationBody g_generationBodies[GenerationCapacity];
+GraphGenerationBody& Body(const GraphGeneration& graph) { return g_generationBodies[&graph - g_generations]; }
 struct ResourceReference {
     void* resource = nullptr;
     uint64_t ownerId = 0;
@@ -224,6 +233,9 @@ struct RollbackUnitSnapshot {
     // Shot bodies/spans and constraint images. Omit leaves constraints incomplete.
     RollbackUnitShotPayload shotPayload = RollbackUnitShotPayload::Omit;
     std::vector<ShotState> shots;
+    // Shot records not in use this frame. Kept, never destroyed, so their
+    // buffers survive a volley ending and the next one starting.
+    std::vector<ShotState> spareShots;
     void* shotManager = nullptr;
     uint32_t shotCursor = 0;
     void* shotConfig = nullptr;
@@ -245,6 +257,38 @@ struct RollbackUnitSnapshot {
 
 namespace {
 using SnapshotManifest = RollbackUnitSnapshot;
+// Effect buffers are sized ahead of need. Growing one inside a save cost about
+// 1 ms the first time 60 effects appeared together (0.7 ms reallocating, 0.35 ms
+// first-touch page faults in the benchmark), so storage starts at a floor that
+// covers a multi-shot hyper, committed when the storage is created at match
+// start, and follows the largest save this session has needed.
+constexpr size_t EffectPayloadFloor = 1024 * 1024, EffectCountFloor = 256, EffectSpanFloor = 2048;
+size_t g_effectPayloadNeed = EffectPayloadFloor, g_effectCountNeed = EffectCountFloor, g_effectSpanNeed = EffectSpanFloor;
+// Storages created so far. Only the rollback window's own are committed up
+// front: with snapdump writes on, every one of the 255 history frames has one.
+size_t g_createdSnapshots = 0;
+void PrepareShotGenerationStorage();
+// Parked shot records with their buffers already committed, so the first save
+// that meets a volley in this storage does not allocate one per shot.
+constexpr size_t SpareShotRecords = 32, SpareShotPayload = 48 * 1024;
+void PreSizeShotStorage(RollbackUnitSnapshot& storage);
+void PreSizeEffectStorage(RollbackUnitSnapshot& storage, bool commit)
+{
+    if (storage.payload.capacity() < g_effectPayloadNeed) {
+        storage.payload.clear();
+        storage.payload.reserve(g_effectPayloadNeed + g_effectPayloadNeed / 4);
+        if (commit) { storage.payload.resize(storage.payload.capacity()); storage.payload.clear(); }
+    }
+    if (storage.effects.capacity() < g_effectCountNeed) {
+        storage.effects.clear();
+        storage.effects.reserve(g_effectCountNeed + g_effectCountNeed / 4);
+        if (commit) { storage.effects.resize(storage.effects.capacity()); storage.effects.clear(); }
+    }
+    if (storage.spans.capacity() < g_effectSpanNeed) {
+        storage.spans.clear();
+        storage.spans.reserve(g_effectSpanNeed + g_effectSpanNeed / 4);
+    }
+}
 // Non-owning lease index only. Captured state belongs to the snapshot storage.
 SnapshotManifest* g_liveSnapshots[ROLLBACK_WINDOW]{};
 // Slots whose lease bits were cleared by drop/clear and not set since. Starts
@@ -1018,8 +1062,9 @@ int OwnCurrentGraph(Identity& owner, const GraphSpan* spans, size_t count)
     graph.attached = true;
     graph.collecting = false;
     graph.spanCount = count;
-    for (size_t i = 0; i < count; ++i) graph.spans[i] = spans[i];
-    std::memcpy(graph.root, owner.object, sizeof(graph.root));
+    auto& body = Body(graph);
+    for (size_t i = 0; i < count; ++i) body.spans[i] = spans[i];
+    std::memcpy(body.root, owner.object, sizeof(body.root));
     owner.graph = int(slot);
     // The object already owns this reference. Snapshot leases do not add refs.
     if (graph.resource) {
@@ -1052,7 +1097,7 @@ void TransferOwnerResource(Identity& owner)
 void DetachGraph(Identity& owner)
 {
     auto& graph = g_generations[owner.graph];
-    std::memcpy(graph.root, owner.object, sizeof(graph.root));
+    std::memcpy(Body(graph).root, owner.object, sizeof(Body(graph).root));
     graph.attached = false;
     owner.graph = -1;
     // Exact postimage of uEffect::releaseGenerator, without destroying storage.
@@ -1095,7 +1140,7 @@ void CollectGraphGenerations()
             // then put its current generation back; never use a surrogate owner.
             uint8_t current[0x280];
             std::memcpy(current, static_cast<uint8_t*>(graph.owner) + 0x40, sizeof(current));
-            std::memcpy(static_cast<uint8_t*>(graph.owner) + 0x40, graph.root + 0x40, sizeof(current));
+            std::memcpy(static_cast<uint8_t*>(graph.owner) + 0x40, Body(graph).root + 0x40, sizeof(current));
             oReleaseGraph(graph.owner);
             std::memcpy(static_cast<uint8_t*>(graph.owner) + 0x40, current, sizeof(current));
         }
@@ -1206,9 +1251,13 @@ void CaptureEffects(SnapshotManifest& manifest, void* manager)
     manifest.effects.clear();
     manifest.spans.clear();
     manifest.payload.clear();
+    // An older storage catches up with the session's largest save in one step.
+    PreSizeEffectStorage(manifest, false);
     for (auto& entries : manifest.primary) entries.clear();
     for (auto& entries : manifest.groups) entries.clear();
     if (!manager) return;
+    // Nested inside save_lifetime, which reports only its own remainder as self time.
+    LagDiagnosticScope stage(LagMetric::SaveUnitLists);
     const uint32_t categories = Read<uint32_t>(manager, 0xC38);
     LIFE_REQUIRE(categories <= 64);
     for (uint32_t category = 0; category < categories; ++category) {
@@ -1231,6 +1280,12 @@ void CaptureEffects(SnapshotManifest& manifest, void* manager)
     }
     size_t activeSeen = 0, activeSaved = 0;
     uint32_t rejectionMask = 0;
+    stage.Next(LagMetric::SaveUnitEffects);
+    // The validation walk, timed apart from the copies around it.
+    const auto ownedGraph = [](void* effect) {
+        LagDiagnosticScope check(LagMetric::SaveUnitEffectCheck);
+        return OwnedEffectGraph(effect);
+    };
     for (auto& identity : ActiveIdentities()) {
         if (identity.occupancy != Occupancy::Live || identity.kind != Kind::Effect) continue;
         void* object = identity.object;
@@ -1242,11 +1297,11 @@ void CaptureEffects(SnapshotManifest& manifest, void* manager)
         const bool simulation = state == 2 && EFFECT_SIMULATION_SNAPSHOTS_ENABLED;
         if (simulation) {
             ++activeSeen;
-            if (!OwnedEffectGraph(object)) {
+            if (!ownedGraph(object)) {
                 rejectionMask |= 2;
                 continue;
             }
-        } else if (!OwnedEffectGraph(object)) continue;
+        } else if (!ownedGraph(object)) continue;
         if (Read<void*>(object, 0x218)) spanCount = DescribeOwnedGraph(object, spans);
         const uint32_t category = (flags >> 3) & 0x7F;
         LIFE_REQUIRE(!(category >= categories && category != 0x7F));
@@ -1287,6 +1342,10 @@ void CaptureEffects(SnapshotManifest& manifest, void* manager)
         }
     }
     const uint32_t bit = uint32_t(1) << unsigned((manifest.frame % ROLLBACK_WINDOW + ROLLBACK_WINDOW) % ROLLBACK_WINDOW);
+    stage.Next(LagMetric::SaveUnitEffectLeases);
+    g_effectPayloadNeed = std::max(g_effectPayloadNeed, manifest.payloadBytes());
+    g_effectCountNeed = std::max(g_effectCountNeed, manifest.effectCount());
+    g_effectSpanNeed = std::max(g_effectSpanNeed, manifest.spanCount());
     for (size_t i = 0; i < manifest.effectCount(); ++i)
         LeaseEffectDependencies(manifest, manifest.effects[i], bit);
     if (activeSeen)
@@ -1682,6 +1741,18 @@ void __fastcall MainReset(void* main)
     oMainReset(main);
     RollbackUnit_Marker("main_reset_end", -1);
 }
+void PreSizeShotStorage(RollbackUnitSnapshot& storage)
+{
+    storage.shots.reserve(SpareShotRecords * 2);
+    storage.spareShots.reserve(SpareShotRecords * 2);
+    while (storage.spareShots.size() < SpareShotRecords) {
+        ShotState& record = storage.spareShots.emplace_back();
+        record.payload.resize(SpareShotPayload); // Zero-filled, so committed.
+        record.payload.clear();
+        record.spans.reserve(32);
+        record.generations.reserve(ShotDomainCount);
+    }
+}
 } // namespace
 
 void RollbackUnit_DropSnapshot(int32_t frame)
@@ -1711,13 +1782,21 @@ void RollbackUnit_SaveSnapshot(int32_t frame, std::shared_ptr<RollbackUnitSnapsh
     if constexpr (!ROLLBACK_UNIT_ENABLED) return;
     if (!g_rollbackUnitEnabled.load(std::memory_order_relaxed)) return;
     const unsigned slot = unsigned((frame % ROLLBACK_WINDOW + ROLLBACK_WINDOW) % ROLLBACK_WINDOW);
+    // Stages nest inside save_lifetime, which reports only its own remainder.
+    LagDiagnosticScope stage(LagMetric::SaveUnitMembers);
     UnitGuard unitGuard;
     ShotWorldGuard shotGuard;
     // Allocation/capacity is reused by the owning snapshot/history bank. A
     // frame jump must not overwrite a capture still indexed by another lease.
     if (!storage || std::any_of(std::begin(g_liveSnapshots), std::end(g_liveSnapshots),
         [&](auto* saved) { return saved == storage.get() && saved != g_liveSnapshots[slot]; }))
+    {
         storage = std::make_shared<RollbackUnitSnapshot>();
+        const bool commit = g_createdSnapshots++ < size_t(ROLLBACK_WINDOW) * 2;
+        PreSizeEffectStorage(*storage, commit);
+        if (commit) PreSizeShotStorage(*storage);
+        PrepareShotGenerationStorage();
+    }
     AcquireSRWLockExclusive(&g_lock);
     const auto* previous = g_liveSnapshots[slot];
     DropShotGenerations(previous, uint32_t(1) << slot);
@@ -1748,7 +1827,9 @@ void RollbackUnit_SaveSnapshot(int32_t frame, std::shared_ptr<RollbackUnitSnapsh
         identity.snapshots |= uint32_t(1) << slot;
         manifest.members.push_back(identity);
     }
+    stage.Finish(); // CaptureEffects times its own stages.
     CaptureEffects(manifest, unitGuard.manager);
+    stage.Next(LagMetric::SaveUnitShotLeases);
     CaptureAttackSpaces(manifest, uint32_t(1) << slot);
     // Index iteration tolerates adoption appending members. Copy the identity
     // before leasing; native DTI/deleting dispatch runs outside the recorder lock.
@@ -1773,10 +1854,23 @@ void RollbackUnit_SaveSnapshot(int32_t frame, std::shared_ptr<RollbackUnitSnapsh
         });
         if constexpr (SAVED_SHOT_RESTORE_ENABLED) CollectDrivenModels(manifest, owner, uint32_t(1) << slot, drivenModels);
     }
+    stage.Next(LagMetric::SaveUnitWorld);
     CaptureShotWorld(manifest, shotGuard.manager);
     const size_t shotCount = unitGuard.manager ? std::count_if(manifest.members.begin(), manifest.members.end(),
         [](const auto& saved) { return saved.kind == Kind::Shot; }) : 0;
-    manifest.shots.resize(shotCount);
+    // Park records beyond this frame's count and bring parked ones back:
+    // resize() would free and then regrow their buffers.
+    while (manifest.shots.size() > shotCount) {
+        manifest.spareShots.push_back(std::move(manifest.shots.back()));
+        manifest.shots.pop_back();
+    }
+    while (manifest.shots.size() < shotCount) {
+        if (manifest.spareShots.empty()) manifest.shots.emplace_back();
+        else {
+            manifest.shots.push_back(std::move(manifest.spareShots.back()));
+            manifest.spareShots.pop_back();
+        }
+    }
     manifest.models.resize(drivenModels.size()); // Keeps each kept element's storage.
     ReleaseSRWLockExclusive(&g_lock);
     for (size_t i = 0; i < drivenModels.size(); ++i) CaptureDrivenModel(drivenModels[i], manifest.models[i]);
@@ -1793,6 +1887,13 @@ void RollbackUnit_SaveSnapshot(int32_t frame, std::shared_ptr<RollbackUnitSnapsh
         saved.payloadState = shotPayload;
         saved.spans.clear(); saved.payload.clear();
         saved.generations.clear();
+        stage.Next(LagMetric::SaveUnitShotCopy); // One sample per shot from here.
+        // A new record: one allocation for the body and its model buffers
+        // instead of regrowing through every append.
+        if (capturePayload && !saved.payload.capacity()) {
+            saved.payload.reserve(size_t(identity.extent) * 3 + 0x4000);
+            saved.spans.reserve(32);
+        }
         const bool body = capturePayload ? VisitShotMemory(identity,
             [](void* context, const char* name, const void* address, uint64_t ownerSlot,
                uint64_t vtable, const void* bytes, size_t size) {
@@ -1804,8 +1905,10 @@ void RollbackUnit_SaveSnapshot(int32_t frame, std::shared_ptr<RollbackUnitSnapsh
                 const auto* data = static_cast<const uint8_t*>(bytes);
                 saved.payload.insert(saved.payload.end(), data, data + size);
             }, &saved) : ShotBodyExtent(identity) != 0;
+        stage.Next(LagMetric::SaveUnitGenerations);
         if (body) CaptureShotGenerations(identity, uint32_t(1) << slot, saved, shotPayload);
     }
+    stage.Next(LagMetric::SaveUnitConstraints);
     if (capturePayload) CaptureShotConstraints(manifest);
     else {
         // Not captured, which is distinct from a captured empty graph. Stages
@@ -1814,6 +1917,7 @@ void RollbackUnit_SaveSnapshot(int32_t frame, std::shared_ptr<RollbackUnitSnapsh
         manifest.constraintsComplete = false;
         manifest.constraintWatermark = 0;
     }
+    stage.Finish();
     AcquireSRWLockExclusive(&g_lock);
     manifest.birthWatermark = g_nextId; // Include pre-existing owners adopted during capture.
     manifest.valid = true;
@@ -2010,7 +2114,7 @@ void RollbackUnit_RestoreEffects(int32_t frame)
                 saved.spanCount <= manifest.spanCount() - saved.spanBegin);
             for (size_t j = 0; j < saved.spanCount; ++j) {
                 const auto& span = manifest.spans[saved.spanBegin + j];
-                LIFE_REQUIRE(graph.spans[j].address == span.address && graph.spans[j].size == span.size &&
+                LIFE_REQUIRE(Body(graph).spans[j].address == span.address && Body(graph).spans[j].size == span.size &&
                     span.offset <= manifest.payloadBytes() && span.size <= manifest.payloadBytes() - span.offset);
             }
             if (current->graph < 0 && (Read<void*>(saved.object, 0x218) ||

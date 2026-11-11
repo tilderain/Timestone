@@ -13,6 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 MOCKS = r'''
 #include <atomic>
+#include <ctime>
 #include <cassert>
 #include <cstdint>
 #include <cstring>
@@ -24,6 +25,24 @@ MOCKS = r'''
 #include <csignal>
 #include <type_traits>
 #define __fastcall
+// Lag capture timers are inert here; only the stages rollback_unit.cpp names.
+enum class LagMetric {
+    SaveUnitMembers, SaveUnitLists, SaveUnitEffects, SaveUnitEffectCheck, SaveUnitEffectLeases,
+    SaveUnitShotLeases, SaveUnitWorld, SaveUnitShotCopy, SaveUnitGenerations, SaveUnitConstraints,
+};
+// Off unless the benchmark turns it on: then each stage's time accumulates here.
+inline bool g_stageTiming = false;
+inline double g_stageUs[10]{};
+struct LagDiagnosticScope {
+    int stage = -1; double start = 0;
+    static double Now() {
+        timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec * 1e6 + t.tv_nsec / 1e3;
+    }
+    explicit LagDiagnosticScope(LagMetric metric) { Next(metric); }
+    ~LagDiagnosticScope() { Finish(); }
+    void Next(LagMetric metric) { Finish(); if (g_stageTiming) { stage = int(metric); start = Now(); } }
+    void Finish() { if (stage >= 0) g_stageUs[stage] += Now() - start; stage = -1; }
+};
 using SRWLOCK = std::mutex;
 #define SRWLOCK_INIT {}
 thread_local bool locked = false;

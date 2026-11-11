@@ -62,6 +62,13 @@ void* head(unsigned team) { return shotHeads[team] + 8; }
 void* nodeOf(void* shot) { return static_cast<uint8_t*>(shot) + 0x1450; }
 uint8_t* makeShot(unsigned id, size_t size, uint32_t jointCount) {
     auto* shot = static_cast<uint8_t*>(std::calloc(1, size));
+    // The registry probes a fixed 32 slots; after several scenes an address
+    // can land in a full run. Take another address rather than time a miss.
+    for (int tries = 0; tries < 64; ++tries) {
+        Birth(shot, Kind::Shot);
+        if (Find(shot, false)) break;
+        shot = static_cast<uint8_t*>(std::calloc(1, size));
+    }
     Write(shot, 0, uintptr_t(0xCAFE)); Write(shot, 0x10, uint32_t(2)); Write(shot, 0x116C, UINT32_MAX);
     Write(shot, 0x1450, uintptr_t(0xBEEF)); Write(shot, 0x1468, static_cast<void*>(shot));
     Write(shot, 0x1F50, id); Write(shot, 0x1F58, 3.0f); Write(shot, 0x2078, 97.0f);
@@ -86,7 +93,11 @@ uint8_t* makeShot(unsigned id, size_t size, uint32_t jointCount) {
     static uintptr_t rootVt[] = {uintptr_t(+[](void* p, uint32_t) -> void* { return p; })};
     Write(root, 0, uintptr_t(rootVt)); Write(root, 0x20, uint32_t(2)); Write(root, 0x24, uint32_t(4)); Write(root, 0x30, (void*)array);
     Write(shot, 0x2058, (void*)root);
-    Birth(shot, Kind::Shot); auto* identity = Find(shot, false);
+    // The game's constructors have written this memory; calloc alone leaves the
+    // pages unmapped and the first save would be timed faulting them in.
+    for (size_t at = 0; at < size; at += 0x1000) { volatile uint8_t* touch = shot + at; *touch = *touch; }
+    for (size_t at = 0; at < 0x10 + jointCount * 0xC0; at += 0x1000) { volatile uint8_t* touch = joints + at; *touch = *touch; }
+    auto* identity = Find(shot, false);
     identity->extent = uint32_t(size); identity->dti = 0x1234; identity->shotLinked = true;
     identity->deleting = +[](void* p, uint32_t) -> void* { return p; };
     Write(manager, 0x38 + id * 4, id);
@@ -147,6 +158,9 @@ void tick() {
 double now() { return std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
 int g_mode = 0;
 [[gnu::noinline]] void SaveAll(int32_t frame) { RollbackUnit_DropSnapshot(frame); RollbackUnit_SaveSnapshot(frame); }
+// Its own symbol so a profiler can collect just this save:
+//   valgrind --tool=callgrind --toggle-collect='VolleyFirstSave*' ./bench.exe 0 1 30 4
+[[gnu::noinline]] void VolleyFirstSave(int32_t frame) { RollbackUnit_DropSnapshot(frame); RollbackUnit_SaveSnapshot(frame); }
 [[gnu::noinline]] void RestoreAll(int32_t target) {
     RollbackUnit_CheckSnapshot(target);
     RollbackUnit_RetireFutureShots(target); RollbackUnit_RestoreEffects(target); RollbackUnit_RestoreShots(target);
@@ -200,6 +214,46 @@ void run(const char* name, int effects, int shotCount) {
     }
     std::printf("%-8s effects=%3d shots=%2d payload=%7zu B  save=%7.2f us  flush=%5.2f us  restore=%7.2f us  resim_save=%7.2f us\n",
         name, effects, shotCount, bytes, save, flush, restore, resave);
+    {   // Volley: many shots and effects first appear on one frame. Their first
+        // saves pay the one-off setup (generations, buffers, the constraint
+        // sort) that the steady figures above never see. Worst single save.
+        const int newShots = 35, newEffects = 60;
+        std::vector<void*> fxLine, shotLine, foreignLine(foreign.begin(), foreign.end());
+        for (int i = 0; i < newEffects; ++i) fx.push_back(new Fx);
+        for (int i = 0; i < newShots; ++i) {
+            shots.push_back(makeShot(5 + shotCount + i, 0x2400, 24));
+            InitializeConstraint(std::calloc(1, 0x100)); // The constraint set changes with them.
+        }
+        for (auto* e : fx) { Write(e->owner, 0x30, uint64_t(0)); fxLine.push_back(e->owner); }
+        for (auto* sh : shots) { Write(sh, 0x30, uint64_t(0)); shotLine.push_back(sh); }
+        for (auto* f : foreign) Write(f, 0x30, uint64_t(0));
+        lineOf(FxCategory, fxLine); lineOf(ShotCategory, shotLine);
+        groupOf(1, fxLine); groupOf(2, shotLine); groupOf(3, foreignLine);
+        std::vector<void*> everything = fxLine; everything.insert(everything.end(), shotLine.begin(), shotLine.end());
+        everything.insert(everything.end(), foreignLine.begin(), foreignLine.end());
+        groupOf(4, everything);
+        void* previous = head(0);
+        for (auto* shot : shots) { Write(previous, 8, nodeOf(shot)); Write(nodeOf(shot), 0x10, previous); previous = nodeOf(shot); }
+        Write(previous, 8, head(0)); Write(head(0), 0x10, head(0));
+        double first = 0, worst = 0, later = 0, second = 0;
+        for (int i = 0; i < 32; ++i, ++frame) {
+            tick();
+            g_stageTiming = i == 0;
+            double t = now(); if (i == 0) VolleyFirstSave(frame); else SaveAll(frame); t = now() - t;
+            g_stageTiming = false;
+            RollbackUnit_Flush();
+            if (i == 0) first = t;
+            if (i < 16) worst = std::max(worst, t); else later = std::max(later, t);
+            if (i && i < 16) second = std::max(second, t);
+        }
+        static const char* names[] = {"members", "lists", "effects", "effect_check", "effect_leases",
+            "shot_leases", "world", "shot_copy", "generations", "constraints"};
+        std::printf("         first save by stage (us):");
+        for (int i = 0; i < 10; ++i) { std::printf(" %s=%.0f", names[i], g_stageUs[i]); g_stageUs[i] = 0; }
+        std::printf("\n");
+        std::printf("         volley +%d shots +%d effects: first save=%7.2f us  worst of the 15 after=%7.2f us  worst of next 16=%7.2f us\n",
+            newShots, newEffects, first, second, later);
+    }
     RollbackUnit_ClearSnapshots();
 }
 int main(int argc, char** argv) {

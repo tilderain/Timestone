@@ -17,6 +17,8 @@ enum class LagMetric : unsigned {
     ControllerStart, ControllerEnd, PacketDrain, PredictionWait, Checksum,
     MainHook, FrameTail, SaveLive, SaveResim, SaveRegions, SaveAllocate, SaveCopy,
     SaveClones, SaveParents, SaveRenderState, SaveLifetimeDrop, SaveLifetime, SaveEffects,
+    SaveUnitMembers, SaveUnitLists, SaveUnitEffects, SaveUnitEffectCheck, SaveUnitEffectLeases,
+    SaveUnitShotLeases, SaveUnitWorld, SaveUnitShotCopy, SaveUnitGenerations, SaveUnitConstraints,
     SnapDump, Restore, RestoreSetup, RestoreRegions, RestoreClones, RestoreFixups,
     RestoreWithdraw, RestoreLate, Correction, ResimFrame, ResimTick,
     RestoreEffects, RestoreShots, RestoreUnitRefs, RebuildSpawn, RebuildFinalize,

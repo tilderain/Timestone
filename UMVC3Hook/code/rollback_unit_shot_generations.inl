@@ -71,6 +71,41 @@ struct ShotDomains {
     ShotDomains() { current.fill(-1); }
 };
 std::vector<ShotGeneration> g_shotGenerations;
+// Image buffers not attached to a generation. A volley of new shots needs three
+// each; taking them from the allocator inside the save was most of its cost
+// (fresh pages), so they are recycled here and a first batch is made when the
+// session's first snapshot storage is created. Same thread as g_shotGenerations.
+std::vector<std::unique_ptr<uint8_t[]>> g_spareShotImages;
+constexpr size_t SpareShotImageBatch = 192, ShotGenerationReserve = 4096;
+void ReturnShotImage(ShotModelImage& image)
+{
+    if (image.bytes) g_spareShotImages.push_back(std::move(image.bytes));
+}
+void TakeShotImage(ShotModelImage& image)
+{
+    if (image.bytes) return;
+    if (g_spareShotImages.empty()) image.bytes = std::make_unique<uint8_t[]>(ShotModelImageSize);
+    else { image.bytes = std::move(g_spareShotImages.back()); g_spareShotImages.pop_back(); }
+}
+// Once per session, at a calm moment: memory the first volley would otherwise
+// have to fault in.
+void PrepareShotGenerationStorage()
+{
+    if (g_shotGenerations.capacity() < ShotGenerationReserve) g_shotGenerations.reserve(ShotGenerationReserve);
+    g_spareShotImages.reserve(SpareShotImageBatch * 2);
+    while (g_spareShotImages.size() < SpareShotImageBatch)
+        g_spareShotImages.push_back(std::make_unique<uint8_t[]>(ShotModelImageSize)); // Zeroed, so committed.
+}
+// No slot below this index is free. NewShotGeneration starts its search here:
+// a volley of new shots asks for 29 slots each, and searching from zero walked
+// every live generation for each one (1.5 ms for 35 shots in the benchmark).
+// A slot freed without FreeShotGeneration is only reused later, never misused.
+size_t g_shotGenerationSearch = 0;
+void FreeShotGeneration(ShotGeneration& generation)
+{
+    generation.id = 0;
+    g_shotGenerationSearch = std::min(g_shotGenerationSearch, size_t(&generation - g_shotGenerations.data()));
+}
 // Each owner's generations as {slot, generation id}, appended at creation, the
 // only place ownerId is set. An entry is live only while its slot still holds
 // that id. Ids are never reused, so collected or reused slots are skipped
@@ -195,9 +230,11 @@ template<class Visit> void VisitDomainFields(ShotDomain domain, Visit visit)
 int NewShotGeneration(const Identity& owner, ShotDomain domain)
 {
     const size_t keyframeBytes = domain == ShotDomain::Keys ? ShotKeyframeBytes(owner) : 0;
-    size_t index = 0;
+    // The vector can have been emptied under the hint (session reset).
+    size_t index = std::min(g_shotGenerationSearch, g_shotGenerations.size());
     while (index < g_shotGenerations.size() && g_shotGenerations[index].id) ++index;
     if (index == g_shotGenerations.size()) g_shotGenerations.emplace_back();
+    g_shotGenerationSearch = index + 1;
     auto& generation = g_shotGenerations[index];
     generation.id = ++g_nextShotGeneration;
     generation.ownerId = owner.id; generation.owner = owner.object;
@@ -205,10 +242,10 @@ int NewShotGeneration(const Identity& owner, ShotDomain domain)
     g_ownerGenerations[owner.id].push_back({index, generation.id});
     generation.domain = domain; generation.snapshots = 0; generation.attached = true;
     if (domain <= ShotDomain::Keys) {
-        if (!generation.image) generation.image.bytes = std::make_unique<uint8_t[]>(ShotModelImageSize);
+        TakeShotImage(generation.image);
         std::memcpy(generation.image, owner.object, ShotModelImageSize);
     } else {
-        generation.image.bytes.reset();
+        ReturnShotImage(generation.image);
         if (ShotResourceDomain(domain))
             generation.resource = Read<uintptr_t>(owner.object, ShotResourceField(domain));
     }
@@ -296,7 +333,7 @@ int EnsureShotGeneration(const Identity& owner, ShotDomain domain)
         LIFE_REQUIRE(!(old.attack && old.attack->root->object != root));
         if (!old.attack && root) {
             old.attached = false;
-            if (!old.snapshots) old.id = 0;
+            if (!old.snapshots) FreeShotGeneration(old);
             domains.current[size_t(domain)] = index = -1;
         }
     }
@@ -323,7 +360,7 @@ void RetireModelDomain(const Identity& owner, ShotDomain domain, bool force = fa
     }
     auto& generation = g_shotGenerations[current];
     current = -1;
-    if (!generation.snapshots && !force) { generation.id = 0; return; }
+    if (!generation.snapshots && !force) { FreeShotGeneration(generation); return; }
     VisitDomainFields(domain, [&](size_t field, size_t size) {
         const uint64_t expected = size == 4 ? Read<uint32_t>(generation.image, field) : Read<uint64_t>(generation.image, field);
         const uint64_t actual = size == 4 ? Read<uint32_t>(owner.object, field) : Read<uint64_t>(owner.object, field);
@@ -370,7 +407,7 @@ void TrackModelAcquisitions(void* owner)
             if (!changed) continue;
             LIFE_REQUIRE(empty); // Nonempty replacement must retire at its destructive entry.
             generation.attached = false;
-            if (!generation.snapshots) generation.id = 0;
+            if (!generation.snapshots) FreeShotGeneration(generation);
             index = -1;
         }
     }
@@ -454,7 +491,7 @@ struct GenerationResourceMove {
                         g_transferredShotResource = (void*)generation.resource;
                         armed = true;
                         g_armedResourceTransfers.fetch_add(1, std::memory_order_relaxed);
-                    } else generation.id = 0;
+                    } else FreeShotGeneration(generation);
                 }
             }
         }
@@ -705,7 +742,7 @@ void CollectShotGenerations()
         // Move ownership out before dropping the lock. Native disposal is
         // explicit; C++ metadata destruction never invokes game code.
         ShotGeneration generation = std::move(stored);
-        stored.id = 0;
+        FreeShotGeneration(stored);
         PruneOwnerGenerations(generation.ownerId);
         ReleaseSRWLockExclusive(&g_lock);
         const bool previous = g_collectingShotGeneration;
@@ -728,6 +765,7 @@ void CollectShotGenerations()
             ReleaseRetiredAttack(generation.attack);
         }
         g_collectingShotGeneration = previous;
+        ReturnShotImage(generation.image);
     }
 }
 
@@ -761,7 +799,7 @@ void ReleaseTerminalShotReferences(uint64_t owner)
             LIFE_VALUE(owner), LIFE_VALUE(generation.id), LIFE_VALUE(generation.domain),
             LIFE_VALUE(generation.resource), LIFE_VALUE(generation.attached), LIFE_VALUE(generation.snapshots));
         void* resource = (void*)generation.resource;
-        generation.id = 0;
+        FreeShotGeneration(generation);
         ReleaseSRWLockExclusive(&g_lock);
         const bool previous = g_collectingShotGeneration;
         g_collectingShotGeneration = true;
@@ -788,7 +826,7 @@ void ForgetCurrentShotGenerations(uint64_t owner, void* address)
             if (generation.snapshots) LIFE_FAIL("native shot teardown would forget a snapshot-leased generation",
                 LIFE_VALUE(owner), LIFE_VALUE(address), LIFE_VALUE(generation.id), LIFE_VALUE(generation.domain),
                 LIFE_VALUE(generation.snapshots), LIFE_VALUE(generation.attached));
-            generation.id = 0;
+            FreeShotGeneration(generation);
             cohorts.push_back(std::move(generation.attack));
         }
         domains = std::move(at->second);

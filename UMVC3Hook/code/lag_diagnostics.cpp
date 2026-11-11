@@ -106,6 +106,8 @@ constexpr const char* names[] = {
     "controller_start", "controller_end", "packet_drain", "prediction_wait", "checksum",
     "main_hook", "frame_tail", "save_live", "save_resim", "save_regions", "save_alloc", "save_copy",
     "save_clones", "save_parents", "save_render", "save_lifetime_drop", "save_lifetime", "save_effects",
+    "save_unit_members", "save_unit_lists", "save_unit_effects", "save_unit_effect_check", "save_unit_effect_leases",
+    "save_unit_shot_leases", "save_unit_world", "save_unit_shot_copy", "save_unit_generations", "save_unit_constraints",
     "snapdump", "restore", "restore_setup", "restore_regions", "restore_clones", "restore_fixups",
     "restore_withdraw", "restore_late", "correction", "resim_frame", "resim_tick",
     "restore_effects", "restore_shots", "restore_unit_refs", "rebuild_spawn", "rebuild_finalize",
