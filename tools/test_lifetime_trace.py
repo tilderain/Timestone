@@ -105,6 +105,9 @@ int ownedFrees = 0;
 void MockOwnedFree(void*, void* p) { assert(!locked); ++ownedFrees; std::free(p); }
 void* MockOwnedAllocate(void*, size_t size, uint32_t) { assert(!locked); return std::malloc(size); }
 void MockCollectModel(void*);
+// Native child retirement that finds the child already inactive: the slot stays.
+std::vector<void*> retiredChildren;
+void MockRetireChild(void* particle) { assert(!locked); retiredChildren.push_back(particle); }
 void* MockOwnedAllocator(void*) {
     static uintptr_t vt[13]{};
     static uintptr_t allocator[1]{};
@@ -189,6 +192,7 @@ void reset() {
     g_collectingShotGeneration = false; g_transferredShotResource = nullptr; ownedFrees = 0;
     collectModelGeneration = MockCollectModel;
     logicallyRetireJoints = MockJointDelete;
+    retireParticleChild = MockRetireChild; retiredChildren.clear();
     for (auto& graph : g_generations) graph = {};
     for (auto& reference : g_resourceReferences) reference = {};
     g_nextGeneration = 0;
@@ -1728,6 +1732,18 @@ int main(int argc, char** argv) {
     assert(Read<void*>(line(), 0) == a.owner && Read<void*>(a.owner, 0x18) == b.owner);
     assert(Read<uint32_t>(a.pool(), 0x20) == 0 && a.jointExtra[0] == 0);
     a.tick(); assert(Read<uint32_t>(a.pool(), 0x20) == expected);
+
+    // A particle spawned a child after the graph was leased. The held graph is
+    // destroyed long after that child is freed, so its slot must not survive.
+    alignas(16) static uint8_t child[0x40]{};
+    Write(a.pool(), 0x60, (void*)child);
+    chain({b.owner}); Write(a.owner, 0x18, (void*)nullptr); Write(a.owner, 0x20, (void*)nullptr);
+    Write(a.owner, 0x10, uint32_t(0x3F8));
+    DeleteEffect(a.owner, 1);
+    assert(g_quarantined == 1 && retiredChildren == std::vector<void*>{a.pool()});
+    assert(!Read<void*>(a.pool(), 0x60));
+    LifetimeTrace_RestoreEffects(0);
+    assert(g_quarantined == 0 && Read<void*>(line(), 0) == a.owner && !Read<void*>(a.pool(), 0x60));
 
     // Arbitrary mutable state and restart do not invalidate owned allocations.
     Write(b.node, 0x78, uint32_t(0xDEADBEEF));
