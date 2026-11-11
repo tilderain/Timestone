@@ -3,8 +3,8 @@
 #include <cstdint>
 #include <atomic>
 
-// Development-only backend detours; keep disabled in release builds.
-inline constexpr bool LAG_BACKEND_TIMING_ENABLED = false;
+// Backend timing detours (input, render, network, Present). They only record during a lag capture.
+inline constexpr bool LAG_BACKEND_TIMING_ENABLED = true;
 // Automatic battle-start capture and exit; suppresses desync handling during the test.
 inline constexpr bool lagTest = false;
 // Experimental: force the native SLI setting on; false respects game configuration.

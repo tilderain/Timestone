@@ -1,14 +1,14 @@
 # Input and Render Backend Timing
 
-## Development Capture
+## Capture
 
-Set `LAG_BACKEND_TIMING_ENABLED` in `lag_diagnostics.h` to true and build with
-`make -j8`. Use the existing manual lag-capture button on the setup exhibiting
+`LAG_BACKEND_TIMING_ENABLED` in `lag_diagnostics.h` is on, including in release
+builds, so the backend detours below are always installed. They record only
+during a lag capture: use the manual lag-capture button on the setup exhibiting
 the issue. For unattended CPU tests, also enable `lagTest` in
 `lag_diagnostics.h`, then run `wine umvc3.exe -training-cpus`.
 
-Check the current header for development flag values. The backend Present
-detour is installed only in the backend-timing build. Timing instrumentation
+The backend Present detour is installed with the others. Timing instrumentation
 itself does not change API results. Separate runtime policies include native
 SLI forcing and asynchronous XInput discovery; see `xinput_discovery.md` for
 the latter's scope and limitations.
