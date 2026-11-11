@@ -31,8 +31,8 @@ Owners are character and weapon bodies; the "prefix" is the first 0x1450 bytes
 | Region | Treated as changed when |
 |---|---|
 | Motion blend buffer of slot *m* | that slot's record (`+0x560 + m*0x180`, 0x180 bytes) changed |
-| Joint states, joint indices, blended joints, motion channels | any byte of the owner's prefix changed |
-| Material job table (`+0x1408..+0x1438`) | a job is active now (bit 0 of `+0xB64`), was active at the previous save, or a job's control block (`+0xB40` to the end of the entry) changed |
+| Joint states, joint indices, blended joints, motion channels | any byte of the owner's prefix changed, or, for a weapon, of its character's prefix |
+| Material job table (`+0x1408..+0x1438`) | a job is active now (bit 0 of `+0xB64`), was active at the previous save, or a job's control block (`+0xB40` to the end of the entry) changed. This signal is incomplete, so a skip is always confirmed by comparing the bytes, in every mode |
 | Everything else (bodies, command lines, collision, camera, ...) | always |
 
 ## Evidence and limits
@@ -41,6 +41,14 @@ The signals are observed correlations, not proofs. Replaying the rules over 18
 host desync dumps (4,319 frames, 5.96 GB of region data) gave no case where a
 signal said "unchanged" and the bytes differed, and 52% of all snapshot bytes
 reused with the 16-slot ring.
+
+Found in play on 2026-11-10 (validate mode, about 100,000 saves per side), and
+the reason for the two qualifications in the table above:
+
+- A 13-joint weapon's joint states changed (joint 1, `+0x20`) with its own
+  prefix unchanged: the weapon follows the character's hand.
+- Material job tables changed at entry `+0x40` with no job active and the
+  control block unchanged. What writes it has not been identified.
 
 Known gaps:
 
