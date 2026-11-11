@@ -427,6 +427,25 @@ static void __fastcall hkParticleGeneratorFilterUpdate(uint64_t generator)
     g_originalParticleGeneratorFilterUpdate(generator);
 }
 
+// sEffect caches a filter unit per view (4 groups of 8 slots at +2C8, stride 48)
+// and never clears a slot when its filter dies; it only tests the unit state on
+// the next submission. If the freed block now holds another live unit, the game
+// writes filter fields into it and calls it as a filter. Replay skips
+// submissions but still frees filters and allocates effects, so clear the slot
+// at destruction.
+static void (__fastcall* g_originalFilterDestructor)(void*) = nullptr;
+static void __fastcall hkFilterDestructor(void* filter)
+{
+    if (uint8_t* effect = *(uint8_t**)_addr(0x140E17A38)) {
+        for (size_t group = 0x2C8; group <= 0x3A0; group += 0x48)
+            for (size_t slot = 0; slot < 8; ++slot) {
+                void** entry = (void**)(effect + group + slot * 8);
+                if (*entry == filter) *entry = nullptr;
+            }
+    }
+    g_originalFilterDestructor(filter);
+}
+
 static void* WriteDefaultJointPosition(void* output)
 {
     if (output)
@@ -783,6 +802,13 @@ void Rollback_InitNativeNullGuards()
     if (particleModelStatus == MH_OK &&
         GameplayHooks_QueueEnable((LPVOID)_addr(0x140898730)) == MH_OK) {
         HookLog("Rollback: installed headless particle-model update filter\n");
+    }
+
+    // uFilter's base destructor (0x1405F5780), reached by every filter class.
+    if (GameplayHooks_Create((LPVOID)_addr(0x1405F5780), (LPVOID)&hkFilterDestructor,
+                             (LPVOID*)&g_originalFilterDestructor) == MH_OK &&
+        GameplayHooks_QueueEnable((LPVOID)_addr(0x1405F5780)) == MH_OK) {
+        HookLog("Rollback: installed screen filter slot release\n");
     }
 
     MH_STATUS particleFilterStatus = GameplayHooks_Create(
