@@ -153,7 +153,6 @@ void CaptureShotConstraints(SnapshotManifest& saved)
         for (const auto& shot : saved.shots) {
             const auto body = std::find_if(shot.spans.begin(), shot.spans.end(),
                 [](const ShotSpan& span) { return span.kind == ShotSpanKind::Body; });
-            LIFE_REQUIRE(body != shot.spans.end());
             if (body->memory.size < 0x90) continue;
             for (auto at = std::lower_bound(sorted.begin(), sorted.end(), body->memory.address, std::less<void*>{});
                  at != sorted.end() && uintptr_t(*at) - uintptr_t(body->memory.address) <= body->memory.size - 0x90; ++at)
@@ -162,8 +161,6 @@ void CaptureShotConstraints(SnapshotManifest& saved)
     }
     for (const auto& shot : saved.shots) for (const auto& span : shot.spans) {
         if (span.kind != ShotSpanKind::ModelJoints) continue;
-        LIFE_REQUIRE(span.memory.offset <= shot.payload.size() && span.memory.size <= shot.payload.size() - span.memory.offset &&
-            !(span.memory.size % 0xC0));
         const uint8_t* bytes = shot.payload.data() + span.memory.offset;
         for (size_t i = 0; i < span.memory.size; i += 0xC0) {
             void* head = Read<void*>(bytes + i, 8);

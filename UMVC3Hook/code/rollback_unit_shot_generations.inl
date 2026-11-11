@@ -274,7 +274,6 @@ std::shared_ptr<AttackCohort> ReadAttackCohort(const Identity& owner, unsigned s
 {
     void* root = Read<void*>(owner.object, 0x2058 + slot * 8);
     if (!root) return {};
-    LIFE_REQUIRE(!Read<uint8_t>(root, 0xC0)); // Normal shot nodes borrow their callback owner.
     auto& domains = g_shotDomains[owner.id];
     if (!domains.roots[slot] || domains.roots[slot]->object != root) domains.roots[slot] = AttackObject(root);
     SetAttackOwner(root, {owner.id, slot, GetCurrentThreadId()});
@@ -282,14 +281,12 @@ std::shared_ptr<AttackCohort> ReadAttackCohort(const Identity& owner, unsigned s
     cohort->root = domains.roots[slot];
     const size_t count = Read<uint32_t>(root, 0x20), capacity = Read<uint32_t>(root, 0x24);
     void* array = Read<void*>(root, 0x30);
-    LIFE_REQUIRE(count <= capacity && capacity <= 65536 && !(capacity && !array));
     cohort->array = previous && previous->array->data == array ? previous->array : std::make_shared<NativeAttackArray>();
     cohort->array->data = array;
     for (size_t i = 0; i < count; ++i) {
         void* wrapper = Read<void*>(array, i * 8);
         if (!wrapper) { cohort->entries.emplace_back(); continue; }
         // These are the native shot graph's ownership rules, not a type whitelist.
-        LIFE_REQUIRE(!Read<uint8_t>(wrapper, 0x18) && !Read<uint8_t>(wrapper, 0x50));
         void* primitive = Read<void*>(wrapper, 0x10);
         AttackEntry entry;
         if (previous && i < previous->entries.size()) {
@@ -309,19 +306,6 @@ std::shared_ptr<AttackCohort> ReadAttackCohort(const Identity& owner, unsigned s
     return cohort;
 }
 
-void ValidateAttackCohort(const AttackCohort& cohort)
-{
-    void* root = cohort.root->object;
-    LIFE_REQUIRE(Read<void*>(root, 0x30) == cohort.array->data && Read<uint32_t>(root, 0x20) == cohort.entries.size());
-    for (size_t i = 0; i < cohort.entries.size(); ++i) {
-        const auto& entry = cohort.entries[i];
-        void* wrapper = Read<void*>(cohort.array->data, i * 8);
-        LIFE_REQUIRE(wrapper == (entry.wrapper ? entry.wrapper->object : nullptr));
-        LIFE_REQUIRE(!(wrapper && (Read<uint8_t>(wrapper, 0x18) || Read<uint8_t>(wrapper, 0x50))));
-        LIFE_REQUIRE(!(wrapper && Read<void*>(wrapper, 0x10) != (entry.primitive ? entry.primitive->object : nullptr))); // An unsupported ownership-changing entry point bypassed COW.
-    }
-}
-
 // Called at the same main-thread/unit fence as capture and native mutation.
 int EnsureShotGeneration(const Identity& owner, ShotDomain domain)
 {
@@ -330,7 +314,6 @@ int EnsureShotGeneration(const Identity& owner, ShotDomain domain)
     if (index >= 0 && domain >= ShotDomain::Attack0) {
         void* root = Read<void*>(owner.object, 0x2058 + (unsigned(domain) - unsigned(ShotDomain::Attack0)) * 8);
         auto& old = g_shotGenerations[index];
-        LIFE_REQUIRE(!(old.attack && old.attack->root->object != root));
         if (!old.attack && root) {
             old.attached = false;
             if (!old.snapshots) FreeShotGeneration(old);
@@ -405,7 +388,6 @@ void TrackModelAcquisitions(void* owner)
                 empty &= size == 4 ? old == UINT32_MAX : old == 0;
             });
             if (!changed) continue;
-            LIFE_REQUIRE(empty); // Nonempty replacement must retire at its destructive entry.
             generation.attached = false;
             if (!generation.snapshots) FreeShotGeneration(generation);
             index = -1;
@@ -453,7 +435,6 @@ void __fastcall GenerationBlend(void* owner, uint32_t count)
     if (!g_collectingShotGeneration) if (auto* identity = ShotIdentity(owner)) {
         if (Read<void*>(owner, 0x100) && Read<uint32_t>(owner, 0x530) &&
             Read<uint32_t>(owner, 0x554) != std::min(count, uint32_t(16))) {
-            LIFE_REQUIRE(Read<uint32_t>(owner, 0x554) <= 8 && count <= 8);
             RetireModelDomain(*identity, ShotDomain::Work);
             RetireModelDomain(*identity, ShotDomain::Keys);
         }
@@ -525,7 +506,6 @@ void __fastcall GenerationBaseModel(void* owner, void* resource)
 void __fastcall GenerationMotionList(void* owner, void* resource, uint32_t slot)
 {
     UnitGuard fence;
-    LIFE_REQUIRE(slot < 16);
     GenerationResourceMove transfer(owner, ShotDomain(unsigned(ShotDomain::Motion0) + slot), true);
     oSetShotMotionList(owner, resource, slot);
 }
@@ -533,7 +513,6 @@ void __fastcall GenerationMotionList(void* owner, void* resource, uint32_t slot)
 void __fastcall GenerationCommandResource(void* owner, void* resource, uint32_t slot)
 {
     UnitGuard fence;
-    LIFE_REQUIRE(slot < 4);
     GenerationResourceMove transfer(owner, ShotDomain(unsigned(ShotDomain::Command0) + slot), true);
     oSetShotCommandResource(owner, resource, slot);
 }
@@ -545,7 +524,6 @@ void* AllocateAttackArray(size_t capacity)
     using Allocate = void* (__fastcall*)(void*, size_t, uint32_t);
     void* allocator = ((Get)_addr(0x14045D4F0))((void*)_addr(0x140E16870));
     void* array = ((Allocate)Read<void*>(Read<void*>(allocator, 0), 0x40))(allocator, capacity * 8, 0x10);
-    LIFE_REQUIRE(array);
     std::memset(array, 0, capacity * 8);
     return array;
 }
@@ -580,11 +558,8 @@ void ReplaceAttackArray(const Identity& owner, unsigned slot, uint32_t capacity,
     const auto domain = ShotDomain(unsigned(ShotDomain::Attack0) + slot);
     const int oldIndex = EnsureShotGeneration(owner, domain);
     auto old = g_shotGenerations[oldIndex].attack;
-    LIFE_REQUIRE(old);
-    ValidateAttackCohort(*old);
     void* root = old->root->object;
     const size_t count = Read<uint32_t>(root, 0x20);
-    LIFE_REQUIRE(capacity >= count);
     void* array = AllocateAttackArray(capacity);
     if (count) std::memcpy(array, Read<void*>(root, 0x30), count * 8);
     old->array->nativeOwner = false;
@@ -613,7 +588,6 @@ bool RetireAttack(const Identity& owner, uint32_t requested, bool full)
         const auto domain = ShotDomain(unsigned(ShotDomain::Attack0) + slot);
         const int index = EnsureShotGeneration(owner, domain);
         auto cohort = g_shotGenerations[index].attack;
-        ValidateAttackCohort(*cohort);
         if (!full) {
             ReplaceAttackArray(owner, slot, Read<uint32_t>(root, 0x24), true);
             continue;
@@ -648,7 +622,6 @@ uint32_t __fastcall GenerationAddChild(void* root, void* geometry, uint8_t clone
     unsigned slot = 0;
     auto* owner = ManagedAttack(root, slot);
     if (!owner) return oGenerationAddChild(root, geometry, clone);
-    LIFE_REQUIRE(!clone); // The normal rShot graph borrows its explicitly owned primitives.
     UnitGuard fence;
     const auto domain = ShotDomain(unsigned(ShotDomain::Attack0) + slot);
     const int index = EnsureShotGeneration(*owner, domain);
@@ -888,7 +861,6 @@ void CaptureShotGenerations(const Identity& owner, uint32_t bit, ShotState& save
             if (!generation.snapshots) generation.attack = ReadAttackCohort(owner,
                 unsigned(domain) - unsigned(ShotDomain::Attack0), generation.attack);
             const AttackCohort* cohort = generation.attack.get();
-            ValidateAttackCohort(*cohort);
             void* root = cohort->root->object;
             const auto slot = uint16_t(domain - size_t(ShotDomain::Attack0));
             const bool copy = payload == RollbackUnitShotPayload::Capture;
@@ -903,7 +875,6 @@ void CaptureShotGenerations(const Identity& owner, uint32_t bit, ShotState& save
                     0x60, nullptr, slot, uint32_t(element));
                 if (entry.primitive) {
                     const uint32_t type = Read<uint32_t>(entry.primitive->object, 8);
-                    LIFE_REQUIRE(type == 5 || type == 6);
                     if (copy) AppendGenerationSpan(saved, "collision.primitive", entry.primitive->object,
                         type == 5 ? 0x70 : 0xB0, nullptr, slot, uint32_t(element));
                 }

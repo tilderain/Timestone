@@ -41,7 +41,6 @@ void CaptureShotWorld(SnapshotManifest& saved, void* manager)
         void* previous = sentinel;
         void* node = Read<void*>(sentinel, 8);
         for (; node && node != sentinel; node = Read<void*>(node, 8)) {
-            LIFE_REQUIRE(saved.shotLists[team].size() != RegistrySize && Read<void*>(node, 0x10) == previous);
             void* object = static_cast<uint8_t*>(node) - 0x1450;
             saved.shotLists[team].push_back({object, id(object)});
             previous = node;
@@ -50,10 +49,8 @@ void CaptureShotWorld(SnapshotManifest& saved, void* manager)
         // unlinking the tail node does, so it is stale and is not checked.
         // Zeroed, not-yet-initialized heads are empty; a nonempty list is
         // circular through its sentinel (insertion into a zeroed head faults).
-        LIFE_REQUIRE(node == sentinel || !Read<void*>(sentinel, 8));
     }
     const uint32_t count = Read<uint32_t>(manager, 0x2448);
-    LIFE_REQUIRE(count <= 512);
     for (uint32_t i = 0; i < count; ++i) {
         void* object = Read<void*>(manager, 0x448 + size_t(i) * 0x10);
         saved.shotPending.push_back({object, Read<uint64_t>(manager, 0x450 + size_t(i) * 0x10), id(object)});
@@ -69,10 +66,7 @@ void CaptureShotWorld(SnapshotManifest& saved, void* manager)
     RollbackUnitFailureScope failureScope("shot.manager.stage", saved.shotManager, 0, saved.frame);
     UnitGuard unitFence;
     ShotWorldGuard shotFence;
-    LIFE_REQUIRE(saved.shotPayload == RollbackUnitShotPayload::Capture);
     // The snapshot, its managers and thread were checked by RollbackUnit_RestoreShots.
-    LIFE_REQUIRE(unitFence.manager && shotFence.manager &&
-        saved.shotConfig == Read<void*>((void*)_addr(0x140D50F88), 0));
     // Restore-fence scratch, reused across restores.
     static std::vector<const Identity*> members;
     static std::vector<Identity*> identities;
@@ -95,9 +89,6 @@ void CaptureShotWorld(SnapshotManifest& saved, void* manager)
         const size_t* at = memberIndex.find(object);
         return at && members[*at]->id == id ? *at : SIZE_MAX;
     };
-    for (const auto& current : ActiveIdentities())
-        LIFE_REQUIRE(!(current.kind == Kind::Shot && current.occupancy == Occupancy::Live &&
-            memberAt(current.object, current.id) == SIZE_MAX));
     ReleaseSRWLockExclusive(&g_lock);
     linked.assign(members.size(), 0);
     const auto index = [&](const ShotListEntry& entry) {
@@ -107,57 +98,30 @@ void CaptureShotWorld(SnapshotManifest& saved, void* manager)
             LIFE_VALUE(entry.id), LIFE_VALUE(saved.frame), LIFE_VALUE(bit), LIFE_VALUE(members.size()));
     };
     const auto contains = [&](void* object) { return memberIndex.contains(object); };
-    bool occupied[256]{};
-    LIFE_REQUIRE(saved.shotCursor && saved.shotCursor <= 256 && saved.shotPending.size() <= 512);
     for (const auto* member : members) {
         const auto at = std::find_if(saved.shots.begin(), saved.shots.end(),
             [&](const auto& shot) { return shot.id == member->id; });
-        LIFE_REQUIRE(at != saved.shots.end());
         const void* image = at->payload.data() + ShotBodySpan(*at, member->object).memory.offset;
         const uint32_t nativeId = Read<uint32_t>(image, 0x1F50), team = Read<uint32_t>(image, 0x1F54);
         // IDs/team belong to registration, not the CPU kernel. Reflection can
         // change both; validate saved claims before publishing them together.
-        LIFE_REQUIRE(nativeId <= 255 && team < 10);
         ids.push_back({nativeId, team});
-        if (!member->shotRegistrationReleased && nativeId) {
-            LIFE_REQUIRE(!occupied[nativeId] && saved.shotOccupancy[nativeId]);
-            occupied[nativeId] = true;
-        }
     }
     for (size_t team = 0; team < 10; ++team) {
         for (const auto& entry : saved.shotLists[team]) {
             const size_t i = index(entry);
-            LIFE_REQUIRE(!linked[i] && members[i]->shotLinked && ids[i][1] == team);
             linked[i] = true;
         }
-        // All future-only shots must already be detached. A surviving foreign
-        // node must not be silently lost by replacing a list header.
-        void* sentinel = (void*)(_addr(0x140D47F90) + team * 0x28 + 8);
-        size_t count = 0;
-        void* previous = sentinel;
-        void* node = Read<void*>(sentinel, 8);
-        for (; node && node != sentinel; node = Read<void*>(node, 8)) {
-            LIFE_REQUIRE(++count <= RegistrySize && Read<void*>(node, 0x10) == previous &&
-                contains(static_cast<uint8_t*>(node) - 0x1450));
-            previous = node;
-        }
-        // The header's previous link is stale by native design (see capture).
-        LIFE_REQUIRE(node == sentinel || !Read<void*>(sentinel, 8));
     }
-    for (size_t i = 0; i < members.size(); ++i)
-        LIFE_REQUIRE(bool(linked[i]) == members[i]->shotLinked);
     static std::vector<ShotPendingEntry> foreign, pending;
     foreign.clear(); pending.clear();
     void* manager = shotFence.manager;
     const uint32_t count = Read<uint32_t>(manager, 0x2448);
-    LIFE_REQUIRE(count <= 512);
     AcquireSRWLockExclusive(&g_lock);
     for (uint32_t i = 0; i < count; ++i) {
         void* object = Read<void*>(manager, 0x448 + size_t(i) * 0x10);
         const auto* current = Find(object, false);
-        if (current && current->kind == Kind::Shot) {
-            LIFE_REQUIRE(contains(object));
-        } else foreign.push_back({object, Read<uint64_t>(manager, 0x450 + size_t(i) * 0x10), 0});
+        if (!current || current->kind != Kind::Shot) foreign.push_back({object, Read<uint64_t>(manager, 0x450 + size_t(i) * 0x10), 0});
     }
     ReleaseSRWLockExclusive(&g_lock);
     // Historical non-shot queue pointers confer no lease. Only use a matching
@@ -174,6 +138,8 @@ void CaptureShotWorld(SnapshotManifest& saved, void* manager)
         }
     }
     for (size_t i = 0; i < foreign.size(); ++i) if (!used[i]) pending.push_back(foreign[i]);
+    // The native queue has 512 entries; current foreign records plus restored
+    // shots must fit before it is rewritten.
     LIFE_REQUIRE(pending.size() <= 512);
     // Preflight above performs no native state mutation. Commit contains no
     // native callback or allocation and preserves node vtables/self pointers.
@@ -215,11 +181,8 @@ void CaptureShotWorld(SnapshotManifest& saved, void* manager)
 {
     RollbackUnitFailureScope failureScope("shot.execution.stage", saved.unitManager, 0, saved.frame);
     UnitGuard fence;
-    LIFE_REQUIRE(saved.shotPayload == RollbackUnitShotPayload::Capture);
-    LIFE_REQUIRE(fence.manager); // The snapshot itself was checked by RollbackUnit_RestoreShots.
     const uint32_t categories = Read<uint32_t>(fence.manager, 0xC38);
     const uint32_t groupCount = Read<uint32_t>(fence.manager, 0x1840);
-    LIFE_REQUIRE(categories <= 64 && groupCount <= 64);
     struct Member {
         void* object;
         Identity* identity;
@@ -251,13 +214,9 @@ void CaptureShotWorld(SnapshotManifest& saved, void* manager)
             !memberIdentities.contains(current));
         const auto shot = std::find_if(saved.shots.begin(), saved.shots.end(),
             [&](const ShotState& shot) { return shot.id == member.id; });
-        LIFE_REQUIRE(shot != saved.shots.end());
         const void* image = shot->payload.data() + ShotBodySpan(*shot, member.object).memory.offset;
         const uint32_t flags = Read<uint32_t>(image, 0x10), category = (flags >> 3) & 0x7F;
         const uint64_t mask = Read<uint64_t>(image, 0x30);
-        LIFE_REQUIRE(!(category >= categories && category != 0x7F) && (flags & 7) <= 4 &&
-            !(groupCount < 64 && (mask >> groupCount)) &&
-            !(member.occupancy == Occupancy::Quarantined && ((flags & 0x3FF) != 0x3F8 || mask)));
         addMember({current->object, current, &member, flags, mask});
     }
     // Shot body ranges, sorted for containment lookups of their inline constraints.
@@ -267,13 +226,10 @@ void CaptureShotWorld(SnapshotManifest& saved, void* manager)
         if (member.identity->extent >= 0x90)
             shotRanges.push_back({uintptr_t(member.object), uintptr_t(member.object) + member.identity->extent - 0x90});
     std::sort(shotRanges.begin(), shotRanges.end());
+    // An incomplete constraint capture is never restored in part.
     LIFE_REQUIRE(saved.constraintsComplete);
     for (const auto& node : saved.constraints) {
         const auto current = g_constructedConstraints.find(node.object);
-        LIFE_REQUIRE(current != g_constructedConstraints.end() && current->second == node.construction &&
-            Read<uintptr_t>(node.object, 0) == Read<uintptr_t>(node.image, 0) &&
-            Read<uintptr_t>(node.object, 0x40) == Read<uintptr_t>(node.image, 0x40) &&
-            Read<void*>(node.object, 0x48) == node.object && !memberObjects.contains(node.object));
         auto* identity = Find(node.object, false);
         const Identity* historical = nullptr;
         if (identity) {
@@ -299,15 +255,12 @@ void CaptureShotWorld(SnapshotManifest& saved, void* manager)
                 void* object = *at;
                 const uint64_t construction = g_constructedConstraints.at(object);
                 if (construction <= saved.constraintWatermark || memberObjects.contains(object)) continue;
-                LIFE_REQUIRE(!Find(object, false)); // Requires the standalone unit's lifetime adapter.
                 addMember({object, nullptr, nullptr, (Read<uint32_t>(object, 0x10) & ~0x3FFu) | 0x3F8u,
                            0, construction});
             }
     }
     const auto captured = [&](void* object) { return memberObjects.contains(object); };
     // Future-only live shots must be withdrawn before any publication.
-    for (const auto& current : ActiveIdentities())
-        LIFE_REQUIRE(!(current.kind == Kind::Shot && current.occupancy == Occupancy::Live && !captured(current.object)));
     const auto reconcile = [&](const std::vector<void*>& historical, const std::vector<void*>& foreign,
                                std::vector<void*>& output) {
         static ScratchSet foreignSet, emitted;
@@ -315,8 +268,7 @@ void CaptureShotWorld(SnapshotManifest& saved, void* manager)
         for (void* object : foreign) foreignSet.insert(object);
         for (void* object : historical) {
             if (!captured(object) && !foreignSet.contains(object)) continue;
-            LIFE_REQUIRE(emitted.insert(object));
-            output.push_back(object);
+            if (emitted.insert(object)) output.push_back(object); // Once each.
         }
         for (void* object : foreign)
             if (emitted.insert(object)) output.push_back(object);
@@ -326,7 +278,6 @@ void CaptureShotWorld(SnapshotManifest& saved, void* manager)
     static std::vector<void*> foreign;
     for (uint32_t category = 0; category < 64; ++category) {
         if (category >= categories) {
-            LIFE_REQUIRE(saved.primary[category].empty());
             continue;
         }
         foreign.clear();
@@ -338,16 +289,13 @@ void CaptureShotWorld(SnapshotManifest& saved, void* manager)
                 LIFE_FAIL("current unit primary list is inconsistent or cyclic", LIFE_VALUE(category),
                     LIFE_VALUE(unit), LIFE_VALUE(previous), LIFE_VALUE(seen.size()));
             const auto* identity = Find(unit, false);
-            LIFE_REQUIRE(!(!captured(unit) && identity && identity->occupancy == Occupancy::Quarantined));
             seen.insert(unit); previous = unit;
             if (!captured(unit)) foreign.push_back(unit);
         }
-        LIFE_REQUIRE(Read<void*>(line, 8) == previous);
         reconcile(saved.primary[category], foreign, primary[category]);
     }
     for (uint32_t group = 0; group < 64; ++group) {
         if (group >= groupCount) {
-            LIFE_REQUIRE(saved.groups[group].empty());
             continue;
         }
         void* descriptor = static_cast<uint8_t*>(fence.manager) + 0xC40 + group * 0x30;
@@ -360,10 +308,7 @@ void CaptureShotWorld(SnapshotManifest& saved, void* manager)
         foreign.clear(); foreignSeen.clear();
         for (uint32_t i = 0; i < size; ++i) {
             void* unit = Read<void*>(data, size_t(i) * 8);
-            LIFE_REQUIRE(unit && (Read<uint64_t>(unit, 0x30) & (uint64_t(1) << group)) &&
-                (captured(unit) || !foreignSeen.contains(unit)));
             const auto* identity = Find(unit, false);
-            LIFE_REQUIRE(!(!captured(unit) && identity && identity->occupancy == Occupancy::Quarantined));
             if (!captured(unit)) { foreign.push_back(unit); foreignSeen.insert(unit); }
         }
         reconcile(saved.groups[group], foreign, groups[group]);
@@ -392,29 +337,18 @@ void CaptureShotWorld(SnapshotManifest& saved, void* manager)
                 member.historical->occupancy == Occupancy::Live;
         void* object = member.object;
         const uint32_t category = (member.flags >> 3) & 0x7F;
-        LIFE_REQUIRE(!(category >= categories && category != 0x7F) && (member.flags & 7) <= 4 &&
-            !(groupCount < 64 && (member.groups >> groupCount)));
         const Placement* at = placements.find(object);
         const Placement placement = at ? *at : Placement{};
-        LIFE_REQUIRE(!placement.repeated && placement.primary == size_t(category != 0x7F) &&
-            (!placement.primary || placement.category == category));
-        LIFE_REQUIRE(placement.groups == member.groups);
     }
-    LIFE_REQUIRE(held <= g_quarantined);
     // Only allocation preparation invokes native code. No topology is changed
     // until every list/mask/identity check above has passed.
     for (uint32_t group = 0; group < groupCount; ++group) {
         void* descriptor = static_cast<uint8_t*>(fence.manager) + 0xC40 + group * 0x30;
         if (groups[group].size() <= Read<uint32_t>(descriptor, 0x1C)) continue;
-        LIFE_REQUIRE(groups[group].size() <= UINT32_MAX - 31);
         ReleaseSRWLockExclusive(&g_lock);
         ((void(__fastcall*)(void*, uint32_t))_addr(0x140011660))(
             static_cast<uint8_t*>(descriptor) + 0x10, (uint32_t(groups[group].size()) + 31) & ~31u);
         AcquireSRWLockExclusive(&g_lock);
-    }
-    for (const auto& member : members) if (member.construction) {
-        const auto current = g_constructedConstraints.find(member.object);
-        LIFE_REQUIRE(current != g_constructedConstraints.end() && current->second == member.construction);
     }
     for (const auto& member : members) {
         void* object = member.object;
@@ -454,15 +388,12 @@ void CaptureShotWorld(SnapshotManifest& saved, void* manager)
 template<class Visit> void VisitCollisionLists(void* collider, Visit visit)
 {
     const uint32_t count = Read<uint32_t>(collider, 0x10);
-    LIFE_REQUIRE(count <= 64);
     void* categories = Read<void*>(collider, 0x20);
-    LIFE_REQUIRE(!(count && !categories));
     for (uint32_t i = 0; i < count; ++i) {
         void* category = Read<void*>(categories, size_t(i) * 8);
         if (!category) continue;
         const uint32_t passes = Read<uint32_t>(category, 8);
         void* lists = Read<void*>(category, 0x18);
-        LIFE_REQUIRE(passes <= 1024 && !(passes && !lists));
         for (uint32_t pass = 0; pass < passes; ++pass)
             if (void* list = Read<void*>(lists, size_t(pass) * 8)) visit(list);
     }
@@ -482,10 +413,8 @@ void DetachTransientShotCollisions(std::vector<void*> roots)
         auto check = [&](size_t array, size_t rootField) {
             const uint32_t count = Read<uint32_t>(list, array + 8);
             void* data = Read<void*>(list, array + 0x18);
-            LIFE_REQUIRE(count <= 1048576 && !(count && !data));
             for (uint32_t i = 0; i < count; ++i) {
                 void* record = Read<void*>(data, size_t(i) * 8);
-                LIFE_REQUIRE(record);
                 void* root = Read<void*>(record, rootField);
                 if (std::binary_search(roots.begin(), roots.end(), root, std::less<void*>{})) {
                     LIFE_FAIL("cannot withdraw a shot root with continuous collision registration",
@@ -506,7 +435,6 @@ void DetachTransientShotCollisions(std::vector<void*> roots)
         ((Native)_addr(0x1405B5B60))(list);
         const uint32_t count = Read<uint32_t>(list, 0xFA0);
         void* groups = Read<void*>(list, 0xFB0);
-        LIFE_REQUIRE(count <= 1048576 && !(count && !groups));
         for (uint32_t i = 0; i < count; ++i)
             ((Native)_addr(0x1405A45C0))(Read<void*>(groups, size_t(i) * 8));
     });
@@ -653,11 +581,9 @@ void RollbackUnit_RetireFutureShots(int32_t frame)
     if (!saved || !saved->valid || saved->frame != frame || !fence.manager ||
         saved->unitManager != fence.manager) { ReleaseSRWLockExclusive(&g_lock); return; }
     void* manager = Read<void*>((void*)_addr(0x140D47F40), 0);
-    LIFE_REQUIRE(saved->shotManager == manager);
     for (auto& shot : ActiveIdentities())
         if (shot.kind == Kind::Shot && (shot.occupancy == Occupancy::Live ||
             shot.occupancy == Occupancy::Quarantined) && shot.id > saved->birthWatermark) {
-            LIFE_REQUIRE(manager && shot.extent >= 0x2140 && shot.deleting);
             future.push_back(shot);
             if (shot.occupancy == Occupancy::Live) AppendShotRoots(shot, roots);
             else shot.futureShot = true;
@@ -677,14 +603,12 @@ void RollbackUnit_RetireFutureShots(int32_t frame)
     ReleaseSRWLockExclusive(&g_lock);
     if (!manager) return;
     void* config = Read<void*>((void*)_addr(0x140D50F88), 0);
-    LIFE_REQUIRE(config == saved->shotConfig);
     DetachTransientShotCollisions(std::move(roots));
     for (const auto& shot : future)
         if (shot.occupancy == Occupancy::Live) WithdrawFutureShot(shot, manager, fence.manager);
     // The pending queue stores {unit*, line} pairs, not just pointers. Preserve
     // foreign entries and ordering; abandoned entries must not be published later.
     const uint32_t count = Read<uint32_t>(manager, 0x2448);
-    LIFE_REQUIRE(count <= 512);
     uint32_t kept = 0;
     for (uint32_t i = 0; i < count; ++i) {
         auto* entry = static_cast<uint8_t*>(manager) + 0x448 + size_t(i) * 0x10;

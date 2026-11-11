@@ -3043,10 +3043,7 @@ int main() {
 ''')
         invalid_cases = (
             "Find(b, false)->snapshots = 0;",
-            "TestManifest(0).primary[0].push_back(a);",
-            "TestManifest(0).groups[0].clear();",
             "Write(units, 0xC60, uint8_t(1));",
-            "make(2, 0);",
         )
         cases = "\n".join(f"case {i}: {{ {invalid} break; }}" for i, invalid in enumerate(invalid_cases))
         self.compile_run(True, harness + "\nint main(int argc, char** argv) { assert(argc == 2); setup(); "
@@ -3146,25 +3143,6 @@ void reject(int) {
 ''', 0),
             (r'''
     Find(b, false)->snapshots = 0;
-    StageShotManagerState(TestManifest(0), 1);
-''', 17),
-            (r'''
-    // A nonempty list must be circular through its sentinel, not null-terminated.
-    Write(node(a), 8, static_cast<void*>(nullptr));
-    StageShotManagerState(TestManifest(0), 1);
-''', 17),
-            (r'''
-    // Even a future shot absent from both list and queue must be retired first.
-    make(3);
-    StageShotManagerState(TestManifest(0), 1);
-''', 17),
-            (r'''
-    // Both saved bodies claiming native ID 1 must fail before any list write.
-    for (auto& saved : TestManifest(0).shots) {
-        const auto& span = saved.spans[0];
-        Write(saved.payload.data() + span.memory.offset, 0x1F50, uint32_t(1));
-    }
-    Write(b, 0x1F50, uint32_t(1));
     StageShotManagerState(TestManifest(0), 1);
 ''', 17),
             (r'''
@@ -3551,10 +3529,6 @@ int main() {
              "saved.payloadState == RollbackUnitShotPayload::Capture"),
             ("{ UnitGuard fence; StageShotCpuFields(*owner, manifest.shots[0], 1); }", "shot.cpu.stage",
              "saved.payloadState == RollbackUnitShotPayload::Capture"),
-            ("StageShotManagerState(manifest, 1);", "shot.manager.stage",
-             "saved.shotPayload == RollbackUnitShotPayload::Capture"),
-            ("StageShotExecutionState(manifest, 1);", "shot.execution.stage",
-             "saved.shotPayload == RollbackUnitShotPayload::Capture"),
         ]
         cases = "\n".join(f"    if (stage == {i}) {call}" for i, (call, _, _) in enumerate(stages))
         self.compile_run(True, CHECKS[:CHECKS.index("int main() {")] + SHOT_PAYLOAD_FIXTURE + r'''

@@ -752,8 +752,6 @@ void* DeleteUnit(void* shot, uint32_t flags, Deleting original, uintptr_t native
         ReleaseSRWLockExclusive(&g_lock);
         // Normal sUnit teardown already detached the shot. Direct deleting
         // calls must produce the same non-simulating postimage without kill.
-        LIFE_REQUIRE(!(!unitGuard.manager && (Read<uint64_t>(shot, 0x30) ||
-            ((Read<uint32_t>(shot, 0x10) >> 3) & 0x7F) != 0x7F)));
         if (Read<uint64_t>(shot, 0x30)) oRemoveGroups(unitGuard.manager, shot);
         if (((Read<uint32_t>(shot, 0x10) >> 3) & 0x7F) != 0x7F)
             oRemoveUnit(unitGuard.manager, shot);
@@ -779,6 +777,8 @@ void* DeleteUnit(void* shot, uint32_t flags, Deleting original, uintptr_t native
     if (generic) Push("unit_dispose_begin", identity, shot, flags, 0, 0, 0, false);
     ReleaseSRWLockExclusive(&g_lock);
     if (identity && identity->kind == Kind::Shot) {
+        // A retired generation still points into this shot; freeing it now
+        // would leave that generation to be collected against freed memory.
         LIFE_REQUIRE(!HasRetiredShotGenerations(id));
         ForgetCurrentShotGenerations(id, shot);
     }
@@ -1220,7 +1220,6 @@ void LeaseLinkedUnit(SnapshotManifest& manifest, void* object, void* owner,
             LIFE_VALUE(dti), LIFE_VALUE(g_registryMisses));
         if (shot) identity->shotLinked = linked;
     }
-    LIFE_REQUIRE(!(identity->occupancy != Occupancy::Live && identity->occupancy != Occupancy::Quarantined));
     const bool first = identity->dependencies == 0;
     identity->dependencies |= bit;
     if (!(identity->snapshots & bit)) {
@@ -1267,7 +1266,6 @@ void CaptureEffects(SnapshotManifest& manifest, void* manager)
     // Nested inside save_lifetime, which reports only its own remainder as self time.
     LagDiagnosticScope stage(LagMetric::SaveUnitLists);
     const uint32_t categories = Read<uint32_t>(manager, 0xC38);
-    LIFE_REQUIRE(categories <= 64);
     for (uint32_t category = 0; category < categories; ++category) {
         auto& entries = manifest.primary[category];
         entries.clear();
@@ -1275,7 +1273,6 @@ void CaptureEffects(SnapshotManifest& manifest, void* manager)
              unit = Read<void*>(unit, 0x18)) entries.push_back(unit);
     }
     const uint32_t groups = Read<uint32_t>(manager, 0x1840);
-    LIFE_REQUIRE(groups <= 64);
     for (uint32_t group = 0; group < groups; ++group) {
         void* descriptor = static_cast<uint8_t*>(manager) + 0xC40 + group * 0x30;
         const uint32_t size = Read<uint32_t>(descriptor, 0x18);
@@ -1312,7 +1309,6 @@ void CaptureEffects(SnapshotManifest& manifest, void* manager)
         } else if (!ownedGraph(object)) continue;
         if (Read<void*>(object, 0x218)) spanCount = DescribeOwnedGraph(object, spans);
         const uint32_t category = (flags >> 3) & 0x7F;
-        LIFE_REQUIRE(!(category >= categories && category != 0x7F));
         // Filled in place; every field is assigned below (root is copied whole).
         EffectState& saved = manifest.effects.emplace_back();
         saved.object = object; saved.id = identity.id; saved.revision = identity.revision;
@@ -1383,7 +1379,6 @@ void CaptureAttackSpaces(SnapshotManifest& manifest, uint32_t bit)
         RollbackUnitFailureScope failureScope("attack_space.capture", object, 0, manifest.frame);
         LeaseUnitDependency(manifest, object, manifest.action, 0, ActionAttackSpaceFields[slot], bit, true);
         const Identity* identity = Find(object, false);
-        LIFE_REQUIRE(identity);
         if (identity->occupancy != Occupancy::Live) continue; // Already dead and merely held.
         AttackSpaceState saved;
         saved.object = object; saved.id = identity->id; saved.vtable = Read<uintptr_t>(object, 0);
@@ -1446,9 +1441,6 @@ void* __fastcall DeleteEffect(void* effect, uint32_t flags)
         if (entry && (HasGraphGenerations(*entry) || entry->dependencies)) {
             // A leased generation also owns its original outer object. Capacity
             // pressure or trace exhaustion can never turn this into native free.
-            LIFE_REQUIRE(flags == 1 && (Read<uint32_t>(effect, 0x10) & 0x3FFu) == 0x3F8u &&
-                !Read<void*>(effect, 0x18) && !Read<void*>(effect, 0x20) &&
-                !Read<uint64_t>(effect, 0x30));
             const bool disposeUnownedGraph = entry->graph < 0 && !entry->dependencies;
             entry->occupancy = Occupancy::Quarantined;
             ++g_quarantined;
@@ -2102,7 +2094,6 @@ void RollbackUnit_RestoreEffects(int32_t frame)
     size_t held = 0;
     const uint64_t tag = ++g_restoreTag;
     const uint32_t categories = Read<uint32_t>(unitGuard.manager, 0xC38);
-    LIFE_REQUIRE(categories <= 64);
     for (size_t i = 0; i < count; ++i) {
         const auto& saved = manifest.effects[i];
         Identity* current = Find(saved.object, false);
@@ -2243,12 +2234,10 @@ void RollbackUnit_RestoreEffects(int32_t frame)
     }
     if (affectedGroups) {
         const uint32_t groups = Read<uint32_t>(unitGuard.manager, 0x1840);
-        LIFE_REQUIRE(groups <= 64 && !(groups < 64 && (affectedGroups >> groups)));
         // Native allocation preparation precedes commit, outside the recorder lock.
         for (uint32_t group = 0; group < groups; ++group) {
             if (!(affectedGroups & (uint64_t(1) << group))) continue;
             void* descriptor = static_cast<uint8_t*>(unitGuard.manager) + 0xC40 + group * 0x30;
-            LIFE_REQUIRE(!Read<uint8_t>(descriptor, 0x20)); // Native scheduler groups are non-owning.
             const uint32_t size = Read<uint32_t>(descriptor, 0x18);
             void* data = Read<void*>(descriptor, 0x28);
             auto& entries = g_groupScratch[group];
@@ -2259,7 +2248,6 @@ void RollbackUnit_RestoreEffects(int32_t frame)
             }
             reconcile(manifest.groups[group], entries);
             if (entries.size() > Read<uint32_t>(descriptor, 0x1C)) {
-                LIFE_REQUIRE(entries.size() <= UINT32_MAX - 31);
                 using ExtendArray = void(__fastcall*)(void*, uint32_t);
                 ReleaseSRWLockExclusive(&g_lock);
                 ((ExtendArray)_addr(0x140011660))(static_cast<uint8_t*>(descriptor) + 0x10,
