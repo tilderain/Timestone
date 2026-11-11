@@ -14,17 +14,20 @@ restored in place, which left four native calls between the two passes:
 | `uModel::setMaterialStencilRefByIndex` `0x140200DB0` | `nDraw::Material` stencil references only. |
 | `Rollback_ClearStaleMaterialPointers` (ours) | Entries of the model's external material list. |
 
-Only `copyFrom` can reach character bytes, through a collision node's children
-(whether those are a character's inline `cHitPrimCapsule` records was not
-established). `uModel::setMotionList` `0x140529730`, called inside the region
-pass, writes `mpMotionList[n]` and each matching layer's `mState`.
+`copyFrom` copies each child with `nCollision::cGeometry::copy` (`cGeometryExpansion::copy`,
+`cGeometryJoint::copyFrom`), and each of those hands the primitive to
+`cMtRef::assignWithFlag` `0x1405AD620`. A borrowed primitive (ownership flag
+clear, which is how a wrapper refers to a character's inline `cHitPrimCapsule`)
+is only re-pointed. An owned one is copied through the primitive's `+0x58` into
+the child's own heap allocation. Neither path writes the character body, so no
+native call between the old passes wrote character bytes. `uModel::setMotionList`
+`0x140529730`, called inside the region pass, writes `mpMotionList[n]` and each
+matching layer's `mState`.
 
-So `Rollback_RestoreSnapshot` now restores a character once:
-
-1. `setMotionList` when slot 2 changed, then every field
-   (`Rollback_RestoreCharacterFields` has no phase argument).
-2. After the collision clones: a roster character's capsule fields again, then
-   every collision parent reference.
+So `Rollback_RestoreSnapshot` now restores a character once: `setMotionList`
+when slot 2 changed, then every field (`Rollback_RestoreCharacterFields` has no
+phase argument). The collision parent references are written once, after the
+collision clones. The capsule fields are not repeated.
 
 A roster character's five target payloads (`+64A0..`) are restored whether or
 not their reference could be, which the late pass used to do. The old and new

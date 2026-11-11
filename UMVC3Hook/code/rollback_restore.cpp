@@ -754,10 +754,6 @@ void Rollback_RestoreSnapshot(int32_t frame)
                     std::memcpy(character + entry + field.offset, saved + entry + field.offset, field.size);
     };
 
-    // Roster characters restored below, by region index.
-    static bool rosterRestored[MAX_REGIONS];
-    std::fill_n(rosterRestored, slot.regionCount, false);
-
     size_t offset = 0;
     for (int i = 0; i < slot.regionCount; ++i) {
         if (offset >= slot.size) break;
@@ -1070,7 +1066,6 @@ void Rollback_RestoreSnapshot(int32_t frame)
             // Primitive payloads rewind independently of their bit patterns;
             // character/weapon parent identities are restored separately.
             restoreCapsules(character, savedCharacter, copySize);
-            rosterRestored[i] = roster;
 
             static constexpr uint32_t sphereBases[] = {0x4E20, 0x5530, 0x5C40};
             static constexpr uint32_t sphereStride = 0x70;
@@ -1138,18 +1133,11 @@ void Rollback_RestoreSnapshot(int32_t frame)
 
     diagnosticStage.Next(LagMetric::RestoreClones);
     Rollback_RestoreCollisionNodeClones(slot);
-    // nCollision::cCollisionNode::copyFrom (1405A4DA0) copies each child through
-    // the child's own virtual copy, which can write a character's inline
-    // capsules and their parent pointers. Put a roster character's capsule
-    // fields back, then every parent reference. This is the only native call in
-    // a restore that writes character bytes after the region pass.
-    offset = 0;
-    for (int i = 0; i < slot.regionCount && offset < slot.size; ++i) {
-        const size_t copySize = std::min(slot.regions[i].size, slot.size - offset);
-        if (rosterRestored[i])
-            restoreCapsules((uint8_t*)slot.regions[i].ptr, slot.data + offset, copySize);
-        offset += slot.regions[i].size;
-    }
+    // nCollision::cCollisionNode::copyFrom (1405A4DA0) copies each child with
+    // cGeometry::copy and its subclasses, which hand the primitive to
+    // cMtRef::assignWithFlag (1405AD620): a borrowed primitive is re-pointed and
+    // an owned one is copied into the child's own heap allocation. Neither
+    // writes a character's inline capsules, so nothing in the body is repeated.
     RestoreCharacterCollisionParentReferences(slot);
     const uint64_t collisionClonesEnd = Profile_Now();
     diagnosticStage.Next(LagMetric::RestoreFixups);
