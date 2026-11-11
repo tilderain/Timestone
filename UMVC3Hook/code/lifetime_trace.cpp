@@ -1331,6 +1331,40 @@ void CaptureAttackSpaces(SnapshotManifest& manifest, uint32_t bit)
 
 #include "lifetime_shot_models.inl"
 
+// Native ParticleRecord__requestChildRetirement: kills a particle's child unit
+// if it is still running and clears the slot; a child in any other state is
+// left in the slot.
+void (__fastcall* retireParticleChild)(void*) = nullptr;
+
+// Caller holds g_lock. Active particles of the effect's ordinary generators that
+// name a child unit.
+std::vector<void*> ParticlesWithChildren(void* effect)
+{
+    std::vector<void*> particles;
+    void* node = Read<void*>(effect, 0x218);
+    for (size_t nodes = 0; node && nodes < 32; ++nodes, node = Read<void*>(node, 0x18)) {
+        const auto* layout = GeneratorLayoutFor(node);
+        if (!layout || !layout->ordinary) continue;
+        void* particle = Read<void*>(node, 0xE0);
+        for (size_t guard = 0; particle && guard < 65536; ++guard, particle = Read<void*>(particle, 8))
+            if (Read<void*>(particle, 0x60)) particles.push_back(particle);
+    }
+    return particles;
+}
+
+// A graph held past native deletion keeps its particles' child pointers, but the
+// children are borrowed: each dies and is freed on its own schedule, and the
+// destructor that finally runs at collection would call through the stale slot
+// (closeParticleAll, 0x140827720). Native deletion retires the children at this
+// point, so do the same now and leave no child slot behind.
+void RetireHeldParticleChildren(const std::vector<void*>& particles)
+{
+    for (void* particle : particles) {
+        retireParticleChild(particle);
+        Write(particle, 0x60, (void*)nullptr);
+    }
+}
+
 void* __fastcall DeleteEffect(void* effect, uint32_t flags)
 {
     const CallerScope caller(LIFE_CALLER());
@@ -1353,10 +1387,17 @@ void* __fastcall DeleteEffect(void* effect, uint32_t flags)
             ++g_quarantined;
             Push("quarantine_hold", entry, effect, entry->snapshots, g_quarantined,
                  Read<uint16_t>(effect, 0x204), 0, true);
+            // The kept graph was leased when no particle had a child; one may have
+            // spawned since. (The other hold path below admits no children.)
+            std::vector<void*> children;
+            if (!disposeUnownedGraph) children = ParticlesWithChildren(effect);
+            if (!children.empty())
+                Push("quarantine_children", entry, effect, uint32_t(children.size()), 0, 0, 0, true);
             ReleaseSRWLockExclusive(&g_lock);
             // A newer, unreferenced graph still receives native logical cleanup
             // now. The old leased graphs and the outer object remain untouched.
             if (disposeUnownedGraph) oReleaseGraph(effect);
+            RetireHeldParticleChildren(children);
             return effect;
         }
         if (entry && entry->occupancy == Occupancy::Live && entry->snapshots &&
@@ -2425,6 +2466,7 @@ void LifetimeTrace_Install()
     releaseResourceRef = (void (__fastcall*)(void*))_addr(0x14050D5A0);
     collectModelGeneration = (void (__fastcall*)(void*))_addr(0x1401FF6B0);
     logicallyRetireJoints = (Deleting)_addr(0x140564900);
+    retireParticleChild = (void (__fastcall*)(void*))_addr(0x1409727E0);
     oRemoveGroups = (void (__fastcall*)(void*, void*))_addr(0x14051BAF0);
     g_lifetimeEnabled.store(complete, std::memory_order_relaxed);
     g_recording.store(complete, std::memory_order_relaxed);
