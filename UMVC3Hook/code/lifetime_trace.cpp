@@ -78,7 +78,7 @@ struct Identity {
     Deleting deleting = nullptr;
     bool shotLinked = false, shotRegistrationReleased = false;
     bool futureShot = false;
-    bool abandonedModel = false; // Driven model the restored frame does not contain.
+    bool abandonedModel = false; // Driven model, or effect of a withdrawn shot, the restored frame does not contain.
     uint64_t dti = 0;
     uint32_t extent = 0;
 };
@@ -2065,6 +2065,8 @@ void LifetimeTrace_RestoreEffects(int32_t frame)
         const Identity* identity = Find(object, false);
         return identity && identity->restoreTag == tag;
     };
+    static std::vector<void*> abandonedChildren;
+    abandonedChildren.clear();
     // Remove the abandoned branch without running kill callbacks against the
     // restored characters. Other snapshots may still own these exact objects.
     for (auto& identity : ActiveIdentities()) {
@@ -2073,10 +2075,18 @@ void LifetimeTrace_RestoreEffects(int32_t frame)
         // branch too; the replay creates its own. Its children are retired here.
         const bool futureSpace = identity.kind == Kind::Unit && (identity.abandonedModel ||
             (identity.id > manifest.birthWatermark && IsAttackSpace(identity.object)));
+        // An effect driven by a shot withdrawn in this restore, whatever its graph.
+        const bool shotEffect = identity.kind == Kind::Effect && identity.abandonedModel &&
+            identity.id > manifest.birthWatermark;
         identity.abandonedModel = false;
-        if (!futureSpace && (identity.kind != Kind::Effect ||
+        if (!futureSpace && !shotEffect && (identity.kind != Kind::Effect ||
             (!identity.restoreOwned &&
              (identity.id <= manifest.birthWatermark || !OwnedEffectGraph(identity.object))))) continue;
+        if (shotEffect) {
+            // It is destroyed at collection, after its particles' children are gone.
+            const auto children = ParticlesWithChildren(identity.object);
+            abandonedChildren.insert(abandonedChildren.end(), children.begin(), children.end());
+        }
         affectedGroups |= Read<uint64_t>(identity.object, 0x30);
         identity.occupancy = Occupancy::Quarantined;
         ++g_quarantined;
@@ -2246,6 +2256,7 @@ void LifetimeTrace_RestoreEffects(int32_t frame)
     ReleaseSRWLockExclusive(&g_lock);
     for (size_t i = 0; i < count; ++i)
         if (releasedResources[i]) releaseResourceRef(releasedResources[i]);
+    RetireHeldParticleChildren(abandonedChildren);
 }
 
 void* LifetimeTrace_ResolveUnitReference(int32_t frame, void* saved, void* live)

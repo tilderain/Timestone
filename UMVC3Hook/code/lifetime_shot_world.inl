@@ -667,6 +667,18 @@ void LifetimeTrace_RetireFutureShots(int32_t frame)
             if (shot.occupancy == Occupancy::Live) AppendShotRoots(shot, roots);
             else shot.futureShot = true;
         }
+    // A withdrawn shot never runs its kill, which is what ends the effects it
+    // drives. One the snapshot cannot rewind would be left running for good
+    // (rock debris of a mispredicted throw), so it leaves with its shot. The
+    // replay creates its own.
+    for (const auto& shot : future) {
+        if (shot.occupancy != Occupancy::Live) continue;
+        VisitShotUnitReferences(shot.object, [&](size_t, void* object) {
+            Identity* effect = object ? Find(object, false) : nullptr;
+            if (effect && effect->kind == Kind::Effect && effect->occupancy == Occupancy::Live &&
+                effect->id > saved->birthWatermark) effect->abandonedModel = true;
+        });
+    }
     ReleaseSRWLockExclusive(&g_lock);
     if (!manager) return;
     void* config = Read<void*>((void*)_addr(0x140D50F88), 0);

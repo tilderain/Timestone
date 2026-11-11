@@ -2328,6 +2328,16 @@ int main(int argc, char** argv) {
     Write(shots, 0x448, abandoned); Write(shots, 0x450, uint64_t(13));
     Write(shots, 0x458, static_cast<void*>(foreign)); Write(shots, 0x460, uint64_t(9));
     Write(shots, 0x2448, uint32_t(2));
+    // An effect the abandoned shot drives. Its graph is not one a snapshot can
+    // rewind, and only the shot's kill would ever end it.
+    alignas(16) static uint8_t debris[0x2C0]{};
+    Write(debris, 0, uintptr_t(_addr(0x140A8E180))); Write(debris, 0x10, uint32_t(2 | (0x7F << 3)));
+    Write(debris, 0x204, uint16_t(1));
+    Birth(debris, Kind::Effect); Write(abandoned, 0x1F78, static_cast<void*>(debris));
+    assert(!OwnedEffectGraph(debris));
+    static int effectDeletes = 0;
+    oEffectDtor = [](void*) { assert(!locked); };
+    oDeleteEffect = [](void* p, uint32_t) -> void* { assert(!locked); ++effectDeletes; EffectDtor(p); return p; };
     LifetimeTrace_SaveSnapshot(776); // A newer snapshot leases the abandoned allocation.
     Write(lists[0], 0x20, uint32_t(1)); Write(lists[0], 0x540, uint32_t(1));
     Write(lists[1], 0xF80, uint32_t(1));
@@ -2344,6 +2354,10 @@ int main(int argc, char** argv) {
     assert(!Read<uint32_t>(collision, 0x7368 + 0x28) && collisionRecycles == 1);
     assert(!Read<uint32_t>(lists[0], 0x540) && !Read<uint32_t>(lists[1], 0xF80));
     assert(collisionGroupClears == 2 && !Read<uint32_t>(group, 0x20));
+    assert(Find(debris, false)->occupancy == Occupancy::Live);
+    LifetimeTrace_RestoreEffects(775);
+    assert(Find(debris, false)->occupancy == Occupancy::Quarantined && !effectDeletes);
+    assert((Read<uint32_t>(debris, 0x10) & 0x3FF) == 0x3F8);
     LifetimeTrace_RetireFutureShots(775); // No duplicate logical retirement.
     assert(unlinks == 1 && releases == 1 && constraintUnlinks == 1);
     void* replayed = spawn();
@@ -2372,7 +2386,7 @@ int main(int argc, char** argv) {
     assert(unlinks == 1 && releases == 1 && Read<uint32_t>(shots, 0x38 + 11*4) == 11);
     LifetimeTrace_ClearSnapshots();
     { UnitGuard fence; nativeDelete(replayed, 1); }
-    assert(deletes == 2 && releases == 2 && !g_quarantined && !kills);
+    assert(deletes == 2 && releases == 2 && !g_quarantined && !kills && effectDeletes == 1);
 }
 ''', arguments=[(), ("omit",)])
 
