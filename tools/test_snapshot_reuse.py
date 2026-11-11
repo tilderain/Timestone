@@ -70,7 +70,7 @@ void tick(Actor& a, unsigned what) {
 class SnapshotReuseTest(unittest.TestCase):
     def run_native(self, mode, main):
         header = (CODE / "snapshot_reuse.h").read_text().replace("#pragma once", "")
-        setting = "SNAPSHOT_REUSE_MODE = SnapshotReuseMode::Validate"
+        setting = "SNAPSHOT_REUSE_MODE = SnapshotReuseMode::Off"
         self.assertIn(setting, header)
         header = header.replace(setting, f"SNAPSHOT_REUSE_MODE = SnapshotReuseMode::{mode}")
         source = (CODE / "snapshot_reuse.cpp").read_text().replace('#include "snapshot_reuse.h"', "")
@@ -252,14 +252,28 @@ int main() {
 }
 ''')
 
+    def test_material_job_target_rebound_while_inactive_is_seen(self):
+        # uMaterialControl::mpTarget (+0x40) changes with the job inactive and its
+        # control block untouched: the signal itself must catch it, with no mismatch.
+        self.run_native("Validate", r'''
+int main() {
+    build();
+    std::vector<uint8_t> buffer(total);
+    SnapshotReuse_Save(buffer.data()); SnapshotReuse_Save(buffer.data());
+    ++actors[0].table[0xBB0 + 0x40];
+    SnapshotReuse_Save(buffer.data());
+    assert(matches(buffer.data()) && !SnapshotReuse_Stats().mismatches && !logs);
+}
+''')
+
     def test_material_table_skip_is_confirmed_in_every_mode(self):
         self.run_native("Trust", r'''
 int main() {
     build();
     std::vector<uint8_t> buffer(total);
     SnapshotReuse_Save(buffer.data()); SnapshotReuse_Save(buffer.data());
-    // Written with no job active and the control block untouched (seen in play at +0x40).
-    ++actors[0].table[0x40];
+    // Written with no job active, outside everything the signal watches.
+    ++actors[0].table[0x300];
     SnapshotReuse_Save(buffer.data());
     assert(matches(buffer.data()) && !SnapshotReuse_Stats().mismatches && !logs);
 }

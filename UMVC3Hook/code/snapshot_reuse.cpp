@@ -15,7 +15,13 @@ constexpr size_t MotionSlotEnd = MotionSlotBase + MotionSlotStride * MotionSlotC
 constexpr size_t MotionBlendPointer = 0x160;  // Within a motion slot record.
 constexpr size_t MaterialTableBase = 0x1408;  // Seven array pointers.
 constexpr uint32_t MaterialStrides[] = {0xBB0, 0xBB0, 0xB90, 0xB90, 0xBB0, 0xBB0, 0xB80};
-// Per-job control block: timers, targets and the active flag (bit 0 of +0xB64).
+// A job is a uMaterialControlEx unit followed by its own state. Watched per job:
+// the unit header up to the controller arrays at +0x50, which holds the unit
+// flags and uMaterialControl::mpTarget (+0x40; rebound or cleared by the base
+// move with the job inactive), and the block from +0xB40 with the owner, timers,
+// endpoints and the active flag (bit 0 of +0xB64). The controller arrays between
+// them are written by an active job's move and by controller setup.
+constexpr size_t MaterialHeaderSize = 0x50;
 constexpr size_t MaterialControlOffset = 0xB40, MaterialActiveOffset = 0xB64;
 
 struct Owner {
@@ -94,19 +100,23 @@ void UpdateOwners()
 }
 
 // A material job array changed if a job runs now, ran at the previous save, or
-// its control blocks differ from the previous save.
+// a job's header or control block differs from the previous save.
 bool MaterialTableChanged(Item& item)
 {
     bool active = false, control = false;
     const size_t controlSize = item.stride - MaterialControlOffset;
     uint8_t* shadow = g_controlShadow.data() + item.shadowOffset;
-    for (size_t entry = 0; entry + item.stride <= item.size; entry += item.stride, shadow += controlSize) {
-        const uint8_t* live = item.ptr + entry + MaterialControlOffset;
-        active |= (item.ptr[entry + MaterialActiveOffset] & 1) != 0;
-        if (g_allChanged || std::memcmp(shadow, live, controlSize)) {
-            std::memcpy(shadow, live, controlSize);
+    const auto watch = [&](const uint8_t* live, size_t size) {
+        if (g_allChanged || std::memcmp(shadow, live, size)) {
+            std::memcpy(shadow, live, size);
             control = true;
         }
+        shadow += size;
+    };
+    for (size_t entry = 0; entry + item.stride <= item.size; entry += item.stride) {
+        active |= (item.ptr[entry + MaterialActiveOffset] & 1) != 0;
+        watch(item.ptr + entry, MaterialHeaderSize);
+        watch(item.ptr + entry + MaterialControlOffset, controlSize);
     }
     const bool changed = active || item.wasActive || control;
     item.wasActive = active;
@@ -198,7 +208,7 @@ void SnapshotReuse_SetPlan(const SnapshotReuseRegion* regions, int count)
             if (region.size % item.stride) continue;
             item.shadowOffset = uint32_t(g_controlShadow.size());
             g_controlShadow.resize(g_controlShadow.size() +
-                region.size / item.stride * (item.stride - MaterialControlOffset));
+                region.size / item.stride * (MaterialHeaderSize + item.stride - MaterialControlOffset));
         }
         item.kind = region.kind; item.index = region.index; item.owner = owner;
     }
