@@ -441,6 +441,8 @@ void Rollback_RestoreSnapshot(int32_t frame)
         return;
     }
 
+    // Everything below rewrites live region memory behind the save's back.
+    SnapshotReuse_BeginRestore();
     LifetimeTrace_WaitForRenderWorker();
     LifetimeTrace_CheckSnapshot(frame);
     uint32_t savedGlobalRng[4] = {};
@@ -1126,6 +1128,7 @@ void Rollback_RestoreSnapshot(int32_t frame)
                     copySize, slot.regions[i].expectedVtable);
         } else if (copySize > 0) {
             std::memcpy(slot.regions[i].ptr, slot.data + offset, copySize);
+            if (copySize == slot.regions[i].size) SnapshotReuse_RegionRestored(i);
         }
         offset += slot.regions[i].size;
     }
@@ -1356,6 +1359,8 @@ void Rollback_RestoreSnapshot(int32_t frame)
         }
     }
 
+    // Regions put back byte for byte are again what this buffer holds.
+    SnapshotReuse_EndRestore(slot.data);
     traceRestoreState("after");
 
     /*std::memcpy(liveGlobalRng, (void*)_addr(0x140D765D8), sizeof(liveGlobalRng));

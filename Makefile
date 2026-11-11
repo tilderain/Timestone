@@ -98,6 +98,7 @@ CPP_SRC   := \
 	$(SRCDIR)/code/rollback_profile.cpp \
 	$(SRCDIR)/code/rollback_rng.cpp \
 	$(SRCDIR)/code/rollback_snapshot.cpp \
+	$(SRCDIR)/code/snapshot_reuse.cpp \
 	$(SRCDIR)/code/netplay.cpp \
 	$(SRCDIR)/code/savedata.cpp \
 	$(SRCDIR)/code/steam_lobby.cpp \
