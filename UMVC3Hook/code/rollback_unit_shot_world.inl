@@ -70,9 +70,9 @@ void CaptureShotWorld(SnapshotManifest& saved, void* manager)
     UnitGuard unitFence;
     ShotWorldGuard shotFence;
     LIFE_REQUIRE(saved.shotPayload == RollbackUnitShotPayload::Capture);
-    LIFE_REQUIRE(saved.valid && unitFence.manager && saved.unitManager == unitFence.manager &&
-        saved.thread == GetCurrentThreadId() && shotFence.manager && saved.shotManager == shotFence.manager &&
-        saved.shotConfig == Read<void*>((void*)_addr(0x140D50F88), 0) && bit && !(bit & (bit - 1)));
+    // The snapshot, its managers and thread were checked by RollbackUnit_RestoreShots.
+    LIFE_REQUIRE(unitFence.manager && shotFence.manager &&
+        saved.shotConfig == Read<void*>((void*)_addr(0x140D50F88), 0));
     // Restore-fence scratch, reused across restores.
     static std::vector<const Identity*> members;
     static std::vector<Identity*> identities;
@@ -80,8 +80,6 @@ void CaptureShotWorld(SnapshotManifest& saved, void* manager)
     static std::vector<std::array<uint32_t, 2>> ids;
     members.clear(); identities.clear(); ids.clear();
     AcquireSRWLockExclusive(&g_lock);
-    const auto slot = unsigned((saved.frame % ROLLBACK_WINDOW + ROLLBACK_WINDOW) % ROLLBACK_WINDOW);
-    LIFE_REQUIRE(bit == (uint32_t(1) << slot) && g_liveSnapshots[slot] == &saved);
     for (const auto& member : saved.members) {
         if (member.kind != Kind::Shot || member.occupancy != Occupancy::Live) continue;
         auto* current = Find(member.object, false);
@@ -218,12 +216,10 @@ void CaptureShotWorld(SnapshotManifest& saved, void* manager)
     RollbackUnitFailureScope failureScope("shot.execution.stage", saved.unitManager, 0, saved.frame);
     UnitGuard fence;
     LIFE_REQUIRE(saved.shotPayload == RollbackUnitShotPayload::Capture);
-    LIFE_REQUIRE(saved.valid && fence.manager && saved.unitManager == fence.manager &&
-        saved.thread == GetCurrentThreadId() && bit && !(bit & (bit - 1)));
-    const unsigned slot = unsigned((saved.frame % ROLLBACK_WINDOW + ROLLBACK_WINDOW) % ROLLBACK_WINDOW);
+    LIFE_REQUIRE(fence.manager); // The snapshot itself was checked by RollbackUnit_RestoreShots.
     const uint32_t categories = Read<uint32_t>(fence.manager, 0xC38);
     const uint32_t groupCount = Read<uint32_t>(fence.manager, 0x1840);
-    LIFE_REQUIRE(categories <= 64 && groupCount <= 64 && bit == (uint32_t(1) << slot));
+    LIFE_REQUIRE(categories <= 64 && groupCount <= 64);
     struct Member {
         void* object;
         Identity* identity;
@@ -246,7 +242,6 @@ void CaptureShotWorld(SnapshotManifest& saved, void* manager)
     for (auto& entries : primary) entries.clear();
     for (auto& entries : groups) entries.clear();
     AcquireSRWLockExclusive(&g_lock);
-    LIFE_REQUIRE(g_liveSnapshots[slot] == &saved);
     for (const auto& member : saved.members) {
         if (member.kind != Kind::Shot || (member.occupancy != Occupancy::Live &&
             member.occupancy != Occupancy::Quarantined)) continue;

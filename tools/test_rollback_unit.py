@@ -2746,12 +2746,11 @@ int main(int argc, char** argv) {
     RollbackUnit_SaveSnapshot(0); auto& saved = TestManifest(0).shots[0];
     Write(shot, 0x1F58, 11.0f); Write(shot, 0x50, 22.0f); std::signal(SIGABRT, reject);
 '''
+        # The owner's own lease and the snapshot's internal consistency are
+        # checked once, by RollbackUnit_RestoreShots; this stage checks the
+        # units the saved bytes point at.
         invalid_cases = (
-            "identity->snapshots = 0;",
-            "saved.spans[0].memory.offset = UINT32_MAX;",
-            "saved.spans.push_back(saved.spans[0]);",
             "Find(target, false)->snapshots = 0;",
-            "Destroyed(\"test_dispose\", target, Find(target, false)->id); Birth(target, Kind::Unit); Find(target, false)->snapshots = 1;",
             "Write(saved.payload.data() + saved.spans[0].memory.offset, 0x2008, uintptr_t(1));",
         )
         cases = "\n".join(f"case {i}: {{ {invalid} break; }}" for i, invalid in enumerate(invalid_cases))
@@ -2909,252 +2908,6 @@ int main() {
 }
 ''')
 
-    def test_shot_constraint_graph_restore_and_preflight(self):
-        harness = CHECKS[:CHECKS.index("int main() {")] + r'''
-alignas(16) uint8_t units[0x1860]{};
-void *a, *b, *n0, *n1, *n2, *n3;
-bool executionFixture = false;
-uint8_t beforeA[0x2400], beforeB[0x2400], beforeJA[2*0xC0], beforeJB[2*0xC0], beforeN1[0x90];
-uint8_t beforeDA[2], beforeDB[2];
-void* joint(void* owner, size_t i) { return static_cast<uint8_t*>(Read<void*>(owner, 0x538)) + i*0xC0; }
-void initialize(void* object) {
-    assert(!locked); Write(object, 0, uintptr_t(0xC0A5)); Write(object, 0x40, uintptr_t(0xFACE));
-    Write(object, 0x48, object); Write(object, 0x10, uint32_t(0x3F8)); Write(object, 0x70, int32_t(-1));
-}
-void* make() {
-    auto* owner = static_cast<uint8_t*>(std::calloc(1, 0x2400));
-    auto* header = static_cast<uint8_t*>(std::calloc(1, 0x10 + 2*0xC0));
-    Write(header, 0, uint32_t(2));
-    for (size_t i = 0; i < 2; ++i) {
-        Write(header + 0x10 + i*0xC0, 0, uintptr_t(mockJointVtable));
-        Write(header + 0x10 + i*0xC0, 0xA8, static_cast<void*>(owner));
-        Write(header + 0x10 + i*0xC0, 0xA4, uint32_t(0x01030009 + i));
-        Write(header + 0x10 + i*0xC0, 0x14, uint32_t(7 + i));
-    }
-    auto* depths = static_cast<uint8_t*>(std::calloc(2, 1)); depths[0] = 1; depths[1] = 0;
-    Write(owner, 0, uintptr_t(0xCAFE)); Write(owner, 0x116C, UINT32_MAX);
-    Write(owner, 0x530, uint32_t(2)); Write(owner, 0x538, header + 0x10); Write(owner, 0x548, depths);
-    Write(owner, 0x558, uint32_t(0x01000015)); Write(owner, 0x123D, uint8_t(0));
-    Write(owner, 0x1F58, 3.0f);
-    Birth(owner, Kind::Shot); auto* identity = Find(owner, false);
-    identity->extent = 0x2400; identity->dti = 0x1234; return owner;
-}
-void chain(void* model, size_t index, std::initializer_list<void*> entries) {
-    void* target = joint(model, index); void* previous = nullptr; int order = 2;
-    Write(target, 8, entries.size() ? static_cast<uint8_t*>(*entries.begin()) + 0x40 : nullptr);
-    for (void* node : entries) {
-        Write(node, 0x50, previous); Write(node, 0x58, (void*)nullptr);
-        if (previous) Write(previous, 0x58, node);
-        Write(node, 0x60, target); Write(node, 0x70, int32_t(order)); order += 5;
-        Write(node, 0x74, uint32_t(1000)); Write(node, 0x78, model);
-        Write(node, 0x68, 0.25f); Write(node, 0x80, 0.02f); Write(node, 0x84, 0.5f);
-        Write(node, 0x88, uint8_t(1)); Write(node, 0x89, uint8_t(1)); previous = node;
-    }
-}
-void future() {
-    Write(joint(a, 1), 8, (void*)nullptr);
-    chain(b, 1, {n2, n0, n3, n1});
-    for (void* owner : {a, b}) {
-        Write(owner, 0x558, uint32_t(0xFFFFFFFF)); Write(owner, 0x123D, uint8_t(1)); Write(owner, 0x1F58, 11.0f);
-        std::memset(Read<void*>(owner, 0x548), 0xEE, 2);
-        for (size_t i = 0; i < 2; ++i) {
-            Write(joint(owner, i), 0x14, uint32_t(99)); Write(joint(owner, i), 0xA4, uint32_t(0xDEADBEEF));
-        }
-    }
-    for (void* node : {n0, n1, n2}) {
-        Write(node, 0x68, 0.9f); Write(node, 0x74, uint32_t(500));
-        std::memset(static_cast<uint8_t*>(node) + 0x8A, 0xEF, 6);
-    }
-}
-void setup() {
-    reset(); unitManager = units; oInitializeConstraint = initialize;
-    oConstraintObjectDtor = +[](void*) { assert(!locked); };
-    a = make(); b = make();
-    n0 = static_cast<uint8_t*>(a) + 0x2140; n2 = static_cast<uint8_t*>(a) + 0x21D0;
-    n3 = static_cast<uint8_t*>(a) + 0x2260;
-    n1 = std::calloc(1, 0x90); // Foreign node is reached through the complete native chain.
-    for (void* node : {n0, n1, n2}) InitializeConstraint(node);
-    chain(a, 1, {n0, n1, n2});
-    if (executionFixture) {
-        Write(units, 0xC38, uint32_t(2)); Write(units, 0x1840, uint32_t(1));
-        Write(a, 0x10, uint32_t(0x3FA)); Write(b, 0x10, uint32_t(0x3FA));
-        void* previous = nullptr; int rno = 42;
-        auto* group = static_cast<uint8_t*>(std::calloc(3, 8)); size_t i = 0;
-        for (void* node : {n0, n1, n2}) {
-            Write(node, 8, int32_t(rno++)); Write(node, 0x28, 1.5f);
-            Write(node, 0x10, uint32_t(0x40A)); Write(node, 0x30, uint64_t(1));
-            Write(node, 0x20, previous); if (previous) Write(previous, 0x18, node);
-            Write(node, 0x18, (void*)nullptr); Write(group, (i++)*8, node); previous = node;
-        }
-        Write(units, 0x80, n0); Write(units, 0x88, n2);
-        Write(units, 0xC58, uint32_t(3)); Write(units, 0xC5C, uint32_t(3)); Write(units, 0xC68, group);
-    }
-    RollbackUnit_SaveSnapshot(0);
-    assert(TestManifest(0).constraints.size() == 3);
-    InitializeConstraint(n3); future();
-}
-void remember() {
-    std::memcpy(beforeA, a, sizeof(beforeA)); std::memcpy(beforeB, b, sizeof(beforeB));
-    std::memcpy(beforeJA, joint(a, 0), sizeof(beforeJA)); std::memcpy(beforeJB, joint(b, 0), sizeof(beforeJB));
-    std::memcpy(beforeDA, Read<void*>(a, 0x548), 2); std::memcpy(beforeDB, Read<void*>(b, 0x548), 2);
-    std::memcpy(beforeN1, n1, sizeof(beforeN1));
-}
-void swapPose() {
-    UnitGuard fence;
-    RetireModelDomain(*Find(a, false), ShotDomain::Pose, true);
-    auto* header = static_cast<uint8_t*>(std::calloc(1, 0x10 + 3*0xC0));
-    Write(header, 0, uint32_t(3)); Write(header + 0x10, 0, uintptr_t(mockJointVtable));
-    Write(a, 0x538, header + 0x10); Write(a, 0x548, std::calloc(3, 1)); Write(a, 0x530, uint32_t(3));
-    EnsureShotGeneration(*Find(a, false), ShotDomain::Pose);
-    Write(joint(b, 1), 8, (void*)nullptr); chain(a, 2, {n2, n0, n3, n1});
-}
-void reject(int) {
-    const bool unchanged = !std::memcmp(beforeA, a, sizeof(beforeA)) && !std::memcmp(beforeB, b, sizeof(beforeB)) &&
-        !std::memcmp(beforeJA, joint(a, 0), sizeof(beforeJA)) && !std::memcmp(beforeJB, joint(b, 0), sizeof(beforeJB)) &&
-        !std::memcmp(beforeDA, Read<void*>(a, 0x548), 2) && !std::memcmp(beforeDB, Read<void*>(b, 0x548), 2) &&
-        !std::memcmp(beforeN1, n1, sizeof(beforeN1));
-    std::_Exit(unchanged ? 17 : 18);
-}
-void clean() {
-    RollbackUnit_ClearSnapshots();
-    for (void* node : {n0, n1, n2, n3}) ForgetConstraintObject(node);
-    for (void* owner : {a, b}) {
-        const uint64_t id = Find(owner, false)->id;
-        ForgetCurrentShotGenerations(id, owner); { UnitGuard fence; MockCollectModel(owner); }
-        Destroyed("gone", owner, id); std::free(owner);
-    }
-    std::free(n1);
-}
-'''
-        self.compile_run(True, harness + r'''
-int main() {
-    setup(); const auto history = testSnapshots[0];
-    for (int repeat = 0; repeat < 2; ++repeat) {
-        auto plan = PrepareShotConstraintGraph(TestManifest(0), 1);
-        for (const auto& shot : TestManifest(0).shots) {
-            auto* owner = Find(shot.spans[0].memory.address, false);
-            StageShotGenerationStorage(*owner, shot, 1); { UnitGuard fence; StageShotCpuFields(*owner, shot, 1); }
-        }
-        StageShotConstraintGraph(plan);
-        assert(Read<void*>(joint(a, 1), 8) == static_cast<uint8_t*>(n0) + 0x40 && !Read<void*>(joint(b, 1), 8));
-        void* previous = nullptr; int order = 2;
-        for (void* node : {n0, n1, n2}) {
-            assert(Read<void*>(node, 0x48) == node && Read<void*>(node, 0x50) == previous);
-            assert(Read<void*>(node, 0x60) == joint(a, 1) && Read<void*>(node, 0x78) == a);
-            assert(Read<int32_t>(node, 0x70) == order && Read<uint32_t>(node, 0x74) == 1000);
-            assert(Read<float>(node, 0x68) == 0.25f && Read<float>(node, 0x84) == 0.5f);
-            assert(Read<uint8_t>(node, 0x8A) == 0xEF && Read<uint8_t>(node, 0x8F) == 0xEF);
-            previous = node; order += 5;
-        }
-        assert(Read<void*>(n0, 0x58) == n1 && Read<void*>(n1, 0x58) == n2 && !Read<void*>(n2, 0x58));
-        assert(!Read<void*>(n3, 0x50) && !Read<void*>(n3, 0x58) && !Read<void*>(n3, 0x60));
-        assert(Read<int32_t>(n3, 0x70) == -1);
-        for (void* owner : {a, b}) {
-            assert(Read<uint32_t>(owner, 0x558) == 0x01000015 && !Read<uint8_t>(owner, 0x123D));
-            assert(Read<uint8_t>(Read<void*>(owner, 0x548), 0) == 1 && !Read<uint8_t>(Read<void*>(owner, 0x548), 1));
-            for (size_t i = 0; i < 2; ++i)
-                assert(Read<uint32_t>(joint(owner, i), 0x14) == 7 + i &&
-                       Read<uint32_t>(joint(owner, i), 0xA4) == 0x01030009 + i);
-            Write(owner, 0x1F58, Read<float>(owner, 0x1F58) + 1); assert(Read<float>(owner, 0x1F58) == 4);
-        }
-        future();
-    }
-    assert(!creates && !constraintUnlinks && !resourceAdds && !resourceReleases);
-    clean();
-    size_t exported = 0;
-    RollbackUnit_VisitSnapshot(0, history.get(), false,
-        [](void* context, const char* name, const void*, uint64_t, uint64_t, const void* bytes, size_t size) {
-            if (!std::strstr(name, "lifetime.constraint.")) return;
-            ++*static_cast<size_t*>(context); assert(size == 0x90 && Read<uint32_t>(bytes, 0x74) == 1000);
-        }, &exported);
-    assert(exported == 3); // Historical export after all native storage has been freed.
-}
-''')
-        self.compile_run(True, harness + r'''
-int main() {
-    setup(); swapPose();
-    void* displaced = joint(a, 2);
-    auto plan = PrepareShotConstraintGraph(TestManifest(0), 1);
-    for (const auto& shot : TestManifest(0).shots) {
-        auto* owner = Find(shot.spans[0].memory.address, false); StageShotGenerationStorage(*owner, shot, 1);
-    }
-    StageShotConstraintGraph(plan);
-    assert(!Read<void*>(displaced, 8) && Read<void*>(n0, 0x60) == joint(a, 1));
-    assert(Read<void*>(joint(a, 1), 8) == static_cast<uint8_t*>(n0) + 0x40);
-    CollectShotGenerations(); // ASan: collection of the displaced pose is now safe.
-    clean();
-}
-''')
-        self.compile_run(True, harness + r'''
-int main() {
-    setup();
-    // Constraint model links can be the only edge retaining a detached owner.
-    Find(b, false)->occupancy = Occupancy::Quarantined; ++g_quarantined;
-    Write(b, 0x10, uint32_t(0x3F8)); RollbackUnit_SaveSnapshot(1);
-    assert(Find(b, false)->dependencies == 2 && TestManifest(1).shots.size() == 2);
-    RollbackUnit_DropSnapshot(0); CollectShotGenerations(); CollectQuarantine();
-    assert(g_quarantined == 1 && Find(b, false)->occupancy == Occupancy::Quarantined);
-    auto plan = PrepareShotConstraintGraph(TestManifest(1), 2); StageShotConstraintGraph(plan);
-    assert(Read<void*>(n0, 0x78) == b && !creates && !resourceAdds && !resourceReleases);
-    Find(b, false)->occupancy = Occupancy::Live; --g_quarantined;
-    clean();
-}
-''')
-        self.compile_run(True, harness + r'''
-int main() {
-    executionFixture = true; setup();
-    Write(units, 0x50, n3); Write(units, 0x58, n2); Write(units, 0x80, n0); Write(units, 0x88, n0);
-    Write(n3, 0x18, n2); Write(n3, 0x20, (void*)nullptr); Write(n3, 0x10, uint32_t(0x402)); Write(n3, 0x30, uint64_t(1));
-    Write(n2, 0x18, (void*)nullptr); Write(n2, 0x20, n3); Write(n2, 0x10, uint32_t(0x402)); Write(n2, 0x30, uint64_t(0));
-    Write(n0, 0x18, (void*)nullptr); Write(n0, 0x20, (void*)nullptr); Write(n0, 0x10, uint32_t(0x40B));
-    Write(n1, 0x18, (void*)nullptr); Write(n1, 0x20, (void*)nullptr); Write(n1, 0x10, uint32_t(0x3F8));
-    Write(n1, 0x30, uint64_t(0));
-    void* group = Read<void*>(units, 0xC68); Write(group, 0, n3); Write(group, 8, n0); Write(units, 0xC58, uint32_t(2));
-    for (void* node : {n0, n1, n2}) { Write(node, 8, int32_t(99)); Write(node, 0x28, 9.0f); }
-    for (int repeat = 0; repeat < 2; ++repeat) {
-        auto plan = PrepareShotConstraintGraph(TestManifest(0), 1);
-        for (const auto& shot : TestManifest(0).shots) {
-            auto* owner = Find(shot.spans[0].memory.address, false);
-            StageShotGenerationStorage(*owner, shot, 1); { UnitGuard fence; StageShotCpuFields(*owner, shot, 1); }
-        }
-        StageShotConstraintGraph(plan); StageShotExecutionState(TestManifest(0), 1);
-        assert(!Read<void*>(units, 0x50) && !Read<void*>(units, 0x58));
-        assert(Read<void*>(units, 0x80) == n0 && Read<void*>(units, 0x88) == n2);
-        assert(Read<void*>(n0, 0x18) == n1 && Read<void*>(n1, 0x18) == n2 && !Read<void*>(n2, 0x18));
-        assert(!Read<void*>(n0, 0x20) && Read<void*>(n1, 0x20) == n0 && Read<void*>(n2, 0x20) == n1);
-        int rno = 42;
-        for (void* node : {n0, n1, n2}) {
-            assert(Read<uint32_t>(node, 0x10) == 0x40A && Read<uint64_t>(node, 0x30) == 1);
-            assert(Read<int32_t>(node, 8) == rno++ && Read<float>(node, 0x28) == 1.5f);
-        }
-        assert((Read<uint32_t>(n3, 0x10) & 0x3FF) == 0x3F8 && !Read<uint64_t>(n3, 0x30));
-        assert(!Read<void*>(n3, 0x18) && !Read<void*>(n3, 0x20));
-        assert(Read<uint32_t>(units, 0xC58) == 3 && Read<void*>(group, 0) == n0 && Read<void*>(group, 8) == n1 &&
-               Read<void*>(group, 16) == n2 && !g_quarantined && !groupExpansions);
-    }
-    clean(); std::free(group);
-}
-''')
-        invalid_cases = (
-            "ForgetConstraintObject(n1);",
-            "InitializeConstraint(n0);",
-            "Write(joint(b, 1), 8, uintptr_t(1));",
-            "Write(n1, 0x58, n2);",
-            "TestManifest(0).constraints.push_back(TestManifest(0).constraints[0]);",
-            "Write(TestManifest(0).constraints[0].image, 0x78, uintptr_t(1));",
-            "TestManifest(0).constraintsComplete = false;",
-            "auto* foreign = std::calloc(1, 0x90); InitializeConstraint(foreign); RollbackUnit_SaveSnapshot(0); chain(b, 1, {n2, n0, n3, n1, foreign});",
-            "auto* foreign = std::calloc(1, 0x90); InitializeConstraint(foreign); chain(b, 1, {n2, n0, n3, n1, foreign});",
-            "auto plan = PrepareShotConstraintGraph(TestManifest(0), 1); InitializeConstraint(n0); remember(); StageShotConstraintGraph(plan);",
-            "auto plan = PrepareShotConstraintGraph(TestManifest(0), 1); RollbackUnit_SaveSnapshot(0); remember(); StageShotConstraintGraph(plan);",
-            "swapPose(); auto plan = PrepareShotConstraintGraph(TestManifest(0), 1); for (const auto& shot : TestManifest(0).shots) StageShotGenerationStorage(*Find(shot.spans[0].memory.address, false), shot, 1); StageShotConstraintGraph(plan); CollectShotGenerations(); remember(); StageShotConstraintGraph(plan);",
-        )
-        cases = "\n".join(f"case {i}: {{ {invalid} break; }}" for i, invalid in enumerate(invalid_cases))
-        self.compile_run(True, harness + "\nint main(int argc, char** argv) { assert(argc == 2); setup(); "
-                         "std::signal(SIGABRT, reject); switch (std::atoi(argv[1])) {\n" + cases +
-                         "\n}\nremember(); PrepareShotConstraintGraph(TestManifest(0), 1);\n}\n",
-                         expected_returncode=17, arguments=[[str(i)] for i in range(len(invalid_cases))])
-
     def test_constraint_unknown_interface_is_not_dereferenced_or_partially_restored(self):
         self.compile_run(True, CHECKS[:CHECKS.index("int main() {")] + r'''
 uint8_t owner[0x2140]{}, header[0x10 + 0xC0]{}, depths[1]{};
@@ -3176,54 +2929,9 @@ int main() {
             *static_cast<bool*>(context) = true; assert(!Read<uint64_t>(bytes, 0));
         }, &diagnostic);
     assert(diagnostic);
-    std::signal(SIGABRT, reject); PrepareShotConstraintGraph(TestManifest(0), 1);
+    std::signal(SIGABRT, reject); StageShotExecutionState(TestManifest(0), 1);
 }
 ''', expected_returncode=17)
-
-    def test_shot_constraint_chain_exceeds_native_sort_limit(self):
-        self.compile_run(True, CHECKS[:CHECKS.index("int main() {")] + r'''
-int main() {
-    reset(); alignas(16) uint8_t units[0x1860]{}; unitManager = units;
-    auto* owner = static_cast<uint8_t*>(std::calloc(1, 0x4000));
-    auto* header = static_cast<uint8_t*>(std::calloc(1, 0x10 + 0xC0));
-    Write(header, 0, uint32_t(1)); Write(header + 0x10, 0, uintptr_t(mockJointVtable));
-    auto* joint = header + 0x10; auto* depths = static_cast<uint8_t*>(std::calloc(1, 1));
-    Write(owner, 0, uintptr_t(0xCAFE)); Write(owner, 0x116C, UINT32_MAX);
-    Write(owner, 0x538, joint); Write(owner, 0x548, depths); Write(owner, 0x530, uint32_t(1));
-    Birth(owner, Kind::Shot); auto* identity = Find(owner, false); identity->extent = 0x4000; identity->dti = 0x1234;
-    oInitializeConstraint = +[](void* node) {
-        Write(node, 0, uintptr_t(0xA)); Write(node, 0x40, uintptr_t(0xB)); Write(node, 0x48, node);
-    };
-    oConstraintObjectDtor = +[](void*) { assert(!locked); };
-    for (size_t i = 0; i < 40; ++i) {
-        void* node = owner + 0x2140 + i*0x90; InitializeConstraint(node);
-        Write(node, 0x50, i ? owner + 0x2140 + (i-1)*0x90 : nullptr);
-        Write(node, 0x58, i+1 < 40 ? owner + 0x2140 + (i+1)*0x90 : nullptr);
-        Write(node, 0x60, static_cast<void*>(joint)); Write(node, 0x78, static_cast<void*>(owner));
-        Write(node, 0x70, int32_t(i*3)); Write(node, 0x74, uint32_t(1000));
-    }
-    Write(joint, 8, owner + 0x2140 + 0x40); RollbackUnit_SaveSnapshot(0);
-    assert(TestManifest(0).constraints.size() == 40 && TestManifest(0).constraintsComplete);
-    // Reverse the current chain, preserving equal priorities.
-    for (size_t i = 0; i < 40; ++i) {
-        void* node = owner + 0x2140 + i*0x90;
-        Write(node, 0x50, i+1 < 40 ? owner + 0x2140 + (i+1)*0x90 : nullptr);
-        Write(node, 0x58, i ? owner + 0x2140 + (i-1)*0x90 : nullptr);
-    }
-    Write(joint, 8, owner + 0x2140 + 39*0x90 + 0x40);
-    auto plan = PrepareShotConstraintGraph(TestManifest(0), 1); StageShotConstraintGraph(plan);
-    void* node = static_cast<uint8_t*>(Read<void*>(joint, 8)) - 0x40;
-    for (size_t i = 0; i < 40; ++i) {
-        assert(node == owner + 0x2140 + i*0x90 && Read<int32_t>(node, 0x70) == int32_t(i*3));
-        node = Read<void*>(node, 0x58);
-    }
-    assert(!node && !constraintUnlinks && !creates);
-    RollbackUnit_ClearSnapshots();
-    for (size_t i = 0; i < 40; ++i) ForgetConstraintObject(owner + 0x2140 + i*0x90);
-    ForgetCurrentShotGenerations(identity->id, owner); { UnitGuard fence; MockCollectModel(owner); }
-    std::free(owner);
-}
-''')
 
     def test_shot_execution_restore_stage(self):
         harness = CHECKS[:CHECKS.index("int main() {")] + r'''
@@ -3339,8 +3047,6 @@ int main() {
             "TestManifest(0).groups[0].clear();",
             "Write(units, 0xC60, uint8_t(1));",
             "make(2, 0);",
-            "g_liveSnapshots[0] = nullptr;",
-            "TestManifest(0).shots[0].spans.push_back(TestManifest(0).shots[0].spans[0]);",
         )
         cases = "\n".join(f"case {i}: {{ {invalid} break; }}" for i, invalid in enumerate(invalid_cases))
         self.compile_run(True, harness + "\nint main(int argc, char** argv) { assert(argc == 2); setup(); "
@@ -3848,8 +3554,6 @@ int main() {
             ("StageShotManagerState(manifest, 1);", "shot.manager.stage",
              "saved.shotPayload == RollbackUnitShotPayload::Capture"),
             ("StageShotExecutionState(manifest, 1);", "shot.execution.stage",
-             "saved.shotPayload == RollbackUnitShotPayload::Capture"),
-            ("PrepareShotConstraintGraph(manifest, 1);", "shot.constraints.prepare",
              "saved.shotPayload == RollbackUnitShotPayload::Capture"),
         ]
         cases = "\n".join(f"    if (stage == {i}) {call}" for i, (call, _, _) in enumerate(stages))

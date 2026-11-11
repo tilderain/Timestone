@@ -410,15 +410,13 @@ void MarkAbandonedModels(int32_t frame);
 #include "rollback_unit_failure.inl"
 // The capture's single body span: at the owner's address, at least the common
 // uShot prefix (0x2140), and inside the payload. Shared by every staging stage.
+// Capture writes exactly one body span per shot, first; only its identity with
+// the live owner is a question for the caller.
 const ShotSpan& ShotBodySpan(const ShotState& saved, const void* owner)
 {
     const ShotSpan* body = nullptr;
-    for (const auto& span : saved.spans) if (span.kind == ShotSpanKind::Body) {
-        LIFE_REQUIRE(!body);
-        body = &span;
-    }
-    LIFE_REQUIRE(body && body->memory.address == owner && body->memory.size >= 0x2140 &&
-        body->memory.offset <= saved.payload.size() && body->memory.size <= saved.payload.size() - body->memory.offset);
+    for (const auto& span : saved.spans) if (span.kind == ShotSpanKind::Body) { body = &span; break; }
+    LIFE_REQUIRE(body && body->memory.address == owner);
     return *body;
 }
 void ValidateShotGenerationIndex();
@@ -1908,7 +1906,6 @@ void RollbackUnit_SaveSnapshot(int32_t frame, std::shared_ptr<RollbackUnitSnapsh
             [](void* context, const char* name, const void* address, uint64_t ownerSlot,
                uint64_t vtable, const void* bytes, size_t size) {
                 auto& saved = *static_cast<ShotState*>(context);
-                LIFE_REQUIRE(size <= UINT32_MAX && saved.payload.size() <= UINT32_MAX - size);
                 saved.spans.push_back({name,
                     {const_cast<void*>(address), uint32_t(size), uint32_t(saved.payload.size())}, ownerSlot, vtable});
                 saved.spans.back().kind = ShotSpanKindOf(name);

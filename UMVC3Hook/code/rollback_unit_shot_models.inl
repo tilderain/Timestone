@@ -97,7 +97,6 @@ void CaptureDrivenModel(const Identity& model, ModelUnitState& saved)
     saved.groups = Read<uint64_t>(model.object, 0x30);
     saved.spans.clear(); saved.payload.clear();
     const auto copy = [&](size_t field, void* address, size_t size) {
-        LIFE_REQUIRE(size <= UINT32_MAX && saved.payload.size() <= UINT32_MAX - size);
         saved.spans.push_back({field, address, uint32_t(size), uint32_t(saved.payload.size())});
         const auto* bytes = static_cast<const uint8_t*>(address);
         saved.payload.insert(saved.payload.end(), bytes, bytes + size);

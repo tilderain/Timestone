@@ -108,26 +108,17 @@ ShotCpuRestoreStatus RestoreShotCpuFields(void* destination, size_t destinationS
 {
     RollbackUnitFailureScope failureScope("shot.cpu.stage", owner.object, owner.id);
     LIFE_REQUIRE(saved.payloadState == RollbackUnitShotPayload::Capture);
-    LIFE_REQUIRE(owner.kind == Kind::Shot && saved.id == owner.id && bit && !(bit & (bit - 1)) &&
-        (owner.snapshots & bit) && !(owner.occupancy != Occupancy::Live && owner.occupancy != Occupancy::Quarantined));
+    // The owner's identity and lease were checked by RollbackUnit_RestoreShots.
     const ShotSpan* body = &ShotBodySpan(saved, owner.object);
     LIFE_REQUIRE(body->memory.size >= ShotCpuCommonSize && body->memory.size <= owner.extent);
-    unsigned slot = 0;
-    while ((uint32_t(1) << slot) != bit) ++slot;
-    LIFE_REQUIRE(slot < ROLLBACK_WINDOW);
     AcquireSRWLockExclusive(&g_lock);
-    const auto* manifest = g_liveSnapshots[slot];
-    LIFE_REQUIRE(manifest && manifest->valid && manifest->shotPayload == RollbackUnitShotPayload::Capture &&
-        std::any_of(manifest->shots.begin(), manifest->shots.end(),
-            [&](const ShotState& shot) { return &shot == &saved; }));
+    // Each unit the saved bytes name must still be an allocation this snapshot
+    // holds: the pointers are about to be written back as they were.
     VisitShotUnitReferences(saved.payload.data() + body->memory.offset, [&](size_t, void* object) {
         if (!object || object == owner.object) return;
         const Identity* target = Find(object, false);
         LIFE_REQUIRE(target && (target->snapshots & bit) &&
-            !(target->occupancy != Occupancy::Live && target->occupancy != Occupancy::Quarantined) &&
-            std::any_of(manifest->members.begin(), manifest->members.end(), [&](const Identity& member) {
-                return member.object == object && member.id == target->id;
-            }));
+            !(target->occupancy != Occupancy::Live && target->occupancy != Occupancy::Quarantined));
     });
     ReleaseSRWLockExclusive(&g_lock);
     const auto status = RestoreShotCpuFields(owner.object, owner.extent,

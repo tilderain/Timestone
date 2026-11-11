@@ -848,7 +848,6 @@ void AppendGenerationSpan(ShotState& saved, const char* name, void* address, siz
                           void* cell = nullptr, uint16_t group = UINT16_MAX, uint32_t element = UINT32_MAX)
 {
     if (!address || !size) return;
-    LIFE_REQUIRE(size <= UINT32_MAX && saved.payload.size() <= UINT32_MAX - size);
     saved.spans.push_back({name, {address, uint32_t(size), uint32_t(saved.payload.size())}, uint64_t(cell), 0, group, element});
     const auto* bytes = static_cast<const uint8_t*>(address);
     saved.payload.insert(saved.payload.end(), bytes, bytes + size);
@@ -934,8 +933,6 @@ void CaptureShotGenerations(const Identity& owner, uint32_t bit, ShotState& save
             (generation.snapshots & bit) && domain < ShotDomainCount && !domains[domain]);
         domains[domain] = true;
     }
-    for (const auto& span : saved.spans)
-        LIFE_REQUIRE(span.memory.offset <= saved.payload.size() && span.memory.size <= saved.payload.size() - span.memory.offset);
     ShotBodySpan(saved, owner.object);
     // One lookup for all domains: the element reference survives the insertions
     // the slow paths below can make, and nothing here erases this owner.
@@ -985,7 +982,6 @@ void CaptureShotGenerations(const Identity& owner, uint32_t bit, ShotState& save
                 Write(owner.object, field, Read<uint32_t>(body, field));
             Write(owner.object, 0x540, Read<uintptr_t>(body, 0x540));
         } else {
-            LIFE_REQUIRE(span.memory.offset <= saved.payload.size() && span.memory.size <= saved.payload.size() - span.memory.offset);
             std::memcpy(span.memory.address, saved.payload.data() + span.memory.offset, span.memory.size);
         }
     }

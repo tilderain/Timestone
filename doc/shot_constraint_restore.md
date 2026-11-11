@@ -72,44 +72,12 @@ This status concerns common graph discovery, not proof of all derived ownership.
 
 ## Prepare And Commit
 
-`PrepareShotConstraintGraph` runs before pose/storage swaps. It validates source
-slot, retained shot birth identities, pose generation IDs/masks, span bounds,
-registered node lifetimes, both vptr identities, backpointers, configured models,
-joint attachments, complete reciprocal chains and absence of cycles/duplicates.
-Numeric interface/next addresses are looked up before their pointees are read.
-
-The current joint set includes current and displaced retained pose generations,
-not only the model's currently selected joint pointer. The plan records those
-generation IDs. Collection is excluded during the native transaction; commit
-also rejects collected/reused generations before touching outgoing joint storage.
-
-A monotonic snapshot `captureId` rejects same-frame recapture as well as slot
-turnover. Commit checks this before using pointers into the snapshot payload, so
-an old plan cannot read overwritten/reallocated capture buffers.
-
-After retained storage and the body/reference adapters have selected the saved
-poses, `StageShotConstraintGraph`:
-
-1. Clears heads in outgoing pose generations and detaches current chain nodes.
-2. Copies saved Rno/parameter, delta time and common fields `48..8A`, preserving
-   primary/interface vptrs and the unreviewed tail-alignment bytes.
-3. Restores saved model `558` and `123D`, every saved joint's depth `14` and packed
-   word `A4`, and the saved evaluation-order bytes owned through model `548`.
-4. Publishes saved joint interface heads with their exact saved chain order.
-
-The whole packed joint word is restored because the retained joint checkpoint
-owns it; a separate flags-only layer would need mask `00030000` instead.
-No sorting, dependency rebuilding, evaluation, constructor, destructor or native
-callback runs during graph commit. Newly encountered current nodes are detached,
-not freed or reconstructed by the graph layer. Only inline children proven to
-have been initialized after the snapshot may be withdrawn without saved state;
-an older foreign node that entered the graph later is rejected, not erased.
-
-The shared execution stage also includes saved common constraints. Their native
-category/group order, lifecycle/move/fixed flags and primary links rewind without
-initialization or registration callbacks. Proven future inline children become
-non-executing and detached. Standalone constraint identities use their existing
-saved unit leases/accounting; absent historical unit identity is not guessed.
+Removed. `PrepareShotConstraintGraph` and `StageShotConstraintGraph` restored
+the chains through a validated plan. The shipped restore never
+called them: saved nodes, shot joints and character joints all return to the
+same frame as plain bytes, so `RollbackUnit_RestoreShots` copies the saved node
+fields directly. The functions and their tests were deleted; see git history
+for the design.
 
 ## Integration Limits
 
