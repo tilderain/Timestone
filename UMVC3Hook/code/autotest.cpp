@@ -2149,7 +2149,10 @@ extern "C" bool AutoTest_StartRuntimeCommand(int32_t playerIndex,
     const bool isHyper = isStagedHyper ||
                          (commandListCategory == 2 &&
                           commandListAttackCount >= 2);
-    if (isHyper)
+    // Offline only, as for manual scripts: a local fill is invisible to the
+    // other peer, whose team then cannot afford what this one later spends.
+    // The net suite fills both peers at its synchronized setup frame instead.
+    if (isHyper && !Netplay_IsActive())
         FillAttackerHyperGauge(playerIndex);
 
     g_runtimeScript.stepCount = 0;
