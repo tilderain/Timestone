@@ -264,14 +264,24 @@ using SnapshotManifest = RollbackUnitSnapshot;
 // start, and follows the largest save this session has needed.
 constexpr size_t EffectPayloadFloor = 1024 * 1024, EffectCountFloor = 256, EffectSpanFloor = 2048;
 size_t g_effectPayloadNeed = EffectPayloadFloor, g_effectCountNeed = EffectCountFloor, g_effectSpanNeed = EffectSpanFloor;
-// Storages created so far. Only the rollback window's own are committed up
-// front: with snapdump writes on, every one of the 255 history frames has one.
-size_t g_createdSnapshots = 0;
+// Every storage is committed up front. Normally that is the 16 rollback slots
+// (about 45 MB). With snapdump writes on, each of the 255 history frames owns a
+// storage, so the debug setting costs about 750 MB and its first 255 saves each
+// pay for one storage's commit; captures taken with it on are then free of
+// allocation spikes too.
 void PrepareShotGenerationStorage();
 // Parked shot records with their buffers already committed, so the first save
 // that meets a volley in this storage does not allocate one per shot.
 constexpr size_t SpareShotRecords = 32, SpareShotPayload = 48 * 1024;
 void PreSizeShotStorage(RollbackUnitSnapshot& storage);
+// The 64 category and 64 group lists start empty and were grown one unit at a
+// time by the first saves (0.7 ms once, early in a match, in a lag capture).
+constexpr size_t SchedulerListReserve = 128;
+void PreSizeSchedulerLists(RollbackUnitSnapshot& storage)
+{
+    for (auto& entries : storage.primary) entries.reserve(SchedulerListReserve);
+    for (auto& entries : storage.groups) entries.reserve(SchedulerListReserve);
+}
 void PreSizeEffectStorage(RollbackUnitSnapshot& storage, bool commit)
 {
     if (storage.payload.capacity() < g_effectPayloadNeed) {
@@ -1792,9 +1802,9 @@ void RollbackUnit_SaveSnapshot(int32_t frame, std::shared_ptr<RollbackUnitSnapsh
         [&](auto* saved) { return saved == storage.get() && saved != g_liveSnapshots[slot]; }))
     {
         storage = std::make_shared<RollbackUnitSnapshot>();
-        const bool commit = g_createdSnapshots++ < size_t(ROLLBACK_WINDOW) * 2;
-        PreSizeEffectStorage(*storage, commit);
-        if (commit) PreSizeShotStorage(*storage);
+        PreSizeEffectStorage(*storage, true);
+        PreSizeShotStorage(*storage);
+        PreSizeSchedulerLists(*storage);
         PrepareShotGenerationStorage();
     }
     AcquireSRWLockExclusive(&g_lock);
