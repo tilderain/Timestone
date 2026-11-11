@@ -282,7 +282,7 @@ void Rollback_CaptureCollisionNodeClones(RollbackSnapshotSlot& slot)
     uint32_t cloneDestroys = 0;
     for (int i = 0; i < slot.regionCount; ++i) {
         const RollbackRegion& region = slot.regions[i];
-        if (!region.ownerSlot || region.size != CCHR_EXTERNAL_ANIM_SIZE) continue;
+        if (!region.collisionWrapper) continue;
 
         uint32_t childCount = *(const uint32_t*)((const uint8_t*)region.ptr + 0x20);
         uint64_t childArray = *(const uint64_t*)((const uint8_t*)region.ptr + 0x30);
@@ -738,6 +738,26 @@ void Rollback_RestoreSnapshot(int32_t frame)
         }
     };
 
+    // The sixteen inline cHitPrimCapsule records at +4210.
+    auto restoreCapsules = [](uint8_t* character, const uint8_t* saved, size_t size) {
+        static constexpr SnapshotRange fields[] = {
+            {0x08, 0x04}, // MtGeometry::mType (32-bit; ctor 14000DA80)
+            {0x10, 0x04}, // MtGeomConvex::mMargin
+            {0x20, 0x24}, // capsule endpoints and radius
+            {0x50, 0x04}, // hit-primitive flags
+            {0x68, 0x0C}, // parent indices and size rate
+            {0x80, 0x20}, // local endpoint offsets
+        };
+        for (uint32_t entry = 0x4210; entry < 0x4D10; entry += 0xB0)
+            for (const SnapshotRange& field : fields)
+                if ((size_t)entry + field.offset + field.size <= size)
+                    std::memcpy(character + entry + field.offset, saved + entry + field.offset, field.size);
+    };
+
+    // Roster characters restored below, by region index.
+    static bool rosterRestored[MAX_REGIONS];
+    std::fill_n(rosterRestored, slot.regionCount, false);
+
     size_t offset = 0;
     for (int i = 0; i < slot.regionCount; ++i) {
         if (offset >= slot.size) break;
@@ -778,9 +798,7 @@ void Rollback_RestoreSnapshot(int32_t frame)
                         payloadSize);
         } else if (!ownerStillMatches[i] || !objectStillMatches) {
             // Skip regions whose owner pointer or vtable no longer matches.
-        } else if (slot.regions[i].ownerSlot != 0 &&
-                   slot.regions[i].dependentRegion < 0 &&
-                   slot.regions[i].size == CCHR_EXTERNAL_ANIM_SIZE) {
+        } else if (slot.regions[i].collisionWrapper) {
             Rollback_RestoreExternalAnimBlock(slot.regions[i].ptr,
                                      slot.data + offset,
                                      copySize);
@@ -861,16 +879,9 @@ void Rollback_RestoreSnapshot(int32_t frame)
                        (uint64_t)_addr(DTI_UCHRWEAPON)) {
             uint8_t* weapon = (uint8_t*)slot.regions[i].ptr;
             const uint8_t* savedWeapon = slot.data + offset;
-            Rollback_RestoreModelMotions(weapon, savedWeapon);
-
-            // Restore selected weapon model/attachment state, leaving lifecycle and owners live.
+            // The uModel prefix from the shared table; lifecycle and owners stay live.
+            Rollback_RestoreActorFields(weapon, savedWeapon, ActorWeapon);
             static constexpr SnapshotRange weaponScalarRanges[] = {
-                // Coordinate selectors, transform, and matrices.
-                {0x48, 0xB8},
-                // uModel flags and motion evaluation state around joint pointers.
-                {0x510, 0x20}, {0x558, 0x08}, // keep joint/blend counts and resource status live
-                // uModel motion/envelope state before its live owner pointer.
-                {0x1160, 0x18}, {0x1180, 0x30},
                 // Aim translation/rotation/scale payloads, excluding their inline vtables.
                 {0x1458, 0x48}, {0x14A8, 0x48}, {0x14F8, 0x48},
                 // uChrWeapon flags, attachment selectors, and cached matrices.
@@ -902,10 +913,25 @@ void Rollback_RestoreSnapshot(int32_t frame)
             }
 
             const uint64_t concreteDti = GetObjectDti((uint64_t)slot.regions[i].ptr);
+            const bool roster = isTeamCharacter((uint64_t)slot.regions[i].ptr);
+            // Throw setup and ZeroSh sync replace motion-list slot 2. Its saved
+            // resource is pinned by the snapshot. uModel::setMotionList
+            // (140529730) manages refcounts and marks the layers that use the
+            // slot S_SETUP, so it runs before the field restore below, which
+            // rewinds each layer's playback state and the work-buffer regions
+            // that follow.
+            for (const auto& binding : slot.characterMotionResources) {
+                if (binding.regionIndex != i) continue;
+                void* liveList = *(void**)((uint8_t*)slot.regions[i].ptr + 0x11C8);
+                if (liveList != binding.resource) {
+                    using SetMotionList = void(__fastcall*)(void*, void*, uint32_t);
+                    ((SetMotionList)_addr(0x140529730))(slot.regions[i].ptr, binding.resource, 2);
+                }
+                break;
+            }
             const auto status = Rollback_RestoreCharacterFields(
                 slot.regions[i].ptr, slot.regions[i].size, slot.data + offset,
-                copySize, concreteDti, isTeamCharacter((uint64_t)slot.regions[i].ptr),
-                CharacterRestorePhase::Early);
+                copySize, concreteDti, roster);
             if (status != CharacterRestoreStatus::ReviewedSubset) {
                 HookLog("Rollback: character restore rejected dti=0x%llX: %s\n",
                         concreteDti,
@@ -932,18 +958,6 @@ void Rollback_RestoreSnapshot(int32_t frame)
             uint8_t* character = (uint8_t*)slot.regions[i].ptr;
             const uint8_t* savedCharacter = slot.data + offset;
 
-            // Throw setup and ZeroSh sync replace motion-list slot 2. Its saved
-            // resource is pinned by the snapshot. Native assignment manages
-            // refcounts and marks layers S_SETUP, so do this before restoring
-            // motion playback and the following external work-buffer regions.
-            for (const auto& binding : slot.characterMotionResources) {
-                if (binding.regionIndex != i) continue;
-                if (*(void**)(character + 0x11C8) != binding.resource) {
-                    using SetMotionList = void(__fastcall*)(void*, void*, uint32_t);
-                    ((SetMotionList)_addr(0x140529730))(character, binding.resource, 2);
-                }
-                break;
-            }
             restoreHelperLinks(character, savedCharacter, copySize);
 
             if (concreteDti == (uint64_t)_addr(0x140D45788) ||
@@ -958,7 +972,6 @@ void Rollback_RestoreSnapshot(int32_t frame)
             restoreCnsHelper(character, savedCharacter, copySize, 0x3BF0);
             restoreCnsHelper(character, savedCharacter, copySize, 0x3D60);
 
-            // Reconstruction may consult these links before the late repair.
             // Historical non-roster identities still require lifecycle support.
             for (uint32_t field : {0x6710u, 0x6718u, 0x6720u, 0x6728u, 0x6730u}) {
                 const uint64_t savedTarget = *(const uint64_t*)(savedCharacter + field);
@@ -1031,8 +1044,6 @@ void Rollback_RestoreSnapshot(int32_t frame)
                             savedCharacter + CCHR_PAUSE_OFFSET + 0x08, 0x08);
             }
 
-            Rollback_RestoreModelMotions(character, savedCharacter);
-
             // Restore five target-info payloads when their reference is null, unchanged, or roster-owned.
             static constexpr uint32_t targetInfoBase = 0x6490;
             static constexpr uint32_t targetInfoStride = 0x80;
@@ -1044,8 +1055,12 @@ void Rollback_RestoreSnapshot(int32_t frame)
 
                 uint64_t savedTarget = *(const uint64_t*)(slot.data + offset + pointerField);
                 uint64_t liveTarget = *(uint64_t*)((uint8_t*)slot.regions[i].ptr + pointerField);
-                if (savedTarget == 0 || savedTarget == liveTarget || isTeamCharacter(savedTarget)) {
+                const bool usable = savedTarget == 0 || savedTarget == liveTarget ||
+                    isTeamCharacter(savedTarget);
+                if (usable)
                     *(uint64_t*)((uint8_t*)slot.regions[i].ptr + pointerField) = savedTarget;
+                // A roster character's payload rewinds even when its reference cannot.
+                if (usable || roster) {
                     std::memcpy((uint8_t*)slot.regions[i].ptr + dataField,
                                 slot.data + offset + dataField,
                                 0x70);
@@ -1054,26 +1069,8 @@ void Rollback_RestoreSnapshot(int32_t frame)
 
             // Primitive payloads rewind independently of their bit patterns;
             // character/weapon parent identities are restored separately.
-            static constexpr uint32_t capsuleBase = 0x4210;
-            static constexpr uint32_t capsuleStride = 0xB0;
-            for (uint32_t primitive = 0; primitive < 16; ++primitive) {
-                uint32_t entry = capsuleBase + primitive * capsuleStride;
-                static constexpr SnapshotRange fields[] = {
-                    {0x08, 0x04}, // MtGeometry::mType (32-bit; ctor 14000DA80)
-                    {0x10, 0x04}, // MtGeomConvex::mMargin
-                    {0x20, 0x24}, // capsule endpoints and radius
-                    {0x50, 0x04}, // hit-primitive flags
-                    {0x68, 0x0C}, // parent indices and size rate
-                    {0x80, 0x20}, // local endpoint offsets
-                };
-                for (const SnapshotRange& field : fields) {
-                    if ((size_t)entry + field.offset + field.size <= copySize) {
-                        std::memcpy((uint8_t*)slot.regions[i].ptr + entry + field.offset,
-                                    slot.data + offset + entry + field.offset,
-                                    field.size);
-                    }
-                }
-            }
+            restoreCapsules(character, savedCharacter, copySize);
+            rosterRestored[i] = roster;
 
             static constexpr uint32_t sphereBases[] = {0x4E20, 0x5530, 0x5C40};
             static constexpr uint32_t sphereStride = 0x70;
@@ -1133,7 +1130,6 @@ void Rollback_RestoreSnapshot(int32_t frame)
         }
         offset += slot.regions[i].size;
     }
-    RestoreCharacterCollisionParentReferences(slot);
     const uint64_t regionsEnd = Profile_Now();
 
     /*std::memcpy(liveGlobalRng, (void*)_addr(0x140D765D8), sizeof(liveGlobalRng));
@@ -1142,6 +1138,19 @@ void Rollback_RestoreSnapshot(int32_t frame)
 
     diagnosticStage.Next(LagMetric::RestoreClones);
     Rollback_RestoreCollisionNodeClones(slot);
+    // nCollision::cCollisionNode::copyFrom (1405A4DA0) copies each child through
+    // the child's own virtual copy, which can write a character's inline
+    // capsules and their parent pointers. Put a roster character's capsule
+    // fields back, then every parent reference. This is the only native call in
+    // a restore that writes character bytes after the region pass.
+    offset = 0;
+    for (int i = 0; i < slot.regionCount && offset < slot.size; ++i) {
+        const size_t copySize = std::min(slot.regions[i].size, slot.size - offset);
+        if (rosterRestored[i])
+            restoreCapsules((uint8_t*)slot.regions[i].ptr, slot.data + offset, copySize);
+        offset += slot.regions[i].size;
+    }
+    RestoreCharacterCollisionParentReferences(slot);
     const uint64_t collisionClonesEnd = Profile_Now();
     diagnosticStage.Next(LagMetric::RestoreFixups);
 
@@ -1200,113 +1209,6 @@ void Rollback_RestoreSnapshot(int32_t frame)
         if (liveCutin != savedCutin) {
             // Reapply child material mode when crossing cut-in/normal render layers.
             setChildMaterialMode(saved.model, -1, savedCutin ? 2 : 3);
-        }
-    }
-
-    // Reapply selected character state after material/render reconciliation.
-    offset = 0;
-    for (int i = 0; i < slot.regionCount; ++i) {
-        if (offset >= slot.size) break;
-        size_t copySize = slot.regions[i].size;
-        if (offset + copySize > slot.size)
-            copySize = slot.size - offset;
-        if (slot.regions[i].skipVtable && slot.regions[i].ownerSlot &&
-            copySize == 0x14D0 && ownerStillMatches[i] &&
-            *(uint64_t*)slot.regions[i].ownerSlot == (uint64_t)slot.regions[i].ptr &&
-            *(uint64_t*)slot.regions[i].ptr == slot.regions[i].expectedVtable) {
-            Rollback_RestoreAuxiliaryActor(slot.regions[i].ptr, slot.regions[i].size,
-                slot.data + offset, copySize, GetObjectDti((uint64_t)slot.regions[i].ptr),
-                CharacterRestorePhase::Late);
-        }
-        if (slot.regions[i].skipVtable &&
-            copySize >= ROLLBACK_CHARACTER_COMMON_SIZE &&
-            isTeamCharacter((uint64_t)slot.regions[i].ptr) &&
-            ownerStillMatches[i] &&
-            *(uint64_t*)slot.regions[i].ptr == slot.regions[i].expectedVtable) {
-            const auto status = Rollback_RestoreCharacterFields(
-                slot.regions[i].ptr, slot.regions[i].size, slot.data + offset,
-                copySize, GetObjectDti((uint64_t)slot.regions[i].ptr), true,
-                CharacterRestorePhase::Late);
-            if (status != CharacterRestoreStatus::ReviewedSubset) {
-                offset += slot.regions[i].size;
-                continue;
-            }
-
-            uint8_t* character = (uint8_t*)slot.regions[i].ptr;
-            const uint8_t* savedCharacter = slot.data + offset;
-            restoreCnsHelper(character, savedCharacter, copySize, 0x3BF0);
-            restoreCnsHelper(character, savedCharacter, copySize, 0x3D60);
-            restoreHelperLinks(character, savedCharacter, copySize);
-
-            // Reapply capsule geometry/flags late; parent references are restored below.
-            constexpr uint32_t capsuleBase = 0x4210;
-            constexpr uint32_t capsuleStride = 0xB0;
-            for (uint32_t primitive = 0; primitive < 16; ++primitive) {
-                uint32_t entry = capsuleBase + primitive * capsuleStride;
-                static constexpr SnapshotRange fields[] = {
-                    {0x08, 0x04}, // MtGeometry::mType, same width as early restore
-                    {0x10, 0x04},
-                    {0x20, 0x24},
-                    {0x50, 0x04},
-                    {0x68, 0x0C},
-                    {0x80, 0x20},
-                };
-                for (const SnapshotRange& field : fields) {
-                    if ((size_t)entry + field.offset + field.size <= copySize) {
-                        std::memcpy(character + entry + field.offset,
-                                    savedCharacter + entry + field.offset,
-                                    field.size);
-                    }
-                }
-            }
-
-            constexpr uint32_t sphereBases[] = {0x4E20, 0x5530, 0x5C40};
-            constexpr uint32_t sphereStride = 0x70;
-            for (uint32_t base : sphereBases) {
-                for (uint32_t primitive = 0; primitive < 16; ++primitive) {
-                    uint32_t entry = base + primitive * sphereStride;
-                    if ((size_t)entry + 0x40 > copySize) continue;
-                }
-            }
-
-            // Keep saved character relationships only when unchanged or roster-owned.
-            constexpr uint32_t RELATIONSHIP_OFFSETS[] = {
-                0x6710, 0x6718, 0x6720, 0x6728, 0x6730,
-            };
-            for (uint32_t relationshipOffset : RELATIONSHIP_OFFSETS) {
-                if ((size_t)relationshipOffset + sizeof(uint64_t) > copySize)
-                    continue;
-                uint64_t savedRelationship = *(const uint64_t*)(
-                    slot.data + offset + relationshipOffset);
-                uint64_t* liveRelationship = (uint64_t*)(
-                    (uint8_t*)slot.regions[i].ptr + relationshipOffset);
-                *liveRelationship =
-                    (savedRelationship == *liveRelationship ||
-                     isTeamCharacter(savedRelationship))
-                        ? savedRelationship : 0;
-            }
-
-        }
-        offset += slot.regions[i].size;
-    }
-    RestoreCharacterCollisionParentReferences(slot);
-
-    // Reapply camera state after material/render reconciliation, including retained references.
-    uint64_t liveCamera = *(uint64_t*)_addr(PTR_SCAMERA);
-    uint64_t liveCameraUnit = liveCamera
-        ? *(uint64_t*)(liveCamera + 0x58) : 0;
-    if (liveCameraUnit) {
-        offset = 0;
-        for (int i = 0; i < slot.regionCount; ++i) {
-            size_t copySize = slot.regions[i].size;
-            if (offset + copySize > slot.size)
-                copySize = slot.size - offset;
-            if ((uint64_t)slot.regions[i].ptr == liveCameraUnit) {
-                restoreActionSideCamera(liveCameraUnit, slot.data + offset,
-                                        copySize);
-                break;
-            }
-            offset += slot.regions[i].size;
         }
     }
 

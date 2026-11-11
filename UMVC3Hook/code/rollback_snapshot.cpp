@@ -424,6 +424,8 @@ static void TraverseAndAddDynamicList(uint64_t listHead, size_t nextOffset,
         regions[r].ownerSlot = 0;
         regions[r].expectedVtable = 0;
         regions[r].skipVtable = false;
+        regions[r].commandLine = false;
+        regions[r].collisionWrapper = false;
         regions[r].dependentRegion = -1;
         regions[r].reuseKind = SnapshotReuseKind::None;
         regions[r].reuseIndex = 0;
@@ -460,6 +462,7 @@ static void TraverseAndAddDynamicList(uint64_t listHead, size_t nextOffset,
             regions[r].expectedVtable = expectedVtable;
             regions[r].skipVtable = skipVtable;
             regions[r].commandLine = false;
+            regions[r].collisionWrapper = false;
             regions[r].dependentRegion = -1;
             regions[r].reuseKind = SnapshotReuseKind::None;
             regions[r].reuseIndex = 0;
@@ -889,11 +892,15 @@ static void TraverseAndAddDynamicList(uint64_t listHead, size_t nextOffset,
                         uint64_t anim = read.operator()<uint64_t>(ownerSlot);
                         if (anim) {
                             read.operator()<uint64_t>(anim);
+                            const int before = r;
                             add((void*)anim, CCHR_EXTERNAL_ANIM_SIZE, ownerSlot, 0, false
 #if ROLLBACK_SNAPDUMP_ENABLED
                                 , "uCharacter.externalAnimation"
 #endif
                             );
+                            // Tagged, not recognised by size: a seven-line command
+                            // table or a 224-joint index buffer is 0xE0 bytes too.
+                            if (r > before) regions[r - 1].collisionWrapper = true;
                         }
                     }
 

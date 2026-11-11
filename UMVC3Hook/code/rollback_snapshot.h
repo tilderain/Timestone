@@ -31,6 +31,7 @@ struct RollbackRegion {
     uint64_t expectedVtable;
     bool skipVtable;
     bool commandLine;
+    bool collisionWrapper; // Character collision node: fields by policy, children by native clone.
     SnapshotReuseKind reuseKind; // how the save decides this region is unchanged
     uint8_t reuseIndex;          // motion slot or material table index for that kind
     int dependentRegion = -1; // auxiliary work buffer: validate its actor before dereferencing ownerSlot

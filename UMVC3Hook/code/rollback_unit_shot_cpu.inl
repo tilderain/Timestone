@@ -19,44 +19,10 @@ template<class Visitor> void VisitShotUnitReferences(const void* body, Visitor v
 }
 
 // The uActorGameModel prefix every model-driven unit shares (uShot and
-// uGameEffectModel both end it at +1450). Same contract as the shot kernel below.
-void RestoreActorModelFields(uint8_t* live, const uint8_t* saved)
-{
-    static constexpr struct { size_t offset, size; } ranges[] = {
-        {0x08, 0x08},     // Rno/unit parameter; lifecycle/category/draw mode stay live.
-        {0x28, 0x04},     // Unit delta; no list links or group mask.
-        {0x40, 0xC0},     // Borrowed parent, selectors, vectors, local/world matrices.
-        {0x55C, 0x04},    // Motion interpolation attributes, not allocation bounds.
-        {0x1180, 0x30},   // Null translation scale and root-motion delta vectors/quaternion.
-        {0x1240, 0x10},   // Inline morph weights, not shader owners at +1250.
-        {0x1260, 0x3F},   // Plane/waist/foot/IK parameters; no map owners or padding.
-        {0x1300, 0x10},   // Actor time coefficients and borrowed owner.
-        {0x1310, 0x34},   // Actor animation requests, time/rate/wait/serial.
-        {0x1350, 0x30},   // Interpreter animation/control and borrowed resource mirrors.
-        {0x1388, 0x30},   // Type/key and resource-backed entry/descriptor/block cursors.
-        {0x13C0, 0x01},   // Command key-change latch.
-        {0x13C4, 0x10},   // Compare/jump registers and return flags; no alignment gap.
-        {0x13D8, 0x10},   // Borrowed unit return value and command loop state.
-    };
-    for (const auto& range : ranges) std::memcpy(live + range.offset, saved + range.offset, range.size);
-
-    // Storage staging restores owned work (+160) and key-slab aliases (+178).
-    // Here bindings and cached cursors rewind under retained motion resources;
-    // preserve sampler alignment gaps and the Motion vtable.
-    for (size_t motion = 0; motion < 8; ++motion) {
-        const size_t base = 0x560 + motion * 0x180;
-        std::memcpy(live + base + 8, saved + base + 8, 6);
-        std::memcpy(live + base + 0x10, saved + base + 0x10, 0x64);
-        std::memcpy(live + base + 0x80, saved + base + 0x80, 0x60);
-        for (size_t sampler : {size_t(0xE0), size_t(0x100)}) {
-            std::memcpy(live + base + sampler, saved + base + sampler, 0xC);
-            std::memcpy(live + base + sampler + 0x10, saved + base + sampler + 0x10, 0xC);
-        }
-        std::memcpy(live + base + 0x120, saved + base + 0x120, 0x40);
-        std::memcpy(live + base + 0x168, saved + base + 0x168, 4);
-        std::memcpy(live + base + 0x170, saved + base + 0x170, 8);
-    }
-}
+// uGameEffectModel both end it at +1450) is the ActorShot column of the table in
+// rollback_character_restore.h. Storage staging restores the owned work (+160)
+// and key-slab aliases (+178) of each Motion record; the table rewinds bindings
+// and cached cursors under retained motion resources.
 
 ShotCpuRestoreStatus RestoreShotCpuFields(void* destination, size_t destinationSize,
     const uint8_t* saved, size_t savedSize)
@@ -68,7 +34,7 @@ ShotCpuRestoreStatus RestoreShotCpuFields(void* destination, size_t destinationS
 
     // Caller must establish compatible retained resources/pose storage and repair
     // references/topology before publishing execution. No native calls run here.
-    RestoreActorModelFields(live, saved);
+    Rollback_RestoreActorFields(live, saved, ActorShot);
     static constexpr struct { size_t offset, size; } ranges[] = {
         {0x1480, 0x0C},   // cAtkCtrl borrowed owner and reset-state dword.
         {0x1490, 0x0C},   // Borrowed rAtkInfo from retained rShot and attack index.

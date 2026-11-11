@@ -1,5 +1,42 @@
 # Character Restore Copy Audit
 
+## Update, 2026-11-11: the late pass is gone
+
+The audit below describes a restore that rebuilt shots and effects through
+native factories between the early and late character passes. That
+reconstruction was removed when shots and effects became retained objects
+restored in place, which left four native calls between the two passes:
+
+| Call | Writes |
+| --- | --- |
+| `nCollision::cCollisionNode::copyFrom` `0x1405A4DA0` | The node's flags, edit DTI, bounds and colour, and each child through the child's own virtual copy (`+0x40`). |
+| `sHitSolver::resetActiveNodes` `0x140259E90` | The solver's active-node array and counter. |
+| `uModel::setMaterialStencilRefByIndex` `0x140200DB0` | `nDraw::Material` stencil references only. |
+| `Rollback_ClearStaleMaterialPointers` (ours) | Entries of the model's external material list. |
+
+Only `copyFrom` can reach character bytes, through a collision node's children
+(whether those are a character's inline `cHitPrimCapsule` records was not
+established). `uModel::setMotionList` `0x140529730`, called inside the region
+pass, writes `mpMotionList[n]` and each matching layer's `mState`.
+
+So `Rollback_RestoreSnapshot` now restores a character once:
+
+1. `setMotionList` when slot 2 changed, then every field
+   (`Rollback_RestoreCharacterFields` has no phase argument).
+2. After the collision clones: a roster character's capsule fields again, then
+   every collision parent reference.
+
+A roster character's five target payloads (`+64A0..`) are restored whether or
+not their reference could be, which the late pass used to do. The old and new
+kernels were compared on randomised bodies for every known character layout,
+both auxiliary actors, the weapon prefix and the shot prefix (52,800
+comparisons, identical). The rest of this document is the record of the earlier
+investigation and uses the old phase names.
+
+The model prefix below `+1450` is now one table, `ActorFieldRows` and
+`ActorMotionRows` in `rollback_character_restore.h`, with a column per owner
+(roster character, helper character, auxiliary actor, weapon, shot).
+
 Investigation, 2026-10-18. No production restore policy was changed. The measured
 copy-kernel experiments are in
 [`../tools/benchmark_character_restore.md`](../tools/benchmark_character_restore.md#layout-mechanism-experiments-2026-10-18).

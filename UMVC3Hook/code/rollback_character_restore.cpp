@@ -20,51 +20,13 @@ T Load(const uint8_t* bytes, size_t offset)
 }
 
 // One common kernel, independent of concrete DTI. Bounds are validated once at
-// entry. Embedded reference/collision repair remains at its existing phase in
-// rollback_restore.cpp; no owner, vtable, lock or callback is copied here.
-void ActorEarly(uint8_t* live, const uint8_t* saved, bool roster)
+// entry. Embedded reference/collision repair is in rollback_restore.cpp; no
+// owner, vtable, lock or callback is copied here. The model prefix below +1450
+// comes from the shared table in the header.
+void Common(uint8_t* live, const uint8_t* saved, bool roster)
 {
-    Copy<0x08, 0x08>(live, saved); // cUnit mRno, mUnitParam
-    if (roster) Copy<0x10, 0x04>(live, saved); // helpers keep lifecycle live
-    Copy<0x28, 0x10>(live, saved); // delta time and unit-group mask
-    // +18/+20/+38 list links, +40 coordinate parent remain live.
-    Copy<0x48, 0xB8>(live, saved); // uCoord selectors, vectors and matrices
-    // uBaseModel +100..510 is live render/resource ownership.
-    Copy<0x558, 0x08>(live, saved); // motion calculation/interpolation flags
-    Copy<0x1180, 0x30>(live, saved); // null scale, delta position/quaternion
-    Copy<0x1240, 0x10>(live, saved); // morph weights, not shader owners +1250
-    Copy<0x1260, 0x3F>(live, saved); // plane, waist/foot/IK scalar parameters
-    // cToonParam writer 140451410 / shader consumer 140451210. Inline visual
-    // parameters, excluding the vtable and the unknown +12E4..12EF gap.
-    Copy<0x12C8, 0x1C>(live, saved); // rim-light height limits, color factor, power
-    Copy<0x12F0, 0x10>(live, saved); // cut-in factor
-    Copy<0x1300, 0x08>(live, saved); // delta coefficients; +1308 mpOwner live
-    Copy<0x1310, 0x34>(live, saved); // animation requests, time/rate/wait/serial
-    // cActorGameModelAnm: vtable +1348, permanent resources +1360..1377,
-    // owner +1380 and borrowed command cursors +1390..13B0 are not scalars.
-    Copy<0x1350, 0x10>(live, saved); // animation numbers and execution flags
-    // Throw setup (140040754 -> 140042460) borrows the thrower's script in
-    // slot 3, without refcount changes. Rewind this mutable binding, including
-    // null, before its cursors; leaving it live suppressed cursor restoration
-    // across throws. Permanent resource replacements still reject cursors.
-    Copy<0x1378, 0x08>(live, saved);
-    bool sameResources = true;
-    for (size_t offset = 0x1360; offset < 0x1378; offset += 8)
-        sameResources &= Load<uint64_t>(live, offset) == Load<uint64_t>(saved, offset);
-    if (sameResources) {
-        Copy<0x1388, 0x30>(live, saved); // type/key and borrowed resource cursors
-    }
-    // +13B8..13BF remains unresolved. The return unit at +13D8 is resolved by
-    // identity after shot restore, with the other weak unit references.
-    Copy<0x13C0, 0x01>(live, saved); // mCngKey
-    Copy<0x13C4, 0x10>(live, saved); // compare registers, jump count, return flags
-    Copy<0x13E0, 0x08>(live, saved); // loop count/start frame
-}
-
-void CommonEarly(uint8_t* live, const uint8_t* saved, bool roster)
-{
-    ActorEarly(live, saved, roster);
-    Copy<0x1480, 0x08>(live, saved); // hip rate/offset, reapplied late
+    Rollback_RestoreActorFields(live, saved, roster ? ActorRoster : ActorCharacter);
+    Copy<0x1480, 0x08>(live, saved); // hip rate/offset
     Copy<0x14A0, 0x04>(live, saved); // constraint share flags
     // cChrNode +14B0..14EF is live intrusive topology.
     Copy<0x14F0, 0x40>(live, saved); // character/action/program/material flags
@@ -139,33 +101,6 @@ void CommonEarly(uint8_t* live, const uint8_t* saved, bool roster)
         Copy<0x1A4, 0x40>(dst, src); // per-line usage counts
         // +1E4 unresolved; six callbacks at +1E8 remain live.
     }
-}
-
-void CommonLate(uint8_t* live, const uint8_t* saved)
-{
-    // These writes intentionally repeat early state across native reconstruction.
-    for (size_t helper : {size_t(0x3BF0), size_t(0x3D60)}) {
-        Copy<0x68, 0x10>(live + helper, saved + helper); // uConstraint blend/order state
-        Copy<0x80, 0x10>(live + helper, saved + helper); // uConstraint blend/enable state
-    }
-    Copy<0x1480, 0x08>(live, saved);
-    Copy<0x1518, 0x18>(live, saved);
-    Copy<0x2AD8, 0x18>(live, saved); // combo matcher success scalars, no pointers
-    Copy<0x3F84, 0x18>(live, saved);
-    Copy<0x4D10, 0x100>(live, saved);
-    Copy<0x6350, 0x20>(live, saved);
-    Copy<0x6430, 0x2C>(live, saved);
-    for (size_t record = 0x6490; record < 0x6710; record += 0x80)
-        std::memcpy(live + record + 0x10, saved + record + 0x10, 0x70);
-    Copy<0x67F8, 0x10>(live, saved);
-    Copy<0x680D, 0x01>(live, saved);
-    Copy<0x6810, 0x11>(live, saved);
-    Copy<0x6828, 0x09>(live, saved);
-    Copy<0x6840, 0x80>(live, saved);
-    Copy<0x68C4, 0x02>(live, saved);
-    Copy<0x68C8, 0x14>(live, saved);
-    Copy<0x68E0, 0x10>(live, saved);
-    // No universal +68F0 write: this is a pointer for many concrete classes.
 }
 
 struct TailRange { uint64_t dti; uint32_t offset; uint32_t size; };
@@ -372,24 +307,18 @@ std::span<const uint32_t> Rollback_CharacterShotTailOffsets(uint64_t dti)
 
 CharacterRestoreStatus Rollback_RestoreAuxiliaryActor(
     void* destination, size_t destinationSize, const uint8_t* saved,
-    size_t savedSize, uint64_t dti, CharacterRestorePhase phase)
+    size_t savedSize, uint64_t dti)
 {
     if (dti != 0x140D455B0 && dti != 0x140D45638)
         return CharacterRestoreStatus::UnsupportedLayout;
     if (!destination || !saved || destinationSize < 0x14D0 || savedSize < 0x14D0)
         return CharacterRestoreStatus::InvalidBuffer;
     auto* live = static_cast<uint8_t*>(destination);
-    // King Kobun factories hide/position this retained actor. Reapply only
-    // pose/visibility after reconstruction, not interpreter or motion history.
-    Copy<0x10, 4>(live, saved);
-    Copy<0x48, 0xB8>(live, saved);
-    Copy<0x11C, 4>(live, saved); // draw layer mask
-    Copy<0x180, 4>(live, saved); // transparency
-    if (phase == CharacterRestorePhase::Late) return CharacterRestoreStatus::ReviewedSubset;
     // The owning fighter slot and vtable are validated by integration. These
-    // actors have no character constraints/ability at the same offsets.
-    ActorEarly(live, saved, true);
-    Rollback_RestoreModelMotions(live, saved);
+    // actors have no character constraints/ability at the same offsets. King
+    // Kobun factories hide and position this retained actor, so its visibility
+    // and pose are in its table rows.
+    Rollback_RestoreActorFields(live, saved, ActorAuxiliary);
     Copy<0x1470, 9>(live, saved); // horizontal velocity, acceleration, crossing latch
     Copy<0x147C, 9>(live, saved); // vertical equivalents; +1488 parent stays live
     Copy<0x1490, 0x3C>(live, saved); // tuning, timers, state and parent-action history
@@ -475,25 +404,9 @@ std::span<const uint32_t> Rollback_CharacterHelperTailOffsets(uint64_t dti)
     }
 }
 
-void Rollback_RestoreModelMotions(void* destination, const uint8_t* saved)
-{
-    auto* live = static_cast<uint8_t*>(destination);
-    for (size_t base = 0x560; base < 0x1160; base += 0x180) {
-        Copy<0x08, 0xD8>(live + base, saved + base); // playback and root-motion history
-        // initVectorTrackSampler 14079F7E0/sample 14079F5D0: each sampler owns
-        // no storage, but borrows track +00 and segment +10 from rMotionList.
-        Copy<0xE0, 0x40>(live + base, saved + base); // two samplers: bindings AND cursors
-        Copy<0x120, 0x40>(live + base, saved + base); // four event bindings and sequence history
-        // setupMotionParam 14052A880 binds count and descriptor together;
-        // calcKeyFrame 1405260B0 consumes both with the retained work slice.
-        Copy<0x168, 0x10>(live + base, saved + base); // count/padding and borrowed mpKeyFrameInfo
-        // +000 vtable, +160 mJoint and +178 mpKeyFrameData remain live.
-    }
-}
-
 CharacterRestoreStatus Rollback_RestoreCharacterFields(
     void* destination, size_t destinationSize, const uint8_t* saved,
-    size_t savedSize, uint64_t dti, bool roster, CharacterRestorePhase phase)
+    size_t savedSize, uint64_t dti, bool roster)
 {
     if (!destination || !saved || destinationSize < ROLLBACK_CHARACTER_COMMON_SIZE ||
         savedSize < ROLLBACK_CHARACTER_COMMON_SIZE)
@@ -519,9 +432,8 @@ CharacterRestoreStatus Rollback_RestoreCharacterFields(
             return CharacterRestoreStatus::InvalidBuffer;
     }
     auto* live = static_cast<uint8_t*>(destination);
-    if (phase == CharacterRestorePhase::Early) CommonEarly(live, saved, roster);
-    else CommonLate(live, saved);
-    if (phase == CharacterRestorePhase::Early && dti == 0x140D45CF8 &&
+    Common(live, saved, roster);
+    if (dti == 0x140D45CF8 &&
         Load<uint64_t>(live, 0x6970) == Load<uint64_t>(saved, 0x6970)) {
         // Embedded uMaterialVjobAnimation at +6930. Preserve its target,
         // controller parents and StringHandles; only rewind matching bindings.
@@ -542,16 +454,7 @@ CharacterRestoreStatus Rollback_RestoreCharacterFields(
         if (callback == 0x14010BB40 || callback == 0x14010BC20)
             Copy<0x128, 8>(live + helper, saved + helper);
     }
-    // Preserve the existing phase contract: tails were early-only except for
-    // the old universal +68F0 dword. Reapply only its reviewed scalar portion,
-    // never the reference at that offset in a different concrete layout.
-    for (size_t i = first; i < end; ++i) {
-        const auto& range = tails[i];
-        if (phase == CharacterRestorePhase::Early)
-            std::memcpy(live + range.offset, saved + range.offset, range.size);
-        else if (range.offset == 0x68F0)
-            std::memcpy(live + range.offset, saved + range.offset,
-                        range.size < 4 ? range.size : 4);
-    }
+    for (size_t i = first; i < end; ++i)
+        std::memcpy(live + tails[i].offset, saved + tails[i].offset, tails[i].size);
     return CharacterRestoreStatus::ReviewedSubset;
 }

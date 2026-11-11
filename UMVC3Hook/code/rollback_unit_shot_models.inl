@@ -123,7 +123,7 @@ bool RestoreDrivenModel(const ModelUnitState& saved, uint32_t bit)
     // cursors would index them. Leave its animation live and rewind the rest.
     const bool storage = SameModelStorage(live, body);
     if (storage) {
-        RestoreActorModelFields(live, body);
+        Rollback_RestoreActorFields(live, body, ActorShot);
         for (size_t i = 1; i < saved.spans.size(); ++i) {
             const auto& span = saved.spans[i];
             std::memcpy(span.address, saved.payload.data() + span.offset, span.size);

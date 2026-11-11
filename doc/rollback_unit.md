@@ -381,8 +381,8 @@ dead pointer, and the cart stayed in phase 0 on the peer that had rolled back.
 - Capture: every live model named by a shot's typed references or tail. Body
   image, joint / depth / interpolation / motion-work / keyframe buffers, control
   words, delta time and scheduler groups.
-- Restore: the actor prefix through `RestoreActorModelFields` (the same reviewed
-  ranges the shot kernel uses below `+1450`), buffer contents, and the lifecycle
+- Restore: the actor prefix through the `ActorShot` column of the shared model-prefix
+  table in `rollback_character_restore.h` (the ranges the shot kernel uses below `+1450`), buffer contents, and the lifecycle
   words `+1CC0..+1D00`. Scheduler membership and revival of a model that retired
   since the frame follow the attack-space path.
 - A model whose buffer pointers or counts changed since the snapshot keeps its
