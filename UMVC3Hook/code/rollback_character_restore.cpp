@@ -113,7 +113,7 @@ void CommonEarly(uint8_t* live, const uint8_t* saved, bool roster)
     Copy<0x4D10, 0x100>(live, saved); // capsule position history
     Copy<0x6340, 0xE8>(live, saved); // push vectors, collision sets, damage state
     // +6428 mpLastCreateShot is a weak unit reference: resolved by identity after
-    // shot restore (LifetimeTrace_ResolveUnitReference), never copied here.
+    // shot restore (RollbackUnit_ResolveUnitReference), never copied here.
     Copy<0x6430, 0x2C>(live, saved); // shot group/serial/hit latches
     // +6460 critical section, +6488 unknown, target references +6490 onward,
     // callbacks +6738/+6740, auxiliary owners +6748 and CPU +67F0 stay live.

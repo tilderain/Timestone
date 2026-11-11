@@ -106,8 +106,8 @@ ShotCpuRestoreStatus RestoreShotCpuFields(void* destination, size_t destinationS
 // Validating an outer allocation lease is not publication of its dependencies.
 [[maybe_unused]] ShotCpuRestoreStatus StageShotCpuFields(const Identity& owner, const ShotState& saved, uint32_t bit)
 {
-    LifetimeFailureScope failureScope("shot.cpu.stage", owner.object, owner.id);
-    LIFE_REQUIRE(saved.payloadState == LifetimeShotPayload::Capture);
+    RollbackUnitFailureScope failureScope("shot.cpu.stage", owner.object, owner.id);
+    LIFE_REQUIRE(saved.payloadState == RollbackUnitShotPayload::Capture);
     LIFE_REQUIRE(owner.kind == Kind::Shot && saved.id == owner.id && bit && !(bit & (bit - 1)) &&
         (owner.snapshots & bit) && !(owner.occupancy != Occupancy::Live && owner.occupancy != Occupancy::Quarantined));
     const ShotSpan* body = &ShotBodySpan(saved, owner.object);
@@ -117,7 +117,7 @@ ShotCpuRestoreStatus RestoreShotCpuFields(void* destination, size_t destinationS
     LIFE_REQUIRE(slot < ROLLBACK_WINDOW);
     AcquireSRWLockExclusive(&g_lock);
     const auto* manifest = g_liveSnapshots[slot];
-    LIFE_REQUIRE(manifest && manifest->valid && manifest->shotPayload == LifetimeShotPayload::Capture &&
+    LIFE_REQUIRE(manifest && manifest->valid && manifest->shotPayload == RollbackUnitShotPayload::Capture &&
         std::any_of(manifest->shots.begin(), manifest->shots.end(),
             [&](const ShotState& shot) { return &shot == &saved; }));
     VisitShotUnitReferences(saved.payload.data() + body->memory.offset, [&](size_t, void* object) {

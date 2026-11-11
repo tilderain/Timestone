@@ -1,5 +1,5 @@
 #include "../pch.h"
-#include "lifetime_trace.h"
+#include "rollback_unit.h"
 
 #include "rollback_snapshot.h"
 #include "rollback_capture_set.h"
@@ -1109,8 +1109,8 @@ void Rollback_SaveSnapshot(int32_t frame)
     LagDiagnosticScope diagnostic(g_isResimulating ? LagMetric::SaveResim : LagMetric::SaveLive);
     {
         LagDiagnosticScope dropDiagnostic(LagMetric::SaveLifetimeDrop);
-        LifetimeTrace_DropSnapshot(frame); // Invalidate observation before any slot mutation/failure.
-        LifetimeTrace_Marker("snapshot_request", frame);
+        RollbackUnit_DropSnapshot(frame); // Invalidate observation before any slot mutation/failure.
+        RollbackUnit_Marker("snapshot_request", frame);
     }
     LagDiagnosticScope diagnosticStage(LagMetric::SaveRegions);
     const uint64_t benchmarkStart = LiveBenchmark_Now();
@@ -1310,13 +1310,13 @@ void Rollback_SaveSnapshot(int32_t frame)
     // bytes. Retention leases are captured either way.
 #if ROLLBACK_SNAPDUMP_ENABLED
     const auto shotPayload = SAVED_SHOT_RESTORE_ENABLED || captureSnapDump
-        ? LifetimeShotPayload::Capture : LifetimeShotPayload::Omit;
+        ? RollbackUnitShotPayload::Capture : RollbackUnitShotPayload::Omit;
 #else
-    const auto shotPayload = SAVED_SHOT_RESTORE_ENABLED ? LifetimeShotPayload::Capture : LifetimeShotPayload::Omit;
+    const auto shotPayload = SAVED_SHOT_RESTORE_ENABLED ? RollbackUnitShotPayload::Capture : RollbackUnitShotPayload::Omit;
 #endif
     {
         LagDiagnosticScope lifetimeDiagnostic(LagMetric::SaveLifetime);
-        LifetimeTrace_SaveSnapshot(frame, slot.lifetime, shotPayload);
+        RollbackUnit_SaveSnapshot(frame, slot.lifetime, shotPayload);
     }
 #if ROLLBACK_SNAPDUMP_ENABLED
     if (captureSnapDump) {
@@ -1396,7 +1396,7 @@ extern "C" bool Rollback_GetSnapshotInputs(int32_t frame, uint32_t* outLocal, ui
 
 void Rollback_FreeSnapshots()
 {
-    LifetimeTrace_ClearSnapshots();
+    RollbackUnit_ClearSnapshots();
     // Restore native calls before releasing snapshot storage.
     Rollback_PatchSleep(false);
     Rollback_PatchPresent(false);

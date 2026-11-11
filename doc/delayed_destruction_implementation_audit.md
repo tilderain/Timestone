@@ -145,7 +145,7 @@ primitives `0x70`, and capsule primitives `0xB0`. Shot ID/team are dwords at
 clear `0x140151490` before collision/resource release. These helpers can be
 detoured instead of patching the base-destructor instruction range, but ID-clear
 suppression must be scoped to the exact currently collecting shot's base
-destructor, including nested destruction. `lifetime_trace.cpp` now implements
+destructor, including nested destruction. `rollback_unit.cpp` now implements
 this scoped suppression for terminal shot/model retention, with concrete
 deleting-target detours registered after factory return. This does not implement
 the collision/model replacement adapters described elsewhere in this audit.

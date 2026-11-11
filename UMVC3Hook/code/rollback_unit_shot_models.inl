@@ -89,7 +89,7 @@ void CollectDrivenModels(SnapshotManifest& manifest, const Identity& owner, uint
 // Unit fence held, recorder lock released: plain copies of quiescent memory.
 void CaptureDrivenModel(const Identity& model, ModelUnitState& saved)
 {
-    LifetimeFailureScope failureScope("model.capture", model.object, model.id);
+    RollbackUnitFailureScope failureScope("model.capture", model.object, model.id);
     saved.object = model.object; saved.id = model.id; saved.vtable = Read<uintptr_t>(model.object, 0);
     saved.extent = model.extent;
     std::memcpy(saved.control, static_cast<uint8_t*>(model.object) + 8, sizeof(saved.control));

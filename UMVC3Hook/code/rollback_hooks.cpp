@@ -12,7 +12,7 @@
 #include "rollback_profile.h"
 #include "live_benchmark.h"
 #include "lag_diagnostics.h"
-#include "lifetime_trace.h"
+#include "rollback_unit.h"
 #include "steam_lobby.h"
 #include "gameplay_hooks.h"
 #include "xinput_discovery.h"
@@ -207,9 +207,9 @@ static void __fastcall hkCChrSetPos(uint64_t character, const float* position)
 
 static void __fastcall hkMvc3MainMove(uint64_t main)
 {
-    LifetimeTrace_SetFrame(g_isResimulating ? g_resimulateCurrentFrame : Controller_GetNetFrameCount(),
+    RollbackUnit_SetFrame(g_isResimulating ? g_resimulateCurrentFrame : Controller_GetNetFrameCount(),
                            g_isResimulating);
-    LifetimeTrace_Flush();
+    RollbackUnit_Flush();
     if (!GameplayHooks_IsActive()) {
         (*g_originalMvc3MainMove)(main);
         return;
@@ -807,7 +807,7 @@ static bool DisableNativeNetworkFrameUpdates()
 
 void Rollback_InitMainHooks(RollbackMainMoveFn* originalMove)
 {
-    LifetimeTrace_Install();
+    RollbackUnit_Install();
     XInputDiscovery_Init();
     HookLog("Native network: component/agent/ranking/room frame updates %s\n",
             DisableNativeNetworkFrameUpdates() ? "disabled (12-byte patch)" : "patch failed");

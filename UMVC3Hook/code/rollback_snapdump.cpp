@@ -20,7 +20,7 @@ int32_t g_pendingDesyncCaptureFrame = -1;
 #include "netplay.h"
 #include "rollback_diagnostics.h"
 #include "rollback_snapshot.h"
-#include "lifetime_trace.h"
+#include "rollback_unit.h"
 
 #include <algorithm>
 #include <cerrno>
@@ -102,7 +102,7 @@ struct HistoryFrame {
     size_t regionOffset = 0;
     size_t capacity = 0;
     uint8_t* storage = nullptr;
-    std::shared_ptr<LifetimeSnapshot> lifetime;
+    std::shared_ptr<RollbackUnitSnapshot> lifetime;
 };
 
 struct CapturedRegion {
@@ -186,7 +186,7 @@ bool CreateParentDirectories(char* path)
 } // namespace
 
 uint8_t* SnapDump_AcquireSnapshotStorage(int32_t frame, size_t byteSize,
-    int regionCount, size_t* capacity, std::shared_ptr<LifetimeSnapshot>* lifetime)
+    int regionCount, size_t* capacity, std::shared_ptr<RollbackUnitSnapshot>* lifetime)
 {
     if (capacity) *capacity = 0;
     if (frame < 0 || byteSize == 0 || regionCount <= 0) return nullptr;
@@ -419,7 +419,7 @@ bool SnapDump_WriteHistory(int32_t triggerFrame, const char* relativePath)
             std::vector<uint8_t>& data;
             std::vector<RegionHeader>& regions;
         } output{data, regions};
-        const auto counts = LifetimeTrace_VisitSnapshot(frame->frame, frame->lifetime.get(), frame == frames.back(),
+        const auto counts = RollbackUnit_VisitSnapshot(frame->frame, frame->lifetime.get(), frame == frames.back(),
             [](void* context, const char* name, const void* address, uint64_t ownerSlot,
                uint64_t vtable, const void* bytes, size_t size) {
                 auto& out = *static_cast<Output*>(context);

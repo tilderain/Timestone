@@ -3,8 +3,8 @@
 The native-mock suites compile one sanitizer build per test method, so a serial
 run is bound by compiler time. Each method runs in its own process here.
 
-    python3 tools/run_tests_parallel.py tools.test_lifetime_trace [more modules...]
-    python3 tools/run_tests_parallel.py -k payload tools.test_lifetime_trace
+    python3 tools/run_tests_parallel.py tools.test_rollback_unit [more modules...]
+    python3 tools/run_tests_parallel.py -k payload tools.test_rollback_unit
 """
 
 import argparse

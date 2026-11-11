@@ -1,5 +1,5 @@
 #include "../pch.h"
-#include "lifetime_trace.h"
+#include "rollback_unit.h"
 
 #include "rollback_restore.h"
 #include "rollback_cleanup.h"
@@ -423,7 +423,7 @@ void Rollback_RestoreCollisionNodeClones(RollbackSnapshotSlot& slot)
 
 void Rollback_RestoreSnapshot(int32_t frame)
 {
-    LifetimeTrace_Marker("restore_request", frame);
+    RollbackUnit_Marker("restore_request", frame);
     LagDiagnosticScope diagnostic(LagMetric::Restore);
     LagDiagnosticScope diagnosticStage(LagMetric::RestoreSetup);
     const uint64_t benchmarkStart = LiveBenchmark_Now();
@@ -443,8 +443,8 @@ void Rollback_RestoreSnapshot(int32_t frame)
 
     // Everything below rewrites live region memory behind the save's back.
     SnapshotReuse_BeginRestore();
-    LifetimeTrace_WaitForRenderWorker();
-    LifetimeTrace_CheckSnapshot(frame);
+    RollbackUnit_WaitForRenderWorker();
+    RollbackUnit_CheckSnapshot(frame);
     uint32_t savedGlobalRng[4] = {};
     bool foundGlobalRng = false;
     size_t globalRngOffset = 0;
@@ -1315,11 +1315,11 @@ void Rollback_RestoreSnapshot(int32_t frame)
     {
         // Nested inside restore_late, which reports only its own remainder as self time.
         LagDiagnosticScope lifetimeStage(LagMetric::RestoreWithdraw);
-        LifetimeTrace_RetireFutureShots(frame);
+        RollbackUnit_RetireFutureShots(frame);
         lifetimeStage.Next(LagMetric::RestoreEffects);
-        LifetimeTrace_RestoreEffects(frame);
+        RollbackUnit_RestoreEffects(frame);
         lifetimeStage.Next(LagMetric::RestoreShots);
-        LifetimeTrace_RestoreShots(frame);
+        RollbackUnit_RestoreShots(frame);
     }
 
     // Characters hold weak references to their shots and effects (Amaterasu's
@@ -1345,7 +1345,7 @@ void Rollback_RestoreSnapshot(int32_t frame)
                     void* liveUnit = nullptr;
                     std::memcpy(&savedUnit, saved + field, sizeof(savedUnit));
                     std::memcpy(&liveUnit, character + field, sizeof(liveUnit));
-                    void* unit = LifetimeTrace_ResolveUnitReference(frame, savedUnit, liveUnit);
+                    void* unit = RollbackUnit_ResolveUnitReference(frame, savedUnit, liveUnit);
                     std::memcpy(character + field, &unit, sizeof(unit));
                 };
                 resolve(0x13D8); // Animation-command return unit.

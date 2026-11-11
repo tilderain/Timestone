@@ -48,7 +48,7 @@ void RegisterConstraint(void* object)
 void __fastcall InitializeConstraint(void* object)
 {
     oInitializeConstraint(object);
-    if (!g_lifetimeEnabled.load(std::memory_order_relaxed)) return;
+    if (!g_rollbackUnitEnabled.load(std::memory_order_relaxed)) return;
     AcquireSRWLockExclusive(&g_lock);
     RegisterConstraint(object);
     ReleaseSRWLockExclusive(&g_lock);
@@ -78,13 +78,13 @@ template<class Visit> void VisitShotConstraintModels(const Identity& owner,
     auto* joints = Read<uint8_t*>(owner.object, 0x538);
     const uint32_t count = joints ? Read<uint32_t>(joints - 0x10, 0) : 0;
     if (count > 65536) {
-        LifetimeFailureScope failureScope("shot.constraint_dependencies.capture", owner.object, owner.id);
+        RollbackUnitFailureScope failureScope("shot.constraint_dependencies.capture", owner.object, owner.id);
         LIFE_FAIL("constraint dependency scan found an invalid joint allocation count",
             LIFE_VALUE(owner.object), LIFE_VALUE(owner.id), LIFE_VALUE(owner.extent), LIFE_VALUE(joints), LIFE_VALUE(count));
     }
     // Every node below must be a registered constraint: with none, nothing to visit.
     if (sortedConstraints.empty()) return;
-    LifetimeFailureScope failureScope("shot.constraint_dependencies.capture", owner.object, owner.id);
+    RollbackUnitFailureScope failureScope("shot.constraint_dependencies.capture", owner.object, owner.id);
     // Capture-fence scratch, reused across shots and frames.
     static std::vector<void*> nodes;
     static ScratchSet appended;
@@ -113,7 +113,7 @@ template<class Visit> void VisitShotConstraintModels(const Identity& owner,
 
 void CaptureShotConstraints(SnapshotManifest& saved)
 {
-    LifetimeFailureScope failureScope("shot.constraints.capture", nullptr, 0, saved.frame);
+    RollbackUnitFailureScope failureScope("shot.constraints.capture", nullptr, 0, saved.frame);
     saved.constraints.clear();
     saved.constraintsComplete = true;
     AcquireSRWLockExclusive(&g_lock);
@@ -205,12 +205,12 @@ struct ShotConstraintPlan {
 // until commit, so displaced current poses remain owned by their generations.
 [[maybe_unused]] ShotConstraintPlan PrepareShotConstraintGraph(const SnapshotManifest& saved, uint32_t bit)
 {
-    LifetimeFailureScope failureScope("shot.constraints.prepare", nullptr, 0, saved.frame);
+    RollbackUnitFailureScope failureScope("shot.constraints.prepare", nullptr, 0, saved.frame);
     UnitGuard fence;
     ShotConstraintPlan plan;
     plan.saved = &saved; plan.bit = bit; plan.captureId = saved.captureId;
     plan.manager = saved.unitManager; plan.frame = saved.frame; plan.thread = saved.thread;
-    LIFE_REQUIRE(saved.shotPayload == LifetimeShotPayload::Capture);
+    LIFE_REQUIRE(saved.shotPayload == RollbackUnitShotPayload::Capture);
     LIFE_REQUIRE(saved.valid && fence.manager && saved.unitManager == fence.manager &&
         saved.thread == GetCurrentThreadId() && bit && !(bit & (bit - 1)));
     const unsigned slot = unsigned((saved.frame % ROLLBACK_WINDOW + ROLLBACK_WINDOW) % ROLLBACK_WINDOW);
@@ -352,7 +352,7 @@ struct ShotConstraintPlan {
 
 [[maybe_unused]] void StageShotConstraintGraph(const ShotConstraintPlan& plan)
 {
-    LifetimeFailureScope failureScope("shot.constraints.stage", nullptr, 0, plan.frame);
+    RollbackUnitFailureScope failureScope("shot.constraints.stage", nullptr, 0, plan.frame);
     UnitGuard fence;
     LIFE_REQUIRE(plan.saved && fence.manager && fence.manager == plan.manager && plan.thread == GetCurrentThreadId());
     AcquireSRWLockExclusive(&g_lock);

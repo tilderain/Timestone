@@ -7,7 +7,7 @@ This is not a claim that shot restore is implemented or runtime validated.
 
 ## Implementation Status
 
-`lifetime_shot_generations.inl` now replaces the unfinished per-allocation ledger.
+`rollback_unit_shot_generations.inl` now replaces the unfinished per-allocation ledger.
 Snapshots hold generation IDs and one rollback-slot mask per ownership domain:
 
 - Model pose: joint vector, depth table, interpolation and palette reservation.
@@ -61,14 +61,14 @@ historical pointers; there is no silent restore skip or character whitelist.
 Palette reservations remain held until physical pose collection, so logical
 palette-capacity closure is not yet established.
 
-2026-11-09 follow-up: `lifetime_shot_world.inl` now withdraws abandoned future
+2026-11-09 follow-up: `rollback_unit_shot_world.inl` now withdraws abandoned future
 shots at the live frame-restore boundary, before effect restoration. It releases
 their exact native list/ID registrations, filters pending queue pairs, rewinds
 the ID cursor and shot-spawn flags, detaches constructed embedded constraints,
 and fences transient collision references before withdrawal/collection. Native
 continuous registrations are preserved and explicitly checked for unsupported
 future-root membership. Known native borrowers can continue to retain withdrawn
-storage after its snapshot leases expire. See `lifetime_trace.md` for the precise
+storage after its snapshot leases expire. See `rollback_unit.md` for the precise
 coverage. The original reproduction was the abandoned Hyper Mystic Blast beam.
 This does not install historical saved-shot bodies, restore a saved quarantined
 shot's dependency graph, or make the storage stage safe to publish on its own.
@@ -131,7 +131,7 @@ restore adapters**:
   separately after coherent reattachment. Do not refresh by calling model move:
   that advances motion, and may apply constraints twice to saved matrices.
 
-The new `lifetime_shot_cpu.inl` component restores reviewed common scalar fields
+The new `rollback_unit_shot_cpu.inl` component restores reviewed common scalar fields
 without presentation ownership or pointer heuristics. Its retained-pose/native-mock
 regression verifies timer `11 -> 3 -> 4` across restore/replay, along with position,
 life, attack clocks and phase. `shot_cpu_restore.md` records the exact schema and
@@ -346,7 +346,7 @@ whole-shot publication is enabled.
 The follow-up implementation now hooks that initializer and observed primary
 `MtObject` teardown (`1409BFE90`), rather than only the base ctor/dtor. Immutable
 common-chain capture and a tested exact graph/cache stage are implemented in
-`lifetime_shot_constraints.inl`; see `shot_constraint_restore.md`. It preserves
+`rollback_unit_shot_constraints.inl`; see `shot_constraint_restore.md`. It preserves
 native order (including non-contiguous indices), performs no relink/sort/evaluation,
 and rejects missing lifetime or external-pose proof before writes. This closes
 the audited common graph component, not foreign physical-owner retention, derived

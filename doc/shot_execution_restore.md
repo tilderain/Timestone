@@ -63,7 +63,7 @@ restore. The unit critical section is not a substitute for render completion.
 outstanding when pacing polls completion and sees `WAIT_TIMEOUT`. Thus a worker
 can survive into the next input hook even though unit jobs have completed.
 
-`LifetimeTrace_WaitForRenderWorker` checks renderer singleton `140E179A8`, active
+`RollbackUnit_WaitForRenderWorker` checks renderer singleton `140E179A8`, active
 frame byte `38` and latched threading byte `3E`. Only when both are set does it
 call `sRender::sync` (`140541030`). That branch waits on completion handle `100`
 and clears `38`; it does not execute inline playback. Configured threading byte

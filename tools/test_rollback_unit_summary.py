@@ -2,7 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from tools.lifetime_trace_summary import summarize
+from tools.rollback_unit_summary import summarize
 
 
 class LifetimeSummaryTests(unittest.TestCase):
