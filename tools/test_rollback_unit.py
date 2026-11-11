@@ -566,10 +566,14 @@ void SaveTestSnapshot(int32_t frame) {
 
     @classmethod
     def _unit(cls, config, cases):
-        enabled, quarantine, _ = config
+        enabled, quarantine, _, *rest = config
+        trace = rest[0] if rest else True  # Most checks assert on trace events.
         header = (ROOT / "UMVC3Hook/code/rollback_unit.h").read_text()
         header = header.replace("#pragma once", "").replace(
             "ROLLBACK_UNIT_ENABLED = true", f"ROLLBACK_UNIT_ENABLED = {str(enabled).lower()}")
+        if trace:
+            assert "ROLLBACK_UNIT_LOG_ENABLED = false" in header
+            header = header.replace("ROLLBACK_UNIT_LOG_ENABLED = false", "ROLLBACK_UNIT_LOG_ENABLED = true")
         header = header.replace("EMPTY_EFFECT_QUARANTINE_ENABLED = true",
                                 f"EMPTY_EFFECT_QUARANTINE_ENABLED = {str(quarantine).lower()}")
         source = (ROOT / "UMVC3Hook/code/rollback_unit.cpp").read_text()
@@ -646,9 +650,9 @@ int main(int argc, char** argv) {
         return exe
 
     def compile_run(self, enabled, checks, quarantine=True, expected_returncode=0, arguments=None,
-                    sanitizers="address,undefined"):
+                    sanitizers="address,undefined", trace=True):
         cls = RollbackUnitTests
-        config = (enabled, quarantine, sanitizers)
+        config = (enabled, quarantine, sanitizers, trace)
         checks = checks.replace("RollbackUnit_SaveSnapshot(", "SaveTestSnapshot(")
         runs = arguments if arguments is not None else [()]
         if getattr(self, "_collecting", False):
@@ -682,6 +686,52 @@ int main(int argc, char** argv) {
 
     def test_trace_and_native_passthrough(self):
         self.compile_run(True, CHECKS)
+
+    def test_tracer_off_keeps_lifetime_tracking(self):
+        # The shipped setting. Every other check builds with the tracer on.
+        self.compile_run(True, CHECKS[:CHECKS.index("int main() {")] + r"""
+int main() {
+    reset();
+    RollbackUnit_Install();
+    assert(creates == 30 && queues == 30 && g_rollbackUnitEnabled && !g_recording);
+    for (uintptr_t traceOnly : {uintptr_t(0x140016F20), uintptr_t(0x14051B9F0), uintptr_t(0x1405E6C40),
+                                uintptr_t(0x1405E4DB0), uintptr_t(0x14051A6B0), uintptr_t(0x1400604E0)})
+        assert(!std::count(mockQueuedTargets.begin(), mockQueuedTargets.end(), (void*)_addr(traceOnly)));
+    // Withdrawal and deferred deletion call sUnit::remove through this pointer.
+    assert((void*)oRemoveUnit == (void*)_addr(0x14051B9F0));
+    const int installLogs = logs;
+
+    uintptr_t shotVtable[] = {uintptr_t(+[](void* p, uint32_t) -> void* { return p; })};
+    uintptr_t vtable = uintptr_t(shotVtable);
+    std::memcpy(object, &vtable, sizeof(vtable));
+    oCreateShot = [](void*) -> void* { ++originalCalls; return object; };
+    assert(CreateShot((void*)99) == object && originalCalls == 1);
+    assert(Find(object, false) && Find(object, false)->id == 1 && Find(object, false)->kind == Kind::Shot);
+    oPublishShot = [](void*, uint32_t, void*) { ++originalCalls; };
+    PublishShot((void*)88, 9, object);
+    assert(Find(object, false)->shotLinked);
+    oShotResource = [](void* p, void*) { checkOriginal(p); };
+    ShotResource(object, (void*)55);
+    assert(Find(object, false)->revision == 0 && g_caller == 0);
+
+    // Base teardown still resolves the identity and retires it.
+    oShotDtor = [](void* p) { checkOriginal(p); assert(g_caller == 0); };
+    ShotDtor(object);
+    assert(!Find(object, false));
+    Birth(object, Kind::Effect);
+    assert(Find(object, false)->id == 2);
+    oEffectDtor = [](void* p) { checkOriginal(p); };
+    EffectDtor(object);
+    assert(!Find(object, false));
+
+    oMainReset = [](void*) { ++originalCalls; };
+    MainReset(object);
+    RollbackUnit_Marker("ignored", 1);
+    RollbackUnit_CheckSnapshot(1);
+    RollbackUnit_Flush();
+    assert(g_count == 0 && g_sequence == 0 && g_epoch == 0 && logs == installLogs);
+}
+""", trace=False)
 
     def test_failure_logs_ownership_values_without_relocking_recorder(self):
         result = self.compile_run(True, CHECKS[:CHECKS.index("int main() {")] + r'''

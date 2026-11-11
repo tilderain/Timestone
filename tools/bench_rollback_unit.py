@@ -269,7 +269,7 @@ def build(root, exe):
     harness.ROOT = root
     checks = harness.CHECKS[:harness.CHECKS.index("int main() {")] + BENCH
     checks = checks.replace("RollbackUnit_SaveSnapshot(", "SaveTestSnapshot(")
-    unit = harness.RollbackUnitTests._unit((True, True, ""), [checks])
+    unit = harness.RollbackUnitTests._unit((True, True, "", False), [checks])  # Shipped setting: tracer off.
     with tempfile.TemporaryDirectory(prefix="lifetime-bench-") as directory:
         cpp = Path(directory) / "bench.cpp"
         cpp.write_text(unit)

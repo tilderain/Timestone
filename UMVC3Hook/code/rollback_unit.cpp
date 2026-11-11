@@ -36,7 +36,7 @@ extern void HookLogTryWriteFatal(const char* text);
 namespace {
 constexpr size_t RegistrySize = 4096;
 constexpr size_t ProbeLimit = 32;
-constexpr size_t EventCapacity = 8192;
+constexpr size_t EventCapacity = ROLLBACK_UNIT_LOG_ENABLED ? 8192 : 1; // The ring exists only with the tracer.
 constexpr uint64_t CaptureLimit = 65536;
 constexpr uint64_t UnknownSampleLimit = 256;
 // Bounds on retained storage, not on what a frame may contain: a multi-shot
@@ -55,10 +55,13 @@ struct GeneratorLayout {
 GeneratorLayout g_generatorLayouts[64];
 size_t g_generatorLayoutCount = 0;
 thread_local uintptr_t g_caller = 0;
+// Tracer only: thread-local access is an emulated-TLS call in this toolchain.
 struct CallerScope {
-    uintptr_t previous = g_caller;
-    explicit CallerScope(uintptr_t caller) { g_caller = caller; }
-    ~CallerScope() { g_caller = previous; }
+    uintptr_t previous = 0;
+    explicit CallerScope([[maybe_unused]] uintptr_t caller) {
+        if constexpr (ROLLBACK_UNIT_LOG_ENABLED) { previous = g_caller; g_caller = caller; }
+    }
+    ~CallerScope() { if constexpr (ROLLBACK_UNIT_LOG_ENABLED) g_caller = previous; }
 };
 enum class Kind : uint8_t { Shot, Effect, Unit };
 enum class Occupancy : uint8_t { Empty, Live, Tombstone, Quarantined, Collecting };
@@ -574,6 +577,7 @@ Identity* Find(void* object, bool insert)
 void Push(const char* name, const Identity* identity, void* object,
           uint64_t a, uint64_t b, uint64_t c, uint64_t d, bool inspect, bool untracked = false)
 {
+    if constexpr (!ROLLBACK_UNIT_LOG_ENABLED) return;
     if (!g_recording.load(std::memory_order_relaxed)) return;
     const uint64_t sequence = ++g_sequence;
     if (g_count == EventCapacity) {
@@ -630,6 +634,7 @@ void Birth(void* object, Kind kind)
 uint64_t Record(const char* name, void* object, uint64_t a = 0, uint64_t b = 0,
                 uint64_t c = 0, uint64_t d = 0, bool reportUnknown = true)
 {
+    if constexpr (!ROLLBACK_UNIT_LOG_ENABLED) return 0;
     if (!g_rollbackUnitEnabled.load(std::memory_order_relaxed)) return 0;
     AcquireSRWLockExclusive(&g_lock);
     Identity* entry = Find(object, false);
@@ -649,6 +654,18 @@ uint64_t Record(const char* name, void* object, uint64_t a = 0, uint64_t b = 0,
             Push(name, nullptr, object, a, b, c, d, true, true);
         }
     }
+    ReleaseSRWLockExclusive(&g_lock);
+    return id;
+}
+
+// Identity of a tracked object, or 0. The teardown hooks need it whether or not
+// events are recorded.
+uint64_t TrackedId(void* object)
+{
+    if (!g_rollbackUnitEnabled.load(std::memory_order_relaxed)) return 0;
+    AcquireSRWLockExclusive(&g_lock);
+    const Identity* entry = Find(object, false);
+    const uint64_t id = entry ? entry->id : 0;
     ReleaseSRWLockExclusive(&g_lock);
     return id;
 }
@@ -676,6 +693,7 @@ void Destroyed(const char* name, void* object, uint64_t id)
 // 1=base teardown, 2=graph release, 3=collision release, 4=resource bind, 5=graph create.
 void Mutation(void* object, uint64_t reason)
 {
+    if constexpr (!ROLLBACK_UNIT_LOG_ENABLED) return; // Revisions are a trace diagnostic.
     if (!g_rollbackUnitEnabled.load(std::memory_order_relaxed)) return;
     AcquireSRWLockExclusive(&g_lock);
     Identity* entry = Find(object, false);
@@ -1469,7 +1487,7 @@ void* __fastcall DeleteEffect(void* effect, uint32_t flags)
             }
             Push("quarantine_skip", entry, effect, g_quarantined >= QuarantineLimit ? 2 : 1,
                  flags, EmptyEffectRejections(effect), Read<uint32_t>(effect, 0x130), true);
-            if (g_graphSamples < 64) {
+            if (ROLLBACK_UNIT_LOG_ENABLED && g_graphSamples < 64) {
                 void* node = Read<void*>(effect, 0x218);
                 // Sample native live nodes before any destructor runs, never historical pointers.
                 for (unsigned i = 0; node && i < 8 && g_graphSamples < 64; ++i) {
@@ -1608,7 +1626,8 @@ void __fastcall ShotDtor(void* shot)
     RollbackUnitFailureScope failureScope("shot.base_destructor", shot, ownerId);
     if (missedDeletingBoundary) LIFE_FAIL("leased shot reached base teardown without interception of derived deletion",
         LIFE_VALUE(shot), LIFE_VALUE(ownerId), LIFE_VALUE(snapshots));
-    const uint64_t id = Record("shot_base_begin", shot);
+    Record("shot_base_begin", shot);
+    const uint64_t id = TrackedId(shot);
     Mutation(shot, 1);
     void* previous = g_shotBase;
     g_shotBase = shot;
@@ -1620,7 +1639,8 @@ void (__fastcall* oEffectDtor)(void*) = nullptr;
 void __fastcall EffectDtor(void* effect)
 {
     const CallerScope caller(LIFE_CALLER());
-    const uint64_t id = Record("game_effect_base_begin", effect);
+    Record("game_effect_base_begin", effect);
+    const uint64_t id = TrackedId(effect);
     Mutation(effect, 1);
     oEffectDtor(effect);
     Destroyed("game_effect_base_end", effect, id);
@@ -1732,10 +1752,12 @@ void __fastcall MainReset(void* main)
 {
     const CallerScope caller(LIFE_CALLER());
     RollbackUnit_ClearSnapshots();
-    AcquireSRWLockExclusive(&g_lock);
-    ++g_epoch;
-    Push("main_reset_begin", nullptr, nullptr, uintptr_t(main), 0, 0, 0, false);
-    ReleaseSRWLockExclusive(&g_lock);
+    if constexpr (ROLLBACK_UNIT_LOG_ENABLED) {
+        AcquireSRWLockExclusive(&g_lock);
+        ++g_epoch;
+        Push("main_reset_begin", nullptr, nullptr, uintptr_t(main), 0, 0, 0, false);
+        ReleaseSRWLockExclusive(&g_lock);
+    }
     oMainReset(main);
     RollbackUnit_Marker("main_reset_end", -1);
 }
@@ -2020,7 +2042,7 @@ void RollbackUnit_WaitForRenderWorker()
 
 void RollbackUnit_CheckSnapshot(int32_t frame)
 {
-    if constexpr (!ROLLBACK_UNIT_ENABLED) return;
+    if constexpr (!ROLLBACK_UNIT_ENABLED || !ROLLBACK_UNIT_LOG_ENABLED) return;
     if (!g_recording.load(std::memory_order_relaxed)) return;
     const unsigned slot = unsigned((frame % ROLLBACK_WINDOW + ROLLBACK_WINDOW) % ROLLBACK_WINDOW);
     AcquireSRWLockExclusive(&g_lock);
@@ -2300,7 +2322,7 @@ void RollbackUnit_RestoreEffects(int32_t frame)
         Push("model_restored", models[i], saved.object, uint32_t(frame), revived, animation,
              Read<uint32_t>(saved.object, 0x1CF8), false);
     }
-    for (size_t i = 0; i < count; ++i) {
+    if constexpr (ROLLBACK_UNIT_LOG_ENABLED) for (size_t i = 0; i < count; ++i) {
         const auto& saved = manifest.effects[i];
         Push("retiring_state_restored", identities[i], saved.object, uint32_t(frame), wasHeld[i],
               saved.category, Read<uint32_t>(saved.object, 0x10) & 7, true);
@@ -2391,7 +2413,7 @@ void RollbackUnit_SetFrame(int32_t frame, bool resimulating)
 
 void RollbackUnit_Marker(const char* event, int32_t frame)
 {
-    if constexpr (!ROLLBACK_UNIT_ENABLED) return;
+    if constexpr (!ROLLBACK_UNIT_ENABLED || !ROLLBACK_UNIT_LOG_ENABLED) return;
     if (!g_recording.load(std::memory_order_relaxed)) return;
     AcquireSRWLockExclusive(&g_lock);
     Push(event, nullptr, nullptr, uint32_t(frame), 0, 0, 0, false);
@@ -2411,7 +2433,7 @@ bool RollbackUnit_FinishCapture()
 
 void RollbackUnit_WritePending(FILE* file)
 {
-    if constexpr (!ROLLBACK_UNIT_ENABLED) return;
+    if constexpr (!ROLLBACK_UNIT_ENABLED || !ROLLBACK_UNIT_LOG_ENABLED) return;
     if (!file) return;
     if (!TryAcquireSRWLockExclusive(&g_lock)) {
         std::fprintf(file, "lifetime pending: trace lock busy\n");
@@ -2453,6 +2475,7 @@ void RollbackUnit_Flush()
         CollectShotGenerations();
         CollectQuarantine();
     }
+    if constexpr (!ROLLBACK_UNIT_LOG_ENABLED) return; // No events exist to drain.
     // Fixed output budget. Native callbacks only append; no logging while holding g_lock.
     Event batch[256];
     AcquireSRWLockExclusive(&g_lock);
@@ -2466,7 +2489,6 @@ void RollbackUnit_Flush()
     const bool stopped = !g_recording.load(std::memory_order_relaxed) && g_sequence >= CaptureLimit;
     ValidateActiveSlots();
     ReleaseSRWLockExclusive(&g_lock);
-    if constexpr (!ROLLBACK_UNIT_LOG_ENABLED) return;
     for (size_t i = 0; i < count; ++i) {
         const Event& e = batch[i];
         HookLog("LIFE seq=%llu ms=%llu thread=%u frame=%d resim=%u epoch=%llu event=%s id=%llu kind=%s obj=0x%llX birthvt=0x%llX vt=0x%llX flags=0x%X a=0x%llX b=0x%llX c=0x%llX d=0x%llX untracked=%u caller=0x%llX snapshots=0x%X revision=%llu\n",
@@ -2511,6 +2533,14 @@ void RollbackUnit_Install()
         {0x140011660, (void*)&GenerationExtendArray, (void**)&oGenerationExtendArray},
         {0x1405A4420, (void*)&GenerationAddChild, (void**)&oGenerationAddChild},
     };
+    // Detours that only record events (and two cold diagnostics): kill, unlink,
+    // effect resource bind, graph restart, scheduler add, effect owner bind.
+    const auto installed = [](uintptr_t address) {
+        constexpr uintptr_t traceOnly[] = {0x140016F20, 0x14051B9F0, 0x1405E6C40, 0x1405E4DB0,
+                                           0x14051A6B0, 0x1400604E0};
+        return ROLLBACK_UNIT_LOG_ENABLED ||
+            std::find(std::begin(traceOnly), std::end(traceOnly), address) == std::end(traceOnly);
+    };
     bool complete = true;
     const struct { uintptr_t address; void* detour; void** original; } retentionHooks[] = {
         {0x140139E80, (void*)&DeleteEffect, (void**)&oDeleteEffect},
@@ -2532,6 +2562,7 @@ void RollbackUnit_Install()
     if constexpr (EMPTY_EFFECT_QUARANTINE_ENABLED) {
         // Deleting-hook enable is deferred until ALL trace/epoch hooks exist below.
         for (const auto& hook : retentionHooks) {
+            if (!installed(hook.address)) continue;
             const auto status = GameplayHooks_Create((void*)_addr(hook.address), hook.detour, hook.original);
             if (status != MH_OK) {
                 complete = false;
@@ -2541,6 +2572,7 @@ void RollbackUnit_Install()
         }
     }
     for (const auto& hook : hooks) {
+        if (!installed(hook.address)) continue;
         const auto status = GameplayHooks_Create((void*)_addr(hook.address), hook.detour, hook.original);
         if (status != MH_OK) {
             complete = false;
@@ -2550,17 +2582,19 @@ void RollbackUnit_Install()
     if (!complete) return; // No partial trace is enabled when creation failed.
     if constexpr (EMPTY_EFFECT_QUARANTINE_ENABLED) {
         for (const auto& hook : retentionHooks)
-            complete &= GameplayHooks_QueueEnable((void*)_addr(hook.address)) == MH_OK;
+            if (installed(hook.address)) complete &= GameplayHooks_QueueEnable((void*)_addr(hook.address)) == MH_OK;
     }
     for (const auto& hook : hooks)
-        complete &= GameplayHooks_QueueEnable((void*)_addr(hook.address)) == MH_OK;
+        if (installed(hook.address)) complete &= GameplayHooks_QueueEnable((void*)_addr(hook.address)) == MH_OK;
+    // sUnit::remove is called directly by withdrawal and deferred deletion.
+    if constexpr (!ROLLBACK_UNIT_LOG_ENABLED) oRemoveUnit = (bool (__fastcall*)(void*, void*))_addr(0x14051B9F0);
     releaseResourceRef = (void (__fastcall*)(void*))_addr(0x14050D5A0);
     collectModelGeneration = (void (__fastcall*)(void*))_addr(0x1401FF6B0);
     logicallyRetireJoints = (Deleting)_addr(0x140564900);
     retireParticleChild = (void (__fastcall*)(void*))_addr(0x1409727E0);
     oRemoveGroups = (void (__fastcall*)(void*, void*))_addr(0x14051BAF0);
     g_rollbackUnitEnabled.store(complete, std::memory_order_relaxed);
-    g_recording.store(complete, std::memory_order_relaxed);
+    g_recording.store(complete && ROLLBACK_UNIT_LOG_ENABLED, std::memory_order_relaxed);
     HookLog("RollbackUnit: queued=%d image_base=0x%llX limit=%llu ring=%zu registry=%zu empty_effect_quarantine=%d quarantine_limit=%zu effect_restore=%d ordinary_cpu_graphs=%d simulation_snapshots=%d shot_model_retention=%d future_shot_withdrawal=%d shot_presentation_live=1 shot_reference_leases=1 restore_render_drain=1 constraint_init_registry=1 constraint_graph_capture=1 lifetime_failure_log=1 saved_shot_restore=%d trace_log=%d; partial graph coverage\n",
             complete, uint64_t(_addr(0x140000000)), CaptureLimit, EventCapacity, RegistrySize,
             EMPTY_EFFECT_QUARANTINE_ENABLED, QuarantineLimit, EFFECT_RESTORE_ENABLED,

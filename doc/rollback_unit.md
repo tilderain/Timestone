@@ -8,11 +8,18 @@ installation. It is independent of `lagTest` and backend timing; neither needs
 to be enabled. All hooks belong to the existing gameplay-hook lifecycle, so
 Normal Launch disables them with the other gameplay hooks.
 
-`ROLLBACK_UNIT_LOG_ENABLED` in the same header (currently `false`), when true, writes the per-event
-`LIFE` and `LIFESTATS` lines to the hook log. Set it false and rebuild to
-silence only that output: events are still recorded and drained, so retention,
-restore, failure reports and the crash report's pending events keep working.
-The startup `RollbackUnit:` line reports the setting as `trace_log=`.
+`ROLLBACK_UNIT_LOG_ENABLED` in the same header (currently `false`) is the whole
+tracer. Off, the build has no event ring, no per-identity revisions, no caller
+attribution, no `LIFE` / `LIFESTATS` lines and no `LIFE_PENDING` crash section,
+and six detours that only record are not installed (unit kill `0x140016F20`,
+unlink `0x14051B9F0`, scheduler add `0x14051A6B0`, effect owner bind
+`0x1400604E0`, effect resource bind `0x1405E6C40`, graph restart `0x1405E4DB0`),
+leaving 30. Identities, snapshots, retention and restore are unaffected. The
+revision field in snapdump shot records and `native_caller` in
+`lifetime_failure.log` read 0. Every section below that describes events,
+counters or record formats applies only with the flag on. The unit tests build
+with it on; `test_tracer_off_keeps_lifetime_tracking` covers the shipped
+setting. The startup `RollbackUnit:` line reports it as `trace_log=`.
 
 `EMPTY_EFFECT_QUARANTINE_ENABLED = true` now enables the first narrow physical
 retention experiment described below. Set it false to return to trace-only

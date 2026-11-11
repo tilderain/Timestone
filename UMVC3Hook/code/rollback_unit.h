@@ -7,9 +7,11 @@
 
 // Development diagnostics. Native lifetime changes are controlled separately below.
 inline constexpr bool ROLLBACK_UNIT_ENABLED = true;
-// Writes the per-event LIFE and LIFESTATS lines to the hook log. Off silences
-// only that output: events are still recorded and drained, so restoration,
-// failure reports and the crash report's pending events are unaffected.
+// The lifetime tracer: the event ring, per-identity revisions, caller
+// attribution, the LIFE / LIFESTATS log lines, the crash report's pending
+// events, and six detours that only record (unit kill, unlink, scheduler add,
+// effect owner and resource bind, graph restart). Off compiles all of it out;
+// identities, snapshots, retention and restore do not depend on it.
 inline constexpr bool ROLLBACK_UNIT_LOG_ENABLED = false;
 // Master retention switch (historical name), including intact shot/model owners.
 // Snapshot ownership outlives trace recording.
