@@ -13,6 +13,11 @@
 struct RollbackUnitSnapshot;
 
 static constexpr int ROLLBACK_MAX_REGIONS = 2048;
+// Bound on walking one team's character list. The list holds the three fighters
+// and every helper they own (Felicia alone adds five), so a fixed 8 cut helpers
+// off: 18 per team were seen with three Felicias. A guard against a corrupt
+// list, not a roster size.
+static constexpr int ROLLBACK_MAX_TEAM_NODES = 64;
 
 struct RollbackSnapshotRange {
     uint32_t offset;

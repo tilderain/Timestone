@@ -231,7 +231,7 @@ static void CaptureCharacterPostState(RollbackSnapshotSlot& slot)
     for (int team = 0; sCharacter && team < 2; ++team) {
         uint64_t node = sCharacter + (team == 0 ? TEAM0_OFFSET : TEAM1_OFFSET) +
             TEAM_FIRST_NODE_OFFSET;
-        for (uint8_t member = 0; node && member < 8; ++member) {
+        for (uint8_t member = 0; node && member < ROLLBACK_MAX_TEAM_NODES; ++member) {
             uint64_t character = *(uint64_t*)(node + NODE_CHR_OFFSET);
             if (character == cachedCharacters[team])
                 slot.characterPost.cachedCharacterMembers[team] = member;
@@ -260,7 +260,7 @@ static void CaptureCharacterCollisionParentReferences(RollbackSnapshotSlot& slot
     uint64_t sCharacter = *(uint64_t*)_addr(PTR_SCHARACTER);
     if (!sCharacter) return;
 
-    RollbackCaptureSet<uint64_t, 2 * 16> capturedCharacters;
+    RollbackCaptureSet<uint64_t, 2 * ROLLBACK_MAX_TEAM_NODES> capturedCharacters;
     auto captureCharacter = [&](uint64_t character) {
         if (!character || !capturedCharacters.insert(character).second) return;
 
@@ -319,7 +319,7 @@ static void CaptureCharacterCollisionParentReferences(RollbackSnapshotSlot& slot
     for (int team = 0; team < 2; ++team) {
         uint64_t node = sCharacter + (team == 0 ? TEAM0_OFFSET : TEAM1_OFFSET) +
             TEAM_FIRST_NODE_OFFSET;
-        for (int safety = 16; node && safety-- > 0;) {
+        for (int safety = ROLLBACK_MAX_TEAM_NODES; node && safety-- > 0;) {
             captureCharacter(*(uint64_t*)(node + NODE_CHR_OFFSET));
             node = *(uint64_t*)(node + NODE_NEXT_OFFSET);
         }
@@ -1265,7 +1265,7 @@ void Rollback_SaveSnapshot(int32_t frame)
         uint64_t node = renderCharacterManager +
             (teamIndex == 0 ? TEAM0_OFFSET : TEAM1_OFFSET) +
             TEAM_FIRST_NODE_OFFSET;
-        for (int member = 0; node && member < 8; ++member) {
+        for (int member = 0; node && member < ROLLBACK_MAX_TEAM_NODES; ++member) {
             void* character = *(void**)(node + NODE_CHR_OFFSET);
             captureCharacterRenderState(character);
             node = *(uint64_t*)(node + NODE_NEXT_OFFSET);

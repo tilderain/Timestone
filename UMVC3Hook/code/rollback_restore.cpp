@@ -486,13 +486,13 @@ void Rollback_RestoreSnapshot(int32_t frame)
     uint64_t sCharacter = *(uint64_t*)_addr(PTR_SCHARACTER);
     uint64_t team0 = sCharacter ? sCharacter + TEAM0_OFFSET : 0;
     uint64_t team1 = sCharacter ? sCharacter + TEAM1_OFFSET : 0;
-    uint64_t teamCharacters[16] = {};
+    uint64_t teamCharacters[2 * ROLLBACK_MAX_TEAM_NODES] = {};
     size_t teamCharacterCount = 0;
     if (sCharacter) {
         for (int teamIndex = 0; teamIndex < 2; ++teamIndex) {
             uint64_t node = sCharacter + (teamIndex == 0 ? TEAM0_OFFSET : TEAM1_OFFSET) +
                 TEAM_FIRST_NODE_OFFSET;
-            for (int n = 0; node && n < 8; ++n) {
+            for (int n = 0; node && n < ROLLBACK_MAX_TEAM_NODES; ++n) {
                 uint64_t character = *(uint64_t*)(node + NODE_CHR_OFFSET);
                 if (character && teamCharacterCount < std::size(teamCharacters))
                     teamCharacters[teamCharacterCount++] = character;
@@ -602,7 +602,8 @@ void Rollback_RestoreSnapshot(int32_t frame)
                 ? sCharacter + (team == 0 ? TEAM0_OFFSET : TEAM1_OFFSET) +
                     TEAM_FIRST_NODE_OFFSET
                 : 0;
-            for (uint8_t member = 0; node && member <= savedMember && member < 8;
+            for (uint8_t member = 0; node && member <= savedMember &&
+                     member < ROLLBACK_MAX_TEAM_NODES;
                  ++member) {
                 if (member == savedMember)
                     character = *(uint64_t*)(node + NODE_CHR_OFFSET);
@@ -830,7 +831,7 @@ void Rollback_RestoreSnapshot(int32_t frame)
                 // Fall back to the live selection if the saved character is absent.
                 bool found = false;
                 uint64_t node = (uint64_t)slot.regions[i].ptr + TEAM_FIRST_NODE_OFFSET;
-                for (int n = 0; node && n < 8; ++n) {
+                for (int n = 0; node && n < ROLLBACK_MAX_TEAM_NODES; ++n) {
                     if (*(uint64_t*)(node + NODE_CHR_OFFSET) == restoredActive) {
                         found = true;
                         break;
