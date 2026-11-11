@@ -20,7 +20,8 @@ constexpr size_t MaterialControlOffset = 0xB40, MaterialActiveOffset = 0xB64;
 
 struct Owner {
     const uint8_t* body = nullptr;
-    bool changed = true;
+    int32_t parent = -1;  // The body this one is attached to; precedes it in g_owners.
+    bool changed = true;  // Own prefix, or the parent's.
     uint8_t changedSlots = 0xFF;
     uint8_t shadow[ActorPrefixSize];
 };
@@ -85,7 +86,10 @@ void UpdateOwners()
         }
         const bool head = SpanChanged(owner, 0, MotionSlotBase);
         const bool tail = SpanChanged(owner, MotionSlotEnd, ActorPrefixSize);
-        owner.changed = head || tail || owner.changedSlots;
+        // A weapon's pose follows the hand that holds it: its joints move with
+        // the character even when nothing in the weapon's own prefix does.
+        owner.changed = head || tail || owner.changedSlots ||
+            (owner.parent >= 0 && g_owners[owner.parent].changed);
     }
 }
 
@@ -154,6 +158,7 @@ void SnapshotReuse_SetPlan(const SnapshotReuseRegion* regions, int count)
     g_total = 0;
     if (!regions || count <= 0) return;
     g_items.reserve(size_t(count));
+    int32_t root = -1;
     for (int i = 0; i < count; ++i) {
         Item item;
         item.ptr = regions[i].ptr;
@@ -163,6 +168,9 @@ void SnapshotReuse_SetPlan(const SnapshotReuseRegion* regions, int count)
         if (regions[i].kind == SnapshotReuseKind::ActorBody && regions[i].size >= ActorPrefixSize) {
             Owner& owner = g_owners.emplace_back();
             owner.body = regions[i].ptr;
+            if (regions[i].index) owner.parent = root; else root = int32_t(g_owners.size() - 1);
+        } else if (regions[i].kind == SnapshotReuseKind::ActorBody && !regions[i].index) {
+            root = -1;  // A root too small to track: its attachments have no known parent.
         }
         g_items.push_back(item);
     }
@@ -263,13 +271,10 @@ size_t SnapshotReuse_Save(uint8_t* buffer)
         uint8_t* saved = buffer + item.offset;
         if (item.version && tag.version == item.version && tag.ptr == item.ptr &&
             tag.offset == item.offset && tag.size == item.size) {
-            if constexpr (SNAPSHOT_REUSE_MODE == SnapshotReuseMode::Validate) {
-                if (!std::memcmp(saved, item.ptr, item.size)) { reused += item.size; continue; }
-                ReportMismatch(item, saved, "save");
-            } else {
-                reused += item.size;
-                continue;
-            }
+            const bool validate = SNAPSHOT_REUSE_MODE == SnapshotReuseMode::Validate;
+            if ((!validate && item.kind != SnapshotReuseKind::MaterialTable) ||
+                !std::memcmp(saved, item.ptr, item.size)) { reused += item.size; continue; }
+            if (validate) ReportMismatch(item, saved, "save");
         }
         std::memcpy(saved, item.ptr, item.size);
         tag = {item.ptr, item.offset, item.size, item.version};

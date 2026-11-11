@@ -923,7 +923,7 @@ static void TraverseAndAddDynamicList(uint64_t listHead, size_t nextOffset,
                                 , "uChrWeapon"
 #endif
                             );
-                            reuse(reuseBefore, SnapshotReuseKind::ActorBody);
+                            reuse(reuseBefore, SnapshotReuseKind::ActorBody, 1); // Attached to this character.
 
                             uint32_t weaponJoints = read.operator()<uint32_t>(
                                 weapon + CCHR_NUM_JOINTS_OFFSET);

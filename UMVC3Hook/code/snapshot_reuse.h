@@ -18,16 +18,19 @@
 enum class SnapshotReuseMode {
     Off,       // Copy every region.
     Validate,  // Compare each region a signal calls unchanged; log and copy on a mismatch.
-    Trust,     // Skip without comparing.
+    Trust,     // Skip without comparing (material job tables are still compared).
 };
 inline constexpr SnapshotReuseMode SNAPSHOT_REUSE_MODE = SnapshotReuseMode::Validate;
 
 enum class SnapshotReuseKind : uint8_t {
     None,           // Always copied.
     ActorBody,      // uActorGameModel-derived body: always copied, owns the regions below.
-    Prefix,         // Unchanged while the owner's actor prefix is unchanged.
+                    // index 1: attached to the preceding index-0 body (a character's weapon).
+    Prefix,         // Unchanged while the owner's actor prefix, and that of the body it is
+                    // attached to, are unchanged.
     MotionBlend,    // Unchanged while the owner's motion slot record `index` is unchanged.
-    MaterialTable,  // Material job array `index`: unchanged while no job in it runs.
+    MaterialTable,  // Material job array `index`. The signal (no job running) is not
+                    // complete, so a skip is always confirmed by comparing, in every mode.
 };
 
 struct SnapshotReuseRegion {

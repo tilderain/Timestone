@@ -229,6 +229,42 @@ int main() {
 }
 ''')
 
+    def test_weapon_pose_follows_its_character(self):
+        self.run_native("Trust", r'''
+int main() {
+    // actors[1] is a weapon attached to actors[0].
+    build();
+    for (auto& region : plan)
+        if (region.ptr == actors[1].body.data()) region.index = 1;
+    SnapshotReuse_SetPlan(plan.data(), int(plan.size()));
+    std::vector<uint8_t> buffer(total);
+    SnapshotReuse_Save(buffer.data()); SnapshotReuse_Save(buffer.data());
+    // The character moves; the weapon's joints follow with its own prefix untouched.
+    ++actors[0].body[0x40]; ++actors[0].joints[0x20]; ++actors[1].joints[0xE0];
+    SnapshotReuse_Save(buffer.data());
+    assert(matches(buffer.data()));
+    // The reverse does not hold: a weapon's prefix says nothing about the character.
+    uint64_t before = SnapshotReuse_Stats().copiedBytes;
+    ++actors[1].body[0x40];
+    SnapshotReuse_Save(buffer.data());
+    const uint64_t copied = SnapshotReuse_Stats().copiedBytes - before;
+    assert(matches(buffer.data()) && copied == sizeof(misc) + 2 * BodySize + actors[1].joints.size());
+}
+''')
+
+    def test_material_table_skip_is_confirmed_in_every_mode(self):
+        self.run_native("Trust", r'''
+int main() {
+    build();
+    std::vector<uint8_t> buffer(total);
+    SnapshotReuse_Save(buffer.data()); SnapshotReuse_Save(buffer.data());
+    // Written with no job active and the control block untouched (seen in play at +0x40).
+    ++actors[0].table[0x40];
+    SnapshotReuse_Save(buffer.data());
+    assert(matches(buffer.data()) && !SnapshotReuse_Stats().mismatches && !logs);
+}
+''')
+
     def test_region_with_misplaced_owner_field_is_always_copied(self):
         self.run_native("Trust", r'''
 int main() {
