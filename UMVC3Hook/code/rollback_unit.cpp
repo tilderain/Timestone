@@ -975,56 +975,39 @@ bool OwnedEffectGraph(void* effect)
         Read<void*>(effect, 0x1F0) || Read<void*>(effect, 0x228)) return false;
     const size_t nodes = Read<uint16_t>(effect, 0x204);
     const size_t joints = Read<uint16_t>(effect, 0x208);
-    const uintptr_t storage = Read<uintptr_t>(effect, 0x220);
+    void* storage = Read<void*>(effect, 0x220);
+    // 32 of each is what a graph's span list (GraphSpanLimit) can describe.
     if (!nodes || nodes > 32 || !joints || joints > 32 || !storage) return false;
-    // Reconstruct the ordinary allocation extent; +210 is aggregate accounting.
-    size_t bytes = joints * 0x150;
-    size_t auxiliary = 0;
-    size_t objects = 0;
+    // The game's own layout (pool slices, record addresses, back-pointers) is
+    // taken as given. What is tested is what makes a graph one this snapshot
+    // can own, and what the copy in DescribeOwnedGraph relies on.
+    size_t bytes = joints * 0x150; // +210 is aggregate accounting, not this extent.
     void* node = Read<void*>(effect, 0x218);
     for (size_t i = 0; i < nodes; ++i) {
         if (!node) return false;
         const auto* layout = GeneratorLayoutFor(node);
-        if (!layout || !layout->ordinary || layout->size < 0x240 || layout->size > 256 * 1024 ||
-            Read<void*>(node, 0x10) != effect || Read<void*>(node, 0x48) ||
+        if (!layout || !layout->ordinary || Read<void*>(node, 0x48) ||
             (Read<uint32_t>(node, 0x20) & 0x70u) ||
             Read<int32_t>(node, 0xD4) != -1 ||
             (Read<uint32_t>(node, 0x12C) & 0x400u)) return false;
-        objects += layout->size;
-        const uintptr_t joint = Read<uintptr_t>(node, 0x28);
-        if (joint < storage || joint - storage >= joints * 0x150 ||
-            (joint - storage) % 0x150) return false;
-        const uintptr_t pool = Read<uintptr_t>(node, 0x38);
-        const size_t poolBytes = Read<uint32_t>(node, 0x34);
-        const size_t capacity = Read<uint16_t>(node, 0x110);
-        const size_t stride = Read<uint16_t>(node, 0x116);
-        if ((capacity && stride < 0x68) || pool != storage + bytes || capacity * stride > poolBytes ||
-            poolBytes > 256 * 1024 || bytes + poolBytes > 256 * 1024) return false;
         // Only initialized active records may contain meaningful child pointers.
-        void* particle = Read<void*>(node, 0xE0);
-        size_t active = 0;
-        while (particle) {
-            const uintptr_t address = uintptr_t(particle);
-            if (++active > capacity || address < pool ||
-                address - pool >= capacity * stride || (address - pool) % stride ||
-                Read<void*>(particle, 0x60)) return false;
-            particle = Read<void*>(particle, 8);
-        }
+        // Bounded by the pool's capacity so a bad list cannot hang the save.
+        size_t left = Read<uint16_t>(node, 0x110);
+        for (void* particle = Read<void*>(node, 0xE0); particle; particle = Read<void*>(particle, 8))
+            if (!left-- || Read<void*>(particle, 0x60)) return false;
         const size_t extra = Read<uint32_t>(node, 0xC4);
-        if (extra > 256 * 1024 || (extra && !Read<void*>(node, 0x210))) return false;
-        auxiliary += extra;
-        bytes += poolBytes;
+        if (extra && !Read<void*>(node, 0x210)) return false; // Copied through this pointer.
+        bytes += layout->size + Read<uint32_t>(node, 0x34) + extra;
         node = Read<void*>(node, 0x18);
     }
-    if (node) return false; // Count mismatch or cycle, never traverse indefinitely.
+    if (node) return false; // More nodes than counted: the span list is sized by the count.
     for (size_t i = 0; i < joints; ++i) {
-        void* joint = (void*)(storage + i * 0x150);
+        void* joint = static_cast<uint8_t*>(storage) + i * 0x150;
         const size_t extra = Read<uint32_t>(joint, 0x128);
-        if (Read<void*>(joint, 0x100) != effect || extra > 0x50 ||
-            (extra && !Read<void*>(joint, 0x130))) return false;
-        auxiliary += extra;
+        if (extra && !Read<void*>(joint, 0x130)) return false;
+        bytes += extra;
     }
-    return bytes + auxiliary + objects + 0x2C0 <= 256 * 1024;
+    return bytes + 0x2C0 <= 256 * 1024;
 }
 
 bool RetainableDetachedEffect(void* effect)
