@@ -71,6 +71,25 @@ Known gaps:
   history, so a region is reused only if it has not changed for 255 frames.
 - The dumps are windows around desyncs, not a random sample of play.
 
+## Region census (2026-11-13)
+
+Measured with a temporary lag-capture counter over three netplay windows (two
+local instances, six characters, no dump recorder). The counter was removed
+afterwards. Per save: 261 regions, about 1.2 MB, `save_copy` 0.125-0.132 ms.
+
+| Kind | Bytes per save | Share |
+|---|---:|---:|
+| Motion blend buffers (character and weapon) | 371 KB | 31% |
+| Material job tables | 322 KB | 27% |
+| Joint states, joint indices, blended joints | 229 KB | 19% |
+| Character bodies | 161 KB | 13% |
+| Weapon bodies | 78 KB | 7% |
+| Everything else (teams, camera, action, command lines, channels, ...) | 37 KB | 3% |
+
+The copy runs at about 9.5 GB/s, so its cost follows the byte count. Removing
+one whole kind would save at most 0.04 ms per save (motion blend), about 0.3 ms
+of a seven-frame rollback.
+
 ## Modes
 
 `SNAPSHOT_REUSE_MODE` in `snapshot_reuse.h`:

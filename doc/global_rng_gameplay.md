@@ -254,6 +254,109 @@ The next discriminating runtime observation is the lifecycle tag and actual
 RNG-owner pointer at the landing draw, not just whether the fighter has zero
 health. No runtime probe or patch was installed during this audit.
 
+## Caller census follow-up — 2026-11-13
+
+Read-only pass on Ghidra port 8192 (`umvc3.exe.unpacked.exe`). Enumerated all
+53 data refs to `0x140D765D8`, all 74 calls to getter `0x1400046D0`, all 37
+calls to `floatInRange 0x140455550` and 20 to `intInRange 0x140455590`, then
+inspected every caller in the fighter/shot/script range not already covered
+above. No Ghidra mutations.
+
+### Round seed chaining (most important new edge)
+
+`sReplay__onRoundStart @ 0x1401CFA90` reseeds global, sEffect, and every
+character stream from `sReplay+0x23424`. Writers of that field (all through
+`sReplay__setField_144420_locked @ 0x14000B350`):
+
+| Writer | Source of seed |
+|---|---|
+| `sAction__executeMatchPhase` call `0x14000604A` | **Global next**, gated by `g__isTrainingMode` (game mode 5) after clearing replay flags. |
+| Char-select/battle-start code at `0x140369D42` (no Ghidra function) | **Global next** (offline match start). |
+| `cNetChrSel__applyCharacterSelectionMessage` `0x140263065`, and `0x140262DB4` | Network message field (+0x28 / +0x40): online seed is peer-synchronized, not local global state. |
+
+So offline/training, the global stream at match/phase start decides the next
+round's **character-local** seeds too, so any drift in the global stream
+(e.g. an extra audio draw) carries into character RNG on the next reseed.
+Online, the seed comes from the network, which breaks that chain at round
+boundaries.
+
+### New consumers classified
+
+| Consumer | Use of global result | Class |
+|---|---|---|
+| `uCharacter__selectProfileVariant @ 0x140055B50` → `0x14005BF70` (percent roll vs rChrProfile row byte +1) and `intInRange` at `0x140055D5B` | Picks intro (kind 1) / win (kind 2) profile rows. Callers: `sAction__enterFightingPhaseSetup`, `executeMatchPhase`, `anmchrCmd1_interpreter`. | Pre/post-round presentation. Intro choice is not shown to alter in-round state. |
+| `anmchrParser__parse3Level` opcode at `0x1401049ED` (6 × floatInRange) | Random position offset + rotation (degrees × `0x140A6A6C4`) → `0x140103720` transform → `sAnmchrParser__spawnLevel3CommandEffect @ 0x140120FE0`. Dispatchers only create sGameEffect/uGameEffectModel/sound. | Effect placement (cosmetic). |
+| `anmchrCmd4_6_stageInterpreter` case 9 (`0x14010840A`) | Random float → stage-object motion slot float +0x5C. Only on uStage/uStageObject. | Stage cosmetic. |
+| `uRyu__tick` `0x1400C86A7..E3` | Random offset of a sound position (`0x1402AAB10`). | Sound. |
+| `uThor__tick` `0x1400E0102` | One-shot `&1` into +0x6910, choosing voice 0x4D vs 0x6F. | Voice. |
+| `0x1400D7984`, `0x1400806DB`, `0x140080A28` | `&1` voice-ID variant → `sGSound__playPersistentVoice`. | Voice. |
+| `0x140187750` (vtable `0x140ABC9D0`) | Random Y rotation for effect 0x3E8 spawn position; then 0/1 into `uShot__lookupAttackInputSlot` (sound, see misleading-names note). | Effect + sound. |
+| `0x14018DC50` | `&1` → `uBaseModel__setPartsDisp`. | Model part visibility. |
+| `uShotVulcanDirectAttackBomb` init `0x1401A99F0` (`0x1401A9B58/7A`) | Random values into embedded uCnsTSR (+0x2140) spin at +0x21D0/+0x21D8. Same pattern as Deadpool grenade; this SHT has zero hit records (see hitbox follow-up). | Model constraint. |
+| Doom effect init `0x14016FBEA` | `1 << random(0,2)` effect mask on new uGameEffect (`chr\DrDoom\effect\efl\`). | Same as MolecularShield EFL variant. |
+| `0x1401BD3CF` | `random(0,2)*30` into +0x2170. ShikiDanKobun voice-gate timer already listed above. | Voice timing. |
+| `uChain__simulateGroup`, `cpChain__allUpdate`, rCloud*, uTVNoise*, uGrassWind, uShadow, `sEffect__cloudJitterStep` | Direct reads of the state words. | Cloth/hair, stage, post-FX. |
+| `sEffect__getRandomU32 @ 0x140543B70` | Uses sEffect's own +0x3C state when arg≠0, global when arg==0. | Effect RNG (cosmetic consumers). |
+| `MtNetSession__getNonce @ 0x14050B900`, `nNetwork__ProtocolStandard__encodeFrame` `0x14094040C` | Session IDs and packet encoding draw from global. | **Non-simulation advance** during native networking; desyncs the stream between peers if native net runs. |
+
+### Owner-aware callers that pass a non-character owner
+
+Checked the owner argument at every call to `lerpRandom 0x14014EA70` (45),
+`lockedAdvanceForCharOrGlobal 0x14014EAB0` (14 direct), `dispatcherNext
+0x14014EB80` (8), and `randomIntRangeInclusive 0x14014EB30` (22). Almost
+all of them pass shot +0x1308, shot +0x2030, or the fighter `this`, so they
+are character-local in normal play. These ones pass a non-character owner and
+**always** draw from the global stream:
+
+| Caller | Owner | Output |
+|---|---|---|
+| `uShotVulcanJigenZan__move @ 0x1401C02E0` (6 draws) | the shot (R14 = this) | Random Euler → `sGameEffect__spawnFromQuaternionPosition`: effect only (already known). |
+| `uShotVulcanHyoran__setup @ 0x140154420` (`0x140154633`) | the shot | `random(0,360)` → embedded uCnsTSR(+0x2140)+0x98, i.e. model-joint spin. Hyoran capsules use mAtkMatrix, not the joint, so this is cosmetic. |
+| **`anmchrCmd0_interpreter` opcode 0x46 (`0x14010308A`)** | interpreter host `mpOwner` (+0x38) | `randomIntRangeInclusive(a,b)` → **`mCmpS32`** (`cActorGameSpriteAnm__setCommandValueAt7C`). |
+| **`anmchrCmd0_interpreter` opcode 0x47 (`0x1401030BB`)** | interpreter host | `lerpRandom(a,b)` → **`mCmpF32`** (+0x80, via folded setter `0x1406D9AB0`). |
+
+Jump table `0x140103188`, 75 entries: index 70 → `0x10308A`, index 71 →
+`0x1030BB`. The interpreter host is the `uActorGameModel` that owns the
+cActorGameModelAnm. Its command blocks run from `uShot__preMove`,
+`uGameEffectModel__restart`, `uStageObject__move`, and `uZeroSh__tick` (via
+`cActorGameModelAnm__bindActionCommandState`), and the ctor is shared by uShot,
+uKobun, uLinlin, uChrWeapon, uGameEffectModel, and stage objects. **When a shot (or other
+non-character actor) script executes 0_46 / 0_47, the draw comes from global
+RNG and lands in the compare register used by the script's conditional jumps**
+(`FUN_140100C70` int compare / `FUN_140100B90` float compare). That is a
+direct global → shot-behaviour branch path, with no owner fallback needed.
+The same opcodes on a fighter are character-local.
+
+`anmchrCmd1_interpreter`'s random opcode (`0x1400FEB98`) casts the host to
+uCharacter first and writes fighter fields (+0x4110/+0x40E8), so it is
+fighter-only and character-local.
+
+Still open: which installed shot/actor anmchr resources actually contain
+0_46/0_47. That needs an archive scan of `chr/archive/*_param.arc` (not done:
+the game install is outside the sandbox for this pass). Morrigan's
+FinishingShower code itself (`setup 0x1401961D0`,
+`computeSteeredNextPositionAndDelta 0x140196690`) has no direct RNG; its
+spread comes from cArm spawn error with the owner's +0x2D80 (or the
+Astral Vision `uMorriganSh`, whose DTI parent is uCharacter, so also local).
+Any FinishingShower global dependency would therefore have to come from
+its anmchr script using 0_46/0_47.
+
+### Updated bottom line
+
+- The new unconditional gameplay path is anmchr command 0_46/0_47 run by a
+  shot or other non-character actor: a global draw into the script compare
+  registers. Which resources use it still needs an archive scan.
+- Otherwise the gameplay-relevant global consumers are offline CPU AI
+  (`rChrCpu__randomMod`), the conditional owner-fallback paths, and
+  campaign/menu selection.
+- Global drift matters indirectly in offline and training modes, through the
+  round reseed above.
+- Many cosmetic draws (sound, effects, chains, stage, native network) advance
+  the shared stream. That is why the mod snapshots/restores the 16 bytes at
+  `0x140D765D8` (`rollback_snapshot.cpp` BuildRegionsUncached,
+  `rollback_restore.cpp` restore). Discarding the state would leave the
+  conditional gameplay consumers exposed to presentation-dependent drift.
+
 ## Relevance to pain sounds and current hooks
 
 Both `sGSound__selectRandomVoiceVariant @ 0x1402A9110` and bank-side

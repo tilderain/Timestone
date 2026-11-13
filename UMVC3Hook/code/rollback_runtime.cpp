@@ -7,6 +7,8 @@
 #include "mk10utils.h"
 #include "netplay.h"
 #include "gameplay_hooks.h"
+#include "share_pose.h"
+#include <atomic>
 
 extern void HookLog(const char* fmt, ...);
 
@@ -411,6 +413,99 @@ static void __fastcall hkToonMaterialUpdate(uint64_t model)
     g_originalToonMaterialUpdate(model);
 }
 
+// uCnsShare's two matrix helpers, replaced by share_pose.h. Replace runs ours
+// alone. Shadow keeps the native helpers authoritative, runs ours beside them
+// and logs any byte difference ("SharePose: ... MISMATCH"); use it to re-check
+// after a toolchain or flag change. The helpers run on live frames too.
+enum class SharePoseMode { Off, Shadow, Replace };
+static constexpr SharePoseMode SHARE_POSE_MODE = SharePoseMode::Replace;
+static uint64_t (__fastcall* g_originalShareParentFrame)(uint64_t, share_pose::Matrix*, uint8_t) = nullptr;
+static void (__fastcall* g_originalShareWorldMatrix)(uint64_t, uint64_t, const float*, const float*, const float*,
+                                                     share_pose::Matrix*, uint32_t) = nullptr;
+static std::atomic<uint64_t> g_shareCompared{0}, g_shareParentMismatches{0}, g_shareWorldMismatches{0};
+
+static void ShareShadowReport(const char* what, const share_pose::Matrix& native, const share_pose::Matrix& ours,
+                              std::atomic<uint64_t>& mismatches)
+{
+    const uint64_t compared = g_shareCompared.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (std::memcmp(&native, &ours, sizeof(native))) {
+        const uint64_t count = mismatches.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (count <= 8) {
+            int at = 0;
+            while (at < 15 && !std::memcmp(&native.m[at / 4][at % 4], &ours.m[at / 4][at % 4], 4)) ++at;
+            uint32_t a, b;
+            std::memcpy(&a, &native.m[at / 4][at % 4], 4); std::memcpy(&b, &ours.m[at / 4][at % 4], 4);
+            HookLog("SharePose: %s MISMATCH #%llu first at [%d][%d] native=%08X ours=%08X\n",
+                    what, (unsigned long long)count, at / 4, at % 4, a, b);
+        }
+    }
+    if (!(compared & 0xFFFFF))
+        HookLog("SharePose: shadow compared=%llu parent_mismatches=%llu world_mismatches=%llu\n",
+                (unsigned long long)compared,
+                (unsigned long long)g_shareParentMismatches.load(std::memory_order_relaxed),
+                (unsigned long long)g_shareWorldMismatches.load(std::memory_order_relaxed));
+}
+
+// The lookups of 0x14010D370, through the same natives it calls: the joint's
+// resource matrix, and its parent joint's world matrix or the model's own.
+static void ShareParentFrame(uint64_t constraint, share_pose::Matrix& out, uint8_t slot)
+{
+    share_pose::Matrix resource;
+    ((share_pose::Matrix*(__fastcall*)(uint64_t, share_pose::Matrix*, uint8_t))_addr(0x14010D2D0))(
+        constraint, &resource, slot);
+    const uint64_t model = *(uint64_t*)(constraint + 0x78); // uConstraint::mpModel
+    const share_pose::Matrix* parent = nullptr;
+    const uint64_t joint = ((uint64_t(__fastcall*)(uint64_t, uint8_t))_addr(0x14002F890))(model, slot);
+    if (joint) {
+        const uint8_t parentIndex = *(uint8_t*)(joint + 0xA1);
+        if (parentIndex != 0xFF)
+            parent = (const share_pose::Matrix*)(
+                ((uint64_t(__fastcall*)(uint64_t, uint32_t))_addr(0x1405662F0))(model, parentIndex) + 0x20);
+    }
+    if (!parent) {
+        const uint64_t vtable = *(uint64_t*)model;
+        parent = ((const share_pose::Matrix*(__fastcall*)(uint64_t, int32_t))(*(uint64_t*)(vtable + 0xA0)))(model, -1);
+    }
+    share_pose::ParentFrame(resource, *parent, out);
+}
+
+static uint64_t __fastcall hkShareParentFrame(uint64_t constraint, share_pose::Matrix* out, uint8_t slot)
+{
+    if (SHARE_POSE_MODE == SharePoseMode::Replace) {
+        ShareParentFrame(constraint, *out, slot);
+        return (uint64_t)out;
+    }
+    const uint64_t result = g_originalShareParentFrame(constraint, out, slot);
+    if (SHARE_POSE_MODE == SharePoseMode::Shadow) {
+        share_pose::Matrix ours;
+        ShareParentFrame(constraint, ours, slot);
+        ShareShadowReport("parent frame", *out, ours, g_shareParentMismatches);
+    }
+    return result;
+}
+
+static void __fastcall hkShareWorldMatrix(uint64_t constraint, uint64_t joint, const float* quaternion,
+    const float* translation, const float* scale, share_pose::Matrix* frame, uint32_t motionFlags)
+{
+    const float* collapsed = (const float*)_addr(0x140D462B0);
+    if (SHARE_POSE_MODE == SharePoseMode::Replace) {
+        share_pose::WorldMatrix(quaternion, translation, scale, *frame, motionFlags, collapsed,
+                                *(share_pose::Matrix*)(joint + 0x20));
+        return;
+    }
+    if (SHARE_POSE_MODE != SharePoseMode::Shadow) {
+        g_originalShareWorldMatrix(constraint, joint, quaternion, translation, scale, frame, motionFlags);
+        return;
+    }
+    share_pose::Matrix ourFrame = *frame, ours;
+    share_pose::WorldMatrix(quaternion, translation, scale, ourFrame, motionFlags, collapsed, ours);
+    g_originalShareWorldMatrix(constraint, joint, quaternion, translation, scale, frame, motionFlags);
+    // The world matrix, and the frame the native helper normalized in place.
+    // A frame difference is reported by poisoning ours so the comparison fails.
+    if (std::memcmp(frame, &ourFrame, sizeof(ourFrame))) ours.m[0][0] = share_pose::FromBits(0x7FC0DEAD);
+    ShareShadowReport("world matrix", *(const share_pose::Matrix*)(joint + 0x20), ours, g_shareWorldMismatches);
+}
+
 static void __fastcall hkParticleGeneratorModelUpdate(uint64_t generator)
 {
     // Keep particle-model updates on the live timeline. Native also changes
@@ -802,6 +897,18 @@ void Rollback_InitNativeNullGuards()
     if (particleModelStatus == MH_OK &&
         GameplayHooks_QueueEnable((LPVOID)_addr(0x140898730)) == MH_OK) {
         HookLog("Rollback: installed headless particle-model update filter\n");
+    }
+
+    if (SHARE_POSE_MODE != SharePoseMode::Off) {
+        const bool parent = GameplayHooks_Create((LPVOID)_addr(0x14010D370), (LPVOID)&hkShareParentFrame,
+                (LPVOID*)&g_originalShareParentFrame) == MH_OK &&
+            GameplayHooks_QueueEnable((LPVOID)_addr(0x14010D370)) == MH_OK;
+        const bool world = GameplayHooks_Create((LPVOID)_addr(0x14010D020), (LPVOID)&hkShareWorldMatrix,
+                (LPVOID*)&g_originalShareWorldMatrix) == MH_OK &&
+            GameplayHooks_QueueEnable((LPVOID)_addr(0x14010D020)) == MH_OK;
+        HookLog("SharePose: %s mode, parent frame %s, world matrix %s\n",
+                SHARE_POSE_MODE == SharePoseMode::Shadow ? "shadow" : "replace",
+                parent ? "hooked" : "FAILED", world ? "hooked" : "FAILED");
     }
 
     // uFilter's base destructor (0x1405F5780), reached by every filter class.
