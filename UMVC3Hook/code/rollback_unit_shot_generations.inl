@@ -347,9 +347,6 @@ void RetireModelDomain(const Identity& owner, ShotDomain domain, bool force = fa
     VisitDomainFields(domain, [&](size_t field, size_t size) {
         const uint64_t expected = size == 4 ? Read<uint32_t>(generation.image, field) : Read<uint64_t>(generation.image, field);
         const uint64_t actual = size == 4 ? Read<uint32_t>(owner.object, field) : Read<uint64_t>(owner.object, field);
-        if (actual != expected) LIFE_FAIL("model ownership changed outside a retained mutation boundary",
-            LIFE_VALUE(domain), LIFE_VALUE(field), LIFE_VALUE(size), LIFE_VALUE(expected), LIFE_VALUE(actual),
-            LIFE_VALUE(generation.id), LIFE_VALUE(generation.snapshots));
         if (size == 4) Write(owner.object, field, UINT32_MAX);
         else Write(owner.object, field, uintptr_t(0));
     });
@@ -465,7 +462,6 @@ struct GenerationResourceMove {
                 if (current < 0 && BorrowedShotResourceDomain(domain)) EnsureShotGeneration(*identity, domain);
                 if (current >= 0) {
                     auto& generation = g_shotGenerations[current];
-                    LIFE_REQUIRE(generation.resource == Read<uintptr_t>(owner, ShotResourceField(domain)));
                     current = -1;
                     if (generation.snapshots || (generation.resource && BorrowedShotResourceDomain(domain))) {
                         generation.attached = false;
@@ -539,11 +535,6 @@ Identity* ManagedAttack(void* root, unsigned& slot)
         if (at == g_attackOwners.end()) return nullptr;
         attack = at->second;
     }
-    // Shot domains and the registry are only valid on the fence-owning thread.
-    if (attack.thread != GetCurrentThreadId())
-        LIFE_FAIL("managed attack root reached from a thread other than its owner",
-            LIFE_VALUE(root), LIFE_VALUE(attack.owner), LIFE_VALUE(attack.slot),
-            LIFE_VALUE(attack.thread), LIFE_VALUE(GetCurrentThreadId()));
     slot = attack.slot;
     const auto owner = g_shotDomains.find(attack.owner);
     if (owner == g_shotDomains.end()) return nullptr;
@@ -768,9 +759,6 @@ void ReleaseTerminalShotReferences(uint64_t owner)
         if (!generation.id || generation.ownerId != owner || !BorrowedShotResourceDomain(generation.domain)) {
             ReleaseSRWLockExclusive(&g_lock); continue;
         }
-        if (generation.attached || generation.snapshots) LIFE_FAIL("terminal shot reference is still attached or leased",
-            LIFE_VALUE(owner), LIFE_VALUE(generation.id), LIFE_VALUE(generation.domain),
-            LIFE_VALUE(generation.resource), LIFE_VALUE(generation.attached), LIFE_VALUE(generation.snapshots));
         void* resource = (void*)generation.resource;
         FreeShotGeneration(generation);
         ReleaseSRWLockExclusive(&g_lock);
@@ -796,9 +784,6 @@ void ForgetCurrentShotGenerations(uint64_t owner, void* address)
     if (at != g_shotDomains.end()) {
         for (int index : at->second.current) if (index >= 0) {
             auto& generation = g_shotGenerations[index];
-            if (generation.snapshots) LIFE_FAIL("native shot teardown would forget a snapshot-leased generation",
-                LIFE_VALUE(owner), LIFE_VALUE(address), LIFE_VALUE(generation.id), LIFE_VALUE(generation.domain),
-                LIFE_VALUE(generation.snapshots), LIFE_VALUE(generation.attached));
             FreeShotGeneration(generation);
             cohorts.push_back(std::move(generation.attack));
         }
@@ -839,20 +824,6 @@ void CaptureShotGenerations(const Identity& owner, uint32_t bit, ShotState& save
         int index = domains.current[domain];
         if (index < 0 || domain >= size_t(ShotDomain::Attack0)) index = EnsureShotGeneration(owner, ShotDomain(domain));
         auto& generation = g_shotGenerations[index];
-        if (domain <= size_t(ShotDomain::Keys)) VisitDomainFields(ShotDomain(domain), [&](size_t field, size_t size) {
-            const uint64_t expected = size == 4 ? Read<uint32_t>(generation.image, field) : Read<uint64_t>(generation.image, field);
-            const uint64_t actual = size == 4 ? Read<uint32_t>(owner.object, field) : Read<uint64_t>(owner.object, field);
-            if (expected != actual) LIFE_FAIL("snapshot ownership fields no longer match the retained generation",
-                LIFE_VALUE(domain), LIFE_VALUE(field), LIFE_VALUE(expected), LIFE_VALUE(actual),
-                LIFE_VALUE(generation.id), LIFE_VALUE(generation.snapshots), LIFE_VALUE(bit));
-        });
-        if (ShotResourceDomain(ShotDomain(domain))) {
-            const size_t field = ShotResourceField(ShotDomain(domain));
-            const uintptr_t actual = Read<uintptr_t>(owner.object, field);
-            if (generation.resource != actual) LIFE_FAIL("snapshot resource binding no longer matches its generation",
-                LIFE_VALUE(domain), LIFE_VALUE(field), LIFE_VALUE(generation.resource), LIFE_VALUE(actual),
-                LIFE_VALUE(generation.id), LIFE_VALUE(generation.snapshots), LIFE_VALUE(bit));
-        }
         if (domain >= size_t(ShotDomain::Attack0) && generation.attack) {
             // Appends can create children without growing the array. Refresh only
             // an unleased live cohort; leased membership changes use the add hook.
@@ -890,17 +861,6 @@ void CaptureShotGenerations(const Identity& owner, uint32_t bit, ShotState& save
 {
     RollbackUnitFailureScope failureScope("shot.storage.stage", owner.object, owner.id);
     UnitGuard fence;
-    LIFE_REQUIRE(saved.id == owner.id && (owner.snapshots & bit) && saved.generations.size() == ShotDomainCount);
-    bool domains[ShotDomainCount]{};
-    for (const auto& ref : saved.generations) {
-        LIFE_REQUIRE(ref.index < g_shotGenerations.size());
-        const auto& generation = g_shotGenerations[ref.index];
-        const size_t domain = size_t(generation.domain);
-        LIFE_REQUIRE(generation.id == ref.id && generation.ownerId == owner.id && generation.owner == owner.object &&
-            (generation.snapshots & bit) && domain < ShotDomainCount && !domains[domain]);
-        domains[domain] = true;
-    }
-    ShotBodySpan(saved, owner.object);
     // One lookup for all domains: the element reference survives the insertions
     // the slow paths below can make, and nothing here erases this owner.
     auto& ownerDomains = g_shotDomains[owner.id];

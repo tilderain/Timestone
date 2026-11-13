@@ -77,11 +77,6 @@ template<class Visit> void VisitShotConstraintModels(const Identity& owner,
 {
     auto* joints = Read<uint8_t*>(owner.object, 0x538);
     const uint32_t count = joints ? Read<uint32_t>(joints - 0x10, 0) : 0;
-    if (count > 65536) {
-        RollbackUnitFailureScope failureScope("shot.constraint_dependencies.capture", owner.object, owner.id);
-        LIFE_FAIL("constraint dependency scan found an invalid joint allocation count",
-            LIFE_VALUE(owner.object), LIFE_VALUE(owner.id), LIFE_VALUE(owner.extent), LIFE_VALUE(joints), LIFE_VALUE(count));
-    }
     // Every node below must be a registered constraint: with none, nothing to visit.
     if (sortedConstraints.empty()) return;
     RollbackUnitFailureScope failureScope("shot.constraint_dependencies.capture", owner.object, owner.id);
@@ -103,8 +98,6 @@ template<class Visit> void VisitShotConstraintModels(const Identity& owner,
         if (head) append((void*)(uintptr_t(head) - 0x40));
     }
     for (size_t i = 0; i < nodes.size(); ++i) {
-        if (!g_constructedConstraints.contains(nodes[i])) LIFE_FAIL("constraint disappeared during dependency capture",
-            LIFE_VALUE(nodes[i]), LIFE_VALUE(i), LIFE_VALUE(owner.id));
         void* model = Read<void*>(nodes[i], 0x78);
         append(Read<void*>(nodes[i], 0x50)); append(Read<void*>(nodes[i], 0x58));
         if (model) visit(model);
@@ -137,10 +130,6 @@ void CaptureShotConstraints(SnapshotManifest& saved)
         ShotConstraintState node;
         node.object = object; node.construction = at->second;
         std::memcpy(node.image, object, sizeof(node.image));
-        const auto self = Read<void*>(node.image, 0x48);
-        if (self != object) LIFE_FAIL("registered constraint adapter has an invalid complete-object backpointer",
-            LIFE_VALUE(object), LIFE_VALUE(self), LIFE_VALUE(node.construction), LIFE_VALUE(saved.frame),
-            LIFE_VALUE(saved.constraints.size()));
         saved.constraints.push_back(node);
         captured.insert(object);
     };

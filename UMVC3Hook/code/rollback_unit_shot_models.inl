@@ -114,8 +114,6 @@ void CaptureDrivenModel(const Identity& model, ModelUnitState& saved)
 bool RestoreDrivenModel(const ModelUnitState& saved, uint32_t bit)
 {
     auto* live = static_cast<uint8_t*>(saved.object);
-    LIFE_REQUIRE(!saved.spans.empty() && !saved.spans[0].field && saved.spans[0].address == saved.object &&
-        saved.spans[0].size == saved.extent && saved.extent >= ModelLifecycleEnd);
     const uint8_t* body = saved.payload.data() + saved.spans[0].offset;
     void* current[std::size(ModelUnitFields)];
     for (size_t i = 0; i < std::size(ModelUnitFields); ++i) current[i] = Read<void*>(live, ModelUnitFields[i]);

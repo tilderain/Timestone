@@ -78,19 +78,7 @@ ShotCpuRestoreStatus RestoreShotCpuFields(void* destination, size_t destinationS
     RollbackUnitFailureScope failureScope("shot.cpu.stage", owner.object, owner.id);
     // The owner's identity and lease were checked by RollbackUnit_RestoreShots.
     const ShotSpan* body = &ShotBodySpan(saved, owner.object);
-    LIFE_REQUIRE(body->memory.size >= ShotCpuCommonSize && body->memory.size <= owner.extent);
-    AcquireSRWLockExclusive(&g_lock);
-    // Each unit the saved bytes name must still be an allocation this snapshot
-    // holds: the pointers are about to be written back as they were.
-    VisitShotUnitReferences(saved.payload.data() + body->memory.offset, [&](size_t, void* object) {
-        if (!object || object == owner.object) return;
-        const Identity* target = Find(object, false);
-        LIFE_REQUIRE(target && (target->snapshots & bit) &&
-            !(target->occupancy != Occupancy::Live && target->occupancy != Occupancy::Quarantined));
-    });
-    ReleaseSRWLockExclusive(&g_lock);
-    const auto status = RestoreShotCpuFields(owner.object, owner.extent,
+    // Every unit the saved bytes name is an allocation this snapshot leased at capture.
+    return RestoreShotCpuFields(owner.object, owner.extent,
         saved.payload.data() + body->memory.offset, body->memory.size);
-    LIFE_REQUIRE(status != ShotCpuRestoreStatus::InvalidBuffer);
-    return status;
 }

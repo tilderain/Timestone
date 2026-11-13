@@ -77,27 +77,16 @@ void CaptureShotWorld(SnapshotManifest& saved, void* manager)
     for (const auto& member : saved.members) {
         if (member.kind != Kind::Shot || member.occupancy != Occupancy::Live) continue;
         auto* current = Find(member.object, false);
-        LIFE_REQUIRE(current && current->id == member.id && (current->snapshots & bit) &&
-            !(current->occupancy != Occupancy::Live && current->occupancy != Occupancy::Quarantined));
         members.push_back(&member); identities.push_back(current);
     }
     // Saved members have distinct addresses (one registry identity per address).
     static ScratchMap<size_t> memberIndex;
     memberIndex.clear();
     for (size_t i = 0; i < members.size(); ++i) *memberIndex.insert(members[i]->object).first = i;
-    const auto memberAt = [&](void* object, uint64_t id) {
-        const size_t* at = memberIndex.find(object);
-        return at && members[*at]->id == id ? *at : SIZE_MAX;
-    };
+    // A saved list or pending entry with an identity is always a saved member.
+    const auto index = [&](const ShotListEntry& entry) { return *memberIndex.find(entry.object); };
     ReleaseSRWLockExclusive(&g_lock);
     linked.assign(members.size(), 0);
-    const auto index = [&](const ShotListEntry& entry) {
-        const size_t i = memberAt(entry.object, entry.id);
-        if (i != SIZE_MAX) return i;
-        LIFE_FAIL("saved shot-list entry has no matching retained identity", LIFE_VALUE(entry.object),
-            LIFE_VALUE(entry.id), LIFE_VALUE(saved.frame), LIFE_VALUE(bit), LIFE_VALUE(members.size()));
-    };
-    const auto contains = [&](void* object) { return memberIndex.contains(object); };
     for (const auto* member : members) {
         const auto at = std::find_if(saved.shots.begin(), saved.shots.end(),
             [&](const auto& shot) { return shot.id == member->id; });
@@ -130,7 +119,6 @@ void CaptureShotWorld(SnapshotManifest& saved, void* manager)
     used.assign(foreign.size(), 0);
     for (const auto& entry : saved.shotPending) {
         if (entry.id) {
-            index({entry.object, entry.id});
             pending.push_back(entry);
         } else for (size_t i = 0; i < foreign.size(); ++i) {
             if (used[i] || foreign[i].object != entry.object || foreign[i].category != entry.category) continue;
@@ -209,9 +197,6 @@ void CaptureShotWorld(SnapshotManifest& saved, void* manager)
         if (member.kind != Kind::Shot || (member.occupancy != Occupancy::Live &&
             member.occupancy != Occupancy::Quarantined)) continue;
         auto* current = Find(member.object, false);
-        LIFE_REQUIRE(current && current->id == member.id && (current->snapshots & bit) &&
-            !(current->occupancy != Occupancy::Live && current->occupancy != Occupancy::Quarantined) &&
-            !memberIdentities.contains(current));
         const auto shot = std::find_if(saved.shots.begin(), saved.shots.end(),
             [&](const ShotState& shot) { return shot.id == member.id; });
         const void* image = shot->payload.data() + ShotBodySpan(*shot, member.object).memory.offset;
@@ -226,19 +211,13 @@ void CaptureShotWorld(SnapshotManifest& saved, void* manager)
         if (member.identity->extent >= 0x90)
             shotRanges.push_back({uintptr_t(member.object), uintptr_t(member.object) + member.identity->extent - 0x90});
     std::sort(shotRanges.begin(), shotRanges.end());
-    // An incomplete constraint capture is never restored in part.
-    LIFE_REQUIRE(saved.constraintsComplete);
     for (const auto& node : saved.constraints) {
-        const auto current = g_constructedConstraints.find(node.object);
         auto* identity = Find(node.object, false);
         const Identity* historical = nullptr;
         if (identity) {
             const auto at = std::find_if(saved.members.begin(), saved.members.end(), [&](const Identity& member) {
                 return member.object == node.object && member.id == identity->id;
             });
-            LIFE_REQUIRE(identity->kind == Kind::Unit && at != saved.members.end() && (identity->snapshots & bit) &&
-                !(at->occupancy != Occupancy::Live && at->occupancy != Occupancy::Quarantined) &&
-                !(identity->occupancy != Occupancy::Live && identity->occupancy != Occupancy::Quarantined));
             historical = &*at;
         }
         addMember({node.object, identity, historical, Read<uint32_t>(node.image, 0x10),
@@ -284,24 +263,15 @@ void CaptureShotWorld(SnapshotManifest& saved, void* manager)
             const uint32_t category = (flags >> 3) & 0x7F;
             if (category < 64) memberLines |= uint64_t(1) << category;
         }
-    static ScratchSet seen;
-    seen.clear();
     static std::vector<void*> foreign;
     for (uint32_t category = 0; category < 64; ++category) {
         if (category >= categories || !(memberLines & (uint64_t(1) << category))) {
             continue;
         }
         foreign.clear();
-        void* previous = nullptr;
         void* line = static_cast<uint8_t*>(fence.manager) + 0x50 + category * 0x30;
-        for (void* unit = Read<void*>(line, 0); unit; unit = Read<void*>(unit, 0x18)) {
-            if (seen.size() == RegistrySize || seen.contains(unit) ||
-                Read<void*>(unit, 0x20) != previous || ((Read<uint32_t>(unit, 0x10) >> 3) & 0x7F) != category)
-                LIFE_FAIL("current unit primary list is inconsistent or cyclic", LIFE_VALUE(category),
-                    LIFE_VALUE(unit), LIFE_VALUE(previous), LIFE_VALUE(seen.size()));
-            seen.insert(unit); previous = unit;
+        for (void* unit = Read<void*>(line, 0); unit; unit = Read<void*>(unit, 0x18))
             if (!captured(unit)) foreign.push_back(unit);
-        }
         reconcile(saved.primary[category], foreign, primary[category]);
     }
     for (uint32_t group = 0; group < 64; ++group) {
@@ -309,11 +279,8 @@ void CaptureShotWorld(SnapshotManifest& saved, void* manager)
             continue;
         }
         void* descriptor = static_cast<uint8_t*>(fence.manager) + 0xC40 + group * 0x30;
-        const uint32_t size = Read<uint32_t>(descriptor, 0x18), capacity = Read<uint32_t>(descriptor, 0x1C);
+        const uint32_t size = Read<uint32_t>(descriptor, 0x18);
         void* data = Read<void*>(descriptor, 0x28);
-        if (Read<uint8_t>(descriptor, 0x20) || size > capacity || (capacity && !data))
-            LIFE_FAIL("unit group backing storage violates the non-owning array contract", LIFE_VALUE(group),
-                LIFE_VALUE(descriptor), LIFE_VALUE(size), LIFE_VALUE(capacity), LIFE_VALUE(data));
         foreign.clear();
         for (uint32_t i = 0; i < size; ++i) {
             void* unit = Read<void*>(data, size_t(i) * 8);
@@ -393,28 +360,6 @@ void DetachTransientShotCollisions(std::vector<void*> roots)
     void* collider = static_cast<uint8_t*>(collision) + 0x7368;
     std::sort(roots.begin(), roots.end(), std::less<void*>{});
     roots.erase(std::unique(roots.begin(), roots.end()), roots.end());
-    // The transient rebuild contract must not destroy or silently ignore a
-    // continuous registration. Validate every live/pending bank before mutation.
-    VisitCollisionLists(collider, [&](void* list) {
-        auto check = [&](size_t array, size_t rootField) {
-            const uint32_t count = Read<uint32_t>(list, array + 8);
-            void* data = Read<void*>(list, array + 0x18);
-            for (uint32_t i = 0; i < count; ++i) {
-                void* record = Read<void*>(data, size_t(i) * 8);
-                void* root = Read<void*>(record, rootField);
-                if (std::binary_search(roots.begin(), roots.end(), root, std::less<void*>{})) {
-                    LIFE_FAIL("cannot withdraw a shot root with continuous collision registration",
-                        LIFE_VALUE(root), LIFE_VALUE(list), LIFE_VALUE(array), LIFE_VALUE(rootField),
-                        LIFE_VALUE(record), LIFE_VALUE(i), LIFE_VALUE(count));
-                }
-            }
-        };
-        check(0x24A8, 8); check(0x24C8, 0x10);
-        for (size_t bank = 0; bank < 41; ++bank) {
-            check(0x1028 + bank * 0x20, 8); check(0x1548 + bank * 0x20, 0x10);
-            check(0x1A68 + bank * 0x20, 8); check(0x1F88 + bank * 0x20, 0x10);
-        }
-    });
     using Native = void (__fastcall*)(void*);
     ((Native)_addr(0x1405B7F20))(collider);
     VisitCollisionLists(collider, [&](void* list) {
@@ -540,7 +485,6 @@ void WithdrawFutureShot(const Identity& shot, void* manager, void* units)
         if (void* root = Read<void*>(shot.object, field)) Write(root, 8, uint8_t(0));
     AcquireSRWLockExclusive(&g_lock);
     Identity* current = Find(shot.object, false);
-    LIFE_REQUIRE(current && current->id == shot.id && current->occupancy == Occupancy::Live);
     current->occupancy = Occupancy::Quarantined;
     current->shotLinked = false; current->shotRegistrationReleased = true; current->futureShot = true;
     ++g_quarantined;

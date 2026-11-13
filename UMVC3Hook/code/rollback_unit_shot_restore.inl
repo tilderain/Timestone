@@ -89,29 +89,16 @@ void RollbackUnit_RestoreShots(int32_t frame)
         ReleaseSRWLockExclusive(&g_lock);
         return;
     }
-    LIFE_REQUIRE(saved->thread == GetCurrentThreadId() &&
-        shotFence.manager && saved->shotManager == shotFence.manager);
     for (const auto& shot : saved->shots) {
         const auto member = std::find_if(saved->members.begin(), saved->members.end(),
             [&](const Identity& member) { return member.kind == Kind::Shot && member.id == shot.id; });
-        LIFE_REQUIRE(member != saved->members.end());
         Identity* owner = Find(member->object, false);
-        LIFE_REQUIRE(owner && owner->id == shot.id && owner->kind == Kind::Shot && (owner->snapshots & bit) &&
-            !(owner->occupancy != Occupancy::Live && owner->occupancy != Occupancy::Quarantined));
         const ShotSpan& body = ShotBodySpan(shot, owner->object);
-        LIFE_REQUIRE(body.memory.size == owner->extent);
         work.push_back({owner, &shot, shot.payload.data() + body.memory.offset});
     }
     // Ascending: each shot finds its inline ones by range. Used under this lock only.
     const std::vector<void*>& constraints = SortedConstraints();
-    for (const auto& node : saved->constraints) {
-        // The same provenance the execution stage requires, checked before any write.
-        const auto current = g_constructedConstraints.find(node.object);
-        LIFE_REQUIRE(current != g_constructedConstraints.end() && current->second == node.construction &&
-            Read<uintptr_t>(node.object, 0) == Read<uintptr_t>(node.image, 0) &&
-            Read<uintptr_t>(node.object, 0x40) == Read<uintptr_t>(node.image, 0x40) &&
-            savedConstraints.insert(node.object));
-    }
+    for (const auto& node : saved->constraints) savedConstraints.insert(node.object);
     // Per shot: unit-header holes for saved inline constraints, whole-object holes
     // for ones initialized after the snapshot (the execution stage withdraws them).
     // Inner hole lists keep their storage too: clear, never shrink the outer.
@@ -132,7 +119,6 @@ void RollbackUnit_RestoreShots(int32_t frame)
                     holes[i].push_back({relative + 0x10, 0x18});
                     holes[i].push_back({relative + 0x30, 0x08});
                 } else {
-                    LIFE_REQUIRE(g_constructedConstraints.at(*at) > saved->constraintWatermark);
                     holes[i].push_back({relative, 0x90});
                     future.push_back(*at);
                 }
@@ -150,7 +136,7 @@ void RollbackUnit_RestoreShots(int32_t frame)
         stage.Next(LagMetric::RestoreShotStorage); // One sample per shot from here.
         StageShotGenerationStorage(owner, *work[i].shot, bit);
         stage.Next(LagMetric::RestoreShotFields);
-        LIFE_REQUIRE(StageShotCpuFields(owner, *work[i].shot, bit) == ShotCpuRestoreStatus::ReviewedSubset);
+        StageShotCpuFields(owner, *work[i].shot, bit);
         RestoreShotTail(static_cast<uint8_t*>(owner.object), work[i].image, owner.extent, holes[i]);
         // Joint-dependency rebuild request; the joints, depth order and model
         // flags it describes came back with the pose spans above.

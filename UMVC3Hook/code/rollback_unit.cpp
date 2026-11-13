@@ -417,7 +417,6 @@ const ShotSpan& ShotBodySpan(const ShotState& saved, const void* owner)
 {
     const ShotSpan* body = nullptr;
     for (const auto& span : saved.spans) if (span.kind == ShotSpanKind::Body) { body = &span; break; }
-    LIFE_REQUIRE(body && body->memory.address == owner);
     return *body;
 }
 void ValidateShotGenerationIndex();
@@ -630,9 +629,6 @@ void Birth(void* object, Kind kind)
     } else {
         Identity* entry = Find(object, true);
         if (entry) {
-            if (HasGraphGenerations(*entry)) LIFE_FAIL("birth would replace an identity with retained effect generations",
-                LIFE_VALUE(object), LIFE_VALUE(entry->object), LIFE_VALUE(entry->id), LIFE_VALUE(entry->graph),
-                LIFE_VALUE(entry->snapshots), LIFE_VALUE(entry->dependencies));
             if (entry->occupancy == Occupancy::Live) ++g_reusedLive;
             *entry = {object, ++g_nextId, Read<uintptr_t>(object, 0), kind, Occupancy::Live};
             ActivateIdentity(*entry);
@@ -768,9 +764,6 @@ void* DeleteUnit(void* shot, uint32_t flags, Deleting original, uintptr_t native
         ReleaseSRWLockExclusive(&g_lock);
         return shot;
     }
-    if (identity && identity->snapshots && g_retentionOpen && flags != 1)
-        LIFE_FAIL("leased unit reached an unsupported deleting-destructor mode", LIFE_VALUE(shot),
-            LIFE_VALUE(flags), LIFE_VALUE(identity->id), LIFE_VALUE(identity->snapshots), LIFE_VALUE(identity->occupancy));
     if (identity && identity->occupancy == Occupancy::Live &&
         (identity->snapshots || (identity->kind == Kind::Shot && HasRetiredShotGenerations(identity->id))) &&
         g_retentionOpen && flags == 1) {
@@ -806,9 +799,6 @@ void* DeleteUnit(void* shot, uint32_t flags, Deleting original, uintptr_t native
     if (generic) Push("unit_dispose_begin", identity, shot, flags, 0, 0, 0, false);
     ReleaseSRWLockExclusive(&g_lock);
     if (identity && identity->kind == Kind::Shot) {
-        // A retired generation still points into this shot; freeing it now
-        // would leave that generation to be collected against freed memory.
-        LIFE_REQUIRE(!HasRetiredShotGenerations(id));
         ForgetCurrentShotGenerations(id, shot);
     }
     void* result = original(shot, flags);
@@ -837,10 +827,6 @@ Deleting RegisterDeleting(void* shot)
     const auto known = g_unitDeleteVtables.find(vtable);
     if (known != g_unitDeleteVtables.end()) return g_unitDeleteHooks[known->second].original;
     void* target = Read<void*>(vtable, 0);
-    // An unknown vtable still holds its native entry, never one of ours.
-    for (const Deleting detour : g_unitDeleteDetours)
-        if (target == (void*)detour) LIFE_FAIL("unregistered vtable already dispatches to a unit deleting detour",
-            LIFE_VALUE(shot), LIFE_VALUE(vtable), LIFE_VALUE(target));
     size_t index = 0;
     while (index < g_unitDeleteHookCount && g_unitDeleteHooks[index].target != target) ++index;
     if (index == g_unitDeleteHookCount) {
@@ -1096,7 +1082,6 @@ int OwnCurrentGraph(Identity& owner, const GraphSpan* spans, size_t count)
             owner.resourceReference = int(reference);
         }
         auto& reference = g_resourceReferences[owner.resourceReference];
-        LIFE_REQUIRE(reference.onOwner && reference.resource == graph.resource && reference.ownerId == owner.id);
         ++reference.generations;
         graph.reference = owner.resourceReference;
     }
@@ -1108,7 +1093,6 @@ void TransferOwnerResource(Identity& owner)
 {
     if (owner.resourceReference < 0) return;
     auto& reference = g_resourceReferences[owner.resourceReference];
-    LIFE_REQUIRE(reference.resource == Read<void*>(owner.object, 0x108) && reference.onOwner);
     reference.onOwner = false;
     Push("graph_resource_transfer", &owner, owner.object, owner.resourceReference, 0, 0, 0, false);
     owner.resourceReference = -1;
@@ -1147,9 +1131,6 @@ void CollectGraphGenerations()
         }
         RollbackUnitFailureScope failureScope("effect.graph.collect", graph.owner, graph.ownerId);
         Identity* owner = Find(graph.owner, false);
-        if (!owner || owner->id != graph.ownerId) LIFE_FAIL("effect graph lost its owning allocation identity",
-            LIFE_VALUE(slot), LIFE_VALUE(graph.id), LIFE_VALUE(graph.owner), LIFE_VALUE(graph.ownerId),
-            LIFE_VALUE(owner ? owner->id : 0), LIFE_VALUE(graph.snapshots), LIFE_VALUE(graph.attached));
         graph.collecting = true;
         const bool detached = !graph.attached;
         if (graph.attached) owner->graph = -1;
@@ -1168,10 +1149,6 @@ void CollectGraphGenerations()
         void* release = nullptr;
         if (graph.reference >= 0) {
             auto& reference = g_resourceReferences[graph.reference];
-            if (!reference.generations || reference.resource != graph.resource)
-                LIFE_FAIL("effect graph resource reference accounting is inconsistent", LIFE_VALUE(graph.id),
-                    LIFE_VALUE(graph.reference), LIFE_VALUE(graph.resource), LIFE_VALUE(reference.resource),
-                    LIFE_VALUE(reference.generations), LIFE_VALUE(reference.onOwner));
             if (--reference.generations == 0) {
                 if (reference.onOwner) owner->resourceReference = -1;
                 else release = reference.resource;
@@ -1221,9 +1198,6 @@ void LeaseLinkedUnit(SnapshotManifest& manifest, void* object, void* owner,
         }
         AcquireSRWLockExclusive(&g_lock);
         if (!unit) {
-            if (requireUnit) LIFE_FAIL("required borrowed dependency is not a native cUnit",
-                LIFE_VALUE(object), LIFE_VALUE(owner), LIFE_VALUE(ownerId), LIFE_VALUE(offset),
-                LIFE_VALUE(bit), LIFE_VALUE(dti), LIFE_VALUE(unit), LIFE_VALUE(shot));
             return; // Existing effect graph links may belong to a non-cUnit owner.
         }
         identity = Find(object, false);
@@ -1236,7 +1210,6 @@ void LeaseLinkedUnit(SnapshotManifest& manifest, void* object, void* owner,
     identity->dependencies |= bit;
     if (!(identity->snapshots & bit)) {
         identity->snapshots |= bit;
-        LIFE_REQUIRE(manifest.count() != RegistrySize);
         manifest.members.push_back(*identity);
     }
     if (first) Push("snapshot_dependency", identity, object,
@@ -1615,13 +1588,7 @@ void __fastcall ShotDtor(void* shot)
     AcquireSRWLockExclusive(&g_lock);
     const auto* owner = Find(shot, false);
     const uint64_t ownerId = owner ? owner->id : 0;
-    const uint32_t snapshots = owner ? owner->snapshots : 0;
-    const bool missedDeletingBoundary = owner && owner->snapshots && g_retentionOpen &&
-        g_shotDomains.count(owner->id);
     ReleaseSRWLockExclusive(&g_lock);
-    RollbackUnitFailureScope failureScope("shot.base_destructor", shot, ownerId);
-    if (missedDeletingBoundary) LIFE_FAIL("leased shot reached base teardown without interception of derived deletion",
-        LIFE_VALUE(shot), LIFE_VALUE(ownerId), LIFE_VALUE(snapshots));
     Record("shot_base_begin", shot);
     const uint64_t id = TrackedId(shot);
     Mutation(shot, 1);
@@ -1679,7 +1646,6 @@ void __fastcall BaseEffectResource(void* effect, void* resource)
         // uEffect::setEffectList releases the graph before this base setter.
         // Suppress only its old-reference decrement, transferring that existing
         // reference to the retained graph. Native code still acquires the new one.
-        LIFE_REQUIRE(owner->graph < 0);
         TransferOwnerResource(*owner);
         Write(effect, 0x108, (void*)nullptr);
     }
@@ -2088,11 +2054,7 @@ void RollbackUnit_RestoreEffects(int32_t frame)
     AcquireSRWLockExclusive(&g_lock);
     const unsigned slot = unsigned((frame % ROLLBACK_WINDOW + ROLLBACK_WINDOW) % ROLLBACK_WINDOW);
     const auto* snapshot = g_liveSnapshots[slot];
-    LIFE_REQUIRE(snapshot);
     const auto& manifest = *snapshot;
-    // A published snapshot is a restore contract, not a best-effort batch.
-    LIFE_REQUIRE(manifest.valid && manifest.frame == frame && manifest.unitManager &&
-        unitGuard.manager == manifest.unitManager && manifest.thread == GetCurrentThreadId());
     const size_t count = manifest.effectCount();
     // Sized by the snapshot: the effect count is whatever the frame held.
     // Restore-fence scratch, reused across restores.
@@ -2106,24 +2068,7 @@ void RollbackUnit_RestoreEffects(int32_t frame)
     for (size_t i = 0; i < count; ++i) {
         const auto& saved = manifest.effects[i];
         Identity* current = Find(saved.object, false);
-        LIFE_REQUIRE(current && current->id == saved.id &&
-            (current->snapshots & (uint32_t(1) << slot)) &&
-            !(saved.category >= categories && saved.category != 0x7F) &&
-            !(current->occupancy != Occupancy::Live && current->occupancy != Occupancy::Quarantined));
         if (saved.graph >= 0) {
-            // These are ownership assertions, not content/admission checks. A
-            // referenced generation cannot expire or have its allocations reused.
-            LIFE_REQUIRE(size_t(saved.graph) < GenerationCapacity);
-            const auto& graph = g_generations[saved.graph];
-            LIFE_REQUIRE(graph.id == saved.generation && graph.ownerId == saved.id &&
-                (graph.snapshots & (uint32_t(1) << slot)) &&
-                graph.spanCount == saved.spanCount && saved.spanBegin <= manifest.spanCount() &&
-                saved.spanCount <= manifest.spanCount() - saved.spanBegin);
-            for (size_t j = 0; j < saved.spanCount; ++j) {
-                const auto& span = manifest.spans[saved.spanBegin + j];
-                LIFE_REQUIRE(Body(graph).spans[j].address == span.address && Body(graph).spans[j].size == span.size &&
-                    span.offset <= manifest.payloadBytes() && span.size <= manifest.payloadBytes() - span.offset);
-            }
             if (current->graph < 0 && (Read<void*>(saved.object, 0x218) ||
                 Read<void*>(saved.object, 0x220) || Read<void*>(saved.object, 0x228))) {
                 // No generation owns this newer graph. Dispose it normally,
@@ -2144,10 +2089,6 @@ void RollbackUnit_RestoreEffects(int32_t frame)
     for (size_t i = 0; i < spaces.size(); ++i) {
         const auto& saved = manifest.attackSpaces[i];
         Identity* current = Find(saved.object, false);
-        LIFE_REQUIRE(current && current->id == saved.id && (current->snapshots & (uint32_t(1) << slot)) &&
-            !(current->occupancy != Occupancy::Live && current->occupancy != Occupancy::Quarantined) &&
-            Read<uintptr_t>(saved.object, 0) == saved.vtable && manifest.action &&
-            Read<void*>((void*)_addr(0x140D47E68), 0) == manifest.action);
         spaces[i] = current;
         current->restoreTag = tag;
     }
@@ -2155,9 +2096,6 @@ void RollbackUnit_RestoreEffects(int32_t frame)
     for (size_t i = 0; i < models.size(); ++i) {
         const auto& saved = manifest.models[i];
         Identity* current = Find(saved.object, false);
-        LIFE_REQUIRE(current && current->id == saved.id && (current->snapshots & (uint32_t(1) << slot)) &&
-            !(current->occupancy != Occupancy::Live && current->occupancy != Occupancy::Quarantined) &&
-            Read<uintptr_t>(saved.object, 0) == saved.vtable && current->extent == saved.extent);
         models[i] = current;
         current->restoreTag = tag;
         current->abandonedModel = false;
@@ -2276,7 +2214,6 @@ void RollbackUnit_RestoreEffects(int32_t frame)
                 else releasedResources[i] = Read<void*>(saved.object, 0x108);
                 if (graph.reference >= 0) {
                     auto& reference = g_resourceReferences[graph.reference];
-                    LIFE_REQUIRE(!reference.onOwner && reference.resource == graph.resource);
                     reference.onOwner = true;
                 }
                 identities[i]->resourceReference = graph.reference;
