@@ -1937,6 +1937,16 @@ void RollbackUnit_SaveSnapshot(int32_t frame, std::shared_ptr<RollbackUnitSnapsh
         if (body) CaptureShotGenerations(identity, uint32_t(1) << slot, saved);
     }
     stage.Next(LagMetric::SaveUnitConstraints);
+    if (g_lagDiagnosticsMayBeEnabled.load(std::memory_order_relaxed)) {
+        uint64_t shotBytes = 0, modelBytes = 0;
+        for (size_t i = 0; i < shotIndex; ++i) shotBytes += manifest.shots[i].payload.size();
+        for (const auto& model : manifest.models) modelBytes += model.payload.size();
+        LagDiagnostics_Count(LagEvent::ShotPayloadBytes, shotBytes);
+        LagDiagnostics_Count(LagEvent::ModelPayloadBytes, modelBytes);
+        // Graph spans plus the fixed root image of each saved effect.
+        LagDiagnostics_Count(LagEvent::EffectPayloadBytes,
+            manifest.payloadBytes() + manifest.effectCount() * sizeof(EffectState::root));
+    }
     CaptureShotConstraints(manifest);
     stage.Finish();
     AcquireSRWLockExclusive(&g_lock);

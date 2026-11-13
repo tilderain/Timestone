@@ -21,7 +21,11 @@ enum class LagMetric : unsigned {
     SaveUnitShotLeases, SaveUnitWorld, SaveUnitShotCopy, SaveUnitGenerations, SaveUnitConstraints,
     SnapDump, Restore, RestoreSetup, RestoreRegions, RestoreClones, RestoreFixups,
     RestoreWithdraw, RestoreLate, Correction, ResimFrame, ResimTick,
-    RestoreEffects, RestoreShots, RestoreUnitRefs, RebuildSpawn, RebuildFinalize,
+    RestoreEffects, RestoreShots, RestoreUnitRefs,
+    // Stages nested inside RestoreShots; Storage and Fields are one sample per shot.
+    RestoreShotPrepare, RestoreShotStorage, RestoreShotFields, RestoreShotLinks,
+    RestoreShotManager, RestoreShotExecution,
+    RebuildSpawn, RebuildFinalize,
     OverlaySetup, OverlayLogic, ImGuiFinalize, HookLog, ProfileDump, RenderEnd, RenderBegin, WindowFocus,
     RenderMove, UnitMove, NativeInput, SoundMove,
     DrawCache, CameraDraw, UnitDraw, DrawFrameCache, Jobs, JobDispatch, UnitSync, UnitAfter,
@@ -47,7 +51,8 @@ enum class LagMetric : unsigned {
 enum class LagEvent : unsigned {
     BenchmarkReset, LiveSample, CorrectionSample, BenchmarkClock,
     NativeOutsideFrame, FrameReentry, OverlayOrder, ScopeOverflow,
-    RenderBatches, RenderJobs, RenderWorkers, SceneDrawables, Count
+    RenderBatches, RenderJobs, RenderWorkers, SceneDrawables,
+    ShotPayloadBytes, ModelPayloadBytes, EffectPayloadBytes, Count
 };
 
 // Initially true for lazy configuration; false between opt-in captures.

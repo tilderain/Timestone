@@ -110,7 +110,10 @@ constexpr const char* names[] = {
     "save_unit_shot_leases", "save_unit_world", "save_unit_shot_copy", "save_unit_generations", "save_unit_constraints",
     "snapdump", "restore", "restore_setup", "restore_regions", "restore_clones", "restore_fixups",
     "restore_withdraw", "restore_late", "correction", "resim_frame", "resim_tick",
-    "restore_effects", "restore_shots", "restore_unit_refs", "rebuild_spawn", "rebuild_finalize",
+    "restore_effects", "restore_shots", "restore_unit_refs",
+    "restore_shot_prepare", "restore_shot_storage", "restore_shot_fields", "restore_shot_links",
+    "restore_shot_manager", "restore_shot_execution",
+    "rebuild_spawn", "rebuild_finalize",
     "overlay_setup", "overlay_logic", "imgui_finalize", "hooklog", "profile_dump", "render_end", "render_begin", "window_focus",
     "render_move", "unit_move", "native_input", "sound_move",
     "draw_cache", "camera_draw", "unit_draw", "draw_frame_cache", "jobs", "job_dispatch", "unit_sync", "unit_after",
@@ -178,6 +181,11 @@ bool WriteReport(const ReportData& report, HANDLE file, double previousWriteMs) 
         (unsigned long long)window.events[(unsigned)LagEvent::RenderJobs],
         (unsigned long long)window.events[(unsigned)LagEvent::RenderWorkers],
         (unsigned long long)window.events[(unsigned)LagEvent::SceneDrawables]);
+    // Bytes copied by the unit save, summed over every save in the window.
+    append(" shot_payload_bytes=%llu model_payload_bytes=%llu effect_payload_bytes=%llu",
+        (unsigned long long)window.events[(unsigned)LagEvent::ShotPayloadBytes],
+        (unsigned long long)window.events[(unsigned)LagEvent::ModelPayloadBytes],
+        (unsigned long long)window.events[(unsigned)LagEvent::EffectPayloadBytes]);
     append("%s", " self_avg_ms{");
     for (unsigned i = 0; i < (unsigned)LagMetric::Count; ++i)
         if (window.costs[i].count && window.selfTicks[i])

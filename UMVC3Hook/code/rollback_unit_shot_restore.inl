@@ -69,6 +69,8 @@ void RollbackUnit_RestoreShots(int32_t frame)
     if constexpr (!ROLLBACK_UNIT_ENABLED || !EMPTY_EFFECT_QUARANTINE_ENABLED || !EFFECT_RESTORE_ENABLED ||
                   !SAVED_SHOT_RESTORE_ENABLED) return;
     if (!g_rollbackUnitEnabled.load(std::memory_order_relaxed)) return;
+    // Stages nest inside restore_shots, which reports only its own remainder.
+    LagDiagnosticScope stage(LagMetric::RestoreShotPrepare);
     UnitGuard unitFence;
     ShotWorldGuard shotFence;
     const unsigned slot = unsigned((frame % ROLLBACK_WINDOW + ROLLBACK_WINDOW) % ROLLBACK_WINDOW);
@@ -145,13 +147,16 @@ void RollbackUnit_RestoreShots(int32_t frame)
     for (size_t i = 0; i < work.size(); ++i) {
         const Identity& owner = *work[i].owner;
         RollbackUnitFailureScope shotScope("shot.restore", owner.object, owner.id, frame);
+        stage.Next(LagMetric::RestoreShotStorage); // One sample per shot from here.
         StageShotGenerationStorage(owner, *work[i].shot, bit);
+        stage.Next(LagMetric::RestoreShotFields);
         LIFE_REQUIRE(StageShotCpuFields(owner, *work[i].shot, bit) == ShotCpuRestoreStatus::ReviewedSubset);
         RestoreShotTail(static_cast<uint8_t*>(owner.object), work[i].image, owner.extent, holes[i]);
         // Joint-dependency rebuild request; the joints, depth order and model
         // flags it describes came back with the pose spans above.
         Write(owner.object, 0x123D, Read<uint8_t>(work[i].image, 0x123D));
     }
+    stage.Next(LagMetric::RestoreShotLinks);
     // Constraint links are plain bytes among retained objects: the saved nodes,
     // the shots' joints (pose spans) and character joints (rollback regions) all
     // return to the same frame, so the chains agree without relinking or sorting.
@@ -166,8 +171,11 @@ void RollbackUnit_RestoreShots(int32_t frame)
         Write(constraint, 0x50, (void*)nullptr); Write(constraint, 0x58, (void*)nullptr);
         Write(constraint, 0x60, (void*)nullptr); Write(constraint, 0x70, int32_t(-1));
     }
+    stage.Next(LagMetric::RestoreShotManager);
     StageShotManagerState(*saved, bit);
+    stage.Next(LagMetric::RestoreShotExecution);
     StageShotExecutionState(*saved, bit);
+    stage.Finish();
     AcquireSRWLockExclusive(&g_lock);
     Push("shots_restored", nullptr, nullptr, uint32_t(frame), work.size(), saved->constraints.size(), future.size(), false);
     ReleaseSRWLockExclusive(&g_lock);

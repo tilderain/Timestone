@@ -119,6 +119,7 @@ source commit and dirty-build flag.
 | `restore_fixups` | Allocation-owner repair, hit-solver reset, stale-pointer and effect-slot cleanup |
 | `restore_late` | Camera, character-post and render reapplication after the regions, plus the four lifetime stages below (its self time excludes them) |
 | `restore_withdraw`, `restore_effects`, `restore_shots` | Withdrawing shots born after the target frame, the effect/attack-space/model transaction, and the saved-shot rewind |
+| `restore_shot_prepare`, `restore_shot_storage`, `restore_shot_fields`, `restore_shot_links`, `restore_shot_manager`, `restore_shot_execution` | Stages inside `restore_shots`: work list and tail holes; per-shot generation/buffer staging; per-shot field and tail copies; constraint links; shot manager registration; scheduler membership. Storage and fields are one sample per shot |
 | `restore_unit_refs` | Resolving the characters' weak shot/effect references against the restored units |
 | `rebuild_spawn`, `rebuild_finalize` | Unused |
 | `correction` | Complete accepted rollback correction, including restore, replay and final repairs |
