@@ -136,6 +136,35 @@ Ordinary particle pool entries are borrowed by the generator from the effect-own
 storage. The generator manages their intrusive active/free topology. Separately
 allocated auxiliary/GPU blocks and registered child units have different lifetimes.
 
+### Snapshot payload census (2026-11-13)
+
+Measured with temporary lag-capture counters over three netplay captures
+(two local instances, simulated latency, 16-30 effects alive per save). The
+counters were removed afterwards; the figures are per rollback save.
+
+| Measure | Result |
+|---|---|
+| Effect payload per save | 170-300 KB (about 17 KB per effect) |
+| Particle pool slices | 58-61% of the payload |
+| Generator objects | 22-23% |
+| Manager records (`0x150` each) | 10-11% |
+| Pool bytes held by live particles (`mParticleMoveNum * mParticleSize`) | 19-24% of pool bytes |
+| Bytes identical to the previous frame's capture (64-byte blocks) | 78-84% of the payload |
+| All-zero 64-byte blocks | 13-14% of the payload |
+
+Conclusions for the snapshot design:
+
+- Skipping all-zero blocks is exact for any generator class but covers too little
+  to pay for the scan.
+- Saving only live particles would remove about 45% of the payload, but
+  `cParticleGenerator__openParticle` resets only `+12`, `+18`, `+1C`, `+60` and
+  flag bits at `+14`/`+16`; it does not clear a record taken from the free list.
+  That needs a read-before-write proof for every concrete generator's
+  initializer, and a miss is a desync.
+- The effect save is about 0.05 ms for 280 KB. Removing every idle pool byte
+  would save roughly 0.2 ms of a 7 ms seven-frame rollback, so the payload is
+  left copied whole.
+
 Round-ten GPU research distinguishes the separately allocated `0xB10` packed-quad
 context, its `0x30` resource-pair record, resource wrappers, and lazy CPU staging
 buffers. A nonnull factory result does not guarantee all nested allocations
