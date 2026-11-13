@@ -273,11 +273,22 @@ void CaptureShotWorld(SnapshotManifest& saved, void* manager)
         for (void* object : foreign)
             if (emitted.insert(object)) output.push_back(object);
     };
+    // Primary lines a member is saved in or sits in now. RollbackUnit_RestoreEffects
+    // ran just before and reconciled every line against this same snapshot; a
+    // line with no member here would come out of the pass below exactly as it
+    // went in, so only these are walked and rewritten. (The walk dereferences
+    // every unit on a line; it was most of this stage's 80 us.)
+    uint64_t memberLines = 0;
+    for (const auto& member : members)
+        for (const uint32_t flags : {member.flags, Read<uint32_t>(member.object, 0x10)}) {
+            const uint32_t category = (flags >> 3) & 0x7F;
+            if (category < 64) memberLines |= uint64_t(1) << category;
+        }
     static ScratchSet seen;
     seen.clear();
     static std::vector<void*> foreign;
     for (uint32_t category = 0; category < 64; ++category) {
-        if (category >= categories) {
+        if (category >= categories || !(memberLines & (uint64_t(1) << category))) {
             continue;
         }
         foreign.clear();
@@ -288,7 +299,6 @@ void CaptureShotWorld(SnapshotManifest& saved, void* manager)
                 Read<void*>(unit, 0x20) != previous || ((Read<uint32_t>(unit, 0x10) >> 3) & 0x7F) != category)
                 LIFE_FAIL("current unit primary list is inconsistent or cyclic", LIFE_VALUE(category),
                     LIFE_VALUE(unit), LIFE_VALUE(previous), LIFE_VALUE(seen.size()));
-            const auto* identity = Find(unit, false);
             seen.insert(unit); previous = unit;
             if (!captured(unit)) foreign.push_back(unit);
         }
@@ -304,42 +314,17 @@ void CaptureShotWorld(SnapshotManifest& saved, void* manager)
         if (Read<uint8_t>(descriptor, 0x20) || size > capacity || (capacity && !data))
             LIFE_FAIL("unit group backing storage violates the non-owning array contract", LIFE_VALUE(group),
                 LIFE_VALUE(descriptor), LIFE_VALUE(size), LIFE_VALUE(capacity), LIFE_VALUE(data));
-        static ScratchSet foreignSeen;
-        foreign.clear(); foreignSeen.clear();
+        foreign.clear();
         for (uint32_t i = 0; i < size; ++i) {
             void* unit = Read<void*>(data, size_t(i) * 8);
-            const auto* identity = Find(unit, false);
-            if (!captured(unit)) { foreign.push_back(unit); foreignSeen.insert(unit); }
+            if (!captured(unit)) foreign.push_back(unit);
         }
         reconcile(saved.groups[group], foreign, groups[group]);
     }
-    // Validate historical topology against the saved unit fields before writing.
-    // One pass records where each object occurs: its primary-list count and the
-    // single category holding it, and its group mask (a repeat within a group fails).
-    struct Placement { size_t primary = 0; uint32_t category = UINT32_MAX; uint64_t groups = 0; bool repeated = false; };
-    static ScratchMap<Placement> placements;
-    placements.clear();
-    for (uint32_t i = 0; i < categories; ++i)
-        for (void* object : primary[i]) {
-            Placement& placement = *placements.insert(object).first;
-            if (placement.primary++ && placement.category != i) placement.repeated = true;
-            placement.category = i;
-        }
-    for (uint32_t i = 0; i < groupCount; ++i)
-        for (void* object : groups[i]) {
-            Placement& placement = *placements.insert(object).first;
-            if (placement.groups & (uint64_t(1) << i)) placement.repeated = true;
-            placement.groups |= uint64_t(1) << i;
-        }
     size_t held = 0;
-    for (const auto& member : members) {
+    for (const auto& member : members)
         held += member.identity && member.historical && member.identity->occupancy == Occupancy::Quarantined &&
                 member.historical->occupancy == Occupancy::Live;
-        void* object = member.object;
-        const uint32_t category = (member.flags >> 3) & 0x7F;
-        const Placement* at = placements.find(object);
-        const Placement placement = at ? *at : Placement{};
-    }
     // Only allocation preparation invokes native code. No topology is changed
     // until every list/mask/identity check above has passed.
     for (uint32_t group = 0; group < groupCount; ++group) {
@@ -364,7 +349,8 @@ void CaptureShotWorld(SnapshotManifest& saved, void* manager)
         }
         if (member.identity && member.historical) member.identity->futureShot = member.historical->futureShot;
     }
-    for (uint32_t category = 0; category < categories; ++category) {
+    for (uint32_t category = 0; category < categories && category < 64; ++category) {
+        if (!(memberLines & (uint64_t(1) << category))) continue; // Not walked: left as it is.
         const auto& entries = primary[category];
         void* line = static_cast<uint8_t*>(fence.manager) + 0x50 + category * 0x30;
         Write(line, 0, entries.empty() ? nullptr : entries.front());
