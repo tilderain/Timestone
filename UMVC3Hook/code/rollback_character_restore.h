@@ -3,7 +3,9 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <iterator>
 #include <span>
+#include <utility>
 
 // Full bodies are still captured. This policy never discovers ownership from
 // the bit pattern of a saved or live word. Unlisted bytes in a reviewed layout
@@ -100,16 +102,38 @@ inline constexpr ActorFieldRow ActorMotionRows[] = {
     {0x170, 0x08, rollback_actor_detail::Mdl}, // Borrowed mpKeyFrameInfo.
 };
 
+namespace rollback_actor_detail {
+// One fixed-size copy per row the owner rewinds, expanded at compile time. A
+// loop over the table is left by GCC (10 and 15.3 alike) as a runtime walk with
+// one memcpy call per row; expanded, 8 shots restore in 4 us instead of 7
+// (tools/benchmark_packed_unit_capture.cpp, under Wine).
+template<const auto& Rows, uint8_t Owner> inline void CopyActorRows(uint8_t* live, const uint8_t* saved)
+{
+    [&]<size_t... I>(std::index_sequence<I...>) {
+        (((Rows[I].owners & Owner)
+            ? (void)std::memcpy(live + Rows[I].offset, saved + Rows[I].offset, Rows[I].size) : (void)0), ...);
+    }(std::make_index_sequence<std::size(Rows)>{});
+}
+template<uint8_t Owner> inline void CopyActorFields(uint8_t* live, const uint8_t* saved)
+{
+    CopyActorRows<ActorFieldRows, Owner>(live, saved);
+    for (size_t motion = 0x560; motion < 0x1160; motion += 0x180)
+        CopyActorRows<ActorMotionRows, Owner>(live + motion, saved + motion);
+}
+}
+
 // Caller guarantees valid bodies of at least +1450 (+1300 for a weapon),
 // retained resources and compatible work allocations. No native calls.
 inline void Rollback_RestoreActorFields(void* destination, const uint8_t* saved, ActorOwner owner)
 {
     auto* live = static_cast<uint8_t*>(destination);
-    for (const ActorFieldRow& row : ActorFieldRows)
-        if (row.owners & owner) std::memcpy(live + row.offset, saved + row.offset, row.size);
-    for (size_t motion = 0x560; motion < 0x1160; motion += 0x180)
-        for (const ActorFieldRow& row : ActorMotionRows)
-            if (row.owners & owner) std::memcpy(live + motion + row.offset, saved + motion + row.offset, row.size);
+    switch (owner) {
+    case ActorCharacter: rollback_actor_detail::CopyActorFields<ActorCharacter>(live, saved); break;
+    case ActorRoster:    rollback_actor_detail::CopyActorFields<ActorRoster>(live, saved); break;
+    case ActorAuxiliary: rollback_actor_detail::CopyActorFields<ActorAuxiliary>(live, saved); break;
+    case ActorWeapon:    rollback_actor_detail::CopyActorFields<ActorWeapon>(live, saved); break;
+    case ActorShot:      rollback_actor_detail::CopyActorFields<ActorShot>(live, saved); break;
+    }
     if (owner & rollback_actor_detail::Chr) {
         bool sameResources = true;
         for (size_t offset = 0x1360; offset < 0x1378; offset += 8)

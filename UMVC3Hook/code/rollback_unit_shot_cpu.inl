@@ -51,7 +51,10 @@ ShotCpuRestoreStatus RestoreShotCpuFields(void* destination, size_t destinationS
         {0x20D0, 0x04},   // Contact-displacement scale; sound cRefs begin at +20D8.
         {0x2118, 0x1B},   // Animation watch controls, phase/dispatch word and three child latches.
     };
-    for (const auto& range : ranges) std::memcpy(live + range.offset, saved + range.offset, range.size);
+    // Expanded like the actor rows: fixed-size copies, not a memcpy call per range.
+    [&]<size_t... I>(std::index_sequence<I...>) {
+        ((std::memcpy(live + ranges[I].offset, saved + ranges[I].offset, ranges[I].size)), ...);
+    }(std::make_index_sequence<std::size(ranges)>{});
 
     // cAtkCtrl::update emits attack sound behind bit 40. uShot's initial sound
     // creation/stop uses bit 10000000 and the four live sound cRefs. Do not rewind

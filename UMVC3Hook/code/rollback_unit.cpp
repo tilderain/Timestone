@@ -452,6 +452,19 @@ template<class T> void Write(void* object, size_t offset, T value)
     std::memcpy(static_cast<uint8_t*>(object) + offset, &value, sizeof(value));
 }
 
+// A fixed-size copy as unaligned SSE2 moves. GCC lowers a constant-size memcpy
+// of a few hundred bytes to rep movsq, whose startup cost dominates at that
+// size: 64 effect roots took 3.5 us against 2.4 us this way
+// (tools/benchmark_packed_unit_capture.cpp).
+template<size_t Bytes> inline void CopyFixed(void* destination, const void* source)
+{
+    static_assert(Bytes % 16 == 0);
+    auto* to = static_cast<uint8_t*>(destination);
+    const auto* from = static_cast<const uint8_t*>(source);
+    for (size_t at = 0; at < Bytes; at += 16)
+        _mm_storeu_si128((__m128i*)(to + at), _mm_loadu_si128((const __m128i*)(from + at)));
+}
+
 // Pointer-keyed scratch for one capture or restore pass. Storage is kept between
 // passes and clear() is an epoch bump, so a pass allocates nothing once warm;
 // the node-based standard containers cost a heap round trip per element. Not
@@ -1351,7 +1364,7 @@ void CaptureEffects(SnapshotManifest& manifest, void* manager)
             graph.snapshots |= uint32_t(1) << unsigned((manifest.frame % ROLLBACK_WINDOW + ROLLBACK_WINDOW) % ROLLBACK_WINDOW);
             saved.spanBegin = uint32_t(manifest.spanCount());
             saved.spanCount = uint32_t(spanCount);
-            std::memcpy(saved.root, object, sizeof(saved.root));
+            CopyFixed<sizeof(saved.root)>(saved.root, object);
             for (size_t i = 0; i < spanCount; ++i) {
                 spans[i].offset = uint32_t(manifest.payloadBytes());
                 const auto* data = static_cast<const uint8_t*>(spans[i].address);
@@ -2286,7 +2299,7 @@ void RollbackUnit_RestoreEffects(int32_t frame)
                 const auto& span = manifest.spans[saved.spanBegin + j];
                 std::memcpy(span.address, manifest.payload.data() + span.offset, span.size);
             }
-            std::memcpy(static_cast<uint8_t*>(saved.object) + 0x40, saved.root + 0x40, 0x280);
+            CopyFixed<0x280>(static_cast<uint8_t*>(saved.object) + 0x40, saved.root + 0x40);
         }
         std::memcpy(static_cast<uint8_t*>(saved.object) + 8, saved.control, sizeof(saved.control));
         Write(saved.object, 0x28, saved.deltaTime);
