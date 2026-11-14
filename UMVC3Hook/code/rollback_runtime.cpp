@@ -812,6 +812,77 @@ bool Rollback_PatchHitSolverAlwaysInline()
     return patched;
 }
 
+bool Rollback_PatchAbilityChecks()
+{
+    // Speed: command gating asks "which abilities are active?" about 180
+    // times a tick, and native answers through up to 18 nested getter calls
+    // (0.76% of the game thread, paid again on every resim tick). isActive and
+    // the two flag collectors are rewritten in place without the calls, which
+    // saves about 5 us per tick.
+    // Six slots at this+0x10, 0x80 apart: active if [slot+0x0C] != 0, flags at
+    // slot+0x1C / slot+0x18. Register results match native, including rcx.
+    static constexpr uint8_t IS_ACTIVE[19] = {
+        0x48, 0x83, 0xEC, 0x28,       // sub rsp, 0x28
+        0xE8, 0xF7, 0x30, 0x3F, 0x00, // call 0x140417C10
+        0x85, 0xC0,                   // test eax, eax
+        0x0F, 0x95, 0xC0,             // setnz al
+        0x48, 0x83, 0xC4, 0x28,       // add rsp, 0x28
+        0xC3,
+    };
+    static constexpr uint8_t IS_ACTIVE_INLINE[19] = {
+        0x8B, 0x41, 0x0C, // mov eax, [rcx+0x0C]
+        0x85, 0xC0,       // test eax, eax
+        0x0F, 0x95, 0xC0, // setnz al
+        0xC3,
+        0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC,
+    };
+#define ABILITY_COLLECT_NATIVE(c0, c1, c2, c3)                                                    \
+    {0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x74, 0x24, 0x10, 0x57, 0x48, 0x83, 0xEC, 0x20,    \
+     0x33, 0xF6, 0x48, 0x8D, 0x59, 0x10, 0x8D, 0x7E, 0x06, 0x48, 0x8B, 0xCB,                      \
+     0xE8, c0, 0x09, 0x00, 0x00, /* call isActive */                                              \
+     0x84, 0xC0, 0x74, 0x0A, 0x48, 0x8B, 0xCB,                                                    \
+     0xE8, c1, c2, c3, 0x00, /* call the flag getter */                                           \
+     0x0B, 0xF0, 0x48, 0x83, 0xEB, 0x80, 0x48, 0xFF, 0xCF, 0x75, 0xE1,                            \
+     0x48, 0x8B, 0x5C, 0x24, 0x30, 0x8B, 0xC6, 0x48, 0x8B, 0x74, 0x24, 0x38,                      \
+     0x48, 0x83, 0xC4, 0x20, 0x5F, 0xC3}
+#define ABILITY_COLLECT_INLINE(flagOffset)                                                        \
+    {0x53,                                     /* push rbx */                                     \
+     0x48, 0x8D, 0x99, 0x10, 0x03, 0x00, 0x00, /* lea rbx, [rcx+0x310]  (end of the slots) */     \
+     0x48, 0x83, 0xC1, 0x10,                   /* add rcx, 0x10 */                                \
+     0x31, 0xC0,                               /* xor eax, eax */                                 \
+     0x83, 0x79, 0x0C, 0x00,                   /* next: cmp dword [rcx+0x0C], 0 */                \
+     0x74, 0x03,                               /* je skip */                                      \
+     0x0B, 0x41, flagOffset,                   /* or eax, [rcx+flagOffset] */                     \
+     0x48, 0x83, 0xE9, 0x80,                   /* skip: sub rcx, -0x80 */                         \
+     0x48, 0x39, 0xD9,                         /* cmp rcx, rbx */                                 \
+     0x75, 0xEE,                               /* jne next */                                     \
+     0x48, 0x83, 0xC1, 0x80,                   /* add rcx, -0x80  (rcx = last slot, as native) */ \
+     0x5B, 0xC3,                               /* pop rbx; ret */                                 \
+     0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC,    \
+     0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC,    \
+     0xCC, 0xCC, 0xCC, 0xCC, 0xCC}
+    static constexpr uint8_t COLLECT_FLAGS[73] = ABILITY_COLLECT_NATIVE(0x90, 0x64, 0x35, 0x62);
+    static constexpr uint8_t COLLECT_FLAGS_INLINE[73] = ABILITY_COLLECT_INLINE(0x1C);
+    static constexpr uint8_t COLLECT_ABILITY[73] = ABILITY_COLLECT_NATIVE(0x40, 0xC4, 0x0C, 0x66);
+    static constexpr uint8_t COLLECT_ABILITY_INLINE[73] = ABILITY_COLLECT_INLINE(0x18);
+#undef ABILITY_COLLECT_NATIVE
+#undef ABILITY_COLLECT_INLINE
+    // The getters the calls reach must be the plain field reads assumed above.
+    static constexpr uint8_t GET_0C[4] = {0x8B, 0x41, 0x0C, 0xC3};
+    static constexpr uint8_t GET_1C[4] = {0x8B, 0x41, 0x1C, 0xC3};
+    static constexpr uint8_t GET_18[4] = {0x8B, 0x41, 0x18, 0xC3};
+    const bool getters = !memcmp((void*)_addr(0x140417C10), GET_0C, 4) &&
+                         !memcmp((void*)_addr(0x1406476F0), GET_1C, 4) &&
+                         !memcmp((void*)_addr(0x140684EA0), GET_18, 4);
+    // The collectors first: they do not depend on isActive once patched.
+    const bool patched = getters &&
+        PatchBytes(0x140024160, COLLECT_FLAGS, COLLECT_FLAGS_INLINE) &&
+        PatchBytes(0x1400241B0, COLLECT_ABILITY, COLLECT_ABILITY_INLINE) &&
+        PatchBytes(0x140024B10, IS_ACTIVE, IS_ACTIVE_INLINE);
+    HookLog("Rollback: cChrAbility inline patch %s\n", patched ? "installed" : "failed");
+    return patched;
+}
+
 void Rollback_PatchBattleUiAllocationFailure()
 {
     // Native failure branches still reach unit setup with null allocations.

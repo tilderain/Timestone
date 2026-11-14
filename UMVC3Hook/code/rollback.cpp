@@ -144,6 +144,7 @@ void Rollback_InitHooks()
 {
     Rollback_PatchGameConfigRefresh();
     Rollback_PatchHitSolverAlwaysInline();
+    Rollback_PatchAbilityChecks();
     Rollback_PatchBattleUiAllocationFailure();
     Rollback_InitNativeNullGuards();
     Rollback_InitOnlineBattleHook();
