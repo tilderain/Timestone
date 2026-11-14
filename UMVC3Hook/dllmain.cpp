@@ -26,6 +26,7 @@
 #include "code/gameplay_hooks.h"
 #include "code/xinput_discovery.h"
 #include "code/d3d9reset.h"
+#include "code/shader_constants.h"
 #include "code/exception.h"
 #include "code/mk10utils.h"
 #include <Windows.h>
@@ -968,6 +969,9 @@ static bool OverlayFrameDue()
 
 long __stdcall hkEndScene(LPDIRECT3DDEVICE9 pDevice)
 {
+	// The overlay below saves and restores device state behind the constant
+	// hooks; start the next frame's constants from scratch.
+	ShaderConstants_Forget();
 	if (InterlockedCompareExchange(&g_firstD3D9EndSceneSeen, 1, 0) == 0) {
 		BootTimer_Stamp("First D3D9 EndScene");
 		D3D9ResetDiagnostics_StartStartupWatchdog();

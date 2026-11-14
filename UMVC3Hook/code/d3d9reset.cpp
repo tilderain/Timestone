@@ -3,6 +3,7 @@
 
 #include "netplay.h" // ENet includes winsock2 before the Windows/D3D headers.
 #include "d3d9reset.h"
+#include "shader_constants.h"
 
 #include "mk10utils.h"
 #include "framestepper.h"
@@ -433,6 +434,7 @@ HRESULT WINAPI HookResetDevice(IDirect3DDevice9* device,
                                D3DPRESENT_PARAMETERS* parameters)
 {
     D3D9ResetDiagnostics_RecordDeviceReset();
+    ShaderConstants_Forget();
     if (!device || !parameters)
         return D3DERR_INVALIDCALL;
 
@@ -1014,6 +1016,8 @@ bool InstallDeviceHook(IDirect3DDevice9* device)
     }
     ReleaseSRWLockExclusive(&g_deviceLock);
     HookLog("D3D9: install device Reset hook %p status=%d\n", target, (int)status);
+    if (status == MH_OK)
+        ShaderConstants_Install(device);
     return status == MH_OK;
 }
 
