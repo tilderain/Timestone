@@ -61,6 +61,8 @@ bool Rollback_PatchGameConfigRefresh();
 void Rollback_PatchBattleUiAllocationFailure();
 // Install native-object null/type checks and resimulation filters.
 void Rollback_InitNativeNullGuards();
+// Skip the scan for already-released stream sources (opt_sound_stream.cpp).
+void OptSoundStream_Init();
 
 // Capture the configured regions and subsystem state for this frame.
 void Rollback_SaveSnapshot(int32_t frame);
