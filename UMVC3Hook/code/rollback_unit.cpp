@@ -177,11 +177,20 @@ struct ShotConstraintState {
 // it watches are rewound; without this state it waits forever for children that
 // were restored to "not finishing", or is gone while they were resurrected.
 constexpr size_t AttackSpaceStateOffset = 0x1CC0, AttackSpaceStateSize = 0x80;
+// uKirigakureScreenEffect (Amaterasu's Veil of Mist) is the same kind of
+// controller, owned by a character rather than sAction: its step +0x1D10 and
+// child slots +0x1D00/+0x1D08 are the only thing that ever ends its two looping
+// mist children (no 0x800, so they outlive their owner). Rewound like an attack
+// space, over its whole tail; the object is 0x1D20 bytes.
+constexpr uintptr_t KirigakureScreenVtable = 0x140A88350;
+constexpr size_t KirigakureScreenStateSize = 0x1D20 - AttackSpaceStateOffset;
+constexpr size_t NoActionSlot = ~size_t(0);
 struct AttackSpaceState {
     void* object = nullptr;
     uint64_t id = 0;
     uintptr_t vtable = 0;
-    size_t actionSlot = 0;
+    size_t actionSlot = 0; // NoActionSlot: not referenced from sAction.
+    size_t stateSize = AttackSpaceStateSize;
     uint8_t control[0x10]{}; // cUnit +08..+17, as for effects.
     float deltaTime = 0;
     uint64_t groups = 0;
@@ -1353,6 +1362,11 @@ bool IsAttackSpace(void* object)
     return vtable >= first && vtable - first < 9 * 0x270 && !((vtable - first) % 0x270);
 }
 
+bool IsKirigakureScreen(void* object)
+{
+    return Read<uintptr_t>(object, 0) == uintptr_t(_addr(KirigakureScreenVtable));
+}
+
 // Caller holds g_lock at the capture fence. Leasing keeps the allocation through
 // native deletion, so a later restore can bring the same object back.
 void CaptureAttackSpaces(SnapshotManifest& manifest, uint32_t bit)
@@ -1360,22 +1374,31 @@ void CaptureAttackSpaces(SnapshotManifest& manifest, uint32_t bit)
     manifest.attackSpaces.clear();
     manifest.action = manifest.unitManager ? Read<void*>((void*)_addr(0x140D47E68), 0) : nullptr;
     if (!manifest.action) return;
-    for (size_t slot = 0; slot < std::size(ActionAttackSpaceFields); ++slot) {
-        void* object = Read<void*>(manifest.action, ActionAttackSpaceFields[slot]);
-        if (!object || !IsAttackSpace(object)) continue;
+    const auto capture = [&](void* object, size_t slot, size_t stateSize) {
         RollbackUnitFailureScope failureScope("attack_space.capture", object, 0, manifest.frame);
-        LeaseUnitDependency(manifest, object, manifest.action, 0, ActionAttackSpaceFields[slot], bit, true);
+        const bool action = slot != NoActionSlot;
+        LeaseUnitDependency(manifest, object, action ? manifest.action : nullptr, 0,
+                            action ? ActionAttackSpaceFields[slot] : 0, bit, true);
         const Identity* identity = Find(object, false);
-        if (identity->occupancy != Occupancy::Live) continue; // Already dead and merely held.
+        if (identity->occupancy != Occupancy::Live) return; // Already dead and merely held.
         AttackSpaceState saved;
         saved.object = object; saved.id = identity->id; saved.vtable = Read<uintptr_t>(object, 0);
         saved.actionSlot = slot;
+        saved.stateSize = stateSize;
         std::memcpy(saved.control, static_cast<uint8_t*>(object) + 8, sizeof(saved.control));
         saved.deltaTime = Read<float>(object, 0x28);
         saved.groups = Read<uint64_t>(object, 0x30);
-        std::memcpy(saved.state, static_cast<uint8_t*>(object) + AttackSpaceStateOffset, sizeof(saved.state));
+        std::memcpy(saved.state, static_cast<uint8_t*>(object) + AttackSpaceStateOffset, stateSize);
         manifest.attackSpaces.push_back(saved);
+    };
+    for (size_t slot = 0; slot < std::size(ActionAttackSpaceFields); ++slot) {
+        void* object = Read<void*>(manifest.action, ActionAttackSpaceFields[slot]);
+        if (object && IsAttackSpace(object)) capture(object, slot, AttackSpaceStateSize);
     }
+    // Veil of Mist controllers sit in the scheduler lists CaptureEffects just copied.
+    for (const auto& entries : manifest.primary)
+        for (void* object : entries)
+            if (IsKirigakureScreen(object)) capture(object, NoActionSlot, KirigakureScreenStateSize);
 }
 
 #include "rollback_unit_shot_models.inl"
@@ -2128,7 +2151,8 @@ void RollbackUnit_RestoreEffects(int32_t frame)
         // An attack space first seen after this snapshot belongs to the abandoned
         // branch too; the replay creates its own. Its children are retired here.
         const bool futureSpace = identity.kind == Kind::Unit && (identity.abandonedModel ||
-            (identity.id > manifest.birthWatermark && IsAttackSpace(identity.object)));
+            (identity.id > manifest.birthWatermark &&
+             (IsAttackSpace(identity.object) || IsKirigakureScreen(identity.object))));
         // An effect driven by a shot withdrawn in this restore, whatever its graph.
         const bool shotEffect = identity.kind == Kind::Effect && identity.abandonedModel &&
             identity.id > manifest.birthWatermark;
@@ -2255,9 +2279,10 @@ void RollbackUnit_RestoreEffects(int32_t frame)
         std::memcpy(static_cast<uint8_t*>(saved.object) + 8, saved.control, sizeof(saved.control));
         Write(saved.object, 0x28, saved.deltaTime);
         Write(saved.object, 0x30, saved.groups);
-        std::memcpy(static_cast<uint8_t*>(saved.object) + AttackSpaceStateOffset, saved.state, sizeof(saved.state));
+        std::memcpy(static_cast<uint8_t*>(saved.object) + AttackSpaceStateOffset, saved.state, saved.stateSize);
         // sAction's phase flags came back with its region; give it the same object.
-        Write(manifest.action, ActionAttackSpaceFields[saved.actionSlot], saved.object);
+        if (saved.actionSlot != NoActionSlot)
+            Write(manifest.action, ActionAttackSpaceFields[saved.actionSlot], saved.object);
         if (revived) { --g_quarantined; spaces[i]->occupancy = Occupancy::Live; }
         Push("attack_space_restored", spaces[i], saved.object, uint32_t(frame), revived,
              Read<uint32_t>(saved.state, 0x1D0C - AttackSpaceStateOffset), 0, false);
