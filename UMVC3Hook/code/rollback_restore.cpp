@@ -191,6 +191,12 @@ static constexpr SnapshotRange SACTION_RESTORE_RANGES[] = {
     {0x150, 0x08},
     // Restore the flag at +0x170, leaving the live fade reference at +0x168 untouched.
     {0x170, 0x01},
+    // Battle theme state: cue, change stamp, pending byte, Wright override
+    // bits. The BGM handle at +0x1F0 stays live.
+    {0x200, 0x04},
+    {0x208, 0x08},
+    {0x210, 0x01},
+    {0x214, 0x04},
     // Action phase counter.
     {0x218, 0x04},
 };

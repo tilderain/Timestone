@@ -173,6 +173,7 @@ void Rollback_ReSimulate(int32_t startFrame, int32_t endFrame)
     Profile_AddElapsed(&RollbackProfile::inputHistorySave, phaseStart);
 
     RollbackUnit_SetFrame(startFrame, true);
+    Rollback_BeginThemeResim();
     Rollback_RestoreSnapshot(startFrame);
     const bool reuseStartSnapshot = CanReuseRestoredSnapshot(startFrame);
 
@@ -231,6 +232,7 @@ void Rollback_ReSimulate(int32_t startFrame, int32_t endFrame)
     Profile_AddElapsed(&RollbackProfile::timingResync, phaseStart);
     g_isResimulating = false;
     RollbackUnit_SetFrame(endFrame, false);
+    Rollback_EndThemeResim();
     Rollback_FlushDeferredModelBounds();
 
     // Fix the swapped in character position on the hud after a resim

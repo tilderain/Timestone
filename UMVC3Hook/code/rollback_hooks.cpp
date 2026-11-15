@@ -595,6 +595,151 @@ static void __fastcall hkSoundPlayWithDb(void* sound, void* resource,
     }
 }
 
+
+// ---------------------------------------------------------------------------
+// Battle theme (BGM) under rollback
+//
+// The theme is driven by sAction state: current cue +0x200, change stamp
+// +0x208 (sMain::mTimer, 100-tick throttle), pending byte +0x210 and Wright's
+// per-team override bits +0x214 (cue 0x79). Those fields are rewound with the
+// rest of sAction. The BGM handle cRef at +0x1F0 stays live.
+//
+// During resim the theme functions run for their state only: playSystemCue is
+// a no-op there, since natively it first stops every other theme and the start
+// it then issues would be suppressed anyway, leaving silence. After resim the
+// cue the corrected timeline wants is compared with the cue actually playing
+// and, if different, started once through the native theme request.
+// ---------------------------------------------------------------------------
+static constexpr uintptr_t FN_GSOUND_PLAY_SYSTEM_CUE = 0x1402AC5C0;
+static constexpr uintptr_t FN_SACTION_REQUEST_THEME = 0x140003D60;
+static constexpr uintptr_t FN_SACTION_SET_THEME_OVERRIDE = 0x140003EA0;
+static constexpr uintptr_t FN_SACTION_PLAY_INITIAL_THEME = 0x14000B570;
+static constexpr uintptr_t PTR_SACTION_THEME = 0x140d47e68;
+static constexpr uintptr_t PTR_SMAIN_THEME = 0x140e177e8;
+static constexpr uint32_t SMAIN_TIMER_OFFSET = 0x38;
+static constexpr uint32_t SACTION_BGM_REF_OFFSET = 0x1F0;   // cRef {vtable, value}
+static constexpr uint32_t SACTION_THEME_CUE_OFFSET = 0x200;
+static constexpr uint32_t SACTION_THEME_STAMP_OFFSET = 0x208;
+static constexpr uint32_t SACTION_THEME_OVERRIDE_OFFSET = 0x214;
+static constexpr uint32_t THEME_OVERRIDE_CUE = 0x79;
+static constexpr uint64_t THEME_THROTTLE_TICKS = 0x65;
+
+using PlaySystemCueFn = uint64_t*(__fastcall*)(void*, uint64_t*, uint32_t, int, char, char);
+using RequestThemeFn = void(__fastcall*)(uint64_t, int);
+using SetThemeOverrideFn = void(__fastcall*)(uint64_t, uint8_t, char, int);
+using PlayInitialThemeFn = void(__fastcall*)(uint64_t);
+static PlaySystemCueFn oPlaySystemCue = nullptr;
+static RequestThemeFn oRequestTheme = nullptr;
+static SetThemeOverrideFn oSetThemeOverride = nullptr;
+static PlayInitialThemeFn oPlayInitialTheme = nullptr;
+
+static uint32_t g_lastSystemCue = 0;
+static uint32_t g_audibleTheme = 0;      // cue last started into sAction+0x1F0 on a live frame
+static bool g_audibleThemeKnown = false;
+static uint8_t g_resimBgmRef[16] = {};
+static bool g_resimBgmRefSaved = false;
+
+static uint64_t ThemeAction() { return *(uint64_t*)_addr(PTR_SACTION_THEME); }
+static uint64_t BgmRefValue(uint64_t action)
+{
+    return *(uint64_t*)(action + SACTION_BGM_REF_OFFSET + 8);
+}
+static uint32_t DesiredThemeCue(uint64_t action)
+{
+    return *(uint32_t*)(action + SACTION_THEME_OVERRIDE_OFFSET)
+        ? THEME_OVERRIDE_CUE
+        : *(uint32_t*)(action + SACTION_THEME_CUE_OFFSET);
+}
+
+static uint64_t* __fastcall hkPlaySystemCue(void* sound, uint64_t* out, uint32_t cue,
+                                            int channel, char flag5, char flag6)
+{
+    if (g_isResimulating) {
+        return ((uint64_t*(__fastcall*)(uint64_t*, uint64_t))
+            _addr(FN_CREF_INIT_DISABLED))(out, UINT64_MAX);
+    }
+    g_lastSystemCue = cue;
+    return oPlaySystemCue(sound, out, cue, channel, flag5, flag6);
+}
+
+// Record which theme a live theme function actually started.
+template <typename Call>
+static void TrackLiveTheme(uint64_t action, Call call)
+{
+    if (g_isResimulating || !action) {
+        call();
+        return;
+    }
+    const uint64_t before = BgmRefValue(action);
+    g_lastSystemCue = 0;
+    call();
+    if (BgmRefValue(action) != before && g_lastSystemCue) {
+        g_audibleTheme = g_lastSystemCue;
+        g_audibleThemeKnown = true;
+    }
+}
+
+static void __fastcall hkRequestTheme(uint64_t action, int cue)
+{
+    TrackLiveTheme(action, [&] { oRequestTheme(action, cue); });
+}
+
+static void __fastcall hkSetThemeOverride(uint64_t action, uint8_t team, char enable, int cue)
+{
+    TrackLiveTheme(action, [&] { oSetThemeOverride(action, team, enable, cue); });
+}
+
+static void __fastcall hkPlayInitialTheme(uint64_t action)
+{
+    TrackLiveTheme(action, [&] { oPlayInitialTheme(action); });
+}
+
+void Rollback_BeginThemeResim()
+{
+    uint64_t action = ThemeAction();
+    g_resimBgmRefSaved = action != 0;
+    if (action)
+        std::memcpy(g_resimBgmRef, (void*)(action + SACTION_BGM_REF_OFFSET), sizeof(g_resimBgmRef));
+}
+
+void Rollback_EndThemeResim()
+{
+    uint64_t action = ThemeAction();
+    if (!action || !g_resimBgmRefSaved || !oRequestTheme || !oSetThemeOverride) return;
+    g_resimBgmRefSaved = false;
+    // Resim requests wrote disabled handles; the live track is still playing.
+    std::memcpy((void*)(action + SACTION_BGM_REF_OFFSET), g_resimBgmRef, sizeof(g_resimBgmRef));
+
+    const uint32_t desired = DesiredThemeCue(action);
+    if (!g_audibleThemeKnown || !desired || desired == g_audibleTheme) return;
+
+    uint64_t sMain = *(uint64_t*)_addr(PTR_SMAIN_THEME);
+    if (!sMain) return;
+    uint32_t* cue = (uint32_t*)(action + SACTION_THEME_CUE_OFFSET);
+    uint64_t* stamp = (uint64_t*)(action + SACTION_THEME_STAMP_OFFSET);
+    uint32_t* overrideBits = (uint32_t*)(action + SACTION_THEME_OVERRIDE_OFFSET);
+    const uint32_t savedCue = *cue;
+    const uint32_t savedOverride = *overrideBits;
+    const uint64_t savedStamp = *stamp;
+
+    // Bypass dedup and throttle so the native request starts the track (and
+    // stops the stale one) exactly as a live change would.
+    *stamp = *(uint64_t*)(sMain + SMAIN_TIMER_OFFSET) - THEME_THROTTLE_TICKS - 1;
+    *overrideBits = 0;
+    HookLog("Rollback: BGM reconcile playing=0x%X desired=0x%X\n", g_audibleTheme, desired);
+    if (savedOverride) {
+        uint8_t team = (uint8_t)__builtin_ctz(savedOverride);
+        hkSetThemeOverride(action, team, 1, 0);
+    } else {
+        *cue = UINT32_MAX;
+        hkRequestTheme(action, (int)desired);
+    }
+    *overrideBits = savedOverride;
+    *cue = savedCue;
+    if (BgmRefValue(action) == *(uint64_t*)(g_resimBgmRef + 8))
+        *stamp = savedStamp; // the request declined (mode or flag gate)
+}
+
 // TODO: this hook should not be needed and has to be fixed at the source. It
 // runs on every sound environment update only to drop a model pointer that a
 // rollback left dangling in the scene. Find what leaves the scene pointing at
@@ -920,6 +1065,22 @@ void Rollback_InitMainHooks(RollbackMainMoveFn* originalMove)
                (void**)&oSoundPlayWithDb,
                "Rollback: suppressed replayed raw sound starts",
                "Rollback: failed to suppress replayed raw sound starts (%d)\n");
+    EnableHook(FN_GSOUND_PLAY_SYSTEM_CUE, (void*)&hkPlaySystemCue,
+               (void**)&oPlaySystemCue,
+               "Rollback: hooked system cue for BGM resim",
+               "Rollback: failed to hook system cue (%d)\n");
+    EnableHook(FN_SACTION_REQUEST_THEME, (void*)&hkRequestTheme,
+               (void**)&oRequestTheme,
+               "Rollback: hooked battle theme request",
+               "Rollback: failed to hook battle theme request (%d)\n");
+    EnableHook(FN_SACTION_SET_THEME_OVERRIDE, (void*)&hkSetThemeOverride,
+               (void**)&oSetThemeOverride,
+               "Rollback: hooked battle theme override",
+               "Rollback: failed to hook battle theme override (%d)\n");
+    EnableHook(FN_SACTION_PLAY_INITIAL_THEME, (void*)&hkPlayInitialTheme,
+               (void**)&oPlayInitialTheme,
+               "Rollback: hooked round-start theme",
+               "Rollback: failed to hook round-start theme (%d)\n");
     EnableHook(FN_SCENE_UPDATE_SOUND_ENV, (void*)&hkSceneUpdateSoundEnv,
                (void**)&oSceneUpdateSoundEnv,
                "Rollback: guarded sound scene model binding",
