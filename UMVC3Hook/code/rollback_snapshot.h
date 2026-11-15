@@ -80,6 +80,21 @@ struct RollbackModelRenderState {
     bool character;
 };
 
+// Mutable uCutIn tail: timer +0x750, duration +0x754, per-participant saved
+// visibility +0x758..+0x797, variant +0x798, fade timers +0x79C/+0x7A0,
+// render-mode flag +0x7A4 and first-participant motion cache +0x7A8.
+static constexpr size_t ROLLBACK_CUTIN_STATE_OFFSET = 0x750;
+static constexpr size_t ROLLBACK_CUTIN_STATE_SIZE = 0x7AC - 0x750;
+static constexpr uint32_t ROLLBACK_CUTIN_MAX_PARTICIPANTS = 16;
+
+struct RollbackCutinState {
+    void* cutin;
+    uint64_t vtable;
+    uint8_t state[ROLLBACK_CUTIN_STATE_SIZE];
+    uint32_t participantCount;
+    void* participants[ROLLBACK_CUTIN_MAX_PARTICIPANTS];
+};
+
 struct RollbackActionSideCameraState {
     void* motionResource = nullptr;
     void* motionParent = nullptr;
@@ -120,6 +135,7 @@ struct RollbackSnapshotSlot {
         characterCollisionParentReferences;
     std::vector<RollbackCollisionNodeClone> collisionNodeClones;
     std::vector<RollbackModelRenderState> modelRenderStates;
+    std::vector<RollbackCutinState> cutins;
     RollbackActionSideCameraState actionSideCamera;
     RollbackCharacterPostState characterPost;
     std::vector<RollbackCharacterMotionResource> characterMotionResources;

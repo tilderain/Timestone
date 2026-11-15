@@ -1175,6 +1175,10 @@ void Rollback_RestoreSnapshot(int32_t frame)
     HookLog("RNGRESTORE frame=%d stage=recipes live=%08X,%08X,%08X,%08X\n",
             frame, liveGlobalRng[0], liveGlobalRng[1], liveGlobalRng[2], liveGlobalRng[3]);*/
 
+    // Rewind or retire live cut-ins before the render-state restore, since
+    // retiring one rewrites its participants' visibility and draw layer.
+    Rollback_RewindCutins(slot);
+
     using SetChildMaterialModeFn = void(__fastcall*)(void*, int, uint8_t);
     auto setChildMaterialMode =
         (SetChildMaterialModeFn)_addr(FN_MODEL_SET_CHILD_MATERIAL_MODE);
@@ -1199,6 +1203,9 @@ void Rollback_RestoreSnapshot(int32_t frame)
             setChildMaterialMode(saved.model, -1, savedCutin ? 2 : 3);
         }
     }
+    // Participants of a cut-in that ended inside the rolled-back window come
+    // back on the cut-in layer with nothing left to restore them.
+    Rollback_RepairCutinRenderState(slot);
 
     // Restore the current uCharacterPost's center and fighter cache used for position correction.
     restoreCharacterPostState();

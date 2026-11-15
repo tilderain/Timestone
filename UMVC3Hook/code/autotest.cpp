@@ -3,6 +3,7 @@
 #include "controller.h"
 #include "mk10utils.h"
 #include "rollback.h"
+#include "rollback_cleanup.h"
 #include "netplay.h"
 #include "framestepper.h"
 #include "gameplay_hooks.h"
@@ -36,7 +37,6 @@ constexpr uintptr_t ADDR_SET_RESTART_MODE = 0x14000AF90;
 constexpr uintptr_t ADDR_SET_CHARACTER_POSITION = 0x140002AF0;
 constexpr uintptr_t ADDR_REPLAY_ROUND_START = 0x1401CFA90;
 constexpr uintptr_t PTR_SHOT_LISTS = 0x140D47F90;
-constexpr uintptr_t MVC3_MANAGER_CUTIN_OFFSET = 0xB50;
 constexpr uintptr_t PTR_SSHOT = 0x140D47F40;
 constexpr size_t SSHOT_ID_POOL_OFFSET = 0x38;
 constexpr size_t SSHOT_ID_POOL_SIZE = 0x404;
@@ -512,8 +512,7 @@ int32_t CountActiveShots()
 
 bool HasActiveCutin()
 {
-    uint64_t manager = *(uint64_t*)_addr(PTR_SMVC3_MANAGER);
-    return manager && *(uint64_t*)(manager + MVC3_MANAGER_CUTIN_OFFSET);
+    return Rollback_HasActiveCutin();
 }
 
 bool CharacterActionsAreIdle(uint64_t attacker, uint64_t defender)

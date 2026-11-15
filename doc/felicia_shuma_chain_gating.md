@@ -146,3 +146,44 @@ Related boundaries: [resource/owner overlap audit](gameplay_chain_audit.md),
 In particular, `uCnsChain__move @ 0x14070D830` has resource/binding reset and
 collision-queue duties; it is not evidence that skipping a differently owned
 `uChrChain` only removes solver arithmetic.
+
+## Follow-Up: Hitbox Reachability (2026-11-14)
+
+Ghidra **8192** `umvc3.exe.unpacked.exe`, plus installed CST/CAC parsing from
+`0017/0037/0046_00.arc` and `_param.arc`. No in-game trace.
+
+**Write path.** Only `uChrChain__simulateChainAfterMove` (weight < 1) writes owner
+joints, via `enforceChainSegmentLengths @ 0x140036800` ->
+`uModel__Joint__setEvaluatedMatrix` (joint `mWmat`). It runs in fence 3, after
+collision and hit solving. `uChain__move` only queues collider queries.
+
+**Overwrite path.** Characters disable `calcWMat` (motion flag bit 27), but
+`uActorShareModel__rebuildSharedConstraints @ 0x140202490` gives every joint
+(`mCnsJointNum = mJointNum`) a `uCnsShare`. `uCnsShare__applyConstraint` then
+rewrites `mWmat` from motion-local transforms and the parent's fresh `mWmat`
+(`0x14010D370`/`0x14010D020`) inside `uModel__setup`. In `uCharacter__move_base`
+this runs before `updateAttackAndHurtSpheres`; `uCharacter__movePost` (attack
+capsules, via `uCharacterPost`) runs later in the same move pass. On every
+advancing tick, the previous chain result is erased before any hit shape reads it.
+
+**Exposure.** Chain poses reach hit shapes only on pose-skip ticks:
+`canAdvanceSimulation` false (time scale <= 0.0001 with the action timer not
+expired), `mNo2F & 0x800000`, or joint attr 0x20. The chain itself keeps running
+then (`+0x348` = `isAliveAndActive`). Hurt spheres are not swept. Attack capsules
+are: `movePost` feeds the previous tick's world p0 into `mOfs1`, so a retained pose
+becomes the trailing capsule endpoint on the next accepted tick. Defenders with an
+active `cChrPause` are rejected by `0x1400438F0`.
+
+**Weight gating.** CST flags: Rocket 0, Felicia tail/antenna 0, Shuma x6 = 4
+(zero transition); none set 0x8/0x10. Weight < 1 therefore needs slot-0 motion
+0x200-0x3FF, a transition out of one, or `1_81`:
+
+| Character | `1_81` | Hitbox consequence |
+|---|---|---|
+| Rocket | actions 0/1/2 -> 0.8 (30f), 10/25 -> 0.5 | Tail solves in neutral and ramps through attack startup; swept tail capsules (sets 11/34) can carry a retained pose. Matches the 6355 capture. |
+| Felicia | action 150 -> 1.0, immediate | The only overlapping set (30) is animation-only. No body overlap. No reachable path found. |
+| Shuma | none | Attacks use lists 0/1 -> weight 1, so tentacle attack capsules are animation-only. Physics only in down motions; body-sphere exposure needs a pose-skip tick while down, normally a paused (unhittable) defender. Low, unproven. |
+
+Unverified: animation commands in `move_base` run before `uModel__setup`, so a shot
+or effect spawned at a chain joint would read the previous tick's post-moveAfter
+`mWmat`. No such Shuma/Felicia spawn was identified.

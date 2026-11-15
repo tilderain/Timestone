@@ -13,6 +13,7 @@
 #include "lag_diagnostics.h"
 #include "rollback_restore.h"
 #include "rollback_resim.h"
+#include "rollback_cleanup.h"
 
 #include <cstdio>
 #include <cstring>
@@ -1290,6 +1291,7 @@ void Rollback_SaveSnapshot(int32_t frame)
             captureCharacterRenderState(character);
         }
     }
+    Rollback_CaptureCutins(slot);
     const uint64_t snapshotEnd = Profile_Now();
     diagnosticStage.Finish();
 
@@ -1420,6 +1422,7 @@ void Rollback_FreeSnapshots()
         g_slots[i].frame       = -1;
         g_slots[i].characterCollisionParentReferences.clear();
         g_slots[i].modelRenderStates.clear();
+        g_slots[i].cutins.clear();
     }
     Rollback_ResetReSimulation();
     g_regionCache.valid = false;
