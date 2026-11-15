@@ -8,6 +8,7 @@
 #include "rollback_rng.h"
 #include "mk10utils.h"
 #include "netplay.h"
+#include "controller.h"
 #include "gameplay_hooks.h"
 
 #include <cstring>
@@ -60,11 +61,11 @@ static constexpr uintptr_t JIGENZAN_EFFECT_RNG_CALLSITES[] = {
     0x1401C054E, 0x1401C0571,
     0x1401C06FA, 0x1401C071D,
 };
-static constexpr uintptr_t FN_SOUND_RANDOM_VARIANT = 0x1402A9110;
 static constexpr uintptr_t FN_HSIENKO_SELECT_ANKI = 0x1400A1260;
 static constexpr uintptr_t FN_SET_RESERVED_ANKI = 0x1400D4D90;
 static constexpr uintptr_t FN_RCHRCPU_RNG_MOD_N = 0x14010FE50;
 static constexpr uintptr_t GLOBAL_RNG_STATE = 0x140D765D8;
+static constexpr uintptr_t FN_SOUND_RANDOM_VARIANT = 0x1402A9110;
 
 using RandomIntRangeFn = int(__fastcall*)(void*, int, int, void*);
 using RngAdvanceFn = float(__fastcall*)(uint64_t, void*);
@@ -74,7 +75,6 @@ using RngFloatInRangeFn = float(__fastcall*)(float, float);
 using RngIntInRangeFn = int(__fastcall*)(int, int);
 using RngNextFn = void(__fastcall*)(uint32_t*);
 using EffectNextRandomFn = uint64_t(__fastcall*)(void*, int);
-using SoundRandomVariantFn = int(__fastcall*)(uint64_t, void*, int);
 using HsienKoSelectAnkiFn = int(__fastcall*)(void*);
 using SetReservedAnkiFn = void(__fastcall*)(void*, int);
 using RChrCpuRngModNFn = uint32_t(__fastcall*)(void*, uint32_t);
@@ -88,7 +88,6 @@ static RngIntInRangeFn oRngIntInRange = nullptr;
 static RngNextFn oRngNext = nullptr;
 static RngNextFn oRngNextImpl = nullptr;
 static EffectNextRandomFn oEffectNextRandom = nullptr;
-static SoundRandomVariantFn oSoundRandomVariant = nullptr;
 static HsienKoSelectAnkiFn oHsienKoSelectAnki = nullptr;
 static SetReservedAnkiFn oSetReservedAnki = nullptr;
 static RChrCpuRngModNFn oRChrCpuRngModN = nullptr;
@@ -138,18 +137,37 @@ static uint64_t __fastcall hkEffectNextRandom(void* effect, int useEffectRng)
     return oEffectNextRandom(effect, GameplayHooks_IsActive() ? 1 : useEffectRng);
 }
 
-static int __fastcall hkSoundRandomVariant(uint64_t soundContext, void* soundRef,
-                                           int variant)
+using SoundRandomVariantFn = int(__fastcall*)(uint64_t, void*, int);
+static SoundRandomVariantFn oSoundRandomVariant = nullptr;
+
+static uint32_t SplitMix32(uint64_t& x)
+{
+    uint64_t z = (x += 0x9E3779B97F4A7C15ull);
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
+    z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
+    return (uint32_t)(z ^ (z >> 31));
+}
+
+// sGSound__selectRandomVoiceVariant picks character voice variants (pain
+// clips included, see pain_voice.cpp) with the global XorShift. Online it runs
+// on a per-frame stream instead: the global state is swapped for one seeded
+// from the frame and the requested cue, then put back. Both peers, and a resim
+// of the frame, pick the same voices regardless of what other sounds ran
+// first, and gameplay RNG is never touched by audio.
+static int __fastcall hkSoundRandomVariant(uint64_t soundContext, void* soundRef, int variant)
 {
     if (!Netplay_IsActive())
         return oSoundRandomVariant(soundContext, soundRef, variant);
 
-    // FUN_1402A9110 chooses voice/sound variants with the global XorShift
-    // stream. Audio presentation must not consume gameplay RNG on one peer.
-    uint32_t savedState[4] = {};
-    std::memcpy(savedState, (void*)_addr(GLOBAL_RNG_STATE), sizeof(savedState));
-    int result = oSoundRandomVariant(soundContext, soundRef, variant);
-    std::memcpy((void*)_addr(GLOBAL_RNG_STATE), savedState, sizeof(savedState));
+    const int32_t frame = g_isResimulating ? g_resimulateCurrentFrame : Controller_GetExecutingFrame();
+    uint64_t seed = ((uint64_t)(uint32_t)frame << 32) | (uint32_t)variant;
+    uint32_t* global = (uint32_t*)_addr(GLOBAL_RNG_STATE);
+    uint32_t saved[4];
+    std::memcpy(saved, global, sizeof(saved));
+    for (int i = 0; i < 4; ++i)
+        global[i] = SplitMix32(seed) | (i == 0 ? 1u : 0u); // never all zero
+    const int result = oSoundRandomVariant(soundContext, soundRef, variant);
+    std::memcpy(global, saved, sizeof(saved));
     return result;
 }
 
@@ -433,18 +451,12 @@ void Rollback_InitRngHooks()
     }
 
     status = GameplayHooks_Create((LPVOID)_addr(FN_SOUND_RANDOM_VARIANT),
-                           (LPVOID)&hkSoundRandomVariant,
-                           (LPVOID*)&oSoundRandomVariant);
-    if (status == MH_OK) {
+                                  (LPVOID)&hkSoundRandomVariant,
+                                  (LPVOID*)&oSoundRandomVariant);
+    if (status == MH_OK)
         status = GameplayHooks_QueueEnable((LPVOID)_addr(FN_SOUND_RANDOM_VARIANT));
-        if (status == MH_OK)
-            HookLog("Rollback: isolated sound variant RNG at 0x%llX\n",
-                    (uint64_t)_addr(FN_SOUND_RANDOM_VARIANT));
-        else
-            HookLog("Rollback: failed to enable sound variant RNG isolation (%d)\n", status);
-    } else {
+    if (status != MH_OK)
         HookLog("Rollback: failed to hook sound variant RNG (%d)\n", status);
-    }
 
     status = GameplayHooks_Create((LPVOID)_addr(FN_RNG_NEXT),
                                       (LPVOID)&hkRngNext,

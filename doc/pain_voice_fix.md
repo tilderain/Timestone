@@ -12,10 +12,11 @@ the audit emits resource SHA-256 values to make comparisons reproducible.
 
 `UMVC3Hook/code/pain_voice.cpp` (`PainVoice_Init`, called from
 `Rollback_InitHooks`) detours `0x1402A2A10` and, only when the return address is
-`0x1402B101E`, remaps `0x15..0x17` with the selector below. The queue runs in
-`uGSoundProcess::moveAfter` (sUnit lane 7), which resim replays, so online the
-roll is a hash of frame, slot and group (a replayed voice picks the live clip);
-offline it is a private xorshift. The silence outcome forwards the original group to keep the
+`0x1402B101E`, resolves `0x15..0x17` by calling the native
+`sGSound__selectRandomVoiceVariant` (`0x1402A9110`) on a copy of the bank ref.
+Online, `rollback_rng.cpp` runs the selector on a per-frame stream (global
+state swapped for one seeded from the frame and requested cue, then restored), so
+both peers and a resim pick the same clip and gameplay RNG is untouched. The silence outcome forwards the original group to keep the
 native rejection path. The install checks that `0x1402B1019` still calls
 `0x1402A2A10`. Built; not yet tested in game.
 

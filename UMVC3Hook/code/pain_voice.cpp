@@ -3,8 +3,6 @@
 #include "rollback.h"
 #include "mk10utils.h"
 #include "gameplay_hooks.h"
-#include "controller.h"
-#include "netplay.h"
 
 extern void HookLog(const char* fmt, ...);
 
@@ -18,13 +16,12 @@ extern void HookLog(const char* fmt, ...);
 // selector (sGSound__selectRandomVoiceVariant, 0x1402A9110) maps those groups
 // to concrete clips 0x18..0x20 or to silence; the queue just never calls it.
 //
-// This detour reproduces that mapping for the queue's call only. The global
-// gameplay RNG is untouched. The queue runs in uGSoundProcess::moveAfter
-// (sUnit lane 7), which resimulation replays, so online the roll is a hash of
-// the frame, slot and group: a replayed pain voice picks the same clip as the
-// live one and rollback_sound.cpp keeps it playing instead of restarting it
-// with another clip. Offline it comes from a private generator.
-// The silence outcome forwards the original group, which
+// This detour runs that native selector for the queue's call only, so pain
+// clips are picked like every other character voice variant. Online the
+// selector draws from a per-frame stream (rollback_rng.cpp
+// hkSoundRandomVariant), so both peers and a resim pick the same clip, and
+// rollback_sound.cpp keeps a replayed pain voice playing.
+// The silence outcome (0) forwards the original group, which
 // takes the native rejection path (disabled cookie, consumed bank ref reset).
 // Dark Phoenix's direct cues 0x61..0x63 and the Dante/Vergil Devil Trigger
 // overrides never reach this with 0x15..0x17 and are unaffected.
@@ -38,49 +35,9 @@ using CreatePersistentVoiceFn = uint64_t* (__fastcall*)(void* dispatcher, uint64
                                                         uint32_t mode, float gain, float extra);
 CreatePersistentVoiceFn g_original = nullptr;
 
-uint32_t g_rngState = 0;
-
-uint32_t Roll100(uint32_t cue, uint64_t slotKey)
-{
-    if (Netplay_IsActive()) {
-        const int32_t frame = g_isResimulating ? g_resimulateCurrentFrame : Controller_GetExecutingFrame();
-        uint32_t h = 2166136261u;
-        const uint32_t values[] = {(uint32_t)frame, (uint32_t)slotKey, cue};
-        for (uint32_t v : values)
-            h = (h ^ v) * 16777619u;
-        h ^= h >> 15;
-        h *= 0x2C1B3C6Du;
-        h ^= h >> 12;
-        return h % 100;
-    }
-    uint32_t x = g_rngState;
-    x ^= x << 13;
-    x ^= x >> 17;
-    x ^= x << 5;
-    g_rngState = x;
-    return x % 100;
-}
-
-// Native normal-pain mapping from 0x1402A9110. 0 means no voice.
-uint32_t ResolveNormalPainCue(uint32_t cue, uint32_t roll)
-{
-    switch (cue) {
-    case 0x15:
-        if (roll < 40) return 0;
-        if (roll < 60) return 0x18;
-        return roll < 80 ? 0x19 : 0x1A;
-    case 0x16:
-        if (roll < 30) return 0;
-        if (roll < 60) return 0x1B;
-        return roll < 80 ? 0x1C : 0x1D;
-    case 0x17:
-        if (roll < 20) return 0;
-        if (roll < 50) return 0x1E;
-        return roll < 80 ? 0x1F : 0x20;
-    default:
-        return cue;
-    }
-}
+constexpr uintptr_t FN_SELECT_RANDOM_VOICE_VARIANT = 0x1402A9110;
+constexpr uintptr_t FN_CREF_INIT = 0x140003990;
+constexpr uint64_t GSOUND_VOICE_DISPATCHER = 0x29B0;
 
 uint64_t* __fastcall hkCreatePersistentVoice(void* dispatcher, uint64_t* outCookie, void* bankRef, uint32_t cueId,
                                              uint64_t slotKey, void* character, uint32_t mode, float gain,
@@ -88,9 +45,14 @@ uint64_t* __fastcall hkCreatePersistentVoice(void* dispatcher, uint64_t* outCook
 {
     if (cueId >= 0x15 && cueId <= 0x17 &&
         (uintptr_t)__builtin_return_address(0) == _addr(RET_CHARACTER_SOUND_QUEUE)) {
-        const uint32_t resolved = ResolveNormalPainCue(cueId, Roll100(cueId, slotKey));
-        if (resolved)
-            cueId = resolved;
+        // The selector consumes (resets) the ref it is given, so hand it a copy.
+        uint64_t ref[2];
+        ((void*(__fastcall*)(void*, void*))_addr(FN_CREF_INIT))(ref, bankRef);
+        const uint64_t gsound = (uint64_t)dispatcher - GSOUND_VOICE_DISPATCHER;
+        const int resolved =
+            ((int(__fastcall*)(uint64_t, void*, int))_addr(FN_SELECT_RANDOM_VOICE_VARIANT))(gsound, ref, (int)cueId);
+        if (resolved > 0)
+            cueId = (uint32_t)resolved;
     }
     return g_original(dispatcher, outCookie, bankRef, cueId, slotKey, character, mode, gain, extra);
 }
@@ -107,7 +69,6 @@ void PainVoice_Init()
         HookLog("PainVoice: unexpected code at the damage voice queue call, not installed\n");
         return;
     }
-    g_rngState = (uint32_t)GetTickCount64() | 1;
     const bool hooked = GameplayHooks_Create((LPVOID)_addr(FN_CREATE_PERSISTENT_VOICE),
                                              (LPVOID)&hkCreatePersistentVoice, (LPVOID*)&g_original) == MH_OK &&
                         GameplayHooks_QueueEnable((LPVOID)_addr(FN_CREATE_PERSISTENT_VOICE)) == MH_OK;
