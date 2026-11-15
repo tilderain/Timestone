@@ -207,6 +207,7 @@ void Rollback_ReSimulate(int32_t startFrame, int32_t endFrame)
             LagDiagnosticScope tickDiagnostic(LagMetric::ResimTick);
             Rollback_HeadlessTick(g_mainInstance);
         }
+        Rollback_RecordBattlePresentation(frame);
         timer.Add(&RollbackProfile::frameNativeTick,
                   &RollbackProfile::frameNativeTickMax);
         Controller_SilentFrameEnd();

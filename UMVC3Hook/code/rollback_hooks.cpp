@@ -740,6 +740,125 @@ void Rollback_EndThemeResim()
         *stamp = savedStamp; // the request declined (mode or flag gate)
 }
 
+// ---------------------------------------------------------------------------
+// Round-end presentation under rollback
+//
+// The battle UI does not run in resim and reacts to edges once, on live frames:
+// uBattleUi__moveAfter turns sAction's step 6/7 into the K.O./time-over banner
+// (which queues the announcer) and kills the combo counter, and uFinishScreen
+// marks each defeated fighter for its finish portrait. Neither is undone when
+// a predicted KO rolls back. Hold both until the frame on which the state
+// began has confirmed remote input; the edge then fires once, a few frames
+// late. Presentation only: no simulation state is touched.
+// ---------------------------------------------------------------------------
+static constexpr uintptr_t FN_UBATTLEUI_MOVE_AFTER = 0x1402D2410;
+static constexpr uintptr_t FN_UBATTLEUI_EFFECTIVE_STEP = 0x1402D33C0;
+static constexpr uintptr_t FN_UFINISHSCREEN_ASSIGN_SLOT = 0x14031BCB0;
+static constexpr uintptr_t FN_CCHR_IS_MOVE_ACTIVE = 0x140056290;
+static constexpr uintptr_t FN_UCHARACTER_CHECK_DEFEAT = 0x140056380;
+static constexpr uintptr_t PTR_SACTION_PRESENTATION = 0x140d47e68;
+static constexpr uintptr_t PTR_SCHARACTER_PRESENTATION = 0x140d44a70;
+static constexpr uint32_t SACTION_STEP_OFFSET = 0xD8;
+static constexpr uint32_t UBATTLEUI_CACHED_STEP_OFFSET = 0x4C;
+static constexpr uint32_t CCHR_DEFAULT_MEMBER_OFFSET = 0x2DAC;
+// Fallback so a gap in confirmation can never hide the result for good.
+static constexpr int32_t PRESENTATION_CONFIRM_TIMEOUT = 120;
+
+struct BattlePresentationFrame {
+    int32_t frame = -1;
+    int32_t step = 0;
+    uint32_t defeated = 0; // bit team * 3 + default member id
+};
+static BattlePresentationFrame g_presentation[256];
+
+using UiMoveFn = void(__fastcall*)(uint64_t);
+using AssignSlotFn = void(__fastcall*)(uint64_t, int, int, uint64_t);
+static UiMoveFn oBattleUiMoveAfter = nullptr;
+static AssignSlotFn oFinishScreenAssignSlot = nullptr;
+
+void Rollback_RecordBattlePresentation(int32_t frame)
+{
+    if (frame < 0) return;
+    uint64_t action = *(uint64_t*)_addr(PTR_SACTION_PRESENTATION);
+    uint64_t sCharacter = *(uint64_t*)_addr(PTR_SCHARACTER_PRESENTATION);
+    if (!action || !sCharacter) return;
+    auto isMoveActive = (bool(__fastcall*)(uint64_t))_addr(FN_CCHR_IS_MOVE_ACTIVE);
+    auto isDefeated = (bool(__fastcall*)(uint64_t))_addr(FN_UCHARACTER_CHECK_DEFEAT);
+    uint32_t defeated = 0;
+    for (int team = 0; team < 2; ++team) {
+        uint64_t node = sCharacter + (team == 0 ? 0x40 : 0x300) + 0x08;
+        for (int member = 0; node && member < 64; ++member, node = *(uint64_t*)(node + 0x10)) {
+            uint64_t character = *(uint64_t*)(node + 0x08);
+            if (!character) continue;
+            int32_t id = *(int32_t*)(character + CCHR_DEFAULT_MEMBER_OFFSET);
+            if (id < 0 || id > 2 || !isMoveActive(character) || !isDefeated(character)) continue;
+            defeated |= 1u << (team * 3 + id);
+        }
+    }
+    BattlePresentationFrame& entry = g_presentation[(uint32_t)frame % 256];
+    entry.frame = frame;
+    entry.step = *(int32_t*)(action + SACTION_STEP_OFFSET);
+    entry.defeated = defeated;
+}
+
+// True once the run of frames ending at `frame` in which `holds` is true began
+// on a confirmed frame. Remote input arrives in order, so that frame and every
+// earlier one are final.
+template <typename Holds>
+static bool PresentationConfirmed(int32_t frame, Holds holds)
+{
+    int32_t start = frame;
+    for (int i = 0; i < 255; ++i) {
+        const int32_t previous = start - 1;
+        const BattlePresentationFrame& entry = g_presentation[(uint32_t)previous % 256];
+        if (previous < 0 || entry.frame != previous || !holds(entry)) break;
+        start = previous;
+    }
+    return Controller_IsFrameConfirmed(start) || frame - start >= PRESENTATION_CONFIRM_TIMEOUT;
+}
+
+static bool HoldPresentation()
+{
+    return Netplay_IsActive() && !g_isResimulating && Controller_GetExecutingFrame() >= 0;
+}
+
+// Live frames have no resim record; the first presentation hook of the frame
+// takes it, after this frame's simulation lanes have run.
+static void RecordLivePresentation(int32_t frame)
+{
+    if (g_presentation[(uint32_t)frame % 256].frame != frame)
+        Rollback_RecordBattlePresentation(frame);
+}
+
+static void __fastcall hkBattleUiMoveAfter(uint64_t ui)
+{
+    if (HoldPresentation()) {
+        const int32_t frame = Controller_GetExecutingFrame();
+        RecordLivePresentation(frame);
+        const int32_t step = ((int32_t(__fastcall*)(uint64_t))_addr(FN_UBATTLEUI_EFFECTIVE_STEP))(ui);
+        if (step != *(int32_t*)(ui + UBATTLEUI_CACHED_STEP_OFFSET) && (step == 6 || step == 7) &&
+            !PresentationConfirmed(frame, [step](const BattlePresentationFrame& e) { return e.step == step; })) {
+            return;
+        }
+    }
+    oBattleUiMoveAfter(ui);
+}
+
+static void __fastcall hkFinishScreenAssignSlot(uint64_t screen, int team, int member, uint64_t character)
+{
+    if (HoldPresentation() && team >= 0 && team < 2 && member >= 0 && member < 3) {
+        const uint32_t bit = 1u << (team * 3 + member);
+        const int32_t frame = Controller_GetExecutingFrame();
+        RecordLivePresentation(frame);
+        const BattlePresentationFrame& current = g_presentation[(uint32_t)frame % 256];
+        if (current.frame == frame && (current.defeated & bit) &&
+            !PresentationConfirmed(frame, [bit](const BattlePresentationFrame& e) { return (e.defeated & bit) != 0; })) {
+            return; // retried next frame: the slot bit stays clear
+        }
+    }
+    oFinishScreenAssignSlot(screen, team, member, character);
+}
+
 // TODO: this hook should not be needed and has to be fixed at the source. It
 // runs on every sound environment update only to drop a model pointer that a
 // rollback left dangling in the scene. Find what leaves the scene pointing at
@@ -1088,6 +1207,14 @@ void Rollback_InitMainHooks(RollbackMainMoveFn* originalMove)
     EnableHook(FN_SGAMEUI_MOVE, (void*)&hkGameUiMove, (void**)&oGameUiMove,
                "Rollback: hooked sGameUI__move for re-simulation suppression",
                "Rollback: failed to hook sGameUI__move (%d)\n");
+    EnableHook(FN_UBATTLEUI_MOVE_AFTER, (void*)&hkBattleUiMoveAfter,
+               (void**)&oBattleUiMoveAfter,
+               "Rollback: holding K.O. banner until confirmed",
+               "Rollback: failed to hook uBattleUi__moveAfter (%d)\n");
+    EnableHook(FN_UFINISHSCREEN_ASSIGN_SLOT, (void*)&hkFinishScreenAssignSlot,
+               (void**)&oFinishScreenAssignSlot,
+               "Rollback: holding finish portraits until confirmed",
+               "Rollback: failed to hook uFinishScreen slot assignment (%d)\n");
     EnableHook(FN_UFADE_MOVE, (void*)&hkFadeMove, (void**)&oFadeMove,
                "Rollback: hooked uFade__move for re-simulation suppression",
                "Rollback: failed to hook uFade__move (%d)\n");

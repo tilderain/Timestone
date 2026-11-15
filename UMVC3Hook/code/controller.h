@@ -145,6 +145,8 @@ extern "C" bool Controller_GetFrameChecksum(int32_t frame, uint32_t* outChecksum
 extern "C" int32_t  Controller_GetDelayFrames();
 extern "C" bool     Controller_IsDelayChangePending();
 extern "C" int32_t  Controller_GetNetFrameCount();
+// Live frame being simulated (set at frame start; resim numbering).
+extern "C" int32_t  Controller_GetExecutingFrame();
 extern "C" int32_t  Controller_GetLastRemoteFrame();
 extern "C" int32_t  Controller_GetRollbackFrames();
 extern "C" bool     Controller_IsRollbackChangePending();

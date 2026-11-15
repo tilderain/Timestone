@@ -455,6 +455,7 @@ extern "C" void Controller_ResetBuffers()
 extern "C" int32_t Controller_GetDelayFrames()      { return g_delayFrames; }
 extern "C" bool Controller_IsDelayChangePending()   { return g_pendingDelayFrames >= 0; }
 extern "C" int32_t Controller_GetNetFrameCount()    { return GetGameFrameCount(); }
+extern "C" int32_t Controller_GetExecutingFrame()   { return g_netFrameCount; }
 extern "C" int32_t Controller_GetLastRemoteFrame()  { return g_lastRemoteFrame; }
 extern "C" int32_t Controller_GetRollbackFrames()   { return g_rollbackFrames; }
 extern "C" bool Controller_IsRollbackChangePending(){ return g_pendingRollbackFrames >= 0; }

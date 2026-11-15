@@ -10,3 +10,7 @@ void Rollback_InitMainHooks(RollbackMainMoveFn* originalMove);
 // start the corrected timeline's theme if it differs from the one playing.
 void Rollback_BeginThemeResim();
 void Rollback_EndThemeResim();
+
+// Round-end UI: record sAction's step and defeated fighters after each
+// simulated frame (live frames record from the battle UI hook).
+void Rollback_RecordBattlePresentation(int32_t frame);
