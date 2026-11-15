@@ -139,6 +139,46 @@ static constexpr uint32_t UBTGAUGELIFE_ARCADE_BOSS_OFFSET = 0xC9; // mIsArcadeBo
 static constexpr uint32_t CCHR_DEFAULT_MEMBER_ID_OFFSET = 0x2DAC;
 static constexpr uint32_t CCHR_MEMBER_ID_OFFSET = 0x2DB0;
 static constexpr uint32_t SUNIT_BATTLE_UI_CHILD_CATEGORY = 0x1D;
+static constexpr uintptr_t PTR_SACTION = 0x140D47E68;
+static constexpr uint32_t SACTION_GAME_FLAGS_OFFSET = 0xC4;   // mGameF
+static constexpr uint32_t SACTION_NO_TEAM1_GAUGE_SWAP = 0x10000;
+
+// Where each gauge sits on screen is not mChrList: it is the pose of the
+// gauge's layout scheduler (+0x58). The swap consumer plays a transition clip
+// chosen from {current clip, swapped slot}, and every clip ends in one fixed
+// order (derived from its table at 0x1402F48A0). After rebuilding mChrList,
+// put the scheduler on a clip ending in that order, at its last frame.
+static constexpr uint32_t UBTGAUGELIFE_LAYOUT_OFFSET = 0x58;
+static constexpr uint32_t SCHEDULER_FRAME_OFFSET = 0x44;
+static constexpr uint32_t SCHEDULER_SEQUENCE_OFFSET = 0x7C;
+static constexpr uint32_t SCHEDULER_SEQUENCES_OFFSET = 0x88;  // {start, end, flags}, 0xC each
+static constexpr uintptr_t FN_SCHEDULER_SET_SEQUENCE = 0x14032DD30;
+static constexpr uintptr_t FN_SCHEDULER_GET_FRAME_MAX = 0x14050ED20;
+static constexpr int32_t GAUGE_LAYOUT_CLIPS = 13;
+static constexpr int32_t GAUGE_LAYOUT_ORDER[GAUGE_LAYOUT_CLIPS][3] = {
+    {0, 1, 2}, {1, 0, 2}, {1, 2, 0}, {2, 0, 1}, {2, 1, 0}, {0, 1, 2}, {0, 2, 1},
+    {2, 1, 0}, {2, 0, 1}, {0, 2, 1}, {0, 1, 2}, {1, 2, 0}, {1, 0, 2},
+};
+// Clip showing each order, indexed by order[0] * 2 + (order[1] > order[2]):
+// the first swap clip ending in it.
+static constexpr int32_t GAUGE_LAYOUT_CLIP_FOR[6] = {5, 6, 1, 2, 3, 4};
+
+static void SyncGaugeLayout(uint64_t gauge, const int32_t (&order)[3])
+{
+    const uint64_t layout = *(uint64_t*)(gauge + UBTGAUGELIFE_LAYOUT_OFFSET);
+    const int32_t current = *(int32_t*)(layout + SCHEDULER_SEQUENCE_OFFSET);
+    if ((uint32_t)current < GAUGE_LAYOUT_CLIPS &&
+        std::memcmp(GAUGE_LAYOUT_ORDER[current], order, sizeof(order)) == 0)
+        return;
+    const int32_t clip = GAUGE_LAYOUT_CLIP_FOR[order[0] * 2 + (order[1] > order[2])];
+    ((void(__fastcall*)(uint64_t, uint32_t, char))_addr(FN_SCHEDULER_SET_SEQUENCE))(layout, clip, 1);
+    const uint64_t sequences = *(uint64_t*)(layout + SCHEDULER_SEQUENCES_OFFSET);
+    float end = *(float*)(sequences + clip * 0xC + 4);
+    const float frameMax = (float)((uint32_t(__fastcall*)(uint64_t))_addr(FN_SCHEDULER_GET_FRAME_MAX))(layout);
+    if (end > frameMax) end = frameMax;
+    *(float*)(layout + SCHEDULER_FRAME_OFFSET) = end;
+    HookLog("Rollback: life gauge layout clip %d -> %d\n", current, clip);
+}
 
 static bool BuildGaugeMemberOrder(uint64_t sCharacter, int teamIndex, int32_t (&order)[3])
 {
@@ -173,8 +213,13 @@ void Rollback_SyncActiveCharacterUi()
 
     int32_t order[2][3];
     bool valid[2];
+    const uint64_t action = *(uint64_t*)_addr(PTR_SACTION);
+    const bool team1Fixed = action &&
+        (*(uint32_t*)(action + SACTION_GAME_FLAGS_OFFSET) & SACTION_NO_TEAM1_GAUGE_SWAP);
     for (int teamIndex = 0; teamIndex < 2; ++teamIndex) {
-        valid[teamIndex] = BuildGaugeMemberOrder(sCharacter, teamIndex, order[teamIndex]);
+        // Natively team 1's gauge never swaps under this flag.
+        valid[teamIndex] = !(teamIndex == 1 && team1Fixed) &&
+            BuildGaugeMemberOrder(sCharacter, teamIndex, order[teamIndex]);
         // Only clear a request the rebuild below supersedes.
         if (valid[teamIndex] &&
             *(int32_t*)(sGameUi + SGAMEUI_TEAM_CHARACTER_ID_OFFSET + teamIndex * 4) != 0)
@@ -195,11 +240,13 @@ void Rollback_SyncActiveCharacterUi()
             if (team > 1 || !valid[team] || *(uint8_t*)(unit + UBTGAUGELIFE_ARCADE_BOSS_OFFSET))
                 continue;
             int32_t* chrList = (int32_t*)(unit + UBTGAUGELIFE_CHR_LIST_OFFSET);
-            if (std::memcmp(chrList, order[team], sizeof(order[team])) == 0) continue;
-            HookLog("Rollback: life gauge %u order %d,%d,%d -> %d,%d,%d\n", team,
-                    chrList[0], chrList[1], chrList[2],
-                    order[team][0], order[team][1], order[team][2]);
-            std::memcpy(chrList, order[team], sizeof(order[team]));
+            if (std::memcmp(chrList, order[team], sizeof(order[team])) != 0) {
+                HookLog("Rollback: life gauge %u order %d,%d,%d -> %d,%d,%d\n", team,
+                        chrList[0], chrList[1], chrList[2],
+                        order[team][0], order[team][1], order[team][2]);
+                std::memcpy(chrList, order[team], sizeof(order[team]));
+            }
+            SyncGaugeLayout(unit, order[team]);
         }
     };
 
