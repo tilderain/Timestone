@@ -1279,6 +1279,8 @@ void CaptureEffects(SnapshotManifest& manifest, void* manager)
     for (auto& identity : ActiveIdentities()) {
         if (identity.occupancy != Occupancy::Live || identity.kind != Kind::Effect) continue;
         void* object = identity.object;
+        // Stage-owned effects stay on live time (not replayed in resim).
+        if (IsStageOwnedEffect((uint64_t)object)) continue;
         RollbackUnitFailureScope effectScope("effect.capture", object, identity.id, manifest.frame);
         const uint32_t flags = Read<uint32_t>(object, 0x10);
         const uint32_t state = flags & 7;
@@ -2120,6 +2122,9 @@ void RollbackUnit_RestoreEffects(int32_t frame)
     // restored characters. Other snapshots may still own these exact objects.
     for (auto& identity : ActiveIdentities()) {
         if (identity.occupancy != Occupancy::Live || identity.restoreTag == tag) continue;
+        // Stage-owned effects are not captured or replayed; the stage, which
+        // does not run in resim either, still owns them.
+        if (identity.kind == Kind::Effect && IsStageOwnedEffect((uint64_t)identity.object)) continue;
         // An attack space first seen after this snapshot belongs to the abandoned
         // branch too; the replay creates its own. Its children are retired here.
         const bool futureSpace = identity.kind == Kind::Unit && (identity.abandonedModel ||

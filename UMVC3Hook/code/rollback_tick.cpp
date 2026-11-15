@@ -132,10 +132,31 @@ static bool IsHeadlessGameplaySyncCategory(uint32_t category)
     }
 }
 
-static bool IsHeadlessGameplayUnitObject(uint64_t dti)
+// DTI -> derives from uGameEffect, in a direct-mapped cache. DTIs are static
+// data, so a slot never goes stale; a collision only costs one ancestry walk.
+static bool IsGameEffectDti(uint64_t dti)
+{
+    struct Entry { uint64_t dti; bool result; };
+    static Entry cache[64] = {};
+    Entry& entry = cache[(dti >> 4) & 63];
+    if (entry.dti != dti) {
+        entry.dti = dti;
+        entry.result = IsDtiKindOf(dti, DTI_UGAME_EFFECT);
+    }
+    return entry.result;
+}
+
+static bool IsHeadlessGameplayUnitObject(uint64_t unit, uint64_t dti, uint32_t category)
 {
     // Skip active callbacks for exact uChrChain objects; lifecycle cleanup is separate.
     if (dti == (uint64_t)_addr(DTI_UCHRCHAIN)) return false;
+    // Stage-owned effects (stage objects spawn theirs into lane 13) follow
+    // their owner, which does not run in resim; they are also outside the
+    // effect snapshot, so they stay on live time.
+    if (category >= 13 && category <= 16 && IsGameEffectDti(dti) &&
+        IsStageOwnedEffect(unit)) {
+        return false;
+    }
     return true;
 }
 
@@ -335,7 +356,7 @@ static void HeadlessUnitCategoryMove(uint64_t sMain, uint64_t sUnit,
             }
 
             if ((stateFlags & 7u) == 2 && (stateFlags & 0x400u) != 0 &&
-                IsHeadlessGameplayUnitObject(dti)) {
+                IsHeadlessGameplayUnitObject(unit, dti, category)) {
                 Rollback_FreezeWatchdogUnit("headless-unit-move", category,
                                             unit, dti, g_resimulateCurrentFrame);
                 if (!useJobs) {
@@ -452,7 +473,7 @@ static void HeadlessUnitCategoryPostMove(uint64_t sMain, uint64_t sUnit,
             }
 
             if ((stateFlags & 7u) == 2 && (stateFlags & 0x400u) != 0 &&
-                IsHeadlessGameplayUnitObject(dti)) {
+                IsHeadlessGameplayUnitObject(unit, dti, category)) {
                 Rollback_FreezeWatchdogUnit(WatchdogPhaseName(phase), category,
                                             unit, dti, g_resimulateCurrentFrame);
                 if (initialized) {
