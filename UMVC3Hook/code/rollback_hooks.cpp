@@ -905,6 +905,42 @@ static void __fastcall hkGameUiMove(uint64_t gameUi)
     oGameUiMove(gameUi);
 }
 
+// ---------------------------------------------------------------------------
+// Rocket Raccoon's tail chain is disabled on live frames and in resim.
+//
+// Its solver (uChrChain move 0x140035F90 / moveAfter 0x140036130) drives the
+// tail joints behind attack collision sets 11 and 34, but its node state is
+// not part of any snapshot, so every rollback resumed it from the abandoned
+// future. Resim already skips all uChrChain objects (rollback_tick.cpp); this
+// stops Rocket's on live frames too, so both peers agree. A dead or missing
+// owner still runs the native move, which kills the chain.
+// See doc/rocket_chain_rollback.md for restoring it with save/restore instead.
+// ---------------------------------------------------------------------------
+static constexpr uintptr_t FN_UCHRCHAIN_MOVE = 0x140035F90;
+static constexpr uintptr_t FN_UCHRCHAIN_MOVE_AFTER = 0x140036130;
+static constexpr uintptr_t FN_MTOBJECT_IS_ALIVE = 0x140001B80;
+static constexpr uintptr_t DTI_UROCKET_RACCOON = 0x140D459D8;
+static constexpr uint32_t UCHRCHAIN_OWNER_OFFSET = 0x1320; // read by 0x140035DC0
+static void(__fastcall* oChrChainMove)(uint64_t) = nullptr;
+static void(__fastcall* oChrChainMoveAfter)(uint64_t) = nullptr;
+
+static bool IsRocketTailChain(uint64_t chain)
+{
+    const uint64_t owner = *(uint64_t*)(chain + UCHRCHAIN_OWNER_OFFSET);
+    return owner && ((bool(__fastcall*)(uint64_t))_addr(FN_MTOBJECT_IS_ALIVE))(owner) &&
+           GetObjectDti(owner) == (uint64_t)_addr(DTI_UROCKET_RACCOON);
+}
+
+static void __fastcall hkChrChainMove(uint64_t chain)
+{
+    if (!IsRocketTailChain(chain)) oChrChainMove(chain);
+}
+
+static void __fastcall hkChrChainMoveAfter(uint64_t chain)
+{
+    if (!IsRocketTailChain(chain)) oChrChainMoveAfter(chain);
+}
+
 static void __fastcall hkFadeMove(uint64_t fade)
 {
     // Do not advance live fade timers again during replay.
@@ -1208,6 +1244,12 @@ void Rollback_InitMainHooks(RollbackMainMoveFn* originalMove)
                (void**)&oFinishScreenAssignSlot,
                "Rollback: holding finish portraits until confirmed",
                "Rollback: failed to hook uFinishScreen slot assignment (%d)\n");
+    EnableHook(FN_UCHRCHAIN_MOVE, (void*)&hkChrChainMove, (void**)&oChrChainMove,
+               "Rollback: disabled Rocket Raccoon's tail chain move",
+               "Rollback: failed to hook uChrChain__move (%d)\n");
+    EnableHook(FN_UCHRCHAIN_MOVE_AFTER, (void*)&hkChrChainMoveAfter, (void**)&oChrChainMoveAfter,
+               "Rollback: disabled Rocket Raccoon's tail chain solver",
+               "Rollback: failed to hook uChrChain__moveAfter (%d)\n");
     EnableHook(FN_UFADE_MOVE, (void*)&hkFadeMove, (void**)&oFadeMove,
                "Rollback: hooked uFade__move for re-simulation suppression",
                "Rollback: failed to hook uFade__move (%d)\n");
