@@ -186,6 +186,10 @@ static constexpr SnapshotRange SMAIN_RESTORE_RANGES[] = {
 static constexpr SnapshotRange SACTION_RESTORE_RANGES[] = {
     // Action timing, flags, and phase state.
     {0x28, 0xE8},
+    // mFinishWatch (+0x110, finish-wait timer that ends the round at 900 or on
+    // time-over) and mWinTeam (+0x114). A replayed finish wait otherwise adds
+    // onto the live timer and ends the round early on the peer that rolled back.
+    {0x110, 0x08},
     // Action transition/frame-sync fields.
     {0x140, 0x08},
     // Additional action transition state.
@@ -200,6 +204,8 @@ static constexpr SnapshotRange SACTION_RESTORE_RANGES[] = {
     {0x214, 0x04},
     // Action phase counter.
     {0x218, 0x04},
+    // KO swap side (1/2): picks the incoming character's tag-in voice line.
+    {0x22C, 0x04},
 };
 
 static constexpr SnapshotRange CCHR_TEAM_RESTORE_RANGES[] = {
