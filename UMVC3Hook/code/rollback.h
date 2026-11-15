@@ -63,6 +63,8 @@ void Rollback_PatchBattleUiAllocationFailure();
 void Rollback_InitNativeNullGuards();
 // Skip the scan for already-released stream sources (opt_sound_stream.cpp).
 void OptSoundStream_Init();
+// Resolve queued damage voice groups to their pain clips (pain_voice.cpp).
+void PainVoice_Init();
 
 // Capture the configured regions and subsystem state for this frame.
 void Rollback_SaveSnapshot(int32_t frame);

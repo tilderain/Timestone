@@ -102,6 +102,7 @@ CPP_SRC   := \
 	$(SRCDIR)/code/rollback_sound.cpp \
 	$(SRCDIR)/code/snapshot_reuse.cpp \
 	$(SRCDIR)/code/opt_sound_stream.cpp \
+	$(SRCDIR)/code/pain_voice.cpp \
 	$(SRCDIR)/code/netplay.cpp \
 	$(SRCDIR)/code/savedata.cpp \
 	$(SRCDIR)/code/steam_lobby.cpp \

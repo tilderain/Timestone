@@ -74,9 +74,17 @@ constexpr uint32_t NARRATION_SLOTS = 8, NARRATION_STRIDE = 0x38, NARRATION_FLAGS
 constexpr uint32_t NARRATION_PENDING = 1, NARRATION_STARTED = 2, NARRATION_DONE = 8;
 struct Range { uint32_t offset, size; };
 constexpr Range GSOUND_STATE[] = {
-    // Delayed character voice records: cRef, character, cue, key, flags, delay.
+    // Per character slot (stride 0x438):
+    // +0x00 delayed voice record: cRef, character, cue, key, flags, delay.
     {0xA38 + 0 * 0x438, 0x30}, {0xA38 + 1 * 0x438, 0x30}, {0xA38 + 2 * 0x438, 0x30},
     {0xA38 + 3 * 0x438, 0x30}, {0xA38 + 4 * 0x438, 0x30}, {0xA38 + 5 * 0x438, 0x30},
+    // +0x70 voice pause state (FUN_1402B1280, every character move) and +0x74
+    // the death voice latch: sGSound__playVoiceForCharAction category 0 (cues
+    // 0x11..0x13) plays once until the match phase resets it. Unrewound, a
+    // resim across a KO hits the latch, never queues the death voice, and the
+    // live one is killed as future-only or wiped from the restored record.
+    {0xAA8 + 0 * 0x438, 8}, {0xAA8 + 1 * 0x438, 8}, {0xAA8 + 2 * 0x438, 8},
+    {0xAA8 + 3 * 0x438, 8}, {0xAA8 + 4 * 0x438, 8}, {0xAA8 + 5 * 0x438, 8},
     // Same-tick group queue (20 x 0x50). The narration queues follow it and
     // are merged per entry instead (Rollback_RestoreSoundState).
     {0x1FD0, 0x2610 - 0x1FD0},

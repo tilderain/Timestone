@@ -149,6 +149,7 @@ void Rollback_InitHooks()
     Rollback_PatchBattleUiAllocationFailure();
     Rollback_InitNativeNullGuards();
     OptSoundStream_Init();
+    PainVoice_Init();
     Rollback_InitOnlineBattleHook();
     Rollback_InitReSimulationHooks();
     Rollback_InitRngHooks();

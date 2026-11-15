@@ -40,7 +40,7 @@ struct InputPacket {
     uint32_t battle_generation;  // match epoch; reject stale packets
     uint32_t start_frame;        // inputs[i] executes at start_frame + i
     uint32_t checksum_frame;     // confirmed frame, UINT32_MAX if absent
-    uint32_t checksum;           // character/gameplay-RNG checksum for checksum_frame
+    uint32_t checksum;           // character checksum for checksum_frame
     uint32_t inputs[NET_HISTORY_SIZE];
     int32_t  frame_advantage;    // sender's estimate; negative means ahead
     uint32_t flags;              // 0 = seed packet, non-zero = real packet

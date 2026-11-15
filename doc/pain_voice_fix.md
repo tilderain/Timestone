@@ -8,6 +8,17 @@ character voice resources. Patch design below is not installed or runtime-tested
 The installed archives have not been authenticated against a clean Steam depot;
 the audit emits resource SHA-256 values to make comparisons reproducible.
 
+## Installed — 2026-11-15
+
+`UMVC3Hook/code/pain_voice.cpp` (`PainVoice_Init`, called from
+`Rollback_InitHooks`) detours `0x1402A2A10` and, only when the return address is
+`0x1402B101E`, remaps `0x15..0x17` with the selector below. The queue runs in
+`uGSoundProcess::moveAfter` (sUnit lane 7), which resim replays, so online the
+roll is a hash of frame, slot and group (a replayed voice picks the live clip);
+offline it is a private xorshift. The silence outcome forwards the original group to keep the
+native rejection path. The install checks that `0x1402B1019` still calls
+`0x1402A2A10`. Built; not yet tested in game.
+
 ## Focused recheck — 2026-10-26
 
 Fresh read-only Ghidra **8193**, `umvc3.exe.unpacked.exe`:

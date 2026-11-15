@@ -121,7 +121,6 @@ static constexpr uintptr_t ADDR_PAD_UNIT_FLAGS             = 0x140001A70;
 
 // Character manager singleton (for desync checksum traversal)
 static constexpr uintptr_t PTR_SCHARACTER                  = 0x140d44a70;
-static constexpr uintptr_t PTR_GLOBAL_RNG                  = 0x140d765d8;
 
 // ---------------------------------------------------------------------------
 // Original function pointers (MinHook trampolines)
@@ -298,7 +297,7 @@ static int32_t   g_lastNonMultiCheckedFrame = -1;
 bool g_multiResimEnabled = true; // Multi-resimulation toggle
 
 // ---------------------------------------------------------------------------
-// Per-frame character/gameplay-RNG checksums and desync status.
+// Per-frame character checksums and desync status.
 // ---------------------------------------------------------------------------
 bool     g_desyncDetected     = false;
 bool     g_desyncSeen         = false;
@@ -1643,7 +1642,7 @@ extern "C" void Controller_OnFrameStart()
 
 // ---------------------------------------------------------------------------
 // Sum integer-truncated positions/HP, action IDs, and per-character RNG hashes.
-// Character order does not affect the sum; mix in global gameplay RNG last.
+// Character order does not affect the sum.
 // ---------------------------------------------------------------------------
 // cChr::mChrF bit 0 closes cChr::isMoveActive (0x14F0); mParentChrInfo's
 // character pointer is at 0x6690 + 8.
@@ -1693,10 +1692,6 @@ static uint32_t ComputeChecksum()
             node = *(uint64_t*)(node + NODE_NEXT_OFFSET);
         }
     }
-
-    const uint32_t* globalRng = (const uint32_t*)_addr(PTR_GLOBAL_RNG);
-    for (int i = 0; i < 4; ++i)
-        cs = (cs ^ globalRng[i]) * 16777619u;
 
     return cs;
 }
