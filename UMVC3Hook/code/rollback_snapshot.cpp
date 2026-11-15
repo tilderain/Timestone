@@ -14,6 +14,7 @@
 #include "rollback_restore.h"
 #include "rollback_resim.h"
 #include "rollback_cleanup.h"
+#include "rollback_sound.h"
 
 #include <cstdio>
 #include <cstring>
@@ -1132,6 +1133,7 @@ void Rollback_SaveSnapshot(int32_t frame)
 
     int count = Rollback_BuildRegions(slot.regions, MAX_REGIONS);
     if (count == 0) return;
+    Rollback_SaveSoundState(frame);
     const uint64_t buildRegionsEnd = Profile_Now();
     diagnosticStage.Next(LagMetric::SaveAllocate);
 

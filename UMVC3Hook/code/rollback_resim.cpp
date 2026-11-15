@@ -10,6 +10,7 @@
 #include "rollback_resim.h"
 #include "rollback_snapshot.h"
 #include "rollback_tick.h"
+#include "rollback_sound.h"
 #include "controller.h"
 #include "autotest.h"
 #include "mk10utils.h"
@@ -172,6 +173,7 @@ void Rollback_ReSimulate(int32_t startFrame, int32_t endFrame)
     Controller_SaveInputHistory();
     Profile_AddElapsed(&RollbackProfile::inputHistorySave, phaseStart);
 
+    Rollback_BeginSoundResim(startFrame);
     RollbackUnit_SetFrame(startFrame, true);
     Rollback_BeginThemeResim();
     Rollback_RestoreSnapshot(startFrame);
@@ -233,6 +235,7 @@ void Rollback_ReSimulate(int32_t startFrame, int32_t endFrame)
     Profile_AddElapsed(&RollbackProfile::timingResync, phaseStart);
     g_isResimulating = false;
     RollbackUnit_SetFrame(endFrame, false);
+    Rollback_EndSoundResim();
     Rollback_EndThemeResim();
     Rollback_FlushDeferredModelBounds();
 

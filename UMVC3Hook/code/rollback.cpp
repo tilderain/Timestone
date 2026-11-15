@@ -6,6 +6,7 @@
 #include "rollback_rng.h"
 #include "gameplay_hooks.h"
 #include "rollback_unit.h"
+#include "rollback_sound.h"
 #include "xinput_discovery.h"
 
 #include <atomic>
@@ -151,5 +152,6 @@ void Rollback_InitHooks()
     Rollback_InitOnlineBattleHook();
     Rollback_InitReSimulationHooks();
     Rollback_InitRngHooks();
+    Rollback_InitSoundHooks();
     HookLog("Rollback: experimental effect restore, future-shot withdrawal and saved-shot rewind enabled\n");
 }

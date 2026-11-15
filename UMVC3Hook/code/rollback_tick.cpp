@@ -6,6 +6,7 @@
 #include "rollback_memory.h"
 #include "rollback_diagnostics.h"
 #include "rollback_tick.h"
+#include "rollback_sound.h"
 #include "controller.h"
 #include "mk10utils.h"
 
@@ -839,6 +840,7 @@ void Rollback_HeadlessTick(uint64_t sMain)
     ((ObjectFn)_addr(FN_RESET_HIT_NODES))(ManagerSubsystem(FN_GET_HIT_SOLVER)); // Clear/free active-node array and reset pool cursor.
     //VTableCall(ManagerSubsystem(FN_GET_REPLAY), 0x30); // sReplay::move.
     //VTableCall(ManagerSubsystem(FN_GET_GSOUND), 0x30); // sGSound::move.
+    Rollback_SoundHeadlessTick(); // Its narration (announcer) queue tail only.
     //VTableCall(ManagerSubsystem(FN_GET_BATTLE_SETTING), 0x30); // sBattleSetting::move.
     //VTableCall(ManagerSubsystem(FN_GET_MVC3_SETTING), 0x30); // sMvc3Setting::move.
 

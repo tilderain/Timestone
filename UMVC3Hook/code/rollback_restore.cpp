@@ -9,6 +9,7 @@
 #include "live_benchmark.h"
 #include "lag_diagnostics.h"
 #include "rollback_snapshot.h"
+#include "rollback_sound.h"
 #include "mk10utils.h"
 
 #include <algorithm>
@@ -446,6 +447,7 @@ void Rollback_RestoreSnapshot(int32_t frame)
                 frame, slot.frame);
         return;
     }
+    Rollback_RestoreSoundState(frame);
 
     // Everything below rewrites live region memory behind the save's back.
     SnapshotReuse_BeginRestore();

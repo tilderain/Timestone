@@ -13,6 +13,7 @@
 #include "live_benchmark.h"
 #include "lag_diagnostics.h"
 #include "rollback_unit.h"
+#include "rollback_sound.h"
 #include "steam_lobby.h"
 #include "gameplay_hooks.h"
 #include "xinput_discovery.h"
@@ -27,13 +28,7 @@ extern void HookLog(const char* fmt, ...);
 static constexpr uintptr_t FN_SMVC3MAIN_MOVE = 0x1402594A0;
 static constexpr uintptr_t FN_CCHR_SET_POS = 0x140002AF0;
 static constexpr uintptr_t FN_RENDER_END_FRAME = 0x14053A250;
-static constexpr uintptr_t FN_SSOUND_MOVE = 0x1405CC040;
-static constexpr uintptr_t FN_GSOUND_VOICE_DISPATCH = 0x1402A3380;
-static constexpr uintptr_t FN_GSOUND_CREATE_VOICE = 0x1402A21F0;
-static constexpr uintptr_t FN_SOUND_PLAY_WITH_DB = 0x1405D28B0;
 static constexpr uintptr_t FN_CREF_INIT_DISABLED = 0x1400239C0;
-static constexpr uint32_t GSOUND_VOICE_REQUEST_FLAGS_OFFSET = 0x30;
-static constexpr uint32_t GSOUND_VOICE_REQUEST_LOOP = 0x80;
 static constexpr uintptr_t FN_SCENE_UPDATE_SOUND_ENV = 0x1405D6CD0;
 static constexpr uintptr_t FN_SGAMEUI_MOVE = 0x1402BE610;
 static constexpr uintptr_t FN_UBTGAUGEHC_MOVE = 0x1402F2AC0;
@@ -63,12 +58,6 @@ static void(__fastcall* oRenderMove)(uint64_t) = nullptr;
 static void(__fastcall* oUnitMove)(uint64_t) = nullptr;
 static void(__fastcall* oNativeInput)(uint64_t) = nullptr;
 static void(__fastcall* oMainMove)(uint64_t) = nullptr;
-static void(__fastcall* oSoundMove)(uint64_t) = nullptr;
-static void(__fastcall* oGSoundVoiceDispatch)(void*, void*, char) = nullptr;
-static uint64_t*(__fastcall* oGSoundCreateVoice)(void*, uint64_t*, void*, void*,
-                                                 char) = nullptr;
-static void(__fastcall* oSoundPlayWithDb)(void*, void*, uint32_t, uint64_t,
-                                          uint32_t, float, uint8_t, int) = nullptr;
 static void(__fastcall* oSceneUpdateSoundEnv)(uint64_t) = nullptr;
 static void(__fastcall* oGameUiMove)(uint64_t) = nullptr;
 static void(__fastcall* oBtGaugeHcMove)(uint64_t) = nullptr;
@@ -340,15 +329,6 @@ static void __fastcall hkWindowFocus(uint64_t main)
     oWindowFocus(main);
 }
 
-static void __fastcall hkSoundMove(uint64_t sound)
-{
-    LagDiagnosticScope diagnostic(LagMetric::SoundMove);
-    RollbackHookProfileScope profile(RollbackHookProfileId::SoundMove);
-    if (g_isResimulating)
-        return;
-    oSoundMove(sound);
-}
-
 static thread_local bool g_timingRender = false;
 static void __fastcall hkRenderMove(uint64_t object)
 {
@@ -557,44 +537,6 @@ static void __fastcall hkTimedSceneSort(uint64_t scene)
     SceneSortTiming::Invoke(scene);
 }
 
-static void __fastcall hkGSoundVoiceDispatch(void* dispatcher, void* voice,
-                                              char stop)
-{
-    // Sound is not rewound: suppress replayed starts, but allow stops for live voices.
-    if (g_isResimulating && stop == 0)
-        return;
-    oGSoundVoiceDispatch(dispatcher, voice, stop);
-}
-
-static uint64_t* __fastcall hkGSoundCreateVoice(void* dispatcher,
-                                                uint64_t* cookie,
-                                                void* voiceData,
-                                                void* request,
-                                                char recursive)
-{
-    const bool isLooping = request &&
-        (*(const uint32_t*)((const uint8_t*)request +
-                            GSOUND_VOICE_REQUEST_FLAGS_OFFSET) &
-         GSOUND_VOICE_REQUEST_LOOP) != 0;
-    if (g_isResimulating && isLooping) {
-        // Return a disabled handle that later shot cleanup can safely stop.
-        return ((uint64_t*(__fastcall*)(uint64_t*, uint64_t))
-            _addr(FN_CREF_INIT_DISABLED))(cookie, UINT64_MAX);
-    }
-    return oGSoundCreateVoice(dispatcher, cookie, voiceData, request, recursive);
-}
-
-static void __fastcall hkSoundPlayWithDb(void* sound, void* resource,
-                                         uint32_t bank, uint64_t cue,
-                                         uint32_t index, float gain,
-                                         uint8_t flags, int gainIsDb)
-{
-    if (!g_isResimulating) {
-        oSoundPlayWithDb(sound, resource, bank, cue, index, gain, flags,
-                         gainIsDb);
-    }
-}
-
 
 // ---------------------------------------------------------------------------
 // Battle theme (BGM) under rollback
@@ -605,8 +547,8 @@ static void __fastcall hkSoundPlayWithDb(void* sound, void* resource,
 // rest of sAction. The BGM handle cRef at +0x1F0 stays live.
 //
 // During resim the theme functions run for their state only: playSystemCue is
-// a no-op there, since natively it first stops every other theme and the start
-// it then issues would be suppressed anyway, leaving silence. After resim the
+// a no-op there, since natively it first stops every other theme and the
+// rollback sound ledger never sees its start replayed. After resim the
 // cue the corrected timeline wants is compared with the cue actually playing
 // and, if different, started once through the native theme request.
 // ---------------------------------------------------------------------------
@@ -659,6 +601,8 @@ static uint64_t* __fastcall hkPlaySystemCue(void* sound, uint64_t* out, uint32_t
             _addr(FN_CREF_INIT_DISABLED))(out, UINT64_MAX);
     }
     g_lastSystemCue = cue;
+    // The theme reconcile owns music: keep it out of the rollback sound ledger.
+    RollbackSoundPresentationScope presentation;
     return oPlaySystemCue(sound, out, cue, channel, flag5, flag6);
 }
 
@@ -1169,21 +1113,6 @@ void Rollback_InitMainHooks(RollbackMainMoveFn* originalMove)
     EnableHook(FN_RENDER_END_FRAME, (void*)&hkCallSRender, (void**)&oCallSRender,
                "Rollback: hooked sRender call",
                "Rollback: failed to hook sRender call (%d)\n");
-    EnableHook(FN_SSOUND_MOVE, (void*)&hkSoundMove, (void**)&oSoundMove,
-               "Rollback: hooked sSound__move for headless re-simulation",
-               "Rollback: failed to hook sSound__move (%d)\n");
-    EnableHook(FN_GSOUND_VOICE_DISPATCH, (void*)&hkGSoundVoiceDispatch,
-               (void**)&oGSoundVoiceDispatch,
-               "Rollback: suppressed replayed sound starts",
-               "Rollback: failed to suppress replayed sound starts (%d)\n");
-    EnableHook(FN_GSOUND_CREATE_VOICE, (void*)&hkGSoundCreateVoice,
-               (void**)&oGSoundCreateVoice,
-               "Rollback: suppressed replayed looping voice allocation",
-               "Rollback: failed to suppress replayed looping voice allocation (%d)\n");
-    EnableHook(FN_SOUND_PLAY_WITH_DB, (void*)&hkSoundPlayWithDb,
-               (void**)&oSoundPlayWithDb,
-               "Rollback: suppressed replayed raw sound starts",
-               "Rollback: failed to suppress replayed raw sound starts (%d)\n");
     EnableHook(FN_GSOUND_PLAY_SYSTEM_CUE, (void*)&hkPlaySystemCue,
                (void**)&oPlaySystemCue,
                "Rollback: hooked system cue for BGM resim",
