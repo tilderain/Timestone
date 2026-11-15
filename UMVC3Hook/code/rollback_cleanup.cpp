@@ -122,25 +122,94 @@ void Rollback_ClearStaleMaterialPointers()
     }
 }
 
+// Life-gauge member order.
+//
+// sGameUi+0x5960[team] is a one-shot tag request, not a cached member id:
+// cChrTeam__commitPendingCharacterSwap writes the incoming member's old slot
+// (1/2) and uBtGaugeLife consumes it once (0x1402F48A0), swapping
+// mChrList[0] <-> mChrList[slot] and writing 0 back. The gauge UI does not
+// tick during resimulation, so a tag replayed or undone there leaves the
+// order permanently wrong. Every swap mirrors the member-id swap, so the
+// canonical order is mChrList[k] = default member id of the character whose
+// current member id is k. Rebuild it after resim and drop the stale request.
+static constexpr uintptr_t VTABLE_UBTGAUGELIFE = 0x140B1BF90;
+static constexpr uint32_t UBTGAUGELIFE_TEAM_OFFSET = 0xB0;       // mId
+static constexpr uint32_t UBTGAUGELIFE_CHR_LIST_OFFSET = 0xB4;   // mChrList[3]
+static constexpr uint32_t UBTGAUGELIFE_ARCADE_BOSS_OFFSET = 0xC9; // mIsArcadeBoss
+static constexpr uint32_t CCHR_DEFAULT_MEMBER_ID_OFFSET = 0x2DAC;
+static constexpr uint32_t CCHR_MEMBER_ID_OFFSET = 0x2DB0;
+static constexpr uint32_t SUNIT_BATTLE_UI_CHILD_CATEGORY = 0x1D;
+
+static bool BuildGaugeMemberOrder(uint64_t sCharacter, int teamIndex, int32_t (&order)[3])
+{
+    uint64_t node = sCharacter + (teamIndex == 0 ? TEAM0_OFFSET : TEAM1_OFFSET) +
+        TEAM_FIRST_NODE_OFFSET;
+    bool found[3] = {};
+    for (int member = 0; node && member < ROLLBACK_MAX_TEAM_NODES;
+         ++member, node = *(uint64_t*)(node + NODE_NEXT_OFFSET)) {
+        uint64_t character = *(uint64_t*)(node + NODE_CHR_OFFSET);
+        if (!character) continue;
+        int32_t memberId = *(int32_t*)(character + CCHR_MEMBER_ID_OFFSET);
+        int32_t defaultId = *(int32_t*)(character + CCHR_DEFAULT_MEMBER_ID_OFFSET);
+        // First match, as cChrTeam__findChrByMemberId.
+        if (memberId < 0 || memberId > 2 || found[memberId]) continue;
+        if (defaultId < 0 || defaultId > 2) return false;
+        order[memberId] = defaultId;
+        found[memberId] = true;
+    }
+    if (!found[0] || !found[1] || !found[2]) return false;
+    return order[0] != order[1] && order[0] != order[2] && order[1] != order[2];
+}
+
 void Rollback_SyncActiveCharacterUi()
 {
     uint64_t sCharacter = *(uint64_t*)_addr(PTR_SCHARACTER);
     uint64_t sGameUi = *(uint64_t*)_addr(PTR_SGAMEUI);
-    if (!sCharacter || !sGameUi) return;
+    uint64_t sUnit = *(uint64_t*)_addr(PTR_SUNIT);
+    if (!sCharacter || !sGameUi || !sUnit) return;
 
     using SetTeamCharacterId = void(__fastcall*)(uint64_t, int, int);
     auto setTeamCharacterId = (SetTeamCharacterId)_addr(FN_GAMEUI_SET_TEAM_CHARACTER_ID);
-    for (int teamIndex = 0; teamIndex < 2; ++teamIndex) {
-        uint64_t team = sCharacter + (teamIndex == 0 ? TEAM0_OFFSET : TEAM1_OFFSET);
-        uint64_t active = *(uint64_t*)(team + 0x48);
-        if (!active) continue;
 
-        int teamId = *(int*)(active + 0x2DA0);
-        int memberId = *(int*)(active + 0x2DB0);
-        int* cachedMemberId = (int*)(sGameUi +
-            SGAMEUI_TEAM_CHARACTER_ID_OFFSET + (uintptr_t)teamId * sizeof(int));
-        if (*cachedMemberId != memberId)
-            setTeamCharacterId(sGameUi, teamId, memberId);
+    int32_t order[2][3];
+    bool valid[2];
+    for (int teamIndex = 0; teamIndex < 2; ++teamIndex) {
+        valid[teamIndex] = BuildGaugeMemberOrder(sCharacter, teamIndex, order[teamIndex]);
+        // Only clear a request the rebuild below supersedes.
+        if (valid[teamIndex] &&
+            *(int32_t*)(sGameUi + SGAMEUI_TEAM_CHARACTER_ID_OFFSET + teamIndex * 4) != 0)
+            setTeamCharacterId(sGameUi, teamIndex, 0);
+    }
+
+    const uint64_t gaugeVtable = _addr(VTABLE_UBTGAUGELIFE);
+    int gaugesFound = 0;
+    auto scanCategory = [&](uint32_t category) {
+        uint64_t unit = *(uint64_t*)(sUnit + SUNIT_CATEGORY_LISTS_OFFSET +
+            category * SUNIT_CATEGORY_LIST_STRIDE);
+        for (int safety = 512; unit && gaugesFound < 2 && safety-- > 0;
+             unit = *(uint64_t*)(unit + 0x18)) {
+            if (*(uint64_t*)unit != gaugeVtable) continue;
+            ++gaugesFound;
+            uint32_t team = *(uint32_t*)(unit + UBTGAUGELIFE_TEAM_OFFSET);
+            // The arcade boss gauge never consumes swap requests.
+            if (team > 1 || !valid[team] || *(uint8_t*)(unit + UBTGAUGELIFE_ARCADE_BOSS_OFFSET))
+                continue;
+            int32_t* chrList = (int32_t*)(unit + UBTGAUGELIFE_CHR_LIST_OFFSET);
+            if (std::memcmp(chrList, order[team], sizeof(order[team])) == 0) continue;
+            HookLog("Rollback: life gauge %u order %d,%d,%d -> %d,%d,%d\n", team,
+                    chrList[0], chrList[1], chrList[2],
+                    order[team][0], order[team][1], order[team][2]);
+            std::memcpy(chrList, order[team], sizeof(order[team]));
+        }
+    };
+
+    uint32_t categoryCount = *(uint32_t*)(sUnit + SUNIT_CATEGORY_COUNT_OFFSET);
+    if (categoryCount > 64) categoryCount = 64;
+    // uBattleUi__setup adds its child gauges at its own move line + 1.
+    if (SUNIT_BATTLE_UI_CHILD_CATEGORY < categoryCount)
+        scanCategory(SUNIT_BATTLE_UI_CHILD_CATEGORY);
+    for (uint32_t category = 0; category < categoryCount && gaugesFound < 2; ++category) {
+        if (category != SUNIT_BATTLE_UI_CHILD_CATEGORY) scanCategory(category);
     }
 }
 
