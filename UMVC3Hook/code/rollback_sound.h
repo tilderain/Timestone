@@ -11,12 +11,10 @@ void Rollback_InitSoundHooks();
 void Rollback_BeginSoundResim(int32_t startFrame);
 void Rollback_EndSoundResim();
 
-// sGSound queue state (delayed character voices, group queue, narration).
+// sGSound queue state: delayed character voices and the group queue are
+// rewound; narration entries only where gameplay queued them unconsumed.
 void Rollback_SaveSoundState(int32_t frame);
 void Rollback_RestoreSoundState(int32_t frame);
-
-// Headless replacement for sGSound::move's narration (announcer) tail.
-void Rollback_SoundHeadlessTick();
 
 // Commands issued inside are presentation: never tracked, never held.
 struct RollbackSoundPresentationScope {

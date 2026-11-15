@@ -201,23 +201,30 @@ the hold is dropped and the voice continues without a gap. The cost: on a
 predicted frame, a real cut-off lands at the confirmation latency instead of
 immediately.
 
-## 3. Make The Sim-Side Sound Queues Real Simulation State
+## 3. Sim-Side Sound Queues
 
-1. Add raw snapshot regions on `sGSound`, about 3.3 KB in one or two memcpy
-   ranges:
-   - the 6 × `0x30` delayed records at `+0xA38 + i*0x438`;
-   - `+0x1FD0..+0x29A0` (group queue and both narration queues);
-   - `+0x8A70..+0x8A7C`.
-2. Tick the narration consumer in the headless tick, at the `sGSound::move`
-   position. Mirror its tail exactly: if not paused and `!sGameUI+0x5ABA`, then for
-   ref 4 and ref 5, if `findVoiceByRef(gs+0x29B0, ref)` then
-   `updateActiveCueOrReset(gs, ref, queue)`. The announcer's
-   `playOrdinaryVoice` then issues its start inside resim, and the ledger
-   dedups or kills it like any other sound.
+1. Raw snapshot regions on `sGSound`: the 6 × `0x30` delayed records at
+   `+0xA38 + i*0x438` and the group queue `+0x1FD0..+0x2610`. Both are consumed
+   in resim (`processCharacterSoundQueues`, cat 7).
+2. **Narration (announcer) is confirmed-only presentation**, not replayed. Replaying
+   its consumer failed in two ways:
+   - Wholesale restore wiped entries the UI had queued, and resim never queues
+     them again. DANGER and Level N may be UI-queued; unverified.
+   - The consumer's "line finished" check reads the game voice list as it is now,
+     so the replay started lines on different frames and the ledger killed the
+     live ones.
 
-This fixes the KO announcer:
-- A predicted KO that rolls back has its "K.O." voice killed at the end of resim.
-- A KO that only the corrected timeline has gets announced once.
+   Now:
+   - `queueGroup4Voice` / `queueGroup5Voice` are hooked to tag each new entry with
+     its frame and with whether gameplay queued it.
+   - Restore merges per entry. It rewinds only gameplay-queued, not-yet-started
+     entries. It keeps started and finished entries, which belong to the consumer,
+     and UI-queued ones.
+   - The live consumer (`0x1402B1330`) runs under a presentation scope. During it,
+     gameplay entries from frames that can still roll back are masked (pending bit
+     cleared), so a rolled-back event is never announced. A real event is
+     announced once its frame confirms.
+   - The `+0x8A70` exclusivity state stays live.
 
 ## 4. Hooks: Remove, Keep, Add
 

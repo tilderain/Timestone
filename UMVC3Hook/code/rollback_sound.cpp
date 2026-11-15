@@ -47,13 +47,12 @@ constexpr uintptr_t FN_UNIT_SYNC_LINE       = 0x14051BF10; // +0x60
 constexpr uintptr_t FN_HIT_SOLVER_MOVE      = 0x140011D90;
 constexpr uintptr_t FN_CHARACTER_MOVE       = 0x1400597F0;
 constexpr uintptr_t FN_NARRATION_UPDATE     = 0x1402B1330; // sGSound__updateActiveCueOrReset
-constexpr uintptr_t FN_RESOLVE_SOUND_REF    = 0x1402AA2B0;
-constexpr uintptr_t FN_FIND_VOICE_BY_REF    = 0x1402A1460;
+constexpr uintptr_t FN_QUEUE_GROUP4_VOICE   = 0x1402AE4B0; // writes narration queue 0
+constexpr uintptr_t FN_QUEUE_GROUP5_VOICE   = 0x1402AE190; // writes narration queue 1
 constexpr uintptr_t FN_RESOURCE_ADD_REF     = 0x14050D100;
 constexpr uintptr_t FN_RESOURCE_RELEASE     = 0x14050D5A0;
 constexpr uintptr_t FN_MVC3MGR_GETINSTANCE  = 0x140001AF0;
 constexpr uintptr_t FN_GET_GSOUND           = 0x140259270;
-constexpr uintptr_t FN_GET_GAME_UI          = 0x14097D370;
 constexpr uintptr_t PTR_SSOUND              = 0x140E18520;
 
 // sSound
@@ -69,19 +68,18 @@ constexpr uint32_t STREAM_RING_CAPACITY = 0x1CF64, STREAM_RING_ENTRIES = 128; //
 constexpr uint32_t CMD_START = 1, CMD_START_BANK = 2, CMD_STOP = 3;
 
 // sGSound
-constexpr uint32_t GSOUND_VOICE_MANAGER = 0x29B0;
-constexpr uint32_t GAMEUI_SOUND_BLOCKED = 0x5ABA;
-struct NarrationQueue { uint32_t ref, offset; };
-constexpr NarrationQueue NARRATION[2] = {{4, 0x2610}, {5, 0x27D8}};
+// Narration (announcer) queues: 8 entries of 0x38, flags at +0x30.
+constexpr uint32_t NARRATION_QUEUE[2] = {0x2610, 0x27D8};
+constexpr uint32_t NARRATION_SLOTS = 8, NARRATION_STRIDE = 0x38, NARRATION_FLAGS = 0x30;
+constexpr uint32_t NARRATION_PENDING = 1, NARRATION_STARTED = 2, NARRATION_DONE = 8;
 struct Range { uint32_t offset, size; };
 constexpr Range GSOUND_STATE[] = {
     // Delayed character voice records: cRef, character, cue, key, flags, delay.
     {0xA38 + 0 * 0x438, 0x30}, {0xA38 + 1 * 0x438, 0x30}, {0xA38 + 2 * 0x438, 0x30},
     {0xA38 + 3 * 0x438, 0x30}, {0xA38 + 4 * 0x438, 0x30}, {0xA38 + 5 * 0x438, 0x30},
-    // Same-tick group queue (20 x 0x50) and both narration queues with timers.
-    {0x1FD0, 0x29A0 - 0x1FD0},
-    // Narration exclusivity state.
-    {0x8A70, 0x0C},
+    // Same-tick group queue (20 x 0x50). The narration queues follow it and
+    // are merged per entry instead (Rollback_RestoreSoundState).
+    {0x1FD0, 0x2610 - 0x1FD0},
 };
 constexpr size_t GSoundStateSize()
 {
@@ -105,6 +103,8 @@ SetEntryFn oSetEntry[2] = {};
 SoundMoveFn oSoundMove = nullptr;
 LineFn oMoveLine = nullptr, oMoveAfterLine = nullptr, oSyncLine = nullptr;
 Call4Fn oHitSolverMove = nullptr, oCharacterMove = nullptr, oNarrationUpdate = nullptr;
+using QueueVoiceFn = void(__fastcall*)(uint64_t, uint32_t, uint8_t, uint32_t, uint64_t);
+QueueVoiceFn oQueueVoice[2] = {};
 
 struct Voice { uint64_t ptr; uint32_t serial; };
 
@@ -147,7 +147,16 @@ bool g_resimLoopSeen = false;
 std::atomic<int> g_simDepth{0};
 thread_local bool t_presentation = false;
 
-struct GSoundStateSlot { int32_t frame = NO_FRAME; uint8_t data[GSoundStateSize()]; };
+// Which frame queued each narration entry, and whether gameplay did.
+struct NarrationTag { int32_t frame = NO_FRAME; bool sim = false; };
+NarrationTag g_narrationTag[2][NARRATION_SLOTS];
+
+struct GSoundStateSlot {
+    int32_t frame = NO_FRAME;
+    uint8_t data[GSoundStateSize()];
+    uint8_t narration[2][NARRATION_SLOTS][NARRATION_STRIDE];
+    NarrationTag tags[2][NARRATION_SLOTS];
+};
 GSoundStateSlot g_gsoundState[ROLLBACK_WINDOW];
 
 struct Lock {
@@ -495,10 +504,60 @@ bool TargetsNewStart(size_t index)
     return false;
 }
 
-void ResolveNarration(uint64_t gsound, uint32_t ref, uint8_t* storage)
+uint32_t& NarrationFlags(uint64_t gsound, int queue, uint32_t slot)
 {
-    ((uint64_t(__fastcall*)(uint64_t, uint8_t*, uint32_t))_addr(FN_RESOLVE_SOUND_REF))(
-        gsound, storage, ref);
+    return *(uint32_t*)(gsound + NARRATION_QUEUE[queue] + slot * NARRATION_STRIDE + NARRATION_FLAGS);
+}
+
+bool IsQueuedOnly(uint32_t flags)
+{
+    return (flags & NARRATION_PENDING) && !(flags & (NARRATION_STARTED | NARRATION_DONE));
+}
+
+// Producers run in gameplay (and in resim) or in the UI. Tag each entry they
+// add with its frame and source.
+template <int Queue>
+void __fastcall hkQueueVoice(uint64_t gsound, uint32_t cue, uint8_t gated, uint32_t flags, uint64_t owner)
+{
+    uint32_t before[NARRATION_SLOTS];
+    for (uint32_t i = 0; i < NARRATION_SLOTS; ++i) before[i] = NarrationFlags(gsound, Queue, i);
+    oQueueVoice[Queue](gsound, cue, gated, flags, owner);
+    const bool sim = g_soundResim || (!t_presentation && g_simDepth.load(std::memory_order_relaxed) > 0);
+    Lock lock;
+    const int32_t frame = CommandFrame();
+    for (uint32_t i = 0; i < NARRATION_SLOTS; ++i) {
+        const uint32_t after = NarrationFlags(gsound, Queue, i);
+        if (IsQueuedOnly(after) && (!(before[i] & NARRATION_PENDING) || (before[i] & NARRATION_DONE)))
+            g_narrationTag[Queue][i] = {frame, sim};
+    }
+}
+
+// The announcer is presentation: it runs on live frames only and never sees
+// a gameplay entry until the frame that queued it is confirmed, so it never
+// announces something a rollback takes back, and its voices are never
+// killed or held by the ledger.
+void __fastcall hkNarrationUpdate(uint64_t gsound, uint64_t ref, uint64_t queueAddress, uint64_t extra)
+{
+    int queue = -1;
+    for (int q = 0; q < 2; ++q)
+        if (queueAddress == gsound + NARRATION_QUEUE[q]) queue = q;
+    uint32_t masked = 0;
+    if (queue >= 0 && Netplay_IsActive()) {
+        for (uint32_t i = 0; i < NARRATION_SLOTS; ++i) {
+            uint32_t& flags = NarrationFlags(gsound, queue, i);
+            const NarrationTag& tag = g_narrationTag[queue][i];
+            if (IsQueuedOnly(flags) && tag.sim && tag.frame != NO_FRAME && CanRollBackTo(tag.frame)) {
+                flags &= ~NARRATION_PENDING;
+                masked |= 1u << i;
+            }
+        }
+    }
+    {
+        RollbackSoundPresentationScope presentation;
+        oNarrationUpdate(gsound, ref, queueAddress, extra);
+    }
+    for (uint32_t i = 0; i < NARRATION_SLOTS; ++i)
+        if (masked & (1u << i)) NarrationFlags(gsound, queue, i) |= NARRATION_PENDING;
 }
 
 } // namespace
@@ -594,6 +653,9 @@ void Rollback_SaveSoundState(int32_t frame)
         std::memcpy(out, (const void*)(gsound + range.offset), range.size);
         out += range.size;
     }
+    for (int q = 0; q < 2; ++q)
+        std::memcpy(slot.narration[q], (const void*)(gsound + NARRATION_QUEUE[q]), sizeof(slot.narration[q]));
+    std::memcpy(slot.tags, g_narrationTag, sizeof(slot.tags));
     slot.frame = frame;
 }
 
@@ -607,22 +669,25 @@ void Rollback_RestoreSoundState(int32_t frame)
         std::memcpy((void*)(gsound + range.offset), in, range.size);
         in += range.size;
     }
-}
-
-void Rollback_SoundHeadlessTick()
-{
-    // sGSound::move's narration tail. Its pause gate never holds in resim.
-    const uint64_t gsound = ManagerSubsystem(FN_GET_GSOUND);
-    const uint64_t ui = ManagerSubsystem(FN_GET_GAME_UI);
-    if (!gsound || !ui || !oNarrationUpdate || *(const uint8_t*)(ui + GAMEUI_SOUND_BLOCKED))
-        return;
-    const auto findVoice = (uint64_t(__fastcall*)(uint64_t, uint8_t*))_addr(FN_FIND_VOICE_BY_REF);
-    for (const NarrationQueue& queue : NARRATION) {
-        alignas(16) uint8_t ref[16];
-        ResolveNarration(gsound, queue.ref, ref);
-        if (!findVoice(gsound + GSOUND_VOICE_MANAGER, ref)) continue;
-        ResolveNarration(gsound, queue.ref, ref);
-        oNarrationUpdate(gsound, (uint64_t)ref, gsound + queue.offset, 0);
+    // Rewind only what gameplay queued and the announcer has not taken yet.
+    // Started or finished entries belong to the announcer, which acts on
+    // confirmed entries only; UI-queued entries are not replayed by resim.
+    for (int q = 0; q < 2; ++q) {
+        for (uint32_t i = 0; i < NARRATION_SLOTS; ++i) {
+            const uint32_t current = NarrationFlags(gsound, q, i);
+            NarrationTag& tag = g_narrationTag[q][i];
+            if ((current & NARRATION_PENDING) && (!IsQueuedOnly(current) || !tag.sim)) continue;
+            uint8_t* entry = (uint8_t*)(gsound + NARRATION_QUEUE[q] + i * NARRATION_STRIDE);
+            const uint8_t* saved = slot.narration[q][i];
+            const uint32_t savedFlags = *(const uint32_t*)(saved + NARRATION_FLAGS);
+            if (IsQueuedOnly(savedFlags) && slot.tags[q][i].sim) {
+                std::memcpy(entry, saved, NARRATION_STRIDE);
+                tag = slot.tags[q][i];
+            } else {
+                std::memset(entry, 0, NARRATION_STRIDE);
+                tag = {};
+            }
+        }
     }
 }
 
@@ -641,7 +706,9 @@ void Rollback_InitSoundHooks()
         {FN_UNIT_SYNC_LINE, (void*)&hkLine<&oSyncLine>, (void**)&oSyncLine, "sUnit::syncLine"},
         {FN_HIT_SOLVER_MOVE, (void*)&hkSimScope<&oHitSolverMove>, (void**)&oHitSolverMove, "sHitSolver::move"},
         {FN_CHARACTER_MOVE, (void*)&hkSimScope<&oCharacterMove>, (void**)&oCharacterMove, "sCharacter::move"},
-        {FN_NARRATION_UPDATE, (void*)&hkSimScope<&oNarrationUpdate>, (void**)&oNarrationUpdate, "narration update"},
+        {FN_NARRATION_UPDATE, (void*)&hkNarrationUpdate, (void**)&oNarrationUpdate, "narration update"},
+        {FN_QUEUE_GROUP4_VOICE, (void*)&hkQueueVoice<0>, (void**)&oQueueVoice[0], "sGSound::queueGroup4Voice"},
+        {FN_QUEUE_GROUP5_VOICE, (void*)&hkQueueVoice<1>, (void**)&oQueueVoice[1], "sGSound::queueGroup5Voice"},
     };
     for (const Hook& hook : hooks) {
         MH_STATUS status = GameplayHooks_Create((LPVOID)_addr(hook.address), hook.detour, (LPVOID*)hook.original);
