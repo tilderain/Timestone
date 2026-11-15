@@ -1225,10 +1225,12 @@ void Rollback_InitMainHooks(RollbackMainMoveFn* originalMove)
                (void**)&oPlayInitialTheme,
                "Rollback: hooked round-start theme",
                "Rollback: failed to hook round-start theme (%d)\n");
-    EnableHook(FN_SCENE_UPDATE_SOUND_ENV, (void*)&hkSceneUpdateSoundEnv,
+    // Disabled for testing: does a rollback still leave a voice bound to a
+    // freed object (crash in the voice position update, 0x1405D6CD0)?
+    /*EnableHook(FN_SCENE_UPDATE_SOUND_ENV, (void*)&hkSceneUpdateSoundEnv,
                (void**)&oSceneUpdateSoundEnv,
                "Rollback: guarded sound scene model binding",
-               "Rollback: failed to guard sound scene model binding (%d)\n");
+               "Rollback: failed to guard sound scene model binding (%d)\n");*/
     EnableHook(FN_SGAMEUI_MOVE, (void*)&hkGameUiMove, (void**)&oGameUiMove,
                "Rollback: hooked sGameUI__move for re-simulation suppression",
                "Rollback: failed to hook sGameUI__move (%d)\n");
