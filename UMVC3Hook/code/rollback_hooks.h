@@ -14,3 +14,7 @@ void Rollback_EndThemeResim();
 // Round-end UI: record sAction's step and defeated fighters after each
 // simulated frame (live frames record from the battle UI hook).
 void Rollback_RecordBattlePresentation(int32_t frame);
+
+// Battle system messages (DOWN, FIRST ATTACK, ...) are held until their frame
+// is confirmed; a rollback to fromFrame drops the ones it replaces.
+void Rollback_DiscardHeldBattleMessages(int32_t fromFrame);

@@ -22,6 +22,7 @@
 #include <cmath>
 #include <cstring>
 #include <iterator>
+#include <vector>
 
 extern void HookLog(const char* fmt, ...);
 
@@ -835,6 +836,64 @@ static void __fastcall hkSceneUpdateSoundEnv(uint64_t scene)
     oSceneUpdateSoundEnv(scene);
 }
 
+// ---------------------------------------------------------------------------
+// Battle system messages ("DOWN", "FIRST ATTACK", ...)
+//
+// Gameplay creates them directly: e.g. uCharacterPost__processDefeatTransitions
+// -> sActionTime__setTeamDefeatState -> sGameUi__createBattleSystemMessage
+// (team, 2 = DOWN). The message unit (uBtUiSubSysMsg, line 0) shows its text
+// and queues its announcer lines from its setup on the next live frame. A
+// predicted message survives the rollback that undoes it, and a replayed one
+// is created again. Hold every creation on a frame that can still roll back,
+// drop held ones a rollback replaces, and create them once confirmed.
+// ---------------------------------------------------------------------------
+static constexpr uintptr_t FN_SGAMEUI_CREATE_BATTLE_MESSAGE = 0x1402BF770;
+using CreateBattleMessageFn = void(__fastcall*)(uint64_t, int, int);
+static CreateBattleMessageFn oCreateBattleMessage = nullptr;
+
+struct HeldBattleMessage { int32_t frame; int team; int text; };
+static std::vector<HeldBattleMessage> g_heldBattleMessages;
+
+static bool BattleMessageMayRollBack(int32_t frame)
+{
+    return Controller_IsRollbackChangePending() ||
+           (!Controller_IsFrameConfirmed(frame) &&
+            Controller_GetExecutingFrame() - frame < ROLLBACK_WINDOW);
+}
+
+static void __fastcall hkCreateBattleMessage(uint64_t gameUi, int team, int text)
+{
+    if (!Netplay_IsActive()) {
+        oCreateBattleMessage(gameUi, team, text);
+        return;
+    }
+    const int32_t frame = g_isResimulating ? g_resimulateCurrentFrame
+                                           : Controller_GetExecutingFrame();
+    if (!g_isResimulating && !BattleMessageMayRollBack(frame)) {
+        oCreateBattleMessage(gameUi, team, text);
+        return;
+    }
+    g_heldBattleMessages.push_back({frame, team, text});
+}
+
+void Rollback_DiscardHeldBattleMessages(int32_t fromFrame)
+{
+    std::erase_if(g_heldBattleMessages,
+                  [fromFrame](const HeldBattleMessage& m) { return m.frame >= fromFrame; });
+}
+
+static void ReleaseHeldBattleMessages(uint64_t gameUi)
+{
+    size_t kept = 0;
+    for (const HeldBattleMessage& message : g_heldBattleMessages) {
+        if (BattleMessageMayRollBack(message.frame))
+            g_heldBattleMessages[kept++] = message;
+        else
+            oCreateBattleMessage(gameUi, message.team, message.text);
+    }
+    g_heldBattleMessages.resize(kept);
+}
+
 static void __fastcall hkGameUiMove(uint64_t gameUi)
 {
     LagDiagnosticScope diagnostic(LagMetric::GameUiMove);
@@ -842,6 +901,7 @@ static void __fastcall hkGameUiMove(uint64_t gameUi)
     // Advance unsnapshotted UI objects only on live frames.
     if (g_isResimulating)
         return;
+    if (!g_heldBattleMessages.empty()) ReleaseHeldBattleMessages(gameUi);
     oGameUiMove(gameUi);
 }
 
@@ -1136,6 +1196,10 @@ void Rollback_InitMainHooks(RollbackMainMoveFn* originalMove)
     EnableHook(FN_SGAMEUI_MOVE, (void*)&hkGameUiMove, (void**)&oGameUiMove,
                "Rollback: hooked sGameUI__move for re-simulation suppression",
                "Rollback: failed to hook sGameUI__move (%d)\n");
+    EnableHook(FN_SGAMEUI_CREATE_BATTLE_MESSAGE, (void*)&hkCreateBattleMessage,
+               (void**)&oCreateBattleMessage,
+               "Rollback: holding battle system messages until confirmed",
+               "Rollback: failed to hook sGameUi__createBattleSystemMessage (%d)\n");
     EnableHook(FN_UBATTLEUI_MOVE_AFTER, (void*)&hkBattleUiMoveAfter,
                (void**)&oBattleUiMoveAfter,
                "Rollback: holding K.O. banner until confirmed",

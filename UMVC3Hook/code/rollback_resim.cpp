@@ -174,6 +174,7 @@ void Rollback_ReSimulate(int32_t startFrame, int32_t endFrame)
     Profile_AddElapsed(&RollbackProfile::inputHistorySave, phaseStart);
 
     Rollback_BeginSoundResim(startFrame);
+    Rollback_DiscardHeldBattleMessages(startFrame);
     RollbackUnit_SetFrame(startFrame, true);
     Rollback_BeginThemeResim();
     Rollback_RestoreSnapshot(startFrame);

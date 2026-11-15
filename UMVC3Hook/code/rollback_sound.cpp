@@ -593,13 +593,11 @@ void Rollback_EndSoundResim()
     if (!g_soundResim) return;
     g_soundResim = false;
 
-    size_t replayed = 0, played = 0, killed = 0, kept = 0;
     for (size_t i = 0; i < g_resim.size(); ++i) {
         Command& command = g_resim[i];
         if (IsStart(command.type)) {
             if (Entry* entry = FindReplayedStart(command)) {
                 entry->matched = true;
-                ++replayed;
             } else {
                 command.forward = command.isNew = true;
             }
@@ -616,10 +614,8 @@ void Rollback_EndSoundResim()
             KillEntry(sound, entry);
             entry.matched = true; // erase below
             entry.frame = NO_FRAME;
-            ++killed;
         } else if (entry.heldStop >= g_resimStart && !entry.heldReissued) {
             entry.heldStop = NO_FRAME; // the stop belonged to the abandoned future
-            ++kept;
         }
     }
     EraseEntries([](const Entry& entry) { return entry.frame == NO_FRAME; });
@@ -629,16 +625,10 @@ void Rollback_EndSoundResim()
             oSetEntry[command.kind](sound, command.request, command.id, command.owner,
                                     command.args, command.link, command.type, command.sub,
                                     command.p9, command.p10, command.p11);
-            if (command.isNew) {
+            if (command.isNew)
                 PushEntry(command.kind, command.request, command.id, command.owner, command.frame);
-                ++played;
-            }
         }
         Release(command.request);
-    }
-    if (replayed || played || killed || kept) {
-        HookLog("Rollback sound: from %d replayed=%zu played=%zu killed=%zu uncut=%zu\n",
-                g_resimStart, replayed, played, killed, kept);
     }
     g_resim.clear();
 }
@@ -716,5 +706,4 @@ void Rollback_InitSoundHooks()
         if (status != MH_OK)
             HookLog("Rollback sound: failed to hook %s (%d)\n", hook.name, status);
     }
-    HookLog("Rollback sound: ledger hooks installed\n");
 }
