@@ -2093,6 +2093,21 @@ static void __fastcall hkxinputToGameMask(uint64_t sPad, uint64_t slotBase, cons
     oxinputToGameMask(sPad, slotBase, pState);
 }
 
+// sMain focus test (0x140259470): true when the window is foreground and not
+// iconified. sMvc3Pad__stepFocusGated (0x1402B41B0) suppresses pad input while
+// it is false, plus a 30-frame lockout after focus returns. Keep input live out
+// of focus, except in dual training where the foreground instance owns the pads.
+static constexpr uintptr_t ADDR_MAIN_HAS_INPUT_FOCUS = 0x140259470;
+using MainHasInputFocus_t = bool(__fastcall*)(uint64_t);
+static MainHasInputFocus_t oMainHasInputFocus = nullptr;
+
+static bool __fastcall hkMainHasInputFocus(uint64_t sMain)
+{
+    if (GetLaunchOption() != LAUNCH_DUAL_TRAINING)
+        return true;
+    return oMainHasInputFocus(sMain);
+}
+
 static void __fastcall hkpadSlotPostReadProcess(uint64_t sPad, uint64_t slotBase, uint32_t slotIdx)
 {
     RollbackHookProfileScope profile(RollbackHookProfileId::PadPostRead);
@@ -2232,6 +2247,17 @@ void Controller_InitHooks()
         GameplayHooks_QueueEnable((LPVOID)_addr(ADDR_XINPUT_TO_GAME_MASK));
     else
         HookLog("Controller: Failed to hook xinputToGameMask (%d)\n", s);
+
+    // Pad focus gate
+    s = GameplayHooks_Create(
+        (LPVOID)_addr(ADDR_MAIN_HAS_INPUT_FOCUS),
+        (LPVOID)&hkMainHasInputFocus,
+        (LPVOID*)&oMainHasInputFocus
+    );
+    if (s == MH_OK)
+        GameplayHooks_QueueEnable((LPVOID)_addr(ADDR_MAIN_HAS_INPUT_FOCUS));
+    else
+        HookLog("Controller: Failed to hook input focus gate (%d)\n", s);
 
     // padSlotPostReadProcess
     s = GameplayHooks_Create(
