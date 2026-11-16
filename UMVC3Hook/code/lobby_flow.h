@@ -54,6 +54,10 @@ void LobbyFlow_RequestReturnToLobby(const char* reason);
 // still starting, or that the native UI could not be brought up.
 void LobbyFlow_DrawOverlay();
 
+// True when a request for this system cue should be dropped: the menu theme
+// is already playing and is being carried across a title-area reload.
+bool LobbyFlow_ShouldSkipSystemCue(uint32_t cue);
+
 // Keyboard text entry (room name, chat).
 bool LobbyFlow_WantsText();
 void LobbyFlow_OnChar(uint32_t utf16);

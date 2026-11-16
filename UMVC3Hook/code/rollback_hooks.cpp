@@ -1,3 +1,4 @@
+#include "lobby_flow.h"
 #include "../pch.h"
 
 #include "rollback_hooks.h"
@@ -598,6 +599,10 @@ static uint64_t* __fastcall hkPlaySystemCue(void* sound, uint64_t* out, uint32_t
                                             int channel, char flag5, char flag6)
 {
     if (g_isResimulating) {
+        return ((uint64_t*(__fastcall*)(uint64_t*, uint64_t))
+            _addr(FN_CREF_INIT_DISABLED))(out, UINT64_MAX);
+    }
+    if (LobbyFlow_ShouldSkipSystemCue(cue)) {
         return ((uint64_t*(__fastcall*)(uint64_t*, uint64_t))
             _addr(FN_CREF_INIT_DISABLED))(out, UINT64_MAX);
     }

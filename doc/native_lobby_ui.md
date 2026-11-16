@@ -304,6 +304,39 @@ draw. Leaving the lobby uses the same fade.
 the license hotkey (`sLicense__handleReturnToTitleFlag` `0x140279680`) every
 lobby frame as a second line of defence.
 
+### Music
+
+The lobby plays the game's own tracks through `sGSound__playSystemCue`
+`0x1402AC5C0` `(sGSound, cRef* out, cue, 0, 0, 1)`, with `sGSound` from
+`0x140003AA0`. The cue table is `sound\bgm\bgm` in `sound\cmn.arc` (`STQR`:
+40-byte file records from `+0x50`, 152-byte requests from `+0x1180`; request
+dword 0 is the cue id, dword 2 the stream type, dword 23 the file index).
+
+- Cue 16 (`bgm_gm` file 13, type 1) is the native lobby room
+  (`uMenuNetRoomMain__playRoomTransitionCue` `0x14042F870`). It plays as soon
+  as it is requested. Confirmed in game.
+- Cues 13 and 14 are the main menu theme: two synchronised layers
+  (`bgm_gm_035`, `bgm_gm_036`), stream type 10. `aTitle__init` and
+  `uMenuTitle__move` request the pair, but that only queues them. They stayed
+  silent in the lobby until the step `uMenuMain` performs in its vfn38
+  `0x1403E89A0` was added: mute the layer the BGM-style setting
+  (`sGameConfig` `0x140251640`) does not use with
+  `sGSound__playVoiceLoopOrIndex` `0x1402AF010` `(sGSound, bank ref 0, cue, 0,
+  0xFFFFFFFF, 0.0f)`, then call `0x1402AEAE0` `(sGSound, cRef* out, cue)` for
+  13 and 14. `ReleaseMenuThemeLayers` does this. Confirmed in game.
+- `0x1402B0D20` `(sGSound, ms)` fades out what is playing; the game calls it
+  before nearly every music change.
+
+The lobby's menus use the menu theme and a room uses cue 16. The theme runs
+straight through a switch between the lobby and the real main menu (confirmed
+in game): while the title area reloads with it playing, `g_keepMenuTheme`
+drops the two things that would break it, the fade the dying `uMenuMain`
+issues (a hook on `0x1402B0D20`) and the restart `aTitle__init` makes for the
+main-menu boot state (`LobbyFlow_ShouldSkipSystemCue`, checked in the
+plugin's existing `sGSound__playSystemCue` hook). The lobby starts its own
+music from a hook at the end of `aTitle__init`. The
+launcher's own music (`launch_music.cpp`) is no longer used by the lobby.
+
 ## First in-game run: what to check
 
 Log lines are prefixed `LobbyNative:`, `LobbyFlow:` and `LobbyRoom:`.

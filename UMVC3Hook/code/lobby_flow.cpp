@@ -6,7 +6,6 @@
 #include "connect_roster.h"
 #include "controller.h"
 #include "framestepper.h"
-#include "launch_music.h"
 #include "launchmenu_utils.h"
 #include "lobby_native.h"
 #include "lobby_room.h"
@@ -87,6 +86,19 @@ constexpr uintptr_t SLICENSE_DISARM_CARD = 0x140279680;
 constexpr uintptr_t SMAIN_INSTANCE_PTR = 0x140E177E8;
 constexpr size_t SMAIN_FRAME_WAIT = 0x58;
 constexpr uintptr_t SMAIN_SET_FRAME_WAIT = 0x140522420; // (this, bool)
+// Menu music, played the way the game does (sGSound system cues): the main
+// menu theme is cues 13 and 14 (aTitle::init, uMenuTitle on Start) and the
+// native lobby room is cue 16 (uMenuNetRoomMain__playRoomTransitionCue
+// 0x14042F870). Before starting the menu theme aTitle::init fades whatever is
+// playing with the call at 0x1402B0D20 (2000 ms there).
+constexpr uintptr_t GSOUND_GET_INSTANCE = 0x140003AA0;
+constexpr uintptr_t GSOUND_PLAY_SYSTEM_CUE = 0x1402AC5C0; // (this, cRef* out, cue, 0, 0, 1)
+constexpr uintptr_t GSOUND_FADE_OUT_BGM = 0x1402B0D20;    // (this, milliseconds)
+constexpr uint32_t kCueMenuThemeA = 13;
+constexpr uint32_t kCueMenuThemeB = 14;
+constexpr uint32_t kCueLobbyRoom = 16;
+constexpr int32_t kBgmSwitchFadeMs = 600;
+constexpr uintptr_t SGAMECONFIG_GET_INSTANCE = 0x140001AB0;
 constexpr ULONGLONG kOnlineFadeOutMs = 200;
 constexpr ULONGLONG kOnlineFadeInMs = 250;
 constexpr ULONGLONG kOnlineFadeLimitMs = 6000; // never leave the screen black
@@ -159,7 +171,6 @@ bool g_matchIsHost = false;
 ULONGLONG g_phaseStartTick = 0;
 bool g_launchSent = false;
 
-bool g_musicWanted = false;
 // Frames the lobby has been waiting for the native backend to come up.
 std::atomic<uint32_t> g_nativeWaitFrames{0};
 constexpr uint32_t kNativeSlowFrames = 180;    // show "starting" after 3 s
@@ -352,6 +363,155 @@ void EnsureFramePacing()
     HookLog("LobbyFlow: enabled sMain frame-wait pacing for the title area\n");
 }
 
+// The menu theme is two synchronised layers (cue 13 -> bgm_gm_035, cue 14 ->
+// bgm_gm_036, stream type 10 in sound\bgm\bgm). Requesting the cues only
+// queues them: the main menu itself (uMenuMain vfn38, 0x1403E89A0) then mutes
+// the layer the player's BGM setting does not use and releases both, and
+// without that step they never become audible.
+constexpr uintptr_t SGAMECONFIG_GET_BGM_STYLE = 0x140251640;   // (config) -> 0 or not
+constexpr uintptr_t GSOUND_RESOLVE_SOUND_REF = 0x1402AA2B0;    // (this, cRef* out, index)
+constexpr uintptr_t GSOUND_SET_CUE_CHANNEL_VOLUME = 0x1402AF010; // (this, ref, cue, 0, channel, vol)
+constexpr uintptr_t GSOUND_RELEASE_CUE = 0x1402AEAE0;          // (this, cRef* out, cue)
+constexpr uint32_t kAllChannels = 0xFFFFFFFFu;
+// Set while the title area reloads with the menu theme already playing, in
+// either direction between the lobby and the real main menu. The game would
+// otherwise fade it (the dying main menu) or restart it (aTitle::init for the
+// main-menu boot state); both are swallowed so the music runs straight through.
+bool g_keepMenuTheme = false;
+uint32_t g_menuThemeKickFrames = 0; // repeat the release once, a little later
+
+enum class Bgm { None, MainMenu, Room };
+Bgm g_bgm = Bgm::None; // what the lobby believes is playing (game thread)
+
+// Mutes the unused layer and releases both, as uMenuMain does. Returns false
+// if the theme's cue is not queued or playing at all.
+bool ReleaseMenuThemeLayers(void* sound)
+{
+    using GetConfig = void*(__fastcall*)();
+    using GetStyle = int32_t(__fastcall*)(void*);
+    using ResolveRef = void*(__fastcall*)(void*, void*, uint32_t);
+    using SetChannelVolume = void(__fastcall*)(void*, void*, uint32_t, uint64_t, uint32_t, float);
+    using ReleaseCue = void*(__fastcall*)(void*, void*, uint32_t);
+    void* config = reinterpret_cast<GetConfig>(_addr(SGAMECONFIG_GET_INSTANCE))();
+    const int32_t style =
+        config ? reinterpret_cast<GetStyle>(_addr(SGAMECONFIG_GET_BGM_STYLE))(config) : 0;
+    alignas(16) uint8_t ref[32] = {};
+    void* bank = reinterpret_cast<ResolveRef>(_addr(GSOUND_RESOLVE_SOUND_REF))(sound, ref, 0);
+    reinterpret_cast<SetChannelVolume>(_addr(GSOUND_SET_CUE_CHANNEL_VOLUME))(
+        sound, bank, style == 0 ? kCueMenuThemeB : kCueMenuThemeA, 0, kAllChannels, 0.0f);
+    alignas(16) uint8_t handle[32] = {};
+    const ReleaseCue release = reinterpret_cast<ReleaseCue>(_addr(GSOUND_RELEASE_CUE));
+    release(sound, handle, kCueMenuThemeA);
+    const bool present = *reinterpret_cast<uint64_t*>(handle + 8) != UINT64_MAX;
+    release(sound, handle, kCueMenuThemeB);
+    return present;
+}
+
+// Starts the menu theme, or lets it carry on if it is already there.
+void PlayMenuTheme(void* sound, bool restart)
+{
+    using PlayCue = void*(__fastcall*)(void*, void*, uint32_t, int32_t, char, char);
+    const PlayCue play = reinterpret_cast<PlayCue>(_addr(GSOUND_PLAY_SYSTEM_CUE));
+    if (!restart && ReleaseMenuThemeLayers(sound)) {
+        HookLog("LobbyFlow: menu theme already present; kept\n");
+        return;
+    }
+    alignas(16) uint8_t handle[32] = {};
+    play(sound, handle, kCueMenuThemeA, 0, 0, 1);
+    play(sound, handle, kCueMenuThemeB, 0, 0, 1);
+    const bool present = ReleaseMenuThemeLayers(sound);
+    g_menuThemeKickFrames = 20;
+    HookLog("LobbyFlow: menu theme started (queued=%d)\n", present ? 1 : 0);
+}
+
+void SetBgm(Bgm wanted)
+{
+    if (wanted == g_bgm) return;
+    using GetInstance = void*(__fastcall*)();
+    void* sound = reinterpret_cast<GetInstance>(_addr(GSOUND_GET_INSTANCE))();
+    if (!sound) return;
+    using FadeOut = void(__fastcall*)(void*, int32_t);
+    using PlayCue = void*(__fastcall*)(void*, void*, uint32_t, int32_t, char, char);
+    const PlayCue play = reinterpret_cast<PlayCue>(_addr(GSOUND_PLAY_SYSTEM_CUE));
+    if (g_bgm != Bgm::None)
+        reinterpret_cast<FadeOut>(_addr(GSOUND_FADE_OUT_BGM))(sound, kBgmSwitchFadeMs);
+    alignas(16) uint8_t handle[32] = {};
+    if (wanted == Bgm::MainMenu) {
+        PlayMenuTheme(sound, true);
+    } else if (wanted == Bgm::Room) {
+        play(sound, handle, kCueLobbyRoom, 0, 0, 1);
+    }
+    HookLog("LobbyFlow: music %d -> %d\n", static_cast<int>(g_bgm), static_cast<int>(wanted));
+    g_bgm = wanted;
+}
+
+// The menu theme only played when it was started where the game starts it:
+// at the end of aTitle::init, before the area's load phase. Requested later
+// from the running title area (boot state 0) it stayed silent, so the lobby
+// starts its music from a hook on aTitle::init, with the same fade-then-play
+// sequence init uses for its main-menu boot states.
+constexpr uintptr_t ATITLE_INIT = 0x140216940;
+using TitleInit = void(__fastcall*)(uint64_t, uint64_t, uint64_t, uint64_t);
+TitleInit g_originalTitleInit = nullptr;
+bool g_titleInitHookInstalled = false;
+
+void __fastcall Hook_TitleInit(uint64_t area, uint64_t a, uint64_t b, uint64_t c)
+{
+    g_originalTitleInit(area, a, b, c);
+    // A reload into the real main menu starts its own theme in init.
+    if (!g_enabled || g_releasedToMainMenu) return;
+    // Booting a battle also passes through the title area; no menu music then.
+    if (g_phase == Phase::Launching || g_phase == Phase::InMatch) return;
+    using GetInstance = void*(__fastcall*)();
+    void* sound = reinterpret_cast<GetInstance>(_addr(GSOUND_GET_INSTANCE))();
+    if (!sound) return;
+    using FadeOut = void(__fastcall*)(void*, int32_t);
+    using PlayCue = void*(__fastcall*)(void*, void*, uint32_t, int32_t, char, char);
+    const PlayCue play = reinterpret_cast<PlayCue>(_addr(GSOUND_PLAY_SYSTEM_CUE));
+    const bool inRoom = g_service && g_service->Room().inRoom;
+    alignas(16) uint8_t handle[32] = {};
+    if (inRoom) {
+        reinterpret_cast<FadeOut>(_addr(GSOUND_FADE_OUT_BGM))(sound, 2000);
+        play(sound, handle, kCueLobbyRoom, 0, 0, 1);
+    } else if (g_bgm == Bgm::MainMenu) {
+        // Coming from the real main menu: let its theme carry on if it
+        // survived the reload, otherwise start it again.
+        PlayMenuTheme(sound, false);
+    } else {
+        reinterpret_cast<FadeOut>(_addr(GSOUND_FADE_OUT_BGM))(sound, 2000);
+        PlayMenuTheme(sound, true);
+    }
+    g_bgm = inRoom ? Bgm::Room : Bgm::MainMenu;
+    HookLog("LobbyFlow: music started from aTitle::init (%s)\n", inRoom ? "room" : "menu theme");
+}
+
+using FadeOutBgm = void(__fastcall*)(void*, int32_t);
+FadeOutBgm g_originalFadeOutBgm = nullptr;
+
+void __fastcall Hook_FadeOutBgm(void* sound, int32_t milliseconds)
+{
+    if (g_keepMenuTheme) return;
+    g_originalFadeOutBgm(sound, milliseconds);
+}
+
+void InstallTitleInitHook()
+{
+    if (g_titleInitHookInstalled) return;
+    g_titleInitHookInstalled = true;
+    void* fade = reinterpret_cast<void*>(_addr(GSOUND_FADE_OUT_BGM));
+    if (MH_CreateHook(fade, reinterpret_cast<void*>(&Hook_FadeOutBgm),
+                      reinterpret_cast<void**>(&g_originalFadeOutBgm)) != MH_OK ||
+        MH_EnableHook(fade) != MH_OK)
+        HookLog("LobbyFlow: music fade hook failed; the menu theme may restart on switches\n");
+    void* target = reinterpret_cast<void*>(_addr(ATITLE_INIT));
+    MH_STATUS status = MH_CreateHook(target, reinterpret_cast<void*>(&Hook_TitleInit),
+                                     reinterpret_cast<void**>(&g_originalTitleInit));
+    if (status == MH_OK) status = MH_EnableHook(target);
+    if (status != MH_OK)
+        HookLog("LobbyFlow: aTitle::init hook failed (%d); menu music may be missing\n",
+                static_cast<int>(status));
+}
+
 void StartBlack()
 {
     if (g_fadeHold.load(std::memory_order_relaxed)) return;
@@ -369,8 +529,9 @@ void LiftBlack()
 // Rebuilds the title area the way the game does: aTitle::init kills every
 // unit and builds the screen the boot state asks for. Killing or spawning
 // menu units by hand left layouts, the status bar and duplicate menus behind.
-void BeginTitleReload(uint64_t titleArea, int32_t bootState)
+void BeginTitleReload(uint64_t titleArea, int32_t bootState, bool keepMenuTheme)
 {
+    g_keepMenuTheme = keepMenuTheme;
     using GetInstance = uint64_t(__fastcall*)();
     if (const uint64_t gameUi = reinterpret_cast<GetInstance>(_addr(SGAMEUI_GET_INSTANCE))())
         *reinterpret_cast<int32_t*>(gameUi + SGAMEUI_BOOT_STATE) = bootState;
@@ -397,6 +558,7 @@ bool TitleReloadPending(uint64_t titleArea)
         mode = g_titleReloadSavedMode;
     }
     g_titleReloadPending = false;
+    g_keepMenuTheme = false;
     return false;
 }
 
@@ -558,8 +720,11 @@ void ReleaseToMainMenu(uint64_t titleArea)
 {
     HookLog("LobbyFlow: leaving the lobby for the main menu\n");
     if (g_service && g_service->Room().inRoom) g_service->Leave();
-    LaunchMusic_BeginFadeOut();
-    g_musicWanted = false;
+    // The rebuilt title area starts the main menu theme itself; if it is
+    // already playing it carries straight on.
+    const bool themePlaying = g_bgm == Bgm::MainMenu;
+    if (g_bgm == Bgm::Room) SetBgm(Bgm::None);
+    g_bgm = Bgm::MainMenu;
     Native_Shutdown();
     InstallMainMenuHooks();
     g_releasedTitleArea = titleArea;
@@ -577,7 +742,7 @@ void ReleaseToMainMenu(uint64_t titleArea)
         if (const uint64_t gameUi = reinterpret_cast<GetInstance>(_addr(SGAMEUI_GET_INSTANCE))())
             *reinterpret_cast<int32_t*>(gameUi + SGAMEUI_MAINMENU_CURSOR) = MAINMENU_ITEM_ONLINE;
     }
-    BeginTitleReload(titleArea, kBootStateMainMenu);
+    BeginTitleReload(titleArea, kBootStateMainMenu, themePlaying);
 }
 
 // ---------------------------------------------------------------------------
@@ -869,11 +1034,6 @@ void RunLobbyFrame(uint64_t titleArea)
 
     UpdateMatchStart(input.cancel);
 
-    // Connection music while in a room, as in the launcher's battle setup.
-    const bool inRoom = g_service->Room().inRoom;
-    if (inRoom && !g_musicWanted && g_phase == Phase::Lobby) LaunchMusic_Start();
-    if (!inRoom && g_musicWanted) LaunchMusic_BeginFadeOut();
-    g_musicWanted = inRoom;
 
     if (Canvas* canvas = Native_BeginFrame()) {
         if (g_entrancePending) {
@@ -885,6 +1045,16 @@ void RunLobbyFrame(uint64_t titleArea)
         g_ui->Draw(*canvas);
         Native_EndFrame();
         g_nativeWaitFrames.store(0, std::memory_order_relaxed);
+        // The game's own music: the main menu theme on the lobby's menus,
+        // the native lobby track once inside a room. Started only once the
+        // lobby is on screen, well after the title area's sound has loaded.
+        if (g_phase != Phase::Launching)
+            SetBgm(g_service->Room().inRoom ? Bgm::Room : Bgm::MainMenu);
+        if (g_menuThemeKickFrames && --g_menuThemeKickFrames == 0 && g_bgm == Bgm::MainMenu) {
+            using GetInstance = void*(__fastcall*)();
+            if (void* sound = reinterpret_cast<GetInstance>(_addr(GSOUND_GET_INSTANCE))())
+                ReleaseMenuThemeLayers(sound);
+        }
         // The lobby is on screen: lift the black left by the transition into
         // it (not the one that is covering it on the way out).
         if (!g_mainMenuReleaseAt) LiftBlack();
@@ -971,6 +1141,7 @@ bool LobbyFlow_InRoomMatch()
 void LobbyFlow_EnterTitleFromLogo()
 {
     if (g_titleRequested) return;
+    InstallTitleInitHook();
     if (RequestTitleArea()) {
         g_titleRequested = true;
         HookLog("LobbyFlow: requested the title area from the logo sequence\n");
@@ -1013,6 +1184,7 @@ bool LobbyFlow_TitleTick(uint64_t titleArea)
         g_entrancePending = true;
         Native_Invalidate();
         RetireNativeTitleUnits(titleArea);
+        ApplyPressStartState();
         EnsureObjects();
         if (g_phase == Phase::Returning || g_phase == Phase::InMatch) {
             g_service->FinishMatch(false, false);
@@ -1033,6 +1205,11 @@ bool LobbyFlow_TitleTick(uint64_t titleArea)
 
     RunLobbyFrame(titleArea);
     return g_phase == Phase::Launching;
+}
+
+bool LobbyFlow_ShouldSkipSystemCue(uint32_t cue)
+{
+    return g_keepMenuTheme && (cue == kCueMenuThemeA || cue == kCueMenuThemeB);
 }
 
 bool LobbyFlow_IsReleasedToMainMenu()
@@ -1079,7 +1256,7 @@ bool LobbyFlow_ReleasedTitleTick(uint64_t titleArea)
     g_releasedToMainMenu = false;
     g_titleNeedsSetup = true;
     SetPhase(Phase::Lobby);
-    BeginTitleReload(titleArea, kBootStateTitle);
+    BeginTitleReload(titleArea, kBootStateTitle, g_bgm == Bgm::MainMenu);
     return true;
 }
 
@@ -1089,8 +1266,7 @@ void LobbyFlow_OnBattleBootCommitted()
     Native_Shutdown();
     g_titleNeedsSetup = true;
     if (g_ui) g_ui->SetBusy(nullptr);
-    LaunchMusic_BeginFadeOut();
-    g_musicWanted = false;
+    SetBgm(Bgm::None); // the battle brings its own music
     if (g_phase == Phase::Launching) SetPhase(Phase::InMatch);
     HookLog("LobbyFlow: battle boot committed; lobby units released\n");
 }
