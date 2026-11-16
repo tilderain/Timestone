@@ -14,6 +14,10 @@ constexpr int kMaxSearchResults = 48;
 constexpr int kMaxChatLines = 32;
 constexpr int kNameCapacity = 64;
 constexpr int kChatCapacity = 128;
+// Set lengths a room can be created with ("first to N").
+constexpr int kFirstToChoices[] = {1, 2, 3, 5, 7, 10};
+constexpr int kFirstToChoiceCount = 6;
+constexpr int kMaxFirstTo = 10;
 
 struct Team {
     int32_t chars[3];
@@ -52,8 +56,9 @@ struct Member {
     MemberStatus status;
     EntryMode entryMode;
     Team team;
-    int16_t wins;
+    int16_t wins;   // sets won in this room
     int16_t losses;
+    int8_t setWins; // games won in the set being played right now
     int16_t pingMs; // estimated ping to the local player, -1 when unknown
 };
 
@@ -71,6 +76,7 @@ struct RoomSettings {
     int slotCount;       // 1..kMaxSlots
     Visibility visibility;
     int32_t music; // lobby_music.h track id the room starts with
+    int firstTo;   // games needed to win a set, fixed when the room is created
 };
 
 struct RoomState {
@@ -94,6 +100,7 @@ struct SearchResult {
     bool compatible;   // same Timestone protocol version
     bool friendLobby;
     bool matchInProgress;
+    int firstTo;
 };
 
 struct ChatLine {

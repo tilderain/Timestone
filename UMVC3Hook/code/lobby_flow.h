@@ -46,6 +46,12 @@ void LobbyFlow_GameTick();
 
 // True from match launch until the player is back in the lobby.
 bool LobbyFlow_InRoomMatch();
+// Called from the result-phase hooks every frame the winner outro or result
+// screen runs, with sAction's winning team (negative for a draw).
+void LobbyFlow_OnResultPhase(int32_t winTeam);
+// False while a rematch must not be started from the result phase: the game
+// just finished has not been counted yet, or it decided the set.
+bool LobbyFlow_AllowResultRestart();
 // Ask to leave the current match and return to the room. Safe from the
 // render thread; the transition happens on the next game tick.
 void LobbyFlow_RequestReturnToLobby(const char* reason);

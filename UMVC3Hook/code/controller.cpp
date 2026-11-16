@@ -3,6 +3,7 @@
 // predict missing remote input and replay frames when confirmation differs.
 #include "../pch.h"
 #include "controller.h"
+#include "lobby_flow.h"
 #include "lag_diagnostics.h"
 #include "mk10utils.h"
 #include "netplay.h"
@@ -1255,7 +1256,10 @@ static bool IsEitherPlayerResultContinuePressed()
 static void __fastcall hkStepResult8(uint64_t sAction)
 {
     if (Netplay_IsActive()) {
-        if (!FrameStepper_IsMatchRestartPending() &&
+        // Room matches are sets: the lobby counts this game and decides
+        // whether another one may follow.
+        LobbyFlow_OnResultPhase(*(int32_t*)(sAction + 0x114));
+        if (!FrameStepper_IsMatchRestartPending() && LobbyFlow_AllowResultRestart() &&
             IsEitherPlayerResultContinuePressed()) {
             FrameStepper_RequestMatchRestart();
         }
@@ -1269,7 +1273,10 @@ static void __fastcall hkStepResult8(uint64_t sAction)
 static void __fastcall hkStepResult9_10_11(uint64_t sAction)
 {
     if (Netplay_IsActive()) {
-        if (!FrameStepper_IsMatchRestartPending() &&
+        // Room matches are sets: the lobby counts this game and decides
+        // whether another one may follow.
+        LobbyFlow_OnResultPhase(*(int32_t*)(sAction + 0x114));
+        if (!FrameStepper_IsMatchRestartPending() && LobbyFlow_AllowResultRestart() &&
             IsEitherPlayerResultContinuePressed()) {
             FrameStepper_RequestMatchRestart();
         }

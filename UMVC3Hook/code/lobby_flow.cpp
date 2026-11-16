@@ -1,5 +1,6 @@
 #include "../pch.h"
 #include "lobby_flow.h"
+#include "lobby_local.h"
 #include "lobby_music.h"
 
 #include "LaunchMenu.h"
@@ -280,6 +281,7 @@ UiPrefs LoadPrefs()
     const int visibility = GetPrivateProfileIntA("Lobby", "RoomVisibility", 0, path);
     prefs.create.visibility = visibility == 1 ? Visibility::FriendsOnly
                             : visibility == 2 ? Visibility::Private : Visibility::Public;
+    prefs.create.firstTo = GetPrivateProfileIntA("Lobby", "RoomFirstTo", 1, path);
     prefs.create.music = GetPrivateProfileIntA("Lobby", "RoomMusic", lobby::kMusicDefault, path);
     if (lobby::FindMusicTrack(prefs.create.music) < 0) prefs.create.music = lobby::kMusicDefault;
     return prefs;
@@ -303,6 +305,7 @@ void SavePrefs(const UiPrefs& prefs)
         {"Lobby", "RoomSlots", std::to_string(prefs.create.slotCount)},
         {"Lobby", "RoomVisibility", std::to_string(static_cast<int>(prefs.create.visibility))},
         {"Lobby", "RoomMusic", std::to_string(prefs.create.music)},
+        {"Lobby", "RoomFirstTo", std::to_string(prefs.create.firstTo)},
     };
     IniSafe_WriteBatch(entries, sizeof(entries) / sizeof(entries[0]), path);
 }
@@ -385,6 +388,36 @@ constexpr uint32_t kAllChannels = 0xFFFFFFFFu;
 // main-menu boot state); both are swallowed so the music runs straight through.
 bool g_keepMenuTheme = false;
 uint32_t g_menuThemeKickFrames = 0; // repeat the release once, a little later
+
+// --- Set in progress (first to N) ---------------------------------------------
+// A room match is a set: games are counted from the result phase the game
+// reaches on both peers (the simulation is shared, so both count the same),
+// rematches run until someone has the room's "first to" number, then both
+// players return to the room on their own.
+constexpr uint32_t kResultCountTicks = 30;       // result phase must hold this long
+constexpr uint32_t kResultGoneTicks = 120;       // ...and be gone this long to re-arm
+constexpr uint32_t kSetEndDelayTicks = 150;      // let the win pose play before leaving
+int g_setFirstTo = 1;
+int g_setWins[2] = {0, 0}; // [0] local, [1] opponent
+bool g_setOver = false;
+uint32_t g_setOverTicks = 0;
+bool g_resultSeen = false;    // set by the result hooks, consumed each game tick
+int32_t g_resultWinTeam = -1;
+uint32_t g_resultTicks = 0;
+uint32_t g_resultGoneTicks = 0;
+bool g_gameCounted = false;
+
+void ResetSet(int firstTo)
+{
+    g_setFirstTo = firstTo < 1 ? 1 : firstTo;
+    g_setWins[0] = g_setWins[1] = 0;
+    g_setOver = false;
+    g_setOverTicks = 0;
+    g_resultSeen = false;
+    g_resultTicks = 0;
+    g_resultGoneTicks = 0;
+    g_gameCounted = false;
+}
 
 enum class Bgm { None, MainMenu, Room };
 Bgm g_bgm = Bgm::None; // what the lobby believes is playing (game thread)
@@ -893,7 +926,10 @@ void BeginLaunch()
     FrameStepper_InitNetplay();
     g_matchHost = nullptr; // owned by netplay from here on
     g_matchPeer = nullptr;
-    if (g_service) g_service->SetLocalStatus(MemberStatus::Fighting);
+    if (g_service) {
+        ResetSet(g_service->Room().settings.firstTo);
+        g_service->SetLocalStatus(MemberStatus::Fighting);
+    }
     SetPhase(Phase::Launching);
     HookLog("LobbyFlow: launching match vs %s as P%d\n", g_pairing.opponentName,
             g_pairing.localSide + 1);
@@ -1044,6 +1080,9 @@ void EnsureObjects()
         }
     }
     if (!g_ui) g_ui.reset(new LobbyUi(*g_service, kRosterSource, LoadPrefs()));
+    // Lobby test build: bring up the second player's game now that this one has
+    // finished starting (no-op otherwise, and only ever once).
+    LocalLobby_SpawnSecondInstance();
 }
 
 void RunLobbyFrame(uint64_t titleArea)
@@ -1151,6 +1190,22 @@ void LobbyFlow_DrawOverlay()
             ImVec2(0.0f, 0.0f), ImGui::GetIO().DisplaySize,
             IM_COL32(0, 0, 0, static_cast<int>(black * 255.0f + 0.5f)));
 
+    // Set score during a room match, top centre between the health bars.
+    if (g_phase == Phase::InMatch && g_setFirstTo > 1) {
+        char score[48];
+        snprintf(score, sizeof(score), "FT%d    %d - %d", g_setFirstTo,
+                 g_setWins[g_pairing.localSide == 0 ? 0 : 1],
+                 g_setWins[g_pairing.localSide == 0 ? 1 : 0]);
+        const ImVec2 display = ImGui::GetIO().DisplaySize;
+        ImFont* font = ImGui::GetFont();
+        const float size = display.y * 0.03f;
+        const ImVec2 extent = font->CalcTextSizeA(size, 100000.0f, 0.0f, score);
+        const ImVec2 at((display.x - extent.x) * 0.5f, display.y * 0.012f);
+        ImDrawList* draw = ImGui::GetBackgroundDrawList();
+        draw->AddText(font, size, ImVec2(at.x + 2.0f, at.y + 2.0f), IM_COL32(0, 0, 0, 220), score);
+        draw->AddText(font, size, at, IM_COL32(255, 255, 255, 255), score);
+    }
+
     const uint32_t waited = g_nativeWaitFrames.load(std::memory_order_relaxed);
     if (waited < kNativeSlowFrames) return;
     const bool failed = waited >= kNativeFailedFrames;
@@ -1225,7 +1280,9 @@ bool LobbyFlow_TitleTick(uint64_t titleArea)
         ApplyPressStartState();
         EnsureObjects();
         if (g_phase == Phase::Returning || g_phase == Phase::InMatch) {
-            g_service->FinishMatch(false, false);
+            // Only a set played to its end goes on the room record.
+            g_service->FinishMatch(g_setOver, g_setWins[0] > g_setWins[1]);
+            ResetSet(1);
             g_ui->ReturnToRoom();
             g_entrancePending = false; // back from a match: the room is simply there
             SetPhase(Phase::Lobby);
@@ -1309,6 +1366,61 @@ void LobbyFlow_OnBattleBootCommitted()
     HookLog("LobbyFlow: battle boot committed; lobby units released\n");
 }
 
+const char* SetResultText()
+{
+    static char text[96];
+    const bool won = g_setWins[0] > g_setWins[1];
+    if (g_setFirstTo <= 1)
+        snprintf(text, sizeof(text), won ? "You won the match." : "You lost the match.");
+    else
+        snprintf(text, sizeof(text), "You %s the set %d - %d.", won ? "won" : "lost", g_setWins[0],
+                 g_setWins[1]);
+    return text;
+}
+
+// Once per game tick while a room match runs: count a finished game, and end
+// the set when it is decided.
+void UpdateSet()
+{
+    if (g_resultSeen) {
+        g_resultSeen = false;
+        g_resultGoneTicks = 0;
+        if (!g_gameCounted && ++g_resultTicks >= kResultCountTicks) {
+            // Held long enough that no rollback can still undo the finish.
+            g_gameCounted = true;
+            const int32_t winTeam = g_resultWinTeam;
+            if (winTeam == 0 || winTeam == 1) {
+                ++g_setWins[winTeam == g_pairing.localSide ? 0 : 1];
+                if (g_service) g_service->ReportSetScore(g_setWins[0]);
+            }
+            g_setOver = g_setWins[0] >= g_setFirstTo || g_setWins[1] >= g_setFirstTo;
+            HookLog("LobbyFlow: game finished winTeam=%d (local side %d) set %d-%d of FT%d%s\n",
+                    winTeam, g_pairing.localSide, g_setWins[0], g_setWins[1], g_setFirstTo,
+                    g_setOver ? " (set over)" : "");
+        }
+    } else if (++g_resultGoneTicks >= kResultGoneTicks) {
+        // A skipped frame or two must not re-arm the count: only a result
+        // phase that has really gone (the rematch is under way) does.
+        g_resultTicks = 0;
+        g_gameCounted = false;
+    }
+    if (g_setOver && ++g_setOverTicks == kSetEndDelayTicks)
+        LobbyFlow_RequestReturnToLobby(SetResultText());
+}
+
+void LobbyFlow_OnResultPhase(int32_t winTeam)
+{
+    if (!g_enabled || g_phase != Phase::InMatch) return;
+    g_resultSeen = true;
+    g_resultWinTeam = winTeam;
+}
+
+bool LobbyFlow_AllowResultRestart()
+{
+    if (!g_enabled || g_phase != Phase::InMatch) return true;
+    return g_gameCounted && !g_setOver;
+}
+
 void LobbyFlow_GameTick()
 {
     if (!g_enabled) return;
@@ -1324,8 +1436,12 @@ void LobbyFlow_GameTick()
         return;
     }
 
-    if (Netplay_TakePeerDisconnected())
-        LobbyFlow_RequestReturnToLobby("Connection to opponent has been lost.");
+    UpdateSet();
+    if (Netplay_TakePeerDisconnected()) {
+        // After a decided set the other player leaving is the normal ending.
+        if (g_setOver) LobbyFlow_RequestReturnToLobby(SetResultText());
+        else LobbyFlow_RequestReturnToLobby("Connection to opponent has been lost.");
+    }
     if (!g_returnRequested.exchange(false, std::memory_order_acq_rel)) return;
 
     HookLog("LobbyFlow: leaving the match (%s)\n", g_returnReason[0] ? g_returnReason : "requested");

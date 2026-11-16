@@ -1,4 +1,5 @@
 #include "steam_transport.h"
+#include "lobby_local.h"
 #include "launch_music.h"
 #include "netplay.h"
 
@@ -240,6 +241,8 @@ bool SteamTransport_IsActive()
 
 uint32_t SteamTransport_GetRTT()
 {
+    // Local test lobby: the match runs over localhost, there is no Steam route.
+    if (LocalLobby_Enabled()) return 2;
     return g_steamRTT.load();
 }
 

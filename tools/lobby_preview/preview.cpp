@@ -291,6 +291,7 @@ UiPrefs DefaultPrefs()
     snprintf(prefs.create.name, sizeof(prefs.create.name), "tilderain's Lobby");
     prefs.create.maxMembers = 8;
     prefs.create.slotCount = 2;
+    prefs.create.firstTo = 3;
     return prefs;
 }
 

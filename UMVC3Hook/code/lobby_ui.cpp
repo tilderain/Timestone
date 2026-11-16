@@ -112,7 +112,8 @@ const char* const kAssistLetters[] = {"A", "B", "Y"};
 
 // Create-screen rows.
 enum CreateRow {
-    CREATE_NAME, CREATE_SIZE, CREATE_SLOTS, CREATE_VISIBILITY, CREATE_MUSIC, CREATE_GO, CREATE_ROWS
+    CREATE_NAME, CREATE_SIZE, CREATE_SLOTS, CREATE_VISIBILITY, CREATE_FORMAT, CREATE_MUSIC, CREATE_GO,
+    CREATE_ROWS
 };
 // Team-screen rows: preset selector, 3 x (character, assist, colour), entry, done.
 constexpr int kTeamRowPreset = 0;
@@ -264,6 +265,9 @@ LobbyUi::LobbyUi(RoomService& service, const RosterSource& roster, const UiPrefs
     if (static_cast<int>(prefs_.create.visibility) > 2)
         prefs_.create.visibility = Visibility::Public;
     if (FindMusicTrack(prefs_.create.music) < 0) prefs_.create.music = kMusicDefault;
+    bool knownFormat = false;
+    for (int choice : kFirstToChoices) knownFormat |= choice == prefs_.create.firstTo;
+    if (!knownFormat) prefs_.create.firstTo = 1;
 }
 
 void LobbyUi::PlayEntrance(uint32_t delayFrames)
@@ -578,6 +582,14 @@ void LobbyUi::UpdateCreate(const Input& input)
         case CREATE_VISIBILITY:
             draft.visibility = static_cast<Visibility>((static_cast<int>(draft.visibility) + delta + 3) % 3);
             break;
+        case CREATE_FORMAT: {
+            int index = 0;
+            for (int i = 0; i < kFirstToChoiceCount; ++i)
+                if (kFirstToChoices[i] == draft.firstTo) index = i;
+            index = (index + delta + kFirstToChoiceCount) % kFirstToChoiceCount;
+            draft.firstTo = kFirstToChoices[index];
+            break;
+        }
         default:
             changed = false;
             break;
@@ -1248,6 +1260,11 @@ const char* LobbyUi::DrawBrowse(Canvas& canvas) const
             if (result.matchInProgress)
                 r.Text("MATCH IN PROGRESS", 1066.0f, y + 13.0f, 0.46f, A_ML, kYellow);
         }
+        if (result.compatible) {
+            char format[12];
+            snprintf(format, sizeof(format), "FT%d", result.firstTo < 1 ? 1 : result.firstTo);
+            r.Text(format, 1176.0f, y - (result.matchInProgress ? 8.0f : 0.0f), 0.6f, A_ML, kDim);
+        }
     }
 
     if (count == 0) {
@@ -1285,13 +1302,13 @@ const char* LobbyUi::DrawCreate(Canvas& canvas) const
     const RoomSettings& draft = prefs_.create;
     char value[kChatCapacity + 8];
     const char* labels[CREATE_ROWS] = {"LOBBY NAME", "LOBBY SIZE", "MATCH SLOTS", "VISIBILITY",
-                                       "LOBBY MUSIC", ""};
+                                       "MATCH FORMAT", "LOBBY MUSIC", ""};
     for (int row = 0; row < CREATE_ROWS; ++row) {
-        const float y = panelY + 112.0f + row * 58.0f;
+        const float y = panelY + 108.0f + row * 52.0f;
         const bool selected = row == createCursor_;
         if (selected) {
             const float pulse = 0.72f + 0.28f * SelectionWave(frame_);
-            p.Box(TEX_ROW_SEL, panelX + 26.0f, y - 29.0f, panelW - 52.0f, 58.0f,
+            p.Box(TEX_ROW_SEL, panelX + 26.0f, y - 26.0f, panelW - 52.0f, 52.0f,
                   WithAlpha(kWhite, pulse));
         }
         if (row == CREATE_GO) {
@@ -1309,6 +1326,7 @@ const char* LobbyUi::DrawCreate(Canvas& canvas) const
             break;
         case CREATE_SIZE: snprintf(value, sizeof(value), "%d PLAYERS", draft.maxMembers); break;
         case CREATE_SLOTS: snprintf(value, sizeof(value), "%d", draft.slotCount); break;
+        case CREATE_FORMAT: snprintf(value, sizeof(value), "FIRST TO %d", draft.firstTo); break;
         case CREATE_MUSIC: {
             const int track = FindMusicTrack(draft.music);
             snprintf(value, sizeof(value), "%s", kMusicTracks[track < 0 ? 0 : track].name);
@@ -1332,6 +1350,7 @@ const char* LobbyUi::DrawCreate(Canvas& canvas) const
         "Set the maximum number of players in your lobby.",
         "Match slots let several pairs fight at the same time.",
         "Choose who can find and join this lobby.",
+        "Games needed to win a set. It cannot be changed once the lobby exists.",
         "Choose the music everyone in the lobby hears.",
         "Create a lobby.",
     };
@@ -1416,6 +1435,14 @@ void LobbyUi::DrawRoomSlots(Canvas& canvas) const
         char title[24];
         snprintf(title, sizeof(title), "MATCH %d", slot + 1);
         p.Text(title, x + 26.0f, y + 30.0f, 0.36f, A_ML, kYellow, FONT_HEADING);
+        if (live && room.settings.firstTo > 1) {
+            // Running set score, player 1 first, as each side reports it.
+            const Member* one = SeatOccupant(slot, 0);
+            const Member* two = SeatOccupant(slot, 1);
+            char score[32];
+            snprintf(score, sizeof(score), "%d - %d", one ? one->setWins : 0, two ? two->setWins : 0);
+            p.Text(score, x + 150.0f, y + 31.0f, 0.74f, A_ML, kText);
+        }
         if (live) {
             // "MATCH IN PROGRESS" word art, breathing.
             const float pulse = 0.72f + 0.28f * SelectionWave(frame_);
@@ -1562,8 +1589,10 @@ const char* LobbyUi::DrawRoom(Canvas& canvas) const
     // What the host has playing, so a change is not a mystery to the room.
     const int track = FindMusicTrack(room.music);
     char music[96];
-    snprintf(music, sizeof(music), "BGM: %s", kMusicTracks[track < 0 ? 0 : track].name);
-    p.TextFit(music, 1060.0f, 61.0f, 0.62f, 340.0f, A_MR, kDim);
+    snprintf(music, sizeof(music), "FT%d   BGM: %s",
+             room.settings.firstTo < 1 ? 1 : room.settings.firstTo,
+             kMusicTracks[track < 0 ? 0 : track].name);
+    p.TextFit(music, 1060.0f, 61.0f, 0.62f, 360.0f, A_MR, kDim);
     p.Sprite(TEX_FRIENDS, 1098.0f, 62.0f, 40.0f, 40.0f, kFullUv, A_MC);
     char population[24];
     snprintf(population, sizeof(population), "%d / %d", room.memberCount, room.settings.maxMembers);

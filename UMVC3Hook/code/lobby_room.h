@@ -68,6 +68,8 @@ public:
     void SetLocalStatus(MemberStatus status);
     // After a match: clear ready, back to Seated, bump the room record.
     void FinishMatch(bool counted, bool localWon);
+    // During a set: the local player's games won so far, shown to the room.
+    void ReportSetScore(int localGamesWon);
     void PostSystemLine(const char* text);
 
 private:
@@ -80,6 +82,7 @@ private:
         Team team = {};
         int wins = 0;
         int losses = 0;
+        int setWins = 0;
     };
 
     void PublishLocal();
@@ -103,6 +106,7 @@ private:
     bool publishedOnce_ = false;
     bool liveAdvertised_ = false;
     int32_t pendingMusic_ = -1; // track to publish once the created room exists
+    int pendingFirstTo_ = 0;    // likewise the set length
     uint64_t knownMembers_[kMaxMembers] = {};
     char knownNames_[kMaxMembers][kNameCapacity] = {};
     int knownMemberCount_ = 0;

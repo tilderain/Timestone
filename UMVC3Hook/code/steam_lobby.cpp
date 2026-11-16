@@ -1,4 +1,5 @@
 #include "steam_lobby.h"
+#include "lobby_local.h"
 
 #include "steam_api_compat.h"
 #include "steam_transport.h"
@@ -938,6 +939,7 @@ bool SteamLobby_IsRelayOnly()
 
 bool SteamLobby_Initialize()
 {
+    if (LocalLobby_Enabled()) return LocalLobby_Initialize();
     if (g_matchmaking && g_sockets) {
         if (!RegisterJoinCallbacks()) {
             SetStatus("Steam join callbacks are unavailable");
@@ -1005,6 +1007,7 @@ bool SteamLobby_Initialize()
 
 void SteamLobby_Search()
 {
+    if (LocalLobby_Enabled()) { LocalLobby_Search(); return; }
     if (!SteamLobby_Initialize() || g_pendingCall != PendingCall::None) return;
     // Rooms advertise under their own key so 1v1 launcher clients never see
     // (and auto-connect into) a multi-player room, and vice versa.
@@ -1038,6 +1041,7 @@ void SteamLobby_Create(SteamLobbyType type)
 
 void SteamLobby_Join(uint64_t lobbyId)
 {
+    if (LocalLobby_Enabled()) { LocalLobby_Join(lobbyId); return; }
     if (!lobbyId || !SteamLobby_Initialize() || g_pendingCall != PendingCall::None) return;
     if (HasResult(lobbyId) && !SteamLobby_IsLobbyVersionCompatible(lobbyId)) {
         const char* protocol = g_api.GetLobbyData(g_matchmaking, lobbyId, "protocol");
@@ -1062,6 +1066,7 @@ void SteamLobby_Join(uint64_t lobbyId)
 
 void SteamLobby_Pump()
 {
+    if (LocalLobby_Enabled()) { LocalLobby_Pump(); return; }
     if (!g_matchmaking || !g_utils) return;
     if (g_callbacksOnUiThread) g_api.RunCallbacks();
     SteamTransport_Pump();
@@ -1182,6 +1187,7 @@ void SteamLobby_Pump()
 
 const char* SteamLobby_GetStatus()
 {
+    if (LocalLobby_Enabled()) return LocalLobby_GetStatus();
     return g_status;
 }
 
@@ -1202,6 +1208,7 @@ const char* SteamLobby_GetConnectionType()
 
 const char* SteamLobby_GetLocalUsername()
 {
+    if (LocalLobby_Enabled()) return LocalLobby_GetLocalUsername();
     return g_localUsername;
 }
 
@@ -1212,6 +1219,7 @@ uint64_t SteamLobby_GetPeerSteamId()
 
 const char* SteamLobby_GetPeerUsername()
 {
+    if (LocalLobby_Enabled()) return LocalLobby_GetPeerUsername();
     return g_peerUsername;
 }
 
@@ -1286,6 +1294,7 @@ bool SteamLobby_GetHostedJoinLink(char* link, size_t capacity)
 
 bool SteamLobby_IsFriendLobby(uint64_t lobbyId)
 {
+    if (LocalLobby_Enabled()) return false;
     for (size_t i = 0; i < g_friendLobbyCandidateCount; ++i) {
         if (g_friendLobbyCandidates[i] == lobbyId) return true;
     }
@@ -1294,6 +1303,7 @@ bool SteamLobby_IsFriendLobby(uint64_t lobbyId)
 
 bool SteamLobby_IsLobbyVersionCompatible(uint64_t lobbyId)
 {
+    if (LocalLobby_Enabled()) return true;
     for (size_t i = 0; i < g_resultCount; ++i) {
         if (g_results[i] == lobbyId)
             return strcmp(g_resultProtocols[i], kLobbyProtocol) == 0;
@@ -1303,26 +1313,31 @@ bool SteamLobby_IsLobbyVersionCompatible(uint64_t lobbyId)
 
 size_t SteamLobby_GetResultCount()
 {
+    if (LocalLobby_Enabled()) return LocalLobby_GetResultCount();
     return g_resultCount;
 }
 
 uint64_t SteamLobby_GetResult(size_t index)
 {
+    if (LocalLobby_Enabled()) return LocalLobby_GetResult();
     return index < g_resultCount ? g_results[index] : 0;
 }
 
 int SteamLobby_GetResultEstimatedPing(size_t index)
 {
+    if (LocalLobby_Enabled()) return 2;
     return index < g_resultCount ? g_resultPings[index] : -1;
 }
 
 const char* SteamLobby_GetResultName(size_t index)
 {
+    if (LocalLobby_Enabled()) return LocalLobby_GetResultName();
     return index < g_resultCount ? g_resultNames[index] : "";
 }
 
 const char* SteamLobby_GetResultUsername(size_t index)
 {
+    if (LocalLobby_Enabled()) return LocalLobby_GetResultUsername();
     return index < g_resultCount ? g_resultUsernames[index] : "";
 }
 
@@ -1333,6 +1348,7 @@ bool SteamLobby_ArePingEstimatesAvailable()
 
 bool SteamLobby_TakeResultsChanged()
 {
+    if (LocalLobby_Enabled()) return LocalLobby_TakeResultsChanged();
     bool changed = g_resultsChanged;
     g_resultsChanged = false;
     return changed;
@@ -1340,6 +1356,7 @@ bool SteamLobby_TakeResultsChanged()
 
 bool SteamLobby_TakeVersionMismatch(char* message, size_t messageSize)
 {
+    if (LocalLobby_Enabled()) return false;
     if (!g_versionMismatchPending || !message || messageSize == 0) return false;
     snprintf(message, messageSize, "%s", g_versionMismatch);
     g_versionMismatchPending = false;
@@ -1348,6 +1365,7 @@ bool SteamLobby_TakeVersionMismatch(char* message, size_t messageSize)
 
 bool SteamLobby_TakeReplacementJoin(uint64_t* lobbyId)
 {
+    if (LocalLobby_Enabled()) return false;
     if (!lobbyId) return false;
     *lobbyId = g_replacementJoinLobby.exchange(0, std::memory_order_acq_rel);
     return *lobbyId != 0;
@@ -1379,6 +1397,7 @@ bool SteamLobby_ResetHostPeer()
 bool SteamLobby_TakeNetworkHandles(ENetHost** outHost, ENetPeer** outPeer,
                                    bool* outIsHost)
 {
+    if (LocalLobby_Enabled()) return LocalLobby_TakeNetworkHandles(outHost, outPeer, outIsHost);
     if (!g_handlesReady || !outHost || !outPeer || !outIsHost) return false;
     *outHost = g_gameHost;
     *outPeer = g_gamePeer;
@@ -1443,6 +1462,7 @@ void SteamLobby_Shutdown(bool preserveConnection)
 // ---------------------------------------------------------------------------
 void SteamLobby_EndSession()
 {
+    if (LocalLobby_Enabled()) { LocalLobby_DisconnectPeer(); return; }
     if (g_roomMode && g_lobbyId)
         SteamRoom_DisconnectPeer();
     else
@@ -1451,23 +1471,27 @@ void SteamLobby_EndSession()
 
 int SteamLobby_GetPendingKind()
 {
+    if (LocalLobby_Enabled()) return 0;
     return static_cast<int>(g_pendingCall);
 }
 
 int SteamLobby_GetResultMemberCount(size_t index)
 {
+    if (LocalLobby_Enabled()) return LocalLobby_GetResultMemberCount();
     if (index >= g_resultCount || !g_matchmaking) return 0;
     return g_api.GetNumLobbyMembers(g_matchmaking, g_results[index]);
 }
 
 int SteamLobby_GetResultMemberLimit(size_t index)
 {
+    if (LocalLobby_Enabled()) return LocalLobby_GetResultMemberLimit();
     if (index >= g_resultCount || !g_matchmaking || !g_api.GetLobbyMemberLimit) return 0;
     return g_api.GetLobbyMemberLimit(g_matchmaking, g_results[index]);
 }
 
 int SteamLobby_GetResultSlotCount(size_t index)
 {
+    if (LocalLobby_Enabled()) return LocalLobby_GetResultSlotCount();
     if (index >= g_resultCount || !g_matchmaking) return 0;
     const char* slots = g_api.GetLobbyData(g_matchmaking, g_results[index], "slots");
     return slots ? atoi(slots) : 0;
@@ -1475,6 +1499,7 @@ int SteamLobby_GetResultSlotCount(size_t index)
 
 bool SteamLobby_IsResultInMatch(size_t index)
 {
+    if (LocalLobby_Enabled()) return LocalLobby_IsResultInMatch();
     if (index >= g_resultCount || !g_matchmaking) return false;
     const char* live = g_api.GetLobbyData(g_matchmaking, g_results[index], "live");
     return live && live[0] == '1';
@@ -1485,6 +1510,7 @@ bool SteamLobby_IsResultInMatch(size_t index)
 // ---------------------------------------------------------------------------
 void SteamRoom_SetMode(bool enabled)
 {
+    if (LocalLobby_Enabled()) return;
     g_roomMode = enabled;
     if (enabled && g_api.RegisterCallback && !g_roomCallbacksRegistered) {
         g_api.RegisterCallback(&g_lobbyChatMsgCallback, k_iCallbackLobbyChatMsg);
@@ -1508,21 +1534,25 @@ void SteamRoom_SetMode(bool enabled)
 
 bool SteamRoom_IsActive()
 {
+    if (LocalLobby_Enabled()) return LocalLobby_IsActive();
     return g_roomMode && g_lobbyId != 0;
 }
 
 uint64_t SteamRoom_GetLobbyId()
 {
+    if (LocalLobby_Enabled()) return LocalLobby_GetLobbyId();
     return g_roomMode ? g_lobbyId : 0;
 }
 
 uint64_t SteamRoom_GetLocalId()
 {
+    if (LocalLobby_Enabled()) return LocalLobby_GetLocalId();
     return g_localSteamId;
 }
 
 void SteamRoom_Create(SteamLobbyType type, int maxMembers, int slotCount, const char* name)
 {
+    if (LocalLobby_Enabled()) { LocalLobby_Create(maxMembers, slotCount, name); return; }
     if (!g_roomMode || !SteamLobby_Initialize() || g_pendingCall != PendingCall::None) return;
     if (g_lobbyId) {
         SetStatus("Already in a Steam lobby");
@@ -1539,6 +1569,7 @@ void SteamRoom_Create(SteamLobbyType type, int maxMembers, int slotCount, const 
 
 void SteamRoom_Leave()
 {
+    if (LocalLobby_Enabled()) { LocalLobby_Leave(); return; }
     SteamRoom_DisconnectPeer();
     ClearLobbyRichPresence();
     if (g_matchmaking && g_lobbyId) {
@@ -1553,27 +1584,32 @@ void SteamRoom_Leave()
 
 int SteamRoom_GetMemberCount()
 {
+    if (LocalLobby_Enabled()) return LocalLobby_GetMemberCount();
     return SteamRoom_IsActive() ? g_api.GetNumLobbyMembers(g_matchmaking, g_lobbyId) : 0;
 }
 
 uint64_t SteamRoom_GetMember(int index)
 {
+    if (LocalLobby_Enabled()) return LocalLobby_GetMember(index);
     return SteamRoom_IsActive() ? g_api.GetLobbyMemberByIndex(g_matchmaking, g_lobbyId, index) : 0;
 }
 
 uint64_t SteamRoom_GetOwner()
 {
+    if (LocalLobby_Enabled()) return LocalLobby_GetOwner();
     return SteamRoom_IsActive() ? g_api.GetLobbyOwner(g_matchmaking, g_lobbyId) : 0;
 }
 
 int SteamRoom_GetMemberLimit()
 {
+    if (LocalLobby_Enabled()) return LocalLobby_GetMemberLimit();
     if (!SteamRoom_IsActive() || !g_api.GetLobbyMemberLimit) return 0;
     return g_api.GetLobbyMemberLimit(g_matchmaking, g_lobbyId);
 }
 
 const char* SteamRoom_GetMemberName(uint64_t memberId)
 {
+    if (LocalLobby_Enabled()) return LocalLobby_GetMemberName(memberId);
     if (memberId == g_localSteamId && g_localUsername[0]) return g_localUsername;
     const char* name = g_friends ? g_api.GetFriendPersonaName(g_friends, memberId) : nullptr;
     return name && name[0] ? name : "Player";
@@ -1581,6 +1617,7 @@ const char* SteamRoom_GetMemberName(uint64_t memberId)
 
 const char* SteamRoom_GetMemberData(uint64_t memberId, const char* key)
 {
+    if (LocalLobby_Enabled()) return LocalLobby_GetMemberData(memberId, key);
     if (!SteamRoom_IsActive() || !g_api.GetLobbyMemberData) return "";
     const char* value = g_api.GetLobbyMemberData(g_matchmaking, g_lobbyId, memberId, key);
     return value ? value : "";
@@ -1588,12 +1625,14 @@ const char* SteamRoom_GetMemberData(uint64_t memberId, const char* key)
 
 void SteamRoom_SetLocalData(const char* key, const char* value)
 {
+    if (LocalLobby_Enabled()) { LocalLobby_SetLocalData(key, value); return; }
     if (SteamRoom_IsActive() && g_api.SetLobbyMemberData)
         g_api.SetLobbyMemberData(g_matchmaking, g_lobbyId, key, value ? value : "");
 }
 
 const char* SteamRoom_GetData(const char* key)
 {
+    if (LocalLobby_Enabled()) return LocalLobby_GetData(key);
     if (!SteamRoom_IsActive()) return "";
     const char* value = g_api.GetLobbyData(g_matchmaking, g_lobbyId, key);
     return value ? value : "";
@@ -1601,12 +1640,14 @@ const char* SteamRoom_GetData(const char* key)
 
 void SteamRoom_SetData(const char* key, const char* value)
 {
+    if (LocalLobby_Enabled()) { LocalLobby_SetData(key, value); return; }
     if (SteamRoom_IsActive() && SteamRoom_GetOwner() == g_localSteamId)
         g_api.SetLobbyData(g_matchmaking, g_lobbyId, key, value ? value : "");
 }
 
 int SteamRoom_EstimateMemberPing(uint64_t memberId)
 {
+    if (LocalLobby_Enabled()) return 2;
     if (!g_networkingUtils || !SteamRoom_IsActive()) return -1;
     const char* encoded = SteamRoom_GetMemberData(memberId, "loc");
     if (!encoded[0]) return -1;
@@ -1619,12 +1660,14 @@ int SteamRoom_EstimateMemberPing(uint64_t memberId)
 
 bool SteamRoom_SendChat(const void* data, int size)
 {
+    if (LocalLobby_Enabled()) return LocalLobby_SendChat(data, size);
     if (!SteamRoom_IsActive() || !g_api.SendLobbyChatMsg || !data || size <= 0) return false;
     return g_api.SendLobbyChatMsg(g_matchmaking, g_lobbyId, data, size);
 }
 
 bool SteamRoom_PollChat(uint64_t* sender, char* buffer, int capacity, int* size)
 {
+    if (LocalLobby_Enabled()) return LocalLobby_PollChat(sender, buffer, capacity, size);
     if (!sender || !buffer || capacity <= 0 || !size) return false;
     uint32_t tail = g_chatTail.load(std::memory_order_relaxed);
     while (tail != g_chatHead.load(std::memory_order_acquire)) {
@@ -1647,12 +1690,14 @@ bool SteamRoom_PollChat(uint64_t* sender, char* buffer, int capacity, int* size)
 
 void SteamRoom_InviteFriends()
 {
+    if (LocalLobby_Enabled()) return;
     if (SteamRoom_IsActive() && g_friends && g_api.ActivateInviteDialog)
         g_api.ActivateInviteDialog(g_friends, g_lobbyId);
 }
 
 bool SteamRoom_ViewProfile(uint64_t memberId)
 {
+    if (LocalLobby_Enabled()) return false;
     if (!memberId || !g_friends || !g_api.ActivateOverlayToUser) return false;
     g_api.ActivateOverlayToUser(g_friends, "steamid", memberId);
     return true;
@@ -1660,6 +1705,7 @@ bool SteamRoom_ViewProfile(uint64_t memberId)
 
 const char* SteamRoom_GetLobbyData(uint64_t lobbyId, const char* key)
 {
+    if (LocalLobby_Enabled()) return LocalLobby_GetLobbyData(lobbyId, key);
     if (!lobbyId || !g_matchmaking || !g_api.GetLobbyData) return "";
     const char* value = g_api.GetLobbyData(g_matchmaking, lobbyId, key);
     return value ? value : "";
@@ -1667,6 +1713,7 @@ const char* SteamRoom_GetLobbyData(uint64_t lobbyId, const char* key)
 
 bool SteamRoom_ConnectPeer(uint64_t memberId, bool asHost)
 {
+    if (LocalLobby_Enabled()) return LocalLobby_ConnectPeer(memberId, asHost);
     if (!SteamRoom_IsActive() || !memberId || !g_sockets) return false;
     if (g_bridgeCreated || g_connection != k_HSteamNetConnection_Invalid) {
         // A previous match connection is still up; drop it first.
@@ -1685,6 +1732,7 @@ bool SteamRoom_ConnectPeer(uint64_t memberId, bool asHost)
 
 void SteamRoom_DisconnectPeer()
 {
+    if (LocalLobby_Enabled()) { LocalLobby_DisconnectPeer(); return; }
     const bool bridgeActive = SteamTransport_IsActive();
     if (bridgeActive) SteamTransport_Shutdown();
     if (!bridgeActive && g_sockets && g_connection != k_HSteamNetConnection_Invalid)
@@ -1707,6 +1755,7 @@ void SteamRoom_DisconnectPeer()
 
 bool SteamRoom_TakePeerFailed()
 {
+    if (LocalLobby_Enabled()) return LocalLobby_TakePeerFailed();
     const bool failed = g_roomPeerFailed;
     g_roomPeerFailed = false;
     return failed;

@@ -409,6 +409,45 @@ Only the lobby owner can write lobby data, so only the host can ban. Nothing
 removes the player from the Steam lobby itself: a modified client can stay in
 it and read its chat, and still counts towards the member limit.
 
+## Sets (first to N)
+
+A room is created with a set length (`MATCH FORMAT`: first to 1, 2, 3, 5, 7 or
+10), stored in the lobby data as `ft` and fixed for the room's life.
+
+A room match is one set. The game's result phase is already hooked for
+rematches (`sAction__stepResult8` / `9_10_11`, see `outro.md`); those hooks
+now also hand `sAction::mWinTeam` (`+0x114`) to `LobbyFlow_OnResultPhase`.
+`UpdateSet` counts a game once the result phase has held for 30 game ticks
+(longer than any rollback window) and re-arms only after it has been gone for
+120, so skipped frames cannot count a game twice. Both peers run the same
+simulation, so both count the same games; nothing is exchanged. Team 0 is
+taken to be player 1 (the pairing's side 0): **unverified**, the log line
+`LobbyFlow: game finished winTeam=...` shows it.
+
+Until the set is decided a confirm in the result phase restarts as before
+(only after the game has been counted). Once someone reaches N the restart is
+refused, the win pose plays for 150 ticks and each player returns to the room
+on their own with the set result; the other player dropping at that point is
+treated as the normal ending. Only a set played to its end goes on the room's
+win/loss record. The running score is published in the member data (version
+2, last field) for the room's slot header and drawn above the health bars
+with ImGui during the match.
+
+## Testing alone: `kLobbyTestBuild`
+
+Steam lobbies need two accounts. Setting `kLobbyTestBuild` to `true`
+in `lobby_local.h` and rebuilding (never ship that build) replaces the Steam lobby with
+one room in named shared memory on this PC (`lobby_local.cpp`) and starts a
+second game process (marked with the internal argument `-lobbytest-child`) once the first has reached the
+lobby. `steam_lobby.cpp` forwards every call the in-game lobby makes to that
+backend while the mode is on, so `lobby_room.cpp` and everything above it run
+unchanged: create, search, join, seats, chat, music, kick and ban, sets.
+Matches connect with plain ENet on `127.0.0.1` (port 27100 + the player-1
+process id modulo 2000). The two players are "Tester One" and "Tester Two",
+logs go to `Timestone_host.log` and `Timestone_client.log`, and only the
+focused window takes input. Not covered: anything Steam itself does (relay
+routing, invites, the overlay, friends-only visibility).
+
 ## First in-game run: what to check
 
 Log lines are prefixed `LobbyNative:`, `LobbyFlow:` and `LobbyRoom:`.

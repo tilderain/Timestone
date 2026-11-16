@@ -20,6 +20,7 @@
 #include "code/lag_diagnostics.h"
 #include "code/trainingboot.h"
 #include "code/lobby_flow.h"
+#include "code/lobby_local.h"
 #include "code/launchmenu_utils.h"
 #include "code/netplay.h"
 #include "code/controller.h"
@@ -1849,8 +1850,20 @@ void OnInitializeHook()
 	if (!trainingArg && !strstr(cmdLineA, "-autotest")) {
 		char settingsPath[MAX_PATH] = {};
 		LaunchMenuUtils::GetSettingsPath(settingsPath, sizeof(settingsPath));
-		const bool launcherArg = strstr(cmdLineA, "-launcher") != nullptr;
-		const bool launcherConfigured = settingsPath[0] &&
+		// Lobby test build (kLobbyTestBuild in lobby_local.h): the in-game
+		// lobby against a same-PC stand-in for Steam, with a second game
+		// instance started alongside. The first instance marks the second
+		// with an internal argument.
+		if (kLobbyTestBuild) {
+			const bool lobbyTestChild = strstr(cmdLineA, "-lobbytest-child") != nullptr;
+			LocalLobby_Enable(lobbyTestChild);
+			// Two processes: keep their logs apart, as dual training does.
+			HookLogSetFile(lobbyTestChild ? "Timestone_client.log" : "Timestone_host.log");
+			g_windowCorner = lobbyTestChild ? 2 : 1;
+		}
+		const bool launcherArg =
+			!LocalLobby_Enabled() && strstr(cmdLineA, "-launcher") != nullptr;
+		const bool launcherConfigured = !LocalLobby_Enabled() && settingsPath[0] &&
 			GetPrivateProfileIntA("Launch", "NativeLobby", 1, settingsPath) == 0;
 		if (launcherArg || launcherConfigured) {
 			HookLog("UMVC3Hook: External launcher requested (%s)\n",

@@ -21,8 +21,9 @@ constexpr char kMusicKey[] = "bgm";      // lobby data: the host's music choice
 // other client drops listed members from its room, and Join refuses a lobby
 // that lists the local player. It lives and dies with the lobby.
 constexpr char kBanKey[] = "ban";
+constexpr char kFirstToKey[] = "ft";     // lobby data: games needed to win a set
 constexpr int kMaxBans = 64;
-constexpr int kMemberVersion = 1;
+constexpr int kMemberVersion = 2;
 constexpr uint8_t kChatText = 'C';       // lobby chat payload: 'C' + UTF-8
 constexpr uint32_t kRefreshInterval = 6; // frames between room rebuilds
 
@@ -61,22 +62,25 @@ bool IsPlausibleTeam(const Team& team)
 // Member state travels as one short string so a member's seat, readiness and
 // team always change atomically for observers.
 void EncodeMember(char* out, size_t size, int slot, int side, bool ready, MemberStatus status,
-                  EntryMode mode, const Team& team, int wins, int losses)
+                  EntryMode mode, const Team& team, int wins, int losses, int setWins)
 {
-    snprintf(out, size, "%d|%d|%d|%d|%d|%d|%d,%d,%d|%d,%d,%d|%d,%d,%d|%d|%d", kMemberVersion,
+    snprintf(out, size, "%d|%d|%d|%d|%d|%d|%d,%d,%d|%d,%d,%d|%d,%d,%d|%d|%d|%d", kMemberVersion,
              slot, side, ready ? 1 : 0, static_cast<int>(status), static_cast<int>(mode),
              team.chars[0], team.chars[1], team.chars[2], team.assists[0], team.assists[1],
-             team.assists[2], team.colors[0], team.colors[1], team.colors[2], wins, losses);
+             team.assists[2], team.colors[0], team.colors[1], team.colors[2], wins, losses,
+             setWins);
 }
 
 bool DecodeMember(const char* text, Member& member)
 {
     int version = 0, slot = -1, side = 0, ready = 0, status = 0, mode = 0, wins = 0, losses = 0;
+    int setWins = 0;
     Team team = {};
-    if (!text || sscanf(text, "%d|%d|%d|%d|%d|%d|%d,%d,%d|%d,%d,%d|%d,%d,%d|%d|%d", &version,
+    if (!text || sscanf(text, "%d|%d|%d|%d|%d|%d|%d,%d,%d|%d,%d,%d|%d,%d,%d|%d|%d|%d", &version,
                         &slot, &side, &ready, &status, &mode, &team.chars[0], &team.chars[1],
                         &team.chars[2], &team.assists[0], &team.assists[1], &team.assists[2],
-                        &team.colors[0], &team.colors[1], &team.colors[2], &wins, &losses) != 17)
+                        &team.colors[0], &team.colors[1], &team.colors[2], &wins, &losses,
+                        &setWins) != 18)
         return false;
     if (version != kMemberVersion) return false;
     if (slot < -1 || slot >= kMaxSlots || side < 0 || side > 2 || status < 0 ||
@@ -90,6 +94,7 @@ bool DecodeMember(const char* text, Member& member)
     member.team = team;
     member.wins = static_cast<int16_t>(wins < 0 ? 0 : wins > 999 ? 999 : wins);
     member.losses = static_cast<int16_t>(losses < 0 ? 0 : losses > 999 ? 999 : losses);
+    member.setWins = static_cast<int8_t>(setWins < 0 ? 0 : setWins > kMaxFirstTo ? kMaxFirstTo : setWins);
     return true;
 }
 
@@ -179,6 +184,7 @@ void SteamRoomService::Create(const RoomSettings& settings)
     if (!available_ || room_.inRoom) return;
     creating_ = true;
     pendingMusic_ = settings.music;
+    pendingFirstTo_ = settings.firstTo;
     SteamRoom_Create(ToSteamType(settings.visibility), settings.maxMembers, settings.slotCount,
                      settings.name);
 }
@@ -192,6 +198,7 @@ void SteamRoomService::Join(uint64_t roomId)
     }
     joining_ = true;
     pendingMusic_ = -1;
+    pendingFirstTo_ = 0;
     SteamLobby_Join(roomId);
 }
 
@@ -204,6 +211,7 @@ void SteamRoomService::Leave()
     local_.status = MemberStatus::Idle;
     local_.wins = 0;
     local_.losses = 0;
+    local_.setWins = 0;
     room_ = {};
     publishedOnce_ = false;
     liveAdvertised_ = false;
@@ -274,7 +282,7 @@ void SteamRoomService::PublishLocal()
     if (!SteamRoom_IsActive()) return;
     char encoded[160];
     EncodeMember(encoded, sizeof(encoded), local_.slot, local_.side, local_.ready, local_.status,
-                 local_.mode, local_.team, local_.wins, local_.losses);
+                 local_.mode, local_.team, local_.wins, local_.losses, local_.setWins);
     SteamRoom_SetLocalData(kMemberKey, encoded);
     publishedOnce_ = true;
 }
@@ -332,10 +340,18 @@ void SteamRoomService::FinishMatch(bool counted, bool localWon)
         if (localWon) ++local_.wins;
         else ++local_.losses;
     }
+    local_.setWins = 0;
     local_.ready = false;
     local_.status = local_.slot >= 0 ? MemberStatus::Seated : MemberStatus::Idle;
     PublishLocal();
     RefreshRoom();
+}
+
+void SteamRoomService::ReportSetScore(int localGamesWon)
+{
+    if (local_.setWins == localGamesWon) return;
+    local_.setWins = localGamesWon;
+    PublishLocal();
 }
 
 void SteamRoomService::SendChat(const char* utf8)
@@ -389,6 +405,8 @@ void SteamRoomService::RefreshResults()
         result.compatible = SteamLobby_IsLobbyVersionCompatible(result.id);
         result.friendLobby = SteamLobby_IsFriendLobby(result.id);
         result.matchInProgress = SteamLobby_IsResultInMatch(i);
+        result.firstTo = atoi(SteamRoom_GetLobbyData(result.id, kFirstToKey));
+        if (result.firstTo < 1 || result.firstTo > kMaxFirstTo) result.firstTo = 1;
     }
 }
 
@@ -408,6 +426,8 @@ void SteamRoomService::RefreshRoom()
     next.settings.slotCount = atoi(SteamRoom_GetData("slots"));
     if (next.settings.slotCount < 1) next.settings.slotCount = 1;
     if (next.settings.slotCount > kMaxSlots) next.settings.slotCount = kMaxSlots;
+    next.settings.firstTo = atoi(SteamRoom_GetData(kFirstToKey));
+    if (next.settings.firstTo < 1 || next.settings.firstTo > kMaxFirstTo) next.settings.firstTo = 1;
     next.music = atoi(SteamRoom_GetData(kMusicKey));
     if (FindMusicTrack(next.music) < 0) next.music = kMusicDefault;
 
@@ -448,6 +468,7 @@ void SteamRoomService::RefreshRoom()
             member.team = local_.team;
             member.wins = static_cast<int16_t>(local_.wins);
             member.losses = static_cast<int16_t>(local_.losses);
+            member.setWins = static_cast<int8_t>(local_.setWins);
             member.pingMs = 0;
         } else {
             if (!DecodeMember(SteamRoom_GetMemberData(id, kMemberKey), member) ||
@@ -608,6 +629,7 @@ void SteamRoomService::Pump()
         local_.status = MemberStatus::Idle;
         local_.wins = 0;
         local_.losses = 0;
+        local_.setWins = 0;
         knownMemberCount_ = 0;
         chatCount_ = 0;
         liveAdvertised_ = false;
@@ -618,6 +640,13 @@ void SteamRoomService::Pump()
         // screen (SetMusic ignores it if we are not the owner).
         if (pendingMusic_ >= 0) SetMusic(pendingMusic_);
         pendingMusic_ = -1;
+        if (pendingFirstTo_ > 0) {
+            char value[8];
+            snprintf(value, sizeof(value), "%d", pendingFirstTo_);
+            SteamRoom_SetData(kFirstToKey, value); // owner only, as for the music
+            room_.settings.firstTo = pendingFirstTo_;
+        }
+        pendingFirstTo_ = 0;
         HookLog("LobbyRoom: entered room %llu (%d members)\n",
                 static_cast<unsigned long long>(room_.id), room_.memberCount);
     }
