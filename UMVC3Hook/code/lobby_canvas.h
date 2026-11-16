@@ -72,6 +72,7 @@ enum Tex : uint8_t {
     TEX_MENU_SEL,        // mai35_sel01b    white main-menu selection bar
     TEX_MENU_BAR,        // mai35_sel02     grey main-menu bar
     TEX_CURSOR,          // mai_cur01       triangle cursor
+    TEX_OPT_ARROW,       // ga_opt_sel_1p   option menu left/right arrow (points left)
     TEX_HELP_BAR,        // ga_window_a     dark footer gradient
     TEX_YELLOW_BAR,      // ga_cmn_bar      yellow accent bar
     TEX_PAD_GLYPHS,      // mai_hlp03       controller button glyphs

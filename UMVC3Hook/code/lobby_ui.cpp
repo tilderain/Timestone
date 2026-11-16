@@ -12,15 +12,39 @@ namespace {
 // Palette and shared geometry (1280x720 UI space)
 // ---------------------------------------------------------------------------
 constexpr Color kText = kWhite;
-// Selection highlights breathe at the game's own rate: the selected-item glow
-// in its menus (submenu_txt_ef in ma_menu_sub_select) loops every 60 frames,
-// rising for 20 and falling for 40. Returns -1..1 like the sine it replaces.
-inline float SelectionWave(uint32_t frame)
+// The option menu's selection animation, read from the shared sprite
+// animation list (ui\cmn\anm\sprite_base, CAC): animation 8 drives the
+// highlight bar and 9/10 the left/right arrows, all on one 76-frame loop, so
+// they move together. From frame 1 the highlight dims (colour 0xBF -> 0x3F)
+// while the arrows slide 5 px inward, over 50 frames; from frame 51 the
+// highlight brightens again and the arrows slide back, over 25 frames.
+// Easing as uUiAnmSprite__interpolateChannel (0x1402C7B90): mode 5 is
+// 1-(1-u)^2, mode 2 is u^2.
+constexpr uint32_t kSelectLoopFrames = 76;
+constexpr float kSelectArrowTravel = 5.0f;
+inline float EaseOutQuad(float u) { return 1.0f - (1.0f - u) * (1.0f - u); }
+
+// Highlight brightness, 1 = brightest, 0 = dimmest.
+inline float SelectionLevel(uint32_t frame)
 {
-    const uint32_t t = frame % 60u;
-    const float level = t < 20u ? t / 20.0f : 1.0f - (t - 20u) / 40.0f;
-    return level * 2.0f - 1.0f;
+    const uint32_t t = frame % kSelectLoopFrames;
+    if (t < 1u) return 1.0f;
+    if (t < 51u) return 1.0f - EaseOutQuad((t - 1u) / 50.0f);
+    return EaseOutQuad((t - 51u) / 25.0f);
 }
+
+// How far each arrow sits in from its rest position, toward the value.
+inline float SelectionArrowInset(uint32_t frame)
+{
+    const uint32_t t = frame % kSelectLoopFrames;
+    if (t < 1u) return 0.0f;
+    if (t < 51u) return kSelectArrowTravel * EaseOutQuad((t - 1u) / 50.0f);
+    const float u = (t - 51u) / 25.0f;
+    return kSelectArrowTravel * (1.0f - u * u);
+}
+
+// -1..1 form of SelectionLevel for the highlight alpha expressions.
+inline float SelectionWave(uint32_t frame) { return SelectionLevel(frame) * 2.0f - 1.0f; }
 
 // Opacity of the top menu's white selection bar: 1.0 down to kMenuBarFadeMin
 // and back, once every kMenuBarFadeFrames frames.
@@ -38,7 +62,6 @@ constexpr Color kYellow = Rgb(0xFFD63A);
 constexpr Color kCyan = Rgb(0x5CE4FF);
 constexpr Color kRed = Rgb(0xFF5A4C);
 constexpr Color kGreen = Rgb(0x86F25E);
-constexpr Color kInk = Rgb(0x0C1118);
 
 constexpr float kScreenW = 1280.0f;
 constexpr float kScreenH = 720.0f;
@@ -172,6 +195,23 @@ private:
     float alpha_;
     float dx_;
 };
+
+// Distance from a value's centre to each arrow. The option menu uses 130; the
+// lobby's values run longer (character and assist names), so a little more,
+// and the value text is fitted to stay clear of the arrows.
+constexpr float kValueArrowSpan = 150.0f;
+constexpr float kValueTextWidth = 2.0f * (kValueArrowSpan - 24.0f);
+
+// Left/right arrows around a selectable value: the option menu's own arrow
+// art (drawn pointing left; the right one is the mirror image), 32 px as
+// there, sliding inward and back in step with the selection highlight.
+void DrawValueArrows(const Painter& p, uint32_t frame, float centerX, float y, float halfSpan)
+{
+    const float inset = SelectionArrowInset(frame);
+    p.Sprite(TEX_OPT_ARROW, centerX - halfSpan + inset, y, 32.0f, 32.0f, kFullUv, A_MC);
+    p.Sprite(TEX_OPT_ARROW, centerX + halfSpan - inset, y, 32.0f, 32.0f,
+             Uv{1.0f, 0.0f, 0.0f, 1.0f}, A_MC);
+}
 
 void DrawPing(const Painter& p, float x, float y, int pingMs, float scale = 1.0f)
 {
@@ -1081,10 +1121,10 @@ const char* LobbyUi::DrawCreate(Canvas& canvas) const
         }
         if (row == CREATE_GO) {
             p.Text(service_.Busy() == RoomBusy::Creating ? "CREATING LOBBY..." : "CREATE LOBBY",
-                   panelX + panelW * 0.5f, y, 0.46f, A_MC, selected ? kInk : kText, FONT_HEADING);
+                   panelX + panelW * 0.5f, y, 0.46f, A_MC, kText, FONT_HEADING);
             continue;
         }
-        p.Text(labels[row], panelX + 64.0f, y, 0.86f, A_ML, selected ? kInk : kDim);
+        p.Text(labels[row], panelX + 64.0f, y, 0.86f, A_ML, selected ? kText : kDim);
         switch (row) {
         case CREATE_NAME:
             if (textTarget_ == TextTarget::RoomName)
@@ -1099,16 +1139,11 @@ const char* LobbyUi::DrawCreate(Canvas& canvas) const
             break;
         }
         const float valueX = panelX + 660.0f;
-        p.TextFit(value, valueX, y, 0.86f, 440.0f, A_MC,
-                  row == CREATE_NAME && textTarget_ == TextTarget::RoomName ? Rgb(0x0A3A66)
-                  : selected ? kInk : kText);
+        p.TextFit(value, valueX, y, 0.86f, row == CREATE_NAME ? 440.0f : kValueTextWidth, A_MC,
+                  row == CREATE_NAME && textTarget_ == TextTarget::RoomName ? kCyan
+                  : kText);
         if (selected && row != CREATE_NAME) {
-            // Reuse the menu cursor triangle for the left/right value arrows.
-            const float bob = 3.0f * std::sin(frame_ * 0.22f);
-            const Uv cursorUv{16.0f / 64.0f, 2.0f / 64.0f, 47.0f / 64.0f, 62.0f / 64.0f};
-            p.Sprite(TEX_CURSOR, valueX + 232.0f + bob, y, 14.0f, 26.0f, cursorUv, A_MC);
-            p.Sprite(TEX_CURSOR, valueX - 232.0f - bob, y, 14.0f, 26.0f,
-                     Uv{cursorUv.u1, cursorUv.v0, cursorUv.u0, cursorUv.v1}, A_MC);
+            DrawValueArrows(p, frame_, valueX, y, kValueArrowSpan);
         }
     }
 
@@ -1321,7 +1356,7 @@ void LobbyUi::DrawListMenu(Canvas& canvas, const char* title, const char* const*
             const float pulse = 0.72f + 0.28f * SelectionWave(frame_);
             p.Box(TEX_ROW_SEL, x + 22.0f, rowY - 24.0f, w - 44.0f, 48.0f, WithAlpha(kWhite, pulse));
         }
-        p.Text(items[i], x + w * 0.5f, rowY, 0.8f, A_MC, i == cursor ? kInk : kDim);
+        p.Text(items[i], x + w * 0.5f, rowY, 0.8f, A_MC, i == cursor ? kText : kDim);
     }
 }
 
@@ -1397,7 +1432,7 @@ const char* LobbyUi::DrawTeam(Canvas& canvas) const
                      prefs_.entryMode == EntryMode::Preset ? "QUICK START" : "CHARACTER SELECT");
             valueColor = kCyan;
         } else if (row == kTeamRowDone) {
-            p.Text("DONE", panelX + panelW * 0.5f, y, 0.4f, A_MC, selected ? kInk : kText,
+            p.Text("DONE", panelX + panelW * 0.5f, y, 0.4f, A_MC, kText,
                    FONT_HEADING);
             continue;
         } else {
@@ -1424,14 +1459,10 @@ const char* LobbyUi::DrawTeam(Canvas& canvas) const
         const bool header = row == kTeamRowPreset || row == kTeamRowEntry ||
                             (row >= kTeamRowFirstSlot && (row - kTeamRowFirstSlot) % 3 == 0);
         p.Text(label, labelX, y, header ? 0.8f : 0.68f, A_ML,
-               selected ? kInk : header ? kText : kFaint);
-        p.TextFit(value, valueX, y, header ? 0.8f : 0.7f, 330.0f, A_MC, selected ? kInk : valueColor);
+               selected || header ? kText : kFaint);
+        p.TextFit(value, valueX, y, header ? 0.8f : 0.7f, kValueTextWidth, A_MC, selected ? kText : valueColor);
         if (selected) {
-            const float bob = 3.0f * std::sin(frame_ * 0.22f);
-            const Uv cursorUv{16.0f / 64.0f, 2.0f / 64.0f, 47.0f / 64.0f, 62.0f / 64.0f};
-            p.Sprite(TEX_CURSOR, valueX + 184.0f + bob, y, 12.0f, 22.0f, cursorUv, A_MC);
-            p.Sprite(TEX_CURSOR, valueX - 184.0f - bob, y, 12.0f, 22.0f,
-                     Uv{cursorUv.u1, cursorUv.v0, cursorUv.u0, cursorUv.v1}, A_MC);
+            DrawValueArrows(p, frame_, valueX, y, kValueArrowSpan);
         }
     }
 
@@ -1510,7 +1541,7 @@ bool LobbyUi::DrawModal(Canvas& canvas) const
                       WithAlpha(kWhite, pulse));
             }
             p.Text(options[i], optionX, y + h - 57.0f, 0.4f, A_MC,
-                   i == confirmCursor_ ? kInk : kDim, FONT_HEADING);
+                   i == confirmCursor_ ? kText : kDim, FONT_HEADING);
         }
     }
     return true;

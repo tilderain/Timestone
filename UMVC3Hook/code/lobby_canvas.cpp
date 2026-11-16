@@ -37,6 +37,7 @@ const TexInfo kTextures[TEX_COUNT] = {
     {"ui\\mainmenu\\mai_tit\\mai35_sel01b_BM_HQ_NOMIP", 512, 64, ARC_MAINMENU, false},
     {"ui\\mainmenu\\mai_tit\\mai35_sel02_BM_HQ_NOMIP", 512, 64, ARC_MAINMENU, false},
     {"ui\\mainmenu\\mai_cur\\mai_cur01_BM_HQ_NOMIP", 64, 64, ARC_MAINMENU, false},
+    {"ui\\opt\\opt_sprite\\ga_opt_sel_1p_BM_HQ_NOMIP", 32, 32, ARC_COMMON, false},
     {"ui\\cmn\\cmn_sprite\\ga_window_a_BM_HQ_NOMIP", 128, 32, ARC_COMMON, false},
     {"ui\\cmn\\cmn_sprite\\ga_cmn_bar_BM_HQ_NOMIP", 256, 16, ARC_COMMON, false},
     {"ui\\mainmenu\\mai_hlp\\mai_hlp03_BM_HQ_NOMIP", 256, 256, ARC_COMMON, false},
