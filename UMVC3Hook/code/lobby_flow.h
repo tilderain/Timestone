@@ -26,6 +26,17 @@ void LobbyFlow_EnterTitleFromLogo();
 // Replaces aTitle::move while the plugin has not booted a battle. Returns
 // true when a match handshake has finished and BootIntoTraining should run.
 bool LobbyFlow_TitleTick(uint64_t titleArea);
+// "Main Menu" in the lobby hands the title area back to the game: the native
+// main menu is spawned and aTitle::move runs untouched until the lobby is
+// reopened (the plugin's Esc menu offers that while the title area is up).
+bool LobbyFlow_IsReleasedToMainMenu();
+// True while released and the title area is the one running.
+bool LobbyFlow_CanReopen();
+// Safe from the render thread; takes effect on the next title-area frame.
+void LobbyFlow_RequestReopen();
+// Released-state replacement for LobbyFlow_TitleTick. Returns true when the
+// lobby took the title area back this frame (skip the native move).
+bool LobbyFlow_ReleasedTitleTick(uint64_t titleArea);
 // BootIntoTraining committed and queued the battle transition: the lobby's
 // units must be gone before the area changes under them.
 void LobbyFlow_OnBattleBootCommitted();

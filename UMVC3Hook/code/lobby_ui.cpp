@@ -42,12 +42,12 @@ struct Prompt {
     const char* label;
 };
 
-const char* const kTopItems[] = {"SEARCH LOBBY", "CREATE LOBBY", "TEAM SETUP", "EXIT GAME"};
+const char* const kTopItems[] = {"SEARCH LOBBY", "CREATE LOBBY", "TEAM SETUP", "MAIN MENU"};
 const char* const kTopHelp[] = {
     "Search for a lobby and join the players inside.",
     "Set your conditions and create a lobby.",
     "Choose the team you bring to a match and how you enter battle.",
-    "Close the game.",
+    "Leave the lobby and return to the game's main menu.",
 };
 constexpr int kTopCount = 4;
 
@@ -216,10 +216,10 @@ uint32_t LobbyUi::TakeSfx()
     return sfx;
 }
 
-bool LobbyUi::TakeExitRequested()
+bool LobbyUi::TakeMainMenuRequested()
 {
-    const bool requested = exitRequested_;
-    exitRequested_ = false;
+    const bool requested = mainMenuRequested_;
+    mainMenuRequested_ = false;
     return requested;
 }
 
@@ -350,8 +350,8 @@ void LobbyUi::Update(const Input& input)
             if (action == Confirm::LeaveRoom) {
                 leftByChoice_ = true;
                 service_.Leave();
-            } else if (action == Confirm::ExitGame) {
-                exitRequested_ = true;
+            } else if (action == Confirm::MainMenu) {
+                mainMenuRequested_ = true;
             }
         }
         return;
@@ -370,7 +370,8 @@ void LobbyUi::UpdateTop(const Input& input)
 {
     MoveCursor(topCursor_, kTopCount, input);
     if (input.cancel) {
-        confirm_ = Confirm::ExitGame;
+        // Backing out by accident is easy, so only this path asks first.
+        confirm_ = Confirm::MainMenu;
         confirmCursor_ = 1;
         Play(SFX_CANCEL);
         return;
@@ -397,8 +398,7 @@ void LobbyUi::UpdateTop(const Input& input)
         GoTo(Screen::Team);
         break;
     default:
-        confirm_ = Confirm::ExitGame;
-        confirmCursor_ = 1;
+        mainMenuRequested_ = true;
         break;
     }
 }
@@ -830,7 +830,7 @@ void LobbyUi::DrawFooter(Canvas& canvas, const char* help) const
         if (confirm_ != Confirm::None) add(BTN_CANCEL, "Back");
     } else if (screen_ == Screen::Top) {
         add(BTN_CONFIRM, "Select");
-        add(BTN_CANCEL, "Exit");
+        add(BTN_CANCEL, "Main Menu");
     } else if (screen_ == Screen::Browse) {
         add(BTN_CONFIRM, "Join");
         add(BTN_X, "Search again");
@@ -1422,8 +1422,8 @@ bool LobbyUi::DrawModal(Canvas& canvas) const
         message = notice_;
     else if (confirm_ == Confirm::LeaveRoom)
         message = "Leave this lobby?";
-    else if (confirm_ == Confirm::ExitGame)
-        message = "Exit the game?";
+    else if (confirm_ == Confirm::MainMenu)
+        message = "Return to the main menu?";
     if (!message) return false;
 
     p.Fill(0.0f, 0.0f, kScreenW, kScreenH, Color{0.0f, 0.0f, 0.0f, 0.6f});

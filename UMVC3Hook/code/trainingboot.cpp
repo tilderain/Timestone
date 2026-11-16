@@ -809,6 +809,12 @@ static SetTeamAutoJump_t oSetTeamAutoJump = nullptr;
 
 void __fastcall Hook_titleUpdate(uint64_t param_1)
 {
+    if (LobbyFlow_IsReleasedToMainMenu()) {
+        // The player chose "Main Menu": the game runs its own title area
+        // until the lobby is reopened.
+        if (!LobbyFlow_ReleasedTitleTick(param_1) && oTitleUpdate) oTitleUpdate(param_1);
+        return;
+    }
     if (LobbyFlow_IsEnabled()) {
         // The lobby owns the title area: it is drawn here between matches and
         // starts each battle through the same boot path once a match is set.

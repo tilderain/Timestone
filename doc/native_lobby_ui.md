@@ -259,6 +259,34 @@ every `_HQ_` texture (format `0x2A`) draws. The cause is not established.
    synchronized restart and shuts netplay down while keeping the room, then
    queues `aTitle`. The title hook rebuilds the lobby and shows the room.
 
+### Leaving for the main menu
+
+"MAIN MENU" on the lobby's top screen (or cancel there, after a prompt) hands
+the title area back to the game: the lobby's units are killed, any room is
+left, `aTitle+0xA0` (`mPresentationMode`) is reset to `-1` and
+`aTitle__setPresentationMode(area, 1)` `0x140216600` spawns `uMenuMain`, the
+same call the press-start screen makes. From then on the title hook runs the
+native `aTitle::move`. The plugin's Esc menu shows "Online Lobby" while the
+title area is running; it retires `uMenuMain` again and rebuilds the lobby.
+Going to the main menu this way is confirmed in game.
+
+The press-start screen is skipped, so `ReleaseToMainMenu` applies what
+`uMenuTitle__move` `0x1403F7DB0` sets on Start: player 0's pad slot
+(`sMvc3Manager+0x140`), `sGameUi+0x5C40` and `+0x5EA8`, plus the `sPad`
+keyboard-block bytes. Without this the keyboard did nothing on the main menu.
+
+"Online" (item 1) is greyed out and skipped natively while
+`isPlatformContextReadyForMatchmaking` `0x14045CEF0` is false, which is always
+the case here because native networking is switched off. Three main-menu
+sites ask through the thunk at `0x14045CFF0`: `uMenuMain`'s move (return
+`0x1403E7514`, colour and animation), `uMenuMain__getInitialSelection`
+(return `0x1403E7274`) and the shared navigation state
+`uMenu__modeFlow_s7_inputNavigation` `0x1403E9D90` (cursor at `+0x78`, writes 1
+to its out parameter on decide). While released, the thunk is answered "ready"
+for those three only (the navigation one only for the main menu unit), and
+deciding on item 1 reopens the lobby. Native modes started from that menu run with the lobby's
+launch option still set, which has not been exercised either.
+
 ## First in-game run: what to check
 
 Log lines are prefixed `LobbyNative:`, `LobbyFlow:` and `LobbyRoom:`.

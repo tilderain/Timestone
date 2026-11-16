@@ -19,6 +19,7 @@
 #include "trainingboot.h"
 #include "../IniSafe.h"
 #include "../imgui/imgui.h"
+#include "../kiero/minhook/include/MinHook.h"
 
 #include <Windows.h>
 #include <atomic>
@@ -43,6 +44,33 @@ constexpr uintptr_t SAREA_VT_REQUEST_TRANSITION = 0x50;
 constexpr uintptr_t ATITLE_DTI = 0x140D506E8;
 constexpr size_t ATITLE_TITLE_MENU = 0x90; // uMenuTitle*
 constexpr size_t ATITLE_MAIN_MENU = 0x98;  // uMenuMain*
+constexpr size_t ATITLE_PRESENTATION_MODE = 0xA0;
+// (aTitle*, mode): mode 1 spawns uMenuMain. It is what the press-start
+// screen invokes to open the main menu; it does nothing if the mode matches.
+constexpr uintptr_t ATITLE_SET_PRESENTATION_MODE = 0x140216600;
+// What uMenuTitle::move (0x1403F7DB0) sets up when Start is pressed, which the
+// lobby skips by retiring that unit: the menu-controlling pad for player 0
+// (sMvc3Manager+0x140), two sGameUi bytes it clears, and (doc/pad.md) the
+// sPad keyboard-block bytes that otherwise keep the keyboard out of menus.
+constexpr uintptr_t SMVC3MANAGER_INSTANCE_PTR = 0x140D510A0;
+constexpr size_t MANAGER_PAD_ASSIGN = 0x140; // int32_t[4]
+constexpr uintptr_t SPAD_INSTANCE_PTR = 0x140E174B8;
+constexpr size_t SPAD_KEYBOARD_BLOCKED_1 = 0xC20;
+constexpr size_t SPAD_KEYBOARD_BLOCKED_2 = 0xC30;
+constexpr uintptr_t SGAMEUI_GET_INSTANCE = 0x140001AC0;
+// The main menu greys out and skips "Online" while the game's own Steam
+// session is not ready, which it never is here: the plugin switches native
+// networking off (doc/native_network_disable.md). Three main-menu call sites
+// ask through this thunk; the navigation state (shared by every menu) reads
+// the cursor at +0x78 and writes 1 to its out parameter on decide.
+constexpr uintptr_t NET_SESSION_READY_THUNK = 0x14045CFF0;
+constexpr uintptr_t MENU_FLOW_NAVIGATION = 0x1403E9D90;       // (menu, int32_t* out)
+constexpr uintptr_t MAINMENU_MOVE_READY_RETURN = 0x1403E7514; // in uMenuMain's move
+constexpr uintptr_t MAINMENU_INITIAL_SELECT_RETURN = 0x1403E7274;
+constexpr size_t MENU_CURSOR = 0x78;
+constexpr int32_t MAINMENU_ITEM_ONLINE = 1;
+constexpr size_t SGAMEUI_TITLE_BYTE_1 = 0x5C40;
+constexpr size_t SGAMEUI_TITLE_BYTE_2 = 0x5EA8;
 constexpr size_t CUNIT_FLAGS = 0x10;
 constexpr uintptr_t CUNIT_VT_KILL = 0x78;
 
@@ -64,6 +92,10 @@ bool g_enabled = false;
 Phase g_phase = Phase::Lobby;
 bool g_titleNeedsSetup = true;
 bool g_titleRequested = false;
+// The player left the lobby for the native main menu (game thread only).
+bool g_releasedToMainMenu = false;
+std::atomic<bool> g_reopenRequested{false};
+std::atomic<ULONGLONG> g_releasedTitleTick{0};
 
 std::unique_ptr<SteamRoomService> g_service;
 std::unique_ptr<LobbyUi> g_ui;
@@ -241,6 +273,112 @@ void RetireNativeTitleUnits(uint64_t titleArea)
         }
         unit = nullptr;
     }
+}
+
+// ---------------------------------------------------------------------------
+// Main menu "Online" -> lobby
+// ---------------------------------------------------------------------------
+using SessionReady = bool(__fastcall*)(void*);
+using MenuNavigation = uint64_t(__fastcall*)(void*, int32_t*);
+SessionReady g_originalSessionReady = nullptr;
+MenuNavigation g_originalMenuNavigation = nullptr;
+bool g_menuHooksInstalled = false;
+bool g_inMainMenuNavigation = false; // game thread only
+uint64_t g_releasedTitleArea = 0;
+
+bool TitleAreaIsRunning()
+{
+    return GetTickCount64() - g_releasedTitleTick.load(std::memory_order_relaxed) < 500;
+}
+
+void* ReleasedMainMenu()
+{
+    if (!g_releasedToMainMenu || !g_releasedTitleArea || !TitleAreaIsRunning()) return nullptr;
+    return *reinterpret_cast<void**>(g_releasedTitleArea + ATITLE_MAIN_MENU);
+}
+
+__attribute__((noinline)) bool __fastcall Hook_SessionReady(void* library)
+{
+    if (g_releasedToMainMenu) {
+        const uintptr_t caller = reinterpret_cast<uintptr_t>(__builtin_return_address(0));
+        if (g_inMainMenuNavigation || caller == _addr(MAINMENU_MOVE_READY_RETURN) ||
+            caller == _addr(MAINMENU_INITIAL_SELECT_RETURN))
+            return true;
+    }
+    return g_originalSessionReady(library);
+}
+
+uint64_t __fastcall Hook_MenuNavigation(void* menu, int32_t* out)
+{
+    void* mainMenu = ReleasedMainMenu();
+    const bool isMainMenu = mainMenu && menu == mainMenu;
+    g_inMainMenuNavigation = isMainMenu;
+    const uint64_t result = g_originalMenuNavigation(menu, out);
+    g_inMainMenuNavigation = false;
+    if (isMainMenu && out && *out == 1 &&
+        *reinterpret_cast<int32_t*>(static_cast<uint8_t*>(menu) + MENU_CURSOR) ==
+            MAINMENU_ITEM_ONLINE &&
+        !g_reopenRequested.exchange(true, std::memory_order_acq_rel))
+        HookLog("LobbyFlow: Online chosen on the main menu\n");
+    return result;
+}
+
+void InstallMainMenuHooks()
+{
+    if (g_menuHooksInstalled) return;
+    g_menuHooksInstalled = true;
+    void* ready = reinterpret_cast<void*>(_addr(NET_SESSION_READY_THUNK));
+    void* navigation = reinterpret_cast<void*>(_addr(MENU_FLOW_NAVIGATION));
+    const MH_STATUS a = MH_CreateHook(ready, reinterpret_cast<void*>(&Hook_SessionReady),
+                                      reinterpret_cast<void**>(&g_originalSessionReady));
+    const MH_STATUS b = MH_CreateHook(navigation, reinterpret_cast<void*>(&Hook_MenuNavigation),
+                                      reinterpret_cast<void**>(&g_originalMenuNavigation));
+    if (a != MH_OK || b != MH_OK || MH_EnableHook(navigation) != MH_OK ||
+        MH_EnableHook(ready) != MH_OK)
+        HookLog("LobbyFlow: main menu Online hooks failed (%d, %d); use the Esc menu\n",
+                static_cast<int>(a), static_cast<int>(b));
+}
+
+void ApplyPressStartState()
+{
+    if (const uint64_t manager = *reinterpret_cast<uint64_t*>(_addr(SMVC3MANAGER_INSTANCE_PTR))) {
+        int32_t* assign = reinterpret_cast<int32_t*>(manager + MANAGER_PAD_ASSIGN);
+        // Keyboard input is routed through whichever slot player 0 maps to.
+        if (assign[0] < 0 || assign[0] > 3) {
+            for (int i = 1; i < 4; ++i)
+                if (assign[i] == 0) assign[i] = assign[0];
+            assign[0] = 0;
+        }
+    }
+    if (const uint64_t pad = *reinterpret_cast<uint64_t*>(_addr(SPAD_INSTANCE_PTR))) {
+        *reinterpret_cast<uint8_t*>(pad + SPAD_KEYBOARD_BLOCKED_1) = 0;
+        *reinterpret_cast<uint8_t*>(pad + SPAD_KEYBOARD_BLOCKED_2) = 0;
+    }
+    using GetInstance = uint64_t(__fastcall*)();
+    if (const uint64_t gameUi = reinterpret_cast<GetInstance>(_addr(SGAMEUI_GET_INSTANCE))()) {
+        *reinterpret_cast<uint8_t*>(gameUi + SGAMEUI_TITLE_BYTE_1) = 0;
+        *reinterpret_cast<uint8_t*>(gameUi + SGAMEUI_TITLE_BYTE_2) = 0;
+    }
+}
+
+// Hands the title area back to the game with its main menu open.
+void ReleaseToMainMenu(uint64_t titleArea)
+{
+    HookLog("LobbyFlow: leaving the lobby for the main menu\n");
+    if (g_service && g_service->Room().inRoom) g_service->Leave();
+    LaunchMusic_BeginFadeOut();
+    g_musicWanted = false;
+    Native_Shutdown();
+    RetireNativeTitleUnits(titleArea);
+    ApplyPressStartState();
+    InstallMainMenuHooks();
+    g_releasedTitleArea = titleArea;
+    g_releasedTitleTick.store(GetTickCount64(), std::memory_order_relaxed);
+    *reinterpret_cast<int32_t*>(titleArea + ATITLE_PRESENTATION_MODE) = -1;
+    using SetPresentationMode = void(__fastcall*)(uint64_t, int32_t);
+    reinterpret_cast<SetPresentationMode>(_addr(ATITLE_SET_PRESENTATION_MODE))(titleArea, 1);
+    g_reopenRequested.store(false, std::memory_order_relaxed);
+    g_releasedToMainMenu = true;
 }
 
 // ---------------------------------------------------------------------------
@@ -508,7 +646,7 @@ void EnsureObjects()
     if (!g_ui) g_ui.reset(new LobbyUi(*g_service, kRosterSource, LoadPrefs()));
 }
 
-void RunLobbyFrame()
+void RunLobbyFrame(uint64_t titleArea)
 {
     g_service->Pump();
 
@@ -518,16 +656,9 @@ void RunLobbyFrame()
     if (g_ui->TakePrefsDirty()) SavePrefs(g_ui->Prefs());
     Native_PlaySfx(g_ui->TakeSfx());
 
-    if (g_ui->TakeExitRequested()) {
-        HookLog("LobbyFlow: exit requested from the lobby\n");
-        HookLogFlush();
-        if (HWND window = GetForegroundWindow()) {
-            DWORD process = 0;
-            GetWindowThreadProcessId(window, &process);
-            if (process == GetCurrentProcessId() && PostMessageW(window, WM_CLOSE, 0, 0)) return;
-        }
-        PrepareForGameExit();
-        ExitProcess(0);
+    if (g_ui->TakeMainMenuRequested()) {
+        ReleaseToMainMenu(titleArea);
+        return;
     }
 
     UpdateMatchStart(input.cancel);
@@ -570,8 +701,8 @@ bool LobbyFlow_IsLobbyVisible()
     // If the native UI never came up, stop claiming the screen so the plugin's
     // own pause menu (and its Exit Game button) is reachable again.
     if (g_nativeWaitFrames.load(std::memory_order_relaxed) >= kNativeFailedFrames) return false;
-    return g_enabled && (g_phase == Phase::Lobby || g_phase == Phase::Connecting ||
-                         g_phase == Phase::Handshake);
+    return g_enabled && !g_releasedToMainMenu &&
+           (g_phase == Phase::Lobby || g_phase == Phase::Connecting || g_phase == Phase::Handshake);
 }
 
 void LobbyFlow_DrawOverlay()
@@ -658,8 +789,36 @@ bool LobbyFlow_TitleTick(uint64_t titleArea)
     // The area can respawn its menu units on a later frame of the same visit.
     RetireNativeTitleUnits(titleArea);
 
-    RunLobbyFrame();
+    RunLobbyFrame(titleArea);
     return g_phase == Phase::Launching;
+}
+
+bool LobbyFlow_IsReleasedToMainMenu()
+{
+    return g_enabled && g_releasedToMainMenu;
+}
+
+bool LobbyFlow_CanReopen()
+{
+    return LobbyFlow_IsReleasedToMainMenu() && TitleAreaIsRunning();
+}
+
+void LobbyFlow_RequestReopen()
+{
+    g_reopenRequested.store(true, std::memory_order_release);
+}
+
+bool LobbyFlow_ReleasedTitleTick(uint64_t titleArea)
+{
+    g_releasedTitleArea = titleArea;
+    g_releasedTitleTick.store(GetTickCount64(), std::memory_order_relaxed);
+    if (!g_reopenRequested.exchange(false, std::memory_order_acq_rel)) return false;
+    HookLog("LobbyFlow: reopening the lobby from the main menu\n");
+    g_releasedToMainMenu = false;
+    g_titleNeedsSetup = true;
+    SetPhase(Phase::Lobby);
+    LobbyFlow_TitleTick(titleArea);
+    return true;
 }
 
 void LobbyFlow_OnBattleBootCommitted()

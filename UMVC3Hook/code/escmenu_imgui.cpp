@@ -153,6 +153,10 @@ void EscMenuImGui_Draw()
         LobbyFlow_RequestReturnToLobby("");
         g_open = false;
     }
+    if (LobbyFlow_CanReopen() && ImGui::Button("Online Lobby", buttonSize)) {
+        LobbyFlow_RequestReopen();
+        g_open = false;
+    }
     if (ImGui::Button("Exit Game", buttonSize))
         ExitGame();
 

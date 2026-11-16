@@ -31,7 +31,8 @@ public:
     void Draw(Canvas& canvas);
 
     uint32_t TakeSfx();
-    bool TakeExitRequested();
+    // True once after the player chose to leave the lobby for the main menu.
+    bool TakeMainMenuRequested();
     bool TakePrefsDirty();
     const UiPrefs& Prefs() const { return prefs_; }
 
@@ -49,7 +50,7 @@ public:
 private:
     enum class Screen : uint8_t { Top, Browse, Create, Room, Team };
     enum class TextTarget : uint8_t { None, RoomName, Chat };
-    enum class Confirm : uint8_t { None, LeaveRoom, ExitGame };
+    enum class Confirm : uint8_t { None, LeaveRoom, MainMenu };
 
     void GoTo(Screen screen);
     void Play(uint32_t sfx) { sfx_ |= sfx; }
@@ -98,7 +99,7 @@ private:
     uint32_t screenFrame_ = 0; // frames since the current screen was entered
     uint32_t sfx_ = 0;
     bool prefsDirty_ = false;
-    bool exitRequested_ = false;
+    bool mainMenuRequested_ = false;
     bool wasInRoom_ = false;
     bool leftByChoice_ = false;
     bool usingKeyboard_ = false;
