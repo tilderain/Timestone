@@ -69,6 +69,17 @@ constexpr uintptr_t MAINMENU_MOVE_READY_RETURN = 0x1403E7514; // in uMenuMain's 
 constexpr uintptr_t MAINMENU_INITIAL_SELECT_RETURN = 0x1403E7274;
 constexpr size_t MENU_CURSOR = 0x78;
 constexpr int32_t MAINMENU_ITEM_ONLINE = 1;
+constexpr uintptr_t UMENUMAIN_DTI = 0x140D6AE60;
+constexpr uintptr_t MTOBJECT_VT_GET_DTI = 0x20;
+// uMenuMain keeps its layout (ma_menu_main) in a unit reference at +0xD0;
+// the getter returns the uScheduler. uMenuMain::kill only takes it down in
+// some states, so the lobby kills it explicitly.
+constexpr size_t UMENUMAIN_LAYOUT_REF = 0xD0;
+constexpr uintptr_t UNIT_REF_GET = 0x1402B6D80;
+constexpr ULONGLONG kOnlineFadeOutMs = 200;
+constexpr ULONGLONG kOnlineFadeInMs = 250;
+constexpr ULONGLONG kOnlineFadeLimitMs = 3000; // never leave the screen black
+constexpr uint32_t CUNIT_FIX = 0x2000; // uMenuMain::kill keeps its layout alive while set
 constexpr size_t SGAMEUI_TITLE_BYTE_1 = 0x5C40;
 constexpr size_t SGAMEUI_TITLE_BYTE_2 = 0x5EA8;
 constexpr size_t CUNIT_FLAGS = 0x10;
@@ -96,6 +107,10 @@ bool g_titleRequested = false;
 bool g_releasedToMainMenu = false;
 std::atomic<bool> g_reopenRequested{false};
 std::atomic<ULONGLONG> g_releasedTitleTick{0};
+// Main menu "Online" transition: black fades out over the menu, holds until
+// the lobby can draw, then fades in. Read by the overlay (render thread).
+std::atomic<ULONGLONG> g_fadeOutStart{0}, g_fadeInStart{0};
+std::atomic<bool> g_fadeHold{false};
 
 std::unique_ptr<SteamRoomService> g_service;
 std::unique_ptr<LobbyUi> g_ui;
@@ -263,17 +278,35 @@ void RetireNativeTitleUnits(uint64_t titleArea)
     for (const size_t offset : {ATITLE_TITLE_MENU, ATITLE_MAIN_MENU}) {
         void*& unit = *reinterpret_cast<void**>(titleArea + offset);
         if (!unit) continue;
-        const uint32_t state = *reinterpret_cast<uint32_t*>(
-            static_cast<uint8_t*>(unit) + CUNIT_FLAGS) & 7u;
+        uint32_t& flags = *reinterpret_cast<uint32_t*>(static_cast<uint8_t*>(unit) + CUNIT_FLAGS);
+        const uint32_t state = flags & 7u;
         if (state == 1 || state == 2) {
+            // A menu that is mid-transition is "fixed", and its kill then
+            // leaves the layout scheduler running; it must go with the menu.
+            flags &= ~CUNIT_FIX;
             using Kill = void(__fastcall*)(void*);
+            void* layout = nullptr;
+            if (offset == ATITLE_MAIN_MENU) {
+                using RefGet = void*(__fastcall*)(void*);
+                layout = reinterpret_cast<RefGet>(_addr(UNIT_REF_GET))(
+                    static_cast<uint8_t*>(unit) + UMENUMAIN_LAYOUT_REF);
+            }
             (*reinterpret_cast<Kill*>(*reinterpret_cast<uint8_t**>(unit) + CUNIT_VT_KILL))(unit);
-            HookLog("LobbyFlow: retired native title unit at aTitle+0x%X\n",
-                    static_cast<unsigned>(offset));
+            if (layout) {
+                const uint32_t layoutState = *reinterpret_cast<uint32_t*>(
+                    static_cast<uint8_t*>(layout) + CUNIT_FLAGS) & 7u;
+                if (layoutState == 1 || layoutState == 2) {
+                    (*reinterpret_cast<Kill*>(*reinterpret_cast<uint8_t**>(layout) + CUNIT_VT_KILL))(layout);
+                    HookLog("LobbyFlow: killed the main menu layout left behind by its menu\n");
+                }
+            }
+            HookLog("LobbyFlow: retired native title unit at aTitle+0x%X (state %u -> %u)\n",
+                    static_cast<unsigned>(offset), state, flags & 7u);
         }
         unit = nullptr;
     }
 }
+
 
 // ---------------------------------------------------------------------------
 // Main menu "Online" -> lobby
@@ -291,10 +324,16 @@ bool TitleAreaIsRunning()
     return GetTickCount64() - g_releasedTitleTick.load(std::memory_order_relaxed) < 500;
 }
 
-void* ReleasedMainMenu()
+// Any live uMenuMain counts, not only the one aTitle tracks at +0x98: the
+// navigation state is shared by every menu class and must be told apart by
+// class, and the title area can respawn its menu on its own.
+bool IsReleasedMainMenu(void* menu)
 {
-    if (!g_releasedToMainMenu || !g_releasedTitleArea || !TitleAreaIsRunning()) return nullptr;
-    return *reinterpret_cast<void**>(g_releasedTitleArea + ATITLE_MAIN_MENU);
+    if (!g_releasedToMainMenu || !menu || !TitleAreaIsRunning()) return false;
+    using GetDti = void*(__fastcall*)(void*);
+    const GetDti getDti = *reinterpret_cast<GetDti*>(
+        *reinterpret_cast<uint8_t**>(menu) + MTOBJECT_VT_GET_DTI);
+    return getDti(menu) == reinterpret_cast<void*>(_addr(UMENUMAIN_DTI));
 }
 
 __attribute__((noinline)) bool __fastcall Hook_SessionReady(void* library)
@@ -310,16 +349,39 @@ __attribute__((noinline)) bool __fastcall Hook_SessionReady(void* library)
 
 uint64_t __fastcall Hook_MenuNavigation(void* menu, int32_t* out)
 {
-    void* mainMenu = ReleasedMainMenu();
-    const bool isMainMenu = mainMenu && menu == mainMenu;
-    g_inMainMenuNavigation = isMainMenu;
+    if (!IsReleasedMainMenu(menu)) return g_originalMenuNavigation(menu, out);
+
+    // The menu is frozen while the transition to the lobby plays.
+    if (g_fadeHold.load(std::memory_order_relaxed)) return 1;
+
+    // Take the decide on Online before the menu sees it: its own handler
+    // starts the native network entry, which leaves the menu half torn down.
+    Input input = {};
+    Native_ReadInput(input, false);
+    if (input.confirm &&
+        *reinterpret_cast<int32_t*>(static_cast<uint8_t*>(menu) + MENU_CURSOR) ==
+            MAINMENU_ITEM_ONLINE) {
+        HookLog("LobbyFlow: Online chosen on the main menu\n");
+        Native_PlaySfx(SFX_CONFIRM);
+        g_fadeInStart.store(0, std::memory_order_relaxed);
+        g_fadeOutStart.store(GetTickCount64(), std::memory_order_relaxed);
+        g_fadeHold.store(true, std::memory_order_release);
+        return 1;
+    }
+
+    g_inMainMenuNavigation = true;
     const uint64_t result = g_originalMenuNavigation(menu, out);
     g_inMainMenuNavigation = false;
-    if (isMainMenu && out && *out == 1 &&
+    // A decide that did not come through the pad or keyboard (a mouse click)
+    // has already been taken by the menu, which played its own sound.
+    if (out && *out == 1 &&
         *reinterpret_cast<int32_t*>(static_cast<uint8_t*>(menu) + MENU_CURSOR) ==
-            MAINMENU_ITEM_ONLINE &&
-        !g_reopenRequested.exchange(true, std::memory_order_acq_rel))
-        HookLog("LobbyFlow: Online chosen on the main menu\n");
+            MAINMENU_ITEM_ONLINE) {
+        HookLog("LobbyFlow: Online clicked on the main menu\n");
+        g_fadeInStart.store(0, std::memory_order_relaxed);
+        g_fadeOutStart.store(GetTickCount64(), std::memory_order_relaxed);
+        g_fadeHold.store(true, std::memory_order_release);
+    }
     return result;
 }
 
@@ -673,6 +735,9 @@ void RunLobbyFrame(uint64_t titleArea)
         g_ui->Draw(*canvas);
         Native_EndFrame();
         g_nativeWaitFrames.store(0, std::memory_order_relaxed);
+        // The lobby is on screen: lift the black left by the Online transition.
+        if (g_fadeHold.exchange(false, std::memory_order_acq_rel))
+            g_fadeInStart.store(GetTickCount64(), std::memory_order_release);
     } else {
         const uint32_t waited = g_nativeWaitFrames.fetch_add(1, std::memory_order_relaxed) + 1;
         if (waited == kNativeFailedFrames)
@@ -708,6 +773,26 @@ bool LobbyFlow_IsLobbyVisible()
 void LobbyFlow_DrawOverlay()
 {
     if (!g_enabled) return;
+
+    const ULONGLONG now = GetTickCount64();
+    float black = 0.0f;
+    if (g_fadeHold.load(std::memory_order_acquire)) {
+        const ULONGLONG elapsed = now - g_fadeOutStart.load(std::memory_order_relaxed);
+        black = elapsed >= kOnlineFadeOutMs ? 1.0f
+                                            : static_cast<float>(elapsed) / kOnlineFadeOutMs;
+        if (elapsed > kOnlineFadeLimitMs) g_fadeHold.store(false, std::memory_order_release);
+    } else if (const ULONGLONG fadeIn = g_fadeInStart.load(std::memory_order_acquire)) {
+        const ULONGLONG elapsed = now - fadeIn;
+        if (elapsed >= kOnlineFadeInMs)
+            g_fadeInStart.store(0, std::memory_order_relaxed);
+        else
+            black = 1.0f - static_cast<float>(elapsed) / kOnlineFadeInMs;
+    }
+    if (black > 0.0f)
+        ImGui::GetBackgroundDrawList()->AddRectFilled(
+            ImVec2(0.0f, 0.0f), ImGui::GetIO().DisplaySize,
+            IM_COL32(0, 0, 0, static_cast<int>(black * 255.0f + 0.5f)));
+
     const uint32_t waited = g_nativeWaitFrames.load(std::memory_order_relaxed);
     if (waited < kNativeSlowFrames) return;
     const bool failed = waited >= kNativeFailedFrames;
@@ -812,6 +897,10 @@ bool LobbyFlow_ReleasedTitleTick(uint64_t titleArea)
 {
     g_releasedTitleArea = titleArea;
     g_releasedTitleTick.store(GetTickCount64(), std::memory_order_relaxed);
+    // "Online" on the main menu: switch once the fade has covered the screen.
+    if (g_fadeHold.load(std::memory_order_relaxed) && !g_fadeInStart.load(std::memory_order_relaxed) &&
+        GetTickCount64() - g_fadeOutStart.load(std::memory_order_relaxed) >= kOnlineFadeOutMs)
+        g_reopenRequested.store(true, std::memory_order_release);
     if (!g_reopenRequested.exchange(false, std::memory_order_acq_rel)) return false;
     HookLog("LobbyFlow: reopening the lobby from the main menu\n");
     g_releasedToMainMenu = false;

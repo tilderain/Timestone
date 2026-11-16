@@ -283,8 +283,14 @@ sites ask through the thunk at `0x14045CFF0`: `uMenuMain`'s move (return
 (return `0x1403E7274`) and the shared navigation state
 `uMenu__modeFlow_s7_inputNavigation` `0x1403E9D90` (cursor at `+0x78`, writes 1
 to its out parameter on decide). While released, the thunk is answered "ready"
-for those three only (the navigation one only for the main menu unit), and
-deciding on item 1 reopens the lobby. Native modes started from that menu run with the lobby's
+for those three only (the navigation one only for `uMenuMain` units, told
+apart by DTI `0x140D6AE60`). A pad or keyboard decide on item 1 is taken
+before the menu sees it, because its own handler starts the native network
+entry and leaves the menu half torn down: the plugin plays the decide cue,
+fades to black with an ImGui rectangle (200 ms), kills the menu and fades the
+lobby in (250 ms) once it can draw. `uMenuMain::kill` does not always take
+its layout scheduler (unit reference at `+0xD0`, getter `0x1402B6D80`) with
+it, so that is killed explicitly. Native modes started from that menu run with the lobby's
 launch option still set, which has not been exercised either.
 
 ## First in-game run: what to check
