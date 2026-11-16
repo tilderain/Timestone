@@ -143,10 +143,12 @@ public:
     }
 
     void Text(const char* text, float x, float y, float scale, Anchor anchor,
-              Color color = kText, Font font = FONT_BODY) const
+              Color color = kText, Font font = FONT_BODY, float stretch = 1.0f,
+              Blend blend = BLEND_NORMAL) const
     {
         if (!text || !text[0]) return;
-        canvas_.Text(text, x + dx_, y, scale, anchor, WithAlpha(color, alpha_), font);
+        canvas_.Text(text, x + dx_, y, scale, anchor, WithAlpha(color, alpha_), font, stretch,
+                     blend);
     }
 
     void TextFit(const char* text, float x, float y, float scale, float maxWidth,
@@ -217,6 +219,12 @@ LobbyUi::LobbyUi(RoomService& service, const RosterSource& roster, const UiPrefs
         prefs_.create.slotCount = 2;
     if (static_cast<int>(prefs_.create.visibility) > 2)
         prefs_.create.visibility = Visibility::Public;
+}
+
+void LobbyUi::PlayEntrance(uint32_t delayFrames)
+{
+    screenFrame_ = 0;
+    entranceDelay_ = delayFrames;
 }
 
 void LobbyUi::GoTo(Screen screen)
@@ -337,7 +345,12 @@ bool LobbyUi::MoveCursor(int& cursor, int count, const Input& input, bool wrap)
 void LobbyUi::Update(const Input& input)
 {
     ++frame_;
-    if (screenFrame_ < 100000) ++screenFrame_;
+    if (entranceDelay_ > 0) {
+        --entranceDelay_;
+        screenFrame_ = 0;
+    } else if (screenFrame_ < 100000) {
+        ++screenFrame_;
+    }
     usingKeyboard_ = input.usingKeyboard;
 
     SyncWithService();
@@ -951,7 +964,12 @@ const char* LobbyUi::DrawTop(Canvas& canvas) const
             p.Sprite(TEX_MENU_SEL, 1296.0f + shift, y, 640.0f, 72.0f,
                      Uv{12.0f / 512.0f, 10.0f / 64.0f, 1.0f, 58.0f / 64.0f}, A_MR,
                      WithAlpha(kWhite, MenuBarFade(frame_)));
-            p.Text(kTopItems[i], 1104.0f + shift, y - 2.0f, 0.5f, A_MR, kInk, FONT_HEADING);
+            // The selected label as the native main menu draws it
+            // (main_menu01 in ma_menu_main): mScale (0.8, 0.92), which a font
+            // unit applies twice, white, with the menu's ink blend. Same
+            // proportions here, at 85% of that size to suit the lobby's bar.
+            p.Text(kTopItems[i], 1104.0f + shift, y - 2.0f, 0.54f, A_MR, kWhite, FONT_HEADING,
+                   0.8464f / 0.64f, BLEND_MENU_INK);
         } else {
             p.Sprite(TEX_MENU_BAR, 1296.0f + shift, y, 600.0f, 58.0f,
                      Uv{14.0f / 512.0f, 12.0f / 64.0f, 452.0f / 512.0f, 52.0f / 64.0f}, A_MR,

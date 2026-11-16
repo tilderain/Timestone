@@ -46,6 +46,10 @@ public:
     void SetBusy(const char* text);
     // Re-enter the room screen after a match without replaying transitions.
     void ReturnToRoom();
+    // Replays the current screen's slide-in, holding it back for `delayFrames`
+    // first. The lobby calls this when it actually becomes visible: frames
+    // tick before the native backend can draw, and under the fade from black.
+    void PlayEntrance(uint32_t delayFrames);
 
 private:
     enum class Screen : uint8_t { Top, Browse, Create, Room, Team };
@@ -97,6 +101,7 @@ private:
     Screen teamReturn_ = Screen::Top;
     uint32_t frame_ = 0;
     uint32_t screenFrame_ = 0; // frames since the current screen was entered
+    uint32_t entranceDelay_ = 0;
     uint32_t sfx_ = 0;
     bool prefsDirty_ = false;
     bool mainMenuRequested_ = false;

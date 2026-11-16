@@ -89,6 +89,7 @@ constexpr uint32_t SPRITE_ATTR_AUTO_SIZE = 0x1; // resize to the texture on assi
 constexpr uint32_t SPRITE_ATTR_SHADOW = 0x2;
 constexpr uint32_t SPRITE_ATTR_GRADIENT = 0x10;
 constexpr size_t SPRITE_CENTER_ATTR = 0x368;
+constexpr size_t SPRITE_BLEND_STATE = 0x398;
 constexpr size_t FRAME_ATTR = 0x540;         // bit 0: tile the centre cell
 constexpr size_t FONT_MSG_INDEX = 0x594;     // -1 while showing a raw string
 constexpr size_t FONT_CACHED_MSG_ID = 0x6F0;
@@ -406,7 +407,7 @@ public:
     }
 
     void Text(const char* utf8, float x, float y, float scale, Anchor anchor, Color color,
-              Font font) override
+              Font font, float stretch, Blend blend) override
     {
         if (!utf8 || !utf8[0] || color.a <= 0.004f) return;
         void* unit = AcquireUnit(KIND_FONT);
@@ -433,9 +434,13 @@ public:
         //    always placed with its top at the anchor whatever the row.
         // The canvas contract is linear scale and a true vertical anchor.
         const float cell = font == FONT_HEADING ? 64.0f : 32.0f;
-        const float unitScale = sqrtf(scale > 0.0f ? scale : 0.0f);
-        const float top = y - static_cast<float>(anchor / 3) * 0.5f * cell * scale;
-        ApplyPlacement(unit, x, top, unitScale, unitScale, anchor, color);
+        const float scaleY = scale * stretch;
+        const float unitScaleX = sqrtf(scale > 0.0f ? scale : 0.0f);
+        const float unitScaleY = sqrtf(scaleY > 0.0f ? scaleY : 0.0f);
+        const float top = y - static_cast<float>(anchor / 3) * 0.5f * cell * scaleY;
+        // Pooled units are reused, so the blend state is set on every draw.
+        Field<int32_t>(unit, SPRITE_BLEND_STATE) = blend;
+        ApplyPlacement(unit, x, top, unitScaleX, unitScaleY, anchor, color);
     }
 };
 

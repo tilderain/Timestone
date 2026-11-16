@@ -35,7 +35,7 @@ public:
     }
 
     void Text(const char* utf8, float x, float y, float scale, Anchor anchor, Color color,
-              Font font) override
+              Font font, float stretch, Blend blend) override
     {
         std::string escaped;
         for (const char* c = utf8; *c; ++c) {
@@ -46,7 +46,10 @@ public:
         snprintf(line, sizeof(line),
                  "{\"type\":\"text\",\"str\":\"%s\",\"pos\":[%.2f,%.2f],\"scale\":[%.3f,%.3f],"
                  "\"anchor\":%d,\"color\":[%.3f,%.3f,%.3f,%.3f],\"font\":%d,\"depth\":%d}",
-                 escaped.c_str(), x, y, scale, scale, anchor, color.r, color.g, color.b, color.a,
+                 escaped.c_str(), x, y, scale, scale * stretch, anchor,
+                 // The offline renderer has no blend states: show ink as black.
+                 blend == BLEND_MENU_INK ? 0.0f : color.r, blend == BLEND_MENU_INK ? 0.0f : color.g,
+                 blend == BLEND_MENU_INK ? 0.0f : color.b, color.a,
                  static_cast<int>(font), Depth());
         commands_.push_back(line);
     }

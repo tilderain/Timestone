@@ -103,6 +103,15 @@ enum Font : uint8_t {
     FONT_HEADING = 4, // bada_b, 64px cell: bold outlined menu headings
 };
 
+// uBaseSprite::mBlendState values the menus use for text.
+enum Blend : uint8_t {
+    BLEND_NORMAL = 1,
+    // What the native main menu puts on its selected label: drawn in white,
+    // the glyph fill comes out black on the white bar and the font's dark
+    // outline disappears, so the letters are thinner than a black tint gives.
+    BLEND_MENU_INK = 5,
+};
+
 class Canvas {
 public:
     virtual ~Canvas() = default;
@@ -116,8 +125,11 @@ public:
     virtual void Frame(Tex tex, float x, float y, float w, float h, Uv uv,
                        Anchor anchor, Color color) = 0;
 
+    // `scale` is the horizontal scale; the vertical one is scale * stretch
+    // (the native main menu draws its labels about 1.3 times taller than wide).
     virtual void Text(const char* utf8, float x, float y, float scale,
-                      Anchor anchor, Color color, Font font = FONT_BODY) = 0;
+                      Anchor anchor, Color color, Font font = FONT_BODY,
+                      float stretch = 1.0f, Blend blend = BLEND_NORMAL) = 0;
 };
 
 // Advance-width sum at scale 1.0 using the fonts' own metric tables.

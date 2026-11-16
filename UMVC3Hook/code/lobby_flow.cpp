@@ -81,6 +81,12 @@ constexpr uintptr_t SMVC3GUIDE_GET_INSTANCE = 0x140001AE0;
 constexpr uintptr_t SMVC3GUIDE_SET_UI_GUIDE_MODE = 0x1402837C0; // (this, mode)
 constexpr uintptr_t SLICENSE_GET_INSTANCE = 0x140004750;
 constexpr uintptr_t SLICENSE_DISARM_CARD = 0x140279680;
+// aTitle::init switches sMain's frame-wait mode off, and in that mode the
+// title area is only paced by VSync: with VSync off it runs at hundreds of
+// frames per second. Frame-wait mode sleeps to the fixed 60 Hz step.
+constexpr uintptr_t SMAIN_INSTANCE_PTR = 0x140E177E8;
+constexpr size_t SMAIN_FRAME_WAIT = 0x58;
+constexpr uintptr_t SMAIN_SET_FRAME_WAIT = 0x140522420; // (this, bool)
 constexpr ULONGLONG kOnlineFadeOutMs = 200;
 constexpr ULONGLONG kOnlineFadeInMs = 250;
 constexpr ULONGLONG kOnlineFadeLimitMs = 6000; // never leave the screen black
@@ -136,6 +142,8 @@ ULONGLONG g_titleReloadStart = 0;
 bool g_onlineChosen = false;        // main menu: Online picked, fading out
 bool g_releaseNeedsInput = false;   // main menu: input state owed after the reload
 ULONGLONG g_mainMenuReleaseAt = 0;  // lobby: MAIN MENU picked, fading out
+bool g_entrancePending = true;      // lobby: slide-in owed once it can draw
+constexpr uint32_t kEntranceFadeDelay = 8; // frames of the 250 ms fade to sit out
 
 std::unique_ptr<SteamRoomService> g_service;
 std::unique_ptr<LobbyUi> g_ui;
@@ -332,6 +340,16 @@ void RetireNativeTitleUnits(uint64_t titleArea)
     }
 }
 
+
+// Called every title-area frame: each reload of the area clears the mode.
+void EnsureFramePacing()
+{
+    const uint64_t main = *reinterpret_cast<uint64_t*>(_addr(SMAIN_INSTANCE_PTR));
+    if (!main || *reinterpret_cast<uint8_t*>(main + SMAIN_FRAME_WAIT)) return;
+    using SetFrameWait = void(__fastcall*)(uint64_t, bool);
+    reinterpret_cast<SetFrameWait>(_addr(SMAIN_SET_FRAME_WAIT))(main, true);
+    HookLog("LobbyFlow: enabled sMain frame-wait pacing for the title area\n");
+}
 
 void StartBlack()
 {
@@ -832,6 +850,12 @@ void RunLobbyFrame(uint64_t titleArea)
     g_musicWanted = inRoom;
 
     if (Canvas* canvas = Native_BeginFrame()) {
+        if (g_entrancePending) {
+            // First frame the lobby can be seen on this visit: play the
+            // screen's slide-in now, after most of any fade from black.
+            g_entrancePending = false;
+            g_ui->PlayEntrance(g_fadeHold.load(std::memory_order_relaxed) ? kEntranceFadeDelay : 0);
+        }
         g_ui->Draw(*canvas);
         Native_EndFrame();
         g_nativeWaitFrames.store(0, std::memory_order_relaxed);
@@ -929,6 +953,7 @@ void LobbyFlow_EnterTitleFromLogo()
 
 bool LobbyFlow_TitleTick(uint64_t titleArea)
 {
+    EnsureFramePacing();
     if (g_phase == Phase::Launching) {
         if (TrainingBoot_HasNetworkFailed()) {
             // The opponent vanished between the handshake and the battle boot.
@@ -959,12 +984,14 @@ bool LobbyFlow_TitleTick(uint64_t titleArea)
     if (g_titleNeedsSetup) {
         // Everything from a previous visit died with the area change.
         g_titleNeedsSetup = false;
+        g_entrancePending = true;
         Native_Invalidate();
         RetireNativeTitleUnits(titleArea);
         EnsureObjects();
         if (g_phase == Phase::Returning || g_phase == Phase::InMatch) {
             g_service->FinishMatch(false, false);
             g_ui->ReturnToRoom();
+            g_entrancePending = false; // back from a match: the room is simply there
             SetPhase(Phase::Lobby);
         }
         if (g_pendingNotice[0]) {
@@ -999,6 +1026,7 @@ void LobbyFlow_RequestReopen()
 
 bool LobbyFlow_ReleasedTitleTick(uint64_t titleArea)
 {
+    EnsureFramePacing();
     g_releasedTitleArea = titleArea;
     g_releasedTitleTick.store(GetTickCount64(), std::memory_order_relaxed);
     // Leaving the lobby: the outgoing area idles until the rebuilt one runs.
