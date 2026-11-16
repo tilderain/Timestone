@@ -117,6 +117,9 @@ std::array<Change, static_cast<size_t>(ChangeKind::Count)> g_changes = {};
 uint64_t g_changeOrder = 0;
 std::atomic<bool> g_pendingChanges { false };
 
+// Game thread, recorded at the first BeginFrame, for the start-up watchdog.
+std::atomic<DWORD> g_gameThreadId { 0 };
+
 [[noreturn]] void FailTransition(HRESULT result, const char* operation, bool showMessage = true)
 {
     g_nativeReady.store(false);
@@ -162,6 +165,10 @@ void __fastcall HookBeginFrame(void* render)
     if (!gameplayExecutionSettingsApplied) {
         Rollback_DisableGameplayParallelism();
         gameplayExecutionSettingsApplied = true;
+        // Watch from the first frame, not the first EndScene: a start-up
+        // that hangs before anything is drawn would otherwise go unreported.
+        g_gameThreadId.store(GetCurrentThreadId(), std::memory_order_relaxed);
+        D3D9ResetDiagnostics_StartStartupWatchdog();
     }
 
     // EndFrame uses +0x3D as well as the latched +0x3E. Never change either
@@ -889,12 +896,76 @@ LONG ReadCounter(volatile LONG* counter)
     return InterlockedCompareExchange(counter, 0, 0);
 }
 
+// Logs where a thread is, as module+offset frames. The thread is suspended
+// only while its stack is walked into a local array: it may be holding the
+// log or heap lock, so nothing is logged or allocated until it runs again.
+void LogThreadBacktrace(DWORD threadId, const char* label)
+{
+    if (!threadId || threadId == GetCurrentThreadId()) return;
+    HANDLE thread = OpenThread(
+        THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION, FALSE, threadId);
+    if (!thread) {
+        HookLog("D3D9: %s backtrace unavailable (OpenThread error=%lu)\n", label, GetLastError());
+        return;
+    }
+    uintptr_t frames[40] = {};
+    int count = 0;
+    if (SuspendThread(thread) != static_cast<DWORD>(-1)) {
+        CONTEXT context = {};
+        context.ContextFlags = CONTEXT_CONTROL | CONTEXT_INTEGER;
+        if (GetThreadContext(thread, &context)) {
+            while (count < 40 && context.Rip) {
+                frames[count++] = static_cast<uintptr_t>(context.Rip);
+                DWORD64 imageBase = 0;
+                PRUNTIME_FUNCTION function =
+                    RtlLookupFunctionEntry(context.Rip, &imageBase, nullptr);
+                if (function) {
+                    void* handlerData = nullptr;
+                    DWORD64 establisher = 0;
+                    RtlVirtualUnwind(UNW_FLAG_NHANDLER, imageBase, context.Rip, function,
+                                     &context, &handlerData, &establisher, nullptr);
+                } else {
+                    // Leaf function: the return address is at the stack top.
+                    if (IsBadReadPtr(reinterpret_cast<void*>(context.Rsp), 8)) break;
+                    context.Rip = *reinterpret_cast<DWORD64*>(context.Rsp);
+                    context.Rsp += 8;
+                }
+            }
+        }
+        ResumeThread(thread);
+    }
+    CloseHandle(thread);
+
+    HookLog("D3D9: %s thread %lu is at (%d frames):\n", label, threadId, count);
+    for (int i = 0; i < count; ++i) {
+        HMODULE module = nullptr;
+        char path[MAX_PATH] = "?";
+        if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                                   GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                               reinterpret_cast<LPCSTR>(frames[i]), &module) && module) {
+            GetModuleFileNameA(module, path, sizeof(path));
+        }
+        const char* name = strrchr(path, '\\');
+        HookLog("D3D9:   #%02d %s+0x%llX\n", i, name ? name + 1 : path,
+                static_cast<unsigned long long>(frames[i] - reinterpret_cast<uintptr_t>(module)));
+    }
+}
+
 DWORD WINAPI StartupWatchdogThread(LPVOID)
 {
     unsigned elapsedSeconds = 0;
     while (InterlockedCompareExchange(&g_startupComplete, 0, 0) == 0) {
         Sleep(1000);
         ++elapsedSeconds;
+        // A healthy start-up completes within a second of the first frame.
+        // Twice, some time apart, to tell a hang from something slow.
+        if ((elapsedSeconds == 10 || elapsedSeconds == 30) &&
+            InterlockedCompareExchange(&g_startupComplete, 0, 0) == 0) {
+            HookLog("D3D9: start-up has not reached its first drawn frame after %us\n",
+                    elapsedSeconds);
+            LogThreadBacktrace(g_gameThreadId.load(std::memory_order_relaxed), "game");
+            HookLogFlush();
+        }
         if (elapsedSeconds % 5 != 0 ||
             InterlockedCompareExchange(&g_startupComplete, 0, 0) != 0) {
             continue;
