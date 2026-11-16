@@ -1540,7 +1540,8 @@ void Netplay_Shutdown()
         g_serviceThread = nullptr;
     }
 
-    SteamLobby_Shutdown(false);
+    // In a room this only closes the match connection; the room is kept.
+    SteamLobby_EndSession();
 
     if (g_peer)
     {

@@ -4,6 +4,7 @@
 #include "mk10utils.h"
 #include "netplay.h"
 #include "LaunchMenu.h"
+#include "lobby_flow.h"
 #include "framestepper.h"
 #include "../MemoryMgr.h"
 #include "../utils/Trampoline.h"
@@ -169,6 +170,31 @@ void TrainingBoot_FailNetwork(const char* reason)
     if (Netplay_IsActive())
         Netplay_SendPlayerDisconnect(100);
     FrameStepper_ShowOpponentDisconnected();
+}
+
+void TrainingBoot_PrepareNextBoot(bool networkRequired)
+{
+    g_hasBooted = false;
+    g_networkRequired = networkRequired;
+    g_networkConnected = false;
+    g_networkFailed = false;
+    g_initialSettingsSent = false;
+    g_initialSettingsReceived = false;
+    g_initialSettingsSynchronized = false;
+    g_initialSettingsStartTick = 0;
+    g_restartConfigPending = false;
+    g_restartTransitionActive = false;
+    g_restartSawActionSetup = false;
+}
+
+bool TrainingBoot_HasBooted()
+{
+    return g_hasBooted;
+}
+
+bool TrainingBoot_HasNetworkFailed()
+{
+    return g_networkFailed;
 }
 
 static bool IsBootNetworkReady()
@@ -783,6 +809,18 @@ static SetTeamAutoJump_t oSetTeamAutoJump = nullptr;
 
 void __fastcall Hook_titleUpdate(uint64_t param_1)
 {
+    if (LobbyFlow_IsEnabled()) {
+        // The lobby owns the title area: it is drawn here between matches and
+        // starts each battle through the same boot path once a match is set.
+        // Native title logic never runs; its menu units have been retired.
+        if (!g_hasBooted && LobbyFlow_TitleTick(param_1)) {
+            BootIntoTraining();
+            if (g_hasBooted)
+                LobbyFlow_OnBattleBootCommitted();
+        }
+        return;
+    }
+
     if (!g_hasBooted) {
         BootIntoTraining();
         return; // Suppress title updates while boot is pending or starting.

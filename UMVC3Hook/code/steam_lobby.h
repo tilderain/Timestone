@@ -47,3 +47,47 @@ bool SteamLobby_TakeReplacementJoin(uint64_t* lobbyId);
 bool SteamLobby_ResetHostPeer();
 bool SteamLobby_TakeNetworkHandles(ENetHost** outHost, ENetPeer** outPeer,
                                    bool* outIsHost);
+
+// Ends the current peer session. In room mode this only closes the match
+// connection and keeps the player in their room; otherwise it is the full
+// SteamLobby_Shutdown(false).
+void SteamLobby_EndSession();
+// 0 = idle, 1 = searching, 2 = creating, 3 = joining.
+int SteamLobby_GetPendingKind();
+int SteamLobby_GetResultMemberCount(size_t index);
+int SteamLobby_GetResultMemberLimit(size_t index);
+int SteamLobby_GetResultSlotCount(size_t index);
+bool SteamLobby_IsResultInMatch(size_t index);
+
+// ---------------------------------------------------------------------------
+// Room mode: multi-player lobbies for the in-game lobby (see lobby_room.cpp).
+// A room is a Steam lobby advertised under "TimestoneRoom". Joining it does
+// not connect anyone; SteamRoom_ConnectPeer opens the match connection between
+// the two players seated at a match slot.
+// ---------------------------------------------------------------------------
+void SteamRoom_SetMode(bool enabled);
+bool SteamRoom_IsActive();
+uint64_t SteamRoom_GetLobbyId();
+uint64_t SteamRoom_GetLocalId();
+void SteamRoom_Create(SteamLobbyType type, int maxMembers, int slotCount, const char* name);
+void SteamRoom_Leave();
+int SteamRoom_GetMemberCount();
+uint64_t SteamRoom_GetMember(int index);
+uint64_t SteamRoom_GetOwner();
+int SteamRoom_GetMemberLimit();
+const char* SteamRoom_GetMemberName(uint64_t memberId);
+const char* SteamRoom_GetMemberData(uint64_t memberId, const char* key);
+void SteamRoom_SetLocalData(const char* key, const char* value);
+const char* SteamRoom_GetData(const char* key);
+void SteamRoom_SetData(const char* key, const char* value); // owner only
+int SteamRoom_EstimateMemberPing(uint64_t memberId);
+bool SteamRoom_SendChat(const void* data, int size);
+// Returns the next received lobby chat entry (including our own), or false.
+bool SteamRoom_PollChat(uint64_t* sender, char* buffer, int capacity, int* size);
+void SteamRoom_InviteFriends();
+// Opens (and keeps retrying) the match connection to another room member.
+// asHost selects the ENet server role; the two players must disagree.
+bool SteamRoom_ConnectPeer(uint64_t memberId, bool asHost);
+// Closes the match connection and transport bridge; the room is kept.
+void SteamRoom_DisconnectPeer();
+bool SteamRoom_TakePeerFailed();

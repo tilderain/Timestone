@@ -28,6 +28,7 @@
 #include "live_benchmark.h"
 #include "keyboard_input.h"
 #include "trainingboot.h"
+#include "lobby_flow.h"
 
 // Netplay debug info from controller.cpp
 extern "C" int32_t Controller_GetDelayFrames();
@@ -576,6 +577,8 @@ static void __fastcall HookedMove(void* sMvc3Main)
 
     LagDiagnosticScope diagnostic(LagMetric::Frame, Controller_GetNetFrameCount());
     ApplyAdvancedLaunchConfig();
+    // In-game lobby: room upkeep during a match and the return-to-room request.
+    LobbyFlow_GameTick();
 
     // These setters rewrite live sMain timing and subsystem state. Applying
     // them from the initialization thread can race native startup before the
@@ -1284,7 +1287,60 @@ void FrameStepper_InitNetplay()
 
 void FrameStepper_ShowOpponentDisconnected()
 {
+    if (LobbyFlow_InRoomMatch()) {
+        // A room match ends by returning to the room, not by ending the session.
+        LobbyFlow_RequestReturnToLobby("Connection to opponent has been lost.");
+        return;
+    }
     g_opponentDisconnected = true;
+}
+
+void FrameStepper_EndNetplaySession()
+{
+    // Same per-match state a full synchronized restart clears, followed by the
+    // transport shutdown. The battle generation moves on so packets from the
+    // finished match can never be mistaken for the next one.
+    Controller_ClearDesyncDetection();
+    Rollback_ClearPendingReSimulation();
+    Rollback_FreeSnapshots();
+    if (Netplay_IsActive())
+        Netplay_ClearInputQueues();
+    Controller_ResetBuffers();
+    Controller_ResetFrameEpoch();
+    Rollback_ResetNetplayOutputDirectory();
+    GameUI_SetWaitingForOpponent(false);
+    GameUI_ResetOpponentDisconnectedPopup();
+
+    g_restartTargetFrame = -1;
+    g_restartKind = RESTART_FULL_MATCH;
+    g_restartButtonMode = 0;
+    g_nativeRestartTransitionPending = false;
+    g_trainingRestartBarrier = false;
+    g_trainingRestartLeftFighting = false;
+    g_delayRestartWaitPopup = false;
+    g_restartWaitStartTick = 0;
+    g_restartWaitPopupBarrier = 0;
+    g_battleSynchronized = false;
+    g_localReady = false;
+    g_remoteReady = false;
+    g_localRelease = false;
+    g_remoteRelease = false;
+    g_roundSeedReady = false;
+    g_roundSeed = 0;
+    g_localFighting = false;
+    g_remoteFighting = false;
+    g_desyncCheckReady = false;
+    ++g_battleGeneration;
+    if (g_battleGeneration == 0)
+        g_battleGeneration = 1;
+    ResetOpeningMemberHandshake();
+    g_advertisedBattleFlags = 0;
+    g_battleAdvertiseTick = 0;
+    g_opponentDisconnected = false;
+    isPaused = false;
+
+    Netplay_Shutdown();
+    HookLog("FrameStepper: netplay session ended (generation=%u)\n", g_battleGeneration);
 }
 
 void FrameStepper_Init()

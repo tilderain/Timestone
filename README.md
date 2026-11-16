@@ -29,6 +29,12 @@ Windows:  in an MSYS2 MINGW64 shell, first `pacman -S mingw-w64-x86_64-toolchain
 Use `-five-bars` with a training launch to start both teams with five hyper bars
 (and every Frank at level 3).
 
+The game boots into the in-game lobby by default: multi-player rooms with
+match slots, drawn with the game's own UI. Use `-launcher` (or
+`[Launch] NativeLobby=0` in `Timestone.ini`) for the external launcher
+instead. See [doc/native_lobby_ui.md](doc/native_lobby_ui.md); the in-game
+lobby has not been validated in play yet.
+
 For AI-assisted desync investigation, there is a semi reliable autotester for moves from the attack command matcher. It supports move names, and move numbers (from the command matcher)
 
 ```text

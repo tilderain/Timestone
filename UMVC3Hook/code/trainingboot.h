@@ -149,3 +149,9 @@ bool TrainingBoot_IsRestartPending();
 
 // Init the hook on aTitle__update.
 void TrainingBoot_InitHooks();
+
+// In-game lobby: arm another boot from the title area. Clears the one-shot
+// boot latch and the per-match network/settings handshake state.
+void TrainingBoot_PrepareNextBoot(bool networkRequired);
+bool TrainingBoot_HasBooted();
+bool TrainingBoot_HasNetworkFailed();

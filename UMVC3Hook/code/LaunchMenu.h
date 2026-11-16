@@ -79,6 +79,10 @@ void UpdateLaunchNetworkConnection();
 // Send the host's selected training configuration after the peer connects.
 void SendTrainingLaunchPacket();
 
+// Delay/rollback the launcher would pick for a measured one-way ping.
+void LaunchMenu_GetAutomaticNetplaySettings(uint32_t pingMs, int32_t* delay,
+                                            int32_t* rollback);
+
 // Apply a host-selected training configuration received by an auto-connected
 // dual-training client before its training boot sequence begins.
 bool ApplyTrainingLaunchPacket(const LaunchTrainingPacket& packet);

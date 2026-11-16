@@ -4,6 +4,7 @@
 #include "framestepper.h"
 #include "LaunchMenu.h"
 #include "LaunchMenu_settings.h"
+#include "lobby_flow.h"
 #include "netplay.h"
 #include "steam_lobby.h"
 #include "umvc3menu.h"
@@ -34,7 +35,8 @@ void ExitGame()
 
 void EscMenuImGui_Update()
 {
-    if (GetLaunchOption() == LAUNCH_NORMAL) {
+    // The native lobby has its own menus, and Esc is its Start button.
+    if (GetLaunchOption() == LAUNCH_NORMAL || LobbyFlow_IsLobbyVisible()) {
         g_open = false;
         return;
     }
@@ -147,6 +149,10 @@ void EscMenuImGui_Draw()
     if (ImGui::Button("Open Opponent Steam Profile", buttonSize))
         SteamLobby_OpenPeerProfile();
     if (!steamProfileAvailable) ImGui::EndDisabled();
+    if (LobbyFlow_InRoomMatch() && ImGui::Button("Return to Lobby", buttonSize)) {
+        LobbyFlow_RequestReturnToLobby("");
+        g_open = false;
+    }
     if (ImGui::Button("Exit Game", buttonSize))
         ExitGame();
 

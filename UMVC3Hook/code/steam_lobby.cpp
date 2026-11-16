@@ -64,6 +64,15 @@ struct SteamAPI {
     bool (*SetLobbyData)(void*, uint64_t, const char*, const char*) = nullptr;
     const char* (*GetLobbyData)(void*, uint64_t, const char*) = nullptr;
     bool (*SetLobbyJoinable)(void*, uint64_t, bool) = nullptr;
+    // Room mode (in-game lobby): per-member state and lobby chat.
+    void (*SetLobbyMemberData)(void*, uint64_t, const char*, const char*) = nullptr;
+    const char* (*GetLobbyMemberData)(void*, uint64_t, uint64_t, const char*) = nullptr;
+    bool (*SendLobbyChatMsg)(void*, uint64_t, const void*, int) = nullptr;
+    int (*GetLobbyChatEntry)(void*, uint64_t, int, uint64_t*, void*, int, int*) = nullptr;
+    int (*GetLobbyMemberLimit)(void*, uint64_t) = nullptr;
+    void* (*GetUserInterface)(void*, HSteamUser, HSteamPipe, const char*) = nullptr;
+    uint64_t (*GetSteamID)(void*) = nullptr;
+    void (*ActivateInviteDialog)(void*, uint64_t) = nullptr;
     bool (*SetRichPresence)(void*, const char*, const char*) = nullptr;
     void (*SetPlayedWith)(void*, uint64_t) = nullptr;
 
@@ -100,6 +109,16 @@ size_t g_friendLobbyCandidateCount = 0;
 bool g_resultsChanged = false;
 uint64_t g_lobbyId = 0;
 bool g_isHost = false;
+// Room mode: the lobby is a multi-player room. Membership no longer implies a
+// peer connection; one is opened on request between the two seated players.
+bool g_roomMode = false;
+int g_roomCreateSlots = 2;
+uint64_t g_roomPeer = 0;
+bool g_roomPeerFailed = false;
+uint64_t g_localSteamId = 0;
+std::atomic<uint32_t> g_chatHead{0}, g_chatTail{0};
+int g_chatIds[64] = {};
+bool g_roomCallbacksRegistered = false;
 HSteamListenSocket g_listenSocket = k_HSteamListenSocket_Invalid;
 HSteamNetConnection g_connection = k_HSteamNetConnection_Invalid;
 ENetHost* g_gameHost = nullptr;
@@ -222,6 +241,29 @@ public:
 
 GameLobbyJoinRequestedCallback g_gameLobbyJoinRequestedCallback;
 GameRichPresenceJoinRequestedCallback g_gameRichPresenceJoinRequestedCallback;
+// Lobby chat arrives as a callback carrying only an entry id. The callback can
+// run on the worker pump thread, so it just queues the id for the game thread.
+class LobbyChatMsgCallback final : public SteamCallbackBase {
+public:
+    LobbyChatMsgCallback() { m_iCallback = k_iCallbackLobbyChatMsg; }
+
+    void Run(void* param) override
+    {
+        if (!param) return;
+        auto* message = static_cast<LobbyChatMsgCompat_t*>(param);
+        if (message->m_ulSteamIDLobby != g_lobbyId) return;
+        const uint32_t head = g_chatHead.load(std::memory_order_relaxed);
+        if (head - g_chatTail.load(std::memory_order_acquire) >= 64) return;
+        g_chatIds[head % 64] = static_cast<int>(message->m_iChatID);
+        g_chatHead.store(head + 1, std::memory_order_release);
+    }
+
+    void Run(void* param, bool, SteamAPICall_t) override { Run(param); }
+    int GetCallbackSizeBytes() override { return sizeof(LobbyChatMsgCompat_t); }
+};
+
+LobbyChatMsgCallback g_lobbyChatMsgCallback;
+
 static_assert(sizeof(GameLobbyJoinRequestedCallback) == 16);
 static_assert(sizeof(GameRichPresenceJoinRequestedCallback) == 16);
 
@@ -306,6 +348,15 @@ bool ResolveExports()
     ok &= Resolve(g_api.SetLobbyData, "SteamAPI_ISteamMatchmaking_SetLobbyData");
     ok &= Resolve(g_api.GetLobbyData, "SteamAPI_ISteamMatchmaking_GetLobbyData");
     ok &= Resolve(g_api.SetLobbyJoinable, "SteamAPI_ISteamMatchmaking_SetLobbyJoinable");
+    ResolveOptional(g_api.SetLobbyMemberData, "SteamAPI_ISteamMatchmaking_SetLobbyMemberData");
+    ResolveOptional(g_api.GetLobbyMemberData, "SteamAPI_ISteamMatchmaking_GetLobbyMemberData");
+    ResolveOptional(g_api.SendLobbyChatMsg, "SteamAPI_ISteamMatchmaking_SendLobbyChatMsg");
+    ResolveOptional(g_api.GetLobbyChatEntry, "SteamAPI_ISteamMatchmaking_GetLobbyChatEntry");
+    ResolveOptional(g_api.GetLobbyMemberLimit, "SteamAPI_ISteamMatchmaking_GetLobbyMemberLimit");
+    ResolveOptional(g_api.GetUserInterface, "SteamAPI_ISteamClient_GetISteamUser");
+    ResolveOptional(g_api.GetSteamID, "SteamAPI_ISteamUser_GetSteamID");
+    ResolveOptional(g_api.ActivateInviteDialog,
+                    "SteamAPI_ISteamFriends_ActivateGameOverlayInviteDialog");
     ResolveOptional(g_api.SetRichPresence, "SteamAPI_ISteamFriends_SetRichPresence");
     ResolveOptional(g_api.SetPlayedWith, "SteamAPI_ISteamFriends_SetPlayedWith");
     ok &= Resolve(g_api.GetPersonaName, "SteamAPI_ISteamFriends_GetPersonaName");
@@ -354,7 +405,7 @@ void ClearLobbyRichPresence();
 
 void PublishLobbyRichPresence()
 {
-    if (!g_isHost || !g_lobbyId || g_bridgeCreated) {
+    if (g_roomMode ? !g_lobbyId : (!g_isHost || !g_lobbyId || g_bridgeCreated)) {
         ClearLobbyRichPresence();
         return;
     }
@@ -362,7 +413,8 @@ void PublishLobbyRichPresence()
     char connect[64];
     snprintf(connect, sizeof(connect), "+connect_lobby %llu",
              static_cast<unsigned long long>(g_lobbyId));
-    SetRichPresence("status", "Waiting in Timestone launch menu");
+    SetRichPresence("status", g_roomMode ? "In a Timestone lobby"
+                                         : "Waiting in Timestone launch menu");
     SetRichPresence("connect", connect);
 }
 
@@ -556,6 +608,13 @@ void StartPeerConnection(uint64_t remoteId)
 
 void PumpLobbyMembers()
 {
+    if (g_roomMode) {
+        // Rooms connect on demand (SteamRoom_ConnectPeer), never on membership.
+        if (g_lobbyId && g_roomPeer && !g_bridgeCreated &&
+            g_connection == k_HSteamNetConnection_Invalid)
+            StartPeerConnection(g_roomPeer);
+        return;
+    }
     if (!g_lobbyId || g_bridgeCreated || g_connection != k_HSteamNetConnection_Invalid)
         return;
     int count = g_api.GetNumLobbyMembers(g_matchmaking, g_lobbyId);
@@ -580,8 +639,9 @@ void PumpLobbyMembers()
 
 void PumpPingLocation()
 {
-    if (!g_isHost || !g_lobbyId || g_pingLocationPublished || !g_networkingUtils)
+    if (!g_lobbyId || g_pingLocationPublished || !g_networkingUtils)
         return;
+    if (!g_roomMode && !g_isHost) return;
 
     ULONGLONG now = GetTickCount64();
     if (now < g_nextPingLocationAttempt) return;
@@ -592,8 +652,17 @@ void PumpPingLocation()
 
     char encoded[k_cchMaxSteamNetworkingPingLocationString] = {};
     g_networkingUtils->ConvertPingLocationToString(location, encoded, sizeof(encoded));
-    if (!encoded[0] || !g_api.SetLobbyData(g_matchmaking, g_lobbyId, "location", encoded))
+    if (!encoded[0]) return;
+    if (g_roomMode) {
+        // Every room member publishes its own location so the member list can
+        // show a connection estimate; the owner's also feeds the lobby browser.
+        if (!g_api.SetLobbyMemberData) return;
+        g_api.SetLobbyMemberData(g_matchmaking, g_lobbyId, "loc", encoded);
+        if (g_api.GetLobbyOwner(g_matchmaking, g_lobbyId) == g_localSteamId)
+            g_api.SetLobbyData(g_matchmaking, g_lobbyId, "location", encoded);
+    } else if (!g_api.SetLobbyData(g_matchmaking, g_lobbyId, "location", encoded)) {
         return;
+    }
 
     g_pingLocationPublished = true;
     HookLog("SteamLobby: published ping location %s\n", encoded);
@@ -704,7 +773,8 @@ bool MergeFriendLobbyCandidates()
         uint64_t lobbyId = g_friendLobbyCandidates[i];
         if (HasResult(lobbyId)) continue;
 
-        const char* marker = g_api.GetLobbyData(g_matchmaking, lobbyId, "Timestone");
+        const char* marker = g_api.GetLobbyData(g_matchmaking, lobbyId,
+                                                g_roomMode ? "TimestoneRoom" : "Timestone");
         if (marker && strcmp(marker, "1") == 0) {
             AddResult(lobbyId);
             changed = true;
@@ -774,6 +844,18 @@ void PumpConnection()
             g_sockets->CloseListenSocket(g_listenSocket);
             g_listenSocket = k_HSteamListenSocket_Invalid;
         }
+        if (g_roomMode) {
+            // A failed match connection must not cost the player their room.
+            g_roomPeer = 0;
+            g_roomPeerFailed = true;
+            g_peerSteamId = 0;
+            g_peerUsername[0] = '\0';
+            g_nextConnectionAttempt = 0;
+            g_connectionDeadline = 0;
+            g_connectionAttempt = 0;
+            SetStatus("Could not connect to the other player");
+            return;
+        }
         ClearLobbyRichPresence();
         if (g_lobbyId) g_api.LeaveLobby(g_matchmaking, g_lobbyId);
         g_lobbyId = 0;
@@ -799,8 +881,10 @@ void PumpConnection()
         g_bridgeCreated = true;
         g_handlesReady = true;
         g_connectionDeadline = 0;
-        g_api.SetLobbyJoinable(g_matchmaking, g_lobbyId, false);
-        ClearLobbyRichPresence();
+        if (!g_roomMode) {
+            g_api.SetLobbyJoinable(g_matchmaking, g_lobbyId, false);
+            ClearLobbyRichPresence();
+        }
         RefreshPeerUsername();
         RefreshConnectedStatus();
         HookLog("SteamLobby: peer connected username=\"%s\" steamid=%llu\n",
@@ -919,8 +1003,10 @@ bool SteamLobby_Initialize()
 void SteamLobby_Search()
 {
     if (!SteamLobby_Initialize() || g_pendingCall != PendingCall::None) return;
-    g_api.AddStringFilter(g_matchmaking, "Timestone", "1", 0);
-    g_api.AddSlotsFilter(g_matchmaking, 1);
+    // Rooms advertise under their own key so 1v1 launcher clients never see
+    // (and auto-connect into) a multi-player room, and vice versa.
+    g_api.AddStringFilter(g_matchmaking, g_roomMode ? "TimestoneRoom" : "Timestone", "1", 0);
+    if (!g_roomMode) g_api.AddSlotsFilter(g_matchmaking, 1);
     g_api.AddResultCountFilter(g_matchmaking, 50);
     g_api.AddDistanceFilter(g_matchmaking, 3); // k_ELobbyDistanceFilterWorldwide
     g_pendingHandle = g_api.RequestLobbyList(g_matchmaking);
@@ -1013,7 +1099,17 @@ void SteamLobby_Pump()
                 g_connectionAttempt = 0;
                 g_pingLocationPublished = false;
                 g_nextPingLocationAttempt = 0;
-                g_api.SetLobbyData(g_matchmaking, g_lobbyId, "Timestone", "1");
+                g_api.SetLobbyData(g_matchmaking, g_lobbyId,
+                                   g_roomMode ? "TimestoneRoom" : "Timestone", "1");
+                if (g_roomMode) {
+                    char slots[8];
+                    snprintf(slots, sizeof(slots), "%d", g_roomCreateSlots);
+                    g_api.SetLobbyData(g_matchmaking, g_lobbyId, "slots", slots);
+                    // Fallback identity when ISteamUser is unavailable: the
+                    // creator of a lobby is its first owner.
+                    if (!g_localSteamId)
+                        g_localSteamId = g_api.GetLobbyOwner(g_matchmaking, g_lobbyId);
+                }
                 g_api.SetLobbyData(g_matchmaking, g_lobbyId, "protocol", kLobbyProtocol);
                 g_api.SetLobbyData(g_matchmaking, g_lobbyId, "build", UMVC3HOOK_GIT_COMMIT);
                 g_api.SetLobbyData(g_matchmaking, g_lobbyId, "state", "waiting");
@@ -1029,7 +1125,10 @@ void SteamLobby_Pump()
                     g_api.SetLobbyData(g_matchmaking, g_lobbyId, "name", fallbackName);
                 }
                 PublishLobbyRichPresence();
-                SetStatusf("Lobby %llu created; waiting for opponent", g_lobbyId);
+                if (g_roomMode)
+                    SetStatus("Lobby created");
+                else
+                    SetStatusf("Lobby %llu created; waiting for opponent", g_lobbyId);
             }
         }
     } else if (g_pendingCall == PendingCall::Join) {
@@ -1042,7 +1141,8 @@ void SteamLobby_Pump()
                 SteamLobby_Search();
             } else {
                 const char* marker = g_api.GetLobbyData(
-                    g_matchmaking, result.m_ulSteamIDLobby, "Timestone");
+                    g_matchmaking, result.m_ulSteamIDLobby,
+                    g_roomMode ? "TimestoneRoom" : "Timestone");
                 const char* protocol = g_api.GetLobbyData(
                     g_matchmaking, result.m_ulSteamIDLobby, "protocol");
                 if (!marker || strcmp(marker, "1") != 0 || !protocol ||
@@ -1054,11 +1154,14 @@ void SteamLobby_Pump()
                 }
                 g_lobbyId = result.m_ulSteamIDLobby;
                 g_isHost = false;
+                g_pingLocationPublished = false;
+                g_nextPingLocationAttempt = 0;
                 ClearLobbyRichPresence();
                 g_nextConnectionAttempt = 0;
-                g_connectionDeadline = GetTickCount64() + kPeerConnectionTimeoutMs;
+                g_connectionDeadline = g_roomMode ? 0 : GetTickCount64() + kPeerConnectionTimeoutMs;
                 g_connectionAttempt = 0;
-                SetStatus("Lobby joined; connecting to owner...");
+                SetStatus(g_roomMode ? "Lobby joined" : "Lobby joined; connecting to owner...");
+                if (g_roomMode) PublishLobbyRichPresence();
             }
         } else if (g_pendingCall == PendingCall::None) {
             // TakeCallResult clears the pending call when the Steam request fails.
@@ -1311,6 +1414,8 @@ void SteamLobby_Shutdown(bool preserveConnection)
     g_pendingHandle = 0;
     g_lobbyId = 0;
     g_isHost = false;
+    g_roomPeer = 0;
+    g_roomPeerFailed = false;
     g_gameHost = nullptr;
     g_gamePeer = nullptr;
     g_peerSteamId = 0;
@@ -1328,4 +1433,264 @@ void SteamLobby_Shutdown(bool preserveConnection)
     g_nextResultPingRefresh = 0;
     g_resultPingRefreshDeadline = 0;
     if (leftLobby) SetStatus("Left Steam lobby");
+}
+
+// ---------------------------------------------------------------------------
+// Session end and search-result details
+// ---------------------------------------------------------------------------
+void SteamLobby_EndSession()
+{
+    if (g_roomMode && g_lobbyId)
+        SteamRoom_DisconnectPeer();
+    else
+        SteamLobby_Shutdown(false);
+}
+
+int SteamLobby_GetPendingKind()
+{
+    return static_cast<int>(g_pendingCall);
+}
+
+int SteamLobby_GetResultMemberCount(size_t index)
+{
+    if (index >= g_resultCount || !g_matchmaking) return 0;
+    return g_api.GetNumLobbyMembers(g_matchmaking, g_results[index]);
+}
+
+int SteamLobby_GetResultMemberLimit(size_t index)
+{
+    if (index >= g_resultCount || !g_matchmaking || !g_api.GetLobbyMemberLimit) return 0;
+    return g_api.GetLobbyMemberLimit(g_matchmaking, g_results[index]);
+}
+
+int SteamLobby_GetResultSlotCount(size_t index)
+{
+    if (index >= g_resultCount || !g_matchmaking) return 0;
+    const char* slots = g_api.GetLobbyData(g_matchmaking, g_results[index], "slots");
+    return slots ? atoi(slots) : 0;
+}
+
+bool SteamLobby_IsResultInMatch(size_t index)
+{
+    if (index >= g_resultCount || !g_matchmaking) return false;
+    const char* live = g_api.GetLobbyData(g_matchmaking, g_results[index], "live");
+    return live && live[0] == '1';
+}
+
+// ---------------------------------------------------------------------------
+// Room mode
+// ---------------------------------------------------------------------------
+void SteamRoom_SetMode(bool enabled)
+{
+    g_roomMode = enabled;
+    if (enabled && g_api.RegisterCallback && !g_roomCallbacksRegistered) {
+        g_api.RegisterCallback(&g_lobbyChatMsgCallback, k_iCallbackLobbyChatMsg);
+        g_roomCallbacksRegistered = true;
+    }
+    if (enabled && !g_localSteamId && g_api.GetUserInterface && g_api.GetSteamID &&
+        g_api.GetClient) {
+        static const char* userVersions[] = {"SteamUser019", "SteamUser020", "SteamUser021",
+                                             "SteamUser018", "SteamUser017"};
+        for (const char* version : userVersions) {
+            void* user = g_api.GetUserInterface(g_api.GetClient(), g_api.GetUser(),
+                                                g_api.GetPipe(), version);
+            if (!user) continue;
+            g_localSteamId = g_api.GetSteamID(user);
+            break;
+        }
+        HookLog("SteamLobby: room mode local SteamID %llu\n",
+                static_cast<unsigned long long>(g_localSteamId));
+    }
+}
+
+bool SteamRoom_IsActive()
+{
+    return g_roomMode && g_lobbyId != 0;
+}
+
+uint64_t SteamRoom_GetLobbyId()
+{
+    return g_roomMode ? g_lobbyId : 0;
+}
+
+uint64_t SteamRoom_GetLocalId()
+{
+    return g_localSteamId;
+}
+
+void SteamRoom_Create(SteamLobbyType type, int maxMembers, int slotCount, const char* name)
+{
+    if (!g_roomMode || !SteamLobby_Initialize() || g_pendingCall != PendingCall::None) return;
+    if (g_lobbyId) {
+        SetStatus("Already in a Steam lobby");
+        return;
+    }
+    if (maxMembers < 2) maxMembers = 2;
+    if (maxMembers > 8) maxMembers = 8;
+    g_roomCreateSlots = slotCount < 1 ? 1 : slotCount;
+    snprintf(g_lobbyName, sizeof(g_lobbyName), "%s", name ? name : "");
+    g_pendingHandle = g_api.CreateLobby(g_matchmaking, static_cast<int>(type), maxMembers);
+    g_pendingCall = PendingCall::Create;
+    SetStatus("Creating lobby...");
+}
+
+void SteamRoom_Leave()
+{
+    SteamRoom_DisconnectPeer();
+    ClearLobbyRichPresence();
+    if (g_matchmaking && g_lobbyId) {
+        g_api.LeaveLobby(g_matchmaking, g_lobbyId);
+        SetStatus("Left Steam lobby");
+    }
+    g_lobbyId = 0;
+    g_isHost = false;
+    g_pingLocationPublished = false;
+    g_chatTail.store(g_chatHead.load(std::memory_order_acquire), std::memory_order_release);
+}
+
+int SteamRoom_GetMemberCount()
+{
+    return SteamRoom_IsActive() ? g_api.GetNumLobbyMembers(g_matchmaking, g_lobbyId) : 0;
+}
+
+uint64_t SteamRoom_GetMember(int index)
+{
+    return SteamRoom_IsActive() ? g_api.GetLobbyMemberByIndex(g_matchmaking, g_lobbyId, index) : 0;
+}
+
+uint64_t SteamRoom_GetOwner()
+{
+    return SteamRoom_IsActive() ? g_api.GetLobbyOwner(g_matchmaking, g_lobbyId) : 0;
+}
+
+int SteamRoom_GetMemberLimit()
+{
+    if (!SteamRoom_IsActive() || !g_api.GetLobbyMemberLimit) return 0;
+    return g_api.GetLobbyMemberLimit(g_matchmaking, g_lobbyId);
+}
+
+const char* SteamRoom_GetMemberName(uint64_t memberId)
+{
+    if (memberId == g_localSteamId && g_localUsername[0]) return g_localUsername;
+    const char* name = g_friends ? g_api.GetFriendPersonaName(g_friends, memberId) : nullptr;
+    return name && name[0] ? name : "Player";
+}
+
+const char* SteamRoom_GetMemberData(uint64_t memberId, const char* key)
+{
+    if (!SteamRoom_IsActive() || !g_api.GetLobbyMemberData) return "";
+    const char* value = g_api.GetLobbyMemberData(g_matchmaking, g_lobbyId, memberId, key);
+    return value ? value : "";
+}
+
+void SteamRoom_SetLocalData(const char* key, const char* value)
+{
+    if (SteamRoom_IsActive() && g_api.SetLobbyMemberData)
+        g_api.SetLobbyMemberData(g_matchmaking, g_lobbyId, key, value ? value : "");
+}
+
+const char* SteamRoom_GetData(const char* key)
+{
+    if (!SteamRoom_IsActive()) return "";
+    const char* value = g_api.GetLobbyData(g_matchmaking, g_lobbyId, key);
+    return value ? value : "";
+}
+
+void SteamRoom_SetData(const char* key, const char* value)
+{
+    if (SteamRoom_IsActive() && SteamRoom_GetOwner() == g_localSteamId)
+        g_api.SetLobbyData(g_matchmaking, g_lobbyId, key, value ? value : "");
+}
+
+int SteamRoom_EstimateMemberPing(uint64_t memberId)
+{
+    if (!g_networkingUtils || !SteamRoom_IsActive()) return -1;
+    const char* encoded = SteamRoom_GetMemberData(memberId, "loc");
+    if (!encoded[0]) return -1;
+    SteamNetworkPingLocation_t location = {};
+    if (!g_networkingUtils->ParsePingLocationString(encoded, location)) return -1;
+    // The estimate is a round trip; report one-way latency like the launcher.
+    const int ping = g_networkingUtils->EstimatePingTimeFromLocalHost(location);
+    return ping >= 0 ? ping / 2 : -1;
+}
+
+bool SteamRoom_SendChat(const void* data, int size)
+{
+    if (!SteamRoom_IsActive() || !g_api.SendLobbyChatMsg || !data || size <= 0) return false;
+    return g_api.SendLobbyChatMsg(g_matchmaking, g_lobbyId, data, size);
+}
+
+bool SteamRoom_PollChat(uint64_t* sender, char* buffer, int capacity, int* size)
+{
+    if (!sender || !buffer || capacity <= 0 || !size) return false;
+    uint32_t tail = g_chatTail.load(std::memory_order_relaxed);
+    while (tail != g_chatHead.load(std::memory_order_acquire)) {
+        const int chatId = g_chatIds[tail % 64];
+        ++tail;
+        g_chatTail.store(tail, std::memory_order_release);
+        if (!SteamRoom_IsActive() || !g_api.GetLobbyChatEntry) continue;
+        int type = 0;
+        uint64_t user = 0;
+        const int length = g_api.GetLobbyChatEntry(g_matchmaking, g_lobbyId, chatId, &user,
+                                                   buffer, capacity, &type);
+        // 1 = k_EChatEntryTypeChatMsg; ignore typing notices and system entries.
+        if (length <= 0 || type != 1) continue;
+        *sender = user;
+        *size = length;
+        return true;
+    }
+    return false;
+}
+
+void SteamRoom_InviteFriends()
+{
+    if (SteamRoom_IsActive() && g_friends && g_api.ActivateInviteDialog)
+        g_api.ActivateInviteDialog(g_friends, g_lobbyId);
+}
+
+bool SteamRoom_ConnectPeer(uint64_t memberId, bool asHost)
+{
+    if (!SteamRoom_IsActive() || !memberId || !g_sockets) return false;
+    if (g_bridgeCreated || g_connection != k_HSteamNetConnection_Invalid) {
+        // A previous match connection is still up; drop it first.
+        SteamRoom_DisconnectPeer();
+    }
+    g_isHost = asHost;
+    g_roomPeer = memberId;
+    g_roomPeerFailed = false;
+    g_handlesReady = false;
+    g_nextConnectionAttempt = 0;
+    g_connectionDeadline = 0;
+    g_connectionAttempt = 0;
+    StartPeerConnection(memberId);
+    return true;
+}
+
+void SteamRoom_DisconnectPeer()
+{
+    const bool bridgeActive = SteamTransport_IsActive();
+    if (bridgeActive) SteamTransport_Shutdown();
+    if (!bridgeActive && g_sockets && g_connection != k_HSteamNetConnection_Invalid)
+        g_sockets->CloseConnection(g_connection, 1000, "Timestone match ended", false);
+    if (g_sockets && g_listenSocket != k_HSteamListenSocket_Invalid)
+        g_sockets->CloseListenSocket(g_listenSocket);
+    g_listenSocket = k_HSteamListenSocket_Invalid;
+    g_connection = k_HSteamNetConnection_Invalid;
+    g_gameHost = nullptr;
+    g_gamePeer = nullptr;
+    g_roomPeer = 0;
+    g_peerSteamId = 0;
+    g_peerUsername[0] = '\0';
+    g_handlesReady = false;
+    g_bridgeCreated = false;
+    g_nextConnectionAttempt = 0;
+    g_connectionDeadline = 0;
+    g_connectionAttempt = 0;
+}
+
+bool SteamRoom_TakePeerFailed()
+{
+    const bool failed = g_roomPeerFailed;
+    g_roomPeerFailed = false;
+    return failed;
 }

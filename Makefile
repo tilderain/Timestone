@@ -106,6 +106,11 @@ CPP_SRC   := \
 	$(SRCDIR)/code/netplay.cpp \
 	$(SRCDIR)/code/savedata.cpp \
 	$(SRCDIR)/code/steam_lobby.cpp \
+	$(SRCDIR)/code/lobby_canvas.cpp \
+	$(SRCDIR)/code/lobby_ui.cpp \
+	$(SRCDIR)/code/lobby_native.cpp \
+	$(SRCDIR)/code/lobby_room.cpp \
+	$(SRCDIR)/code/lobby_flow.cpp \
 	$(SRCDIR)/code/steam_transport.cpp \
 	$(SRCDIR)/imgui/imgui.cpp \
 	$(SRCDIR)/imgui/imgui_demo.cpp \

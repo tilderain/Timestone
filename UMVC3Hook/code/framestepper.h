@@ -13,6 +13,9 @@ void FrameStepper_Draw();
 float FrameStepper_GetStatusHudBottom();
 void FrameStepper_DrawAutoTest();
 void FrameStepper_ShowOpponentDisconnected();
+// In-game lobby: tear down the current netplay match (rollback state, battle
+// handshake, transport) without ending the process.
+void FrameStepper_EndNetplaySession();
 void FrameStepper_SetDevice(LPDIRECT3DDEVICE9 device);
 void FrameStepper_InvalidateDeviceObjects();
 void FrameStepper_Capture(LPDIRECT3DDEVICE9 pDevice);

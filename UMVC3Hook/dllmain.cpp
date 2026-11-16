@@ -19,6 +19,8 @@
 #include "code/keyboard_input.h"
 #include "code/lag_diagnostics.h"
 #include "code/trainingboot.h"
+#include "code/lobby_flow.h"
+#include "code/launchmenu_utils.h"
 #include "code/netplay.h"
 #include "code/controller.h"
 #include "code/autotest.h"
@@ -787,6 +789,10 @@ LRESULT __stdcall WndProc(const HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPar
         break;
     }
 
+    // Typed text for the native lobby's room-name and chat fields.
+    if (uMsg == WM_CHAR && LobbyFlow_WantsText())
+        LobbyFlow_OnChar(static_cast<uint32_t>(wParam));
+
     const bool keyboardMessage = uMsg == WM_KEYDOWN || uMsg == WM_KEYUP ||
         uMsg == WM_CHAR || uMsg == WM_SYSKEYDOWN || uMsg == WM_SYSKEYUP;
     const bool keyboardOverlayOpen = TheMenu->GetActiveState() ||
@@ -1107,6 +1113,7 @@ long __stdcall hkEndScene(LPDIRECT3DDEVICE9 pDevice)
 		LagDiagnosticScope diagnostic(LagMetric::EscapeHud);
 		EscMenuImGui_Draw();
 	}
+	LobbyFlow_DrawOverlay();
 	LiveBenchmark_Draw();
 
 	if (TheMenu->GetActiveState())
@@ -1728,11 +1735,23 @@ void __fastcall Hook_titleLogoUpdate(uintptr_t param_1)
 			PostMessageW(g_d3d9FocusWindow, kRevealGameWindow, 0, 0);
 	}
 
-	const bool trainingBoot =
-		GetLaunchOption() == LAUNCH_TRAINING ||
-		GetLaunchOption() == LAUNCH_DUAL_TRAINING;
+	const bool lobbyBoot = LobbyFlow_IsEnabled();
+	const bool trainingBoot = !lobbyBoot &&
+		(GetLaunchOption() == LAUNCH_TRAINING ||
+		 GetLaunchOption() == LAUNCH_DUAL_TRAINING);
 
 	const int parentState = *(int*)(param_1 + 0x78);
+	if (lobbyBoot && parentState >= 1) {
+		// The lobby lives in the title area. Phase 1 would play the logos and
+		// phase 2 the opening movie before queueing aTitle; once the common
+		// archives are resident, request aTitle directly instead.
+		typedef uintptr_t(__fastcall* GetManager_t)();
+		typedef bool(__fastcall* AreArchivesLoaded_t)(uintptr_t, int32_t);
+		const uintptr_t manager = ((GetManager_t)_addr(0x140001AF0))();
+		if (manager && ((AreArchivesLoaded_t)_addr(0x14025AC60))(manager, -1))
+			LobbyFlow_EnterTitleFromLogo();
+		return;
+	}
 	if (trainingBoot && parentState == 1) {
 		// State 1 normally creates and advances the Capcom/Marvel presentation.
 		// Archive I/O advances independently, so poll its native readiness gate
@@ -1822,6 +1841,26 @@ void OnInitializeHook()
 	else if (strstr(cmdLineA, "-training-p2-cpu")) {
 		TrainingBoot_SetCpuMode(TRAINING_CPU_P2_ONLY);
 		HookLog("UMVC3Hook: Training CPU control enabled for P2\n");
+	}
+	// The in-game lobby is the default entry: skip the external launcher, boot
+	// to the title area and run the native lobby there. The launcher remains
+	// available with -launcher or [Launch] NativeLobby=0. Training and autotest
+	// launches keep their own direct boot.
+	if (!trainingArg && !strstr(cmdLineA, "-autotest")) {
+		char settingsPath[MAX_PATH] = {};
+		LaunchMenuUtils::GetSettingsPath(settingsPath, sizeof(settingsPath));
+		const bool launcherArg = strstr(cmdLineA, "-launcher") != nullptr;
+		const bool launcherConfigured = settingsPath[0] &&
+			GetPrivateProfileIntA("Launch", "NativeLobby", 1, settingsPath) == 0;
+		if (launcherArg || launcherConfigured) {
+			HookLog("UMVC3Hook: External launcher requested (%s)\n",
+				launcherArg ? "-launcher" : "Timestone.ini");
+		} else {
+			trainingArg = true;
+			SetLaunchOption(LAUNCH_TRAINING);
+			LobbyFlow_Enable();
+			HookLog("UMVC3Hook: Booting into the in-game lobby\n");
+		}
 	}
 	if (strstr(cmdLineA, "-five-bars")) {
 		TrainingBoot_SetFiveBarStart(true);
@@ -1987,7 +2026,9 @@ static void CompleteLaunchInitialization(LaunchOption opt)
 	if (opt == LAUNCH_NORMAL && !GameplayHooks_Disable())
 		D3D9Reset_AbortStartup("Could not restore native gameplay hooks for Normal Launch");
 	PrepareAdvancedLaunchConfig();
-	EnableReturnToLaunchMenuOnExit();
+	// The in-game lobby is its own way back; do not relaunch the launcher.
+	if (!LobbyFlow_IsEnabled())
+		EnableReturnToLaunchMenuOnExit();
 	g_serializeD3D9CreateDevice =
 		opt == LAUNCH_DUAL_TRAINING || g_autoConnectPort != 0;
 

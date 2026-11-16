@@ -258,6 +258,14 @@ static AutomaticNetplaySettings ApplyAutomaticNetplaySettings(enet_uint32 pingMs
     return settings;
 }
 
+void LaunchMenu_GetAutomaticNetplaySettings(uint32_t pingMs, int32_t* delay,
+                                            int32_t* rollback)
+{
+    const AutomaticNetplaySettings settings = GetAutomaticNetplaySettings(pingMs);
+    if (delay) *delay = settings.delay;
+    if (rollback) *rollback = settings.rollback;
+}
+
 static void ResetPingSamples(ENetPeer* peer = nullptr)
 {
     g_pingSamplePeer = peer;

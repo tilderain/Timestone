@@ -1,0 +1,129 @@
+#pragma once
+
+// Screen logic for the in-game lobby. Pure state machine over RoomService and
+// Canvas: it owns no game or Steam state, so the preview tool can drive it.
+
+#include "lobby_canvas.h"
+#include "lobby_model.h"
+
+namespace lobby {
+
+enum Sfx : uint32_t {
+    SFX_MOVE = 1u << 0,
+    SFX_CONFIRM = 1u << 1,
+    SFX_CANCEL = 1u << 2,
+};
+
+// Preferences the caller loads before constructing the UI and saves whenever
+// TakePrefsDirty() reports a change.
+struct UiPrefs {
+    Team team;
+    EntryMode entryMode;
+    int presetIndex; // saved-roster preset in use, or -1 for a custom team
+    RoomSettings create;
+};
+
+class LobbyUi {
+public:
+    LobbyUi(RoomService& service, const RosterSource& roster, const UiPrefs& prefs);
+
+    void Update(const Input& input);
+    void Draw(Canvas& canvas);
+
+    uint32_t TakeSfx();
+    bool TakeExitRequested();
+    bool TakePrefsDirty();
+    const UiPrefs& Prefs() const { return prefs_; }
+
+    // True while keyboard characters should be routed to Input::typed.
+    bool TextEntryActive() const { return textTarget_ != TextTarget::None; }
+
+    // Modal message dismissed with confirm.
+    void ShowNotice(const char* text);
+    // Non-dismissable progress overlay (e.g. "Connecting to opponent...").
+    // Pass nullptr to clear.
+    void SetBusy(const char* text);
+    // Re-enter the room screen after a match without replaying transitions.
+    void ReturnToRoom();
+
+private:
+    enum class Screen : uint8_t { Top, Browse, Create, Room, Team };
+    enum class TextTarget : uint8_t { None, RoomName, Chat };
+    enum class Confirm : uint8_t { None, LeaveRoom, ExitGame };
+
+    void GoTo(Screen screen);
+    void Play(uint32_t sfx) { sfx_ |= sfx; }
+    bool MoveCursor(int& cursor, int count, const Input& input, bool wrap = true);
+
+    void UpdateTop(const Input& input);
+    void UpdateBrowse(const Input& input);
+    void UpdateCreate(const Input& input);
+    void UpdateRoom(const Input& input);
+    void UpdateRoomMenu(const Input& input);
+    void UpdateQuickChat(const Input& input);
+    void UpdateTeam(const Input& input);
+    void UpdateText(const Input& input);
+    void SyncWithService();
+
+    void DrawBackdrop(Canvas& canvas) const;
+    void DrawFooter(Canvas& canvas, const char* help) const;
+    const char* DrawTop(Canvas& canvas) const; // returns footer help
+    const char* DrawBrowse(Canvas& canvas) const; // returns footer help
+    const char* DrawCreate(Canvas& canvas) const; // returns footer help
+    const char* DrawRoom(Canvas& canvas) const; // returns footer help
+    void DrawRoomMembers(Canvas& canvas) const;
+    void DrawRoomSlots(Canvas& canvas) const;
+    void DrawRoomChat(Canvas& canvas) const;
+    const char* DrawTeam(Canvas& canvas) const; // returns footer help
+    void DrawTeamCard(Canvas& canvas, float x, float y, float w) const;
+    void DrawListMenu(Canvas& canvas, const char* title, const char* const* items,
+                      int count, int cursor) const;
+    bool DrawModal(Canvas& canvas) const; // true when a modal layer was drawn
+
+    const Member* LocalMember() const;
+    const Member* SeatOccupant(int slot, int side) const;
+    void ApplyPreset(int index);
+    void CommitTeam();
+    void StepTeamField(int delta);
+    void BeginText(TextTarget target, const char* initial);
+    void EndText(bool accept);
+
+    RoomService& service_;
+    RosterSource roster_;
+    UiPrefs prefs_;
+
+    Screen screen_ = Screen::Top;
+    Screen teamReturn_ = Screen::Top;
+    uint32_t frame_ = 0;
+    uint32_t screenFrame_ = 0; // frames since the current screen was entered
+    uint32_t sfx_ = 0;
+    bool prefsDirty_ = false;
+    bool exitRequested_ = false;
+    bool wasInRoom_ = false;
+    bool leftByChoice_ = false;
+    bool usingKeyboard_ = false;
+
+    int topCursor_ = 0;
+    int browseCursor_ = 0;
+    int browseScroll_ = 0;
+    int createCursor_ = 0;
+    int seatSlot_ = 0;
+    int seatSide_ = 0;
+    int teamCursor_ = 0;
+
+    bool roomMenuOpen_ = false;
+    int roomMenuCursor_ = 0;
+    bool quickChatOpen_ = false;
+    int quickChatCursor_ = 0;
+
+    Confirm confirm_ = Confirm::None;
+    int confirmCursor_ = 1; // default to "No"
+    char notice_[256] = {};
+    char busy_[128] = {};
+
+    TextTarget textTarget_ = TextTarget::None;
+    char text_[kChatCapacity] = {};
+    size_t textCapacity_ = 0;
+};
+
+} // namespace lobby
