@@ -5,6 +5,11 @@
 #include <cstdio>
 #include <cstring>
 
+// The plugin's build passes its version; the offline preview tool does not.
+#ifndef UMVC3HOOK_VERSION
+#define UMVC3HOOK_VERSION "0.0.0"
+#endif
+
 namespace lobby {
 
 namespace {
@@ -1249,7 +1254,7 @@ void LobbyUi::StepTeamField(int delta)
 {
     if (teamCursor_ == kTeamRowPreset) {
         const int presets = roster_.presetCount ? roster_.presetCount() : 0;
-        // Cycle CUSTOM (-1), PRESET 1..n.
+        // Cycle CUSTOM (-1), RESERVE UNIT A..C.
         int index = prefs_.presetIndex + delta;
         if (index < -1) index = presets - 1;
         if (index >= presets) index = -1;
@@ -1468,7 +1473,7 @@ void LobbyUi::DrawTeamCard(Canvas& canvas, float x, float y, float w) const
     p.Box(TEX_PANEL_DARK, x, y, w, 300.0f);
     p.Sprite(TEX_USER_ICON, x + 34.0f, y + 58.0f, 56.0f, 56.0f, kFullUv, A_ML);
     p.TextFit(service_.LocalName(), x + 104.0f, y + 46.0f, 0.95f, w - 130.0f, A_ML);
-    p.Text(prefs_.presetIndex >= 0 ? "SAVED PRESET" : "CUSTOM TEAM", x + 104.0f, y + 74.0f, 0.62f,
+    p.Text(prefs_.presetIndex >= 0 ? "RESERVE UNIT" : "CUSTOM TEAM", x + 104.0f, y + 74.0f, 0.62f,
            A_ML, kYellow);
     p.Sprite(TEX_LINE, x + 28.0f, y + 100.0f, w - 56.0f, 3.0f, Uv{0.1f, 0.55f, 0.9f, 0.95f}, A_TL,
              WithAlpha(kCyan, 0.8f));
@@ -1491,7 +1496,7 @@ const char* LobbyUi::DrawTop(Canvas& canvas) const
     // "LOBBY" title art (row 0 of ga_room_subtit2), slightly enlarged.
     p.Sprite(TEX_SUBTITLES2, 76.0f, 68.0f, 68.0f * 1.7f, 30.0f * 1.7f,
              Uv{0.0f, 1.0f / 64.0f, 68.0f / 256.0f, 31.0f / 64.0f}, A_ML);
-    p.Label("TIMESTONE ROLLBACK", 204.0f, 76.0f, 0.62f, A_ML, kYellow);
+    p.Label("Timestone v" UMVC3HOOK_VERSION, 204.0f, 76.0f, 0.62f, A_ML, kYellow);
 
     DrawTeamCard(canvas, 72.0f, 168.0f, 470.0f);
     p.TextFit(service_.StatusText(), 84.0f, 494.0f, 0.62f, 450.0f, A_ML,
@@ -2243,7 +2248,7 @@ const char* LobbyUi::DrawTeam(Canvas& canvas) const
         if (row == kTeamRowPreset) {
             label = "TEAM";
             if (prefs_.presetIndex >= 0)
-                snprintf(value, sizeof(value), "PRESET %d", prefs_.presetIndex + 1);
+                snprintf(value, sizeof(value), "RESERVE UNIT %c", 'A' + prefs_.presetIndex);
             else
                 snprintf(value, sizeof(value), "CUSTOM");
             valueColor = kYellow;
@@ -2295,7 +2300,7 @@ const char* LobbyUi::DrawTeam(Canvas& canvas) const
     const char* help = teamForMatch_ ? "Choose your team, then select START."
                                      : "Edit your team.";
     if (teamCursor_ == kTeamRowPreset)
-        help = "Use one of your saved preset teams, or build a custom team.";
+        help = "Use one of your reserve units, or build a custom team.";
     return help;
 }
 
