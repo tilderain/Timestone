@@ -885,6 +885,21 @@ void FillBootConfig(TrainingBootConfig& config, const Team& p1, const Team& p2, 
     config.timerValue = 99;
 }
 
+// Delay and rollback cannot both be 0, and each setter refuses a 0 while the
+// other value is still 0. Whatever the last match (or watching one) left
+// behind, the non-zero one goes in first: a chosen delay of 0 used to be
+// turned into 1 because the rollback window was applied after it.
+void ApplyNetplaySettings(int32_t delay, int32_t rollback)
+{
+    if (delay > 0) {
+        Controller_SetDelayFrames(delay);
+        Controller_SetRollbackFrames(rollback);
+    } else {
+        Controller_SetRollbackFrames(rollback);
+        Controller_SetDelayFrames(delay);
+    }
+}
+
 // Player 1 owns the match parameters: netplay settings from measured ping,
 // both rosters as published in the room, and the stage. This mirrors what the
 // launcher's host sends before it starts the game.
@@ -911,8 +926,7 @@ bool SendLaunchAsHost()
     if (delay == 0 && rollback == 0) rollback = 1;
     HookLog("LobbyFlow: delay picks local=%d opponent=%d measured ping=%u ms -> %dD/%dR\n",
             g_pairing.localDelayPick, g_pairing.opponentDelayPick, rtt / 2, delay, rollback);
-    Controller_SetDelayFrames(delay);
-    Controller_SetRollbackFrames(rollback);
+    ApplyNetplaySettings(delay, rollback);
 
     DelayPacket settings = {};
     settings.type = PACKET_DELAY;
@@ -1182,8 +1196,7 @@ bool PumpHandshake(bool bothReady)
             if (settings.delay >= 0 && settings.delay <= 15 && settings.rollbackFrames >= 0 &&
                 settings.rollbackFrames <= 16 &&
                 (settings.delay != 0 || settings.rollbackFrames != 0)) {
-                Controller_SetDelayFrames(settings.delay);
-                Controller_SetRollbackFrames(settings.rollbackFrames);
+                ApplyNetplaySettings(settings.delay, settings.rollbackFrames);
                 HookLog("LobbyFlow: applied P1 netplay settings %dD/%dR\n", settings.delay,
                         settings.rollbackFrames);
             }
