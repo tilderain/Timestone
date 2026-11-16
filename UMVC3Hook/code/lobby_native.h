@@ -37,6 +37,8 @@ void Native_ReadInput(Input& input, bool textActive);
 void Native_OnChar(uint32_t utf16);
 
 void Native_PlaySfx(uint32_t sfxMask);
+// Brings the game window to the front (and flashes it if Windows refuses).
+void Native_FocusGameWindow();
 // Makes sPad start polling its controller slots (see the definition). Safe to
 // call every frame; needed by the native main menu as well as the lobby.
 void Native_EnsurePadSlotsActive();

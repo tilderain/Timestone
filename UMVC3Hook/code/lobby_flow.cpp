@@ -23,6 +23,7 @@
 #include "../kiero/minhook/include/MinHook.h"
 
 #include <Windows.h>
+#include <algorithm>
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
@@ -171,6 +172,7 @@ bool g_presetsLoaded = false;
 MatchPairing g_pairing = {};
 ENetHost* g_matchHost = nullptr;
 ENetPeer* g_matchPeer = nullptr;
+ULONGLONG g_bothReadyTick = 0; // when both players finished the pre-match steps
 bool g_matchIsHost = false;
 ULONGLONG g_phaseStartTick = 0;
 bool g_launchSent = false;
@@ -270,8 +272,6 @@ UiPrefs LoadPrefs()
     }
     if (!valid) prefs.team = Team{{CHR_RYU, CHR_WOLVERINE, CHR_DANTE}, {0, 0, 0}, {0, 0, 0}};
 
-    prefs.entryMode = GetPrivateProfileIntA("Lobby", "EntryMode", 0, path) == 1
-        ? EntryMode::CharacterSelect : EntryMode::Preset;
     prefs.presetIndex = GetPrivateProfileIntA("Lobby", "Preset", -1, path);
     if (prefs.presetIndex < -1 || prefs.presetIndex > 2) prefs.presetIndex = -1;
     GetPrivateProfileStringA("Lobby", "RoomName", "", prefs.create.name,
@@ -298,7 +298,6 @@ void SavePrefs(const UiPrefs& prefs)
     }
     ConnectRoster_Save(path, g_rosterPrefs);
     const IniSafe_Entry entries[] = {
-        {"Lobby", "EntryMode", prefs.entryMode == EntryMode::CharacterSelect ? "1" : "0"},
         {"Lobby", "Preset", std::to_string(prefs.presetIndex)},
         {"Lobby", "RoomName", prefs.create.name},
         {"Lobby", "RoomSize", std::to_string(prefs.create.maxMembers)},
@@ -836,7 +835,12 @@ void AbortMatchStart(const char* notice)
 {
     HookLog("LobbyFlow: match start aborted: %s\n", notice ? notice : "(cancelled)");
     DropMatchConnection();
-    if (g_service) g_service->FinishMatch(false, false);
+    if (g_service) {
+        g_service->FinishMatch(false, false);
+        // A failure with both players still seated would pair them again on
+        // the next frame and fail the same way; the seat is given up instead.
+        if (notice) g_service->Stand();
+    }
     if (g_ui) {
         g_ui->SetBusy(nullptr);
         if (notice) g_ui->ShowNotice(notice);
@@ -867,8 +871,26 @@ void FillBootConfig(TrainingBootConfig& config, const Team& p1, const Team& p2, 
 bool SendLaunchAsHost()
 {
     int32_t delay = 3, rollback = 7;
+    // "Auto" is the ping measured on this connection, which has been up since
+    // both players accepted the match: the same figure the prompt showed.
     const uint32_t rtt = SteamTransport_GetRTT();
     LaunchMenu_GetAutomaticNetplaySettings(rtt / 2, &delay, &rollback);
+    // The players' own delay picks. Both run the same delay, so the higher
+    // pick is used (a player who asked for more must not get less); "Auto"
+    // stands for the value measured from the ping. Moving away from the
+    // automatic delay keeps the same total budget by adjusting rollback.
+    const auto wanted = [&](int pick) { return pick > kDelayPickAuto ? pick - 1 : delay; };
+    const int32_t chosen = std::max(wanted(g_pairing.localDelayPick),
+                                    wanted(g_pairing.opponentDelayPick));
+    if (chosen != delay) {
+        const int32_t budget = delay + rollback;
+        delay = chosen;
+        rollback = std::max(rollback, budget - delay);
+        if (rollback > 16) rollback = 16;
+    }
+    if (delay == 0 && rollback == 0) rollback = 1;
+    HookLog("LobbyFlow: delay picks local=%d opponent=%d measured ping=%u ms -> %dD/%dR\n",
+            g_pairing.localDelayPick, g_pairing.opponentDelayPick, rtt / 2, delay, rollback);
     Controller_SetDelayFrames(delay);
     Controller_SetRollbackFrames(rollback);
 
@@ -937,18 +959,24 @@ void BeginLaunch()
 
 // Services the fresh connection until the launch parameters are exchanged.
 // Returns true when the match can launch.
-bool PumpHandshake()
+bool PumpHandshake(bool bothReady)
 {
-    const ULONGLONG elapsed = GetTickCount64() - g_phaseStartTick;
-    if (elapsed > kHandshakeTimeoutMs) {
+    const ULONGLONG now = GetTickCount64();
+    // The connection is up while the players are still answering the
+    // pre-match prompts; the exchange is only on the clock once both are done.
+    if (!bothReady) g_bothReadyTick = 0;
+    else if (!g_bothReadyTick) g_bothReadyTick = now;
+    if (g_bothReadyTick && now - g_bothReadyTick > kHandshakeTimeoutMs) {
         AbortMatchStart("Could not properly sync with the other player.");
         return false;
     }
+    const ULONGLONG elapsed = now - g_phaseStartTick; // age of the connection
 
     if (g_matchIsHost) {
-        // Let Steam's route settle so the automatic settings see a real ping.
+        // Let Steam's route settle so the automatic settings see a real ping,
+        // and hold the launch until both players have finished their prompts.
         const bool pingKnown = SteamTransport_GetRTT() != 0;
-        if (elapsed < kPingSettleMs || (!pingKnown && elapsed < kPingWaitLimitMs)) {
+        if (!bothReady || elapsed < kPingSettleMs || (!pingKnown && elapsed < kPingWaitLimitMs)) {
             ENetEvent event;
             while (enet_host_service(g_matchHost, &event, 0) > 0) {
                 if (event.type == ENET_EVENT_TYPE_RECEIVE) {
@@ -1016,12 +1044,13 @@ void UpdateMatchStart(bool cancelPressed)
         g_launchSent = false;
         if (!SteamRoom_ConnectPeer(pairing.opponentId, g_matchIsHost)) {
             g_service->FinishMatch(false, false);
+            g_service->Stand(); // do not retry every frame
             g_ui->ShowNotice("Failed to create game session.");
             return;
         }
-        char busy[128];
-        snprintf(busy, sizeof(busy), "Connecting to %.48s...", pairing.opponentName);
-        g_ui->SetBusy(busy);
+        // No overlay: the connection is made behind the pre-match prompts so
+        // they can show the ping actually measured between the two players.
+        g_bothReadyTick = 0;
         SetPhase(Phase::Connecting);
         HookLog("LobbyFlow: pairing found slot=%d side=%d opponent=%llu\n", pairing.slot,
                 pairing.localSide, static_cast<unsigned long long>(pairing.opponentId));
@@ -1033,17 +1062,16 @@ void UpdateMatchStart(bool cancelPressed)
         const bool stillPaired = g_service->FindPairing(current) &&
                                  current.opponentId == g_pairing.opponentId;
         if (!stillPaired) {
-            AbortMatchStart("The other player is no longer ready.");
-            return;
-        }
-        if (cancelPressed) {
-            // Backing out while the connection is still being made.
+            // Someone gave their seat up; the prompts already say so.
             AbortMatchStart(nullptr);
             return;
         }
-        // Teams may still change until the connection is up.
-        g_pairing.localTeam = current.localTeam;
-        g_pairing.opponentTeam = current.opponentTeam;
+        if (current.bothReady) {
+            // Both got through the prompts before the connection was up.
+            char busy[128];
+            snprintf(busy, sizeof(busy), "Connecting to %.48s...", g_pairing.opponentName);
+            g_ui->SetBusy(busy);
+        }
         if (SteamRoom_TakePeerFailed() ||
             GetTickCount64() - g_phaseStartTick > kConnectTimeoutMs) {
             AbortMatchStart("Connection to battle could not be made.");
@@ -1052,14 +1080,31 @@ void UpdateMatchStart(bool cancelPressed)
         bool isHost = false;
         if (SteamLobby_TakeNetworkHandles(&g_matchHost, &g_matchPeer, &isHost)) {
             g_matchIsHost = isHost;
-            g_ui->SetBusy("Preparing the battle...");
             SetPhase(Phase::Handshake);
             HookLog("LobbyFlow: match connection established (%s)\n", isHost ? "P1" : "P2");
         }
         return;
     }
 
-    if (g_phase == Phase::Handshake && PumpHandshake()) BeginLaunch();
+    if (g_phase != Phase::Handshake) return;
+    MatchPairing current;
+    if (!g_service->FindPairing(current) || current.opponentId != g_pairing.opponentId) {
+        AbortMatchStart(nullptr);
+        return;
+    }
+    // Teams and delay picks are chosen in the prompts, after the connection.
+    g_pairing.localTeam = current.localTeam;
+    g_pairing.opponentTeam = current.opponentTeam;
+    g_pairing.localDelayPick = current.localDelayPick;
+    g_pairing.opponentDelayPick = current.opponentDelayPick;
+    // The prompts show this in place of the room's estimate, and "Auto" is
+    // worked out from it on both sides.
+    if (const uint32_t rtt = SteamTransport_GetRTT())
+        g_service->SetMeasuredPing(g_pairing.opponentId, static_cast<int>(rtt / 2));
+    if (current.bothReady && !g_bothReadyTick) g_ui->SetBusy("Preparing the battle...");
+    // Player 2 always listens: player 1 launches as soon as it sees both
+    // ready, which can be a moment before this side's view of the room agrees.
+    if (PumpHandshake(current.bothReady)) BeginLaunch();
 }
 
 // ---------------------------------------------------------------------------
@@ -1095,7 +1140,9 @@ void RunLobbyFrame(uint64_t titleArea)
     if (g_mainMenuReleaseAt) input = Input{};
     g_ui->Update(input);
     if (g_ui->TakePrefsDirty()) SavePrefs(g_ui->Prefs());
-    Native_PlaySfx(g_ui->TakeSfx());
+    const uint32_t sfx = g_ui->TakeSfx();
+    if (sfx & SFX_MATCH_FOUND) Native_FocusGameWindow();
+    Native_PlaySfx(sfx);
 
     if (g_ui->TakeMainMenuRequested() && !g_mainMenuReleaseAt) {
         StartBlack();
@@ -1437,12 +1484,14 @@ void LobbyFlow_GameTick()
     }
 
     UpdateSet();
-    if (Netplay_TakePeerDisconnected()) {
-        // After a decided set the other player leaving is the normal ending.
-        if (g_setOver) LobbyFlow_RequestReturnToLobby(SetResultText());
-        else LobbyFlow_RequestReturnToLobby("Connection to opponent has been lost.");
-    }
+    if (Netplay_TakePeerDisconnected())
+        LobbyFlow_RequestReturnToLobby("Connection to opponent has been lost.");
     if (!g_returnRequested.exchange(false, std::memory_order_acq_rel)) return;
+    // After a decided set the other player leaving is the normal ending, and
+    // both players leave at almost the same moment: whoever is a frame behind
+    // sees a disconnect first. Whatever asked for the return (netplay reports
+    // a lost peer through more than one path), the set result is the news.
+    if (g_setOver) snprintf(g_returnReason, sizeof(g_returnReason), "%s", SetResultText());
 
     HookLog("LobbyFlow: leaving the match (%s)\n", g_returnReason[0] ? g_returnReason : "requested");
     FrameStepper_EndNetplaySession();

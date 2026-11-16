@@ -66,6 +66,13 @@ constexpr uintptr_t SPAD_REDETECT_SLOT = 0x140514950;  // (this, slot, flags)
 constexpr uintptr_t SPAD_CANCEL_MASK = 0x140001A50;
 constexpr uintptr_t MENU_SE_DECIDE = 0x14032A7F0;  // system voice 9
 constexpr uintptr_t MENU_SE_CANCEL = 0x1403F78C0;  // system voice 10
+// The cue aChrSelect__enterStageSelection (0x140366EF0) plays when character
+// select moves on to the stage: voice 0xA0 of sound bank 6.
+constexpr uintptr_t GSOUND_INSTANCE = 0x140003AA0;
+constexpr uintptr_t GSOUND_RESOLVE_REF = 0x1402AA2B0;      // (this, cRef* out, bank)
+constexpr uintptr_t GSOUND_PLAY_ORDINARY_VOICE = 0x1402AAC40; // (this, cRef* out, ref, id, 0, 1.0f, 0)
+constexpr uint32_t kStageSelectBank = 6;
+constexpr uint32_t kStageSelectVoice = 0xA0;
 constexpr uintptr_t MENU_SE_CURSOR = 0x1403F7920;  // system voice 8 when +0x88 != +0x8C
 
 // ---------------------------------------------------------------------------
@@ -972,9 +979,62 @@ void Native_ReadInput(Input& input, bool textActive)
     }
 }
 
+void Native_FocusGameWindow()
+{
+    struct Search {
+        DWORD process;
+        HWND window;
+    } search = {GetCurrentProcessId(), nullptr};
+    EnumWindows(
+        [](HWND window, LPARAM param) -> BOOL {
+            Search& found = *reinterpret_cast<Search*>(param);
+            DWORD process = 0;
+            GetWindowThreadProcessId(window, &process);
+            if (process != found.process || !IsWindowVisible(window) || GetWindow(window, GW_OWNER))
+                return TRUE;
+            found.window = window;
+            return FALSE;
+        },
+        reinterpret_cast<LPARAM>(&search));
+    if (!search.window || GetForegroundWindow() == search.window) return;
+    if (IsIconic(search.window)) ShowWindow(search.window, SW_RESTORE);
+    // Windows only lets the foreground thread hand the foreground over, so
+    // borrow its input queue for the call; flash the taskbar button as well
+    // in case it still says no.
+    const DWORD self = GetCurrentThreadId();
+    const DWORD front = GetWindowThreadProcessId(GetForegroundWindow(), nullptr);
+    if (front && front != self) AttachThreadInput(front, self, TRUE);
+    BringWindowToTop(search.window);
+    SetForegroundWindow(search.window);
+    if (front && front != self) AttachThreadInput(front, self, FALSE);
+    if (GetForegroundWindow() != search.window) {
+        FLASHWINFO flash = {sizeof(flash), search.window, FLASHW_ALL | FLASHW_TIMERNOFG, 0, 0};
+        FlashWindowEx(&flash);
+    }
+}
+
 void Native_PlaySfx(uint32_t sfxMask)
 {
     using PlayVoid = void(__fastcall*)();
+    if (sfxMask & SFX_MATCH_FOUND) {
+        using GetSound = void*(__fastcall*)();
+        using ResolveRef = void*(__fastcall*)(void*, void*, uint32_t);
+        using PlayVoice = void*(__fastcall*)(void*, void*, void*, uint32_t, uint32_t, float, uint32_t);
+        bool played = false;
+        if (void* sound = Native<GetSound>(GSOUND_INSTANCE)()) {
+            alignas(16) uint8_t ref[32] = {};
+            alignas(16) uint8_t handle[32] = {};
+            void* bank = Native<ResolveRef>(GSOUND_RESOLVE_REF)(sound, ref, kStageSelectBank);
+            Native<PlayVoice>(GSOUND_PLAY_ORDINARY_VOICE)(sound, handle, bank, kStageSelectVoice, 0,
+                                                         1.0f, 0);
+            played = *reinterpret_cast<uint64_t*>(handle + 8) != UINT64_MAX;
+        }
+        // That bank belongs to character select; if it is not loaded here the
+        // prompt still makes itself heard.
+        if (!played) Native<PlayVoid>(MENU_SE_DECIDE)();
+        HookLog("LobbyNative: match-found cue (stage select voice %s)\n", played ? "played" : "unavailable");
+        return;
+    }
     if (sfxMask & SFX_CONFIRM) {
         Native<PlayVoid>(MENU_SE_DECIDE)();
     } else if (sfxMask & SFX_CANCEL) {

@@ -1,6 +1,7 @@
 #include "../pch.h"
 #include "lobby_room.h"
 #include "lobby_music.h"
+#include "LaunchMenu.h"
 #include "steam_lobby.h"
 
 #include <Windows.h>
@@ -23,7 +24,7 @@ constexpr char kMusicKey[] = "bgm";      // lobby data: the host's music choice
 constexpr char kBanKey[] = "ban";
 constexpr char kFirstToKey[] = "ft";     // lobby data: games needed to win a set
 constexpr int kMaxBans = 64;
-constexpr int kMemberVersion = 2;
+constexpr int kMemberVersion = 3;
 constexpr uint8_t kChatText = 'C';       // lobby chat payload: 'C' + UTF-8
 constexpr uint32_t kRefreshInterval = 6; // frames between room rebuilds
 
@@ -62,10 +63,12 @@ bool IsPlausibleTeam(const Team& team)
 // Member state travels as one short string so a member's seat, readiness and
 // team always change atomically for observers.
 void EncodeMember(char* out, size_t size, int slot, int side, bool ready, MemberStatus status,
-                  EntryMode mode, const Team& team, int wins, int losses, int setWins)
+                  bool accepted, int delayPick, const Team& team, int wins, int losses,
+                  int setWins)
 {
-    snprintf(out, size, "%d|%d|%d|%d|%d|%d|%d,%d,%d|%d,%d,%d|%d,%d,%d|%d|%d|%d", kMemberVersion,
-             slot, side, ready ? 1 : 0, static_cast<int>(status), static_cast<int>(mode),
+    snprintf(out, size, "%d|%d|%d|%d|%d|%d|%d|%d,%d,%d|%d,%d,%d|%d,%d,%d|%d|%d|%d",
+             kMemberVersion, slot, side, ready ? 1 : 0, static_cast<int>(status),
+             accepted ? 1 : 0, delayPick,
              team.chars[0], team.chars[1], team.chars[2], team.assists[0], team.assists[1],
              team.assists[2], team.colors[0], team.colors[1], team.colors[2], wins, losses,
              setWins);
@@ -73,24 +76,27 @@ void EncodeMember(char* out, size_t size, int slot, int side, bool ready, Member
 
 bool DecodeMember(const char* text, Member& member)
 {
-    int version = 0, slot = -1, side = 0, ready = 0, status = 0, mode = 0, wins = 0, losses = 0;
-    int setWins = 0;
+    int version = 0, slot = -1, side = 0, ready = 0, status = 0, accepted = 0, wins = 0, losses = 0;
+    int setWins = 0, delayPick = kDelayPickNone;
     Team team = {};
-    if (!text || sscanf(text, "%d|%d|%d|%d|%d|%d|%d,%d,%d|%d,%d,%d|%d,%d,%d|%d|%d|%d", &version,
-                        &slot, &side, &ready, &status, &mode, &team.chars[0], &team.chars[1],
+    if (!text || sscanf(text, "%d|%d|%d|%d|%d|%d|%d|%d,%d,%d|%d,%d,%d|%d,%d,%d|%d|%d|%d", &version,
+                        &slot, &side, &ready, &status, &accepted, &delayPick, &team.chars[0],
+                        &team.chars[1],
                         &team.chars[2], &team.assists[0], &team.assists[1], &team.assists[2],
                         &team.colors[0], &team.colors[1], &team.colors[2], &wins, &losses,
-                        &setWins) != 18)
+                        &setWins) != 19)
         return false;
     if (version != kMemberVersion) return false;
     if (slot < -1 || slot >= kMaxSlots || side < 0 || side > 2 || status < 0 ||
-        status > static_cast<int>(MemberStatus::Watching) || mode < 0 || mode > 1)
+        status > static_cast<int>(MemberStatus::Watching) || delayPick < kDelayPickNone ||
+        delayPick > kMaxDelayPick)
         return false;
     member.slot = static_cast<int8_t>(slot);
     member.side = static_cast<int8_t>(side);
     member.ready = ready != 0;
     member.status = static_cast<MemberStatus>(status);
-    member.entryMode = static_cast<EntryMode>(mode);
+    member.accepted = accepted != 0;
+    member.delayPick = static_cast<int8_t>(delayPick);
     member.team = team;
     member.wins = static_cast<int16_t>(wins < 0 ? 0 : wins > 999 ? 999 : wins);
     member.losses = static_cast<int16_t>(losses < 0 ? 0 : losses > 999 ? 999 : losses);
@@ -207,7 +213,8 @@ void SteamRoomService::Leave()
     SteamRoom_Leave();
     local_.slot = -1;
     local_.side = 0;
-    local_.ready = false;
+    ClearHandshake();
+    handshakeOpponent_ = 0;
     local_.status = MemberStatus::Idle;
     local_.wins = 0;
     local_.losses = 0;
@@ -282,7 +289,8 @@ void SteamRoomService::PublishLocal()
     if (!SteamRoom_IsActive()) return;
     char encoded[160];
     EncodeMember(encoded, sizeof(encoded), local_.slot, local_.side, local_.ready, local_.status,
-                 local_.mode, local_.team, local_.wins, local_.losses, local_.setWins);
+                 local_.accepted, local_.delayPick, local_.team, local_.wins, local_.losses,
+                 local_.setWins);
     SteamRoom_SetLocalData(kMemberKey, encoded);
     publishedOnce_ = true;
 }
@@ -293,7 +301,7 @@ void SteamRoomService::Sit(int slot, int side)
     if (local_.status == MemberStatus::Fighting) return;
     local_.slot = slot;
     local_.side = side;
-    local_.ready = false;
+    ClearHandshake();
     local_.status = MemberStatus::Seated;
     PublishLocal();
     RefreshRoom();
@@ -304,7 +312,7 @@ void SteamRoomService::Stand()
     if (local_.status == MemberStatus::Fighting) return;
     local_.slot = -1;
     local_.side = 0;
-    local_.ready = false;
+    ClearHandshake();
     local_.status = MemberStatus::Idle;
     PublishLocal();
     RefreshRoom();
@@ -319,11 +327,42 @@ void SteamRoomService::SetReady(bool ready)
     RefreshRoom();
 }
 
-void SteamRoomService::SetTeam(const Team& team, EntryMode mode)
+void SteamRoomService::SetTeam(const Team& team)
 {
     local_.team = team;
-    local_.mode = mode;
     PublishLocal();
+}
+
+int SteamRoomService::AutoDelay(int pingMs) const
+{
+    if (pingMs < 0) return -1;
+    int32_t delay = 0, rollback = 0;
+    LaunchMenu_GetAutomaticNetplaySettings(static_cast<uint32_t>(pingMs), &delay, &rollback);
+    return delay;
+}
+
+void SteamRoomService::ClearHandshake()
+{
+    local_.accepted = false;
+    local_.delayPick = kDelayPickNone;
+    local_.ready = false;
+    if (local_.status == MemberStatus::Ready) local_.status = MemberStatus::Seated;
+}
+
+void SteamRoomService::AcceptMatch()
+{
+    if (local_.slot < 0 || local_.status == MemberStatus::Fighting || local_.accepted) return;
+    local_.accepted = true;
+    PublishLocal();
+    RefreshRoom();
+}
+
+void SteamRoomService::PickDelay(int pick)
+{
+    if (local_.slot < 0 || local_.status == MemberStatus::Fighting || !local_.accepted) return;
+    local_.delayPick = pick < kDelayPickAuto ? kDelayPickAuto : pick > kMaxDelayPick ? kMaxDelayPick : pick;
+    PublishLocal();
+    RefreshRoom();
 }
 
 void SteamRoomService::SetLocalStatus(MemberStatus status)
@@ -341,10 +380,23 @@ void SteamRoomService::FinishMatch(bool counted, bool localWon)
         else ++local_.losses;
     }
     local_.setWins = 0;
-    local_.ready = false;
+    ClearHandshake();
+    handshakeOpponent_ = 0; // a rematch with the same player starts over too
+    measuredPeer_ = 0;
+    measuredPing_ = -1;
     local_.status = local_.slot >= 0 ? MemberStatus::Seated : MemberStatus::Idle;
     PublishLocal();
     RefreshRoom();
+}
+
+void SteamRoomService::SetMeasuredPing(uint64_t memberId, int oneWayMs)
+{
+    if (measuredPeer_ == memberId && measuredPing_ == oneWayMs) return;
+    measuredPeer_ = memberId;
+    measuredPing_ = oneWayMs;
+    for (int i = 0; i < room_.memberCount; ++i)
+        if (room_.members[i].id == memberId && oneWayMs >= 0)
+            room_.members[i].pingMs = static_cast<int16_t>(oneWayMs > 9999 ? 9999 : oneWayMs);
 }
 
 void SteamRoomService::ReportSetScore(int localGamesWon)
@@ -464,7 +516,8 @@ void SteamRoomService::RefreshRoom()
             member.side = static_cast<int8_t>(local_.side);
             member.ready = local_.ready;
             member.status = local_.status;
-            member.entryMode = local_.mode;
+            member.accepted = local_.accepted;
+            member.delayPick = static_cast<int8_t>(local_.delayPick);
             member.team = local_.team;
             member.wins = static_cast<int16_t>(local_.wins);
             member.losses = static_cast<int16_t>(local_.losses);
@@ -476,10 +529,15 @@ void SteamRoomService::RefreshRoom()
                 // Not published yet (or malformed): present but not seated.
                 member.slot = -1;
                 member.ready = false;
+                member.accepted = false;
+                member.delayPick = kDelayPickNone;
                 member.status = MemberStatus::Idle;
             }
             if (member.slot >= next.settings.slotCount) member.slot = -1;
             member.pingMs = static_cast<int16_t>(SteamRoom_EstimateMemberPing(id));
+            // A live connection to this member knows better than the estimate.
+            if (id == measuredPeer_ && measuredPing_ >= 0)
+                member.pingMs = static_cast<int16_t>(measuredPing_ > 9999 ? 9999 : measuredPing_);
         }
     }
 
@@ -497,12 +555,41 @@ void SteamRoomService::RefreshRoom()
             loser.status = MemberStatus::Idle;
             if (loser.isLocal && local_.slot >= 0 && local_.status != MemberStatus::Fighting) {
                 local_.slot = -1;
-                local_.ready = false;
+                ClearHandshake();
                 local_.status = MemberStatus::Idle;
                 PublishLocal();
                 AddChat("", "That seat was taken by another player.", true);
             }
         }
+    }
+
+    // The pre-match steps belong to one pairing. If the opposite seat empties
+    // or someone else takes it, the local player starts over with them.
+    if (local_.slot >= 0 && local_.status != MemberStatus::Fighting) {
+        uint64_t opponent = 0;
+        for (int i = 0; i < next.memberCount; ++i) {
+            const Member& member = next.members[i];
+            if (!member.isLocal && member.slot == local_.slot && member.side < 2 &&
+                member.side != local_.side)
+                opponent = member.id;
+        }
+        if (opponent != handshakeOpponent_) {
+            handshakeOpponent_ = opponent;
+            if (local_.accepted || local_.ready || local_.delayPick != kDelayPickNone) {
+                ClearHandshake();
+                PublishLocal();
+                for (int i = 0; i < next.memberCount; ++i) {
+                    Member& member = next.members[i];
+                    if (!member.isLocal) continue;
+                    member.accepted = false;
+                    member.delayPick = kDelayPickNone;
+                    member.ready = false;
+                    member.status = local_.status;
+                }
+            }
+        }
+    } else if (local_.slot < 0) {
+        handshakeOpponent_ = 0;
     }
 
     bool anyLive = false;
@@ -561,14 +648,12 @@ void SteamRoomService::RefreshRoom()
 
 bool SteamRoomService::FindPairing(MatchPairing& pairing) const
 {
-    if (!room_.inRoom || local_.slot < 0 || !local_.ready ||
-        local_.status == MemberStatus::Fighting)
+    if (!room_.inRoom || local_.slot < 0 || local_.status == MemberStatus::Fighting)
         return false;
     for (int i = 0; i < room_.memberCount; ++i) {
         const Member& member = room_.members[i];
         if (member.isLocal || member.slot != local_.slot || member.side > 1 ||
-            member.side == local_.side || !member.ready ||
-            member.status == MemberStatus::Fighting)
+            member.side == local_.side || member.status == MemberStatus::Fighting)
             continue;
         pairing = {};
         pairing.slot = local_.slot;
@@ -577,6 +662,9 @@ bool SteamRoomService::FindPairing(MatchPairing& pairing) const
         snprintf(pairing.opponentName, sizeof(pairing.opponentName), "%s", member.name);
         pairing.localTeam = local_.team;
         pairing.opponentTeam = member.team;
+        pairing.localDelayPick = local_.delayPick;
+        pairing.opponentDelayPick = member.delayPick;
+        pairing.bothReady = local_.ready && member.ready;
         return true;
     }
     return false;
@@ -625,7 +713,8 @@ void SteamRoomService::Pump()
         // Fresh room: start unseated with a clean record and publish at once.
         local_.slot = -1;
         local_.side = 0;
-        local_.ready = false;
+        ClearHandshake();
+        handshakeOpponent_ = 0;
         local_.status = MemberStatus::Idle;
         local_.wins = 0;
         local_.losses = 0;

@@ -409,6 +409,44 @@ Only the lobby owner can write lobby data, so only the host can ban. Nothing
 removes the player from the Steam lobby itself: a modified client can stay in
 it and read its chat, and still counts towards the member limit.
 
+## Pre-match prompts
+
+There is no ready button on the room screen. Once both seats of a match slot
+are taken, each of the two players gets a modal that walks through three
+steps. The state is three fields each player publishes in their member data
+(version 3: `accepted`, `delayPick`, then the existing `ready`), so both
+clients derive the same step (`LobbyUi::HandshakeStep`):
+
+1. **Ready up** (15 s). READY or LEAVE SEAT. No answer, LEAVE SEAT or cancel
+   gives the seat up. When this prompt appears the game window is brought to
+   the front (`Native_FocusGameWindow`) and the stage-select cue plays: voice
+   `0xA0` of sound bank 6, as `aChrSelect__enterStageSelection` `0x140366EF0`
+   plays it through `sGSound__playOrdinaryVoice` `0x1402AAC40`. If that bank
+   is not loaded in the title area the decide cue plays instead; the log line
+   `LobbyNative: match-found cue` says which. **Unverified in game.**
+2. **Input delay** (20 s, then the highlighted value). AUTO or 0..8, with the
+   other player's pick shown once they have chosen. Both players run one
+   delay, so player 1 uses the higher of the two picks (`SendLaunchAsHost`).
+   AUTO is shown with its number, e.g. `AUTO (2)`, worked out from the ping
+   **measured between the two players**: the match connection is opened as
+   soon as both seats are taken (`FindPairing` pairs on being seated, before
+   either has readied up), stays up behind the prompts, and its round trip
+   (`SteamTransport_GetRTT`) replaces the room's estimate for that opponent
+   (`SetMeasuredPing`) in the prompt's ping display and in AUTO. Player 1
+   holds the launch packet until both are `ready`; the exchange's 15 s
+   timeout only runs from then. Until the first measurement arrives (a second
+   or two into the ready-up prompt) the estimate is shown. A connection that
+   fails stands the local player up, so the pair is not retried every frame.
+3. **Start immediately / character select** (30 s, then start). Character
+   select opens the team screen (90 s) whose last row is START. Either way
+   the player ends up `ready`; when both are, the match is started as before.
+
+Cancel at any step gives the seat up. The service forgets a player's answers
+whenever the opposite seat empties or changes hands, and after every match,
+so the next pairing (including a rematch) starts from step 1. There is no
+queue yet: "the next player" is whoever takes the vacated seat. The per-player
+quick start / character select setting is gone.
+
 ## Sets (first to N)
 
 A room is created with a set length (`MATCH FORMAT`: first to 1, 2, 3, 5, 7 or

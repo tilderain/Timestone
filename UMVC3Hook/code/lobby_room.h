@@ -22,6 +22,9 @@ struct MatchPairing {
     char opponentName[kNameCapacity];
     Team localTeam;
     Team opponentTeam;
+    int localDelayPick;    // see kDelayPickAuto in lobby_model.h
+    int opponentDelayPick;
+    bool bothReady;        // both players finished the pre-match steps
 };
 
 class SteamRoomService final : public RoomService {
@@ -47,8 +50,11 @@ public:
 
     void Sit(int slot, int side) override;
     void Stand() override;
+    void AcceptMatch() override;
+    void PickDelay(int pick) override;
+    int AutoDelay(int pingMs) const override;
     void SetReady(bool ready) override;
-    void SetTeam(const Team& team, EntryMode mode) override;
+    void SetTeam(const Team& team) override;
     void InviteFriends() override;
     void SetMusic(int32_t trackId) override;
     void ViewProfile(uint64_t memberId) override;
@@ -61,8 +67,10 @@ public:
     bool TakeError(char* message, size_t capacity) override;
 
     // --- Match flow (lobby_flow.cpp) ---
-    // True while the local player and the opponent at the same slot are both
-    // seated and ready and no match is running there yet.
+    // True once both seats of the local player's slot are taken and no match
+    // is running there. The connection is made from that point, before
+    // either has readied up, so the prompts can show a measured ping;
+    // `bothReady` says when the match may start.
     bool FindPairing(MatchPairing& pairing) const;
     // Publishes the local status shown to the room (Fighting while in battle).
     void SetLocalStatus(MemberStatus status);
@@ -70,6 +78,9 @@ public:
     void FinishMatch(bool counted, bool localWon);
     // During a set: the local player's games won so far, shown to the room.
     void ReportSetScore(int localGamesWon);
+    // Ping measured on the live connection to a member; shown in place of
+    // the room's estimate for them until the next FinishMatch.
+    void SetMeasuredPing(uint64_t memberId, int oneWayMs);
     void PostSystemLine(const char* text);
 
 private:
@@ -78,7 +89,8 @@ private:
         int side = 0;
         bool ready = false;
         MemberStatus status = MemberStatus::Idle;
-        EntryMode mode = EntryMode::Preset;
+        bool accepted = false;
+        int delayPick = kDelayPickNone;
         Team team = {};
         int wins = 0;
         int losses = 0;
@@ -107,6 +119,10 @@ private:
     bool liveAdvertised_ = false;
     int32_t pendingMusic_ = -1; // track to publish once the created room exists
     int pendingFirstTo_ = 0;    // likewise the set length
+    uint64_t handshakeOpponent_ = 0; // who the pre-match steps were taken with
+    uint64_t measuredPeer_ = 0;
+    int measuredPing_ = -1;
+    void ClearHandshake();
     uint64_t knownMembers_[kMaxMembers] = {};
     char knownNames_[kMaxMembers][kNameCapacity] = {};
     int knownMemberCount_ = 0;

@@ -12,13 +12,15 @@ enum Sfx : uint32_t {
     SFX_MOVE = 1u << 0,
     SFX_CONFIRM = 1u << 1,
     SFX_CANCEL = 1u << 2,
+    // A match is waiting on the local player: the stage-select cue, and the
+    // game window is brought to the front.
+    SFX_MATCH_FOUND = 1u << 3,
 };
 
 // Preferences the caller loads before constructing the UI and saves whenever
 // TakePrefsDirty() reports a change.
 struct UiPrefs {
     Team team;
-    EntryMode entryMode;
     int presetIndex; // saved-roster preset in use, or -1 for a custom team
     RoomSettings create;
 };
@@ -59,6 +61,17 @@ private:
     enum class Screen : uint8_t { Top, Browse, Create, Room, Team };
     enum class TextTarget : uint8_t { None, RoomName, Chat };
     enum class Confirm : uint8_t { None, LeaveRoom, MainMenu, KickMember };
+    // Pre-match steps shown as a modal once both seats of the local player's
+    // match slot are taken. Each is answered by both players in turn.
+    enum class Handshake : uint8_t {
+        None,
+        Prompt,     // "ready up?" not answered yet
+        WaitAccept, // answered, the other player has not
+        Delay,      // choosing an input delay
+        WaitDelay,
+        Entry,      // character select or start immediately
+        WaitStart,  // done, waiting for the other player's team
+    };
 
     void GoTo(Screen screen);
     void Play(uint32_t sfx) { sfx_ |= sfx; }
@@ -72,6 +85,9 @@ private:
     void UpdateQuickChat(const Input& input);
     void UpdateMusicMenu(const Input& input);
     void UpdateMemberList(const Input& input);
+    Handshake HandshakeStep() const;
+    bool UpdateHandshake(const Input& input); // true while it owns the input
+    void DrawHandshake(Canvas& canvas) const;
     void UpdateMemberMenu(const Input& input);
     void UpdateTeam(const Input& input);
     void UpdateText(const Input& input);
@@ -135,6 +151,11 @@ private:
     int memberMenuCursor_ = 0;
     uint64_t memberMenuId_ = 0;   // who the menu / kick confirmation is about
     char memberMenuName_[kNameCapacity] = {};
+    Handshake handshake_ = Handshake::None; // step shown last frame
+    uint32_t handshakeFrames_ = 0;          // frames spent on it
+    int handshakeCursor_ = 0;
+    int delayCursor_ = 0;                   // delay pick being chosen
+    bool teamForMatch_ = false;             // team screen opened from the Entry step
     bool musicOpen_ = false; // host's lobby music picker
     int musicCursor_ = 0;
 

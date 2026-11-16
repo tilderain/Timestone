@@ -166,6 +166,8 @@ public:
         if (!local) return;
         local->slot = static_cast<int8_t>(slot);
         local->side = static_cast<int8_t>(side);
+        local->accepted = false;
+        local->delayPick = kDelayPickNone;
         local->ready = false;
         local->status = MemberStatus::Seated;
         Recompute();
@@ -175,6 +177,8 @@ public:
         Member* local = Local();
         if (!local) return;
         local->slot = -1;
+        local->accepted = false;
+        local->delayPick = kDelayPickNone;
         local->ready = false;
         local->status = MemberStatus::Idle;
         Recompute();
@@ -187,12 +191,18 @@ public:
         local->status = ready ? MemberStatus::Ready : MemberStatus::Seated;
         Recompute();
     }
-    void SetTeam(const Team& team, EntryMode mode) override
+    void SetTeam(const Team& team) override
     {
-        if (Member* local = Local()) {
-            local->team = team;
-            local->entryMode = mode;
-        }
+        if (Member* local = Local()) local->team = team;
+    }
+    void AcceptMatch() override
+    {
+        if (Member* local = Local()) local->accepted = true;
+    }
+    int AutoDelay(int pingMs) const override { return pingMs < 0 ? -1 : 1 + pingMs / 40; }
+    void PickDelay(int pick) override
+    {
+        if (Member* local = Local()) local->delayPick = static_cast<int8_t>(pick);
     }
     void InviteFriends() override {}
     void SetMusic(int32_t trackId) override { room.music = trackId; }
@@ -218,6 +228,7 @@ public:
         member.isHost = host;
         member.isLocal = local;
         member.slot = -1;
+        member.delayPick = kDelayPickNone;
         member.pingMs = static_cast<int16_t>(20 + id * 23 % 190);
         Preset(static_cast<int>(id % 3), &member.team);
         return member;
@@ -229,6 +240,10 @@ public:
         member.side = static_cast<int8_t>(side);
         member.ready = ready;
         member.status = status;
+        // A seated guest in these scenes has already answered the ready
+        // prompt; the scenes move it through the later steps by hand.
+        member.accepted = true;
+        member.delayPick = kDelayPickNone;
     }
     void AddChat(const char* sender, const char* text, bool system)
     {
@@ -287,7 +302,6 @@ UiPrefs DefaultPrefs()
     UiPrefs prefs = {};
     Preset(0, &prefs.team);
     prefs.presetIndex = 0;
-    prefs.entryMode = EntryMode::Preset;
     snprintf(prefs.create.name, sizeof(prefs.create.name), "tilderain's Lobby");
     prefs.create.maxMembers = 8;
     prefs.create.slotCount = 2;
@@ -301,13 +315,14 @@ void Populate(FakeService& service, int slots)
     snprintf(settings.name, sizeof(settings.name), "Friday Night Marvel");
     settings.maxMembers = 8;
     settings.slotCount = slots;
+    settings.firstTo = 3;
     service.Create(settings);
     service.AddMember(2, "Vevota", false, false);
     service.AddMember(3, "ArcherOfLegend", false, false);
     service.AddMember(4, "Jasongamedev", false, false);
     service.AddMember(5, "a_really_long_steam_persona_name", false, false);
     service.AddMember(6, "John2143", false, false);
-    service.Seat(1, 0, 1, true, MemberStatus::Ready);
+    service.Seat(1, 0, 1, false, MemberStatus::Seated);
     service.Seat(2, 1, 0, true, MemberStatus::Fighting);
     service.Seat(3, 1, 1, true, MemberStatus::Fighting);
     if (slots > 2) service.Seat(4, 2, 0, false, MemberStatus::Seated);
@@ -410,11 +425,9 @@ int main(int argc, char** argv)
         Settle(ui);
         Populate(service, slots);
         Settle(ui);
-        ui.Update(Press(&Input::confirm)); // sit at match 1, player 1
-        Settle(ui, 3);
         char name[32];
         snprintf(name, sizeof(name), "room_%dslot", slots);
-        ok &= Capture(ui, directory, name);
+        ok &= Capture(ui, directory, name); // cursor on the open seat
         if (slots == 2) {
             ui.Update(Press(&Input::menu));
             Settle(ui, 2);
@@ -447,9 +460,32 @@ int main(int argc, char** argv)
             Settle(ui, 2);
             ok &= Capture(ui, directory, "room_chat");
             ui.Update(Press(&Input::cancel));
-            ui.Update(Press(&Input::confirm)); // ready: slot 0 goes to Starting
+
+            // Sit opposite Vevota: the pre-match prompts, step by step.
+            ui.Update(Press(&Input::confirm));
+            Settle(ui, 90);
+            ok &= Capture(ui, directory, "match_prompt");
+            ui.Update(Press(&Input::confirm)); // READY
+            Settle(ui, 3);
+            ok &= Capture(ui, directory, "match_delay");
+            ui.Update(Press(&Input::right));
+            ui.Update(Press(&Input::right));
+            ui.Update(Press(&Input::right));
+            ui.Update(Press(&Input::confirm)); // delay 2
+            Settle(ui, 3);
+            ok &= Capture(ui, directory, "match_delay_wait");
+            service.room.members[1].delayPick = kDelayPickAuto;
+            Settle(ui, 3);
+            ui.Update(Press(&Input::down));
+            Settle(ui, 3);
+            ok &= Capture(ui, directory, "match_entry");
+            ui.Update(Press(&Input::confirm)); // CHARACTER SELECT
+            Settle(ui, 20);
+            ok &= Capture(ui, directory, "match_team");
+            ui.Update(Press(&Input::up)); // wrap to START
+            ui.Update(Press(&Input::confirm));
             Settle(ui, 4);
-            ok &= Capture(ui, directory, "room_starting");
+            ok &= Capture(ui, directory, "match_wait_start");
             ui.SetBusy("Connecting to Vevota...");
             Settle(ui, 2);
             ok &= Capture(ui, directory, "room_busy");

@@ -25,11 +25,12 @@ struct Team {
     int32_t colors[3];  // zero-based archive variant
 };
 
-// How a player wants to enter a match once both seats are ready.
-enum class EntryMode : uint8_t {
-    Preset = 0,          // go straight into battle with the published team
-    CharacterSelect = 1, // open team selection first
-};
+// Input delay choices offered before a match. A pick is stored as an index:
+// kDelayPickNone until chosen, kDelayPickAuto to follow the measured ping,
+// otherwise delay frames + 1.
+constexpr int kDelayPickNone = -1;
+constexpr int kDelayPickAuto = 0;
+constexpr int kMaxDelayPick = 9; // delay 8
 
 enum class Visibility : uint8_t {
     Public = 0,
@@ -54,7 +55,10 @@ struct Member {
     int8_t slot;   // -1 when not seated or watching
     int8_t side;   // 0 = player 1, 1 = player 2, 2 = spectator
     MemberStatus status;
-    EntryMode entryMode;
+    // Pre-match steps with the player in the opposite seat, in order:
+    // accepted the match, picked an input delay, then `ready` (team settled).
+    bool accepted;
+    int8_t delayPick;
     Team team;
     int16_t wins;   // sets won in this room
     int16_t losses;
@@ -133,8 +137,15 @@ public:
 
     virtual void Sit(int slot, int side) = 0;
     virtual void Stand() = 0;
+    // Pre-match steps, see Member. They are forgotten whenever the opposite
+    // seat changes hands or empties.
+    virtual void AcceptMatch() = 0;
+    virtual void PickDelay(int pick) = 0;
+    // The input delay an "Auto" pick stands for at this one-way ping, or -1
+    // if the ping is not known yet.
+    virtual int AutoDelay(int pingMs) const = 0;
     virtual void SetReady(bool ready) = 0;
-    virtual void SetTeam(const Team& team, EntryMode mode) = 0;
+    virtual void SetTeam(const Team& team) = 0;
     virtual void InviteFriends() = 0;
     // Host only: the room's music, a lobby_music.h track id. Everyone in the
     // room sees it in RoomState::music.
