@@ -12,6 +12,26 @@ namespace {
 // Palette and shared geometry (1280x720 UI space)
 // ---------------------------------------------------------------------------
 constexpr Color kText = kWhite;
+// Selection highlights breathe at the game's own rate: the selected-item glow
+// in its menus (submenu_txt_ef in ma_menu_sub_select) loops every 60 frames,
+// rising for 20 and falling for 40. Returns -1..1 like the sine it replaces.
+inline float SelectionWave(uint32_t frame)
+{
+    const uint32_t t = frame % 60u;
+    const float level = t < 20u ? t / 20.0f : 1.0f - (t - 20u) / 40.0f;
+    return level * 2.0f - 1.0f;
+}
+
+// Opacity of the top menu's white selection bar: 1.0 down to kMenuBarFadeMin
+// and back, once every kMenuBarFadeFrames frames.
+constexpr float kMenuBarFadeMin = 0.82f;
+constexpr float kMenuBarFadeFrames = 96.0f;
+inline float MenuBarFade(uint32_t frame)
+{
+    const float phase = std::cos(frame * (6.2831853f / kMenuBarFadeFrames));
+    return kMenuBarFadeMin + (1.0f - kMenuBarFadeMin) * (0.5f + 0.5f * phase);
+}
+
 constexpr Color kDim = Rgb(0xBAC4D2);
 constexpr Color kFaint = Rgb(0x7E8A9A);
 constexpr Color kYellow = Rgb(0xFFD63A);
@@ -925,10 +945,12 @@ const char* LobbyUi::DrawTop(Canvas& canvas) const
         if (selected) {
             // The white bar carries a round ornament near its right end; the
             // label stops just short of it, as on the native main menu.
-            const float pulse = 0.88f + 0.12f * std::sin(frame_ * 0.16f);
+            // Like the native main menu's bar: full white easing to slightly
+            // see-through white and back. Depth and rate are set by eye from
+            // the game; its layout data holds no keys for this fade.
             p.Sprite(TEX_MENU_SEL, 1296.0f + shift, y, 640.0f, 72.0f,
                      Uv{12.0f / 512.0f, 10.0f / 64.0f, 1.0f, 58.0f / 64.0f}, A_MR,
-                     WithAlpha(kWhite, pulse));
+                     WithAlpha(kWhite, MenuBarFade(frame_)));
             p.Text(kTopItems[i], 1104.0f + shift, y - 2.0f, 0.5f, A_MR, kInk, FONT_HEADING);
         } else {
             p.Sprite(TEX_MENU_BAR, 1296.0f + shift, y, 600.0f, 58.0f,
@@ -969,7 +991,7 @@ const char* LobbyUi::DrawBrowse(Canvas& canvas) const
         r.Box(TEX_SLANT_ROW, kSafeLeft, y - 29.0f, rowWidth, 58.0f,
               selected ? Color{0.42f, 0.44f, 0.5f, 0.96f} : Color{0.2f, 0.22f, 0.28f, 0.9f});
         if (selected) {
-            const float pulse = 0.5f + 0.22f * std::sin(frame_ * 0.18f);
+            const float pulse = 0.5f + 0.22f * SelectionWave(frame_);
             p.Box(TEX_SLANT_SEL, kSafeLeft, y - 29.0f, rowWidth, 58.0f, WithAlpha(kWhite, pulse));
         }
         r.Sprite(TEX_USER_ICON, 104.0f, y, 38.0f, 38.0f, kFullUv, A_ML);
@@ -1035,7 +1057,7 @@ const char* LobbyUi::DrawCreate(Canvas& canvas) const
         const float y = panelY + 112.0f + row * 62.0f;
         const bool selected = row == createCursor_;
         if (selected) {
-            const float pulse = 0.72f + 0.28f * std::sin(frame_ * 0.18f);
+            const float pulse = 0.72f + 0.28f * SelectionWave(frame_);
             p.Box(TEX_ROW_SEL, panelX + 26.0f, y - 29.0f, panelW - 52.0f, 58.0f,
                   WithAlpha(kWhite, pulse));
         }
@@ -1154,7 +1176,7 @@ void LobbyUi::DrawRoomSlots(Canvas& canvas) const
         p.Text(title, x + 26.0f, y + 30.0f, 0.36f, A_ML, kYellow, FONT_HEADING);
         if (live) {
             // "MATCH IN PROGRESS" word art, breathing.
-            const float pulse = 0.72f + 0.28f * std::sin(frame_ * 0.1f);
+            const float pulse = 0.72f + 0.28f * SelectionWave(frame_);
             p.Sprite(TEX_WORDS_B, x + cardW - 24.0f, y + 30.0f, 235.0f * 0.64f, 37.0f * 0.64f,
                      Uv{11.0f / 256.0f, 13.0f / 256.0f, 246.0f / 256.0f, 50.0f / 256.0f}, A_MR,
                      WithAlpha(kWhite, pulse));
@@ -1175,7 +1197,7 @@ void LobbyUi::DrawRoomSlots(Canvas& canvas) const
 
             // The focus frame goes under the seat so it never veils the text.
             if (focused) {
-                const float pulse = 0.7f + 0.3f * std::sin(frame_ * 0.2f);
+                const float pulse = 0.7f + 0.3f * SelectionWave(frame_);
                 p.Box(TEX_ROW_SEL, x + 10.0f, sy - 5.0f, cardW - 20.0f, seatH + 10.0f,
                       WithAlpha(kWhite, pulse));
             }
@@ -1278,7 +1300,7 @@ void LobbyUi::DrawListMenu(Canvas& canvas, const char* title, const char* const*
     for (int i = 0; i < count; ++i) {
         const float rowY = y + 88.0f + i * 44.0f;
         if (i == cursor) {
-            const float pulse = 0.72f + 0.28f * std::sin(frame_ * 0.18f);
+            const float pulse = 0.72f + 0.28f * SelectionWave(frame_);
             p.Box(TEX_ROW_SEL, x + 22.0f, rowY - 24.0f, w - 44.0f, 48.0f, WithAlpha(kWhite, pulse));
         }
         p.Text(items[i], x + w * 0.5f, rowY, 0.8f, A_MC, i == cursor ? kInk : kDim);
@@ -1334,7 +1356,7 @@ const char* LobbyUi::DrawTeam(Canvas& canvas) const
         const float y = panelY + 40.0f + row * 39.0f;
         const bool selected = row == teamCursor_;
         if (selected) {
-            const float pulse = 0.72f + 0.28f * std::sin(frame_ * 0.18f);
+            const float pulse = 0.72f + 0.28f * SelectionWave(frame_);
             p.Box(TEX_ROW_SEL, panelX + 20.0f, y - 23.0f, panelW - 40.0f, 46.0f,
                   WithAlpha(kWhite, pulse));
         }
@@ -1465,7 +1487,7 @@ bool LobbyUi::DrawModal(Canvas& canvas) const
         for (int i = 0; i < 2; ++i) {
             const float optionX = kScreenW * 0.5f + (i == 0 ? -110.0f : 110.0f);
             if (i == confirmCursor_) {
-                const float pulse = 0.72f + 0.28f * std::sin(frame_ * 0.18f);
+                const float pulse = 0.72f + 0.28f * SelectionWave(frame_);
                 p.Box(TEX_ROW_SEL, optionX - 90.0f, y + h - 82.0f, 180.0f, 50.0f,
                       WithAlpha(kWhite, pulse));
             }
