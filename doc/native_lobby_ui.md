@@ -664,10 +664,15 @@ well. **Unverified in game.**
 
 ### In the room
 
-Confirm on a setup with a match running opens a two-item menu, WATCH MATCH or
-JOIN / LEAVE QUEUE. Watching while queued is allowed; a seat ends it
-(`Sit` clears the watch, and a spectator whose queue reaches the front is
-taken back to the room). The setup card shows the WATCH tag and a count.
+Lining up for a setup whose match is running also watches it: while the
+local player is queued for a slot that is `InProgress`, `UpdateSpectateJoin`
+calls `Watch` for it. A seat ends the watching (`Sit` clears it, and a
+spectator whose queue reaches the front is taken back to the room). Stop
+Watching in the pause menu, or cancelling while the match is being joined,
+opts out of that setup's match (`g_watchOptOutSlot`) without giving up the
+place in line; leaving the queue or lining up again forgets the opt-out.
+There is no watching without queueing.
+The setup card shows the WATCH tag and a count.
 In the battle the top of the screen names the two players, the set score and
 the state of the feed; the pause menu offers Stop Watching only.
 

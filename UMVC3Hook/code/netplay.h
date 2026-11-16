@@ -241,6 +241,10 @@ bool Netplay_TakePeerDisconnected();
 
 // Queue a reliable disconnect notice; wait for the send attempt, not a peer ACK.
 bool Netplay_SendPlayerDisconnect(uint32_t timeoutMs = 100);
+// True once the peer has announced it is leaving (it closed the match itself:
+// returned to the lobby, quit), until the next session starts. A link that
+// just died never sets it.
+bool Netplay_PeerLeftByChoice();
 // Consume a user-requested disconnect notice from the peer.
 bool Netplay_TakePlayerDisconnectNotice();
 

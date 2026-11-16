@@ -1450,7 +1450,8 @@ void FrameStepper_ShowOpponentDisconnected()
 {
     if (LobbyFlow_InRoomMatch()) {
         // A room match ends by returning to the room, not by ending the session.
-        LobbyFlow_RequestReturnToLobby("Connection to opponent has been lost.");
+        LobbyFlow_RequestReturnToLobby(Netplay_PeerLeftByChoice()
+            ? "Your opponent left the match." : "Connection to opponent has been lost.");
         return;
     }
     g_opponentDisconnected = true;

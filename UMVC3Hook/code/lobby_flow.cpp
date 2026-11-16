@@ -176,10 +176,15 @@ bool g_presetsLoaded = false;
 bool g_spectating = false;
 ULONGLONG g_watchIdleTick = 0;   // joining: when the slot stopped being in progress
 ULONGLONG g_feedLostTick = 0;    // watching: when the feed went away
+// The setup whose match the player chose not to watch (Stop Watching, or
+// cancelling the join) while staying in its queue; -1 when there is none.
+// Lining up again, there or elsewhere, forgets it.
+std::atomic<int> g_watchOptOutSlot{-1};
 char g_watchNames[2][kNameCapacity] = {};
 char g_watchLine[160] = {};
 
 MatchPairing g_pairing = {};
+ULONGLONG g_launchWaitTick = 0; // player 2: when player 1 was first seen fighting
 ENetHost* g_matchHost = nullptr;
 ENetPeer* g_matchPeer = nullptr;
 ULONGLONG g_bothReadyTick = 0; // when both players finished the pre-match steps
@@ -1054,8 +1059,18 @@ void UpdateSpectateJoin(bool cancelPressed)
     if (g_phase != Phase::Lobby && g_phase != Phase::WatchJoining) return;
     const Member* local = LocalRoomMember();
     const RoomState& room = g_service->Room();
-    const int wanted = local && room.inRoom ? local->watchSlot : -1;
+    int wanted = local && room.inRoom ? local->watchSlot : -1;
     if (g_phase == Phase::Lobby) {
+        // Waiting in line for a setup means watching its match meanwhile,
+        // unless the player said no to this one.
+        const int queued = local && room.inRoom && local->slot < 0 ? local->queueSlot : -1;
+        if (g_watchOptOutSlot.load(std::memory_order_relaxed) != queued)
+            g_watchOptOutSlot.store(-1, std::memory_order_relaxed);
+        if (wanted < 0 && queued >= 0 && room.slots[queued] == SlotState::InProgress &&
+            g_watchOptOutSlot.load(std::memory_order_relaxed) < 0) {
+            g_service->Watch(queued);
+            wanted = queued;
+        }
         if (wanted < 0) return;
         Spectate_Start(wanted);
         g_watchIdleTick = 0;
@@ -1075,6 +1090,9 @@ void UpdateSpectateJoin(bool cancelPressed)
             failure = "Could not join the match as a spectator.";
     }
     if (stop || failure) {
+        // Not this match again by itself: neither after a cancel nor in a
+        // loop after a failure.
+        if (wanted >= 0) g_watchOptOutSlot.store(wanted, std::memory_order_relaxed);
         HookLog("LobbyFlow: stopped joining as a spectator (%s)\n", failure ? failure : "cancelled");
         StopSpectating();
         g_ui->SetBusy(nullptr);
@@ -1242,7 +1260,40 @@ void UpdateMatchStart(bool cancelPressed)
 
     if (g_phase != Phase::Handshake) return;
     MatchPairing current;
-    if (!g_service->FindPairing(current) || current.opponentId != g_pairing.opponentId) {
+    const bool paired = g_service->FindPairing(current) &&
+                        current.opponentId == g_pairing.opponentId;
+    if (!paired && !g_matchIsHost) {
+        // Player 1 marks itself as fighting the moment it launches, and the
+        // room can show that before the launch packet has been read here:
+        // the pairing then looks gone when it has in fact just started.
+        // Whatever the room says, a launch that is already on the wire wins.
+        if (PumpHandshake(false)) {
+            BeginLaunch();
+            return;
+        }
+        if (g_phase != Phase::Handshake) return; // the pump found the link dead
+        // Still opposite us and fighting: the launch is on its way. Give it
+        // a few seconds before believing the room over the connection.
+        const Member* local = LocalRoomMember();
+        bool launching = false;
+        const RoomState& room = g_service->Room();
+        for (int i = 0; local && i < room.memberCount; ++i) {
+            const Member& member = room.members[i];
+            launching |= member.id == g_pairing.opponentId && member.slot == local->slot &&
+                         member.status == MemberStatus::Fighting;
+        }
+        const ULONGLONG now = GetTickCount64();
+        if (!launching) g_launchWaitTick = 0;
+        else if (!g_launchWaitTick) g_launchWaitTick = now;
+        if (launching && now - g_launchWaitTick < 5000) return;
+    }
+    if (paired) g_launchWaitTick = 0;
+    if (!paired) {
+        g_launchWaitTick = 0;
+        const Member* local = LocalRoomMember();
+        HookLog("LobbyFlow: pairing with %llu is gone (local slot=%d status=%d)\n",
+                static_cast<unsigned long long>(g_pairing.opponentId), local ? local->slot : -9,
+                local ? static_cast<int>(local->status) : -1);
         AbortMatchStart(nullptr);
         return;
     }
@@ -1742,7 +1793,8 @@ void LobbyFlow_GameTick()
         UpdateSet();
         SampleTeamHealth();
         if (Netplay_TakePeerDisconnected())
-            LobbyFlow_RequestReturnToLobby("Connection to opponent has been lost.");
+            LobbyFlow_RequestReturnToLobby(Netplay_PeerLeftByChoice()
+                ? "Your opponent left the match." : "Connection to opponent has been lost.");
     }
     if (!g_returnRequested.exchange(false, std::memory_order_acq_rel)) return;
     // After a decided set the other player leaving is the normal ending, and
@@ -1790,7 +1842,9 @@ void LobbyFlow_RequestLeaveMatch()
 {
     if (!LobbyFlow_InRoomMatch()) return;
     if (g_spectating) {
-        // Only the watching ends; a place in a queue is kept.
+        // Only the watching ends; a place in a queue is kept, and the room
+        // does not send the player straight back in.
+        g_watchOptOutSlot.store(Spectate_Slot(), std::memory_order_relaxed);
         LobbyFlow_RequestReturnToLobby("");
         return;
     }

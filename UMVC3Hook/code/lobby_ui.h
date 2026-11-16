@@ -82,7 +82,6 @@ private:
     void UpdateCreate(const Input& input);
     void UpdateRoom(const Input& input);
     void UpdateRoomMenu(const Input& input);
-    void UpdateSlotMenu(const Input& input);
     void UpdateQuickChat(const Input& input);
     void UpdateMusicMenu(const Input& input);
     void UpdateMemberList(const Input& input);
@@ -148,8 +147,6 @@ private:
 
     bool roomMenuOpen_ = false;
     int roomMenuCursor_ = 0;
-    bool slotMenuOpen_ = false; // watch or line up, for a setup with a match running
-    int slotMenuCursor_ = 0;
     bool quickChatOpen_ = false;
     int quickChatCursor_ = 0;
     bool memberFocus_ = false;    // cursor is in the player list, not on a seat

@@ -482,12 +482,8 @@ int main(int argc, char** argv)
         snprintf(name, sizeof(name), "room_%dslot", slots);
         ok &= Capture(ui, directory, name); // cursor on the open seat
         if (slots == 4) {
-            // The match in progress (the second slot): watch it or line up.
+            // Line up for the match in progress (the second slot).
             ui.Update(Press(&Input::right));
-            ui.Update(Press(&Input::confirm));
-            Settle(ui, 3);
-            ok &= Capture(ui, directory, "room_slot_menu");
-            ui.Update(Press(&Input::down));
             ui.Update(Press(&Input::confirm));
             Settle(ui, 3);
             ok &= Capture(ui, directory, "room_4slot_queued");

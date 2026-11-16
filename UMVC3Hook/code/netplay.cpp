@@ -67,6 +67,8 @@ static std::atomic<bool>    g_playerDisconnectRequested { false };
 static std::atomic<bool>    g_playerDisconnectSent { false };
 static std::atomic<bool>    g_playerDisconnectSendSucceeded { false };
 static std::atomic<bool>    g_playerDisconnectNotice { false };
+// The peer said it was leaving, as opposed to the link simply going away.
+static std::atomic<bool>    g_peerLeftByChoice { false };
 
 // Delay + rollback control channel — small packets to keep both peers in sync.
 static int32_t              g_outboundDelay    = -1;
@@ -791,6 +793,7 @@ static DWORD WINAPI Netplay_ServiceThread(LPVOID)
                                 if (event.packet->dataLength >= sizeof(PlayerDisconnectPacket))
                                 {
                                     HookLog("Netplay: Remote player sent disconnect notice\n");
+                                    g_peerLeftByChoice = true;
                                     MarkPeerDisconnected(event.peer, true);
                                 }
                                 break;
@@ -953,6 +956,7 @@ void Netplay_Init(ENetHost* host, ENetPeer* peer)
     g_playerDisconnectSent = false;
     g_playerDisconnectSendSucceeded = false;
     g_playerDisconnectNotice = false;
+    g_peerLeftByChoice = false;
 
     std::memset(g_rttHistory, 0, sizeof(g_rttHistory));
     g_avgRttHistoryIndex = 0;
@@ -1022,6 +1026,7 @@ void Netplay_InitSpectator()
     g_peerDisconnected = false;
     g_playerDisconnectRequested = false;
     g_playerDisconnectNotice = false;
+    g_peerLeftByChoice = false;
     g_rtt = 0;
     g_averageRtt = 0;
     g_packetLoss = -1.0f;
@@ -1510,6 +1515,11 @@ bool Netplay_SendPlayerDisconnect(uint32_t timeoutMs)
     while (!g_playerDisconnectSent && GetTickCount() - start < timeoutMs)
         Sleep(1);
     return g_playerDisconnectSent && g_playerDisconnectSendSucceeded;
+}
+
+bool Netplay_PeerLeftByChoice()
+{
+    return g_peerLeftByChoice.load();
 }
 
 bool Netplay_TakePlayerDisconnectNotice()
