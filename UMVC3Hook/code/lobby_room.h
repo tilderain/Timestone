@@ -141,6 +141,7 @@ private:
 
     ChatLine chat_[kMaxChatLines] = {};
     int chatCount_ = 0;
+    int chatHead_ = 0; // index of the oldest retained line (ring)
     char error_[256] = {};
 };
 

@@ -89,6 +89,7 @@ private:
     bool UpdateHandshake(const Input& input); // true while it owns the input
     void DrawHandshake(Canvas& canvas) const;
     void UpdateMemberMenu(const Input& input);
+    void UpdateChatFocus(const Input& input);
     void UpdateTeam(const Input& input);
     void UpdateText(const Input& input);
     void SyncWithService();
@@ -102,6 +103,7 @@ private:
     void DrawRoomMembers(Canvas& canvas) const;
     void DrawRoomSlots(Canvas& canvas) const;
     void DrawRoomChat(Canvas& canvas) const;
+    int ChatRowsFrom(int firstMessage) const; // display rows of messages [first, count)
     const char* DrawTeam(Canvas& canvas) const; // returns footer help
     void DrawTeamCard(Canvas& canvas, float x, float y, float w) const;
     void DrawListMenu(Canvas& canvas, const char* title, const char* const* items,
@@ -149,6 +151,10 @@ private:
     bool memberFocus_ = false;    // cursor is in the player list, not on a seat
     int memberCursor_ = 0;
     bool memberMenuOpen_ = false; // actions for the selected player
+    bool chatFocus_ = false;      // cursor is on the chat panel, below the player list
+    bool chatExpanded_ = false;   // chat covers the player list and scrolls
+    int chatScroll_ = 0;          // display rows scrolled back from the newest
+    int chatSeenCount_ = 0;       // messages there were when the scroll was last set
     int memberMenuCursor_ = 0;
     uint64_t memberMenuId_ = 0;   // who the menu / kick confirmation is about
     char memberMenuName_[kNameCapacity] = {};

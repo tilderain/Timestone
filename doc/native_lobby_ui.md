@@ -484,6 +484,17 @@ honest as the clients: a modified one could publish a low `queueSeq`.
 A lobby test build opens `kLobbyTestExtraInstances` extra windows
 (`lobby_local.h`, 1 by default); a queue needs at least 2.
 
+## Chat panel
+
+Stepping off either end of the player list puts the cursor on the chat panel;
+confirm expands it over the list (23 rows) and up/down or the shoulder buttons
+scroll. The service keeps the last 5000 lines in a ring. Long messages wrap in
+both views (`WrapChat`: at spaces, inside a word only when it must, at most 8
+rows a message), so scrolling counts display rows from the newest; the window
+is filled by walking back from the newest message, and the full history is
+only measured when scrolling up, to find the top. Lines that arrive while
+scrolled back push the view up by their own height.
+
 ## Match slot contents
 
 A seat shows the player's name and their games in the current set (member

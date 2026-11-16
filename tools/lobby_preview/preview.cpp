@@ -487,6 +487,24 @@ int main(int argc, char** argv)
             Settle(ui, 2);
             ok &= Capture(ui, directory, "room_kick");
             ui.Update(Press(&Input::cancel));
+            // Up off the top of the player list lands on the chat panel.
+            ui.Update(Press(&Input::up));
+            ui.Update(Press(&Input::up));
+            Settle(ui, 2);
+            ok &= Capture(ui, directory, "room_chat_focus");
+            for (int i = 0; i < 30; ++i) {
+                char line[128];
+                snprintf(line, sizeof(line), i % 4 == 1
+                             ? "message number %d, which goes on long enough to need a second and even a third row to say it all"
+                             : "message number %d in a long evening", i + 1);
+                service.AddChat(i % 3 ? "Vevota" : "ArcherOfLegend", line, false);
+            }
+            ui.Update(Press(&Input::confirm)); // expand
+            ui.Update(Press(&Input::up));
+            ui.Update(Press(&Input::up));
+            Settle(ui, 2);
+            ok &= Capture(ui, directory, "room_chat_expanded");
+            ui.Update(Press(&Input::cancel)); // collapse
             ui.Update(Press(&Input::right)); // back to the seats
             ui.Update(Press(&Input::menu));
             ui.Update(Press(&Input::down)); // LOBBY MUSIC

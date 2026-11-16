@@ -11,7 +11,7 @@ namespace lobby {
 constexpr int kMaxMembers = 8;       // matches the native lobby's eight rows
 constexpr int kMaxSlots = 4;         // match slots ("cabinets") per room
 constexpr int kMaxSearchResults = 48;
-constexpr int kMaxChatLines = 32;
+constexpr int kMaxChatLines = 5000; // history kept for the expanded chat
 constexpr int kNameCapacity = 64;
 constexpr int kChatCapacity = 128;
 // Set lengths a room can be created with ("first to N"). 0 is endless: the

@@ -295,6 +295,8 @@ void LobbyUi::GoTo(Screen screen)
     musicOpen_ = false;
     memberFocus_ = false;
     memberMenuOpen_ = false;
+    chatFocus_ = false;
+    chatExpanded_ = false;
     confirm_ = Confirm::None;
     if (textTarget_ != TextTarget::None) EndText(false);
 }
@@ -345,6 +347,8 @@ void LobbyUi::ReturnToRoom()
     musicOpen_ = false;
     memberFocus_ = false;
     memberMenuOpen_ = false;
+    chatFocus_ = false;
+    chatExpanded_ = false;
     teamForMatch_ = false;
     confirm_ = Confirm::None;
     wasInRoom_ = true;
@@ -686,6 +690,10 @@ void LobbyUi::UpdateRoom(const Input& input)
         Play(SFX_CONFIRM);
         return;
     }
+    if (chatFocus_ || chatExpanded_) {
+        UpdateChatFocus(input);
+        return;
+    }
     if (memberFocus_) {
         UpdateMemberList(input);
         return;
@@ -801,6 +809,8 @@ bool LobbyUi::UpdateHandshake(const Input& input)
             musicOpen_ = false;
             memberMenuOpen_ = false;
             memberFocus_ = false;
+            chatFocus_ = false;
+            chatExpanded_ = false;
             Play(SFX_MATCH_FOUND);
         }
         handshake_ = step;
@@ -885,7 +895,14 @@ void LobbyUi::UpdateMemberList(const Input& input)
         return;
     }
     if (memberCursor_ >= room.memberCount) memberCursor_ = room.memberCount - 1;
-    MoveCursor(memberCursor_, room.memberCount, input);
+    // The chat panel sits under the list: stepping off either end lands on it.
+    if ((input.down && memberCursor_ == room.memberCount - 1) || (input.up && memberCursor_ == 0)) {
+        memberFocus_ = false;
+        chatFocus_ = true;
+        Play(SFX_MOVE);
+        return;
+    }
+    MoveCursor(memberCursor_, room.memberCount, input, false);
     if (input.right || input.cancel) {
         memberFocus_ = false;
         Play(input.cancel ? SFX_CANCEL : SFX_MOVE);
@@ -898,6 +915,124 @@ void LobbyUi::UpdateMemberList(const Input& input)
     memberMenuCursor_ = 0;
     memberMenuOpen_ = true;
     Play(SFX_CONFIRM);
+}
+
+// Lines the chat shows when it is expanded over the player list.
+constexpr int kChatExpandedRows = 23;
+
+// Chat panel geometry shared by layout and drawing.
+constexpr float kChatX = 40.0f, kChatW = 430.0f;
+constexpr float kChatScale = 0.56f;
+constexpr float kChatTextX = 140.0f;                    // message column, after the sender
+constexpr float kChatTextW = kChatW - 162.0f;           // its width
+constexpr float kChatSystemW = kChatW - 44.0f;          // system lines use the whole row
+constexpr int kChatMaxWrap = 8;                         // rows one message may take
+
+struct ChatSpan {
+    uint8_t start, length;
+};
+
+// Breaks a message into rows no wider than maxWidth: at spaces where it can,
+// inside a word (on a character boundary) where it must. Returns the row
+// count, at least 1; text beyond kChatMaxWrap rows is dropped.
+int WrapChat(const char* text, float maxWidth, ChatSpan spans[kChatMaxWrap])
+{
+    const size_t total = strlen(text);
+    size_t at = 0;
+    int rows = 0;
+    while (at < total && rows < kChatMaxWrap) {
+        while (text[at] == ' ') ++at; // rows do not start with the break's space
+        if (at >= total) break;
+        size_t end = at, lastSpace = 0;
+        char probe[kChatCapacity + 4];
+        while (end < total) {
+            size_t next = end + 1;
+            while (next < total && (static_cast<unsigned char>(text[next]) & 0xC0) == 0x80) ++next;
+            const size_t length = next - at;
+            if (length >= sizeof(probe)) break;
+            memcpy(probe, text + at, length);
+            probe[length] = '\0';
+            if (TextWidth(probe) * kChatScale > maxWidth && end > at) break;
+            if (text[end] == ' ') lastSpace = end;
+            end = next;
+        }
+        if (end < total && lastSpace > at) end = lastSpace;
+        size_t length = end - at;
+        if (length > 255) length = 255;
+        spans[rows++] = ChatSpan{static_cast<uint8_t>(at), static_cast<uint8_t>(length)};
+        at = end;
+    }
+    if (rows == 0) spans[rows++] = ChatSpan{0, 0};
+    return rows;
+}
+
+int ChatRowCount(const ChatLine& line)
+{
+    ChatSpan spans[kChatMaxWrap];
+    return WrapChat(line.text, line.system ? kChatSystemW : kChatTextW, spans);
+}
+
+// Cursor on the chat panel. Confirm expands it over the player list; expanded,
+// up/down scroll a line and the shoulder buttons a page.
+void LobbyUi::UpdateChatFocus(const Input& input)
+{
+    if (!chatExpanded_) {
+        if (input.confirm) {
+            chatExpanded_ = true;
+            chatScroll_ = 0;
+            chatSeenCount_ = service_.ChatCount();
+            Play(SFX_CONFIRM);
+        } else if (input.up || input.down) {
+            // Back into the player list, at the end nearest the chat.
+            const int count = service_.Room().memberCount;
+            chatFocus_ = false;
+            if (count > 0) {
+                memberFocus_ = true;
+                memberCursor_ = input.up ? count - 1 : 0;
+            }
+            Play(SFX_MOVE);
+        } else if (input.right || input.cancel) {
+            chatFocus_ = false;
+            Play(input.cancel ? SFX_CANCEL : SFX_MOVE);
+        }
+        return;
+    }
+    if (input.cancel || input.confirm) {
+        chatExpanded_ = false;
+        chatFocus_ = true;
+        Play(SFX_CANCEL);
+        return;
+    }
+    // While scrolled back, lines that arrive push the view up by their own
+    // height, so what is being read stays put.
+    const int count = service_.ChatCount();
+    if (chatScroll_ > 0 && count > chatSeenCount_) chatScroll_ += ChatRowsFrom(chatSeenCount_);
+    chatSeenCount_ = count;
+
+    int next = chatScroll_;
+    if (input.up) ++next;
+    if (input.down) --next;
+    if (input.pageLeft) next += kChatExpandedRows - 2;
+    if (input.pageRight) next -= kChatExpandedRows - 2;
+    if (next == chatScroll_) return;
+    if (next > chatScroll_) {
+        // Only now is the whole history measured, to find the top.
+        const int limit = ChatRowsFrom(0) - kChatExpandedRows;
+        if (next > limit) next = limit;
+    }
+    if (next < 0) next = 0;
+    if (next != chatScroll_) {
+        chatScroll_ = next;
+        Play(SFX_MOVE);
+    }
+}
+
+int LobbyUi::ChatRowsFrom(int firstMessage) const
+{
+    int rows = 0;
+    for (int i = firstMessage < 0 ? 0 : firstMessage; i < service_.ChatCount(); ++i)
+        rows += ChatRowCount(service_.Chat(i));
+    return rows;
 }
 
 void LobbyUi::UpdateMemberMenu(const Input& input)
@@ -1264,6 +1399,15 @@ void LobbyUi::DrawFooter(Canvas& canvas, const char* help) const
         add(BTN_CANCEL, "Done");
     } else if (roomMenuOpen_ || quickChatOpen_ || memberMenuOpen_) {
         add(BTN_CONFIRM, "Select");
+        add(BTN_CANCEL, "Back");
+    } else if (chatExpanded_) {
+        add(BTN_DPAD, "Scroll");
+        add(BTN_Y, "Chat");
+        add(BTN_CANCEL, "Close");
+    } else if (chatFocus_) {
+        add(BTN_CONFIRM, "Expand");
+        add(BTN_Y, "Chat");
+        add(BTN_MENU, "Menu");
         add(BTN_CANCEL, "Back");
     } else if (memberFocus_) {
         add(BTN_CONFIRM, "Player");
@@ -1674,7 +1818,8 @@ void LobbyUi::DrawRoomSlots(Canvas& canvas) const
             const float cy = sy + seatH * 0.5f;
             const Member* occupant = SeatOccupant(slot, side);
             const bool focused = slot == seatSlot_ && side == seatSide_ && !roomMenuOpen_ &&
-                                 !quickChatOpen_ && !musicOpen_ && !memberFocus_;
+                                 !quickChatOpen_ && !musicOpen_ && !memberFocus_ &&
+                                 !chatFocus_ && !chatExpanded_;
             const bool mine = occupant && local && occupant->id == local->id;
 
             // The focus frame goes under the seat so it never veils the text.
@@ -1747,24 +1892,67 @@ void LobbyUi::DrawRoomChat(Canvas& canvas) const
 {
     const float t = Clamp01(screenFrame_ / static_cast<float>(kTransitionFrames));
     const Painter p(canvas, t, 0.0f);
-    const float x = 40.0f, y = 516.0f, w = 430.0f, h = 130.0f;
+    // Expanded, the panel grows upward over the player list.
+    const float x = kChatX, w = kChatW;
+    const float y = chatExpanded_ ? 110.0f : 516.0f;
+    const float h = chatExpanded_ ? 536.0f : 130.0f;
+    if (chatFocus_ && !chatExpanded_) {
+        const float pulse = 0.72f + 0.28f * SelectionWave(frame_);
+        p.Box(TEX_ROW_SEL, x - 4.0f, y - 4.0f, w + 8.0f, h + 8.0f, WithAlpha(kWhite, pulse));
+    }
     p.Box(TEX_PANEL_DARK, x, y, w, h);
+    if (chatExpanded_) // twice over: the room behind must not show through text
+        p.Fill(x + 5.0f, y + 5.0f, w - 10.0f, h - 10.0f, Color{0.02f, 0.03f, 0.06f, 0.7f});
 
     const bool typing = textTarget_ == TextTarget::Chat;
-    const int visible = typing ? kChatRows - 1 : kChatRows;
+    const int rows = chatExpanded_ ? kChatExpandedRows : kChatRows;
+    const int visible = typing ? rows - 1 : rows;
     const int count = service_.ChatCount();
-    const int first = count > visible ? count - visible : 0;
-    for (int i = first; i < count; ++i) {
+    const int scroll = chatExpanded_ ? chatScroll_ : 0;
+
+    // Long messages wrap, so the window is counted in display rows. Walk back
+    // from the newest message, skipping `scroll` rows, until it is full.
+    struct Row {
+        int message;
+        ChatSpan span;
+        bool first; // first row of its message: carries the sender
+    };
+    Row window[kChatExpandedRows];
+    int filled = 0, skipped = 0;
+    for (int i = count - 1; i >= 0 && filled < visible; --i) {
         const ChatLine& line = service_.Chat(i);
-        const float rowY = y + 22.0f + (i - first) * 21.0f;
+        ChatSpan spans[kChatMaxWrap];
+        const int wrapped = WrapChat(line.text, line.system ? kChatSystemW : kChatTextW, spans);
+        for (int r = wrapped - 1; r >= 0 && filled < visible; --r) {
+            if (skipped < scroll) {
+                ++skipped;
+                continue;
+            }
+            window[filled++] = Row{i, spans[r], r == 0};
+        }
+    }
+    if (chatExpanded_ && scroll > 0) {
+        char position[32];
+        snprintf(position, sizeof(position), "%d rows back", scroll);
+        p.Text(position, x + w - 22.0f, y + h - 16.0f, 0.5f, A_MR, kFaint);
+    }
+    // `window` runs newest first; the oldest row goes on the top line.
+    for (int slot = 0; slot < filled; ++slot) {
+        const Row& row = window[filled - 1 - slot];
+        const ChatLine& line = service_.Chat(row.message);
+        const float rowY = y + 22.0f + slot * 21.0f;
+        char text[kChatCapacity + 4];
+        snprintf(text, sizeof(text), "%.*s", row.span.length, line.text + row.span.start);
         if (line.system) {
-            p.TextFit(line.text, x + 22.0f, rowY, 0.56f, w - 44.0f, A_ML, kYellow);
+            p.Text(text, x + 22.0f, rowY, kChatScale, A_ML, kYellow);
             continue;
         }
-        char sender[48];
-        FitText(sender, sizeof(sender), line.sender, 110.0f, 0.56f);
-        p.Text(sender, x + 22.0f, rowY, 0.56f, A_ML, kCyan);
-        p.TextFit(line.text, x + 140.0f, rowY, 0.56f, w - 162.0f, A_ML);
+        if (row.first) {
+            char sender[48];
+            FitText(sender, sizeof(sender), line.sender, 110.0f, kChatScale);
+            p.Text(sender, x + 22.0f, rowY, kChatScale, A_ML, kCyan);
+        }
+        p.Text(text, x + kChatTextX, rowY, kChatScale, A_ML);
     }
     if (count == 0 && !typing)
         p.Text("Say hello to the lobby.", x + 22.0f, y + 22.0f, 0.56f, A_ML, kFaint);
@@ -1826,7 +2014,7 @@ const char* LobbyUi::DrawRoom(Canvas& canvas) const
     snprintf(population, sizeof(population), "%d / %d", room.memberCount, room.settings.maxMembers);
     p.Text(population, 1216.0f, 61.0f, 0.86f, A_MR);
 
-    DrawRoomMembers(canvas);
+    if (!chatExpanded_) DrawRoomMembers(canvas); // the expanded chat covers the list
     DrawRoomSlots(canvas);
     DrawRoomChat(canvas);
 
@@ -1853,7 +2041,11 @@ const char* LobbyUi::DrawRoom(Canvas& canvas) const
         const bool canKick = self && self->isHost && memberMenuId_ != self->id;
         const char* const items[] = {"VIEW STEAM PROFILE", "KICK FROM LOBBY"};
         DrawListMenu(canvas, memberMenuName_, items, canKick ? 2 : 1, memberMenuCursor_);
-    } else if (memberFocus_ && textTarget_ == TextTarget::None)
+    } else if (chatExpanded_ && textTarget_ == TextTarget::None)
+        help = "Scroll back through the lobby's chat.";
+    else if (chatFocus_ && textTarget_ == TextTarget::None)
+        help = "Expand the chat to read back through it.";
+    else if (memberFocus_ && textTarget_ == TextTarget::None)
         help = "Select a player to view their profile.";
     return roomMenuOpen_ || quickChatOpen_ || musicOpen_ || memberMenuOpen_ ||
                    HandshakeStep() != Handshake::None

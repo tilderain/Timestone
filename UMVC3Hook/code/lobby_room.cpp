@@ -162,7 +162,7 @@ const SearchResult& SteamRoomService::Result(int index) const
 const ChatLine& SteamRoomService::Chat(int index) const
 {
     static const ChatLine empty = {};
-    return index >= 0 && index < chatCount_ ? chat_[index] : empty;
+    return index >= 0 && index < chatCount_ ? chat_[(chatHead_ + index) % kMaxChatLines] : empty;
 }
 
 void SteamRoomService::SetError(const char* text)
@@ -180,11 +180,12 @@ bool SteamRoomService::TakeError(char* message, size_t capacity)
 
 void SteamRoomService::AddChat(const char* sender, const char* text, bool system)
 {
+    // A ring: the oldest line makes way once the history is full.
     if (chatCount_ == kMaxChatLines) {
-        memmove(&chat_[0], &chat_[1], sizeof(ChatLine) * (kMaxChatLines - 1));
+        chatHead_ = (chatHead_ + 1) % kMaxChatLines;
         --chatCount_;
     }
-    ChatLine& line = chat_[chatCount_++];
+    ChatLine& line = chat_[(chatHead_ + chatCount_++) % kMaxChatLines];
     line = {};
     snprintf(line.sender, sizeof(line.sender), "%s", sender ? sender : "");
     snprintf(line.text, sizeof(line.text), "%s", text ? text : "");
@@ -247,6 +248,7 @@ void SteamRoomService::Leave()
     liveAdvertised_ = false;
     knownMemberCount_ = 0;
     chatCount_ = 0;
+    chatHead_ = 0;
 }
 
 void SteamRoomService::InviteFriends()
@@ -858,6 +860,7 @@ void SteamRoomService::Pump()
         local_.setWins = 0;
         knownMemberCount_ = 0;
         chatCount_ = 0;
+        chatHead_ = 0;
         liveAdvertised_ = false;
         PublishLocal();
         RefreshRoom();
