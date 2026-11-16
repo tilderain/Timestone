@@ -42,6 +42,7 @@ struct SteamAPI {
     HSteamPipe (*GetPipe)() = nullptr;
     void* (*GetClient)() = nullptr;
     void* (*GetFriends)(void*, HSteamUser, HSteamPipe, const char*) = nullptr;
+    void (*ActivateOverlayToUser)(void*, const char*, uint64_t) = nullptr;
     void* (*GetMatchmaking)(void*, HSteamUser, HSteamPipe, const char*) = nullptr;
     void* (*GetUtils)(void*, HSteamPipe, const char*) = nullptr;
     void* (*GetGeneric)(void*, HSteamUser, HSteamPipe, const char*) = nullptr;
@@ -358,6 +359,8 @@ bool ResolveExports()
     ResolveOptional(g_api.ActivateInviteDialog,
                     "SteamAPI_ISteamFriends_ActivateGameOverlayInviteDialog");
     ResolveOptional(g_api.SetRichPresence, "SteamAPI_ISteamFriends_SetRichPresence");
+    ResolveOptional(g_api.ActivateOverlayToUser,
+                    "SteamAPI_ISteamFriends_ActivateGameOverlayToUser");
     ResolveOptional(g_api.SetPlayedWith, "SteamAPI_ISteamFriends_SetPlayedWith");
     ok &= Resolve(g_api.GetPersonaName, "SteamAPI_ISteamFriends_GetPersonaName");
     ok &= Resolve(g_api.GetFriendPersonaName, "SteamAPI_ISteamFriends_GetFriendPersonaName");
@@ -1646,6 +1649,20 @@ void SteamRoom_InviteFriends()
 {
     if (SteamRoom_IsActive() && g_friends && g_api.ActivateInviteDialog)
         g_api.ActivateInviteDialog(g_friends, g_lobbyId);
+}
+
+bool SteamRoom_ViewProfile(uint64_t memberId)
+{
+    if (!memberId || !g_friends || !g_api.ActivateOverlayToUser) return false;
+    g_api.ActivateOverlayToUser(g_friends, "steamid", memberId);
+    return true;
+}
+
+const char* SteamRoom_GetLobbyData(uint64_t lobbyId, const char* key)
+{
+    if (!lobbyId || !g_matchmaking || !g_api.GetLobbyData) return "";
+    const char* value = g_api.GetLobbyData(g_matchmaking, lobbyId, key);
+    return value ? value : "";
 }
 
 bool SteamRoom_ConnectPeer(uint64_t memberId, bool asHost)

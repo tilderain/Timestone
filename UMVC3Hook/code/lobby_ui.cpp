@@ -279,6 +279,8 @@ void LobbyUi::GoTo(Screen screen)
     roomMenuOpen_ = false;
     quickChatOpen_ = false;
     musicOpen_ = false;
+    memberFocus_ = false;
+    memberMenuOpen_ = false;
     confirm_ = Confirm::None;
     if (textTarget_ != TextTarget::None) EndText(false);
 }
@@ -327,6 +329,8 @@ void LobbyUi::ReturnToRoom()
     roomMenuOpen_ = false;
     quickChatOpen_ = false;
     musicOpen_ = false;
+    memberFocus_ = false;
+    memberMenuOpen_ = false;
     confirm_ = Confirm::None;
     wasInRoom_ = true;
 }
@@ -365,7 +369,8 @@ void LobbyUi::SyncWithService()
     } else if (!inRoom && wasInRoom_) {
         if (screen_ == Screen::Room || (screen_ == Screen::Team && teamReturn_ == Screen::Room)) {
             GoTo(Screen::Top);
-            if (!leftByChoice_) ShowNotice("Lobby has been closed.");
+            // An error from the service (e.g. removed by the host) says more.
+            if (!leftByChoice_ && !notice_[0]) ShowNotice("Lobby has been closed.");
         }
         leftByChoice_ = false;
     }
@@ -437,6 +442,8 @@ void LobbyUi::Update(const Input& input)
                 service_.Leave();
             } else if (action == Confirm::MainMenu) {
                 mainMenuRequested_ = true;
+            } else if (action == Confirm::KickMember) {
+                service_.Kick(memberMenuId_);
             }
         }
         return;
@@ -622,11 +629,40 @@ void LobbyUi::UpdateRoom(const Input& input)
         UpdateMusicMenu(input);
         return;
     }
+    if (memberMenuOpen_) {
+        UpdateMemberMenu(input);
+        return;
+    }
 
     const RoomState& room = service_.Room();
     const Member* local = LocalMember();
     const int seatCount = room.settings.slotCount * 2;
     if (seatCount <= 0) return;
+
+    if (input.menu) {
+        roomMenuOpen_ = true;
+        roomMenuCursor_ = 0;
+        Play(SFX_CONFIRM);
+        return;
+    }
+    if (input.actionY) {
+        quickChatOpen_ = true;
+        quickChatCursor_ = 0;
+        Play(SFX_CONFIRM);
+        return;
+    }
+    if (memberFocus_) {
+        UpdateMemberList(input);
+        return;
+    }
+    // The player list sits to the left of the seats: left from the leftmost
+    // column of seats moves into it.
+    if (input.left && (room.settings.slotCount <= 2 || seatSlot_ % 2 == 0) && room.memberCount > 0) {
+        memberFocus_ = true;
+        if (memberCursor_ >= room.memberCount) memberCursor_ = room.memberCount - 1;
+        Play(SFX_MOVE);
+        return;
+    }
 
     // Seats form a list: up/down walks seats, left/right jumps whole slots.
     int index = seatSlot_ * 2 + seatSide_;
@@ -645,18 +681,6 @@ void LobbyUi::UpdateRoom(const Input& input)
     const bool seated = local && local->slot >= 0 && local->side < 2;
     const bool onOwnSeat = seated && local->slot == seatSlot_ && local->side == seatSide_;
 
-    if (input.menu) {
-        roomMenuOpen_ = true;
-        roomMenuCursor_ = 0;
-        Play(SFX_CONFIRM);
-        return;
-    }
-    if (input.actionY) {
-        quickChatOpen_ = true;
-        quickChatCursor_ = 0;
-        Play(SFX_CONFIRM);
-        return;
-    }
     if (input.actionX && seated) {
         service_.Stand();
         Play(SFX_CANCEL);
@@ -695,6 +719,60 @@ void LobbyUi::UpdateRoom(const Input& input)
     }
     service_.Sit(seatSlot_, seatSide_);
     Play(SFX_CONFIRM);
+}
+
+// Cursor in the player list. Confirm opens the actions for that player.
+void LobbyUi::UpdateMemberList(const Input& input)
+{
+    const RoomState& room = service_.Room();
+    if (room.memberCount <= 0) {
+        memberFocus_ = false;
+        return;
+    }
+    if (memberCursor_ >= room.memberCount) memberCursor_ = room.memberCount - 1;
+    MoveCursor(memberCursor_, room.memberCount, input);
+    if (input.right || input.cancel) {
+        memberFocus_ = false;
+        Play(input.cancel ? SFX_CANCEL : SFX_MOVE);
+        return;
+    }
+    if (!input.confirm) return;
+    const Member& member = room.members[memberCursor_];
+    memberMenuId_ = member.id;
+    snprintf(memberMenuName_, sizeof(memberMenuName_), "%s", member.name);
+    memberMenuCursor_ = 0;
+    memberMenuOpen_ = true;
+    Play(SFX_CONFIRM);
+}
+
+void LobbyUi::UpdateMemberMenu(const Input& input)
+{
+    // The player may leave while their menu is open.
+    const RoomState& room = service_.Room();
+    const Member* target = nullptr;
+    for (int i = 0; i < room.memberCount; ++i)
+        if (room.members[i].id == memberMenuId_) target = &room.members[i];
+    if (!target) {
+        memberMenuOpen_ = false;
+        return;
+    }
+    const Member* local = LocalMember();
+    const bool canKick = local && local->isHost && !target->isLocal;
+    MoveCursor(memberMenuCursor_, canKick ? 2 : 1, input);
+    if (input.cancel || input.menu) {
+        memberMenuOpen_ = false;
+        Play(SFX_CANCEL);
+        return;
+    }
+    if (!input.confirm) return;
+    Play(SFX_CONFIRM);
+    memberMenuOpen_ = false;
+    if (memberMenuCursor_ == 0) {
+        service_.ViewProfile(memberMenuId_);
+    } else if (canKick) {
+        confirm_ = Confirm::KickMember;
+        confirmCursor_ = 1;
+    }
 }
 
 void LobbyUi::UpdateRoomMenu(const Input& input)
@@ -1007,8 +1085,13 @@ void LobbyUi::DrawFooter(Canvas& canvas, const char* help) const
     } else if (screen_ == Screen::Team) {
         add(BTN_DPAD, "Change");
         add(BTN_CANCEL, "Done");
-    } else if (roomMenuOpen_ || quickChatOpen_) {
+    } else if (roomMenuOpen_ || quickChatOpen_ || memberMenuOpen_) {
         add(BTN_CONFIRM, "Select");
+        add(BTN_CANCEL, "Back");
+    } else if (memberFocus_) {
+        add(BTN_CONFIRM, "Player");
+        add(BTN_Y, "Chat");
+        add(BTN_MENU, "Menu");
         add(BTN_CANCEL, "Back");
     } else {
         const Member* local = LocalMember();
@@ -1277,6 +1360,10 @@ void LobbyUi::DrawRoomMembers(Canvas& canvas) const
 
         const Member& member = room.members[i];
         const float cy = y + 22.0f;
+        if (memberFocus_ && i == memberCursor_) {
+            const float pulse = 0.72f + 0.28f * SelectionWave(frame_);
+            p.Box(TEX_ROW_SEL, x - 4.0f, y - 3.0f, width + 8.0f, 50.0f, WithAlpha(kWhite, pulse));
+        }
         // Small HOST / GUEST tag: rows 6 and 7 of the tag sheet.
         p.Sprite(TEX_TAGS, x + 12.0f, cy, 46.0f, 24.0f,
                  Uv{11.0f / 64.0f, (member.isHost ? 196.0f : 228.0f) / 256.0f, 53.0f / 64.0f,
@@ -1347,7 +1434,7 @@ void LobbyUi::DrawRoomSlots(Canvas& canvas) const
             const float cy = sy + seatH * 0.5f;
             const Member* occupant = SeatOccupant(slot, side);
             const bool focused = slot == seatSlot_ && side == seatSide_ && !roomMenuOpen_ &&
-                                 !quickChatOpen_ && !musicOpen_;
+                                 !quickChatOpen_ && !musicOpen_ && !memberFocus_;
             const bool mine = occupant && local && occupant->id == local->id;
 
             // The focus frame goes under the seat so it never veils the text.
@@ -1451,7 +1538,7 @@ void LobbyUi::DrawListMenu(Canvas& canvas, const char* title, const char* const*
     const float x = (kScreenW - w) * 0.5f;
     const float y = (kScreenH - h) * 0.5f - 10.0f;
     p.Box(TEX_PANEL_DARK, x, y, w, h);
-    p.Text(title, x + w * 0.5f, y + 40.0f, 0.38f, A_MC, kYellow, FONT_HEADING);
+    p.TextFit(title, x + w * 0.5f, y + 40.0f, 0.38f, w - 60.0f, A_MC, kYellow, FONT_HEADING);
     for (int i = 0; i < count; ++i) {
         const float rowY = y + 88.0f + i * 44.0f;
         if (i == cursor) {
@@ -1500,7 +1587,14 @@ const char* LobbyUi::DrawRoom(Canvas& canvas) const
         DrawListMenu(canvas, "CHAT", kQuickChat, kQuickChatCount, quickChatCursor_);
     else if (musicOpen_)
         DrawMusicMenu(canvas);
-    return roomMenuOpen_ || quickChatOpen_ || musicOpen_ ? nullptr : help;
+    else if (memberMenuOpen_) {
+        const Member* self = LocalMember();
+        const bool canKick = self && self->isHost && memberMenuId_ != self->id;
+        const char* const items[] = {"VIEW STEAM PROFILE", "KICK FROM LOBBY"};
+        DrawListMenu(canvas, memberMenuName_, items, canKick ? 2 : 1, memberMenuCursor_);
+    } else if (memberFocus_ && textTarget_ == TextTarget::None)
+        help = "Select a player to view their profile.";
+    return roomMenuOpen_ || quickChatOpen_ || musicOpen_ || memberMenuOpen_ ? nullptr : help;
 }
 
 void LobbyUi::DrawMusicMenu(Canvas& canvas) const
@@ -1640,6 +1734,12 @@ bool LobbyUi::DrawModal(Canvas& canvas) const
         message = "Leave this lobby?";
     else if (confirm_ == Confirm::MainMenu)
         message = "Return to the main menu?";
+    char kick[160];
+    if (!message && confirm_ == Confirm::KickMember) {
+        snprintf(kick, sizeof(kick), "Kick %.40s?\nThey will not be able to rejoin this lobby.",
+                 memberMenuName_);
+        message = kick;
+    }
     if (!message) return false;
 
     p.Fill(0.0f, 0.0f, kScreenW, kScreenH, Color{0.0f, 0.0f, 0.0f, 0.6f});

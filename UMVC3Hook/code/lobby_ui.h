@@ -58,7 +58,7 @@ public:
 private:
     enum class Screen : uint8_t { Top, Browse, Create, Room, Team };
     enum class TextTarget : uint8_t { None, RoomName, Chat };
-    enum class Confirm : uint8_t { None, LeaveRoom, MainMenu };
+    enum class Confirm : uint8_t { None, LeaveRoom, MainMenu, KickMember };
 
     void GoTo(Screen screen);
     void Play(uint32_t sfx) { sfx_ |= sfx; }
@@ -71,6 +71,8 @@ private:
     void UpdateRoomMenu(const Input& input);
     void UpdateQuickChat(const Input& input);
     void UpdateMusicMenu(const Input& input);
+    void UpdateMemberList(const Input& input);
+    void UpdateMemberMenu(const Input& input);
     void UpdateTeam(const Input& input);
     void UpdateText(const Input& input);
     void SyncWithService();
@@ -127,6 +129,12 @@ private:
     int roomMenuCursor_ = 0;
     bool quickChatOpen_ = false;
     int quickChatCursor_ = 0;
+    bool memberFocus_ = false;    // cursor is in the player list, not on a seat
+    int memberCursor_ = 0;
+    bool memberMenuOpen_ = false; // actions for the selected player
+    int memberMenuCursor_ = 0;
+    uint64_t memberMenuId_ = 0;   // who the menu / kick confirmation is about
+    char memberMenuName_[kNameCapacity] = {};
     bool musicOpen_ = false; // host's lobby music picker
     int musicCursor_ = 0;
 

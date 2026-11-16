@@ -196,6 +196,8 @@ public:
     }
     void InviteFriends() override {}
     void SetMusic(int32_t trackId) override { room.music = trackId; }
+    void ViewProfile(uint64_t) override {}
+    void Kick(uint64_t) override {}
     void SendChat(const char* utf8) override { AddChat("tilderain", utf8, false); }
     int ChatCount() const override { return static_cast<int>(chat.size()); }
     const ChatLine& Chat(int index) const override { return chat[index]; }
@@ -416,6 +418,21 @@ int main(int argc, char** argv)
             ui.Update(Press(&Input::menu));
             Settle(ui, 2);
             ok &= Capture(ui, directory, "room_menu");
+            ui.Update(Press(&Input::cancel));
+            ui.Update(Press(&Input::left)); // into the player list
+            ui.Update(Press(&Input::down));
+            Settle(ui, 2);
+            ok &= Capture(ui, directory, "room_members");
+            ui.Update(Press(&Input::confirm));
+            Settle(ui, 2);
+            ok &= Capture(ui, directory, "room_member_menu");
+            ui.Update(Press(&Input::down));
+            ui.Update(Press(&Input::confirm));
+            Settle(ui, 2);
+            ok &= Capture(ui, directory, "room_kick");
+            ui.Update(Press(&Input::cancel));
+            ui.Update(Press(&Input::right)); // back to the seats
+            ui.Update(Press(&Input::menu));
             ui.Update(Press(&Input::down)); // LOBBY MUSIC
             ui.Update(Press(&Input::confirm));
             ui.Update(Press(&Input::right)); // jump to the stage group

@@ -16,6 +16,12 @@ namespace {
 
 constexpr char kMemberKey[] = "ts";      // per-member room state
 constexpr char kMusicKey[] = "bgm";      // lobby data: the host's music choice
+// Lobby data: SteamIDs the host removed, as comma-separated hex. Steam has no
+// kick, so the list is the kick: a listed client leaves by itself, every
+// other client drops listed members from its room, and Join refuses a lobby
+// that lists the local player. It lives and dies with the lobby.
+constexpr char kBanKey[] = "ban";
+constexpr int kMaxBans = 64;
 constexpr int kMemberVersion = 1;
 constexpr uint8_t kChatText = 'C';       // lobby chat payload: 'C' + UTF-8
 constexpr uint32_t kRefreshInterval = 6; // frames between room rebuilds
@@ -27,6 +33,19 @@ SteamLobbyType ToSteamType(Visibility visibility)
     case Visibility::FriendsOnly: return SteamLobbyType::FriendsOnly;
     default: return SteamLobbyType::Public;
     }
+}
+
+bool IsBanned(const char* list, uint64_t id)
+{
+    if (!list || !id) return false;
+    for (const char* cursor = list; *cursor;) {
+        char* end = nullptr;
+        const uint64_t entry = strtoull(cursor, &end, 16);
+        if (end == cursor) break;
+        if (entry == id) return true;
+        cursor = *end == ',' ? end + 1 : end;
+    }
+    return false;
 }
 
 bool IsPlausibleTeam(const Team& team)
@@ -167,6 +186,10 @@ void SteamRoomService::Create(const RoomSettings& settings)
 void SteamRoomService::Join(uint64_t roomId)
 {
     if (!available_ || !roomId) return;
+    if (IsBanned(SteamRoom_GetLobbyData(roomId, kBanKey), SteamRoom_GetLocalId())) {
+        SetError("You were removed from this lobby by its host\nand cannot join it again.");
+        return;
+    }
     joining_ = true;
     pendingMusic_ = -1;
     SteamLobby_Join(roomId);
@@ -203,6 +226,44 @@ void SteamRoomService::SetMusic(int32_t trackId)
     snprintf(value, sizeof(value), "%d", trackId);
     SteamRoom_SetData(kMusicKey, value);
     room_.music = trackId; // Steam echoes it back a moment later
+}
+
+void SteamRoomService::ViewProfile(uint64_t memberId)
+{
+    if (!SteamRoom_ViewProfile(memberId))
+        SetError("The Steam overlay is not available.");
+}
+
+void SteamRoomService::Kick(uint64_t memberId)
+{
+    const uint64_t localId = SteamRoom_GetLocalId();
+    if (!room_.inRoom || !memberId || memberId == localId || SteamRoom_GetOwner() != localId)
+        return;
+    char list[kMaxBans * 17 + 32];
+    snprintf(list, sizeof(list), "%s", SteamRoom_GetData(kBanKey));
+    if (IsBanned(list, memberId)) return;
+    int count = list[0] ? 1 : 0;
+    for (const char* c = list; *c; ++c) count += *c == ',';
+    if (count >= kMaxBans) {
+        // Oldest entry makes room; it is far more likely to be long gone.
+        const char* comma = strchr(list, ',');
+        memmove(list, comma ? comma + 1 : list + strlen(list), comma ? strlen(comma + 1) + 1 : 1);
+    }
+    const size_t used = strlen(list);
+    snprintf(list + used, sizeof(list) - used, "%s%llx", used ? "," : "",
+             static_cast<unsigned long long>(memberId));
+    char line[kChatCapacity];
+    snprintf(line, sizeof(line), "%.48s was removed from the lobby.", SteamRoom_GetMemberName(memberId));
+    SteamRoom_SetData(kBanKey, list);
+    // Already announced here; the membership difference must not repeat it.
+    for (int i = 0; i < knownMemberCount_; ++i) {
+        if (knownMembers_[i] != memberId) continue;
+        knownMembers_[i] = knownMembers_[--knownMemberCount_];
+        snprintf(knownNames_[i], sizeof(knownNames_[i]), "%s", knownNames_[knownMemberCount_]);
+        break;
+    }
+    AddChat("", line, true);
+    RefreshRoom();
 }
 
 // ---------------------------------------------------------------------------
@@ -352,10 +413,24 @@ void SteamRoomService::RefreshRoom()
 
     const uint64_t owner = SteamRoom_GetOwner();
     const uint64_t localId = SteamRoom_GetLocalId();
+    char bans[kMaxBans * 17 + 32];
+    snprintf(bans, sizeof(bans), "%s", SteamRoom_GetData(kBanKey));
+    if (owner != localId && IsBanned(bans, localId) && local_.status != MemberStatus::Fighting) {
+        // The host removed us (or we got in past the join check, e.g. through
+        // an invite). A match in progress is allowed to finish first.
+        HookLog("LobbyRoom: removed from room %llu by its host\n",
+                static_cast<unsigned long long>(next.id));
+        Leave();
+        SetError("You were removed from the lobby by the host.");
+        return;
+    }
     const int count = SteamRoom_GetMemberCount();
     for (int i = 0; i < count && next.memberCount < kMaxMembers; ++i) {
         const uint64_t id = SteamRoom_GetMember(i);
         if (!id) continue;
+        // A removed player's client leaves by itself; until it has (or if it
+        // never does), nobody else treats them as part of the room.
+        if (id != owner && id != localId && IsBanned(bans, id)) continue;
         Member& member = next.members[next.memberCount++];
         member = {};
         member.id = id;

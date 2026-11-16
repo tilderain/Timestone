@@ -51,6 +51,8 @@ public:
     void SetTeam(const Team& team, EntryMode mode) override;
     void InviteFriends() override;
     void SetMusic(int32_t trackId) override;
+    void ViewProfile(uint64_t memberId) override;
+    void Kick(uint64_t memberId) override;
 
     void SendChat(const char* utf8) override;
     int ChatCount() const override { return chatCount_; }

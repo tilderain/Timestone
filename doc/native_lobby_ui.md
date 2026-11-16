@@ -386,6 +386,29 @@ plugin's existing `sGSound__playSystemCue` hook). The lobby starts its own
 music from a hook at the end of `aTitle__init`. The
 launcher's own music (`launch_music.cpp`) is no longer used by the lobby.
 
+## Player list actions
+
+Left from the leftmost seat column moves the cursor into the player list
+(right or cancel returns to the seats). Confirm on a player opens their
+actions: VIEW STEAM PROFILE (`ISteamFriends::ActivateGameOverlayToUser`,
+"steamid") and, for the host on anyone else, KICK FROM LOBBY.
+
+Steam lobbies have no kick, so a kick is a ban list in the lobby's own data
+(`ban`: comma-separated hex SteamIDs, at most 64, oldest dropped first). It
+exists exactly as long as the lobby does. Three checks enforce it, all in
+`lobby_room.cpp`:
+
+- a listed client leaves by itself on its next room refresh (after its match,
+  if it is fighting) and is told the host removed it;
+- every other client leaves listed members out of its room state, so a client
+  that refuses to leave still has no seat and is not shown;
+- `Join` refuses a lobby whose data lists the local player. A join through a
+  Steam invite skips that check and is caught by the first one.
+
+Only the lobby owner can write lobby data, so only the host can ban. Nothing
+removes the player from the Steam lobby itself: a modified client can stay in
+it and read its chat, and still counts towards the member limit.
+
 ## First in-game run: what to check
 
 Log lines are prefixed `LobbyNative:`, `LobbyFlow:` and `LobbyRoom:`.

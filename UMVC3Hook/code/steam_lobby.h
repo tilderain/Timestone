@@ -85,6 +85,10 @@ bool SteamRoom_SendChat(const void* data, int size);
 // Returns the next received lobby chat entry (including our own), or false.
 bool SteamRoom_PollChat(uint64_t* sender, char* buffer, int capacity, int* size);
 void SteamRoom_InviteFriends();
+// Opens the Steam overlay on a player's profile. False if it is unavailable.
+bool SteamRoom_ViewProfile(uint64_t memberId);
+// Data of any lobby Steam has told us about (search results, the current room).
+const char* SteamRoom_GetLobbyData(uint64_t lobbyId, const char* key);
 // Opens (and keeps retrying) the match connection to another room member.
 // asHost selects the ENet server role; the two players must disagree.
 bool SteamRoom_ConnectPeer(uint64_t memberId, bool asHost);
