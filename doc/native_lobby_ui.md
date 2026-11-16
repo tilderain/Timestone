@@ -619,7 +619,7 @@ A spectator runs the netplay client path against a virtual opponent:
   game's waiting notice is shown), play, restart (the log says the game was
   restarted: the same synchronized restart runs with the logged roster) or
   leave (the match ended).
-- Catching up: with more than 90 frames buffered, up to 15 frames are
+- Catching up: with more than 90 frames buffered, up to 8 frames are
   simulated ahead of each drawn one, two ways (`SpectatorFrameStart`):
   - In the fight (action step 5), the rollback path itself:
     `Rollback_SaveSnapshot` of the current frame, the native frame counter

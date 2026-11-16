@@ -22,7 +22,7 @@ constexpr bool kFastForward = true;
 constexpr int kResumeBuffer = 30;   // frames wanted before playing on after running dry
 constexpr int kFastForwardStart = 90;  // further behind than this: catch up...
 constexpr int kFastForwardTarget = 45; // ...to this
-constexpr int kFastForwardPerTick = 15; // one short of the rollback window
+constexpr int kFastForwardPerTick = 8;
 constexpr int kChecksumInterval = 60;
 // How many spectators one member feeds. A fighting player's link competes
 // with their match, so they take one; a spectator has nothing to protect.
