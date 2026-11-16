@@ -106,14 +106,18 @@ const char* const kQuickChat[] = {
 constexpr int kQuickChatCount = 8;
 
 const char* const kVisibilityNames[] = {"PUBLIC", "FRIENDS ONLY", "PRIVATE"};
+const char* RotationName(Rotation rotation)
+{
+    return rotation == Rotation::WinnerLeaves ? "WINNER LEAVES" : "WINNER STAYS";
+}
 const char* const kSlotStateNames[] = {"OPEN", "WAITING", "STANDBY", "", ""};
 const char* const kTeamSlotNames[] = {"POINT", "SECOND", "ANCHOR"};
 const char* const kAssistLetters[] = {"A", "B", "Y"};
 
 // Create-screen rows.
 enum CreateRow {
-    CREATE_NAME, CREATE_SIZE, CREATE_SLOTS, CREATE_VISIBILITY, CREATE_FORMAT, CREATE_MUSIC, CREATE_GO,
-    CREATE_ROWS
+    CREATE_NAME, CREATE_SIZE, CREATE_SLOTS, CREATE_VISIBILITY, CREATE_FORMAT, CREATE_ROTATION,
+    CREATE_MUSIC, CREATE_GO, CREATE_ROWS
 };
 // Team-screen rows: preset selector, 3 x (character, assist, colour), entry, done.
 constexpr int kTeamRowPreset = 0;
@@ -273,6 +277,7 @@ LobbyUi::LobbyUi(RoomService& service, const RosterSource& roster, const UiPrefs
     bool knownFormat = false;
     for (int choice : kFirstToChoices) knownFormat |= choice == prefs_.create.firstTo;
     if (!knownFormat) prefs_.create.firstTo = 1;
+    if (prefs_.create.rotation != Rotation::WinnerLeaves) prefs_.create.rotation = Rotation::WinnerStays;
 }
 
 void LobbyUi::PlayEntrance(uint32_t delayFrames)
@@ -588,6 +593,15 @@ void LobbyUi::UpdateCreate(const Input& input)
         case CREATE_VISIBILITY:
             draft.visibility = static_cast<Visibility>((static_cast<int>(draft.visibility) + delta + 3) % 3);
             break;
+        case CREATE_ROTATION:
+            // No set ever ends in an endless room, so there is nothing to set.
+            if (draft.firstTo == kFirstToEndless) {
+                changed = false;
+                break;
+            }
+            draft.rotation = draft.rotation == Rotation::WinnerStays ? Rotation::WinnerLeaves
+                                                                     : Rotation::WinnerStays;
+            break;
         case CREATE_FORMAT: {
             int index = 0;
             for (int i = 0; i < kFirstToChoiceCount; ++i)
@@ -702,8 +716,10 @@ void LobbyUi::UpdateRoom(const Input& input)
     const bool seated = local && local->slot >= 0 && local->side < 2;
     const bool onOwnSeat = seated && local->slot == seatSlot_ && local->side == seatSide_;
 
-    if (input.actionX && seated) {
-        service_.Stand();
+    const bool queued = local && local->queueSlot >= 0;
+    if (input.actionX && (seated || queued)) {
+        if (seated) service_.Stand();
+        else service_.LeaveQueue();
         Play(SFX_CANCEL);
         return;
     }
@@ -711,6 +727,8 @@ void LobbyUi::UpdateRoom(const Input& input)
         Play(SFX_CANCEL);
         if (seated) {
             service_.Stand();
+        } else if (queued) {
+            service_.LeaveQueue();
         } else {
             confirm_ = Confirm::LeaveRoom;
             confirmCursor_ = 1;
@@ -722,13 +740,36 @@ void LobbyUi::UpdateRoom(const Input& input)
     // Nothing to do on one's own seat: readying up happens in the prompt that
     // appears once the opposite seat is taken.
     if (onOwnSeat) return;
-    if (SeatOccupant(seatSlot_, seatSide_) || room.slots[seatSlot_] >= SlotState::Starting) {
+    if (seated) {
+        // One place at a time: give the seat up first.
         Play(SFX_CANCEL);
         return;
     }
-    service_.Sit(seatSlot_, seatSide_);
+    if (queued && local->queueSlot == seatSlot_) {
+        service_.LeaveQueue();
+        Play(SFX_CANCEL);
+        return;
+    }
+    // A seat is taken directly only when it is free and nobody is waiting
+    // for this slot; otherwise confirm lines up for it.
+    const bool full = SeatOccupant(seatSlot_, 0) && SeatOccupant(seatSlot_, 1);
+    if (!full && SlotQueueLength(seatSlot_) == 0 && !SeatOccupant(seatSlot_, seatSide_) &&
+        room.slots[seatSlot_] < SlotState::Starting) {
+        service_.Sit(seatSlot_, seatSide_);
+    } else {
+        service_.JoinQueue(seatSlot_); // moves over from any other queue
+    }
     Play(SFX_CONFIRM);
 }
+
+int LobbyUi::SlotQueueLength(int slot) const
+{
+    const RoomState& room = service_.Room();
+    int length = 0;
+    for (int i = 0; i < room.memberCount; ++i) length += room.members[i].queueSlot == slot;
+    return length;
+}
+
 
 // Which pre-match step the local player is on, from the published state of
 // both seats. None unless both seats of their slot are taken and idle.
@@ -767,6 +808,8 @@ bool LobbyUi::UpdateHandshake(const Input& input)
         handshakeCursor_ = 0;
         if (step == Handshake::Delay) delayCursor_ = kDelayPickAuto;
     }
+    // The other player watches the highlight move before it is locked in.
+    if (step == Handshake::Delay) service_.HoverDelay(delayCursor_);
     if (step == Handshake::None) return false;
     ++handshakeFrames_;
 
@@ -1231,11 +1274,20 @@ void LobbyUi::DrawFooter(Canvas& canvas, const char* help) const
         const Member* local = LocalMember();
         const bool seated = local && local->slot >= 0 && local->side < 2;
         const bool onOwnSeat = seated && local->slot == seatSlot_ && local->side == seatSide_;
-        if (!onOwnSeat && !SeatOccupant(seatSlot_, seatSide_)) add(BTN_CONFIRM, "Sit");
+        const bool queued = local && local->queueSlot >= 0;
+        const bool full = SeatOccupant(seatSlot_, 0) && SeatOccupant(seatSlot_, 1);
+        if (queued && local->queueSlot == seatSlot_)
+            add(BTN_CONFIRM, "Leave queue");
+        else if (!seated && !full && SlotQueueLength(seatSlot_) == 0 &&
+                 !SeatOccupant(seatSlot_, seatSide_))
+            add(BTN_CONFIRM, "Sit");
+        else if (!seated)
+            add(BTN_CONFIRM, "Join queue");
         if (seated) add(BTN_X, "Leave seat");
+        else if (queued) add(BTN_X, "Leave queue");
         add(BTN_Y, "Chat");
         add(BTN_MENU, "Menu");
-        add(BTN_CANCEL, seated ? "Back" : "Leave");
+        add(BTN_CANCEL, seated || queued ? "Back" : "Leave");
     }
 
     const Tex sheet = usingKeyboard_ ? TEX_KEY_GLYPHS : TEX_PAD_GLYPHS;
@@ -1378,7 +1430,8 @@ const char* LobbyUi::DrawBrowse(Canvas& canvas) const
         }
         if (result.compatible) {
             char format[12];
-            snprintf(format, sizeof(format), "FT%d", result.firstTo < 1 ? 1 : result.firstTo);
+            if (result.firstTo == kFirstToEndless) snprintf(format, sizeof(format), "END");
+            else snprintf(format, sizeof(format), "FT%d", result.firstTo);
             r.Text(format, 1176.0f, y - (result.matchInProgress ? 8.0f : 0.0f), 0.6f, A_ML, kDim);
         }
     }
@@ -1418,13 +1471,13 @@ const char* LobbyUi::DrawCreate(Canvas& canvas) const
     const RoomSettings& draft = prefs_.create;
     char value[kChatCapacity + 8];
     const char* labels[CREATE_ROWS] = {"LOBBY NAME", "LOBBY SIZE", "MATCH SLOTS", "VISIBILITY",
-                                       "MATCH FORMAT", "LOBBY MUSIC", ""};
+                                       "MATCH FORMAT", "ROTATION", "LOBBY MUSIC", ""};
     for (int row = 0; row < CREATE_ROWS; ++row) {
-        const float y = panelY + 108.0f + row * 52.0f;
+        const float y = panelY + 104.0f + row * 46.0f;
         const bool selected = row == createCursor_;
         if (selected) {
             const float pulse = 0.72f + 0.28f * SelectionWave(frame_);
-            p.Box(TEX_ROW_SEL, panelX + 26.0f, y - 26.0f, panelW - 52.0f, 52.0f,
+            p.Box(TEX_ROW_SEL, panelX + 26.0f, y - 23.0f, panelW - 52.0f, 46.0f,
                   WithAlpha(kWhite, pulse));
         }
         if (row == CREATE_GO) {
@@ -1442,7 +1495,14 @@ const char* LobbyUi::DrawCreate(Canvas& canvas) const
             break;
         case CREATE_SIZE: snprintf(value, sizeof(value), "%d PLAYERS", draft.maxMembers); break;
         case CREATE_SLOTS: snprintf(value, sizeof(value), "%d", draft.slotCount); break;
-        case CREATE_FORMAT: snprintf(value, sizeof(value), "FIRST TO %d", draft.firstTo); break;
+        case CREATE_FORMAT:
+            if (draft.firstTo == kFirstToEndless) snprintf(value, sizeof(value), "ENDLESS");
+            else snprintf(value, sizeof(value), "FIRST TO %d", draft.firstTo);
+            break;
+        case CREATE_ROTATION:
+            snprintf(value, sizeof(value), "%s",
+                     draft.firstTo == kFirstToEndless ? "-" : RotationName(draft.rotation));
+            break;
         case CREATE_MUSIC: {
             const int track = FindMusicTrack(draft.music);
             snprintf(value, sizeof(value), "%s", kMusicTracks[track < 0 ? 0 : track].name);
@@ -1456,7 +1516,8 @@ const char* LobbyUi::DrawCreate(Canvas& canvas) const
         p.TextFit(value, valueX, y, 0.86f, row == CREATE_NAME ? 440.0f : kValueTextWidth, A_MC,
                   row == CREATE_NAME && textTarget_ == TextTarget::RoomName ? kCyan
                   : kText);
-        if (selected && row != CREATE_NAME && row != CREATE_MUSIC) {
+        if (selected && row != CREATE_NAME && row != CREATE_MUSIC &&
+            !(row == CREATE_ROTATION && draft.firstTo == kFirstToEndless)) {
             DrawValueArrows(p, frame_, valueX, y, kValueArrowSpan);
         }
     }
@@ -1466,7 +1527,8 @@ const char* LobbyUi::DrawCreate(Canvas& canvas) const
         "Set the maximum number of players in your lobby.",
         "Match slots let several pairs fight at the same time.",
         "Choose who can find and join this lobby.",
-        "Games needed to win a set. It cannot be changed once the lobby exists.",
+        "Games needed to win a set. Endless: rematch until someone leaves.",
+        "Who makes way for the next player in line when a set ends.",
         "Choose the music everyone in the lobby hears.",
         "Create a lobby.",
     };
@@ -1518,6 +1580,11 @@ void LobbyUi::DrawRoomMembers(Canvas& canvas) const
             p.Text("READY", x + 288.0f, cy, 0.56f, A_ML, kYellow);
         } else if (member.status == MemberStatus::Seated) {
             p.Text("SEATED", x + 288.0f, cy, 0.56f, A_ML, kDim);
+        } else if (member.queueSlot >= 0) {
+            // Waiting: which match, and how far from the front.
+            char wait[16];
+            snprintf(wait, sizeof(wait), "M%d #%d", member.queueSlot + 1, member.queuePos);
+            p.Text(wait, x + 288.0f, cy, 0.56f, A_ML, member.queuePos == 1 ? kCyan : kDim);
         }
         if (!member.isLocal) DrawPing(p, x + 356.0f, cy, member.pingMs, 0.66f);
     }
@@ -1551,13 +1618,36 @@ void LobbyUi::DrawRoomSlots(Canvas& canvas) const
         char title[24];
         snprintf(title, sizeof(title), "MATCH %d", slot + 1);
         p.Text(title, x + 26.0f, y + 30.0f, 0.36f, A_ML, kYellow, FONT_HEADING);
-        if (live && room.settings.firstTo > 1) {
+        if (live && room.settings.firstTo != 1) {
             // Running set score, player 1 first, as each side reports it.
             const Member* one = SeatOccupant(slot, 0);
             const Member* two = SeatOccupant(slot, 1);
             char score[32];
             snprintf(score, sizeof(score), "%d - %d", one ? one->setWins : 0, two ? two->setWins : 0);
             p.Text(score, x + 150.0f, y + 31.0f, 0.74f, A_ML, kText);
+        }
+        {
+            // Who is waiting for this slot, front of the line first.
+            const Member* next = nullptr;
+            int waiting = 0;
+            for (int i = 0; i < room.memberCount; ++i) {
+                const Member& member = room.members[i];
+                if (member.queueSlot != slot) continue;
+                ++waiting;
+                if (member.queuePos == 1) next = &member;
+            }
+            if (next) {
+                char line[96];
+                if (waiting > 1)
+                    snprintf(line, sizeof(line), "NEXT: %.40s  +%d", next->name, waiting - 1);
+                else
+                    snprintf(line, sizeof(line), "NEXT: %.40s", next->name);
+                const float left = x + (live && room.settings.firstTo != 1 ? 232.0f : 150.0f);
+                const float right = x + cardW - (live ? 190.0f : 130.0f);
+                if (right - left > 80.0f)
+                    p.TextFit(line, left, y + 31.0f, 0.58f, right - left, A_ML,
+                              next->isLocal ? kCyan : kDim);
+            }
         }
         if (live) {
             // "MATCH IN PROGRESS" word art, breathing.
@@ -1701,14 +1791,16 @@ const char* LobbyUi::DrawRoom(Canvas& canvas) const
     // Title bar: room name on the left, population on the right.
     p.Sprite(TEX_TITLE_BAR, 40.0f, 62.0f, 1200.0f, 52.0f,
              Uv{4.0f / 1024.0f, 8.0f / 64.0f, 1020.0f / 1024.0f, 56.0f / 64.0f}, A_ML);
-    p.TextFit(room.settings.name, 64.0f, 60.0f, 0.44f, 620.0f, A_ML, kText, FONT_HEADING);
+    p.TextFit(room.settings.name, 64.0f, 60.0f, 0.44f, 510.0f, A_ML, kText, FONT_HEADING);
     // What the host has playing, so a change is not a mystery to the room.
     const int track = FindMusicTrack(room.music);
     char music[96];
-    snprintf(music, sizeof(music), "FT%d   BGM: %s",
-             room.settings.firstTo < 1 ? 1 : room.settings.firstTo,
-             kMusicTracks[track < 0 ? 0 : track].name);
-    p.TextFit(music, 1060.0f, 61.0f, 0.62f, 360.0f, A_MR, kDim);
+    if (room.settings.firstTo == kFirstToEndless)
+        snprintf(music, sizeof(music), "ENDLESS   BGM: %s", kMusicTracks[track < 0 ? 0 : track].name);
+    else
+        snprintf(music, sizeof(music), "FT%d   %s   BGM: %s", room.settings.firstTo,
+                 RotationName(room.settings.rotation), kMusicTracks[track < 0 ? 0 : track].name);
+    p.TextFit(music, 1060.0f, 61.0f, 0.62f, 470.0f, A_MR, kDim);
     p.Sprite(TEX_FRIENDS, 1098.0f, 62.0f, 40.0f, 40.0f, kFullUv, A_MC);
     char population[24];
     snprintf(population, sizeof(population), "%d / %d", room.memberCount, room.settings.maxMembers);
@@ -1723,8 +1815,10 @@ const char* LobbyUi::DrawRoom(Canvas& canvas) const
     const Member* local = LocalMember();
     if (textTarget_ == TextTarget::Chat)
         help = "Type a message, then confirm.";
+    else if (local && local->queueSlot >= 0)
+        help = "You are in line. You will be seated when it is your turn.";
     else if (local && local->slot < 0)
-        help = "Take a seat to challenge a player.";
+        help = "Take a seat, or line up for a match that is full.";
 
     if (roomMenuOpen_)
         DrawListMenu(canvas, "LOBBY MENU", kRoomMenuItems, kRoomMenuCount, roomMenuCursor_);
@@ -1818,7 +1912,7 @@ void LobbyUi::DrawHandshake(Canvas& canvas) const
         p.Text(label, ox, oy, 0.4f, A_MC, selected ? kText : kDim, FONT_HEADING);
     };
     const auto delayName = [autoDelay](int pick, char* out, size_t size) {
-        if (pick == kDelayPickNone) snprintf(out, size, "choosing...");
+        if (pick == kDelayPickNone) snprintf(out, size, "...");
         else if (pick == kDelayPickAuto && autoDelay >= 0) snprintf(out, size, "AUTO (%d)", autoDelay);
         else if (pick == kDelayPickAuto) snprintf(out, size, "AUTO");
         else snprintf(out, size, "%d", pick - 1);
@@ -1843,13 +1937,14 @@ void LobbyUi::DrawHandshake(Canvas& canvas) const
         p.Text("INPUT DELAY", cx, y + 108.0f, 0.36f, A_MC, kText, FONT_HEADING);
         char mine[24], theirs[24];
         delayName(step == Handshake::Delay ? delayCursor_ : local->delayPick, mine, sizeof(mine));
-        delayName(other->delayPick, theirs, sizeof(theirs));
+        // Their locked pick, or until then whatever they have highlighted.
+        const bool theirsLocked = other->delayPick != kDelayPickNone;
+        delayName(theirsLocked ? other->delayPick : other->delayHover, theirs, sizeof(theirs));
         p.Text("YOU", cx - 180.0f, y + 150.0f, 0.6f, A_MC, kDim);
         p.Text(mine, cx - 180.0f, y + 188.0f, 1.0f, A_MC, step == Handshake::Delay ? kText : kGreen);
         if (step == Handshake::Delay) DrawValueArrows(p, frame_, cx - 180.0f, y + 188.0f, 110.0f);
         p.TextFit(other->name, cx + 180.0f, y + 150.0f, 0.6f, 300.0f, A_MC, kDim);
-        p.Text(theirs, cx + 180.0f, y + 188.0f, 1.0f, A_MC,
-               other->delayPick == kDelayPickNone ? kDim : kGreen);
+        p.Text(theirs, cx + 180.0f, y + 188.0f, 1.0f, A_MC, theirsLocked ? kGreen : kText);
         p.Text(step == Handshake::Delay ? "The higher of the two picks is used."
                                         : "Waiting for your opponent to choose.",
                cx, y + 244.0f, 0.62f, A_MC, kDim);

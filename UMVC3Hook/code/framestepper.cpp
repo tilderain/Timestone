@@ -1269,6 +1269,12 @@ void FrameStepper_InitNetplay()
     HookLog("FrameStepper: launch netplay config hostEnabled=%d host=%p peer=%p\n",
             cfg.hostEnabled ? 1 : 0, (void*)cfg.enetHost, (void*)cfg.enetPeer);
     if (cfg.hostEnabled && cfg.enetHost && cfg.enetPeer && !Netplay_IsActive()) {
+        // A new session is a new connection, possibly to a different player.
+        // Both sides must count its battles from the same number: a room
+        // player who has already played others would otherwise sit at a
+        // higher generation than a newcomer, each would discard the other's
+        // BattleReady, and the match would hang at the start-up barrier.
+        g_battleGeneration = 1;
         Netplay_Init(cfg.enetHost, cfg.enetPeer);
     }
     if (Netplay_IsActive()) {

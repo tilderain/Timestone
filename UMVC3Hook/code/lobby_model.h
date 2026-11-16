@@ -14,9 +14,11 @@ constexpr int kMaxSearchResults = 48;
 constexpr int kMaxChatLines = 32;
 constexpr int kNameCapacity = 64;
 constexpr int kChatCapacity = 128;
-// Set lengths a room can be created with ("first to N").
-constexpr int kFirstToChoices[] = {1, 2, 3, 5, 7, 10};
-constexpr int kFirstToChoiceCount = 6;
+// Set lengths a room can be created with ("first to N"). 0 is endless: the
+// two players rematch until one of them leaves, and nothing is recorded.
+constexpr int kFirstToEndless = 0;
+constexpr int kFirstToChoices[] = {1, 2, 3, 5, 7, 10, kFirstToEndless};
+constexpr int kFirstToChoiceCount = 7;
 constexpr int kMaxFirstTo = 10;
 
 struct Team {
@@ -30,7 +32,16 @@ struct Team {
 // otherwise delay frames + 1.
 constexpr int kDelayPickNone = -1;
 constexpr int kDelayPickAuto = 0;
-constexpr int kMaxDelayPick = 9; // delay 8
+constexpr int kMaxDelayPick = 7; // delay 6
+
+// What happens to the two players when a set ends and others are queued for
+// their match slot. With nobody queued, both simply stay. An endless room
+// (firstTo 0) has no set end, so nobody is ever rotated there: a queued
+// player waits for someone to leave.
+enum class Rotation : uint8_t {
+    WinnerStays = 1,  // the loser goes to the back of the queue
+    WinnerLeaves = 2, // the winner goes to the back of the queue
+};
 
 enum class Visibility : uint8_t {
     Public = 0,
@@ -59,10 +70,14 @@ struct Member {
     // accepted the match, picked an input delay, then `ready` (team settled).
     bool accepted;
     int8_t delayPick;
+    int8_t delayHover; // what they have highlighted while still choosing
     Team team;
     int16_t wins;   // sets won in this room
     int16_t losses;
     int8_t setWins; // games won in the set being played right now
+    int8_t queueSlot;   // match slot this player is waiting for, -1 if none
+    uint32_t queueSeq;  // order of joining that queue (lower waits longer)
+    int8_t queuePos;    // 1 = next up; 0 when not queued (derived)
     int16_t pingMs; // estimated ping to the local player, -1 when unknown
 };
 
@@ -80,7 +95,8 @@ struct RoomSettings {
     int slotCount;       // 1..kMaxSlots
     Visibility visibility;
     int32_t music; // lobby_music.h track id the room starts with
-    int firstTo;   // games needed to win a set, fixed when the room is created
+    int firstTo;   // games needed to win a set (0 = endless), fixed at creation
+    Rotation rotation; // likewise fixed
 };
 
 struct RoomState {
@@ -137,10 +153,16 @@ public:
 
     virtual void Sit(int slot, int side) = 0;
     virtual void Stand() = 0;
+    // Wait for a seat at a match slot. The player at the head of a slot's
+    // queue is seated by their own client as soon as a seat there opens.
+    virtual void JoinQueue(int slot) = 0;
+    virtual void LeaveQueue() = 0;
     // Pre-match steps, see Member. They are forgotten whenever the opposite
     // seat changes hands or empties.
     virtual void AcceptMatch() = 0;
     virtual void PickDelay(int pick) = 0;
+    // The delay currently highlighted, shown to the other player as it moves.
+    virtual void HoverDelay(int pick) = 0;
     // The input delay an "Auto" pick stands for at this one-way ping, or -1
     // if the ping is not known yet.
     virtual int AutoDelay(int pingMs) const = 0;

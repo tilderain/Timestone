@@ -200,9 +200,24 @@ public:
         if (Member* local = Local()) local->accepted = true;
     }
     int AutoDelay(int pingMs) const override { return pingMs < 0 ? -1 : 1 + pingMs / 40; }
+    void HoverDelay(int pick) override
+    {
+        if (Member* local = Local()) local->delayHover = static_cast<int8_t>(pick);
+    }
     void PickDelay(int pick) override
     {
         if (Member* local = Local()) local->delayPick = static_cast<int8_t>(pick);
+    }
+    void JoinQueue(int slot) override
+    {
+        if (Member* local = Local()) {
+            local->queueSlot = static_cast<int8_t>(slot);
+            local->queuePos = 3;
+        }
+    }
+    void LeaveQueue() override
+    {
+        if (Member* local = Local()) local->queueSlot = -1;
     }
     void InviteFriends() override {}
     void SetMusic(int32_t trackId) override { room.music = trackId; }
@@ -228,7 +243,9 @@ public:
         member.isHost = host;
         member.isLocal = local;
         member.slot = -1;
+        member.queueSlot = -1;
         member.delayPick = kDelayPickNone;
+        member.delayHover = kDelayPickNone;
         member.pingMs = static_cast<int16_t>(20 + id * 23 % 190);
         Preset(static_cast<int>(id % 3), &member.team);
         return member;
@@ -244,6 +261,7 @@ public:
         // prompt; the scenes move it through the later steps by hand.
         member.accepted = true;
         member.delayPick = kDelayPickNone;
+        member.delayHover = 4; // highlighting delay 3
     }
     void AddChat(const char* sender, const char* text, bool system)
     {
@@ -294,6 +312,7 @@ SearchResult MakeResult(uint64_t id, const char* name, const char* host, int mem
     result.pingMs = ping;
     result.compatible = compatible;
     result.matchInProgress = live;
+    result.firstTo = static_cast<int>(id % 4 == 0 ? 0 : 1 + id % 3);
     return result;
 }
 
@@ -306,6 +325,7 @@ UiPrefs DefaultPrefs()
     prefs.create.maxMembers = 8;
     prefs.create.slotCount = 2;
     prefs.create.firstTo = 3;
+    prefs.create.rotation = Rotation::WinnerStays;
     return prefs;
 }
 
@@ -316,6 +336,7 @@ void Populate(FakeService& service, int slots)
     settings.maxMembers = 8;
     settings.slotCount = slots;
     settings.firstTo = 3;
+    settings.rotation = Rotation::WinnerStays;
     service.Create(settings);
     service.AddMember(2, "Vevota", false, false);
     service.AddMember(3, "ArcherOfLegend", false, false);
@@ -326,6 +347,13 @@ void Populate(FakeService& service, int slots)
     service.Seat(2, 1, 0, true, MemberStatus::Fighting);
     service.Seat(3, 1, 1, true, MemberStatus::Fighting);
     if (slots > 2) service.Seat(4, 2, 0, false, MemberStatus::Seated);
+    // Two players waiting for the match in progress (the second slot).
+    if (slots > 1) {
+        service.room.members[5].queueSlot = 1;
+        service.room.members[5].queuePos = 1;
+        service.room.members[4].queueSlot = 1;
+        service.room.members[4].queuePos = 2;
+    }
     service.Recompute();
     service.AddChat("", "Vevota joined the lobby.", true);
     service.AddChat("Vevota", "anyone up for a long set?", false);

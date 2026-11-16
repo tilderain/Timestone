@@ -23,8 +23,9 @@ constexpr char kMusicKey[] = "bgm";      // lobby data: the host's music choice
 // that lists the local player. It lives and dies with the lobby.
 constexpr char kBanKey[] = "ban";
 constexpr char kFirstToKey[] = "ft";     // lobby data: games needed to win a set
+constexpr char kRotationKey[] = "rot";   // lobby data: Rotation, as a number
 constexpr int kMaxBans = 64;
-constexpr int kMemberVersion = 3;
+constexpr int kMemberVersion = 5;
 constexpr uint8_t kChatText = 'C';       // lobby chat payload: 'C' + UTF-8
 constexpr uint32_t kRefreshInterval = 6; // frames between room rebuilds
 
@@ -50,6 +51,14 @@ bool IsBanned(const char* list, uint64_t id)
     return false;
 }
 
+// A missing or bad value means first to 1; "0" is a real choice (endless).
+int ParseFirstTo(const char* text)
+{
+    if (!text || text[0] < '0' || text[0] > '9') return 1;
+    const int value = atoi(text);
+    return value > kMaxFirstTo ? 1 : value;
+}
+
 bool IsPlausibleTeam(const Team& team)
 {
     for (int i = 0; i < 3; ++i) {
@@ -64,27 +73,28 @@ bool IsPlausibleTeam(const Team& team)
 // team always change atomically for observers.
 void EncodeMember(char* out, size_t size, int slot, int side, bool ready, MemberStatus status,
                   bool accepted, int delayPick, const Team& team, int wins, int losses,
-                  int setWins)
+                  int setWins, int queueSlot, uint32_t queueSeq, int delayHover)
 {
-    snprintf(out, size, "%d|%d|%d|%d|%d|%d|%d|%d,%d,%d|%d,%d,%d|%d,%d,%d|%d|%d|%d",
+    snprintf(out, size, "%d|%d|%d|%d|%d|%d|%d|%d,%d,%d|%d,%d,%d|%d,%d,%d|%d|%d|%d|%d|%u|%d",
              kMemberVersion, slot, side, ready ? 1 : 0, static_cast<int>(status),
              accepted ? 1 : 0, delayPick,
              team.chars[0], team.chars[1], team.chars[2], team.assists[0], team.assists[1],
              team.assists[2], team.colors[0], team.colors[1], team.colors[2], wins, losses,
-             setWins);
+             setWins, queueSlot, queueSeq, delayHover);
 }
 
 bool DecodeMember(const char* text, Member& member)
 {
     int version = 0, slot = -1, side = 0, ready = 0, status = 0, accepted = 0, wins = 0, losses = 0;
-    int setWins = 0, delayPick = kDelayPickNone;
+    int setWins = 0, delayPick = kDelayPickNone, queueSlot = -1, delayHover = kDelayPickNone;
+    unsigned queueSeq = 0;
     Team team = {};
-    if (!text || sscanf(text, "%d|%d|%d|%d|%d|%d|%d|%d,%d,%d|%d,%d,%d|%d,%d,%d|%d|%d|%d", &version,
+    if (!text || sscanf(text, "%d|%d|%d|%d|%d|%d|%d|%d,%d,%d|%d,%d,%d|%d,%d,%d|%d|%d|%d|%d|%u|%d", &version,
                         &slot, &side, &ready, &status, &accepted, &delayPick, &team.chars[0],
                         &team.chars[1],
                         &team.chars[2], &team.assists[0], &team.assists[1], &team.assists[2],
                         &team.colors[0], &team.colors[1], &team.colors[2], &wins, &losses,
-                        &setWins) != 19)
+                        &setWins, &queueSlot, &queueSeq, &delayHover) != 22)
         return false;
     if (version != kMemberVersion) return false;
     if (slot < -1 || slot >= kMaxSlots || side < 0 || side > 2 || status < 0 ||
@@ -97,6 +107,11 @@ bool DecodeMember(const char* text, Member& member)
     member.status = static_cast<MemberStatus>(status);
     member.accepted = accepted != 0;
     member.delayPick = static_cast<int8_t>(delayPick);
+    member.delayHover = static_cast<int8_t>(
+        delayHover < kDelayPickNone || delayHover > kMaxDelayPick ? kDelayPickNone : delayHover);
+    // Seated players are not waiting for anything.
+    member.queueSlot = static_cast<int8_t>(slot >= 0 || queueSlot < 0 || queueSlot >= kMaxSlots ? -1 : queueSlot);
+    member.queueSeq = queueSeq;
     member.team = team;
     member.wins = static_cast<int16_t>(wins < 0 ? 0 : wins > 999 ? 999 : wins);
     member.losses = static_cast<int16_t>(losses < 0 ? 0 : losses > 999 ? 999 : losses);
@@ -191,6 +206,7 @@ void SteamRoomService::Create(const RoomSettings& settings)
     creating_ = true;
     pendingMusic_ = settings.music;
     pendingFirstTo_ = settings.firstTo;
+    pendingRotation_ = static_cast<int>(settings.rotation);
     SteamRoom_Create(ToSteamType(settings.visibility), settings.maxMembers, settings.slotCount,
                      settings.name);
 }
@@ -204,7 +220,8 @@ void SteamRoomService::Join(uint64_t roomId)
     }
     joining_ = true;
     pendingMusic_ = -1;
-    pendingFirstTo_ = 0;
+    pendingFirstTo_ = -1;
+    pendingRotation_ = -1;
     SteamLobby_Join(roomId);
 }
 
@@ -215,6 +232,7 @@ void SteamRoomService::Leave()
     local_.side = 0;
     ClearHandshake();
     handshakeOpponent_ = 0;
+    local_.queueSlot = -1;
     local_.status = MemberStatus::Idle;
     local_.wins = 0;
     local_.losses = 0;
@@ -290,7 +308,7 @@ void SteamRoomService::PublishLocal()
     char encoded[160];
     EncodeMember(encoded, sizeof(encoded), local_.slot, local_.side, local_.ready, local_.status,
                  local_.accepted, local_.delayPick, local_.team, local_.wins, local_.losses,
-                 local_.setWins);
+                 local_.setWins, local_.queueSlot, local_.queueSeq, local_.delayHover);
     SteamRoom_SetLocalData(kMemberKey, encoded);
     publishedOnce_ = true;
 }
@@ -301,6 +319,7 @@ void SteamRoomService::Sit(int slot, int side)
     if (local_.status == MemberStatus::Fighting) return;
     local_.slot = slot;
     local_.side = side;
+    local_.queueSlot = -1;
     ClearHandshake();
     local_.status = MemberStatus::Seated;
     PublishLocal();
@@ -316,6 +335,65 @@ void SteamRoomService::Stand()
     local_.status = MemberStatus::Idle;
     PublishLocal();
     RefreshRoom();
+}
+
+int SteamRoomService::QueueLength(int slot) const
+{
+    int length = 0;
+    for (int i = 0; i < room_.memberCount; ++i) length += room_.members[i].queueSlot == slot;
+    return length;
+}
+
+void SteamRoomService::JoinQueue(int slot)
+{
+    if (!room_.inRoom || slot < 0 || slot >= room_.settings.slotCount || local_.slot >= 0 ||
+        local_.status == MemberStatus::Fighting)
+        return;
+    // One past the highest number anyone in the room holds: later than all of
+    // them, without relying on anyone's clock.
+    uint32_t last = 0;
+    for (int i = 0; i < room_.memberCount; ++i)
+        if (room_.members[i].queueSlot >= 0 && room_.members[i].queueSeq > last)
+            last = room_.members[i].queueSeq;
+    local_.queueSlot = slot;
+    local_.queueSeq = last + 1;
+    PublishLocal();
+    RefreshRoom();
+}
+
+void SteamRoomService::LeaveQueue()
+{
+    if (local_.queueSlot < 0) return;
+    local_.queueSlot = -1;
+    PublishLocal();
+    RefreshRoom();
+}
+
+// The head of a slot's queue takes a seat there as soon as one is open. Each
+// client only ever moves its own player.
+void SteamRoomService::RunQueue()
+{
+    if (!room_.inRoom || local_.queueSlot < 0 || local_.slot >= 0) return;
+    const int slot = local_.queueSlot;
+    if (slot >= room_.settings.slotCount) {
+        LeaveQueue();
+        return;
+    }
+    if (room_.slots[slot] == SlotState::InProgress) return;
+    bool taken[2] = {false, false};
+    int position = 0;
+    for (int i = 0; i < room_.memberCount; ++i) {
+        const Member& member = room_.members[i];
+        if (member.slot == slot && member.side < 2) taken[member.side] = true;
+        if (member.isLocal) position = member.queuePos;
+    }
+    const int open = (taken[0] ? 0 : 1) + (taken[1] ? 0 : 1);
+    // Two open seats seat the first two in line; one seats only the first.
+    if (open == 0 || position < 1 || position > open) return;
+    const int side = position == 1 ? (taken[0] ? 1 : 0) : 1;
+    if (taken[side]) return;
+    HookLog("LobbyRoom: queue reached the front for match %d; taking seat %d\n", slot + 1, side + 1);
+    Sit(slot, side);
 }
 
 void SteamRoomService::SetReady(bool ready)
@@ -345,6 +423,7 @@ void SteamRoomService::ClearHandshake()
 {
     local_.accepted = false;
     local_.delayPick = kDelayPickNone;
+    local_.delayHover = kDelayPickNone;
     local_.ready = false;
     if (local_.status == MemberStatus::Ready) local_.status = MemberStatus::Seated;
 }
@@ -355,6 +434,13 @@ void SteamRoomService::AcceptMatch()
     local_.accepted = true;
     PublishLocal();
     RefreshRoom();
+}
+
+void SteamRoomService::HoverDelay(int pick)
+{
+    if (local_.slot < 0 || !local_.accepted || local_.delayHover == pick) return;
+    local_.delayHover = pick < kDelayPickAuto ? kDelayPickAuto : pick > kMaxDelayPick ? kMaxDelayPick : pick;
+    PublishLocal();
 }
 
 void SteamRoomService::PickDelay(int pick)
@@ -385,8 +471,20 @@ void SteamRoomService::FinishMatch(bool counted, bool localWon)
     measuredPeer_ = 0;
     measuredPing_ = -1;
     local_.status = local_.slot >= 0 ? MemberStatus::Seated : MemberStatus::Idle;
+    // A finished set rotates one of the two players out when others are
+    // waiting for this slot. The one who moves does it for themselves.
+    const int slot = local_.slot;
+    const Rotation rotation = room_.settings.rotation;
+    const bool rotateOut = counted && slot >= 0 && QueueLength(slot) > 0 &&
+                           ((rotation == Rotation::WinnerStays && !localWon) ||
+                            (rotation == Rotation::WinnerLeaves && localWon));
     PublishLocal();
     RefreshRoom();
+    if (rotateOut) {
+        Stand();
+        JoinQueue(slot);
+        AddChat("", "You moved to the back of the queue.", true);
+    }
 }
 
 void SteamRoomService::SetMeasuredPing(uint64_t memberId, int oneWayMs)
@@ -457,8 +555,7 @@ void SteamRoomService::RefreshResults()
         result.compatible = SteamLobby_IsLobbyVersionCompatible(result.id);
         result.friendLobby = SteamLobby_IsFriendLobby(result.id);
         result.matchInProgress = SteamLobby_IsResultInMatch(i);
-        result.firstTo = atoi(SteamRoom_GetLobbyData(result.id, kFirstToKey));
-        if (result.firstTo < 1 || result.firstTo > kMaxFirstTo) result.firstTo = 1;
+        result.firstTo = ParseFirstTo(SteamRoom_GetLobbyData(result.id, kFirstToKey));
     }
 }
 
@@ -478,8 +575,9 @@ void SteamRoomService::RefreshRoom()
     next.settings.slotCount = atoi(SteamRoom_GetData("slots"));
     if (next.settings.slotCount < 1) next.settings.slotCount = 1;
     if (next.settings.slotCount > kMaxSlots) next.settings.slotCount = kMaxSlots;
-    next.settings.firstTo = atoi(SteamRoom_GetData(kFirstToKey));
-    if (next.settings.firstTo < 1 || next.settings.firstTo > kMaxFirstTo) next.settings.firstTo = 1;
+    next.settings.firstTo = ParseFirstTo(SteamRoom_GetData(kFirstToKey));
+    next.settings.rotation = atoi(SteamRoom_GetData(kRotationKey)) == 2 ? Rotation::WinnerLeaves
+                                                                         : Rotation::WinnerStays;
     next.music = atoi(SteamRoom_GetData(kMusicKey));
     if (FindMusicTrack(next.music) < 0) next.music = kMusicDefault;
 
@@ -518,10 +616,13 @@ void SteamRoomService::RefreshRoom()
             member.status = local_.status;
             member.accepted = local_.accepted;
             member.delayPick = static_cast<int8_t>(local_.delayPick);
+            member.delayHover = static_cast<int8_t>(local_.delayHover);
             member.team = local_.team;
             member.wins = static_cast<int16_t>(local_.wins);
             member.losses = static_cast<int16_t>(local_.losses);
             member.setWins = static_cast<int8_t>(local_.setWins);
+            member.queueSlot = static_cast<int8_t>(local_.slot >= 0 ? -1 : local_.queueSlot);
+            member.queueSeq = local_.queueSeq;
             member.pingMs = 0;
         } else {
             if (!DecodeMember(SteamRoom_GetMemberData(id, kMemberKey), member) ||
@@ -531,9 +632,12 @@ void SteamRoomService::RefreshRoom()
                 member.ready = false;
                 member.accepted = false;
                 member.delayPick = kDelayPickNone;
+                member.delayHover = kDelayPickNone;
+                member.queueSlot = -1;
                 member.status = MemberStatus::Idle;
             }
             if (member.slot >= next.settings.slotCount) member.slot = -1;
+            if (member.queueSlot >= next.settings.slotCount) member.queueSlot = -1;
             member.pingMs = static_cast<int16_t>(SteamRoom_EstimateMemberPing(id));
             // A live connection to this member knows better than the estimate.
             if (id == measuredPeer_ && measuredPing_ >= 0)
@@ -590,6 +694,22 @@ void SteamRoomService::RefreshRoom()
         }
     } else if (local_.slot < 0) {
         handshakeOpponent_ = 0;
+    }
+
+    // Queue positions: per slot, by joining order, SteamID breaking ties. Every
+    // client sorts the same published values, so all agree who is next.
+    for (int i = 0; i < next.memberCount; ++i) {
+        Member& member = next.members[i];
+        member.queuePos = 0;
+        if (member.queueSlot < 0) continue;
+        int ahead = 0;
+        for (int j = 0; j < next.memberCount; ++j) {
+            const Member& other = next.members[j];
+            if (j == i || other.queueSlot != member.queueSlot) continue;
+            ahead += other.queueSeq < member.queueSeq ||
+                     (other.queueSeq == member.queueSeq && other.id < member.id);
+        }
+        member.queuePos = static_cast<int8_t>(ahead + 1);
     }
 
     bool anyLive = false;
@@ -715,6 +835,7 @@ void SteamRoomService::Pump()
         local_.side = 0;
         ClearHandshake();
         handshakeOpponent_ = 0;
+        local_.queueSlot = -1;
         local_.status = MemberStatus::Idle;
         local_.wins = 0;
         local_.losses = 0;
@@ -729,20 +850,30 @@ void SteamRoomService::Pump()
         // screen (SetMusic ignores it if we are not the owner).
         if (pendingMusic_ >= 0) SetMusic(pendingMusic_);
         pendingMusic_ = -1;
-        if (pendingFirstTo_ > 0) {
+        if (pendingFirstTo_ >= 0) {
             char value[8];
             snprintf(value, sizeof(value), "%d", pendingFirstTo_);
             SteamRoom_SetData(kFirstToKey, value); // owner only, as for the music
             room_.settings.firstTo = pendingFirstTo_;
         }
-        pendingFirstTo_ = 0;
+        pendingFirstTo_ = -1;
+        if (pendingRotation_ >= 0) {
+            char value[8];
+            snprintf(value, sizeof(value), "%d", pendingRotation_);
+            SteamRoom_SetData(kRotationKey, value);
+            room_.settings.rotation = static_cast<Rotation>(pendingRotation_);
+        }
+        pendingRotation_ = -1;
         HookLog("LobbyRoom: entered room %llu (%d members)\n",
                 static_cast<unsigned long long>(room_.id), room_.memberCount);
     }
 
     if (inRoom || room_.inRoom) {
         DrainChat();
-        if (frame_ % kRefreshInterval == 0) RefreshRoom();
+        if (frame_ % kRefreshInterval == 0) {
+            RefreshRoom();
+            RunQueue();
+        }
     }
     if (SteamLobby_TakeResultsChanged() || (!inRoom && frame_ % 45 == 0)) RefreshResults();
 }

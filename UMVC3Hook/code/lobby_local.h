@@ -9,17 +9,20 @@
 #include <cstdint>
 #include <enet/enet.h>
 
-// Call before the lobby starts. `child` marks the instance the first one
-// spawned.
-void LocalLobby_Enable(bool child);
+// Call before the lobby starts. `instance` is 0 for the game the player
+// launched and 1, 2... for the ones it spawned.
+void LocalLobby_Enable(int instance);
 // Set to true and rebuild for a lobby test build: the game then always boots
 // into the in-game lobby against the local stand-in and opens a second
 // window. Leave it false in anything that ships; while it is false no forward
 // in steam_lobby.cpp is ever taken and nothing can switch the mode on.
 constexpr bool kLobbyTestBuild = false;
 constexpr bool LocalLobby_Enabled() { return kLobbyTestBuild; }
+// Extra game windows a lobby test build opens: 1 for a match, 2 or more to
+// have players waiting in a queue (each is a full copy of the game).
+constexpr int kLobbyTestExtraInstances = 1;
 bool LocalLobby_IsChild();
-// Starts a second game process in the same mode (first instance only, once).
+// Starts the extra game processes (first instance only, once).
 void LocalLobby_SpawnSecondInstance();
 
 bool LocalLobby_Initialize();

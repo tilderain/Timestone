@@ -282,6 +282,8 @@ UiPrefs LoadPrefs()
     prefs.create.visibility = visibility == 1 ? Visibility::FriendsOnly
                             : visibility == 2 ? Visibility::Private : Visibility::Public;
     prefs.create.firstTo = GetPrivateProfileIntA("Lobby", "RoomFirstTo", 1, path);
+    prefs.create.rotation = GetPrivateProfileIntA("Lobby", "RoomRotation", 1, path) == 2
+        ? Rotation::WinnerLeaves : Rotation::WinnerStays;
     prefs.create.music = GetPrivateProfileIntA("Lobby", "RoomMusic", lobby::kMusicDefault, path);
     if (lobby::FindMusicTrack(prefs.create.music) < 0) prefs.create.music = lobby::kMusicDefault;
     return prefs;
@@ -305,6 +307,7 @@ void SavePrefs(const UiPrefs& prefs)
         {"Lobby", "RoomVisibility", std::to_string(static_cast<int>(prefs.create.visibility))},
         {"Lobby", "RoomMusic", std::to_string(prefs.create.music)},
         {"Lobby", "RoomFirstTo", std::to_string(prefs.create.firstTo)},
+        {"Lobby", "RoomRotation", std::to_string(static_cast<int>(prefs.create.rotation))},
     };
     IniSafe_WriteBatch(entries, sizeof(entries) / sizeof(entries[0]), path);
 }
@@ -408,7 +411,7 @@ bool g_gameCounted = false;
 
 void ResetSet(int firstTo)
 {
-    g_setFirstTo = firstTo < 1 ? 1 : firstTo;
+    g_setFirstTo = firstTo < 0 ? 1 : firstTo; // 0: endless, no set to win
     g_setWins[0] = g_setWins[1] = 0;
     g_setOver = false;
     g_setOverTicks = 0;
@@ -1238,9 +1241,10 @@ void LobbyFlow_DrawOverlay()
             IM_COL32(0, 0, 0, static_cast<int>(black * 255.0f + 0.5f)));
 
     // Set score during a room match, top centre between the health bars.
-    if (g_phase == Phase::InMatch && g_setFirstTo > 1) {
-        char score[48];
-        snprintf(score, sizeof(score), "FT%d    %d - %d", g_setFirstTo,
+    if (g_phase == Phase::InMatch && g_setFirstTo != 1) {
+        char score[48], format[12] = "";
+        if (g_setFirstTo > 0) snprintf(format, sizeof(format), "FT%d    ", g_setFirstTo);
+        snprintf(score, sizeof(score), "%s%d - %d", format,
                  g_setWins[g_pairing.localSide == 0 ? 0 : 1],
                  g_setWins[g_pairing.localSide == 0 ? 1 : 0]);
         const ImVec2 display = ImGui::GetIO().DisplaySize;
@@ -1440,7 +1444,8 @@ void UpdateSet()
                 ++g_setWins[winTeam == g_pairing.localSide ? 0 : 1];
                 if (g_service) g_service->ReportSetScore(g_setWins[0]);
             }
-            g_setOver = g_setWins[0] >= g_setFirstTo || g_setWins[1] >= g_setFirstTo;
+            g_setOver = g_setFirstTo > 0 &&
+                        (g_setWins[0] >= g_setFirstTo || g_setWins[1] >= g_setFirstTo);
             HookLog("LobbyFlow: game finished winTeam=%d (local side %d) set %d-%d of FT%d%s\n",
                     winTeam, g_pairing.localSide, g_setWins[0], g_setWins[1], g_setFirstTo,
                     g_setOver ? " (set over)" : "");
@@ -1490,8 +1495,13 @@ void LobbyFlow_GameTick()
     // After a decided set the other player leaving is the normal ending, and
     // both players leave at almost the same moment: whoever is a frame behind
     // sees a disconnect first. Whatever asked for the return (netplay reports
-    // a lost peer through more than one path), the set result is the news.
-    if (g_setOver) snprintf(g_returnReason, sizeof(g_returnReason), "%s", SetResultText());
+    // a lost peer through more than one path), it is not an error. The result
+    // goes in the room's chat; no modal stands between the players and the
+    // next match's prompt.
+    if (g_setOver) {
+        g_returnReason[0] = '\0';
+        if (g_service) g_service->PostSystemLine(SetResultText());
+    }
 
     HookLog("LobbyFlow: leaving the match (%s)\n", g_returnReason[0] ? g_returnReason : "requested");
     FrameStepper_EndNetplaySession();

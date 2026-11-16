@@ -111,6 +111,7 @@ private:
 
     const Member* LocalMember() const;
     const Member* SeatOccupant(int slot, int side) const;
+    int SlotQueueLength(int slot) const;
     void ApplyPreset(int index);
     void CommitTeam();
     void StepTeamField(int delta);

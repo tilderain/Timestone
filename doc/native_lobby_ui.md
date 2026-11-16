@@ -424,7 +424,7 @@ clients derive the same step (`LobbyUi::HandshakeStep`):
    plays it through `sGSound__playOrdinaryVoice` `0x1402AAC40`. If that bank
    is not loaded in the title area the decide cue plays instead; the log line
    `LobbyNative: match-found cue` says which. **Unverified in game.**
-2. **Input delay** (20 s, then the highlighted value). AUTO or 0..8, with the
+2. **Input delay** (20 s, then the highlighted value). AUTO or 0..6, with the
    other player's pick shown once they have chosen. Both players run one
    delay, so player 1 uses the higher of the two picks (`SendLaunchAsHost`).
    AUTO is shown with its number, e.g. `AUTO (2)`, worked out from the ping
@@ -447,10 +447,47 @@ so the next pairing (including a rematch) starts from step 1. There is no
 queue yet: "the next player" is whoever takes the vacated seat. The per-player
 quick start / character select setting is gone.
 
+## Queues and rotation
+
+Each match slot has its own queue. A player joins one with confirm on a slot
+that is full or already has people waiting (a free seat with nobody waiting
+is still taken directly), and leaves it with confirm on that slot again, X or
+cancel. A player is either seated or in one queue, never both.
+
+There is no arbiter. Each player publishes `queueSlot` and `queueSeq` in
+their member data (version 4); a joiner takes one more than the highest
+`queueSeq` anyone in the room holds, so no clocks are involved. Every client
+sorts a slot's queue by `(queueSeq, SteamID)` and gets the same order
+(`Member::queuePos`, 1 = next). `SteamRoomService::RunQueue` runs after each
+room refresh and only ever moves the local player: if they are at the front
+and a seat at their slot is open, they sit (two open seats take the first two
+in line). Sitting starts the pre-match prompts as usual; a player who lets the
+ready prompt run out is stood up and not put back in the queue, so the seat
+goes to the next in line.
+
+The room's `ROTATION` setting (lobby data `rot`, fixed at creation) decides
+who makes way after a set played to its end, in `FinishMatch`: with WINNER
+STAYS the loser stands and rejoins the back of that slot's queue, with WINNER
+LEAVES the winner does. Nobody moves when the queue is empty: the two then
+get the prompts again as a rematch.
+
+`MATCH FORMAT` also offers ENDLESS (`ft` = `0`; a missing or bad value means
+first to 1). An endless match has no set: the two rematch until one of them
+leaves, nothing goes on the room record, and since no set ever ends nobody is
+rotated. Players queued for that slot wait for a seat to open, and the
+rotation row on the create screen is inert.
+
+The slot header shows `NEXT: name +n` and the player list shows `M2 #1`
+(match, position) for everyone waiting. As with kick, the order is only as
+honest as the clients: a modified one could publish a low `queueSeq`.
+
+A lobby test build opens `kLobbyTestExtraInstances` extra windows
+(`lobby_local.h`, 1 by default); a queue needs at least 2.
+
 ## Sets (first to N)
 
 A room is created with a set length (`MATCH FORMAT`: first to 1, 2, 3, 5, 7 or
-10), stored in the lobby data as `ft` and fixed for the room's life.
+10, or endless, see "Queues and rotation"), stored in the lobby data as `ft` and fixed for the room's life.
 
 A room match is one set. The game's result phase is already hooked for
 rematches (`sAction__stepResult8` / `9_10_11`, see `outro.md`); those hooks
@@ -465,8 +502,8 @@ taken to be player 1 (the pairing's side 0): **unverified**, the log line
 Until the set is decided a confirm in the result phase restarts as before
 (only after the game has been counted). Once someone reaches N the restart is
 refused, the win pose plays for 150 ticks and each player returns to the room
-on their own with the set result; the other player dropping at that point is
-treated as the normal ending. Only a set played to its end goes on the room's
+on their own. The result is a line in the room's chat, not a modal; the other
+player dropping at that point is treated as the normal ending. Only a set played to its end goes on the room's
 win/loss record. The running score is published in the member data (version
 2, last field) for the room's slot header and drawn above the health bars
 with ImGui during the match.

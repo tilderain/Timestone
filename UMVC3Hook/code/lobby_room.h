@@ -50,8 +50,11 @@ public:
 
     void Sit(int slot, int side) override;
     void Stand() override;
+    void JoinQueue(int slot) override;
+    void LeaveQueue() override;
     void AcceptMatch() override;
     void PickDelay(int pick) override;
+    void HoverDelay(int pick) override;
     int AutoDelay(int pingMs) const override;
     void SetReady(bool ready) override;
     void SetTeam(const Team& team) override;
@@ -91,10 +94,13 @@ private:
         MemberStatus status = MemberStatus::Idle;
         bool accepted = false;
         int delayPick = kDelayPickNone;
+        int delayHover = kDelayPickNone;
         Team team = {};
         int wins = 0;
         int losses = 0;
         int setWins = 0;
+        int queueSlot = -1;
+        uint32_t queueSeq = 0;
     };
 
     void PublishLocal();
@@ -118,7 +124,10 @@ private:
     bool publishedOnce_ = false;
     bool liveAdvertised_ = false;
     int32_t pendingMusic_ = -1; // track to publish once the created room exists
-    int pendingFirstTo_ = 0;    // likewise the set length
+    int pendingFirstTo_ = -1;   // likewise the set length
+    int pendingRotation_ = -1;  // and the rotation rule
+    void RunQueue();
+    int QueueLength(int slot) const;
     uint64_t handshakeOpponent_ = 0; // who the pre-match steps were taken with
     uint64_t measuredPeer_ = 0;
     int measuredPing_ = -1;

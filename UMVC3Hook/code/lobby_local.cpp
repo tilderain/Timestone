@@ -182,11 +182,14 @@ void DestroyMatchHost()
 
 } // namespace
 
-void LocalLobby_Enable(bool child)
+void LocalLobby_Enable(int instance)
 {
-    g_child = child;
+    g_child = instance > 0;
     g_localId = kIdBase + GetCurrentProcessId();
-    snprintf(g_localName, sizeof(g_localName), child ? "Tester Two" : "Tester One");
+    static const char* const names[] = {"Tester One", "Tester Two", "Tester Three",
+                                        "Tester Four", "Tester Five", "Tester Six"};
+    snprintf(g_localName, sizeof(g_localName), "%s",
+             names[instance < 0 ? 0 : instance > 5 ? 5 : instance]);
     HookLog("LocalLobby: test lobby enabled (%s, id=%llu)\n", g_localName,
             static_cast<unsigned long long>(g_localId));
 }
@@ -199,17 +202,20 @@ void LocalLobby_SpawnSecondInstance()
     g_childSpawned = true;
     wchar_t exe[MAX_PATH] = {};
     if (!GetModuleFileNameW(nullptr, exe, MAX_PATH)) return;
-    wchar_t command[MAX_PATH + 64];
-    swprintf(command, MAX_PATH + 64, L"\"%ls\" -lobbytest-child", exe);
-    STARTUPINFOW startup = {sizeof(startup)};
-    PROCESS_INFORMATION process = {};
-    if (CreateProcessW(exe, command, nullptr, nullptr, FALSE, CREATE_NEW_CONSOLE, nullptr, nullptr,
-                       &startup, &process)) {
-        CloseHandle(process.hProcess);
-        CloseHandle(process.hThread);
-        HookLog("LocalLobby: started the second game instance\n");
-    } else {
-        HookLog("LocalLobby: could not start the second instance (error %lu)\n", GetLastError());
+    for (int instance = 1; instance <= kLobbyTestExtraInstances; ++instance) {
+        wchar_t command[MAX_PATH + 64];
+        swprintf(command, MAX_PATH + 64, L"\"%ls\" -lobbytest-child=%d", exe, instance);
+        STARTUPINFOW startup = {sizeof(startup)};
+        PROCESS_INFORMATION process = {};
+        if (CreateProcessW(exe, command, nullptr, nullptr, FALSE, CREATE_NEW_CONSOLE, nullptr,
+                           nullptr, &startup, &process)) {
+            CloseHandle(process.hProcess);
+            CloseHandle(process.hThread);
+            HookLog("LocalLobby: started game instance %d\n", instance + 1);
+        } else {
+            HookLog("LocalLobby: could not start instance %d (error %lu)\n", instance + 1,
+                    GetLastError());
+        }
     }
 }
 

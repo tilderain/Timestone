@@ -1855,10 +1855,15 @@ void OnInitializeHook()
 		// instance started alongside. The first instance marks the second
 		// with an internal argument.
 		if (kLobbyTestBuild) {
-			const bool lobbyTestChild = strstr(cmdLineA, "-lobbytest-child") != nullptr;
-			LocalLobby_Enable(lobbyTestChild);
-			// Two processes: keep their logs apart, as dual training does.
-			HookLogSetFile(lobbyTestChild ? "Timestone_client.log" : "Timestone_host.log");
+			const char* childArg = strstr(cmdLineA, "-lobbytest-child=");
+			const int instance = childArg ? atoi(childArg + 17) : 0;
+			const bool lobbyTestChild = instance > 0;
+			LocalLobby_Enable(instance);
+			// Several processes: keep their logs apart, as dual training does.
+			static char lobbyTestLog[40];
+			snprintf(lobbyTestLog, sizeof(lobbyTestLog), "Timestone_client%d.log", instance);
+			HookLogSetFile(instance == 0 ? "Timestone_host.log"
+				: instance == 1 ? "Timestone_client.log" : lobbyTestLog);
 			g_windowCorner = lobbyTestChild ? 2 : 1;
 		}
 		const bool launcherArg =
