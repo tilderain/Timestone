@@ -70,6 +70,7 @@ struct RoomSettings {
     int maxMembers;      // 2..kMaxMembers
     int slotCount;       // 1..kMaxSlots
     Visibility visibility;
+    int32_t music; // lobby_music.h track id the room starts with
 };
 
 struct RoomState {
@@ -79,6 +80,7 @@ struct RoomState {
     int memberCount;
     Member members[kMaxMembers];
     SlotState slots[kMaxSlots];
+    int32_t music; // lobby_music.h track id playing now (the host's choice)
 };
 
 struct SearchResult {
@@ -127,6 +129,9 @@ public:
     virtual void SetReady(bool ready) = 0;
     virtual void SetTeam(const Team& team, EntryMode mode) = 0;
     virtual void InviteFriends() = 0;
+    // Host only: the room's music, a lobby_music.h track id. Everyone in the
+    // room sees it in RoomState::music.
+    virtual void SetMusic(int32_t trackId) = 0;
 
     virtual void SendChat(const char* utf8) = 0;
     virtual int ChatCount() const = 0;

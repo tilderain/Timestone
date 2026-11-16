@@ -1,5 +1,6 @@
 #include "../pch.h"
 #include "lobby_room.h"
+#include "lobby_music.h"
 #include "steam_lobby.h"
 
 #include <Windows.h>
@@ -14,6 +15,7 @@ namespace lobby {
 namespace {
 
 constexpr char kMemberKey[] = "ts";      // per-member room state
+constexpr char kMusicKey[] = "bgm";      // lobby data: the host's music choice
 constexpr int kMemberVersion = 1;
 constexpr uint8_t kChatText = 'C';       // lobby chat payload: 'C' + UTF-8
 constexpr uint32_t kRefreshInterval = 6; // frames between room rebuilds
@@ -157,6 +159,7 @@ void SteamRoomService::Create(const RoomSettings& settings)
 {
     if (!available_ || room_.inRoom) return;
     creating_ = true;
+    pendingMusic_ = settings.music;
     SteamRoom_Create(ToSteamType(settings.visibility), settings.maxMembers, settings.slotCount,
                      settings.name);
 }
@@ -165,6 +168,7 @@ void SteamRoomService::Join(uint64_t roomId)
 {
     if (!available_ || !roomId) return;
     joining_ = true;
+    pendingMusic_ = -1;
     SteamLobby_Join(roomId);
 }
 
@@ -187,6 +191,18 @@ void SteamRoomService::Leave()
 void SteamRoomService::InviteFriends()
 {
     SteamRoom_InviteFriends();
+}
+
+// The choice lives in the lobby's own data, so Steam delivers it to everyone
+// in the room and to anyone who joins later, and it survives the host leaving.
+void SteamRoomService::SetMusic(int32_t trackId)
+{
+    if (!room_.inRoom || SteamRoom_GetOwner() != SteamRoom_GetLocalId()) return;
+    if (FindMusicTrack(trackId) < 0) return;
+    char value[16];
+    snprintf(value, sizeof(value), "%d", trackId);
+    SteamRoom_SetData(kMusicKey, value);
+    room_.music = trackId; // Steam echoes it back a moment later
 }
 
 // ---------------------------------------------------------------------------
@@ -331,6 +347,8 @@ void SteamRoomService::RefreshRoom()
     next.settings.slotCount = atoi(SteamRoom_GetData("slots"));
     if (next.settings.slotCount < 1) next.settings.slotCount = 1;
     if (next.settings.slotCount > kMaxSlots) next.settings.slotCount = kMaxSlots;
+    next.music = atoi(SteamRoom_GetData(kMusicKey));
+    if (FindMusicTrack(next.music) < 0) next.music = kMusicDefault;
 
     const uint64_t owner = SteamRoom_GetOwner();
     const uint64_t localId = SteamRoom_GetLocalId();
@@ -521,6 +539,10 @@ void SteamRoomService::Pump()
         PublishLocal();
         RefreshRoom();
         knownMemberCount_ = room_.memberCount; // do not announce existing members
+        // A room we just created starts with the music chosen on the create
+        // screen (SetMusic ignores it if we are not the owner).
+        if (pendingMusic_ >= 0) SetMusic(pendingMusic_);
+        pendingMusic_ = -1;
         HookLog("LobbyRoom: entered room %llu (%d members)\n",
                 static_cast<unsigned long long>(room_.id), room_.memberCount);
     }

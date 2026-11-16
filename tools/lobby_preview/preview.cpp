@@ -153,6 +153,7 @@ public:
         room.inRoom = true;
         room.id = 1;
         room.settings = settings;
+        room.music = settings.music;
         AddMember(1, "tilderain", true, true);
     }
     void Join(uint64_t) override {}
@@ -194,6 +195,7 @@ public:
         }
     }
     void InviteFriends() override {}
+    void SetMusic(int32_t trackId) override { room.music = trackId; }
     void SendChat(const char* utf8) override { AddChat("tilderain", utf8, false); }
     int ChatCount() const override { return static_cast<int>(chat.size()); }
     const ChatLine& Chat(int index) const override { return chat[index]; }
@@ -391,6 +393,13 @@ int main(int argc, char** argv)
         ui.Update(Press(&Input::down));
         Settle(ui, 2);
         ok &= Capture(ui, directory, "create");
+        for (int i = 0; i < 3; ++i) ui.Update(Press(&Input::down)); // LOBBY MUSIC
+        ui.Update(Press(&Input::right));
+        Settle(ui, 2);
+        ok &= Capture(ui, directory, "create_music_row");
+        ui.Update(Press(&Input::confirm));
+        Settle(ui, 2);
+        ok &= Capture(ui, directory, "create_music");
     }
     for (int slots : {1, 2, 4}) {   // Room with 1, 2 and 4 match slots.
         FakeService service;
@@ -407,6 +416,14 @@ int main(int argc, char** argv)
             ui.Update(Press(&Input::menu));
             Settle(ui, 2);
             ok &= Capture(ui, directory, "room_menu");
+            ui.Update(Press(&Input::down)); // LOBBY MUSIC
+            ui.Update(Press(&Input::confirm));
+            ui.Update(Press(&Input::right)); // jump to the stage group
+            for (int i = 0; i < 4; ++i) ui.Update(Press(&Input::down));
+            ui.Update(Press(&Input::confirm)); // host picks it
+            ui.Update(Press(&Input::down));
+            Settle(ui, 2);
+            ok &= Capture(ui, directory, "room_music");
             ui.Update(Press(&Input::cancel));
             ui.Update(Press(&Input::actionY));
             Settle(ui, 2);

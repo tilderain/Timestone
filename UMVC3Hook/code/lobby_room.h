@@ -50,6 +50,7 @@ public:
     void SetReady(bool ready) override;
     void SetTeam(const Team& team, EntryMode mode) override;
     void InviteFriends() override;
+    void SetMusic(int32_t trackId) override;
 
     void SendChat(const char* utf8) override;
     int ChatCount() const override { return chatCount_; }
@@ -99,6 +100,7 @@ private:
     bool creating_ = false;
     bool publishedOnce_ = false;
     bool liveAdvertised_ = false;
+    int32_t pendingMusic_ = -1; // track to publish once the created room exists
     uint64_t knownMembers_[kMaxMembers] = {};
     char knownNames_[kMaxMembers][kNameCapacity] = {};
     int knownMemberCount_ = 0;

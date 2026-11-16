@@ -39,6 +39,10 @@ public:
     // True while keyboard characters should be routed to Input::typed.
     bool TextEntryActive() const { return textTarget_ != TextTarget::None; }
 
+    // Track (lobby_music.h id) to audition while the create screen's music
+    // list is open, or -1: the one under the cursor.
+    int32_t PreviewMusic() const;
+
     // Modal message dismissed with confirm.
     void ShowNotice(const char* text);
     // Non-dismissable progress overlay (e.g. "Connecting to opponent...").
@@ -66,6 +70,7 @@ private:
     void UpdateRoom(const Input& input);
     void UpdateRoomMenu(const Input& input);
     void UpdateQuickChat(const Input& input);
+    void UpdateMusicMenu(const Input& input);
     void UpdateTeam(const Input& input);
     void UpdateText(const Input& input);
     void SyncWithService();
@@ -83,6 +88,7 @@ private:
     void DrawTeamCard(Canvas& canvas, float x, float y, float w) const;
     void DrawListMenu(Canvas& canvas, const char* title, const char* const* items,
                       int count, int cursor) const;
+    void DrawMusicMenu(Canvas& canvas) const;
     bool DrawModal(Canvas& canvas) const; // true when a modal layer was drawn
 
     const Member* LocalMember() const;
@@ -121,6 +127,8 @@ private:
     int roomMenuCursor_ = 0;
     bool quickChatOpen_ = false;
     int quickChatCursor_ = 0;
+    bool musicOpen_ = false; // host's lobby music picker
+    int musicCursor_ = 0;
 
     Confirm confirm_ = Confirm::None;
     int confirmCursor_ = 1; // default to "No"

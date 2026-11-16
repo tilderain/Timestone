@@ -1,4 +1,5 @@
 #include "lobby_ui.h"
+#include "lobby_music.h"
 
 #include <cmath>
 #include <cstdio>
@@ -94,8 +95,9 @@ const char* const kTopHelp[] = {
 };
 constexpr int kTopCount = 4;
 
-const char* const kRoomMenuItems[] = {"TEAM SETUP", "INVITE FRIENDS", "LEAVE LOBBY"};
-constexpr int kRoomMenuCount = 3;
+const char* const kRoomMenuItems[] = {"TEAM SETUP", "LOBBY MUSIC", "INVITE FRIENDS", "LEAVE LOBBY"};
+constexpr int kRoomMenuCount = 4;
+constexpr int kMusicRows = 9; // tracks visible at once in the music picker
 
 const char* const kQuickChat[] = {
     "Type a message...", "Good fight!", "One more?", "Nice!", "Hello!",
@@ -109,7 +111,9 @@ const char* const kTeamSlotNames[] = {"POINT", "SECOND", "ANCHOR"};
 const char* const kAssistLetters[] = {"A", "B", "Y"};
 
 // Create-screen rows.
-enum CreateRow { CREATE_NAME, CREATE_SIZE, CREATE_SLOTS, CREATE_VISIBILITY, CREATE_GO, CREATE_ROWS };
+enum CreateRow {
+    CREATE_NAME, CREATE_SIZE, CREATE_SLOTS, CREATE_VISIBILITY, CREATE_MUSIC, CREATE_GO, CREATE_ROWS
+};
 // Team-screen rows: preset selector, 3 x (character, assist, colour), entry, done.
 constexpr int kTeamRowPreset = 0;
 constexpr int kTeamRowFirstSlot = 1;
@@ -259,6 +263,7 @@ LobbyUi::LobbyUi(RoomService& service, const RosterSource& roster, const UiPrefs
         prefs_.create.slotCount = 2;
     if (static_cast<int>(prefs_.create.visibility) > 2)
         prefs_.create.visibility = Visibility::Public;
+    if (FindMusicTrack(prefs_.create.music) < 0) prefs_.create.music = kMusicDefault;
 }
 
 void LobbyUi::PlayEntrance(uint32_t delayFrames)
@@ -273,6 +278,7 @@ void LobbyUi::GoTo(Screen screen)
     screenFrame_ = 0;
     roomMenuOpen_ = false;
     quickChatOpen_ = false;
+    musicOpen_ = false;
     confirm_ = Confirm::None;
     if (textTarget_ != TextTarget::None) EndText(false);
 }
@@ -298,6 +304,11 @@ bool LobbyUi::TakePrefsDirty()
     return dirty;
 }
 
+int32_t LobbyUi::PreviewMusic() const
+{
+    return musicOpen_ && screen_ == Screen::Create ? kMusicTracks[musicCursor_].id : -1;
+}
+
 void LobbyUi::ShowNotice(const char* text)
 {
     snprintf(notice_, sizeof(notice_), "%s", text ? text : "");
@@ -315,6 +326,7 @@ void LobbyUi::ReturnToRoom()
     screenFrame_ = kTransitionFrames;
     roomMenuOpen_ = false;
     quickChatOpen_ = false;
+    musicOpen_ = false;
     confirm_ = Confirm::None;
     wasInRoom_ = true;
 }
@@ -522,6 +534,10 @@ void LobbyUi::UpdateBrowse(const Input& input)
 
 void LobbyUi::UpdateCreate(const Input& input)
 {
+    if (musicOpen_) {
+        UpdateMusicMenu(input);
+        return;
+    }
     MoveCursor(createCursor_, CREATE_ROWS, input);
     if (input.cancel) {
         Play(SFX_CANCEL);
@@ -577,6 +593,12 @@ void LobbyUi::UpdateCreate(const Input& input)
         }
         Play(SFX_CONFIRM);
         service_.Create(draft);
+    } else if (createCursor_ == CREATE_MUSIC) {
+        // Too many tracks for a left/right value: confirm opens the full list.
+        Play(SFX_CONFIRM);
+        const int current = FindMusicTrack(draft.music);
+        musicCursor_ = current < 0 ? 0 : current;
+        musicOpen_ = true;
     } else {
         // Confirm on a value row advances it, so the screen is usable one-handed.
         Input step = {};
@@ -594,6 +616,10 @@ void LobbyUi::UpdateRoom(const Input& input)
     }
     if (quickChatOpen_) {
         UpdateQuickChat(input);
+        return;
+    }
+    if (musicOpen_) {
+        UpdateMusicMenu(input);
         return;
     }
 
@@ -688,13 +714,74 @@ void LobbyUi::UpdateRoomMenu(const Input& input)
         teamCursor_ = 0;
         GoTo(Screen::Team);
         break;
-    case 1:
+    case 1: {
+        const Member* local = LocalMember();
+        if (!local || !local->isHost) {
+            ShowNotice("Only the lobby host can change the music.");
+            break;
+        }
+        const int current = FindMusicTrack(service_.Room().music);
+        musicCursor_ = current < 0 ? 0 : current;
+        musicOpen_ = true;
+        break;
+    }
+    case 2:
         service_.InviteFriends();
         break;
     default:
         confirm_ = Confirm::LeaveRoom;
         confirmCursor_ = 1;
         break;
+    }
+}
+
+// The music picker: one long list in three groups. Up/down walks the tracks,
+// left/right jumps to the previous or next group. It serves the create screen
+// (the track a new lobby starts with) and the host of a running lobby.
+void LobbyUi::UpdateMusicMenu(const Input& input)
+{
+    const bool inRoom = screen_ == Screen::Room;
+    const Member* local = LocalMember();
+    if (inRoom && (!local || !local->isHost)) {
+        // Host changed while the picker was open.
+        musicOpen_ = false;
+        return;
+    }
+    if (input.cancel || input.menu) {
+        musicOpen_ = false;
+        Play(SFX_CANCEL);
+        return;
+    }
+    if (!MoveCursor(musicCursor_, kMusicTrackCount, input)) {
+        const MusicGroup group = kMusicTracks[musicCursor_].group;
+        int next = musicCursor_;
+        if (input.right || input.pageRight) {
+            while (next < kMusicTrackCount && kMusicTracks[next].group == group) ++next;
+            if (next >= kMusicTrackCount) next = 0;
+        } else if (input.left || input.pageLeft) {
+            // Start of this group, or of the previous one if already there.
+            while (next > 0 && kMusicTracks[next - 1].group == group) --next;
+            if (next == musicCursor_) {
+                next = next > 0 ? next - 1 : kMusicTrackCount - 1;
+                const MusicGroup previous = kMusicTracks[next].group;
+                while (next > 0 && kMusicTracks[next - 1].group == previous) --next;
+            }
+        }
+        if (next != musicCursor_) {
+            musicCursor_ = next;
+            Play(SFX_MOVE);
+        }
+    }
+    if (!input.confirm) return;
+    Play(SFX_CONFIRM);
+    // Either way the choice becomes the one the next created lobby starts with.
+    prefs_.create.music = kMusicTracks[musicCursor_].id;
+    prefsDirty_ = true;
+    if (inRoom) {
+        // Stays open so the host can audition tracks; everyone hears each choice.
+        service_.SetMusic(prefs_.create.music);
+    } else {
+        musicOpen_ = false;
     }
 }
 
@@ -901,6 +988,10 @@ void LobbyUi::DrawFooter(Canvas& canvas, const char* help) const
     } else if (modal) {
         add(BTN_CONFIRM, "OK");
         if (confirm_ != Confirm::None) add(BTN_CANCEL, "Back");
+    } else if (musicOpen_) {
+        add(BTN_CONFIRM, screen_ == Screen::Room ? "Play" : "Select");
+        add(BTN_DPAD, "Group");
+        add(BTN_CANCEL, "Close");
     } else if (screen_ == Screen::Top) {
         add(BTN_CONFIRM, "Select");
         add(BTN_CANCEL, "Main Menu");
@@ -911,7 +1002,7 @@ void LobbyUi::DrawFooter(Canvas& canvas, const char* help) const
         add(BTN_CANCEL, "Back");
     } else if (screen_ == Screen::Create) {
         add(BTN_CONFIRM, "Select");
-        add(BTN_DPAD, "Change");
+        if (createCursor_ != CREATE_MUSIC) add(BTN_DPAD, "Change");
         add(BTN_CANCEL, "Back");
     } else if (screen_ == Screen::Team) {
         add(BTN_DPAD, "Change");
@@ -1104,15 +1195,16 @@ const char* LobbyUi::DrawCreate(Canvas& canvas) const
     p.Sprite(TEX_SUBTITLES, 76.0f, 68.0f, 144.0f * 1.5f, 30.0f * 1.5f,
              Uv{0.0f, 33.0f / 256.0f, 144.0f / 256.0f, 63.0f / 256.0f}, A_ML);
 
-    const float panelX = 170.0f, panelY = 150.0f, panelW = 940.0f, panelH = 440.0f;
+    const float panelX = 170.0f, panelY = 140.0f, panelW = 940.0f, panelH = 470.0f;
     p.Box(TEX_PANEL_DARK, panelX, panelY, panelW, panelH);
     p.Text("LOBBY SETTING", panelX + 44.0f, panelY + 44.0f, 0.4f, A_ML, kYellow, FONT_HEADING);
 
     const RoomSettings& draft = prefs_.create;
     char value[kChatCapacity + 8];
-    const char* labels[CREATE_ROWS] = {"LOBBY NAME", "LOBBY SIZE", "MATCH SLOTS", "VISIBILITY", ""};
+    const char* labels[CREATE_ROWS] = {"LOBBY NAME", "LOBBY SIZE", "MATCH SLOTS", "VISIBILITY",
+                                       "LOBBY MUSIC", ""};
     for (int row = 0; row < CREATE_ROWS; ++row) {
-        const float y = panelY + 112.0f + row * 62.0f;
+        const float y = panelY + 112.0f + row * 58.0f;
         const bool selected = row == createCursor_;
         if (selected) {
             const float pulse = 0.72f + 0.28f * SelectionWave(frame_);
@@ -1134,6 +1226,11 @@ const char* LobbyUi::DrawCreate(Canvas& canvas) const
             break;
         case CREATE_SIZE: snprintf(value, sizeof(value), "%d PLAYERS", draft.maxMembers); break;
         case CREATE_SLOTS: snprintf(value, sizeof(value), "%d", draft.slotCount); break;
+        case CREATE_MUSIC: {
+            const int track = FindMusicTrack(draft.music);
+            snprintf(value, sizeof(value), "%s", kMusicTracks[track < 0 ? 0 : track].name);
+            break;
+        }
         default:
             snprintf(value, sizeof(value), "%s", kVisibilityNames[static_cast<int>(draft.visibility) % 3]);
             break;
@@ -1142,7 +1239,7 @@ const char* LobbyUi::DrawCreate(Canvas& canvas) const
         p.TextFit(value, valueX, y, 0.86f, row == CREATE_NAME ? 440.0f : kValueTextWidth, A_MC,
                   row == CREATE_NAME && textTarget_ == TextTarget::RoomName ? kCyan
                   : kText);
-        if (selected && row != CREATE_NAME) {
+        if (selected && row != CREATE_NAME && row != CREATE_MUSIC) {
             DrawValueArrows(p, frame_, valueX, y, kValueArrowSpan);
         }
     }
@@ -1152,8 +1249,13 @@ const char* LobbyUi::DrawCreate(Canvas& canvas) const
         "Set the maximum number of players in your lobby.",
         "Match slots let several pairs fight at the same time.",
         "Choose who can find and join this lobby.",
+        "Choose the music everyone in the lobby hears.",
         "Create a lobby.",
     };
+    if (musicOpen_) {
+        DrawMusicMenu(canvas);
+        return nullptr;
+    }
     return textTarget_ == TextTarget::RoomName ? "Type a name, then confirm."
                                                : help[createCursor_];
 }
@@ -1245,7 +1347,7 @@ void LobbyUi::DrawRoomSlots(Canvas& canvas) const
             const float cy = sy + seatH * 0.5f;
             const Member* occupant = SeatOccupant(slot, side);
             const bool focused = slot == seatSlot_ && side == seatSide_ && !roomMenuOpen_ &&
-                                 !quickChatOpen_;
+                                 !quickChatOpen_ && !musicOpen_;
             const bool mine = occupant && local && occupant->id == local->id;
 
             // The focus frame goes under the seat so it never veils the text.
@@ -1369,7 +1471,12 @@ const char* LobbyUi::DrawRoom(Canvas& canvas) const
     // Title bar: room name on the left, population on the right.
     p.Sprite(TEX_TITLE_BAR, 40.0f, 62.0f, 1200.0f, 52.0f,
              Uv{4.0f / 1024.0f, 8.0f / 64.0f, 1020.0f / 1024.0f, 56.0f / 64.0f}, A_ML);
-    p.TextFit(room.settings.name, 64.0f, 60.0f, 0.44f, 760.0f, A_ML, kText, FONT_HEADING);
+    p.TextFit(room.settings.name, 64.0f, 60.0f, 0.44f, 620.0f, A_ML, kText, FONT_HEADING);
+    // What the host has playing, so a change is not a mystery to the room.
+    const int track = FindMusicTrack(room.music);
+    char music[96];
+    snprintf(music, sizeof(music), "BGM: %s", kMusicTracks[track < 0 ? 0 : track].name);
+    p.TextFit(music, 1060.0f, 61.0f, 0.62f, 340.0f, A_MR, kDim);
     p.Sprite(TEX_FRIENDS, 1098.0f, 62.0f, 40.0f, 40.0f, kFullUv, A_MC);
     char population[24];
     snprintf(population, sizeof(population), "%d / %d", room.memberCount, room.settings.maxMembers);
@@ -1391,7 +1498,45 @@ const char* LobbyUi::DrawRoom(Canvas& canvas) const
         DrawListMenu(canvas, "LOBBY MENU", kRoomMenuItems, kRoomMenuCount, roomMenuCursor_);
     else if (quickChatOpen_)
         DrawListMenu(canvas, "CHAT", kQuickChat, kQuickChatCount, quickChatCursor_);
-    return roomMenuOpen_ || quickChatOpen_ ? nullptr : help;
+    else if (musicOpen_)
+        DrawMusicMenu(canvas);
+    return roomMenuOpen_ || quickChatOpen_ || musicOpen_ ? nullptr : help;
+}
+
+void LobbyUi::DrawMusicMenu(Canvas& canvas) const
+{
+    const Painter p(canvas, 1.0f, 0.0f);
+    p.Fill(0.0f, 0.0f, kScreenW, kScreenH, Color{0.0f, 0.0f, 0.0f, 0.55f});
+    const float w = 620.0f;
+    const float h = 136.0f + kMusicRows * 44.0f;
+    const float x = (kScreenW - w) * 0.5f;
+    const float y = (kScreenH - h) * 0.5f - 10.0f;
+    p.Box(TEX_PANEL_DARK, x, y, w, h);
+    p.Text("LOBBY MUSIC", x + w * 0.5f, y + 40.0f, 0.38f, A_MC, kYellow, FONT_HEADING);
+
+    // Keep the cursor in the middle of the window where the list allows it.
+    int first = musicCursor_ - kMusicRows / 2;
+    if (first > kMusicTrackCount - kMusicRows) first = kMusicTrackCount - kMusicRows;
+    if (first < 0) first = 0;
+    const int playing = screen_ == Screen::Room ? service_.Room().music : prefs_.create.music;
+    for (int row = 0; row < kMusicRows && first + row < kMusicTrackCount; ++row) {
+        const int index = first + row;
+        const MusicTrack& track = kMusicTracks[index];
+        const float rowY = y + 88.0f + row * 44.0f;
+        const bool selected = index == musicCursor_;
+        if (selected) {
+            const float pulse = 0.72f + 0.28f * SelectionWave(frame_);
+            p.Box(TEX_ROW_SEL, x + 22.0f, rowY - 24.0f, w - 44.0f, 48.0f, WithAlpha(kWhite, pulse));
+        }
+        const bool current = track.id == playing;
+        p.Text(MusicGroupName(track.group), x + 48.0f, rowY, 0.56f, A_ML,
+               current ? kCyan : kDim);
+        p.TextFit(track.name, x + 190.0f, rowY, 0.8f, w - 190.0f - 48.0f, A_ML,
+                  current ? kCyan : selected ? kText : kDim);
+    }
+    char position[24];
+    snprintf(position, sizeof(position), "%d / %d", musicCursor_ + 1, kMusicTrackCount);
+    p.Text(position, x + w - 48.0f, y + h - 30.0f, 0.62f, A_MR, kDim);
 }
 
 const char* LobbyUi::DrawTeam(Canvas& canvas) const

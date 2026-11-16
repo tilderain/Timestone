@@ -1,5 +1,6 @@
 #include "../pch.h"
 #include "lobby_flow.h"
+#include "lobby_music.h"
 
 #include "LaunchMenu.h"
 #include "assist_names.h"
@@ -92,11 +93,13 @@ constexpr uintptr_t SMAIN_SET_FRAME_WAIT = 0x140522420; // (this, bool)
 // 0x14042F870). Before starting the menu theme aTitle::init fades whatever is
 // playing with the call at 0x1402B0D20 (2000 ms there).
 constexpr uintptr_t GSOUND_GET_INSTANCE = 0x140003AA0;
-constexpr uintptr_t GSOUND_PLAY_SYSTEM_CUE = 0x1402AC5C0; // (this, cRef* out, cue, 0, 0, 1)
+// (this, cRef* out, cue, variant, release, restart). `variant` picks the mix
+// of a stage cue (71..80), `release` starts a cue that would otherwise only
+// be queued (character and stage themes), `restart` replays one already up.
+constexpr uintptr_t GSOUND_PLAY_SYSTEM_CUE = 0x1402AC5C0;
 constexpr uintptr_t GSOUND_FADE_OUT_BGM = 0x1402B0D20;    // (this, milliseconds)
 constexpr uint32_t kCueMenuThemeA = 13;
 constexpr uint32_t kCueMenuThemeB = 14;
-constexpr uint32_t kCueLobbyRoom = 16;
 constexpr int32_t kBgmSwitchFadeMs = 600;
 constexpr uintptr_t SGAMECONFIG_GET_INSTANCE = 0x140001AB0;
 constexpr ULONGLONG kOnlineFadeOutMs = 200;
@@ -277,6 +280,8 @@ UiPrefs LoadPrefs()
     const int visibility = GetPrivateProfileIntA("Lobby", "RoomVisibility", 0, path);
     prefs.create.visibility = visibility == 1 ? Visibility::FriendsOnly
                             : visibility == 2 ? Visibility::Private : Visibility::Public;
+    prefs.create.music = GetPrivateProfileIntA("Lobby", "RoomMusic", lobby::kMusicDefault, path);
+    if (lobby::FindMusicTrack(prefs.create.music) < 0) prefs.create.music = lobby::kMusicDefault;
     return prefs;
 }
 
@@ -297,6 +302,7 @@ void SavePrefs(const UiPrefs& prefs)
         {"Lobby", "RoomSize", std::to_string(prefs.create.maxMembers)},
         {"Lobby", "RoomSlots", std::to_string(prefs.create.slotCount)},
         {"Lobby", "RoomVisibility", std::to_string(static_cast<int>(prefs.create.visibility))},
+        {"Lobby", "RoomMusic", std::to_string(prefs.create.music)},
     };
     IniSafe_WriteBatch(entries, sizeof(entries) / sizeof(entries[0]), path);
 }
@@ -382,6 +388,41 @@ uint32_t g_menuThemeKickFrames = 0; // repeat the release once, a little later
 
 enum class Bgm { None, MainMenu, Room };
 Bgm g_bgm = Bgm::None; // what the lobby believes is playing (game thread)
+int32_t g_roomTrack = lobby::kMusicDefault; // lobby_music.h id, while g_bgm is Room
+
+// What should be playing right now: the menu theme on the lobby's own menus,
+// and in a room whatever its host chose (the native room track by default).
+// A host who picks the menu theme gets the same two-layer playback as the
+// menus, so it also carries on unbroken when the room is entered or left.
+struct WantedBgm {
+    Bgm bgm;
+    int32_t track;
+};
+WantedBgm CurrentWantedBgm()
+{
+    const bool inRoom = g_service && g_service->Room().inRoom;
+    // Outside a room the only other music is the track being auditioned in
+    // the create screen's list; closing the list returns to the menu theme.
+    const int32_t preview = !inRoom && g_ui ? g_ui->PreviewMusic() : -1;
+    if (!inRoom && preview < 0) return {Bgm::MainMenu, lobby::kMusicDefault};
+    const int32_t track = inRoom ? g_service->Room().music : preview;
+    if (lobby::MusicCue(track) == lobby::kMusicCueMainMenu)
+        return {Bgm::MainMenu, lobby::kMusicDefault};
+    return {Bgm::Room, track};
+}
+
+void PlayRoomTrack(void* sound, int32_t track)
+{
+    using PlayCue = void*(__fastcall*)(void*, void*, uint32_t, int32_t, char, char);
+    alignas(16) uint8_t handle[32] = {};
+    reinterpret_cast<PlayCue>(_addr(GSOUND_PLAY_SYSTEM_CUE))(
+        sound, handle, static_cast<uint32_t>(lobby::MusicCue(track)), lobby::MusicVariant(track),
+        1, 1);
+    g_roomTrack = track;
+    HookLog("LobbyFlow: room music cue %d variant %d (started=%d)\n", lobby::MusicCue(track),
+            lobby::MusicVariant(track),
+            *reinterpret_cast<uint64_t*>(handle + 8) != UINT64_MAX ? 1 : 0);
+}
 
 // Mutes the unused layer and releases both, as uMenuMain does. Returns false
 // if the theme's cue is not queued or playing at all.
@@ -424,22 +465,19 @@ void PlayMenuTheme(void* sound, bool restart)
     HookLog("LobbyFlow: menu theme started (queued=%d)\n", present ? 1 : 0);
 }
 
-void SetBgm(Bgm wanted)
+void SetBgm(Bgm wanted, int32_t track = lobby::kMusicDefault)
 {
-    if (wanted == g_bgm) return;
+    if (wanted == g_bgm && (wanted != Bgm::Room || track == g_roomTrack)) return;
     using GetInstance = void*(__fastcall*)();
     void* sound = reinterpret_cast<GetInstance>(_addr(GSOUND_GET_INSTANCE))();
     if (!sound) return;
     using FadeOut = void(__fastcall*)(void*, int32_t);
-    using PlayCue = void*(__fastcall*)(void*, void*, uint32_t, int32_t, char, char);
-    const PlayCue play = reinterpret_cast<PlayCue>(_addr(GSOUND_PLAY_SYSTEM_CUE));
     if (g_bgm != Bgm::None)
         reinterpret_cast<FadeOut>(_addr(GSOUND_FADE_OUT_BGM))(sound, kBgmSwitchFadeMs);
-    alignas(16) uint8_t handle[32] = {};
     if (wanted == Bgm::MainMenu) {
         PlayMenuTheme(sound, true);
     } else if (wanted == Bgm::Room) {
-        play(sound, handle, kCueLobbyRoom, 0, 0, 1);
+        PlayRoomTrack(sound, track);
     }
     HookLog("LobbyFlow: music %d -> %d\n", static_cast<int>(g_bgm), static_cast<int>(wanted));
     g_bgm = wanted;
@@ -466,13 +504,11 @@ void __fastcall Hook_TitleInit(uint64_t area, uint64_t a, uint64_t b, uint64_t c
     void* sound = reinterpret_cast<GetInstance>(_addr(GSOUND_GET_INSTANCE))();
     if (!sound) return;
     using FadeOut = void(__fastcall*)(void*, int32_t);
-    using PlayCue = void*(__fastcall*)(void*, void*, uint32_t, int32_t, char, char);
-    const PlayCue play = reinterpret_cast<PlayCue>(_addr(GSOUND_PLAY_SYSTEM_CUE));
-    const bool inRoom = g_service && g_service->Room().inRoom;
-    alignas(16) uint8_t handle[32] = {};
+    const WantedBgm wanted = CurrentWantedBgm();
+    const bool inRoom = wanted.bgm == Bgm::Room;
     if (inRoom) {
         reinterpret_cast<FadeOut>(_addr(GSOUND_FADE_OUT_BGM))(sound, 2000);
-        play(sound, handle, kCueLobbyRoom, 0, 0, 1);
+        PlayRoomTrack(sound, wanted.track);
     } else if (g_bgm == Bgm::MainMenu) {
         // Coming from the real main menu: let its theme carry on if it
         // survived the reload, otherwise start it again.
@@ -1048,8 +1084,10 @@ void RunLobbyFrame(uint64_t titleArea)
         // The game's own music: the main menu theme on the lobby's menus,
         // the native lobby track once inside a room. Started only once the
         // lobby is on screen, well after the title area's sound has loaded.
-        if (g_phase != Phase::Launching)
-            SetBgm(g_service->Room().inRoom ? Bgm::Room : Bgm::MainMenu);
+        if (g_phase != Phase::Launching) {
+            const WantedBgm wanted = CurrentWantedBgm();
+            SetBgm(wanted.bgm, wanted.track);
+        }
         if (g_menuThemeKickFrames && --g_menuThemeKickFrames == 0 && g_bgm == Bgm::MainMenu) {
             using GetInstance = void*(__fastcall*)();
             if (void* sound = reinterpret_cast<GetInstance>(_addr(GSOUND_GET_INSTANCE))())

@@ -327,7 +327,56 @@ dword 0 is the cue id, dword 2 the stream type, dword 23 the file index).
 - `0x1402B0D20` `(sGSound, ms)` fades out what is playing; the game calls it
   before nearly every music change.
 
-The lobby's menus use the menu theme and a room uses cue 16. The theme runs
+#### Room music chosen by the host
+
+A room's music is the host's choice: LOBBY MUSIC on the create screen sets
+what a new lobby starts with, and the same item in the room menu (Start)
+changes it afterwards. The last choice made in either place is remembered
+(`[Lobby] RoomMusic`) and preselected the next time a lobby is created.
+The track id is written to the Steam lobby's own data under `bgm`, so every
+member and every later joiner reads the same value and it survives the host
+leaving; each client plays it locally when the value changes. Only the
+choice is shared, not the playback position. The default (id 0) is cue 16.
+The table is `lobby_music.h`; an id is `cue | variant << 8`, and anything not
+in the table is treated as the default.
+
+`sGSound__playSystemCue` is `(sGSound, cRef* out, cue, variant, release,
+restart)`:
+
+- `restart` 0 leaves a cue alone if it is already playing.
+- `release` 1 starts a cue that would otherwise only be queued. Which cues
+  those are is `sGSound__cueNeedsRelease` `0x1402AB4A0`: 8, 13, 14, 20..89 and
+  120..131, which are exactly the stream-type-10 requests. The lobby passes
+  1 for every room track.
+- Cues 71..80 (`sGSound__isLayeredStageCue` `0x1402AB490`) are stage themes
+  with a second mix in cue + 20 (`bgm_st_NNN_b`). Both are started together
+  and `variant` picks the audible one (0 main, 1 the `_b` file, 2 a third
+  channel pair that the lobby does not offer). Cues 90..104 cannot be
+  requested directly (`sGSound__isStageAltMixCue` `0x1402AB480`).
+
+Where the names in the table come from (static analysis of the executable and
+the cue table; none of the tracks beyond 13/14/16 has been heard in the lobby
+yet):
+
+- Characters: every character class's theme virtual (`+0x2E0`) is
+  `mov eax, cue; ret`. Cues 20..39 are the original Capcom cast, 40..55 and
+  57..59 the Marvel cast, 60 Galactus, 120..125 and 126..131 the Ultimate
+  additions; 121 is Wright's Turnabout theme. Cue 56 has no file.
+- Stages: `uStageNNN`'s theme virtual (`+0x238`) returns 70 + stage number
+  (training room 70, Danger Room `uStage100` 71); the 1xx variants share the
+  base stage's cue. No stage class returns 78, listed as "Stage 8".
+- Menus, from the call sites of `sGSound__playSystemCue`: 2/3
+  `sAction__executeMatchPhase` (listed as Victory, a guess from context), 4/5
+  and 106..108 character select, 9/10 `uBtContinue__setup`, 15 gallery, 17
+  `uMenuLicense`, 19 `aFinalResut__init`, 84..88 `uEnding`, 134..137 the
+  gallery's content table, 138 `aCredit`. The use of 18, 112, 113, 132 and 133
+  was not identified and they are listed by number. Where a pair exists the
+  second entry ("B") is the one the BGM-style option switches to.
+- Left out: the short stingers (6, 8, 11, 12).
+
+The lobby's menus use the menu theme and a room uses the host's track (cue 16
+unless changed); picking "Main Menu" in a room plays the same two-layer theme
+as the menus. The theme runs
 straight through a switch between the lobby and the real main menu (confirmed
 in game): while the title area reloads with it playing, `g_keepMenuTheme`
 drops the two things that would break it, the fade the dying `uMenuMain`
