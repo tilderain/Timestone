@@ -62,6 +62,7 @@ constexpr uintptr_t UUIANMSPRITEFONT_SET_FONT_TYPE = 0x1402CE4E0;
 
 constexpr uintptr_t SPAD_GET_INSTANCE = 0x140001B00;
 constexpr uintptr_t SPAD_DECIDE_MASK = 0x140001A70;
+constexpr uintptr_t SPAD_REDETECT_SLOT = 0x140514950;  // (this, slot, flags)
 constexpr uintptr_t SPAD_CANCEL_MASK = 0x140001A50;
 constexpr uintptr_t MENU_SE_DECIDE = 0x14032A7F0;  // system voice 9
 constexpr uintptr_t MENU_SE_CANCEL = 0x1403F78C0;  // system voice 10
@@ -99,6 +100,7 @@ constexpr size_t USCHEDULER_UNIT_TRACK_NUM = 0x68;
 constexpr size_t SPAD_SLOT_BASE = 0x58;
 constexpr size_t SPAD_SLOT_STRIDE = 0x2E0;
 constexpr size_t SPAD_SLOT_ACTIVE = 0x08;
+constexpr size_t SPAD_SLOT_KIND = 0x0B;      // 0 none, 2 DirectInput, others XInput
 constexpr size_t SPAD_SLOT_BUTTONS = 0x164;
 
 // Internal pad mask bits (sPad__decodeXInputState_toButtons).
@@ -503,6 +505,114 @@ void AppendUtf8(char* out, size_t capacity, uint32_t codepoint)
     memcpy(out + used, encoded, length + 1);
 }
 
+// ---------------------------------------------------------------------------
+// XInput fallback
+// ---------------------------------------------------------------------------
+// The lobby normally reads the masks sPad has already decoded. If no native
+// slot reports anything (in game the controller did nothing in the lobby while
+// the keyboard worked, cause not established), controllers are read straight
+// from XInput and translated to the same internal mask.
+struct XInputPadState {
+    DWORD packet;
+    WORD buttons;
+    BYTE leftTrigger, rightTrigger;
+    SHORT lx, ly, rx, ry;
+};
+using XInputGetStateFn = DWORD(WINAPI*)(DWORD, XInputPadState*);
+XInputGetStateFn g_xinputGetState = nullptr;
+bool g_xinputLoadTried = false;
+uint32_t g_xinputNextProbe[4] = {};
+bool g_xinputLogged = false;
+constexpr uint32_t kXInputReprobeFrames = 120; // absent users are slow to query
+constexpr SHORT kStickThreshold = 16000;
+
+uint32_t ReadXInputMask()
+{
+    if (!g_xinputLoadTried) {
+        g_xinputLoadTried = true;
+        for (const char* name : {"XINPUT1_3.dll", "XINPUT1_4.dll", "XINPUT9_1_0.dll"}) {
+            if (HMODULE module = LoadLibraryA(name)) {
+                g_xinputGetState = reinterpret_cast<XInputGetStateFn>(
+                    reinterpret_cast<void*>(GetProcAddress(module, "XInputGetState")));
+                if (g_xinputGetState) break;
+            }
+        }
+        if (!g_xinputGetState) HookLog("LobbyNative: XInput is not available for the fallback\n");
+    }
+    if (!g_xinputGetState) return 0;
+
+    uint32_t mask = 0;
+    for (DWORD user = 0; user < 4; ++user) {
+        if (g_frame < g_xinputNextProbe[user]) continue;
+        XInputPadState state = {};
+        if (g_xinputGetState(user, &state) != ERROR_SUCCESS) {
+            g_xinputNextProbe[user] = g_frame + kXInputReprobeFrames;
+            continue;
+        }
+        const WORD b = state.buttons;
+        if (b & 0x0001) mask |= 0x10;       // d-pad up
+        if (b & 0x0002) mask |= 0x40;       // d-pad down
+        if (b & 0x0004) mask |= 0x80;       // d-pad left
+        if (b & 0x0008) mask |= 0x20;       // d-pad right
+        if (b & 0x0010) mask |= 0x8;        // start
+        if (b & 0x0020) mask |= 0x1;        // back
+        if (b & 0x0100) mask |= 0x100;      // left shoulder
+        if (b & 0x0200) mask |= 0x200;      // right shoulder
+        if (b & 0x1000) mask |= 0x4000;     // A
+        if (b & 0x2000) mask |= 0x2000;     // B
+        if (b & 0x4000) mask |= 0x8000;     // X
+        if (b & 0x8000) mask |= 0x1000;     // Y
+        if (state.ly > kStickThreshold) mask |= 0x10000;
+        if (state.lx > kStickThreshold) mask |= 0x20000;
+        if (state.ly < -kStickThreshold) mask |= 0x40000;
+        if (state.lx < -kStickThreshold) mask |= 0x80000;
+    }
+    return mask;
+}
+
+void LogPadState(void* pad, const char* why)
+{
+    HookLog("LobbyNative: pad state (%s): sPad.mActive=%u keyboardBlock=%u/%u source=%u\n", why,
+            Field<uint8_t>(pad, 0x38), Field<uint8_t>(pad, 0xC20), Field<uint8_t>(pad, 0xC21),
+            Field<uint8_t>(pad, 0xC30));
+    for (int slot = 0; slot < 4; ++slot) {
+        uint8_t* slotObject = static_cast<uint8_t*>(pad) + SPAD_SLOT_BASE + slot * SPAD_SLOT_STRIDE;
+        HookLog("LobbyNative:   slot %d active=%u ready=%u kind=%u device=%u buttons=%08x\n", slot,
+                slotObject[0x08], slotObject[0x09], slotObject[0x0B],
+                *reinterpret_cast<uint32_t*>(slotObject + 0x18),
+                *reinterpret_cast<uint32_t*>(slotObject + SPAD_SLOT_BUTTONS));
+    }
+}
+
+} // namespace
+
+// sPad only polls and re-detects a slot whose active byte is set, and that
+// byte is only ever set by sPad__redetectSlot (0x140514950). In game every
+// slot was found inactive in the title area (the startup detection had not
+// taken), so no controller reached the lobby or the main menu. Ask for
+// detection the way sPad::Pad::detect does (flags 0x18: XInput, then
+// DirectInput) until each slot is active; from then on the engine's own poll
+// keeps re-detecting it. The call is rate limited to once a second per slot.
+void Native_EnsurePadSlotsActive()
+{
+    using GetInstance = void*(__fastcall*)();
+    void* pad = Native<GetInstance>(SPAD_GET_INSTANCE)();
+    if (!pad) return;
+    using Redetect = uint32_t(__fastcall*)(void*, uint32_t, uint32_t);
+    static bool logged[4] = {};
+    for (uint32_t slot = 0; slot < 4; ++slot) {
+        uint8_t* slotObject = static_cast<uint8_t*>(pad) + SPAD_SLOT_BASE + slot * SPAD_SLOT_STRIDE;
+        if (slotObject[SPAD_SLOT_ACTIVE]) continue;
+        Native<Redetect>(SPAD_REDETECT_SLOT)(pad, slot, 0x18);
+        if (slotObject[SPAD_SLOT_ACTIVE] && !logged[slot]) {
+            logged[slot] = true;
+            HookLog("LobbyNative: pad slot %u activated (kind=%u)\n", slot, slotObject[SPAD_SLOT_KIND]);
+        }
+    }
+}
+
+namespace {
+
 // Menu keys follow the game's own fixed keyboard mapping
 // (sPad__accumulateUnitFlagsFromQuery): arrows, Enter/A, Backspace/B, X, Y,
 // Esc as Start.
@@ -756,15 +866,33 @@ void Native_ReadInput(Input& input, bool textActive)
     using GetMask = uint32_t(__fastcall*)(void*);
     void* pad = Native<GetInstance>(SPAD_GET_INSTANCE)();
     uint32_t padHeld = 0;
+    bool nativeDevice = false; // sPad has a controller open in some slot
     uint32_t decideMask = 0x4000, cancelMask = 0x2000;
     if (pad) {
         for (int slot = 0; slot < 4; ++slot) {
             uint8_t* slotObject = static_cast<uint8_t*>(pad) + SPAD_SLOT_BASE + slot * SPAD_SLOT_STRIDE;
             if (slotObject[SPAD_SLOT_ACTIVE])
                 padHeld |= *reinterpret_cast<uint32_t*>(slotObject + SPAD_SLOT_BUTTONS);
+            if (slotObject[SPAD_SLOT_ACTIVE] && slotObject[SPAD_SLOT_KIND]) nativeDevice = true;
         }
         decideMask = Native<GetMask>(SPAD_DECIDE_MASK)(pad);
         cancelMask = Native<GetMask>(SPAD_CANCEL_MASK)(pad);
+    }
+    // One snapshot of what sPad sees, a couple of seconds in, for the log.
+    static bool statLogged = false;
+    if (pad && !statLogged && g_frame > 120) {
+        statLogged = true;
+        LogPadState(pad, "lobby");
+    }
+    if (!nativeDevice) {
+        const uint32_t direct = ReadXInputMask();
+        if (direct && !g_xinputLogged) {
+            g_xinputLogged = true;
+            HookLog("LobbyNative: controller input is coming from the XInput fallback (%08x)\n",
+                    direct);
+            if (pad) LogPadState(pad, "fallback in use");
+        }
+        padHeld = direct;
     }
     if (!foreground) padHeld = 0;
 

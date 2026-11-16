@@ -344,6 +344,7 @@ void RetireNativeTitleUnits(uint64_t titleArea)
 // Called every title-area frame: each reload of the area clears the mode.
 void EnsureFramePacing()
 {
+    Native_EnsurePadSlotsActive();
     const uint64_t main = *reinterpret_cast<uint64_t*>(_addr(SMAIN_INSTANCE_PTR));
     if (!main || *reinterpret_cast<uint8_t*>(main + SMAIN_FRAME_WAIT)) return;
     using SetFrameWait = void(__fastcall*)(uint64_t, bool);
@@ -503,6 +504,31 @@ void InstallMainMenuHooks()
         MH_EnableHook(ready) != MH_OK)
         HookLog("LobbyFlow: main menu Online hooks failed (%d, %d); use the Esc menu\n",
                 static_cast<int>(a), static_cast<int>(b));
+}
+
+// On the main menu the game only reads the hardware slot that player 0 is
+// mapped to, and only switches from keyboard to pad when that slot reports a
+// press (0x1402B42C0). The press-start screen normally maps player 0 to
+// whichever pad pressed Start; the lobby skips it, so do the same here for
+// whichever pad is being used.
+void FollowActivePad()
+{
+    const uint64_t manager = *reinterpret_cast<uint64_t*>(_addr(SMVC3MANAGER_INSTANCE_PTR));
+    const uint64_t pad = *reinterpret_cast<uint64_t*>(_addr(SPAD_INSTANCE_PTR));
+    if (!manager || !pad) return;
+    int32_t* assign = reinterpret_cast<int32_t*>(manager + MANAGER_PAD_ASSIGN);
+    for (int32_t slot = 0; slot < 4; ++slot) {
+        const uint8_t* slotObject = reinterpret_cast<const uint8_t*>(pad + 0x58 + slot * 0x2E0);
+        const bool active = slotObject[0x08] != 0;
+        const uint32_t pressed = *reinterpret_cast<const uint32_t*>(slotObject + 0x16C);
+        if (!active || !pressed || assign[0] == slot) continue;
+        // Same exchange as the game's own assignment (0x14025B090).
+        for (int i = 1; i < 4; ++i)
+            if (assign[i] == slot) assign[i] = assign[0];
+        HookLog("LobbyFlow: player 1 menu input moved from pad slot %d to %d\n", assign[0], slot);
+        assign[0] = slot;
+        return;
+    }
 }
 
 void ApplyPressStartState()
@@ -1039,6 +1065,8 @@ bool LobbyFlow_ReleasedTitleTick(uint64_t titleArea)
         HookLog("LobbyFlow: main menu ready (area=%llx)\n",
                 static_cast<unsigned long long>(titleArea));
     }
+
+    FollowActivePad();
 
     // "Online" on the main menu: switch once the fade has covered the screen.
     if (g_onlineChosen &&
