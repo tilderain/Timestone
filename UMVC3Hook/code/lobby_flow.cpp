@@ -1272,8 +1272,8 @@ void LobbyFlow_DrawOverlay()
                  ImGuiWindowFlags_NoInputs);
     if (failed) {
         ImGui::TextUnformatted("The in-game lobby could not start.");
-        ImGui::TextUnformatted("Details are in Timestone.log. Press Esc for the menu,");
-        ImGui::TextUnformatted("or launch with -launcher to use the launcher.");
+        ImGui::TextUnformatted("Details are in Timestone.log.");
+        ImGui::TextUnformatted("Launch with -launcher to use the launcher.");
     } else {
         ImGui::TextUnformatted("Starting lobby...");
     }

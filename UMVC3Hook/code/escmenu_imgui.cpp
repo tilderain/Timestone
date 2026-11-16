@@ -35,8 +35,16 @@ void ExitGame()
 
 void EscMenuImGui_Update()
 {
-    // The native lobby has its own menus, and Esc is its Start button.
-    if (GetLaunchOption() == LAUNCH_NORMAL || LobbyFlow_IsLobbyVisible()) {
+    // This menu belongs to a running netplay match and to the training boots:
+    // dual training (its host counts before the second instance has
+    // connected) and solo training from the launcher. The in-game lobby also
+    // runs under the training launch option, so that alone does not count.
+    // Everywhere else the game's own menus are in charge: the lobby, the main
+    // menu, offline modes. It also closes by itself when the match ends.
+    const bool soloTraining = GetLaunchOption() == LAUNCH_TRAINING && !LobbyFlow_IsEnabled();
+    const bool available = Netplay_IsActive() || soloTraining ||
+                           GetLaunchOption() == LAUNCH_DUAL_TRAINING;
+    if (!available || LobbyFlow_IsLobbyVisible()) {
         g_open = false;
         return;
     }
@@ -153,11 +161,9 @@ void EscMenuImGui_Draw()
         LobbyFlow_RequestLeaveMatch();
         g_open = false;
     }
-    if (LobbyFlow_CanReopen() && ImGui::Button("Online Lobby", buttonSize)) {
-        LobbyFlow_RequestReopen();
-        g_open = false;
-    }
-    if (ImGui::Button("Exit Game", buttonSize))
+    // In a lobby match the way out is Return to Lobby; quitting the game
+    // from here would drop the opponent and the room in one click.
+    if (!LobbyFlow_InRoomMatch() && ImGui::Button("Exit Game", buttonSize))
         ExitGame();
 
     ImGui::End();
