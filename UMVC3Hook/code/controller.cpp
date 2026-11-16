@@ -13,6 +13,7 @@
 #include "autotest.h"
 #include "framestepper.h"
 #include "gameplay_hooks.h"
+#include "spectate.h"
 #include <cstdio>
 #include <cstdint>
 #include <cstring>
@@ -262,6 +263,8 @@ static int32_t   g_pendingRollbackEffectiveFrame = -1;
 static bool IsFrameConfirmed(int32_t frame)
 {
     if (frame < 0) return false;
+    // A spectator only ever simulates frames whose inputs are final.
+    if (Spectate_IsViewing()) return true;
     // Both peers use neutral startup input; no packet is needed to confirm it.
     if (frame <= g_delayFrames + g_rollbackFrames) return true;
     return g_confirmedFrame[frame % RING_SIZE] == frame;
@@ -307,6 +310,7 @@ uint32_t g_desyncLocalCS      = 0;
 uint32_t g_desyncRemoteCS     = 0;
 
 static uint32_t  g_localChecksum[RING_SIZE];
+static uint32_t  g_localChecksumParts[RING_SIZE][4];
 static uint32_t  g_remoteChecksum[RING_SIZE];
 static int32_t   g_localChecksumFrame[RING_SIZE];
 static int32_t   g_remoteChecksumFrame[RING_SIZE];
@@ -926,7 +930,10 @@ static uint32_t ResolveTimelineInput(FrameInputRemapContext* context,
     bool isLocal = Netplay_IsHost() ? (inputTeam == 0) : (inputTeam == 1);
     uint32_t resolved;
 
-    if (g_isResimulating) {
+    if (Spectate_IsViewing()) {
+        // Both teams are played from the spectate log, drawn or not.
+        resolved = Spectate_GetInput(inputTeam, context->frame);
+    } else if (g_isResimulating) {
         uint32_t snapLocal = 0;
         uint32_t snapRemote = 0;
         if (Rollback_GetSnapshotInputs(context->frame, &snapLocal, &snapRemote))
@@ -967,6 +974,12 @@ static uint32_t __fastcall hkbuttonRemap(uint64_t playerIndex, uint32_t rawInput
 
     uint32_t inputTeam = playerIndex < 2 ? (uint32_t)playerIndex
                                          : context->ownerTeam;
+    if (Spectate_IsViewing()) {
+        // Nothing local reaches the characters of a match being watched.
+        uint32_t watched = ResolveTimelineInput(context, inputTeam, 0, false);
+        context->injectedAtButtonRemap = true;
+        return watched;
+    }
     uint32_t currentInput;
     uint32_t rawTestInput = 0;
     if (!g_isResimulating &&
@@ -1018,6 +1031,8 @@ static uint64_t __fastcall hkGetsCurrentInput_withSOCD(uint64_t pad, uint32_t pl
     RollbackHookProfileScope profile(RollbackHookProfileId::GetCurrentInput);
 
     bool is_active = Netplay_IsActive();
+    if (is_active && Spectate_IsViewing())
+        return 0;
 
     // Suppress the remote slot during live netplay.
     uint64_t raw;
@@ -1255,6 +1270,11 @@ static bool IsEitherPlayerResultContinuePressed()
 
 static void __fastcall hkStepResult8(uint64_t sAction)
 {
+    if (Netplay_IsActive() && Spectate_IsViewing()) {
+        // The winner's outro plays; what follows is the players' call.
+        oStepResult8(sAction);
+        return;
+    }
     if (Netplay_IsActive()) {
         // Room matches are sets: the lobby counts this game and decides
         // whether another one may follow.
@@ -1272,6 +1292,10 @@ static void __fastcall hkStepResult8(uint64_t sAction)
 
 static void __fastcall hkStepResult9_10_11(uint64_t sAction)
 {
+    // A spectator has no say on the result screen: its menu never runs, and
+    // the restart or the end of the match arrives with the feed.
+    if (Netplay_IsActive() && Spectate_IsViewing())
+        return;
     if (Netplay_IsActive()) {
         // Room matches are sets: the lobby counts this game and decides
         // whether another one may follow.
@@ -1657,8 +1681,16 @@ static constexpr uint64_t CHR_FLAGS_OFFSET = 0x14F0;
 static constexpr uint32_t CHR_FLAG_MOVE_STOPPED = 1;
 static constexpr uint64_t CHR_PARENT_OFFSET = 0x6698;
 
+// The checksum is the sum of four parts, kept apart for diagnosis: positions,
+// life, action ids and the per-character RNG hashes.
+static uint32_t g_checksumParts[4] = {};
+// ...and the RNG hash of each team member on its own (team * 3 + member).
+static uint32_t g_checksumRng[6] = {};
+
 static uint32_t ComputeChecksum()
 {
+    std::memset(g_checksumParts, 0, sizeof(g_checksumParts));
+    std::memset(g_checksumRng, 0, sizeof(g_checksumRng));
     uint64_t sCharacter = *(uint64_t*)_addr(PTR_SCHARACTER);
     if (!sCharacter) return 0;
 
@@ -1687,6 +1719,9 @@ static uint32_t ComputeChecksum()
                 cs += (uint32_t)(qy < 0 ? -qy : qy);
                 cs += (uint32_t)(hp < 0 ? -hp : hp);
                 cs += *(uint32_t*)(character + 0x1310); // actionId
+                g_checksumParts[0] += (uint32_t)(qx < 0 ? -qx : qx) + (uint32_t)(qy < 0 ? -qy : qy);
+                g_checksumParts[1] += (uint32_t)(hp < 0 ? -hp : hp);
+                g_checksumParts[2] += *(uint32_t*)(character + 0x1310);
 
                 // Hash each character's RNG separately to keep the sum order-independent.
                 const uint32_t* characterRng =
@@ -1695,6 +1730,10 @@ static uint32_t ComputeChecksum()
                 for (int i = 0; i < 4; ++i)
                     rngHash = (rngHash ^ characterRng[i]) * 16777619u;
                 cs += rngHash;
+                g_checksumParts[3] += rngHash;
+                const int32_t member = *(int32_t*)(character + 0x2DAC); // mDefMemberId
+                if (member >= 0 && member < 3 && !*(uint64_t*)(character + CHR_PARENT_OFFSET))
+                    g_checksumRng[ti * 3 + member] = rngHash;
             }
             node = *(uint64_t*)(node + NODE_NEXT_OFFSET);
         }
@@ -1712,6 +1751,7 @@ extern "C" void Controller_RecordFrameChecksum(int32_t frame)
         return;
     uint32_t idx = (uint32_t)frame % RING_SIZE;
     g_localChecksum[idx] = ComputeChecksum();
+    std::memcpy(g_localChecksumParts[idx], g_checksumParts, sizeof(g_checksumParts));
     g_localChecksumFrame[idx] = frame;
     g_localChecksumRemoteInput[idx] = g_processedRemoteInput[idx];
     g_localChecksumAdvertisedFrame[idx] = -1;
@@ -1771,6 +1811,85 @@ static void UpdateConfirmedChecksums()
         if (diff > DESYNC_THRESHOLD && !g_desyncSeen && !g_desyncDetected)
             HookLog("Note frame %d: local=0x%08X remote=0x%08X\n",
                     frame, local, remote);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Spectators
+// ---------------------------------------------------------------------------
+static constexpr int32_t SPECTATE_CHECKSUM_INTERVAL = 60;
+static int32_t g_spectateChecksumNext = SPECTATE_CHECKSUM_INTERVAL;
+static int32_t g_spectateLoggedLastTick = 0;
+
+// Appends every frame whose inputs are now final to the log spectators play
+// from: one pair per frame, in order. A frame is final once the remote input
+// for it has arrived; the local one was fixed when it was scheduled.
+static void RecordSpectateFrames()
+{
+    int32_t next = Spectate_RecFrameCount();
+    if (next < 0)
+        return;
+    if (next == 0) {
+        g_spectateChecksumNext = SPECTATE_CHECKSUM_INTERVAL;
+        g_spectateLoggedLastTick = 0;
+    }
+    const bool localIsP1 = Netplay_IsHost();
+    const int32_t loggedBefore = next;
+    for (; next <= g_netFrameCount && IsFrameConfirmed(next); ++next) {
+        const uint32_t idx = (uint32_t)next % RING_SIZE;
+        uint32_t local = 0;
+        uint32_t remote = 0;
+        // The neutral start-up frames run on zero input on both peers, and
+        // anything older than the rings has been overwritten (it never is
+        // while the prediction budget holds).
+        if (next > g_delayFrames + g_rollbackFrames && g_netFrameCount - next < RING_SIZE) {
+            local = g_recordedLocalInput[idx];
+            remote = g_confirmedFrame[idx] == next ? g_receivedInput[idx] : 0;
+        }
+        Spectate_RecFrame(localIsP1 ? local : remote, localIsP1 ? remote : local);
+    }
+
+    // A checksum for spectators, taken straight from the state: only when it
+    // is certain to be final. That is when this tick's frame is the one frame
+    // that became final now (so everything before it was final a tick ago,
+    // and any correction of it ran at the start of this tick) and it was
+    // simulated with the input that arrived.
+    const int32_t frame = g_netFrameCount;
+    const uint32_t frameIdx = (uint32_t)frame % RING_SIZE;
+    if (frame > 0 && frame % SPECTATE_CHECKSUM_INTERVAL == 0 && loggedBefore == frame &&
+        next == frame + 1 && !g_isResimulating &&
+        (frame <= g_delayFrames + g_rollbackFrames ||
+         g_usedRemoteInput[frameIdx] == g_receivedInput[frameIdx])) {
+        const uint32_t checksum = ComputeChecksum();
+        Spectate_RecChecksum(frame, checksum, g_checksumParts, g_checksumRng);
+    }
+    g_spectateLoggedLastTick = loggedBefore;
+}
+
+
+// A spectator's frame boundaries: no packets, no prediction, no schedule.
+extern "C" int32_t Controller_SpectatorFrameStart()
+{
+    g_preRenderInputReady = false;
+    ClearPredictionBudgetExhausted();
+    g_netFrameCount = GetGameFrameCount();
+    if (g_netFrameCount < 0)
+        return -1;
+    uint64_t sReplay = *(uint64_t*)_addr(G_PSREPLAY_PTR);
+    if (sReplay) {
+        *(int32_t*)(sReplay + 0x54) = g_netFrameCount;
+        g_gameFrameBase = 0;
+    }
+    g_localPending = 0;
+    return g_netFrameCount;
+}
+
+extern "C" void Controller_SpectatorFrameEnd(int32_t frame, int32_t fastForwarded)
+{
+    if (Spectate_WantsChecksum(frame)) {
+        const uint32_t checksum = ComputeChecksum();
+        Spectate_OnChecksum(frame, checksum, g_checksumParts, g_checksumRng,
+                            fastForwarded != 0);
     }
 }
 
@@ -1903,6 +2022,7 @@ extern "C" void Controller_OnFrameEnd()
         return;
     // Also serves as the fallback for frames that never entered rendering.
     PublishFrameInput(true);
+    RecordSpectateFrames();
 
     ApplyScheduledRollbackIfReady();
 
@@ -2111,6 +2231,18 @@ static bool __fastcall hkMainHasInputFocus(uint64_t sMain)
     return oMainHasInputFocus(sMain);
 }
 
+// sPad__getRawStickInput_noSOCD: what the result screen and other native
+// menus read. A spectator's pad must not reach the match being watched.
+using PadRawInput_t = uint32_t(__fastcall*)(uint64_t, uint32_t);
+static PadRawInput_t oPadRawInput = nullptr;
+
+static uint32_t __fastcall hkPadRawInput(uint64_t sPad, uint32_t padIndex)
+{
+    if (Spectate_IsViewing() && Netplay_IsActive())
+        return 0;
+    return oPadRawInput(sPad, padIndex);
+}
+
 static void __fastcall hkpadSlotPostReadProcess(uint64_t sPad, uint64_t slotBase, uint32_t slotIdx)
 {
     RollbackHookProfileScope profile(RollbackHookProfileId::PadPostRead);
@@ -2261,6 +2393,17 @@ void Controller_InitHooks()
         GameplayHooks_QueueEnable((LPVOID)_addr(ADDR_MAIN_HAS_INPUT_FOCUS));
     else
         HookLog("Controller: Failed to hook input focus gate (%d)\n", s);
+
+    // Raw pad reads, silenced while spectating
+    s = GameplayHooks_Create(
+        (LPVOID)_addr(ADDR_PAD_RAW_INPUT),
+        (LPVOID)&hkPadRawInput,
+        (LPVOID*)&oPadRawInput
+    );
+    if (s == MH_OK)
+        GameplayHooks_QueueEnable((LPVOID)_addr(ADDR_PAD_RAW_INPUT));
+    else
+        HookLog("Controller: Failed to hook raw pad input (%d)\n", s);
 
     // padSlotPostReadProcess
     s = GameplayHooks_Create(

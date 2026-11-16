@@ -95,3 +95,18 @@ bool SteamRoom_ConnectPeer(uint64_t memberId, bool asHost);
 // Closes the match connection and transport bridge; the room is kept.
 void SteamRoom_DisconnectPeer();
 bool SteamRoom_TakePeerFailed();
+
+// ---------------------------------------------------------------------------
+// Spectator links: reliable message links between room members, apart from
+// the match connection (their own virtual port). A link exists once both
+// ends have opened it; who opens which is derived from the room's published
+// state (spectate.cpp), so both always do.
+void SteamRoom_SpecOpen(uint64_t memberId);  // idempotent
+void SteamRoom_SpecClose(uint64_t memberId);
+void SteamRoom_SpecCloseAll();
+// 0 = not open, 1 = connecting, 2 = connected, 3 = failed.
+int SteamRoom_SpecState(uint64_t memberId);
+bool SteamRoom_SpecSend(uint64_t memberId, const void* data, int size);
+bool SteamRoom_SpecReceive(uint64_t* memberId, void* buffer, int capacity, int* size);
+// Once per frame: connection progress and retries.
+void SteamRoom_SpecPump();

@@ -343,6 +343,7 @@ void LobbyUi::ReturnToRoom()
     screen_ = Screen::Room;
     screenFrame_ = kTransitionFrames;
     roomMenuOpen_ = false;
+    slotMenuOpen_ = false;
     quickChatOpen_ = false;
     musicOpen_ = false;
     memberFocus_ = false;
@@ -657,6 +658,10 @@ void LobbyUi::UpdateRoom(const Input& input)
         UpdateRoomMenu(input);
         return;
     }
+    if (slotMenuOpen_) {
+        UpdateSlotMenu(input);
+        return;
+    }
     if (quickChatOpen_) {
         UpdateQuickChat(input);
         return;
@@ -753,6 +758,13 @@ void LobbyUi::UpdateRoom(const Input& input)
         Play(SFX_CANCEL);
         return;
     }
+    if (room.slots[seatSlot_] == SlotState::InProgress) {
+        // A match is running here: it can be watched, queued for or both.
+        slotMenuOpen_ = true;
+        slotMenuCursor_ = 0;
+        Play(SFX_CONFIRM);
+        return;
+    }
     if (queued && local->queueSlot == seatSlot_) {
         service_.LeaveQueue();
         Play(SFX_CANCEL);
@@ -768,6 +780,38 @@ void LobbyUi::UpdateRoom(const Input& input)
         service_.JoinQueue(seatSlot_); // moves over from any other queue
     }
     Play(SFX_CONFIRM);
+}
+
+void LobbyUi::UpdateSlotMenu(const Input& input)
+{
+    MoveCursor(slotMenuCursor_, 2, input);
+    if (input.cancel || input.menu) {
+        slotMenuOpen_ = false;
+        Play(SFX_CANCEL);
+        return;
+    }
+    if (!input.confirm) return;
+    slotMenuOpen_ = false;
+    Play(SFX_CONFIRM);
+    const Member* local = LocalMember();
+    if (slotMenuCursor_ == 0) {
+        if (service_.Room().slots[seatSlot_] != SlotState::InProgress)
+            ShowNotice("That match has ended.");
+        else
+            service_.Watch(seatSlot_); // the lobby flow takes it from here
+    } else if (local && local->queueSlot == seatSlot_) {
+        service_.LeaveQueue();
+    } else {
+        service_.JoinQueue(seatSlot_);
+    }
+}
+
+int LobbyUi::SlotWatcherCount(int slot) const
+{
+    const RoomState& room = service_.Room();
+    int count = 0;
+    for (int i = 0; i < room.memberCount; ++i) count += room.members[i].watchSlot == slot;
+    return count;
 }
 
 int LobbyUi::SlotQueueLength(int slot) const
@@ -1397,7 +1441,7 @@ void LobbyUi::DrawFooter(Canvas& canvas, const char* help) const
     } else if (screen_ == Screen::Team) {
         add(BTN_DPAD, "Change");
         add(BTN_CANCEL, "Done");
-    } else if (roomMenuOpen_ || quickChatOpen_ || memberMenuOpen_) {
+    } else if (roomMenuOpen_ || slotMenuOpen_ || quickChatOpen_ || memberMenuOpen_) {
         add(BTN_CONFIRM, "Select");
         add(BTN_CANCEL, "Back");
     } else if (chatExpanded_) {
@@ -1420,7 +1464,9 @@ void LobbyUi::DrawFooter(Canvas& canvas, const char* help) const
         const bool onOwnSeat = seated && local->slot == seatSlot_ && local->side == seatSide_;
         const bool queued = local && local->queueSlot >= 0;
         const bool full = SeatOccupant(seatSlot_, 0) && SeatOccupant(seatSlot_, 1);
-        if (queued && local->queueSlot == seatSlot_)
+        if (!seated && service_.Room().slots[seatSlot_] == SlotState::InProgress)
+            add(BTN_CONFIRM, "Watch / queue");
+        else if (queued && local->queueSlot == seatSlot_)
             add(BTN_CONFIRM, "Leave queue");
         else if (!seated && !full && SlotQueueLength(seatSlot_) == 0 &&
                  !SeatOccupant(seatSlot_, seatSide_))
@@ -1801,10 +1847,25 @@ void LobbyUi::DrawRoomSlots(Canvas& canvas) const
         p.Text(count, labelLeft - 14.0f, y + 31.0f, 0.7f, A_MR, countColor);
         p.Sprite(TEX_FRIENDS, labelLeft - 14.0f - (waiting > 9 ? 30.0f : 18.0f), y + 30.0f, 24.0f,
                  24.0f, kFullUv, A_MR, WithAlpha(kWhite, waiting ? 1.0f : 0.45f));
+        // Spectators, when there are any: the WATCH tag and how many.
+        const int watchers = SlotWatcherCount(slot);
+        float headerLeft = x + 150.0f;
+        if (watchers > 0) {
+            // On a grid card it has to fit between the title and the queue count.
+            const float tagScale = narrowCard ? 0.62f : 1.0f;
+            const float tagX = narrowCard ? x + 121.0f : x + 150.0f;
+            p.Sprite(TEX_TAGS, tagX, y + 30.0f, 54.0f * tagScale, 22.0f * tagScale,
+                     Uv{1.0f / 64.0f, 68.0f / 256.0f, 63.0f / 64.0f, 92.0f / 256.0f}, A_ML);
+            char watching[8];
+            snprintf(watching, sizeof(watching), "%d", watchers);
+            p.Text(watching, tagX + 54.0f * tagScale + (narrowCard ? 3.0f : 5.0f), y + 31.0f,
+                   narrowCard ? 0.54f : 0.7f, A_ML, kText);
+            headerLeft = tagX + 54.0f * tagScale + 34.0f;
+        }
         if (nextUp && !narrowCard) {
             char line[96];
             snprintf(line, sizeof(line), "NEXT: %.40s", nextUp->name);
-            const float left = x + 150.0f;
+            const float left = headerLeft;
             const float right = labelLeft - 76.0f;
             if (right - left > 80.0f)
                 p.TextFit(line, left, y + 31.0f, 0.58f, right - left, A_ML,
@@ -2028,9 +2089,15 @@ const char* LobbyUi::DrawRoom(Canvas& canvas) const
     else if (local && local->slot < 0)
         help = "Take a seat, or line up for a setup that is full.";
 
-    if (roomMenuOpen_)
+    if (roomMenuOpen_) {
         DrawListMenu(canvas, "LOBBY MENU", kRoomMenuItems, kRoomMenuCount, roomMenuCursor_);
-    else if (quickChatOpen_)
+    } else if (slotMenuOpen_) {
+        char title[16];
+        snprintf(title, sizeof(title), "SETUP %d", seatSlot_ + 1);
+        const char* const items[] = {
+            "WATCH MATCH", local && local->queueSlot == seatSlot_ ? "LEAVE QUEUE" : "JOIN QUEUE"};
+        DrawListMenu(canvas, title, items, 2, slotMenuCursor_);
+    } else if (quickChatOpen_)
         DrawListMenu(canvas, "CHAT", kQuickChat, kQuickChatCount, quickChatCursor_);
     else if (musicOpen_)
         DrawMusicMenu(canvas);

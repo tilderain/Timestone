@@ -151,6 +151,18 @@ void TrainingBoot_SetConfig(const TrainingBootConfig& cfg)
     g_bootConfig = cfg;
 }
 
+const TrainingBootConfig& TrainingBoot_GetConfig()
+{
+    return g_bootConfig;
+}
+
+static bool g_spectatorBoot = false;
+
+void TrainingBoot_SetSpectatorBoot(bool enabled)
+{
+    g_spectatorBoot = enabled;
+}
+
 void TrainingBoot_SetNetworkRequired(bool required)
 {
     g_networkRequired = required;
@@ -416,7 +428,7 @@ static void NormalizeBootColors()
 
 static void ApplyPlayerOneBindingsToPlayerTwo()
 {
-    if (!Netplay_IsActive() || Netplay_IsHost())
+    if (!Netplay_IsActive() || Netplay_IsHost() || g_spectatorBoot)
         return;
 
     typedef uint64_t(__fastcall* GetInstance_t)();
@@ -463,6 +475,11 @@ static bool SynchronizeInitialPlayerSettings()
         return false;
     if (g_initialSettingsSynchronized)
         return true;
+    if (g_spectatorBoot) {
+        // AutoJump and voices came with the match being watched.
+        g_initialSettingsSynchronized = true;
+        return true;
+    }
 
     const int localTeam = Netplay_IsHost() ? 0 : 1;
     if (!g_initialSettingsSent) {

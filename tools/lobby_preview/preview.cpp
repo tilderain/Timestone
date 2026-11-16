@@ -219,6 +219,17 @@ public:
     {
         if (Member* local = Local()) local->queueSlot = -1;
     }
+    void Watch(int slot) override
+    {
+        if (Member* local = Local()) {
+            local->watchSlot = static_cast<int8_t>(slot);
+            local->status = MemberStatus::Watching;
+        }
+    }
+    void StopWatching() override
+    {
+        if (Member* local = Local()) local->watchSlot = -1;
+    }
     void InviteFriends() override {}
     void SetMusic(int32_t trackId) override { room.music = trackId; }
     void ViewProfile(uint64_t) override {}
@@ -244,6 +255,7 @@ public:
         member.isLocal = local;
         member.slot = -1;
         member.queueSlot = -1;
+        member.watchSlot = -1;
         member.delayPick = kDelayPickNone;
         member.delayHover = kDelayPickNone;
         member.health[0] = member.health[1] = member.health[2] = kHealthUnknown;
@@ -361,6 +373,12 @@ void Populate(FakeService& service, int slots)
         service.room.members[4].queueSlot = 1;
         service.room.members[4].queuePos = 2;
     }
+    // ...and watching it meanwhile.
+    if (slots > 1) {
+        service.room.members[5].watchSlot = 1;
+        service.room.members[4].watchSlot = 1;
+        service.room.members[5].status = MemberStatus::Watching;
+    }
     service.Recompute();
     service.AddChat("", "Vevota joined the lobby.", true);
     service.AddChat("Vevota", "anyone up for a long set?", false);
@@ -464,8 +482,12 @@ int main(int argc, char** argv)
         snprintf(name, sizeof(name), "room_%dslot", slots);
         ok &= Capture(ui, directory, name); // cursor on the open seat
         if (slots == 4) {
-            // Line up for the match in progress (the second slot).
+            // The match in progress (the second slot): watch it or line up.
             ui.Update(Press(&Input::right));
+            ui.Update(Press(&Input::confirm));
+            Settle(ui, 3);
+            ok &= Capture(ui, directory, "room_slot_menu");
+            ui.Update(Press(&Input::down));
             ui.Update(Press(&Input::confirm));
             Settle(ui, 3);
             ok &= Capture(ui, directory, "room_4slot_queued");

@@ -147,6 +147,11 @@ static void __fastcall hkBtScoreUpdate(uint64_t score, uint64_t a2,
     const bool localIsP1 = Netplay_IsHost();
     const char* p1Name = localIsP1 ? localDisplayName : peerDisplayName;
     const char* p2Name = localIsP1 ? peerDisplayName : localDisplayName;
+    // Watching: the two players' names, not ours.
+    if (LobbyFlow_IsSpectating() && !LobbyFlow_GetWatchedNames(&p1Name, &p2Name)) {
+        p1Name = "Player 1";
+        p2Name = "Player 2";
+    }
     SetFightingName(*(uint64_t*)(score + 0xC8), p1Name);
     SetFightingName(*(uint64_t*)(score + 0xF0), p2Name);
 }
@@ -317,11 +322,18 @@ static void __fastcall hkMvc3MainMove(uint64_t main)
     LiveBenchmark_EndFrame(benchmarkStart, Controller_GetNetFrameCount());
 }
 
+static bool g_undrawnLiveTicks = false;
+
+void Rollback_SetUndrawnLiveTicks(bool enabled)
+{
+    g_undrawnLiveTicks = enabled;
+}
+
 static void __fastcall hkCallSRender(uint64_t render)
 {
     LagDiagnosticScope diagnostic(LagMetric::RenderEnd);
     RollbackHookProfileScope profile(RollbackHookProfileId::RenderEndFrame);
-    if (!g_isResimulating)
+    if (!g_isResimulating && !g_undrawnLiveTicks)
         oCallSRender(render);
 }
 
@@ -984,6 +996,14 @@ static void __fastcall hkMainMove(uint64_t main)
     RollbackHookProfileScope profile(RollbackHookProfileId::MainMove);
     if (g_isResimulating) {
         *(uint32_t*)(main + 0x48) = (uint32_t)g_resimulateCurrentFrame;
+        *(float*)(main + 0x80) = 1.0f;
+        return;
+    }
+    if (g_undrawnLiveTicks) {
+        // No pacing: the frame stamp and step a paced tick ends up with.
+        const int32_t frame = Controller_GetNetFrameCount();
+        if (frame >= 0)
+            *(uint32_t*)(main + 0x48) = (uint32_t)frame;
         *(float*)(main + 0x80) = 1.0f;
         return;
     }

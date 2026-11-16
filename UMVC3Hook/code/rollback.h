@@ -79,6 +79,11 @@ void Rollback_RestoreSnapshot(int32_t frame);
 // Multi-resim refreshes corrected snapshots, reusing the start snapshot when valid.
 void Rollback_ReSimulate(int32_t startFrame, int32_t endFrame);
 
+// While set, a live tick neither paces itself nor draws: the whole native
+// frame runs, exactly as a drawn one, and nothing is presented. A spectator
+// catches up with a match this way (several ticks per drawn frame).
+void Rollback_SetUndrawnLiveTicks(bool enabled);
+
 // Release rollback slot storage and reset tracking; preserve snapdump history.
 void Rollback_FreeSnapshots();
 

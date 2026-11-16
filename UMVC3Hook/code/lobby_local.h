@@ -66,3 +66,13 @@ bool LocalLobby_TakeNetworkHandles(ENetHost** outHost, ENetPeer** outPeer, bool*
 void LocalLobby_DisconnectPeer();
 bool LocalLobby_TakePeerFailed();
 const char* LocalLobby_GetPeerUsername();
+
+// Spectator links (see steam_lobby.h): ENet on localhost, one listening
+// socket per process on a port derived from its id.
+void LocalLobby_SpecOpen(uint64_t memberId);
+void LocalLobby_SpecClose(uint64_t memberId);
+void LocalLobby_SpecCloseAll();
+int LocalLobby_SpecState(uint64_t memberId);
+bool LocalLobby_SpecSend(uint64_t memberId, const void* data, int size);
+bool LocalLobby_SpecReceive(uint64_t* memberId, void* buffer, int capacity, int* size);
+void LocalLobby_SpecPump();

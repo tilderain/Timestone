@@ -82,6 +82,12 @@ struct Member {
     // While fighting: each team member's life as a percentage, in team
     // order. kHealthUnknown until the first report of a match.
     uint8_t health[3];
+    // Spectating: the match slot being watched (-1 if none), the order of
+    // starting to watch it, and the member this one's feed comes from. The
+    // last two only matter to the feed itself (spectate.h).
+    int8_t watchSlot;
+    uint32_t watchSeq;
+    uint64_t upstream;
     int16_t pingMs; // estimated ping to the local player, -1 when unknown
 };
 
@@ -161,6 +167,11 @@ public:
     // queue is seated by their own client as soon as a seat there opens.
     virtual void JoinQueue(int slot) = 0;
     virtual void LeaveQueue() = 0;
+    // Watch the match running at a slot (possible while queued, not while
+    // seated). The lobby flow takes it from there: it sees the published
+    // watch slot, finds a feed and boots the battle as a spectator.
+    virtual void Watch(int slot) = 0;
+    virtual void StopWatching() = 0;
     // Pre-match steps, see Member. They are forgotten whenever the opposite
     // seat changes hands or empties.
     virtual void AcceptMatch() = 0;

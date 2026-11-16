@@ -1571,6 +1571,7 @@ void SteamRoom_Leave()
 {
     if (LocalLobby_Enabled()) { LocalLobby_Leave(); return; }
     SteamRoom_DisconnectPeer();
+    SteamRoom_SpecCloseAll();
     ClearLobbyRichPresence();
     if (g_matchmaking && g_lobbyId) {
         g_api.LeaveLobby(g_matchmaking, g_lobbyId);
@@ -1759,4 +1760,185 @@ bool SteamRoom_TakePeerFailed()
     const bool failed = g_roomPeerFailed;
     g_roomPeerFailed = false;
     return failed;
+}
+
+// ---------------------------------------------------------------------------
+// Spectator links
+// ---------------------------------------------------------------------------
+namespace {
+
+constexpr int kSpecVirtualPort = 734; // the match connection uses 733
+constexpr int kMaxSpecLinks = 8;
+constexpr ULONGLONG kSpecConnectTimeoutMs = 15000;
+
+struct SpecLink {
+    uint64_t id = 0;
+    HSteamNetConnection connection = k_HSteamNetConnection_Invalid;
+    int state = 0;
+    ULONGLONG nextAttempt = 0;
+    ULONGLONG deadline = 0;
+    unsigned polls = 0;
+};
+SpecLink g_specLinks[kMaxSpecLinks];
+HSteamListenSocket g_specListen = k_HSteamListenSocket_Invalid;
+
+SpecLink* FindSpecLink(uint64_t id)
+{
+    if (!id) return nullptr;
+    for (SpecLink& link : g_specLinks)
+        if (link.id == id) return &link;
+    return nullptr;
+}
+
+void CloseSpecConnection(SpecLink& link, const char* reason)
+{
+    if (g_sockets && link.connection != k_HSteamNetConnection_Invalid)
+        g_sockets->CloseConnection(link.connection, 1000, reason, false);
+    link.connection = k_HSteamNetConnection_Invalid;
+}
+
+// Symmetric connect, as for the match: both ends dial and Steam pairs the two
+// attempts into one connection.
+void DialSpecLink(SpecLink& link)
+{
+    SteamNetworkingConfigValue_t options[4];
+    ConnectionOptions(options);
+    if (g_specListen == k_HSteamListenSocket_Invalid) {
+        g_specListen = g_sockets->CreateListenSocketP2P(kSpecVirtualPort, 4, options);
+        if (g_specListen == k_HSteamListenSocket_Invalid) {
+            HookLog("SteamLobby: could not create the spectator listen socket\n");
+            link.nextAttempt = GetTickCount64() + 1000;
+            return;
+        }
+    }
+    SteamNetworkingIdentity identity = {};
+    identity.m_eType = k_ESteamNetworkingIdentityType_SteamID;
+    identity.m_cbSize = sizeof(uint64_t);
+    identity.data.m_steamID64 = link.id;
+    link.connection = g_sockets->ConnectP2P(identity, kSpecVirtualPort, 4, options);
+    if (link.connection == k_HSteamNetConnection_Invalid)
+        link.nextAttempt = GetTickCount64() + 1000;
+}
+
+} // namespace
+
+void SteamRoom_SpecOpen(uint64_t memberId)
+{
+    if (LocalLobby_Enabled()) { LocalLobby_SpecOpen(memberId); return; }
+    if (!g_sockets || !memberId || FindSpecLink(memberId)) return;
+    for (SpecLink& link : g_specLinks) {
+        if (link.id) continue;
+        link = SpecLink{};
+        link.id = memberId;
+        link.state = 1;
+        link.deadline = GetTickCount64() + kSpecConnectTimeoutMs;
+        return;
+    }
+}
+
+void SteamRoom_SpecClose(uint64_t memberId)
+{
+    if (LocalLobby_Enabled()) { LocalLobby_SpecClose(memberId); return; }
+    if (SpecLink* link = FindSpecLink(memberId)) {
+        CloseSpecConnection(*link, "Timestone spectator link closed");
+        *link = SpecLink{};
+    }
+}
+
+void SteamRoom_SpecCloseAll()
+{
+    if (LocalLobby_Enabled()) { LocalLobby_SpecCloseAll(); return; }
+    for (SpecLink& link : g_specLinks) {
+        if (!link.id) continue;
+        CloseSpecConnection(link, "Timestone spectator link closed");
+        link = SpecLink{};
+    }
+    if (g_sockets && g_specListen != k_HSteamListenSocket_Invalid)
+        g_sockets->CloseListenSocket(g_specListen);
+    g_specListen = k_HSteamListenSocket_Invalid;
+}
+
+int SteamRoom_SpecState(uint64_t memberId)
+{
+    if (LocalLobby_Enabled()) return LocalLobby_SpecState(memberId);
+    const SpecLink* link = FindSpecLink(memberId);
+    return link ? link->state : 0;
+}
+
+bool SteamRoom_SpecSend(uint64_t memberId, const void* data, int size)
+{
+    if (LocalLobby_Enabled()) return LocalLobby_SpecSend(memberId, data, size);
+    const SpecLink* link = FindSpecLink(memberId);
+    if (!link || link->state != 2 || !g_sockets || !data || size <= 0) return false;
+    return g_sockets->SendMessageToConnection(link->connection, data,
+                                              static_cast<uint32_t>(size),
+                                              k_nSteamNetworkingSend_Reliable,
+                                              nullptr) == k_EResultOK;
+}
+
+bool SteamRoom_SpecReceive(uint64_t* memberId, void* buffer, int capacity, int* size)
+{
+    if (LocalLobby_Enabled()) return LocalLobby_SpecReceive(memberId, buffer, capacity, size);
+    if (!g_sockets || !memberId || !buffer || !size || capacity <= 0) return false;
+    for (SpecLink& link : g_specLinks) {
+        if (!link.id || link.state != 2) continue;
+        SteamNetworkingMessage_t* message = nullptr;
+        if (g_sockets->ReceiveMessagesOnConnection(link.connection, &message, 1) != 1 || !message)
+            continue;
+        const int length = static_cast<int>(message->m_cbSize);
+        const bool fits = length <= capacity;
+        if (fits) memcpy(buffer, message->m_pData, static_cast<size_t>(length));
+        message->Release();
+        if (!fits) continue; // nothing we send is that large
+        *memberId = link.id;
+        *size = length;
+        return true;
+    }
+    return false;
+}
+
+void SteamRoom_SpecPump()
+{
+    if (LocalLobby_Enabled()) { LocalLobby_SpecPump(); return; }
+    if (!g_sockets) return;
+    const ULONGLONG now = GetTickCount64();
+    for (SpecLink& link : g_specLinks) {
+        if (!link.id || link.state == 3) continue;
+        if (link.state == 1 && link.connection == k_HSteamNetConnection_Invalid) {
+            if (now >= link.deadline) {
+                link.state = 3;
+                continue;
+            }
+            if (now >= link.nextAttempt) DialSpecLink(link);
+            continue;
+        }
+        // A live link is only checked now and then; a failure also shows up
+        // as sends that stop being accepted.
+        if (link.state == 2 && ++link.polls % 30 != 0) continue;
+        SteamNetConnectionRealTimeStatus_t status = {};
+        if (g_sockets->GetConnectionRealTimeStatus(link.connection, &status, 0, nullptr) != k_EResultOK)
+            continue;
+        const bool ended = status.m_eState == k_ESteamNetworkingConnectionState_ClosedByPeer ||
+                           status.m_eState == k_ESteamNetworkingConnectionState_ProblemDetectedLocally ||
+                           status.m_eState == k_ESteamNetworkingConnectionState_None;
+        if (link.state == 1) {
+            if (status.m_eState == k_ESteamNetworkingConnectionState_Connected) {
+                link.state = 2;
+                HookLog("SteamLobby: spectator link to %llu connected\n",
+                        static_cast<unsigned long long>(link.id));
+            } else if (ended) {
+                // The other end may simply not have dialled yet: try again.
+                CloseSpecConnection(link, "Timestone spectator link retry");
+                link.nextAttempt = now + 1000;
+            } else if (now >= link.deadline) {
+                CloseSpecConnection(link, "Timestone spectator link timed out");
+                link.state = 3;
+            }
+        } else if (ended) {
+            HookLog("SteamLobby: spectator link to %llu ended (state %d)\n",
+                    static_cast<unsigned long long>(link.id), static_cast<int>(status.m_eState));
+            CloseSpecConnection(link, "Timestone spectator link ended");
+            link.state = 3;
+        }
+    }
 }

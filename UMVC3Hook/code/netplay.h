@@ -220,6 +220,11 @@ void Netplay_ConfigureHostLimits(ENetHost* host);
 // Take ownership of the ENet host/peer and start the service thread.
 void Netplay_Init(ENetHost* host, ENetPeer* peer);
 
+// Start a session with no peer, for a spectator replaying someone's match
+// from the spectate log. Netplay_IsActive is true; nothing is ever sent.
+void Netplay_InitSpectator();
+bool Netplay_IsSpectator();
+
 // Legacy wrapper: queue a packet with rawInput in inputs[0] at frame 0.
 void Netplay_SendInput(uint32_t rawInput);
 

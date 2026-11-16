@@ -5,6 +5,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
+#include <vector>
 
 extern void HookLog(const char* fmt, ...);
 
@@ -371,6 +373,7 @@ void LocalLobby_Join(uint64_t lobbyId)
 
 void LocalLobby_Leave()
 {
+    LocalLobby_SpecCloseAll();
     if (!g_room) return;
     Lock lock;
     if (SharedMember* self = FindMember(g_localId)) *self = {};
@@ -579,3 +582,210 @@ bool LocalLobby_TakePeerFailed()
 }
 
 const char* LocalLobby_GetPeerUsername() { return g_peerName; }
+
+// --- Spectator links ------------------------------------------------------------
+// Every process listens; of two members the one with the lower id dials, and
+// says who it is in the connect data. Both ends "open" the link, as with
+// Steam, so the listening end knows which callers it is expecting.
+namespace {
+
+constexpr uint16_t kSpecPortBase = 29100;
+constexpr int kMaxSpecLinks = 8;
+constexpr ULONGLONG kSpecConnectTimeoutMs = 10000;
+
+struct SpecLink {
+    uint64_t id = 0;
+    ENetPeer* peer = nullptr;
+    int state = 0;
+    ULONGLONG deadline = 0;
+    ULONGLONG nextDial = 0;
+};
+struct SpecMessage {
+    uint64_t from;
+    std::vector<uint8_t> data;
+};
+ENetHost* g_specHost = nullptr;
+SpecLink g_specLinks[kMaxSpecLinks];
+// Callers we have not been asked to open a link to yet.
+struct SpecCaller {
+    uint64_t id;
+    ENetPeer* peer;
+};
+SpecCaller g_specCallers[kMaxSpecLinks] = {};
+std::deque<SpecMessage> g_specInbox;
+
+uint16_t SpecPort(uint64_t id)
+{
+    return static_cast<uint16_t>(kSpecPortBase + (id - kIdBase) % 2000);
+}
+
+bool EnsureSpecHost()
+{
+    if (g_specHost) return true;
+    ENetAddress address = {};
+    address.host = ENET_HOST_ANY;
+    address.port = SpecPort(g_localId);
+    g_specHost = enet_host_create(&address, 2 * kMaxSpecLinks, 1, 0, 0);
+    if (!g_specHost)
+        HookLog("LocalLobby: could not open the spectator port %u\n", address.port);
+    return g_specHost != nullptr;
+}
+
+SpecLink* FindSpecLink(uint64_t id)
+{
+    if (!id) return nullptr;
+    for (SpecLink& link : g_specLinks)
+        if (link.id == id) return &link;
+    return nullptr;
+}
+
+void DialSpecLink(SpecLink& link)
+{
+    ENetAddress target = {};
+    enet_address_set_host(&target, "127.0.0.1");
+    target.port = SpecPort(link.id);
+    link.peer = enet_host_connect(g_specHost, &target, 1,
+                                  static_cast<enet_uint32>(g_localId - kIdBase));
+    if (link.peer) link.peer->data = nullptr;
+    link.nextDial = GetTickCount64() + 2000;
+}
+
+} // namespace
+
+void LocalLobby_SpecOpen(uint64_t memberId)
+{
+    if (!memberId || memberId == g_localId || FindSpecLink(memberId) || !EnsureSpecHost()) return;
+    for (SpecLink& link : g_specLinks) {
+        if (link.id) continue;
+        link = SpecLink{};
+        link.id = memberId;
+        link.state = 1;
+        link.deadline = GetTickCount64() + kSpecConnectTimeoutMs;
+        if (g_localId < memberId) {
+            DialSpecLink(link);
+        } else {
+            for (SpecCaller& caller : g_specCallers) {
+                if (caller.id != memberId) continue;
+                link.peer = caller.peer;
+                link.state = 2;
+                caller = {};
+            }
+        }
+        return;
+    }
+}
+
+void LocalLobby_SpecClose(uint64_t memberId)
+{
+    if (SpecLink* link = FindSpecLink(memberId)) {
+        if (link->peer) enet_peer_disconnect(link->peer, 0);
+        *link = SpecLink{};
+    }
+}
+
+void LocalLobby_SpecCloseAll()
+{
+    for (SpecLink& link : g_specLinks) {
+        if (link.id && link.peer) enet_peer_disconnect(link.peer, 0);
+        link = SpecLink{};
+    }
+    if (g_specHost) enet_host_flush(g_specHost);
+    g_specInbox.clear();
+}
+
+int LocalLobby_SpecState(uint64_t memberId)
+{
+    const SpecLink* link = FindSpecLink(memberId);
+    return link ? link->state : 0;
+}
+
+bool LocalLobby_SpecSend(uint64_t memberId, const void* data, int size)
+{
+    const SpecLink* link = FindSpecLink(memberId);
+    if (!link || link->state != 2 || !link->peer || !data || size <= 0) return false;
+    ENetPacket* packet = enet_packet_create(data, static_cast<size_t>(size), ENET_PACKET_FLAG_RELIABLE);
+    if (!packet) return false;
+    if (enet_peer_send(link->peer, 0, packet) != 0) {
+        enet_packet_destroy(packet);
+        return false;
+    }
+    return true;
+}
+
+bool LocalLobby_SpecReceive(uint64_t* memberId, void* buffer, int capacity, int* size)
+{
+    while (!g_specInbox.empty()) {
+        SpecMessage message = std::move(g_specInbox.front());
+        g_specInbox.pop_front();
+        if (static_cast<int>(message.data.size()) > capacity) continue;
+        memcpy(buffer, message.data.data(), message.data.size());
+        *memberId = message.from;
+        *size = static_cast<int>(message.data.size());
+        return true;
+    }
+    return false;
+}
+
+void LocalLobby_SpecPump()
+{
+    if (!LocalLobby_Enabled() || !g_localId || !EnsureSpecHost()) return;
+    const ULONGLONG now = GetTickCount64();
+    ENetEvent event;
+    while (enet_host_service(g_specHost, &event, 0) > 0) {
+        if (event.type == ENET_EVENT_TYPE_CONNECT) {
+            // Our own dial completing, or someone calling us.
+            SpecLink* link = nullptr;
+            for (SpecLink& candidate : g_specLinks)
+                if (candidate.id && candidate.peer == event.peer) link = &candidate;
+            if (!link) {
+                const uint64_t caller = kIdBase + event.data;
+                link = FindSpecLink(caller);
+                if (link && link->state == 1 && !link->peer) {
+                    link->peer = event.peer;
+                } else {
+                    link = nullptr;
+                    for (SpecCaller& slot : g_specCallers) {
+                        if (slot.id && slot.id != caller) continue;
+                        slot = {caller, event.peer};
+                        break;
+                    }
+                }
+            }
+            // Loading screens can leave the socket unserviced for seconds.
+            enet_peer_timeout(event.peer, 0, 30000, 60000);
+            if (link) {
+                link->state = 2;
+                HookLog("LocalLobby: spectator link to %llu connected\n",
+                        static_cast<unsigned long long>(link->id));
+            }
+        } else if (event.type == ENET_EVENT_TYPE_RECEIVE) {
+            for (const SpecLink& link : g_specLinks) {
+                if (!link.id || link.peer != event.peer) continue;
+                SpecMessage message;
+                message.from = link.id;
+                message.data.assign(event.packet->data, event.packet->data + event.packet->dataLength);
+                g_specInbox.push_back(std::move(message));
+            }
+            enet_packet_destroy(event.packet);
+        } else if (event.type == ENET_EVENT_TYPE_DISCONNECT) {
+            for (SpecCaller& slot : g_specCallers)
+                if (slot.peer == event.peer) slot = {};
+            for (SpecLink& link : g_specLinks) {
+                if (!link.id || link.peer != event.peer) continue;
+                link.peer = nullptr;
+                // An unanswered dial is retried below; a dropped link is over.
+                if (link.state == 2) link.state = 3;
+            }
+        }
+    }
+    for (SpecLink& link : g_specLinks) {
+        if (!link.id || link.state != 1) continue;
+        if (now >= link.deadline) {
+            if (link.peer) enet_peer_reset(link.peer);
+            link.peer = nullptr;
+            link.state = 3;
+        } else if (!link.peer && g_localId < link.id && now >= link.nextDial) {
+            DialSpecLink(link);
+        }
+    }
+}

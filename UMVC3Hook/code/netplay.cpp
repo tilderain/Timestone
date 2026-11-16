@@ -855,24 +855,9 @@ void Netplay_ConfigureHostLimits(ENetHost* host)
     host->maximumWaitingData = NET_MAX_WAITING_DATA;
 }
 
-void Netplay_Init(ENetHost* host, ENetPeer* peer)
+// The packet exchange queues: created with a session, destroyed with it.
+static void InitializeQueues()
 {
-    if (g_running || g_serviceThread)
-    {
-        HookLog("Netplay: Init ignored because service thread is already running\n");
-        return;
-    }
-
-    g_host   = host;
-    g_peer   = peer;
-    g_active = (host != nullptr && peer != nullptr);
-
-    if (!g_active)
-    {
-        HookLog("Netplay: Init called but host/peer not ready — disabled\n");
-        return;
-    }
-
     // Initialize critical sections (once)
     if (!g_csInitialized)
     {
@@ -920,6 +905,29 @@ void Netplay_Init(ENetHost* host, ENetPeer* peer)
         std::memset(&g_outboundPacket, 0, sizeof(InputPacket));
         g_csInitialized = true;
     }
+}
+
+static bool g_spectatorSession = false;
+
+void Netplay_Init(ENetHost* host, ENetPeer* peer)
+{
+    if (g_running || g_serviceThread)
+    {
+        HookLog("Netplay: Init ignored because service thread is already running\n");
+        return;
+    }
+
+    g_host   = host;
+    g_peer   = peer;
+    g_active = (host != nullptr && peer != nullptr);
+
+    if (!g_active)
+    {
+        HookLog("Netplay: Init called but host/peer not ready — disabled\n");
+        return;
+    }
+
+    InitializeQueues();
 
     {
         ScopedCS lock(g_inboundCS);
@@ -984,6 +992,49 @@ void Netplay_Init(ENetHost* host, ENetPeer* peer)
         g_running = false;
         g_active  = false;
     }
+}
+
+// A spectator's session has no peer and no service thread: everything the
+// game asks of netplay is answered from the spectate log (spectate.cpp), and
+// whatever it "sends" simply stays in the queues.
+void Netplay_InitSpectator()
+{
+    if (g_running || g_serviceThread)
+    {
+        HookLog("Netplay: spectator session ignored; a session is already running\n");
+        return;
+    }
+    g_host = nullptr;
+    g_peer = nullptr;
+    InitializeQueues();
+    {
+        ScopedCS lock(g_inboundCS);
+        g_inboundHead = 0;
+        g_inboundCount = 0;
+    }
+    {
+        ScopedCS lock(g_outboundCS);
+        g_outboundPacket = {};
+        g_outboundNew = false;
+        g_outboundValid = false;
+        g_outboundLastSendTick = 0;
+    }
+    g_peerDisconnected = false;
+    g_playerDisconnectRequested = false;
+    g_playerDisconnectNotice = false;
+    g_rtt = 0;
+    g_averageRtt = 0;
+    g_packetLoss = -1.0f;
+    Controller_ResetBuffers();
+    g_spectatorSession = true;
+    g_active = true;
+    g_running = true;
+    HookLog("Netplay: spectator session started\n");
+}
+
+bool Netplay_IsSpectator()
+{
+    return g_spectatorSession && g_running.load();
 }
 
 void Netplay_SetTimeout(uint32_t timeoutMs)
@@ -1448,7 +1499,7 @@ bool Netplay_TakePeerDisconnected()
 
 bool Netplay_SendPlayerDisconnect(uint32_t timeoutMs)
 {
-    if (!Netplay_IsActive())
+    if (!Netplay_IsActive() || g_spectatorSession)
         return false;
 
     g_playerDisconnectSent = false;
@@ -1541,7 +1592,10 @@ void Netplay_Shutdown()
     }
 
     // In a room this only closes the match connection; the room is kept.
-    SteamLobby_EndSession();
+    // A spectator never had one.
+    if (!g_spectatorSession)
+        SteamLobby_EndSession();
+    g_spectatorSession = false;
 
     if (g_peer)
     {

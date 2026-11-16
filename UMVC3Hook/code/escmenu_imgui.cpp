@@ -147,17 +147,22 @@ void EscMenuImGui_Draw()
     const ImVec2 buttonSize(-1.0f, 36.0f);
     if (ImGui::Button("Resume", buttonSize))
         g_open = false;
-    if (ImGui::Button("Restart Match (f11)", buttonSize) &&
-        FrameStepper_RequestMatchRestart())
-        g_open = false;
-    if (ImGui::Button("Character Select (f8)", buttonSize) && ChrSelImGui_Open())
-        g_open = false;
-    const bool steamProfileAvailable = SteamLobby_HasPeerProfile();
-    if (!steamProfileAvailable) ImGui::BeginDisabled();
-    if (ImGui::Button("Open Opponent Steam Profile", buttonSize))
-        SteamLobby_OpenPeerProfile();
-    if (!steamProfileAvailable) ImGui::EndDisabled();
-    if (LobbyFlow_InRoomMatch() && ImGui::Button("Return to Lobby", buttonSize)) {
+    // Someone watching has no match of their own to restart or re-pick.
+    const bool spectating = LobbyFlow_IsSpectating();
+    if (!spectating) {
+        if (ImGui::Button("Restart Match (f11)", buttonSize) &&
+            FrameStepper_RequestMatchRestart())
+            g_open = false;
+        if (ImGui::Button("Character Select (f8)", buttonSize) && ChrSelImGui_Open())
+            g_open = false;
+        const bool steamProfileAvailable = SteamLobby_HasPeerProfile();
+        if (!steamProfileAvailable) ImGui::BeginDisabled();
+        if (ImGui::Button("Open Opponent Steam Profile", buttonSize))
+            SteamLobby_OpenPeerProfile();
+        if (!steamProfileAvailable) ImGui::EndDisabled();
+    }
+    if (LobbyFlow_InRoomMatch() &&
+        ImGui::Button(spectating ? "Stop Watching" : "Return to Lobby", buttonSize)) {
         LobbyFlow_RequestLeaveMatch();
         g_open = false;
     }

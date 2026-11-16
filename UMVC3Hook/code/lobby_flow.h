@@ -59,6 +59,11 @@ void LobbyFlow_RequestReturnToLobby(const char* reason);
 // seat at the match slot (and with it any place in line).
 void LobbyFlow_RequestLeaveMatch();
 
+// True while the local game is watching someone's room match.
+bool LobbyFlow_IsSpectating();
+// The two players of the match being watched, player 1 first.
+bool LobbyFlow_GetWatchedNames(const char** p1, const char** p2);
+
 // ImGui fallback drawn from the overlay pass: tells the player the lobby is
 // still starting, or that the native UI could not be brought up.
 void LobbyFlow_DrawOverlay();

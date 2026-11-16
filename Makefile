@@ -111,6 +111,7 @@ CPP_SRC   := \
 	$(SRCDIR)/code/lobby_native.cpp \
 	$(SRCDIR)/code/lobby_room.cpp \
 	$(SRCDIR)/code/lobby_local.cpp \
+	$(SRCDIR)/code/spectate.cpp \
 	$(SRCDIR)/code/lobby_flow.cpp \
 	$(SRCDIR)/code/steam_transport.cpp \
 	$(SRCDIR)/imgui/imgui.cpp \

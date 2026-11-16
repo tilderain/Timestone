@@ -189,3 +189,7 @@ extern "C" void     Controller_ClearDesyncDetection();
 // Frame advantage (GGPO-style) — frame-count-based timesync
 extern int32_t      g_localFrameAdvantage;    // negative = we're ahead of remote
 extern int32_t      g_remoteFrameAdvantage;   // received from peer (their local advantage)
+
+// Spectators (spectate.h): frame boundaries of a match played from the log.
+extern "C" int32_t  Controller_SpectatorFrameStart();
+extern "C" void     Controller_SpectatorFrameEnd(int32_t frame, int32_t fastForwarded);

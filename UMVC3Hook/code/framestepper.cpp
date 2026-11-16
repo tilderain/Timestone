@@ -29,6 +29,7 @@
 #include "keyboard_input.h"
 #include "trainingboot.h"
 #include "lobby_flow.h"
+#include "spectate.h"
 
 // Netplay debug info from controller.cpp
 extern "C" int32_t Controller_GetDelayFrames();
@@ -185,6 +186,9 @@ static bool IsPastIntroStep()
 
 static bool RequestMatchRestart()
 {
+    // A spectator's restarts come from the match being watched.
+    if (Spectate_IsViewing())
+        return false;
     if (g_restartTargetFrame >= 0 || g_trainingRestartBarrier)
         return false;
     if (!IsPastIntroStep())
@@ -552,6 +556,81 @@ static void PresentFrozenFrame()
 
 extern "C" void Controller_OnFrameStart();
 extern "C" void Controller_OnFrameEnd();
+
+// A spectator's turn at the frame boundary: what the log of the watched match
+// allows next. Returns false when no frame is to be simulated this tick.
+static int32_t g_spectatorFrame = -1;
+// Running dry for a moment just freezes the picture, as a player waiting on
+// a late input does; a longer wait shows the game's own waiting notice.
+static ULONGLONG g_spectatorHoldSince = 0;
+static bool g_spectatorShowWait = false;
+static constexpr ULONGLONG SPECTATOR_WAIT_NOTICE_MS = 1500;
+static constexpr ULONGLONG SPECTATOR_CATCH_UP_BUDGET_MS = 24;
+
+static bool SpectatorFrameStart(void* sMvc3Main)
+{
+    g_spectatorFrame = -1;
+    g_spectatorShowWait = false;
+    int32_t frame = Controller_SpectatorFrameStart();
+    if (frame < 0)
+        return true; // the battle is not far enough along to have a frame yet
+
+    typedef uint64_t(__fastcall* GetAction_t)();
+    const uint64_t action = ((GetAction_t)_addr(0x140001A90))();
+    const int32_t step = action ? *(int32_t*)(action + 0xD8) : 0;
+    int32_t fastForward = 0;
+    switch (Spectate_Next(frame, step, &fastForward)) {
+    case SpectateStep::Hold: {
+        const ULONGLONG now = GetTickCount64();
+        if (!g_spectatorHoldSince)
+            g_spectatorHoldSince = now;
+        g_spectatorShowWait = now - g_spectatorHoldSince >= SPECTATOR_WAIT_NOTICE_MS;
+        return false;
+    }
+    case SpectateStep::Leave:
+        LobbyFlow_RequestReturnToLobby("");
+        return false;
+    case SpectateStep::Restart:
+        // The same synchronized restart the players ran, due at once.
+        if (g_restartTargetFrame < 0 && !g_trainingRestartBarrier &&
+            !g_nativeRestartTransitionPending) {
+            TrainingBootConfig config;
+            uint32_t seed = 0;
+            if (Spectate_GetRestart(&config, &seed)) {
+                g_restartRoundSeed = seed;
+                g_restartKind = RESTART_FULL_MATCH;
+                g_restartButtonMode = 0;
+                g_restartTargetFrame = frame;
+                HookLog("FrameStepper: spectator follows the match restart at frame %d\n",
+                        frame);
+            }
+        }
+        return false;
+    case SpectateStep::Play:
+        break;
+    }
+    g_spectatorHoldSince = 0;
+    // Catching up: whole native ticks, just not paced and not drawn, so a
+    // caught-up frame is simulated exactly like a watched one. As many as
+    // fit in the time one drawn frame can spare.
+    if (fastForward > 0) {
+        const ULONGLONG started = GetTickCount64();
+        Rollback_SetUndrawnLiveTicks(true);
+        for (int32_t i = 0; i < fastForward && frame >= 0; ++i) {
+            oMove(sMvc3Main);
+            Controller_SpectatorFrameEnd(frame, 1);
+            frame = Controller_SpectatorFrameStart();
+            if (GetTickCount64() - started >= SPECTATOR_CATCH_UP_BUDGET_MS)
+                break;
+        }
+        Rollback_SetUndrawnLiveTicks(false);
+        if (frame < 0)
+            return true;
+    }
+    g_spectatorFrame = frame;
+    return true;
+}
+
 // ---------------------------------------------------------------------------
 // Hooked sMvc3Main::move — skips the call when paused unless advancing.
 // ---------------------------------------------------------------------------
@@ -642,6 +721,9 @@ static void __fastcall HookedMove(void* sMvc3Main)
                 g_restartButtonMode = 0;
                 return;
             }
+            // Spectators follow with the roster the restart was given.
+            if (restartNetplay && !Spectate_IsViewing())
+                Spectate_RecRestart(g_restartRoundSeed);
         }
         HookLogFlush();
         const bool fullRosterTransition =
@@ -822,6 +904,27 @@ static void __fastcall HookedMove(void* sMvc3Main)
             }
         }
 
+        // A spectator's opponent is the log of the match being watched: it
+        // is "ready" as soon as the feed has delivered the game's seed and
+        // opening characters, and it never needs anything from us.
+        const bool viewing = Spectate_IsViewing();
+        uint32_t watchedSeed = 0;
+        uint32_t watchedOpening[2] = {0, 0};
+        const bool watchedStartKnown = viewing && !g_battleSynchronized &&
+            g_restartTargetFrame < 0 &&
+            Spectate_GetGameStart(&watchedSeed, &watchedOpening[0], &watchedOpening[1]);
+        if (watchedStartKnown) {
+            g_remoteReady = true;
+            g_remoteRelease = true;
+            g_roundSeed = watchedSeed;
+            g_roundSeedReady = true;
+            g_remoteOpeningMember = watchedOpening[0];
+            g_remoteOpeningReady = true;
+            g_remoteOpeningRelease = true;
+        }
+        if (viewing)
+            g_remoteFighting = true;
+
         typedef uint64_t(__fastcall* GetAction_t)();
         static GetAction_t getAction = (GetAction_t)_addr(0x140001A90);
         uint64_t action = getAction();
@@ -831,7 +934,14 @@ static void __fastcall HookedMove(void* sMvc3Main)
                                    !g_trainingRestartBarrier;
 
         if (!g_battleSynchronized && enteringIntro) {
-            if (!g_localOpeningReady) {
+            if (!g_localOpeningReady && viewing) {
+                // Player 2's pick, from the log (a spectator stands in the
+                // client's place; nothing of its own is ever captured).
+                if (watchedStartKnown) {
+                    g_localOpeningMember = watchedOpening[1];
+                    g_localOpeningReady = true;
+                }
+            } else if (!g_localOpeningReady) {
                 g_localOpeningMember = Controller_CaptureOpeningMember();
                 g_localOpeningReady = true;
                 HookLog("Netplay: opening member selected team=%u member=%u "
@@ -972,6 +1082,12 @@ static void __fastcall HookedMove(void* sMvc3Main)
             Netplay_SetTimeout(AutoTest_IsActive() ? 2000 : 4000);
             HookLog("Netplay: Intro barrier released after RNG sync (generation=%u seed=0x%08X)\n",
                      g_battleGeneration, g_roundSeed);
+            // Frame 0 of a game spectators can follow.
+            if (!viewing)
+                Spectate_RecGameStart(
+                    g_battleGeneration, g_roundSeed,
+                    Netplay_IsHost() ? g_localOpeningMember : g_remoteOpeningMember,
+                    Netplay_IsHost() ? g_remoteOpeningMember : g_localOpeningMember);
         }
 
         if (g_battleSynchronized && !g_desyncCheckReady &&
@@ -993,7 +1109,19 @@ static void __fastcall HookedMove(void* sMvc3Main)
             return;
         }
 
-        if (g_battleSynchronized)
+        if (g_battleSynchronized && viewing)
+        {
+            if (!SpectatorFrameStart(sMvc3Main)) {
+                // The waiting notice pauses the battle natively, so the game
+                // can keep drawing (and the pause menu stays reachable).
+                GameUI_SetWaitingForOpponent(g_spectatorShowWait);
+                if (g_spectatorShowWait)
+                    oMove(sMvc3Main);
+                return;
+            }
+            GameUI_SetWaitingForOpponent(false);
+        }
+        else if (g_battleSynchronized)
         {
             Controller_OnFrameStart();
             if (Controller_IsPredictionBudgetExhausted()) {
@@ -1011,7 +1139,13 @@ static void __fastcall HookedMove(void* sMvc3Main)
     oMove(sMvc3Main);
 
     LagDiagnosticScope tailDiagnostic(LagMetric::FrameTail);
-    if (Netplay_IsActive() && g_battleSynchronized)
+    if (Netplay_IsActive() && g_battleSynchronized && Spectate_IsViewing())
+    {
+        if (g_spectatorFrame >= 0)
+            Controller_SpectatorFrameEnd(g_spectatorFrame, 0);
+        g_spectatorFrame = -1;
+    }
+    else if (Netplay_IsActive() && g_battleSynchronized)
     {
         Controller_OnFrameEnd();
     }
@@ -1303,6 +1437,8 @@ void FrameStepper_ShowOpponentDisconnected()
 
 void FrameStepper_EndNetplaySession()
 {
+    // The log spectators follow ends here (no-op for a spectator's own session).
+    Spectate_RecEnd();
     // Same per-match state a full synchronized restart clears, followed by the
     // transport shutdown. The battle generation moves on so packets from the
     // finished match can never be mistaken for the next one.
@@ -1632,8 +1768,8 @@ void FrameStepper_Process()
         }
     }
     // Netplay settings hotkeys. These work regardless of training mode so both
-    // sides can adjust them mid-match.
-    if (Netplay_IsActive())
+    // sides can adjust them mid-match. A spectator has no settings to adjust.
+    if (Netplay_IsActive() && !Spectate_IsViewing())
     {
         if (KeyPressed(VK_F3))
         {
@@ -1949,7 +2085,7 @@ void FrameStepper_Draw()
     snprintf(lossText, sizeof(lossText), "%s / %s", localLoss, remoteLoss);
     ImVec2 warningPos(12.0f, 12.0f);
     if (Netplay_IsActive() && Controller_GetNetFrameCount() >= 0 &&
-        statusHudMode != 0)
+        statusHudMode != 0 && !Spectate_IsViewing())
     {
         // sReplay advances during oMove, but processFrameInput records under the
         // frame value from the start of that tick. Display the input that made
@@ -2076,7 +2212,7 @@ void FrameStepper_Draw()
     }
 
     if (Netplay_IsActive() && Controller_GetNetFrameCount() >= 0 &&
-        statusHudMode != 2) {
+        statusHudMode != 2 && !Spectate_IsViewing()) {
         const int32_t jitterMs = Netplay_GetJitter();
         if (lossWarning || jitterMs > jitterWarningMs) {
             char warning[96];

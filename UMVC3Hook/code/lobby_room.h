@@ -52,6 +52,8 @@ public:
     void Stand() override;
     void JoinQueue(int slot) override;
     void LeaveQueue() override;
+    void Watch(int slot) override;
+    void StopWatching() override;
     void AcceptMatch() override;
     void PickDelay(int pick) override;
     void HoverDelay(int pick) override;
@@ -86,6 +88,10 @@ public:
     // Ping measured on the live connection to a member; shown in place of
     // the room's estimate for them until the next FinishMatch.
     void SetMeasuredPing(uint64_t memberId, int oneWayMs);
+    // While watching: the member the local spectator's feed comes from (0 for
+    // none yet). Published so that member, and everyone choosing a feed of
+    // their own, can see it.
+    void SetUpstream(uint64_t memberId);
     void PostSystemLine(const char* text);
 
 private:
@@ -104,6 +110,9 @@ private:
         int queueSlot = -1;
         uint32_t queueSeq = 0;
         uint8_t health[3] = {kHealthUnknown, kHealthUnknown, kHealthUnknown};
+        int watchSlot = -1;
+        uint32_t watchSeq = 0;
+        uint64_t upstream = 0;
     };
 
     void PublishLocal();

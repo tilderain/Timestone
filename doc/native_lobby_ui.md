@@ -545,6 +545,135 @@ win/loss record. The running score is published in the member data (version
 2, last field) for the room's slot header and drawn above the health bars
 with ImGui during the match.
 
+## Spectating
+
+**Status: built 2026-11-16, compiled only. Nothing here has run in game.**
+
+A match is watched by simulating it. A spectator boots the same battle and is
+fed the two players' confirmed inputs; no game state is ever sent, and a
+spectator never predicts or rolls back. Code: `spectate.cpp` (log, feed,
+playback decisions), plus the hooks named below.
+
+### The log
+
+One per game of a set (`Game` in `spectate.cpp`):
+
+- the boot configuration (`TrainingBootConfig`, CPU mode, five bars);
+- the round seed and both opening characters, known when the start-up
+  barrier releases (`Spectate_RecGameStart`, from `HookedMove`);
+- one input pair per frame, player 1 first, appended once the frame is final:
+  `RecordSpectateFrames` in `controller.cpp` walks forward from the last
+  logged frame while `IsFrameConfirmed` holds. The local value is
+  `g_recordedLocalInput`, the remote one `g_receivedInput`; the neutral
+  start-up frames (`<= delay + rollback`) are logged as zero for both;
+- the player's checksum every 60 frames, logged a tick after the frames up to
+  it were confirmed so any correction of them has already run;
+- how it ended: restarted (with the restart seed and the roster the restart
+  was given, so a roster change carries over) or the match is over
+  (`Spectate_RecRestart` at the synchronized restart, `Spectate_RecEnd` from
+  `FrameStepper_EndNetplaySession`).
+
+The game id is the battle generation, which both players count alike, so the
+two players' logs name the same games and a spectator can change who feeds it
+and resume by frame number. The current game and the one before it are kept.
+
+### The feed
+
+Every member can hold the log and serve it. Links are reliable message links
+between room members on their own virtual port (734; the match uses 733):
+`SteamRoom_Spec*` in `steam_lobby.cpp`, ENet on localhost in the test lobby.
+Both ends open a link, as with the match connection.
+
+Who feeds whom is published, not negotiated. Member data (version 7) carries
+`watchSlot`, `watchSeq` (order of starting to watch, assigned like queue
+numbers) and `upstream`, the member the spectator chose to be fed by.
+`ChooseUpstream` picks one of the two players while they have room, otherwise
+a spectator of the same slot who started earlier (that ordering keeps the
+links loop-free). A fighting player feeds one spectator, a spectator feeds
+two; whoever claims a full source and is not among its earliest claimers
+picks again. A member serves exactly the members whose `upstream` names it.
+
+The child sends `MSG_SUB` (the game and frame it has); the parent answers
+with `MSG_GAME`, `MSG_START`, run-length encoded `MSG_FRAMES`, `MSG_CHECK`
+and `MSG_FINISH`, then keeps appending. Live frames go out in batches of 12.
+A backlog is capped per frame at 700 bytes from a player and 12000 from a
+spectator. `Spectate_Pump` runs once per frame on the game thread, in the
+lobby and in a battle. A lost or refused source is avoided for 8 seconds and
+another is chosen; the subscription then resumes from the frame already held.
+
+### Playback
+
+A spectator runs the netplay client path against a virtual opponent:
+
+- `Netplay_InitSpectator` starts a session with no peer and no service
+  thread, so `Netplay_IsActive` is true and every determinism path the
+  players use is on. Rollback frames are set to 0: no snapshots are taken.
+- `HookedMove` answers the start-up barrier from the log
+  (`Spectate_GetGameStart`): remote ready, release, seed and opening
+  characters are set as if a peer had sent them.
+- `ResolveTimelineInput` returns `Spectate_GetInput` for both teams;
+  `hkGetsCurrentInput` and the raw pad read `0x1402B3B80` return nothing, so
+  the spectator's own pad cannot reach the match. The result screen's native
+  handler (`sAction__stepResult9_10_11`) does not run for a spectator.
+- Each tick `Spectate_Next` decides: hold (nothing buffered; after 1.5 s the
+  game's waiting notice is shown), play, restart (the log says the game was
+  restarted: the same synchronized restart runs with the logged roster) or
+  leave (the match ended).
+- Catching up: with more than 90 frames buffered, up to 8 extra ticks are
+  run per drawn frame (24 ms budget) with `Rollback_SetUndrawnLiveTicks`:
+  the whole native tick runs, only `sMain::move`'s pacing and the render
+  end-frame call are skipped. Sounds of those ticks play as they come.
+  The first version used the headless re-simulation tick instead; in the
+  2026-11-16 tests the intro checks (frames 60, 120, drawn) matched the
+  players and every check after a headless stretch differed in the two point
+  characters' RNG only, with positions drifting by a unit a few seconds
+  later. The headless tick is only equivalent to a live one after a snapshot
+  restore, which a spectator does not have. `kFastForward` in `spectate.cpp`
+  turns catching up off.
+- Every 60 frames the spectator's checksum is compared with the players'. A
+  mismatch is logged (`Spectate: out of sync...`) and shown; the next game
+  starts from a fresh restart either way.
+
+Every spectator is a late joiner: it boots only after the first game's
+configuration arrives, so it starts behind by its own loading time and relies
+on the catch-up. A game that was already restarted when the spectator arrived
+is skipped; it boots the roster that follows and waits for the next game.
+
+### Intro picks (found in the first test, 2026-11-16)
+
+The first run matched the players on positions, life and action ids for a
+whole game while every character-RNG hash differed, and the intros looked
+different. `uCharacter__selectProfileVariant` `0x140055B50` picks each
+character's intro row with percent rolls on the *global* XorShift
+(`0x14005BF70`) and caches it at `+0x6828`. That happens during battle
+set-up, before the start-up barrier seeds anything, so each machine rolled on
+its own stream; a different intro then draws the character's RNG differently.
+`hkSelectProfileVariant` (`rollback_rng.cpp`) now makes the intro pick roll on
+a stream derived from the game number, the six characters and the asking
+character, and restores the global stream. This applies to the two players as
+well. **Unverified in game.**
+
+### In the room
+
+Confirm on a setup with a match running opens a two-item menu, WATCH MATCH or
+JOIN / LEAVE QUEUE. Watching while queued is allowed; a seat ends it
+(`Sit` clears the watch, and a spectator whose queue reaches the front is
+taken back to the room). The setup card shows the WATCH tag and a count.
+In the battle the top of the screen names the two players, the set score and
+the state of the feed; the pause menu offers Stop Watching only.
+
+### Known gaps
+
+- Whether a freshly booted battle matches one reached by a rematch restart is
+  assumed (both pass the same seeded barrier). The checksums will say.
+- Undrawn live ticks are unverified in game: whether skipping the render
+  end-frame call for several ticks in a row is harmless, and how the
+  sped-up sound of a catch-up comes across.
+- If the feed moves on while a roster change is pending and the spectator is
+  between games, it can load the old roster for one game.
+- The native spectator presentation (battle type 4, `ingameonlinechecks.md`)
+  is not used.
+
 ## Testing alone: `kLobbyTestBuild`
 
 Steam lobbies need two accounts. Setting `kLobbyTestBuild` to `true`
@@ -557,8 +686,10 @@ unchanged: create, search, join, seats, chat, music, kick and ban, sets.
 Matches connect with plain ENet on `127.0.0.1` (port 27100 + the player-1
 process id modulo 2000). The two players are "Tester One" and "Tester Two",
 logs go to `Timestone_host.log` and `Timestone_client.log`, and only the
-focused window takes input. Not covered: anything Steam itself does (relay
-routing, invites, the overlay, friends-only visibility).
+focused window takes input. With `kLobbyTestExtraInstances` at 2 the third
+window can watch the other two play (their spectator links are ENet on port
+29100 + process id modulo 2000). Not covered: anything Steam itself does
+(relay routing, invites, the overlay, friends-only visibility).
 
 ## First in-game run: what to check
 
@@ -583,28 +714,73 @@ menu (with Exit Game) becomes available again.
    brings both back seated with the room intact. Step 4 of the sequence above
    is the least certain part of this work.
 
+## Battle cards (research, 2026-11-16, not implemented)
+
+The swaying license cards of the native room are `ui\net\net_sprite\net_room_card`
+(loaded into `uMenuNetRoomMain::mpRoomSdlArray` by `setup`). Everything it needs
+is in `ui\netroom[_lang]`, which the lobby already keeps resident: the layout,
+the models `ui\lic\ga_lic_card_b\ga_lic_card_b_typeC` (1P, warm tint) and
+`..._c\..._c_typeC` (2P, cool tint), their textures and the radar texture. Only
+placeholder `lic_user/syogo/rank/flag` textures are in `netroom`; the real ones
+are in `ui\lic` (`RequestLicenseArchive`). Verified statically.
+
+Layout (dumped offline):
+
+- `ga_LicCard1P` / `ga_LicCard2P` are `uUiModelBase` (DTI `0x140D559B0`, hash
+  `0x000E25FF`; a DTI hash is `~crc32(name) & 0x7FFFFFFF`). Each has 15 children
+  parented to it (`mpParent` = the card's track): `icon_LCnP_face` (40x40),
+  `_syogo` (title plate) + `Font_syogoN`, `Font_LCnP_name`, `_rank`, `_flag`,
+  `_num_1..3` + `_wins` (win digits), `_radar` + `_radar_p1` (`uUiAnmSpriteRadar`,
+  5 values at `+0x704`, `uUiAnmSpriteRadar__setParam` `0x140309C90`). Children
+  carry `mAngle.x = pi` because the card space is y-up.
+- Coordinates: `uUiModelBase__draw` `0x140326A70` with `m2D` uses
+  `sPrimitive__buildSpriteCamera` (eye `(0,0,990)`, 40 degree FOV, 16:9). At
+  z=0 that spans 720 units, so card space is UI pixels **centred on the screen,
+  y up**: UI `(x, y)` is card `(x - 640, 360 - y)`. Resting positions are 1P
+  `(160, 160)`, 2P `(160, -35)`, both tilted by `mAngle` (-0.26, +/-0.26, 0).
+- Frame ranges (`g_netRoomCardRange_*`, set by static initialisers
+  `0x140A3A520..0x140A3A660`): slide-in with overshoot 0-30; clash bounce 80-120
+  (looped while the match starts); 2P flies off 160-190; idle sway 200-490
+  (looped: yaw rocks +/-0.26 rad over ~5 s); 1P drops out and 2P moves into
+  its place 540-570; a new 2P slides in 600-650; both leave 650-670.
+
+Driving (`uMenuNetRoomMain__updateBattleCardAnimation` `0x14042F8B0`):
+`uMenuSubBase__setSchedulerRangeStartAndPause` `0x1403F6E80` seeks the scheduler
+(`uScheduler::mFrame` `+0x44`) to a range start, `playSchedulerFrameRange`
+`0x1403F6DA0` plays and pauses at the end (returns true when done), and
+`uMenuSubBase__loopSchedulerFrameRange` `0x1403F6E20` seeks back to the start
+once the end is passed. `refreshRoomDisplay` fills the cards at `this+0xA68`
+(stride `0xF0`): name with `resetIndexAndSetText`, face/title/rank/flag with
+`setTexture`, title text by message index, radar values, three character
+portraits.
+
+What a per-slot copy needs (static analysis; **unverified in game**):
+
+- One `net_room_card` scheduler per match slot, loaded with
+  `UI_LOAD_SCHEDULER` exactly like the prototype scheduler. Each instance
+  spawns its own cards and children, so no copy constructor for
+  `uUiModelBase` is needed.
+- The keyframes are absolute, so each instance has to be moved as a whole.
+  `uCoord__composeWorldMatrix` `0x140548730` multiplies by a live parent's
+  `mWmat` (`mParentFlags` 3 on the cards inherits position, rotation and
+  scale), so giving both cards a parent anchor at the slot's position (and a
+  scale below 1) moves and shrinks the pair with its children, and keeps the
+  animation local to the anchor.
+- The scheduler would overwrite that parent: `uScheduler__updateTrack`
+  `0x14050F590` re-applies every property track whenever the frame changes,
+  and for a unit-reference track (`mpParent`, kind `0xC`) value 0 writes null.
+  A track-work entry (`mTrackWork` `+0x58`, `0x68` bytes each) whose
+  descriptor pointer (`+0`) is null is skipped for good; the scheduler does
+  that itself when a binding fails. Clearing the two cards' `mpParent` entries
+  in each instance and then setting `uCoord::mpParent` to the anchor is the
+  intended route. SDL track indices are 1-based (track 0 is the header):
+  `ga_LicCard1P` is track 32, its `mpParent` track 41.
+- The plugin would drive the frame itself (seek, play, loop) with the same
+  ranges. Room members carry no native license data, so face, title, rank,
+  flag and radar would be the plugin's own choice (or hidden).
+
 ## Not done yet
 
-- **Spectating.** The room model and UI already carry a `Watching` status and
-  the native WATCH tag, but nothing streams a match. The simulation has no
-  mid-match state transfer, so a spectator has to join before a match starts,
-  boot the same rosters and seed, and consume a relayed stream of *confirmed*
-  inputs for both teams with no rollback and no prediction (stall when the
-  stream runs dry). Two ways to feed those inputs:
-  - Timestone's own timeline: a spectator is a client for which both teams are
-    "remote". This needs a relay from player 1, a both-teams-remote mode in
-    `controller.cpp`, and a spectator path through the battle-ready handshake
-    in `framestepper.cpp`. It matches the plugin's canonical input timeline
-    (logical inputs after button remap) and is the recommended route.
-  - The game's own mechanism: native spectating is built on `sReplay`
-    playback. `aChrSelect__init` resets `sReplay` (vtable `+0x28`) when
-    `sBattleSetting__isOnlineSpectatorBattle` is true, and
-    `sReplay__writeBothTeamInputs` `0x1401CF5D0` / `sReplay__readInput`
-    `0x1401CECB0` are the stream write and read ends (see `replay.md`). Its
-    records hold native replay inputs, not Timestone's timeline values, so it
-    would need its own determinism validation.
-  Battle type 4 and the spectator branches listed in `ingameonlinechecks.md`
-  are the native presentation hooks (banners, non-pausing overlay) either way.
 - **Native character select.** "Character select" entry currently opens the
   native-styled team panel. Driving the real screen means queueing `aChrSelect`
   with only the local side active and capturing the result at

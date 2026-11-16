@@ -15,6 +15,7 @@
 #include "mk10utils.h"
 #include "netplay.h"
 #include "savedata.h"
+#include "spectate.h"
 #include "steam_lobby.h"
 #include "steam_transport.h"
 #include "trainingboot.h"
@@ -133,6 +134,7 @@ constexpr ULONGLONG kPingWaitLimitMs = 4500;
 
 enum class Phase {
     Lobby,      // screens are up
+    WatchJoining, // finding a feed for a match to watch, waiting for its first game
     Connecting, // opening the match connection to the paired opponent
     Handshake,  // exchanging settings and rosters over the fresh connection
     Launching,  // lobby torn down, BootIntoTraining in progress
@@ -168,6 +170,14 @@ ConnectRoster g_rosterPrefs;
 SavedRoster g_presets[3] = {};
 size_t g_presetCount = 0;
 bool g_presetsLoaded = false;
+
+// Watching someone's match instead of playing one (game thread, except the
+// text the overlay copies).
+bool g_spectating = false;
+ULONGLONG g_watchIdleTick = 0;   // joining: when the slot stopped being in progress
+ULONGLONG g_feedLostTick = 0;    // watching: when the feed went away
+char g_watchNames[2][kNameCapacity] = {};
+char g_watchLine[160] = {};
 
 MatchPairing g_pairing = {};
 ENetHost* g_matchHost = nullptr;
@@ -944,10 +954,148 @@ bool SendLaunchAsHost()
     return true;
 }
 
+// ---------------------------------------------------------------------------
+// Spectating
+// ---------------------------------------------------------------------------
+const Member* LocalRoomMember()
+{
+    if (!g_service) return nullptr;
+    const RoomState& room = g_service->Room();
+    for (int i = 0; i < room.memberCount; ++i)
+        if (room.members[i].isLocal) return &room.members[i];
+    return nullptr;
+}
+
+// Once per frame wherever the game is: the feed runs on the room's published
+// state, for the two players as much as for anyone watching.
+void PumpSpectate()
+{
+    SpectateRoom view = {};
+    if (g_service && g_service->Room().inRoom) {
+        const RoomState& room = g_service->Room();
+        view.localId = SteamRoom_GetLocalId();
+        for (int i = 0; i < room.memberCount && view.count < 8; ++i) {
+            const Member& member = room.members[i];
+            SpectateRoomMember& out = view.members[view.count++];
+            out.id = member.id;
+            out.slot = member.side < 2 ? member.slot : -1;
+            out.fighting = member.status == MemberStatus::Fighting;
+            out.watchSlot = member.watchSlot;
+            out.watchSeq = member.watchSeq;
+            out.upstream = member.upstream;
+        }
+    }
+    const uint64_t upstream = Spectate_Pump(view);
+    if (g_service && Spectate_GetState() != SpectateState::Off) g_service->SetUpstream(upstream);
+}
+
+void StopSpectating()
+{
+    Spectate_Stop();
+    if (g_service) g_service->StopWatching();
+    TrainingBoot_SetSpectatorBoot(false);
+    g_spectating = false;
+    g_watchIdleTick = 0;
+    g_feedLostTick = 0;
+    g_watchLine[0] = '\0';
+}
+
+// Who is being watched, for the overlay and the in-battle name plates.
+void UpdateWatchText()
+{
+    const int slot = Spectate_Slot();
+    if (!g_service || slot < 0) return;
+    const RoomState& room = g_service->Room();
+    const Member* players[2] = {nullptr, nullptr};
+    for (int i = 0; i < room.memberCount; ++i) {
+        const Member& member = room.members[i];
+        if (member.slot == slot && member.side < 2) players[member.side] = &member;
+    }
+    if (!players[0] || !players[1]) return; // keep the last names once they have left
+    for (int side = 0; side < 2; ++side)
+        snprintf(g_watchNames[side], sizeof(g_watchNames[side]), "%s", players[side]->name);
+    char line[sizeof(g_watchLine)];
+    const int firstTo = room.settings.firstTo;
+    if (firstTo == 1)
+        snprintf(line, sizeof(line), "%.40s  vs  %.40s", players[0]->name, players[1]->name);
+    else
+        snprintf(line, sizeof(line), "%.40s  %d - %d  %.40s", players[0]->name,
+                 players[0]->setWins, players[1]->setWins, players[1]->name);
+    memcpy(g_watchLine, line, sizeof(g_watchLine));
+}
+
+void BeginSpectateLaunch(const TrainingBootConfig& config, int cpuMode, bool fiveBars)
+{
+    TrainingBoot_PrepareNextBoot(true);
+    TrainingBoot_SetSpectatorBoot(true);
+    TrainingBoot_SetCpuMode(static_cast<TrainingBootCpuMode>(cpuMode));
+    TrainingBoot_SetFiveBarStart(fiveBars);
+    TrainingBoot_SetConfig(config);
+    SetNetworkHandles(nullptr, nullptr);
+    // A netplay session without a peer; every frame it simulates is final,
+    // so nothing is ever predicted or rolled back.
+    Netplay_InitSpectator();
+    Controller_SetDelayFrames(1);
+    Controller_SetRollbackFrames(0);
+    FrameStepper_InitNetplay();
+    g_spectating = true;
+    g_feedLostTick = 0;
+    g_leaveSeatOnReturn.store(false, std::memory_order_relaxed);
+    ResetSet(1);
+    UpdateWatchText();
+    g_ui->SetBusy("Loading the match...");
+    SetPhase(Phase::Launching);
+    HookLog("LobbyFlow: launching setup %d's match as a spectator\n", Spectate_Slot() + 1);
+}
+
+// The room publishes who watches what (the screens set it); this follows.
+void UpdateSpectateJoin(bool cancelPressed)
+{
+    if (g_phase != Phase::Lobby && g_phase != Phase::WatchJoining) return;
+    const Member* local = LocalRoomMember();
+    const RoomState& room = g_service->Room();
+    const int wanted = local && room.inRoom ? local->watchSlot : -1;
+    if (g_phase == Phase::Lobby) {
+        if (wanted < 0) return;
+        Spectate_Start(wanted);
+        g_watchIdleTick = 0;
+        g_ui->SetBusy("Joining the match as a spectator...\nCancel to stop.");
+        SetPhase(Phase::WatchJoining);
+        return;
+    }
+
+    const ULONGLONG now = GetTickCount64();
+    const char* failure = nullptr;
+    bool stop = wanted < 0 || cancelPressed; // seated by a queue, left, or changed their mind
+    if (!stop) {
+        if (room.slots[wanted] == SlotState::InProgress) g_watchIdleTick = 0;
+        else if (!g_watchIdleTick) g_watchIdleTick = now;
+        else if (now - g_watchIdleTick > 4000) failure = "That match has ended.";
+        if (!failure && now - g_phaseStartTick > 25000)
+            failure = "Could not join the match as a spectator.";
+    }
+    if (stop || failure) {
+        HookLog("LobbyFlow: stopped joining as a spectator (%s)\n", failure ? failure : "cancelled");
+        StopSpectating();
+        g_ui->SetBusy(nullptr);
+        if (failure) g_ui->ShowNotice(failure);
+        SetPhase(Phase::Lobby);
+        return;
+    }
+    TrainingBootConfig config;
+    int cpuMode = 0;
+    bool fiveBars = false;
+    if (Spectate_TakeLaunch(&config, &cpuMode, &fiveBars))
+        BeginSpectateLaunch(config, cpuMode, fiveBars);
+}
+
 void BeginLaunch()
 {
     // The lobby stays on screen (busy overlay) until the boot commits; see
     // LobbyFlow_OnBattleBootCommitted.
+    TrainingBoot_SetSpectatorBoot(false);
+    g_spectating = false;
+    Spectate_RecBegin(); // from here on this match can be watched
     TrainingBoot_PrepareNextBoot(true);
     SetNetworkHandles(g_matchHost, g_matchPeer);
     FrameStepper_InitNetplay();
@@ -1160,8 +1308,9 @@ void RunLobbyFrame(uint64_t titleArea)
         return;
     }
 
+    PumpSpectate();
+    UpdateSpectateJoin(input.cancel);
     UpdateMatchStart(input.cancel);
-
 
     if (Canvas* canvas = Native_BeginFrame()) {
         if (g_entrancePending) {
@@ -1217,7 +1366,8 @@ bool LobbyFlow_IsLobbyVisible()
     // own pause menu (and its Exit Game button) is reachable again.
     if (g_nativeWaitFrames.load(std::memory_order_relaxed) >= kNativeFailedFrames) return false;
     return g_enabled && !g_releasedToMainMenu &&
-           (g_phase == Phase::Lobby || g_phase == Phase::Connecting || g_phase == Phase::Handshake);
+           (g_phase == Phase::Lobby || g_phase == Phase::WatchJoining ||
+            g_phase == Phase::Connecting || g_phase == Phase::Handshake);
 }
 
 void LobbyFlow_DrawOverlay()
@@ -1243,8 +1393,33 @@ void LobbyFlow_DrawOverlay()
             ImVec2(0.0f, 0.0f), ImGui::GetIO().DisplaySize,
             IM_COL32(0, 0, 0, static_cast<int>(black * 255.0f + 0.5f)));
 
+    // Watching: who is playing (and the set score), with the state of the
+    // feed under it when there is something to say.
+    if (g_phase == Phase::InMatch && g_spectating) {
+        char line[sizeof(g_watchLine)];
+        memcpy(line, g_watchLine, sizeof(line));
+        line[sizeof(line) - 1] = '\0';
+        const SpectateStatus status = Spectate_GetStatus();
+        const char* note = status.desynced ? "OUT OF SYNC WITH THE MATCH (FIXES ITSELF NEXT GAME)"
+                         : status.feedLost ? "RECONNECTING..."
+                         : status.catchingUp ? "CATCHING UP..."
+                         : status.waiting ? "WAITING FOR THE MATCH..." : "SPECTATING";
+        const ImVec2 display = ImGui::GetIO().DisplaySize;
+        ImFont* font = ImGui::GetFont();
+        ImDrawList* draw = ImGui::GetBackgroundDrawList();
+        const auto centred = [&](const char* text, float size, float y, ImU32 color) {
+            const ImVec2 extent = font->CalcTextSizeA(size, 100000.0f, 0.0f, text);
+            const ImVec2 at((display.x - extent.x) * 0.5f, y);
+            draw->AddText(font, size, ImVec2(at.x + 2.0f, at.y + 2.0f), IM_COL32(0, 0, 0, 220), text);
+            draw->AddText(font, size, at, color, text);
+        };
+        centred(line, display.y * 0.03f, display.y * 0.012f, IM_COL32(255, 255, 255, 255));
+        centred(note, display.y * 0.022f, display.y * 0.047f,
+                status.desynced ? IM_COL32(255, 110, 90, 255) : IM_COL32(120, 220, 255, 255));
+    }
+
     // Set score during a room match, top centre between the health bars.
-    if (g_phase == Phase::InMatch && g_setFirstTo != 1) {
+    if (g_phase == Phase::InMatch && !g_spectating && g_setFirstTo != 1) {
         char score[48], format[12] = "";
         if (g_setFirstTo > 0) snprintf(format, sizeof(format), "FT%d    ", g_setFirstTo);
         snprintf(score, sizeof(score), "%s%d - %d", format,
@@ -1305,12 +1480,14 @@ bool LobbyFlow_TitleTick(uint64_t titleArea)
             FrameStepper_EndNetplaySession();
             SetNetworkHandles(nullptr, nullptr);
             TrainingBoot_PrepareNextBoot(false);
-            g_service->FinishMatch(false, false);
+            if (g_spectating) StopSpectating();
+            else g_service->FinishMatch(false, false);
             g_ui->SetBusy(nullptr);
             g_ui->ShowNotice("Connection to opponent has been lost.");
             SetPhase(Phase::Lobby);
             return false;
         }
+        PumpSpectate();
         // Keep the room on screen under the busy overlay while the boot waits
         // for the native config load and the initial settings exchange.
         g_service->Pump();
@@ -1333,7 +1510,14 @@ bool LobbyFlow_TitleTick(uint64_t titleArea)
         RetireNativeTitleUnits(titleArea);
         ApplyPressStartState();
         EnsureObjects();
-        if (g_phase == Phase::Returning || g_phase == Phase::InMatch) {
+        if ((g_phase == Phase::Returning || g_phase == Phase::InMatch) && g_spectating) {
+            // Back from watching: nothing of the match was ours.
+            StopSpectating();
+            ResetSet(1);
+            g_ui->ReturnToRoom();
+            g_entrancePending = false;
+            SetPhase(Phase::Lobby);
+        } else if (g_phase == Phase::Returning || g_phase == Phase::InMatch) {
             // Only a set played to its end goes on the room record.
             g_service->FinishMatch(g_setOver, g_setWins[0] > g_setWins[1]);
             if (g_leaveSeatOnReturn.exchange(false, std::memory_order_acq_rel)) {
@@ -1532,15 +1716,34 @@ void LobbyFlow_GameTick()
         static uint32_t tick = 0;
         if (g_service && (g_phase == Phase::Returning || ++tick % 20 == 0)) g_service->Pump();
     }
+    // In the title area the lobby frame pumps the feed; everywhere else, here.
+    if (g_phase == Phase::InMatch || g_phase == Phase::Returning) PumpSpectate();
     if (g_phase != Phase::InMatch) {
         g_returnRequested.store(false, std::memory_order_relaxed);
         return;
     }
 
-    UpdateSet();
-    SampleTeamHealth();
-    if (Netplay_TakePeerDisconnected())
-        LobbyFlow_RequestReturnToLobby("Connection to opponent has been lost.");
+    if (g_spectating) {
+        UpdateWatchText();
+        const Member* local = LocalRoomMember();
+        const ULONGLONG now = GetTickCount64();
+        if (local && local->slot >= 0) {
+            // A queue reached the front: the seat comes before the show.
+            HookLog("LobbyFlow: seated while watching; back to the room\n");
+            LobbyFlow_RequestReturnToLobby("");
+        } else if (!Spectate_GetStatus().feedLost) {
+            g_feedLostTick = 0;
+        } else if (!g_feedLostTick) {
+            g_feedLostTick = now;
+        } else if (now - g_feedLostTick > 10000) {
+            LobbyFlow_RequestReturnToLobby("The connection to the match was lost.");
+        }
+    } else {
+        UpdateSet();
+        SampleTeamHealth();
+        if (Netplay_TakePeerDisconnected())
+            LobbyFlow_RequestReturnToLobby("Connection to opponent has been lost.");
+    }
     if (!g_returnRequested.exchange(false, std::memory_order_acq_rel)) return;
     // After a decided set the other player leaving is the normal ending, and
     // both players leave at almost the same moment: whoever is a frame behind
@@ -1570,9 +1773,27 @@ void LobbyFlow_GameTick()
     SetPhase(Phase::Returning);
 }
 
+bool LobbyFlow_IsSpectating()
+{
+    return g_enabled && g_spectating;
+}
+
+bool LobbyFlow_GetWatchedNames(const char** p1, const char** p2)
+{
+    if (!g_enabled || !g_spectating || !g_watchNames[0][0] || !g_watchNames[1][0]) return false;
+    if (p1) *p1 = g_watchNames[0];
+    if (p2) *p2 = g_watchNames[1];
+    return true;
+}
+
 void LobbyFlow_RequestLeaveMatch()
 {
     if (!LobbyFlow_InRoomMatch()) return;
+    if (g_spectating) {
+        // Only the watching ends; a place in a queue is kept.
+        LobbyFlow_RequestReturnToLobby("");
+        return;
+    }
     g_leaveSeatOnReturn.store(true, std::memory_order_release);
     LobbyFlow_RequestReturnToLobby("");
 }

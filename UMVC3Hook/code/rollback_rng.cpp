@@ -10,6 +10,8 @@
 #include "netplay.h"
 #include "controller.h"
 #include "gameplay_hooks.h"
+#include "spectate.h"
+#include "trainingboot.h"
 
 #include <cstring>
 
@@ -168,6 +170,56 @@ static int __fastcall hkSoundRandomVariant(uint64_t soundContext, void* soundRef
         global[i] = SplitMix32(seed) | (i == 0 ? 1u : 0u); // never all zero
     const int result = oSoundRandomVariant(soundContext, soundRef, variant);
     std::memcpy(global, saved, sizeof(saved));
+    return result;
+}
+
+// uCharacter__selectProfileVariant picks a character's intro (kind 1) and win
+// (kind 2) profile row with percent rolls on the global XorShift, and caches
+// the result on the character. The intro pick is made while the battle is
+// being set up, before the peers' start-up barrier seeds anything: every
+// machine rolled on whatever its own global stream held, so two machines
+// could play different intros, and a different intro draws the character's
+// own RNG differently once the match runs. Online the intro pick rolls on a
+// stream derived from things every machine has (the game number, the six
+// characters, and which character is asking), and the global stream is put
+// back afterwards.
+static constexpr uintptr_t FN_SELECT_PROFILE_VARIANT = 0x140055B50;
+static constexpr uintptr_t FN_CHR_GET_TEAM_INDEX = 0x140004AC0;
+static constexpr uint32_t UCHARACTER_PROFILE_KIND1 = 0x6828;
+static constexpr uint32_t UCHARACTER_DEF_MEMBER_ID = 0x2DAC;
+using SelectProfileVariantFn = uint32_t(__fastcall*)(uint64_t, int, uint64_t, int*);
+static SelectProfileVariantFn oSelectProfileVariant = nullptr;
+extern "C" uint32_t FrameStepper_GetBattleGeneration();
+
+static uint32_t __fastcall hkSelectProfileVariant(uint64_t character, int eventKind,
+                                                  uint64_t opponent, int* outMetadata)
+{
+    if (!Netplay_IsActive() || eventKind != 1 || !character ||
+        *(int32_t*)(character + UCHARACTER_PROFILE_KIND1) >= 0)
+        return oSelectProfileVariant(character, eventKind, opponent, outMetadata);
+
+    // A spectator numbers games as the players do.
+    const uint32_t game = Spectate_IsViewing() ? Spectate_PlayGameId()
+                                               : FrameStepper_GetBattleGeneration();
+    const TrainingBootConfig& roster = TrainingBoot_GetConfig();
+    uint64_t seed = 0x1D7A0C5EEDull ^ ((uint64_t)game << 40);
+    for (int i = 0; i < 3; ++i) {
+        seed = seed * 131 + (uint32_t)roster.p1Chars[i];
+        seed = seed * 131 + (uint32_t)roster.p2Chars[i];
+    }
+    const uint32_t team = ((uint32_t(__fastcall*)(uint64_t))_addr(FN_CHR_GET_TEAM_INDEX))(character);
+    const int32_t member = *(int32_t*)(character + UCHARACTER_DEF_MEMBER_ID);
+    seed = seed * 131 + team * 3 + (uint32_t)member;
+
+    uint32_t* global = (uint32_t*)_addr(GLOBAL_RNG_STATE);
+    uint32_t saved[4];
+    std::memcpy(saved, global, sizeof(saved));
+    for (int i = 0; i < 4; ++i)
+        global[i] = SplitMix32(seed) | (i == 0 ? 1u : 0u); // never all zero
+    const uint32_t result = oSelectProfileVariant(character, eventKind, opponent, outMetadata);
+    std::memcpy(global, saved, sizeof(saved));
+    HookLog("Netplay: intro profile team=%u member=%d row=%u (game %u)\n", team, member, result,
+            game);
     return result;
 }
 
@@ -449,6 +501,14 @@ void Rollback_InitRngHooks()
     } else {
         HookLog("Rollback: failed to hook effect RNG isolation (%d)\n", status);
     }
+
+    status = GameplayHooks_Create((LPVOID)_addr(FN_SELECT_PROFILE_VARIANT),
+                                  (LPVOID)&hkSelectProfileVariant,
+                                  (LPVOID*)&oSelectProfileVariant);
+    if (status == MH_OK)
+        status = GameplayHooks_QueueEnable((LPVOID)_addr(FN_SELECT_PROFILE_VARIANT));
+    if (status != MH_OK)
+        HookLog("Rollback: failed to hook intro profile selection (%d)\n", status);
 
     status = GameplayHooks_Create((LPVOID)_addr(FN_SOUND_RANDOM_VARIANT),
                                   (LPVOID)&hkSoundRandomVariant,

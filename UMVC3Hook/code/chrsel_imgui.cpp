@@ -10,6 +10,8 @@
 #include "netplay.h"
 #include "savedata.h"
 #include "trainingboot.h"
+#include "spectate.h"
+
 #include <Windows.h>
 #include <algorithm>
 #include <cstdint>
@@ -481,6 +483,8 @@ void RandomizeRoster(bool allTeams)
 
 bool CanOpenSelector()
 {
+    if (Spectate_IsViewing())
+        return false;
     if (GetLaunchOption() != LAUNCH_TRAINING &&
         GetLaunchOption() != LAUNCH_DUAL_TRAINING)
         return false;
@@ -1026,6 +1030,19 @@ bool ChrSelImGui_Open()
 
 bool ChrSelImGui_ApplyRestart(int32_t targetFrame)
 {
+    if (Spectate_IsViewing()) {
+        // The roster comes with the match being watched, changed or not.
+        TrainingBootConfig watched;
+        uint32_t seed = 0;
+        if (!Spectate_GetRestart(&watched, &seed) || !TrainingBoot_RestartWithConfig(watched))
+            return false;
+        Spectate_OnRestartApplied();
+        g_fullTransitionRequested = true;
+        g_pendingRoster = false;
+        g_pendingTargetFrame = -1;
+        HookLog("ChrSelImGui: spectator restart queued at frame %d\n", targetFrame);
+        return true;
+    }
     RosterConfig restartRoster = {};
     if (g_pendingRoster) {
         if (targetFrame != g_pendingTargetFrame ||

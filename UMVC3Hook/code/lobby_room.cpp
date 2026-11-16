@@ -25,7 +25,7 @@ constexpr char kBanKey[] = "ban";
 constexpr char kFirstToKey[] = "ft";     // lobby data: games needed to win a set
 constexpr char kRotationKey[] = "rot";   // lobby data: Rotation, as a number
 constexpr int kMaxBans = 64;
-constexpr int kMemberVersion = 6;
+constexpr int kMemberVersion = 7;
 constexpr uint8_t kChatText = 'C';       // lobby chat payload: 'C' + UTF-8
 constexpr uint32_t kRefreshInterval = 6; // frames between room rebuilds
 
@@ -74,14 +74,17 @@ bool IsPlausibleTeam(const Team& team)
 void EncodeMember(char* out, size_t size, int slot, int side, bool ready, MemberStatus status,
                   bool accepted, int delayPick, const Team& team, int wins, int losses,
                   int setWins, int queueSlot, uint32_t queueSeq, int delayHover,
-                  const uint8_t health[3])
+                  const uint8_t health[3], int watchSlot, uint32_t watchSeq, uint64_t upstream)
 {
-    snprintf(out, size, "%d|%d|%d|%d|%d|%d|%d|%d,%d,%d|%d,%d,%d|%d,%d,%d|%d|%d|%d|%d|%u|%d|%d,%d,%d",
+    snprintf(out, size,
+             "%d|%d|%d|%d|%d|%d|%d|%d,%d,%d|%d,%d,%d|%d,%d,%d|%d|%d|%d|%d|%u|%d|%d,%d,%d|%d|%u|%u,%u",
              kMemberVersion, slot, side, ready ? 1 : 0, static_cast<int>(status),
              accepted ? 1 : 0, delayPick,
              team.chars[0], team.chars[1], team.chars[2], team.assists[0], team.assists[1],
              team.assists[2], team.colors[0], team.colors[1], team.colors[2], wins, losses,
-             setWins, queueSlot, queueSeq, delayHover, health[0], health[1], health[2]);
+             setWins, queueSlot, queueSeq, delayHover, health[0], health[1], health[2],
+             watchSlot, watchSeq, static_cast<unsigned>(upstream >> 32),
+             static_cast<unsigned>(upstream & 0xFFFFFFFFu));
 }
 
 bool DecodeMember(const char* text, Member& member)
@@ -90,14 +93,17 @@ bool DecodeMember(const char* text, Member& member)
     int setWins = 0, delayPick = kDelayPickNone, queueSlot = -1, delayHover = kDelayPickNone;
     unsigned queueSeq = 0;
     int health[3] = {kHealthUnknown, kHealthUnknown, kHealthUnknown};
+    int watchSlot = -1;
+    unsigned watchSeq = 0;
+    unsigned upstreamHigh = 0, upstreamLow = 0;
     Team team = {};
-    if (!text || sscanf(text, "%d|%d|%d|%d|%d|%d|%d|%d,%d,%d|%d,%d,%d|%d,%d,%d|%d|%d|%d|%d|%u|%d|%d,%d,%d", &version,
+    if (!text || sscanf(text, "%d|%d|%d|%d|%d|%d|%d|%d,%d,%d|%d,%d,%d|%d,%d,%d|%d|%d|%d|%d|%u|%d|%d,%d,%d|%d|%u|%u,%u", &version,
                         &slot, &side, &ready, &status, &accepted, &delayPick, &team.chars[0],
                         &team.chars[1],
                         &team.chars[2], &team.assists[0], &team.assists[1], &team.assists[2],
                         &team.colors[0], &team.colors[1], &team.colors[2], &wins, &losses,
                         &setWins, &queueSlot, &queueSeq, &delayHover, &health[0], &health[1],
-                        &health[2]) != 25)
+                        &health[2], &watchSlot, &watchSeq, &upstreamHigh, &upstreamLow) != 29)
         return false;
     if (version != kMemberVersion) return false;
     if (slot < -1 || slot >= kMaxSlots || side < 0 || side > 2 || status < 0 ||
@@ -115,6 +121,11 @@ bool DecodeMember(const char* text, Member& member)
     // Seated players are not waiting for anything.
     member.queueSlot = static_cast<int8_t>(slot >= 0 || queueSlot < 0 || queueSlot >= kMaxSlots ? -1 : queueSlot);
     member.queueSeq = queueSeq;
+    // Nobody watches from a seat.
+    member.watchSlot = static_cast<int8_t>(slot >= 0 || watchSlot < 0 || watchSlot >= kMaxSlots ? -1 : watchSlot);
+    member.watchSeq = watchSeq;
+    member.upstream = member.watchSlot >= 0
+        ? (static_cast<uint64_t>(upstreamHigh) << 32) | upstreamLow : 0;
     for (int i = 0; i < 3; ++i)
         member.health[i] = static_cast<uint8_t>(health[i] < 0 || health[i] > 100 ? kHealthUnknown : health[i]);
     member.team = team;
@@ -239,6 +250,8 @@ void SteamRoomService::Leave()
     ClearHandshake();
     handshakeOpponent_ = 0;
     local_.queueSlot = -1;
+    local_.watchSlot = -1;
+    local_.upstream = 0;
     local_.status = MemberStatus::Idle;
     local_.wins = 0;
     local_.losses = 0;
@@ -312,11 +325,11 @@ void SteamRoomService::Kick(uint64_t memberId)
 void SteamRoomService::PublishLocal()
 {
     if (!SteamRoom_IsActive()) return;
-    char encoded[160];
+    char encoded[192];
     EncodeMember(encoded, sizeof(encoded), local_.slot, local_.side, local_.ready, local_.status,
                  local_.accepted, local_.delayPick, local_.team, local_.wins, local_.losses,
                  local_.setWins, local_.queueSlot, local_.queueSeq, local_.delayHover,
-                 local_.health);
+                 local_.health, local_.watchSlot, local_.watchSeq, local_.upstream);
     SteamRoom_SetLocalData(kMemberKey, encoded);
     publishedOnce_ = true;
 }
@@ -328,6 +341,8 @@ void SteamRoomService::Sit(int slot, int side)
     local_.slot = slot;
     local_.side = side;
     local_.queueSlot = -1;
+    local_.watchSlot = -1; // a seat ends any watching
+    local_.upstream = 0;
     ClearHandshake();
     local_.status = MemberStatus::Seated;
     PublishLocal();
@@ -375,6 +390,42 @@ void SteamRoomService::LeaveQueue()
     local_.queueSlot = -1;
     PublishLocal();
     RefreshRoom();
+}
+
+void SteamRoomService::Watch(int slot)
+{
+    if (!room_.inRoom || slot < 0 || slot >= room_.settings.slotCount || local_.slot >= 0 ||
+        local_.status == MemberStatus::Fighting)
+        return;
+    // Later than everyone already watching, by the same clockless rule as
+    // the queues: a spectator is only ever fed by one who came before.
+    uint32_t last = 0;
+    for (int i = 0; i < room_.memberCount; ++i)
+        if (room_.members[i].watchSlot >= 0 && room_.members[i].watchSeq > last)
+            last = room_.members[i].watchSeq;
+    local_.watchSlot = slot;
+    local_.watchSeq = last + 1;
+    local_.upstream = 0;
+    local_.status = MemberStatus::Watching;
+    PublishLocal();
+    RefreshRoom();
+}
+
+void SteamRoomService::StopWatching()
+{
+    if (local_.watchSlot < 0) return;
+    local_.watchSlot = -1;
+    local_.upstream = 0;
+    if (local_.status == MemberStatus::Watching) local_.status = MemberStatus::Idle;
+    PublishLocal();
+    RefreshRoom();
+}
+
+void SteamRoomService::SetUpstream(uint64_t memberId)
+{
+    if (local_.watchSlot < 0 || local_.upstream == memberId) return;
+    local_.upstream = memberId;
+    PublishLocal();
 }
 
 // The head of a slot's queue takes a seat there as soon as one is open. Each
@@ -639,6 +690,9 @@ void SteamRoomService::RefreshRoom()
             member.setWins = static_cast<int8_t>(local_.setWins);
             member.queueSlot = static_cast<int8_t>(local_.slot >= 0 ? -1 : local_.queueSlot);
             member.queueSeq = local_.queueSeq;
+            member.watchSlot = static_cast<int8_t>(local_.slot >= 0 ? -1 : local_.watchSlot);
+            member.watchSeq = local_.watchSeq;
+            member.upstream = local_.upstream;
             memcpy(member.health, local_.health, sizeof(member.health));
             member.pingMs = 0;
         } else {
@@ -651,10 +705,13 @@ void SteamRoomService::RefreshRoom()
                 member.delayPick = kDelayPickNone;
                 member.delayHover = kDelayPickNone;
                 member.queueSlot = -1;
+                member.watchSlot = -1;
+                member.upstream = 0;
                 memset(member.health, kHealthUnknown, sizeof(member.health));
                 member.status = MemberStatus::Idle;
             }
             if (member.slot >= next.settings.slotCount) member.slot = -1;
+            if (member.watchSlot >= next.settings.slotCount) member.watchSlot = -1;
             if (member.queueSlot >= next.settings.slotCount) member.queueSlot = -1;
             member.pingMs = static_cast<int16_t>(SteamRoom_EstimateMemberPing(id));
             // A live connection to this member knows better than the estimate.
@@ -854,6 +911,8 @@ void SteamRoomService::Pump()
         ClearHandshake();
         handshakeOpponent_ = 0;
         local_.queueSlot = -1;
+        local_.watchSlot = -1;
+        local_.upstream = 0;
         local_.status = MemberStatus::Idle;
         local_.wins = 0;
         local_.losses = 0;
