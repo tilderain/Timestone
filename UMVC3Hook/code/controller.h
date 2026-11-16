@@ -193,3 +193,4 @@ extern int32_t      g_remoteFrameAdvantage;   // received from peer (their local
 // Spectators (spectate.h): frame boundaries of a match played from the log.
 extern "C" int32_t  Controller_SpectatorFrameStart();
 extern "C" void     Controller_SpectatorFrameEnd(int32_t frame, int32_t fastForwarded);
+extern "C" void     Controller_AdvanceFrameCounter(int32_t frames);

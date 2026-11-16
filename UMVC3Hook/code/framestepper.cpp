@@ -566,6 +566,8 @@ static ULONGLONG g_spectatorHoldSince = 0;
 static bool g_spectatorShowWait = false;
 static constexpr ULONGLONG SPECTATOR_WAIT_NOTICE_MS = 1500;
 static constexpr ULONGLONG SPECTATOR_CATCH_UP_BUDGET_MS = 24;
+// Snapshots taken for a spectator's catch-up are still held.
+static bool g_spectatorResimSnapshots = false;
 
 static bool SpectatorFrameStart(void* sMvc3Main)
 {
@@ -610,10 +612,24 @@ static bool SpectatorFrameStart(void* sMvc3Main)
         break;
     }
     g_spectatorHoldSince = 0;
-    // Catching up: whole native ticks, just not paced and not drawn, so a
-    // caught-up frame is simulated exactly like a watched one. As many as
-    // fit in the time one drawn frame can spare.
-    if (fastForward > 0) {
+        // Whole native ticks, just not paced and not drawn; as many as fit
+        // in the time one drawn frame can spare.
+    // Catching up. In the fight, the rollback path itself: snapshot the frame
+    // the game is on and re-simulate forward from it, the "present" being
+    // `fastForward` frames on. Calling the headless tick on its own, without
+    // the snapshot and restore around it, left the point characters' RNG
+    // different from the players'. Re-simulation is a fight-time tool (its
+    // clean-up touches the battle HUD, which the intro does not have yet),
+    // so everywhere else the frames are run as undrawn live ticks.
+    if (fastForward > 0 && step == 5 && Rollback_CanReSimulate()) {
+        Rollback_SaveSnapshot(frame);
+        Controller_AdvanceFrameCounter(fastForward);
+        Rollback_ReSimulate(frame, frame + fastForward);
+        g_spectatorResimSnapshots = true;
+        frame = Controller_SpectatorFrameStart();
+        if (frame < 0)
+            return true;
+    } else if (fastForward > 0) {
         const ULONGLONG started = GetTickCount64();
         Rollback_SetUndrawnLiveTicks(true);
         for (int32_t i = 0; i < fastForward && frame >= 0; ++i) {
@@ -626,6 +642,11 @@ static bool SpectatorFrameStart(void* sMvc3Main)
         Rollback_SetUndrawnLiveTicks(false);
         if (frame < 0)
             return true;
+    }
+    if (fastForward == 0 && g_spectatorResimSnapshots) {
+        // Caught up: nothing will be rolled back to, so nothing is retained.
+        g_spectatorResimSnapshots = false;
+        Rollback_FreeSnapshots();
     }
     g_spectatorFrame = frame;
     return true;

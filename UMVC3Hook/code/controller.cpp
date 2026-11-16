@@ -1893,6 +1893,14 @@ extern "C" void Controller_SpectatorFrameEnd(int32_t frame, int32_t fastForwarde
     }
 }
 
+// Moves the native frame cursor past frames simulated without it.
+extern "C" void Controller_AdvanceFrameCounter(int32_t frames)
+{
+    uint64_t sReplay = *(uint64_t*)_addr(G_PSREPLAY_PTR);
+    if (sReplay && frames > 0)
+        *(int32_t*)(sReplay + 0x54) += frames;
+}
+
 static void PublishFrameInput(bool frameComplete)
 {
     if (!Netplay_IsActive() || g_isResimulating || g_netFrameCount < 0)

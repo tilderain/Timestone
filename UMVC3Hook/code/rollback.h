@@ -78,6 +78,8 @@ void Rollback_RestoreSnapshot(int32_t frame);
 // Restore startFrame, then run headless ticks for [startFrame, endFrame).
 // Multi-resim refreshes corrected snapshots, reusing the start snapshot when valid.
 void Rollback_ReSimulate(int32_t startFrame, int32_t endFrame);
+// False until the first live tick after a reset has registered the game.
+bool Rollback_CanReSimulate();
 
 // While set, a live tick neither paces itself nor draws: the whole native
 // frame runs, exactly as a drawn one, and nothing is presented. A spectator

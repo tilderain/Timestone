@@ -619,17 +619,26 @@ A spectator runs the netplay client path against a virtual opponent:
   game's waiting notice is shown), play, restart (the log says the game was
   restarted: the same synchronized restart runs with the logged roster) or
   leave (the match ended).
-- Catching up: with more than 90 frames buffered, up to 8 extra ticks are
-  run per drawn frame (24 ms budget) with `Rollback_SetUndrawnLiveTicks`:
-  the whole native tick runs, only `sMain::move`'s pacing and the render
-  end-frame call are skipped. Sounds of those ticks play as they come.
-  The first version used the headless re-simulation tick instead; in the
-  2026-11-16 tests the intro checks (frames 60, 120, drawn) matched the
-  players and every check after a headless stretch differed in the two point
-  characters' RNG only, with positions drifting by a unit a few seconds
-  later. The headless tick is only equivalent to a live one after a snapshot
-  restore, which a spectator does not have. `kFastForward` in `spectate.cpp`
-  turns catching up off.
+- Catching up: with more than 90 frames buffered, up to 15 frames are
+  simulated ahead of each drawn one, two ways (`SpectatorFrameStart`):
+  - In the fight (action step 5), the rollback path itself:
+    `Rollback_SaveSnapshot` of the current frame, the native frame counter
+    moved on by the batch, then `Rollback_ReSimulate` over the batch. The
+    snapshots are freed once caught up.
+  - Anywhere else (the intro above all), undrawn live ticks
+    (`Rollback_SetUndrawnLiveTicks`): the whole native tick, with only
+    `sMain::move`'s pacing and the render end-frame call skipped, within a
+    24 ms budget. Re-simulating in the intro crashed in the HUD clean-up.
+  History, from the 2026-11-16 tests: the first version called the headless
+  tick directly, with no snapshot or restore around it. The intro checks
+  (frames 60 and 120, drawn) matched the players and every check after such
+  a stretch differed in the two point characters' RNG only, with positions
+  drifting a few seconds later. Which of the three differences from a real
+  rollback was responsible (no restore, no per-frame saves, frame counter
+  left behind) was not isolated. The user reported the rollback-path version
+  in sync; the log of that run was not kept, so it is not known whether the
+  fight-time path ran in it. `kFastForward` in `spectate.cpp` turns
+  catching up off.
 - Every 60 frames the spectator's checksum is compared with the players'. A
   mismatch is logged (`Spectate: out of sync...`) and shown; the next game
   starts from a fresh restart either way.

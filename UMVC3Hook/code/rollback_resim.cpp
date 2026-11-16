@@ -112,6 +112,11 @@ void Rollback_SetMainInstance(uint64_t main)
     if (!g_mainInstance) g_mainInstance = main;
 }
 
+bool Rollback_CanReSimulate()
+{
+    return g_mainInstance != 0 && !g_isResimulating;
+}
+
 void Rollback_InitReSimulationHooks()
 {
     Rollback_InitMainHooks(&g_originalMainMove);
