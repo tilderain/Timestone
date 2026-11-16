@@ -10,7 +10,6 @@ namespace {
 // Paths and pixel sizes read from the retail archives (ui\cmn, ui\netroom,
 // ui\mnmain). Order must match enum Tex.
 const TexInfo kTextures[TEX_COUNT] = {
-    {"ui\\mainmenu\\ma_sprite\\meku_menu_co00_BM_NOMIP", 1280, 720, ARC_NETROOM, false},
     {"ui\\ui_filter\\white_BM_HQ_NOMIP", 32, 32, ARC_COMMON, false},
     {"ui\\net\\net_sprite\\ga_net_waku_a_BM_HQ_NOMIP", 1024, 64, ARC_NETROOM, false},
     {"ui\\net\\net_sprite\\ga_net_waku_f_BM_HQ_NOMIP", 64, 128, ARC_NETROOM, false},

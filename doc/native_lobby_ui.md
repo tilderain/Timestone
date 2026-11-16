@@ -4,8 +4,10 @@
 Native facts are from static analysis in Ghidra 8192 (`umvc3.exe.unpacked.exe`)
 and from decoding the retail UI archives offline. The plugin code builds
 (`make -j8`) and its screens are verified by an offline renderer against the
-real game textures. The first in-game run (2026-11-15) reached the title area, loaded the archive
-and resolved all three prototypes; drawing has not been confirmed yet.
+real game textures. In-game runs on 2026-11-15 confirmed drawing: layout,
+frames, anchors, colours, draw order and both fonts match the offline preview.
+Two differences found from those screenshots are recorded under Text and
+Drawing below. The match and return-to-lobby flow is still untested in game.
 Sections say "verified" when a statement was read from decompilation or
 resource bytes, and "unverified" when it is an inference that the first
 in-game run has to confirm.
@@ -57,7 +59,7 @@ Struct layouts are in the Ghidra database (`uBaseSprite`, `uCoord`, `cUnit`,
 | `+0x50` | `mPos` | UI pixels |
 | `+0x70` | `mScale` | |
 | `+0x108` | `mGeometryDirty` | must be set after changing size/UV/anchor/colour |
-| `+0x310` | `mColor` | four bytes; R,G,B,A order is **unverified** (see checklist) |
+| `+0x310` | `mColor` | four bytes in R,G,B,A order (confirmed in game) |
 | `+0x330` | `mSize` | frames: size of the stretched centre |
 | `+0x338/+0x340` | `mUV0`, `mUV1` | |
 | `+0x350` | texture `cResource*` | font units store their font texture here |
@@ -106,7 +108,16 @@ map and matches the property names found in `.sdl` files.
   language, outline flag, text flags and `mAttr`. Position, scale and colour
   are applied at draw time, so they do not need a relayout. Alignment is baked
   in at layout, so the backend marks `mCachedMsgId` stale when a pooled unit's
-  anchor changes (anchor semantics for fonts are **unverified**).
+  anchor changes.
+- Scale is applied twice. `uUiAnmSpriteFont__rebuildTextQuadGeometry`
+  `0x1402CB440` lays glyphs out at `cell * mScale` and then transforms them by
+  the world matrix, which carries `mScale` again, so on-screen size goes with
+  `mScale` squared (confirmed in game). The backend passes `sqrt(scale)`.
+- The horizontal anchor works as for sprites. The vertical one does not for a
+  single line: `uUiAnmSpriteFont__measureResolvedText` `0x1402CF3B0` only adds
+  height per line break, so the measured height is 0 and the text's top sits at
+  the anchor (confirmed in game). The backend offsets `y` by half or a whole
+  cell itself.
 - `uUiAnmSpriteFont__fontType__setter` `0x1402CE4E0` swaps font texture and
   metrics. Glyph cell is 32 px for `nrodinpro` and 64 px for `bada_b`.
 - Font metrics (`.fsd`, type `0x1DB58B09`) are a table of advance widths; glyph
@@ -214,6 +225,12 @@ each frame the backend checks that the scheduler, the prototypes and the first
 and last clone of each pool still have the expected vtable and an alive state,
 and rebuilds from scratch if not.
 
+The backdrop is the title area's own animated key art, dimmed with a
+full-screen fill. The native lobby's comic plate
+(`ui\mainmenu\ma_sprite\meku_menu_co00_BM_NOMIP`) loads but did not draw
+through a cloned sprite in game. It is the only DXT1 texture that was tried;
+every `_HQ_` texture (format `0x2A`) draws. The cause is not established.
+
 ### Rooms
 
 - A room is a Steam lobby tagged `TimestoneRoom=1` (not `Timestone=1`, so
@@ -254,11 +271,11 @@ menu (with Exit Game) becomes available again.
    on a black screen, `aTitle::load` is not completing.
 2. `LobbyNative: ready sprite=... frame=... font=...`. If prototypes stay
    missing, the layout name or the archive language suffix is wrong.
-3. Colours: if reds and blues are swapped, flip the byte order in
-   `PackColor`.
-4. Text: alignment of right-aligned and centred strings, heading font size,
-   and whether names with non-Latin characters render.
-5. Draw order: later commands must appear above earlier ones.
+3. Colours: confirmed correct.
+4. Text: right-aligned and centred strings confirmed. Still to check after the
+   size and vertical-offset fix: small labels match the preview, and names
+   with non-Latin characters render.
+5. Draw order: confirmed.
 6. Input: pad and keyboard both navigate; footer glyphs follow the last
    device used.
 7. Two clients: create, join, sit, ready, match starts, "Return to Lobby"

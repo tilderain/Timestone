@@ -796,9 +796,11 @@ void LobbyUi::Draw(Canvas& canvas)
 
 void LobbyUi::DrawBackdrop(Canvas& canvas) const
 {
-    // Same comic-cover plate the native lobby uses, pushed back so text reads.
-    canvas.Sprite(TEX_BG_COMIC, 0.0f, 0.0f, kScreenW, kScreenH, kFullUv, A_TL,
-                  Color{0.27f, 0.29f, 0.35f, 1.0f});
+    // The title area keeps animating its key art behind the lobby; it is
+    // pushed far back so panels and text read. (The native lobby's own comic
+    // plate is a DXT1 texture that the cloned HQ sprite does not draw.)
+    canvas.Sprite(TEX_WHITE, 0.0f, 0.0f, kScreenW, kScreenH, Uv{0.25f, 0.25f, 0.75f, 0.75f}, A_TL,
+                  Color{0.02f, 0.03f, 0.07f, 0.74f});
     canvas.Sprite(TEX_WHITE, 0.0f, 0.0f, kScreenW, 132.0f, Uv{0.25f, 0.25f, 0.75f, 0.75f}, A_TL,
                   Color{0.0f, 0.0f, 0.0f, 0.38f});
 }

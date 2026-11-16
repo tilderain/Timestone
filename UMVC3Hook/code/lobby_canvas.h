@@ -45,7 +45,6 @@ constexpr Uv kFullUv{0.0f, 0.0f, 1.0f, 1.0f};
 // Native texture resources. Every entry is an existing game asset; nothing is
 // shipped by the plugin. The archive column says which .arc must be resident.
 enum Tex : uint8_t {
-    TEX_BG_COMIC,        // 1280x720 comic-cover backdrop used by the native lobby
     TEX_WHITE,           // 1x1-style white for flat fills
     TEX_TITLE_BAR,       // ga_net_waku_a   1024x64 blue gradient bar
     TEX_PANEL_DARK,      // ga_net_waku_f   dark translucent panel (9-slice)

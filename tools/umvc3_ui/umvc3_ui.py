@@ -42,6 +42,7 @@ TYPE_FSD = 0x1DB58B09
 UNIT_KINDS = {0x7942324B: 'sprite', 0x4AF926B7: 'frame', 0x518E722D: 'text'}
 # Archives the lobby draws from, relative to nativePCx64/ui.
 LOBBY_ARCHIVES = ('cmn', 'netroom', 'mnmain')
+UNDERLAY = 'meku_menu_co00_BM_NOMIP'
 DEFAULT_CACHE = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'build', 'ui_cache')
 
 
@@ -288,7 +289,7 @@ def sdl_summary(path, frame=0):
         print('%4d %-7s %-24s pos=%s size=%s anchor=%s depth=%s tex=%s%s' % (
             unit['index'], kind, unit['name'], pos and tuple(round(v, 1) for v in pos[:2]),
             size and tuple(round(v, 1) for v in size[:2]), first('mCenterAttr'), first('mDepth'),
-            (first('LocalizeBaseTexture') or '').split('\\')[-1],
+            str(first('LocalizeBaseTexture') or '').split('\\')[-1],
             ' anim=' + ','.join(animated) if animated else ''))
 
 
@@ -428,6 +429,11 @@ class Renderer:
     def render(self, commands, out_path, size=(1280, 720)):
         from PIL import Image
         canvas = Image.new('RGBA', size, (8, 8, 16, 255))
+        # Stand-in for the live title art the lobby is drawn over in game.
+        try:
+            canvas.alpha_composite(self.texture(UNDERLAY).convert('RGBA').resize(size))
+        except (KeyError, OSError):
+            pass
         ordered = sorted(enumerate(commands), key=lambda item: (-item[1].get('depth', 0), item[0]))
         missing = set()
         for _index, command in ordered:

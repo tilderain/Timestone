@@ -8,6 +8,7 @@
 
 #include <Windows.h>
 #include <atomic>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -423,7 +424,18 @@ public:
         // (uUiAnmSpriteFont__isTextGeometryDirty compares the two).
         if (Field<uint32_t>(unit, SPRITE_CENTER_ATTR) != static_cast<uint32_t>(anchor))
             Field<int32_t>(unit, FONT_CACHED_MSG_ID) = Field<int32_t>(unit, FONT_MSG_INDEX) - 1;
-        ApplyPlacement(unit, x, y, scale, scale, anchor, color);
+        // Two engine quirks, both read from rebuildTextQuadGeometry
+        // (0x1402CB440) and measureResolvedText (0x1402CF3B0):
+        //  - glyph quads are laid out at cell * mScale and then transformed
+        //    by the world matrix, which carries mScale again, so on-screen
+        //    size goes with mScale squared;
+        //  - the measured height only counts line breaks, so a single line is
+        //    always placed with its top at the anchor whatever the row.
+        // The canvas contract is linear scale and a true vertical anchor.
+        const float cell = font == FONT_HEADING ? 64.0f : 32.0f;
+        const float unitScale = sqrtf(scale > 0.0f ? scale : 0.0f);
+        const float top = y - static_cast<float>(anchor / 3) * 0.5f * cell * scale;
+        ApplyPlacement(unit, x, top, unitScale, unitScale, anchor, color);
     }
 };
 
