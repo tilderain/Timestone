@@ -262,13 +262,22 @@ every `_HQ_` texture (format `0x2A`) draws. The cause is not established.
 ### Leaving for the main menu
 
 "MAIN MENU" on the lobby's top screen (or cancel there, after a prompt) hands
-the title area back to the game: the lobby's units are killed, any room is
-left, `aTitle+0xA0` (`mPresentationMode`) is reset to `-1` and
-`aTitle__setPresentationMode(area, 1)` `0x140216600` spawns `uMenuMain`, the
-same call the press-start screen makes. From then on the title hook runs the
-native `aTitle::move`. The plugin's Esc menu shows "Online Lobby" while the
-title area is running; it retires `uMenuMain` again and rebuilds the lobby.
-Going to the main menu this way is confirmed in game.
+the title area back to the game, and "Online" on that main menu (or "Online
+Lobby" in the plugin's Esc menu) takes it back. Both directions reload the
+title area instead of touching menu units: `BeginTitleReload` sets the
+`sGameUi` boot state (`+0x5798`; 1 = main menu with music and camera, 0 =
+press-start screen) and queues `aTitle` again. `sArea__applyPendingAreaTransition`
+`0x140545640` rebuilds the leaf even when the target equals the current area,
+and `aTitle__init` runs `sUnit__killAll`. The outgoing area's
+`mPresentationMode` (`+0xA0`) is overwritten with a marker so the first tick of
+the rebuilt area can be recognised even at the same address. The lobby then
+takes over a fresh press-start screen exactly as it does at boot; returning
+from a match also sets boot state 0 for the same reason.
+
+An earlier version spawned `uMenuMain` with `aTitle__setPresentationMode`
+`0x140216600` and killed it by hand. In game that left the menu layout, the
+status bar and the license hotkey alive and could produce two menus. Do not go
+back to it.
 
 The press-start screen is skipped, so `ReleaseToMainMenu` applies what
 `uMenuTitle__move` `0x1403F7DB0` sets on Start: player 0's pad slot
@@ -286,12 +295,14 @@ to its out parameter on decide). While released, the thunk is answered "ready"
 for those three only (the navigation one only for `uMenuMain` units, told
 apart by DTI `0x140D6AE60`). A pad or keyboard decide on item 1 is taken
 before the menu sees it, because its own handler starts the native network
-entry and leaves the menu half torn down: the plugin plays the decide cue,
-fades to black with an ImGui rectangle (200 ms), kills the menu and fades the
-lobby in (250 ms) once it can draw. `uMenuMain::kill` does not always take
-its layout scheduler (unit reference at `+0xD0`, getter `0x1402B6D80`) with
-it, so that is killed explicitly. Native modes started from that menu run with the lobby's
-launch option still set, which has not been exercised either.
+entry: the plugin plays the decide cue, fades to black with an ImGui rectangle
+(200 ms), reloads the title area and fades the lobby in (250 ms) once it can
+draw. Leaving the lobby uses the same fade.
+
+`HideNativeMenuChrome` still clears the guide mode
+(`sMvc3Guide__setUiGuideMode` `0x1402837C0`, `sMvc3Guide+0x4B0`) and disarms
+the license hotkey (`sLicense__handleReturnToTitleFlag` `0x140279680`) every
+lobby frame as a second line of defence.
 
 ## First in-game run: what to check
 

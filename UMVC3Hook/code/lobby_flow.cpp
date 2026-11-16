@@ -45,9 +45,6 @@ constexpr uintptr_t ATITLE_DTI = 0x140D506E8;
 constexpr size_t ATITLE_TITLE_MENU = 0x90; // uMenuTitle*
 constexpr size_t ATITLE_MAIN_MENU = 0x98;  // uMenuMain*
 constexpr size_t ATITLE_PRESENTATION_MODE = 0xA0;
-// (aTitle*, mode): mode 1 spawns uMenuMain. It is what the press-start
-// screen invokes to open the main menu; it does nothing if the mode matches.
-constexpr uintptr_t ATITLE_SET_PRESENTATION_MODE = 0x140216600;
 // What uMenuTitle::move (0x1403F7DB0) sets up when Start is pressed, which the
 // lobby skips by retiring that unit: the menu-controlling pad for player 0
 // (sMvc3Manager+0x140), two sGameUi bytes it clears, and (doc/pad.md) the
@@ -76,9 +73,30 @@ constexpr uintptr_t MTOBJECT_VT_GET_DTI = 0x20;
 // some states, so the lobby kills it explicitly.
 constexpr size_t UMENUMAIN_LAYOUT_REF = 0xD0;
 constexpr uintptr_t UNIT_REF_GET = 0x1402B6D80;
+// Menu chrome that outlives uMenuMain: the guide/status bar mode that
+// uMenuMainBase::setup selects (sMvc3Guide+0x4B0, 0 = none) and the license
+// card hotkey, which the menu's navigation state arms every frame
+// (sLicense LicAttr bit 1) and only an explicit call disarms.
+constexpr uintptr_t SMVC3GUIDE_GET_INSTANCE = 0x140001AE0;
+constexpr uintptr_t SMVC3GUIDE_SET_UI_GUIDE_MODE = 0x1402837C0; // (this, mode)
+constexpr uintptr_t SLICENSE_GET_INSTANCE = 0x140004750;
+constexpr uintptr_t SLICENSE_DISARM_CARD = 0x140279680;
 constexpr ULONGLONG kOnlineFadeOutMs = 200;
 constexpr ULONGLONG kOnlineFadeInMs = 250;
-constexpr ULONGLONG kOnlineFadeLimitMs = 3000; // never leave the screen black
+constexpr ULONGLONG kOnlineFadeLimitMs = 6000; // never leave the screen black
+// sGameUi boot state selects what aTitle::init builds: 0 the press-start
+// screen, 1 the main menu with its music and camera.
+constexpr size_t SGAMEUI_BOOT_STATE = 0x5798;
+// Saved cursor of the main menu (sGameUi::mMenuCursorPos[0]), read by
+// uMenuMain__getInitialSelection.
+constexpr size_t SGAMEUI_MAINMENU_CURSOR = 0x57B0;
+constexpr int32_t kBootStateTitle = 0;
+constexpr int32_t kBootStateMainMenu = 1;
+// Written to the outgoing aTitle's mPresentationMode while a reload is queued.
+// aTitle::init sets that field to 0 or 1, so the first tick that does not see
+// the marker belongs to the rebuilt area (which may reuse the same address).
+constexpr int32_t kReloadMarker = 0x5A5A0001;
+constexpr ULONGLONG kReloadTimeoutMs = 8000;
 constexpr uint32_t CUNIT_FIX = 0x2000; // uMenuMain::kill keeps its layout alive while set
 constexpr size_t SGAMEUI_TITLE_BYTE_1 = 0x5C40;
 constexpr size_t SGAMEUI_TITLE_BYTE_2 = 0x5EA8;
@@ -111,6 +129,13 @@ std::atomic<ULONGLONG> g_releasedTitleTick{0};
 // the lobby can draw, then fades in. Read by the overlay (render thread).
 std::atomic<ULONGLONG> g_fadeOutStart{0}, g_fadeInStart{0};
 std::atomic<bool> g_fadeHold{false};
+// Game thread only.
+bool g_titleReloadPending = false;
+int32_t g_titleReloadSavedMode = 0;
+ULONGLONG g_titleReloadStart = 0;
+bool g_onlineChosen = false;        // main menu: Online picked, fading out
+bool g_releaseNeedsInput = false;   // main menu: input state owed after the reload
+ULONGLONG g_mainMenuReleaseAt = 0;  // lobby: MAIN MENU picked, fading out
 
 std::unique_ptr<SteamRoomService> g_service;
 std::unique_ptr<LobbyUi> g_ui;
@@ -308,6 +333,69 @@ void RetireNativeTitleUnits(uint64_t titleArea)
 }
 
 
+void StartBlack()
+{
+    if (g_fadeHold.load(std::memory_order_relaxed)) return;
+    g_fadeInStart.store(0, std::memory_order_relaxed);
+    g_fadeOutStart.store(GetTickCount64(), std::memory_order_relaxed);
+    g_fadeHold.store(true, std::memory_order_release);
+}
+
+void LiftBlack()
+{
+    if (g_fadeHold.exchange(false, std::memory_order_acq_rel))
+        g_fadeInStart.store(GetTickCount64(), std::memory_order_release);
+}
+
+// Rebuilds the title area the way the game does: aTitle::init kills every
+// unit and builds the screen the boot state asks for. Killing or spawning
+// menu units by hand left layouts, the status bar and duplicate menus behind.
+void BeginTitleReload(uint64_t titleArea, int32_t bootState)
+{
+    using GetInstance = uint64_t(__fastcall*)();
+    if (const uint64_t gameUi = reinterpret_cast<GetInstance>(_addr(SGAMEUI_GET_INSTANCE))())
+        *reinterpret_cast<int32_t*>(gameUi + SGAMEUI_BOOT_STATE) = bootState;
+    int32_t& mode = *reinterpret_cast<int32_t*>(titleArea + ATITLE_PRESENTATION_MODE);
+    if (!g_titleReloadPending) g_titleReloadSavedMode = mode;
+    StartBlack();
+    if (!RequestTitleArea()) {
+        HookLog("LobbyFlow: sArea is unavailable; cannot reload the title area\n");
+        return;
+    }
+    mode = kReloadMarker;
+    g_titleReloadPending = true;
+    g_titleReloadStart = GetTickCount64();
+}
+
+// True while `titleArea` is still the outgoing area of a queued reload.
+bool TitleReloadPending(uint64_t titleArea)
+{
+    if (!g_titleReloadPending) return false;
+    int32_t& mode = *reinterpret_cast<int32_t*>(titleArea + ATITLE_PRESENTATION_MODE);
+    if (mode == kReloadMarker) {
+        if (GetTickCount64() - g_titleReloadStart < kReloadTimeoutMs) return true;
+        HookLog("LobbyFlow: title area reload did not happen; carrying on in place\n");
+        mode = g_titleReloadSavedMode;
+    }
+    g_titleReloadPending = false;
+    return false;
+}
+
+// The lobby has no native menu under it, so nothing the main menu switched on
+// may stay: the status bar and the Ctrl license card would draw over it.
+void HideNativeMenuChrome()
+{
+    using GetInstance = void*(__fastcall*)();
+    if (void* guide = reinterpret_cast<GetInstance>(_addr(SMVC3GUIDE_GET_INSTANCE))()) {
+        using SetUiGuideMode = void(__fastcall*)(void*, uint64_t);
+        reinterpret_cast<SetUiGuideMode>(_addr(SMVC3GUIDE_SET_UI_GUIDE_MODE))(guide, 0);
+    }
+    if (void* license = reinterpret_cast<GetInstance>(_addr(SLICENSE_GET_INSTANCE))()) {
+        using Disarm = void(__fastcall*)(void*);
+        reinterpret_cast<Disarm>(_addr(SLICENSE_DISARM_CARD))(license);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Main menu "Online" -> lobby
 // ---------------------------------------------------------------------------
@@ -349,13 +437,13 @@ __attribute__((noinline)) bool __fastcall Hook_SessionReady(void* library)
 
 uint64_t __fastcall Hook_MenuNavigation(void* menu, int32_t* out)
 {
+    // No menu takes input while the title area is being rebuilt.
+    if (g_titleReloadPending) return 1;
     if (!IsReleasedMainMenu(menu)) return g_originalMenuNavigation(menu, out);
-
-    // The menu is frozen while the transition to the lobby plays.
-    if (g_fadeHold.load(std::memory_order_relaxed)) return 1;
+    if (g_onlineChosen) return 1;
 
     // Take the decide on Online before the menu sees it: its own handler
-    // starts the native network entry, which leaves the menu half torn down.
+    // would start the native network entry.
     Input input = {};
     Native_ReadInput(input, false);
     if (input.confirm &&
@@ -363,9 +451,8 @@ uint64_t __fastcall Hook_MenuNavigation(void* menu, int32_t* out)
             MAINMENU_ITEM_ONLINE) {
         HookLog("LobbyFlow: Online chosen on the main menu\n");
         Native_PlaySfx(SFX_CONFIRM);
-        g_fadeInStart.store(0, std::memory_order_relaxed);
-        g_fadeOutStart.store(GetTickCount64(), std::memory_order_relaxed);
-        g_fadeHold.store(true, std::memory_order_release);
+        g_onlineChosen = true;
+        StartBlack();
         return 1;
     }
 
@@ -378,9 +465,8 @@ uint64_t __fastcall Hook_MenuNavigation(void* menu, int32_t* out)
         *reinterpret_cast<int32_t*>(static_cast<uint8_t*>(menu) + MENU_CURSOR) ==
             MAINMENU_ITEM_ONLINE) {
         HookLog("LobbyFlow: Online clicked on the main menu\n");
-        g_fadeInStart.store(0, std::memory_order_relaxed);
-        g_fadeOutStart.store(GetTickCount64(), std::memory_order_relaxed);
-        g_fadeHold.store(true, std::memory_order_release);
+        g_onlineChosen = true;
+        StartBlack();
     }
     return result;
 }
@@ -431,16 +517,23 @@ void ReleaseToMainMenu(uint64_t titleArea)
     LaunchMusic_BeginFadeOut();
     g_musicWanted = false;
     Native_Shutdown();
-    RetireNativeTitleUnits(titleArea);
-    ApplyPressStartState();
     InstallMainMenuHooks();
     g_releasedTitleArea = titleArea;
     g_releasedTitleTick.store(GetTickCount64(), std::memory_order_relaxed);
-    *reinterpret_cast<int32_t*>(titleArea + ATITLE_PRESENTATION_MODE) = -1;
-    using SetPresentationMode = void(__fastcall*)(uint64_t, int32_t);
-    reinterpret_cast<SetPresentationMode>(_addr(ATITLE_SET_PRESENTATION_MODE))(titleArea, 1);
     g_reopenRequested.store(false, std::memory_order_relaxed);
+    g_onlineChosen = false;
+    g_releaseNeedsInput = true;
     g_releasedToMainMenu = true;
+    // The first visit of a session lands on Online, the way back to the
+    // lobby; later visits keep wherever the player left the cursor.
+    static bool firstVisit = true;
+    if (firstVisit) {
+        firstVisit = false;
+        using GetInstance = uint64_t(__fastcall*)();
+        if (const uint64_t gameUi = reinterpret_cast<GetInstance>(_addr(SGAMEUI_GET_INSTANCE))())
+            *reinterpret_cast<int32_t*>(gameUi + SGAMEUI_MAINMENU_CURSOR) = MAINMENU_ITEM_ONLINE;
+    }
+    BeginTitleReload(titleArea, kBootStateMainMenu);
 }
 
 // ---------------------------------------------------------------------------
@@ -714,11 +807,18 @@ void RunLobbyFrame(uint64_t titleArea)
 
     Input input = {};
     Native_ReadInput(input, g_ui->TextEntryActive());
+    // MAIN MENU was picked: the lobby stays up, inert, until black covers it.
+    if (g_mainMenuReleaseAt) input = Input{};
     g_ui->Update(input);
     if (g_ui->TakePrefsDirty()) SavePrefs(g_ui->Prefs());
     Native_PlaySfx(g_ui->TakeSfx());
 
-    if (g_ui->TakeMainMenuRequested()) {
+    if (g_ui->TakeMainMenuRequested() && !g_mainMenuReleaseAt) {
+        StartBlack();
+        g_mainMenuReleaseAt = GetTickCount64() + kOnlineFadeOutMs;
+    }
+    if (g_mainMenuReleaseAt && GetTickCount64() >= g_mainMenuReleaseAt) {
+        g_mainMenuReleaseAt = 0;
         ReleaseToMainMenu(titleArea);
         return;
     }
@@ -735,9 +835,9 @@ void RunLobbyFrame(uint64_t titleArea)
         g_ui->Draw(*canvas);
         Native_EndFrame();
         g_nativeWaitFrames.store(0, std::memory_order_relaxed);
-        // The lobby is on screen: lift the black left by the Online transition.
-        if (g_fadeHold.exchange(false, std::memory_order_acq_rel))
-            g_fadeInStart.store(GetTickCount64(), std::memory_order_release);
+        // The lobby is on screen: lift the black left by the transition into
+        // it (not the one that is covering it on the way out).
+        if (!g_mainMenuReleaseAt) LiftBlack();
     } else {
         const uint32_t waited = g_nativeWaitFrames.fetch_add(1, std::memory_order_relaxed) + 1;
         if (waited == kNativeFailedFrames)
@@ -853,6 +953,9 @@ bool LobbyFlow_TitleTick(uint64_t titleArea)
         return true; // keep driving BootIntoTraining until it commits
     }
 
+    // Reopening from the main menu: wait for the rebuilt title area.
+    if (TitleReloadPending(titleArea)) return false;
+
     if (g_titleNeedsSetup) {
         // Everything from a previous visit died with the area change.
         g_titleNeedsSetup = false;
@@ -873,6 +976,7 @@ bool LobbyFlow_TitleTick(uint64_t titleArea)
     }
     // The area can respawn its menu units on a later frame of the same visit.
     RetireNativeTitleUnits(titleArea);
+    HideNativeMenuChrome();
 
     RunLobbyFrame(titleArea);
     return g_phase == Phase::Launching;
@@ -897,16 +1001,29 @@ bool LobbyFlow_ReleasedTitleTick(uint64_t titleArea)
 {
     g_releasedTitleArea = titleArea;
     g_releasedTitleTick.store(GetTickCount64(), std::memory_order_relaxed);
+    // Leaving the lobby: the outgoing area idles until the rebuilt one runs.
+    if (TitleReloadPending(titleArea)) return true;
+    if (g_releaseNeedsInput) {
+        // First frame of the rebuilt area, with the main menu in place.
+        g_releaseNeedsInput = false;
+        ApplyPressStartState();
+        LiftBlack();
+        HookLog("LobbyFlow: main menu ready (area=%llx)\n",
+                static_cast<unsigned long long>(titleArea));
+    }
+
     // "Online" on the main menu: switch once the fade has covered the screen.
-    if (g_fadeHold.load(std::memory_order_relaxed) && !g_fadeInStart.load(std::memory_order_relaxed) &&
+    if (g_onlineChosen &&
         GetTickCount64() - g_fadeOutStart.load(std::memory_order_relaxed) >= kOnlineFadeOutMs)
         g_reopenRequested.store(true, std::memory_order_release);
     if (!g_reopenRequested.exchange(false, std::memory_order_acq_rel)) return false;
+
     HookLog("LobbyFlow: reopening the lobby from the main menu\n");
+    g_onlineChosen = false;
     g_releasedToMainMenu = false;
     g_titleNeedsSetup = true;
     SetPhase(Phase::Lobby);
-    LobbyFlow_TitleTick(titleArea);
+    BeginTitleReload(titleArea, kBootStateTitle);
     return true;
 }
 
@@ -949,6 +1066,11 @@ void LobbyFlow_GameTick()
     snprintf(g_pendingNotice, sizeof(g_pendingNotice), "%s", g_returnReason);
     g_returnReason[0] = '\0';
     g_titleNeedsSetup = true;
+    // Come back to the bare title screen, the state the lobby is known to
+    // take over cleanly, not to a main menu that would have to be removed.
+    using GetInstance = uint64_t(__fastcall*)();
+    if (const uint64_t gameUi = reinterpret_cast<GetInstance>(_addr(SGAMEUI_GET_INSTANCE))())
+        *reinterpret_cast<int32_t*>(gameUi + SGAMEUI_BOOT_STATE) = kBootStateTitle;
     if (!RequestTitleArea()) HookLog("LobbyFlow: sArea is unavailable; cannot return to title\n");
     SetPhase(Phase::Returning);
 }
