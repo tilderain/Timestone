@@ -246,6 +246,7 @@ public:
         member.queueSlot = -1;
         member.delayPick = kDelayPickNone;
         member.delayHover = kDelayPickNone;
+        member.health[0] = member.health[1] = member.health[2] = kHealthUnknown;
         member.pingMs = static_cast<int16_t>(20 + id * 23 % 190);
         Preset(static_cast<int>(id % 3), &member.team);
         return member;
@@ -347,6 +348,12 @@ void Populate(FakeService& service, int slots)
     service.Seat(2, 1, 0, true, MemberStatus::Fighting);
     service.Seat(3, 1, 1, true, MemberStatus::Fighting);
     if (slots > 2) service.Seat(4, 2, 0, false, MemberStatus::Seated);
+    // The match in progress, part-way through a game.
+    {
+        const uint8_t one[3] = {64, 100, 0}, two[3] = {20, 88, 100};
+        memcpy(service.room.members[2].health, one, 3);
+        memcpy(service.room.members[3].health, two, 3);
+    }
     // Two players waiting for the match in progress (the second slot).
     if (slots > 1) {
         service.room.members[5].queueSlot = 1;
@@ -456,6 +463,13 @@ int main(int argc, char** argv)
         char name[32];
         snprintf(name, sizeof(name), "room_%dslot", slots);
         ok &= Capture(ui, directory, name); // cursor on the open seat
+        if (slots == 4) {
+            // Line up for the match in progress (the second slot).
+            ui.Update(Press(&Input::right));
+            ui.Update(Press(&Input::confirm));
+            Settle(ui, 3);
+            ok &= Capture(ui, directory, "room_4slot_queued");
+        }
         if (slots == 2) {
             ui.Update(Press(&Input::menu));
             Settle(ui, 2);

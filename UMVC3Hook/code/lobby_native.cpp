@@ -26,6 +26,12 @@ namespace {
 constexpr uintptr_t SRESOURCE_GET_INSTANCE = 0x140001B10;
 constexpr uintptr_t SRESOURCE_VT_CREATE = 0x60;           // (this, MtDTI*, const char*, u32)
 constexpr uintptr_t RTEXTURE_DTI = 0x140E17570;
+// Archive request, as sGameUi__loadNetRoomArchive (0x1402BDE30) makes it:
+// compose the language-specific name, then sResource::create with the
+// archive DTI and the asynchronous flag.
+constexpr uintptr_t RARCHIVE_DTI = 0x140E17BD8;
+constexpr uintptr_t COMPOSE_ARCHIVE_NAME = 0x140455260; // (buffer[272], 3, name, 0) -> object
+constexpr uintptr_t ARCHIVE_NAME_CSTR = 0x140151080;    // (object) -> const char*
 constexpr uintptr_t CRESOURCE_RELEASE_REF = 0x14050D5A0;
 constexpr uintptr_t SGAMEUI_GET_INSTANCE = 0x140001AC0;
 constexpr uintptr_t SGAMEUI_LOAD_NETROOM_ARCHIVE = 0x1402BDE30;
@@ -261,6 +267,31 @@ void* AcquireUnit(Kind kind)
     return unit;
 }
 
+// ui\lic holds the character portraits. Nothing in the title area loads it, so
+// the lobby asks for it the first time a portrait is wanted and keeps the
+// handle for good; the textures then resolve on a later retry.
+void* g_licenseArchive = nullptr;
+
+void RequestLicenseArchive()
+{
+    if (g_licenseArchive) return;
+    using GetInstance = void*(__fastcall*)();
+    using Compose = void*(__fastcall*)(void*, int, const char*, int);
+    using CStr = const char*(__fastcall*)(void*);
+    using Create = void*(__fastcall*)(void*, void*, const char*, uint32_t);
+    void* resources = Native<GetInstance>(SRESOURCE_GET_INSTANCE)();
+    if (!resources) return;
+    alignas(16) uint8_t name[0x120] = {};
+    void* composed = Native<Compose>(COMPOSE_ARCHIVE_NAME)(name, 3, "ui\\lic", 0);
+    const char* path = composed ? Native<CStr>(ARCHIVE_NAME_CSTR)(composed) : nullptr;
+    if (!path) return;
+    const Create create = *reinterpret_cast<Create*>(
+        *reinterpret_cast<uint8_t**>(resources) + SRESOURCE_VT_CREATE);
+    g_licenseArchive = create(resources, reinterpret_cast<void*>(_addr(RARCHIVE_DTI)), path, 2);
+    HookLog("LobbyNative: requested %s archive for character portraits (%p)\n", path,
+            g_licenseArchive);
+}
+
 void* GetTexture(Tex tex)
 {
     if (tex >= TEX_COUNT) return nullptr;
@@ -268,6 +299,7 @@ void* GetTexture(Tex tex)
     if (g_frame < g_textureRetryFrame[tex]) return nullptr;
 
     const TexInfo& info = GetTexInfo(tex);
+    if (info.archive == ARC_LICENSE) RequestLicenseArchive();
     char path[0x108] = {};
     if (info.localized) {
         using Compose = void(__fastcall*)(int, const char*, char*, char);

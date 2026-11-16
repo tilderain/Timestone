@@ -81,6 +81,8 @@ public:
     void FinishMatch(bool counted, bool localWon);
     // During a set: the local player's games won so far, shown to the room.
     void ReportSetScore(int localGamesWon);
+    // During a match: the local team's life, percent per member in team order.
+    void ReportHealth(const uint8_t percent[3]);
     // Ping measured on the live connection to a member; shown in place of
     // the room's estimate for them until the next FinishMatch.
     void SetMeasuredPing(uint64_t memberId, int oneWayMs);
@@ -101,6 +103,7 @@ private:
         int setWins = 0;
         int queueSlot = -1;
         uint32_t queueSeq = 0;
+        uint8_t health[3] = {kHealthUnknown, kHealthUnknown, kHealthUnknown};
     };
 
     void PublishLocal();

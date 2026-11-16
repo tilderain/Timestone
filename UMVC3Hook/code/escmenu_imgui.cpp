@@ -150,7 +150,7 @@ void EscMenuImGui_Draw()
         SteamLobby_OpenPeerProfile();
     if (!steamProfileAvailable) ImGui::EndDisabled();
     if (LobbyFlow_InRoomMatch() && ImGui::Button("Return to Lobby", buttonSize)) {
-        LobbyFlow_RequestReturnToLobby("");
+        LobbyFlow_RequestLeaveMatch();
         g_open = false;
     }
     if (LobbyFlow_CanReopen() && ImGui::Button("Online Lobby", buttonSize)) {

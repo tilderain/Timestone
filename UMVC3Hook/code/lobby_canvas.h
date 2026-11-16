@@ -77,6 +77,10 @@ enum Tex : uint8_t {
     TEX_YELLOW_BAR,      // ga_cmn_bar      yellow accent bar
     TEX_PAD_GLYPHS,      // mai_hlp03       controller button glyphs
     TEX_KEY_GLYPHS,      // mai_hlp04       keyboard key glyphs
+    // One portrait per character, in character-id order (id 1 first): the
+    // license card's icon set, ui\lic\lic_user_i. See CharacterIcon.
+    TEX_CHAR_FIRST,
+    TEX_CHAR_LAST = TEX_CHAR_FIRST + 50,
     TEX_COUNT,
 };
 
@@ -84,6 +88,7 @@ enum Archive : uint8_t {
     ARC_COMMON,   // ui\cmn      - resident from boot
     ARC_NETROOM,  // ui\netroom  - loaded by the lobby itself
     ARC_MAINMENU, // ui\mnmain   - resident while the title area is alive
+    ARC_LICENSE,  // ui\lic      - requested by the lobby when a portrait is first drawn
 };
 
 struct TexInfo {
@@ -97,6 +102,8 @@ struct TexInfo {
 };
 
 const TexInfo& GetTexInfo(Tex tex);
+// Portrait for a character id (1..51); the default player icon otherwise.
+Tex CharacterIcon(int32_t characterId);
 
 // The game ships five fonts; these two are the ones menus use.
 enum Font : uint8_t {

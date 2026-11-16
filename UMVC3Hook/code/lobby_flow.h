@@ -55,6 +55,9 @@ bool LobbyFlow_AllowResultRestart();
 // Ask to leave the current match and return to the room. Safe from the
 // render thread; the transition happens on the next game tick.
 void LobbyFlow_RequestReturnToLobby(const char* reason);
+// The player chose "Return to Lobby": as above, and they also give up their
+// seat at the match slot (and with it any place in line).
+void LobbyFlow_RequestLeaveMatch();
 
 // ImGui fallback drawn from the overlay pass: tells the player the lobby is
 // still starting, or that the native UI could not be brought up.

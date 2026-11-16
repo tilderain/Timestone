@@ -25,7 +25,7 @@ constexpr char kBanKey[] = "ban";
 constexpr char kFirstToKey[] = "ft";     // lobby data: games needed to win a set
 constexpr char kRotationKey[] = "rot";   // lobby data: Rotation, as a number
 constexpr int kMaxBans = 64;
-constexpr int kMemberVersion = 5;
+constexpr int kMemberVersion = 6;
 constexpr uint8_t kChatText = 'C';       // lobby chat payload: 'C' + UTF-8
 constexpr uint32_t kRefreshInterval = 6; // frames between room rebuilds
 
@@ -73,14 +73,15 @@ bool IsPlausibleTeam(const Team& team)
 // team always change atomically for observers.
 void EncodeMember(char* out, size_t size, int slot, int side, bool ready, MemberStatus status,
                   bool accepted, int delayPick, const Team& team, int wins, int losses,
-                  int setWins, int queueSlot, uint32_t queueSeq, int delayHover)
+                  int setWins, int queueSlot, uint32_t queueSeq, int delayHover,
+                  const uint8_t health[3])
 {
-    snprintf(out, size, "%d|%d|%d|%d|%d|%d|%d|%d,%d,%d|%d,%d,%d|%d,%d,%d|%d|%d|%d|%d|%u|%d",
+    snprintf(out, size, "%d|%d|%d|%d|%d|%d|%d|%d,%d,%d|%d,%d,%d|%d,%d,%d|%d|%d|%d|%d|%u|%d|%d,%d,%d",
              kMemberVersion, slot, side, ready ? 1 : 0, static_cast<int>(status),
              accepted ? 1 : 0, delayPick,
              team.chars[0], team.chars[1], team.chars[2], team.assists[0], team.assists[1],
              team.assists[2], team.colors[0], team.colors[1], team.colors[2], wins, losses,
-             setWins, queueSlot, queueSeq, delayHover);
+             setWins, queueSlot, queueSeq, delayHover, health[0], health[1], health[2]);
 }
 
 bool DecodeMember(const char* text, Member& member)
@@ -88,13 +89,15 @@ bool DecodeMember(const char* text, Member& member)
     int version = 0, slot = -1, side = 0, ready = 0, status = 0, accepted = 0, wins = 0, losses = 0;
     int setWins = 0, delayPick = kDelayPickNone, queueSlot = -1, delayHover = kDelayPickNone;
     unsigned queueSeq = 0;
+    int health[3] = {kHealthUnknown, kHealthUnknown, kHealthUnknown};
     Team team = {};
-    if (!text || sscanf(text, "%d|%d|%d|%d|%d|%d|%d|%d,%d,%d|%d,%d,%d|%d,%d,%d|%d|%d|%d|%d|%u|%d", &version,
+    if (!text || sscanf(text, "%d|%d|%d|%d|%d|%d|%d|%d,%d,%d|%d,%d,%d|%d,%d,%d|%d|%d|%d|%d|%u|%d|%d,%d,%d", &version,
                         &slot, &side, &ready, &status, &accepted, &delayPick, &team.chars[0],
                         &team.chars[1],
                         &team.chars[2], &team.assists[0], &team.assists[1], &team.assists[2],
                         &team.colors[0], &team.colors[1], &team.colors[2], &wins, &losses,
-                        &setWins, &queueSlot, &queueSeq, &delayHover) != 22)
+                        &setWins, &queueSlot, &queueSeq, &delayHover, &health[0], &health[1],
+                        &health[2]) != 25)
         return false;
     if (version != kMemberVersion) return false;
     if (slot < -1 || slot >= kMaxSlots || side < 0 || side > 2 || status < 0 ||
@@ -112,6 +115,8 @@ bool DecodeMember(const char* text, Member& member)
     // Seated players are not waiting for anything.
     member.queueSlot = static_cast<int8_t>(slot >= 0 || queueSlot < 0 || queueSlot >= kMaxSlots ? -1 : queueSlot);
     member.queueSeq = queueSeq;
+    for (int i = 0; i < 3; ++i)
+        member.health[i] = static_cast<uint8_t>(health[i] < 0 || health[i] > 100 ? kHealthUnknown : health[i]);
     member.team = team;
     member.wins = static_cast<int16_t>(wins < 0 ? 0 : wins > 999 ? 999 : wins);
     member.losses = static_cast<int16_t>(losses < 0 ? 0 : losses > 999 ? 999 : losses);
@@ -308,7 +313,8 @@ void SteamRoomService::PublishLocal()
     char encoded[160];
     EncodeMember(encoded, sizeof(encoded), local_.slot, local_.side, local_.ready, local_.status,
                  local_.accepted, local_.delayPick, local_.team, local_.wins, local_.losses,
-                 local_.setWins, local_.queueSlot, local_.queueSeq, local_.delayHover);
+                 local_.setWins, local_.queueSlot, local_.queueSeq, local_.delayHover,
+                 local_.health);
     SteamRoom_SetLocalData(kMemberKey, encoded);
     publishedOnce_ = true;
 }
@@ -392,7 +398,7 @@ void SteamRoomService::RunQueue()
     if (open == 0 || position < 1 || position > open) return;
     const int side = position == 1 ? (taken[0] ? 1 : 0) : 1;
     if (taken[side]) return;
-    HookLog("LobbyRoom: queue reached the front for match %d; taking seat %d\n", slot + 1, side + 1);
+    HookLog("LobbyRoom: queue reached the front for setup %d; taking seat %d\n", slot + 1, side + 1);
     Sit(slot, side);
 }
 
@@ -466,6 +472,7 @@ void SteamRoomService::FinishMatch(bool counted, bool localWon)
         else ++local_.losses;
     }
     local_.setWins = 0;
+    memset(local_.health, kHealthUnknown, sizeof(local_.health));
     ClearHandshake();
     handshakeOpponent_ = 0; // a rematch with the same player starts over too
     measuredPeer_ = 0;
@@ -485,6 +492,13 @@ void SteamRoomService::FinishMatch(bool counted, bool localWon)
         JoinQueue(slot);
         AddChat("", "You moved to the back of the queue.", true);
     }
+}
+
+void SteamRoomService::ReportHealth(const uint8_t percent[3])
+{
+    if (memcmp(local_.health, percent, sizeof(local_.health)) == 0) return;
+    memcpy(local_.health, percent, sizeof(local_.health));
+    PublishLocal();
 }
 
 void SteamRoomService::SetMeasuredPing(uint64_t memberId, int oneWayMs)
@@ -623,6 +637,7 @@ void SteamRoomService::RefreshRoom()
             member.setWins = static_cast<int8_t>(local_.setWins);
             member.queueSlot = static_cast<int8_t>(local_.slot >= 0 ? -1 : local_.queueSlot);
             member.queueSeq = local_.queueSeq;
+            memcpy(member.health, local_.health, sizeof(member.health));
             member.pingMs = 0;
         } else {
             if (!DecodeMember(SteamRoom_GetMemberData(id, kMemberKey), member) ||
@@ -634,6 +649,7 @@ void SteamRoomService::RefreshRoom()
                 member.delayPick = kDelayPickNone;
                 member.delayHover = kDelayPickNone;
                 member.queueSlot = -1;
+                memset(member.health, kHealthUnknown, sizeof(member.health));
                 member.status = MemberStatus::Idle;
             }
             if (member.slot >= next.settings.slotCount) member.slot = -1;

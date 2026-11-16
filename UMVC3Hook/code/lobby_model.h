@@ -33,6 +33,7 @@ struct Team {
 constexpr int kDelayPickNone = -1;
 constexpr int kDelayPickAuto = 0;
 constexpr int kMaxDelayPick = 7; // delay 6
+constexpr uint8_t kHealthUnknown = 255;
 
 // What happens to the two players when a set ends and others are queued for
 // their match slot. With nobody queued, both simply stay. An endless room
@@ -78,6 +79,9 @@ struct Member {
     int8_t queueSlot;   // match slot this player is waiting for, -1 if none
     uint32_t queueSeq;  // order of joining that queue (lower waits longer)
     int8_t queuePos;    // 1 = next up; 0 when not queued (derived)
+    // While fighting: each team member's life as a percentage, in team
+    // order. kHealthUnknown until the first report of a match.
+    uint8_t health[3];
     int16_t pingMs; // estimated ping to the local player, -1 when unknown
 };
 

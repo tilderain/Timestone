@@ -173,6 +173,8 @@ MatchPairing g_pairing = {};
 ENetHost* g_matchHost = nullptr;
 ENetPeer* g_matchPeer = nullptr;
 ULONGLONG g_bothReadyTick = 0; // when both players finished the pre-match steps
+// Set by "Return to Lobby": back in the room the player is stood up.
+std::atomic<bool> g_leaveSeatOnReturn{false};
 bool g_matchIsHost = false;
 ULONGLONG g_phaseStartTick = 0;
 bool g_launchSent = false;
@@ -951,6 +953,7 @@ void BeginLaunch()
     FrameStepper_InitNetplay();
     g_matchHost = nullptr; // owned by netplay from here on
     g_matchPeer = nullptr;
+    g_leaveSeatOnReturn.store(false, std::memory_order_relaxed);
     if (g_service) {
         ResetSet(g_service->Room().settings.firstTo);
         g_service->SetLocalStatus(MemberStatus::Fighting);
@@ -1333,6 +1336,13 @@ bool LobbyFlow_TitleTick(uint64_t titleArea)
         if (g_phase == Phase::Returning || g_phase == Phase::InMatch) {
             // Only a set played to its end goes on the room record.
             g_service->FinishMatch(g_setOver, g_setWins[0] > g_setWins[1]);
+            if (g_leaveSeatOnReturn.exchange(false, std::memory_order_acq_rel)) {
+                // Walking out of a match is walking away from the slot: no
+                // seat, and no place in its queue either.
+                g_service->Stand();
+                g_service->LeaveQueue();
+                HookLog("LobbyFlow: left the match by choice; seat given up\n");
+            }
             ResetSet(1);
             g_ui->ReturnToRoom();
             g_entrancePending = false; // back from a match: the room is simply there
@@ -1460,6 +1470,45 @@ void UpdateSet()
         LobbyFlow_RequestReturnToLobby(SetResultText());
 }
 
+// The local team's life, for the room's match slot. Read straight from the
+// characters (life ratio of cChrStatus at uCharacter+0x1530), rounded to a
+// few steps so a match does not publish hundreds of member-data updates.
+constexpr uintptr_t PTR_SCHARACTER_INSTANCE = 0x140D44A70;
+constexpr uintptr_t CCHRSTATUS_GET_LIFE_RATIO = 0x1400315C0; // (cChrStatus*) -> float
+constexpr uint32_t kHealthSampleTicks = 180; // every 3 seconds
+constexpr int kHealthStep = 4; // percent
+
+void SampleTeamHealth()
+{
+    static uint32_t tick = 0;
+    if (++tick % kHealthSampleTicks != 0 || !g_service) return;
+    const uint64_t characters = *reinterpret_cast<uint64_t*>(_addr(PTR_SCHARACTER_INSTANCE));
+    if (!characters) return;
+    uint8_t percent[3] = {lobby::kHealthUnknown, lobby::kHealthUnknown, lobby::kHealthUnknown};
+    using GetLifeRatio = float(__fastcall*)(uint64_t);
+    const GetLifeRatio getRatio = reinterpret_cast<GetLifeRatio>(_addr(CCHRSTATUS_GET_LIFE_RATIO));
+    // Team list as the plugin's checksum walks it: sCharacter+0x40 / +0x300,
+    // nodes linked at +0x10 with the character at +0x08.
+    uint64_t node = characters + (g_pairing.localSide == 0 ? 0x40 : 0x300) + 0x08;
+    for (int guard = 0; node && guard < 16; ++guard) {
+        const uint64_t character = *reinterpret_cast<uint64_t*>(node + 0x08);
+        node = *reinterpret_cast<uint64_t*>(node + 0x10);
+        if (!character) continue;
+        // Helpers (Frank's zombies and the like) hang off a parent character.
+        if (*reinterpret_cast<uint64_t*>(character + 0x6698)) continue;
+        const int32_t member = *reinterpret_cast<int32_t*>(character + 0x2DAC); // mDefMemberId
+        if (member < 0 || member > 2) continue;
+        float ratio = getRatio(character + 0x1530);
+        if (!(ratio > 0.0f)) ratio = 0.0f;
+        if (ratio > 1.0f) ratio = 1.0f;
+        int value = static_cast<int>(ratio * 100.0f + 0.5f);
+        // Round up to the step, so only a dead character reads as zero.
+        value = value <= 0 ? 0 : ((value + kHealthStep - 1) / kHealthStep) * kHealthStep;
+        percent[member] = static_cast<uint8_t>(value > 100 ? 100 : value);
+    }
+    g_service->ReportHealth(percent);
+}
+
 void LobbyFlow_OnResultPhase(int32_t winTeam)
 {
     if (!g_enabled || g_phase != Phase::InMatch) return;
@@ -1489,6 +1538,7 @@ void LobbyFlow_GameTick()
     }
 
     UpdateSet();
+    SampleTeamHealth();
     if (Netplay_TakePeerDisconnected())
         LobbyFlow_RequestReturnToLobby("Connection to opponent has been lost.");
     if (!g_returnRequested.exchange(false, std::memory_order_acq_rel)) return;
@@ -1518,6 +1568,13 @@ void LobbyFlow_GameTick()
         *reinterpret_cast<int32_t*>(gameUi + SGAMEUI_BOOT_STATE) = kBootStateTitle;
     if (!RequestTitleArea()) HookLog("LobbyFlow: sArea is unavailable; cannot return to title\n");
     SetPhase(Phase::Returning);
+}
+
+void LobbyFlow_RequestLeaveMatch()
+{
+    if (!LobbyFlow_InRoomMatch()) return;
+    g_leaveSeatOnReturn.store(true, std::memory_order_release);
+    LobbyFlow_RequestReturnToLobby("");
 }
 
 void LobbyFlow_RequestReturnToLobby(const char* reason)

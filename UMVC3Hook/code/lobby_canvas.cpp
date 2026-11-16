@@ -9,6 +9,8 @@ namespace {
 
 // Paths and pixel sizes read from the retail archives (ui\cmn, ui\netroom,
 // ui\mnmain). Order must match enum Tex.
+#define LIC_ICON(n) \
+    {"ui\\lic\\lic_user_i\\lic_user_i" #n "_BM_HQ_NOMIP", 64, 64, ARC_LICENSE, false}
 const TexInfo kTextures[TEX_COUNT] = {
     {"ui\\ui_filter\\white_BM_HQ_NOMIP", 32, 32, ARC_COMMON, false},
     {"ui\\net\\net_sprite\\ga_net_waku_a_BM_HQ_NOMIP", 1024, 64, ARC_NETROOM, false},
@@ -42,7 +44,61 @@ const TexInfo kTextures[TEX_COUNT] = {
     {"ui\\cmn\\cmn_sprite\\ga_cmn_bar_BM_HQ_NOMIP", 256, 16, ARC_COMMON, false},
     {"ui\\mainmenu\\mai_hlp\\mai_hlp03_BM_HQ_NOMIP", 256, 256, ARC_COMMON, false},
     {"ui\\mainmenu\\mai_hlp\\mai_hlp04_BM_HQ_NOMIP", 256, 256, ARC_COMMON, false},
+    // Character portraits, by character id 1..51. The numbers are the license
+    // icons showing each character (read off the icon sheet).
+    LIC_ICON(001),
+    LIC_ICON(006),
+    LIC_ICON(017),
+    LIC_ICON(003),
+    LIC_ICON(011),
+    LIC_ICON(009),
+    LIC_ICON(004),
+    LIC_ICON(007),
+    LIC_ICON(181),
+    LIC_ICON(013),
+    LIC_ICON(012),
+    LIC_ICON(008),
+    LIC_ICON(014),
+    LIC_ICON(010),
+    LIC_ICON(002),
+    LIC_ICON(018),
+    LIC_ICON(005),
+    LIC_ICON(015),
+    LIC_ICON(016),
+    LIC_ICON(171),
+    LIC_ICON(179),
+    LIC_ICON(177),
+    LIC_ICON(178),
+    LIC_ICON(180),
+    LIC_ICON(182),
+    LIC_ICON(028),
+    LIC_ICON(022),
+    LIC_ICON(019),
+    LIC_ICON(032),
+    LIC_ICON(020),
+    LIC_ICON(027),
+    LIC_ICON(035),
+    LIC_ICON(021),
+    LIC_ICON(026),
+    LIC_ICON(024),
+    LIC_ICON(031),
+    LIC_ICON(174),
+    LIC_ICON(030),
+    LIC_ICON(034),
+    LIC_ICON(023),
+    LIC_ICON(033),
+    LIC_ICON(025),
+    LIC_ICON(036),
+    LIC_ICON(029),
+    LIC_ICON(183),
+    LIC_ICON(188),
+    LIC_ICON(184),
+    LIC_ICON(185),
+    LIC_ICON(186),
+    LIC_ICON(187),
+    LIC_ICON(037),
 };
+#undef LIC_ICON
 
 // Advance widths for U+0020..U+007E, copied from the fonts' FSD metric tables
 // (ui\font\nrodinpro and ui\font\bada_b). Glyph index is codepoint - 0x20.
@@ -96,6 +152,12 @@ float GlyphWidth(const char* text, size_t length, Font font)
 }
 
 } // namespace
+
+Tex CharacterIcon(int32_t characterId)
+{
+    if (characterId < 1 || characterId > 51) return TEX_USER_ICON;
+    return static_cast<Tex>(TEX_CHAR_FIRST + characterId - 1);
+}
 
 const TexInfo& GetTexInfo(Tex tex)
 {

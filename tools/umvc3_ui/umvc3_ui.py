@@ -41,7 +41,9 @@ TYPE_SDL = 0x4C0DB839
 TYPE_FSD = 0x1DB58B09
 UNIT_KINDS = {0x7942324B: 'sprite', 0x4AF926B7: 'frame', 0x518E722D: 'text'}
 # Archives the lobby draws from, relative to nativePCx64/ui.
-LOBBY_ARCHIVES = ('cmn', 'netroom', 'mnmain')
+LOBBY_ARCHIVES = ('cmn', 'netroom', 'mnmain', 'lic')
+# Of the license archive only the icon set is used (character portraits).
+ARCHIVE_FILTER = {'lic': 'lic_user_i'}
 UNDERLAY = 'meku_menu_co00_BM_NOMIP'
 DEFAULT_CACHE = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'build', 'ui_cache')
 
@@ -164,7 +166,10 @@ def extract(game_dir, cache):
         if not os.path.exists(path):
             print('missing', path)
             continue
+        wanted = ARCHIVE_FILTER.get(archive)
         for name, type_hash, payload in arc_extract(path, (TYPE_TEX, TYPE_SDL, TYPE_FSD)):
+            if wanted and wanted not in name:
+                continue
             base = name.replace('\\', '/').split('/')[-1]
             if type_hash == TYPE_TEX:
                 try:

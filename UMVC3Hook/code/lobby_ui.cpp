@@ -1470,7 +1470,7 @@ const char* LobbyUi::DrawCreate(Canvas& canvas) const
 
     const RoomSettings& draft = prefs_.create;
     char value[kChatCapacity + 8];
-    const char* labels[CREATE_ROWS] = {"LOBBY NAME", "LOBBY SIZE", "MATCH SLOTS", "VISIBILITY",
+    const char* labels[CREATE_ROWS] = {"LOBBY NAME", "LOBBY SIZE", "SETUPS", "VISIBILITY",
                                        "MATCH FORMAT", "ROTATION", "LOBBY MUSIC", ""};
     for (int row = 0; row < CREATE_ROWS; ++row) {
         const float y = panelY + 104.0f + row * 46.0f;
@@ -1525,7 +1525,7 @@ const char* LobbyUi::DrawCreate(Canvas& canvas) const
     const char* const help[CREATE_ROWS] = {
         "Set your lobby title.",
         "Set the maximum number of players in your lobby.",
-        "Match slots let several pairs fight at the same time.",
+        "Setups let several pairs fight at the same time.",
         "Choose who can find and join this lobby.",
         "Games needed to win a set. Endless: rematch until someone leaves.",
         "Who makes way for the next player in line when a set ends.",
@@ -1583,7 +1583,7 @@ void LobbyUi::DrawRoomMembers(Canvas& canvas) const
         } else if (member.queueSlot >= 0) {
             // Waiting: which match, and how far from the front.
             char wait[16];
-            snprintf(wait, sizeof(wait), "M%d #%d", member.queueSlot + 1, member.queuePos);
+            snprintf(wait, sizeof(wait), "S%d #%d", member.queueSlot + 1, member.queuePos);
             p.Text(wait, x + 288.0f, cy, 0.56f, A_ML, member.queuePos == 1 ? kCyan : kDim);
         }
         if (!member.isLocal) DrawPing(p, x + 356.0f, cy, member.pingMs, 0.66f);
@@ -1613,51 +1613,58 @@ void LobbyUi::DrawRoomSlots(Canvas& canvas) const
         const float y = areaY + (slot / columns) * (cardH + gap);
         const SlotState state = room.slots[slot];
         const bool live = state == SlotState::InProgress;
-        p.Box(TEX_PANEL_DARK, x, y, cardW, cardH);
+        // Who is waiting for this slot, front of the line first.
+        const Member* nextUp = nullptr;
+        int waiting = 0;
+        bool localWaiting = false;
+        for (int i = 0; i < room.memberCount; ++i) {
+            const Member& member = room.members[i];
+            if (member.queueSlot != slot) continue;
+            ++waiting;
+            localWaiting |= member.isLocal;
+            if (member.queuePos == 1) nextUp = &member;
+        }
+        // The slot the local player is in line for stands out in dark blue.
+        p.Box(TEX_PANEL_DARK, x, y, cardW, cardH,
+              localWaiting ? Color{0.5f, 0.68f, 1.0f, 1.0f} : kWhite);
+        if (localWaiting)
+            p.Fill(x + 5.0f, y + 5.0f, cardW - 10.0f, cardH - 10.0f, Color{0.08f, 0.2f, 0.55f, 0.34f});
 
+        // Grid cards (three or four slots) are too narrow for names in the
+        // header: the queue is a number only there.
+        const bool narrowCard = cardW < 500.0f;
         char title[24];
-        snprintf(title, sizeof(title), "MATCH %d", slot + 1);
+        snprintf(title, sizeof(title), "SETUP %d", slot + 1);
         p.Text(title, x + 26.0f, y + 30.0f, 0.36f, A_ML, kYellow, FONT_HEADING);
-        if (live && room.settings.firstTo != 1) {
-            // Running set score, player 1 first, as each side reports it.
-            const Member* one = SeatOccupant(slot, 0);
-            const Member* two = SeatOccupant(slot, 1);
-            char score[32];
-            snprintf(score, sizeof(score), "%d - %d", one ? one->setWins : 0, two ? two->setWins : 0);
-            p.Text(score, x + 150.0f, y + 31.0f, 0.74f, A_ML, kText);
-        }
-        {
-            // Who is waiting for this slot, front of the line first.
-            const Member* next = nullptr;
-            int waiting = 0;
-            for (int i = 0; i < room.memberCount; ++i) {
-                const Member& member = room.members[i];
-                if (member.queueSlot != slot) continue;
-                ++waiting;
-                if (member.queuePos == 1) next = &member;
-            }
-            if (next) {
-                char line[96];
-                if (waiting > 1)
-                    snprintf(line, sizeof(line), "NEXT: %.40s  +%d", next->name, waiting - 1);
-                else
-                    snprintf(line, sizeof(line), "NEXT: %.40s", next->name);
-                const float left = x + (live && room.settings.firstTo != 1 ? 232.0f : 150.0f);
-                const float right = x + cardW - (live ? 190.0f : 130.0f);
-                if (right - left > 80.0f)
-                    p.TextFit(line, left, y + 31.0f, 0.58f, right - left, A_ML,
-                              next->isLocal ? kCyan : kDim);
-            }
-        }
+        // Right side: the slot's state, then to its left how many are in line.
+        float labelLeft = x + cardW - 26.0f;
         if (live) {
-            // "MATCH IN PROGRESS" word art, breathing.
+            // "MATCH IN PROGRESS" word art, breathing; a size down on grid cards.
+            const float artScale = narrowCard ? 0.5f : 0.64f;
             const float pulse = 0.72f + 0.28f * SelectionWave(frame_);
-            p.Sprite(TEX_WORDS_B, x + cardW - 24.0f, y + 30.0f, 235.0f * 0.64f, 37.0f * 0.64f,
+            p.Sprite(TEX_WORDS_B, x + cardW - 24.0f, y + 30.0f, 235.0f * artScale, 37.0f * artScale,
                      Uv{11.0f / 256.0f, 13.0f / 256.0f, 246.0f / 256.0f, 50.0f / 256.0f}, A_MR,
                      WithAlpha(kWhite, pulse));
+            labelLeft = x + cardW - 24.0f - 235.0f * artScale;
         } else {
             p.Text(kSlotStateNames[static_cast<int>(state)], x + cardW - 26.0f, y + 30.0f, 0.58f,
                    A_MR, state == SlotState::Starting ? kGreen : kDim);
+            labelLeft = x + cardW - 26.0f - 92.0f;
+        }
+        char count[8];
+        snprintf(count, sizeof(count), "%d", waiting);
+        const Color countColor = localWaiting ? kCyan : waiting ? kText : kFaint;
+        p.Text(count, labelLeft - 14.0f, y + 31.0f, 0.7f, A_MR, countColor);
+        p.Sprite(TEX_FRIENDS, labelLeft - 14.0f - (waiting > 9 ? 30.0f : 18.0f), y + 30.0f, 24.0f,
+                 24.0f, kFullUv, A_MR, WithAlpha(kWhite, waiting ? 1.0f : 0.45f));
+        if (nextUp && !narrowCard) {
+            char line[96];
+            snprintf(line, sizeof(line), "NEXT: %.40s", nextUp->name);
+            const float left = x + 150.0f;
+            const float right = labelLeft - 76.0f;
+            if (right - left > 80.0f)
+                p.TextFit(line, left, y + 31.0f, 0.58f, right - left, A_ML,
+                          nextUp->isLocal ? kCyan : kDim);
         }
 
         const float seatTop = y + 54.0f;
@@ -1680,7 +1687,7 @@ void LobbyUi::DrawRoomSlots(Canvas& canvas) const
                   WithAlpha(kWhite, occupant ? 1.0f : 0.72f));
 
             // PLAYER 1 / PLAYER 2 word art: rows 0 and 1.
-            p.Sprite(TEX_WORDS_A, x + 32.0f, cy - (occupant ? 13.0f : 0.0f), 74.0f, 23.0f,
+            p.Sprite(TEX_WORDS_A, x + 32.0f, cy - (occupant && live ? 13.0f : 0.0f), 74.0f, 23.0f,
                      Uv{2.0f / 128.0f, (side * 32 + 4) / 256.0f, 76.0f / 128.0f,
                         (side * 32 + 27) / 256.0f},
                      A_ML, WithAlpha(kWhite, occupant ? 1.0f : 0.6f));
@@ -1692,26 +1699,39 @@ void LobbyUi::DrawRoomSlots(Canvas& canvas) const
 
             // Narrow (grid) cards move the READY lamp to the team line so the
             // player name keeps the full first line.
-            const bool narrow = cardW < 500.0f;
-            const float readyW = narrow ? 76.0f : 92.0f;
-            const float lampSpace = live ? 0.0f : readyW + 16.0f;
-            p.TextFit(occupant->name, x + 122.0f, cy - 13.0f, 0.84f,
-                      cardW - 122.0f - 32.0f - (narrow ? 0.0f : lampSpace), A_ML,
+            // Before the match only the name shows: a team on display here
+            // would be an invitation to counterpick, and it can still change.
+            // Once the match is running the teams are locked and listed.
+            const float nameY = live ? cy - 13.0f : cy;
+            p.TextFit(occupant->name, x + 122.0f, nameY, 0.84f, cardW - 122.0f - 32.0f - 44.0f, A_ML,
                       mine ? kYellow : kText);
-            char summary[160];
-            TeamSummary(roster_, occupant->team, summary, sizeof(summary));
-            p.TextFit(summary, x + 32.0f, cy + 15.0f, 0.6f, cardW - 64.0f - lampSpace, A_ML,
-                      mine ? kText : kDim);
-
-            if (!live) {
-                // READY lamp: row 4 lit, row 5 dim.
-                const int readyRow = occupant->accepted ? 4 : 5;
-                p.Sprite(TEX_WORDS_A, x + cardW - 32.0f, narrow ? cy + 14.0f : cy, readyW,
-                         readyW * 0.25f,
-                         Uv{1.0f / 128.0f, (readyRow * 32 + 1) / 256.0f, 127.0f / 128.0f,
-                            (readyRow * 32 + 31) / 256.0f},
-                         A_MR);
+            if (live) {
+                // The team as portraits, each with its life bar, as the game's
+                // own lobby shows a match in progress.
+                const float rowLeft = x + 32.0f;
+                const float cell = (cardW - 64.0f - 44.0f) / 3.0f;
+                const float icon = 28.0f;
+                for (int i = 0; i < 3; ++i) {
+                    const float ix = rowLeft + i * cell;
+                    const uint8_t health = occupant->health[i];
+                    const bool down = health == 0;
+                    p.Sprite(CharacterIcon(occupant->team.chars[i]), ix, cy + 17.0f, icon, icon,
+                             kFullUv, A_ML, down ? Color{0.35f, 0.35f, 0.38f, 1.0f} : kWhite);
+                    const float barX = ix + icon + 6.0f;
+                    const float barW = cell - icon - 6.0f - 12.0f;
+                    if (barW < 12.0f) continue;
+                    p.Fill(barX, cy + 13.0f, barW, 8.0f, Color{0.0f, 0.0f, 0.0f, 0.75f});
+                    if (health == kHealthUnknown || down) continue;
+                    const float ratio = health / 100.0f;
+                    const Color fill = ratio > 0.5f ? Rgb(0xFFD63A)
+                                     : ratio > 0.25f ? Rgb(0xFF9A2E) : Rgb(0xF0453A);
+                    p.Fill(barX + 1.0f, cy + 14.0f, (barW - 2.0f) * ratio, 6.0f, fill);
+                }
             }
+            // This player's games in the set being played.
+            char wins[8];
+            snprintf(wins, sizeof(wins), "%d", occupant->setWins);
+            p.Text(wins, x + cardW - 40.0f, cy, 1.0f, A_MR, live ? kText : kFaint);
         }
 
         if (state == SlotState::Starting) {
@@ -1818,7 +1838,7 @@ const char* LobbyUi::DrawRoom(Canvas& canvas) const
     else if (local && local->queueSlot >= 0)
         help = "You are in line. You will be seated when it is your turn.";
     else if (local && local->slot < 0)
-        help = "Take a seat, or line up for a match that is full.";
+        help = "Take a seat, or line up for a setup that is full.";
 
     if (roomMenuOpen_)
         DrawListMenu(canvas, "LOBBY MENU", kRoomMenuItems, kRoomMenuCount, roomMenuCursor_);
@@ -1922,7 +1942,7 @@ void LobbyUi::DrawHandshake(Canvas& canvas) const
     switch (step) {
     case Handshake::Prompt:
         p.Text("Your match is ready.", cx, y + 116.0f, 0.9f, A_MC);
-        p.Text(other->accepted ? "Your opponent is ready." : "Waiting for your opponent too.", cx,
+        p.Text(other->accepted ? "Your opponent is ready." : "Waiting for your opponent.", cx,
                y + 150.0f, 0.66f, A_MC, other->accepted ? kGreen : kDim);
         option("READY", cx - 150.0f, y + 214.0f, 240.0f, handshakeCursor_ == 0);
         option("LEAVE SEAT", cx + 150.0f, y + 214.0f, 240.0f, handshakeCursor_ == 1);

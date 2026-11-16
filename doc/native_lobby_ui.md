@@ -484,6 +484,32 @@ honest as the clients: a modified one could publish a low `queueSeq`.
 A lobby test build opens `kLobbyTestExtraInstances` extra windows
 (`lobby_local.h`, 1 by default); a queue needs at least 2.
 
+## Match slot contents
+
+A seat shows the player's name and their games in the current set (member
+data `setWins`); there is no READY lamp. The team is not shown before the
+match, so it cannot be counterpicked and is not shown stale.
+
+While a match runs, the seat shows the team as three portraits with a life
+bar each:
+
+- **Portraits** are the license card icons, `ui\lic\lic_user_i\lic_user_iNNN`
+  (64x64). `CharacterIcon` maps a character id to one; the id-to-icon table
+  in `lobby_canvas.cpp` was read off the icon sheet (001..037 are the
+  original cast in the license screen's order, 171, 174 and 177..188 the DLC
+  and Ultimate characters). Nothing in the title area loads `ui\lic`, so
+  `RequestLicenseArchive` asks for it the first time a portrait is drawn,
+  the way `sGameUi__loadNetRoomArchive` `0x1402BDE30` asks for `ui\netroom`
+  (name composed by `0x140455260`, `sResource` create with the archive DTI
+  `0x140E17BD8` and flag 2); the textures resolve on a later retry.
+  **Unverified in game.**
+- **Life** is sampled every 3 seconds by each fighting player for their own
+  team (`SampleTeamHealth`): `cChrStatus__getLifeRatio` `0x1400315C0` on
+  `uCharacter+0x1530` for every character in the team list that has no parent
+  (helpers are skipped), indexed by `mDefMemberId` `+0x2DAC`, rounded up to 4%
+  steps and published in the member data (version 6, last field) only when it
+  changes. Zero means defeated; 255 means not reported yet.
+
 ## Sets (first to N)
 
 A room is created with a set length (`MATCH FORMAT`: first to 1, 2, 3, 5, 7 or
